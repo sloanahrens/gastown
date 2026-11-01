@@ -36,6 +36,10 @@ type Deps struct {
 	// ProcessBuildExec in production. Nil runs the build through Exec, which
 	// takes no deadline.
 	BuildExec BuildExec
+	// CgoEnv returns the cgo entries the sweep's one go build needs. Nil takes
+	// buildflags.ICUCgoEnv, which a unit test never wants: on a Mac it starts
+	// `brew --prefix icu4c`.
+	CgoEnv func(base []string) []string
 	// Src lists and reads the repository's files. When nil, the run lists with
 	// `git ls-files` through Exec and reads files through ReadFile.
 	Src Source
@@ -145,7 +149,7 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 	if buildExec != nil && root != DefaultRoot {
 		buildExec = inRootBuild(root, buildExec)
 	}
-	s := &Sweep{Opts: opts, Exec: exec, BuildExec: buildExec, Src: src, Environ: d.Environ, Stderr: stderr,
+	s := &Sweep{Opts: opts, Exec: exec, BuildExec: buildExec, Src: src, Environ: d.Environ, CgoEnv: d.CgoEnv, Stderr: stderr,
 		Now: now, Timings: timings, Walls: walls, Began: d.Began, Resume: resume,
 		Shards: shards, ShardErr: shardErr, TestWalls: testWalls}
 	code := runTiers(s, opts.Tiers, stdout, stderr)
