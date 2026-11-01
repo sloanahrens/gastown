@@ -93,3 +93,44 @@ func TestTableGoldenNamesAreUniqueAndPathSafe(t *testing.T) {
 		}
 	}
 }
+
+// TestTableHoldsTheCloseForceRowUnderItsOwnName: bd closes past a blocker with
+// --force, and the shim does not answer the flag, so the table records the
+// row under a golden name the plain close row does not share (gt-jbetd). The
+// differential test names that stem.
+func TestTableHoldsTheCloseForceRowUnderItsOwnName(t *testing.T) {
+	t.Parallel()
+	var forced, plain *Row
+	rows := Table()
+	for i := range rows {
+		if rows[i].Verb != "close" {
+			continue
+		}
+		if slicesContain(rows[i].Flags, "--force") {
+			forced = &rows[i]
+		} else {
+			plain = &rows[i]
+		}
+	}
+	if forced == nil || plain == nil {
+		t.Fatalf("%s: close rows forced=%v plain=%v, want both", t.Name(), forced, plain)
+	}
+	if !forced.Mutates {
+		t.Errorf("%s: the close --force row does not mutate, so it would share the read copy", t.Name())
+	}
+	if got, want := GoldenName(*forced), "close-force-reason-fixture-close"; got != want {
+		t.Errorf("%s: golden name %q, want %q", t.Name(), got, want)
+	}
+	if GoldenName(*forced) == GoldenName(*plain) {
+		t.Errorf("%s: the forced and plain close rows share the golden %q", t.Name(), GoldenName(*plain))
+	}
+}
+
+func slicesContain(flags []string, want string) bool {
+	for _, f := range flags {
+		if f == want {
+			return true
+		}
+	}
+	return false
+}

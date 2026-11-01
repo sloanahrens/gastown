@@ -787,3 +787,35 @@ func TestReviewRecordWithoutHeadStillParses(t *testing.T) {
 		t.Errorf("om-stats read the old line as %+v, %v; want it counted with no head", parsed.rec, ok)
 	}
 }
+
+// A verdict whose judged head is empty still writes its reviews line, and the
+// landing log says the line carries no head; a line with a head says nothing
+// (gt-6c9o7).
+func TestLogReviewWarnsWhenTheJudgedHeadIsEmpty(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		head     string
+		wantWarn bool
+	}{{"an empty head", "", true}, {"a head", "abc123", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := barFixture(t, "0.8")
+			reviews := reviewsFileIn(t)
+			l := f.lander()
+			l.Reviews = reviews
+			var out strings.Builder
+			l.Out = &out
+
+			l.logReview(&beads.Issue{}, f.work, nil, f.git.Open(f.repo), f.base, tc.head, Verdict{Verdict: VerdictApprove, Score: 0.9}, false)
+
+			if got := strings.Contains(out.String(), "judged head is empty"); got != tc.wantWarn {
+				t.Errorf("warning logged = %v, want %v:\n%s", got, tc.wantWarn, out.String())
+			}
+			recs, err := reviews.Since(time.Time{})
+			if err != nil || len(recs) != 1 || recs[0].Head != tc.head {
+				t.Fatalf("reviews log = %+v, %v; want one line with head %q", recs, err, tc.head)
+			}
+		})
+	}
+}

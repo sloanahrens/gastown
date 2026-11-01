@@ -1037,6 +1037,12 @@ func (l *Lander) logReview(issue *beads.Issue, w Work, comments []beads.Comment,
 	if err != nil {
 		l.logf("%s: could not read the review bar for the reviews log (%v); it is logged as 0", w.BeadID, err)
 	}
+	if head == "" {
+		// The line is still written: a round without a head is better in the
+		// table than no round. The log line says why the row cannot be joined
+		// to the tree that was judged (gt-6c9o7).
+		l.logf("%s: WARNING the judged head is empty; the reviews log line carries no head and cannot be joined to a tree", w.BeadID)
+	}
 	attempt := reviewAttempt(issue.Notes)
 	// A refused round's block stops counting at the ceiling (gt-ern0y), so the
 	// line names that same attempt: the rework pass matches a record to its

@@ -402,6 +402,9 @@ button.arow-head:hover{background:#19212b}
 .bhead a.bname{color:inherit;font-size:inherit}
 .bhead a:hover{text-decoration:underline}
 .bhead .bage{margin-left:auto;color:var(--dim);white-space:nowrap}
+.bpages{display:flex;flex-wrap:wrap;gap:2px 12px;margin-top:2px;font-size:11px}
+.bpages a{color:var(--blue);text-decoration:none;overflow-wrap:anywhere}
+.bpages a:hover{text-decoration:underline}
 .brow .bsum{margin:2px 0 0;white-space:pre-wrap;overflow-wrap:anywhere}
 .needsyou{margin-top:6px;border-top:1px solid var(--line);padding-top:4px}
 .nysum{cursor:pointer;color:var(--dim);font-size:11px}
@@ -2001,6 +2004,22 @@ function drawBirds(box, s) {
     row.append(head);
     if (b.state === "error" || b.state === "withheld") row.append(el("div", "badc", b.note || b.state));
     else if (b.summary) row.append(el("div", "bsum", b.summary));
+    // The bird's topic pages, newest first, as links to the same sandboxed route.
+    // The name is checked against the shape the server serves before it is joined
+    // into a path, the title is text, and a row with no pages draws nothing.
+    const pages = (b.pages || []).filter(p => /^[a-z0-9][a-z0-9-]{0,60}\.html$/.test(p.name || ""));
+    if (pages.length) {
+      const list = el("div", "bpages");
+      for (const p of pages) {
+        const a = el("a", "", p.title || p.name);
+        a.href = "/birds/" + b.bird + "/" + p.name;
+        a.target = "_blank";
+        a.rel = "noopener";
+        if (p.mtime) a.title = "written " + new Date(p.mtime).toLocaleString();
+        list.append(a);
+      }
+      row.append(list);
+    }
     box.append(row);
   }
   // The decisions the reporters put to the operator, in one list under the
@@ -2689,6 +2708,9 @@ function renderOM(s) {
     // A read that has failed says so; only a read that has not happened yet is
     // still "reading…" (gt-q6h8e).
     box.append(el("div", "empty", r ? "unavailable — the om records could not be read" : "reading the landings and the daemon log…"));
+    // The rework fold reads the review log, not the om records, so a failed or
+    // absent om read must not take it or its unreadable alarm with it (gt-ddxrq).
+    omRework(box, s.rework);
     $("omnote").textContent = "";
     $("omnote").title = "";
     return;
@@ -2705,7 +2727,7 @@ function renderOM(s) {
     box.append(line);
   }
 
-  // Running now, then the last five om ran, above both folds. A server that
+  // Running now, then the last five om ran, above every fold. A server that
   // sends neither list draws neither block.
   const cell = (tr, cls, text, title) => { const c = el("td", cls, text); if (title) c.title = title; tr.append(c); };
   const running = Array.isArray(om.running) ? om.running : [];
@@ -2787,6 +2809,10 @@ function renderOM(s) {
   rt.forEach(([k, n]) => meta.append(el("span", "tag", k + " " + n)));
   if (om.risk_paths) meta.append(document.createElement("br"), el("span", "title", "touched risk paths: "), el("span", "warnc", om.risk_paths + " landings"));
   fold("Stats" + (day ? " · " + day.label + ": " + day.landed + " landed, " + day.rejected + " rejected" : ""), openOMStats, v => { openOMStats = v; }, t, meta);
+
+  // The rework fold sits under Stats: both read the review log, and the figures
+  // the note carries expand here (gt-ddxrq).
+  omRework(box, s.rework);
 
   // Scores: the score histogram (approvals and review rejections by decile; red
   // below the threshold) and the by-day table.
@@ -3190,10 +3216,11 @@ const fmtTokens = n => {
   if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
   return String(n);
 };
-// costTable is a table of heads ([text, numeric?]) over rows of [text, class,
-// title?] cells, shared by the Usage and rework parts of the Cost panel. A
-// title is the cell's hover, for a figure whose numbers are behind it.
-function costTable(heads, rows) {
+// panelTable is a table of heads ([text, numeric?]) over rows of [text, class,
+// title?] cells, shared by the Usage part of the Cost panel and the om review
+// panel's rework fold. A title is the cell's hover, for a figure whose numbers
+// are behind it.
+function panelTable(heads, rows) {
   const t = el("table");
   const hr = el("tr");
   heads.forEach(([h, num]) => hr.append(el("th", num ? "n" : "", h)));
@@ -3220,13 +3247,13 @@ function costUsage(box, u, s) {
   const byClass = u.by_class_model || [], deep = u.deep_review_runs || [], top = u.top_beads || [], over = u.over20 || [];
 
   const win = u.window || "24h";
-  const table = costTable;
+  const table = panelTable;
   const none = text => el("div", "empty", text);
   const plural = (n, one, many) => n + " " + (n === 1 ? one : many);
 
   const calls = byClass.reduce((n, r) => n + (r.calls || 0), 0);
   const tokens = byClass.reduce((n, r) => n + (r.uncached || 0), 0);
-  const byClassFold = costFold(box, "cost.byclass", "By class and model",
+  const byClassFold = panelFold(box, "cost.byclass", "By class and model",
     byClass.length ? calls + " calls · " + fmtTokens(tokens) + " tokens" : "no usage in the last " + win);
   byClassFold.body.append(byClass.length
     ? table([["Class"], ["Model"], ["Calls", 1], ["Spend ($)", 1], ["Tokens", 1]], byClass.map(r => [
@@ -3251,7 +3278,7 @@ function costUsage(box, u, s) {
   const scheds = (dr && dr.schedules) || [];
   const unread = !dr || !!dr.unavailable;
   const off = !unread && (!!dr.paused || scheds.some(sc => sc && sc.next === "patrol disabled"));
-  const deepFold = costFold(box, "cost.deepreview", "Deep reviews", deepLine);
+  const deepFold = panelFold(box, "cost.deepreview", "Deep reviews", deepLine);
   const chip = unread ? el("span", "badge warnc", "unknown")
     : off ? el("span", "badge warnc", "paused")
     : scheds.length && deep.length ? el("span", "badge good", "scheduled") : null;
@@ -3271,7 +3298,7 @@ function costUsage(box, u, s) {
       }))
     : none("no deep review runs"));
 
-  const topFold = costFold(box, "cost.topbeads", "Top beads",
+  const topFold = panelFold(box, "cost.topbeads", "Top beads",
     top.length ? "top " + top[0].bead + " " + fmtTokens(top[0].uncached) + " tokens" : "no beads in the last " + win);
   topFold.body.append(top.length
     ? table([["Bead"], ["Class"], ["Took", 1], ["Spend ($)", 1], ["Tokens", 1]], top.map(r => [
@@ -3280,7 +3307,7 @@ function costUsage(box, u, s) {
         [fmtTokens(r.uncached), "n"]]))
     : none("no beads in the last " + win));
 
-  const overFold = costFold(box, "cost.over20", "Over 20 minutes (48h)",
+  const overFold = panelFold(box, "cost.over20", "Over 20 minutes (48h)",
     over.length ? plural(over.length, "bead", "beads") + " in the last 48h" : "none in the last 48h");
   overFold.body.append(over.length
     ? table([["Bead"], ["Rig"], ["Took", 1], ["Tests", 1]], over.map(r => [
@@ -3291,7 +3318,7 @@ function costUsage(box, u, s) {
   // How old the records are: the scan runs on a schedule, so an old AsOf means
   // the numbers in the folds are a past day's, and the fold says so.
   const counts = (u.unmatched || 0) + " unmatched · " + (u.incomplete || 0) + " incomplete · " + (u.skipped || 0) + " skipped";
-  const quality = costFold(box, "cost.quality", "Data quality", counts);
+  const quality = panelFold(box, "cost.quality", "Data quality", counts);
   const scanned = u.as_of ? new Date(u.as_of).getTime() : NaN;
   if (isNaN(scanned)) quality.body.append(el("div", "empty warnc", "never scanned"));
   else {
@@ -3301,22 +3328,23 @@ function costUsage(box, u, s) {
   quality.body.append(el("div", "empty", counts));
 }
 
-// costFolds keeps each fold of the Cost panel's usage part by its key, built once
-// like the chart folds: a redraw refills the fold's body and its heading's chip
-// and date, so a reading that arrives every few seconds does not stack a second
-// fold on the same key.
-const costFolds = {};
-// costFold draws a closed fold under key into box, titled title, with line as
+// panelFolds keeps each folded block of a panel by its key — the Cost panel's
+// usage blocks and the om review panel's rework table — built once like the
+// chart folds: a redraw refills the fold's body and its heading's chip and date,
+// so a reading that arrives every few seconds does not stack a second fold on
+// the same key.
+const panelFolds = {};
+// panelFold draws a closed fold under key into box, titled title, with line as
 // the one line its heading shows while closed, and returns it. Its heading holds
 // the title, then the bits span a redraw sets (a state chip, a date), then the
 // closed line foldable adds.
-function costFold(box, key, title, line) {
-  let f = costFolds[key];
+function panelFold(box, key, title, line) {
+  let f = panelFolds[key];
   if (!f) {
     const sec = el("section");
     sec.dataset.fold = key;
     const head = el("h2", "", title);
-    f = costFolds[key] = {sec: sec, head: head, bits: el("span", ""), body: el("div", "body"), line: line};
+    f = panelFolds[key] = {sec: sec, head: head, bits: el("span", ""), body: el("div", "body"), line: line};
     head.append(f.bits);
     sec.append(head, f.body);
     f.fold = foldable(sec, {key: key, summary: () => f.line});
@@ -3338,18 +3366,18 @@ function costJevFold(box, s) {
   if (!jev && !rows.some(p => p && p.id === "jev")) return;
   if (!jev) {
     const missing = "the Jev spend could not be read";
-    costFold(box, "cost.jev", "Jev spend", missing).body.append(el("div", "badc", missing));
+    panelFold(box, "cost.jev", "Jev spend", missing).body.append(el("div", "badc", missing));
     return;
   }
   const calls = jev.calls + (jev.calls === 1 ? " call" : " calls") + (jev.window ? " in " + jev.window : "");
   const top = jev.top_caller ? " · top caller " + jev.top_caller + " (" + jev.top_caller_calls + (jev.top_caller_calls === 1 ? " call" : " calls") + ")" : "";
-  costFold(box, "cost.jev", "Jev spend", calls + top).body.append(el("div", "empty", calls + top));
+  panelFold(box, "cost.jev", "Jev spend", calls + top).body.append(el("div", "empty", calls + top));
 }
 
-// The om rework part of the Cost panel: what each review bar costs in rework,
-// from the landing worker's review log, for the last seven days and the seven
-// before them, in one table with a row per window and bar, folded closed like
-// its siblings with the latest window's share and loops out on the heading. A
+// The om review panel's rework fold: what each review bar costs in rework, from
+// the landing worker's review log, for the last seven days and the seven before
+// them, in one table with a row per window and bar, folded closed like its
+// siblings with the latest window's share and loops out on the heading. A
 // bead counts under the bar in force at its first review in the window. A bar
 // of 0 is a tree that named none and reads "?". A row whose bar saw a single
 // review is not drawn: one review is 1/1 and 0%, which says nothing beside a
@@ -3358,8 +3386,8 @@ function costJevFold(box, s) {
 // table. The om time column is the mean of the landed beads' own totals, each
 // the sum of every review that bead had before it landed; a bar no bead has a
 // time for draws a dash.
-function costRework(box, r) {
-  const f = costFold(box, "cost.rework", "om rework", reworkLine(r));
+function omRework(box, r) {
+  const f = panelFold(box, "om.rework", "om rework", reworkLine(r));
   if (!r) { f.body.append(el("div", "empty", "om rework · reading…")); return; }
   if (r.unavailable) { f.body.append(el("div", "badc", "om rework · review log unreadable")); return; }
   const heads = [["Window"], ["Bar", 1], ["Reviews", 1], ["First try", 1], ["Rework", 1], ["Reviews per landed", 1], ["Mean om time", 1], ["Loops out", 1], ["Mean score", 1]];
@@ -3382,7 +3410,7 @@ function costRework(box, r) {
         [b.mean_score.toFixed(2), "n"]]);
     }
   }
-  if (rows.length) f.body.append(costTable(heads, rows));
+  if (rows.length) f.body.append(panelTable(heads, rows));
   for (const name of empty) f.body.append(el("div", "empty", name + ": no om reviews"));
 }
 
@@ -4265,7 +4293,6 @@ function renderCost(s) {
   costChartFold(spendBox, "hourly", charts.hourly, s.cost_providers);
   costUsage(box, u, s);
   costJevFold(box, s);
-  costRework(box, s.rework);
 }
 
 // An escalation's severity is why a row is where it is, so the panel colours
@@ -4775,7 +4802,7 @@ const PANES = {
   healthmark: {read: s => s.deploys, draw: s => renderHealthMark(s)},
   attention: {sec: "attention", body: ["attention"], read: s => s.attention, draw: s => renderAttention(s)},
   birds: {sec: "birds", body: ["birds"], read: s => [s.birds, readInput(s, "birds")], draw: s => renderBirds(s)},
-  cost: {sec: "cost", body: ["cost"], read: s => [s.spend, s.usage, s.cost_providers, s.cloud, s.cost_charts, s.rework, s.jev_spend, s.deepreview, readInput(s, "spend")], draw: s => renderCost(s)},
+  cost: {sec: "cost", body: ["cost"], read: s => [s.spend, s.usage, s.cost_providers, s.cloud, s.cost_charts, s.jev_spend, s.deepreview, readInput(s, "spend")], draw: s => renderCost(s)},
   rigs: {sec: "rigs", body: ["rigs"], read: s => [s.rigs, s.queue, readInput(s, "queue")], draw: s => renderRigs(s)},
   // The work pane's own key holds the list's filters and the rows a reader has
   // opened, so a section opened after a blind draw asks for the body it never
@@ -4790,8 +4817,9 @@ const PANES = {
   tiersweep: {sec: "tiersweep", body: ["tiersweep"], read: s => s.tiersweep, draw: s => renderTierSweep(s)},
   jev: {sec: "jev", body: ["jev"], read: s => [s.jev_scorecard, readInput(s, "jev_scorecard")], draw: s => renderJev(s)},
   mango: {sec: "mango", body: ["mango"], read: s => s.mango, draw: s => renderMango(s)},
-  // The om note also carries the review log's figures, so a rework reading that
-  // moves draws the pane even when the om read has not changed (gt-bz0pn).
+  // The om note and its rework fold both carry the review log's figures, so a
+  // rework reading that moves draws the pane even when the om read has not
+  // changed (gt-bz0pn, gt-ddxrq).
   om: {sec: "om", body: ["om"], read: s => [s.om, s.rework, readInput(s, "om")], draw: s => renderOM(s)},
   events: {sec: "events", body: ["events"], read: s => s.alerts, draw: s => renderEvents(s)},
 };

@@ -2075,6 +2075,14 @@ func (b *Beads) KVGet(key string) (string, error) {
 	}
 	out, err := b.run("kv", "get", key, "--json")
 	if err != nil {
+		// bd prints {"found":false,...} and then exits 1 for an unset key, so
+		// the answer is on the failed call's stdout. Only an explicit
+		// found=false makes an absence; no payload, an unreadable one, an
+		// object with no found key and found=true all stay the run error.
+		var failed *unavailableError
+		if errors.As(err, &failed) && kvStdoutSaysAbsent(failed.stdout) {
+			return "", fmt.Errorf("bd kv get %s: %w", key, ErrNotFound)
+		}
 		return "", err
 	}
 	return ParseKVGetJSON(out)
@@ -2146,6 +2154,24 @@ func ParseKVGetJSON(out []byte) (string, error) {
 	}
 	s, _ := kvValueText(kv.Value)
 	return s, nil
+}
+
+// kvStdoutSaysAbsent reports whether a failed kv get printed an explicit
+// found=false. ParseKVGetJSON reads a missing found key as false, which is right
+// for a clean exit and wrong here: a failing exit with {}, {"error":...} or a
+// null payload is a failure and must not be read as an unset key.
+func kvStdoutSaysAbsent(out []byte) bool {
+	payload, err := kvPayload(out)
+	if err != nil {
+		return false
+	}
+	var kv struct {
+		Found *bool `json:"found"`
+	}
+	if json.Unmarshal(payload, &kv) != nil {
+		return false
+	}
+	return kv.Found != nil && !*kv.Found
 }
 
 // kvPayload is the data of bd's machine envelope, or out when out is the bare

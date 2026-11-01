@@ -43,9 +43,13 @@ func (c *Cutover) Provision() error {
 		return fmt.Errorf("the provisioning command line was refused: %w", err)
 	}
 	c.logf("provisioning %s: bots, access and branch protection", c.Opts.Repo)
-	// The cutover has no context of its own; each request is bounded by the
-	// provisioner's client timeout.
-	if code := c.provisionRun()(context.Background(), opts, c.provisionEnv()); code != forgejoprov.ExitOK {
+	// The run's context reaches the provisioner, so an interrupt stops the
+	// requests as well; each request is also bounded by the client's timeout.
+	ctx := c.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if code := c.provisionRun()(ctx, opts, c.provisionEnv()); code != forgejoprov.ExitOK {
 		// The run's own failure line already reached the log, so this message names
 		// the step and its exit status and repeats neither the cause nor a value.
 		return fmt.Errorf("the provisioning run of %s did not finish (exit %d)", c.Opts.Repo, code)

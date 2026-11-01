@@ -805,3 +805,70 @@ func TestBirdsReportAndYesterdayLabels(t *testing.T) {
 		}
 	}
 }
+
+// A bird's topic pages are drawn as links under its row, newest first as the
+// reader listed them, to the sandboxed route; a row with none draws no list, and
+// a name outside the served shape is not drawn at all (gt-ylswr).
+func TestBirdsPanelDrawsTopicLinks(t *testing.T) {
+	t.Parallel()
+
+	stamp := time.Now().UTC().Format(time.RFC3339)
+	dom := newPageDOM(t)
+	dom.call(t, "renderBirds", map[string]any{
+		"birds": []any{
+			map[string]any{"bird": "heron", "state": "fresh", "written": stamp, "pages": []any{
+				map[string]any{"name": "pool-cutover.html", "title": "The pool <b>cutover</b>", "mtime": stamp},
+				map[string]any{"name": "older.html", "title": "", "mtime": stamp},
+				map[string]any{"name": "../daily.json", "title": "outside the shape", "mtime": stamp},
+				map[string]any{"name": "Upper.html", "title": "outside the shape", "mtime": stamp},
+			}},
+			map[string]any{"bird": "quiet", "state": "fresh", "written": stamp},
+		},
+		"reads": map[string]any{"birds": map[string]any{"at": stamp, "every_sec": 60}},
+	})
+
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
+		const out = {};
+		__walk(__byId["birds"], n => {
+			if (!__cls(n, "brow")) return;
+			const name = n.children[0].children[0].textContent;
+			const list = __find(n, ".bpages");
+			out[name] = list ? list.children.__arr.map(a => ({tag: a.tagName, text: a.textContent, href: a.href || "", target: a.target || "", rel: a.rel || "", title: a.title || ""})) : null;
+		});
+		return out;
+	})())`)
+	if err != nil {
+		t.Fatalf("reading the topic links: %v", err)
+	}
+	var got map[string][]struct {
+		Tag    string `json:"tag"`
+		Text   string `json:"text"`
+		Href   string `json:"href"`
+		Target string `json:"target"`
+		Rel    string `json:"rel"`
+		Title  string `json:"title"`
+	}
+	if err := json.Unmarshal([]byte(v.String()), &got); err != nil {
+		t.Fatalf("reading the topic links: %v", err)
+	}
+
+	links := got["heron"]
+	if len(links) != 2 {
+		t.Fatalf("heron drew %d topic links, want the two whose names the route serves: %+v", len(links), links)
+	}
+	if links[0].Tag != "A" || links[0].Href != "/birds/heron/pool-cutover.html" || links[0].Target != "_blank" || links[0].Rel != "noopener" {
+		t.Errorf("heron's first link is %+v, want an anchor to the route, in a new tab, noopener", links[0])
+	}
+	if links[0].Text != "The pool <b>cutover</b>" {
+		t.Errorf("heron's first link reads %q, want the title as text, not markup", links[0].Text)
+	}
+	if links[1].Text != "older.html" || links[1].Href != "/birds/heron/older.html" {
+		t.Errorf("heron's second link is %+v, want the page's name when it has no title", links[1])
+	}
+	if !strings.HasPrefix(links[0].Title, "written ") {
+		t.Errorf("heron's first link carries the hover %q, want when it was written", links[0].Title)
+	}
+	if list, drawn := got["quiet"]; !drawn || list != nil {
+		t.Errorf("quiet drew %+v (row drawn: %v), want a row with no topic list", list, drawn)
+	}
+}

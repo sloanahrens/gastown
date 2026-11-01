@@ -12,6 +12,7 @@
       "spec": {
         "priorityClassName": "gt-ci",
         "restartPolicy": "Never",
+        "shareProcessNamespace": true,
         "containers": [
           {
             "name": "runner",
@@ -23,6 +24,10 @@
               {
                 "name": "DOCKER_HOST",
                 "value": "tcp://127.0.0.1:2375"
+              },
+              {
+                "name": "HOME",
+                "value": "/tmp"
               },
               {
                 "name": "GT_SWEEP_RIG",
@@ -50,6 +55,9 @@
                 "cpu": "8",
                 "memory": "24Gi"
               }
+            },
+            "securityContext": {
+              "runAsUser": 10001
             },
             "volumeMounts": [
               {

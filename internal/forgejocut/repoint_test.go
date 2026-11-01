@@ -108,6 +108,20 @@ func (m *memFiles) Rename(from, to string) error {
 	return nil
 }
 
+func (m *memFiles) Chmod(p string, perm fs.FileMode) error {
+	m.writes = append(m.writes, p)
+	if _, ok := m.files[p]; ok {
+		m.modes[p] = perm
+	}
+	return nil
+}
+
+func (m *memFiles) MkdirAll(p string, perm fs.FileMode) error {
+	m.writes = append(m.writes, p)
+	m.dirs[p] = true
+	return nil
+}
+
 // repointGit is the git seam: a set of repositories with an origin each, answering
 // the calls the step makes and recording every argv and every set-url. A directory
 // in origins is a work tree of its own; one in bare is a bare repository; one in
@@ -524,7 +538,8 @@ func TestJSONPathRefusesAnEmptyPath(t *testing.T) {
 }
 
 // failFiles is memFiles with one operation made to fail: the key is "<op> <path>"
-// (op is stat, readdir, read, write or rename), so a test drives each refusal.
+// (op is stat, readdir, read, write, rename, chmod or mkdir), so a test drives
+// each refusal.
 type failFiles struct {
 	*memFiles
 	fail map[string]error
@@ -563,6 +578,20 @@ func (f failFiles) Rename(a, b string) error {
 		return err
 	}
 	return f.memFiles.Rename(a, b)
+}
+
+func (f failFiles) Chmod(p string, m fs.FileMode) error {
+	if err := f.fail["chmod "+p]; err != nil {
+		return err
+	}
+	return f.memFiles.Chmod(p, m)
+}
+
+func (f failFiles) MkdirAll(p string, m fs.FileMode) error {
+	if err := f.fail["mkdir "+p]; err != nil {
+		return err
+	}
+	return f.memFiles.MkdirAll(p, m)
 }
 
 var errDisk = errors.New("disk said no")

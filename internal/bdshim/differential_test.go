@@ -47,6 +47,10 @@ type differentialCase struct {
 	handlers map[string]Handler
 	// known is the verbs the shim has no handler for yet.
 	known map[string]bool
+	// diverge is the rows whose shim answer differs from bd's by design, by
+	// stem; awaiting is the ones whose golden is not recorded yet.
+	diverge  map[string]seatDivergence
+	awaiting map[string]bool
 	// keep names the ids the fixture file holds, which golden.Normalize leaves
 	// as recorded.
 	keep map[string]bool
@@ -61,6 +65,8 @@ type differentialReport struct {
 	goldens int
 	// compared is how many rows a handler answered and the run diffed.
 	compared int
+	// diverged is how many rows were checked against a listed difference.
+	diverged int
 	// unhandled is the verbs the run skipped, once each, in golden order.
 	unhandled []string
 }
@@ -114,6 +120,19 @@ func runDifferential(c differentialCase) (differentialReport, error) {
 			failures = append(failures, fmt.Sprintf("golden %s: %v", stem, err))
 			continue
 		}
+		if div, ok := c.diverge[stem]; ok {
+			// The row differs from bd by design: the shim must give the listed
+			// answer, and that answer must still differ from bd's.
+			report.diverged++
+			got = golden.Normalize(got, c.keep)
+			if string(got) != div.stdout || exit != div.exit {
+				failures = append(failures, fmt.Sprintf("golden %s: the shim answered exit %d stdout %q, the listed difference is exit %d stdout %q", stem, exit, got, div.exit, div.stdout))
+			}
+			if bytes.Equal(got, want) && exit == wantExit {
+				failures = append(failures, fmt.Sprintf("golden %s: knownSeatDivergences lists the row but the shim now answers as bd does; remove the entry", stem))
+			}
+			continue
+		}
 		report.compared++
 		// The shim's answer carries the ids and times of this run, and the
 		// golden holds the recorder's; normalizing both the same way is what
@@ -124,6 +143,29 @@ func runDifferential(c differentialCase) (differentialReport, error) {
 		}
 		if exit != wantExit {
 			failures = append(failures, fmt.Sprintf("golden %s: exit code is %d, want bd's %d", stem, exit, wantExit))
+		}
+	}
+
+	// A divergence row whose golden is not recorded yet is checked on the shim's
+	// side alone; one whose golden exists must leave the awaiting list.
+	for _, stem := range slices.Sorted(maps.Keys(c.awaiting)) {
+		if slices.Contains(stems, stem) {
+			failures = append(failures, fmt.Sprintf("awaitingRecording lists %q, but its golden exists; remove the entry", stem))
+			continue
+		}
+		div, ok := c.diverge[stem]
+		row, rowOK := rows[stem]
+		if !ok || !rowOK {
+			failures = append(failures, fmt.Sprintf("awaitingRecording lists %q, which is not in knownSeatDivergences and differentialRows", stem))
+			continue
+		}
+		got, exit, err := c.run(row.argv)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("awaiting %s: %v", stem, err))
+			continue
+		}
+		if got = golden.Normalize(got, c.keep); string(got) != div.stdout || exit != div.exit {
+			failures = append(failures, fmt.Sprintf("awaiting %s: the shim answered exit %d stdout %q, the listed difference is exit %d stdout %q", stem, exit, got, div.exit, div.stdout))
 		}
 	}
 
@@ -439,4 +481,109 @@ func writeGolden(t *testing.T, dir, stem, stdout string, exit int) {
 	if err := os.WriteFile(filepath.Join(dir, stem+".exit"), []byte(strconv.Itoa(exit)+"\n"), 0o600); err != nil {
 		t.Fatalf("writing golden %s exit: %v", stem, err)
 	}
+}
+
+// closeForceCase is a one-row case for the close --force divergence: a golden
+// of bd's success (or none), and a close handler that answers as given.
+func closeForceCase(t *testing.T, golden bool, answer func(env Env) int, awaiting bool) differentialCase {
+	t.Helper()
+	dir := t.TempDir()
+	const stem = "close-force-reason-fixture-close"
+	// Another golden keeps the directory non-empty when this row has none yet.
+	writeGolden(t, dir, "show-json", "{}\n", 0)
+	if golden {
+		writeGolden(t, dir, stem, "closed fx-1\n", 0)
+	}
+	hs := map[string]Handler{
+		"show":  func(env Env, _ Decision) int { _, _ = fmt.Fprint(env.Stdout, "{}\n"); return 0 },
+		"close": func(env Env, _ Decision) int { return answer(env) },
+	}
+	town := newTown(t, routeFixture)
+	c := differentialCase{
+		dir: dir,
+		rows: []differentialRow{
+			{stem: "show-json", argv: []string{"show", "--json", "fx-1"}},
+			{stem: stem, argv: []string{"close", "--force", "--reason", "fixture-close", "fx-1"}},
+		},
+		handlers: hs,
+		known:    map[string]bool{},
+		diverge:  map[string]seatDivergence{stem: {stdout: "", exit: 1}},
+		keep:     map[string]bool{"fx-1": true},
+		run:      runInShim(t, town, hs),
+	}
+	if awaiting {
+		c.awaiting = map[string]bool{stem: true}
+	}
+	return c
+}
+
+// TestDifferentialAssertsTheSeatDivergence: a row listed in knownSeatDivergences
+// must be answered with the listed difference and must still differ from bd's
+// golden; an answer that has become bd's, or any other answer, fails (gt-jbetd).
+func TestDifferentialAssertsTheSeatDivergence(t *testing.T) {
+	t.Parallel()
+	refuse := func(env Env) int {
+		_, _ = fmt.Fprintln(env.Stderr, "bdshim: flag --force is not implemented")
+		return 1
+	}
+	asBD := func(env Env) int { _, _ = fmt.Fprint(env.Stdout, "closed fx-1\n"); return 0 }
+	other := func(env Env) int { _, _ = fmt.Fprint(env.Stdout, "something\n"); return 1 }
+
+	t.Run("the listed difference passes", func(t *testing.T) {
+		t.Parallel()
+		report, err := runDifferential(closeForceCase(t, true, refuse, false))
+		if err != nil || report.diverged != 1 {
+			t.Errorf("%s: report %+v err %v, want one diverged row and no failure", t.Name(), report, err)
+		}
+	})
+	t.Run("an answer that became bd's fails", func(t *testing.T) {
+		t.Parallel()
+		_, err := runDifferential(closeForceCase(t, true, asBD, false))
+		if err == nil || !strings.Contains(err.Error(), "close-force-reason-fixture-close") || !strings.Contains(err.Error(), "remove the entry") {
+			t.Errorf("%s: error = %v, want one naming the stem and saying to remove the entry", t.Name(), err)
+		}
+	})
+	t.Run("any other answer fails", func(t *testing.T) {
+		t.Parallel()
+		_, err := runDifferential(closeForceCase(t, true, other, false))
+		if err == nil || !strings.Contains(err.Error(), "the listed difference") {
+			t.Errorf("%s: error = %v, want one naming the listed difference", t.Name(), err)
+		}
+	})
+}
+
+// TestDifferentialAwaitingRecordingShrinks: a divergence row with no golden yet
+// has its shim answer asserted anyway, an entry whose golden exists fails, and
+// an entry that is not a divergence row fails.
+func TestDifferentialAwaitingRecordingShrinks(t *testing.T) {
+	t.Parallel()
+	refuse := func(env Env) int { return 1 }
+	asBD := func(env Env) int { _, _ = fmt.Fprint(env.Stdout, "closed fx-1\n"); return 0 }
+
+	t.Run("no golden: the shim's answer is asserted", func(t *testing.T) {
+		t.Parallel()
+		if _, err := runDifferential(closeForceCase(t, false, refuse, true)); err != nil {
+			t.Errorf("%s: %v", t.Name(), err)
+		}
+		_, err := runDifferential(closeForceCase(t, false, asBD, true))
+		if err == nil || !strings.Contains(err.Error(), "awaiting close-force-reason-fixture-close") {
+			t.Errorf("%s: error = %v, want the awaiting row's wrong shim answer named", t.Name(), err)
+		}
+	})
+	t.Run("a golden that exists fails the entry", func(t *testing.T) {
+		t.Parallel()
+		_, err := runDifferential(closeForceCase(t, true, refuse, true))
+		if err == nil || !strings.Contains(err.Error(), "awaitingRecording lists") || !strings.Contains(err.Error(), "its golden exists") {
+			t.Errorf("%s: error = %v, want the entry removed", t.Name(), err)
+		}
+	})
+	t.Run("an entry that is not a divergence row fails", func(t *testing.T) {
+		t.Parallel()
+		c := closeForceCase(t, false, refuse, true)
+		c.diverge = map[string]seatDivergence{}
+		_, err := runDifferential(c)
+		if err == nil || !strings.Contains(err.Error(), "not in knownSeatDivergences") {
+			t.Errorf("%s: error = %v, want the stray entry named", t.Name(), err)
+		}
+	})
 }

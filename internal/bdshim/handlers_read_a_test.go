@@ -47,6 +47,11 @@ func testHandlerRows(t *testing.T, verb string) {
 		if verbOf(row.argv) != verb {
 			continue
 		}
+		// A row the shim answers differently from bd by design is pinned by the
+		// differential test (knownSeatDivergences), not compared here.
+		if _, diverges := knownSeatDivergences[row.stem]; diverges {
+			continue
+		}
 		rows++
 		t.Run(row.stem, func(t *testing.T) {
 			want, wantExit, err := readGolden(goldenDirectory, row.stem)

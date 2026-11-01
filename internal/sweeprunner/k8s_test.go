@@ -480,13 +480,31 @@ func volumeMountNamed(job *Job, name string) (VolumeMount, bool) {
 	return VolumeMount{}, false
 }
 
-// The runner container names the sweep-run command, so the pod does not start the
-// image's default bash and finish with no result.
-func TestK8sRunnerNamesTheSweepRunCommand(t *testing.T) {
+// The runner container names the sweep-run binary, so the pod does not start the
+// image's default bash and finish with no result. It runs as the unprivileged
+// polecat user with no root of its own, and the pod shares one process namespace,
+// whose root pause process reaps the orphans the tests kill and is the other
+// user's pid 1. Removing the command, the user or the shared namespace turns this
+// red, as it does the golden; running the runner as root does too, because it
+// would sit beside the privileged dind sidecar in that namespace.
+func TestK8sRunnerCommandUserAndSharedProcessNamespace(t *testing.T) {
 	t.Parallel()
-	c := runnerContainer(goldenSpec())
-
-	if len(c.Command) != 1 || c.Command[0] != RunnerCommand {
-		t.Errorf("runner container command = %q, want [%q]", c.Command, RunnerCommand)
+	plan, err := Kubernetes{}.Render(goldenSpec())
+	if err != nil {
+		t.Fatalf("rendering: %v", err)
+	}
+	runner, ok := containerNamed(plan.Job, runnerContainerName)
+	if !ok {
+		t.Fatalf("the Job renders no %q container", runnerContainerName)
+	}
+	if !slices.Equal(runner.Command, []string{RunnerCommand}) {
+		t.Errorf("runner container command = %q, want [%q]", runner.Command, RunnerCommand)
+	}
+	if runner.SecurityContext == nil || runner.SecurityContext.RunAsUser == nil || *runner.SecurityContext.RunAsUser != 10001 {
+		t.Errorf("runner security context = %+v, want runAsUser 10001 and never root", runner.SecurityContext)
+	}
+	pod := plan.Job.Spec.Template.Spec
+	if pod.ShareProcessNamespace == nil || !*pod.ShareProcessNamespace {
+		t.Error("the pod does not share its process namespace: killed grandchildren would stay zombies")
 	}
 }

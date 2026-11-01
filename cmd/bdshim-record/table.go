@@ -107,6 +107,9 @@ func Table() []Row {
 		{Verb: "create", Flags: []string{"--title", "fixture-created", "--type", "task", "--priority", "3", "--json"}, Mutates: true},
 		{Verb: "update", Flags: []string{"--status", "in_progress"}, Operands: []string{fixtureID}, Mutates: true},
 		{Verb: "close", Flags: []string{"--reason", "fixture-close"}, Operands: []string{fixtureID}, Mutates: true},
+		// bd closes past a blocker with --force; the shim does not answer the flag
+		// (gt-jbetd), so the differential test pins that difference.
+		{Verb: "close", Flags: []string{"--force", "--reason", "fixture-close"}, Operands: []string{fixtureID}, Mutates: true},
 		{Verb: "reopen", Operands: []string{fixtureID}, Mutates: true},
 		{Verb: "delete", Flags: []string{"--force"}, Operands: []string{fixtureID}, Mutates: true},
 		{Verb: "defer", Flags: []string{"--reason", "fixture-defer"}, Operands: []string{fixtureID}, Mutates: true},

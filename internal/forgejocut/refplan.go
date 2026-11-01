@@ -56,14 +56,20 @@ type RefGit interface {
 // ExecRefGit is RefGit backed by the git binary, run through Run in the scratch
 // repository at Dir.
 type ExecRefGit struct {
-	Dir string               // the scratch repository holding both sides' objects
+	Dir string // the scratch repository holding both sides' objects
+	// Ctx is the run's context each call derives from, so an interrupt reaches a
+	// read in flight; nil is context.Background.
+	Ctx context.Context
 	Run forgejoresync.Runner // runs one git argv; forgejoresync.RunExec in production
 }
 
-// run runs one git argv. The cutover installs no signal handler, so every call
-// runs under the background context (gt-csjwi).
+// run runs one git argv under the run's context.
 func (g ExecRefGit) run(argv []string) ([]byte, error) {
-	return g.Run(context.Background(), argv)
+	ctx := g.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return g.Run(ctx, argv)
 }
 
 // Peel returns the commit sha names: the sha itself, or the commit an annotated
