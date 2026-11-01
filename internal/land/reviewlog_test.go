@@ -355,11 +355,14 @@ func TestLandLogsEachOMVerdict(t *testing.T) {
 		t.Fatal(err)
 	}
 	at := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	if len(f.review.calls) != 2 {
+		t.Fatalf("the reviewer ran %d time(s), want once per landing", len(f.review.calls))
+	}
 	want := []ReviewRecord{
-		{BeadID: f.work.BeadID, Rig: f.work.Rig, Attempt: 1, Score: 0.3, Verdict: VerdictRequestChanges, Findings: 1, Bar: 0.8, At: at,
+		{BeadID: f.work.BeadID, Rig: f.work.Rig, Attempt: 1, Head: f.review.calls[0][2], Score: 0.3, Verdict: VerdictRequestChanges, Findings: 1, Bar: 0.8, At: at,
 			Branch: f.work.Branch, AuthorKind: authorkind.Polecat,
 			FindingText: []ReviewFindingText{{ID: "f-1", Severity: "major", File: "b.txt", Line: 1, Title: "wrong"}}},
-		{BeadID: f.work.BeadID, Rig: f.work.Rig, Attempt: 2, Score: 0.92, Verdict: VerdictApprove, Findings: 1, Bar: 0.8, At: at,
+		{BeadID: f.work.BeadID, Rig: f.work.Rig, Attempt: 2, Head: f.review.calls[1][2], Score: 0.92, Verdict: VerdictApprove, Findings: 1, Bar: 0.8, At: at,
 			Branch: f.work.Branch, AuthorKind: authorkind.Polecat,
 			FindingText: []ReviewFindingText{{ID: "f-2", Severity: "minor", File: "b.txt", Line: 1, Title: "name", Claim: "the error names nothing"}}},
 	}
@@ -724,5 +727,63 @@ func TestReviewRecordReadsALineFromBeforeTheAuthorFields(t *testing.T) {
 	}
 	if got.Agent != "opus" || got.Attempt != 2 || got.Verdict != VerdictRequestChanges {
 		t.Errorf("the old line's own fields read as %+v", got)
+	}
+}
+
+// TestReviewRecordCarriesTheHead: the line names the commit the verdict judged
+// — the merge candidate the om stage was handed — not the sha the target ends
+// on after the landing squashes it (gt-lh22v).
+func TestReviewRecordCarriesTheHead(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	reviews := reviewsFileIn(t)
+	l := f.lander()
+	l.Reviews = reviews
+	if _, err := l.Land(context.Background(), f.work); err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	recs, err := reviews.Since(time.Time{})
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("review log = %+v, %v; want the landing's one record", recs, err)
+	}
+	if len(f.review.calls) != 1 {
+		t.Fatalf("the reviewer ran %d time(s), want once", len(f.review.calls))
+	}
+	judged := f.review.calls[0][2]
+	if recs[0].Head != judged {
+		t.Errorf("record head = %q, want the commit the review was handed, %q", recs[0].Head, judged)
+	}
+	if len(recs[0].Head) != 40 || strings.Trim(recs[0].Head, "0123456789abcdef") != "" {
+		t.Errorf("record head = %q, want the full 40-hex sha", recs[0].Head)
+	}
+}
+
+// TestReviewRecordWithoutHeadStillParses: a line written before the head field
+// carries none, and both readers of the log read it as they read any other
+// record rather than skipping it (gt-lh22v).
+func TestReviewRecordWithoutHeadStillParses(t *testing.T) {
+	t.Parallel()
+	f := reviewsFileIn(t)
+	if err := os.MkdirAll(filepath.Dir(f.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := `{"bead":"gt-old","rig":"gastown","attempt":1,"score":0.4,"verdict":"request_changes","agent":"opus","findings":2,"bar":0.8,"at":"2026-10-20T12:00:00Z"}`
+	if err := os.WriteFile(f.Path, []byte(old+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recs, err := f.Since(time.Time{})
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("Since = %+v, %v; want the old line read", recs, err)
+	}
+	got := recs[0]
+	if got.Head != "" {
+		t.Errorf("the old line read with head %q, want none", got.Head)
+	}
+	if got.BeadID != "gt-old" || got.Attempt != 1 || got.Verdict != VerdictRequestChanges || got.Score != 0.4 {
+		t.Errorf("the old line's own fields read as %+v", got)
+	}
+	parsed, ok := parseOmStatsReviewRecord([]byte(old))
+	if !ok || parsed.rec.BeadID != "gt-old" || parsed.rec.Head != "" {
+		t.Errorf("om-stats read the old line as %+v, %v; want it counted with no head", parsed.rec, ok)
 	}
 }
