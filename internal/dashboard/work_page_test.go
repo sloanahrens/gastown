@@ -1040,11 +1040,11 @@ func workQueueHelp(t *testing.T, dom *pageDOM) queueHelp {
 	return h
 }
 
-// TestTheWorkQueueHelpIsADisclosureClosedByDefault drives the queue list: the
+// TestWorkQueueHelpIsADisclosureClosedByDefault drives the queue list: the
 // help paragraph sits inside one closed disclosure beside the tabs, the browser
 // draws nothing of it until the operator opens it, and the caption then reads
 // word for word (gt-mxn86).
-func TestTheWorkQueueHelpIsADisclosureClosedByDefault(t *testing.T) {
+func TestWorkQueueHelpIsADisclosureClosedByDefault(t *testing.T) {
 	t.Parallel()
 
 	readyHelp := "Open beads with nothing blocking them. Only the green “ready” ones are taken by the spec dispatcher: shaped, unassigned, not an epic, and in a rig that is not parked. Beads held by an assignee wait for that person; beads in parked rigs wait until the rig is re-enabled."
@@ -1105,6 +1105,52 @@ func TestTheWorkQueueHelpIsADisclosureClosedByDefault(t *testing.T) {
 	}
 	if h.Text != readyHelp {
 		t.Errorf("the opened help reads %q, want the caption unchanged", h.Text)
+	}
+}
+
+// TestWorkQueueHelpStaysOpenAcrossRedraw opens the queue help and then redraws
+// the panel the way the next poll does: the redraw rebuilds the queue list, and
+// the help must come back open rather than snap shut under the operator's
+// click (gt-mxn86).
+func TestWorkQueueHelpStaysOpenAcrossRedraw(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderWork", workState([]any{
+		seat("gastown", "dementus", "working", "gt-vcr3z", "one Work panel", "deepseek-flash", time.Minute),
+	}, workQueueReading(57, 1, 3, 0)))
+	before := workChild(t, dom, "wsum")
+	if !strings.Contains(before.Text, "57ready") {
+		t.Fatalf("the queue summary reads %q, want the 57 the first reading carried", before.Text)
+	}
+
+	if _, err := dom.vm.RunString(`(() => {
+		const cls = (e, c) => String(e.className).split(" ").indexOf(c) >= 0;
+		let hint = null;
+		(function walk(n) {
+			for (const c of (n.children || [])) { if (cls(c, "qhint")) hint = c; walk(c); }
+		})(__byId["work"]);
+		if (!hint) throw new Error("the queue list drew no help disclosure");
+		__clickSummary(hint);
+	})()`); err != nil {
+		t.Fatal(err)
+	}
+
+	// A poll brings a new reading, so the panel redraws and builds the queue
+	// list and its help from scratch.
+	dom.call(t, "renderWork", workState([]any{
+		seat("gastown", "dementus", "working", "gt-vcr3z", "one Work panel", "deepseek-flash", time.Minute),
+	}, workQueueReading(58, 1, 3, 0)))
+	after := workChild(t, dom, "wsum")
+	if !strings.Contains(after.Text, "58ready") {
+		t.Fatalf("the queue summary reads %q after a new reading, want the 58 that proves the panel redrew", after.Text)
+	}
+
+	h := workQueueHelp(t, dom)
+	if !h.Open {
+		t.Error("the redraw closed the help the operator had opened")
+	} else if h.Covered {
+		t.Error("the opened help's caption is covered by a closed disclosure")
 	}
 }
 

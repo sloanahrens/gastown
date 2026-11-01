@@ -935,13 +935,15 @@ const STATE_HELP = {
   idle: "holds nothing"
 };
 // The Work panel's folds (the seats that need a look, idle seats, parked-rig
-// seats, the queue list) last for the session and are not stored. The queue
-// list starts open, so the operator reads the beads without a click; closing it
-// holds across the polls.
+// seats, the queue list, the queue help) last for the session and are not
+// stored. The queue list starts open, so the operator reads the beads without a
+// click; the help starts closed, out of the rows' way. Either choice holds
+// across the polls.
 let openIdle = false;
 let openParkedRig = false;
 let openNeedsLook = false;
 let openQueueList = true;
+let openQueueHelp = false;
 // The om panel's Stats and Scores sections start closed and keep the viewer's
 // choice across the periodic redraw and a reload, keyed by section name. Storage
 // that throws — a locked-down browser, private mode — leaves them closed and
@@ -4809,13 +4811,16 @@ function drawQueueList(box, s) {
     landing: "Submitted by a polecat or crew and waiting for the landing worker.",
     blocked: "Open beads waiting on another bead to close. Wisp steps left by retired patrols and old polecat runs are hidden by default; the wisps chip shows them."}[qTab];
   // The help paragraph takes the place of rows the operator reads, so it folds
-  // behind a one-word disclosure beside the tabs (gt-mxn86). The caption keeps
-  // a class of its own: "empty" also marks the placeholder inside the scrolling
-  // rows, so a test looking for it cannot tell a queue list with a caption from
-  // one without. Nothing writes this details' open state and nothing holds it,
-  // so every draw builds it closed.
+  // behind a one-word disclosure beside the tabs (gt-mxn86). openQueueHelp
+  // holds the open state, so the redraw that rebuilds this list every poll
+  // leaves the help as the operator set it. The caption keeps a class of its
+  // own: "empty" also marks the placeholder inside the scrolling rows, so a
+  // test looking for it cannot tell a queue list with a caption from one
+  // without.
   const help = document.createElement("details");
   help.className = "qhint";
+  help.open = openQueueHelp;
+  help.ontoggle = () => { openQueueHelp = help.open; };
   help.append(el("summary", "title", "help"));
   help.append(el("div", "qcaption", caption));
   box.append(help);
