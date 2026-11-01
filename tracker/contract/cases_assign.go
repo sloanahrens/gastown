@@ -103,8 +103,8 @@ func claimGuard(t *testing.T, s store.Store) {
 
 func assignRefusals(t *testing.T, s store.Store) {
 	is := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "held", Assignee: "alice"})
-	// Held, not started: the update path's in_progress fence does not apply, so
-	// only the holder guard can refuse another actor here.
+	// Held, not started: the verbs refuse another actor on their holder check
+	// (requireHolder), not on the update path's guard.
 	mustUpdate(t, s, is.ID, api.UpdatePatch{Status: str("hooked"), Actor: "alice"}, api.Guard{})
 	held, events := mustGet(t, s, is.ID), len(eventsFor(t, s, is.ID))
 

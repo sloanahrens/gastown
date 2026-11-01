@@ -53,19 +53,35 @@ func (s writeStub) DeleteIssues(ctx context.Context, ids []string) error { retur
 
 func writeServer(t *testing.T, st store.Store) *httptest.Server {
 	t.Helper()
-	s := New(Config{Auth: fakeAuth{"good-token": "town/crew/dipper"}, Health: fakeHealth{}, SchemaLevel: 3, Store: st})
+	s := New(Config{Auth: fakeAuth{"good-token": "town/crew/dipper", "admin-token": "town/daemon"}, Health: fakeHealth{}, SchemaLevel: 3, Store: st})
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
 	return ts
 }
 
+// tokenFor is the token a write route takes in these tests: delete is
+// admin-only, every other write takes a seat.
+func tokenFor(path string) string {
+	if path == "/v1/issues:delete" {
+		return "admin-token"
+	}
+	return "good-token"
+}
+
 func writeCall(t *testing.T, method, url, body string) (int, string) {
+	t.Helper()
+	return writeCallAs(t, "good-token", method, url, body)
+}
+
+// writeCallAs sends a write with tok, a seat token unless the test names the
+// admin one.
+func writeCallAs(t *testing.T, tok, method, url, body string) (int, string) {
 	t.Helper()
 	req, err := http.NewRequest(method, url, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Authorization", "Bearer good-token")
+	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set(api.SchemaHeader, "3")
 	resp, err := writeHTTP.Do(req)
 	if err != nil {
@@ -178,6 +194,50 @@ func TestUpdateUsesTheTokensActorTheIDAndTheGuardAnswers204(t *testing.T) {
 	}
 }
 
+// A seat's PATCH that reassigns an issue another actor holds reaches the store
+// with the seat's identity, and the store's refusal answers 409 guard_failed
+// naming the holder. The holder rule itself is in the store's contract cases.
+func TestReassignOfAHeldIssueReachesTheStoreAsTheSeatAnd409sItsRefusal(t *testing.T) {
+	t.Parallel()
+	var scope api.Scope
+	var ctxActor string
+	st := okStub()
+	st.update = func(ctx context.Context, _ string, p api.UpdatePatch, _ api.Guard) error {
+		scope, ctxActor = api.ScopeFrom(ctx), api.ActorFrom(ctx)
+		if p.Assignee != nil {
+			return api.GuardFailed(`gt-abc is held by "alice"; only the holder can reassign it`)
+		}
+		return nil
+	}
+	ts := writeServer(t, st)
+	code, body := writeCall(t, "PATCH", ts.URL+"/v1/issues/gt-abc", `{"patch":{"assignee":"dipper"}}`)
+	if e := decodeErr(t, body); code != 409 || e.Kind != api.KindGuardFailed || !strings.Contains(e.Message, `held by "alice"`) {
+		t.Errorf("seat reassign = %d %q, want 409 guard_failed naming the holder", code, body)
+	}
+	if ctxActor != tokenActor || scope != api.ScopeSeat {
+		t.Errorf("store saw actor %q scope %q, want %q seat", ctxActor, scope, tokenActor)
+	}
+}
+
+// The admin token reaches the store with admin scope, so the store can let the
+// daemon recover a dead holder's bead.
+func TestReassignByTheAdminTokenReachesTheStoreWithAdminScope(t *testing.T) {
+	t.Parallel()
+	var scope api.Scope
+	st := okStub()
+	st.update = func(ctx context.Context, _ string, _ api.UpdatePatch, _ api.Guard) error {
+		scope = api.ScopeFrom(ctx)
+		return nil
+	}
+	ts := writeServer(t, st)
+	if code, body := writeCallAs(t, "admin-token", "PATCH", ts.URL+"/v1/issues/gt-abc", `{"patch":{"assignee":"dipper"},"guard":{"if_assignee":"alice"}}`); code != 204 || body != "" {
+		t.Fatalf("admin reassign = %d %q, want 204", code, body)
+	}
+	if scope != api.ScopeAdmin {
+		t.Errorf("store saw scope %q, want admin", scope)
+	}
+}
+
 func TestAssignRoutesUseTheTokenActorAndAnswer204(t *testing.T) {
 	t.Parallel()
 	type call struct{ verb, id, status, assignee, actor string }
@@ -259,11 +319,33 @@ func TestCloseAndDeletePassTheirArgumentsAndAnswer204(t *testing.T) {
 	if code, body := writeCall(t, "POST", ts.URL+"/v1/issues:close", `{"ids":["gt-a","gt-b"],"reason":"done","force":true}`); code != 204 || body != "" {
 		t.Errorf("close = %d %q, want 204", code, body)
 	}
-	if code, body := writeCall(t, "POST", ts.URL+"/v1/issues:delete", `{"ids":["gt-c"]}`); code != 204 || body != "" {
+	if code, body := writeCallAs(t, "admin-token", "POST", ts.URL+"/v1/issues:delete", `{"ids":["gt-c"]}`); code != 204 || body != "" {
 		t.Errorf("delete = %d %q, want 204", code, body)
 	}
 	if len(closeIDs) != 2 || reason != "done" || !force || len(delIDs) != 1 || delIDs[0] != "gt-c" {
 		t.Errorf("close got %v %q %v, delete got %v", closeIDs, reason, force, delIDs)
+	}
+}
+
+// A seat token cannot delete, whatever the issue: the refusal is 403 and the
+// store never sees the call. The admin token reaches the store.
+func TestDeleteRefusesASeatTokenBeforeTheStore(t *testing.T) {
+	t.Parallel()
+	var calls int
+	st := okStub()
+	st.del = func(context.Context, []string) error { calls++; return nil }
+	ts := writeServer(t, st)
+	if code, body := writeCallAs(t, "good-token", "POST", ts.URL+"/v1/issues:delete", `{"ids":["gt-c"]}`); code != 403 || decodeErr(t, body).Kind != api.KindForbidden {
+		t.Errorf("seat delete = %d %q, want 403 forbidden", code, body)
+	}
+	if calls != 0 {
+		t.Errorf("the store saw a refused seat delete %d times, want none", calls)
+	}
+	if code, body := writeCallAs(t, "admin-token", "POST", ts.URL+"/v1/issues:delete", `{"ids":["gt-c"]}`); code != 204 || body != "" {
+		t.Errorf("admin delete = %d %q, want 204", code, body)
+	}
+	if calls != 1 {
+		t.Errorf("the store saw the admin delete %d times, want 1", calls)
 	}
 }
 
@@ -298,7 +380,7 @@ func TestWriteRoutesMapStoreErrorsToStatusAndKind(t *testing.T) {
 			{"POST", "/v1/issues/gt-a/claim", ""}, {"POST", "/v1/issues/gt-a/release", ""},
 			{"POST", "/v1/issues/gt-a/transfer", `{"assignee":"bob"}`},
 		} {
-			code, body := writeCall(t, r.method, ts.URL+r.path, r.body)
+			code, body := writeCallAs(t, tokenFor(r.path), r.method, ts.URL+r.path, r.body)
 			if e := decodeErr(t, body); code != tc.status || e.Kind != tc.kind {
 				t.Errorf("%s %s %s: %d %q, want %d %s", name, r.method, r.path, code, body, tc.status, tc.kind)
 			}
@@ -317,7 +399,7 @@ func TestWriteRoutesRefuseEmptyAndUnknownFieldBodies(t *testing.T) {
 		{"POST", "/v1/issues/gt-a/transfer"},
 	} {
 		for name, body := range map[string]string{"empty": "", "unknown field": `{"surprise":1}`, "not json": `{`, "trailing data": `{}{}`} {
-			code, resp := writeCall(t, r.method, ts.URL+r.path, body)
+			code, resp := writeCallAs(t, tokenFor(r.path), r.method, ts.URL+r.path, body)
 			if e := decodeErr(t, resp); code != 400 || e.Kind != api.KindInvalid {
 				t.Errorf("%s %s %s = %d %q, want 400 invalid", r.method, r.path, name, code, resp)
 			}
@@ -360,7 +442,7 @@ func TestEmptyIDListsReachTheStoreAndAnswer204(t *testing.T) {
 	st.del = func(_ context.Context, ids []string) error { delCalls += 1 + len(ids)*0; return nil }
 	ts := writeServer(t, st)
 	for _, path := range []string{"/v1/issues:close", "/v1/issues:delete"} {
-		if code, body := writeCall(t, "POST", ts.URL+path, `{"ids":[]}`); code != 204 || body != "" {
+		if code, body := writeCallAs(t, tokenFor(path), "POST", ts.URL+path, `{"ids":[]}`); code != 204 || body != "" {
 			t.Errorf("POST %s with no ids = %d %q, want 204", path, code, body)
 		}
 	}

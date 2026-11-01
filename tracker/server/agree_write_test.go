@@ -26,6 +26,10 @@ func TestClientWritesAgreeWithTheRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	admin, err := client.New(client.Config{BaseURL: ts.URL, Token: "admin-token", SchemaLevel: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	is, err := c.Create(ctx, api.CreateParams{Title: "t", Actor: "mallory"})
 	if err != nil || is.ID != "gt-new" || is.CreatedBy != tokenActor {
@@ -35,7 +39,7 @@ func TestClientWritesAgreeWithTheRoutes(t *testing.T) {
 	for name, call := range map[string]func() error{
 		"Update": func() error { return c.Update(ctx, "gt-a", api.UpdatePatch{Title: &title}, api.Guard{}) },
 		"Close":  func() error { return c.Close(ctx, []string{"gt-a"}, "r", false) },
-		"Delete": func() error { return c.Delete(ctx, []string{"gt-a"}) },
+		"Delete": func() error { return admin.Delete(ctx, []string{"gt-a"}) }, // delete is admin-only
 	} {
 		nextErr = nil
 		if err := call(); err != nil {

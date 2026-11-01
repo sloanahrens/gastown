@@ -78,8 +78,9 @@ func validatePatch(patch api.UpdatePatch) error {
 
 // UpdateIssue applies patch to one issue in a transaction while g holds. The
 // guards compare the assignee and status under the row lock, so two callers
-// racing to claim an issue cannot both win. Without a guard, overwriting
-// another actor's live in_progress claim is refused unless patch.Force.
+// racing to claim an issue cannot both win. Changing the assignee of an issue
+// another actor holds is refused, whatever its status, unless the token is
+// admin-scope (the daemon's dead-holder recovery).
 func (p *Postgres) UpdateIssue(ctx context.Context, id string, patch api.UpdatePatch, g api.Guard) error {
 	if err := validatePatch(patch); err != nil {
 		return err
@@ -101,9 +102,12 @@ func updateInTx(ctx context.Context, tx pgx.Tx, id string, patch api.UpdatePatch
 	if g.IfStatus != nil && cur.status != *g.IfStatus {
 		return api.GuardFailed(fmt.Sprintf("%s has status %q, not %q", id, cur.status, *g.IfStatus))
 	}
-	if patch.Assignee != nil && *patch.Assignee != cur.assignee && g.IfAssignee == nil && !patch.Force &&
-		cur.status == "in_progress" && cur.assignee != "" && patch.Actor != cur.assignee {
-		return api.GuardFailed(fmt.Sprintf("%s is held in_progress by %q; pass a guard, or force an abandoned claim", id, cur.assignee))
+	// Only the holder reassigns an issue, or an admin-scope token (the daemon
+	// recovers a dead holder's bead). A guard does not make the caller the
+	// holder, since the caller writes it, so it does not bypass this check.
+	if patch.Assignee != nil && *patch.Assignee != cur.assignee && cur.assignee != "" && cur.assignee != patch.Actor &&
+		api.ScopeFrom(ctx) != api.ScopeAdmin {
+		return api.GuardFailed(fmt.Sprintf("%s is held by %q; only the holder can reassign it", id, cur.assignee))
 	}
 
 	var sets []string
