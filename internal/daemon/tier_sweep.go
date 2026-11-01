@@ -559,6 +559,10 @@ type tierSweepSeams struct {
 	// result, so a test fakes the launch by writing one there. Nil resolves to
 	// the daemon's own launcher over the configured backend.
 	launch func(ctx context.Context, st tierSweepStage, spec sweeprunner.Spec) tierSweepLaunch
+	// pollInterval is how long a launched run's status and result are read
+	// between looks. Zero is tierSweepRunnerPollInterval; a test sets it short
+	// so a retried read does not wait out real seconds.
+	pollInterval time.Duration
 	// treeHas reports whether the checked-out tree at dir ships rel, a file or a
 	// directory, and an error when the tree cannot be read. Each stage's command
 	// is picked from it before the stage runs.
@@ -1218,7 +1222,7 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 			waitNote = fmt.Sprintf(" (slot wait %s)", res.slotWait.Round(time.Second))
 		}
 		d.logger.Printf("tier_sweep: %s: %s finished (exit %d) in %s%s; last lines:\n%s",
-			rig, st.tiers[0], res.exitCode, stageElapsed.Round(time.Second), waitNote, lastLines(res.output, tierSweepLogTailLines))
+			rig, st.tiers[0], res.exitCode, stageElapsed.Round(time.Second), waitNote, lastLines(res.output))
 	}
 
 	if len(results) == 0 {
@@ -1667,6 +1671,10 @@ type tierSweepLaunch struct {
 // output in the shape the cycle already reads. The record, the log and the
 // attention items then come from the same code a host stage's do.
 //
+// A backend whose result stays on its engine is asked, on each poll, whether the
+// run has ended; once it has, the poll copies result.json out to the same
+// directory before it reads it (tierSweepRunnerCollect).
+//
 // The run outlives a cycle that ends its wait, and a cycle that finds a run in
 // its directory adopts it rather than starting a second engine beside it. The
 // directory is named after what the run tests (tierSweepRunnerRunID), so a
@@ -1765,8 +1773,15 @@ func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec
 	// nothing about the tree, so the cycle defers and retries.
 	budget := time.NewTimer(wait)
 	defer budget.Stop()
-	tick := time.NewTicker(tierSweepRunnerPollInterval)
+	interval := d.tierSweepSeams.pollInterval
+	if interval == 0 {
+		interval = tierSweepRunnerPollInterval
+	}
+	tick := time.NewTicker(interval)
 	defer tick.Stop()
+	// statusErr is the status read that failed on the last look, nil once a look
+	// reads the status: the budget names it when it judges a run that never ended.
+	var statusErr error
 	for {
 		res, err := sweeprunner.Read(spec.OutDir, spec.Rig, spec.SHA)
 		if err == nil {
@@ -1777,10 +1792,41 @@ func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec
 			stop()
 			return tierSweepRunnerNoResultStage(started, err, false)
 		}
+		// The engine may have ended the run with its result still on the engine:
+		// bring it to the host before the next look.
+		copied, err := d.tierSweepRunnerCollect(ctx, spec)
+		statusErr = nil
+		if err != nil {
+			if ctx.Err() != nil {
+				return tierSweepStageResult{exitCode: -1, err: ctx.Err()}
+			}
+			// A status read that fails says nothing about a run that may be going
+			// well, so the wait goes on and the next look asks again. The budget
+			// judges a run that never shows a result.
+			if !errors.Is(err, errTierSweepStatusUnread) {
+				stop()
+				return tierSweepRunnerNoResultStage(started, err, false)
+			}
+			statusErr = err
+		}
+		if copied {
+			// The copy is on the host now, so it is read without waiting for the
+			// next tick. A read that still finds nothing means the copy did not
+			// write the result: that is RED, not another copy.
+			res, err := sweeprunner.Read(spec.OutDir, spec.Rig, spec.SHA)
+			stop()
+			if err != nil {
+				return tierSweepRunnerNoResultStage(started, err, false)
+			}
+			return d.tierSweepRunnerStageResult(st, spec, res, started)
+		}
 		select {
 		case <-budget.C:
 			stop()
 			why := fmt.Errorf("no result in %s after %s", spec.OutDir, st.budget)
+			if statusErr != nil {
+				why = fmt.Errorf("%w; the last status read failed: %w", why, statusErr)
+			}
 			return tierSweepRunnerNoResultStage(started, why, true)
 		case <-ctx.Done():
 			// The cycle's own deadline ended the wait. The run keeps going in
@@ -1790,6 +1836,53 @@ func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec
 		case <-tick.C:
 		}
 	}
+}
+
+// errTierSweepStatusUnread is the error tierSweepRunnerCollect returns when it
+// cannot read a run's status. The poll keeps waiting on it, where a copy that
+// fails is judged RED at once.
+var errTierSweepStatusUnread = errors.New("the run's status cannot be read")
+
+// tierSweepRunnerCollect brings a run's result onto the host once the run has
+// ended, for a backend whose result stays on the engine. It reports whether it
+// copied the result this call. A backend whose run writes result.json into the
+// output directory itself has no Poll and nothing to collect. A run still going
+// reports false with no error, so the wait goes on. A status the daemon cannot
+// read reports errTierSweepStatusUnread; any other error, a failed copy or a
+// config the daemon cannot render, is one the caller judges RED.
+func (d *Daemon) tierSweepRunnerCollect(ctx context.Context, spec sweeprunner.Spec) (bool, error) {
+	cfg := tierSweepRunnerConfig(d.patrolConfig)
+	if cfg == nil {
+		return false, errors.New("no runner is configured")
+	}
+	backend, err := tierSweepRunnerBackend(cfg.Backend)
+	if err != nil {
+		return false, err
+	}
+	plan, err := backend.Render(spec)
+	if err != nil {
+		return false, err
+	}
+	if plan.Poll == nil {
+		return false, nil
+	}
+	status := plan.Poll.Status
+	stdout, stderr, err := d.runCmd(exec.CommandContext(ctx, status.Argv[0], status.Argv[1:]...)) //nolint:gosec // G204: the argv a Backend rendered from a validated Spec, run directly and never through a shell
+	if err != nil {
+		d.logger.Printf("tier_sweep: %s: reading run %s's status; last lines:\n%s",
+			spec.Rig, spec.RunID, lastLines(string(stderr)))
+		return false, fmt.Errorf("%w (%w)", errTierSweepStatusUnread, err)
+	}
+	if !plan.Poll.Ended(stdout) {
+		return false, nil
+	}
+	out, code := tierSweepRunSteps(ctx, d, plan.Poll.Collect)
+	if code != 0 {
+		d.logger.Printf("tier_sweep: %s: copying run %s's result out (exit %d); last lines:\n%s",
+			spec.Rig, spec.RunID, code, lastLines(out))
+		return false, fmt.Errorf("copying the run's result out of its output claim (exit %d)", code)
+	}
+	return true, nil
 }
 
 // tierSweepRunnerNoResultStage is the stage result of a run whose result the
@@ -1879,10 +1972,7 @@ func tierSweepRunnerBackend(name string) (sweeprunner.Backend, error) {
 	case sweeprunner.Docker{}.Name():
 		return sweeprunner.Docker{}, nil
 	case sweeprunner.Kubernetes{}.Name():
-		// R2 renders the Job, but its result lands on the run's output claim,
-		// which the caller creates and reads back; the daemon has no copy-out
-		// for a Job's result yet.
-		return nil, fmt.Errorf("runner backend %q: the daemon cannot read a Job's result yet; use %q", name, sweeprunner.Docker{}.Name())
+		return sweeprunner.Kubernetes{}, nil
 	}
 	return nil, fmt.Errorf("runner backend %q: want %q or %q", name, sweeprunner.Docker{}.Name(), sweeprunner.Kubernetes{}.Name())
 }
@@ -1906,16 +1996,12 @@ func (d *Daemon) tierSweepLaunchRunner(ctx context.Context, st tierSweepStage, s
 	if err != nil {
 		return tierSweepLaunch{exitCode: -1, err: err}
 	}
-	if plan.Job != nil {
-		// Only the Kubernetes backend renders a Job, and tierSweepRunnerBackend
-		// refuses it: a Job this path applied would leave every run's output
-		// claim behind and its result unread.
-		return tierSweepLaunch{exitCode: -1, err: fmt.Errorf("runner backend %q: a Job is not launched here", cfg.Backend)}
-	}
-	// Only the plan's start steps run here: the teardown steps in the same plan
-	// run once the caller has read the result, and running them at launch would
-	// take the run down the moment it started (gt-z4ppb).
-	start := make([]sweeprunner.Step, 0, len(plan.Steps))
+	// The plan's apply steps create the run's objects (a Kubernetes claim, then
+	// its Job) and run before its start steps. Only those run here: the teardown
+	// steps in the same plan run once the caller has read the result, and running
+	// them at launch would take the run down the moment it started (gt-z4ppb).
+	start := make([]sweeprunner.Step, 0, len(plan.Apply)+len(plan.Steps))
+	start = append(start, plan.Apply...)
 	for _, step := range plan.Steps {
 		if !step.Teardown {
 			start = append(start, step)
@@ -1965,7 +2051,7 @@ func (d *Daemon) tierSweepRunnerTeardown(ctx context.Context, spec sweeprunner.S
 		defer cancel()
 		if tdOut, tdCode := tierSweepRunSteps(tdCtx, d, steps); tdCode != 0 {
 			d.logger.Printf("tier_sweep: %s: removing the run's objects (exit %d); last lines:\n%s",
-				spec.Rig, tdCode, lastLines(tdOut, tierSweepLogTailLines))
+				spec.Rig, tdCode, lastLines(tdOut))
 			return
 		}
 	}
@@ -1986,6 +2072,9 @@ func tierSweepRunSteps(ctx context.Context, d *Daemon, steps []sweeprunner.Step)
 			continue
 		}
 		cmd := exec.CommandContext(ctx, step.Argv[0], step.Argv[1:]...) //nolint:gosec // G204: the argv a Backend rendered from a validated Spec, run directly and never through a shell
+		if step.Stdin != nil {
+			cmd.Stdin = bytes.NewReader(step.Stdin)
+		}
 		stdout, stderr, err := d.runCmd(cmd)
 		b.Write(stdout)
 		b.Write(stderr)
@@ -2387,11 +2476,12 @@ func tierSweepCloseGreen(d *Daemon, bd tierSweepBeadStore, rig, tier, sha string
 	}
 }
 
-// lastLines is out's final n lines; a shorter output is returned whole.
-func lastLines(out string, n int) string {
+// lastLines is out's final tierSweepLogTailLines lines; a shorter output is
+// returned whole.
+func lastLines(out string) string {
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
-	if len(lines) > n {
-		lines = lines[len(lines)-n:]
+	if len(lines) > tierSweepLogTailLines {
+		lines = lines[len(lines)-tierSweepLogTailLines:]
 	}
 	return strings.Join(lines, "\n")
 }

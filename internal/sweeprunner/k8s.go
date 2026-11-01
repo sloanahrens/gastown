@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -35,6 +36,9 @@ const (
 	runnerContainerName = "runner"
 	dindContainerName   = "dind"
 
+	// readerContainerName names the reader pod's one container.
+	readerContainerName = "reader"
+
 	// repoVolume, outVolume and dindVolume name the pod's volumes.
 	repoVolume = "repo"
 	outVolume  = "out"
@@ -62,6 +66,26 @@ const (
 	// ends, so a caller that died before its teardown leaks no job. The run's
 	// result lives on the output claim, not in the Job.
 	jobTTLSeconds = int32(60 * 60)
+
+	// outClaimStorage is the output claim's requested size, for the result and
+	// the logs of one sweep.
+	outClaimStorage = "5Gi"
+
+	// readerLifetimeSeconds bounds the reader pod that copies the result out:
+	// it sleeps this long and the pod is ended at the same mark, so a teardown
+	// that never ran leaves no pod running past it.
+	readerLifetimeSeconds = 900
+
+	// readerCPU and readerMemory are the reader's share, requested and limited
+	// alike. It only sleeps and serves a copy, so it takes a sliver of a node.
+	readerCPU    = "100m"
+	readerMemory = "128Mi"
+
+	// readyTimeout is how long the copy waits for the reader pod to start
+	// before the run is judged RED. The reader mounts the output claim, which
+	// is ReadWriteOnce: its node can attach the claim only after the Job's pod
+	// has ended and the volume has detached, so the wait allows for that.
+	readyTimeout = "300s"
 
 	// maxNameLength is the most characters a Kubernetes object's name may hold.
 	maxNameLength = 63
@@ -99,19 +123,49 @@ type PodTemplate struct {
 	Spec PodSpec `json:"spec"`
 }
 
-// PodSpec is the pod's priority, its restart policy, its containers and the
-// volumes they mount.
+// PodSpec is the pod's priority, its restart policy, its deadline, its
+// containers and the volumes they mount.
 type PodSpec struct {
-	PriorityClassName string      `json:"priorityClassName,omitempty"`
-	RestartPolicy     string      `json:"restartPolicy"`
-	Containers        []Container `json:"containers"`
-	Volumes           []Volume    `json:"volumes"`
+	PriorityClassName     string      `json:"priorityClassName,omitempty"`
+	RestartPolicy         string      `json:"restartPolicy"`
+	ActiveDeadlineSeconds *int64      `json:"activeDeadlineSeconds,omitempty"`
+	Containers            []Container `json:"containers"`
+	Volumes               []Volume    `json:"volumes"`
+}
+
+// Pod is a single pod the caller applies on its own, outside any Job.
+type Pod struct {
+	APIVersion string     `json:"apiVersion"`
+	Kind       string     `json:"kind"`
+	Metadata   ObjectMeta `json:"metadata"`
+	Spec       PodSpec    `json:"spec"`
+}
+
+// Claim is the run's output claim as the document kubectl applies: the
+// PersistentVolumeClaim the runner writes result.json and its logs to.
+type Claim struct {
+	APIVersion string     `json:"apiVersion"`
+	Kind       string     `json:"kind"`
+	Metadata   ObjectMeta `json:"metadata"`
+	Spec       ClaimSpec  `json:"spec"`
+}
+
+// ClaimSpec is the claim's access mode and the storage it asks for.
+type ClaimSpec struct {
+	AccessModes []string       `json:"accessModes"`
+	Resources   ClaimResources `json:"resources"`
+}
+
+// ClaimResources is the claim's requested quantities, by resource name.
+type ClaimResources struct {
+	Requests map[string]string `json:"requests"`
 }
 
 // Container is one container of the pod.
 type Container struct {
 	Name            string           `json:"name"`
 	Image           string           `json:"image"`
+	Command         []string         `json:"command,omitempty"`
 	Args            []string         `json:"args,omitempty"`
 	Env             []EnvVar         `json:"env,omitempty"`
 	Resources       *Resources       `json:"resources,omitempty"`
@@ -139,9 +193,12 @@ type ResourceList struct {
 }
 
 // SecurityContext is the capability a container needs: the dind sidecar runs its
-// own engine, and no other container of the pod holds one.
+// own engine, and no other container of the pod holds one. AllowPrivilegeEscalation
+// is a pointer so an explicit false is rendered; an absent value leaves the
+// cluster's default, which allows escalation.
 type SecurityContext struct {
-	Privileged bool `json:"privileged,omitempty"`
+	Privileged               bool  `json:"privileged,omitempty"`
+	AllowPrivilegeEscalation *bool `json:"allowPrivilegeEscalation,omitempty"`
 }
 
 // VolumeMount is one mount of a container.
@@ -169,39 +226,128 @@ type ClaimRef struct {
 type EmptyDirVolumeSource struct{}
 
 // Render returns the run as a Job and the steps that remove it, or the Validate
-// error that refuses the Spec. The caller reads the result from the output claim
-// before it runs the teardown, because the teardown removes the claim too.
+// error that refuses the Spec. Apply creates the output claim, then the Job. The
+// teardown removes the Job, the reader pod and the claim, in that order, so the
+// claim is not removed while a pod still mounts it. Poll reports when the run
+// has ended and copies its result out of the claim onto the host; the caller
+// reads the host copy, and runs the teardown after that read.
 func (Kubernetes) Render(spec Spec) (Plan, error) {
 	if err := spec.Validate(); err != nil {
 		return Plan{}, err
 	}
 	job := renderJob(spec)
+	claim := renderOutClaim(spec)
+	reader := renderReader(spec)
 	return Plan{
 		Job: job,
+		Apply: []Step{
+			// The claim goes first: a Job applied before its claim has nothing to
+			// write its result to.
+			{Argv: kubectlArgv(spec, "apply", "-f", "-"), Stdin: claim.JSON()},
+			{Argv: kubectlArgv(spec, "apply", "-f", "-"), Stdin: job.JSON()},
+		},
 		Steps: []Step{
-			{
-				Argv:     []string{kubectl, "--context", spec.Context, "delete", "job", job.Metadata.Name, "--ignore-not-found"},
-				Teardown: true,
-			},
-			{
-				// The run's output claim is the caller's to create and its teardown
-				// removes it: a Job-only teardown leaves every run's claim behind
-				// (gt-7zy61).
-				Argv:     []string{kubectl, "--context", spec.Context, "delete", "persistentvolumeclaim", OutClaimName(spec), "--ignore-not-found"},
-				Teardown: true,
+			{Argv: kubectlArgv(spec, "delete", "job", job.Metadata.Name, "--ignore-not-found"), Teardown: true},
+			// The reader pod mounts the claim, so it goes before the claim does.
+			{Argv: kubectlArgv(spec, "delete", "pod", reader.Metadata.Name, "--ignore-not-found"), Teardown: true},
+			// The run's output claim is the caller's to create and its teardown
+			// removes it: a Job-only teardown leaves every run's claim behind
+			// (gt-7zy61).
+			{Argv: kubectlArgv(spec, "delete", "persistentvolumeclaim", claim.Metadata.Name, "--ignore-not-found"), Teardown: true},
+		},
+		Poll: &Poll{
+			Status: Step{Argv: kubectlArgv(spec, "get", "job", job.Metadata.Name, "-o", `jsonpath={.status.conditions[?(@.status=="True")].type}`)},
+			Ended:  jobEnded,
+			Collect: []Step{
+				{Argv: kubectlArgv(spec, "apply", "-f", "-"), Stdin: reader.JSON()},
+				{Argv: kubectlArgv(spec, "wait", "--for=condition=Ready", "pod/"+reader.Metadata.Name, "--timeout="+readyTimeout)},
+				{Argv: kubectlArgv(spec, "cp", reader.Metadata.Name+":"+OutputDir+"/"+ResultFileName, filepath.Join(spec.OutDir, ResultFileName))},
 			},
 		},
 	}, nil
 }
 
-// JSON is the Job as the document kubectl applies.
-func (j *Job) JSON() []byte {
+// kubectlArgv is a kubectl command against the Spec's context.
+func kubectlArgv(spec Spec, args ...string) []string {
+	return append([]string{kubectl, "--context", spec.Context}, args...)
+}
+
+// jobEnded reports from a Job's condition types whether it has ended: a Job
+// with no true condition is still running, and one with Complete or Failed true
+// has ended, whichever way it went.
+func jobEnded(stdout []byte) bool {
+	for _, field := range strings.Fields(string(stdout)) {
+		if field == "Complete" || field == "Failed" {
+			return true
+		}
+	}
+	return false
+}
+
+// manifestJSON is a document as kubectl applies it.
+func manifestJSON(v any) []byte {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
-	_ = enc.Encode(j)
+	_ = enc.Encode(v)
 	return buf.Bytes()
+}
+
+// JSON is the Job as the document kubectl applies.
+func (j *Job) JSON() []byte { return manifestJSON(j) }
+
+// JSON is the output claim as the document kubectl applies.
+func (c *Claim) JSON() []byte { return manifestJSON(c) }
+
+// JSON is the pod as the document kubectl applies.
+func (p *Pod) JSON() []byte { return manifestJSON(p) }
+
+// renderOutClaim is the claim this run writes its result and logs to. It is
+// ReadWriteOnce, so one node mounts it at a time: the Job writes it, and the
+// reader mounts it only after the Job has ended.
+func renderOutClaim(spec Spec) *Claim {
+	return &Claim{
+		APIVersion: "v1",
+		Kind:       "PersistentVolumeClaim",
+		Metadata:   ObjectMeta{Name: OutClaimName(spec)},
+		Spec: ClaimSpec{
+			AccessModes: []string{"ReadWriteOnce"},
+			Resources:   ClaimResources{Requests: map[string]string{"storage": outClaimStorage}},
+		},
+	}
+}
+
+// renderReader is the pod that copies the result out of the claim once the Job
+// has ended: it mounts the claim read-only and sleeps, so kubectl can copy from
+// it, and it ends at the deadline whether or not a teardown removed it.
+func renderReader(spec Spec) *Pod {
+	share := ResourceList{CPU: readerCPU, Memory: readerMemory}
+	return &Pod{
+		APIVersion: "v1",
+		Kind:       "Pod",
+		Metadata:   ObjectMeta{Name: readerName(spec)},
+		Spec: PodSpec{
+			PriorityClassName:     PriorityClass,
+			RestartPolicy:         "Never",
+			ActiveDeadlineSeconds: int64Ptr(readerLifetimeSeconds),
+			Containers: []Container{{
+				Name:            readerContainerName,
+				Image:           spec.Image,
+				Command:         []string{"sleep", strconv.Itoa(readerLifetimeSeconds)},
+				Resources:       &Resources{Requests: share, Limits: share},
+				SecurityContext: &SecurityContext{AllowPrivilegeEscalation: boolPtr(false)},
+				VolumeMounts:    []VolumeMount{{Name: outVolume, MountPath: OutputDir, ReadOnly: true}},
+			}},
+			Volumes: []Volume{{Name: outVolume, PersistentVolumeClaim: &ClaimRef{ClaimName: OutClaimName(spec), ReadOnly: true}}},
+		},
+	}
+}
+
+// readerName is the reader pod's name, which the run id makes unique to the
+// launch.
+func readerName(spec Spec) string {
+	return k8sName("gt-sweep-read", spec.Rig, shortSHA(spec.SHA), spec.RunID)
 }
 
 // renderJob is the Job for a Spec that has passed Validate.
@@ -371,3 +517,7 @@ func int32Ptr(v int32) *int32 { return &v }
 // int64Ptr returns a pointer to v, for the fields a Job's absent value differs
 // from its zero one.
 func int64Ptr(v int64) *int64 { return &v }
+
+// boolPtr returns a pointer to v, so a false value is rendered rather than
+// omitted.
+func boolPtr(v bool) *bool { return &v }

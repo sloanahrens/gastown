@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -379,23 +380,6 @@ func TestTierSweepRunnerRefusesWhatItCannotLaunch(t *testing.T) {
 		}
 	})
 
-	t.Run("a backend the daemon cannot read a result from", func(t *testing.T) {
-		t.Parallel()
-		now := atHour(time.Now(), 15)
-		cfg := runnerTestConfig(t)
-		cfg.Backend = config.TierSweepRunnerKubernetes
-		d, _ := runnerCycleDaemon(t, now, cfg, "")
-		spec, ok, err := d.tierSweepRunnerSpec(tierSweepStage{tiers: []string{"integration"}, slot: true, rig: "gastown", tested: runnerTestSHA})
-		if err != nil || !ok {
-			t.Fatalf("spec = %+v, ok = %v, err = %v; want the runner to take the stage", spec, ok, err)
-		}
-
-		res := d.tierSweepLaunchRunner(context.Background(), tierSweepStage{}, spec)
-		if res.err == nil || !strings.Contains(res.err.Error(), "cannot read a Job's result") {
-			t.Fatalf("launch = %+v, want it refused for the Job's result it cannot read", res)
-		}
-	})
-
 	t.Run("an unknown backend", func(t *testing.T) {
 		t.Parallel()
 		cfg := runnerTestConfig(t)
@@ -462,12 +446,19 @@ func TestTierSweepRunnerNoTiersIsRed(t *testing.T) {
 type runnerFakeCmds struct {
 	ran     []string
 	ctxDone []bool
-	answer  func(argv []string) (stdout, stderr []byte, err error)
+	// stdin is what each command read from its input, nil for one that read none.
+	stdin  [][]byte
+	answer func(argv []string) (stdout, stderr []byte, err error)
 }
 
 func (f *runnerFakeCmds) run(cmd *exec.Cmd) ([]byte, []byte, error) {
 	f.ran = append(f.ran, strings.Join(cmd.Args, " "))
 	f.ctxDone = append(f.ctxDone, cmd.Cancel != nil && cmd.Cancel() != nil)
+	var in []byte
+	if cmd.Stdin != nil {
+		in, _ = io.ReadAll(cmd.Stdin) // the launcher's input is a bytes.Reader, which never fails
+	}
+	f.stdin = append(f.stdin, in)
 	if f.answer != nil {
 		return f.answer(cmd.Args)
 	}
@@ -691,4 +682,365 @@ func TestTierSweepRunnerLaunchRecord(t *testing.T) {
 			t.Error("a stage that could not read the run's record launched a second engine beside it")
 		}
 	})
+}
+
+// runnerKubernetesDaemon is a daemon whose runner block names the Kubernetes
+// backend, with the Spec of the stage it runs. It sets no command seam: the test
+// does, because the answers depend on the Spec.
+func runnerKubernetesDaemon(t *testing.T, now time.Time) (*Daemon, sweeprunner.Spec, tierSweepStage) {
+	t.Helper()
+	d, _, _, _ := newTierSweepDaemon(t, now, "gastown")
+	cfg := runnerTestConfig(t)
+	cfg.Backend = config.TierSweepRunnerKubernetes
+	d.patrolConfig.Patrols.TierSweep.Runner = cfg
+	// The budget is short so a run whose result is never copied is judged RED in
+	// about a second; the copy path reads its result without waiting on it.
+	st := tierSweepStage{tiers: []string{"integration", "race"}, slot: true, rig: "gastown", tested: runnerTestSHA, budget: time.Second}
+	spec, ok, err := d.tierSweepRunnerSpec(st)
+	if err != nil || !ok {
+		t.Fatalf("spec = %+v, ok = %v, err = %v; want the runner to take the stage", spec, ok, err)
+	}
+	return d, spec, st
+}
+
+// runnerCluster answers the kubectl commands one Kubernetes run makes. The Job
+// prints status when it is asked: statusErr fails every read, and flakyStatus
+// fails only the first that many. A copy writes result into the directory it
+// names, fails the way kubectl does when the claim holds no result, or succeeds
+// and writes nothing when skipWrite is set; failCopy fails it outright. failApply
+// is the 1-based apply that fails, 0 for none: 1 is the claim, 2 the Job and 3
+// the reader pod. failWait fails the reader pod's readiness wait.
+type runnerCluster struct {
+	t           *testing.T
+	status      string
+	statusErr   bool
+	flakyStatus int
+	statusReads int
+	result      *sweeprunner.Result
+	skipWrite   bool
+	failCopy    bool
+	failWait    bool
+	failApply   int
+	applies     int
+}
+
+func (c *runnerCluster) answer(argv []string) ([]byte, []byte, error) {
+	switch {
+	case slices.Contains(argv, "get"):
+		c.statusReads++
+		if c.statusErr || c.statusReads <= c.flakyStatus {
+			return nil, []byte("Error from server (NotFound): jobs.batch not found\n"), errors.New("exit status 1")
+		}
+		return []byte(c.status), nil, nil
+	case slices.Contains(argv, "apply"):
+		c.applies++
+		if c.applies == c.failApply {
+			return nil, []byte("error: the server refused the document\n"), errors.New("exit status 1")
+		}
+	case slices.Contains(argv, "wait"):
+		if c.failWait {
+			return nil, []byte("error: timed out waiting for the condition\n"), errors.New("exit status 1")
+		}
+	case slices.Contains(argv, "cp"):
+		if c.failCopy {
+			return nil, []byte("error: unable to copy from the pod\n"), errors.New("exit status 1")
+		}
+		if c.result == nil {
+			return nil, []byte("error: cannot stat the result in the claim\n"), errors.New("exit status 1")
+		}
+		if !c.skipWrite {
+			if err := sweeprunner.Write(filepath.Dir(argv[len(argv)-1]), *c.result); err != nil {
+				c.t.Errorf("the fake copy writing the result: %v", err)
+			}
+		}
+	}
+	return nil, nil, nil
+}
+
+// runnerCalls returns the indexes of the commands whose argv holds every word.
+func runnerCalls(ran []string, words ...string) []int {
+	var at []int
+	for i, cmd := range ran {
+		fields := strings.Fields(cmd)
+		all := true
+		for _, w := range words {
+			if !slices.Contains(fields, w) {
+				all = false
+				break
+			}
+		}
+		if all {
+			at = append(at, i)
+		}
+	}
+	return at
+}
+
+// A Kubernetes run is launched as its plan renders it: the output claim is
+// applied before the Job, both as the rendered documents, and the stage folds
+// the verdicts of the result the copy brought back (gt-2j3t7).
+func TestTierSweepRunnerKubernetesLaunchesJob(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, spec, st := runnerKubernetesDaemon(t, now)
+	result := runnerTestResult(spec, now)
+	cmds := &runnerFakeCmds{answer: (&runnerCluster{t: t, status: "Complete", result: &result}).answer}
+	d.execCmd = cmds.run
+
+	stage := d.tierSweepRunRunner(context.Background(), st, spec)
+
+	plan, err := sweeprunner.Kubernetes{}.Render(spec)
+	if err != nil {
+		t.Fatalf("rendering the spec: %v", err)
+	}
+	claimAt, jobAt := -1, -1
+	for i := range cmds.ran {
+		switch {
+		case claimAt < 0 && bytes.Equal(cmds.stdin[i], plan.Apply[0].Stdin):
+			claimAt = i
+		case jobAt < 0 && bytes.Equal(cmds.stdin[i], plan.Job.JSON()):
+			jobAt = i
+		}
+	}
+	if claimAt < 0 {
+		t.Fatalf("the output claim was never applied as its rendered document; commands: %q", cmds.ran)
+	}
+	if jobAt < 0 {
+		t.Fatalf("the Job was never applied as its rendered document; commands: %q", cmds.ran)
+	}
+	if jobAt < claimAt {
+		t.Errorf("the Job was applied at command %d, before its claim at %d: it would have nothing to write its result to", jobAt, claimAt)
+	}
+	if stage.reason != "" {
+		t.Fatalf("stage = %+v, want the copied result folded, not RED", stage)
+	}
+	for _, want := range []string{"integration GREEN passed=66", "race RED"} {
+		if !strings.Contains(stage.output, want) {
+			t.Errorf("stage output does not carry the copied verdict %q:\n%s", want, stage.output)
+		}
+	}
+	if stage.exitCode != tierSweepRedExit {
+		t.Errorf("exit code = %d, want the sweep's RED exit: the race tier the copied result names is RED", stage.exitCode)
+	}
+}
+
+// A run's objects come down only after its result is read, whichever way the
+// Job ended: the copy runs first, then the Job, the reader pod and the claim are
+// removed (gt-2j3t7).
+func TestTierSweepRunnerKubernetesTeardown(t *testing.T) {
+	t.Parallel()
+	for _, status := range []string{"Complete", "Failed"} {
+		t.Run("the Job ended "+status, func(t *testing.T) {
+			t.Parallel()
+			now := atHour(time.Now(), 15)
+			d, spec, st := runnerKubernetesDaemon(t, now)
+			result := runnerTestResult(spec, now)
+			cmds := &runnerFakeCmds{answer: (&runnerCluster{t: t, status: status, result: &result}).answer}
+			d.execCmd = cmds.run
+
+			stage := d.tierSweepRunRunner(context.Background(), st, spec)
+
+			if stage.reason != "" {
+				t.Fatalf("stage = %+v, want the copied result folded", stage)
+			}
+			copies := runnerCalls(cmds.ran, "cp")
+			if len(copies) != 1 {
+				t.Fatalf("copies = %d, want the one copy of the result: %q", len(copies), cmds.ran)
+			}
+			deletes := runnerCalls(cmds.ran, "delete")
+			if len(deletes) != 3 {
+				t.Fatalf("removals = %d, want the Job, the reader pod and the claim: %q", len(deletes), cmds.ran)
+			}
+			for i, word := range []string{"job", "pod", "persistentvolumeclaim"} {
+				if at := deletes[i]; !slices.Contains(strings.Fields(cmds.ran[at]), word) {
+					t.Errorf("removal %d is %q, want one that removes a %s", i, cmds.ran[at], word)
+				}
+				if deletes[i] < copies[0] {
+					t.Errorf("removal %q ran before the result was read", cmds.ran[deletes[i]])
+				}
+			}
+		})
+	}
+}
+
+// A Kubernetes run whose result the daemon cannot bring home is RED with the
+// no-result reason, and its objects still come down, so no run is left behind a
+// verdict the daemon has already taken (gt-2j3t7).
+func TestTierSweepRunnerKubernetesRedAndTornDown(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		status    string
+		statusErr bool
+		noResult  bool
+		skipWrite bool
+		failCopy  bool
+		failWait  bool
+		failApply int
+	}{
+		{name: "the Job ended with no result", status: "Failed", noResult: true},
+		{name: "the status cannot be read", statusErr: true},
+		{name: "the copy succeeds and writes nothing", status: "Complete", skipWrite: true},
+		{name: "the copy fails", status: "Complete", failCopy: true},
+		{name: "the reader pod never becomes ready", status: "Complete", failWait: true},
+		{name: "the claim cannot be applied", status: "Complete", failApply: 1},
+		{name: "the Job cannot be applied", status: "Complete", failApply: 2},
+		{name: "the reader pod cannot be applied", status: "Complete", failApply: 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			now := atHour(time.Now(), 15)
+			d, spec, st := runnerKubernetesDaemon(t, now)
+			cluster := &runnerCluster{t: t, status: tc.status, statusErr: tc.statusErr, skipWrite: tc.skipWrite, failCopy: tc.failCopy, failWait: tc.failWait, failApply: tc.failApply}
+			if !tc.noResult {
+				result := runnerTestResult(spec, now)
+				cluster.result = &result
+			}
+			cmds := &runnerFakeCmds{answer: cluster.answer}
+			d.execCmd = cmds.run
+
+			stage := d.tierSweepRunRunner(context.Background(), st, spec)
+
+			if stage.reason != tierSweepRunnerNoResult {
+				t.Fatalf("stage = %+v, want RED with reason %q", stage, tierSweepRunnerNoResult)
+			}
+			if stage.exitCode == 0 {
+				t.Error("exit code 0 for a run whose result was never read; the cycle would record a clean sweep")
+			}
+			if tc.statusErr && !strings.Contains(stage.output, "the run's status cannot be read") {
+				t.Errorf("stage output does not name the status read that failed for the whole budget:\n%s", stage.output)
+			}
+			if n := len(runnerCalls(cmds.ran, "delete")); n != 3 {
+				t.Errorf("removals = %d, want the Job, the reader pod and the claim removed once the run was judged: %q", n, cmds.ran)
+			}
+		})
+	}
+}
+
+// One failed status read is not a verdict: a run that is going well can fail a
+// read, and the poll asks again on its next tick, so the run's result is still
+// folded and the run is torn down after it is read (gt-2j3t7).
+func TestTierSweepRunnerKubernetesStatusReadRetried(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, spec, st := runnerKubernetesDaemon(t, now)
+	result := runnerTestResult(spec, now)
+	cluster := &runnerCluster{t: t, status: "Complete", result: &result, flakyStatus: 1}
+	cmds := &runnerFakeCmds{answer: cluster.answer}
+	d.execCmd = cmds.run
+	d.tierSweepSeams.pollInterval = time.Millisecond
+
+	stage := d.tierSweepRunRunner(context.Background(), st, spec)
+
+	if stage.reason != "" {
+		t.Fatalf("stage = %+v, want the copied result folded, not RED on the one failed read", stage)
+	}
+	if n := len(runnerCalls(cmds.ran, "get")); n < 2 {
+		t.Errorf("status reads = %d, want the poll to ask again after the failed one: %q", n, cmds.ran)
+	}
+	if !strings.Contains(stage.output, "integration GREEN passed=66") {
+		t.Errorf("stage output does not carry the copied verdict:\n%s", stage.output)
+	}
+	if n := len(runnerCalls(cmds.ran, "delete")); n != 3 {
+		t.Errorf("removals = %d, want the Job, the reader pod and the claim once the result was read: %q", n, cmds.ran)
+	}
+}
+
+// tierSweepRunnerCollect is the step the poll takes each time the result is not
+// on the host yet. It copies only a run that has ended, reports a run still going
+// as not yet, and refuses what it cannot read or copy (gt-2j3t7).
+func TestTierSweepRunnerCollect(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		status     string
+		statusErr  bool
+		noResult   bool
+		backend    string
+		noRunner   bool
+		badSpec    bool
+		wantCopied bool
+		wantErr    bool
+		wantCopy   bool
+	}{
+		{name: "a docker run writes its own result", backend: config.TierSweepRunnerDocker},
+		{name: "a run still going is not copied", status: ""},
+		{name: "a run that completed is copied", status: "Complete", wantCopied: true, wantCopy: true},
+		{name: "a run that failed is copied", status: "Failed", wantCopied: true, wantCopy: true},
+		{name: "a status that cannot be read is refused", statusErr: true, wantErr: true},
+		{name: "a copy with no result in the claim is refused", status: "Failed", noResult: true, wantErr: true, wantCopy: true},
+		{name: "a missing runner block is refused", noRunner: true, wantErr: true},
+		{name: "a backend the daemon does not know is refused", backend: "podman", wantErr: true},
+		{name: "a spec no backend renders is refused", badSpec: true, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			now := atHour(time.Now(), 15)
+			d, spec, _ := runnerKubernetesDaemon(t, now)
+			cluster := &runnerCluster{t: t, status: tc.status, statusErr: tc.statusErr}
+			if !tc.noResult {
+				result := runnerTestResult(spec, now)
+				cluster.result = &result
+			}
+			cmds := &runnerFakeCmds{answer: cluster.answer}
+			d.execCmd = cmds.run
+			runner := d.patrolConfig.Patrols.TierSweep.Runner
+			switch {
+			case tc.backend != "":
+				runner.Backend = tc.backend
+			case tc.noRunner:
+				d.patrolConfig.Patrols.TierSweep.Runner = nil
+			case tc.badSpec:
+				spec.CPUs = 0
+			}
+			if err := os.MkdirAll(spec.OutDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+
+			copied, err := d.tierSweepRunnerCollect(context.Background(), spec)
+
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, want an error = %v", err, tc.wantErr)
+			}
+			if copied != tc.wantCopied {
+				t.Errorf("copied = %v, want %v", copied, tc.wantCopied)
+			}
+			if got := len(runnerCalls(cmds.ran, "cp")) > 0; got != tc.wantCopy {
+				t.Errorf("a copy ran = %v, want %v: %q", got, tc.wantCopy, cmds.ran)
+			}
+			if tc.wantCopied {
+				if _, err := sweeprunner.Read(spec.OutDir, spec.Rig, spec.SHA); err != nil {
+					t.Errorf("the copied result does not read back: %v", err)
+				}
+			}
+		})
+	}
+}
+
+// A cycle that ends while the run's status is being read defers the stage: the
+// run is left going on its cluster for the next cycle to adopt, so its objects
+// are not removed and nothing is judged (gt-2j3t7).
+func TestTierSweepRunnerKubernetesCycleEndsDuringCollect(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, spec, st := runnerKubernetesDaemon(t, now)
+	cluster := &runnerCluster{t: t, statusErr: true}
+	cmds := &runnerFakeCmds{answer: cluster.answer}
+	d.execCmd = cmds.run
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	stage := d.tierSweepRunRunner(ctx, st, spec)
+
+	if !errors.Is(stage.err, context.Canceled) {
+		t.Fatalf("stage = %+v, want the cycle's cancellation returned so the cycle defers", stage)
+	}
+	if stage.reason != "" {
+		t.Errorf("stage reason = %q, want none: a cycle that ended the wait learned nothing about the tree", stage.reason)
+	}
+	if n := len(runnerCalls(cmds.ran, "delete")); n != 0 {
+		t.Errorf("removals = %d, want none: the run keeps going for the next cycle to adopt: %q", n, cmds.ran)
+	}
 }

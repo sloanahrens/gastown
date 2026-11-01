@@ -1,6 +1,7 @@
 package sweeprunner
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -299,8 +300,8 @@ func TestK8sRenderTeardownRemovesTheJobItRenders(t *testing.T) {
 		t.Errorf("the plan renders %d steps beside the teardown; the Job is the run's whole start", got)
 	}
 	teardown := plan.Teardown()
-	if len(teardown) != 2 {
-		t.Fatalf("the plan renders %d teardown steps, want the Job's removal and the output claim's: %v", len(teardown), teardown)
+	if len(teardown) != 3 {
+		t.Fatalf("the plan renders %d teardown steps, want the Job's removal, the reader pod's and the output claim's: %v", len(teardown), teardown)
 	}
 	if !slices.Contains(teardown[0].Argv, plan.Job.Metadata.Name) {
 		t.Errorf("the teardown %v does not name the Job %q", teardown[0].Argv, plan.Job.Metadata.Name)
@@ -308,11 +309,138 @@ func TestK8sRenderTeardownRemovesTheJobItRenders(t *testing.T) {
 	if !slices.Contains(teardown[0].Argv, "job") {
 		t.Errorf("the teardown %v does not remove a Job", teardown[0].Argv)
 	}
-	if !slices.Contains(teardown[1].Argv, OutClaimName(spec)) {
-		t.Errorf("the teardown %v does not name the output claim %q, so every run's claim is left behind", teardown[1].Argv, OutClaimName(spec))
+	if !slices.Contains(teardown[1].Argv, readerName(spec)) || !slices.Contains(teardown[1].Argv, "pod") {
+		t.Errorf("the teardown %v does not remove the reader pod %q, which mounts the claim", teardown[1].Argv, readerName(spec))
 	}
-	if !slices.Contains(teardown[1].Argv, "persistentvolumeclaim") {
-		t.Errorf("the teardown %v does not remove a claim", teardown[1].Argv)
+	if !slices.Contains(teardown[2].Argv, OutClaimName(spec)) {
+		t.Errorf("the teardown %v does not name the output claim %q, so every run's claim is left behind", teardown[2].Argv, OutClaimName(spec))
+	}
+	if !slices.Contains(teardown[2].Argv, "persistentvolumeclaim") {
+		t.Errorf("the teardown %v does not remove a claim", teardown[2].Argv)
+	}
+}
+
+// TestK8sRenderAppliesTheClaimBeforeTheJob holds the launch to its order: the
+// output claim is applied first, then the Job, each as the document the plan
+// rendered, so the Job never starts with nothing to write its result to.
+func TestK8sRenderAppliesTheClaimBeforeTheJob(t *testing.T) {
+	t.Parallel()
+	spec := goldenSpec()
+	plan, err := Kubernetes{}.Render(spec)
+	if err != nil {
+		t.Fatalf("rendering the golden spec: %v", err)
+	}
+	if len(plan.Apply) != 2 {
+		t.Fatalf("the plan applies %d objects, want the output claim then the Job", len(plan.Apply))
+	}
+	var claim Claim
+	if err := json.Unmarshal(plan.Apply[0].Stdin, &claim); err != nil {
+		t.Fatalf("the first apply is not a document: %v", err)
+	}
+	if claim.Kind != "PersistentVolumeClaim" || claim.Metadata.Name != OutClaimName(spec) {
+		t.Errorf("the first apply is a %s %q, want the output claim %q", claim.Kind, claim.Metadata.Name, OutClaimName(spec))
+	}
+	if !slices.Equal(claim.Spec.AccessModes, []string{"ReadWriteOnce"}) {
+		t.Errorf("the claim's access modes are %v, want one read-write mount", claim.Spec.AccessModes)
+	}
+	if got := claim.Spec.Resources.Requests["storage"]; got != outClaimStorage {
+		t.Errorf("the claim requests storage %q, want %q", got, outClaimStorage)
+	}
+	if !slices.Equal(plan.Apply[0].Argv, plan.Apply[1].Argv) {
+		t.Errorf("the applies run %v and %v, want the same kubectl apply", plan.Apply[0].Argv, plan.Apply[1].Argv)
+	}
+	if !slices.Contains(plan.Apply[1].Argv, "apply") {
+		t.Errorf("the Job's apply runs %v, which does not apply", plan.Apply[1].Argv)
+	}
+	if string(plan.Apply[1].Stdin) != string(plan.Job.JSON()) {
+		t.Errorf("the Job's apply does not carry the rendered Job document")
+	}
+}
+
+// TestK8sPollCopiesTheResultOutOfTheClaim holds the copy-out to its reader: the
+// reader pod mounts the output claim read-only at the runner's output directory,
+// it ends at its deadline, and the copy lands result.json in the host directory
+// the caller reads from.
+func TestK8sPollCopiesTheResultOutOfTheClaim(t *testing.T) {
+	t.Parallel()
+	spec := goldenSpec()
+	plan, err := Kubernetes{}.Render(spec)
+	if err != nil {
+		t.Fatalf("rendering the golden spec: %v", err)
+	}
+	if plan.Poll == nil {
+		t.Fatal("the Kubernetes plan renders no poll; a result left on the claim is never copied out")
+	}
+	var pod Pod
+	if err := json.Unmarshal(plan.Poll.Collect[0].Stdin, &pod); err != nil {
+		t.Fatalf("the reader apply is not a document: %v", err)
+	}
+	if pod.Metadata.Name != readerName(spec) || pod.Kind != "Pod" {
+		t.Errorf("the reader is a %s %q, want the pod %q", pod.Kind, pod.Metadata.Name, readerName(spec))
+	}
+	if pod.Spec.ActiveDeadlineSeconds == nil || *pod.Spec.ActiveDeadlineSeconds != readerLifetimeSeconds {
+		t.Errorf("the reader's deadline is %v, want %d seconds so it ends whether or not teardown ran", pod.Spec.ActiveDeadlineSeconds, readerLifetimeSeconds)
+	}
+	if pod.Spec.PriorityClassName != PriorityClass {
+		t.Errorf("the reader runs at priority %q, want the CI class %q", pod.Spec.PriorityClassName, PriorityClass)
+	}
+	if len(pod.Spec.Containers) != 1 || pod.Spec.Containers[0].Name != readerContainerName {
+		t.Fatalf("the reader renders containers %+v, want the one %q container", pod.Spec.Containers, readerContainerName)
+	}
+	reader := pod.Spec.Containers[0]
+	if reader.Resources == nil || reader.Resources.Limits == (ResourceList{}) || reader.Resources.Requests != reader.Resources.Limits {
+		t.Errorf("the reader's resources are %+v, want a bounded share with requests equal to limits", reader.Resources)
+	}
+	if reader.SecurityContext == nil || reader.SecurityContext.AllowPrivilegeEscalation == nil || *reader.SecurityContext.AllowPrivilegeEscalation {
+		t.Errorf("the reader's security context is %+v, want privilege escalation refused", reader.SecurityContext)
+	}
+	if !slices.Equal(reader.Command, []string{"sleep", strconv.Itoa(readerLifetimeSeconds)}) {
+		t.Errorf("the reader runs %v, want a sleep that holds it for the copy", reader.Command)
+	}
+	if want := (VolumeMount{Name: outVolume, MountPath: OutputDir, ReadOnly: true}); !slices.Equal(reader.VolumeMounts, []VolumeMount{want}) {
+		t.Errorf("the reader's mounts = %+v, want the claim read-only at %s", reader.VolumeMounts, OutputDir)
+	}
+	if len(pod.Spec.Volumes) != 1 || pod.Spec.Volumes[0].PersistentVolumeClaim == nil ||
+		pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName != OutClaimName(spec) ||
+		!pod.Spec.Volumes[0].PersistentVolumeClaim.ReadOnly {
+		t.Errorf("the reader's volumes = %+v, want only the output claim, read-only", pod.Spec.Volumes)
+	}
+
+	if len(plan.Poll.Collect) != 3 {
+		t.Fatalf("the copy renders %d steps, want the reader's apply, its readiness wait and the copy", len(plan.Poll.Collect))
+	}
+	dst := filepath.Join(spec.OutDir, ResultFileName)
+	if cp := plan.Poll.Collect[2].Argv; !slices.Contains(cp, "cp") || !slices.Contains(cp, readerName(spec)+":"+OutputDir+"/"+ResultFileName) || cp[len(cp)-1] != dst {
+		t.Errorf("the copy runs %v, want the result copied from the reader into %q", cp, dst)
+	}
+	if got := plan.Poll.Status.Argv; !slices.Contains(got, "get") || !slices.Contains(got, "job") || !slices.Contains(got, plan.Job.Metadata.Name) {
+		t.Errorf("the status reads %v, want the Job's status", got)
+	}
+}
+
+// TestK8sPollEndedIsTrueOnlyOnAnEndedJob reads the Job's status output: a run
+// with no true condition is still going, and Complete or Failed ends it whichever
+// way it went.
+func TestK8sPollEndedIsTrueOnlyOnAnEndedJob(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		stdout string
+		want   bool
+	}{
+		{"still running", "", false},
+		{"complete", "Complete", true},
+		{"failed", "Failed", true},
+		{"failed with a trailing newline", "Failed\n", true},
+		{"a condition that is not an end", "Suspended", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := jobEnded([]byte(tc.stdout)); got != tc.want {
+				t.Errorf("jobEnded(%q) = %v, want %v", tc.stdout, got, tc.want)
+			}
+		})
 	}
 }
 
