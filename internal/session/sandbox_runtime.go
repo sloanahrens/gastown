@@ -74,8 +74,7 @@ type promptCommentStore interface {
 // town root rewritten. The agent command names settings.json and the system
 // prompt, so a missing one is an error. A rig or polecat name that is not one
 // path segment is an error too. A tracker-routed seat's archive also carries
-// its token file at .tracker/token, 0400, holding SandboxTrackerPlaceholder
-// when the spec asks for it.
+// its token file at .tracker/token (gt-p85pw.84).
 //
 // The spawn log, the renderer and the comment store are seams: the production
 // caller passes its own, and a test captures the uploaded prompt's hash line
@@ -148,8 +147,7 @@ func buildRuntimeArchiveLogging(spec SpawnSpec, gitEmail string, promptLog io.Wr
 	// archive, no environment value and no settings file holds it
 	// (gt-p85pw.84). The sandbox only ever reads the file, so the owner has no
 	// write bit and group and world have none (gt-rh8ak). A spawn that asks
-	// for the placeholder stages that instead, keeping the real token off
-	// every archive entry (gt-874y8).
+	// for the placeholder stages it instead (gt-874y8).
 	if tracker.on() {
 		token := tracker.token
 		if spec.TrackerTokenPlaceholder {

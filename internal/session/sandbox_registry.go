@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/workspaceid"
 )
 
@@ -99,15 +100,22 @@ func writeSeatLine(f *os.File, line []byte) error {
 	return f.Close()
 }
 
-// sandboxRecordWorkspace is the workspace id a record for rig carries: the
-// town's mapping for the rig, or its default. A map that cannot be read is an
-// error, never an empty or guessed id (plan rows M1 and M5).
+// sandboxRecordWorkspace is the workspace id a record for rig carries. The
+// town's workspace map is keyed by rig prefix, not rig name, so the rig's
+// prefix is resolved from the town registry first; a registry this town cannot
+// read is an error, never the "gt" fallback. A map that cannot be read is an
+// error too, never an empty or guessed id (plan rows M1 and M5).
 func sandboxRecordWorkspace(townRoot, rig string) (string, error) {
+	prefix := config.GetRigPrefix(townRoot, rig)
+	if prefix == "" {
+		return "", fmt.Errorf("sandbox record: rig %q has no readable beads prefix in %s",
+			rig, filepath.Join(townRoot, "mayor", "rigs.json"))
+	}
 	m, err := workspaceid.Load(townRoot)
 	if err != nil {
 		return "", err
 	}
-	return m.For(rig)
+	return m.For(prefix)
 }
 
 // WriteSandboxRecord records r for its session.
@@ -144,10 +152,12 @@ func ReadSandboxRecord(townRoot, session string) (r SandboxRecord, ok bool, err 
 	return r, true, nil
 }
 
-// RemoveSandboxRecord forgets session, appending its seat-end line to the
-// ledger first. Idempotent: a record that does not exist writes no line, and a
-// ledger that cannot be written still lets the removal happen, its error joined
-// with the removal's (plan row M5).
+// RemoveSandboxRecord forgets session, writing its seat-end line once the
+// record is gone. Idempotent: a record that does not exist, or one another
+// removal already took, writes no line, and a failed removal writes none
+// either, so a retry cannot line the same seat twice. A ledger that cannot be
+// written still leaves the removal done, its error joined with the removal's
+// (plan row M5).
 func RemoveSandboxRecord(townRoot, session string) error {
 	return removeSandboxRecord(townRoot, session, time.Now)
 }
@@ -155,22 +165,34 @@ func RemoveSandboxRecord(townRoot, session string) error {
 // removeSandboxRecord is RemoveSandboxRecord with its clock injected, so a
 // test pins the line's ended_at.
 func removeSandboxRecord(townRoot, session string, now func() time.Time) error {
+	return removeSandboxRecordWith(townRoot, session, now, os.Remove)
+}
+
+// removeSandboxRecordWith is removeSandboxRecord with the unlink injected, so
+// a test can fail a removal and drive its retry.
+func removeSandboxRecordWith(townRoot, session string, now func() time.Time, remove func(string) error) error {
 	if !validSessionName(session) {
 		return nil
 	}
-	var ledgerErr error
-	rec, ok, err := ReadSandboxRecord(townRoot, session)
+	rec, ok, readErr := ReadSandboxRecord(townRoot, session)
+	removeErr := remove(sandboxRecordPath(townRoot, session))
 	switch {
-	case err != nil:
-		// An unreadable record is not a missing one: the seat existed and
-		// its line cannot be written, so say so rather than meter nothing.
-		ledgerErr = fmt.Errorf("reading %s for its seat-end line: %w", session, err)
-	case ok:
-		ledgerErr = appendSandboxSeatEnd(townRoot, rec, now())
+	case errors.Is(removeErr, os.ErrNotExist):
+		// Gone already: whoever removed it wrote its line, or there was none.
+		// Either way this call writes nothing.
+		removeErr, ok = nil, false
+	case removeErr != nil:
+		// The record still stands, so the seat has not ended: no line yet.
+		ok = false
 	}
-	removeErr := os.Remove(sandboxRecordPath(townRoot, session))
-	if errors.Is(removeErr, os.ErrNotExist) {
-		removeErr = nil
+	if readErr != nil {
+		// An unreadable record is not a missing one: the seat existed and its
+		// line cannot be written, so say so rather than meter nothing.
+		return errors.Join(fmt.Errorf("reading %s for its seat-end line: %w", session, readErr), removeErr)
+	}
+	var ledgerErr error
+	if ok {
+		ledgerErr = appendSandboxSeatEnd(townRoot, rec, now())
 	}
 	return errors.Join(ledgerErr, removeErr)
 }

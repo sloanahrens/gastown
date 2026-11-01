@@ -389,39 +389,56 @@ func openshellTrackerRealToken() sandboxTracker {
 	return sandboxTracker{URL: "http://tracker.test:7600", AllowHTTPHost: "tracker.test", token: []byte(openshellSeatTokenValue)}
 }
 
-// openshellArchiveWithToken builds the runtime archive for a tracker-routed
-// seat: the test town's spawn, with a tracker that stages the test token.
-func openshellArchiveWithToken(t *testing.T) map[string]runtimeEntry {
+// openshellArchiveBytes builds the runtime archive for spec and returns the
+// uploaded bytes.
+func openshellArchiveBytes(t *testing.T, spec SpawnSpec, tracker sandboxTracker) []byte {
 	t.Helper()
-	town, work := openshellTown(t)
-	data, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, openshellPromptRender, nil,
-		openshellTrackerRealToken())
+	data, err := buildRuntimeArchiveLogging(spec, openshellTestGitEmail, io.Discard, openshellPromptRender, nil, tracker)
 	if err != nil {
 		t.Fatalf("buildRuntimeArchiveLogging: %v", err)
 	}
-	return untarRuntime(t, data)
+	return data
 }
 
-// The seat token file is staged owner-read-only: the sandbox only ever reads
-// it, so no group or world bit is set and the owner has no write bit either
-// (gt-rh8ak).
-func TestTrackerTokenFileStagedOwnerReadOnly(t *testing.T) {
-	t.Parallel()
-	entry, ok := openshellArchiveWithToken(t)[runtimeTrackerToken]
-	if !ok {
-		t.Fatalf("the archive stages no %s; the sandbox would start without its seat token", runtimeTrackerToken)
-	}
-	if entry.mode != 0o400 {
-		t.Errorf("%s mode = %o, want 400 (owner read only, no group or world access)", runtimeTrackerToken, entry.mode)
+// openshellArchiveWithToken builds the runtime archive for a tracker-routed
+// seat: spec's spawn, with a tracker that stages the test token.
+func openshellArchiveWithToken(t *testing.T, spec SpawnSpec) map[string]runtimeEntry {
+	t.Helper()
+	return untarRuntime(t, openshellArchiveBytes(t, spec, openshellTrackerRealToken()))
+}
+
+// wantTrackerArchiveModes is the exact entry set of a tracker-routed seat's
+// runtime archive and each entry's mode: the five a spawn with no tracker gets,
+// plus the tracker's directory and token file. A test compares the whole set
+// against it, so an entry added, dropped or given another mode fails rather
+// than passing as something a denylist of credential names permits.
+//
+// The set is written out here instead of read from a second build, so a shared
+// code path that loses a file or changes a mode cannot satisfy both sides of
+// the comparison at once.
+func wantTrackerArchiveModes() map[string]int64 {
+	claudeDir := "gt/" + openshellTestRig + "/polecats/.claude/"
+	return map[string]int64{
+		".claude.json":              0o600,
+		".gitconfig":                0o644,
+		".githelper":                0o755,
+		claudeDir + "settings.json": 0o644,
+		claudeDir + "system-prompt-" + openshellTestPolecat + ".md": 0o644,
+		path.Dir(runtimeTrackerToken) + "/":                         0o700,
+		runtimeTrackerToken:                                         0o400,
 	}
 }
 
-// The runtime archive holds the seat token file and no other credential file:
-// the token travels in that one entry, and nothing shaped like a dotenv, a
-// netrc, a git credential store or a private key is staged beside it (gt-rh8ak).
+// The archive stages exactly today's entries plus the tracker's own directory
+// and token file, and no other entry carries the seat token: an allowlist, not
+// a denylist of credential names, so a credential file under a name this test
+// does not know fails it too. The token file is owner-read-only, because the
+// sandbox only ever reads it (gt-rh8ak).
 func TestRuntimeArchiveHoldsOnlyTheSeatToken(t *testing.T) {
 	t.Parallel()
-	entries := openshellArchiveWithToken(t)
+	town, work := openshellTown(t)
+	entries := openshellArchiveWithToken(t, openshellSpawn(town, work))
+
 	token, ok := entries[runtimeTrackerToken]
 	if !ok {
 		t.Fatalf("the archive stages no %s; the sandbox would start without its seat token", runtimeTrackerToken)
@@ -429,12 +446,26 @@ func TestRuntimeArchiveHoldsOnlyTheSeatToken(t *testing.T) {
 	if token.body != openshellSeatTokenValue {
 		t.Errorf("%s = %q, want exactly the seat's token", runtimeTrackerToken, token.body)
 	}
-	for name, entry := range entries {
-		if name == runtimeTrackerToken {
+	want := wantTrackerArchiveModes()
+	if len(entries) != len(want) {
+		t.Errorf("archive holds %d entries, want today's %d: %v", len(entries), len(want), entries)
+	}
+	for name, mode := range want {
+		entry, ok := entries[name]
+		if !ok {
+			t.Errorf("the archive stages no %s", name)
 			continue
 		}
-		if runtimeCredentialName(name) {
-			t.Errorf("the archive stages %s, a credential file; only %s may hold one", name, runtimeTrackerToken)
+		if entry.mode != mode {
+			t.Errorf("%s mode = %o, want %o", name, entry.mode, mode)
+		}
+	}
+	for name, entry := range entries {
+		if _, wanted := want[name]; !wanted {
+			t.Errorf("the archive stages %s; only today's entries and %s may be there", name, runtimeTrackerToken)
+		}
+		if name == runtimeTrackerToken {
+			continue
 		}
 		if strings.Contains(entry.body, openshellSeatTokenValue) {
 			t.Errorf("archive entry %s carries the seat token; only %s may", name, runtimeTrackerToken)
@@ -488,10 +519,11 @@ func TestTrackerPlaceholderArchiveHoldsNoRealToken(t *testing.T) {
 	}
 }
 
-// With the switch off the archive is today's: the token file holds the real
-// token at 0400, the placeholder appears nowhere, and no other entry differs
-// from the placeholder spawn's, so nothing changes before the per-seat
-// provider is wired (gt-874y8).
+// With the switch off the archive is today's: exactly today's entry set and
+// modes (wantTrackerArchiveModes), the token file holding the real token at
+// 0400, the placeholder appearing nowhere, and no other entry differing from
+// the placeholder spawn's, so nothing changes before the per-seat provider is
+// wired (gt-874y8).
 func TestTrackerSwitchOffKeepsTheRealTokenFile(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
@@ -500,11 +532,7 @@ func TestTrackerSwitchOffKeepsTheRealTokenFile(t *testing.T) {
 		t.Fatal("a spawn that was never asked for the placeholder has the switch on")
 	}
 	tracker := openshellTrackerRealToken()
-	off, err := buildRuntimeArchiveLogging(spec, openshellTestGitEmail, io.Discard, openshellPromptRender, nil, tracker)
-	if err != nil {
-		t.Fatalf("buildRuntimeArchiveLogging: %v", err)
-	}
-	entries := untarRuntime(t, off)
+	entries := openshellArchiveWithToken(t, spec)
 	token, ok := entries[runtimeTrackerToken]
 	if !ok {
 		t.Fatalf("runtime archive entries = %v, want %s", entries, runtimeTrackerToken)
@@ -512,22 +540,38 @@ func TestTrackerSwitchOffKeepsTheRealTokenFile(t *testing.T) {
 	if token.body != openshellSeatTokenValue {
 		t.Errorf("%s = %q, want the real seat token", runtimeTrackerToken, token.body)
 	}
-	if token.mode != 0o400 {
-		t.Errorf("%s mode = %o, want 400", runtimeTrackerToken, token.mode)
-	}
 	for name, entry := range entries {
 		if strings.Contains(entry.body, SandboxTrackerPlaceholder) {
 			t.Errorf("archive entry %s carries the placeholder; the switch is off", name)
 		}
 	}
 
+	// Today's archive, entry for entry and mode for mode. The set is the test's
+	// own statement of today, not a second build's, so a shared path that drops
+	// a file or changes a mode fails here instead of on both sides at once.
+	want := wantTrackerArchiveModes()
+	if len(entries) != len(want) {
+		t.Errorf("the switch-off archive holds %d entries, want today's %d: %v", len(entries), len(want), entries)
+	}
+	for name, mode := range want {
+		entry, ok := entries[name]
+		if !ok {
+			t.Errorf("the switch-off archive stages no %s; today's does", name)
+			continue
+		}
+		if entry.mode != mode {
+			t.Errorf("%s mode = %o, want today's %o", name, entry.mode, mode)
+		}
+	}
+	for name := range entries {
+		if _, wanted := want[name]; !wanted {
+			t.Errorf("the switch-off archive stages %s; today's has no such entry", name)
+		}
+	}
+
 	on := spec
 	on.TrackerTokenPlaceholder = true
-	onData, err := buildRuntimeArchiveLogging(on, openshellTestGitEmail, io.Discard, openshellPromptRender, nil, tracker)
-	if err != nil {
-		t.Fatalf("buildRuntimeArchiveLogging with the placeholder: %v", err)
-	}
-	onEntries := untarRuntime(t, onData)
+	onEntries := untarRuntime(t, openshellArchiveBytes(t, on, tracker))
 	for name, entry := range entries {
 		if name == runtimeTrackerToken {
 			continue
@@ -536,27 +580,6 @@ func TestTrackerSwitchOffKeepsTheRealTokenFile(t *testing.T) {
 			t.Errorf("archive entry %s differs from the placeholder spawn's; only the token may", name)
 		}
 	}
-}
-
-// runtimeCredentialName reports whether a runtime archive entry name is a file
-// that holds credentials or account data, or any file in the tracker's own
-// directory other than the token. A directory entry (a name ending in "/")
-// holds no data of its own.
-func runtimeCredentialName(name string) bool {
-	if strings.HasSuffix(name, "/") {
-		return false
-	}
-	base := path.Base(name)
-	switch {
-	case base == ".netrc", base == ".git-credentials", base == ".npmrc", base == ".pypirc",
-		base == "id_rsa", base == "id_ed25519", strings.HasPrefix(base, ".env"):
-		return true
-	}
-	if ext := path.Ext(base); ext == ".pem" || ext == ".key" {
-		return true
-	}
-	return strings.HasSuffix(name, ".docker/config.json") ||
-		strings.HasPrefix(name, path.Dir(runtimeTrackerToken)+"/")
 }
 
 // failingIssuer is an issuer that answers with an error while still returning a

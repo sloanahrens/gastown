@@ -965,7 +965,15 @@ func (b *openshellBackend) rollback(spec SpawnSpec, cause error, trace *SandboxT
 		// gone, which is the state the rollback is after, so not-found is
 		// success here as it is in Delete.
 		deleteErr = b.deleteSandbox(spec.Session)
-		return errors.Join(deleteErr, RemoveSandboxRecord(b.townRoot, spec.Session))
+		// The record goes with the sandbox, but a failure to remove it is not a
+		// failed rollback: the sandbox is already deleted, a record that
+		// survives is removed by the patrol scan, and a seat-end line that
+		// cannot be written is metering lost. Both are warned like a failed
+		// token revoke, never reported as the rollback failing (gt-pe98l).
+		if removeErr := RemoveSandboxRecord(b.townRoot, spec.Session); removeErr != nil {
+			b.warn("sandbox %s: removing its record while rolling back: %v", spec.Session, removeErr)
+		}
+		return deleteErr
 	})
 	if deleteErr == nil {
 		b.revokeSeat(SandboxRecord{Session: spec.Session, Rig: spec.Rig, Polecat: spec.Polecat})
