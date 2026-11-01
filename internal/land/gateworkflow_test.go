@@ -123,17 +123,28 @@ func gitFetchWords(run string) [][]string {
 }
 
 // shellCommands splits a run script into commands, each a list of words. A
-// backslash at a line end continues the line. Whitespace separates words,
-// quotes group a word and are dropped, and a newline, && || ; | & ( ) or a
-// backtick ends a command. A quote left open at the end of the run takes the
-// rest of the run as its word.
+// backslash at a line end continues the line. Whitespace separates words, and
+// a newline, && || ; | & ( ) or a backtick ends a command. Quotes group a word
+// and are dropped, but a double-quoted $( or backtick still opens a command,
+// and a quote opened inside it nests. A backslash escapes the next character,
+// or inside double quotes only " \ $ and a backtick. A quote left open at the
+// end of the run takes the rest of the run as its word.
 func shellCommands(run string) [][]string {
 	run = strings.ReplaceAll(run, "\\\n", " ")
 	var cmds [][]string
 	var words []string
 	var word strings.Builder
 	inWord := false
-	var quote rune
+	// open holds the frames the scanner is inside: a single quote, a double
+	// quote, a ( group or $( substitution, or a backtick substitution.
+	var open []rune
+	top := func() rune {
+		if len(open) == 0 {
+			return 0
+		}
+		return open[len(open)-1]
+	}
+	pop := func() { open = open[:len(open)-1] }
 	endWord := func() {
 		if inWord {
 			words = append(words, word.String())
@@ -148,20 +159,61 @@ func shellCommands(run string) [][]string {
 		}
 		words = nil
 	}
-	for _, r := range run {
-		switch {
-		case quote != 0:
-			if r == quote {
-				quote = 0
+	rs := []rune(run)
+	for i := 0; i < len(rs); i++ {
+		r := rs[i]
+		switch top() {
+		case '\'':
+			if r == '\'' {
+				pop()
 			} else {
 				word.WriteRune(r)
 			}
-		case r == '"' || r == '\'':
-			quote = r
+			continue
+		case '"':
+			switch {
+			case r == '\\' && i+1 < len(rs) && strings.ContainsRune("\"\\$`", rs[i+1]):
+				i++
+				word.WriteRune(rs[i])
+			case r == '"':
+				pop()
+			case r == '(' && i > 0 && rs[i-1] == '$':
+				open = append(open, '(')
+				endCmd()
+			case r == '`':
+				open = append(open, '`')
+				endCmd()
+			default:
+				word.WriteRune(r)
+			}
+			continue
+		}
+		switch {
+		case r == '\\' && i+1 < len(rs):
+			i++
+			word.WriteRune(rs[i])
 			inWord = true
+		case r == '\'' || r == '"':
+			open = append(open, r)
+			inWord = true
+		case r == '`':
+			if top() == '`' {
+				pop()
+			} else {
+				open = append(open, '`')
+			}
+			endCmd()
+		case r == '(':
+			open = append(open, '(')
+			endCmd()
+		case r == ')':
+			if top() == '(' {
+				pop()
+			}
+			endCmd()
 		case r == ' ' || r == '\t' || r == '\r':
 			endWord()
-		case r == '\n' || strings.ContainsRune(";&|()`", r):
+		case r == '\n' || r == ';' || r == '&' || r == '|':
 			endCmd()
 		default:
 			word.WriteRune(r)
@@ -249,6 +301,18 @@ func TestGateFetchProblemsNamesEveryHeadFetch(t *testing.T) {
 			steps: []gateStep{{Run: "x=$(git fetch --all)"}}, wantProblems: 1},
 		{name: "a fetch in backticks is read",
 			steps: []gateStep{{Run: "echo `git fetch --all`"}}, wantProblems: 1},
+		{name: "a fetch in a double-quoted command substitution is read",
+			steps: []gateStep{{Run: `x="$(git fetch --all)"`}}, wantProblems: 1},
+		{name: "a -C path with a space in a double-quoted substitution does not hide --all",
+			steps: []gateStep{{Run: `x="$(git -C "my repo" fetch --all)"`}}, wantProblems: 1},
+		{name: "a fetch in double-quoted backticks is read",
+			steps: []gateStep{{Run: "echo \"`git fetch --all`\""}}, wantProblems: 1},
+		{name: "an escaped quote does not hide a fetch after the quoted word",
+			steps: []gateStep{{Run: `echo "a\"" && git fetch --all`}}, wantProblems: 1},
+		{name: "a fetch named in single quotes is text, not a command",
+			steps: []gateStep{{Run: "echo 'git fetch --all'"}}},
+		{name: "a fetch named in double quotes is text, not a command",
+			steps: []gateStep{{Run: `echo "git fetch --all"`}}},
 		{name: "a fetch after a background operator is read",
 			steps: []gateStep{{Run: "make gate & git fetch --all"}}, wantProblems: 1},
 		{name: "a -C path with a named branch is allowed",
