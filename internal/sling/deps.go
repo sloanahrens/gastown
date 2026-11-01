@@ -78,14 +78,7 @@ type Deps struct {
 	PriorAttempt       func(beadsDir, issueID string) []string
 	Cook               func(formulaName, workDir, townRoot string) error
 	InstantiateFormula func(ctx context.Context, formulaName, beadID, title, hookWorkDir, townRoot string, extraVars []string) (*FormulaResult, error)
-	// FormulaFailed reports the error that a fatal formula step ended on,
-	// before the spawn is rolled back. The caller classifies it: a failure that
-	// is the town's load rather than the bead's — a bond that never got the
-	// town lock — gives back the respawn the spawn charged, since the bead is
-	// deferred and slung again rather than failed (gt-8d38p). Nil reports
-	// nothing.
-	FormulaFailed func(spawn *Spawn, err error)
-	HookDir       func(townRoot, beadID, workDir string) string
+	HookDir            func(townRoot, beadID, workDir string) string
 	// Hook hooks beadID to targetAgent. A non-nil fields is written in the same
 	// bd update as the hook, so the hook and the attachment fields cost one
 	// Dolt commit; nil writes the hook alone.

@@ -53,6 +53,14 @@ func TestDoltInitRigRemoteTownLocation(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			townRoot := townRootWithDoltEndpoint(t, "10.0.0.5", 3307)
+			// doltInitRig and InitRig draw the remote/local line from the same
+			// predicate on the same config, so pin that this town is remote by
+			// it. The fake result then stands for a real remote InitRig, which
+			// reports a running server and sends nothing to a local data
+			// directory (gt-l5s2m).
+			if !doltserver.DefaultConfig(townRoot).IsRemote() {
+				t.Fatal("the fixture town is not remote by the predicate InitRig branches on")
+			}
 			fakeInitRig := func(_, _ string) (doltserver.InitRigResult, error) {
 				return doltserver.InitRigResult{Created: created, ServerWasRunning: true}, nil
 			}
@@ -68,6 +76,18 @@ func TestDoltInitRigRemoteTownLocation(t *testing.T) {
 			}
 			if local := filepath.Join(townRoot, ".dolt-data"); strings.Contains(got, local) {
 				t.Errorf("output = %q, want no local data directory path for a remote town", got)
+			}
+			// The Data dir line is where a remote town's silence about its
+			// absent local directory is said out loud, so it is pinned for the
+			// create that prints one (gt-l5s2m).
+			if !created {
+				if strings.Contains(got, "Data dir:") {
+					t.Errorf("output = %q, want no Data dir line for a database that already exists", got)
+				}
+				return
+			}
+			if !strings.Contains(got, "Data dir: ") || !strings.Contains(got, "none (databases live on the remote Dolt)") {
+				t.Errorf("output = %q, want the Data dir line to say there is no local one", got)
 			}
 		})
 	}

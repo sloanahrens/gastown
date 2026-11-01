@@ -1278,8 +1278,17 @@ func (r *slingRun) runRigTarget(rigName, beadID, formulaName, townRoot string) e
 	if r.opts.ralph {
 		mode = "ralph"
 	}
-	_, err := r.executeSling(r.rigTargetParams(rigName, beadID, formulaName, townRoot, mode))
+	result, err := r.executeSling(r.rigTargetParams(rigName, beadID, formulaName, townRoot, mode))
 	if err != nil {
+		// The engine rolled its spawn back, but a bond that never got the town
+		// lock spent a respawn the deferral should not keep: the bead is slung
+		// again next tick rather than failed (gt-8d38p). The result carries the
+		// spawn even on failure, unless the spawn itself failed: then there is
+		// no count to give back. This is the engine's give-back; run's own
+		// deferred rollback makes the matching one for the inline targets.
+		if result != nil && result.SpawnInfo != nil {
+			cmdSpawn(result.SpawnInfo).giveBackBondLockRespawn(err)
+		}
 		return err
 	}
 	if !r.opts.noBoot {

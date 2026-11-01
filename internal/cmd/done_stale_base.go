@@ -3,6 +3,9 @@ package cmd
 import (
 	"fmt"
 	"io"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/git"
 )
 
 // staleBaseThreshold is how many commits origin/main may carry that the
@@ -10,9 +13,11 @@ import (
 // that the warning would be noise on every submission.
 const staleBaseThreshold = 25
 
-// staleBaseGit is git's surface for the stale-base check: the one read it
-// makes. *git.Git in production, a recorder in a test.
+// staleBaseGit is git's surface for the stale-base check: the bounded fetch
+// that refreshes origin/main and the read it makes. *git.Git in production, a
+// recorder in a test.
 type staleBaseGit interface {
+	FetchRefspecWithTimeout(remote, refspec string, timeout time.Duration) error
 	CountCommitsBehind(ref string) (int, error)
 }
 
@@ -31,7 +36,14 @@ func staleBaseWarning(behind, threshold int) string {
 
 // warnStaleBase writes the stale-base warning for g to w. A count that fails
 // prints nothing: the warning is advisory and never stops a submission.
+//
+// origin/main is refreshed first, bounded like every read-only remote query:
+// counted against the last fetch, the warning would understate a stale base —
+// or miss one entirely — because done.Run fetches only after this runs. A
+// fetch that fails leaves the existing ref in place, which is the best
+// question the branch can still be asked.
 func warnStaleBase(w io.Writer, g staleBaseGit) {
+	_ = g.FetchRefspecWithTimeout("origin", "+refs/heads/main:refs/remotes/origin/main", git.RemoteQueryTimeout)
 	behind, err := g.CountCommitsBehind("origin/main")
 	if err != nil {
 		return

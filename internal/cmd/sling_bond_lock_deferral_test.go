@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -66,6 +68,64 @@ func TestSlingBondLockTimeoutGivesBackTheRespawn(t *testing.T) {
 			}
 			if got := respawnCountOf(t, townRoot, bead); got != tc.want {
 				t.Errorf("respawn count after the failed sling = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBondLockGiveBackResolvesTheTown pins gt-ymw7d: a spawn that recorded no
+// town — a reused seat, a forced sling — resolves it through the lookup the
+// production path passes, and a lookup that fails leaves the count spent with
+// a warning rather than passing as a give-back that had nothing to do.
+func TestBondLockGiveBackResolvesTheTown(t *testing.T) {
+	t.Parallel()
+	const bead = "gt-bond-town"
+	for _, tc := range []struct {
+		name    string
+		findErr error
+		want    int
+		// wantWarn is whether the failed lookup must be reported: a give-back
+		// that could not be made is not a give-back that had nothing to do.
+		wantWarn bool
+	}{
+		{name: "the town is found", want: 1},
+		{name: "the town cannot be found", findErr: errors.New("no town"), want: 2, wantWarn: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			// One death already on the bead: a give-back removes the spawn's
+			// count and leaves that one, so a no-op reads as 2.
+			if _, err := polecat.RecordBeadRespawn(townRoot, bead); err != nil {
+				t.Fatalf("RecordBeadRespawn: %v", err)
+			}
+			mark, err := polecat.RecordBeadRespawnMark(townRoot, bead)
+			if err != nil {
+				t.Fatalf("RecordBeadRespawnMark: %v", err)
+			}
+
+			findTown := func() (string, error) {
+				if tc.findErr != nil {
+					return "", tc.findErr
+				}
+				return townRoot, nil
+			}
+			s := &SpawnedPolecatInfo{HookBead: bead, respawnMark: mark}
+			var warn bytes.Buffer
+
+			s.giveBackBondLockRespawnWith(findTown, &warn, fmt.Errorf("bonding: %w", ErrBondLockTimeout))
+
+			if got := respawnCountOf(t, townRoot, bead); got != tc.want {
+				t.Errorf("respawn count after the give-back = %d, want %d", got, tc.want)
+			}
+			if gotWarn := warn.Len() > 0; gotWarn != tc.wantWarn {
+				t.Errorf("warning = %q, want printed %v", warn.String(), tc.wantWarn)
+			} else if tc.wantWarn {
+				for _, want := range []string{bead, "find the town root", tc.findErr.Error()} {
+					if !strings.Contains(warn.String(), want) {
+						t.Errorf("warning = %q, want it to name %q", warn.String(), want)
+					}
+				}
 			}
 		})
 	}
