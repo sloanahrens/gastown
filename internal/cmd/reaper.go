@@ -951,7 +951,7 @@ func purgeReaperDatabase(dbName string, purgeAge, mailAge time.Duration) (*reape
 // writer failures come back as errors, wrapped with what failed and joined by
 // reportPurgeResponse with the database name, so a purge that never ran fails
 // the command instead of exiting 0 (gt-2wesb). A dry run keeps the older
-// behaviour: those branches print and return no error, because reaperWriter
+// behavior: those branches print and return no error, because reaperWriter
 // itself is nil for a dry run and a preview that cannot reach a database does
 // not have a partial deletion to report.
 func purgeReaperDatabaseWith(dbName string, dryRun bool, stderr io.Writer, s reaperPurgeSession) (*reaper.PurgeResult, error) {
@@ -971,7 +971,7 @@ func purgeReaperDatabaseWith(dbName string, dryRun bool, stderr io.Writer, s rea
 		}
 		return nil, fmt.Errorf("connect error: %w", err)
 	}
-	defer s.close(db)
+	defer func() { _ = s.close(db) }()
 
 	if ok, err := s.hasSchema(db); err != nil {
 		if dryRun {
