@@ -47,11 +47,73 @@ func cwdAt(dir string) func() (string, error) {
 // town serves on, so a test that is not about the endpoint is not refused by it.
 const testScratchPort = "13307"
 
-// scratchServerEnv is the environment of the child bd a test drives unless the test is about the Dolt
-// endpoint: a throwaway server named the way testutil names one, by a port and no host
-// (gt-p85pw.115).
+// testDoltHost is the name a test child reaches this machine's Dolt server on inside its container.
+const testDoltHost = "host.docker.internal"
+
+// The two spellings of one build's `bd version` line: the host's build stamps its branch before the
+// commit and a cross-compiled build of the same commit does not (gt-p85pw.117).
+const (
+	forkHostVersion      = "bd version 1.2.2 (688ff7d2: master@688ff7d249e9) schema<=66\n"
+	forkContainerVersion = "bd version 1.2.2 (688ff7d2: 688ff7d249e9) schema<=66\n"
+)
+
+// scratchServerEnv is the recording environment of the child bd a test drives unless the test is
+// about the Dolt endpoint: a throwaway server named the way testutil names one, by a port and no
+// host (gt-p85pw.115).
 func scratchServerEnv() []string {
 	return []string{"PATH=/usr/bin", "BEADS_DOLT_SERVER_PORT=" + testScratchPort}
+}
+
+// testChildEnv is the environment a child inside the container gets for env, built by the production
+// filter, so the guard is driven by the environment a real container would be given (gt-p85pw.117).
+func testChildEnv(env []string) []string {
+	return endpointEnv(env)
+}
+
+// answerVersion returns run with the container's bd version answered, since the guard proves the
+// build before it asks anything else (gt-p85pw.117).
+func answerVersion(run Runner) Runner {
+	return func(dir string, args []string) ([]byte, int, error) {
+		if len(args) == 1 && args[0] == "version" {
+			return []byte(forkContainerVersion), 0, nil
+		}
+		return run(dir, args)
+	}
+}
+
+// atWork resolves the workspace bd makes under the mounted directory.
+func atWork(string, []string) (string, error) { return filepath.Join(workDir, ".beads"), nil }
+
+// noWorkspace answers as bd does in a fresh container: it resolves no workspace at all.
+func noWorkspace(string, []string) (string, error) { return "", nil }
+
+// testChild returns the child bd a test drives: its runs are run's with the container's version
+// answered, its environment is the one a container gets, where answers for bd where, and the host bd
+// is the build the container's is.
+func testChild(run Runner, where Resolver) childBD {
+	return childWith(run, scratchServerEnv(), where)
+}
+
+// childWith is testChild with the recording environment a test is about named.
+func childWith(run Runner, env []string, where Resolver) childBD {
+	return childBD{
+		Run:         answerVersion(run),
+		Env:         func(string) []string { return testChildEnv(env) },
+		Where:       where,
+		HostVersion: func() ([]byte, error) { return []byte(forkHostVersion), nil },
+	}
+}
+
+// childWithRawEnv is childWith with env handed to the resolver as it stands, so a test drives a pin
+// the container filter would drop and proves the guard decides by the workspace resolved, never by
+// the pin (gt-p85pw.117).
+func childWithRawEnv(run Runner, env []string, where Resolver) childBD {
+	return childBD{
+		Run:         answerVersion(run),
+		Env:         func(string) []string { return env },
+		Where:       where,
+		HostVersion: func() ([]byte, error) { return []byte(forkHostVersion), nil },
+	}
 }
 
 // initMakesWorkspace returns run with the step a real bd init takes when it exits 0: the .beads
@@ -69,7 +131,7 @@ func initMakesWorkspace(run Runner) Runner {
 
 // guardBD is the bd the guard tests drive: every run answers exit 0, and an init makes the .beads
 // directory in the directory it runs in, as bd init does. A noWorkspace guardBD answers the init
-// without making anything, which is the bd that ignores the pinned environment.
+// without making anything, which is a bd that writes nowhere the recorder can see.
 type guardBD struct {
 	dirs        []string
 	args        [][]string
@@ -87,36 +149,16 @@ func (g *guardBD) Run(dir string, args []string) ([]byte, int, error) {
 	return nil, 0, nil
 }
 
-// pinnedChild returns the child bd a test drives: its runs are run's, and bd where reports the
-// workspace the recorder's environment pins for the directory it asks about, or fallback when
-// nothing is pinned, which is where the fork's walk up from the directory lands. The environment is
-// the production one, so a guard that no longer pins its workspace refuses the scratch a real bd
-// would have resolved there.
-func pinnedChild(run Runner, fallback string) childBD {
-	base := scratchServerEnv()
-	return childBD{
-		Run: run,
-		Env: func(dir string) []string { return childEnv(base, dir) },
-		Where: func(dir string, env []string) (string, error) {
-			if values := envEntries(env)["BEADS_DIR"]; len(values) == 1 {
-				return values[0], nil
-			}
-			return fallback, nil
-		},
-	}
-}
-
 // childFor returns the child factory runIn takes for a child that answers every call the same way.
-func childFor(child childBD) func(bin string) childBD {
-	return func(string) childBD { return child }
+func childFor(child childBD) func(options) childBD {
+	return func(options) childBD { return child }
 }
 
 // passingChild is the child bd a runIn test drives when the guard is not what the test is about:
 // every run answers exit 0, an init makes the workspace the guard checks for, and bd where reports
-// the workspace the recorder pinned for the directory, or one outside the scratch when nothing is
-// pinned.
+// the workspace bd makes under the mounted directory.
 func passingChild(bd *fakeBD) childBD {
-	return pinnedChild(initMakesWorkspace(bd.Run), "/nowhere/.beads")
+	return testChild(initMakesWorkspace(bd.Run), atWork)
 }
 
 // TestGuardRunRefusesWhatItCannotCheck: a working directory the process cannot name, or a marker it
@@ -126,7 +168,7 @@ func TestGuardRunRefusesWhatItCannotCheck(t *testing.T) {
 	t.Run("a working directory it cannot name", func(t *testing.T) {
 		t.Parallel()
 		unnamed := func() (string, error) { return "", errors.New("getwd: i/o error") }
-		err := guardRun(unnamed, filepath.Join(tempDir(t), "scratch"), pinnedChild(okRun, "/nowhere/.beads"))
+		err := guardRun(unnamed, filepath.Join(tempDir(t), "scratch"), testChild(okRun, atWork))
 		if err == nil || !strings.Contains(err.Error(), "i/o error") {
 			t.Fatalf("guardRun with no working directory = %v, want the getwd failure reported", err)
 		}
@@ -139,22 +181,21 @@ func TestGuardRunRefusesWhatItCannotCheck(t *testing.T) {
 		if err := os.Symlink(".beads", filepath.Join(tree, ".beads")); err != nil {
 			t.Fatalf("make the marker loop: %v", err)
 		}
-		err := guardRun(cwdAt(tree), filepath.Join(tempDir(t), "scratch"), pinnedChild(okRun, "/nowhere/.beads"))
+		err := guardRun(cwdAt(tree), filepath.Join(tempDir(t), "scratch"), testChild(okRun, atWork))
 		if err == nil || !strings.Contains(err.Error(), "check for a beads workspace") {
 			t.Fatalf("guardRun over an unreadable marker = %v, want the read failure reported", err)
 		}
 	})
 }
 
-// TestGuardRunPassesAScratchThatOwnsItsWorkspace: bd resolves the workspace through the environment
-// the recorder pins, so a scratch whose answer lands inside it passes, and the workspace the guard
-// made for the check is dropped and removed again (gt-p85pw.115).
+// TestGuardRunPassesAScratchThatOwnsItsWorkspace: bd resolves the workspace under the mounted
+// directory, so a scratch whose answer lands there passes, and the workspace the guard made for the
+// check is dropped and removed again (gt-p85pw.115, gt-p85pw.117).
 func TestGuardRunPassesAScratchThatOwnsItsWorkspace(t *testing.T) {
 	t.Parallel()
 	bd := &guardBD{}
 	scratch := filepath.Join(tempDir(t), "scratch")
-	outside := filepath.Join(tempDir(t), ".beads") // where a walk up from the scratch would land
-	if err := guardRun(safeCwd(t), scratch, pinnedChild(bd.Run, outside)); err != nil {
+	if err := guardRun(safeCwd(t), scratch, testChild(bd.Run, atWork)); err != nil {
 		t.Fatalf("guardRun with a scratch that owns its workspace = %v, want it accepted", err)
 	}
 	if len(bd.args) != 2 || bd.args[0][0] != "init" || bd.args[1][0] != "sql" {
@@ -174,8 +215,8 @@ func TestGuardRunPassesAScratchThatOwnsItsWorkspace(t *testing.T) {
 }
 
 // TestGuardRunPassesAWorkingDirectoryBeneathAWorkspace: work lives under the town, so a recorder
-// started beneath a workspace passes as long as its scratch owns the workspace bd resolves there
-// (gt-p85pw.116).
+// started beneath a workspace passes as long as bd in the container resolves a workspace under the
+// mounted directory (gt-p85pw.116).
 func TestGuardRunPassesAWorkingDirectoryBeneathAWorkspace(t *testing.T) {
 	t.Parallel()
 	town := tempDir(t)
@@ -187,7 +228,7 @@ func TestGuardRunPassesAWorkingDirectoryBeneathAWorkspace(t *testing.T) {
 	}
 	bd := &guardBD{}
 	scratch := filepath.Join(work, "scratch")
-	if err := guardRun(cwdAt(work), scratch, pinnedChild(bd.Run, townWorkspace)); err != nil {
+	if err := guardRun(cwdAt(work), scratch, testChild(bd.Run, atWork)); err != nil {
 		t.Fatalf("guardRun beneath a workspace = %v, want it accepted", err)
 	}
 	if len(bd.args) != 2 || bd.args[0][0] != "init" || bd.args[1][0] != "sql" {
@@ -241,7 +282,7 @@ func TestGuardRunRefusesAWorkingDirectoryThatIsAWorkspaceRoot(t *testing.T) {
 			cwd, marker := tc.root(t)
 			before := readFile(t, marker)
 			bd := &guardBD{}
-			err := guardRun(cwdAt(cwd), filepath.Join(tempDir(t), "scratch"), pinnedChild(bd.Run, "/nowhere/.beads"))
+			err := guardRun(cwdAt(cwd), filepath.Join(tempDir(t), "scratch"), testChild(bd.Run, atWork))
 			if err == nil || !strings.Contains(err.Error(), "workspace root") {
 				t.Fatalf("guardRun in %s = %v, want it refused", tc.name, err)
 			}
@@ -281,21 +322,16 @@ func TestGuardRunResolvesARelativeScratchAgainstTheWorkingDirectory(t *testing.T
 		where Resolver
 		want  string // empty: the guard accepts
 	}{
-		{"bd resolves a workspace inside the scratch", func(dir string, _ []string) (string, error) {
-			return filepath.Join(dir, ".beads"), nil
-		}, ""},
-		{"bd resolves the town's workspace", func(string, []string) (string, error) {
-			return townWorkspace, nil
-		}, "outside the scratch"},
+		{"bd resolves a workspace inside the mounted directory", atWork, ""},
+		{"bd resolves no workspace yet", noWorkspace, ""},
+		{"bd resolves a workspace outside it", func(string, []string) (string, error) {
+			return "/town/.beads", nil
+		}, "outside /work"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			bd := &guardBD{}
-			child := childBD{
-				Run:   bd.Run,
-				Env:   func(dir string) []string { return childEnv(scratchServerEnv(), dir) },
-				Where: tc.where,
-			}
+			child := testChild(bd.Run, tc.where)
 			err := guardRun(cwdAt(work), "scratch", child)
 			if tc.want != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -316,7 +352,9 @@ func TestGuardRunResolvesARelativeScratchAgainstTheWorkingDirectory(t *testing.T
 
 // TestGuardRunRefusesTheTownDoltServer: the scratch's bd init creates a database, so an environment
 // that aims it at the town's Dolt server, or at no server the guard can vouch for, is refused before
-// any bd call, and the scratch directory is not even made (gt-p85pw.115).
+// any bd call, and the scratch directory is not even made (gt-p85pw.115). Only the BEADS_DOLT_ names
+// reach the container, so a server named under the fork's GT_DOLT_ names is no server at all and is
+// refused as one (gt-p85pw.117).
 func TestGuardRunRefusesTheTownDoltServer(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -326,9 +364,8 @@ func TestGuardRunRefusesTheTownDoltServer(t *testing.T) {
 	}{
 		{"the production port", []string{"BEADS_DOLT_SERVER_PORT=3307"}, "town's Dolt server"},
 		{"the production port under bd's other name", []string{"BEADS_DOLT_PORT=3307"}, "town's Dolt server"},
-		{"the production port of the fork", []string{"GT_DOLT_PORT=3307"}, "town's Dolt server"},
+		{"the production port under a name the container never sees", []string{"GT_DOLT_PORT=3307"}, "no Dolt server is named"},
 		{"a host that is not this machine", []string{"BEADS_DOLT_SERVER_HOST=dolt.example", "BEADS_DOLT_SERVER_PORT=" + testScratchPort}, "not this machine"},
-		{"the host of the fork", []string{"GT_DOLT_HOST=dolt.example", "BEADS_DOLT_SERVER_PORT=" + testScratchPort}, "not this machine"},
 		{"a port that is not a port", []string{"BEADS_DOLT_SERVER_PORT=dolt"}, "does not name a port"},
 		{"no server named at all", nil, "no Dolt server is named"},
 	}
@@ -336,11 +373,7 @@ func TestGuardRunRefusesTheTownDoltServer(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			bd := &guardBD{}
-			child := childBD{
-				Run:   bd.Run,
-				Env:   func(dir string) []string { return childEnv(tc.env, dir) },
-				Where: func(dir string, _ []string) (string, error) { return filepath.Join(dir, ".beads"), nil },
-			}
+			child := childWith(bd.Run, tc.env, atWork)
 			scratch := filepath.Join(tempDir(t), "scratch")
 			err := guardRun(safeCwd(t), scratch, child)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -364,11 +397,7 @@ func TestGuardRunRefusesThePortTheTownItselfNames(t *testing.T) {
 	town := tempDir(t)
 	mustWrite(t, filepath.Join(town, "mayor", "town.json"), `{"name":"temp","dolt":{"port":13307}}`)
 	bd := &guardBD{}
-	child := childBD{
-		Run:   bd.Run,
-		Env:   func(dir string) []string { return childEnv([]string{"BEADS_DOLT_SERVER_PORT=13307"}, dir) },
-		Where: func(dir string, _ []string) (string, error) { return filepath.Join(dir, ".beads"), nil },
-	}
+	child := childWith(bd.Run, []string{"BEADS_DOLT_SERVER_PORT=13307"}, atWork)
 	err := guardRun(cwdAt(town), filepath.Join(town, "scratch"), child)
 	if err == nil || !strings.Contains(err.Error(), "port 13307") {
 		t.Fatalf("guardRun in a town that serves Dolt on 13307 = %v, want its port refused", err)
@@ -379,10 +408,9 @@ func TestGuardRunRefusesThePortTheTownItselfNames(t *testing.T) {
 }
 
 // TestGuardRunRefusesAScratchItsInitMadeNoWorkspaceIn: bd where's answer is bd's own report, so a bd
-// that answers with the pinned workspace but wrote nothing to the scratch is refused before it is
-// asked, on the marker it did not make. A marker above the scratch is the town's workspace, which the
-// scratch does not own, and a marker it cannot read is a refusal rather than an absent one
-// (gt-p85pw.115).
+// that answers with the mounted workspace but wrote nothing to the scratch is refused on the marker
+// it did not make. A marker above the scratch is the town's workspace, which the scratch does not
+// own, and a marker it cannot read is a refusal rather than an absent one (gt-p85pw.115).
 func TestGuardRunRefusesAScratchItsInitMadeNoWorkspaceIn(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -415,21 +443,9 @@ func TestGuardRunRefusesAScratchItsInitMadeNoWorkspaceIn(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			bd := &guardBD{noWorkspace: true} // answers exit 0 to init, and makes nothing
-			asked := false
-			child := childBD{
-				Run: bd.Run,
-				Env: func(dir string) []string { return childEnv(scratchServerEnv(), dir) },
-				Where: func(dir string, _ []string) (string, error) {
-					asked = true // the pin's answer, which a bd that ignored it would echo
-					return filepath.Join(dir, ".beads"), nil
-				},
-			}
-			err := guardRun(safeCwd(t), tc.tree(t), child)
+			err := guardRun(safeCwd(t), tc.tree(t), testChild(bd.Run, atWork))
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("guardRun over an init that made nothing = %v, want an error naming %q", err, tc.want)
-			}
-			if asked {
-				t.Error("bd where was asked about a workspace the init never made")
 			}
 			if len(bd.args) != 1 || bd.args[0][0] != "init" {
 				t.Errorf("bd ran %v, want only the init that made nothing", bd.args)
@@ -438,36 +454,32 @@ func TestGuardRunRefusesAScratchItsInitMadeNoWorkspaceIn(t *testing.T) {
 	}
 }
 
-// TestGuardRunRefusesAScratchThatResolvesOutsideItself: a bd that does not resolve the scratch's own
-// workspace, however the environment is pinned, is refused before anything is recorded, and the
-// workspace it walked up to is left untouched (gt-p85pw.115).
-func TestGuardRunRefusesAScratchThatResolvesOutsideItself(t *testing.T) {
+// TestGuardRunRefusesAWorkspaceTheContainerResolvesOutsideWork: a container whose bd resolves a
+// workspace outside the mounted directory is refused before the scratch's init runs, and the
+// workspace bd walked up to is left untouched (gt-p85pw.117).
+func TestGuardRunRefusesAWorkspaceTheContainerResolvesOutsideWork(t *testing.T) {
 	t.Parallel()
 	town := tempDir(t)
 	metadata := filepath.Join(town, ".beads", "metadata.json")
 	mustWrite(t, metadata, `{"dolt_database":"hq"}`)
 	before := readFile(t, metadata)
 	bd := &guardBD{}
-	child := childBD{
-		Run:   bd.Run,
-		Env:   func(dir string) []string { return childEnv(scratchServerEnv(), dir) },
-		Where: func(string, []string) (string, error) { return filepath.Join(town, ".beads"), nil },
-	}
+	child := testChild(bd.Run, func(string, []string) (string, error) { return "/town/.beads", nil })
 	err := guardRun(safeCwd(t), filepath.Join(town, "scratch"), child)
-	if err == nil || !strings.Contains(err.Error(), "outside the scratch") {
-		t.Fatalf("guardRun over a scratch whose workspace is the town's = %v, want it refused", err)
+	if err == nil || !strings.Contains(err.Error(), "outside /work") {
+		t.Fatalf("guardRun over a container that resolves the town's workspace = %v, want it refused", err)
 	}
-	if len(bd.args) != 1 || bd.args[0][0] != "init" {
-		t.Errorf("bd ran %v, want only the scratch's init after a refused answer", bd.args)
+	if len(bd.args) != 0 {
+		t.Errorf("bd ran %v, want no bd run after a refused answer", bd.args)
 	}
 	if after := readFile(t, metadata); after != before {
 		t.Errorf("%s = %q after the refused run, want %q", metadata, after, before)
 	}
 }
 
-// TestGuardRunRefusesAResolverThatDoesNotNameAWorkspaceInside: an answer the recorder cannot use as
-// proof of a workspace inside the scratch is a refusal, not a guess (gt-p85pw.115).
-func TestGuardRunRefusesAResolverThatDoesNotNameAWorkspaceInside(t *testing.T) {
+// TestGuardRunRefusesAResolverThatDoesNotAnswer: an answer the recorder cannot use as proof of a
+// workspace inside workDir is a refusal, not a guess (gt-p85pw.117).
+func TestGuardRunRefusesAResolverThatDoesNotAnswer(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name  string
@@ -477,24 +489,19 @@ func TestGuardRunRefusesAResolverThatDoesNotNameAWorkspaceInside(t *testing.T) {
 		{"an error", func(string, []string) (string, error) {
 			return "", errors.New("bd where: exit status 1")
 		}, "ask bd which workspace"},
-		{"an empty answer", func(string, []string) (string, error) { return "", nil }, "named no workspace"},
-		{"a path that is not absolute", func(string, []string) (string, error) { return ".beads", nil }, "not an absolute path"},
+		{"a path that is not absolute", func(string, []string) (string, error) { return ".beads", nil }, "outside /work"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			bd := &guardBD{}
-			child := childBD{
-				Run:   bd.Run,
-				Env:   func(dir string) []string { return childEnv(scratchServerEnv(), dir) },
-				Where: tc.where,
-			}
+			child := testChild(bd.Run, tc.where)
 			err := guardRun(safeCwd(t), filepath.Join(tempDir(t), "scratch"), child)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("guardRun over %s = %v, want an error naming %q", tc.name, err, tc.want)
 			}
-			if len(bd.args) != 1 || bd.args[0][0] != "init" {
-				t.Errorf("bd ran %v, want only the scratch's init after a refused answer", bd.args)
+			if len(bd.args) != 0 {
+				t.Errorf("bd ran %v, want no bd run after a refused answer", bd.args)
 			}
 		})
 	}
@@ -535,14 +542,10 @@ func TestGuardRunRefusesAScratchBehindASymlink(t *testing.T) {
 			t.Parallel()
 			bd := &guardBD{}
 			resolved := false
-			child := childBD{
-				Run: bd.Run,
-				Env: func(dir string) []string { return childEnv(scratchServerEnv(), dir) },
-				Where: func(dir string, _ []string) (string, error) {
-					resolved = true
-					return filepath.Join(dir, ".beads"), nil
-				},
-			}
+			child := testChild(bd.Run, func(string, []string) (string, error) {
+				resolved = true
+				return filepath.Join(workDir, ".beads"), nil
+			})
 			err := guardRun(safeCwd(t), tc.scratch(t), child)
 			if err == nil || !strings.Contains(err.Error(), "symlink") {
 				t.Fatalf("guardRun over %s = %v, want the symlink refused", tc.name, err)
@@ -562,7 +565,7 @@ func TestGuardRunRefusesAWorkingDirectoryItCannotResolve(t *testing.T) {
 	if err := os.Symlink(loop, loop); err != nil {
 		t.Fatalf("make the symlink loop: %v", err)
 	}
-	err := guardRun(cwdAt(loop), filepath.Join(tempDir(t), "scratch"), pinnedChild(okRun, "/nowhere/.beads"))
+	err := guardRun(cwdAt(loop), filepath.Join(tempDir(t), "scratch"), testChild(okRun, atWork))
 	if err == nil || !strings.Contains(err.Error(), "resolve") {
 		t.Fatalf("guardRun from an unresolvable working directory = %v, want the resolve failure reported", err)
 	}
@@ -573,29 +576,9 @@ func TestGuardRunRefusesAWorkingDirectoryItCannotResolve(t *testing.T) {
 func TestGuardRunRefusesAScratchPathItCannotCheck(t *testing.T) {
 	t.Parallel()
 	scratch := filepath.Join(tempDir(t), strings.Repeat("a", 300), "scratch")
-	err := guardRun(safeCwd(t), scratch, pinnedChild(okRun, "/nowhere/.beads"))
+	err := guardRun(safeCwd(t), scratch, testChild(okRun, atWork))
 	if err == nil || !strings.Contains(err.Error(), "check") {
 		t.Fatalf("guardRun over a path it cannot stat = %v, want the check failure reported", err)
-	}
-}
-
-// TestGuardRunRefusesAWorkspaceItCannotResolve: an answer whose path cannot be resolved is refused,
-// since the recorder cannot prove it sits inside the scratch.
-func TestGuardRunRefusesAWorkspaceItCannotResolve(t *testing.T) {
-	t.Parallel()
-	loop := filepath.Join(tempDir(t), "loop")
-	if err := os.Symlink(loop, loop); err != nil {
-		t.Fatalf("make the symlink loop: %v", err)
-	}
-	bd := &guardBD{}
-	child := childBD{
-		Run:   bd.Run,
-		Env:   func(dir string) []string { return childEnv(scratchServerEnv(), dir) },
-		Where: func(string, []string) (string, error) { return filepath.Join(loop, ".beads"), nil },
-	}
-	err := guardRun(safeCwd(t), filepath.Join(tempDir(t), "scratch"), child)
-	if err == nil || !strings.Contains(err.Error(), "resolve the workspace") {
-		t.Fatalf("guardRun over a workspace it cannot resolve = %v, want the resolve failure reported", err)
 	}
 }
 
@@ -620,7 +603,7 @@ func TestGuardRunReportsAFailedScratchWorkspace(t *testing.T) {
 				}
 				return nil, 0, nil
 			}}
-			err := guardRun(safeCwd(t), filepath.Join(tempDir(t), "scratch"), pinnedChild(initMakesWorkspace(bd.Run), "/nowhere/.beads"))
+			err := guardRun(safeCwd(t), filepath.Join(tempDir(t), "scratch"), testChild(initMakesWorkspace(bd.Run), atWork))
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("guardRun over a failed %s = %v, want an error naming %q", tc.name, err, tc.want)
 			}
@@ -634,7 +617,7 @@ func TestGuardRunRefusesAScratchItCannotMake(t *testing.T) {
 	t.Parallel()
 	file := filepath.Join(tempDir(t), "file")
 	mustWrite(t, file, "not a directory\n")
-	err := guardRun(safeCwd(t), filepath.Join(file, "scratch"), pinnedChild(okRun, "/nowhere/.beads"))
+	err := guardRun(safeCwd(t), filepath.Join(file, "scratch"), testChild(okRun, atWork))
 	if err == nil || !strings.Contains(err.Error(), "make the scratch directory") {
 		t.Fatalf("guardRun with a scratch under a file = %v, want the directory it cannot make named", err)
 	}
@@ -705,33 +688,29 @@ func TestRunRefusesAFixtureMissingABead(t *testing.T) {
 	}
 }
 
-// TestRunRefusesAScratchThatBelongsToAnotherWorkspace: bd walking up from the copy it runs in would
-// rewrite the workspace above it, so a scratch whose workspace bd resolves elsewhere is refused
-// before anything is recorded, and that workspace is left untouched (gt-p85pw.103, gt-p85pw.115).
-func TestRunRefusesAScratchThatBelongsToAnotherWorkspace(t *testing.T) {
+// TestRunRefusesAScratchWhoseContainerResolvesAnotherWorkspace: a container whose bd resolves a
+// workspace outside the mounted directory is refused before anything is recorded, and that
+// workspace is left untouched (gt-p85pw.115, gt-p85pw.117).
+func TestRunRefusesAScratchWhoseContainerResolvesAnotherWorkspace(t *testing.T) {
 	t.Parallel()
 	town := tempDir(t)
 	metadata := filepath.Join(town, ".beads", "metadata.json")
 	mustWrite(t, metadata, `{"dolt_database":"hq"}`)
 	before := readFile(t, metadata)
 	bd := &fakeBD{out: okBD}
-	child := childBD{
-		Run:   initMakesWorkspace(bd.Run),
-		Env:   func(dir string) []string { return childEnv(scratchServerEnv(), dir) },
-		Where: func(string, []string) (string, error) { return filepath.Join(town, ".beads"), nil },
-	}
+	child := testChild(initMakesWorkspace(bd.Run), func(string, []string) (string, error) { return "/town/.beads", nil })
 	scratch := filepath.Join(town, "scratch")
 	out := filepath.Join(tempDir(t), "golden")
 	var stdout, stderr bytes.Buffer
 	args := []string{"-fixture", writeFixture(t, fixtureIDs...), "-scratch", scratch, "-out", out}
 	if code := runIn(safeCwd(t), childFor(child), args, &stdout, &stderr); code != 1 {
-		t.Fatalf("run over a scratch whose workspace is the town's = %d, want 1\nstderr: %s", code, stderr.String())
+		t.Fatalf("run over a container that resolves the town's workspace = %d, want 1\nstderr: %s", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "outside the scratch") {
-		t.Errorf("stderr = %q, want the workspace outside the scratch named", stderr.String())
+	if !strings.Contains(stderr.String(), "outside /work") {
+		t.Errorf("stderr = %q, want the workspace outside /work named", stderr.String())
 	}
-	if inits := callIndices(bd, "init"); len(bd.args) != len(inits) {
-		t.Errorf("bd ran %v, want only the guard's init after a refused answer", bd.args)
+	if len(bd.args) != 0 {
+		t.Errorf("bd ran %v, want no bd run after a refused answer", bd.args)
 	}
 	if after := readFile(t, metadata); after != before {
 		t.Errorf("%s = %q after the refused run, want %q", metadata, after, before)
@@ -843,5 +822,35 @@ func TestRunRefusesAWorkingDirectoryThatIsAWorkspaceRoot(t *testing.T) {
 	}
 	if entries, err := os.ReadDir(out); err == nil && len(entries) > 0 {
 		t.Errorf("goldens written under a workspace: %v", entries)
+	}
+}
+
+// TestRunNamesARelativeScratchByTheWorkingDirectory: docker mounts each copy by its host path, so a
+// relative -scratch is made absolute against the working directory the run started in, and every bd
+// call runs in a copy under that directory, never under a path the process's own directory would
+// resolve (gt-p85pw.117).
+func TestRunNamesARelativeScratchByTheWorkingDirectory(t *testing.T) {
+	t.Parallel()
+	town := tempDir(t)
+	bd := &fakeBD{out: echoBD}
+	out := filepath.Join(tempDir(t), "golden")
+	var stdout, stderr bytes.Buffer
+	args := []string{"-fixture", writeFixture(t, fixtureIDs...), "-scratch", "scratch", "-out", out}
+	if code := runIn(cwdAt(town), childFor(passingChild(bd)), args, &stdout, &stderr); code != 0 {
+		t.Fatalf("run with a relative scratch = %d, want 0\nstderr: %s", code, stderr.String())
+	}
+	under := filepath.Join(town, "scratch")
+	ran := 0
+	for _, dir := range bd.dirs {
+		if dir == "" {
+			continue
+		}
+		ran++
+		if !isWithin(under, dir) {
+			t.Errorf("bd ran in %s, want a copy under the scratch %s named from the working directory", dir, under)
+		}
+	}
+	if ran == 0 {
+		t.Fatal("bd ran in no copy, want the rows run in one")
 	}
 }

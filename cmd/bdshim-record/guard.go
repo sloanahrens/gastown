@@ -19,38 +19,34 @@ import (
 // doltserver pulls the daemon's packages into this command). No recording names it (gt-p85pw.115).
 const productionDoltPort = 3307
 
-// endpointHostVars and endpointPortVars are the variables bd reads to find the Dolt server a run
-// connects to: the three internal/config exports to the bd gt starts (DoltEndpointEnvKeys), and the
-// GT_DOLT_ pair the fork also reads (testutil's scratch Dolt names its container by GT_DOLT_PORT).
-// The recording environment passes them through untouched, so the guard refuses the town's server
-// here rather than trusting the operator's shell (gt-p85pw.115).
-var endpointHostVars = []string{"BEADS_DOLT_SERVER_HOST", "GT_DOLT_HOST"}
-var endpointPortVars = []string{"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT", "GT_DOLT_PORT"}
+// endpointPortVars are the names bd reads the Dolt server's port from that cross into the container:
+// internal/config's DoltEndpointEnvKeys names the same server for the bd gt starts, and only the
+// BEADS_DOLT_ names reach a container (gt-p85pw.115, gt-p85pw.117).
+var endpointPortVars = []string{"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"}
 
 // workspaceMarkers are what a directory holds when a beads workspace sits in it: the .beads
 // directory itself, or the metadata.json bd keeps its store's settings in.
 var workspaceMarkers = []string{".beads", "metadata.json"}
 
-// Resolver reports the beads workspace bd resolves for a run in dir carrying env. The recorder
-// answers it with bd where --json, the one read-only call that names the active .beads location.
+// Resolver reports the beads workspace bd resolves for a run in dir carrying env, in the container's
+// own paths. The recorder answers it with bd where --json, the one read-only call that names the
+// active .beads location; an empty workspace with no error is bd's answer that it resolved none, and
+// a run that did not answer is an error.
 type Resolver func(dir string, env []string) (string, error)
 
-// guardRun refuses a recording that bd init could aim at a workspace the recorder did not make. bd
-// init walks up from the directory it runs in and rewrites the first workspace it finds, so a copy
-// under a tree that holds one changes that tree's store (gt-p85pw.103). Every directory under the
-// town root holds one, so a scratch is refused unless it owns a workspace of its own: the guard
-// makes one with bd init, then asks bd which workspace it resolves there, carrying the environment
-// every child is given, and passes only when the answer is inside the scratch and the workspace the
-// init made is on disk in it (gt-p85pw.115).
+// guardRun refuses a recording that could write a workspace or a Dolt server the recorder did not
+// make. Every bd child runs in a container with only its own directory mounted, so bd init cannot
+// walk up to an ancestor workspace; the guard proves the container is the one the recorder meant
+// before anything is written: the container's bd must be the host's build, and bd must resolve no
+// workspace outside workDir. Only then does the scratch's init run, and the workspace it makes must
+// be on disk in the scratch (gt-p85pw.115, gt-p85pw.117).
 //
-// The child environment is also refused when it aims the scratch's bd runs at the town's Dolt
+// The environment the child gets is refused when it aims the scratch's runs at the town's Dolt
 // server, whose database the init would then create as cruft no cleanup owns (gt-p85pw.115).
 //
-// The recorder's own working directory is refused only when it is a workspace root itself, where bd
-// init would rewrite that workspace's store; a directory that merely sits under one passes, since
-// work lives under the town and the scratch's own resolved workspace is the test (gt-p85pw.116).
-// Every refusal comes before anything is recorded, and the bd calls the guard makes are the init
-// that gives the scratch its workspace and the read-only where that answers with it.
+// The recorder's own working directory is refused only when it is a workspace root itself; a
+// directory that merely sits under one passes, since work lives under the town (gt-p85pw.116).
+// Every refusal comes before anything is recorded.
 func guardRun(getwd func() (string, error), scratch string, child childBD) error {
 	cwd, err := getwd()
 	if err != nil {
@@ -71,23 +67,34 @@ func guardRun(getwd func() (string, error), scratch string, child childBD) error
 		}
 		return fmt.Errorf("%s is itself a beads workspace root, where bd init would rewrite that workspace's store; run the recorder from a directory that holds no .beads of its own", where)
 	}
+	// The build is proved first: it reads only, so it needs no directory, and every mode records
+	// from the one bd it makes sure the container runs.
+	if err := proveBDBuild(child); err != nil {
+		return err
+	}
 	if scratch == "" {
-		return nil // a flags recording makes no copies, so it has no scratch directory to give a workspace
+		return nil // a flags recording makes no copies, so it mounts no workspace to prove
 	}
 	if !filepath.IsAbs(scratch) {
 		scratch = filepath.Join(cwd, scratch)
 	}
 	scratch = filepath.Clean(scratch)
+	if err := refuseMountCharacter(scratch); err != nil {
+		return err
+	}
 	if link, found, err := symlinkOnPath(scratch); err != nil {
 		return err
 	} else if found {
-		return fmt.Errorf("%s is behind the symlink %s; name a scratch directory whose path holds no symlink, since bd follows them and the workspace the recorder makes is then not the one it named", scratch, link)
+		return fmt.Errorf("%s is behind the symlink %s; name a scratch directory whose path holds no symlink, since the directory the recorder mounts is then not the one it named", scratch, link)
 	}
 	if err := refuseTownServer(child.Env(scratch), townDoltPort(cwd)); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(scratch, 0o755); err != nil {
 		return fmt.Errorf("make the scratch directory %s: %w", scratch, err)
+	}
+	if err := proveWorkspace(scratch, child); err != nil {
+		return err
 	}
 	name := newDatabaseName()
 	if err := initDatabase(child.Run, scratch, name); err != nil {
@@ -96,19 +103,41 @@ func guardRun(getwd func() (string, error), scratch string, child childBD) error
 	if err := scratchMadeWorkspace(scratch); err != nil {
 		return err
 	}
-	resolved, err := child.Where(scratch, child.Env(scratch))
-	if err != nil {
-		// The database the init made stays: the guard refuses rather than making more bd calls, and
-		// its name carries the test prefix a later cleanup drops it by.
-		return fmt.Errorf("ask bd which workspace it resolves in %s: %w", scratch, err)
-	}
-	if err := scratchOwnsWorkspace(scratch, resolved); err != nil {
-		return err
-	}
 	// The workspace existed for the check alone. Both parts of its cleanup run, so a failed drop
 	// still removes the directory, and either failure is reported rather than left behind.
 	if err := errors.Join(dropDatabase(child.Run, scratch, name), os.RemoveAll(beadsDirIn(scratch))); err != nil {
 		return fmt.Errorf("clean up the scratch workspace %s: %w", scratch, err)
+	}
+	return nil
+}
+
+// refuseMountCharacter refuses a scratch whose path holds a character a -v source cannot carry: ':'
+// ends the host path and starts the mount point, ',' splits the options of the --mount form the same
+// path would take, and a line break or NUL cannot be read back as a path. The directory the call
+// mounts would then not be the scratch the recorder named, so no bd call may run in it (gt-p85pw.117).
+func refuseMountCharacter(scratch string) error {
+	if i := strings.IndexAny(scratch, ":,\n\x00"); i >= 0 {
+		return fmt.Errorf("the scratch directory %q holds %q, which docker would read as part of the mount rather than the path; name a scratch directory whose path has no such character", scratch, scratch[i])
+	}
+	return nil
+}
+
+// proveWorkspace refuses a container that resolves a beads workspace anywhere but under workDir.
+// bd walks up from its working directory, so an answer from outside workDir means the mount let an
+// ancestor workspace reach the container and the recording would read and write that store; pinning
+// BEADS_DIR changes nothing, since bd honors the pin only when that workspace exists (gt-p85pw.117).
+// No workspace at all passes: the container is fresh and bd init makes one under workDir. A bd that
+// cannot answer is refused, so the proof is never decided by an error or by an empty answer.
+func proveWorkspace(scratch string, child childBD) error {
+	resolved, err := child.Where(scratch, child.Env(scratch))
+	if err != nil {
+		return fmt.Errorf("ask bd which workspace it resolves in the container at %s: %w", workDir, err)
+	}
+	if resolved == "" {
+		return nil
+	}
+	if !isWithin(workDir, resolved) {
+		return fmt.Errorf("bd resolves the workspace %s in the container, which is outside %s; only the scratch directory is mounted there, so the recording would run against a workspace it did not make", resolved, workDir)
 	}
 	return nil
 }
@@ -123,10 +152,8 @@ func guardRun(getwd func() (string, error), scratch string, child childBD) error
 //     container mapped onto this host's loopback;
 //   - no port named at all, since bd then falls back to its own default, the town's server here.
 func refuseTownServer(env []string, townPort int) error {
-	for _, key := range endpointHostVars {
-		if host, ok := envValue(env, key); ok && !isLocalHost(host) {
-			return fmt.Errorf("%s names a host that is not this machine; record against the throwaway Dolt server on this host, never a server the town runs", key)
-		}
+	if host, ok := envValue(env, doltHostVar); ok && !isLocalHost(host) {
+		return fmt.Errorf("%s names a host that is not this machine; record against the throwaway Dolt server on this host, never a server the town runs", doltHostVar)
 	}
 	named := ""
 	for _, key := range endpointPortVars {
@@ -144,7 +171,7 @@ func refuseTownServer(env []string, townPort int) error {
 		}
 	}
 	if named == "" {
-		return fmt.Errorf("no Dolt server is named in BEADS_DOLT_SERVER_PORT, BEADS_DOLT_PORT or GT_DOLT_PORT, so bd would take its own default, the town's server on this machine; name the throwaway server the recording runs against")
+		return fmt.Errorf("no Dolt server is named in BEADS_DOLT_SERVER_PORT or BEADS_DOLT_PORT, so bd would take its own default, the town's server on this machine; name the throwaway server the recording runs against")
 	}
 	return nil
 }
@@ -185,10 +212,9 @@ func envValue(env []string, key string) (string, bool) {
 }
 
 // scratchMadeWorkspace refuses a scratch that does not hold the workspace the guard's own bd init
-// made in it. bd where's answer is bd's own report, so by itself it cannot tell a bd that wrote to the
-// pinned workspace from one that wrote elsewhere and answered with the pin; the marker on disk is the
-// independent proof, and an init that made nothing leaves the scratch without one (gt-p85pw.115). A
-// marker above the scratch is the town's workspace, which the scratch does not own.
+// made in it: the init is the only write, and an init that wrote somewhere else leaves the scratch
+// without a marker, while the mounted directory is the only place bd can write (gt-p85pw.115,
+// gt-p85pw.117). A marker above the scratch is the town's workspace, which the scratch does not own.
 func scratchMadeWorkspace(scratch string) error {
 	workspace, found, err := enclosingWorkspace(scratch)
 	if err != nil {
@@ -203,30 +229,8 @@ func scratchMadeWorkspace(scratch string) error {
 	return fmt.Errorf("bd init made no workspace in %s, so the recorder cannot prove the scratch owns the store its bd runs would write", scratch)
 }
 
-// scratchOwnsWorkspace refuses an answer that is not an absolute path inside the scratch, after
-// following the symlinks on both. A workspace bd did not name, and one it names anywhere else, are
-// both refusals: the scratch has to own the workspace the recording runs in.
-func scratchOwnsWorkspace(scratch, workspace string) error {
-	if workspace == "" {
-		return fmt.Errorf("bd named no workspace for %s; the scratch must own the workspace it records in", scratch)
-	}
-	if !filepath.IsAbs(workspace) {
-		return fmt.Errorf("bd named the workspace %q for %s, which is not an absolute path, so the recorder cannot tell which workspace that is", workspace, scratch)
-	}
-	found, err := realPath(workspace)
-	if err != nil {
-		return fmt.Errorf("resolve the workspace %s bd named: %w", workspace, err)
-	}
-	// The scratch itself needs no resolving: symlinkOnPath refused every path that could lead
-	// somewhere other than where it says.
-	if !isWithin(filepath.Clean(scratch), found) {
-		return fmt.Errorf("bd resolves the workspace %s for %s, which is outside the scratch; the scratch must own the workspace it records in", found, scratch)
-	}
-	return nil
-}
-
-// isWithin reports whether path is dir or sits under it. A pair it cannot compare is not proof of
-// a workspace inside the scratch, so it reads as outside.
+// isWithin reports whether path is dir or sits under it. A pair it cannot compare is not proof of a
+// workspace inside the directory, so it reads as outside.
 func isWithin(dir, path string) bool {
 	rel, err := filepath.Rel(dir, path)
 	if err != nil {

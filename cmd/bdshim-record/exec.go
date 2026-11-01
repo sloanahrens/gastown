@@ -3,18 +3,17 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/testdb"
 )
 
@@ -22,74 +21,50 @@ import (
 const runLimit = time.Minute
 
 // childBD is every bd process a recorder starts: the rows' runs, the workspace the guard makes, and
-// the read-only answer the guard resolves (gt-p85pw.115). main wires it to the binary -bd names; a
-// unit test injects a fake, since a unit test may not start a process.
+// the read-only answers the guard proves the recording with (gt-p85pw.115, gt-p85pw.117). main wires
+// it to the container every child runs in; a unit test injects a fake, since a unit test may not
+// start a process.
 type childBD struct {
-	Run   Runner
-	Env   func(dir string) []string
-	Where Resolver
+	Run         Runner
+	Env         func(dir string) []string
+	Where       Resolver
+	HostVersion func() ([]byte, error)
 }
 
-// execChild returns the child bd the binary bin names, every call carrying the recording
-// environment built from base.
-func execChild(bin string) childBD {
-	base := os.Environ()
-	return childBD{
-		Run:   execBD(bin, base),
-		Env:   func(dir string) []string { return childEnv(base, dir) },
-		Where: whereBD(bin),
-	}
-}
-
-// execBD returns a Runner that runs the bd binary bin in dir with the Dolt server's address passed
-// through from base and the workspace beside dir pinned (gt-p85pw.92, gt-p85pw.115).
-//
-// The address passes through because a fresh copy has no .beads of its own when bd init makes its
-// database, so the environment is the only thing that can name the server. bdshim.ExecRunner cannot
-// serve here: it strips every BEADS_DOLT_* variable, leaving bd init with no server.
-func execBD(bin string, base []string) Runner {
-	return func(dir string, args []string) ([]byte, int, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), runLimit)
-		defer cancel()
-		c := bdCommand(ctx, bin, dir, args, base)
-		var stdout bytes.Buffer
-		c.Stdout = &stdout
-		c.Stderr = os.Stderr
-		err := c.Run()
-		return exitResult(stdout.Bytes(), err, errors.Is(ctx.Err(), context.DeadlineExceeded))
-	}
-}
-
-// whereBD returns a Resolver that asks bd which workspace it resolves in dir: bd where --json names
-// the active beads location, which is the one read-only answer the guard trusts (gt-p85pw.115).
-func whereBD(bin string) Resolver {
-	return func(dir string, env []string) (string, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), runLimit)
-		defer cancel()
-		c := bdCommandWith(ctx, bin, dir, []string{"where", "--json"}, env)
-		var stdout bytes.Buffer
-		c.Stdout = &stdout
-		c.Stderr = os.Stderr
-		err := c.Run()
-		return whereResult(stdout.Bytes(), err, errors.Is(ctx.Err(), context.DeadlineExceeded))
-	}
-}
-
-// whereResult turns how the bd where run ended into the workspace it named. A run that timed out or
-// never finished is an error, so a workspace is never read out of an answer bd did not give.
-func whereResult(stdout []byte, runErr error, timedOut bool) (string, error) {
-	if timedOut {
-		return "", fmt.Errorf("bd where ran past %s", runLimit)
-	}
+// whereResult turns how one bd where run ended into the workspace it named. A run that did not
+// reach an exit is an error, and so is a non-zero exit other than bd's own "no workspace" answer, so
+// a workspace is never read out of an answer bd did not give. "No workspace" is no workspace, not an
+// error: a fresh container resolves none until bd init makes one (gt-p85pw.117).
+func whereResult(stdout []byte, exit int, runErr error) (string, error) {
 	if runErr != nil {
 		return "", fmt.Errorf("bd where: %w", runErr)
+	}
+	if exit != 0 {
+		if exit == noWorkspaceExit && noWorkspaceAnswer(stdout) {
+			return "", nil
+		}
+		return "", fmt.Errorf("bd where exited %d", exit)
 	}
 	return workspaceFromWhere(stdout)
 }
 
+// noWorkspaceExit is the exit code bd where gives when it resolves no workspace (probed against bd 1.2.2).
+const noWorkspaceExit = 1
+
+// noWorkspaceAnswer reports whether bd where's JSON answer says bd resolved no workspace: the error
+// bd names as no_beads_directory.
+func noWorkspaceAnswer(stdout []byte) bool {
+	var answer struct {
+		Data struct {
+			Error string `json:"error"`
+		} `json:"data"`
+	}
+	return json.Unmarshal(stdout, &answer) == nil && answer.Data.Error == "no_beads_directory"
+}
+
 // workspaceFromWhere reads the workspace out of bd where's JSON answer. An answer that does not
-// parse is an error rather than an empty workspace, so a bd the recorder cannot read is refused
-// instead of taken for one that named nothing.
+// parse, or that names no path, is an error rather than an empty workspace, so a bd the recorder
+// cannot read is refused instead of taken for one that named nothing (gt-p85pw.117).
 func workspaceFromWhere(stdout []byte) (string, error) {
 	var answer struct {
 		Data struct {
@@ -99,85 +74,16 @@ func workspaceFromWhere(stdout []byte) (string, error) {
 	if err := json.Unmarshal(stdout, &answer); err != nil {
 		return "", fmt.Errorf("bd where did not answer with JSON: %w", err)
 	}
+	if strings.TrimSpace(answer.Data.Path) == "" {
+		return "", errors.New("bd where answered with JSON that names no data.path, so the recorder cannot tell which workspace bd resolves")
+	}
 	return answer.Data.Path, nil
-}
-
-// bdCommand returns the command one bd run is: bin with args, run in dir, carrying the recording
-// environment built from base, so bd works on the workspace beside dir and records the recorder as
-// the author of every bead it writes (gt-p85pw.103).
-func bdCommand(ctx context.Context, bin, dir string, args, base []string) *exec.Cmd {
-	return bdCommandWith(ctx, bin, dir, args, childEnv(base, dir))
-}
-
-// bdCommandWith returns a bd process run in dir with env already built, so the guard can resolve
-// with the exact environment a child is given.
-func bdCommandWith(ctx context.Context, bin, dir string, args, env []string) *exec.Cmd {
-	c := exec.CommandContext(ctx, bin, args...) //nolint:gosec // G204: bin is the bd binary the operator names; args are the recording's fixed rows
-	c.Dir = dir
-	c.Env = env
-	c.WaitDelay = time.Second
-	return c
 }
 
 // beadsDirIn names the workspace beside dir, which is the one the recorder makes for a bd that runs
 // there.
 func beadsDirIn(dir string) string {
 	return filepath.Join(dir, ".beads")
-}
-
-// childEnv is the environment a bd run in dir gets: the recording environment with the workspace
-// beside dir pinned into it (gt-p85pw.115).
-func childEnv(base []string, dir string) []string {
-	return recordingEnv(base, beadsDirIn(dir))
-}
-
-// workspaceVars are the variables the beads fork reads to find the workspace a run works in: the
-// .beads directory, the database file, the shared server's directory and the Dolt data directory.
-// The list is a copy of bdTargetEnvKeys, internal/beads's one list of the variables it strips from a
-// bd subprocess's environment (internal/beads/database.go); it is copied because that list is
-// unexported, so the two change together. Each is pinned to the workspace the recorder made, so a
-// value inherited from the operator's shell cannot aim a run at another store (gt-p85pw.115).
-var workspaceVars = []string{
-	"BEADS_DIR",
-	"BEADS_DB",
-	"BD_DB",
-	"BEADS_SHARED_SERVER_DIR",
-	"GT_DOLT_DATA",
-}
-
-// storeSelectors are the variables naming a store that is not the workspace the recorder made: the
-// server database a run would otherwise be aimed at. They are dropped rather than pinned, since a
-// copy's own database is the one its .beads metadata names (gt-p85pw.92).
-var storeSelectors = []string{
-	"BEADS_DOLT_SERVER_DATABASE",
-}
-
-// pinnedIdentity is the environment every bd run gets, so the actor and the git identity bd records
-// are the recorder's own rather than the operator's: a golden's owner and created_by then read the
-// same on every machine (gt-p85pw.103).
-var pinnedIdentity = [][2]string{
-	{"BEADS_ACTOR", "bdshim-record"},
-	{"BD_ACTOR", "bdshim-record"},
-	{"GIT_AUTHOR_NAME", "bdshim-record"},
-	{"GIT_AUTHOR_EMAIL", "bdshim-record@example.invalid"},
-	{"GIT_COMMITTER_NAME", "bdshim-record"},
-	{"GIT_COMMITTER_EMAIL", "bdshim-record@example.invalid"},
-}
-
-// recordingEnv returns base with every workspace variable pinned to beadsDir and the store selectors
-// dropped, so bd works on the workspace the recorder made, and with the identity pinned, so bd
-// records the recorder as the author of every bead it writes.
-func recordingEnv(base []string, beadsDir string) []string {
-	for _, key := range storeSelectors {
-		base = beads.StripEnvKey(base, key)
-	}
-	for _, key := range workspaceVars {
-		base = append(beads.StripEnvKey(base, key), key+"="+beadsDir)
-	}
-	for _, pinned := range pinnedIdentity {
-		base = append(beads.StripEnvKey(base, pinned[0]), pinned[0]+"="+pinned[1])
-	}
-	return base
 }
 
 // exitResult turns how a bd run ended into a recording's stdout and exit code. A non-zero exit is a
@@ -290,9 +196,53 @@ func initDatabase(run Runner, dir, name string) error {
 	return expectExit(run, dir, args, "init the database "+name)
 }
 
-// importFixture fills the copy's database from the fixture file.
+// fixtureInCopy is the fixture's name inside a copy. Only a child's own directory is mounted in its
+// container, so the import reads a copy of the fixture the recorder puts there, never the file the
+// operator named (gt-p85pw.117).
+const fixtureInCopy = "fixture.jsonl"
+
+// importFixture fills the copy's database from the fixture file, copied into the copy first. The
+// copy is removed once bd has read it, so a copy outlives the import holding only the database bd
+// made, never the operator's fixture data (gt-p85pw.117).
 func importFixture(run Runner, dir, fixture string) error {
-	return expectExit(run, dir, []string{"import", "-i", fixture}, "import the fixture "+filepath.Base(fixture))
+	path := filepath.Join(dir, fixtureInCopy)
+	err := copyFile(fixture, path)
+	if err != nil {
+		err = fmt.Errorf("put the fixture %s in the copy: %w", fixture, err)
+	} else {
+		inContainer := workDir + "/" + fixtureInCopy
+		err = expectExit(run, dir, []string{"import", "-i", inContainer}, "import the fixture "+filepath.Base(fixture))
+	}
+	return errors.Join(err, removeFixtureCopy(path))
+}
+
+// removeFixtureCopy removes the fixture the recorder put in a copy. Leaving it there is reported
+// rather than shrugged off: the copy lives on for the rows, and a read of the fixture would then see
+// the operator's data where bd's database should be the only thing there. A path the copy never got
+// has nothing to remove (gt-p85pw.117).
+func removeFixtureCopy(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("remove the fixture copy %s: %w", path, err)
+	}
+	return nil
+}
+
+// copyFile copies src to dst, so a file outside the container's mounted directory reaches bd inside
+// it (gt-p85pw.117).
+func copyFile(src, dst string) error {
+	in, err := os.Open(src) //nolint:gosec // G304: the operator names the fixture on the command line
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()                                            // a read of the fixture: a close failure cannot lose the copy
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, goldenMode) //nolint:gosec // G304: dst is a file in the copy the recorder made
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		return errors.Join(err, out.Close())
+	}
+	return out.Close()
 }
 
 // dropDatabase removes the copy's database. bd has no verb that drops one database by name, so the
