@@ -45,6 +45,13 @@ var pinnedIdentity = [][2]string{
 	{"GIT_COMMITTER_EMAIL", "bdshim-record@example.invalid"},
 }
 
+// testServerOptIn is the one name besides the pinned identity the recorder adds to a child's
+// environment: bd refuses to make a database on a server it cannot vouch for unless
+// BEADS_TEST_SERVER=1 is set, and a recording's scratch database is made on a throwaway server by
+// design (gt-czb3c). The value is the recorder's own constant, never the operator's, so an
+// operator's BEADS_TEST_SERVER never decides whether a container call may create its database.
+var testServerOptIn = [2]string{"BEADS_TEST_SERVER", "1"}
+
 // dockerBin is the docker command every child runs through.
 const dockerBin = "docker"
 
@@ -213,10 +220,13 @@ func endpointEnv(base []string) []string {
 }
 
 // containerEnv returns the endpoint env a child inside the container gets: a loopback host replaced
-// by doltHost, since 127.0.0.1 inside the container is the container itself, and doltHost named
-// when the recording names no host at all (gt-p85pw.117).
+// by doltHost, since 127.0.0.1 inside the container is the container itself, doltHost named when the
+// recording names no host at all, and bd's opt-in to a database on a server it cannot vouch for,
+// which is the throwaway server every recording runs against (gt-p85pw.117, gt-czb3c). The opt-in is
+// added here, after refuseTownServer has read the environment (container.env), so the refusal sees
+// exactly what it saw before (gt-czb3c).
 func containerEnv(env []string, doltHost string) []string {
-	mapped := make([]string, 0, len(env)+1)
+	mapped := make([]string, 0, len(env)+2)
 	named := false
 	for _, entry := range env {
 		key, value, _ := strings.Cut(entry, "=")
@@ -231,7 +241,7 @@ func containerEnv(env []string, doltHost string) []string {
 	if !named {
 		mapped = append(mapped, doltHostVar+"="+doltHost)
 	}
-	return mapped
+	return append(mapped, testServerOptIn[0]+"="+testServerOptIn[1])
 }
 
 // bdVersionLineRE matches the fields of a `bd version` line the container's bd must share with the
