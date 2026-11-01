@@ -256,7 +256,8 @@ func profileAllows(p profileFile, method, route string) bool {
 // (docs/research/tracker/K1b-seat-token-as-provider-placeholder.md, question 3):
 // the admin-gated ones, and the four no seat has been shown to call. The
 // profile leaves them out so a seat token minted with admin scope still cannot
-// reach them from a sandbox.
+// reach them from a sandbox. POST /v1/issues:delete is the tenth: no seat may
+// delete a bead, and the server does not check ownership (gt-zbpf0).
 var refusedRoutes = []struct{ method, path string }{
 	{"POST", "/v1/tokens"},
 	{"POST", "/v1/tokens:revoke"},
@@ -267,10 +268,12 @@ var refusedRoutes = []struct{ method, path string }{
 	{"POST", "/v1/export"},
 	{"GET", "/v1/snapshot/town"},
 	{"POST", "/v1/board/dispatch"},
+	{"POST", "/v1/issues:delete"},
 }
 
 // seatRoutes are the routes the research doc lists under reads and writes, with
-// a sample id in each {id}: what a seat does to its own issues.
+// a sample id in each {id}: what a seat does to its own issues. Delete and
+// transfer are not here: the profile refuses them (gt-zbpf0).
 var seatRoutes = []struct{ method, path string }{
 	{"GET", "/v1/issues/gt-0f305"},
 	{"POST", "/v1/issues:show-many"},
@@ -287,11 +290,9 @@ var seatRoutes = []struct{ method, path string }{
 	{"POST", "/v1/issues"},
 	{"PATCH", "/v1/issues/gt-0f305"},
 	{"POST", "/v1/issues:close"},
-	{"POST", "/v1/issues:delete"},
 	{"POST", "/v1/graphs"},
 	{"POST", "/v1/issues/gt-0f305/claim"},
 	{"POST", "/v1/issues/gt-0f305/release"},
-	{"POST", "/v1/issues/gt-0f305/transfer"},
 	{"POST", "/v1/batch"},
 	{"POST", "/v1/issues/gt-0f305/comments"},
 	{"POST", "/v1/issues/gt-0f305/dependencies"},
@@ -356,6 +357,38 @@ func TestTrackerPolecatProfileAllowsNoAdminRoute(t *testing.T) {
 	for _, form := range routedForms("/v1/stats") {
 		if route := requestPath(t, form); !profileAllows(canary, "GET", route) {
 			t.Fatalf("%s resolves to %s, which the canary rule GET /v1/* does not admit, so the refusal check above would pass whatever the profile says", form, route)
+		}
+	}
+}
+
+// TestTrackerPolecatProfileAllowsNoDeleteRoute proves the profile refuses
+// POST /v1/issues:delete in each form a server resolves to it. A bead delete is
+// town-side, and the server does not check that the caller owns the bead, so a
+// seat must not reach it (gt-zbpf0).
+func TestTrackerPolecatProfileAllowsNoDeleteRoute(t *testing.T) {
+	t.Parallel()
+	p := readProfile(t, trackerProfilePath)
+	for _, form := range routedForms("/v1/issues:delete") {
+		route := requestPath(t, form)
+		if profileAllows(p, "POST", route) {
+			t.Errorf("POST %s (requested as %s) matches an allow rule in %s, and the profile must refuse it", route, form, trackerProfilePath)
+		}
+	}
+}
+
+// TestTrackerPolecatProfileTransferRule holds the transfer route to the case the
+// bead's Constraints name: no production seat calls POST /v1/issues/{id}/transfer
+// (tracker/client.Transfer is called only from the tracker's contract cases and
+// server tests), so the profile refuses it in each form a server resolves to it.
+// If a seat caller appears, name it on gt-zbpf0 and change this test to allow
+// the route.
+func TestTrackerPolecatProfileTransferRule(t *testing.T) {
+	t.Parallel()
+	p := readProfile(t, trackerProfilePath)
+	for _, form := range routedForms("/v1/issues/gt-0f305/transfer") {
+		route := requestPath(t, form)
+		if profileAllows(p, "POST", route) {
+			t.Errorf("POST %s (requested as %s) matches an allow rule in %s, and no seat caller needs it (gt-zbpf0)", route, form, trackerProfilePath)
 		}
 	}
 }

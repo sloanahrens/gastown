@@ -9,8 +9,10 @@
 # decides it (gt-0f305).
 #
 # The routes are the seat's own: issue reads and writes, comments, dependencies,
-# the board reads, claim, release, transfer, batch, events and whoami
+# the board reads, claim, release, batch, events and whoami
 # (docs/research/tracker/K1b-seat-token-as-provider-placeholder.md, question 3).
+# Delete and transfer are left out too (gt-zbpf0): a bead delete is town-side,
+# and no production seat calls transfer.
 # The admin routes, and the four routes the doc marks not verified, are left out
 # so a seat token that was ever minted with admin scope still could not reach
 # them from a sandbox. A grep of the four found no polecat caller: stats and
@@ -59,15 +61,14 @@ endpoints:
       # cover the query the request carries.
       - allow: { method: GET, path: "/v1/events*" }
       - allow: { method: GET, path: "/v1/whoami" }
-      # Writes.
+      # Writes. issues:delete and issues/*/transfer are not here (gt-zbpf0): see
+      # the header for why.
       - allow: { method: POST, path: "/v1/issues" }
       - allow: { method: PATCH, path: "/v1/issues/*" }
       - allow: { method: POST, path: "/v1/issues:close" }
-      - allow: { method: POST, path: "/v1/issues:delete" }
       - allow: { method: POST, path: "/v1/graphs" }
       - allow: { method: POST, path: "/v1/issues/*/claim" }
       - allow: { method: POST, path: "/v1/issues/*/release" }
-      - allow: { method: POST, path: "/v1/issues/*/transfer" }
       - allow: { method: POST, path: "/v1/batch" }
       - allow: { method: POST, path: "/v1/issues/*/comments" }
       - allow: { method: POST, path: "/v1/issues/*/dependencies" }

@@ -37,7 +37,7 @@ The client also reads the token from a file and trims it, so the file in the san
 Derived from the route registrations in `tracker/server/routes_*.go` and `server.go`. A seat needs the issue read and write routes, comments, dependencies, the board routes, claim and release, batch, `GET /v1/events` and `GET /v1/whoami`:
 
 - reads: `GET /v1/issues/{id}`, `POST /v1/issues:show-many`, `:list`, `:count`, `POST /v1/assigned`, `POST /v1/ready`, `POST /v1/blocked`, `POST /v1/issues:children-of`, `GET /v1/events`, `GET /v1/whoami`, `GET /v1/issues/{id}/comments`, `GET /v1/issues/{id}/dependencies`
-- writes: `POST /v1/issues`, `PATCH /v1/issues/{id}`, `POST /v1/issues:close`, `POST /v1/issues:delete`, `POST /v1/graphs`, `POST /v1/issues/{id}/claim`, `release`, `transfer`, `POST /v1/batch`, `POST /v1/issues/{id}/comments`, `POST /v1/issues/{id}/dependencies`, `DELETE /v1/issues/{id}/dependencies/{dependsOn}`
+- writes: `POST /v1/issues`, `PATCH /v1/issues/{id}`, `POST /v1/issues:close`, `POST /v1/graphs`, `POST /v1/issues/{id}/claim`, `release`, `POST /v1/batch`, `POST /v1/issues/{id}/comments`, `POST /v1/issues/{id}/dependencies`, `DELETE /v1/issues/{id}/dependencies/{dependsOn}`. `:delete` and `transfer` were first listed here and are not seat writes: a bead delete is town-side, and no production seat calls transfer (gt-zbpf0).
 
 Refuse in the profile, in two groups.
 
