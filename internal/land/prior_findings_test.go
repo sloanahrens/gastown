@@ -165,7 +165,7 @@ func TestPriorReviewFindings(t *testing.T) {
 		{
 			// A review that raised nothing answers for itself: the round before
 			// it is answered and must not outlive it.
-			name: "a review refusal with no findings after one with them",
+			name:  "a review refusal with no findings after one with them",
 			notes: review + "\n" + FormatRejectionNote(RejectionNote{Attempt: 2, Kind: string(RejectReview), Reason: "om requested changes (score 0.70, 0 finding(s))", MR: "gt-abc"}),
 		},
 		{
