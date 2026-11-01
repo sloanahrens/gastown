@@ -3,12 +3,15 @@
 package makegate
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Sandbox is a throwaway town root for the seed cases, ported from the shell
@@ -170,6 +173,177 @@ func fixedGit(dir string, args ...string) (string, error) {
 	}
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
+}
+
+// gateRunTimeout bounds one gate run against the stub tools. Every stage of
+// the recipe is stubbed, so a run that takes this long is hung rather than
+// slow.
+const gateRunTimeout = 2 * time.Minute
+
+// The gate failure-path stubs. Each logs its call to $STUB_LOG so a case sees
+// which stages ran, and refuses only when the case's variable says so, as the
+// shell fixture's stubs do.
+const (
+	gateStubGo = `#!/bin/sh
+echo "go $1 GT_TEST_DOCKER=${GT_TEST_DOCKER:-unset}" >>"$STUB_LOG"
+[ "$1" = "${STUB_GO_FAIL:-}" ] && exit 1
+exit 0
+`
+	gateStubLint = `#!/bin/sh
+echo "golangci-lint $*" >>"$STUB_LOG"
+[ "$1" = run ] && [ -n "${STUB_LINT_FAIL:-}" ] && exit 1
+exit 0
+`
+	gateStubPreflight = `#!/bin/sh
+if [ -n "${EXEC_TAX_WARN:-}" ]; then
+	echo "gate: WARNING exec tax 180 ms/exec in this process tree: a fresh executable here waits on a macOS scan or a throttled process, and the unit tier builds one per package (see gt-2ycne.1)" >&2
+fi
+exit 0
+`
+	gateStubShellTests = `#!/bin/sh
+echo "shell-tests" >>"$STUB_LOG"
+exit 0
+`
+)
+
+// GateSandbox runs the real gate recipe against stub tools, so the recipe's
+// stages decide the exit code without building, linting or testing the tree.
+type GateSandbox struct {
+	*Sandbox
+	bin string
+}
+
+// GateRun is one gate run against a GateSandbox's stubs: the exit code, the
+// gate's stderr (where it prints its stage and wall) and the stub call log.
+type GateRun struct {
+	Code   int
+	Stderr string
+	Calls  []string
+}
+
+// hasCall reports whether the run's stub call log holds line exactly.
+func (r GateRun) hasCall(line string) bool {
+	for _, call := range r.Calls {
+		if call == line {
+			return true
+		}
+	}
+	return false
+}
+
+// hasCallWithPrefix reports whether any call line begins with prefix.
+func (r GateRun) hasCallWithPrefix(prefix string) bool {
+	for _, call := range r.Calls {
+		if strings.HasPrefix(call, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// callLog is the run's stub call log, one call per line, for a failure message.
+func (r GateRun) callLog() string { return strings.Join(r.Calls, "\n") }
+
+// newGateSandbox returns a GateSandbox whose PATH leads with stub go,
+// golangci-lint, the exec-tax preflight and the shell-test script.
+func newGateSandbox(t *testing.T) *GateSandbox {
+	t.Helper()
+	s := newSandbox(t)
+	g := &GateSandbox{Sandbox: s, bin: s.Path("bin")}
+	for _, stub := range []struct{ name, body string }{
+		{"go", gateStubGo},
+		{"golangci-lint", gateStubLint},
+		{"preflight", gateStubPreflight},
+		{"shell-tests", gateStubShellTests},
+	} {
+		g.writeStub(stub.name, stub.body)
+	}
+	return g
+}
+
+// writeStub writes an executable stub named name into the sandbox's bin
+// directory. A stub that cannot be written or made executable fails the test:
+// make would otherwise find the host's tool, not the case's stub.
+func (g *GateSandbox) writeStub(name, body string) {
+	g.t.Helper()
+	path := filepath.Join(g.bin, name)
+	if err := os.MkdirAll(g.bin, 0o755); err != nil {
+		g.t.Fatalf("make the stub directory %s: %v", g.bin, err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		g.t.Fatalf("write the %s stub %s: %v", name, path, err)
+	}
+	if err := os.Chmod(path, 0o755); err != nil {
+		g.t.Fatalf("make the %s stub %s executable: %v", name, path, err)
+	}
+}
+
+// Run runs the real gate recipe in the checkout under test against the stubs.
+// makeFlags go to make before the target, as the shell's run_gate takes its
+// flags; vars are environment assignments for the run (STUB_GO_FAIL and
+// friends). The inherited GT_TEST_DOCKER=1 is set too, so a recipe that
+// forgets to turn containers off is seen to pass it on. The call log is
+// truncated first, so a case reads only this run's calls.
+func (g *GateSandbox) Run(makeFlags []string, vars ...string) GateRun {
+	g.t.Helper()
+	calls := g.Path("calls")
+	if err := os.WriteFile(calls, nil, 0o644); err != nil {
+		g.t.Fatalf("truncate the stub call log %s: %v", calls, err)
+	}
+	argv := append([]string{"-C", g.repo, "--no-print-directory"}, makeFlags...)
+	argv = append(argv, "gate",
+		"SHELL_TESTS="+filepath.Join(g.bin, "shell-tests"),
+		"EXEC_TAX_PREFLIGHT="+filepath.Join(g.bin, "preflight"))
+	ctx, cancel := context.WithTimeout(context.Background(), gateRunTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "make", argv...)
+	cmd.Env = g.gateEnv(vars)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	code := 0
+	if err := cmd.Run(); err != nil {
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) {
+			g.t.Fatalf("run the gate: %v\n%s", err, stderr.String())
+		}
+		code = exit.ExitCode()
+	}
+	if ctx.Err() != nil {
+		g.t.Fatalf("the gate did not finish within %s: %v\n%s", gateRunTimeout, ctx.Err(), stderr.String())
+	}
+	data, err := os.ReadFile(calls)
+	if err != nil {
+		g.t.Fatalf("read the stub call log %s: %v", calls, err)
+	}
+	var log []string
+	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+		if line != "" {
+			log = append(log, line)
+		}
+	}
+	return GateRun{Code: code, Stderr: stderr.String(), Calls: log}
+}
+
+// gateEnv is the environment the gate runs in: the sandbox environment with
+// the stub directory leading PATH and the case's variables appended last, so
+// a case's variable wins over anything inherited. The caller's PATH stays
+// below the stubs because the recipe itself runs bash, date, mktemp and find,
+// as the shell fixture's `PATH="$TMP/bin:$PATH"` leaves them.
+func (g *GateSandbox) gateEnv(vars []string) []string {
+	drop := map[string]bool{"PATH": true, "STUB_LOG": true, "GT_TEST_DOCKER": true}
+	for _, kv := range vars {
+		key, _, _ := strings.Cut(kv, "=")
+		drop[key] = true
+	}
+	env := []string{"PATH=" + g.bin + string(os.PathListSeparator) + os.Getenv("PATH")}
+	for _, kv := range sandboxEnv() {
+		key, _, _ := strings.Cut(kv, "=")
+		if !drop[key] {
+			env = append(env, kv)
+		}
+	}
+	env = append(env, "GT_TEST_DOCKER=1", "STUB_LOG="+g.Path("calls"))
+	return append(env, vars...)
 }
 
 // TestIntegrationSandboxGitIgnoresACallerGitDir checks that the fixture's git
