@@ -29,7 +29,7 @@ a precondition fails after step 2 began; the BEFORE and AFTER row count or table
 4. Mutation proofs: drop the hash comparison, drop the pause marker, rebase main directly instead of the work branch, skip the backup precondition; each turns a named test red.
 5. Measured in the first manual run, not assumed: rebase time for about 24k commits, peak disk use, whether bd clients honor the pause marker or fail while main is absent during the swap.
 
-## First manual run, about 2026-11-03, operator present
+## First manual run (2026-11-02 morning, after L3's first checks), operator present
 Owner of each step in brackets.
 R0 [operator, overseer] Pick the time (a window with the fewest seats busy). Measure and write down: `du -sh ~/gt/.dolt-data/gt`, `du -sh ~/gt/.dolt-data/gt/.dolt/noms/oldgen`, `SELECT COUNT(*) FROM dolt_log`.
 R1 [overseer] Backup: use the 03:00 nightly backup if it finished within 12 hours and names gt (`~/gt-backups/dolt/<date>/backup.json`); otherwise run the same `dolt backup sync-url` the daemon runs (internal/daemon/maintenance_backup.go maintenanceBackupOne) into a dated directory outside the rotation. Check the restore page (docs/dolt-restore.md) lists the restore steps for this database.
