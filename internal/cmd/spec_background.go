@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/imagedrift"
 	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/specdispatch"
@@ -145,10 +146,21 @@ func specNewestSpawn(rosterNewest time.Time, inFlight []specInFlight) time.Time 
 // jobs, and as dispatched entries so the tick's own accounting (the dispatch
 // health, the idle run) sees a tick that dispatched. The sling's own report
 // follows when the daemon has run it.
-func specHandOffPendingSlings(pending []specPendingSling, report *specDispatchReport) {
+func specHandOffPendingSlings(env specDispatchEnv, pending []specPendingSling, report *specDispatchReport) {
 	for _, p := range pending {
 		entry := p.entry
+		// A sling refused for the lagging image a moment ago holds the ones
+		// behind it: no job process is started for them (gt-uisom).
+		held, line, note := env.imageDriftSkip(p.id, p.seat.Agent)
+		if held {
+			entry.Line = line
+			specApplyOutcome(env, report, specSlingOutcome{kind: specSlingSkipped, entry: entry})
+			continue
+		}
 		entry.Line = fmt.Sprintf("%s: sling to %s on %s (%s) started in the background", p.id, p.c.Rig, p.seat.Agent, p.seat.Reason)
+		if note != "" {
+			entry.Line += " (" + note + ")"
+		}
 		report.Dispatched = append(report.Dispatched, entry)
 		report.Pending = append(report.Pending, specSlingJob{
 			Bead: p.id, Rig: p.c.Rig, Agent: p.seat.Agent, Reason: p.seat.Reason,
@@ -288,6 +300,7 @@ func specSlingEnv(townRoot, cacheOwner string, traces *specSlingTraces) specDisp
 		PendingInstall: func(now time.Time) (*installpending.Marker, error) {
 			return installpending.StoreFor(townRoot).Pending(now)
 		},
+		Drift: imagedrift.StoreFor(townRoot),
 	}
 }
 
