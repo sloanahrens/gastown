@@ -33,7 +33,7 @@ const (
 	// that admit the daemon to it.
 	trackerPort = 7433
 	// dnsPort is the cluster DNS port the allow rules open on UDP and TCP. The
-	// DNS pods are labelled k8s-app: kube-dns in kube-system, which is the
+	// DNS pods are labeled k8s-app: kube-dns in kube-system, which is the
 	// standard label on kind and the hosted clusters.
 	dnsPort = 53
 )

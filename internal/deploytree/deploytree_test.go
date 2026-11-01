@@ -273,8 +273,8 @@ func matches(sel selectorSpec, labels map[string]string) bool {
 	return true
 }
 
-// peerAllows reports whether a rule peer admits a pod labelled pod in a
-// namespace labelled ns. A peer with no namespaceSelector admits only pods in
+// peerAllows reports whether a rule peer admits a pod labeled pod in a
+// namespace labeled ns. A peer with no namespaceSelector admits only pods in
 // the policy's own namespace, by name.
 func peerAllows(peer policyPeer, policyNS, ns nsRef, pod map[string]string) bool {
 	if peer.NamespaceSelector != nil {
@@ -313,8 +313,8 @@ func hasType(p networkPolicy, policyType string) bool {
 	return false
 }
 
-// allowsEgress reports whether any of ps admits a pod labelled src in
-// policyNS, selected by the policy, egressing to a pod labelled dst in dstNS on
+// allowsEgress reports whether any of ps admits a pod labeled src in
+// policyNS, selected by the policy, egressing to a pod labeled dst in dstNS on
 // port.
 func allowsEgress(ps map[string]networkPolicy, policyNS nsRef, src map[string]string, dstNS nsRef, dst map[string]string, port policyPort) bool {
 	for _, p := range ps {
@@ -335,8 +335,8 @@ func allowsEgress(ps map[string]networkPolicy, policyNS nsRef, src map[string]st
 	return false
 }
 
-// allowsIngress reports whether any of ps admits a pod labelled src in srcNS
-// reaching a pod labelled dst on port, where the policy selects dst in
+// allowsIngress reports whether any of ps admits a pod labeled src in srcNS
+// reaching a pod labeled dst on port, where the policy selects dst in
 // policyNS.
 func allowsIngress(ps map[string]networkPolicy, policyNS, srcNS nsRef, src map[string]string, dst map[string]string, port policyPort) bool {
 	for _, p := range ps {
