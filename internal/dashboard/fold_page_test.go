@@ -19,7 +19,7 @@ import (
 // saved choice. The list is a constant in the page's script and the operator's
 // to edit; this test pins what the bead asked for, and the rest of this file
 // reads the page's own list rather than assuming it.
-var foldDefaultOpen = []string{"attention", "overseer", "cost", "work", "landings"}
+var foldDefaultOpen = []string{"attention", "overseer", "work", "landings"}
 
 // foldIsDefaultOpen reports whether key is one of the sections the page opens.
 func foldIsDefaultOpen(key string) bool {
@@ -243,17 +243,39 @@ func TestFoldSavedChoiceWinsOverTheDefault(t *testing.T) {
 	wantFold(t, dom.fold(t, "work"), "work", true)  // the default is open
 	wantFold(t, dom.fold(t, "rigs"), "rigs", false) // the default is closed
 
-	dom.press(t, "cost", "click")
+	dom.press(t, "overseer", "click")
 	stored := dom.storage(t)
 	var fold map[string]bool
 	if err := json.Unmarshal([]byte(stored["gt-fold"]), &fold); err != nil {
 		t.Fatalf("the page's saved folds: %v (storage: %v)", err, stored)
 	}
-	if !fold["cost"] {
-		t.Errorf("closing the cost section saved %v, want cost:true", fold)
+	if !fold["overseer"] {
+		t.Errorf("closing the overseer section saved %v, want overseer:true", fold)
 	}
 	again := newPageDOMStoring(t, stored)
-	wantFold(t, again.fold(t, "cost"), "cost", true)
+	wantFold(t, again.fold(t, "overseer"), "overseer", true)
+}
+
+// The Cost panel starts closed on every load: a choice saved by an earlier
+// session, open or closed, does not restore it. The reader's own toggle still
+// works within the page session, and no other panel's default moves
+// (gt-7swd8).
+func TestFoldCostStartsClosedOnEveryLoad(t *testing.T) {
+	t.Parallel()
+
+	for _, saved := range []string{`{}`, `{"cost":false}`, `{"cost":true}`} {
+		dom := newPageDOMStoring(t, map[string]string{"gt-fold": saved})
+		wantFold(t, dom.fold(t, "cost"), "cost", true)
+		// the other panels still follow their own lists
+		wantFold(t, dom.fold(t, "work"), "work", false)
+		wantFold(t, dom.fold(t, "rigs"), "rigs", true)
+	}
+
+	dom := newPageDOMStoring(t, map[string]string{"gt-fold": `{"cost":false}`})
+	dom.press(t, "cost", "click")
+	wantFold(t, dom.fold(t, "cost"), "cost", false)
+	dom.press(t, "cost", "click")
+	wantFold(t, dom.fold(t, "cost"), "cost", true)
 }
 
 // A choice saved before the sections had keys — in gt-collapsed, under the
@@ -336,7 +358,7 @@ func TestFoldSummaryComesFromTheReading(t *testing.T) {
 	dom := newPageDOM(t)
 	dom.press(t, "work", "click")
 	dom.press(t, "attention", "click")
-	dom.press(t, "cost", "click")
+	// Cost starts closed on every load (gt-7swd8): no click needed.
 
 	if _, err := dom.vm.RunString(`state = {
 		summary_at: "2026-10-29T00:00:00Z",
