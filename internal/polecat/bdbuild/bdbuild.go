@@ -224,13 +224,38 @@ func Compile(opt Options, git Git, goBuild Go) (string, error) {
 	}
 	defer removeWorktree(opt.Src, dir, git)
 
+	shortRev, err := buildID(git, dir, commit)
+	if err != nil {
+		return "", err
+	}
+
 	env := buildEnv(opt.Env)
-	// -X main.Commit stamps the commit `bd version --json` reports, the same
-	// variable scripts/refresh-bd-command-tree.sh stamps.
-	if _, err := goBuild(dir, env, "build", "-trimpath", "-ldflags", "-X main.Commit="+commit, "-o", out, Package); err != nil {
+	// -X main.Build and -X main.Commit stamp the two halves of the build id `bd
+	// version` prints, the same variables the beads Makefile stamps. main.Build
+	// is the abbreviation git prints for the commit, so the image's bd reports
+	// the same build id as the host's installed bd (gt-glsx8).
+	ldflags := "-X main.Build=" + shortRev + " -X main.Commit=" + commit
+	if _, err := goBuild(dir, env, "build", "-trimpath", "-ldflags", ldflags, "-o", out, Package); err != nil {
 		return "", fmt.Errorf("cannot build bd at %s: %w", commit, err)
 	}
 	return commit, nil
+}
+
+// buildID returns the value stamped into main.Build: the abbreviation git prints
+// for commit in dir, which git picks from the checkout's object count, so it has
+// the length the host build's abbreviation has. An answer that is not a commit
+// is refused rather than stamped: an empty main.Build makes the image's bd
+// report a build id no host build has.
+func buildID(git Git, dir, commit string) (string, error) {
+	out, err := git(dir, "rev-parse", "--short", commit)
+	if err != nil {
+		return "", fmt.Errorf("cannot read the build id of %s in %s: %w", commit, dir, err)
+	}
+	short := strings.TrimSpace(string(out))
+	if !isCommit(short) {
+		return "", fmt.Errorf("git in %s printed %q as the build id of %s, which is not a 7+ character hex commit", dir, short, commit)
+	}
+	return short, nil
 }
 
 // removeWorktree unregisters dir from src and deletes it. A removal that fails

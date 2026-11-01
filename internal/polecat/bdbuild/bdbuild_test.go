@@ -13,6 +13,9 @@ import (
 const (
 	hostCommit = "39a04940092c1adaa4868cbc62723785a6096860"
 	fullCommit = "3b90ab0c0ffee0000000000000000000000000aa"
+	// shortID is what the fake git answers `rev-parse --short` with: an
+	// abbreviation shorter than the full sha, as git prints one.
+	shortID = "3b90ab0"
 )
 
 // fakeBD answers the store's version report with info and err, and counts the
@@ -35,8 +38,12 @@ type gitCall []string
 // remove it answers removes the worktree directory as git would, so a test can
 // see the worktree is gone.
 type fakeGit struct {
-	revParse  string
-	revErr    error
+	revParse string
+	revErr   error
+	// short answers `rev-parse --short`; shortErr fails that call. An unset
+	// short answers with an empty line, so a test says what the abbreviation is.
+	short     string
+	shortErr  error
 	addErr    error
 	removeErr error
 	// fetchErr fails the fetch; fetchFixes makes the commit appear once a fetch ran.
@@ -52,6 +59,11 @@ func (f *fakeGit) run(dir string, args ...string) ([]byte, error) {
 	case len(args) >= 1 && args[0] == "fetch":
 		f.fetched = true
 		return nil, f.fetchErr
+	case len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--short":
+		if f.shortErr != nil {
+			return nil, f.shortErr
+		}
+		return []byte(f.short + "\n"), nil
 	case len(args) >= 1 && args[0] == "rev-parse":
 		if f.revErr != nil && !(f.fetchFixes && f.fetched) {
 			return nil, f.revErr
@@ -183,7 +195,7 @@ func TestCommitRefusesAVersionItCannotRead(t *testing.T) {
 
 func TestCompileBuildsTheCommitFromACleanWorktree(t *testing.T) {
 	t.Parallel()
-	git := &fakeGit{revParse: fullCommit}
+	git := &fakeGit{revParse: fullCommit, short: shortID}
 	build := &fakeGo{}
 	out := filepath.Join(t.TempDir(), "bd")
 	got, err := Compile(Options{Src: "/beads", Out: out, Commit: hostCommit, BuildDir: t.TempDir()}, git.run, build.run)
@@ -208,7 +220,7 @@ func TestCompileBuildsTheCommitFromACleanWorktree(t *testing.T) {
 	if build.dir != add[4] {
 		t.Errorf("Compile built in %q, want the worktree %q", build.dir, add[4])
 	}
-	wantArgs := []string{"build", "-trimpath", "-ldflags", "-X main.Commit=" + fullCommit, "-o", out, "./cmd/bd"}
+	wantArgs := []string{"build", "-trimpath", "-ldflags", "-X main.Build=" + shortID + " -X main.Commit=" + fullCommit, "-o", out, "./cmd/bd"}
 	if strings.Join(build.args, " ") != strings.Join(wantArgs, " ") {
 		t.Errorf("Compile ran go %v, want %v", build.args, wantArgs)
 	}
@@ -222,9 +234,86 @@ func TestCompileBuildsTheCommitFromACleanWorktree(t *testing.T) {
 	}
 }
 
+// The image's bd must report the same build id as the host's installed bd, or
+// the recorder refuses it, so the build stamps main.Build beside main.Commit
+// the way the beads Makefile does (gt-glsx8).
+func TestBuildStampsTheBuildIDAndTheCommit(t *testing.T) {
+	t.Parallel()
+	git := &fakeGit{revParse: fullCommit, short: shortID}
+	build := &fakeGo{}
+	out := filepath.Join(t.TempDir(), "bd")
+	if _, err := Compile(Options{Src: "/beads", Out: out, Commit: hostCommit, BuildDir: t.TempDir()}, git.run, build.run); err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	add := git.find("worktree", "add")
+	if add == nil {
+		t.Fatalf("Compile did not check the commit out; git calls: %v", git.calls)
+	}
+	short := git.find("rev-parse", "--short")
+	if short == nil {
+		t.Fatalf("Compile did not ask git for the build id; git calls: %v", git.calls)
+	}
+	if short[0] != add[4] || short[3] != fullCommit {
+		t.Errorf("Compile read the build id with %v, want rev-parse --short %s in the worktree %s", short, fullCommit, add[4])
+	}
+	want := "-X main.Build=" + shortID + " -X main.Commit=" + fullCommit
+	i := indexOf(build.args, "-ldflags")
+	if i < 0 || i+1 >= len(build.args) {
+		t.Fatalf("Compile ran go %v with no -ldflags value", build.args)
+	}
+	if ldflags := build.args[i+1]; ldflags != want {
+		t.Errorf("Compile built with -ldflags %q, want %q", ldflags, want)
+	}
+}
+
+// A git that cannot name the commit's abbreviation leaves no build id to stamp,
+// so the build is refused rather than stamped with an empty main.Build.
+func TestCompileRefusesWhenGitCannotNameTheBuildID(t *testing.T) {
+	t.Parallel()
+	git := &fakeGit{revParse: fullCommit, shortErr: errors.New("fatal: bad object")}
+	build := &fakeGo{}
+	_, err := Compile(Options{Src: "/beads", Out: "/out/bd", Commit: fullCommit, BuildDir: t.TempDir()}, git.run, build.run)
+	if err == nil {
+		t.Fatal("Compile built a bd whose build id it could not read")
+	}
+	for _, want := range []string{fullCommit, "bad object"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Compile: error lacks %q: %v", want, err)
+		}
+	}
+	if build.dir != "" {
+		t.Errorf("Compile built in %q after git could not name the build id", build.dir)
+	}
+	if add := git.find("worktree", "add"); add == nil || git.find("worktree", "remove") == nil {
+		t.Errorf("Compile did not remove the worktree after the build id was refused; git calls: %v", git.calls)
+	}
+}
+
+// An abbreviation that is not a commit — empty, or a name git echoed back — is
+// refused: stamped, it would make the image's bd report a build id no host
+// build has.
+func TestCompileRefusesABuildIDThatIsNotACommit(t *testing.T) {
+	t.Parallel()
+	for _, short := range []string{"", "HEAD", "3b90ab"} {
+		git := &fakeGit{revParse: fullCommit, short: short}
+		build := &fakeGo{}
+		_, err := Compile(Options{Src: "/beads", Out: "/out/bd", Commit: fullCommit, BuildDir: t.TempDir()}, git.run, build.run)
+		if err == nil {
+			t.Errorf("Compile stamped %q as the build id", short)
+			continue
+		}
+		if !strings.Contains(err.Error(), "build id") || !strings.Contains(err.Error(), fullCommit) {
+			t.Errorf("Compile(short=%q): error does not name the build id and the commit: %v", short, err)
+		}
+		if build.dir != "" {
+			t.Errorf("Compile(short=%q) built in %q with an unreadable build id", short, build.dir)
+		}
+	}
+}
+
 func TestCompileResolvesARelativeOutputOutsideTheWorktree(t *testing.T) {
 	t.Parallel()
-	git := &fakeGit{revParse: fullCommit}
+	git := &fakeGit{revParse: fullCommit, short: shortID}
 	build := &fakeGo{}
 	if _, err := Compile(Options{Src: "/beads", Out: "deploy/polecat/bin/bd", Commit: fullCommit, BuildDir: t.TempDir()}, git.run, build.run); err != nil {
 		t.Fatalf("Compile: %v", err)
@@ -247,7 +336,7 @@ func TestCompileResolvesARelativeOutputOutsideTheWorktree(t *testing.T) {
 
 func TestCompileDropsHostVariablesThatChangeTheBuild(t *testing.T) {
 	t.Parallel()
-	git := &fakeGit{revParse: fullCommit}
+	git := &fakeGit{revParse: fullCommit, short: shortID}
 	build := &fakeGo{}
 	host := []string{
 		"PATH=/usr/bin:/bin",
@@ -307,7 +396,7 @@ func TestCompileRefusesACommitTheCheckoutDoesNotHold(t *testing.T) {
 
 func TestCompileRemovesTheWorktreeWhenTheBuildFails(t *testing.T) {
 	t.Parallel()
-	git := &fakeGit{revParse: fullCommit}
+	git := &fakeGit{revParse: fullCommit, short: shortID}
 	build := &fakeGo{err: errors.New("exit status 1")}
 	_, err := Compile(Options{Src: "/beads", Out: "/out/bd", Commit: fullCommit, BuildDir: t.TempDir()}, git.run, build.run)
 	if err == nil || !strings.Contains(err.Error(), fullCommit) {
@@ -320,7 +409,7 @@ func TestCompileRemovesTheWorktreeWhenTheBuildFails(t *testing.T) {
 
 func TestCompileDeletesTheWorktreeWhenGitCannotRemoveIt(t *testing.T) {
 	t.Parallel()
-	git := &fakeGit{revParse: fullCommit, removeErr: errors.New("exit status 1")}
+	git := &fakeGit{revParse: fullCommit, short: shortID, removeErr: errors.New("exit status 1")}
 	build := &fakeGo{}
 	if _, err := Compile(Options{Src: "/beads", Out: "/out/bd", Commit: fullCommit, BuildDir: t.TempDir()}, git.run, build.run); err != nil {
 		t.Fatalf("Compile: %v", err)
@@ -339,7 +428,7 @@ func TestCompileDeletesTheWorktreeWhenGitCannotRemoveIt(t *testing.T) {
 
 func TestCompileNamesWhatItCannotBuild(t *testing.T) {
 	t.Parallel()
-	git := &fakeGit{revParse: fullCommit}
+	git := &fakeGit{revParse: fullCommit, short: shortID}
 	build := &fakeGo{}
 	for _, opt := range []Options{
 		{Out: "/out/bd", Commit: fullCommit},
@@ -358,7 +447,7 @@ func TestCompileNamesWhatItCannotBuild(t *testing.T) {
 func TestCompilePutsTheWorktreeUnderTheBuildDir(t *testing.T) {
 	t.Parallel()
 	buildDir := t.TempDir()
-	git := &fakeGit{revParse: fullCommit}
+	git := &fakeGit{revParse: fullCommit, short: shortID}
 	build := &fakeGo{}
 	if _, err := Compile(Options{Src: "/beads", Out: "/out/bd", Commit: fullCommit, BuildDir: buildDir}, git.run, build.run); err != nil {
 		t.Fatalf("Compile: %v", err)
@@ -391,6 +480,16 @@ func contains(list []string, want string) bool {
 	return false
 }
 
+// indexOf returns the position of want in list, or -1.
+func indexOf(list []string, want string) int {
+	for i, s := range list {
+		if s == want {
+			return i
+		}
+	}
+	return -1
+}
+
 func countCalls(g *fakeGit, verb string) int {
 	n := 0
 	for _, c := range g.calls {
@@ -405,7 +504,7 @@ func countCalls(g *fakeGit, verb string) int {
 // build goes ahead when the fetch brought it in (gt-pme82).
 func TestCompileFetchesOnceWhenTheCommitIsMissingThenBuilds(t *testing.T) {
 	t.Parallel()
-	git := &fakeGit{revParse: fullCommit, revErr: errors.New("fatal: Needed a single revision"), fetchFixes: true}
+	git := &fakeGit{revParse: fullCommit, short: shortID, revErr: errors.New("fatal: Needed a single revision"), fetchFixes: true}
 	build := &fakeGo{}
 	got, err := Compile(Options{Src: "/beads", Out: "/out/bd", Commit: fullCommit, BuildDir: t.TempDir()}, git.run, build.run)
 	if err != nil {
@@ -424,8 +523,8 @@ func TestCompileFetchesOnceWhenTheCommitIsMissingThenBuilds(t *testing.T) {
 	if n := countCalls(git, "fetch"); n != 1 {
 		t.Errorf("Compile fetched %d times, want once", n)
 	}
-	if n := countCalls(git, "rev-parse"); n != 2 {
-		t.Errorf("Compile looked the commit up %d times, want twice (before and after the fetch)", n)
+	if n := countCalls(git, "rev-parse"); n != 3 {
+		t.Errorf("Compile ran rev-parse %d times, want three (the lookup before and after the fetch, and the build id)", n)
 	}
 	if build.dir == "" {
 		t.Error("Compile did not build after the fetch brought the commit in")
@@ -435,7 +534,7 @@ func TestCompileFetchesOnceWhenTheCommitIsMissingThenBuilds(t *testing.T) {
 // A commit the checkout already holds costs no fetch.
 func TestCompileDoesNotFetchWhenTheCommitIsPresent(t *testing.T) {
 	t.Parallel()
-	git := &fakeGit{revParse: fullCommit}
+	git := &fakeGit{revParse: fullCommit, short: shortID}
 	build := &fakeGo{}
 	if _, err := Compile(Options{Src: "/beads", Out: "/out/bd", Commit: fullCommit, BuildDir: t.TempDir()}, git.run, build.run); err != nil {
 		t.Fatalf("Compile: %v", err)

@@ -403,8 +403,16 @@ func TestBDPinMatchesThePolecatImageFlow(t *testing.T) {
 	}
 	// Drop the leading "go": bdbuild's argv starts at the go subcommand.
 	got := run.calls[1].argv[1:]
-	if !reflect.DeepEqual(withOut(got), withOut(compiled)) {
+	// The stamps differ on purpose: the polecat image's bd carries the host
+	// build id in main.Build beside main.Commit (gt-glsx8), the daemon image's bd
+	// the commit alone. The source, package and flags stay pinned, and the
+	// daemon image's own stamp is asserted below, so a build that drops it still
+	// fails here. The polecat side's stamp is bdbuild's own tests' to assert.
+	if !reflect.DeepEqual(withOut(withoutLdflags(got)), withOut(withoutLdflags(compiled))) {
 		t.Errorf("the daemon image builds bd with %q, the polecat image with %q", got, compiled)
+	}
+	if want := []string{bdCommitFlag + testBDCommit}; !reflect.DeepEqual(ldflagsOf(run.calls[1].argv), want) {
+		t.Errorf("the daemon image stamps bd with %q, want %q", ldflagsOf(run.calls[1].argv), want)
 	}
 }
 
