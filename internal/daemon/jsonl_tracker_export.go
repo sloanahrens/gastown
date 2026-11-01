@@ -47,6 +47,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/backend"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/tracker/api"
 	"github.com/steveyegge/gastown/tracker/client"
@@ -213,21 +214,17 @@ func (d *Daemon) jsonlTrackerRoutes() trackerRoutes {
 	return readTrackerRoutes(d.config.TownRoot)
 }
 
-// trackerExporterFromEnv builds the production exporter: a tracker client from
-// the daemon's environment, whose settings are the ones internal/beads/backend
-// reads for a tracker rig (TRACKER_URL, and TRACKER_TOKEN or
-// TRACKER_TOKEN_FILE). The error names the setting that is missing and never a
-// token's value.
-func trackerExporterFromEnv(getenv func(string) string) trackerRigExporter {
+// trackerExporter builds the production exporter: a tracker client for the
+// daemon, on the town's admin credential (backend.TownConfig). The export route
+// is admin-only, so a seat token in the daemon's environment is not used. The
+// error names the setting that is missing and never a token's value.
+func trackerExporter(townRoot string, getenv func(string) string) trackerRigExporter {
 	return func(ctx context.Context, rig string, emit func(api.ExportRecord) error) error {
-		cfg := client.FromEnv(getenv)
-		if cfg.BaseURL == "" {
-			return fmt.Errorf("rig %s is on the tracker but TRACKER_URL is not set", rig)
+		cfg, err := backend.TownConfig(townRoot, getenv)
+		if err != nil {
+			return fmt.Errorf("rig %s is on the tracker but %w", rig, err)
 		}
-		if cfg.Token == "" && cfg.TokenFile == "" {
-			return fmt.Errorf("rig %s is on the tracker but neither TRACKER_TOKEN nor TRACKER_TOKEN_FILE is set", rig)
-		}
-		c, err := client.New(cfg)
+		c, err := client.New(cfg.Tracker)
 		if err != nil {
 			return fmt.Errorf("rig %s: %w", rig, err)
 		}
@@ -248,7 +245,11 @@ func trackerExporterFromEnv(getenv func(string) string) trackerRigExporter {
 func (d *Daemon) exportTrackerDatabaseToJsonl(rig, db, dbDir string) (int, error) {
 	export := d.jsonlTrackerExportFn
 	if export == nil {
-		export = trackerExporterFromEnv(os.Getenv)
+		townRoot := ""
+		if d.config != nil {
+			townRoot = d.config.TownRoot
+		}
+		export = trackerExporter(townRoot, os.Getenv)
 	}
 	spool := newTrackerSpool(dbDir)
 	defer spool.discard()

@@ -1045,28 +1045,49 @@ func TestSyncJsonlGitBackupTrackerFlipCommitsAMarkedCount(t *testing.T) {
 	}
 }
 
+// writeDaemonEnv writes the town's settings/daemon.env, where the admin
+// credential is kept, with the file's 0600 mode.
+func writeDaemonEnv(t *testing.T, townRoot, body string) {
+	t.Helper()
+	dir := filepath.Join(townRoot, "settings")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "daemon.env"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestTrackerExporterRefusesSettingsItCannotReach: a tracker rig with no
-// endpoint, no token or an unusable endpoint fails its export and says what is
-// wrong; it never falls back to the Dolt database the rig left behind.
+// endpoint, no admin credential or an unusable endpoint fails its export and
+// says what is wrong; it never falls back to the Dolt database the rig left
+// behind. A seat token in the environment is not the daemon's credential.
 func TestTrackerExporterRefusesSettingsItCannotReach(t *testing.T) {
 	t.Parallel()
+	const adminLine = "TRACKER_ADMIN_TOKEN=admin-secret\n"
 	cases := []struct {
-		name string
-		env  map[string]string
-		want string
+		name      string
+		env       map[string]string
+		daemonEnv string
+		want      string
 	}{
-		{"no endpoint", nil, "TRACKER_URL is not set"},
-		{"an endpoint with no token", map[string]string{"TRACKER_URL": "https://tracker.example"}, "TRACKER_TOKEN"},
+		{"no endpoint", nil, adminLine, "TRACKER_URL is not set"},
+		{"an endpoint with no admin credential", map[string]string{"TRACKER_URL": "https://tracker.example"}, "", "TRACKER_ADMIN_TOKEN is not set"},
 		{
-			"an endpoint that is not a URL",
-			map[string]string{"TRACKER_URL": "not-a-url", "TRACKER_TOKEN": "secret"},
-			"is not a URL with a host",
+			"a seat token is not the daemon's credential",
+			map[string]string{"TRACKER_URL": "https://tracker.example", "TRACKER_TOKEN": "seat-secret"},
+			"", "TRACKER_ADMIN_TOKEN is not set",
 		},
+		{"an endpoint that is not a URL", map[string]string{"TRACKER_URL": "not-a-url"}, adminLine, "is not a URL with a host"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			export := trackerExporterFromEnv(func(key string) string { return c.env[key] })
+			townRoot := t.TempDir()
+			if c.daemonEnv != "" {
+				writeDaemonEnv(t, townRoot, c.daemonEnv)
+			}
+			export := trackerExporter(townRoot, func(key string) string { return c.env[key] })
 			err := export(t.Context(), "al", func(api.ExportRecord) error { return nil })
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("export = %v, want an error naming %q", err, c.want)

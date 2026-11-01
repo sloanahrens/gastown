@@ -15,6 +15,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/trackerclient"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/tracker/client"
 )
 
@@ -36,6 +37,42 @@ type Config struct{ Tracker client.Config }
 
 // FromEnv reads the tracker settings from getenv.
 func FromEnv(getenv func(string) string) Config { return Config{Tracker: client.FromEnv(getenv)} }
+
+// TownConfig reads the tracker settings of a town-side process, the daemon's
+// export and the reaper's purge. Their token is the admin-scope credential in
+// the town's settings/daemon.env, because the routes they call (POST
+// /v1/export, POST /v1/wisps:purge) are admin-only. The endpoint still comes
+// from TRACKER_URL. TRACKER_TOKEN and TRACKER_TOKEN_FILE are a seat's token and
+// are never read here, so a seat token in the daemon's environment cannot be
+// the one these calls use.
+func TownConfig(townRoot string, getenv func(string) string) (Config, error) {
+	return townConfig(townRoot, getenv, config.LoadTrackerAdminToken)
+}
+
+// townConfig is TownConfig reading the admin credential through load, so a
+// test can drive a loader that yields no credential without a settings file.
+func townConfig(townRoot string, getenv func(string) string, load func(string) (config.TrackerAdminToken, error)) (Config, error) {
+	baseURL := getenv("TRACKER_URL")
+	if baseURL == "" {
+		return Config{}, errors.New("TRACKER_URL is not set")
+	}
+	if townRoot == "" {
+		return Config{}, errors.New("no town root, so the tracker admin credential cannot be read")
+	}
+	admin, err := load(townRoot)
+	if err != nil {
+		return Config{}, err
+	}
+	secret, ok := admin.Reveal()
+	if !ok {
+		return Config{}, errors.New("the tracker admin credential is not valid")
+	}
+	return Config{Tracker: client.Config{
+		BaseURL:       baseURL,
+		AllowHTTPHost: getenv("TRACKER_ALLOW_HTTP_HOST"),
+		Token:         secret,
+	}}, nil
+}
 
 // Open opens the rig whose beads directory is beadsDir. townRoot holds the
 // route table (townRoot/.beads/routes.jsonl). A rig the table does not name,

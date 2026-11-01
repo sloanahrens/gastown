@@ -7,8 +7,10 @@ import (
 )
 
 // trackerAdminTokenKey is the settings/daemon.env name of the tracker admin
-// credential. Only host processes that issue or revoke seat tokens read it;
-// no seat environment builder does (gt-p85pw.79).
+// credential. Only town-side host processes read it: the ones that issue or
+// revoke seat tokens, and the daemon's export and the reaper's purge, whose
+// routes are admin-only (backend.TownConfig). No seat environment builder does
+// (gt-p85pw.79).
 const trackerAdminTokenKey = "TRACKER_ADMIN_TOKEN"
 
 // trackerAdminRedacted is what every formatted view of the credential prints.
