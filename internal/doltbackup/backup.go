@@ -28,7 +28,7 @@ import (
 
 const (
 	// Keep is how many nightly backups rotation leaves.
-	Keep = 7
+	Keep = 14
 
 	// StaleAfter is the age past which the newest backup counts as stale:
 	// one missed night plus the window's slack.
