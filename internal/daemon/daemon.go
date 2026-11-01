@@ -3532,14 +3532,18 @@ func KillOrphanedDaemons(townRoot string) (int, error) {
 // When a crash is detected, the polecat is automatically restarted.
 // This provides faster recovery than waiting for GUPP timeout or Witness detection.
 func (d *Daemon) checkPolecatSessionHealth() {
+	times := &seatTimes{}
 	d.rigPool.runPerRig(d.ctx, d.getKnownRigs(), func(ctx context.Context, rigName string) error {
-		d.checkRigPolecatHealth(rigName)
+		d.checkRigPolecatHealth(rigName, times)
 		return nil
 	})
+	if len(times.seats) > 0 {
+		d.logger.Println(times.summary())
+	}
 }
 
 // checkRigPolecatHealth checks polecat session health for a specific rig.
-func (d *Daemon) checkRigPolecatHealth(rigName string) {
+func (d *Daemon) checkRigPolecatHealth(rigName string, times *seatTimes) {
 	// Get polecat directories for this rig
 	polecatsDir := filepath.Join(d.config.TownRoot, rigName, "polecats")
 	polecats, err := listPolecatWorktrees(polecatsDir)
@@ -3548,7 +3552,14 @@ func (d *Daemon) checkRigPolecatHealth(rigName string) {
 	}
 
 	for _, polecatName := range polecats {
-		d.checkPolecatHealth(rigName, polecatName)
+		tm := &seatTimer{}
+		start := d.clk().Now()
+		d.checkPolecatHealthTimed(rigName, polecatName, tm)
+		took := d.clk().Since(start)
+		times.add(rigName, polecatName, took)
+		if took >= slowSeatCheck {
+			d.logger.Println(slowSeatLine(rigName, polecatName, took, tm))
+		}
 	}
 }
 
@@ -3603,6 +3614,12 @@ func rigLEDLegend() string {
 // checkPolecatHealth checks a single polecat's session health.
 // If the polecat has work-on-hook but the tmux session is dead, it's restarted.
 func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
+	d.checkPolecatHealthTimed(rigName, polecatName, &seatTimer{})
+}
+
+// checkPolecatHealthTimed is checkPolecatHealth charging its tmux and bd calls
+// to tm (gt-2a5z6).
+func (d *Daemon) checkPolecatHealthTimed(rigName, polecatName string, tm *seatTimer) {
 	// The seat's intent record says whether it is held and, when a writer
 	// set it, what work it holds. It is read before tmux and never from
 	// Dolt, and an unreadable record is a hold (fail closed). A polecat the
@@ -3629,7 +3646,10 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 		// operator recovers it.
 		now := time.Now()
 		if parked, st, perr := agentpause.IsPaused(d.config.TownRoot, rigName, constants.RolePolecat, polecatName); err == nil && perr == nil && parked && agentpause.ParkedStale(st, now) {
-			if alive, serr := d.tmux.HasSession(sessionName); serr == nil && !alive {
+			var alive bool
+			var serr error
+			d.timeSeatCall(tm, seatTmux, func() { alive, serr = d.tmux.HasSession(sessionName) })
+			if serr == nil && !alive {
 				age := parkedAge(now.Sub(st.PausedAt))
 				d.crashSkipLog.logAs(d.logger.Printf, rigName+"/"+polecatName, "parked-released",
 					fmt.Sprintf("Skipping crash detection for %s/%s: polecat seat paused %s ago (%s); seat released; recover with gt polecat check-recovery %s/%s; this is the seat, not the rig (gt rig status %s: %s)",
@@ -3655,7 +3675,9 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	// nothing, and falling through on it would call a landing still in flight
 	// a crash.
 	if rec.Submitted() {
-		if still, known := d.workBeadStillSubmitted(rigName, rec.WorkBead); !known || still {
+		var still, known bool
+		d.timeSeatCall(tm, seatBD, func() { still, known = d.workBeadStillSubmitted(rigName, rec.WorkBead) })
+		if !known || still {
 			skipped = true
 			d.crashSkipLog.logf(d.logger.Printf, rigName+"/"+polecatName, "Skipping crash detection for %s/%s: work %s is submitted for landing",
 				rigName, polecatName, rec.WorkBead)
@@ -3664,7 +3686,8 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	}
 
 	// Check if tmux session exists
-	sessionAlive, err := d.tmux.HasSession(sessionName)
+	var sessionAlive bool
+	d.timeSeatCall(tm, seatTmux, func() { sessionAlive, err = d.tmux.HasSession(sessionName) })
 	if err != nil {
 		d.logger.Printf("Error checking session %s: %v", sessionName, err)
 		return
@@ -3684,7 +3707,9 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	hookBead := rec.WorkBead
 	if hookBead == "" {
 		assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
-		work, werr := d.assignedActiveWorkBead(rigName, assignee)
+		var work string
+		var werr error
+		d.timeSeatCall(tm, seatBD, func() { work, werr = d.assignedActiveWorkBead(rigName, assignee) })
 		if werr != nil {
 			d.logger.Printf("UNKNOWN: crash detection for %s/%s skipped: session %s is dead and assigned work could not be read: %v",
 				rigName, polecatName, sessionName, werr)
@@ -3701,7 +3726,9 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	// Finished work: gt done closes the work bead before the session stops,
 	// so a dead session holding closed work completed normally. The same read
 	// dates the bead, which is what the spawn grace below measures.
-	closed, submitted, workUpdated := d.beadFinished(hookBead)
+	var closed, submitted bool
+	var workUpdated time.Time
+	d.timeSeatCall(tm, seatBD, func() { closed, submitted, workUpdated = d.beadFinished(hookBead) })
 	if closed {
 		skipped = true
 		d.crashSkipLog.logf(d.logger.Printf, rigName+"/"+polecatName, "Skipping crash detection for %s/%s: hook_bead %s is already closed (work completed normally)",
@@ -3743,7 +3770,10 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	// longer than the window earns nothing (gt-i3ky2).
 	if !workUpdated.IsZero() {
 		if age := time.Since(workUpdated); age < polecatSpawnGrace {
-			if rec, ok := d.polecatAgentRecord(rigName, polecatName); ok &&
+			var rec patrolscan.AgentRecord
+			var ok bool
+			d.timeSeatCall(tm, seatBD, func() { rec, ok = d.polecatAgentRecord(rigName, polecatName) })
+			if ok &&
 				polecat.SpawnGrace(rec.State, workUpdated, time.Now(), polecatSpawnGrace) &&
 				polecat.SpawnGrace(rec.State, rec.UpdatedAt, time.Now(), polecatSpawnGrace) {
 				skipped = true
@@ -3757,7 +3787,8 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	// TOCTOU guard: re-verify session is still dead before restarting.
 	// Between the initial check and now, the session may have been restarted
 	// by another heartbeat cycle, witness, or the polecat itself.
-	sessionRevived, err := d.tmux.HasSession(sessionName)
+	var sessionRevived bool
+	d.timeSeatCall(tm, seatTmux, func() { sessionRevived, err = d.tmux.HasSession(sessionName) })
 	if err == nil && sessionRevived {
 		return // Session came back - no restart needed
 	}
