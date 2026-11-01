@@ -19,6 +19,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/steveyegge/gastown/internal/daemonlog"
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/landings"
@@ -415,11 +416,18 @@ type omReader struct {
 	procs      omProcLister
 	polecatFor func(rig, bead string) string
 
-	rigMu    sync.Mutex // guards the cached read of the rig's .om.json
-	rigCfg   omRigRead
-	rigAt    time.Time
-	mu       sync.Mutex
-	offset   int64
+	rigMu  sync.Mutex // guards the cached read of the rig's .om.json
+	rigCfg omRigRead
+	rigAt  time.Time
+	mu     sync.Mutex
+	offset int64
+	// now is the clock the rotated-log window is cut against; nil reads time.Now.
+	now func() time.Time
+	// rotated holds each rotated log read already, by file name, and what
+	// failed on it: a rotated file never changes, so it is read once, and a
+	// failed one is reported every scan and not read again (its good lines
+	// are already kept).
+	rotated  map[string]error
 	stages   []omStage
 	rejects  []omRejection
 	merges   map[string]omMerge  // bead -> its latest merge, live until it ends
@@ -674,9 +682,68 @@ func loadOMConfig(path string) omConfig {
 	return c
 }
 
-// scanLog reads what the daemon log gained since the last scan. A log that
-// shrank was rotated: it is read from the top, and what was kept stays kept.
+// omRotatedWindow is how far back the rotated daemon logs are read: the
+// panels' 24 hours and an hour of margin for the stage line that joins a
+// rejection (a rotated log holds only lines older than its stamp).
+const omRotatedWindow = 25 * time.Hour
+
+// scanLog reads the rotated daemon logs inside the window, each once, oldest
+// first, then what the live log gained since the last scan. A daemon restart
+// rotates the live log to daemon-<stamp>.log.gz, so without the rotated files
+// the rejections and stage times of the day restart from zero after every
+// install. A rotated file that cannot be read is reported in the returned
+// error on every scan, beside whatever the live log gave.
 func (r *omReader) scanLog() error {
+	rotErr := r.scanRotated()
+	if err := r.scanCurrent(); err != nil {
+		return err
+	}
+	return rotErr
+}
+
+// scanRotated reads the rotated logs next to the live log that no earlier scan
+// has read. The dispatcher's tick lines are not taken from them: the latest
+// tick is the live log's, and an old one would read as current.
+func (r *omReader) scanRotated() error {
+	now := time.Now
+	if r.now != nil {
+		now = r.now
+	}
+	if r.rotated == nil {
+		r.rotated = map[string]error{}
+	}
+	var errs []error
+	for _, path := range daemonlog.Backups(filepath.Dir(r.logPath), now().Add(-omRotatedWindow)) {
+		name := filepath.Base(path)
+		if prev, done := r.rotated[name]; done {
+			if prev != nil {
+				errs = append(errs, prev)
+			}
+			continue
+		}
+		err := daemonlog.ReadBackup(path, func(line string) {
+			if strings.Contains(line, dispatchTickMarker) || !omWantedLine(line) {
+				return
+			}
+			r.parseLogLine(line)
+		})
+		if err != nil {
+			err = fmt.Errorf("rotated log %s: %w", name, err)
+			errs = append(errs, err)
+		}
+		r.rotated[name] = err
+	}
+	return errors.Join(errs...)
+}
+
+// omWantedLine is the prefilter: the lines parseLogLine has a rule for.
+func omWantedLine(line string) bool {
+	return strings.Contains(line, "[land]") || strings.Contains(line, infraFailedMarker) || strings.Contains(line, dispatchTickMarker) || strings.Contains(line, daemonStartMarker)
+}
+
+// scanCurrent reads what the live daemon log gained since the last scan. A log
+// that shrank was rotated: it is read from the top, and what was kept stays kept.
+func (r *omReader) scanCurrent() error {
 	f, err := os.Open(r.logPath)
 	if err != nil {
 		return err
@@ -704,7 +771,7 @@ func (r *omReader) scanLog() error {
 			return err
 		}
 		r.offset += int64(len(line))
-		if !strings.Contains(line, "[land]") && !strings.Contains(line, infraFailedMarker) && !strings.Contains(line, dispatchTickMarker) && !strings.Contains(line, daemonStartMarker) {
+		if !omWantedLine(line) {
 			continue
 		}
 		r.parseLogLine(strings.TrimRight(line, "\r\n"))
