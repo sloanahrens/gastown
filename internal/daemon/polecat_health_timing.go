@@ -93,7 +93,15 @@ func (s *seatTimes) summary() string {
 // slowSeatLine is the line for one seat that took slowSeatCheck or more, with
 // the split between its tmux and its bd calls.
 func slowSeatLine(rig, polecat string, took time.Duration, tm *seatTimer) string {
-	return fmt.Sprintf("polecat-health: %s/%s took %s (tmux %s in %d calls, bd %s in %d calls)",
+	return fmt.Sprintf("polecat-health: %s/%s took %s (tmux %s in %s, bd %s in %s)",
 		rig, polecat, took.Round(time.Millisecond),
-		tm.tmux.Round(time.Millisecond), tm.tmuxCalls, tm.bd.Round(time.Millisecond), tm.bdCalls)
+		tm.tmux.Round(time.Millisecond), callCount(tm.tmuxCalls), tm.bd.Round(time.Millisecond), callCount(tm.bdCalls))
+}
+
+// callCount is "1 call" or "N calls".
+func callCount(n int) string {
+	if n == 1 {
+		return "1 call"
+	}
+	return fmt.Sprintf("%d calls", n)
 }
