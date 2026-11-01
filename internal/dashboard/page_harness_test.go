@@ -70,7 +70,7 @@ __sectionSpec.forEach(function (sp) {
 });
 function __cls(e, c) { return (" " + (e.className || "") + " ").indexOf(" " + c + " ") >= 0; }
 function __walk(e, fn) {
-  for (var i = 0; i < (e.children || []).length; i++) { fn(e.children[i]); __walk(e.children[i], fn); }
+  for (var i = 0; i < (e._kids || []).length; i++) { fn(e._kids[i]); __walk(e._kids[i], fn); }
 }
 // __rowCount is how many table rows sit under an element: the height a scroll
 // range is measured from, since the stub draws nothing.
@@ -87,8 +87,8 @@ function __find(e, sel) {
   sel = String(sel).trim();
   if (sel.indexOf(":scope > ") === 0) {
     var tag = sel.slice(9).trim().toLowerCase();
-    for (var i = 0; i < (e.children || []).length; i++) {
-      var c = e.children[i];
+    for (var i = 0; i < (e._kids || []).length; i++) {
+      var c = e._kids[i];
       if (c.tagName && c.tagName.toLowerCase() === tag) return c;
     }
     return null;
@@ -110,7 +110,7 @@ function __fireOn(e, type, ev) {
 }
 function __el(tag) {
   var e = {
-    tagName: String(tag).toUpperCase(), children: [], _text: "",
+    tagName: String(tag).toUpperCase(), _kids: [], _text: "",
     className: "", title: "", hidden: false, tabIndex: 0,
     dataset: {},
     // The Deploys block sets its ch-based column widths through style, so the
@@ -131,24 +131,35 @@ function __el(tag) {
     // parentNode is what closest walks: the browser fills it in on append, and
     // the fold is the one handler that asks what a click landed on.
     parentNode: null,
-    get childElementCount() { return this.children.length; },
-    get firstChild() { return this.children.length ? this.children[0] : null; },
+    // children answers what a browser's HTMLCollection does and no more: a length,
+    // an index, item() and iteration. It has no map, forEach, filter or find, so a
+    // page that calls an array method on it throws here as it would in a browser
+    // (gt-bqxpz). A test that wants the array reads children.__arr.
+    get children() {
+      var k = this._kids, o = { length: k.length, item: function (i) { return k[i] || null; } };
+      for (var i = 0; i < k.length; i++) o[i] = k[i];
+      Object.defineProperty(o, "__arr", { value: k.slice() });
+      o[Symbol.iterator] = function () { return k[Symbol.iterator](); };
+      return o;
+    },
+    get childElementCount() { return this._kids.length; },
+    get firstChild() { return this._kids.length ? this._kids[0] : null; },
     get textContent() {
-      if (this.children.length) {
+      if (this._kids.length) {
         var s = "";
-        for (var i = 0; i < this.children.length; i++) s += this.children[i].textContent;
+        for (var i = 0; i < this._kids.length; i++) s += this._kids[i].textContent;
         return s;
       }
       return this._text;
     },
-    set textContent(v) { this.children = []; this._text = v == null ? "" : String(v); },
-    append: function () { for (var i = 0; i < arguments.length; i++) { arguments[i].parentNode = this; this.children.push(arguments[i]); } },
-    appendChild: function (n) { n.parentNode = this; this.children.push(n); return n; },
-    prepend: function () { for (var i = arguments.length - 1; i >= 0; i--) { arguments[i].parentNode = this; this.children.unshift(arguments[i]); } },
+    set textContent(v) { this._kids = []; this._text = v == null ? "" : String(v); },
+    append: function () { for (var i = 0; i < arguments.length; i++) { arguments[i].parentNode = this; this._kids.push(arguments[i]); } },
+    appendChild: function (n) { n.parentNode = this; this._kids.push(n); return n; },
+    prepend: function () { for (var i = arguments.length - 1; i >= 0; i--) { arguments[i].parentNode = this; this._kids.unshift(arguments[i]); } },
     replaceChildren: function () {
-      this.children = [];
+      this._kids = [];
       this._text = "";
-      for (var i = 0; i < arguments.length; i++) { arguments[i].parentNode = this; this.children.push(arguments[i]); }
+      for (var i = 0; i < arguments.length; i++) { arguments[i].parentNode = this; this._kids.push(arguments[i]); }
     },
     remove: function () {},
     focus: function () { document.activeElement = this; },

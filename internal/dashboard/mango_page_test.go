@@ -1782,8 +1782,8 @@ func mangoColumnWidths(t *testing.T, dom *pageDOM, tablePx float64) ([]float64, 
 	t.Helper()
 
 	const expr = `JSON.stringify((function () {
-  var table = __byId["mango"].children.find(function (c) { return String(c.className).split(" ").indexOf("mgtable") >= 0; });
-  return table.children[0].children[0].children.map(function (th) { return {text: th.textContent, class: th.className}; });
+  var table = __byId["mango"].children.__arr.find(function (c) { return String(c.className).split(" ").indexOf("mgtable") >= 0; });
+  return table.children[0].children[0].children.__arr.map(function (th) { return {text: th.textContent, class: th.className}; });
 })())`
 	v, err := dom.vm.RunString(expr)
 	if err != nil {
@@ -2073,9 +2073,9 @@ func mangoRows(t *testing.T, dom *pageDOM) [][]mangoNode {
 	t.Helper()
 
 	const expr = `JSON.stringify((function () {
-  var table = __byId["mango"].children.find(function (c) { return String(c.className).split(" ").indexOf("mgtable") >= 0; });
-  return table.children[1].children.map(function (tr) {
-    return tr.children.map(function (td) {
+  var table = __byId["mango"].children.__arr.find(function (c) { return String(c.className).split(" ").indexOf("mgtable") >= 0; });
+  return table.children[1].children.__arr.map(function (tr) {
+    return tr.children.__arr.map(function (td) {
       return (function walk(n, chain) {
         var here = chain.concat(String(n.className || "").split(" ").filter(function (x) { return x; }));
         return {
@@ -2084,7 +2084,7 @@ func mangoRows(t *testing.T, dom *pageDOM) [][]mangoNode {
           classes: here,
           text: n.children.length ? "" : String(n.textContent || ""),
           all: String(n.textContent || ""),
-          kids: n.children.map(function (c) { return walk(c, here); })
+          kids: n.children.__arr.map(function (c) { return walk(c, here); })
         };
       })(td, []);
     });
@@ -2627,10 +2627,10 @@ func mangoBodyLabels(t *testing.T, dom *pageDOM, label string) []string {
 	t.Helper()
 
 	v, err := dom.vm.RunString(`JSON.stringify((function () {
-  var table = __byId["mango"].children.find(function (c) { return String(c.className).split(" ").indexOf("mgtable") >= 0; });
-  var row = table.children[1].children.find(function (tr) { return String(tr.children[0].textContent) === ` + quoteJS(label) + `; });
+  var table = __byId["mango"].children.__arr.find(function (c) { return String(c.className).split(" ").indexOf("mgtable") >= 0; });
+  var row = table.children[1].children.__arr.find(function (tr) { return String(tr.children[0].textContent) === ` + quoteJS(label) + `; });
   if (!row) return [];
-  return row.children.map(function (td) { return String(td.getAttribute("data-label") || ""); });
+  return row.children.__arr.map(function (td) { return String(td.getAttribute("data-label") || ""); });
 })())`)
 	if err != nil {
 		t.Fatalf("reading the target row's data-labels: %v", err)

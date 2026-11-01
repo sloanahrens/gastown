@@ -29,7 +29,7 @@ type overseerBlock struct {
 func overseerBlocks(t *testing.T, dom *pageDOM) []overseerBlock {
 	t.Helper()
 
-	v, err := dom.vm.RunString(`JSON.stringify(__byId["overseer"].children.map(b => ({
+	v, err := dom.vm.RunString(`JSON.stringify(__byId["overseer"].children.__arr.map(b => ({
 		name: b.children[0].children[0].textContent, note: b.children[0].children[1].textContent,
 		text: b.children[1].textContent})))`)
 	if err != nil {
@@ -64,11 +64,11 @@ func blockTable(t *testing.T, dom *pageDOM, name string) [][]string {
 	t.Helper()
 
 	js := `JSON.stringify((() => {
-		const b = __byId["overseer"].children.find(x => x.children[0].children[0].textContent === ` + strconv.Quote(name) + `);
+		const b = __byId["overseer"].children.__arr.find(x => x.children[0].children[0].textContent === ` + strconv.Quote(name) + `);
 		if (!b) return null;
-		const t = b.children[1].children.find(c => c.tagName === "TABLE");
+		const t = b.children[1].children.__arr.find(c => c.tagName === "TABLE");
 		if (!t) return null;
-		return t.children.map(tr => tr.children.map(td => td.textContent));
+		return t.children.__arr.map(tr => tr.children.__arr.map(td => td.textContent));
 	})())`
 	v, err := dom.vm.RunString(js)
 	if err != nil {
@@ -91,9 +91,9 @@ func blockClasses(t *testing.T, dom *pageDOM, name string) []string {
 	t.Helper()
 
 	js := `JSON.stringify((() => {
-		const b = __byId["overseer"].children.find(x => x.children[0].children[0].textContent === ` + strconv.Quote(name) + `);
+		const b = __byId["overseer"].children.__arr.find(x => x.children[0].children[0].textContent === ` + strconv.Quote(name) + `);
 		if (!b) return null;
-		return b.children[1].children.map(c => c.className);
+		return b.children[1].children.__arr.map(c => c.className);
 	})())`
 	v, err := dom.vm.RunString(js)
 	if err != nil {

@@ -38,6 +38,7 @@ h1{font-size:15px;margin:0;letter-spacing:.08em;text-transform:uppercase;color:v
 #conn.on::before{content:"● ";color:var(--green)}#conn.off::before{content:"● ";color:var(--red)}
 .grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);gap:12px}
 @media (max-width:1000px){.grid{grid-template-columns:1fr}}
+section.wide{margin-top:12px}
 .col{display:flex;flex-direction:column;gap:12px;min-width:0}
 section{background:var(--panel);border:1px solid var(--line);border-radius:8px;min-width:0}
 section>h2{white-space:nowrap;margin:0;padding:9px 12px;border-bottom:1px solid var(--line);font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:var(--dim);display:flex;gap:10px;align-items:center}
@@ -203,6 +204,20 @@ section>h2 .foldsum{margin-left:auto;text-transform:none;letter-spacing:0;white-
    carries rides on its first line, in the dim the By column wears (gt-uvpo1). */
 .ltable td.main .by{color:var(--dim)}
 .lrows{max-height:70vh;overflow-y:auto}
+/* Below 640 px the eight columns cannot sit side by side, so each row stacks: the
+   title first on a full line (two lines at most, the rest on its hover), then the
+   other cells in a wrapping line, each led by its column's name because the
+   header row is hidden. Nothing is cut and the page does not scroll sideways
+   (gt-bqxpz). */
+@media (max-width:640px){
+  .ltable{display:block}
+  .ltable tr{display:flex;flex-wrap:wrap;gap:2px 12px;padding:6px 0;border-top:1px solid var(--line)}
+  .ltable tr:first-child{display:none}
+  .ltable td,.ltable td.n{display:block;border-top:0;padding:0;text-align:left}
+  .ltable td.main{order:-1;flex:1 0 100%}
+  .ltable td[data-label]::before{content:attr(data-label) " ";color:var(--dim);font-size:11px}
+  .ltable td.main .title{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+}
 .lrows th{position:sticky;top:0;background:var(--panel)}
 .costchip{border:1px solid currentColor;border-radius:999px;padding:0 7px;font-size:11px;white-space:nowrap;color:var(--dim)}
 /* A wide table in a narrow panel scrolls sideways, and the fade at the cut edge
@@ -494,9 +509,10 @@ a.hrow:hover{background:#19212b}
     <section data-fold="cloud"><h2>Cloud <span class="r" id="cloudnote"></span></h2><div class="body" id="cloud"></div><h3 class="sub">Deploys <span class="r" id="deploysnote"></span></h3><div class="body" id="deploys"></div></section>
     <section data-fold="forgejo"><h2>Forgejo <span class="r" id="forgejonote"></span></h2><div class="body"><div id="forgejoacts"></div><button id="forgejofeedhead" type="button" class="feedhead" aria-controls="forgejo"></button><div id="forgejo"></div></div></section>
     <section data-fold="om"><h2>om review <span class="r" id="omnote"></span></h2><div class="body" id="om"></div></section>
-    <section id="trendsec" data-fold="landings" hidden><h2>Landings <span class="r" id="trendnote"></span></h2><div class="body" id="trend"></div></section>
   </div>
 </div>
+<!-- Landings is the pane the operator reads daily: it sits outside the grid, full width, and is the one panel that starts open. -->
+<section id="trendsec" class="wide" data-fold="landings" hidden><h2>Landings <span class="r" id="trendnote"></span></h2><div class="body" id="trend"></div></section>
 
 <script>
 "use strict";
@@ -1614,7 +1630,7 @@ function landingTable(s, names, rows, waiting) {
   for (const b of shown) {
     const tr = el("tr");
     const when = el("td", "when title", b.updated_at ? "waiting " + age(b.updated_at) : "waiting");
-    when.title = "waiting since the bead's last update, which gt done moves";
+    when.title = "submitted and waiting for the landing worker to take it; waiting since the bead's last update, which gt done moves";
     tr.append(when);
     const main = el("td", "main");
     main.colSpan = cols.length - 1;
@@ -1630,7 +1646,6 @@ function landingTable(s, names, rows, waiting) {
     }
     if (b.title) main.append(document.createElement("br"), el("span", "title", (b.rig ? b.rig + " · " : "") + b.title));
     tr.append(main);
-    tr.title = "submitted and waiting for the landing worker to take it";
     tbl.append(tr);
   }
   for (const r of rows) {
@@ -1639,7 +1654,8 @@ function landingTable(s, names, rows, waiting) {
     if (r.outcome === "running") tr.className = "live";
     tr.append(el("td", "when title", r.outcome === "running" ? "merging " + fmtDur((Date.now() - when.getTime()) / 1000) : r.outcome === "backoff" ? "checked " + clock(r.at).slice(0, 5) : (when.toDateString() === today ? clock(r.at).slice(0, 5) : when.toLocaleDateString([], {month: "short", day: "numeric"}) + " " + clock(r.at).slice(0, 5))));
     const main = el("td", "main");
-    main.append(el("span", "bead", r.bead));
+    const beadEl = el("span", "bead", r.bead);
+    main.append(beadEl);
     if (r.outcome === "running") { const g = el("span", "tag live", "running"); g.title = "merged; the worker is gating the merged tree and running the om review"; main.append(document.createTextNode(" "), g); }
     else if (r.outcome === "rejected") { const g = el("span", "tag badc", "rejected · " + (r.kind || "?")); main.append(document.createTextNode(" "), g); }
     else if (r.outcome === "backoff") { const g = el("span", "tag badc", "failing · " + (r.stage || "?")); g.title = "the landing worker keeps retrying this landing and losing; the stage is where the last attempt failed"; main.append(document.createTextNode(" "), g); }
@@ -1650,7 +1666,9 @@ function landingTable(s, names, rows, waiting) {
     if (r.outcome === "rejected" && r.detail) main.append(document.createElement("br"), el("span", "badc", r.detail));
     if (r.outcome === "backoff") main.append(document.createElement("br"), el("span", "badc", backoffDetail(r)));
     const total = (r.lint_secs || 0) + (r.gate_secs || 0) + (r.om_secs || 0);
-    tr.title = [r.commit ? "commit " + r.commit : null, total ? "lint " + fmtDur(r.lint_secs || 0) + " + gate " + fmtDur(r.gate_secs || 0) + " + om " + fmtDur(r.om_secs || 0) + " = " + fmtDur(total) : null, r.route ? "route " + r.route : null].filter(Boolean).join(" · ");
+    // The row's detail rides the bead id, not the whole row: a native tip opens
+    // under the pointer wherever it rests, and over a row it covers that row.
+    beadEl.title = [r.commit ? "commit " + r.commit : null, total ? "lint " + fmtDur(r.lint_secs || 0) + " + gate " + fmtDur(r.gate_secs || 0) + " + om " + fmtDur(r.om_secs || 0) + " = " + fmtDur(total) : null, r.route ? "route " + r.route : null].filter(Boolean).join(" · ");
     tr.append(main);
     // By names the holder the way the Work panel's seat rows do: the short name, and
     // its rig only where two rigs in view use that name. The row's own rig
@@ -1686,6 +1704,10 @@ function landingTable(s, names, rows, waiting) {
     else if (r.ship_pending) { ship.textContent = "pending"; ship.title = appRig ? "landed; waiting for the staging deploy" : "landed; waiting for the restart that installs it"; }
     else ship.textContent = "–";
     tr.append(ship);
+    // A narrow page stacks each row (see the max-width rule on .ltable): the
+    // title on a line of its own, then the other cells, each named by its
+    // column's heading because the header row is hidden there.
+    Array.from(tr.children).forEach((td, i) => { if (i !== 1) td.setAttribute("data-label", cols[i][0]); });
     tbl.append(tr);
   }
   // Every finished landing of the window is a row; the rows scroll inside a fixed
@@ -5468,7 +5490,7 @@ const FOLD_KEY = "gt-fold";
 // every other section starts closed. A pane that opts out with
 // data-default-collapsed starts closed whatever this holds. This list is the
 // operator's to edit.
-const FOLD_DEFAULT_OPEN = ["attention", "overseer", "work", "landings"];
+const FOLD_DEFAULT_OPEN = ["landings"];
 // FOLD_ALWAYS_CLOSED is the sections that start closed on every load, whatever
 // was saved: the operator opens them for a look, and a reload closes them
 // again. A toggle still works for the rest of the page session (gt-7swd8).
@@ -5627,7 +5649,9 @@ function foldSummaryLine(fold, s, note) {
 // setupCollapse makes every section of the page foldable, with the key its
 // markup declares.
 function setupCollapse() {
-  document.querySelectorAll("main section, .grid section").forEach(sec => {
+  // section.wide is the Landings block below the grid, which no .grid section
+  // selector reaches; "main section" is not on the page and is kept as it was.
+  document.querySelectorAll("main section, .grid section, section.wide").forEach(sec => {
     const head = sec.querySelector(":scope > h2");
     if (!head) return;
     const key = sec.dataset.fold;

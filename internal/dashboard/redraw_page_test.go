@@ -57,9 +57,9 @@ func attentionReading(title string) map[string]any {
 func TestPageDrawsAPaneOnlyWhenItsReadingChanged(t *testing.T) {
 	t.Parallel()
 
-	dom := newPageDOM(t)
+	dom := newPageDOMOpening(t, "attention")
 	if dom.fold(t, "attention").Collapsed {
-		t.Fatal("the attention section starts open for a reader with no saved choice, so its body is what a push draws")
+		t.Fatal("the attention section is open here, so its body is what a push draws")
 	}
 	draws := countPaneDraws(t, dom, "attention")
 
@@ -127,9 +127,9 @@ func TestPageRedrawsAPaneWhenOnlyItsReadStatusChanged(t *testing.T) {
 	t.Run("the Work pane", func(t *testing.T) {
 		t.Parallel()
 
-		dom := newPageDOM(t)
+		dom := newPageDOMOpening(t, "work")
 		if dom.fold(t, "work").Collapsed {
-			t.Fatal("the work section starts open for a reader with no saved choice")
+			t.Fatal("the work section is open here")
 		}
 		// Every stamp is the test's, and the seat carries no age of its own, so
 		// the readings below differ in one field: the status of the seats read.
@@ -159,7 +159,7 @@ func TestPageRedrawsAPaneWhenOnlyItsReadStatusChanged(t *testing.T) {
 func TestPageRetriesAPaneWhoseDrawThrew(t *testing.T) {
 	t.Parallel()
 
-	dom := newPageDOM(t)
+	dom := newPageDOMOpening(t, "attention")
 	draws := countPaneDraws(t, dom, "attention")
 	pushState(t, dom, attentionReading("is the dome open"))
 	if got := draws(); got != 1 {

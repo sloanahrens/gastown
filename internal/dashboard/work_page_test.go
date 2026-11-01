@@ -44,7 +44,7 @@ func workRows(t *testing.T, dom *pageDOM) [][]string {
 		(function walk(n) {
 			for (const c of (n.children || [])) {
 				if (String(c.className).split(" ").indexOf("workrow") >= 0) {
-					out.push(c.children.filter(x => x.tagName === "SPAN").map(x => x.textContent));
+					out.push(c.children.__arr.filter(x => x.tagName === "SPAN").map(x => x.textContent));
 				}
 				walk(c);
 			}
@@ -67,7 +67,7 @@ func workChild(t *testing.T, dom *pageDOM, class string) drawn {
 	t.Helper()
 
 	js := `JSON.stringify((() => {
-		const x = __byId["work"].children.find(c => String(c.className).split(" ").indexOf(` + quoteJS(class) + `) >= 0);
+		const x = __byId["work"].children.__arr.find(c => String(c.className).split(" ").indexOf(` + quoteJS(class) + `) >= 0);
 		return x ? {text: x.textContent, class: x.className, title: x.title, hidden: !!x.hidden, kids: x.children.length} : null;
 	})())`
 	v, err := dom.vm.RunString(js)
@@ -200,10 +200,10 @@ func workSeatRowsDrawn(t *testing.T, dom *pageDOM) []workSeatRow {
 				const cls = String(c.className).split(" ");
 				const h = hidden || !!c.hidden;
 				if (cls.indexOf("workrow") >= 0) {
-					const spans = c.children.filter(x => x.tagName === "SPAN").map(x => x.textContent);
+					const spans = c.children.__arr.filter(x => x.tagName === "SPAN").map(x => x.textContent);
 					const cmds = [];
-					c.children.filter(x => String(x.className).split(" ").indexOf("whints") >= 0)
-						.forEach(x => x.children.forEach(b => cmds.push(b.textContent)));
+					c.children.__arr.filter(x => String(x.className).split(" ").indexOf("whints") >= 0)
+						.forEach(x => x.children.__arr.forEach(b => cmds.push(b.textContent)));
 					out.push({name: spans[0] || "", state: spans[3] || "", head: cls.indexOf("whead") >= 0, hidden: h, cmds: cmds});
 				}
 				walk(c, h);
@@ -291,8 +291,8 @@ func TestTheWorkPanelLeadsWithTheLiveSeatsAndFoldsTheOnesThatNeedALook(t *testin
 
 	// Opening the fold shows the seats and their commands, in the same rows.
 	if _, err := dom.vm.RunString(`(() => {
-		const t = __byId["work"].children.find(c => String(c.className).split(" ").indexOf("wtable") >= 0);
-		const d = t.children.find(c => c.tagName === "DETAILS" && c.textContent.indexOf("needs a look") === 0);
+		const t = __byId["work"].children.__arr.find(c => String(c.className).split(" ").indexOf("wtable") >= 0);
+		const d = t.children.__arr.find(c => c.tagName === "DETAILS" && c.textContent.indexOf("needs a look") === 0);
 		__clickSummary(d);
 	})()`); err != nil {
 		t.Fatal(err)
@@ -339,10 +339,10 @@ func TestTheWorkPanelKeepsTheNeedsALookFoldAcrossPolls(t *testing.T) {
 	read := func(dom *pageDOM) foldState {
 		t.Helper()
 		v, err := dom.vm.RunString(`JSON.stringify((() => {
-			const t = __byId["work"].children.find(c => String(c.className).split(" ").indexOf("wtable") >= 0);
+			const t = __byId["work"].children.__arr.find(c => String(c.className).split(" ").indexOf("wtable") >= 0);
 			if (!t) return null;
-			const d = t.children.find(c => c.tagName === "DETAILS" && c.textContent.indexOf("needs a look") === 0);
-			const w = t.children.find(c => String(c.className).split(" ").indexOf("wfoldrows") >= 0);
+			const d = t.children.__arr.find(c => c.tagName === "DETAILS" && c.textContent.indexOf("needs a look") === 0);
+			const w = t.children.__arr.find(c => String(c.className).split(" ").indexOf("wfoldrows") >= 0);
 			return d && w ? {open: !!d.open, hidden: !!w.hidden, rows: w.children.length} : null;
 		})())`)
 		if err != nil {
@@ -360,8 +360,8 @@ func TestTheWorkPanelKeepsTheNeedsALookFoldAcrossPolls(t *testing.T) {
 	click := func(dom *pageDOM) {
 		t.Helper()
 		if _, err := dom.vm.RunString(`(() => {
-			const t = __byId["work"].children.find(c => String(c.className).split(" ").indexOf("wtable") >= 0);
-			__clickSummary(t.children.find(c => c.tagName === "DETAILS" && c.textContent.indexOf("needs a look") === 0));
+			const t = __byId["work"].children.__arr.find(c => String(c.className).split(" ").indexOf("wtable") >= 0);
+			__clickSummary(t.children.__arr.find(c => c.tagName === "DETAILS" && c.textContent.indexOf("needs a look") === 0));
 		})()`); err != nil {
 			t.Fatal(err)
 		}
@@ -415,7 +415,7 @@ func TestTheWorkHeaderAndItsRowsShareOneColumnTemplate(t *testing.T) {
 		seat("gastown", "stall", "stalled", "gt-stall", "nothing is doing it", "deepseek-flash", time.Minute),
 	}, workQueueReading(1, 0, 0, 0)))
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
-		const t = __byId["work"].children.find(c => String(c.className).split(" ").indexOf("wtable") >= 0);
+		const t = __byId["work"].children.__arr.find(c => String(c.className).split(" ").indexOf("wtable") >= 0);
 		if (!t) return null;
 		const cls = n => String(n.className).split(" ");
 		const kind = c => c.tagName === "DETAILS" ? "fold"
@@ -427,16 +427,16 @@ func TestTheWorkHeaderAndItsRowsShareOneColumnTemplate(t *testing.T) {
 			for (const c of (n.children || [])) {
 				const here = cls(c).indexOf("wfoldrows") >= 0 ? "wfoldrows" : where;
 				if (cls(c).indexOf("workrow") >= 0) {
-					rows.push({where: where, head: cls(c).indexOf("whead") >= 0, cells: c.children.filter(x => x.tagName === "SPAN").length});
+					rows.push({where: where, head: cls(c).indexOf("whead") >= 0, cells: c.children.__arr.filter(x => x.tagName === "SPAN").length});
 				}
 				walk(c, here);
 			}
 		})(t, "table");
 		return {
-			direct: t.children.map(kind),
+			direct: t.children.__arr.map(kind),
 			rows: rows,
-			foldRows: t.children.filter(c => cls(c).indexOf("wfoldrows") >= 0)
-				.map(c => c.children.filter(x => cls(x).indexOf("workrow") >= 0).length)
+			foldRows: t.children.__arr.filter(c => cls(c).indexOf("wfoldrows") >= 0)
+				.map(c => c.children.__arr.filter(x => cls(x).indexOf("workrow") >= 0).length)
 		};
 	})())`)
 	if err != nil {
@@ -695,7 +695,7 @@ func TestTheWorkPanelFoldsTheWholeQueueList(t *testing.T) {
 	if list.Kids < 2 {
 		t.Fatalf("the queue list is not a disclosure with a summary and a list: %+v", list)
 	}
-	open, err := dom.vm.RunString(`String(__byId["work"].children.find(c => String(c.className).indexOf("wqueue") >= 0).open)`)
+	open, err := dom.vm.RunString(`String(__byId["work"].children.__arr.find(c => String(c.className).indexOf("wqueue") >= 0).open)`)
 	if err != nil {
 		t.Fatalf("reading the list's fold: %v", err)
 	}
@@ -711,7 +711,7 @@ func TestTheWorkPanelFoldsTheWholeQueueList(t *testing.T) {
 func queueListOpen(t *testing.T, dom *pageDOM) string {
 	t.Helper()
 
-	v, err := dom.vm.RunString(`String(__byId["work"].children.find(c => String(c.className).indexOf("wqueue") >= 0).open)`)
+	v, err := dom.vm.RunString(`String(__byId["work"].children.__arr.find(c => String(c.className).indexOf("wqueue") >= 0).open)`)
 	if err != nil {
 		t.Fatalf("reading the list's fold: %v", err)
 	}
@@ -738,7 +738,7 @@ func TestTheWorkPanelKeepsTheQueueListClosedOnceAnOperatorClosesIt(t *testing.T)
 
 	// A click on the summary: the stub flips open and fires the page's handler.
 	if _, err := dom.vm.RunString(`(() => {
-		const d = __byId["work"].children.find(c => String(c.className).indexOf("wqueue") >= 0);
+		const d = __byId["work"].children.__arr.find(c => String(c.className).indexOf("wqueue") >= 0);
 		globalThis.__queueList = d;
 		__clickSummary(d);
 	})()`); err != nil {
@@ -749,7 +749,7 @@ func TestTheWorkPanelKeepsTheQueueListClosedOnceAnOperatorClosesIt(t *testing.T)
 	}
 
 	dom.call(t, "renderWork", st)
-	same, err := dom.vm.RunString(`String(__byId["work"].children.find(c => String(c.className).indexOf("wqueue") >= 0) === globalThis.__queueList)`)
+	same, err := dom.vm.RunString(`String(__byId["work"].children.__arr.find(c => String(c.className).indexOf("wqueue") >= 0) === globalThis.__queueList)`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -759,7 +759,7 @@ func TestTheWorkPanelKeepsTheQueueListClosedOnceAnOperatorClosesIt(t *testing.T)
 
 	next := workState(seats(), workQueueReading(58, 1, 2, 3))
 	dom.call(t, "renderWork", next)
-	redrawn, err := dom.vm.RunString(`String(__byId["work"].children.find(c => String(c.className).indexOf("wqueue") >= 0) !== globalThis.__queueList)`)
+	redrawn, err := dom.vm.RunString(`String(__byId["work"].children.__arr.find(c => String(c.className).indexOf("wqueue") >= 0) !== globalThis.__queueList)`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -945,11 +945,11 @@ func TestTheWorkQueueScrollsOnlyItsBeadRows(t *testing.T) {
 			}
 		})(__byId["work"]);
 		const isRow = c => String(c.className).split(" ").indexOf("qrow") >= 0;
-		region = list.children.find(c => String(c.className).split(" ").indexOf("qrows") >= 0);
+		region = list.children.__arr.find(c => String(c.className).split(" ").indexOf("qrows") >= 0);
 		return {
-			kids: list.children.map(c => String(c.className)),
-			rowsDirect: list.children.filter(isRow).length,
-			rowsInRegion: region ? region.children.filter(isRow).length : -1
+			kids: list.children.__arr.map(c => String(c.className)),
+			rowsDirect: list.children.__arr.filter(isRow).length,
+			rowsInRegion: region ? region.children.__arr.filter(isRow).length : -1
 		};
 	})())`)
 	if err != nil {
@@ -1015,8 +1015,8 @@ func workQueueHelp(t *testing.T, dom *pageDOM) queueHelp {
 		const hints = all.filter(c => cls(c, "qhint"));
 		const caps = all.filter(c => cls(c, "qcaption"));
 		const hint = hints.length === 1 ? hints[0] : null;
-		const sum = hint ? hint.children.find(c => c.tagName === "SUMMARY") : null;
-		const cap = hint ? hint.children.find(c => cls(c, "qcaption")) : null;
+		const sum = hint ? hint.children.__arr.find(c => c.tagName === "SUMMARY") : null;
+		const cap = hint ? hint.children.__arr.find(c => cls(c, "qcaption")) : null;
 		const covered = e => {
 			for (let p = e.parentNode; p; p = p.parentNode) if (p.tagName === "DETAILS" && !p.open) return true;
 			return false;
@@ -1196,7 +1196,7 @@ func workCells(t *testing.T, dom *pageDOM, cls string) []drawn {
 		(function walk(n) {
 			for (const c of (n.children || [])) {
 				if (String(c.className).split(" ").indexOf("workrow") >= 0) {
-					const x = c.children.find(k => String(k.className).split(" ").indexOf(` + quoteJS(cls) + `) >= 0);
+					const x = c.children.__arr.find(k => String(k.className).split(" ").indexOf(` + quoteJS(cls) + `) >= 0);
 					if (x) out.push({text: x.textContent, class: x.className, title: x.title});
 				}
 				walk(c);
@@ -1506,7 +1506,7 @@ func beadTips(t *testing.T, dom *pageDOM) []string {
 		(function walk(n) {
 			for (const c of (n.children || [])) {
 				if (String(c.className).split(" ").indexOf("workrow") >= 0) {
-					out.push(c.children.filter(x => String(x.className).split(" ").indexOf("wbead") >= 0).map(x => x.title)[0] || "");
+					out.push(c.children.__arr.filter(x => String(x.className).split(" ").indexOf("wbead") >= 0).map(x => x.title)[0] || "");
 				}
 				walk(c);
 			}

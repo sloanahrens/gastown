@@ -113,9 +113,9 @@ func birdRows(t *testing.T, dom *pageDOM) []birdDrawnRow {
 
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
 		const cell = c => ({tag: c.tagName, text: c.textContent, class: c.className, href: c.href || "", target: c.target || "", rel: c.rel || "", kids: c.children.length});
-		return __byId["birds"].children.filter(c => (" " + (c.className || "") + " ").indexOf(" brow ") >= 0).map(row => ({
+		return __byId["birds"].children.__arr.filter(c => (" " + (c.className || "") + " ").indexOf(" brow ") >= 0).map(row => ({
 			class: row.className,
-			head: (row.children[0] ? row.children[0].children : []).map(cell),
+			head: (row.children[0] ? row.children[0].children.__arr : []).map(cell),
 			body: row.children[1] ? cell(row.children[1]) : null
 		}));
 	})())`)
@@ -134,7 +134,7 @@ func birdRows(t *testing.T, dom *pageDOM) []birdDrawnRow {
 func birdLines(t *testing.T, dom *pageDOM) []string {
 	t.Helper()
 
-	v, err := dom.vm.RunString(`JSON.stringify(__byId["birds"].children.map(c => c.className))`)
+	v, err := dom.vm.RunString(`JSON.stringify(__byId["birds"].children.__arr.map(c => c.className))`)
 	if err != nil {
 		t.Fatalf("reading the Birds panel's lines: %v", err)
 	}
@@ -390,9 +390,9 @@ const needsYouWalk = `JSON.stringify((() => {
           cls: c.className,
           open: !!c.open,
           summary: c.children.length ? c.children[0].textContent : "",
-          groups: c.children.slice(1).map(g => ({
+          groups: c.children.__arr.slice(1).map(g => ({
             cls: g.className,
-            parts: g.children.map(x => x.textContent)
+            parts: g.children.__arr.map(x => x.textContent)
           }))
         });
       }

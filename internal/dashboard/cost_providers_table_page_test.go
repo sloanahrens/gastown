@@ -40,14 +40,14 @@ type costElem struct {
 // in: a .costscroll div, so a narrow panel scrolls the table's nine columns
 // sideways instead of clipping the Status cell. This is the one place its
 // traversal is written.
-const costScrollWrapperJS = `__byId["cost"].children.filter(c => c.className === "costscroll")[0]`
+const costScrollWrapperJS = `__byId["cost"].children.__arr.filter(c => c.className === "costscroll")[0]`
 
 // costProvidersTableJS finds the providers table inside that wrapper, or null
 // when the panel drew none. Every read-back below goes through this lookup, so
 // moving the table another level down changes this constant alone.
 const costProvidersTableJS = `(() => {
 	const wrap = ` + costScrollWrapperJS + `;
-	return wrap ? wrap.children.filter(c => c.tagName === "TABLE" && c.className === "costprov")[0] || null : null;
+	return wrap ? wrap.children.__arr.filter(c => c.tagName === "TABLE" && c.className === "costprov")[0] || null : null;
 })()`
 
 // costTable reads back the providers table the Cost panel drew: the header row,
@@ -58,9 +58,9 @@ func costTable(t *testing.T, dom *pageDOM) []costTableRow {
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
 		const tbl = ` + costProvidersTableJS + `;
 		if (!tbl) return null;
-		return tbl.children.map(tr => ({
+		return tbl.children.__arr.map(tr => ({
 			class: tr.className, title: tr.title || "",
-			cells: tr.children.map(td => ({text: td.textContent, class: td.className, chip: td.children.length ? td.children[0].className : ""}))
+			cells: tr.children.__arr.map(td => ({text: td.textContent, class: td.className, chip: td.children.length ? td.children[0].className : ""}))
 		}));
 	})())`)
 	if err != nil {
@@ -85,8 +85,8 @@ func panelTexts(t *testing.T, dom *pageDOM, class string) []string {
 
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
 		const cost = __byId["cost"];
-		const spend = cost.children.filter(c => c.className === "spendpart")[0];
-		return cost.children.concat(spend ? spend.children : []).filter(c => c.className === ` + quoteJS(class) + `).map(c => c.textContent);
+		const spend = cost.children.__arr.filter(c => c.className === "spendpart")[0];
+		return cost.children.__arr.concat(spend ? spend.children.__arr : []).filter(c => c.className === ` + quoteJS(class) + `).map(c => c.textContent);
 	})())`)
 	if err != nil {
 		t.Fatalf("reading the Cost panel for %q: %v", class, err)
@@ -105,9 +105,9 @@ func costFoldChildren(t *testing.T, dom *pageDOM, key string) []costElem {
 	t.Helper()
 
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
-		const sec = __byId["cost"].children.filter(c => c.className === "spendpart")[0].children.filter(c => c.dataset && c.dataset.fold === ` + quoteJS(key) + `)[0];
+		const sec = __byId["cost"].children.__arr.filter(c => c.className === "spendpart")[0].children.__arr.filter(c => c.dataset && c.dataset.fold === ` + quoteJS(key) + `)[0];
 		if (!sec) return null;
-		return sec.children[1].children.map(c => ({tag: c.tagName, class: c.className || c.getAttribute("class") || "", text: c.textContent}));
+		return sec.children[1].children.__arr.map(c => ({tag: c.tagName, class: c.className || c.getAttribute("class") || "", text: c.textContent}));
 	})())`)
 	if err != nil {
 		t.Fatalf("reading the %s fold: %v", key, err)
@@ -139,9 +139,9 @@ func costLegendEntries(t *testing.T, dom *pageDOM, key string) []string {
 	t.Helper()
 
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
-		const sec = __byId["cost"].children.filter(c => c.className === "spendpart")[0].children.filter(c => c.dataset && c.dataset.fold === ` + quoteJS(key) + `)[0];
-		const lg = sec.children[1].children.filter(c => c.className === "legend")[0];
-		return lg ? lg.children.map(x => x.textContent) : [];
+		const sec = __byId["cost"].children.__arr.filter(c => c.className === "spendpart")[0].children.__arr.filter(c => c.dataset && c.dataset.fold === ` + quoteJS(key) + `)[0];
+		const lg = sec.children[1].children.__arr.filter(c => c.className === "legend")[0];
+		return lg ? lg.children.__arr.map(x => x.textContent) : [];
 	})())`)
 	if err != nil {
 		t.Fatalf("reading the %s legend: %v", key, err)
@@ -468,7 +468,7 @@ func TestCostProvidersTableGreysOnlyTheDeepSeekRowForAStaleSpendRead(t *testing.
 	}
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
 		const cost = __byId["cost"];
-		const spend = cost.children.filter(c => c.className.split(" ").indexOf("spendpart") >= 0)[0];
+		const spend = cost.children.__arr.filter(c => c.className.split(" ").indexOf("spendpart") >= 0)[0];
 		return {
 			tableOnPanel: Boolean(` + costProvidersTableJS + `),
 			spendGreyed: spend.className.split(" ").indexOf("stale") >= 0,
@@ -633,9 +633,9 @@ func costLegendSwatches(t *testing.T, dom *pageDOM, key string) []string {
 	t.Helper()
 
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
-		const sec = __byId["cost"].children.filter(c => c.className === "spendpart")[0].children.filter(c => c.dataset && c.dataset.fold === ` + quoteJS(key) + `)[0];
-		const lg = sec.children[1].children.filter(c => c.className === "legend")[0];
-		return lg ? lg.children.map(x => x.children[0].style.background) : [];
+		const sec = __byId["cost"].children.__arr.filter(c => c.className === "spendpart")[0].children.__arr.filter(c => c.dataset && c.dataset.fold === ` + quoteJS(key) + `)[0];
+		const lg = sec.children[1].children.__arr.filter(c => c.className === "legend")[0];
+		return lg ? lg.children.__arr.map(x => x.children[0].style.background) : [];
 	})())`)
 	if err != nil {
 		t.Fatalf("reading the %s swatches: %v", key, err)
@@ -917,7 +917,7 @@ func TestCostProvidersTableScrollsSidewaysInsteadOfClipping(t *testing.T) {
 		return {
 			wrapper: Boolean(wrap),
 			tableInWrapper: Boolean(` + costProvidersTableJS + `),
-			tableAtPanel: __byId["cost"].children.some(c => c.className === "costprov")
+			tableAtPanel: __byId["cost"].children.__arr.some(c => c.className === "costprov")
 		};
 	})())`)
 	if err != nil {
@@ -1016,10 +1016,10 @@ func costSVGChildren(t *testing.T, dom *pageDOM, key string) []costElem {
 	t.Helper()
 
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
-		const sec = __byId["cost"].children.filter(c => c.className === "spendpart")[0].children.filter(c => c.dataset && c.dataset.fold === ` + quoteJS(key) + `)[0];
-		const svg = sec.children[1].children.filter(c => c.tagName === "SVG")[0];
+		const sec = __byId["cost"].children.__arr.filter(c => c.className === "spendpart")[0].children.__arr.filter(c => c.dataset && c.dataset.fold === ` + quoteJS(key) + `)[0];
+		const svg = sec.children[1].children.__arr.filter(c => c.tagName === "SVG")[0];
 		if (!svg) return [];
-		return svg.children.map(c => ({tag: c.tagName, class: c.getAttribute("class") || "", text: c.textContent}));
+		return svg.children.__arr.map(c => ({tag: c.tagName, class: c.getAttribute("class") || "", text: c.textContent}));
 	})())`)
 	if err != nil {
 		t.Fatalf("reading the %s chart: %v", key, err)
@@ -1035,7 +1035,7 @@ func costSVGChildren(t *testing.T, dom *pageDOM, key string) []costElem {
 func costFoldKeys(t *testing.T, dom *pageDOM) []string {
 	t.Helper()
 
-	v, err := dom.vm.RunString(`JSON.stringify(__byId["cost"].children.filter(c => c.className === "spendpart")[0].children.filter(c => c.dataset && c.dataset.fold).map(c => c.dataset.fold))`)
+	v, err := dom.vm.RunString(`JSON.stringify(__byId["cost"].children.__arr.filter(c => c.className === "spendpart")[0].children.__arr.filter(c => c.dataset && c.dataset.fold).map(c => c.dataset.fold))`)
 	if err != nil {
 		t.Fatalf("reading the Cost folds: %v", err)
 	}

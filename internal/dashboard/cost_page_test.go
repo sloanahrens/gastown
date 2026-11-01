@@ -73,7 +73,7 @@ func drawCost(t *testing.T, s map[string]any) (lines []costLine, note drawn) {
 func drawCostOn(t *testing.T, dom *pageDOM, s map[string]any) (lines []costLine, note drawn) {
 	t.Helper()
 	dom.call(t, "renderCost", s)
-	v, err := dom.vm.RunString(`JSON.stringify(__byId["cost"].children.map(c => ({class: c.className, text: c.textContent, title: c.title})))`)
+	v, err := dom.vm.RunString(`JSON.stringify(__byId["cost"].children.__arr.map(c => ({class: c.className, text: c.textContent, title: c.title})))`)
 	if err != nil {
 		t.Fatalf("reading the Cost panel: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestCostPanelDrawsGCPUnderTheProviderRows(t *testing.T) {
 	})
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
 		const table = ` + costProvidersTableJS + `;
-		return __byId["cost"].children.map(c =>
+		return __byId["cost"].children.__arr.map(c =>
 			c.className === "spendpart" ? "spendpart"
 				: c.textContent.indexOf("GCP") === 0 ? "gcp"
 				: c === table || (table && c === table.parentNode) ? "providers" : "other");
