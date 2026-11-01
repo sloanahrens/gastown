@@ -848,7 +848,11 @@ type ListOptions struct {
 	Label  string // Label filter (e.g., "gt:agent", "gt:merge-request")
 	// Labels keeps only issues carrying every one of them (bd list
 	// --label, once per label). Label, when set too, is a further AND.
-	Labels     []string
+	Labels []string
+	// LabelsAny keeps only issues carrying at least one of them (bd list
+	// --label-any, once per label); it combines with Label and Labels as bd
+	// list combines the flags. Not supported with Ephemeral.
+	LabelsAny  []string
 	Priority   PriorityFilter // see PriorityFilter: the zero value keeps every priority
 	Parent     string         // filter by parent ID
 	Assignee   string         // filter by assignee (e.g., "gastown/Toast")
@@ -2393,6 +2397,9 @@ func stripEnvPrefixes(environ []string, prefixes ...string) []string {
 // "bd list" only searches the issues table and misses wisps entirely.
 func (b *Beads) List(opts ListOptions) ([]*Issue, error) {
 	if opts.Ephemeral {
+		if len(opts.LabelsAny) > 0 {
+			return nil, errors.New("beads: LabelsAny is not supported with Ephemeral")
+		}
 		return b.listEphemeral(opts)
 	}
 	return b.listIssues(opts)
@@ -2421,6 +2428,13 @@ func (b *Beads) listIssues(opts ListOptions) ([]*Issue, error) {
 			continue
 		}
 		args = append(args, "--label="+label)
+	}
+	// --label-any ORs its labels, and is a further AND with --label.
+	for _, label := range opts.LabelsAny {
+		if label == "" {
+			continue
+		}
+		args = append(args, "--label-any="+label)
 	}
 	if opts.IssueType != "" {
 		args = append(args, "--type="+opts.IssueType)

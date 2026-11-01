@@ -363,7 +363,17 @@ func (s *healthSources) pendingLandings(rig string) (int, time.Time, string, err
 // by the operator, so counting it holds a field at a constant and hides the
 // beads that do need attention (gt-tk2xd).
 func (s *healthSources) actionableBeads(rig, label string) ([]*beads.Issue, error) {
-	issues, err := s.d.workBeads(s.d.workBeadsEnv(rig), townHealthBDTimeout).List(beads.ListOptions{Label: label, Priority: -1})
+	return s.actionableOf(rig, beads.ListOptions{Label: label, Priority: -1})
+}
+
+// actionableBeadsAny is actionableBeads for the beads carrying at least one of
+// labels, in one read (gt-5nq22).
+func (s *healthSources) actionableBeadsAny(rig string, labels []string) ([]*beads.Issue, error) {
+	return s.actionableOf(rig, beads.ListOptions{LabelsAny: labels, Priority: -1})
+}
+
+func (s *healthSources) actionableOf(rig string, opts beads.ListOptions) ([]*beads.Issue, error) {
+	issues, err := s.d.workBeads(s.d.workBeadsEnv(rig), townHealthBDTimeout).List(opts)
 	if err != nil {
 		return nil, err
 	}
@@ -579,14 +589,20 @@ func (s *healthSources) NeedsHuman(ctx context.Context) ([]townhealth.PersonWait
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		// One read of the rig's three labels, then each bead is counted once, under
+		// the first of the labels (in the order above) that it carries.
+		names := make([]string, 0, len(labels))
+		for _, l := range labels {
+			names = append(names, l.label)
+		}
+		rigIssues, err := s.actionableBeadsAny(rig, names)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", rig, err)
+		}
 		counted := map[string]bool{}
 		for _, l := range labels {
-			issues, err := s.actionableBeads(rig, l.label)
-			if err != nil {
-				return nil, fmt.Errorf("%s: %w", rig, err)
-			}
-			for _, is := range issues {
-				if counted[is.ID] {
+			for _, is := range rigIssues {
+				if !beads.HasLabel(is, l.label) || counted[is.ID] {
 					continue
 				}
 				counted[is.ID] = true

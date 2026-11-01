@@ -50,6 +50,9 @@ func (b *labelBeads) Show(id string) (*beads.Issue, error) {
 }
 func (b *labelBeads) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 	b.reads = append(b.reads, beadRead{label: opts.Label, opts: opts})
+	if len(opts.LabelsAny) > 0 {
+		return b.listAny(opts)
+	}
 	if opts.Label == b.failFor {
 		return nil, errors.New("bd: timed out")
 	}
@@ -62,6 +65,33 @@ func (b *labelBeads) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 	default:
 		return b.issuesByLabel[opts.Label], nil
 	}
+}
+
+// listAny answers a LabelsAny read the way bd does: each issue carrying at
+// least one of the labels once, with the labels of the set it carries, out of
+// the issues table.
+func (b *labelBeads) listAny(opts beads.ListOptions) ([]*beads.Issue, error) {
+	for _, l := range opts.LabelsAny {
+		if l != "" && l == b.failFor {
+			return nil, errors.New("bd: timed out")
+		}
+	}
+	var out []*beads.Issue
+	at := map[string]int{}
+	for _, l := range opts.LabelsAny {
+		for _, is := range b.issuesByLabel[l] {
+			i, seen := at[is.ID]
+			if !seen {
+				cp := *is
+				cp.Labels = nil
+				out = append(out, &cp)
+				i = len(out) - 1
+				at[is.ID] = i
+			}
+			out[i].Labels = append(out[i].Labels, l)
+		}
+	}
+	return out, nil
 }
 
 // read returns the List call that asked for label. A label read once is the

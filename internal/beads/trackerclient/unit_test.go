@@ -115,6 +115,7 @@ func TestListRefusesFiltersTheTrackerCannotExpress(t *testing.T) {
 	for name, opts := range map[string]beads.ListOptions{
 		"NotesContains": {NotesContains: "MERGE REJECTION"},
 		"UpdatedAfter":  {UpdatedAfter: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)},
+		"LabelsAny":     {LabelsAny: []string{"gt:needs-human", "gt:needs-operator"}},
 	} {
 		if _, err := c.List(opts); !errors.Is(err, ErrListFilter) || !strings.Contains(err.Error(), name) {
 			t.Errorf("List(%s) = %v, want an ErrListFilter naming the filter", name, err)
