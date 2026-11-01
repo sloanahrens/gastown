@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"io/fs"
@@ -224,6 +225,63 @@ func TestJSONLAppendsOneLinePerPackage(t *testing.T) {
 	}, "\n")
 	if string(data) != want {
 		t.Errorf("series = %q, want %q", string(data), want)
+	}
+}
+
+// TestJSONLCachedPackageShipsNoWall pins how the series reads go test's result
+// cache: a cached package keeps its line and its verdict, marked cached, and
+// carries no wall_s, while a package that really ran keeps its wall_s and has
+// no cached key. A reader takes wall_s only from lines without cached.
+// Mutation: write the elapsed time for a cached package, and the cached line
+// grows a wall_s key.
+func TestJSONLCachedPackageShipsNoWall(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "gate-walls.jsonl")
+	const stream = `{"Time":"2026-10-02T11:00:00.000000Z","Action":"start","Package":"example.com/cached"}
+{"Time":"2026-10-02T11:00:00.100000Z","Action":"output","Package":"example.com/cached","Output":"ok  \texample.com/cached\t(cached)\n"}
+{"Time":"2026-10-02T11:00:00.200000Z","Action":"pass","Package":"example.com/cached","Elapsed":0}
+{"Time":"2026-10-02T11:00:00.300000Z","Action":"start","Package":"example.com/ran"}
+{"Time":"2026-10-02T11:00:00.400000Z","Action":"output","Package":"example.com/ran","Output":"ok  \texample.com/ran\t1.500s\n"}
+{"Time":"2026-10-02T11:00:00.500000Z","Action":"pass","Package":"example.com/ran","Elapsed":1.5}
+`
+	var out, errOut bytes.Buffer
+	code := run([]string{"-jsonl", path, "-run", "gate-1"}, strings.NewReader(stream), &out, &errOut, fixedHost())
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0: stderr = %q", code, errOut.String())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the run wrote no series: %v", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("series = %q, want two lines", data)
+	}
+	for i, tc := range []struct {
+		pkg    string
+		keys   []string
+		absent []string
+	}{
+		{"example.com/cached", []string{"cached"}, []string{"wall_s"}},
+		{"example.com/ran", []string{"wall_s"}, []string{"cached"}},
+	} {
+		var line map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(lines[i]), &line); err != nil {
+			t.Fatalf("line %d is not JSON: %v", i, err)
+		}
+		if got := string(line["pkg"]); got != `"`+tc.pkg+`"` {
+			t.Errorf("line %d pkg = %s, want %q", i, got, tc.pkg)
+		}
+		for _, k := range tc.keys {
+			if _, ok := line[k]; !ok {
+				t.Errorf("line %d (%s) has no %q key: %s", i, tc.pkg, k, lines[i])
+			}
+		}
+		for _, k := range tc.absent {
+			if _, ok := line[k]; ok {
+				t.Errorf("line %d (%s) has a %q key: %s", i, tc.pkg, k, lines[i])
+			}
+		}
 	}
 }
 

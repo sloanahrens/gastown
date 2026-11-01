@@ -17,8 +17,10 @@
 // -jsonl <path> -run <id> also appends one line per package to a series, so
 // "where does the gate's time go" can be read over weeks rather than from one
 // run's report (gt-u0up0). An absolute path is used as given; a relative one
-// is taken from the town root the checkout sits in, so the gate can name the
-// town's series without reading the environment. The report and the exit code
+// is taken from the town root the checkout sits in, so the gate names the
+// town's series without being told where the town is. A package go test
+// served from its result cache is still recorded, with "cached": true and no
+// wall_s, because a cache hit measured nothing. The report and the exit code
 // do not change: a series the tool cannot write, or a run it finds no town
 // for, is reported on stderr and fails nothing, because the gate's verdict is
 // go test's alone.
@@ -153,6 +155,7 @@ type report struct {
 	builds  map[string][]string // build-output held per import path
 	elapsed map[string]float64  // each package's pass/fail Elapsed, in seconds
 	results map[string]string   // each package's verdict: pass, fail or skip
+	cached  map[string]bool     // packages go test served from its result cache
 }
 
 func newReport(out io.Writer) *report {
@@ -163,6 +166,7 @@ func newReport(out io.Writer) *report {
 		builds:  map[string][]string{},
 		elapsed: map[string]float64{},
 		results: map[string]string{},
+		cached:  map[string]bool{},
 	}
 }
 
@@ -211,6 +215,13 @@ func (r *report) handle(e event) {
 		case e.Package == "":
 			r.builds[e.ImportPath] = append(r.builds[e.ImportPath], e.Output)
 		case e.Test == "":
+			// A cached package reports its pass with Elapsed 0 and says so on
+			// the package's own "ok  \t<pkg>\t(cached)" line. A test's output
+			// never reaches this branch, so a test that happens to print the
+			// word cannot mark its package.
+			if strings.HasSuffix(strings.TrimSpace(e.Output), "(cached)") {
+				r.cached[e.Package] = true
+			}
 			r.pkgOut[e.Package] = append(r.pkgOut[e.Package], e.Output)
 		default:
 			key := testKey(e.Package, e.Test)
@@ -286,22 +297,26 @@ func (r *report) tier() time.Duration {
 }
 
 // wallLine is one package's wall in one run: the JSON object -jsonl appends.
-// load1 is left out when the host reports none, so a line never carries a load
-// it did not read.
+// wall_s is left out for a package served from go test's result cache, and
+// cached marks that line, so a reader never takes a cache hit's zero for a
+// measured wall. load1 is left out when the host reports none, so a line never
+// carries a load it did not read.
 type wallLine struct {
 	TS     time.Time `json:"ts"`
 	Run    string    `json:"run"`
 	Pkg    string    `json:"pkg"`
-	WallS  float64   `json:"wall_s"`
+	WallS  *float64  `json:"wall_s,omitempty"`
 	Result string    `json:"result"`
 	Load1  *float64  `json:"load1,omitempty"`
+	Cached bool      `json:"cached,omitempty"`
 }
 
 // series renders one line per package the stream reported a verdict for,
 // sorted by package so one stream always renders one file. ts is the run's own
 // start, the stream's first event; a stream with no timestamps is stamped from
 // the clock. The load is read once for the run, and left out when the host
-// reports none.
+// reports none. A cached package keeps its line and its verdict but carries no
+// wall: go test reported no time for it.
 func (r *report) series(runID string, h host) ([]byte, error) {
 	pkgs := make([]string, 0, len(r.results))
 	for pkg := range r.results {
@@ -321,13 +336,19 @@ func (r *report) series(runID string, h host) ([]byte, error) {
 	}
 	var buf bytes.Buffer
 	for _, pkg := range pkgs {
+		var wall *float64
+		if !r.cached[pkg] {
+			w := r.elapsed[pkg]
+			wall = &w
+		}
 		line, err := json.Marshal(wallLine{
 			TS:     ts,
 			Run:    runID,
 			Pkg:    pkg,
-			WallS:  r.elapsed[pkg],
+			WallS:  wall,
 			Result: r.results[pkg],
 			Load1:  load,
+			Cached: r.cached[pkg],
 		})
 		if err != nil {
 			return nil, err
@@ -406,11 +427,12 @@ func hostLoad1() (float64, bool) {
 }
 
 // townRoot is the town the checkout sits in, or "" when there is none. It
-// reads no environment: the town is the outermost ancestor holding
-// mayor/town.json. The working directory answers for a gate run inside the
-// town (a polecat worktree); a landing's throwaway worktree sits outside the
-// town, so when the directory finds nothing the repository it belongs to is
-// asked instead.
+// reads no environment of its own: the town walk is workspace.Find, whose only
+// read is the test harness's GT_TEST_FORBIDDEN_TOWN_ROOT guard. The town is the
+// outermost ancestor holding mayor/town.json. The working directory answers
+// for a gate run inside the town (a polecat worktree); a landing's throwaway
+// worktree sits outside the town, so when the directory finds nothing the
+// repository it belongs to is asked instead.
 func townRoot() string {
 	return townRootAt(os.Getwd, gitCommonDir)
 }
