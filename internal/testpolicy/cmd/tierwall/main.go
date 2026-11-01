@@ -446,10 +446,16 @@ func townAbove(dir string) string {
 	return root
 }
 
+// gitTimeout bounds the one git call the town lookup makes: a repository that
+// cannot answer costs the series, never the run.
+const gitTimeout = 2 * time.Second
+
 // gitCommonDir is the repository's shared .git directory, which a linked
 // worktree points at even when its own directory sits outside the town.
 func gitCommonDir() (string, error) {
-	out, err := exec.Command("git", "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
 	if err != nil {
 		return "", fmt.Errorf("git rev-parse --git-common-dir: %w", err)
 	}
