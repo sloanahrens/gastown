@@ -95,7 +95,12 @@ func runLandWait(cmd *cobra.Command, _ []string) error {
 		out:      cmd.OutOrStdout(),
 		errOut:   cmd.ErrOrStderr(),
 	})
-	return landWaitAnswer(cmd.OutOrStdout(), err)
+	err = landWaitAnswer(cmd.OutOrStdout(), err)
+	if _, ok := IsSilentExit(err); ok {
+		// The exit code is the answer; cobra must not print it as an error.
+		cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	}
+	return err
 }
 
 // landWaitAnswer turns the wait's end into what the command reports: the
