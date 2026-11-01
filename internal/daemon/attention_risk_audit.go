@@ -55,11 +55,41 @@ func (s *attentionSources) auditResolvedRiskFails(ctx context.Context) ([]string
 	// One read per finding bead per tick: several landings may name the same one.
 	read := map[string]*beads.Issue{}
 	since := s.now.Add(-attentionRiskPathWindow)
-	for _, rig := range s.landingRigs() {
+	rigs := s.landingRigs()
+	// The pass starts at the rig after the last one the previous pass finished,
+	// so a pass cut short by its share does not starve the rigs behind the
+	// first (auditNext is carried across ticks by the attention cache).
+	start := 0
+	if len(rigs) > 0 {
+		start = s.auditStart % len(rigs)
+	}
+	s.auditNext = start
+	for i := range rigs {
+		idx := (start + i) % len(rigs)
+		rig := rigs[idx]
+		if err := ctx.Err(); err != nil {
+			return wrote, err
+		}
 		recs, err := s.riskLandings(rig, since)
 		if err != nil {
 			note(fmt.Errorf("%s: %w", rig, err))
+			s.auditNext = (idx + 1) % len(rigs)
 			continue
+		}
+		// One batched read of the rig's qualifying beads, not one read per
+		// landing record (gt-5req0).
+		issues, err := s.riskIssuesBatch(ctx, rig, recs)
+		if err != nil {
+			note(fmt.Errorf("%s: %w", rig, err))
+			if ctx.Err() != nil {
+				return wrote, firstErr
+			}
+			// A batch that read nothing skips the rig; a per-bead fallback
+			// that read some goes on with those.
+			if issues == nil {
+				s.auditNext = (idx + 1) % len(rigs)
+				continue
+			}
 		}
 		for _, rec := range recs {
 			if len(wrote) >= riskAuditCap {
@@ -71,11 +101,7 @@ func (s *attentionSources) auditResolvedRiskFails(ctx context.Context) ([]string
 			if rec.BeadID == "" || rec.Head == "" || len(rec.RiskPaths) == 0 {
 				continue
 			}
-			issue, err := s.riskIssue(ctx, rig, rec.BeadID)
-			if err != nil {
-				note(fmt.Errorf("%s: %w", rec.BeadID, err))
-				continue
-			}
+			issue := issues[rec.BeadID]
 			if issue == nil {
 				continue
 			}
@@ -126,8 +152,42 @@ func (s *attentionSources) auditResolvedRiskFails(ctx context.Context) ([]string
 				wrote = append(wrote, rec.BeadID+": "+line)
 			}
 		}
+		s.auditNext = (idx + 1) % len(rigs)
 	}
 	return wrote, firstErr
+}
+
+// riskIssuesBatch reads the work beads of rig's qualifying landing records (a
+// bead id, a head and risk paths) in one batched call, keyed by bead id. A
+// source without a batch read (riskIssues nil) reads them one at a time, as
+// the pass did before gt-5req0.
+func (s *attentionSources) riskIssuesBatch(ctx context.Context, rig string, recs []land.LandingRecord) (map[string]*beads.Issue, error) {
+	var ids []string
+	seen := map[string]bool{}
+	for _, rec := range recs {
+		if rec.BeadID == "" || rec.Head == "" || len(rec.RiskPaths) == 0 || seen[rec.BeadID] {
+			continue
+		}
+		seen[rec.BeadID] = true
+		ids = append(ids, rec.BeadID)
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	if s.riskIssues != nil {
+		return s.riskIssues(ctx, rig, ids)
+	}
+	out := make(map[string]*beads.Issue, len(ids))
+	var errs []error
+	for _, id := range ids {
+		issue, err := s.riskIssue(ctx, rig, id)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", id, err))
+			continue
+		}
+		out[id] = issue
+	}
+	return out, errors.Join(errs...)
 }
 
 // unshapedFinding returns the first finding id that is not shaped like a bead

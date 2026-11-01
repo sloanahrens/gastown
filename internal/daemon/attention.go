@@ -179,6 +179,9 @@ type attentionCache struct {
 	// riskSkipped is the work beads the risk-path collector skipped last tick
 	// because their read failed, so a bead still failing is not logged again.
 	riskSkipped map[string]bool
+	// auditNext is the rig index the resolved-FAIL audit begins at on the next
+	// tick: the rig after the last one the previous pass finished.
+	auditNext int
 	// escalationLogs is the condition each escalation was last logged for, so
 	// an unchanged refusal or failed read is said once, not every tick.
 	escalationLogs map[string]string
@@ -265,6 +268,13 @@ type attentionSources struct {
 	// two outside reads (gt-vsct7.4).
 	riskLandings func(rig string, since time.Time) ([]land.LandingRecord, error)
 	riskIssue    func(ctx context.Context, rig, id string) (*beads.Issue, error)
+	// riskIssues reads the work beads ids of one rig in one batched call,
+	// keyed by id; nil falls back to riskIssue per id (gt-5req0).
+	riskIssues func(ctx context.Context, rig string, ids []string) (map[string]*beads.Issue, error)
+	// auditStart is the rig index the resolved-FAIL pass begins at and
+	// auditNext the one the next pass begins at, carried by the attention
+	// cache.
+	auditStart, auditNext int
 	// findingIssue reads one finding bead — the status and the close reason
 	// that resolved it — and riskAppend appends a review line to a work bead's
 	// notes: the resolved-FAIL pass's read and its only write
@@ -377,6 +387,7 @@ func (d *Daemon) writeAttentionWith(budget time.Duration, sources func(now time.
 	src.repeatedAt = cache.repeatedAt
 	src.backlogSamples = cache.backlogSamples
 	src.riskSkipped = cache.riskSkipped
+	src.auditStart = cache.auditNext
 	src.escalationLogs = cache.escalationLogs
 	tips, err := readDirectPushTips(d.config.TownRoot)
 	if err != nil {
@@ -406,7 +417,7 @@ func (d *Daemon) writeAttentionWith(budget time.Duration, sources func(now time.
 		d.logger.Printf("attention: auditing resolved risk-path FAILs: %v", err)
 	}
 	state := d.attentionTick(ctx, src, prev, acks, now)
-	d.lastAttention = &attentionCache{state: state, reworkNotes: src.reworkNotes, diskWarnBeats: src.diskWarnBeats, dockerProbeFails: src.dockerProbeFails, repeatedAt: src.repeatedAt, backlogSamples: src.backlogSamples, riskSkipped: src.riskSkipped, escalationLogs: src.escalationLogs}
+	d.lastAttention = &attentionCache{state: state, reworkNotes: src.reworkNotes, diskWarnBeats: src.diskWarnBeats, dockerProbeFails: src.dockerProbeFails, repeatedAt: src.repeatedAt, backlogSamples: src.backlogSamples, riskSkipped: src.riskSkipped, auditNext: src.auditNext, escalationLogs: src.escalationLogs}
 	if len(src.tips.Rigs) == 0 {
 		return
 	}
@@ -703,6 +714,26 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 			return nil, err
 		}
 		return d.rigWorkBeads(rig).Show(id)
+	}
+	s.riskIssues = func(ctx context.Context, rig string, ids []string) (map[string]*beads.Issue, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		rd := d.rigWorkBeads(rig)
+		if batch, ok := rd.(interface {
+			ShowMultiple(ids []string) (map[string]*beads.Issue, error)
+		}); ok {
+			return batch.ShowMultiple(ids)
+		}
+		out := make(map[string]*beads.Issue, len(ids))
+		for _, id := range ids {
+			issue, err := rd.Show(id)
+			if err != nil {
+				return nil, err
+			}
+			out[id] = issue
+		}
+		return out, nil
 	}
 	d.productionRiskAudit(s)
 	return s
