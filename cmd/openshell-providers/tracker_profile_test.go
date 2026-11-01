@@ -379,16 +379,29 @@ func TestTrackerPolecatProfileAllowsNoDeleteRoute(t *testing.T) {
 // TestTrackerPolecatProfileTransferRule holds the transfer route to the case the
 // bead's Constraints name: no production seat calls POST /v1/issues/{id}/transfer
 // (tracker/client.Transfer is called only from the tracker's contract cases and
-// server tests), so the profile refuses it in each form a server resolves to it.
+// server tests). The effect checked is that no method reaches the route in any
+// form a server resolves to it, so a seat cannot hand a bead to another assignee
+// through it. This covers the transfer route only. Reassignment through PATCH and
+// the batch update op is not refused here, because a rule matches no body (gt-26dvk).
 // If a seat caller appears, name it on gt-zbpf0 and change this test to allow
 // the route.
 func TestTrackerPolecatProfileTransferRule(t *testing.T) {
 	t.Parallel()
 	p := readProfile(t, trackerProfilePath)
+	for _, method := range httpMethods {
+		for _, form := range routedForms("/v1/issues/gt-0f305/transfer") {
+			route := requestPath(t, form)
+			if profileAllows(p, method, route) {
+				t.Errorf("%s %s (requested as %s) matches an allow rule in %s, so a seat could hand a bead to another assignee through it (gt-zbpf0)", method, route, form, trackerProfilePath)
+			}
+		}
+	}
+	// A matcher that admits nothing would pass the loop above whatever the file
+	// says, so a canary rule that does admit the route must be seen to.
+	canary := profileFile{Endpoints: []profileEndpoint{{Rules: []profileRule{allowRule("POST", "/v1/issues/*/transfer")}}}}
 	for _, form := range routedForms("/v1/issues/gt-0f305/transfer") {
-		route := requestPath(t, form)
-		if profileAllows(p, "POST", route) {
-			t.Errorf("POST %s (requested as %s) matches an allow rule in %s, and no seat caller needs it (gt-zbpf0)", route, form, trackerProfilePath)
+		if route := requestPath(t, form); !profileAllows(canary, "POST", route) {
+			t.Fatalf("%s resolves to %s, which the canary transfer rule does not admit, so the refusal check above would pass whatever the profile says", form, route)
 		}
 	}
 }

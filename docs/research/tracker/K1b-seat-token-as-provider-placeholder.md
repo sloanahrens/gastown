@@ -39,6 +39,10 @@ Derived from the route registrations in `tracker/server/routes_*.go` and `server
 - reads: `GET /v1/issues/{id}`, `POST /v1/issues:show-many`, `:list`, `:count`, `POST /v1/assigned`, `POST /v1/ready`, `POST /v1/blocked`, `POST /v1/issues:children-of`, `GET /v1/events`, `GET /v1/whoami`, `GET /v1/issues/{id}/comments`, `GET /v1/issues/{id}/dependencies`
 - writes: `POST /v1/issues`, `PATCH /v1/issues/{id}`, `POST /v1/issues:close`, `POST /v1/graphs`, `POST /v1/issues/{id}/claim`, `release`, `POST /v1/batch`, `POST /v1/issues/{id}/comments`, `POST /v1/issues/{id}/dependencies`, `DELETE /v1/issues/{id}/dependencies/{dependsOn}`. `:delete` and `transfer` were first listed here and are not seat writes: a bead delete is town-side, and no production seat calls transfer (gt-zbpf0).
 
+Reassignment is still open through the allowed writes. `PATCH /v1/issues/{id}` and the batch `update` op both carry an `assignee` patch, and the store sets it on any bead another actor does not hold `in_progress` (`tracker/store/postgres_update.go`). A profile rule matches method and path, not the body, so removing `transfer` does not stop a seat from reassigning a bead. The server guard is gt-26dvk.
+
+The batch rule (`POST /v1/batch`, `tracker/api/batch.go`, `tracker/store/postgres_batch.go`) admits four ops: `create`, `update`, `close` and `comment`. There is no delete or transfer op, so the batch rule does not reopen `issues:delete` or `transfer`. Its `update` op runs the same path as PATCH, so it adds no reach beyond the reassignment gap above, and its `close` op runs with the request's `force` flag, the same as `POST /v1/issues:close`.
+
 Refuse in the profile, in two groups.
 
 - Admin-gated, read from the code: `POST /v1/tokens`, `POST /v1/tokens:revoke`, `PUT /v1/config/{key}` and `POST /v1/wisps:purge` are wrapped in `requireAdmin` (`tracker/server/routes_admin.go:25-28`), and `POST /v1/export` is too (`tracker/server/routes_export.go:16`). The profile refuses them as defence in depth: a seat token that was ever issued with admin scope still could not reach them through the sandbox.
