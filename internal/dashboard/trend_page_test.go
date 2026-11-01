@@ -61,7 +61,7 @@ func TestQueuedLandingRowAgesTheWaitFromTheBeadsLastUpdate(t *testing.T) {
 
 	tbl := pageFunc(t, "landingTable")
 	for _, want := range []string{
-		`el("td", "title", b.updated_at ? "waiting " + age(b.updated_at) : "waiting")`,
+		`el("td", "when title", b.updated_at ? "waiting " + age(b.updated_at) : "waiting")`,
 		`when.title = "waiting since the bead's last update, which gt done moves";`,
 	} {
 		if !strings.Contains(tbl, want) {

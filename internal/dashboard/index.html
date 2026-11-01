@@ -188,14 +188,20 @@ section>h2 .foldsum{margin-left:auto;text-transform:none;letter-spacing:0;white-
 .fev .rp{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ltable td{vertical-align:top}
 .ltable td.n,.ltable th.n{padding-left:14px}
-.ltable td:nth-child(2){overflow-wrap:anywhere}
-.lrows{max-height:70vh;overflow:auto}
+/* A landing's title keeps a floor, so a narrow panel scrolls the table rather
+   than squeezing the title into a column of one-word fragments. */
+.ltable td.main{min-width:200px;overflow-wrap:break-word}
+/* The When cell is one reading, never a sentence split over two lines: "merging
+   47s" reads as one value (gt-u7xe9). */
+.ltable td.when{white-space:nowrap}
+.lrows{max-height:70vh;overflow-y:auto}
 .lrows th{position:sticky;top:0;background:var(--panel)}
 .costchip{border:1px solid currentColor;border-radius:999px;padding:0 7px;font-size:11px;white-space:nowrap;color:var(--dim)}
-/* A nine-column table in a narrow panel scrolls sideways, and the fade at the
-   cut edge is the cue: a dim gradient under a panel-coloured cover that scrolls
-   with the table, so the fade shows only while the table overflows. */
-.costscroll{
+/* A wide table in a narrow panel scrolls sideways, and the fade at the cut edge
+   is the cue: a dim gradient under a panel-coloured cover that scrolls with the
+   table, so the fade shows only while the table overflows. The Cost panel's
+   providers table and the Landings table share it (gt-k21do, gt-u7xe9). */
+.costscroll,.lrows{
   overflow-x:auto;
   background:
     linear-gradient(to left, var(--panel) 60%, transparent) right center,
@@ -1551,10 +1557,10 @@ function landingTable(s, names, rows, waiting) {
   // row says waiting and nothing about position.
   for (const b of shown) {
     const tr = el("tr");
-    const when = el("td", "title", b.updated_at ? "waiting " + age(b.updated_at) : "waiting");
+    const when = el("td", "when title", b.updated_at ? "waiting " + age(b.updated_at) : "waiting");
     when.title = "waiting since the bead's last update, which gt done moves";
     tr.append(when);
-    const main = el("td");
+    const main = el("td", "main");
     main.append(el("span", "bead", b.id));
     const tag = el("span", "tag", "queued");
     tag.title = "submitted; the landing worker has not taken it yet";
@@ -1573,8 +1579,8 @@ function landingTable(s, names, rows, waiting) {
     const tr = el("tr");
     const when = new Date(r.at);
     if (r.outcome === "running") tr.className = "live";
-    tr.append(el("td", "title", r.outcome === "running" ? "merging " + fmtDur((Date.now() - when.getTime()) / 1000) : r.outcome === "backoff" ? "checked " + clock(r.at).slice(0, 5) : (when.toDateString() === today ? clock(r.at).slice(0, 5) : when.toLocaleDateString([], {month: "short", day: "numeric"}) + " " + clock(r.at).slice(0, 5))));
-    const main = el("td");
+    tr.append(el("td", "when title", r.outcome === "running" ? "merging " + fmtDur((Date.now() - when.getTime()) / 1000) : r.outcome === "backoff" ? "checked " + clock(r.at).slice(0, 5) : (when.toDateString() === today ? clock(r.at).slice(0, 5) : when.toLocaleDateString([], {month: "short", day: "numeric"}) + " " + clock(r.at).slice(0, 5))));
+    const main = el("td", "main");
     main.append(el("span", "bead", r.bead));
     if (r.outcome === "running") { const g = el("span", "tag live", "running"); g.title = "merged; the worker is gating the merged tree and running the om review"; main.append(document.createTextNode(" "), g); }
     else if (r.outcome === "rejected") { const g = el("span", "tag badc", "rejected · " + (r.kind || "?")); main.append(document.createTextNode(" "), g); }
