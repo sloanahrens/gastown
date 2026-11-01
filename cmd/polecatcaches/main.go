@@ -98,7 +98,9 @@ func runWith(args []string, out, errw io.Writer, d deps) int {
 		d.remoteURL = func(rigName string) (string, error) { return forgejoRemote(*town, rigName) }
 	}
 	if d.profiles == nil {
-		d.profiles = townSandboxProfiles
+		d.profiles = func(townRoot string) (map[string]config.SandboxProfile, error) {
+			return townSandboxProfiles(d.readFile, townRoot)
+		}
 	}
 
 	pins, code := resolvePins(fs.Args(), *pinsPath, *forgejoHost, errw, d)
@@ -250,15 +252,22 @@ func seedPlacement(town, name, claim string, errw io.Writer, d deps) (map[string
 	return profile.NodeSelector, tolerations, true
 }
 
-// townSandboxProfiles reads the town's sandbox profiles. A town with no
-// settings file names none, and the caller that asked for a profile is refused.
-func townSandboxProfiles(townRoot string) (map[string]config.SandboxProfile, error) {
-	ts, err := config.LoadTownSettings(config.TownSettingsPath(townRoot))
+// townSandboxProfiles reads the town's sandbox profiles through readFile, the
+// seam the pins are read through, so no caller reads the town tree directly. A
+// town with no settings file names none, and the caller that asked for a
+// profile is refused.
+func townSandboxProfiles(readFile func(string) ([]byte, error), townRoot string) (map[string]config.SandboxProfile, error) {
+	path := config.TownSettingsPath(townRoot)
+	data, err := readFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("there is no settings file at %s", path)
+	}
 	if err != nil {
 		return nil, err
 	}
-	if ts == nil {
-		return nil, fmt.Errorf("there is no settings file at %s", config.TownSettingsPath(townRoot))
+	var ts config.TownSettings
+	if err := config.DecodeJSONFile(path, data, &ts); err != nil {
+		return nil, err
 	}
 	return ts.Sandboxes, nil
 }

@@ -237,14 +237,19 @@ POLE_CACHE_IMAGE ?= $(POLE_IMAGE):dev
 POLE_FORGEJO_HOST ?=
 # POLE_CACHE_SANDBOX is the sandbox profile that owns the claim: its
 # node_selector and tolerations place the seed Job's pod on the pool that
-# mounts the claim (gt-5paez). Empty places the pod nowhere itself, which is
-# right only for a plain cluster.
+# mounts the claim (gt-5paez). The recipe refuses an empty value unless
+# POLE_CACHE_PLAIN_CLUSTER is set, since an empty profile places the pod
+# nowhere itself, which is right only for a plain cluster.
 POLE_CACHE_SANDBOX ?=
+# POLE_CACHE_PLAIN_CLUSTER=1 names a plain cluster, where the cluster places
+# the seed Job's pod itself, so POLE_CACHE_SANDBOX may stay empty (gt-9v6v1).
+POLE_CACHE_PLAIN_CLUSTER ?=
 
 # RIGS narrows the seed to the named pins: make polecat-caches RIGS="gastown
 # om". Empty seeds every pin in POLE_SEED_PINS. The Job's marker skips the
 # steps a rerun with the same pins would repeat.
 polecat-caches:
+	@test -n "$(POLE_CACHE_SANDBOX)$(POLE_CACHE_PLAIN_CLUSTER)" || { echo "polecat-caches: POLE_CACHE_SANDBOX is empty, so the seed Job's pod would be placed nowhere, off the pool that mounts $(POLE_CACHE_CLAIM) (gt-5paez): name the sandbox profile that owns the claim, or set POLE_CACHE_PLAIN_CLUSTER=1 for a plain cluster" >&2; exit 2; }
 	@go run ./cmd/polecatcaches -pins $(POLE_SEED_PINS) -town $(POLE_TOWN) -image $(POLE_CACHE_IMAGE) -claim $(POLE_CACHE_CLAIM) -namespace "$(POLE_CACHE_NAMESPACE)" -sandbox "$(POLE_CACHE_SANDBOX)" -forgejo-host "$(POLE_FORGEJO_HOST)" $(RIGS)
 
 # Profiles are imported and the two providers created from the key files under

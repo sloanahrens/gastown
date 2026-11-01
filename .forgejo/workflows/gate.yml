@@ -19,10 +19,10 @@
 # The fetch deepens two refs, the candidate and main, and creates no other.
 # The gate's history reader is `git describe --tags --always` (VERSION, hence
 # the build's ldflags): it needs the candidate's ancestry back to its nearest
-# tag, which a depth-1 checkout alone does not have. main is the base the
-# candidate is built on, kept for the ancestry and merge-base reads around the
-# landing. `fetch-depth: 0` fetched all 669 heads instead, 8s of a 49s job
-# (gt-ebco0).
+# tag, which a depth-1 checkout alone does not have, and the tags step below
+# fetches the tags. main is the base the candidate is built on, so the
+# candidate's history reaches it. `fetch-depth: 0` would fetch every head
+# instead of these two (gt-ebco0).
 name: ci
 on:
   push:
