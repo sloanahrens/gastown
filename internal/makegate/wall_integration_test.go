@@ -115,20 +115,28 @@ func TestIntegrationWallIsAnUncachedRun(t *testing.T) {
 	}
 }
 
+// wallRecipeSample is a frozen copy of the wall recipe's two suite commands as
+// `make -n test-integration-wall` printed them at gt-gq4gl: each carries
+// -json -count=1. The next case derives the recipe the fix replaced from it, so
+// a later edit to the live Makefile cannot break that case or hide a gap in the
+// check. The live recipe is read by TestIntegrationWallIsAnUncachedRun.
+const wallRecipeSample = `GT_TEST_DOCKER=1 GT_TEST_DOLT_INIT_CONCURRENCY=8 go test -json -count=1 -tags integration -timeout 20m ./...; \
+GT_TEST_DOCKER=1 GT_TEST_DOLT_INIT_CONCURRENCY=8 go test -json -count=1 -timeout 20m ./internal/beads ./internal/testutil; \
+`
+
 // TestIntegrationWallCountCheckRejectsThePreGtGq4glRecipe checks "the -count=1
 // check rejects the pre-gt-gq4gl wall recipe". The recipe it rejects is made
-// from the real one: the wall's dry run with -count=1 taken out of both
-// commands, which is the shape the wall had before gt-gq4gl.
+// from the frozen sample with -count=1 taken out of both commands, which is the
+// shape the wall had before gt-gq4gl.
 // Mutation: return true from wallUncached unconditionally, and the recipe this
 // case exists to catch passes the very check that guards the measurement.
 func TestIntegrationWallCountCheckRejectsThePreGtGq4glRecipe(t *testing.T) {
-	out := dryTarget(t, defaultsMake(t, repoRoot(t)), "test-integration-wall")
-	if !wallUncached(out) {
-		t.Fatalf("the real wall recipe is not uncached, so there is no recipe to take -count=1 out of\n%s", out)
+	if !wallUncached(wallRecipeSample) {
+		t.Fatalf("the check rejects the frozen sample of the fixed recipe, so it would reject the live one\n%s", wallRecipeSample)
 	}
-	preGtGq4gl := strings.ReplaceAll(out, " -count=1", "")
-	if preGtGq4gl == out {
-		t.Fatal("taking -count=1 out of the wall recipe changed nothing")
+	preGtGq4gl := strings.ReplaceAll(wallRecipeSample, " -count=1", "")
+	if preGtGq4gl == wallRecipeSample {
+		t.Fatal("taking -count=1 out of the frozen sample changed nothing")
 	}
 	if wallUncached(preGtGq4gl) {
 		t.Fatalf("the -count=1 check admits the wall recipe with -count=1 taken out\n%s", preGtGq4gl)

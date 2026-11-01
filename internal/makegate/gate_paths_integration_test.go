@@ -82,8 +82,8 @@ func TestIntegrationGatePathsLintWaitsOnTheLock(t *testing.T) {
 // TestIntegrationGatePathsTaxedHostWarnsAndPasses checks "a taxed host: the
 // gate warns on the exec tax and still passes (gt-2ycne.1)".
 // Mutation: drop the exec-tax-preflight prerequisite from gate-lint, and the
-// preflight stub is never called. The warning itself is the preflight's text,
-// not the gate's, so the case asserts the gate ran the preflight and carried on.
+// preflight stub is never called; send the preflight's stderr to /dev/null in
+// the recipe, and the warning never reaches the operator.
 func TestIntegrationGatePathsTaxedHostWarnsAndPasses(t *testing.T) {
 	r := newGateSandbox(t).Run([]string{"-o", "lint"}, "EXEC_TAX_WARN=1")
 
@@ -92,6 +92,12 @@ func TestIntegrationGatePathsTaxedHostWarnsAndPasses(t *testing.T) {
 	}
 	if !r.hasCall("preflight") {
 		t.Fatalf("the gate never ran the exec-tax preflight\ncalls:\n%s", r.callLog())
+	}
+	// The warning is the preflight's own text (the stub prints it, as the real
+	// one does on a taxed host), so this asserts what the gate owes the operator:
+	// that it lets the preflight's stderr through instead of swallowing it.
+	if !strings.Contains(r.Stderr, "gate: WARNING exec tax 180 ms/exec") {
+		t.Fatalf("the preflight's warning did not reach the operator: the gate swallowed its stderr\nstderr:\n%s", r.Stderr)
 	}
 	if !gateWallLine.MatchString(r.Stderr) {
 		t.Fatalf("the gate printed no `gate: PASSED in <n>s wall` line\nstderr:\n%s", r.Stderr)
