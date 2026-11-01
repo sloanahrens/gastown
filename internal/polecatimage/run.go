@@ -1,8 +1,8 @@
 // Package polecatimage is the polecat-image plugin: it keeps the
-// gastown-polecat:dev image at the installed gt's commit, publishes what it
-// builds, and trims the image tags, build cache and per-rig cache volumes that
-// runs accumulate (gt-tpg0p.5 through gt-tpg0p.7). plugins/polecat-image/plugin.md
-// is the contract.
+// gastown-polecat:dev image at the installed gt's and bd's commits, publishes
+// what it builds, and trims the image tags, build cache and per-rig cache
+// volumes that runs accumulate (gt-tpg0p.5 through gt-tpg0p.7).
+// plugins/polecat-image/plugin.md is the contract.
 package polecatimage
 
 import (
@@ -21,8 +21,10 @@ import (
 // program's wiring fills it, from the environment for the values the script
 // reads that way.
 type Config struct {
-	// GT, Docker, Git, Make, Pgrep and Openshell are the programs a run calls.
-	GT, Docker, Git, Make, Pgrep, Openshell string
+	// GT, BD, Docker, Git, Make, Pgrep and Openshell are the programs a run
+	// calls. BD is the installed bd whose commit the image's bd label must
+	// match.
+	GT, BD, Docker, Git, Make, Pgrep, Openshell string
 	// RigRepo is the bare repository a build makes its worktree from, BuildRoot
 	// holds the worktrees it makes there, and BDSrc is the beads checkout the
 	// image's bd is built from.
@@ -35,14 +37,18 @@ type Config struct {
 	// SandboxRecords is the gateway's per-sandbox directory: a listed sandbox
 	// without a record there defers the run.
 	SandboxRecords string
-	// Image is the tag a build updates, and Label is the label inside it that
-	// records the gt commit.
-	Image, Label string
+	// Image is the tag a build updates, Label is the label inside it that
+	// records the gt commit, and BdLabel the one that records the bd commit.
+	Image, Label, BdLabel string
 	// Registry is the host:port image pushes go to; empty publishes nothing.
 	Registry string
 	// Published records the "<image id> <registry>" a complete push left, so
 	// the next run retries one that did not finish.
 	Published string
+	// BdStuck records the "<installed bd> <image bd>" pair of a run that ended
+	// with the image's bd label behind the installed bd. Later runs fail at once
+	// for that pair instead of building again, until either commit moves.
+	BdStuck string
 	// Crane pushes the image's first tag and makes every later tag on the
 	// registry.
 	Crane string

@@ -1,6 +1,9 @@
 package polecatimage
 
-import "strings"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // InstalledCommit is the commit the installed gt was built from, or "" when
 // `gt version` names no 7-character lowercase hex commit in its last
@@ -60,12 +63,57 @@ func isHex(s string) bool {
 // carry, which a missing label is.
 const dockerNoValue = "<no value>"
 
+// InstalledBdCommit is the commit the installed bd was built from, read from
+// the commit field of `bd version --json`, or "" when that cannot be read.
+//
+// The run treats "" as the image's bd being current and says so here, so a bd
+// that cannot answer never starts a build loop. It is asked only once the gt
+// half is current, so an unreadable bd never rebuilds an image whose gt is
+// current.
+func (r *Run) InstalledBdCommit() string {
+	res := r.call(r.Cfg.BD, "version", "--json")
+	commit := ""
+	if !res.failed() {
+		commit = bdCommitOfVersion(res.output())
+	}
+	if commit == "" {
+		r.Logf("cannot read the installed bd's commit from '%s version --json'; treating the image's bd as current", r.Cfg.BD)
+	}
+	return commit
+}
+
+// bdCommitOfVersion reads the commit from the JSON `bd version --json` prints,
+// or "" when the output is not that JSON, names no commit, or names something
+// that is not a commit.
+func bdCommitOfVersion(out string) string {
+	var v struct {
+		Data struct {
+			Commit string `json:"commit"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		return ""
+	}
+	if !isCommit(v.Data.Commit) {
+		return ""
+	}
+	return v.Data.Commit
+}
+
 // ImageCommit is the gt commit the image's label records, or "" when the image
 // or the label is missing.
+func (r *Run) ImageCommit() string { return r.imageLabel(r.Cfg.Label) }
+
+// ImageBdCommit is the bd commit the image's bd label records, or "" when the
+// image or the label is missing.
+func (r *Run) ImageBdCommit() string { return r.imageLabel(r.Cfg.BdLabel) }
+
+// imageLabel is one label's value in the image, or "" when the image or the
+// label is missing.
 //
 // Only stdout counts: a docker warning on stderr must not read as a commit.
-func (r *Run) ImageCommit() string {
-	format := `{{index .Config.Labels "` + r.Cfg.Label + `"}}`
+func (r *Run) imageLabel(name string) string {
+	format := `{{index .Config.Labels "` + name + `"}}`
 	res := r.call(r.Cfg.Docker, "image", "inspect", "--format", format, r.Cfg.Image)
 	label := strings.TrimSpace(res.output())
 	if label == dockerNoValue {

@@ -1,6 +1,6 @@
 +++
 name = "polecat-image"
-description = "Rebuild gastown-polecat:dev at the installed gt's commit after each gt install, so sandbox slings are not refused for image drift; publish it to the configured registry; then trim the image tags, build cache and per-rig cache volumes that run grows"
+description = "Rebuild gastown-polecat:dev at the installed gt's and bd's commits; publish it to the configured registry; then trim the image tags, build cache and per-rig cache volumes a run grows"
 version = 1
 
 [gate]
@@ -19,9 +19,8 @@ timeout = "15m"
 
 # Polecat Image
 
-A sandbox polecat runs the **image's** gt (hooks, `gt done`, `bd` access)
-against the live daemon and Dolt, so the image must carry the same gt as the
-installed one. The sandbox backend refuses a sling whose image carries another
+A sandbox polecat runs the **image's** gt (hooks, `gt done`, `bd` access), so
+the image must carry the installed gt's commit. The sandbox backend refuses a sling whose image carries another
 commit (gt-pmxo9); gt is reinstalled after most landings, so without this
 plugin every sandbox sling would be refused until someone rebuilt the image by
 hand.
@@ -37,9 +36,11 @@ detached, escalating a failure under `install-gt:image-build-failed`.
 
 ## What it does
 
-1. Reads the installed gt's commit (`gt version`) and the commit label of
-   `gastown-polecat:dev` (`org.gastown.gt-commit`). Equal (a prefix of at least
-   7 characters either way): prints `current` and stops.
+1. Reads the installed gt's and bd's commits (`gt version`, `bd version
+   --json`) and the image's `org.gastown.gt-commit` and `org.gastown.bd-commit`
+   labels. Each pair equal (7 characters as a prefix either way): prints
+   `current` and stops, so a bd-only landing still rebuilds (gt-xudej). An
+   unreadable bd leaves the bd half current and logs one line.
 2. Defers (exit 0, a `deferred:` line, retried by the next cooldown) while Docker
    Desktop is stopped, while a `gt sling` process is running, or while the
    gateway lists a sandbox whose registry record under
@@ -58,8 +59,11 @@ detached, escalating a failure under `install-gt:image-build-failed`.
    BD_SRC=~/gt/beads/mayor/rig` there, removes the worktree, and checks the
    labels it ended with; the Makefile's `BD_COMMIT` comment says which bd
    commit goes into the image and when the build fetches one (gt-7b7a5).
-5. Reads the installed commit again; if a newer install landed during the
-   build it builds again, at most 3 rounds.
+5. Reads both commits again; if either moved it builds again, at most 3 rounds.
+   A bd label still behind then fails the run, naming both commits, and records
+   the pair in `~/gt/.runtime/polecat-image.bd-stuck`. A later run that finds gt
+   current and the same pair fails at once without building, until either
+   commit moves; a run that finds the image current clears the record.
 6. With a registry resolved ("Publishing to a registry"), publishes what it just
    built there, and retries a publish that did not complete for an image that is
    already current.
@@ -111,8 +115,8 @@ Every build tags the image `gastown-polecat:<short sha>` as well as `:dev`, and
 nothing else removes the old tags (gt-mexpf). At the end of every run (current,
 deferred or built, never after a failure) the plugin untags the per-commit tags
 beyond the newest 3 (`POLECAT_IMAGE_KEEP`) with a plain `docker rmi
-<repo>:<sha>`. It never touches `:dev`, the image `:dev` names or a tag that is
-not a hex commit, never passes `-f`, and never prunes anything else. A failed
+<repo>:<sha>`. It never touches `:dev` or a tag that is not a hex commit, and never passes
+`-f`. A failed
 removal keeps the tag and logs docker's own reason, `kept ... (rmi failed:
 <reason>)`, so a container using the image and a real error read differently.
 With a registry set, the tag's `<registry>/…:<sha>` alias is untagged first (it
@@ -124,8 +128,8 @@ rest of the run carries on.
 ## Build cache
 
 Each rebuild also leaves its layers in Docker's build cache (apt, the Go
-toolchain, golangci-lint, the gt and bd compiles): a day of installs made it 20
-GB with nothing in use (gt-atxdz). After the image prune the plugin runs
+toolchain, golangci-lint, the gt and bd compiles), which grew to 20 GB unused
+(gt-atxdz). After the image prune the plugin runs
 `docker builder prune --keep-storage 8GB -f` (`POLECAT_IMAGE_BUILDER_KEEP`):
 LRU, so the most recently used layers stay and the next rebuild is warm. It runs
 that command and no wider prune (never a system, image, volume or `--all`
@@ -138,8 +142,7 @@ the run.
 ## Per-rig cache volumes
 
 Every sandbox of a rig mounts that rig's `gt-cache-<rig>` volume at
-`/sandbox/.cache`, and nothing trimmed it: `gt-cache-gastown` reached 27.7 GB on
-2026-10-24, growing about 3 GB an hour (gt-3g7p2). After the build cache trim
+`/sandbox/.cache`, and nothing trimmed it (gt-3g7p2). After the build cache trim
 the plugin brings each `gt-cache-<rig>` volume back under `POLECAT_CACHE_CAP`
 (default 10GB; a K, M, G, T or P suffix, so `512M` works):
 
@@ -149,8 +152,8 @@ failure never reads as "nothing to do".
 
 Over the cap, a short-lived container of the polecat image runs
 `bin/polecat-image trim-cache` and deletes files under `go-build`, least recently
-used first, until the volume fits. The trim runs in the image because a docker
-volume has no host path: the volume is its only mount. "Used" is the later of a
+used first, until the volume fits. The trim runs in the image, since a docker
+volume has no host path. "Used" is the later of a
 file's atime and mtime, because Go touches the mtime of a cache entry it reuses
 and a noatime mount leaves atime stale. `go/pkg/mod` goes only when the build
 cache alone cannot reach the cap. The helper follows no symlink, so it never
@@ -158,16 +161,15 @@ removes a path outside the volume. No volume is removed and no `docker volume
 prune` runs.
 
 A sandbox starting between the in-use check and the helper can lose a cache
-entry it would have read; Go reads a miss and rebuilds it, so the window is
-accepted rather than locked.
+entry; Go rebuilds the miss, so the window is accepted, not locked.
 
 Every failure exits non-zero with the tail of the failing command: a commit the
 rig repo does not know, a failed build, an image still carrying another commit,
 an installed gt whose commit cannot be read. A deferral exits 0 and prints why,
 unless `POLECAT_IMAGE_FAIL_CLOSED=1` makes it exit non-zero; read "Publishing to
 a registry" before setting that variable. A plugin whose receipts show
-`deferred:` run after run is stuck behind that reason and the image stays stale,
-with the sandbox sling's refusal as the net.
+`deferred:` run after run is stuck behind that reason, with the sandbox sling's
+refusal as the net.
 
 Run it directly; before building or syncing this plugin, read "Script entry
 point" in `plugins/README.md`:

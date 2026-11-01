@@ -60,6 +60,7 @@ func ConfigFromEnv(get func(string) string) (Config, error) {
 	}
 	return Config{
 		GT:             envOr(get, "POLECAT_IMAGE_GT", "gt"),
+		BD:             envOr(get, "POLECAT_IMAGE_BD", "bd"),
 		Docker:         envOr(get, "POLECAT_IMAGE_DOCKER", "docker"),
 		Git:            envOr(get, "POLECAT_IMAGE_GIT", "git"),
 		Make:           envOr(get, "POLECAT_IMAGE_MAKE", "make"),
@@ -74,8 +75,10 @@ func ConfigFromEnv(get func(string) string) (Config, error) {
 		SandboxRecords: envOr(get, "POLECAT_IMAGE_SANDBOX_RECORDS", filepath.Join(town, ".runtime", "sandboxes")),
 		Image:          envOr(get, "POLECAT_IMAGE_NAME", "gastown-polecat:dev"),
 		Label:          "org.gastown.gt-commit",
+		BdLabel:        "org.gastown.bd-commit",
 		Registry:       registry,
 		Published:      envOr(get, "POLECAT_IMAGE_PUBLISHED", filepath.Join(town, ".runtime", "polecat-image.published")),
+		BdStuck:        filepath.Join(town, ".runtime", "polecat-image.bd-stuck"),
 		// Only 1 turns it on, so a stray POLECAT_IMAGE_FAIL_CLOSED=0 cannot fail
 		// a run (gt-efupr).
 		FailClosed:         get("POLECAT_IMAGE_FAIL_CLOSED") == "1",
