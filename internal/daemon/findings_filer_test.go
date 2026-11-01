@@ -320,6 +320,32 @@ func TestFindingsFilerUnreadableDestination(t *testing.T) {
 	}
 }
 
+// TestFindingsFilerMissingDatabases pins the two stores a pass cannot open: a
+// scanned rig with no database is counted and skipped, and a destination rig
+// with none stops that source bead. Neither reads as a pass that found nothing
+// to file, and nothing is marked, so the next pass retries the finding.
+func TestFindingsFilerMissingDatabases(t *testing.T) {
+	t.Parallel()
+	town := newFindingsFilerTown(t, "gastown", "atlantis")
+	source := town.sourceBead(t, "gastown", "closed", "rig: atlantis\nthe foo module leaks a goroutine")
+	delete(town.stores, "atlantis")
+
+	got := town.pass(5)
+	if got.Filed != 0 {
+		t.Fatalf("filed %d Found beads with no database in atlantis, want 0", got.Filed)
+	}
+	if got.Failed != 2 {
+		t.Errorf("a pass over a missing database reported %d failures, want the scan and the filing", got.Failed)
+	}
+	lines := strings.Join(town.lines, "\n")
+	if !strings.Contains(lines, "no database to scan") || !strings.Contains(lines, "no database for rig atlantis") {
+		t.Errorf("the pass did not name both missing databases; log: %q", town.lines)
+	}
+	if marks := town.marks(t, "gastown", source); len(marks) != 0 {
+		t.Errorf("marks = %q, want none while the destination cannot be opened", marks)
+	}
+}
+
 func TestFindingsFilerUnknownRig(t *testing.T) {
 	t.Parallel()
 	town := newFindingsFilerTown(t, "gastown", "gantry")
