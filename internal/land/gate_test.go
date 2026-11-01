@@ -838,12 +838,34 @@ func TestShellTierInputsCoverTodaysRule(t *testing.T) {
 	}
 }
 
-// TestShellTierInputsOfAnEmptyManifestMatchNothing: a manifest with no
-// entries can blame no landing for a shell failure.
-func TestShellTierInputsOfAnEmptyManifestMatchNothing(t *testing.T) {
+// TestShellTierInputsNameTheTierMachinery: the tier's own runner is an input
+// even when every manifest entry is exempt, which is when TriggersOrDefault
+// appends no GoTriggers. Dropping the machinery from the rule turns this red.
+func TestShellTierInputsNameTheTierMachinery(t *testing.T) {
 	t.Parallel()
-	if got := shellTierInputsRE(nil); got != `^$` {
-		t.Fatalf("shellTierInputsRE(nil) = %q, want ^$", got)
+	exempt := []shelltier.Entry{
+		{Path: "scripts/one_test.sh", StubsGo: "none: names no go command"},
+		{Path: "scripts/two_test.sh", StubsGo: "stub: scripts/two_test.sh:3 defines a fake go"},
+	}
+	rule := shellTierInputsRE(exempt)
+	re := regexp.MustCompile(rule)
+	for _, path := range []string{
+		"internal/shelltier/manifest.go",
+		"cmd/tier-sweep/main.go",
+		"internal/tiersweep/gotier.go",
+	} {
+		if !re.MatchString(path) {
+			t.Errorf("%q: an all-exempt manifest dropped the tier's machinery from %q", path, rule)
+		}
+	}
+}
+
+// TestShellTierInputsOfAnEmptyUnionMatchNothing: a rule built from no trigger
+// can blame no landing for a shell failure.
+func TestShellTierInputsOfAnEmptyUnionMatchNothing(t *testing.T) {
+	t.Parallel()
+	if got := shellTierTriggersRE(nil); got != `^$` {
+		t.Fatalf("shellTierTriggersRE(nil) = %q, want ^$", got)
 	}
 }
 

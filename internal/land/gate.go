@@ -297,8 +297,17 @@ func RigGate(dir string, mq *config.MergeQueueConfig, unitOnly bool) (CommandGat
 	return CommandGate{Steps: steps}, nil
 }
 
+// shellTierMachinery are the paths of the tier's own machinery, named here
+// rather than left to the manifest: internal/shelltier is the runner the tier
+// execs, and cmd/tier-sweep and internal/tiersweep are the command and package
+// that run it. TriggersOrDefault appends GoTriggers (which holds internal/ and
+// cmd/) only for an entry without a StubsGo reason, so a manifest whose every
+// entry were exempt would leave the runner out of the rule.
+var shellTierMachinery = []string{"internal/shelltier/", "cmd/tier-sweep/", "internal/tiersweep/"}
+
 // ShellTierInputs returns the ERE of the paths whose change can move the shell
-// tier's verdict, the union of every manifest entry's triggers (gt-u560q.9).
+// tier's verdict: the tier's own machinery and the union of every manifest
+// entry's triggers (gt-u560q.9).
 //
 // The post-land revert reads it (landworker/revert.go). It no longer mirrors
 // scripts/post-land-shell.sh's INPUTS line, which the runner replaces.
@@ -306,22 +315,30 @@ func ShellTierInputs() string {
 	return shellTierInputsRE(shelltier.Manifest())
 }
 
-// shellTierInputsRE builds ShellTierInputs from entries' triggers: a trigger
-// ending in "/" matches every path under it, and any other is a file path and
-// matches in full. An empty union matches no path, so a manifest with nothing
-// in it cannot blame a landing for a shell failure.
+// shellTierInputsRE builds ShellTierInputs from the tier's machinery and the
+// entries' triggers.
 func shellTierInputsRE(entries []shelltier.Entry) string {
+	triggers := slices.Clone(shellTierMachinery)
+	for _, e := range entries {
+		triggers = append(triggers, e.TriggersOrDefault()...)
+	}
+	return shellTierTriggersRE(triggers)
+}
+
+// shellTierTriggersRE renders triggers as one ERE: a trigger ending in "/"
+// matches every path under it, and any other is a file path and matches in
+// full. An empty union matches no path, so a rule that covers nothing cannot
+// blame a landing for a shell failure.
+func shellTierTriggersRE(triggers []string) string {
 	seen := make(map[string]bool)
 	var alts []string
-	for _, e := range entries {
-		for _, trigger := range e.TriggersOrDefault() {
-			alt := shellTierAlternative(trigger)
-			if seen[alt] {
-				continue
-			}
-			seen[alt] = true
-			alts = append(alts, alt)
+	for _, trigger := range triggers {
+		alt := shellTierAlternative(trigger)
+		if seen[alt] {
+			continue
 		}
+		seen[alt] = true
+		alts = append(alts, alt)
 	}
 	if len(alts) == 0 {
 		return `^$`
