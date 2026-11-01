@@ -4,7 +4,7 @@
 // Nothing calls this package yet. Its callers are the seat start and seat end
 // paths and the reaper, which arrive in the third build bead and the wiring
 // after it (design: docs/research/tracker/K1b-seat-token-as-provider-placeholder.md,
-// question 1, option A).
+// question 1, option A). Every call runs against openshell's active gateway.
 package seatprovider
 
 import (
@@ -164,7 +164,8 @@ func sweep(ctx context.Context, r Runner, keep map[string]bool) ([]string, error
 	return deleted, nil
 }
 
-// createArgs returns the argv that creates name. The credential is the variable
+// createArgs returns the argv that creates name, the form internal/openshellprov
+// and openshell's provider reference both use. The credential is the variable
 // tokenEnv, which the caller sets in the call's environment.
 func createArgs(name string) []string {
 	return []string{"provider", "create", "--name", name, "--type", providerType, "--credential", tokenEnv}
