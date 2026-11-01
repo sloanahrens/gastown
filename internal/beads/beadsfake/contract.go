@@ -590,7 +590,7 @@ func contractCloseFence(t *testing.T, s *scope) {
 	if st := s.mustShow(t, parent.ID).Status; st != "open" {
 		t.Errorf("refused close left status %q", st)
 	}
-	mustDo(t, "ForceCloseWithReason", s.ForceCloseWithReason("forced", parent.ID))
+	mustDo(t, "ForceCloseWithReason", s.roles.Admin.ForceCloseWithReason("forced", parent.ID))
 	if got := s.mustShow(t, parent.ID); got.Status != "closed" || got.CloseReason != "forced" {
 		t.Errorf("forced close: %q %q", got.Status, got.CloseReason)
 	}
@@ -606,7 +606,7 @@ func contractCloseFence(t *testing.T, s *scope) {
 	mustDo(t, "AddDependency", s.AddDependency(blocked.ID, blocker.ID))
 	refused(t, "closing an issue with an open blocker", s.Close(blocked.ID))
 	refused(t, "Update(status=closed) of an issue with an open blocker", s.Update(blocked.ID, beads.UpdateOptions{Status: ptr("closed")}))
-	mustDo(t, "force close blocked", s.ForceCloseWithReason("forced", blocked.ID))
+	mustDo(t, "force close blocked", s.roles.Admin.ForceCloseWithReason("forced", blocked.ID))
 	mustDo(t, "close the blocker itself", s.Close(blocker.ID))
 
 	// bd refuses to close an issue assigned to someone other than the
@@ -617,7 +617,7 @@ func contractCloseFence(t *testing.T, s *scope) {
 	if st := s.mustShow(t, theirs.ID).Status; st != "open" {
 		t.Errorf("refused close left status %q", st)
 	}
-	mustDo(t, "ForceCloseWithReason theirs", s.ForceCloseWithReason("done", theirs.ID))
+	mustDo(t, "ForceCloseWithReason theirs", s.roles.Admin.ForceCloseWithReason("done", theirs.ID))
 	if st := s.mustShow(t, theirs.ID).Status; st != "closed" {
 		t.Errorf("forced close of alice's issue left status %q", st)
 	}
@@ -646,7 +646,7 @@ func contractCloseFence(t *testing.T, s *scope) {
 	mustDo(t, "Update(status=closed) of a pinned issue", s.Update(still.ID, beads.UpdateOptions{Status: ptr("closed")}))
 	last := s.mustCreate(t, beads.CreateOptions{Title: "pinned last", Priority: -1})
 	mustDo(t, "pin last", s.Update(last.ID, beads.UpdateOptions{Status: ptr("pinned")}))
-	mustDo(t, "ForceCloseWithReason of a pinned issue", s.ForceCloseWithReason("forced", last.ID))
+	mustDo(t, "ForceCloseWithReason of a pinned issue", s.roles.Admin.ForceCloseWithReason("forced", last.ID))
 }
 
 func contractListFilters(t *testing.T, s *scope) {
@@ -840,7 +840,7 @@ func contractAssigneeQueries(t *testing.T, s *scope) {
 	}
 	done := s.mustCreate(t, beads.CreateOptions{Title: "done", Priority: -1})
 	mustDo(t, "assign done", s.Update(done.ID, beads.UpdateOptions{Assignee: ptr(alice)}))
-	mustDo(t, "close done", s.ForceCloseWithReason("done", done.ID))
+	mustDo(t, "close done", s.roles.Admin.ForceCloseWithReason("done", done.ID))
 	wisp := s.mustCreate(t, beads.CreateOptions{Title: "wisp", Priority: -1, Ephemeral: true})
 	mustDo(t, "assign wisp", s.Update(wisp.ID, beads.UpdateOptions{Assignee: ptr(alice)}))
 	bobs := s.mustCreate(t, beads.CreateOptions{Title: "bob's", Priority: -1})
@@ -1253,7 +1253,7 @@ func contractBatchCloseRefusal(t *testing.T, s *scope) {
 	}
 
 	// Forced, nothing is refused.
-	mustDo(t, "a forced batch close", s.ForceCloseWithReason("forced", other.ID, theirs.ID))
+	mustDo(t, "a forced batch close", s.roles.Admin.ForceCloseWithReason("forced", other.ID, theirs.ID))
 }
 
 // contractBatchCloseChain pins that bd closes a batch in argument order,
