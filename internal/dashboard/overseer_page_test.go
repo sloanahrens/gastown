@@ -184,8 +184,21 @@ func TestHeaderKeepsOverseerAndDispatchReadings(t *testing.T) {
 		if !strings.HasPrefix(ov.Text, c.wantOverseer) || ov.Class != c.wantOvClass {
 			t.Errorf("%s: the overseer fact reads %q wearing %q, want %q wearing %q", c.name, ov.Text, ov.Class, c.wantOverseer, c.wantOvClass)
 		}
-		if !strings.HasPrefix(tick.Text, c.wantTick) || tick.Class != c.wantTickCls || (c.dispatch != nil && !strings.HasSuffix(tick.Text, " ago")) {
+		if !strings.HasPrefix(tick.Text, c.wantTick) || tick.Class != c.wantTickCls || (c.dispatch != nil && !strings.Contains(tick.Text, " ago")) {
 			t.Errorf("%s: the dispatcher fact reads %q wearing %q, want %q wearing %q", c.name, tick.Text, tick.Class, c.wantTick, c.wantTickCls)
+		}
+	}
+
+	// A stopped dispatcher says so in the strip itself, not only on a hover: the
+	// visible text carries "not ticking" once the tick is red, and not before.
+	for _, c := range []struct {
+		ago  time.Duration
+		want bool
+	}{{20 * time.Minute, true}, {200 * time.Second, false}, {time.Second, false}} {
+		d := newPageDOM(t)
+		d.call(t, "renderStrip", state(alive, tickAgo(c.ago)))
+		if got := strings.Contains(stripFact(t, d, "dispatcher last tick").Text, "not ticking"); got != c.want {
+			t.Errorf("a tick %v old reads %q, want not-ticking visible: %v", c.ago, stripFact(t, d, "dispatcher last tick").Text, c.want)
 		}
 	}
 

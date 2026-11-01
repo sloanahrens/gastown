@@ -814,7 +814,7 @@ function renderStrip(s) {
   }
 
   // The overseer's standing and the dispatcher's last tick: the two readings of
-  // the removed Overseer panel that go stale and matter when they do, one place
+  // the former Overseer panel that go stale and matter when they do, one place
   // each (gt-ztrv1). The standing is the reader's own verdict against the silence
   // window the daemon's silent-overseer rule uses. The tick is aged live: the
   // dispatcher ticks every minute, so it reads amber past 150 s and alert red
@@ -829,7 +829,7 @@ function renderStrip(s) {
       : ovAlive ? "the overseer's heartbeat is inside its silence window" + (ov.last_active_sec != null ? " · last active " + fmtDur(ov.last_active_sec) + " ago" : "")
       : "the overseer has been silent past its window" + (ov.last_active_sec != null ? " · last active " + fmtDur(ov.last_active_sec) + " ago" : "")});
   const tickSec = dp ? (Date.now() - new Date(dp.at).getTime()) / 1000 : null;
-  fact(box, tickSec == null ? "none logged" : fmtDur(tickSec) + " ago", "dispatcher last tick",
+  fact(box, tickSec == null ? "none logged" : fmtDur(tickSec) + " ago" + (tickSec > 300 ? " · not ticking" : ""), "dispatcher last tick",
     {lead: true, cls: tickSec == null ? "" : tickSec > 300 ? "bad" : tickSec > 150 ? "warn" : "v",
      tip: tickSec == null ? "no dispatcher tick in the daemon log yet"
        : tickSec > 300 ? "the dispatcher has not ticked for " + fmtDur(tickSec) + " (it ticks every minute)"
@@ -3263,7 +3263,8 @@ function costUsage(box, u, s) {
     : none("no usage in the last " + win));
 
   // What a run's tokens bought: its findings, joined by bead id from the runs
-  // the Deep review block's reader carries. A run that reader does not list has
+  // the deep review reader carries (state deepreview.runs). A run that reader does
+  // not list has
   // no count ("-"), and a run with none has no per-finding figure to divide
   // into.
   const found = new Map(((s.deepreview && s.deepreview.runs) || []).map(r => [r.id, r.findings]));

@@ -585,8 +585,9 @@ func TestBirdsPanelNeedsYouWithheldOnly(t *testing.T) {
 }
 
 // The Birds panel is a top-level section, first among the panels, and a reader
-// with no saved choice sees it closed: its header still counts the birds and the ones that need the operator, so a
-// closed panel says whether anything waits (gt-0g6z9, gt-gm9lq).
+// with no saved choice sees it closed: its header still counts the birds and
+// the ones that need the operator, so a closed panel says whether anything
+// waits (gt-0g6z9, gt-gm9lq).
 func TestBirdsPanelClosedByDefault(t *testing.T) {
 	t.Parallel()
 
