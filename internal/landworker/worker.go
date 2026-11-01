@@ -129,6 +129,9 @@ type Worker struct {
 	Remote   Remote
 	Lander   Lander
 	Landings Landings
+	// noBatchSaid is set once the worker has said its beads client cannot batch
+	// reads, so the pass that repeats says so once, not on every pass.
+	noBatchSaid bool
 	// ClearIntent returns the author polecat's seat from submitted to stop
 	// once the worker has finished with its bead. nil skips it.
 	ClearIntent func(w land.Work) error
@@ -566,18 +569,33 @@ func (w *Worker) showMultiple(ids []string) (issues map[string]*beads.Issue, ok 
 		ShowMultiple([]string) (map[string]*beads.Issue, error)
 	})
 	if !can {
+		w.saySlowReads()
 		return nil, false
 	}
 	issues, err := batch.ShowMultiple(ids)
 	if err != nil {
-		// A client that cannot batch says so on every pass; only a real
-		// failure is worth a line.
-		if !errors.Is(err, ErrNoShowMultiple) {
+		// RetryBeads, the production client, always has the method and answers
+		// ErrNoShowMultiple when its inner client cannot batch, so that is the
+		// path a store without batching takes. It says so once; only a real
+		// failure is worth a line on every pass.
+		if errors.Is(err, ErrNoShowMultiple) {
+			w.saySlowReads()
+		} else {
 			w.logf("reading the beads of %d landing records in one call: %v", len(ids), err)
 		}
 		return nil, false
 	}
 	return issues, true
+}
+
+// saySlowReads logs, once, that the beads client cannot batch and the repair
+// pass reads each landing record's bead on its own.
+func (w *Worker) saySlowReads() {
+	if w.noBatchSaid {
+		return
+	}
+	w.noBatchSaid = true
+	w.logf("the beads client cannot batch reads: reading each landing record's bead on its own")
 }
 
 func workFromRecord(rec land.LandingRecord, issue *beads.Issue) land.Work {

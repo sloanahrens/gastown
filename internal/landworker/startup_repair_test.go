@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -239,4 +240,51 @@ func TestRetryBeadsShowMultiple(t *testing.T) {
 			t.Fatalf("ShowMultiple = %v, want ErrNoShowMultiple", err)
 		}
 	})
+}
+
+// noBatchInner is a RetryInner that hides the fake's ShowMultiple by embedding
+// only the interface, and records the single reads.
+type noBatchInner struct {
+	RetryInner
+	shows []string
+}
+
+func (n *noBatchInner) Show(id string) (*beads.Issue, error) {
+	n.shows = append(n.shows, id)
+	return n.RetryInner.Show(id)
+}
+
+// The production client is a RetryBeads, which always has ShowMultiple; over a
+// store that cannot batch it answers ErrNoShowMultiple. The worker then reads
+// each record's bead on its own, queues the repairs the per-record worker
+// queues, and says so once across passes, not on every pass.
+func TestStartupRepairOverARetryClientWithoutBatching(t *testing.T) {
+	t.Parallel()
+	const records = 50
+	h, _ := repairFixture(t, records, nil)
+	inner := &noBatchInner{RetryInner: h.bd}
+	var logs []string
+	h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+	store := RetryBeads{Inner: inner, Sleep: func(time.Duration) {}}
+
+	pending := queueRepairs(t, h, store)
+	queueRepairs(t, h, store)
+
+	if len(inner.shows) == 0 {
+		t.Fatal("no single Show calls: the worker did not fall back to per-record reads")
+	}
+	said := 0
+	for _, l := range logs {
+		if strings.Contains(l, "cannot batch reads") {
+			said++
+		}
+	}
+	if said != 1 {
+		t.Fatalf("the slow-reads line was logged %d times over two passes, want once; logs %q", said, logs)
+	}
+	per, _ := repairFixture(t, records, nil)
+	perPending := queueRepairs(t, per, &perRecordStore{Beads: per.bd, fake: per.bd})
+	if !maps.Equal(pending, perPending) {
+		t.Fatalf("repairs over the retry client = %v, want the per-record repairs %v", pending, perPending)
+	}
 }

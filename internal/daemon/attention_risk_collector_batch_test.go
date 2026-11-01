@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // collectorWorld is the batch audit world with 30 distinct beads over three
@@ -149,5 +150,51 @@ func TestRiskCollectorKeepsFailedReadSemantics(t *testing.T) {
 	}
 	if !f.src.riskSkipped["alpha\x00gt-a1"] {
 		t.Errorf("%s: riskSkipped = %v, want alpha's bead recorded", t.Name(), f.src.riskSkipped)
+	}
+	// The skip is said once: the first tick logs it, and a second tick that
+	// finds the bead already in riskSkipped stays quiet.
+	const skipLine = "attention: collector risk-path: skipping gt-a1 this tick"
+	if n := strings.Count(f.logs.String(), skipLine); n != 1 {
+		t.Errorf("%s: skip logged %d times on the first tick, want once; log %q", t.Name(), n, f.logs.String())
+	}
+	f.src.prev = attention.State{Updated: now, Items: items}
+	f.collect(t, f.src.collectRiskPaths)
+	if n := strings.Count(f.logs.String(), skipLine); n != 1 {
+		t.Errorf("%s: skip logged %d times after a second failing tick, want still once", t.Name(), n)
+	}
+}
+
+// A source without a batch read reads each id on its own, and a context that
+// ends mid-way stops the loop: the ids after it are not asked for and the
+// error is the context's (gt-5req0).
+func TestRiskIssuesBatchStopsWhenTheContextEnds(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	head := strings.Repeat("d", 40)
+	recs := []land.LandingRecord{
+		{BeadID: "gt-c1", Head: head, RiskPaths: []string{"x"}},
+		{BeadID: "gt-c2", Head: head, RiskPaths: []string{"x"}},
+		{BeadID: "gt-c3", Head: head, RiskPaths: []string{"x"}},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var asked []string
+	f.src.riskIssues = nil
+	f.src.riskIssue = func(_ context.Context, _, id string) (*beads.Issue, error) {
+		asked = append(asked, id)
+		cancel()
+		return &beads.Issue{ID: id}, nil
+	}
+
+	got, err := f.src.riskIssuesBatch(ctx, "alpha", recs)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("%s: err = %v, want context canceled", t.Name(), err)
+	}
+	if len(asked) != 1 || asked[0] != "gt-c1" {
+		t.Errorf("%s: asked %v, want only gt-c1 before the context ended", t.Name(), asked)
+	}
+	if len(got) != 1 || got["gt-c1"] == nil {
+		t.Errorf("%s: got %v, want the one read that finished", t.Name(), got)
 	}
 }

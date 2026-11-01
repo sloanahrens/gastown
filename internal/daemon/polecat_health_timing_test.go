@@ -65,7 +65,7 @@ func TestPolecatHealthLogsSlowSeats(t *testing.T) {
 	d.checkRigPolecatHealth("myr", &seatTimes{})
 
 	got := logs.String()
-	if want := "polecat-health: myr/amber took 3s (tmux 3s in 1 calls, bd 0s in 0 calls)"; !strings.Contains(got, want) {
+	if want := "polecat-health: myr/amber took 3s (tmux 3s in 1 call, bd 0s in 0 calls)"; !strings.Contains(got, want) {
 		t.Errorf("%s: log lacks %q:\n%s", t.Name(), want, got)
 	}
 	for _, fast := range []string{"myr/birch", "myr/cedar"} {
