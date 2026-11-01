@@ -843,12 +843,10 @@ type Daemon struct {
 	// ominstaller.Run (rebuild_om.go).
 	rebuildOMInstallFn rebuildOMInstallFunc
 
-	// rebuildHMRunning is the rebuild_hm job's single-flight guard. The seams
-	// rebuild_hm.go names replace its two renames and its install lock in tests;
-	// nil is the production call.
+	// rebuildHMRunning is the rebuild_hm job's single-flight guard.
+	// rebuildHMRenameFn replaces the swap's renames in tests; nil is os.Rename.
 	rebuildHMRunning  atomic.Bool
 	rebuildHMRenameFn rebuildHMRenameFunc
-	rebuildHMLockFn   rebuildHMLockFunc
 
 	// jevDedupeRunning is the jev_dedupe pass's single-flight guard
 	// (jev_dedupe.go). A pass makes network calls, so it runs on its own

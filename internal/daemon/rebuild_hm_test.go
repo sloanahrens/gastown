@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
@@ -38,7 +40,9 @@ type rebuildHMAnswers struct {
 	renameAsideErr  bool     // renaming the installed hm to hm.prev fails
 	renameIntoErr   bool     // renaming the build over the installed hm fails
 	rollbackErr     bool     // restoring hm.prev over the installed hm fails
-	lockBusy        bool     // the install lock is not taken
+	lockBusy        bool     // another install holds the install lock
+	lockDirIsFile   bool     // the install lock's directory is a regular file
+	lockPathIsDir   bool     // the install lock's path is a directory
 	relativeInstall bool     // the installed hm is at a relative path
 }
 
@@ -103,11 +107,27 @@ func newRebuildHMRig(t *testing.T, a rebuildHMAnswers) *rebuildHMRig {
 	d.execCmd = r.run
 	d.hmSkew.pathFn = func() string { return r.installPath }
 	d.rebuildHMRenameFn = r.rename
-	d.rebuildHMLockFn = func(string, time.Duration) (func(), error) {
-		if a.lockBusy {
-			return nil, errors.New("another install holds the install lock")
+
+	// The install lock is the real flock under the town's daemon directory. The
+	// lock-path faults are set up on disk, so the failure paths run for real.
+	lockDir := filepath.Join(town, "daemon")
+	lockPath := filepath.Join(lockDir, "install-hm.lock")
+	switch {
+	case a.lockDirIsFile:
+		mkdirs(t, filepath.Dir(lockDir))
+		if err := os.WriteFile(lockDir, nil, 0o644); err != nil {
+			t.Fatal(err)
 		}
-		return func() {}, nil
+	case a.lockPathIsDir:
+		mkdirs(t, lockPath)
+	case a.lockBusy:
+		mkdirs(t, lockDir)
+		held := flock.New(lockPath)
+		locked, err := held.TryLock()
+		if err != nil || !locked {
+			t.Fatalf("could not hold the install lock for the test: locked=%v err=%v", locked, err)
+		}
+		t.Cleanup(func() { _ = held.Unlock() })
 	}
 	return r
 }
@@ -486,6 +506,8 @@ func TestRebuildHMDefersWithoutAVerdict(t *testing.T) {
 		{name: "origin/main in the clone is not a commit", mutate: func(a *rebuildHMAnswers) { a.headNotSHA = true }},
 		{name: "the ancestry check cannot run", mutate: func(a *rebuildHMAnswers) { a.ancestorErr = true }},
 		{name: "the install lock is busy", mutate: func(a *rebuildHMAnswers) { a.lockBusy = true }},
+		{name: "the lock directory is a file", mutate: func(a *rebuildHMAnswers) { a.lockDirIsFile = true }},
+		{name: "the lock path is a directory", mutate: func(a *rebuildHMAnswers) { a.lockPathIsDir = true }},
 		{name: "the installed hm is at a relative path", mutate: func(a *rebuildHMAnswers) { a.relativeInstall = true }},
 	}
 	for _, tc := range cases {

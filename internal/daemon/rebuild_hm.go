@@ -31,17 +31,12 @@ const (
 	defaultRebuildHMInterval = time.Hour
 
 	// rebuildHMRunBudget bounds the build and its version check, the steps the
-	// cycle runs under its context. The reading, the lock, the checkout and the
-	// ancestry check each carry their own bound (hmSkewCloneTimeout,
-	// rebuildHMLockWait, rebuildHMGitTimeout).
+	// cycle runs under its context. The reading, the checkout and the ancestry
+	// check each carry their own bound (hmSkewCloneTimeout, rebuildHMGitTimeout).
 	rebuildHMRunBudget = 30 * time.Minute
 
 	// rebuildHMGitTimeout bounds one git call in the clone.
 	rebuildHMGitTimeout = 2 * time.Minute
-
-	// rebuildHMLockWait is how long the install waits for the install lock. A
-	// held lock means another install is running from its own build now.
-	rebuildHMLockWait = 60 * time.Second
 
 	// rebuildHMBinDir is GOBIN for the build, relative to the town. go install
 	// writes the new hm here, and the swap renames it into place from here.
@@ -61,11 +56,6 @@ const (
 // os.Rename. Tests answer it, so the order of renames is recorded and no file
 // moves.
 type rebuildHMRenameFunc func(from, to string) error
-
-// rebuildHMLockFunc takes the install lock at path, waiting at most wait. nil is
-// the flock in rebuildHMAcquire. Tests answer it, so the lock-busy refusal runs
-// without a real wait.
-type rebuildHMLockFunc func(path string, wait time.Duration) (unlock func(), err error)
 
 func rebuildHMInterval(config *DaemonPatrolConfig) time.Duration {
 	if config != nil && config.Patrols != nil && config.Patrols.RebuildHM != nil {
@@ -286,21 +276,21 @@ func (d *Daemon) rebuildHMRename(from, to string) error {
 	return os.Rename(from, to)
 }
 
-// rebuildHMAcquire takes the install lock, waiting at most rebuildHMLockWait.
-// The daemon's rebuildHMLockFn seam answers instead when a test sets one.
+// rebuildHMAcquire takes the install lock without waiting. A held lock means
+// another install is running now, and the cycle defers to the next heartbeat, so
+// no wait is needed to bound.
 func (d *Daemon) rebuildHMAcquire(path string) (func(), error) {
-	if d.rebuildHMLockFn != nil {
-		return d.rebuildHMLockFn(path, rebuildHMLockWait)
-	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("cannot create the install lock directory: %w", err)
 	}
-	lockCtx, cancel := context.WithTimeout(context.Background(), rebuildHMLockWait)
-	defer cancel()
 	lock := flock.New(path)
-	locked, err := lock.TryLockContext(lockCtx, 250*time.Millisecond)
-	if err != nil || !locked {
-		return nil, fmt.Errorf("another install holds the install lock past %s", rebuildHMLockWait)
+	locked, err := lock.TryLock()
+	if err != nil {
+		// The error names the path and the step only: it is not the lock's own output.
+		return nil, fmt.Errorf("cannot take the install lock at %s", path)
+	}
+	if !locked {
+		return nil, errors.New("another install holds the install lock")
 	}
 	return func() {
 		if err := lock.Unlock(); err != nil {
