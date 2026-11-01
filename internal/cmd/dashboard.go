@@ -186,6 +186,12 @@ deep-review run's own digest is drawn as its bead and comment count, never as
 the comment's text. gt overseer beat and gt overseer log write the heartbeat and
 journal.
 
+The Birds panel lists the daily reports the town's birds leave for the operator:
+one row per bird with a report under <town>/.runtime/<bird>/reports, from its
+daily.json, with the daily.html page beside it openable from the row. A summary
+older than 26 hours is marked stale. The panel reads those files and writes
+nothing.
+
 The Attention panel is the one list of what waits on a decision or an action:
 the town's open escalation beads, the open overseer questions and the attention
 queue's standing wake events, each row tagged with the owner who has to move and
@@ -313,6 +319,13 @@ func dashboardReportsDir(townRoot string) string {
 	return report.ReportsDir(townRoot)
 }
 
+// dashboardRuntimeDir is the town's runtime directory: the birds each write a
+// directory here holding their daily reports, beside the town's other runtime
+// state. The dashboard only reads it.
+func dashboardRuntimeDir(townRoot string) string {
+	return filepath.Join(townRoot, ".runtime")
+}
+
 // dashboardCloudChecksPath is where the devops rig's cloud-check plugin writes
 // its status inside the town: one JSON file per run, overwritten each time.
 func dashboardCloudChecksPath(townRoot string) string {
@@ -430,6 +443,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		WithChecks(dashboard.NewCloudChecksReader(dashboardCloudChecksPath(townRoot))).
 		WithApps(dashboard.NewAppPowerReader(config.CloudOffDir(), config.CloudReleasesDir()))
 	reports := dashboard.NewReportsReader(dashboardReportsDir(townRoot))
+	birds := dashboard.NewBirdReportsReader(dashboardRuntimeDir(townRoot))
 	questions := newDashQuestionsReader(townRoot)
 	overseerPane := newDashOverseerReader(townRoot, func() (int, error) {
 		open, err := questions.list()
@@ -465,6 +479,9 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Deploys:        forgejoDeploys,
 		Reports:        func() *dashboard.Reports { return reports.Read(time.Now()) },
 		ReportsDir:     dashboardReportsDir(townRoot),
+		Birds:          func() []dashboard.BirdReport { return birds.Read(time.Now()) },
+		BirdsDir:       dashboardRuntimeDir(townRoot),
+		BirdsEvery:     60 * time.Second,
 		Questions:      func() *dashboard.Questions { return questions.read(time.Now()) },
 		Overseer:       func() *dashboard.Overseer { return overseerPane.read(time.Now()) },
 		DeepReview:     func() *dashboard.DeepReview { return deepReview.read(time.Now()) },
