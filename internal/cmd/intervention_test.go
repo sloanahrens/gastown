@@ -239,6 +239,31 @@ func TestInterventionRecordOnATownBead(t *testing.T) {
 	}
 }
 
+// TestInterventionRecordReportsAFailedWrite requires a record the host refuses
+// to write to exit 1 naming the failure, rather than report the intervention as
+// recorded.
+func TestInterventionRecordReportsAFailedWrite(t *testing.T) {
+	t.Parallel()
+	town := interventionTestTown(t)
+	if err := os.MkdirAll(filepath.Join(town, ".runtime"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A file where the record's directory belongs: the directory cannot be made.
+	if err := os.WriteFile(filepath.Join(town, ".runtime", "metrics"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := interventionTestCommand(t, town, "record", "--kind", "hold", "--reason", "paused dispatch")
+	if err == nil {
+		t.Fatal("record on an unwritable path succeeded, want it refused")
+	}
+	if got := exitCodeForError(err); got != 1 {
+		t.Fatalf("record exits %d, want 1 (err %v)", got, err)
+	}
+	if !strings.Contains(err.Error(), "creating") {
+		t.Fatalf("error = %q, want it to name the directory it could not create", err)
+	}
+}
+
 // TestInterventionRecordOutsideATown requires the command to refuse when the
 // working directory names no town, rather than record into a guessed path.
 func TestInterventionRecordOutsideATown(t *testing.T) {
