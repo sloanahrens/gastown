@@ -214,6 +214,16 @@ runs the procedure; `--help` lists the flags, and the script header gives the
 order and the reason for each step. It refuses while a `gt:ready-to-land` bead
 is queued. `--dry-run` prints every command and writes nothing.
 
+The Go port of step 5 (`internal/forgejocut`, gt-tpg0p.48) repoints `origin` in the
+rig's bare repository, in `mayor/rig` and in every crew clone, then sets
+`registry.rigs.<rig>.git_url` in `mayor/town.json`. It is the live step of the
+cutover: run it only after the promote key exists and the first L3 checks have
+passed, never from a landing. Each repoint logs the origin it replaced, and the
+undo for one directory is `git -C <dir> remote set-url origin <old url>`. Before
+`town.json` changes it is copied to `town.json.bak-<yyyymmdd-hhmmss>`, and the
+undo is copying that file back over `town.json`; a `git_url` that already matches
+is left alone and gets no backup.
+
 When the rig's credential-helper hostname is not the admin base — the usual
 case, since it is the form every rig remote carries — pass `--forgejo-url` that
 hostname form. It is what lands in the remotes, `town.json` and the rig block;
