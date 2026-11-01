@@ -44,9 +44,11 @@ nothing more:
    lock a live run holds prints a skipped line and exits 0, which records the
    run as skipped rather than as an overlap failure.
 2. Runs the snapshot, then the analysis, and passes both outputs through
-   unchanged. The snapshot's receipt line —
-   `snapshot <ts> appended to <path> (<n> groups, <m> errors)` — is the hour's
-   record; the analysis prints either
+   unchanged. The snapshot's receipt line is the hour's record. The snapshot
+   step also appends each rig's line for the local day that just ended to
+   `<town>/.runtime/metrics/bd-daily.jsonl`, so the tracker's counts, ages and
+   shape outlive the Dolt history flatten; `internal/metrics/bdsnap.go` holds
+   what a line carries and what a gap means. The analysis prints either
    `analyse <ts>: <n> landings, <t> targets -> <panel>` or a not-due line, which
    is what an hour that is not a day's boundary looks like.
 3. Exits with the first failing step's error, so both steps always run. A source

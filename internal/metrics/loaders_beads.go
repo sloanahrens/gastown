@@ -68,6 +68,7 @@ type BeadRow struct {
 	Rig             string
 	CreatedAt       string
 	ClosedAt        *string
+	Status          string
 	Type            string
 	Priority        *int
 	Labels          []string
@@ -86,6 +87,7 @@ type bdListBead struct {
 	ID                 string   `json:"id"`
 	CreatedAt          string   `json:"created_at"`
 	ClosedAt           *string  `json:"closed_at"`
+	Status             string   `json:"status"`
 	IssueType          string   `json:"issue_type"`
 	Priority           *int     `json:"priority"`
 	Labels             []string `json:"labels"`
@@ -133,6 +135,7 @@ func LoadBeads(run BdRun, dirs []string, dropped *Dropped) []BeadRow {
 				Rig:             strings.SplitN(b.ID, "-", 2)[0],
 				CreatedAt:       b.CreatedAt,
 				ClosedAt:        b.ClosedAt,
+				Status:          b.Status,
 				Type:            b.IssueType,
 				Priority:        b.Priority,
 				Labels:          labels,

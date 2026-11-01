@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/metrics"
 )
 
@@ -86,6 +88,171 @@ func TestMetricsSnapshotReceiptSaysWhetherAPlacementIsKnown(t *testing.T) {
 	}
 	if !strings.Contains(known.String(), "(2 groups, 0 errors)\n") || strings.Contains(known.String(), "none known") {
 		t.Fatalf("receipt with a placement = %q", known.String())
+	}
+}
+
+// The daily step's receipt names the day and the file, and a second run the
+// same day says the rig was already recorded.
+func TestRunBdDailyPrintsItsReceipt(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	env := metrics.Env{
+		Town: town,
+		ReadFile: func(path string) ([]byte, error) {
+			if path == filepath.Join(town, "mayor", "rigs.json") {
+				return []byte(`{"version":1,"rigs":{"gastown":{}}}`), nil
+			}
+			return os.ReadFile(path)
+		},
+		RunDir: func(context.Context, string, []string) ([]byte, error) { return []byte(`[]`), nil },
+		Now:    func() time.Time { return now },
+	}
+	var out bytes.Buffer
+	if err := runBdDaily(context.Background(), &out, env); err != nil {
+		t.Fatalf("runBdDaily: %v", err)
+	}
+	want := "bd-daily 2026-10-31 appended to " + metrics.BdDailyPath(town) + " (1 rigs written, 0 already recorded, 0 gaps)\n"
+	if out.String() != want {
+		t.Fatalf("receipt = %q, want %q", out.String(), want)
+	}
+	out.Reset()
+	if err := runBdDaily(context.Background(), &out, env); err != nil {
+		t.Fatalf("second runBdDaily: %v", err)
+	}
+	if !strings.Contains(out.String(), "(0 rigs written, 1 already recorded, 0 gaps)") {
+		t.Fatalf("second receipt = %q", out.String())
+	}
+}
+
+// The two steps are independent: a snapshot whose append fails still leaves the
+// day's step to list the rigs and record their gap, and the error names both
+// failures.
+func TestRunMetricsStepsReportsBothFailures(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	metricsDir := filepath.Join(town, ".runtime", "metrics")
+	if err := os.MkdirAll(metricsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The snapshot's log is a directory, so its append fails; the day's step
+	// then runs its bd listing and records the rig's gap.
+	if err := os.Mkdir(filepath.Join(metricsDir, "snapshots.jsonl"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	listed := 0
+	env := metrics.Env{
+		Town: town,
+		ReadFile: func(path string) ([]byte, error) {
+			if path == filepath.Join(town, "mayor", "rigs.json") {
+				return []byte(`{"version":1,"rigs":{"gastown":{}}}`), nil
+			}
+			return nil, fs.ErrNotExist
+		},
+		RunDir: func(context.Context, string, []string) ([]byte, error) {
+			listed++
+			return nil, errors.New("dolt is down")
+		},
+		Now: func() time.Time { return time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC) },
+	}
+	var out bytes.Buffer
+	err := runMetricsSteps(context.Background(), &out, env, []metrics.Source{
+		fakeSource{group: "alpha", cols: map[string]any{"n": 1}},
+	})
+	if err == nil {
+		t.Fatal("runMetricsSteps accepted two failed steps")
+	}
+	for _, want := range []string{"appending the snapshot", "bd daily:", "gastown"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to name %q", err.Error(), want)
+		}
+	}
+	if listed == 0 {
+		t.Fatal("the day's step never listed the rig")
+	}
+	data, readErr := os.ReadFile(metrics.BdDailyPath(town))
+	if readErr != nil {
+		t.Fatalf("the day's step wrote nothing: %v", readErr)
+	}
+	if !strings.Contains(string(data), `"gap"`) {
+		t.Fatalf("the day's line is not a gap: %s", data)
+	}
+}
+
+// A rig the day's step could only record as a gap fails the step, and the
+// receipt still prints the day it appended.
+func TestRunBdDailyGapIsAnError(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	env := metrics.Env{
+		Town: town,
+		ReadFile: func(path string) ([]byte, error) {
+			if path == filepath.Join(town, "mayor", "rigs.json") {
+				return []byte(`{"version":1,"rigs":{"gastown":{}}}`), nil
+			}
+			return nil, fs.ErrNotExist
+		},
+		RunDir: func(context.Context, string, []string) ([]byte, error) {
+			return nil, errors.New("dolt is down")
+		},
+		Now: func() time.Time { return time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC) },
+	}
+	var out bytes.Buffer
+	err := runBdDaily(context.Background(), &out, env)
+	if err == nil || !strings.Contains(err.Error(), "bd daily:") || !strings.Contains(err.Error(), "gastown") {
+		t.Fatalf("runBdDaily = %v, want a gap failure naming gastown", err)
+	}
+	if !strings.Contains(out.String(), "(0 rigs written, 0 already recorded, 1 gaps)") {
+		t.Fatalf("receipt = %q, want the day and its gap", out.String())
+	}
+}
+
+// A run that cannot take the day's lock says so instead of claiming an append
+// another run is making.
+func TestRunBdDailyPrintsSkippedWhenTheLockIsHeld(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	lockPath := metrics.BdDailyLockPath(town)
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	unlock, held, err := lock.FlockTryAcquire(lockPath)
+	if err != nil || !held {
+		t.Fatalf("taking the daily lock = %v, %v, want held", held, err)
+	}
+	defer unlock()
+	env := metrics.Env{
+		Town: town,
+		ReadFile: func(path string) ([]byte, error) {
+			if path == filepath.Join(town, "mayor", "rigs.json") {
+				return []byte(`{"version":1,"rigs":{"gastown":{}}}`), nil
+			}
+			return nil, fs.ErrNotExist
+		},
+		RunDir: func(context.Context, string, []string) ([]byte, error) {
+			t.Error("the skipped run listed beads")
+			return []byte(`[]`), nil
+		},
+		Now: func() time.Time { return time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC) },
+	}
+	var out bytes.Buffer
+	if err := runBdDaily(context.Background(), &out, env); err != nil {
+		t.Fatalf("runBdDaily under a held lock: %v", err)
+	}
+	if !strings.Contains(out.String(), "skipped") || !strings.Contains(out.String(), "2026-10-31") {
+		t.Fatalf("receipt = %q, want a skipped line for the day", out.String())
+	}
+}
+
+// A day the daily step cannot write fails the step rather than passing as an
+// hour that recorded it.
+func TestRunBdDailyFailureIsTheStepsFailure(t *testing.T) {
+	t.Parallel()
+	env := metrics.Env{Town: t.TempDir(), Now: func() time.Time { return time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC) }}
+	var out bytes.Buffer
+	err := runBdDaily(context.Background(), &out, env)
+	if err == nil || !strings.Contains(err.Error(), "bd daily:") {
+		t.Fatalf("runBdDaily without a file reader = %v, want a bd daily error", err)
 	}
 }
 
