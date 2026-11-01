@@ -36,10 +36,17 @@ func (m CalendarMonth) End() time.Time {
 	return m.Start().AddDate(0, 1, 0)
 }
 
+// Days is the number of days in m.
+func (m CalendarMonth) Days() int {
+	return int(m.End().Sub(m.Start()) / (24 * time.Hour))
+}
+
 // Input is the month's sample rows: everything Month reads.
 type Input struct {
-	// Month is the calendar month the rows belong to. A row for another month
-	// names its workspace in the export but contributes no figures.
+	// Month is the calendar month the export covers. A Seat or Storage row whose
+	// interval or day lies outside it still names its workspace but contributes
+	// no figures; a TokenCount row carries no date, so it is read as the month's
+	// total whatever Month is.
 	Month CalendarMonth
 	// OverheadUSD is the town's fixed monthly overhead, split equally over the
 	// workspaces active in the month.
@@ -69,8 +76,10 @@ type StorageSample struct {
 	Day time.Time
 }
 
-// TokenCount is one workspace's token counts for the month. Rows for one
-// workspace sum; a price is applied downstream (plan row I1), never here.
+// TokenCount is one workspace's token counts for the month. It carries no date,
+// so the adapter that reads the usage records totals them for the month before
+// calling Month; rows for one workspace sum, and a price is applied downstream
+// (plan row I1), never here.
 type TokenCount struct {
 	Workspace     string
 	Input         int64
@@ -91,8 +100,10 @@ type WorkspaceExport struct {
 	// SeatHours is the workspace's seat hours per profile, sorted by profile
 	// name.
 	SeatHours []ProfileHours
-	// StorageGBMonths is the sum over kinds of each kind's mean daily bytes in
-	// the month, in GiB.
+	// StorageGBMonths is the sum over kinds of each kind's mean bytes over the
+	// month's days, in GiB. A day with no sample of a kind counts as zero: the
+	// samplers write one line per existing prefix or repository (plan rows M6,
+	// M7), so an absent line means the kind stored nothing that day.
 	StorageGBMonths float64
 	// OverheadShareUSD is the fixed monthly overhead split equally over the
 	// workspaces active in the month; zero for an inactive one.
@@ -154,8 +165,9 @@ func Month(in Input) Export {
 		if day.Before(start) || !day.Before(end) {
 			continue
 		}
-		// A day's total is every sample that day, all kinds and all
-		// repositories, so the mean is of the workspace's daily storage.
+		// A kind's day total is every sample of that kind that day, across its
+		// repositories or prefixes; storageGBMonths then means each kind over
+		// the month's days.
 		kinds := storage[s.Workspace]
 		if kinds == nil {
 			kinds = map[string]map[string]int64{}
@@ -196,7 +208,7 @@ func Month(in Input) Export {
 		we := WorkspaceExport{
 			Workspace:       id,
 			SeatHours:       profileHours(seatTime[id]),
-			StorageGBMonths: storageGBMonths(storage[id]),
+			StorageGBMonths: storageGBMonths(storage[id], in.Month),
 			Tokens:          tokens[id],
 			ZeroPrice:       id == workspaceid.CustomerZero,
 		}
@@ -252,13 +264,14 @@ func profileHours(profiles map[string]time.Duration) []ProfileHours {
 	return out
 }
 
-// storageGBMonths is the sum over kinds of each kind's mean daily bytes, in
-// GiB. Kinds are summed in name order so the float result does not depend on
-// map order, and a kind with no sample in the month adds nothing.
-func storageGBMonths(kinds map[string]map[string]int64) float64 {
+// storageGBMonths is the sum over kinds of each kind's mean bytes over the
+// month's days, in GiB. Kinds are summed in name order so the float result does
+// not depend on map order, and a kind with no sample in the month adds nothing.
+func storageGBMonths(kinds map[string]map[string]int64, month CalendarMonth) float64 {
 	if len(kinds) == 0 {
 		return 0
 	}
+	daysInMonth := float64(month.Days())
 	names := make([]string, 0, len(kinds))
 	for name := range kinds {
 		names = append(names, name)
@@ -266,15 +279,15 @@ func storageGBMonths(kinds map[string]map[string]int64) float64 {
 	sort.Strings(names)
 	var meanBytes float64
 	for _, name := range names {
-		days := kinds[name]
-		if len(days) == 0 {
+		dailyTotals := kinds[name]
+		if len(dailyTotals) == 0 {
 			continue
 		}
 		var sum int64
-		for _, bytes := range days {
+		for _, bytes := range dailyTotals {
 			sum += bytes
 		}
-		meanBytes += float64(sum) / float64(len(days))
+		meanBytes += float64(sum) / daysInMonth
 	}
 	return meanBytes / bytesPerGiB
 }
