@@ -111,3 +111,38 @@ func TestHeartbeatTimingChangesNothingElse(t *testing.T) {
 		}
 	}
 }
+
+// The slow-step line starts at exactly slowHeartbeatStep: a step one
+// millisecond short of it logs nothing and a step of exactly 2s does (gt-p4ted).
+func TestHeartbeatSlowStepThresholdBoundary(t *testing.T) {
+	t.Parallel()
+	names := stepNames(2)
+	d, logs, _ := timedHeartbeatDaemon(t, map[string]time.Duration{
+		names[0]: slowHeartbeatStep - time.Millisecond,
+		names[1]: slowHeartbeatStep,
+	})
+
+	d.heartbeatWork(&State{Running: true}, true)
+
+	got := logs.String()
+	if strings.Contains(got, "Heartbeat step "+names[0]+" took") {
+		t.Errorf("%s: a step 1ms under the threshold logged a slow-step line:\n%s", t.Name(), got)
+	}
+	if want := "Heartbeat step " + names[1] + " took 2s"; !strings.Contains(got, want) {
+		t.Errorf("%s: log lacks %q for a step of exactly the threshold:\n%s", t.Name(), want, got)
+	}
+}
+
+// A heartbeat that ran fewer than three steps names the ones it ran and no
+// more (gt-p4ted).
+func TestHeartbeatSummaryWithFewerThanThreeSteps(t *testing.T) {
+	t.Parallel()
+	timing := &heartbeatTiming{}
+	if got, want := timing.summary(0), "Heartbeat took 0s; slowest: "; got != want {
+		t.Errorf("no steps: summary = %q, want %q", got, want)
+	}
+	timing.steps = []stepTime{{name: "a", took: time.Second}, {name: "b", took: 3 * time.Second}}
+	if got, want := timing.summary(4*time.Second), "Heartbeat took 4s; slowest: b 3s, a 1s"; got != want {
+		t.Errorf("two steps: summary = %q, want %q", got, want)
+	}
+}

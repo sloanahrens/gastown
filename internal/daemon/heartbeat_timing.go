@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -25,11 +26,11 @@ type heartbeatTiming struct {
 	steps []stepTime
 }
 
-// logStep records a finished step and logs it when it was slow.
-func (d *Daemon) logStep(t *heartbeatTiming, name string, took time.Duration) {
+// logStep records a finished step and logs it to logger when it was slow.
+func (t *heartbeatTiming) logStep(logger *log.Logger, name string, took time.Duration) {
 	t.steps = append(t.steps, stepTime{name: name, took: took})
 	if took >= slowHeartbeatStep {
-		d.logger.Printf("Heartbeat step %s took %s", name, took.Round(time.Millisecond))
+		logger.Printf("Heartbeat step %s took %s", name, took.Round(time.Millisecond))
 	}
 }
 
