@@ -5,6 +5,7 @@ package makegate
 import (
 	"bytes"
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -27,6 +28,24 @@ import (
 // test-slow and test-makefile both run it.
 const shellTestsLine = "GT_TEST_DOCKER=0 go run ./internal/shelltier/cmd/shelltier --all"
 
+// defaultsMake is a dry-run Make for the checkout at root that runs the way a
+// fresh shell would: the outer make's flags are unset, and so is every variable
+// the Makefile gives a `?=` default, so an ambient SHELL_TESTS or
+// PRESUBMIT_BASE cannot change the recipe a case reads. The names come from the
+// Makefile itself, so a default added later is covered without editing this.
+func defaultsMake(t *testing.T, root string) Make {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(root, "Makefile"))
+	if err != nil {
+		t.Fatalf("read the Makefile: %v", err)
+	}
+	unset := append([]string{"GT_TEST_DOCKER"}, outerMakeFlags...)
+	for _, m := range regexp.MustCompile(`(?m)^([A-Za-z_][A-Za-z0-9_]*)[ \t]*\?=`).FindAllSubmatch(data, -1) {
+		unset = append(unset, string(m[1]))
+	}
+	return envMakeWithout(root, true, unset)
+}
+
 // dryTarget is make -n with args, the output a case reads. make failing fails
 // the test: no assertion may run against a partial dry run.
 func dryTarget(t *testing.T, m Make, args ...string) string {
@@ -42,7 +61,7 @@ func dryTarget(t *testing.T, m Make, args ...string) string {
 // Mutation: a syntax error or a $(error ...) in test-slow's recipe makes make -n
 // exit non-zero.
 func TestIntegrationTargetsTestSlowDryRunExitsZero(t *testing.T) {
-	dryTarget(t, RealMake(repoRoot(t)), "test-slow")
+	dryTarget(t, defaultsMake(t, repoRoot(t)), "test-slow")
 }
 
 // targetsContainerOptInOn matches the container opt-in set to anything but 0,
@@ -57,7 +76,7 @@ var targetsSlotRun = regexp.MustCompile(`slot +run`)
 // Mutation: drop test-slow's gate prerequisite, swap the recipe's two stages,
 // write GT_TEST_DOCKER=1 on either line, or wrap a line in `gt slot run`.
 func TestIntegrationTargetsTestSlowRunsTheGateThenTheShellTests(t *testing.T) {
-	out := dryTarget(t, RealMake(repoRoot(t)), "test-slow")
+	out := dryTarget(t, defaultsMake(t, repoRoot(t)), "test-slow")
 	gate := lineOf(out, "go test -timeout 20m ./...")
 	shell := lineOf(out, shellTestsLine)
 	if gate == 0 || shell == 0 || gate >= shell {
@@ -76,7 +95,7 @@ func TestIntegrationTargetsTestSlowRunsTheGateThenTheShellTests(t *testing.T) {
 // Mutation: a syntax error or a $(error ...) in test-makefile's recipe makes
 // make -n exit non-zero.
 func TestIntegrationTargetsTestMakefileDryRunExitsZero(t *testing.T) {
-	dryTarget(t, RealMake(repoRoot(t)), "test-makefile")
+	dryTarget(t, defaultsMake(t, repoRoot(t)), "test-makefile")
 }
 
 // bashScriptCall matches a recipe line running a shell script by hand.
@@ -87,7 +106,7 @@ var bashScriptCall = regexp.MustCompile(`bash\s+\S+`)
 // Mutation: give test-makefile a hand-written list (`bash scripts/x_test.sh`),
 // and the list drifts from the runner test-slow uses.
 func TestIntegrationTargetsTestMakefileRunsTheShelltierRunnerAlone(t *testing.T) {
-	out := dryTarget(t, RealMake(repoRoot(t)), "test-makefile")
+	out := dryTarget(t, defaultsMake(t, repoRoot(t)), "test-makefile")
 	if call := bashScriptCall.FindString(out); call != "" {
 		t.Fatalf("test-makefile runs a shell script by hand (%q); the shell tests have one runner\n%s", call, out)
 	}
@@ -145,7 +164,7 @@ func TestIntegrationTargetsShellTestListRunsTheScriptsTheOldHandListSkipped(t *t
 			t.Fatalf("the shelltier runner never starts %s\nstarted: %q", want, started)
 		}
 	}
-	if mout := dryTarget(t, RealMake(root), "test-makefile"); strings.Contains(mout, "test-makefile.sh") {
+	if mout := dryTarget(t, defaultsMake(t, root), "test-makefile"); strings.Contains(mout, "test-makefile.sh") {
 		t.Fatalf("test-makefile names a hand-written list instead of the runner's manifest\n%s", mout)
 	}
 }
@@ -276,7 +295,7 @@ func TestIntegrationTargetsPolecatCachesRunsTheGoCommand(t *testing.T) {
 // Mutation: drop the go run line, and the target exits 0 having imported no
 // provider.
 func TestIntegrationTargetsOpenshellProvidersRunsTheGoCommand(t *testing.T) {
-	out := dryTarget(t, RealMake(repoRoot(t)), "openshell-providers")
+	out := dryTarget(t, defaultsMake(t, repoRoot(t)), "openshell-providers")
 	if !strings.Contains(out, "go run ./cmd/openshell-providers") {
 		t.Fatalf("openshell-providers does not run the Go command\n%s", out)
 	}
