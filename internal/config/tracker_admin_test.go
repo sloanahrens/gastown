@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/config/configtest"
 	"github.com/steveyegge/gastown/internal/constants"
 )
 
@@ -50,7 +51,7 @@ func TestLoadTrackerAdminToken_ResolvesValue(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			townRoot := t.TempDir()
-			writeDaemonEnv(t, townRoot, tc.body)
+			configtest.WriteDaemonEnv(t, townRoot, tc.body)
 			getenv := func(name string) string { return tc.parent[name] }
 
 			tok, err := loadTrackerAdminToken(townRoot, getenv)
@@ -93,7 +94,7 @@ func TestLoadTrackerAdminToken_ErrorNamesKeyNotValues(t *testing.T) {
 			t.Parallel()
 			townRoot := t.TempDir()
 			if tc.body != nil {
-				writeDaemonEnv(t, townRoot, *tc.body)
+				configtest.WriteDaemonEnv(t, townRoot, *tc.body)
 			}
 			tok, err := loadTrackerAdminToken(townRoot, func(string) string { return "" })
 			if err == nil {
@@ -121,7 +122,7 @@ func TestLoadTrackerAdminToken_MalformedLineErrorDoesNotEchoLine(t *testing.T) {
 	t.Parallel()
 	const leak = fakeCredentialMarker + "malformed-line"
 	townRoot := t.TempDir()
-	writeDaemonEnv(t, townRoot, trackerAdminTokenKey+" "+leak+"\n")
+	configtest.WriteDaemonEnv(t, townRoot, trackerAdminTokenKey+" "+leak+"\n")
 
 	_, err := LoadTrackerAdminToken(townRoot)
 	if err == nil {
@@ -166,7 +167,7 @@ func TestLoadTrackerAdminToken_UnreadableFileIsErrorNotMissingKey(t *testing.T) 
 func TestTrackerAdminToken_RedactsInEveryFormat(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	writeDaemonEnv(t, townRoot, trackerAdminTokenKey+"="+trackerAdminFakeSecret+"\n")
+	configtest.WriteDaemonEnv(t, townRoot, trackerAdminTokenKey+"="+trackerAdminFakeSecret+"\n")
 	tok, err := LoadTrackerAdminToken(townRoot)
 	if err != nil {
 		t.Fatalf("LoadTrackerAdminToken() error = %v", err)
@@ -225,7 +226,7 @@ func TestSeatEnvNeverCarriesTrackerAdminToken(t *testing.T) {
 	if err := SaveRigSettings(RigSettingsPath(rigPath), NewRigSettings()); err != nil {
 		t.Fatalf("SaveRigSettings: %v", err)
 	}
-	writeDaemonEnv(t, townRoot, trackerAdminTokenKey+"=${GT_TRACKER_ADMIN_CRED}\nGT_TRACKER_ADMIN_CRED="+trackerAdminFakeSecret+"\n")
+	configtest.WriteDaemonEnv(t, townRoot, trackerAdminTokenKey+"=${GT_TRACKER_ADMIN_CRED}\nGT_TRACKER_ADMIN_CRED="+trackerAdminFakeSecret+"\n")
 	parent := parentEnvWithFakeCredentials()
 	parent[trackerAdminTokenKey] = trackerAdminFakeSecret
 	h := agentHost(parent)

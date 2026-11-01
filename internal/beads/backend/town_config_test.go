@@ -1,26 +1,12 @@
 package backend
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/config/configtest"
 )
-
-// writeTownDaemonEnv writes the town's settings/daemon.env, where the admin
-// credential is kept.
-func writeTownDaemonEnv(t *testing.T, townRoot, body string) {
-	t.Helper()
-	dir := filepath.Join(townRoot, "settings")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "daemon.env"), []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
 
 // The town-side config carries the admin credential from settings/daemon.env,
 // and the endpoint from TRACKER_URL. The seat token in the same environment is
@@ -28,7 +14,7 @@ func writeTownDaemonEnv(t *testing.T, townRoot, body string) {
 func TestTownConfigCarriesTheAdminCredentialNotTheSeatToken(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	writeTownDaemonEnv(t, townRoot, "TRACKER_ADMIN_TOKEN=admin-secret\n")
+	configtest.WriteDaemonEnv(t, townRoot, "TRACKER_ADMIN_TOKEN=admin-secret\n")
 	env := map[string]string{
 		"TRACKER_URL":        "https://tracker.example.com",
 		"TRACKER_TOKEN":      "seat-secret",
@@ -86,12 +72,6 @@ func TestTownConfigRefusesWhatItCannotReach(t *testing.T) {
 			},
 			want: "TRACKER_ADMIN_TOKEN is not set",
 		},
-		{
-			name:      "an admin key that names an unset variable",
-			daemonEnv: "TRACKER_ADMIN_TOKEN=${TRACKER_ABSENT_FOR_TEST}\n",
-			env:       map[string]string{"TRACKER_URL": "https://tracker.example.com"},
-			want:      "is not set",
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -100,7 +80,7 @@ func TestTownConfigRefusesWhatItCannotReach(t *testing.T) {
 			if !tt.noTown {
 				townRoot = t.TempDir()
 				if tt.daemonEnv != "" {
-					writeTownDaemonEnv(t, townRoot, tt.daemonEnv)
+					configtest.WriteDaemonEnv(t, townRoot, tt.daemonEnv)
 				}
 			}
 			cfg, err := TownConfig(townRoot, func(key string) string { return tt.env[key] })

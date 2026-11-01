@@ -38,14 +38,14 @@ type Config struct{ Tracker client.Config }
 // FromEnv reads the tracker settings from getenv.
 func FromEnv(getenv func(string) string) Config { return Config{Tracker: client.FromEnv(getenv)} }
 
-// TownConfig reads the tracker settings of a town-side process, the daemon's
-// export and the reaper's purge. Their token is the admin-scope credential in
-// the town's settings/daemon.env, because the routes they call (POST
-// /v1/export, POST /v1/wisps:purge) are admin-only. The endpoint still comes
-// from TRACKER_URL. TRACKER_TOKEN and TRACKER_TOKEN_FILE are a seat's token and
-// are never read here, so a seat token in the daemon's environment cannot be
-// the one these calls use.
+// TownConfig is the tracker config of a town-side process, built on the town's admin credential.
 func TownConfig(townRoot string, getenv func(string) string) (Config, error) {
+	// The daemon's export and the reaper's purge call admin-only routes (POST
+	// /v1/export, POST /v1/wisps:purge), so their token is the admin credential
+	// in settings/daemon.env. The endpoint still comes from TRACKER_URL.
+	// TRACKER_TOKEN and TRACKER_TOKEN_FILE are a seat's token and are never read
+	// here, so a seat token in the daemon's environment cannot be the one these
+	// calls use.
 	return townConfig(townRoot, getenv, config.LoadTrackerAdminToken)
 }
 
