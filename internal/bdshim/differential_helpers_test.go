@@ -91,8 +91,9 @@ var differentialRows = []differentialRow{
 	{stem: "config-set", argv: []string{"config", "set", "export.auto", "false"}},
 }
 
-// knownUnhandledVerbs is the tracker verbs the shim has no handler for yet
-// (X3 to X6 of gt-p85pw), keyed as the registry is: bd's verb. A golden row
+// knownUnhandledVerbs is the tracker verbs the shim has no handler for yet,
+// keyed as the registry is: bd's verb. An entry goes when its handler lands
+// (the test below fails on it until then). A golden row
 // whose verb is here is skipped. The list only shrinks: a test fails on an
 // entry whose verb has gained a handler, and on a golden row whose verb is
 // neither handled nor listed.
@@ -318,8 +319,16 @@ func fixtureEnv(t *testing.T, town string, fixture []fixtureBead, argv []string)
 		}
 		return ""
 	}
+	env, stdout, stderr := differentialEnv(argv, getenv, town)
+	env.Handlers = handlers
+	return env, stdout, stderr
+}
+
+// differentialEnv is the Env both runs share: the town as working directory, no
+// bd.real to fall through to, and the answer captured. The caller sets Handlers.
+func differentialEnv(argv []string, getenv func(string) string, town string) (Env, *bytes.Buffer, *bytes.Buffer) {
 	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
-	env := Env{
+	return Env{
 		Args:   argv,
 		Getenv: getenv,
 		Getwd:  func() (string, error) { return town, nil },
@@ -329,11 +338,9 @@ func fixtureEnv(t *testing.T, town string, fixture []fixtureBead, argv []string)
 		Run: func(string, []string) error {
 			return errors.New("the differential test never runs bd.real")
 		},
-		Handlers: handlers,
-		Stdout:   stdout,
-		Stderr:   stderr,
-	}
-	return env, stdout, stderr
+		Stdout: stdout,
+		Stderr: stderr,
+	}, stdout, stderr
 }
 
 // runInShim is a run that answers argv through Main against town, with the
@@ -341,21 +348,8 @@ func fixtureEnv(t *testing.T, town string, fixture []fixtureBead, argv []string)
 func runInShim(t *testing.T, town string, handlers map[string]Handler) func([]string) ([]byte, int, error) {
 	t.Helper()
 	return func(argv []string) ([]byte, int, error) {
-		stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
-		env := Env{
-			Args:   argv,
-			Getenv: func(string) string { return "" },
-			Getwd:  func() (string, error) { return town, nil },
-			Executable: func() (string, error) {
-				return "", errors.New("the differential test has no bd.real")
-			},
-			Run: func(string, []string) error {
-				return errors.New("the differential test never runs bd.real")
-			},
-			Handlers: handlers,
-			Stdout:   stdout,
-			Stderr:   stderr,
-		}
+		env, stdout, _ := differentialEnv(argv, func(string) string { return "" }, town)
+		env.Handlers = handlers
 		code := Main(env)
 		return stdout.Bytes(), code, nil
 	}
