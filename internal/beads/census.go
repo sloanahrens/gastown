@@ -114,10 +114,27 @@ func censusCaller() string {
 	return censusCallerFromFrames(names[:i])
 }
 
-// censusCallerFromFrames returns the first frame name outside this package as
-// "package.Func", or "unknown" when every frame is inside it.
+// censusWrapperFrames are frame prefixes of pass-through wrappers: methods
+// that forward a call to the store beneath them, choosing only how to retry it
+// and never whether the call is made. The census names the function that
+// decided to read, so it skips these frames the way it skips this package's own
+// seam (gt-krmal). Each prefix includes the module path, matching the frame
+// names the compiler writes.
+var censusWrapperFrames = []string{
+	// landworker.RetryBeads retries a serialization failure and forwards every
+	// other call unchanged, so every landing worker read named the wrapper
+	// instead of the step that asked for it (gt-krmal).
+	censusModulePath + "/internal/landworker.RetryBeads.",
+	// The same wrapper's methods when declared on the pointer, which the frame
+	// name spells differently.
+	censusModulePath + "/internal/landworker.(*RetryBeads).",
+}
+
+// censusCallerFromFrames returns the first frame name outside this package and
+// outside its pass-through wrappers as "package.Func", or "unknown" when every
+// frame is one of those.
 func censusCallerFromFrames(names []string) string {
-	for _, name := range names {
+	for i, name := range names {
 		// runtime frames are the walk's own machinery, not a caller.
 		if name == "" || strings.HasPrefix(name, "runtime.") {
 			continue
@@ -125,9 +142,40 @@ func censusCallerFromFrames(names []string) string {
 		if censusInBeads(name) {
 			continue
 		}
+		// A wrapper stands in for the caller only when no frame above it can
+		// name one; a stack that ends at the wrapper keeps its name.
+		if censusInWrapper(name) && censusNamesCaller(names[i+1:]) {
+			continue
+		}
 		return censusShortName(name)
 	}
 	return censusUnknown
+}
+
+// censusInWrapper reports whether the frame name is a pass-through wrapper the
+// census looks through.
+func censusInWrapper(name string) bool {
+	for _, prefix := range censusWrapperFrames {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// censusNamesCaller reports whether names holds a frame that could still name
+// the caller: not the runtime's machinery, and not this package's seam. The
+// walk stops at censusMaxFrames, so a deciding frame past it is not in names
+// and the wrapper keeps its name, the same fallback as a stack that ends at the
+// wrapper.
+func censusNamesCaller(names []string) bool {
+	for _, name := range names {
+		if name == "" || strings.HasPrefix(name, "runtime.") || censusInBeads(name) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // censusInBeads reports whether the frame name is this package or a package

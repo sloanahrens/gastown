@@ -36,9 +36,18 @@ const (
 
 // CensusBudgetCheck fails when a bd caller's average rate in the daemon's
 // census exceeds the budget internal/beads/census_budgets.go records for it,
-// and warns about a caller the table does not name (gt-gojo0). A window lists
-// only its eight busiest rows, so an average is a floor: calls the log leaves
-// out are never counted against a caller.
+// and warns about a caller the table does not name (gt-gojo0). The census names
+// the landing step that decided to read rather than the retry wrapper it used
+// to name, so those reads are summed onto the wrapper's row (gt-krmal).
+//
+// A window lists only its eight busiest rows. For a caller the table names
+// directly, an average is a floor: calls the log leaves out are never counted
+// against it, and the baseline measured the same floor. A folded wrapper row is
+// different: its measured rate was one key's count, and the sum of the step
+// reads behind it spreads over many keys that mostly miss the window's eight
+// rows. When a window's listed rows account for fewer calls than its total, the
+// folded rows are reported but neither passed nor failed, and the check reports
+// the window incomplete (gt-krmal).
 type CensusBudgetCheck struct {
 	BaseCheck
 	// Now is the clock the staleness guard reads; nil is time.Now.
@@ -104,35 +113,73 @@ func (c *CensusBudgetCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	calls := censusCallerCalls(samples)
 	minutes := censusSpanMinutes(samples)
 	budgets := make(map[string]float64)
 	for _, b := range c.budgetTable() {
 		budgets[b.Caller] = b.CallsPerMinute
 	}
+	folded := censusWrapperRows(budgets)
+	foldedRows := make(map[string]bool, len(folded))
+	for _, row := range folded {
+		foldedRows[row] = true
+	}
+	rowCalls, unbudgetedCalls := censusReadRows(censusReadCalls(samples), budgets, folded)
+	listing, total := censusListedAndTotal(samples)
+	complete := listing == total
 
-	var over, unbudgeted []string
-	for _, caller := range sortedKeys(calls) {
-		average := float64(calls[caller]) / minutes
-		budget, ok := budgets[caller]
-		switch {
-		case !ok:
-			unbudgeted = append(unbudgeted,
-				fmt.Sprintf("%s averages %.1f calls/min over %d windows and has no budget", caller, average, len(samples)))
-		case average > budget:
+	var over, unbudgeted, visible []string
+	for _, row := range sortedKeys(rowCalls) {
+		average := float64(rowCalls[row]) / minutes
+		if !complete && foldedRows[row] {
+			// The listed rows are a sample of the window, so their sum is a
+			// floor below the rate the wrapper rows were measured at. A floor
+			// over the budget still proves a breach, so it fails; a floor under
+			// it proves nothing, so the row is reported and left ungated rather
+			// than passed on an undercount.
+			if average > budgets[row] {
+				over = append(over,
+					fmt.Sprintf("%s shows at least %.1f calls/min over %d windows (a floor: the window lists only its busiest rows), budget %.1f", row, average, len(samples), budgets[row]))
+				continue
+			}
+			visible = append(visible,
+				fmt.Sprintf("%s shows %.1f calls/min over %d windows, budget %.1f: not gated, the window lists only its busiest rows", row, average, len(samples), budgets[row]))
+			continue
+		}
+		if average > budgets[row] {
 			over = append(over,
-				fmt.Sprintf("%s averages %.1f calls/min over %d windows, budget %.1f", caller, average, len(samples), budget))
+				fmt.Sprintf("%s averages %.1f calls/min over %d windows, budget %.1f", row, average, len(samples), budgets[row]))
 		}
 	}
+	for _, caller := range sortedKeys(unbudgetedCalls) {
+		average := float64(unbudgetedCalls[caller]) / minutes
+		unbudgeted = append(unbudgeted,
+			fmt.Sprintf("%s averages %.1f calls/min over %d windows and has no budget", caller, average, len(samples)))
+	}
+	// incomplete names the calls the measured windows counted but did not list.
+	incomplete := fmt.Sprintf("incomplete: %d of %d reads visible", listing, total)
 
 	switch {
 	case len(over) > 0:
+		details := append([]string(nil), over...)
+		if !complete {
+			details = append(details, incomplete+": the retry-wrapper rows were not gated on a partial fold")
+		}
+		details = append(append(details, visible...), unbudgeted...)
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusError,
 			Message: fmt.Sprintf("%d bd caller(s) over budget in the last %d census windows", len(over), len(samples)),
-			Details: append(append(append([]string(nil), over...), unbudgeted...), censusNoteDetails(read)...),
+			Details: append(details, censusNoteDetails(read)...),
 			FixHint: "Cut the caller's bd calls, or raise its row in internal/beads/census_budgets.go (a data edit om reviews)",
+		}
+	case !complete:
+		details := append(append(append([]string(nil), visible...), unbudgeted...), censusNoteDetails(read)...)
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusWarning,
+			Message: fmt.Sprintf("%s across the last %d census windows: the retry-wrapper rows are not gated on a partial fold", incomplete, len(samples)),
+			Details: details,
+			FixHint: "A window lists only its busiest rows, so a sum of them misses calls: the wrapper rows are reported but not gated until a window's rows account for its total",
 		}
 	case len(unbudgeted) > 0:
 		return &CheckResult{
@@ -254,16 +301,68 @@ func censusSamples(townRoot string, max int) (censusRead, error) {
 	return read, nil
 }
 
-// censusCallerCalls folds the windows into each caller's call count. A window
+// censusReadKey is one row key: the verb and caller the census names. A caller
+// that reads under two verbs is two reads, which is what lets a folded sum
+// charge each read to the right budget row.
+type censusReadKey struct{ verb, caller string }
+
+// censusReadCalls folds the windows into each read's call count. A window
 // lists only its busiest rows, so the count is the calls the log can attribute.
-func censusCallerCalls(samples []censusSample) map[string]int {
-	calls := make(map[string]int)
+func censusReadCalls(samples []censusSample) map[censusReadKey]int {
+	calls := make(map[censusReadKey]int)
 	for _, sample := range samples {
 		for _, row := range sample.Window.Rows {
-			calls[row.Caller] += row.Count
+			calls[censusReadKey{verb: row.Verb, caller: row.Caller}] += row.Count
 		}
 	}
 	return calls
+}
+
+// censusListedAndTotal is the calls the measured windows' listed rows account
+// for and the calls their totals count. A window's total covers every call it
+// saw, so a listed sum below it means the log left rows out.
+func censusListedAndTotal(samples []censusSample) (listing, total int) {
+	for _, sample := range samples {
+		listing += beads.CensusRowsTotal(sample.Window.Rows)
+		total += sample.Window.Total
+	}
+	return listing, total
+}
+
+// censusWrapperRows maps each read a retry-wrapper budget row counts to that
+// row, dropping rows the gate's table does not hold.
+func censusWrapperRows(budgets map[string]float64) map[censusReadKey]string {
+	rows := make(map[censusReadKey]string)
+	for row, reads := range beads.CensusWrapperReads() {
+		if _, ok := budgets[row]; !ok {
+			continue
+		}
+		for _, read := range reads {
+			rows[censusReadKey{verb: read.Verb, caller: read.Caller}] = row
+		}
+	}
+	return rows
+}
+
+// censusReadRows charges every read to the budget row it counts against: its
+// own caller when the table budgets that name, else the retry-wrapper row whose
+// call sites the census names instead (gt-krmal). A read no row names is folded
+// by caller for the unbudgeted report.
+func censusReadRows(calls map[censusReadKey]int, budgets map[string]float64, folded map[censusReadKey]string) (rowCalls, unbudgeted map[string]int) {
+	rowCalls = make(map[string]int)
+	unbudgeted = make(map[string]int)
+	for read, count := range calls {
+		if _, ok := budgets[read.caller]; ok {
+			rowCalls[read.caller] += count
+			continue
+		}
+		if row, ok := folded[read]; ok {
+			rowCalls[row] += count
+			continue
+		}
+		unbudgeted[read.caller] += count
+	}
+	return rowCalls, unbudgeted
 }
 
 // censusSpanMinutes is the time the records cover: first stamp to last. A
