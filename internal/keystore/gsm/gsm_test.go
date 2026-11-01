@@ -188,3 +188,38 @@ func TestGetNotFoundWhenTheVersionDisappearsBetweenListAndRead(t *testing.T) {
 		t.Errorf("Get when the newest version is disabled after the list = %v, want ErrNotFound", err)
 	}
 }
+
+func TestEachClientFailureIsWrappedWithItsOperation(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("backend down")
+	ctx := context.Background()
+	for _, tc := range []struct {
+		method string
+		call   func(s *Store) error
+	}{
+		{"access", func(s *Store) error { _, err := s.Get(ctx, "ws-1", "api-key"); return err }},
+		{"disable", func(s *Store) error { return s.Disable(ctx, "ws-1", "api-key", 1) }},
+		{"destroy", func(s *Store) error { return s.Destroy(ctx, "ws-1", "api-key", 1) }},
+	} {
+		c := newFakeClient()
+		s := newStore(t, c)
+		if _, err := s.Put(ctx, "ws-1", "api-key", []byte("one")); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		c.failWith, c.failOnly = boom, tc.method
+		err := tc.call(s)
+		if !errors.Is(err, boom) || errors.Is(err, keystore.ErrNotFound) || errors.Is(err, keystore.ErrRevisionNotFound) {
+			t.Errorf("%s with a failing client = %v, want the client's error and no not-found", tc.method, err)
+		}
+		if err != nil && !strings.Contains(err.Error(), tc.method) {
+			t.Errorf("%s error %q does not name the operation", tc.method, err)
+		}
+	}
+}
+
+func TestNewRefusesANilClient(t *testing.T) {
+	t.Parallel()
+	if s, err := New(nil, "ws-1"); err == nil || s != nil {
+		t.Errorf("New(nil client) = %v, %v, want an error and no store", s, err)
+	}
+}

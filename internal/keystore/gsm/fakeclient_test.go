@@ -12,6 +12,7 @@ type fakeClient struct {
 	secrets  map[string]*fakeSecret
 	calls    []string // "method secretID"
 	failWith error    // returned by every call when set
+	failOnly string   // when set with failWith, only this method fails
 	// beforeAccess, when set, runs at the start of AccessVersion with the lock
 	// released, so a test can change a version between the list and the read.
 	beforeAccess func()
@@ -27,6 +28,9 @@ func newFakeClient() *fakeClient { return &fakeClient{secrets: map[string]*fakeS
 
 func (f *fakeClient) record(method, id string) error {
 	f.calls = append(f.calls, method+" "+id)
+	if f.failOnly != "" && f.failOnly != method {
+		return nil
+	}
 	return f.failWith
 }
 
