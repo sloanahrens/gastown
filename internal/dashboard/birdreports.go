@@ -122,7 +122,9 @@ var (
 )
 
 // BirdDecisionItem is one decision a reporter puts to the operator: the
-// question it asks and the answer it recommends.
+// question it asks and the answer it recommends. The page reads these under
+// the long names whether the sidecar wrote them as q and rec or as question
+// and recommendation.
 type BirdDecisionItem struct {
 	Question       string `json:"question"`
 	Recommendation string `json:"recommendation"`
@@ -358,6 +360,31 @@ func (r *BirdReportsReader) readBird(now time.Time, name string) (BirdReport, bo
 	return row, true
 }
 
+// birdDecisionWire is one decision as a sidecar writes it. The reporters write
+// the short keys q and rec; the long spellings are the ones the page shows, and
+// both are read. Each is a pointer so that a key the sidecar did not write is
+// told apart from one it wrote empty: a key that is there is the spelling used.
+type birdDecisionWire struct {
+	Question       *string `json:"question"`
+	Recommendation *string `json:"recommendation"`
+	Q              *string `json:"q"`
+	Rec            *string `json:"rec"`
+}
+
+// birdDecisionText is the text a decision wrote for one of its two fields: the
+// long spelling when the sidecar wrote that key, the short one when it did not,
+// and empty when it wrote neither.
+func birdDecisionText(long, short *string) string {
+	switch {
+	case long != nil:
+		return *long
+	case short != nil:
+		return *short
+	default:
+		return ""
+	}
+}
+
 // birdDecisionItems decodes a sidecar's decision_items into the items a row may
 // show, and the rule each dropped item matched. A missing, null or malformed
 // array yields no items: the decisions are a convenience over the summary, so
@@ -369,15 +396,12 @@ func birdDecisionItems(raw json.RawMessage) (items []BirdDecisionItem, withheld 
 	if len(raw) == 0 {
 		return nil, nil
 	}
-	var wire []struct {
-		Question       string `json:"question"`
-		Recommendation string `json:"recommendation"`
-	}
+	var wire []birdDecisionWire
 	if err := json.Unmarshal(raw, &wire); err != nil {
 		return nil, nil
 	}
 	for _, w := range wire {
-		question := birdTextCut(w.Question, birdDecisionItemRunes)
+		question := birdTextCut(birdDecisionText(w.Question, w.Q), birdDecisionItemRunes)
 		if question == "" {
 			continue
 		}
@@ -386,7 +410,7 @@ func birdDecisionItems(raw json.RawMessage) (items []BirdDecisionItem, withheld 
 		}
 		item := BirdDecisionItem{
 			Question:       question,
-			Recommendation: birdTextCut(w.Recommendation, birdDecisionItemRunes),
+			Recommendation: birdTextCut(birdDecisionText(w.Recommendation, w.Rec), birdDecisionItemRunes),
 		}
 		// Each field is screened as the text the page would show, the way the
 		// summary is: a flagged item is dropped whole rather than shown with
