@@ -600,3 +600,35 @@ func TestContainerRehearsalBoundsAHungCheckCall(t *testing.T) {
 		t.Fatalf("err=%v\n%s", err, out.String())
 	}
 }
+
+// A failure after the run directory and its marker exist (making a settings
+// directory, writing a staged file) is named, and the run directory is still
+// removed.
+func TestContainerRehearsalNamesAStagedFileItCannotWrite(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	for name, want := range map[string]string{"mkdir": "create " + rehearseRoot, "write": "write " + rehearseRoot} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newRehearseHost()
+			d := h.deps(&bytes.Buffer{})
+			mk, wr := d.mkdirAll, d.write
+			d.mkdirAll = func(p string, m os.FileMode) error {
+				if name == "mkdir" && strings.HasPrefix(p, rehearseRoot) {
+					return boom
+				}
+				return mk(p, m)
+			}
+			d.write = func(p string, data []byte, m os.FileMode) error {
+				if name == "write" && strings.HasPrefix(p, rehearseRoot) {
+					return boom
+				}
+				return wr(p, data, m)
+			}
+			err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), d)
+			if !errors.Is(err, boom) || !strings.Contains(err.Error(), want) || len(h.removed) != 1 {
+				t.Fatalf("err=%v removed=%v, want %q wrapping the cause and the run dir removed", err, h.removed, want)
+			}
+		})
+	}
+}
