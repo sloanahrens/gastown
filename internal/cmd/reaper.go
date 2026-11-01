@@ -170,28 +170,24 @@ func reaperTrackerTargets(townRoot string, wholeTown bool, databases []string) (
 }
 
 // reaperTrackerWisps returns the constructor of the tracker the town's tracker
-// rigs are on. The reaper's purge is admin-only, so the client carries the
-// town's admin credential (backend.TownConfig), never a seat's token.
-func reaperTrackerWisps(townRoot string) func() (reaper.TrackerWisps, error) {
+// rigs are on: the endpoint from getenv, the credential from townRoot's
+// settings. The reaper's purge is admin-only, so the client carries the town's
+// admin credential (backend.TownConfig), never a seat's token. The token never
+// comes from a flag.
+func reaperTrackerWisps(townRoot string, getenv func(string) string) func() (reaper.TrackerWisps, error) {
 	return func() (reaper.TrackerWisps, error) {
-		return reaperTrackerWispsFrom(townRoot, os.Getenv)
+		cfg, err := backend.TownConfig(townRoot, getenv)
+		if err != nil {
+			// The caller names the tracker rigs when it prints this error.
+			return nil, err
+		}
+		tc, err := client.New(cfg.Tracker)
+		if err != nil {
+			// client.New never quotes the token; its message names the problem.
+			return nil, err
+		}
+		return tc, nil
 	}
-}
-
-// reaperTrackerWispsFrom is reaperTrackerWisps reading its endpoint from getenv
-// and its credential from the town's settings. The token never comes from a flag.
-func reaperTrackerWispsFrom(townRoot string, getenv func(string) string) (reaper.TrackerWisps, error) {
-	cfg, err := backend.TownConfig(townRoot, getenv)
-	if err != nil {
-		// The caller names the tracker rigs when it prints this error.
-		return nil, err
-	}
-	tc, err := client.New(cfg.Tracker)
-	if err != nil {
-		// client.New never quotes the token; its message names the problem.
-		return nil, err
-	}
-	return tc, nil
 }
 
 // scanTrackerRigs scans each tracker rig through the tracker's wisp reads. A rig
@@ -576,7 +572,7 @@ Use this to understand the state before deciding what to reap.`,
 			}
 			results = append(results, result)
 		}
-		results = append(results, scanTrackerTargets(context.Background(), trackerRigs, reaperTrackerWisps(townRoot), maxAge, purgeAge, time.Now())...)
+		results = append(results, scanTrackerTargets(context.Background(), trackerRigs, reaperTrackerWisps(townRoot, os.Getenv), maxAge, purgeAge, time.Now())...)
 
 		if reaperJSON {
 			fmt.Println(reaper.FormatJSON(results))
@@ -703,7 +699,7 @@ Returns the count of reaped wisps. Use --dry-run to preview.`,
 			}
 			results = append(results, result)
 		}
-		tracked, failed := reapTrackerTargets(context.Background(), trackerRigs, reaperTrackerWisps(townRoot), purgeAge, reaperDryRun, time.Now())
+		tracked, failed := reapTrackerTargets(context.Background(), trackerRigs, reaperTrackerWisps(townRoot, os.Getenv), purgeAge, reaperDryRun, time.Now())
 		results = append(results, tracked...)
 		reapFailures += failed
 

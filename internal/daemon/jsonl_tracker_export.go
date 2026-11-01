@@ -218,6 +218,10 @@ func (d *Daemon) jsonlTrackerRoutes() trackerRoutes {
 // daemon, on the town's admin credential (backend.TownConfig). The export route
 // is admin-only, so a seat token in the daemon's environment is not used. The
 // error names the setting that is missing and never a token's value.
+//
+// The credential is read on every export rather than cached, so a rotated or
+// revoked admin token takes effect on the next rig without a daemon restart.
+// The read is one small file per rig.
 func trackerExporter(townRoot string, getenv func(string) string) trackerRigExporter {
 	return func(ctx context.Context, rig string, emit func(api.ExportRecord) error) error {
 		cfg, err := backend.TownConfig(townRoot, getenv)
@@ -249,7 +253,11 @@ func (d *Daemon) exportTrackerDatabaseToJsonl(rig, db, dbDir string) (int, error
 		if d.config != nil {
 			townRoot = d.config.TownRoot
 		}
-		export = trackerExporter(townRoot, os.Getenv)
+		getenv := d.trackerEnv
+		if getenv == nil {
+			getenv = os.Getenv
+		}
+		export = trackerExporter(townRoot, getenv)
 	}
 	spool := newTrackerSpool(dbDir)
 	defer spool.discard()

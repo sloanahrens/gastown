@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beadsql"
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/config/configtest"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/tracker/api"
 )
@@ -1045,19 +1047,6 @@ func TestSyncJsonlGitBackupTrackerFlipCommitsAMarkedCount(t *testing.T) {
 	}
 }
 
-// writeDaemonEnv writes the town's settings/daemon.env, where the admin
-// credential is kept, with the file's 0600 mode.
-func writeDaemonEnv(t *testing.T, townRoot, body string) {
-	t.Helper()
-	dir := filepath.Join(townRoot, "settings")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "daemon.env"), []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // TestTrackerExporterRefusesSettingsItCannotReach: a tracker rig with no
 // endpoint, no admin credential or an unusable endpoint fails its export and
 // says what is wrong; it never falls back to the Dolt database the rig left
@@ -1085,7 +1074,7 @@ func TestTrackerExporterRefusesSettingsItCannotReach(t *testing.T) {
 			t.Parallel()
 			townRoot := t.TempDir()
 			if c.daemonEnv != "" {
-				writeDaemonEnv(t, townRoot, c.daemonEnv)
+				configtest.WriteDaemonEnv(t, townRoot, c.daemonEnv)
 			}
 			export := trackerExporter(townRoot, func(key string) string { return c.env[key] })
 			err := export(t.Context(), "al", func(api.ExportRecord) error { return nil })
@@ -1093,6 +1082,29 @@ func TestTrackerExporterRefusesSettingsItCannotReach(t *testing.T) {
 				t.Fatalf("export = %v, want an error naming %q", err, c.want)
 			}
 		})
+	}
+}
+
+// TestTrackerExportReadsTheDaemonsOwnTownCredential drives the production
+// exporter the backup runs, with no client seam. The town has no admin
+// credential, so the export is refused before any request is built, and the
+// refusal must name this daemon's own settings/daemon.env: the root was wired
+// from d.config, and the seat token in the environment is never the fallback.
+func TestTrackerExportReadsTheDaemonsOwnTownCredential(t *testing.T) {
+	t.Parallel()
+	townRoot := trackerTown(t)
+	env := map[string]string{
+		"TRACKER_URL":   "https://tracker.example.com",
+		"TRACKER_TOKEN": "seat-secret",
+	}
+	d, _ := backupTestDaemon(t)
+	d.config = &Config{TownRoot: townRoot}
+	d.trackerEnv = func(key string) string { return env[key] }
+
+	_, err := d.exportTrackerDatabaseToJsonl("al", "al", t.TempDir())
+	want := config.DaemonEnvPath(townRoot)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("exportTrackerDatabaseToJsonl error = %v, want a refusal naming %s", err, want)
 	}
 }
 

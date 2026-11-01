@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/config/configtest"
 	"github.com/steveyegge/gastown/internal/reaper"
 	"github.com/steveyegge/gastown/tracker/api"
 )
@@ -296,19 +298,6 @@ func TestReapTrackerTargetsCountsEveryRigItCannotReach(t *testing.T) {
 	}
 }
 
-// writeReaperDaemonEnv writes the town's settings/daemon.env, where the admin
-// credential is kept.
-func writeReaperDaemonEnv(t *testing.T, townRoot, body string) {
-	t.Helper()
-	dir := filepath.Join(townRoot, "settings")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "daemon.env"), []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestReaperTrackerWispsRefusesMissingSettings(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -322,17 +311,19 @@ func TestReaperTrackerWispsRefusesMissingSettings(t *testing.T) {
 			"TRACKER_URL":   "https://tracker.example.com",
 			"TRACKER_TOKEN": "seat-secret",
 		}, ""},
+		// The admin credential is present, so the client itself refuses the endpoint.
+		{"an endpoint that is not a URL", map[string]string{"TRACKER_URL": "not-a-url"}, "TRACKER_ADMIN_TOKEN=admin\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			townRoot := t.TempDir()
 			if tt.daemonEnv != "" {
-				writeReaperDaemonEnv(t, townRoot, tt.daemonEnv)
+				configtest.WriteDaemonEnv(t, townRoot, tt.daemonEnv)
 			}
 			getenv := func(key string) string { return tt.env[key] }
-			if _, err := reaperTrackerWispsFrom(townRoot, getenv); err == nil {
-				t.Fatal("reaperTrackerWispsFrom = nil error, want a refusal naming the missing setting")
+			if _, err := reaperTrackerWisps(townRoot, getenv)(); err == nil {
+				t.Fatal("reaperTrackerWisps = nil error, want a refusal naming the missing setting")
 			}
 		})
 	}
@@ -353,16 +344,22 @@ func findTownAt(townRoot string, err error) func() (string, error) {
 	return func() (string, error) { return townRoot, err }
 }
 
-// TestReaperTrackerWispsBuildsOnTheAdminCredentialAlone: the purge needs admin
-// scope, so a town with only the admin credential builds the reaper's client
-// even with no seat token in the environment.
-func TestReaperTrackerWispsBuildsOnTheAdminCredentialAlone(t *testing.T) {
+// TestReaperTrackerWispsReadsTheTownItWasGiven: the purge is admin-only, so its
+// client takes the credential from the town root the reaper was given. A town
+// with no admin credential is refused before any client is built, and the
+// refusal must name that town's settings/daemon.env. The seat token in the
+// environment is never the fallback.
+func TestReaperTrackerWispsReadsTheTownItWasGiven(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	writeReaperDaemonEnv(t, townRoot, "TRACKER_ADMIN_TOKEN=admin-secret\n")
-	env := map[string]string{"TRACKER_URL": "https://tracker.example.com"}
-	if _, err := reaperTrackerWispsFrom(townRoot, func(key string) string { return env[key] }); err != nil {
-		t.Fatalf("reaperTrackerWispsFrom = %v, want a client on the admin credential", err)
+	env := map[string]string{
+		"TRACKER_URL":   "https://tracker.example.com",
+		"TRACKER_TOKEN": "seat-secret",
+	}
+	_, err := reaperTrackerWisps(townRoot, func(key string) string { return env[key] })()
+	want := agentconfig.DaemonEnvPath(townRoot)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("reaperTrackerWisps error = %v, want a refusal naming %s", err, want)
 	}
 }
 

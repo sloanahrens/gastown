@@ -392,6 +392,11 @@ type Daemon struct {
 	// (jsonl_tracker_export.go).
 	jsonlTrackerExportFn trackerRigExporter
 
+	// trackerEnv is the environment the production tracker client reads its
+	// endpoint from, so a test can point it at a loopback tracker; nil is
+	// os.Getenv. The admin credential is read from the town root, not here.
+	trackerEnv func(string) string
+
 	// jsonlTrackerDBs holds the databases the current backup cycle exported
 	// through the tracker, so the commit subject can mark their counts and the
 	// spike guard can tell a tracker-measured count from a Dolt one
