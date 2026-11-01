@@ -109,17 +109,28 @@ func (s *Sandbox) SeedMake(build string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), makeTestTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "make", argv...)
-	cmd.Env = seedMakeEnv()
+	cmd.Env = sandboxEnv()
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
 
-// seedMakeEnv is the process environment without the make flags: an outer
-// make's flags must not decide whether the seed recipe's commands run.
-func seedMakeEnv() []string {
-	var env []string
+// sandboxEnv is the environment a sandbox command runs in: the caller's, with
+// every GIT_* variable and the make flags dropped. An inherited GIT_DIR,
+// GIT_WORK_TREE or GIT_INDEX_FILE would point the fixture's git calls at the
+// caller's repository, and the caller's global config or GIT_CONFIG_PARAMETERS
+// would decide what the fixture commits; an inherited make flag would decide
+// whether the seed recipe's commands run. The config pins shut the global and
+// system files the dropped variables would have named (gt-n8354).
+func sandboxEnv() []string {
+	env := []string{
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL=" + os.DevNull,
+	}
 	for _, kv := range os.Environ() {
 		key, _, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(key, "GIT_") {
+			continue
+		}
 		switch key {
 		case "MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS":
 			continue
@@ -136,9 +147,86 @@ func (s *Sandbox) git(dir string, args ...string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), makeTestTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = sandboxEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		s.t.Fatalf("git -C %s %s: %v\n%s", dir, strings.Join(args, " "), err, out)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// fixedGit runs git in dir with an environment the case fixes itself, so the
+// case reads the checkout the fixture built without the fixture's environment
+// deciding what it sees. A git failure comes back as an error, not a failed
+// test: a case about a refusal reads it.
+func fixedGit(dir string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), makeTestTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL=" + os.DevNull,
+	}
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+// TestIntegrationSandboxGitIgnoresACallerGitDir checks that the fixture's git
+// calls act on the sandbox checkout while the caller's environment names
+// another repository. Mutation: run the fixture's git with the inherited
+// environment, and the commits land in the caller's GIT_DIR, leaving the
+// sandbox checkout without a repository of its own (gt-n8354).
+func TestIntegrationSandboxGitIgnoresACallerGitDir(t *testing.T) {
+	t.Setenv("GIT_DIR", filepath.Join(t.TempDir(), "elsewhere"))
+	s := newSandbox(t)
+	s.Rig("gastown")
+
+	gitDir, err := fixedGit(s.Path("gastown", "mayor", "rig"), "rev-parse", "--git-dir")
+	if err != nil || gitDir != ".git" {
+		t.Fatalf("the sandbox checkout's git dir is %q (%v), want .git: the fixture's git calls followed the caller's GIT_DIR", gitDir, err)
+	}
+}
+
+// TestIntegrationSandboxIgnoresACallerGlobalGitConfig checks that the caller's
+// global git config does not reach the fixture's commits. Mutation: inherit the
+// environment, and the global core.hooksPath runs a failing pre-commit hook,
+// so the fixture cannot make its second commit (gt-n8354).
+func TestIntegrationSandboxIgnoresACallerGlobalGitConfig(t *testing.T) {
+	hooks := t.TempDir()
+	if err := os.WriteFile(filepath.Join(hooks, "pre-commit"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("write the failing hook: %v", err)
+	}
+	config := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(config, []byte("[core]\n\thooksPath = "+hooks+"\n"), 0o644); err != nil {
+		t.Fatalf("write the global config: %v", err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", config)
+
+	s := newSandbox(t)
+	s.Rig("gastown")
+
+	head, err := fixedGit(s.Path("gastown", "mayor", "rig"), "rev-parse", "HEAD")
+	if err != nil || len(head) != 40 {
+		t.Fatalf("the sandbox checkout has no commit (HEAD %q, %v): the fixture ran the caller's global pre-commit hook", head, err)
+	}
+}
+
+// TestIntegrationSeedMakeIgnoresACallerGitDir checks that the seed recipe's git
+// calls act on the sandbox checkouts while the caller's environment names
+// another repository. Mutation: pass the inherited environment to make, and
+// the stage's git calls fail against the caller's GIT_DIR before anything is
+// staged (gt-n8354).
+func TestIntegrationSeedMakeIgnoresACallerGitDir(t *testing.T) {
+	s := newSandbox(t)
+	build, _ := s.Rig("gastown")
+	pinned, _ := s.Rig("fx")
+	s.WriteFile("pins", "fx "+pinned+"\n")
+	t.Setenv("GIT_DIR", filepath.Join(t.TempDir(), "elsewhere"))
+
+	out, err := s.SeedMake(build, "polecat-seed-stage")
+	if err != nil {
+		t.Fatalf("polecat-seed-stage failed under the caller's GIT_DIR: %v\n%s", err, out)
+	}
+	mustExist(t, s.Path("out", "gastown", "first.txt"))
 }
