@@ -1183,7 +1183,7 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 		endedIn := ""
 		neverStarted := map[string]bool{}
 		starvedNote := ""
-		if res.reason == "" && tierSweepStageCutOff(res) {
+		if res.reason == "" && tierSweepStageCutOff(st.tiers, res) {
 			endedIn, neverStarted = tierSweepStageProgress(st.tiers, res.output)
 			starvedNote = "the stage printed nothing"
 			if endedIn != "" {
@@ -2280,17 +2280,47 @@ func tierSweepUnreachedAfterDeclined(tiers []string, declined map[string]bool) m
 // a tier that came back RED. A stage that exits 0, or exits at a tier it does
 // not offer, ran to its own end, so a tier it never reached is a contract
 // failure to judge RED rather than a starvation (gt-34r68).
-func tierSweepStageCutOff(res tierSweepStageResult) bool {
-	return res.timedOut || res.exitCode == tierSweepRedExit || res.exitCode < 0
+//
+// A RED exit is cut-off evidence only while the output names a tier. Exit 1 is
+// the contract for a tier that came back RED and printed its line, so a stage
+// of more than one tier that exits 1 naming none of them has broken that
+// contract: the stage itself failed, and each tier it was to run takes the RED
+// the missing summary line earns, not a starvation (gt-9qpxa). A timeout or a
+// signal still cut the stage off, and a single tier has nowhere else to be.
+func tierSweepStageCutOff(tiers []string, res tierSweepStageResult) bool {
+	switch {
+	case res.timedOut || res.exitCode < 0:
+		return true
+	case res.exitCode != tierSweepRedExit:
+		return false
+	case len(tiers) < 2:
+		return true
+	}
+	return tierSweepOutputNamesTier(tiers, res.output)
+}
+
+// tierSweepOutputNamesTier reports whether any output line shows the stage
+// reached one of tiers, by the same test tierSweepStageProgress uses to place
+// the tier it ended in (tierSweepLineNamesTier).
+func tierSweepOutputNamesTier(tiers []string, output string) bool {
+	for _, line := range strings.Split(output, "\n") {
+		for _, tier := range tiers {
+			if tierSweepLineNamesTier(line, tier) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // tierSweepStageProgress reads a cut-off stage's output and returns the tier the
 // stage ended in and the tiers of the stage it never named. The ended tier is
 // the last one a line names, in the order printed: the rig's script runs its
 // tiers in an order of its own, so the stage's list cannot place them
-// (gt-zlcl6). A stage of one tier has nowhere else to be, so a cut-off that
-// printed nothing still ended in it. Any other tier no line names never
-// started, so its silence is starvation rather than a verdict (gt-34r68).
+// (gt-zlcl6). A RED exit that named no tier is not a cut-off and never reaches
+// here (tierSweepStageCutOff); a stage of one tier has nowhere else to be, so a
+// cut-off that printed nothing still ended in it. Any other tier no line names
+// never started, so its silence is starvation rather than a verdict (gt-34r68).
 func tierSweepStageProgress(tiers []string, output string) (ended string, never map[string]bool) {
 	named := map[string]bool{}
 	for _, line := range strings.Split(output, "\n") {
