@@ -35,6 +35,8 @@ func TestPoolConfigKeepsTheDSNValue(t *testing.T) {
 	for name, dsn := range map[string]string{
 		"url":     "postgres://u:p@h/db?pool_max_conns=7",
 		"keyword": "host=h pool_max_conns=7 dbname=db",
+		// An escaped space stays inside an unquoted value, so pool_max_conns after it is still a keyword.
+		"keyword after an escaped space": `host=h password=a\ b pool_max_conns=7`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
