@@ -8,9 +8,9 @@ import (
 	"testing"
 )
 
-// The first nine cases of scripts/makefile-gate_test.sh (its gate dry-run
-// section), each one case and each comment naming the mutation that turns it
-// red.
+// The Makefile's gate dry-run shape: one test per case, each pinning one fact
+// about `make -n gate`, `make -n lint` or `make -n tier-check`, and each
+// comment naming the mutation that turns the test red.
 
 // cachedUnitTierViolations are the recipe shapes that take gate's unit tier off
 // go test's result cache; the budget runner's -exec wrapper reran every package
@@ -24,7 +24,7 @@ var cachedUnitTierViolations = []struct {
 	{"the retired slow tier", regexp.MustCompile(`-slow( |=)|slow\.txt`).MatchString},
 }
 
-// TestIntegrationGateDryRunExitsZero ports "make -n gate exits 0".
+// TestIntegrationGateDryRunExitsZero checks "make -n gate exits 0".
 // Mutation: a syntax error in gate's recipe, or a $(error ...) in one, makes
 // make -n exit non-zero.
 func TestIntegrationGateDryRunExitsZero(t *testing.T) {
@@ -33,7 +33,7 @@ func TestIntegrationGateDryRunExitsZero(t *testing.T) {
 	}
 }
 
-// TestIntegrationGateRecipesDoNotRecurseThroughMake ports "gate, test-slow,
+// TestIntegrationGateRecipesDoNotRecurseThroughMake checks "gate, test-slow,
 // test-integration and test recipes do not recurse through $(MAKE), so -n runs
 // nothing".
 // Mutation: add a `$(MAKE) -C ...` recipe line to gate; make would run it even
@@ -50,7 +50,7 @@ func TestIntegrationGateRecipesDoNotRecurseThroughMake(t *testing.T) {
 	}
 }
 
-// TestIntegrationGateRunsLintThenBuildThenUnitTier ports "gate runs lint, then
+// TestIntegrationGateRunsLintThenBuildThenUnitTier checks "gate runs lint, then
 // go build ./..., then the cached unit tier".
 // Mutation: swap gate's prerequisites to `gate-test gate-lint`, and lint runs
 // after the build.
@@ -64,7 +64,7 @@ func TestIntegrationGateRunsLintThenBuildThenUnitTier(t *testing.T) {
 	}
 }
 
-// TestIntegrationGateLeavesShellTestsToTestSlow ports "gate leaves the shell
+// TestIntegrationGateLeavesShellTestsToTestSlow checks "gate leaves the shell
 // tests (the shelltier runner) to test-slow".
 // Mutation: add the shelltier runner to gate's recipe, and every landing runs
 // the shell tests too.
@@ -75,7 +75,7 @@ func TestIntegrationGateLeavesShellTestsToTestSlow(t *testing.T) {
 	}
 }
 
-// TestIntegrationGateUnitTierRunsThroughTheCache ports "gate runs the unit tier
+// TestIntegrationGateUnitTierRunsThroughTheCache checks "gate runs the unit tier
 // over every package through the test cache (no budget -exec, no -count=1)".
 // Mutation: route the unit tier through cmd/budget, add -count=1, or name a
 // slow list, and go test's result cache no longer serves a landing.
@@ -91,7 +91,7 @@ func TestIntegrationGateUnitTierRunsThroughTheCache(t *testing.T) {
 	}
 }
 
-// TestIntegrationGateOnlyWarnsOnWallTime ports "gate only warns on wall time;
+// TestIntegrationGateOnlyWarnsOnWallTime checks "gate only warns on wall time;
 // make tier-check runs the unit tier with -strict-wall and no lint or build".
 // Mutation: add -strict-wall to gate's unit tier, and a loaded host refuses a
 // landing (gt-z7qtk); drop it from tier-check, and drift is never caught.
@@ -113,7 +113,7 @@ func TestIntegrationGateOnlyWarnsOnWallTime(t *testing.T) {
 	}
 }
 
-// TestIntegrationGatePrintsItsWallTime ports "gate prints its wall time".
+// TestIntegrationGatePrintsItsWallTime checks "gate prints its wall time".
 // Mutation: delete gate's final PASSED echo, and the landing log no longer says
 // how long the gate took.
 func TestIntegrationGatePrintsItsWallTime(t *testing.T) {
@@ -123,12 +123,12 @@ func TestIntegrationGatePrintsItsWallTime(t *testing.T) {
 	}
 }
 
-// rootLintLockWait is the root lint's retry line. Anchored to the line start:
-// the nested-module loop carries its own copy of the wrapper, so an unanchored
-// match would keep passing after the root lint lost its retry.
+// rootLintLockWait is plain make lint's root lint line, matched from the line
+// start: the nested-module loop carries its own copy of the retry wrapper, so
+// a substring match would keep passing after the root lint lost its retry.
 var rootLintLockWait = regexp.MustCompile(`(?m)^bash scripts/lint-lock-wait\.sh 600 golangci-lint run --timeout=5m`)
 
-// TestIntegrationGateLintWaitsOnTheLock ports "gate's lint waits on the lint
+// TestIntegrationGateLintWaitsOnTheLock checks "gate's lint waits on the lint
 // lock; plain make lint retries a contended lint for LINT_LOCK_WAIT".
 // Mutation: drop the target-specific --allow-serial-runners from both gate and
 // gate-lint, and two worktrees' gates fail instead of waiting their turn
@@ -152,7 +152,7 @@ func TestIntegrationGateLintWaitsOnTheLock(t *testing.T) {
 	}
 }
 
-// TestIntegrationGateNeverTakesTheSlot ports "gate never takes the container-gate
+// TestIntegrationGateNeverTakesTheSlot checks "gate never takes the container-gate
 // slot".
 // Mutation: wrap gate's unit tier in `gt slot run`, and the gate competes with
 // the pool it must never hold.

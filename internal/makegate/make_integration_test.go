@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -22,8 +23,8 @@ type Make func(args ...string) (string, error)
 
 // RealMake returns the Make that runs the checkout at root as a dry run,
 // `make -C root --no-print-directory -n args...`, whose output is the recipe
-// without running it. The dry run is the shape the shell test read; a recipe
-// line holding $(MAKE) still runs under -n, which the gate-shape cases pin.
+// without running it. A recipe line holding $(MAKE) still runs under -n, which
+// the gate-shape cases pin.
 func RealMake(root string) Make {
 	return func(args ...string) (string, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), makeTestTimeout)
@@ -33,8 +34,8 @@ func RealMake(root string) Make {
 	}
 }
 
-// lineOf is the shell test's line_of: the 1-based number of the first line of
-// out that holds needle as a fixed string, or 0 when no line does.
+// lineOf returns the 1-based number of the first line of out that holds needle
+// as a fixed string, or 0 when no line does.
 func lineOf(out, needle string) int {
 	for i, line := range strings.Split(out, "\n") {
 		if strings.Contains(line, needle) {
@@ -70,8 +71,7 @@ func makefileText(t *testing.T, root string) string {
 	return string(data)
 }
 
-// hasTargetLine reports whether text declares target, as the shell's
-// grep -E '^target:' does.
+// hasTargetLine reports whether text declares target: at the start of a line.
 func hasTargetLine(text, target string) bool {
 	for _, line := range strings.Split(text, "\n") {
 		if strings.HasPrefix(line, target+":") {
@@ -92,7 +92,7 @@ func recipesRecursingThroughMake(text string) []string {
 			inRecipe = true
 			continue
 		}
-		if !strings.HasPrefix(line, "\t") {
+		if endsRecipe(line) {
 			inRecipe = false
 		}
 		if inRecipe && strings.Contains(line, "$(MAKE)") {
@@ -100,6 +100,18 @@ func recipesRecursingThroughMake(text string) []string {
 		}
 	}
 	return found
+}
+
+// endsRecipe reports whether line closes an open recipe. make ignores a blank
+// line and a line whose first non-space character is #, so the recipe resumes
+// at the next tab line; any other line that does not start with a tab is make
+// syntax and ends it.
+func endsRecipe(line string) bool {
+	if strings.HasPrefix(line, "\t") {
+		return false
+	}
+	trimmed := strings.TrimSpace(line)
+	return trimmed != "" && !strings.HasPrefix(trimmed, "#")
 }
 
 // isGateShapeTarget reports whether line declares one of the targets whose
@@ -122,4 +134,53 @@ func dryGate(t *testing.T, m Make) string {
 		t.Fatalf("make -n gate: %v\n%s", err, out)
 	}
 	return out
+}
+
+// TestIntegrationRecipesRecursingThroughMake checks the gate-shape recipe scan
+// on the shapes make's recipe rules allow. Mutation: close the recipe at a
+// blank or comment line, and the rows whose $(MAKE) sits below one go red.
+func TestIntegrationRecipesRecursingThroughMake(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		text string
+		want []string
+	}{
+		{
+			name: "directly under a gate-shape target",
+			text: "gate: gate-lint\n\t$(MAKE) -C sub all\n",
+			want: []string{"\t$(MAKE) -C sub all"},
+		},
+		{
+			name: "below a blank line",
+			text: "gate: gate-lint\n\n\t$(MAKE) -C sub all\n",
+			want: []string{"\t$(MAKE) -C sub all"},
+		},
+		{
+			name: "below a whitespace-only line",
+			text: "gate: gate-lint\n   \n\t$(MAKE) -C sub all\n",
+			want: []string{"\t$(MAKE) -C sub all"},
+		},
+		{
+			name: "below a comment",
+			text: "gate: gate-lint\n# the gate recurses here\n\t$(MAKE) -C sub all\n",
+			want: []string{"\t$(MAKE) -C sub all"},
+		},
+		{
+			name: "in another target's recipe",
+			text: "release:\n\t$(MAKE) -C sub all\n",
+			want: nil,
+		},
+		{
+			name: "not after an assignment closes the recipe",
+			text: "gate: gate-lint\n\t$(MAKE) -C a all\nBAR := 1\n\t$(MAKE) -C b all\n",
+			want: []string{"\t$(MAKE) -C a all"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := recipesRecursingThroughMake(tc.text)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("recipesRecursingThroughMake = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
