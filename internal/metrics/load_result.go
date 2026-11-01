@@ -23,12 +23,18 @@ const (
 
 // Footer is the extract's footer.json: the rows it read and the ones it refused,
 // so the report can say what a week's figures do not cover. RowsDropped and Gaps
-// hold (source, reason) pairs.
+// hold (source, reason) pairs. ModelUnknown and the StageStampMissing counts say
+// what the landings join left empty, so a blank cell is never read as a zero
+// measurement.
 type Footer struct {
-	RowsRead          map[string]int `json:"rows_read"`
-	RowsDropped       [][]string     `json:"rows_dropped"`
-	Gaps              [][]string     `json:"gaps"`
-	SourcesUnreadable []string       `json:"sources_unreadable"`
+	RowsRead                      map[string]int `json:"rows_read"`
+	RowsDropped                   [][]string     `json:"rows_dropped"`
+	Gaps                          [][]string     `json:"gaps"`
+	SourcesUnreadable             []string       `json:"sources_unreadable"`
+	ModelUnknown                  int            `json:"model_unknown"`
+	StageStampMissingCreatedAt    int            `json:"stage_stamp_missing_created_at"`
+	StageStampMissingDispatchedAt int            `json:"stage_stamp_missing_dispatched_at"`
+	StageStampMissingSubmittedAt  int            `json:"stage_stamp_missing_submitted_at"`
 }
 
 // Result is an earlier extract's output as LoadResult reads it back.

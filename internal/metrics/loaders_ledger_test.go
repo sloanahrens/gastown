@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 )
@@ -91,6 +92,90 @@ func TestLoadLedgerTable(t *testing.T) {
 				t.Errorf("drop reasons = %v, want %v", reasons, tc.dropped)
 			}
 		})
+	}
+}
+
+// stageEventLine is one events-feed line, in the shape events.Event decodes.
+func stageEventLine(t *testing.T, ts, eventType string, payload map[string]string) string {
+	t.Helper()
+	data, err := json.Marshal(map[string]any{"ts": ts, "type": eventType, "payload": payload})
+	if err != nil {
+		t.Fatalf("marshal a %s event: %v", eventType, err)
+	}
+	return string(data)
+}
+
+// TestLoadStageStampsDispatchesTheRunThatLanded: a bead re-slung after its
+// first run ended is dated from the re-sling, because the run that landed is
+// the one the feed's last sling began.
+func TestLoadStageStampsDispatchesTheRunThatLanded(t *testing.T) {
+	t.Parallel()
+	lines := []string{
+		stageEventLine(t, "2026-10-10T00:00:00Z", "sling", map[string]string{"bead": "gt-a", "target": "gastown/polecats/alfa"}),
+		stageEventLine(t, "2026-10-11T00:00:00Z", "done", map[string]string{"bead": "gt-a"}),
+		stageEventLine(t, "2026-10-12T00:00:00Z", "sling", map[string]string{"bead": "gt-a", "target": "gastown/polecats/bravo"}),
+		stageEventLine(t, "2026-10-13T00:00:00Z", "done", map[string]string{"bead": "gt-a"}),
+		stageEventLine(t, "2026-10-09T00:00:00Z", "sling", map[string]string{"bead": "gt-b"}),
+		stageEventLine(t, "2026-10-09T00:00:00Z", "spawn", map[string]string{"rig": "gastown"}),
+	}
+	landed := map[string]string{
+		"gt-a": "2026-10-14T00:00:00Z",
+		"gt-b": "2026-10-10T00:00:00Z",
+		"gt-c": "2026-10-14T00:00:00Z",
+	}
+	var d Dropped
+	stamps := LoadStageStamps(lines, landed, &d)
+	if got, want := stamps.Dispatched["gt-a"], "2026-10-12T00:00:00Z"; got != want {
+		t.Errorf("gt-a dispatched_at = %q, want the re-sling %q", got, want)
+	}
+	if got, want := stamps.Submitted["gt-a"], "2026-10-13T00:00:00Z"; got != want {
+		t.Errorf("gt-a submitted_at = %q, want the latest done %q", got, want)
+	}
+	if got, want := stamps.Dispatched["gt-b"], "2026-10-09T00:00:00Z"; got != want {
+		t.Errorf("gt-b dispatched_at = %q, want %q", got, want)
+	}
+	if got, ok := stamps.Dispatched["gt-c"]; ok {
+		t.Errorf("gt-c dispatched_at = %q, want no stamp for a bead the feed never slung", got)
+	}
+	if got, ok := stamps.Submitted["gt-b"]; ok {
+		t.Errorf("gt-b submitted_at = %q, want no stamp for a bead with no done event", got)
+	}
+	if d.Count() != 0 {
+		t.Errorf("dropped = %v, want every line read", d.Items)
+	}
+}
+
+// TestLoadStageStampsDropsAnUnparseableLine keeps a bad feed line from reading
+// as a dispatch or a submission, and keeps the lines beside it.
+func TestLoadStageStampsDropsAnUnparseableLine(t *testing.T) {
+	t.Parallel()
+	lines := []string{
+		"{not an event",
+		`{"ts": "2026-10-10T00:00:00Z", "payload": {"bead": "gt-a"}}`, // no type
+		stageEventLine(t, "2026-10-11T00:00:00Z", "sling", map[string]string{"bead": "gt-a"}),
+	}
+	var d Dropped
+	stamps := LoadStageStamps(lines, map[string]string{"gt-a": "2026-10-12T00:00:00Z"}, &d)
+	if got := d.Count(); got != 2 {
+		t.Errorf("dropped = %d, want the two lines that are not events", got)
+	}
+	if got, want := stamps.Dispatched["gt-a"], "2026-10-11T00:00:00Z"; got != want {
+		t.Errorf("gt-a dispatched_at = %q, want %q", got, want)
+	}
+}
+
+// TestLoadStageStampsDoneStampIsTheSubmissionNotTheWrite: a host-re-recorded
+// done event carries the seat's own time as "at", so that is the submission
+// stamp, not when the host wrote the line.
+func TestLoadStageStampsDoneStampIsTheSubmissionNotTheWrite(t *testing.T) {
+	t.Parallel()
+	lines := []string{
+		stageEventLine(t, "2026-10-13T05:00:00Z", "done",
+			map[string]string{"bead": "gt-a", "at": "2026-10-13T00:00:00Z"}),
+	}
+	stamps := LoadStageStamps(lines, map[string]string{}, &Dropped{})
+	if got, want := stamps.Submitted["gt-a"], "2026-10-13T00:00:00Z"; got != want {
+		t.Errorf("gt-a submitted_at = %q, want the event's at %q", got, want)
 	}
 }
 

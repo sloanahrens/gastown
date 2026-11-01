@@ -16,11 +16,12 @@ type UsageModel struct {
 	Calls int `json:"calls"`
 }
 
-// UsageFile is a bead's *.work.json as LoadUsage reads it. An absent seat or
-// end reads as the empty string.
+// UsageFile is a bead's *.work.json as LoadUsage reads it. An absent seat, rig
+// or end reads as the empty string.
 type UsageFile struct {
 	Models   map[string]UsageModel `json:"models"`
 	Seat     string                `json:"seat"`
+	Rig      string                `json:"rig"`
 	End      string                `json:"end"`
 	Sessions []json.RawMessage     `json:"sessions"`
 }
@@ -39,25 +40,92 @@ type Usage struct {
 func LoadUsage(files map[string]UsageFile) map[string]Usage {
 	out := make(map[string]Usage, len(files))
 	for bead, f := range files {
-		if len(f.Models) == 0 {
+		top := dominantModel(f.Models)
+		if top == "" {
 			continue
-		}
-		names := make([]string, 0, len(f.Models))
-		for name := range f.Models {
-			names = append(names, name)
-		}
-		// Names are scanned in sorted order, so a tie in calls goes to the
-		// first name alphabetically; map order cannot decide it.
-		sort.Strings(names)
-		top := names[0]
-		for _, name := range names[1:] {
-			if f.Models[name].Calls > f.Models[top].Calls {
-				top = name
-			}
 		}
 		out[bead] = Usage{Model: top, Seat: f.Seat, End: f.End, Sessions: len(f.Sessions)}
 	}
 	return out
+}
+
+// dominantModel is the model that made the most calls in a usage record, "" when
+// the record names none. Names are scanned in sorted order, so a tie in calls
+// goes to the first name alphabetically; map order cannot decide it.
+func dominantModel(models map[string]UsageModel) string {
+	if len(models) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(models))
+	for name := range models {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	top := names[0]
+	for _, name := range names[1:] {
+		if models[name].Calls > models[top].Calls {
+			top = name
+		}
+	}
+	return top
+}
+
+// UsageSeats is who ran what, as the usage records name it: the model each seat
+// ran on, and the seat each bead's record names.
+type UsageSeats struct {
+	// SeatModels keys each seat's model by "rig/seat".
+	SeatModels map[string]string
+	// BeadSeats is the seat each bead's usage record names, model or no model.
+	BeadSeats map[string]string
+}
+
+// ReadUsageSeats indexes the seats the usage records name, so a landing whose
+// bead carries no model of its own can still be given the model of the seat
+// that wrote it (gt-p9pok).
+//
+// A seat whose records name two models is ambiguous and left out of SeatModels:
+// a polecat's name is bound to its model (internal/polecat's name pool), so two
+// answers mean the records disagree, and the join reports the model unknown
+// rather than pick one. Beads are visited in sorted order, so the ambiguity is
+// found the same way on every run.
+func ReadUsageSeats(files map[string]UsageFile) UsageSeats {
+	seats := UsageSeats{
+		SeatModels: make(map[string]string, len(files)),
+		BeadSeats:  make(map[string]string, len(files)),
+	}
+	beads := make([]string, 0, len(files))
+	for bead := range files {
+		beads = append(beads, bead)
+	}
+	sort.Strings(beads)
+	ambiguous := map[string]bool{}
+	for _, bead := range beads {
+		f := files[bead]
+		if f.Seat == "" {
+			continue
+		}
+		seats.BeadSeats[bead] = f.Seat
+		if f.Rig == "" {
+			// A record that names no rig cannot be joined to a landing's seat:
+			// a polecat name is scoped to its rig, so two rigs may share one.
+			continue
+		}
+		model := dominantModel(f.Models)
+		if model == "" {
+			continue
+		}
+		key := f.Rig + "/" + f.Seat
+		if ambiguous[key] {
+			continue
+		}
+		if prev, seen := seats.SeatModels[key]; seen && prev != model {
+			delete(seats.SeatModels, key)
+			ambiguous[key] = true
+			continue
+		}
+		seats.SeatModels[key] = model
+	}
+	return seats
 }
 
 // overrunZeroTime is the zero stamp the guard writes for a stop that has not

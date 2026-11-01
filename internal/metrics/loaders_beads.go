@@ -6,6 +6,9 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // The beads loaders read bd through an injected BdRun and record every bead
@@ -57,8 +60,9 @@ func unwrapBdData(out []byte) []byte {
 // BeadRow is one bead from the bd listing. Its notes and description are read
 // at load to find rejection kinds and are not kept; Branch keeps the last
 // Branch line of the notes, so a review can be attributed to the seat that
-// wrote the branch it judged. A null closed_at is a nil ClosedAt, which keeps
-// an open bead apart from a closed one.
+// wrote the branch it judged. SubmittedAt is the time on the notes' last READY
+// TO LAND block, "" for a bead whose block carries none. A null closed_at is a
+// nil ClosedAt, which keeps an open bead apart from a closed one.
 type BeadRow struct {
 	ID              string
 	Rig             string
@@ -73,6 +77,7 @@ type BeadRow struct {
 	Shaped          bool
 	RejectionKinds  []string
 	Branch          string
+	SubmittedAt     string
 }
 
 // bdListBead is one entry of `bd list --json`. A JSON null decodes to the zero
@@ -119,6 +124,10 @@ func LoadBeads(run BdRun, dirs []string, dropped *Dropped) []BeadRow {
 			for _, m := range beadRejectionRE.FindAllStringSubmatch(b.Notes+b.Description, -1) {
 				kinds = append(kinds, m[1])
 			}
+			var submittedAt string
+			if at := land.ReadyBlockTime(b.Notes); !at.IsZero() {
+				submittedAt = at.UTC().Format(time.RFC3339)
+			}
 			rows = append(rows, BeadRow{
 				ID:              b.ID,
 				Rig:             strings.SplitN(b.ID, "-", 2)[0],
@@ -133,6 +142,7 @@ func LoadBeads(run BdRun, dirs []string, dropped *Dropped) []BeadRow {
 				Shaped:          b.AcceptanceCriteria != "", // a shaped bead carries acceptance criteria
 				RejectionKinds:  kinds,
 				Branch:          BranchLine(b.Notes),
+				SubmittedAt:     submittedAt,
 			})
 		}
 	}

@@ -94,6 +94,82 @@ func TestLoadUsageTable(t *testing.T) {
 	}
 }
 
+// TestReadUsageSeatsIndexesTheSeatAndItsModel: a landing whose bead carries no
+// model can be given the model of its seat from the records of the other beads
+// that seat ran, keyed by rig because a polecat name is scoped to its rig.
+func TestReadUsageSeatsIndexesTheSeatAndItsModel(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		files map[string]UsageFile
+		want  UsageSeats
+	}{
+		{
+			name: "a record names its bead's seat and the seat's model",
+			files: map[string]UsageFile{"gt-a": {
+				Rig: "gastown", Seat: "alfa", Models: map[string]UsageModel{"a": {Calls: 1}, "b": {Calls: 3}},
+			}},
+			want: UsageSeats{
+				SeatModels: map[string]string{"gastown/alfa": "b"},
+				BeadSeats:  map[string]string{"gt-a": "alfa"},
+			},
+		},
+		{
+			name:  "a record with no rig names the bead's seat but no seat model",
+			files: map[string]UsageFile{"gt-a": {Seat: "alfa", Models: map[string]UsageModel{"b": {Calls: 1}}}},
+			want: UsageSeats{
+				SeatModels: map[string]string{},
+				BeadSeats:  map[string]string{"gt-a": "alfa"},
+			},
+		},
+		{
+			name: "a record with no model still names its bead's seat",
+			files: map[string]UsageFile{"gt-a": {
+				Rig: "gastown", Seat: "alfa", Models: map[string]UsageModel{},
+			}},
+			want: UsageSeats{
+				SeatModels: map[string]string{},
+				BeadSeats:  map[string]string{"gt-a": "alfa"},
+			},
+		},
+		{
+			name: "one seat that two records give two models is ambiguous and left out",
+			files: map[string]UsageFile{
+				"gt-a": {Rig: "gastown", Seat: "alfa", Models: map[string]UsageModel{"haiku": {Calls: 1}}},
+				"gt-b": {Rig: "gastown", Seat: "alfa", Models: map[string]UsageModel{"opus": {Calls: 1}}},
+			},
+			want: UsageSeats{
+				SeatModels: map[string]string{},
+				BeadSeats:  map[string]string{"gt-a": "alfa", "gt-b": "alfa"},
+			},
+		},
+		{
+			name: "one name on two rigs keeps each rig's own model",
+			files: map[string]UsageFile{
+				"gt-a": {Rig: "gastown", Seat: "alfa", Models: map[string]UsageModel{"haiku": {Calls: 1}}},
+				"dv-a": {Rig: "devops", Seat: "alfa", Models: map[string]UsageModel{"opus": {Calls: 1}}},
+			},
+			want: UsageSeats{
+				SeatModels: map[string]string{"gastown/alfa": "haiku", "devops/alfa": "opus"},
+				BeadSeats:  map[string]string{"gt-a": "alfa", "dv-a": "alfa"},
+			},
+		},
+		{
+			name:  "a record with no seat names nothing",
+			files: map[string]UsageFile{"gt-a": {Rig: "gastown", Models: map[string]UsageModel{"b": {Calls: 1}}}},
+			want:  UsageSeats{SeatModels: map[string]string{}, BeadSeats: map[string]string{}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ReadUsageSeats(tc.files); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("ReadUsageSeats = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestLoadOverrunStopMeansTheStopBegan is the Python test's
 // test_overrun_stop_means_the_stop_began_not_that_the_guard_tracked_the_bead:
 // every bead but b is tracked, nudged or stamped with the zero time, and none

@@ -60,7 +60,7 @@ func (fakeDiffSource) Stats(_ context.Context, _, commit string) (DiffStat, erro
 func buildTablesLandings(t *testing.T, dropped *Dropped) []Row {
 	t.Helper()
 	rows, err := BuildLandings(context.Background(), tablesLedger, tablesRework, fakeDiffSource{},
-		tablesBeads(), tablesUsage, tablesOverrun, tablesEras, tablesShaped, dropped)
+		tablesBeads(), tablesUsage, tablesOverrun, tablesEras, tablesShaped, StageStamps{}, dropped)
 	if err != nil {
 		t.Fatalf("BuildLandings: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestBuildLandingsDiffErrorOtherThanUnavailableFails(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("boom")
 	rows, err := BuildLandings(context.Background(), tablesLedger, tablesRework, failingDiffSource{err: boom},
-		tablesBeads(), tablesUsage, tablesOverrun, tablesEras, tablesShaped, &Dropped{})
+		tablesBeads(), tablesUsage, tablesOverrun, tablesEras, tablesShaped, StageStamps{}, &Dropped{})
 	if err == nil {
 		t.Fatal("BuildLandings: no error, want the diff's error to stop the build")
 	}
@@ -166,7 +166,7 @@ func TestBuildLandingsBadLandedAtFails(t *testing.T) {
 	// No eras: EraOf never reads the timestamp, so only WeekOf can fail here.
 	ledger := []LedgerRow{{Bead: "gt-9", Rig: "gastown", LandedCommit: "c1", LandedAt: "not-a-time", Route: "daemon"}}
 	rows, err := BuildLandings(context.Background(), ledger, tablesRework, fakeDiffSource{},
-		tablesBeads(), tablesUsage, tablesOverrun, nil, tablesShaped, &Dropped{})
+		tablesBeads(), tablesUsage, tablesOverrun, nil, tablesShaped, StageStamps{}, &Dropped{})
 	if err == nil {
 		t.Fatal("BuildLandings: no error for an unparsable landed_at")
 	}
@@ -182,7 +182,7 @@ func TestBuildLandingsBadEraStartFails(t *testing.T) {
 	t.Parallel()
 	eras := map[string][]OMEra{"gastown": {{Start: "not-a-time", Threshold: 0.7}}}
 	rows, err := BuildLandings(context.Background(), tablesLedger[:1], tablesRework, fakeDiffSource{},
-		tablesBeads(), tablesUsage, tablesOverrun, eras, tablesShaped, &Dropped{})
+		tablesBeads(), tablesUsage, tablesOverrun, eras, tablesShaped, StageStamps{}, &Dropped{})
 	if err == nil {
 		t.Fatal("BuildLandings: no error for an unparsable era start")
 	}
@@ -212,20 +212,29 @@ func TestExplainOnlyContainsOnlyPostHocColumns(t *testing.T) {
 	}
 }
 
-// TestExplainOnlyColumnsMatchThePythonExtract checks the sidecar's keys are the
-// Python extract's EXPLAIN_ONLY set: the mango stage drops exactly those
-// columns from its predictors.
-func TestExplainOnlyColumnsMatchThePythonExtract(t *testing.T) {
+// TestExplainOnlyColumnsExtendThePythonExtracts checks the sidecar's keys are
+// the Python extract's EXPLAIN_ONLY set plus the stage columns this join
+// appends: the Python reference stays at the ported schema, and the mango stage
+// drops exactly the explain-only columns from its predictors.
+func TestExplainOnlyColumnsExtendThePythonExtracts(t *testing.T) {
 	t.Parallel()
-	want := pythonStringList(t, "tables.py", "EXPLAIN_ONLY")
-	if len(want) == 0 {
+	legacy := pythonStringList(t, "tables.py", "EXPLAIN_ONLY")
+	if len(legacy) == 0 {
 		t.Fatal("read no columns out of tables.py")
 	}
-	slices.Sort(want)
-	got := slices.Clone(explainOnlyColumns)
-	slices.Sort(got)
-	if !slices.Equal(got, want) {
-		t.Errorf("explainOnlyColumns = %v, want the extract's %v", explainOnlyColumns, want)
+	for _, column := range legacy {
+		if !slices.Contains(explainOnlyColumns, column) {
+			t.Errorf("explainOnlyColumns omits %q, which the Python extract marks explain-only", column)
+		}
+	}
+	if got, want := len(explainOnlyColumns), len(legacy)+len(appendedLandingColumns); got != want {
+		t.Fatalf("explainOnlyColumns has %d columns, want the Python extract's %d plus %d appended",
+			got, len(legacy), len(appendedLandingColumns))
+	}
+	for _, column := range appendedLandingColumns {
+		if !slices.Contains(explainOnlyColumns, column) {
+			t.Errorf("explainOnlyColumns omits the appended stage column %q", column)
+		}
 	}
 }
 
@@ -255,6 +264,8 @@ func TestWriteLandingSidecarListsExplainOnly(t *testing.T) {
 const landingSidecarBytes = `{
  "explain_only": [
   "attempts",
+  "created_at",
+  "dispatched_at",
   "file_entropy",
   "files_touched",
   "gate_result",
@@ -263,6 +274,8 @@ const landingSidecarBytes = `{
   "lines_total",
   "om_verdict",
   "package_entropy",
+  "submitted_at",
+  "time_to_land_s",
   "unreadable"
  ]
 }`

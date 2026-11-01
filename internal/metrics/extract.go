@@ -58,6 +58,10 @@ type ExtractEnv struct {
 	LedgerLines map[string][]string
 	// ReviewLines is reviews.jsonl, still as lines.
 	ReviewLines []string
+	// EventLines is the town's events feed, still as lines: the dispatch and
+	// done clocks the landings join reads. A line the loader refuses is recorded
+	// in dropped, and the extract keeps the stamps it could read.
+	EventLines []string
 	// Diffs is where a landing's size and spread come from.
 	Diffs DiffSource
 	// RunBd runs bd in a directory and returns its stdout.
@@ -200,6 +204,8 @@ func Extract(ctx context.Context, env ExtractEnv) (ExtractResult, error) {
 		return res, err
 	}
 	usage := LoadUsage(env.UsageFiles)
+	stamps := LoadStageStamps(env.EventLines, landedAt, dropped)
+	stamps.Seats = ReadUsageSeats(env.UsageFiles)
 	ledgerBeads := make([]string, 0, len(landedAt))
 	for bead := range landedAt {
 		ledgerBeads = append(ledgerBeads, bead)
@@ -232,7 +238,7 @@ func Extract(ctx context.Context, env ExtractEnv) (ExtractResult, error) {
 		}
 	}
 
-	landings, err := BuildLandings(ctx, ledger, rework, env.Diffs, beadsByID, usage, overrun, eras, shaped, dropped)
+	landings, err := BuildLandings(ctx, ledger, rework, env.Diffs, beadsByID, usage, overrun, eras, shaped, stamps, dropped)
 	if err != nil {
 		return res, err
 	}
@@ -331,6 +337,7 @@ func Extract(ctx context.Context, env ExtractEnv) (ExtractResult, error) {
 		}
 		gaps = append(gaps, pair)
 	}
+	landingGaps := CountLandingGaps(landings)
 	footer := Footer{
 		RowsRead: map[string]int{
 			"ledger":  ledgerLines,
@@ -338,9 +345,13 @@ func Extract(ctx context.Context, env ExtractEnv) (ExtractResult, error) {
 			"beads":   len(beads),
 			"usage":   len(env.UsageFiles),
 		},
-		RowsDropped:       rowsDropped,
-		Gaps:              gaps,
-		SourcesUnreadable: unreadable,
+		RowsDropped:                   rowsDropped,
+		Gaps:                          gaps,
+		SourcesUnreadable:             unreadable,
+		ModelUnknown:                  landingGaps.ModelUnknown,
+		StageStampMissingCreatedAt:    landingGaps.StageStampMissing["created_at"],
+		StageStampMissingDispatchedAt: landingGaps.StageStampMissing["dispatched_at"],
+		StageStampMissingSubmittedAt:  landingGaps.StageStampMissing["submitted_at"],
 	}
 	if err := env.writeOutput(footerName, func(w io.Writer) error {
 		return writeFooter(w, footer)
@@ -513,10 +524,14 @@ func beadsCSVRows(beads []BeadRow, handoff map[string]int, usage map[string]Usag
 // spaced separators writes, and Go writes none, so the parity run compares
 // cells and leaves this file alone (gt-f3dmx).
 type footerDoc struct {
-	RowsRead          footerRowsRead `json:"rows_read"`
-	RowsDropped       [][]string     `json:"rows_dropped"`
-	Gaps              [][]string     `json:"gaps"`
-	SourcesUnreadable []string       `json:"sources_unreadable"`
+	RowsRead                      footerRowsRead `json:"rows_read"`
+	RowsDropped                   [][]string     `json:"rows_dropped"`
+	Gaps                          [][]string     `json:"gaps"`
+	SourcesUnreadable             []string       `json:"sources_unreadable"`
+	ModelUnknown                  int            `json:"model_unknown"`
+	StageStampMissingCreatedAt    int            `json:"stage_stamp_missing_created_at"`
+	StageStampMissingDispatchedAt int            `json:"stage_stamp_missing_dispatched_at"`
+	StageStampMissingSubmittedAt  int            `json:"stage_stamp_missing_submitted_at"`
 }
 
 // footerRowsRead is footerDoc's rows_read object, with its keys in file order.
@@ -536,9 +551,13 @@ func writeFooter(w io.Writer, f Footer) error {
 			Beads:   f.RowsRead["beads"],
 			Usage:   f.RowsRead["usage"],
 		},
-		RowsDropped:       f.RowsDropped,
-		Gaps:              f.Gaps,
-		SourcesUnreadable: f.SourcesUnreadable,
+		RowsDropped:                   f.RowsDropped,
+		Gaps:                          f.Gaps,
+		SourcesUnreadable:             f.SourcesUnreadable,
+		ModelUnknown:                  f.ModelUnknown,
+		StageStampMissingCreatedAt:    f.StageStampMissingCreatedAt,
+		StageStampMissingDispatchedAt: f.StageStampMissingDispatchedAt,
+		StageStampMissingSubmittedAt:  f.StageStampMissingSubmittedAt,
 	})
 }
 

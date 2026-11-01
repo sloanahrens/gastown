@@ -166,8 +166,6 @@ func TestPrepareDropsEachRule(t *testing.T) {
 
 func TestPrepareBuildsPredictorsFromTheExtractHeader(t *testing.T) {
 	t.Parallel()
-	explainOnly := []string{"lines_added", "lines_deleted", "lines_total", "files_touched", "file_entropy",
-		"package_entropy", "attempts", "gate_result", "om_verdict", "unreadable"}
 	header := append(append([]string{}, landingColumns...), "unknown_metric")
 	// Every target drops the whole target list and none defines a column of its
 	// own, so the rows share one header; a per-target drop rule fails the row it
@@ -183,7 +181,7 @@ func TestPrepareBuildsPredictorsFromTheExtractHeader(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.target, func(t *testing.T) {
 			t.Parallel()
-			p := Prepare(header, splitRows(10), explainOnly, tc.target)
+			p := Prepare(header, splitRows(10), explainOnlyColumns, tc.target)
 			if got := strings.Join(p.Predictors, ","); got != tc.want {
 				t.Errorf("predictors = %s, want %s", got, tc.want)
 			}

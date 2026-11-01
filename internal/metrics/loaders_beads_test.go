@@ -84,6 +84,33 @@ func TestLoadBeadsParsesAndNormalisesLabels(t *testing.T) {
 	}
 }
 
+// TestLoadBeadsReadsTheReadyToLandSubmissionStamp: the submission time is the
+// last READY TO LAND block's own stamp, and a bead whose block carries none
+// reads as no stamp rather than as the bead's last update (gt-t2jhf).
+func TestLoadBeadsReadsTheReadyToLandSubmissionStamp(t *testing.T) {
+	t.Parallel()
+	const listing = `[
+ {"id": "gt-1", "issue_type": "task",
+  "notes": "READY TO LAND\nBranch: polecat/alfa/gt-1\nHead: abc\nTarget: main\nWorker: alfa\nSubmitted: 2026-10-13T00:00:00Z"},
+ {"id": "gt-2", "issue_type": "task",
+  "notes": "READY TO LAND\nBranch: polecat/bravo/gt-2\nHead: def\nTarget: main\nWorker: bravo"},
+ {"id": "gt-3", "issue_type": "task", "notes": "no landing request yet"}
+]`
+	rows := LoadBeads(fakeBd(listing, true, &[]bdCall{}), []string{"/g"}, &Dropped{})
+	if len(rows) != 3 {
+		t.Fatalf("rows = %d, want 3", len(rows))
+	}
+	if got, want := rows[0].SubmittedAt, "2026-10-13T00:00:00Z"; got != want {
+		t.Errorf("gt-1 submitted_at = %q, want %q", got, want)
+	}
+	if got := rows[1].SubmittedAt; got != "" {
+		t.Errorf("gt-2 submitted_at = %q, want no stamp on a block without one", got)
+	}
+	if got := rows[2].SubmittedAt; got != "" {
+		t.Errorf("gt-3 submitted_at = %q, want no stamp on a bead with no block", got)
+	}
+}
+
 func TestLoadBeadsCountsABeadSeenFromTwoDirectoriesOnce(t *testing.T) {
 	t.Parallel()
 	var calls []bdCall
