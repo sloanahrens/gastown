@@ -16,6 +16,9 @@
           {
             "name": "runner",
             "image": "gt-polecat:gt-74ix9",
+            "command": [
+              "/usr/local/bin/sweep-run"
+            ],
             "env": [
               {
                 "name": "DOCKER_HOST",

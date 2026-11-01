@@ -479,3 +479,14 @@ func volumeMountNamed(job *Job, name string) (VolumeMount, bool) {
 	}
 	return VolumeMount{}, false
 }
+
+// The runner container names the sweep-run command, so the pod does not start the
+// image's default bash and finish with no result.
+func TestK8sRunnerNamesTheSweepRunCommand(t *testing.T) {
+	t.Parallel()
+	c := runnerContainer(goldenSpec())
+
+	if len(c.Command) != 1 || c.Command[0] != RunnerCommand {
+		t.Errorf("runner container command = %q, want [%q]", c.Command, RunnerCommand)
+	}
+}

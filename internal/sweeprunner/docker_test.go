@@ -507,3 +507,17 @@ func valueAfter(argv []string, flag string) (string, bool) {
 	}
 	return "", false
 }
+
+// The runner container is started with the sweep-run command after the image: the
+// image's own default is bash, which exits at once with no terminal, and the
+// daemon would wait for a result that never comes. Dropping the command turns this
+// red, as it does the golden.
+func TestDockerRunnerNamesTheSweepRunCommand(t *testing.T) {
+	t.Parallel()
+	argv := runnerArgv(goldenSpec())
+
+	n := len(argv)
+	if n < 2 || argv[n-2] != goldenSpec().Image || argv[n-1] != RunnerCommand {
+		t.Errorf("runner argv ends %q, want the image %q then %q", argv[max(0, n-2):], goldenSpec().Image, RunnerCommand)
+	}
+}

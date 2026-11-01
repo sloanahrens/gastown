@@ -72,7 +72,8 @@
       "GT_SWEEP_TIERS=shell,integration,race",
       "--env",
       "GT_SWEEP_JOBS=4",
-      "gt-polecat:gt-74ix9"
+      "gt-polecat:gt-74ix9",
+      "/usr/local/bin/sweep-run"
     ]
   },
   {
