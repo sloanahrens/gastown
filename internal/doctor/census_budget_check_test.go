@@ -158,6 +158,55 @@ func TestCensusBudgetCheckNamesACallerTheTableDropped(t *testing.T) {
 	}
 }
 
+// TestCensusBudgetCheckFailsTheStepOverTheWrapperBudget: the census now names
+// the landing step that decided to read, so a step's reads must trip the
+// wrapper row's budget rather than going ungated (gt-krmal).
+func TestCensusBudgetCheckFailsTheStepOverTheWrapperBudget(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeCensusLog(t, town, 60, func(int) []string {
+		return []string{
+			"list@metrics.queueLandingColumn=1",
+			"show@landworker.(*Worker).outcomeRow=12",
+		}
+	})
+
+	r := censusCheck().Run(&CheckContext{TownRoot: town})
+
+	if r.Status != StatusError {
+		t.Fatalf("status = %v (%s), want Error", r.Status, r.Message)
+	}
+	detail := censusDetail(r, "landworker.RetryBeads.Show")
+	if detail == "" {
+		t.Fatalf("details do not name the wrapper row the step counts against: %q", r.Details)
+	}
+	for _, want := range []string{"12.0", "11.4"} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("detail %q must hold the average and the budget (%s)", detail, want)
+		}
+	}
+}
+
+// TestCensusBudgetCheckPassesTheStepsUnderTheWrapperBudgets: a step's reads
+// within the wrapper's measured rate pass, and are not reported unbudgeted.
+func TestCensusBudgetCheckPassesTheStepsUnderTheWrapperBudgets(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeCensusLog(t, town, 60, func(int) []string {
+		return []string{
+			"list@metrics.queueLandingColumn=1",
+			"show@landworker.(*Worker).outcomeRow=8",
+			"list@landworker.(*Worker).landReady=4",
+		}
+	})
+
+	r := censusCheck().Run(&CheckContext{TownRoot: town})
+
+	if r.Status != StatusOK {
+		t.Fatalf("status = %v (%s, %q), want OK", r.Status, r.Message, r.Details)
+	}
+}
+
 // TestCensusBudgetCheckPassesWithinBudget: every caller under its row passes.
 func TestCensusBudgetCheckPassesWithinBudget(t *testing.T) {
 	t.Parallel()

@@ -115,10 +115,11 @@ func censusCaller() string {
 }
 
 // censusWrapperFrames are frame prefixes of pass-through wrappers: methods
-// that forward a call to the store beneath them and decide nothing. The census
-// names the function that decided to read, so it skips these frames the way it
-// skips this package's own seam (gt-krmal). Each prefix includes the module
-// path, matching the frame names the compiler writes.
+// that forward a call to the store beneath them, choosing only how to retry it
+// and never whether the call is made. The census names the function that
+// decided to read, so it skips these frames the way it skips this package's own
+// seam (gt-krmal). Each prefix includes the module path, matching the frame
+// names the compiler writes.
 var censusWrapperFrames = []string{
 	// landworker.RetryBeads retries a serialization failure and forwards every
 	// other call unchanged, so every landing worker read named the wrapper
@@ -163,7 +164,10 @@ func censusInWrapper(name string) bool {
 }
 
 // censusNamesCaller reports whether names holds a frame that could still name
-// the caller: not the runtime's machinery, and not this package's seam.
+// the caller: not the runtime's machinery, and not this package's seam. The
+// walk stops at censusMaxFrames, so a deciding frame past it is not in names
+// and the wrapper keeps its name, the same fallback as a stack that ends at the
+// wrapper.
 func censusNamesCaller(names []string) bool {
 	for _, name := range names {
 		if name == "" || strings.HasPrefix(name, "runtime.") || censusInBeads(name) {

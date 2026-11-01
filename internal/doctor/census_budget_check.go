@@ -36,9 +36,11 @@ const (
 
 // CensusBudgetCheck fails when a bd caller's average rate in the daemon's
 // census exceeds the budget internal/beads/census_budgets.go records for it,
-// and warns about a caller the table does not name (gt-gojo0). A window lists
-// only its eight busiest rows, so an average is a floor: calls the log leaves
-// out are never counted against a caller.
+// and warns about a caller the table does not name (gt-gojo0). The census names
+// the landing step that decided to read rather than the retry wrapper it used
+// to name, so those reads are summed onto the wrapper's row (gt-krmal). A
+// window lists only its eight busiest rows, so an average is a floor: calls the
+// log leaves out are never counted against a caller.
 type CensusBudgetCheck struct {
 	BaseCheck
 	// Now is the clock the staleness guard reads; nil is time.Now.
@@ -104,25 +106,24 @@ func (c *CensusBudgetCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	calls := censusCallerCalls(samples)
 	minutes := censusSpanMinutes(samples)
 	budgets := make(map[string]float64)
 	for _, b := range c.budgetTable() {
 		budgets[b.Caller] = b.CallsPerMinute
 	}
+	rowCalls, unbudgetedCalls := censusReadRows(censusReadCalls(samples), budgets, censusWrapperRows(budgets))
 
 	var over, unbudgeted []string
-	for _, caller := range sortedKeys(calls) {
-		average := float64(calls[caller]) / minutes
-		budget, ok := budgets[caller]
-		switch {
-		case !ok:
-			unbudgeted = append(unbudgeted,
-				fmt.Sprintf("%s averages %.1f calls/min over %d windows and has no budget", caller, average, len(samples)))
-		case average > budget:
+	for _, row := range sortedKeys(rowCalls) {
+		if average := float64(rowCalls[row]) / minutes; average > budgets[row] {
 			over = append(over,
-				fmt.Sprintf("%s averages %.1f calls/min over %d windows, budget %.1f", caller, average, len(samples), budget))
+				fmt.Sprintf("%s averages %.1f calls/min over %d windows, budget %.1f", row, average, len(samples), budgets[row]))
 		}
+	}
+	for _, caller := range sortedKeys(unbudgetedCalls) {
+		average := float64(unbudgetedCalls[caller]) / minutes
+		unbudgeted = append(unbudgeted,
+			fmt.Sprintf("%s averages %.1f calls/min over %d windows and has no budget", caller, average, len(samples)))
 	}
 
 	switch {
@@ -254,16 +255,57 @@ func censusSamples(townRoot string, max int) (censusRead, error) {
 	return read, nil
 }
 
-// censusCallerCalls folds the windows into each caller's call count. A window
+// censusReadKey is one row key: the verb and caller the census names. A caller
+// that reads under two verbs is two reads, which is what lets a folded sum
+// charge each read to the right budget row.
+type censusReadKey struct{ verb, caller string }
+
+// censusReadCalls folds the windows into each read's call count. A window
 // lists only its busiest rows, so the count is the calls the log can attribute.
-func censusCallerCalls(samples []censusSample) map[string]int {
-	calls := make(map[string]int)
+func censusReadCalls(samples []censusSample) map[censusReadKey]int {
+	calls := make(map[censusReadKey]int)
 	for _, sample := range samples {
 		for _, row := range sample.Window.Rows {
-			calls[row.Caller] += row.Count
+			calls[censusReadKey{verb: row.Verb, caller: row.Caller}] += row.Count
 		}
 	}
 	return calls
+}
+
+// censusWrapperRows maps each read a retry-wrapper budget row counts to that
+// row, dropping rows the gate's table does not hold.
+func censusWrapperRows(budgets map[string]float64) map[censusReadKey]string {
+	rows := make(map[censusReadKey]string)
+	for row, reads := range beads.CensusWrapperReads() {
+		if _, ok := budgets[row]; !ok {
+			continue
+		}
+		for _, read := range reads {
+			rows[censusReadKey{verb: read.Verb, caller: read.Caller}] = row
+		}
+	}
+	return rows
+}
+
+// censusReadRows charges every read to the budget row it counts against: its
+// own caller when the table budgets that name, else the retry-wrapper row whose
+// call sites the census names instead (gt-krmal). A read no row names is folded
+// by caller for the unbudgeted report.
+func censusReadRows(calls map[censusReadKey]int, budgets map[string]float64, folded map[censusReadKey]string) (rowCalls, unbudgeted map[string]int) {
+	rowCalls = make(map[string]int)
+	unbudgeted = make(map[string]int)
+	for read, count := range calls {
+		if _, ok := budgets[read.caller]; ok {
+			rowCalls[read.caller] += count
+			continue
+		}
+		if row, ok := folded[read]; ok {
+			rowCalls[row] += count
+			continue
+		}
+		unbudgeted[read.caller] += count
+	}
+	return rowCalls, unbudgeted
 }
 
 // censusSpanMinutes is the time the records cover: first stamp to last. A

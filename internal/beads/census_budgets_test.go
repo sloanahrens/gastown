@@ -142,3 +142,62 @@ func TestCensusBudgetsReturnACopy(t *testing.T) {
 		t.Error("CensusBudgets hands out the shipped table itself")
 	}
 }
+
+// TestCensusWrapperReadsCoverEveryWrapperRow: the census no longer names the
+// retry wrapper, so a wrapper budget row with no read counting against it is
+// dead data the gate can never apply (gt-krmal).
+func TestCensusWrapperReadsCoverEveryWrapperRow(t *testing.T) {
+	budgeted := map[string]bool{}
+	for _, b := range CensusBudgets() {
+		budgeted[b.Caller] = true
+	}
+	reads := CensusWrapperReads()
+	for _, b := range CensusBudgets() {
+		if !strings.HasPrefix(b.Caller, "landworker.RetryBeads.") {
+			continue
+		}
+		if len(reads[b.Caller]) == 0 {
+			t.Errorf("%s is budgeted, but no census read counts against it", b.Caller)
+		}
+	}
+	for row, rs := range reads {
+		if !budgeted[row] {
+			t.Errorf("censusWrapperReads names %q, which is no budget row", row)
+		}
+		if len(rs) == 0 {
+			t.Errorf("%s lists no reads", row)
+		}
+		for _, r := range rs {
+			if r.Verb == "" || r.Caller == "" {
+				t.Errorf("%s holds an empty read %+v", row, r)
+			}
+		}
+	}
+}
+
+// TestCensusWrapperReadsChargeEachReadOnce: a read counted under two rows has
+// its calls charged to both budgets, and one of them is a number nobody
+// measured.
+func TestCensusWrapperReadsChargeEachReadOnce(t *testing.T) {
+	seen := map[CensusRead]string{}
+	for row, rs := range CensusWrapperReads() {
+		for _, r := range rs {
+			if prev, ok := seen[r]; ok {
+				t.Errorf("read %+v counts against %s and %s", r, prev, row)
+			}
+			seen[r] = row
+		}
+	}
+}
+
+// TestCensusWrapperReadsReturnACopy: the gate measures against the shipped
+// reads, so a caller editing the returned slices must not change them.
+func TestCensusWrapperReadsReturnACopy(t *testing.T) {
+	for row := range CensusWrapperReads() {
+		reads := CensusWrapperReads()
+		reads[row][0].Caller = "mutated"
+		if CensusWrapperReads()[row][0].Caller == "mutated" {
+			t.Fatalf("CensusWrapperReads hands out the shipped reads of %s", row)
+		}
+	}
+}
