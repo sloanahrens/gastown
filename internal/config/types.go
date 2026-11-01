@@ -462,6 +462,12 @@ type DaemonThresholds struct {
 	// run at once townwide. A presubmit past the cap waits for a free slot
 	// rather than loading the host beside the others (default 2).
 	PresubmitPool *int `json:"presubmit_pool,omitempty"`
+
+	// CPUClassSize is how many CPU-heavy host builds (go build, go vet and
+	// go test from a crew checkout) may run at once townwide. A build past the
+	// cap queues in arrival order for a free slot instead of piling onto the
+	// host beside the others (default 3, gt-bq68w).
+	CPUClassSize *int `json:"cpu_class_size,omitempty"`
 }
 
 // MailThresholds configures mail system thresholds.

@@ -75,6 +75,10 @@ const (
 	// DefaultPresubmitPool is how many gt done presubmits may run at once
 	// townwide (operational.daemon.presubmit_pool).
 	DefaultPresubmitPool = 2
+
+	// DefaultCPUClassSize is how many crew host builds may run at once
+	// townwide (operational.daemon.cpu_class_size).
+	DefaultCPUClassSize = 3
 )
 
 // Dolt defaults.
@@ -461,6 +465,16 @@ func (d *DaemonThresholds) PresubmitPoolV() int {
 		return *d.PresubmitPool
 	}
 	return DefaultPresubmitPool
+}
+
+// CPUClassSizeV returns the configured or default number of concurrent
+// CPU-class host builds. A value below 1 falls back to the default: a zero
+// class would park every crew build forever.
+func (d *DaemonThresholds) CPUClassSizeV() int {
+	if d != nil && d.CPUClassSize != nil && *d.CPUClassSize >= 1 {
+		return *d.CPUClassSize
+	}
+	return DefaultCPUClassSize
 }
 
 // --- Overseer accessors ---

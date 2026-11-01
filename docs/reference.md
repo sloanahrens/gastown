@@ -233,6 +233,15 @@ three to five at once starved it (2026-10-20: host idle 0-2%, `bd` reads from 0.
 budget, logs one line once the wait passes 60 s, and shows in `gt slot status` under
 "Presubmit pool". It never takes a container-gate slot, and a landing never waits on it.
 
+**Crew host builds queue under a CPU class (gt-bq68w).** A crew checkout's `make presubmit`,
+`make gate` and the `go build`, `go vet` and `go test` steps behind them run under a
+town-wide class of `operational.daemon.cpu_class_size` concurrent builds (default `3`). A
+build past the class waits in arrival order, up to 30 minutes, and a wait past that bound
+fails naming the slots' holders. Each build runs at nice 10, and its `GOFLAGS` gets `-p=4`
+unless the caller already set `-p`. Only a checkout under `<rig>/crew/` takes the class: a
+polecat's sandbox pod and the landing worker's gate are bounded elsewhere, so their builds
+take no CPU-class slot.
+
 **Whole-tree runs are capped (gt-dhcmp).** A whole-tree test run is the heaviest thing a
 seat starts, and several at once starve the landing gate: on 2026-10-03 whole-suite runs
 from several seats pushed one landing's gate to 5m02s against a 26-39s norm. The

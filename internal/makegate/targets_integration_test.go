@@ -90,6 +90,46 @@ func TestIntegrationTargetsTestSlowRunsTheGateThenTheShellTests(t *testing.T) {
 	}
 }
 
+// cpuClassWrapper is the invocation that fronts a gate or presubmit Go step
+// with the CPU class (gt-bq68w), as the Makefile's own default spells it.
+const cpuClassWrapper = "go run ./internal/slot/cmd/cpuslot"
+
+// cpuClassStep matches a recipe line running a Go build, vet or test step: the
+// step is the line's own command or one inside its subshell, not a `go run`
+// helper beside it.
+var cpuClassStep = regexp.MustCompile(`(^|[\s(])go (build|vet|test) `)
+
+// TestIntegrationTargetsGateBuildAndTestStepsQueueUnderTheCPUClass checks "make
+// gate runs every go build, vet and test step under the CPU class (gt-bq68w)".
+// Mutation: drop $(CPU_CLASS) from any of those lines, and the step it runs
+// stops naming the wrapper, so a crew checkout's build piles onto the host
+// beside its neighbors instead of queueing.
+//
+// The target is gate rather than presubmit because presubmit's last recipe line
+// names $(MAKE), which make runs even under -n: a dry run of presubmit would
+// run it. presubmit's recipe shape is judged by the presubmit cases in this
+// package, which run it in a scratch checkout against stub go.
+func TestIntegrationTargetsGateBuildAndTestStepsQueueUnderTheCPUClass(t *testing.T) {
+	out := dryTarget(t, defaultsMake(t, repoRoot(t)), "gate")
+	steps := 0
+	for _, line := range strings.Split(out, "\n") {
+		// An echo line names the step it is about to run; it runs nothing.
+		if strings.HasPrefix(strings.TrimSpace(line), "echo ") {
+			continue
+		}
+		if !cpuClassStep.MatchString(line) {
+			continue
+		}
+		steps++
+		if !strings.Contains(line, cpuClassWrapper) {
+			t.Errorf("a go build, vet or test step in the gate runs outside the CPU class: %s", strings.TrimSpace(line))
+		}
+	}
+	if steps == 0 {
+		t.Fatalf("the gate's dry run holds no go build, vet or test step, so this case would pass on an empty recipe\n%s", out)
+	}
+}
+
 // TestIntegrationTargetsTestMakefileDryRunExitsZero checks "make -n test-makefile
 // exits 0".
 // Mutation: a syntax error or a $(error ...) in test-makefile's recipe makes

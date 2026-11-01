@@ -734,8 +734,29 @@ trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin"
 # The go stub logs each call with the container opt-in it saw, and fails the
 # subcommand named in STUB_GO_FAIL (build or test).
+#
+# The gate's build, vet and test steps start with `go run
+# ./internal/slot/cmd/cpuslot` (gt-bq68w), the CPU-class wrapper. What this
+# test judges is which command the recipe runs, so the stub answers that call
+# by running the wrapped command itself: it applies the wrapper's -dir, peels
+# the env assignments the wrapper would have applied, then logs and fails
+# exactly as for an unwrapped call. The wrapper's queue and priority behaviour
+# is covered by internal/slot's own tests.
 cat >"$TMP/bin/go" <<'STUB'
 #!/usr/bin/env bash
+if [[ "$1" == run && "$2" == ./internal/slot/cmd/cpuslot ]]; then
+  shift 2
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -dir|--dir) cd "$2" || exit 1; shift 2 ;;
+      -timeout|--timeout) shift 2 ;;
+      -*) shift ;;
+      *) break ;;
+    esac
+  done
+  while [[ $# -gt 0 && "$1" == *=* ]]; do export "$1"; shift; done
+  [[ "$1" == go ]] && shift
+fi
 echo "go $1 GT_TEST_DOCKER=${GT_TEST_DOCKER:-unset}" >>"$STUB_LOG"
 [[ "${PWD##*/}" == tracker ]] && echo "go $1 in tracker" >>"$STUB_LOG"
 if [[ "$1" == test && -n "${STUB_GO_INTERRUPT:-}" ]]; then
