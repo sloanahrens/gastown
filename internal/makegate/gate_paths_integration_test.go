@@ -23,14 +23,12 @@ import (
 var gateWallLine = regexp.MustCompile(`gate: PASSED in [0-9]+s wall`)
 
 // TestIntegrationGatePathsGreenStubs checks "green stubs: exit 0 with the wall
-// printed, lint waited on the lock, only the Go suite ran, and it saw
-// GT_TEST_DOCKER=0 despite an inherited 1".
+// printed, only the Go suite ran, and it saw GT_TEST_DOCKER=0 despite an
+// inherited 1".
 // Mutation: drop GT_TEST_DOCKER=0 from the unit tier's two go test lines (the
 // main suite and the tracker loop), and the exact `go test GT_TEST_DOCKER=0`
 // call disappears while the inherited 1 shows through; add the shell tests to
-// the gate, and the `shell-tests` call appears; drop the gate's and gate-lint's
-// LINT_RUNNER_FLAGS assignments, and lint no longer runs with
-// --allow-serial-runners.
+// the gate, and the `shell-tests` call appears.
 func TestIntegrationGatePathsGreenStubs(t *testing.T) {
 	r := newGateSandbox(t).Run(nil)
 
@@ -46,23 +44,60 @@ func TestIntegrationGatePathsGreenStubs(t *testing.T) {
 	if r.hasCall("shell-tests") {
 		t.Fatalf("the gate ran the shell tests, which belong to test-slow\ncalls:\n%s", r.callLog())
 	}
-	if !r.hasCallWithPrefix("golangci-lint run --timeout=5m --allow-serial-runners") {
-		t.Fatalf("lint did not wait on the lock: no golangci-lint run call carries --allow-serial-runners\ncalls:\n%s", r.callLog())
+}
+
+// lintRuns is how many golangci-lint run calls the run made.
+func lintRuns(r GateRun) int {
+	n := 0
+	for _, call := range r.Calls {
+		if strings.HasPrefix(call, "golangci-lint run") {
+			n++
+		}
+	}
+	return n
+}
+
+// TestIntegrationGatePathsLintWaitsOnTheLock checks "lint waited on the lock" by
+// the wait: with another golangci-lint holding the module lock for the first two
+// runs (the stub exits 3 with the lock line, as the real one does), the gate
+// still exits 0, and it made two more lint runs than an uncontended gate, which
+// is the retry the wait script does (LINT_LOCK_POLL=0 keeps the pause out).
+// Mutation: run golangci-lint without scripts/lint-lock-wait.sh in lint and
+// gate-lint, and the first contended run is the gate's last: it exits non-zero.
+func TestIntegrationGatePathsLintWaitsOnTheLock(t *testing.T) {
+	quiet := newGateSandbox(t).Run([]string{"-o", "docs-lint"})
+	if quiet.Code != 0 || lintRuns(quiet) == 0 {
+		t.Fatalf("the uncontended gate exited %d with %d lint runs, want 0 and at least 1\nstderr:\n%s\ncalls:\n%s", quiet.Code, lintRuns(quiet), quiet.Stderr, quiet.callLog())
+	}
+	r := newGateSandbox(t).Run([]string{"-o", "docs-lint"}, "STUB_LINT_CONTEND=2", "LINT_LOCK_POLL=0")
+
+	if r.Code != 0 {
+		t.Fatalf("the gate exited %d with another lint holding the lock, want it to wait and pass\nstderr:\n%s\ncalls:\n%s", r.Code, r.Stderr, r.callLog())
+	}
+	if got, want := lintRuns(r), lintRuns(quiet)+2; got != want {
+		t.Fatalf("the contended gate made %d lint runs, want %d (the uncontended %d plus the two it waited out)\ncalls:\n%s", got, want, lintRuns(quiet), r.callLog())
 	}
 }
 
 // TestIntegrationGatePathsTaxedHostWarnsAndPasses checks "a taxed host: the
 // gate warns on the exec tax and still passes (gt-2ycne.1)".
 // Mutation: drop the exec-tax-preflight prerequisite from gate-lint, and the
-// preflight stub never runs, so no warning line is printed.
+// preflight stub is never called; send the preflight's stderr to /dev/null in
+// the recipe, and the warning never reaches the operator.
 func TestIntegrationGatePathsTaxedHostWarnsAndPasses(t *testing.T) {
 	r := newGateSandbox(t).Run([]string{"-o", "lint"}, "EXEC_TAX_WARN=1")
 
 	if r.Code != 0 {
 		t.Fatalf("the gate exited %d on a taxed host, want 0\nstderr:\n%s", r.Code, r.Stderr)
 	}
+	if !r.hasCall("preflight") {
+		t.Fatalf("the gate never ran the exec-tax preflight\ncalls:\n%s", r.callLog())
+	}
+	// The warning is the preflight's own text (the stub prints it, as the real
+	// one does on a taxed host), so this asserts what the gate owes the operator:
+	// that it lets the preflight's stderr through instead of swallowing it.
 	if !strings.Contains(r.Stderr, "gate: WARNING exec tax 180 ms/exec") {
-		t.Fatalf("the gate did not print the exec-tax warning\nstderr:\n%s", r.Stderr)
+		t.Fatalf("the preflight's warning did not reach the operator: the gate swallowed its stderr\nstderr:\n%s", r.Stderr)
 	}
 	if !gateWallLine.MatchString(r.Stderr) {
 		t.Fatalf("the gate printed no `gate: PASSED in <n>s wall` line\nstderr:\n%s", r.Stderr)
