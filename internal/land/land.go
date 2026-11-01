@@ -1583,7 +1583,12 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 			reason = fmt.Sprintf("the candidate gate %s failed on the merged tree", gateRes.Steps[0].Command)
 		}
 		l.discardCandidate(ctx, w, candRes)
-		rej := &Rejection{Kind: RejectGate, Rework: true, Reason: reason, GateTail: tail, GateLog: candRes.GateLog}
+		// The refusal carries the verdict it followed, though that verdict
+		// approved: no block records an approval, so the next review reads the
+		// findings here or runs cold on the unchanged diff (gt-g8otg). A waived
+		// head and a review that reached no verdict leave it empty.
+		rej := &Rejection{Kind: RejectGate, Rework: true, Reason: reason, GateTail: tail, GateLog: candRes.GateLog,
+			Findings: verdict.Findings}
 		return Result{}, l.reject(issue, w, rej, nil)
 	}
 
@@ -2342,9 +2347,12 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 		rej.ReviewSummary = verdict.Summary
 		rej.ReviewScore = verdict.Score
 		rej.ReviewVerdict = verdict.Verdict
-		note.Findings = verdict.Findings
 		note.Receipt = &Receipt{Score: verdict.Score}
 	}
+	// The note carries the refusal's own findings whichever refusal wrote it: a
+	// review's verdict findings, or the approve findings a gate refusal followed
+	// (gt-g8otg). A refusal that carries none writes none.
+	note.Findings = rej.Findings
 	// The target tip rides the rejection line itself: a conflicted merge writes
 	// no merge line, so this is the only record of what the conflict was built
 	// on (gt-0nvhe).
