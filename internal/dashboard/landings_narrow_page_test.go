@@ -22,12 +22,14 @@ import (
 // check the overseer owes after install (gt-o7z1j).
 
 // landingsBodyRow is one body row of the Landings table as the page drew it:
-// its class and each cell's class and text.
+// its class and each cell's class, text, hover and column span.
 type landingsBodyRow struct {
 	Class string `json:"class"`
 	Cells []struct {
 		Class string `json:"class"`
 		Text  string `json:"text"`
+		Title string `json:"title"`
+		Span  int    `json:"span"`
 	} `json:"cells"`
 }
 
@@ -40,7 +42,7 @@ func landingsRows(t *testing.T, p *pageDOM) []landingsBodyRow {
   __walk(document.getElementById("trend"), function (c) {
     if (c.tagName !== "TR" || !c.children.length || c.children[0].tagName === "TH") return;
     rows.push({class: c.className || "", cells: c.children.map(function (td) {
-      return {class: td.className || "", text: td.textContent};
+      return {class: td.className || "", text: td.textContent, title: td.title || "", span: td.colSpan || 1};
     })});
   });
   return rows;
@@ -311,6 +313,205 @@ func TestLandingsLayoutRulesHoldAtEveryWidth(t *testing.T) {
 					t.Errorf("%s sets %s:%s on %s, so the table draws a different layout at that width than the declarations the other tests pin", rule.At, prop, got, rule.Sel)
 				}
 			}
+		}
+	}
+}
+
+// landingsHeaderCells is how many columns the Landings table heads: the count a
+// row's cells and spans must add up to for its cells to sit under the headers.
+func landingsHeaderCells(t *testing.T, p *pageDOM) int {
+	t.Helper()
+
+	v, err := p.vm.RunString(`(function () {
+  var tbl = __find(document.getElementById("trend"), ".ltable");
+  return tbl ? tbl.children[0].children.length : 0;
+})()`)
+	if err != nil {
+		t.Fatalf("reading the landings header: %v", err)
+	}
+	return int(v.ToInteger())
+}
+
+// A waiting row has no stage readings, so its five cost cells held nothing but
+// dashes and its title sat in the Landing column alone, wrapping over six or
+// seven lines. The title cell now spans the columns those cells and By would
+// have taken, so the title reads in a line or two (gt-uvpo1).
+func TestAWaitingRowTitleCellSpansTheEmptyCells(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 31, 16, 0, 0, 0, time.Local)
+	p := newPageDOM(t)
+	p.call(t, "renderTrend", landingsQueuedRunningAndLanded(now))
+
+	head := landingsHeaderCells(t, p)
+	if head != 8 {
+		t.Fatalf("the table heads %d columns, want the eight the Landings table draws", head)
+	}
+	rows := landingsRows(t, p)
+	if len(rows) != 3 {
+		t.Fatalf("the table drew %d rows, want the queued bead, the running landing and the finished one", len(rows))
+	}
+	waiting := rows[0]
+	if len(waiting.Cells) != 2 {
+		t.Fatalf("the waiting row drew %d cells, want its When cell and one title cell", len(waiting.Cells))
+	}
+	if got := waiting.Cells[0].Span + waiting.Cells[1].Span; got != head {
+		t.Errorf("the waiting row covers %d columns, want the %d the table heads", got, head)
+	}
+	if got := waiting.Cells[1].Span; got != head-1 {
+		t.Errorf("the waiting row's title cell spans %d columns, want %d: it takes the five cost cells and By", got, head-1)
+	}
+	if !hasClassToken(waiting.Cells[1].Class, "main") {
+		t.Errorf("the waiting row's title cell carries class %q, want the main class the title rule names", waiting.Cells[1].Class)
+	}
+}
+
+// waitingRowParts is what one waiting row's cells read back: the parts of its
+// title cell, and the When cell beside it.
+type waitingRowParts struct {
+	When  drawn  `json:"when"`
+	Bead  drawn  `json:"bead"`
+	Tag   drawn  `json:"tag"`
+	By    *drawn `json:"by"`
+	Title drawn  `json:"title"`
+}
+
+// waitingRow reads back the first waiting row's When cell and the parts its
+// title cell drew.
+func waitingRow(t *testing.T, p *pageDOM) waitingRowParts {
+	t.Helper()
+
+	v, err := p.vm.RunString(`JSON.stringify((function () {
+  var tbl = __find(document.getElementById("trend"), ".ltable");
+  var tr = tbl.children[1], main = tr.children[1];
+  function part(e) { return e ? {text: e.textContent, class: e.className || "", title: e.title || ""} : null; }
+  return {when: part(tr.children[0]), bead: part(__find(main, ".bead")), tag: part(__find(main, ".tag")),
+          by: part(__find(main, ".by")), title: part(__find(main, ".title"))};
+})())`)
+	if err != nil {
+		t.Fatalf("reading the waiting row: %v", err)
+	}
+	var got waitingRowParts
+	if err := json.Unmarshal([]byte(v.String()), &got); err != nil {
+		t.Fatalf("reading the waiting row: %v", err)
+	}
+	return got
+}
+
+// The span does not cost the row a field: the When cell still ages the wait from
+// the bead's last update, and the title cell still carries the bead id, the
+// queued tag and why it says that, the holder with the store it names, and the
+// rig and title of the bead (gt-uvpo1).
+func TestAWaitingRowKeepsEveryFieldItsSpanCovers(t *testing.T) {
+	t.Parallel()
+
+	// The page ages the wait against its own clock, which starts at the real one
+	// when the page loads, so the bead's last update is set from the real clock.
+	p := newPageDOM(t)
+	p.call(t, "renderTrend", map[string]any{
+		"queue": map[string]any{"landing": []any{map[string]any{
+			"id": "gt-loqew", "title": "the queue that never drains",
+			"rig": "gastown", "assignee": "gastown/polecats/dag",
+			"updated_at": time.Now().Add(-12 * time.Minute).Format(time.RFC3339),
+		}}},
+	})
+
+	got := waitingRow(t, p)
+	if got.When.Text != "waiting 12m" {
+		t.Errorf("the When cell reads %q, want the wait aged from the bead's last update", got.When.Text)
+	}
+	if !strings.Contains(got.When.Title, "waiting since the bead's last update") {
+		t.Errorf("the When cell's hover reads %q, want it to say what the wait is aged from", got.When.Title)
+	}
+	if got.Bead.Text != "gt-loqew" {
+		t.Errorf("the title cell's bead reads %q, want the queued bead's id", got.Bead.Text)
+	}
+	if got.Tag.Text != "queued" || !strings.Contains(got.Tag.Title, "the landing worker has not taken it") {
+		t.Errorf("the title cell's tag reads %q (%q), want the queued tag and why it says that", got.Tag.Text, got.Tag.Title)
+	}
+	if got.By == nil {
+		t.Fatal("the title cell draws no holder: the row lost the By reading it carried in the By column")
+	}
+	if got.By.Text != "dag" || got.By.Title != "gastown/dag" {
+		t.Errorf("the title cell's holder reads %q (%q), want the bare name and the store it names", got.By.Text, got.By.Title)
+	}
+	if got.Title.Text != "gastown · the queue that never drains" {
+		t.Errorf("the title cell's title reads %q, want the bead's rig and title", got.Title.Text)
+	}
+}
+
+// A bead nobody holds draws no holder rather than a placeholder for one: the
+// row says waiting, and its title cell carries no "by" reading (gt-uvpo1).
+func TestAWaitingRowWithNoHolderDrawsNoByReading(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 31, 16, 0, 0, 0, time.Local)
+	p := newPageDOM(t)
+	p.call(t, "renderTrend", map[string]any{
+		"queue": map[string]any{"landing": []any{map[string]any{
+			"id": "gt-nowho", "updated_at": now.Add(-5 * time.Minute).Format(time.RFC3339),
+		}}},
+	})
+
+	rows := landingsRows(t, p)
+	if len(rows) != 1 {
+		t.Fatalf("the table drew %d rows, want the one queued bead", len(rows))
+	}
+	if len(rows[0].Cells) != 2 {
+		t.Fatalf("the waiting row drew %d cells, want its When cell and one title cell", len(rows[0].Cells))
+	}
+	if got := rows[0].Cells[1].Text; strings.Contains(got, "· by") {
+		t.Errorf("the title cell reads %q, want no holder reading for a bead nobody holds", got)
+	}
+	if got := waitingRow(t, p); got.By != nil {
+		t.Errorf("the title cell draws a holder %q, want none for a bead nobody holds", got.By.Text)
+	}
+}
+
+// The span is the waiting row's alone: a finished landing and one the worker is
+// running still draw all eight cells, with the readings the server sent and
+// dashes where a stage has not run (gt-uvpo1).
+func TestFinishedAndRunningRowsKeepEveryCell(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 31, 16, 0, 0, 0, time.Local)
+	p := newPageDOM(t)
+	p.call(t, "renderTrend", map[string]any{
+		"queue": map[string]any{"landing": queuedBeads(now, 1)},
+		"trend": map[string]any{
+			"hours":  []map[string]any{{"hour": now.Add(-time.Hour).Format(time.RFC3339), "landed": 1, "rejected": 0}},
+			"stages": []any{},
+			"recent": []any{
+				map[string]any{"at": now.Add(-30 * time.Second).Format(time.RFC3339), "bead": "gt-running", "outcome": "running", "polecat": "dag"},
+				map[string]any{"at": now.Add(-10 * time.Minute).Format(time.RFC3339), "bead": "gt-landed", "outcome": "landed", "polecat": "dag",
+					"score": 0.86, "gate_secs": 42.0, "om_secs": 61.0, "ship_secs": 180.0},
+			},
+		},
+	})
+
+	head := landingsHeaderCells(t, p)
+	rows := landingsRows(t, p)
+	if len(rows) != 3 {
+		t.Fatalf("the table drew %d rows, want the queued bead, the running landing and the finished one", len(rows))
+	}
+	for _, row := range rows[1:] {
+		bead := row.Cells[1].Text
+		if len(row.Cells) != head {
+			t.Fatalf("the %q row drew %d cells, want the %d columns the table heads", bead, len(row.Cells), head)
+		}
+		for i, c := range row.Cells {
+			if c.Span != 1 {
+				t.Errorf("the %q row's cell %d spans %d columns, want 1: only a waiting row spans cells", bead, i, c.Span)
+			}
+		}
+	}
+	running, finished := rows[1], rows[2]
+	if got := running.Cells[6].Text; got != "–" {
+		t.Errorf("the running row's om cell reads %q, want a dash for a review that has not finished", got)
+	}
+	for i, want := range map[int]string{4: "0.86", 5: "42s", 6: "61s", 7: "3m"} {
+		if got := finished.Cells[i].Text; got != want {
+			t.Errorf("the finished row's cell %d reads %q, want %q", i, got, want)
 		}
 	}
 }
