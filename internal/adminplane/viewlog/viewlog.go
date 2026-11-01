@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 )
 
@@ -79,11 +80,13 @@ var (
 //
 // An item that is not shared is refused with ErrNotShared and appends nothing.
 // A ShareChecker error is returned wrapped: an unknown answer is not a refusal.
+// A nil ShareChecker or Logger, including a nil pointer held in the interface,
+// is refused with ErrNoChecker or ErrNoLog.
 func ViewShared(ctx context.Context, shares ShareChecker, log Logger, v View) error {
 	switch {
-	case shares == nil:
+	case isNil(shares):
 		return ErrNoChecker
-	case log == nil:
+	case isNil(log):
 		return ErrNoLog
 	case v.Actor == "":
 		return ErrNoActor
@@ -103,6 +106,20 @@ func ViewShared(ctx context.Context, shares ShareChecker, log Logger, v View) er
 		return fmt.Errorf("viewlog: appending the view of item %q: %w", v.ItemID, err)
 	}
 	return nil
+}
+
+// isNil reports whether v is nil, including an interface that holds a nil
+// pointer, map, slice, func or channel. Such an interface compares unequal to
+// nil, so a plain nil check would let a call reach a method that dereferences it.
+func isNil(v any) bool {
+	if v == nil {
+		return true
+	}
+	switch rv := reflect.ValueOf(v); rv.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
+		return rv.IsNil()
+	}
+	return false
 }
 
 // Memory is an in-memory Logger for tests and for callers before the view log
