@@ -24,20 +24,31 @@ func sameEntry(a, b ActionEntry) bool {
 		a.From == b.From && a.To == b.To && a.At.Equal(b.At)
 }
 
+// errStale is the refusal fakeStore gives a Save whose workspace moved after Load.
+var errStale = errors.New("fakeStore: workspace changed since it was loaded")
+
 // fakeStore is Store in memory, recording every save so a test can assert a
-// refused move wrote nothing.
+// refused move wrote nothing. It holds Store's compare-and-swap: Load records the
+// state it returned, and Save refuses while the stored state differs from that.
 type fakeStore struct {
 	workspaces map[string]registry.Workspace
+	loaded     map[string]registry.State
 	saves      []registry.Workspace
 	loadErr    error
 	saveErr    error
+	// afterLoad, when set, runs once after Load has recorded its state and
+	// before it returns, standing in for a move that lands in between.
+	afterLoad func(s *fakeStore)
 }
 
 // newFakeStore returns a store holding one workspace, ws-1, in state.
 func newFakeStore(state registry.State) *fakeStore {
-	return &fakeStore{workspaces: map[string]registry.Workspace{
-		"ws-1": {ID: "ws-1", OrgID: "org-1", OwnerSub: "sub-1", State: state, CreatedAt: at},
-	}}
+	return &fakeStore{
+		workspaces: map[string]registry.Workspace{
+			"ws-1": {ID: "ws-1", OrgID: "org-1", OwnerSub: "sub-1", State: state, CreatedAt: at},
+		},
+		loaded: map[string]registry.State{},
+	}
 }
 
 func (s *fakeStore) Load(_ context.Context, id string) (registry.Workspace, error) {
@@ -48,12 +59,20 @@ func (s *fakeStore) Load(_ context.Context, id string) (registry.Workspace, erro
 	if !ok {
 		return registry.Workspace{}, errors.New("fakeStore: no workspace " + id)
 	}
+	s.loaded[id] = w.State
+	if hook := s.afterLoad; hook != nil {
+		s.afterLoad = nil
+		hook(s)
+	}
 	return w, nil
 }
 
 func (s *fakeStore) Save(_ context.Context, w registry.Workspace) error {
 	if s.saveErr != nil {
 		return s.saveErr
+	}
+	if s.workspaces[w.ID].State != s.loaded[w.ID] {
+		return errStale
 	}
 	s.saves = append(s.saves, w)
 	s.workspaces[w.ID] = w
@@ -232,6 +251,34 @@ func TestSaveFailureIsNotLogged(t *testing.T) {
 	}
 	if len(log.entries) != 0 {
 		t.Errorf("failed save logged %d entries, want none: the state did not change", len(log.entries))
+	}
+}
+
+// TestSaveRefusedWhenStateMovedAfterLoad holds Store's compare-and-swap: a move
+// whose workspace changed between Load and Save is refused, so it neither
+// overwrites the move that landed first nor leaves an entry for its own.
+func TestSaveRefusedWhenStateMovedAfterLoad(t *testing.T) {
+	t.Parallel()
+	store, log := newFakeStore(registry.Active), &fakeLog{}
+	store.afterLoad = func(s *fakeStore) {
+		w := s.workspaces["ws-1"]
+		w.State = registry.Suspended
+		s.workspaces["ws-1"] = w
+	}
+	d := Deps{Store: store, Log: log, Clock: fixedClock}
+
+	err := Pause(context.Background(), d, "ws-1", "operator")
+	if !errors.Is(err, errStale) {
+		t.Fatalf("Pause after the state moved between load and save returned %v, want errStale", err)
+	}
+	if got := store.workspaces["ws-1"].State; got != registry.Suspended {
+		t.Errorf("stored state = %q, want %q: the stale save overwrote the move that landed first", got, registry.Suspended)
+	}
+	if len(store.saves) != 0 {
+		t.Errorf("stale save stored %d workspaces, want none: %+v", len(store.saves), store.saves)
+	}
+	if len(log.entries) != 0 {
+		t.Errorf("stale move logged %d entries, want none: %+v", len(log.entries), log.entries)
 	}
 }
 
