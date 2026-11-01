@@ -394,6 +394,17 @@ h3.ohead .r{margin-left:auto;text-transform:none;letter-spacing:0;white-space:no
 .dname{color:var(--dim);font-size:11px;letter-spacing:.04em}
 .dbody{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;background:#10161d;border:1px solid var(--line);border-radius:6px;padding:4px 8px}
 .dskip{color:var(--dim);font-size:11px;margin-top:3px}
+/* The Birds block: one row per bird, its name and the pages it wrote on one
+   line with the age of its summary at the right, and the summary under them.
+   A stale row carries the amber the digest marks an overdue report with. */
+.brow{padding:4px 0;border-top:1px solid var(--line)}
+.brow:first-child{border-top:0}
+.bhead{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.bhead .bname{font-weight:600}
+.bhead a{color:var(--blue);text-decoration:none;font-size:11px}
+.bhead a:hover{text-decoration:underline}
+.bhead .bage{margin-left:auto;color:var(--dim);white-space:nowrap}
+.brow .bsum{margin:2px 0 0;white-space:pre-wrap;overflow-wrap:anywhere}
 .arow .qrec,.arow .qheld{color:var(--dim);display:block;margin:2px 0}
 .arow .qtext{display:block;margin:2px 0}
 .qage{color:var(--dim)}
@@ -2144,6 +2155,59 @@ function drawDigestSections(box, text, prefixes) {
   }
 }
 
+// The Birds block draws the birds' daily reports, one row each: the bird's name
+// and the pages it wrote, the age of the summary it left, the summary itself,
+// and the bird's own ask for the operator as a badge. What a row shows is the
+// sidecar the reader read, so a summary holding markup goes through el() and
+// reads as that text; the page beside it is a link the route serves in a
+// sandbox, opened in a new tab.
+//
+// The reader's verdicts are drawn rather than smoothed over: a stale row
+// carries the amber the digest marks an overdue report with, a row in error or
+// withheld carries its note in the alarm red and no summary, and a list with no
+// rows names that state instead of drawing nothing. The heading's note ages the
+// read, so rows kept through a failed read are drawn as the last reading they
+// are (gt-q6h8e).
+function drawBirds(panel, s) {
+  const { box, note } = oblock(panel, "Birds");
+  const r = readOf(s, "birds");
+  paintsRead(box, note, r);
+  const rows = s.birds || [];
+  note.textContent = readCaption(r, [rows.length ? rows.length + (rows.length === 1 ? " bird" : " birds") : null, r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : null]);
+  if (!rows.length) {
+    box.append(el("div", r && r.error ? "badc" : "empty", r && r.error ? "the birds read failed" : "no bird has written a daily report yet"));
+    return;
+  }
+  for (const b of rows) {
+    const row = el("div", "brow" + (b.stale ? " warnc" : ""));
+    const head = el("div", "bhead");
+    head.append(el("span", "bname", b.bird || "–"));
+    // The bird name is the one the reader validated before it built a path,
+    // and the route checks it again before it opens anything: the link is
+    // joined from that name and the path is never decoded from free text.
+    if (b.has_page) {
+      const page = el("a", "bpage", "page");
+      page.href = "/birds/" + b.bird + "/daily.html";
+      page.target = "_blank";
+      page.rel = "noopener";
+      head.append(page);
+    }
+    if (b.has_prev) {
+      const prev = el("a", "bprev", "previous");
+      prev.href = "/birds/" + b.bird + "/daily.prev.html";
+      prev.target = "_blank";
+      prev.rel = "noopener";
+      head.append(prev);
+    }
+    if (b.needs_operator) head.append(el("span", "badge warnc", "needs the operator"));
+    if (b.written) head.append(el("span", "bage", "written " + age(b.written) + " ago"));
+    row.append(head);
+    if (b.state === "error" || b.state === "withheld") row.append(el("div", "badc", b.note || b.state));
+    else if (b.summary) row.append(el("div", "bsum", b.summary));
+    box.append(row);
+  }
+}
+
 // The Deploys block draws the deploy workflows' runs — a release and a
 // landing's staging deploy — as repo, ref, commit, state, age and the stages in
 // needs order, on one line while the panel is wide enough to hold them and
@@ -2912,6 +2976,7 @@ function renderOverseer(s) {
   box.replaceChildren();
   drawHeartbeat(box, s);
   drawDigest(box, s);
+  drawBirds(box, s);
   drawDeepReview(box, s);
   drawDispatch(box, s);
   drawOverseerQueue(box, s);
@@ -4975,7 +5040,7 @@ const PANES = {
   hold: {read: s => s.hold, draw: s => renderHold(s)},
   healthmark: {read: s => s.deploys, draw: s => renderHealthMark(s)},
   attention: {sec: "attention", body: ["attention"], read: s => s.attention, draw: s => renderAttention(s)},
-  overseer: {sec: "overseer", body: ["overseer"], read: s => [s.overseer, s.dispatch, s.reports, s.queue, s.attention, s.deepreview], draw: s => renderOverseer(s)},
+  overseer: {sec: "overseer", body: ["overseer"], read: s => [s.overseer, s.dispatch, s.reports, s.birds, s.queue, s.attention, s.deepreview, readInput(s, "birds")], draw: s => renderOverseer(s)},
   cost: {sec: "cost", body: ["cost"], read: s => [s.spend, s.usage, s.cost_providers, s.cloud, s.cost_charts, s.rework, s.jev_spend, s.deepreview, readInput(s, "spend")], draw: s => renderCost(s)},
   rigs: {sec: "rigs", body: ["rigs"], read: s => [s.rigs, s.queue, readInput(s, "queue")], draw: s => renderRigs(s)},
   // The work pane's own key holds the list's filters and the rows a reader has
