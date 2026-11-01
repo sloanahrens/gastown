@@ -122,4 +122,4 @@ session near its context limit hands off instead (`gt handoff`).
 
 1. **Persist findings early** — `bd update <issue> --append-notes "..."` before session death
 2. **Run `gt done` when complete** — mandatory for polecats (pushes, submits to MQ/PR path, exits)
-3. **File discovered work** — `bd create` for bugs found, don't fix them yourself
+3. **Report discovered work** — `gt done --finding`; the town files the bead, don't fix it yourself

@@ -305,29 +305,16 @@ A commit message is the description and the bead id, nothing more: NO
 Co-Authored-By trailer, no AI attribution anywhere.
 
 **Discovered work:**
-If you find bugs or improvements outside your scope, file them in the shape the
-spec dispatcher lints, so the bead is dispatchable instead of held unshaped:
-Goal (what exists after it lands), Constraints (the files to change, and what
-must not change), Out of scope (what the bead is not), Gate (what the landing
-gate runs for this bead, plus any extra test only this diff needs) and Size (one worker, one landing), plus at least one acceptance
-item. `--acceptance` sets that item in the same command:
+If you find bugs or improvements outside your scope, do not file a bead. Report
+each one in your `gt done` submission with `gt done --finding`, and the town
+files the Found bead in the rig that owns the code. Name that rig on the
+finding's first line when it is not your own, then say what is broken, where,
+and what you ran to see it:
 ```bash
-desc="$(cat <<'BEAD'
-## Goal
-<what exists after this lands>
-## Constraints
-<the files to change, and what must not change>
-## Out of scope
-<what this bead is not>
-## Gate
-<what the landing gate runs for this bead, plus any extra test only this diff needs>
-## Size
-one worker, one landing
-BEAD
-)"
-gt bead create --title "Found: <short description>" --type task --priority 3 \
-  --description "$desc" --acceptance "- [ ] <the observable result a reviewer can check>" -q
-# Note the printed ID, continue with your work
+gt done --finding "rig: <owning-rig>
+
+<what is broken, where, and what you ran to see it>"
+# up to five --finding values; the run that submits your work records them
 ```
 
 Do NOT fix unrelated issues in this branch.

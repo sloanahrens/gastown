@@ -52,7 +52,7 @@ a Size that says planning, or more than six acceptance items. Fix it and lint
 again.
 
 A bead you will land yourself needs no shape. One you want a polecat to build
-does. `gt prime --step 3 --formula mol-polecat-work` prints the shape in full.
+does.
 
 ## Session Close Protocol
 
