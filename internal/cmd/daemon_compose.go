@@ -24,6 +24,11 @@ type daemonComposeFlags struct {
 	// mount nor the flag. The command never reads the file, so its contents are
 	// in no output and no error (gt-yaqct).
 	omTokenFile string
+	// omTokenFileSet is whether --om-token-file was given at all. A blank value
+	// on a flag the operator named is refused rather than read as unset: it
+	// names no file, so the render would silently carry no token mount
+	// (gt-0pb64).
+	omTokenFileSet bool
 	// forgeHost and forgeTokenFile are --forge-host and --forge-token-file: the
 	// Forgejo's host:port and the host path of the landing bot's token file,
 	// which the render mounts read-only into the container and passes to the
@@ -126,7 +131,8 @@ because inside the container that host is the container itself.
 path. The render mounts it read-only into the container and passes its path to
 the entrypoint, which loads the token into the daemon's environment; the file is
 never read here, so its contents appear in no output, and without the flag the
-render carries neither the mount nor the flag.
+render carries neither the mount nor the flag. A flag given with a blank value
+is refused, since it names no file and would otherwise render as if unset.
 
 --forge-host and --forge-token-file give the container's git the Forgejo
 credential helper, so the landing worker's pushes carry the landing bot's token.
@@ -137,12 +143,13 @@ reaches the compose file. They are accepted only together.
 --print prints the render and writes no file.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			f.omTokenFileSet = cmd.Flags().Changed(config.OMTokenFileFlag)
 			return run(cmd.OutOrStdout(), f)
 		},
 	}
 	write.Flags().StringVar(&f.image, "image", "", "daemon image tag, gt-daemon:<rev>")
 	write.Flags().StringVar(&f.omTokenFile, config.OMTokenFileFlag, "",
-		"om token file's absolute path on the host, mounted read-only into the container; unset renders neither the mount nor the flag")
+		"om token file's absolute path on the host, mounted read-only into the container; unset renders neither the mount nor the flag, and a blank value is refused")
 	write.Flags().BoolVar(&f.print, "print", false, "print the render and write no file")
 	write.Flags().StringVar(&f.forgeHost, config.ForgeHostFlag, "",
 		"Give the container's git this Forgejo host:port; accepted only with --"+config.ForgeTokenFileFlag)
@@ -172,6 +179,9 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 	// refuses a relative one. The command never opens the file, so no contents
 	// reach its output or an error.
 	omTokenFile := strings.TrimSpace(f.omTokenFile)
+	if f.omTokenFileSet && omTokenFile == "" {
+		return fmt.Errorf("--%s was given blank; name the om token file's absolute path on the host, or leave the flag out to render no token mount", config.OMTokenFileFlag)
+	}
 	// The forge pair is passed the same way: the render refuses a host that is
 	// not a bare host:port and a token file path it cannot mount, and the
 	// command opens neither.
