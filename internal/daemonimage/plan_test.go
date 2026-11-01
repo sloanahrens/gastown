@@ -78,6 +78,9 @@ func TestPlanNamesEachStepAndRunsNothing(t *testing.T) {
 		{"build bd: ", "go build -trimpath -ldflags " + bdBuildFlag + planBuildID + " " + bdCommitFlag + testBDCommit + " -o " + filepath.Join(b.Out, "bd") + " " + BDPackage + "   (clean worktree of /src/beads at " + testBDCommit + ")"},
 		{"build om: ", "go build -trimpath -o " + filepath.Join(b.Out, "om") + " " + OMPackage + "   (clean worktree of /src/om at HEAD)"},
 		{"fetch claude: ", "GET " + fetched + " -> " + filepath.Join(b.Out, claudeCLIName) + "   (sha256 " + templates.ClaudeCLISHA256 + ")"},
+		{"fetch openshell: ", "GET " + templates.DaemonClientTools[0].URL + " -> " + filepath.Join(b.Out, "openshell") + "   (sha256 " + templates.DaemonClientTools[0].SHA256 + ")"},
+		{"fetch docker: ", "GET " + templates.DaemonClientTools[1].URL + " -> " + filepath.Join(b.Out, "docker") + "   (sha256 " + templates.DaemonClientTools[1].SHA256 + ")"},
+		{"fetch kubectl: ", "GET " + templates.DaemonClientTools[2].URL + " -> " + filepath.Join(b.Out, "kubectl") + "   (sha256 " + templates.DaemonClientTools[2].SHA256 + ")"},
 		{"image: ", "docker --context " + DockerContext + " build -f " + b.Dockerfile + " -t " + ImageTag(testRev) + " " + b.Out},
 	}
 	if len(lines) != len(steps) {

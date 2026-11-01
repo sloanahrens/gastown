@@ -359,6 +359,7 @@ func TestJSONRunKeepsTheLogAndSummary(t *testing.T) {
 				Exec:    exec,
 				Src:     taggedRepo([]string{pkg}),
 				Environ: []string{"PATH=/fake/bin"},
+				CgoEnv:  testCgoEnv,
 				Stderr:  stderr,
 				Now:     func() time.Time { return at },
 			}

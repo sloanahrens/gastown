@@ -34,9 +34,26 @@ if [ "$1" = "version" ]; then
   echo "bd 9.9.9"
   exit 0
 fi
-if [ "$1" = "show" ] && [ -f %s/"$2".json ]; then
-  cat %s/"$2".json
-  exit 0
+if [ "$1" = "show" ]; then
+  # bd show prints the issues of the ids it is given, the id in any position
+  # next to --json: one fixture per id, merged into one array.
+  shift
+  found=""
+  for arg in "$@"; do
+    case "$arg" in -*) continue ;; esac
+    if [ -f %s/"$arg".json ]; then found="$found $arg"; fi
+  done
+  if [ -n "$found" ]; then
+    first=1
+    printf '['
+    for id in $found; do
+      [ "$first" = 1 ] || printf ','
+      first=0
+      sed -e 's/^\[//' -e 's/\]$//' %s/"$id".json
+    done
+    printf ']\n'
+    exit 0
+  fi
 fi
 echo '[]'
 `, logPath, fixtures, fixtures)

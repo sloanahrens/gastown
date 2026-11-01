@@ -100,6 +100,13 @@ func (f fakeImageBuilder) FetchClaudeCLI(context.Context) (string, error) {
 	return "/out/claude", nil
 }
 
+func (f fakeImageBuilder) FetchClientTools(context.Context) ([]string, error) {
+	if err := f.step("tools"); err != nil {
+		return nil, err
+	}
+	return []string{"/out/openshell", "/out/docker", "/out/kubectl"}, nil
+}
+
 func (f fakeImageBuilder) BuildImage(_ context.Context, rev string, bins []string) (string, error) {
 	if err := f.step("image " + rev + " " + strings.Join(bins, ",")); err != nil {
 		return "", err
@@ -149,10 +156,11 @@ func TestDaemonImageApplyRunsTheStepsInOrder(t *testing.T) {
 		wantTag   bool
 		wantError string
 	}{
-		{"all succeed", "", []string{"binaries " + imageTestRev, "claude", "image " + imageTestRev + " /out/gt,/out/bd,/out/om,/out/claude"}, true, ""},
+		{"all succeed", "", []string{"binaries " + imageTestRev, "claude", "tools", "image " + imageTestRev + " /out/gt,/out/bd,/out/om,/out/claude,/out/openshell,/out/docker,/out/kubectl"}, true, ""},
 		{"the binaries fail", "binaries " + imageTestRev, []string{"binaries " + imageTestRev}, false, "failed"},
 		{"the claude CLI fails", "claude", []string{"binaries " + imageTestRev, "claude"}, false, "claude failed"},
-		{"the image build fails", "image " + imageTestRev + " /out/gt,/out/bd,/out/om,/out/claude", []string{"binaries " + imageTestRev, "claude", "image " + imageTestRev + " /out/gt,/out/bd,/out/om,/out/claude"}, false, "image " + imageTestRev + " /out/gt,/out/bd,/out/om,/out/claude failed"},
+		{"the client tools fail", "tools", []string{"binaries " + imageTestRev, "claude", "tools"}, false, "tools failed"},
+		{"the image build fails", "image " + imageTestRev + " /out/gt,/out/bd,/out/om,/out/claude,/out/openshell,/out/docker,/out/kubectl", []string{"binaries " + imageTestRev, "claude", "tools", "image " + imageTestRev + " /out/gt,/out/bd,/out/om,/out/claude,/out/openshell,/out/docker,/out/kubectl"}, false, "image " + imageTestRev + " /out/gt,/out/bd,/out/om,/out/claude,/out/openshell,/out/docker,/out/kubectl failed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -266,7 +274,7 @@ func TestDaemonImageRefusesBeforeAnything(t *testing.T) {
 func TestDaemonImageDockerBuildIgnoresTheShellsDockerEnvironment(t *testing.T) {
 	t.Parallel()
 	r := newImageRig(t)
-	for _, name := range []string{"gt", "bd", "om", "claude"} {
+	for _, name := range []string{"gt", "bd", "om", "claude", "openshell", "docker", "kubectl"} {
 		if err := os.WriteFile(filepath.Join(r.flags.out, name), []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -282,6 +290,7 @@ func TestDaemonImageDockerBuildIgnoresTheShellsDockerEnvironment(t *testing.T) {
 	tag, err := b.BuildImage(context.Background(), imageTestRev, []string{
 		filepath.Join(r.flags.out, "gt"), filepath.Join(r.flags.out, "bd"),
 		filepath.Join(r.flags.out, "om"), filepath.Join(r.flags.out, "claude"),
+		filepath.Join(r.flags.out, "openshell"), filepath.Join(r.flags.out, "docker"), filepath.Join(r.flags.out, "kubectl"),
 	})
 	if err != nil {
 		t.Fatalf("BuildImage: %v", err)

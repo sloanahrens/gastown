@@ -30,7 +30,7 @@ func imageBuilder(t *testing.T) (Builder, *fakeRunner) {
 }
 
 // imageBinaryNames is the binaries the image copies from its build context.
-var imageBinaryNames = []string{"gt", "bd", "om", "claude"}
+var imageBinaryNames = []string{"gt", "bd", "om", "claude", "openshell", "docker", "kubectl"}
 
 // imageBinaries is the list of the image's binaries in b.Out, in the order
 // imageBinaryNames names them.
@@ -311,7 +311,7 @@ func gitConfigGlobal(in dockerfileInstruction) (key, value string, ok bool) {
 
 // TestDaemonDockerfileCopiesOnlyTheBinariesAndDolt: every COPY is one of two
 // kinds. The Dolt client is copied from the dolt stage, and nothing else is.
-// Each of gt, bd, om and claude is copied from the build context by its bare
+// Each of the image binaries (imageBinaryNames) is copied from the build context by its bare
 // name, once each, and no other file is. A COPY from any other source, or a
 // second copy of a name, fails, so the image cannot ship a binary the deployer
 // did not build or fetch, or miss one it did.

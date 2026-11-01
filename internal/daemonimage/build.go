@@ -7,6 +7,7 @@
 package daemonimage
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -19,6 +20,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/polecat/bdbuild"
 	"github.com/steveyegge/gastown/internal/templates"
 )
@@ -346,13 +348,17 @@ func (b Builder) Plan(rev string) ([]string, error) {
 		return nil, fmt.Errorf("daemonimage: Dockerfile %s is not a file", b.Dockerfile)
 	}
 	tag := ImageTag(rev)
-	return []string{
+	lines := []string{
 		fmt.Sprintf("build gt: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "gt"), GTPackage, gtCommitFlag+rev), " "), b.GTSrc, rev),
 		fmt.Sprintf("build bd: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "bd"), BDPackage, bdBuildFlag+planBuildID+" "+bdCommitFlag+bdCommit), " "), b.BDSrc, bdCommit),
 		fmt.Sprintf("build om: %s   (clean worktree of %s at HEAD)", strings.Join(goBuildArgv(filepath.Join(b.Out, "om"), OMPackage, ""), " "), b.OMSrc),
 		fmt.Sprintf("fetch claude: GET %s -> %s   (sha256 %s)", fmt.Sprintf(templates.ClaudeCLIURLFormat, templates.ClaudeCLIVersion), filepath.Join(b.Out, claudeCLIName), templates.ClaudeCLISHA256),
-		fmt.Sprintf("image: %s", strings.Join(imageArgv(b.Dockerfile, tag, b.Out), " ")),
-	}, nil
+	}
+	for _, t := range templates.DaemonClientTools {
+		lines = append(lines, fmt.Sprintf("fetch %s: GET %s -> %s   (sha256 %s)", t.Name, t.URL, filepath.Join(b.Out, t.Name), t.SHA256))
+	}
+	lines = append(lines, fmt.Sprintf("image: %s", strings.Join(imageArgv(b.Dockerfile, tag, b.Out), " ")))
+	return lines, nil
 }
 
 // planBuildID is what Plan prints in place of bd's build id: git answers it inside
@@ -367,8 +373,9 @@ const claudeCLIName = "claude"
 // a floating tag such as latest or stable cannot match.
 var claudeVersion = regexp.MustCompile(`^[0-9]+(\.[0-9]+)+$`)
 
-// claudeSHA256 is the form a sha256 sum prints in: 64 lower-case hex digits.
-var claudeSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
+// sha256Pin is the form a sha256 sum prints in: 64 lower-case hex digits. The
+// claude CLI pin and every client tool pin are checked against it.
+var sha256Pin = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // FetchClaudeCLI downloads the pinned linux/arm64 claude CLI, verifies its sha256
 // against templates.ClaudeCLISHA256, and writes it to b.Out/claude, the build
@@ -410,29 +417,45 @@ func (b Builder) fetchClaudeCLI(ctx context.Context, url, version, want string, 
 // fetchClaudeCLIWith is fetchClaudeCLI with the temporary file's source injected,
 // so each step's failure can be driven.
 func (b Builder) fetchClaudeCLIWith(ctx context.Context, url, version, want string, max int64, create func(dir, pattern string) (claudeTemp, error)) (string, error) {
-	if b.Fetch == nil {
-		return "", errors.New("daemonimage: no fetcher to download the claude CLI with")
-	}
-	if b.Out == "" {
-		return "", errors.New("daemonimage: no build context for the claude CLI; Out is the directory the binaries are in")
-	}
-	if !filepath.IsAbs(b.Out) {
-		return "", fmt.Errorf("daemonimage: build context %q is not absolute; the claude CLI is written there for the Dockerfile's COPY", b.Out)
-	}
 	if err := checkClaudePin(version, want); err != nil {
 		return "", err
 	}
-	body, err := b.Fetch(ctx, url)
+	return b.fetchPinned(ctx, pinnedFile{what: "the claude CLI", name: claudeCLIName, url: url, sha256: want, max: max}, create)
+}
+
+// pinnedFile is one download the deployer verifies and places in the build
+// context: the claude CLI and every client tool go through fetchPinned. A member
+// names the one file to take out of a .tar.gz download; empty means the
+// download is the file itself.
+type pinnedFile struct {
+	what, name, url, sha256, member string
+	max                             int64
+}
+
+// fetchPinned downloads p.url, refuses it unless it is at most p.max bytes and
+// its sha256 is p.sha256, and places the file (or the archive's member) in b.Out
+// under p.name. The download is written under a temporary name and takes its
+// own only once it verifies; any other exit removes the temporary file, so a
+// refused download leaves nothing in b.Out.
+func (b Builder) fetchPinned(ctx context.Context, p pinnedFile, create func(dir, pattern string) (claudeTemp, error)) (string, error) {
+	if b.Fetch == nil {
+		return "", fmt.Errorf("daemonimage: no fetcher to download %s with", p.what)
+	}
+	if b.Out == "" {
+		return "", fmt.Errorf("daemonimage: no build context for %s; Out is the directory the binaries are in", p.what)
+	}
+	if !filepath.IsAbs(b.Out) {
+		return "", fmt.Errorf("daemonimage: build context %q is not absolute; %s is written there for the Dockerfile's COPY", b.Out, p.what)
+	}
+	body, err := b.Fetch(ctx, p.url)
 	if err != nil {
-		return "", fmt.Errorf("daemonimage: cannot download the claude CLI %s from %s: %w", version, url, err)
+		return "", fmt.Errorf("daemonimage: cannot download %s from %s: %w", p.what, p.url, err)
 	}
 	defer func() { _ = body.Close() }()
-	tmp, err := create(b.Out, "."+claudeCLIName+"-*")
+	tmp, err := create(b.Out, "."+p.name+"-*")
 	if err != nil {
-		return "", fmt.Errorf("daemonimage: cannot stage the claude CLI in %s: %w", b.Out, err)
+		return "", fmt.Errorf("daemonimage: cannot stage %s in %s: %w", p.what, b.Out, err)
 	}
-	// The download is written under a temporary name and takes the claude name
-	// only once it verifies; any other exit removes the temporary file.
 	placed := false
 	defer func() {
 		if !placed {
@@ -440,31 +463,63 @@ func (b Builder) fetchClaudeCLIWith(ctx context.Context, url, version, want stri
 		}
 	}()
 	sum := sha256.New()
+	// An archive's member is taken from memory once the download verifies; a
+	// plain file is only ever on disk.
+	var archive bytes.Buffer
+	sinks := []io.Writer{tmp, sum}
+	if p.member != "" {
+		sinks = append(sinks, &archive)
+	}
 	// The copy reads at most max+1 bytes: a stream that reaches max+1 is over the
 	// bound, and nothing past max+1 is read.
-	n, err := io.Copy(io.MultiWriter(tmp, sum), io.LimitReader(body, max+1))
+	n, err := io.Copy(io.MultiWriter(sinks...), io.LimitReader(body, p.max+1))
 	if err != nil {
 		_ = tmp.Close()
-		return "", fmt.Errorf("daemonimage: cannot download the claude CLI from %s: %w", url, err)
+		return "", fmt.Errorf("daemonimage: cannot download %s from %s: %w", p.what, p.url, err)
 	}
-	if n > max {
+	if n > p.max {
 		_ = tmp.Close()
-		return "", fmt.Errorf("daemonimage: the claude CLI from %s is over the %d-byte bound; nothing was written to %s", url, max, b.Out)
+		return "", errOverBound(p.what, p.url, p.max, b.Out)
 	}
 	if err := tmp.Close(); err != nil {
-		return "", fmt.Errorf("daemonimage: cannot write the claude CLI in %s: %w", b.Out, err)
+		return "", fmt.Errorf("daemonimage: cannot write %s in %s: %w", p.what, b.Out, err)
 	}
-	if got := hex.EncodeToString(sum.Sum(nil)); got != want {
-		return "", fmt.Errorf("daemonimage: the claude CLI from %s has sha256 %s, not the pinned %s; nothing was written to %s", url, got, want, b.Out)
+	if err := verifySum(p.what, p.url, hex.EncodeToString(sum.Sum(nil)), p.sha256, b.Out); err != nil {
+		return "", err
+	}
+	path := filepath.Join(b.Out, p.name)
+	if p.member != "" {
+		data, err := extractMember(archive.Bytes(), p.member, p.max)
+		if err != nil {
+			return "", fmt.Errorf("daemonimage: %s from %s: %w", p.what, p.url, err)
+		}
+		if err := atomicfile.WriteFile(path, data, 0o755); err != nil {
+			return "", fmt.Errorf("daemonimage: cannot write %s: %w", path, err)
+		}
+		return path, nil
 	}
 	// The Dockerfile's COPY sets the binary's mode, so the file keeps the
 	// temporary file's.
-	path := filepath.Join(b.Out, claudeCLIName)
 	if err := os.Rename(tmp.Name(), path); err != nil {
-		return "", fmt.Errorf("daemonimage: cannot move the claude CLI into %s: %w", b.Out, err)
+		return "", fmt.Errorf("daemonimage: cannot move %s into %s: %w", p.what, b.Out, err)
 	}
 	placed = true
 	return path, nil
+}
+
+// errOverBound is the refusal for a download that reaches past its size bound,
+// shared by the claude CLI and the client tools so the two read alike.
+func errOverBound(what, url string, max int64, out string) error {
+	return fmt.Errorf("daemonimage: %s from %s is over the %d-byte bound; nothing was written to %s", what, url, max, out)
+}
+
+// verifySum is the refusal for a download whose sha256 is not its pin, shared
+// by the claude CLI and the client tools.
+func verifySum(what, url, got, want, out string) error {
+	if got != want {
+		return fmt.Errorf("daemonimage: %s from %s has sha256 %s, not the pinned %s; nothing was written to %s", what, url, got, want, out)
+	}
+	return nil
 }
 
 // checkClaudePin refuses a claude CLI pin that is not an exact version and a
@@ -474,7 +529,7 @@ func checkClaudePin(version, sha string) error {
 	if !claudeVersion.MatchString(version) {
 		return fmt.Errorf("daemonimage: claude CLI version %q is not an exact dotted version such as 2.1.314; a floating tag would fetch a binary the pin does not name", version)
 	}
-	if !claudeSHA256.MatchString(sha) {
+	if !sha256Pin.MatchString(sha) {
 		return fmt.Errorf("daemonimage: claude CLI sha256 %q is not 64 lower-case hex digits", sha)
 	}
 	return nil
@@ -529,16 +584,17 @@ func (b Builder) BuildImage(ctx context.Context, rev string, bins []string) (str
 }
 
 // checkImageBinaries refuses a set of binaries the Dockerfile's COPY lines could
-// not read: gt, bd, om and claude once each, as files in the build context. Docker
-// would report a missing or misplaced one only after the package install ran, so
-// it is caught here first, against what the caller passed.
+// not read: each of the image's binaries (gt, bd, om, claude and ClientToolNames)
+// once, as files in the build context. Docker would report a missing or
+// misplaced one only after the package install ran, so it is caught here first,
+// against what the caller passed.
 func (b Builder) checkImageBinaries(bins []string) error {
-	want := []string{"gt", "bd", "om", claudeCLIName}
+	want := append([]string{"gt", "bd", "om", claudeCLIName}, ClientToolNames()...)
 	seen := make(map[string]bool, len(want))
 	for _, p := range bins {
 		name := filepath.Base(p)
 		if !slices.Contains(want, name) {
-			return fmt.Errorf("daemonimage: %q is not one of the image's binaries gt, bd, om and claude", p)
+			return fmt.Errorf("daemonimage: %q is not one of the image's binaries %s", p, strings.Join(want, ", "))
 		}
 		if filepath.Dir(filepath.Clean(p)) != filepath.Clean(b.Out) {
 			return fmt.Errorf("daemonimage: %q is outside the build context %s, so the Dockerfile's COPY %s reads nothing", p, b.Out, name)
@@ -553,7 +609,7 @@ func (b Builder) checkImageBinaries(bins []string) error {
 	}
 	for _, name := range want {
 		if !seen[name] {
-			return fmt.Errorf("daemonimage: no %s binary among the %d given; the image copies gt, bd, om and claude", name, len(bins))
+			return fmt.Errorf("daemonimage: no %s binary among the %d given; the image copies %s", name, len(bins), strings.Join(want, ", "))
 		}
 	}
 	return nil
