@@ -11,7 +11,7 @@ import (
 
 func TestFakeClientContract(t *testing.T) {
 	t.Parallel()
-	RunClientContract(t, func(t *testing.T) beads.Client { return New() })
+	RunClientContract(t, func(t *testing.T) Roles { return OneRole(New()) })
 	RunShowTextContract(t, func(t *testing.T) beads.Client { return New() })
 	RunDepListUpContract(t, func(t *testing.T) beads.Client { return New() })
 	RunCreatorOptionContract(t, func(t *testing.T) beads.Client { return New() })
@@ -31,7 +31,7 @@ func TestFakeClientDepListUpExternal(t *testing.T) {
 func TestFakeClientContractSharedDatabase(t *testing.T) {
 	t.Parallel()
 	shared := New()
-	RunClientContract(t, func(t *testing.T) beads.Client { return shared })
+	RunClientContract(t, func(t *testing.T) Roles { return OneRole(shared) })
 	RunShowTextContract(t, func(t *testing.T) beads.Client { return shared })
 	RunDepListUpContract(t, func(t *testing.T) beads.Client { return shared })
 	RunCreatorOptionContract(t, func(t *testing.T) beads.Client { return shared })

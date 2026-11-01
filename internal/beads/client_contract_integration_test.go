@@ -72,13 +72,13 @@ func TestIntegrationClientContract(t *testing.T) {
 		for range clientLanes {
 			lanes <- &lane{dir: t.TempDir()}
 		}
-		beadsfake.RunClientContract(t, func(t *testing.T) beads.Client {
+		beadsfake.RunClientContract(t, func(t *testing.T) beadsfake.Roles {
 			l := <-lanes
 			t.Cleanup(func() { lanes <- l })
 			if l.db == nil {
 				l.db = newDB(t, l.dir)
 			}
-			return l.db
+			return beadsfake.OneRole(l.db)
 		})
 	})
 	// RunShowTextContract names its own subtest, so a wrapper here would give
