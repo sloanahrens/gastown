@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // This file ports ExtractEnv and the extract orchestration of the town metrics
@@ -43,10 +45,18 @@ type RowCountError struct {
 	Source string
 	Rows   int
 	Drops  int
-	Lines  int
+	// Queue is the lines the source holds that are not rows by design: the
+	// reviews log carries the om follow-up queue's entries beside its review
+	// lines. They are identified by their marker, so a line that is merely
+	// unreadable is still a drop or a refusal, never a queue line.
+	Queue int
+	Lines int
 }
 
 func (e *RowCountError) Error() string {
+	if e.Queue > 0 {
+		return fmt.Sprintf("%s: %d rows + %d logged drops + %d queue lines != %d source lines", e.Source, e.Rows, e.Drops, e.Queue, e.Lines)
+	}
 	return fmt.Sprintf("%s: %d rows + %d logged drops != %d source lines", e.Source, e.Rows, e.Drops, e.Lines)
 }
 
@@ -161,8 +171,9 @@ func Extract(ctx context.Context, env ExtractEnv) (ExtractResult, error) {
 	reviews := reviewLoader(env.ReviewLines, dropped)
 	reviewLines := nonblankLines(env.ReviewLines)
 	reviewDrops := dropped.Count() - logged
-	if len(reviews)+reviewDrops != reviewLines {
-		return res, &RowCountError{Source: "reviews", Rows: len(reviews), Drops: reviewDrops, Lines: reviewLines}
+	queueLines := queueReviewLines(env.ReviewLines)
+	if len(reviews)+reviewDrops+queueLines != reviewLines {
+		return res, &RowCountError{Source: "reviews", Rows: len(reviews), Drops: reviewDrops, Queue: queueLines, Lines: reviewLines}
 	}
 	// Everything logged so far is a refused row; what a later stage logs is a
 	// gap in a source that was read.
@@ -440,6 +451,20 @@ func nonblankLines(lines []string) int {
 	n := 0
 	for _, line := range lines {
 		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	return n
+}
+
+// queueReviewLines counts the non-blank lines that are om follow-up queue
+// entries, which the reviews loader skips without a row or a drop (the same
+// land.IsQueueLine test the loader uses), so the row-count assertion can
+// account for them as a third kind of line.
+func queueReviewLines(lines []string) int {
+	n := 0
+	for _, line := range lines {
+		if strings.TrimSpace(line) != "" && land.IsQueueLine([]byte(line)) {
 			n++
 		}
 	}

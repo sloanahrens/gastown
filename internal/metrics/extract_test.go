@@ -523,6 +523,41 @@ func TestExtractRefusesAReviewsLoaderThatLosesARow(t *testing.T) {
 	assertNoFilesWritten(t, files)
 }
 
+// The reviews log carries om follow-up queue entries beside its review lines.
+// The loader skips them without a row or a drop, so the row-count assertion
+// counts them as a third kind of line: a log of one review and two queue
+// entries extracts, and the same log with a loader that loses the review is
+// still refused with the queue count in the message (the 2026-11-01 hourly
+// failure: 4998 rows + 0 drops != 5004 lines, six of them queue entries).
+func TestExtractAccountsForQueueLinesInTheReviewsLog(t *testing.T) {
+	t.Parallel()
+	const review = `{"bead": "gt-a", "rig": "gastown", "attempt": 1, "score": 0.5, "verdict": "request_changes", "at": "2026-10-13T00:00:00Z"}`
+	const queue = `{"bead": "gt-q", "rig": "gastown", "attempt": 0, "score": 0, "verdict": "", "findings": 0, "followup_queue": {"landed": "abc"}}`
+	env, _ := extractCase(t)
+	env.ReviewLines = []string{review, queue, "", queue}
+	if _, err := Extract(context.Background(), env); err != nil {
+		t.Fatalf("Extract with two queue lines: %v", err)
+	}
+
+	env, files := extractCase(t)
+	env.ReviewLines = []string{review, queue, queue}
+	env.ReviewLoader = func(lines []string, dropped *Dropped) []Review {
+		return LoadReviews(lines, dropped)[:0]
+	}
+	_, err := Extract(context.Background(), env)
+	var short *RowCountError
+	if !errors.As(err, &short) {
+		t.Fatalf("Extract error = %v, want a RowCountError for the lost review", err)
+	}
+	if short.Rows != 0 || short.Drops != 0 || short.Queue != 2 || short.Lines != 3 {
+		t.Errorf("RowCountError = %d rows, %d drops, %d queue, %d lines; want 0, 0, 2, 3", short.Rows, short.Drops, short.Queue, short.Lines)
+	}
+	if want := "0 rows + 0 logged drops + 2 queue lines != 3 source lines"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want it to contain %q", err, want)
+	}
+	assertNoFilesWritten(t, files)
+}
+
 // assertNoFilesWritten checks a refused extract opened no output file, so
 // nothing reads a partial output directory as a finished extract.
 func assertNoFilesWritten(t *testing.T, files *extractFiles) {
