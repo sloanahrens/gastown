@@ -403,6 +403,12 @@ func setPath(raw []byte, path []string, value json.RawMessage) ([]byte, error) {
 			return nil, err
 		}
 	}
+	return renderMembers(members), nil
+}
+
+// renderMembers is members as one compact JSON object, in the order given, each
+// value's text untouched.
+func renderMembers(members []member) []byte {
 	var buf bytes.Buffer
 	buf.WriteByte('{')
 	for n, m := range members {
@@ -414,7 +420,22 @@ func setPath(raw []byte, path []string, value json.RawMessage) ([]byte, error) {
 		buf.Write(m.val)
 	}
 	buf.WriteByte('}')
-	return buf.Bytes(), nil
+	return buf.Bytes()
+}
+
+// ensureKeys returns the object doc with each default added at its end when the
+// object has no such key. A key that is present is not touched, whatever it holds.
+func ensureKeys(doc []byte, defaults []member) ([]byte, error) {
+	members, err := parseObject(doc)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range defaults {
+		if lastMember(members, d.key) < 0 {
+			members = append(members, d)
+		}
+	}
+	return renderMembers(members), nil
 }
 
 // jsonString is s as a JSON string, with no HTML escaping: a URL keeps its & and <.
