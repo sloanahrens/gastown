@@ -3,9 +3,11 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -212,7 +214,7 @@ func TestContainerRehearsalDoesNotStageCredentialsFromOtherSettingsFiles(t *test
 			t.Errorf("%q survived into the staged copy or the output:\n%s", secret, staged)
 		}
 	}
-	if !strings.Contains(staged, "${KEEP_ME}") || !strings.Contains(staged, "/opt/missing") {
+	if !strings.Contains(staged, "/opt/missing") {
 		t.Errorf("the redaction removed more than the secret values:\n%s", staged)
 	}
 	if _, ok := h.files[rehearseRoot+"/settings/secrets.env"]; ok {
@@ -630,5 +632,32 @@ func TestContainerRehearsalNamesAStagedFileItCannotWrite(t *testing.T) {
 				t.Fatalf("err=%v removed=%v, want %q wrapping the cause and the run dir removed", err, h.removed, want)
 			}
 		})
+	}
+}
+
+// A secret-named key is blanked whatever its value is: a string, a string holding
+// a ${NAME} reference, a number, an object, an array, a bool or null. Nothing of
+// the value reaches the staged copy, and the type is kept.
+func TestContainerRehearsalRedactionFailsClosedForEveryValueType(t *testing.T) {
+	t.Parallel()
+	in := `{"api_key":"sk-1","token_ref":"${TOKEN_NAME}","secret_n":12345,"secret_obj":{"user":"u-leak","pw":"p-leak"},` +
+		`"passwords":["a-leak","b-leak"],"private_flag":true,"credential":null,"plain":"keep-me"}`
+	out, values, err := redactSettingsJSON([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, leak := range []string{"sk-1", "TOKEN_NAME", "12345", "u-leak", "p-leak", "a-leak", "b-leak"} {
+		if strings.Contains(string(out), leak) || slices.ContainsFunc(values, func(v string) bool { return strings.Contains(v, leak) }) {
+			t.Errorf("%q survived redaction:\n%s", leak, out)
+		}
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"api_key": "", "token_ref": "", "secret_n": float64(0), "secret_obj": map[string]any{},
+		"passwords": []any{}, "private_flag": false, "credential": nil, "plain": "keep-me"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("staged = %v, want %v", got, want)
 	}
 }

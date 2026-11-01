@@ -316,8 +316,26 @@ func (r *rehearsal) stage() error {
 // rehearseSecretKey matches the JSON keys whose string values are credentials.
 var rehearseSecretKey = regexp.MustCompile(`(?i)token|secret|passw|credential|api[_-]?key|private`)
 
-// redactSettingsJSON blanks the value of every secret-named key (a ${NAME}
-// reference stays: it names a secret, it is not one) and returns the staged
+// blankedJSON is the empty value of v's JSON type, so the staged file keeps the
+// shape the config loader expects and none of the content.
+func blankedJSON(v any) any {
+	switch v.(type) {
+	case string:
+		return ""
+	case float64:
+		return float64(0)
+	case bool:
+		return false
+	case map[string]any:
+		return map[string]any{}
+	case []any:
+		return []any{}
+	}
+	return nil
+}
+
+// redactSettingsJSON blanks the value of every secret-named key, of whatever
+// type or content, and returns the staged
 // bytes with every string value the staged file holds. A file that is not JSON
 // is refused rather than copied.
 func redactSettingsJSON(data []byte) ([]byte, []string, error) {
@@ -331,8 +349,10 @@ func redactSettingsJSON(data []byte) ([]byte, []string, error) {
 		switch t := v.(type) {
 		case map[string]any:
 			for k, x := range t {
-				if str, ok := x.(string); ok && rehearseSecretKey.MatchString(k) && !rehearseEnvRef.MatchString(str) {
-					t[k] = ""
+				if rehearseSecretKey.MatchString(k) {
+					// Whatever the value's type or content, nothing of it is staged
+					// (a ${NAME} reference included: the rehearsal needs no value).
+					t[k] = blankedJSON(x)
 					continue
 				}
 				t[k] = walk(x)
