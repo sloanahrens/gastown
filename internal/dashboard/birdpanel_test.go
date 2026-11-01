@@ -278,3 +278,35 @@ func TestBirdsPanelNeedsYou(t *testing.T) {
 		t.Errorf("drawBirds drew %d Needs you sections for reporters with no items, want none", len(none))
 	}
 }
+
+// A reporter whose every decision item was withheld still reaches the combined
+// list: its text is gone, so the note that one was withheld is the only thing
+// the operator would otherwise never see.
+func TestBirdsPanelNeedsYouWithheldOnly(t *testing.T) {
+	t.Parallel()
+
+	written := time.Date(2026, 11, 1, 11, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	state := map[string]any{"birds": []map[string]any{
+		{"bird": "fulmar", "state": "fresh", "written": written,
+			"decision_items_withheld": []string{"credential-assignment"}},
+		{"bird": "heron", "state": "fresh", "written": written},
+	}}
+
+	got := drawBirdsInDOM(t, state)
+	if len(got) != 1 {
+		t.Fatalf("drawBirds drew %d Needs you sections, want 1 for the reporter whose item was withheld", len(got))
+	}
+	ny := got[0]
+	if ny.Summary != "Needs you (1 withheld)" {
+		t.Errorf("the summary reads %q, want the withheld count when no item can be shown", ny.Summary)
+	}
+	if len(ny.Groups) != 1 || len(ny.Groups[0].Parts) != 2 {
+		t.Fatalf("the section drew %+v, want one group naming fulmar and its withheld item", ny.Groups)
+	}
+	if ny.Groups[0].Parts[0] != "fulmar" {
+		t.Errorf("the group names %q, want fulmar", ny.Groups[0].Parts[0])
+	}
+	if want := "withheld: a decision item looks like it holds a secret (credential-assignment)"; ny.Groups[0].Parts[1] != want {
+		t.Errorf("the group reads %q, want %q", ny.Groups[0].Parts[1], want)
+	}
+}

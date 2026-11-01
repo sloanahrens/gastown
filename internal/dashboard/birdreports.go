@@ -362,8 +362,9 @@ func (r *BirdReportsReader) readBird(now time.Time, name string) (BirdReport, bo
 // show, and the rule each dropped item matched. A missing, null or malformed
 // array yields no items: the decisions are a convenience over the summary, so
 // one that is not the array of questions the writer promises costs the row its
-// list and nothing else. Only the first birdDecisionItemsMax entries are read,
-// and an entry with no question left after cleaning is not a decision.
+// list and nothing else. At most birdDecisionItemsMax decisions are read, each
+// one either shown or noted as withheld; an entry with no question left after
+// cleaning is not a decision, so it neither appears nor counts against the cap.
 func birdDecisionItems(raw json.RawMessage) (items []BirdDecisionItem, withheld []string) {
 	if len(raw) == 0 {
 		return nil, nil
@@ -375,13 +376,13 @@ func birdDecisionItems(raw json.RawMessage) (items []BirdDecisionItem, withheld 
 	if err := json.Unmarshal(raw, &wire); err != nil {
 		return nil, nil
 	}
-	if len(wire) > birdDecisionItemsMax {
-		wire = wire[:birdDecisionItemsMax]
-	}
 	for _, w := range wire {
 		question := birdTextCut(w.Question, birdDecisionItemRunes)
 		if question == "" {
 			continue
+		}
+		if len(items)+len(withheld) >= birdDecisionItemsMax {
+			break
 		}
 		item := BirdDecisionItem{
 			Question:       question,
@@ -414,13 +415,13 @@ func birdRealDir(path string) bool {
 }
 
 // birdTextCut is a sidecar field as a row may show it: the control characters
-// reportsText strips, then cut to max runes so a bird that pastes a transcript
+// reportsText strips, then cut to n runes so a bird that pastes a transcript
 // into a field cannot grow the page with it. The cut is by rune, so a
 // multi-byte character is never split in half.
-func birdTextCut(s string, max int) string {
+func birdTextCut(s string, n int) string {
 	s = reportsText(s)
-	if runes := []rune(s); len(runes) > max {
-		return string(runes[:max])
+	if runes := []rune(s); len(runes) > n {
+		return string(runes[:n])
 	}
 	return s
 }

@@ -2217,8 +2217,11 @@ function drawBirds(panel, s) {
   // wrote most recently comes first, because its question is the one the day
   // is about. The list is closed until the operator opens it — the rows above
   // already say who is asking — and left out whole when no reporter has a
-  // decision to show.
-  const asks = rows.filter(b => b.decision_items && b.decision_items.length);
+  // decision to show. A reporter whose every item was withheld still gets its
+  // group: the item's text is gone, so the note that one was withheld is all
+  // the operator would otherwise never see.
+  const asks = rows.filter(b => (b.decision_items && b.decision_items.length) ||
+                                (b.decision_items_withheld && b.decision_items_withheld.length));
   asks.sort((a, b) => {
     const at = a.written ? new Date(a.written).getTime() : 0;
     const bt = b.written ? new Date(b.written).getTime() : 0;
@@ -2226,13 +2229,16 @@ function drawBirds(panel, s) {
     return a.bird < b.bird ? -1 : a.bird > b.bird ? 1 : 0;
   });
   if (asks.length) {
-    const total = asks.reduce((n, b) => n + b.decision_items.length, 0);
+    const total = asks.reduce((n, b) => n + (b.decision_items || []).length, 0);
+    // Count the items the operator can answer; a list holding only withheld
+    // decisions says how many were withheld rather than "Needs you (0)".
+    const held = asks.reduce((n, b) => n + (b.decision_items_withheld || []).length, 0);
     const needs = el("details", "needsyou");
-    needs.append(el("summary", "nysum", "Needs you (" + total + ")"));
+    needs.append(el("summary", "nysum", total ? "Needs you (" + total + ")" : "Needs you (" + held + " withheld)"));
     for (const b of asks) {
       const group = el("div", "nygroup");
       group.append(el("div", "nybird", b.bird || "–"));
-      for (const it of b.decision_items) {
+      for (const it of b.decision_items || []) {
         group.append(el("div", "nyq", it.question || ""));
         if (it.recommendation) group.append(el("div", "nyr", "→ " + it.recommendation));
       }

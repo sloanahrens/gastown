@@ -610,6 +610,23 @@ func TestBirdReportsDecisionItems(t *testing.T) {
 	]`)
 	writeBird(t, root, "empty-question", birdWrites{json: birdSidecarJSON(t, emptyQuestion)})
 
+	// Entries with no question are not decisions, so they do not spend the
+	// cap: eight of them ahead of two real questions still leave both shown.
+	padded := birdSidecarFor("padded", now, "padded title", "padded summary")
+	padded.DecisionItems = json.RawMessage(`[
+		{"question": "\u0007", "recommendation": "one"},
+		{"question": "\u0007", "recommendation": "two"},
+		{"question": "\u0007", "recommendation": "three"},
+		{"question": "\u0007", "recommendation": "four"},
+		{"question": "\u0007", "recommendation": "five"},
+		{"question": "\u0007", "recommendation": "six"},
+		{"question": "\u0007", "recommendation": "seven"},
+		{"question": "\u0007", "recommendation": "eight"},
+		{"question": "the real question?", "recommendation": "yes"},
+		{"question": "and the next?", "recommendation": "later"}
+	]`)
+	writeBird(t, root, "padded", birdWrites{json: birdSidecarJSON(t, padded)})
+
 	rows := NewBirdReportsReader(root).Read(now)
 	byName := birdByName(rows)
 
@@ -657,6 +674,11 @@ func TestBirdReportsDecisionItems(t *testing.T) {
 	kept := byName["empty-question"].DecisionItems
 	if len(kept) != 1 || kept[0].Question != "kept?" || kept[0].Recommendation != "" {
 		t.Errorf("empty-question carried %+v, want only the item with a question", kept)
+	}
+
+	paddedItems := byName["padded"].DecisionItems
+	if len(paddedItems) != 2 || paddedItems[0].Question != "the real question?" || paddedItems[1].Question != "and the next?" {
+		t.Errorf("padded carried %+v, want the two real questions past the entries that are not decisions", paddedItems)
 	}
 }
 
