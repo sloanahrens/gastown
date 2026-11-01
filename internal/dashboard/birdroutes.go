@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
+	"path/filepath"
 	"strings"
 )
 
@@ -37,12 +39,14 @@ func (h *Hub) serveBirds(w http.ResponseWriter, r *http.Request) {
 // against the name a bird writes and reads the file — Lstatting it, capping it
 // and screening it — so the route never builds a path from the URL and nothing
 // else in the reports directory can be asked for. Anything else — a page that
-// is not there, a name of another shape, or a hub with no birds directory —
-// answers 404; a page that looks like it holds a secret answers 403 and its
-// body says only that.
+// is not there, a name of another shape, or a birds directory that is not an
+// absolute path — answers 404; a page that looks like it holds a secret answers
+// 403 and its body says only that. The directory must be absolute because a
+// relative one would resolve against the dashboard's own working directory,
+// which is not the birds' runtime directory.
 func (h *Hub) serveBirdPage(w http.ResponseWriter, r *http.Request) {
 	bird, file, ok := birdPageParts(r.URL.EscapedPath())
-	if !ok || h.cfg.BirdsDir == "" {
+	if !ok || !filepath.IsAbs(h.cfg.BirdsDir) {
 		http.NotFound(w, r)
 		return
 	}
@@ -63,15 +67,17 @@ func (h *Hub) serveBirdPage(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(page)
 }
 
-// birdPathsAsWritten sends a bird path that the mux would clean to the bird
-// route as it was written. The mux cleans a "." or ".." segment and a doubled
-// separator out of a path before matching it, and answers a redirect to the
-// cleaned path; a bird path answers such a request 404 instead, because it
-// names no page, and a redirect would send a fetch or a frame to a path this
-// dashboard does not serve.
-func (h *Hub) birdPathsAsWritten(next http.Handler) http.Handler {
+// birdPathsToTheRoute answers every request that names the bird route before
+// the mux matches it. A bird path answers 404 to anything that is not exactly
+// one bird's page, and the mux would not: it cleans a "." or ".." segment and a
+// doubled separator out of the path and answers a redirect to the cleaned path,
+// which would send a fetch or a frame to a path this dashboard does not serve.
+// Which form the mux cleans — the escaped path or the decoded one — is its
+// business, so a request is answered here when either form names the route, and
+// the mux never sees a bird path at all.
+func (h *Hub) birdPathsToTheRoute(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if birdPathNeedsCleaning(r.URL.EscapedPath()) {
+		if birdPathNamed(r.URL) {
 			h.serveBirdPage(w, r)
 			return
 		}
@@ -79,16 +85,14 @@ func (h *Hub) birdPathsAsWritten(next http.Handler) http.Handler {
 	})
 }
 
-// birdPathNeedsCleaning reports whether the mux would clean escapedPath before
-// matching it: a "." or ".." segment, or a separator with nothing after it.
-// Only bird paths are considered; every other path keeps the mux's behavior.
-func birdPathNeedsCleaning(escapedPath string) bool {
-	rest, ok := strings.CutPrefix(escapedPath, birdPagePrefix)
-	if !ok {
-		return false
-	}
-	for _, seg := range strings.Split(rest, "/") {
-		if seg == "" || seg == "." || seg == ".." {
+// birdPathNamed reports whether u names the bird route or a path under it, as
+// written or as decoded. A "/birds" with no slash is the route's own entry and
+// names no page, but it is caught here too, so the mux does not answer its
+// redirect to the trailing slash.
+func birdPathNamed(u *url.URL) bool {
+	route := strings.TrimSuffix(birdPagePrefix, "/")
+	for _, path := range []string{u.EscapedPath(), u.Path} {
+		if path == route || strings.HasPrefix(path, birdPagePrefix) {
 			return true
 		}
 	}

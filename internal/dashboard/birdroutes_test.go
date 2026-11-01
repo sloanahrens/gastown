@@ -31,35 +31,42 @@ func birdRoutesServer(root string) *Hub {
 	return NewHub(Config{BirdsDir: root})
 }
 
-// A fresh page is served as the bird wrote it, under a policy of its own: no
-// script, an opaque origin, and none of the dashboard's own policy, which would
-// otherwise let the page read /api/state from this origin.
+// A fresh page and the page before it are served as the bird wrote them, under
+// a policy of their own: no script, an opaque origin, and none of the
+// dashboard's own policy, which would otherwise let the page read /api/state
+// from this origin.
 func TestBirdRoutesServeThePageInert(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	page := "<!doctype html><html><body><p>dunlin's day</p></body></html>"
-	writeBird(t, root, "dunlin", birdWrites{page: page})
+	pages := map[string]string{
+		"daily.html":      "<!doctype html><html><body><p>dunlin's day</p></body></html>",
+		"daily.prev.html": "<!doctype html><html><body><p>dunlin's day before</p></body></html>",
+	}
+	writeBird(t, root, "dunlin", birdWrites{page: pages["daily.html"], prev: pages["daily.prev.html"]})
+	h := birdRoutesServer(root)
 
-	rec := birdRouteGet(t, birdRoutesServer(root), "/birds/dunlin/daily.html")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status %d, want 200 (body %q)", rec.Code, rec.Body.String())
-	}
-	for header, want := range map[string]string{
-		"Content-Security-Policy": birdRouteCSP,
-		"X-Content-Type-Options":  "nosniff",
-		"Content-Type":            "text/html; charset=utf-8",
-		"Cache-Control":           "no-store",
-	} {
-		if got := rec.Header().Get(header); got != want {
-			t.Errorf("%s %q, want %q", header, got, want)
+	for file, page := range pages {
+		rec := birdRouteGet(t, h, "/birds/dunlin/"+file)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s: status %d, want 200 (body %q)", file, rec.Code, rec.Body.String())
 		}
-	}
-	if csp := rec.Header().Get("Content-Security-Policy"); strings.Contains(csp, "default-src 'self'") {
-		t.Errorf("the page carries the dashboard's own policy: %q", csp)
-	}
-	if got := rec.Body.String(); got != page {
-		t.Errorf("body %q, want the page as written", got)
+		for header, want := range map[string]string{
+			"Content-Security-Policy": birdRouteCSP,
+			"X-Content-Type-Options":  "nosniff",
+			"Content-Type":            "text/html; charset=utf-8",
+			"Cache-Control":           "no-store",
+		} {
+			if got := rec.Header().Get(header); got != want {
+				t.Errorf("GET %s: %s %q, want %q", file, header, got, want)
+			}
+		}
+		if csp := rec.Header().Get("Content-Security-Policy"); strings.Contains(csp, "default-src 'self'") {
+			t.Errorf("GET %s: the page carries the dashboard's own policy: %q", file, csp)
+		}
+		if got := rec.Body.String(); got != page {
+			t.Errorf("GET %s: body %q, want the page as written", file, got)
+		}
 	}
 }
 
@@ -84,6 +91,8 @@ func TestBirdRoutesRefuseEverythingElse(t *testing.T) {
 	h := birdRoutesServer(root)
 
 	for _, path := range []string{
+		"/birds",
+		"/birds/",
 		"/birds/../x",
 		"/birds/./daily.html",
 		"/birds/%2e%2e/daily.html",
@@ -117,25 +126,32 @@ func TestBirdRoutesRefuseEverythingElse(t *testing.T) {
 	}
 }
 
-// A hub with no birds directory serves no page, even when the working directory
-// holds a file at the relative path an empty directory name would build: the
-// route refuses before it reads anything.
-//
-//testpolicy:allow parallel — the working directory is the input under test, and the test changes it for the process
-func TestBirdRoutesRefuseAnUnwiredHub(t *testing.T) {
-	dir := t.TempDir()
-	reports := filepath.Join(dir, "dunlin", "reports")
-	if err := os.MkdirAll(reports, 0o755); err != nil {
-		t.Fatalf("mkdir the relative path an empty directory name builds: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(reports, "daily.html"), []byte("a page joined from the working directory"), 0o644); err != nil {
-		t.Fatalf("write the page at the relative path: %v", err)
-	}
-	//testpolicy:allow no-chdir — the cwd is the input under test: an empty birds directory would resolve against it
-	t.Chdir(dir)
+// A birds directory that is not an absolute path serves nothing, even when the
+// path as written reaches a real page from the working directory: a relative
+// directory resolves against the dashboard's own working directory, which is
+// not the birds' runtime directory, so the route refuses before it reads.
+func TestBirdRoutesRefuseADirectoryThatIsNotAbsolute(t *testing.T) {
+	t.Parallel()
 
-	if rec := birdRouteGet(t, NewHub(Config{}), "/birds/dunlin/daily.html"); rec.Code != http.StatusNotFound {
-		t.Errorf("unwired hub: status %d, want 404 (body %q)", rec.Code, rec.Body.String())
+	root := t.TempDir()
+	writeBird(t, root, "dunlin", birdWrites{page: "<p>a page behind a relative path</p>"})
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	rel, err := filepath.Rel(wd, root)
+	if err != nil {
+		t.Fatalf("rel from the working directory to the birds' root: %v", err)
+	}
+	if filepath.IsAbs(rel) {
+		t.Fatalf("%q is absolute, so the case under test is not built", rel)
+	}
+
+	for _, dir := range []string{"", rel} {
+		h := NewHub(Config{BirdsDir: dir})
+		if rec := birdRouteGet(t, h, "/birds/dunlin/daily.html"); rec.Code != http.StatusNotFound {
+			t.Errorf("BirdsDir %q: status %d, want 404 (body %q)", dir, rec.Code, rec.Body.String())
+		}
 	}
 }
 

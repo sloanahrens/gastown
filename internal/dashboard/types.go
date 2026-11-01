@@ -826,9 +826,9 @@ type Config struct {
 	Reports    func() *Reports
 	ReportsDir string
 	// Birds reads the birds' daily reports for the Reports page's list, and
-	// BirdsDir is the runtime directory they write under: /api/birds returns the
-	// rows of what it last read, and /birds/<bird>/<file> reads one bird's page
-	// from inside it when the page is asked for.
+	// BirdsDir is the runtime directory they write under: /api/birds calls Birds
+	// for its rows, and /birds/<bird>/<file> reads one bird's page from inside
+	// BirdsDir when the page is asked for.
 	Birds    func() []BirdReport
 	BirdsDir string
 	// Questions reads the overseer's open questions for Sloan.

@@ -38,7 +38,7 @@ func (h *Hub) Handler() http.Handler {
 	mux.HandleFunc("/api/birds", h.serveBirds)
 	mux.HandleFunc(birdPagePrefix, h.serveBirdPage)
 	mux.HandleFunc("/stream", h.serveStream)
-	return guard(h.birdPathsAsWritten(mux))
+	return guard(h.birdPathsToTheRoute(mux))
 }
 
 func guard(next http.Handler) http.Handler {
