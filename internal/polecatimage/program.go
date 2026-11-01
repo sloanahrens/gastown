@@ -343,12 +343,19 @@ func seedCloneMain(args []string, stdout, stderr io.Writer) int {
 	pinsText := flags.String("pins", "", "the seed pins, as the seed Job renders them")
 	dest := flags.String("dest", defaultSeedSource, "the directory each pinned rig is checked out under")
 	root := flags.String("root", defaultSeedRoot, "the shared cache claim, whose marker says whether the pins are already checked out")
+	tokenFile := flags.String("token-file", "", "the file holding the read-only Forgejo token the clone authenticates with; empty clones anonymously")
 	if err := flags.Parse(args); err != nil {
 		return 3
 	}
 	pins, err := decodePins(*pinsText)
+	token := ""
+	if err == nil && *tokenFile != "" {
+		// Read at run time: the file is the Secret the Job mounts, and the token never reaches an
+		// argument, the manifest or a log.
+		token, err = readCloneToken(*tokenFile)
+	}
 	if err == nil {
-		err = CloneSeed(*dest, *root, pins, OSFiles{}, execSeedRun, outLogf(stdout))
+		err = CloneSeed(*dest, *root, pins, token, OSFiles{}, execSeedRun, outLogf(stdout))
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "seed-clone: %v\n", err)
