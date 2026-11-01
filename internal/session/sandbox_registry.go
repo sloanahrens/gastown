@@ -119,9 +119,11 @@ func sandboxRecordWorkspace(townRoot, rig string) (string, error) {
 }
 
 // sandboxRigPrefix is the beads prefix the town's registry gives rig. Only a
-// registry file that is absent takes config.GetRigPrefix's default: a registry
-// that exists must name the rig, because "gt" for a missing entry guesses the
-// workspace of another rig.
+// registry file that is absent takes config.GetRigPrefix's default "gt": a town
+// with no mayor/rigs.json (its registry is mayor/town.json) must still spawn,
+// and failing closed there would break every sandbox. A registry that exists
+// must name the rig with a beads prefix, because "gt" for a present but
+// unusable entry guesses the workspace of another rig.
 func sandboxRigPrefix(townRoot, rig string) (string, error) {
 	path := filepath.Join(townRoot, "mayor", "rigs.json")
 	cfg, err := config.LoadRigsConfig(path)
