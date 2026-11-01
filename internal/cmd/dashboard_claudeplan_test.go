@@ -72,7 +72,10 @@ func TestDashboardClaudePlanReaderCarriesTheAPIEquivalentDollars(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	now := time.Now()
+	// A fixed instant in the middle of a month: the month rollup starts on the
+	// first, so a record an hour before the real clock fell outside it in the
+	// first hour of every UTC month (gt-lllti).
+	now := time.Date(2026, time.October, 15, 12, 0, 0, 0, time.UTC)
 	writeClaudePlanSeries(t, root, now)
 
 	// One complete record ending an hour ago, of a model the price file knows.
