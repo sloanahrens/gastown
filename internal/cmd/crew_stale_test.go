@@ -3,7 +3,7 @@ package cmd
 import (
 	"bytes"
 	"errors"
-	"os"
+	"io/fs"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -12,6 +12,76 @@ import (
 
 	"github.com/steveyegge/gastown/internal/crewfresh"
 )
+
+// fakeCrewStaleFS is the town the walk reads: the entries each directory
+// holds, when each FETCH_HEAD was written, and the errors to answer with
+// instead. Every call is recorded, so a test can assert the walk only asked to
+// read.
+type fakeCrewStaleFS struct {
+	dirs    map[string][]fs.DirEntry
+	dirErrs map[string]error
+	mtime   map[string]time.Time
+	fileErr map[string]error
+	calls   []string
+}
+
+func newFakeCrewStaleFS() *fakeCrewStaleFS {
+	return &fakeCrewStaleFS{
+		dirs:    map[string][]fs.DirEntry{},
+		dirErrs: map[string]error{},
+		mtime:   map[string]time.Time{},
+		fileErr: map[string]error{},
+	}
+}
+
+func (f *fakeCrewStaleFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	f.calls = append(f.calls, "ReadDir "+name)
+	if err := f.dirErrs[name]; err != nil {
+		return nil, err
+	}
+	entries, ok := f.dirs[name]
+	if !ok {
+		return nil, &fs.PathError{Op: "readdir", Path: name, Err: fs.ErrNotExist}
+	}
+	return entries, nil
+}
+
+func (f *fakeCrewStaleFS) Stat(name string) (fs.FileInfo, error) {
+	f.calls = append(f.calls, "Stat "+name)
+	if err := f.fileErr[name]; err != nil {
+		return nil, err
+	}
+	at, ok := f.mtime[name]
+	if !ok {
+		return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrNotExist}
+	}
+	return fileInfo{name: filepath.Base(name), at: at}, nil
+}
+
+// entry is one name in a fake directory listing: the walk asks a listing for a
+// name and whether it is a directory, and nothing else.
+func entry(name string, dir bool) fs.DirEntry {
+	return fs.FileInfoToDirEntry(fileInfo{name: name, dir: dir})
+}
+
+type fileInfo struct {
+	name string
+	dir  bool
+	at   time.Time
+}
+
+func (i fileInfo) Name() string       { return i.name }
+func (i fileInfo) Size() int64        { return 0 }
+func (i fileInfo) ModTime() time.Time { return i.at }
+func (i fileInfo) IsDir() bool        { return i.dir }
+func (i fileInfo) Sys() any           { return nil }
+
+func (i fileInfo) Mode() fs.FileMode {
+	if i.dir {
+		return fs.ModeDir | 0o755
+	}
+	return 0o644
+}
 
 // fakeCrewStaleGit answers one checkout's reads from the test's tables and
 // records every call, so a test can assert what the command asked and that it
@@ -71,19 +141,20 @@ func (r fakeCrewStaleRepo) CountCommitsBehind(ref string) (int, error) {
 	return r.town.behind[r.root], nil
 }
 
-// staleTown is a town on disk under t.TempDir: crew clones whose FETCH_HEAD
-// carries the fetch time the test sets, plus the git surface a fake answers.
+// staleTown is a town the walk reads through fakes: the rigs and crew clones
+// the fake filesystem holds, and the git answers for each clone.
 type staleTown struct {
 	root string
 	now  time.Time
+	fs   *fakeCrewStaleFS
 	git  *fakeCrewStaleGit
 }
 
-func newStaleTown(t *testing.T) *staleTown {
-	t.Helper()
+func newStaleTown() *staleTown {
 	return &staleTown{
-		root: t.TempDir(),
+		root: "/town",
 		now:  time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC),
+		fs:   newFakeCrewStaleFS(),
 		git: &fakeCrewStaleGit{
 			branch:    map[string]string{},
 			behind:    map[string]int{},
@@ -93,25 +164,29 @@ func newStaleTown(t *testing.T) *staleTown {
 	}
 }
 
-// clone creates <town>/<rig>/crew/<dir>, with a FETCH_HEAD last modified at
+// addDir records that path holds entries, keeping what it already holds.
+func (s *staleTown) addDir(path string, entries ...fs.DirEntry) {
+	s.fs.dirs[path] = append(s.fs.dirs[path], entries...)
+}
+
+// rig adds a directory to the town root, once however many clones it holds.
+func (s *staleTown) rig(name string) {
+	if slices.ContainsFunc(s.fs.dirs[s.root], func(e fs.DirEntry) bool { return e.Name() == name }) {
+		return
+	}
+	s.addDir(s.root, entry(name, true))
+}
+
+// clone adds <town>/<rig>/crew/<dir>, with a FETCH_HEAD last written at
 // fetched. A zero fetched leaves no FETCH_HEAD: the clone never fetched.
-func (s *staleTown) clone(t *testing.T, rig, dir string, fetched time.Time) string {
-	t.Helper()
-	root := filepath.Join(s.root, rig, "crew", dir)
-	gitDir := filepath.Join(root, ".git")
-	if err := os.MkdirAll(gitDir, 0o755); err != nil {
-		t.Fatalf("create %s: %v", gitDir, err)
-	}
+func (s *staleTown) clone(rig, dir string, fetched time.Time) string {
+	s.rig(rig)
+	crewDir := filepath.Join(s.root, rig, "crew")
+	s.addDir(crewDir, entry(dir, true))
+	root := filepath.Join(crewDir, dir)
 	s.git.branch[root] = "main"
-	head := filepath.Join(gitDir, "FETCH_HEAD")
-	if fetched.IsZero() {
-		return root
-	}
-	if err := os.WriteFile(head, []byte("deadbeef\t\tbranch 'main' of origin\n"), 0o644); err != nil {
-		t.Fatalf("write %s: %v", head, err)
-	}
-	if err := os.Chtimes(head, fetched, fetched); err != nil {
-		t.Fatalf("set the mtime of %s: %v", head, err)
+	if !fetched.IsZero() {
+		s.fs.mtime[filepath.Join(root, ".git", "FETCH_HEAD")] = fetched
 	}
 	return root
 }
@@ -120,43 +195,31 @@ func (s *staleTown) deps() crewStaleDeps {
 	return crewStaleDeps{
 		findTown: func() (string, error) { return s.root, nil },
 		now:      func() time.Time { return s.now },
+		fs:       s.fs,
 		repos:    s.git.repo,
 	}
 }
 
 // TestCrewStaleListsOnlyCrewCheckoutsPastTheLimit pins what the report names:
 // the five-day clone appears, and neither a clone fetched two hours ago — in
-// this rig or the other one — nor mayor/rig nor a polecat worktree does.
+// this rig or the other one — nor the town's mayor directory nor the rig's own
+// mayor/rig and polecat worktrees does.
 func TestCrewStaleListsOnlyCrewCheckoutsPastTheLimit(t *testing.T) {
 	t.Parallel()
-	town := newStaleTown(t)
-	fresh := town.clone(t, "gastown", "dunlin", town.now.Add(-2*time.Hour))
-	stale := town.clone(t, "gastown", "merlin", town.now.Add(-5*24*time.Hour))
-	other := town.clone(t, "devops", "otto", town.now.Add(-time.Hour))
+	town := newStaleTown()
+	town.rig("mayor")  // the town's own bookkeeping directory, not a rig
+	town.rig("review") // a rig with no crew directory
+	fresh := town.clone("gastown", "dunlin", town.now.Add(-2*time.Hour))
+	stale := town.clone("gastown", "merlin", town.now.Add(-5*24*time.Hour))
+	town.clone("devops", "otto", town.now.Add(-time.Hour))
 	town.git.behind[fresh] = 0
 	town.git.behind[stale] = 7
-	town.git.behind[other] = 0
 
-	// A town holds a rig with no crew, its own bookkeeping directory, and
-	// these two checkouts; none of them is a crew clone, so none may be read
-	// or reported.
-	if err := os.MkdirAll(filepath.Join(town.root, "review"), 0o755); err != nil {
-		t.Fatalf("create a rig with no crew: %v", err)
-	}
-	notCrew := []string{
-		filepath.Join(town.root, "gastown", "mayor", "rig"),
-		filepath.Join(town.root, "gastown", "polecats", "coma", "gastown"),
-		filepath.Join(town.root, "devops", "polecats"),
-	}
-	for _, root := range notCrew {
-		if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
-			t.Fatalf("create %s: %v", root, err)
-		}
-		town.git.branch[root] = "main"
-	}
-	if err := os.MkdirAll(filepath.Join(town.root, ".beads", "crew"), 0o755); err != nil {
-		t.Fatalf("create the town's .beads: %v", err)
-	}
+	// The fake holds these so a walk that reached into them would show in the
+	// recorded calls rather than finding an empty town.
+	town.addDir(filepath.Join(town.root, "gastown", "mayor"), entry("rig", true))
+	town.addDir(filepath.Join(town.root, "gastown", "polecats"), entry("coma", true))
+	town.addDir(filepath.Join(town.root, "gastown", "polecats", "coma", "gastown"), entry(".git", true))
 
 	var out bytes.Buffer
 	if err := crewStale(&out, town.deps()); err != nil {
@@ -167,9 +230,42 @@ func TestCrewStaleListsOnlyCrewCheckoutsPastTheLimit(t *testing.T) {
 	if got := out.String(); got != want {
 		t.Errorf("gt crew stale printed %q, want %q", got, want)
 	}
-	for _, call := range town.git.calls {
-		if strings.Contains(call, "mayor") || strings.Contains(call, "polecats") || strings.Contains(call, ".beads") {
+	for _, call := range append(slices.Clone(town.git.calls), town.fs.calls...) {
+		if strings.Contains(call, "mayor/rig") || strings.Contains(call, "polecats/") {
 			t.Errorf("gt crew stale read a checkout that is not a crew clone: %q", call)
+		}
+	}
+}
+
+// TestCrewStaleDoesNotFetch pins the command's whole surface: every git call
+// is a read and every filesystem call is a read, so no later change can add a
+// fetch or a write without this failing.
+func TestCrewStaleDoesNotFetch(t *testing.T) {
+	t.Parallel()
+	town := newStaleTown()
+	root := town.clone("gastown", "merlin", town.now.Add(-5*24*time.Hour))
+	town.git.behind[root] = 3
+
+	var out bytes.Buffer
+	if err := crewStale(&out, town.deps()); err != nil {
+		t.Fatalf("crewStale() = %v, want no error", err)
+	}
+
+	if len(town.git.calls) == 0 || len(town.fs.calls) == 0 {
+		t.Fatal("no read was recorded, so this test proves nothing")
+	}
+	gitReads := []string{"CommonDir", "CurrentBranch", "CountCommitsBehind"}
+	for _, call := range town.git.calls {
+		method, _, _ := strings.Cut(call, " ")
+		if !slices.Contains(gitReads, method) {
+			t.Errorf("gt crew stale asked git to %s, and it may only read", call)
+		}
+	}
+	fsReads := []string{"ReadDir", "Stat"}
+	for _, call := range town.fs.calls {
+		method, _, _ := strings.Cut(call, " ")
+		if !slices.Contains(fsReads, method) {
+			t.Errorf("gt crew stale asked the filesystem to %s, and it may only read", call)
 		}
 	}
 }
@@ -179,8 +275,8 @@ func TestCrewStaleListsOnlyCrewCheckoutsPastTheLimit(t *testing.T) {
 // failure, so the line shows it instead of a reason.
 func TestCrewStaleListsACloneThatNeverFetched(t *testing.T) {
 	t.Parallel()
-	town := newStaleTown(t)
-	town.clone(t, "gastown", "dunlin", time.Time{})
+	town := newStaleTown()
+	town.clone("gastown", "dunlin", time.Time{})
 
 	var out bytes.Buffer
 	if err := crewStale(&out, town.deps()); err != nil {
@@ -192,12 +288,31 @@ func TestCrewStaleListsACloneThatNeverFetched(t *testing.T) {
 	}
 }
 
+// TestCrewStaleListsACloneDatedInTheFuture covers a FETCH_HEAD written after
+// this run: its age cannot be printed as a stale duration, and treating it as
+// fresh would drop the clone from the report entirely. It is listed with the
+// reason instead.
+func TestCrewStaleListsACloneDatedInTheFuture(t *testing.T) {
+	t.Parallel()
+	town := newStaleTown()
+	town.clone("gastown", "dunlin", town.now.Add(2*time.Hour))
+
+	var out bytes.Buffer
+	if err := crewStale(&out, town.deps()); err != nil {
+		t.Fatalf("crewStale() = %v, want no error", err)
+	}
+	want := "gastown/dunlin  main  ?  0  FETCH_HEAD is dated in the future\n"
+	if got := out.String(); got != want {
+		t.Errorf("gt crew stale printed %q, want %q", got, want)
+	}
+}
+
 // TestCrewStaleShowsADetachedHead pins the rendering of the branch read that
 // prints HEAD: the report names it detached rather than calling it a branch.
 func TestCrewStaleShowsADetachedHead(t *testing.T) {
 	t.Parallel()
-	town := newStaleTown(t)
-	root := town.clone(t, "gastown", "dunlin", town.now.Add(-2*24*time.Hour))
+	town := newStaleTown()
+	root := town.clone("gastown", "dunlin", town.now.Add(-2*24*time.Hour))
 	town.git.branch[root] = "HEAD"
 	town.git.behind[root] = 4
 
@@ -217,21 +332,10 @@ func TestCrewStaleShowsADetachedHead(t *testing.T) {
 // down, so it is the time the report counts.
 func TestCrewStaleReadsTheSharedFetchHead(t *testing.T) {
 	t.Parallel()
-	town := newStaleTown(t)
-	root := town.clone(t, "gastown", "dunlin-fix-flake", town.now.Add(-2*time.Hour))
-
+	town := newStaleTown()
+	root := town.clone("gastown", "dunlin-fix-flake", town.now.Add(-2*time.Hour))
 	shared := filepath.Join(town.root, "gastown", ".repo.git")
-	if err := os.MkdirAll(shared, 0o755); err != nil {
-		t.Fatalf("create %s: %v", shared, err)
-	}
-	head := filepath.Join(shared, "FETCH_HEAD")
-	if err := os.WriteFile(head, []byte("deadbeef\t\tbranch 'main' of origin\n"), 0o644); err != nil {
-		t.Fatalf("write %s: %v", head, err)
-	}
-	fetched := town.now.Add(-5 * 24 * time.Hour)
-	if err := os.Chtimes(head, fetched, fetched); err != nil {
-		t.Fatalf("set the mtime of %s: %v", head, err)
-	}
+	town.fs.mtime[filepath.Join(shared, "FETCH_HEAD")] = town.now.Add(-5 * 24 * time.Hour)
 	town.git.commonDir[root] = shared
 
 	var out bytes.Buffer
@@ -241,47 +345,6 @@ func TestCrewStaleReadsTheSharedFetchHead(t *testing.T) {
 	want := "gastown/dunlin-fix-flake  main  120h  0\n"
 	if got := out.String(); got != want {
 		t.Errorf("gt crew stale printed %q, want %q", got, want)
-	}
-}
-
-// TestCrewStaleDoesNotFetch pins the command's whole git surface: every call
-// it makes is a read, and the clone's FETCH_HEAD is left standing after the
-// run. The fake records each call, so a call a later change adds is recorded
-// here and fails the test.
-func TestCrewStaleDoesNotFetch(t *testing.T) {
-	t.Parallel()
-	town := newStaleTown(t)
-	root := town.clone(t, "gastown", "merlin", town.now.Add(-5*24*time.Hour))
-	town.git.behind[root] = 3
-	head := filepath.Join(root, ".git", "FETCH_HEAD")
-	before, err := os.Stat(head)
-	if err != nil {
-		t.Fatalf("stat %s: %v", head, err)
-	}
-
-	var out bytes.Buffer
-	if err := crewStale(&out, town.deps()); err != nil {
-		t.Fatalf("crewStale() = %v, want no error", err)
-	}
-
-	if len(town.git.calls) == 0 {
-		t.Fatal("no git call was recorded, so this test proves nothing")
-	}
-	reads := []string{"CommonDir", "CurrentBranch", "CountCommitsBehind"}
-	for _, call := range town.git.calls {
-		method, _, _ := strings.Cut(call, " ")
-		if !slices.Contains(reads, method) {
-			t.Errorf("gt crew stale asked git to %s, and it may only read", call)
-		}
-	}
-
-	after, err := os.Stat(head)
-	if err != nil {
-		t.Fatalf("stat %s after the run: %v", head, err)
-	}
-	if !after.ModTime().Equal(before.ModTime()) {
-		t.Errorf("FETCH_HEAD mtime moved from %v to %v: the command wrote to the clone",
-			before.ModTime(), after.ModTime())
 	}
 }
 
@@ -321,6 +384,15 @@ func TestCrewStaleLine(t *testing.T) {
 			want: "gastown/dunlin  main  never  0",
 		},
 		{
+			name: "a fetch time that could not be trusted",
+			reading: crewStaleReading{
+				clone: crewfresh.Clone{Rig: "gastown", Dir: "dunlin", Branch: "main",
+					Err: "FETCH_HEAD is dated in the future"},
+				branchOK: true, behindOK: true,
+			},
+			want: "gastown/dunlin  main  ?  0  FETCH_HEAD is dated in the future",
+		},
+		{
 			name: "a behind count that could not be read",
 			reading: crewStaleReading{
 				clone: crewfresh.Clone{Rig: "gastown", Dir: "dunlin", Branch: "main",
@@ -354,11 +426,11 @@ func TestCrewStaleLine(t *testing.T) {
 // not a reason to withhold the rest of the town.
 func TestCrewStaleReportsUnreadableCheckouts(t *testing.T) {
 	t.Parallel()
-	town := newStaleTown(t)
+	town := newStaleTown()
 	fetched := town.now.Add(-5 * 24 * time.Hour)
-	noBranch := town.clone(t, "gastown", "aaa", fetched)
-	noBehind := town.clone(t, "gastown", "bbb", fetched)
-	noGitDir := town.clone(t, "gastown", "ccc", fetched)
+	noBranch := town.clone("gastown", "aaa", fetched)
+	noBehind := town.clone("gastown", "bbb", fetched)
+	noGitDir := town.clone("gastown", "ccc", fetched)
 	town.git.fail[noBranch] = "branch"
 	town.git.fail[noBehind] = "behind"
 	town.git.fail[noGitDir] = "gitdir"
@@ -383,22 +455,14 @@ func TestCrewStaleReportsUnreadableCheckouts(t *testing.T) {
 }
 
 // TestCrewStaleReportsAnUnreadableFetchHead drives the stat failure that is
-// not absence: the checkout's git path is a file, so FETCH_HEAD cannot be
-// reached. That is a read that failed, not a clone that never fetched, so the
-// line names the question instead of showing "never".
+// not absence: FETCH_HEAD exists but cannot be read. That is a read that
+// failed, not a clone that never fetched, so the line names the question
+// instead of showing "never".
 func TestCrewStaleReportsAnUnreadableFetchHead(t *testing.T) {
 	t.Parallel()
-	town := newStaleTown(t)
-	root := filepath.Join(town.root, "gastown", "crew", "dunlin")
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		t.Fatalf("create %s: %v", root, err)
-	}
-	// A linked checkout's .git is a file, and a common dir that does not
-	// resolve leaves FETCH_HEAD's parent a non-directory.
-	if err := os.WriteFile(filepath.Join(root, ".git"), []byte("gitdir: lost\n"), 0o644); err != nil {
-		t.Fatalf("write the .git file: %v", err)
-	}
-	town.git.branch[root] = "main"
+	town := newStaleTown()
+	root := town.clone("gastown", "dunlin", town.now.Add(-5*24*time.Hour))
+	town.fs.fileErr[filepath.Join(root, ".git", "FETCH_HEAD")] = errors.New("permission denied")
 
 	var out bytes.Buffer
 	if err := crewStale(&out, town.deps()); err != nil {
@@ -414,8 +478,8 @@ func TestCrewStaleReportsAnUnreadableFetchHead(t *testing.T) {
 // report relies on: empty output means no crew clone is stale.
 func TestCrewStalePrintsNothingWhenEveryCloneIsFresh(t *testing.T) {
 	t.Parallel()
-	town := newStaleTown(t)
-	town.clone(t, "gastown", "dunlin", town.now.Add(-2*time.Hour))
+	town := newStaleTown()
+	town.clone("gastown", "dunlin", town.now.Add(-2*time.Hour))
 
 	var out bytes.Buffer
 	if err := crewStale(&out, town.deps()); err != nil {
@@ -431,52 +495,34 @@ func TestCrewStalePrintsNothingWhenEveryCloneIsFresh(t *testing.T) {
 // is not a directory are errors, never an empty report.
 func TestCrewStaleRefusesWhatItCannotList(t *testing.T) {
 	t.Parallel()
-	crewPathIsFile := func(t *testing.T) crewStaleDeps {
-		t.Helper()
-		root := t.TempDir()
-		if err := os.MkdirAll(filepath.Join(root, "gastown"), 0o755); err != nil {
-			t.Fatalf("create the rig: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(root, "gastown", "crew"), nil, 0o644); err != nil {
-			t.Fatalf("write the crew path: %v", err)
-		}
-		return crewStaleDeps{
-			findTown: func() (string, error) { return root, nil },
-			now:      time.Now,
-			repos:    (&fakeCrewStaleGit{}).repo,
-		}
-	}
-
 	cases := []struct {
 		name    string
-		deps    func(t *testing.T) crewStaleDeps
+		deps    func() crewStaleDeps
 		wantErr string
 	}{
 		{
 			name: "a town root that cannot be found",
-			deps: func(t *testing.T) crewStaleDeps {
-				return crewStaleDeps{
-					findTown: func() (string, error) { return "", errors.New("not in a town") },
-					now:      time.Now,
-					repos:    (&fakeCrewStaleGit{}).repo,
-				}
+			deps: func() crewStaleDeps {
+				deps := newStaleTown().deps()
+				deps.findTown = func() (string, error) { return "", errors.New("not in a town") }
+				return deps
 			},
 			wantErr: "find the town root",
 		},
 		{
-			name: "a town root that does not exist",
-			deps: func(t *testing.T) crewStaleDeps {
-				return crewStaleDeps{
-					findTown: func() (string, error) { return filepath.Join(t.TempDir(), "gone"), nil },
-					now:      time.Now,
-					repos:    (&fakeCrewStaleGit{}).repo,
-				}
-			},
+			name:    "a town root that does not exist",
+			deps:    func() crewStaleDeps { return newStaleTown().deps() },
 			wantErr: "read the town root",
 		},
 		{
-			name:    "a crew path that is a file",
-			deps:    crewPathIsFile,
+			name: "a crew path that is a file",
+			deps: func() crewStaleDeps {
+				town := newStaleTown()
+				town.rig("gastown")
+				crewDir := filepath.Join(town.root, "gastown", "crew")
+				town.fs.dirErrs[crewDir] = &fs.PathError{Op: "readdir", Path: crewDir, Err: fs.ErrInvalid}
+				return town.deps()
+			},
 			wantErr: "read the crew directory",
 		},
 	}
@@ -484,7 +530,7 @@ func TestCrewStaleRefusesWhatItCannotList(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var out bytes.Buffer
-			err := crewStale(&out, tc.deps(t))
+			err := crewStale(&out, tc.deps())
 			if err == nil {
 				t.Fatalf("crewStale() = nil, want an error naming %q", tc.wantErr)
 			}
