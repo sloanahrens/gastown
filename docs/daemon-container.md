@@ -118,6 +118,16 @@ prints is the tag `gt-daemon:<rev>`, and
 prints an image id. Never point `--gt-src`, `--bd-src`, `--om-src` or `--out` at
 a canonical `mayor/rig` clone: the command refuses one.
 
+**Before any L3 window: the container-config rehearsal.** From `~/gt`, run
+`gt daemon rehearse --live-root ~/gt --image gt-daemon:<rev>`. It stages a scratch
+copy of the live settings under `.runtime/rehearsal/town` (daemon.env keeps its
+keys and loses every value), checks the image against it (`gt config validate`,
+every program the daemon execs, every absolute path and every
+host.docker.internal address a setting names), starts the entrypoint on the copy
+with no network, and waits up to `--budget` (3 minutes) for a heartbeat. It
+prints one row per check, lists every failure, and exits non-zero if a required
+check failed. The window does not open until it exits zero.
+
 **Step 3. Render and start the scratch project.**
 
 Run these from `<scratch-parent>`, a directory that is neither the live town nor
