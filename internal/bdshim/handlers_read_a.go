@@ -183,8 +183,19 @@ func showHandler(env Env, d Decision) int {
 	return 0
 }
 
+// readStore is the part of a rig's store the read rows use. The handlers open
+// the full backend.Store; the narrow interface lets a test drive each read's
+// failure without a tracker server.
+type readStore interface {
+	Show(id string) (*beads.Issue, error)
+	ShowMultiple(ids []string) (map[string]*beads.Issue, error)
+	List(opts beads.ListOptions) ([]*beads.Issue, error)
+	Children(parentID string) ([]*beads.Issue, error)
+	Comments(id string) ([]beads.Comment, error)
+}
+
 // showRow reads one issue and everything bd's show row prints about it.
-func showRow(st backend.Store, id string) (bdShowIssue, error) {
+func showRow(st readStore, id string) (bdShowIssue, error) {
 	is, err := st.Show(id)
 	if err != nil {
 		return bdShowIssue{}, fmt.Errorf("show %s: %w", id, err)
@@ -277,7 +288,7 @@ func childrenHandler(env Env, d Decision) int {
 // listRows renders listed issues as bd's rows. Each issue is read again for
 // the dependencies and dependents its row counts, and its comments for the
 // count bd prints.
-func listRows(st backend.Store, issues []*beads.Issue) ([]bdListIssue, error) {
+func listRows(st readStore, issues []*beads.Issue) ([]bdListIssue, error) {
 	rows := make([]bdListIssue, 0, len(issues))
 	for _, is := range issues {
 		full, err := st.Show(is.ID)

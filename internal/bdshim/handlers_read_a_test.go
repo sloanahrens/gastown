@@ -3,6 +3,7 @@ package bdshim
 import (
 	"bytes"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -275,3 +276,158 @@ func TestPrintBDAnswerReportsAWriteFailure(t *testing.T) {
 type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("write refused") }
+
+// TestPrintBDAnswerReportsAValueItCannotRender: an answer the printer cannot
+// marshal is the shim's error, not a half-written answer.
+func TestPrintBDAnswerReportsAValueItCannotRender(t *testing.T) {
+	t.Parallel()
+	if err := printBDAnswer(failingWriter{}, make(chan int)); err == nil {
+		t.Fatal("printBDAnswer passed a value it could not render")
+	}
+}
+
+// TestShowRowReportsEachStoreFailure: every read a show row makes can fail, and
+// each failure is reported with the issue it was reading.
+func TestShowRowReportsEachStoreFailure(t *testing.T) {
+	t.Parallel()
+	withDep := &beads.Issue{ID: "fx-1", Dependencies: []beads.IssueDep{{ID: "fx-2", DependencyType: "blocks"}}}
+	tests := []struct {
+		name  string
+		store stubReadStore
+		want  string
+	}{
+		{
+			name:  "the issue cannot be read",
+			store: stubReadStore{show: func(string) (*beads.Issue, error) { return nil, errors.New("read refused") }},
+			want:  "show fx-1: read refused",
+		},
+		{
+			name: "the beads it depends on cannot be read",
+			store: stubReadStore{
+				show:         func(string) (*beads.Issue, error) { return withDep, nil },
+				showMultiple: func([]string) (map[string]*beads.Issue, error) { return nil, errors.New("targets refused") },
+			},
+			want: "reading the beads it depends on: targets refused",
+		},
+		{
+			name: "its comments cannot be read",
+			store: stubReadStore{
+				show:         func(string) (*beads.Issue, error) { return withDep, nil },
+				showMultiple: func([]string) (map[string]*beads.Issue, error) { return map[string]*beads.Issue{}, nil },
+				comments:     func(string) ([]beads.Comment, error) { return nil, errors.New("comments refused") },
+			},
+			want: "reading its comments: comments refused",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := showRow(tc.store, "fx-1")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("showRow = %v, want it to hold %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestListRowsReportsEachStoreFailure: the re-read and the comment count a list
+// row makes can each fail, and each failure names the issue.
+func TestListRowsReportsEachStoreFailure(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		store stubReadStore
+		want  string
+	}{
+		{
+			name:  "the issue cannot be read again",
+			store: stubReadStore{show: func(string) (*beads.Issue, error) { return nil, errors.New("read refused") }},
+			want:  "reading fx-1: read refused",
+		},
+		{
+			name: "its comments cannot be read",
+			store: stubReadStore{
+				show:     func(id string) (*beads.Issue, error) { return &beads.Issue{ID: id}, nil },
+				comments: func(string) ([]beads.Comment, error) { return nil, errors.New("comments refused") },
+			},
+			want: "reading fx-1's comments: comments refused",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := listRows(tc.store, []*beads.Issue{{ID: "fx-1"}})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("listRows = %v, want it to hold %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestHandlersRefuseAWorkingDirectoryBelowANonDirectoryBeads drives the town
+// walk: a .beads that is a file names no store, so the handler refuses rather
+// than walking past a directory that could hold the route table.
+func TestHandlersRefuseAWorkingDirectoryBelowANonDirectoryBeads(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, ".beads"), "not a store")
+	stderr := &bytes.Buffer{}
+	env := Env{
+		Args:   []string{"show", "--json", "fx-1"},
+		Getenv: func(string) string { return "" },
+		Getwd:  func() (string, error) { return dir, nil },
+		Stdout: &bytes.Buffer{}, Stderr: stderr,
+	}
+	if code := showHandler(env, Decision{Route: beads.Route{Prefix: "fx-"}}); code != 1 {
+		t.Errorf("show below a .beads file: exit code is %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "not a directory") {
+		t.Errorf("stderr = %q, want it to say .beads is not a directory", stderr.String())
+	}
+}
+
+// stubReadStore is a store whose reads a test scripts. A read the test did not
+// script refuses, except ShowMultiple, which answers no beads; that is enough
+// for the failure paths a test drives.
+type stubReadStore struct {
+	show         func(string) (*beads.Issue, error)
+	showMultiple func([]string) (map[string]*beads.Issue, error)
+	list         func(beads.ListOptions) ([]*beads.Issue, error)
+	children     func(string) ([]*beads.Issue, error)
+	comments     func(string) ([]beads.Comment, error)
+}
+
+func (s stubReadStore) Show(id string) (*beads.Issue, error) {
+	if s.show == nil {
+		return nil, errors.New("stubReadStore: Show was not scripted")
+	}
+	return s.show(id)
+}
+
+func (s stubReadStore) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
+	if s.showMultiple == nil {
+		return map[string]*beads.Issue{}, nil
+	}
+	return s.showMultiple(ids)
+}
+
+func (s stubReadStore) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	if s.list == nil {
+		return nil, errors.New("stubReadStore: List was not scripted")
+	}
+	return s.list(opts)
+}
+
+func (s stubReadStore) Children(parentID string) ([]*beads.Issue, error) {
+	if s.children == nil {
+		return nil, errors.New("stubReadStore: Children was not scripted")
+	}
+	return s.children(parentID)
+}
+
+func (s stubReadStore) Comments(id string) ([]beads.Comment, error) {
+	if s.comments == nil {
+		return nil, errors.New("stubReadStore: Comments was not scripted")
+	}
+	return s.comments(id)
+}
