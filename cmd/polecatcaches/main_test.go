@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -559,50 +558,50 @@ func TestSandboxProfileRefusesOneThatCannotPlaceTheJob(t *testing.T) {
 // TestTownSandboxProfilesRefusesATownItCannotRead pins the production seam
 // behind -sandbox: a settings file that is missing or does not decode refuses,
 // rather than reading as a town with no profiles and placing the Job nowhere.
+// The file comes from a fake reader, so the test reads no file.
 func TestTownSandboxProfilesRefusesATownItCannotRead(t *testing.T) {
 	t.Parallel()
-	t.Run("missing settings file", func(t *testing.T) {
-		t.Parallel()
-		if _, err := townSandboxProfiles(t.TempDir()); err == nil {
-			t.Error("townSandboxProfiles read a town with no settings file")
-		}
-	})
-	t.Run("settings file that does not decode", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		path := config.TownSettingsPath(dir)
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := townSandboxProfiles(dir); err == nil {
-			t.Error("townSandboxProfiles read a settings file that does not decode")
-		}
-	})
+	const town = "/town"
+	tests := []struct {
+		name string
+		data []byte
+		err  error
+	}{
+		{name: "missing settings file", err: os.ErrNotExist},
+		{name: "settings file that does not decode", data: []byte("{not json")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			readFile := func(string) ([]byte, error) { return tc.data, tc.err }
+			if _, err := townSandboxProfiles(readFile, town); err == nil {
+				t.Error("townSandboxProfiles read a town it could not read")
+			}
+		})
+	}
 }
 
 // TestTownSandboxProfilesReadsTheTownsProfiles pins the success path: the
 // profile -sandbox names, and the placement it supplies, come from the town's
-// own settings file.
+// own settings file, which is the file read.
 func TestTownSandboxProfilesReadsTheTownsProfiles(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	path := config.TownSettingsPath(dir)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	const town = "/town"
 	settings := `{"sandboxes":{"polecat-k8s":{"driver":"kubernetes","image":"gastown-polecat:dev",` +
 		`"policy":"deploy/polecat/policy.yaml","kubernetes_cache_claim":"gt-cache",` +
 		`"node_selector":{"gt.dev/pool":"sandbox"},` +
 		`"tolerations":[{"key":"gt.dev/pool","operator":"Equal","value":"sandbox","effect":"NoSchedule"}]}}}`
-	if err := os.WriteFile(path, []byte(settings), 0o600); err != nil {
-		t.Fatal(err)
+	var asked string
+	readFile := func(path string) ([]byte, error) {
+		asked = path
+		return []byte(settings), nil
 	}
-	profiles, err := townSandboxProfiles(dir)
+	profiles, err := townSandboxProfiles(readFile, town)
 	if err != nil {
 		t.Fatalf("townSandboxProfiles: %v", err)
+	}
+	if want := config.TownSettingsPath(town); asked != want {
+		t.Errorf("read %q, want the town's settings file %q", asked, want)
 	}
 	if !reflect.DeepEqual(profiles["polecat-k8s"].NodeSelector, map[string]string{"gt.dev/pool": "sandbox"}) {
 		t.Errorf("profiles = %+v, want the settings' node_selector on polecat-k8s", profiles)

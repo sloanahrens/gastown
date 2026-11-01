@@ -1699,6 +1699,49 @@ func TestGateFailureAfterOMPassRejectsAsGate(t *testing.T) {
 	}
 }
 
+// TestLandRedGateNeverPushes is the red-gate test moved to the order om runs
+// first (gt-g0w49): om passes, the candidate is pushed for its CI verdict, and
+// a red verdict never reaches the target. No merge is requested, origin/main
+// does not move, and the gate's tail goes on the rejection (gt-juu5v).
+func TestLandRedGateNeverPushes(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.gate.fn = func(string) GateResult {
+		return GateResult{Steps: []StepResult{{Name: StageCI, Command: "ci / gate (push)", ExitCode: 2,
+			Tail: "--- FAIL: TestB\nFAIL\tgithub.com/x/b\n"}}}
+	}
+	f.merger = &localMerger{f: f}
+	_, err := f.lander().Land(context.Background(), f.work)
+	f.assertRejected(t, err, RejectGate, LabelRework)
+	if n := len(f.merger.calls); n != 0 {
+		t.Errorf("the merger was asked to land a red candidate %d time(s): %+v", n, f.merger.calls)
+	}
+	if notes := f.bead().Notes; !strings.Contains(notes, "FAIL\tgithub.com/x/b") {
+		t.Errorf("rejection note lacks the gate tail:\n%s", notes)
+	}
+}
+
+// TestGateInfraErrorLogsStageTimes: a candidate gate that returns no verdict
+// still logs the stage line, the CI stage it ran and om's time, as the red path
+// does, so the landing log accounts for om even when the gate never answered
+// (gt-juu5v).
+func TestGateInfraErrorLogsStageTimes(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.gate.fn = func(string) GateResult { return GateResult{Err: errors.New("container slot unavailable")} }
+	var out strings.Builder
+	l := f.lander()
+	l.Out = &out
+	_, err := l.Land(context.Background(), f.work)
+	var infra *InfraError
+	if !errors.As(err, &infra) || infra.Stage != StageCI {
+		t.Fatalf("Land error = %T %v, want *InfraError at the CI stage", err, err)
+	}
+	if line := out.String(); !strings.Contains(line, "stages: ci ") || !strings.Contains(line, ", om ") {
+		t.Errorf("landing log lacks a stage line with the CI stage and om's time:\n%s", line)
+	}
+}
+
 // TestStageLineStaysParseable: the stage line keeps its "stages: <stage>,
 // <stage>" shape on a landing that never reached its candidate gate. The
 // skipped CI stage keeps its name and the decision that ended the landing, and

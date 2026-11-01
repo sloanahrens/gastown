@@ -445,7 +445,7 @@ func (l *Lander) candidateGate(ctx context.Context, wt Repo, dir string, w Work,
 	cres := l.Candidate.Run(ctx, wt, dir, w, merged)
 	step := StepResult{Name: StageCI, Command: cres.Context, Elapsed: time.Since(start), Tail: cres.Tail}
 	if cres.Err != nil {
-		return cres, GateResult{}, &InfraError{Stage: StageCI, Err: cres.Err}
+		return cres, GateResult{Steps: []StepResult{step}}, &InfraError{Stage: StageCI, Err: cres.Err}
 	}
 	switch cres.State {
 	case CandidatePassed:
@@ -456,7 +456,7 @@ func (l *Lander) candidateGate(ctx context.Context, wt Repo, dir string, w Work,
 		l.logf("%s: %s failed on the candidate %s (%s); the job log tail goes with the rework", w.BeadID, cres.Context, shortSHA(cres.SHA), cres.Branch)
 		return cres, GateResult{Steps: []StepResult{step}}, nil
 	default:
-		return cres, GateResult{}, &InfraError{Stage: StageCI, Err: fmt.Errorf(
+		return cres, GateResult{Steps: []StepResult{step}}, &InfraError{Stage: StageCI, Err: fmt.Errorf(
 			"%w: %s reported nothing on the candidate %s (%s) within its wait window",
 			ErrCISilence, cres.Context, shortSHA(cres.SHA), cres.Branch)}
 	}
@@ -1565,6 +1565,9 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	ciContext = ciGateContext(gateRes)
 	gateDone()
 	if gateErr != nil {
+		// om ran and its time is logged even though the gate never reached a
+		// verdict, as the red path logs it.
+		l.logf("%s: %s", w.BeadID, stageTimes(gateRes, omTime, omRetried))
 		l.discardCandidate(ctx, w, candRes)
 		return Result{}, gateErr
 	}
