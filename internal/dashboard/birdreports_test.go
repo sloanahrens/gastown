@@ -553,3 +553,197 @@ func TestBirdReportsSaysWhichPagesAreThere(t *testing.T) {
 		}
 	}
 }
+
+// decision_items is the reporter's own list of decisions to put on the one
+// "Needs you" list, so it is decoded on its own: a missing, null or malformed
+// array costs the row its list and never its summary, and a reporter that
+// writes more than the cap has its list cut rather than the page grown.
+func TestBirdReportsDecisionItems(t *testing.T) {
+	t.Parallel()
+
+	now := birdReportsNow
+	root := t.TempDir()
+
+	// Nine items: only the first eight are read, and the two with control
+	// characters in them are cleaned the way the summary is.
+	asker := birdSidecarFor("asker", now, "title", "summary")
+	asker.DecisionItems = json.RawMessage(`[
+		{"question": "ship the darker palette?", "recommendation": "yes, ship it"},
+		{"question": "question\u0007 bell \u001b[31m", "recommendation": "answer\rwith\rcontrol"},
+		{"question": "item three", "recommendation": "rec three"},
+		{"question": "item four", "recommendation": "rec four"},
+		{"question": "item five", "recommendation": "rec five"},
+		{"question": "item six", "recommendation": "rec six"},
+		{"question": "item seven", "recommendation": "rec seven"},
+		{"question": "item eight", "recommendation": "rec eight"},
+		{"question": "item nine", "recommendation": "rec nine"}
+	]`)
+	writeBird(t, root, "asker", birdWrites{json: birdSidecarJSON(t, asker)})
+
+	long := birdSidecarFor("long", now, "title", "summary")
+	long.DecisionItems = json.RawMessage(`[{"question": "` + strings.Repeat("日", 300) + `", "recommendation": "rec"}]`)
+	writeBird(t, root, "long", birdWrites{json: birdSidecarJSON(t, long)})
+
+	// Every shape that is not the array of questions the writer promises: the
+	// row keeps its summary and reads fresh, and carries no items.
+	missing := birdSidecarFor("missing", now, "missing title", "missing summary")
+	writeBird(t, root, "missing", birdWrites{json: birdSidecarJSON(t, missing)})
+
+	nullItems := birdSidecarFor("null-items", now, "null title", "null summary")
+	nullItems.DecisionItems = json.RawMessage(`null`)
+	writeBird(t, root, "null-items", birdWrites{json: birdSidecarJSON(t, nullItems)})
+
+	notArray := birdSidecarFor("not-array", now, "string title", "string summary")
+	notArray.DecisionItems = json.RawMessage(`"two questions and an answer"`)
+	writeBird(t, root, "not-array", birdWrites{json: birdSidecarJSON(t, notArray)})
+
+	wrongType := birdSidecarFor("wrong-type", now, "wrong title", "wrong summary")
+	wrongType.DecisionItems = json.RawMessage(`[{"question": 7, "recommendation": "rec"}]`)
+	writeBird(t, root, "wrong-type", birdWrites{json: birdSidecarJSON(t, wrongType)})
+
+	// An entry with nothing but control characters after cleaning is not a
+	// question, so it is not an item; the entry beside it is.
+	emptyQuestion := birdSidecarFor("empty-question", now, "empty title", "empty summary")
+	emptyQuestion.DecisionItems = json.RawMessage(`[
+		{"question": "\u0007\u0000", "recommendation": "orphan answer"},
+		{"question": "kept?", "recommendation": ""}
+	]`)
+	writeBird(t, root, "empty-question", birdWrites{json: birdSidecarJSON(t, emptyQuestion)})
+
+	// Entries with no question are not decisions, so they do not spend the
+	// cap: eight of them ahead of two real questions still leave both shown.
+	padded := birdSidecarFor("padded", now, "padded title", "padded summary")
+	padded.DecisionItems = json.RawMessage(`[
+		{"question": "\u0007", "recommendation": "one"},
+		{"question": "\u0007", "recommendation": "two"},
+		{"question": "\u0007", "recommendation": "three"},
+		{"question": "\u0007", "recommendation": "four"},
+		{"question": "\u0007", "recommendation": "five"},
+		{"question": "\u0007", "recommendation": "six"},
+		{"question": "\u0007", "recommendation": "seven"},
+		{"question": "\u0007", "recommendation": "eight"},
+		{"question": "the real question?", "recommendation": "yes"},
+		{"question": "and the next?", "recommendation": "later"}
+	]`)
+	writeBird(t, root, "padded", birdWrites{json: birdSidecarJSON(t, padded)})
+
+	rows := NewBirdReportsReader(root).Read(now)
+	byName := birdByName(rows)
+
+	got := byName["asker"].DecisionItems
+	if len(got) != 8 {
+		t.Fatalf("asker carried %d items, want the first 8", len(got))
+	}
+	if got[0].Question != "ship the darker palette?" || got[0].Recommendation != "yes, ship it" {
+		t.Errorf("asker's first item is %+v, want the question and recommendation as written", got[0])
+	}
+	if got[7].Question != "item eight" {
+		t.Errorf("asker's last item is %q, want item eight: the list was not cut at 8 in order", got[7].Question)
+	}
+	if got[1].Question != "question bell [31m" {
+		t.Errorf("asker's second question is %q, want the control characters gone", got[1].Question)
+	}
+	if got[1].Recommendation != "answerwithcontrol" {
+		t.Errorf("asker's second recommendation is %q, want the control characters gone", got[1].Recommendation)
+	}
+
+	cut := byName["long"].DecisionItems
+	if len(cut) != 1 {
+		t.Fatalf("long carried %d items, want 1", len(cut))
+	}
+	if n := utf8.RuneCountInString(cut[0].Question); n != 240 {
+		t.Errorf("the long question is %d runes, want 240", n)
+	}
+	if strings.Trim(cut[0].Question, "日") != "" {
+		t.Errorf("the long question was cut mid-rune: %q", cut[0].Question)
+	}
+
+	for _, name := range []string{"missing", "null-items", "not-array", "wrong-type"} {
+		row := byName[name]
+		if row.State != BirdReportFresh || row.Note != "" {
+			t.Errorf("%s: state %q note %q, want a fresh row that merely has no items", name, row.State, row.Note)
+		}
+		if row.Summary == "" {
+			t.Errorf("%s: a sidecar that is not an items array cost the row its summary", name)
+		}
+		if len(row.DecisionItems) != 0 {
+			t.Errorf("%s: carried %d items, want none", name, len(row.DecisionItems))
+		}
+	}
+
+	kept := byName["empty-question"].DecisionItems
+	if len(kept) != 1 || kept[0].Question != "kept?" || kept[0].Recommendation != "" {
+		t.Errorf("empty-question carried %+v, want only the item with a question", kept)
+	}
+
+	paddedItems := byName["padded"].DecisionItems
+	if len(paddedItems) != 2 || paddedItems[0].Question != "the real question?" || paddedItems[1].Question != "and the next?" {
+		t.Errorf("padded carried %+v, want the two real questions past the entries that are not decisions", paddedItems)
+	}
+}
+
+// A decision item's question and recommendation are text a bird wrote, so each
+// passes the screen the summary passes: a flagged item is dropped whole, its
+// rule named on the row, and the row's own state left alone because the
+// reporter's summary is still there to show.
+func TestBirdReportsDecisionItemsWithheld(t *testing.T) {
+	t.Parallel()
+
+	now := birdReportsNow
+	root := t.TempDir()
+	// Positive inputs are joined from pieces so that no secret-looking literal
+	// sits in this file for the repository's own scanners to flag.
+	secret := "password=" + strings.Repeat("k", 16)
+
+	asker := birdSidecarFor("asker", now, "title", "summary")
+	asker.DecisionItems = json.RawMessage(`[
+		{"question": "deploy now?", "recommendation": "wait for green"},
+		{"question": "what is the token?", "recommendation": "` + secret + `"},
+		{"question": "which bird writes?", "recommendation": "heron"}
+	]`)
+	writeBird(t, root, "asker", birdWrites{json: birdSidecarJSON(t, asker)})
+
+	// A withheld summary does not take the reporter's clean asks with it: the
+	// items are screened on their own text.
+	leaky := birdSidecarFor("leaky-summary", now, "leaky title", "the bird tried "+secret)
+	leaky.DecisionItems = json.RawMessage(`[{"question": "retry the patrol?", "recommendation": "yes"}]`)
+	writeBird(t, root, "leaky-summary", birdWrites{json: birdSidecarJSON(t, leaky)})
+
+	rows := NewBirdReportsReader(root).Read(now)
+	byName := birdByName(rows)
+
+	row := byName["asker"]
+	if row.State != BirdReportFresh || row.Note != "" {
+		t.Errorf("asker: state %q note %q, want the row itself untouched", row.State, row.Note)
+	}
+	if len(row.DecisionItems) != 2 {
+		t.Fatalf("asker carried %d items, want the two clean ones", len(row.DecisionItems))
+	}
+	if row.DecisionItems[0].Question != "deploy now?" || row.DecisionItems[1].Question != "which bird writes?" {
+		t.Errorf("asker kept %+v, want the clean items in their own order", row.DecisionItems)
+	}
+	if !slices.Equal(row.DecisionItemsWithheld, []string{"credential-assignment"}) {
+		t.Errorf("asker withheld %v, want the one rule that matched", row.DecisionItemsWithheld)
+	}
+
+	leakyRow := byName["leaky-summary"]
+	if leakyRow.State != BirdReportWithheld || leakyRow.Summary != "" {
+		t.Errorf("leaky-summary: state %q summary %q, want the summary withheld", leakyRow.State, leakyRow.Summary)
+	}
+	if len(leakyRow.DecisionItems) != 1 || leakyRow.DecisionItems[0].Question != "retry the patrol?" {
+		t.Errorf("leaky-summary carried %+v, want its clean ask", leakyRow.DecisionItems)
+	}
+
+	encoded, err := json.Marshal(rows)
+	if err != nil {
+		t.Fatalf("marshal rows: %v", err)
+	}
+	for _, held := range []string{strings.Repeat("k", 8), secret} {
+		if strings.Contains(string(encoded), held) {
+			t.Errorf("a withheld secret reached the JSON-encoded rows: %q", held)
+		}
+	}
+	if !strings.Contains(string(encoded), `"decision_items_withheld":["credential-assignment"]`) {
+		t.Errorf("the rows do not carry the rule that withheld an item: %s", encoded)
+	}
+}
