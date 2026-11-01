@@ -272,7 +272,7 @@ lint: docs-lint
 	@for m in $(TESTED_MODULES); do echo "lint: golangci-lint run in $$m"; (cd "$$m" && bash ../scripts/lint-lock-wait.sh $(LINT_LOCK_WAIT) golangci-lint run --timeout=5m --config ../.golangci.yml --build-tags integration $(LINT_RUNNER_FLAGS)) || { echo "lint failed in $$m"; exit 1; }; done
 	go run ./cmd/repo-guards
 	@echo "lint: guardlint (fail-open guard check, gt-udrrw)"
-	go test ./internal/guardlint/... -run TestNoNewFailOpenGuards -v
+	$(CPU_CLASS) go test ./internal/guardlint/... -run TestNoNewFailOpenGuards -v
 
 # Deterministic docs and comments checks (docs/writing-for-agents.md).
 # Also the tier lists the weekly doc audit slices from.
@@ -442,6 +442,15 @@ SHELL_TESTS ?= go run ./internal/shelltier/cmd/shelltier --all
 # drive the warning path with a stub.
 EXEC_TAX_PREFLIGHT ?= go run ./internal/exectax/cmd/preflight
 
+# CPU_CLASS fronts a go build, vet or test step with the town's CPU-class slot
+# when make runs from a crew checkout (<town>/<rig>/crew/...), so a burst of
+# crew worktrees building at once queues instead of starving the daemon, bd and
+# the dispatcher (gt-bq68w). It is empty everywhere else, so a polecat, the
+# landing worker and CI run their go steps exactly as before. The wrapper reads
+# its own working directory and ignores the class outside a crew checkout; this
+# path test only spares the other trees its start-up.
+CPU_CLASS ?= $(if $(findstring /crew/,$(CURDIR)),go run ./internal/slot/cmd/cpuslot)
+
 # The gate's lint waits its turn on golangci-lint's module lock instead of
 # exiting in 5s: the gate is judged by its exit code alone, so a contended
 # lint must not read as red. Plain `make lint` retries a contended lint for
@@ -465,10 +474,10 @@ gate-lint: exec-tax-preflight lint
 gate-test: GATE_START := $(shell date +%s)
 gate-test:
 	@echo "gate: build (go build ./... and the nested modules: $(NESTED_MODULES))" >&2
-	@go build ./... || { echo "gate: FAILED at build" >&2; exit 1; }
+	@$(CPU_CLASS) go build ./... || { echo "gate: FAILED at build" >&2; exit 1; }
 	@# -o into a temp dir: `go build ./...` over a module with one main
 	@# package writes that binary into the module's directory.
-	@out=$$(mktemp -d); for m in $(NESTED_MODULES); do (cd "$$m" && go build -o "$$out/" ./...) || { rm -rf "$$out"; echo "gate: FAILED at build ($$m)" >&2; exit 1; }; done; rm -rf "$$out"
+	@out=$$(mktemp -d); for m in $(NESTED_MODULES); do (cd "$$m" && $(CPU_CLASS) go build -o "$$out/" ./...) || { rm -rf "$$out"; echo "gate: FAILED at build ($$m)" >&2; exit 1; }; done; rm -rf "$$out"
 	@# The unit tier: every package, through go test's result cache, so a
 	@# landing reruns only the packages its change can affect (gt-s1vff).
 	@# The budget runner's CPU-measuring exec wrapper bypassed the cache and
@@ -477,12 +486,13 @@ gate-test:
 	@# -timeout 20m is the per-package hang detector (gt-ik4a1.1).
 	@echo "gate: unit tier (every package)" >&2
 	@# The suite runs in the background so the trap fires at once on INT or
-	@# TERM (bash defers traps until a foreground child exits); the trap finds
-	@# it as this shell's child (pgrep -P) and stops it before its children.
-	@trap 'for p in $$(pgrep -P $$$$); do k=$$(pgrep -P $$p); kill $$p 2>/dev/null; [ -n "$$k" ] && kill $$k 2>/dev/null; done; exit 130' INT TERM; \
-	GT_TEST_DOCKER=0 go test -timeout 20m ./... & gt=$$!; \
+	@# TERM (bash defers traps until a foreground child exits); the trap walks
+	@# this shell's whole descendant tree (pgrep -P), so it stops the suite
+	@# whether it is a direct child or behind the CPU-class wrapper.
+	@trap 'killtree() { for c in $$(pgrep -P "$$1" 2>/dev/null); do killtree "$$c"; done; kill "$$1" 2>/dev/null; }; for c in $$(pgrep -P $$$$ 2>/dev/null); do killtree "$$c"; done; exit 130' INT TERM; \
+	$(CPU_CLASS) GT_TEST_DOCKER=0 go test -timeout 20m ./... & gt=$$!; \
 	wait $$gt; go_rc=$$?; \
-	if [ $$go_rc -eq 0 ]; then for m in $(TESTED_MODULES); do echo "gate: vet and unit tier in $$m" >&2; (cd "$$m" && go vet ./... && GT_TEST_DOCKER=0 go test ./...) || { go_rc=$$?; break; }; done; fi; \
+	if [ $$go_rc -eq 0 ]; then for m in $(TESTED_MODULES); do echo "gate: vet and unit tier in $$m" >&2; (cd "$$m" && $(CPU_CLASS) go vet ./... && $(CPU_CLASS) GT_TEST_DOCKER=0 go test ./...) || { go_rc=$$?; break; }; done; fi; \
 	wall=$$(( $$(date +%s) - $(GATE_START) )); \
 	if [ $$go_rc -ne 0 ]; then echo "gate: FAILED at unit tier (Go suite, exit $$go_rc) after $${wall}s wall" >&2; exit 1; fi; \
 	echo "gate: PASSED in $${wall}s wall" >&2
@@ -529,9 +539,9 @@ presubmit: LINT_RUNNER_FLAGS := --allow-serial-runners
 presubmit: GATE_START := $(shell date +%s)
 presubmit: lint
 	@echo "presubmit: build (go build ./... and the nested modules: $(NESTED_MODULES))" >&2
-	@go build ./... || { echo "presubmit: FAILED at build" >&2; exit 1; }
-	@out=$$(mktemp -d); for m in $(NESTED_MODULES); do (cd "$$m" && go build -o "$$out/" ./...) || { rm -rf "$$out"; echo "presubmit: FAILED at build ($$m)" >&2; exit 1; }; done; rm -rf "$$out"
-	@for m in $(TESTED_MODULES); do if ! git diff --quiet $(PRESUBMIT_BASE)...HEAD -- "$$m"; then echo "presubmit: vet and tests in $$m" >&2; (cd "$$m" && go vet ./... && GT_TEST_DOCKER=0 go test -timeout 10m ./...) || { echo "presubmit: FAILED at tests ($$m)" >&2; exit 1; }; fi; done
+	@$(CPU_CLASS) go build ./... || { echo "presubmit: FAILED at build" >&2; exit 1; }
+	@out=$$(mktemp -d); for m in $(NESTED_MODULES); do (cd "$$m" && $(CPU_CLASS) go build -o "$$out/" ./...) || { rm -rf "$$out"; echo "presubmit: FAILED at build ($$m)" >&2; exit 1; }; done; rm -rf "$$out"
+	@for m in $(TESTED_MODULES); do if ! git diff --quiet $(PRESUBMIT_BASE)...HEAD -- "$$m"; then echo "presubmit: vet and tests in $$m" >&2; (cd "$$m" && $(CPU_CLASS) go vet ./... && $(CPU_CLASS) GT_TEST_DOCKER=0 go test -timeout 10m ./...) || { echo "presubmit: FAILED at tests ($$m)" >&2; exit 1; }; fi; done
 	@pkgs=$$(go run ./internal/land/cmd/changedpkgs -base $(PRESUBMIT_BASE)) || { echo "presubmit: FAILED computing the changed packages against $(PRESUBMIT_BASE)" >&2; exit 1; }; \
 	guards=$$(go run ./internal/land/cmd/changedpkgs -base $(PRESUBMIT_BASE) -guards) || { echo "presubmit: FAILED computing the tree-wide guard tests against $(PRESUBMIT_BASE)" >&2; exit 1; }; \
 	cover=; \
@@ -541,11 +551,11 @@ presubmit: lint
 			cover=$$(mktemp "$${TMPDIR:-/tmp}/gt-presubmit-cover.XXXXXX") || { echo "presubmit: FAILED making room for the cover profile" >&2; exit 1; }; \
 			trap 'rm -f "$$cover"' EXIT; \
 			echo "presubmit: go test of the changed packages:" $$pkgs >&2; \
-			GT_TEST_DOCKER=0 go test -timeout 10m -coverprofile="$$cover" $$pkgs || { echo "presubmit: FAILED at tests" >&2; exit 1; }; \
+			$(CPU_CLASS) GT_TEST_DOCKER=0 go test -timeout 10m -coverprofile="$$cover" $$pkgs || { echo "presubmit: FAILED at tests" >&2; exit 1; }; \
 		fi; \
 		if [ -n "$$guards" ]; then \
 			echo "presubmit: go test of the tree-wide guard tests:" $$guards >&2; \
-			GT_TEST_DOCKER=0 go test -timeout 10m $$guards || { echo "presubmit: FAILED at the tree-wide guard tests" >&2; exit 1; }; \
+			$(CPU_CLASS) GT_TEST_DOCKER=0 go test -timeout 10m $$guards || { echo "presubmit: FAILED at the tree-wide guard tests" >&2; exit 1; }; \
 		fi; \
 		if [ -n "$$cover" ]; then \
 			go run ./internal/presubmit/cmd/errbranch -base $(PRESUBMIT_BASE) -cover "$$cover" || { echo "presubmit: FAILED at the error-branch check" >&2; exit 1; }; \

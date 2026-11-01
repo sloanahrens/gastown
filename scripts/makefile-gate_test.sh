@@ -19,6 +19,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# The CPU-class wrapper fronts the go steps only in a crew checkout (gt-bq68w);
+# this fixture stubs go, so it takes the class out of the recipes and checks
+# them unwrapped. internal/makegate's CPU-class case runs the real wrapper.
+export CPU_CLASS=
 PASS=0
 FAIL=0
 

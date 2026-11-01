@@ -767,3 +767,38 @@ func TestPresubmitPool_Override(t *testing.T) {
 		t.Errorf("PresubmitPoolV() = %d, want 3", got)
 	}
 }
+
+// TestCPUClassSize_Defaults: an unset cpu_class_size is three crew host builds
+// townwide, and a value below one falls back to that default rather than
+// parking every crew build behind a zero-slot class.
+func TestCPUClassSize_Defaults(t *testing.T) {
+	t.Parallel()
+
+	var nilDaemon *DaemonThresholds
+	if got := nilDaemon.CPUClassSizeV(); got != DefaultCPUClassSize {
+		t.Errorf("nil daemon: CPUClassSizeV() = %d, want %d", got, DefaultCPUClassSize)
+	}
+	if got := (&DaemonThresholds{}).CPUClassSizeV(); got != 3 {
+		t.Errorf("unset: CPUClassSizeV() = %d, want 3", got)
+	}
+	for _, v := range []int{0, -1} {
+		d := &DaemonThresholds{CPUClassSize: &v}
+		if got := d.CPUClassSizeV(); got != DefaultCPUClassSize {
+			t.Errorf("cpu_class_size=%d: CPUClassSizeV() = %d, want the default %d", v, got, DefaultCPUClassSize)
+		}
+	}
+}
+
+// TestCPUClassSize_Override: cpu_class_size in the daemon section sets the
+// class size, and the key decodes from settings JSON as the bead names it.
+func TestCPUClassSize_Override(t *testing.T) {
+	t.Parallel()
+
+	var op OperationalConfig
+	if err := json.Unmarshal([]byte(`{"daemon": {"cpu_class_size": 5}}`), &op); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := op.GetDaemonConfig().CPUClassSizeV(); got != 5 {
+		t.Errorf("CPUClassSizeV() = %d, want 5", got)
+	}
+}

@@ -2,6 +2,7 @@ package slot
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/jonboulle/clockwork"
 
+	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/procid"
 )
@@ -301,6 +303,20 @@ type Gate struct {
 	// debrisOut its verdicts on containers it walks past or removes.
 	probeOut  io.Writer
 	debrisOut io.Writer
+
+	// execCPU runs a command a CPU-class slot was taken for (RunCPU). A test
+	// replaces it so no unit test starts a process; nil means runCPUExec.
+	execCPU CPUExecutor
+
+	// ticketRand is where the CPU class's arrival-queue ticket ids come from
+	// (see newCPUTicketID). A test replaces it with a reader that fails, so
+	// the ticket's error path runs without waiting on the kernel's entropy.
+	ticketRand io.Reader
+
+	// writeJSON is how the CPU class replaces its arrival queue on disk; nil
+	// means the atomic writer. A test injects a writer that fails, so the
+	// queue's write error path runs without making a directory unwritable.
+	writeJSON func(path string, v any) error
 }
 
 // Option configures a Gate.
@@ -327,6 +343,17 @@ func WithPollInterval(d time.Duration) Option {
 	}
 }
 
+// WithCPUExecutor sets the executor RunCPU runs the held command with. The
+// default starts a process (runCPUExec); a test injects one that records the
+// request instead.
+func WithCPUExecutor(fn CPUExecutor) Option {
+	return func(g *Gate) {
+		if fn != nil {
+			g.execCPU = fn
+		}
+	}
+}
+
 // NewGate returns a Gate with every default, overridden by opts.
 func NewGate(opts ...Option) *Gate {
 	g := &Gate{
@@ -339,6 +366,9 @@ func NewGate(opts ...Option) *Gate {
 		scratch:      HostScratchIdentity(),
 		probeOut:     os.Stderr,
 		debrisOut:    os.Stderr,
+		execCPU:      runCPUExec,
+		ticketRand:   rand.Reader,
+		writeJSON:    atomicfile.EnsureDirAndWriteJSON,
 	}
 	for _, opt := range opts {
 		opt(g)

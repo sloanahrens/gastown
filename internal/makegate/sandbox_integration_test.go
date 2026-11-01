@@ -189,6 +189,7 @@ const gateRunTimeout = 2 * time.Minute
 const (
 	gateStubGo = `#!/bin/sh
 echo "go $1 GT_TEST_DOCKER=${GT_TEST_DOCKER:-unset}" >>"$STUB_LOG"
+[ -n "${GOFLAGS:-}" ] && echo "go $1 GOFLAGS=$GOFLAGS" >>"$STUB_LOG"
 [ "${PWD##*/}" = tracker ] && echo "go $1 in tracker" >>"$STUB_LOG"
 dir_ok=1
 if [ -n "${STUB_GO_FAIL_DIR:-}" ]; then
@@ -349,7 +350,7 @@ func (g *GateSandbox) Run(makeFlags []string, vars ...string) GateRun {
 // below the stubs because the recipe itself runs bash, date, mktemp and find,
 // as the shell fixture's `PATH="$TMP/bin:$PATH"` leaves them.
 func (g *GateSandbox) gateEnv(vars []string) []string {
-	drop := map[string]bool{"PATH": true, "STUB_LOG": true, "GT_TEST_DOCKER": true}
+	drop := map[string]bool{"PATH": true, "STUB_LOG": true, "GT_TEST_DOCKER": true, "CPU_CLASS": true, "GOFLAGS": true}
 	for _, kv := range vars {
 		key, _, _ := strings.Cut(kv, "=")
 		drop[key] = true
