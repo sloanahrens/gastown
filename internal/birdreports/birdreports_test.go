@@ -259,6 +259,12 @@ func TestEmbeddedRequestIsTheDocsCopy(t *testing.T) {
 	if !strings.Contains(request, "<NAME>") {
 		t.Error("the request has no <NAME> placeholder to fill in")
 	}
+	if !strings.Contains(request, "<RUNTIME_DIR>") {
+		t.Error("the request has no <RUNTIME_DIR> placeholder to fill in")
+	}
+	if strings.Contains(request, "~/gt/.runtime") {
+		t.Error("the request hard-codes ~/gt/.runtime instead of the resolved runtime dir")
+	}
 }
 
 // numberedSection is one of the DAILY profile's eight numbered sections.
@@ -266,7 +272,7 @@ var numberedSection = regexp.MustCompile(`(?m)^[1-8]\. `)
 
 func TestRequestNamesTheReporter(t *testing.T) {
 	t.Parallel()
-	got := Request("dunlin")
+	got := Request("dunlin", "/town/.runtime")
 	if strings.Contains(got, "<NAME>") {
 		t.Error("Request left a <NAME> placeholder in the text")
 	}
@@ -275,6 +281,21 @@ func TestRequestNamesTheReporter(t *testing.T) {
 	}
 	if got == dailyRequest {
 		t.Error("Request returned the unfilled text")
+	}
+}
+
+func TestRequestNamesTheRuntimeDirectoryItWasGiven(t *testing.T) {
+	t.Parallel()
+	runtimeDir := filepath.Join(t.TempDir(), ".runtime")
+	got := Request("dunlin", runtimeDir)
+	if strings.Contains(got, "<RUNTIME_DIR>") {
+		t.Error("Request left a <RUNTIME_DIR> placeholder in the text")
+	}
+	if !strings.Contains(got, runtimeDir) {
+		t.Errorf("Request does not name the runtime dir %q:\n%s", runtimeDir, got)
+	}
+	if strings.Contains(got, "~/gt/.runtime") {
+		t.Error("Request kept the hard-coded ~/gt/.runtime path")
 	}
 }
 

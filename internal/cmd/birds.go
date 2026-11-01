@@ -36,7 +36,8 @@ var birdsDueCmd = &cobra.Command{
 	Use:   "due",
 	Short: "Print the late daily reports and the request to send each reporter",
 	Long: `Print every reporter whose daily report is missing or more than 26 hours old,
-then the request to send that reporter, with <NAME> replaced by its name.
+then the request to send that reporter, with <NAME> replaced by its name and
+<RUNTIME_DIR> by the runtime directory this command reads.
 
 The reporters are the nine birds and the overseer; the report path is
 <town>/.runtime/<reporter>/reports/daily.json. The request text is
@@ -83,7 +84,7 @@ func runBirdsDue(w io.Writer, runtimeDir string, now time.Time, reporters []stri
 		due++
 		fmt.Fprintln(w, birdDueLine(report))
 		fmt.Fprintln(w)
-		request := birdreports.Request(report.Reporter)
+		request := birdreports.Request(report.Reporter, runtimeDir)
 		if _, err := fmt.Fprint(w, request); err != nil {
 			return err
 		}

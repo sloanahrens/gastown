@@ -49,12 +49,18 @@ func TestBirdsDuePrintsTheLateReportItsAgeAndTheRequest(t *testing.T) {
 	for _, want := range []string{
 		"eagle: stale, 31h05m old",
 		"owl: missing (no daily.json)",
-		birdreports.Request("eagle"),
-		birdreports.Request("owl"),
+		birdreports.Request("eagle", runtimeDir),
+		birdreports.Request("owl", runtimeDir),
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("output does not hold %q:\n%s", want, got)
 		}
+	}
+	if !strings.Contains(got, runtimeDir) {
+		t.Errorf("the request does not name the runtime dir %q the command read:\n%s", runtimeDir, got)
+	}
+	if strings.Contains(got, "~/gt/.runtime") {
+		t.Errorf("a request carries the hard-coded ~/gt/.runtime path:\n%s", got)
 	}
 	if strings.Contains(got, "dunlin") {
 		t.Errorf("a fresh report is in the output:\n%s", got)
@@ -165,7 +171,7 @@ func TestBirdsDueNamesAReportItCannotRead(t *testing.T) {
 	if want := "eagle: unreadable (daily.json is not valid JSON)"; !strings.Contains(out.String(), want) {
 		t.Errorf("output does not hold %q:\n%s", want, out.String())
 	}
-	if !strings.Contains(out.String(), birdreports.Request("eagle")) {
+	if !strings.Contains(out.String(), birdreports.Request("eagle", runtimeDir)) {
 		t.Error("a reporter with an unreadable report got no request")
 	}
 }

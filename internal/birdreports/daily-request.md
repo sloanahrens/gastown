@@ -14,7 +14,7 @@ Write the report in these eight sections, in this order:
 Publish it as you always do:
 
 - Update your fixed daily artifact: the same slug every day, titled "<NAME> Daily". A new artifact each day leaves duplicates the operator has to delete.
-- Write the page to ~/gt/.runtime/<NAME>/reports/daily.html and the sidecar ~/gt/.runtime/<NAME>/reports/daily.json beside it, with exactly these fields:
+- Write the page to <RUNTIME_DIR>/<NAME>/reports/daily.html and the sidecar <RUNTIME_DIR>/<NAME>/reports/daily.json beside it, with exactly these fields:
   {"bird":"<NAME>","written_at":"<RFC 3339 instant>","title":"<the report's headline>","summary":"<the report in three sentences>","needs_operator":false,"decisions":0}
   - bird is your name, and must match the directory the files are in.
   - written_at is when you finished writing, in RFC 3339; the dashboard marks the report stale 26 hours after it.
