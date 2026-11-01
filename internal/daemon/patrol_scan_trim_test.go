@@ -48,13 +48,13 @@ func TestTrimmableSeatsAtDirCap(t *testing.T) {
 		{"under the cap names none", 4, nil},
 	}
 	agents := map[string]string{"agate": endSandboxIn, "basalt": endHostAgent, "cobalt": endSandboxIn}
+	listed := []string{"agate", "basalt", "cobalt"}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			h := trimHost(t, tt.dirCap, agents)
-			makePolecatDirs(t, h.town(), "agate", "basalt", "cobalt")
 
-			got, err := h.TrimmableSeats("gastown")
+			got, err := h.TrimmableSeats("gastown", listed)
 			if err != nil {
 				t.Fatalf("TrimmableSeats: %v", err)
 			}
@@ -63,6 +63,38 @@ func TestTrimmableSeatsAtDirCap(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestTrimmableSeatsReadsTheTicksListing guards gt-spsmb: the cap is counted
+// and the seats classified from the listing the tick hands over, so the host
+// lists nothing a second time and never names a seat the tick did not list.
+func TestTrimmableSeatsReadsTheTicksListing(t *testing.T) {
+	t.Parallel()
+	t.Run("counts the listing, not the directories", func(t *testing.T) {
+		t.Parallel()
+		h := trimHost(t, 2, map[string]string{"agate": endSandboxIn})
+		makePolecatDirs(t, h.town(), "agate", "basalt", "cobalt")
+
+		// Three directories on disk, one of them listed: the rig is under its
+		// cap as the tick saw it.
+		if got, err := h.TrimmableSeats("gastown", []string{"agate"}); err != nil || got != nil {
+			t.Fatalf("TrimmableSeats = %v, %v; want nil, nil", got, err)
+		}
+	})
+
+	t.Run("names no seat the tick did not list", func(t *testing.T) {
+		t.Parallel()
+		h := trimHost(t, 2, map[string]string{"agate": endSandboxIn, "basalt": endSandboxIn, "cobalt": endSandboxIn})
+		makePolecatDirs(t, h.town(), "agate", "basalt", "cobalt")
+
+		got, err := h.TrimmableSeats("gastown", []string{"agate", "cobalt"})
+		if err != nil {
+			t.Fatalf("TrimmableSeats: %v", err)
+		}
+		if want := []string{"agate", "cobalt"}; !slices.Equal(got, want) {
+			t.Errorf("TrimmableSeats = %v, want %v", got, want)
+		}
+	})
 }
 
 // TestPolecatDirCapFor reads the cap from a town's rig registry. The rig bead
@@ -113,21 +145,20 @@ func TestPolecatDirCapFor(t *testing.T) {
 func TestTrimmableSeatsOfAnUncoveredRig(t *testing.T) {
 	t.Parallel()
 	h := trimHost(t, 1, map[string]string{"agate": endSandboxIn})
-	makePolecatDirs(t, h.town(), "agate")
 
-	got, err := h.TrimmableSeats("other")
+	got, err := h.TrimmableSeats("other", []string{"agate"})
 	if err != nil || got != nil {
 		t.Fatalf("TrimmableSeats(other) = %v, %v; want nil, nil", got, err)
 	}
 }
 
-// TestTrimmableSeatsOfARigWithNoDirectories: a rig that has not been slung yet
+// TestTrimmableSeatsOfATickThatListedNoSeats: a rig that has not been slung yet
 // holds no seat, so no cap can have been reached.
-func TestTrimmableSeatsOfARigWithNoDirectories(t *testing.T) {
+func TestTrimmableSeatsOfATickThatListedNoSeats(t *testing.T) {
 	t.Parallel()
 	h := trimHost(t, 1, nil)
 
-	got, err := h.TrimmableSeats("gastown")
+	got, err := h.TrimmableSeats("gastown", nil)
 	if err != nil || got != nil {
 		t.Fatalf("TrimmableSeats = %v, %v; want nil, nil", got, err)
 	}
@@ -140,10 +171,9 @@ func TestTrimmableSeatsFailsClosed(t *testing.T) {
 	t.Run("cap unreadable", func(t *testing.T) {
 		t.Parallel()
 		h := trimHost(t, 1, map[string]string{"agate": endSandboxIn})
-		makePolecatDirs(t, h.town(), "agate")
 		h.polecatDirCap = func(string) (int, error) { return 0, errors.New("registry unreadable") }
 
-		if got, err := h.TrimmableSeats("gastown"); err == nil || got != nil {
+		if got, err := h.TrimmableSeats("gastown", []string{"agate"}); err == nil || got != nil {
 			t.Fatalf("TrimmableSeats = %v, %v; want nil and the unreadable cap", got, err)
 		}
 	})
@@ -151,29 +181,10 @@ func TestTrimmableSeatsFailsClosed(t *testing.T) {
 	t.Run("agent bead unreadable", func(t *testing.T) {
 		t.Parallel()
 		h := trimHost(t, 1, nil)
-		makePolecatDirs(t, h.town(), "agate")
 		h.agentRecord = func(_, _ string) (string, error) { return "", errors.New("bd unavailable") }
 
-		if got, err := h.TrimmableSeats("gastown"); err == nil || got != nil {
+		if got, err := h.TrimmableSeats("gastown", []string{"agate"}); err == nil || got != nil {
 			t.Fatalf("TrimmableSeats = %v, %v; want nil and the unreadable bead", got, err)
-		}
-	})
-
-	t.Run("polecats path unreadable", func(t *testing.T) {
-		t.Parallel()
-		h := trimHost(t, 1, nil)
-		rigDir := filepath.Join(h.town(), "gastown")
-		if err := os.MkdirAll(rigDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		// A file where the directory should be: the listing fails, and the
-		// failure is not "does not exist".
-		if err := os.WriteFile(filepath.Join(rigDir, "polecats"), nil, 0o644); err != nil {
-			t.Fatal(err)
-		}
-
-		if got, err := h.TrimmableSeats("gastown"); err == nil || got != nil {
-			t.Fatalf("TrimmableSeats = %v, %v; want nil and the unreadable listing", got, err)
 		}
 	})
 }

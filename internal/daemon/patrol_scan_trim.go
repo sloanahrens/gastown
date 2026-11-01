@@ -14,35 +14,30 @@ import (
 // wedged by a leftover directory, and this trim is what removes it. Both read
 // the same cap number (rig.EffectivePolecatDirCap).
 
-// TrimmableSeats implements patrolscan.TrimEnv: the rig's sandbox seats, when
-// the rig holds at least as many polecat directories as its cap, and nil when it
-// is under the cap. A rig the cleanup config does not cover is not trimmed at
-// all, which is nil: the pass does not run there.
+// TrimmableSeats implements patrolscan.TrimEnv: the rig's sandbox seats, among
+// the polecats the tick listed, when the rig holds at least as many polecat
+// directories as its cap, and nil when it is under the cap. The tick's listing
+// is the size bound the trim fires on, whatever its seats turned out to be, and
+// each name is a seat to classify; the host lists nothing a second time. A rig
+// the cleanup config does not cover is not trimmed at all, which is nil: the
+// pass does not run there.
 //
-// A cap that cannot be read, a directory listing that fails, or a seat whose
-// agent bead cannot be classified is an error, and the tick trims nothing on it:
-// a seat it cannot classify may be a tmux seat, and the trim must never remove
-// one.
-func (h *patrolScanHost) TrimmableSeats(rigName string) ([]string, error) {
+// A cap that cannot be read or a seat whose agent bead cannot be classified is
+// an error, and the tick trims nothing on it: a seat it cannot classify may be a
+// tmux seat, and the trim must never remove one.
+func (h *patrolScanHost) TrimmableSeats(rigName string, polecats []string) ([]string, error) {
 	if !h.reapCoversRig(rigName) {
 		return nil, nil
-	}
-	// One listing answers both questions: the directories are the size bound
-	// the trim fires on, whatever their seats turned out to be, and each name is
-	// a seat to classify.
-	names, err := h.Polecats(rigName)
-	if err != nil {
-		return nil, fmt.Errorf("listing polecat directories of %s: %w", rigName, err)
 	}
 	cap, err := h.polecatDirCapFor(rigName)
 	if err != nil {
 		return nil, err
 	}
-	if len(names) < cap {
+	if len(polecats) < cap {
 		return nil, nil
 	}
-	seats := make([]string, 0, len(names))
-	for _, name := range names {
+	seats := make([]string, 0, len(polecats))
+	for _, name := range polecats {
 		_, sandboxed, err := h.openshellSeat(rigName, name)
 		if err != nil {
 			return nil, fmt.Errorf("telling a sandbox seat from a host seat in %s: %w", rigName, err)

@@ -330,9 +330,14 @@ type fakeTrimEnv struct {
 	*fakeReapEnv
 	trimmable []string
 	trimErr   error
+	// listed records the polecats the tick passed to TrimmableSeats.
+	listed []string
 }
 
-func (f *fakeTrimEnv) TrimmableSeats(string) ([]string, error) { return f.trimmable, f.trimErr }
+func (f *fakeTrimEnv) TrimmableSeats(_ string, polecats []string) ([]string, error) {
+	f.listed = polecats
+	return f.trimmable, f.trimErr
+}
 
 // trimmable wraps env with the trim half a host at its directory cap answers
 // with: names are the seats the rig's cap may trim this tick.
@@ -462,6 +467,38 @@ func TestDirCapTrimFailsClosed(t *testing.T) {
 	}
 	if len(env.reaped) != 0 {
 		t.Fatalf("reaped %v with the cap unreadable", env.reaped)
+	}
+}
+
+// TestDirCapTrimReadsTheTicksListing guards gt-spsmb: the trim classifies the
+// polecats the tick already listed instead of asking the host to list them a
+// second time.
+func TestDirCapTrimReadsTheTicksListing(t *testing.T) {
+	t.Parallel()
+	env := eligible()
+	env.polecats = []string{"agate", "onyx"}
+	env.recovery["agate"] = Recovery{Verdict: "WORKING"}
+	trim := trimmable(env, "onyx")
+	reapScanner(trim, ReapOptions{}).Tick("gastown")
+	if got, want := strings.Join(trim.listed, ","), strings.Join(env.polecats, ","); got != want {
+		t.Fatalf("TrimmableSeats got %q, want the tick's listing %q", got, want)
+	}
+}
+
+// TestDirCapTrimOffWhenTheListingFails: the tick's listing is the trim's only
+// input, so a listing that cannot be read trims nothing and says so — the
+// failed read is never the empty rig the no-trim answer looks like.
+func TestDirCapTrimOffWhenTheListingFails(t *testing.T) {
+	t.Parallel()
+	env := eligible()
+	env.polecatsErr = errors.New("polecats unreadable")
+	trim := trimmable(env, "onyx")
+	r := reapScanner(trim, ReapOptions{}).Tick("gastown")
+	if len(r.Errors) == 0 || !strings.Contains(strings.Join(r.Errors, " "), "polecats unreadable") {
+		t.Fatalf("errors = %v; want the unreadable listing reported", r.Errors)
+	}
+	if trim.listed != nil || len(env.reaped) != 0 {
+		t.Fatalf("trim asked with %v and reaped %v; want neither", trim.listed, env.reaped)
 	}
 }
 
