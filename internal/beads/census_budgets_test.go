@@ -9,26 +9,26 @@ import (
 	"testing"
 )
 
-// baselineCaller is one row of the baseline copy in testdata: the rate the
+// censusCopyRow is one row of a pinned census copy in testdata: the rate the
 // census measured, the caller, and the bead that cuts it.
-type baselineCaller struct {
+type censusCopyRow struct {
 	Rate   float64
 	Caller string
 	CutBy  string
 }
 
-// readCensusBaseline reads testdata/census-baseline-20261030.txt, the copy of
-// the census baseline the budget table is built from, so a test can check the
-// shipped table against the data it claims to hold and not only its length.
-func readCensusBaseline(t *testing.T) []baselineCaller {
+// readCensusRows reads one of the pinned census copies in testdata, so a test
+// can check the shipped table against the data it claims to hold and not only
+// its length.
+func readCensusRows(t *testing.T, path string) []censusCopyRow {
 	t.Helper()
-	f, err := os.Open("testdata/census-baseline-20261030.txt")
+	f, err := os.Open(path)
 	if err != nil {
-		t.Fatalf("open the baseline copy: %v", err)
+		t.Fatalf("open %s: %v", path, err)
 	}
 	defer func() { _ = f.Close() }()
 
-	var rows []baselineCaller
+	var rows []censusCopyRow
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -37,24 +37,38 @@ func readCensusBaseline(t *testing.T) []baselineCaller {
 		}
 		fields := strings.Split(line, "\t")
 		if len(fields) != 3 {
-			t.Fatalf("baseline line %q is not rate, caller, cutting bead", line)
+			t.Fatalf("%s: line %q is not rate, caller, cutting bead", path, line)
 		}
 		rate, err := strconv.ParseFloat(fields[0], 64)
 		if err != nil {
-			t.Fatalf("baseline line %q: rate: %v", line, err)
+			t.Fatalf("%s: line %q: rate: %v", path, line, err)
 		}
-		rows = append(rows, baselineCaller{Rate: rate, Caller: fields[1], CutBy: fields[2]})
+		rows = append(rows, censusCopyRow{Rate: rate, Caller: fields[1], CutBy: fields[2]})
 	}
 	if err := scanner.Err(); err != nil {
-		t.Fatalf("read the baseline copy: %v", err)
+		t.Fatalf("read %s: %v", path, err)
 	}
 	return rows
+}
+
+// readCensusBaseline reads testdata/census-baseline-20261030.txt, the copy of
+// the census baseline the budget table is built from.
+func readCensusBaseline(t *testing.T) []censusCopyRow {
+	t.Helper()
+	return readCensusRows(t, "testdata/census-baseline-20261030.txt")
+}
+
+// readCensusRebase reads testdata/census-rebase-20261101.txt, the explicit
+// overrides a later census measured above the baseline.
+func readCensusRebase(t *testing.T) []censusCopyRow {
+	t.Helper()
+	return readCensusRows(t, "testdata/census-rebase-20261101.txt")
 }
 
 // budgetFor is the budget a baseline row allows: the rate itself, rounded up to
 // the next hundredth, when a hot-path bead cuts the caller (the budget is
 // tightened after a post-install census), and the rate times 1.25 otherwise.
-func budgetFor(row baselineCaller) float64 {
+func budgetFor(row censusCopyRow) float64 {
 	if row.CutBy != "-" {
 		return math.Ceil(row.Rate*100) / 100
 	}
@@ -62,11 +76,14 @@ func budgetFor(row baselineCaller) float64 {
 }
 
 // TestCensusBudgetsAreTheBaseline: the shipped table names the baseline's
-// callers, in its order, at each one's baseline rate when a hot-path bead cuts it and at 1.25 times it when none does (gt-gojo0). A table
-// that only counted sixteen rows would pass while naming the wrong sixteen or
-// holding a budget the baseline never allowed.
+// callers, in its order, at each one's baseline rate when a hot-path bead cuts
+// it and at 1.25 times it when none does (gt-gojo0), except a row a later
+// census re-based, which carries the rate testdata/census-rebase-20261101.txt
+// records (gt-1rub5). A table that only counted sixteen rows would pass while
+// naming the wrong sixteen or holding a budget the baseline never allowed.
 func TestCensusBudgetsAreTheBaseline(t *testing.T) {
 	baseline := readCensusBaseline(t)
+	rebased := readCensusRebase(t)
 	if len(baseline) != 16 {
 		t.Fatalf("the baseline copy holds %d callers, want the top sixteen", len(baseline))
 	}
@@ -74,10 +91,30 @@ func TestCensusBudgetsAreTheBaseline(t *testing.T) {
 	if len(budgets) != len(baseline) {
 		t.Fatalf("the table names %d callers, the baseline %d", len(budgets), len(baseline))
 	}
+	inBaseline := make(map[string]bool, len(baseline))
+	for _, row := range baseline {
+		inBaseline[row.Caller] = true
+	}
+	rebaseRate := make(map[string]float64, len(rebased))
+	for _, row := range rebased {
+		if !inBaseline[row.Caller] {
+			t.Errorf("re-base row %q names no caller in the baseline", row.Caller)
+		}
+		if _, ok := rebaseRate[row.Caller]; ok {
+			t.Errorf("re-base row %q appears twice", row.Caller)
+		}
+		rebaseRate[row.Caller] = row.Rate
+	}
 	for i, want := range baseline {
 		got := budgets[i]
 		if got.Caller != want.Caller {
 			t.Errorf("row %d names %q, the baseline ranks %q there", i+1, got.Caller, want.Caller)
+		}
+		if rate, ok := rebaseRate[want.Caller]; ok {
+			if got.CallsPerMinute != rate {
+				t.Errorf("%s: budget %v, want the re-based %v (baseline %v a minute, cut by %q)", got.Caller, got.CallsPerMinute, rate, want.Rate, want.CutBy)
+			}
+			continue
 		}
 		if wantBudget := budgetFor(want); got.CallsPerMinute != wantBudget {
 			t.Errorf("%s: budget %v, want %v (baseline %v a minute, cut by %q)", got.Caller, got.CallsPerMinute, wantBudget, want.Rate, want.CutBy)
@@ -95,6 +132,40 @@ func TestCensusBudgetsNeverFallBelowTheBaseline(t *testing.T) {
 		if budgets[i].CallsPerMinute < baseline[i].Rate {
 			t.Errorf("%s: budget %v is below the baseline's %v a minute", budgets[i].Caller, budgets[i].CallsPerMinute, baseline[i].Rate)
 		}
+	}
+}
+
+// TestCensusBudgetScanRowIsTheMeasuredScan: the sling-context scan reads each
+// of the town's 14 databases once a minute, one bd query each, after gt-s0xpe
+// cut it from 23 queries. The census measured 14 calls a minute, and
+// testdata/census-rebase-20261101.txt pins that rate, so a later change to the
+// row fails here with the reason (gt-1rub5).
+func TestCensusBudgetScanRowIsTheMeasuredScan(t *testing.T) {
+	const caller = "schedulerrun.listAllSlingContextRecords"
+	var measured float64
+	found := false
+	for _, row := range readCensusRebase(t) {
+		if row.Caller == caller {
+			measured, found = row.Rate, true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("%s has no re-base row: the scan reads the town's 14 databases once a minute, one bd query each, and the census measured 14 calls a minute (gt-1rub5)", caller)
+	}
+	var budget float64
+	found = false
+	for _, b := range CensusBudgets() {
+		if b.Caller == caller {
+			budget, found = b.CallsPerMinute, true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("%s has no budget row: the scan reads the town's 14 databases once a minute, one bd query each (gt-1rub5)", caller)
+	}
+	if budget != measured {
+		t.Errorf("%s: budget %v, want the measured %v: the scan reads the town's 14 databases once a minute, one bd query each (gt-1rub5)", caller, budget, measured)
 	}
 }
 

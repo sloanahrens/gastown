@@ -19,15 +19,18 @@ type CensusBudget struct {
 // cuts is budgeted at its baseline rate times 1.25, rounded up to the next
 // hundredth: its rate is what it will keep. Each row's comment names its
 // cutting bead, and the test that reads testdata/census-baseline-20261030.txt
-// pins both rules.
+// pins both rules. A row a later census measured above its baseline rate is an
+// explicit override: it carries the measured rate, and the test that reads
+// testdata/census-rebase-20261101.txt pins it (gt-1rub5).
 //
 // Rows are in baseline order. The first nine carry the rate the baseline
-// recorded for that caller (a cut caller's row is that rate; List, which no bead
-// cuts, carries 1.25 times it). A census window logs only its eight busiest rows,
-// so a caller fast enough to rank was measured and a slower one was not: the
-// rows below the ninth sit at 1.0 a minute, the rate every caller the log left
-// out is bounded by. The split and the rounding are pinned by the test that
-// reads testdata/census-baseline-20261030.txt.
+// recorded for that caller, or the re-based rate above (a cut caller's row is
+// that rate; List, which no bead cuts, carries 1.25 times it). A census window
+// logs only its eight busiest rows, so a caller fast enough to rank was
+// measured and a slower one was not: the rows below the ninth sit at 1.0 a
+// minute, the rate every caller the log left out is bounded by. The split and
+// the rounding are pinned by the test that reads
+// testdata/census-baseline-20261030.txt.
 //
 // The landworker.RetryBeads.* rows name a wrapper the census no longer reports:
 // it looks through that wrapper and names the landing step that decided to read
@@ -53,9 +56,12 @@ var censusCallerBudgets = []CensusBudget{
 	// which stays (gt-r9pj9 leaves it alone). Summed through censusWrapperReads
 	// (gt-krmal).
 	{Caller: "landworker.RetryBeads.List", CallsPerMinute: 8.63},
-	// Baseline 207 calls, 3.5 a minute in bursts: the sling contexts read
-	// three times a dispatch cycle (gt-pjcpb).
-	{Caller: "schedulerrun.listAllSlingContextRecords", CallsPerMinute: 3.50},
+	// gt-1rub5 re-bases this row above its baseline rate: after gt-s0xpe cut
+	// the scan to one `bd query` per database, the census measured 14 a
+	// minute for the town's 14 databases. The derivation only lowers a
+	// budget, so the rise is this explicit override row, pinned by
+	// testdata/census-rebase-20261101.txt.
+	{Caller: "schedulerrun.listAllSlingContextRecords", CallsPerMinute: 14.00},
 	// Baseline 198 calls, 3.3 a minute: the held beads' children (gt-r9pj9).
 	// Summed through censusWrapperReads (gt-krmal).
 	{Caller: "landworker.RetryBeads.Children", CallsPerMinute: 3.30},
