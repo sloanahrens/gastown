@@ -100,7 +100,7 @@ func hmSkewRealDaemon(t *testing.T, town string, installed *string) (*Daemon, *n
 // TestHMSkewRealCloneEscalatesOnACodeChange: an installed hm at the first commit,
 // with origin's main moved by a commit that changes a code path, escalates once
 // under hm-skew, and the clone the monitor made is the job-owned one.
-func TestHMSkewRealCloneEscalatesOnACodeChange(t *testing.T) {
+func TestIntegrationHMSkewRealCloneEscalatesOnACodeChange(t *testing.T) {
 	t.Parallel()
 	town, rig, _, base := hmSkewRealTown(t)
 	tip := hmSkewCommit(t, rig, "internal/cli/cmd_query.go", "package cli\n")
@@ -126,7 +126,7 @@ func TestHMSkewRealCloneEscalatesOnACodeChange(t *testing.T) {
 
 // TestHMSkewRealCloneIgnoresADocsOnlyChange: the same skew over a commit that
 // changes only markdown and docs escalates nothing.
-func TestHMSkewRealCloneIgnoresADocsOnlyChange(t *testing.T) {
+func TestIntegrationHMSkewRealCloneIgnoresADocsOnlyChange(t *testing.T) {
 	t.Parallel()
 	town, rig, _, base := hmSkewRealTown(t)
 	hmSkewCommit(t, rig, "docs/guide.md", "guide\n")
@@ -147,7 +147,7 @@ func TestHMSkewRealCloneIgnoresADocsOnlyChange(t *testing.T) {
 // the installed hm is at the new tip and that tip only changes docs, the next
 // reading clears the alert. A clone that never fetched the new tip could not
 // make that clear.
-func TestHMSkewRealCloneFollowsOriginMain(t *testing.T) {
+func TestIntegrationHMSkewRealCloneFollowsOriginMain(t *testing.T) {
 	t.Parallel()
 	town, rig, _, base := hmSkewRealTown(t)
 	codeTip := hmSkewCommit(t, rig, "internal/cli/cmd_query.go", "package cli\n")
