@@ -43,6 +43,8 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 		{cfg.CacheCap, "10GB", "cache cap"},
 		{cfg.Docker, "docker", "docker"},
 		{cfg.GT, "gt", "gt"},
+		{cfg.BD, "bd", "bd"},
+		{cfg.BdLabel, "org.gastown.bd-commit", "bd label"},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("the %s is %q, want %q", tc.name, tc.got, tc.want)
@@ -72,6 +74,7 @@ func TestConfigFromEnvOverrides(t *testing.T) {
 		"POLECAT_IMAGE_BUILDER_KEEP":  "2GB",
 		"POLECAT_CACHE_CAP":           "512M",
 		"POLECAT_IMAGE_DOCKER":        "docker-dev",
+		"POLECAT_IMAGE_BD":            "bd-dev",
 	}))
 	if err != nil {
 		t.Fatalf("ConfigFromEnv() failed: %v", err)
@@ -86,6 +89,7 @@ func TestConfigFromEnvOverrides(t *testing.T) {
 		{cfg.BuilderKeep, "2GB", "builder keep"},
 		{cfg.CacheCap, "512M", "cache cap"},
 		{cfg.Docker, "docker-dev", "docker"},
+		{cfg.BD, "bd-dev", "bd"},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("the %s is %q, want %q", tc.name, tc.got, tc.want)

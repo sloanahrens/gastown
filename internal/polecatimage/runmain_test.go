@@ -7,12 +7,24 @@ import (
 	"testing"
 )
 
+// testBdCommit is the installed bd commit a reply reports, and the bd label its
+// image carries, unless a case says otherwise. It is 7 hex characters, the
+// shortest commit a comparison accepts.
+const testBdCommit = "bd00000"
+
+// bdLabelFormat is the template ImageBdCommit reads the bd label with, for a
+// run whose configuration carries bdLabelName.
+const bdLabelFormat = `{{index .Config.Labels "` + bdLabelName + `"}}`
+
 // runReply answers a whole Main run: the installed commits gt reports in order,
-// the label the image carries (following the last build), and the publish calls
-// through publishReply.
+// the labels the image carries (following the last build), and the publish
+// calls through publishReply.
 type runReply struct {
 	installs []string // what `gt version` says, in order; the last repeats
-	label    string   // the label the image carries before a build
+	label    string   // the gt label the image carries before a build
+	bd       string   // what `bd version --json` reports; empty makes it fail
+	bdLabel  string   // the bd label the image carries before a build
+	bdBuilt  string   // the bd label a build leaves; empty follows the installed bd
 	info     result   // docker info
 	build    result   // make polecat-image
 	pgrep    result   // pgrep for a running sling
@@ -21,14 +33,17 @@ type runReply struct {
 
 	n        int    // how many times gt version was asked
 	resolved string // the commit the last build resolved
-	built    string // the commit the last build left in the label
+	built    string // the gt label the last build left
+	builtBd  string // the bd label the last build left
 }
 
-// newRunReply is a run whose docker is up, no sling is running and no sandbox is
-// listed.
+// newRunReply is a run whose docker is up, no sling is running, no sandbox is
+// listed, and whose image is at the installed bd's commit.
 func newRunReply(installs ...string) *runReply {
 	return &runReply{
 		installs: installs,
+		bd:       testBdCommit,
+		bdLabel:  testBdCommit,
 		pgrep:    result{exit: 1},
 		list:     result{stdout: "No sandboxes found.\n"},
 	}
@@ -61,11 +76,21 @@ func (rr *runReply) answer(t *testing.T, label string) func(command) result {
 			return result{stdout: "gt version (dev: " + say + ")\n"}
 		case c.name == "docker" && hasArg(c.args, "info"):
 			return rr.info
+		case c.name == "docker" && hasArg(c.args, bdLabelFormat):
+			if rr.builtBd != "" {
+				return result{stdout: rr.builtBd + "\n"}
+			}
+			return result{stdout: rr.bdLabel}
 		case c.name == "docker" && hasArg(c.args, label):
 			if rr.built != "" {
 				return result{stdout: rr.built + "\n"}
 			}
 			return result{stdout: rr.label}
+		case c.name == "bd" && hasArg(c.args, "version"):
+			if rr.bd == "" {
+				return result{exit: 1, stderr: "bd: command failed"}
+			}
+			return result{stdout: `{"data":{"commit":"` + rr.bd + `"}}` + "\n"}
 		case c.name == "git" && hasArg(c.args, "rev-parse"):
 			want := strings.TrimSuffix(c.args[len(c.args)-1], "^{commit}")
 			rr.resolved = want + strings.Repeat("0", 40-len(want))
@@ -82,6 +107,12 @@ func (rr *runReply) answer(t *testing.T, label string) func(command) result {
 			return result{}
 		case c.name == "make":
 			rr.built = rr.resolved
+			// A build labels the bd it compiled: the installed one, unless the
+			// case pins the label, as a Makefile BD_COMMIT does.
+			rr.builtBd = rr.bd
+			if rr.bdBuilt != "" {
+				rr.builtBd = rr.bdBuilt
+			}
 			return rr.build
 		case c.name == "pgrep":
 			return rr.pgrep
@@ -135,6 +166,110 @@ func TestMainPublishesTheImageItBuilds(t *testing.T) {
 	tr.wantLogged(t, "current at abc1234")
 	if _, err := os.Stat(tr.Cfg.Published); err != nil {
 		t.Errorf("the push was not recorded: %v", err)
+	}
+}
+
+// TestMainRebuildsWhenOnlyTheBdCommitDiffers is the bd half of the currency
+// test: a landing that changed only bd leaves the image's gt label current, so
+// the bd label alone must force the rebuild (gt-xudej).
+func TestMainRebuildsWhenOnlyTheBdCommitDiffers(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		bd        string
+		wantMakes int
+	}{
+		{name: "the installed bd moved", bd: "bd11111", wantMakes: 1},
+		{name: "both commits equal", bd: testBdCommit, wantMakes: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tr := newTestRun(t)
+			tr.Cfg.Registry = ""
+			reply := newRunReply("abc1234")
+			reply.label = "abc1234"
+			reply.bd = tc.bd
+			tr.reply = reply.answer(t, labelFormat(tr))
+			t.Cleanup(tr.Cleanup)
+			if err := tr.Main(); err != nil {
+				t.Fatalf("Main() failed: %v", err)
+			}
+			if got := len(tr.callsTo("make")); got != tc.wantMakes {
+				t.Errorf("make was called %d times, want %d", got, tc.wantMakes)
+			}
+			tr.wantLogged(t, "current at abc1234")
+		})
+	}
+}
+
+// TestMainTreatsAnUnreadableBdAsCurrent is the other half of the bd check: a bd
+// that cannot answer leaves a gt-current image alone and the run says so once,
+// so a broken bd never loops the build (gt-xudej).
+func TestMainTreatsAnUnreadableBdAsCurrent(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		bd   string  // what `bd version --json` reports; empty makes it fail
+		says *result // the call's answer instead, for output the stub cannot make on its own
+	}{
+		{name: "bd fails", bd: ""},
+		{name: "output is not JSON", says: &result{stdout: "{not json\n"}},
+		{name: "no commit field", says: &result{stdout: `{"data":{"branch":"main"}}`}},
+		{name: "commit is not a commit", says: &result{stdout: `{"data":{"commit":"unknown"}}`}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tr := newTestRun(t)
+			reply := newRunReply("abc1234")
+			reply.label = "abc1234"
+			reply.bd = tc.bd
+			if tc.says != nil {
+				reply.fail = map[string]result{callKey("bd", "version", "--json"): *tc.says}
+			}
+			tr.reply = reply.answer(t, labelFormat(tr))
+			t.Cleanup(tr.Cleanup)
+			if err := tr.Main(); err != nil {
+				t.Fatalf("Main() failed: %v", err)
+			}
+			if got := len(tr.callsTo("make")); got != 0 {
+				t.Errorf("make was called %d times, want none: the image is current and the bd is unreadable", got)
+			}
+			tr.wantLogged(t, "current at abc1234")
+			if got := strings.Count(tr.output(), "cannot read the installed bd's commit"); got != 1 {
+				t.Errorf("the unreadable bd was logged %d times, want once: %s", got, tr.output())
+			}
+		})
+	}
+}
+
+// TestMainStopsWhenTheBuiltBdLabelStillDiffers drives a build whose bd label
+// never follows the install, as a Makefile BD_COMMIT pin leaves it: the run
+// stops at the round limit and names both commits rather than rebuilding
+// forever (gt-xudej).
+func TestMainStopsWhenTheBuiltBdLabelStillDiffers(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	tr.Cfg.Registry = ""
+	reply := newRunReply("abc1234")
+	reply.label = "abc1234"      // the gt half is current already
+	reply.bd = "bd11111"         // the installed bd moved
+	reply.bdLabel = testBdCommit // the image still carries the old bd
+	reply.bdBuilt = testBdCommit // a pinned build leaves that label alone
+	tr.reply = reply.answer(t, labelFormat(tr))
+	t.Cleanup(tr.Cleanup)
+	err := tr.Main()
+	if err == nil {
+		t.Fatal("Main() = nil, want the bd label that never followed")
+	}
+	for _, want := range []string{testBdCommit, "bd11111", "after 3 builds"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Main() = %v, want it to name %q", err, want)
+		}
+	}
+	if got := len(tr.callsTo("make")); got != 3 {
+		t.Errorf("make was called %d times, want %d: the round limit ends the run", got, 3)
 	}
 }
 

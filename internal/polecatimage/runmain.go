@@ -4,8 +4,9 @@ package polecatimage
 // keeps moving, the script's MAX_ROUNDS.
 const maxRounds = 3
 
-// Main keeps the image at the installed gt's commit, publishing each build when
-// a registry is named, and answers the failure it cannot carry past.
+// Main keeps the image at the installed gt's commit and the installed bd's
+// commit, publishing each build when a registry is named, and answers the
+// failure it cannot carry past.
 func (r *Run) Main() error {
 	installed := r.InstalledCommit()
 	if installed == "" {
@@ -17,7 +18,7 @@ func (r *Run) Main() error {
 	if r.call(r.Cfg.Docker, "info").failed() {
 		return r.Defer("deferred: docker unavailable")
 	}
-	if SameCommit(r.ImageCommit(), installed) {
+	if r.current(installed) {
 		if err := r.Republish(); err != nil {
 			return err
 		}
@@ -39,7 +40,7 @@ func (r *Run) Main() error {
 		if installed == "" {
 			return r.failf("cannot read the installed gt's commit from '%s version'", r.Cfg.GT)
 		}
-		if SameCommit(r.ImageCommit(), installed) {
+		if r.current(installed) {
 			r.Logf("current at %s", shortCommit(installed))
 			return nil
 		}
@@ -56,8 +57,28 @@ func (r *Run) Main() error {
 	}
 	installed = r.InstalledCommit()
 	if SameCommit(r.ImageCommit(), installed) {
-		r.Logf("current at %s", shortCommit(installed))
-		return nil
+		imageBd := r.ImageBdCommit()
+		installedBd := r.InstalledBdCommit()
+		if installedBd == "" || SameCommit(imageBd, installedBd) {
+			r.Logf("current at %s", shortCommit(installed))
+			return nil
+		}
+		// The gt half is current and every round left the bd label where it
+		// was, so another build would not move it: a Makefile BD_COMMIT pins
+		// the bd the image carries.
+		return r.failf("the image's bd is still at %s, not the installed %s after %d builds", shortCommit(imageBd), shortCommit(installedBd), maxRounds)
 	}
 	return r.failf("the installed gt kept moving: %s is still not at %s after %d builds", r.Cfg.Image, shortCommit(installed), maxRounds)
+}
+
+// current reports whether the image is current for this install: at the
+// installed gt's commit and at the installed bd's commit, by the same prefix
+// rule as SameCommit. A bd that cannot be read is not counted against the
+// image, so a broken bd never loops the build.
+func (r *Run) current(installed string) bool {
+	if !SameCommit(r.ImageCommit(), installed) {
+		return false
+	}
+	installedBd := r.InstalledBdCommit()
+	return installedBd == "" || SameCommit(r.ImageBdCommit(), installedBd)
 }

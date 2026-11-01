@@ -15,6 +15,10 @@ var testNow = time.Date(2026, 10, 26, 19, 20, 36, 0, time.UTC)
 // testRegistry is the host:port the default test configuration publishes to.
 const testRegistry = "registry.example:5000"
 
+// bdLabelName is the label the image records its bd commit under, the one
+// ImageBdCommit reads.
+const bdLabelName = "org.gastown.bd-commit"
+
 // testRun is one run rooted in a temporary town: a case answers the program
 // calls it names, and every call is recorded whether it answered or not.
 type testRun struct {
@@ -38,6 +42,7 @@ func newTestRun(t *testing.T) *testRun {
 	tr.Run = &Run{
 		Cfg: Config{
 			GT:             "gt",
+			BD:             "bd",
 			Docker:         "docker",
 			Git:            "git",
 			Make:           "make",
@@ -51,6 +56,7 @@ func newTestRun(t *testing.T) *testRun {
 			SandboxRecords: filepath.Join(root, "runtime", "sandboxes"),
 			Image:          "gastown-polecat:dev",
 			Label:          "org.gastown.gt-commit",
+			BdLabel:        bdLabelName,
 			Registry:       testRegistry,
 			Published:      filepath.Join(root, "runtime", "polecat-image.published"),
 			Crane:          "crane",

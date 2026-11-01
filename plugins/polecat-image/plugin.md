@@ -1,6 +1,6 @@
 +++
 name = "polecat-image"
-description = "Rebuild gastown-polecat:dev at the installed gt's commit after each gt install, so sandbox slings are not refused for image drift; publish it to the configured registry; then trim the image tags, build cache and per-rig cache volumes that run grows"
+description = "Rebuild gastown-polecat:dev at the installed gt's and bd's commits; publish it to the configured registry; then trim the image tags, build cache and per-rig cache volumes a run grows"
 version = 1
 
 [gate]
@@ -37,9 +37,11 @@ detached, escalating a failure under `install-gt:image-build-failed`.
 
 ## What it does
 
-1. Reads the installed gt's commit (`gt version`) and the commit label of
-   `gastown-polecat:dev` (`org.gastown.gt-commit`). Equal (a prefix of at least
-   7 characters either way): prints `current` and stops.
+1. Reads the installed gt's and bd's commits (`gt version`, `bd version
+   --json`) and the image's `org.gastown.gt-commit` and `org.gastown.bd-commit`
+   labels. Each pair equal (7 characters as a prefix either way): prints
+   `current` and stops, so a bd-only landing still rebuilds (gt-xudej). An
+   unreadable bd leaves the bd half current and logs one line.
 2. Defers (exit 0, a `deferred:` line, retried by the next cooldown) while Docker
    Desktop is stopped, while a `gt sling` process is running, or while the
    gateway lists a sandbox whose registry record under
@@ -58,8 +60,8 @@ detached, escalating a failure under `install-gt:image-build-failed`.
    BD_SRC=~/gt/beads/mayor/rig` there, removes the worktree, and checks the
    labels it ended with; the Makefile's `BD_COMMIT` comment says which bd
    commit goes into the image and when the build fetches one (gt-7b7a5).
-5. Reads the installed commit again; if a newer install landed during the
-   build it builds again, at most 3 rounds.
+5. Reads both commits again; if either moved it builds again, at most 3 rounds.
+   A bd label still behind then fails the run, naming both commits.
 6. With a registry resolved ("Publishing to a registry"), publishes what it just
    built there, and retries a publish that did not complete for an image that is
    already current.
@@ -138,8 +140,7 @@ the run.
 ## Per-rig cache volumes
 
 Every sandbox of a rig mounts that rig's `gt-cache-<rig>` volume at
-`/sandbox/.cache`, and nothing trimmed it: `gt-cache-gastown` reached 27.7 GB on
-2026-10-24, growing about 3 GB an hour (gt-3g7p2). After the build cache trim
+`/sandbox/.cache`, and nothing trimmed it (gt-3g7p2). After the build cache trim
 the plugin brings each `gt-cache-<rig>` volume back under `POLECAT_CACHE_CAP`
 (default 10GB; a K, M, G, T or P suffix, so `512M` works):
 
@@ -166,8 +167,8 @@ rig repo does not know, a failed build, an image still carrying another commit,
 an installed gt whose commit cannot be read. A deferral exits 0 and prints why,
 unless `POLECAT_IMAGE_FAIL_CLOSED=1` makes it exit non-zero; read "Publishing to
 a registry" before setting that variable. A plugin whose receipts show
-`deferred:` run after run is stuck behind that reason and the image stays stale,
-with the sandbox sling's refusal as the net.
+`deferred:` run after run is stuck behind that reason, with the sandbox sling's
+refusal as the net.
 
 Run it directly; before building or syncing this plugin, read "Script entry
 point" in `plugins/README.md`:
