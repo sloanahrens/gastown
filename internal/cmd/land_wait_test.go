@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
@@ -493,6 +494,136 @@ func TestLandHelpListsWait(t *testing.T) {
 	}
 }
 
+// The bead's notes are the outcome's attribution, so a store the waiter cannot
+// open or read is a failure to report, not an outcome that is nobody's.
+func TestLandWaitBeadNotes(t *testing.T) {
+	t.Parallel()
+	landed := land.LandingRecord{BeadID: "gt-a", Branch: "crew/dunlin/gt-a-x",
+		Target: "main", LandedCommit: "1a2b3c4d5e6f", LandedAt: landWaitEpoch}.NoteBlock()
+	ev := landWaitEvent{Bead: "gt-a", Landed: true, Commit: "1a2b3c4d"}
+	for _, tc := range []struct {
+		name  string
+		open  func(string) (landWaitBeadReader, error)
+		want  string
+		found bool
+	}{
+		{
+			name: "a store that cannot be opened",
+			open: func(string) (landWaitBeadReader, error) { return nil, landWaitErrTestRead },
+			want: "the read failed",
+		},
+		{
+			name: "a bead that cannot be read",
+			open: func(string) (landWaitBeadReader, error) {
+				return landWaitFakeBeads{err: landWaitErrTestRead}, nil
+			},
+			want: "reading gt-a: the read failed",
+		},
+		{
+			name: "a bead that is not there",
+			open: func(string) (landWaitBeadReader, error) { return landWaitFakeBeads{}, nil },
+			want: "reading gt-a: no such bead",
+		},
+		{
+			name: "the bead's record",
+			open: func(string) (landWaitBeadReader, error) {
+				return landWaitFakeBeads{issue: &beads.Issue{ID: "gt-a", Notes: landed}}, nil
+			},
+			found: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			outcome, found, err := landWaitBeadNotes(tc.open)(ev)
+			if tc.want != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("landWaitBeadNotes() error = %v, want it to name %q", err, tc.want)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("landWaitBeadNotes() error = %v", err)
+			}
+			if found != tc.found || !found {
+				t.Fatalf("landWaitBeadNotes() found = %v, want %v", found, tc.found)
+			}
+			if outcome.Commit != "1a2b3c4d5e6f" || outcome.Branch != "crew/dunlin/gt-a-x" {
+				t.Errorf("outcome = %+v, want the landing's commit and branch", outcome)
+			}
+		})
+	}
+}
+
+func TestLandWaitBeadStoreRefusesNoWorkdir(t *testing.T) {
+	t.Parallel()
+	if _, err := landWaitBeadStore(func() (string, error) { return "", landWaitErrTestRead }, "gt-a"); err == nil {
+		t.Fatal("landWaitBeadStore() = nil error with no working directory")
+	}
+}
+
+// landWaitFakeBeads is one bead read as the waiter makes it.
+type landWaitFakeBeads struct {
+	issue *beads.Issue
+	err   error
+}
+
+func (f landWaitFakeBeads) Show(string) (*beads.Issue, error) { return f.issue, f.err }
+
+// The command's three refusals before it polls: a timeout it cannot read, a
+// role that names no crew member, and a town it cannot find.
+func TestLandWaitCommandRefusals(t *testing.T) {
+	t.Parallel()
+	town := func() (string, error) { return t.TempDir(), nil }
+	for _, tc := range []struct {
+		name, agentFlag, timeoutFlag, gtRole string
+		findTown                             func() (string, error)
+		want                                 string
+	}{
+		{name: "a timeout that is not a duration", timeoutFlag: "soon", findTown: town, want: "--timeout"},
+		{name: "a polecat's role", timeoutFlag: "1ms", gtRole: "gastown/polecats/coma", findTown: town, want: "crew member's branches"},
+		{name: "no town", agentFlag: "dunlin", timeoutFlag: "1ms",
+			findTown: func() (string, error) { return "", landWaitErrTestRead }, want: "resolving the town"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := &cobra.Command{}
+			err := landWaitCommand(cmd, tc.agentFlag, tc.timeoutFlag, landWaitEnv(tc.gtRole), os.Getwd, tc.findTown)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("landWaitCommand() error = %v, want it to name %q", err, tc.want)
+			}
+			if _, silent := IsSilentExit(err); silent {
+				t.Errorf("a refusal came back as a silent exit")
+			}
+		})
+	}
+}
+
+// The command's whole body runs against a town whose log holds nothing: it
+// answers with the run-again line and exit 3.
+func TestLandWaitCommandAnswersWithNoOutcome(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	err := landWaitCommand(cmd, "dunlin", "1ns", landWaitEnv(""), os.Getwd, func() (string, error) { return t.TempDir(), nil })
+	if code, ok := IsSilentExit(err); !ok || code != 3 {
+		t.Fatalf("landWaitCommand() error = %v (silent %v), want exit 3", err, ok)
+	}
+	if !strings.Contains(out.String(), "no outcome yet, run again") {
+		t.Errorf("output = %q, want the run-again line", out.String())
+	}
+}
+
+// landWaitEnv is a GT_ROLE lookup a test steers.
+func landWaitEnv(gtRole string) func(string) string {
+	return func(key string) string {
+		if key == "GT_ROLE" {
+			return gtRole
+		}
+		return ""
+	}
+}
+
 func TestLandWaitLogSourceReadsSinceTheStart(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -513,6 +644,20 @@ func TestLandWaitLogSourceReadsSinceTheStart(t *testing.T) {
 	}
 	if want := time.Date(2026, 11, 1, 9, 0, 1, 0, time.Local); !events[0].At.Equal(want) {
 		t.Errorf("event at %s, want the line's stamp %s", events[0].At, want)
+	}
+}
+
+// A log that cannot be read is an error, not a town that logged nothing: the
+// two look the same to the wait, and only one of them is worth exiting 3 on.
+func TestLandWaitLogSourceRefusesAnUnreadableLog(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// A directory where the log should be opens and then cannot be read.
+	if err := os.Mkdir(filepath.Join(dir, "daemon.log"), 0o700); err != nil {
+		t.Fatalf("making the unreadable log: %v", err)
+	}
+	if _, err := landWaitLogSource(dir)(landWaitEpoch); err == nil {
+		t.Fatal("landWaitLogSource() = nil error on a log it cannot read")
 	}
 }
 

@@ -72,15 +72,22 @@ func init() {
 }
 
 func runLandWait(cmd *cobra.Command, _ []string) error {
-	timeout, err := landWaitParseTimeout(landWaitTimeout)
+	return landWaitCommand(cmd, landWaitAgent, landWaitTimeout, os.Getenv, os.Getwd, workspace.FindFromCwdOrError)
+}
+
+// landWaitCommand is the command body over injected inputs, so a test drives
+// each refusal without a flag, the host's environment or its town.
+func landWaitCommand(cmd *cobra.Command, agentFlag, timeoutFlag string, getenv func(string) string,
+	getwd func() (string, error), findTown func() (string, error)) error {
+	timeout, err := landWaitParseTimeout(timeoutFlag)
 	if err != nil {
 		return err
 	}
-	agent, err := landWaitAgentFrom(landWaitAgent, os.Getenv)
+	agent, err := landWaitAgentFrom(agentFlag, getenv)
 	if err != nil {
 		return err
 	}
-	townRoot, err := workspace.FindFromCwdOrError()
+	townRoot, err := findTown()
 	if err != nil {
 		return fmt.Errorf("resolving the town: %w", err)
 	}
@@ -91,9 +98,11 @@ func runLandWait(cmd *cobra.Command, _ []string) error {
 		now:      time.Now,
 		sleep:    time.Sleep,
 		source:   landWaitLogSource(filepath.Join(townRoot, "daemon")),
-		detail:   landWaitBeadNotes(os.Getwd),
-		out:      cmd.OutOrStdout(),
-		errOut:   cmd.ErrOrStderr(),
+		detail: landWaitBeadNotes(func(bead string) (landWaitBeadReader, error) {
+			return landWaitBeadStore(getwd, bead)
+		}),
+		out:    cmd.OutOrStdout(),
+		errOut: cmd.ErrOrStderr(),
 	})
 	return landWaitFinish(cmd, err)
 }
@@ -309,17 +318,32 @@ func landWaitLogSource(dir string) func(since time.Time) ([]landWaitEvent, error
 	}
 }
 
-// landWaitBeadNotes reads the outcome's branch and figures from the bead's own
-// record of it, the notes gt land verdict reads. A read failure is returned
-// rather than read as no outcome: a bird that cannot see its bead's notes has
-// not been told the landing did not happen.
-func landWaitBeadNotes(getwd func() (string, error)) func(landWaitEvent) (landWaitOutcome, bool, error) {
+// landWaitBeadReader is the one read the waiter makes of a bead: its notes, the
+// record gt land verdict reads. *beads.Beads satisfies it; a test passes a fake.
+type landWaitBeadReader interface {
+	Show(id string) (*beads.Issue, error)
+}
+
+// landWaitBeadStore opens the beads store a bead's notes live in, routed by the
+// bead's prefix, from the working directory getwd names.
+func landWaitBeadStore(getwd func() (string, error), bead string) (landWaitBeadReader, error) {
+	cwd, err := getwd()
+	if err != nil {
+		return nil, fmt.Errorf("resolving the working directory: %w", err)
+	}
+	return beads.NewWithBeadsDir(cwd, beads.ResolveBeadsDirForID(beads.ResolveBeadsDir(cwd), bead)), nil
+}
+
+// landWaitBeadNotes answers an event from the bead's own record of it. A store
+// that cannot be opened or read is returned rather than read as no outcome: a
+// bird that cannot see its bead's notes has not been told the landing did not
+// happen.
+func landWaitBeadNotes(open func(bead string) (landWaitBeadReader, error)) func(landWaitEvent) (landWaitOutcome, bool, error) {
 	return func(ev landWaitEvent) (landWaitOutcome, bool, error) {
-		cwd, err := getwd()
+		bd, err := open(ev.Bead)
 		if err != nil {
-			return landWaitOutcome{}, false, fmt.Errorf("resolving the working directory: %w", err)
+			return landWaitOutcome{}, false, err
 		}
-		bd := beads.NewWithBeadsDir(cwd, beads.ResolveBeadsDirForID(beads.ResolveBeadsDir(cwd), ev.Bead))
 		issue, err := bd.Show(ev.Bead)
 		if err != nil {
 			return landWaitOutcome{}, false, fmt.Errorf("reading %s: %w", ev.Bead, err)
