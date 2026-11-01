@@ -1,10 +1,15 @@
 package main
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/steveyegge/gastown/internal/bdshim/golden"
+)
 
 // fixturePrefix is the issue prefix every copy's database is initialized with, the one the fixture
-// file's bead ids carry.
-const fixturePrefix = "fx"
+// file's bead ids carry. It is the normalizer's too, so a golden and the answer normalized against
+// it tell a minted id from fixture text the same way (gt-p85pw.118).
+const fixturePrefix = golden.FixturePrefix
 
 // The beads the fixture database must hold, since the table's rows name them. bd is asked for each
 // one before any row runs, so a fixture that is missing one fails the recording instead of being

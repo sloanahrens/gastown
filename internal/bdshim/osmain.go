@@ -22,13 +22,13 @@ func OsMain(args []string) int {
 
 // osEnv is the process surface a real run reads.
 func osEnv(args []string) Env {
-	return processEnv(args, os.Getenv, os.Getwd, os.Executable, runBdReal, os.Stderr)
+	return processEnv(args, os.Getenv, os.Getwd, os.Executable, runBdReal, os.Stdout, os.Stderr)
 }
 
 // processEnv wires Main to the process's reads and to the verb registry. The
 // caller passes each source: osEnv passes the real ones, and a test passes
 // fakes for the same wiring with a town of its own.
-func processEnv(args []string, getenv func(string) string, getwd func() (string, error), executable func() (string, error), run func(string, []string) error, stderr io.Writer) Env {
+func processEnv(args []string, getenv func(string) string, getwd func() (string, error), executable func() (string, error), run func(string, []string) error, stdout, stderr io.Writer) Env {
 	return Env{
 		Args:       args,
 		Getenv:     getenv,
@@ -36,6 +36,7 @@ func processEnv(args []string, getenv func(string) string, getwd func() (string,
 		Executable: executable,
 		Run:        run,
 		Handlers:   handlers,
+		Stdout:     stdout,
 		Stderr:     stderr,
 	}
 }

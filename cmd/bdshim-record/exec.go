@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/bdshim/golden"
 	"github.com/steveyegge/gastown/internal/testdb"
 )
 
@@ -284,7 +285,7 @@ func checkFixtureFile(path string) (map[string]bool, error) {
 		if err := json.Unmarshal(text, &bead); err != nil {
 			return nil, fmt.Errorf("fixture %s line %d is not a bead: %w", path, line, err)
 		}
-		collectIDs(bead, held)
+		golden.CollectIDs(bead, held)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read the fixture %s: %w", path, err)
@@ -295,24 +296,4 @@ func checkFixtureFile(path string) (map[string]bool, error) {
 		}
 	}
 	return held, nil
-}
-
-// collectIDs adds to held every id value the fixture line holds at any depth, so a comment's id is
-// kept by a golden as well as the bead's own.
-func collectIDs(value any, held map[string]bool) {
-	switch v := value.(type) {
-	case map[string]any:
-		for key, field := range v {
-			if key == "id" {
-				if id, ok := field.(string); ok {
-					held[id] = true
-				}
-			}
-			collectIDs(field, held)
-		}
-	case []any:
-		for _, item := range v {
-			collectIDs(item, held)
-		}
-	}
 }

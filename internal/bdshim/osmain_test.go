@@ -3,6 +3,7 @@ package bdshim
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,7 +97,7 @@ func processRun(t *testing.T, cwd, beadsDir string, proc *fakeProcess, args ...s
 	e := processEnv(args, beadsDirOnly(beadsDir),
 		func() (string, error) { return cwd, nil },
 		func() (string, error) { return shimPath, nil },
-		proc.run, stderr)
+		proc.run, io.Discard, stderr)
 	return Main(e), stderr, shimPath
 }
 

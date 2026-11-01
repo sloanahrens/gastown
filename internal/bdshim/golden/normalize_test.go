@@ -1,4 +1,4 @@
-package main
+package golden
 
 import "testing"
 
@@ -8,9 +8,9 @@ import "testing"
 func TestNormalizeGoldenRewritesWhatTheRunDecides(t *testing.T) {
 	t.Parallel()
 	keep := map[string]bool{
-		fixtureID:      true,
-		fixtureDepID:   true,
-		fixtureParent:  true,
+		"fx-1":         true,
+		"fx-2":         true,
+		"fx-parent":    true,
 		"fx-1-comment": true,
 		"fx-agent":     true,
 	}
@@ -123,8 +123,8 @@ func TestNormalizeGoldenRewritesWhatTheRunDecides(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := string(normalizeGolden([]byte(tc.in), keep)); got != tc.want {
-				t.Errorf("normalizeGolden(%s) =\n%s\nwant:\n%s", tc.name, got, tc.want)
+			if got := string(Normalize([]byte(tc.in), keep)); got != tc.want {
+				t.Errorf("Normalize(%s) =\n%s\nwant:\n%s", tc.name, got, tc.want)
 			}
 		})
 	}
@@ -148,7 +148,7 @@ func TestNormalizeGoldenKeepsBdMemberOrder(t *testing.T) {
   ]
 }
 `
-	if got := string(normalizeGolden([]byte(in), nil)); got != want {
-		t.Errorf("normalizeGolden kept %s, want bd's member order:\n%s", got, want)
+	if got := string(Normalize([]byte(in), nil)); got != want {
+		t.Errorf("Normalize kept %s, want bd's member order:\n%s", got, want)
 	}
 }
