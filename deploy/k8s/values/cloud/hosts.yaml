@@ -1,0 +1,7 @@
+# Environment hosts for a cloud cluster. The values are placeholders that no
+# code reads yet; they carry the same keys as the kind file so a move is a value
+# swap (gt-ht5he). Nothing here is a secret.
+control_plane_host: CONTROL_PLANE_HOST
+registry_host: REGISTRY_HOST
+storage_class: STORAGE_CLASS
+reclaim_policy: Retain

@@ -237,7 +237,7 @@ else
     kubectl apply -f -
 fi
 kubectl apply -f "$HERE/gateway-nodeport.yaml"
-kubectl apply -f "$HERE/../services/control-plane.yaml"
+kubectl apply -f "$HERE/../values/kind/control-plane-services.yaml"
 kubectl -n openshell rollout status statefulset/openshell --timeout=300s
 
 # Client certificates for the CLI. The key is never printed; the CLI wants

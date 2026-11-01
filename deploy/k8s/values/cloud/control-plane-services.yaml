@@ -1,0 +1,21 @@
+# The cloud counterpart of ../kind/control-plane-services.yaml: the same four
+# Service names, with the placeholder in hosts.yaml. Not applied by anything yet.
+apiVersion: v1
+kind: Service
+metadata: {name: control-plane, namespace: openshell}
+spec: {type: ExternalName, externalName: CONTROL_PLANE_HOST}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: dolt, namespace: openshell}
+spec: {type: ExternalName, externalName: CONTROL_PLANE_HOST}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: forgejo, namespace: openshell}
+spec: {type: ExternalName, externalName: CONTROL_PLANE_HOST}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: tracker, namespace: openshell}
+spec: {type: ExternalName, externalName: CONTROL_PLANE_HOST}

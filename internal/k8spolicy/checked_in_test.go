@@ -143,7 +143,7 @@ func TestCheckedInKindPolicyIsTheRender(t *testing.T) {
 	if msg := kindDrift(t, "../../deploy/polecat/policy.yaml", "../../deploy/k8s/policy/kind.yaml"); msg != "" {
 		t.Error(msg)
 	}
-	for _, p := range servicesProblems(readRepoFile(t, "../../deploy/k8s/services/control-plane.yaml")) {
+	for _, p := range servicesProblems(readRepoFile(t, "../../deploy/k8s/values/kind/control-plane-services.yaml")) {
 		t.Error(p)
 	}
 }
