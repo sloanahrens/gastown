@@ -39,7 +39,7 @@ func TestTimeoutRetrySkipsABeadAtItsRespawnLimit(t *testing.T) {
 			cleared = append(cleared, beadID)
 			return nil
 		},
-		respawnLimited: func(string) bool { return true },
+		respawnGate: func(string) (bool, []string) { return true, nil },
 	}
 
 	got := specCandidatesRetrying(townRoot, 2, respawnRetryBoard(), notDocked, retry)
@@ -72,7 +72,7 @@ func TestTimeoutRetryStillRetriesBelowTheLimit(t *testing.T) {
 			cleared = append(cleared, beadID)
 			return nil
 		},
-		respawnLimited: func(string) bool { return false },
+		respawnGate: func(string) (bool, []string) { return false, nil },
 	}
 
 	got := specCandidatesRetrying(townRoot, 2, respawnRetryBoard(), notDocked, retry)
@@ -98,9 +98,9 @@ func TestThreeRefusalsProduceNoFourthSling(t *testing.T) {
 	townRoot := specTown(t)
 	cleared := 0
 	retry := &specTimeoutRetry{
-		due:            func(string) (map[string]bool, error) { return map[string]bool{"gt-retry": true}, nil },
-		clear:          func(string, string) error { cleared++; return nil },
-		respawnLimited: specRespawnLimitedFrom(fakeSlingStores(beadsfake.New()), townRoot),
+		due:         func(string) (map[string]bool, error) { return map[string]bool{"gt-retry": true}, nil },
+		clear:       func(string, string) error { cleared++; return nil },
+		respawnGate: specRespawnGateFrom(fakeSlingStores(beadsfake.New()), townRoot),
 	}
 
 	var planned []int
@@ -182,7 +182,7 @@ func respawnLimitedRetry(townRoot string, stores slingStores, cleared *[]string)
 			*cleared = append(*cleared, beadID)
 			return nil
 		},
-		respawnLimited: specRespawnLimitedFrom(stores, townRoot),
+		respawnGate: specRespawnGateFrom(stores, townRoot),
 	}
 }
 
@@ -249,5 +249,37 @@ func TestTimeoutRetryHoldsABeadWithNoReadableSubmission(t *testing.T) {
 	}
 	if len(cleared) != 0 {
 		t.Errorf("cleared = %v, want the label left on", cleared)
+	}
+}
+
+// A comment read that fails while the round still carries a READY TO LAND stamp
+// clears the count as usual, and the failed read reaches the tick's errors: the
+// gate prints nothing from inside itself (gt-51dmz).
+func TestTimeoutRetryReportsAFailedCommentReadOnTheTick(t *testing.T) {
+	t.Parallel()
+	townRoot, stores := respawnLimitedRetryTown(t, pastTheLastSpawn())
+	// Every pinned store is the same seeded fake, so the comment read alone is
+	// swapped for one that fails.
+	seeded := stores.pinned("").(slingFake)
+	unreadable := slingStores{
+		pinned: func(string) slingStore { return commentsUnreadable{seeded} },
+		routed: stores.routed,
+	}
+	var cleared []string
+
+	got := specCandidatesRetrying(townRoot, 2, respawnRetryBoard(), notDocked,
+		respawnLimitedRetry(townRoot, unreadable, &cleared))
+
+	if len(got.Candidates) != 1 || got.Candidates[0].Spec.ID != "gt-retry" {
+		t.Fatalf("candidates = %+v, want the bead slung: its stamp dates the round", got.Candidates)
+	}
+	reported := false
+	for _, e := range got.Errors {
+		if strings.Contains(e, "could not read the comments on gt-retry") {
+			reported = true
+		}
+	}
+	if !reported {
+		t.Errorf("Errors = %v, want the failed comment read reported on the tick", got.Errors)
 	}
 }

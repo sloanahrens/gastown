@@ -133,7 +133,13 @@ func admitSlingRespawn(stores slingStores, townRoot, rigName string, opts SlingS
 	// are the rounds behind the submission, which are not deaths by that rule.
 	// A sling that then fails to launch records no spawn of its own, so it
 	// costs the bead nothing it would be blocked on.
-	clearRespawnForSubmittedRound(stores, townRoot, opts.HookBead)
+	cleared, warnings := clearRespawnForSubmittedRound(stores, townRoot, opts.HookBead)
+	for _, w := range warnings {
+		style.PrintWarning("%s", w)
+	}
+	if cleared {
+		fmt.Printf("  %s Cleared the count for %s: it is a round that submitted, not a respawn\n", style.Bold.Render("✓"), opts.HookBead)
+	}
 	if !polecat.ShouldBlockRespawn(townRoot, opts.HookBead) {
 		return nil
 	}
@@ -182,32 +188,34 @@ func recordSlingRespawn(warn io.Writer, townRoot string, opts SlingSpawnOptions)
 // it. A bead whose submission cannot be read or dated clears nothing: the count
 // is the breaker for a polecat that dies at start over and over, and keeping it
 // is the safe direction.
-func clearRespawnForSubmittedRound(stores slingStores, townRoot, beadID string) {
+//
+// It prints nothing. The dispatcher's respawn gate calls it, where a line would
+// land in the tick, so it returns what the caller reports:
+// cleared says the count was dropped, and warnings names each read or write it
+// could not do.
+func clearRespawnForSubmittedRound(stores slingStores, townRoot, beadID string) (cleared bool, warnings []string) {
 	if beadID == "" {
-		return
+		return false, nil
 	}
 	issue, err := stores.show(townRoot, beadID)
 	if err != nil || issue == nil {
-		return
+		return false, nil
 	}
 	comments, err := stores.comments(townRoot, beadID)
 	if err != nil {
 		// Only the submission comments are lost. A bead whose READY TO LAND
 		// block carries a stamp still dates its round, so this is reported and
 		// not returned on.
-		style.PrintWarning("could not read the comments on %s: %v", beadID, err)
+		warnings = append(warnings, fmt.Sprintf("could not read the comments on %s: %v", beadID, err))
 		comments = nil
 	}
 	submitted := latestSubmissionTime(issue, comments)
 	if submitted.IsZero() {
-		return
+		return false, warnings
 	}
-	cleared, err := polecat.ResetBeadRespawnForRound(townRoot, beadID, submitted)
+	cleared, err = polecat.ResetBeadRespawnForRound(townRoot, beadID, submitted)
 	if err != nil {
-		style.PrintWarning("could not clear the respawn count for %s: %v", beadID, err)
-		return
+		return false, append(warnings, fmt.Sprintf("could not clear the respawn count for %s: %v", beadID, err))
 	}
-	if cleared {
-		fmt.Printf("  %s Cleared the count for %s: it is a round that submitted, not a respawn\n", style.Bold.Render("✓"), beadID)
-	}
+	return cleared, warnings
 }

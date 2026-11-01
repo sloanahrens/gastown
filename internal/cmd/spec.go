@@ -2717,8 +2717,8 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 						reads.call()
 						return specTimedOutRetriesIn(rigPath)
 					},
-					clear:          specRetryTimedOutSling,
-					respawnLimited: specRespawnLimitedIn(townRoot),
+					clear:       specRetryTimedOutSling,
+					respawnGate: specRespawnGateIn(townRoot),
 				}
 			}
 			read := specCandidatesRetrying(townRoot, maxPriority, func(rigPath string) ([]*beads.Issue, error) {
@@ -3165,10 +3165,14 @@ func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, r
 					labeled[s.ID] = true
 					continue
 				}
-				if retry.respawnLimited != nil && retry.respawnLimited(s.ID) {
-					labeled[s.ID] = true
-					read.RespawnHeld = append(read.RespawnHeld, s.ID)
-					continue
+				if retry.respawnGate != nil {
+					held, warnings := retry.respawnGate(s.ID)
+					read.Errors = append(read.Errors, warnings...)
+					if held {
+						labeled[s.ID] = true
+						read.RespawnHeld = append(read.RespawnHeld, s.ID)
+						continue
+					}
 				}
 				if err := retry.clear(rigPath, s.ID); err != nil {
 					read.Errors = append(read.Errors, fmt.Sprintf("%s: %v", s.ID, err))
@@ -3217,12 +3221,13 @@ func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, r
 type specTimeoutRetry struct {
 	due   func(rigPath string) (map[string]bool, error)
 	clear func(rigPath, beadID string) error
-	// respawnLimited reports whether the bead has spent its respawn budget. A
-	// bead that has is not retried: the spawn would refuse it after the sling
-	// had paid for its duplicate check and seat decision, and the label stays
-	// until a person resets the count (gt sling respawn-reset). nil holds no
-	// bead back.
-	respawnLimited func(beadID string) bool
+	// respawnGate settles the bead's submitted round, then reports whether its
+	// respawn budget is still spent. A held bead is not retried: the spawn would
+	// refuse it after the sling had paid for its duplicate check and seat
+	// decision, and the label stays until a person resets the count (gt sling
+	// respawn-reset). warnings are what the settle could not do; the read
+	// reports them, since the gate prints nothing. nil holds no bead back.
+	respawnGate func(beadID string) (held bool, warnings []string)
 }
 
 // specTimedOutRetriesIn is the retry probe over the rig's own store.
@@ -3267,25 +3272,26 @@ func specRetryTimedOutSlingFrom(b beads.Client, beadID string) error {
 	return nil
 }
 
-// specRespawnLimitedIn answers specTimeoutRetry.respawnLimited from the town's
-// respawn state: the same count the spawn refuses on (admitSlingRespawn), so a
-// bead the spawn would refuse is not slung to be refused.
-func specRespawnLimitedIn(townRoot string) func(beadID string) bool {
-	return specRespawnLimitedFrom(slingStores{}, townRoot)
+// specRespawnGateIn answers specTimeoutRetry.respawnGate from the town's respawn
+// state: the same count the spawn refuses on (admitSlingRespawn), so a bead the
+// spawn would refuse is not slung to be refused.
+func specRespawnGateIn(townRoot string) func(beadID string) (bool, []string) {
+	return specRespawnGateFrom(slingStores{}, townRoot)
 }
 
-// specRespawnLimitedFrom is specRespawnLimitedIn over the stores the caller
-// supplies, so a test runs the guard against a fake instead of a live bd.
+// specRespawnGateFrom is specRespawnGateIn over the stores the caller supplies,
+// so a test runs the gate against a fake instead of a live bd.
 //
 // The spawn discounts the rounds behind a bead's newest submission before it
-// reads the limit (admitSlingRespawn); a guard that read the count bare would
+// reads the limit (admitSlingRespawn); a gate that read the count bare would
 // hold a rework bead whose last round submitted, which the sling would have
-// admitted (gt-gil3z). The discount may write: it clears the count the next
-// sling would clear anyway, and the retry this guard admits is that sling.
-func specRespawnLimitedFrom(stores slingStores, townRoot string) func(beadID string) bool {
-	return func(beadID string) bool {
-		clearRespawnForSubmittedRound(stores, townRoot, beadID)
-		return polecat.ShouldBlockRespawn(townRoot, beadID)
+// admitted (gt-gil3z). The settle writes: it clears the count the next sling
+// would clear anyway, and the retry this gate admits is that sling. Because
+// the gate settles before it reads, it is named for that, not for the limit.
+func specRespawnGateFrom(stores slingStores, townRoot string) func(beadID string) (bool, []string) {
+	return func(beadID string) (bool, []string) {
+		_, warnings := clearRespawnForSubmittedRound(stores, townRoot, beadID)
+		return polecat.ShouldBlockRespawn(townRoot, beadID), warnings
 	}
 }
 
