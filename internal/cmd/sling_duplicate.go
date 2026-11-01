@@ -690,7 +690,14 @@ func duplicateCandidatesOf(store beads.Client, beadsDir string, rows []*beads.Is
 		if row.ID == "" {
 			continue
 		}
-		candidates = append(candidates, candidateOfRow(row, detailsByID[row.ID]))
+		detail, read := detailsByID[row.ID]
+		c := candidateOfRow(row, detail)
+		// A row no show answered has no design or notes behind its refs, so
+		// its claim on a test file is unknown, not empty. The caller that
+		// dispatches on this pool holds rather than reading it as a bead that
+		// names nothing (gt-n6jbw).
+		c.ClaimsUnread = !read
+		candidates = append(candidates, c)
 	}
 	return candidates, deferred, detailErr
 }

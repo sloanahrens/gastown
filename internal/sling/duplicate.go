@@ -57,6 +57,12 @@ type Duplicate struct {
 	// ListOnly marks a bead whose Refs were extracted from its list row alone
 	// (title, description, close reason): its design and notes were not read.
 	ListOnly bool
+	// ClaimsUnread marks a bead in the active or recently closed pool whose
+	// design and notes were not read at all: the batched show failed, it did
+	// not answer for the row, or the tick's detail cache deferred it. The spec
+	// dispatcher's target-claim rule reads this as a claim on an unknown test
+	// file, never as a bead that claims nothing (gt-n6jbw).
+	ClaimsUnread bool
 	// Blockers lists the IDs this bead has a blocking dependency on, as far as
 	// the caller could read them from bd. The overlap guard walks these edges
 	// to tell a bead of the candidate's own chain from a duplicate: a chain's

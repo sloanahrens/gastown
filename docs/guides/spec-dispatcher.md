@@ -133,20 +133,23 @@ decides and reports without slinging, labeling or commenting.
    while that bead is in flight, is open and one this tick will sling ahead of
    the candidate, or landed within the last day when the candidate was filed
    before that landing. A bead the tick carries on its board but never slings —
-   the shape gate holds it, it needs planning — claims nothing. Two beads that name one test file are two seats on one line of it,
-   which rebounds as a rebase conflict rather than a bounce (gt-n6jbw). Two
-   beads name one file when the paths they spell are equal; a bare name states
-   no directory, so it names whichever file carries it, and a path in one
-   package never matches a path in another. Two beads naming different tests of
-   one file (`TestFoo` against `TestBar`) target different assertions and do not
-   hold each other, and a bead naming no test file claims nothing. Before
-   changing what holds, read `specdispatch.TargetClaimHold`. A claim set the
-   tick cannot read holds too: only a positive answer that nothing claims the
-   target dispatches. The sling-time guard still runs for a dispatch, and the
-   overlap it would refuse is dropped from the report rather than refusing the
-   sling (`sling.Options.AdmitOverlap`), so the dispatch says nothing about
-   that overlap. A manual `gt sling` keeps the refusal, and `--force` overrides
-   it.
+   the shape gate holds it, it needs planning — claims nothing; a bead it slates
+   and the sling then refuses holds for the rest of the tick. Two beads that
+   name one test file are two seats on one line of it, which rebounds as a
+   rebase conflict rather than a bounce (gt-n6jbw). Two beads name one file when
+   the paths they spell are equal; a bare name states no directory, so it names
+   whichever file carries it, and a path in one package never matches a path in
+   another. Two beads naming different tests of one file (`TestFoo` against
+   `TestBar`) target different assertions and do not hold each other, and a bead
+   naming no test file claims nothing. A peer whose own design and notes could
+   not be read holds as a claim on unknown files, so the candidate waits with
+   the reason naming that peer rather than dispatching past it. Before changing
+   what holds, read `specdispatch.TargetClaimHold`. A claim set the tick cannot
+   read holds too: only a positive answer that nothing claims the target
+   dispatches. The sling-time guard still runs for a dispatch, and the overlap
+   it would refuse is dropped from the report rather than refusing the sling
+   (`sling.Options.AdmitOverlap`), so the dispatch says nothing about that
+   overlap. A manual `gt sling` keeps the refusal, and `--force` overrides it.
 6. A bead that takes a seat and matches the overrun-stop box is slung anyway
    and wears one comment saying so (see below).
 

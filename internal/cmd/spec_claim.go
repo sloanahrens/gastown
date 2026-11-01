@@ -7,14 +7,9 @@ import (
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
-// The spec dispatcher's target-claim check (gt-n6jbw).
-//
-// The tick holds a candidate whose test file another bead already claims. The
-// claim set is the duplicate guard's comparison pool — the rig's open beads and
-// the beads that closed within its lookback — reduced to what the rule weighs.
-// Reading that pool here rather than fetching anything of its own costs the
-// slings that follow almost nothing: the guard's own fetch is cached for the
-// tick, so the pool is read once and reused.
+// The spec dispatcher's target-claim check (gt-n6jbw). The peer set is the
+// duplicate guard's pool, whose fetch is cached for the tick, so the rule
+// costs the slings that follow no read of their own.
 
 // specCandidateClaim reduces the bead about to be slung to its claim: the test
 // files and test identifiers its own text names. The paths go through
@@ -45,8 +40,11 @@ func claimOf(c duplicateCandidate) specdispatch.Claimant {
 		CreatedAt: c.CreatedAt,
 		ClosedAt:  c.ClosedAt,
 		Landed:    c.Landed,
-		Paths:     specHoldFiles(c.Refs.Files, c.Ready.Description, c.Refs.Text),
-		Tests:     c.Refs.Tests,
+		// An unread claim is unknown, not empty: TargetClaimHold holds the
+		// candidate rather than dispatching past what it could not read.
+		ClaimUnread: c.ClaimsUnread,
+		Paths:       specHoldFiles(c.Refs.Files, c.Ready.Description, c.Refs.Text),
+		Tests:       c.Refs.Tests,
 	}
 }
 

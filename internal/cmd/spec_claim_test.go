@@ -292,6 +292,100 @@ func TestSpecTargetClaimsFailsOnAnUnreadableRig(t *testing.T) {
 	}
 }
 
+// droppedShow answers a batched show without the beads named in drop, and
+// refuses the whole batch when err is set: the two ways one peer's design and
+// notes go unread while the pool still lists it.
+type droppedShow struct {
+	beads.Client
+	drop map[string]bool
+	err  error
+}
+
+func (s droppedShow) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	issues, err := s.Client.ShowMultiple(ids)
+	if err != nil {
+		return nil, err
+	}
+	for id := range s.drop {
+		delete(issues, id)
+	}
+	return issues, nil
+}
+
+// TestSpecDispatchHoldsForAPeerWhoseClaimWasNotRead is the fail-closed half of
+// the partial-read finding: a pool that lists a peer but never read its design
+// and notes must hold the candidate that names a test file, not read the peer
+// as claiming nothing. The same pool read to completion, where the peer names
+// no file, dispatches (gt-n6jbw).
+func TestSpecDispatchHoldsForAPeerWhoseClaimWasNotRead(t *testing.T) {
+	t.Parallel()
+	peer := beads.Issue{ID: "fr-z64c", Title: "Pool the repeat rate over many seeds", Status: "in_progress",
+		Assignee: "fractals/polecats/cantor", Priority: 1, CreatedAt: "2026-10-31T09:00:00Z",
+		Description: "Pool the repeat rate of the walk over many seeds."}
+	candidate := beads.Issue{ID: "fr-zdzs", Title: frZ64cTitle, Status: "open", Priority: 1,
+		CreatedAt: "2026-10-31T15:00:00Z", Description: frZ64cDesc}
+
+	for _, tc := range []struct {
+		name      string
+		drop      map[string]bool
+		showErr   bool
+		wantSlung bool
+	}{
+		{name: "a peer whose design and notes were not read holds the candidate", drop: map[string]bool{"fr-z64c": true}},
+		{name: "a pool whose batched show failed holds the candidate", showErr: true},
+		{name: "a peer read to completion that names no file does not hold it", wantSlung: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := beadsfake.New()
+			db.Seed(peer, candidate)
+			dir := t.TempDir()
+			var showErr error
+			if tc.showErr {
+				showErr = errors.New("bd: show timed out")
+			}
+			claims, err := specTargetClaimsFrom("fr-zdzs", "/town/fractals/mayor/rig/.beads",
+				func(string) ([]duplicateCandidate, error) {
+					return fetchDuplicatePoolFrom(droppedShow{Client: db, drop: tc.drop, err: showErr}, func(string, error) {}, dir)
+				})
+			if err != nil {
+				t.Fatalf("claims: %v", err)
+			}
+			var peerClaim *specdispatch.Claimant
+			for i := range claims {
+				if claims[i].ID == "fr-z64c" {
+					peerClaim = &claims[i]
+				}
+			}
+			if peerClaim == nil {
+				t.Fatalf("the pool lost fr-z64c: %+v", claims)
+			}
+			if unread := len(tc.drop) > 0 || tc.showErr; peerClaim.ClaimUnread != unread {
+				t.Fatalf("fr-z64c claim unread = %v, want %v", peerClaim.ClaimUnread, unread)
+			}
+
+			f := newFakeSpecTown(frSpec("fr-zdzs", frZ64cTitle, frZ64cDesc, "2026-10-31T15:00:00Z"))
+			f.claims = map[string][]specdispatch.Claimant{"fr-zdzs": claims}
+			env := f.env()
+			env.ShapeGate = specdispatch.ShapeGateOff
+
+			r := runSpecDispatchCycle(env)
+
+			if got := len(f.slung) == 1; got != tc.wantSlung {
+				t.Fatalf("slung %v, want slung=%v (%+v)", f.slung, tc.wantSlung, r)
+			}
+			if !tc.wantSlung {
+				if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, "fr-z64c claim unread") {
+					t.Fatalf("skipped = %+v, want a hold naming the unread peer", r.Skipped)
+				}
+			}
+		})
+	}
+}
+
 // TestSpecDispatchHoldsWhenClaimsCannotBeRead is the no-fail-open half: a
 // claim set that will not load, and a tick whose claim reader was never wired,
 // both hold the candidate instead of dispatching on what the tick never

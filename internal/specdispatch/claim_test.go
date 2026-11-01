@@ -151,6 +151,25 @@ func TestTargetClaimHold(t *testing.T) {
 			peer: Claimant{ID: "fr-z64c", Status: "in_progress", Assignee: "fractals/polecats/cantor"},
 		},
 		{
+			// The peer's design and notes were never read, so its list row is
+			// all this side knows: it may name the file, and holding is the
+			// only answer that does not dispatch past an unknown claim.
+			name:    "a peer whose claim was not read holds the file",
+			peer:    Claimant{ID: "fr-z64c", Status: "in_progress", Assignee: "fractals/polecats/cantor", ClaimUnread: true},
+			want:    true,
+			wantTxt: "fr-z64c claim unread",
+		},
+		{
+			name:   "an unread peer the tick does not slate does not hold it",
+			peer:   Claimant{ID: "fr-z64c", Status: "open", Priority: 0, CreatedAt: "2026-10-31T09:00:00Z", ClaimUnread: true},
+			slated: slatedNobody,
+		},
+		{
+			name:      "an unread peer holds nothing when the candidate names no file",
+			peer:      Claimant{ID: "fr-z64c", Status: "in_progress", Assignee: "fractals/polecats/cantor", ClaimUnread: true},
+			candidate: Claimant{ID: "fr-zdzs"},
+		},
+		{
 			name: "the candidate does not hold itself",
 			peer: Claimant{ID: "fr-zdzs", Status: "in_progress", Assignee: "fractals/polecats/cantor", Paths: []string{claimTestFile}},
 		},

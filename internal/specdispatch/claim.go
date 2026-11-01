@@ -157,8 +157,12 @@ type Claimant struct {
 	// Landed marks a bead closed by a landing (CloseReasonIsLanding): its work
 	// is on the branch the candidate would rebase onto.
 	Landed bool
-	Paths  []string
-	Tests  []string
+	// ClaimUnread marks a peer whose design and notes were not read. Its text
+	// may name any test file, so it holds a candidate that names one rather
+	// than reading as a bead that names nothing (gt-n6jbw).
+	ClaimUnread bool
+	Paths       []string
+	Tests       []string
 }
 
 // CloseReasonIsLanding reports whether reason is the close reason a landing
@@ -181,6 +185,10 @@ func CloseReasonIsLanding(reason string) bool {
 //   - closed by a landing within claimLandingWindow, when the candidate was
 //     filed before that landing, so its author wrote it against a base the
 //     landing has since replaced.
+//
+// A peer whose design and notes could not be read claims an unknown set of
+// files: it holds any candidate that names a test file, under the same status
+// gates, rather than reading as a bead that claims nothing (gt-n6jbw).
 //
 // slated is the set of beads the tick has decided to sling this tick, not the
 // set its ready board carries. A board-carried peer the tick holds for a reason
@@ -208,18 +216,28 @@ func TargetClaimHold(candidate Claimant, peers []Claimant, slated map[string]boo
 		if peer.ID == "" || peer.ID == candidate.ID || (heldID != "" && peer.ID >= heldID) {
 			continue
 		}
-		shared := sharedTestFile(files, peer.Paths)
-		if shared == "" || distinctTests(candidate.Tests, peer.Tests) {
-			continue
+		shared := ""
+		if !peer.ClaimUnread {
+			shared = sharedTestFile(files, peer.Paths)
+			if shared == "" || distinctTests(candidate.Tests, peer.Tests) {
+				continue
+			}
+		}
+		match := claimMatch(peer, shared)
+		// "on it" names the file a read peer holds; an unread peer holds an
+		// unknown one.
+		onIt := " on it"
+		if peer.ClaimUnread {
+			onIt = ""
 		}
 		var why string
 		switch {
 		case claimLiveStatuses[peer.Status]:
-			why = fmt.Sprintf("%s names the same test file, %s, and is in flight on it%s; the hold lifts when that bead closes", peer.ID, shared, seatOf(peer))
+			why = fmt.Sprintf("%s %s and is in flight%s%s; the hold lifts when that bead closes", peer.ID, match, onIt, seatOf(peer))
 		case peer.Status == "open" && slated[peer.ID] && precedes(peer, candidate):
-			why = fmt.Sprintf("%s names the same test file, %s, and comes first in dispatch order; the hold lifts when that bead closes", peer.ID, shared)
+			why = fmt.Sprintf("%s %s and comes first in dispatch order; the hold lifts when that bead closes", peer.ID, match)
 		case peer.Status == "closed" && peer.Landed && landedRecently(peer, now) && filedBeforeLanding(candidate, peer):
-			why = fmt.Sprintf("%s names the same test file, %s, and landed after this bead was filed; the hold lifts when the landing leaves the window", peer.ID, shared)
+			why = fmt.Sprintf("%s %s and landed after this bead was filed; the hold lifts when the landing leaves the window", peer.ID, match)
 		default:
 			continue
 		}
@@ -229,6 +247,16 @@ func TargetClaimHold(candidate Claimant, peers []Claimant, slated map[string]boo
 		return "", false
 	}
 	return reason, true
+}
+
+// claimMatch is the clause of a hold reason that names what the peer holds:
+// the shared test file, or, for a peer whose text could not be read, that its
+// target is unknown.
+func claimMatch(peer Claimant, shared string) string {
+	if peer.ClaimUnread {
+		return "claim unread, so it may name the same test file,"
+	}
+	return fmt.Sprintf("names the same test file, %s,", shared)
 }
 
 // seatOf names the seat a claimant is in flight on, for a hold reason, and
@@ -260,7 +288,8 @@ func distinctTests(a, b []string) bool {
 
 // landedRecently reports whether a landed peer's claim outlives its landing.
 // A close time that cannot be read cannot bound the claim, so it counts as
-// recent: an unknown window holds rather than passing the candidate.
+// recent: the hold lasts until the bead leaves the pool's closed lookback, and
+// this accepts that bound over guessing a window for a time it cannot place.
 func landedRecently(peer Claimant, now time.Time) bool {
 	closed := parseTime(peer.ClosedAt)
 	if closed.IsZero() {
