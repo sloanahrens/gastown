@@ -1,6 +1,7 @@
 package contract
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -17,6 +18,7 @@ func init() {
 	register(Case{Name: "update guards: a guard that does not hold writes nothing", Run: updateGuards})
 	register(Case{Name: "two racing claims with a guard have exactly one winner", Run: updateClaimRace})
 	register(Case{Name: "another actor's live in_progress claim is not overwritten without a guard or force", Run: updateClaimFence})
+	register(Case{Name: "a reassignment needs the holder on every status, and only an admin's force takes an abandoned claim", Run: updateReassignHolder})
 	register(Case{Name: "update persistent promotes a wisp", Run: updatePersistent})
 }
 
@@ -103,7 +105,7 @@ func updateGuards(t *testing.T, s store.Store) {
 	if got := mustGet(t, s, is.ID); got.Title != "t" || got.Assignee != "alice" {
 		t.Errorf("a failed guard wrote something: %+v", got)
 	}
-	mustUpdate(t, s, is.ID, api.UpdatePatch{Assignee: str("")}, api.Guard{IfAssignee: str("alice"), IfStatus: str("open")})
+	mustUpdate(t, s, is.ID, api.UpdatePatch{Assignee: str(""), Actor: "alice"}, api.Guard{IfAssignee: str("alice"), IfStatus: str("open")})
 	if got := mustGet(t, s, is.ID); got.Assignee != "" {
 		t.Errorf("Assignee = %q after a release that held its guard, want empty", got.Assignee)
 	}
@@ -158,13 +160,73 @@ func updateClaimFence(t *testing.T, s store.Store) {
 		t.Errorf("another actor releasing a live claim = %v, want api.ErrGuardFailed", err)
 	}
 	mustUpdate(t, s, is.ID, api.UpdatePatch{AppendNotes: "alice works", Actor: "alice"}, api.Guard{})
-	mustUpdate(t, s, is.ID, api.UpdatePatch{Assignee: str("carol"), Actor: "bob", Force: true}, api.Guard{})
+	if err := s.UpdateIssue(as("bob"), is.ID, api.UpdatePatch{Assignee: str("carol"), Force: true}, api.Guard{}); !errors.Is(err, api.ErrGuardFailed) {
+		t.Errorf("a seat's forced reassignment of a live claim = %v, want api.ErrGuardFailed", err)
+	}
+	admin := api.WithIdentity(ctx(), api.Identity{Actor: "town/daemon", Scope: api.ScopeAdmin})
+	if err := s.UpdateIssue(admin, is.ID, api.UpdatePatch{Assignee: str("carol"), Force: true}, api.Guard{}); err != nil {
+		t.Fatalf("an admin's forced reassignment = %v, want nil", err)
+	}
 	if got := mustGet(t, s, is.ID); got.Assignee != "carol" {
 		t.Errorf("Assignee = %q after a forced reassignment, want carol", got.Assignee)
 	}
-	mustUpdate(t, s, is.ID, api.UpdatePatch{Assignee: str("dave"), Actor: "erin"}, api.Guard{IfAssignee: str("carol")})
+	if err := s.UpdateIssue(as("erin"), is.ID, api.UpdatePatch{Assignee: str("dave")}, api.Guard{IfAssignee: str("carol")}); !errors.Is(err, api.ErrGuardFailed) {
+		t.Errorf("a guard naming the holder let another actor reassign = %v, want api.ErrGuardFailed", err)
+	}
+	mustUpdate(t, s, is.ID, api.UpdatePatch{Assignee: str("dave"), Actor: "carol"}, api.Guard{IfAssignee: str("carol")})
 	if got := mustGet(t, s, is.ID); got.Assignee != "dave" {
-		t.Errorf("Assignee = %q after a guarded reassignment, want dave (the guard replaces the fence)", got.Assignee)
+		t.Errorf("Assignee = %q after the holder's guarded reassignment, want dave", got.Assignee)
+	}
+}
+
+// updateReassignHolder holds a reassignment to the issue's holder on every
+// status. A guard and a seat's force do not make the caller the holder; only
+// an admin-scope token's force takes an abandoned claim.
+func updateReassignHolder(t *testing.T, s store.Store) {
+	admin := api.WithIdentity(ctx(), api.Identity{Actor: "town/daemon", Scope: api.ScopeAdmin})
+	for _, tc := range []struct {
+		name    string
+		holder  string // the assignee at setup; "" for none
+		status  string // "open", "in_progress" or "closed" at setup
+		ctx     context.Context
+		patch   api.UpdatePatch
+		guard   api.Guard
+		refused bool
+		want    string // the assignee after the patch
+	}{
+		{name: "an open issue held by another seat is refused", holder: "alice", status: "open", ctx: as("bob"), patch: api.UpdatePatch{Assignee: str("bob")}, refused: true, want: "alice"},
+		{name: "an in_progress issue held by another seat is refused", holder: "alice", status: "in_progress", ctx: as("bob"), patch: api.UpdatePatch{Assignee: str("bob")}, refused: true, want: "alice"},
+		{name: "a closed issue held by another seat is refused", holder: "alice", status: "closed", ctx: as("bob"), patch: api.UpdatePatch{Assignee: str("bob")}, refused: true, want: "alice"},
+		{name: "a guard naming the holder does not authorise another seat", holder: "alice", status: "open", ctx: as("bob"), patch: api.UpdatePatch{Assignee: str("bob")},
+			guard: api.Guard{IfAssignee: str("alice")}, refused: true, want: "alice"},
+		{name: "a seat's force does not authorise another seat", holder: "alice", status: "in_progress", ctx: as("bob"), patch: api.UpdatePatch{Assignee: str("bob"), Force: true}, refused: true, want: "alice"},
+		{name: "an admin's force takes an abandoned claim", holder: "alice", status: "in_progress", ctx: admin, patch: api.UpdatePatch{Assignee: str("bob"), Force: true}, want: "bob"},
+		{name: "an unheld issue can be assigned", holder: "", status: "open", ctx: as("bob"), patch: api.UpdatePatch{Assignee: str("bob")}, want: "bob"},
+		{name: "the holder can reassign its issue", holder: "alice", status: "open", ctx: as("alice"), patch: api.UpdatePatch{Assignee: str("bob")}, want: "bob"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			is := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "held", Assignee: tc.holder})
+			switch tc.status {
+			case "in_progress":
+				if err := s.Claim(as(tc.holder), is.ID); err != nil {
+					t.Fatalf("claim = %v, want nil", err)
+				}
+			case "closed":
+				if err := s.CloseIssues(as(tc.holder), []string{is.ID}, "done", false); err != nil {
+					t.Fatalf("close = %v, want nil", err)
+				}
+			}
+			err := s.UpdateIssue(tc.ctx, is.ID, tc.patch, tc.guard)
+			if tc.refused && !errors.Is(err, api.ErrGuardFailed) {
+				t.Errorf("UpdateIssue = %v, want api.ErrGuardFailed", err)
+			}
+			if !tc.refused && err != nil {
+				t.Errorf("UpdateIssue = %v, want nil", err)
+			}
+			if got := mustGet(t, s, is.ID); got.Assignee != tc.want {
+				t.Errorf("assignee after the patch = %q, want %q", got.Assignee, tc.want)
+			}
+		})
 	}
 }
 
