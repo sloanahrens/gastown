@@ -31,6 +31,10 @@ var ErrNoLog = errors.New("actions: Deps.Log is required")
 // append (the returned *LogFailure carries the entry).
 var ErrLogNotWritten = errors.New("actions: workspace saved but its action log entry was not written")
 
+// ErrNoActor is a move's refusal of an empty actor: the entry it leaves names
+// who asked, and an entry naming nobody records nothing.
+var ErrNoActor = errors.New("actions: an actor is required")
+
 // ActionEntry is one logged state action: the workspace that moved, the actor
 // that asked, the state it left and entered, and when.
 type ActionEntry struct {
@@ -42,13 +46,18 @@ type ActionEntry struct {
 }
 
 // Store is where a move reads and writes the workspace. The admin plane's
-// implementation is its Postgres table (plan row V1b); a caller retrying a
-// failed log must not save again, because the state already moved.
+// implementation is its Postgres table (plan row V1b).
+//
+// Load and Save are one compare-and-swap: Save stores w only while the stored
+// workspace is still in the state Load returned, and refuses with an error
+// otherwise, so a save never overwrites a move that landed in between. A caller
+// retrying a failed log must not save again, because the state already moved.
 type Store interface {
 	// Load returns the workspace with the given id. An error means the move
 	// cannot proceed, so no error may read as an empty workspace.
 	Load(ctx context.Context, id string) (registry.Workspace, error)
-	// Save stores w in its new state, replacing what Load returned.
+	// Save stores w in its new state, replacing what Load returned, or refuses
+	// when the stored workspace has changed since.
 	Save(ctx context.Context, w registry.Workspace) error
 }
 
@@ -69,7 +78,8 @@ type Deps struct {
 }
 
 // Pause moves workspace ws to Paused on behalf of actor and logs the move.
-// actor is a role such as "operator", or an owner id, never a person's name.
+// actor is a role such as "operator", or an owner id, never a person's name; an
+// empty one is refused with ErrNoActor.
 //
 // A move the rules refuse returns the registry's *registry.TransitionError and
 // writes neither a save nor an entry.
@@ -78,7 +88,8 @@ func Pause(ctx context.Context, d Deps, ws, actor string) error {
 }
 
 // Suspend moves workspace ws to Suspended on behalf of actor and logs the move.
-// actor is a role such as "operator", or an owner id, never a person's name.
+// actor is a role such as "operator", or an owner id, never a person's name; an
+// empty one is refused with ErrNoActor.
 //
 // A move the rules refuse returns the registry's *registry.TransitionError and
 // writes neither a save nor an entry.
@@ -96,6 +107,9 @@ func perform(ctx context.Context, d Deps, ws, actor string, to registry.State) e
 	}
 	if d.Log == nil {
 		return ErrNoLog
+	}
+	if actor == "" {
+		return ErrNoActor
 	}
 	w, err := d.Store.Load(ctx, ws)
 	if err != nil {

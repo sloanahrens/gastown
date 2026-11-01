@@ -31,16 +31,16 @@ const (
 // default.
 var order = []Step{SignIn, OrgWorkspace, ModelKey, Repository, FirstProject, GCP}
 
-// Set is the set of steps a State has reached. The zero value holds none.
-type Set map[Step]bool
+// set is the set of steps a State has reached. The zero value holds none.
+type set map[Step]bool
 
-// Has reports whether s holds step.
-func (s Set) Has(step Step) bool { return s[step] }
+// has reports whether s holds step.
+func (s set) has(step Step) bool { return s[step] }
 
 // with returns s plus step in a new map, so the State with got keeps the map it
 // already had: Advance hands back a new State, not a changed one.
-func (s Set) with(step Step) Set {
-	out := make(Set, len(s)+1)
+func (s set) with(step Step) set {
+	out := make(set, len(s)+1)
 	for k := range s {
 		out[k] = true
 	}
@@ -49,16 +49,24 @@ func (s Set) with(step Step) Set {
 }
 
 // State is where an onboarding stands: the steps done and the steps skipped.
-// The zero value is nobody having done anything.
+// The zero value is nobody having done anything. The sets behind it are private,
+// so a caller reads a state through HasDone and HasSkipped and changes it only
+// by handing it to Advance or Skip.
 type State struct {
-	Done    Set
-	Skipped Set
+	done    set
+	skipped set
 }
 
+// HasDone reports whether the onboarding has completed step.
+func (s State) HasDone(step Step) bool { return s.done.has(step) }
+
+// HasSkipped reports whether the onboarding left step for later.
+func (s State) HasSkipped(step Step) bool { return s.skipped.has(step) }
+
 // StoreKey writes the workspace's model key to the key store of plan row K2
-// (keystore.Store's Put) and reports whether it stored it. Advance calls it for
-// the model-key step alone, so the caller binds it to the workspace and value it
-// is onboarding; a nil StoreKey is refused there.
+// (keystore.Store's Put); a non-nil return means the key was not stored. Advance
+// calls it for the model-key step alone, so the caller binds it to the
+// workspace and value it is onboarding; a nil StoreKey is refused there.
 type StoreKey func() error
 
 var (
@@ -106,12 +114,13 @@ func (e *NotSkippableError) Error() string {
 }
 
 // StoreKeyError is Advance's report that the key store did not store the model
-// key, which leaves the model-key step undone so the caller retries it. The
-// wrapped error is the store's; the key's value never travels through it.
+// key, which leaves the model-key step undone so the caller retries it. Unwrap
+// reaches the store's own error; the message names the step alone, so the
+// store's text, which may carry the key, never reaches a log.
 type StoreKeyError struct{ Err error }
 
 func (e *StoreKeyError) Error() string {
-	return fmt.Sprintf("onboarding: the model key was not stored: %v", e.Err)
+	return fmt.Sprintf("onboarding: step %q did not store the model key", ModelKey)
 }
 
 func (e *StoreKeyError) Unwrap() error { return e.Err }
@@ -130,14 +139,14 @@ func Advance(s State, to Step, storeKey StoreKey) (State, error) {
 	if !ok {
 		return s, fmt.Errorf("%w: %q", ErrUnknownStep, to)
 	}
-	if s.Skipped.Has(to) {
+	if s.skipped.has(to) {
 		return s, &SettledError{Step: to, Skipped: true}
 	}
-	if s.Done.Has(to) {
+	if s.done.has(to) {
 		return s, &SettledError{Step: to}
 	}
 	if i > 0 {
-		if needs := order[i-1]; !s.Done.Has(needs) {
+		if needs := order[i-1]; !s.done.has(needs) {
 			return s, &OrderError{Step: to, Needs: needs}
 		}
 	}
@@ -149,7 +158,7 @@ func Advance(s State, to Step, storeKey StoreKey) (State, error) {
 			return s, &StoreKeyError{Err: err}
 		}
 	}
-	return State{Done: s.Done.with(to), Skipped: s.Skipped}, nil
+	return State{done: s.done.with(to), skipped: s.skipped}, nil
 }
 
 // Skip records step as left for later and returns the State that records it.
@@ -165,13 +174,13 @@ func Skip(s State, step Step) (State, error) {
 	if step != GCP {
 		return s, &NotSkippableError{Step: step}
 	}
-	if s.Done.Has(step) {
+	if s.done.has(step) {
 		return s, &SettledError{Step: step}
 	}
-	if s.Skipped.Has(step) {
+	if s.skipped.has(step) {
 		return s, nil
 	}
-	return State{Done: s.Done, Skipped: s.Skipped.with(step)}, nil
+	return State{done: s.done, skipped: s.skipped.with(step)}, nil
 }
 
 // position returns step's place in order, and false for a step this package

@@ -73,9 +73,10 @@ var ErrNoRecord = errors.New("drivertoken: no such token for that workspace")
 type Store interface {
 	// Put stores rec. An error means it was not stored.
 	Put(ctx context.Context, rec Record) error
-	// Lookup returns the record holding hash, or ErrUnknownToken. Matching a
-	// stored hash is constant time, so the call's duration says nothing about
-	// how much of a hash matched.
+	// Lookup returns the record holding hash, or ErrUnknownToken. An
+	// implementation compares the stored hashes to hash in constant time, so
+	// the call's duration says nothing about how much of a hash matched;
+	// Memory does, and the Postgres table must.
 	Lookup(ctx context.Context, hash []byte) (Record, error)
 	// Revoke marks the record id, issued for workspace ws, revoked. Naming the
 	// workspace keeps a caller from revoking another workspace's token by id.
@@ -86,6 +87,9 @@ type Store interface {
 // source of token bytes, and the clock a record is stamped with.
 type Deps struct {
 	Store Store
+	// Rand is the source of every token's bytes. It must be a cryptographically
+	// secure reader such as crypto/rand.Reader: a caller who can predict its
+	// output can predict the tokens issued from it.
 	Rand  io.Reader
 	Clock registry.Clock
 }
@@ -199,6 +203,14 @@ func NewMemory() *Memory { return &Memory{} }
 func (m *Memory) Put(_ context.Context, rec Record) error {
 	m.records = append(m.records, rec)
 	return nil
+}
+
+// Records returns a copy of the records the store holds, so a caller can read
+// what was stored without holding the store's own slice.
+func (m *Memory) Records() []Record {
+	out := make([]Record, len(m.records))
+	copy(out, m.records)
+	return out
 }
 
 // Lookup returns the record holding hash, or ErrUnknownToken.

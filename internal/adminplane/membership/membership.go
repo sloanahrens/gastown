@@ -78,15 +78,8 @@ var (
 	ErrWorkspaceExists = errors.New("membership: workspace already exists")
 )
 
-// Store is where organizations, their members and their workspaces live. The
-// admin plane's implementation is its Postgres tables (a later bead); Memory is
-// the in-memory fake.
-//
-// AddOrg, AddMember, MembersOf, WorkspacesOf and SetEmail are the model plan row
-// O1 states. RemoveMember, SetRole and AddWorkspace are here because the owner
-// rule cannot be checked without them: it is membership changes that could take
-// an owner away, and it is a stored workspace that has one to lose (gt-hqmhf).
-type Store interface {
+// Model is the store's methods as plan row O1 lists them (gt-hqmhf).
+type Model interface {
 	// AddOrg stores o. An error means it was not stored.
 	AddOrg(ctx context.Context, o Org) error
 	// AddMember adds m to the organization orgID. An error means it was not added.
@@ -100,6 +93,15 @@ type Store interface {
 	// SetEmail stores email as the display address of every membership held by
 	// sub. The subject, and so the membership, does not change.
 	SetEmail(ctx context.Context, sub, email string) error
+}
+
+// Store is where organizations, their members and their workspaces live: Model,
+// plus the three membership changes the owner rule is checked on, since it is a
+// change that could take an owner away and a stored workspace that has one to
+// lose (gt-hqmhf). The admin plane's implementation is its Postgres tables (a
+// later bead); Memory is the in-memory fake.
+type Store interface {
+	Model
 	// SetRole changes the role of the member sub in orgID. A change that would
 	// take the organization's last owner, or the owner a workspace names, is an
 	// error and leaves the role as it was.
@@ -121,6 +123,10 @@ type Memory struct {
 	members map[string]map[string]Member // organization id -> sub -> member
 	spaces  map[string]registry.Workspace
 }
+
+// The fake the callers use must be a Store, so a method either interface gains
+// without it fails the build here rather than at the first caller.
+var _ Store = (*Memory)(nil)
 
 // NewMemory returns an empty Memory.
 func NewMemory() *Memory {

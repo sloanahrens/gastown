@@ -2,6 +2,8 @@ package onboarding
 
 import (
 	"errors"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -25,21 +27,17 @@ func doneThrough(t *testing.T, steps ...Step) State {
 }
 
 // sameState reports whether a and b hold the same done and skipped steps.
-func sameState(a, b State) bool {
-	return sameSet(a.Done, b.Done) && sameSet(a.Skipped, b.Skipped)
-}
+func sameState(a, b State) bool { return reflect.DeepEqual(a, b) }
 
-// sameSet reports whether a and b hold the same steps.
-func sameSet(a, b Set) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for step, present := range a {
-		if present != b[step] {
-			return false
+// doneCount returns how many of the steps a state marks done.
+func doneCount(s State) int {
+	n := 0
+	for _, step := range order {
+		if s.HasDone(step) {
+			n++
 		}
 	}
-	return true
+	return n
 }
 
 // TestStepsCompleteInOrder walks the whole sequence and checks each step took
@@ -52,11 +50,11 @@ func TestStepsCompleteInOrder(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Advance(%q): %v", step, err)
 		}
-		if !next.Done.Has(step) {
+		if !next.HasDone(step) {
 			t.Fatalf("state after Advance(%q) does not mark it done: %+v", step, next)
 		}
-		if len(next.Done) != i+1 {
-			t.Fatalf("state after Advance(%q) holds %d done steps, want %d", step, len(next.Done), i+1)
+		if got := doneCount(next); got != i+1 {
+			t.Fatalf("state after Advance(%q) holds %d done steps, want %d", step, got, i+1)
 		}
 		s = next
 	}
@@ -90,6 +88,9 @@ func TestStepsOnlyInOrder(t *testing.T) {
 			if orderErr.Step != tc.to || orderErr.Needs != tc.needs {
 				t.Errorf("error = %+v, want step %q needing %q", orderErr, tc.to, tc.needs)
 			}
+			if got := err.Error(); !strings.Contains(got, string(tc.to)) || !strings.Contains(got, string(tc.needs)) {
+				t.Errorf("refusal %q does not name step %q and the step it needs %q", got, tc.to, tc.needs)
+			}
 			if !sameState(after, tc.state) {
 				t.Errorf("state = %+v after the refusal, want %+v unchanged", after, tc.state)
 			}
@@ -113,7 +114,7 @@ func TestOnlyGCPMaySkipped(t *testing.T) {
 		if notSkippable.Step != step {
 			t.Errorf("error = %+v, want it to name step %q", notSkippable, step)
 		}
-		if after.Skipped.Has(step) {
+		if after.HasSkipped(step) {
 			t.Errorf("Skip(%q) marked it skipped despite the refusal", step)
 		}
 	}
@@ -122,7 +123,7 @@ func TestOnlyGCPMaySkipped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Skip(%q): %v", GCP, err)
 	}
-	if !after.Skipped.Has(GCP) {
+	if !after.HasSkipped(GCP) {
 		t.Errorf("state after Skip(%q) does not mark it skipped: %+v", GCP, after)
 	}
 }
@@ -201,7 +202,10 @@ func TestFailedKeyStoreLeavesModelKeyUndone(t *testing.T) {
 	if !errors.Is(err, errStoreFailed) {
 		t.Errorf("error = %v, want it to wrap the store's error", err)
 	}
-	if after.Done.Has(ModelKey) {
+	if strings.Contains(err.Error(), errStoreFailed.Error()) {
+		t.Errorf("refusal %q repeats the store's error text, which may hold the key", err)
+	}
+	if after.HasDone(ModelKey) {
 		t.Errorf("state marks the model-key step done after the store failed: %+v", after)
 	}
 	if !sameState(after, before) {
@@ -218,7 +222,7 @@ func TestModelKeyNeedsStore(t *testing.T) {
 	if !errors.Is(err, ErrNoKeyStore) {
 		t.Fatalf("Advance(%q) with no store error = %v, want ErrNoKeyStore", ModelKey, err)
 	}
-	if after.Done.Has(ModelKey) {
+	if after.HasDone(ModelKey) {
 		t.Errorf("state marks the model-key step done with no store: %+v", after)
 	}
 }
@@ -231,7 +235,7 @@ func TestSkipDoesNotNeedPredecessor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Skip(%q): %v", GCP, err)
 	}
-	if !after.Skipped.Has(GCP) {
+	if !after.HasSkipped(GCP) {
 		t.Errorf("state after Skip(%q) does not mark it skipped: %+v", GCP, after)
 	}
 }
@@ -245,10 +249,10 @@ func TestAdvanceReturnsNewState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Advance(%q): %v", SignIn, err)
 	}
-	if before.Done.Has(SignIn) {
+	if before.HasDone(SignIn) {
 		t.Errorf("the state passed to Advance changed: %+v", before)
 	}
-	if !after.Done.Has(SignIn) {
+	if !after.HasDone(SignIn) {
 		t.Errorf("the state Advance returned does not mark %q done: %+v", SignIn, after)
 	}
 }
