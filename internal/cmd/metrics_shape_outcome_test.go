@@ -46,15 +46,25 @@ func shapeRow(t *testing.T, out, feature, bucket string) []string {
 	return nil
 }
 
+// shapeGoodEvents date both ends of gt-a's life, so the bead has a time to
+// close.
+const shapeGoodEvents = `{"issue_id":"gt-a","event_type":"created","created_at":"2026-09-10 09:00:00"}` + "\n" +
+	`{"issue_id":"gt-a","event_type":"closed","created_at":"2026-09-10 21:00:00"}` + "\n"
+
 // shapeGoodEnv is a town whose archive and review log answer one landed bead,
 // and the runner calls it made. It takes the run to the print stage, so a test
 // can drive any later failure.
 func shapeGoodEnv(t *testing.T) (shapeArchiveEnv, *[][]string) {
 	t.Helper()
+	return shapeEnvWithEvents(t, shapeGoodEvents)
+}
+
+// shapeEnvWithEvents is shapeGoodEnv with the archive's event table chosen by
+// the test, so a test can drop a stamp and read how the receipt counts it.
+func shapeEnvWithEvents(t *testing.T, events string) (shapeArchiveEnv, *[][]string) {
+	t.Helper()
 	town := shapeTown(t)
 	issues := `{"id":"gt-a","description":"## Size\nOne worker, one landing.","acceptance_criteria":"- [ ] a","created_at":"2026-09-10T09:00:00Z"}` + "\n"
-	events := `{"issue_id":"gt-a","event_type":"created","created_at":"2026-09-10 09:00:00"}` + "\n" +
-		`{"issue_id":"gt-a","event_type":"closed","created_at":"2026-09-10 21:00:00"}` + "\n"
 	calls := &[][]string{}
 	env := shapeArchiveEnv{
 		Town:     town,
@@ -107,7 +117,7 @@ func TestMetricsShapeOutcomeUsesTheInjectedRunner(t *testing.T) {
 	got := out.String()
 	wantReceipt := "shape-outcome gt: 1 sampled day(s) 2026-09-10..2026-09-10, 1 first-filed bead(s); 1 joined to a landing, " +
 		"0 with no review, 0 reviewed but not landed, 0 landed without a first-filed row; " +
-		"1 read from their filed day's last export (edited_same_day); 0 row(s) dropped\n"
+		"1 read from their filed day's last export (edited_same_day); 0 landed with no time to close; 0 row(s) dropped\n"
 	if !strings.HasPrefix(got, wantReceipt) {
 		t.Fatalf("receipt = %q, want it to start %q", got, wantReceipt)
 	}
@@ -115,6 +125,23 @@ func TestMetricsShapeOutcomeUsesTheInjectedRunner(t *testing.T) {
 	gotRow := shapeRow(t, got, "acceptance_boxes", "1")
 	if strings.Join(gotRow, " ") != strings.Join(want, " ") {
 		t.Fatalf("acceptance_boxes 1 row = %v, want %v", gotRow, want)
+	}
+}
+
+// TestMetricsShapeOutcomeCountsLandedBeadsWithoutATimeToClose drives the
+// receipt's hours accounting: a landed bead whose closed stamp is missing from
+// the archive is counted in the receipt rather than left as a silent gap in the
+// hours column.
+func TestMetricsShapeOutcomeCountsLandedBeadsWithoutATimeToClose(t *testing.T) {
+	t.Parallel()
+	events := `{"issue_id":"gt-a","event_type":"created","created_at":"2026-09-10 09:00:00"}` + "\n"
+	env, _ := shapeEnvWithEvents(t, events)
+	var out bytes.Buffer
+	if err := runMetricsShapeOutcome(context.Background(), &out, env); err != nil {
+		t.Fatalf("runMetricsShapeOutcome: %v", err)
+	}
+	if !strings.Contains(out.String(), "1 landed with no time to close") {
+		t.Fatalf("receipt does not count the landed bead with no time to close:\n%s", out.String())
 	}
 }
 

@@ -13,14 +13,14 @@ var shapeDay = time.Date(2026, 9, 10, 9, 0, 0, 0, time.UTC)
 func TestFirstFiledVersionsKeepsTheFirstRow(t *testing.T) {
 	t.Parallel()
 	commits := []ArchiveCommit{
-		{Day: "2026-09-09", Rows: []ArchiveIssueRow{
+		{At: shapeDay.AddDate(0, 0, -1), Rows: []ArchiveIssueRow{
 			{ID: "gt-a", Description: "as filed", CreatedAt: shapeDay.AddDate(0, 0, -2)},
 		}},
-		{Day: "2026-09-10", Rows: []ArchiveIssueRow{
+		{At: shapeDay, Rows: []ArchiveIssueRow{
 			{ID: "gt-a", Description: "edited", CreatedAt: shapeDay.AddDate(0, 0, -2)},
 			{ID: "gt-b", Description: "filed today", CreatedAt: shapeDay},
 		}},
-		{Day: "2026-09-11", Rows: []ArchiveIssueRow{
+		{At: shapeDay.AddDate(0, 0, 1), Rows: []ArchiveIssueRow{
 			{ID: "gt-a", Description: "edited twice", CreatedAt: shapeDay.AddDate(0, 0, -2)},
 		}},
 	}
@@ -42,6 +42,29 @@ func TestFirstFiledVersionsKeepsTheFirstRow(t *testing.T) {
 	}
 }
 
+// TestFirstFiledVersionsComparesDaysInTheCommitsZone pins the edited_same_day
+// rule to one calendar: the bead's creation is read in the commit's zone, so a
+// creation at 02:00 UTC, which is 19:00 the day before where the commit was
+// made, is filed on the commit's day.
+func TestFirstFiledVersionsComparesDaysInTheCommitsZone(t *testing.T) {
+	t.Parallel()
+	west := time.FixedZone("UTC-7", -7*60*60)
+	commitAt := time.Date(2026, 9, 9, 23, 0, 0, 0, west) // 2026-09-10 06:00 UTC
+	got := FirstFiledVersions([]ArchiveCommit{{
+		At: commitAt,
+		Rows: []ArchiveIssueRow{{
+			ID:        "gt-a",
+			CreatedAt: time.Date(2026, 9, 10, 2, 0, 0, 0, time.UTC),
+		}},
+	}})
+	if len(got) != 1 {
+		t.Fatalf("rows = %d, want 1", len(got))
+	}
+	if !got[0].EditedSameDay {
+		t.Error("a creation at 19:00 in the commit's zone is not marked edited_same_day against a commit at 23:00 that day")
+	}
+}
+
 func TestShapeFeaturesCountsBoxesAndConstraintWords(t *testing.T) {
 	t.Parallel()
 	row := ArchiveIssueRow{
@@ -55,9 +78,10 @@ func TestShapeFeaturesCountsBoxesAndConstraintWords(t *testing.T) {
 	if got.AcceptanceBoxes != 3 {
 		t.Errorf("AcceptanceBoxes = %d, want 3", got.AcceptanceBoxes)
 	}
-	constraints := "- only `internal/metrics/shape_outcome.go`\n- do not touch docs/reference.md"
-	if want := len(strings.Fields(constraints)); got.ConstraintWords != want {
-		t.Errorf("ConstraintWords = %d, want %d", got.ConstraintWords, want)
+	// The Constraints section's two "-" list markers are not words:
+	// only, internal/metrics/shape_outcome.go, do, not, touch, docs/reference.md.
+	if got.ConstraintWords != 6 {
+		t.Errorf("ConstraintWords = %d, want 6 words without the bullet markers", got.ConstraintWords)
 	}
 	if !got.SizeOneWorker {
 		t.Error("SizeOneWorker = false, want true for a Size line saying one worker")
@@ -75,6 +99,63 @@ func TestShapeFeaturesWithoutTheSections(t *testing.T) {
 	got := ShapeFeatures(ArchiveIssueRow{ID: "gt-a", Description: "just prose.", AcceptanceCriteria: "no boxes here"})
 	if got.AcceptanceBoxes != 0 || got.ConstraintWords != 0 || got.SizeOneWorker || got.FilesNamed != 0 {
 		t.Errorf("shape of a bead filed without sections = %+v, want every count 0", got)
+	}
+}
+
+// TestShapeSectionMatchesHeadingAndStopsAtTheNext drives the section lookup:
+// any heading level, case-insensitively, the exact name only, and text after
+// the next heading is not part of the section.
+func TestShapeSectionMatchesHeadingAndStopsAtTheNext(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		body    string
+		section string
+		want    string
+	}{
+		{"lowercase heading", "## constraints\nkeep it small\n", "Constraints", "keep it small"},
+		{"any heading level", "### Size\nOne worker.\n", "Size", "One worker."},
+		{"stops at the next heading", "## Constraints\na b\n## Goal\nnot counted\n", "Constraints", "a b"},
+		{"a heading whose name merely starts with it", "## Consequences\nx\n", "Constraints", ""},
+		{"no such heading", "## Goal\nx\n", "Constraints", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := shapeSection(c.body, c.section); got != c.want {
+				t.Errorf("shapeSection(%q, %q) = %q, want %q", c.body, c.section, got, c.want)
+			}
+		})
+	}
+}
+
+// TestShapeFeaturesReadsTheSizeAndConstraintsSections drives both section uses
+// through ShapeFeatures: Size matches only its own heading, in either case,
+// and Constraints ends at the heading after it with its bullets uncounted.
+func TestShapeFeaturesReadsTheSizeAndConstraintsSections(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		description string
+		size        bool
+		words       int
+	}{
+		{"Size says one worker in either case", "## Size\nONE WORKER, one landing.", true, 0},
+		{"a heading that starts with Size is not the Size section", "## Sizes\none worker", false, 0},
+		{"Constraints ends at the next heading", "## Constraints\n- alpha\n- beta gamma\n## Size\none worker", true, 3},
+		{"Constraints words exclude every bullet marker", "## Constraints\n- alpha\n* beta\n+ gamma\n", false, 3},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got := ShapeFeatures(ArchiveIssueRow{ID: "gt-a", Description: c.description})
+			if got.SizeOneWorker != c.size {
+				t.Errorf("SizeOneWorker = %v, want %v", got.SizeOneWorker, c.size)
+			}
+			if got.ConstraintWords != c.words {
+				t.Errorf("ConstraintWords = %d, want %d", got.ConstraintWords, c.words)
+			}
+		})
 	}
 }
 

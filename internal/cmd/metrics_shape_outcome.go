@@ -38,8 +38,10 @@ bucket with its n.
 One export commit is sampled per local day, the day's last, because reading
 every 15-minute commit is thousands of git shows for the same answer. A bead
 filed and edited within one day therefore reads as its edited version, and
-those beads are counted as edited_same_day. Buckets under 20 beads are marked
-thin. The export is read only: git log, git show and git ls-tree, never a write.`,
+those beads are counted as edited_same_day. A landed bead the archive cannot
+date at both ends has no time to close, and the receipt counts those. Buckets
+under 20 beads are marked thin. The export is read only: git log, git show and
+git ls-tree, never a write.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		return runMetricsShapeOutcomeIn(cmd.Context(), cmd.OutOrStdout(), workspace.FindFromCwdOrError, metricsShapeRig)
@@ -162,17 +164,20 @@ func runMetricsShapeOutcome(ctx context.Context, out io.Writer, env shapeArchive
 		}
 	}
 	filed := shapeIDs(first)
-	landedWithoutText := 0
-	for id := range outcomes {
+	landedWithoutText, landedNoHours := 0, 0
+	for id, o := range outcomes {
 		if _, ok := filed[id]; !ok {
 			landedWithoutText++
+		}
+		if !o.HasHours {
+			landedNoHours++
 		}
 	}
 
 	window := commits[0].At.Format(time.DateOnly) + ".." + commits[len(commits)-1].At.Format(time.DateOnly)
 	if _, err := fmt.Fprintf(out,
-		"shape-outcome %s: %d sampled day(s) %s, %d first-filed bead(s); %d joined to a landing, %d with no review, %d reviewed but not landed, %d landed without a first-filed row; %d read from their filed day's last export (edited_same_day); %d row(s) dropped\n",
-		rig, len(commits), window, len(first), joined, noReview, reviewedNotLanded, landedWithoutText, editedSameDay, dropped.Count()); err != nil {
+		"shape-outcome %s: %d sampled day(s) %s, %d first-filed bead(s); %d joined to a landing, %d with no review, %d reviewed but not landed, %d landed without a first-filed row; %d read from their filed day's last export (edited_same_day); %d landed with no time to close; %d row(s) dropped\n",
+		rig, len(commits), window, len(first), joined, noReview, reviewedNotLanded, landedWithoutText, editedSameDay, landedNoHours, dropped.Count()); err != nil {
 		return err
 	}
 	return printShapeBuckets(out, buckets)
@@ -255,7 +260,7 @@ func shapeFirstFiled(ctx context.Context, env shapeArchiveEnv, repo, rig string,
 			return nil, fmt.Errorf("shape-outcome: reading %s/issues.jsonl at %s: %w", rig, c.SHA, err)
 		}
 		batches = append(batches, metrics.ArchiveCommit{
-			Day:  c.At.Format(time.DateOnly),
+			At:   c.At,
 			Rows: metrics.DecodeArchiveIssues(data, c.SHA, dropped),
 		})
 	}

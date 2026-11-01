@@ -90,19 +90,20 @@ func DecodeArchiveIssues(data []byte, source string, dropped *Dropped) []Archive
 }
 
 // ArchiveCommit is the issues rows one sampled archive commit holds, with the
-// day the commit was made in its own zone.
+// time the commit was made in its own zone.
 type ArchiveCommit struct {
-	Day  string // YYYY-MM-DD
+	At   time.Time
 	Rows []ArchiveIssueRow
 }
 
 // FirstFiled is one bead's first-filed row: the row the earliest sampled
 // commit that carries the bead holds.
 //
-// EditedSameDay says the bead's created_at falls on the same day as the
-// sampled commit. One commit is sampled per day, so a bead filed and edited
-// within that day reads as its edited version here; the flag counts it rather
-// than letting it pass as the text as filed.
+// EditedSameDay says the bead's created_at falls on the sampled commit's own
+// calendar day, creation converted into the commit's zone so an instant near
+// midnight is not compared as two different days. One commit is sampled per
+// day, so a bead filed and edited within that day reads as its edited version
+// here; the flag counts it rather than letting it pass as the text as filed.
 type FirstFiled struct {
 	Row           ArchiveIssueRow
 	EditedSameDay bool
@@ -116,6 +117,7 @@ func FirstFiledVersions(commits []ArchiveCommit) []FirstFiled {
 	seen := make(map[string]bool)
 	var out []FirstFiled
 	for _, c := range commits {
+		day := c.At.Format(time.DateOnly)
 		for _, row := range c.Rows {
 			if seen[row.ID] {
 				continue
@@ -123,7 +125,7 @@ func FirstFiledVersions(commits []ArchiveCommit) []FirstFiled {
 			seen[row.ID] = true
 			out = append(out, FirstFiled{
 				Row:           row,
-				EditedSameDay: row.CreatedAt.Format(time.DateOnly) == c.Day,
+				EditedSameDay: row.CreatedAt.In(c.At.Location()).Format(time.DateOnly) == day,
 			})
 		}
 	}
@@ -145,7 +147,9 @@ type Shape struct {
 //   - AcceptanceBoxes is the number of checkbox items in the acceptance
 //     criteria, checked or not.
 //   - ConstraintWords is the word count of the "Constraints" section of the
-//     description, 0 when the filed text has no such section.
+//     description, 0 when the filed text has no such section. A word is a
+//     whitespace-separated token holding a letter or a digit, so a list
+//     marker such as "-" is not counted.
 //   - SizeOneWorker is whether the "Size" section says "one worker".
 //   - FilesNamed is the number of distinct file paths named in the description
 //     and the acceptance criteria.
@@ -156,7 +160,7 @@ func ShapeFeatures(row ArchiveIssueRow) Shape {
 	return Shape{
 		Bead:              row.ID,
 		AcceptanceBoxes:   len(shapeBoxRE.FindAllStringIndex(row.AcceptanceCriteria, -1)),
-		ConstraintWords:   len(strings.Fields(constraints)),
+		ConstraintWords:   shapeWordCount(constraints),
 		SizeOneWorker:     strings.Contains(strings.ToLower(size), "one worker"),
 		FilesNamed:        shapeFilesNamed(row.Description + "\n" + row.AcceptanceCriteria),
 		DescriptionLength: utf8.RuneCountInString(row.Description),
@@ -181,6 +185,21 @@ func shapeSection(body, name string) string {
 		}
 	}
 	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
+// shapeWordCount counts the words in text: the whitespace-separated tokens that
+// hold a letter or a digit. A Markdown list marker is punctuation standing
+// alone, so the bullets of a Constraints section do not inflate its word count.
+func shapeWordCount(text string) int {
+	n := 0
+	for _, tok := range strings.Fields(text) {
+		if strings.ContainsFunc(tok, func(r rune) bool {
+			return unicode.IsLetter(r) || unicode.IsDigit(r)
+		}) {
+			n++
+		}
+	}
+	return n
 }
 
 // shapeBoxRE matches one acceptance checkbox: "- [ ]", "* [x]" and "+ [X]" are
