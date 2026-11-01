@@ -17,7 +17,7 @@ import (
 var landWaitEpoch = time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC)
 
 // landWaitErrTestRead stands in for a failed read of the log or the bead.
-var landWaitErrTestRead = landWaitTestError("the log failed")
+var landWaitErrTestRead = landWaitTestError("the read failed")
 
 type landWaitTestError string
 
@@ -394,12 +394,12 @@ func TestLandWaitRefusesBadInputs(t *testing.T) {
 		{
 			name: "an unreadable log",
 			deps: landWaitDeps{timeout: time.Minute, interval: time.Second, source: failingSource, detail: landWaitFixtureDetail(nil)},
-			want: "the log failed",
+			want: "the read failed",
 		},
 		{
 			name: "an unreadable bead",
 			deps: landWaitDeps{timeout: time.Minute, interval: time.Second, source: failing, detail: failingDetail},
-			want: "the log failed",
+			want: "the read failed",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
