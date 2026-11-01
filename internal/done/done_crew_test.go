@@ -26,6 +26,7 @@ const (
 func newCrewSubmitHarness(t *testing.T) *submitHarness {
 	t.Helper()
 	h := newSubmitHarness(t)
+	writeTownHuman(t, h.townRoot, crewTestHumanName, crewTestHumanEmail)
 	h.r.branch = crewTestBranch
 	h.r.polecatName = ""
 	h.r.sender = "Sloan Ahrens"
