@@ -1,7 +1,10 @@
 package k8s
 
 import (
+	"fmt"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -33,7 +36,7 @@ func TestControlKindConfig(t *testing.T) {
 		}
 		if patches, ok := m["kubeadmConfigPatches"].([]any); ok && len(patches) > 0 {
 			text, _ := patches[0].(string)
-			if strings.Contains(text, "key: gt.dev/pool") && strings.Contains(text, "effect: NoSchedule\n") {
+			if strings.Contains(text, "key: gt.dev/pool") && strings.Contains(text, "value: privileged") && strings.Contains(text, "effect: NoSchedule\n") {
 				tainted = pool
 			}
 		}
@@ -78,5 +81,15 @@ func TestControlRunbookStatesCoreBudget(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Errorf("the runbook lacks the budget figure %q", want)
 		}
+	}
+	// The four VM figures are attached to their names and add up to the total
+	// the runbook states.
+	sum := 0
+	for _, m := range regexp.MustCompile(`(?:Docker Desktop|gt-sbx|gt-control|gt-kind) (\d+)[,.]? ?`).FindAllStringSubmatch(text, -1) {
+		n, _ := strconv.Atoi(m[1])
+		sum += n
+	}
+	if !strings.Contains(text, fmt.Sprintf("%d against 24", sum)) {
+		t.Errorf("the VM figures sum to %d, which the runbook's total does not state", sum)
 	}
 }
