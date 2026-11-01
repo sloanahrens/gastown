@@ -120,15 +120,16 @@ func TestAQueuedRowNamesACrewAssigneeByBareName(t *testing.T) {
 		t.Fatalf("reading the queued rows: %v", err)
 	}
 
-	for i, want := range []struct{ bead, by, title string }{
+	wantRows := []struct{ bead, by, title string }{
 		{"gt-crew", "heron", "heron"},
 		{"gt-rig", "jay", "jay"},
 		{"gt-polecat", "dag", "gastown/dag"},
 		{"gt-other", "sloan", "sloan"},
-	} {
-		if i >= len(rows) {
-			t.Fatalf("the table drew %d waiting rows, want one per queued bead", len(rows))
-		}
+	}
+	if len(rows) != len(wantRows) {
+		t.Fatalf("the table drew %d waiting rows, want %d, one per queued bead", len(rows), len(wantRows))
+	}
+	for i, want := range wantRows {
 		if !strings.Contains(rows[i].Main, want.bead) {
 			t.Fatalf("row %d is the bead %q, want %s", i+1, rows[i].Main, want.bead)
 		}
