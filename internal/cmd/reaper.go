@@ -42,7 +42,7 @@ var (
 // formula emits for its 30d default. time.ParseDuration alone rejects "30d" as
 // "unknown unit d" (gt-2qzr).
 func parseReaperAge(flag, value string) (time.Duration, error) {
-	d, err := daemon.ParseAgeDuration(value)
+	d, err := agentconfig.ParseAgeDuration(value)
 	if err != nil {
 		return 0, fmt.Errorf("invalid %s: %w", flag, err)
 	}

@@ -15,7 +15,8 @@ import (
 // (gt-fcxe9.12, ADR 0001). The reaper selects candidates with read-only SQL
 // and never writes a bd table itself: bd's close and delete keep is_blocked,
 // the events journal, close metadata and bd's own Dolt commit correct, which
-// a raw UPDATE or DELETE skipped (B5-06, G1-19). *beads.Beads satisfies it.
+// a raw UPDATE or DELETE skipped (B5-06, G1-19). Events retention is the one
+// exception (events.go: PurgeEvents). *beads.Beads satisfies it.
 type Writer interface {
 	// CloseWithReason closes ids ("bd close --reason"); bd refuses an issue
 	// with an open blocker or child and reports it as a partial close.

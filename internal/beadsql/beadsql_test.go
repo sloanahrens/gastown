@@ -16,8 +16,14 @@ import (
 type fakeServer struct {
 	level    any   // value of MAX(version); nil for an empty table
 	levelErr error // error for the schema-level read
-	mu       sync.Mutex
-	seen     []string
+	// queryErr and execErr fail every query after the schema-level read and
+	// every exec; rowsAffectedErr fails only the exec's row count.
+	queryErr        error
+	execErr         error
+	execRows        int64
+	rowsAffectedErr error
+	mu              sync.Mutex
+	seen            []string
 }
 
 func (s *fakeServer) Connect(context.Context) (driver.Conn, error) { return fakeConn{s}, nil }
@@ -49,8 +55,30 @@ func (c fakeConn) QueryContext(_ context.Context, query string, _ []driver.Named
 		}
 		return &fakeRows{cols: []string{"version"}, rows: [][]driver.Value{{c.s.level}}}, nil
 	}
+	if c.s.queryErr != nil {
+		return nil, c.s.queryErr
+	}
 	return &fakeRows{cols: []string{"n"}, rows: [][]driver.Value{{int64(7)}}}, nil
 }
+
+func (c fakeConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
+	c.s.mu.Lock()
+	c.s.seen = append(c.s.seen, query)
+	c.s.mu.Unlock()
+	if c.s.execErr != nil {
+		return nil, c.s.execErr
+	}
+	return fakeResult{rows: c.s.execRows, err: c.s.rowsAffectedErr}, nil
+}
+
+// fakeResult is an exec's result, with a row count that may fail.
+type fakeResult struct {
+	rows int64
+	err  error
+}
+
+func (r fakeResult) LastInsertId() (int64, error) { return 0, nil }
+func (r fakeResult) RowsAffected() (int64, error) { return r.rows, r.err }
 
 type fakeRows struct {
 	cols []string

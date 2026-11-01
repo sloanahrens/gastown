@@ -1,10 +1,9 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beadsql"
@@ -32,13 +31,22 @@ const (
 	// beads — every agent, dog, and patrol-molecule bead in the town. Auto-close
 	// is for work that was abandoned, and abandonment does not look like a week.
 	defaultStaleIssueAge = 30 * 24 * time.Hour
+	// defaultEventsPurgeBatch and defaultEventsPurgeMaxBatches bound one events
+	// retention pass (gt-hk21d): at most this many DELETEs of this many rows, so
+	// a large first backlog drains over several cycles instead of one long write.
+	defaultEventsPurgeBatch      = 5000
+	defaultEventsPurgeMaxBatches = 20
+	// eventsRetentionTimeout bounds one database's retention pass. It is longer
+	// than maxBatches DELETEs at the 30s write timeout each, so the budget
+	// cannot cut a pass short before the server refuses a delete itself.
+	eventsRetentionTimeout = 15 * time.Minute
 )
 
 // wispReaperInterval returns the configured interval, or the default (1h).
 func wispReaperInterval(config *DaemonPatrolConfig) time.Duration {
 	if config != nil && config.Patrols != nil && config.Patrols.WispReaper != nil {
 		if config.Patrols.WispReaper.IntervalStr != "" {
-			if d, err := ParseAgeDuration(config.Patrols.WispReaper.IntervalStr); err == nil && d > 0 {
+			if d, err := agentconfig.ParseAgeDuration(config.Patrols.WispReaper.IntervalStr); err == nil && d > 0 {
 				return d
 			}
 		}
@@ -50,7 +58,7 @@ func wispReaperInterval(config *DaemonPatrolConfig) time.Duration {
 func wispReaperMaxAge(config *DaemonPatrolConfig) time.Duration {
 	if config != nil && config.Patrols != nil && config.Patrols.WispReaper != nil {
 		if config.Patrols.WispReaper.MaxAgeStr != "" {
-			if d, err := ParseAgeDuration(config.Patrols.WispReaper.MaxAgeStr); err == nil && d > 0 {
+			if d, err := agentconfig.ParseAgeDuration(config.Patrols.WispReaper.MaxAgeStr); err == nil && d > 0 {
 				return d
 			}
 		}
@@ -62,7 +70,7 @@ func wispReaperMaxAge(config *DaemonPatrolConfig) time.Duration {
 func wispDeleteAge(config *DaemonPatrolConfig) time.Duration {
 	if config != nil && config.Patrols != nil && config.Patrols.WispReaper != nil {
 		if config.Patrols.WispReaper.DeleteAgeStr != "" {
-			if d, err := ParseAgeDuration(config.Patrols.WispReaper.DeleteAgeStr); err == nil && d > 0 {
+			if d, err := agentconfig.ParseAgeDuration(config.Patrols.WispReaper.DeleteAgeStr); err == nil && d > 0 {
 				return d
 			}
 		}
@@ -75,7 +83,7 @@ func wispDeleteAge(config *DaemonPatrolConfig) time.Duration {
 func wispReaperStaleIssueAge(config *DaemonPatrolConfig) time.Duration {
 	if config != nil && config.Patrols != nil && config.Patrols.WispReaper != nil {
 		if config.Patrols.WispReaper.StaleIssueAgeStr != "" {
-			if d, err := ParseAgeDuration(config.Patrols.WispReaper.StaleIssueAgeStr); err == nil && d > 0 {
+			if d, err := agentconfig.ParseAgeDuration(config.Patrols.WispReaper.StaleIssueAgeStr); err == nil && d > 0 {
 				return d
 			}
 		}
@@ -109,22 +117,6 @@ func wispReaperAutoCloseEnabled(config *DaemonPatrolConfig) bool {
 	}
 	knob := config.Patrols.WispReaper.AutoClose
 	return knob != nil && *knob
-}
-
-// ParseAgeDuration parses an age string, accepting the day suffix the retired
-// mol-dog-reaper formula emitted for its 30d default. time.ParseDuration rejects
-// "30d" as "unknown unit d", which is how the incident run ended up with a
-// locally-invented shorter value instead of the formula's intent (gt-2qzr).
-func ParseAgeDuration(s string) (time.Duration, error) {
-	s = strings.TrimSpace(s)
-	if days, ok := strings.CutSuffix(s, "d"); ok {
-		n, err := strconv.Atoi(strings.TrimSpace(days))
-		if err != nil {
-			return 0, fmt.Errorf("invalid day suffix in %q: %w", s, err)
-		}
-		return time.Duration(n) * 24 * time.Hour, nil
-	}
-	return time.ParseDuration(s)
 }
 
 // triggerWispReaper runs a wisp_reaper cycle when the patrol is due, on its
@@ -239,6 +231,14 @@ func (d *Daemon) reaperWriter(dbName string, dryRun bool) (reaper.Writer, error)
 		return d.reaperWriterForFn(d.config.TownRoot, dbName)
 	}
 	return reaper.WriterForDatabase(d.config.TownRoot, dbName)
+}
+
+// openReaperDB opens the events retention step's connection to dbName.
+func (d *Daemon) openReaperDB(dbName string, readTimeout, writeTimeout time.Duration) (*beadsql.DB, error) {
+	if d.reaperOpenDBFn != nil {
+		return d.reaperOpenDBFn(dbName, readTimeout, writeTimeout)
+	}
+	return reaper.OpenDB(d.doltUserInfo(), d.doltServerHost(), d.doltServerPort(), dbName, readTimeout, writeTimeout)
 }
 
 // reapWispsInline runs the reaper cycle in the daemon, recording each step on
@@ -440,6 +440,60 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 		totalDispatchClosed += result.Closed
 		if result.Closed > 0 {
 			d.logger.Printf("wisp_reaper: %s: closed %d plugin dispatches", dbName, result.Closed)
+		}
+	}
+
+	// Step 3d: Events retention (opt-in)
+	//
+	// Off unless patrols.wisp_reaper.events_retention is set: deleting audit
+	// rows is the operator's call (gt-hk21d). dry_run counts the eligible rows
+	// and deletes nothing.
+	if retain, err := config.EventsRetention(); err != nil {
+		d.logger.Printf("wisp_reaper: events retention: %v", err)
+		cycle.failStep("events-retention", "patrols.wisp_reaper.events_retention is not a positive age")
+	} else if retain == 0 {
+		d.logger.Printf("wisp_reaper: events retention skipped (set patrols.wisp_reaper.events_retention to allow)")
+		cycle.skipStep("events-retention", "patrols.wisp_reaper.events_retention is not set")
+	} else {
+		retentionErrors := 0
+		for _, dbName := range databases {
+			if err := reaper.ValidateDBName(dbName); err != nil {
+				continue
+			}
+			db, err := d.openReaperDB(dbName, 10*time.Second, 30*time.Second)
+			if err != nil {
+				if errors.Is(err, beadsql.ErrNotBeads) {
+					continue
+				}
+				d.logger.Printf("wisp_reaper: %s: events retention connect error: %v", dbName, err)
+				retentionErrors++
+				continue
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), eventsRetentionTimeout)
+			result, purgeErr := reaper.PurgeEvents(ctx, db, reaper.EventsPurgeOptions{
+				Now:        time.Now().UTC(),
+				Retain:     retain,
+				Batch:      defaultEventsPurgeBatch,
+				MaxBatches: defaultEventsPurgeMaxBatches,
+				DryRun:     dryRun,
+			})
+			cancel()
+			db.Close()
+			if purgeErr != nil {
+				if result.Cutoff.IsZero() {
+					d.logger.Printf("wisp_reaper: %s: events retention error: %v", dbName, purgeErr)
+				} else {
+					d.logger.Printf("wisp_reaper: %s: events retention error: %v (%s)", dbName, purgeErr, result.Summary())
+				}
+				retentionErrors++
+				continue
+			}
+			d.logger.Printf("wisp_reaper: %s: events retention: %s", dbName, result.Summary())
+		}
+		if retentionErrors > 0 {
+			cycle.failStep("events-retention", fmt.Sprintf("%d databases had events retention errors", retentionErrors))
+		} else {
+			cycle.closeStep("events-retention")
 		}
 	}
 

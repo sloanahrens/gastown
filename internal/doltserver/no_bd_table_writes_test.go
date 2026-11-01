@@ -17,6 +17,27 @@ var bdTableWrite = regexp.MustCompile(`\b(INSERT\s+(IGNORE\s+)?INTO|REPLACE\s+IN
 	"(`?[%\\w]+`?\\.)?`?" +
 	`(issues|wisps|labels|wisp_labels|comments|wisp_comments|events|wisp_events|dependencies|wisp_dependencies|config)\b`)
 
+// allowedBdTableWrites is the complete set of source lines that carry the only
+// DML gastown may send to a bd table: the events retention delete
+// (reaper.PurgeEvents, gt-hk21d). A line is exempt only when, trimmed, it is
+// exactly one of these, so a changed statement — another table, no LIMIT, or a
+// second statement sharing the line — is still refused.
+var allowedBdTableWrites = []string{
+	`const deleteEventsBefore = "DELETE FROM events WHERE created_at < ? ORDER BY created_at LIMIT ?"`,
+}
+
+// bdTableWriteAllowed reports whether line is exactly one of
+// allowedBdTableWrites.
+func bdTableWriteAllowed(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	for _, allowed := range allowedBdTableWrites {
+		if trimmed == allowed {
+			return true
+		}
+	}
+	return false
+}
+
 // TestNoGoSourceWritesBdTables scans every non-test Go file under internal/
 // for a write to a bd table.
 func TestNoGoSourceWritesBdTables(t *testing.T) {
@@ -37,7 +58,7 @@ func TestNoGoSourceWritesBdTables(t *testing.T) {
 			if strings.HasPrefix(strings.TrimSpace(line), "//") {
 				continue
 			}
-			if m := bdTableWrite.FindString(line); m != "" {
+			if m := bdTableWrite.FindString(line); m != "" && !bdTableWriteAllowed(line) {
 				t.Errorf("%s:%d writes a bd table (%s): %s", path, i+1, m, strings.TrimSpace(line))
 			}
 		}
@@ -45,6 +66,34 @@ func TestNoGoSourceWritesBdTables(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestBdTableWriteAllowedIsTheEventsPurgeStatement: the exemption admits the
+// events purge statement and nothing that differs from it, so it cannot be
+// widened into a delete of another table, one without a LIMIT, or a line that
+// carries a second statement beside it.
+func TestBdTableWriteAllowedIsTheEventsPurgeStatement(t *testing.T) {
+	t.Parallel()
+	allowed := allowedBdTableWrites[0]
+	if !bdTableWrite.MatchString(allowed) {
+		t.Fatalf("the allowed statement is not one the guard would flag, so the exemption is dead: %s", allowed)
+	}
+	for _, line := range []string{allowed, "  " + allowed + "  "} {
+		if !bdTableWriteAllowed(line) {
+			t.Errorf("bdTableWriteAllowed(%q) = false, want true", line)
+		}
+	}
+	for _, line := range []string{
+		`deleteEventsBefore = "DELETE FROM events WHERE created_at < ?"`,
+		`deleteEventsBefore = "DELETE FROM events WHERE created_at < ? ORDER BY created_at LIMIT 10"`,
+		`deleteEventsBefore = "DELETE FROM wisp_events WHERE created_at < ? ORDER BY created_at LIMIT ?"`,
+		`deleteEventsBefore = "DELETE FROM bd_events_journal WHERE created_at < ? ORDER BY created_at LIMIT ?"`,
+		allowed + `; db.Exec("DELETE FROM wisp_events WHERE x")`,
+	} {
+		if bdTableWriteAllowed(line) {
+			t.Errorf("bdTableWriteAllowed(%q) = true, want false", line)
+		}
 	}
 }
 

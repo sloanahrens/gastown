@@ -1386,6 +1386,77 @@ type fakeReaperState struct {
 	nextConn    int
 	ops         map[int][]string
 	w           *fakeReaperWriter
+
+	// eventsTable is whether the fake database has an events table. The two
+	// sibling event tables stand in for the ones retention must not touch.
+	eventsTable   bool
+	events        []fakeEvent
+	wispEvents    []fakeEvent
+	journalEvents []fakeEvent
+
+	// The errors the events queries fail with, so the retention tests can
+	// drive each failure path: the table probe, the dry-run count, the delete.
+	probeErr  error
+	countErr  error
+	deleteErr error
+}
+
+// fakeEvent is one row of an event table, by age.
+type fakeEvent struct {
+	id        int64
+	createdAt time.Time
+}
+
+// addEvent adds an events-table row created age before now.
+func (s *fakeReaperState) addEvent(id int64, now time.Time, age time.Duration) {
+	s.events = append(s.events, fakeEvent{id: id, createdAt: now.Add(-age)})
+}
+
+// hasTableLocked answers the reaper's table-exists probe for the tables the
+// fake models.
+func (s *fakeReaperState) hasTableLocked(table string) bool {
+	switch table {
+	case "events":
+		return s.eventsTable
+	case "wisp_events", "bd_events_journal":
+		return true
+	}
+	return false
+}
+
+// eventsOlderThanLocked is the count the dry run asks for.
+func (s *fakeReaperState) eventsOlderThanLocked(cutoff time.Time) int {
+	n := 0
+	for _, e := range s.events {
+		if e.createdAt.Before(cutoff) {
+			n++
+		}
+	}
+	return n
+}
+
+// deleteEventsLocked applies one bounded events delete: the oldest eligible
+// rows, no more than limit, and reports how many went. Anything the statement
+// does not name is left alone, so a purge that reached another table shows up
+// as an unhandled statement rather than a silent row count.
+func (s *fakeReaperState) deleteEventsLocked(cutoff time.Time, limit int) int64 {
+	eligible := make([]fakeEvent, 0, len(s.events))
+	kept := make([]fakeEvent, 0, len(s.events))
+	for _, e := range s.events {
+		if e.createdAt.Before(cutoff) {
+			eligible = append(eligible, e)
+			continue
+		}
+		kept = append(kept, e)
+	}
+	sort.Slice(eligible, func(i, j int) bool { return eligible[i].createdAt.Before(eligible[j].createdAt) })
+	if len(eligible) > limit {
+		kept = append(kept, eligible[limit:]...)
+		eligible = eligible[:limit]
+	}
+	sort.Slice(kept, func(i, j int) bool { return kept[i].id < kept[j].id })
+	s.events = kept
+	return int64(len(eligible))
 }
 
 // staleIssueCandidatesLocked mirrors the sweep's SELECT: still-open issues whose
@@ -1801,6 +1872,19 @@ func (c *fakeReaperConn) QueryContext(_ context.Context, query string, args []dr
 	c.state.record(c.id, "QUERY "+normalized)
 
 	switch {
+	case strings.Contains(normalized, "FROM information_schema.tables WHERE table_name = ?"):
+		if c.state.probeErr != nil {
+			return nil, c.state.probeErr
+		}
+		if c.state.hasTableLocked(namedString(args, 0)) {
+			return fakeCountRows(1), nil
+		}
+		return fakeCountRows(0), nil
+	case strings.Contains(normalized, "SELECT COUNT(*) AS cnt FROM events WHERE created_at < ?"):
+		if c.state.countErr != nil {
+			return nil, c.state.countErr
+		}
+		return fakeCountRows(c.state.eventsOlderThanLocked(namedTime(args))), nil
 	case strings.Contains(normalized, "SELECT COUNT(DISTINCT w.id) FROM wisps w") && strings.Contains(normalized, "sib.type = 'blocks'"):
 		return fakeCountRows(c.state.orphanedStepCountLocked()), nil
 	case strings.Contains(normalized, "SELECT description FROM wisps WHERE"):
@@ -1880,15 +1964,25 @@ func (c *fakeReaperConn) QueryContext(_ context.Context, query string, args []dr
 	}
 }
 
-// ExecContext refuses every statement: the reaper selects with SQL and writes
-// only through its bd Writer (gt-fcxe9.12). Any Exec reaching the fake is a
-// raw write against a bd table, the bypass of is_blocked and the events
-// journal B5-06 names.
-func (c *fakeReaperConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
+// ExecContext admits the one write the reaper is allowed to send — the
+// bounded events retention delete — and refuses every other statement: every
+// other reaper write goes through its bd Writer (gt-fcxe9.12), and a raw write
+// to a bd table bypasses is_blocked and the events journal B5-06 names.
+func (c *fakeReaperConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	normalized := normalizeSQL(query)
 	c.state.mu.Lock()
+	defer c.state.mu.Unlock()
 	c.state.record(c.id, "EXEC "+normalized)
-	c.state.mu.Unlock()
+
+	if strings.Contains(normalized, "DELETE FROM events WHERE created_at <") {
+		if !strings.Contains(normalized, "ORDER BY created_at LIMIT ?") {
+			return nil, fmt.Errorf("events purge delete is not bounded by ORDER BY created_at LIMIT: %s", normalized)
+		}
+		if c.state.deleteErr != nil {
+			return nil, c.state.deleteErr
+		}
+		return fakeReaperResult(c.state.deleteEventsLocked(namedTime(args), namedInt(args, 1))), nil
+	}
 	c.t.Errorf("reaper wrote SQL (every write must go through bd): %s", normalized)
 	return nil, fmt.Errorf("reaper wrote SQL: %s", normalized)
 }
@@ -1970,6 +2064,29 @@ func namedTime(args []driver.NamedValue) time.Time {
 		return value
 	}
 	return time.Time{}
+}
+
+// namedString is the i-th bind argument as a string, or "" when it is not one.
+func namedString(args []driver.NamedValue, i int) string {
+	if i >= len(args) {
+		return ""
+	}
+	value, _ := args[i].Value.(string)
+	return value
+}
+
+// namedInt is the i-th bind argument as an int, or 0 when it is not one.
+func namedInt(args []driver.NamedValue, i int) int {
+	if i >= len(args) {
+		return 0
+	}
+	switch value := args[i].Value.(type) {
+	case int64:
+		return int(value)
+	case int:
+		return value
+	}
+	return 0
 }
 
 // namedLiteralTTLTime extracts the merge-requested protection TTL cutoff the
