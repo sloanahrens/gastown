@@ -6,9 +6,9 @@ import (
 )
 
 // The om panel opens with what is running now and the last five om ran, then
-// folds its Stats and Scores sections under details/summary lines built like the
-// polecats panel's idle line (gt-hmthk).
-func TestOMPanelOpensWithRunningAndLastFiveAboveTwoFolds(t *testing.T) {
+// folds its Stats, Rework and Scores sections under details/summary lines built
+// like the polecats panel's idle line (gt-hmthk).
+func TestOMPanelOpensWithRunningAndLastFiveAboveItsFolds(t *testing.T) {
 	t.Parallel()
 
 	body := pageFunc(t, "renderOM")
@@ -16,12 +16,15 @@ func TestOMPanelOpensWithRunningAndLastFiveAboveTwoFolds(t *testing.T) {
 	running := strings.Index(body, `"running now"`)
 	last := strings.Index(body, `om.last`)
 	stats := strings.Index(body, `fold("Stats`)
+	// The last call is the one on the om-present path: renderOM also draws the
+	// fold before returning from an absent om read (gt-ddxrq).
+	rework := strings.LastIndex(body, "omRework(box, s.rework)")
 	scores := strings.Index(body, `fold("Scores`)
-	if running < 0 || last < 0 || stats < 0 || scores < 0 {
-		t.Fatalf("renderOM is missing a block (running=%d last=%d stats=%d scores=%d)", running, last, stats, scores)
+	if running < 0 || last < 0 || stats < 0 || rework < 0 || scores < 0 {
+		t.Fatalf("renderOM is missing a block (running=%d last=%d stats=%d rework=%d scores=%d)", running, last, stats, rework, scores)
 	}
-	if !(running < last && last < stats && stats < scores) {
-		t.Errorf("renderOM draws its blocks out of order: want running, last five, Stats, Scores (running=%d last=%d stats=%d scores=%d)", running, last, stats, scores)
+	if !(running < last && last < stats && stats < rework && rework < scores) {
+		t.Errorf("renderOM draws its blocks out of order: want running, last five, Stats, Rework, Scores (running=%d last=%d stats=%d rework=%d scores=%d)", running, last, stats, rework, scores)
 	}
 
 	// Each fold is a details element whose open state lives in a module-level
