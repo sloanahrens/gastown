@@ -18,7 +18,7 @@ import (
 // maintenance window and before the gc, every database is copied with
 // CALL dolt_backup('sync-url', 'file://...') into
 // ~/gt-backups/dolt/<date>/<db> (internal/doltbackup), and rotation keeps the
-// newest seven. Restoring one is docs/dolt-restore.md.
+// newest fourteen. Restoring one is docs/dolt-restore.md.
 //
 // The copy goes through the running server, not the files under .dolt-data: a
 // Dolt backup is the server's own consistent snapshot of a database's

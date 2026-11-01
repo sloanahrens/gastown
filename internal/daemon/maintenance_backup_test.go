@@ -124,11 +124,11 @@ func TestScheduledMaintenanceBackupFailureSkipsGCAndUnpauses(t *testing.T) {
 	}
 }
 
-func TestMaintenanceBackupRotationKeepsSeven(t *testing.T) {
+func TestMaintenanceBackupRotationKeepsFourteen(t *testing.T) {
 	t.Parallel()
 	d, _ := gcTestDaemon(t)
 	f := withGCFakes(t, d)
-	for daysAgo := 9; daysAgo >= 1; daysAgo-- {
+	for daysAgo := 15; daysAgo >= 1; daysAgo-- {
 		started := gcTestNow.AddDate(0, 0, -daysAgo)
 		if err := os.MkdirAll(doltbackup.PartialDir(f.backupRoot, started), 0o755); err != nil {
 			t.Fatal(err)
@@ -146,11 +146,11 @@ func TestMaintenanceBackupRotationKeepsSeven(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != doltbackup.Keep {
-		t.Fatalf("%d backups after rotation, want %d", len(all), doltbackup.Keep)
+	if len(all) != 14 {
+		t.Fatalf("%d backups after rotation, want 14", len(all))
 	}
-	if first, last := filepath.Base(all[0].Path), filepath.Base(all[len(all)-1].Path); first != "2026-09-25" || last != "2026-10-01" {
-		t.Errorf("kept %s..%s, want 2026-09-25..2026-10-01", first, last)
+	if first, last := filepath.Base(all[0].Path), filepath.Base(all[len(all)-1].Path); first != "2026-09-18" || last != "2026-10-01" {
+		t.Errorf("kept %s..%s, want 2026-09-18..2026-10-01", first, last)
 	}
 }
 

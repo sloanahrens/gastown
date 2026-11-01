@@ -13,7 +13,7 @@ import (
 //   - Checkpoint Dog: every 10m, auto-commit dirty polecat worktrees
 //   - Doctor Dog (health): every 5m
 //   - JSONL Git Backup: every 15m
-//   - Scheduled Maintenance: window 03:00; nightly backup to ~/gt-backups/dolt (7 kept),
+//   - Scheduled Maintenance: window 03:00; nightly backup to ~/gt-backups/dolt (14 kept),
 //     then dolt_gc --full weekly, or on old-gen growth >20%
 //   - Disk Maintenance: declared with window 04:30 and mode dry_run, and
 //     disabled: it prunes the registry, so a town turns it on itself

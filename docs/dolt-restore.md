@@ -14,7 +14,7 @@ database each night, before its gc (gt-8z769.5,
     gt/
     ...
   2026-09-30/
-  ...                seven nights are kept
+  ...                fourteen nights are kept
 ```
 
 - The root is outside the town (`~/gt`), so nothing that cleans or tests the

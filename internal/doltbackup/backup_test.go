@@ -134,10 +134,10 @@ func TestListSkipsPartialsAndUnfinishedNights(t *testing.T) {
 	}
 }
 
-func TestRotateKeepsSevenAndOnlyTouchesItsOwnNames(t *testing.T) {
+func TestRotateKeepsFourteenAndOnlyTouchesItsOwnNames(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	for daysAgo := 9; daysAgo >= 0; daysAgo-- {
+	for daysAgo := 15; daysAgo >= 0; daysAgo-- {
 		commitNight(t, root, daysAgo, "hq")
 	}
 	// A crashed night, a dated dir with no manifest, and an operator's files.
@@ -154,14 +154,17 @@ func TestRotateKeepsSevenAndOnlyTouchesItsOwnNames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Rotate: %v", err)
 	}
-	wantRemoved := []string{"2026-09-14", "2026-09-15.partial", "2026-09-22", "2026-09-23", "2026-09-24"}
+	wantRemoved := []string{"2026-09-14", "2026-09-15.partial", "2026-09-16", "2026-09-17"}
 	if !reflect.DeepEqual(removed, wantRemoved) {
 		t.Errorf("removed = %v, want %v", removed, wantRemoved)
 	}
 	got := strings.Join(names(t, root), ",")
-	want := "2026-09-25,2026-09-26,2026-09-27,2026-09-28,2026-09-29,2026-09-30,2026-10-01,README,keep-me"
+	want := "2026-09-18,2026-09-19,2026-09-20,2026-09-21,2026-09-22,2026-09-23,2026-09-24,2026-09-25,2026-09-26,2026-09-27,2026-09-28,2026-09-29,2026-09-30,2026-10-01,README,keep-me"
 	if got != want {
 		t.Errorf("after rotation: %s, want %s", got, want)
+	}
+	if all, err := List(root); err != nil || len(all) != 14 {
+		t.Errorf("List after rotation = %d backups, %v; want 14", len(all), err)
 	}
 
 	// Rotating again is a no-op.
