@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/config/configtest"
 )
 
 func TestLoadDaemonEnv_MissingFileReturnsEmptyMap(t *testing.T) {
@@ -81,18 +83,6 @@ func TestDaemonEnvPath(t *testing.T) {
 	}
 }
 
-// writeDaemonEnv writes townRoot/settings/daemon.env.
-func writeDaemonEnv(t *testing.T, townRoot, body string) {
-	t.Helper()
-	dir := filepath.Join(townRoot, "settings")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "daemon.env"), []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestResolveDoltPassword(t *testing.T) {
 	t.Parallel()
 	ref := func(v string) *DoltThresholds { return &DoltThresholds{Password: &v} }
@@ -111,7 +101,7 @@ func TestResolveDoltPassword(t *testing.T) {
 	t.Run("reference reads daemon.env", func(t *testing.T) {
 		t.Parallel()
 		townRoot := t.TempDir()
-		writeDaemonEnv(t, townRoot, "GT_DOLT_PASSWORD=from-file\n")
+		configtest.WriteDaemonEnv(t, townRoot, "GT_DOLT_PASSWORD=from-file\n")
 		if got := resolveDoltPassword(townRoot, ref("${GT_DOLT_PASSWORD}"), noEnv); got != "from-file" {
 			t.Errorf("got %q, want from-file", got)
 		}
@@ -120,7 +110,7 @@ func TestResolveDoltPassword(t *testing.T) {
 	t.Run("name daemon.env lacks falls back to the process env", func(t *testing.T) {
 		t.Parallel()
 		townRoot := t.TempDir()
-		writeDaemonEnv(t, townRoot, "OTHER=x\n")
+		configtest.WriteDaemonEnv(t, townRoot, "OTHER=x\n")
 		getenv := func(name string) string {
 			if name == "GT_DOLT_PASSWORD" {
 				return "from-process"

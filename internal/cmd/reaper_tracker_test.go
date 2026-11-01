@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/config/configtest"
 	"github.com/steveyegge/gastown/internal/reaper"
 	"github.com/steveyegge/gastown/tracker/api"
 )
@@ -299,22 +301,29 @@ func TestReapTrackerTargetsCountsEveryRigItCannotReach(t *testing.T) {
 func TestReaperTrackerWispsRefusesMissingSettings(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name string
-		env  map[string]string
+		name      string
+		env       map[string]string
+		daemonEnv string
 	}{
-		{"no tracker url", map[string]string{"TRACKER_TOKEN": "t"}},
-		{"no token", map[string]string{"TRACKER_URL": "https://tracker.example.com"}},
-		{"token file that cannot be read", map[string]string{
-			"TRACKER_URL":        "https://tracker.example.com",
-			"TRACKER_TOKEN_FILE": filepath.Join(t.TempDir(), "absent-token"),
-		}},
+		{"no tracker url", map[string]string{"TRACKER_TOKEN": "t"}, "TRACKER_ADMIN_TOKEN=admin\n"},
+		{"no admin credential", map[string]string{"TRACKER_URL": "https://tracker.example.com"}, ""},
+		{"a seat token is not the purge's credential", map[string]string{
+			"TRACKER_URL":   "https://tracker.example.com",
+			"TRACKER_TOKEN": "seat-secret",
+		}, ""},
+		// The admin credential is present, so the client itself refuses the endpoint.
+		{"an endpoint that is not a URL", map[string]string{"TRACKER_URL": "not-a-url"}, "TRACKER_ADMIN_TOKEN=admin\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			townRoot := t.TempDir()
+			if tt.daemonEnv != "" {
+				configtest.WriteDaemonEnv(t, townRoot, tt.daemonEnv)
+			}
 			getenv := func(key string) string { return tt.env[key] }
-			if _, err := reaperTrackerWispsFrom(getenv); err == nil {
-				t.Fatal("reaperTrackerWispsFrom = nil error, want a refusal naming the missing setting")
+			if _, err := reaperTrackerWisps(townRoot, getenv)(); err == nil {
+				t.Fatal("reaperTrackerWisps = nil error, want a refusal naming the missing setting")
 			}
 		})
 	}
@@ -333,6 +342,25 @@ func TestReaperTrackerTargetsRefusesAnUnreadableRouteTable(t *testing.T) {
 // root and error it was built with, so no test changes the working directory.
 func findTownAt(townRoot string, err error) func() (string, error) {
 	return func() (string, error) { return townRoot, err }
+}
+
+// TestReaperTrackerWispsReadsTheTownItWasGiven: the purge is admin-only, so its
+// client takes the credential from the town root the reaper was given. A town
+// with no admin credential is refused before any client is built, and the
+// refusal must name that town's settings/daemon.env. The seat token in the
+// environment is never the fallback.
+func TestReaperTrackerWispsReadsTheTownItWasGiven(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	env := map[string]string{
+		"TRACKER_URL":   "https://tracker.example.com",
+		"TRACKER_TOKEN": "seat-secret",
+	}
+	_, err := reaperTrackerWisps(townRoot, func(key string) string { return env[key] })()
+	want := agentconfig.DaemonEnvPath(townRoot)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("reaperTrackerWisps error = %v, want a refusal naming %s", err, want)
+	}
 }
 
 func TestReaperRunTargetsResolvesTheTownOrRefuses(t *testing.T) {
@@ -366,7 +394,7 @@ func TestReaperRunTargetsResolvesTheTownOrRefuses(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			rigs, _, err := reaperRunTargets(tt.find, true, []string{"beads"})
+			_, rigs, _, err := reaperRunTargets(tt.find, true, []string{"beads"})
 			if tt.wantErr {
 				if err == nil || !strings.Contains(err.Error(), "cannot find the tracker rigs") {
 					t.Fatalf("reaperRunTargets error = %v, want the refusal that names the tracker rigs", err)
@@ -387,9 +415,28 @@ func TestReaperRunTargetsRefusesAnUnreadableRouteTable(t *testing.T) {
 	t.Parallel()
 	townRoot := writeCmdTownRoutes(t, "{not json\n")
 
-	_, _, err := reaperRunTargets(findTownAt(townRoot, nil), true, []string{"beads"})
+	_, _, _, err := reaperRunTargets(findTownAt(townRoot, nil), true, []string{"beads"})
 	if err == nil || !strings.Contains(err.Error(), "cannot find the tracker rigs") {
 		t.Fatalf("reaperRunTargets error = %v, want the refusal that names the tracker rigs: an unreadable route table must not fall through to the bd sweep", err)
+	}
+}
+
+// TestReaperRunTargetsReturnsTheTownItResolved: the town root is what the
+// tracker client reads its admin credential from, so the run gets the root the
+// route table was read from, not a second lookup.
+func TestReaperRunTargetsReturnsTheTownItResolved(t *testing.T) {
+	t.Parallel()
+	townRoot := writeCmdTownRoutes(t, `{"path":"gastown/mayor/rig","prefix":"gt-","backend":"tracker"}`+"\n")
+
+	got, rigs, _, err := reaperRunTargets(findTownAt(townRoot, nil), true, []string{"beads"})
+	if err != nil {
+		t.Fatalf("reaperRunTargets: %v", err)
+	}
+	if got != townRoot {
+		t.Errorf("town root = %q, want %q", got, townRoot)
+	}
+	if len(rigs) != 1 {
+		t.Errorf("tracker rigs = %+v, want the one tracker rig the route table names", rigs)
 	}
 }
 

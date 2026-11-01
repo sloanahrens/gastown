@@ -11,6 +11,7 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads/backend"
 	"github.com/steveyegge/gastown/internal/beadsql"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
@@ -123,20 +124,21 @@ func reaperWriter(dbName string) (reaper.Writer, error) {
 }
 
 // reaperRunTargets resolves the tracker rigs a scan or reap covers, and the bd
-// databases its sweep keeps, from the town find locates. A town-less run ("" with
-// no error) has no route table, so it has no tracker rigs. A town lookup that
-// fails is an error, not a town-less run: a run that cannot find the town cannot
-// tell the tracker rigs apart, so it refuses rather than sweep them.
-func reaperRunTargets(find func() (string, error), wholeTown bool, databases []string) ([]reaper.TrackerRig, []string, error) {
+// databases its sweep keeps, from the town find locates. It returns that town
+// root too, which the tracker client reads its admin credential from. A town-less
+// run ("" with no error) has no route table, so it has no tracker rigs. A town
+// lookup that fails is an error, not a town-less run: a run that cannot find the
+// town cannot tell the tracker rigs apart, so it refuses rather than sweep them.
+func reaperRunTargets(find func() (string, error), wholeTown bool, databases []string) (string, []reaper.TrackerRig, []string, error) {
 	townRoot, err := find()
 	if err != nil {
-		return nil, nil, fmt.Errorf("cannot find the tracker rigs: %w", err)
+		return "", nil, nil, fmt.Errorf("cannot find the tracker rigs: %w", err)
 	}
 	rigs, dbs, err := reaperTrackerTargets(townRoot, wholeTown, databases)
 	if err != nil {
-		return nil, nil, fmt.Errorf("cannot find the tracker rigs: %w", err)
+		return "", nil, nil, fmt.Errorf("cannot find the tracker rigs: %w", err)
 	}
-	return rigs, dbs, nil
+	return townRoot, rigs, dbs, nil
 }
 
 // reaperTrackerTargets splits a hand run's targets into the tracker rigs it
@@ -167,27 +169,25 @@ func reaperTrackerTargets(townRoot string, wholeTown bool, databases []string) (
 	return covered, reaper.WithoutTrackerDatabases(databases, rigs), nil
 }
 
-// reaperTrackerWisps reaches the tracker the town's tracker rigs are on, from
-// the environment the tracker client reads. The token never comes from a flag.
-func reaperTrackerWisps() (reaper.TrackerWisps, error) {
-	return reaperTrackerWispsFrom(os.Getenv)
-}
-
-// reaperTrackerWispsFrom is reaperTrackerWisps reading its settings from getenv.
-func reaperTrackerWispsFrom(getenv func(string) string) (reaper.TrackerWisps, error) {
-	cfg := client.FromEnv(getenv)
-	if cfg.BaseURL == "" {
-		return nil, errors.New("tracker rigs need TRACKER_URL set")
+// reaperTrackerWisps returns the constructor of the tracker the town's tracker
+// rigs are on: the endpoint from getenv, the credential from townRoot's
+// settings. The reaper's purge is admin-only, so the client carries the town's
+// admin credential (backend.TownConfig), never a seat's token. The token never
+// comes from a flag.
+func reaperTrackerWisps(townRoot string, getenv func(string) string) func() (reaper.TrackerWisps, error) {
+	return func() (reaper.TrackerWisps, error) {
+		cfg, err := backend.TownConfig(townRoot, getenv)
+		if err != nil {
+			// The caller names the tracker rigs when it prints this error.
+			return nil, err
+		}
+		tc, err := client.New(cfg.Tracker)
+		if err != nil {
+			// client.New never quotes the token; its message names the problem.
+			return nil, err
+		}
+		return tc, nil
 	}
-	if cfg.Token == "" && cfg.TokenFile == "" {
-		return nil, errors.New("tracker rigs need TRACKER_TOKEN or TRACKER_TOKEN_FILE set")
-	}
-	tc, err := client.New(cfg)
-	if err != nil {
-		// client.New never quotes the token; its message names the problem.
-		return nil, err
-	}
-	return tc, nil
 }
 
 // scanTrackerRigs scans each tracker rig through the tracker's wisp reads. A rig
@@ -531,7 +531,7 @@ Use this to understand the state before deciding what to reap.`,
 		}
 
 		databases := reaperDatabaseNames()
-		trackerRigs, databases, err := reaperRunTargets(workspace.FindFromCwd, reaperDB == "", databases)
+		townRoot, trackerRigs, databases, err := reaperRunTargets(workspace.FindFromCwd, reaperDB == "", databases)
 		if err != nil {
 			return err
 		}
@@ -572,7 +572,7 @@ Use this to understand the state before deciding what to reap.`,
 			}
 			results = append(results, result)
 		}
-		results = append(results, scanTrackerTargets(context.Background(), trackerRigs, reaperTrackerWisps, maxAge, purgeAge, time.Now())...)
+		results = append(results, scanTrackerTargets(context.Background(), trackerRigs, reaperTrackerWisps(townRoot, os.Getenv), maxAge, purgeAge, time.Now())...)
 
 		if reaperJSON {
 			fmt.Println(reaper.FormatJSON(results))
@@ -639,7 +639,7 @@ Returns the count of reaped wisps. Use --dry-run to preview.`,
 			return err
 		}
 		databases := reaperDatabaseNames()
-		trackerRigs, databases, err := reaperRunTargets(workspace.FindFromCwd, reaperDB == "", databases)
+		townRoot, trackerRigs, databases, err := reaperRunTargets(workspace.FindFromCwd, reaperDB == "", databases)
 		if err != nil {
 			return err
 		}
@@ -699,7 +699,7 @@ Returns the count of reaped wisps. Use --dry-run to preview.`,
 			}
 			results = append(results, result)
 		}
-		tracked, failed := reapTrackerTargets(context.Background(), trackerRigs, reaperTrackerWisps, purgeAge, reaperDryRun, time.Now())
+		tracked, failed := reapTrackerTargets(context.Background(), trackerRigs, reaperTrackerWisps(townRoot, os.Getenv), purgeAge, reaperDryRun, time.Now())
 		results = append(results, tracked...)
 		reapFailures += failed
 
@@ -729,7 +729,6 @@ Returns the count of reaped wisps. Use --dry-run to preview.`,
 					prefix, len(results), totalReaped, extra, totalOpen)
 			}
 		}
-		townRoot, _ := workspace.FindFromCwd()
 		reportReaperRunOpenWisps(os.Stderr, townRoot, reaperRunAlert{
 			Sample:          reaper.OpenWispSample{OpenWisps: totalOpen, Databases: len(results), DryRun: reaperDryRun},
 			WholeTown:       reaperDB == "" && !reaperJSON,

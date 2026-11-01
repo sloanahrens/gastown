@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beadsql"
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/config/configtest"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/tracker/api"
 )
@@ -1046,32 +1048,63 @@ func TestSyncJsonlGitBackupTrackerFlipCommitsAMarkedCount(t *testing.T) {
 }
 
 // TestTrackerExporterRefusesSettingsItCannotReach: a tracker rig with no
-// endpoint, no token or an unusable endpoint fails its export and says what is
-// wrong; it never falls back to the Dolt database the rig left behind.
+// endpoint, no admin credential or an unusable endpoint fails its export and
+// says what is wrong; it never falls back to the Dolt database the rig left
+// behind. A seat token in the environment is not the daemon's credential.
 func TestTrackerExporterRefusesSettingsItCannotReach(t *testing.T) {
 	t.Parallel()
+	const adminLine = "TRACKER_ADMIN_TOKEN=admin-secret\n"
 	cases := []struct {
-		name string
-		env  map[string]string
-		want string
+		name      string
+		env       map[string]string
+		daemonEnv string
+		want      string
 	}{
-		{"no endpoint", nil, "TRACKER_URL is not set"},
-		{"an endpoint with no token", map[string]string{"TRACKER_URL": "https://tracker.example"}, "TRACKER_TOKEN"},
+		{"no endpoint", nil, adminLine, "TRACKER_URL is not set"},
+		{"an endpoint with no admin credential", map[string]string{"TRACKER_URL": "https://tracker.example"}, "", "TRACKER_ADMIN_TOKEN is not set"},
 		{
-			"an endpoint that is not a URL",
-			map[string]string{"TRACKER_URL": "not-a-url", "TRACKER_TOKEN": "secret"},
-			"is not a URL with a host",
+			"a seat token is not the daemon's credential",
+			map[string]string{"TRACKER_URL": "https://tracker.example", "TRACKER_TOKEN": "seat-secret"},
+			"", "TRACKER_ADMIN_TOKEN is not set",
 		},
+		{"an endpoint that is not a URL", map[string]string{"TRACKER_URL": "not-a-url"}, adminLine, "is not a URL with a host"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			export := trackerExporterFromEnv(func(key string) string { return c.env[key] })
+			townRoot := t.TempDir()
+			if c.daemonEnv != "" {
+				configtest.WriteDaemonEnv(t, townRoot, c.daemonEnv)
+			}
+			export := trackerExporter(townRoot, func(key string) string { return c.env[key] })
 			err := export(t.Context(), "al", func(api.ExportRecord) error { return nil })
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("export = %v, want an error naming %q", err, c.want)
 			}
 		})
+	}
+}
+
+// TestTrackerExportReadsTheDaemonsOwnTownCredential drives the production
+// exporter the backup runs, with no client seam. The town has no admin
+// credential, so the export is refused before any request is built, and the
+// refusal must name this daemon's own settings/daemon.env: the root was wired
+// from d.config, and the seat token in the environment is never the fallback.
+func TestTrackerExportReadsTheDaemonsOwnTownCredential(t *testing.T) {
+	t.Parallel()
+	townRoot := trackerTown(t)
+	env := map[string]string{
+		"TRACKER_URL":   "https://tracker.example.com",
+		"TRACKER_TOKEN": "seat-secret",
+	}
+	d, _ := backupTestDaemon(t)
+	d.config = &Config{TownRoot: townRoot}
+	d.trackerEnv = func(key string) string { return env[key] }
+
+	_, err := d.exportTrackerDatabaseToJsonl("al", "al", t.TempDir())
+	want := config.DaemonEnvPath(townRoot)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("exportTrackerDatabaseToJsonl error = %v, want a refusal naming %s", err, want)
 	}
 }
 
