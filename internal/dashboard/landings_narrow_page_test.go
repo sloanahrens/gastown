@@ -336,7 +336,7 @@ func landingsHeaderCells(t *testing.T, p *pageDOM) int {
 // dashes and its title sat in the Landing column alone, wrapping over six or
 // seven lines. The title cell now spans the columns those cells and By would
 // have taken, so the title reads in a line or two (gt-uvpo1).
-func TestAWaitingRowTitleCellSpansTheEmptyCells(t *testing.T) {
+func TestLandingsAWaitingRowTitleCellSpansTheEmptyCells(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 10, 31, 16, 0, 0, 0, time.Local)
