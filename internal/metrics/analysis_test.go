@@ -212,6 +212,7 @@ func analysisEnv(t *testing.T, town, dayDir string, answer func(recordedCall) ([
 		Town:     town,
 		Now:      func() time.Time { return analyseNow },
 		ReadFile: os.ReadFile,
+		ReadDir:  listDir,
 		Run:      func(_ context.Context, argv []string) ([]byte, error) { return record(nil, argv) },
 		RunEnv:   func(_ context.Context, argv, extra []string) ([]byte, error) { return record(extra, argv) },
 	}, calls
