@@ -149,7 +149,7 @@ func listMatches(is api.Issue, flt api.ListFilter) bool {
 	if is.Ephemeral != flt.Ephemeral {
 		return false
 	}
-	if !flt.IncludeInfra && flt.IssueType == "" && store.IsInfraType(is.Type) {
+	if !flt.IncludeInfra && flt.IssueType == "" && api.IsInfraType(is.Type) {
 		return false
 	}
 	if !slices.Contains(flt.Statuses, "all") {

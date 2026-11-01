@@ -114,6 +114,10 @@ func (f *Fake) createLocked(p api.CreateParams) (api.Issue, error) {
 	return is, nil
 }
 
+// GetIssues returns the issues that exist among ids, with their links. Every
+// caller sees Dependencies filled, as it does on Postgres: a named read
+// answers what the issue depends on, and the contract case "a named read
+// carries each link's own record" holds both stores to it.
 func (f *Fake) GetIssues(_ context.Context, ids []string) (map[string]api.Issue, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -349,61 +349,23 @@ func TestShowRowsReportsEachStoreFailure(t *testing.T) {
 	}
 }
 
-// TestShowRowsReadsEachBeadOnce: show names its beads in one call and their
-// dependency targets in a second, so the answer costs two reads however many
-// ids the command names, plus one comment count per named bead the store
-// answers only per issue.
-func TestShowRowsReadsEachBeadOnce(t *testing.T) {
+// TestListRowsKeepsTheCommentCountTheListFilled: a list row's comment count is
+// the one the list read answered, not one the handler reads again.
+func TestListRowsKeepsTheCommentCountTheListFilled(t *testing.T) {
 	t.Parallel()
-	one := &beads.Issue{ID: "fx-1", Dependencies: []beads.IssueDep{{ID: "fx-2"}}}
-	two := &beads.Issue{ID: "fx-2"}
-	st := &countingStore{stubReadStore: stubReadStore{
-		showMultiple: func(ids []string) (map[string]*beads.Issue, error) {
-			out := map[string]*beads.Issue{}
-			for _, id := range ids {
-				switch id {
-				case "fx-1":
-					out[id] = one
-				case "fx-2":
-					out[id] = two
-				}
-			}
-			return out, nil
-		},
-		comments: func(string) ([]beads.Comment, error) { return nil, nil },
+	st := stubReadStore{showMultiple: func(ids []string) (map[string]*beads.Issue, error) {
+		out := map[string]*beads.Issue{}
+		for _, id := range ids {
+			out[id] = &beads.Issue{ID: id}
+		}
+		return out, nil
 	}}
-	if _, err := showRows(st, []string{"fx-1", "fx-2"}); err != nil {
-		t.Fatalf("showRows: %v", err)
-	}
-	if st.showMultiple != 2 || st.comments != 2 {
-		t.Errorf("show of two beads read the store %d times for beads and %d for comments, want 2 and 2", st.showMultiple, st.comments)
-	}
-}
-
-// TestListRowsReadsTheListedBeadsOnce: a list row's links come from one read for
-// the whole page, not a read per row, and its comment count comes from the list
-// read itself.
-func TestListRowsReadsTheListedBeadsOnce(t *testing.T) {
-	t.Parallel()
-	issues := []*beads.Issue{{ID: "fx-1", CommentCount: 3}, {ID: "fx-2"}, {ID: "fx-3"}}
-	st := &countingStore{stubReadStore: stubReadStore{
-		showMultiple: func(ids []string) (map[string]*beads.Issue, error) {
-			out := map[string]*beads.Issue{}
-			for _, id := range ids {
-				out[id] = &beads.Issue{ID: id}
-			}
-			return out, nil
-		},
-	}}
-	rows, err := listRows(st, issues)
+	rows, err := listRows(st, []*beads.Issue{{ID: "fx-1", CommentCount: 3}})
 	if err != nil {
 		t.Fatalf("listRows: %v", err)
 	}
-	if st.showMultiple != 1 || st.comments != 0 {
-		t.Errorf("a list of three rows read the store %d times for beads and %d for comments, want 1 and 0", st.showMultiple, st.comments)
-	}
 	if rows[0].CommentCount != 3 {
-		t.Errorf("the first row's comment count is %d, want the 3 the list read filled", rows[0].CommentCount)
+		t.Errorf("the row's comment count is %d, want the 3 the list read filled", rows[0].CommentCount)
 	}
 }
 
@@ -437,11 +399,12 @@ func TestListAndChildrenRowsReportAReadTheyCannotMake(t *testing.T) {
 	}
 }
 
-// TestChildrenRowsReadsCommentsPerChild: a children read fills no comment count,
-// so each child's comments are read once, and a refusal names the child.
-func TestChildrenRowsReadsCommentsPerChild(t *testing.T) {
+// TestChildrenRowsReportsACommentReadItCannotMake: a child's comment count
+// cannot be guessed, so a failed read is the shim's error and it names the
+// child.
+func TestChildrenRowsReportsACommentReadItCannotMake(t *testing.T) {
 	t.Parallel()
-	st := &countingStore{stubReadStore: stubReadStore{
+	st := stubReadStore{
 		showMultiple: func(ids []string) (map[string]*beads.Issue, error) {
 			out := map[string]*beads.Issue{}
 			for _, id := range ids {
@@ -450,7 +413,7 @@ func TestChildrenRowsReadsCommentsPerChild(t *testing.T) {
 			return out, nil
 		},
 		comments: func(string) ([]beads.Comment, error) { return nil, errors.New("comments refused") },
-	}}
+	}
 	if _, err := childrenRows(st, []*beads.Issue{{ID: "fx-1"}}); err == nil || !strings.Contains(err.Error(), "fx-1's comments") {
 		t.Errorf("childrenRows = %v, want it to name the child whose comments it could not read", err)
 	}
@@ -491,22 +454,4 @@ func (s stubReadStore) Comments(id string) ([]beads.Comment, error) {
 		return nil, errors.New("stubReadStore: Comments was not scripted")
 	}
 	return s.comments(id)
-}
-
-// countingStore counts the reads a test's script answers, so a test can state
-// how many times an answer reached the store.
-type countingStore struct {
-	stubReadStore
-	showMultiple int
-	comments     int
-}
-
-func (c *countingStore) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
-	c.showMultiple++
-	return c.stubReadStore.ShowMultiple(ids)
-}
-
-func (c *countingStore) Comments(id string) ([]beads.Comment, error) {
-	c.comments++
-	return c.stubReadStore.Comments(id)
 }

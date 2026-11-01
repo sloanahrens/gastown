@@ -1,6 +1,9 @@
 package api
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 // CreateParams creates an issue. Rig is required unless ID is given; an ID
 // must start with its rig's prefix and a dash. Actor becomes created_by.
@@ -57,6 +60,15 @@ type ListFilter struct {
 	Limit  int    `json:"limit,omitempty"`
 	Cursor string `json:"cursor,omitempty"`
 }
+
+// InfraTypes are the issue types bd's list leaves out unless it is asked for
+// infrastructure issues: the town's own records (agents, roles, messages), not
+// the work. The Postgres list query and the in-memory fake apply this one list,
+// so a filter cannot leave out a type the other includes.
+var InfraTypes = []string{"agent", "role", "message"}
+
+// IsInfraType reports whether t is a type a list leaves out unless asked.
+func IsInfraType(t string) bool { return slices.Contains(InfraTypes, t) }
 
 // UpdatePatch changes the fields it sets. A nil pointer leaves a field alone.
 // AppendNotes adds a line to the notes; Persistent promotes a wisp.

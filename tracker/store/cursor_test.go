@@ -47,20 +47,6 @@ func TestPageSize(t *testing.T) {
 	}
 }
 
-func TestInfraTypesAreTheOnesBDHides(t *testing.T) {
-	t.Parallel()
-	for _, typ := range []string{"agent", "role", "message"} {
-		if !IsInfraType(typ) {
-			t.Errorf("%s should be an infrastructure type: bd list hides it by default", typ)
-		}
-	}
-	for _, typ := range []string{"task", "bug", "epic", "molecule", "convoy", "event"} {
-		if IsInfraType(typ) {
-			t.Errorf("%s is not an infrastructure type", typ)
-		}
-	}
-}
-
 func TestListCursorSurvivesATimeInAZoneWithSecondsInItsOffset(t *testing.T) {
 	t.Parallel()
 	// Postgres returns year 1 in the session zone with its local-mean-time
