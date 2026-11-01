@@ -26,6 +26,27 @@
       "--context",
       "colima-gt-sbx",
       "run",
+      "--rm",
+      "--network",
+      "none",
+      "--entrypoint",
+      "cp",
+      "--volume",
+      "gt-sweep-dind-seed:/seed:ro",
+      "--volume",
+      "gt-sweep-dind-data-gastown-4f2a9c1e-mvv8asko:/var/lib/docker",
+      "data.forgejo.org/oci/docker@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977",
+      "-a",
+      "/seed/.",
+      "/var/lib/docker/"
+    ]
+  },
+  {
+    "argv": [
+      "docker",
+      "--context",
+      "colima-gt-sbx",
+      "run",
       "-d",
       "--name",
       "gt-sweep-dind-gastown-4f2a9c1e-mvv8asko",

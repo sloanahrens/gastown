@@ -63,6 +63,13 @@ const (
 	// dindDataPath is where the sidecar's engine keeps its state, on the run's
 	// own volume.
 	dindDataPath = "/var/lib/docker"
+	// SeedVolume is the engine state a seed run (RenderSeed) fills with the images
+	// the packages' tests start. Each run copies it into the run's own volume
+	// before the sidecar starts, so the sidecar's engine has the images without
+	// any network and the seed itself is never written by a run.
+	SeedVolume = "gt-sweep-dind-seed"
+	// seedMount is where the copy step reads the seed, read-only.
+	seedMount = "/seed"
 )
 
 // Docker renders a sweep run as docker CLI argv against the Spec's context.
@@ -86,6 +93,18 @@ func (Docker) Render(spec Spec) (Plan, error) {
 		start = append(start,
 			dockerStep(spec, "network", "create", "--internal", networkName(spec)),
 			dockerStep(spec, "volume", "create", volumeName(spec)),
+			// The run's volume starts as a copy of the seed: the sidecar sits on
+			// an internal network and cannot pull the images the tests start, so
+			// they come from the seed filled once by RenderSeed. The seed is
+			// mounted read-only, and a seed that was never filled is an empty
+			// copy: the packages that need an image then fail on it by name.
+			dockerStep(spec, "run", "--rm", "--network", "none",
+				"--entrypoint", "cp",
+				"--volume", SeedVolume+":"+seedMount+":ro",
+				"--volume", volumeName(spec)+":"+dindDataPath,
+				templates.SweepDindImage,
+				"-a", seedMount+"/.", dindDataPath+"/",
+			),
 			// The engine is the plan's only privileged container, and it is
 			// reached over plain TCP on the run's own loopback: dockerd runs the
 			// packages' containers, and nothing else needs a capability. The

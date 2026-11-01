@@ -572,7 +572,7 @@ func TestDockerSidecarUsesTheSweepDindPinAndNamesDockerd(t *testing.T) {
 	}
 	for _, step := range plan.Steps {
 		i := slices.Index(step.Argv, templates.SweepDindImage)
-		if i < 0 {
+		if i < 0 || !slices.Contains(step.Argv, "--privileged") {
 			continue
 		}
 		if i+1 >= len(step.Argv) || step.Argv[i+1] != "dockerd" {
@@ -585,3 +585,88 @@ func TestDockerSidecarUsesTheSweepDindPinAndNamesDockerd(t *testing.T) {
 
 // sweepDindPinShape is a repository pinned by a sha256 digest in lowercase hex.
 var sweepDindPinShape = regexp.MustCompile(`^[^@\s]+@sha256:[0-9a-f]{64}$`)
+
+// The run's volume is a copy of the seed before the sidecar starts: the sidecar
+// is on an internal network and cannot pull the images the tests start. The copy
+// reads the seed read-only, has no network, and runs before the sidecar. Dropping
+// the copy turns this red, as it does the golden.
+func TestDockerRunCopiesTheSeedBeforeTheSidecarStarts(t *testing.T) {
+	t.Parallel()
+	plan, err := Docker{}.Render(goldenSpec())
+	if err != nil {
+		t.Fatalf("rendering: %v", err)
+	}
+	copyAt, sidecarAt := -1, -1
+	for i, step := range plan.Steps {
+		joined := strings.Join(step.Argv, " ")
+		if strings.Contains(joined, "--entrypoint cp") {
+			copyAt = i
+			for _, want := range []string{"--network none", "--volume " + SeedVolume + ":/seed:ro", "-a /seed/. /var/lib/docker/"} {
+				if !strings.Contains(joined, want) {
+					t.Errorf("copy step %q lacks %q", joined, want)
+				}
+			}
+		}
+		if slices.Contains(step.Argv, "dockerd") {
+			sidecarAt = i
+		}
+	}
+	if copyAt < 0 || sidecarAt < 0 || copyAt > sidecarAt {
+		t.Errorf("copy step at %d, sidecar at %d: the seed must be copied before the sidecar starts", copyAt, sidecarAt)
+	}
+	for _, step := range plan.Teardown() {
+		if slices.Contains(step.Argv, SeedVolume) {
+			t.Errorf("teardown step %q removes the seed volume", step.Argv)
+		}
+	}
+}
+
+// The one-time seed: a temporary engine on the seed volume pulls each image, is
+// stopped so its state is whole, and is removed; the volume stays.
+func TestRenderSeedPullsEachImageAndKeepsTheVolume(t *testing.T) {
+	t.Parallel()
+	plan, err := Docker{}.RenderSeed(SeedSpec{Context: "ctx", Images: []string{"a/b:1", "c/d:2"}})
+	if err != nil {
+		t.Fatalf("RenderSeed: %v", err)
+	}
+	var lines []string
+	for _, step := range plan.Steps {
+		lines = append(lines, strings.Join(step.Argv, " "))
+	}
+	text := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"docker --context ctx volume create " + SeedVolume,
+		"docker --context ctx exec gt-sweep-seed docker pull a/b:1",
+		"docker --context ctx exec gt-sweep-seed docker pull c/d:2",
+		"docker --context ctx stop -t 30 gt-sweep-seed",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("seed plan lacks %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "--internal") || strings.Contains(text, "--network") {
+		t.Errorf("the seed engine must be on the default network to pull:\n%s", text)
+	}
+	if td := plan.Teardown(); len(td) != 1 || !slices.Contains(td[0].Argv, "rm") || slices.Contains(td[0].Argv, SeedVolume) {
+		t.Errorf("seed teardown = %v, want only the temporary container removed", td)
+	}
+}
+
+// A seed run docker would read as something else is refused before any step.
+func TestRenderSeedRefusesWhatDockerWouldMisread(t *testing.T) {
+	t.Parallel()
+	for name, seed := range map[string]SeedSpec{
+		"no context":      {Images: []string{"a/b:1"}},
+		"flag context":    {Context: "--rm", Images: []string{"a/b:1"}},
+		"control context": {Context: "c\n", Images: []string{"a/b:1"}},
+		"no images":       {Context: "c"},
+		"flag image":      {Context: "c", Images: []string{"--privileged"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := (Docker{}).RenderSeed(seed); err == nil {
+				t.Error("RenderSeed accepted it")
+			}
+		})
+	}
+}
