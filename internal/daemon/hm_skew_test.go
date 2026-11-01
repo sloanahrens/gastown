@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -37,7 +38,9 @@ type hmSkewAnswers struct {
 	changed      []string // the paths the clone's diff names
 	lacksInstall bool     // the clone has no commit for the installed sha
 	probeErr     bool     // the clone cannot answer whether it has the installed sha
-	noClone      bool     // the job-owned clone directory does not exist
+	noClone      bool     // the job-owned clone does not exist yet, so the monitor clones it
+	cloneErr     bool     // the clone fails, leaving a partial directory behind
+	fetchErr     bool     // the fetch of origin's main into the clone fails
 }
 
 // hmSkewBehindAnswers is an hm at installed sha A, origin's main at B, and a diff
@@ -92,6 +95,26 @@ func hmSkewRunner(t *testing.T, a hmSkewAnswers) cmdRunFunc {
 			if a.lsRemoteErr {
 				err = errors.New("fatal: unable to access remote")
 			}
+		case strings.Contains(joined, " clone "):
+			// The last argument is the clone's directory. A clone that succeeds
+			// leaves a repository there; one that fails leaves a partial one.
+			dst := cmd.Args[len(cmd.Args)-1]
+			if a.cloneErr {
+				mkdirs(t, filepath.Join(dst, ".git"))
+				err = errors.New("fatal: unable to access remote")
+				break
+			}
+			mkdirs(t, filepath.Join(dst, ".git"))
+		case strings.Contains(joined, " fetch "):
+			// The clone is the call's -C directory: git fetches into a repository
+			// only, so a fetch before the clone exists fails as it would for real.
+			_, statErr := os.Stat(filepath.Join(cmd.Args[2], ".git"))
+			switch {
+			case a.fetchErr:
+				err = errors.New("fatal: unable to access remote")
+			case statErr != nil:
+				err = errors.New("fatal: not a git repository")
+			}
 		case strings.Contains(joined, " diff --name-only "):
 			if a.diffErr {
 				err = errors.New("fatal: bad revision")
@@ -128,7 +151,7 @@ func hmSkewDaemon(t *testing.T, a hmSkewAnswers) (*Daemon, *notifyfake.Recorder,
 	var logs bytes.Buffer
 	town := t.TempDir()
 	if !a.noClone {
-		mkdirs(t, filepath.Join(town, hmSkewCloneDir))
+		mkdirs(t, filepath.Join(town, hmSkewCloneDir, ".git"))
 	}
 	d := &Daemon{
 		logger:   log.New(&logs, "", 0),
@@ -262,9 +285,15 @@ func TestHMSkewUnreadableIsALogLine(t *testing.T) {
 			a.probeErr = true
 			return a
 		}},
-		{"a missing clone", func() hmSkewAnswers {
+		{"a clone that cannot be made on first use", func() hmSkewAnswers {
 			a := hmSkewBehindAnswers()
 			a.noClone = true
+			a.cloneErr = true
+			return a
+		}},
+		{"a fetch of origin's main that fails", func() hmSkewAnswers {
+			a := hmSkewBehindAnswers()
+			a.fetchErr = true
 			return a
 		}},
 		{"a clone whose diff fails and that has the installed commit", func() hmSkewAnswers {
@@ -290,6 +319,40 @@ func TestHMSkewUnreadableIsALogLine(t *testing.T) {
 				t.Errorf("clears = %+v, want none for a reading that could not be taken", clears)
 			}
 		})
+	}
+}
+
+// TestHMSkewClonesTheCloneWhenItIsAbsent: with no clone yet, the monitor clones
+// the hm origin itself and judges the skew from it, so a fresh town alarms with
+// no producer in front of the check.
+func TestHMSkewClonesTheCloneWhenItIsAbsent(t *testing.T) {
+	t.Parallel()
+	a := hmSkewBehindAnswers()
+	a.noClone = true
+	d, rec, _ := hmSkewDaemon(t, a)
+
+	d.hmSkewOnce()
+
+	if esc := rec.Escalations(); len(esc) != 1 {
+		t.Fatalf("escalations = %+v, want one from a skew judged on the clone the monitor made", esc)
+	}
+}
+
+// TestHMSkewFailedCloneLeavesNoPartialDirectory: a clone that fails leaves no
+// directory behind, so the next reading clones again rather than failing on a
+// partial clone for good.
+func TestHMSkewFailedCloneLeavesNoPartialDirectory(t *testing.T) {
+	t.Parallel()
+	a := hmSkewBehindAnswers()
+	a.noClone = true
+	a.cloneErr = true
+	d, _, _ := hmSkewDaemon(t, a)
+
+	d.hmSkewOnce()
+
+	clone := filepath.Join(d.config.TownRoot, hmSkewCloneDir)
+	if _, err := os.Stat(clone); !os.IsNotExist(err) {
+		t.Errorf("stat %s = %v, want the partial clone removed", clone, err)
 	}
 }
 
@@ -405,7 +468,7 @@ func TestHMSkewRefusesRevisionsThatAreNotCommitIDs(t *testing.T) {
 	d, _, _ := hmSkewDaemon(t, hmSkewBehindAnswers())
 
 	for _, bad := range []string{"--output=/x", "1111111;rm"} {
-		if _, err := d.hmSkewBehind(d.config.TownRoot, bad, hmSkewTestRemote); err == nil {
+		if _, err := d.hmSkewBehind(d.config.TownRoot, hmSkewTestURL, bad, hmSkewTestRemote); err == nil {
 			t.Errorf("hmSkewBehind(%q, ...) = nil error, want a refusal before git runs", bad)
 		}
 	}

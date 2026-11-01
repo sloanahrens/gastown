@@ -2,12 +2,15 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // The hm-skew check compares the installed hm with the hm rig's origin/main at
@@ -36,8 +39,13 @@ const (
 	// daemon reads hm's origin url from (never a fetch, as om_skew).
 	hmSkewRigWorktree = "hm/mayor/rig"
 	// hmSkewCloneDir is the job-owned clone the diff runs in, relative to the
-	// town. It is never the rig worktree.
+	// town. The monitor clones it from the rig's origin on first use and fetches
+	// origin's main into it before each diff. It is never the rig worktree.
 	hmSkewCloneDir = ".runtime/hm-src"
+	// hmSkewCloneTimeout bounds the first clone; hmSkewFetchTimeout bounds one
+	// fetch of origin's main into the clone.
+	hmSkewCloneTimeout = 5 * time.Minute
+	hmSkewFetchTimeout = 2 * time.Minute
 )
 
 // hmSkewMonitor is the check's state: the start guard, the test seam for the
@@ -96,7 +104,9 @@ func (d *Daemon) hmSkewOnce() {
 }
 
 // hmSkewReading is one comparison: whether the installed hm is behind origin's
-// main, or the error that stopped the reading being taken.
+// main, or the error that stopped the reading being taken. A clone that cannot
+// be brought up to origin's main stops the reading the same way, so a stale
+// clone is never judged and never clears an alert.
 type hmSkewReading struct {
 	installed string
 	remote    string
@@ -115,7 +125,7 @@ func (d *Daemon) hmSkewRead(townRoot string) hmSkewReading {
 	if err != nil {
 		return hmSkewReading{err: fmt.Errorf("the installed hm: %w", err)}
 	}
-	remote, err := d.hmSkewRemoteSHA(townRoot)
+	url, remote, err := d.hmSkewRemote(townRoot)
 	if err != nil {
 		return hmSkewReading{err: fmt.Errorf("the hm rig's origin/main: %w", err)}
 	}
@@ -123,7 +133,7 @@ func (d *Daemon) hmSkewRead(townRoot string) hmSkewReading {
 	if hmSameCommit(installed, remote) {
 		return r
 	}
-	behind, err := d.hmSkewBehind(townRoot, installed, remote)
+	behind, err := d.hmSkewBehind(townRoot, url, installed, remote)
 	if err != nil {
 		return hmSkewReading{installed: installed, remote: remote, err: err}
 	}
@@ -138,18 +148,21 @@ func hmSameCommit(installed, remote string) bool {
 }
 
 // hmSkewBehind reports whether the installed hm is behind origin's main in a way
-// that can change the binary. The clone answers two questions: whether it has
-// the installed commit at all (a commit it lacks is not main's history, so a
-// skew), and which files differ between the two (a diff over markdown and docs
-// alone is not one). A clone that cannot answer is an error, not a skew.
-func (d *Daemon) hmSkewBehind(townRoot, installed, remote string) (bool, error) {
-	src, err := hmSkewCloneDirOf(townRoot)
-	if err != nil {
-		return false, err
-	}
+// that can change the binary. The clone is first brought up to origin's main, so
+// both answers come from the current history. The clone answers two questions:
+// whether it has the installed commit at all (a commit it lacks is not main's
+// history, so a skew), and which files differ between the two (a diff over
+// markdown and docs alone is not one). A clone that cannot be brought up to
+// main, or cannot answer, is an error, not a skew: a stale clone could name the
+// wrong files.
+func (d *Daemon) hmSkewBehind(townRoot, url, installed, remote string) (bool, error) {
 	// Both revisions reach git's argv, so each is held to a commit id before
 	// the call (the omSkewCommitRevs guard, gt-8n9hj).
 	if err := omSkewCommitRevs(installed, remote); err != nil {
+		return false, err
+	}
+	src, err := d.hmSkewRefreshClone(townRoot, url)
+	if err != nil {
 		return false, err
 	}
 	// The probe runs before the diff: a commit the clone lacks is a skew by
@@ -195,14 +208,65 @@ func hmSkewBinaryPath(p string) bool {
 	return !strings.HasSuffix(p, ".md") && !strings.HasPrefix(p, "docs/")
 }
 
-// hmSkewCloneDirOf is the job-owned clone the diff runs in. It is checked for
-// existence so a missing clone is named as such rather than as a git failure.
-func hmSkewCloneDirOf(townRoot string) (string, error) {
+// hmSkewRefreshClone makes the job-owned clone current with origin's main. The
+// clone is cloned from the rig's origin url on first use, and origin's main is
+// fetched into it on every call, so a skew is judged against the tip the
+// reading names rather than against whatever the clone last saw. The fetch is
+// by url, so the clone follows the url the rig reports now. The rig worktree is
+// only read for that url, never written.
+func (d *Daemon) hmSkewRefreshClone(townRoot, url string) (string, error) {
 	src := filepath.Join(townRoot, filepath.FromSlash(hmSkewCloneDir))
-	if _, err := os.Stat(src); err != nil {
-		return "", fmt.Errorf("the hm clone: %w", err)
+	_, err := os.Stat(filepath.Join(src, ".git"))
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		if err := d.hmSkewClone(src, url); err != nil {
+			return "", err
+		}
+	case err != nil:
+		return "", fmt.Errorf("the hm clone at %s: %w", src, err)
+	}
+	// The refspec moves the remote-tracking ref to main, so the commits of earlier
+	// fetches stay reachable and an installed commit on main's history is found.
+	if err := d.hmSkewGit(hmSkewFetchTimeout, "fetching origin's main into the hm clone",
+		"-C", src, "fetch", "--quiet", "--no-tags", "--", url,
+		"+"+omSkewRemoteRef+":refs/remotes/origin/main"); err != nil {
+		return "", err
 	}
 	return src, nil
+}
+
+// hmSkewClone clones the hm origin into src without a worktree: the check reads
+// commits and paths, never files. A clone that fails is removed, so a partial
+// directory does not read as a clone on the next reading and fail there for
+// good; the next reading clones again.
+func (d *Daemon) hmSkewClone(src, url string) error {
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		return fmt.Errorf("cannot create %s: %w", filepath.Dir(src), err)
+	}
+	err := d.hmSkewGit(hmSkewCloneTimeout, "cloning the hm origin into the hm clone",
+		"clone", "--quiet", "--no-checkout", "--", url, src)
+	if err == nil {
+		return nil
+	}
+	if rmErr := os.RemoveAll(src); rmErr != nil {
+		return fmt.Errorf("%w; and removing the partial clone at %s failed: %w", err, src, rmErr)
+	}
+	return err
+}
+
+// hmSkewGit runs one git call for the hm clone, bounded by timeout. A failure is
+// named by what the call was for, never by its argv or its output: the url can
+// carry a credential, and captured output is not put in an error (rule 11).
+func (d *Daemon) hmSkewGit(timeout time.Duration, what string, args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	// A background call must never sit on a credential prompt (omSkewGitRun).
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if _, err := d.combinedOutput(cmd); err != nil {
+		return fmt.Errorf("%s: %w", what, err)
+	}
+	return nil
 }
 
 // hmSkewJudge applies one reading to the alert state. A skewed reading escalates
@@ -313,26 +377,26 @@ func parseHMVersion(out string) (string, error) {
 	return "", fmt.Errorf("no \"hm <sha>\" line in the output of hm version")
 }
 
-// hmSkewRemoteSHA reads the hm rig's origin/main tip: the url from the rig's own
-// origin remote, the tip from an ls-remote against that url. The read is never a
-// fetch, so the rig's refs do not move.
-func (d *Daemon) hmSkewRemoteSHA(townRoot string) (string, error) {
+// hmSkewRemote reads the hm rig's origin url and origin/main's tip: the url from
+// the rig's own origin remote, the tip from an ls-remote against that url. The
+// read is never a fetch, so the rig's refs do not move.
+func (d *Daemon) hmSkewRemote(townRoot string) (url, sha string, err error) {
 	rigPath := filepath.Join(townRoot, filepath.FromSlash(hmSkewRigWorktree))
-	url, err := d.omSkewGit("-C", rigPath, "remote", "get-url", "origin")
+	url, err = d.omSkewGit("-C", rigPath, "remote", "get-url", "origin")
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if url == "" {
-		return "", fmt.Errorf("git -C %s remote get-url origin: no url", rigPath)
+		return "", "", fmt.Errorf("git -C %s remote get-url origin: no url", rigPath)
 	}
 	// The "--" keeps a url that begins with "-" from being read as an option.
 	out, err := d.omSkewGit("ls-remote", "--", url, omSkewRemoteRef)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	sha := parseLSRemoteMain(out)
+	sha = parseLSRemoteMain(out)
 	if sha == "" {
-		return "", fmt.Errorf("git ls-remote %s %s: no tip", url, omSkewRemoteRef)
+		return "", "", fmt.Errorf("git ls-remote %s %s: no tip", url, omSkewRemoteRef)
 	}
-	return sha, nil
+	return url, sha, nil
 }
