@@ -68,14 +68,20 @@ func TestPolecatNamesAreShortUnlessTwoRigsShareOne(t *testing.T) {
 		t.Errorf("a polecat's cell does not carry the full rig/name: %s", want)
 	}
 
+	// The Landings table draws its By cell — for a landing's holder and for a
+	// queued bead's — through holderCell, which shows the short name and keeps
+	// the rig on the cell.
 	landing := pageFunc(t, "landingTable")
+	if want := "const rig = r.rig || names.rigOf(who);"; !strings.Contains(landing, want) {
+		t.Errorf("the landings table has no %q", want)
+	}
+	by := pageFunc(t, "holderCell")
 	for _, want := range []string{
-		"const rig = r.rig || names.rigOf(who);",
 		"by.textContent = names.label(rig, who);",
 		"by.title = rig ? rig + \"/\" + who : who;",
 	} {
-		if !strings.Contains(landing, want) {
-			t.Errorf("the landings table has no %q", want)
+		if !strings.Contains(by, want) {
+			t.Errorf("the landings table's By cell has no %q", want)
 		}
 	}
 }
