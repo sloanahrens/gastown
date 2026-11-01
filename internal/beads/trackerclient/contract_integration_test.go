@@ -56,16 +56,24 @@ func newTracker(t *testing.T, actor string, scope api.Scope) *trackerclient.Clie
 
 // newTrackerRoles returns the roles one contract case acts through, all on one
 // tracker: the seat the suite runs as, the admin-scope daemon, and a seat for
-// each actor named as a holder. The tracker refuses a seat a reassignment of a
-// held issue and a delete (gt-26dvk), so those rows act through the role the
+// each actor named as a holder. The tracker does not let a seat reassign a held
+// issue or delete one (gt-26dvk), so those rows act through the role the
 // tracker grants them.
 func newTrackerRoles(t *testing.T) beadsfake.Roles {
 	t.Helper()
 	mint := newTrackerServer(t)
+	holders := map[string]beads.Client{}
 	return beadsfake.Roles{
-		Seat:   mint("town/crew/dipper", api.ScopeSeat),
-		Admin:  mint("town/daemon", api.ScopeAdmin),
-		Holder: func(actor string) beads.Client { return mint(actor, api.ScopeSeat) },
+		Seat:  mint("town/crew/dipper", api.ScopeSeat),
+		Admin: mint("town/daemon", api.ScopeAdmin),
+		Holder: func(actor string) beads.Client {
+			if c, ok := holders[actor]; ok {
+				return c
+			}
+			c := mint(actor, api.ScopeSeat)
+			holders[actor] = c
+			return c
+		},
 	}
 }
 
@@ -115,6 +123,16 @@ func TestIntegrationASeatCannotDeleteIssues(t *testing.T) {
 	}
 	if _, err := roles.Admin.Show(is.ID); err != nil {
 		t.Errorf("the issue a seat tried to delete is gone: %v", err)
+	}
+}
+
+// A holder is one seat per actor, so a case that acts through it again reuses
+// the client it already has rather than minting a token each call.
+func TestIntegrationHolderReusesTheClientForAnActor(t *testing.T) {
+	roles := newTrackerRoles(t)
+	alice := "town/polecats/alice"
+	if first, again := roles.Holder(alice), roles.Holder(alice); first != again {
+		t.Errorf("Holder(alice) returned a new client on the second call; want the one it already minted")
 	}
 }
 
