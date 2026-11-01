@@ -71,14 +71,20 @@ func TestKVGetOfAnUnsetKeyThatExitsOneIsNotFound(t *testing.T) {
 	}
 }
 
-// A failing exit with no answer behind it stays the run error: nothing, garbage
-// and a found=true payload are none of them an absence.
+// A failing exit with no found=false answer behind it stays the run error:
+// nothing, garbage, found=true and any JSON that is not an explicit found=false
+// are none of them an absence.
 func TestKVGetFailureWithoutAFoundFalseAnswerIsNotNotFound(t *testing.T) {
 	t.Parallel()
 	for name, stdout := range map[string]string{
-		"nothing":            "",
-		"garbage":            "panic: nil pointer dereference",
-		"found under a fail": `{"found":true,"key":"custom.probe","value":"x","schema_version":1}`,
+		"nothing":             "",
+		"garbage":             "panic: nil pointer dereference",
+		"found under a fail":  `{"found":true,"key":"custom.probe","value":"x","schema_version":1}`,
+		"empty object":        `{}`,
+		"error object":        `{"error":"store unavailable"}`,
+		"null":                `null`,
+		"envelope, no found":  `{"schema_version":1,"contract_version":1,"data":{"key":"custom.probe"},"pagination":null,"error":null}`,
+		"envelope, null data": `{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":null}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
