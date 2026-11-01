@@ -31,6 +31,11 @@ func newSecret(value []byte) Secret {
 	return Secret{v: &secretValue{value: append([]byte(nil), value...)}}
 }
 
+// NewSecret copies value into a Secret. A Store implementation outside this
+// package returns its reads through it; the copy means a caller that reuses its
+// buffer cannot rewrite what the Secret holds.
+func NewSecret(value []byte) Secret { return newSecret(value) }
+
 // wipe zeroes the value every copy of s shares and drops it, so a Secret that
 // was read before its revision was destroyed holds nothing afterwards.
 func (s Secret) wipe() {
