@@ -75,7 +75,7 @@ func TestQueuedLandingRowAgesTheWaitFromTheBeadsLastUpdate(t *testing.T) {
 	if want := `const m = /^([^/]+)\/polecats\/([^/]+)$/.exec(b.assignee || "");`; !strings.Contains(holder, want) {
 		t.Errorf("queueHolder has no %q", want)
 	}
-	if want := `by.textContent = names.label(h.rig, h.name);`; !strings.Contains(tbl, want) {
+	if want := `const by = el("span", "by", names.label(h.rig, h.name));`; !strings.Contains(tbl, want) {
 		t.Errorf("a queued row's holder is not named through the shared helper: %s", want)
 	}
 }
@@ -98,21 +98,42 @@ func TestAQueuedRowNamesACrewAssigneeByBareName(t *testing.T) {
 		}},
 	})
 
-	// #trend holds the landings wrap alone with nothing landed in the window:
-	// its caption, then the table, whose first row is the header.
+	// A waiting row's title cell spans the cost cells and the By column
+	// (gt-uvpo1), so the holder is the .by span that cell draws. The table is
+	// found by its class: the caption above it is not part of the row count.
+	var rows []struct {
+		Main  string `json:"main"`
+		By    string `json:"by"`
+		Title string `json:"title"`
+	}
+	got, err := dom.vm.RunString(`JSON.stringify((function () {
+  var tbl = __find(document.getElementById("trend"), ".ltable");
+  return tbl.children.slice(1).map(function (tr) {
+    var main = tr.children[1], by = __find(main, ".by");
+    return {main: main.textContent, by: by ? by.textContent : "", title: by ? by.title : ""};
+  });
+})())`)
+	if err != nil {
+		t.Fatalf("reading the queued rows: %v", err)
+	}
+	if err := json.Unmarshal([]byte(got.String()), &rows); err != nil {
+		t.Fatalf("reading the queued rows: %v", err)
+	}
+
 	for i, want := range []struct{ bead, by, title string }{
 		{"gt-crew", "heron", "heron"},
 		{"gt-rig", "jay", "jay"},
 		{"gt-polecat", "dag", "gastown/dag"},
 		{"gt-other", "sloan", "sloan"},
 	} {
-		row := i + 1
-		if main := dom.descend(t, "trend", 0, 1, 0, row, 1).Text; !strings.Contains(main, want.bead) {
-			t.Fatalf("row %d is the bead %q, want %s", row, main, want.bead)
+		if i >= len(rows) {
+			t.Fatalf("the table drew %d waiting rows, want one per queued bead", len(rows))
 		}
-		by := dom.descend(t, "trend", 0, 1, 0, row, 2)
-		if by.Text != want.by || by.Title != want.title {
-			t.Errorf("%s reads %q (%q) in the By column, want %q (%q)", want.bead, by.Text, by.Title, want.by, want.title)
+		if !strings.Contains(rows[i].Main, want.bead) {
+			t.Fatalf("row %d is the bead %q, want %s", i+1, rows[i].Main, want.bead)
+		}
+		if rows[i].By != want.by || rows[i].Title != want.title {
+			t.Errorf("%s reads %q (%q) as its holder, want %q (%q)", want.bead, rows[i].By, rows[i].Title, want.by, want.title)
 		}
 	}
 }

@@ -199,6 +199,9 @@ section>h2 .foldsum{margin-left:auto;text-transform:none;letter-spacing:0;white-
 /* The When cell is one reading, never a sentence split over two lines: "merging
    47s" reads as one value (gt-u7xe9). */
 .ltable td.when{white-space:nowrap}
+/* A waiting row's title cell spans the cost cells and By, so the holder the row
+   carries rides on its first line, in the dim the By column wears (gt-uvpo1). */
+.ltable td.main .by{color:var(--dim)}
 .lrows{max-height:70vh;overflow-y:auto}
 .lrows th{position:sticky;top:0;background:var(--panel)}
 .costchip{border:1px solid currentColor;border-radius:999px;padding:0 7px;font-size:11px;white-space:nowrap;color:var(--dim)}
@@ -1594,30 +1597,38 @@ function landingTable(s, names, rows, waiting) {
   const thr = s.om && s.om.threshold != null ? s.om.threshold : null;
   const tbl = el("table", "ltable");
   const hr = el("tr");
-  [["When"], ["Landing"], ["By", "who built it: the polecat, or the crew member whose branch it was"], ["Polecat", "the time the bead's polecat seats spent hooked on it, read from the spans log; hover for each attempt, + marks a reading that may understate the time, and ≤ one read from the bead's dispatch, which may overstate it", 1], ["Score", "om's score", 1], ["Gate", "wall time of the gate stage", 1], ["om", "wall time of the om review", 1], ["Ship", "total ship time in minutes: dispatched to deployed, which is the staging deploy for an app rig and the daemon restart for gastown", 1]].forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); });
+  const cols = [["When"], ["Landing"], ["By", "who built it: the polecat, or the crew member whose branch it was"], ["Polecat", "the time the bead's polecat seats spent hooked on it, read from the spans log; hover for each attempt, + marks a reading that may understate the time, and ≤ one read from the bead's dispatch, which may overstate it", 1], ["Score", "om's score", 1], ["Gate", "wall time of the gate stage", 1], ["om", "wall time of the om review", 1], ["Ship", "total ship time in minutes: dispatched to deployed, which is the staging deploy for an app rig and the daemon restart for gastown", 1]];
+  cols.forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); });
   tbl.append(hr);
   const today = new Date().toDateString();
-  // No stage has run yet, so the cost columns are dashes and the wait is
-  // aged from the bead's last update — the label write gt done makes is
-  // normally its last write. The worker's order is not known to this page, so a
-  // row says waiting and nothing about position.
+  // No stage has run yet, so the five cost columns hold nothing a reader can
+  // use: a waiting row drops them rather than filling them with dashes, and its
+  // title cell spans the columns they and By would have taken, so the title
+  // reads in a line or two instead of wrapping down the Landing column. The
+  // holder then rides on the row's first line, which keeps the By reading the
+  // table draws for every other row (gt-uvpo1). The wait is aged from the bead's
+  // last update — the label write gt done makes is normally its last write. The
+  // worker's order is not known to this page, so a row says waiting and nothing
+  // about position.
   for (const b of shown) {
     const tr = el("tr");
     const when = el("td", "when title", b.updated_at ? "waiting " + age(b.updated_at) : "waiting");
     when.title = "waiting since the bead's last update, which gt done moves";
     tr.append(when);
     const main = el("td", "main");
+    main.colSpan = cols.length - 1;
     main.append(el("span", "bead", b.id));
     const tag = el("span", "tag", "queued");
     tag.title = "submitted; the landing worker has not taken it yet";
     main.append(document.createTextNode(" "), tag);
+    const h = queueHolder(b);
+    if (h.name) {
+      const by = el("span", "by", names.label(h.rig, h.name));
+      by.title = h.rig ? h.rig + "/" + h.name : h.name;
+      main.append(document.createTextNode(" · by "), by);
+    }
     if (b.title) main.append(document.createElement("br"), el("span", "title", (b.rig ? b.rig + " · " : "") + b.title));
     tr.append(main);
-    const h = queueHolder(b);
-    const by = el("td", "title");
-    if (h.name) { by.textContent = names.label(h.rig, h.name); by.title = h.rig ? h.rig + "/" + h.name : h.name; }
-    else by.textContent = "–";
-    tr.append(by, el("td", "n", "–"), el("td", "n", "–"), el("td", "n", "–"), el("td", "n", "–"), el("td", "n", "–"));
     tr.title = "submitted and waiting for the landing worker to take it";
     tbl.append(tr);
   }
