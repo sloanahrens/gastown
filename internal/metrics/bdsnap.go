@@ -34,6 +34,12 @@ import (
 // Dependency chain depth would need the edge list, which `bd list` does not
 // give; the line carries the per-bead dependency_count histogram and nothing
 // about depth.
+//
+// The age and shaped blocks also carry a work-only twin over the beads that
+// are not identity beads (type rig, or label gt:agent or handoff). Those stay
+// open for the life of the town, so a raw block can name one as the oldest
+// open bead or count it as unshaped; the twin is what says whether any work is
+// stuck (gt-9iel9).
 
 // bdDailyCallTimeout bounds one rig's bd listing: the town's largest rig lists
 // in a few seconds, and the loader retries once, so a store hung on a dead Dolt
@@ -53,23 +59,27 @@ func BdDailyLockPath(town string) string {
 // BdDailyLine is one rig's tracker state on Date, the local day that ended at
 // the run's midnight; CreatedToday and ClosedToday count that day.
 type BdDailyLine struct {
-	Date            string         `json:"date"`
-	Rig             string         `json:"rig"`
-	Total           int            `json:"total"`
-	ByStatus        map[string]int `json:"by_status"`
-	ByPriority      map[string]int `json:"by_priority"`
-	ByType          map[string]int `json:"by_type"`
-	ByLabel         map[string]int `json:"by_label"`
-	DependencyCount map[string]int `json:"dependency_count"`
-	OpenAgeDays     BdDailyAges    `json:"open_age_days"`
-	CreatedToday    int            `json:"created_today"`
-	ClosedToday     int            `json:"closed_today"`
-	ShapedOpen      int            `json:"shaped_open"`
-	UnshapedOpen    int            `json:"unshaped_open"`
+	Date             string         `json:"date"`
+	Rig              string         `json:"rig"`
+	Total            int            `json:"total"`
+	ByStatus         map[string]int `json:"by_status"`
+	ByPriority       map[string]int `json:"by_priority"`
+	ByType           map[string]int `json:"by_type"`
+	ByLabel          map[string]int `json:"by_label"`
+	DependencyCount  map[string]int `json:"dependency_count"`
+	OpenAgeDays      BdDailyAges    `json:"open_age_days"`
+	OpenAgeDaysWork  BdDailyAges    `json:"open_age_days_work"`
+	CreatedToday     int            `json:"created_today"`
+	ClosedToday      int            `json:"closed_today"`
+	ShapedOpen       int            `json:"shaped_open"`
+	UnshapedOpen     int            `json:"unshaped_open"`
+	ShapedOpenWork   int            `json:"shaped_open_work"`
+	UnshapedOpenWork int            `json:"unshaped_open_work"`
 }
 
-// BdDailyAges is the age in days of the rig's open beads. A rig with no open
-// bead carries null percentiles and no oldest_id, never zeros.
+// BdDailyAges is the age in days of a set of open beads: the rig's beads in
+// open_age_days, its work beads in open_age_days_work. A set with no bead
+// carries null percentiles and no oldest_id, never zeros.
 type BdDailyAges struct {
 	P50      *float64 `json:"p50"`
 	P90      *float64 `json:"p90"`
@@ -282,10 +292,11 @@ func bdDailyRun(ctx context.Context, runDir RunnerDir) BdRun {
 }
 
 // bdDailyAggregate counts one rig's listing as the line for now's day. Only
-// status "open" is open work: a bead that is in_progress, hooked, blocked or
-// deferred is not counted in the ages or the shaped totals. A label used on
-// fewer than 3 of the rig's beads is summed into "other", so the labels that
-// name one bead do not each cost a key.
+// status "open" is open: a bead that is in_progress, hooked, blocked or
+// deferred is not counted in the ages or the shaped totals. The work-only
+// twin blocks take the same open beads minus the identity beads
+// bdDailyWorkBead rejects. A label used on fewer than 3 of the rig's beads is
+// summed into "other", so the labels that name one bead do not each cost a key.
 func bdDailyAggregate(rig string, rows []BeadRow, now time.Time) (BdDailyLine, error) {
 	day := bdDailyDay(now)
 	line := BdDailyLine{
@@ -299,11 +310,7 @@ func bdDailyAggregate(rig string, rows []BeadRow, now time.Time) (BdDailyLine, e
 		DependencyCount: map[string]int{"0": 0, "1": 0, "2": 0, "3-5": 0, "6+": 0},
 	}
 	labelUses := map[string]int{}
-	type beadAge struct {
-		days float64
-		id   string
-	}
-	var open []beadAge
+	var open, openWork []bdDailyBeadAge
 	for _, b := range rows {
 		status := b.Status
 		if status == "" {
@@ -352,7 +359,8 @@ func bdDailyAggregate(rig string, rows []BeadRow, now time.Time) (BdDailyLine, e
 		if status != "open" {
 			continue
 		}
-		if b.Shaped {
+		shaped := b.Shaped
+		if shaped {
 			line.ShapedOpen++
 		} else {
 			line.UnshapedOpen++
@@ -362,7 +370,17 @@ func bdDailyAggregate(rig string, rows []BeadRow, now time.Time) (BdDailyLine, e
 			// A bead stamped later than the clock is 0 days old, not negative.
 			days = 0
 		}
-		open = append(open, beadAge{days: days, id: b.ID})
+		age := bdDailyBeadAge{days: days, id: b.ID}
+		open = append(open, age)
+		if !bdDailyWorkBead(b) {
+			continue
+		}
+		if shaped {
+			line.ShapedOpenWork++
+		} else {
+			line.UnshapedOpenWork++
+		}
+		openWork = append(openWork, age)
 	}
 
 	other := 0
@@ -377,8 +395,37 @@ func bdDailyAggregate(rig string, rows []BeadRow, now time.Time) (BdDailyLine, e
 		line.ByLabel["other"] += other
 	}
 
+	line.OpenAgeDays = bdDailyAgesOf(open)
+	line.OpenAgeDaysWork = bdDailyAgesOf(openWork)
+	return line, nil
+}
+
+// bdDailyBeadAge is one open bead's age, which the age blocks are read from.
+type bdDailyBeadAge struct {
+	days float64
+	id   string
+}
+
+// bdDailyWorkBead reports whether a bead is work. The beads whose type is rig
+// or whose labels hold gt:agent or handoff are identity beads: they stay open
+// for the life of the town, so counting them says nothing about stuck work.
+func bdDailyWorkBead(b BeadRow) bool {
+	if b.Type == "rig" {
+		return false
+	}
+	for _, label := range b.Labels {
+		if label == "gt:agent" || label == "handoff" {
+			return false
+		}
+	}
+	return true
+}
+
+// bdDailyAgesOf is the age block of the given open beads, or the null block of
+// a set that holds none.
+func bdDailyAgesOf(open []bdDailyBeadAge) BdDailyAges {
 	if len(open) == 0 {
-		return line, nil
+		return BdDailyAges{}
 	}
 	// Equal ages are ordered by id so the oldest_id is the same on every run.
 	sort.Slice(open, func(i, j int) bool {
@@ -394,8 +441,7 @@ func bdDailyAggregate(rig string, rows []BeadRow, now time.Time) (BdDailyLine, e
 	p50 := bdDailyRound(bdDailyPercentile(ages, 50))
 	p90 := bdDailyRound(bdDailyPercentile(ages, 90))
 	max := bdDailyRound(ages[len(ages)-1])
-	line.OpenAgeDays = BdDailyAges{P50: &p50, P90: &p90, Max: &max, OldestID: open[len(open)-1].id}
-	return line, nil
+	return BdDailyAges{P50: &p50, P90: &p90, Max: &max, OldestID: open[len(open)-1].id}
 }
 
 // bdDailyPercentile is the nearest-rank percentile of ascending values: the
