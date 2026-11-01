@@ -497,8 +497,8 @@ func TestTheEventsTimeCellNeverWraps(t *testing.T) {
 	if !slices.Contains(strings.Fields(row), "evrow") {
 		t.Fatalf("the alert drew in a row classed %q, want an .evrow", row)
 	}
-	if stamp != "t" {
-		t.Fatalf("the row drew its stamp in a cell classed %q, want .t, the cell the no-wrap rule styles", stamp)
+	if !slices.Contains(strings.Fields(stamp), "t") {
+		t.Fatalf("the row drew its stamp in a cell classed %q, want .t among its classes, the cell the no-wrap rule styles", stamp)
 	}
 
 	// The grid's first track holds the stamp, so it takes the stamp's width.
@@ -506,9 +506,51 @@ func TestTheEventsTimeCellNeverWraps(t *testing.T) {
 	if first, _, _ := strings.Cut(grid, " "); first != "max-content" {
 		t.Errorf("the .evrow rule sizes its stamp column %q, want the first track max-content so the column is as wide as the stamp", grid)
 	}
-	if got := declOf(t, topRule(t, ".evrow .t"), "white-space"); got != "nowrap" {
-		t.Errorf("the .evrow .t rule has white-space %q, want nowrap so the stamp stays on one line", got)
+	if got := stampCellDecls(t)["white-space"]; got != "nowrap" {
+		t.Errorf("the rules that style the stamp cell set white-space %q, want nowrap so the stamp stays on one line", got)
 	}
+}
+
+// stampCellDecls returns the declarations the top-level rules set on an EVENTS
+// row's stamp cell, keyed by property, later rules last. A rule applies to the
+// cell when its subject names .t and its ancestor, if it has one, names .evrow,
+// so the check reads the rules the page applies to the drawn cell and not only
+// the one spelled .evrow .t.
+func stampCellDecls(t *testing.T) map[string]string {
+	t.Helper()
+
+	decls := map[string]string{}
+	for _, rule := range strings.Split(withoutMediaBlocks(pageStyle(t)), "}") {
+		sel, body, ok := strings.Cut(rule, "{")
+		if !ok || !slices.ContainsFunc(strings.Split(sel, ","), appliesToStampCell) {
+			continue
+		}
+		for _, decl := range strings.Split(body, ";") {
+			if prop, val, ok := strings.Cut(decl, ":"); ok {
+				decls[strings.TrimSpace(prop)] = strings.TrimSpace(val)
+			}
+		}
+	}
+	return decls
+}
+
+// appliesToStampCell reports whether one selector reaches the stamp cell: its
+// last compound names .t, and either it has no ancestor or an ancestor names
+// .evrow.
+func appliesToStampCell(one string) bool {
+	fields := strings.Fields(one)
+	if len(fields) == 0 || !selectsClass(fields[len(fields)-1], "t") {
+		return false
+	}
+	if len(fields) == 1 {
+		return true
+	}
+	for _, anc := range fields[:len(fields)-1] {
+		if selectsClass(anc, "evrow") {
+			return true
+		}
+	}
+	return false
 }
 
 // drawnStampCell is the first row the EVENTS feed drew and the class of the cell
