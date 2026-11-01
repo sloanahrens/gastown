@@ -8,7 +8,9 @@ import (
 
 // DefaultSeedImages are the images the packages' tests start in the sidecar's
 // engine: the Dolt server the Dolt-backed tests run (internal/testutil's
-// DoltDockerImage; a test keeps the two equal).
+// DoltDockerImage; a test keeps the two equal). They are pulled by the tag the
+// tests name, since the tests start that tag; the sidecar engine itself is
+// pinned by digest (SweepDindImage).
 var DefaultSeedImages = []string{"dolthub/dolt-sql-server:2.0.7"}
 
 const (

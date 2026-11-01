@@ -599,9 +599,9 @@ func TestDockerRunCopiesTheSeedBeforeTheSidecarStarts(t *testing.T) {
 	copyAt, sidecarAt := -1, -1
 	for i, step := range plan.Steps {
 		joined := strings.Join(step.Argv, " ")
-		if strings.Contains(joined, "--entrypoint cp") {
+		if strings.Contains(joined, "--entrypoint sh") && strings.Contains(joined, SeedVolume) {
 			copyAt = i
-			for _, want := range []string{"--network none", "--volume " + SeedVolume + ":/seed:ro", "-a /seed/. /var/lib/docker/"} {
+			for _, want := range []string{"--network none", "--volume " + SeedVolume + ":/seed:ro", "cp -a /seed/. /var/lib/docker/", "is empty: run sweep-seed"} {
 				if !strings.Contains(joined, want) {
 					t.Errorf("copy step %q lacks %q", joined, want)
 				}
@@ -668,5 +668,28 @@ func TestRenderSeedRefusesWhatDockerWouldMisread(t *testing.T) {
 				t.Error("RenderSeed accepted it")
 			}
 		})
+	}
+}
+
+// The runner turns the testcontainers reaper off: the reaper is an image the
+// sidecar's engine cannot pull, and the sidecar's teardown removes what the tests
+// started. Without it the Dolt-backed packages fail on the reaper's image.
+func TestDockerRunnerDisablesTheTestcontainersReaper(t *testing.T) {
+	t.Parallel()
+	argv := runnerArgv(goldenSpec())
+	if !slices.Contains(argv, "TESTCONTAINERS_RYUK_DISABLED=true") {
+		t.Errorf("runner argv %q does not disable the reaper", argv)
+	}
+}
+
+// Every container name a run makes starts with ContainerPrefix, which sweep-seed
+// uses to see a running sweep.
+func TestRunContainerNamesStartWithThePrefix(t *testing.T) {
+	t.Parallel()
+	spec := goldenSpec()
+	for _, name := range []string{runnerName(spec), dindName(spec)} {
+		if !strings.HasPrefix(name, ContainerPrefix) {
+			t.Errorf("container name %q does not start with %q", name, ContainerPrefix)
+		}
 	}
 }

@@ -20,10 +20,16 @@ func TestMain(m *testing.M) { os.Exit(unittier.Main(m)) }
 type recorder struct {
 	argvs  [][]string
 	failOn string
+	// running is what the docker ps of the sweep containers prints.
+	running string
 }
 
-func (r *recorder) run(argv []string, _, _ io.Writer) error {
+func (r *recorder) run(argv []string, stdout, _ io.Writer) error {
 	r.argvs = append(r.argvs, slices.Clone(argv))
+	if slices.Contains(argv, "ps") {
+		io.WriteString(stdout, r.running)
+		return nil
+	}
 	if r.failOn != "" && strings.Contains(strings.Join(argv, " "), r.failOn) {
 		return errors.New("boom")
 	}
@@ -115,5 +121,48 @@ func TestRunRefusesWhatItCannotUse(t *testing.T) {
 				t.Errorf("ran %q", joined(r.argvs))
 			}
 		})
+	}
+}
+
+// A sweep container running on the context stops the seed before it writes
+// anything: the runs read the seed, and a write under a running copy tears it.
+func TestRunRefusesWhileASweepIsRunning(t *testing.T) {
+	t.Parallel()
+	r := &recorder{running: "gt-sweep-dind-gastown-1234abcd-r1\n"}
+	var stdout, stderr bytes.Buffer
+
+	code := Run([]string{"--context", "c"}, &stdout, &stderr, r.run)
+
+	if code != 1 {
+		t.Errorf("exit %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "gt-sweep-dind-gastown-1234abcd-r1") {
+		t.Errorf("stderr %q does not name the running container", stderr.String())
+	}
+	for _, s := range joined(r.argvs) {
+		if strings.Contains(s, "volume create") || strings.Contains(s, " run ") {
+			t.Errorf("a seed step ran while a sweep was running: %q", s)
+		}
+	}
+}
+
+// A docker ps that fails is not read as "nothing running".
+func TestRunRefusesWhenTheSweepListFails(t *testing.T) {
+	t.Parallel()
+	r := &recorder{failOn: " ps "}
+	r.running = ""
+	var stdout, stderr bytes.Buffer
+	run := func(argv []string, so, se io.Writer) error {
+		if slices.Contains(argv, "ps") {
+			return errors.New("daemon down")
+		}
+		return r.run(argv, so, se)
+	}
+
+	if code := Run([]string{"--context", "c"}, &stdout, &stderr, run); code != 1 {
+		t.Errorf("exit %d, want 1", code)
+	}
+	if len(r.argvs) != 0 {
+		t.Errorf("seed steps ran after a failed list: %q", joined(r.argvs))
 	}
 }

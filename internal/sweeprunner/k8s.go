@@ -395,6 +395,7 @@ func runnerContainer(spec Spec) Container {
 	env = append(env,
 		// The unprivileged user's own home belongs to another user.
 		EnvVar{Name: "HOME", Value: "/tmp"},
+		EnvVar{Name: ryukDisabledName, Value: ryukDisabledValue},
 		EnvVar{Name: EnvRig, Value: spec.Rig},
 		EnvVar{Name: EnvSHA, Value: spec.SHA},
 		EnvVar{Name: EnvTiers, Value: strings.Join(spec.TiersOrDefault(), ",")},
@@ -423,7 +424,10 @@ func runnerContainer(spec Spec) Container {
 
 // dindContainer is the sidecar the packages that need a Docker API reach: the
 // pod's only privileged container, bound to the pod's loopback so no other pod
-// in the cluster can drive the engine.
+// in the cluster can drive the engine. Unlike the Docker backend's sidecar, which
+// sits on an internal network with no route out and so starts from a seed volume,
+// this one has the pod's network and pulls the images the tests start itself, so
+// the Job renders no seed step (gt-aw5jn).
 func dindContainer() Container {
 	share := ResourceList{CPU: dindCPU, Memory: dindMemory}
 	return Container{

@@ -30,15 +30,14 @@
       "--network",
       "none",
       "--entrypoint",
-      "cp",
+      "sh",
       "--volume",
       "gt-sweep-dind-seed:/seed:ro",
       "--volume",
       "gt-sweep-dind-data-gastown-4f2a9c1e-mvv8asko:/var/lib/docker",
       "data.forgejo.org/oci/docker@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977",
-      "-a",
-      "/seed/.",
-      "/var/lib/docker/"
+      "-c",
+      "[ -n \"$(ls -A /seed)\" ] || { echo \"the seed volume gt-sweep-dind-seed is empty: run sweep-seed\" \u003e\u00262; exit 1; }; cp -a /seed/. /var/lib/docker/"
     ]
   },
   {
@@ -97,6 +96,8 @@
       "GT_SWEEP_TIERS=shell,integration,race",
       "--env",
       "GT_SWEEP_JOBS=4",
+      "--env",
+      "TESTCONTAINERS_RYUK_DISABLED=true",
       "gt-polecat:gt-74ix9",
       "setpriv",
       "--reuid",

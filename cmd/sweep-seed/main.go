@@ -10,6 +10,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -63,6 +64,18 @@ func Run(args []string, stdout, stderr io.Writer, run StepRunner) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "sweep-seed: %v\nusage: sweep-seed --context CTX [--image REF]...\n", err)
 		return 2
+	}
+	// The seed is read by every run's copy step, so it is not written while a sweep
+	// runs. This is a check before the first write, not a lock: a sweep that starts
+	// in the moments after it is not seen, so seed while the daemon is quiet.
+	var running bytes.Buffer
+	if err := run([]string{"docker", "--context", seed.Context, "ps", "--filter", "name=" + sweeprunner.ContainerPrefix, "--format", "{{.Names}}"}, &running, stderr); err != nil {
+		fmt.Fprintf(stderr, "sweep-seed: could not list the running sweep containers: %v\n", err)
+		return 1
+	}
+	if names := strings.Fields(running.String()); len(names) > 0 {
+		fmt.Fprintf(stderr, "sweep-seed: sweep containers are running on %s (%s); seed after they end\n", seed.Context, strings.Join(names, " "))
+		return 1
 	}
 	failed := false
 	for _, step := range plan.Steps {
