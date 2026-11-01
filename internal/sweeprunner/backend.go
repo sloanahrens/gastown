@@ -10,20 +10,41 @@ type Backend interface {
 	Render(spec Spec) (Plan, error)
 }
 
-// Plan is one rendered run: the object it applies, and the steps a caller runs
-// in the order it runs them.
+// Plan is one rendered run: the objects it applies, the steps a caller runs in
+// the order it runs them, and how a caller learns the run has ended.
 //
-// A caller applies Job when it is set, then runs the steps whose Teardown is
-// false in order and stops at the first failure, then runs Teardown whether or
-// not a step before it failed. A run that fails at its own start step has still
-// made the network, the volume and the sidecar, so a teardown that waited for
+// A caller runs Apply in order, then the steps whose Teardown is false in order,
+// and stops at the first failure, then runs Teardown whether or not a step
+// before it failed. A run that fails at its own start step has still made the
+// network, the volume, the claim and the sidecar, so a teardown that waited for
 // success would leak them.
 type Plan struct {
 	// Job is the batch/v1 Job a Kubernetes backend applies, and nil for a
-	// backend that renders argv alone.
+	// backend that renders argv alone. Apply carries the document it applies.
 	Job *Job
+	// Apply are the steps that create the run's objects before its start
+	// steps, each with the document it applies as Stdin. Nil for a backend
+	// that renders argv alone.
+	Apply []Step
 	// Steps are the run's own steps, then its teardown.
 	Steps []Step
+	// Poll is how a caller learns the run has ended and gets its result out,
+	// for a backend whose result stays on the engine. Nil when the run writes
+	// its result into the output directory itself.
+	Poll *Poll
+}
+
+// Poll is how a caller learns that a run has ended and brings its result out.
+type Poll struct {
+	// Status is the step that reads the run's state. Its stdout is handed to
+	// Ended.
+	Status Step
+	// Ended reports from Status's stdout whether the run has ended, whether it
+	// succeeded or not.
+	Ended func(stdout []byte) bool
+	// Collect copies the result into the output directory. A caller runs it
+	// once Ended reports true, in order, and stops at the first failure.
+	Collect []Step
 }
 
 // Teardown returns the steps that take the run down, in the order to run them:
@@ -43,6 +64,9 @@ type Step struct {
 	// Argv is the program and its arguments, run directly and never through a
 	// shell.
 	Argv []string
+	// Stdin is the input the step reads, when it reads one: the document an
+	// apply takes. Nil for a step that reads nothing.
+	Stdin []byte
 	// Teardown marks a step that removes what an earlier step made; it runs
 	// even when an earlier step failed.
 	Teardown bool
