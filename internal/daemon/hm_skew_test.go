@@ -41,6 +41,7 @@ type hmSkewAnswers struct {
 	noClone      bool     // the job-owned clone does not exist yet, so the monitor clones it
 	cloneErr     bool     // the clone fails, leaving a partial directory behind
 	fetchErr     bool     // the fetch of origin's main into the clone fails
+	cloneIsFile  bool     // the clone's path is a regular file, not a directory
 }
 
 // hmSkewBehindAnswers is an hm at installed sha A, origin's main at B, and a diff
@@ -150,7 +151,13 @@ func hmSkewDaemon(t *testing.T, a hmSkewAnswers) (*Daemon, *notifyfake.Recorder,
 	rec := notifyfake.New()
 	var logs bytes.Buffer
 	town := t.TempDir()
-	if !a.noClone {
+	switch {
+	case a.cloneIsFile:
+		mkdirs(t, filepath.Dir(filepath.Join(town, hmSkewCloneDir)))
+		if err := os.WriteFile(filepath.Join(town, hmSkewCloneDir), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	case !a.noClone:
 		mkdirs(t, filepath.Join(town, hmSkewCloneDir, ".git"))
 	}
 	d := &Daemon{
@@ -296,6 +303,11 @@ func TestHMSkewUnreadableIsALogLine(t *testing.T) {
 			a.fetchErr = true
 			return a
 		}},
+		{"a clone path that is a file", func() hmSkewAnswers {
+			a := hmSkewBehindAnswers()
+			a.cloneIsFile = true
+			return a
+		}},
 		{"a clone whose diff fails and that has the installed commit", func() hmSkewAnswers {
 			a := hmSkewBehindAnswers()
 			a.diffErr = true
@@ -353,6 +365,43 @@ func TestHMSkewFailedCloneLeavesNoPartialDirectory(t *testing.T) {
 	clone := filepath.Join(d.config.TownRoot, hmSkewCloneDir)
 	if _, err := os.Stat(clone); !os.IsNotExist(err) {
 		t.Errorf("stat %s = %v, want the partial clone removed", clone, err)
+	}
+}
+
+// TestHMSkewCloneThatIsNotADirectoryIsNamed: a clone path that is a file is named
+// as the clone that could not be read, not as a failed fetch, so the log says
+// which thing is wrong.
+func TestHMSkewCloneThatIsNotADirectoryIsNamed(t *testing.T) {
+	t.Parallel()
+	a := hmSkewBehindAnswers()
+	a.cloneIsFile = true
+	d, _, logs := hmSkewDaemon(t, a)
+
+	d.hmSkewOnce()
+
+	if !strings.Contains(logs.String(), "the hm clone at") {
+		t.Errorf("log = %q, want the clone path named as the unreadable clone", logs.String())
+	}
+}
+
+// TestHMSkewPartialCloneThatCannotBeRemovedIsALogLine: a clone that fails and
+// whose partial directory cannot be removed is a logged reading that names both
+// failures, and escalates nothing.
+func TestHMSkewPartialCloneThatCannotBeRemovedIsALogLine(t *testing.T) {
+	t.Parallel()
+	a := hmSkewBehindAnswers()
+	a.noClone = true
+	a.cloneErr = true
+	d, rec, logs := hmSkewDaemon(t, a)
+	d.hmSkew.removeAll = func(string) error { return errors.New("permission denied") }
+
+	d.hmSkewOnce()
+
+	if !strings.Contains(logs.String(), "removing the partial clone") {
+		t.Errorf("log = %q, want the partial clone that could not be removed named", logs.String())
+	}
+	if esc := rec.Escalations(); len(esc) != 0 {
+		t.Errorf("escalations = %+v, want none for a reading that could not be taken", esc)
 	}
 }
 

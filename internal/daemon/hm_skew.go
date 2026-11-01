@@ -20,7 +20,8 @@ import (
 //
 // It reports and nothing else: no path here blocks, rejects or delays anything,
 // the readings run on their own goroutine, and a reading that cannot be taken
-// is a log line, not an alarm. It shares om_skew's reads of the remote and its
+// is a log line, not an alarm. Its one write is the job-owned clone under
+// .runtime. It shares om_skew's reads of the remote and its
 // escalation key convention, but not om's rule for what counts as a skew: a
 // diff that touches only markdown or docs is not one.
 const (
@@ -56,6 +57,10 @@ type hmSkewMonitor struct {
 	// pathFn is the installed hm's path; nil is the production lookup
 	// (hmSkewPath). Tests answer it so no binary is resolved from the host.
 	pathFn func() string
+
+	// removeAll clears a partial clone; nil is os.RemoveAll. Tests answer it, so
+	// a clone that cannot be cleared is driven without a permission fixture.
+	removeAll func(string) error
 
 	mu sync.Mutex
 	// raised is true while the last reading was a skew, so the next clean
@@ -240,18 +245,25 @@ func (d *Daemon) hmSkewRefreshClone(townRoot, url string) (string, error) {
 // directory does not read as a clone on the next reading and fail there for
 // good; the next reading clones again.
 func (d *Daemon) hmSkewClone(src, url string) error {
-	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
-		return fmt.Errorf("cannot create %s: %w", filepath.Dir(src), err)
-	}
+	// git creates the leading directories of src itself.
 	err := d.hmSkewGit(hmSkewCloneTimeout, "cloning the hm origin into the hm clone",
 		"clone", "--quiet", "--no-checkout", "--", url, src)
 	if err == nil {
 		return nil
 	}
-	if rmErr := os.RemoveAll(src); rmErr != nil {
+	if rmErr := d.hmSkewRemoveAll(src); rmErr != nil {
 		return fmt.Errorf("%w; and removing the partial clone at %s failed: %w", err, src, rmErr)
 	}
 	return err
+}
+
+// hmSkewRemoveAll removes a partial clone. The seam is hmSkewMonitor.removeAll;
+// nil is os.RemoveAll.
+func (d *Daemon) hmSkewRemoveAll(src string) error {
+	if d.hmSkew.removeAll != nil {
+		return d.hmSkew.removeAll(src)
+	}
+	return os.RemoveAll(src)
 }
 
 // hmSkewGit runs one git call for the hm clone, bounded by timeout. A failure is
