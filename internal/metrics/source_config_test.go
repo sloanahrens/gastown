@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // configTestTown is the town the config tests read, so every path the source
@@ -127,6 +129,10 @@ func TestSourceConfigReadsPoolOverrunGateAndParked(t *testing.T) {
 		"parked_rigs":           1,
 		"om_threshold_gastown":  0.75,
 		"om_threshold_beads":    nil,
+		"seat_models":           map[string]string{"claude-haiku": "haiku"},
+		"gt_commit":             nil,
+		"directive_hash":        nil,
+		"gate_ids":              nil,
 		"config_probe_failures": 0,
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -444,6 +450,80 @@ func TestSourceConfigUnreadableRigRegistryCostsTheRigColumns(t *testing.T) {
 	}
 	if got["pool_max_total"] != 12 || got["parked_rigs"] != 0 {
 		t.Errorf("pool_max_total = %v, parked_rigs = %v, want 12 and 0 beside the registry gap", got["pool_max_total"], got["parked_rigs"])
+	}
+}
+
+// A town with none of the regime files has none of the regime values: every
+// key is the missing marker and no failure is counted, because a source that
+// is absent is not a source that broke.
+func TestSourceConfigRegimeFieldsAbsentAreNoValue(t *testing.T) {
+	t.Parallel()
+	settings, rigs, _, _ := configTestPaths()
+	got, err := configSource{}.Collect(context.Background(), configTestEnv(t, map[string]string{
+		settings: `{"type": "town-settings", "version": 1}`,
+		rigs:     configRigsFixture("gastown"),
+	}, nil, configRigList(t, `[]`)))
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	for _, key := range []string{"gt_commit", "directive_hash", "seat_models", "gate_ids"} {
+		if value, ok := got[key]; !ok || value != nil {
+			t.Errorf("%s = %v, want the missing marker null", key, value)
+		}
+	}
+	if got["config_probe_failures"] != 0 {
+		t.Errorf("config_probe_failures = %v, want 0: an absent source is not a failed probe", got["config_probe_failures"])
+	}
+}
+
+// The directive hash covers what the prompt renders: a leading Changelog block
+// is the editors' record, not directive text, so a note added to it alone
+// leaves the hash where it was (config.LoadRoleDirective strips the block).
+func TestSourceConfigDirectiveHashIgnoresTheChangelog(t *testing.T) {
+	t.Parallel()
+	settings, rigs, _, _ := configTestPaths()
+	common := filepath.Join(config.CentralDirectiveDir(configTestTown), "_common.md")
+	polecat := filepath.Join(config.CentralDirectiveDir(configTestTown), "polecat.md")
+	collect := func(commonText string) map[string]any {
+		files := map[string]string{
+			settings: `{"type": "town-settings", "version": 1}`,
+			rigs:     configRigsFixture("gastown"),
+			common:   commonText,
+			polecat:  "role policy\n",
+		}
+		got, err := configSource{}.Collect(context.Background(), configTestEnv(t, files, nil, configRigList(t, `[]`)))
+		if err != nil {
+			t.Fatalf("Collect: %v", err)
+		}
+		return got
+	}
+	plain := collect("## Policy\n\nshared policy\n")
+	withRecord := collect("## Changelog\n\n- 2026-11-01 a note\n\n## Policy\n\nshared policy\n")
+	if plain["directive_hash"] == nil {
+		t.Fatalf("directive_hash = nil, want a hash over the two directive files")
+	}
+	if plain["directive_hash"] != withRecord["directive_hash"] {
+		t.Errorf("directive_hash moved with the Changelog block: %v vs %v", plain["directive_hash"], withRecord["directive_hash"])
+	}
+}
+
+// A directive file the town has not moved to the central layer yet is read
+// from the legacy town directory, as the prompt reader falls back to it.
+func TestSourceConfigDirectiveHashReadsTheLegacyFallback(t *testing.T) {
+	t.Parallel()
+	settings, rigs, _, _ := configTestPaths()
+	files := map[string]string{
+		settings: `{"type": "town-settings", "version": 1}`,
+		rigs:     configRigsFixture("gastown"),
+		filepath.Join(configTestTown, "directives", "_common.md"):               "legacy policy\n",
+		filepath.Join(config.CentralDirectiveDir(configTestTown), "polecat.md"): "role policy\n",
+	}
+	got, err := configSource{}.Collect(context.Background(), configTestEnv(t, files, nil, configRigList(t, `[]`)))
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if want := regimeTestHash("legacy policy\nrole policy"); got["directive_hash"] != want {
+		t.Errorf("directive_hash = %v, want %s over the legacy file and the central one", got["directive_hash"], want)
 	}
 }
 

@@ -1269,8 +1269,17 @@ func resolveMergeQueueConfigIn(open RepoFileOpener, townRoot, rigName string) (*
 		localMQ = localSettings.MergeQueue
 	}
 
-	mq := config.MergeSettingsCommand(rigRootMQ, repoMQ)
-	return config.MergeSettingsCommand(mq, localMQ), repoErr
+	return ResolveMergeQueueConfigTiers(rigRootMQ, repoMQ, localMQ), repoErr
+}
+
+// ResolveMergeQueueConfigTiers is the resolver's precedence over tiers the
+// caller has already read: the rig-root config.json floor, the repo-committed
+// settings, and the rig-local settings/config.json override. A caller that
+// reads the town through a seam of its own (the metrics snapshot's Env) passes
+// the tiers it could read and nil for one it could not, so the precedence
+// still lives here rather than in a second merge (gt-egiv).
+func ResolveMergeQueueConfigTiers(rigRoot, repo, local *config.MergeQueueConfig) *config.MergeQueueConfig {
+	return config.MergeSettingsCommand(config.MergeSettingsCommand(rigRoot, repo), local)
 }
 
 // malformedRepoSettingsError is a repo-committed .gastown/settings.json the
