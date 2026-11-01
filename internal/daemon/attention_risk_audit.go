@@ -101,6 +101,7 @@ func (s *attentionSources) auditResolvedRiskFails(ctx context.Context) ([]string
 				continue
 			}
 		}
+		s.keepForCollector(rig, issues)
 		for _, rec := range recs {
 			if len(wrote) >= riskAuditCap {
 				return wrote, firstErr
@@ -161,6 +162,8 @@ func (s *attentionSources) auditResolvedRiskFails(ctx context.Context) ([]string
 			}
 			if written {
 				wrote = append(wrote, rec.BeadID+": "+line)
+				// Its notes changed: the collector reads it fresh.
+				delete(s.tickIssues, rig+"\x00"+rec.BeadID)
 			}
 		}
 		s.auditNext = (idx + 1) % len(rigs)
@@ -191,6 +194,10 @@ func (s *attentionSources) riskIssuesBatch(ctx context.Context, rig string, recs
 	out := make(map[string]*beads.Issue, len(ids))
 	var errs []error
 	for _, id := range ids {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err)
+			break
+		}
 		issue, err := s.riskIssue(ctx, rig, id)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", id, err))
@@ -284,5 +291,18 @@ func (d *Daemon) productionRiskAudit(s *attentionSources) {
 		}
 		return beads.NewPlain(d.config.TownRoot, bdMutationRoutingEnv(d.config.TownRoot), beads.WithBin(d.bdPathOrDefault())).
 			WithTimeout(attentionBeadTimeout).AppendNotes(id, note)
+	}
+}
+
+// keepForCollector remembers the beads the audit read in rig, for the risk-path
+// collector of the same tick.
+func (s *attentionSources) keepForCollector(rig string, issues map[string]*beads.Issue) {
+	if s.tickIssues == nil {
+		s.tickIssues = map[string]*beads.Issue{}
+	}
+	for id, issue := range issues {
+		if issue != nil {
+			s.tickIssues[rig+"\x00"+id] = issue
+		}
 	}
 }
