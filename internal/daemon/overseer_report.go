@@ -12,6 +12,8 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/crewfresh"
+	"github.com/steveyegge/gastown/internal/crewstale"
+	"github.com/steveyegge/gastown/internal/git"
 	townreport "github.com/steveyegge/gastown/internal/report"
 	"github.com/steveyegge/gastown/internal/townhealth"
 )
@@ -333,12 +335,14 @@ func (d *Daemon) overseerReportProdSeams() *overseerReportSeams {
 		return townreport.WrapStore(b), nil
 	}
 	return &overseerReportSeams{
-		now:  time.Now,
-		logf: d.logger.Printf,
-		// staleCrew is left nil: the crew clone discovery is in internal/cmd,
-		// which imports this package, so the daemon cannot call it. The
-		// section says so while the option is on.
+		now:         time.Now,
+		logf:        d.logger.Printf,
 		staleCrewOn: overseerReportStaleCrewOn(d.patrolConfig),
+		// staleCrew reads the crew clones under the town over the real disk
+		// and git. It only reads: no clone is fetched or moved.
+		staleCrew: func() ([]crewfresh.Clone, error) {
+			return crewstale.Clones(townRoot, crewstale.Disk{}, func(root string) crewstale.Git { return git.NewGit(root) }, d.clk().Now())
+		},
 		digest: func(slot, since time.Time) townreport.Digest {
 			return townreport.Digest{
 				Now:    d.clk().Now(),

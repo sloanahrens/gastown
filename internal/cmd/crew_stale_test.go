@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/crewfresh"
+	"github.com/steveyegge/gastown/internal/crewstale"
 )
 
 // fakeCrewStaleFS is the town the walk reads: the entries each directory
@@ -103,7 +104,7 @@ type fakeCrewStaleRepo struct {
 	root string
 }
 
-func (f *fakeCrewStaleGit) repo(root string) crewStaleGit {
+func (f *fakeCrewStaleGit) repo(root string) crewstale.Git {
 	return fakeCrewStaleRepo{town: f, root: root}
 }
 
@@ -132,7 +133,7 @@ func (r fakeCrewStaleRepo) CurrentBranch() (string, error) {
 
 func (r fakeCrewStaleRepo) CountCommitsBehind(ref string) (int, error) {
 	r.record("CountCommitsBehind")
-	if ref != crewStaleOriginMain {
+	if ref != crewstale.OriginMain {
 		return 0, errors.New("unexpected ref " + ref)
 	}
 	if r.town.fail[r.root] == "behind" {
@@ -356,55 +357,55 @@ func TestCrewStaleLine(t *testing.T) {
 	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
 	cases := []struct {
 		name    string
-		reading crewStaleReading
+		reading crewstale.Reading
 		want    string
 	}{
 		{
 			name: "a clone on main",
-			reading: crewStaleReading{
-				clone:    crewfresh.Clone{Rig: "gastown", Dir: "dunlin", Branch: "main", LastFetch: now.Add(-5 * time.Hour), Behind: 2},
-				branchOK: true, fetchOK: true, behindOK: true,
+			reading: crewstale.Reading{
+				Clone:    crewfresh.Clone{Rig: "gastown", Dir: "dunlin", Branch: "main", LastFetch: now.Add(-5 * time.Hour), Behind: 2},
+				BranchOK: true, FetchOK: true, BehindOK: true,
 			},
 			want: "gastown/dunlin  main  5h  2",
 		},
 		{
 			name: "a detached head",
-			reading: crewStaleReading{
-				clone:    crewfresh.Clone{Rig: "gastown", Dir: "dunlin", Branch: "", LastFetch: now.Add(-30 * time.Hour)},
-				branchOK: true, fetchOK: true, behindOK: true,
+			reading: crewstale.Reading{
+				Clone:    crewfresh.Clone{Rig: "gastown", Dir: "dunlin", Branch: "", LastFetch: now.Add(-30 * time.Hour)},
+				BranchOK: true, FetchOK: true, BehindOK: true,
 			},
 			want: "gastown/dunlin  detached  30h  0",
 		},
 		{
 			name: "a clone that never fetched",
-			reading: crewStaleReading{
-				clone:    crewfresh.Clone{Rig: "gastown", Dir: "dunlin", Branch: "main"},
-				branchOK: true, fetchOK: true, behindOK: true,
+			reading: crewstale.Reading{
+				Clone:    crewfresh.Clone{Rig: "gastown", Dir: "dunlin", Branch: "main"},
+				BranchOK: true, FetchOK: true, BehindOK: true,
 			},
 			want: "gastown/dunlin  main  never  0",
 		},
 		{
 			name: "a fetch time that could not be trusted",
-			reading: crewStaleReading{
-				clone: crewfresh.Clone{Rig: "gastown", Dir: "dunlin", Branch: "main",
+			reading: crewstale.Reading{
+				Clone: crewfresh.Clone{Rig: "gastown", Dir: "dunlin", Branch: "main",
 					Err: "FETCH_HEAD is dated in the future"},
-				branchOK: true, behindOK: true,
+				BranchOK: true, BehindOK: true,
 			},
 			want: "gastown/dunlin  main  ?  0  FETCH_HEAD is dated in the future",
 		},
 		{
 			name: "a behind count that could not be read",
-			reading: crewStaleReading{
-				clone: crewfresh.Clone{Rig: "gastown", Dir: "dunlin", Branch: "main",
+			reading: crewstale.Reading{
+				Clone: crewfresh.Clone{Rig: "gastown", Dir: "dunlin", Branch: "main",
 					LastFetch: now.Add(-26 * time.Hour), Err: "the commits behind origin/main could not be counted"},
-				branchOK: true, fetchOK: true,
+				BranchOK: true, FetchOK: true,
 			},
 			want: "gastown/dunlin  main  26h  ?  the commits behind origin/main could not be counted",
 		},
 		{
 			name: "a clone no read reached",
-			reading: crewStaleReading{
-				clone: crewfresh.Clone{Rig: "gastown", Dir: "dunlin",
+			reading: crewstale.Reading{
+				Clone: crewfresh.Clone{Rig: "gastown", Dir: "dunlin",
 					Err: "the branch could not be read; FETCH_HEAD could not be read"},
 			},
 			want: "gastown/dunlin  ?  ?  ?  the branch could not be read; FETCH_HEAD could not be read",

@@ -1027,7 +1027,9 @@ func TestOverseerReportStaleCrewSectionRowsAndUnreadable(t *testing.T) {
 }
 
 // The production seams read the option from the patrol config, and an unset or
-// false option leaves the section off.
+// false option leaves the section off. The crew clone source is wired in every
+// case: an empty town lists no clones and no error, so an option turned on
+// reads "(none)", never "unavailable".
 func TestOverseerReportStaleCrewOptionReachesTheSeam(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -1043,8 +1045,15 @@ func TestOverseerReportStaleCrewOptionReachesTheSeam(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: discardLogger, patrolConfig: tc.cfg}
-			if got := d.overseerReportProdSeams().staleCrewOn; got != tc.want {
-				t.Errorf("staleCrewOn = %v, want %v", got, tc.want)
+			s := d.overseerReportProdSeams()
+			if s.staleCrewOn != tc.want {
+				t.Errorf("staleCrewOn = %v, want %v", s.staleCrewOn, tc.want)
+			}
+			if s.staleCrew == nil {
+				t.Fatal("staleCrew is nil: the production seam has no crew clone source")
+			}
+			if clones, err := s.staleCrew(); err != nil || len(clones) != 0 {
+				t.Errorf("staleCrew() = %v, %v; want no clones and no error for an empty town", clones, err)
 			}
 		})
 	}
