@@ -1045,3 +1045,17 @@ func TestCutoverProceedsWhenNeitherStateNorJobRuns(t *testing.T) {
 		t.Errorf("waited %s for a heartbeat with no daemon running", *atStop)
 	}
 }
+
+func TestCutoverRefusesWhenStateSaysStoppedAndTheJobCannotBeRead(t *testing.T) {
+	t.Parallel()
+	r, p, _ := boundaryRig()
+	r.state = &daemon.State{Running: false, Owner: &cutoverLaunchd}
+	r.fromJob = templates.SupervisorState{Err: errors.New("launchctl print failed")}
+	err := p.execute(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "job state cannot be read") || !strings.Contains(err.Error(), "nothing was changed") {
+		t.Fatalf("error = %v, want a refusal naming the unreadable job", err)
+	}
+	if len(r.calls) != 0 {
+		t.Errorf("commands ran with the job unreadable: %v", r.calls)
+	}
+}
