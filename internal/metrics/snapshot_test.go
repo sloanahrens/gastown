@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/rig"
 )
 
 func TestSnapshotAppendsExactlyOneParseableLine(t *testing.T) {
@@ -381,6 +383,43 @@ func TestSnapshotOldLinesStillParse(t *testing.T) {
 	}
 	if records[1].Groups["config"]["gt_commit"] != "abc1234def" {
 		t.Errorf("new line gt_commit = %v, want abc1234def", records[1].Groups["config"]["gt_commit"])
+	}
+}
+
+// The repo file seam passes a read's answer through unchanged: a file the
+// reader found comes back found, and a read that failed stays an error rather
+// than reading as a rig with no repo-committed file.
+func TestRepoFileSeamKeepsTheReadsAnswer(t *testing.T) {
+	t.Parallel()
+	readErr := errors.New("no repo")
+	tests := []struct {
+		name      string
+		read      func(string, string, string) (rig.RepoFile, error)
+		wantFound bool
+		wantErr   error
+	}{
+		{
+			name: "a file the reader found",
+			read: func(string, string, string) (rig.RepoFile, error) {
+				return rig.RepoFile{Data: []byte("{}"), Found: true}, nil
+			},
+			wantFound: true,
+		},
+		{
+			name: "a read that failed",
+			read: func(string, string, string) (rig.RepoFile, error) { return rig.RepoFile{}, readErr },
+			// The answer stays an error, so the gate probe reports a gap.
+			wantErr: readErr,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, found, err := repoFileWith(tc.read, "/town", "gastown", config.RepoSettingsPath)
+			if !errors.Is(err, tc.wantErr) || found != tc.wantFound {
+				t.Errorf("found, err = %v, %v, want %v, %v", found, err, tc.wantFound, tc.wantErr)
+			}
+		})
 	}
 }
 

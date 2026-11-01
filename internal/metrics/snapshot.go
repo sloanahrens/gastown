@@ -56,10 +56,16 @@ func OSEnv(town string) Env {
 	}
 }
 
-// repoFileAt is Env.RepoFile over the rig package's reader: the rig repo's
-// main, else its mayor/rig clone.
+// repoFileAt is Env.RepoFile over the rig package's reader.
 func repoFileAt(townRoot, rigName, relPath string) ([]byte, bool, error) {
-	f, err := rig.RepoFileFor(townRoot, rigName, relPath)
+	return repoFileWith(rig.RepoFileFor, townRoot, rigName, relPath)
+}
+
+// repoFileWith is repoFileAt over a reader, so a test drives a failed read
+// without a repository. The error stays an error: read as "no file" it would
+// turn a broken tier into a rig with no repo-committed gate.
+func repoFileWith(read func(townRoot, rigName, relPath string) (rig.RepoFile, error), townRoot, rigName, relPath string) ([]byte, bool, error) {
+	f, err := read(townRoot, rigName, relPath)
 	if err != nil {
 		return nil, false, err
 	}
