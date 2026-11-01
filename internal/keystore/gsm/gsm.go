@@ -143,7 +143,10 @@ func (s *Store) Put(ctx context.Context, workspace, name string, value []byte) (
 	return keystore.Revision(n), nil
 }
 
-// Get returns the highest enabled version.
+// Get returns the highest enabled version. A version that is disabled or
+// destroyed between the list and the read is passed over for the next enabled
+// one below it, so a concurrent Disable of the newest version reads as the older
+// revision it left current, not as a missing key.
 func (s *Store) Get(ctx context.Context, workspace, name string) (keystore.Secret, error) {
 	id, err := s.secretID(ctx, workspace, name)
 	if err != nil {
@@ -153,26 +156,26 @@ func (s *Store) Get(ctx context.Context, workspace, name string) (keystore.Secre
 	if err != nil {
 		return keystore.Secret{}, fmt.Errorf("gsm: list versions of %s: %w", id, err)
 	}
-	var best int64
+	var enabled []int64
 	for _, v := range versions {
-		if v.State == Enabled && v.Number > best {
-			best = v.Number
+		if v.State == Enabled {
+			enabled = append(enabled, v.Number)
 		}
 	}
-	if best == 0 {
-		return keystore.Secret{}, fmt.Errorf("%w: workspace %q key %q", keystore.ErrNotFound, workspace, name)
+	sort.Slice(enabled, func(i, j int) bool { return enabled[i] > enabled[j] })
+	for _, n := range enabled {
+		payload, err := s.client.AccessVersion(ctx, id, n)
+		if errors.Is(err, ErrClientNotFound) {
+			continue
+		}
+		if err != nil {
+			return keystore.Secret{}, fmt.Errorf("gsm: access version %d of %s: %w", n, id, err)
+		}
+		secret := keystore.NewSecret(payload)
+		clear(payload)
+		return secret, nil
 	}
-	payload, err := s.client.AccessVersion(ctx, id, best)
-	if errors.Is(err, ErrClientNotFound) {
-		// The version was disabled or destroyed between the list and the read.
-		return keystore.Secret{}, fmt.Errorf("%w: workspace %q key %q", keystore.ErrNotFound, workspace, name)
-	}
-	if err != nil {
-		return keystore.Secret{}, fmt.Errorf("gsm: access version %d of %s: %w", best, id, err)
-	}
-	secret := keystore.NewSecret(payload)
-	clear(payload)
-	return secret, nil
+	return keystore.Secret{}, fmt.Errorf("%w: workspace %q key %q", keystore.ErrNotFound, workspace, name)
 }
 
 // Disable stops new reads of rev.
