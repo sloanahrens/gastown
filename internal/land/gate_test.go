@@ -871,6 +871,20 @@ func TestShellTierInputsAreTheUnionWhenItCoversTheMachinery(t *testing.T) {
 	}
 }
 
+// TestTheManifestUnionCoversTheTierMachinery: the entries' triggers reach the
+// tier's own machinery (today through the GoTriggers one entry contributes), so
+// ShellTierInputs adds no fallback and the rule stays the union (gt-u560q.9).
+func TestTheManifestUnionCoversTheTierMachinery(t *testing.T) {
+	t.Parallel()
+	var union []string
+	for _, e := range shelltier.Manifest() {
+		union = append(union, e.TriggersOrDefault()...)
+	}
+	if !shellTierCovers(union, shellTierMachinery) {
+		t.Fatalf("the manifest union %v does not cover the tier machinery %v, so the rule would add paths the union lacks", union, shellTierMachinery)
+	}
+}
+
 // TestShellTierInputsOfAnEmptyUnionMatchNothing: a rule built from no trigger
 // can blame no landing for a shell failure.
 func TestShellTierInputsOfAnEmptyUnionMatchNothing(t *testing.T) {
