@@ -3263,7 +3263,22 @@ func specRetryTimedOutSlingFrom(b beads.Client, beadID string) error {
 // respawn state: the same count the spawn refuses on (admitSlingRespawn), so a
 // bead the spawn would refuse is not slung to be refused.
 func specRespawnLimitedIn(townRoot string) func(beadID string) bool {
-	return func(beadID string) bool { return polecat.ShouldBlockRespawn(townRoot, beadID) }
+	return specRespawnLimitedFrom(slingStores{}, townRoot)
+}
+
+// specRespawnLimitedFrom is specRespawnLimitedIn over the stores the caller
+// supplies, so a test runs the guard against a fake instead of a live bd.
+//
+// The spawn discounts the rounds behind a bead's newest submission before it
+// reads the limit (admitSlingRespawn); a guard that read the count bare would
+// hold a rework bead whose last round submitted, which the sling would have
+// admitted (gt-gil3z). The discount may write: it clears the count the next
+// sling would clear anyway, and the retry this guard admits is that sling.
+func specRespawnLimitedFrom(stores slingStores, townRoot string) func(beadID string) bool {
+	return func(beadID string) bool {
+		clearRespawnForSubmittedRound(stores, townRoot, beadID)
+		return polecat.ShouldBlockRespawn(townRoot, beadID)
+	}
 }
 
 // specRespawnHeldNotice is the tick's one line for the beads a kill at the
