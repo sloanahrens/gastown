@@ -96,6 +96,9 @@ func (d *Daemon) dispatchPlugins(rigsConfig *config.RigsConfig) {
 	}
 
 	for _, p := range plugins {
+		if d.offInContainer(p.Name) {
+			continue
+		}
 		// Never auto-dispatch manual-gate plugins — they require an explicit trigger.
 		if p.Gate != nil && p.Gate.Type == plugin.GateManual {
 			d.logger.Printf("Handler: skipping plugin %s (gate=manual, requires explicit trigger)", p.Name)

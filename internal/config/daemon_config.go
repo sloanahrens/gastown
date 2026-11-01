@@ -69,6 +69,12 @@ type DaemonPatrolConfig struct {
 	// and the same town settings are read on both sides of the container
 	// boundary. The sidecar never holds the token.
 	OMTokenMetaSetting string `json:"om_token_meta,omitempty"`
+
+	// ContainerOffSetting names the plugins and patrols this town's daemon does
+	// not run while it is the container: the ones that need the host's
+	// toolchain or engine (gt-1oz0t). The launchd daemon ignores it and runs
+	// everything. The host agent runs the same names on the host.
+	ContainerOffSetting []string `json:"container_off,omitempty"`
 }
 
 // The supervisor kinds daemon.supervisor accepts, and the names the container
@@ -190,6 +196,14 @@ func (c *DaemonPatrolConfig) OMTokenMeta() string {
 		return ""
 	}
 	return c.OMTokenMetaSetting
+}
+
+// ContainerOff returns the plugin and patrol names daemon.container_off lists.
+func (c *DaemonPatrolConfig) ContainerOff() []string {
+	if c == nil {
+		return nil
+	}
+	return c.ContainerOffSetting
 }
 
 // ContainerName returns the container the container supervisor manages.

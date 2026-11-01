@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
@@ -612,10 +613,17 @@ func loadDisabledPatrolsFromTownSettingsTo(townRoot string, warn io.Writer) map[
 // disabled_patrols list (settings/config.json). A patrol is active
 // only if it is enabled in daemon config AND not in the disabled list.
 func (d *Daemon) isPatrolActive(patrol string) bool {
-	if d.disabledPatrols[patrol] {
+	if d.disabledPatrols[patrol] || d.offInContainer(patrol) {
 		return false
 	}
 	return IsPatrolEnabled(d.patrolConfig, patrol)
+}
+
+// offInContainer reports whether name is a plugin or patrol this daemon skips:
+// only the container daemon skips daemon.container_off, and the launchd daemon
+// runs every name as before (gt-1oz0t).
+func (d *Daemon) offInContainer(name string) bool {
+	return d.containerMode && slices.Contains(d.patrolConfig.ContainerOff(), name)
 }
 
 // LifecycleAction represents a lifecycle request action.
