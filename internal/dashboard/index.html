@@ -5374,7 +5374,7 @@ setInterval(() => {
 // pane's reading, so the tick redraws the panes whose drawing carries one from
 // the reading the page already holds — forced past the push's skip, and still
 // leaving a closed section's body alone (gt-quuq5).
-setInterval(() => { if (state) { pushBegin(state, true); try { renderStrip(state); renderWork(state); renderTierSweep(state); renderForgejo(state); renderNews(state); renderHold(state); renderRigs(state); renderMachine(state); renderCost(state); renderOM(state); renderJev(state); renderOverseer(state); renderAttention(state); renderCloud(state); renderDeploys(state); renderMango(state); renderEvents(state); } finally { pushEnd(); } } }, 15000);
+setInterval(() => { if (state) { pushBegin(state, true); try { renderStrip(state); renderWork(state); renderTierSweep(state); renderForgejo(state); renderNews(state); renderHold(state); renderRigs(state); renderMachine(state); renderCost(state); renderOM(state); renderJev(state); renderOverseer(state); renderAttention(state); renderCloud(state); renderDeploys(state); renderTrend(state); renderMango(state); renderEvents(state); } finally { pushEnd(); } paintFolds(state); } }, 15000);
 </script>
 </body>
 </html>
