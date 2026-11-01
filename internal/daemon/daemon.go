@@ -2387,6 +2387,7 @@ func (d *Daemon) saveState(state *State) error {
 // (the town E-stop) skips the steps that dispatch, kill or restart.
 func (d *Daemon) heartbeatWork(state *State, lifecycle bool) {
 	d.logger.Println("Heartbeat starting (recovery-focused)")
+	timing := &heartbeatTiming{start: d.clk().Now()}
 
 	for _, step := range heartbeatSteps {
 		if step.lifecycle && !lifecycle {
@@ -2398,7 +2399,9 @@ func (d *Daemon) heartbeatWork(state *State, lifecycle bool) {
 			return
 		}
 		d.setHeartbeatStep(step.name)
+		stepStart := d.clk().Now()
 		d.seams.runHeartbeatStep(d, step)
+		d.logStep(timing, step.name, d.clk().Since(stepStart))
 		d.setHeartbeatStep("")
 	}
 
@@ -2420,6 +2423,7 @@ func (d *Daemon) heartbeatWork(state *State, lifecycle bool) {
 	d.hb.stateMu.Unlock()
 
 	d.logger.Printf("Heartbeat complete (#%d)", count)
+	d.logger.Println(timing.summary(d.clk().Since(timing.start)))
 }
 
 // rotateOversizedLogs checks Dolt server log files and rotates any that exceed
