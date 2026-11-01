@@ -110,10 +110,35 @@ func TestMainRunsEveryEntryWithAll(t *testing.T) {
 	if len(f.cmds) != len(entries) {
 		t.Fatalf("ran %d scripts, want %d", len(f.cmds), len(entries))
 	}
-	for i, e := range entries {
-		if got := f.cmds[i].Argv[len(f.cmds[i].Argv)-1]; got != e.Path {
-			t.Fatalf("script %d = %s, want %s", i, got, e.Path)
+	// The pool starts every Parallel entry before the Serial ones, so a run's
+	// order is not the manifest order; each entry must still run exactly once,
+	// and the Serial entries keep their relative manifest order.
+	parallel := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		if e.Mode == shelltier.Parallel {
+			parallel[e.Path] = true
 		}
+	}
+	ran := make(map[string]int, len(f.cmds))
+	var gotSerial []string
+	for _, c := range f.cmds {
+		path := c.Argv[len(c.Argv)-1]
+		ran[path]++
+		if !parallel[path] {
+			gotSerial = append(gotSerial, path)
+		}
+	}
+	var wantSerial []string
+	for _, e := range entries {
+		if got := ran[e.Path]; got != 1 {
+			t.Errorf("%s ran %d times, want once", e.Path, got)
+		}
+		if !parallel[e.Path] {
+			wantSerial = append(wantSerial, e.Path)
+		}
+	}
+	if !slices.Equal(gotSerial, wantSerial) {
+		t.Fatalf("Serial scripts ran in the order %q, want the manifest order %q", gotSerial, wantSerial)
 	}
 }
 
