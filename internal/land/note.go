@@ -47,6 +47,11 @@ type RejectionNote struct {
 	MR       string
 	Findings []Finding
 	Receipt  *Receipt
+	// Approved is set on a gate refusal that followed an om approve: om
+	// answered this round, so the next review reads nothing past the block,
+	// even when the approve raised no findings (gt-xal5q). A note without the
+	// field parses as before.
+	Approved bool
 
 	// Head is the exact tip that was rejected. gt done compares a resubmission
 	// against it (unchanged-since-rejection), so a rejection with no MR bead
@@ -84,6 +89,9 @@ func FormatRejectionNote(n RejectionNote) string {
 			note += fmt.Sprintf("\nUnresolved: %s", strings.Join(n.Receipt.Unresolved, ","))
 		}
 	}
+	if n.Approved {
+		note += "\nApproved: " + approvedBy
+	}
 	if head := NoteField(n.Head); head != "" {
 		note += "\nHead: " + head
 	}
@@ -114,6 +122,10 @@ func FormatRejectionNote(n RejectionNote) string {
 	}
 	return note
 }
+
+// approvedBy is the reviewer an Approved line names: the om approve that the
+// gate refusal followed (gt-xal5q).
+const approvedBy = "om"
 
 // gateTailLineMax bounds each quoted output line, so one runaway line (a
 // dumped blob, a minified file) cannot bloat the bead's notes.
@@ -270,6 +282,8 @@ func ParseRejectionNote(notes string) (RejectionNote, bool) {
 			n.MR, seen[key] = value, true
 		case "head":
 			n.Head, seen[key] = value, true
+		case "approved":
+			n.Approved, seen[key] = value == approvedBy, true
 		case "score":
 			if score, err := strconv.ParseFloat(value, 64); err == nil {
 				n.Receipt = &Receipt{Score: score}
@@ -350,7 +364,9 @@ func RejectionForAttempt(notes string, attempt int) (RejectionNote, bool) {
 // It stops at the newest review block whether or not that block raised
 // findings: a review that found nothing leaves the next round nothing to
 // classify, and an older round's findings must not outlive the round that
-// answered them.
+// answered them. It stops at a gate refusal that followed an om approve too,
+// even one whose approve raised nothing, because that refusal is marked
+// Approved (gt-xal5q).
 //
 // Empty on a bead no refusal has rejected — which is exactly attempt 1 — and on
 // a refusal that raised none: that round has nothing for om to classify, and
@@ -371,7 +387,7 @@ func priorReviewFindings(notes string) []Finding {
 		if n.Kind == "" || n.Kind == string(RejectReview) {
 			return n.Findings
 		}
-		if len(n.Findings) > 0 {
+		if len(n.Findings) > 0 || n.Approved {
 			return n.Findings
 		}
 	}

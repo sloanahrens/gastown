@@ -45,7 +45,7 @@ func TestFormatRejectionNoteLandAdditions(t *testing.T) {
 		t.Error("tail forged a ready block")
 	}
 	plain := FormatRejectionNote(RejectionNote{Reason: "r", Branch: "b", Target: "t", MR: "m"})
-	for _, absent := range []string{"Head:", "Conflicting:", "Gate tail:"} {
+	for _, absent := range []string{"Head:", "Conflicting:", "Gate tail:", "Approved:"} {
 		if strings.Contains(plain, absent) {
 			t.Errorf("unset field %q written: %s", absent, plain)
 		}
@@ -244,6 +244,17 @@ func TestParseRejectionNoteRoundTrips(t *testing.T) {
 	}
 	if last.GateTail != "" || last.GateLog != "" || len(last.Findings) != 0 {
 		t.Errorf("fields bled from the earlier block: %+v", last)
+	}
+
+	// A gate refusal that followed a clean approve carries the approval with no
+	// findings, and the approval comes back (gt-xal5q).
+	approved := FormatRejectionNote(RejectionNote{Attempt: 1, Kind: "gate", Reason: "make test exit 2", Branch: "b", Target: "main", MR: "gt-x", Head: "feed", Approved: true})
+	back, ok := ParseRejectionNote(approved)
+	if !ok || !back.Approved || len(back.Findings) != 0 || back.Head != "feed" {
+		t.Errorf("approved block = %+v ok=%v, want Approved with no findings", back, ok)
+	}
+	if plain, ok := ParseRejectionNote(second); !ok || plain.Approved {
+		t.Errorf("a block without the approval line reads Approved: %+v ok=%v", plain, ok)
 	}
 }
 
