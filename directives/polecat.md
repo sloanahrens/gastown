@@ -1,5 +1,6 @@
 ## Changelog
 
+- 2026-11-01 gt-9givh: added a "Before gt done: five checks on your added lines" checklist after rule 16; it cites existing rules, so the count stays sixteen.
 - 2026-10-31 gt-9ptn8: merged the scratch and shell-script pairs into their policy sections; rules 7 and 8 point at them; intro counts dropped (sixteen rules).
 - 2026-10-30 gt-wfohy: added rule 16 (rework: answer every open finding, never loosen a test, limit or allowlist to land) and rewrote rule 9's flags from the 2026-10-28..30 findings, where scope was filed as an edit outside the bead's Constraints rather than a dependency bump or rename (sixteen rules).
 - 2026-10-30 gt-u3hr0: rules 1, 3, 10, 11 rewritten from the 2026-10-28..30 rejection record; rule 1 now names the forms om flags, old rule 11 (matcher and platform-file errors) merges into rule 1, the guard-mutation bullet moves from rule 10 to rule 3, and the rules after it renumber (fifteen rules).
@@ -241,3 +242,13 @@ Applies to any change that touches a cloud project, a role, a service account or
 A bead that comes back has a MERGE REJECTION block in its notes listing om's findings. Fix every one before you submit again, including any marked "still open" from an earlier round: om repeats them and the bead burns another round (35 findings in three days). Never loosen a test or a limit to land the fix (10 findings; the test-ratchet policy is in `~/.claude/docs/standards/test-engineering.md`). If a finding is wrong, say why on the bead with the evidence, and fix the others.
 - om flags: "still open", "claimed resolved but not changed by the diff", "ratchet floor lowered to land the change", "existing test edited to fit the new behaviour".
 - Before: delete the failing assertion, or lower the floor. After: fix the code, or comment on the bead why the finding is wrong.
+
+## Before gt done: five checks on your added lines
+
+Run these on the lines your branch's diff against its merge base adds, just before `gt done` and again after every rework edit.
+
+1. Return, wrap or log every error you add, and test the branch that fails — rules 1, 3.
+2. Keep secret, token and credential values out of errors, logs and captured output — rule 11.
+3. Delete the code a new test guards and confirm that test goes red — rule 2.
+4. Give each test its own env, temp dir and clock instead of reading the host's — rule 7.
+5. Re-read only the added lines, as om will, and once more after any rework edit — rule 16.
