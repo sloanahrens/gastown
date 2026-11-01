@@ -13,13 +13,9 @@
 # (docs/research/tracker/K1b-seat-token-as-provider-placeholder.md, question 3).
 # Delete and transfer are left out too (gt-zbpf0): a bead delete is town-side,
 # and no production seat calls transfer. Reassignment is holder-only on the
-# server (gt-26dvk, tracker/store/postgres_update.go): PATCH /v1/issues/* and the
-# batch update op refuse an assignee change on a bead with a holder, on every
-# status, from any actor but that holder, unless the token has admin scope. A
-# rule matches method and path, not the body, so no line here can refuse that.
-# The holder can still hand its own bead to another actor through PATCH and the
-# batch update op, so the transfer refusal narrows the routes and does not close
-# that.
+# server, and a rule matches method and path, not the body, so no line here can
+# refuse it. The reassignment paragraph in the K1b doc and the store
+# (tracker/store/postgres_update.go) hold the rule and what stays open.
 # The admin routes, and the four routes the doc marks not verified, are left out
 # so a seat token that was ever minted with admin scope still could not reach
 # them from a sandbox. A grep of the four found no polecat caller: stats and
