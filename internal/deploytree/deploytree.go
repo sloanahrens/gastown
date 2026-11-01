@@ -93,6 +93,11 @@ func (v Values) Validate() error {
 	if !nameRe.MatchString(v.TrackerDSNSecret) {
 		return fmt.Errorf("%w: trackerDSNSecret must be a Secret name, not a DSN", ErrBadValues)
 	}
+	// The Secret is the workspace's own: its name starts with the workspace id,
+	// so two workspaces cannot name one Secret and share a tracker database.
+	if !strings.HasPrefix(v.TrackerDSNSecret, v.Workspace+"-") {
+		return fmt.Errorf("%w: trackerDSNSecret %q must start with %q", ErrBadValues, v.TrackerDSNSecret, v.Workspace+"-")
+	}
 	for _, c := range Components {
 		if !digestRe.MatchString(v.Images[c]) {
 			return fmt.Errorf("%w: images.%s must be repo@sha256:<digest>", ErrBadValues, c)

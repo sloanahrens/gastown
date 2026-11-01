@@ -157,3 +157,13 @@ func TestUnknownImageErrorNamesTheFirstKeyEveryTime(t *testing.T) {
 		}
 	}
 }
+
+func TestTwoWorkspacesCannotNameOneDSNSecret(t *testing.T) {
+	t.Parallel()
+	for _, ws := range []string{"alpha", "beta"} {
+		file := strings.ReplaceAll(string(valuesFile(ws)), ws+"-tracker-dsn", "shared-tracker-dsn")
+		if _, err := Load([]byte(file)); !errors.Is(err, ErrBadValues) {
+			t.Errorf("workspace %s naming shared-tracker-dsn: Load = %v, want ErrBadValues", ws, err)
+		}
+	}
+}
