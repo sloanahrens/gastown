@@ -13,9 +13,10 @@ import (
 // fakeFS is a town held in memory: the entries each directory lists, the errors
 // a listing answers with, and when each file was last written.
 type fakeFS struct {
-	dirs    map[string][]fs.DirEntry
-	dirErrs map[string]error
-	mtimes  map[string]time.Time
+	dirs     map[string][]fs.DirEntry
+	dirErrs  map[string]error
+	mtimes   map[string]time.Time
+	statErrs map[string]error
 }
 
 func (f fakeFS) ReadDir(name string) ([]fs.DirEntry, error) {
@@ -30,6 +31,9 @@ func (f fakeFS) ReadDir(name string) ([]fs.DirEntry, error) {
 }
 
 func (f fakeFS) Stat(name string) (fs.FileInfo, error) {
+	if err := f.statErrs[name]; err != nil {
+		return nil, err
+	}
 	at, ok := f.mtimes[name]
 	if !ok {
 		return nil, fs.ErrNotExist
@@ -59,10 +63,11 @@ func (e entry) Info() (fs.FileInfo, error) { return nil, nil }
 // fakeGit answers the three reads for one checkout. It refuses any ref other
 // than OriginMain, so a count against the wrong ref reads as a failure.
 type fakeGit struct {
-	branch    string
-	branchErr error
-	behind    int
-	commonDir string
+	branch       string
+	branchErr    error
+	behind       int
+	commonDir    string
+	commonDirErr error
 }
 
 func (g fakeGit) CurrentBranch() (string, error) { return g.branch, g.branchErr }
@@ -74,7 +79,7 @@ func (g fakeGit) CountCommitsBehind(ref string) (int, error) {
 	return g.behind, nil
 }
 
-func (g fakeGit) CommonDir() (string, error) { return g.commonDir, nil }
+func (g fakeGit) CommonDir() (string, error) { return g.commonDir, g.commonDirErr }
 
 // TestClonesReadsEachCheckoutOrItsFailedRead builds a town with one rig that
 // has a crew clone, one rig with no crew directory, and a stray file, then
@@ -140,6 +145,32 @@ func TestClonesReadsEachCheckoutOrItsFailedRead(t *testing.T) {
 			},
 			git:     fakeGit{branch: "main", commonDir: commonDir},
 			wantErr: true,
+		},
+		{
+			name: "a town root that cannot be listed is an error",
+			fsys: func() fakeFS {
+				f := base()
+				delete(f.dirs, town)
+				return f
+			},
+			git:     fakeGit{branch: "main", commonDir: commonDir},
+			wantErr: true,
+		},
+		{
+			name: "a checkout whose git directory cannot be named keeps the reason",
+			fsys: base,
+			git:  fakeGit{branch: "main", behind: 2, commonDirErr: errors.New("fatal: /home/user/.git")},
+			want: []crewfresh.Clone{{Path: clone, Rig: "gastown", Dir: "dunlin", Branch: "main", Behind: 2, Err: "FETCH_HEAD could not be read"}},
+		},
+		{
+			name: "a FETCH_HEAD that cannot be stat'ed keeps the reason",
+			fsys: func() fakeFS {
+				f := base()
+				f.statErrs = map[string]error{commonDir + "/FETCH_HEAD": fs.ErrPermission}
+				return f
+			},
+			git:  fakeGit{branch: "main", behind: 2, commonDir: commonDir},
+			want: []crewfresh.Clone{{Path: clone, Rig: "gastown", Dir: "dunlin", Branch: "main", Behind: 2, Err: "FETCH_HEAD could not be read"}},
 		},
 	}
 
