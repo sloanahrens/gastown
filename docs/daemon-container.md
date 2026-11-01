@@ -1084,9 +1084,12 @@ day.
       cutover waits for both (below), but look first: a window that starts with
       either busy spends its 30 minutes waiting.
 - [ ] **The live compose starts two containers.** Besides the daemon it starts
-      `sweep-dind`, a privileged `docker:dind` engine on the project's internal
-      network that the daemon waits on (reasons: `docs/plans/2026-10-28-daemon-container-design.md`).
-      It must be pullable and able to start before the window.
+      `sweep-dind`, a privileged Docker-in-Docker engine on the project's
+      internal network that the daemon waits on. The compose names its image by
+      digest (`templates.DindImage`, `data.forgejo.org/oci/docker@sha256:...`);
+      that digest must still be served by the engine the daemon will use
+      (`gt daemon rehearse` pulls it). Reasons:
+      `docs/plans/2026-10-28-daemon-container-design.md`.
 - [ ] **A recorded baseline.** Before starting, keep the output of
       `docker --context desktop-linux ps --format '{{.Names}} {{.Status}}'`
       (it shows neither container yet),
@@ -1120,15 +1123,15 @@ in whenever one ends badly. Nothing is rolled back by itself.
    prints that the old daemon is not proven stopped and the restore command
    (`launchctl bootstrap gui/<uid> <the job's plist>`), and does not start the
    container.
-4. **Start the container through the startup guard** (this brings up `sweep-dind` first, then the daemon, which waits for it to be healthy) and wait 2 minutes for
+4. **Start the container through the startup guard** and wait 2 minutes for
    `state.json` to name `container` and the container's name as owner. If the
    guard refuses, it prints that the old daemon is stopped and the restore
    command. If the container starts and never takes the town, it prints the
-   container's logs command and the rollback.
-5. **Wait for the container daemon's second heartbeat**, up to 6 minutes
-   (`docker ps` now shows `sweep-dind` and the daemon). If
+   container's logs command and the rollback. Starting the daemon starts
+   `sweep-dind` first; the daemon waits for it to be healthy.
+5. **Wait for the container daemon's second heartbeat**, up to 6 minutes. If
    there is none it reports the container unhealthy, with its logs command and
-   the rollback.
+   the rollback. `docker ps` now shows `sweep-dind` and the daemon.
 
 Expected on success, last lines: `container owns the town and has beaten twice.`
 then `✓ Cutover to container done.`
@@ -1214,11 +1217,14 @@ Before it, these must be true:
   `launchd` / `com.gastown.daemon` and for the second heartbeat.
 
 Expected on success: `launchd owns the town and has beaten twice.` then
-`✓ Cutover to launchd done.` The cutover stops the daemon container; `sweep-dind`
-and its volume remain until you remove them with
-`docker --context desktop-linux compose -p gt-live -f <live-town>/daemon/container/compose.yml down`
-(never add `-v` without the overseer). If a step fails, the command prints the state it
+`✓ Cutover to launchd done.` If a step fails, the command prints the state it
 left and the command to restore the other side, as it does going forward.
+
+The cutover stops only the daemon container (`compose stop daemon`); `sweep-dind`
+keeps running, with its volume. To remove both containers, run
+`docker --context desktop-linux compose -p gt-live -f <live-town>/daemon/container/compose.yml down`
+once the rollback has succeeded. It keeps the volume; never add `-v` without the
+overseer.
 
 **After the rollback, switch the setting back.** The rollback does not switch
 `daemon.supervisor` either. Make the switch described in the cutover section
