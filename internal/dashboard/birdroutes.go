@@ -81,7 +81,7 @@ func (h *Hub) birdPathsAsWritten(next http.Handler) http.Handler {
 
 // birdPathNeedsCleaning reports whether the mux would clean escapedPath before
 // matching it: a "." or ".." segment, or a separator with nothing after it.
-// Only bird paths are considered; every other path keeps the mux's behaviour.
+// Only bird paths are considered; every other path keeps the mux's behavior.
 func birdPathNeedsCleaning(escapedPath string) bool {
 	rest, ok := strings.CutPrefix(escapedPath, birdPagePrefix)
 	if !ok {
