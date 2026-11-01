@@ -18,14 +18,18 @@ import (
 // writes through, and where it logs.
 type Cutover struct {
 	Opts *Options
+	// Ctx bounds the steps that take one (the provisioning run); nil is
+	// context.Background.
+	Ctx context.Context
 	// Git runs one git argv and returns its stdout; nil runs the git binary, each
 	// call bounded as forgejoresync bounds its own.
 	Git forgejoresync.Runner
 	// Log writes one line to the run's stderr; nil writes nothing.
 	Log func(string)
-	// Runner runs the child processes that are not git: the landing-queue read and
-	// the daemon restart. A test injects a fake; nil means the exec seam is not
-	// wired, and a step that needs it refuses rather than skip its child.
+	// Runner runs the child processes that are not git: the landing-queue read,
+	// the probe, ssh-keygen and the daemon restart. A test injects a fake; nil
+	// means the exec seam is not wired, and a step that needs it refuses rather
+	// than skip its child.
 	Runner Runner
 	// MkdirTemp and RemoveAll make and remove the scratch directory the import's
 	// repository sits in; nil means os.MkdirTemp and os.RemoveAll.

@@ -285,101 +285,22 @@ func (g *runGit) listing(url string) ([]byte, error) {
 	return []byte(b.String()), nil
 }
 
-// memKeys is the in-memory filesystem the promote key step goes through: the
-// key's private half, its public half and the directory holding them, with every
-// write recorded and any operation made to fail.
-type memKeys struct {
-	files   map[string][]byte
-	modes   map[string]fs.FileMode
-	dirs    map[string]fs.FileMode
-	fail    map[string]error // "stat:<path>", "mkdir:<path>", "chmod:<path>", "write:<path>", "rename:<path>"
-	writes  []string
-	renames [][2]string
-}
-
-func newMemKeys() *memKeys {
-	return &memKeys{files: map[string][]byte{}, modes: map[string]fs.FileMode{}, dirs: map[string]fs.FileMode{}, fail: map[string]error{}}
-}
-
-// place puts a file or directory in the world without recording a write: it is
-// what ssh-keygen or an earlier run left there.
-func (m *memKeys) place(path, content string, mode fs.FileMode) {
-	m.files[path] = []byte(content)
-	m.modes[path] = mode
-}
-
-func (m *memKeys) Stat(path string) (fs.FileInfo, error) {
-	if err := m.fail["stat:"+path]; err != nil {
-		return nil, err
-	}
-	if content, ok := m.files[path]; ok {
-		return memInfo{name: path, mode: m.modes[path], size: int64(len(content))}, nil
-	}
-	if mode, ok := m.dirs[path]; ok {
-		return memInfo{name: path, mode: mode | fs.ModeDir}, nil
-	}
-	return nil, &fs.PathError{Op: "stat", Path: path, Err: fs.ErrNotExist}
-}
-
-func (m *memKeys) MkdirAll(path string, perm fs.FileMode) error {
-	if err := m.fail["mkdir:"+path]; err != nil {
-		return err
-	}
-	m.writes = append(m.writes, "mkdir "+path)
-	m.dirs[path] = perm
-	return nil
-}
-
-func (m *memKeys) Chmod(path string, perm fs.FileMode) error {
-	if err := m.fail["chmod:"+path]; err != nil {
-		return err
-	}
-	m.writes = append(m.writes, "chmod "+path)
-	if _, ok := m.files[path]; ok {
-		m.modes[path] = perm
-	} else {
-		m.dirs[path] = perm
-	}
-	return nil
-}
-
-func (m *memKeys) WriteFile(path string, data []byte, perm fs.FileMode) error {
-	if err := m.fail["write:"+path]; err != nil {
-		return err
-	}
-	m.writes = append(m.writes, "write "+path)
-	m.files[path] = slices.Clone(data)
-	m.modes[path] = perm
-	return nil
-}
-
-func (m *memKeys) Rename(oldpath, newpath string) error {
-	if err := m.fail["rename:"+oldpath]; err != nil {
-		return err
-	}
-	m.writes = append(m.writes, "rename "+oldpath)
-	m.renames = append(m.renames, [2]string{oldpath, newpath})
-	m.files[newpath], m.modes[newpath] = m.files[oldpath], m.modes[oldpath]
-	delete(m.files, oldpath)
-	delete(m.modes, oldpath)
-	return nil
-}
-
 // runExec is the Runner seam the whole run goes through. It answers the landing
 // queue read, the probe, ssh-keygen and the daemon restart from what a test
 // staged, and records every call. A key mint is its only write: the probe and the
 // restart are the script's commands that a converged run still makes.
 type runExec struct {
-	keys       *memKeys
+	files      *memFiles
 	counts     []string // the landing counts, in call order; the last repeats
 	countErr   error
 	probeErr   error
 	mintErr    error
 	deriveErr  error
 	restartErr error
-	calls      [][]string // Output calls
-	runs       [][]string // Run calls
-	writes     []string   // a key mint
+	calls      [][]string           // Output calls
+	runs       [][]string           // Run calls
+	tokens     []forgejoprov.Secret // the token each RunWithToken call was handed
+	writes     []string             // a key mint
 	countIndex int
 }
 
@@ -418,13 +339,20 @@ func (f *runExec) Run(argv []string) error {
 		f.writes = append(f.writes, "ssh-keygen "+key)
 		// The child writes both halves mode 644, as the script's stub did, so the
 		// mode the step sets afterwards is what a test reads.
-		f.keys.place(key, runPrivateKey, 0o644)
-		f.keys.place(key+".pub", runPublicKey+"\n", 0o644)
+		f.files.addFile(key, runPrivateKey, 0o644)
+		f.files.addFile(key+".pub", runPublicKey+"\n", 0o644)
 		return nil
 	case "env":
 		return f.restartErr
 	}
 	return fmt.Errorf("unexpected Run call: %q", argv)
+}
+
+// RunWithToken is the probe's channel when no token file was named: it records
+// the token and behaves as Run does.
+func (f *runExec) RunWithToken(argv []string, token forgejoprov.Secret) error {
+	f.tokens = append(f.tokens, token)
+	return f.Run(argv)
 }
 
 // runWorld is one whole cutover's world: the options, the seam set and the fakes
@@ -433,13 +361,16 @@ type runWorld struct {
 	opts   *Options
 	env    RunEnv
 	files  *memFiles
-	keys   *memKeys
 	git    *runGit
 	exec   *runExec
 	fake   *forgejotest.Fake
 	pfiles *provisionFiles
-	stdout *strings.Builder
-	stderr *strings.Builder
+	// madeTemp and removed are the import's scratch directory lifecycle: the
+	// (dir, pattern) MkdirTemp was asked for, and the path RemoveAll was given.
+	madeTemp *[]string
+	removed  *[]string
+	stdout   *strings.Builder
+	stderr   *strings.Builder
 }
 
 // newRunWorld builds the world: a rig whose Forgejo copy already holds main while
@@ -459,7 +390,6 @@ func newRunWorld(t *testing.T, dryRun bool) *runWorld {
 	files.addFile(runTownRoot+"/mayor/town.json", runTownJSON, 0o644)
 	files.addFile(opts.RigRoot+"/settings/config.json", runSettingsJSON, 0o644)
 
-	keys := newMemKeys()
 	git := &runGit{
 		refs: map[string]map[string]string{
 			runGitHubURL: {
@@ -488,18 +418,22 @@ func newRunWorld(t *testing.T, dryRun bool) *runWorld {
 	fake.AddRepo(runRepoName)
 	fake.ViewerExists = true
 	pfiles := newProvisionFiles()
-	exec := &runExec{keys: keys, counts: []string{"0"}}
+	exec := &runExec{files: files, counts: []string{"0"}}
 	stdout, stderr := &strings.Builder{}, &strings.Builder{}
+	madeTemp, removed := &[]string{}, &[]string{}
 	env := RunEnv{
 		Git:    git.run,
 		Files:  files,
 		Now:    func() time.Time { return time.Date(2026, 11, 1, 14, 5, 9, 0, time.UTC) },
 		Runner: exec,
-		Keys:   keys,
-		MkdirTemp: func(string, string) (string, error) {
+		MkdirTemp: func(dir, pattern string) (string, error) {
+			*madeTemp = append(*madeTemp, dir+"|"+pattern)
 			return runScratchRoot, nil
 		},
-		RemoveAll: func(string) error { return nil },
+		RemoveAll: func(path string) error {
+			*removed = append(*removed, path)
+			return nil
+		},
 		ProvisionEnv: forgejoprov.Env{
 			Getenv:   runGetenv,
 			ReadFile: runReadFile,
@@ -509,7 +443,7 @@ func newRunWorld(t *testing.T, dryRun bool) *runWorld {
 		Stdout: stdout,
 		Stderr: stderr,
 	}
-	return &runWorld{opts: opts, env: env, files: files, keys: keys, git: git, exec: exec, fake: fake, pfiles: pfiles, stdout: stdout, stderr: stderr}
+	return &runWorld{opts: opts, env: env, files: files, git: git, exec: exec, fake: fake, pfiles: pfiles, madeTemp: madeTemp, removed: removed, stdout: stdout, stderr: stderr}
 }
 
 // runGetenv is the environment seam a whole-run test reads: the config home the
@@ -540,13 +474,34 @@ func (w *runWorld) run(t *testing.T, ctx context.Context) int {
 // script's test captured it.
 func (w *runWorld) output() string { return w.stdout.String() + w.stderr.String() }
 
+// failFile makes one Files operation fail for the run: op is stat, read, write,
+// rename, chmod or mkdir, as failFiles reads it.
+func (w *runWorld) failFile(op, path string) {
+	w.env.Files = failFiles{memFiles: w.files, fail: map[string]error{op + " " + path: errExit}}
+}
+
+// writtenPaths is every path a fake recorded a write to, so a test can say where
+// the run wrote rather than only how many times.
+func (w *runWorld) writtenPaths() []string {
+	var paths []string
+	paths = append(paths, w.files.writes...)
+	for _, pair := range w.files.renames {
+		paths = append(paths, pair[0], pair[1])
+	}
+	for _, entry := range w.exec.writes {
+		paths = append(paths, strings.TrimPrefix(entry, "ssh-keygen "))
+	}
+	for path := range w.pfiles.written {
+		paths = append(paths, path)
+	}
+	return paths
+}
+
 // resetWrites forgets every write each fake recorded, so a second run's stillness
 // is what the logs then hold.
 func (w *runWorld) resetWrites() {
 	w.files.writes = nil
 	w.files.renames = nil
-	w.keys.writes = nil
-	w.keys.renames = nil
 	w.git.writes = nil
 	w.exec.writes = nil
 	w.fake.ClearCalls()
@@ -572,9 +527,10 @@ func (w *runWorld) snapshotTokens() provisionSnapshot {
 
 // TestRunDryRunWritesNothingOutsideItsTempDir: a dry run prints the probe, the
 // ref import, the key it would mint, the gh deploy-key command and the daemon
-// restart, and writes nothing at all: no key, no settings, no town.json, no
-// remote, no push, no Forgejo write and no restart. Making WriteSettings or the
-// provisioner ignore DryRun turns it red.
+// restart, and writes nothing outside the one scratch directory it makes and
+// removes: no key, no settings, no town.json, no remote, no push, no Forgejo
+// write and no restart. Making WriteSettings or the provisioner ignore DryRun
+// turns it red.
 func TestRunDryRunWritesNothingOutsideItsTempDir(t *testing.T) {
 	t.Parallel()
 	w := newRunWorld(t, true)
@@ -621,11 +577,10 @@ func TestRunDryRunWritesNothingOutsideItsTempDir(t *testing.T) {
 	if len(w.files.writes) != 0 || len(w.files.renames) != 0 {
 		t.Errorf("the dry run wrote files: %q, renamed %q", w.files.writes, w.files.renames)
 	}
-	if len(w.keys.writes) != 0 || len(w.keys.renames) != 0 {
-		t.Errorf("the dry run changed key files: %q, renamed %q", w.keys.writes, w.keys.renames)
-	}
-	if len(w.keys.files) != 0 {
-		t.Errorf("the dry run created key files: %q", w.keys.files)
+	for _, path := range []string{runKeyPath, runKeyPath + ".pub"} {
+		if _, ok := w.files.files[path]; ok {
+			t.Errorf("the dry run created the key file %s", path)
+		}
 	}
 	if len(w.git.writes) != 0 {
 		t.Errorf("the dry run changed %q", w.git.writes)
@@ -652,6 +607,21 @@ func TestRunDryRunWritesNothingOutsideItsTempDir(t *testing.T) {
 	}
 	if got := string(w.files.files[runTownRoot+"/mayor/town.json"]); got != beforeTown {
 		t.Errorf("the dry run rewrote town.json:\n%s", got)
+	}
+
+	// Its own temp dir is the one place a dry run may write: it is made from the
+	// default temp location, removed when the import ends, and every path any fake
+	// recorded a write to lies inside it.
+	if !slices.Equal(*w.madeTemp, []string{"|forgejo-cutover."}) {
+		t.Errorf("the dry run made the scratch directories %q, want one from the default temp dir", *w.madeTemp)
+	}
+	if !slices.Equal(*w.removed, []string{runScratchRoot}) {
+		t.Errorf("the dry run removed %q, want its scratch directory %q", *w.removed, runScratchRoot)
+	}
+	for _, path := range w.writtenPaths() {
+		if path != runScratchRoot && !strings.HasPrefix(path, runScratchRoot+"/") {
+			t.Errorf("the dry run wrote outside its temp dir: %q", path)
+		}
 	}
 }
 
@@ -692,9 +662,6 @@ func TestRunSecondRunChangesNothing(t *testing.T) {
 	}
 	if len(w.files.writes) != 0 || len(w.files.renames) != 0 {
 		t.Errorf("the second run wrote files: %q, renamed %q", w.files.writes, w.files.renames)
-	}
-	if len(w.keys.writes) != 0 || len(w.keys.renames) != 0 {
-		t.Errorf("the second run changed key files: %q, renamed %q", w.keys.writes, w.keys.renames)
 	}
 	if len(w.exec.writes) != 0 {
 		t.Errorf("the second run ran the write children %q", w.exec.writes)
@@ -818,10 +785,10 @@ func TestRunPromoteKey(t *testing.T) {
 		if code := w.run(t, context.Background()); code != ExitOK {
 			t.Fatalf("Run = %d, want 0 (output: %s)", code, w.output())
 		}
-		if got := w.keys.modes[runKeyPath]; got != 0o600 {
+		if got := w.files.modes[runKeyPath]; got != 0o600 {
 			t.Errorf("the private key mode = %v, want 0600", got)
 		}
-		if got := w.keys.modes[runKeyPath+".pub"]; got != 0o644 {
+		if got := w.files.modes[runKeyPath+".pub"]; got != 0o644 {
 			t.Errorf("the public half mode = %v, want 0644", got)
 		}
 		mint := w.exec.writes
@@ -855,8 +822,8 @@ func TestRunPromoteKey(t *testing.T) {
 	t.Run("reuses an existing key without running ssh-keygen", func(t *testing.T) {
 		t.Parallel()
 		w := newRunWorld(t, false)
-		w.keys.place(runKeyPath, runPrivateKey, 0o600)
-		w.keys.place(runKeyPath+".pub", runPublicKey+"\n", 0o644)
+		w.files.addFile(runKeyPath, runPrivateKey, 0o600)
+		w.files.addFile(runKeyPath+".pub", runPublicKey+"\n", 0o644)
 		if code := w.run(t, context.Background()); code != ExitOK {
 			t.Fatalf("Run = %d, want 0 (output: %s)", code, w.output())
 		}
@@ -868,20 +835,39 @@ func TestRunPromoteKey(t *testing.T) {
 		}
 	})
 
-	t.Run("derives a missing public half rather than a new key", func(t *testing.T) {
+	t.Run("sets a reused key whose mode drifted back to 600", func(t *testing.T) {
 		t.Parallel()
 		w := newRunWorld(t, false)
-		w.keys.place(runKeyPath, runPrivateKey, 0o644)
+		w.files.addFile(runKeyPath, runPrivateKey, 0o644)
+		w.files.addFile(runKeyPath+".pub", runPublicKey+"\n", 0o644)
 		if code := w.run(t, context.Background()); code != ExitOK {
 			t.Fatalf("Run = %d, want 0 (output: %s)", code, w.output())
 		}
-		if got := string(w.keys.files[runKeyPath+".pub"]); !strings.Contains(got, "AAAARUNPUBLICKEY") {
+		if got := w.files.modes[runKeyPath]; got != 0o600 {
+			t.Errorf("the reused private key mode = %v, want 0600", got)
+		}
+		if got := string(w.files.files[runKeyPath+".pub"]); got != runPublicKey+"\n" {
+			t.Errorf("the run rewrote the public half: %q", got)
+		}
+		if len(w.exec.writes) != 0 {
+			t.Errorf("the run minted a key over an existing one: %q", w.exec.writes)
+		}
+	})
+
+	t.Run("derives a missing public half rather than a new key", func(t *testing.T) {
+		t.Parallel()
+		w := newRunWorld(t, false)
+		w.files.addFile(runKeyPath, runPrivateKey, 0o644)
+		if code := w.run(t, context.Background()); code != ExitOK {
+			t.Fatalf("Run = %d, want 0 (output: %s)", code, w.output())
+		}
+		if got := string(w.files.files[runKeyPath+".pub"]); !strings.Contains(got, "AAAARUNPUBLICKEY") {
 			t.Errorf("the derived public half = %q, want the key ssh-keygen printed", got)
 		}
-		if got := w.keys.modes[runKeyPath+".pub"]; got != 0o644 {
+		if got := w.files.modes[runKeyPath+".pub"]; got != 0o644 {
 			t.Errorf("the derived public half mode = %v, want 0644", got)
 		}
-		if got := w.keys.modes[runKeyPath]; got != 0o600 {
+		if got := w.files.modes[runKeyPath]; got != 0o600 {
 			t.Errorf("the reused private key mode = %v, want 0600", got)
 		}
 		for _, argv := range w.exec.runs {
@@ -907,12 +893,12 @@ func TestRunPromoteKeyFailures(t *testing.T) {
 	}{
 		{
 			name:  "the private half cannot be looked at",
-			setup: func(w *runWorld) { w.keys.fail["stat:"+runKeyPath] = errExit },
+			setup: func(w *runWorld) { w.failFile("stat", runKeyPath) },
 			want:  "could not look at the promote key",
 		},
 		{
 			name:  "the key directory cannot be made",
-			setup: func(w *runWorld) { w.keys.fail["mkdir:"+runConfigDir+"/gt"] = errExit },
+			setup: func(w *runWorld) { w.failFile("mkdir", runConfigDir+"/gt") },
 			want:  "could not make the promote key's directory",
 		},
 		{
@@ -923,37 +909,46 @@ func TestRunPromoteKeyFailures(t *testing.T) {
 		{
 			name: "the private half cannot be set to mode 600",
 			setup: func(w *runWorld) {
-				w.keys.fail["chmod:"+runKeyPath] = errExit
+				w.failFile("chmod", runKeyPath)
 			},
 			want: "mode 600",
 		},
 		{
 			name: "the public half cannot be set to mode 644",
 			setup: func(w *runWorld) {
-				w.keys.fail["chmod:"+runKeyPath+".pub"] = errExit
+				w.failFile("chmod", runKeyPath+".pub")
 			},
 			want: "mode 644",
 		},
 		{
 			name: "the existing public half cannot be looked at",
 			setup: func(w *runWorld) {
-				w.keys.place(runKeyPath, runPrivateKey, 0o600)
-				w.keys.fail["stat:"+runKeyPath+".pub"] = errExit
+				w.files.addFile(runKeyPath, runPrivateKey, 0o600)
+				w.failFile("stat", runKeyPath+".pub")
 			},
 			want: "could not look at the public half",
 		},
 		{
 			name: "the existing key cannot be set to mode 600",
 			setup: func(w *runWorld) {
-				w.keys.place(runKeyPath, runPrivateKey, 0o644)
-				w.keys.fail["chmod:"+runKeyPath] = errExit
+				w.files.addFile(runKeyPath, runPrivateKey, 0o644)
+				w.failFile("chmod", runKeyPath)
+			},
+			want: "mode 600",
+		},
+		{
+			name: "the reused key cannot be set to mode 600 when its public half exists",
+			setup: func(w *runWorld) {
+				w.files.addFile(runKeyPath, runPrivateKey, 0o644)
+				w.files.addFile(runKeyPath+".pub", runPublicKey+"\n", 0o644)
+				w.failFile("chmod", runKeyPath)
 			},
 			want: "mode 600",
 		},
 		{
 			name: "ssh-keygen cannot derive the public half",
 			setup: func(w *runWorld) {
-				w.keys.place(runKeyPath, runPrivateKey, 0o600)
+				w.files.addFile(runKeyPath, runPrivateKey, 0o600)
 				w.exec.deriveErr = errExit
 			},
 			want: "could not derive the public half",
@@ -961,24 +956,24 @@ func TestRunPromoteKeyFailures(t *testing.T) {
 		{
 			name: "the derived public half cannot be written",
 			setup: func(w *runWorld) {
-				w.keys.place(runKeyPath, runPrivateKey, 0o600)
-				w.keys.fail["write:"+runKeyPath+".pub.tmp"] = errExit
+				w.files.addFile(runKeyPath, runPrivateKey, 0o600)
+				w.failFile("write", runKeyPath+".pub.tmp")
 			},
 			want: "could not write the public half",
 		},
 		{
 			name: "the derived public half cannot be set to mode 644",
 			setup: func(w *runWorld) {
-				w.keys.place(runKeyPath, runPrivateKey, 0o600)
-				w.keys.fail["chmod:"+runKeyPath+".pub.tmp"] = errExit
+				w.files.addFile(runKeyPath, runPrivateKey, 0o600)
+				w.failFile("chmod", runKeyPath+".pub.tmp")
 			},
 			want: "mode 644",
 		},
 		{
 			name: "the derived public half cannot be moved into place",
 			setup: func(w *runWorld) {
-				w.keys.place(runKeyPath, runPrivateKey, 0o600)
-				w.keys.fail["rename:"+runKeyPath+".pub.tmp"] = errExit
+				w.files.addFile(runKeyPath, runPrivateKey, 0o600)
+				w.failFile("rename", runKeyPath+".pub")
 			},
 			want: "could not move the public half",
 		},
@@ -1026,8 +1021,11 @@ func TestRunExitCodes(t *testing.T) {
 		if code := w.run(t, context.Background()); code != ExitFailure {
 			t.Fatalf("Run = %d, want 1 (output: %s)", code, w.output())
 		}
-		if !strings.Contains(w.stderr.String(), "sudo -u gt-forge gt-approve run forgejo-cutover") {
-			t.Errorf("the failure does not name the broker:\n%s", w.stderr.String())
+		if !strings.Contains(w.stderr.String(), "sudo -u gt-forge gt-approve run forgejo-cutover-go -- <its arguments>") {
+			t.Errorf("the failure does not name this command's broker rule:\n%s", w.stderr.String())
+		}
+		if strings.Contains(w.stderr.String(), "run forgejo-cutover --") {
+			t.Errorf("the failure names the retired shell script's broker rule:\n%s", w.stderr.String())
 		}
 		if strings.Contains(w.output(), decoy) {
 			t.Fatalf("the failure echoes a token from a file it should not read:\n%s", w.output())
@@ -1089,8 +1087,13 @@ func TestRunDivergedRef(t *testing.T) {
 			if len(w.git.writes) != 0 {
 				t.Errorf("the run pushed before stopping: %q", w.git.writes)
 			}
-			if len(w.files.writes) != 0 || len(w.keys.files) != 0 {
-				t.Errorf("the run wrote after the divergence: files %q, keys %q", w.files.writes, w.keys.files)
+			if len(w.files.writes) != 0 {
+				t.Errorf("the run wrote after the divergence: %q", w.files.writes)
+			}
+			for _, path := range []string{runKeyPath, runKeyPath + ".pub"} {
+				if _, ok := w.files.files[path]; ok {
+					t.Errorf("the run wrote the key file %s after the divergence", path)
+				}
 			}
 		})
 	}
@@ -1178,7 +1181,7 @@ func TestRunBrokerToken(t *testing.T) {
 					t.Errorf("%s holds the token", path)
 				}
 			}
-			for path, content := range w.keys.files {
+			for path, content := range w.files.files {
 				if strings.Contains(string(content), token) {
 					t.Errorf("%s holds the token", path)
 				}
@@ -1200,6 +1203,11 @@ func TestRunBrokerToken(t *testing.T) {
 			}
 			if probes != 1 {
 				t.Errorf("the probe ran %d times, want once", probes)
+			}
+			// The probe is the one child handed the token, and it is handed the
+			// resolved value; no other child's call carries one.
+			if len(w.exec.tokens) != 1 || w.exec.tokens[0].Reveal() != token {
+				t.Errorf("the probe was handed %d token(s), want exactly the resolved one", len(w.exec.tokens))
 			}
 			if settings := string(w.files.files[w.opts.RigRoot+"/settings/config.json"]); !strings.Contains(settings, runForgejoURL) {
 				t.Errorf("the run did not converge the rig's settings:\n%s", settings)
@@ -1245,6 +1253,26 @@ func TestRunRefusesAnUnwiredSeam(t *testing.T) {
 			t.Errorf("stderr = %q, want the missing options named", w.stderr.String())
 		}
 	})
+}
+
+// TestRunContextReachesTheProvisioningRun: the in-process provisioning run gets
+// the cutover's own context, so an interrupt reaches the requests it makes.
+func TestRunContextReachesTheProvisioningRun(t *testing.T) {
+	t.Parallel()
+	type ctxKey struct{}
+	w := newRunWorld(t, false)
+	var got context.Context
+	w.env.ProvisionRun = func(ctx context.Context, _ *forgejoprov.Options, _ forgejoprov.Env) int {
+		got = ctx
+		return forgejoprov.ExitOK
+	}
+	ctx := context.WithValue(context.Background(), ctxKey{}, "the run's context")
+	if code := w.run(t, ctx); code != ExitOK {
+		t.Fatalf("Run = %d, want 0 (output: %s)", code, w.output())
+	}
+	if got == nil || got.Value(ctxKey{}) != "the run's context" {
+		t.Error("the provisioning run got a context the cutover was not given")
+	}
 }
 
 // TestRunCanceledContext: a canceled context stops the run before the step it

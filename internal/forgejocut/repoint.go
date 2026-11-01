@@ -23,6 +23,8 @@ type Files interface {
 	ReadFile(path string) ([]byte, error)
 	WriteFile(path string, data []byte, perm fs.FileMode) error
 	Rename(oldpath, newpath string) error
+	Chmod(path string, perm fs.FileMode) error
+	MkdirAll(path string, perm fs.FileMode) error
 }
 
 // osFiles is Files on the operating system.
@@ -35,6 +37,8 @@ func (osFiles) Rename(oldpath, newpath string) error       { return os.Rename(ol
 func (osFiles) WriteFile(path string, data []byte, perm fs.FileMode) error {
 	return os.WriteFile(path, data, perm)
 }
+func (osFiles) Chmod(path string, perm fs.FileMode) error    { return os.Chmod(path, perm) }
+func (osFiles) MkdirAll(path string, perm fs.FileMode) error { return os.MkdirAll(path, perm) }
 
 // files is the filesystem the run reads: the injected one, else the operating
 // system's.

@@ -10,6 +10,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
+	"slices"
+	"strings"
+	"syscall"
 
 	"github.com/steveyegge/gastown/internal/forgejocut"
 	"github.com/steveyegge/gastown/internal/forgejoprov"
@@ -18,7 +22,12 @@ import (
 )
 
 func main() {
-	os.Exit(run(os.Args[1:], liveEnv(), os.Stdout, os.Stderr))
+	// An interrupt or a termination stops the run before its next step and
+	// cancels the child process it is waiting on.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	code := run(ctx, os.Args[1:], liveEnv(), os.Stdout, os.Stderr)
+	stop()
+	os.Exit(code)
 }
 
 // parseOptions is the seam runParse reads its command line through: Parse in the
@@ -32,17 +41,17 @@ type parseOptions func(args []string, env forgejocut.Env) (*forgejocut.Options, 
 type cutoverRun func(ctx context.Context, opts *forgejocut.Options, env forgejocut.RunEnv) int
 
 // run is the process minus os.Exit: a test hands it a command line, the seam set
-// the parse reads through and the streams, and reads the code the process would
-// have exited with.
-func run(args []string, env forgejocut.Env, stdout, stderr io.Writer) int {
-	return runParse(args, env, stdout, stderr, forgejocut.Parse, forgejocut.Run)
+// the parse reads through, the streams and the context, and reads the code the
+// process would have exited with.
+func run(ctx context.Context, args []string, env forgejocut.Env, stdout, stderr io.Writer) int {
+	return runParse(ctx, args, env, stdout, stderr, forgejocut.Parse, forgejocut.Run)
 }
 
 // runParse turns what Parse returned into the script's exit codes: the help
 // request is the usage text and success, a refused command line is its message and
 // the usage hint, and any other error is a run that failed. A command line that
-// parses reaches the cutover run.
-func runParse(args []string, env forgejocut.Env, stdout, stderr io.Writer, parse parseOptions, cutover cutoverRun) int {
+// parses reaches the cutover run with the same context.
+func runParse(ctx context.Context, args []string, env forgejocut.Env, stdout, stderr io.Writer, parse parseOptions, cutover cutoverRun) int {
 	opts, err := parse(args, env)
 	switch {
 	case errors.Is(err, forgejocut.ErrHelp):
@@ -62,7 +71,7 @@ func runParse(args []string, env forgejocut.Env, stdout, stderr io.Writer, parse
 		fmt.Fprintln(stderr, "forgejo-cutover: the command line parsed to no options")
 		return forgejocut.ExitFailure
 	}
-	return cutover(context.Background(), opts, liveRunEnv(stdout, stderr))
+	return cutover(ctx, opts, liveRunEnv(ctx, stdout, stderr))
 }
 
 // liveEnv is the seam set the process reads: the environment, the filesystem, the
@@ -85,11 +94,12 @@ func liveEnv() forgejocut.Env {
 }
 
 // liveRunEnv is the seam set the cutover run reads: the process's streams, the
-// real children, and the environment and token file the admin token resolves from,
-// which is the same seam the provisioning run is given.
-func liveRunEnv(stdout, stderr io.Writer) forgejocut.RunEnv {
+// real children bounded by the run's context, and the environment and token file
+// the admin token resolves from, which is the same seam the provisioning run is
+// given.
+func liveRunEnv(ctx context.Context, stdout, stderr io.Writer) forgejocut.RunEnv {
 	return forgejocut.RunEnv{
-		Runner:       execRunner{stdout: stdout, stderr: stderr},
+		Runner:       execRunner{ctx: ctx, stdout: stdout, stderr: stderr},
 		ProvisionEnv: forgejoprov.Env{Getenv: os.Getenv, ReadFile: os.ReadFile},
 		Stdout:       stdout,
 		Stderr:       stderr,
@@ -115,28 +125,90 @@ func (bareGit) OriginURL(bareRepo string) (string, error) {
 	return git.NewGitWithDir(bareRepo, "").RemoteURL("origin")
 }
 
+// tokenEnvNames are the variables the admin token arrives in: the broker's and
+// the stand-in's. No child inherits either; the probe, when it has no token file,
+// is given the broker's variable by RunWithToken and nothing else is.
+var tokenEnvNames = []string{
+	"GT_AUTH_FORGEJO_TOKEN", //nolint:gosec // G101: the variable's name, not a credential
+	"FORGEJO_ADMIN_TOKEN",   //nolint:gosec // G101: the variable's name, not a credential
+}
+
+// probeTokenEnv is the variable the probe resolves its token from, as the old
+// shell cutover's probe did.
+const probeTokenEnv = "GT_AUTH_FORGEJO_TOKEN" //nolint:gosec // G101: the variable's name, not a credential
+
 // execRunner is forgejocut.Runner over the operating system: Output captures a
 // read's stdout, and Run lets a child's own output reach the operator's streams —
-// the probe's log is the operator's to read.
+// the probe's log is the operator's to read. Every child is bounded by the run's
+// context and runs with the admin token removed from its environment.
 type execRunner struct {
-	stdout io.Writer
-	stderr io.Writer
+	// ctx bounds the child; nil is context.Background.
+	ctx context.Context
+	// environ is the environment the children are built from; nil is os.Environ.
+	environ func() []string
+	stdout  io.Writer
+	stderr  io.Writer
+}
+
+// command builds the child for argv.
+func (r execRunner) command(argv []string) (*exec.Cmd, error) {
+	if len(argv) == 0 {
+		return nil, errors.New("no command to run")
+	}
+	ctx := r.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return exec.CommandContext(ctx, argv[0], argv[1:]...), nil //nolint:gosec // G204: argv is the cutover's own line, its paths from validated flags
+}
+
+// childEnv is the environment a child runs with: the process's own, less the
+// variables the admin token arrives in.
+func (r execRunner) childEnv() []string {
+	environ := r.environ
+	if environ == nil {
+		environ = os.Environ
+	}
+	entries := environ()
+	env := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		key, _, _ := strings.Cut(entry, "=")
+		if slices.Contains(tokenEnvNames, key) {
+			continue
+		}
+		env = append(env, entry)
+	}
+	return env
 }
 
 // Output runs argv and returns its stdout.
 func (r execRunner) Output(argv []string) ([]byte, error) {
-	if len(argv) == 0 {
-		return nil, errors.New("no command to run")
+	cmd, err := r.command(argv)
+	if err != nil {
+		return nil, err
 	}
-	return exec.Command(argv[0], argv[1:]...).Output() //nolint:gosec // G204: argv is the cutover's own line, its paths from validated flags
+	cmd.Env = r.childEnv()
+	return cmd.Output()
 }
 
 // Run runs argv with the run's own stdout and stderr.
 func (r execRunner) Run(argv []string) error {
-	if len(argv) == 0 {
-		return errors.New("no command to run")
+	return r.run(argv, nil)
+}
+
+// RunWithToken runs argv with the admin token in its environment: the probe's
+// channel. Every other variable the token could hide in is still removed.
+func (r execRunner) RunWithToken(argv []string, token forgejoprov.Secret) error {
+	return r.run(argv, []string{probeTokenEnv + "=" + token.Reveal()})
+}
+
+// run builds the child once, adds extra to its scrubbed environment and runs it.
+func (r execRunner) run(argv, extra []string) error {
+	cmd, err := r.command(argv)
+	if err != nil {
+		return err
 	}
-	cmd := exec.Command(argv[0], argv[1:]...) //nolint:gosec // G204: argv is the cutover's own line, its paths from validated flags
+	cmd.Env = append(r.childEnv(), extra...)
 	cmd.Stdout = r.stdout
 	cmd.Stderr = r.stderr
 	return cmd.Run()

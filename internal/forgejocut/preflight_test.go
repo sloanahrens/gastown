@@ -9,15 +9,19 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/forgejoprov"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
 // fakeRunner is the Runner seam: it records each argv in order and answers every
-// call with the stdout and error it is given.
+// call with the stdout and error it is given. A RunWithToken call also records
+// the token it was handed, so a test can tell the probe's channel from a plain
+// Run.
 type fakeRunner struct {
-	out   []byte
-	err   error
-	calls [][]string
+	out    []byte
+	err    error
+	calls  [][]string
+	tokens []forgejoprov.Secret
 }
 
 func (f *fakeRunner) Output(argv []string) ([]byte, error) {
@@ -27,6 +31,12 @@ func (f *fakeRunner) Output(argv []string) ([]byte, error) {
 
 func (f *fakeRunner) Run(argv []string) error {
 	f.calls = append(f.calls, argv)
+	return f.err
+}
+
+func (f *fakeRunner) RunWithToken(argv []string, token forgejoprov.Secret) error {
+	f.calls = append(f.calls, argv)
+	f.tokens = append(f.tokens, token)
 	return f.err
 }
 
@@ -183,9 +193,10 @@ func probeOptions() *Options {
 	}
 }
 
-func TestProbeArgsAndOutcome(t *testing.T) {
-	t.Parallel()
-	withoutToken := []string{"bash", probeScript, "gastown",
+// probeArgvWithoutToken is the exact probe argv when no admin token file was
+// named: the token travels through the runner's environment, never in a word.
+func probeArgvWithoutToken() []string {
+	return []string{"bash", probeScript, "gastown",
 		"--repo", "acme/gastown",
 		"--main-branch", "main",
 		"--town-root", "/srv/town",
@@ -194,6 +205,11 @@ func TestProbeArgsAndOutcome(t *testing.T) {
 		"--github-url", probeGitHub,
 		"--git-url", probeAdminGit,
 	}
+}
+
+func TestProbeArgsAndOutcome(t *testing.T) {
+	t.Parallel()
+	withoutToken := probeArgvWithoutToken()
 	withToken := []string{"bash", probeScript, "gastown",
 		"--repo", "acme/gastown",
 		"--main-branch", "main",
@@ -212,11 +228,15 @@ func TestProbeArgsAndOutcome(t *testing.T) {
 		wantArgv  []string
 		wantErr   string
 		wantLog   []string
+		// wantToken is true when the probe resolves the token from the environment
+		// the runner hands it: no token file was named.
+		wantToken bool
 	}{
 		{
-			name:     "green probe without a token file",
-			wantArgv: withoutToken,
-			wantLog:  []string{"probing gastown through its real runner before the cutover"},
+			name:      "green probe without a token file",
+			wantArgv:  withoutToken,
+			wantLog:   []string{"probing gastown through its real runner before the cutover"},
+			wantToken: true,
 		},
 		{
 			name:      "green probe with a token file",
@@ -225,11 +245,12 @@ func TestProbeArgsAndOutcome(t *testing.T) {
 			wantLog:   []string{"probing gastown through its real runner before the cutover"},
 		},
 		{
-			name:     "red probe",
-			runErr:   errExit,
-			wantArgv: withoutToken,
-			wantErr:  "the probe of gastown is not green; fix the runner or the gate workflow and re-run",
-			wantLog:  []string{"probing gastown through its real runner before the cutover"},
+			name:      "red probe",
+			runErr:    errExit,
+			wantArgv:  withoutToken,
+			wantErr:   "the probe of gastown is not green; fix the runner or the gate workflow and re-run",
+			wantLog:   []string{"probing gastown through its real runner before the cutover"},
+			wantToken: true,
 		},
 		{
 			name:     "dry run prints the probe and runs nothing",
@@ -258,8 +279,9 @@ func TestProbeArgsAndOutcome(t *testing.T) {
 			o.AdminTokenFile = tt.tokenFile
 			o.DryRun = tt.dryRun
 			run := &fakeRunner{err: tt.runErr}
+			token := probeToken(t)
 			var logs []string
-			err := ProbeGreen(run, o, func(s string) { logs = append(logs, s) })
+			err := ProbeGreen(run, o, token, func(s string) { logs = append(logs, s) })
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("ProbeGreen = %v, want nil", err)
@@ -274,6 +296,13 @@ func TestProbeArgsAndOutcome(t *testing.T) {
 			} else if len(run.calls) != 1 || !slices.Equal(run.calls[0], tt.wantArgv) {
 				t.Fatalf("ProbeGreen ran %q, want one call of %q", run.calls, tt.wantArgv)
 			}
+			if tt.wantToken {
+				if len(run.tokens) != 1 || run.tokens[0].Reveal() != adminMarker {
+					t.Fatal("the probe was not handed the resolved token")
+				}
+			} else if len(run.tokens) != 0 {
+				t.Fatal("the probe was handed a token it should have read from the named file")
+			}
 			if !slices.Equal(logs, tt.wantLog) {
 				t.Fatalf("logs = %q, want %q", logs, tt.wantLog)
 			}
@@ -285,6 +314,44 @@ func TestProbeArgsAndOutcome(t *testing.T) {
 // file, so the assertions below run against the token's bytes rather than a
 // string that never leaves the test.
 const adminMarker = "tok-9f3a1c-marker"
+
+// probeToken is the resolved admin token a probe test hands ProbeGreen.
+func probeToken(t *testing.T) forgejoprov.Secret {
+	t.Helper()
+	token, err := forgejoprov.ResolveAdminToken(func(string) string { return adminMarker }, nil, "")
+	if err != nil {
+		t.Fatalf("resolve the fixture admin token: %v", err)
+	}
+	return token
+}
+
+// TestProbeHandsOnlyTheEnvironmentTokenToTheProbe: with no token file named, the
+// probe is the one child handed the token, and the value is in no argv word, log
+// line or returned error.
+func TestProbeHandsOnlyTheEnvironmentTokenToTheProbe(t *testing.T) {
+	t.Parallel()
+	run := &fakeRunner{}
+	var logs []string
+	if err := ProbeGreen(run, probeOptions(), probeToken(t), func(s string) { logs = append(logs, s) }); err != nil {
+		t.Fatal("ProbeGreen with a token in the environment failed")
+	}
+	if len(run.tokens) != 1 || run.tokens[0].Reveal() != adminMarker {
+		t.Fatal("the probe was not handed the resolved token")
+	}
+	if len(run.calls) != 1 || !slices.Equal(run.calls[0], probeArgvWithoutToken()) {
+		t.Fatal("a recorded argv is not the exact expected argv")
+	}
+	for _, argv := range run.calls {
+		if strings.Contains(commandText(argv), adminMarker) {
+			t.Fatal("a recorded argv carries the admin token")
+		}
+	}
+	for _, line := range logs {
+		if strings.Contains(line, adminMarker) {
+			t.Fatal("a log line carries the admin token")
+		}
+	}
+}
 
 // stageTokenFile writes FORGEJO_ADMIN_TOKEN=<marker> to a fresh file and returns
 // its path: the value the preflight is handed, never the token itself.
@@ -357,7 +424,7 @@ func TestProbeKeepsAdminTokenOutOfArgvLogsAndErrors(t *testing.T) {
 			log := func(s string) { logs = append(logs, s) }
 			var err error
 			if tt.probe {
-				err = ProbeGreen(run, o, log)
+				err = ProbeGreen(run, o, probeToken(t), log)
 			} else {
 				err = RefuseIfLandingInFlight(run, o, log)
 			}
@@ -395,7 +462,7 @@ func TestProbeNeverReadsTheAdminTokenFile(t *testing.T) {
 	o := probeOptions()
 	o.AdminTokenFile = filepath.Join(t.TempDir(), "absent.env")
 	run := &fakeRunner{}
-	if err := ProbeGreen(run, o, func(string) {}); err != nil {
+	if err := ProbeGreen(run, o, probeToken(t), func(string) {}); err != nil {
 		t.Fatalf("ProbeGreen with an absent token file = %v, want nil", err)
 	}
 	// The failure message names the surface, never the argv: a mutation that leaked

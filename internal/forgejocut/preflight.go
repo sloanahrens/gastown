@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/forgejoprov"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
@@ -17,6 +18,10 @@ type Runner interface {
 	// Run runs argv with the run's own stdout and stderr, so the probe's log
 	// reaches the operator.
 	Run(argv []string) error
+	// RunWithToken runs argv with the admin token in its environment. The probe
+	// is the one child that resolves the token that way; every other child runs
+	// with the token variables removed from its environment.
+	RunWithToken(argv []string, token forgejoprov.Secret) error
 }
 
 // countPattern is what the bd count prints: digits and nothing else.
@@ -68,8 +73,10 @@ func RefuseIfLandingInFlight(run Runner, o *Options, log func(string)) error {
 // The probe carries --town-root so it pushes from a worktree of the rig's bare
 // repository and the rig's hooks run. Its push rides the admin git URL, because it
 // happens before provisioning, when the bots have no access yet. The admin token
-// is handed over as a file path only, never as an argv word.
-func ProbeGreen(run Runner, o *Options, log func(string)) error {
+// is handed over as a file path when one was named, and otherwise in the probe's
+// environment and no other child's: the probe is a separate script until it has
+// its own port, and it resolves the token the same way the old shell cutover did.
+func ProbeGreen(run Runner, o *Options, token forgejoprov.Secret, log func(string)) error {
 	argv := []string{"bash", o.Probe, o.Rig,
 		"--repo", o.Repo,
 		"--main-branch", o.MainBranch,
@@ -90,7 +97,14 @@ func ProbeGreen(run Runner, o *Options, log func(string)) error {
 		return nil
 	}
 	log("probing " + o.Rig + " through its real runner before the cutover")
-	if err := run.Run(argv); err != nil {
+	var err error
+	if o.AdminTokenFile != "" {
+		// The probe reads the named file itself; no token goes in its environment.
+		err = run.Run(argv)
+	} else {
+		err = run.RunWithToken(argv, token)
+	}
+	if err != nil {
 		// The probe's own output already reached the operator, and err is only the
 		// exit status, so the message does not repeat either.
 		return fmt.Errorf("the probe of %s is not green; fix the runner or the gate workflow and re-run", o.Rig)

@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/forgejocut"
+	"github.com/steveyegge/gastown/internal/forgejoprov"
 	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
 
@@ -83,7 +85,7 @@ func TestMainUsageExitsTwoAndHelpExitsZero(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			var stdout, stderr strings.Builder
-			if got := run(tc.args, stubEnv(noEnv), &stdout, &stderr); got != forgejocut.ExitUsage {
+			if got := run(context.Background(), tc.args, stubEnv(noEnv), &stdout, &stderr); got != forgejocut.ExitUsage {
 				t.Fatalf("run(%v) = %d, want 2 (stderr: %s)", tc.args, got, stderr.String())
 			}
 			if !strings.Contains(stderr.String(), tc.stderr) {
@@ -102,7 +104,7 @@ func TestMainUsageExitsTwoAndHelpExitsZero(t *testing.T) {
 		t.Run(flag, func(t *testing.T) {
 			t.Parallel()
 			var stdout, stderr strings.Builder
-			if got := run([]string{flag}, stubEnv(noEnv), &stdout, &stderr); got != forgejocut.ExitOK {
+			if got := run(context.Background(), []string{flag}, stubEnv(noEnv), &stdout, &stderr); got != forgejocut.ExitOK {
 				t.Fatalf("run(%s) = %d, want 0 (stderr: %s)", flag, got, stderr.String())
 			}
 			// Each of these is read from the constant that holds the default, so a
@@ -128,9 +130,46 @@ func TestMainUsageExitsTwoAndHelpExitsZero(t *testing.T) {
 	}
 }
 
-// TestExecRunnerRefusesAnEmptyArgv: an argv with no program is refused on both
-// methods, rather than indexed out of range.
-func TestExecRunnerRefusesAnEmptyArgv(t *testing.T) {
+// execHelperMarker separates the helper's arguments from the test binary's.
+const execHelperMarker = "forgejo-cutover-exec-helper"
+
+// execHelperArgv is the argv that starts the test binary as a child process in
+// the mode named: it prints its environment or exits 1.
+func execHelperArgv(t *testing.T, mode string) []string {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locate the test binary: %v", err)
+	}
+	return []string{exe, "-test.run=^TestExecHelperProcess$", execHelperMarker, mode}
+}
+
+// TestExecHelperProcess is not a test: started with the helper marker, it stands
+// in for a child process, so the exec seam is exercised against a real one.
+func TestExecHelperProcess(t *testing.T) {
+	i := slices.Index(os.Args, execHelperMarker)
+	if i < 0 || i+1 >= len(os.Args) {
+		return
+	}
+	switch os.Args[i+1] {
+	case "environment":
+		for _, entry := range os.Environ() {
+			fmt.Println(entry)
+		}
+	case "exit-1":
+		os.Exit(1)
+	}
+}
+
+// realExec is the exec seam under test, fed the environment a test stages and
+// writing a child's stdout into stdout.
+func realExec(ctx context.Context, environ []string, stdout, stderr io.Writer) execRunner {
+	return execRunner{ctx: ctx, environ: func() []string { return environ }, stdout: stdout, stderr: stderr}
+}
+
+// TestMainExecRunnerRefusesAnEmptyArgv: an argv with no program is refused on
+// every method, rather than indexed out of range.
+func TestMainExecRunnerRefusesAnEmptyArgv(t *testing.T) {
 	t.Parallel()
 	r := execRunner{stdout: io.Discard, stderr: io.Discard}
 	if _, err := r.Output(nil); err == nil || !strings.Contains(err.Error(), "no command to run") {
@@ -138,6 +177,161 @@ func TestExecRunnerRefusesAnEmptyArgv(t *testing.T) {
 	}
 	if err := r.Run(nil); err == nil || !strings.Contains(err.Error(), "no command to run") {
 		t.Errorf("Run(nil) = %v, want the empty argv refused", err)
+	}
+	if err := r.RunWithToken(nil, forgejoprov.Secret{}); err == nil || !strings.Contains(err.Error(), "no command to run") {
+		t.Errorf("RunWithToken(nil) = %v, want the empty argv refused", err)
+	}
+}
+
+// TestMainExecRunnerRunsARealChild: Output returns a real child's stdout, Run
+// lets it write to the run's streams, and a non-zero status is an error.
+func TestMainExecRunnerRunsARealChild(t *testing.T) {
+	t.Parallel()
+	environ := []string{"EXEC_HELPER=1"}
+
+	var stdout, stderr strings.Builder
+	r := realExec(context.Background(), environ, &stdout, &stderr)
+	out, err := r.Output(execHelperArgv(t, "environment"))
+	if err != nil {
+		t.Fatalf("Output = %v, want the child's stdout", err)
+	}
+	if !strings.Contains(string(out), "EXEC_HELPER=1") {
+		t.Error("Output did not return the child's environment")
+	}
+
+	stdout.Reset()
+	if err := r.Run(execHelperArgv(t, "environment")); err != nil {
+		t.Fatalf("Run = %v, want nil", err)
+	}
+	if !strings.Contains(stdout.String(), "EXEC_HELPER=1") {
+		t.Error("Run did not let the child's output reach the run's stream")
+	}
+	if stderr.Len() != 0 {
+		t.Error("the child wrote to stderr, want nothing there")
+	}
+
+	if err := r.Run(execHelperArgv(t, "exit-1")); err == nil {
+		t.Error("Run = nil for a child that exits 1, want its failure")
+	}
+}
+
+// TestMainExecRunnerScrubsTheTokenFromEveryChild: no child inherits either
+// variable an admin token arrives in, and every other variable is kept.
+func TestMainExecRunnerScrubsTheTokenFromEveryChild(t *testing.T) {
+	t.Parallel()
+	const brokerLeak = "leak-broker-token"
+	const standInLeak = "leak-standin-token" //nolint:gosec // G101: a fixture, not a credential
+	environ := []string{
+		"GT_AUTH_FORGEJO_TOKEN=" + brokerLeak,
+		"FORGEJO_ADMIN_TOKEN=" + standInLeak,
+		"UNRELATED=kept",
+	}
+
+	for _, method := range []string{"Output", "Run"} {
+		t.Run(method, func(t *testing.T) {
+			t.Parallel()
+			var stdout, stderr strings.Builder
+			r := realExec(context.Background(), environ, &stdout, &stderr)
+			var childEnv string
+			if method == "Output" {
+				out, err := r.Output(execHelperArgv(t, "environment"))
+				if err != nil {
+					t.Fatalf("Output = %v, want the child's stdout", err)
+				}
+				childEnv = string(out)
+			} else {
+				if err := r.Run(execHelperArgv(t, "environment")); err != nil {
+					t.Fatalf("Run = %v, want nil", err)
+				}
+				childEnv = stdout.String()
+			}
+			if strings.Contains(childEnv, brokerLeak) || strings.Contains(childEnv, standInLeak) {
+				t.Error("a token reached the child's environment")
+			}
+			if strings.Contains(childEnv, "GT_AUTH_FORGEJO_TOKEN=") || strings.Contains(childEnv, "FORGEJO_ADMIN_TOKEN=") {
+				t.Error("a token variable survived into the child's environment")
+			}
+			if !strings.Contains(childEnv, "UNRELATED=kept") {
+				t.Error("an unrelated variable was dropped from the child's environment")
+			}
+		})
+	}
+}
+
+// TestMainExecRunnerHandsTheTokenOnlyToTheRunningProbe: RunWithToken gives its
+// child the resolved token as the probe's variable and nothing else, and the
+// stand-in variable a child might have inherited is still removed.
+func TestMainExecRunnerHandsTheTokenOnlyToTheRunningProbe(t *testing.T) {
+	t.Parallel()
+	const token = "tok-probe-only-marker"
+	const standInLeak = "leak-standin-token" //nolint:gosec // G101: a fixture, not a credential
+	tokenSecret, err := forgejoprov.ResolveAdminToken(func(string) string { return token }, nil, "")
+	if err != nil {
+		t.Fatalf("resolve the fixture token: %v", err)
+	}
+	environ := []string{"FORGEJO_ADMIN_TOKEN=" + standInLeak, "UNRELATED=kept"}
+
+	var stdout, stderr strings.Builder
+	r := realExec(context.Background(), environ, &stdout, &stderr)
+	if err := r.RunWithToken(execHelperArgv(t, "environment"), tokenSecret); err != nil {
+		t.Fatalf("RunWithToken = %v, want nil", err)
+	}
+	childEnv := stdout.String()
+	if !strings.Contains(childEnv, "GT_AUTH_FORGEJO_TOKEN="+token) {
+		t.Error("the probe's child did not receive the resolved token")
+	}
+	if strings.Contains(childEnv, standInLeak) || strings.Contains(childEnv, "FORGEJO_ADMIN_TOKEN=") {
+		t.Error("the stand-in token variable reached the child")
+	}
+	if !strings.Contains(childEnv, "UNRELATED=kept") {
+		t.Error("an unrelated variable was dropped from the child's environment")
+	}
+}
+
+// TestMainExecRunnerChildHonorsACanceledContext: a canceled context stops a
+// child before it starts, so an interrupt does not wait on it.
+func TestMainExecRunnerChildHonorsACanceledContext(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var stdout, stderr strings.Builder
+	r := realExec(ctx, nil, &stdout, &stderr)
+	var err error
+	for _, call := range []struct {
+		name string
+		run  func() error
+	}{
+		{"Output", func() error { _, err := r.Output(execHelperArgv(t, "environment")); return err }},
+		{"Run", func() error { return r.Run(execHelperArgv(t, "environment")) }},
+		{"RunWithToken", func() error { return r.RunWithToken(execHelperArgv(t, "environment"), forgejoprov.Secret{}) }},
+	} {
+		err = call.run()
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("%s = %v, want the canceled context's error", call.name, err)
+		}
+	}
+	if stdout.Len() != 0 {
+		t.Error("a canceled run started the child")
+	}
+}
+
+// TestRunParsePassesItsContextToTheCutover: the run receives the command's own
+// context, so an interrupt reaches the run and its children.
+func TestRunParsePassesItsContextToTheCutover(t *testing.T) {
+	t.Parallel()
+	type ctxKey struct{}
+	var got context.Context
+	cutover := func(ctx context.Context, _ *forgejocut.Options, _ forgejocut.RunEnv) int {
+		got = ctx
+		return forgejocut.ExitOK
+	}
+	ctx := context.WithValue(context.Background(), ctxKey{}, "the run's context")
+	var stdout, stderr strings.Builder
+	if code := runParse(ctx, []string{"gastown", "--repo", "acme/gastown"}, stubEnv(homeEnv), &stdout, &stderr, forgejocut.Parse, cutover); code != forgejocut.ExitOK {
+		t.Fatalf("runParse = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+	if got == nil || got.Value(ctxKey{}) != "the run's context" {
+		t.Error("the cutover ran with a context the command did not pass")
 	}
 }
 
@@ -154,7 +348,7 @@ func TestMainValidCommandLineRunsTheCutover(t *testing.T) {
 		return forgejocut.ExitOK
 	}
 	var parseOut, parseErr strings.Builder
-	got := runParse([]string{"gastown", "--repo", "acme/gastown"}, stubEnv(homeEnv), &parseOut, &parseErr, forgejocut.Parse, cutover)
+	got := runParse(context.Background(), []string{"gastown", "--repo", "acme/gastown"}, stubEnv(homeEnv), &parseOut, &parseErr, forgejocut.Parse, cutover)
 	if got != forgejocut.ExitOK {
 		t.Fatalf("runParse = %d, want the run's 0 (stderr: %s)", got, parseErr.String())
 	}
@@ -227,7 +421,7 @@ func TestRunExitCodes(t *testing.T) {
 				}
 			}
 			var stdout, stderr strings.Builder
-			got := runParse(tt.args, stubEnv(homeEnv), &stdout, &stderr, forgejocut.Parse, cutover)
+			got := runParse(context.Background(), tt.args, stubEnv(homeEnv), &stdout, &stderr, forgejocut.Parse, cutover)
 			if got != tt.code {
 				t.Fatalf("runParse(%v) = %d, want %d (stderr: %s)", tt.args, got, tt.code, stderr.String())
 			}
@@ -245,7 +439,7 @@ func TestMainFailedRigExitsOne(t *testing.T) {
 	env := stubEnv(homeEnv)
 	env.IsDir = func(path string) bool { return path == "/home/test/gt" }
 	var stdout, stderr strings.Builder
-	got := run([]string{"absent", "--repo", "acme/gastown"}, env, &stdout, &stderr)
+	got := run(context.Background(), []string{"absent", "--repo", "acme/gastown"}, env, &stdout, &stderr)
 	if got != forgejocut.ExitFailure {
 		t.Fatalf("run = %d, want 1 (stderr: %s)", got, stderr.String())
 	}
@@ -266,7 +460,7 @@ func TestRunParseWithoutOptionsExitsOne(t *testing.T) {
 		return nil, nil
 	}
 	var stdout, stderr strings.Builder
-	if got := runParse(nil, stubEnv(noEnv), &stdout, &stderr, empty, neverRuns(t)); got != forgejocut.ExitFailure {
+	if got := runParse(context.Background(), nil, stubEnv(noEnv), &stdout, &stderr, empty, neverRuns(t)); got != forgejocut.ExitFailure {
 		t.Fatalf("runParse = %d, want 1", got)
 	}
 	if !strings.Contains(stderr.String(), "parsed to no options") {
@@ -282,7 +476,7 @@ func TestRunParseFailedParseIsAFailedRun(t *testing.T) {
 		return nil, errors.New("no origin URL")
 	}
 	var stdout, stderr strings.Builder
-	if got := runParse(nil, stubEnv(noEnv), &stdout, &stderr, failing, neverRuns(t)); got != forgejocut.ExitFailure {
+	if got := runParse(context.Background(), nil, stubEnv(noEnv), &stdout, &stderr, failing, neverRuns(t)); got != forgejocut.ExitFailure {
 		t.Fatalf("runParse = %d, want 1", got)
 	}
 	if !strings.Contains(stderr.String(), "no origin URL") || strings.Contains(stderr.String(), "usage:") {
