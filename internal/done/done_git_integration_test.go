@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	gitpkg "github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/templates"
 )
 
 // The git operations under gt done's auto-save safety net and submodule
@@ -269,5 +270,66 @@ func TestIntegrationPushSubmoduleChanges(t *testing.T) {
 	remoteSHA = strings.Fields(string(lsOut))[0]
 	if remoteSHA != newSHA {
 		t.Errorf("expected submodule remote main to be %s, got %s", newSHA, remoteSHA)
+	}
+}
+
+// markerRepo is the submit harness's fake repo with one method of the real
+// git: CheckUncommittedWork reads the real worktree, so the marker rule that
+// classifies the rig-written CLAUDE.md as runtime is what the submit consults
+// (gt-iv92k). The fake alone returns a status it is handed and never reaches it.
+type markerRepo struct {
+	*fakeDoneRepo
+	g *gitpkg.Git
+}
+
+func (m markerRepo) CheckUncommittedWork() (*gitpkg.UncommittedWorkStatus, error) {
+	return m.g.CheckUncommittedWork()
+}
+
+// TestIntegrationSubmitReadsTheMarkerBearingCLAUDEmd: a worktree whose only
+// uncommitted path is the marker-bearing CLAUDE.md overlay submits, and the
+// same worktree with a project CLAUDE.md (no marker) is refused before any
+// push (gt-263mt).
+func TestIntegrationSubmitReadsTheMarkerBearingCLAUDEmd(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		claude     string
+		wantRefuse bool
+	}{
+		{"the rig-written overlay", "# Polecat\n\n## " + templates.PolecatLifecycleMarker + "\n", false},
+		{"a project CLAUDE.md without the marker", "# Project instructions\n", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			testRunGit(t, dir, "init")
+			testRunGit(t, dir, "config", "user.email", "test@test.com")
+			testRunGit(t, dir, "config", "user.name", "Test")
+			if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Test\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			testRunGit(t, dir, "add", "README.md")
+			testRunGit(t, dir, "commit", "-m", "initial commit")
+			if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte(tc.claude), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			h := newSubmitHarness(t)
+			h.r.deps.repo = markerRepo{fakeDoneRepo: h.repo, g: gitpkg.NewGit(dir)}
+			err := h.submit()
+			if tc.wantRefuse {
+				if err == nil || !strings.Contains(err.Error(), "uncommitted changes would be lost") {
+					t.Fatalf("submit = %v, want the uncommitted-work refusal", err)
+				}
+				if len(h.repo.pushes) != 0 {
+					t.Errorf("pushed with uncommitted work: %v", h.repo.pushes)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("submit = %v, want a worktree with only the overlay to submit", err)
+			}
+		})
 	}
 }
