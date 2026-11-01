@@ -311,7 +311,7 @@ rejection was environmental, or to make a new commit otherwise.
 **Recording a decision on a review finding (gt-yphcl).** Each om round's findings are kept
 in `rounds-<bead>.json` under the rig's om directory (`.runtime/landing-om/<rig>/`), with
 what became of each. A comment on the work bead records a decision about one, and only the
-overseer or Sloan may write it: a polecat describes the disagreement in a plain comment and
+overseer or the operator may write it: a polecat describes the disagreement in a plain comment and
 lets them decide.
 
     ACCEPTED-RISK: F2 the mount is approved by design 5.5
@@ -1103,13 +1103,13 @@ it — and `gt attention` prints a `STALE` header and exits 3.
 
 ### Overseer Questions
 
-A question the overseer has for Sloan is a bead in the town database under the
+A question the overseer has for the operator is a bead in the town database under the
 label `overseer-question`, so it survives the overseer's session and the
 dashboard's Attention panel and the daemon read it.
 
 ```bash
 gt ask "<title>" <<'EOF'   # file one; body sections below, on stdin
-gt answer <id> "<text>"    # Sloan's answer: a comment with no prefix
+gt answer <id> "<text>"    # the operator's answer: a comment with no prefix
 gt answer --overseer <id> "<text>"   # the overseer's note: "[overseer] <text>"
 gt questions [--json]      # the open ones as a priority queue, with held work
 ```
@@ -1126,7 +1126,7 @@ dashboard's Questions payload order by priority and then by how long the questio
 has waited, and each row carries the priority, the count of beads depending on
 the question and its effort tag.
 
-A question is waiting on Sloan while its newest comment is the overseer's or
+A question is waiting on the operator while its newest comment is the overseer's or
 there is none, and answered once its newest comment lacks the `[overseer]`
 prefix. The attention queue raises three rules for it (flags in `ruleFlags`):
 
@@ -1137,7 +1137,7 @@ prefix. The attention queue raises three rules for it (flags in `ruleFlags`):
   hours.
 
 The repeat intervals are `repeatEvery` in `internal/attention/repeat.go`. Each
-question row on the dashboard shows the `gt answer <id> "..."` line Sloan runs;
+question row on the dashboard shows the `gt answer <id> "..."` line the operator runs;
 the page stays read-only.
 
 ### Overseer Heartbeat and Journal
@@ -1166,7 +1166,7 @@ backlog for what to automate next.
 The `overseer.silent` rule (info, no wake) holds while the heartbeat is older
 than `overseer.silent_after` (default `90m`) and either the spec dispatcher's
 newest tick, under ten minutes old, found ready beads, or an open question is
-owed a move by the overseer: no comment yet, or answered by Sloan. A town whose
+owed a move by the overseer: no comment yet, or answered by the operator. A town whose
 overseer has never beaten is silent. When `overseer.silent_push` names a
 `notify.commands` entry, the daemon pushes through it once per silent period,
 the period being one stale heartbeat; `silent-push.json` in the same directory
