@@ -9,12 +9,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/lintlock"
+	"github.com/steveyegge/gastown/internal/shelltier"
 )
 
 // scriptedRun answers each step by its command string.
@@ -778,27 +780,117 @@ func TestCommandGateStepTimeoutLeavesFastStepsAlone(t *testing.T) {
 	}
 }
 
-// TestShellTierInputsMatchPostLandScript: the shell-tier rule the post-land
-// run and its revert read is the script's own INPUTS set, and the Go constant
-// is checked against the script so the two cannot drift (gt-er6jn).
-func TestShellTierInputsMatchPostLandScript(t *testing.T) {
+// TestShellTierInputsCoverTheManifestTriggers: the shell-tier rule the
+// post-land revert reads covers every trigger of every manifest entry, so a
+// landing that could have moved a shell test's verdict is never called
+// innocent (gt-u560q.9).
+func TestShellTierInputsCoverTheManifestTriggers(t *testing.T) {
 	t.Parallel()
-	data, err := os.ReadFile(filepath.Join("..", "..", "scripts", "post-land-shell.sh"))
-	if err != nil {
-		t.Fatal(err)
+	entries := shelltier.Manifest()
+	if len(entries) == 0 {
+		t.Fatal("the shell tier manifest is empty, so the union covers nothing")
 	}
-	want := ""
-	for _, line := range strings.Split(string(data), "\n") {
-		if v, ok := strings.CutPrefix(line, "INPUTS='"); ok {
-			want = strings.TrimSuffix(v, "'")
-			break
+	re := regexp.MustCompile(ShellTierInputs())
+	for _, e := range entries {
+		for _, trigger := range e.TriggersOrDefault() {
+			changed := trigger
+			if strings.HasSuffix(trigger, "/") {
+				changed = trigger + "changed.txt"
+			}
+			if !re.MatchString(changed) {
+				t.Errorf("%s: trigger %q does not match ShellTierInputs() = %q", e.Path, trigger, ShellTierInputs())
+			}
 		}
 	}
-	if want == "" {
-		t.Fatal("scripts/post-land-shell.sh has no INPUTS='...' line")
+	// A rule that matches everything would pass the loop above; a path no
+	// trigger names must not match.
+	for _, path := range []string{"docs/reference.md", "tracker/api/actor.go"} {
+		if re.MatchString(path) {
+			t.Errorf("ShellTierInputs() = %q matches %q, which no manifest trigger covers", ShellTierInputs(), path)
+		}
 	}
-	if want != ShellTierInputs {
-		t.Fatalf("ShellTierInputs = %q, want scripts/post-land-shell.sh's %q", ShellTierInputs, want)
+}
+
+// TestShellTierInputsCoverTodaysRule: every path family the rule this
+// replaces covered still matches, so building the rule from the manifest
+// cannot narrow the revert's blame rule (gt-u560q.9).
+func TestShellTierInputsCoverTodaysRule(t *testing.T) {
+	t.Parallel()
+	re := regexp.MustCompile(ShellTierInputs())
+	for _, path := range []string{
+		"scripts/test-makefile.sh",
+		"plugins/town-metrics/plugin.md",
+		".githooks/pre-push",
+		"Makefile",
+		"internal/shelltier/manifest.go",
+		"cmd/tier-sweep/main.go",
+		"internal/tiersweep/gotier.go",
+		"internal/testpolicy/docker.txt",
+		"internal/cmd/scheduler_integration_test.go",
+	} {
+		if !re.MatchString(path) {
+			t.Errorf("%q: ShellTierInputs() = %q no longer matches a family the previous rule covered", path, ShellTierInputs())
+		}
+	}
+	// The Makefile trigger is a file, not a prefix.
+	if re.MatchString("Makefile.bak") {
+		t.Errorf("ShellTierInputs() = %q matches Makefile.bak", ShellTierInputs())
+	}
+}
+
+// TestShellTierInputsNameTheTierMachinery: the tier's own runner is an input
+// even when every manifest entry is exempt, which is when TriggersOrDefault
+// appends no GoTriggers. Dropping the machinery from the rule turns this red.
+func TestShellTierInputsNameTheTierMachinery(t *testing.T) {
+	t.Parallel()
+	exempt := []shelltier.Entry{
+		{Path: "scripts/one_test.sh", StubsGo: "none: names no go command"},
+		{Path: "scripts/two_test.sh", StubsGo: "stub: scripts/two_test.sh:3 defines a fake go"},
+	}
+	rule := shellTierInputsRE(exempt)
+	re := regexp.MustCompile(rule)
+	for _, path := range []string{
+		"internal/shelltier/manifest.go",
+		"cmd/tier-sweep/main.go",
+		"internal/tiersweep/gotier.go",
+	} {
+		if !re.MatchString(path) {
+			t.Errorf("%q: an all-exempt manifest dropped the tier's machinery from %q", path, rule)
+		}
+	}
+}
+
+// TestShellTierInputsAreTheUnionWhenItCoversTheMachinery: an entry without a
+// StubsGo reason pulls in GoTriggers, which names internal/ and cmd/, so the
+// rule is the manifest union and adds no machinery path of its own (gt-u560q.9).
+func TestShellTierInputsAreTheUnionWhenItCoversTheMachinery(t *testing.T) {
+	t.Parallel()
+	entries := []shelltier.Entry{{Path: "scripts/one_test.sh"}}
+	if got, want := shellTierInputsRE(entries), shellTierTriggersRE(entries[0].TriggersOrDefault()); got != want {
+		t.Fatalf("shellTierInputsRE(%v) = %q, want the union %q", entries, got, want)
+	}
+}
+
+// TestTheManifestUnionCoversTheTierMachinery: the entries' triggers reach the
+// tier's own machinery (today through the GoTriggers one entry contributes), so
+// ShellTierInputs adds no fallback and the rule stays the union (gt-u560q.9).
+func TestTheManifestUnionCoversTheTierMachinery(t *testing.T) {
+	t.Parallel()
+	var union []string
+	for _, e := range shelltier.Manifest() {
+		union = append(union, e.TriggersOrDefault()...)
+	}
+	if !shellTierCovers(union, shellTierMachinery) {
+		t.Fatalf("the manifest union %v does not cover the tier machinery %v, so the rule would add paths the union lacks", union, shellTierMachinery)
+	}
+}
+
+// TestShellTierInputsOfAnEmptyUnionMatchNothing: a rule built from no trigger
+// can blame no landing for a shell failure.
+func TestShellTierInputsOfAnEmptyUnionMatchNothing(t *testing.T) {
+	t.Parallel()
+	if got := shellTierTriggersRE(nil); got != `^$` {
+		t.Fatalf("shellTierTriggersRE(nil) = %q, want ^$", got)
 	}
 }
 

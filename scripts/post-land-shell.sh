@@ -24,8 +24,9 @@
 # schedulerTownSlots out of it (gt-tqxdd). internal/shelltier/ is the runner
 # the tier execs, and cmd/tier-sweep and internal/tiersweep are the command
 # and package that run it, so a change to any of them moves the verdict too.
-# internal/land's ShellTierInputs mirrors this line — the post-land revert
-# reads it — and TestShellTierInputsMatchPostLandScript fails if the two drift.
+# internal/land's ShellTierInputs no longer mirrors this line: it is built from
+# the shell tier manifest's triggers (internal/shelltier), and the post-land
+# revert reads it (gt-u560q.9).
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 

@@ -116,22 +116,42 @@ func TestRedMainFilesARevertOfTheOnlyLandingSinceGreen(t *testing.T) {
 }
 
 // gt-40so9: at 4576c678 a Go-only landing (gt-vsct7.1) was reverted for a
-// scripts/test-makefile.sh failure it cannot have caused.
+// scripts/test-makefile.sh failure it cannot have caused. Since gt-u560q.9 the
+// shell-tier rule covers the whole Go tree under internal/ and cmd/, so a Go
+// file no shell test reads (tracker/) is the case that must not be reverted.
 func TestRedMainSkipsTheRevertWhenTheLandingCannotHaveFailedTheScript(t *testing.T) {
 	t.Parallel()
 	h := newRevertHarness(t, greenSHA)
-	h.changed = []string{"internal/attention/attention.go", "internal/cmd/attention.go", "docs/reference.md"}
+	h.changed = []string{"tracker/api/actor.go", "docs/reference.md"}
 	h.redShell(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"}, "scripts/test-makefile.sh")
 
 	if len(h.reverts) != 0 || len(h.revertBeads(t)) != 0 {
 		t.Fatalf("reverted a landing that cannot have failed the script: %v %+v", h.reverts, h.revertBeads(t))
 	}
-	if s := h.lastStatus(); !strings.Contains(s, "no revert: scripts/test-makefile.sh: the landing changed no shell-tier input (internal/attention/attention.go, internal/cmd/attention.go, docs/reference.md)") {
+	if s := h.lastStatus(); !strings.Contains(s, "no revert: scripts/test-makefile.sh: the landing changed no shell-tier input (tracker/api/actor.go, docs/reference.md)") {
 		t.Fatalf("status %q; want the skipped revert and why", s)
 	}
 	// The red-main bead stands: the failure is a human's call.
 	if open := h.open(t); len(open) != 1 || open[RedMainTitle("gastown", redMainNoPackage)] == nil {
 		t.Fatalf("red-main beads %+v; want the whole-command bead", open)
+	}
+}
+
+// gt-u560q.9: the shell-tier rule is the manifest's trigger union, which runs
+// a shell test on the Go tree under internal/. A landing that changed a Go file
+// there can have failed the script and is reverted.
+func TestRedMainRevertsALandingThatChangedTheGoTreeTheShellTierRuns(t *testing.T) {
+	t.Parallel()
+	h := newRevertHarness(t, greenSHA)
+	h.changed = []string{"internal/attention/attention.go", "docs/reference.md"}
+	h.redShell(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"}, "scripts/test-makefile.sh")
+
+	rv := h.revertBeads(t)
+	if len(h.reverts) != 1 || len(rv) != 1 {
+		t.Fatalf("reverts %v, beads %+v; want the landing that changed a shell-tier input reverted", h.reverts, rv)
+	}
+	if s := h.lastStatus(); !strings.Contains(s, "reverting gt-cul as "+rv[0].ID) {
+		t.Fatalf("status %q", s)
 	}
 }
 
@@ -183,7 +203,7 @@ func TestRedMainRevertsARedRunThatNamedNoUnit(t *testing.T) {
 func TestRedMainSkipsTheRevertWhenOneFailingUnitIsUnattributable(t *testing.T) {
 	t.Parallel()
 	h := newRevertHarness(t, greenSHA)
-	h.changed = []string{"internal/a/a.go"}
+	h.changed = []string{"tracker/api/actor.go"}
 	h.r.Red(context.Background(), "bash scripts/post-land-shell.sh", PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"},
 		PostLandResult{ExitCode: 2, Packages: pkgs(map[string]bool{pkgA: false}), ShellFailures: []string{"scripts/test-makefile.sh"}})
 

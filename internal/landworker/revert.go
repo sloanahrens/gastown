@@ -335,9 +335,9 @@ var (
 	// verdict: the sources, the module files, the Makefile whose targets run
 	// the tier, and the test policy that decides which packages pass.
 	goVerdictInputsRE = regexp.MustCompile(`(\.go$|go\.mod$|go\.sum$|Makefile$|^internal/testpolicy/)`)
-	// shellVerdictInputsRE is the same rule for the shell tier, the tier's
-	// own (land.ShellTierInputs).
-	shellVerdictInputsRE = regexp.MustCompile(land.ShellTierInputs)
+	// shellVerdictInputsRE is the same rule for the shell tier, the union of
+	// the shell tier manifest's triggers (land.ShellTierInputs).
+	shellVerdictInputsRE = regexp.MustCompile(land.ShellTierInputs())
 )
 
 // unattributable names a unit a red run blamed that a landing with those

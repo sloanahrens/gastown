@@ -10,12 +10,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/lintlock"
+	"github.com/steveyegge/gastown/internal/shelltier"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -295,17 +297,94 @@ func RigGate(dir string, mq *config.MergeQueueConfig, unitOnly bool) (CommandGat
 	return CommandGate{Steps: steps}, nil
 }
 
-// ShellTierInputs is the ERE of the paths whose change can move the shell
-// tier's verdict: the INPUTS line of scripts/post-land-shell.sh (gt-er6jn),
-// the post-land run's own rule and the one the post-land revert reads
-// (landworker/revert.go). TestShellTierInputsMatchPostLandScript fails when
-// this constant and the script drift.
+// shellTierMachinery are the paths of the tier's own machinery, named here
+// rather than left to the manifest: internal/shelltier is the runner the tier
+// execs, and cmd/tier-sweep and internal/tiersweep are the command and package
+// that run it. TriggersOrDefault appends GoTriggers (which holds internal/ and
+// cmd/) only for an entry without a StubsGo reason, so a manifest whose every
+// entry were exempt would leave the runner out of the rule.
+var shellTierMachinery = []string{"internal/shelltier/", "cmd/tier-sweep/", "internal/tiersweep/"}
+
+// ShellTierInputs returns the ERE of the paths whose change can move the shell
+// tier's verdict: the union of every manifest entry's triggers (gt-u560q.9).
+// The union reaches the tier's own machinery (internal/shelltier, cmd/tier-sweep,
+// internal/tiersweep) through the GoTriggers an entry that does not exempt
+// itself from Go changes contributes; shellTierInputsRE adds the machinery
+// itself only when no entry does.
 //
-// internal/cmd/scheduler_integration_test.go is a shell-tier input although it
-// is Go: scripts/makefile-gate_test.sh reads schedulerTownSlots out of it
-// (gt-tqxdd). internal/shelltier/ is the runner the tier execs, and
-// cmd/tier-sweep and internal/tiersweep are the command and package that run it.
-const ShellTierInputs = `^(scripts/|plugins/|\.githooks/|Makefile$|internal/shelltier/|cmd/tier-sweep/|internal/tiersweep/|internal/testpolicy/docker\.txt$|internal/cmd/scheduler_integration_test\.go$)`
+// The post-land revert reads it (landworker/revert.go). It no longer mirrors
+// scripts/post-land-shell.sh's INPUTS line, which the runner replaces.
+func ShellTierInputs() string {
+	return shellTierInputsRE(shelltier.Manifest())
+}
+
+// shellTierInputsRE builds ShellTierInputs from the entries' triggers. The
+// tier's machinery is added only when the union does not already cover it, so
+// the rule is the manifest union wherever that union names the tier's own code
+// and falls back to the machinery only for an all-exempt manifest.
+func shellTierInputsRE(entries []shelltier.Entry) string {
+	var triggers []string
+	for _, e := range entries {
+		triggers = append(triggers, e.TriggersOrDefault()...)
+	}
+	if !shellTierCovers(triggers, shellTierMachinery) {
+		triggers = append(triggers, shellTierMachinery...)
+	}
+	return shellTierTriggersRE(triggers)
+}
+
+// shellTierCovers reports whether triggers cover every path the way
+// shellTierTriggersRE reads them: a trigger ending in "/" covers the paths
+// under it, and any other is a file path and covers only itself.
+func shellTierCovers(triggers, paths []string) bool {
+	for _, path := range paths {
+		covered := false
+		for _, trigger := range triggers {
+			if strings.HasSuffix(trigger, "/") {
+				covered = strings.HasPrefix(path, trigger)
+			} else {
+				covered = path == trigger
+			}
+			if covered {
+				break
+			}
+		}
+		if !covered {
+			return false
+		}
+	}
+	return true
+}
+
+// shellTierTriggersRE renders triggers as one ERE: a trigger ending in "/"
+// matches every path under it, and any other is a file path and matches in
+// full. An empty union matches no path, so a rule that covers nothing cannot
+// blame a landing for a shell failure.
+func shellTierTriggersRE(triggers []string) string {
+	seen := make(map[string]bool)
+	var alts []string
+	for _, trigger := range triggers {
+		alt := shellTierAlternative(trigger)
+		if seen[alt] {
+			continue
+		}
+		seen[alt] = true
+		alts = append(alts, alt)
+	}
+	if len(alts) == 0 {
+		return `^$`
+	}
+	slices.Sort(alts)
+	return "^(" + strings.Join(alts, "|") + ")"
+}
+
+// shellTierAlternative renders one trigger as an ERE alternative.
+func shellTierAlternative(trigger string) string {
+	if strings.HasSuffix(trigger, "/") {
+		return regexp.QuoteMeta(trigger)
+	}
+	return regexp.QuoteMeta(trigger) + "$"
+}
 
 // ShellTierSummaryRE matches the shell tier's one summary line and captures
 // the scripts it names. The log directory trails the names, and the tier's
