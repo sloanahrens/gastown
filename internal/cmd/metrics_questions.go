@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -58,6 +59,9 @@ type questionsEnv struct {
 	// GitShow returns the content of spec ("HEAD:gt/events.jsonl") in the
 	// repository at repo.
 	GitShow func(ctx context.Context, repo, spec string) ([]byte, error)
+	// GitList returns the names (repo-relative, "gt/events.jsonl") of the files
+	// directly under dir at HEAD in the repository at repo.
+	GitList func(ctx context.Context, repo, dir string) ([]string, error)
 	Town    string
 }
 
@@ -69,13 +73,19 @@ func questionsOSEnv(town string) questionsEnv {
 		GitShow: func(ctx context.Context, repo, spec string) ([]byte, error) {
 			return exec.CommandContext(ctx, "git", "-C", repo, "show", spec).Output()
 		},
+		GitList: func(ctx context.Context, repo, dir string) ([]string, error) {
+			out, err := exec.CommandContext(ctx, "git", "-C", repo, "ls-tree", "--name-only", "HEAD", dir+"/").Output()
+			return strings.Fields(string(out)), err
+		},
 		Town: town,
 	}
 }
 
-// questionsEventShards are the tracker export's event files for the gt
-// prefix: the live one and the older shards.
-var questionsEventShards = []string{"events.jsonl", "events.2.jsonl", "events.3.jsonl", "events.4.jsonl", "events.5.jsonl", "events.6.jsonl", "events.7.jsonl"}
+// questionsEventShard matches the tracker export's event files for the gt
+// prefix: events.jsonl and its numbered shards. They are listed from the
+// export, so a new shard is read without a code change; the stage logic does
+// not depend on their order.
+var questionsEventShard = regexp.MustCompile(`^gt/events(\.\d+)?\.jsonl$`)
 
 var questionsDatedDir = regexp.MustCompile(`/\d{4}-\d{2}-\d{2}$`)
 
@@ -129,7 +139,11 @@ func questionTimeToLand(ctx context.Context, env questionsEnv, runtime string, n
 		return metrics.Question{N: 4, Title: "Time to land", Status: metrics.QuestionMissing, Detail: why}
 	}
 	dirs, err := env.Glob(filepath.Join(runtime, "metrics", "20*"))
-	if err != nil || len(dirs) == 0 {
+	if err != nil {
+		problem("ledger directories", err)
+		return missing("the ledger directories could not be listed")
+	}
+	if len(dirs) == 0 {
 		return missing("no dated landing ledger under .runtime/metrics")
 	}
 	sort.Strings(dirs)
@@ -154,20 +168,29 @@ func questionTimeToLand(ctx context.Context, env questionsEnv, runtime string, n
 		return missing("landing ledger unusable")
 	}
 	repo := filepath.Join(env.Town, ".dolt-archive", "git")
+	names, err := env.GitList(ctx, repo, "gt")
+	if err != nil {
+		problem("tracker export", err)
+		return missing("tracker export events unreadable")
+	}
 	var events []byte
-	for _, shard := range questionsEventShards {
-		b, err := env.GitShow(ctx, repo, "HEAD:gt/"+shard)
-		if err != nil {
-			// A shard that does not exist yet is normal; an export with no shard
-			// at all is not.
+	read, failed := 0, 0
+	for _, name := range names {
+		if !questionsEventShard.MatchString(name) {
 			continue
 		}
+		b, err := env.GitShow(ctx, repo, "HEAD:"+name)
+		if err != nil {
+			failed++
+			problem("tracker export "+name, err)
+			continue
+		}
+		read++
 		events = append(events, b...)
 		events = append(events, '\n')
 	}
-	if len(events) == 0 {
-		problem("tracker export", fmt.Errorf("no event shard readable in %s", repo))
-		return missing("tracker export events unreadable")
+	if read == 0 {
+		return missing(fmt.Sprintf("tracker export events unreadable (%d event files listed, none readable)", failed))
 	}
 	q := metrics.QuestionTimeToLand(events, landed, now, days)
 	q.Detail += fmt.Sprintf(" Ledger %s, gastown (gt-) daemon-route landings only.", filepath.Base(ledgerDir))

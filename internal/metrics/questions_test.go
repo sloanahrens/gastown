@@ -197,3 +197,31 @@ func TestRenderQuestionsReturnsAWriteError(t *testing.T) {
 		t.Errorf("a refused write must be returned, got %v", err)
 	}
 }
+
+func TestQuestionTimeToLandDoesNotDependOnEventOrder(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
+	landed := []LandedBead{{"gt-a", time.Date(2026, 11, 1, 12, 30, 0, 0, time.UTC)}}
+	lines := strings.Split(strings.TrimSpace(string(questionEventsFixture())), "\n")
+	reversed := make([]string, len(lines))
+	for i, l := range lines {
+		reversed[len(lines)-1-i] = l
+	}
+	a := QuestionTimeToLand([]byte(strings.Join(lines, "\n")), landed, now, 7)
+	b := QuestionTimeToLand([]byte(strings.Join(reversed, "\n")), landed, now, 7)
+	if a.Detail != b.Detail {
+		t.Errorf("reversing the event order changed the answer:\n%s\n%s", a.Detail, b.Detail)
+	}
+}
+
+func TestQuestionSpendSaysWhyTheBalanceIsUnknown(t *testing.T) {
+	t.Parallel()
+	noAge := strings.Replace(questionSnapshotFixture, `"deepseek_spend_age_s":1519621,`, "", 1)
+	if q := QuestionSpend([]byte(noAge)); !strings.Contains(q.Detail, "no reading age") {
+		t.Errorf("a snapshot without the reading age must say so:\n%s", q.Detail)
+	}
+	noBalance := strings.Replace(strings.Replace(questionSnapshotFixture, `"deepseek_spend_age_s":1519621`, `"deepseek_spend_age_s":60`, 1), `"deepseek_balance":5.2,`, "", 1)
+	if q := QuestionSpend([]byte(noBalance)); !strings.Contains(q.Detail, "carries no balance") {
+		t.Errorf("a fresh reading without a balance must say so:\n%s", q.Detail)
+	}
+}

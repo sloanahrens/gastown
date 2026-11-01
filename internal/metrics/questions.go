@@ -193,15 +193,20 @@ func QuestionTimeToLand(events []byte, landed []LandedBead, now time.Time, days 
 			s = &stages{}
 			st[e.Issue] = s
 		}
+		// The event shards are concatenated in no promised order, so each stage
+		// is decided by time: the earliest created, the earliest submit label
+		// and the latest closed.
 		switch e.Type {
 		case "created":
-			if s.created.IsZero() {
+			if s.created.IsZero() || at.Before(s.created) {
 				s.created = at
 			}
 		case "closed":
-			s.closed = at
+			if at.After(s.closed) {
+				s.closed = at
+			}
 		case "label_added":
-			if s.submitted.IsZero() {
+			if s.submitted.IsZero() || at.Before(s.submitted) {
 				s.submitted = at
 			}
 		}
@@ -321,7 +326,7 @@ func QuestionSaturation(snapshot []byte) Question {
 		seat = fmt.Sprintf("%.0f", seats)
 	}
 	h := g["host"]
-	q.Detail = fmt.Sprintf("snapshot %s: load1 %s, cpu idle %s%%, bd latency %s ms, dolt connections %s, live seats %s, dispatcher tick %s s. Earlier curve: idle under 10%% from about 9 seats (110 hourly samples, thin above 8).",
+	q.Detail = fmt.Sprintf("snapshot %s: load1 %s, cpu idle %s%%, bd latency %s ms, dolt connections %s, live seats %s, dispatcher tick %s s.",
 		ts, qfmt(h, "load1", "%.1f"), qfmt(h, "cpu_idle_pct", "%.0f"), qfmt(h, "bd_latency_ms", "%.0f"), qfmt(h, "dolt_conns", "%.0f"), seat, qfmt(g["queue"], "last_tick_secs", "%.1f"))
 	return q
 }
@@ -337,11 +342,14 @@ func QuestionSpend(snapshot []byte) Question {
 		return q
 	}
 	m := g["money"]
-	balance := "unknown"
+	balance := "unknown (the snapshot carries no reading age)"
 	if age, ok := qnum(m, "deepseek_spend_age_s"); ok {
-		if time.Duration(age)*time.Second > questionSpendStaleAfter {
+		switch _, hasBalance := qnum(m, "deepseek_balance"); {
+		case time.Duration(age)*time.Second > questionSpendStaleAfter:
 			balance = fmt.Sprintf("unknown (the reading is %.1f days old)", age/86400)
-		} else if _, ok := qnum(m, "deepseek_balance"); ok {
+		case !hasBalance:
+			balance = "unknown (the reading carries no balance)"
+		default:
 			balance = qfmt(m, "deepseek_balance", "$%.2f")
 		}
 	}
@@ -360,7 +368,7 @@ func QuestionBacklog(snapshot []byte) Question {
 		return q
 	}
 	qu := g["queue"]
-	q.Detail = fmt.Sprintf("snapshot %s: ready %s, blocked %s, dispatchable %s, waiting to land %s. Age of the oldest open bead, om-followup depth against its limit of 40 and duplicates come with the daily bd snapshot.",
+	q.Detail = fmt.Sprintf("snapshot %s: ready %s, blocked %s, dispatchable %s, waiting to land %s. Age of the oldest open bead and the depth of any label are not computed here.",
 		ts, qfmt(qu, "ready", "%.0f"), qfmt(qu, "blocked", "%.0f"), qfmt(qu, "dispatchable", "%.0f"), qfmt(qu, "waiting_to_land", "%.0f"))
 	return q
 }
