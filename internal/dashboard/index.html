@@ -5117,8 +5117,9 @@ function drawQueueList(box, s) {
         parts.push(shaping === 1 ? "1 bead needs shaping" : shaping + " beads need shaping");
         parts.push(held === 1 ? "1 bead is held" : held + " beads are held");
       }
-      // A town of nothing but town-store beads is the case the old view
-      // misreported as dispatchable, so the empty view names it (gt-50dkq).
+      // The dispatchable view leaves the town store out, so an empty one names
+      // the beads waiting there rather than reading as a town with no work
+      // (gt-50dkq).
       const town = qRig === "all" ? all.filter(isTownStore).length : 0;
       if (town) parts.push(town === 1 ? "1 bead waits in the town store, which the dispatcher does not read" : town + " beads wait in the town store, which the dispatcher does not read");
       msg = "nothing is dispatchable right now" + (parts.length ? " — " + parts.join(", ") : "");
