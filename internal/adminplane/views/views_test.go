@@ -67,9 +67,9 @@ func record(id string, state registry.State) Record {
 			{ID: "bd-2", Title: "second bead", Body: beadBodyValue},
 		},
 		Metering: MeteringSummary{
-			SeatHours:       []export.ProfileHours{{Profile: "standard", Hours: 12.5}},
+			SeatHours:       []ProfileHours{{Profile: "standard", Hours: 12.5}},
 			StorageGBMonths: 1.5,
-			Tokens:          export.Tokens{Input: 10, Output: 20, CacheCreation: 30, CacheRead: 40},
+			Tokens:          Tokens{Input: 10, Output: 20, CacheCreation: 30, CacheRead: 40},
 		},
 		Code:       codeValue,
 		APIKey:     apiKeyValue,
@@ -136,6 +136,47 @@ func TestListShowsStateAndCounts(t *testing.T) {
 	}
 	if !reflect.DeepEqual(rows, want) {
 		t.Errorf("rows = %+v, want %+v", rows, want)
+	}
+}
+
+func TestListDropsRefusedFields(t *testing.T) {
+	t.Parallel()
+	rows, err := List(&fakeSource{list: []Record{record("ws-1", registry.Active)}})
+	if err != nil {
+		t.Fatalf("List returned %v, want nil", err)
+	}
+	data, err := json.Marshal(rows)
+	if err != nil {
+		t.Fatalf("marshal rows: %v", err)
+	}
+	for name, value := range map[string]string{
+		"code":       codeValue,
+		"API key":    apiKeyValue,
+		"transcript": transcriptValue,
+		"bead body":  beadBodyValue,
+	} {
+		if strings.Contains(string(data), value) {
+			t.Errorf("list JSON holds the %s: %s", name, data)
+		}
+	}
+}
+
+// TestMeteringSummaryHoldsNoExportType pins that no field of MeteringSummary
+// is a type the metering export declares, so a field the export gains cannot
+// reach a view through the summary.
+func TestMeteringSummaryHoldsNoExportType(t *testing.T) {
+	t.Parallel()
+	exportPkg := reflect.TypeOf(export.Tokens{}).PkgPath()
+	summary := reflect.TypeOf(MeteringSummary{})
+	for i := 0; i < summary.NumField(); i++ {
+		field := summary.Field(i)
+		typ := field.Type
+		if typ.Kind() == reflect.Slice {
+			typ = typ.Elem()
+		}
+		if typ.PkgPath() == exportPkg {
+			t.Errorf("MeteringSummary.%s is %s, a type from the metering export", field.Name, typ)
+		}
 	}
 }
 
