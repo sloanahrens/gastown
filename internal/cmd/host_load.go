@@ -60,10 +60,11 @@ Dolt, each VM, the dashboard and everything else. The line below the table
 carries the load averages, one timed bd call, the dispatcher's last tick and
 the town's seat count.
 
-  gt host load --sample --every 10s --out load.jsonl
+With --sample the command records instead of printing: one JSON line per
+interval, appended to --out, so a slowdown can be attributed afterwards
+instead of argued about from one ps snapshot.
 
-samples instead: one JSON line per interval, appended to --out, so a slowdown
-can be attributed afterwards instead of argued about from one ps snapshot.
+  gt host load --sample --every 10s --out load.jsonl
 
 A process that starts and exits between samples is not counted: a sample reads
 one interval, it does not trace the host.`,
