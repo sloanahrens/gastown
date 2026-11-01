@@ -224,10 +224,23 @@ func TestAnnounceRunsACommandWithNoArgvWithoutPanicking(t *testing.T) {
 	}
 }
 
-// jobsStartBound is the hang guard for the parallel start: a command that wired
-// --jobs starts both entries at once, and one that did not fails here rather
-// than hanging the suite.
-const jobsStartBound = 10 * time.Second
+// hangGuard bounds every wait this file makes on a run that ends at once: a
+// command that wired --jobs starts both entries together and returns as soon
+// as they are released, so a regression fails the test here rather than
+// hanging the suite.
+const hangGuard = 10 * time.Second
+
+// endRun waits for the command's run to end within hangGuard, failing the test
+// if it does not: a released run returns at once, so a stuck one is a
+// regression, not a slow one.
+func endRun(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(hangGuard): //testpolicy:allow no-sleep — a hang guard only: every held script is released, so a correct run returns at once and a stuck one fails here rather than hanging the suite
+		t.Fatalf("waited %s for the run to finish", hangGuard)
+	}
+}
 
 // TestMainRunsParallelEntriesUpToJobs: --jobs reaches the pool. Two Parallel
 // entries with --jobs 2 start together; a command that did not wire the flag
@@ -267,7 +280,7 @@ func TestMainRunsParallelEntriesUpToJobs(t *testing.T) {
 	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
 	t.Cleanup(func() {
 		releaseAll()
-		<-done
+		endRun(t, done)
 	})
 
 	var began []string
@@ -275,18 +288,14 @@ func TestMainRunsParallelEntriesUpToJobs(t *testing.T) {
 		select {
 		case path := <-started:
 			began = append(began, path)
-		case <-time.After(jobsStartBound): //testpolicy:allow no-sleep — a hang guard only: both entries start at once on a wired --jobs, and a command that dropped the flag fails here rather than hanging the suite
-			t.Fatalf("waited %s for both Parallel entries to start: %q started", jobsStartBound, began)
+		case <-time.After(hangGuard): //testpolicy:allow no-sleep — a hang guard only: both entries start at once on a wired --jobs, and a command that dropped the flag fails here rather than hanging the suite
+			t.Fatalf("waited %s for both Parallel entries to start: %q started", hangGuard, began)
 		}
 	}
 	releaseAll()
-	select {
-	case <-done:
-		if code != 0 {
-			t.Errorf("exit = %d, want 0: %s", code, errs.String())
-		}
-	case <-time.After(jobsStartBound): //testpolicy:allow no-sleep — a hang guard only: every held script is released, so a correct run returns at once and a stuck one fails here rather than hanging the suite
-		t.Fatalf("waited %s for the run to finish", jobsStartBound)
+	endRun(t, done)
+	if code != 0 {
+		t.Errorf("exit = %d, want 0: %s", code, errs.String())
 	}
 }
 

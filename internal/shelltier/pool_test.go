@@ -27,6 +27,15 @@ func waitFor[T any](t *testing.T, ch <-chan T, what string) T {
 	return zero
 }
 
+// endRun releases every held script and waits, within the hang guard, for the
+// run to end: a run that does not end once its scripts are released is a
+// regression, so the test fails here rather than hanging the suite.
+func endRun(t *testing.T, held *gates, done <-chan struct{}) {
+	t.Helper()
+	held.releaseAll()
+	waitFor(t, done, "the run to finish once every script was released")
+}
+
 // clockAt is a Now that always answers at, safe to call from the pool's workers
 // at once.
 func clockAt(at time.Time) func() time.Time { return func() time.Time { return at } }
@@ -199,10 +208,7 @@ func TestPoolNeverExceedsTheCap(t *testing.T) {
 		result = Run(t.Context(), poolConfig(poolEntries(paths, nil), jobs, fake.exec))
 		close(done)
 	}()
-	t.Cleanup(func() {
-		gates.releaseAll()
-		<-done
-	})
+	t.Cleanup(func() { endRun(t, gates, done) })
 
 	// Fill the pool: the first Jobs scripts start together and are held, so a
 	// pool that runs them one at a time never reaches Jobs and fails here.
@@ -268,10 +274,7 @@ func TestSerialEntriesRunAlone(t *testing.T) {
 		result = Run(t.Context(), poolConfig(poolEntries(paths, map[string]Mode{serial: Serial}), 2, fake.exec))
 		close(done)
 	}()
-	t.Cleanup(func() {
-		gates.releaseAll()
-		<-done
-	})
+	t.Cleanup(func() { endRun(t, gates, done) })
 
 	// The two parallel scripts are held, so a serial script that shared their
 	// workers would start beside them and the fake fails that start.
@@ -317,10 +320,7 @@ func TestResultOrderIsTheManifestOrder(t *testing.T) {
 		result = Run(t.Context(), poolConfig(poolEntries(paths, nil), len(paths), fake.exec))
 		close(done)
 	}()
-	t.Cleanup(func() {
-		gates.releaseAll()
-		<-done
-	})
+	t.Cleanup(func() { endRun(t, gates, done) })
 
 	for range paths {
 		waitFor(t, fake.started, "a script to start")
@@ -372,7 +372,7 @@ func TestOneFailureDoesNotCancelTheOthers(t *testing.T) {
 	}()
 	t.Cleanup(func() {
 		releaseAll()
-		<-done
+		waitFor(t, done, "the run to finish once every script was released")
 	})
 
 	// Every script starts although the first fails at once: a run that canceled
