@@ -12,7 +12,8 @@ func TestThePageMarksAFailedOrStaleReading(t *testing.T) {
 	t.Parallel()
 
 	for _, pane := range []struct{ fn, source, note string }{
-		{"renderWork", "seats", "worknote"}, // the Work panel is joined from the seats and queue reads
+		{"renderPolecats", "seats", "polecatsnote"},
+		{"renderBeads", "queue", "beadsnote"},
 		{"renderMachine", "machine", "machnote"},
 		{"renderOM", "om", "omnote"},
 		{"renderRigs", "queue", "rigsnote"}, // the Rigs rows are joined from the queue read
@@ -35,16 +36,6 @@ func TestThePageMarksAFailedOrStaleReading(t *testing.T) {
 		}
 	}
 
-	// The Work panel draws the seats and the queue, so it reads both sources
-	// and wears the worse of the two.
-	work := pageFunc(t, "renderWork")
-	if !strings.Contains(work, `readOf(s, "queue")`) {
-		t.Error("renderWork does not read the queue's status, so half its pane is never greyed")
-	}
-	if !strings.Contains(work, "paintsRead(box, $(\"worknote\"), worseRead(rSeats, rQueue));") {
-		t.Error("renderWork does not wear the worse of the two readings it joined")
-	}
-
 	// A failed seats read is unavailable, never a town with no polecats.
 	if seats := pageFunc(t, "workSeats"); !strings.Contains(seats, "unavailable — the seats read failed or went stale") {
 		t.Error("workSeats reads a failed seats read as a town with no polecats")
@@ -60,13 +51,18 @@ func TestThePageMarksAFailedOrStaleReading(t *testing.T) {
 
 	// The panel's ages are written on every call, above the unchanged-key early
 	// return, where the seat ages move in place.
-	workNote := pageFunc(t, "renderWork")
-	note, skip := strings.Index(workNote, `$("worknote").textContent`), strings.Index(workNote, "key === wKey)")
-	if note < 0 || skip < 0 || note > skip {
-		t.Errorf("renderWork writes its ages below the early return, so they freeze (note=%d skip=%d)", note, skip)
+	for _, pane := range []struct{ fn, note, key string }{
+		{"renderPolecats", `$("polecatsnote").textContent`, "key === pKey)"},
+		{"renderBeads", `$("beadsnote").textContent`, "key === bKey)"},
+	} {
+		body := pageFunc(t, pane.fn)
+		note, skip := strings.Index(body, pane.note), strings.Index(body, pane.key)
+		if note < 0 || skip < 0 || note > skip {
+			t.Errorf("%s writes its ages below the early return, so they freeze (note=%d skip=%d)", pane.fn, note, skip)
+		}
 	}
-	if !strings.Contains(string(indexHTML), "renderStrip(state); renderWork(state); renderTierSweep(state);") {
-		t.Error("the 15s tick does not redraw the Work panel's note, so its ages still freeze")
+	if !strings.Contains(string(indexHTML), "renderStrip(state); renderPolecats(state); renderBeads(state); renderTierSweep(state);") {
+		t.Error("the 15s tick does not redraw the Polecats and Beads notes, so their ages still freeze")
 	}
 
 	// The page writes text, never markup, wherever a reading is described.
