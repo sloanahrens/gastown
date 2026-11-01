@@ -1218,7 +1218,7 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 			waitNote = fmt.Sprintf(" (slot wait %s)", res.slotWait.Round(time.Second))
 		}
 		d.logger.Printf("tier_sweep: %s: %s finished (exit %d) in %s%s; last lines:\n%s",
-			rig, st.tiers[0], res.exitCode, stageElapsed.Round(time.Second), waitNote, lastLines(res.output, tierSweepLogTailLines))
+			rig, st.tiers[0], res.exitCode, stageElapsed.Round(time.Second), waitNote, lastLines(res.output))
 	}
 
 	if len(results) == 0 {
@@ -1843,7 +1843,7 @@ func (d *Daemon) tierSweepRunnerCollect(ctx context.Context, spec sweeprunner.Sp
 	stdout, stderr, err := d.runCmd(exec.CommandContext(ctx, status.Argv[0], status.Argv[1:]...)) //nolint:gosec // G204: the argv a Backend rendered from a validated Spec, run directly and never through a shell
 	if err != nil {
 		d.logger.Printf("tier_sweep: %s: reading run %s's status; last lines:\n%s",
-			spec.Rig, spec.RunID, lastLines(string(stderr), tierSweepLogTailLines))
+			spec.Rig, spec.RunID, lastLines(string(stderr)))
 		return false, fmt.Errorf("reading the run's status (%w)", err)
 	}
 	if !plan.Poll.Ended(stdout) {
@@ -1852,7 +1852,7 @@ func (d *Daemon) tierSweepRunnerCollect(ctx context.Context, spec sweeprunner.Sp
 	out, code := tierSweepRunSteps(ctx, d, plan.Poll.Collect)
 	if code != 0 {
 		d.logger.Printf("tier_sweep: %s: copying run %s's result out (exit %d); last lines:\n%s",
-			spec.Rig, spec.RunID, code, lastLines(out, tierSweepLogTailLines))
+			spec.Rig, spec.RunID, code, lastLines(out))
 		return false, fmt.Errorf("copying the run's result out of its output claim (exit %d)", code)
 	}
 	return true, nil
@@ -2024,7 +2024,7 @@ func (d *Daemon) tierSweepRunnerTeardown(ctx context.Context, spec sweeprunner.S
 		defer cancel()
 		if tdOut, tdCode := tierSweepRunSteps(tdCtx, d, steps); tdCode != 0 {
 			d.logger.Printf("tier_sweep: %s: removing the run's objects (exit %d); last lines:\n%s",
-				spec.Rig, tdCode, lastLines(tdOut, tierSweepLogTailLines))
+				spec.Rig, tdCode, lastLines(tdOut))
 			return
 		}
 	}
@@ -2449,11 +2449,12 @@ func tierSweepCloseGreen(d *Daemon, bd tierSweepBeadStore, rig, tier, sha string
 	}
 }
 
-// lastLines is out's final n lines; a shorter output is returned whole.
-func lastLines(out string, n int) string {
+// lastLines is out's final tierSweepLogTailLines lines; a shorter output is
+// returned whole.
+func lastLines(out string) string {
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
-	if len(lines) > n {
-		lines = lines[len(lines)-n:]
+	if len(lines) > tierSweepLogTailLines {
+		lines = lines[len(lines)-tierSweepLogTailLines:]
 	}
 	return strings.Join(lines, "\n")
 }
