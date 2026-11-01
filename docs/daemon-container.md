@@ -1026,13 +1026,10 @@ day.
 - [ ] **The live compose file is written.** `gt daemon compose write --image
       gt-daemon:<rev>` renders `<live-town>/daemon/container/compose.yml` from
       the town's settings and starts nothing. To let the container's landing
-      worker push to the live Forgejo, name its credential as the scratch render
-      does: `--forge-host <host:port> --forge-token-file <absolute host path>`,
-      both together or neither. The render mounts that token file read-only into
-      the container and passes the pair to the entrypoint, which sets
-      `gt git-credential-forgejo` for the host, so a `land/<bead>` push carries
-      the landing bot's token. The cutover starts the container from this file,
-      so the window cannot start before it exists.
+      worker push to the live Forgejo, pass the forge credential flags as the
+      scratch render does; `gt daemon compose write --help` gives their contract,
+      so a `land/<bead>` push carries the landing bot's token. The cutover starts
+      the container from this file, so the window cannot start before it exists.
 - [ ] **Both container fields are set in the live settings** while
       `daemon.supervisor` stays `launchd`: `daemon.container_name` and
       `daemon.compose_project`, never one without the other. The cutover builds
