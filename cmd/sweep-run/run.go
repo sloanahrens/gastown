@@ -174,6 +174,9 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 			tiersweep.EnvLogDir: opts.logDir(),
 			tiersweep.EnvTested: opts.SHA,
 			envJobs:             strconv.Itoa(opts.Jobs),
+			// The runner container has no town, so the sweep's packages run
+			// without gt slot run; the runner holds its own reservation.
+			tiersweep.EnvNoSlot: "1",
 		}
 		// The sweep's summary lines are echoed as it prints them, so the
 		// container's log reads like a host sweep's, and captured for the result.

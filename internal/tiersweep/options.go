@@ -36,6 +36,7 @@ const (
 	EnvTimings = "TIER_SWEEP_TIMINGS"
 	EnvJobs    = "TIER_SWEEP_JOBS"
 	EnvGTBin   = "TIER_SWEEP_GT_BIN"
+	EnvNoSlot  = "TIER_SWEEP_NOSLOT"
 )
 
 // The values a name takes when the environment leaves it unset.
@@ -102,6 +103,10 @@ type Options struct {
 	// Jobs is TIER_SWEEP_JOBS: how many packages the sweep runs at once, 1 to
 	// MaxJobs. Unset is 1, one package at a time, the sweep's original shape.
 	Jobs int
+	// NoSlot is TIER_SWEEP_NOSLOT=1: each package runs without the `gt slot run`
+	// wrapper. The runner container sets it, since it has no town for the wrapper
+	// to find and holds its own reservation. Unset or 0 leaves the wrapper on.
+	NoSlot bool
 }
 
 // UnknownTierError is a command line naming a tier the sweep does not offer.
@@ -205,6 +210,11 @@ func ParseOptions(args []string, host Host) (Options, error) {
 		return Options{}, err
 	}
 	opts.Jobs = jobs
+	noSlot, err := parseNoSlot(host.Env(EnvNoSlot))
+	if err != nil {
+		return Options{}, err
+	}
+	opts.NoSlot = noSlot
 	logDir := host.Env(EnvLogDir)
 	if logDir == "" {
 		parent := orDefault(host.Env("TMPDIR"), DefaultTempDir)
@@ -241,6 +251,19 @@ func SkipFor(list, tier, pkg string) (whole bool, pattern string) {
 		}
 	}
 	return false, ""
+}
+
+// parseNoSlot reads TIER_SWEEP_NOSLOT: unset or 0 keeps the slot wrapper, 1 drops
+// it. Anything else is the caller's usage error, so a typo never silently runs
+// the sweep the other way.
+func parseNoSlot(value string) (bool, error) {
+	switch value {
+	case "", "0":
+		return false, nil
+	case "1":
+		return true, nil
+	}
+	return false, fmt.Errorf("%s: %s=%q: want 0 or 1", Name, EnvNoSlot, value)
 }
 
 // parseNice reads TIER_SWEEP_NICE: nil when the variable is unset, and

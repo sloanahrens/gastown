@@ -152,7 +152,7 @@ func (s *Sweep) Integration() (line string, red bool) {
 	// inside them reach the next sweep's timings. The container list keeps the
 	// plain output it logs today: its wall is the container slot's, and the bead
 	// that added the test timings stops at this tier (gt-juo5e).
-	root := runner.TierJSON(true, TierIntegration, ".", slotPrefix(s.Opts.Nice), taggedArgs, plan.root)
+	root := runner.TierJSON(true, TierIntegration, ".", slotPrefix(s.Opts.Nice, s.Opts.NoSlot), taggedArgs, plan.root)
 	// The container tier runs its packages whole, so the shard plan is lifted for
 	// that call and put back for the nested modules' calls (gt-rw118).
 	shards := runner.Shards
@@ -164,7 +164,7 @@ func (s *Sweep) Integration() (line string, red bool) {
 			fmt.Fprintf(s.Stderr, "%s: %s: shard plan: %s runs whole, the container tier does not shard\n", Name, TierDocker, pkg)
 		}
 	}
-	docker := runner.TierJSON(false, TierDocker, ".", slotPrefix(s.Opts.Nice), nil, plan.docker)
+	docker := runner.TierJSON(false, TierDocker, ".", slotPrefix(s.Opts.Nice, s.Opts.NoSlot), nil, plan.docker)
 	runner.Shards = shards
 	// Only a passing container run at a named commit earns the record. A red
 	// one leaves the state alone, so the next sweep runs those packages again,
@@ -178,7 +178,7 @@ func (s *Sweep) Integration() (line string, red bool) {
 	var names []string
 	names = append(names, root.FailedNames...)
 	for _, m := range plan.modules {
-		c := runner.TierJSON(true, TierIntegration, m.dir, slotPrefix(s.Opts.Nice), taggedArgs, m.pkgs)
+		c := runner.TierJSON(true, TierIntegration, m.dir, slotPrefix(s.Opts.Nice, s.Opts.NoSlot), taggedArgs, m.pkgs)
 		passed += c.Passed
 		failed += c.Failed
 		skipped += c.Skipped
@@ -303,8 +303,13 @@ func triggerArgv(verb string) []string {
 
 // slotPrefix runs a package under gt slot run with the container tests on, and
 // with --nice when TIER_SWEEP_NICE set one. A nil nice passes no flag, so gt
-// slot run keeps its own default.
-func slotPrefix(nice *int) []string {
+// slot run keeps its own default. With noSlot the wrapper is dropped and only the
+// container-test environment remains: the runner container has no town for
+// gt slot run to find (TIER_SWEEP_NOSLOT).
+func slotPrefix(nice *int, noSlot bool) []string {
+	if noSlot {
+		return []string{"env", "GT_TEST_DOCKER=1"}
+	}
 	prefix := []string{"gt", "slot", "run"}
 	if nice != nil {
 		prefix = append(prefix, "--nice", strconv.Itoa(*nice))

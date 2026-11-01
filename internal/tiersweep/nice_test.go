@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -44,7 +45,7 @@ func TestSlotPrefixNice(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := slotPrefix(tc.nice); !reflect.DeepEqual(got, tc.want) {
+			if got := slotPrefix(tc.nice, false); !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("slotPrefix(%v) = %q, want %q", tc.nice, got, tc.want)
 			}
 		})
@@ -119,6 +120,21 @@ func TestParseOptionsNiceRefusals(t *testing.T) {
 // of each gt slot run they started.
 func tierSlotRuns(t *testing.T, env map[string]string) [][]string {
 	t.Helper()
+	var runs [][]string
+	for _, argv := range tierRuns(t, env) {
+		if argv[0] == "gt" {
+			runs = append(runs, argv)
+		}
+	}
+	if len(runs) != 4 {
+		t.Fatalf("gt slot run calls = %d, want 4 (root, docker, module, race): %q", len(runs), runs)
+	}
+	return runs
+}
+
+// tierRuns is every command the integration and race tiers started.
+func tierRuns(t *testing.T, env map[string]string) [][]string {
+	t.Helper()
 	logDir := t.TempDir()
 	env[EnvLogDir] = logDir
 	host := &fakeHost{env: env, tmpDir: logDir}
@@ -148,12 +164,7 @@ func tierSlotRuns(t *testing.T, env map[string]string) [][]string {
 	s.Race()
 	var runs [][]string
 	for _, c := range fake.calls {
-		if c.argv[0] == "gt" {
-			runs = append(runs, c.argv)
-		}
-	}
-	if len(runs) != 4 {
-		t.Fatalf("gt slot run calls = %d, want 4 (root, docker, module, race): %q", len(runs), runs)
+		runs = append(runs, c.argv)
 	}
 	return runs
 }
@@ -179,5 +190,46 @@ func TestIntegrationAndRaceUnsetNiceKeepsTheDefaultArgv(t *testing.T) {
 		if len(argv) < len(want) || !reflect.DeepEqual(argv[:len(want)], want) {
 			t.Errorf("go test invocation %q does not begin with %q", argv, want)
 		}
+	}
+}
+
+// TestNoSlotDropsTheSlotWrapperFromEveryPackage: with TIER_SWEEP_NOSLOT=1 the
+// four package commands (root, docker, module, race) start with the container
+// environment and no gt slot run, and none of the sweep's commands is gt at all.
+// The runner container has no town for gt slot run to find.
+func TestNoSlotDropsTheSlotWrapperFromEveryPackage(t *testing.T) {
+	t.Parallel()
+	want := []string{"env", "GT_TEST_DOCKER=1"}
+	packages := 0
+	for _, argv := range tierRuns(t, map[string]string{EnvNoSlot: "1"}) {
+		if slices.Contains(argv, "slot") {
+			t.Errorf("command %q still runs gt slot run", argv)
+		}
+		if argv[0] == "env" {
+			packages++
+			if !reflect.DeepEqual(argv[:len(want)], want) {
+				t.Errorf("package command %q does not begin with %q", argv, want)
+			}
+		}
+	}
+	if packages != 4 {
+		t.Errorf("package commands = %d, want 4 (root, docker, module, race)", packages)
+	}
+}
+
+// TestParseOptionsNoSlot: unset and 0 keep the wrapper, 1 drops it, and anything
+// else is a usage error that names the variable and the value.
+func TestParseOptionsNoSlot(t *testing.T) {
+	t.Parallel()
+	for value, want := range map[string]bool{"": false, "0": false, "1": true} {
+		f := &fakeHost{env: map[string]string{EnvNoSlot: value}, tmpDir: madeDir}
+		opts, err := ParseOptions(nil, f.host())
+		if err != nil || opts.NoSlot != want {
+			t.Errorf("ParseOptions(EnvNoSlot=%q) = NoSlot %v, %v; want %v", value, opts.NoSlot, err, want)
+		}
+	}
+	f := &fakeHost{env: map[string]string{EnvNoSlot: "yes"}, tmpDir: madeDir}
+	if _, err := ParseOptions(nil, f.host()); err == nil || !strings.Contains(err.Error(), EnvNoSlot) || !strings.Contains(err.Error(), "yes") {
+		t.Errorf("ParseOptions(EnvNoSlot=yes) error = %v, want one naming the variable and the value", err)
 	}
 }

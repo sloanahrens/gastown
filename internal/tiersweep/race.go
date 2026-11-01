@@ -31,6 +31,6 @@ func (s *Sweep) Race() (line string, red bool) {
 		Walls:    s.Walls,
 		Resume:   s.Resume,
 	}
-	c := runner.Tier(TierRace, ".", slotPrefix(s.Opts.Nice), raceArgs, []string{racePkg})
+	c := runner.Tier(TierRace, ".", slotPrefix(s.Opts.Nice, s.Opts.NoSlot), raceArgs, []string{racePkg})
 	return Summary(TierRace, s.Opts.LogDir, c.Passed, c.Failed, c.Skipped, strings.Join(c.FailedNames, " "), elapsed())
 }
