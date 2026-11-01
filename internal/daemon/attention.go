@@ -275,6 +275,10 @@ type attentionSources struct {
 	// auditNext the one the next pass begins at, carried by the attention
 	// cache.
 	auditStart, auditNext int
+	// tickIssues is the work beads the resolved-FAIL audit read this tick, keyed
+	// rig + NUL + bead id, for the risk-path collector to use instead of reading
+	// them again. A bead the audit wrote to is removed from it: its notes changed.
+	tickIssues map[string]*beads.Issue
 	// findingIssue reads one finding bead — the status and the close reason
 	// that resolved it — and riskAppend appends a review line to a work bead's
 	// notes: the resolved-FAIL pass's read and its only write
@@ -1494,6 +1498,9 @@ func (s *attentionSources) collectRiskPaths(ctx context.Context) ([]attention.It
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", rig, err)
 		}
+		// One batched read of the rig's beads the audit has not read this tick
+		// (gt-12mix).
+		rigReads := s.riskReads(ctx, rig, recs)
 		for _, rec := range recs {
 			if rec.BeadID == "" || rec.Head == "" || len(rec.RiskPaths) == 0 {
 				continue
@@ -1502,11 +1509,10 @@ func (s *attentionSources) collectRiskPaths(ctx context.Context) ([]attention.It
 			cacheKey := rig + "\x00" + rec.BeadID
 			read, ok := reads[cacheKey]
 			if !ok {
-				issue, err := s.riskIssue(ctx, rig, rec.BeadID)
-				read = riskRead{issue: issue, err: err}
+				read = rigReads[rec.BeadID]
 				reads[cacheKey] = read
 				beadReads++
-				if err != nil {
+				if err := read.err; err != nil {
 					if ctxErr := ctx.Err(); ctxErr != nil {
 						return nil, ctxErr
 					}
@@ -1568,6 +1574,42 @@ func (s *attentionSources) collectRiskPaths(ctx context.Context) ([]attention.It
 	// backlog rule may clear a standing item on (gt-8mm0g).
 	s.riskOpen, s.riskCounted = len(out), beadFails == 0
 	return out, nil
+}
+
+// riskReads reads rig's qualifying landing beads for the collector: each
+// distinct bead once, from the audit's read of this tick when it has one,
+// otherwise in one batched call for all the rest. A bead the batch could not
+// read carries the batch's error; a bead it did not return and no error
+// explains is a bead with no issue.
+func (s *attentionSources) riskReads(ctx context.Context, rig string, recs []land.LandingRecord) map[string]riskRead {
+	out := map[string]riskRead{}
+	var need []land.LandingRecord
+	for _, rec := range recs {
+		if rec.BeadID == "" || rec.Head == "" || len(rec.RiskPaths) == 0 {
+			continue
+		}
+		if _, done := out[rec.BeadID]; done {
+			continue
+		}
+		if issue, ok := s.tickIssues[rig+"\x00"+rec.BeadID]; ok {
+			out[rec.BeadID] = riskRead{issue: issue}
+			continue
+		}
+		out[rec.BeadID] = riskRead{}
+		need = append(need, rec)
+	}
+	if len(need) == 0 {
+		return out
+	}
+	issues, err := s.riskIssuesBatch(ctx, rig, need)
+	for _, rec := range need {
+		if issue, ok := issues[rec.BeadID]; ok {
+			out[rec.BeadID] = riskRead{issue: issue}
+		} else if err != nil {
+			out[rec.BeadID] = riskRead{err: err}
+		}
+	}
+	return out
 }
 
 // riskRead is one work bead's read as collectRiskPaths holds it for the tick:
