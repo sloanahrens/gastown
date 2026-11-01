@@ -154,6 +154,12 @@ const (
 	tierSweepRed   = "RED"
 )
 
+// tierSweepStarvedAlertAfter is how many cycles in a row may starve the same
+// tier before its verdict is stale enough to raise an attention item: a tier
+// an earlier stage always cuts off never runs, so a regression in it would
+// otherwise stay hidden (gt-r2e0h).
+const tierSweepStarvedAlertAfter = 3
+
 // tierSweepState is one rig's sweep record, .runtime/tier-sweep/<rig>.json.
 // gt report --hour reads the same file (internal/cmd/report.go).
 //
@@ -189,6 +195,13 @@ type tierSweepState struct {
 	// means it is caught up, which is why the field carries no omitempty: a
 	// zero time.Time is written out whatever its tag says (gt-icmdq).
 	OwedSince time.Time `json:"owed_since"`
+	// Starved counts the consecutive cycles that stopped before reaching each
+	// tier the schedule names: a cut-off stage starves every tier of its own
+	// that never began. A cycle that judges the tier drops it from the map,
+	// which is what resets the count. The RED collector raises an attention
+	// item at tierSweepStarvedAlertAfter, so a tier an earlier stage always
+	// keeps from running is not silently stale (gt-r2e0h).
+	Starved map[string]int `json:"starved_cycles,omitempty"`
 }
 
 // tierSweepTierResult is one tier's last verdict.
@@ -1128,10 +1141,10 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 	// without a verdict: the cycle is incomplete and the next heartbeat retries
 	// it.
 	deferred := false
-	// starved is true when a stage was cut off before a later tier of its own
-	// could print: that tier has no verdict of this cycle, so the record keeps
-	// the one it had and the cycle is Partial (gt-34r68).
-	starved := false
+	// starvedTiers names the tiers a stage was cut off before it could print:
+	// each has no verdict of this cycle, so the record keeps the one it had and
+	// the cycle is Partial (gt-34r68).
+	starvedTiers := map[string]bool{}
 	treeHas := seams.treeHas
 	if treeHas == nil {
 		treeHas = tierSweepTreeHas
@@ -1212,7 +1225,7 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 					// keeps the tier's previous verdict and the cycle is
 					// Partial, so the next one re-runs it (gt-34r68).
 					d.logger.Printf("tier_sweep: %s: %s did not run: %s", rig, tier, starvedNote)
-					starved = true
+					starvedTiers[tier] = true
 					continue
 				}
 				// No cut-off excuses this tier, so a missing summary line is
@@ -1275,10 +1288,11 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 	// partial covers both kinds of incomplete cycle: one that deferred, and one
 	// whose multi-tier stage was starved before its later tiers could print
 	// (gt-34r68). Neither says anything about the tiers it did not judge.
-	partial := deferred || starved
+	partial := deferred || len(starvedTiers) > 0
 	state.Tiers = tierSweepRecordedTiers(results, prior, stages, sha, partial, notOffered)
 	state.LastSHA = sha
 	state.Partial = partial
+	state.Starved = tierSweepStarvedCycles(prior.Starved, results, starvedTiers, stages)
 	// LastGreenSHA advances only on a cycle whose every stage ran green over
 	// the tiers the script offers: a partial cycle ran fewer stages or tiers than
 	// it planned and says nothing about the rest, and a tier the script does not
@@ -1358,6 +1372,32 @@ func tierSweepRecordedTiers(results map[string]tierSweepTierResult, prior tierSw
 		}
 	}
 	return recorded
+}
+
+// tierSweepStarvedCycles is the record's consecutive-starvation count for the
+// tiers the schedule names. A tier this cycle starved gains one on its prior
+// count, a tier it judged drops out (so that is what resets the count), and any
+// other tier keeps the count it had: a cycle that deferred ran no stage, which
+// says nothing about a tier. A tier the schedule no longer names is dropped
+// too, since no cycle would ever judge it again and its count could only grow
+// (gt-r2e0h).
+func tierSweepStarvedCycles(prior map[string]int, results map[string]tierSweepTierResult, starved map[string]bool, stages []tierSweepStage) map[string]int {
+	out := map[string]int{}
+	for _, st := range stages {
+		for _, tier := range st.tiers {
+			if _, judged := results[tier]; judged {
+				continue
+			}
+			n := prior[tier]
+			if starved[tier] {
+				n++
+			}
+			if n > 0 {
+				out[tier] = n
+			}
+		}
+	}
+	return out
 }
 
 // tierSweepStageJudged reports whether a stage reported a summary line for
