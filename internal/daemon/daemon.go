@@ -1850,8 +1850,8 @@ func (d *Daemon) Run() (err error) {
 	// heartbeat through the supervisor, within its budget (gt-4k3fj.3).
 
 	// Initial heartbeat, beside the signal channel like every later one.
-	if stop, err := d.stopOnSignal(sigChan, state, func() { d.heartbeat(state) }); stop {
-		return err
+	if stop, exit := d.stopOnSignal(sigChan, state, func() { d.heartbeat(state) }); stop {
+		return exit
 	}
 	startupComplete = true
 	if err := d.exitForUpgradeIfRequested(state, time.Now()); err != nil {
@@ -2024,8 +2024,8 @@ func (d *Daemon) Run() (err error) {
 			}
 
 		case <-timer.C:
-			if stop, err := d.stopOnSignal(sigChan, state, func() { d.heartbeat(state) }); stop {
-				return err
+			if stop, exit := d.stopOnSignal(sigChan, state, func() { d.heartbeat(state) }); stop {
+				return exit
 			}
 			if err := d.exitForUpgradeIfRequested(state, time.Now()); err != nil {
 				return err

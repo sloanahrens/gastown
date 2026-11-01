@@ -102,9 +102,10 @@ func (d *Daemon) heartbeatCanceled() bool {
 }
 
 // stopOnSignal runs one heartbeat beside sigChan and, when a shutdown signal
-// ended it, runs the shutdown. stop is true when the daemon must return err.
+// ended it, runs the shutdown. stop is true when the daemon must return exit,
+// the shutdown's result.
 // Both heartbeat call sites in Run use it.
-func (d *Daemon) stopOnSignal(sigChan <-chan os.Signal, state *State, run func()) (stop bool, err error) {
+func (d *Daemon) stopOnSignal(sigChan <-chan os.Signal, state *State, run func()) (stop bool, exit error) {
 	if sig := d.runHeartbeat(sigChan, run); sig != nil {
 		return true, d.finishSignalShutdown(state)
 	}
