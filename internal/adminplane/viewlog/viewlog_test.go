@@ -12,8 +12,9 @@ import (
 // clock that a call reading time.Now instead is visible.
 var at = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 
-// validView is the view every refusal test leaves one field short: the shared
-// item item-1 of workspace ws-1.
+// validView is a complete, valid view of the shared item item-1 in workspace
+// ws-1. Every test uses it whole except the field rows of
+// TestRefusedViewAppendsNothing, which spell out their own View.
 func validView() View {
 	return View{Actor: "operator", Workspace: "ws-1", ItemID: "item-1", At: at}
 }
@@ -119,6 +120,8 @@ func TestRefusedViewAppendsNothing(t *testing.T) {
 	}{
 		{"no share checker", nil, NewMemory(), validView(), ErrNoChecker},
 		{"no logger", &fakeShares{}, nil, validView(), ErrNoLog},
+		{"typed nil share checker", (*fakeShares)(nil), NewMemory(), validView(), ErrNoChecker},
+		{"typed nil logger", &fakeShares{}, (*Memory)(nil), validView(), ErrNoLog},
 		{"no actor", &fakeShares{}, NewMemory(), View{Workspace: "ws-1", ItemID: "item-1", At: at}, ErrNoActor},
 		{"no workspace", &fakeShares{}, NewMemory(), View{Actor: "operator", ItemID: "item-1", At: at}, ErrEmptyWorkspace},
 		{"no item", &fakeShares{}, NewMemory(), View{Actor: "operator", Workspace: "ws-1", At: at}, ErrEmptyItem},
@@ -129,10 +132,10 @@ func TestRefusedViewAppendsNothing(t *testing.T) {
 			if err := ViewShared(context.Background(), tc.shares, tc.log, tc.view); !errors.Is(err, tc.want) {
 				t.Fatalf("ViewShared returned %v, want %v", err, tc.want)
 			}
-			if shares, ok := tc.shares.(*fakeShares); ok && shares.calls != 0 {
+			if shares, ok := tc.shares.(*fakeShares); ok && shares != nil && shares.calls != 0 {
 				t.Errorf("share checker consulted %d times, want 0", shares.calls)
 			}
-			if log, ok := tc.log.(*Memory); ok && len(log.Entries()) != 0 {
+			if log, ok := tc.log.(*Memory); ok && log != nil && len(log.Entries()) != 0 {
 				t.Errorf("logged %+v, want no entry", log.Entries())
 			}
 		})
