@@ -491,6 +491,67 @@ func TestBirdsPanelNeedsYou(t *testing.T) {
 	}
 }
 
+// A stale reporter's group sorts after every fresh one however recently it
+// wrote, says when its last report was written, and is counted apart in the
+// header; a list of only stale items reads "Needs you (0, M stale)" (gt-9t6lr).
+func TestBirdsPanelNeedsYouStale(t *testing.T) {
+	t.Parallel()
+
+	old := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	mid := time.Date(2026, 11, 1, 8, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	recent := time.Date(2026, 11, 1, 11, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	asking := func(name, state, written string) map[string]any {
+		b := map[string]any{"bird": name, "state": state, "written": written,
+			"decision_items": []map[string]string{{"question": name + " question?", "recommendation": "yes"}}}
+		if state == "stale" {
+			b["stale"] = true
+		}
+		return b
+	}
+
+	// The stale bird wrote last, and still comes after both fresh ones.
+	state := map[string]any{"birds": []map[string]any{
+		asking("albatross", "stale", recent),
+		asking("crane", "fresh", old),
+		asking("dunlin", "fresh", mid),
+	}}
+	ny := drawBirdsInDOM(t, state)[0]
+	if ny.Summary != "Needs you (2, 1 stale)" {
+		t.Errorf("the summary reads %q, want the fresh items counted and the stale one named", ny.Summary)
+	}
+	var names []string
+	for _, g := range ny.Groups {
+		names = append(names, g.Parts[0])
+	}
+	if want := []string{"dunlin", "crane", "albatross"}; !slices.Equal(names, want) {
+		t.Errorf("the groups are %v, want %v: every fresh group before the stale one", names, want)
+	}
+	for _, g := range ny.Groups[:2] {
+		if len(g.Parts) != 3 {
+			t.Errorf("a fresh group reads %q, want its name, question and recommendation only", g.Parts)
+		}
+	}
+	stale := ny.Groups[2].Parts
+	if len(stale) != 4 || !strings.HasPrefix(stale[1], "stale: last report ") || len(stale[1]) <= len("stale: last report ") {
+		t.Fatalf("the stale group reads %q, want its name, a stale line with the report time, then its question", stale)
+	}
+
+	// Only stale items: the fresh count is 0 and the header still says so.
+	only := drawBirdsInDOM(t, map[string]any{"birds": []map[string]any{asking("albatross", "stale", old)}})[0]
+	if only.Summary != "Needs you (0, 1 stale)" {
+		t.Errorf("the summary reads %q, want Needs you (0, 1 stale)", only.Summary)
+	}
+
+	// A stale reporter's withheld note is grouped the same way.
+	held := asking("albatross", "stale", recent)
+	held["decision_items"] = nil
+	held["decision_items_withheld"] = []string{"credential-assignment"}
+	got := drawBirdsInDOM(t, map[string]any{"birds": []map[string]any{held, asking("crane", "fresh", old)}})[0]
+	if got.Groups[0].Parts[0] != "crane" || got.Groups[1].Parts[0] != "albatross" || !strings.HasPrefix(got.Groups[1].Parts[1], "stale: last report ") {
+		t.Errorf("the groups read %+v, want crane first and albatross's stale withheld group after it", got.Groups)
+	}
+}
+
 // A reporter whose every decision item was withheld still reaches the combined
 // list: its text is gone, so the note that one was withheld is the only thing
 // the operator would otherwise never see.
