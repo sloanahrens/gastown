@@ -13,13 +13,14 @@ import (
 	"unicode"
 )
 
-// The Digest block of the Overseer panel: the daemon's latest report. Its
+// The daemon's latest report, served on /api/state and /api/report (no panel
+// draws it now). Its
 // overseer_report patrol writes report files — one file per run, named for the
 // instant it wrote it, plus the latest.md copy it leaves for a human to read —
-// and this dashboard only reads the directory. So the report the block shows is
+// and this dashboard only reads the directory. So the report served is
 // the newest file that names a timestamp, never a guess at which file is
 // current, and a directory the reader cannot read is a named state rather than
-// an empty block (a failed read must not look like no reports at all).
+// an empty list (a failed read must not look like no reports at all).
 //
 // The reader opens files for reading and writes nothing, so nothing on this
 // page can reach into the overseer's own output.

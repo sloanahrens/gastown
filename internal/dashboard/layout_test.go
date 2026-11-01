@@ -23,9 +23,8 @@ func TestPaneColumns(t *testing.T) {
 	for _, tc := range []struct {
 		pane, col, before, after string
 	}{
-		{"attentionnote", "left", "", "overseernote"},
-		{"overseernote", "left", "attentionnote", "costnote"},
-		{"costnote", "left", "overseernote", "rigsnote"},
+		{"attentionnote", "left", "", "costnote"},
+		{"costnote", "left", "attentionnote", "rigsnote"},
 		{"rigsnote", "left", "costnote", "tiersweepnote"},
 		{"tiersweepnote", "left", "rigsnote", "mangonote"},
 		{"mangonote", "left", "tiersweepnote", "worknote"},

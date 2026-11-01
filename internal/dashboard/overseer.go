@@ -1,6 +1,6 @@
 package dashboard
 
-// The Overseer panel's payload: whether the overseer session is alive, what it
+// The overseer's payload: whether the overseer session is alive, what it
 // has done lately and what kinds of intervention it makes most. The page is
 // read-only; the overseer writes the heartbeat and the journal with gt overseer
 // beat and gt overseer log, and the daemon's silent-overseer rule watches the
@@ -35,8 +35,8 @@ type OverseerCount struct {
 	Count int    `json:"count"`
 }
 
-// Overseer is the Overseer panel. Unavailable says a file could not be read,
-// which the pane draws as itself and never as a silent overseer or an empty
+// Overseer is the overseer's state: the top strip reads its standing. Unavailable
+// says a file could not be read, which the strip draws as itself and never as a silent overseer or an empty
 // journal: "the overseer is quiet" and "its files could not be read" are
 // different things to tell the operator.
 type Overseer struct {

@@ -193,3 +193,16 @@ func TestFakeListLabelsAny(t *testing.T) {
 	}
 	_, _, _ = a, b, c
 }
+
+// The fake refuses LabelsAny with Ephemeral exactly as the real Beads.List
+// does, so a caller that asks for the pair fails in a test, not in town.
+func TestFakeListLabelsAnyRefusesEphemeral(t *testing.T) {
+	t.Parallel()
+	f := New()
+	if _, err := f.List(beads.ListOptions{Ephemeral: true, LabelsAny: []string{"gt:needs-human"}, Priority: -1}); err == nil {
+		t.Fatal("LabelsAny with Ephemeral: want an error, got none")
+	}
+	if _, err := f.List(beads.ListOptions{Ephemeral: true, Priority: -1}); err != nil {
+		t.Fatalf("Ephemeral alone: %v", err)
+	}
+}

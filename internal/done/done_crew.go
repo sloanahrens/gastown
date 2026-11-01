@@ -354,6 +354,9 @@ func submitCrewForLanding(r *doneRun) error {
 	if err != nil {
 		return fmt.Errorf("resolving HEAD: %w", err)
 	}
+	if err := refuseHumanIdentity(r, head); err != nil {
+		return err
+	}
 	if err := repo.VerifyPushedCommit("origin", r.branch, head); err != nil {
 		return doneExit(doneExitPushUnverified,
 			fmt.Sprintf("origin/%s is not at HEAD %s; push it first (git push origin HEAD:%s), then re-run gt done", r.branch, ShortSHA(head), r.branch), err)

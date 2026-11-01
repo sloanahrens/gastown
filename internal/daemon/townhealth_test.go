@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -68,28 +69,46 @@ func (b *labelBeads) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 }
 
 // listAny answers a LabelsAny read the way bd does: each issue carrying at
-// least one of the labels once, with the labels of the set it carries, out of
-// the issues table.
+// least one of the labels once, out of the issues table, as bd's list --json
+// prints it. bd prints every label the issue carries, not only the queried
+// ones, and the daemon reads the labels back out of that JSON, so the fake
+// writes the wire form and decodes it instead of handing back its own structs:
+// the json tags, and an issue with no labels, take the real path.
 func (b *labelBeads) listAny(opts beads.ListOptions) ([]*beads.Issue, error) {
 	for _, l := range opts.LabelsAny {
 		if l != "" && l == b.failFor {
 			return nil, errors.New("bd: timed out")
 		}
 	}
-	var out []*beads.Issue
-	at := map[string]int{}
+	// Every label an issue carries in the fake's world.
+	all := map[string][]string{}
+	for label, list := range b.issuesByLabel {
+		for _, is := range list {
+			all[is.ID] = append(all[is.ID], label)
+		}
+	}
+	var wire []map[string]any
+	seen := map[string]bool{}
 	for _, l := range opts.LabelsAny {
 		for _, is := range b.issuesByLabel[l] {
-			i, seen := at[is.ID]
-			if !seen {
-				cp := *is
-				cp.Labels = nil
-				out = append(out, &cp)
-				i = len(out) - 1
-				at[is.ID] = i
+			if seen[is.ID] {
+				continue
 			}
-			out[i].Labels = append(out[i].Labels, l)
+			seen[is.ID] = true
+			labels := all[is.ID]
+			sort.Strings(labels)
+			row := map[string]any{"id": is.ID, "status": is.Status, "labels": labels,
+				"created_at": is.CreatedAt, "updated_at": is.UpdatedAt}
+			wire = append(wire, row)
 		}
+	}
+	raw, err := json.Marshal(wire)
+	if err != nil {
+		return nil, err
+	}
+	var out []*beads.Issue
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

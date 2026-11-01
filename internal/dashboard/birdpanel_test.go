@@ -584,21 +584,18 @@ func TestBirdsPanelNeedsYouWithheldOnly(t *testing.T) {
 	}
 }
 
-// The Birds panel is a top-level section, first among the panels and ahead of
-// the Overseer panel, and a reader with no saved choice sees it closed: its
-// header still counts the birds and the ones that need the operator, so a
-// closed panel says whether anything waits (gt-0g6z9, gt-gm9lq).
+// The Birds panel is a top-level section, first among the panels, and a reader
+// with no saved choice sees it closed: its header still counts the birds and
+// the ones that need the operator, so a closed panel says whether anything
+// waits (gt-0g6z9, gt-gm9lq).
 func TestBirdsPanelClosedByDefault(t *testing.T) {
 	t.Parallel()
 
 	dom := newPageDOM(t)
 	keys := dom.foldKeys(t)
-	birdsAt, overseerAt := slices.Index(keys, "birds"), slices.Index(keys, "overseer")
-	if birdsAt < 0 || overseerAt < 0 {
-		t.Fatalf("the page's sections are %v, want a Birds panel and an Overseer panel among them", keys)
-	}
-	if birdsAt > overseerAt {
-		t.Errorf("the Birds panel sits at %d and the Overseer panel at %d, want the birds drawn first", birdsAt, overseerAt)
+	birdsAt := slices.Index(keys, "birds")
+	if birdsAt < 0 {
+		t.Fatalf("the page's sections are %v, want a Birds panel among them", keys)
 	}
 	if birdsAt != 0 {
 		t.Errorf("the page's sections are %v, want the Birds panel first among the panels", keys)
@@ -631,31 +628,6 @@ func TestBirdsPanelClosedByDefault(t *testing.T) {
 	}
 	if note := dom.element(t, "birdsnote").Text; !strings.Contains(note, "11 birds") || !strings.Contains(note, "8 need you") {
 		t.Errorf("the panel's note reads %q, want the bird count and the need-you count", note)
-	}
-}
-
-// The Overseer panel no longer draws the birds: they are a panel of their own.
-// Its other blocks are the ones it drew before, in the same order.
-func TestOverseerPanelHasNoBirds(t *testing.T) {
-	t.Parallel()
-
-	stamp := time.Now().UTC().Format(time.RFC3339)
-	dom := newPageDOM(t)
-	dom.call(t, "renderOverseer", map[string]any{
-		"birds": []any{map[string]any{"bird": "dunlin", "state": "fresh", "written": stamp, "summary": "the day in one line"}},
-		"reads": map[string]any{"birds": map[string]any{"at": stamp, "every_sec": 60}},
-	})
-
-	var names []string
-	for _, b := range overseerBlocks(t, dom) {
-		names = append(names, b.Name)
-	}
-	want := []string{"Heartbeat", "Digest", "Deep review", "Dispatcher", "For the overseer"}
-	if !slices.Equal(names, want) {
-		t.Errorf("the panel drew %v, want %v", names, want)
-	}
-	if text := dom.element(t, "overseer").Text; strings.Contains(text, "dunlin") {
-		t.Errorf("the Overseer panel still draws a bird's row: %q", text)
 	}
 }
 
