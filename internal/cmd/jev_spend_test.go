@@ -59,6 +59,25 @@ func TestJevSpendJSONSumsTheWindowByCaller(t *testing.T) {
 	}, got.ByCaller)
 }
 
+// The JSON also carries the periods the dashboard's Jev row fills its other
+// columns from, in the same pass over the same ledger.
+func TestJevSpendJSONCarriesThePeriods(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	writeJevSpendLedger(t, town,
+		jevSpendLine(now.Add(-30*time.Minute), "a", 1000, 0),
+		jevSpendLine(now.Add(-26*time.Hour), "a", 4000, 0),
+	)
+	var buf bytes.Buffer
+	require.NoError(t, jevSpendWithFlags(&buf, town, 24, 1e9, true, now))
+	var got struct {
+		Periods jev.SpendPeriods `json:"periods"`
+	}
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &got))
+	assert.Equal(t, jev.SpendPeriods{Last1hUSD: 1000, TodayUSD: 1000, YesterdayUSD: 4000, Last7dUSD: 5000}, got.Periods)
+}
+
 func TestJevSpendMissingLedgerPrintsZeros(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)

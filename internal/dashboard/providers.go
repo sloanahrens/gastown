@@ -411,6 +411,10 @@ func jevCostProvider(_ time.Time, _ json.RawMessage, _ *ClaudePlan, _ *CostChart
 		rate := jev.USD / 24
 		p.PerHour24h = &rate
 	}
+	if per := jev.Periods; per != nil {
+		today, yesterday, avg, hour := per.TodayUSD, per.YesterdayUSD, per.Last7dUSD/7, per.Last1hUSD
+		p.Today, p.Yesterday, p.Avg7d, p.PerHour1h = &today, &yesterday, &avg, &hour
+	}
 	p.Detail = append(p.Detail, jevCallLines(jev)...)
 	return p
 }

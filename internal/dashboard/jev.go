@@ -24,6 +24,10 @@ type JevSpend struct {
 	TopCaller      string  `json:"top_caller,omitempty"`
 	TopCallerCalls int     `json:"top_caller_calls,omitempty"`
 	TopCallerUSD   float64 `json:"top_caller_usd,omitempty"`
+	// Periods are the ledger's last hour, today, yesterday and last 168 hours in
+	// dollars, which fill the Cost row's other columns. Nil when the spend
+	// command does not print them, and the row leaves those columns blank.
+	Periods *JevPeriods `json:"periods,omitempty"`
 	// ReadFailed and Stale say the figures are the last good ones rather than
 	// current: the hub sets them on the value it hands the Cost rows, so the row
 	// can say why instead of drawing them as today's. Both are false on the
@@ -32,6 +36,14 @@ type JevSpend struct {
 	// report or a state value cannot set them.
 	ReadFailed bool `json:"-"`
 	Stale      bool `json:"-"`
+}
+
+// JevPeriods is the "periods" object of `gt jev spend --json`.
+type JevPeriods struct {
+	Last1hUSD    float64 `json:"last_1h_usd"`
+	TodayUSD     float64 `json:"today_usd"`
+	YesterdayUSD float64 `json:"yesterday_usd"`
+	Last7dUSD    float64 `json:"last_7d_usd"`
 }
 
 // ParseJevSpend folds the JSON `gt jev spend --json` prints into the row.
@@ -43,8 +55,9 @@ func ParseJevSpend(out []byte) (*JevSpend, error) {
 		return nil, errors.New("jev spend: not a JSON object")
 	}
 	var rep struct {
-		Calls    *int     `json:"calls"`
-		USD      *float64 `json:"usd"`
+		Calls    *int        `json:"calls"`
+		USD      *float64    `json:"usd"`
+		Periods  *JevPeriods `json:"periods"`
 		ByCaller map[string]struct {
 			Calls int     `json:"calls"`
 			USD   float64 `json:"usd"`
@@ -56,7 +69,7 @@ func ParseJevSpend(out []byte) (*JevSpend, error) {
 	if rep.Calls == nil || rep.USD == nil {
 		return nil, errors.New("jev spend: the report has no calls or usd")
 	}
-	j := &JevSpend{Calls: *rep.Calls, USD: *rep.USD}
+	j := &JevSpend{Calls: *rep.Calls, USD: *rep.USD, Periods: rep.Periods}
 	names := make([]string, 0, len(rep.ByCaller))
 	for name := range rep.ByCaller {
 		names = append(names, name)

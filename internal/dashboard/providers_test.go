@@ -511,6 +511,34 @@ func TestCostProvidersUnavailableHasNilFiguresAndWhy(t *testing.T) {
 	}
 }
 
+// The ledger's periods fill the Jev row's other columns; a spend command that
+// prints none leaves them blank, never zero.
+func TestCostProvidersJevRowFillsItsPeriods(t *testing.T) {
+	t.Parallel()
+
+	got, err := ParseJevSpend([]byte(`{"calls":14,"usd":2.4,"by_caller":{},"periods":{"last_1h_usd":0.1,"today_usd":1.5,"yesterday_usd":2,"last_7d_usd":7}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got.Window = "24h"
+	p := jevCostProvider(costProvidersNow, nil, nil, nil, got)
+	figureIs(t, "today", p.Today, 1.5)
+	figureIs(t, "yesterday", p.Yesterday, 2)
+	figureIs(t, "avg_7d", p.Avg7d, 1)
+	figureIs(t, "per_hour_1h", p.PerHour1h, 0.1)
+	figureIs(t, "per_hour_24h", p.PerHour24h, 0.1)
+
+	bare, err := ParseJevSpend([]byte(jevReport))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bare.Window = "24h"
+	q := jevCostProvider(costProvidersNow, nil, nil, nil, bare)
+	if q.Today != nil || q.Yesterday != nil || q.Avg7d != nil || q.PerHour1h != nil {
+		t.Errorf("a report with no periods filled %+v, want those columns blank", q)
+	}
+}
+
 func TestCostProvidersJevRow(t *testing.T) {
 	t.Parallel()
 
