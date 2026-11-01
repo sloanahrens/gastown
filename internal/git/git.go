@@ -4512,13 +4512,10 @@ type UncommittedWorkStatus struct {
 	// (sourceBeside.spares).
 	beside sourceBeside
 
-	// overlayCLAUDE records that the worktree's root CLAUDE.md carries
-	// templates.PolecatLifecycleMarker, so the file is the rig-written polecat
-	// overlay rather than repo source. autoSaveUncommittedWork in gt done
-	// unstages the same file by the same marker test, and the submission path
-	// strips it from the branch, so the uncommitted-work check ignores it too
-	// (gt-iv92k). A file the marker cannot be read from is not an overlay and
-	// blocks like any other change.
+	// overlayCLAUDE records that the root CLAUDE.md is the rig-written polecat
+	// overlay, by the rule templates.PolecatLifecycleMarker states (gt-iv92k).
+	// A file that rule cannot confirm is not an overlay and blocks like any
+	// other change.
 	overlayCLAUDE bool
 
 	changedSources     []string
@@ -5243,11 +5240,12 @@ func (g *Git) checkUncommittedWork(unpushedCommits func() (int, error)) (*Uncomm
 	return status, nil
 }
 
-// hasOverlayCLAUDE reports whether the worktree's root CLAUDE.md carries
-// templates.PolecatLifecycleMarker, the test autoSaveUncommittedWork applies
-// before it unstages the file. The worktree is read only when one of the
-// changed paths could be that file, and a missing or unreadable file has no
-// marker: the path then keeps blocking a submit.
+// hasOverlayCLAUDE reports whether the root CLAUDE.md is the polecat overlay:
+// a regular file in the worktree (not a symlink) that carries
+// templates.PolecatLifecycleMarker and, when its change is staged, a staged
+// copy that carries it too, so a staged project edit cannot hide behind an
+// overlay worktree copy (gt-u7zod). The worktree is read only when one of the
+// changed paths could be that file.
 func (g *Git) hasOverlayCLAUDE(modified, untracked []string) bool {
 	if g.workDir == "" {
 		return false
@@ -5258,11 +5256,23 @@ func (g *Git) hasOverlayCLAUDE(modified, untracked []string) bool {
 	if !slices.ContainsFunc(modified, isRootCLAUDE) && !slices.ContainsFunc(untracked, isRootCLAUDE) {
 		return false
 	}
-	data, err := os.ReadFile(filepath.Join(g.workDir, polecatOverlayCLAUDE))
+	file := filepath.Join(g.workDir, polecatOverlayCLAUDE)
+	if info, err := os.Lstat(file); err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	data, err := os.ReadFile(file)
+	if err != nil || !strings.Contains(string(data), templates.PolecatLifecycleMarker) {
+		return false
+	}
+	staged, err := g.run("diff", "--cached", "--name-only", "--", polecatOverlayCLAUDE)
 	if err != nil {
 		return false
 	}
-	return strings.Contains(string(data), templates.PolecatLifecycleMarker)
+	if strings.TrimSpace(staged) == "" {
+		return true
+	}
+	index, err := g.ShowFile("", polecatOverlayCLAUDE)
+	return err == nil && strings.Contains(index, templates.PolecatLifecycleMarker)
 }
 
 // besideSource returns the coverage/ and .cache/ roots of paths that hold a

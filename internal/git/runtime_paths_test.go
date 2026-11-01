@@ -192,6 +192,9 @@ func TestCheckUncommittedWorkExcludesMarkerBearingCLAUDEmd(t *testing.T) {
 		name      string
 		claude    string
 		noFile    bool
+		symlink   bool
+		staged    bool   // the index differs from HEAD for CLAUDE.md
+		index     string // the staged CLAUDE.md, read when staged
 		status    string
 		wantClean bool
 	}{
@@ -231,17 +234,56 @@ func TestCheckUncommittedWorkExcludesMarkerBearingCLAUDEmd(t *testing.T) {
 			status:    "?? docs/CLAUDE.md\n",
 			wantClean: false,
 		},
+		{
+			name:      "staged overlay copy",
+			claude:    overlay,
+			staged:    true,
+			index:     overlay,
+			status:    "M  CLAUDE.md\n",
+			wantClean: true,
+		},
+		{
+			name:      "staged project edit behind an overlay worktree copy",
+			claude:    overlay,
+			staged:    true,
+			index:     "# Project instructions\n",
+			status:    "MM CLAUDE.md\n",
+			wantClean: false,
+		},
+		{
+			name:      "symlinked CLAUDE.md naming a marker-bearing file",
+			claude:    overlay,
+			symlink:   true,
+			status:    "?? CLAUDE.md\n",
+			wantClean: false,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			cached := ""
+			if tt.staged {
+				cached = "CLAUDE.md\n"
+			}
 			g := newTestGit(t, newScripted(map[string]reply{
-				"status --porcelain -uall": ok(tt.status),
-				"ls-files -v -z":           ok(""),
-				"stash list":               ok(""),
+				"status --porcelain -uall":               ok(tt.status),
+				"ls-files -v -z":                         ok(""),
+				"stash list":                             ok(""),
+				"diff --cached --name-only -- CLAUDE.md": ok(cached),
+				"show :CLAUDE.md":                        ok(tt.index),
 			}))
-			if !tt.noFile {
+			switch {
+			case tt.noFile:
+			case tt.symlink:
+				target := filepath.Join(g.WorkDir(), "overlay-source.md")
+				if err := os.WriteFile(target, []byte(tt.claude), 0o644); err != nil {
+					t.Fatalf("write symlink target: %v", err)
+				}
+				if err := os.Symlink(target, filepath.Join(g.WorkDir(), "CLAUDE.md")); err != nil {
+					t.Fatalf("symlink CLAUDE.md: %v", err)
+				}
+			default:
 				if err := os.WriteFile(filepath.Join(g.WorkDir(), "CLAUDE.md"), []byte(tt.claude), 0o644); err != nil {
 					t.Fatalf("write CLAUDE.md: %v", err)
 				}
