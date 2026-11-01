@@ -497,6 +497,11 @@ never waits. Do not copy binaries by hand, run `go install`, or
 use `make install-local` in a town: none of them restarts the daemon or rolls
 back.
 
+After the install the same `rebuild_gt` cycle brings the other rigs' canonical
+checkouts forward; the install itself fetches only in gastown's. The rule for
+which checkout moves, and for who may fetch in one, is stated once in
+[reference.md](reference.md#agent-working-directories-and-settings).
+
 ```bash
 make install               # from any gastown clone in the town
 gt version                 # the installed commit

@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -87,6 +89,15 @@ const (
 	// rebuildGTGitTimeout bounds one git call.
 	rebuildGTGitTimeout = 2 * time.Minute
 
+	// rebuildGTRigSyncTimeout bounds one rig checkout's sync: its fetch, its
+	// history reads and its fast-forward together, so a rig whose remote is slow
+	// cannot hold the cycle open.
+	rebuildGTRigSyncTimeout = 60 * time.Second
+
+	// rebuildGTRigSyncBudget bounds the whole rig sweep, so a town with many
+	// slow rigs cannot hold the cycle open either.
+	rebuildGTRigSyncBudget = 5 * time.Minute
+
 	// rebuildGTSubjectLimit caps the commit subjects the install records.
 	rebuildGTSubjectLimit = 20
 
@@ -118,6 +129,11 @@ const (
 // rebuildGTSource is the --source every escalation and install from this job
 // carries, the same string the plugin used.
 const rebuildGTSource = "rebuild-gt"
+
+// rebuildGTSourceRig is the one rig whose canonical checkout rebuildGTSync
+// fast-forwards before an install. The rig sweep skips it: that checkout has
+// already been moved by the time the sweep runs (gt-f91o8).
+const rebuildGTSourceRig = "gastown"
 
 // rebuildGTInstallRecord is the last-run key recording the last install that
 // built and swapped a binary, which is what the install window is measured
@@ -422,7 +438,32 @@ func (d *Daemon) runRebuildGT() bool {
 }
 
 // rebuildGTCycle is the script's flow, in its order.
-func (d *Daemon) rebuildGTCycle(ctx context.Context, cycle *dogCycle, repoRoot string, now time.Time) bool {
+func (d *Daemon) rebuildGTCycle(ctx context.Context, cycle *dogCycle, repoRoot string, now time.Time) (settled bool) {
+	// The rig sweep runs last and only for a cycle that reached a verdict after
+	// the gt sync: the deferred call lands below every return in this function,
+	// so no rig can delay the install above it. A deferral syncs nothing,
+	// because the next heartbeat runs the whole cycle again and would fetch
+	// every rig a second time to reach the same place (gt-f91o8).
+	//
+	// It runs on the cycle's own goroutine — the one triggerRebuildGT launches
+	// only after rebuildGTRunning.CompareAndSwap(false, true) — and never on the
+	// heartbeat's, which returned when that goroutine started. What it costs is
+	// time, not the heartbeat: while the sweep runs (at most
+	// rebuildGTRigSyncBudget) the guard stays set, so a landing's install
+	// request that arrives meanwhile is not served by this cycle. It stays
+	// armed — a cycle consumes a request only as it starts
+	// (takeRebuildGTRequest) and puts back one it did not accomplish — and the
+	// first heartbeat after the sweep takes it. One settled cycle fetches about
+	// eight remotes (every rig but gastown); its cadence is the rebuild_gt
+	// patrol interval (rebuildGTInterval, one hour unless daemon.json sets
+	// another), so no cooldown is needed unless that interval is under a minute.
+	synced := false
+	defer func() {
+		if settled && synced {
+			d.rebuildGTSyncRigCheckouts()
+		}
+	}()
+
 	// The stagnation check runs before any bail, and reads git history only:
 	// every skip below leaves a due binary out of force, and keying the alarm
 	// to that outcome rather than to an enumeration of skip reasons is what
@@ -482,6 +523,7 @@ func (d *Daemon) rebuildGTCycle(ctx context.Context, cycle *dogCycle, repoRoot s
 		d.rebuildGTNoteBlocked(cycle, due, why)
 		return true
 	}
+	synced = true
 
 	// Read staleness again, after the sync: it compares the binary against the
 	// checkout's own main ref, so checking first would let a stale checkout
@@ -725,6 +767,220 @@ func (d *Daemon) rebuildGTSync(ctx context.Context, repoRoot string) (rebuildGTS
 		}
 	}
 	return rebuildGTSyncOK, ""
+}
+
+// rebuildGTRigCheckoutCounts is what one rig sweep did, for the cycle's log
+// line. Moved + Skipped + Failed is every rig the sweep considered: each known
+// rig but gastown, except one with no canonical checkout to move.
+type rebuildGTRigCheckoutCounts struct {
+	Moved, Skipped, Failed int
+}
+
+// rebuildGTRigDir is one rig whose canonical checkout the sweep will visit.
+type rebuildGTRigDir struct {
+	rig string
+	dir string
+}
+
+// rebuildGTRigNameOK reports whether rig can be joined under the town root: an
+// empty name, "." or ".." would name the town root itself, and a separator
+// would name a directory that is not the rig (gt-f91o8).
+func rebuildGTRigNameOK(rig string) bool {
+	if rig == "" || rig == "." || rig == ".." {
+		return false
+	}
+	return !strings.ContainsAny(rig, `/\`)
+}
+
+// rebuildGTSyncRigCheckouts fast-forwards the canonical checkout of every rig
+// but gastown, <town>/<rig>/mayor/rig, to origin/main.
+//
+// A rig's directive layer and its bead redirect are read from that tree, so a
+// directive landed on a rig's main stays invisible until its checkout moves,
+// and nothing else ever moved one (gt-f91o8).
+//
+// This is the only code that fetches in another rig's canonical checkout: the
+// install and the staleness read fetch in gastown's own, which they build from
+// and compare the binary against, and sessions and crews fetch in none they did
+// not open (docs/reference.md states the rule). The sweep runs after the cycle
+// has reached its verdict, so a slow or failing rig never delays or fails the
+// gt install, and every rig it does not move is logged once with its reason and
+// left alone.
+func (d *Daemon) rebuildGTSyncRigCheckouts() rebuildGTRigCheckoutCounts {
+	budget := rebuildGTRigSyncBudget
+	if d.rebuildGTRigSyncBudgetFn != nil {
+		budget = d.rebuildGTRigSyncBudgetFn()
+	}
+	// The daemon's own context is the parent, so a daemon stop ends the sweep
+	// between rigs and cuts the git call it is in (shutdown cancels d.ctx before
+	// the process exits). The cycle's context is not used: it is built from
+	// Background with the install's budget, which the sweep must not inherit.
+	parent := context.Background()
+	if d.ctx != nil {
+		parent = d.ctx
+	}
+	budgetCtx, cancel := context.WithTimeout(parent, budget)
+	defer cancel()
+
+	timeout := rebuildGTRigSyncTimeout
+	if d.rebuildGTRigSyncTimeoutFn != nil {
+		timeout = d.rebuildGTRigSyncTimeoutFn()
+	}
+
+	// Cloned before sorting: getKnownRigs hands back the daemon's cached slice,
+	// which readers on other goroutines hold.
+	rigs := slices.Clone(d.getKnownRigs())
+	slices.Sort(rigs)
+	var counts rebuildGTRigCheckoutCounts
+
+	// Which rigs have a checkout is settled before any git runs, so the counts
+	// cover every checkout in the town: a rig the budget never reaches is
+	// skipped with that reason rather than dropped from the cycle's line
+	// (gt-f91o8).
+	var checkouts []rebuildGTRigDir
+	for _, rig := range rigs {
+		if rig == rebuildGTSourceRig {
+			continue
+		}
+		if !rebuildGTRigNameOK(rig) {
+			counts.Skipped++
+			d.logger.Printf("rebuild_gt: rig %q: invalid rig name; leaving its checkout alone", rig)
+			continue
+		}
+		checkout := filepath.Join(d.config.TownRoot, rig, "mayor", "rig")
+		if _, err := os.Stat(filepath.Join(checkout, ".git")); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				// No canonical checkout: nothing to move.
+				continue
+			}
+			counts.Failed++
+			d.logger.Printf("rebuild_gt: rig %s: cannot read its checkout (%v); leaving it alone", rig, err)
+			continue
+		}
+		checkouts = append(checkouts, rebuildGTRigDir{rig: rig, dir: checkout})
+	}
+
+	for i, rig := range checkouts {
+		if budgetCtx.Err() != nil {
+			// The budget is spent before these rigs were visited: they are
+			// skipped, not dropped, so the counts still add up to every
+			// checkout the town has (gt-f91o8).
+			for _, rest := range checkouts[i:] {
+				counts.Skipped++
+				if d.ctx != nil && d.ctx.Err() != nil {
+					d.logger.Printf("rebuild_gt: rig %s: the daemon is stopping; leaving its checkout alone", rest.rig)
+					continue
+				}
+				d.logger.Printf("rebuild_gt: rig %s: the %s sweep budget is spent; leaving its checkout alone", rest.rig, budget)
+			}
+			break
+		}
+		rigCtx, rigCancel := context.WithTimeout(budgetCtx, timeout)
+		moved, failed, why := d.rebuildGTSyncRigCheckout(rigCtx, rig.dir)
+		rigCancel()
+		switch {
+		case moved:
+			counts.Moved++
+		case failed:
+			counts.Failed++
+			d.logger.Printf("rebuild_gt: rig %s: %s; leaving its checkout alone", rig.rig, why)
+		default:
+			counts.Skipped++
+			d.logger.Printf("rebuild_gt: rig %s: %s; leaving its checkout alone", rig.rig, why)
+		}
+	}
+	d.logger.Printf("rebuild_gt: rig checkouts: %d moved, %d skipped, %d failed", counts.Moved, counts.Skipped, counts.Failed)
+	return counts
+}
+
+// rebuildGTSyncRigCheckout fast-forwards one rig's canonical checkout to
+// origin/main and reports what it did: moved, or failed, or skipped with why.
+//
+// Only a checkout on main, clean, and strictly behind origin/main is moved: a
+// fast-forward is the only write here, and it is the only write that cannot
+// lose anything. Every other state is a tree someone may be holding on
+// purpose, so it is reported and left alone.
+func (d *Daemon) rebuildGTSyncRigCheckout(ctx context.Context, checkout string) (moved, failed bool, why string) {
+	// git is this checkout's runner, bounded by the caller's context: the seam
+	// carries that context so a test can drive the per-rig bound with a runner
+	// that starts no process (gt-f91o8).
+	git := d.rebuildGTGitCtx
+	if d.rebuildGTRigGitFn != nil {
+		git = d.rebuildGTRigGitFn
+	}
+	branch, err := git(ctx, checkout, "branch", "--show-current")
+	if err != nil {
+		return false, true, "cannot read the branch: " + err.Error()
+	}
+	if b := strings.TrimSpace(branch); b != "main" {
+		if b == "" {
+			return false, false, "HEAD is detached"
+		}
+		return false, false, "on branch " + b
+	}
+
+	// .beads is excluded for the reason the gastown pre-flight excludes it: the
+	// checkout holds tracked bead state that changes without anyone touching the
+	// tree, and refusing to move over that would hold the rig back forever
+	// (gt-50k). A change there that the fast-forward would overwrite fails the
+	// merge below, which is reported.
+	dirty, err := git(ctx, checkout, "status", "--porcelain", "--untracked-files=no", "--", ".", ":(exclude).beads")
+	if err != nil {
+		return false, true, "cannot read the work tree: " + err.Error()
+	}
+	if strings.TrimSpace(dirty) != "" {
+		return false, false, "the work tree has uncommitted changes"
+	}
+
+	if _, err := git(ctx, checkout, "fetch", "origin", "--quiet"); err != nil {
+		return false, true, "cannot fetch origin: " + err.Error()
+	}
+
+	// One read answers both questions the fast-forward rests on: rev-list
+	// --left-right --count HEAD...origin/main prints "<ahead>\t<behind>", so
+	// ahead == 0 is exactly "HEAD is an ancestor of origin/main" and behind == 0
+	// is "there is nothing to fast-forward".
+	out, err := git(ctx, checkout, "rev-list", "--left-right", "--count", "HEAD...origin/main")
+	if err != nil {
+		return false, true, "cannot compare HEAD with origin/main: " + err.Error()
+	}
+	ahead, behind, ok := parseAheadBehind(out)
+	if !ok {
+		return false, true, "cannot compare HEAD with origin/main: rev-list did not print two counts"
+	}
+	if ahead > 0 {
+		if ahead == 1 {
+			return false, false, "1 commit on HEAD is not on origin/main"
+		}
+		return false, false, fmt.Sprintf("%d commits on HEAD are not on origin/main", ahead)
+	}
+	if behind == 0 {
+		return false, false, "already at origin/main"
+	}
+
+	if _, err := git(ctx, checkout, "merge", "--ff-only", "origin/main", "--quiet"); err != nil {
+		return false, true, "cannot fast-forward to origin/main: " + err.Error()
+	}
+	return true, false, ""
+}
+
+// parseAheadBehind reads the "<ahead>\t<behind>" rev-list --left-right --count
+// prints. ok is false on anything else, which is a reading to report, never a
+// zero to act on.
+func parseAheadBehind(out string) (ahead, behind int, ok bool) {
+	fields := strings.Fields(out)
+	if len(fields) != 2 {
+		return 0, 0, false
+	}
+	a, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return 0, 0, false
+	}
+	b, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return 0, 0, false
+	}
+	return a, b, true
 }
 
 // rebuildGTInstall builds the Go installer from the synced checkout, runs it
@@ -1244,7 +1500,14 @@ func (d *Daemon) rebuildGTWaitForGate(ctx context.Context, deadline time.Time) b
 
 // rebuildGTGit runs one git command in the source checkout, returning stdout.
 func (d *Daemon) rebuildGTGit(repoRoot string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), rebuildGTGitTimeout)
+	return d.rebuildGTGitCtx(context.Background(), repoRoot, args...)
+}
+
+// rebuildGTGitCtx is rebuildGTGit under a caller's context, so a caller that
+// bounds a whole checkout's sync as one step (rather than one call at a time)
+// stops every git call under it when that bound expires.
+func (d *Daemon) rebuildGTGitCtx(ctx context.Context, repoRoot string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, rebuildGTGitTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", repoRoot}, args...)...)
 	stdout, stderr, err := d.runCmd(cmd)
@@ -1252,6 +1515,11 @@ func (d *Daemon) rebuildGTGit(repoRoot string, args ...string) (string, error) {
 		msg := strings.TrimSpace(string(stderr))
 		if msg == "" {
 			msg = err.Error()
+		}
+		// A git killed by the bound reports the signal, which says nothing about
+		// why: name the expiry instead (gt-f91o8).
+		if ctx.Err() != nil {
+			msg = "git " + strings.Join(args, " ") + ": " + ctx.Err().Error()
 		}
 		return string(stdout), errors.New(msg)
 	}

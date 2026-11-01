@@ -695,7 +695,27 @@ Understanding this hierarchy is essential for proper configuration.
 | **Polecat** | `~/gt/<rig>/polecats/<name>/<rig>/` | Polecat worktree (ephemeral sandbox) |
 
 Note: The per-rig `<rig>/mayor/rig/` directory is NOT a working directory—it's
-a git clone that holds the canonical `.beads/` database for that rig.
+a git clone that holds the canonical `.beads/` database for that rig, and a
+rig's directive layer is read from its `.gastown/directives`.
+
+The writers that fetch in a canonical checkout (`<town>/<rig>/mayor/rig`):
+
+- The install and the staleness read of the installed binary fetch in
+  `gastown`'s checkout, the tree the binary is built from
+  ([INSTALLING.md](INSTALLING.md)).
+- The daemon's `rebuild_gt` cycle fetches there too, and after its verdict
+  fast-forwards every other rig's checkout to `origin/main` when that checkout
+  is on main, clean and strictly behind; it logs every other state once with its
+  reason and leaves it alone. It is the only code that moves another rig's
+  checkout.
+- Every other fetch runs in a working directory of its own: the crew clone
+  `gt crew` and `gt crew fresh` work in, the caller's current directory for the
+  divergence warning in `gt mol status`, and the bare clone under
+  `.runtime/jev/repos/` for the submission and drift batteries. Checked
+  2026-11-01 for the fetch callers in `internal/daemon`, `internal/version`,
+  `internal/crewfresh`, `internal/jev` and the crew and mol status commands of
+  `internal/cmd`; a new fetch caller belongs in this list.
+
 
 ### Settings File Locations
 
