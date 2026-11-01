@@ -20,6 +20,17 @@ func newStore(t *testing.T, c Client) *Store {
 	return s
 }
 
+// mustPut stores value under ws-1/api-key and fails the test when the store
+// refuses it, so a setup that did not happen cannot pass for one that did.
+func mustPut(t *testing.T, s *Store, value string) keystore.Revision {
+	t.Helper()
+	rev, err := s.Put(context.Background(), "ws-1", "api-key", []byte(value))
+	if err != nil {
+		t.Fatalf("setup Put(%q): %v", value, err)
+	}
+	return rev
+}
+
 func TestContractOverFakeClient(t *testing.T) {
 	t.Parallel()
 	storetest.Run(t, "ws-1", func(t *testing.T) keystore.Store { return newStore(t, newFakeClient()) })
@@ -79,20 +90,21 @@ func TestNoValueInErrors(t *testing.T) {
 	if _, err := s.Put(ctx, "ws-1", "api-key", []byte(value)); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	// A failing client whose error carries the payload, as a careless SDK could.
-	c.failWith = fmt.Errorf("rpc failed for payload %s", value)
+	// A failing client whose own error is value-free: whatever the adapter adds
+	// around it must be value-free too, so the whole text is checked, not what
+	// is left after taking the client's string out.
+	c.failWith = errors.New("rpc failed")
 	_, putErr := s.Put(ctx, "ws-1", "api-key", []byte(value))
 	_, getErr := s.Get(ctx, "ws-1", "api-key")
-	// The adapter wraps the client's error; it must not add the value itself.
-	// What the client chose to put in its own error is the client's to avoid, so
-	// the check is that the adapter's own text is value-free.
 	for name, err := range map[string]error{"Put": putErr, "Get": getErr} {
 		if err == nil {
 			t.Fatalf("%s with a failing client returned nil", name)
 		}
-		own := strings.ReplaceAll(err.Error(), c.failWith.Error(), "")
-		if strings.Contains(own, value) {
-			t.Errorf("%s error adds the value: %q", name, own)
+		if !errors.Is(err, c.failWith) {
+			t.Errorf("%s error %q lost the client's error", name, err)
+		}
+		if strings.Contains(err.Error(), value) {
+			t.Errorf("%s error adds the value: %q", name, err.Error())
 		}
 	}
 }
@@ -119,7 +131,7 @@ func TestDestroyedVersionNumberIsNotReusedAndLeavesRevisions(t *testing.T) {
 	c := newFakeClient()
 	s := newStore(t, c)
 	ctx := context.Background()
-	first, _ := s.Put(ctx, "ws-1", "api-key", []byte("one"))
+	first := mustPut(t, s, "one")
 	if err := s.Destroy(ctx, "ws-1", "api-key", first); err != nil {
 		t.Fatalf("Destroy: %v", err)
 	}
@@ -127,7 +139,7 @@ func TestDestroyedVersionNumberIsNotReusedAndLeavesRevisions(t *testing.T) {
 	if err != nil || len(infos) != 0 {
 		t.Fatalf("Revisions after destroying the only version = %v, %v; want none", infos, err)
 	}
-	if second, _ := s.Put(ctx, "ws-1", "api-key", []byte("two")); second <= first {
+	if second := mustPut(t, s, "two"); second <= first {
 		t.Errorf("Put after Destroy = %d, want above %d", second, first)
 	}
 }
@@ -137,8 +149,8 @@ func TestGetReadsTheHighestEnabledVersionOnly(t *testing.T) {
 	c := newFakeClient()
 	s := newStore(t, c)
 	ctx := context.Background()
-	s.Put(ctx, "ws-1", "api-key", []byte("one"))
-	second, _ := s.Put(ctx, "ws-1", "api-key", []byte("two"))
+	mustPut(t, s, "one")
+	second := mustPut(t, s, "two")
 	if err := s.Disable(ctx, "ws-1", "api-key", second); err != nil {
 		t.Fatalf("Disable: %v", err)
 	}
@@ -178,7 +190,7 @@ func TestGetNotFoundWhenTheVersionDisappearsBetweenListAndRead(t *testing.T) {
 	c := newFakeClient()
 	s := newStore(t, c)
 	ctx := context.Background()
-	only, _ := s.Put(ctx, "ws-1", "api-key", []byte("one"))
+	only := mustPut(t, s, "one")
 	c.beforeAccess = func() {
 		if err := c.DisableVersion(ctx, SecretID("ws-1", "api-key"), int64(only)); err != nil {
 			t.Errorf("disable inside the race: %v", err)
@@ -221,5 +233,30 @@ func TestNewRefusesANilClient(t *testing.T) {
 	t.Parallel()
 	if s, err := New(nil, "ws-1"); err == nil || s != nil {
 		t.Errorf("New(nil client) = %v, %v, want an error and no store", s, err)
+	}
+}
+
+// A newest version disabled between the list and the read leaves the older
+// enabled one current: Get returns it rather than reporting the key missing.
+func TestGetFallsBackToTheNextEnabledVersion(t *testing.T) {
+	t.Parallel()
+	c := newFakeClient()
+	s := newStore(t, c)
+	ctx := context.Background()
+	mustPut(t, s, "one")
+	second := mustPut(t, s, "two")
+	once := true
+	c.beforeAccess = func() {
+		if !once {
+			return
+		}
+		once = false
+		if err := c.DisableVersion(ctx, SecretID("ws-1", "api-key"), int64(second)); err != nil {
+			t.Errorf("disable inside the race: %v", err)
+		}
+	}
+	secret, err := s.Get(ctx, "ws-1", "api-key")
+	if err != nil || string(secret.Bytes()) != "one" {
+		t.Fatalf("Get after the newest version was disabled mid-read = %q, %v; want one", secret.Bytes(), err)
 	}
 }

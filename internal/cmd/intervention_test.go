@@ -77,12 +77,12 @@ func TestInterventionRecordRefusesBadInput(t *testing.T) {
 		{
 			name:    "no kind",
 			args:    []string{"record", "--reason", "held the queue"},
-			wantErr: "kind",
+			wantErr: `required flag(s) "kind" not set`,
 		},
 		{
 			name:    "no reason",
 			args:    []string{"record", "--kind", "hold"},
-			wantErr: "reason",
+			wantErr: `required flag(s) "reason" not set`,
 		},
 		{
 			name:    "a takeover with no bead",
@@ -123,7 +123,7 @@ func TestInterventionRecordRefusesBadInput(t *testing.T) {
 				return town
 			},
 			args:    []string{"record", "--kind", "takeover", "--bead", "gt-abc", "--reason", "took the bead over"},
-			wantErr: "route table",
+			wantErr: "reading the route table",
 		},
 	}
 	for _, tc := range tests {
