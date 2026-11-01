@@ -438,6 +438,41 @@ func TestCommitIdentityUnknownCommit(t *testing.T) {
 	s.noUnscripted(t)
 }
 
+// CommitAuthorship reads one commit's author and committer together, so gt
+// done judges both identities from that commit alone (gt-dvotr).
+func TestCommitAuthorship(t *testing.T) {
+	t.Parallel()
+	s := newScripted(map[string]reply{
+		"log -1 --format=%an%x00%ae%x00%cn%x00%ce cccc": ok("Seat Opal\x00opal@gastown.local\x00Seat Opal\x00opal@gastown.local\n"),
+	})
+	g := newTestGit(t, s)
+
+	got, err := g.CommitAuthorship("cccc")
+	want := CommitAuthorship{
+		AuthorName: "Seat Opal", AuthorEmail: "opal@gastown.local",
+		CommitterName: "Seat Opal", CommitterEmail: "opal@gastown.local",
+	}
+	if err != nil || got != want {
+		t.Fatalf("CommitAuthorship = %+v, %v; want %+v, nil", got, err, want)
+	}
+	s.noUnscripted(t)
+}
+
+// An unknown commit is an error, never an empty identity a caller could read
+// as naming nobody (gt-dvotr).
+func TestCommitAuthorshipUnknownCommit(t *testing.T) {
+	t.Parallel()
+	s := newScripted(map[string]reply{
+		"log -1 --format=%an%x00%ae%x00%cn%x00%ce dead": fail(128, "fatal: bad revision 'dead'"),
+	})
+	g := newTestGit(t, s)
+
+	if _, err := g.CommitAuthorship("dead"); err == nil {
+		t.Fatal("want an error for a commit the repo does not have")
+	}
+	s.noUnscripted(t)
+}
+
 // Each commit line is "<sha>NUL<author>NUL<email>NUL<subject>", newest first.
 // The subject may hold colons and spaces; an empty range has no summaries.
 func TestFirstParentCommitSummariesParsesAuthorEmailAndSubject(t *testing.T) {

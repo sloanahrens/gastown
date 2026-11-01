@@ -262,6 +262,38 @@ func (g *Git) CommitIdentity(rev string) (name, email string, err error) {
 	return strings.TrimSpace(name), strings.TrimSpace(email), nil
 }
 
+// CommitAuthorship is the identity one commit records as its author and as
+// its committer.
+type CommitAuthorship struct {
+	AuthorName     string
+	AuthorEmail    string
+	CommitterName  string
+	CommitterEmail string
+}
+
+// CommitAuthorship reads one commit's author and committer in a single call.
+// The lowercase format codes read the commit's own fields, so a repository's
+// .mailmap cannot rewrite the identity a caller judges.
+func (g *Git) CommitAuthorship(rev string) (CommitAuthorship, error) {
+	out, err := g.runOutput("log", "-1", "--format=%an%x00%ae%x00%cn%x00%ce", rev)
+	if err != nil {
+		return CommitAuthorship{}, err
+	}
+	fields := strings.Split(strings.TrimSpace(out), "\x00")
+	if len(fields) != 4 {
+		return CommitAuthorship{}, fmt.Errorf("commit %s: %d identity fields, want 4", rev, len(fields))
+	}
+	for i := range fields {
+		fields[i] = strings.TrimSpace(fields[i])
+	}
+	return CommitAuthorship{
+		AuthorName:     fields[0],
+		AuthorEmail:    fields[1],
+		CommitterName:  fields[2],
+		CommitterEmail: fields[3],
+	}, nil
+}
+
 // DiffStatThreeDot returns git diff --stat for base...head, the diff restricted
 // to what head introduces on top of the merge base (as opposed to the pair-wise
 // base..head range, which also reports base's own progress as a deletion).

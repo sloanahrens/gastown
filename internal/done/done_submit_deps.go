@@ -28,6 +28,7 @@ type doneRepo interface {
 	PushRemoteBranchTip(remote, branch string) (string, error)
 	IsAncestor(ancestor, descendant string) (bool, error)
 	AuthorEmail() (string, error)
+	CommitAuthorship(rev string) (git.CommitAuthorship, error)
 }
 
 var _ doneRepo = (*git.Git)(nil)

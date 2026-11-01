@@ -68,6 +68,10 @@ type fakeDoneRepo struct {
 	fullSummaries map[string][]git.CommitSummary
 	// authorEmail is the worktree's user.email; empty reads as unset.
 	authorEmail string
+	// authorship is the identity the head commit records; authorshipErr makes
+	// reading it fail.
+	authorship    git.CommitAuthorship
+	authorshipErr error
 
 	// preservedByDefault makes a branch origin does not have read as pushed
 	// when HEAD is an ancestor of the default branch, as the real git does.
@@ -243,6 +247,15 @@ func (f *fakeDoneRepo) AuthorEmail() (string, error) {
 		return "", errors.New("user.email is not set")
 	}
 	return f.authorEmail, nil
+}
+
+func (f *fakeDoneRepo) CommitAuthorship(string) (git.CommitAuthorship, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.authorshipErr != nil {
+		return git.CommitAuthorship{}, f.authorshipErr
+	}
+	return f.authorship, nil
 }
 
 // PushForceWithLease pushes HEAD to the branch named by refspec's
