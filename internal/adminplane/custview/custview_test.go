@@ -52,8 +52,7 @@ func record() Record {
 			{State: "in_progress", Body: beadBodyValue},
 			{State: "open", Body: beadBodyValue},
 		},
-		MonthToDateUSD: 120.5,
-		Cap:            spendcap.Cap{Workspace: "ws-1", DailyUSD: 10},
+		Cap: spendcap.Cap{Workspace: "ws-1", DailyUSD: 10},
 		SpendRecords: []spendcap.Record{
 			{Workspace: "ws-1", EndedAt: noon.Add(-time.Hour), CostUSD: 3},
 		},
@@ -191,17 +190,74 @@ func TestStatusCopiesStateAndHealth(t *testing.T) {
 	}
 }
 
-func TestSpendCopiesMonthToDateAndCap(t *testing.T) {
+func TestSpendCopiesCap(t *testing.T) {
 	t.Parallel()
 	v, err := Build(fakeSource{rec: record()})
 	if err != nil {
 		t.Fatalf("Build returned %v, want nil", err)
 	}
-	if v.Spend.MonthToDateUSD != 120.5 {
-		t.Errorf("month-to-date spend = %v, want 120.5", v.Spend.MonthToDateUSD)
-	}
 	if v.Spend.DailyCapUSD != 10 {
 		t.Errorf("daily cap = %v, want 10", v.Spend.DailyCapUSD)
+	}
+}
+
+func TestMonthToDateSumsTheWorkspaceRecords(t *testing.T) {
+	t.Parallel()
+	// monthStart is the first of noon's month; the cases hold records placed
+	// around its edges and the day's end.
+	monthStart := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name    string
+		records []spendcap.Record
+		want    float64
+	}{
+		{
+			name: "sums the month's records through the day",
+			records: []spendcap.Record{
+				{Workspace: "ws-1", EndedAt: monthStart, CostUSD: 1},
+				{Workspace: "ws-1", EndedAt: noon, CostUSD: 2},
+				{Workspace: "ws-1", EndedAt: time.Date(2026, 3, 14, 23, 59, 0, 0, time.UTC), CostUSD: 4},
+			},
+			want: 7,
+		},
+		{
+			name: "leaves out the previous month",
+			records: []spendcap.Record{
+				{Workspace: "ws-1", EndedAt: monthStart.Add(-time.Nanosecond), CostUSD: 100},
+				{Workspace: "ws-1", EndedAt: noon, CostUSD: 2},
+			},
+			want: 2,
+		},
+		{
+			name: "leaves out the next day",
+			records: []spendcap.Record{
+				{Workspace: "ws-1", EndedAt: time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC), CostUSD: 100},
+				{Workspace: "ws-1", EndedAt: noon, CostUSD: 2},
+			},
+			want: 2,
+		},
+		{
+			name: "leaves out another workspace",
+			records: []spendcap.Record{
+				{Workspace: "ws-2", EndedAt: noon, CostUSD: 100},
+				{Workspace: "ws-1", EndedAt: noon, CostUSD: 2},
+			},
+			want: 2,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			rec := record()
+			rec.SpendRecords = c.records
+			v, err := Build(fakeSource{rec: rec})
+			if err != nil {
+				t.Fatalf("Build returned %v, want nil", err)
+			}
+			if v.Spend.MonthToDateUSD != c.want {
+				t.Errorf("month-to-date spend = %v, want %v", v.Spend.MonthToDateUSD, c.want)
+			}
+		})
 	}
 }
 
@@ -240,6 +296,51 @@ func TestBuildAcceptsNoCap(t *testing.T) {
 	}
 	if v.Spend.Decision.Level != spendcap.Under {
 		t.Errorf("decision with no cap = %q, want %q", v.Spend.Decision.Level, spendcap.Under)
+	}
+}
+
+func TestBuildNoCapStillReportsOwnSpend(t *testing.T) {
+	t.Parallel()
+	rec := record()
+	rec.Cap = spendcap.Cap{}
+	rec.SpendRecords = []spendcap.Record{{Workspace: "ws-1", EndedAt: noon, CostUSD: 3}}
+	v, err := Build(fakeSource{rec: rec})
+	if err != nil {
+		t.Fatalf("Build with no cap returned %v, want nil", err)
+	}
+	if v.Spend.Decision.Spent != 3 {
+		t.Errorf("spent with no cap = %v, want the workspace's 3", v.Spend.Decision.Spent)
+	}
+}
+
+func TestBuildRefusesCapForAnotherWorkspaceWithoutDailyLimit(t *testing.T) {
+	t.Parallel()
+	rec := record()
+	rec.Cap = spendcap.Cap{Workspace: "ws-2"}
+	rec.SpendRecords = []spendcap.Record{{Workspace: "ws-2", EndedAt: noon, CostUSD: 100}}
+	v, err := Build(fakeSource{rec: rec})
+	if !errors.Is(err, ErrCapWorkspace) {
+		t.Fatalf("Build with a limitless cap for another workspace returned %v, want ErrCapWorkspace", err)
+	}
+	if !reflect.DeepEqual(v, View{}) {
+		t.Errorf("refused view = %+v, want the zero value", v)
+	}
+}
+
+func TestUsageSerialisesNoSeatHoursAsEmptyList(t *testing.T) {
+	t.Parallel()
+	rec := record()
+	rec.Usage.SeatHours = nil
+	v, err := Build(fakeSource{rec: rec})
+	if err != nil {
+		t.Fatalf("Build returned %v, want nil", err)
+	}
+	data, err := json.Marshal(v.Usage)
+	if err != nil {
+		t.Fatalf("marshal usage: %v", err)
+	}
+	if !strings.Contains(string(data), `"seat_hours":[]`) {
+		t.Errorf("usage JSON = %s, want seat_hours as an empty list", data)
 	}
 }
 

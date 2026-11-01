@@ -51,8 +51,10 @@ type StateCount struct {
 }
 
 // Spend is the workspace's money at the cap: the month's spend so far, the
-// daily cap, and the K4 decision for the UTC day of the record's Now. A cap of
-// zero or less means none is set and the decision is Under.
+// daily cap, and the K4 decision for the UTC day of the record's Now. The
+// month's spend runs from the first of Now's UTC month through the end of its
+// day, so it never reads below the decision's spend. A cap of zero or less
+// means none is set and the decision is Under.
 type Spend struct {
 	MonthToDateUSD float64           `json:"month_to_date_usd"`
 	DailyCapUSD    float64           `json:"daily_cap_usd"`
@@ -87,17 +89,18 @@ type Bead struct {
 // Record is everything a Source holds for one workspace: the fields a view
 // copies and whatever else the admin plane's records hold. Code, APIKey and
 // Transcript are here so a record source and its fake carry the fields a view
-// refuses, and a test can prove none of them reaches the view.
+// refuses, and a test can prove none of them reaches the view. The month's
+// spend is not a field: a view sums SpendRecords, so it cannot disagree with
+// them.
 type Record struct {
-	ID             string
-	State          registry.State
-	Health         string
-	Beads          []Bead
-	MonthToDateUSD float64
-	Cap            spendcap.Cap
-	SpendRecords   []spendcap.Record
-	Now            time.Time
-	Usage          export.WorkspaceExport
+	ID           string
+	State        registry.State
+	Health       string
+	Beads        []Bead
+	Cap          spendcap.Cap
+	SpendRecords []spendcap.Record
+	Now          time.Time
+	Usage        export.WorkspaceExport
 
 	Code       string
 	APIKey     string
@@ -127,9 +130,10 @@ var (
 	// ErrEmptyBeadState is Build's refusal of a bead with no state, which it
 	// could not count under any row the dashboard shows.
 	ErrEmptyBeadState = errors.New("custview: a bead has an empty state")
-	// ErrCapWorkspace is Build's refusal of a cap set for another workspace.
-	// Evaluate counts only the cap's workspace, so a mismatched cap would show
-	// no spend and read as Under.
+	// ErrCapWorkspace is Build's refusal of a cap that names another workspace.
+	// Evaluate sums the spend of the cap's workspace, so a cap for another
+	// workspace would show that workspace's spend on this one's dashboard, even
+	// when the cap sets no daily limit.
 	ErrCapWorkspace = errors.New("custview: the daily cap names a different workspace")
 )
 
@@ -149,20 +153,26 @@ func Build(src Source) (View, error) {
 	if rec.Now.IsZero() {
 		return View{}, ErrNoNow
 	}
-	if rec.Cap.DailyUSD > 0 && rec.Cap.Workspace != rec.ID {
+	// A cap with no workspace name belongs to the record it sits in. A cap that
+	// names another workspace is refused whatever its daily limit, because
+	// Evaluate would sum that workspace's spend here.
+	if rec.Cap.Workspace != "" && rec.Cap.Workspace != rec.ID {
 		return View{}, fmt.Errorf("%w: cap for %q, workspace %q", ErrCapWorkspace, rec.Cap.Workspace, rec.ID)
 	}
 	counts, err := countsByState(rec.Beads)
 	if err != nil {
 		return View{}, err
 	}
+	// The cap is evaluated for rec.ID, not for rec.Cap.Workspace, which may be
+	// empty when the record carries no cap.
+	cap := spendcap.Cap{Workspace: rec.ID, DailyUSD: rec.Cap.DailyUSD}
 	return View{
 		Status:   Status{State: rec.State, Health: rec.Health},
 		Progress: Progress{ByState: counts},
 		Spend: Spend{
-			MonthToDateUSD: rec.MonthToDateUSD,
+			MonthToDateUSD: monthToDate(rec.SpendRecords, rec.ID, rec.Now),
 			DailyCapUSD:    rec.Cap.DailyUSD,
-			Decision:       spendcap.Evaluate(rec.Cap, rec.SpendRecords, rec.Now),
+			Decision:       spendcap.Evaluate(cap, rec.SpendRecords, rec.Now),
 		},
 		Usage:   usage(rec.Usage),
 		Actions: actions,
@@ -207,11 +217,31 @@ func countsByState(beads []Bead) ([]StateCount, error) {
 	return out, nil
 }
 
+// monthToDate sums the workspace's spend from the first of now's UTC month
+// through the end of now's UTC day, the window the day's decision reads, so the
+// month figure includes the day's spend. Records for other workspaces are left
+// out.
+func monthToDate(recs []spendcap.Record, workspace string, now time.Time) float64 {
+	local := now.UTC()
+	start := time.Date(local.Year(), local.Month(), 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(local.Year(), local.Month(), local.Day()+1, 0, 0, 0, 0, time.UTC)
+	var total float64
+	for _, r := range recs {
+		if r.Workspace != workspace || r.EndedAt.Before(start) || !r.EndedAt.Before(end) {
+			continue
+		}
+		total += r.CostUSD
+	}
+	return total
+}
+
 // usage copies the export's per-workspace figures and its seat-hours slice, so
 // a later change to the source's record cannot change a view already returned.
+// The seat hours are never nil, so a month with none serialises as an empty
+// list, as Actions does.
 func usage(w export.WorkspaceExport) Usage {
 	return Usage{
-		SeatHours:       append([]export.ProfileHours(nil), w.SeatHours...),
+		SeatHours:       append(make([]export.ProfileHours, 0, len(w.SeatHours)), w.SeatHours...),
 		StorageGBMonths: w.StorageGBMonths,
 		Tokens:          w.Tokens,
 	}
