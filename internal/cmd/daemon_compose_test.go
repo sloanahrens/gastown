@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,7 +57,9 @@ func newComposeRig(t *testing.T) *composeRig {
 				ComposeProjectSetting: composeTestProject,
 			}, nil
 		},
-		doltHost: func(string) (string, bool) { return composeTestDoltHost, true },
+		doltHost:     func(string) (string, bool) { return composeTestDoltHost, true },
+		containerEnv: func(string) (map[string]string, error) { return map[string]string{}, nil },
+		readFile:     func(string) ([]byte, error) { return nil, fs.ErrNotExist },
 		files: composeFiles{
 			mkdirAll: func(dir string) error {
 				if r.mkdirErr != nil {

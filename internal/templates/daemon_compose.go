@@ -99,6 +99,19 @@ type ComposeSpec struct {
 	ForgeHost      string
 	ForgeTokenFile string
 
+	// Env, KubeconfigFiles and OpenShellConfigDir are the live container's
+	// client configuration (gt-yj0vh), the counterpart of what the launchd plist
+	// and the operator's home give the host daemon. Env is rendered into the
+	// daemon's environment, sorted; it is the caller's already filtered
+	// daemon.env, and the render refuses a name it sets itself. KubeconfigFiles
+	// are absolute paths (under the town bind) joined into KUBECONFIG, first
+	// file first. OpenShellConfigDir is the host's openshell config directory,
+	// mounted read-only at LiveOpenShellConfigPath, with XDG_CONFIG_HOME set to
+	// its parent. A scratch spec sets none of them.
+	Env                map[string]string
+	KubeconfigFiles    []string
+	OpenShellConfigDir string
+
 	// LiveTownRoot is the live town's root, which a scratch spec must not
 	// mount, nor mount anything under. It is required when Scratch is set, and
 	// absolute, so a scratch render is always checked against the live town it
@@ -579,7 +592,7 @@ services:
       GT_DAEMON_SUPERVISOR: %[6]q
       GT_DAEMON_TAKEOVER: "${GT_DAEMON_TAKEOVER:-}"
       GT_TOWN_ROOT: %[4]q
-    volumes:
+%[18]s    volumes:
       - type: bind
         source: %[4]q
         target: %[4]q
@@ -677,7 +690,7 @@ func RenderDaemonCompose(s ComposeSpec) ([]byte, error) {
 		}
 	} else {
 		command = liveDaemonCommand(s)
-		tokenMounts = liveTokenMounts(s)
+		tokenMounts = liveTokenMounts(s) + liveClientMounts(s)
 	}
 
 	out := fmt.Sprintf(daemonComposeBody,
@@ -698,6 +711,7 @@ func RenderDaemonCompose(s ComposeSpec) ([]byte, error) {
 		doltWait,
 		forgeNetwork,
 		tokenMounts,
+		liveClientEnv(s),
 	)
 	return []byte(out), nil
 }
@@ -741,6 +755,9 @@ func (s ComposeSpec) validate() error {
 		return fmt.Errorf("compose spec: OMTokenFile %q holds a control character, which neither a command line entry nor a mount can carry", s.OMTokenFile)
 	case !s.Scratch && s.DoltHost == "":
 		return fmt.Errorf("compose spec: DoltHost is empty; pass town.json's dolt.container_host or dolt.host resolved, and an empty dolt.host is the local machine, which inside the container is the container itself")
+	}
+	if err := s.validateClient(); err != nil {
+		return err
 	}
 	if err := s.validateForge(); err != nil {
 		return err

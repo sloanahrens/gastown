@@ -1031,6 +1031,15 @@ day.
       `gt daemon image --rev <rev> ... --apply` (L1 Step 2), and
       `docker --context desktop-linux image inspect gt-daemon:<rev>` prints an
       id.
+- [ ] **The container can dispatch.** Add `--kubeconfig ~/gt/.runtime/sbx-k8s/kubeconfig
+      --openshell-config-dir ~/.config/openshell` to the compose write. The
+      render derives `.runtime/container/kubeconfig.yaml` (clusters only, on
+      `host.docker.internal` with `tls-server-name: localhost`, since the kind API
+      certificate does not name `host.docker.internal`), lists it before the
+      original in `KUBECONFIG`, mounts the openshell directory read-only and sets
+      `XDG_CONFIG_HOME`. The daemon.env entries that are not host-only reach the
+      container's environment; secrets stay resolved by name. Only paths appear
+      in the compose file.
 - [ ] **The live compose file is written.** `gt daemon compose write --image
       gt-daemon:<rev>` renders `<live-town>/daemon/container/compose.yml` from
       the town's settings and starts nothing. To let the container's landing
