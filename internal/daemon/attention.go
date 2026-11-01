@@ -358,7 +358,14 @@ func (d *Daemon) writeAttentionWith(budget time.Duration, sources func(now time.
 	if err != nil {
 		d.logger.Printf("attention: reading acks: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	// The tick runs under the daemon context, so a shutdown ends it (gt-zszj0).
+	// Run always sets d.ctx; the Background fallback is for a Daemon built
+	// without one (tests), whose tick only its own budget ends.
+	parent := d.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, budget)
 	defer cancel()
 	now := d.clk().Now()
 	src := sources(now)
