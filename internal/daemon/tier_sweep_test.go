@@ -2503,6 +2503,16 @@ func TestTierSweepRigCycleStarvedTierTakesNoVerdict(t *testing.T) {
 		why:         "the stage printed nothing",
 		wantPartial: true,
 	}, {
+		// Exit 1 is the contract for a tier that came back RED and printed its
+		// line. A stage of two tiers that exits 1 having printed nothing has
+		// broken that contract, so the silence is a verdict against the stage:
+		// each tier takes the RED a missing summary line earns, not a
+		// starvation (gt-9qpxa).
+		name:            "the RED exit with no tier line is a verdict, not a starvation",
+		exitCode:        tierSweepRedExit,
+		wantRace:        "no verdict line (exit 1)",
+		wantIntegration: "no verdict line (exit 1)",
+	}, {
 		// A clean exit reached the end it chose, so the missing race line is a
 		// contract failure, not a starvation.
 		name:            "a clean exit with no race line is still RED",
