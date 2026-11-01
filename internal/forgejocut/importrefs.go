@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/forgejoprov"
 	"github.com/steveyegge/gastown/internal/forgejoresync"
@@ -34,6 +35,11 @@ type Cutover struct {
 	// Log with the run's own, so a progress line reaches the operator the way every
 	// other step's lines do.
 	ProvisionEnv forgejoprov.Env
+	// Files is the filesystem the repoint step reads and writes; nil means the
+	// operating system's. Now is the clock the backup names are stamped from; nil
+	// means time.Now.
+	Files Files
+	Now   func() time.Time
 }
 
 // errRefsMissing is the final comparison's refusal: Forgejo does not hold every
