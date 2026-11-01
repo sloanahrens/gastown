@@ -151,12 +151,31 @@ func liveSeatKeys(live []poolSession) map[string]bool {
 // A bead is answered from the batch only in a form the seat read can use whole:
 // an agent bead is complete (listedAgentBeadComplete) or read live by id, and an
 // id two rigs' lists carry is answered in a fixed order (heldIssue).
+//
+// A rig is read the first time one of its seats is asked about, unless readRigs
+// reads it first: the roster calls that with the rigs its seat read will ask
+// about, so the tick pays their bd calls at once instead of one rig after
+// another (gt-0mzpm). Rigs are independent — each reads its own directory and
+// its own store — so the reads run on separate goroutines. rigSlot makes each
+// rig's slot under mu, and the rig's read fills that slot once and closes its
+// ready channel; a batch handed out before its read has finished is not yet in
+// the snapshot, so heldIssue never looks at one mid-read.
 type poolSeatBatch struct {
 	townRoot string
 	store    func(rigName string) beads.Client
 	show     func(bd beads.Client, id string) (*beads.Issue, error)
-	rigs     map[string]*rigSeatBatch
+	// bound is how many rigs readRigs reads at once; zero is poolSeatRigReads.
+	bound int
+
+	mu   sync.Mutex
+	rigs map[string]*rigSeatBatch
 }
+
+// poolSeatRigReads is how many rigs the roster reads at once. Dolt answers
+// every one of them, so the fan-out is a bound on load as much as a width: four
+// reads overlap the roster's bd calls without asking a busy Dolt for more
+// (gt-0mzpm). Lower it if the phase does not fall by a third.
+const poolSeatRigReads = 4
 
 // rigSeatBatch is one rig's reads. store is the rig's client, which the
 // per-seat fallback reads too. assigned and held come from the rig's work list,
@@ -167,7 +186,17 @@ type poolSeatBatch struct {
 // beads a later batch added — and an id it does not hold is read live, as the
 // per-seat read does.
 type rigSeatBatch struct {
-	store    beads.Client
+	store beads.Client
+	// once runs the rig's read, so the fan-out and a seat's lazy read of the
+	// same rig share one store and one read rather than racing two.
+	once sync.Once
+	// ready is closed when the read has finished. heldIssue searches a rig only
+	// after this, so it never reads a batch a read is still filling.
+	ready chan struct{}
+	// err is the read's failure to list the rig's polecat directories, which
+	// leaves the batches empty and readRigs reports. Every other failed read
+	// keeps its per-seat fallback instead (read).
+	err      error
 	asked    map[string]bool         // agent bead ids the batch answered (found or not)
 	agents   map[string]*beads.Issue // the agent beads that exist among them
 	parsed   map[string]parsedAgent  // each agent bead's parse, once, by id
@@ -191,7 +220,7 @@ var assignedStatuses = []string{string(beads.StatusOpen), string(beads.StatusInP
 // newPoolSeatBatch builds the batch over the stores store returns, and show,
 // the by-id read the hook reference follows.
 func newPoolSeatBatch(townRoot string, store func(rigName string) beads.Client, show func(bd beads.Client, id string) (*beads.Issue, error)) *poolSeatBatch {
-	return &poolSeatBatch{townRoot: townRoot, store: store, show: show, rigs: map[string]*rigSeatBatch{}}
+	return &poolSeatBatch{townRoot: townRoot, store: store, show: show, bound: poolSeatRigReads, rigs: map[string]*rigSeatBatch{}}
 }
 
 // disposition is the polecatDispositionFunc the batch answers.
@@ -262,33 +291,134 @@ func (b *poolSeatBatch) landingWork(town beads.Client) poolSeatWorkFunc {
 // heldIssue answers a bead id from the batches made so far. One bead is one
 // bead whichever rig's list carried it, so the rigs are searched in name order:
 // a bead two rigs hold is answered by the same rig on every run, where a walk
-// over the map would answer by whichever rig the iteration reached first.
+// over the map would answer by whichever rig the iteration reached first. A rig
+// whose read is still running is not searched: its batch is not made yet. A
+// slot with no ready channel is one no read was started for, so nothing is in
+// flight and its fields are read as they are.
 func (b *poolSeatBatch) heldIssue(id string) (*beads.Issue, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	names := make([]string, 0, len(b.rigs))
 	for name := range b.rigs {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		if issue, ok := b.rigs[name].held[id]; ok {
+		rb := b.rigs[name]
+		if rb.ready != nil {
+			select {
+			case <-rb.ready:
+			default:
+				// The read has not finished, so this rig's batch is not made yet.
+				continue
+			}
+		}
+		if issue, ok := rb.held[id]; ok {
 			return issue, true
 		}
 	}
 	return nil, false
 }
 
-// rig reads a rig's batches the first time one of its polecats is asked about.
+// rig reads a rig's batches the first time one of its polecats is asked about,
+// or answers it from readRigs' read when that came first. The read and the
+// store it reads through run once, so a rig the fan-out and a seat read both
+// reach is read once.
 func (b *poolSeatBatch) rig(rigName string) *rigSeatBatch {
+	rb := b.rigSlot(rigName)
+	rb.once.Do(func() {
+		rb.store = b.store(rigName)
+		rb.err = rb.read(b.townRoot, rigName)
+		close(rb.ready)
+	})
+	return rb
+}
+
+// rigSlot is the rig's slot, made the first time it is asked for, once however
+// many readers ask at once. The map is guarded by b.mu because readRigs fills it
+// from several goroutines; the slot's store and batches are filled by its read,
+// outside the lock, since the store call reaches the caller's own wiring.
+func (b *poolSeatBatch) rigSlot(rigName string) *rigSeatBatch {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if rb, ok := b.rigs[rigName]; ok {
 		return rb
 	}
-	rb := &rigSeatBatch{store: b.store(rigName)}
+	rb := &rigSeatBatch{ready: make(chan struct{})}
 	b.rigs[rigName] = rb
-	names, err := listPolecatDirectoryNames(filepath.Join(b.townRoot, rigName))
-	if err != nil || len(names) == 0 {
-		return rb
+	return rb
+}
+
+// readRigs reads each named rig's batches concurrently, at most bound at a
+// time, and returns after every one has finished. It is the roster's fan-out:
+// the seat read would otherwise ask the batch about each rig in turn and pay
+// that rig's bd calls there (gt-0mzpm). Call it before the seats are read; a
+// rig it did not name stays lazily read by rig.
+//
+// A rig whose polecat directory cannot be listed is reported by the first rig
+// in name order, so the roster reports what a sequential walk would have
+// reached first however the concurrent reads finish; the sequential read
+// reports that same error through its dead-hooked walk. A read that fails any
+// other way is the per-seat fallback's business and is not an error here.
+func (b *poolSeatBatch) readRigs(rigNames []string) error {
+	names := make([]string, 0, len(rigNames))
+	seen := make(map[string]bool, len(rigNames))
+	for _, name := range rigNames {
+		if name != "" && !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
 	}
-	prefix := beads.GetPrefixForRig(b.townRoot, rigName)
+	sort.Strings(names)
+	workers := b.bound
+	if workers <= 0 {
+		workers = poolSeatRigReads
+	}
+	if workers > len(names) {
+		workers = len(names)
+	}
+	if workers > 1 {
+		sem := make(chan struct{}, workers)
+		var wg sync.WaitGroup
+		for _, name := range names {
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(rigName string) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				b.rig(rigName)
+			}(name)
+		}
+		wg.Wait()
+	} else {
+		for _, name := range names {
+			b.rig(name)
+		}
+	}
+	// Every read above has finished, so rig answers from the same once and
+	// hands back that read's error; the first name that failed is the one a
+	// sequential walk would have reported.
+	for _, name := range names {
+		if err := b.rig(name).err; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// read fills the rig's batches from its polecat directories and its store. Its
+// error is the directory listing's alone: a rig whose polecats cannot be listed
+// has no batch, and readRigs reports it. Every failed bd read leaves its batch
+// nil instead, so the per-seat read answers that part.
+func (rb *rigSeatBatch) read(townRoot, rigName string) error {
+	names, err := listPolecatDirectoryNames(filepath.Join(townRoot, rigName))
+	if err != nil {
+		return fmt.Errorf("listing polecats in %s: %w", rigName, err)
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	prefix := beads.GetPrefixForRig(townRoot, rigName)
 	ids := make([]string, 0, len(names))
 	for _, name := range names {
 		ids = append(ids, beads.PolecatBeadIDWithPrefix(prefix, rigName, name))
@@ -306,7 +436,7 @@ func (b *poolSeatBatch) rig(rigName string) *rigSeatBatch {
 	}
 	rb.readAgents(ids)
 	rb.readSourceIssues()
-	return rb
+	return nil
 }
 
 // readAgents answers the polecats' agent beads from the work list and, for the

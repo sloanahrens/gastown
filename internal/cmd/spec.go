@@ -497,12 +497,18 @@ func (c specTickClient) ShowMultiple(ids []string) (map[string]*beads.Issue, err
 }
 
 func (c specTickClient) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	// The roster's fan-out reads several rigs at once, so this ledger write
+	// races another rig's without the lock count requires (gt-0mzpm).
+	c.reads.mu.Lock()
 	c.reads.count()
+	c.reads.mu.Unlock()
 	return c.Client.List(opts)
 }
 
 func (c specTickClient) Children(parentID string) ([]*beads.Issue, error) {
+	c.reads.mu.Lock()
 	c.reads.count()
+	c.reads.mu.Unlock()
 	return c.Client.Children(parentID)
 }
 
@@ -2909,7 +2915,35 @@ func specRosterSnapshotWith(reads *specTickReads, townRoot string, pool *config.
 	// them, so a tick with a seat mid-landing spends no town-wide read on it
 	// (gt-4efmk).
 	work := batch.landingWork(store(townRoot))
+	return rosterSnapshotOn(batch, work, townRoot, pool, lister, now)
+}
+
+// rosterSnapshotOn is the roster read over an assembled batch: the rigs the
+// seat read will ask the batch about are read at once first (readRigs), then
+// the seat picture is read. It is the seam the fan-out's tests drive, so they
+// read the roster the dispatcher reads rather than the batch alone (gt-0mzpm).
+func rosterSnapshotOn(batch *poolSeatBatch, work poolSeatWorkFunc, townRoot string, pool *config.PolecatPool, lister sessionLister, now func() time.Time) (poolSeatSnapshot, error) {
+	rigs, err := rosterRigNames(townRoot, pool)
+	if err != nil {
+		return poolSeatSnapshot{}, err
+	}
+	if err := batch.readRigs(rigs); err != nil {
+		return poolSeatSnapshot{}, err
+	}
 	return poolSeatSnapshotWith(lister, townRoot, batch.disposition, work, pool, now)
+}
+
+// rosterRigNames names the rigs the seat picture reads: every known rig when
+// the dead-hooked walk reads them, which needs the pool to own seats and a town
+// to read. Those are the rigs whose batches can be read before their first seat
+// is asked about; with no such walk the read reaches only the live sessions'
+// rigs, one seat at a time, and reading idle rigs here would spend bd calls the
+// seat read would not have made (gt-0mzpm).
+func rosterRigNames(townRoot string, pool *config.PolecatPool) ([]string, error) {
+	if townRoot == "" || !poolOwnsSeats(pool) {
+		return nil, nil
+	}
+	return knownRigNames(townRoot)
 }
 
 // poolSeatSnapshotWith reads poolSeatSessionsWith through a recorder of the
