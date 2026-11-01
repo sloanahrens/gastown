@@ -535,8 +535,9 @@ func openStepReason(b beads.Client, is *beads.Issue) string {
 	return strings.Join(why, "; ")
 }
 
-// closeDescendants recursively closes all descendant issues of a parent.
-// Returns the count of issues closed. Logs warnings on errors but doesn't fail.
+// closeDescendants closes all descendant issues of a parent, deepest level
+// first. Returns the count of issues closed. Logs warnings on errors but
+// doesn't fail.
 func closeDescendants(b beads.Client, parentID string) int {
 	count, err := closeDescendantsImpl(b, parentID, false)
 	if err != nil {
@@ -553,65 +554,30 @@ func forceCloseDescendants(b beads.Client, parentID string) (int, error) {
 	return closeDescendantsImpl(b, parentID, true)
 }
 
+// closeDescendantsImpl closes every descendant of parentID, deepest level
+// first, in the batch closeChildrenOf makes for each parent. The tree is read
+// one level at a time and held in memory, so a molecule of N nodes costs one
+// read per level, not one per node (gt-p9m39). ChildrenOf reads bd's `show
+// --children` view, which sees ephemeral wisp children (gt-43t7). A child that
+// several parents list is closed once.
 func closeDescendantsImpl(b beads.Client, parentID string, force bool) (int, error) {
-	// Uses Children (bd show --children), not List(ListOptions{Parent:
-	// parentID}) (bd list --parent): the latter only checks the persistent
-	// dependencies table and silently misses ephemeral wisp children,
-	// whose parent-child edges live in a separate wisp_dependencies table.
-	// That gap is why mol-polecat-work step wisps leaked without bound —
-	// gt done never found them here to close. See gt-43t7.
-	children, err := b.Children(parentID)
-	if err != nil {
-		return 0, fmt.Errorf("listing children of %s: %w", parentID, err)
-	}
-
-	if len(children) == 0 {
-		return 0, nil
-	}
-
-	// First, recursively close grandchildren
+	levels, errs := readDescendantLevels(b, parentID)
 	totalClosed := 0
-	var errs []error
-	for _, child := range children {
-		closed, childErr := closeDescendantsImpl(b, child.ID, force)
-		totalClosed += closed
-		if childErr != nil {
-			errs = append(errs, childErr)
-		}
-	}
-
-	// Then close direct children
-	var idsToClose []string
-	for _, child := range children {
-		if child.Status != "closed" {
-			idsToClose = append(idsToClose, child.ID)
-		}
-	}
-
-	if len(idsToClose) > 0 {
-		var closeErr error
-		if force {
-			closeErr = b.ForceCloseWithReason("burned: force-close descendants", idsToClose...)
-		} else {
-			// A pinned child is a hand-off marker, not unfinished work, and
-			// bd refuses to close it: clear the mark before the sweep
-			// (gt-z5m6j). Forced closes skip bd's fences, the pin among them.
-			released, releaseErr := beads.ReleasePinnedSteps(b, children)
-			if releaseErr != nil {
-				style.PrintWarning("%v", releaseErr)
+	closing := map[string]bool{}
+	for i := len(levels) - 1; i >= 0; i-- {
+		for _, parent := range levels[i].parents {
+			var children []*beads.Issue
+			for _, child := range levels[i].byParent[parent] {
+				if !closing[child.ID] {
+					closing[child.ID] = true
+					children = append(children, child)
+				}
 			}
-			if released > 0 {
-				fmt.Fprintf(os.Stderr, "Released %d pinned step(s) under %s\n", released, parentID)
+			closed, err := closeChildrenOf(b, parent, children, force)
+			totalClosed += closed
+			if err != nil {
+				errs = append(errs, err)
 			}
-			closeErr = closeUntilNoProgress(b, idsToClose)
-		}
-		// A batch close can close some children and have bd refuse others
-		// (a *beads.PartialCloseError): count only the ones that closed, and
-		// report the rest so no caller takes a stranded step for a closed
-		// one (gt-7lx3).
-		totalClosed += len(beads.ClosedIDs(idsToClose, closeErr))
-		if closeErr != nil {
-			errs = append(errs, fmt.Errorf("closing children of %s: %w", parentID, closeErr))
 		}
 	}
 
@@ -619,6 +585,137 @@ func closeDescendantsImpl(b beads.Client, parentID string, force bool) (int, err
 		return totalClosed, errors.Join(errs...)
 	}
 	return totalClosed, nil
+}
+
+// descendantLevel is one level of the tree below a molecule: the children of
+// each parent in it. parents keeps the order the walk met them, so a level's
+// batches follow the order of the children lists.
+type descendantLevel struct {
+	parents  []string
+	byParent map[string][]*beads.Issue
+}
+
+// readDescendantLevels reads the tree below parentID one level at a time,
+// the root's children first: each level is one ChildrenOf call for every
+// parent in it. The walk ends at a level with no children. A node is
+// descended into under the first parent that names it, so a tree that links
+// one node to two parents still ends. A parent whose children cannot be read
+// costs its own subtree and nothing else: the levels found are still returned
+// so what was found is closed, and the error comes back with them.
+func readDescendantLevels(b beads.Client, parentID string) ([]descendantLevel, []error) {
+	var levels []descendantLevel
+	var errs []error
+	seen := map[string]bool{parentID: true}
+	for level := []string{parentID}; len(level) > 0; {
+		byParent, levelErrs := readLevelChildren(b, level)
+		errs = append(errs, levelErrs...)
+		next := descendantLevel{byParent: make(map[string][]*beads.Issue, len(level))}
+		var below []string
+		for _, parent := range level {
+			children := byParent[parent]
+			if len(children) == 0 {
+				continue
+			}
+			next.parents = append(next.parents, parent)
+			next.byParent[parent] = children
+			for _, child := range children {
+				if !seen[child.ID] {
+					seen[child.ID] = true
+					below = append(below, child.ID)
+				}
+			}
+		}
+		if len(next.parents) == 0 {
+			break
+		}
+		levels = append(levels, next)
+		level = below
+	}
+	return levels, errs
+}
+
+// readLevelChildren reads the children of every parent in one level. Parents
+// are grouped by id prefix, because ChildrenOf routes a whole call by its first
+// parent, and each group is one call. A group whose call fails is read again
+// one parent at a time, so one parent that cannot be read costs its own
+// subtree and not its siblings'.
+func readLevelChildren(b beads.Client, level []string) (map[string][]*beads.Issue, []error) {
+	var order []string
+	groups := map[string][]string{}
+	for _, id := range level {
+		prefix := beads.ExtractPrefix(id)
+		if _, ok := groups[prefix]; !ok {
+			order = append(order, prefix)
+		}
+		groups[prefix] = append(groups[prefix], id)
+	}
+	out := make(map[string][]*beads.Issue, len(level))
+	var errs []error
+	for _, prefix := range order {
+		group := groups[prefix]
+		byParent, err := b.ChildrenOf(group...)
+		if err == nil {
+			for parent, children := range byParent {
+				out[parent] = children
+			}
+			continue
+		}
+		if len(group) == 1 {
+			errs = append(errs, fmt.Errorf("listing children of %s: %w", group[0], err))
+			continue
+		}
+		for _, parent := range group {
+			one, oneErr := b.ChildrenOf(parent)
+			if oneErr != nil {
+				errs = append(errs, fmt.Errorf("listing children of %s: %w", parent, oneErr))
+				continue
+			}
+			for p, children := range one {
+				out[p] = children
+			}
+		}
+	}
+	return out, errs
+}
+
+// closeChildrenOf closes the open children of one parent and reports how many
+// closed. A batch close can close some children and have bd refuse others
+// (a *beads.PartialCloseError): only the ones that closed are counted, and
+// the rest are reported so no caller takes a stranded step for a closed one
+// (gt-7lx3).
+func closeChildrenOf(b beads.Client, parent string, children []*beads.Issue, force bool) (int, error) {
+	var idsToClose []string
+	for _, child := range children {
+		if child.Status != "closed" {
+			idsToClose = append(idsToClose, child.ID)
+		}
+	}
+
+	if len(idsToClose) == 0 {
+		return 0, nil
+	}
+
+	var closeErr error
+	if force {
+		closeErr = b.ForceCloseWithReason("burned: force-close descendants", idsToClose...)
+	} else {
+		// A pinned child is a hand-off marker, not unfinished work, and
+		// bd refuses to close it: clear the mark before the sweep
+		// (gt-z5m6j). Forced closes skip bd's fences, the pin among them.
+		released, releaseErr := beads.ReleasePinnedSteps(b, children)
+		if releaseErr != nil {
+			style.PrintWarning("%v", releaseErr)
+		}
+		if released > 0 {
+			fmt.Fprintf(os.Stderr, "Released %d pinned step(s) under %s\n", released, parent)
+		}
+		closeErr = closeUntilNoProgress(b, idsToClose)
+	}
+	closed := len(beads.ClosedIDs(idsToClose, closeErr))
+	if closeErr != nil {
+		return closed, fmt.Errorf("closing children of %s: %w", parent, closeErr)
+	}
+	return closed, nil
 }
 
 // moleculeLifecycleEnv is what gt mol burn and squash read from the process

@@ -373,9 +373,12 @@ func (s slingStores) burnMolecules(molecules []string, beadID, townRoot string) 
 
 	// Step 1: Force-close descendant steps before detaching. Uses force variant
 	// since burn is a destructive recovery path where prior state may be inconsistent.
-	// Best-effort — log but proceed in destructive path.
+	// Best-effort — log but proceed in destructive path. A walk that fails is
+	// recorded so step 4 retries that molecule and no other (gt-p9m39).
+	unwalked := make(map[string]bool, len(molecules))
 	for _, molID := range molecules {
 		if _, err := forceCloseDescendants(bd, molID); err != nil {
+			unwalked[molID] = true
 			style.PrintWarning("burn: could not close descendants of %s: %v", molID, err)
 		}
 	}
@@ -402,8 +405,14 @@ func (s slingStores) burnMolecules(molecules []string, beadID, townRoot string) 
 	}
 
 	// Step 4: Close descendants, then force-close the orphaned wisp roots.
+	// Only a molecule whose step 1 walk failed is walked again: the detach and
+	// the bond removal in between add no child, so a molecule that walked
+	// cleanly in step 1 has nothing new to close (gt-p9m39).
 	// Best-effort — log but proceed in destructive path.
 	for _, molID := range molecules {
+		if !unwalked[molID] {
+			continue
+		}
 		if _, err := forceCloseDescendants(bd, molID); err != nil {
 			style.PrintWarning("burn: could not close descendants of %s: %v", molID, err)
 		}
