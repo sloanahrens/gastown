@@ -21,7 +21,8 @@ var beadRejectionRE = regexp.MustCompile(`MERGE REJECTION \(attempt \d+\): (\w+)
 
 // bdJSON runs bd and returns its JSON output, or nil when no JSON could be had.
 // A failed call is retried once. Output that is not JSON is not retried: the
-// same command would give the same answer.
+// same command would give the same answer. A bd envelope is unwrapped to its
+// data member, since that is where the rows are.
 func bdJSON(run BdRun, dir string, args []string) []byte {
 	for i := 0; i < 2; i++ {
 		out, ok := run(dir, args)
@@ -31,9 +32,26 @@ func bdJSON(run BdRun, dir string, args []string) []byte {
 		if !json.Valid(out) {
 			return nil
 		}
-		return out
+		return unwrapBdData(out)
 	}
 	return nil
+}
+
+// unwrapBdData returns the data member of a bd JSON envelope: bd 1.2.2 prints
+// {"schema_version": N, "data": ...} where the loaders read the rows, so an
+// array read as one would decode to nothing (gt-rgj98). Output with no
+// schema_version is returned unchanged, so a bare array still decodes. An
+// envelope with no data member yields nil, which the loaders refuse rather
+// than read as an empty answer.
+func unwrapBdData(out []byte) []byte {
+	var envelope struct {
+		SchemaVersion *int            `json:"schema_version"`
+		Data          json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(out, &envelope); err != nil || envelope.SchemaVersion == nil {
+		return out
+	}
+	return envelope.Data
 }
 
 // BeadRow is one bead from the bd listing. Its notes and description are read
