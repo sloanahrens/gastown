@@ -7,12 +7,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/steveyegge/gastown/internal/templates"
 )
@@ -150,6 +152,72 @@ func TestFetchedClientToolRefusesAnArchiveWithoutTheMember(t *testing.T) {
 	}
 	if after := outEntries(t, b.Out); strings.Join(after, ",") != strings.Join(before, ",") {
 		t.Errorf("a refused archive left files: before %v, after %v", before, after)
+	}
+}
+
+func TestFetchedClientToolRefusesWhatItCannotUse(t *testing.T) {
+	t.Parallel()
+	good := []byte("body")
+	truncatedTar := func() []byte {
+		// A gzip holding a tar header that claims 1000 bytes and then ends.
+		var buf bytes.Buffer
+		zw := gzip.NewWriter(&buf)
+		tw := tar.NewWriter(zw)
+		if err := tw.WriteHeader(&tar.Header{Name: "docker/docker", Mode: 0o755, Size: 1000, Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = tw.Write([]byte("short"))
+		_ = zw.Close() // the tar writer is left unclosed on purpose
+		return buf.Bytes()
+	}()
+	garbageTar := func() []byte {
+		var buf bytes.Buffer
+		zw := gzip.NewWriter(&buf)
+		_, _ = zw.Write(bytes.Repeat([]byte{0xff}, 600))
+		_ = zw.Close()
+		return buf.Bytes()
+	}()
+	for _, tc := range []struct {
+		name  string
+		pin   templates.ClientToolPin
+		fetch func(context.Context, string) (io.ReadCloser, error)
+		want  string
+	}{
+		{"a pin that is not a sha256", templates.ClientToolPin{Name: "k", URL: "https://x", SHA256: "abc"}, fetchOf(good), "not a sha256"},
+		{"a failing fetch", templates.ClientToolPin{Name: "k", URL: "https://x", SHA256: sumHex(good)}, func(context.Context, string) (io.ReadCloser, error) { return nil, errors.New("offline") }, "cannot download k"},
+		{"a body that errors midway", templates.ClientToolPin{Name: "k", URL: "https://x", SHA256: sumHex(good)}, func(context.Context, string) (io.ReadCloser, error) {
+			return io.NopCloser(iotest.ErrReader(errors.New("reset"))), nil
+		}, "cannot download k"},
+		{"an archive that is not gzip", templates.ClientToolPin{Name: "d", URL: "https://x", SHA256: sumHex(good), Member: "m"}, fetchOf(good), "not gzip"},
+		{"a gzip that is not a tar", templates.ClientToolPin{Name: "d", URL: "https://x", SHA256: sumHex(garbageTar), Member: "m"}, fetchOf(garbageTar), "does not read"},
+		{"a member cut short", templates.ClientToolPin{Name: "d", URL: "https://x", SHA256: sumHex(truncatedTar), Member: "docker/docker"}, fetchOf(truncatedTar), "cannot read"},
+	} {
+		b, _ := imageBuilder(t)
+		b.Fetch = tc.fetch
+		if _, err := b.fetchClientTool(context.Background(), tc.pin, 1<<20); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: error = %v, want one containing %q", tc.name, err, tc.want)
+		}
+	}
+}
+
+func TestFetchedClientToolCannotBePlacedInAMissingDirectory(t *testing.T) {
+	t.Parallel()
+	b, _ := imageBuilder(t)
+	b.Out = filepath.Join(b.Out, "gone", "away")
+	body := []byte("kubectl")
+	pin := templates.ClientToolPin{Name: "kubectl", URL: "https://x", SHA256: sumHex(body)}
+	b.Fetch = fetchOf(body)
+	if _, err := b.fetchClientTool(context.Background(), pin, 1<<20); err == nil || !strings.Contains(err.Error(), "cannot write") {
+		t.Fatalf("error = %v, want the write refusal", err)
+	}
+}
+
+func TestFetchClientToolsStopsAtTheFirstFailingTool(t *testing.T) {
+	t.Parallel()
+	b, _ := imageBuilder(t)
+	b.Fetch = fetchOf([]byte("not the pinned bytes"))
+	if _, err := b.FetchClientTools(context.Background()); err == nil || !strings.Contains(err.Error(), "not the pinned") {
+		t.Fatalf("error = %v, want the first tool's sha256 mismatch", err)
 	}
 }
 
