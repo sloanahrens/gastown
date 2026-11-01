@@ -3,6 +3,7 @@ package tiersweep
 import (
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -274,5 +275,64 @@ func TestGTBuildLogCannotBeCreated(t *testing.T) {
 	}
 	if red || !strings.Contains(line, "integration GREEN passed=1 failed=0 skipped=0") {
 		t.Errorf("line = %q red = %v, want the tier GREEN with its package passed", line, red)
+	}
+}
+
+// TestRunCarriesDepsCgoEnvToTheBuild: the cgo entries a run's Deps answer are
+// the ones the go build gets, so a unit test of Run never reaches the real ICU
+// lookup, which starts brew on a Mac (gt-0brwb). The environment the entries
+// are added to is the run's own.
+func TestRunCarriesDepsCgoEnvToTheBuild(t *testing.T) {
+	t.Parallel()
+	fake := &fakeTier{head: "abc123"}
+	at := time.Date(2026, time.October, 30, 0, 0, 0, 0, time.UTC)
+	logDir := t.TempDir()
+	code := Run([]string{TierIntegration}, io.Discard, io.Discard, Deps{
+		CgoEnv: func(base []string) []string { return append(base[:len(base):len(base)], "CGO_LDFLAGS=-L/icu/lib") },
+		Host: Host{
+			Env: func(name string) string {
+				if name == EnvLogDir {
+					return logDir
+				}
+				return ""
+			},
+			MkdirAll: func(string, fs.FileMode) error { return nil },
+		},
+		Exec:    fake.exec,
+		Src:     taggedRootRepo(),
+		Environ: []string{"PATH=/fake/bin"},
+		Now:     func() time.Time { return at },
+	})
+	if code != 0 {
+		t.Fatalf("Run exited %d, want a GREEN run", code)
+	}
+	got := builds(fake)
+	if len(got) != 1 {
+		t.Fatalf("go build calls = %d, want 1: %v", len(got), got)
+	}
+	if !hasEnv(got[0].env, "CGO_LDFLAGS=-L/icu/lib") || !hasEnv(got[0].env, "PATH=/fake/bin") {
+		t.Errorf("go build environment = %v, want the Deps entries added to the run's own", got[0].env)
+	}
+}
+
+// TestUnitSweepHelperAnswersTheCgoEnvItself: a Sweep the shared helper builds
+// has its own CgoEnv, so its gt build never asks buildflags.ICUCgoEnv, whether
+// or not the host has brew. On a Mac with brew the package's subprocess
+// tripwire says the same for every other test; this one holds on a host without
+// it (gt-0brwb).
+func TestUnitSweepHelperAnswersTheCgoEnvItself(t *testing.T) {
+	t.Parallel()
+	fake := &fakeTier{head: "abc123"}
+	s, _ := newIntegration(t, taggedRootRepo(), fake, "", "")
+	if s.CgoEnv == nil {
+		t.Fatal("a unit test's Sweep has no CgoEnv, so its gt build reaches buildflags.ICUCgoEnv and starts brew on a Mac")
+	}
+	s.Integration()
+	got := builds(fake)
+	if len(got) != 1 {
+		t.Fatalf("go build calls = %d, want 1: %v", len(got), got)
+	}
+	if anyEnvNamed(got[0].env, "CGO_CPPFLAGS") || anyEnvNamed(got[0].env, "CGO_LDFLAGS") {
+		t.Errorf("go build environment = %v, want no icu4c entries from the host", got[0].env)
 	}
 }

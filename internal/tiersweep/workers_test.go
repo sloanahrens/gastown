@@ -542,6 +542,7 @@ func TestWorkersKeepTheSerialResult(t *testing.T) {
 			Exec:    fake.exec,
 			Src:     repo,
 			Environ: []string{"PATH=/fake/bin"},
+			CgoEnv:  testCgoEnv,
 			Stderr:  io.Discard,
 			Now:     func() time.Time { return at },
 		}
@@ -747,6 +748,7 @@ func runTierInBackground(repo *fakeRepo, fake *poolGo, env map[string]string, st
 	at := time.Date(2026, time.October, 30, 0, 0, 0, 0, time.UTC)
 	go func() {
 		done <- Run([]string{TierIntegration}, io.Discard, stderr, Deps{
+			CgoEnv: testCgoEnv,
 			Host: Host{
 				Env:      func(name string) string { return env[name] },
 				MkdirAll: func(string, fs.FileMode) error { return nil },
