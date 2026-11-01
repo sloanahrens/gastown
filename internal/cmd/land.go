@@ -30,7 +30,7 @@ var landCmd = &cobra.Command{
 
 Landings are queued by gt done and drained by the daemon's landing worker. A
 landing the worker refuses goes back to dispatch labeled rework. The operator's
-commands act on that queue; wait reports a crew member's own landings from it.
+commands act on that queue; wait reports a crew member's own landing outcomes.
 
 Subcommands:
   requeue     Put a rejected landing back in the queue unchanged
