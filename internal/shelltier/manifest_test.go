@@ -105,11 +105,18 @@ func TestManifestOrderIsToday(t *testing.T) {
 	}
 }
 
-func TestManifestStartsSerialWithNoTriggersOfItsOwn(t *testing.T) {
+func TestManifestStartsSerial(t *testing.T) {
 	t.Parallel()
 	for _, e := range Manifest() {
-		if e.Mode != Serial || len(e.Triggers) != 0 {
-			t.Errorf("%s: Mode=%v Triggers=%q, want Serial with no triggers of its own", e.Path, e.Mode, e.Triggers)
+		if e.Mode != Serial {
+			t.Errorf("%s: Mode=%v, want Serial", e.Path, e.Mode)
+		}
+		// A declared list is the entry's whole trigger set, so it repeats the
+		// defaults rather than dropping them.
+		for _, want := range DefaultTriggers {
+			if !slices.Contains(e.TriggersOrDefault(), want) {
+				t.Errorf("%s: Triggers=%q lose the default %q", e.Path, e.Triggers, want)
+			}
 		}
 	}
 }
@@ -185,8 +192,14 @@ func TestEveryEntryDeclaresItsGoUse(t *testing.T) {
 func TestMakefileGateRunsOnShelltierChanges(t *testing.T) {
 	t.Parallel()
 	// The selection is the production matcher's: a change to a Go file under
-	// internal/shelltier must run the go: row and must not run a none: row.
+	// internal/shelltier must run the go: row, and a none: row must not run on a
+	// Go change its own triggers do not name. The probe is go.mod rather than
+	// internal/shelltier because an entry whose script reads a path under
+	// internal/ declares internal/ as a trigger, which
+	// TestEveryReferencedRepoPathIsATrigger requires; go.mod stands in for the
+	// Go tree no entry names, so the assertion holds for every none: row.
 	goChange := []string{"internal/shelltier/manifest.go"}
+	goModChange := []string{"go.mod"}
 	var gateSeen, exemptSeen bool
 	for _, e := range Manifest() {
 		switch {
@@ -196,8 +209,8 @@ func TestMakefileGateRunsOnShelltierChanges(t *testing.T) {
 			}
 			gateSeen = true
 		case strings.HasPrefix(e.StubsGo, "none:") && hasReason(e.StubsGo):
-			if tiertrigger.Runs(e.TriggersOrDefault(), goChange, false) {
-				t.Errorf("%s is exempt (%q) but runs on a change to %s", e.Path, e.StubsGo, goChange[0])
+			if tiertrigger.Runs(e.TriggersOrDefault(), goModChange, false) {
+				t.Errorf("%s is exempt (%q) but runs on a change to %s", e.Path, e.StubsGo, goModChange[0])
 			}
 			exemptSeen = true
 		}
