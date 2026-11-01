@@ -374,7 +374,8 @@ func TestPoolBusyReadOnly(t *testing.T) {
 	}{
 		{name: "the pool is free", slots: 1},
 		{name: "the only slot is held", slots: 1, held: []int{0}, want: true},
-		{name: "one of two slots is held", slots: 2, held: []int{1}},
+		{name: "one of two slots is held", slots: 2, held: []int{1}, want: true},
+		{name: "one of eight slots is held", slots: 8, held: []int{3}, want: true},
 		{name: "an unwrapped suite holds the docker VM", slots: 1, lines: []string{"dolt/dolt-sql-server:2.2.0 unwrapped-suite"}, want: true},
 		{name: "docker cannot be read", slots: 1, listErr: looking, wantErr: true},
 		{name: "the lock cannot be opened", slots: 1, lockUnopenable: true, wantErr: true},

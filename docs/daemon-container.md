@@ -1063,7 +1063,7 @@ day.
       after the last install that swapped a binary: a landing's install request
       waits that long, so a window inside it can have an install begin under the
       cutover. Check the last install's time before choosing the start.
-- [ ] **No `gt sling` is running and the container-gate slot is free.** The
+- [ ] **No `gt sling` is running and no container-gate job is running.** The
       cutover waits for both (below), but look first: a window that starts with
       either busy spends its 30 minutes waiting.
 - [ ] **A recorded baseline.** Before starting, keep the output of
@@ -1084,7 +1084,7 @@ It runs five steps, each with a budget, and prints what state the town is left
 in whenever one ends badly. Nothing is rolled back by itself.
 
 1. **Wait for a quiet town**, up to 30 minutes: the dispatch hold on, no
-   `gt sling` running, the container-gate slot free. This is the command's own
+   `gt sling` running, no container-gate job running (any held slot counts, whatever the pool size). This is the command's own
    wait for a quiet gate; it reads the three and changes nothing. If it gives up
    it prints `not cutting over to container, nothing was changed:` and names the
    first blocker standing at the last read.
@@ -1185,7 +1185,7 @@ Before it, these must be true:
   gui/$(id -u)/com.gastown.daemon` reports not found while the job is booted
   out, which is expected).
 - The dispatch hold is still on, since the reverse cutover waits for the same
-  quiet town: no `gt sling` running and the container-gate slot free.
+  quiet town: no `gt sling` running and no container-gate job running.
 - Run it from `<live-town>`. It stops the container, proves it stopped, starts
   launchd through the startup guard, and waits for `state.json` to name
   `launchd` / `com.gastown.daemon` and for the second heartbeat.

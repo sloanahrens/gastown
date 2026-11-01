@@ -29,7 +29,7 @@ const (
 
 // QuietProbes is the three readings that decide whether the daemon may be
 // swapped: whether the operator's dispatch hold is on, whether a `gt sling` is
-// running, and whether the container-gate pool has a free slot (gt-qpeei.22).
+// running, and whether any container-gate job is running (gt-qpeei.22).
 // Each answers for the condition its name states, and an error means the probe
 // could not look, which is never quiet.
 type QuietProbes struct {
@@ -112,7 +112,7 @@ func NewQuietProbes(townRoot string, deps QuietProbeDeps) (QuietProbes, error) {
 }
 
 // WaitQuiet returns nil once the town is quiet: the dispatch hold is on, no
-// `gt sling` is running and the container-gate slot is free. It reads the
+// `gt sling` is running and no container-gate job is running. It reads the
 // probes at once and then once per poll, and gives up at budget with an error
 // naming the first blocker standing at the last read, having changed nothing. A
 // budget or poll that is not positive takes the default (gt-qpeei.22).
