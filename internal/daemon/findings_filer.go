@@ -106,32 +106,43 @@ type findingsFilerFinding struct {
 	priority int
 }
 
-// runFindingsFilerPass runs one pass and returns how many Found beads it
-// filed. A read that fails is logged and skipped, never read as a bead with no
-// findings: the finding it hides is retried next pass, since nothing marks it.
-func runFindingsFilerPass(opts findingsFilerOptions) int {
+// findingsFilerPassResult is one pass's outcome. Filed is the Found beads it
+// wrote, Failed the reads and writes it could not complete: a caller can tell
+// a pass that found nothing to file from one that filed nothing because its
+// reads failed. A failure leaves its finding unmarked, so the next pass
+// retries it.
+type findingsFilerPassResult struct {
+	Filed  int
+	Failed int
+}
+
+// runFindingsFilerPass runs one pass. A read that fails is logged and counted
+// as a failure, never read as a bead with no findings: the finding it hides is
+// retried next pass, since nothing marks it.
+func runFindingsFilerPass(opts findingsFilerOptions) findingsFilerPassResult {
 	logf := opts.Logf
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
 	if opts.Open == nil || opts.MaxPerRun < 1 {
 		logf("findings_filer: nothing to file: no database reader or a per-pass cap of %d", opts.MaxPerRun)
-		return 0
+		return findingsFilerPassResult{Failed: 1}
 	}
 	known := make(map[string]bool, len(opts.KnownRigs))
 	for _, rig := range opts.KnownRigs {
 		known[rig] = true
 	}
 	since := opts.Now.Add(-findingsFilerWindow)
-	filed := 0
+	var result findingsFilerPassResult
 	for _, sourceRig := range opts.Rigs {
-		remaining := opts.MaxPerRun - filed
+		remaining := opts.MaxPerRun - result.Filed
 		if remaining < 1 {
 			break
 		}
 		store := opts.Open(sourceRig)
 		if store == nil {
 			logf("findings_filer: %s: no database to scan", sourceRig)
+			result.Failed++
 			continue
 		}
 		issues, err := store.List(beads.ListOptions{
@@ -142,72 +153,78 @@ func runFindingsFilerPass(opts findingsFilerOptions) int {
 		})
 		if err != nil {
 			logf("findings_filer: %s: listing beads changed in the last day: %v", sourceRig, err)
+			result.Failed++
 			continue
 		}
 		for _, issue := range issues {
 			if remaining < 1 {
 				break
 			}
-			n := findingsFilerBead(opts, logf, store, sourceRig, issue, known, remaining)
-			filed += n
-			remaining -= n
+			r := findingsFilerBead(opts, logf, store, sourceRig, issue, known, remaining)
+			result.Filed += r.Filed
+			result.Failed += r.Failed
+			remaining -= r.Filed
 		}
 	}
-	return filed
+	return result
 }
 
-// findingsFilerBead files the pending findings of one source bead and returns
-// how many it filed, at most remaining. A create that fails stops the bead:
-// the later findings must not be marked ahead of the one that did not file, or
-// the mark count the next pass reads would skip it.
-func findingsFilerBead(opts findingsFilerOptions, logf func(string, ...any), store findingsFilerStore, sourceRig string, issue *beads.Issue, known map[string]bool, remaining int) int {
+// findingsFilerBead files the pending findings of one source bead, at most
+// remaining. A create that fails stops the bead, and so does a mark that does
+// not land: the marks count the front of the finding list on the next pass, so
+// a finding must not be marked ahead of one that is not.
+func findingsFilerBead(opts findingsFilerOptions, logf func(string, ...any), store findingsFilerStore, sourceRig string, issue *beads.Issue, known map[string]bool, remaining int) findingsFilerPassResult {
+	var result findingsFilerPassResult
 	comments, err := store.Comments(issue.ID)
 	if err != nil {
 		logf("findings_filer: %s: reading the comments: %v", issue.ID, err)
-		return 0
+		result.Failed++
+		return result
 	}
 	findings, marks := findingsFilerComments(comments)
 	if marks >= len(findings) {
-		return 0
+		return result
 	}
 	pending := findings[marks:]
 	// One destination read per rig: the Found beads this source bead already
-	// produced, by title. A mark the pass could not write leaves one, and the
-	// next pass must not file the finding again.
-	existing := map[string]map[string]string{}
-	filed := 0
+	// produced. A mark the pass could not write leaves one, and the next pass
+	// must not file the finding again.
+	existing := map[string][]findingsFilerFiled{}
 	for _, finding := range pending {
-		if filed >= remaining {
+		if result.Filed >= remaining {
 			break
 		}
 		targetRig, fallback := findingsFilerOwnerRig(finding, sourceRig, known)
 		target := opts.Open(targetRig)
 		if target == nil {
 			logf("findings_filer: %s: no database for rig %s", issue.ID, targetRig)
+			result.Failed++
 			break
 		}
-		titles, seen := existing[targetRig]
+		filed, seen := existing[targetRig]
 		if !seen {
-			var err error
-			if titles, err = findingsFilerFoundTitles(target, issue.ID); err != nil {
-				logf("findings_filer: %s: reading the Found beads already filed for it in %s: %v", issue.ID, targetRig, err)
+			var listErr error
+			if filed, listErr = findingsFilerFiledBeads(target, issue.ID); listErr != nil {
+				logf("findings_filer: %s: reading the Found beads already filed for it in %s: %v", issue.ID, targetRig, listErr)
+				result.Failed++
 				break
 			}
-			existing[targetRig] = titles
+			existing[targetRig] = filed
 		}
-		title := findingsFilerTitle(finding)
-		if id, ok := titles[title]; ok {
+		if id, ok := findingsFilerFiledID(filed, finding); ok {
 			// Already filed by an earlier pass whose mark did not land. The
 			// mark is the only thing missing, so write it rather than file
 			// the same defect twice.
 			if err := store.AddComment(issue.ID, findingsFilerFiledComment(id)); err != nil {
 				logf("findings_filer: %s: marking the finding filed as %s: %v", issue.ID, id, err)
+				result.Failed++
+				break
 			}
 			continue
 		}
-		body := findingsFilerBody(finding, title, issue.ID, fallback, opts.Template)
+		body := findingsFilerBody(finding, issue.ID, fallback, opts.Template)
 		created, err := target.Create(beads.CreateOptions{
-			Title:       title,
+			Title:       findingsFilerTitle(finding),
 			Description: body,
 			Priority:    finding.priority,
 			Labels:      []string{"found-from:" + issue.ID},
@@ -215,15 +232,17 @@ func findingsFilerBead(opts findingsFilerOptions, logf func(string, ...any), sto
 		})
 		if err != nil {
 			logf("findings_filer: %s: filing the finding in %s: %v", issue.ID, targetRig, err)
+			result.Failed++
 			break
 		}
-		filed++
-		titles[title] = created.ID
+		result.Filed++
 		if err := store.AddComment(issue.ID, findingsFilerFiledComment(created.ID)); err != nil {
 			logf("findings_filer: %s: marking the finding filed as %s: %v", issue.ID, created.ID, err)
+			result.Failed++
+			break
 		}
 	}
-	return filed
+	return result
 }
 
 // findingsFilerComments splits one bead's comments into the findings, in
@@ -337,11 +356,11 @@ func findingsFilerTitle(f findingsFilerFinding) string {
 // SHAPE note in front when the dispatcher's lint would hold it. A finding with
 // no text is unshaped by definition, so it carries the note without a lint
 // pass over a Goal that only says it has nothing.
-func findingsFilerBody(f findingsFilerFinding, title, sourceID, fallback string, tmpl specdispatch.Template) string {
+func findingsFilerBody(f findingsFilerFinding, sourceID, fallback string, tmpl specdispatch.Template) string {
 	body := findingsFilerDescription(f, sourceID, fallback)
 	note := findingsFilerEmptyNote
 	if f.text != "" {
-		note = findingsFilerShapeNote(body, title, tmpl)
+		note = findingsFilerShapeNote(body, findingsFilerTitle(f), tmpl)
 	}
 	if note != "" {
 		return note + "\n\n" + body
@@ -354,12 +373,7 @@ func findingsFilerBody(f findingsFilerFinding, title, sourceID, fallback string,
 // with the source bead and the fallback, when there is one, in Constraints.
 func findingsFilerDescription(f findingsFilerFinding, sourceID, fallback string) string {
 	var b strings.Builder
-	b.WriteString("## Goal\n")
-	if f.text == "" {
-		b.WriteString(findingsFilerEmptyGoal + "\n")
-	} else {
-		b.WriteString(f.text + "\n")
-	}
+	b.WriteString(findingsFilerGoal(f))
 	b.WriteString("\n## Constraints\n")
 	fmt.Fprintf(&b, "Source bead %s; filed from a polecat finding.\n", sourceID)
 	if fallback != "" {
@@ -372,11 +386,25 @@ func findingsFilerDescription(f findingsFilerFinding, sourceID, fallback string)
 	return b.String()
 }
 
+// findingsFilerGoal is the Goal section a filed Found bead carries for f: the
+// finding's text verbatim, or the sentence a finding with no text says. It is
+// also what a later pass recognises an existing bead by, so it holds nothing
+// that changes between passes.
+func findingsFilerGoal(f findingsFilerFinding) string {
+	if f.text == "" {
+		return "## Goal\n" + findingsFilerEmptyGoal + "\n"
+	}
+	return "## Goal\n" + f.text + "\n"
+}
+
 // findingsFilerShapeNote is the SHAPE note the body earns when the dispatcher's
-// lint would hold it, "" when the lint clears it. Only a missing section or an
-// empty acceptance list is this file's to fix, as the tier sweep's own filing
-// decides it: a Size the patrol cannot satisfy is left for the dispatcher to
-// report rather than rewritten.
+// lint would hold it, "" when no refusal names a section or the acceptance
+// list. The body carries every section the built-in template asks for, so a
+// section refusal means the operator's template asks for one the patrol does
+// not write, and an acceptance refusal means the list is missing; the note
+// itself names whichever. A size refusal alone earns no note: the patrol
+// cannot change what the finding is worth, so the dispatcher reports that one
+// at dispatch.
 func findingsFilerShapeNote(body, title string, tmpl specdispatch.Template) string {
 	spec := specdispatch.Spec{Title: title, Type: "task", Description: body}
 	verdict := specdispatch.LintShape(spec, tmpl)
@@ -388,20 +416,42 @@ func findingsFilerShapeNote(body, title string, tmpl specdispatch.Template) stri
 	return ""
 }
 
-// findingsFilerFoundTitles returns the Found beads a source bead already
-// produced in one rig, by title. A read that fails is an error rather than an
-// empty set: filing past it would file a defect twice, and the finding is
-// retried next pass because nothing marked it.
-func findingsFilerFoundTitles(store findingsFilerStore, sourceID string) (map[string]string, error) {
+// findingsFilerFiled is one Found bead a source bead already produced, with
+// the description the pass recognises as its finding.
+type findingsFilerFiled struct {
+	id          string
+	description string
+}
+
+// findingsFilerFiledBeads returns the Found beads a source bead already
+// produced in one rig. A read that fails is an error rather than an empty set:
+// filing past it would file a defect twice, and the finding is retried next
+// pass because nothing marked it.
+func findingsFilerFiledBeads(store findingsFilerStore, sourceID string) ([]findingsFilerFiled, error) {
 	issues, err := store.List(beads.ListOptions{Status: "all", Label: "found-from:" + sourceID, Priority: -1, Limit: 0})
 	if err != nil {
 		return nil, err
 	}
-	titles := make(map[string]string, len(issues))
+	filed := make([]findingsFilerFiled, 0, len(issues))
 	for _, issue := range issues {
-		titles[issue.Title] = issue.ID
+		filed = append(filed, findingsFilerFiled{id: issue.ID, description: issue.Description})
 	}
-	return titles, nil
+	return filed, nil
+}
+
+// findingsFilerFiledID returns the Found bead already carrying f, if there is
+// one. The finding's own text under Goal is the identity: two findings on one
+// bead can share their first line, so their titles collide, and the rest of
+// the description moves with the operator's template, so it is not stable
+// across passes.
+func findingsFilerFiledID(filed []findingsFilerFiled, f findingsFilerFinding) (string, bool) {
+	goal := findingsFilerGoal(f)
+	for _, bead := range filed {
+		if strings.Contains(bead.description, goal) {
+			return bead.id, true
+		}
+	}
+	return "", false
 }
 
 // findingsFilerInterval returns the configured interval, or the default.
@@ -429,12 +479,19 @@ func findingsFilerMaxPerRun(cfg *DaemonPatrolConfig) int {
 // findingsFilerTemplate is the shape a filed bead is linted against: the
 // operator's spec template, resolved the way the dispatcher's lint resolves
 // it, with the built-in sections as the last fallback (specdispatch.LoadTemplate).
-func findingsFilerTemplate(townRoot string) specdispatch.Template {
+// A patrol config that cannot be read is an error, not an absent template: the
+// path it might name is unknown, and filing under the built-in shape instead
+// would leave a bead the operator's template holds without saying so.
+func findingsFilerTemplate(townRoot string) (specdispatch.Template, error) {
+	pc, err := ReadPatrolConfig(townRoot)
+	if err != nil {
+		return specdispatch.Template{}, fmt.Errorf("reading the patrol config: %w", err)
+	}
 	configured := ""
-	if pc, err := ReadPatrolConfig(townRoot); err == nil && pc != nil && pc.Patrols != nil && pc.Patrols.SpecDispatch != nil {
+	if pc != nil && pc.Patrols != nil && pc.Patrols.SpecDispatch != nil {
 		configured = pc.Patrols.SpecDispatch.Template
 	}
-	return specdispatch.LoadTemplate(specdispatch.ResolveTemplatePath(configured))
+	return specdispatch.LoadTemplate(specdispatch.ResolveTemplatePath(configured)), nil
 }
 
 // findingsFilerStoreFor opens a rig's own database: the Found bead is created
@@ -460,12 +517,12 @@ func (d *Daemon) triggerFindingsFiler() bool {
 }
 
 // findingsFilerSeams replaces the pass's rig reads in tests: the rigs to scan,
-// the rigs a named owner resolves against, the shape to lint against and the
-// store each rig opens. Nil reads the town.
+// the rigs a named owner resolves against, the template to lint against and
+// the store each rig opens. A nil field reads that value from the town.
 type findingsFilerSeams struct {
 	rigs      []string
 	knownRigs []string
-	template  specdispatch.Template
+	template  func(townRoot string) (specdispatch.Template, error)
 	open      func(rig string) findingsFilerStore
 }
 
@@ -475,11 +532,19 @@ func (d *Daemon) runFindingsFiler() {
 		return
 	}
 	rigs, known := d.getPatrolRigs("findings_filer"), d.getKnownRigs()
-	tmpl, open := findingsFilerTemplate(d.config.TownRoot), d.findingsFilerStoreFor
+	templateOf, open := findingsFilerTemplate, d.findingsFilerStoreFor
 	if s := d.findingsFilerSeams; s != nil {
-		rigs, known, tmpl, open = s.rigs, s.knownRigs, s.template, s.open
+		rigs, known, open = s.rigs, s.knownRigs, s.open
+		if s.template != nil {
+			templateOf = s.template
+		}
 	}
-	filed := runFindingsFilerPass(findingsFilerOptions{
+	tmpl, err := templateOf(d.config.TownRoot)
+	if err != nil {
+		d.logger.Printf("findings_filer: not filing this pass: %v", err)
+		return
+	}
+	result := runFindingsFilerPass(findingsFilerOptions{
 		Rigs:      rigs,
 		KnownRigs: known,
 		Now:       d.clk().Now(),
@@ -488,7 +553,10 @@ func (d *Daemon) runFindingsFiler() {
 		Open:      open,
 		Logf:      d.logger.Printf,
 	})
-	if filed > 0 {
-		d.logger.Printf("findings_filer: filed %d Found bead(s)", filed)
+	if result.Filed > 0 {
+		d.logger.Printf("findings_filer: filed %d Found bead(s)", result.Filed)
+	}
+	if result.Failed > 0 {
+		d.logger.Printf("findings_filer: %d read(s) or write(s) failed; those findings are retried next interval", result.Failed)
 	}
 }

@@ -1,8 +1,12 @@
 package daemon
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -92,8 +96,10 @@ func findingsFilerEntryDaemon(t *testing.T, town *findingsFilerTown, enabled boo
 		findingsFilerSeams: &findingsFilerSeams{
 			rigs:      town.rigs,
 			knownRigs: town.rigs,
-			template:  findingsFilerTestTemplate(),
-			open:      town.open,
+			template: func(string) (specdispatch.Template, error) {
+				return findingsFilerTestTemplate(), nil
+			},
+			open: town.open,
 		},
 	}
 }
@@ -109,7 +115,7 @@ func (town *findingsFilerTown) open(rig string) findingsFilerStore {
 
 // pass runs one pass at a minute past every write the fakes made, so the
 // seeded beads sit inside the day the pass reads.
-func (town *findingsFilerTown) pass(maxPerRun int) int {
+func (town *findingsFilerTown) pass(maxPerRun int) findingsFilerPassResult {
 	return runFindingsFilerPass(findingsFilerOptions{
 		Rigs:      town.rigs,
 		KnownRigs: town.rigs,
@@ -184,7 +190,7 @@ func TestFindingsFilerFilesOnce(t *testing.T) {
 	town := newFindingsFilerTown(t, "gastown", "gantry")
 	source := town.sourceBead(t, "gastown", "closed", "rig: gantry\nthe widget drops a byte on every read")
 
-	if got := town.pass(5); got != 1 {
+	if got := town.pass(5).Filed; got != 1 {
 		t.Fatalf("filed %d Found beads, want 1", got)
 	}
 	found := town.foundBeads(t, "gantry")
@@ -217,7 +223,7 @@ func TestFindingsFilerFilesOnce(t *testing.T) {
 		t.Fatalf("marks = %q, want one naming %s", marks, got.ID)
 	}
 
-	if got := town.pass(5); got != 0 {
+	if got := town.pass(5).Filed; got != 0 {
 		t.Fatalf("a second pass filed %d Found beads, want 0", got)
 	}
 	if n := len(town.foundBeads(t, "gantry")); n != 1 {
@@ -237,7 +243,7 @@ func TestFindingsFilerScanStatuses(t *testing.T) {
 		town.sourceBead(t, "gastown", status, "the "+status+" defect")
 	}
 
-	if got := town.pass(5); got != 3 {
+	if got := town.pass(5).Filed; got != 3 {
 		t.Fatalf("filed %d Found beads, want 3", got)
 	}
 	var titles []string
@@ -261,7 +267,7 @@ func TestFindingsFilerRetries(t *testing.T) {
 	source := town.sourceBead(t, "gastown", "closed", "the parser panics on an empty line")
 	town.stores["gastown"].createErr = errors.New("dolt is unreachable")
 
-	if got := town.pass(5); got != 0 {
+	if got := town.pass(5).Filed; got != 0 {
 		t.Fatalf("filed %d Found beads past a failed create, want 0", got)
 	}
 	if n := len(town.foundBeads(t, "gastown")); n != 0 {
@@ -275,7 +281,7 @@ func TestFindingsFilerRetries(t *testing.T) {
 	}
 
 	town.stores["gastown"].createErr = nil
-	if got := town.pass(5); got != 1 {
+	if got := town.pass(5).Filed; got != 1 {
 		t.Fatalf("the retry filed %d Found beads, want 1", got)
 	}
 	if n := len(town.foundBeads(t, "gastown")); n != 1 {
@@ -295,7 +301,7 @@ func TestFindingsFilerUnreadableDestination(t *testing.T) {
 	source := town.sourceBead(t, "gastown", "closed", "rig: gantry\nthe widget drops a byte")
 	town.stores["gantry"].listErr = errors.New("the destination is unreachable")
 
-	if got := town.pass(5); got != 0 {
+	if got := town.pass(5).Filed; got != 0 {
 		t.Fatalf("filed %d Found beads past an unreadable destination, want 0", got)
 	}
 	if marks := town.marks(t, "gastown", source); len(marks) != 0 {
@@ -306,7 +312,7 @@ func TestFindingsFilerUnreadableDestination(t *testing.T) {
 	}
 
 	town.stores["gantry"].listErr = nil
-	if got := town.pass(5); got != 1 {
+	if got := town.pass(5).Filed; got != 1 {
 		t.Fatalf("the retry filed %d Found beads, want 1", got)
 	}
 	if n := len(town.foundBeads(t, "gantry")); n != 1 {
@@ -319,7 +325,7 @@ func TestFindingsFilerUnknownRig(t *testing.T) {
 	town := newFindingsFilerTown(t, "gastown", "gantry")
 	source := town.sourceBead(t, "gastown", "closed", "rig: atlantis\nthe foo module leaks a goroutine")
 
-	if got := town.pass(5); got != 1 {
+	if got := town.pass(5).Filed; got != 1 {
 		t.Fatalf("filed %d Found beads, want 1", got)
 	}
 	found := town.foundBeads(t, "gastown")
@@ -372,20 +378,33 @@ func TestFindingsFilerOptIn(t *testing.T) {
 	town := newFindingsFilerTown(t, "gastown")
 	town.sourceBead(t, "gastown", "closed", "the first defect")
 	town.sourceBead(t, "gastown", "closed", "the second defect")
-	if got := town.pass(1); got != 1 {
+	if got := town.pass(1).Filed; got != 1 {
 		t.Fatalf("filed %d Found beads with max_per_run 1, want 1", got)
 	}
-	if n := len(town.foundBeads(t, "gastown")); n != 1 {
-		t.Fatalf("one pass left %d Found beads, want 1", n)
+	first := town.foundBeads(t, "gastown")
+	if len(first) != 1 {
+		t.Fatalf("one pass left %d Found beads, want 1", len(first))
 	}
 	// The next interval files the finding the cap held back, not the one
 	// already filed.
-	if got := town.pass(1); got != 1 {
+	if got := town.pass(1).Filed; got != 1 {
 		t.Fatalf("the next pass filed %d Found beads, want 1", got)
 	}
 	found := town.foundBeads(t, "gastown")
 	if len(found) != 2 {
 		t.Fatalf("two passes left %d Found beads, want 2", len(found))
+	}
+	byTitle := map[string]bool{}
+	for _, issue := range found {
+		byTitle[issue.Title] = true
+	}
+	if len(byTitle) != 2 {
+		t.Errorf("the two passes filed %v, want the two distinct findings", byTitle)
+	}
+	for _, want := range []string{"Found: the first defect", "Found: the second defect"} {
+		if !byTitle[want] {
+			t.Errorf("the two passes filed %v, want both %q among them", byTitle, want)
+		}
 	}
 
 	// The cap holds within one source bead too: two findings on it file one
@@ -394,10 +413,10 @@ func TestFindingsFilerOptIn(t *testing.T) {
 	if err := town.stores["gastown"].Fake.AddComment(both, findingsFilerMarker+"\nthe second of a pair"); err != nil {
 		t.Fatalf("record the second finding: %v", err)
 	}
-	if got := town.pass(1); got != 1 {
+	if got := town.pass(1).Filed; got != 1 {
 		t.Fatalf("a pass over two findings of one bead filed %d, want 1", got)
 	}
-	if got := town.pass(1); got != 1 {
+	if got := town.pass(1).Filed; got != 1 {
 		t.Fatalf("the next pass over two findings of one bead filed %d, want 1", got)
 	}
 	if marks := town.marks(t, "gastown", both); len(marks) != 2 {
@@ -410,7 +429,7 @@ func TestFindingsFilerUnshapedThinFinding(t *testing.T) {
 	town := newFindingsFilerTown(t, "gastown")
 	town.sourceBead(t, "gastown", "closed", "rig: gastown")
 
-	if got := town.pass(5); got != 1 {
+	if got := town.pass(5).Filed; got != 1 {
 		t.Fatalf("filed %d Found beads, want 1", got)
 	}
 	found := town.foundBeads(t, "gastown")
@@ -431,7 +450,7 @@ func TestFindingsFilerUnshapedThinFinding(t *testing.T) {
 func TestFindingsFilerShapeNoteForTemplateSection(t *testing.T) {
 	t.Parallel()
 	sections := append(append([]string(nil), specdispatch.DefaultSections...), "Rollback")
-	got := findingsFilerBody(findingsFilerFinding{text: "the cache never expires"}, "Found: the cache never expires", "gt-src", "", specdispatch.Template{Sections: sections})
+	got := findingsFilerBody(findingsFilerFinding{text: "the cache never expires"}, "gt-src", "", specdispatch.Template{Sections: sections})
 	if !strings.HasPrefix(got, "SHAPE: ## Rollback: section missing") {
 		t.Errorf("body = %q, want the lint's SHAPE note", got)
 	}
@@ -443,7 +462,7 @@ func TestFindingsFilerMarkFailureDoesNotFileTwice(t *testing.T) {
 	source := town.sourceBead(t, "gastown", "closed", "the retry counter never resets")
 	town.stores["gastown"].markErr = errors.New("the comment write failed")
 
-	if got := town.pass(5); got != 1 {
+	if got := town.pass(5).Filed; got != 1 {
 		t.Fatalf("filed %d Found beads, want 1", got)
 	}
 	if n := len(town.foundBeads(t, "gastown")); n != 1 {
@@ -456,7 +475,7 @@ func TestFindingsFilerMarkFailureDoesNotFileTwice(t *testing.T) {
 	// The Found bead exists; the mark is all that failed. A later pass must
 	// write the mark, not the bead again.
 	town.stores["gastown"].markErr = nil
-	if got := town.pass(5); got != 0 {
+	if got := town.pass(5).Filed; got != 0 {
 		t.Fatalf("the later pass filed %d Found beads, want 0", got)
 	}
 	found := town.foundBeads(t, "gastown")
@@ -469,13 +488,140 @@ func TestFindingsFilerMarkFailureDoesNotFileTwice(t *testing.T) {
 	}
 }
 
+// TestFindingsFilerSameSubjectOnOneBead pins what a filed bead is recognised
+// by on a later pass: the finding's own text, not the title its first line
+// makes. Two findings on one source bead can share that line, and a mark the
+// first pass could not write must not cost the second finding its own bead.
+func TestFindingsFilerSameSubjectOnOneBead(t *testing.T) {
+	t.Parallel()
+	town := newFindingsFilerTown(t, "gastown")
+	source := town.sourceBead(t, "gastown", "closed", "the widget leaks a byte\non every read")
+	if err := town.stores["gastown"].Fake.AddComment(source, findingsFilerMarker+"\nthe widget leaks a byte\non every write"); err != nil {
+		t.Fatalf("record the second finding: %v", err)
+	}
+
+	// No mark lands: the pass files the first finding and stops at its failed
+	// mark. The next pass must recognise that bead by the finding's text, not
+	// by the title it shares with the finding it held back.
+	town.stores["gastown"].markErr = errors.New("the comment write failed")
+	if got := town.pass(5).Filed; got != 1 {
+		t.Fatalf("filed %d Found beads while the mark write fails, want 1", got)
+	}
+	town.stores["gastown"].markErr = nil
+
+	// The retry writes the missing mark, then files the finding it held back.
+	if got := town.pass(5).Filed; got != 1 {
+		t.Fatalf("the retry filed %d Found beads, want the second finding's one", got)
+	}
+	if got := town.pass(5).Filed; got != 0 {
+		t.Fatalf("the pass after the retry filed %d Found beads, want 0", got)
+	}
+
+	found := town.foundBeads(t, "gastown")
+	if len(found) != 2 {
+		t.Fatalf("three passes left %d Found beads, want one per finding", len(found))
+	}
+	for _, want := range []string{"on every read", "on every write"} {
+		var hit bool
+		for _, issue := range found {
+			if strings.Contains(issue.Description, want) {
+				hit = true
+			}
+		}
+		if !hit {
+			t.Errorf("no Found bead carries %q; found %d beads", want, len(found))
+		}
+	}
+	filedIDs := map[string]bool{}
+	for _, issue := range found {
+		filedIDs[issue.ID] = true
+	}
+	marks := town.marks(t, "gastown", source)
+	if len(marks) != 2 {
+		t.Fatalf("marks = %q, want one per finding", marks)
+	}
+	markedIDs := map[string]bool{}
+	for _, mark := range marks {
+		markedIDs[strings.TrimPrefix(mark, findingsFilerFiledMarker+" ")] = true
+	}
+	if len(markedIDs) != 2 {
+		t.Errorf("marks = %q, want each naming its own Found bead", marks)
+	}
+	for id := range markedIDs {
+		if !filedIDs[id] {
+			t.Errorf("a mark names %s, which is not one of the Found beads %v", id, filedIDs)
+		}
+	}
+}
+
+// TestFindingsFilerTemplateReadFailure pins the template's read: a patrol
+// config the pass cannot read leaves the shape it asked for unknown, so the
+// pass files nothing rather than filing under the built-in sections and
+// calling it shaped.
+func TestFindingsFilerTemplateReadFailure(t *testing.T) {
+	t.Parallel()
+	town := newFindingsFilerTown(t, "gastown")
+	town.sourceBead(t, "gastown", "closed", "the widget drops a byte")
+
+	townRoot := t.TempDir()
+	settings := filepath.Join(townRoot, "settings")
+	if err := os.MkdirAll(settings, 0o755); err != nil {
+		t.Fatalf("create the settings directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(settings, "config.json"), []byte(`{"daemon": `), 0o644); err != nil {
+		t.Fatalf("write an unreadable settings file: %v", err)
+	}
+
+	logs := &bytes.Buffer{}
+	d := findingsFilerEntryDaemon(t, town, true)
+	d.config = &Config{TownRoot: townRoot}
+	d.logger = log.New(logs, "", 0)
+	d.findingsFilerSeams.template = nil
+	d.runFindingsFiler()
+
+	if n := len(town.foundBeads(t, "gastown")); n != 0 {
+		t.Fatalf("filed %d Found beads without the template, want 0", n)
+	}
+	if !strings.Contains(logs.String(), "not filing this pass") {
+		t.Errorf("the template read failure was not logged; log: %q", logs.String())
+	}
+}
+
+// TestFindingsFilerFailureIsNotAnEmptyPass pins the pass's outcome: a pass
+// whose reads or writes failed says so, so a caller cannot read it as a pass
+// that found nothing to file.
+func TestFindingsFilerFailureIsNotAnEmptyPass(t *testing.T) {
+	t.Parallel()
+	town := newFindingsFilerTown(t, "gastown")
+	town.sourceBead(t, "gastown", "closed", "the widget drops a byte")
+
+	if got := town.pass(5); got != (findingsFilerPassResult{Filed: 1}) {
+		t.Fatalf("a clean pass over a bead with one finding reported %+v, want one filing and no failures", got)
+	}
+
+	failing := newFindingsFilerTown(t, "gastown")
+	failing.sourceBead(t, "gastown", "closed", "the widget drops a byte")
+	failing.stores["gastown"].createErr = errors.New("dolt is unreachable")
+	logs := &bytes.Buffer{}
+	d := findingsFilerEntryDaemon(t, failing, true)
+	d.logger = log.New(logs, "", 0)
+	d.runFindingsFiler()
+
+	if n := len(failing.foundBeads(t, "gastown")); n != 0 {
+		t.Fatalf("filed %d Found beads past a failed create, want 0", n)
+	}
+	if !strings.Contains(logs.String(), "failed") {
+		t.Errorf("a pass that filed nothing because its create failed logged %q, want the failure named", logs.String())
+	}
+}
+
 func TestFindingsFilerPriorityAndTitle(t *testing.T) {
 	t.Parallel()
 	town := newFindingsFilerTown(t, "gastown")
 	subject := "P1: " + strings.Repeat("z", 200)
 	town.sourceBead(t, "gastown", "closed", subject)
 
-	if got := town.pass(5); got != 1 {
+	if got := town.pass(5).Filed; got != 1 {
 		t.Fatalf("filed %d Found beads, want 1", got)
 	}
 	found := town.foundBeads(t, "gastown")
