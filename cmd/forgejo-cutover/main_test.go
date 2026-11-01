@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -124,6 +125,19 @@ func TestMainUsageExitsTwoAndHelpExitsZero(t *testing.T) {
 				t.Errorf("run(%s) stderr = %q, want nothing on a help request", flag, stderr.String())
 			}
 		})
+	}
+}
+
+// TestExecRunnerRefusesAnEmptyArgv: an argv with no program is refused on both
+// methods, rather than indexed out of range.
+func TestExecRunnerRefusesAnEmptyArgv(t *testing.T) {
+	t.Parallel()
+	r := execRunner{stdout: io.Discard, stderr: io.Discard}
+	if _, err := r.Output(nil); err == nil || !strings.Contains(err.Error(), "no command to run") {
+		t.Errorf("Output(nil) = %v, want the empty argv refused", err)
+	}
+	if err := r.Run(nil); err == nil || !strings.Contains(err.Error(), "no command to run") {
+		t.Errorf("Run(nil) = %v, want the empty argv refused", err)
 	}
 }
 
