@@ -2,10 +2,8 @@
 # token, sent as a bearer placeholder the proxy swaps, to api.anthropic.com only.
 # Modelled on deploy/polecat/profiles/deepseek-claude.yaml.
 #
-# What ran: the claude-q3f.13 proof passed, and the overseer's sandbox run of this narrowed
-# list passed (both recorded on gt-du9v5). That run used a scratch profile built from this
-# file, without /usr/bin/node, which sent a request to api.anthropic.com and got a reply.
-# The live seat runs this list.
+# Exercised live: sbx-haiku seats send api.anthropic.com /v1/messages under this provider
+# (supervisor log, overseer, 2026-10-31, gt-h9r8s). The live seat runs this list.
 id: anthropic-oauth
 display_name: Anthropic subscription token for Claude Code
 description: Claude Code model requests with a setup-token subscription token, sent only to api.anthropic.com
