@@ -45,10 +45,7 @@ const (
 	// full cycle fits.
 	cutoverBoundaryBudget = 6 * time.Minute
 	// cutoverBoundaryFresh is how old the daemon's last heartbeat may be for the
-	// stop to be issued: the daemon reads signals only between loop iterations,
-	// so a stop issued soon after a heartbeat completes is read at once, while
-	// one issued inside the next heartbeat waits out launchd's ExitTimeOut and
-	// is SIGKILLed (2026-11-01).
+	// stop to be issued: it reads signals only between heartbeats (gt-xplg3).
 	cutoverBoundaryFresh = 60 * time.Second
 
 	// cutoverPoll is how often a wait reads state.json and the job state.
@@ -123,12 +120,18 @@ func (p *cutoverPlan) execute(ctx context.Context) error {
 	// one completes. The wait can take minutes, so the town is checked quiet
 	// again right after it, still having changed nothing.
 	if p.from.stopAtHeartbeat {
-		p.say("Waiting for the old %s daemon to finish a heartbeat before stopping it (up to %s).", p.from.name, cutoverBoundaryBudget)
-		if ok, why := p.waitFor(ctx, cutoverBoundaryBudget, p.atHeartbeatBoundary); !ok {
-			return fmt.Errorf("not cutting over to %s, nothing was changed: the old daemon did not complete a heartbeat within %s: %s", p.to.name, cutoverBoundaryBudget, why)
+		running, err := p.daemonRunning()
+		if err != nil {
+			return fmt.Errorf("not cutting over to %s, nothing was changed: %w", p.to.name, err)
 		}
-		if err := p.quiet(ctx, cutoverRecheckBudget); err != nil {
-			return fmt.Errorf("not cutting over to %s, nothing was changed: the town stopped being quiet while waiting for the heartbeat boundary: %w", p.to.name, err)
+		if running {
+			p.say("Waiting for the old %s daemon to finish a heartbeat before stopping it (up to %s).", p.from.name, cutoverBoundaryBudget)
+			if ok, why := p.waitFor(ctx, cutoverBoundaryBudget, p.atHeartbeatBoundary); !ok {
+				return fmt.Errorf("not cutting over to %s, nothing was changed: the old daemon did not complete a heartbeat within %s: %s", p.to.name, cutoverBoundaryBudget, why)
+			}
+			if err := p.quiet(ctx, cutoverRecheckBudget); err != nil {
+				return fmt.Errorf("not cutting over to %s, nothing was changed: the town stopped being quiet while waiting for the heartbeat boundary: %w", p.to.name, err)
+			}
 		}
 	}
 
@@ -173,20 +176,43 @@ func (p *cutoverPlan) execute(ctx context.Context) error {
 	return nil
 }
 
+// daemonRunning says whether the heartbeat wait applies: state.json records a
+// running daemon. When it does not, the old side's job is read: a running (or
+// unreadable) job means a stop could land inside a heartbeat that state.json
+// does not show, so it is an error; a job that is not running either means
+// there is nothing to wait for and the stop proceeds as before.
+func (p *cutoverPlan) daemonRunning() (bool, error) {
+	st, err := p.state()
+	if err == nil && st != nil && st.Running {
+		return true, nil
+	}
+	job := p.from.job()
+	switch {
+	case job.Err != nil:
+		return false, fmt.Errorf("state.json records no running daemon and the %s job state cannot be read (%v); fix state first", p.from.name, job.Err)
+	case !p.from.stopped(job):
+		return false, fmt.Errorf("state.json records no running daemon but %s's job is running; fix state first", p.from.name)
+	}
+	return false, nil
+}
+
 // atHeartbeatBoundary reports whether the old daemon completed a heartbeat at
-// most cutoverBoundaryFresh ago, which is when a stop is read at once. A state
-// that records no running daemon has nothing to wait for; the proof after the
-// stop is what judges it.
+// most cutoverBoundaryFresh ago, which is when a stop is read at once. A
+// heartbeat in the future is not a boundary, and neither is a state that
+// records no running daemon: both keep the wait going.
 func (p *cutoverPlan) atHeartbeatBoundary() (bool, string) {
 	st, err := p.state()
 	switch {
 	case err != nil:
 		return false, fmt.Sprintf("state.json cannot be read: %v", err)
 	case st == nil, !st.Running:
-		return true, ""
+		return false, "state.json records no running daemon"
 	}
 	age := p.clk.Now().Sub(st.LastHeartbeat)
-	if age <= cutoverBoundaryFresh {
+	switch {
+	case age < 0:
+		return false, fmt.Sprintf("the last heartbeat (%s) is in the future", st.LastHeartbeat.Format(time.RFC3339))
+	case age <= cutoverBoundaryFresh:
 		return true, ""
 	}
 	return false, fmt.Sprintf("the last heartbeat completed %s ago, more than %s", age.Round(time.Second), cutoverBoundaryFresh)

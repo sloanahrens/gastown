@@ -979,10 +979,15 @@ func TestCutoverBoundaryWaitBudgetChangesNothing(t *testing.T) {
 func TestCutoverBoundaryWaitRechecksQuietBeforeTheStop(t *testing.T) {
 	t.Parallel()
 	r, p, _ := boundaryRig()
-	r.lastBeat = func() time.Time { return r.start.Add(-10 * time.Second) }
-	// Calls 1 and 2 are steps 1 and 2; call 3 is the recheck after the wait.
-	r.quietAnswer = func(call int) error {
-		if call == 3 {
+	// The town goes busy once the boundary wait has read the heartbeat, whatever
+	// the order or number of the quiet probes before it.
+	read := false
+	r.lastBeat = func() time.Time {
+		read = true
+		return r.start.Add(-10 * time.Second)
+	}
+	r.quietAnswer = func(int) error {
+		if read {
 			return errors.New("a landing pass started")
 		}
 		return nil
@@ -993,5 +998,50 @@ func TestCutoverBoundaryWaitRechecksQuietBeforeTheStop(t *testing.T) {
 	}
 	if len(r.calls) != 0 {
 		t.Errorf("commands ran after the town stopped being quiet: %v", r.calls)
+	}
+}
+
+func TestCutoverFutureHeartbeatIsNotABoundary(t *testing.T) {
+	t.Parallel()
+	r, p, _ := boundaryRig()
+	r.lastBeat = func() time.Time { return r.clk.Now().Add(5 * time.Minute) }
+	err := p.execute(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "in the future") {
+		t.Fatalf("error = %v, want one naming the future heartbeat", err)
+	}
+	if len(r.calls) != 0 {
+		t.Errorf("commands ran on a heartbeat from the future: %v", r.calls)
+	}
+}
+
+func TestCutoverRefusesWhenStateSaysStoppedButTheJobRuns(t *testing.T) {
+	t.Parallel()
+	for name, st := range map[string]*daemon.State{
+		"not running": {Running: false, Owner: &cutoverLaunchd},
+		"no file":     nil,
+	} {
+		r, p, _ := boundaryRig()
+		r.state = st // the rig's fromJob is loaded and running
+		err := p.execute(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "records no running daemon but launchd's job is running; fix state first") ||
+			!strings.Contains(err.Error(), "nothing was changed") {
+			t.Errorf("%s: error = %v", name, err)
+		}
+		if len(r.calls) != 0 {
+			t.Errorf("%s: commands ran: %v", name, r.calls)
+		}
+	}
+}
+
+func TestCutoverProceedsWhenNeitherStateNorJobRuns(t *testing.T) {
+	t.Parallel()
+	r, p, atStop := boundaryRig()
+	r.state = &daemon.State{Running: false, Owner: &cutoverLaunchd, HeartbeatCount: 40}
+	r.fromJob = templates.SupervisorState{Loaded: false, LastExit: -1}
+	if err := p.execute(context.Background()); err != nil {
+		t.Fatalf("cutover: %v\n%s", err, r.out.String())
+	}
+	if *atStop != 0 {
+		t.Errorf("waited %s for a heartbeat with no daemon running", *atStop)
 	}
 }
