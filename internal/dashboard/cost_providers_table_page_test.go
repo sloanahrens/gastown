@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"encoding/json"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -942,14 +943,9 @@ func TestCostProvidersTableScrollsSidewaysInsteadOfClipping(t *testing.T) {
 	}
 }
 
-// A narrow panel scrolls the providers table, but on a host whose scrollbars
-// are overlay-style a bare overflow-x:auto draws nothing until the reader
-// scrolls, so the cut Status column reads as the table's end. The wrapper fades
-// its clipped edge instead: a dim gradient at the panel's left and right edges,
-// under a panel-coloured cover that scrolls with the table. The cover is what
-// makes the cue conditional on overflow (the test names it: background-
-// attachment: local), so a table that fits shows no fade, while overflow-x:auto
-// keeps the fade from pinning to a non-scrolling box.
+// A narrow panel scrolls the providers table sideways, and the wrapper marks
+// the cut edge with a fade that shows only while the table overflows. This holds
+// the declarations that cue rests on (gt-k21do, gt-vonj4).
 func TestCostProvidersTableShowsItsSidewaysScroll(t *testing.T) {
 	t.Parallel()
 
@@ -966,17 +962,22 @@ func TestCostProvidersTableShowsItsSidewaysScroll(t *testing.T) {
 		t.Errorf("the .costscroll rule has background %q, want a panel-coloured cover over the fade so it can be hidden when nothing is cut", fade)
 	}
 
-	// background-attachment: local is the declaration the cue's condition
-	// rests on: the covers scroll with the table, so they sit over the fade
-	// when the table fits or is scrolled to an end, and clear it while more is
-	// cut off. Without it the fade is always on.
-	attach := decls["background-attachment"]
-	if !strings.Contains(attach, "local") {
-		t.Errorf("the .costscroll rule has background-attachment %q, want local so the fade shows only while the table overflows", attach)
+	attach := cssLayers(decls["background-attachment"])
+	if want := []string{"local", "local", "scroll", "scroll"}; !slices.Equal(attach, want) {
+		t.Errorf("the .costscroll rule has background-attachment %q, want %v: the two covers scroll with the table and the two fades stay pinned to the panel", decls["background-attachment"], want)
 	}
 	if !strings.Contains(decls["background-size"], "16px 100%") {
 		t.Errorf("the .costscroll rule has background-size %q, want the 16px fade band at each edge", decls["background-size"])
 	}
+}
+
+// cssLayers splits a comma-separated property value into its layers, trimmed.
+func cssLayers(val string) []string {
+	parts := strings.Split(val, ",")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	return parts
 }
 
 // cellTexts is the text of each cell of a row, in column order.
