@@ -74,6 +74,10 @@ type Options struct {
 	// PreVerified skips the crew local presubmit gate. Crew only: a polecat's
 	// gt done always runs the gate.
 	PreVerified bool
+	// Findings are the --finding texts: defects the polecat met outside its
+	// task. Run records them through RecordFindings once the source bead is
+	// resolved, before it submits, so a failed submission still carries them.
+	Findings []string
 
 	// Env reads the process environment. Nil is os.Getenv.
 	Env func(string) string
@@ -94,6 +98,12 @@ type Options struct {
 	// the bead was resolved too). consumed=false means the callback could not
 	// address the bead and the run writes pending itself.
 	RecordAgentState func(cwd, townRoot, exitType, issueID string, pending beads.AgentFieldUpdates) (consumed bool, err error)
+
+	// RecordFindings records Options.Findings on the source bead issueID. Run
+	// calls it before it submits, so the findings survive a submission that
+	// fails; a finding the callback cannot record is its warning, never a
+	// refusal. Nil skips the write.
+	RecordFindings func(cwd, issueID string, findings []string)
 
 	// LocalGate builds the local pre-submit gate for a rig. Nil is the real
 	// land gate. The command layer supplies its own indirection so cmd-level

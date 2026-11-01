@@ -102,13 +102,17 @@ func runDoneForExitCode(t *testing.T, branchSetup func(t *testing.T, workDir str
 
 // runDoneForExitCodeWithStatus is runDoneForExitCode with the --cleanup-status
 // the polecat passes. It also returns the path of the bd recorder log.
-func runDoneForExitCodeWithStatus(t *testing.T, cleanupStatus string, branchSetup func(t *testing.T, workDir string)) (string, error) {
+// configure, when given, sets flags after the reset that clears them.
+func runDoneForExitCodeWithStatus(t *testing.T, cleanupStatus string, branchSetup func(t *testing.T, workDir string), configure ...func()) (string, error) {
 	t.Helper()
 	workDir, currentBeadsDir, ownerBeadsDir := setupRoutedSourceTestTown(t)
 	setupRoutedSubmitCommandTown(t, workDir)
 	branchSetup(t, workDir)
 	logPath := installSubmitSourceBDRecorder(t, currentBeadsDir, ownerBeadsDir)
 	resetDoneFlagsForTest(t)
+	for _, c := range configure {
+		c()
+	}
 	oldDelays := pushLandingRetryDelays
 	pushLandingRetryDelays = []time.Duration{0}
 	oldSleep := doneRetrySleep
@@ -216,13 +220,16 @@ func TestIntegrationRunDoneClassifiesOnTheLastPushAttempt(t *testing.T) {
 func resetDoneFlagsForTest(t *testing.T) {
 	t.Helper()
 	oldIssue, oldStatus, oldCleanupStatus, oldTarget := doneIssue, doneStatus, doneCleanupStatus, doneTarget
+	oldFindings := doneFindings
 	oldUpdateAgentStateOnDoneFn := updateAgentStateOnDoneFn
 	doneIssue = ""
 	doneStatus = ExitCompleted
 	doneCleanupStatus = ""
 	doneTarget = ""
+	doneFindings = nil
 	t.Cleanup(func() {
 		doneIssue, doneStatus, doneCleanupStatus, doneTarget = oldIssue, oldStatus, oldCleanupStatus, oldTarget
+		doneFindings = oldFindings
 		updateAgentStateOnDoneFn = oldUpdateAgentStateOnDoneFn
 	})
 	// No test runs the rig's real gate; a test that cares replaces this.
@@ -266,5 +273,54 @@ func assertDoneExitCode(t *testing.T, err error, want int, wantText string) {
 	}
 	if !strings.Contains(err.Error(), wantText) {
 		t.Errorf("error %q lacks %q", err, wantText)
+	}
+}
+
+// TestIntegrationRunDoneRecordsFindingWhenSubmitFails: a finding describes a
+// defect met outside the task, so a submission that fails — here origin refuses
+// the push, exit 10 — still carries it to the source bead.
+func TestIntegrationRunDoneRecordsFindingWhenSubmitFails(t *testing.T) {
+	const finding = "the retry never resets its counter"
+	logPath, err := runDoneForExitCodeWithStatus(t, "unpushed", func(t *testing.T, workDir string) {
+		setupRoutedSubmitGitRepo(t, workDir, false)
+		installRemoteHook(t, workDir, "pre-receive", "echo 'rejected by test hook' >&2\nexit 1\n")
+	}, func() {
+		doneFindings = []string{finding}
+	})
+	assertDoneExitCode(t, err, done.DoneExitPushFailed, "feature/routed-submit")
+
+	log := readSubmitSourceBDLog(t, logPath)
+	if !strings.Contains(log, "comments add bd-source") {
+		t.Fatalf("a failed submission dropped the FINDING comment:\n%s", log)
+	}
+	if !strings.Contains(log, finding) {
+		t.Errorf("the FINDING comment does not carry the finding text:\n%s", log)
+	}
+}
+
+// TestIntegrationRunDoneFindingWithDeferredAndEscalated: --finding is recorded
+// on DEFERRED and ESCALATED, neither of which submits the branch.
+func TestIntegrationRunDoneFindingWithDeferredAndEscalated(t *testing.T) {
+	const finding = "a defect met while blocked"
+	for _, status := range []string{ExitDeferred, ExitEscalated} {
+		t.Run(status, func(t *testing.T) {
+			logPath, err := runDoneForExitCodeWithStatus(t, "unpushed", func(t *testing.T, workDir string) {
+				setupRoutedSubmitGitRepo(t, workDir, false)
+			}, func() {
+				doneStatus = status
+				doneFindings = []string{finding}
+			})
+			if err != nil {
+				t.Fatalf("gt done --status %s: %v", status, err)
+			}
+
+			log := readSubmitSourceBDLog(t, logPath)
+			if !strings.Contains(log, "comments add bd-source") {
+				t.Fatalf("%s exit dropped the FINDING comment:\n%s", status, log)
+			}
+			if !strings.Contains(log, finding) {
+				t.Errorf("%s FINDING comment does not carry the finding text:\n%s", status, log)
+			}
+		})
 	}
 }
