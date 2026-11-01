@@ -268,6 +268,7 @@ type PatrolsConfig struct {
 	SpecDispatch         *SpecDispatchConfig         `json:"spec_dispatch,omitempty"`
 	OverseerReport       *OverseerReportConfig       `json:"overseer_report,omitempty"`
 	BirdReports          *BirdReportsConfig          `json:"bird_reports,omitempty"`
+	FindingsFiler        *FindingsFilerConfig        `json:"findings_filer,omitempty"`
 	PatrolScan           *PatrolScanConfig           `json:"patrol_scan,omitempty"`
 	EventsPrune          *EventsPruneConfig          `json:"events_prune,omitempty"`
 
@@ -1415,6 +1416,83 @@ func (c *BirdReportsConfig) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("patrols.bird_reports.reporters: %q is listed twice", name)
 		}
 		seen[name] = true
+	}
+	*c = cfg
+	return nil
+}
+
+// FindingsFilerConfig configures the findings_filer patrol (gt-rws9m): every
+// interval the daemon reads the FINDING: comments gt done recorded on beads
+// closed, deferred or hooked in the last day and files one Found bead per
+// comment in the rig the finding names.
+//
+// Off unless enabled: a pass files beads into rig databases, so a town opts in
+// once rather than discovering the filings.
+type FindingsFilerConfig struct {
+	// Enabled turns the patrol on. Default off.
+	Enabled bool `json:"enabled"`
+
+	// IntervalStr is how often one pass runs (default "10m").
+	IntervalStr string `json:"interval,omitempty"`
+
+	// MaxPerRun caps the Found beads one pass files (default 5). It is a
+	// pointer so an explicit 0 is refused rather than read as the default: a
+	// patrol that runs and files nothing is a typo, not a setting.
+	MaxPerRun *int `json:"max_per_run,omitempty"`
+}
+
+// The findings_filer defaults.
+const (
+	// FindingsFilerDefaultInterval is how often one pass runs.
+	FindingsFilerDefaultInterval = 10 * time.Minute
+	// FindingsFilerDefaultMaxPerRun is how many Found beads one pass files. A
+	// finding waits at most a few intervals, and a pass cannot flood a rig's
+	// board with a day of them at once.
+	FindingsFilerDefaultMaxPerRun = 5
+)
+
+// IntervalValue returns how often one pass runs, or an error for a value the
+// patrol cannot schedule. An empty setting is the default; an unparseable one
+// is refused rather than read as the default, so a typo cannot leave the
+// patrol silently never running.
+func (c *FindingsFilerConfig) IntervalValue() (time.Duration, error) {
+	if c == nil || c.IntervalStr == "" {
+		return FindingsFilerDefaultInterval, nil
+	}
+	d, err := time.ParseDuration(c.IntervalStr)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("patrols.findings_filer.interval = %q: want a positive Go duration such as %q",
+			c.IntervalStr, FindingsFilerDefaultInterval)
+	}
+	return d, nil
+}
+
+// MaxPerRunValue returns how many Found beads one pass may file: the
+// configured count, or the default when the key is absent.
+func (c *FindingsFilerConfig) MaxPerRunValue() int {
+	if c == nil || c.MaxPerRun == nil {
+		return FindingsFilerDefaultMaxPerRun
+	}
+	return *c.MaxPerRun
+}
+
+// UnmarshalJSON decodes the patrol's block strictly, refusing a value it
+// cannot act on. The unknown-field check is repeated here because a type that
+// decodes itself is decoded by the config kernel's strict decoder opaquely.
+func (c *FindingsFilerConfig) UnmarshalJSON(data []byte) error {
+	type plain FindingsFilerConfig
+	var p plain
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
+		return fmt.Errorf("patrols.findings_filer: %w", err)
+	}
+	cfg := FindingsFilerConfig(p)
+	if _, err := cfg.IntervalValue(); err != nil {
+		return err
+	}
+	if p.MaxPerRun != nil && *p.MaxPerRun < 1 {
+		return fmt.Errorf("patrols.findings_filer.max_per_run = %d: want at least 1", *p.MaxPerRun)
 	}
 	*c = cfg
 	return nil

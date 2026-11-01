@@ -475,6 +475,58 @@ The block is decoded strictly: an unknown key, an hour outside 0 to 23, an age
 that is not a positive duration, or a reporter name that is not one directory
 name refuses the config load rather than being ignored.
 
+### Findings Filer
+
+A polecat reports defects it meets outside its own task through
+`gt done --finding`, which leaves a `FINDING:` comment on the source bead. The
+`findings_filer` patrol (gt-rws9m) turns each comment into a Found bead in the
+rig that owns the defect, so the reporting polecat never files a bead of its
+own. It is off unless `daemon.patrols.findings_filer.enabled` is true in
+`settings/config.json`:
+
+```json
+"daemon": {
+  "patrols": {
+    "findings_filer": {
+      "enabled": true,
+      "interval": "10m",
+      "max_per_run": 5
+    }
+  }
+}
+```
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `enabled` | `false` | Whether the patrol runs at all. A pass files beads into rig databases, so a town opts in |
+| `interval` | `10m` | How often a pass runs, as a Go duration |
+| `max_per_run` | `5` | The Found beads one pass may file, so a day of findings does not land on a board at once. A finding waits a few intervals; `0` is refused |
+
+Every interval a pass reads the beads closed, deferred or hooked in the last
+24 hours in every unparked rig, and the comments on them. A comment whose first
+line is `FINDING:` is a finding; a second line of the form `rig: <name>` names
+the owning rig, and the rest of the comment is the text. A finding naming no
+rig is filed in the source bead's own rig; one naming a rig the town does not
+have is filed there too, and the new bead's Constraints say so.
+
+The Found bead's title is the finding's first line, and its Goal section is the
+finding's text verbatim. It carries the Constraints, Out of scope, Gate, Size
+and Acceptance sections `gt spec lint` reads, the label
+`found-from:<source bead>`, priority 1 when that first line says `P1` and 3
+otherwise. A finding with no text beyond its rig line is filed with a `SHAPE:`
+note in front of the body rather than dropped.
+
+Once the Found bead exists the pass comments `FINDING-FILED: <new bead id>` on
+the source bead. A create that fails writes no mark and the next interval
+retries the finding. A mark that fails to write is written by a later pass from
+the Found bead itself, which the pass recognizes by the finding text under Goal,
+so a mark failure costs a delay and never a second bead.
+
+The block is decoded strictly: an unknown key, a duration that is not positive,
+or a `max_per_run` below 1 refuses the config load rather than being ignored. A
+patrol config a pass cannot read files nothing for that interval and says so in
+the daemon log.
+
 ### Daemon Environment (`settings/daemon.env`)
 
 Optional. One `KEY=VALUE` pair per line; blank lines and lines starting with

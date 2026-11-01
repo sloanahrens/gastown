@@ -726,6 +726,13 @@ type Daemon struct {
 	patrolScanRunning atomic.Bool
 	patrolScanCycles  sync.WaitGroup
 
+	// findingsFilerRunning is the findings_filer tick's single-flight guard
+	// (gt-rws9m, findings_filer.go): a pass files beads, so a slow one must
+	// not overlap the next tick. findingsFilerSeams replaces the pass's rig
+	// reads in tests.
+	findingsFilerRunning atomic.Bool
+	findingsFilerSeams   *findingsFilerSeams
+
 	// reapAlertState is the blocked-seat alert pass's memory between ticks,
 	// and reapAlertSink is where it sends; a nil sink uses
 	// escalateAlert/clearAlerts (patrol_scan_reap_alert.go). The tick is
@@ -1817,6 +1824,20 @@ func (d *Daemon) Run() (err error) {
 		d.runBirdReports()
 	}
 
+	// Start the findings_filer tick if enabled (default off, gt-rws9m): it
+	// files one Found bead per FINDING: comment on a bead that changed in the
+	// last day. The first tick is one interval out; a pass missed by a restart
+	// is picked up because the window, not a cursor, decides what is read.
+	var findingsFilerTicker *time.Ticker
+	var findingsFilerChan <-chan time.Time
+	if d.isPatrolActive("findings_filer") {
+		interval := findingsFilerInterval(d.patrolConfig)
+		findingsFilerTicker = time.NewTicker(interval)
+		findingsFilerChan = findingsFilerTicker.C
+		defer findingsFilerTicker.Stop()
+		d.logger.Printf("Findings filer ticker started (interval %v)", interval)
+	}
+
 	// Start the patrol_scan tick if enabled (default off, gt-4k3fj.6): the
 	// deterministic replacement for the witness LLM's patrol.
 	var patrolScanTicker *time.Ticker
@@ -1999,6 +2020,14 @@ func (d *Daemon) Run() (err error) {
 			// the metrics snapshot (gt-qqwey).
 			if !d.isShutdownInProgress() {
 				d.triggerResourceSampler()
+			}
+
+		case <-findingsFilerChan:
+			// Findings filer tick — files one Found bead per FINDING: comment
+			// on the beads that changed in the last day, on its own goroutine
+			// (gt-rws9m).
+			if !d.isShutdownInProgress() {
+				d.triggerFindingsFiler()
 			}
 
 		case <-patrolScanChan:

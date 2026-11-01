@@ -141,6 +141,7 @@ type (
 	SpecDispatchConfig         = agentconfig.SpecDispatchConfig
 	OverseerReportConfig       = agentconfig.OverseerReportConfig
 	BirdReportsConfig          = agentconfig.BirdReportsConfig
+	FindingsFilerConfig        = agentconfig.FindingsFilerConfig
 	PatrolScanConfig           = agentconfig.PatrolScanConfig
 	EventsPruneConfig          = agentconfig.EventsPruneConfig
 	JevDedupeConfig            = agentconfig.JevDedupeConfig
@@ -516,6 +517,14 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.BirdReports.Enabled
+	}
+	// findings_filer defaults OFF: a pass files beads into rig databases, so
+	// the operator opts in (gt-rws9m).
+	if patrol == "findings_filer" {
+		if config == nil || config.Patrols == nil || config.Patrols.FindingsFiler == nil {
+			return false
+		}
+		return config.Patrols.FindingsFiler.Enabled
 	}
 	// patrol_scan defaults OFF: it restarts polecats on its own, so the
 	// operator opts in (gt-4k3fj.6, ADR 0005).
