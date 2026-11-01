@@ -70,15 +70,26 @@ func questionsOSEnv(town string) questionsEnv {
 		Now:      time.Now,
 		ReadFile: os.ReadFile,
 		Glob:     filepath.Glob,
-		GitShow: func(ctx context.Context, repo, spec string) ([]byte, error) {
-			return exec.CommandContext(ctx, "git", "-C", repo, "show", spec).Output()
-		},
-		GitList: func(ctx context.Context, repo, dir string) ([]string, error) {
-			out, err := exec.CommandContext(ctx, "git", "-C", repo, "ls-tree", "--name-only", "HEAD", dir+"/").Output()
-			return strings.Fields(string(out)), err
-		},
-		Town: town,
+		GitShow:  questionsGitShow,
+		GitList:  questionsGitList,
+		Town:     town,
 	}
+}
+
+// questionsGitShow returns the content of spec ("HEAD:gt/events.jsonl") in the
+// repository at repo, read-only.
+func questionsGitShow(ctx context.Context, repo, spec string) ([]byte, error) {
+	return exec.CommandContext(ctx, "git", "-C", repo, "show", spec).Output()
+}
+
+// questionsGitList returns the repo-relative names of the files directly under
+// dir at HEAD in the repository at repo, read-only.
+func questionsGitList(ctx context.Context, repo, dir string) ([]string, error) {
+	out, err := exec.CommandContext(ctx, "git", "-C", repo, "ls-tree", "--name-only", "HEAD", dir+"/").Output()
+	if err != nil {
+		return nil, err
+	}
+	return strings.Fields(string(out)), nil
 }
 
 // questionsEventShard matches the tracker export's event files for the gt

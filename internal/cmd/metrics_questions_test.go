@@ -6,7 +6,9 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -262,5 +264,50 @@ func TestMetricsQuestionsReadsTheProductionLayout(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "note: ") {
 		t.Errorf("the production layout must read without notes:\n%s", out.String())
+	}
+}
+
+// TestQuestionsGitReadersAgainstARealRepository runs the two read-only git
+// helpers against a throwaway repository under t.TempDir(): one commit with an
+// events file, and a directory that is not a repository for the failure path.
+func TestQuestionsGitReadersAgainstARealRepository(t *testing.T) {
+	t.Parallel()
+	repo := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	if err := os.MkdirAll(filepath.Join(repo, "gt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"events.jsonl", "events.2.jsonl", "issues.jsonl"} {
+		if err := os.WriteFile(filepath.Join(repo, "gt", f), []byte(f+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git("add", "gt")
+	git("commit", "-q", "-m", "export")
+
+	names, err := questionsGitList(context.Background(), repo, "gt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(names)
+	if got := strings.Join(names, ","); got != "gt/events.2.jsonl,gt/events.jsonl,gt/issues.jsonl" {
+		t.Errorf("listed %q", got)
+	}
+	b, err := questionsGitShow(context.Background(), repo, "HEAD:gt/events.jsonl")
+	if err != nil || string(b) != "events.jsonl\n" {
+		t.Errorf("show = %q, %v", b, err)
+	}
+	if _, err := questionsGitShow(context.Background(), repo, "HEAD:gt/nope.jsonl"); err == nil {
+		t.Error("showing a file that is not in the commit must fail")
+	}
+	if _, err := questionsGitList(context.Background(), t.TempDir(), "gt"); err == nil {
+		t.Error("listing a directory that is not a repository must fail")
 	}
 }
