@@ -6,9 +6,8 @@ import (
 	"errors"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"sort"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -267,47 +266,38 @@ func TestMetricsQuestionsReadsTheProductionLayout(t *testing.T) {
 	}
 }
 
-// TestQuestionsGitReadersAgainstARealRepository runs the two read-only git
-// helpers against a throwaway repository under t.TempDir(): one commit with an
-// events file, and a directory that is not a repository for the failure path.
-func TestQuestionsGitReadersAgainstARealRepository(t *testing.T) {
+// TestQuestionsGitReadersAskGitReadOnlyQuestions drives the two helpers with a
+// fake runner: the argv they build is read-only git against the given
+// repository, the output is parsed, and a runner error is returned.
+func TestQuestionsGitReadersAskGitReadOnlyQuestions(t *testing.T) {
 	t.Parallel()
-	repo := t.TempDir()
-	git := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"}, args...)...)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
+	var got [][]string
+	run := func(out string, err error) questionsRunner {
+		return func(_ context.Context, name string, args ...string) ([]byte, error) {
+			got = append(got, append([]string{name}, args...))
+			return []byte(out), err
 		}
 	}
-	git("init", "-q")
-	if err := os.MkdirAll(filepath.Join(repo, "gt"), 0o755); err != nil {
-		t.Fatal(err)
+	names, err := questionsGitList(context.Background(), run("gt/events.jsonl\ngt/events.2.jsonl\n", nil), "/repo", "gt")
+	if err != nil || strings.Join(names, ",") != "gt/events.jsonl,gt/events.2.jsonl" {
+		t.Errorf("list = %v, %v", names, err)
 	}
-	for _, f := range []string{"events.jsonl", "events.2.jsonl", "issues.jsonl"} {
-		if err := os.WriteFile(filepath.Join(repo, "gt", f), []byte(f+"\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	git("add", "gt")
-	git("commit", "-q", "-m", "export")
-
-	names, err := questionsGitList(context.Background(), repo, "gt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	sort.Strings(names)
-	if got := strings.Join(names, ","); got != "gt/events.2.jsonl,gt/events.jsonl,gt/issues.jsonl" {
-		t.Errorf("listed %q", got)
-	}
-	b, err := questionsGitShow(context.Background(), repo, "HEAD:gt/events.jsonl")
-	if err != nil || string(b) != "events.jsonl\n" {
+	b, err := questionsGitShow(context.Background(), run("body", nil), "/repo", "HEAD:gt/events.jsonl")
+	if err != nil || string(b) != "body" {
 		t.Errorf("show = %q, %v", b, err)
 	}
-	if _, err := questionsGitShow(context.Background(), repo, "HEAD:gt/nope.jsonl"); err == nil {
-		t.Error("showing a file that is not in the commit must fail")
+	want := [][]string{
+		{"git", "-C", "/repo", "ls-tree", "--name-only", "HEAD", "gt/"},
+		{"git", "-C", "/repo", "show", "HEAD:gt/events.jsonl"},
 	}
-	if _, err := questionsGitList(context.Background(), t.TempDir(), "gt"); err == nil {
-		t.Error("listing a directory that is not a repository must fail")
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("git argv = %v, want %v", got, want)
+	}
+	boom := errors.New("fatal: not a git repository")
+	if _, err := questionsGitList(context.Background(), run("", boom), "/repo", "gt"); !errors.Is(err, boom) {
+		t.Errorf("list must return the runner error, got %v", err)
+	}
+	if _, err := questionsGitShow(context.Background(), run("", boom), "/repo", "HEAD:x"); !errors.Is(err, boom) {
+		t.Errorf("show must return the runner error, got %v", err)
 	}
 }

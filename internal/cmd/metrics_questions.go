@@ -70,22 +70,34 @@ func questionsOSEnv(town string) questionsEnv {
 		Now:      time.Now,
 		ReadFile: os.ReadFile,
 		Glob:     filepath.Glob,
-		GitShow:  questionsGitShow,
-		GitList:  questionsGitList,
-		Town:     town,
+		GitShow: func(ctx context.Context, repo, spec string) ([]byte, error) {
+			return questionsGitShow(ctx, questionsExec, repo, spec)
+		},
+		GitList: func(ctx context.Context, repo, dir string) ([]string, error) {
+			return questionsGitList(ctx, questionsExec, repo, dir)
+		},
+		Town: town,
 	}
+}
+
+// questionsRunner runs a program and returns its stdout. The real one execs;
+// the tests pass a fake, so no git runs in the unit tier.
+type questionsRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
+
+func questionsExec(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, name, args...).Output()
 }
 
 // questionsGitShow returns the content of spec ("HEAD:gt/events.jsonl") in the
 // repository at repo, read-only.
-func questionsGitShow(ctx context.Context, repo, spec string) ([]byte, error) {
-	return exec.CommandContext(ctx, "git", "-C", repo, "show", spec).Output()
+func questionsGitShow(ctx context.Context, run questionsRunner, repo, spec string) ([]byte, error) {
+	return run(ctx, "git", "-C", repo, "show", spec)
 }
 
 // questionsGitList returns the repo-relative names of the files directly under
 // dir at HEAD in the repository at repo, read-only.
-func questionsGitList(ctx context.Context, repo, dir string) ([]string, error) {
-	out, err := exec.CommandContext(ctx, "git", "-C", repo, "ls-tree", "--name-only", "HEAD", dir+"/").Output()
+func questionsGitList(ctx context.Context, run questionsRunner, repo, dir string) ([]string, error) {
+	out, err := run(ctx, "git", "-C", repo, "ls-tree", "--name-only", "HEAD", dir+"/")
 	if err != nil {
 		return nil, err
 	}
