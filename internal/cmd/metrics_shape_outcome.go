@@ -181,7 +181,7 @@ func shapeIDs(first []metrics.FirstFiled) map[string]struct{} {
 }
 
 // shapeLogCommit is one commit that touched the archive's issues.jsonl: its id
-// and the day it was committed, in the committer's own zone.
+// and when it was committed, in the committer's own zone.
 type shapeLogCommit struct {
 	SHA string
 	At  time.Time

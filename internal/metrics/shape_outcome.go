@@ -43,7 +43,7 @@ type ArchiveIssueRow struct {
 	CreatedAt          time.Time
 }
 
-// archiveIssueJSON is one issues.jsonl line as the export writes it.
+// archiveIssueJSON is the part of one issues.jsonl line the decode reads.
 type archiveIssueJSON struct {
 	ID                 string `json:"id"`
 	Description        string `json:"description"`
