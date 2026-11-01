@@ -98,7 +98,7 @@ func newRebuildHMRig(t *testing.T, a rebuildHMAnswers) *rebuildHMRig {
 	}
 	r.prev = filepath.Join(filepath.Dir(r.installPath), rebuildHMPrevName)
 	r.src = filepath.Join(town, filepath.FromSlash(hmSkewCloneDir))
-	r.binDir = filepath.Join(town, filepath.FromSlash(rebuildHMBinDir))
+	r.binDir = filepath.Join(filepath.Dir(r.installPath), rebuildHMStageName)
 	r.built = filepath.Join(r.binDir, "hm")
 	r.rigPath = filepath.Join(town, filepath.FromSlash(hmSkewRigWorktree))
 	mkdirs(t, filepath.Join(r.src, ".git"))
@@ -291,6 +291,11 @@ func TestRebuildHMInstallsWhenBehind(t *testing.T) {
 	if build.gobin != r.binDir {
 		t.Errorf("GOBIN = %q, want the job directory %q", build.gobin, r.binDir)
 	}
+	// The build lands beside the installed hm, so the swap's renames stay on its
+	// volume: a build under the town would fail with a cross-device link there.
+	if filepath.Dir(build.gobin) != filepath.Dir(r.installPath) {
+		t.Errorf("GOBIN = %q, want a directory beside the installed hm %q", build.gobin, r.installPath)
+	}
 	if want := "-ldflags=-X " + rebuildHMVersionVar + "=" + rebuildHMHeadSHA; !slices.Contains(build.argv, want) {
 		t.Errorf("go install argv = %v, want it to stamp the built commit as %q", build.argv, want)
 	}
@@ -341,9 +346,10 @@ func TestRebuildHMRefusesABuildThatDoesNotReportItsSha(t *testing.T) {
 	}
 }
 
-// TestRebuildHMIsOptIn: with patrols.rebuild_hm absent or enabled:false the job
-// makes no call and takes no guard (acceptance 3). The control shows the same
-// config turns the job on once enabled.
+// TestRebuildHMIsOptIn: with patrols.rebuild_hm absent or enabled:false a trigger
+// does nothing: no git or go call, no rename, no escalation, no single-flight guard
+// taken (acceptance 3). The control shows the same config turns the job on once
+// enabled.
 func TestRebuildHMIsOptIn(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -360,11 +366,18 @@ func TestRebuildHMIsOptIn(t *testing.T) {
 			r := newRebuildHMRig(t, rebuildHMBehindAnswers())
 			r.d.patrolConfig = tc.cfg
 
-			// triggerRebuildHM returns before it starts its goroutine while this gate
-			// is shut, so the gate is what is pinned, read synchronously. A check
-			// after a trigger would race the goroutine it did not start.
 			if r.d.isPatrolActive("rebuild_hm") {
 				t.Error("rebuild_hm is on with its block absent or disabled")
+			}
+			// With the gate shut, triggerRebuildHM returns before it starts its
+			// goroutine, so nothing runs concurrently with the checks below.
+			r.d.triggerRebuildHM()
+			if len(r.calls) != 0 {
+				t.Errorf("a trigger with the job off made calls: %v", r.calls)
+			}
+			r.wantNoInstall()
+			if r.d.rebuildHMRunning.Load() {
+				t.Error("a trigger with the job off took the single-flight guard")
 			}
 		})
 	}
@@ -423,15 +436,18 @@ func TestRebuildHMTouchesOnlyItsOwnPaths(t *testing.T) {
 
 // TestRebuildHMFailedInstallLeavesTheInstalledHMAndEscalates: a failure at any
 // step of the install escalates under hm-skew, and the installed hm is left in
-// place. A failed second rename is rolled back from hm.prev; a failed rollback is
-// named in the escalation so the operator restores it by hand.
+// place. A failed second rename is rolled back from hm.prev, and the escalation
+// says the installed hm stays in force. A failed rollback leaves the path empty:
+// it escalates at HIGH and names hm.prev, and never says the installed hm stays.
 func TestRebuildHMFailedInstallLeavesTheInstalledHMAndEscalates(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name        string
-		mutate      func(*rebuildHMAnswers)
-		wantRenames [][2]string
-		wantInMsg   string
+		name         string
+		mutate       func(*rebuildHMAnswers)
+		wantRenames  [][2]string
+		wantSeverity string // "" is MEDIUM, the refused-install severity
+		wantInMsg    string
+		wantNotInMsg string
 	}{
 		{
 			name:   "checkout fails",
@@ -445,17 +461,21 @@ func TestRebuildHMFailedInstallLeavesTheInstalledHMAndEscalates(t *testing.T) {
 			name:        "keeping the installed hm fails",
 			mutate:      func(a *rebuildHMAnswers) { a.renameAsideErr = true },
 			wantRenames: [][2]string{{"bin/hm", "bin/hm.prev"}},
+			wantInMsg:   "stays in force",
 		},
 		{
 			name:        "the new hm does not rename into place, and the rollback holds",
 			mutate:      func(a *rebuildHMAnswers) { a.renameIntoErr = true },
-			wantRenames: [][2]string{{"bin/hm", "bin/hm.prev"}, {".runtime/hm-bin/hm", "bin/hm"}, {"bin/hm.prev", "bin/hm"}},
+			wantRenames: [][2]string{{"bin/hm", "bin/hm.prev"}, {"bin/.hm-rebuild/hm", "bin/hm"}, {"bin/hm.prev", "bin/hm"}},
+			wantInMsg:   "stays in force",
 		},
 		{
-			name:        "the new hm does not rename into place, and the rollback fails",
-			mutate:      func(a *rebuildHMAnswers) { a.renameIntoErr, a.rollbackErr = true, true },
-			wantRenames: [][2]string{{"bin/hm", "bin/hm.prev"}, {".runtime/hm-bin/hm", "bin/hm"}, {"bin/hm.prev", "bin/hm"}},
-			wantInMsg:   "by hand",
+			name:         "the new hm does not rename into place, and the rollback fails",
+			mutate:       func(a *rebuildHMAnswers) { a.renameIntoErr, a.rollbackErr = true, true },
+			wantRenames:  [][2]string{{"bin/hm", "bin/hm.prev"}, {"bin/.hm-rebuild/hm", "bin/hm"}, {"bin/hm.prev", "bin/hm"}},
+			wantSeverity: "HIGH",
+			wantInMsg:    "restore it by hand from hm.prev",
+			wantNotInMsg: "stays in force",
 		},
 	}
 	for _, tc := range cases {
@@ -481,10 +501,18 @@ func TestRebuildHMFailedInstallLeavesTheInstalledHMAndEscalates(t *testing.T) {
 					t.Errorf("renames = %v, want %v", got, tc.wantRenames)
 				}
 			}
-			r.wantEscalation(hmSkewAlertKey, "MEDIUM")
-			if tc.wantInMsg != "" {
-				if msg := r.rec.Escalations()[0].Escalation.Reason; !strings.Contains(msg, tc.wantInMsg) {
+			severity := tc.wantSeverity
+			if severity == "" {
+				severity = "MEDIUM"
+			}
+			r.wantEscalation(hmSkewAlertKey, severity)
+			if len(r.rec.Escalations()) == 1 {
+				msg := r.rec.Escalations()[0].Escalation.Reason
+				if tc.wantInMsg != "" && !strings.Contains(msg, tc.wantInMsg) {
 					t.Errorf("escalation %q does not say %q", msg, tc.wantInMsg)
+				}
+				if tc.wantNotInMsg != "" && strings.Contains(msg, tc.wantNotInMsg) {
+					t.Errorf("escalation %q says %q, which is false once the rollback failed", msg, tc.wantNotInMsg)
 				}
 			}
 		})

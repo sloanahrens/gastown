@@ -38,17 +38,21 @@ const (
 	// rebuildHMGitTimeout bounds one git call in the clone.
 	rebuildHMGitTimeout = 2 * time.Minute
 
-	// rebuildHMBinDir is GOBIN for the build, relative to the town. go install
-	// writes the new hm here, and the swap renames it into place from here.
-	rebuildHMBinDir = ".runtime/hm-bin"
+	// rebuildHMStageName names the build's GOBIN: a job directory beside the
+	// installed hm, not under the town. go install writes the new hm there and the
+	// swap renames it into place, so both renames stay on the installed hm's volume.
+	// A build under the town would fail the rename with a cross-device link
+	// whenever the install lives on another volume.
+	rebuildHMStageName = ".hm-rebuild"
 
 	// rebuildHMPrevName is the installed hm once the swap has kept it, beside it.
 	rebuildHMPrevName = "hm.prev"
 
 	// rebuildHMVersionVar is the -X target the build stamps the commit into. The
-	// version check requires the new binary to print that commit back. The name
-	// is the one the bead gives; the hm source is not checked out on this host,
-	// so a wrong name shows as a failed version check, and nothing is installed.
+	// bead names it as Version. -X needs the package-qualified symbol, and hm's
+	// cmd/hm is package main, so the target is main.Version. The hm source is not
+	// on this host, so the name is unverified here: a wrong name fails the version
+	// check and nothing is installed.
 	rebuildHMVersionVar = "main.Version"
 )
 
@@ -131,7 +135,7 @@ func (d *Daemon) rebuildHMCycle(ctx context.Context, cycle *dogCycle) bool {
 	// applies, and it names the same failures.
 	ancestor, err := d.rebuildOMBehind(src, r.installed, head)
 	if err != nil {
-		// The error is git's: its stderr is captured output, so it is not echoed (rule 11).
+		// git's stderr is captured output and can hold a secret, so it is not echoed.
 		cycle.skipStep("ancestry", "git merge-base in the hm clone did not answer")
 		d.logger.Printf("rebuild_hm: cannot tell whether the installed hm %s is an ancestor of origin/main %s; deferring",
 			shortOMSHA(r.installed), shortOMSHA(head))
@@ -168,15 +172,26 @@ func (d *Daemon) rebuildHMCycle(ctx context.Context, cycle *dogCycle) bool {
 // check, swap. Each failure before the swap leaves the installed hm where it is;
 // a failure of the second rename rolls the first back.
 func (d *Daemon) rebuildHMInstall(ctx context.Context, cycle *dogCycle, src, installPath, head string) bool {
+	// The reading and this job share the clone without a lock, and need none: the
+	// reading only fetches refs and reads commits, never the worktree, and every
+	// read here names a sha, so a fetch between two calls moves origin/main but not
+	// the commit this job builds.
 	if _, err := d.rebuildOMGit(rebuildHMGitTimeout, "-C", src,
 		"-c", "advice.detachedHead=false", "checkout", "--quiet", "--force", "--detach", head); err != nil {
 		return d.rebuildHMFail(cycle, "checkout", "the hm clone cannot check out "+shortOMSHA(head), head)
 	}
 
-	binDir := filepath.Join(d.config.TownRoot, filepath.FromSlash(rebuildHMBinDir))
+	binDir := filepath.Join(filepath.Dir(installPath), rebuildHMStageName)
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		return d.rebuildHMFail(cycle, "build", "cannot create "+binDir+": "+err.Error(), head)
 	}
+	// The stage is cleared on every path: a refused build leaves nothing beside the
+	// installed hm, and a swap leaves the directory empty.
+	defer func() {
+		if err := os.RemoveAll(binDir); err != nil {
+			d.logger.Printf("rebuild_hm: removing the build directory %s failed: %v", binDir, err)
+		}
+	}()
 	if err := d.rebuildHMBuild(ctx, src, binDir, head); err != nil {
 		return d.rebuildHMFail(cycle, "build", "go install failed for "+shortOMSHA(head), head)
 	}
@@ -202,7 +217,7 @@ func (d *Daemon) rebuildHMInstall(ctx context.Context, cycle *dogCycle, src, ins
 	}
 	if err := d.rebuildHMRename(built, installPath); err != nil {
 		if rbErr := d.rebuildHMRename(prev, installPath); rbErr != nil {
-			return d.rebuildHMFail(cycle, "swap", fmt.Sprintf("cannot rename the build over %s (%v), and restoring the installed hm from %s failed (%v): restore it by hand",
+			return d.rebuildHMHalted(cycle, fmt.Sprintf("cannot rename the build over %s (%v), and restoring the installed hm from %s failed (%v)",
 				installPath, err, prev, rbErr), head)
 		}
 		return d.rebuildHMFail(cycle, "swap", "cannot rename the build over "+installPath+": "+err.Error(), head)
@@ -214,14 +229,27 @@ func (d *Daemon) rebuildHMInstall(ctx context.Context, cycle *dogCycle, src, ins
 }
 
 // rebuildHMFail ends a cycle whose install did not land: the step is recorded,
-// the failure is escalated under the hm-skew key, and the cycle reaches its
-// verdict so the interval holds. A half-done swap is undone by the caller before
-// it calls this.
+// the failure is escalated under the hm-skew key at MEDIUM, and the cycle reaches
+// its verdict so the interval holds. The installed hm is still at its path: a
+// half-done swap is undone by the caller before it calls this.
 func (d *Daemon) rebuildHMFail(cycle *dogCycle, step, msg, head string) bool {
+	return d.rebuildHMReport(cycle, "MEDIUM", step, msg, head, "the installed hm stays in force")
+}
+
+// rebuildHMHalted ends a cycle whose rollback failed: the installed path is empty,
+// so it escalates at HIGH and names the file to restore from.
+func (d *Daemon) rebuildHMHalted(cycle *dogCycle, msg, head string) bool {
+	return d.rebuildHMReport(cycle, "HIGH", "swap", msg, head,
+		"the installed hm is not at its path: restore it by hand from hm.prev beside it")
+}
+
+// rebuildHMReport records the failed step, escalates it under hm-skew at severity,
+// and says in the escalation what state the install was left in.
+func (d *Daemon) rebuildHMReport(cycle *dogCycle, severity, step, msg, head, standing string) bool {
 	cycle.failStep(step, msg)
-	d.logger.Printf("rebuild_hm: install of %s failed (%s); the installed hm stays in force", shortOMSHA(head), msg)
-	if err := d.escalateAlertSeverity("MEDIUM", hmSkewAlertKey, hmSkewSource,
-		fmt.Sprintf("rebuild_hm: installing hm %s failed (%s); the installed hm stays in force", shortOMSHA(head), msg)); err != nil {
+	d.logger.Printf("rebuild_hm: install of %s failed (%s); %s", shortOMSHA(head), msg, standing)
+	if err := d.escalateAlertSeverity(severity, hmSkewAlertKey, hmSkewSource,
+		fmt.Sprintf("rebuild_hm: installing hm %s failed (%s); %s", shortOMSHA(head), msg, standing)); err != nil {
 		// The escalation never reached the town: log it. The next interval finds
 		// the same skew and tries again.
 		d.logger.Printf("rebuild_hm: the failure escalation did not reach the town: %v", err)
@@ -234,7 +262,7 @@ func (d *Daemon) rebuildHMFail(cycle *dogCycle, step, msg, head string) bool {
 func (d *Daemon) rebuildHMHead(src string) (string, error) {
 	out, err := d.rebuildOMGit(rebuildHMGitTimeout, "-C", src, "rev-parse", "origin/main")
 	if err != nil {
-		// git's stderr is captured output and is not echoed (rule 11).
+		// git's stderr is captured output and can hold a secret, so it is not echoed.
 		return "", errors.New("cannot read origin/main in the hm clone: git rev-parse did not answer")
 	}
 	head := strings.TrimSpace(out)
@@ -256,7 +284,7 @@ func (d *Daemon) rebuildHMBuild(ctx context.Context, src, binDir, head string) e
 }
 
 // rebuildHMBuiltSHA runs the built binary's version and returns the sha it
-// prints. Its output is not echoed into an error (rule 11).
+// prints. Its output is not echoed into an error, since it can hold a secret.
 func (d *Daemon) rebuildHMBuiltSHA(ctx context.Context, built string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, omSkewVersionTimeout)
 	defer cancel()
