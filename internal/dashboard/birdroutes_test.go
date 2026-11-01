@@ -70,8 +70,8 @@ func TestBirdRoutesServeThePageInert(t *testing.T) {
 	}
 }
 
-// Everything that is not exactly /birds/<bird>/daily.html or
-// /birds/<bird>/daily.prev.html answers 404, and the guard still answers 405 to
+// Everything that is not /birds/<bird>/ daily.html, daily.prev.html or a
+// topic page <slug>.html answers 404, and the guard still answers 405 to
 // a write and 403 to a Host that is not this machine.
 func TestBirdRoutesRefuseEverythingElse(t *testing.T) {
 	t.Parallel()
@@ -84,7 +84,7 @@ func TestBirdRoutesRefuseEverythingElse(t *testing.T) {
 	// A file of another name in the same reports directory, and a directory of
 	// another spelling of the same bird: each is refused by the name check, not
 	// by being absent.
-	if err := os.WriteFile(filepath.Join(root, "dunlin", "reports", "other.html"), []byte("<p>another file</p>"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "dunlin", "reports", "other.txt"), []byte("<p>another file</p>"), 0o644); err != nil {
 		t.Fatalf("write the file of another name: %v", err)
 	}
 	writeBird(t, root, "Dunlin", birdWrites{page: "<p>a page under another spelling</p>"})
@@ -97,7 +97,9 @@ func TestBirdRoutesRefuseEverythingElse(t *testing.T) {
 		"/birds/./daily.html",
 		"/birds/%2e%2e/daily.html",
 		"/birds/dunlin/daily.html/",
-		"/birds/dunlin/other.html",
+		"/birds/dunlin/other.txt",
+		"/birds/dunlin/Other.html",
+		"/birds/dunlin/a.b.html",
 		"/birds/Dunlin/daily.html",
 		"/birds/dunlin/daily.json",
 		"/birds/nosuchbird/daily.html",
@@ -272,5 +274,79 @@ func TestBirdRoutesWithholdASecretPage(t *testing.T) {
 	rec = birdRouteGet(t, NewHub(Config{}), "/api/birds")
 	if got := strings.TrimSpace(rec.Body.String()); got != "[]" {
 		t.Errorf("/api/birds with no reader: body %q, want []", got)
+	}
+}
+
+// A bird's topic pages are served by the same sandboxed route: a regular
+// <slug>.html directly inside its reports directory. A link, a name outside the
+// slug shape, daily.json and a dot segment are refused (gt-ylswr).
+func TestBirdTopicPageRoute(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeBird(t, root, "dunlin", birdWrites{
+		json: birdSidecarJSON(t, birdSidecarFor("dunlin", birdReportsNow, "title", "summary")),
+		page: "<p>daily</p>",
+	})
+	reports := filepath.Join(root, "dunlin", "reports")
+	topic := "<!doctype html><title>The pool</title><p>topic</p>"
+	for name, body := range map[string]string{
+		"pool-cutover.html": topic,
+		"a.html":            "<p>one letter</p>",
+		"9lives.html":       "<p>starts with a digit</p>",
+		"secret-target.txt": "outside the shape",
+		"a.b.html":          "<p>a dot in the slug</p>",
+		"Upper.html":        "<p>an upper-case slug</p>",
+	} {
+		if err := os.WriteFile(filepath.Join(reports, name), []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(reports, "pool-cutover.html"), filepath.Join(reports, "linked.html")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(reports, "dir.html"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	h := birdRoutesServer(root)
+
+	for _, name := range []string{"pool-cutover.html", "a.html", "9lives.html"} {
+		rec := birdRouteGet(t, h, "/birds/dunlin/"+name)
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET %s: status %d, want 200", name, rec.Code)
+			continue
+		}
+		if got := rec.Header().Get("Content-Security-Policy"); got != birdRouteCSP {
+			t.Errorf("GET %s: policy %q, want the sandbox policy", name, got)
+		}
+		if rec.Header().Get("X-Content-Type-Options") != "nosniff" || rec.Header().Get("Cache-Control") != "no-store" {
+			t.Errorf("GET %s: lost the guard's nosniff or no-store headers", name)
+		}
+	}
+	if got := birdRouteGet(t, h, "/birds/dunlin/pool-cutover.html").Body.String(); got != topic {
+		t.Errorf("the topic page body is %q, want it as written", got)
+	}
+
+	long := strings.Repeat("a", 62) + ".html"
+	for _, path := range []string{
+		"/birds/dunlin/linked.html",
+		"/birds/dunlin/dir.html",
+		"/birds/dunlin/daily.json",
+		"/birds/dunlin/secret-target.txt",
+		"/birds/dunlin/-lead.html",
+		"/birds/dunlin/Upper.html",
+		"/birds/dunlin/a.b.html",
+		"/birds/dunlin/.html",
+		"/birds/dunlin/" + long,
+		"/birds/dunlin/pool-cutover.html/",
+		"/birds/dunlin/../daily.html",
+		"/birds/dunlin/%2e%2e/pool-cutover.html",
+		"/birds/dunlin/..%2fpool-cutover.html",
+		"/birds/dunlin/missing.html",
+		"/birds/nosuchbird/pool-cutover.html",
+	} {
+		if rec := birdRouteGet(t, h, path); rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s: status %d, want 404", path, rec.Code)
+		}
 	}
 }

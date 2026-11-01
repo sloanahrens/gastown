@@ -932,3 +932,83 @@ func TestBirdReportsDecisionItemShortKeysScreened(t *testing.T) {
 		t.Errorf("leaky withheld %v, want the one rule a short-key recommendation matched", leakyRow.DecisionItemsWithheld)
 	}
 }
+
+// The bird's row lists its other pages: topic pages directly inside the reports
+// directory, regular files only, by their own <title> (the name when there is
+// none or the title looks like a secret), newest first, at most ten. The daily
+// pages and files of another shape are not topic pages (gt-ylswr).
+func TestBirdTopicPagesListed(t *testing.T) {
+	t.Parallel()
+
+	now := birdReportsNow
+	root := t.TempDir()
+	writeBird(t, root, "heron", birdWrites{
+		json: birdSidecarJSON(t, birdSidecarFor("heron", now, "title", "summary")),
+		page: "<title>Daily</title>",
+		prev: "<title>Daily before</title>",
+	})
+	writeBird(t, root, "quiet", birdWrites{page: "<p>daily only</p>"})
+	reports := filepath.Join(root, "heron", "reports")
+	write := func(name, body string, age time.Duration) {
+		t.Helper()
+		path := filepath.Join(reports, name)
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		birdSetMtime(t, path, now.Add(-age))
+	}
+	// Twelve topic pages, one an hour older than the last.
+	for i := 0; i < 12; i++ {
+		write(fmt.Sprintf("topic-%02d.html", i), fmt.Sprintf("<html><head><title>Topic %d &amp; more</title></head></html>", i), time.Duration(i+1)*time.Hour)
+	}
+	write("untitled.html", "<p>no title here</p>", 30*time.Minute)
+	write("leaky.html", "<title>"+"password="+strings.Repeat("k", 16)+"</title>", 20*time.Minute)
+	write("notes.txt", "<title>not a page</title>", time.Minute)
+	write("Upper.html", "<title>not the shape</title>", time.Minute)
+	if err := os.Symlink(filepath.Join(reports, "topic-00.html"), filepath.Join(reports, "linked.html")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(reports, "dir.html"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	byName := birdByName(NewBirdReportsReader(root).Read(now))
+	pages := byName["heron"].Pages
+	if len(pages) != 10 {
+		t.Fatalf("heron lists %d pages, want the newest 10: %+v", len(pages), pages)
+	}
+	var names []string
+	for _, p := range pages {
+		names = append(names, p.Name)
+	}
+	want := []string{"leaky.html", "untitled.html", "topic-00.html", "topic-01.html", "topic-02.html", "topic-03.html", "topic-04.html", "topic-05.html", "topic-06.html", "topic-07.html"}
+	if !slices.Equal(names, want) {
+		t.Errorf("heron lists %v, want %v: newest first, no daily page, link, directory or other shape", names, want)
+	}
+	if pages[0].Title != "leaky.html" {
+		t.Errorf("a title that looks like a secret is listed as %q, want the page's name", pages[0].Title)
+	}
+	if pages[1].Title != "untitled.html" {
+		t.Errorf("a page with no title is listed as %q, want its name", pages[1].Title)
+	}
+	if pages[2].Title != "Topic 0 & more" {
+		t.Errorf("a titled page is listed as %q, want its <title> with entities decoded", pages[2].Title)
+	}
+	if want := now.Add(-time.Hour).UTC(); !pages[2].MTime.Equal(want) {
+		t.Errorf("topic-00 lists mtime %v, want %v", pages[2].MTime, want)
+	}
+	if got := byName["quiet"].Pages; len(got) != 0 {
+		t.Errorf("a bird with only a daily page lists %+v, want none", got)
+	}
+
+	// The JSON carries them as name, title and mtime, and leaves the key out when
+	// there are none.
+	raw, err := json.Marshal(byName["heron"])
+	if err != nil || !strings.Contains(string(raw), `"pages":[{"name":"leaky.html","title":"leaky.html","mtime":"`) {
+		t.Errorf("heron's row encodes as %s (%v), want a pages array of name, title, mtime", raw, err)
+	}
+	raw, _ = json.Marshal(byName["quiet"])
+	if strings.Contains(string(raw), `"pages"`) {
+		t.Errorf("a row with no topic pages encodes as %s, want no pages key", raw)
+	}
+}
