@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -341,6 +342,17 @@ var (
 	// its own triggers instead; the union is the rule for one the manifest does
 	// not list, whose triggers are unknown (gt-r0vuk).
 	shellVerdictInputsRE = regexp.MustCompile(land.ShellTierInputs())
+	// shellTierMachinery is the shell tier's own machinery: the runner every
+	// manifest script is exec'd by, and the command and package that run it. A
+	// change there can move any listed script's verdict even though the
+	// script's own triggers name no Go path, so every per-script trigger set
+	// carries these paths (gt-r0vuk). land names the same paths when it builds
+	// the tier-wide union (land.shellTierMachinery, unexported, and the bead's
+	// Constraints keep land unedited). TestTriggerCoversReadsLikeTheLandRule
+	// holds this copy to land.ShellTierInputs: every path here must be one the
+	// land rule matches. A path land adds without dropping one is not visible
+	// from here.
+	shellTierMachinery = []string{"internal/shelltier/", "cmd/tier-sweep/", "internal/tiersweep/"}
 )
 
 // unattributable names a unit a red run blamed that a landing with those
@@ -374,15 +386,23 @@ func anyScriptMoved(changed, scripts []string) bool {
 }
 
 // shellScriptMoved reports whether a change to any of changed can have moved
-// script's verdict: a script the shell-tier manifest lists moves only by its
-// own triggers, while one the manifest does not list falls back to the
-// tier-wide union, since nothing says which paths it reads (gt-r0vuk).
+// script's verdict: a script the shell-tier manifest lists moves by its own
+// triggers and the tier machinery, while one the manifest does not list falls
+// back to the tier-wide union, since nothing says which paths it reads
+// (gt-r0vuk).
 func shellScriptMoved(script string, changed []string) bool {
 	e, listed := shellScriptEntry(script)
 	if !listed {
 		return anyMatch(changed, shellVerdictInputsRE)
 	}
-	return triggerCovers(e.TriggersOrDefault(), changed)
+	return triggerCovers(shellScriptTriggers(e), changed)
+}
+
+// shellScriptTriggers are the paths whose change can move a listed script's
+// verdict: the entry's own triggers and the tier machinery, which execs the
+// script whatever the entry declares (gt-r0vuk).
+func shellScriptTriggers(e shelltier.Entry) []string {
+	return append(slices.Clone(e.TriggersOrDefault()), shellTierMachinery...)
 }
 
 // shellScriptEntry is the shell-tier manifest entry for script, if it has one.
@@ -417,20 +437,26 @@ func triggerCovers(triggers, paths []string) bool {
 }
 
 // shellBlame is why the landing cannot have failed any of scripts, for the
-// status line: the union rule when no failing script has a manifest entry,
-// since that is the rule that judged them, and their own triggers when one
-// does (gt-r0vuk).
+// status line: a failing script the manifest does not list is judged by the
+// union, so one of those in the set makes the union rule the one that spared
+// the landing; only when every failing script has a manifest entry is it the
+// per-script rule, and the line names that (gt-r0vuk).
 func shellBlame(changed, scripts []string) string {
+	perScript := true
 	for _, script := range scripts {
-		if _, listed := shellScriptEntry(script); listed {
-			noun := "script"
-			if len(scripts) > 1 {
-				noun = "scripts"
-			}
-			return fmt.Sprintf("%s: the landing changed no input of the failing %s (%s)", strings.Join(scripts, ", "), noun, pathsBrief(changed))
+		if _, listed := shellScriptEntry(script); !listed {
+			perScript = false
+			break
 		}
 	}
-	return fmt.Sprintf("%s: the landing changed no shell-tier input (%s)", strings.Join(scripts, ", "), pathsBrief(changed))
+	if !perScript {
+		return fmt.Sprintf("%s: the landing changed no shell-tier input (%s)", strings.Join(scripts, ", "), pathsBrief(changed))
+	}
+	noun := "script"
+	if len(scripts) > 1 {
+		noun = "scripts"
+	}
+	return fmt.Sprintf("%s: the landing changed no input of the failing %s (%s)", strings.Join(scripts, ", "), noun, pathsBrief(changed))
 }
 
 // unattributableFromDiff is unattributable over the landing of rec. A red run

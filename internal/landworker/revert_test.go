@@ -228,6 +228,32 @@ func TestRedMainBlamesAFailingScriptByItsOwnTriggers(t *testing.T) {
 	}
 }
 
+// gt-r0vuk: the tier's own machinery execs every script the manifest lists,
+// so a change there can move a verdict even for a script whose triggers name
+// no Go path. The per-script rule carries the machinery, as the union does.
+func TestRedMainRevertsWhenTheLandingTouchedTheShellTierRunner(t *testing.T) {
+	t.Parallel()
+	for _, changed := range []string{
+		"internal/shelltier/runner.go",
+		"cmd/tier-sweep/main.go",
+		"internal/tiersweep/sweep.go",
+	} {
+		t.Run(changed, func(t *testing.T) {
+			t.Parallel()
+			h := newRevertHarness(t, greenSHA)
+			h.changed = []string{changed}
+			// gate-vs-load declares no triggers, so nothing of its own covers
+			// the runner.
+			h.redShell(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"}, "scripts/gate-vs-load_test.sh")
+
+			rv := h.revertBeads(t)
+			if len(h.reverts) != 1 || len(rv) != 1 {
+				t.Fatalf("reverts %v, beads %+v; want the runner change reverted", h.reverts, rv)
+			}
+		})
+	}
+}
+
 // gt-r0vuk: with several failing scripts the landing is the culprit when it
 // can have moved any one of them, and is spared only when it moved none. A
 // script the manifest does not list keeps the tier-wide union rule, so nothing
@@ -260,6 +286,16 @@ func TestRedMainBlamesSeveralFailingScriptsByAnyOfTheirInputs(t *testing.T) {
 			wantStatus: "no revert: scripts/gate-vs-load_test.sh, scripts/post-land-shell_test.sh: " +
 				"the landing changed no input of the failing scripts (tracker/api/actor.go)",
 		},
+		{
+			// The unlisted script was judged by the union, so the status line
+			// names that rule rather than claiming a per-script one covered
+			// the whole set.
+			name:    "a listed and an unlisted script fail together",
+			changed: []string{"tracker/api/actor.go"},
+			scripts: []string{"scripts/gate-vs-load_test.sh", "scripts/test-makefile.sh"},
+			wantStatus: "no revert: scripts/gate-vs-load_test.sh, scripts/test-makefile.sh: " +
+				"the landing changed no shell-tier input (tracker/api/actor.go)",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -287,22 +323,31 @@ func TestRedMainBlamesSeveralFailingScriptsByAnyOfTheirInputs(t *testing.T) {
 	}
 }
 
-// TestTriggerCoversReadsLikeTheLandRule pins triggerCovers to the reading
-// land.ShellTierInputs uses, so a drift in either one fails here: over every
-// manifest trigger, a path is covered exactly when the land rule matches it
-// (gt-r0vuk).
+// TestTriggerCoversReadsLikeTheLandRule pins the trigger set a listed script
+// is judged by, and triggerCovers, to land.ShellTierInputs. The union is built
+// by the function the revert reads, so it carries the tier machinery as well
+// as every Entry.TriggersOrDefault trigger; over that full union a path is
+// covered exactly when the land rule matches it (gt-r0vuk).
 func TestTriggerCoversReadsLikeTheLandRule(t *testing.T) {
 	t.Parallel()
-	var triggers []string
+	var union []string
 	for _, e := range shelltier.Manifest() {
-		triggers = append(triggers, e.TriggersOrDefault()...)
+		union = append(union, shellScriptTriggers(e)...)
 	}
-	if len(triggers) == 0 {
+	if len(union) == 0 {
 		t.Fatal("the shell tier manifest is empty, so the union covers nothing")
 	}
 	re := regexp.MustCompile(land.ShellTierInputs())
+	for _, machinery := range shellTierMachinery {
+		if !slices.Contains(union, machinery) {
+			t.Fatalf("the per-script union %v omits the tier machinery path %q", union, machinery)
+		}
+		if !re.MatchString(machinery) {
+			t.Errorf("land.ShellTierInputs() = %q does not match the tier machinery path %q, so the land rule and this rule disagree on the runner", land.ShellTierInputs(), machinery)
+		}
+	}
 	var paths []string
-	for _, trigger := range triggers {
+	for _, trigger := range union {
 		paths = append(paths, trigger)
 		if strings.HasSuffix(trigger, "/") {
 			paths = append(paths, trigger+"changed.txt")
@@ -312,7 +357,7 @@ func TestTriggerCoversReadsLikeTheLandRule(t *testing.T) {
 	}
 	paths = append(paths, "docs/reference.md", "tracker/api/actor.go")
 	for _, p := range paths {
-		if got, want := triggerCovers(triggers, []string{p}), re.MatchString(p); got != want {
+		if got, want := triggerCovers(union, []string{p}), re.MatchString(p); got != want {
 			t.Errorf("triggerCovers(%q) = %v, land.ShellTierInputs() = %q matches it: %v", p, got, land.ShellTierInputs(), want)
 		}
 	}
