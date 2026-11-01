@@ -232,17 +232,79 @@ var pkgDefault = regexp.MustCompile(`(^|[^A-Za-z_])PKGS *\?=`)
 
 // TestIntegrationGateNoRecipeDefaultsTheContainerOptIn checks "no recipe
 // defaults the container opt-in from the environment".
-// Mutation: write GT_TEST_DOCKER=$(GT_TEST_DOCKER:-0), and a caller's exported
-// 1 becomes the default on every target.
+// Mutation: write GT_TEST_DOCKER ?= 0, GT_TEST_DOCKER=$(GT_TEST_DOCKER), or
+// GT_TEST_DOCKER=$${GT_TEST_DOCKER:-0}, and a caller's exported 1 becomes the
+// default on every target. The table below drives each form on text of its
+// own; this test drives the real Makefile through the same check.
 func TestIntegrationGateNoRecipeDefaultsTheContainerOptIn(t *testing.T) {
-	if line := firstLineMatching(makefileText(t, repoRoot(t)), containerOptInDefault); line != "" {
+	if line := containerOptInDefaultLine(makefileText(t, repoRoot(t))); line != "" {
 		t.Fatalf("the Makefile defaults the container opt-in from the environment: %s", line)
 	}
 }
 
-// containerOptInDefault matches a recipe defaulting GT_TEST_DOCKER from the
-// environment.
-var containerOptInDefault = regexp.MustCompile(`GT_TEST_DOCKER:-`)
+// containerOptInDefault matches a Makefile line that takes GT_TEST_DOCKER from
+// the environment instead of writing a literal:
+//
+//	GT_TEST_DOCKER ?= 0                       make leaves an inherited value set
+//	GT_TEST_DOCKER=$(GT_TEST_DOCKER)          a recipe takes the inherited value
+//	GT_TEST_DOCKER=${GT_TEST_DOCKER}          the same, in make's brace form
+//	GT_TEST_DOCKER=$(or $(GT_TEST_DOCKER),0)  a make function of the inherited value
+//	GT_TEST_DOCKER=$$GT_TEST_DOCKER           the shell takes the inherited value
+//	GT_TEST_DOCKER=$${GT_TEST_DOCKER:-0}      the shell supplies a default
+var containerOptInDefault = regexp.MustCompile(
+	`GT_TEST_DOCKER\s*\?=` +
+		`|GT_TEST_DOCKER\s*[+:]?=.*\$[{($]*GT_TEST_DOCKER`)
+
+// containerOptInDefaultLine returns the first line of text that defaults
+// GT_TEST_DOCKER from the environment, or "" if none does. A line whose first
+// non-space character is '#' is a comment and is skipped: an example in a
+// comment cannot default anything.
+func containerOptInDefaultLine(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		if containerOptInDefault.MatchString(line) {
+			return line
+		}
+	}
+	return ""
+}
+
+// TestIntegrationGateContainerOptInDefaultLine drives every form containerOptInDefaultLine
+// must catch and the literal forms it must let through, so a broken
+// alternative cannot let the real Makefile pass unchecked.
+// Mutation: drop an alternative from containerOptInDefault, or the comment
+// skip, and the row for it below goes red.
+func TestIntegrationGateContainerOptInDefaultLine(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{name: "question mark default keeps an inherited value", text: "GT_TEST_DOCKER ?= 0", want: true},
+		{name: "question mark default without spaces", text: "GT_TEST_DOCKER?=0", want: true},
+		{name: "make reads the inherited value", text: "GT_TEST_DOCKER=$(GT_TEST_DOCKER)", want: true},
+		{name: "make reads the inherited value in braces", text: "GT_TEST_DOCKER=${GT_TEST_DOCKER}", want: true},
+		{name: "make or-function of the inherited value", text: "GT_TEST_DOCKER=$(or $(GT_TEST_DOCKER),0)", want: true},
+		{name: "shell reads the exported value", text: "GT_TEST_DOCKER=$$GT_TEST_DOCKER", want: true},
+		{name: "shell supplies a default", text: "GT_TEST_DOCKER=$${GT_TEST_DOCKER:-0}", want: true},
+		{name: "append of the inherited value", text: "GT_TEST_DOCKER+=$(GT_TEST_DOCKER)", want: true},
+		{name: "literal zero is not a default", text: "GT_TEST_DOCKER=0", want: false},
+		{name: "literal one in a recipe is not a default", text: "\tGT_TEST_DOCKER=1 go test ./...", want: false},
+		{name: "another variable's value is not a default", text: "OTHER=GT_TEST_DOCKER", want: false},
+		{name: "an example in a comment is not a default", text: "# never add GT_TEST_DOCKER ?= 0 here", want: false},
+		{name: "a comment does not hide the line after it", text: "# keep it literal\nGT_TEST_DOCKER ?= 0", want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := containerOptInDefaultLine(tc.text)
+			if (got != "") != tc.want {
+				t.Fatalf("containerOptInDefaultLine(%q) = %q, want a match: %v", tc.text, got, tc.want)
+			}
+		})
+	}
+}
 
 // firstLineMatching returns the first line of text that matches re, or "".
 func firstLineMatching(text string, re *regexp.Regexp) string {
