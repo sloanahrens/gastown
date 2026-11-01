@@ -7,13 +7,6 @@ import (
 	"github.com/steveyegge/gastown/internal/polecat"
 )
 
-// A rig's polecat directory cap counts live seats, not directories. A tmux
-// seat's directory is its seat, so it counts as it always has. A sandbox seat's
-// directory is not: the seed worktree a sling makes is a snapshot the sandbox
-// never writes to, and once the gateway affirms the sandbox gone nothing live
-// is left behind it (gt-xlazq). A directory whose seat a read cannot classify
-// counts, so a fact that cannot be measured never admits a sling past the cap.
-
 // liveSeatCounter answers the cap's question about the polecat directory name:
 // does it hold a live seat? True counts the directory against the cap.
 type liveSeatCounter func(polecatName string) bool
@@ -26,7 +19,9 @@ type liveSeatCounter func(polecatName string) bool
 // A directory counts unless every read agrees it is a sandbox seat whose
 // sandbox is gone: no agent bead, an unreadable bead, a seat the probe cannot
 // classify, and a gateway that did not answer all count. Only the gateway's
-// affirmative "gone" (polecat.SandboxSeatGitState's live source) does not.
+// affirmative "gone" (polecat.SandboxSeatGitState's live source) does not: a
+// sandbox seat's directory is a seed worktree the sandbox never writes to, so
+// nothing live is left behind it (gt-xlazq).
 func newLiveSeatCounter(bd beads.Client, agentBeadID func(polecatName string) string,
 	sessionName func(polecatName string) string, probe sandboxSeatProbe) liveSeatCounter {
 	return func(name string) bool {
