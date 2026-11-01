@@ -655,6 +655,114 @@ func TestRepoAliasCreatePinsAnAbsentWorkspace(t *testing.T) {
 	}
 }
 
+// TestRepoAliasCreateRefusesAnUnwritableWorkspaceConfig: the create stops when
+// a workspace it resolved cannot take its config.yaml, rather than running bd
+// against a workspace the render could not prepare.
+func TestRepoAliasCreateRefusesAnUnwritableWorkspaceConfig(t *testing.T) {
+	t.Parallel()
+	townRoot := seatTownWithRoutes(t)
+	// config.yaml as a directory: EnsureConfigYAML cannot read or write it.
+	if err := os.Mkdir(filepath.Join(townRoot, "a", "mayor", "rig", ".beads", "config.yaml"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := newRecorder(nil)
+	b := newBeads(beadsFields{workDir: filepath.Join(townRoot, "a", "mayor", "rig"), baseEnv: []string{"PATH=/usr/bin"}, exec: r.exec})
+
+	_, err := b.Create(CreateOptions{Title: "filed in a", Rig: "a"})
+	if err == nil || !strings.Contains(err.Error(), `ensuring beads config for rig "a"`) {
+		t.Fatalf("Create(--rig=a) error = %v, want the config refusal", err)
+	}
+	if calls := r.calls(); len(calls) != 0 {
+		t.Fatalf("bd ran %d time(s) for an unprepared workspace: %v", len(calls), r.argvs())
+	}
+}
+
+// TestEnsureCreateConfigYAML: the create writes config.yaml into a workspace
+// that exists, leaves an absent one absent, and refuses a path that is not a
+// workspace it can prepare. The last two outcomes are unreachable from Create
+// (resolution already refused them), so they are driven here.
+func TestEnsureCreateConfigYAML(t *testing.T) {
+	t.Parallel()
+	townRoot := seatTownWithRoutes(t)
+
+	present := filepath.Join(townRoot, "a", "mayor", "rig", ".beads")
+	if err := ensureCreateConfigYAML(present, townRoot, "a"); err != nil {
+		t.Fatalf("ensureCreateConfigYAML(present workspace): %v", err)
+	}
+	config, err := os.ReadFile(filepath.Join(present, "config.yaml"))
+	if err != nil || !strings.Contains(string(config), "issue-prefix: aa") {
+		t.Fatalf("config.yaml = %q, %v; want the rig's prefix written", config, err)
+	}
+
+	absent := filepath.Join(townRoot, "b", "mayor", "rig", ".beads")
+	if err := ensureCreateConfigYAML(absent, townRoot, "b"); err != nil {
+		t.Fatalf("ensureCreateConfigYAML(absent workspace): %v", err)
+	}
+	if _, err := os.Stat(absent); !os.IsNotExist(err) {
+		t.Fatalf("an absent workspace was created (stat err = %v)", err)
+	}
+
+	// A path that is a file, and one whose parent is a file: neither is a
+	// workspace to write into.
+	filePath := filepath.Join(townRoot, "filerig", "mayor", "rig", ".beads")
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filePath, []byte("not a workspace"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureCreateConfigYAML(filePath, townRoot, "filerig"); err == nil || !strings.Contains(err.Error(), "is not a directory") {
+		t.Fatalf("ensureCreateConfigYAML(file path) error = %v, want the not-a-directory refusal", err)
+	}
+
+	underFile := filepath.Join(townRoot, "blob", "mayor", "rig", ".beads")
+	if err := os.WriteFile(filepath.Join(townRoot, "blob"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureCreateConfigYAML(underFile, townRoot, "blob"); err == nil || !strings.Contains(err.Error(), "inspecting beads workspace") {
+		t.Fatalf("ensureCreateConfigYAML(uninspectable path) error = %v, want the inspection refusal", err)
+	}
+}
+
+// TestLoadRoutesRejectsAnUnreadableFile: a routes.jsonl that cannot be read is
+// an error, not an empty table (a town whose routes vanished must not read as
+// having none).
+func TestLoadRoutesRejectsAnUnreadableFile(t *testing.T) {
+	t.Parallel()
+	beadsDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(beadsDir, RoutesFileName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadRoutes(beadsDir); err == nil {
+		t.Fatal("LoadRoutes = nil error for a routes.jsonl that cannot be read")
+	}
+}
+
+// TestParseRoutesSkipsMalformedLines: a malformed line is reported and skipped,
+// and the routes around it survive.
+func TestParseRoutesSkipsMalformedLines(t *testing.T) {
+	t.Parallel()
+	doc := []byte("# a comment\n" +
+		`{"prefix":"aa-","path":"a/mayor/rig"}` + "\n" +
+		"not json\n" +
+		"\n" +
+		`{"prefix":"bb-","path":"b/mayor/rig"}` + "\n")
+
+	var warned []int
+	routes := ParseRoutes(doc, func(line int, err error) {
+		if err == nil {
+			t.Error("ParseRoutes warned with a nil error")
+		}
+		warned = append(warned, line)
+	})
+	if len(warned) != 1 || warned[0] != 3 {
+		t.Errorf("warned lines = %v, want just line 3", warned)
+	}
+	if len(routes) != 2 || routes[0].Prefix != "aa-" || routes[1].Prefix != "bb-" {
+		t.Errorf("routes = %+v, want the two valid lines", routes)
+	}
+}
+
 func TestRewriteBDCreateRepoAlias(t *testing.T) {
 	townRoot := t.TempDir()
 	townBeads := filepath.Join(townRoot, ".beads")

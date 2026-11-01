@@ -434,11 +434,7 @@ func sandboxBeadsMetadata(rel string, raw []byte, controlPlaneHost string) ([]by
 // uses. A rig whose host workspace holds no metadata is skipped: it costs that
 // rig's alias in the seat, not the seat. A read that fails otherwise is
 // returned, as the rest of this render does (gt-dmtmv).
-func addRoutedRigBeads(town townReader, s SkeletonSpec, add func(string, []byte), addDir func(string)) error {
-	routes, err := beads.LoadRoutes(filepath.Join(s.TownRoot, ".beads"))
-	if err != nil {
-		return fmt.Errorf("sandbox: reading routes: %w", err)
-	}
+func addRoutedRigBeads(town townReader, s SkeletonSpec, routes []beads.Route, add func(string, []byte), addDir func(string)) error {
 	carried := map[string]bool{}
 	for _, route := range routes {
 		if route.Path == "." {
@@ -474,18 +470,16 @@ func addRoutedRigBeads(town townReader, s SkeletonSpec, add func(string, []byte)
 		// A rig with no config.yaml is still carried: bd opens the database
 		// without one, and the seat's own rig stays the only rig whose config
 		// the render requires (gt-z7ut1).
-		configRel, rawConfig, found, err := rigBeadsConfigFound(town, rig)
+		_, rawConfig, found, err := rigBeadsConfigFound(town, rig)
 		if err != nil {
 			return err
 		}
 		if !found {
 			continue
 		}
-		data, err := sanitizeFile(configRel, rawConfig)
-		if err != nil {
-			return fmt.Errorf("sandbox: %s: %w", configRel, err)
-		}
-		add(path.Join(route.Path, ".beads", "config.yaml"), data)
+		// config.yaml is YAML text, which is what sanitizeFile's default
+		// branch scrubs; the read above is the only way it can fail here.
+		add(path.Join(route.Path, ".beads", "config.yaml"), scrubText(rawConfig))
 	}
 	return nil
 }
@@ -575,6 +569,7 @@ func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
 	// credential-carrying URL out of them. The rig's metadata.json is optional:
 	// some rigs keep theirs under .beads/, and host polecats run without it.
 	rigMetadata := s.Rig + "/metadata.json"
+	var routesData []byte
 	for _, rel := range []string{
 		"mayor/town.json",
 		".beads/routes.jsonl",
@@ -586,6 +581,9 @@ func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
 		}
 		if err != nil {
 			return nil, err
+		}
+		if rel == ".beads/routes.jsonl" {
+			routesData = raw
 		}
 		data, err := sanitizeFile(rel, raw)
 		if err != nil {
@@ -629,7 +627,7 @@ func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
 	// falls back to the seat's workspace, refuses the other database's
 	// identity, and the Found bead lands in hq, which the spec dispatcher
 	// never reads (gt-dmtmv).
-	if err := addRoutedRigBeads(town, s, add, addDir); err != nil {
+	if err := addRoutedRigBeads(town, s, beads.ParseRoutes(routesData, nil), add, addDir); err != nil {
 		return nil, err
 	}
 

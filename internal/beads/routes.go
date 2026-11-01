@@ -2,7 +2,6 @@
 package beads
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -52,36 +51,42 @@ const RoutesTempPrefix = ".routes-"
 // Returns an empty slice if the file doesn't exist.
 func LoadRoutes(beadsDir string) ([]Route, error) {
 	routesPath := filepath.Join(beadsDir, RoutesFileName)
-	file, err := os.Open(routesPath)
+	data, err := os.ReadFile(routesPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil // No routes file is not an error
 		}
 		return nil, err
 	}
-	defer file.Close()
+	return ParseRoutes(data, func(line int, err error) {
+		fmt.Fprintf(os.Stderr, "Warning: skipping malformed route at %s:%d: %v\n", routesPath, line, err)
+	}), nil
+}
 
+// ParseRoutes parses routes.jsonl contents. Blank lines and comments are
+// skipped, and a malformed line is reported to warn (nil ignores it) and
+// skipped. It takes the document rather than a path so a caller that already
+// holds the bytes parses them without reading the file twice (gt-dmtmv); a
+// byte slice cannot fail to read, so it returns no error.
+func ParseRoutes(data []byte, warn func(line int, err error)) []Route {
 	var routes []Route
-	scanner := bufio.NewScanner(file)
-	lineNum := 0
-	for scanner.Scan() {
-		lineNum++
-		line := strings.TrimSpace(scanner.Text())
+	for i, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
-			continue // Skip empty lines and comments
+			continue
 		}
-
 		var route Route
 		if err := json.Unmarshal([]byte(line), &route); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: skipping malformed route at %s:%d: %v\n", routesPath, lineNum, err)
+			if warn != nil {
+				warn(i+1, err)
+			}
 			continue
 		}
 		if route.Prefix != "" && route.Path != "" {
 			routes = append(routes, route)
 		}
 	}
-
-	return routes, scanner.Err()
+	return routes
 }
 
 // AppendRoute appends a route to routes.jsonl in the town's beads directory.
