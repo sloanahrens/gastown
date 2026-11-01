@@ -921,6 +921,10 @@ type doneRun struct {
 	// recordAgentState is the CLI layer's agent-bead state write; nil when the
 	// caller has no agent bead to write.
 	recordAgentState func(cwd, townRoot, exitType, issueID string, pending beads.AgentFieldUpdates) (bool, error)
+	// findings are the --finding texts this run records on the source bead.
+	findings []string
+	// recordFindings writes findings; nil skips the write.
+	recordFindings func(cwd, issueID string, findings []string)
 	// sourceIssue and sourceBD are the same pair doneSubmission carries; the
 	// revert guard reads the bead's label and description from here and appends
 	// the deletes-by-spec waiver through its client.
@@ -985,6 +989,8 @@ func Run(opts Options) error {
 		env:              getenv,
 		sessionBackend:   getenv("GT_SESSION_BACKEND"),
 		recordAgentState: opts.RecordAgentState,
+		findings:         opts.Findings,
+		recordFindings:   opts.RecordFindings,
 	}
 	r.g = git.NewGit(r.cwd)
 
@@ -1076,6 +1082,13 @@ func Run(opts Options) error {
 		} else if ambiguous {
 			return failRun(fmt.Errorf("branch %q embeds issue %s but %s has multiple active assignments; use --issue to disambiguate", r.branch, info.Issue, r.sender))
 		}
+	}
+
+	// Findings describe defects met outside the task, so they go to the source
+	// bead before the submission: a submission that fails never reaches
+	// reportDone, and a finding is owed whatever the exit (gt-o85mj).
+	if len(r.findings) > 0 && r.recordFindings != nil {
+		r.recordFindings(r.cwd, r.issueID, r.findings)
 	}
 
 	// Write heartbeat state="exiting" (gt-3vr5: heartbeat v2): the agent is

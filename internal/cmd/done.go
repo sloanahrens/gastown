@@ -71,7 +71,9 @@ Examples:
   gt done --issue gt-abc               # Explicit issue ID
   gt done --status ESCALATED           # Signal blocker, submit nothing
   gt done --status DEFERRED            # Pause work, submit nothing
-  gt done --bead gt-abc                # Crew: submit the pushed branch for gt-abc`,
+  gt done --bead gt-abc                # Crew: submit the pushed branch for gt-abc
+  gt done --finding "the retry never resets its counter"
+                                       # Record a defect met outside this task`,
 	RunE:         runDone,
 	SilenceUsage: true, // Don't print usage on operational errors (confuses agents)
 }
@@ -84,6 +86,10 @@ var (
 	doneAllowReverts  bool
 
 	doneAllowThrowawayPaths bool
+
+	// doneFindings are the --finding texts, recorded on the source bead as
+	// FINDING: comments (gt-o85mj).
+	doneFindings []string
 
 	// doneBead and donePreVerified are crew submission flags (gt-3e7tk).
 	doneBead        string
@@ -123,6 +129,7 @@ func init() {
 	doneCmd.Flags().BoolVar(&doneAllowThrowawayPaths, "allow-throwaway-paths", false, "Submit a branch that adds scratch, backup or /tmp files to the target (refused by default)")
 	doneCmd.Flags().StringVar(&doneBead, "bead", "", "Crew: the work bead to submit (default: parse from the branch name)")
 	doneCmd.Flags().BoolVar(&donePreVerified, "pre-verified", false, "Crew only: skip the local presubmit gate (the landing worker still gates the merged tree)")
+	doneCmd.Flags().StringArrayVar(&doneFindings, "finding", nil, "Polecat: report a defect met outside your task; recorded as a FINDING: comment on the source bead (repeatable, up to 5)")
 
 	rootCmd.AddCommand(doneCmd)
 }
@@ -138,11 +145,15 @@ func runDone(cmd *cobra.Command, args []string) error {
 			AllowReverts:        doneAllowReverts,
 			AllowThrowawayPaths: doneAllowThrowawayPaths,
 			PreVerified:         donePreVerified,
+			Findings:            doneFindings,
 			Env:                 os.Getenv,
 			Getwd:               os.Getwd,
 			Detect:              detectDoneAgent,
 			RecordAgentState: func(cwd, townRoot, exitType, issueID string, pending beads.AgentFieldUpdates) (bool, error) {
 				return updateAgentStateOnDoneFn(cwd, townRoot, exitType, issueID, pending)
+			},
+			RecordFindings: func(cwd, issueID string, findings []string) {
+				recordDoneFindings(os.Stderr, cwd, issueID, findings, done.OpenSourceStore)
 			},
 			LocalGate:   doneLocalGate,
 			RetryDelays: pushLandingRetryDelays,
