@@ -1177,15 +1177,18 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 		}
 		declined := tierSweepDeclined(st, res)
 		unreached := tierSweepUnreachedAfterDeclined(st.tiers, declined)
-		// The tier a stage's own output shows it ended in, and the tiers after
-		// it that therefore never started (gt-34r68). Only a stage that was cut
-		// off starves them, and a stage whose result carried a reason has no
-		// output to place its end in.
+		// The tier a cut-off stage's own output shows it ended in, and the tiers
+		// it never named, which therefore never started (gt-34r68). A stage
+		// whose result carried a reason has no output to read.
 		endedIn := ""
 		neverStarted := map[string]bool{}
+		starvedNote := ""
 		if res.reason == "" && tierSweepStageCutOff(res) {
-			endedIn = tierSweepStageEndedIn(st, res.output)
-			neverStarted = tierSweepUnreachedAfterEnd(st.tiers, endedIn)
+			endedIn, neverStarted = tierSweepStageProgress(st.tiers, res.output)
+			starvedNote = "the stage printed nothing"
+			if endedIn != "" {
+				starvedNote = "the stage ended in " + endedIn
+			}
 		}
 		logPath := d.tierSweepWriteLog(rig, st.tiers[0], res.output)
 		for _, tier := range st.tiers {
@@ -1204,11 +1207,11 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 					continue
 				}
 				if neverStarted[tier] {
-					// The stage was cut off in an earlier tier, so this one
-					// never began and its silence is not a verdict against it.
-					// The record keeps the tier's previous verdict and the cycle
-					// is Partial, so the next one re-runs it (gt-34r68).
-					d.logger.Printf("tier_sweep: %s: %s did not run: the stage ended in %s", rig, tier, endedIn)
+					// The stage was cut off before this tier, so it never began
+					// and its silence is not a verdict against it. The record
+					// keeps the tier's previous verdict and the cycle is
+					// Partial, so the next one re-runs it (gt-34r68).
+					d.logger.Printf("tier_sweep: %s: %s did not run: %s", rig, tier, starvedNote)
 					starved = true
 					continue
 				}
@@ -2281,68 +2284,56 @@ func tierSweepStageCutOff(res tierSweepStageResult) bool {
 	return res.timedOut || res.exitCode == tierSweepRedExit || res.exitCode < 0
 }
 
-// tierSweepStageEndedIn names the tier a stage's output shows it was running
-// when the stage ended: the last tier of the stage the output names, by a
-// summary line, an unknown-tier line or a per-unit progress marker. A stage
-// runs its tiers one at a time in one process, so the tiers after that one never
-// started, and a tier at or before it with no summary line is where the stage
-// ran out of time. A stage whose output names none of its tiers ended before
-// its first, which is the one it is attributed to (gt-34r68).
-func tierSweepStageEndedIn(st tierSweepStage, output string) string {
-	if len(st.tiers) == 0 {
-		return ""
-	}
-	ended := st.tiers[0]
-	for _, tier := range st.tiers {
-		if tierSweepOutputNamesTier(output, tier) {
-			ended = tier
+// tierSweepStageProgress reads a cut-off stage's output and returns the tier the
+// stage ended in and the tiers of the stage it never named. The ended tier is
+// the last one a line names, in the order printed: the rig's script runs its
+// tiers in an order of its own, so the stage's list cannot place them
+// (gt-zlcl6). A stage of one tier has nowhere else to be, so a cut-off that
+// printed nothing still ended in it. Any other tier no line names never
+// started, so its silence is starvation rather than a verdict (gt-34r68).
+func tierSweepStageProgress(tiers []string, output string) (ended string, never map[string]bool) {
+	named := map[string]bool{}
+	for _, line := range strings.Split(output, "\n") {
+		for _, tier := range tiers {
+			if tierSweepLineNamesTier(line, tier) {
+				named[tier] = true
+				ended = tier
+			}
 		}
 	}
-	return ended
+	if ended == "" && len(tiers) == 1 {
+		ended = tiers[0]
+	}
+	never = map[string]bool{}
+	for _, tier := range tiers {
+		if !named[tier] && tier != ended {
+			never[tier] = true
+		}
+	}
+	return ended, never
 }
 
-// tierSweepOutputNamesTier reports whether a stage's output shows it reached
+// tierSweepLineNamesTier reports whether one output line shows the stage reached
 // tier: the tier's summary line, the stage's line saying it does not offer the
 // tier, or a progress marker opening one of the tier's units. The integration
 // tier's container list opens its units under the docker marker, so the marker
 // tiers of tier count as its own (tierSweepLogMarkerTiers).
-func tierSweepOutputNamesTier(output, tier string) bool {
-	markers := tierSweepLogMarkerTiers(tier)
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if m := tierSweepSummaryRE.FindStringSubmatch(line); m != nil && m[1] == tier {
-			return true
-		}
-		if m := tierSweepUnknownTierRE.FindStringSubmatch(line); m != nil && m[1] == tier {
-			return true
-		}
-		if marker, _, ok := tierSweepLogMarker(line); ok {
-			for _, mt := range markers {
-				if mt == marker {
-					return true
-				}
+func tierSweepLineNamesTier(line, tier string) bool {
+	line = strings.TrimSpace(line)
+	if m := tierSweepSummaryRE.FindStringSubmatch(line); m != nil && m[1] == tier {
+		return true
+	}
+	if m := tierSweepUnknownTierRE.FindStringSubmatch(line); m != nil && m[1] == tier {
+		return true
+	}
+	if marker, _, ok := tierSweepLogMarker(line); ok {
+		for _, mt := range tierSweepLogMarkerTiers(tier) {
+			if mt == marker {
+				return true
 			}
 		}
 	}
 	return false
-}
-
-// tierSweepUnreachedAfterEnd names the stage's tiers that never started: the
-// ones after the tier the stage ended in, in the stage's own order. The caller
-// leaves them out of the cycle's results instead of reading their silence as a
-// RED verdict (gt-34r68).
-func tierSweepUnreachedAfterEnd(tiers []string, ended string) map[string]bool {
-	out := map[string]bool{}
-	after := false
-	for _, tier := range tiers {
-		if after {
-			out[tier] = true
-		}
-		if tier == ended {
-			after = true
-		}
-	}
-	return out
 }
 
 // parseTierSweepSummaries reads the verdicts a stage's output reported, keyed
@@ -2377,7 +2368,7 @@ func parseTierSweepSummaries(output string) map[string]tierSweepTierResult {
 // non-zero exit overrules a GREEN summary line (the runner's exit 2 is a usage
 // or log-dir failure). That GREEN line is withheld, so the tier is unreported,
 // and the caller records a tier with no verdict as RED, unless the stage was cut
-// off before reaching it (tierSweepUnreachedAfterEnd).
+// off before reaching it (tierSweepStageProgress).
 //
 // The integration and race stage is read the same way, with two exceptions.
 // The RED exit (tierSweepRedExit) beside a RED line stands: the command exits 1

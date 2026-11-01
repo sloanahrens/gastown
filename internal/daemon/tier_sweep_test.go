@@ -2416,8 +2416,10 @@ func TestTierSweepRigCycleGoCommandDeclineExcusesNothing(t *testing.T) {
 // stage cut off in integration takes the race tier's verdict line with it. The
 // silence is not a race verdict: race leaves the results and files no bead, and
 // the cycle is Partial so the next one re-runs it. The tier the stage ended in
-// takes the RED. A stage that ended on its own terms (a clean exit) or carried a
-// reason instead of output starves nothing, and its missing tiers stay RED.
+// takes the RED, and it is read from the output rather than the stage's list,
+// which the rig's script does not follow (gt-zlcl6). A stage that ended on its
+// own terms (a clean exit) or carried a reason instead of output starves
+// nothing, and its missing tiers stay RED.
 func TestTierSweepRigCycleStarvedTierTakesNoVerdict(t *testing.T) {
 	t.Parallel()
 	const (
@@ -2433,11 +2435,13 @@ func TestTierSweepRigCycleStarvedTierTakesNoVerdict(t *testing.T) {
 		exitCode int
 		timedOut bool
 		reason   string
-		// wantRace is the RED reason race takes; "" is no verdict at all.
-		wantRace string
-		// wantIntegration is the RED reason integration takes; "" is GREEN.
+		// wantRace and wantIntegration are each tier's verdict: GREEN, a RED
+		// reason, or "" for a tier the stage never reached.
+		wantRace        string
 		wantIntegration string
-		// wantPartial is true when the stage left a tier unjudged.
+		// starved names the tiers the cycle logs as not run, in tc.why.
+		starved     []string
+		why         string
 		wantPartial bool
 	}{{
 		// Integration RED and the stage stops there: race never began, so it
@@ -2446,6 +2450,8 @@ func TestTierSweepRigCycleStarvedTierTakesNoVerdict(t *testing.T) {
 		stage:           integrationMarker + integrationRed,
 		exitCode:        tierSweepRedExit,
 		wantIntegration: "./internal/repoguard",
+		starved:         []string{"race"},
+		why:             "the stage ended in integration",
 		wantPartial:     true,
 	}, {
 		// A budget kill withholds the GREEN integration line, so integration is
@@ -2455,12 +2461,16 @@ func TestTierSweepRigCycleStarvedTierTakesNoVerdict(t *testing.T) {
 		exitCode:        -1,
 		timedOut:        true,
 		wantIntegration: "timeout",
+		starved:         []string{"race"},
+		why:             "the stage ended in integration",
 		wantPartial:     true,
 	}, {
 		name:            "a signal ended the stage",
 		stage:           integrationMarker + integrationGreen,
 		exitCode:        -1,
 		wantIntegration: "no verdict line (exit -1)",
+		starved:         []string{"race"},
+		why:             "the stage ended in integration",
 		wantPartial:     true,
 	}, {
 		// Race opened its first unit, so it is the tier that was cut off and
@@ -2472,12 +2482,26 @@ func TestTierSweepRigCycleStarvedTierTakesNoVerdict(t *testing.T) {
 		wantRace:        "timeout",
 		wantIntegration: "./internal/repoguard",
 	}, {
-		// Nothing printed: the stage's first tier is the one it is attributed to.
-		name:            "the stage printed no verdict at all",
-		exitCode:        -1,
-		timedOut:        true,
-		wantIntegration: "timeout",
-		wantPartial:     true,
+		// The rig's script runs race before integration, whatever the stage's
+		// list order says (gt-zlcl6). A stage cut off in race starves
+		// integration, which never printed, instead of filing a RED against it.
+		name:        "race ran first and the stage ended there",
+		stage:       raceMarker,
+		exitCode:    -1,
+		timedOut:    true,
+		wantRace:    "timeout",
+		starved:     []string{"integration"},
+		why:         "the stage ended in race",
+		wantPartial: true,
+	}, {
+		// Nothing printed: no line places the stage in either tier, so neither
+		// is judged from its silence.
+		name:        "the stage printed no verdict at all",
+		exitCode:    -1,
+		timedOut:    true,
+		starved:     []string{"integration", "race"},
+		why:         "the stage printed nothing",
+		wantPartial: true,
 	}, {
 		// A clean exit reached the end it chose, so the missing race line is a
 		// contract failure, not a starvation.
@@ -2485,7 +2509,7 @@ func TestTierSweepRigCycleStarvedTierTakesNoVerdict(t *testing.T) {
 		stage:           integrationGreen,
 		exitCode:        0,
 		wantRace:        "no verdict line",
-		wantIntegration: "",
+		wantIntegration: tierSweepGreen,
 	}, {
 		// A result carrying a reason has no output to place the stage's end in,
 		// so that reason is the verdict of every tier the stage names.
@@ -2521,48 +2545,53 @@ func TestTierSweepRigCycleStarvedTierTakesNoVerdict(t *testing.T) {
 				t.Fatalf("record = %+v, want tip tips1 with Partial = %v", st, tc.wantPartial)
 			}
 			if st.LastGreenSHA != "" {
-				t.Errorf("LastGreenSHA = %q, want none: no cycle judged race", st.LastGreenSHA)
+				t.Errorf("LastGreenSHA = %q, want none: no cycle judged every tier", st.LastGreenSHA)
 			}
-			race, hasRace := st.Tiers["race"]
-			if tc.wantRace == "" {
-				if hasRace {
-					t.Errorf("race verdict = %+v, want none for a tier the stage never reached", race)
+			for _, want := range []struct{ tier, verdict string }{
+				{"integration", tc.wantIntegration},
+				{"race", tc.wantRace},
+			} {
+				ts, has := st.Tiers[want.tier]
+				switch want.verdict {
+				case "":
+					if has {
+						t.Errorf("%s verdict = %+v, want none: the stage never reached it", want.tier, ts)
+					}
+				case tierSweepGreen:
+					if !has || ts.Verdict != tierSweepGreen {
+						t.Errorf("%s = %+v (present = %v), want GREEN: its own line stands", want.tier, ts, has)
+					}
+				default:
+					if !has || ts.Verdict != tierSweepRed || !slices.Contains(ts.FailedNames, want.verdict) {
+						t.Errorf("%s = %+v (present = %v), want RED %q: the stage ended there or its reason stands", want.tier, ts, has, want.verdict)
+					}
 				}
-				if want := "tier_sweep: gastown: race did not run: the stage ended in integration"; !strings.Contains(logs.String(), want) {
+				var beads, items int
+				for _, c := range bd.created {
+					if strings.HasPrefix(c.Title, tierSweepBeadPrefix("gastown", want.tier)) {
+						beads++
+					}
+				}
+				for _, it := range tierSweepItems(t, d, now, "gastown") {
+					if strings.Contains(it.Summary, "tier sweep gastown "+want.tier+" ") {
+						items++
+					}
+				}
+				wantBeads := 0
+				if want.verdict != "" && want.verdict != tierSweepGreen {
+					wantBeads = 1
+				}
+				if beads != wantBeads || items != wantBeads {
+					t.Errorf("%s beads = %d, attention items = %d, want %d each", want.tier, beads, items, wantBeads)
+				}
+			}
+			for _, tier := range tc.starved {
+				if want := "tier_sweep: gastown: " + tier + " did not run: " + tc.why; !strings.Contains(logs.String(), want) {
 					t.Errorf("log lacks %q:\n%s", want, logs.String())
 				}
-				if strings.Contains(logs.String(), "race RED") {
-					t.Errorf("the starved tier was logged RED:\n%s", logs.String())
+				if strings.Contains(logs.String(), "gastown: "+tier+" RED:") {
+					t.Errorf("the starved tier %s was logged RED:\n%s", tier, logs.String())
 				}
-			} else if !hasRace || race.Verdict != tierSweepRed || !slices.Contains(race.FailedNames, tc.wantRace) {
-				t.Errorf("race = %+v (present = %v), want RED %q: the stage reached it or ended cleanly", race, hasRace, tc.wantRace)
-			}
-			in := st.Tiers["integration"]
-			if tc.wantIntegration == "" {
-				if in.Verdict != tierSweepGreen {
-					t.Errorf("integration = %+v, want GREEN: its own line stands", in)
-				}
-			} else if in.Verdict != tierSweepRed || !slices.Contains(in.FailedNames, tc.wantIntegration) {
-				t.Errorf("integration = %+v, want RED %q: the stage ended there or its reason stands", in, tc.wantIntegration)
-			}
-
-			var raceBeads, raceItems int
-			for _, c := range bd.created {
-				if strings.HasPrefix(c.Title, tierSweepBeadPrefix("gastown", "race")) {
-					raceBeads++
-				}
-			}
-			for _, it := range tierSweepItems(t, d, now, "gastown") {
-				if strings.Contains(it.Summary, "tier sweep gastown race ") {
-					raceItems++
-				}
-			}
-			want := 0
-			if tc.wantRace != "" {
-				want = 1
-			}
-			if raceBeads != want || raceItems != want {
-				t.Errorf("race beads = %d, attention items = %d, want %d each", raceBeads, raceItems, want)
 			}
 		})
 	}
