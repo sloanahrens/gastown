@@ -146,7 +146,10 @@ func (c *Client) CloseWithReason(reason string, ids ...string) error {
 	return c.closeIDs(reason, false, ids)
 }
 
-// ForceCloseWithReason is CloseWithReason past the close fences.
+// ForceCloseWithReason is CloseWithReason past the close fences, so it needs a
+// client holding an admin-scope token: the tracker refuses a force close from
+// a seat token (gt-gk7ga). The town-side callers move onto the admin
+// credential in gt-1m0kb.
 func (c *Client) ForceCloseWithReason(reason string, ids ...string) error {
 	return c.closeIDs(reason, true, ids)
 }

@@ -26,6 +26,46 @@ func (s *Server) registerWriteRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/batch", s.batch)
 }
 
+// forceCloseNeedsAdmin refuses a force close from a token that is not
+// admin-scope, before the store, and reports whether it refused. The force
+// flag skips the close fences, so only the admin scope may set it; the store
+// is never told about roles.
+func forceCloseNeedsAdmin(w http.ResponseWriter, r *http.Request) bool {
+	if api.ScopeFrom(r.Context()) == api.ScopeAdmin {
+		return false
+	}
+	writeAPIError(w, http.StatusForbidden, api.Forbidden("force close needs an admin token"))
+	return true
+}
+
+// patchClosesWithForce reports whether an update patch asks to close with
+// force. The refusal is the request's shape, not the row's state: the handler
+// cannot read the status without a race that a reopen turns into a hole, so a
+// patch that force-closes an already-closed issue is refused too, though the
+// store would have spent the force on nothing.
+func patchClosesWithForce(p api.UpdatePatch) bool {
+	return p.Force && p.Status != nil && *p.Status == "closed"
+}
+
+// batchClosesWithForce reports whether any operation of a batch would close
+// with force. A batch applies all operations or none, so one of them refuses
+// the batch whole.
+func batchClosesWithForce(req api.BatchRequest) bool {
+	for _, op := range req.Operations {
+		switch op.Op {
+		case api.BatchOpClose:
+			if op.Close != nil && op.Close.Force {
+				return true
+			}
+		case api.BatchOpUpdate:
+			if op.Update != nil && patchClosesWithForce(op.Update.Patch) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // claimIssue takes the issue for the token's actor; the request has no body,
 // because the holder is always the caller.
 func (s *Server) claimIssue(w http.ResponseWriter, r *http.Request) {
@@ -73,6 +113,9 @@ func (s *Server) batch(w http.ResponseWriter, r *http.Request) {
 	var req api.BatchRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, err, s.cfg.Log)
+		return
+	}
+	if batchClosesWithForce(req) && forceCloseNeedsAdmin(w, r) {
 		return
 	}
 	res, err := s.cfg.Store.Batch(r.Context(), req)
@@ -124,6 +167,9 @@ func (s *Server) updateIssue(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err, s.cfg.Log)
 		return
 	}
+	if patchClosesWithForce(req.Patch) && forceCloseNeedsAdmin(w, r) {
+		return
+	}
 	req.Patch.Actor = api.ActorFrom(r.Context())
 	if err := s.cfg.Store.UpdateIssue(r.Context(), r.PathValue("id"), req.Patch, req.Guard); err != nil {
 		writeError(w, err, s.cfg.Log)
@@ -136,6 +182,9 @@ func (s *Server) closeIssues(w http.ResponseWriter, r *http.Request) {
 	var req api.CloseRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, err, s.cfg.Log)
+		return
+	}
+	if req.Force && forceCloseNeedsAdmin(w, r) {
 		return
 	}
 	if err := s.cfg.Store.CloseIssues(r.Context(), req.IDs, req.Reason, req.Force); err != nil {

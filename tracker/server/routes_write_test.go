@@ -316,7 +316,8 @@ func TestCloseAndDeletePassTheirArgumentsAndAnswer204(t *testing.T) {
 	}
 	st.del = func(_ context.Context, ids []string) error { delIDs = ids; return nil }
 	ts := writeServer(t, st)
-	if code, body := writeCall(t, "POST", ts.URL+"/v1/issues:close", `{"ids":["gt-a","gt-b"],"reason":"done","force":true}`); code != 204 || body != "" {
+	// the admin token: a force close needs one (gt-gk7ga)
+	if code, body := writeCallAs(t, "admin-token", "POST", ts.URL+"/v1/issues:close", `{"ids":["gt-a","gt-b"],"reason":"done","force":true}`); code != 204 || body != "" {
 		t.Errorf("close = %d %q, want 204", code, body)
 	}
 	if code, body := writeCallAs(t, "admin-token", "POST", ts.URL+"/v1/issues:delete", `{"ids":["gt-c"]}`); code != 204 || body != "" {
@@ -346,6 +347,112 @@ func TestDeleteRefusesASeatTokenBeforeTheStore(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("the store saw the admin delete %d times, want 1", calls)
+	}
+}
+
+const forceCloseRefusal = "force close needs an admin token"
+
+// The force flag skips the close fences (pinned, assigned elsewhere, open
+// children, open blockers), so a seat token cannot set it: the request is
+// refused before the store, naming the scope, and the admin token's reaches
+// the store (gt-gk7ga).
+func TestForceCloseNeedsAdmin(t *testing.T) {
+	t.Parallel()
+	var calls int
+	var force bool
+	st := okStub()
+	st.close = func(_ context.Context, _ []string, _ string, f bool) error {
+		calls++
+		force = f
+		return nil
+	}
+	ts := writeServer(t, st)
+	code, body := writeCall(t, "POST", ts.URL+"/v1/issues:close", `{"ids":["gt-a"],"force":true}`)
+	if e := decodeErr(t, body); code != 403 || e.Kind != api.KindForbidden || e.Message != forceCloseRefusal {
+		t.Errorf("seat force close = %d %q, want 403 forbidden %q", code, body, forceCloseRefusal)
+	}
+	if calls != 0 {
+		t.Fatalf("the store saw a refused seat force close %d times, want none", calls)
+	}
+	if code, body := writeCallAs(t, "admin-token", "POST", ts.URL+"/v1/issues:close", `{"ids":["gt-a"],"force":true}`); code != 204 || body != "" {
+		t.Errorf("admin force close = %d %q, want 204", code, body)
+	}
+	if calls != 1 || !force {
+		t.Errorf("the store saw %d closes with force=%v, want one close with force", calls, force)
+	}
+}
+
+// A patch that sets status closed with force is the close verb's force flag by
+// another route, and meets the same fence before the store.
+func TestPatchForceCloseNeedsAdmin(t *testing.T) {
+	t.Parallel()
+	var calls int
+	var got api.UpdatePatch
+	st := okStub()
+	st.update = func(_ context.Context, _ string, p api.UpdatePatch, _ api.Guard) error {
+		calls++
+		got = p
+		return nil
+	}
+	ts := writeServer(t, st)
+	body := `{"patch":{"status":"closed","force":true}}`
+	code, gotBody := writeCall(t, "PATCH", ts.URL+"/v1/issues/gt-a", body)
+	if e := decodeErr(t, gotBody); code != 403 || e.Kind != api.KindForbidden || e.Message != forceCloseRefusal {
+		t.Errorf("seat force close by patch = %d %q, want 403 forbidden %q", code, gotBody, forceCloseRefusal)
+	}
+	if calls != 0 {
+		t.Fatalf("the store saw a refused seat force patch %d times, want none", calls)
+	}
+	if code, body := writeCallAs(t, "admin-token", "PATCH", ts.URL+"/v1/issues/gt-a", body); code != 204 || body != "" {
+		t.Errorf("admin force close by patch = %d %q, want 204", code, body)
+	}
+	if calls != 1 || !got.Force || got.Status == nil || *got.Status != "closed" {
+		t.Errorf("the store saw %d patches, want one closing with force", calls)
+	}
+}
+
+// Without force a seat closes as it always has, on every route that can close:
+// the refusal is only about the flag.
+func TestCloseWithoutForceUnchanged(t *testing.T) {
+	t.Parallel()
+	for _, tok := range []string{"good-token", "admin-token"} {
+		t.Run("close verb "+tok, func(t *testing.T) {
+			t.Parallel()
+			var calls int
+			var force bool
+			st := okStub()
+			st.close = func(_ context.Context, _ []string, _ string, f bool) error {
+				calls++
+				force = f
+				return nil
+			}
+			ts := writeServer(t, st)
+			if code, body := writeCallAs(t, tok, "POST", ts.URL+"/v1/issues:close", `{"ids":["gt-a"]}`); code != 204 || body != "" {
+				t.Errorf("close as %s = %d %q, want 204", tok, code, body)
+			}
+			if calls != 1 || force {
+				t.Errorf("close as %s reached the store %d times with force=%v, want once without force", tok, calls, force)
+			}
+		})
+		t.Run("patch "+tok, func(t *testing.T) {
+			t.Parallel()
+			var calls int
+			st := okStub()
+			st.update = func(_ context.Context, _ string, p api.UpdatePatch, _ api.Guard) error {
+				if p.Status == nil || *p.Status != "closed" {
+					t.Errorf("the patch reached the store without status closed")
+				}
+				calls++
+				return nil
+			}
+			ts := writeServer(t, st)
+			if code, body := writeCallAs(t, tok, "PATCH", ts.URL+"/v1/issues/gt-a", `{"patch":{"status":"closed"}}`); code != 204 || body != "" {
+				t.Errorf("patch as %s = %d %q, want 204", tok, code, body)
+			}
+			if calls != 1 {
+				t.Errorf("patch as %s reached the store %d times, want once", tok, calls)
+			}
+		})
 	}
 }
 
