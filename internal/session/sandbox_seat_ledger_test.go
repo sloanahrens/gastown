@@ -315,6 +315,21 @@ func TestOpenShellPrepareRollbackWarnsWhenTheSeatLineCannotBeWritten(t *testing.
 	}
 }
 
+// A town with no mayor/rigs.json (its registry is mayor/town.json) takes the
+// default prefix: only an absent registry file does, so the sandbox still spawns
+// (gt-1sriy).
+func TestSandboxRigPrefixAbsentRegistryTakesTheDefault(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	got, err := sandboxRigPrefix(town, openshellTestRig)
+	if err != nil {
+		t.Fatalf("sandboxRigPrefix with no rig registry: %v", err)
+	}
+	if want := "gt"; got != want {
+		t.Fatalf("sandboxRigPrefix = %q, want the default prefix %q", got, want)
+	}
+}
+
 // A town whose workspace map, or whose rig registry, cannot be read, or whose
 // registry does not name the rig, refuses the spawn before anything is pushed or
 // created: the record would carry an empty or guessed workspace id (plan row M5).
