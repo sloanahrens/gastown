@@ -2944,9 +2944,13 @@ func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return
 		}
 	}
 
+	// The final record is a value copy taken and saved under stateMu, the lock
+	// every other writer of *state holds (heartbeatWork's update), so a heartbeat
+	// abandoned at the grace cannot change what is saved (gt-lbqgz).
 	d.hb.stateMu.Lock()
 	state.Running = false
-	if err := d.saveState(state); err != nil {
+	final := *state
+	if err := d.saveState(&final); err != nil {
 		d.logger.Printf("Warning: failed to save final state: %v", err)
 	}
 	d.hb.stateMu.Unlock()

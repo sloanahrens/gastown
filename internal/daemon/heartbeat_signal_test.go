@@ -180,13 +180,13 @@ func TestHeartbeatIgnoresLifecycleSignalAndFinishes(t *testing.T) {
 	go func() { result <- d.runHeartbeat(sigChan, run) }()
 	reached(t, "the heartbeat", running)
 	sigChan <- syscall.SIGUSR1
-	// Let the wait read the signal before the heartbeat is let go: the
-	// buffered channel is empty once it has.
+	// The wait logs the ignored signal when it has read it; let the heartbeat go
+	// only after that line is there.
 	drained, cancel := context.WithTimeout(context.Background(), signalWait)
 	defer cancel()
-	for len(sigChan) > 0 {
+	for !strings.Contains(logs.String(), "Received SIGUSR1: ignored") {
 		if drained.Err() != nil {
-			t.Fatalf("%s: the wait never read SIGUSR1", t.Name())
+			t.Fatalf("%s: the wait never logged SIGUSR1 as ignored", t.Name())
 		}
 		runtime.Gosched()
 	}
@@ -286,7 +286,7 @@ func TestAbandonedHeartbeatDoesNotChangeWhatShutdownSaved(t *testing.T) {
 }
 
 // A heartbeat started after the cancel runs no step and saves no state.
-func TestHeartbeatAfterCancelDoesNotSaveState(t *testing.T) {
+func TestSignalHeartbeatAfterCancelDoesNotSaveState(t *testing.T) {
 	t.Parallel()
 	d, _ := signalTestDaemon(t)
 	var steps atomic.Int32
@@ -310,5 +310,61 @@ func TestHeartbeatAfterCancelDoesNotSaveState(t *testing.T) {
 		t.Errorf("%s: a canceled heartbeat saved HeartbeatCount %d", t.Name(), saved.HeartbeatCount)
 	case err != nil && !errors.Is(err, os.ErrNotExist):
 		t.Fatalf("%s: LoadState: %v", t.Name(), err)
+	}
+}
+
+// The grace a shutdown signal gives an uninterruptible step is five seconds
+// (constant heartbeatSignalGrace); the hbGrace test seam overrides it, and only
+// it.
+func TestSignalGraceIsFiveSeconds(t *testing.T) {
+	t.Parallel()
+	d, _ := signalTestDaemon(t)
+	if got := d.signalGrace(); got != 5*time.Second {
+		t.Errorf("%s: grace = %s, want 5s", t.Name(), got)
+	}
+	if heartbeatSignalGrace != 5*time.Second {
+		t.Errorf("%s: heartbeatSignalGrace = %s, want 5s", t.Name(), heartbeatSignalGrace)
+	}
+	d.hbGrace = 7 * time.Millisecond
+	if got := d.signalGrace(); got != 7*time.Millisecond {
+		t.Errorf("%s: grace with the seam set = %s, want 7ms", t.Name(), got)
+	}
+}
+
+// Shutdown saves a copy of the state taken under stateMu, so code that mutates
+// the shared state under that lock while shutdown runs cannot change what is
+// saved or race it (run under -race).
+func TestShutdownSavesACopyOfTheStateUnderTheLock(t *testing.T) {
+	t.Parallel()
+	d, _ := signalTestDaemon(t)
+	state := &State{Running: true}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			d.hb.stateMu.Lock()
+			state.HeartbeatCount++
+			d.hb.stateMu.Unlock()
+		}
+	}()
+
+	if err := d.shutdown(state); err != nil {
+		t.Fatalf("%s: shutdown: %v", t.Name(), err)
+	}
+	close(stop)
+	within(t, signalWait, "the writer goroutine", done)
+
+	saved, err := LoadState(d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("%s: LoadState: %v", t.Name(), err)
+	}
+	if saved.Running {
+		t.Errorf("%s: the saved state says the daemon is running", t.Name())
 	}
 }

@@ -69,10 +69,7 @@ func (d *Daemon) runHeartbeat(sigChan <-chan os.Signal, run func()) os.Signal {
 			if d.cancel != nil {
 				d.cancel()
 			}
-			grace := d.hbGrace
-			if grace <= 0 {
-				grace = heartbeatSignalGrace
-			}
+			grace := d.signalGrace()
 			wait := time.NewTimer(grace)
 			defer wait.Stop()
 			select {
@@ -101,10 +98,19 @@ func (d *Daemon) heartbeatCanceled() bool {
 	return d.ctx != nil && d.ctx.Err() != nil
 }
 
+// signalGrace is how long a signal waits for a step that does not stop:
+// heartbeatSignalGrace, unless a test set hbGrace (a test seam on the Daemon, so
+// the abandoned-step path runs in milliseconds).
+func (d *Daemon) signalGrace() time.Duration {
+	if d.hbGrace > 0 {
+		return d.hbGrace
+	}
+	return heartbeatSignalGrace
+}
+
 // stopOnSignal runs one heartbeat beside sigChan and, when a shutdown signal
 // ended it, runs the shutdown. stop is true when the daemon must return exit,
 // the shutdown's result.
-// Both heartbeat call sites in Run use it.
 func (d *Daemon) stopOnSignal(sigChan <-chan os.Signal, state *State, run func()) (stop bool, exit error) {
 	if sig := d.runHeartbeat(sigChan, run); sig != nil {
 		return true, d.finishSignalShutdown(state)
