@@ -466,10 +466,9 @@ func TestCheckPolecatSafetyOfADeadSandboxSeat(t *testing.T) {
 	}
 }
 
-// An idle, clean sandbox seat is nukable without --force: the daemon's reap
-// pass runs `gt polecat nuke` with no --force flag, so a seat it trims must
-// pass the same gate a person's nuke does. This one has a gone sandbox, a clean
-// cleanup_status, and no hook, which is every fact the gate reads (gt-xlazq).
+// The nuke gate accepts an idle, clean sandbox seat when neither --force nor
+// --dry-run is set: the seat has a gone sandbox, a clean cleanup_status and no
+// hook, which is every fact the gate reads (gt-xlazq).
 func TestNukeOfAnIdleCleanSandboxSeatNeedsNoForce(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
