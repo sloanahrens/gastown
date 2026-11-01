@@ -77,14 +77,7 @@ td.n,th.n{text-align:right}
 .chip{cursor:pointer;border:1px solid var(--line);border-radius:999px;padding:1px 9px;font-size:11px;color:var(--dim);background:none;font:inherit;font-size:11px}
 .chip.on{color:var(--text);border-color:var(--blue);background:#1c2a3d}
 .chip b{font-weight:400;color:var(--dim);margin-left:4px}
-#feed{max-height:68vh;overflow:auto;padding:4px 0}
-.row{display:grid;grid-template-columns:62px 82px 1fr;gap:8px;padding:2px 12px}
 [hidden]{display:none !important}
-.row:hover{background:#19212b}
-.row .t{color:var(--dim)}.row .g{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.row .x{overflow-wrap:anywhere}
-.c-failure .x{color:var(--red)}.c-warning .x{color:var(--amber)}.c-success .x{color:var(--green)}
-.c-landing .x{color:var(--violet)}.c-dispatch .x{color:var(--blue)}.c-restart .x{color:var(--teal)}.c-plain .x{color:var(--dim)}
 .bars{display:flex;align-items:flex-end;gap:3px;height:54px;margin:4px 0 2px;position:relative}
 .bars i{flex:1;background:var(--blue);min-height:1px;border-radius:2px 2px 0 0;position:relative}
 .bars i.low{background:var(--red)}
@@ -472,13 +465,7 @@ a.hrow:hover{background:#19212b}
     <section data-fold="cost"><h2>Cost <span class="r" id="costnote"></span></h2><div class="body" id="cost"></div></section>
     <section data-fold="rigs"><h2>Rigs <span class="r" id="rigsnote"></span></h2><div class="body" id="rigs"></div></section>
     <section data-fold="tiersweep"><h2><span class="sweepico" id="tiersweepico"></span>Tier sweeps <span class="r" id="tiersweepnote"></span></h2><div class="body" id="tiersweep"></div></section>
-    <section id="jevsec" data-fold="jev" data-default-collapsed hidden><h2>JEV · <span class="r" id="jevnote"></span></h2><div class="body" id="jev"></div></section>
-    <section id="mangosec" data-fold="mango" data-default-collapsed hidden><h2>Mango · <span class="r" id="mangonote"></span></h2><div class="body" id="mango"></div></section>
     <section data-fold="work"><h2>Work <span class="r" id="worknote"></span></h2><div class="body" id="work"></div></section>
-    <section data-fold="feed">
-      <h2>Feed <span class="chips" id="chips"></span></h2>
-      <div id="feed"></div>
-    </section>
   </div>
   <div class="col">
     <section id="newssec" data-fold="news" hidden><h2>Hacker News <span class="r" id="newsnote"></span></h2><div class="body" id="news"></div></section>
@@ -486,6 +473,8 @@ a.hrow:hover{background:#19212b}
     <section data-fold="cloud"><h2>Cloud <span class="r" id="cloudnote"></span></h2><div class="body" id="cloud"></div><h3 class="sub">Deploys <span class="r" id="deploysnote"></span></h3><div class="body" id="deploys"></div></section>
     <section data-fold="forgejo"><h2>Forgejo <span class="r" id="forgejonote"></span></h2><div class="body"><div id="forgejoacts"></div><button id="forgejofeedhead" type="button" class="feedhead" aria-controls="forgejo"></button><div id="forgejo"></div></div></section>
     <section data-fold="om"><h2>om review <span class="r" id="omnote"></span></h2><div class="body" id="om"></div></section>
+    <section id="jevsec" data-fold="jev" data-default-collapsed hidden><h2>JEV · <span class="r" id="jevnote"></span></h2><div class="body" id="jev"></div></section>
+    <section id="mangosec" data-fold="mango" data-default-collapsed hidden><h2>Mango · <span class="r" id="mangonote"></span></h2><div class="body" id="mango"></div></section>
   </div>
 </div>
 <!-- Landings is the pane the operator reads daily: it sits outside the grid, full width, and is the one panel that starts open. -->
@@ -3076,7 +3065,7 @@ function ownerShown(r) { return OWNERS.indexOf(r.owner) < 0 || shownOwners.has(r
 
 // The owner chips are the panel's one filter: one chip per owner the reader can
 // tag a row with, carrying the count of the rows it holds. The choice survives
-// reloads the way the feed's class chips do, and a chip is drawn at zero rather
+// reloads, and a chip is drawn at zero rather
 // than dropped, so an owner never disappears from the page.
 // Storage that throws — a locked-down browser, private mode — leaves the chips
 // on their default rather than taking the page down.
@@ -4888,43 +4877,6 @@ function renderAll() {
   paintFolds(state);
 }
 
-const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
-// The feed's class chips: every class but "plain" is on until the reader turns
-// it off, and storage that throws leaves that default rather than taking the
-// page down.
-const defaultChips = () => CLASSES.filter(c => c !== "plain");
-let shown = new Set(defaultChips());
-try { shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || defaultChips()); } catch (e) {}
-const counts = {};
-function renderChips() {
-  const box = $("chips");
-  box.replaceChildren();
-  for (const c of CLASSES) {
-    const b = el("button", "chip" + (shown.has(c) ? " on" : ""), c);
-    b.title = "show or hide " + c + " lines";
-    b.append(el("b", "", String(counts[c] || 0)));
-    b.onclick = () => { shown.has(c) ? shown.delete(c) : shown.add(c); try { localStorage.setItem("gt-chips", JSON.stringify([...shown])); } catch (e) {} renderChips(); applyFilter(); };
-    box.append(b);
-  }
-}
-function rowFor(e) {
-  const r = el("div", "row c-" + e.class);
-  r.dataset.class = e.class;
-  r.append(el("span", "t", clock(e.at)), el("span", "g", e.rig + (e.kind === "landings" ? " ⬇" : "")), el("span", "x", e.text));
-  r.hidden = !shown.has(e.class);
-  return r;
-}
-function applyFilter() { for (const r of $("feed").children) r.hidden = !shown.has(r.dataset.class); }
-function pushEntry(e, stick) {
-  const f = $("feed");
-  const atBottom = f.scrollHeight - f.scrollTop - f.clientHeight < 40;
-  f.append(rowFor(e));
-  counts[e.class] = (counts[e.class] || 0) + 1;
-  while (f.children.length > 800) { counts[f.firstChild.dataset.class]--; f.firstChild.remove(); }
-  if (!pushEntry.t) pushEntry.t = setTimeout(() => { pushEntry.t = null; renderChips(); }, 1000);
-  if (atBottom || stick) f.scrollTop = f.scrollHeight;
-}
-
 // The stream, kept alive by the page and not only by the browser. A browser
 // retries a stream it closed itself, but not one the connection ended for good:
 // WebKit reaches EventSource.CLOSED after a failed reconnect and never calls
@@ -4978,8 +4930,9 @@ function connect() {
   // A list event is only stored: the state frame the hub sends right after it is
   // the one that draws it.
   for (const name of ["trend.recent", "queue.ready", "queue.blocked"]) es.addEventListener(name, ev => { seen(); lists[name] = JSON.parse(ev.data); });
-  es.addEventListener("backlog", ev => { seen(); $("feed").replaceChildren(); for (const k of Object.keys(counts)) delete counts[k]; JSON.parse(ev.data).forEach(e => pushEntry(e, true)); });
-  es.addEventListener("entry", ev => { seen(); pushEntry(JSON.parse(ev.data)); });
+  // The activity feed is gone from the page, but the hub still sends its frames
+  // and each one is a sign the stream is alive.
+  for (const name of ["backlog", "entry"]) es.addEventListener(name, () => { seen(); });
   es.addEventListener("alert", ev => { seen(); onAlert(JSON.parse(ev.data)); });
 }
 // dropStream records that the page's stream is gone, whether the browser said so
@@ -5224,7 +5177,6 @@ $("forgejofeedhead").addEventListener("click", toggleFeed);
 foldFeed(false); // no state has arrived yet, so there is no Actions section
 $("models").addEventListener("click", toggleModels);
 paintModelsLine();
-renderChips();
 connect();
 // A tab that comes back has a stream whose events may still be queued behind
 // the tab's own held timers, so the silence belongs to the tab, not the
