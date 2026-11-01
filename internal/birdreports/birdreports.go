@@ -3,10 +3,11 @@
 //
 // A bird writes <runtimeDir>/<bird>/reports/daily.json, the sidecar the
 // dashboard's Birds panel reads (internal/dashboard/birdreports.go). `gt birds
-// due` reads them here; the daemon's bird_reports patrol reads the same files
-// with its own reader, so the two can judge one sidecar differently: the
-// patrol reads no `bird` field, applies no size cap, and calls any future
-// written_at late, where Read forgives one within FutureSlack.
+// due` reads them here; the daemon's bird_reports patrol
+// (internal/daemon/bird_reports.go) reads the same files with its own reader,
+// so the two can judge one sidecar differently: the patrol reads no `bird`
+// field, applies no size cap, and calls any future written_at late, where Read
+// forgives one within FutureSlack.
 package birdreports
 
 import (
