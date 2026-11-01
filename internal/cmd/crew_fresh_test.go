@@ -148,6 +148,18 @@ func TestCrewCloneRoot(t *testing.T) {
 			eval:    func(string) (string, error) { return "", fs.ErrPermission },
 			wantErr: true,
 		},
+		{
+			// The town resolves; the clone under it does not.
+			name: "a crew clone that cannot be resolved under a readable town",
+			cwd:  filepath.Join(town, "gastown", "crew", "dunlin"),
+			eval: func(p string) (string, error) {
+				if p == town {
+					return p, nil
+				}
+				return "", fs.ErrPermission
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range cases {
