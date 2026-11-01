@@ -34,8 +34,7 @@ func TestPaneColumns(t *testing.T) {
 		{"machnote", "right", "", "cloudnote"},
 		{"cloudnote", "right", "machnote", "forgejonote"},
 		{"forgejonote", "right", "cloudnote", "omnote"},
-		{"omnote", "right", "forgejonote", "trendsec"},
-		{"trendsec", "right", "omnote", ""},
+		{"omnote", "right", "forgejonote", ""},
 	} {
 		got := left
 		other := right
@@ -58,7 +57,7 @@ func TestPaneColumns(t *testing.T) {
 		}
 	}
 
-	if !strings.Contains(left+right, `<section id="trendsec" data-fold="landings" hidden>`) {
+	if !strings.Contains(string(indexHTML), `<section id="trendsec" class="wide" data-fold="landings" hidden>`) {
 		t.Error("the Landings section lost its hidden attribute")
 	}
 }

@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -524,4 +525,130 @@ func hasClassToken(attr, class string) bool {
 		}
 	}
 	return false
+}
+
+// The Landings pane is the one the operator reads daily, so it sits below the
+// panel grid at the full page width, last on the page, and is the only panel
+// that starts open (gt-bqxpz).
+func TestLandingsIsFullWidthAndOnlyOpenPanel(t *testing.T) {
+	t.Parallel()
+
+	page := string(indexHTML)
+	at := strings.Index(page, `<section id="trendsec" class="wide" data-fold="landings" hidden>`)
+	if at < 0 {
+		t.Fatal("the Landings section is not the .wide section the page places below the grid")
+	}
+	start := strings.Index(page, `<div class="grid">`)
+	if start < 0 || start > at {
+		t.Fatal("the Landings section does not follow the panel grid")
+	}
+	between := page[start:at]
+	if opens, closes := strings.Count(between, "<div"), strings.Count(between, "</div>"); opens != closes {
+		t.Errorf("%d divs open and %d close between the grid and the Landings section: it sits inside the grid", opens, closes)
+	}
+	tail := page[at+len("<section"):]
+	if end := strings.Index(tail, "<script>"); end < 0 || strings.Contains(tail[:end], "<section") {
+		t.Error("a section follows the Landings section: it is not the last block")
+	}
+	for _, prop := range []string{"width", "max-width", "grid-column", "float"} {
+		if got, ok := cssDecls(t, "wide")[prop]; ok {
+			t.Errorf("the .wide rule sets %s:%s, want the section to take the page's full width as a block", prop, got)
+		}
+	}
+
+	m := regexp.MustCompile(`const FOLD_DEFAULT_OPEN = \[([^\]]*)\];`).FindStringSubmatch(page)
+	if m == nil {
+		t.Fatal("index.html has no FOLD_DEFAULT_OPEN list")
+	}
+	if got := strings.Join(strings.Fields(m[1]), " "); got != `"landings"` {
+		t.Errorf("FOLD_DEFAULT_OPEN is [%s], want only \"landings\"", got)
+	}
+
+	dom := newPageDOM(t)
+	for _, sp := range pageSections(t) {
+		if closed := dom.fold(t, sp.Key).Collapsed; closed == (sp.Key == "landings") {
+			t.Errorf("the %s section starts collapsed=%v for a reader with no saved choice, want only landings open", sp.Key, closed)
+		}
+	}
+}
+
+// At 470 px the eight columns cannot sit side by side. Below 640 px each row
+// stacks: the title on a full line of its own, clamped to two lines, and every
+// other cell named by its column because the header row is hidden. Nothing is
+// cut and the page does not scroll sideways. The harness has no layout engine,
+// so the test reads the declarations and the cells' labels; the rendered
+// 470 px check is the overseer's, live (gt-bqxpz).
+func TestLandingsFitsANarrowViewport(t *testing.T) {
+	t.Parallel()
+
+	want := map[string]map[string]string{
+		".ltable":                {"display": "block"},
+		".ltable tr":             {"display": "flex", "flex-wrap": "wrap"},
+		".ltable tr:first-child": {"display": "none"},
+		".ltable td":             {"display": "block"},
+		".ltable td.main":        {"order": "-1", "flex": "1 0 100%"},
+		".ltable td.main .title": {"-webkit-line-clamp": "2", "overflow": "hidden"},
+	}
+	found := map[string]bool{}
+	for _, rule := range landingsConditionalRules(t) {
+		if !strings.Contains(rule.At, "max-width:640px") {
+			continue
+		}
+		// A selector list is read by its first selector: ".ltable td,.ltable td.n".
+		first, _, _ := strings.Cut(rule.Sel, ",")
+		for sel, decls := range want {
+			if strings.TrimSpace(first) != sel {
+				continue
+			}
+			found[sel] = true
+			for prop, val := range decls {
+				if got := rule.Decls[prop]; got != val {
+					t.Errorf("%s sets %s:%q at a narrow width, want %q", sel, prop, got, val)
+				}
+			}
+		}
+	}
+	for sel := range want {
+		if !found[sel] {
+			t.Errorf("no max-width:640px rule styles %s, so the narrow table keeps its eight columns side by side", sel)
+		}
+	}
+
+	// A finished row's cells, except the title, are named for the stacked layout.
+	now := time.Date(2026, 10, 31, 16, 0, 0, 0, time.Local)
+	p := newPageDOM(t)
+	p.call(t, "renderTrend", landingsQueuedRunningAndLanded(now))
+	v, err := p.vm.RunString(`JSON.stringify((function () {
+  var out = [];
+  __walk(document.getElementById("trend"), function (c) {
+    if (c.tagName !== "TR" || !c.children.length || c.children[0].tagName === "TH") return;
+    out.push({title: c.title || "", labels: c.children.map(function (td) { return td["attr_data-label"] || ""; })});
+  });
+  return out;
+})())`)
+	if err != nil {
+		t.Fatalf("reading the row labels: %v", err)
+	}
+	var rows []struct {
+		Title  string   `json:"title"`
+		Labels []string `json:"labels"`
+	}
+	if err := json.Unmarshal([]byte(v.String()), &rows); err != nil {
+		t.Fatalf("reading the row labels: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("the table drew %d rows, want 3", len(rows))
+	}
+	wantLabels := []string{"When", "", "By", "Polecat", "Score", "Gate", "om", "Ship"}
+	for _, row := range rows[1:] {
+		if strings.Join(row.Labels, "|") != strings.Join(wantLabels, "|") {
+			t.Errorf("a finished row's cells are labelled %q, want %q", row.Labels, wantLabels)
+		}
+		if row.Title != "" {
+			t.Errorf("a landings row carries the hover %q on the whole row, want it on the bead id so the tip does not open over the row", row.Title)
+		}
+	}
+	if rows[0].Title != "" {
+		t.Errorf("the waiting row carries the hover %q on the whole row", rows[0].Title)
+	}
 }

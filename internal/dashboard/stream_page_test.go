@@ -358,9 +358,9 @@ func TestStreamListEventsDrawTheSameRowsAsTheWholeState(t *testing.T) {
 		first.Write(f)
 	}
 
-	split := newPageDOM(t)
+	split := newPageDOMOpening(t, "work")
 	deliverFrames(t, split, first.String())
-	whole := newPageDOM(t)
+	whole := newPageDOMOpening(t, "work")
 	deliverStream(t, whole, "state", mustJSONString(t, h.State()))
 
 	assertSameDrawing := func(when string) {

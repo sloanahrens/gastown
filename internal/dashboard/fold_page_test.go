@@ -19,7 +19,24 @@ import (
 // saved choice. The list is a constant in the page's script and the operator's
 // to edit; this test pins what the bead asked for, and the rest of this file
 // reads the page's own list rather than assuming it.
-var foldDefaultOpen = []string{"attention", "overseer", "work", "landings"}
+var foldDefaultOpen = []string{"landings"}
+
+// newPageDOMOpening is a page whose reader has opened the named sections by
+// hand: a saved choice is the page's own way to start a section open, now that
+// only Landings opens by default (gt-bqxpz).
+func newPageDOMOpening(t *testing.T, keys ...string) *pageDOM {
+	t.Helper()
+
+	saved := map[string]bool{}
+	for _, k := range keys {
+		saved[k] = false
+	}
+	raw, err := json.Marshal(saved)
+	if err != nil {
+		t.Fatalf("saving the opened sections: %v", err)
+	}
+	return newPageDOMStoring(t, map[string]string{"gt-fold": string(raw)})
+}
 
 // foldIsDefaultOpen reports whether key is one of the sections the page opens.
 func foldIsDefaultOpen(key string) bool {
@@ -239,21 +256,21 @@ func TestFoldPaneThatOptsOutStaysClosed(t *testing.T) {
 func TestFoldSavedChoiceWinsOverTheDefault(t *testing.T) {
 	t.Parallel()
 
-	dom := newPageDOMStoring(t, map[string]string{"gt-fold": `{"work":true,"rigs":false}`})
-	wantFold(t, dom.fold(t, "work"), "work", true)  // the default is open
-	wantFold(t, dom.fold(t, "rigs"), "rigs", false) // the default is closed
+	dom := newPageDOMStoring(t, map[string]string{"gt-fold": `{"landings":true,"rigs":false}`})
+	wantFold(t, dom.fold(t, "landings"), "landings", true) // the default is open
+	wantFold(t, dom.fold(t, "rigs"), "rigs", false)        // the default is closed
 
-	dom.press(t, "overseer", "click")
+	dom.press(t, "rigs", "click")
 	stored := dom.storage(t)
 	var fold map[string]bool
 	if err := json.Unmarshal([]byte(stored["gt-fold"]), &fold); err != nil {
 		t.Fatalf("the page's saved folds: %v (storage: %v)", err, stored)
 	}
-	if !fold["overseer"] {
-		t.Errorf("closing the overseer section saved %v, want overseer:true", fold)
+	if !fold["rigs"] {
+		t.Errorf("closing the rigs section saved %v, want rigs:true", fold)
 	}
 	again := newPageDOMStoring(t, stored)
-	wantFold(t, again.fold(t, "overseer"), "overseer", true)
+	wantFold(t, again.fold(t, "rigs"), "rigs", true)
 }
 
 // The Cost panel starts closed on every load: a choice saved by an earlier
@@ -267,7 +284,7 @@ func TestFoldCostStartsClosedOnEveryLoad(t *testing.T) {
 		dom := newPageDOMStoring(t, map[string]string{"gt-fold": saved})
 		wantFold(t, dom.fold(t, "cost"), "cost", true)
 		// the other panels still follow their own lists
-		wantFold(t, dom.fold(t, "work"), "work", false)
+		wantFold(t, dom.fold(t, "landings"), "landings", false)
 		wantFold(t, dom.fold(t, "rigs"), "rigs", true)
 	}
 
@@ -285,7 +302,7 @@ func TestFoldChoiceFromBeforeTheKeysStillApplies(t *testing.T) {
 	t.Parallel()
 
 	legacy := newPageDOMStoring(t, map[string]string{"gt-collapsed": `{"Work":true,"Rigs":false}`})
-	wantFold(t, legacy.fold(t, "work"), "work", true)  // the default is open
+	wantFold(t, legacy.fold(t, "work"), "work", true)  // the legacy entry read it closed
 	wantFold(t, legacy.fold(t, "rigs"), "rigs", false) // the legacy entry read it open
 
 	// A new key with a choice of its own is the one that counts.
@@ -303,11 +320,11 @@ func TestFoldSurvivesStorageThatThrows(t *testing.T) {
 	t.Parallel()
 
 	dom := newPageDOMNoStorage(t)
-	wantFold(t, dom.fold(t, "rigs"), "rigs", true)            // the default is closed
-	wantFold(t, dom.fold(t, "attention"), "attention", false) // the default is open
+	wantFold(t, dom.fold(t, "rigs"), "rigs", true)          // the default is closed
+	wantFold(t, dom.fold(t, "landings"), "landings", false) // the default is open
 
-	dom.press(t, "attention", "click")
-	wantFold(t, dom.fold(t, "attention"), "attention", true)
+	dom.press(t, "landings", "click")
+	wantFold(t, dom.fold(t, "landings"), "landings", true)
 	dom.press(t, "rigs", "enter")
 	wantFold(t, dom.fold(t, "rigs"), "rigs", false)
 }
@@ -317,7 +334,7 @@ func TestFoldSurvivesStorageThatThrows(t *testing.T) {
 func TestFoldSummaryShowsOnlyWhileClosed(t *testing.T) {
 	t.Parallel()
 
-	dom := newPageDOM(t)
+	dom := newPageDOMOpening(t, "attention")
 	dom.call(t, "renderAttention", map[string]any{
 		"attention": map[string]any{"rows": []any{
 			map[string]any{"kind": "question", "owner": "operator", "class": "human", "id": "gt-aaaaa", "title": "which one?", "age_sec": 30},
@@ -355,7 +372,7 @@ func TestFoldSummaryComesFromTheReading(t *testing.T) {
 
 	// The reader folds the sections first: the summary is what a closed section
 	// says when a reading arrives behind it, not something a toggle recomputes.
-	dom := newPageDOM(t)
+	dom := newPageDOMOpening(t, "attention", "work")
 	dom.press(t, "work", "click")
 	dom.press(t, "attention", "click")
 	// Cost starts closed on every load (gt-7swd8): no click needed.
@@ -410,7 +427,7 @@ func TestFoldClosedSectionKeepsUpWithTheReading(t *testing.T) {
 			},
 		}
 	}
-	dom := newPageDOM(t)
+	dom := newPageDOMOpening(t, "work")
 	requests := pageNumber(t, dom, "__fetches.length")
 	dom.press(t, "work", "click") // closed by the reader
 	dom.call(t, "renderWork", read("angharad"))
@@ -444,7 +461,7 @@ func TestFoldClosedSectionKeepsUpWithTheReading(t *testing.T) {
 func TestFoldSetupRunTwiceFoldsOnce(t *testing.T) {
 	t.Parallel()
 
-	dom := newPageDOM(t)
+	dom := newPageDOMOpening(t, "work")
 	if _, err := dom.vm.RunString("setupCollapse(); setupCollapse();"); err != nil {
 		t.Fatalf("running the page's setup a second time: %v", err)
 	}
@@ -467,7 +484,6 @@ func TestFoldAttentionSummaryWhenEveryOwnerChipIsOff(t *testing.T) {
 	t.Parallel()
 
 	dom := newPageDOMStoring(t, map[string]string{"gt-attention-owners": "[]"})
-	dom.press(t, "attention", "click")
 	if _, err := dom.vm.RunString(`state = {
 		summary_at: "2026-10-29T00:00:00Z",
 		attention: {rows: [{owner: "operator", kind: "question", class: "needs"}]}
@@ -478,4 +494,26 @@ func TestFoldAttentionSummaryWhenEveryOwnerChipIsOff(t *testing.T) {
 	if got, want := dom.fold(t, "attention").Summary, "every owner chip is off"; got != want {
 		t.Errorf("the closed attention section reads %q, want %q", got, want)
 	}
+}
+
+// The reader's own choice for the one panel that opens by default, and for one
+// that starts closed, is remembered the way the page remembers every fold: the
+// next load finds each as it was left (gt-bqxpz).
+func TestFoldStateIsRemembered(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.press(t, "landings", "click") // closes the default-open panel
+	dom.press(t, "birds", "click")    // opens a default-closed one
+	stored := dom.storage(t)
+	var saved map[string]bool
+	if err := json.Unmarshal([]byte(stored["gt-fold"]), &saved); err != nil {
+		t.Fatalf("the page's saved folds: %v (storage: %v)", err, stored)
+	}
+	if !saved["landings"] || saved["birds"] {
+		t.Errorf("the page saved %v, want landings:true and birds:false", saved)
+	}
+	again := newPageDOMStoring(t, stored)
+	wantFold(t, again.fold(t, "landings"), "landings", true)
+	wantFold(t, again.fold(t, "birds"), "birds", false)
 }
