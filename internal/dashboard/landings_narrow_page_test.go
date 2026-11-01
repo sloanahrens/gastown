@@ -12,6 +12,14 @@ import (
 // .lrows box scrolls it sideways (the Cost table's own fade marks the cut
 // edge), a When cell reads as one value, and a title keeps a floor instead of
 // breaking into fragments (gt-u7xe9).
+//
+// These tests read the stylesheet. The page harness has no layout engine, so a
+// test cannot see what a browser draws: it asserts the declarations that
+// produce the layout, at both the wide two-track .grid and the narrow stacked
+// one. Each test fails when its declaration is removed or changed to a value
+// that draws a different table. The rendered check — that the table really
+// scrolls and the title really keeps its floor in a 470 px column — is a live
+// check the overseer owes after install (gt-o7z1j).
 
 // landingsBodyRow is one body row of the Landings table as the page drew it:
 // its class and each cell's class and text.
@@ -149,7 +157,8 @@ func TestLandingsWhenCellNeverWraps(t *testing.T) {
 
 // A landing's title keeps a floor: the Landing cell is at least 200 px wide and
 // only breaks a word when nothing else fits, so a narrow column does not shred
-// it into one- and two-letter lines.
+// it into one- and two-letter lines. A long unbroken token is the case the
+// break-word value is chosen for: it breaks rather than overflowing the cell.
 func TestLandingsTitleCellKeepsAReadableWidth(t *testing.T) {
 	t.Parallel()
 
@@ -179,6 +188,129 @@ func TestLandingsTitleCellKeepsAReadableWidth(t *testing.T) {
 		}
 		if !hasClassToken(row.Cells[1].Class, "main") {
 			t.Errorf("the Landing cell of row %q carries class %q, want the main class the title rule names", row.Cells[0].Text, row.Cells[1].Class)
+		}
+	}
+}
+
+// The table sizes its columns from their content. That is what turns the
+// title's floor and the When cell's nowrap into width: a fixed layout would
+// size the columns from the table width and ignore both, squeezing the title
+// and clipping the When reading however the cells declare themselves.
+func TestLandingsTableSizesColumnsFromContent(t *testing.T) {
+	t.Parallel()
+
+	if got := cssDecls(t, "ltable")["table-layout"]; got != "auto" {
+		t.Errorf("the .ltable rule has table-layout %q, want auto so the title floor and the When cell's nowrap size the columns", got)
+	}
+}
+
+// landingsConditionalRule is one rule the page draws only under a width
+// condition: the @media or @container block it sits in, its selector, and its
+// declarations keyed by property.
+type landingsConditionalRule struct {
+	At    string
+	Sel   string
+	Decls map[string]string
+}
+
+// landingsConditionalRules reads every @media and @container block in the
+// page's stylesheet. The page writes a rule's declarations with no nested
+// blocks, so each block's rules split on their closing brace. A block that is
+// opened and never closed is a fatal: the narrow layout cannot be read from a
+// stylesheet that does not parse.
+func landingsConditionalRules(t *testing.T) []landingsConditionalRule {
+	t.Helper()
+
+	css := pageStyle(t)
+	var out []landingsConditionalRule
+	for _, at := range []string{"@media", "@container"} {
+		for rest := css; ; {
+			start := strings.Index(rest, at)
+			if start < 0 {
+				break
+			}
+			open := strings.IndexByte(rest[start:], '{')
+			if open < 0 {
+				t.Fatalf("index.html has an unclosed %s block", at)
+			}
+			open += start
+			atRule := strings.TrimSpace(rest[start:open])
+			body, n := landingsBracedBody(t, rest[open:])
+			for _, rule := range strings.Split(body, "}") {
+				sel, declText, ok := strings.Cut(rule, "{")
+				if !ok {
+					continue
+				}
+				decls := map[string]string{}
+				for _, decl := range strings.Split(declText, ";") {
+					if prop, val, ok := strings.Cut(decl, ":"); ok {
+						decls[strings.TrimSpace(prop)] = strings.TrimSpace(val)
+					}
+				}
+				out = append(out, landingsConditionalRule{At: atRule, Sel: strings.TrimSpace(sel), Decls: decls})
+			}
+			rest = rest[open+n:]
+		}
+	}
+	return out
+}
+
+// landingsBracedBody returns the text between s[0], a "{", and its matching
+// close brace, and the index just past that brace.
+func landingsBracedBody(t *testing.T, s string) (string, int) {
+	t.Helper()
+
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return s[1:i], i + 1
+			}
+		}
+	}
+	t.Fatalf("index.html has an unclosed block")
+	return "", 0
+}
+
+// The table is drawn in the wide two-track .grid and in the narrow column the
+// same .grid stacks to one track below 1000 px. No width-conditional rule
+// re-declares a landings layout property, so the two columns draw the same
+// table rules and a check of the declarations covers both widths. What differs
+// between them is only the width they leave the table, which these tests cannot
+// see; the overseer's live 470 px check covers the narrow one.
+func TestLandingsLayoutRulesHoldAtEveryWidth(t *testing.T) {
+	t.Parallel()
+
+	wide := declOf(t, topRule(t, ".grid"), "grid-template-columns")
+	if got := len(strings.Fields(wide)); got != 2 {
+		t.Errorf("the .grid draws %d tracks (%q), want the two the landings panel shares at a wide width", got, wide)
+	}
+
+	stacked := false
+	for _, rule := range landingsConditionalRules(t) {
+		if rule.Sel == ".grid" && strings.Contains(rule.At, "max-width") && rule.Decls["grid-template-columns"] == "1fr" {
+			stacked = true
+		}
+	}
+	if !stacked {
+		t.Error("no max-width rule stacks the .grid to one track, so the narrow column the landings table is drawn in has no declaration")
+	}
+
+	props := []string{"table-layout", "min-width", "overflow-wrap", "white-space", "overflow-x"}
+	for _, rule := range landingsConditionalRules(t) {
+		for _, class := range []string{"ltable", "lrows", "main", "when"} {
+			if !selectsClass(rule.Sel, class) {
+				continue
+			}
+			for _, prop := range props {
+				if got, ok := rule.Decls[prop]; ok {
+					t.Errorf("%s sets %s:%s on %s, so the table draws a different layout at that width than the declarations the other tests pin", rule.At, prop, got, rule.Sel)
+				}
+			}
 		}
 	}
 }

@@ -187,6 +187,10 @@ section>h2 .foldsum{margin-left:auto;text-transform:none;letter-spacing:0;white-
 .fev .a{color:var(--teal);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .fev .s{overflow-wrap:anywhere}
 .fev .rp{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* The landings table sizes its columns from their content, so the title's floor
+   and the When cell's nowrap widen the table into the scroll box; a fixed
+   layout would size the columns from the table width and ignore both. */
+.ltable{table-layout:auto}
 .ltable td{vertical-align:top}
 .ltable td.n,.ltable th.n{padding-left:14px}
 /* A landing's title keeps a floor, so a narrow panel scrolls the table rather
