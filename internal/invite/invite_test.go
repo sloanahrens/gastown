@@ -250,3 +250,40 @@ func TestNewRefusesBadConfig(t *testing.T) {
 		}
 	}
 }
+
+// ascending yields the bytes 0, 1, 2, ... so the code bytes are known.
+type ascending struct{ n byte }
+
+func (r *ascending) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = r.n
+		r.n++
+	}
+	return len(p), nil
+}
+
+func TestCodeUsesTheWholeAlphabetFromTheLastEightBytes(t *testing.T) {
+	t.Parallel()
+	var got sent
+	svc, err := New(Config{
+		Store: NewMemory(), Members: func() *membership.Memory {
+			m := membership.NewMemory()
+			if err := m.AddOrg(context.Background(), membership.Org{ID: "org-1", Name: "One"}); err != nil {
+				t.Fatal(err)
+			}
+			return m
+		}(),
+		Send: func(_ context.Context, email, id, code string) error { got = sent{email, id, code}; return nil },
+		Now:  func() time.Time { return t0 }, Rand: &ascending{}, TTL: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Create(context.Background(), "org-1", "a@example.com", membership.RoleMember); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Bytes 16 to 23 index the 32-symbol alphabet: S T U V W X Y Z.
+	if got.code != "STUVWXYZ" {
+		t.Errorf("code = %q, want STUVWXYZ", got.code)
+	}
+}

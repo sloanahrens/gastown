@@ -123,9 +123,9 @@ func (s *Service) Create(ctx context.Context, orgID, email string, role membersh
 		return "", fmt.Errorf("invite: random source: %w", err)
 	}
 	id := hex.EncodeToString(raw[:16])
-	code := make([]byte, 8)
-	for i := range code {
-		code[i] = codeAlphabet[raw[16+i]&31]
+	code := make([]byte, 0, 8)
+	for _, b := range raw[16:] {
+		code = append(code, codeAlphabet[b&31])
 	}
 	inv := Invitation{
 		ID: id, OrgID: orgID, Email: email, Role: role,
