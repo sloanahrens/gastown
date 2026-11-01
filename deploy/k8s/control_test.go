@@ -16,12 +16,18 @@ func TestControlKindConfig(t *testing.T) {
 	if !ok || len(nodes) != 3 {
 		t.Fatalf("nodes = %v, want a control-plane and two workers", cfg["nodes"])
 	}
+	images := map[string]bool{}
 	pools := map[string]bool{}
 	var tainted string
 	for _, n := range nodes {
 		m, _ := n.(map[string]any)
 		labels, _ := m["labels"].(map[string]any)
 		pool, _ := labels["gt.dev/pool"].(string)
+		img, _ := m["image"].(string)
+		if !strings.HasPrefix(img, "kindest/node:v") || !strings.Contains(img, "@sha256:") {
+			t.Errorf("node %v image = %q, want kindest/node:v<version>@sha256:<digest>", m["role"], img)
+		}
+		images[img] = true
 		if m["role"] == "worker" {
 			pools[pool] = true
 		}
@@ -31,6 +37,9 @@ func TestControlKindConfig(t *testing.T) {
 				tainted = pool
 			}
 		}
+	}
+	if len(images) != 1 {
+		t.Errorf("nodes run %d different images, want one pinned image", len(images))
 	}
 	if !pools["core"] || !pools["privileged"] {
 		t.Errorf("worker pools = %v, want core and privileged", pools)
@@ -53,19 +62,19 @@ func readControlRunbook(t *testing.T) string {
 // which VM hosts the control cluster and what gt-control really is.
 func TestControlRunbookNamesGtKindNotGtControl(t *testing.T) {
 	t.Parallel()
-	lines := strings.SplitN(readControlRunbook(t), "\n", 5)
-	head := strings.Join(lines[:min(len(lines), 5)], "\n")
-	for _, want := range []string{"gt-kind", "gt-control", "sweep runner"} {
-		if !strings.Contains(head, want) {
-			t.Errorf("the runbook's opening lines lack %q:\n%s", want, head)
-		}
+	lines := strings.Split(readControlRunbook(t), "\n")
+	if len(lines) < 3 || !strings.Contains(lines[0], "gt-kind") {
+		t.Fatalf("the runbook's first line must name gt-kind as the VM: %q", lines[:min(len(lines), 1)])
+	}
+	if !strings.Contains(lines[2], "gt-control") || !strings.Contains(lines[2], "sweep runner") {
+		t.Errorf("the first paragraph must say gt-control is the sweep runner's engine: %q", lines[2])
 	}
 }
 
 func TestControlRunbookStatesCoreBudget(t *testing.T) {
 	t.Parallel()
 	text := readControlRunbook(t)
-	for _, want := range []string{"24 cores", "Docker Desktop 8", "gt-sbx 12", "gt-control 8", "gt-kind 6"} {
+	for _, want := range []string{"24 cores", "Docker Desktop 8, gt-sbx 12, gt-control 8, gt-kind 6", "34 against 24"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("the runbook lacks the budget figure %q", want)
 		}

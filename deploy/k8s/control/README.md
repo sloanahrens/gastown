@@ -4,7 +4,7 @@ The VM is `gt-kind`. The Colima VM named `gt-control` is NOT the control plane: 
 
 ## What this directory holds
 
-`kind-config.yaml` is the cluster `gt-ctl`: one control-plane node, a `core` worker (`gt.dev/pool=core`) and a `privileged` worker (`gt.dev/pool=privileged`, tainted `NoSchedule`) for the Forgejo runner later. Nothing here starts a VM or a cluster.
+`kind-config.yaml` is the cluster `gt-ctl`, every node on the pinned node image the gt-sbx cluster already runs: one control-plane node, a `core` worker (`gt.dev/pool=core`) and a `privileged` worker (`gt.dev/pool=privileged`, tainted `NoSchedule`) for the Forgejo runner later. Nothing here starts a VM or a cluster.
 
 ## Host core budget
 
@@ -36,4 +36,4 @@ Nothing else depends on this cluster until a workload is moved into it, so stopp
 
 ## Environments
 
-Hosts, the registry and the storage class for this cluster are read from `deploy/k8s/values/<env>/hosts.yaml`, not spelled in a manifest (gt-ht5he).
+Hosts, the registry and the storage class are meant to come from per-environment values files, not to be spelled in a manifest (gt-ht5he adds them under `deploy/k8s/values`; until it lands there are none).
