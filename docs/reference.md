@@ -428,6 +428,53 @@ refuses the run rather than reading as "keep nothing" or "prune nothing".
 [The disk maintenance guide](guides/disk-maintenance.md) says what a run
 deletes and keeps, when it refuses, and how to read the ledger.
 
+### Bird Reports
+
+The `bird_reports` patrol (gt-cbsat) raises one attention item per expected
+reporter whose daily report is missing or late, so a report a session cron was
+to write is noticed the same morning without anyone remembering to look. It is
+off unless `daemon.patrols.bird_reports.enabled` is true in
+`settings/config.json`:
+
+```json
+"daemon": {
+  "patrols": {
+    "bird_reports": {
+      "enabled": true,
+      "start_hour": 6,
+      "max_age": "26h",
+      "reporters": ["dunlin", "overseer"]
+    }
+  }
+}
+```
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `enabled` | `false` | Whether the patrol runs at all. A town with no birds leaves it off |
+| `start_hour` | `6` | The local hour, 0 to 23, the day's reports are expected from. Before it the patrol raises nothing, because the reports are not late yet. `0` is midnight, so the key is optional rather than zero-means-default |
+| `max_age` | `26h` | How old a report may be before it is late, as a Go duration. A day plus two hours, so a report written a little later each morning is not late the moment its hour passes |
+| `reporters` | the nine birds (`dunlin`, `dipper`, `eagle`, `goose`, `peacock`, `egret`, `seagull`, `owl`, `merlin`) and `overseer` | The reporters whose daily report is expected. Each name is one directory under `.runtime`; a name that is empty, `.`, `..`, carries a path separator, or is listed twice is refused |
+
+Every hour, from `start_hour` on, the patrol reads
+`<town>/.runtime/<name>/reports/daily.json` — only its `written_at`; the Birds
+panel reads the same file — and raises the attention item
+`bird-report-stale:<name>` while that report is missing, unreadable, has no
+readable `written_at`, or carries one older than `max_age`. A `written_at` in
+the future is an item too: its age cannot be judged, and reading it as fresh
+would let a bad timestamp hide a stale report. The item clears on the next
+check that finds the report fresh, and a reporter taken out of the list loses
+its item the same way.
+
+A check that cannot run — a `max_age` the patrol cannot parse — raises
+`bird-report-check-failed` at high severity instead of leaving the queue quiet,
+and it replaces the reporter items of the previous check, because none of them
+was verified by this one.
+
+The block is decoded strictly: an unknown key, an hour outside 0 to 23, an age
+that is not a positive duration, or a reporter name that is not one directory
+name refuses the config load rather than being ignored.
+
 ### Daemon Environment (`settings/daemon.env`)
 
 Optional. One `KEY=VALUE` pair per line; blank lines and lines starting with

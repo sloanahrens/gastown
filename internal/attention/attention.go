@@ -83,6 +83,9 @@ const (
 	// KindReviewBacklog: the open risk-path queue passed its threshold or rose
 	// fast, so unreviewed landings are piling up faster than they clear.
 	KindReviewBacklog Kind = "review-backlog"
+	// KindBirdReportStale: an expected reporter's daily report is missing or
+	// older than the patrol's maximum age (gt-cbsat).
+	KindBirdReportStale Kind = "bird-report-stale"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -96,6 +99,7 @@ func Kinds() []Kind {
 		KindHostDisk, KindHostMem, KindHostDocker, KindHostProbe,
 		KindQuestionNew, KindQuestionAnswered, KindQuestionStale,
 		KindOverseerSilent, KindDispatchIdle, KindDeployFailed, KindReviewBacklog,
+		KindBirdReportStale,
 	}
 }
 

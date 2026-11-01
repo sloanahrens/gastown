@@ -83,6 +83,8 @@ var ruleOwners = map[string]Owner{
 	RuleDeployFailed: OwnerOverseer,
 	// A review queue is the overseer's to work down.
 	RuleReviewBacklog: OwnerOverseer,
+	// A late report is chased by the overseer, which the birds answer to.
+	RuleBirdReportStale: OwnerOverseer,
 }
 
 // humanFamilies are the rule families the table gives the human as a whole:

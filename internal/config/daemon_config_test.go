@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -435,6 +436,87 @@ func TestDaemonPatrolConfigDecodesOverseerReport(t *testing.T) {
 	var typo DaemonPatrolConfig
 	if err := DecodeJSONFile("daemon.json", []byte(`{"patrols":{"overseer_report":{"enabled":true,"intervall":"15m"}}}`), &typo); err == nil {
 		t.Error("an unknown overseer_report field decoded without error")
+	}
+}
+
+// bird_reports (gt-cbsat) decodes strictly with its own fields, defaults its
+// hour, age and reporters, and refuses a value the patrol cannot act on: a
+// mistyped setting must not read as "no alarm".
+func TestBirdReportsConfigDefaultsAndRefusals(t *testing.T) {
+	t.Parallel()
+
+	var cfg DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(`{"patrols":{"bird_reports":{"enabled":true,"start_hour":7,"max_age":"30h","reporters":["dunlin","overseer"]}}}`), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	br := cfg.Patrols.BirdReports
+	if br == nil || !br.Enabled {
+		t.Fatalf("bird_reports = %+v, want enabled", br)
+	}
+	if got := br.StartHourValue(); got != 7 {
+		t.Errorf("start_hour = %d, want 7", got)
+	}
+	if age, err := br.MaxAgeValue(); err != nil || age != 30*time.Hour {
+		t.Errorf("max_age = %v, %v; want 30h", age, err)
+	}
+	if got := br.ReportersValue(); !slices.Equal(got, []string{"dunlin", "overseer"}) {
+		t.Errorf("reporters = %v, want the configured pair", got)
+	}
+
+	var absent DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(`{"patrols":{"handler":{"enabled":true}}}`), &absent); err != nil {
+		t.Fatalf("decode without bird_reports: %v", err)
+	}
+	if absent.Patrols.BirdReports != nil {
+		t.Errorf("absent key decoded as %+v", absent.Patrols.BirdReports)
+	}
+
+	// The accessors answer for a block that is not there, so the patrol reads
+	// the same defaults whether a town wrote the key or not.
+	var none *BirdReportsConfig
+	if got := none.StartHourValue(); got != BirdReportsDefaultStartHour {
+		t.Errorf("unset start_hour = %d, want the %d default", got, BirdReportsDefaultStartHour)
+	}
+	if age, err := none.MaxAgeValue(); err != nil || age != 26*time.Hour {
+		t.Errorf("unset max_age = %v, %v; want 26h", age, err)
+	}
+	if got := none.ReportersValue(); !slices.Equal(got, DefaultBirdReporters()) || len(got) != 10 {
+		t.Errorf("unset reporters = %v, want the ten defaults", got)
+	}
+
+	// 0 is midnight, a real hour, so it must not read as "unset".
+	var midnight DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(`{"patrols":{"bird_reports":{"start_hour":0}}}`), &midnight); err != nil {
+		t.Fatalf("decode start_hour 0: %v", err)
+	}
+	if got := midnight.Patrols.BirdReports.StartHourValue(); got != 0 {
+		t.Errorf("start_hour 0 read as %d, want 0", got)
+	}
+
+	bad := map[string]string{
+		"not an object":         `{"bird_reports": "on"}`,
+		"unknown key":           `{"bird_reports": {"enable": true}}`,
+		"hour past 23":          `{"bird_reports": {"start_hour": 24}}`,
+		"negative hour":         `{"bird_reports": {"start_hour": -1}}`,
+		"unparseable age":       `{"bird_reports": {"max_age": "soon"}}`,
+		"zero age":              `{"bird_reports": {"max_age": "0s"}}`,
+		"negative age":          `{"bird_reports": {"max_age": "-1h"}}`,
+		"empty reporter":        `{"bird_reports": {"reporters": [""]}}`,
+		"dot-dot reporter":      `{"bird_reports": {"reporters": [".."]}}`,
+		"separator in reporter": `{"bird_reports": {"reporters": ["a/b"]}}`,
+		"backslash in reporter": `{"bird_reports": {"reporters": ["a\\b"]}}`,
+		"NUL in reporter":       `{"bird_reports": {"reporters": ["dunlin\u0000"]}}`,
+		"reporter listed twice": `{"bird_reports": {"reporters": ["dunlin", "dunlin"]}}`,
+		"reporters not a list":  `{"bird_reports": {"reporters": "dunlin"}}`,
+	}
+	for name, doc := range bad {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var p PatrolsConfig
+			if err := json.Unmarshal([]byte(doc), &p); err == nil {
+				t.Fatalf("%s decoded without an error: %+v", name, p.BirdReports)
+			}
+		})
 	}
 }
 

@@ -265,6 +265,7 @@ type PatrolsConfig struct {
 	HMSync               *HMSyncConfig               `json:"hm_sync,omitempty"`
 	SpecDispatch         *SpecDispatchConfig         `json:"spec_dispatch,omitempty"`
 	OverseerReport       *OverseerReportConfig       `json:"overseer_report,omitempty"`
+	BirdReports          *BirdReportsConfig          `json:"bird_reports,omitempty"`
 	PatrolScan           *PatrolScanConfig           `json:"patrol_scan,omitempty"`
 	EventsPrune          *EventsPruneConfig          `json:"events_prune,omitempty"`
 
@@ -1242,6 +1243,135 @@ type OverseerReportConfig struct {
 	// StaleCrew adds the stale crew clones section, which lists the crew
 	// clones not fetched in a day (gt-t3mky). Default off.
 	StaleCrew bool `json:"stale_crew,omitempty"`
+}
+
+// BirdReportsConfig configures the bird_reports patrol (gt-cbsat): every hour
+// the daemon checks each reporter's <town>/.runtime/<name>/reports/daily.json
+// and, from StartHour on, raises one attention item, bird-report-stale:<name>,
+// while that report is missing, unreadable or older than MaxAge.
+//
+// Off unless enabled: a town that keeps no birds must not get ten items for
+// ten files that were never going to exist. Enabling it is a config change,
+// and so is adding a reporter to the list.
+type BirdReportsConfig struct {
+	// Enabled turns the patrol on. Default off.
+	Enabled bool `json:"enabled"`
+
+	// StartHour is the local hour the day's reports are expected from, 0 to
+	// 23. Absent means BirdReportsDefaultStartHour; 0 is a real setting
+	// (midnight), which is why the field is a pointer.
+	StartHour *int `json:"start_hour,omitempty"`
+
+	// MaxAgeStr is how old a report may be before it is late (default "26h").
+	MaxAgeStr string `json:"max_age,omitempty"`
+
+	// Reporters names the reporters whose daily report is expected. Absent
+	// means DefaultBirdReporters; each name is one directory under .runtime.
+	Reporters []string `json:"reporters,omitempty"`
+}
+
+// The bird_reports defaults.
+const (
+	// BirdReportsDefaultStartHour is the local hour the day's reports are
+	// expected from.
+	BirdReportsDefaultStartHour = 6
+	// BirdReportsDefaultMaxAge is how old a report may be before it is late:
+	// a day plus two hours, so a report written a little later each morning is
+	// not late the moment its hour passes.
+	BirdReportsDefaultMaxAge = 26 * time.Hour
+)
+
+// DefaultBirdReporters returns the reporters the patrol expects when the
+// config lists none: the nine birds who report every day, and the overseer's
+// own report as the tenth.
+func DefaultBirdReporters() []string {
+	return []string{"dunlin", "dipper", "eagle", "goose", "peacock", "egret", "seagull", "owl", "merlin", "overseer"}
+}
+
+// StartHourValue returns the hour the day's reports are expected from.
+func (c *BirdReportsConfig) StartHourValue() int {
+	if c == nil || c.StartHour == nil {
+		return BirdReportsDefaultStartHour
+	}
+	return *c.StartHour
+}
+
+// MaxAgeValue returns how old a report may be before it is late, or an error
+// for a value the patrol cannot judge against. An empty setting is the
+// default; an unparseable one is refused rather than read as the default, so
+// a typo cannot widen the window to no alarm.
+func (c *BirdReportsConfig) MaxAgeValue() (time.Duration, error) {
+	if c == nil || c.MaxAgeStr == "" {
+		return BirdReportsDefaultMaxAge, nil
+	}
+	d, err := time.ParseDuration(c.MaxAgeStr)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("patrols.bird_reports.max_age = %q: want a positive Go duration such as %q",
+			c.MaxAgeStr, BirdReportsDefaultMaxAge)
+	}
+	return d, nil
+}
+
+// ReportersValue returns the reporters whose daily report is expected: the
+// configured list, or DefaultBirdReporters when it is empty.
+func (c *BirdReportsConfig) ReportersValue() []string {
+	if c == nil || len(c.Reporters) == 0 {
+		return DefaultBirdReporters()
+	}
+	return slices.Clone(c.Reporters)
+}
+
+// validateBirdReporterName refuses a name that is not one directory name under
+// the town's .runtime: the patrol builds a path from each name, so a separator
+// or a dot entry would read a file outside the reporter's own directory.
+func validateBirdReporterName(name string) error {
+	switch {
+	case name == "":
+		return errors.New("patrols.bird_reports.reporters: a reporter name is empty")
+	case name == "." || name == "..":
+		return fmt.Errorf("patrols.bird_reports.reporters: %q is not a reporter directory name", name)
+	case strings.ContainsAny(name, `/\`):
+		return fmt.Errorf("patrols.bird_reports.reporters: %q is not a reporter directory name: it carries a path separator", name)
+	case strings.ContainsRune(name, 0):
+		return fmt.Errorf("patrols.bird_reports.reporters: %q is not a reporter directory name", name)
+	}
+	return nil
+}
+
+// UnmarshalJSON decodes the patrol's block strictly, refusing a value it
+// cannot act on: an hour outside the clock, an age it cannot measure, or a
+// reporter name that is not one directory name. A typo must not quietly read
+// as the default, or the town would run on a setting it never wrote.
+//
+// The unknown-field check is repeated here because a type that decodes itself
+// is decoded by the config kernel's strict decoder opaquely.
+func (c *BirdReportsConfig) UnmarshalJSON(data []byte) error {
+	type plain BirdReportsConfig
+	var p plain
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
+		return fmt.Errorf("patrols.bird_reports: %w", err)
+	}
+	if p.StartHour != nil && (*p.StartHour < 0 || *p.StartHour > 23) {
+		return fmt.Errorf("patrols.bird_reports.start_hour = %d: want an hour from 0 to 23", *p.StartHour)
+	}
+	cfg := BirdReportsConfig(p)
+	if _, err := cfg.MaxAgeValue(); err != nil {
+		return err
+	}
+	seen := make(map[string]bool, len(cfg.Reporters))
+	for _, name := range cfg.Reporters {
+		if err := validateBirdReporterName(name); err != nil {
+			return err
+		}
+		if seen[name] {
+			return fmt.Errorf("patrols.bird_reports.reporters: %q is listed twice", name)
+		}
+		seen[name] = true
+	}
+	*c = cfg
+	return nil
 }
 
 // PatrolScanConfig configures the patrol_scan tick (ADR 0005, gt-4k3fj.6):

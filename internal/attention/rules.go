@@ -70,6 +70,10 @@ const (
 
 	// RuleReviewBacklog is the review-backlog rule (gt-ee6ox).
 	RuleReviewBacklog = "review.backlog"
+
+	// RuleBirdReportStale is the late-or-missing daily bird report rule
+	// (gt-cbsat).
+	RuleBirdReportStale = "bird.report_stale"
 )
 
 var (
@@ -108,6 +112,9 @@ var ruleFlags = map[string]RuleFlags{
 	// Each risk-path item wakes on its own only after RiskPathPromoteAfter, so
 	// a pile of them goes unnoticed; this rule wakes on the total.
 	RuleReviewBacklog: flagsWake,
+	// A late report is for the next overseer look, not a reason to wake it:
+	// the queue row and the dashboard pill are what the beat reads.
+	RuleBirdReportStale: flagsAsk,
 	// A question is waiting on the operator, or the operator has answered and
 	// the overseer has yet to act; both are the overseer's to pick up.
 	RuleQuestionNew:      flagsWake,
@@ -196,6 +203,7 @@ var kindRules = map[Kind]string{
 	KindDispatchIdle:     RuleDispatchIdle,
 	KindDeployFailed:     RuleDeployFailed,
 	KindReviewBacklog:    RuleReviewBacklog,
+	KindBirdReportStale:  RuleBirdReportStale,
 }
 
 // RuleFor is the rule id of an item. The disk collector's key is its rule

@@ -317,6 +317,9 @@ type attentionSources struct {
 	// (attention_dispatch_idle.go).
 	dispatchIdle func() dispatchIdleStatus
 	dispatchHold func() string
+	// birdReports is the last bird_reports check's items, or nil when the
+	// patrol is off (bird_reports.go).
+	birdReports func() []attention.Item
 	// repeatedAt is when each repeating item was last said, carried across
 	// ticks by the daemon. attentionTick updates it.
 	repeatedAt map[string]time.Time
@@ -573,6 +576,7 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindHostDocker, collect: s.collectHostDocker},
 		{kind: attention.KindDispatchIdle, collect: s.collectDispatchIdle},
 		{kind: attention.KindDeployFailed, collect: s.collectDeployFailures},
+		{kind: attention.KindBirdReportStale, collect: s.collectBirdReports},
 	}, s.questionCollectors()...)
 }
 
@@ -597,6 +601,11 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 	s.overseer = d.productionOverseerReads()
 	s.dispatchIdle = d.dispatchIdle.Status
 	s.dispatchHold = d.specDispatchTownHold
+	// A patrol that is off raises nothing, so its items clear rather than
+	// outliving the setting that asked for them.
+	if d.isPatrolActive("bird_reports") {
+		s.birdReports = d.birdReportStale.observed
+	}
 	s.redMain = func(ctx context.Context, rig string) ([]*beads.Issue, error) {
 		return d.rigWorkBeads(rig).List(beads.ListOptions{
 			Status: "open", Label: landworker.LabelRedMain, Priority: -1, Limit: 0,
