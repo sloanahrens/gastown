@@ -117,12 +117,14 @@ type runGit struct {
 	ancestors map[string]bool              // "a>b" -> a is b or an ancestor of b
 	ahead     map[string]string            // "a>b" -> the commits b has that a lacks
 	calls     [][]string
-	writes    []string // a push and a set-url, the calls that change a remote
+	contexts  []context.Context // the context each call was run under
+	writes    []string          // a push and a set-url, the calls that change a remote
 }
 
 // run runs one git argv.
-func (g *runGit) run(_ context.Context, argv []string) ([]byte, error) {
+func (g *runGit) run(ctx context.Context, argv []string) ([]byte, error) {
 	g.calls = append(g.calls, slices.Clone(argv))
+	g.contexts = append(g.contexts, ctx)
 	if len(argv) < 2 || argv[0] != "git" {
 		return nil, fmt.Errorf("not a git call: %q", argv)
 	}
@@ -507,6 +509,16 @@ func (w *runWorld) resetWrites() {
 	w.fake.ClearCalls()
 }
 
+// childArgv returns the first recorded run of program, or nil.
+func childArgv(runs [][]string, program string) []string {
+	for _, argv := range runs {
+		if len(argv) > 0 && argv[0] == program {
+			return slices.Clone(argv)
+		}
+	}
+	return nil
+}
+
 // snapshot is the token files a provisioning run wrote, as a value a second run
 // can be compared against.
 type provisionSnapshot struct {
@@ -627,7 +639,9 @@ func TestRunDryRunWritesNothingOutsideItsTempDir(t *testing.T) {
 
 // TestRunSecondRunChangesNothing drives the cutover twice over one world and holds
 // the second run to no write anywhere: no Forgejo write, no push or set-url, no
-// file write, no key operation and no key mint. Making any step write
+// file write, no key operation and no key mint. The probe and the daemon restart
+// still run — a converged run repeats both — and the test pins them to the first
+// run's argv with no other child beside them. Making any step write
 // unconditionally turns it red.
 func TestRunSecondRunChangesNothing(t *testing.T) {
 	t.Parallel()
@@ -642,6 +656,12 @@ func TestRunSecondRunChangesNothing(t *testing.T) {
 	if len(w.fake.Writes()) == 0 {
 		t.Fatal("the first run sent no write to Forgejo")
 	}
+	firstProbe := childArgv(w.exec.runs, "bash")
+	firstRestart := childArgv(w.exec.runs, "env")
+	if firstProbe == nil || firstRestart == nil {
+		t.Fatalf("the first run did not run the probe and the restart: %q", w.exec.runs)
+	}
+	runsBefore, readsBefore := len(w.exec.runs), len(w.exec.calls)
 
 	w.resetWrites()
 	tokensBefore := w.snapshotTokens()
@@ -665,6 +685,29 @@ func TestRunSecondRunChangesNothing(t *testing.T) {
 	}
 	if len(w.exec.writes) != 0 {
 		t.Errorf("the second run ran the write children %q", w.exec.writes)
+	}
+	// The two children a converged run still runs — the probe and the daemon
+	// restart — ran with exactly the first run's argv, and no other child ran.
+	// Making either step write, adding a child, or changing its argv turns this
+	// red.
+	secondRuns := w.exec.runs[runsBefore:]
+	if len(secondRuns) != 2 {
+		t.Fatalf("the second run ran %d child(ren) %q, want the probe and the restart", len(secondRuns), secondRuns)
+	}
+	if !slices.Equal(secondRuns[0], firstProbe) {
+		t.Errorf("the second run's probe = %q, want the first run's %q", secondRuns[0], firstProbe)
+	}
+	if !slices.Equal(secondRuns[1], firstRestart) {
+		t.Errorf("the second run's restart = %q, want the first run's %q", secondRuns[1], firstRestart)
+	}
+	secondReads := w.exec.calls[readsBefore:]
+	if len(secondReads) == 0 {
+		t.Error("the second run did not re-read the landing queue")
+	}
+	for _, argv := range secondReads {
+		if len(argv) == 0 || argv[0] != "bd" {
+			t.Errorf("the second run ran a read other than the landing-queue read: %q", argv)
+		}
 	}
 	if got := w.snapshotTokens(); !reflect.DeepEqual(got, tokensBefore) {
 		t.Errorf("the second run changed the token files: %+v, want %+v", got, tokensBefore)
@@ -1181,11 +1224,6 @@ func TestRunBrokerToken(t *testing.T) {
 					t.Errorf("%s holds the token", path)
 				}
 			}
-			for path, content := range w.files.files {
-				if strings.Contains(string(content), token) {
-					t.Errorf("%s holds the token", path)
-				}
-			}
 			for path, content := range w.pfiles.written {
 				if strings.Contains(string(content), token) {
 					t.Errorf("%s holds the token", path)
@@ -1272,6 +1310,48 @@ func TestRunContextReachesTheProvisioningRun(t *testing.T) {
 	}
 	if got == nil || got.Value(ctxKey{}) != "the run's context" {
 		t.Error("the provisioning run got a context the cutover was not given")
+	}
+}
+
+// TestRunContextReachesTheGitCalls: every git call the run makes — the ref
+// listings, the scratch repository, the plan's reads, the push and the repoint —
+// runs under the cutover's own context, so an interrupt reaches a call in flight.
+// Running a call under context.Background instead turns it red.
+func TestRunContextReachesTheGitCalls(t *testing.T) {
+	t.Parallel()
+	type ctxKey struct{}
+	const want = "the run's context"
+	w := newRunWorld(t, false)
+	ctx := context.WithValue(context.Background(), ctxKey{}, want)
+	if code := w.run(t, ctx); code != ExitOK {
+		t.Fatalf("Run = %d, want 0 (output: %s)", code, w.output())
+	}
+	if len(w.git.contexts) != len(w.git.calls) || len(w.git.calls) == 0 {
+		t.Fatalf("recorded %d context(s) for %d git call(s)", len(w.git.contexts), len(w.git.calls))
+	}
+	for i, got := range w.git.contexts {
+		if got == nil || got.Value(ctxKey{}) != want {
+			t.Errorf("git call %d ran under a context the cutover was not given: %q", i, w.git.calls[i])
+		}
+	}
+}
+
+// TestRunSendsNoMirrorRequest: the port dropped --mirror, so a default run sends
+// Forgejo no mirror request and writes no mirror target. Re-adding a mirror
+// call turns it red.
+func TestRunSendsNoMirrorRequest(t *testing.T) {
+	t.Parallel()
+	w := newRunWorld(t, false)
+	if code := w.run(t, context.Background()); code != ExitOK {
+		t.Fatalf("Run = %d, want 0 (output: %s)", code, w.output())
+	}
+	for _, call := range w.fake.CallLog() {
+		if strings.Contains(strings.ToLower(call.Path), "mirror") {
+			t.Errorf("a default run sent %s %s, a mirror request", call.Method, call.Path)
+		}
+	}
+	if settings := string(w.files.files[w.opts.RigRoot+"/settings/config.json"]); strings.Contains(settings, "mirror") {
+		t.Errorf("the settings name a mirror:\n%s", settings)
 	}
 }
 

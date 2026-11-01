@@ -18,7 +18,7 @@ import (
 // writes through, and where it logs.
 type Cutover struct {
 	Opts *Options
-	// Ctx bounds the steps that take one (the provisioning run); nil is
+	// Ctx bounds the provisioning run and every git call; nil is
 	// context.Background.
 	Ctx context.Context
 	// Git runs one git argv and returns its stdout; nil runs the git binary, each
@@ -96,7 +96,7 @@ func (c *Cutover) ImportRefs() (err error) {
 		return err
 	}
 
-	plan, err := Plan(githubBefore, forgejoBefore, ExecRefGit{Dir: scratch, Run: c.git()})
+	plan, err := Plan(githubBefore, forgejoBefore, ExecRefGit{Dir: scratch, Ctx: c.ctx(), Run: c.git()})
 	if err != nil {
 		return err
 	}
@@ -114,7 +114,7 @@ func (c *Cutover) ImportRefs() (err error) {
 	} else {
 		c.logf("+ git -C %s push --quiet -- %s %s", scratch, printedURL(o.AdminGitURL), strings.Join(specs, " "))
 		if !o.DryRun {
-			if err := pushRefs(c.git(), scratch, o.AdminGitURL, specs); err != nil {
+			if err := pushRefs(c.ctx(), c.git(), scratch, o.AdminGitURL, specs); err != nil {
 				return err
 			}
 		}
@@ -185,7 +185,7 @@ func missingNames(github, forgejo []forgejoresync.Ref) []string {
 // listRefs logs and reads one side's branch and tag listing, sorted by ref name.
 func (c *Cutover) listRefs(url string) ([]forgejoresync.Ref, error) {
 	c.logf("+ git ls-remote --heads --tags --refs %s", printedURL(url))
-	out, err := forgejoresync.ExecGit{Run: c.git()}.LsRemote(url)
+	out, err := forgejoresync.ExecGit{Context: c.ctx(), Run: c.git()}.LsRemote(url)
 	if err != nil {
 		return nil, fmt.Errorf("could not list the refs at %s: %w", printedURL(url), err)
 	}
@@ -200,7 +200,7 @@ func (c *Cutover) listRefs(url string) ([]forgejoresync.Ref, error) {
 // ask one side's sha against the other's. A dry run fetches too: these writes stay
 // inside the scratch directory, and the plan is unreadable without them.
 func (c *Cutover) fetchBoth(scratch string) error {
-	git := forgejoresync.ExecGit{Run: c.git()}
+	git := forgejoresync.ExecGit{Context: c.ctx(), Run: c.git()}
 	c.logf("+ git init --bare --quiet %s", scratch)
 	if err := git.InitBare(scratch); err != nil {
 		return fmt.Errorf("could not make the scratch repository %s: %w", scratch, err)
@@ -221,14 +221,14 @@ func (c *Cutover) fetchBoth(scratch string) error {
 }
 
 // pushRefs sends specs from the scratch repository to url as a plain push, so a
-// ref Forgejo is ahead on cannot move. The cutover installs no signal handler, so
-// the push runs under the background context (gt-csjwi).
+// ref Forgejo is ahead on cannot move. ctx is the run's context, so an interrupt
+// ends a push in flight.
 //
 // Its error is returned as git wrote it: ImportRefs is its only caller, and the
 // scrub there is what takes the URL out.
-func pushRefs(git forgejoresync.Runner, scratch, url string, specs []string) error {
+func pushRefs(ctx context.Context, git forgejoresync.Runner, scratch, url string, specs []string) error {
 	argv := append([]string{"git", "-C", scratch, "push", "--quiet", "--", url}, specs...)
-	if _, err := git(context.Background(), argv); err != nil {
+	if _, err := git(ctx, argv); err != nil {
 		return fmt.Errorf("the push of %d ref(s) to the admin base failed: %w", len(specs), err)
 	}
 	return nil
@@ -476,6 +476,15 @@ func (c *Cutover) git() forgejoresync.Runner {
 		return c.Git
 	}
 	return forgejoresync.RunExec
+}
+
+// ctx is the run's context every git call derives from, so an interrupt reaches
+// a fetch or a push in flight; nil is context.Background.
+func (c *Cutover) ctx() context.Context {
+	if c.Ctx != nil {
+		return c.Ctx
+	}
+	return context.Background()
 }
 
 // logf writes one line of the run's log, when the run has one.

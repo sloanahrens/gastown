@@ -5,12 +5,17 @@ stays until the deletion bead (gt-tpg0p.52). Every assertion it executes is
 mapped below to the Go test that holds the same behaviour, so deleting an
 assertion's Go coverage is visible here first.
 
-Counts. The shell test executes 157 assertions today: 138 check lines plus
-19 exit-status assertions in the case headers (the bead says 158; the count
-was taken at filing). Every one is accounted for below. The --mirror case is
-the one block with no Go behaviour to test: the port dropped --mirror,
---mirror-target and --provision as flags (bead gt-tpg0p.44), so its
-assertions map to the test that pins the refusal.
+Counts. The shell test executes 157 assertions: 138 `check` lines
+(`grep -cE '^\s*check "' scripts/forgejo-cutover_test.sh`) plus 19 exit-status
+assertions at the head of a case (`grep -cE '^if \[ "\$rc" '
+scripts/forgejo-cutover_test.sh`). The table has one row per assertion, keyed by
+the script line the assertion sits on, and
+TestCaseTableAccountsForEveryShellAssertion checks that the three agree and that
+every test a row names exists. The bead's description says 158; that count was
+taken at filing and the script has 157. The --mirror case is the one block with
+no post-parse Go behaviour: the port dropped --mirror, --mirror-target and
+--provision as flags (bead gt-tpg0p.44), so the flag is refused before any step
+and each of its assertions maps to that refusal row.
 
 Scope note (recorded, not hidden). Bead gt-tpg0p.47 (6/10, step 4, the
 promote key) was still open with no EnsurePromoteKey in the tree when
@@ -33,7 +38,7 @@ landing a second implementation.
 - `482` a red probe exits non-zero — TestRunStopsAtTheFirstFailingStepAndSaysWhich (row step 1 (the probe))
 - `483` the refusal says the probe is not green — TestProbeArgsAndOutcome
 - `484` the probe was run — TestProbeArgsAndOutcome
-- `485` no mirror is created — TestMainUsageExitsTwoAndHelpExitsZero (the port refuses --mirror)
+- `485` no mirror is created — TestRunSendsNoMirrorRequest
 ## an unreadable landing queue refuses the cutover
 
 - `491` an unreadable queue exits non-zero — TestRefuseIfLandingInFlightMessage (queue read fails)
@@ -71,8 +76,8 @@ landing a second implementation.
 - `533` the probe ran with the cutover town root — TestProbeArgsAndOutcome
 - `536` the repo is provisioned through the shared provisioner — TestProvisionInProcessAgainstTheFake; TestProvisionCallsTheProvisionerOnce
 - `537` every GitHub ref was imported — TestImportFinalComparison; TestRunSecondRunChangesNothing
-- `538` a default run creates no push mirror — TestMainUsageExitsTwoAndHelpExitsZero (--mirror refused)
-- `539` no mirror body was sent — TestMainUsageExitsTwoAndHelpExitsZero
+- `538` a default run creates no push mirror — TestRunSendsNoMirrorRequest
+- `539` no mirror body was sent — TestRunSendsNoMirrorRequest
 - `540` the promote key was minted at the default path — TestRunPromoteKey
 - `541` the key is ed25519 — TestRunPromoteKey
 - `542` the private key is mode 600 — TestRunPromoteKey
@@ -110,14 +115,14 @@ landing a second implementation.
 - `579` the block is reported already matching — TestSettingsAlreadyMatchingIsUntouched; TestRunSecondRunChangesNothing
 ## --mirror reproduces the push mirror
 
-- `586` the mirror cutover exits 0 — TestMainUsageExitsTwoAndHelpExitsZero (--mirror dropped by the port)
-- `587` the push mirror was created without a branch filter — TestMainUsageExitsTwoAndHelpExitsZero
-- `588` the mirror enables ssh — TestMainUsageExitsTwoAndHelpExitsZero
-- `589` the mirror deploy key is printed — TestMainUsageExitsTwoAndHelpExitsZero
-- `590` the block names the mirror target — TestMainUsageExitsTwoAndHelpExitsZero
-- `591` the block names no promote fields — TestMainUsageExitsTwoAndHelpExitsZero
-- `592` no promote key is minted — TestMainUsageExitsTwoAndHelpExitsZero
-- `593` no promote key file is left — TestMainUsageExitsTwoAndHelpExitsZero
+- `586` the mirror cutover exits 0 — TestMainUsageExitsTwoAndHelpExitsZero/the dropped --mirror (the port refuses the flag before any step)
+- `587` the push mirror was created without a branch filter — TestMainUsageExitsTwoAndHelpExitsZero/the dropped --mirror (no mirror is created)
+- `588` the mirror enables ssh — TestMainUsageExitsTwoAndHelpExitsZero/the dropped --mirror (no mirror is created)
+- `589` the mirror deploy key is printed — TestMainUsageExitsTwoAndHelpExitsZero/the dropped --mirror (no mirror is created)
+- `590` the block names the mirror target — TestMainUsageExitsTwoAndHelpExitsZero/the dropped --mirror (no block is written)
+- `591` the block names no promote fields — TestMainUsageExitsTwoAndHelpExitsZero/the dropped --mirror (no block is written)
+- `592` no promote key is minted — TestRunSendsNoMirrorRequest (the refused flag runs no step)
+- `593` no promote key file is left — TestRunSendsNoMirrorRequest (the refused flag runs no step)
 ## a hostname-form --forgejo-url does the script own git work as admin
 
 - `604` the cutover exits 0 — TestImportNeverForces; TestRunSecondRunChangesNothing
@@ -212,7 +217,7 @@ landing a second implementation.
 - `765` the provisioner is run with no token file to read — TestRunBrokerToken (the captured provisioner options name none)
 - `766` the provisioner is run with no token in its own argv — TestRunBrokerToken
 - `767` the run still converges the rig — TestRunBrokerToken
-- `768` the run still creates the push mirror — TestMainUsageExitsTwoAndHelpExitsZero (--mirror dropped by the port)
+- `768` the run still creates the push mirror — TestMainUsageExitsTwoAndHelpExitsZero/the dropped --mirror (the port refuses the flag)
 ## the environment override stands in for the broker
 
 - `784` a run with the override in the environment exits 0 — TestRunBrokerToken (override row)

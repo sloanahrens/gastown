@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/forgejocut"
@@ -130,51 +132,27 @@ func TestMainUsageExitsTwoAndHelpExitsZero(t *testing.T) {
 	}
 }
 
-// execHelperMarker separates the helper's arguments from the test binary's.
-const execHelperMarker = "forgejo-cutover-exec-helper"
-
-// execHelperArgv is the argv that starts the test binary as a child process in
-// the mode named: it prints its environment or exits 1.
-func execHelperArgv(t *testing.T, mode string) []string {
-	t.Helper()
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatalf("locate the test binary: %v", err)
-	}
-	return []string{exe, "-test.run=^TestExecHelperProcess$", execHelperMarker, mode}
+// recordingStart is the exec seam a test injects: it keeps every child the run
+// built, with the capture mode it asked for, and answers with what the test
+// staged, so no process starts.
+type recordingStart struct {
+	captures []bool
+	cmds     []*exec.Cmd
+	out      []byte
+	err      error
 }
 
-// TestExecHelperProcess is not a test: started with the helper marker, it stands
-// in for a child process, so the exec seam is exercised against a real one.
-func TestExecHelperProcess(t *testing.T) {
-	// Parallel because the tree-wide policy asks every test for it; the body
-	// below runs only in the child process, where this is the one test selected.
-	t.Parallel()
-	i := slices.Index(os.Args, execHelperMarker)
-	if i < 0 || i+1 >= len(os.Args) {
-		return
-	}
-	switch os.Args[i+1] {
-	case "environment":
-		for _, entry := range os.Environ() {
-			fmt.Println(entry)
-		}
-	case "exit-1":
-		os.Exit(1)
-	}
-}
-
-// realExec is the exec seam under test, fed the environment a test stages and
-// writing a child's stdout into stdout.
-func realExec(ctx context.Context, environ []string, stdout, stderr io.Writer) execRunner {
-	return execRunner{ctx: ctx, environ: func() []string { return environ }, stdout: stdout, stderr: stderr}
+func (s *recordingStart) start(cmd *exec.Cmd, capture bool) ([]byte, error) {
+	s.captures = append(s.captures, capture)
+	s.cmds = append(s.cmds, cmd)
+	return s.out, s.err
 }
 
 // TestMainExecRunnerRefusesAnEmptyArgv: an argv with no program is refused on
 // every method, rather than indexed out of range.
 func TestMainExecRunnerRefusesAnEmptyArgv(t *testing.T) {
 	t.Parallel()
-	r := execRunner{stdout: io.Discard, stderr: io.Discard}
+	r := execRunner{}
 	if _, err := r.Output(nil); err == nil || !strings.Contains(err.Error(), "no command to run") {
 		t.Errorf("Output(nil) = %v, want the empty argv refused", err)
 	}
@@ -186,135 +164,200 @@ func TestMainExecRunnerRefusesAnEmptyArgv(t *testing.T) {
 	}
 }
 
-// TestMainExecRunnerRunsARealChild: Output returns a real child's stdout, Run
-// lets it write to the run's streams, and a non-zero status is an error.
-func TestMainExecRunnerRunsARealChild(t *testing.T) {
-	t.Parallel()
-	environ := []string{"EXEC_HELPER=1"}
-
-	var stdout, stderr strings.Builder
-	r := realExec(context.Background(), environ, &stdout, &stderr)
-	out, err := r.Output(execHelperArgv(t, "environment"))
-	if err != nil {
-		t.Fatalf("Output = %v, want the child's stdout", err)
-	}
-	if !strings.Contains(string(out), "EXEC_HELPER=1") {
-		t.Error("Output did not return the child's environment")
-	}
-
-	stdout.Reset()
-	if err := r.Run(execHelperArgv(t, "environment")); err != nil {
-		t.Fatalf("Run = %v, want nil", err)
-	}
-	if !strings.Contains(stdout.String(), "EXEC_HELPER=1") {
-		t.Error("Run did not let the child's output reach the run's stream")
-	}
-	if stderr.Len() != 0 {
-		t.Error("the child wrote to stderr, want nothing there")
-	}
-
-	if err := r.Run(execHelperArgv(t, "exit-1")); err == nil {
-		t.Error("Run = nil for a child that exits 1, want its failure")
-	}
-}
-
-// TestMainExecRunnerScrubsTheTokenFromEveryChild: no child inherits either
-// variable an admin token arrives in, and every other variable is kept.
-func TestMainExecRunnerScrubsTheTokenFromEveryChild(t *testing.T) {
+// TestMainExecRunnerBuildsEachChildInProcess: every method hands its seam the
+// child the run built: the argv it was given, the environment with the token
+// variables removed and only the probe's child carrying the resolved token, the
+// operator's streams on a running child, and the capture mode. Removing the
+// scrub, the extra probe entry, or a stream assignment turns it red.
+func TestMainExecRunnerBuildsEachChildInProcess(t *testing.T) {
 	t.Parallel()
 	const brokerLeak = "leak-broker-token"
 	const standInLeak = "leak-standin-token" //nolint:gosec // G101: a fixture, not a credential
-	environ := []string{
-		"GT_AUTH_FORGEJO_TOKEN=" + brokerLeak,
-		"FORGEJO_ADMIN_TOKEN=" + standInLeak,
-		"UNRELATED=kept",
-	}
-
-	for _, method := range []string{"Output", "Run"} {
-		t.Run(method, func(t *testing.T) {
-			t.Parallel()
-			var stdout, stderr strings.Builder
-			r := realExec(context.Background(), environ, &stdout, &stderr)
-			var childEnv string
-			if method == "Output" {
-				out, err := r.Output(execHelperArgv(t, "environment"))
-				if err != nil {
-					t.Fatalf("Output = %v, want the child's stdout", err)
-				}
-				childEnv = string(out)
-			} else {
-				if err := r.Run(execHelperArgv(t, "environment")); err != nil {
-					t.Fatalf("Run = %v, want nil", err)
-				}
-				childEnv = stdout.String()
-			}
-			if strings.Contains(childEnv, brokerLeak) || strings.Contains(childEnv, standInLeak) {
-				t.Error("a token reached the child's environment")
-			}
-			if strings.Contains(childEnv, "GT_AUTH_FORGEJO_TOKEN=") || strings.Contains(childEnv, "FORGEJO_ADMIN_TOKEN=") {
-				t.Error("a token variable survived into the child's environment")
-			}
-			if !strings.Contains(childEnv, "UNRELATED=kept") {
-				t.Error("an unrelated variable was dropped from the child's environment")
-			}
-		})
-	}
-}
-
-// TestMainExecRunnerHandsTheTokenOnlyToTheRunningProbe: RunWithToken gives its
-// child the resolved token as the probe's variable and nothing else, and the
-// stand-in variable a child might have inherited is still removed.
-func TestMainExecRunnerHandsTheTokenOnlyToTheRunningProbe(t *testing.T) {
-	t.Parallel()
-	const token = "tok-probe-only-marker"
-	const standInLeak = "leak-standin-token" //nolint:gosec // G101: a fixture, not a credential
-	tokenSecret, err := forgejoprov.ResolveAdminToken(func(string) string { return token }, nil, "")
+	const probeToken = "tok-probe-only-marker"
+	tokenSecret, err := forgejoprov.ResolveAdminToken(func(string) string { return probeToken }, nil, "")
 	if err != nil {
 		t.Fatalf("resolve the fixture token: %v", err)
 	}
-	environ := []string{"FORGEJO_ADMIN_TOKEN=" + standInLeak, "UNRELATED=kept"}
 
 	var stdout, stderr strings.Builder
-	r := realExec(context.Background(), environ, &stdout, &stderr)
-	if err := r.RunWithToken(execHelperArgv(t, "environment"), tokenSecret); err != nil {
-		t.Fatalf("RunWithToken = %v, want nil", err)
+	start := &recordingStart{out: []byte("child output")}
+	r := execRunner{
+		environ: func() []string {
+			return []string{
+				"GT_AUTH_FORGEJO_TOKEN=" + brokerLeak,
+				"FORGEJO_ADMIN_TOKEN=" + standInLeak,
+				"UNRELATED=kept",
+			}
+		},
+		stdout: &stdout,
+		stderr: &stderr,
+		start:  start.start,
 	}
-	childEnv := stdout.String()
-	if !strings.Contains(childEnv, "GT_AUTH_FORGEJO_TOKEN="+token) {
-		t.Error("the probe's child did not receive the resolved token")
+
+	out, err := r.Output([]string{"bd", "list"})
+	if err != nil || string(out) != "child output" {
+		t.Fatalf("Output = %q, %v, want the seam's output", out, err)
 	}
-	if strings.Contains(childEnv, standInLeak) || strings.Contains(childEnv, "FORGEJO_ADMIN_TOKEN=") {
-		t.Error("the stand-in token variable reached the child")
+	if err := r.Run([]string{"bash", "probe.sh"}); err != nil {
+		t.Fatalf("Run = %v, want the seam's answer", err)
 	}
-	if !strings.Contains(childEnv, "UNRELATED=kept") {
-		t.Error("an unrelated variable was dropped from the child's environment")
+	if err := r.RunWithToken([]string{"bash", "probe.sh"}, tokenSecret); err != nil {
+		t.Fatalf("RunWithToken = %v, want the seam's answer", err)
+	}
+
+	if len(start.cmds) != 3 {
+		t.Fatalf("the seam was handed %d children, want 3", len(start.cmds))
+	}
+	wantArgv := [][]string{
+		{"bd", "list"},
+		{"bash", "probe.sh"},
+		{"bash", "probe.sh"},
+	}
+	for i, want := range wantArgv {
+		if got := start.cmds[i].Args; !slices.Equal(got, want) {
+			t.Errorf("child %d argv = %q, want %q", i, got, want)
+		}
+	}
+	if !slices.Equal(start.captures, []bool{true, false, false}) {
+		t.Errorf("the capture modes = %v, want the read captured and the runs streamed", start.captures)
+	}
+	for i, cmd := range start.cmds {
+		if slices.Contains(cmd.Env, "GT_AUTH_FORGEJO_TOKEN="+brokerLeak) || slices.Contains(cmd.Env, "FORGEJO_ADMIN_TOKEN="+standInLeak) {
+			t.Errorf("child %d inherited a token variable: %q", i, cmd.Env)
+		}
+		if !slices.Contains(cmd.Env, "UNRELATED=kept") {
+			t.Errorf("child %d lost an unrelated variable: %q", i, cmd.Env)
+		}
+	}
+	probeEntry := probeTokenEnv + "=" + probeToken
+	if !slices.Contains(start.cmds[2].Env, probeEntry) {
+		t.Errorf("the probe's child did not receive the resolved token: %q", start.cmds[2].Env)
+	}
+	if slices.Contains(start.cmds[1].Env, probeEntry) {
+		t.Errorf("a child other than the probe received the token: %q", start.cmds[1].Env)
+	}
+
+	if start.cmds[0].Stdout != nil || start.cmds[0].Stderr != nil {
+		t.Error("the captured read was given the operator's streams")
+	}
+	for _, i := range []int{1, 2} {
+		if start.cmds[i].Stdout != &stdout || start.cmds[i].Stderr != &stderr {
+			t.Errorf("child %d did not get the operator's streams", i)
+		}
 	}
 }
 
-// TestMainExecRunnerChildHonorsACanceledContext: a canceled context stops a
-// child before it starts, so an interrupt does not wait on it.
-func TestMainExecRunnerChildHonorsACanceledContext(t *testing.T) {
+// TestMainExecRunnerHonorsACanceledContext: a canceled context stops a child
+// before it starts, so an interrupt does not wait on it. The path is one that
+// does not exist: the canceled context is what the error must name.
+func TestMainExecRunnerHonorsACanceledContext(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+	argv := []string{filepath.Join(t.TempDir(), "child-that-is-never-started")}
 	var stdout, stderr strings.Builder
-	r := realExec(ctx, nil, &stdout, &stderr)
-	var err error
+	r := execRunner{ctx: ctx, stdout: &stdout, stderr: &stderr}
 	for _, call := range []struct {
 		name string
 		run  func() error
 	}{
-		{"Output", func() error { _, err := r.Output(execHelperArgv(t, "environment")); return err }},
-		{"Run", func() error { return r.Run(execHelperArgv(t, "environment")) }},
-		{"RunWithToken", func() error { return r.RunWithToken(execHelperArgv(t, "environment"), forgejoprov.Secret{}) }},
+		{"Output", func() error { _, err := r.Output(argv); return err }},
+		{"Run", func() error { return r.Run(argv) }},
+		{"RunWithToken", func() error { return r.RunWithToken(argv, forgejoprov.Secret{}) }},
 	} {
-		err = call.run()
-		if !errors.Is(err, context.Canceled) {
+		if err := call.run(); !errors.Is(err, context.Canceled) {
 			t.Errorf("%s = %v, want the canceled context's error", call.name, err)
 		}
 	}
 	if stdout.Len() != 0 {
-		t.Error("a canceled run started the child")
+		t.Error("a canceled run wrote to the operator's stream")
+	}
+}
+
+// TestMainWatchInterrupts: the first signal cancels the run and the second ends
+// the process with 128 plus the signal number; a run that returns ends the watch
+// without waiting for a signal. The signals are already buffered, so the watch
+// runs to its decision in the test's own goroutine.
+func TestMainWatchInterrupts(t *testing.T) {
+	t.Parallel()
+	t.Run("the second signal ends the process", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithCancel(context.Background())
+		signals := make(chan os.Signal, 2)
+		signals <- os.Interrupt
+		signals <- syscall.SIGTERM
+		var exited []int
+		watchInterrupts(make(chan struct{}), signals, cancel, func(code int) { exited = append(exited, code) })
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			t.Error("the first signal did not cancel the run")
+		}
+		if !slices.Equal(exited, []int{128 + int(syscall.SIGTERM)}) {
+			t.Errorf("the second signal exited %v, want one exit with 128+SIGTERM", exited)
+		}
+	})
+
+	t.Run("a finished run ends the watch", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		close(done)
+		var exited []int
+		watchInterrupts(done, make(chan os.Signal), cancel, func(code int) { exited = append(exited, code) })
+		if ctx.Err() != nil {
+			t.Errorf("the run's context was canceled after it returned: %v", ctx.Err())
+		}
+		if len(exited) != 0 {
+			t.Errorf("a finished run exited %v", exited)
+		}
+	})
+
+	t.Run("a run that returns after the first signal ends the watch", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithCancel(context.Background())
+		signals := make(chan os.Signal, 1)
+		signals <- os.Interrupt
+		done := make(chan struct{})
+		var exited []int
+		// The cancel is also the run returning: the watch has taken its first
+		// signal (done is still open when it looks) and finds done closed when it
+		// waits for the second.
+		cancelAndFinish := func() {
+			cancel()
+			close(done)
+		}
+		watchInterrupts(done, signals, cancelAndFinish, func(code int) { exited = append(exited, code) })
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			t.Error("the first signal did not cancel the run")
+		}
+		if len(exited) != 0 {
+			t.Errorf("the watch exited %v after the run returned", exited)
+		}
+	})
+}
+
+// interruptSignal is an os.Signal that is not a syscall.Signal, the shape
+// interruptExitCode falls back on.
+type interruptSignal string
+
+func (s interruptSignal) String() string { return string(s) }
+func (interruptSignal) Signal()          {}
+
+// TestMainInterruptExitCode: the shell's 128+signum, so a second Ctrl-C reads as
+// an interrupt rather than as the run's own failure; a signal the syscall
+// package does not number is the plain interrupt status.
+func TestMainInterruptExitCode(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		sig  os.Signal
+		code int
+	}{
+		{os.Interrupt, 130},
+		{syscall.SIGTERM, 143},
+		{interruptSignal("SIGOTHER"), 130},
+	} {
+		if got := interruptExitCode(tt.sig); got != tt.code {
+			t.Errorf("interruptExitCode(%v) = %d, want %d", tt.sig, got, tt.code)
+		}
 	}
 }
 

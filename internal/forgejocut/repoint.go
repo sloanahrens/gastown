@@ -2,7 +2,6 @@ package forgejocut
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -141,7 +140,7 @@ func (c *Cutover) repointOne(dir, url string, crew bool) error {
 	// A repository with no origin reads as an empty URL and is set, as the script's
 	// "|| true" did. Git exits 2 for a remote that is not defined; any other failure
 	// is a read that went wrong and would blank the undo line.
-	out, err := c.git()(context.Background(), []string{"git", "-C", dir, "remote", "get-url", "origin"})
+	out, err := c.git()(c.ctx(), []string{"git", "-C", dir, "remote", "get-url", "origin"})
 	var coded interface{ ExitCode() int }
 	if err != nil && !(errors.As(err, &coded) && coded.ExitCode() == noSuchRemoteExit) {
 		return fmt.Errorf("could not read the origin of %s: %w", dir, err)
@@ -155,7 +154,7 @@ func (c *Cutover) repointOne(dir, url string, crew bool) error {
 	if c.Opts.DryRun {
 		return nil
 	}
-	if _, err := c.git()(context.Background(), []string{"git", "-C", dir, "remote", "set-url", "origin", url}); err != nil {
+	if _, err := c.git()(c.ctx(), []string{"git", "-C", dir, "remote", "set-url", "origin", url}); err != nil {
 		return fmt.Errorf("could not repoint %s: %w", dir, err)
 	}
 	return nil
@@ -167,7 +166,7 @@ func (c *Cutover) repointOne(dir, url string, crew bool) error {
 // rev-parse --git-dir; asking for the top level is what tells the two apart, and
 // the origin that gets set is then the folder's own, never an ancestor's.
 func (c *Cutover) isRepositoryRoot(dir string) bool {
-	ctx := context.Background()
+	ctx := c.ctx()
 	if out, err := c.git()(ctx, []string{"git", "-C", dir, "rev-parse", "--show-toplevel"}); err == nil {
 		return samePath(strings.TrimRight(string(out), "\n"), dir)
 	}
