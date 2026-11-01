@@ -1,28 +1,30 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io"
+	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 )
 
-// The two shipped provider profiles this file reads. trackerProfilePath is the
-// seat's, and forgejoProfilePath is the one the gateway already imports, which
-// calibrates the lint: a lint that refuses the forgejo profile is wrong about
-// what `openshell profile lint` takes (gt-0f305).
+// The two shipped provider profiles this file reads. The forgejo profile is the
+// reference: it is the shape the gateway imports today, so the tracker profile
+// is held to it (gt-0f305).
 const (
 	trackerProfilePath = "../../deploy/polecat/profiles/tracker-polecat.yaml"
 	forgejoProfilePath = "../../deploy/polecat/profiles/forgejo-polecat.yaml"
 )
 
-// profileFile is the part of an openshell provider profile the lint reads.
+// profileFile is the part of an openshell provider profile these tests read.
 type profileFile struct {
 	ID          string              `yaml:"id"`
 	DisplayName string              `yaml:"display_name"`
@@ -62,13 +64,6 @@ type profileRule struct {
 // httpMethods are the methods a rule may name.
 var httpMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"}
 
-// profileIDPattern is the id shape the gateway keys a profile and its providers
-// by.
-var profileIDPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
-
-// envVarPattern is the shape of an environment variable a credential names.
-var envVarPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
-
 // trackerTokenPattern is the tracker's token shape (tracker/store/tokens.go), so
 // a real token pasted into the profile instead of a placeholder is refused.
 var trackerTokenPattern = regexp.MustCompile(`trk_[0-9a-f]{16,}`)
@@ -93,99 +88,139 @@ func readProfile(t *testing.T, file string) profileFile {
 	return p
 }
 
-// profileProblems lists every way p breaks the shape `openshell profile lint`
-// accepts: the fields the shipped profiles set, present and in range. The lint
-// command is a subprocess and this tier starts none, so the live
-// `openshell profile lint -f <file>` stays the authority on the file's grammar
-// (gt-0f305); this lint is the same contract stated in Go, so a regression in
-// the file fails a test that runs everywhere.
-func profileProblems(p profileFile) []string {
-	var out []string
-	if !profileIDPattern.MatchString(p.ID) {
-		out = append(out, "id "+strconv.Quote(p.ID)+" is not a lower-case hyphenated name")
-	}
-	for _, f := range []struct{ name, value string }{
-		{"display_name", p.DisplayName}, {"description", p.Description}, {"category", p.Category},
+// TestTrackerPolecatProfileMatchesTheForgejoProfileShape checks the tracker
+// profile has the shape forgejo-polecat.yaml has: the same required fields, one
+// credential set out the same way, and endpoints carrying rules. It is a
+// structural check, not the profile lint. `openshell profile lint -f`, which the
+// import command runs before every import (internal/openshellprov/importprofiles.go:158),
+// is the authority on the file's grammar; the live run of it stays the
+// overseer's proof (gt-0f305).
+func TestTrackerPolecatProfileMatchesTheForgejoProfileShape(t *testing.T) {
+	t.Parallel()
+	ref := readProfile(t, forgejoProfilePath)
+	got := readProfile(t, trackerProfilePath)
+
+	// The top-level fields a profile needs, read from the reference so this
+	// check follows it rather than restating its grammar.
+	for _, f := range []struct{ name, ref, got string }{
+		{"id", ref.ID, got.ID},
+		{"display_name", ref.DisplayName, got.DisplayName},
+		{"description", ref.Description, got.Description},
+		{"category", ref.Category, got.Category},
 	} {
-		if strings.TrimSpace(f.value) == "" {
-			out = append(out, f.name+" is empty")
+		if strings.TrimSpace(f.ref) == "" {
+			t.Fatalf("%s sets no %s, so it cannot be the reference for it", forgejoProfilePath, f.name)
+		}
+		if strings.TrimSpace(f.got) == "" {
+			t.Errorf("%s sets no %s, and the forgejo profile does", trackerProfilePath, f.name)
 		}
 	}
-	if len(p.Credentials) == 0 {
-		out = append(out, "no credential is declared")
+
+	if len(ref.Credentials) == 0 {
+		t.Fatalf("%s declares no credential, so it cannot be the reference for one", forgejoProfilePath)
 	}
-	declared := make(map[string]bool, len(p.Credentials))
-	for i, c := range p.Credentials {
+	if len(got.Credentials) != len(ref.Credentials) {
+		t.Errorf("%s declares %d credentials, and the forgejo profile declares %d", trackerProfilePath, len(got.Credentials), len(ref.Credentials))
+	}
+	declared := make(map[string]bool, len(got.Credentials))
+	for i, c := range got.Credentials {
 		where := fmt.Sprintf("credentials[%d]", i)
 		if strings.TrimSpace(c.Name) == "" {
-			out = append(out, where+" has no name")
+			t.Errorf("%s has no name", where)
 		}
 		declared[c.Name] = true
 		if len(c.EnvVars) == 0 {
-			out = append(out, where+" names no env_var")
-		}
-		for _, v := range c.EnvVars {
-			if !envVarPattern.MatchString(v) {
-				out = append(out, where+" env var "+strconv.Quote(v)+" is not an environment variable name")
-			}
-		}
-		if c.AuthStyle != "header" && c.AuthStyle != "bearer" {
-			out = append(out, where+" auth_style "+strconv.Quote(c.AuthStyle)+" is neither header nor bearer")
-		}
-		if strings.TrimSpace(c.HeaderName) == "" {
-			out = append(out, where+" has no header_name")
+			t.Errorf("%s names no env_var", where)
 		}
 		if !c.Required {
-			out = append(out, where+" is not required, so a sandbox without the token would start")
+			t.Errorf("%s is not required, so a sandbox without the token would start", where)
+		}
+		if strings.TrimSpace(c.AuthStyle) == "" || strings.TrimSpace(c.HeaderName) == "" {
+			t.Errorf("%s sets auth_style %q and header_name %q, and the forgejo profile sets both", where, c.AuthStyle, c.HeaderName)
 		}
 	}
-	if len(p.Discovery.Credentials) == 0 {
-		out = append(out, "discovery names no credential")
+	if len(got.Discovery.Credentials) == 0 {
+		t.Errorf("%s discovery names no credential, and the forgejo profile does", trackerProfilePath)
 	}
-	for _, name := range p.Discovery.Credentials {
+	for _, name := range got.Discovery.Credentials {
 		if !declared[name] {
-			out = append(out, "discovery names "+strconv.Quote(name)+", which no credential declares")
+			t.Errorf("discovery names %q, which no credential declares", name)
 		}
 	}
-	if len(p.Endpoints) == 0 {
-		out = append(out, "no endpoint is declared")
+
+	if len(ref.Endpoints) == 0 {
+		t.Fatalf("%s declares no endpoint, so it cannot be the reference for one", forgejoProfilePath)
 	}
-	for i, e := range p.Endpoints {
+	if len(got.Endpoints) == 0 {
+		t.Errorf("%s declares no endpoint", trackerProfilePath)
+	}
+	for i, e := range got.Endpoints {
 		where := fmt.Sprintf("endpoints[%d]", i)
-		if strings.TrimSpace(e.Host) == "" || strings.ContainsAny(e.Host, " /\\:") {
-			out = append(out, where+" host "+strconv.Quote(e.Host)+" is not a bare host name")
+		if strings.TrimSpace(e.Host) == "" {
+			t.Errorf("%s has no host", where)
 		}
 		if e.Port < 1 || e.Port > 65535 {
-			out = append(out, where+" port is not 1-65535")
+			t.Errorf("%s port %d is not 1-65535", where, e.Port)
 		}
-		if e.Protocol != "rest" && e.Protocol != "tcp" {
-			out = append(out, where+" protocol "+strconv.Quote(e.Protocol)+" is neither rest nor tcp")
+		if strings.TrimSpace(e.Protocol) == "" {
+			t.Errorf("%s has no protocol", where)
 		}
-		if e.Enforcement != "enforce" {
-			out = append(out, where+" enforcement is "+strconv.Quote(e.Enforcement)+", want enforce: an endpoint the supervisor does not inspect hands the token to every request on it")
+		if e.Enforcement != ref.Endpoints[0].Enforcement {
+			t.Errorf("%s enforcement is %q, and the forgejo profile's is %q: an endpoint the supervisor does not inspect hands the token to every request on it", where, e.Enforcement, ref.Endpoints[0].Enforcement)
 		}
 		if e.Protocol == "rest" && len(e.Rules) == 0 {
-			out = append(out, where+" is a rest endpoint with no rules, so the token reaches every request on it")
+			t.Errorf("%s is a rest endpoint with no rules, and the forgejo profile's carries one", where)
 		}
 		for j, r := range e.Rules {
 			rw := fmt.Sprintf("%s.rules[%d]", where, j)
 			if !slices.Contains(httpMethods, r.Allow.Method) {
-				out = append(out, rw+" method "+strconv.Quote(r.Allow.Method)+" is not an HTTP method")
+				t.Errorf("%s method %q is not an HTTP method", rw, r.Allow.Method)
 			}
 			if !strings.HasPrefix(r.Allow.Path, "/") {
-				out = append(out, rw+" path "+strconv.Quote(r.Allow.Path)+" is not an absolute path")
+				t.Errorf("%s path %q is not an absolute path", rw, r.Allow.Path)
 			}
 		}
 	}
-	if len(p.Binaries) == 0 {
-		out = append(out, "no binary is declared")
+
+	if len(got.Binaries) == 0 {
+		t.Errorf("%s declares no binary, and the forgejo profile does", trackerProfilePath)
 	}
-	for _, b := range p.Binaries {
-		if !strings.HasPrefix(b, "/") || strings.ContainsAny(b, " \t") {
-			out = append(out, "binary "+strconv.Quote(b)+" is not an absolute path")
+	for _, b := range got.Binaries {
+		if !strings.HasPrefix(b, "/") {
+			t.Errorf("binary %q is not an absolute path", b)
 		}
 	}
-	return out
+}
+
+// TestTrackerPolecatProfileCarriesTheSeatToken holds the file to the contract
+// it exists for: one TRACKER_TOKEN sent as the authorization header to the
+// tracker through the control-plane alias, with no token in the file and no GT_
+// environment read (gt-0f305).
+func TestTrackerPolecatProfileCarriesTheSeatToken(t *testing.T) {
+	t.Parallel()
+	p := readProfile(t, trackerProfilePath)
+	src := readProfileSource(t, trackerProfilePath)
+
+	if p.ID != "tracker-polecat" {
+		t.Errorf("id = %q, want tracker-polecat: the gateway keys the profile and its providers on it", p.ID)
+	}
+	if len(p.Credentials) != 1 || !slices.Equal(p.Credentials[0].EnvVars, []string{"TRACKER_TOKEN"}) {
+		t.Fatalf("credentials = %+v, want one credential holding exactly TRACKER_TOKEN", p.Credentials)
+	}
+	if c := p.Credentials[0]; c.AuthStyle != "bearer" || c.HeaderName != "authorization" {
+		t.Errorf("credential auth = %q in %q, want the Bearer authorization header the tracker client sends", c.AuthStyle, c.HeaderName)
+	}
+	if len(p.Endpoints) != 1 || p.Endpoints[0].Host != "host.docker.internal" || p.Endpoints[0].Port != 7433 {
+		t.Errorf("endpoints = %+v, want one on host.docker.internal:7433, the control-plane alias on the tracker's default port", p.Endpoints)
+	}
+	for _, v := range p.Credentials[0].EnvVars {
+		if strings.HasPrefix(v, "GT_") {
+			t.Errorf("credential env var %s is a GT_ read, which the config kernel refuses", v)
+		}
+	}
+	if tok := trackerTokenPattern.Find(src); tok != nil {
+		t.Errorf("%s holds a tracker token (%s...); the sandbox gets a placeholder and the supervisor substitutes the real one", trackerProfilePath, tok[:len("trk_")+4])
+	}
 }
 
 // ruleMatches reports whether a rule's path pattern admits a request path. A
@@ -263,59 +298,65 @@ var seatRoutes = []struct{ method, path string }{
 	{"DELETE", "/v1/issues/gt-0f305/dependencies/external:om:om-7"},
 }
 
-// TestTrackerPolecatProfileLints holds the shipped tracker profile to the lint
-// the forgejo profile passes, and to the contract the profile exists for: one
-// TRACKER_TOKEN sent as the authorization header to the tracker's control-plane
-// alias, with no token in the file.
-func TestTrackerPolecatProfileLints(t *testing.T) {
-	t.Parallel()
-	if probs := profileProblems(readProfile(t, forgejoProfilePath)); len(probs) != 0 {
-		t.Fatalf("the lint refuses %s, which the gateway imports today: %s", forgejoProfilePath, strings.Join(probs, "; "))
-	}
-	src := readProfileSource(t, trackerProfilePath)
-	p := readProfile(t, trackerProfilePath)
-	if probs := profileProblems(p); len(probs) != 0 {
-		t.Fatalf("%s does not pass the lint: %s", trackerProfilePath, strings.Join(probs, "; "))
-	}
-
-	if p.ID != "tracker-polecat" {
-		t.Errorf("id = %q, want tracker-polecat: the gateway keys the profile and its providers on it", p.ID)
-	}
-	if len(p.Credentials) != 1 || !slices.Equal(p.Credentials[0].EnvVars, []string{"TRACKER_TOKEN"}) {
-		t.Fatalf("credentials = %+v, want one credential holding exactly TRACKER_TOKEN", p.Credentials)
-	}
-	if c := p.Credentials[0]; c.AuthStyle != "bearer" || c.HeaderName != "authorization" {
-		t.Errorf("credential auth = %q in %q, want the Bearer authorization header the tracker client sends", c.AuthStyle, c.HeaderName)
-	}
-	if len(p.Endpoints) != 1 || p.Endpoints[0].Host != "host.docker.internal" || p.Endpoints[0].Port != 7433 {
-		t.Errorf("endpoints = %+v, want one on host.docker.internal:7433, the control-plane alias on the tracker's default port", p.Endpoints)
-	}
-	for _, v := range p.Credentials[0].EnvVars {
-		if strings.HasPrefix(v, "GT_") {
-			t.Errorf("credential env var %s is a GT_ read, which the config kernel refuses", v)
-		}
-	}
-	if tok := trackerTokenPattern.Find(src); tok != nil {
-		t.Errorf("%s holds a tracker token (%s...); the sandbox gets a placeholder and the supervisor substitutes the real one", trackerProfilePath, tok[:len("trk_")+4])
+// routedForms returns the request forms a server resolves to p: the plain path,
+// its last segment percent-encoded, and its last segment reached through a dot
+// segment. A supervisor matches a rule against the request it receives, so a
+// refusal test that only asks the plain form proves nothing about the others.
+func routedForms(p string) []string {
+	i := strings.LastIndexByte(p, '/')
+	head, last := p[:i+1], p[i+1:]
+	return []string{
+		p,
+		head + escapeAll(last),
+		head + "x/../" + last,
 	}
 }
 
+// escapeAll percent-encodes every byte of s.
+func escapeAll(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		fmt.Fprintf(&b, "%%%02X", s[i])
+	}
+	return b.String()
+}
+
+// requestPath returns the path a server routes route to: its escapes decoded and
+// its dot segments resolved, so /v1/%73tats and /v1/x/../stats are the same
+// /v1/stats the plain form is.
+func requestPath(t *testing.T, route string) string {
+	t.Helper()
+	decoded, err := url.PathUnescape(route)
+	if err != nil {
+		t.Fatalf("unescaping %q: %v", route, err)
+	}
+	return path.Clean(decoded)
+}
+
 // TestTrackerPolecatProfileAllowsNoAdminRoute proves the profile refuses every
-// route the research doc's refuse list names, so the sandbox cannot reach an
-// admin route even with a token minted for admin scope.
+// route the research doc's refuse list names, in each form a server resolves to
+// it, so the sandbox cannot reach an admin route even with a token minted for
+// admin scope.
 func TestTrackerPolecatProfileAllowsNoAdminRoute(t *testing.T) {
 	t.Parallel()
 	p := readProfile(t, trackerProfilePath)
 	for _, r := range refusedRoutes {
-		if profileAllows(p, r.method, r.path) {
-			t.Errorf("%s %s matches an allow rule in %s, and the profile must refuse it", r.method, r.path, trackerProfilePath)
+		for _, form := range routedForms(r.path) {
+			route := requestPath(t, form)
+			if profileAllows(p, r.method, route) {
+				t.Errorf("%s %s (requested as %s) matches an allow rule in %s, and the profile must refuse it", r.method, route, form, trackerProfilePath)
+			}
 		}
 	}
 	// A matcher that admits nothing would pass the loop above whatever the file
-	// says, so it is shown to admit an admin route when a rule names one.
+	// says, so it is shown to admit an admin route when a rule names one, in
+	// every form: a normalization that did not resolve these forms would make
+	// the loop above vacuous.
 	canary := profileFile{Endpoints: []profileEndpoint{{Rules: []profileRule{allowRule("GET", "/v1/*")}}}}
-	if !profileAllows(canary, "GET", "/v1/stats") {
-		t.Fatal("the rule matcher admits nothing, so it would pass this test whatever the profile says")
+	for _, form := range routedForms("/v1/stats") {
+		if route := requestPath(t, form); !profileAllows(canary, "GET", route) {
+			t.Fatalf("%s resolves to %s, which the canary rule GET /v1/* does not admit, so the refusal check above would pass whatever the profile says", form, route)
+		}
 	}
 }
 
@@ -332,48 +373,83 @@ func TestTrackerPolecatProfileAllowsSeatRoutes(t *testing.T) {
 	}
 }
 
-// TestProfileLintRefusesEachBreak drives every refusal the lint has, so a check
-// that stopped working shows up here rather than as a profile that quietly
-// imports.
-func TestProfileLintRefusesEachBreak(t *testing.T) {
+// TestTrackerPolecatProfileIsLintedByTheImportCommand runs the command over a
+// checkout holding the shipped profiles and checks the tracker profile reaches
+// `openshell profile lint -f` before its import. The import path lints every
+// profile it has not seen, and this test pins that for the tracker file. No
+// process starts here; the live lint and import stay the overseer's proof
+// (gt-0f305).
+func TestTrackerPolecatProfileIsLintedByTheImportCommand(t *testing.T) {
 	t.Parallel()
-	cases := map[string]func(*profileFile){
-		"no id":                       func(p *profileFile) { p.ID = "" },
-		"unhyphenated id":             func(p *profileFile) { p.ID = "Tracker Polecat" },
-		"no display name":             func(p *profileFile) { p.DisplayName = "" },
-		"no description":              func(p *profileFile) { p.Description = "" },
-		"no category":                 func(p *profileFile) { p.Category = "" },
-		"no credential":               func(p *profileFile) { p.Credentials = nil },
-		"credential with no env var":  func(p *profileFile) { p.Credentials[0].EnvVars = nil },
-		"lower-case env var":          func(p *profileFile) { p.Credentials[0].EnvVars = []string{"tracker_token"} },
-		"unknown auth style":          func(p *profileFile) { p.Credentials[0].AuthStyle = "query" },
-		"no header name":              func(p *profileFile) { p.Credentials[0].HeaderName = "" },
-		"optional credential":         func(p *profileFile) { p.Credentials[0].Required = false },
-		"discovery names none":        func(p *profileFile) { p.Discovery.Credentials = nil },
-		"discovery names a stranger":  func(p *profileFile) { p.Discovery.Credentials = []string{"api_token"} },
-		"no endpoint":                 func(p *profileFile) { p.Endpoints = nil },
-		"host with a port":            func(p *profileFile) { p.Endpoints[0].Host = "host.docker.internal:7433" },
-		"port out of range":           func(p *profileFile) { p.Endpoints[0].Port = 0 },
-		"unknown protocol":            func(p *profileFile) { p.Endpoints[0].Protocol = "http" },
-		"unenforced endpoint":         func(p *profileFile) { p.Endpoints[0].Enforcement = "" },
-		"rest endpoint with no rules": func(p *profileFile) { p.Endpoints[0].Rules = nil },
-		"unknown method":              func(p *profileFile) { p.Endpoints[0].Rules[0].Allow.Method = "FETCH" },
-		"relative rule path":          func(p *profileFile) { p.Endpoints[0].Rules[0].Allow.Path = "v1/whoami" },
-		"no binary":                   func(p *profileFile) { p.Binaries = nil },
-		"relative binary":             func(p *profileFile) { p.Binaries = []string{"gt"} },
+	h := fakeHost(t, map[string]string{"XDG_CONFIG_HOME": keyDir(t)})
+	root, err := h.Getwd()
+	if err != nil {
+		t.Fatalf("working directory: %v", err)
 	}
-	for name, mutate := range cases {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			p := readProfile(t, trackerProfilePath)
-			if probs := profileProblems(p); len(probs) != 0 {
-				t.Fatalf("the shipped profile already breaks the lint: %v", probs)
-			}
-			mutate(&p)
-			if probs := profileProblems(p); len(probs) == 0 {
-				t.Errorf("%s: the lint accepted a profile that breaks the contract", name)
-			}
-		})
+	dir := filepath.Join(root, "deploy", "polecat", "profiles")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	for _, name := range []string{"forgejo-polecat.yaml", "tracker-polecat.yaml"} {
+		src, err := os.ReadFile(filepath.Join("../../deploy/polecat/profiles", name))
+		if err != nil {
+			t.Fatalf("reading the shipped %s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), src, 0o644); err != nil {
+			t.Fatalf("writing %s: %v", name, err)
+		}
+	}
+
+	var calls []string
+	h.Exec = recordingExec{calls: &calls}
+	var out, errw bytes.Buffer
+	if code := run(nil, &out, &errw, h); code != 0 {
+		t.Fatalf("run() = %d (stderr %q), want 0", code, errw.String())
+	}
+
+	file := filepath.Join(dir, "tracker-polecat.yaml")
+	lint := "openshell profile lint -f " + file
+	imprt := "openshell profile import -f " + file + " --global"
+	lintAt, importAt := slices.Index(calls, lint), slices.Index(calls, imprt)
+	if lintAt < 0 {
+		t.Fatalf("the command never linted the tracker profile: calls %q", calls)
+	}
+	if importAt < 0 {
+		t.Fatalf("the command never imported the tracker profile: calls %q", calls)
+	}
+	if lintAt > importAt {
+		t.Errorf("the command imported the tracker profile before linting it: calls %q", calls)
+	}
+}
+
+// recordingExec records every command a run makes and answers each one as
+// acceptAll does, so no process starts.
+type recordingExec struct {
+	calls *[]string
+}
+
+func (r recordingExec) Run(name string, args []string, _ []string, _ io.Reader) ([]byte, []byte, error) {
+	*r.calls = append(*r.calls, strings.Join(append([]string{name}, args...), " "))
+	out, err := acceptAll(name, args)
+	return out, nil, err
+}
+
+// TestRequestPathResolvesEscapesAndDotSegments pins the normalization the
+// refusal test rests on: a server routes an escaped or dot-segment path to the
+// plain path it names.
+func TestRequestPathResolvesEscapesAndDotSegments(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ route, want string }{
+		{"/v1/stats", "/v1/stats"},
+		{"/v1/%73tats", "/v1/stats"},
+		{"/v1/stats/", "/v1/stats"},
+		{"/v1/x/../stats", "/v1/stats"},
+		{"//v1//stats", "/v1/stats"},
+		{"/v1/issues/gt-a", "/v1/issues/gt-a"},
+	} {
+		if got := requestPath(t, tc.route); got != tc.want {
+			t.Errorf("requestPath(%q) = %q, want %q", tc.route, got, tc.want)
+		}
 	}
 }
 

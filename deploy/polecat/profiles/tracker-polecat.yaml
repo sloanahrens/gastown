@@ -2,17 +2,21 @@
 #
 # trackerd runs on the Mac (127.0.0.1:7433) and is reached from Docker Desktop
 # sandboxes as host.docker.internal:7433 over plain HTTP. The sandbox sees only a
-# placeholder in TRACKER_TOKEN; the tracker client sends it as
+# placeholder in TRACKER_TOKEN, and the tracker client sends it as
 #   Authorization: Bearer <placeholder>
-# (tracker/client/client.go) and the supervisor substitutes the real token on the
-# routes below and nowhere else.
+# (tracker/client/client.go). Substituting a Bearer header is not verified: the
+# only worked example is the forgejo profile's token prefix, so the live proof
+# decides it (gt-0f305).
 #
 # The routes are the seat's own: issue reads and writes, comments, dependencies,
 # the board reads, claim, release, transfer, batch, events and whoami
 # (docs/research/tracker/K1b-seat-token-as-provider-placeholder.md, question 3).
-# The admin routes, and the four routes no seat has been shown to call, are left
-# out so a seat token that was ever minted with admin scope still could not reach
-# them from a sandbox.
+# The admin routes, and the four routes the doc marks not verified, are left out
+# so a seat token that was ever minted with admin scope still could not reach
+# them from a sandbox. A grep of the four found no polecat caller: stats and
+# config get are town-side (gt tracker status, the events journal check, bd admin
+# through the shim), and snapshot and dispatch board have only the tracker
+# contract tests (gt-0f305).
 #
 # Import:  openshell profile lint -f deploy/polecat/profiles/tracker-polecat.yaml
 #          openshell profile import -f deploy/polecat/profiles/tracker-polecat.yaml --global
