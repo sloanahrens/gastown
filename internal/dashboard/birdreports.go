@@ -339,7 +339,8 @@ func (r *BirdReportsReader) readBird(now time.Time, name string) (BirdReport, bo
 	row.Summary = birdTextCut(side.Summary, birdSummaryRunes)
 	row.NeedsOperator = side.NeedsOperator
 	row.Decisions = side.Decisions
-	row.DecisionItems, row.DecisionItemsWithheld = birdDecisionItems(side.DecisionItems)
+	var unread string
+	row.DecisionItems, row.DecisionItemsWithheld, unread = birdDecisionItems(side.DecisionItems)
 	if now.Sub(written) > birdStaleAfter {
 		row.State, row.Stale = BirdReportStale, true
 	}
@@ -356,6 +357,12 @@ func (r *BirdReportsReader) readBird(now time.Time, name string) (BirdReport, bo
 			row.Note = fmt.Sprintf("withheld: looks like it holds a secret (%s)", class)
 			break
 		}
+	}
+	// A list the reader could not fully use says so, but a note that already
+	// names a worse problem (a withheld row, a page older than its summary)
+	// keeps the line.
+	if unread != "" && row.Note == "" {
+		row.Note = unread
 	}
 	return row, true
 }
@@ -386,19 +393,36 @@ func birdDecisionText(long, short *string) string {
 }
 
 // birdDecisionItems decodes a sidecar's decision_items into the items a row may
-// show, and the rule each dropped item matched. A missing, null or malformed
-// array yields no items: the decisions are a convenience over the summary, so
-// one that is not the array of questions the writer promises costs the row its
-// list and nothing else. At most birdDecisionItemsMax decisions are read, each
-// one either shown or noted as withheld; an entry with no question left after
-// cleaning is not a decision, so it neither appears nor counts against the cap.
-func birdDecisionItems(raw json.RawMessage) (items []BirdDecisionItem, withheld []string) {
+// show, the rule each dropped item matched, and a note when part of the list
+// could not be read. A missing, null or empty array is silent. A value that is
+// not an array yields no items and the note; so does an element that is not a
+// decision (a wrong-typed field), which is skipped on its own while the other
+// elements are kept, so one bad element no longer hides the questions beside
+// it. At most birdDecisionItemsMax decisions are read, each one either shown or
+// noted as withheld; an entry with no question left after cleaning is not a
+// decision, so it neither appears nor counts against the cap.
+func birdDecisionItems(raw json.RawMessage) (items []BirdDecisionItem, withheld []string, unread string) {
 	if len(raw) == 0 {
-		return nil, nil
+		return nil, nil, ""
+	}
+	var elems []json.RawMessage
+	if err := json.Unmarshal(raw, &elems); err != nil {
+		return nil, nil, "decision items could not be read"
 	}
 	var wire []birdDecisionWire
-	if err := json.Unmarshal(raw, &wire); err != nil {
-		return nil, nil
+	bad := 0
+	for _, e := range elems {
+		var w birdDecisionWire
+		if err := json.Unmarshal(e, &w); err != nil {
+			bad++
+			continue
+		}
+		wire = append(wire, w)
+	}
+	if bad == 1 {
+		unread = "1 decision item could not be read"
+	} else if bad > 1 {
+		unread = fmt.Sprintf("%d decision items could not be read", bad)
 	}
 	for _, w := range wire {
 		question := birdTextCut(birdDecisionText(w.Question, w.Q), birdDecisionItemRunes)
@@ -427,7 +451,7 @@ func birdDecisionItems(raw json.RawMessage) (items []BirdDecisionItem, withheld 
 			items = append(items, item)
 		}
 	}
-	return items, withheld
+	return items, withheld, unread
 }
 
 // birdRealDir reports whether path is a directory in its own right. The Lstat

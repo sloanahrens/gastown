@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -660,8 +661,11 @@ func TestBirdReportsDecisionItems(t *testing.T) {
 
 	for _, name := range []string{"missing", "null-items", "not-array", "wrong-type"} {
 		row := byName[name]
-		if row.State != BirdReportFresh || row.Note != "" {
-			t.Errorf("%s: state %q note %q, want a fresh row that merely has no items", name, row.State, row.Note)
+		// The two malformed shapes say so in the note (gt-tm1fa); the row is
+		// still fresh and keeps its summary.
+		wantNote := map[string]string{"not-array": "decision items could not be read", "wrong-type": "1 decision item could not be read"}[name]
+		if row.State != BirdReportFresh || row.Note != wantNote {
+			t.Errorf("%s: state %q note %q, want a fresh row with note %q and no items", name, row.State, row.Note, wantNote)
 		}
 		if row.Summary == "" {
 			t.Errorf("%s: a sidecar that is not an items array cost the row its summary", name)
@@ -679,6 +683,41 @@ func TestBirdReportsDecisionItems(t *testing.T) {
 	paddedItems := byName["padded"].DecisionItems
 	if len(paddedItems) != 2 || paddedItems[0].Question != "the real question?" || paddedItems[1].Question != "and the next?" {
 		t.Errorf("padded carried %+v, want the two real questions past the entries that are not decisions", paddedItems)
+	}
+}
+
+// One element of the wrong type costs the row that element and nothing else:
+// the other questions are shown and the note counts the one that was skipped.
+// A value that is not an array shows nothing and says so; a missing, null or
+// empty list stays silent (gt-tm1fa).
+func TestBirdDecisionItemsUnreadable(t *testing.T) {
+	t.Parallel()
+
+	good := `{"question": "q%d?", "recommendation": "r"}`
+	seven := ""
+	for i := 1; i <= 7; i++ {
+		seven += fmt.Sprintf(good, i) + ","
+	}
+	cases := []struct {
+		name      string
+		raw       string
+		wantItems int
+		wantNote  string
+	}{
+		{"seven good and one wrong-typed", `[` + seven + `{"q": 5}]`, 7, "1 decision item could not be read"},
+		{"a list-valued question", `[` + seven + `{"q": ["x"]}]`, 7, "1 decision item could not be read"},
+		{"two bad elements", `[{"q": 5}, ` + seven + `"text"]`, 7, "2 decision items could not be read"},
+		{"not an array", `{"question": "q?"}`, 0, "decision items could not be read"},
+		{"a string", `"q?"`, 0, "decision items could not be read"},
+		{"empty array", `[]`, 0, ""},
+		{"null", `null`, 0, ""},
+		{"missing", ``, 0, ""},
+	}
+	for _, c := range cases {
+		items, _, note := birdDecisionItems(json.RawMessage(c.raw))
+		if len(items) != c.wantItems || note != c.wantNote {
+			t.Errorf("%s: %d items and note %q, want %d and %q", c.name, len(items), note, c.wantItems, c.wantNote)
+		}
 	}
 }
 
