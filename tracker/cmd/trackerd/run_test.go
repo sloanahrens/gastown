@@ -36,6 +36,21 @@ func TestRunRefusesBadInvocations(t *testing.T) {
 	}
 }
 
+// A DSN the pool cannot read is refused by run before any connection, with the
+// fixed message and without the password.
+func TestRunRefusesADSNItCannotReadWithoutEchoingIt(t *testing.T) {
+	t.Parallel()
+	var out, errb bytes.Buffer
+	dsn := "host=h password=hunter2 pool_max_conns=abc"
+	err := run(context.Background(), []string{}, env(map[string]string{"TRACKER_DSN": dsn}), &out, &errb, nil)
+	if err == nil || err.Error() != "cannot use TRACKER_DSN as a connection string" {
+		t.Fatalf("run() = %v, want the fixed unreadable-DSN error", err)
+	}
+	if all := err.Error() + out.String() + errb.String(); strings.Contains(all, "hunter2") {
+		t.Errorf("output leaks the DSN password: %q", all)
+	}
+}
+
 // The DSN holds a password; it must never reach the output or an error.
 func TestRunNeverEchoesTheDSN(t *testing.T) {
 	t.Parallel()
