@@ -88,6 +88,19 @@ func TestExtractContentRefs(t *testing.T) {
 			wantFiles: []string{"sling.go"},
 		},
 		{
+			// fr-zdzs named the file this way while fr-z64c spelled its path,
+			// and the guard compared neither spelling against the other
+			// (gt-n6jbw).
+			name:      "a bare test-file name counts",
+			text:      "wanderHops.test.ts: keep the per-hop assertions",
+			wantFiles: []string{"wanderHops.test.ts"},
+		},
+		{
+			name:      "a bare spec-file name counts",
+			text:      "the share test in tour.spec.tsx",
+			wantFiles: []string{"tour.spec.tsx"},
+		},
+		{
 			name: "urls are not repo paths",
 			text: "see https://github.com/steveyegge/gastown/blob/main/internal/cmd/sling.go and " +
 				"docs at github.com/steveyegge/gastown/docs/policy.md",
@@ -363,6 +376,35 @@ func TestSlingDuplicateNegativeControl(t *testing.T) {
 	for _, want := range []string{"internal/cmd/sling.go", "gt-aaaa", "proceeds"} {
 		if !strings.Contains(decision.Message, want) {
 			t.Errorf("warning should mention %q:\n%s", want, decision.Message)
+		}
+	}
+}
+
+// TestSlingDuplicateGuardReadsABareTestFileName is the guard-level half of
+// gt-n6jbw: the target-claim rule compares the test files two beads name, and
+// the manual sling guard reads the same refs, so a bead that spells the file
+// without its directory has to reach the guard's report. A bare name is a file
+// overlap, not a shared test, so the guard names it and lets the sling proceed.
+func TestSlingDuplicateGuardReadsABareTestFileName(t *testing.T) {
+	t.Parallel()
+	candidate := newDuplicateCandidate("fr-z64c", "the repeat-rate assertion is a one-seed fit", "open",
+		"Rewrite the final assertion in wanderHops.test.ts as a provable bound.")
+	other := newDuplicateCandidate("fr-zdzs", "the repeat-rate assertion pools every seed", "in_progress",
+		"Pool the repeat rate of wanderHops.test.ts over many seeds.")
+
+	matches := findDuplicateMatches(candidate, []duplicateCandidate{other})
+	if len(matches) != 1 {
+		t.Fatalf("matches = %+v, want one for the file both beads name", matches)
+	}
+	assertStrings(t, "shared files", matches[0].SharedFiles, []string{"wanderHops.test.ts"})
+
+	decision := decideSlingDuplicates(candidate, matches)
+	if decision.Blocked {
+		t.Fatalf("a file-only overlap must not refuse the sling:\n%s", decision.Message)
+	}
+	for _, want := range []string{"wanderHops.test.ts", "fr-zdzs", "proceeds"} {
+		if !strings.Contains(decision.Message, want) {
+			t.Errorf("report should mention %q:\n%s", want, decision.Message)
 		}
 	}
 }

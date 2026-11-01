@@ -104,7 +104,10 @@ var (
 	sourceFileExtRe = regexp.MustCompile(`\.(?:go|md|sh|bash|zsh|ya?ml|toml|sql|ts|tsx|js|jsx|py|rs|tmpl|conf)$`)
 
 	// bareFileExtRe restricts extension-only matches (no directory component)
-	// to extensions that are unambiguous file references on their own.
+	// to extensions that are unambiguous file references on their own. A bare
+	// test-file name is read too, whatever its extension: specdispatch.IsTestFile
+	// names the endings, so a bead that spells "wanderHops.test.ts" without its
+	// path still names the file the target-claim rule compares (gt-n6jbw).
 	bareFileExtRe = regexp.MustCompile(`\.(?:go|md|sh|ya?ml|toml|sql)$`)
 
 	// domainLikeRe matches a leading host component such as "github.com", so a
@@ -231,7 +234,7 @@ func normalizeFileToken(raw string) (string, bool) {
 		if !sourceFileExtRe.MatchString(last) {
 			return "", false
 		}
-	} else if !bareFileExtRe.MatchString(last) {
+	} else if !bareFileExtRe.MatchString(last) && !specdispatch.IsTestFile(last) {
 		return "", false
 	}
 	if dot := strings.LastIndex(last, "."); dot <= 0 {
@@ -687,7 +690,14 @@ func duplicateCandidatesOf(store beads.Client, beadsDir string, rows []*beads.Is
 		if row.ID == "" {
 			continue
 		}
-		candidates = append(candidates, candidateOfRow(row, detailsByID[row.ID]))
+		detail, read := detailsByID[row.ID]
+		c := candidateOfRow(row, detail)
+		// A row no show answered has no design or notes behind its refs, so
+		// its claim on a test file is unknown, not empty. The caller that
+		// dispatches on this pool holds rather than reading it as a bead that
+		// names nothing (gt-n6jbw).
+		c.ClaimsUnread = !read
+		candidates = append(candidates, c)
 	}
 	return candidates, deferred, detailErr
 }
@@ -704,6 +714,7 @@ func candidateOfRow(row *beads.Issue, detail duplicateDetail) duplicateCandidate
 		Priority:  row.Priority,
 		CreatedAt: row.CreatedAt,
 		Blockers:  detail.Blockers,
+		Landed:    specdispatch.CloseReasonIsLanding(row.CloseReason),
 		Ready:     readinessOf(row, detail),
 		Refs: extractOverlapRefs(row.Title, row.Description, row.CloseReason,
 			detail.Design, detail.Notes),

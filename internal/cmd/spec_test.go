@@ -143,6 +143,11 @@ type fakeSpecTown struct {
 	// (gt-7t1im). A rig absent here asks no path question, which is what a
 	// fixture that does not care about one gets.
 	targets map[string]*specdispatch.TargetTree
+	// claims is the target-claim peer set the tick reads for a candidate, keyed
+	// by that candidate's id; an absent key is a rig that holds no other bead's
+	// claim (gt-n6jbw). claimErr fails the read for every candidate.
+	claims   map[string][]specdispatch.Claimant
+	claimErr error
 }
 
 // specTestNow is the tick clock every dispatch test runs at.
@@ -266,6 +271,14 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 		},
 		RevertInFlight: func(rig string) *specdispatch.Revert { return f.revert[rig] },
 		Target:         func(rig string) *specdispatch.TargetTree { return f.targets[rig] },
+		Claims: func(beadID string) ([]specdispatch.Claimant, error) {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if f.claimErr != nil {
+				return nil, f.claimErr
+			}
+			return f.claims[beadID], nil
+		},
 		BranchOnOrigin: func(rig, branch string) (bool, error) {
 			if f.originErr != nil {
 				return false, f.originErr

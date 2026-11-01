@@ -1412,6 +1412,14 @@ type specDispatchEnv struct {
 	// lint's path check (gt-7t1im). Nil asks nothing, which is what a test of
 	// some other hold wants; the tick itself always wires it.
 	Target func(rig string) *specdispatch.TargetTree
+	// Claims returns the target claims of the other beads in a candidate's
+	// rig: the test files and test identifiers their own text names, with the
+	// state that decides whether each holds the candidate
+	// (specdispatch.TargetClaimHold, gt-n6jbw). A read that fails holds the
+	// candidate, a peer whose own design and notes were not read holds as a
+	// claim on unknown files, and so does a nil seam — a checker that is not
+	// wired holds rather than dispatching what it never checked.
+	Claims func(beadID string) ([]specdispatch.Claimant, error)
 	// Reads is the ledger the tick's own reads go through, so the tick can
 	// name the phase each one was made under (gt-139dp). Nil counts no phase,
 	// which is what a test of what the tick decided wants.
@@ -1581,6 +1589,15 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	for _, f := range env.InFlight {
 		inFlight[f.Bead] = true
 	}
+	// The beads this tick decides to sling, which the target-claim rule reads
+	// as the ones about to be in flight. A board-carried peer the tick never
+	// slates — the shape gate holds it, it needs planning, it rests out its
+	// startup backoff — never gets a seat, so it must not hold the file it
+	// names either (gt-n6jbw). A slated peer the sling then refuses still holds
+	// its file for the rest of this tick: the claim is decided as the board is
+	// walked, before the sling runs, and one tick's hold is accepted over
+	// walking the board again.
+	slated := make(map[string]bool)
 
 	env.Reads.setPhase(specPhaseCandidates)
 	candidatesAt := env.Now()
@@ -1794,6 +1811,25 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 				continue
 			}
 		}
+		// A target another bead already claims: two beads that name one test
+		// file are two seats on one line of it, and the losing branch conflicts
+		// at rebase against the winner (gt-n6jbw). A claim set that cannot be
+		// read holds the candidate rather than dispatching onto what it never
+		// checked: only a positive answer that nothing claims the target
+		// dispatches.
+		// A candidate that names no test file claims nothing, so the other
+		// beads' targets are not read for it and a failed read holds it not.
+		if claim := specCandidateClaim(full); specdispatch.NamesTestFile(claim) {
+			peers, err := env.claims(id)
+			if err != nil {
+				report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %scannot read the other beads' targets: %s", id, specdispatch.SkipHeld, firstErrLine(err))})
+				continue
+			}
+			if why, held := specdispatch.TargetClaimHold(claim, peers, slated, env.Now()); held {
+				report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s%s", id, specdispatch.SkipHeld, why)})
+				continue
+			}
+		}
 		// Re-read the clock at the choice, per candidate: the board read and the
 		// holds above can carry the tick past a seat's window boundary, and the
 		// snapshot taken when the budget was built is not the clock the choice
@@ -1863,6 +1899,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 				entry.Line += "; " + overrunNote
 			}
 			report.Dispatched = append(report.Dispatched, entry)
+			slated[id] = true
 			budget.Bump(seat.Agent, budget.Now)
 			continue
 		}
@@ -1888,6 +1925,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// reads, was the tick: 45-70 s each in series, 2026-10-21).
 		c.order = len(pending)
 		pending = append(pending, specPendingSling{c: c, id: id, seat: seat, resume: resume, gone: gone, shapeNote: shapeNote, overrunNote: overrunNote, entry: entry})
+		slated[id] = true
 		budget.Bump(seat.Agent, budget.Now)
 	}
 	report.CandidatesTook = env.Now().Sub(candidatesAt)
@@ -2779,6 +2817,11 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 				return specChildren(townRoot, id)
 			}
 			return children(id)
+		},
+		// The target-claim rule's peer set comes from the guard's own pool, so a
+		// sling that reuses the cached pool costs no read of its own (gt-n6jbw).
+		Claims: func(beadID string) ([]specdispatch.Claimant, error) {
+			return specTargetClaims(townRoot, beadID)
 		},
 		RigHold: func(rig string) string { return dispatch.RigHold(townRoot, rig) },
 		RevertInFlight: specRevertInFlight(townRoot, reads, reverts, func(name string) beads.Client {
