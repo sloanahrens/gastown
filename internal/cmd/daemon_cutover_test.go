@@ -55,6 +55,10 @@ type cutoverRig struct {
 	// runErr fails the command whose first word matches the key.
 	runErr map[string]error
 
+	// lastBeat, when set, gives the old daemon's last heartbeat time at the
+	// moment state.json is read.
+	lastBeat func() time.Time
+
 	quietCalls  int
 	quietAnswer func(call int) error
 	guardErr    error
@@ -120,6 +124,11 @@ func (r *cutoverRig) plan(to string) *cutoverPlan {
 		clk:      r.clk,
 		out:      &r.out,
 		state: func() (*daemon.State, error) {
+			if r.state != nil && r.lastBeat != nil && r.state.Running && r.state.Owner == &cutoverLaunchd {
+				st := *r.state
+				st.LastHeartbeat = r.lastBeat()
+				return &st, nil
+			}
 			if r.state != nil && r.beat != nil {
 				st := *r.state
 				st.HeartbeatCount = r.beat()
@@ -898,5 +907,91 @@ func TestCutoverTakesTheBaselineFromTheProvenStop(t *testing.T) {
 	p3 := r3.plan(config.SupervisorContainer)
 	if ok, _ := p3.oldDaemonStopped(); ok || p3.baseline != nil {
 		t.Errorf("an unproven stop took baseline %+v", p3.baseline)
+	}
+}
+
+// boundaryRig is a launchd-to-container rig whose launchd side stops only just
+// after a heartbeat (the real side's setting), and whose stop notes how long
+// the cutover waited.
+func boundaryRig() (*cutoverRig, *cutoverPlan, *time.Duration) {
+	r := toContainerRig()
+	var atStop time.Duration
+	inner := r.onStop
+	r.onStop = func(r *cutoverRig) {
+		atStop = r.elapsed()
+		inner(r)
+	}
+	p := r.plan(config.SupervisorContainer)
+	p.from.stopAtHeartbeat = true
+	return r, p, &atStop
+}
+
+func TestCutoverStopWaitsForAHeartbeatBoundary(t *testing.T) {
+	t.Parallel()
+	r, p, atStop := boundaryRig()
+	// The last heartbeat completed 100 s before the cutover began; the next
+	// completes 40 s in.
+	r.lastBeat = func() time.Time {
+		if r.elapsed() < 40*time.Second {
+			return r.start.Add(-100 * time.Second)
+		}
+		return r.start.Add(40 * time.Second)
+	}
+	if err := p.execute(context.Background()); err != nil {
+		t.Fatalf("cutover: %v\n%s", err, r.out.String())
+	}
+	if *atStop < 40*time.Second {
+		t.Errorf("bootout ran %s in, before the heartbeat completed at 40s", *atStop)
+	}
+	if *atStop > 40*time.Second+cutoverBoundaryFresh {
+		t.Errorf("bootout ran %s in, more than %s after the heartbeat", *atStop, cutoverBoundaryFresh)
+	}
+}
+
+func TestCutoverStopIssuedWhenHeartbeatIsFresh(t *testing.T) {
+	t.Parallel()
+	r, p, atStop := boundaryRig()
+	r.lastBeat = func() time.Time { return r.start.Add(-10 * time.Second) }
+	if err := p.execute(context.Background()); err != nil {
+		t.Fatalf("cutover: %v\n%s", err, r.out.String())
+	}
+	if *atStop != 0 {
+		t.Errorf("bootout ran %s in, want at once for a heartbeat 10s old", *atStop)
+	}
+}
+
+func TestCutoverBoundaryWaitBudgetChangesNothing(t *testing.T) {
+	t.Parallel()
+	r, p, _ := boundaryRig()
+	r.lastBeat = func() time.Time { return r.start.Add(-200 * time.Second) }
+	err := p.execute(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "nothing was changed") {
+		t.Fatalf("error = %v, want one saying nothing was changed", err)
+	}
+	if len(r.calls) != 0 {
+		t.Errorf("commands ran despite no heartbeat boundary: %v", r.calls)
+	}
+	if r.elapsed() < cutoverBoundaryBudget {
+		t.Errorf("gave up after %s, want the full %s budget", r.elapsed(), cutoverBoundaryBudget)
+	}
+}
+
+func TestCutoverBoundaryWaitRechecksQuietBeforeTheStop(t *testing.T) {
+	t.Parallel()
+	r, p, _ := boundaryRig()
+	r.lastBeat = func() time.Time { return r.start.Add(-10 * time.Second) }
+	// Calls 1 and 2 are steps 1 and 2; call 3 is the recheck after the wait.
+	r.quietAnswer = func(call int) error {
+		if call == 3 {
+			return errors.New("a landing pass started")
+		}
+		return nil
+	}
+	err := p.execute(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "nothing was changed") {
+		t.Fatalf("error = %v, want one saying nothing was changed", err)
+	}
+	if len(r.calls) != 0 {
+		t.Errorf("commands ran after the town stopped being quiet: %v", r.calls)
 	}
 }

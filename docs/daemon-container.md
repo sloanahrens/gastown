@@ -1091,7 +1091,7 @@ in whenever one ends badly. Nothing is rolled back by itself.
 2. **Check quiet again** immediately before touching the old daemon. If the town
    stopped being quiet it ends with `the town stopped being quiet`, and nothing
    was changed.
-3. **Stop the launchd daemon and wait for proof it stopped**: `state.json`
+3. **Stop the launchd daemon, just after it completes a heartbeat, and wait for proof it stopped**. The command first waits (up to 6 minutes) until the daemon's last heartbeat is at most 60 seconds old, because the daemon reads the stop signal only between heartbeats and launchd kills it 30 seconds after the signal; it then checks the town quiet once more. Proof: `state.json`
    records a clean stop (`running` false) and the launchd job reads as not
    loaded. If the proof does not come within a minute (the daemon's 30-second
    shutdown budget and 30 seconds more), it
