@@ -171,9 +171,9 @@ func TestIntegrationTargetsPolecatImageDryRunExitsZero(t *testing.T) {
 const arm64CrossBuild = "GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build"
 
 // TestIntegrationTargetsPolecatImageCrossCompilesForArm64 checks "polecat-image
-// cross-compiles gt and the cache-trim helper for linux/arm64 and builds bd
-// through the bd build helper".
-// Mutation: drop either go build line, point one at another package, or build bd
+// cross-compiles gt, the cache-trim helper and the tier-sweep runner for
+// linux/arm64 and builds bd through the bd build helper".
+// Mutation: drop any go build line, point one at another package, or build bd
 // outside the helper, and the image loses a binary or its commit provenance.
 func TestIntegrationTargetsPolecatImageCrossCompilesForArm64(t *testing.T) {
 	out := dryTarget(t, polecatImageMake(t, repoRoot(t)), "polecat-image")
@@ -183,10 +183,10 @@ func TestIntegrationTargetsPolecatImageCrossCompilesForArm64(t *testing.T) {
 			cross++
 		}
 	}
-	if cross != 2 {
-		t.Fatalf("polecat-image cross-compiles %d helpers, want gt and the cache-trim helper\n%s", cross, out)
+	if cross != 3 {
+		t.Fatalf("polecat-image cross-compiles %d helpers, want gt, the cache-trim helper and the tier-sweep runner\n%s", cross, out)
 	}
-	for _, want := range []string{"./cmd/gt", "./plugins/polecat-image", "go run ./internal/polecat/bdbuild/cmd/build"} {
+	for _, want := range []string{"./cmd/gt", "./plugins/polecat-image", "./cmd/sweep-run", "go run ./internal/polecat/bdbuild/cmd/build"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("polecat-image does not build %s\n%s", want, out)
 		}

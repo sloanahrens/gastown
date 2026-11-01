@@ -176,10 +176,11 @@ POLE_SEED_BUILD_RIG ?= gastown
 # POLE_NODE_PRUNE=1 to run polecat-node-prune after the build (gt-06ni7).
 POLE_NODE_PRUNE ?= 0
 
-# Cross-compile gt, bd and the plugin's cache-trim helper for the sandbox
-# image, then build it. The Dockerfile copies deploy/polecat/bin/, so that
-# directory is the build context's payload. The guard is the first recipe line,
-# so a run without BD_SRC stops before anything is built.
+# Cross-compile gt, bd, the plugin's cache-trim helper and the tier-sweep
+# runner for the sandbox image, then build it. The Dockerfile copies
+# deploy/polecat/bin/, so that directory is the build context's payload. The
+# guard is the first recipe line, so a run without BD_SRC stops before
+# anything is built.
 polecat-image:
 	@test -n "$(BD_SRC)" || { echo "polecat-image: BD_SRC is unset; run make polecat-image BD_SRC=<beads checkout>" >&2; exit 2; }
 	@test -z "$$(git status --porcelain -- . ':(exclude).beads')" || { echo "polecat-image: the tree has uncommitted or untracked changes, so its gt is not the commit the label names ($(POLE_COMMIT)); commit or remove them first" >&2; exit 2; }
@@ -187,6 +188,7 @@ polecat-image:
 	@mkdir -p deploy/polecat/bin
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o deploy/polecat/bin/gt ./cmd/gt
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o deploy/polecat/bin/polecat-image ./plugins/polecat-image
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o deploy/polecat/bin/sweep-run ./cmd/sweep-run
 	@bd_commit=$$(go run ./internal/polecat/bdbuild/cmd/build -src "$(BD_SRC)" -out $(CURDIR)/deploy/polecat/bin/bd -commit "$(BD_COMMIT)") || { echo "polecat-image: the bd build failed, so the image has no bd commit to label" >&2; exit 2; }; \
 	test -n "$$bd_commit" || { echo "polecat-image: the bd build printed no commit, so the image's bd cannot be labelled" >&2; exit 2; }; \
 	printf '%s\n' "$$bd_commit" > deploy/polecat/bin/bd.commit
