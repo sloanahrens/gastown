@@ -1,0 +1,20 @@
+Invoice INV-2026-10-0001
+Workspace: acme
+Period: October 2026
+
+Charges
+  seat-hours opus: 24.00 h x $0.09/h = $2.16
+  seat-hours sonnet: 42.00 h x $0.03/h = $1.26
+  storage: 1.50 GB-months x $0.20/GB-month = $0.30
+  overhead share: $10.00
+
+Subtotal: $13.72
+Factor (115%): $15.78
+Monthly floor: $5.00
+Total: $15.78
+
+Tokens (not priced)
+  input: 1234
+  output: 567
+  cache creation: 89
+  cache read: 4321
