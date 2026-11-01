@@ -47,7 +47,12 @@ func recordTiming(cfg Config, e Entry, out outcome) {
 	if cfg.Timing == nil || cfg.TimingPath == "" {
 		return
 	}
-	line, err := timingLine(e, out)
+	line, err := timingLine(timingRecord{
+		Script:  e.Path,
+		Seconds: out.ended.Sub(out.began).Seconds(),
+		Exit:    out.exit,
+		At:      out.ended.UTC().Format(time.RFC3339),
+	})
 	if err == nil {
 		err = cfg.Timing.Append(cfg.TimingPath, line)
 	}
@@ -56,17 +61,11 @@ func recordTiming(cfg Config, e Entry, out outcome) {
 	}
 }
 
-// timingLine renders one script's line, newline included.
-func timingLine(e Entry, out outcome) ([]byte, error) {
-	rec := timingRecord{
-		Script:  e.Path,
-		Seconds: out.ended.Sub(out.began).Seconds(),
-		Exit:    out.exit,
-		At:      out.ended.UTC().Format(time.RFC3339),
-	}
+// timingLine renders rec as one line, newline included.
+func timingLine(rec timingRecord) ([]byte, error) {
 	line, err := json.Marshal(rec)
 	if err != nil {
-		return nil, fmt.Errorf("encode the line for %s: %w", e.Path, err)
+		return nil, fmt.Errorf("encode the line for %s: %w", rec.Script, err)
 	}
 	return append(line, '\n'), nil
 }
@@ -85,8 +84,19 @@ func (OSTimingFiles) Append(path string, line []byte) error {
 	if err != nil {
 		return fmt.Errorf("open %s: %w", path, err)
 	}
-	_, writeErr := fh.Write(line)
-	closeErr := fh.Close()
+	return appendLine(fh, path, line)
+}
+
+// appendTarget is the open log appendLine writes one line to.
+type appendTarget interface {
+	Write(p []byte) (int, error)
+	Close() error
+}
+
+// appendLine writes line to w and closes it, reporting a failed write or close.
+func appendLine(w appendTarget, path string, line []byte) error {
+	_, writeErr := w.Write(line)
+	closeErr := w.Close()
 	if writeErr != nil {
 		return fmt.Errorf("write %s: %w", path, errors.Join(writeErr, closeErr))
 	}

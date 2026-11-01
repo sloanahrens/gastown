@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -253,5 +254,55 @@ func TestTimingOSAppendRefusesAPathUnderAFile(t *testing.T) {
 	err := OSTimingFiles{}.Append(filepath.Join(blocker, "shell.jsonl"), []byte("{}\n"))
 	if err == nil {
 		t.Fatal("Append under a regular file = nil, want an error")
+	}
+}
+
+func TestTimingOSAppendRefusesADirectoryAsTheLog(t *testing.T) {
+	t.Parallel()
+	err := OSTimingFiles{}.Append(t.TempDir(), []byte("{}\n"))
+	if err == nil {
+		t.Fatal("Append to a directory = nil, want an error")
+	}
+}
+
+// fakeAppendTarget is an open log whose write and close the case decides.
+type fakeAppendTarget struct {
+	writeErr, closeErr error
+	wrote              []byte
+}
+
+func (f *fakeAppendTarget) Write(p []byte) (int, error) {
+	f.wrote = append(f.wrote, p...)
+	return len(p), f.writeErr
+}
+
+func (f *fakeAppendTarget) Close() error { return f.closeErr }
+
+func TestTimingOSAppendReportsAFailedWriteOrClose(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		target *fakeAppendTarget
+		want   string
+	}{
+		{"a failed write", &fakeAppendTarget{writeErr: errors.New("disk full")}, "write /log: disk full"},
+		{"a failed close", &fakeAppendTarget{closeErr: errors.New("input/output error")}, "close /log: input/output error"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := appendLine(tc.target, "/log", []byte("{}\n"))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("appendLine = %v, want an error saying %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestTimingRefusesALineItCannotEncode(t *testing.T) {
+	t.Parallel()
+	_, err := timingLine(timingRecord{Script: "scripts/a_test.sh", Seconds: math.NaN()})
+	if err == nil {
+		t.Fatal("timingLine with an unencodable duration = nil, want an error")
 	}
 }
