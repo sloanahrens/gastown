@@ -50,6 +50,12 @@ SELECT rig AS prefix,
 // The DSN carries a password, so no message here repeats it. pgconn's connect
 // error names the user and the database only.
 func (q pgQuerier) Sizes(ctx context.Context) ([]PrefixSize, error) {
+	// pgx's parse error echoes the DSN, and its redaction of the password is best
+	// effort: an unencoded '@' in the password gets through. A DSN that does not
+	// parse is reported without pgx's text.
+	if _, err := pgx.ParseConfig(q.dsn); err != nil {
+		return nil, fmt.Errorf("connect to the tracker: the DSN in %s does not parse", dsnEnv)
+	}
 	conn, err := pgx.Connect(ctx, q.dsn)
 	if err != nil {
 		return nil, fmt.Errorf("connect to the tracker: %w", err)
