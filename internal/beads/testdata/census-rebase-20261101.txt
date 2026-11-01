@@ -1,0 +1,5 @@
+# The budget rows a later census re-based above the pinned baseline: the
+# explicit override the census_budgets.go comment describes. Columns: calls per
+# minute, caller, the bead that cut the caller. Each rate is the count the
+# recorded census windows in census-recorded-20261101.txt show.
+14.0	schedulerrun.listAllSlingContextRecords	gt-s0xpe

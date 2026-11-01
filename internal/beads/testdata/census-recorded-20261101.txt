@@ -1,0 +1,6 @@
+# Two one-minute census windows from the daemon log (daemon/daemon.log), verbatim,
+# written after gt-s0xpe was installed (gt 298e459a8, daemon restart 13:58:59 on
+# 2026-11-01). They are the measurement the re-based row in
+# census-rebase-20261101.txt stands on.
+2026/11/01 13:59:59 bd census: total=493 window=59s top: show@landworker.RetryBeads.Show=437 query@schedulerrun.listAllSlingContextRecords=14 list@landworker.RetryBeads.List=9 list@metrics.queueLandingColumn=9 show@daemon.(*Daemon).showRigBead=9 comments gt-2conu@landworker.RetryBeads.Comments=4 comments gt-nu89c@landworker.RetryBeads.Comments=3 comments add@landworker.RetryBeads.AddComment=2
+2026/11/01 14:02:59 bd census: total=29 window=60s top: query@schedulerrun.listAllSlingContextRecords=14 list@landworker.RetryBeads.List=8 close@plugin.(*Recorder).RecordRun=1 comments add@landworker.RetryBeads.AddComment=1 comments gt-u560q.12@landworker.RetryBeads.Comments=1 create@plugin.(*Recorder).RecordRun=1 list@metrics.queueLandingColumn=1 list@notify.PushUnhandled=1
