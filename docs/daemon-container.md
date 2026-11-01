@@ -1026,10 +1026,21 @@ day.
 - [ ] **The live compose file is written.** `gt daemon compose write --image
       gt-daemon:<rev>` renders `<live-town>/daemon/container/compose.yml` from
       the town's settings and starts nothing. To let the container's landing
-      worker push to the live Forgejo, pass the forge credential flags as the
-      scratch render does; `gt daemon compose write --help` gives their contract,
-      so a `land/<bead>` push carries the landing bot's token. The cutover starts
-      the container from this file, so the window cannot start before it exists.
+      worker push to the live Forgejo, add the forge credential pair:
+      `--forge-host host.docker.internal:3000 --forge-token-file ~/.config/gt/forgejo-landing.env`.
+      `host.docker.internal` is how the container reaches the Mac (the name
+      `dolt.container_host` gives it) and 3000 is the port the live Forgejo
+      publishes; the credential helper is keyed to exactly this host:port, so
+      it has to be the one the container's pushes name. The path is the landing
+      bot's token file that `docs/forgejo-runbook.md`'s provisioning writes,
+      which the render mounts read-only; the command never opens it, so it need
+      not exist yet when this runs, and having it in place before the window's
+      first landing is what makes a `land/<bead>` push carry the bot's token.
+      Leave `~` unquoted so the shell makes the path absolute, since a relative
+      one is refused. With neither flag the container gets no helper and its
+      pushes fail; `gt daemon compose write --help` gives the pair's contract.
+      The cutover starts the container from this file, so the window cannot
+      start before it exists.
 - [ ] **Both container fields are set in the live settings** while
       `daemon.supervisor` stays `launchd`: `daemon.container_name` and
       `daemon.compose_project`, never one without the other. The cutover builds
