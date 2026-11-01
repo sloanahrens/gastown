@@ -459,19 +459,111 @@ func TestReadyRowsKeepsOpenUnblockedWork(t *testing.T) {
 		},
 		blocked: map[string]bool{"held": true},
 	}
-	ids := func(issues []*beads.Issue) []string {
-		out := make([]string, len(issues))
-		for i, is := range issues {
-			out[i] = is.ID
-		}
-		return out
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	rows, err := readyRows(b, false, now)
+	if err != nil {
+		t.Fatalf("readyRows: %v", err)
 	}
-	if got, want := ids(readyRows(b, false)), []string{"open", "assigned"}; !reflect.DeepEqual(got, want) {
+	if got, want := issueIDs(rows), []string{"open", "assigned"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("readyRows = %v, want %v", got, want)
 	}
-	if got, want := ids(readyRows(b, true)), []string{"open"}; !reflect.DeepEqual(got, want) {
+	rows, err = readyRows(b, true, now)
+	if err != nil {
+		t.Fatalf("readyRows(--unassigned): %v", err)
+	}
+	if got, want := issueIDs(rows), []string{"open"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("readyRows(--unassigned) = %v, want %v", got, want)
 	}
+}
+
+// TestReadyRowsReadsADeferralTheWayTheStoreDoes: the board's status and defer
+// rule is the store's ready query's, so a board the shim works out neither
+// drops an issue whose deferral has passed nor shows one whose deferral has
+// not. An open issue deferred into the future waits, a deferred issue whose
+// time has passed is ready without anything writing to it, and a deferred
+// issue with no time is parked.
+func TestReadyRowsReadsADeferralTheWayTheStoreDoes(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	b := board{listed: []*beads.Issue{
+		{ID: "open", Status: "open"},
+		{ID: "open-later", Status: "open", DeferUntil: "2026-06-01T13:00:00Z"},
+		{ID: "open-woken", Status: "open", DeferUntil: "2026-06-01T11:00:00Z"},
+		{ID: "deferred-woken", Status: "deferred", DeferUntil: "2026-06-01T11:00:00Z"},
+		{ID: "deferred-later", Status: "deferred", DeferUntil: "2026-06-01T13:00:00Z"},
+		{ID: "deferred-parked", Status: "deferred"},
+		{ID: "closed", Status: "closed"},
+	}}
+	rows, err := readyRows(b, false, now)
+	if err != nil {
+		t.Fatalf("readyRows: %v", err)
+	}
+	if got, want := issueIDs(rows), []string{"open", "open-woken", "deferred-woken"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("readyRows = %v, want %v", got, want)
+	}
+}
+
+// TestReadyRowsRefusesADeferTimeItCannotRead: a defer time the shim cannot read
+// is the shim's error, never read as no deferral, which would show an issue bd
+// holds back.
+func TestReadyRowsRefusesADeferTimeItCannotRead(t *testing.T) {
+	t.Parallel()
+	b := board{listed: []*beads.Issue{{ID: "fx-1", Status: "deferred", DeferUntil: "soon"}}}
+	_, err := readyRows(b, false, time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC))
+	if err == nil || !strings.Contains(err.Error(), "fx-1") || !strings.Contains(err.Error(), "defer time") {
+		t.Errorf("readyRows = %v, want an error naming the issue and its defer time", err)
+	}
+}
+
+// TestQueryFilterOrdersTheMergedBoardByTimeNotText: the durable and wisp tables
+// can spell one instant differently, and bd's row order is by time. Text order
+// would put a fractional-second row before the whole second it follows, and a
+// negative zone offset before the instant it states.
+func TestQueryFilterOrdersTheMergedBoardByTimeNotText(t *testing.T) {
+	t.Parallel()
+	st := stubReadStore{list: func(opts beads.ListOptions) ([]*beads.Issue, error) {
+		if opts.Ephemeral {
+			return []*beads.Issue{
+				{ID: "wisp-late", Priority: 2, CreatedAt: "2026-01-01T00:00:00.5Z"},
+			}, nil
+		}
+		return []*beads.Issue{
+			{ID: "fx-b", Priority: 2, CreatedAt: "2025-12-31T22:00:00-02:00"},
+			{ID: "fx-a", Priority: 2, CreatedAt: "2026-01-01T00:00:00Z"},
+		}, nil
+	}}
+	got, err := queryFilter{opts: beads.ListOptions{Status: "open"}, ephemeral: "both"}.read(st)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if ids, want := issueIDs(got), []string{"fx-a", "fx-b", "wisp-late"}; !reflect.DeepEqual(ids, want) {
+		t.Errorf("read = %v, want bd's row order %v", ids, want)
+	}
+}
+
+// TestQueryFilterRefusesACreationTimeItCannotRead: a time the shim cannot read
+// is the shim's error, never ordered by its text.
+func TestQueryFilterRefusesACreationTimeItCannotRead(t *testing.T) {
+	t.Parallel()
+	st := stubReadStore{list: func(opts beads.ListOptions) ([]*beads.Issue, error) {
+		if opts.Ephemeral {
+			return nil, nil
+		}
+		return []*beads.Issue{{ID: "fx-1", CreatedAt: "yesterday"}}, nil
+	}}
+	_, err := queryFilter{ephemeral: "both"}.read(st)
+	if err == nil || !strings.Contains(err.Error(), "fx-1") || !strings.Contains(err.Error(), "creation time") {
+		t.Errorf("read = %v, want an error naming the issue and its creation time", err)
+	}
+}
+
+// issueIDs names the issues in order, for a comparison against bd's row order.
+func issueIDs(issues []*beads.Issue) []string {
+	out := make([]string, len(issues))
+	for i, is := range issues {
+		out[i] = is.ID
+	}
+	return out
 }
 
 // TestSearchMatchesHoldsEveryWord: search keeps an issue only when every word

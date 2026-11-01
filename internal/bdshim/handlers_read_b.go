@@ -18,11 +18,13 @@ import (
 // and refuses any other flag by name, so a caller never reads a filtered answer
 // as an unfiltered one.
 //
-// The store seam carries no board query — beads.Client has no Ready or Blocked,
-// and the tracker fake models neither — so ready and blocked list the rig's
-// issues once, read their links once, and work out bd's answer here with the
-// blocking rule the store's own queries use. The store is opened through the
-// backend seam, from the route the router chose.
+// The seam carries no blocked query, and the tracker store the handlers are
+// tested against models no board query at all, so ready and blocked list the
+// rig's issues once, read their links once, and work out bd's answer here. The
+// rules are not the shim's own copies: the link types that block, the statuses
+// that resolve a target and the kinds a ready board leaves out are defined once
+// in tracker/api, where the store's own queries build from them. The store is
+// opened through the backend seam, from the route the router chose.
 
 // The flag set each verb answers: the flags its golden rows cover.
 var (
@@ -82,14 +84,14 @@ func readBoard(st readStore, opts beads.ListOptions) (board, error) {
 	return board{listed: listed, full: full, blocked: blockedIssues(listed, full)}, nil
 }
 
-// The rules a link blocks by: the two lists the store's ready and blocked
-// queries build their SQL from (tracker/store/postgres_ready.go). The shim
-// applies the same rules to the issues it listed, so its board and the store's
-// cannot disagree about what is held.
-var (
-	blockingLinkTypes = map[string]bool{"blocks": true, "conditional-blocks": true}
-	resolvedStatuses  = map[string]bool{"closed": true, "pinned": true}
-)
+// blocks reports whether dep holds its issue back: a blocking relation whose
+// target is still unresolved. The two lists are the store's own
+// (tracker/api/board.go), so a board the shim works out and one the store's
+// queries answer cannot disagree about what is held.
+func blocks(dep beads.IssueDep) bool {
+	return slices.Contains(api.BlockingLinkTypes, dep.DependencyType) &&
+		!slices.Contains(api.ResolvedStatuses, dep.Status)
+}
 
 // blockedIssues returns the ids among listed that bd's blocked board reports:
 // an issue held by a blocking link to a target that is neither closed nor
@@ -121,12 +123,6 @@ func blockedIssues(listed []*beads.Issue, full map[string]*beads.Issue) map[stri
 	return blocked
 }
 
-// blocks reports whether dep holds its issue back: a blocking relation whose
-// target is still unresolved.
-func blocks(dep beads.IssueDep) bool {
-	return blockingLinkTypes[dep.DependencyType] && !resolvedStatuses[dep.Status]
-}
-
 // parentOf names the bead is a child of, by its parent-child link or, when the
 // store answers the field rather than the link, its parent.
 func parentOf(is *beads.Issue) string {
@@ -141,20 +137,18 @@ func parentOf(is *beads.Issue) string {
 	return ""
 }
 
-// readyExcludedType are the bead kinds bd's ready board leaves out beyond the
-// infrastructure types the list read already drops: the refinery's queue, gates,
-// molecule roots and a rig's identity bead. The store's ready query carries the
-// same list.
-var readyExcludedType = map[string]bool{"merge-request": true, "gate": true, "molecule": true, "rig": true}
-
-// readyRows keeps the issues bd's ready board answers: open, unblocked, and not
-// a kind of bead the board leaves out. The seam carries no defer time, so an
-// issue bd would wake from deferral is not in this answer. unassigned keeps only
-// the issues nobody holds.
-func readyRows(b board, unassigned bool) []*beads.Issue {
+// readyRows keeps the issues bd's ready board answers: open, or deferred with
+// its time passed, unblocked, and not a kind of bead the board leaves out
+// (api.ReadyExcludedTypes, the list the store's ready query applies too).
+// unassigned keeps only the issues nobody holds.
+func readyRows(b board, unassigned bool, now time.Time) ([]*beads.Issue, error) {
 	rows := make([]*beads.Issue, 0, len(b.listed))
 	for _, is := range b.listed {
-		if is.Status != "open" || b.blocked[is.ID] || readyExcludedType[is.Type] {
+		ready, err := readyByStatus(is, now)
+		if err != nil {
+			return nil, err
+		}
+		if !ready || b.blocked[is.ID] || slices.Contains(api.ReadyExcludedTypes, is.Type) {
 			continue
 		}
 		if unassigned && is.Assignee != "" {
@@ -162,7 +156,39 @@ func readyRows(b board, unassigned bool) []*beads.Issue {
 		}
 		rows = append(rows, is)
 	}
-	return rows
+	return rows, nil
+}
+
+// readyByStatus applies the store's ready predicate (tracker/store/
+// postgres_ready.go) to one issue's status and defer time: an open issue is
+// ready unless it is deferred into the future, and a deferred issue wakes by
+// itself once its time has passed, because nothing sweeps its status back to
+// open. A defer time the shim cannot read is refused rather than read as no
+// deferral, and a deferred issue with no time is parked, not ready.
+func readyByStatus(is *beads.Issue, now time.Time) (bool, error) {
+	if is.Status != "open" && is.Status != "deferred" {
+		return false, nil
+	}
+	until, err := deferTime(is)
+	if err != nil {
+		return false, err
+	}
+	if until.IsZero() {
+		return is.Status == "open", nil
+	}
+	return !until.After(now), nil
+}
+
+// deferTime reads the issue's defer time; empty means the issue carries none.
+func deferTime(is *beads.Issue) (time.Time, error) {
+	if is.DeferUntil == "" {
+		return time.Time{}, nil
+	}
+	until, err := time.Parse(time.RFC3339, is.DeferUntil)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("issue %s has a defer time %q that is not RFC 3339", is.ID, is.DeferUntil)
+	}
+	return until, nil
 }
 
 // boardRows renders the rows bd's ready and search print: the list fields and
@@ -204,7 +230,11 @@ func readyHandler(env Env, d Decision) int {
 	if err != nil {
 		return shimError(env, err)
 	}
-	rows := limitIssues(readyRows(b, fl.has("--unassigned")), limit)
+	rows, err := readyRows(b, fl.has("--unassigned"), time.Now())
+	if err != nil {
+		return shimError(env, err)
+	}
+	rows = limitIssues(rows, limit)
 	if err := printBDAnswer(env.Stdout, bdListAnswer{Data: boardRows(rows, b.full), SchemaVersion: bdSchemaVersion}); err != nil {
 		return shimError(env, err)
 	}
@@ -314,21 +344,36 @@ func (q queryFilter) read(st readStore) ([]*beads.Issue, error) {
 		return nil, err
 	}
 	out := append(a, b...)
-	slices.SortStableFunc(out, issueOrder)
+	if err := sortByBDOrder(out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
-// issueOrder is the order bd lists issues in: priority, then creation time, then
-// id. The stores write creation times in UTC RFC 3339, so their text order is
-// their time order.
-func issueOrder(a, b *beads.Issue) int {
-	if a.Priority != b.Priority {
-		return a.Priority - b.Priority
+// sortByBDOrder sorts issues into bd's row order: priority, then creation time,
+// then id. The creation time is compared as a time, not as text: the durable
+// and wisp tables can spell one instant differently (a fractional second, a
+// zone offset), and RFC 3339 text order is not time order across such spellings.
+// A creation time the shim cannot read is refused rather than ordered by text.
+func sortByBDOrder(issues []*beads.Issue) error {
+	created := make(map[string]time.Time, len(issues))
+	for _, is := range issues {
+		t, err := time.Parse(time.RFC3339, is.CreatedAt)
+		if err != nil {
+			return fmt.Errorf("issue %s has a creation time %q that is not RFC 3339", is.ID, is.CreatedAt)
+		}
+		created[is.ID] = t
 	}
-	if c := strings.Compare(a.CreatedAt, b.CreatedAt); c != 0 {
-		return c
-	}
-	return strings.Compare(a.ID, b.ID)
+	slices.SortStableFunc(issues, func(a, b *beads.Issue) int {
+		if a.Priority != b.Priority {
+			return a.Priority - b.Priority
+		}
+		if c := created[a.ID].Compare(created[b.ID]); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	return nil
 }
 
 // queryHandler answers bd query --json for a tracker rig.

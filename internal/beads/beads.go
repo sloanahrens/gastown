@@ -313,6 +313,7 @@ type Issue struct {
 	CreatedBy   string   `json:"created_by,omitempty"`
 	UpdatedAt   string   `json:"updated_at"`
 	ClosedAt    string   `json:"closed_at,omitempty"`
+	DeferUntil  string   `json:"defer_until,omitempty"`  // When a deferred or open issue becomes workable again; empty when it has no deferral
 	CloseReason string   `json:"close_reason,omitempty"` // Reason provided when closing (gt-pvwy: distinguishes finished/canceled/superseded)
 	Parent      string   `json:"parent,omitempty"`
 	ExternalRef string   `json:"external_ref,omitempty"`

@@ -3,20 +3,21 @@ package store
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/steveyegge/gastown/tracker/api"
 )
 
-// A link blocks when its type is in blockingTypes and its target is neither
-// closed nor pinned (resolvedStatuses); blocked issues pass that down to their
-// children. Every query that asks "what blocks" builds its SQL from these two
-// lists, so ready, blocked, BlockedBy and the close fence cannot disagree.
+// A link blocks when its type is in api.BlockingLinkTypes and its target is
+// neither closed nor pinned (api.ResolvedStatuses); blocked issues pass that
+// down to their children. Every query that asks "what blocks" builds its SQL
+// from these two lists, so ready, blocked, BlockedBy and the close fence cannot
+// disagree. The bd shim applies the same two lists to the board it lists, so
+// its answer and this one cannot disagree about what is held.
 var (
-	blockingTypes    = []string{"blocks", "conditional-blocks"}
-	resolvedStatuses = []string{"closed", "pinned"}
+	blockingTypes    = api.BlockingLinkTypes
+	resolvedStatuses = api.ResolvedStatuses
 )
 
 // sqlList renders a list of constants as a SQL list literal: ('a', 'b').
@@ -76,9 +77,9 @@ func scopeCTE(rootArg string) string {
 
 // readyExcludedTypes are the types the whole-database ready board leaves out,
 // as bd's does: the infrastructure types, and the kinds of bead that are not
-// work to pick up (merge requests, gates, molecule roots, rig identity beads).
-// Inside one molecule only the infrastructure types are left out.
-var readyExcludedTypes = append(slices.Clone(api.InfraTypes), "merge-request", "gate", "molecule", "rig")
+// work to pick up. The bd shim applies this same list. Inside one molecule only
+// the infrastructure types are left out.
+var readyExcludedTypes = api.ReadyExcludedTypes
 
 // buildReadyQuery builds the ready query (blocked=false) or the blocked one.
 // Ready is open (or deferred and woken), unblocked, not ephemeral (unless scoped to a

@@ -42,14 +42,15 @@ func TestIssueConversionCarriesFieldsTimesAndDependencies(t *testing.T) {
 	t.Parallel()
 	created := time.Date(2026, 10, 1, 10, 0, 0, 0, time.FixedZone("x", 3600))
 	closed := created.Add(time.Hour)
+	deferUntil := created.Add(2 * time.Hour)
 	got := issue(api.Issue{
 		ID: "gt-a", Title: "t", Status: "closed", Priority: 1, Type: "task", CreatedAt: created, UpdatedAt: created, ClosedAt: &closed,
-		BlockedBy: []string{"gt-b", "gt-c"}, Payload: `{"n": 3, "a": 1}`,
+		DeferUntil: &deferUntil, BlockedBy: []string{"gt-b", "gt-c"}, Payload: `{"n": 3, "a": 1}`,
 		Dependencies: []api.IssueDep{{ID: "gt-b", Title: "b", Status: "open", DependencyType: "blocks"}},
 		Dependents:   []api.IssueDep{{ID: "gt-w", Title: "w", Status: "open", DependencyType: "tracks"}},
 	})
-	if got.CreatedAt != "2026-10-01T09:00:00Z" || got.ClosedAt != "2026-10-01T10:00:00Z" {
-		t.Errorf("times = %q / %q, want RFC3339 in UTC", got.CreatedAt, got.ClosedAt)
+	if got.CreatedAt != "2026-10-01T09:00:00Z" || got.ClosedAt != "2026-10-01T10:00:00Z" || got.DeferUntil != "2026-10-01T11:00:00Z" {
+		t.Errorf("times = %q / %q / %q, want RFC3339 in UTC", got.CreatedAt, got.ClosedAt, got.DeferUntil)
 	}
 	if got.BlockedByCount != 2 || len(got.Dependencies) != 1 || got.Dependencies[0].DependencyType != "blocks" || got.Dependencies[0].Title != "b" {
 		t.Errorf("BlockedByCount = %d, Dependencies = %+v", got.BlockedByCount, got.Dependencies)
@@ -62,6 +63,9 @@ func TestIssueConversionCarriesFieldsTimesAndDependencies(t *testing.T) {
 	}
 	if issue(api.Issue{ID: "gt-z"}).ClosedAt != "" {
 		t.Error("an open issue must have an empty ClosedAt")
+	}
+	if issue(api.Issue{ID: "gt-z"}).DeferUntil != "" {
+		t.Error("an issue with no deferral must have an empty DeferUntil")
 	}
 }
 

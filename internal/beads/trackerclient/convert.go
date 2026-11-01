@@ -29,6 +29,7 @@ func issue(a api.Issue) *beads.Issue {
 		ID: a.ID, Title: a.Title, Description: a.Description, Design: a.Design, Notes: a.Notes,
 		Status: a.Status, Priority: a.Priority, Type: a.Type,
 		CreatedAt: ts(a.CreatedAt), CreatedBy: a.CreatedBy, UpdatedAt: ts(a.UpdatedAt), ClosedAt: tsPtr(a.ClosedAt),
+		DeferUntil:  tsPtr(a.DeferUntil),
 		CloseReason: a.CloseReason, Parent: a.Parent, Assignee: a.Assignee,
 		Children: a.Children, DependsOn: a.DependsOn, BlockedBy: a.BlockedBy, Labels: a.Labels,
 		Ephemeral: a.Ephemeral, WispType: a.WispType, EventKind: a.EventKind, Payload: compactJSON(a.Payload),
