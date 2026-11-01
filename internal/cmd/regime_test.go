@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -165,5 +166,61 @@ func TestRegimeRecordOutsideATownExitsOne(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "Gas Town workspace") {
 		t.Fatalf("error = %q, want it to say there is no Gas Town workspace", err)
+	}
+}
+
+// regimeCheckRun runs gt regime check over town and returns its output and error.
+func regimeCheckRun(find func() (string, error)) (string, error) {
+	cmd := newRegimeCommand(find, func() time.Time { return regimeTestNow }, func() string { return "a" })
+	var out bytes.Buffer
+	cmd.SetArgs([]string{"check"})
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	err := cmd.Execute()
+	return out.String(), err
+}
+
+// gt regime check reads a record the writer produced and a backfill file with
+// the real reader, and a backfill line the reader rejects fails the command with
+// the reader's reason, before an install carries the reader to the file.
+func TestRegimeCheckReadsTheFilesWithTheRealReader(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	find := func() (string, error) { return town, nil }
+
+	out, err := regimeCheckRun(find)
+	if err != nil || !strings.Contains(out, "regime events readable: 0, oldest -, newest -") {
+		t.Fatalf("empty town: out %q, err %v; want zero events readable", out, err)
+	}
+
+	if err := runRegimeRecord(regimeDeps{townRoot: town, now: regimeTestNow, actor: "a"},
+		regimeFlags{kind: "gate", beforeRef: "x", afterRef: "y", reason: "gate raised"}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	good := `{"ts":"2026-10-01T09:00:00Z","kind":"install","before_ref":"","after_ref":"b","commit":"","reason":"gt installed","actor":"merlin","source":"log"}` + "\n"
+	path := filepath.Join(filepath.Dir(metrics.RegimeEventsPath(town)), "regime-events-backfill-20261101.jsonl")
+	if err := os.WriteFile(path, []byte(good), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err = regimeCheckRun(find)
+	if err != nil || !strings.Contains(out, "readable: 2, oldest 2026-10-01, newest 2026-11-01") {
+		t.Fatalf("two records: out %q, err %v; want both read", out, err)
+	}
+
+	bad := strings.Replace(good, `"actor":"merlin"`, `"actor":"merlin","date_only":true`, 1)
+	if err := os.WriteFile(path, []byte(bad), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = regimeCheckRun(find)
+	if err == nil || !strings.Contains(err.Error(), "not readable") || !strings.Contains(err.Error(), "date_only") {
+		t.Fatalf("a backfill line with an unknown field: err %v; want the reader's reason", err)
+	}
+}
+
+func TestRegimeCheckOutsideATown(t *testing.T) {
+	t.Parallel()
+	_, err := regimeCheckRun(func() (string, error) { return "", errors.New("no town here") })
+	if err == nil || !strings.Contains(err.Error(), "not in a Gas Town workspace") {
+		t.Fatalf("err = %v; want the workspace refusal", err)
 	}
 }
