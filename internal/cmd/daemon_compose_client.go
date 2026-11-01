@@ -227,3 +227,25 @@ func portSuffix(port string) string {
 func containerKubeconfigPath(townRoot string) string {
 	return filepath.Join(townRoot, filepath.FromSlash(containerKubeconfigRP))
 }
+
+// containerZone is the IANA zone name the container's TZ carries: the zone
+// polecat_pool.timezone names when set, else the host's own (the zoneinfo name
+// /etc/localtime links to), else "" and no TZ. A name only, never zone data: the
+// gt binary embeds the database (gt-yrxhs).
+func containerZone(townRoot string, load func(path string) (*config.TownSettings, error), readlink func(string) (string, error)) (string, error) {
+	settings, err := load(config.TownSettingsPath(townRoot))
+	if err != nil {
+		return "", fmt.Errorf("read the town's settings for polecat_pool.timezone: %w", err)
+	}
+	if settings != nil && settings.PolecatPool != nil && settings.PolecatPool.Timezone != "" {
+		return settings.PolecatPool.Timezone, nil
+	}
+	target, err := readlink("/etc/localtime")
+	if err != nil {
+		return "", nil // no readable host zone link: the container keeps UTC rather than a guess
+	}
+	if _, name, ok := strings.Cut(target, "zoneinfo/"); ok {
+		return name, nil
+	}
+	return "", nil
+}

@@ -400,3 +400,55 @@ func TestSecretNamePatternCoversCommonCredentialNames(t *testing.T) {
 		}
 	}
 }
+
+func TestContainerZoneIsTheTownsThenTheHosts(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	none := func(string) (*config.TownSettings, error) { return nil, nil }
+	link := func(target string, err error) func(string) (string, error) {
+		return func(string) (string, error) { return target, err }
+	}
+	named := func(string) (*config.TownSettings, error) {
+		return &config.TownSettings{PolecatPool: &config.PolecatPool{Timezone: "America/Denver"}}, nil
+	}
+	if z, err := containerZone("/t", named, link("/var/db/timezone/zoneinfo/Europe/Paris", nil)); z != "America/Denver" || err != nil {
+		t.Errorf("a town naming a zone = %q, %v", z, err)
+	}
+	if z, err := containerZone("/t", none, link("/var/db/timezone/zoneinfo/America/Chicago", nil)); z != "America/Chicago" || err != nil {
+		t.Errorf("the host's zone = %q, %v", z, err)
+	}
+	for name, l := range map[string]func(string) (string, error){"no link": link("", boom), "a link that is not zoneinfo": link("/etc/other", nil)} {
+		if z, err := containerZone("/t", none, l); z != "" || err != nil {
+			t.Errorf("%s = %q, %v; want no TZ", name, z, err)
+		}
+	}
+	if _, err := containerZone("/t", func(string) (*config.TownSettings, error) { return nil, boom }, link("", nil)); !errors.Is(err, boom) {
+		t.Errorf("unreadable settings: %v", err)
+	}
+}
+
+func TestComposeWriteCarriesTheZoneSidecarAndWorkRoot(t *testing.T) {
+	t.Parallel()
+	r := newComposeRig(t)
+	r.deps.townZone = func(string) (string, error) { return "America/Chicago", nil }
+	r.deps.daemonConfig = func(string) (*config.DaemonPatrolConfig, error) {
+		return &config.DaemonPatrolConfig{
+			ContainerNameSetting: composeTestContainer, ComposeProjectSetting: composeTestProject,
+			OMTokenMetaSetting: "/h/om.meta",
+			Patrols:            &config.PatrolsConfig{LandingWorker: &config.LandingWorkerConfig{WorkRoot: "/h/landing"}},
+		}, nil
+	}
+	if err := runDaemonCompose(r.flags, r.deps); err != nil {
+		t.Fatal(err)
+	}
+	compose := string(r.disk[r.composePath()])
+	for _, want := range []string{`TZ: "America/Chicago"`, `source: "/h/om.meta"`, `source: "/h/landing"`} {
+		if !strings.Contains(compose, want) {
+			t.Errorf("the compose lacks %q:\n%s", want, compose)
+		}
+	}
+	r.deps.townZone = func(string) (string, error) { return "", errors.New("boom") }
+	if err := runDaemonCompose(r.flags, r.deps); err == nil {
+		t.Error("an unreadable zone must refuse")
+	}
+}

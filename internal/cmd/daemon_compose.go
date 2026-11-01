@@ -61,8 +61,10 @@ type daemonComposeDeps struct {
 	// evalSymlinks resolves the kubeconfig and the town for the under-the-town
 	// check.
 	evalSymlinks func(path string) (string, error)
-	files        composeFiles
-	out          io.Writer
+	// townZone is the IANA zone name for the container's TZ ("" for none).
+	townZone func(townRoot string) (string, error)
+	files    composeFiles
+	out      io.Writer
 }
 
 // composeFiles is the filesystem the compose file is written through: a
@@ -101,6 +103,9 @@ func realDaemonComposeDeps(out io.Writer) daemonComposeDeps {
 		},
 		readFile:     os.ReadFile,
 		evalSymlinks: filepath.EvalSymlinks,
+		townZone: func(townRoot string) (string, error) {
+			return containerZone(townRoot, config.LoadTownSettings, os.Readlink)
+		},
 		files: composeFiles{
 			mkdirAll: func(dir string) error { return os.MkdirAll(dir, 0o755) },
 			write:    daemonimage.WriteComposeFile,
@@ -241,6 +246,10 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 	if err != nil {
 		return fmt.Errorf("reading the town's daemon.env for the container's environment: %w", err)
 	}
+	zone, err := d.townZone(townRoot)
+	if err != nil {
+		return err
+	}
 	kubeconfig := strings.TrimSpace(f.kubeconfig)
 	var overlay []byte
 	var kubeconfigFiles []string
@@ -259,6 +268,9 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 	}
 	spec := templates.ComposeSpec{
 		Env:                env,
+		TimeZone:           zone,
+		OMTokenMetaFile:    cfg.OMTokenMeta(),
+		LandingWorkRoot:    landingWorkRoot(cfg),
 		KubeconfigFiles:    kubeconfigFiles,
 		OpenShellConfigDir: strings.TrimSpace(f.openShellConfigDir),
 		Project:            project,
@@ -309,4 +321,14 @@ func requireUnderTown(townRoot, path string, eval func(string) (string, error)) 
 		return fmt.Errorf("--kubeconfig %s resolves to %s, which is not an absolute path under the town %s; the container reads only the town bind", path, real, town)
 	}
 	return nil
+}
+
+// landingWorkRoot is patrols.landing_worker.work_root, "" when the town sets
+// none. The render binds it at the same path, so a relative one is refused
+// there with its reason.
+func landingWorkRoot(cfg *config.DaemonPatrolConfig) string {
+	if cfg.Patrols == nil || cfg.Patrols.LandingWorker == nil {
+		return ""
+	}
+	return strings.TrimSpace(cfg.Patrols.LandingWorker.WorkRoot)
 }
