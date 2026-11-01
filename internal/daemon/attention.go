@@ -715,28 +715,33 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 		}
 		return d.rigWorkBeads(rig).Show(id)
 	}
-	s.riskIssues = func(ctx context.Context, rig string, ids []string) (map[string]*beads.Issue, error) {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		rd := d.rigWorkBeads(rig)
-		if batch, ok := rd.(interface {
-			ShowMultiple(ids []string) (map[string]*beads.Issue, error)
-		}); ok {
-			return batch.ShowMultiple(ids)
-		}
-		out := make(map[string]*beads.Issue, len(ids))
-		for _, id := range ids {
-			issue, err := rd.Show(id)
-			if err != nil {
-				return nil, err
-			}
-			out[id] = issue
-		}
-		return out, nil
-	}
+	s.riskIssues = d.attentionRiskIssues
 	d.productionRiskAudit(s)
 	return s
+}
+
+// attentionRiskIssues reads the work beads ids of rig in one batched call when
+// the reader has one (the production client does), and one at a time when it
+// does not (gt-5req0).
+func (d *Daemon) attentionRiskIssues(ctx context.Context, rig string, ids []string) (map[string]*beads.Issue, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	rd := d.rigWorkBeads(rig)
+	if batch, ok := rd.(interface {
+		ShowMultiple(ids []string) (map[string]*beads.Issue, error)
+	}); ok {
+		return batch.ShowMultiple(ids)
+	}
+	out := make(map[string]*beads.Issue, len(ids))
+	for _, id := range ids {
+		issue, err := rd.Show(id)
+		if err != nil {
+			return nil, err
+		}
+		out[id] = issue
+	}
+	return out, nil
 }
 
 // attentionRiskLandings reads the rig's landing records landed at or after

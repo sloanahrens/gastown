@@ -161,3 +161,93 @@ func TestRiskAuditRotatesAfterATimeout(t *testing.T) {
 		t.Errorf("%s: second pass read %s, want it to begin at beta", t.Name(), got)
 	}
 }
+
+// A context that ended before the pass stops it at the first rig with the
+// context's error and reads nothing.
+func TestRiskAuditStopsOnACanceledContext(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	w := newBatchAuditWorld(f, "alpha", "beta")
+	w.landIn("alpha", "gt-a1", strings.Repeat("d", 40), "ok")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := f.src.auditResolvedRiskFails(ctx); err == nil {
+		t.Errorf("%s: a canceled context returned no error", t.Name())
+	}
+	if len(w.batches) != 0 || w.singles != 0 {
+		t.Errorf("%s: a canceled pass read %v and %d singles, want nothing", t.Name(), w.batches, w.singles)
+	}
+}
+
+// batchReader is a work-bead reader with the batched read.
+type batchReader struct {
+	workBeadReader
+	batched [][]string
+}
+
+func (b *batchReader) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
+	b.batched = append(b.batched, ids)
+	return map[string]*beads.Issue{ids[0]: {ID: ids[0]}}, nil
+}
+
+// singleReader is a work-bead reader without it.
+type singleReader struct {
+	workBeadReader
+	shown []string
+	fail  string
+}
+
+func (r *singleReader) Show(id string) (*beads.Issue, error) {
+	r.shown = append(r.shown, id)
+	if id == r.fail {
+		return nil, fmt.Errorf("show %s: boom", id)
+	}
+	return &beads.Issue{ID: id}, nil
+}
+
+// The production read uses the batched call when the reader has one, falls
+// back to one read per id when it does not, and fails on a canceled context or
+// a failed read.
+func TestAttentionRiskIssuesBatchesOrFallsBack(t *testing.T) {
+	t.Parallel()
+	d, _ := signalTestDaemon(t)
+
+	t.Run("a reader with the batch read gets one call", func(t *testing.T) {
+		t.Parallel()
+		r := &batchReader{}
+		d.openWorkBeads = func([]string, time.Duration) workBeadReader { return r }
+		got, err := d.attentionRiskIssues(context.Background(), "alpha", []string{"gt-1", "gt-2"})
+		if err != nil || len(r.batched) != 1 || got["gt-1"] == nil {
+			t.Errorf("%s: got %v err %v batched %v, want one batched call", t.Name(), got, err, r.batched)
+		}
+	})
+	t.Run("a reader without it is read one id at a time", func(t *testing.T) {
+		t.Parallel()
+		dd, _ := signalTestDaemon(t)
+		r := &singleReader{}
+		dd.openWorkBeads = func([]string, time.Duration) workBeadReader { return r }
+		got, err := dd.attentionRiskIssues(context.Background(), "alpha", []string{"gt-1", "gt-2"})
+		if err != nil || len(got) != 2 || strings.Join(r.shown, ",") != "gt-1,gt-2" {
+			t.Errorf("%s: got %v err %v shown %v", t.Name(), got, err, r.shown)
+		}
+	})
+	t.Run("a failed read fails the call", func(t *testing.T) {
+		t.Parallel()
+		dd, _ := signalTestDaemon(t)
+		dd.openWorkBeads = func([]string, time.Duration) workBeadReader { return &singleReader{fail: "gt-2"} }
+		if _, err := dd.attentionRiskIssues(context.Background(), "alpha", []string{"gt-1", "gt-2"}); err == nil {
+			t.Errorf("%s: a failed Show returned no error", t.Name())
+		}
+	})
+	t.Run("a canceled context fails the call", func(t *testing.T) {
+		t.Parallel()
+		dd, _ := signalTestDaemon(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err := dd.attentionRiskIssues(ctx, "alpha", []string{"gt-1"}); err == nil {
+			t.Errorf("%s: a canceled context returned no error", t.Name())
+		}
+	})
+}
