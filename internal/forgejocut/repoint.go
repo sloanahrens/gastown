@@ -165,7 +165,7 @@ func (c *Cutover) repointOne(dir, url string, crew bool) error {
 func (c *Cutover) isRepositoryRoot(dir string) bool {
 	ctx := context.Background()
 	if out, err := c.git()(ctx, []string{"git", "-C", dir, "rev-parse", "--show-toplevel"}); err == nil {
-		return filepath.Clean(strings.TrimRight(string(out), "\n")) == filepath.Clean(dir)
+		return samePath(strings.TrimRight(string(out), "\n"), dir)
 	}
 	// A bare repository has no top level; it is the root when git says it is bare
 	// and its git directory is the directory itself.
@@ -175,6 +175,21 @@ func (c *Cutover) isRepositoryRoot(dir string) bool {
 	}
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
 	return len(lines) == 2 && lines[0] == "true" && lines[1] == "."
+}
+
+// samePath reports whether a and b name the same directory. Git prints the
+// resolved top level, so a clone reached through a symlink (a town root or a
+// crew folder that is a link) reports a path that differs from the one given;
+// comparing only the cleaned text would call that real repository "not of its
+// own" and let the crew skip report success. Both are resolved when they exist;
+// a path that does not resolve is compared as written.
+func samePath(a, b string) bool {
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	ra, errA := filepath.EvalSymlinks(a)
+	rb, errB := filepath.EvalSymlinks(b)
+	return errA == nil && errB == nil && ra == rb
 }
 
 // noSuchRemoteExit is the status git remote get-url exits with for a remote the

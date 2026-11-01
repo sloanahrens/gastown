@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"os"
 	"path"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -806,5 +808,32 @@ func TestRepointRefusesAFolderInsideABareRepository(t *testing.T) {
 	}
 	if len(git.setURLs) != 0 {
 		t.Errorf("set %q", git.setURLs)
+	}
+}
+
+// A crew folder reached through a symlink is the real clone: git reports the
+// resolved top level, which differs from the path as given, and the folder must
+// still be repointed, not skipped as "not a repository of its own".
+func TestRepointFollowsASymlinkedCrewFolder(t *testing.T) {
+	t.Parallel()
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "bob")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	fsys, git := repointTown()
+	// The step visits the link; git answers for it with the resolved top level.
+	git.origins[link] = oldURL
+	git.inside[link] = real
+	if !samePath(real, link) {
+		t.Fatalf("samePath(%q, %q) = false, want true", real, link)
+	}
+	if samePath(real, t.TempDir()) {
+		t.Error("samePath of two different directories = true")
+	}
+	c, _ := repointCutover(fsys, git, false)
+
+	if !c.isRepositoryRoot(link) {
+		t.Errorf("isRepositoryRoot(%q) = false for a symlink to its own top level %q", link, real)
 	}
 }
