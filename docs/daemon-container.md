@@ -1091,7 +1091,7 @@ in whenever one ends badly. Nothing is rolled back by itself.
 2. **Check quiet again** immediately before touching the old daemon. If the town
    stopped being quiet it ends with `the town stopped being quiet`, and nothing
    was changed.
-3. **Stop the launchd daemon and wait for proof it stopped**: `state.json`
+3. **Stop the launchd daemon, just after it completes a heartbeat (the wait is `cutoverBoundaryBudget` in `daemon_cutover.go`), and wait for proof it stopped**. Proof: `state.json`
    records a clean stop (`running` false) and the launchd job reads as not
    loaded. If the proof does not come within a minute (the daemon's 30-second
    shutdown budget and 30 seconds more), it

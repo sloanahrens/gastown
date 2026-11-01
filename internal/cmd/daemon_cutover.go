@@ -39,6 +39,15 @@ const (
 	// about a minute after the start and the second one interval after it.
 	cutoverHeartbeatBudget = 5*time.Minute + time.Minute
 
+	// cutoverBoundaryBudget is how long the launchd side waits for the daemon to
+	// finish a heartbeat before it is stopped: a heartbeat takes 92 to 136 s at
+	// the town's usual load and the next starts 180 s after one completes, so a
+	// full cycle fits.
+	cutoverBoundaryBudget = 6 * time.Minute
+	// cutoverBoundaryFresh is how old the daemon's last heartbeat may be for the
+	// stop to be issued: it reads signals only between heartbeats (gt-xplg3).
+	cutoverBoundaryFresh = 60 * time.Second
+
 	// cutoverPoll is how often a wait reads state.json and the job state.
 	cutoverPoll = 5 * time.Second
 
@@ -64,6 +73,10 @@ type cutoverSide struct {
 	// restore is the command that brings this side back after the cutover has
 	// stopped it. diagnose is the command that shows why it did not come up.
 	restore, diagnose string
+	// stopAtHeartbeat makes the cutover stop this side's daemon only just after
+	// a heartbeat completed (gt-xplg3). It is set for the launchd side, whose
+	// daemon answers SIGTERM only between its loop iterations.
+	stopAtHeartbeat bool
 }
 
 // cutoverPlan is one cutover run: which side goes down, which comes up, and the
@@ -101,6 +114,25 @@ func (p *cutoverPlan) execute(ctx context.Context) error {
 	}
 	if err := p.quiet(ctx, cutoverRecheckBudget); err != nil {
 		return fmt.Errorf("not cutting over to %s, nothing was changed: the town stopped being quiet: %w", p.to.name, err)
+	}
+
+	// A daemon that reads signals only between heartbeats is stopped just after
+	// one completes. The wait can take minutes, so the town is checked quiet
+	// again right after it, still having changed nothing.
+	if p.from.stopAtHeartbeat {
+		running, err := p.daemonRunning()
+		if err != nil {
+			return fmt.Errorf("not cutting over to %s, nothing was changed: %w", p.to.name, err)
+		}
+		if running {
+			p.say("Waiting for the old %s daemon to finish a heartbeat before stopping it (up to %s).", p.from.name, cutoverBoundaryBudget)
+			if ok, why := p.waitFor(ctx, cutoverBoundaryBudget, p.atHeartbeatBoundary); !ok {
+				return fmt.Errorf("not cutting over to %s, nothing was changed: the old daemon did not complete a heartbeat within %s: %s", p.to.name, cutoverBoundaryBudget, why)
+			}
+			if err := p.quiet(ctx, cutoverRecheckBudget); err != nil {
+				return fmt.Errorf("not cutting over to %s, nothing was changed: the town stopped being quiet while waiting for the heartbeat boundary: %w", p.to.name, err)
+			}
+		}
 	}
 
 	// Step 3: stop the old daemon and prove it stopped.
@@ -142,6 +174,48 @@ func (p *cutoverPlan) execute(ctx context.Context) error {
 	}
 	p.say("%s owns the town and has beaten twice.", p.to.name)
 	return nil
+}
+
+// daemonRunning says whether the heartbeat wait applies: state.json records a
+// running daemon. When it does not, the old side's job is read: a running (or
+// unreadable) job means a stop could land inside a heartbeat that state.json
+// does not show, so it is an error; a job that is not running either means
+// there is nothing to wait for and the stop proceeds as before.
+func (p *cutoverPlan) daemonRunning() (bool, error) {
+	st, err := p.state()
+	if err == nil && st != nil && st.Running {
+		return true, nil
+	}
+	job := p.from.job()
+	switch {
+	case job.Err != nil:
+		return false, fmt.Errorf("state.json records no running daemon and the %s job state cannot be read (%v); fix state first", p.from.name, job.Err)
+	case !p.from.stopped(job):
+		return false, fmt.Errorf("state.json records no running daemon but %s's job is running; fix state first", p.from.name)
+	}
+	return false, nil
+}
+
+// atHeartbeatBoundary reports whether the old daemon completed a heartbeat at
+// most cutoverBoundaryFresh ago, which is when a stop is read at once. A
+// heartbeat in the future is not a boundary, and neither is a state that
+// records no running daemon: both keep the wait going.
+func (p *cutoverPlan) atHeartbeatBoundary() (bool, string) {
+	st, err := p.state()
+	switch {
+	case err != nil:
+		return false, fmt.Sprintf("state.json cannot be read: %v", err)
+	case st == nil, !st.Running:
+		return false, "state.json records no running daemon"
+	}
+	age := p.clk.Now().Sub(st.LastHeartbeat)
+	switch {
+	case age < 0:
+		return false, fmt.Sprintf("the last heartbeat (%s) is in the future", st.LastHeartbeat.Format(time.RFC3339))
+	case age <= cutoverBoundaryFresh:
+		return true, ""
+	}
+	return false, fmt.Sprintf("the last heartbeat completed %s ago, more than %s", age.Round(time.Second), cutoverBoundaryFresh)
 }
 
 // oldDaemonStopped is the proof step 3 waits for: state.json records a clean
@@ -321,6 +395,8 @@ func (c *daemonControl) cutoverSides(townRoot string) (launchd, container cutove
 		stopped:   launchdStopped,
 		restore:   l.load,
 		diagnose:  fmt.Sprintf("launchctl print gui/%d/%s, and gt daemon logs", c.uid, templates.LaunchdLabel),
+		// The launchd daemon reads SIGTERM only between loop iterations.
+		stopAtHeartbeat: true,
 	}
 	container = cutoverSide{
 		name:     config.SupervisorContainer,
@@ -409,7 +485,9 @@ budget and a stated ending when it runs out:
   1. wait for a quiet town (dispatch hold on, no gt sling running, container-gate
      no gate job running), 30 minutes; nothing is changed if it never comes
   2. check quiet again immediately before the next step
-  3. stop the old daemon and wait for proof it stopped: state.json records a clean
+  3. stop the old daemon and wait for proof it stopped (a launchd daemon is stopped
+     only just after it completed a heartbeat, up to 6 minutes of waiting first,
+     then the town is checked quiet once more): state.json records a clean
      stop and the old job reads as not running; on timeout the new side is not
      started and the command that restores the old one is printed
   4. start the new daemon through the startup guard and wait 2 minutes for
