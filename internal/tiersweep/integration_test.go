@@ -127,6 +127,14 @@ func (f *fakeTier) triggerCalls(verb string) []tierCall {
 // newIntegration is a Sweep over repo and fake, logging into a fresh temporary
 // directory and writing its stderr to the returned buffer. The clock stands
 // still, so every elapsed time reads 0s.
+// testCgoEnv is the CgoEnv seam of every Sweep a unit test builds and runs
+// through the gt build: it answers "no extra cgo entries" itself, so the build
+// never reaches buildflags.ICUCgoEnv, which starts `brew --prefix icu4c` on a
+// Mac and fails the package's subprocess tripwire (gt-0brwb). A test of the
+// build's cgo entries sets its own canned CgoEnv, as
+// TestGTBuildCarriesTheICUCgoEnv does.
+func testCgoEnv([]string) []string { return nil }
+
 func newIntegration(t *testing.T, repo *fakeRepo, fake *fakeTier, skip, trigger string) (*Sweep, *bytes.Buffer) {
 	t.Helper()
 	stderr := &bytes.Buffer{}
@@ -136,6 +144,7 @@ func newIntegration(t *testing.T, repo *fakeRepo, fake *fakeTier, skip, trigger 
 		Exec:    fake.exec,
 		Src:     repo,
 		Environ: []string{"PATH=/fake/bin"},
+		CgoEnv:  testCgoEnv,
 		Stderr:  stderr,
 		Now:     func() time.Time { return at },
 	}, stderr

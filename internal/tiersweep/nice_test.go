@@ -104,7 +104,7 @@ func TestParseOptionsNiceRefusals(t *testing.T) {
 			// The same refusal through the command: the usage exit, and no
 			// log directory made on the way.
 			var stderr bytes.Buffer
-			code := Run(nil, io.Discard, &stderr, Deps{Host: f.host()})
+			code := Run(nil, io.Discard, &stderr, Deps{CgoEnv: testCgoEnv, Host: f.host()})
 			if code != UsageExit {
 				t.Errorf("Run exit = %d, want the usage exit %d", code, UsageExit)
 			}
@@ -157,6 +157,7 @@ func tierRuns(t *testing.T, env map[string]string) [][]string {
 		Exec:    fake.exec,
 		Src:     repo,
 		Environ: []string{"PATH=/fake/bin"},
+		CgoEnv:  testCgoEnv,
 		Stderr:  io.Discard,
 		Now:     func() time.Time { return at },
 	}

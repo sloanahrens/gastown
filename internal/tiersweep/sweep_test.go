@@ -175,6 +175,7 @@ func (r *rig) run(args ...string) (code int, stdout, stderr string) {
 		host.Remove = nil
 	}
 	code = Run(args, out, &errw, Deps{
+		CgoEnv:  testCgoEnv,
 		Host:    host,
 		Exec:    exec,
 		Src:     r.repo,
@@ -312,6 +313,7 @@ func TestSweepLogDirFailureExitsTwo(t *testing.T) {
 	t.Parallel()
 	var out, errw bytes.Buffer
 	code := Run([]string{"race"}, &out, &errw, Deps{
+		CgoEnv: testCgoEnv,
 		Host: Host{
 			Env:       func(string) string { return "" },
 			MkdirTemp: func(string, string) (string, error) { return "", fmt.Errorf("disk full") },
@@ -611,6 +613,7 @@ func (p *productionRun) run(t *testing.T, args ...string) (code int, stdout, std
 	logDir := t.TempDir()
 	var out, errw bytes.Buffer
 	code = Run(args, &out, &errw, Deps{
+		CgoEnv: testCgoEnv,
 		Host: Host{
 			Env: func(name string) string {
 				if name == EnvLogDir {
@@ -728,6 +731,7 @@ func TestSweepDefaultsReadFileToTheDisk(t *testing.T) {
 	logDir := t.TempDir()
 	var out, errw bytes.Buffer
 	code := Run([]string{"--root", root, "integration"}, &out, &errw, Deps{
+		CgoEnv: testCgoEnv,
 		Host: Host{
 			Env: func(name string) string {
 				if name == EnvLogDir {
