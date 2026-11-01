@@ -260,6 +260,13 @@ func TestDaemonComposeWriteRefusesAndLeavesTheFileAlone(t *testing.T) {
 			mutate: func(r *composeRig) { r.flags.image = "gt-daemon:nothex1" },
 			want:   "is not gt-daemon:<7 or more hex digits>",
 		},
+		{
+			name: "a token file flag given blank",
+			mutate: func(r *composeRig) {
+				r.flags.omTokenFile, r.flags.omTokenFileSet = "  ", true
+			},
+			want: "was given blank",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -431,7 +438,7 @@ func TestDaemonComposeCommandIsWired(t *testing.T) {
 	if err := c.Execute(); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	if want := (daemonComposeFlags{image: daemonimage.ImageTag(composeTestRev), omTokenFile: "/ops/om/token", print: true}); !ran || got != want {
+	if want := (daemonComposeFlags{image: daemonimage.ImageTag(composeTestRev), omTokenFile: "/ops/om/token", omTokenFileSet: true, print: true}); !ran || got != want {
 		t.Errorf("ran %v flags %+v, want write with the image, the token file and --print (%+v)", ran, got, want)
 	}
 

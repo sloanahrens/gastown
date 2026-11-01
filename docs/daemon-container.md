@@ -1023,11 +1023,16 @@ day.
       `gt daemon image --rev <rev> ... --apply` (L1 Step 2), and
       `docker --context desktop-linux image inspect gt-daemon:<rev>` prints an
       id.
-- [ ] **The live compose file is written.** BLOCKED on gt-kqhhi: no command
-      writes `<live-town>/daemon/container/compose.yml` yet. `gt daemon
-      compose write --image gt-daemon:<rev>`, which that bead adds, renders it
-      from the town's settings and starts nothing. The cutover starts the
-      container from that file, so the window cannot start before it exists.
+- [ ] **The live compose file is written.** `gt daemon compose write --image
+      gt-daemon:<rev>` renders `<live-town>/daemon/container/compose.yml` from
+      the town's settings and starts nothing. To let the container's landing
+      worker push to the live Forgejo, name its credential as the scratch render
+      does: `--forge-host <host:port> --forge-token-file <absolute host path>`,
+      both together or neither. The render mounts that token file read-only into
+      the container and passes the pair to the entrypoint, which sets
+      `gt git-credential-forgejo` for the host, so a `land/<bead>` push carries
+      the landing bot's token. The cutover starts the container from this file,
+      so the window cannot start before it exists.
 - [ ] **Both container fields are set in the live settings** while
       `daemon.supervisor` stays `launchd`: `daemon.container_name` and
       `daemon.compose_project`, never one without the other. The cutover builds
