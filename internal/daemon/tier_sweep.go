@@ -559,6 +559,10 @@ type tierSweepSeams struct {
 	// result, so a test fakes the launch by writing one there. Nil resolves to
 	// the daemon's own launcher over the configured backend.
 	launch func(ctx context.Context, st tierSweepStage, spec sweeprunner.Spec) tierSweepLaunch
+	// pollInterval is how long a launched run's status and result are read
+	// between looks. Zero is tierSweepRunnerPollInterval; a test sets it short
+	// so a retried read does not wait out real seconds.
+	pollInterval time.Duration
 	// treeHas reports whether the checked-out tree at dir ships rel, a file or a
 	// directory, and an error when the tree cannot be read. Each stage's command
 	// is picked from it before the stage runs.
@@ -1769,8 +1773,15 @@ func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec
 	// nothing about the tree, so the cycle defers and retries.
 	budget := time.NewTimer(wait)
 	defer budget.Stop()
-	tick := time.NewTicker(tierSweepRunnerPollInterval)
+	interval := d.tierSweepSeams.pollInterval
+	if interval == 0 {
+		interval = tierSweepRunnerPollInterval
+	}
+	tick := time.NewTicker(interval)
 	defer tick.Stop()
+	// statusErr is the status read that failed on the last look, nil once a look
+	// reads the status: the budget names it when it judges a run that never ended.
+	var statusErr error
 	for {
 		res, err := sweeprunner.Read(spec.OutDir, spec.Rig, spec.SHA)
 		if err == nil {
@@ -1784,12 +1795,19 @@ func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec
 		// The engine may have ended the run with its result still on the engine:
 		// bring it to the host before the next look.
 		copied, err := d.tierSweepRunnerCollect(ctx, spec)
+		statusErr = nil
 		if err != nil {
 			if ctx.Err() != nil {
 				return tierSweepStageResult{exitCode: -1, err: ctx.Err()}
 			}
-			stop()
-			return tierSweepRunnerNoResultStage(started, err, false)
+			// A status read that fails says nothing about a run that may be going
+			// well, so the wait goes on and the next look asks again. The budget
+			// judges a run that never shows a result.
+			if !errors.Is(err, errTierSweepStatusUnread) {
+				stop()
+				return tierSweepRunnerNoResultStage(started, err, false)
+			}
+			statusErr = err
 		}
 		if copied {
 			// The copy is on the host now, so it is read without waiting for the
@@ -1806,6 +1824,9 @@ func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec
 		case <-budget.C:
 			stop()
 			why := fmt.Errorf("no result in %s after %s", spec.OutDir, st.budget)
+			if statusErr != nil {
+				why = fmt.Errorf("%w; the last status read failed: %w", why, statusErr)
+			}
 			return tierSweepRunnerNoResultStage(started, why, true)
 		case <-ctx.Done():
 			// The cycle's own deadline ended the wait. The run keeps going in
@@ -1817,12 +1838,18 @@ func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec
 	}
 }
 
+// errTierSweepStatusUnread is the error tierSweepRunnerCollect returns when it
+// cannot read a run's status. The poll keeps waiting on it, where a copy that
+// fails is judged RED at once.
+var errTierSweepStatusUnread = errors.New("the run's status cannot be read")
+
 // tierSweepRunnerCollect brings a run's result onto the host once the run has
 // ended, for a backend whose result stays on the engine. It reports whether it
 // copied the result this call. A backend whose run writes result.json into the
 // output directory itself has no Poll and nothing to collect. A run still going
 // reports false with no error, so the wait goes on. A status the daemon cannot
-// read, or a copy that fails, is an error the caller judges RED.
+// read reports errTierSweepStatusUnread; any other error, a failed copy or a
+// config the daemon cannot render, is one the caller judges RED.
 func (d *Daemon) tierSweepRunnerCollect(ctx context.Context, spec sweeprunner.Spec) (bool, error) {
 	cfg := tierSweepRunnerConfig(d.patrolConfig)
 	if cfg == nil {
@@ -1844,7 +1871,7 @@ func (d *Daemon) tierSweepRunnerCollect(ctx context.Context, spec sweeprunner.Sp
 	if err != nil {
 		d.logger.Printf("tier_sweep: %s: reading run %s's status; last lines:\n%s",
 			spec.Rig, spec.RunID, lastLines(string(stderr)))
-		return false, fmt.Errorf("reading the run's status (%w)", err)
+		return false, fmt.Errorf("%w (%w)", errTierSweepStatusUnread, err)
 	}
 	if !plan.Poll.Ended(stdout) {
 		return false, nil

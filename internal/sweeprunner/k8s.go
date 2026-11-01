@@ -76,9 +76,16 @@ const (
 	// that never ran leaves no pod running past it.
 	readerLifetimeSeconds = 900
 
+	// readerCPU and readerMemory are the reader's share, requested and limited
+	// alike. It only sleeps and serves a copy, so it takes a sliver of a node.
+	readerCPU    = "100m"
+	readerMemory = "128Mi"
+
 	// readyTimeout is how long the copy waits for the reader pod to start
-	// before the run is judged RED.
-	readyTimeout = "120s"
+	// before the run is judged RED. The reader mounts the output claim, which
+	// is ReadWriteOnce: its node can attach the claim only after the Job's pod
+	// has ended and the volume has detached, so the wait allows for that.
+	readyTimeout = "300s"
 
 	// maxNameLength is the most characters a Kubernetes object's name may hold.
 	maxNameLength = 63
@@ -186,9 +193,12 @@ type ResourceList struct {
 }
 
 // SecurityContext is the capability a container needs: the dind sidecar runs its
-// own engine, and no other container of the pod holds one.
+// own engine, and no other container of the pod holds one. AllowPrivilegeEscalation
+// is a pointer so an explicit false is rendered; an absent value leaves the
+// cluster's default, which allows escalation.
 type SecurityContext struct {
-	Privileged bool `json:"privileged,omitempty"`
+	Privileged               bool  `json:"privileged,omitempty"`
+	AllowPrivilegeEscalation *bool `json:"allowPrivilegeEscalation,omitempty"`
 }
 
 // VolumeMount is one mount of a container.
@@ -312,6 +322,7 @@ func renderOutClaim(spec Spec) *Claim {
 // has ended: it mounts the claim read-only and sleeps, so kubectl can copy from
 // it, and it ends at the deadline whether or not a teardown removed it.
 func renderReader(spec Spec) *Pod {
+	share := ResourceList{CPU: readerCPU, Memory: readerMemory}
 	return &Pod{
 		APIVersion: "v1",
 		Kind:       "Pod",
@@ -321,10 +332,12 @@ func renderReader(spec Spec) *Pod {
 			RestartPolicy:         "Never",
 			ActiveDeadlineSeconds: int64Ptr(readerLifetimeSeconds),
 			Containers: []Container{{
-				Name:         readerContainerName,
-				Image:        spec.Image,
-				Command:      []string{"sleep", strconv.Itoa(readerLifetimeSeconds)},
-				VolumeMounts: []VolumeMount{{Name: outVolume, MountPath: OutputDir, ReadOnly: true}},
+				Name:            readerContainerName,
+				Image:           spec.Image,
+				Command:         []string{"sleep", strconv.Itoa(readerLifetimeSeconds)},
+				Resources:       &Resources{Requests: share, Limits: share},
+				SecurityContext: &SecurityContext{AllowPrivilegeEscalation: boolPtr(false)},
+				VolumeMounts:    []VolumeMount{{Name: outVolume, MountPath: OutputDir, ReadOnly: true}},
 			}},
 			Volumes: []Volume{{Name: outVolume, PersistentVolumeClaim: &ClaimRef{ClaimName: OutClaimName(spec), ReadOnly: true}}},
 		},
@@ -504,3 +517,7 @@ func int32Ptr(v int32) *int32 { return &v }
 // int64Ptr returns a pointer to v, for the fields a Job's absent value differs
 // from its zero one.
 func int64Ptr(v int64) *int64 { return &v }
+
+// boolPtr returns a pointer to v, so a false value is rendered rather than
+// omitted.
+func boolPtr(v bool) *bool { return &v }

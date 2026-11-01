@@ -388,6 +388,12 @@ func TestK8sPollCopiesTheResultOutOfTheClaim(t *testing.T) {
 		t.Fatalf("the reader renders containers %+v, want the one %q container", pod.Spec.Containers, readerContainerName)
 	}
 	reader := pod.Spec.Containers[0]
+	if reader.Resources == nil || reader.Resources.Limits == (ResourceList{}) || reader.Resources.Requests != reader.Resources.Limits {
+		t.Errorf("the reader's resources are %+v, want a bounded share with requests equal to limits", reader.Resources)
+	}
+	if reader.SecurityContext == nil || reader.SecurityContext.AllowPrivilegeEscalation == nil || *reader.SecurityContext.AllowPrivilegeEscalation {
+		t.Errorf("the reader's security context is %+v, want privilege escalation refused", reader.SecurityContext)
+	}
 	if !slices.Equal(reader.Command, []string{"sleep", strconv.Itoa(readerLifetimeSeconds)}) {
 		t.Errorf("the reader runs %v, want a sleep that holds it for the copy", reader.Command)
 	}
