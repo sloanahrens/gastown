@@ -1396,13 +1396,13 @@ func (d *Daemon) recordStopForHeal(now time.Time) {
 // (gt-518hq, gt-swsqm).
 func (d *Daemon) shutdownForSignal(sig os.Signal, state *State) error {
 	d.logger.Printf("Received signal %v, shutting down", sig)
-	return d.finishSignalShutdown(sig, state)
+	return d.finishSignalShutdown(state)
 }
 
 // finishSignalShutdown is shutdownForSignal after the signal line was written:
 // a signal that arrived during a heartbeat logged it at once, with the step it
 // interrupted (heartbeat_signal.go).
-func (d *Daemon) finishSignalShutdown(sig os.Signal, state *State) error {
+func (d *Daemon) finishSignalShutdown(state *State) error {
 	d.recordStopForHeal(time.Now())
 	// Exit 0 only when gt asked for this stop; any other signal exits 75,
 	// which launchd turns into a relaunch only for a job still loaded under
@@ -1851,7 +1851,7 @@ func (d *Daemon) Run() (err error) {
 
 	// Initial heartbeat, beside the signal channel like every later one.
 	if sig := d.runHeartbeat(sigChan, func() { d.heartbeat(state) }); sig != nil {
-		return d.finishSignalShutdown(sig, state)
+		return d.finishSignalShutdown(state)
 	}
 	startupComplete = true
 	if err := d.exitForUpgradeIfRequested(state, time.Now()); err != nil {
@@ -2025,7 +2025,7 @@ func (d *Daemon) Run() (err error) {
 
 		case <-timer.C:
 			if sig := d.runHeartbeat(sigChan, func() { d.heartbeat(state) }); sig != nil {
-				return d.finishSignalShutdown(sig, state)
+				return d.finishSignalShutdown(state)
 			}
 			if err := d.exitForUpgradeIfRequested(state, time.Now()); err != nil {
 				return err
@@ -2401,9 +2401,9 @@ func (d *Daemon) heartbeatWork(state *State, lifecycle bool) {
 	// shutdown has recorded the daemon as stopped, and a late save would undo
 	// it (gt-lbqgz).
 	d.hb.stateMu.Lock()
-	if d.heartbeatCancelled() {
+	if d.heartbeatCanceled() {
 		d.hb.stateMu.Unlock()
-		d.logger.Println("Heartbeat ended after the daemon context was cancelled; state left as shutdown wrote it")
+		d.logger.Println("Heartbeat ended after the daemon context was canceled; state left as shutdown wrote it")
 		return
 	}
 	state.LastHeartbeat = time.Now()

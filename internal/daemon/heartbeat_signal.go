@@ -8,7 +8,7 @@ import (
 )
 
 // heartbeatSignalGrace is how long a shutdown signal waits for the running
-// heartbeat step to stop on the cancelled daemon context before the daemon
+// heartbeat step to stop on the canceled daemon context before the daemon
 // shuts down around it (gt-lbqgz). A heartbeat takes 80 to 160 s under load;
 // the main loop used to read its signal channel only between heartbeats, so a
 // SIGTERM waited that long and launchd's 30 s stop ended in SIGKILL.
@@ -98,8 +98,8 @@ func (d *Daemon) logSignalDuringHeartbeat(sig os.Signal) {
 	d.logger.Printf("Received signal %v during a heartbeat, shutting down", sig)
 }
 
-// heartbeatCancelled reports whether the daemon context is cancelled, which
+// heartbeatCanceled reports whether the daemon context is canceled, which
 // is how a heartbeat that outlived its shutdown learns to stop writing.
-func (d *Daemon) heartbeatCancelled() bool {
+func (d *Daemon) heartbeatCanceled() bool {
 	return d.ctx != nil && d.ctx.Err() != nil
 }

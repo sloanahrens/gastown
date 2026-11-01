@@ -59,7 +59,7 @@ func TestSignalDuringBlockedHeartbeatShutsDownWithinLimit(t *testing.T) {
 			result <- errors.New("runHeartbeat returned no signal")
 			return
 		}
-		result <- d.finishSignalShutdown(sig, state)
+		result <- d.finishSignalShutdown(state)
 	}()
 	<-running
 	sigChan <- syscall.SIGTERM
@@ -78,7 +78,7 @@ func TestSignalDuringBlockedHeartbeatShutsDownWithinLimit(t *testing.T) {
 		t.Error("the saved state still says the daemon is running")
 	}
 	if strings.Contains(logs.String(), "did not stop") {
-		t.Errorf("a step that stops on the cancelled context was reported as abandoned:\n%s", logs)
+		t.Errorf("a step that stops on the canceled context was reported as abandoned:\n%s", logs)
 	}
 }
 
@@ -116,7 +116,7 @@ func TestSignalDuringHeartbeatLogsAbandonedStep(t *testing.T) {
 		}
 	}
 	if d.ctx.Err() == nil {
-		t.Error("the daemon context was not cancelled by the signal")
+		t.Error("the daemon context was not canceled by the signal")
 	}
 }
 
@@ -174,7 +174,7 @@ func TestHeartbeatIgnoresLifecycleSignalAndFinishes(t *testing.T) {
 		t.Errorf("SIGUSR1 was not logged as ignored:\n%s", logs)
 	}
 	if d.ctx.Err() != nil {
-		t.Error("an ignored signal cancelled the daemon context")
+		t.Error("an ignored signal canceled the daemon context")
 	}
 }
 
@@ -190,9 +190,9 @@ func TestHeartbeatAfterCancelDoesNotSaveState(t *testing.T) {
 	d.heartbeatWork(state, true)
 
 	if state.HeartbeatCount != 0 {
-		t.Errorf("HeartbeatCount = %d after a cancelled heartbeat, want 0", state.HeartbeatCount)
+		t.Errorf("HeartbeatCount = %d after a canceled heartbeat, want 0", state.HeartbeatCount)
 	}
 	if saved, err := LoadState(d.config.TownRoot); err == nil && saved.HeartbeatCount != 0 {
-		t.Errorf("a cancelled heartbeat saved HeartbeatCount %d", saved.HeartbeatCount)
+		t.Errorf("a canceled heartbeat saved HeartbeatCount %d", saved.HeartbeatCount)
 	}
 }
