@@ -20,6 +20,10 @@ var handlers = map[string]Handler{
 	"query":    queryHandler,
 	"search":   searchHandler,
 	"count":    countHandler,
+	"create":   createHandler,
+	"update":   updateHandler,
+	"close":    closeHandler,
+	"reopen":   reopenHandler,
 }
 
 // OsMain is the production entry: this process's argv, environment and working
