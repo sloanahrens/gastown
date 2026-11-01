@@ -2,7 +2,6 @@ package onboarding
 
 import (
 	"errors"
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -26,8 +25,17 @@ func doneThrough(t *testing.T, steps ...Step) State {
 	return s
 }
 
-// sameState reports whether a and b hold the same done and skipped steps.
-func sameState(a, b State) bool { return reflect.DeepEqual(a, b) }
+// sameState reports whether a and b hold the same done and skipped steps. It
+// asks each step through HasDone and HasSkipped, so a nil set and an empty one
+// count as the same state.
+func sameState(a, b State) bool {
+	for _, step := range order {
+		if a.HasDone(step) != b.HasDone(step) || a.HasSkipped(step) != b.HasSkipped(step) {
+			return false
+		}
+	}
+	return true
+}
 
 // doneCount returns how many of the steps a state marks done.
 func doneCount(s State) int {
@@ -254,5 +262,31 @@ func TestAdvanceReturnsNewState(t *testing.T) {
 	}
 	if !after.HasDone(SignIn) {
 		t.Errorf("the state Advance returned does not mark %q done: %+v", SignIn, after)
+	}
+}
+
+// TestSameStateComparesSteps checks that sameState calls two states the same
+// when they mark the same steps, whether or not their sets are allocated, and
+// different when they differ in a done or a skipped step.
+func TestSameStateComparesSteps(t *testing.T) {
+	t.Parallel()
+	signedIn := doneThrough(t, SignIn)
+	cases := []struct {
+		name string
+		a, b State
+		want bool
+	}{
+		{"zero value and empty sets", State{}, State{done: set{}, skipped: set{}}, true},
+		{"same done step", signedIn, doneThrough(t, SignIn), true},
+		{"extra done step", signedIn, doneThrough(t, SignIn, OrgWorkspace), false},
+		{"skipped differs from done", signedIn, State{skipped: set{OrgWorkspace: true}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := sameState(tc.a, tc.b); got != tc.want {
+				t.Errorf("sameState(%+v, %+v) = %v, want %v", tc.a, tc.b, got, tc.want)
+			}
+		})
 	}
 }
