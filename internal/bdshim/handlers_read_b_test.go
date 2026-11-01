@@ -212,6 +212,11 @@ func TestHandlersRefuseAQueryFormTheTrackerDoesNotAnswer(t *testing.T) {
 		{name: "an unclosed group", expr: `(status="open"`, want: "not closed"},
 		{name: "a status named twice", expr: `status="open" AND status="closed"`, want: "more than once"},
 		{name: "a status after a group", expr: `(status="open" OR status="closed") AND status="hooked"`, want: "more than once"},
+		{name: "a group after a status", expr: `status="open" AND (status="closed" OR status="hooked")`, want: "more than once"},
+		{name: "a status with a range in a group", expr: `(status>=open)`, want: "status takes ="},
+		{name: "a group status with no value", expr: `(status=)`, want: "status needs a value"},
+		{name: "a predicate with no value", expr: `status=`, want: "needs a value"},
+		{name: "a quoted value with a bad escape", expr: `status="\q"`, want: "not a quoted string"},
 		{name: "an assignee named twice", expr: `assignee="a" AND assignee="b"`, want: "more than once"},
 		{name: "an ephemeral that is not a boolean", expr: `ephemeral=maybe`, want: "not a boolean"},
 		{name: "an ephemeral with a range", expr: `ephemeral>=true`, want: "ephemeral does not take >="},
@@ -352,6 +357,46 @@ func TestQueryFilterReadsBothTablesWhenTheExpressionNamesNeither(t *testing.T) {
 	}
 	if want := []string{"wisp-1", "fx-1", "fx-2"}; !reflect.DeepEqual(ids, want) {
 		t.Errorf("read = %v, want bd's row order %v", ids, want)
+	}
+}
+
+// TestQueryFilterReportsAReadItCannotMake: a table read that fails is the
+// caller's error, never the other table's answer read as both.
+func TestQueryFilterReportsAReadItCannotMake(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		store stubReadStore
+		want  string
+	}{
+		{
+			name: "the durable table",
+			store: stubReadStore{list: func(opts beads.ListOptions) ([]*beads.Issue, error) {
+				if opts.Ephemeral {
+					return nil, nil
+				}
+				return nil, errors.New("durable refused")
+			}},
+			want: "durable refused",
+		},
+		{
+			name: "the wisp table",
+			store: stubReadStore{list: func(opts beads.ListOptions) ([]*beads.Issue, error) {
+				if opts.Ephemeral {
+					return nil, errors.New("wisps refused")
+				}
+				return nil, nil
+			}},
+			want: "wisps refused",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := (queryFilter{ephemeral: "both"}).read(tc.store)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("read = %v, want it to hold %q", err, tc.want)
+			}
+		})
 	}
 }
 
