@@ -4,8 +4,8 @@
 # Built by internal/daemonimage's Builder.BuildImage, which passes this file with
 # -f, the directory of the binaries as the context, and the tag gt-daemon:<rev>.
 # Nothing is compiled here: the deployer cross-compiles gt, bd and om on this Mac
-# and fetches the pinned claude CLI and the client tools (templates.DaemonClientTools),
-# then COPYs them in, so the image is exactly the code the tag's rev names.
+# and fetches the pinned claude CLI and the pinned client tools, then COPYs them
+# in, so the image is exactly the code the tag's rev names.
 #
 # The base image and the Dolt version are internal/templates/images.go's
 # DaemonBaseImage and DoltVersion. TestDaemonDockerfileMatchesTheImageTable fails

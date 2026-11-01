@@ -5,14 +5,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
-	"path/filepath"
 
-	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/templates"
 )
 
@@ -30,18 +26,12 @@ func ClientToolNames() []string {
 	return names
 }
 
-// FetchClientTools downloads each pinned client tool, verifies the download's
-// sha256 against its pin, and writes the executable to b.Out under the tool's
-// name (taking the one member out of a .tar.gz download). It returns the
-// paths in the order of the pins. A download that differs from its pin writes
-// nothing (gt-sx34i).
+// FetchClientTools downloads each pinned client tool through fetchPinned (the
+// flow the claude CLI uses), verifies the download's sha256 against its pin, and
+// writes the executable to b.Out under the tool's name (taking the one member
+// out of a .tar.gz download). It returns the paths in the order of the pins. A
+// download that differs from its pin writes nothing (gt-sx34i).
 func (b Builder) FetchClientTools(ctx context.Context) ([]string, error) {
-	if b.Fetch == nil {
-		return nil, errors.New("daemonimage: no fetcher to download the client tools with")
-	}
-	if b.Out == "" || !filepath.IsAbs(b.Out) {
-		return nil, fmt.Errorf("daemonimage: build context %q is not an absolute directory; the client tools are written there for the Dockerfile's COPY", b.Out)
-	}
 	var paths []string
 	for _, pin := range templates.DaemonClientTools {
 		p, err := b.fetchClientTool(ctx, pin, clientToolMaxBytes)
@@ -53,52 +43,27 @@ func (b Builder) FetchClientTools(ctx context.Context) ([]string, error) {
 	return paths, nil
 }
 
-// fetchClientTool is one pin's download, verification and placement. The
-// download is held in memory until its sha256 verifies, so a refused download
-// leaves nothing in b.Out.
+// fetchClientTool is one pin's fetch with the size bound injected.
 func (b Builder) fetchClientTool(ctx context.Context, pin templates.ClientToolPin, max int64) (string, error) {
 	if !sha256Pin.MatchString(pin.SHA256) {
 		return "", fmt.Errorf("daemonimage: the %s pin %q is not a sha256 of 64 lower-case hex digits", pin.Name, pin.SHA256)
 	}
-	body, err := b.Fetch(ctx, pin.URL)
-	if err != nil {
-		return "", fmt.Errorf("daemonimage: cannot download %s from %s: %w", pin.Name, pin.URL, err)
-	}
-	defer func() { _ = body.Close() }()
-	data, err := io.ReadAll(io.LimitReader(body, max+1))
-	if err != nil {
-		return "", fmt.Errorf("daemonimage: cannot download %s from %s: %w", pin.Name, pin.URL, err)
-	}
-	if int64(len(data)) > max {
-		return "", errOverBound(pin.Name, pin.URL, max, b.Out)
-	}
-	sum := sha256.Sum256(data)
-	if err := verifySum(pin.Name, pin.URL, hex.EncodeToString(sum[:]), pin.SHA256, b.Out); err != nil {
-		return "", err
-	}
-	if pin.Member != "" {
-		if data, err = extractMember(data, pin.Member, max); err != nil {
-			return "", fmt.Errorf("daemonimage: %s from %s: %w", pin.Name, pin.URL, err)
-		}
-	}
-	final := filepath.Join(b.Out, pin.Name)
-	if err := atomicfile.WriteFile(final, data, 0o755); err != nil {
-		return "", fmt.Errorf("daemonimage: cannot write %s: %w", final, err)
-	}
-	return final, nil
+	return b.fetchPinned(ctx, pinnedFile{what: pin.Name, name: pin.Name, url: pin.URL, sha256: pin.SHA256, member: pin.Member, max: max}, createClaudeTemp)
 }
 
 // extractMember returns the bytes of the one regular file named member in the
 // .tar.gz archive. The name is compared whole and nothing is written to a path
 // taken from the archive, so a hostile member name cannot place a file. The
-// member is read to at most max bytes, so a pinned archive that expands past the
-// download bound is refused.
+// archive is read to at most max bytes decompressed, so a pinned archive that
+// expands past the download bound is refused.
 func extractMember(archive []byte, member string, max int64) ([]byte, error) {
 	zr, err := gzip.NewReader(bytes.NewReader(archive))
 	if err != nil {
 		return nil, fmt.Errorf("the download is not gzip: %w", err)
 	}
-	tr := tar.NewReader(zr)
+	// The decompressed stream is bounded as a whole, so members that are skipped
+	// count against max too.
+	tr := tar.NewReader(io.LimitReader(zr, max))
 	for {
 		h, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -108,12 +73,9 @@ func extractMember(archive []byte, member string, max int64) ([]byte, error) {
 			return nil, fmt.Errorf("the archive does not read: %w", err)
 		}
 		if h.Typeflag == tar.TypeReg && h.Name == member {
-			data, err := io.ReadAll(io.LimitReader(tr, max+1))
+			data, err := io.ReadAll(tr)
 			if err != nil {
-				return nil, fmt.Errorf("cannot read %q from the archive: %w", member, err)
-			}
-			if int64(len(data)) > max {
-				return nil, fmt.Errorf("%q expands past the %d-byte bound", member, max)
+				return nil, fmt.Errorf("cannot read %q from the archive (it may expand past the %d-byte bound): %w", member, max, err)
 			}
 			return data, nil
 		}

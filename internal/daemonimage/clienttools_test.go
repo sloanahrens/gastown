@@ -200,13 +200,29 @@ func TestFetchedClientToolRefusesWhatItCannotUse(t *testing.T) {
 	}
 }
 
-func TestFetchedClientToolCannotBePlacedInAMissingDirectory(t *testing.T) {
+func TestFetchedClientToolCannotBeStagedInAMissingDirectory(t *testing.T) {
 	t.Parallel()
 	b, _ := imageBuilder(t)
 	b.Out = filepath.Join(b.Out, "gone", "away")
 	body := []byte("kubectl")
 	pin := templates.ClientToolPin{Name: "kubectl", URL: "https://x", SHA256: sumHex(body)}
 	b.Fetch = fetchOf(body)
+	if _, err := b.fetchClientTool(context.Background(), pin, 1<<20); err == nil || !strings.Contains(err.Error(), "cannot stage") {
+		t.Fatalf("error = %v, want the staging refusal", err)
+	}
+}
+
+// A member that verifies but cannot take its place (a directory holds the name)
+// is refused.
+func TestFetchedClientToolMemberCannotTakeAPathHeldByADirectory(t *testing.T) {
+	t.Parallel()
+	b, _ := imageBuilder(t)
+	archive := tgzOf(t, map[string]string{"docker/docker": "client"}, []string{"docker/docker"})
+	pin := templates.ClientToolPin{Name: "held", URL: "https://x", SHA256: sumHex(archive), Member: "docker/docker"}
+	if err := os.MkdirAll(filepath.Join(b.Out, "held", "inner"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	b.Fetch = fetchOf(archive)
 	if _, err := b.fetchClientTool(context.Background(), pin, 1<<20); err == nil || !strings.Contains(err.Error(), "cannot write") {
 		t.Fatalf("error = %v, want the write refusal", err)
 	}
@@ -241,7 +257,7 @@ func TestFetchClientToolsRefusesWithoutAFetcherOrAbsoluteOut(t *testing.T) {
 	}
 	b.Fetch = fetchOf(nil)
 	b.Out = "rel/out"
-	if _, err := b.FetchClientTools(context.Background()); err == nil || !strings.Contains(err.Error(), "not an absolute directory") {
+	if _, err := b.FetchClientTools(context.Background()); err == nil || !strings.Contains(err.Error(), "is not absolute") {
 		t.Errorf("error = %v, want the relative-directory refusal", err)
 	}
 }
@@ -258,7 +274,7 @@ func TestFetchedClientToolRefusesAMemberThatExpandsPastTheBound(t *testing.T) {
 	}
 	pin := templates.ClientToolPin{Name: "bomb", URL: "https://example.test/bomb.tgz", SHA256: sumHex(archive), Member: "bomb"}
 	b.Fetch = fetchOf(archive)
-	if _, err := b.fetchClientTool(context.Background(), pin, max); err == nil || !strings.Contains(err.Error(), "expands past") {
+	if _, err := b.fetchClientTool(context.Background(), pin, max); err == nil || !strings.Contains(err.Error(), "does not read") {
 		t.Fatalf("error = %v, want the expansion refusal", err)
 	}
 	if _, err := os.Stat(filepath.Join(b.Out, "bomb")); !os.IsNotExist(err) {

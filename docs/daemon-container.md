@@ -110,8 +110,9 @@ validates the flags, prints the commands it would run, ends with
 `dry run: nothing was run. Pass --apply to build.`, and writes nothing. Read
 that output, then run the same command with `--apply`. With `--apply` it builds
 gt, bd and om for linux/arm64 in clean worktrees of the commits named, downloads
-the pinned claude CLI and the pinned client tools (`templates.DaemonClientTools`: openshell, docker, kubectl; each checked against its sha256), and builds the image with the `desktop-linux` context. The
-Dockerfile is read from `--gt-src`'s working tree. Expected: the last line it
+the pinned claude CLI and the pinned client tools (`templates.DaemonClientTools`;
+each is checked against its sha256), and builds the image with the `desktop-linux`
+context. The Dockerfile is read from `--gt-src`'s working tree. Expected: the last line it
 prints is the tag `gt-daemon:<rev>`, and
 `docker --context desktop-linux image inspect gt-daemon:<rev> --format '{{.Id}}'`
 prints an image id. Never point `--gt-src`, `--bd-src`, `--om-src` or `--out` at
