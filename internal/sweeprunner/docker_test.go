@@ -87,11 +87,77 @@ func TestDockerRenderGolden(t *testing.T) {
 			if slices.Contains(step.Argv, templates.DindImage) {
 				t.Errorf("a run without dind rendered the sidecar: %v", step.Argv)
 			}
-			if slices.Contains(step.Argv, "DOCKER_HOST=tcp://"+dindAlias+":"+dindPort) {
+			if slices.Contains(step.Argv, "DOCKER_HOST=tcp://"+dindAddress+":"+dindPort) {
 				t.Errorf("a run without dind points the runner at an engine it did not start: %v", step.Argv)
 			}
 		}
 	})
+}
+
+// TestDockerRunnerSharesTheEngineNetworkNamespace pins the container-backed
+// packages' half of the run: internal/testutil finds Docker with `docker info`
+// and dials a started Dolt container at 127.0.0.1:<published port>. Two
+// containers on a bridge network share no namespace, so the runner joins the
+// sidecar's, and the engine listens on that shared loopback (gt-9lmam).
+// Mutation: give the runner the run's bridge network instead of
+// container:<sidecar> and a published port is not on its 127.0.0.1; drop the
+// sidecar's --host and the privileged engine answers whatever the run network
+// can reach.
+func TestDockerRunnerSharesTheEngineNetworkNamespace(t *testing.T) {
+	t.Parallel()
+	spec := goldenSpec()
+	plan, err := Docker{}.Render(spec)
+	if err != nil {
+		t.Fatalf("rendering the golden spec: %v", err)
+	}
+	dind, ok := stepNamed(plan, dindName(spec))
+	if !ok {
+		t.Fatalf("the plan renders no sidecar step named %q", dindName(spec))
+	}
+	runner, ok := stepNamed(plan, runnerName(spec))
+	if !ok {
+		t.Fatalf("the plan renders no runner step named %q", runnerName(spec))
+	}
+
+	if got, _ := valueAfter(runner.Argv, "--network"); got != "container:"+dindName(spec) {
+		t.Errorf("the runner joins network %q, want container:%s: only a shared namespace puts a test container's published port on 127.0.0.1", got, dindName(spec))
+	}
+	if got, _ := envValue(runner.Argv, "DOCKER_HOST"); got != "tcp://"+dindAddress+":"+dindPort {
+		t.Errorf("the runner's DOCKER_HOST is %q, want the sidecar on the shared loopback tcp://%s:%s", got, dindAddress, dindPort)
+	}
+	want := "tcp://" + dindAddress + ":" + dindPort
+	if got, _ := flagValue(dind.Argv, "--host"); got != want {
+		t.Errorf("the sidecar's --host is %q, want %q: the privileged engine answers only the run's own loopback", got, want)
+	}
+
+	// The sidecar has to exist before its network namespace can be joined.
+	dindAt, runnerAt := -1, -1
+	for i, step := range plan.Steps {
+		if name, ok := valueAfter(step.Argv, "--name"); ok {
+			switch name {
+			case dindName(spec):
+				dindAt = i
+			case runnerName(spec):
+				runnerAt = i
+			}
+		}
+	}
+	if dindAt < 0 || runnerAt < 0 {
+		t.Fatalf("the plan's sidecar and runner steps are at %d and %d, want both", dindAt, runnerAt)
+	}
+	if dindAt > runnerAt {
+		t.Errorf("the runner step (%d) comes before the sidecar step (%d), so --network container:%s names a container that does not exist", runnerAt, dindAt, dindName(spec))
+	}
+}
+
+// flagValue returns the value a step writes as flag=value.
+func flagValue(argv []string, flag string) (string, bool) {
+	for _, arg := range argv {
+		if value, found := strings.CutPrefix(arg, flag+"="); found {
+			return value, true
+		}
+	}
+	return "", false
 }
 
 // TestDockerRenderPassesTheTiersItWasGiven keeps the run spec whole: the runner

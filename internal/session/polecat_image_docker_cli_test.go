@@ -1,0 +1,68 @@
+package session
+
+import (
+	"regexp"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/steveyegge/gastown/internal/templates"
+)
+
+// TestPolecatImageInstallsDockerCLIPinned pins the half of the tier-sweep
+// runner that internal/testutil needs: a Docker client on PATH, so its
+// `docker info` probe answers. The client is copied from the engine image the
+// sweep's Docker-in-Docker sidecar runs, pinned by that image's digest, and the
+// copy is the client alone: a daemon in the image every seat runs would be a
+// capability no seat has today (gt-9lmam).
+//
+// Mutation: drop the COPY, the digest ARG or the digest pin in FROM, or copy a
+// second binary out of the stage, and this goes red.
+func TestPolecatImageInstallsDockerCLIPinned(t *testing.T) {
+	t.Parallel()
+	ins := dockerfileInstructions(t)
+
+	args := map[string]string{}
+	for _, in := range ins {
+		rest, ok := strings.CutPrefix(in, "ARG ")
+		if !ok {
+			continue
+		}
+		if key, value, ok := strings.Cut(rest, "="); ok {
+			args[key] = value
+		}
+	}
+	digest, ok := args["DOCKER_CLI_DIGEST"]
+	if !ok {
+		t.Fatal("the Dockerfile pins no DOCKER_CLI_DIGEST, so a rebuild could pull a different docker client")
+	}
+	if !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(digest) {
+		t.Errorf("DOCKER_CLI_DIGEST is %q, want sha256: and 64 lowercase hex digits", digest)
+	}
+
+	// The client must come from the engine the sweep's sidecar runs: one image
+	// carries both halves, so an engine bump cannot silently leave a stale
+	// client behind.
+	var stage string
+	for _, in := range ins {
+		if rest, ok := strings.CutPrefix(in, "FROM "); ok && strings.HasSuffix(rest, " AS docker-cli") {
+			stage = strings.TrimSuffix(rest, " AS docker-cli")
+		}
+	}
+	if stage == "" {
+		t.Fatal("the Dockerfile has no `FROM ... AS docker-cli` stage, so nothing offers the client to copy")
+	}
+	if got := strings.ReplaceAll(stage, "${DOCKER_CLI_DIGEST}", digest); got != templates.DindImage {
+		t.Errorf("the docker client stage is FROM %q, want %q (templates.DindImage): the client and the sidecar engine must be one image", got, templates.DindImage)
+	}
+
+	var copies []string
+	for _, in := range ins {
+		if rest, ok := strings.CutPrefix(in, "COPY --from=docker-cli "); ok {
+			copies = append(copies, rest)
+		}
+	}
+	if want := []string{"/usr/local/bin/docker /usr/local/bin/docker"}; !slices.Equal(copies, want) {
+		t.Errorf("the copies from the docker-cli stage are %q, want exactly %q: the client binary at a path on PATH, and no dockerd from the engine image", copies, want)
+	}
+}
