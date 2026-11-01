@@ -222,51 +222,18 @@ func TestListAssignedIssueStatusesWithoutAssigneeSpawnsNothing(t *testing.T) {
 // sends, as the recorder sees it.
 const assigneeUnionQuery = `query --json assignee="gastown/polecats/toast" AND (status="hooked" OR status="in_progress") --all --limit=0`
 
-// assigneeTableList is the fallback read of the issues table, as the recorder
-// sees it: bd list with the statuses comma-joined, plus the --flat injection
-// that makes bd list --json print JSON.
-const assigneeTableList = `list --json --status=hooked,in_progress --assignee=gastown/polecats/toast --limit=0 --flat`
-
-// The wisps search can fail while the issues table answers (gt-osaep): bd
-// builds the union by searching both tables, and its status-filtered wisp
-// search is what broke. A failed union query must therefore retry against the
-// issues table, not report the hook lookup as a dead database.
-func TestListAssignedIssueStatusesFallsBackToIssuesTable(t *testing.T) {
+// The wisps search can fail while the issues table still answers (gt-osaep).
+// A failed union query must fail the lookup, naming the query step, and must
+// not return the durable rows as if they were the whole answer. The recorder
+// fails the test on any bd call past the union query, so a table retry is
+// caught too.
+func TestListAssignedIssueStatusesNamesFailedQueryStep(t *testing.T) {
 	t.Parallel()
 
 	r := newRecorder(func(args []string) reply {
 		switch strings.Join(args, " ") {
 		case assigneeUnionQuery:
 			return reply{stderr: "search count wisps: invalid connection\n", err: exitError{1}}
-		case assigneeTableList:
-			return reply{stdout: `[{"id":"gt-hook","title":"hooked work","status":"hooked"}]`}
-		}
-		t.Fatalf("unexpected bd call: %v", args)
-		return reply{}
-	})
-	b := newRecordedBeads(t.TempDir(), r)
-
-	got, err := b.ListAssignedIssueStatuses("gastown/polecats/toast", IssueStatusHooked, StatusInProgress)
-	if err != nil {
-		t.Fatalf("ListAssignedIssueStatuses() error = %v", err)
-	}
-	if len(got) != 1 || got[0].ID != "gt-hook" || got[0].Status != string(IssueStatusHooked) {
-		t.Fatalf("got %+v, want the hooked bead the issues table listed", got)
-	}
-}
-
-// The fallback must not turn a failed query into an empty hook. With the
-// issues table empty, the wisps stayed unread, so a hooked wisp cannot be
-// ruled out: the lookup has to fail, naming the step that failed.
-func TestListAssignedIssueStatusesNamesFailedStepWhenTableIsEmpty(t *testing.T) {
-	t.Parallel()
-
-	r := newRecorder(func(args []string) reply {
-		switch strings.Join(args, " ") {
-		case assigneeUnionQuery:
-			return reply{stderr: "search count wisps: invalid connection\n", err: exitError{1}}
-		case assigneeTableList:
-			return reply{stdout: `[]`}
 		}
 		t.Fatalf("unexpected bd call: %v", args)
 		return reply{}
@@ -275,54 +242,26 @@ func TestListAssignedIssueStatusesNamesFailedStepWhenTableIsEmpty(t *testing.T) 
 
 	got, err := b.ListAssignedIssueStatuses("gastown/polecats/toast", IssueStatusHooked, StatusInProgress)
 	if err == nil {
-		t.Fatalf("ListAssignedIssueStatuses() = %v, nil; a failed union query with an empty issues table must not read as an empty hook", got)
+		t.Fatalf("ListAssignedIssueStatuses() = %d issues, nil; a failed union query must not read as an answer", len(got))
 	}
-	for _, want := range []string{"assigned-work query failed", "search count wisps", "empty hook is not established"} {
+	if got != nil {
+		t.Errorf("ListAssignedIssueStatuses() = %d issues with error; want no assignments", len(got))
+	}
+	for _, want := range []string{"assigned-work query over issues and wisps failed", "empty hook is not reported", "search count wisps"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not name %q", err, want)
 		}
 	}
 }
 
-// Both table reads failing is the one case where the lookup knows nothing at
-// all; the error must carry both steps so the caller can tell which read to
-// investigate.
-func TestListAssignedIssueStatusesReportsBothFailedReads(t *testing.T) {
+// A union answer of the wrong JSON shape is a failed read, not an empty hook:
+// the parse error has to reach the caller.
+func TestListAssignedIssueStatusesReportsUnparsableQueryOutput(t *testing.T) {
 	t.Parallel()
 
 	r := newRecorder(func(args []string) reply {
 		switch strings.Join(args, " ") {
 		case assigneeUnionQuery:
-			return reply{stderr: "search count wisps: invalid connection\n", err: exitError{1}}
-		case assigneeTableList:
-			return reply{stderr: "connection reset by peer\n", err: exitError{1}}
-		}
-		t.Fatalf("unexpected bd call: %v", args)
-		return reply{}
-	})
-	b := newRecordedBeads(t.TempDir(), r)
-
-	if _, err := b.ListAssignedIssueStatuses("gastown/polecats/toast", IssueStatusHooked, StatusInProgress); err == nil {
-		t.Fatal("ListAssignedIssueStatuses() = nil error; both reads failed")
-	} else {
-		for _, want := range []string{"assigned-work query failed", "reading assigned issues failed", "connection reset"} {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("error %q does not name %q", err, want)
-			}
-		}
-	}
-}
-
-// A fallback read that answers with JSON of the wrong shape is a failed read,
-// not an empty hook: the parse error has to reach the caller.
-func TestListAssignedIssueStatusesReportsUnparsableTableRead(t *testing.T) {
-	t.Parallel()
-
-	r := newRecorder(func(args []string) reply {
-		switch strings.Join(args, " ") {
-		case assigneeUnionQuery:
-			return reply{stderr: "search count wisps: invalid connection\n", err: exitError{1}}
-		case assigneeTableList:
 			return reply{stdout: `{"data":[]}`}
 		}
 		t.Fatalf("unexpected bd call: %v", args)
@@ -331,8 +270,8 @@ func TestListAssignedIssueStatusesReportsUnparsableTableRead(t *testing.T) {
 	b := newRecordedBeads(t.TempDir(), r)
 
 	_, err := b.ListAssignedIssueStatuses("gastown/polecats/toast", IssueStatusHooked, StatusInProgress)
-	if err == nil || !strings.Contains(err.Error(), "parsing bd list output") {
-		t.Fatalf("err = %v, want the bd list parse failure", err)
+	if err == nil || !strings.Contains(err.Error(), "parsing bd query output") {
+		t.Fatalf("err = %v, want the bd query parse failure", err)
 	}
 }
 
