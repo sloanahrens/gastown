@@ -843,10 +843,13 @@ func (h *Hub) pollReports() {
 	h.publishLocked()
 }
 
-// pollBirds reads the birds' daily reports for the Reports page's list. A read
-// that returns no rows is a read that failed, not a town holding no birds: the
-// rows it last read stay in the state and the read is flagged, so the pane ages
-// them and says so instead of drawing an empty list (gt-q6h8e).
+// pollBirds reads the birds' daily reports for the Reports page's list. A nil
+// answer is a read that failed — the reader had no answer to give — so the rows
+// it last read stay in the state and the read is flagged, and the pane ages them
+// instead of drawing an empty list (gt-q6h8e). Any other answer, including one
+// with no rows, is the reader's own: the runtime directory was read and no bird
+// has written a report, so the rows the state held are replaced and the birds
+// that went away stop being drawn.
 func (h *Hub) pollBirds() {
 	if h.cfg.Birds == nil {
 		return
@@ -854,7 +857,7 @@ func (h *Hub) pollBirds() {
 	rows := h.cfg.Birds()
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if len(rows) == 0 {
+	if rows == nil {
 		h.readFailedLocked(SourceBirds, h.cfg.BirdsEvery)
 		h.publishLocked()
 		return

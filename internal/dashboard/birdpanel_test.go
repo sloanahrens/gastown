@@ -9,10 +9,11 @@ import (
 	"time"
 )
 
-// A birds read that returns no rows is a read that failed, not a town holding
-// no birds: the rows it last read stay on the page, and the read is flagged so
-// the block ages them and says so instead of drawing an empty list (gt-q6h8e).
-func TestBirdPanelPollKeepsTheLastRowsOnAFailedRead(t *testing.T) {
+// A birds read with an answer sets the state's rows and marks the read: the
+// rows when the reader has them, and no rows when the birds really went away.
+// A read with no answer at all keeps the rows it last read and flags itself
+// (gt-q6h8e).
+func TestBirdPanelPollFollowsTheRead(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
@@ -36,27 +37,45 @@ func TestBirdPanelPollKeepsTheLastRowsOnAFailedRead(t *testing.T) {
 		t.Fatalf("a read that answered is flagged as failed: %+v", r)
 	}
 
-	// The next read returns no rows. Two birds cannot become none without the
-	// runtime directory being unreadable, so the rows stand and the read is
-	// what is marked.
+	// Every bird's report is gone: the reader answered with no rows, which is a
+	// read that worked and found nobody rather than one that failed. The rows
+	// the state held must not keep drawing birds that are not there.
+	read = []BirdReport{}
+	h.pollBirds()
+	st = h.State()
+	if len(st.Birds) != 0 {
+		t.Errorf("a read with no rows kept the rows it held: %+v", st.Birds)
+	}
+	if r := st.Reads[SourceBirds]; r.Error {
+		t.Errorf("a read with no rows is flagged as failed: %+v", r)
+	}
+
+	// A reader with no answer at all is a failed read: the rows stand, and the
+	// read is flagged with its last good age so the pane ages them (gt-q6h8e).
+	read = rows
+	h.pollBirds()
 	read = nil
 	h.pollBirds()
 	st = h.State()
 	if len(st.Birds) != 2 || st.Birds[0].Bird != "dunlin" || st.Birds[1].Bird != "heron" {
-		t.Fatalf("a read with no rows dropped the last rows: %+v", st.Birds)
+		t.Fatalf("a read with no answer dropped the last rows: %+v", st.Birds)
 	}
 	if r := st.Reads[SourceBirds]; !r.Error || r.At.IsZero() {
-		t.Errorf("a read with no rows is not flagged with its last good age: %+v", r)
+		t.Errorf("a read with no answer is not flagged with its last good age: %+v", r)
 	}
+}
 
-	// A hub with no birds reader starts no poller: the run returns without a
-	// read, and the poll is a no-op rather than a read of nothing.
-	h2 := NewHub(Config{})
+// A hub with no birds reader starts no poller: the run returns without a read,
+// and the poll is a no-op rather than a read of nothing.
+func TestBirdPanelWithNoReaderReadsNothing(t *testing.T) {
+	t.Parallel()
+
+	h := NewHub(Config{})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	h2.Run(ctx)
-	h2.pollBirds()
-	st = h2.State()
+	h.Run(ctx)
+	h.pollBirds()
+	st := h.State()
 	if st.Birds != nil {
 		t.Errorf("a hub with no birds reader drew rows: %+v", st.Birds)
 	}
@@ -65,46 +84,226 @@ func TestBirdPanelPollKeepsTheLastRowsOnAFailedRead(t *testing.T) {
 	}
 }
 
-// The block draws the row the reader decided: every field through el(), which
-// writes textContent, the summary and the age of it, the amber mark on a stale
-// row, the note in the alarm class for a row in error or withheld, the badge a
-// bird asks for the operator with, and the two pages it wrote as links that
-// open in a new tab. The page's own helper words the age, so the block and the
-// digest say "written … ago" alike.
+// birdDrawnCell is one element the Birds block drew: its text and class, the
+// link it carries when it is one, and how many children it holds — a leaf
+// written through textContent has none.
+type birdDrawnCell struct {
+	Text   string `json:"text"`
+	Class  string `json:"class"`
+	Href   string `json:"href"`
+	Target string `json:"target"`
+	Rel    string `json:"rel"`
+	Kids   int    `json:"kids"`
+}
+
+// birdDrawnRow is one row of the Birds block: the class it wears, the cells of
+// its head in the order the block appended them, and its body line when it drew
+// one.
+type birdDrawnRow struct {
+	Class string          `json:"class"`
+	Head  []birdDrawnCell `json:"head"`
+	Body  *birdDrawnCell  `json:"body"`
+}
+
+// birdRows reads the rows the panel drew under the Birds heading. A panel that
+// drew no such block fails here rather than reading as an empty list.
+func birdRows(t *testing.T, dom *pageDOM) []birdDrawnRow {
+	t.Helper()
+
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
+		const b = __byId["overseer"].children.find(x => x.children[0].children[0].textContent === "Birds");
+		if (!b) return null;
+		const cell = c => ({text: c.textContent, class: c.className, href: c.href || "", target: c.target || "", rel: c.rel || "", kids: c.children.length});
+		return b.children[1].children.map(row => ({
+			class: row.className,
+			head: (row.children[0] ? row.children[0].children : []).map(cell),
+			body: row.children[1] ? cell(row.children[1]) : null
+		}));
+	})())`)
+	if err != nil {
+		t.Fatalf("reading the Birds block's rows: %v", err)
+	}
+	if v.String() == "null" {
+		t.Fatal("the panel drew no Birds block")
+	}
+	var out []birdDrawnRow
+	if err := json.Unmarshal([]byte(v.String()), &out); err != nil {
+		t.Fatalf("reading the Birds block's rows: %v", err)
+	}
+	return out
+}
+
+// The block draws the row the reader decided: the name, the summary and the age
+// of it, the amber mark on a stale row, a row in error named in the alert
+// class, the badge a bird asks for the operator with, and the two pages it
+// wrote as links that open in a new tab. Every cell is the page's own text, so
+// a tag a bird wrote shows as that text rather than as markup.
 func TestBirdPanelDrawsAgeStaleSummaryAndLinks(t *testing.T) {
 	t.Parallel()
 
-	draw := pageFunc(t, "drawBirds")
-	for _, want := range []string{
-		`const rows = s.birds || [];`,
-		`const row = el("div", "brow" + (b.stale ? " warnc" : ""));`,
-		`if (b.state === "error" || b.state === "withheld") row.append(el("div", "badc", b.note || b.state));`,
-		`else if (b.summary) row.append(el("div", "bsum", b.summary));`,
-		`if (b.needs_operator) head.append(el("span", "badge warnc", "needs the operator"));`,
-		`head.append(el("span", "bage", "written " + age(b.written) + " ago"));`,
-		`page.href = "/birds/" + b.bird + "/daily.html";`,
-		`page.target = "_blank";`,
-		`page.rel = "noopener";`,
-		`if (b.has_prev) {`,
-		`prev.href = "/birds/" + b.bird + "/daily.prev.html";`,
-		`no bird has written a daily report yet`,
-	} {
-		if !strings.Contains(draw, want) {
-			t.Errorf("drawBirds has no %q", want)
-		}
-	}
-	if strings.Contains(draw, "innerHTML") {
-		t.Error("drawBirds sets markup from a bird's text")
+	written := time.Now().UTC().Add(-30 * time.Minute).Format(time.RFC3339)
+	stamp := time.Now().UTC().Format(time.RFC3339)
+	dom := newPageDOM(t)
+	dom.call(t, "renderOverseer", map[string]any{
+		"birds": []any{
+			map[string]any{
+				"bird": "dunlin", "state": "fresh", "written": written,
+				"summary": "the <b>day</b> in one line", "needs_operator": true,
+				"has_page": true, "has_prev": true,
+			},
+			map[string]any{"bird": "heron", "state": "stale", "written": written, "stale": true},
+			map[string]any{"bird": "curlew", "state": "error", "note": "daily.json is not valid JSON"},
+		},
+		"reads": map[string]any{"birds": map[string]any{"at": stamp, "every_sec": 60}},
+	})
+
+	rows := birdRows(t, dom)
+	if len(rows) != 3 {
+		t.Fatalf("the block drew %d rows, want the reader's three: %+v", len(rows), rows)
 	}
 
-	// The block is drawn on the Overseer panel the way the digest is, from the
-	// reading it draws: a push that moves s.birds or its read status draws it.
-	page := string(indexHTML)
-	if !strings.Contains(page, "drawBirds(box, s);") {
-		t.Error("renderOverseer never draws the Birds block")
+	// The bird that wrote a page, a previous page and a summary: its name, both
+	// links, the badge and the age of the summary, then the summary itself.
+	if rows[0].Class != "brow" {
+		t.Errorf("a fresh row is drawn as %q, want no mark", rows[0].Class)
 	}
-	if !strings.Contains(page, `s.birds,`) || !strings.Contains(page, `readInput(s, "birds")`) {
-		t.Error("the overseer pane's read list leaves out the birds or their read status")
+	wantHead := []birdDrawnCell{
+		{Text: "dunlin", Class: "bname"},
+		{Text: "page", Class: "bpage", Href: "/birds/dunlin/daily.html", Target: "_blank", Rel: "noopener"},
+		{Text: "previous", Class: "bprev", Href: "/birds/dunlin/daily.prev.html", Target: "_blank", Rel: "noopener"},
+		{Text: "needs the operator", Class: "badge warnc"},
+		{Text: "written 30m ago", Class: "bage"},
+	}
+	if !slices.Equal(rows[0].Head, wantHead) {
+		t.Errorf("the row's head reads %+v, want %+v", rows[0].Head, wantHead)
+	}
+	wantBody := birdDrawnCell{Text: "the <b>day</b> in one line", Class: "bsum"}
+	if rows[0].Body == nil || *rows[0].Body != wantBody {
+		t.Errorf("the row's summary reads %+v, want %+v", rows[0].Body, wantBody)
+	}
+
+	// The stale bird wears the amber mark, wrote no page and no summary, so its
+	// head carries only its name and the age.
+	if rows[1].Class != "brow warnc" {
+		t.Errorf("a stale row is drawn as %q, want the amber mark", rows[1].Class)
+	}
+	if len(rows[1].Head) != 2 || rows[1].Head[0].Text != "heron" || rows[1].Head[1].Class != "bage" {
+		t.Errorf("the stale row's head reads %+v, want its name and age", rows[1].Head)
+	}
+	if rows[1].Body != nil {
+		t.Errorf("the stale row drew a body line it has no words for: %+v", rows[1].Body)
+	}
+
+	// The bird the reader could not use shows what is wrong in the alert class,
+	// and no age, because the reader had no instant to show.
+	if rows[2].Body == nil || rows[2].Body.Class != "badc" || rows[2].Body.Text != "daily.json is not valid JSON" {
+		t.Errorf("the error row's note reads %+v, want the reader's words in the alert class", rows[2].Body)
+	}
+	if len(rows[2].Head) != 1 || rows[2].Head[0].Text != "curlew" {
+		t.Errorf("the error row's head reads %+v, want its name alone", rows[2].Head)
+	}
+}
+
+// The two branches drawBirds takes with no rows: a read that failed says so in
+// its own words and in the alert class, and a read that worked draws the quiet
+// line saying no bird has written yet. The two must not read alike.
+func TestBirdPanelDrawsAReadWithNoBirds(t *testing.T) {
+	t.Parallel()
+
+	stamp := time.Now().UTC().Format(time.RFC3339)
+	cases := []struct {
+		name      string
+		status    map[string]any
+		wantClass string
+		wantText  string
+		wantNote  string
+	}{
+		{
+			name:      "a failed read",
+			status:    map[string]any{"at": stamp, "every_sec": 60, "error": true, "stale": true},
+			wantClass: "badc",
+			wantText:  "the birds read failed",
+			wantNote:  "read failed",
+		},
+		{
+			name:      "a read that found nobody",
+			status:    map[string]any{"at": stamp, "every_sec": 60},
+			wantClass: "empty",
+			wantText:  "no bird has written a daily report yet",
+		},
+	}
+	for _, tc := range cases {
+		dom := newPageDOM(t)
+		dom.call(t, "renderOverseer", map[string]any{
+			"birds": []any{},
+			"reads": map[string]any{"birds": tc.status},
+		})
+		block := blockNamed(t, overseerBlocks(t, dom), "Birds")
+		if block.Text != tc.wantText {
+			t.Errorf("%s: the block reads %q, want %q", tc.name, block.Text, tc.wantText)
+		}
+		if classes := blockClasses(t, dom, "Birds"); !slices.Equal(classes, []string{tc.wantClass}) {
+			t.Errorf("%s: the block's line is drawn as %v, want %q", tc.name, classes, tc.wantClass)
+		}
+		if tc.wantNote != "" && !strings.Contains(block.Note, tc.wantNote) {
+			t.Errorf("%s: the block's note reads %q, want it to name %q", tc.name, block.Note, tc.wantNote)
+		}
+	}
+}
+
+// A row in error draws the note the reader wrote for it, and a withheld row
+// with no note names its own state: the block never draws an empty alert line.
+func TestBirdPanelDrawsARowsNoteOrItsState(t *testing.T) {
+	t.Parallel()
+
+	stamp := time.Now().UTC().Format(time.RFC3339)
+	dom := newPageDOM(t)
+	dom.call(t, "renderOverseer", map[string]any{
+		"birds": []any{
+			map[string]any{"bird": "curlew", "state": "error", "note": "daily.json is not valid JSON"},
+			map[string]any{"bird": "heron", "state": "withheld"},
+		},
+		"reads": map[string]any{"birds": map[string]any{"at": stamp, "every_sec": 60}},
+	})
+
+	rows := birdRows(t, dom)
+	if len(rows) != 2 {
+		t.Fatalf("the block drew %d rows, want the reader's two: %+v", len(rows), rows)
+	}
+	if got := rows[0].Body; got == nil || got.Class != "badc" || got.Text != "daily.json is not valid JSON" {
+		t.Errorf("the error row reads %+v, want the reader's note in the alert class", got)
+	}
+	if got := rows[1].Body; got == nil || got.Class != "badc" || got.Text != "withheld" {
+		t.Errorf("a withheld row with no note reads %+v, want its state in the alert class", got)
+	}
+}
+
+// The pane redraws when its read status moves even though the rows it drew did
+// not: a read that failed while the birds it last read stayed put is a change
+// the pane's push guard must see (gt-quuq5).
+func TestBirdPanelRedrawsWhenOnlyItsReadStatusChanged(t *testing.T) {
+	t.Parallel()
+
+	stamp := time.Now().UTC().Format(time.RFC3339)
+	dom := newPageDOM(t)
+	draws := countPaneDraws(t, dom, "overseer")
+	reading := func(status map[string]any) map[string]any {
+		return map[string]any{
+			"birds": []any{map[string]any{"bird": "dunlin", "state": "fresh", "written": stamp, "summary": "the day in one line"}},
+			"reads": map[string]any{"birds": status},
+		}
+	}
+	pushState(t, dom, reading(map[string]any{"at": stamp, "every_sec": 60}))
+	if got := draws(); got != 1 {
+		t.Fatalf("the first reading drew the pane %d times, want once", got)
+	}
+	// The same bird and the same stamp: only the read behind them failed.
+	pushState(t, dom, reading(map[string]any{"at": stamp, "every_sec": 60, "error": true, "stale": true}))
+	if got := draws(); got != 2 {
+		t.Errorf("a failed birds read drew the pane %d times, want 2: the rows did not move, the status did", got)
+	}
+	if note := blockNamed(t, overseerBlocks(t, dom), "Birds").Note; !strings.Contains(note, "read failed") {
+		t.Errorf("the birds block's note reads %q after the failed read, want it named", note)
 	}
 }
 
