@@ -9,8 +9,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/events"
 )
 
 // sameStat reports whether two diff stats match, their floats within 1e-9.
@@ -425,6 +428,24 @@ func seamWired(t *testing.T, files seamFiles) (RealTown, error) {
 // townOfSeam is the town of the file-seam cases: a path no host has.
 const townOfSeam = "/seam-town"
 
+// TestRealEnvNamesAnEventsFeedItCannotRead: a feed that exists but cannot be
+// read is a named unreadable source, not a town that never logged an event, so
+// the extract does not read every dispatch as missing.
+func TestRealEnvNamesAnEventsFeedItCannotRead(t *testing.T) {
+	t.Parallel()
+	eventsPath := filepath.Join(townOfSeam, events.EventsFile)
+	real, err := seamWired(t, seamFiles{errs: map[string]error{eventsPath: fs.ErrPermission}})
+	if err != nil {
+		t.Fatalf("RealEnv: %v", err)
+	}
+	if real.Extract.EventLines != nil {
+		t.Errorf("EventLines = %q, want nil for a feed it cannot read", real.Extract.EventLines)
+	}
+	if !slices.Contains(real.Extract.Unreadable, "events") {
+		t.Errorf("Unreadable = %v, want the events feed named", real.Extract.Unreadable)
+	}
+}
+
 func TestRealEnvReadsThroughItsFileSeam(t *testing.T) {
 	t.Parallel()
 	files := seamFiles{
@@ -433,6 +454,7 @@ func TestRealEnvReadsThroughItsFileSeam(t *testing.T) {
 			filepath.Join(townOfSeam, ".runtime", "usage", "beads", "gt-a.work.json"):   `{"models":{"m":{"calls":2}}}`,
 			filepath.Join(townOfSeam, ".runtime", "overrun-guard", "gt-a.json"):         `{"stop_began_at":"2026-10-01T00:00:00Z"}`,
 			filepath.Join(townOfSeam, ".runtime", "metrics", "cache", handoffCacheName): `{"gt-a":120}`,
+			filepath.Join(townOfSeam, events.EventsFile):                                `{"type":"sling","bead":"gt-a"}` + "\n",
 		},
 		dirs: map[string][]DirEntry{
 			filepath.Join(townOfSeam, ".runtime", "usage", "beads"): {{Name: "gt-a.work.json"}},
@@ -452,6 +474,9 @@ func TestRealEnvReadsThroughItsFileSeam(t *testing.T) {
 	}
 	if real.Extract.HandoffCache["gt-a"] != 120 {
 		t.Errorf("HandoffCache = %v, want the seam's gt-a", real.Extract.HandoffCache)
+	}
+	if got, want := real.Extract.EventLines, []string{`{"type":"sling","bead":"gt-a"}`}; !reflect.DeepEqual(got, want) {
+		t.Errorf("EventLines = %q, want the seam's feed %q", got, want)
 	}
 }
 

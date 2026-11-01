@@ -11,15 +11,46 @@ import (
 	"testing"
 )
 
-// landingsFixture is testdata/landings.v1.csv, bytes included: its CRLF line
-// endings are the extract's and the round trip is measured against them.
+// landingsFixture is testdata/landings.v2.csv, the header this join writes,
+// bytes included: its CRLF line endings are the extract's and the round trip is
+// measured against them.
 func landingsFixture(t *testing.T) []byte {
 	t.Helper()
-	data, err := os.ReadFile("testdata/landings.v1.csv")
+	data, err := os.ReadFile("testdata/landings.v2.csv")
 	if err != nil {
 		t.Fatalf("read the landings fixture: %v", err)
 	}
 	return data
+}
+
+// TestReadLandingsReadsAPreChangeFile: landings.v1.csv is the 25-column file the
+// extract wrote before the stage columns appended. It still reads as the
+// contract it was, its header returned as written and its rows keyed by it, so
+// a reader of an older file keeps working and does not see the appended
+// columns as empty keys (gt-p9pok).
+func TestReadLandingsReadsAPreChangeFile(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile("testdata/landings.v1.csv")
+	if err != nil {
+		t.Fatalf("read the pre-change fixture: %v", err)
+	}
+	header, rows, err := ReadLandings(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("read the pre-change fixture: %v", err)
+	}
+	legacy := landingColumns[:len(landingColumns)-len(appendedLandingColumns)]
+	if !slices.Equal(header, legacy) {
+		t.Errorf("header = %v, want the pre-change header %v", header, legacy)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("rows = %d, want the fixture's 3", len(rows))
+	}
+	if got, want := rows[0]["model"], "opus"; got != want {
+		t.Errorf("rows[0][model] = %q, want %q", got, want)
+	}
+	if _, ok := rows[0]["created_at"]; ok {
+		t.Errorf("rows[0] carries created_at = %q, want a pre-change row to have no such key", rows[0]["created_at"])
+	}
 }
 
 func TestReadLandingsReadsTheExtractHeader(t *testing.T) {
@@ -71,14 +102,25 @@ func pythonLandingColumns(t *testing.T) []string {
 	return pythonStringList(t, "tables.py", "LANDING_COLUMNS")
 }
 
-func TestLandingColumnsMatchThePythonExtract(t *testing.T) {
+// TestLandingColumnsKeepThePythonExtractsHeader: the Python extract's columns
+// are the head of landingColumns, in its order, and the stage columns this join
+// appends are the only ones after them. The Python reference stays at the
+// header it was ported with, so the Go contract extends it append-only: an
+// existing column keeps its name and place (gt-p9pok).
+func TestLandingColumnsKeepThePythonExtractsHeader(t *testing.T) {
 	t.Parallel()
-	want := pythonLandingColumns(t)
-	if len(want) == 0 {
+	legacy := pythonLandingColumns(t)
+	if len(legacy) == 0 {
 		t.Fatal("read no columns out of tables.py")
 	}
-	if !slices.Equal(landingColumns, want) {
-		t.Errorf("landingColumns = %v, want the extract's %v", landingColumns, want)
+	if len(landingColumns) < len(legacy) {
+		t.Fatalf("landingColumns has %d columns, want at least the Python extract's %d", len(landingColumns), len(legacy))
+	}
+	if got := landingColumns[:len(legacy)]; !slices.Equal(got, legacy) {
+		t.Errorf("landingColumns starts %v, want the Python extract's %v", got, legacy)
+	}
+	if got := landingColumns[len(legacy):]; !slices.Equal(got, appendedLandingColumns) {
+		t.Errorf("appended columns = %v, want %v", got, appendedLandingColumns)
 	}
 }
 
@@ -255,6 +297,59 @@ func TestLedgerDispatchedStampFromTheFeed(t *testing.T) {
 	}
 	if got, want := CountLandingGaps(rows).StageStampMissing["dispatched_at"], 1; got != want {
 		t.Errorf("stage_stamp_missing_dispatched_at = %d, want %d", got, want)
+	}
+}
+
+// TestLedgerSubmittedNoteStampIsGuarded: the READY TO LAND note is rewritten by
+// a later run's submission, so a note stamp after the landing, or one that is
+// not a timestamp, is not this landing's. The feed's in-time done event then
+// answers, and a landing neither source stamps is counted missing.
+func TestLedgerSubmittedNoteStampIsGuarded(t *testing.T) {
+	t.Parallel()
+	ledger := []LedgerRow{{Bead: "gt-a", Rig: "gastown", LandedCommit: "c1", LandedAt: "2026-10-14T00:00:00Z"}}
+	tests := []struct {
+		name        string
+		note        string
+		feed        map[string]string
+		want        string
+		wantMissing int
+	}{
+		{"a note stamp after the landing is refused", "2026-10-15T00:00:00Z", nil, "", 1},
+		{"a malformed note stamp is refused", "not-a-time", nil, "", 1},
+		{"the feed's in-time done event answers a refused note", "2026-10-15T00:00:00Z",
+			map[string]string{"gt-a": "2026-10-13T00:00:00Z"}, "2026-10-13T00:00:00Z", 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			beads := map[string]BeadRow{"gt-a": {ID: "gt-a", SubmittedAt: tc.note}}
+			rows := buildLedgerLandings(t, ledger, beads, nil, StageStamps{Submitted: tc.feed})
+			if got := rows[0]["submitted_at"]; got != tc.want {
+				t.Errorf("submitted_at = %q, want %q", got, tc.want)
+			}
+			if got := CountLandingGaps(rows).StageStampMissing["submitted_at"]; got != tc.wantMissing {
+				t.Errorf("stage_stamp_missing_submitted_at = %d, want %d", got, tc.wantMissing)
+			}
+		})
+	}
+}
+
+// TestLedgerMalformedCreatedAtIsMissing: a created_at the join cannot parse is
+// not a stamp, so the cell is empty, time_to_land_s is empty, and the footer
+// counts the landing rather than the row carrying text no reader can use.
+func TestLedgerMalformedCreatedAtIsMissing(t *testing.T) {
+	t.Parallel()
+	beads := map[string]BeadRow{"gt-a": {ID: "gt-a", CreatedAt: "not-a-time"}}
+	ledger := []LedgerRow{{Bead: "gt-a", Rig: "gastown", LandedCommit: "c1", LandedAt: "2026-10-14T00:00:00Z"}}
+	rows := buildLedgerLandings(t, ledger, beads, nil, StageStamps{})
+	if got := rows[0]["created_at"]; got != "" {
+		t.Errorf("created_at = %q, want an empty cell for an unparsable stamp", got)
+	}
+	if got := rows[0]["time_to_land_s"]; got != "" {
+		t.Errorf("time_to_land_s = %q, want empty without a readable created_at", got)
+	}
+	if got, want := CountLandingGaps(rows).StageStampMissing["created_at"], 1; got != want {
+		t.Errorf("stage_stamp_missing_created_at = %d, want %d", got, want)
 	}
 }
 

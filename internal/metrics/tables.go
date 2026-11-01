@@ -70,8 +70,8 @@ func BuildLandings(ctx context.Context, ledger []LedgerRow, rework map[string]Re
 
 		b := beadsByID[l.Bead]
 		model := landingModel(l, usage, stamps.Seats)
-		createdAt := b.CreatedAt
-		dispatchedAt := stamps.Dispatched[l.Bead]
+		createdAt := stampCell(b.CreatedAt)
+		dispatchedAt := stampCell(stamps.Dispatched[l.Bead])
 		submittedAt := landingSubmitted(l.Bead, b, stamps, landed)
 		// A nil value is written as an empty cell.
 		var linesAdded, linesDeleted, linesTotal, filesTouched, fileEntropy, packageEntropy string

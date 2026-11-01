@@ -25,6 +25,11 @@ var landingColumns = []string{
 // order the footer counts them.
 var landingStageStamps = []string{"created_at", "dispatched_at", "submitted_at"}
 
+// appendedLandingColumns are the columns the stage join adds after the header
+// the ported extract wrote. The Python reference stays at that header: a script
+// does not take the join logic Go owns, so the contract extends it append-only.
+var appendedLandingColumns = []string{"created_at", "dispatched_at", "submitted_at", "time_to_land_s"}
+
 // LandingGaps is what the joined landings do not cover: the rows no seat record
 // gave a model, and the rows whose stage stamp is empty, by stamp name.
 type LandingGaps struct {
@@ -76,11 +81,15 @@ func landingModel(l LedgerRow, usage map[string]Usage, seats UsageSeats) string 
 
 // landingSubmitted is when a landing was submitted: the READY TO LAND block's
 // own stamp, which gt done writes with the submission and no comment moves
-// (gt-t2jhf), else the bead's latest done event. A done event after the landing
-// belongs to a run that did not produce it, so it is not this landing's stamp.
+// (gt-t2jhf), else the bead's latest done event. A stamp after the landing
+// belongs to a run that did not produce it, so it is not this landing's stamp,
+// whether the notes or the feed carries it: a later run that resubmitted the
+// bead rewrites the note too.
 func landingSubmitted(bead string, b BeadRow, stamps StageStamps, landedAt time.Time) string {
-	if b.SubmittedAt != "" {
-		return b.SubmittedAt
+	if note := b.SubmittedAt; note != "" {
+		if when, err := ParseTS(note); err == nil && !when.After(landedAt) {
+			return note
+		}
 	}
 	at, ok := stamps.Submitted[bead]
 	if !ok {
@@ -88,6 +97,20 @@ func landingSubmitted(bead string, b BeadRow, stamps StageStamps, landedAt time.
 	}
 	when, err := ParseTS(at)
 	if err != nil || when.After(landedAt) {
+		return ""
+	}
+	return at
+}
+
+// stampCell is a stage stamp as the cell carries it, "" when the source text is
+// not a timestamp. A stamp the join cannot place on a clock is missing, so the
+// footer counts it and time_to_land_s stays empty, rather than the cell carrying
+// text no reader can use.
+func stampCell(at string) string {
+	if at == "" {
+		return ""
+	}
+	if _, err := ParseTS(at); err != nil {
 		return ""
 	}
 	return at

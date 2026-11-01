@@ -59,8 +59,8 @@ type ExtractEnv struct {
 	// ReviewLines is reviews.jsonl, still as lines.
 	ReviewLines []string
 	// EventLines is the town's events feed, still as lines: the dispatch and
-	// done clocks the landings join reads. A line the loader refuses is logged,
-	// and the extract keeps the stamps it could read.
+	// done clocks the landings join reads. A line the loader refuses is recorded
+	// in dropped, and the extract keeps the stamps it could read.
 	EventLines []string
 	// Diffs is where a landing's size and spread come from.
 	Diffs DiffSource
