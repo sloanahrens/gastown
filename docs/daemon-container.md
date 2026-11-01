@@ -1032,13 +1032,13 @@ day.
       `dolt.container_host` gives it) and 3000 is the port the live Forgejo
       publishes; the credential helper is keyed to exactly this host:port, so
       it has to be the one the container's pushes name. The path is the landing
-      bot's token file that `docs/forgejo-runbook.md`'s provisioning writes,
-      which the render mounts read-only; the command never opens it, so it need
-      not exist yet when this runs, and having it in place before the window's
-      first landing is what makes a `land/<bead>` push carry the bot's token.
-      Leave `~` unquoted so the shell makes the path absolute, since a relative
-      one is refused. With neither flag the container gets no helper and its
-      pushes fail; `gt daemon compose write --help` gives the pair's contract.
+      bot's token file that `docs/forgejo-runbook.md`'s provisioning writes.
+      It must exist before the cutover starts the container, not merely before
+      the window's first landing: the compose file bind-mounts it, and Docker
+      resolves that mount at container start, so a token written afterwards is
+      too late. Leave `~` unquoted so the shell makes the path absolute, since
+      a relative one is refused. Without the pair its pushes fail;
+      `gt daemon compose write --help` gives the pair's contract.
       The cutover starts the container from this file, so the window cannot
       start before it exists.
 - [ ] **Both container fields are set in the live settings** while
