@@ -2317,9 +2317,10 @@ func tierSweepOutputNamesTier(tiers []string, output string) bool {
 // stage ended in and the tiers of the stage it never named. The ended tier is
 // the last one a line names, in the order printed: the rig's script runs its
 // tiers in an order of its own, so the stage's list cannot place them
-// (gt-zlcl6). A RED exit that named no tier is not a cut-off and never reaches
-// here (tierSweepStageCutOff); a stage of one tier has nowhere else to be, so a
-// cut-off that printed nothing still ended in it. Any other tier no line names
+// (gt-zlcl6). In a stage of two or more tiers a RED exit that named no tier is
+// not a cut-off and never reaches here (tierSweepStageCutOff); a stage of one
+// tier has nowhere else to be, so its exit 1 is a cut-off whatever it printed,
+// and a cut-off that printed nothing still ended in that tier. Any other tier no line names
 // never started, so its silence is starvation rather than a verdict (gt-34r68).
 func tierSweepStageProgress(tiers []string, output string) (ended string, never map[string]bool) {
 	named := map[string]bool{}
