@@ -685,6 +685,28 @@ func TestReaperPurgeReportsPartialCountAndFails(t *testing.T) {
 	}
 }
 
+// TestReaperPurgeReportsRetriedChunks: a purge that rode out a write conflict
+// prints how many delete chunks needed a retry, so a clean exit does not hide
+// the conflict it recovered from (gt-ujklm).
+func TestReaperPurgeReportsRetriedChunks(t *testing.T) {
+	t.Parallel()
+	outcomes := []reaperPurgeOutcome{{
+		db:     "testdb",
+		result: &reaper.PurgeResult{Database: "testdb", WispsPurged: 2, RetriedChunks: 3},
+	}}
+
+	var stdout, stderr bytes.Buffer
+	if err := reportPurgeResponse(reaperPurgeReport{outcomes: outcomes, stdout: &stdout, stderr: &stderr}); err != nil {
+		t.Fatalf("reportPurgeResponse = %v, want nil", err)
+	}
+	if !strings.Contains(stdout.String(), "retried 3 delete chunks") {
+		t.Errorf("stdout = %q, want the retried chunk count", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want no failure output", stderr.String())
+	}
+}
+
 // TestReaperPurgeCleanOutcomeReturnsNoError: a purge with nothing failed
 // prints its count and returns no error, so a clean run keeps exiting 0.
 func TestReaperPurgeCleanOutcomeReturnsNoError(t *testing.T) {

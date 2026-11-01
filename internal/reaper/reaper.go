@@ -96,6 +96,10 @@ type PurgeResult struct {
 	// FailedChunks names each bd delete chunk that failed, so a purge that
 	// deleted part of its set reports the part it could not (gt-2wesb).
 	FailedChunks []PurgeChunkFailure `json:"failed_chunks,omitempty"`
+	// RetriedChunks is how many delete chunks failed on a transient error and
+	// then succeeded on a retry, so a purge that rode out a write conflict
+	// says so (gt-ujklm).
+	RetriedChunks int `json:"retried_chunks,omitempty"`
 }
 
 // PurgeChunkFailure is one bd delete chunk that failed: the ids it covered and
@@ -862,7 +866,9 @@ func selectIDs(ctx context.Context, db *beadsql.DB, query string, args ...interf
 //
 // A purge that fails part way still returns its result: the counts are what
 // was deleted and FailedChunks names each chunk bd refused, so a caller can
-// report the partial purge instead of a silent zero (gt-2wesb).
+// report the partial purge instead of a silent zero (gt-2wesb). A chunk that
+// failed on a transient error is retried with backoff first, and
+// RetriedChunks counts the chunks that succeeded only on a retry (gt-ujklm).
 func Purge(db *beadsql.DB, w Writer, dbName string, purgeAge, mailDeleteAge time.Duration, dryRun bool) (*PurgeResult, error) {
 	if !dryRun && w == nil {
 		return nil, ErrNoWriter
@@ -873,7 +879,7 @@ func Purge(db *beadsql.DB, w Writer, dbName string, purgeAge, mailDeleteAge time
 	}
 
 	// Purge closed wisps.
-	purged, anomalies, err := purgeClosedWisps(db, w, purgeAge, dryRun, recordFailures)
+	purged, anomalies, err := purgeClosedWisps(db, w, purgeAge, dryRun, recordFailures, &result.RetriedChunks)
 	result.WispsPurged = purged
 	result.Anomalies = append(result.Anomalies, anomalies...)
 	if err != nil {
@@ -881,7 +887,7 @@ func Purge(db *beadsql.DB, w Writer, dbName string, purgeAge, mailDeleteAge time
 	}
 
 	// Purge old mail.
-	mailPurged, err := purgeOldMail(db, w, dbName, mailDeleteAge, dryRun, recordFailures)
+	mailPurged, err := purgeOldMail(db, w, dbName, mailDeleteAge, dryRun, recordFailures, &result.RetriedChunks)
 	result.MailPurged = mailPurged
 	if err != nil {
 		return result, fmt.Errorf("purge mail: %w", err)
@@ -892,8 +898,9 @@ func Purge(db *beadsql.DB, w Writer, dbName string, purgeAge, mailDeleteAge time
 
 // purgeClosedWisps deletes the closed wisps and hands each failed bd delete
 // chunk to onFailedChunks, so a partial purge keeps the chunks it could not
-// delete.
-func purgeClosedWisps(db *beadsql.DB, w Writer, purgeAge time.Duration, dryRun bool, onFailedChunks func([]PurgeChunkFailure)) (int, []Anomaly, error) {
+// delete. It adds to *retriedChunks the chunks that succeeded only on a retry
+// (gt-ujklm).
+func purgeClosedWisps(db *beadsql.DB, w Writer, purgeAge time.Duration, dryRun bool, onFailedChunks func([]PurgeChunkFailure), retriedChunks *int) (int, []Anomaly, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -950,7 +957,8 @@ func purgeClosedWisps(db *beadsql.DB, w Writer, purgeAge time.Duration, dryRun b
 	if err != nil {
 		return 0, anomalies, fmt.Errorf("select closed wisps: %w", err)
 	}
-	totalDeleted, failed, err := deleteInChunks(w, ids)
+	totalDeleted, retried, failed, err := deleteInChunks(w, ids)
+	*retriedChunks += retried
 	if err != nil {
 		onFailedChunks(failed)
 		return totalDeleted, anomalies, fmt.Errorf("delete closed wisps: %w", err)
@@ -959,8 +967,9 @@ func purgeClosedWisps(db *beadsql.DB, w Writer, purgeAge time.Duration, dryRun b
 }
 
 // purgeOldMail deletes the old mail and hands each failed bd delete chunk to
-// onFailedChunks, so a partial purge keeps the chunks it could not delete.
-func purgeOldMail(db *beadsql.DB, w Writer, dbName string, mailDeleteAge time.Duration, dryRun bool, onFailedChunks func([]PurgeChunkFailure)) (int, error) {
+// onFailedChunks, so a partial purge keeps the chunks it could not delete. It
+// adds to *retriedChunks the chunks that succeeded only on a retry (gt-ujklm).
+func purgeOldMail(db *beadsql.DB, w Writer, dbName string, mailDeleteAge time.Duration, dryRun bool, onFailedChunks func([]PurgeChunkFailure), retriedChunks *int) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -991,7 +1000,8 @@ func purgeOldMail(db *beadsql.DB, w Writer, dbName string, mailDeleteAge time.Du
 	if err != nil {
 		return 0, fmt.Errorf("select mail: %w", err)
 	}
-	totalDeleted, failed, err := deleteInChunks(w, ids)
+	totalDeleted, retried, failed, err := deleteInChunks(w, ids)
+	*retriedChunks += retried
 	if err != nil {
 		onFailedChunks(failed)
 		return totalDeleted, fmt.Errorf("delete mail: %w", err)

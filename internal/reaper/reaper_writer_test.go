@@ -285,7 +285,7 @@ func TestDeleteInChunks(t *testing.T) {
 	}
 	w := &chunkWriter{failOn: map[string]bool{ids[DefaultBatchSize]: true}}
 
-	deleted, failed, err := deleteInChunks(w, ids)
+	deleted, _, failed, err := deleteInChunks(w, ids)
 	if err == nil {
 		t.Fatal("deleteInChunks with a failed chunk = nil error, want the chunk's failure")
 	}
@@ -307,6 +307,153 @@ func TestDeleteInChunks(t *testing.T) {
 	}
 	if !strings.Contains(failedChunk.Error, "refused") {
 		t.Errorf("failed chunk error = %q, want the bd error text", failedChunk.Error)
+	}
+}
+
+// scriptedWriter answers each DeleteIssues call with the next scripted error,
+// then succeeds, and records every batch it was handed.
+type scriptedWriter struct {
+	errors  []error
+	batches [][]string
+}
+
+func (w *scriptedWriter) CloseWithReason(string, ...string) error      { return nil }
+func (w *scriptedWriter) ForceCloseWithReason(string, ...string) error { return nil }
+
+func (w *scriptedWriter) DeleteIssues(ids ...string) error {
+	w.batches = append(w.batches, append([]string(nil), ids...))
+	if len(w.errors) == 0 {
+		return nil
+	}
+	err := w.errors[0]
+	w.errors = w.errors[1:]
+	return err
+}
+
+// recordingSleep returns the seam deleteInChunksSleeping takes and the delays
+// it recorded, so a test reads the backoff instead of waiting it out.
+func recordingSleep() (func(time.Duration), *[]time.Duration) {
+	waits := &[]time.Duration{}
+	return func(d time.Duration) { *waits = append(*waits, d) }, waits
+}
+
+// TestDeleteInChunksRetriesATransientFailure: a chunk bd refused with a
+// serialization failure twice and then accepted is deleted once, counted once,
+// and the waits between the attempts are 1 s and 2 s (gt-ujklm).
+func TestDeleteInChunksRetriesATransientFailure(t *testing.T) {
+	t.Parallel()
+	ids := []string{"w-a", "w-b", "w-c"}
+	w := &scriptedWriter{errors: []error{
+		errors.New("bd delete: serialization failure: transaction conflict"),
+		errors.New("bd delete: serialization failure: transaction conflict"),
+	}}
+	sleep, waits := recordingSleep()
+
+	deleted, retried, failed, err := deleteInChunksSleeping(w, ids, sleep)
+	if err != nil {
+		t.Fatalf("deleteInChunksSleeping = %v, want nil after the retry succeeds", err)
+	}
+	if deleted != len(ids) || retried != 1 || len(failed) != 0 {
+		t.Errorf("deleted=%d retried=%d failed=%+v, want %d, 1, none", deleted, retried, failed, len(ids))
+	}
+	if len(w.batches) != 3 {
+		t.Fatalf("DeleteIssues calls = %d, want 3 (two failures then the success)", len(w.batches))
+	}
+	if !reflect.DeepEqual(*waits, []time.Duration{time.Second, 2 * time.Second}) {
+		t.Errorf("waits = %v, want [1s 2s]", *waits)
+	}
+}
+
+// TestDeleteInChunksDoesNotRetryAPermanentError: a permanent refusal is
+// attempted once, waits for nothing, and is reported as a failed chunk
+// (gt-ujklm).
+func TestDeleteInChunksDoesNotRetryAPermanentError(t *testing.T) {
+	t.Parallel()
+	ids := []string{"w-a", "w-b"}
+	w := &scriptedWriter{errors: []error{errors.New("bd delete: w-a is still referenced")}}
+	sleep, waits := recordingSleep()
+
+	deleted, retried, failed, err := deleteInChunksSleeping(w, ids, sleep)
+	if err == nil {
+		t.Fatal("deleteInChunksSleeping with a permanent error = nil error, want the refusal")
+	}
+	if len(w.batches) != 1 {
+		t.Errorf("DeleteIssues calls = %d, want 1 (a refusal is not retried)", len(w.batches))
+	}
+	if len(*waits) != 0 {
+		t.Errorf("waits = %v, want none for a permanent error", *waits)
+	}
+	if deleted != 0 || retried != 0 {
+		t.Errorf("deleted=%d retried=%d, want 0 and 0", deleted, retried)
+	}
+	if len(failed) != 1 || failed[0].FirstID != ids[0] {
+		t.Errorf("failed chunks = %+v, want the refused chunk", failed)
+	}
+}
+
+// TestDeleteInChunksGivesUpAfterThreeAttempts: a chunk that fails transiently
+// every time is tried three times and reported failed, while the next chunk
+// still deletes (gt-ujklm).
+func TestDeleteInChunksGivesUpAfterThreeAttempts(t *testing.T) {
+	t.Parallel()
+	ids := make([]string, DefaultBatchSize*2)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("w-%03d", i)
+	}
+	transient := fmt.Errorf("bd delete: lock wait timeout exceeded")
+	w := &scriptedWriter{errors: []error{transient, transient, transient}}
+	sleep, waits := recordingSleep()
+
+	deleted, retried, failed, err := deleteInChunksSleeping(w, ids, sleep)
+	if err == nil {
+		t.Fatal("deleteInChunksSleeping with a chunk that never succeeds = nil error, want the failure")
+	}
+	first := w.batches[0]
+	if len(w.batches) != 4 {
+		t.Fatalf("DeleteIssues calls = %d, want 4 (three attempts at the first chunk, one at the second)", len(w.batches))
+	}
+	if !reflect.DeepEqual(w.batches[1], first) || !reflect.DeepEqual(w.batches[2], first) {
+		t.Errorf("attempts 2 and 3 were handed %v and %v, want the same chunk", w.batches[1], w.batches[2])
+	}
+	if want := len(ids) - DefaultBatchSize; deleted != want {
+		t.Errorf("deleted = %d, want %d (the chunk that succeeded)", deleted, want)
+	}
+	if retried != 0 {
+		t.Errorf("retried = %d, want 0 (a chunk given up on did not succeed)", retried)
+	}
+	if len(failed) != 1 || failed[0].FirstID != ids[0] {
+		t.Errorf("failed chunks = %+v, want the chunk that never succeeded", failed)
+	}
+	if !reflect.DeepEqual(*waits, []time.Duration{time.Second, 2 * time.Second}) {
+		t.Errorf("waits = %v, want [1s 2s] before giving up", *waits)
+	}
+}
+
+// TestIsTransientDeleteError is the classification on its own: a serialization
+// failure, a lock wait timeout and a connection timeout may be retried, while
+// a refusal, a bad id and a nil error may not (gt-ujklm).
+func TestIsTransientDeleteError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "serialization failure", err: errors.New("Error 1213: Deadlock found"), want: true},
+		{name: "lock wait timeout", err: errors.New("Error 1205: Lock wait timeout exceeded"), want: true},
+		{name: "connection timeout", err: errors.New("read tcp: i/o timeout"), want: true},
+		{name: "dropped connection", err: errors.New("invalid connection"), want: true},
+		{name: "refused chunk", err: errors.New("bd delete: w-a is still referenced"), want: false},
+		{name: "bad id", err: errors.New("no such issue: w-a"), want: false},
+		{name: "nil", err: nil, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isTransientDeleteError(tt.err); got != tt.want {
+				t.Errorf("isTransientDeleteError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }
 

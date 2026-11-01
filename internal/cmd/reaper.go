@@ -870,7 +870,7 @@ func reportPurgeResponse(r reaperPurgeReport) error {
 	if r.json {
 		fmt.Fprintln(r.stdout, reaper.FormatJSON(results))
 	} else {
-		var totalWisps, totalMail int
+		var totalWisps, totalMail, totalRetried int
 		for _, o := range r.outcomes {
 			if res := o.result; res != nil {
 				prefix := ""
@@ -879,11 +879,16 @@ func reportPurgeResponse(r reaperPurgeReport) error {
 				}
 				fmt.Fprintf(r.stdout, "%s: %spurged %d wisps, %d mail\n",
 					res.Database, prefix, res.WispsPurged, res.MailPurged)
+				if res.RetriedChunks > 0 {
+					fmt.Fprintf(r.stdout, "%s: retried %d delete chunks\n",
+						res.Database, res.RetriedChunks)
+				}
 				for _, a := range res.Anomalies {
 					fmt.Fprintf(r.stdout, "  %s %s\n", style.Warning.Render("ANOMALY:"), a.Message)
 				}
 				totalWisps += res.WispsPurged
 				totalMail += res.MailPurged
+				totalRetried += res.RetriedChunks
 			}
 			if o.err != nil {
 				// The count above is what this database did delete; the
@@ -902,8 +907,8 @@ func reportPurgeResponse(r reaperPurgeReport) error {
 			if r.dryRun {
 				prefix = "[DRY RUN] "
 			}
-			fmt.Fprintf(r.stdout, "\n%sPurge summary (%d databases): purged %d wisps, %d mail\n",
-				prefix, len(results), totalWisps, totalMail)
+			fmt.Fprintf(r.stdout, "\n%sPurge summary (%d databases): purged %d wisps, %d mail, retried %d delete chunks\n",
+				prefix, len(results), totalWisps, totalMail, totalRetried)
 		}
 	}
 
