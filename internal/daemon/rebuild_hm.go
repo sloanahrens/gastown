@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofrs/flock"
@@ -66,6 +67,26 @@ const (
 // os.Rename. Tests answer it, so the order of renames is recorded and no file
 // moves.
 type rebuildHMRenameFunc func(from, to string) error
+
+// rebuildHMAlertState is the job's failure alert as this process knows it.
+type rebuildHMAlertState struct {
+	mu sync.Mutex
+	// raised is true once this process reported a failed install, so the next
+	// verdict that leaves no failed install knows an alert is open to close.
+	raised bool
+	// settled is true once this process has closed the job's alert. raised lives
+	// only in memory, so a fresh daemon clears once on its first verdict, for an
+	// alert a previous process may have left open, and after that only when a
+	// failed install raised one again.
+	settled bool
+}
+
+// raise records that a failed install's alert is open.
+func (s *rebuildHMAlertState) raise() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.raised = true
+}
 
 func rebuildHMInterval(config *DaemonPatrolConfig) time.Duration {
 	if config != nil && config.Patrols != nil && config.Patrols.RebuildHM != nil {
@@ -253,6 +274,7 @@ func (d *Daemon) rebuildHMHalted(cycle *dogCycle, msg, head string) bool {
 // severity, and says in the escalation what state the install was left in.
 func (d *Daemon) rebuildHMReport(cycle *dogCycle, severity, step, msg, head, standing string) bool {
 	cycle.failStep(step, msg)
+	d.rebuildHMAlert.raise()
 	d.logger.Printf("rebuild_hm: install of %s failed (%s); %s", shortOMSHA(head), msg, standing)
 	if err := d.escalateAlertSeverity(severity, rebuildHMAlertKey, hmSkewSource,
 		fmt.Sprintf("rebuild_hm: installing hm %s failed (%s); %s", shortOMSHA(head), msg, standing)); err != nil {
@@ -266,10 +288,21 @@ func (d *Daemon) rebuildHMReport(cycle *dogCycle, severity, step, msg, head, sta
 // rebuildHMClear closes the job's failure alert once a cycle reaches a verdict
 // that leaves no failed install: hm is current, or the install landed. A clear
 // that does not reach the town is logged, and the next such verdict clears it again.
+// Once this process has settled the alert, a clear is sent only after a failed
+// install raised it again, so an hm that stays current is not cleared every hour.
 func (d *Daemon) rebuildHMClear(reason string) {
+	s := &d.rebuildHMAlert
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.raised && s.settled {
+		return
+	}
 	if err := d.clearAlertsErr(reason, rebuildHMAlertKey); err != nil {
 		d.logger.Printf("rebuild_hm: clearing the failure alert did not reach the town; retrying next cycle: %v", err)
+		return
 	}
+	s.raised = false
+	s.settled = true
 }
 
 // rebuildHMHead reads origin/main's tip in the clone. The reading has already
