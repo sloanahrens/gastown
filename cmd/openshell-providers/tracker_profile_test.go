@@ -256,7 +256,8 @@ func profileAllows(p profileFile, method, route string) bool {
 // (docs/research/tracker/K1b-seat-token-as-provider-placeholder.md, question 3):
 // the admin-gated ones, and the four no seat has been shown to call. The
 // profile leaves them out so a seat token minted with admin scope still cannot
-// reach them from a sandbox.
+// reach them from a sandbox. POST /v1/issues:delete is the tenth: no seat may
+// delete a bead, and the server does not check ownership (gt-zbpf0).
 var refusedRoutes = []struct{ method, path string }{
 	{"POST", "/v1/tokens"},
 	{"POST", "/v1/tokens:revoke"},
@@ -267,10 +268,12 @@ var refusedRoutes = []struct{ method, path string }{
 	{"POST", "/v1/export"},
 	{"GET", "/v1/snapshot/town"},
 	{"POST", "/v1/board/dispatch"},
+	{"POST", "/v1/issues:delete"},
 }
 
 // seatRoutes are the routes the research doc lists under reads and writes, with
-// a sample id in each {id}: what a seat does to its own issues.
+// a sample id in each {id}: what a seat does to its own issues. Delete and
+// transfer are not here: the profile refuses them (gt-zbpf0).
 var seatRoutes = []struct{ method, path string }{
 	{"GET", "/v1/issues/gt-0f305"},
 	{"POST", "/v1/issues:show-many"},
@@ -287,11 +290,9 @@ var seatRoutes = []struct{ method, path string }{
 	{"POST", "/v1/issues"},
 	{"PATCH", "/v1/issues/gt-0f305"},
 	{"POST", "/v1/issues:close"},
-	{"POST", "/v1/issues:delete"},
 	{"POST", "/v1/graphs"},
 	{"POST", "/v1/issues/gt-0f305/claim"},
 	{"POST", "/v1/issues/gt-0f305/release"},
-	{"POST", "/v1/issues/gt-0f305/transfer"},
 	{"POST", "/v1/batch"},
 	{"POST", "/v1/issues/gt-0f305/comments"},
 	{"POST", "/v1/issues/gt-0f305/dependencies"},
@@ -358,6 +359,49 @@ func TestTrackerPolecatProfileAllowsNoAdminRoute(t *testing.T) {
 			t.Fatalf("%s resolves to %s, which the canary rule GET /v1/* does not admit, so the refusal check above would pass whatever the profile says", form, route)
 		}
 	}
+}
+
+// refuseEveryMethod fails the test when an allow rule in p admits any method on
+// route in a form a server resolves it to. pattern is a glob that admits route, so
+// a canary rule shows the matcher reaches route in every form: a refusal cannot
+// pass only because nothing is admitted.
+func refuseEveryMethod(t *testing.T, p profileFile, route, pattern string) {
+	t.Helper()
+	for _, method := range httpMethods {
+		for _, form := range routedForms(route) {
+			got := requestPath(t, form)
+			if profileAllows(p, method, got) {
+				t.Errorf("%s %s (requested as %s) matches an allow rule in %s, and the profile must refuse it (gt-zbpf0)", method, got, form, trackerProfilePath)
+			}
+		}
+	}
+	canary := profileFile{Endpoints: []profileEndpoint{{Rules: []profileRule{allowRule("POST", pattern)}}}}
+	for _, form := range routedForms(route) {
+		if got := requestPath(t, form); !profileAllows(canary, "POST", got) {
+			t.Fatalf("%s resolves to %s, which the canary rule POST %s does not admit, so the refusal check would pass whatever the profile says", form, got, pattern)
+		}
+	}
+}
+
+// TestTrackerPolecatProfileAllowsNoDeleteRoute proves no method reaches
+// POST /v1/issues:delete in any form a server resolves it to. A bead delete is
+// town-side, and the server does not check that the caller owns the bead, so a
+// seat must not reach it through any method (gt-zbpf0).
+func TestTrackerPolecatProfileAllowsNoDeleteRoute(t *testing.T) {
+	t.Parallel()
+	refuseEveryMethod(t, readProfile(t, trackerProfilePath), "/v1/issues:delete", "/v1/issues:delete")
+}
+
+// TestTrackerPolecatProfileTransferRule holds the transfer route to the case the
+// bead's Constraints name: no production seat calls POST /v1/issues/{id}/transfer
+// (tracker/client.Transfer is called only from the tracker's contract cases and
+// server tests). The effect checked is that no method reaches the route in any
+// form a server resolves to it, so a seat cannot hand a bead to another assignee
+// through it. This covers the transfer route only. If a seat caller appears, name
+// it on gt-zbpf0 and change this test to allow the route.
+func TestTrackerPolecatProfileTransferRule(t *testing.T) {
+	t.Parallel()
+	refuseEveryMethod(t, readProfile(t, trackerProfilePath), "/v1/issues/gt-0f305/transfer", "/v1/issues/*/transfer")
 }
 
 // TestTrackerPolecatProfileAllowsSeatRoutes proves each read and write the
