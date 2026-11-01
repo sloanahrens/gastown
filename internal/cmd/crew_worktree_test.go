@@ -208,6 +208,7 @@ func (f *crewCloneFixture) run(topic string) (string, error) {
 			return f.role, nil
 		},
 		repo:    func(string) crewWorktreeGit { return f.g },
+		eval:    noSymlinks,
 		timeout: time.Second,
 	}
 	var out bytes.Buffer
@@ -336,43 +337,75 @@ func TestCrewWorktreeReportsALookupFailure(t *testing.T) {
 
 // TestCrewWorktreeRepoPathExists pins the three answers the production stat
 // gives: a path that is there, one that is not, and a stat that fails for a
-// reason other than absence, which is an error rather than a free name.
+// reason other than absence, which is an error rather than a free name. The
+// stat is the repo's own seam, so the test asks the production PathExists for
+// each answer without reading the host filesystem (gt-lcjtl).
 func TestCrewWorktreeRepoPathExists(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	file := filepath.Join(dir, "a-file")
-	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
-		t.Fatalf("writing the fixture file: %v", err)
-	}
-	r := crewWorktreeRepo{}
-
+	const path = "/town/gastown/crew/dunlin-topic"
 	cases := []struct {
 		name    string
-		path    string
+		lstat   func(string) (os.FileInfo, error)
 		want    bool
 		wantErr bool
 	}{
-		{name: "a path that is there", path: file, want: true},
-		{name: "a path that is not", path: filepath.Join(dir, "absent")},
-		{name: "a stat that fails", path: filepath.Join(file, "below-a-file"), wantErr: true},
+		{
+			name:  "a path that is there",
+			lstat: func(string) (os.FileInfo, error) { return nil, nil },
+			want:  true,
+		},
+		{
+			name:  "a path that is not",
+			lstat: func(string) (os.FileInfo, error) { return nil, os.ErrNotExist },
+		},
+		{
+			name:    "a stat that fails",
+			lstat:   func(string) (os.FileInfo, error) { return nil, os.ErrPermission },
+			wantErr: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := r.PathExists(tc.path)
+			asked := 0
+			r := crewWorktreeRepo{lstat: func(p string) (os.FileInfo, error) {
+				if p != path {
+					t.Errorf("stat of %q, want the path it was asked about", p)
+				}
+				asked++
+				return tc.lstat(p)
+			}}
+			got, err := r.PathExists(path)
+			if asked != 1 {
+				t.Errorf("stat calls = %d, want 1", asked)
+			}
 			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("PathExists(%q) = %t, nil; want an error", tc.path, got)
+				if !errors.Is(err, os.ErrPermission) {
+					t.Fatalf("PathExists(%q) = %t, %v; want the stat's own error", path, got, err)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("PathExists(%q): %v", tc.path, err)
+				t.Fatalf("PathExists(%q): %v", path, err)
 			}
 			if got != tc.want {
-				t.Errorf("PathExists(%q) = %t, want %t", tc.path, got, tc.want)
+				t.Errorf("PathExists(%q) = %t, want %t", path, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestCrewWorktreeRepoPathExistsDefaultsToTheHostStat pins that the seam is
+// only a seam: a repo built with no lstat asks os.Lstat, so the production
+// value is what production runs.
+func TestCrewWorktreeRepoPathExistsDefaultsToTheHostStat(t *testing.T) {
+	t.Parallel()
+	got, err := (crewWorktreeRepo{}).PathExists(t.TempDir())
+	if err != nil {
+		t.Fatalf("PathExists of a directory that exists: %v", err)
+	}
+	if !got {
+		t.Error("PathExists = false for a directory that exists, want the default to be os.Lstat")
 	}
 }
 

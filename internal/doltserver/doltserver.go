@@ -3095,6 +3095,11 @@ type InitRigResult struct {
 	// caller can tell those cases apart without looking at the filesystem
 	// (gt-p85pw.102).
 	SkipReason string
+	// Remote says this run took InitRig's remote path, so the database lives on
+	// the town's remote Dolt server and has no local data directory. It reports
+	// the path actually taken, so the caller describes what this run did
+	// instead of deciding from the config a second time (gt-l5s2m).
+	Remote bool
 }
 
 // InitRig initializes a new rig database in the data directory.
@@ -3223,16 +3228,16 @@ func InitRig(townRoot, rigName string) (InitRigResult, error) {
 func (h *host) initRemoteRig(townRoot, rigName string, config *Config) (InitRigResult, error) {
 	ident, err := databaseIdentifier(rigName)
 	if err != nil {
-		return InitRigResult{}, err
+		return InitRigResult{Remote: true}, err
 	}
 
 	exists, err := h.remoteDatabaseExists(config, rigName)
 	if err != nil {
-		return InitRigResult{}, fmt.Errorf("reading the database list of the remote Dolt at %s: %w", config.HostPort(), err)
+		return InitRigResult{Remote: true}, fmt.Errorf("reading the database list of the remote Dolt at %s: %w", config.HostPort(), err)
 	}
 	if !exists {
 		if err := h.createRemoteDatabase(config, ident); err != nil {
-			return InitRigResult{}, fmt.Errorf("creating database %q on the remote Dolt at %s: %w", rigName, config.HostPort(), err)
+			return InitRigResult{Remote: true}, fmt.Errorf("creating database %q on the remote Dolt at %s: %w", rigName, config.HostPort(), err)
 		}
 		InvalidateDBCache()
 	}
@@ -3246,10 +3251,10 @@ func (h *host) initRemoteRig(townRoot, rigName string, config *Config) (InitRigR
 	// serverMode: the remote server is already up, so EnsureRigIssuePrefix
 	// must not start (and then stop) a local one around the seed.
 	if err := h.EnsureRigIssuePrefix(townRoot, rigName, true); err != nil {
-		return InitRigResult{ServerWasRunning: true, Created: !exists}, fmt.Errorf("ensuring issue_prefix for database %q: %w", rigName, err)
+		return InitRigResult{ServerWasRunning: true, Created: !exists, Remote: true}, fmt.Errorf("ensuring issue_prefix for database %q: %w", rigName, err)
 	}
 
-	return InitRigResult{ServerWasRunning: true, Created: !exists}, nil
+	return InitRigResult{ServerWasRunning: true, Created: !exists, Remote: true}, nil
 }
 
 // remoteDatabaseExists reports whether name is a database on config's server.

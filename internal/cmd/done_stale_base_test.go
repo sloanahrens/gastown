@@ -5,17 +5,27 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
-// staleBaseRecorder is the git handle these tests drive: it answers the one
-// read the stale-base check makes, with the value or error a case sets.
+// staleBaseRecorder is the git handle these tests drive: it answers the fetch
+// and the read the stale-base check makes, with the values or errors a case
+// sets, and records the calls in the order they arrive.
 type staleBaseRecorder struct {
-	behind int
-	err    error
-	refs   []string
+	behind   int
+	err      error
+	refs     []string
+	fetchErr error
+	calls    []string
+}
+
+func (r *staleBaseRecorder) FetchRefspecWithTimeout(remote, refspec string, _ time.Duration) error {
+	r.calls = append(r.calls, "fetch "+remote+" "+refspec)
+	return r.fetchErr
 }
 
 func (r *staleBaseRecorder) CountCommitsBehind(ref string) (int, error) {
+	r.calls = append(r.calls, "count "+ref)
 	r.refs = append(r.refs, ref)
 	return r.behind, r.err
 }
@@ -107,5 +117,61 @@ func TestDoneStaleBaseWarnsAndCarriesOn(t *testing.T) {
 	printed := strings.Split(strings.TrimSpace(out.String()), "\n")
 	if len(printed) != 1 || !strings.Contains(printed[0], "400") {
 		t.Fatalf("printed %q, want one line naming 400", out.String())
+	}
+}
+
+// TestDoneStaleBaseRefreshesOriginFirst pins gt-u7mtn: done.Run fetches only
+// after the warning is printed, so a count against the last fetch could
+// understate the branch's staleness. The warning refreshes origin/main itself,
+// before it reads the count, and a refresh that fails says so instead of
+// passing as a clean read.
+func TestDoneStaleBaseRefreshesOriginFirst(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		fetchErr error
+	}{
+		{name: "the fetch succeeds"},
+		{name: "the fetch fails", fetchErr: errors.New("no such remote")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			repo := &staleBaseRecorder{behind: 400, fetchErr: tc.fetchErr}
+			var out bytes.Buffer
+
+			submitWithStaleBaseWarning(&out, repo, func() error { return nil })
+
+			want := []string{
+				"fetch origin +refs/heads/main:refs/remotes/origin/main",
+				"count origin/main",
+			}
+			if len(repo.calls) != len(want) {
+				t.Fatalf("git calls = %v, want %v", repo.calls, want)
+			}
+			for i := range want {
+				if repo.calls[i] != want[i] {
+					t.Fatalf("git calls = %v, want %v", repo.calls, want)
+				}
+			}
+			printed := out.String()
+			// The warning is advisory either way: the count still prints, and a
+			// failed refresh is reported rather than read as an up-to-date base.
+			if !strings.Contains(printed, "400") {
+				t.Errorf("printed %q, want the warning to still name 400", printed)
+			}
+			if tc.fetchErr == nil {
+				if strings.Contains(printed, "could not refresh origin/main") {
+					t.Errorf("printed %q, want no refresh failure for a fetch that succeeded", printed)
+				}
+				return
+			}
+			for _, want := range []string{"could not refresh origin/main", tc.fetchErr.Error()} {
+				if !strings.Contains(printed, want) {
+					t.Errorf("printed %q, want it to name %q", printed, want)
+				}
+			}
+		})
 	}
 }

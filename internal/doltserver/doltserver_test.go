@@ -2409,8 +2409,8 @@ func TestInitRig_TrackerRouteCreatesNoDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InitRig: %v", err)
 	}
-	if result.ServerWasRunning || result.Created {
-		t.Fatalf("InitRig = (running %v, created %v); want no server involved and nothing created", result.ServerWasRunning, result.Created)
+	if result.ServerWasRunning || result.Created || result.Remote {
+		t.Fatalf("InitRig = (running %v, created %v, remote %v); want no server involved and nothing created", result.ServerWasRunning, result.Created, result.Remote)
 	}
 	if !strings.Contains(result.SkipReason, `"agrig"`) || !strings.Contains(result.SkipReason, "tracker backend") {
 		t.Errorf("SkipReason = %q, want the rig name and the tracker backend", result.SkipReason)
@@ -2519,9 +2519,9 @@ func TestInitRig_DoltAndAbsentRouteStillCreate(t *testing.T) {
 			}
 
 			result, err := h.InitRig(townRoot, "testrig")
-			if err != nil || result.ServerWasRunning || !result.Created {
-				t.Fatalf("InitRig = (running %v, created %v, skip %q, err %v); want a new database on a stopped server",
-					result.ServerWasRunning, result.Created, result.SkipReason, err)
+			if err != nil || result.ServerWasRunning || !result.Created || result.Remote {
+				t.Fatalf("InitRig = (running %v, created %v, remote %v, skip %q, err %v); want a new database on a stopped local server",
+					result.ServerWasRunning, result.Created, result.Remote, result.SkipReason, err)
 			}
 			if got := f.ranMatching("dolt init"); len(got) != 1 {
 				t.Errorf("dolt init calls = %q, want one", got)

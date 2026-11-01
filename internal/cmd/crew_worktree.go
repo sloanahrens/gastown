@@ -50,6 +50,7 @@ func runCrewWorktree(cmd *cobra.Command, args []string) error {
 		findTown: workspace.FindFromCwdOrError,
 		role:     GetRoleWithContext,
 		repo:     newCrewWorktreeRepo,
+		eval:     filepath.EvalSymlinks,
 		timeout:  crewWorktreeTimeout,
 	})
 }
@@ -72,15 +73,25 @@ type crewWorktreeDeps struct {
 	findTown func() (string, error)
 	role     func(cwd, townRoot string) (RoleInfo, error)
 	repo     func(root string) crewWorktreeGit
-	timeout  time.Duration
+	// eval resolves a path through symlinks for the containment check on the
+	// clone (crewCloneRoot). filepath.EvalSymlinks in production; a fake in a
+	// test.
+	eval    func(string) (string, error)
+	timeout time.Duration
 }
 
 // crewWorktreeRepo is the production git surface. The fetch goes through
 // crewfresh's git, whose deadline and prompt-free environment that package
 // already pins; the questions and the creation use the clone's own *git.Git.
+//
+// lstat is the one filesystem read the name question makes. Nil is os.Lstat,
+// which is what production runs; a test sets it so every answer — present,
+// absent, and a stat that failed for another reason — is driven without the
+// host filesystem.
 type crewWorktreeRepo struct {
 	clone *git.Git
 	fresh crewfresh.Git
+	lstat func(string) (os.FileInfo, error)
 }
 
 func newCrewWorktreeRepo(root string) crewWorktreeGit {
@@ -93,7 +104,11 @@ func (r crewWorktreeRepo) Fetch(timeout time.Duration) error { return r.fresh.Fe
 // reason other than absence is returned, so an unreadable parent refuses
 // instead of passing as free.
 func (r crewWorktreeRepo) PathExists(path string) (bool, error) {
-	_, err := os.Lstat(path)
+	lstat := r.lstat
+	if lstat == nil {
+		lstat = os.Lstat
+	}
+	_, err := lstat(path)
 	switch {
 	case err == nil:
 		return true, nil
@@ -124,7 +139,7 @@ func crewWorktree(out io.Writer, topic string, deps crewWorktreeDeps) error {
 	if err != nil {
 		return fmt.Errorf("find the town root: %w", err)
 	}
-	root, err := crewCloneRoot(cwd, townRoot)
+	root, err := crewCloneRootResolved(cwd, townRoot, deps.eval)
 	if err != nil {
 		return err
 	}

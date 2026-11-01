@@ -4,6 +4,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"iter"
 	"os"
@@ -1134,22 +1135,20 @@ func (s *SpawnedPolecatInfo) finishStart(pane string, startErr error) (string, e
 // label the deferral exists to avoid (gt-2qdzf, gt-cjmt5). Every other start
 // failure keeps its count.
 func (s *SpawnedPolecatInfo) giveBackDriftRespawn(startErr error) {
-	if s == nil || s.HookBead == "" {
-		return
-	}
-	townRoot, err := s.town()
-	if err != nil {
-		return
-	}
-	s.giveBackDriftRespawnIn(townRoot, startErr)
+	s.giveBackDriftRespawnWith(workspace.FindFromCwdOrError, os.Stderr, startErr)
 }
 
-// giveBackDriftRespawnIn is giveBackDriftRespawn for the town at townRoot.
-func (s *SpawnedPolecatInfo) giveBackDriftRespawnIn(townRoot string, startErr error) {
-	if !errors.Is(startErr, session.ErrImageDrift) {
+// giveBackDriftRespawnWith is giveBackDriftRespawn with the town lookup and
+// the warning's writer given: workspace.FindFromCwdOrError and os.Stderr in
+// production, so the refusal an unrecorded town reaches is driven in a test
+// without a town on disk.
+func (s *SpawnedPolecatInfo) giveBackDriftRespawnWith(findTown func() (string, error), warn io.Writer, startErr error) {
+	if s == nil || s.HookBead == "" || !errors.Is(startErr, session.ErrImageDrift) {
 		return
 	}
-	s.giveBackRespawn(townRoot, "an image-drift deferral")
+	if townRoot, ok := s.townForGiveBack(findTown, warn, "an image-drift deferral"); ok {
+		s.giveBackRespawn(townRoot, "an image-drift deferral")
+	}
 }
 
 // giveBackBondLockRespawn hands back the count this spawn recorded when the
@@ -1160,22 +1159,34 @@ func (s *SpawnedPolecatInfo) giveBackDriftRespawnIn(townRoot string, startErr er
 // respawn budget on the queue in front of it (gt-8d38p). Every other sling
 // failure keeps its count.
 func (s *SpawnedPolecatInfo) giveBackBondLockRespawn(slingErr error) {
-	if s == nil || s.HookBead == "" {
-		return
-	}
-	townRoot, err := s.town()
-	if err != nil {
-		return
-	}
-	s.giveBackBondLockRespawnIn(townRoot, slingErr)
+	s.giveBackBondLockRespawnWith(workspace.FindFromCwdOrError, os.Stderr, slingErr)
 }
 
-// giveBackBondLockRespawnIn is giveBackBondLockRespawn for the town at townRoot.
-func (s *SpawnedPolecatInfo) giveBackBondLockRespawnIn(townRoot string, slingErr error) {
-	if !errors.Is(slingErr, ErrBondLockTimeout) {
+// giveBackBondLockRespawnWith is giveBackBondLockRespawn with the town lookup
+// and the warning's writer given, as giveBackDriftRespawnWith is.
+func (s *SpawnedPolecatInfo) giveBackBondLockRespawnWith(findTown func() (string, error), warn io.Writer, slingErr error) {
+	if s == nil || s.HookBead == "" || !errors.Is(slingErr, ErrBondLockTimeout) {
 		return
 	}
-	s.giveBackRespawn(townRoot, "a bond-lock deferral")
+	if townRoot, ok := s.townForGiveBack(findTown, warn, "a bond-lock deferral"); ok {
+		s.giveBackRespawn(townRoot, "a bond-lock deferral")
+	}
+}
+
+// townForGiveBack resolves the town a give-back writes to: the one the spawn
+// recorded, or findTown's when it recorded none. A lookup that fails warns and
+// reports false, so the count stays spent with a record of why rather than
+// passing as a give-back that had nothing to do (gt-ymw7d).
+func (s *SpawnedPolecatInfo) townForGiveBack(findTown func() (string, error), warn io.Writer, why string) (string, bool) {
+	if s.townRoot != "" {
+		return s.townRoot, true
+	}
+	townRoot, err := findTown()
+	if err != nil {
+		style.FprintWarning(warn, "could not give back the respawn of %s for %s: find the town root: %v", s.HookBead, why, err)
+		return "", false
+	}
+	return townRoot, true
 }
 
 // giveBackRespawn removes this spawn's count from its bead, for a failure that

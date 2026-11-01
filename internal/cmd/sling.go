@@ -1278,8 +1278,11 @@ func (r *slingRun) runRigTarget(rigName, beadID, formulaName, townRoot string) e
 	if r.opts.ralph {
 		mode = "ralph"
 	}
-	_, err := r.executeSling(r.rigTargetParams(rigName, beadID, formulaName, townRoot, mode))
-	if err != nil {
+	// executeSling itself gives back the respawn of a bond that never got the
+	// town lock, for every caller of the engine (gt-8d38p). run's own deferred
+	// rollback makes the matching give-back for inline targets, which never
+	// reach the engine.
+	if _, err := r.executeSling(r.rigTargetParams(rigName, beadID, formulaName, townRoot, mode)); err != nil {
 		return err
 	}
 	if !r.opts.noBoot {

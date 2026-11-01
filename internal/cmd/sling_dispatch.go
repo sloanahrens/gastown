@@ -33,7 +33,33 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 	return realSlingDeps().executeSling(params)
 }
 
-// executeSling is sling.Run on these collaborators.
+// executeSling is sling.Run on these collaborators. It is the one method every
+// in-process engine dispatch goes through — gt sling's rig target, the spec
+// dispatcher (slingSpec) and the scheduler's capacity dispatch (the package
+// executeSling) — so the bond-lock give-back below reaches each of them without
+// any caller remembering to ask for it.
 func (d *slingDeps) executeSling(params SlingParams) (*SlingResult, error) {
-	return sling.Run(context.Background(), d.engineDeps(), params)
+	result, err := sling.Run(context.Background(), d.engineDeps(), params)
+	if err != nil {
+		giveBackBondLockRespawn(result, err)
+	}
+	return result, err
+}
+
+// giveBackBondLockRespawn gives back the respawn a spawn charged when the
+// engine's formula step failed on a bond that never got the town lock
+// (ErrBondLockTimeout). The lock never reached bd, so the failure is the town's
+// load rather than a death of the bead: the spec dispatcher defers the bead and
+// slings it again next tick, and a count per tick would spend the bead's
+// respawn budget on the queue in front of it (gt-8d38p). Every other failure
+// keeps its count. The engine returns the spawn beside the error, unless the
+// spawn itself failed: then there is no count to give back.
+//
+// The engine cannot classify the error itself — internal/sling does not import
+// cmd — which is why this lives here rather than on the engine's Deps.
+func giveBackBondLockRespawn(result *SlingResult, err error) {
+	if result == nil || result.SpawnInfo == nil {
+		return
+	}
+	cmdSpawn(result.SpawnInfo).giveBackBondLockRespawn(err)
 }

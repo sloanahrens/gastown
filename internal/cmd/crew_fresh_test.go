@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,6 +15,10 @@ import (
 // comes back from crewfresh.Decide with no error (gt-3jose).
 const fetchFailedMessage = "fetch failed so the numbers are as of the last fetch"
 
+// noSymlinks resolves every path as itself: the fixture paths are not on disk,
+// and the test is not about what the filesystem says about them.
+func noSymlinks(p string) (string, error) { return p, nil }
+
 // TestCrewCloneRoot pins which paths gt crew fresh will act on: a crew clone
 // and anything below it, and nothing else, because the clone it returns is the
 // one git is run in.
@@ -21,9 +26,11 @@ func TestCrewCloneRoot(t *testing.T) {
 	t.Parallel()
 	town := filepath.Join(string(filepath.Separator), "town")
 	cases := []struct {
-		name    string
-		town    string
-		cwd     string
+		name string
+		town string
+		cwd  string
+		// eval resolves the path a case is about; nil is noSymlinks.
+		eval    func(string) (string, error)
 		want    string
 		wantErr bool
 	}{
@@ -95,6 +102,64 @@ func TestCrewCloneRoot(t *testing.T) {
 			cwd:     filepath.Join(string(filepath.Separator), "crew", "dunlin", "x"),
 			wantErr: true,
 		},
+		{
+			// The shape test passes; the entry itself points at a polecat
+			// worktree, which is exactly the path this guard exists to keep
+			// git out of (gt-tqd3b).
+			name: "a crew entry that is a symlink out of the crew directory",
+			cwd:  filepath.Join(town, "gastown", "crew", "dunlin"),
+			eval: crewSymlinks(map[string]string{
+				filepath.Join(town, "gastown", "crew", "dunlin"): filepath.Join(town, "gastown", "polecats", "x", "gastown"),
+			}),
+			wantErr: true,
+		},
+		{
+			// A crew directory symlinked out of the town is not this town's
+			// crew directory, however the entry is spelled.
+			name: "a crew directory that resolves outside the town",
+			cwd:  filepath.Join(town, "gastown", "crew", "dunlin"),
+			eval: crewSymlinks(map[string]string{
+				town: filepath.Join(string(filepath.Separator), "elsewhere"),
+			}),
+			wantErr: true,
+		},
+		{
+			// Another crew entry is still a crew clone: the guard is
+			// containment, not the entry's own name.
+			name: "a crew entry that resolves to another crew entry",
+			cwd:  filepath.Join(town, "gastown", "crew", "dunlin"),
+			eval: crewSymlinks(map[string]string{
+				filepath.Join(town, "gastown", "crew", "dunlin"): filepath.Join(town, "gastown", "crew", "sloan"),
+			}),
+			want: filepath.Join(town, "gastown", "crew", "dunlin"),
+		},
+		{
+			// EvalSymlinks' answer for a path that is not there: no target,
+			// so nothing to have escaped through.
+			name: "a crew clone that is not on disk",
+			cwd:  filepath.Join(town, "gastown", "crew", "dunlin"),
+			eval: func(string) (string, error) { return "", fs.ErrNotExist },
+			want: filepath.Join(town, "gastown", "crew", "dunlin"),
+		},
+		{
+			// An unreadable path is not a crew clone.
+			name:    "a crew clone that cannot be resolved",
+			cwd:     filepath.Join(town, "gastown", "crew", "dunlin"),
+			eval:    func(string) (string, error) { return "", fs.ErrPermission },
+			wantErr: true,
+		},
+		{
+			// The town resolves; the clone under it does not.
+			name: "a crew clone that cannot be resolved under a readable town",
+			cwd:  filepath.Join(town, "gastown", "crew", "dunlin"),
+			eval: func(p string) (string, error) {
+				if p == town {
+					return p, nil
+				}
+				return "", fs.ErrPermission
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range cases {
@@ -104,7 +169,11 @@ func TestCrewCloneRoot(t *testing.T) {
 			if tc.town != "" {
 				townRoot = tc.town
 			}
-			got, err := crewCloneRoot(cwd, townRoot)
+			eval := tc.eval
+			if eval == nil {
+				eval = noSymlinks
+			}
+			got, err := crewCloneRootResolved(cwd, townRoot, eval)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("crewCloneRoot(%q) = %q, want an error", tc.cwd, got)
@@ -118,6 +187,18 @@ func TestCrewCloneRoot(t *testing.T) {
 				t.Fatalf("crewCloneRoot(%q) = %q, want %q", tc.cwd, got, tc.want)
 			}
 		})
+	}
+}
+
+// crewSymlinks is an eval that answers the paths in links with their targets
+// and every other path as itself, the way filepath.EvalSymlinks resolves a
+// tree a test does not have on disk.
+func crewSymlinks(links map[string]string) func(string) (string, error) {
+	return func(p string) (string, error) {
+		if target, ok := links[p]; ok {
+			return target, nil
+		}
+		return p, nil
 	}
 }
 
@@ -144,7 +225,7 @@ func TestCrewFreshPrintsTheReportAndExitsZeroOnFetchFailure(t *testing.T) {
 
 	var out bytes.Buffer
 	getwd, findTownRoot := crewFreshLookups(cwd, town)
-	if err := crewFresh(&out, getwd, findTownRoot, run); err != nil {
+	if err := crewFresh(&out, getwd, findTownRoot, run, noSymlinks); err != nil {
 		t.Fatalf("crewFresh: %v, want nil for a failed fetch", err)
 	}
 	if gotRoot != cwd {
@@ -169,7 +250,7 @@ func TestCrewFreshRefusesOutsideACrewClone(t *testing.T) {
 
 	var out bytes.Buffer
 	getwd, findTownRoot := crewFreshLookups(cwd, town)
-	if err := crewFresh(&out, getwd, findTownRoot, run); err == nil {
+	if err := crewFresh(&out, getwd, findTownRoot, run, noSymlinks); err == nil {
 		t.Fatal("crewFresh = nil, want an error for mayor/rig")
 	}
 	if out.Len() != 0 {
@@ -215,7 +296,7 @@ func TestCrewFreshReturnsLookupErrors(t *testing.T) {
 			}
 
 			var out bytes.Buffer
-			err := crewFresh(&out, tc.getwd, tc.findTownRoot, run)
+			err := crewFresh(&out, tc.getwd, tc.findTownRoot, run, noSymlinks)
 			if !errors.Is(err, boom) {
 				t.Fatalf("crewFresh error = %v, want %v", err, boom)
 			}
@@ -264,7 +345,7 @@ func TestCrewFreshReturnsRunErrors(t *testing.T) {
 
 			var out bytes.Buffer
 			getwd, findTownRoot := crewFreshLookups(cwd, town)
-			err := crewFresh(&out, getwd, findTownRoot, run)
+			err := crewFresh(&out, getwd, findTownRoot, run, noSymlinks)
 			if !errors.Is(err, tc.runErr) {
 				t.Fatalf("crewFresh error = %v, want %v", err, tc.runErr)
 			}

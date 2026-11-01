@@ -2748,13 +2748,9 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 			return children(id)
 		},
 		RigHold: func(rig string) string { return dispatch.RigHold(townRoot, rig) },
-		RevertInFlight: func(rig string) *specdispatch.Revert {
-			return rigRevertInFlight(townRoot, rig, func(beadID string) bool {
-				return revertBeadOpen(rig, beadID, reads, reverts, func(name string) beads.Client {
-					return beads.NewPinned(beads.ResolveBeadsDir(filepath.Join(townRoot, name)))
-				})
-			})
-		},
+		RevertInFlight: specRevertInFlight(townRoot, reads, reverts, func(name string) beads.Client {
+			return beads.NewPinned(beads.ResolveBeadsDir(filepath.Join(townRoot, name)))
+		}),
 		// The same seat picture `gt daemon dispatch-check` nudges from:
 		// live sessions, in-flight claims, and seats mid-landing. Two
 		// pictures of one pool is how the dispatcher ends up slinging into
@@ -2952,6 +2948,18 @@ func printSpecDispatchReport(cmd *cobra.Command, r specDispatchReport) {
 	}
 	for _, e := range r.Errors {
 		fmt.Fprintf(w, "  error      %s\n", e)
+	}
+}
+
+// specRevertInFlight is the tick's RevertInFlight hook: the revert a rig's
+// red-main owner has building or queued, with the bead it names read once per
+// rig and bead in the tick (gt-kuax8). It is named so a test drives the hook
+// the tick calls — read, cache and all — rather than only the helper behind it.
+func specRevertInFlight(townRoot string, reads *specTickReads, reverts *specRevertBeads, storeFor func(rig string) beads.Client) func(rig string) *specdispatch.Revert {
+	return func(rig string) *specdispatch.Revert {
+		return rigRevertInFlight(townRoot, rig, func(beadID string) bool {
+			return revertBeadOpen(rig, beadID, reads, reverts, storeFor)
+		})
 	}
 }
 

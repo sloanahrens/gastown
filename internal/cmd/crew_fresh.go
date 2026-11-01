@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,8 +20,9 @@ import (
 // session on an unreachable remote.
 const crewFreshTimeout = 5 * time.Second
 
-// crewFreshRun asks git about one crew clone and makes the move crewfresh
-// allows. It is a variable so a test drives the command without git.
+// crewFreshRun is the production runner runCrewFresh hands crewFresh: the real
+// crewfresh package, run in the clone crewFresh resolved. crewFresh takes the
+// runner as a parameter, so no test calls this one.
 var crewFreshRun = func(root string) (crewfresh.Report, error) {
 	return crewfresh.Run(crewfresh.NewGit(root), crewFreshTimeout)
 }
@@ -43,7 +46,7 @@ Run it from your own clone:
 }
 
 func runCrewFresh(cmd *cobra.Command, args []string) error {
-	return crewFresh(cmd.OutOrStdout(), os.Getwd, workspace.FindFromCwdOrError, crewFreshRun)
+	return crewFresh(cmd.OutOrStdout(), os.Getwd, workspace.FindFromCwdOrError, crewFreshRun, filepath.EvalSymlinks)
 }
 
 // crewFresh runs the freshness check for the clone that holds the caller's
@@ -58,6 +61,7 @@ func crewFresh(
 	getwd func() (string, error),
 	findTownRoot func() (string, error),
 	run func(string) (crewfresh.Report, error),
+	eval func(string) (string, error),
 ) error {
 	cwd, err := getwd()
 	if err != nil {
@@ -67,7 +71,7 @@ func crewFresh(
 	if err != nil {
 		return fmt.Errorf("find the town root: %w", err)
 	}
-	root, err := crewCloneRoot(cwd, townRoot)
+	root, err := crewCloneRootResolved(cwd, townRoot, eval)
 	if err != nil {
 		return err
 	}
@@ -85,7 +89,23 @@ func crewFresh(
 // (mayor/rig and polecat worktrees included), and a path with a ".." segment,
 // whose real target the lexical test below cannot vouch for. It reads no
 // environment variable.
+//
+// The lexical answer is then resolved through symlinks and must still be a
+// crew clone: a crew entry that is a symlink out of the crew directory — a
+// polecat worktree, say — would otherwise pass the shape test and have git run
+// in the place it points at.
 func crewCloneRoot(cwd, townRoot string) (string, error) {
+	return crewCloneRootResolved(cwd, townRoot, filepath.EvalSymlinks)
+}
+
+// crewCloneRootResolved is crewCloneRoot with symlink resolution given, so a
+// test drives both answers without the host filesystem.
+//
+// A path that does not exist has no target to resolve to, so the resolution's
+// ENOENT leaves the lexical answer standing: there is no symlink there to
+// escape through, and a clone that is not there fails the fetch it was found
+// for. Any other resolution failure is refused.
+func crewCloneRootResolved(cwd, townRoot string, eval func(string) (string, error)) (string, error) {
 	if !filepath.IsAbs(townRoot) {
 		return "", fmt.Errorf("town root %q is not an absolute path", townRoot)
 	}
@@ -97,19 +117,66 @@ func crewCloneRoot(cwd, townRoot string) (string, error) {
 	}
 
 	cleanTown := filepath.Clean(townRoot)
-	prefix := cleanTown
-	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
-		prefix += string(filepath.Separator)
-	}
-	rel, under := strings.CutPrefix(filepath.Clean(cwd), prefix)
 	// A clone is <town>/<rig>/crew/<dir>, and anything below <dir> belongs to
 	// it. The town root itself, a sibling whose name merely starts with the
 	// town's, and every path outside all fail the cut.
-	parts := strings.Split(rel, string(filepath.Separator))
-	if !under || len(parts) < 3 || parts[1] != "crew" || parts[2] == "" {
+	rig, dir, ok := crewCloneParts(cleanTown, cwd)
+	if !ok {
 		return "", fmt.Errorf("%q is not a crew clone under %s", cwd, cleanTown)
 	}
-	return filepath.Join(cleanTown, parts[0], "crew", parts[2]), nil
+	root := filepath.Join(cleanTown, rig, "crew", dir)
+
+	// The same cut, on what the paths really are. A clone that resolves
+	// outside the crew directory is refused, and so is one that cannot be
+	// read: an unreadable clone is not a crew clone.
+	resolvedTown, ok, err := crewResolve(cleanTown, eval)
+	if err != nil {
+		return "", fmt.Errorf("resolve the town root %s: %w", cleanTown, err)
+	}
+	if !ok {
+		return root, nil // no town root on disk: nothing to have been a symlink
+	}
+	resolvedRoot, ok, err := crewResolve(root, eval)
+	if err != nil {
+		return "", fmt.Errorf("resolve the crew clone %s: %w", root, err)
+	}
+	if !ok {
+		return root, nil
+	}
+	if _, _, ok := crewCloneParts(filepath.Clean(resolvedTown), resolvedRoot); !ok {
+		return "", fmt.Errorf("%q resolves to %q, which is not a crew clone under %s", cwd, resolvedRoot, cleanTown)
+	}
+	return root, nil
+}
+
+// crewResolve resolves p through symlinks. ok is false, with no error, when p
+// does not exist: a path that is not there has no target, so the caller keeps
+// its lexical answer rather than refusing.
+func crewResolve(p string, eval func(string) (string, error)) (resolved string, ok bool, err error) {
+	resolved, err = eval(p)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return resolved, true, nil
+}
+
+// crewCloneParts cuts p's path below town into the rig and crew directory it
+// names, and reports whether p sits in a crew clone at all:
+// <town>/<rig>/crew/<dir>, and anything below <dir>.
+func crewCloneParts(town, p string) (rig, dir string, ok bool) {
+	prefix := town
+	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
+		prefix += string(filepath.Separator)
+	}
+	rel, under := strings.CutPrefix(filepath.Clean(p), prefix)
+	parts := strings.Split(rel, string(filepath.Separator))
+	if !under || len(parts) < 3 || parts[1] != "crew" || parts[2] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[2], true
 }
 
 // hasParentSegment reports whether p holds a ".." segment. Cleaning first would
