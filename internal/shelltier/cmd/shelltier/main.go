@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/git"
@@ -27,7 +28,7 @@ import (
 )
 
 // usage is the line a usage error prints, the one a caller greps for.
-const usage = "usage: shelltier [--all] [--since-green --town dir] [--root dir] [--logdir dir] [--budget duration]"
+const usage = "usage: shelltier [--all] [--since-green --town dir] [--root dir] [--logdir dir] [--budget duration] [--jobs n]"
 
 // Env is one run's inputs. main fills it with the real manifest, process and
 // clock; tests fill every field with fakes, so no case runs a script or reads
@@ -161,6 +162,7 @@ func Main(args []string, out io.Writer, env Env) int {
 	root := fs.String("root", ".", "the directory each script runs in")
 	logdir := fs.String("logdir", "", "the directory for each script's log and TMPDIR (default: a new temp dir)")
 	budget := fs.Duration("budget", 10*time.Minute, "the time limit for each script")
+	jobs := fs.Int("jobs", 1, "the number of parallel scripts run at once")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprintln(out, usage)
@@ -170,6 +172,10 @@ func Main(args []string, out io.Writer, env Env) int {
 		return 2
 	}
 	if fs.NArg() > 0 {
+		fmt.Fprintln(env.Err, usage)
+		return 2
+	}
+	if *jobs < 1 {
 		fmt.Fprintln(env.Err, usage)
 		return 2
 	}
@@ -199,6 +205,7 @@ func Main(args []string, out io.Writer, env Env) int {
 		Root:        *root,
 		LogDir:      dir,
 		Budget:      *budget,
+		Jobs:        *jobs,
 		Exec:        announce(env.Err, env.Exec),
 		Now:         env.Now,
 		WithTimeout: env.WithTimeout,
@@ -213,10 +220,15 @@ func Main(args []string, out io.Writer, env Env) int {
 }
 
 // announce wraps exec so each script's line is written to w before the script
-// runs, the way the tier sweep names each script it starts.
+// runs, the way the tier sweep names each script it starts. The pool runs
+// scripts in parallel, so the write is serialized: two lines never interleave,
+// and a test's writer needs no lock of its own.
 func announce(w io.Writer, exec shelltier.Exec) shelltier.Exec {
+	var mu sync.Mutex
 	return func(ctx context.Context, c shelltier.Command) (int, error) {
+		mu.Lock()
 		fmt.Fprintf(w, "tier-sweep: shell %s ...\n", scriptPath(c))
+		mu.Unlock()
 		return exec(ctx, c)
 	}
 }

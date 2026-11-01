@@ -2,9 +2,11 @@ package shelltier
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -24,9 +26,9 @@ type Command struct {
 // command did not finish with an exit code: it could not start, or its context ended.
 type Exec func(ctx context.Context, c Command) (exitCode int, err error)
 
-// Config is the input to Run. Every field is required except the timing log's:
-// with no Timing or an empty TimingPath, the run records nothing and its result
-// is the same.
+// Config is the input to Run. Every field is required except Jobs, whose zero
+// value runs one worker, and the timing log's: with no Timing or an empty
+// TimingPath, the run records nothing and its result is the same.
 type Config struct {
 	Entries []Entry
 	// Root is the directory each script runs in.
@@ -38,11 +40,15 @@ type Config struct {
 	Exec        Exec
 	Now         func() time.Time
 	WithTimeout func(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc)
+	// Jobs is the number of Parallel entries run at once. Below one, one
+	// worker runs, so the pool never asks for no workers.
+	Jobs int
 	// Timing appends each script's wall time to TimingPath. Nil records none.
 	Timing TimingFiles
 	// TimingPath is the log Timing appends to. Empty records none.
 	TimingPath string
-	// Err receives each timing line that could not be appended. Nil sends them
+	// Err receives the runner's diagnostics: a timing line that could not be
+	// appended, and each script a canceled run never started. Nil sends them
 	// to the process's error stream.
 	Err io.Writer
 }
@@ -70,36 +76,104 @@ type outcome struct {
 	began, ended time.Time
 }
 
-// Run runs each entry in order as `bash <path>` and counts the outcomes. A
-// script passes on exit 0. A non-zero exit, an Exec error or a Budget timeout
-// fails it, and the run goes on to the next script. Run creates no directories:
-// Exec creates LogDir and each TMPDIR before it runs a command.
+// Run runs each entry as `bash <path>` and counts the outcomes. The entries
+// with Mode Parallel run through at most Jobs workers; once that pool has
+// drained, the Serial entries run one at a time. A script passes on exit 0. A
+// non-zero exit, an Exec error or a Budget timeout fails it, and the run goes
+// on: one failure cancels nothing. Results, failed names and timing lines keep
+// manifest order whatever the finish order. Run creates no directories: Exec
+// creates LogDir and each TMPDIR before it runs a command.
 //
-// Once ctx ends, no further script is run: the one it interrupts and every
-// script after it fail, none counted as timed out. A script that ran at all
-// gets a line in the timing log (Config.Timing); one that never started does
-// not.
+// Once ctx ends, no further script is started: the one it interrupts and every
+// script after it fail, none counted as timed out, and each one that never ran
+// is named on Config.Err. A script that ran at all gets a line in the timing
+// log (Config.Timing); one that never started does not.
 func Run(ctx context.Context, cfg Config) Result {
 	start := cfg.Now()
-	var r Result
-	for _, e := range cfg.Entries {
-		var out outcome
-		if ctx.Err() == nil {
-			out = runOne(ctx, cfg, e)
-			recordTiming(cfg, e, out)
+	outs := make([]outcome, len(cfg.Entries))
+	ran := make([]bool, len(cfg.Entries))
+
+	var parallel, serial []int
+	for i, e := range cfg.Entries {
+		if e.Mode == Parallel {
+			parallel = append(parallel, i)
+		} else {
+			serial = append(serial, i)
 		}
-		if out.passed {
+	}
+
+	runPool(ctx, cfg, parallel, outs, ran)
+	for _, i := range serial {
+		if ctx.Err() != nil {
+			continue
+		}
+		outs[i] = runOne(ctx, cfg, cfg.Entries[i])
+		ran[i] = true
+	}
+
+	var r Result
+	for i, e := range cfg.Entries {
+		if ran[i] {
+			recordTiming(cfg, e, outs[i])
+		} else {
+			fmt.Fprintf(errorStream(cfg.Err), "shelltier: %s: not run, the run's context ended\n", e.Path)
+		}
+		if outs[i].passed {
 			r.Passed++
 			continue
 		}
 		r.Failed++
-		if out.timedOut {
+		if outs[i].timedOut {
 			r.TimedOut++
 		}
 		r.FailedNames = append(r.FailedNames, e.Path)
 	}
 	r.Elapsed = cfg.Now().Sub(start)
 	return r
+}
+
+// runPool runs the entries at idx through at most cfg.Jobs workers. A worker
+// starts a script only while ctx is live; one it never starts stays unrun, for
+// Run to count and to name.
+//
+// Each worker writes only the index it was handed, and Run reads the outcomes
+// after the pool has drained, so the outcomes need no lock.
+func runPool(ctx context.Context, cfg Config, idx []int, outs []outcome, ran []bool) {
+	workers := jobs(cfg.Jobs)
+	if workers > len(idx) {
+		workers = len(idx)
+	}
+	if workers == 0 {
+		return
+	}
+	work := make(chan int)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			for i := range work {
+				if ctx.Err() != nil {
+					continue
+				}
+				outs[i] = runOne(ctx, cfg, cfg.Entries[i])
+				ran[i] = true
+			}
+		}()
+	}
+	for _, i := range idx {
+		work <- i
+	}
+	close(work)
+	wg.Wait()
+}
+
+// jobs is the number of workers a pool runs, never below one.
+func jobs(n int) int {
+	if n < 1 {
+		return 1
+	}
+	return n
 }
 
 // runOne runs one entry under its own Budget and reports how it went. A script
