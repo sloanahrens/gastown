@@ -12,12 +12,16 @@ import (
 	"time"
 )
 
-// fixedHost is the seam run reads outside the stream: one fixed clock and no
-// load, so no test reads the host.
+// fixedHost is the seam run reads outside the stream: one fixed clock, no
+// load, no town, and real files under the test's own temporary directory, so
+// no test reads the host.
 func fixedHost() host {
 	return host{
 		now:   func() time.Time { return time.Date(2026, 11, 1, 14, 42, 0, 0, time.UTC) },
 		load1: func() (float64, bool) { return 0, false },
+		town:  func() string { return "" },
+		mkdir: func(string) error { return nil },
+		open:  openAppend,
 	}
 }
 
@@ -285,73 +289,151 @@ func TestJSONLNeedsARun(t *testing.T) {
 	}
 }
 
-// TestJSONLUnwritablePathFailsTheRun pins fail-closed: a series the tool
-// cannot write is exit 2, and the report it already rendered is still printed.
-// A gate that passed on a series it never wrote would lose the measurement
-// silently.
-func TestJSONLUnwritablePathFailsTheRun(t *testing.T) {
+// TestJSONLSeriesFailuresLeaveTheVerdictAlone pins the contract the gate is
+// wired on: every way the series can fail is reported on stderr naming the
+// file, and the exit code stays go test's verdict, because wall time never
+// fails a run.
+func TestJSONLSeriesFailuresLeaveTheVerdictAlone(t *testing.T) {
 	t.Parallel()
-	blocker := filepath.Join(t.TempDir(), "blocker")
-	if err := os.WriteFile(blocker, []byte("not a directory\n"), 0o644); err != nil {
+	for _, tc := range []struct {
+		name  string
+		setup func(h *host)
+	}{
+		{"the directory cannot be made", func(h *host) {
+			h.mkdir = func(string) error { return errors.New("read-only file system") }
+		}},
+		{"the file cannot be opened", func(h *host) {
+			h.open = func(string) (io.WriteCloser, error) { return nil, errors.New("no such device") }
+		}},
+		{"the write is rejected", func(h *host) {
+			h.open = func(string) (io.WriteCloser, error) {
+				return failingFile{writeErr: errors.New("disk full")}, nil
+			}
+		}},
+		{"the close is rejected", func(h *host) {
+			h.open = func(string) (io.WriteCloser, error) {
+				return failingFile{closeErr: errors.New("stale NFS handle")}, nil
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "gate-walls.jsonl")
+			h := fixedHost()
+			tc.setup(&h)
+
+			code, stdout, stderr := runFileWith(t, "pass.jsonl", h, "-jsonl", path, "-run", "gate-1")
+			if code != 0 {
+				t.Errorf("exit code = %d, want 0: a series failure never fails the run", code)
+			}
+			if !strings.Contains(stderr, path) {
+				t.Errorf("stderr = %q, want it to name %s", stderr, path)
+			}
+			if !strings.Contains(stdout, "tierwall: tier ") {
+				t.Errorf("stdout = %q, want the report still printed", stdout)
+			}
+		})
+	}
+}
+
+// failingFile is a series file whose write or close fails: the failures a real
+// file on a healthy host cannot be made to reach.
+type failingFile struct {
+	writeErr error
+	closeErr error
+}
+
+func (f failingFile) Write(p []byte) (int, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
+	return len(p), nil
+}
+
+func (f failingFile) Close() error { return f.closeErr }
+
+// TestJSONLSeriesRelativePathIsTakenFromTheTown pins the wiring's one
+// assumption: the Makefile names the series with a relative path, and the tool
+// places it under the town it found, creating the runtime directory.
+func TestJSONLSeriesRelativePathIsTakenFromTheTown(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	h := fixedHost()
+	h.town = func() string { return town }
+	h.mkdir = func(dir string) error { return os.MkdirAll(dir, 0o755) }
+
+	code, _, stderr := runFileWith(t, "pass.jsonl", h, "-jsonl", ".runtime/metrics/gate-walls.jsonl", "-run", "gate-1")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0: stderr = %q", code, stderr)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want nothing", stderr)
+	}
+	data, err := os.ReadFile(filepath.Join(town, ".runtime", "metrics", "gate-walls.jsonl"))
+	if err != nil {
+		t.Fatalf("the run wrote no series under the town: %v", err)
+	}
+	if got := strings.Count(string(data), "\n"); got != 5 {
+		t.Errorf("series has %d lines, want one per package (5): %q", got, data)
+	}
+}
+
+// TestJSONLSeriesRelativePathWithoutATownWritesNothing checks that a relative
+// path the tool cannot place is reported, not silently read as a clean run.
+func TestJSONLSeriesRelativePathWithoutATownWritesNothing(t *testing.T) {
+	t.Parallel()
+	code, stdout, stderr := runFileWith(t, "pass.jsonl", fixedHost(),
+		"-jsonl", ".runtime/metrics/gate-walls.jsonl", "-run", "gate-1")
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0: a series never fails the run", code)
+	}
+	if !strings.Contains(stderr, ".runtime/metrics/gate-walls.jsonl") {
+		t.Errorf("stderr = %q, want it to name the path it could not place", stderr)
+	}
+	if !strings.Contains(stderr, "no town root") {
+		t.Errorf("stderr = %q, want it to say why nothing was appended", stderr)
+	}
+	if !strings.Contains(stdout, "tierwall: tier ") {
+		t.Errorf("stdout = %q, want the report still printed", stdout)
+	}
+}
+
+// TestTownRootAtReadsTheOutermostTown checks the two places townRoot looks:
+// the working directory, for a gate run inside the town, and the repository's
+// shared git dir, for a landing's throwaway worktree outside it. A rig carries
+// a mayor/ of its own, so only the outermost mayor/town.json is the town.
+func TestTownRootAtReadsTheOutermostTown(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(blocker, "gate-walls.jsonl")
+	if err := os.WriteFile(filepath.Join(town, "mayor", "town.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rig := filepath.Join(town, "gastown", "mayor", "rig")
+	if err := os.MkdirAll(rig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	noRepo := func() (string, error) { return "", errors.New("not a repository") }
 
-	code, stdout, stderr := runFileWith(t, "pass.jsonl", fixedHost(), "-jsonl", path, "-run", "gate-1")
-	if code != 2 {
-		t.Errorf("exit code = %d, want 2: an unwritable series is the runner's failure", code)
-	}
-	if !strings.Contains(stderr, path) {
-		t.Errorf("stderr = %q, want it to name %s", stderr, path)
-	}
-	if !strings.Contains(stdout, "tierwall: tier ") {
-		t.Errorf("stdout = %q, want the report still printed", stdout)
-	}
-}
-
-// failingFile is a series file whose write fails: the one failure a real file
-// on a healthy host cannot be made to reach.
-type failingFile struct{ err error }
-
-func (f failingFile) Write([]byte) (int, error) { return 0, f.err }
-func (f failingFile) Close() error              { return nil }
-
-// TestJSONLSeriesOpenFailureFailsTheRun checks that a series file the tool
-// cannot open is exit 2, with the report still printed.
-func TestJSONLSeriesOpenFailureFailsTheRun(t *testing.T) {
-	t.Parallel()
-	path := filepath.Join(t.TempDir(), "gate-walls.jsonl")
-	h := fixedHost()
-	h.open = func(string) (io.WriteCloser, error) { return nil, errors.New("no such device") }
-
-	code, stdout, stderr := runFileWith(t, "pass.jsonl", h, "-jsonl", path, "-run", "gate-1")
-	if code != 2 {
-		t.Errorf("exit code = %d, want 2: a series that cannot be opened is the runner's failure", code)
-	}
-	if !strings.Contains(stderr, path) {
-		t.Errorf("stderr = %q, want it to name %s", stderr, path)
-	}
-	if !strings.Contains(stdout, "tierwall: tier ") {
-		t.Errorf("stdout = %q, want the report still printed", stdout)
-	}
-}
-
-// TestJSONLSeriesWriteFailureFailsTheRun checks that a write the file rejects
-// is exit 2, not a run that reports success over a lost series.
-func TestJSONLSeriesWriteFailureFailsTheRun(t *testing.T) {
-	t.Parallel()
-	path := filepath.Join(t.TempDir(), "gate-walls.jsonl")
-	h := fixedHost()
-	h.open = func(string) (io.WriteCloser, error) {
-		return failingFile{err: errors.New("disk full")}, nil
-	}
-
-	code, _, stderr := runFileWith(t, "pass.jsonl", h, "-jsonl", path, "-run", "gate-1")
-	if code != 2 {
-		t.Errorf("exit code = %d, want 2: a series that cannot be written is the runner's failure", code)
-	}
-	if !strings.Contains(stderr, path) {
-		t.Errorf("stderr = %q, want it to name %s", stderr, path)
+	for _, tc := range []struct {
+		name   string
+		getwd  func() (string, error)
+		common func() (string, error)
+		want   string
+	}{
+		{"the working directory is in the town", func() (string, error) { return rig, nil }, noRepo, town},
+		{"the repository is in the town", func() (string, error) { return outside, nil }, func() (string, error) { return filepath.Join(rig, ".git"), nil }, town},
+		{"neither is in a town", func() (string, error) { return outside, nil }, noRepo, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := townRootAt(tc.getwd, tc.common); got != tc.want {
+				t.Errorf("townRootAt = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

@@ -16,13 +16,18 @@
 //
 // -jsonl <path> -run <id> also appends one line per package to a series, so
 // "where does the gate's time go" can be read over weeks rather than from one
-// run's report (gt-u0up0). The report and the exit code do not change; a
-// series the tool cannot write is exit 2, never a silent success.
+// run's report (gt-u0up0). An absolute path is used as given; a relative one
+// is taken from the town root the checkout sits in, so the gate can name the
+// town's series without reading the environment. The report and the exit code
+// do not change: a series the tool cannot write, or a run it finds no town
+// for, is reported on stderr and fails nothing, because the gate's verdict is
+// go test's alone.
 package main
 
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -35,6 +40,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/hoststat"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // maxLine is the longest stdin line read: one event, which carries a whole
@@ -56,30 +64,40 @@ type event struct {
 }
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, host{now: time.Now, load1: hostLoad1}))
+	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, host{
+		now:   time.Now,
+		load1: hostLoad1,
+		town:  townRoot,
+		mkdir: mkdirAll,
+		open:  openAppend,
+	}))
 }
 
 // host is what run reads outside the stream: the clock a stream with no
-// timestamps is stamped from, the load a series line carries, and the file the
-// series appends to. main wires the real ones; a test injects them, so no test
-// reads the host and every failure path the series can hit has a case.
+// timestamps is stamped from, the load a series line carries, the town a
+// relative series path is taken from, and the directory and file the series
+// appends through. main wires the real ones; a test injects them, so no test
+// reads the host and every path the series can take has a case.
 type host struct {
 	now   func() time.Time
 	load1 func() (float64, bool)
-	// open appends to a path; nil means the real file.
-	open func(path string) (io.WriteCloser, error)
+	// town is the town root a relative -jsonl path is taken from; "" means no
+	// town was found.
+	town  func() string
+	mkdir func(dir string) error
+	open  func(path string) (io.WriteCloser, error)
 }
 
 // run reads a go test -json stream from stdin and writes the report to
 // stdout. The exit code is 1 when any package or test failed, else 3 when
 // -max-wall is set and the tier is over it, else 0; 2 means the runner
-// itself failed, a series it could not write included.
+// itself failed, which the series never does.
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer, h host) int {
 	fs := flag.NewFlagSet("tierwall", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	bar := fs.Duration("bar", 90*time.Second, "the wall the tier line is judged against (OK or OVER); it fails nothing")
 	maxWall := fs.Duration("max-wall", 0, "exit 3 when the tier is over this wall; 0 turns the check off")
-	jsonl := fs.String("jsonl", "", "append one JSON line per package to this file (needs -run)")
+	jsonl := fs.String("jsonl", "", "append one JSON line per package to this file (needs -run); a relative path is taken from the town root")
 	runID := fs.String("run", "", "the run id each -jsonl line carries")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -97,29 +115,15 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, h host) int {
 		fmt.Fprintln(stderr, "tierwall:", err)
 		return 2
 	}
-	var seriesErr error
 	if *jsonl != "" {
-		data, err := r.series(*runID, h)
-		switch {
-		case err != nil:
-			seriesErr = err
-		case len(data) == 0:
-			fmt.Fprintf(stderr, "tierwall: no package events in the stream; nothing appended to %s\n", *jsonl)
-		default:
-			seriesErr = appendLines(*jsonl, data, h.open)
+		// A series that cannot be written is reported and fails nothing: the
+		// gate's verdict is go test's, and wall time never fails a run.
+		if err := appendSeries(*jsonl, *runID, r, h, stderr); err != nil {
+			fmt.Fprintln(stderr, "tierwall:", err)
 		}
 	}
-	reportErr := r.print(*bar)
-	failedRunner := false
-	if reportErr != nil {
-		fmt.Fprintln(stderr, "tierwall:", reportErr)
-		failedRunner = true
-	}
-	if seriesErr != nil {
-		fmt.Fprintln(stderr, "tierwall:", seriesErr)
-		failedRunner = true
-	}
-	if failedRunner {
+	if err := r.print(*bar); err != nil {
+		fmt.Fprintln(stderr, "tierwall:", err)
 		return 2
 	}
 	switch {
@@ -334,17 +338,37 @@ func (r *report) series(runID string, h host) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// appendSeries renders the run's series and appends it to the file -jsonl
+// names. A stream with no package verdicts appends nothing and says so: an
+// empty run must not read as a run with nothing slow to report. An absolute
+// path is taken as given; a relative one is joined to the town root, so the
+// gate names the town's series without knowing where the town is.
+func appendSeries(path, runID string, r *report, h host, stderr io.Writer) error {
+	data, err := r.series(runID, h)
+	if err != nil {
+		return err
+	}
+	if len(data) == 0 {
+		fmt.Fprintf(stderr, "tierwall: no package events in the stream; nothing appended to %s\n", path)
+		return nil
+	}
+	if !filepath.IsAbs(path) {
+		town := h.town()
+		if town == "" {
+			return fmt.Errorf("%s is relative and no town root was found above the checkout; nothing appended", path)
+		}
+		path = filepath.Join(town, path)
+	}
+	return appendLines(path, data, h.mkdir, h.open)
+}
+
 // appendLines appends data to path in one write, opened O_APPEND so two runs
 // writing at once cannot interleave their lines. The parent directory is
 // created first: the town's runtime directory need not exist before the first
-// run records. open names the file's opener; nil means the real appending
-// file.
-func appendLines(path string, data []byte, open func(string) (io.WriteCloser, error)) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+// run records.
+func appendLines(path string, data []byte, mkdir func(string) error, open func(string) (io.WriteCloser, error)) error {
+	if err := mkdir(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("%s: %w", path, err)
-	}
-	if open == nil {
-		open = openAppend
 	}
 	f, err := open(path)
 	if err != nil {
@@ -365,31 +389,71 @@ func openAppend(path string) (io.WriteCloser, error) {
 	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
 }
 
+// mkdirAll makes a series file's directory, creating it when the town's
+// runtime directory does not exist yet.
+func mkdirAll(dir string) error {
+	return os.MkdirAll(dir, 0o755)
+}
+
 // hostLoad1 reads the host's 1-minute load average, the number a slow wall is
-// read against. It mirrors internal/land's reader rather than importing that
-// package: land carries the whole landing path, and this tool is built inside
-// the gate it measures.
+// read against, through the host reading the rest of the town uses (gt-auiji).
 func hostLoad1() (float64, bool) {
-	if data, err := os.ReadFile("/proc/loadavg"); err == nil {
-		var load float64
-		if _, err := fmt.Sscanf(string(data), "%f", &load); err == nil {
-			return load, true
+	load1, _, _ := hoststat.SampleLoad(context.Background())
+	if load1 == nil {
+		return 0, false
+	}
+	return *load1, true
+}
+
+// townRoot is the town the checkout sits in, or "" when there is none. It
+// reads no environment: the town is the outermost ancestor holding
+// mayor/town.json. The working directory answers for a gate run inside the
+// town (a polecat worktree); a landing's throwaway worktree sits outside the
+// town, so when the directory finds nothing the repository it belongs to is
+// asked instead.
+func townRoot() string {
+	return townRootAt(os.Getwd, gitCommonDir)
+}
+
+// townRootAt is townRoot over the working-directory and git readers it uses,
+// so a test reads a tree it built rather than the host.
+func townRootAt(getwd func() (string, error), commonDir func() (string, error)) string {
+	if cwd, err := getwd(); err == nil {
+		if town := townAbove(cwd); town != "" {
+			return town
 		}
 	}
-	out, err := exec.Command("/usr/sbin/sysctl", "-n", "vm.loadavg").Output()
+	gitDir, err := commonDir()
 	if err != nil {
-		return 0, false
+		return ""
 	}
-	// macOS prints "{ 1.23 4.56 7.89 }".
-	fields := strings.Fields(strings.Trim(strings.TrimSpace(string(out)), "{ }"))
-	if len(fields) == 0 {
-		return 0, false
+	// The common dir is <repo>/.git for a checkout and a worktree alike, so
+	// the repository is its parent.
+	return townAbove(filepath.Dir(gitDir))
+}
+
+// townAbove returns the outermost ancestor of dir holding mayor/town.json, or
+// "" when none does. The outermost marker is the town: a rig can carry a
+// mayor/ of its own (gt-y3pgh.2).
+func townAbove(dir string) string {
+	root, err := workspace.Find(dir)
+	if err != nil || root == "" {
+		return ""
 	}
-	load, err := strconv.ParseFloat(fields[0], 64)
+	if _, err := os.Stat(filepath.Join(root, workspace.PrimaryMarker)); err != nil {
+		return ""
+	}
+	return root
+}
+
+// gitCommonDir is the repository's shared .git directory, which a linked
+// worktree points at even when its own directory sits outside the town.
+func gitCommonDir() (string, error) {
+	out, err := exec.Command("git", "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
 	if err != nil {
-		return 0, false
+		return "", fmt.Errorf("git rev-parse --git-common-dir: %w", err)
 	}
-	return load, true
+	return strings.TrimSpace(string(out)), nil
 }
 
 func (r *report) printLines(lines []string) {

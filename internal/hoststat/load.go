@@ -8,6 +8,13 @@ import (
 	"strings"
 )
 
+// SampleLoad reads the host's three load averages, or three nils when the host
+// reports none. It is Sample's load probe alone, for a caller that needs the
+// load and nothing else and must not pay for top and ps to get it.
+func SampleLoad(ctx context.Context) (load1, load5, load15 *float64) {
+	return loadAvg(ctx)
+}
+
 // loadAvg reads the host's three load averages, or three nils when the host
 // reports none. It is one instant read of a counter the kernel already keeps,
 // so unlike top it neither waits for a sample window nor fails when the host
