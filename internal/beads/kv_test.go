@@ -46,6 +46,64 @@ func TestKVGetOfAnUnsetKeyIsNotFound(t *testing.T) {
 	}
 }
 
+// bd answers an unset key with the found=false payload and then exits 1. The
+// answer is still an absence, whether bd printed the envelope or the bare
+// object, and never the run error (gt-wy9tn).
+func TestKVGetOfAnUnsetKeyThatExitsOneIsNotFound(t *testing.T) {
+	t.Parallel()
+	for name, stdout := range map[string]string{
+		"bare object": `{"found":false,"key":"custom.probe","schema_version":1,"value":""}`,
+		"envelope":    `{"schema_version":1,"contract_version":1,"data":{"found":false,"key":"custom.probe","value":""},"pagination":null,"error":null}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			rec := newRecorder(func([]string) reply {
+				return reply{stdout: stdout, err: errors.New("exit status 1")}
+			})
+			got, err := newRecordedBeads(t.TempDir(), rec).KVGet("custom.probe")
+			if !errors.Is(err, ErrNotFound) {
+				t.Errorf("KVGet(unset, exit 1) = %q, %v; want ErrNotFound", got, err)
+			}
+			if errors.Is(err, ErrUnavailable) {
+				t.Errorf("KVGet(unset, exit 1) = %v; an absence is not an unavailable store", err)
+			}
+		})
+	}
+}
+
+// A failing exit with no answer behind it stays the run error: nothing, garbage
+// and a found=true payload are none of them an absence.
+func TestKVGetFailureWithoutAFoundFalseAnswerIsNotNotFound(t *testing.T) {
+	t.Parallel()
+	for name, stdout := range map[string]string{
+		"nothing":            "",
+		"garbage":            "panic: nil pointer dereference",
+		"found under a fail": `{"found":true,"key":"custom.probe","value":"x","schema_version":1}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			rec := newRecorder(func([]string) reply {
+				return reply{stdout: stdout, stderr: "boom", err: errors.New("exit status 1")}
+			})
+			got, err := newRecordedBeads(t.TempDir(), rec).KVGet("custom.probe")
+			if err == nil || errors.Is(err, ErrNotFound) {
+				t.Errorf("KVGet = %q, %v; want the run error, not ErrNotFound", got, err)
+			}
+		})
+	}
+}
+
+// A set key still reads as its value on a clean exit.
+func TestKVGetOfASetKeyReturnsTheValue(t *testing.T) {
+	t.Parallel()
+	rec := newRecorder(func([]string) reply {
+		return reply{stdout: `{"found":true,"key":"custom.probe","value":"kept","schema_version":1}`}
+	})
+	if got, err := newRecordedBeads(t.TempDir(), rec).KVGet("custom.probe"); err != nil || got != "kept" {
+		t.Errorf("KVGet(set) = %q, %v; want kept", got, err)
+	}
+}
+
 // The list keeps every value readable: strings as themselves, other JSON as
 // its compact text, and null as no entry at all (gt-p85pw.9).
 func TestParseKVListJSON(t *testing.T) {

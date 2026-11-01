@@ -2056,6 +2056,16 @@ func (b *Beads) KVGet(key string) (string, error) {
 	}
 	out, err := b.run("kv", "get", key, "--json")
 	if err != nil {
+		// bd prints {"found":false,...} and then exits 1 for an unset key, so
+		// the answer is on the failed call's stdout. Only that payload makes
+		// an absence; no payload, an unreadable one, or found=true under a
+		// failing exit stays the run error.
+		var failed *unavailableError
+		if errors.As(err, &failed) {
+			if _, perr := ParseKVGetJSON(failed.stdout); errors.Is(perr, ErrNotFound) {
+				return "", perr
+			}
+		}
 		return "", err
 	}
 	return ParseKVGetJSON(out)
