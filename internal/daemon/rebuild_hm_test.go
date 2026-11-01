@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -92,7 +93,9 @@ func newRebuildHMRig(t *testing.T, a rebuildHMAnswers) *rebuildHMRig {
 	d, rec := daemonWithRecorder(t)
 	town := d.config.TownRoot
 	r := &rebuildHMRig{t: t, a: a, rec: rec, town: town, d: d}
-	r.installPath = filepath.Join(town, "bin", "hm")
+	// The installed hm sits outside the town, where hmSkewPath finds it (PATH or
+	// ~/go/bin), so the swap and its stage run on a path the town does not own.
+	r.installPath = filepath.Join(t.TempDir(), "bin", "hm")
 	if a.relativeInstall {
 		r.installPath = "hm"
 	}
@@ -397,15 +400,54 @@ func TestRebuildHMIsOptIn(t *testing.T) {
 	})
 }
 
+// townTree lists every path under root, relative to it, so a test can see which
+// entries a cycle created or removed on disk.
+func townTree(t *testing.T, root string) map[string]bool {
+	t.Helper()
+	tree := map[string]bool{}
+	err := filepath.WalkDir(root, func(p string, _ fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		if rel != "." {
+			tree[filepath.ToSlash(rel)] = true
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("listing %s: %v", root, err)
+	}
+	return tree
+}
+
 // TestRebuildHMTouchesOnlyItsOwnPaths: the cycle builds only in the job clone,
 // fetches only there, never runs in or writes under <town>/hm/mayor/rig, and
-// swaps the binary by renames only, never a copy (acceptance 4).
+// swaps the binary by renames only, never a copy (acceptance 4). The file ops the
+// job makes on disk are recorded as the town tree before and after: the install
+// lock and its directory are the only entries it creates under the town, and the
+// installed hm sits outside it.
 func TestRebuildHMTouchesOnlyItsOwnPaths(t *testing.T) {
 	t.Parallel()
 	r := newRebuildHMRig(t, rebuildHMBehindAnswers())
+	before := townTree(t, r.town)
 
 	if !r.d.runRebuildHM() {
 		t.Fatal("the cycle reached no verdict after a successful install")
+	}
+
+	var created []string
+	for p := range townTree(t, r.town) {
+		if !before[p] {
+			created = append(created, p)
+		}
+	}
+	slices.Sort(created)
+	if want := []string{"daemon", "daemon/install-hm.lock"}; !slices.Equal(created, want) {
+		t.Errorf("the cycle created %v under the town, want only the install lock %v", created, want)
 	}
 
 	for _, c := range r.calls {
@@ -435,6 +477,30 @@ func TestRebuildHMTouchesOnlyItsOwnPaths(t *testing.T) {
 	wantRenames := [][2]string{{r.installPath, r.prev}, {r.built, r.installPath}}
 	if !slices.Equal(r.renames, wantRenames) {
 		t.Errorf("renames = %v, want exactly %v", r.renames, wantRenames)
+	}
+}
+
+// TestRebuildHMLeavesAForeignStageAlone: a stage directory that already holds
+// something the job did not write keeps it. The job clears only its own build
+// file and the directory when it is empty, so the install still lands and the
+// foreign file survives.
+func TestRebuildHMLeavesAForeignStageAlone(t *testing.T) {
+	t.Parallel()
+	r := newRebuildHMRig(t, rebuildHMBehindAnswers())
+	mkdirs(t, r.binDir)
+	foreign := filepath.Join(r.binDir, "notes.txt")
+	if err := os.WriteFile(foreign, []byte("kept"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !r.d.runRebuildHM() {
+		t.Fatal("the cycle reached no verdict after a successful install")
+	}
+	if _, err := os.Stat(foreign); err != nil {
+		t.Errorf("the job removed a file it did not write from the stage: %v", err)
+	}
+	if _, err := os.Stat(r.binDir); err != nil {
+		t.Errorf("the job removed the stage directory while it held a foreign file: %v", err)
 	}
 }
 
@@ -497,9 +563,10 @@ func TestRebuildHMFailedInstallLeavesTheInstalledHMAndEscalates(t *testing.T) {
 					t.Errorf("renames = %v, want none before a swap", r.renames)
 				}
 			} else {
+				root := filepath.Dir(filepath.Dir(r.installPath))
 				got := make([][2]string, 0, len(r.renames))
 				for _, rn := range r.renames {
-					got = append(got, [2]string{relToTown(r.town, rn[0]), relToTown(r.town, rn[1])})
+					got = append(got, [2]string{relToRoot(root, rn[0]), relToRoot(root, rn[1])})
 				}
 				if !slices.Equal(got, tc.wantRenames) {
 					t.Errorf("renames = %v, want %v", got, tc.wantRenames)
@@ -605,10 +672,11 @@ func (r *rebuildHMRig) buildCallOrNil() *rebuildHMCall {
 	return nil
 }
 
-// relToTown names a path under the town as a town-relative slash path, so a test
-// table reads the same on every host. A path outside the town is kept whole.
-func relToTown(town, p string) string {
-	if rel, ok := strings.CutPrefix(p, town+"/"); ok {
+// relToRoot names a path under root as a root-relative slash path, so a test table
+// reads the same on every host (bin/hm, not a temp directory). A path outside root
+// is kept whole.
+func relToRoot(root, p string) string {
+	if rel, ok := strings.CutPrefix(p, root+"/"); ok {
 		return rel
 	}
 	return p

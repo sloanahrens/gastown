@@ -186,12 +186,10 @@ func (d *Daemon) rebuildHMInstall(ctx context.Context, cycle *dogCycle, src, ins
 		return d.rebuildHMFail(cycle, "build", "cannot create "+binDir+": "+err.Error(), head)
 	}
 	// The stage is cleared on every path: a refused build leaves nothing beside the
-	// installed hm, and a swap leaves the directory empty.
-	defer func() {
-		if err := os.RemoveAll(binDir); err != nil {
-			d.logger.Printf("rebuild_hm: removing the build directory %s failed: %v", binDir, err)
-		}
-	}()
+	// installed hm, and a swap leaves the directory empty. Only the build's own file
+	// is removed, then the directory if it is empty: a stage holding anything else
+	// is left as it is.
+	defer d.rebuildHMClearStage(binDir)
 	if err := d.rebuildHMBuild(ctx, src, binDir, head); err != nil {
 		return d.rebuildHMFail(cycle, "build", "go install failed for "+shortOMSHA(head), head)
 	}
@@ -293,6 +291,18 @@ func (d *Daemon) rebuildHMBuiltSHA(ctx context.Context, built string) (string, e
 		return "", fmt.Errorf("%s version: %w", built, err)
 	}
 	return parseHMVersion(string(out))
+}
+
+// rebuildHMClearStage removes the build's file from the stage and the stage
+// itself when it is empty. A file already gone is not an error: a swap moved it.
+func (d *Daemon) rebuildHMClearStage(binDir string) {
+	built := filepath.Join(binDir, "hm")
+	if err := os.Remove(built); err != nil && !errors.Is(err, os.ErrNotExist) {
+		d.logger.Printf("rebuild_hm: removing the build %s failed: %v", built, err)
+	}
+	if err := os.Remove(binDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+		d.logger.Printf("rebuild_hm: the build directory %s is kept: %v", binDir, err)
+	}
 }
 
 // rebuildHMRename is the swap's rename: the seam when a test set one, else
