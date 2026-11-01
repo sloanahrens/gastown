@@ -32,20 +32,39 @@ type childBD struct {
 }
 
 // whereResult turns how one bd where run ended into the workspace it named. A run that did not
-// reach an exit is an error, so a workspace is never read out of an answer bd did not give.
+// reach an exit is an error, and so is a non-zero exit other than bd's own "no workspace" answer, so
+// a workspace is never read out of an answer bd did not give. "No workspace" is no workspace, not an
+// error: a fresh container resolves none until bd init makes one (gt-p85pw.117).
 func whereResult(stdout []byte, exit int, runErr error) (string, error) {
 	if runErr != nil {
 		return "", fmt.Errorf("bd where: %w", runErr)
 	}
 	if exit != 0 {
+		if exit == noWorkspaceExit && noWorkspaceAnswer(stdout) {
+			return "", nil
+		}
 		return "", fmt.Errorf("bd where exited %d", exit)
 	}
 	return workspaceFromWhere(stdout)
 }
 
+// noWorkspaceExit is the exit code bd where gives when it resolves no workspace (probed against bd 1.2.2).
+const noWorkspaceExit = 1
+
+// noWorkspaceAnswer reports whether bd where's JSON answer says bd resolved no workspace: the error
+// bd names as no_beads_directory.
+func noWorkspaceAnswer(stdout []byte) bool {
+	var answer struct {
+		Data struct {
+			Error string `json:"error"`
+		} `json:"data"`
+	}
+	return json.Unmarshal(stdout, &answer) == nil && answer.Data.Error == "no_beads_directory"
+}
+
 // workspaceFromWhere reads the workspace out of bd where's JSON answer. An answer that does not
-// parse is an error rather than an empty workspace, so a bd the recorder cannot read is refused
-// instead of taken for one that named nothing.
+// parse, or that names no path, is an error rather than an empty workspace, so a bd the recorder
+// cannot read is refused instead of taken for one that named nothing (gt-p85pw.117).
 func workspaceFromWhere(stdout []byte) (string, error) {
 	var answer struct {
 		Data struct {
@@ -54,6 +73,9 @@ func workspaceFromWhere(stdout []byte) (string, error) {
 	}
 	if err := json.Unmarshal(stdout, &answer); err != nil {
 		return "", fmt.Errorf("bd where did not answer with JSON: %w", err)
+	}
+	if strings.TrimSpace(answer.Data.Path) == "" {
+		return "", errors.New("bd where answered with JSON that names no data.path, so the recorder cannot tell which workspace bd resolves")
 	}
 	return answer.Data.Path, nil
 }

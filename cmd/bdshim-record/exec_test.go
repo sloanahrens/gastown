@@ -95,6 +95,42 @@ func TestWhereResultKeepsAWorkspaceAndRefusesARunThatNeverFinished(t *testing.T)
 	}
 }
 
+// TestWhereResultReadsNoWorkspaceAsNoneAndRefusesOtherFailures: bd where exits 1 with
+// no_beads_directory when it resolves no workspace, which is the answer a fresh container gives before
+// bd init makes one, so it reads as no workspace. Any other non-zero exit is refused, and so is a
+// no-workspace answer that does not name the error (gt-p85pw.117).
+func TestWhereResultReadsNoWorkspaceAsNoneAndRefusesOtherFailures(t *testing.T) {
+	t.Parallel()
+	noWorkspace := []byte(`{"data":{"error":"no_beads_directory","hint":"run bd init","message":"No active beads workspace found."},"schema_version":1}`)
+	tests := []struct {
+		name    string
+		answer  []byte
+		exit    int
+		want    string
+		wantErr string
+	}{
+		{"no workspace yet", noWorkspace, 1, "", ""},
+		{"another error bd names", []byte(`{"data":{"error":"dolt_unreachable"}}`), 1, "", "exited 1"},
+		{"a failure with no JSON", []byte("bd: panic\n"), 1, "", "exited 1"},
+		{"no_beads_directory exiting 2", noWorkspace, 2, "", "exited 2"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := whereResult(tc.answer, tc.exit, nil)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("whereResult(%s) = %q, %v, want an error naming %q", tc.name, got, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Errorf("whereResult(%s) = %q, %v, want %q", tc.name, got, err, tc.want)
+			}
+		})
+	}
+}
+
 // TestWorkspaceFromWhere: the workspace the guard compares is the one bd where names, and an answer
 // that does not parse is an error rather than a workspace that could compare inside by accident
 // (gt-p85pw.115).
@@ -108,7 +144,9 @@ func TestWorkspaceFromWhere(t *testing.T) {
 	}{
 		{"the active workspace", `{"data":{"path":"/scratch/.beads"},"schema_version":1}`, "/scratch/.beads", ""},
 		{"a redirect", `{"data":{"path":"/town/.beads","redirected_from":"/scratch/.beads"}}`, "/town/.beads", ""},
-		{"no path", `{"data":{"prefix":"fx"},"schema_version":1}`, "", ""},
+		{"no path", `{"data":{"prefix":"fx"},"schema_version":1}`, "", "names no data.path"},
+		{"an empty path", `{"data":{"path":"  "}}`, "", "names no data.path"},
+		{"no data at all", `{}`, "", "names no data.path"},
 		{"not JSON", "bd: no workspace\n", "", "did not answer with JSON"},
 		{"nothing at all", "", "", "did not answer with JSON"},
 	}

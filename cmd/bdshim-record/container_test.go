@@ -21,22 +21,24 @@ func containerChild(c container) childBD {
 }
 
 // dockerAnswer returns a dockerRunner that records each command it is given, answers a bd version
-// with the container's, leaves the workspace a bd init makes in the directory the command mounts,
-// and answers every other call with whereOut and whereExit.
+// with the container's, answers a bd where with whereOut and whereExit, leaves the workspace a bd init
+// makes in the directory the command mounts, and exits 0 for every other call.
 func dockerAnswer(argvLog *[][]string, whereOut []byte, whereExit int) dockerRunner {
 	return func(_ []string, argv []string) ([]byte, int, error) {
 		*argvLog = append(*argvLog, argv)
-		if slices.Contains(argv, "version") {
+		switch {
+		case slices.Contains(argv, "version"):
 			return []byte(forkContainerVersion), 0, nil
-		}
-		if slices.Contains(argv, "init") {
+		case slices.Contains(argv, "where"):
+			return whereOut, whereExit, nil
+		case slices.Contains(argv, "init"):
 			if dir := mountOf(argv); dir != "" {
 				if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
 					return nil, 0, err
 				}
 			}
 		}
-		return whereOut, whereExit, nil
+		return nil, 0, nil
 	}
 }
 
@@ -72,9 +74,9 @@ func TestContainerArgsMountOnlyTheDirectoryAndPassOnlyTheDoltNames(t *testing.T)
 		},
 	}
 	env := containerEnv(c.env("/scratch/copy"), c.doltHost)
-	got := c.args("/scratch/copy", env, []string{"show", "fx-1"})
+	got := c.args("/scratch/copy", env, "bdshim-record-test", []string{"show", "fx-1"})
 	want := []string{
-		"run", "--rm",
+		"run", "--rm", "--name", "bdshim-record-test",
 		"-v", "/scratch/copy:" + workDir,
 		"-w", workDir,
 		"-e", "BEADS_DOLT_SERVER_PORT",
@@ -160,7 +162,7 @@ func TestEndpointEnvDropsTheStoreSelector(t *testing.T) {
 func TestContainerArgsWithoutADirectoryMountNothing(t *testing.T) {
 	t.Parallel()
 	c := container{image: "bd-image:test", bin: "bd", doltHost: testDoltHost}
-	got := c.args("", nil, []string{"--help"})
+	got := c.args("", nil, "bdshim-record-test", []string{"--help"})
 	if mounts := countFlag(got, "-v"); mounts != 0 {
 		t.Errorf("the command mounts %d directories, want none for a call with no directory", mounts)
 	}
@@ -361,9 +363,11 @@ func TestGuardRunReachesTheInitWhenTheContainerResolvesUnderWork(t *testing.T) {
 	tests := []struct {
 		name  string
 		where []byte
+		exit  int
 	}{
-		{"no workspace yet", []byte(`{"data":{"prefix":"fx"}}`)},
-		{"a workspace under the mount", []byte(`{"data":{"path":"/work/.beads"}}`)},
+		// bd where exits 1 with no_beads_directory when it resolves no workspace (bd 1.2.2).
+		{"no workspace yet", []byte(`{"data":{"error":"no_beads_directory","message":"No active beads workspace found."},"schema_version":1}`), 1},
+		{"a workspace under the mount", []byte(`{"data":{"path":"/work/.beads"}}`), 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -374,7 +378,7 @@ func TestGuardRunReachesTheInitWhenTheContainerResolvesUnderWork(t *testing.T) {
 				bin:      "bd",
 				doltHost: testDoltHost,
 				base:     scratchServerEnv(),
-				docker:   dockerAnswer(&ran, tc.where, 0),
+				docker:   dockerAnswer(&ran, tc.where, tc.exit),
 			}
 			scratch := filepath.Join(tempDir(t), "scratch")
 			if err := guardRun(safeCwd(t), scratch, containerChild(c)); err != nil {
@@ -451,4 +455,115 @@ func countFlag(argv []string, flag string) int {
 		}
 	}
 	return count
+}
+
+// nameOf returns the container name a docker run argv gives its --name flag.
+func nameOf(argv []string) string {
+	for i, arg := range argv {
+		if arg == "--name" && i+1 < len(argv) {
+			return argv[i+1]
+		}
+	}
+	return ""
+}
+
+// TestContainerCallRemovesATimedOutContainer: a docker client killed at runLimit leaves the container
+// it started running against the scratch, so a call that times out removes that container by the
+// name it gave it, exactly once. A removal that fails is joined to the timeout, so a container that
+// may still be writing is never reported as cleaned up (gt-p85pw.117).
+func TestContainerCallRemovesATimedOutContainer(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		runErr  error
+		rmExit  int
+		rmErr   error
+		wantRm  bool
+		wantErr string // empty: the call returns no error
+	}{
+		{"a run that finishes", nil, 0, nil, false, ""},
+		{"a run that times out and is removed", errDockerTimedOut, 0, nil, true, "ran past"},
+		{"a run that times out and the removal exits non-zero", errDockerTimedOut, 1, nil, true, "docker rm exited 1"},
+		{"a run that times out and the removal never runs", errDockerTimedOut, 0, errors.New("exec: docker: not found"), true, "remove container"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var calls [][]string
+			c := container{
+				image:    "bd-image:test",
+				bin:      "bd",
+				doltHost: testDoltHost,
+				docker: func(_ []string, argv []string) ([]byte, int, error) {
+					calls = append(calls, argv)
+					if argv[0] == "rm" {
+						return nil, tc.rmExit, tc.rmErr
+					}
+					return nil, 0, tc.runErr
+				},
+			}
+			_, _, err := c.call("/scratch/copy", nil, []string{"show", "fx-1"})
+			if !tc.wantRm {
+				if len(calls) != 1 {
+					t.Fatalf("docker ran %d commands, want the run alone: %v", len(calls), calls)
+				}
+			} else {
+				if len(calls) != 2 {
+					t.Fatalf("docker ran %d commands, want the run then one removal: %v", len(calls), calls)
+				}
+				name := nameOf(calls[0])
+				if !strings.HasPrefix(name, "bdshim-record-") {
+					t.Fatalf("the run was given the name %q, want a bdshim-record- name", name)
+				}
+				if want := []string{"rm", "-f", name}; !slices.Equal(calls[1], want) {
+					t.Errorf("the removal ran %v, want %v", calls[1], want)
+				}
+			}
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("call = %v, want no error", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("call = %v, want an error naming %q", err, tc.wantErr)
+			}
+			if tc.runErr != nil && !errors.Is(err, errDockerTimedOut) {
+				t.Errorf("call = %v, want the timeout kept in the error", err)
+			}
+		})
+	}
+}
+
+// TestGuardRunRefusesAScratchDockerWouldSplit: a character docker reads as part of a -v mount, in the
+// scratch's path, refuses the run before any bd call runs and before the scratch is made, since the
+// directory the call mounts would not be the one the recorder named (gt-p85pw.117).
+func TestGuardRunRefusesAScratchDockerWouldSplit(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		char string
+	}{
+		{"a colon", ":"},
+		{"a comma", ","},
+		{"a line break", "\n"},
+		{"a NUL", "\x00"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bd := &guardBD{}
+			scratch := filepath.Join(tempDir(t), "a"+tc.char+"b")
+			err := guardRun(safeCwd(t), scratch, testChild(bd.Run, atWork))
+			if err == nil || !strings.Contains(err.Error(), "docker would read") {
+				t.Fatalf("guardRun over a scratch with %s = %v, want it refused", tc.name, err)
+			}
+			if len(bd.args) != 0 {
+				t.Errorf("bd ran %v, want nothing run for a refused scratch", bd.args)
+			}
+			if _, statErr := os.Stat(scratch); statErr == nil {
+				t.Errorf("scratch %q was made, want nothing written for a refused scratch", scratch)
+			}
+		})
+	}
 }

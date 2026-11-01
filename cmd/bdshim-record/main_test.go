@@ -824,3 +824,33 @@ func TestRunRefusesAWorkingDirectoryThatIsAWorkspaceRoot(t *testing.T) {
 		t.Errorf("goldens written under a workspace: %v", entries)
 	}
 }
+
+// TestRunNamesARelativeScratchByTheWorkingDirectory: docker mounts each copy by its host path, so a
+// relative -scratch is made absolute against the working directory the run started in, and every bd
+// call runs in a copy under that directory, never under a path the process's own directory would
+// resolve (gt-p85pw.117).
+func TestRunNamesARelativeScratchByTheWorkingDirectory(t *testing.T) {
+	t.Parallel()
+	town := tempDir(t)
+	bd := &fakeBD{out: echoBD}
+	out := filepath.Join(tempDir(t), "golden")
+	var stdout, stderr bytes.Buffer
+	args := []string{"-fixture", writeFixture(t, fixtureIDs...), "-scratch", "scratch", "-out", out}
+	if code := runIn(cwdAt(town), childFor(passingChild(bd)), args, &stdout, &stderr); code != 0 {
+		t.Fatalf("run with a relative scratch = %d, want 0\nstderr: %s", code, stderr.String())
+	}
+	under := filepath.Join(town, "scratch")
+	ran := 0
+	for _, dir := range bd.dirs {
+		if dir == "" {
+			continue
+		}
+		ran++
+		if !isWithin(under, dir) {
+			t.Errorf("bd ran in %s, want a copy under the scratch %s named from the working directory", dir, under)
+		}
+	}
+	if ran == 0 {
+		t.Fatal("bd ran in no copy, want the rows run in one")
+	}
+}

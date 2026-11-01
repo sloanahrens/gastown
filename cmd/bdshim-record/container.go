@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"os"
@@ -64,9 +65,12 @@ type container struct {
 	docker   dockerRunner // how one docker command runs
 }
 
-// execChild returns the child bd the binary runs: every call inside the container opts names, whose
-// environment is the endpoint names of the recording environment and the recorder's pinned
-// identity, and the bd on PATH as the build the container's bd must be.
+// execChild returns the childBD whose every call runs bd in a container from opts.bdImage, with only
+// the directory the call works in mounted at workDir. The container's environment is the BEADS_DOLT_
+// names of this process's environment, less the store selector, plus the recorder's pinned identity.
+// A bd exit code is a result the caller keeps. A docker command that never ran to an exit, or ran
+// past runLimit, is an error. Docker's own failure to start a container also exits 125, which reads as
+// an exit code, so the guard's version call refuses it before any golden is written.
 func execChild(opts options) childBD {
 	c := container{
 		image:    opts.bdImage,
@@ -83,9 +87,14 @@ func execChild(opts options) childBD {
 	}
 }
 
+// errDockerTimedOut is what a docker command that ran past runLimit returns. Killing the docker client
+// does not stop the container it started, so the caller removes that container by name (gt-p85pw.117).
+var errDockerTimedOut = fmt.Errorf("docker ran past %s", runLimit)
+
 // execDocker runs one docker command, bounded by runLimit so a hung docker fails the recording
 // instead of stalling it. env is the docker client's environment, where docker reads the value of
-// each -e name the command carries.
+// each -e name the command carries. Each call gets its own context, so a removal after a timeout is
+// not cut short by the expired one.
 func execDocker(env []string, argv []string) ([]byte, int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), runLimit)
 	defer cancel()
@@ -96,7 +105,10 @@ func execDocker(env []string, argv []string) ([]byte, int, error) {
 	c.Stderr = os.Stderr
 	c.WaitDelay = time.Second
 	err := c.Run()
-	return exitResult(stdout.Bytes(), err, errors.Is(ctx.Err(), context.DeadlineExceeded))
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return nil, 0, errDockerTimedOut
+	}
+	return exitResult(stdout.Bytes(), err, false)
 }
 
 // dockerClientEnv returns the environment the docker client runs with: the recorder's own, with
@@ -121,24 +133,50 @@ func dockerClientEnv(base, env []string) []string {
 // run runs one bd call inside the container, in dir mounted at workDir.
 func (c container) run(dir string, args []string) ([]byte, int, error) {
 	env := containerEnv(c.env(dir), c.doltHost)
-	return c.docker(env, c.args(dir, env, args))
+	return c.call(dir, env, args)
 }
 
 // where asks bd which workspace it resolves in dir, inside the container.
 func (c container) where(dir string, env []string) (string, error) {
 	env = containerEnv(env, c.doltHost)
-	stdout, exit, err := c.docker(env, c.args(dir, env, []string{"where", "--json"}))
+	stdout, exit, err := c.call(dir, env, []string{"where", "--json"})
 	return whereResult(stdout, exit, err)
 }
 
-// args returns the docker arguments one bd call is: run --rm, dir mounted at workDir and nothing
-// else, the working directory there, one -e per name in env, then the image, the bd binary and the
-// call. Each -e names a variable and carries no value: docker reads the value from the client's
+// call runs one bd call in a new container named for this call. A call that runs past runLimit has
+// its docker client killed, which leaves the container running against dir, so the container is
+// removed by the name the call gave it. The removal's own failure is joined to the timeout, so a
+// container that may still be writing is never reported as cleaned up (gt-p85pw.117).
+func (c container) call(dir string, env, args []string) ([]byte, int, error) {
+	name := containerName()
+	stdout, exit, err := c.docker(env, c.args(dir, env, name, args))
+	if !errors.Is(err, errDockerTimedOut) {
+		return stdout, exit, err
+	}
+	_, rmExit, rmErr := c.docker(nil, []string{"rm", "-f", name})
+	if rmErr == nil && rmExit == 0 {
+		return nil, 0, err
+	}
+	if rmErr == nil {
+		rmErr = fmt.Errorf("docker rm exited %d", rmExit)
+	}
+	return nil, 0, errors.Join(err, fmt.Errorf("remove container %s: %w", name, rmErr))
+}
+
+// containerName returns a random name for one call's container, so the removal after a timeout names
+// that call's container and not another's (gt-p85pw.117).
+func containerName() string {
+	return "bdshim-record-" + strings.ToLower(rand.Text())
+}
+
+// args returns the docker arguments one bd call is: run --rm under name, dir mounted at workDir and
+// nothing else, the working directory there, one -e per name in env, then the image, the bd binary and
+// the call. Each -e names a variable and carries no value: docker reads the value from the client's
 // environment, where the runner puts it, so a secret never appears in the argv (gt-p85pw.117). A
 // call with no directory (the help walk names none) mounts nothing and keeps the image's own working
 // directory.
-func (c container) args(dir string, env, args []string) []string {
-	argv := []string{"run", "--rm"}
+func (c container) args(dir string, env []string, name string, args []string) []string {
+	argv := []string{"run", "--rm", "--name", name}
 	if dir != "" {
 		argv = append(argv, "-v", dir+":"+workDir, "-w", workDir)
 	}

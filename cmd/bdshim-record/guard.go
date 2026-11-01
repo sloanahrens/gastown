@@ -79,6 +79,9 @@ func guardRun(getwd func() (string, error), scratch string, child childBD) error
 		scratch = filepath.Join(cwd, scratch)
 	}
 	scratch = filepath.Clean(scratch)
+	if err := refuseMountCharacter(scratch); err != nil {
+		return err
+	}
 	if link, found, err := symlinkOnPath(scratch); err != nil {
 		return err
 	} else if found {
@@ -104,6 +107,17 @@ func guardRun(getwd func() (string, error), scratch string, child childBD) error
 	// still removes the directory, and either failure is reported rather than left behind.
 	if err := errors.Join(dropDatabase(child.Run, scratch, name), os.RemoveAll(beadsDirIn(scratch))); err != nil {
 		return fmt.Errorf("clean up the scratch workspace %s: %w", scratch, err)
+	}
+	return nil
+}
+
+// refuseMountCharacter refuses a scratch whose path holds a character a -v source cannot carry: ':'
+// ends the host path and starts the mount point, ',' splits the options of the --mount form the same
+// path would take, and a line break or NUL cannot be read back as a path. The directory the call
+// mounts would then not be the scratch the recorder named, so no bd call may run in it (gt-p85pw.117).
+func refuseMountCharacter(scratch string) error {
+	if i := strings.IndexAny(scratch, ":,\n\x00"); i >= 0 {
+		return fmt.Errorf("the scratch directory %q holds %q, which docker would read as part of the mount rather than the path; name a scratch directory whose path has no such character", scratch, scratch[i])
 	}
 	return nil
 }

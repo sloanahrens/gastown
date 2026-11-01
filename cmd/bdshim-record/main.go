@@ -95,6 +95,23 @@ func runIn(getwd func() (string, error), child func(options) childBD, args []str
 	scratch := opts.scratch
 	if opts.flags {
 		scratch = "" // a flags recording makes no copies, so it has no scratch directory to guard
+	} else {
+		// An empty -scratch names no directory, and joining it to the working directory would name
+		// that directory itself, so it is refused here as the directory the run cannot make.
+		if opts.scratch == "" {
+			fmt.Fprintf(stderr, "bdshim-record: make scratch directory %q: name a directory, not an empty path\n", opts.scratch)
+			return 1
+		}
+		// docker mounts the scratch by its host path, which must be absolute, so every copy and the
+		// guard name it from the working directory, never a relative path docker would read as one
+		// (gt-p85pw.117).
+		abs, err := absolutePath(getwd, opts.scratch)
+		if err != nil {
+			fmt.Fprintf(stderr, "bdshim-record: %v\n", err)
+			return 1
+		}
+		opts.scratch = abs
+		scratch = abs
 	}
 	bd := child(opts)
 	if err := guardRun(getwd, scratch, bd); err != nil {
