@@ -420,47 +420,36 @@ id = "self-review"
 title = "Self-review changes"
 needs = ["commit-changes"]
 description = """
-Review your own changes before the build check. Use `/review --branch` for
-structured grading, or do a manual review.
+Review your own added lines before the build check, against the rules om rejects
+most. The full rules are the directive's "What om rejects" section; the plan you
+wrote in `scratch/plan.md` ("Before you write code") is what you check against.
+Let `D` below stand for `git diff -U0 origin/{{base_branch}}...HEAD`. A hit is a
+question, not a verdict. Fix what you find now; amend or add commits as needed.
 
-**Option A: Use /review (recommended)**
-```bash
-/review --branch
-```
-This gives you a structured grade (A-F) with CRITICAL/MAJOR/MINOR findings
-and specific fix suggestions. Fix any CRITICAL or MAJOR issues before proceeding.
-
-**Option B: Manual review**
-
-**1. Review the diff:**
-```bash
-git diff origin/{{base_branch}}...HEAD     # All changes vs {{base_branch}}
-git log --oneline origin/{{base_branch}}..HEAD  # All commits
-```
-
-**2. Check for common issues:**
-
-| Category | Look For |
-|----------|----------|
-| Bugs | Off-by-one, null handling, edge cases |
-| Security | Injection, auth bypass, exposed secrets |
-| Style | Naming, formatting, code organization |
-| Completeness | Missing error handling, incomplete paths |
-| Cruft | Debug prints, commented code, TODOs |
-
-**3. Fix issues found:**
-Don't just note them - fix them now. Amend or add commits as needed.
-
-**4. Verify no unintended changes:**
+1. Errors (rule 1): `D -- '*.go' | grep -nE '^[+].*(_ = |, _ :?= )'`, and
+   read every added `if err != nil` branch. Each hit returns, wraps or escalates; an unknown or unreadable input denies.
+2. Wiring (12): `D -- '*.go' | grep -E '^[+]func '`, then `grep -rn <name>` for a
+   caller outside tests. Compare the Goal and each acceptance box with your plan.
+3. Red without the code (2, 3, 10): each added refusal branch and call has a test
+   row; delete the guard or call, run its `-run` test, see it fail, restore.
+4. Docs and comments (14): `D | grep -nE '^[+][[:space:]]*(//|#|[*]|-)'`; read each
+   line against the code (no line numbers, no claim the code does not make).
+5. State and bounds (13): name what ends each cache, lock, retry, timeout or reset.
+6. Input (4): each caller or file value that reaches a path, argv or request is
+   validated first.
+7. Test hygiene (7, 8): `D -- '*_test.go' | grep -nE '^[+].*(time[.]Sleep|time[.]After|Setenv|Getenv|UserHomeDir|/tmp|exec[.]Command)'`
+   is empty or justified.
+8. Secrets (11): no added error or log line prints captured output, a token or a password.
+9. Scope (9): verify no unintended changes:
 ```bash
 git diff --stat origin/{{base_branch}}...HEAD
-# Only files relevant to {{issue}} should appear
+# Only files named in your Constraints for {{issue}} should appear
 ```
 
 If you accidentally modified unrelated files, remove those changes.
 
-**Exit criteria:** Changes are clean, reviewed (Grade B or better if using /review),
-and ready for build check."""
+**Exit criteria:** every hit above is fixed or justified, and the diff is ready
+for the build check."""
 
 [[steps]]
 id = "build-check"
