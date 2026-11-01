@@ -81,6 +81,12 @@ type Daemon struct {
 	// survives records coming and going between ticks.
 	sandboxRecordCursor string
 
+	// hb is the heartbeat in flight: its step and the lock between an
+	// abandoned heartbeat and shutdown (heartbeat_signal.go, gt-lbqgz).
+	// hbGrace overrides heartbeatSignalGrace in tests.
+	hb      heartbeatRun
+	hbGrace time.Duration
+
 	config       *Config
 	patrolConfig *DaemonPatrolConfig
 	tmux         sessionTmux
@@ -1390,6 +1396,13 @@ func (d *Daemon) recordStopForHeal(now time.Time) {
 // (gt-518hq, gt-swsqm).
 func (d *Daemon) shutdownForSignal(sig os.Signal, state *State) error {
 	d.logger.Printf("Received signal %v, shutting down", sig)
+	return d.finishSignalShutdown(state)
+}
+
+// finishSignalShutdown is shutdownForSignal after the signal line was written:
+// a signal that arrived during a heartbeat logged it at once, with the step it
+// interrupted (heartbeat_signal.go).
+func (d *Daemon) finishSignalShutdown(state *State) error {
 	d.recordStopForHeal(time.Now())
 	// Exit 0 only when gt asked for this stop; any other signal exits 75,
 	// which launchd turns into a relaunch only for a job still loaded under
@@ -1836,8 +1849,10 @@ func (d *Daemon) Run() (err error) {
 	// No tmux pane-died respawn hooks: a dead session is restarted by the
 	// heartbeat through the supervisor, within its budget (gt-4k3fj.3).
 
-	// Initial heartbeat
-	d.heartbeat(state)
+	// Initial heartbeat, beside the signal channel like every later one.
+	if stop, exit := d.stopOnSignal(sigChan, state, func() { d.heartbeat(state) }); stop {
+		return exit
+	}
 	startupComplete = true
 	if err := d.exitForUpgradeIfRequested(state, time.Now()); err != nil {
 		return err
@@ -2009,7 +2024,9 @@ func (d *Daemon) Run() (err error) {
 			}
 
 		case <-timer.C:
-			d.heartbeat(state)
+			if stop, exit := d.stopOnSignal(sigChan, state, func() { d.heartbeat(state) }); stop {
+				return exit
+			}
 			if err := d.exitForUpgradeIfRequested(state, time.Now()); err != nil {
 				return err
 			}
@@ -2375,17 +2392,34 @@ func (d *Daemon) heartbeatWork(state *State, lifecycle bool) {
 		if step.lifecycle && !lifecycle {
 			continue
 		}
+		// A canceled context means shutdown has begun: start no further step.
+		if d.heartbeatCanceled() {
+			d.logger.Printf("Heartbeat stopped before step %q: the daemon context is canceled", step.name)
+			return
+		}
+		d.setHeartbeatStep(step.name)
 		d.seams.runHeartbeatStep(d, step)
+		d.setHeartbeatStep("")
 	}
 
-	// Update state
+	// Update state. A heartbeat that outlived a shutdown signal writes nothing:
+	// shutdown has recorded the daemon as stopped, and a late save would undo
+	// it (gt-lbqgz).
+	d.hb.stateMu.Lock()
+	if d.heartbeatCanceled() {
+		d.hb.stateMu.Unlock()
+		d.logger.Println("Heartbeat ended after the daemon context was canceled; state left as shutdown wrote it")
+		return
+	}
 	state.LastHeartbeat = time.Now()
 	state.HeartbeatCount++
 	if err := d.saveState(state); err != nil {
 		d.logger.Printf("Warning: failed to save state: %v", err)
 	}
+	count := state.HeartbeatCount
+	d.hb.stateMu.Unlock()
 
-	d.logger.Printf("Heartbeat complete (#%d)", state.HeartbeatCount)
+	d.logger.Printf("Heartbeat complete (#%d)", count)
 }
 
 // rotateOversizedLogs checks Dolt server log files and rotates any that exceed
@@ -2910,10 +2944,16 @@ func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return
 		}
 	}
 
+	// The final record is a value copy taken and saved under stateMu, the lock
+	// every other writer of *state holds (heartbeatWork's update), so a heartbeat
+	// abandoned at the grace cannot change what is saved (gt-lbqgz).
+	d.hb.stateMu.Lock()
 	state.Running = false
-	if err := d.saveState(state); err != nil {
+	final := *state
+	if err := d.saveState(&final); err != nil {
 		d.logger.Printf("Warning: failed to save final state: %v", err)
 	}
+	d.hb.stateMu.Unlock()
 
 	d.logger.Println("Daemon stopped")
 	return nil
