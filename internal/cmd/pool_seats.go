@@ -156,8 +156,10 @@ func liveSeatKeys(live []poolSession) map[string]bool {
 // reads it first: the roster calls that with the rigs its seat read will ask
 // about, so the tick pays their bd calls at once instead of one rig after
 // another (gt-0mzpm). Rigs are independent — each reads its own directory and
-// its own store — so the reads run on separate goroutines, and the map they
-// fill (rigs) is written under mu.
+// its own store — so the reads run on separate goroutines. rigSlot makes each
+// rig's slot under mu, and the rig's read fills that slot once and closes its
+// ready channel; a batch handed out before its read has finished is not yet in
+// the snapshot, so heldIssue never looks at one mid-read.
 type poolSeatBatch struct {
 	townRoot string
 	store    func(rigName string) beads.Client
@@ -186,8 +188,11 @@ const poolSeatRigReads = 4
 type rigSeatBatch struct {
 	store beads.Client
 	// once runs the rig's read, so the fan-out and a seat's lazy read of the
-	// same rig share one read rather than racing two.
+	// same rig share one store and one read rather than racing two.
 	once sync.Once
+	// ready is closed when the read has finished. heldIssue searches a rig only
+	// after this, so it never reads a batch a read is still filling.
+	ready chan struct{}
 	// err is the read's failure to list the rig's polecat directories, which
 	// leaves the batches empty and readRigs reports. Every other failed read
 	// keeps its per-seat fallback instead (read).
@@ -286,7 +291,10 @@ func (b *poolSeatBatch) landingWork(town beads.Client) poolSeatWorkFunc {
 // heldIssue answers a bead id from the batches made so far. One bead is one
 // bead whichever rig's list carried it, so the rigs are searched in name order:
 // a bead two rigs hold is answered by the same rig on every run, where a walk
-// over the map would answer by whichever rig the iteration reached first.
+// over the map would answer by whichever rig the iteration reached first. A rig
+// whose read is still running is not searched: its batch is not made yet. A
+// slot with no ready channel is one no read was started for, so nothing is in
+// flight and its fields are read as they are.
 func (b *poolSeatBatch) heldIssue(id string) (*beads.Issue, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -296,7 +304,16 @@ func (b *poolSeatBatch) heldIssue(id string) (*beads.Issue, bool) {
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		if issue, ok := b.rigs[name].held[id]; ok {
+		rb := b.rigs[name]
+		if rb.ready != nil {
+			select {
+			case <-rb.ready:
+			default:
+				// The read has not finished, so this rig's batch is not made yet.
+				continue
+			}
+		}
+		if issue, ok := rb.held[id]; ok {
 			return issue, true
 		}
 	}
@@ -304,33 +321,32 @@ func (b *poolSeatBatch) heldIssue(id string) (*beads.Issue, bool) {
 }
 
 // rig reads a rig's batches the first time one of its polecats is asked about,
-// or answers it from readRigs' read when that came first. The read runs once,
-// so a rig the fan-out and a seat read both reach is read once.
+// or answers it from readRigs' read when that came first. The read and the
+// store it reads through run once, so a rig the fan-out and a seat read both
+// reach is read once.
 func (b *poolSeatBatch) rig(rigName string) *rigSeatBatch {
 	rb := b.rigSlot(rigName)
-	rb.once.Do(func() { rb.err = rb.read(b.townRoot, rigName) })
+	rb.once.Do(func() {
+		rb.store = b.store(rigName)
+		rb.err = rb.read(b.townRoot, rigName)
+		close(rb.ready)
+	})
 	return rb
 }
 
 // rigSlot is the rig's slot, made the first time it is asked for, once however
 // many readers ask at once. The map is guarded by b.mu because readRigs fills it
-// from several goroutines; the store is built outside the lock, since that call
-// reaches the caller's own wiring.
+// from several goroutines; the slot's store and batches are filled by its read,
+// outside the lock, since the store call reaches the caller's own wiring.
 func (b *poolSeatBatch) rigSlot(rigName string) *rigSeatBatch {
-	b.mu.Lock()
-	rb, ok := b.rigs[rigName]
-	b.mu.Unlock()
-	if ok {
-		return rb
-	}
-	made := &rigSeatBatch{store: b.store(rigName)}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if rb, ok := b.rigs[rigName]; ok {
 		return rb
 	}
-	b.rigs[rigName] = made
-	return made
+	rb := &rigSeatBatch{ready: make(chan struct{})}
+	b.rigs[rigName] = rb
+	return rb
 }
 
 // readRigs reads each named rig's batches concurrently, at most bound at a

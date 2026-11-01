@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,15 +17,21 @@ import (
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
 
-// rosterStartWait bounds how long the concurrent roster read may take to start
-// every rig's read before a test calls the read serial. It is a failure bound,
-// not a duration a test measures.
+// rosterStartWait bounds a test's wait for the roster read to reach a fixture's
+// checkpoint: another rig's read starting, or the rig the fixture holds back.
+// It is a failure bound, not a duration a test measures.
 const rosterStartWait = 10 * time.Second
 
 // rosterSerialWait bounds a rig's read that waits for another rig's read to
 // start. The concurrent read answers well inside it; a serial read never does,
 // so the fake store reports the wait by name.
 const rosterSerialWait = 25 * time.Millisecond
+
+// rosterDoorWait bounds the check that no rig's read starts while the fan-out's
+// slots are all held: a read past the bound waits at the semaphore's door, so it
+// cannot reach the store before a slot frees. It is a door wait, not a duration
+// a test measures.
+const rosterDoorWait = 250 * time.Millisecond
 
 // rosterTown writes a town of the named rigs, each holding one polecat
 // directory per name, with one agent bead per polecat in that rig's own beads
@@ -129,10 +137,42 @@ func (c *inFlightCounter) max() int {
 	return c.peak
 }
 
-// TestRosterReadsRigsConcurrently is gt-0mzpm: the roster's per-rig reads run
-// at once, bounded by the batch's bound, and a serial read is held at its wait.
-// The fixtures rendezvous inside the fake stores, so no duration is measured:
-// two rigs' work lists can only both start if the reads overlap.
+// assertNoRigReadStarts fails if a rig's read starts while every fan-out slot is
+// held. It releases the rigs' reads before failing, so the roster read it guards
+// is not left blocked.
+func assertNoRigReadStarts(t *testing.T, started <-chan string, release chan struct{}) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), rosterDoorWait)
+	defer cancel()
+	select {
+	case rigName := <-started:
+		close(release)
+		t.Fatalf("rig %s's read started while %d were in flight: the fan-out is not bounded at %d", rigName, poolSeatRigReads, poolSeatRigReads)
+	case <-ctx.Done():
+	}
+}
+
+// blockingStore is one rig's store whose agent-bead batch waits for the test to
+// release it, so the test can ask the batch about a bead while that rig's read
+// is still filling it.
+type blockingStore struct {
+	beads.Client
+	entered chan<- struct{}
+	release <-chan struct{}
+}
+
+func (s *blockingStore) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
+	s.entered <- struct{}{}
+	<-s.release
+	return s.Client.ShowMultiple(ids)
+}
+
+// TestRosterReadsRigsConcurrently is gt-0mzpm: the spec tick's roster read
+// takes its per-rig reads at once, bounded by poolSeatRigReads. It drives
+// specRosterSnapshotWith, the wiring the tick's roster step calls, so deleting
+// the fan-out from that path turns it red. The fixtures rendezvous inside the
+// fake stores, so no duration is measured: two rigs' work lists can only both
+// start if the reads overlap.
 func TestRosterReadsRigsConcurrently(t *testing.T) {
 	t.Parallel()
 	town, dbs, lister := rosterTown(t, map[string][]string{
@@ -140,77 +180,88 @@ func TestRosterReadsRigsConcurrently(t *testing.T) {
 		"drig": {"p1"}, "erig": {"p1"}, "frig": {"p1"},
 	})
 	pool := seatPool("deepseek-flash", 10)
-	const bound = 4
+	const bound = poolSeatRigReads
 
-	t.Run("the rigs' reads overlap, bounded", func(t *testing.T) {
-		started := make(chan string, len(dbs))
-		release := make(chan struct{})
-		count := &inFlightCounter{}
-		stores := make(map[string]*rendezvousStore, len(dbs))
-		for rigName, db := range dbs {
-			stores[rigName] = &rendezvousStore{Client: db, rig: rigName, started: started, release: release, wait: rosterStartWait, inFlight: count}
+	started := make(chan string, len(dbs))
+	release := make(chan struct{})
+	count := &inFlightCounter{}
+	// A rendezvous store per rig, keyed by the directory the roster asks the
+	// batch for. The town's own directory gets a plain store: this fixture's
+	// landing read never asks it for a bead.
+	stores := make(map[string]*rendezvousStore, len(dbs))
+	for rigName, db := range dbs {
+		stores[filepath.Join(town, rigName)] = &rendezvousStore{Client: db, rig: rigName, started: started, release: release, wait: rosterStartWait, inFlight: count}
+	}
+	townStore := beadsfake.New()
+	storeFor := func(dir string) beads.Client {
+		if store, ok := stores[dir]; ok {
+			return store
 		}
-		batch := rosterBatch(town, func(rigName string) beads.Client { return stores[rigName] }, bound)
-		done := make(chan error, 1)
-		go func() {
-			_, err := rosterSnapshotOn(batch, nil, town, pool, lister, time.Now)
-			done <- err
-		}()
-		for i := 0; i < bound; i++ {
-			select {
-			case <-started:
-			case <-time.After(rosterStartWait): //testpolicy:allow no-sleep — a hang guard only: the concurrent read signals every start on a channel, so this fires only when the read is serial, and the test fails naming the wait instead of hanging the suite
-				close(release)
-				t.Fatalf("%d of %d rig reads started within %s: the roster read the rigs one after another", i, bound, rosterStartWait)
-			}
-		}
+		return townStore
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := specRosterSnapshotWith(newSpecTickReads(), town, pool, lister, storeFor, time.Now)
+		done <- err
+	}()
+	for i := 0; i < bound; i++ {
 		select {
-		case rigName := <-started:
+		case <-started:
+		case <-time.After(rosterStartWait): //testpolicy:allow no-sleep — a hang guard only: the concurrent read signals every start on a channel, so this fires only when the read is serial, and the test fails naming the wait instead of hanging the suite
 			close(release)
-			t.Fatalf("rig %s's read started while %d were in flight: the fan-out is not bounded at %d", rigName, bound, bound)
-		default:
+			t.Fatalf("%d of %d rig reads started within %s: the roster read the rigs one after another", i, bound, rosterStartWait)
 		}
-		close(release)
-		if err := <-done; err != nil {
-			t.Fatalf("roster read: %v", err)
+	}
+	assertNoRigReadStarts(t, started, release)
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("roster read: %v", err)
+	}
+	if got := count.max(); got != bound {
+		t.Errorf("peak rig reads in flight = %d, want the bound %d", got, bound)
+	}
+	for _, store := range stores {
+		if err := store.heldAtError(); err != nil {
+			t.Errorf("rig %s was held at a wait while the reads overlapped: %v", store.rig, err)
 		}
-		if got := count.max(); got != bound {
-			t.Errorf("peak rig reads in flight = %d, want the bound %d", got, bound)
-		}
-		for rigName, store := range stores {
-			if err := store.heldAtError(); err != nil {
-				t.Errorf("rig %s was held at a wait while the reads overlapped: %v", rigName, err)
-			}
-		}
-	})
+	}
+}
 
-	t.Run("a serial read is held at its wait", func(t *testing.T) {
-		started := make(chan string, len(dbs))
-		release := make(chan struct{}) // never closed: one rig read at a time
-		stores := make(map[string]*rendezvousStore, len(dbs))
-		for rigName, db := range dbs {
-			stores[rigName] = &rendezvousStore{Client: db, rig: rigName, started: started, release: release, wait: rosterSerialWait}
+// TestRosterSerialReadIsHeldAtItsWait is the fixture's control for
+// TestRosterReadsRigsConcurrently: the same rendezvous stores read one rig at a
+// time are held at the rig's wait, so that test passes only because the roster
+// overlapped the reads. It drives the roster at a bound of one, which the
+// tick's own wiring does not offer.
+func TestRosterSerialReadIsHeldAtItsWait(t *testing.T) {
+	t.Parallel()
+	town, dbs, lister := rosterTown(t, map[string][]string{"arig": {"p1"}, "brig": {"p1"}})
+	pool := seatPool("deepseek-flash", 10)
+
+	started := make(chan string, len(dbs))
+	release := make(chan struct{}) // never closed: one rig read at a time
+	stores := make(map[string]*rendezvousStore, len(dbs))
+	for rigName, db := range dbs {
+		stores[rigName] = &rendezvousStore{Client: db, rig: rigName, started: started, release: release, wait: rosterSerialWait}
+	}
+	batch := rosterBatch(town, func(rigName string) beads.Client { return stores[rigName] }, 1)
+	if _, err := rosterSnapshotOn(batch, nil, town, pool, lister, time.Now); err != nil {
+		t.Fatalf("serial roster read: %v", err)
+	}
+	held := 0
+	for _, store := range stores {
+		err := store.heldAtError()
+		if err == nil {
+			continue
 		}
-		batch := rosterBatch(town, func(rigName string) beads.Client { return stores[rigName] }, 1)
-		if _, err := rosterSnapshotOn(batch, nil, town, pool, lister, time.Now); err != nil {
-			t.Fatalf("serial roster read: %v", err)
+		held++
+		if !strings.Contains(err.Error(), "no other rig's read started") ||
+			!strings.Contains(err.Error(), store.rig) {
+			t.Errorf("the wait a serial read is held at = %q, want the wait named with rig %s", err, store.rig)
 		}
-		held := 0
-		for _, store := range stores {
-			err := store.heldAtError()
-			if err == nil {
-				continue
-			}
-			held++
-			if !strings.Contains(err.Error(), "no other rig's read started") ||
-				!strings.Contains(err.Error(), store.rig) {
-				t.Errorf("the wait a serial read is held at = %q, want the wait named with rig %s", err, store.rig)
-			}
-		}
-		if held == 0 {
-			t.Fatalf("no rig's read was held at its wait: the read overlapped with bound 1")
-		}
-	})
+	}
+	if held == 0 {
+		t.Fatalf("no rig's read was held at its wait: the read overlapped with bound 1")
+	}
 }
 
 // TestRosterResultEqualsTheSequentialRead is gt-0mzpm: the same fixture read
@@ -270,10 +321,12 @@ func TestRosterResultEqualsTheSequentialRead(t *testing.T) {
 
 // TestRosterErrorIsTheFirstRigInNameOrder is gt-0mzpm: when more than one rig
 // cannot be read, the roster reports the first rig in name order, as the
-// sequential walk does, whatever order the concurrent reads finish in. The
-// first rig's read is held until every other rig's read has started, so the
-// other rigs' errors are all known before its own: a roster that reported the
-// first error to finish would report one of theirs.
+// sequential walk does, whatever order the concurrent reads finish in. It drives
+// the tick's own roster wiring. The first rig's read is held until every other
+// rig's store has been built, so the other rigs' reads have all started before
+// its own: a roster that reported the first error to finish would report one of
+// theirs. The hold is bounded, so a roster that read the rigs one after another
+// fails naming the wait instead of hanging.
 func TestRosterErrorIsTheFirstRigInNameOrder(t *testing.T) {
 	t.Parallel()
 	town, dbs, lister := rosterTown(t, map[string][]string{
@@ -291,30 +344,38 @@ func TestRosterErrorIsTheFirstRigInNameOrder(t *testing.T) {
 	}
 	pool := seatPool("deepseek-flash", 10)
 
-	// Every rig but the first has started its read before the first rig's read
-	// starts, so the reads finish in the reverse of name order.
-	var (
-		mu         sync.Mutex
-		storesMade int
-	)
+	rigOfDir := make(map[string]string, len(dbs))
+	for rigName := range dbs {
+		rigOfDir[filepath.Join(town, rigName)] = rigName
+	}
+	townStore := beadsfake.New()
 	others := len(dbs) - 1
-	allOthersCalled := make(chan struct{})
-	storeFor := func(rigName string) beads.Client {
-		if rigName != "arig" {
-			mu.Lock()
-			storesMade++
-			if storesMade == others {
-				close(allOthersCalled)
+	var othersMade atomic.Int32
+	var heldOut atomic.Bool
+	allOthersMade := make(chan struct{})
+	storeFor := func(dir string) beads.Client {
+		rigName, isRig := rigOfDir[dir]
+		switch {
+		case !isRig:
+			return townStore
+		case rigName == "arig":
+			select {
+			case <-allOthersMade:
+			case <-time.After(rosterStartWait): //testpolicy:allow no-sleep — a hang guard: a roster that reads the rigs at once builds every other rig's store first, so this bound turns a serial read into a named failure instead of a hang
+				heldOut.Store(true)
 			}
-			mu.Unlock()
-		} else {
-			<-allOthersCalled
+		default:
+			if othersMade.Add(1) == int32(others) {
+				close(allOthersMade)
+			}
 		}
 		return dbs[rigName]
 	}
 
-	batch := rosterBatch(town, storeFor, 4)
-	_, err := rosterSnapshotOn(batch, nil, town, pool, lister, time.Now)
+	_, err := specRosterSnapshotWith(newSpecTickReads(), town, pool, lister, storeFor, time.Now)
+	if heldOut.Load() {
+		t.Fatalf("arig's store was built before every other rig's within %s: no other rig's read was in flight with arig's", rosterStartWait)
+	}
 	if err == nil {
 		t.Fatalf("roster read a town whose rigs cannot be listed")
 	}
@@ -323,10 +384,68 @@ func TestRosterErrorIsTheFirstRigInNameOrder(t *testing.T) {
 	}
 }
 
-// TestRosterRefusesARigRegistryItCannotRead: the fan-out's rigs come from the
-// town's registry, and a registry that cannot be read is not a town of no rigs.
-// The roster refuses before reading any seat, rather than counting the live
-// sessions alone as if the town had no dead seats.
+// TestRosterHeldIssueSkipsARigWhoseReadIsInFlight is gt-0mzpm: the batch answers
+// heldIssue only from a rig whose read has finished. The rig's batch already
+// holds a bead when its agent-bead read blocks, so a heldIssue that looked at
+// the rig mid-read would answer from a batch the snapshot does not have yet.
+func TestRosterHeldIssueSkipsARigWhoseReadIsInFlight(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTestRigsConfig(t, town, "arig")
+	writeTownPolecatDir(t, town, "arig", "p1")
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "ar-held", Status: string(beads.StatusOpen), Assignee: "arig/polecats/p1"})
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	store := &blockingStore{Client: db, entered: entered, release: release}
+	batch := newPoolSeatBatch(town, func(string) beads.Client { return store },
+		func(bd beads.Client, id string) (*beads.Issue, error) { return bd.Show(id) })
+	// The landing read answers from the batch first and asks the town only for a
+	// bead the batch does not hold, so a town bead it returns is one the batch
+	// did not answer.
+	work := batch.landingWork(beadsfake.New())
+	done := make(chan struct{})
+	go func() {
+		batch.rig("arig")
+		close(done)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(rosterStartWait): //testpolicy:allow no-sleep — a hang guard only: the store signals the moment the read reaches its blocked agent-bead batch, so this fires only when the read never gets there
+		close(release)
+		t.Fatalf("the rig's read did not reach its blocked agent-bead batch within %s", rosterStartWait)
+	}
+	held, err := work([]string{"ar-held"})
+	if err != nil {
+		t.Fatalf("landing read while the rig's read was in flight: %v", err)
+	}
+	if held["ar-held"] != nil {
+		t.Errorf("the landing read answered a bead from a rig whose read was still in flight")
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(rosterStartWait): //testpolicy:allow no-sleep — a hang guard only: the released read finishes at once, so this fires only when it never does
+		t.Fatalf("the rig's read did not finish within %s", rosterStartWait)
+	}
+	held, err = work([]string{"ar-held"})
+	if err != nil {
+		t.Fatalf("landing read after the rig's read: %v", err)
+	}
+	if held["ar-held"] == nil {
+		t.Fatalf("the landing read could not answer a bead the finished rig's batch holds")
+	}
+	if held["ar-held"].ID != "ar-held" {
+		t.Errorf("the landing read answered %q, want ar-held", held["ar-held"].ID)
+	}
+}
+
+// TestRosterRefusesARigRegistryItCannotRead: a registry that cannot be read is
+// not a town of no rigs. The roster refuses rather than counting the live
+// sessions alone as if the town had no dead seats. The refusal predates the
+// fan-out — the dead-hooked walk that reads every rig already returned the same
+// registry error — and this pins that the roster's new first read does not
+// swallow it.
 func TestRosterRefusesARigRegistryItCannotRead(t *testing.T) {
 	t.Parallel()
 	town, dbs, lister := rosterTown(t, map[string][]string{"arig": {"p1"}})

@@ -497,12 +497,18 @@ func (c specTickClient) ShowMultiple(ids []string) (map[string]*beads.Issue, err
 }
 
 func (c specTickClient) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	// The roster's fan-out reads several rigs at once, so this ledger write
+	// races another rig's without the lock count requires (gt-0mzpm).
+	c.reads.mu.Lock()
 	c.reads.count()
+	c.reads.mu.Unlock()
 	return c.Client.List(opts)
 }
 
 func (c specTickClient) Children(parentID string) ([]*beads.Issue, error) {
+	c.reads.mu.Lock()
 	c.reads.count()
+	c.reads.mu.Unlock()
 	return c.Client.Children(parentID)
 }
 
