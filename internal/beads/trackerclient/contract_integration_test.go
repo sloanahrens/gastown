@@ -57,8 +57,8 @@ func newTracker(t *testing.T, actor string, scope api.Scope) *trackerclient.Clie
 // newTrackerRoles returns the roles one contract case acts through, all on one
 // tracker: the seat the suite runs as, the admin-scope daemon, and a seat for
 // each actor named as a holder. The tracker does not let a seat reassign a held
-// issue or delete one (gt-26dvk), so those rows act through the role the
-// tracker grants them.
+// issue, delete one or force-close one (gt-26dvk, gt-gk7ga), so those rows act
+// through the role the tracker grants them.
 func newTrackerRoles(t *testing.T) beadsfake.Roles {
 	t.Helper()
 	mint := newTrackerServer(t)

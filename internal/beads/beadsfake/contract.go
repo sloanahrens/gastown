@@ -37,8 +37,8 @@ func RunClientContract(t *testing.T, newRoles func(t *testing.T) Roles) {
 // Roles are the clients one contract case acts through, all on one store. The
 // suite runs as Seat. A store that authorizes writes by role may refuse the seat
 // some writes, so those rows act through the role the store grants: Admin for a
-// batch delete and for a takeover of a held issue, and Holder(actor) for a
-// reassignment or transfer that actor's claim allows. A store with no such
+// batch delete, a forced close and a takeover of a held issue, and Holder(actor)
+// for a reassignment or transfer that actor's claim allows. A store with no such
 // rules returns its one client for every role (see OneRole).
 type Roles struct {
 	Seat   beads.Client
