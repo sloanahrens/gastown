@@ -741,7 +741,12 @@ mkdir -p "$TMP/bin"
 cat >"$TMP/bin/go" <<'STUB'
 #!/usr/bin/env bash
 echo "go $1 GT_TEST_DOCKER=${GT_TEST_DOCKER:-unset}" >>"$STUB_LOG"
-[[ "${PWD##*/}" == tracker ]] && echo "go $1 in tracker" >>"$STUB_LOG"
+# The module a call runs in: the working directory, or the directory named by
+# go's -C flag (the nested-module steps use -C so the CPU-class wrapper runs
+# from the root, gt-bhah3).
+wd="${PWD##*/}"
+[[ "${2:-}" == -C ]] && wd="${3##*/}"
+[[ "$wd" == tracker ]] && echo "go $1 in tracker" >>"$STUB_LOG"
 if [[ "$1" == test && -n "${STUB_GO_INTERRUPT:-}" ]]; then
   # Signal the recipe shell (the parent), then wait to be killed.
   kill -TERM "$PPID"
@@ -753,9 +758,9 @@ fi
 dir_ok=1
 if [[ -n "${STUB_GO_FAIL_DIR:-}" ]]; then
   if [[ "$STUB_GO_FAIL_DIR" == '!'* ]]; then
-    [[ "${PWD##*/}" != "${STUB_GO_FAIL_DIR#!}" ]] || dir_ok=0
+    [[ "$wd" != "${STUB_GO_FAIL_DIR#!}" ]] || dir_ok=0
   else
-    [[ "${PWD##*/}" == "$STUB_GO_FAIL_DIR" ]] || dir_ok=0
+    [[ "$wd" == "$STUB_GO_FAIL_DIR" ]] || dir_ok=0
   fi
 fi
 [[ "$1" == "${STUB_GO_FAIL:-}" && $dir_ok == 1 ]] && exit 1
