@@ -149,18 +149,78 @@ func readDirectiveFile(path string) (string, error) {
 // the legacy path when that exists, which is warned about once per process
 // (gt-oz73l). Asking for the shared file yields it once rather than twice.
 func directivePaths(role, townRoot, rigName string) []string {
-	names := []string{SharedDirectiveName}
-	if role != SharedDirectiveName && IsKnownRole(role) {
-		names = append(names, role)
-	}
 	var paths []string
-	for _, name := range names {
+	for _, name := range directiveFileNames(role) {
 		paths = append(paths, layerDirectivePath(CentralDirectiveDir(townRoot), filepath.Join(townRoot, "directives"), name))
 		if rigName != "" {
 			paths = append(paths, layerDirectivePath(RigDirectiveDir(townRoot, rigName), filepath.Join(townRoot, rigName, "directives"), name))
 		}
 	}
 	return paths
+}
+
+// directiveFileNames returns the names that render for role, broadest first:
+// the shared file every role loads, then the role's own when it is a known one.
+func directiveFileNames(role string) []string {
+	names := []string{SharedDirectiveName}
+	if role != SharedDirectiveName && IsKnownRole(role) {
+		names = append(names, role)
+	}
+	return names
+}
+
+// ReadRoleDirectiveFrom returns the directive text LoadRoleDirective would
+// render, reading the files through read instead of os: same names, same order,
+// same Changelog strip and join. found is false when no directive file exists,
+// so a caller can tell no directive from an empty one. A file that exists and
+// cannot be read is an error, as ReadRoleDirectives returns it, where
+// LoadRoleDirective treats it as absent: a caller that hashes the text must not
+// name a directive whose policy it silently dropped. The metrics snapshot uses
+// it to hash the polecat directive through its Env seam (gt-16efl).
+func ReadRoleDirectiveFrom(role, townRoot, rigName string, read func(string) ([]byte, error)) (text string, found bool, err error) {
+	parts := make([]string, 0, 2*len(directiveFileNames(role)))
+	for _, name := range directiveFileNames(role) {
+		texts, readErr := readDirectiveSources(read, name, townRoot, rigName)
+		if readErr != nil {
+			return "", false, readErr
+		}
+		for _, fileText := range texts {
+			found = true
+			// RoleDirectiveSources drops a file that holds only whitespace, so
+			// the join is the same one LoadRoleDirective makes.
+			if strings.TrimSpace(fileText) == "" {
+				continue
+			}
+			parts = append(parts, strings.TrimSpace(stripChangelog(fileText)))
+		}
+	}
+	return strings.Join(parts, "\n"), found, nil
+}
+
+// readDirectiveSources returns each layer's text for name in resolution order:
+// a layer's new path when a file is there, else its legacy file, as
+// layerDirectivePath resolves each layer with a stat. Reading is the test:
+// absence moves on, and any other failure is returned.
+func readDirectiveSources(read func(string) ([]byte, error), name, townRoot, rigName string) ([]string, error) {
+	layers := [][2]string{{CentralDirectiveDir(townRoot), filepath.Join(townRoot, "directives")}}
+	if rigName != "" {
+		layers = append(layers, [2]string{RigDirectiveDir(townRoot, rigName), filepath.Join(townRoot, rigName, "directives")})
+	}
+	var texts []string
+	for _, layer := range layers {
+		for _, path := range []string{filepath.Join(layer[0], name+".md"), filepath.Join(layer[1], name+".md")} {
+			data, readErr := read(path)
+			if errors.Is(readErr, fs.ErrNotExist) {
+				continue
+			}
+			if readErr != nil {
+				return nil, readErr
+			}
+			texts = append(texts, string(data))
+			break // the layer answered; its legacy file is not read as well
+		}
+	}
+	return texts, nil
 }
 
 // DirectivePaths returns the directive files that render for role, broadest

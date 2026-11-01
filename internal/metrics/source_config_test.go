@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // configTestTown is the town the config tests read, so every path the source
@@ -78,6 +80,9 @@ func configTestEnv(t *testing.T, files map[string]string, errs map[string]error,
 		}
 		return nil, fs.ErrNotExist
 	}
+	// No rig in a config fixture has a repo-committed file unless a test
+	// replaces this seam with one that carries it.
+	env.RepoFile = func(string, string, string) ([]byte, bool, error) { return nil, false, nil }
 	if run != nil {
 		env.Run = run
 		env.RunDir = func(ctx context.Context, dir string, argv []string) ([]byte, error) {
@@ -127,6 +132,10 @@ func TestSourceConfigReadsPoolOverrunGateAndParked(t *testing.T) {
 		"parked_rigs":           1,
 		"om_threshold_gastown":  0.75,
 		"om_threshold_beads":    nil,
+		"seat_models":           map[string]string{},
+		"gt_commit":             nil,
+		"directive_hash":        nil,
+		"gate_ids":              nil,
 		"config_probe_failures": 0,
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -444,6 +453,287 @@ func TestSourceConfigUnreadableRigRegistryCostsTheRigColumns(t *testing.T) {
 	}
 	if got["pool_max_total"] != 12 || got["parked_rigs"] != 0 {
 		t.Errorf("pool_max_total = %v, parked_rigs = %v, want 12 and 0 beside the registry gap", got["pool_max_total"], got["parked_rigs"])
+	}
+}
+
+// A town with none of the regime files has none of the regime values: every
+// key is the missing marker and no failure is counted, because a source that
+// is absent is not a source that broke.
+func TestSourceConfigRegimeFieldsAbsentAreNoValue(t *testing.T) {
+	t.Parallel()
+	settings, rigs, _, _ := configTestPaths()
+	got, err := configSource{}.Collect(context.Background(), configTestEnv(t, map[string]string{
+		settings: `{"type": "town-settings", "version": 1}`,
+		rigs:     configRigsFixture("gastown"),
+	}, nil, configRigList(t, `[]`)))
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	for _, key := range []string{"gt_commit", "directive_hash", "seat_models", "gate_ids"} {
+		if value, ok := got[key]; !ok || value != nil {
+			t.Errorf("%s = %v, want the missing marker null", key, value)
+		}
+	}
+	if got["config_probe_failures"] != 0 {
+		t.Errorf("config_probe_failures = %v, want 0: an absent source is not a failed probe", got["config_probe_failures"])
+	}
+}
+
+// The in-force build is the installer's record, not the daemon's: the last
+// receipt that names a binary in place. An "installed" run names the commit it
+// swapped in; a "noop" run swapped nothing, so its prev_commit is the binary
+// already there; a run that only refused or failed left the binary as an
+// earlier receipt recorded it.
+func TestSourceConfigGtCommitReadsTheInstallReceipts(t *testing.T) {
+	t.Parallel()
+	settings, rigs, _, _ := configTestPaths()
+	receipts := filepath.Join(configTestTown, "daemon", "install-receipts.jsonl")
+	state := filepath.Join(configTestTown, "daemon", "state.json")
+	tests := []struct {
+		name     string
+		files    map[string]string
+		errs     map[string]error
+		want     any
+		failures int
+	}{
+		{
+			name:  "the last install names the build in force",
+			files: map[string]string{receipts: `{"event": "installed", "commit": "aaa111"}` + "\n" + `{"event": "installed", "commit": "bbb222"}` + "\n"},
+			want:  "bbb222",
+		},
+		{
+			name:  "a failed install after a good one does not move it",
+			files: map[string]string{receipts: `{"event": "installed", "commit": "bbb222"}` + "\n" + `{"event": "failed", "commit": "ccc333", "reason": "build-failed"}` + "\n"},
+			want:  "bbb222",
+		},
+		{
+			name:  "a noop names the binary already in place",
+			files: map[string]string{receipts: `{"event": "noop", "commit": "ddd444", "prev_commit": "bbb222"}` + "\n"},
+			want:  "bbb222",
+		},
+		{
+			name:  "a record of no install is no value",
+			files: map[string]string{receipts: `{"event": "refused", "commit": "ccc333"}` + "\n"},
+			want:  nil,
+		},
+		{
+			name:  "an install receipt that names no commit is no value",
+			files: map[string]string{receipts: `{"event": "installed", "commit": ""}` + "\n"},
+			want:  nil,
+		},
+		{
+			name:  "a daemon state alone names no install",
+			files: map[string]string{state: `{"commit": "abc1234def"}`},
+			want:  nil,
+		},
+		{
+			name:     "an unreadable receipt file is a gap",
+			errs:     map[string]error{receipts: fs.ErrPermission},
+			want:     nil,
+			failures: 1,
+		},
+		{
+			name:     "a receipt line that does not parse is a gap",
+			files:    map[string]string{receipts: `{"event": "installed",` + "\n"},
+			want:     nil,
+			failures: 1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			files := map[string]string{
+				settings: `{"type": "town-settings", "version": 1}`,
+				rigs:     configRigsFixture("gastown"),
+			}
+			for path, data := range tc.files {
+				files[path] = data
+			}
+			got, err := configSource{}.Collect(context.Background(), configTestEnv(t, files, tc.errs, configRigList(t, `[]`)))
+			if err != nil {
+				t.Fatalf("Collect: %v", err)
+			}
+			if got["gt_commit"] != tc.want {
+				t.Errorf("gt_commit = %v, want %v", got["gt_commit"], tc.want)
+			}
+			if got["config_probe_failures"] != tc.failures {
+				t.Errorf("config_probe_failures = %v, want %d", got["config_probe_failures"], tc.failures)
+			}
+		})
+	}
+}
+
+// A seat's model is what the town's agent config says it runs, in either
+// spelling of the flag. A seat whose agent names no model is left out rather
+// than guessed from the agent's name.
+func TestSourceConfigSeatModelsNamesOnlyConfiguredModels(t *testing.T) {
+	t.Parallel()
+	settings, rigs, _, _ := configTestPaths()
+	tests := []struct {
+		name   string
+		agents string
+		want   map[string]string
+	}{
+		{name: "the separate flag", agents: `{"claude-sonnet": {"args": ["--model", "opus"]}}`, want: map[string]string{"claude-sonnet": "opus"}},
+		{name: "the equals spelling carries the operator's value", agents: `{"claude-sonnet": {"args": ["--model=sonnet[1m]"]}}`, want: map[string]string{"claude-sonnet": "sonnet[1m]"}},
+		{name: "the short flag", agents: `{"claude-sonnet": {"args": ["-m", "haiku"]}}`, want: map[string]string{"claude-sonnet": "haiku"}},
+		{name: "a flag with no value names no model", agents: `{"claude-sonnet": {"args": ["--model"]}}`, want: map[string]string{}},
+		{name: "an agent config naming no model leaves the seat out", agents: `{"claude-sonnet": {"command": "claude"}}`, want: map[string]string{}},
+		{name: "no agent config names no model", agents: `{}`, want: map[string]string{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			files := map[string]string{
+				settings: `{"type": "town-settings", "version": 1, "polecat_pool": {"seats": ` +
+					`{"claude-sonnet": {"cap": 1}, "claude-haiku": {"cap": 1}}}, "agents": ` + tc.agents + `}`,
+				rigs: configRigsFixture("gastown"),
+			}
+			got, err := configSource{}.Collect(context.Background(), configTestEnv(t, files, nil, configRigList(t, `[]`)))
+			if err != nil {
+				t.Fatalf("Collect: %v", err)
+			}
+			if !reflect.DeepEqual(got["seat_models"], tc.want) {
+				t.Errorf("seat_models = %#v, want %#v", got["seat_models"], tc.want)
+			}
+		})
+	}
+}
+
+// The gate id covers the repo-committed tier too: a rig whose gates are merged
+// in .gastown/settings.json has one, and a tier that cannot be read is a gap
+// rather than a rig with no gate.
+func TestSourceConfigGateIDsReadTheRepoCommittedTier(t *testing.T) {
+	t.Parallel()
+	settings, rigs, _, _ := configTestPaths()
+	const repoGates = `{"merge_queue": {"test_command": "make repo-test"}}`
+	tests := []struct {
+		name     string
+		repoFile func() ([]byte, bool, error)
+		want     any
+		failures int
+	}{
+		{
+			name:     "gates only in the repo main",
+			repoFile: func() ([]byte, bool, error) { return []byte(repoGates), true, nil },
+			want:     map[string]string{"gastown": regimeTestHash("test\tmake repo-test\n")},
+		},
+		{
+			name:     "a repo read that fails is a gap",
+			repoFile: func() ([]byte, bool, error) { return nil, false, errors.New("no repo") },
+			want:     nil,
+			failures: 1,
+		},
+		{
+			name:     "a repo file that does not parse is a gap",
+			repoFile: func() ([]byte, bool, error) { return []byte(`{"merge_queue":`), true, nil },
+			want:     nil,
+			failures: 1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			files := map[string]string{
+				settings: `{"type": "town-settings", "version": 1}`,
+				rigs:     configRigsFixture("gastown"),
+				// The rig-root floor names a different gate, so a row that reads
+				// the repo tier reports a different id from one that does not.
+				filepath.Join(configTestTown, "gastown", "config.json"): `{"merge_queue": {"test_command": "make floor-test"}}`,
+			}
+			env := configTestEnv(t, files, nil, configRigList(t, `[]`))
+			repoFile := tc.repoFile
+			env.RepoFile = func(_ string, _ string, relPath string) ([]byte, bool, error) {
+				if relPath != config.RepoSettingsPath {
+					return nil, false, errors.New("unexpected repo path " + relPath)
+				}
+				return repoFile()
+			}
+			got, err := configSource{}.Collect(context.Background(), env)
+			if err != nil {
+				t.Fatalf("Collect: %v", err)
+			}
+			if !reflect.DeepEqual(got["gate_ids"], tc.want) {
+				t.Errorf("gate_ids = %#v, want %#v", got["gate_ids"], tc.want)
+			}
+			if got["config_probe_failures"] != tc.failures {
+				t.Errorf("config_probe_failures = %v, want %d", got["config_probe_failures"], tc.failures)
+			}
+		})
+	}
+}
+
+// A snapshot whose Env has no repo file seam cannot rule out a repo-committed
+// gate, so the map is the missing marker and the gap is counted.
+func TestSourceConfigGateIDsWithoutTheRepoSeamIsAGap(t *testing.T) {
+	t.Parallel()
+	settings, rigs, _, _ := configTestPaths()
+	files := map[string]string{
+		settings: `{"type": "town-settings", "version": 1}`,
+		rigs:     configRigsFixture("gastown"),
+	}
+	env := configTestEnv(t, files, nil, configRigList(t, `[]`))
+	env.RepoFile = nil
+	got, err := configSource{}.Collect(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if got["gate_ids"] != nil {
+		t.Errorf("gate_ids = %#v, want the missing marker null", got["gate_ids"])
+	}
+	if got["config_probe_failures"] != 1 {
+		t.Errorf("config_probe_failures = %v, want 1 for the unwired seam", got["config_probe_failures"])
+	}
+}
+
+// The directive hash covers what the prompt renders: a leading Changelog block
+// is the editors' record, not directive text, so a note added to it alone
+// leaves the hash where it was (config.LoadRoleDirective strips the block).
+func TestSourceConfigDirectiveHashIgnoresTheChangelog(t *testing.T) {
+	t.Parallel()
+	settings, rigs, _, _ := configTestPaths()
+	common := filepath.Join(config.CentralDirectiveDir(configTestTown), "_common.md")
+	polecat := filepath.Join(config.CentralDirectiveDir(configTestTown), "polecat.md")
+	collect := func(commonText string) map[string]any {
+		files := map[string]string{
+			settings: `{"type": "town-settings", "version": 1}`,
+			rigs:     configRigsFixture("gastown"),
+			common:   commonText,
+			polecat:  "role policy\n",
+		}
+		got, err := configSource{}.Collect(context.Background(), configTestEnv(t, files, nil, configRigList(t, `[]`)))
+		if err != nil {
+			t.Fatalf("Collect: %v", err)
+		}
+		return got
+	}
+	plain := collect("## Policy\n\nshared policy\n")
+	withRecord := collect("## Changelog\n\n- 2026-11-01 a note\n\n## Policy\n\nshared policy\n")
+	if plain["directive_hash"] == nil {
+		t.Fatalf("directive_hash = nil, want a hash over the two directive files")
+	}
+	if plain["directive_hash"] != withRecord["directive_hash"] {
+		t.Errorf("directive_hash moved with the Changelog block: %v vs %v", plain["directive_hash"], withRecord["directive_hash"])
+	}
+}
+
+// A directive file the town has not moved to the central layer yet is read
+// from the legacy town directory, as the prompt reader falls back to it.
+func TestSourceConfigDirectiveHashReadsTheLegacyFallback(t *testing.T) {
+	t.Parallel()
+	settings, rigs, _, _ := configTestPaths()
+	files := map[string]string{
+		settings: `{"type": "town-settings", "version": 1}`,
+		rigs:     configRigsFixture("gastown"),
+		filepath.Join(configTestTown, "directives", "_common.md"):               "legacy policy\n",
+		filepath.Join(config.CentralDirectiveDir(configTestTown), "polecat.md"): "role policy\n",
+	}
+	got, err := configSource{}.Collect(context.Background(), configTestEnv(t, files, nil, configRigList(t, `[]`)))
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if want := regimeTestHash("legacy policy\nrole policy"); got["directive_hash"] != want {
+		t.Errorf("directive_hash = %v, want %s over the legacy file and the central one", got["directive_hash"], want)
 	}
 }
 

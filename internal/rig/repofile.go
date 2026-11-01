@@ -25,6 +25,13 @@ type RepoFileOpener func(repoPath string) RepoFileReader
 // openRepoFile is the production RepoFileOpener.
 func openRepoFile(repoPath string) RepoFileReader { return git.NewGit(repoPath) }
 
+// RepoFileFor is ReadRepoFile with the production git reader, for a caller
+// outside this package that reads a rig's tracked file through a seam of its
+// own (the metrics snapshot's Env, gt-16efl).
+func RepoFileFor(townRoot, rigName, relPath string) (RepoFile, error) {
+	return ReadRepoFile(openRepoFile, townRoot, rigName, relPath)
+}
+
 // RepoFile is a repo-relative file a rig holds: its contents, where they came
 // from, and whether anything has the file at all.
 type RepoFile struct {

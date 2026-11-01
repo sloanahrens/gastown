@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -74,6 +75,48 @@ func TestDirectiveLegacyReadWarnsOncePerFile(t *testing.T) {
 	}
 	if lines := strings.Count(buf.String(), legacy); lines != 1 {
 		t.Errorf("warnings name %s %d time(s), want once:\n%s", legacy, lines, buf.String())
+	}
+}
+
+// ReadRoleDirectiveFrom resolves through the caller's reader the same text
+// LoadRoleDirective renders: both layers, the Changelog strip and the join.
+func TestReadRoleDirectiveFromMatchesTheReader(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeDirective(t, filepath.Join(CentralDirectiveDir(town), "_common.md"),
+		"## Changelog\n\n- a note\n\n## Shared\n\nshared\n")
+	writeDirective(t, filepath.Join(RigDirectiveDir(town, "alpha"), "polecat.md"), "rig rule")
+	text, found, err := ReadRoleDirectiveFrom("polecat", town, "alpha", os.ReadFile)
+	if err != nil || !found {
+		t.Fatalf("ReadRoleDirectiveFrom = (%q, %v, %v), want the directive found", text, found, err)
+	}
+	if want := LoadRoleDirective("polecat", town, "alpha"); text != want {
+		t.Errorf("ReadRoleDirectiveFrom = %q, want the reader's %q", text, want)
+	}
+}
+
+// A reader that reports no file gives found=false, and one that reports a
+// failure other than absence is an error rather than a dropped policy.
+func TestReadRoleDirectiveFromReportsAbsenceAndUnreadable(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		read      func(string) ([]byte, error)
+		wantFound bool
+		wantErr   bool
+	}{
+		{"no file", func(string) ([]byte, error) { return nil, fs.ErrNotExist }, false, false},
+		{"an empty file", func(string) ([]byte, error) { return []byte("  \n"), nil }, true, false},
+		{"an unreadable file", func(string) ([]byte, error) { return nil, fs.ErrPermission }, false, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, found, err := ReadRoleDirectiveFrom("polecat", t.TempDir(), "", tc.read)
+			if (err != nil) != tc.wantErr || found != tc.wantFound {
+				t.Errorf("found, err = %v, %v, want %v, %v", found, err, tc.wantFound, tc.wantErr)
+			}
+		})
 	}
 }
 
