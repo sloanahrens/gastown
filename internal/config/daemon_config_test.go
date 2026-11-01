@@ -520,6 +520,66 @@ func TestBirdReportsConfigDefaultsAndRefusals(t *testing.T) {
 	}
 }
 
+// findings_filer (gt-rws9m) decodes strictly with its own fields, defaults its
+// interval and per-pass cap, and refuses a value the patrol cannot act on: a
+// typo must not read as a patrol that runs on something else.
+func TestFindingsFilerConfigDefaultsAndRefusals(t *testing.T) {
+	t.Parallel()
+
+	var cfg DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(`{"patrols":{"findings_filer":{"enabled":true,"interval":"30m","max_per_run":2}}}`), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	ff := cfg.Patrols.FindingsFiler
+	if ff == nil || !ff.Enabled {
+		t.Fatalf("findings_filer = %+v, want enabled", ff)
+	}
+	if got, err := ff.IntervalValue(); err != nil || got != 30*time.Minute {
+		t.Errorf("interval = %v, %v; want 30m", got, err)
+	}
+	if got := ff.MaxPerRunValue(); got != 2 {
+		t.Errorf("max_per_run = %d, want 2", got)
+	}
+
+	var absent DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(`{"patrols":{"handler":{"enabled":true}}}`), &absent); err != nil {
+		t.Fatalf("decode without findings_filer: %v", err)
+	}
+	if absent.Patrols.FindingsFiler != nil {
+		t.Errorf("absent key decoded as %+v", absent.Patrols.FindingsFiler)
+	}
+
+	// The accessors answer for a block that is not there, so the patrol reads
+	// the same defaults whether a town wrote the key or not.
+	var none *FindingsFilerConfig
+	if got, err := none.IntervalValue(); err != nil || got != FindingsFilerDefaultInterval {
+		t.Errorf("unset interval = %v, %v; want %v", got, err, FindingsFilerDefaultInterval)
+	}
+	if got := none.MaxPerRunValue(); got != FindingsFilerDefaultMaxPerRun {
+		t.Errorf("unset max_per_run = %d, want %d", got, FindingsFilerDefaultMaxPerRun)
+	}
+
+	bad := map[string]string{
+		"not an object":           `{"findings_filer": "on"}`,
+		"unknown key":             `{"findings_filer": {"enable": true}}`,
+		"unparseable interval":    `{"findings_filer": {"interval": "soon"}}`,
+		"zero interval":           `{"findings_filer": {"interval": "0s"}}`,
+		"negative interval":       `{"findings_filer": {"interval": "-5m"}}`,
+		"zero max_per_run":        `{"findings_filer": {"max_per_run": 0}}`,
+		"negative max_per_run":    `{"findings_filer": {"max_per_run": -1}}`,
+		"max_per_run not a count": `{"findings_filer": {"max_per_run": "five"}}`,
+	}
+	for name, doc := range bad {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var p PatrolsConfig
+			if err := json.Unmarshal([]byte(doc), &p); err == nil {
+				t.Fatalf("%s decoded without an error: %+v", name, p.FindingsFiler)
+			}
+		})
+	}
+}
+
 // TestForgejoTokenDir pins the landing worker's token-directory resolution
 // (gt-fn9e6.3): the configured directory wins, and an unconfigured worker
 // falls back to the host default. Tokens are never config values, so the only
