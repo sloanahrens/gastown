@@ -186,14 +186,9 @@ section>h2 .foldsum{margin-left:auto;text-transform:none;letter-spacing:0;white-
 .lrows{max-height:70vh;overflow:auto}
 .lrows th{position:sticky;top:0;background:var(--panel)}
 .costchip{border:1px solid currentColor;border-radius:999px;padding:0 7px;font-size:11px;white-space:nowrap;color:var(--dim)}
-/* The providers table is nine columns wide, so a narrow panel scrolls it
-   sideways instead of clipping the Status cell against the panel edge. A
-   scrollbar is no cue on a host whose bars are overlay-style, so the cut edge
-   gets a fade: a dim gradient pinned to the panel's left and right edges, over
-   a panel-coloured cover that scrolls with the table (background-attachment:
-   local). While the table is wider than the panel the far cover sits off
-   screen and the fade shows at the cut edge; at either end of the scroll, and
-   for a table that fits, the cover sits over the fade and none shows. */
+/* A nine-column table in a narrow panel scrolls sideways, and the fade at the
+   cut edge is the cue: a dim gradient under a panel-coloured cover that scrolls
+   with the table, so the fade shows only while the table overflows. */
 .costscroll{
   overflow-x:auto;
   background:
@@ -1382,18 +1377,18 @@ function percentile(xs, p) {
   return v[Math.min(v.length - 1, Math.max(0, Math.ceil(p * v.length) - 1))];
 }
 
-// stageSummary is the gate or om part of the compact line that replaced its
-// chart: the median, 90th percentile and slowest wall time over the landings in
-// the window. A stage no landing ran has no reading, so the part is left out.
+// stageSummary is the gate or om part of the compact stats line: the median,
+// 90th percentile and slowest wall time over the landings in the window. A stage
+// no landing ran has no reading, so the part is left out.
 function stageSummary(name, secs) {
   const v = secs.filter(x => x != null);
   if (!v.length) return null;
   return name + " · median " + fmtDur(median(v)) + " · p90 " + fmtDur(percentile(v, 0.9)) + " · slowest " + fmtDur(Math.max(...v));
 }
 
-// loadSummary is the compact line that replaced the hourly load chart: the last
-// recorded reading ("now"), the average and peak over the hours on record, and
-// how many of the 24 hours were recorded, as the old chart's title said.
+// loadSummary is the hourly load's compact stats line: the last recorded reading
+// ("now"), the average and peak over the hours on record, and how many of the 24
+// hours were recorded.
 function loadSummary(loads) {
   if (!loads.length) return null;
   const vals = loads.map(p => p.v);
@@ -1481,8 +1476,8 @@ function renderTrend(s) {
   }
   lhbody.append(el("div", "k title", "landings per hour, red = rejected"), bars, timeAxis(t0, t1));
 
-  // The two lower charts the operator did not read are one compact stats line
-  // each now, computed from the same reading; no new endpoint or data source.
+  // The gate, om and load readings are one compact stats line each, off the
+  // same reading the chart above draws.
   const stageLines = [stageSummary("gate", stages.map(p => p.gate_secs)), stageSummary("om", stages.map(p => p.om_secs))].filter(Boolean);
   if (stageLines.length) box.append(el("div", "k title", stageLines.join("  ")));
   else box.append(el("div", "empty", "no stage lines in the last 24 hours"));

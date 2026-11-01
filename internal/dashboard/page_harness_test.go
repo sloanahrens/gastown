@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -464,8 +465,8 @@ var (
 
 // pageSections is the page's grid as the stub builds it: every section in
 // index.html's .grid, with the heading it folds under. The markup is embedded
-// and fixed, so it is parsed once and every page construction reads the same
-// list.
+// and fixed, so it is parsed once; every call gets its own copy, so a test that
+// edits a spec cannot change the grid the next page is built from.
 func pageSections(t *testing.T) []foldSectionSpec {
 	t.Helper()
 
@@ -473,7 +474,41 @@ func pageSections(t *testing.T) []foldSectionSpec {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return specs
+	out := make([]foldSectionSpec, len(specs))
+	for i, sp := range specs {
+		sp.Head = slices.Clone(sp.Head)
+		out[i] = sp
+	}
+	return out
+}
+
+// The grid is parsed once and cached, so each caller has to get a copy of it: a
+// test that edits the spec it read would otherwise change what every later page
+// is built from (gt-ldwn5).
+func TestPageSectionsHandsEachCallerItsOwnCopy(t *testing.T) {
+	t.Parallel()
+
+	first := pageSections(t)
+	if len(first) == 0 {
+		t.Fatal("index.html's grid holds no sections")
+	}
+	i := 0
+	for ; i < len(first) && len(first[i].Head) == 0; i++ {
+	}
+	if i == len(first) {
+		t.Fatal("no section carries a heading, so the heading's copy cannot be checked")
+	}
+	key, head := first[i].Key, first[i].Head[0]
+	first[i].Key = "edited"
+	first[i].Head[0] = foldHeadPart{Text: "edited"}
+
+	second := pageSections(t)
+	if second[i].Key != key {
+		t.Errorf("a second call read the section's key as %q, want %q: the cached spec was changed by the first caller", second[i].Key, key)
+	}
+	if second[i].Head[0] != head {
+		t.Errorf("a second call read the heading's first part as %+v, want %+v: the cached heading was changed by the first caller", second[i].Head[0], head)
+	}
 }
 
 var pageSectionsOnce = sync.OnceValues(parsePageSections)

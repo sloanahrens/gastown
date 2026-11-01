@@ -472,21 +472,57 @@ func TestTheEventsHeaderShowsNoStatsForAnEmptyFeed(t *testing.T) {
 	if chips := eventChips(t, dom); len(chips) != 0 {
 		t.Errorf("an empty feed drew %d stat chips, want none: %+v", len(chips), chips)
 	}
+
+	// The control: the same header paints chips once a reading carries an alert
+	// in the hour, so a header that never drew any fails the empty-feed check
+	// rather than passing it.
+	stateAlerts(t, dom, alertAt(rejectedAlert(1, "gt-a"), pageNow(t, dom).Add(-time.Minute), LevelWarn))
+	if chips := eventChips(t, dom); len(chips) == 0 {
+		t.Error("a feed with an alert in the hour drew no chips, so the empty-feed check above passes for a header that draws none at all")
+	}
 }
 
 // The EVENTS rows' time cell never wraps: the column it sat in was 62px, less
 // than the page's monospace needs for "14:28:28", so the operator's screenshot
-// showed one stamp over two lines ("14:28:2" above "8"). The column is sized to
-// the stamp it holds and the cell is told not to break (gt-y3fau).
+// showed one stamp over two lines ("14:28:2" above "8") (gt-y3fau). The harness
+// has no layout engine, so the check is the cell the page draws the stamp in
+// and the declarations the row and that cell carry.
 func TestTheEventsTimeCellNeverWraps(t *testing.T) {
 	t.Parallel()
 
-	if rule := cssRule(t, ".evrow"); strings.Contains(rule, "62px") {
-		t.Errorf("the EVENTS row still sizes its time column at 62px, narrower than a stamp: %q", rule)
-	} else if !strings.Contains(rule, "grid-template-columns:max-content") {
-		t.Errorf("the EVENTS row does not size its time column to the stamp: %q", rule)
+	dom := newPageDOM(t)
+	stateAlerts(t, dom, alertAt(rejectedAlert(1, "gt-a"), pageNow(t, dom).Add(-time.Minute), LevelWarn))
+
+	row, stamp := drawnStampCell(t, dom)
+	if !slices.Contains(strings.Fields(row), "evrow") {
+		t.Fatalf("the alert drew in a row classed %q, want an .evrow", row)
 	}
-	if rule := cssRule(t, ".evrow .t"); !strings.Contains(rule, "white-space:nowrap") {
-		t.Errorf("the EVENTS time cell may still wrap: %q", rule)
+	if stamp != "t" {
+		t.Fatalf("the row drew its stamp in a cell classed %q, want .t, the cell the no-wrap rule styles", stamp)
 	}
+
+	// The grid's first track holds the stamp, so it takes the stamp's width.
+	grid := declOf(t, topRule(t, ".evrow"), "grid-template-columns")
+	if first, _, _ := strings.Cut(grid, " "); first != "max-content" {
+		t.Errorf("the .evrow rule sizes its stamp column %q, want the first track max-content so the column is as wide as the stamp", grid)
+	}
+	if got := declOf(t, topRule(t, ".evrow .t"), "white-space"); got != "nowrap" {
+		t.Errorf("the .evrow .t rule has white-space %q, want nowrap so the stamp stays on one line", got)
+	}
+}
+
+// drawnStampCell is the first row the EVENTS feed drew and the class of the cell
+// holding its stamp.
+func drawnStampCell(t *testing.T, dom *pageDOM) (row, stamp string) {
+	t.Helper()
+
+	js := `(function () {
+		var r = __byId["events"].children[0];
+		return r ? r.className + "\u0000" + r.children[0].className : "";
+	})()`
+	row, stamp, ok := strings.Cut(pageExpr(t, dom, js), "\u0000")
+	if !ok {
+		t.Fatal("the EVENTS feed drew no row to read the stamp cell from")
+	}
+	return row, stamp
 }
