@@ -13,16 +13,24 @@
 // otherwise. Wall time depends on host load, so nothing fails on it by
 // default (gt-z7qtk); -max-wall turns the tier's wall into a failure on
 // request.
+//
+// -jsonl <path> -run <id> also appends one line per package to a series, so
+// "where does the gate's time go" can be read over weeks rather than from one
+// run's report (gt-u0up0). The report and the exit code do not change; a
+// series the tool cannot write is exit 2, never a silent success.
 package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -48,22 +56,39 @@ type event struct {
 }
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, host{now: time.Now, load1: hostLoad1}))
+}
+
+// host is what run reads outside the stream: the clock a stream with no
+// timestamps is stamped from, the load a series line carries, and the file the
+// series appends to. main wires the real ones; a test injects them, so no test
+// reads the host and every failure path the series can hit has a case.
+type host struct {
+	now   func() time.Time
+	load1 func() (float64, bool)
+	// open appends to a path; nil means the real file.
+	open func(path string) (io.WriteCloser, error)
 }
 
 // run reads a go test -json stream from stdin and writes the report to
 // stdout. The exit code is 1 when any package or test failed, else 3 when
 // -max-wall is set and the tier is over it, else 0; 2 means the runner
-// itself failed.
-func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+// itself failed, a series it could not write included.
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer, h host) int {
 	fs := flag.NewFlagSet("tierwall", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	bar := fs.Duration("bar", 90*time.Second, "the wall the tier line is judged against (OK or OVER); it fails nothing")
 	maxWall := fs.Duration("max-wall", 0, "exit 3 when the tier is over this wall; 0 turns the check off")
+	jsonl := fs.String("jsonl", "", "append one JSON line per package to this file (needs -run)")
+	runID := fs.String("run", "", "the run id each -jsonl line carries")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
+		return 2
+	}
+	if *jsonl != "" && *runID == "" {
+		fmt.Fprintln(stderr, "tierwall: -jsonl needs -run <id>: a series line with no run cannot be placed")
 		return 2
 	}
 
@@ -72,8 +97,29 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "tierwall:", err)
 		return 2
 	}
-	if err := r.print(*bar); err != nil {
-		fmt.Fprintln(stderr, "tierwall:", err)
+	var seriesErr error
+	if *jsonl != "" {
+		data, err := r.series(*runID, h)
+		switch {
+		case err != nil:
+			seriesErr = err
+		case len(data) == 0:
+			fmt.Fprintf(stderr, "tierwall: no package events in the stream; nothing appended to %s\n", *jsonl)
+		default:
+			seriesErr = appendLines(*jsonl, data, h.open)
+		}
+	}
+	reportErr := r.print(*bar)
+	failedRunner := false
+	if reportErr != nil {
+		fmt.Fprintln(stderr, "tierwall:", reportErr)
+		failedRunner = true
+	}
+	if seriesErr != nil {
+		fmt.Fprintln(stderr, "tierwall:", seriesErr)
+		failedRunner = true
+	}
+	if failedRunner {
 		return 2
 	}
 	switch {
@@ -102,6 +148,7 @@ type report struct {
 	pkgOut  map[string][]string // package-level output held until the package reports
 	builds  map[string][]string // build-output held per import path
 	elapsed map[string]float64  // each package's pass/fail Elapsed, in seconds
+	results map[string]string   // each package's verdict: pass, fail or skip
 }
 
 func newReport(out io.Writer) *report {
@@ -111,6 +158,7 @@ func newReport(out io.Writer) *report {
 		pkgOut:  map[string][]string{},
 		builds:  map[string][]string{},
 		elapsed: map[string]float64{},
+		results: map[string]string{},
 	}
 }
 
@@ -184,8 +232,11 @@ func (r *report) verdict(e event) {
 	}
 	lines := r.pkgOut[e.Package]
 	delete(r.pkgOut, e.Package)
+	r.results[e.Package] = e.Action
 	if e.Action == "skip" {
-		// A package with no test files ran nothing and earns no line.
+		// A package with no test files ran nothing and earns no line in the
+		// report. It is still a package the run covered, so the series keeps
+		// it, at its zero wall.
 		return
 	}
 	r.elapsed[e.Package] = e.Elapsed
@@ -228,6 +279,117 @@ func (r *report) tier() time.Duration {
 		return 0
 	}
 	return r.last.Sub(r.first)
+}
+
+// wallLine is one package's wall in one run: the JSON object -jsonl appends.
+// load1 is left out when the host reports none, so a line never carries a load
+// it did not read.
+type wallLine struct {
+	TS     time.Time `json:"ts"`
+	Run    string    `json:"run"`
+	Pkg    string    `json:"pkg"`
+	WallS  float64   `json:"wall_s"`
+	Result string    `json:"result"`
+	Load1  *float64  `json:"load1,omitempty"`
+}
+
+// series renders one line per package the stream reported a verdict for,
+// sorted by package so one stream always renders one file. ts is the run's own
+// start, the stream's first event; a stream with no timestamps is stamped from
+// the clock. The load is read once for the run, and left out when the host
+// reports none.
+func (r *report) series(runID string, h host) ([]byte, error) {
+	pkgs := make([]string, 0, len(r.results))
+	for pkg := range r.results {
+		pkgs = append(pkgs, pkg)
+	}
+	if len(pkgs) == 0 {
+		return nil, nil
+	}
+	sort.Strings(pkgs)
+	ts := r.first
+	if ts.IsZero() {
+		ts = h.now()
+	}
+	var load *float64
+	if v, ok := h.load1(); ok {
+		load = &v
+	}
+	var buf bytes.Buffer
+	for _, pkg := range pkgs {
+		line, err := json.Marshal(wallLine{
+			TS:     ts,
+			Run:    runID,
+			Pkg:    pkg,
+			WallS:  r.elapsed[pkg],
+			Result: r.results[pkg],
+			Load1:  load,
+		})
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(line)
+		buf.WriteByte('\n')
+	}
+	return buf.Bytes(), nil
+}
+
+// appendLines appends data to path in one write, opened O_APPEND so two runs
+// writing at once cannot interleave their lines. The parent directory is
+// created first: the town's runtime directory need not exist before the first
+// run records. open names the file's opener; nil means the real appending
+// file.
+func appendLines(path string, data []byte, open func(string) (io.WriteCloser, error)) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	if open == nil {
+		open = openAppend
+	}
+	f, err := open(path)
+	if err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	_, werr := f.Write(data)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		return fmt.Errorf("%s: %w", path, werr)
+	}
+	return nil
+}
+
+// openAppend opens path for appending, creating it.
+func openAppend(path string) (io.WriteCloser, error) {
+	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+}
+
+// hostLoad1 reads the host's 1-minute load average, the number a slow wall is
+// read against. It mirrors internal/land's reader rather than importing that
+// package: land carries the whole landing path, and this tool is built inside
+// the gate it measures.
+func hostLoad1() (float64, bool) {
+	if data, err := os.ReadFile("/proc/loadavg"); err == nil {
+		var load float64
+		if _, err := fmt.Sscanf(string(data), "%f", &load); err == nil {
+			return load, true
+		}
+	}
+	out, err := exec.Command("/usr/sbin/sysctl", "-n", "vm.loadavg").Output()
+	if err != nil {
+		return 0, false
+	}
+	// macOS prints "{ 1.23 4.56 7.89 }".
+	fields := strings.Fields(strings.Trim(strings.TrimSpace(string(out)), "{ }"))
+	if len(fields) == 0 {
+		return 0, false
+	}
+	load, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil {
+		return 0, false
+	}
+	return load, true
 }
 
 func (r *report) printLines(lines []string) {
