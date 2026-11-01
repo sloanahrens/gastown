@@ -313,6 +313,29 @@ func TestListAssignedIssueStatusesReportsBothFailedReads(t *testing.T) {
 	}
 }
 
+// A fallback read that answers with JSON of the wrong shape is a failed read,
+// not an empty hook: the parse error has to reach the caller.
+func TestListAssignedIssueStatusesReportsUnparsableTableRead(t *testing.T) {
+	t.Parallel()
+
+	r := newRecorder(func(args []string) reply {
+		switch strings.Join(args, " ") {
+		case assigneeUnionQuery:
+			return reply{stderr: "search count wisps: invalid connection\n", err: exitError{1}}
+		case assigneeTableList:
+			return reply{stdout: `{"data":[]}`}
+		}
+		t.Fatalf("unexpected bd call: %v", args)
+		return reply{}
+	})
+	b := newRecordedBeads(t.TempDir(), r)
+
+	_, err := b.ListAssignedIssueStatuses("gastown/polecats/toast", IssueStatusHooked, StatusInProgress)
+	if err == nil || !strings.Contains(err.Error(), "parsing bd list output") {
+		t.Fatalf("err = %v, want the bd list parse failure", err)
+	}
+}
+
 func TestListDurableUsesBDListFilters(t *testing.T) {
 	ResetBdAllowStaleCacheForTest()
 	logPath := installMockBDRecorder(t)
