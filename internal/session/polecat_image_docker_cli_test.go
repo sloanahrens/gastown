@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/sweeprunner"
 	"github.com/steveyegge/gastown/internal/templates"
 )
 
@@ -97,5 +98,19 @@ func TestPolecatImageInstallsLsofPinned(t *testing.T) {
 	}
 	if installs != 1 {
 		t.Errorf("%d apt install lines name \"lsof=${LSOF_VERSION}\", want exactly 1: the image needs lsof pinned in the base-tools layer", installs)
+	}
+}
+
+// TestPolecatImageCopiesTheSweepRunner pins that the image carries the program
+// the runner container runs, at the path the sweep runner's backends name: a
+// rename on either side would start a container whose command does not exist.
+//
+// Mutation: change the COPY's target, or sweeprunner.RunnerCommand, and this
+// goes red.
+func TestPolecatImageCopiesTheSweepRunner(t *testing.T) {
+	t.Parallel()
+	want := "COPY bin/sweep-run " + sweeprunner.RunnerCommand
+	if !slices.Contains(dockerfileInstructions(t), want) {
+		t.Errorf("the Dockerfile has no %q: the runner container runs sweeprunner.RunnerCommand, so the image must hold the binary there", want)
 	}
 }

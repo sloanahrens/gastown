@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/templates"
 )
 
 // TestPolecatImageInstallsDoltPinned pins how the image installs Dolt: the
@@ -12,8 +14,8 @@ import (
 // /usr/local/bin. The tier-sweep runner's doltserver, deps and cmd tests start
 // a server or check its version on PATH, and an unchecked download would let a
 // rebuild ship a different server than the town runs (gt-q7wkn).
-// Mutation: drop the sha256sum check, a digest ARG, or the DOLT_VERSION ARG and
-// this goes red.
+// Mutation: drop the sha256sum check, a digest ARG, or the DOLT_VERSION ARG, or
+// move DOLT_VERSION off templates.DoltVersion, and this goes red.
 func TestPolecatImageInstallsDoltPinned(t *testing.T) {
 	t.Parallel()
 	ins := dockerfileInstructions(t)
@@ -37,6 +39,9 @@ func TestPolecatImageInstallsDoltPinned(t *testing.T) {
 	}
 	if !regexp.MustCompile(`^\d+\.\d+\.\d+$`).MatchString(version) {
 		t.Errorf("the Dockerfile's DOLT_VERSION is %q, want a pinned x.y.z version so a rebuild keeps the town's server version", version)
+	}
+	if version != templates.DoltVersion {
+		t.Errorf("the Dockerfile's DOLT_VERSION is %q, want %q (templates.DoltVersion): the image's client and the town's server are one version", version, templates.DoltVersion)
 	}
 	sha := regexp.MustCompile(`^[0-9a-f]{64}$`)
 	for _, arch := range []string{"ARM64", "AMD64"} {

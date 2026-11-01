@@ -21,8 +21,9 @@ const (
 	// OutputDir is where the run writes result.json and its logs.
 	OutputDir = "/out"
 	// RunnerCommand is the program the runner container runs: the sweep-run the
-	// polecat image carries. Both backends name it, because the image's own default
-	// is bash, which exits at once in a container with no terminal.
+	// polecat image carries (deploy/polecat/Dockerfile copies it to this path). Both
+	// backends name it, because the image's own default is bash, which exits at once
+	// in a container with no terminal.
 	RunnerCommand = "/usr/local/bin/sweep-run"
 
 	// EnvRig is the rig whose sweep the runner runs.
@@ -38,9 +39,6 @@ const (
 const (
 	// program is the CLI every step runs.
 	program = "docker"
-	// dindPort is the engine's plain-TCP port: the sidecar runs with --tls=false
-	// on an internal network and publishes nothing.
-	dindPort = "2375"
 	// dindDataPath is where the sidecar's engine keeps its state, on the run's
 	// own volume.
 	dindDataPath = "/var/lib/docker"

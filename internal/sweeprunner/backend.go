@@ -1,5 +1,21 @@
 package sweeprunner
 
+// The sidecar engine's address and port, which both backends hand the runner
+// (DOCKER_HOST) and the sidecar (--host).
+const (
+	// dindAddress is where the runner reaches the sidecar: the runner's own
+	// loopback, because it shares the sidecar's network namespace (the pod's,
+	// with the Kubernetes backend; the sidecar container's, which the Docker
+	// backend's runner joins). The sidecar binds this address too; a bind on
+	// 0.0.0.0 would answer at the pod IP or the run network, where another
+	// workload could drive the privileged engine (gt-7zy61).
+	dindAddress = "127.0.0.1"
+
+	// dindPort is the engine's plain-TCP port: the sidecar runs with --tls=false
+	// on an internal network and publishes nothing.
+	dindPort = "2375"
+)
+
 // Backend renders a Spec into the steps that run it on one engine: the Docker
 // Backend renders CLI argv, and the Kubernetes one renders a Job (gt-7zy61).
 type Backend interface {

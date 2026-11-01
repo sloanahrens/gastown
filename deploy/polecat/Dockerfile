@@ -20,7 +20,8 @@
 # digest: a registry pull verifies every layer, where a tarball fetched in a
 # RUN is verified only if a sha256 is written out beside it and kept in step.
 # Only the client binary reaches the image below, so a sandbox gets a CLI and
-# no daemon (gt-9lmam). Moving DindImage means moving this digest with it.
+# no daemon (gt-9lmam). TestPolecatImageInstallsDockerCLIPinned keeps this digest
+# equal to DindImage's.
 ARG DOCKER_CLI_DIGEST=sha256:7dcdfc4a20246236f558175182ccace1eb15a41bd3eb119dd2284f393498b7c1
 FROM data.forgejo.org/oci/docker@${DOCKER_CLI_DIGEST} AS docker-cli
 
@@ -73,9 +74,8 @@ ARG GOLANGCI_LINT_VERSION=v2.13.2
 ARG LIBICU_VERSION=74.2-1ubuntu3.1
 # lsof lets the sweep runner's doltserver integration test name the process that
 # holds a port (internal/doltserver TestIntegrationProcessIdentity); the image
-# has neither lsof nor ss otherwise. Version read with `apt-cache policy lsof` in
-# ubuntu:24.04 on 2026-11-01; re-read it if the base image tag moves or noble
-# supersedes the candidate, since the exact pin fails the build once superseded.
+# has neither lsof nor ss otherwise. Version read the same way as LIBICU_VERSION,
+# with `apt-cache policy lsof`, on 2026-11-01.
 ARG LSOF_VERSION=4.95.0-1build3
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -123,7 +123,8 @@ RUN ARCH=$(dpkg --print-architecture) \
     && tar -C /usr/local -xzf /tmp/go.tgz && rm /tmp/go.tgz
 
 # The Dolt client, at the version the town's server runs (internal/templates/
-# images.go DoltVersion): the sweep runner's internal/doltserver, internal/deps
+# images.go DoltVersion, which TestPolecatImageInstallsDoltPinned keeps equal to
+# DOLT_VERSION): the sweep runner's internal/doltserver, internal/deps
 # and internal/cmd tests start or check a server and need it on PATH (gt-q7wkn).
 ARG DOLT_VERSION=2.3.2
 # sha256 of dolt-linux-arm64.tar.gz and dolt-linux-amd64.tar.gz at
@@ -249,7 +250,9 @@ COPY bin/bd /usr/local/bin/bd
 # The trim helper a cache-volume container runs; plugin.md, "Per-rig cache
 # volumes", says why the trim has to run in the image.
 COPY bin/polecat-image /usr/local/bin/polecat-image
-# The entrypoint a tier-sweep runner container runs (cmd/sweep-run, gt-q7wkn).
+# The entrypoint a tier-sweep runner container runs (cmd/sweep-run, gt-q7wkn); its
+# path is sweeprunner.RunnerCommand, which TestPolecatImageCopiesTheSweepRunner
+# keeps equal to this COPY's target.
 COPY bin/sweep-run /usr/local/bin/sweep-run
 RUN chmod 0755 /usr/local/bin/gt /usr/local/bin/bd /usr/local/bin/polecat-image /usr/local/bin/sweep-run
 
