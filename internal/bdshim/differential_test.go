@@ -180,6 +180,11 @@ func runDifferential(c differentialCase) (differentialReport, error) {
 	if len(failures) > 0 {
 		return report, errors.New(strings.Join(failures, "\n\n"))
 	}
+	// Rows that were all skipped as unhandled prove nothing about the shim: the
+	// gate passes only when at least one row went through a handler.
+	if report.compared+report.diverged == 0 {
+		return report, fmt.Errorf("no golden row went through a handler (%d rows, all unhandled): the differential test compared nothing", report.goldens)
+	}
 	return report, nil
 }
 
@@ -586,4 +591,25 @@ func TestDifferentialAwaitingRecordingShrinks(t *testing.T) {
 			t.Errorf("%s: error = %v, want the stray entry named", t.Name(), err)
 		}
 	})
+}
+
+// A directory of goldens whose every verb is unhandled and listed passes none
+// of the shim's answers through a comparison; the gate must not call that green.
+func TestDifferentialRefusesAGateThatComparedNothing(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeGolden(t, dir, "kv-get", "{}\n", 0)
+	c := differentialCase{
+		dir:      dir,
+		rows:     []differentialRow{{stem: "kv-get", argv: []string{"kv", "get", "k"}}},
+		handlers: map[string]Handler{},
+		known:    map[string]bool{"kv": true},
+	}
+	_, err := runDifferential(c)
+	if err == nil {
+		t.Fatal("runDifferential passed with every row skipped as unhandled")
+	}
+	if !strings.Contains(err.Error(), "compared nothing") {
+		t.Errorf("error = %q, want it to say nothing was compared", err)
+	}
 }
