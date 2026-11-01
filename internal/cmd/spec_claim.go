@@ -8,8 +8,8 @@ import (
 )
 
 // The spec dispatcher's target-claim check (gt-n6jbw). The peer set is the
-// duplicate guard's pool, whose fetch is cached for the tick, so the rule
-// costs the slings that follow no read of their own.
+// duplicate guard's pool, whose fetch is cached, so the rule costs the slings
+// that follow no read of their own.
 
 // specCandidateClaim reduces the bead about to be slung to its claim: the test
 // files and test identifiers its own text names. The paths go through

@@ -2814,8 +2814,8 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 			}
 			return children(id)
 		},
-		// The target-claim rule's peer set comes from the guard's own pool, read
-		// once per rig per tick and reused by every sling of this tick (gt-n6jbw).
+		// The target-claim rule's peer set comes from the guard's own pool, so a
+		// sling that reuses the cached pool costs no read of its own (gt-n6jbw).
 		Claims: func(beadID string) ([]specdispatch.Claimant, error) {
 			return specTargetClaims(townRoot, beadID)
 		},
