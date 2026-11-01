@@ -105,10 +105,6 @@ var knownUnhandledVerbs = map[string]bool{
 	"dep":      true,
 	"label":    true,
 	"events":   true,
-	"delete":   true,
-	"defer":    true,
-	"undefer":  true,
-	"unclaim":  true,
 	"comment":  true,
 }
 

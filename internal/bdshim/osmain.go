@@ -24,6 +24,10 @@ var handlers = map[string]Handler{
 	"update":   updateHandler,
 	"close":    closeHandler,
 	"reopen":   reopenHandler,
+	"delete":   deleteHandler,
+	"defer":    deferHandler,
+	"undefer":  undeferHandler,
+	"unclaim":  unclaimHandler,
 }
 
 // OsMain is the production entry: this process's argv, environment and working

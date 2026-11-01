@@ -6,11 +6,12 @@
 // read reports, and the tokens an admin issues and revokes. GetIssues fills
 // Dependencies and Dependents, as the real store does; ListIssues, ChildrenOf
 // and Comments answer the reads the bd shim's handlers make (gt-p85pw.94),
-// CommentCounts returns each issue's comment count in one read, and UpdateIssue
-// answers the status the shim's update, close and reopen write (gt-p85pw.96).
-// Every other method returns store.ErrUnimplemented, so a unit
-// test that reaches past them fails loudly rather than reading a store that
-// only looks modeled.
+// CommentCounts returns each issue's comment count in one read, UpdateIssue
+// answers the status the shim's update, close and reopen write (gt-p85pw.96)
+// and the text fields its delete and defer write (gt-p85pw.97), and DeleteIssues
+// deletes a batch with its links. Every other method returns
+// store.ErrUnimplemented, so a unit test that reaches past them fails loudly
+// rather than reading a store that only looks modeled.
 package storetest
 
 import (
@@ -269,12 +270,13 @@ func (*Fake) Assigned(context.Context, api.AssignedRequest) (api.AssignedPage, e
 // stored.
 var builtinStatuses = []string{"open", "in_progress", "closed", "deferred", "hooked", "pinned"}
 
-// UpdateIssue applies the status of patch while g holds: the one patch field
-// the fake models, because it is the one the bd shim's update, close and reopen
-// handlers write (gt-p85pw.96). A status of closed obeys the close fences and a
-// status that leaves closed clears the close, as the Postgres store does; a
-// guard that does not hold writes nothing. Any other patch field is refused
-// rather than applied in part. (contract: updateStatusOnly)
+// UpdateIssue applies the fields of patch the fake models while g holds: the
+// status the bd shim's update, close and reopen handlers write (gt-p85pw.96),
+// and the title, description, acceptance criteria and appended notes its delete
+// and defer handlers write (gt-p85pw.97). A status of closed obeys the close
+// fences and a status that leaves closed clears the close, as the Postgres
+// store does; a guard that does not hold writes nothing. Any other patch field
+// is refused rather than applied in part. (contract: updateStatusOnly)
 func (f *Fake) UpdateIssue(_ context.Context, id string, patch api.UpdatePatch, g api.Guard) error {
 	if err := fakePatch(patch); err != nil {
 		return err
@@ -291,39 +293,72 @@ func (f *Fake) UpdateIssue(_ context.Context, id string, patch api.UpdatePatch, 
 	if g.IfStatus != nil && is.Status != *g.IfStatus {
 		return api.GuardFailed(fmt.Sprintf("%s has status %q, not %q", id, is.Status, *g.IfStatus))
 	}
-	if patch.Status == nil || *patch.Status == is.Status {
+	changed := false
+	now := f.now()
+	if patch.Title != nil && *patch.Title != is.Title {
+		if strings.TrimSpace(*patch.Title) == "" {
+			return api.Invalid("title cannot be empty")
+		}
+		is.Title, changed = *patch.Title, true
+	}
+	if patch.Description != nil && *patch.Description != is.Description {
+		is.Description, changed = *patch.Description, true
+	}
+	if patch.Acceptance != nil && *patch.Acceptance != is.AcceptanceCriteria {
+		is.AcceptanceCriteria, changed = *patch.Acceptance, true
+	}
+	if patch.AppendNotes != "" {
+		is.Notes, changed = appendNote(is.Notes, patch.AppendNotes), true
+	}
+	if patch.Status != nil && *patch.Status != is.Status {
+		status := *patch.Status
+		if !slices.Contains(builtinStatuses, status) {
+			return api.Invalid("unknown status %q", status)
+		}
+		switch {
+		case status == "closed":
+			if err := f.fenceCloseLocked(is, []string{id}, patch.Force, patch.Actor); err != nil {
+				return err
+			}
+			closedAt := now
+			is.Status, is.CloseReason, is.ClosedAt = "closed", "", &closedAt
+		case is.Status == "closed":
+			is.Status, is.CloseReason, is.ClosedAt = status, "", nil
+		default:
+			is.Status = status
+		}
+		changed = true
+	}
+	if !changed {
 		return nil
 	}
-	status := *patch.Status
-	if !slices.Contains(builtinStatuses, status) {
-		return api.Invalid("unknown status %q", status)
-	}
-	now := f.now()
-	switch {
-	case status == "closed":
-		if err := f.fenceCloseLocked(is, []string{id}, patch.Force, patch.Actor); err != nil {
-			return err
-		}
-		closedAt := now
-		is.Status, is.CloseReason, is.ClosedAt, is.UpdatedAt = "closed", "", &closedAt, now
-	case is.Status == "closed":
-		is.Status, is.CloseReason, is.ClosedAt, is.UpdatedAt = status, "", nil, now
-	default:
-		is.Status, is.UpdatedAt = status, now
-	}
+	is.UpdatedAt = now
 	f.issues[id] = is
 	return nil
 }
 
+// appendNote joins line to notes with one newline between, as the Postgres
+// store's bd update --append-notes does.
+func appendNote(notes, line string) string {
+	if line == "" {
+		return notes
+	}
+	if notes == "" {
+		return line
+	}
+	return strings.TrimRight(notes, "\n") + "\n" + line
+}
+
 // fakePatch refuses a patch carrying a field the fake does not model, so a
 // caller never reads a write that happened in part. Actor is the request's
-// identity, not a field, and status is the modeled one.
+// identity, not a field; title, description, acceptance, notes and status are
+// the modeled ones.
 func fakePatch(patch api.UpdatePatch) error {
 	switch {
-	case patch.Title != nil, patch.Priority != nil, patch.Description != nil, patch.Assignee != nil,
-		patch.Acceptance != nil, len(patch.AddLabels) > 0, len(patch.RemoveLabels) > 0, len(patch.SetLabels) > 0,
-		patch.AppendNotes != "", patch.Persistent, patch.DeferUntil != nil:
-		return unimplemented("UpdateIssue: a patch field other than status")
+	case patch.Priority != nil, patch.Assignee != nil,
+		len(patch.AddLabels) > 0, len(patch.RemoveLabels) > 0, len(patch.SetLabels) > 0,
+		patch.Persistent, patch.DeferUntil != nil:
+		return unimplemented("UpdateIssue: a patch field other than title, description, acceptance, notes or status")
 	}
 	return nil
 }
@@ -495,7 +530,43 @@ func (f *Fake) CloseIssues(ctx context.Context, ids []string, reason string, for
 	}
 	return nil
 }
-func (*Fake) DeleteIssues(context.Context, []string) error { return unimplemented("DeleteIssues") }
+
+// DeleteIssues deletes ids, or none: an id the fake does not hold refuses the
+// batch before anything is written. Every link touching a deleted issue goes in
+// both directions, and a child that survives its deleted parent is left without
+// one, as the Postgres store does.
+func (f *Fake) DeleteIssues(_ context.Context, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	gone := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if _, ok := f.issues[id]; !ok {
+			return api.NotFound(id)
+		}
+		gone[id] = true
+	}
+	for id := range gone {
+		delete(f.issues, id)
+	}
+	kept := f.links[:0]
+	for _, l := range f.links {
+		if gone[l.IssueID] || gone[l.DependsOn] {
+			continue
+		}
+		kept = append(kept, l)
+	}
+	f.links = kept
+	for id, is := range f.issues {
+		if gone[is.Parent] {
+			is.Parent = ""
+			f.issues[id] = is
+		}
+	}
+	return nil
+}
 
 // AddComment appends a comment to id. Export reads the comments; Comments
 // stays unimplemented.
