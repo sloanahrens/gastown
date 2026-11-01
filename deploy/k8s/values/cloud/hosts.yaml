@@ -3,5 +3,8 @@
 # swap (gt-ht5he). Nothing here is a secret.
 control_plane_host: CONTROL_PLANE_HOST
 registry_host: REGISTRY_HOST
+# storage_class and reclaim_policy are the contract for stateful claims; no manifest reads
+# them yet (the gt-cache claim leaves its class to the cluster default on purpose), so a
+# claim that names a class takes it from here.
 storage_class: STORAGE_CLASS
 reclaim_policy: Retain
