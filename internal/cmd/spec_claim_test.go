@@ -427,3 +427,26 @@ func TestSpecDispatchHoldsWhenClaimsCannotBeRead(t *testing.T) {
 		})
 	}
 }
+
+// TestSpecDispatchDoesNotHoldACandidateThatNamesNoTestFile: a candidate that
+// names no test file claims nothing, so a claim set that will not load must
+// not hold it (gt-n6jbw): only a candidate with a target to check waits on the
+// read.
+func TestSpecDispatchDoesNotHoldACandidateThatNamesNoTestFile(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(frSpec("fr-notest", "Tidy the bar helper", "Edit internal/foo/bar.go to drop the unused argument.", "2026-10-31T09:00:00Z"))
+	f.claimErr = errors.New("dolt is unreachable")
+	env := f.env()
+	env.ShapeGate = specdispatch.ShapeGateOff
+
+	r := runSpecDispatchCycle(env)
+
+	for _, s := range r.Skipped {
+		if strings.Contains(s.Line, "cannot read the other beads' targets") {
+			t.Fatalf("a candidate naming no test file was held on the claim read: %+v", r.Skipped)
+		}
+	}
+	if len(f.slung) != 1 {
+		t.Fatalf("slung = %v, want the one candidate (skipped %+v)", f.slung, r.Skipped)
+	}
+}

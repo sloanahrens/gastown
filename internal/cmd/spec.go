@@ -1817,14 +1817,18 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// read holds the candidate rather than dispatching onto what it never
 		// checked: only a positive answer that nothing claims the target
 		// dispatches.
-		peers, err := env.claims(id)
-		if err != nil {
-			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %scannot read the other beads' targets: %s", id, specdispatch.SkipHeld, firstErrLine(err))})
-			continue
-		}
-		if why, held := specdispatch.TargetClaimHold(specCandidateClaim(full), peers, slated, env.Now()); held {
-			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s%s", id, specdispatch.SkipHeld, why)})
-			continue
+		// A candidate that names no test file claims nothing, so the other
+		// beads' targets are not read for it and a failed read holds it not.
+		if claim := specCandidateClaim(full); specdispatch.NamesTestFile(claim) {
+			peers, err := env.claims(id)
+			if err != nil {
+				report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %scannot read the other beads' targets: %s", id, specdispatch.SkipHeld, firstErrLine(err))})
+				continue
+			}
+			if why, held := specdispatch.TargetClaimHold(claim, peers, slated, env.Now()); held {
+				report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s%s", id, specdispatch.SkipHeld, why)})
+				continue
+			}
 		}
 		// Re-read the clock at the choice, per candidate: the board read and the
 		// holds above can carry the tick past a seat's window boundary, and the

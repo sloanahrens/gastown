@@ -174,6 +174,11 @@ func CloseReasonIsLanding(reason string) bool {
 	return strings.HasPrefix(strings.TrimSpace(line), "Landed on ")
 }
 
+// NamesTestFile reports whether the candidate names a test file at all. A
+// candidate that names none has nothing to claim, so the pool of other beads'
+// targets need not be read for it, and a failed read must not hold it.
+func NamesTestFile(candidate Claimant) bool { return len(testFiles(candidate.Paths)) > 0 }
+
 // TargetClaimHold reports why candidate's target is already claimed by one of
 // peers, and false when no peer claims it (gt-n6jbw).
 //
