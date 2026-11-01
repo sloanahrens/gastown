@@ -227,6 +227,58 @@ func TestCensusCallerFromFrames(t *testing.T) {
 	}
 }
 
+// TestCensusCallerSkipsWrapperFrames checks the caller walk looks through the
+// landing worker's retry wrapper to name the function that decided to read,
+// and keeps the wrapper's name when no frame above it can name one (gt-krmal).
+func TestCensusCallerSkipsWrapperFrames(t *testing.T) {
+	seam := censusPkgPath + ".(*Beads).run"
+	frame := func(name string) string { return censusModulePath + "/internal/" + name }
+	tests := []struct {
+		name   string
+		frames []string
+		want   string
+	}{
+		{
+			name:   "names the frame above the wrapper",
+			frames: []string{seam, frame("landworker.RetryBeads.Show"), frame("landworker.(*Worker).Pass")},
+			want:   "landworker.(*Worker).Pass",
+		},
+		{
+			name:   "keeps the wrapper when it is the last frame",
+			frames: []string{seam, frame("landworker.RetryBeads.Show")},
+			want:   "landworker.RetryBeads.Show",
+		},
+		{
+			name:   "keeps the wrapper when only runtime frames follow",
+			frames: []string{seam, frame("landworker.RetryBeads.Show"), "runtime.goexit"},
+			want:   "landworker.RetryBeads.Show",
+		},
+		{
+			name: "skips the wrapper's retry closure and do frames",
+			frames: []string{
+				seam,
+				frame("landworker.RetryBeads.List.func1"),
+				frame("landworker.RetryBeads.do"),
+				frame("landworker.RetryBeads.List"),
+				frame("landworker.(*Worker).landReady"),
+			},
+			want: "landworker.(*Worker).landReady",
+		},
+		{
+			name:   "skips a pointer receiver wrapper",
+			frames: []string{seam, frame("landworker.(*RetryBeads).Show"), frame("landworker.(*Worker).outcomeRow")},
+			want:   "landworker.(*Worker).outcomeRow",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := censusCallerFromFrames(tt.frames); got != tt.want {
+				t.Errorf("censusCallerFromFrames(%q) = %q, want %q", tt.frames, got, tt.want)
+			}
+		})
+	}
+}
+
 // hasArg reports whether args holds want.
 func hasArg(args []string, want string) bool {
 	for _, arg := range args {

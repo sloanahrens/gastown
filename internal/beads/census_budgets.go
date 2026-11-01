@@ -28,40 +28,55 @@ type CensusBudget struct {
 // rows below the ninth sit at 1.0 a minute, the rate every caller the log left
 // out is bounded by. The split and the rounding are pinned by the test that
 // reads testdata/census-baseline-20261030.txt.
+//
+// The landworker.RetryBeads.* rows are sums: the census now looks through that
+// wrapper and names the landing step that decided to read, so each row holds
+// the calls every such step makes together. A later edit re-keys them from a
+// post-install census (gt-krmal); until then the names and numbers stay as
+// measured.
 var censusCallerBudgets = []CensusBudget{
 	// Baseline 762 calls, 12.7 a minute: one ready-to-land list per rig per
 	// metrics sample (gt-hw6ih moves the column onto the landing worker's
 	// published count).
 	{Caller: "metrics.queueLandingColumn", CallsPerMinute: 12.70},
 	// Baseline 685 calls, 11.4 a minute: the landing worker re-reading every
-	// held bead each pass (gt-r9pj9).
+	// held bead each pass (gt-r9pj9). The sum of the call sites behind the
+	// RetryBeads wrapper (gt-krmal).
 	{Caller: "landworker.RetryBeads.Show", CallsPerMinute: 11.40},
 	// Baseline 462 calls, 7.7 a minute: each rig's identity bead, once a
 	// minute (gt-z0dcj).
 	{Caller: "daemon.(*Daemon).showRigBead", CallsPerMinute: 7.70},
 	// Baseline 414 calls, 6.9 a minute: the per-rig poll of ready-to-land,
-	// which stays (gt-r9pj9 leaves it alone).
+	// which stays (gt-r9pj9 leaves it alone). The sum of the call sites behind
+	// the RetryBeads wrapper (gt-krmal).
 	{Caller: "landworker.RetryBeads.List", CallsPerMinute: 8.63},
 	// Baseline 207 calls, 3.5 a minute in bursts: the sling contexts read
 	// three times a dispatch cycle (gt-pjcpb).
 	{Caller: "schedulerrun.listAllSlingContextRecords", CallsPerMinute: 3.50},
 	// Baseline 198 calls, 3.3 a minute: the held beads' children (gt-r9pj9).
+	// The sum of the call sites behind the RetryBeads wrapper (gt-krmal).
 	{Caller: "landworker.RetryBeads.Children", CallsPerMinute: 3.30},
 	// Baseline 128 calls, 2.1 a minute: the held beads' comments (gt-r9pj9).
+	// The sum of the call sites behind the RetryBeads wrapper (gt-krmal).
 	{Caller: "landworker.RetryBeads.Comments", CallsPerMinute: 2.10},
 	// Baseline 84 calls, 1.4 a minute: one plugin-run list per plugin per
 	// tick (gt-3bqfy).
 	{Caller: "plugin.(*Recorder).queryRuns", CallsPerMinute: 1.40},
 	// Baseline 60 calls, 1.0 a minute: the refusal annotation posted again
-	// each pass (gt-r9pj9).
+	// each pass (gt-r9pj9). The sum of the call sites behind the RetryBeads
+	// wrapper (gt-krmal).
 	{Caller: "landworker.RetryBeads.AddComment", CallsPerMinute: 1.00},
-	// The ready note each landing writes, one call per landed bead.
+	// The ready note each landing writes, one call per landed bead. The sum of
+	// the call sites behind the RetryBeads wrapper (gt-krmal).
 	{Caller: "landworker.RetryBeads.AppendNotes", CallsPerMinute: 1.25},
-	// The label write a landing makes, and the rework label's removal.
+	// The label write a landing makes, and the rework label's removal. The sum
+	// of the call sites behind the RetryBeads wrapper (gt-krmal).
 	{Caller: "landworker.RetryBeads.Update", CallsPerMinute: 1.25},
-	// The close that ends a landing.
+	// The close that ends a landing. The sum of the call sites behind the
+	// RetryBeads wrapper (gt-krmal).
 	{Caller: "landworker.RetryBeads.CloseWithReason", CallsPerMinute: 1.25},
-	// A revert bead, created when a landing is reverted rather than landed.
+	// A revert bead, created when a landing is reverted rather than landed. The
+	// sum of the call sites behind the RetryBeads wrapper (gt-krmal).
 	{Caller: "landworker.RetryBeads.Create", CallsPerMinute: 1.25},
 	// A scheduled sling's own run beads, one list per entry per pass.
 	{Caller: "daemon.(*execScheduledSlingRunner).listBeads", CallsPerMinute: 1.25},
