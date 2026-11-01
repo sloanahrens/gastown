@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // The Cost panel's ledger read carries the malformed lines it skipped, and a
@@ -30,5 +32,18 @@ func TestDashboardSpendHoursFromReadsAnUnreadableLedgerAsEmpty(t *testing.T) {
 	read := dashboardSpendHoursFrom(t.TempDir())() // a directory is not a ledger
 	if read.Hours != nil || read.Skipped != 0 {
 		t.Errorf("read = %+v, want an empty read", read)
+	}
+}
+
+// The hub writes the DeepSeek reading where the snapshot, gt tail and gt
+// report read it: the town's runtime watch directory, the same one
+// internal/metrics and internal/report build from TownRuntimePath (gt-jqtw9).
+func TestDashboardWatchDirIsTheTownRuntimeWatchDir(t *testing.T) {
+	t.Parallel()
+
+	town := t.TempDir()
+	want := filepath.Join(constants.TownRuntimePath(town), "watch")
+	if got := dashboardWatchDir(town); got != want {
+		t.Errorf("the hub writes the spend reading to %q, want %q", got, want)
 	}
 }

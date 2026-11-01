@@ -810,6 +810,10 @@ type Config struct {
 	Mango func() *Mango
 	// Spend returns the DeepSeek spend report as JSON, nil when unavailable.
 	Spend func() json.RawMessage
+	// WatchDir is the directory the town's watch files live in, where a spend
+	// report that carries a balance rewrites <WatchDir>/spend.json for the
+	// hourly snapshot, gt tail and gt report. Empty leaves the file unwritten.
+	WatchDir string
 	// SpendHours returns the last day's spend by hour from the balance ledger,
 	// with the malformed lines it skipped. It is read with the spend report.
 	SpendHours func() SpendRead
