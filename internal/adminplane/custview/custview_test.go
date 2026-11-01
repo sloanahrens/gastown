@@ -269,9 +269,9 @@ func TestUsageCopiesMonthTotals(t *testing.T) {
 		t.Fatalf("Build returned %v, want nil", err)
 	}
 	want := Usage{
-		SeatHours:       []export.ProfileHours{{Profile: "standard", Hours: 12.5}},
+		SeatHours:       []ProfileHours{{Profile: "standard", Hours: 12.5}},
 		StorageGBMonths: 1.5,
-		Tokens:          export.Tokens{Input: 10, Output: 20, CacheCreation: 30, CacheRead: 40},
+		Tokens:          Tokens{Input: 10, Output: 20, CacheCreation: 30, CacheRead: 40},
 	}
 	if !reflect.DeepEqual(v.Usage, want) {
 		t.Fatalf("usage = %+v, want %+v", v.Usage, want)
@@ -279,6 +279,91 @@ func TestUsageCopiesMonthTotals(t *testing.T) {
 	rec.Usage.SeatHours[0].Hours = 999
 	if v.Usage.SeatHours[0].Hours == 999 {
 		t.Error("view usage changed with the record's seat hours, want its own copy")
+	}
+}
+
+// TestUsageHoldsNoExportType pins that no field of Usage is a type the metering
+// export declares, including inside a slice, array, map, pointer or struct
+// field, so a field the export gains cannot reach a view through the usage.
+// TestExportTypeInFindsExportTypes shows the walk reports each of those shapes.
+func TestUsageHoldsNoExportType(t *testing.T) {
+	t.Parallel()
+	exportPkg := reflect.TypeOf(export.Tokens{}).PkgPath()
+	usageType := reflect.TypeOf(Usage{})
+	for i := 0; i < usageType.NumField(); i++ {
+		field := usageType.Field(i)
+		if name := exportTypeIn(field.Type, exportPkg); name != "" {
+			t.Errorf("Usage.%s holds %s, a type from the metering export", field.Name, name)
+		}
+	}
+}
+
+// exportTypeIn returns the name of the first type in t, or in anything t holds,
+// that is declared in exportPkg, or "" if none is.
+func exportTypeIn(t reflect.Type, exportPkg string) string {
+	return exportTypeInSeen(t, exportPkg, map[reflect.Type]bool{})
+}
+
+// exportTypeInSeen is exportTypeIn with the types already walked, so a type
+// that refers to itself through a pointer, map or slice ends the walk.
+func exportTypeInSeen(t reflect.Type, exportPkg string, seen map[reflect.Type]bool) string {
+	if seen[t] {
+		return ""
+	}
+	seen[t] = true
+	if t.PkgPath() == exportPkg {
+		return t.String()
+	}
+	switch t.Kind() {
+	case reflect.Slice, reflect.Array, reflect.Pointer:
+		return exportTypeInSeen(t.Elem(), exportPkg, seen)
+	case reflect.Map:
+		if name := exportTypeInSeen(t.Key(), exportPkg, seen); name != "" {
+			return name
+		}
+		return exportTypeInSeen(t.Elem(), exportPkg, seen)
+	case reflect.Struct:
+		for i := 0; i < t.NumField(); i++ {
+			if name := exportTypeInSeen(t.Field(i).Type, exportPkg, seen); name != "" {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+// TestExportTypeInFindsExportTypes drives the guard's failing branch: each shape
+// that holds a metering export type is reported under that type's name, and a
+// local type or a type with no export inside is not.
+func TestExportTypeInFindsExportTypes(t *testing.T) {
+	t.Parallel()
+	exportPkg := reflect.TypeOf(export.Tokens{}).PkgPath()
+	type nested struct{ Inner export.Tokens }
+	type cyclic struct{ Next *cyclic }
+	cases := []struct {
+		name string
+		typ  reflect.Type
+		want string
+	}{
+		{name: "local type", typ: reflect.TypeOf(Tokens{}), want: ""},
+		{name: "export type", typ: reflect.TypeOf(export.Tokens{}), want: "export.Tokens"},
+		{name: "slice of export type", typ: reflect.TypeOf([]export.ProfileHours{}), want: "export.ProfileHours"},
+		{name: "array of export type", typ: reflect.TypeOf([2]export.Tokens{}), want: "export.Tokens"},
+		{name: "pointer to export type", typ: reflect.TypeOf(&export.Tokens{}), want: "export.Tokens"},
+		{name: "map with export type value", typ: reflect.TypeOf(map[string]export.Tokens{}), want: "export.Tokens"},
+		{name: "map with export type key", typ: reflect.TypeOf(map[export.ProfileHours]int{}), want: "export.ProfileHours"},
+		{name: "struct field of export type", typ: reflect.TypeOf(struct{ T export.Tokens }{}), want: "export.Tokens"},
+		{name: "export type nested in a struct", typ: reflect.TypeOf(nested{}), want: "export.Tokens"},
+		{name: "slice of structs holding export type", typ: reflect.TypeOf([]nested{}), want: "export.Tokens"},
+		{name: "cyclic type with no export type", typ: reflect.TypeOf(cyclic{}), want: ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := exportTypeIn(c.typ, exportPkg); got != c.want {
+				t.Errorf("exportTypeIn(%v) = %q, want %q", c.typ, got, c.want)
+			}
+		})
 	}
 }
 
