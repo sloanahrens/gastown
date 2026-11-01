@@ -16,9 +16,12 @@ import (
 // (gt-e1ufo). What such beads share is the test file, the unit a landing
 // conflicts in, so that is what this rule reads (gt-n6jbw).
 //
-// A test file is matched by base name because one bead spells the path and the
-// other the bare name, and both name one file: a check that compared the
-// spellings would have let this pair through.
+// A test file is matched by its path when both beads spell one, because
+// `internal/specdispatch/claim_test.go` and `internal/cmd/claim_test.go` are two
+// files. A bare name states no directory, so it matches any spelling of the
+// file it names: one bead of the gt-n6jbw pair spelled the path and the other
+// the bare name, and a check that compared only the spellings would have let
+// that pair through.
 //
 // The hold is the spec dispatcher's, applied in its tick beside the other
 // holds, and it is a skip rather than a failure: the bead stays ready and is
@@ -65,24 +68,34 @@ func IsTestFile(path string) bool {
 	return false
 }
 
-// testFileNames reduces a bead's paths to the base names of the test files it
-// names, deduplicated and sorted.
-func testFileNames(paths []string) []string {
-	seen := make(map[string]bool, len(paths))
+// testFile is one test file a bead names: the path as the bead spelled it, and
+// its last segment. The two are kept apart because a path names one file while
+// a bare name names whichever file carries it (see sameTestFile).
+type testFile struct {
+	path string
+	name string
+}
+
+// testFiles reduces a bead's paths to the test files it names, deduplicated by
+// path and sorted so a pair's reason does not depend on the order the pool
+// listed them.
+func testFiles(paths []string) []testFile {
+	seen := make(map[string]testFile, len(paths))
 	for _, path := range paths {
 		if !IsTestFile(path) {
 			continue
 		}
-		seen[baseName(path)] = true
+		path = strings.TrimPrefix(strings.TrimSpace(path), "./")
+		seen[path] = testFile{path: path, name: baseName(path)}
 	}
 	if len(seen) == 0 {
 		return nil
 	}
-	out := make([]string, 0, len(seen))
-	for name := range seen {
-		out = append(out, name)
+	out := make([]testFile, 0, len(seen))
+	for _, file := range seen {
+		out = append(out, file)
 	}
-	sort.Strings(out)
+	sort.Slice(out, func(i, j int) bool { return out[i].path < out[j].path })
 	return out
 }
 
@@ -94,22 +107,38 @@ func baseName(path string) string {
 	return path
 }
 
-// sharedTestFile returns the first test-file name both sides name, in sorted
-// order so a pair's reason does not depend on the order the pool listed them.
-func sharedTestFile(mine []string, peerPaths []string) string {
-	peer := testFileNames(peerPaths)
-	for i, j := 0, 0; i < len(mine) && j < len(peer); {
-		switch {
-		case mine[i] == peer[j]:
-			return mine[i]
-		case mine[i] < peer[j]:
-			i++
-		default:
-			j++
+// sharedTestFile returns the base name of the first test file both sides name,
+// in sorted order so a pair's reason does not depend on the order the pool
+// listed them.
+func sharedTestFile(mine []testFile, peerPaths []string) string {
+	peer := testFiles(peerPaths)
+	for _, a := range mine {
+		for _, b := range peer {
+			if sameTestFile(a, b) {
+				return a.name
+			}
 		}
 	}
 	return ""
 }
+
+// sameTestFile reports whether two beads' paths name one file. Two full paths
+// name one file only when they are equal: packages repeat test-file names, and
+// holding `internal/a/claim_test.go` against `internal/b/claim_test.go` would
+// stop both. A bare name leaves the directory unstated, so it answers the file
+// every spelling with that name answers.
+func sameTestFile(a, b testFile) bool {
+	if a.path == b.path {
+		return true
+	}
+	if a.name != b.name {
+		return false
+	}
+	return !spellsDirectory(a.path) || !spellsDirectory(b.path)
+}
+
+// spellsDirectory reports whether a path carries a directory as well as a file.
+func spellsDirectory(path string) bool { return strings.Contains(path, "/") }
 
 // Claimant is one bead the target-claim check weighs: what its text says it
 // will change — the paths and test identifiers its own words name — and the
@@ -147,16 +176,18 @@ func CloseReasonIsLanding(reason string) bool {
 // A claim is a test file the candidate names. A peer claims it when it names
 // the same test file and is one of:
 //   - in flight, a seat already on the file; the hold lifts when it closes;
-//   - open, on the tick's ready board, and ahead of the candidate in dispatch
-//     order, so at most one bead of a ready cluster spends a seat;
+//   - open and slated, and ahead of the candidate in dispatch order, so at most
+//     one bead of a ready cluster spends a seat;
 //   - closed by a landing within claimLandingWindow, when the candidate was
 //     filed before that landing, so its author wrote it against a base the
 //     landing has since replaced.
 //
-// ready is the set the dispatcher would take this tick. A peer it never
-// reaches — blocked, labeled away, deferred — does not hold the candidate:
-// ranking such a head ahead would hold the file for as long as its hold lasts
-// (gt-mknmb, gt-00gee).
+// slated is the set of beads the tick has decided to sling this tick, not the
+// set its ready board carries. A board-carried peer the tick holds for a reason
+// of its own — the shape gate refuses it, it needs planning, it rests out its
+// startup backoff — is never slung, so ranking it ahead would hold the file for
+// as long as that hold lasts (gt-mknmb, gt-00gee). The tick walks its board in
+// dispatch order, so a peer it slates is always one that precedes the candidate.
 //
 // Two beads naming the same test file but different test identifiers
 // (TestFoo against TestBar) target different assertions, so they do not hold
@@ -166,8 +197,8 @@ func CloseReasonIsLanding(reason string) bool {
 // stable reason. An empty id and the candidate itself claim nothing; an epic
 // enumerates its children's files rather than naming one target, so the caller
 // drops it before the set arrives here (sling.Duplicate.IsEpic).
-func TargetClaimHold(candidate Claimant, peers []Claimant, ready map[string]bool, now time.Time) (string, bool) {
-	files := testFileNames(candidate.Paths)
+func TargetClaimHold(candidate Claimant, peers []Claimant, slated map[string]bool, now time.Time) (string, bool) {
+	files := testFiles(candidate.Paths)
 	if len(files) == 0 {
 		return "", false
 	}
@@ -185,7 +216,7 @@ func TargetClaimHold(candidate Claimant, peers []Claimant, ready map[string]bool
 		switch {
 		case claimLiveStatuses[peer.Status]:
 			why = fmt.Sprintf("%s names the same test file, %s, and is in flight on it%s; the hold lifts when that bead closes", peer.ID, shared, seatOf(peer))
-		case peer.Status == "open" && ready[peer.ID] && precedes(peer, candidate):
+		case peer.Status == "open" && slated[peer.ID] && precedes(peer, candidate):
 			why = fmt.Sprintf("%s names the same test file, %s, and comes first in dispatch order; the hold lifts when that bead closes", peer.ID, shared)
 		case peer.Status == "closed" && peer.Landed && landedRecently(peer, now) && filedBeforeLanding(candidate, peer):
 			why = fmt.Sprintf("%s names the same test file, %s, and landed after this bead was filed; the hold lifts when the landing leaves the window", peer.ID, shared)

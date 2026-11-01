@@ -380,6 +380,35 @@ func TestSlingDuplicateNegativeControl(t *testing.T) {
 	}
 }
 
+// TestSlingDuplicateGuardReadsABareTestFileName is the guard-level half of
+// gt-n6jbw: the target-claim rule compares the test files two beads name, and
+// the manual sling guard reads the same refs, so a bead that spells the file
+// without its directory has to reach the guard's report. A bare name is a file
+// overlap, not a shared test, so the guard names it and lets the sling proceed.
+func TestSlingDuplicateGuardReadsABareTestFileName(t *testing.T) {
+	t.Parallel()
+	candidate := newDuplicateCandidate("fr-z64c", "the repeat-rate assertion is a one-seed fit", "open",
+		"Rewrite the final assertion in wanderHops.test.ts as a provable bound.")
+	other := newDuplicateCandidate("fr-zdzs", "the repeat-rate assertion pools every seed", "in_progress",
+		"Pool the repeat rate of wanderHops.test.ts over many seeds.")
+
+	matches := findDuplicateMatches(candidate, []duplicateCandidate{other})
+	if len(matches) != 1 {
+		t.Fatalf("matches = %+v, want one for the file both beads name", matches)
+	}
+	assertStrings(t, "shared files", matches[0].SharedFiles, []string{"wanderHops.test.ts"})
+
+	decision := decideSlingDuplicates(candidate, matches)
+	if decision.Blocked {
+		t.Fatalf("a file-only overlap must not refuse the sling:\n%s", decision.Message)
+	}
+	for _, want := range []string{"wanderHops.test.ts", "fr-zdzs", "proceeds"} {
+		if !strings.Contains(decision.Message, want) {
+			t.Errorf("report should mention %q:\n%s", want, decision.Message)
+		}
+	}
+}
+
 // TestSlingDuplicateIgnoresPackageFixtures replays the refusal behind gt-a0gk:
 // gt-hotx and gt-a8kx were each refused against ten unrelated live beads, and
 // every one of those overlaps was the name "TestMain" — Go's package

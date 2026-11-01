@@ -43,14 +43,14 @@ func TestTargetClaimHold(t *testing.T) {
 		CreatedAt: "2026-10-31T15:00:00Z",
 		Paths:     []string{claimTestFile},
 	}
-	boardHoldsFrZ64c := map[string]bool{"fr-z64c": true}
-	boardHoldsNobody := map[string]bool{"fr-other": true}
+	slatedFrZ64c := map[string]bool{"fr-z64c": true}
+	slatedNobody := map[string]bool{"fr-other": true}
 
 	tests := []struct {
 		name      string
 		peer      Claimant
 		candidate Claimant
-		ready     map[string]bool
+		slated    map[string]bool
 		want      bool
 		wantTxt   string
 	}{
@@ -67,7 +67,7 @@ func TestTargetClaimHold(t *testing.T) {
 			wantTxt: "fr-z64c",
 		},
 		{
-			name:    "an open peer the board carries and the order reaches first holds it",
+			name:    "an open peer the tick slates ahead of it holds it",
 			peer:    Claimant{ID: "fr-z64c", Status: "open", Priority: 1, CreatedAt: "2026-10-31T09:00:00Z", Paths: []string{claimTestFile}},
 			want:    true,
 			wantTxt: "comes first in dispatch order",
@@ -77,11 +77,28 @@ func TestTargetClaimHold(t *testing.T) {
 			peer: Claimant{ID: "fr-z64c", Status: "open", Priority: 1, CreatedAt: "2026-10-31T20:00:00Z", Paths: []string{claimTestFile}},
 		},
 		{
-			name: "an open peer the board does not carry does not hold it",
-			// A labeled, blocked or deferred bead is never slung, so ranking
-			// it first would hold the file for as long as its own hold lasts.
-			peer:  Claimant{ID: "fr-z64c", Status: "open", Priority: 0, CreatedAt: "2026-10-31T09:00:00Z", Paths: []string{claimTestFile}},
-			ready: boardHoldsNobody,
+			name: "an open peer the tick does not slate does not hold it",
+			// A board-carried bead the tick holds for a reason of its own — the
+			// shape gate refuses it, it needs planning — is never slung, so
+			// ranking it first would hold the file for as long as its own hold
+			// lasts.
+			peer:   Claimant{ID: "fr-z64c", Status: "open", Priority: 0, CreatedAt: "2026-10-31T09:00:00Z", Paths: []string{claimTestFile}},
+			slated: slatedNobody,
+		},
+		{
+			name: "two test files of one name in different packages do not hold each other",
+			// Packages repeat test-file names; only the whole path says which
+			// file a bead means.
+			peer:      Claimant{ID: "fr-z64c", Status: "in_progress", Assignee: "fractals/polecats/cantor", Paths: []string{"internal/specdispatch/claim_test.go"}},
+			candidate: Claimant{ID: "fr-zdzs", Paths: []string{"internal/cmd/claim_test.go"}},
+		},
+		{
+			name: "a bare name is the same file as any path spelling of it",
+			peer: Claimant{ID: "fr-z64c", Status: "hooked", Assignee: "fractals/polecats/cantor",
+				Paths: []string{"claim_test.go"}},
+			candidate: Claimant{ID: "fr-zdzs", Paths: []string{"internal/cmd/claim_test.go"}},
+			want:      true,
+			wantTxt:   "fr-z64c",
 		},
 		{
 			name:    "a landed peer the candidate was filed before holds it",
@@ -145,11 +162,11 @@ func TestTargetClaimHold(t *testing.T) {
 			if c.ID == "" {
 				c = filed
 			}
-			ready := tc.ready
-			if ready == nil {
-				ready = boardHoldsFrZ64c
+			slated := tc.slated
+			if slated == nil {
+				slated = slatedFrZ64c
 			}
-			why, held := TargetClaimHold(c, []Claimant{tc.peer}, ready, claimTestNow)
+			why, held := TargetClaimHold(c, []Claimant{tc.peer}, slated, claimTestNow)
 			if held != tc.want {
 				t.Fatalf("held = %v (%q), want %v", held, why, tc.want)
 			}

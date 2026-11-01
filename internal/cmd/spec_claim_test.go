@@ -158,6 +158,51 @@ func TestSpecDispatchHoldsTheSecondBeadOfATargetClaim(t *testing.T) {
 	}
 }
 
+// TestSpecDispatchDoesNotHoldForAPeerTheTickNeverSlings bounds the open-peer
+// half of the rule: an open bead the board carries is a claim only when the
+// tick gets it onto a seat. A bead held for planning is never slung, so holding
+// its same-file candidate would hold that file for as long as the plan waits
+// (gt-n6jbw).
+func TestSpecDispatchDoesNotHoldForAPeerTheTickNeverSlings(t *testing.T) {
+	t.Parallel()
+	const claimFile = "src/lib/__tests__/wanderHops.test.ts"
+	body := "- `" + claimFile + "` only."
+	desc := specConstraints(&body)
+
+	planning := cleanSpec("fr-z64c", 1, "2026-10-31T09:00:00Z")
+	planning.Description = desc
+	planning.Labels = []string{specdispatch.NeedsPlanningLabel}
+	candidate := cleanSpec("fr-zdzs", 1, "2026-10-31T15:00:00Z")
+	candidate.Description = desc
+
+	peers := []specdispatch.Claimant{{
+		ID: "fr-z64c", Status: "open", Priority: 1, CreatedAt: "2026-10-31T09:00:00Z",
+		Paths: []string{claimFile},
+	}}
+	f := newFakeSpecTown(planning, candidate)
+	f.claims = map[string][]specdispatch.Claimant{
+		"fr-z64c": peers,
+		"fr-zdzs": peers,
+	}
+	// Both beads clear the lint's path check: the file they name is on the
+	// branch their rig lands on.
+	f.targets = map[string]*specdispatch.TargetTree{
+		"gastown": {Branch: "main", Files: map[string]struct{}{claimFile: {}}},
+	}
+	env := f.env()
+	env.ShapeGate = specdispatch.ShapeGateWarn
+	env.PerTick = 2
+
+	r := runSpecDispatchCycle(env)
+
+	if got := strings.Join(f.slung, " "); got != "fr-zdzs" {
+		t.Fatalf("slung %q, want the shaped candidate: a peer the tick never slates holds nothing (skipped %+v)", got, r.Skipped)
+	}
+	if len(r.Planning) != 1 || r.Planning[0].Bead != "fr-z64c" {
+		t.Fatalf("planning = %+v, want fr-z64c held for its plan", r.Planning)
+	}
+}
+
 // TestSpecDispatchHoldsAFiledBeforeLandingCandidate drives the landed half of
 // the rule through the production pool: a bead written before a landing on its
 // test file is held, and one written after the landing dispatches.

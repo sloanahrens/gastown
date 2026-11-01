@@ -1588,14 +1588,12 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	for _, f := range env.InFlight {
 		inFlight[f.Bead] = true
 	}
-	// The candidates this tick's board carries, which the target-claim rule
-	// reads as the beads the dispatcher would sling. A peer outside it — one
-	// another hold, a label or a blocker keeps off the board — never gets a
-	// seat, so it must not hold the file it names either (gt-n6jbw).
-	boardReady := make(map[string]bool, len(read.Candidates))
-	for _, c := range read.Candidates {
-		boardReady[c.Spec.ID] = true
-	}
+	// The beads this tick decides to sling, which the target-claim rule reads
+	// as the ones about to be in flight. A board-carried peer the tick never
+	// slates — the shape gate holds it, it needs planning, it rests out its
+	// startup backoff — never gets a seat, so it must not hold the file it
+	// names either (gt-n6jbw).
+	slated := make(map[string]bool)
 
 	env.Reads.setPhase(specPhaseCandidates)
 	candidatesAt := env.Now()
@@ -1820,7 +1818,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %scannot read the other beads' targets: %s", id, specdispatch.SkipHeld, firstErrLine(err))})
 			continue
 		}
-		if why, held := specdispatch.TargetClaimHold(specCandidateClaim(full), peers, boardReady, env.Now()); held {
+		if why, held := specdispatch.TargetClaimHold(specCandidateClaim(full), peers, slated, env.Now()); held {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s%s", id, specdispatch.SkipHeld, why)})
 			continue
 		}
@@ -1893,6 +1891,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 				entry.Line += "; " + overrunNote
 			}
 			report.Dispatched = append(report.Dispatched, entry)
+			slated[id] = true
 			budget.Bump(seat.Agent, budget.Now)
 			continue
 		}
@@ -1918,6 +1917,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// reads, was the tick: 45-70 s each in series, 2026-10-21).
 		c.order = len(pending)
 		pending = append(pending, specPendingSling{c: c, id: id, seat: seat, resume: resume, gone: gone, shapeNote: shapeNote, overrunNote: overrunNote, entry: entry})
+		slated[id] = true
 		budget.Bump(seat.Agent, budget.Now)
 	}
 	report.CandidatesTook = env.Now().Sub(candidatesAt)
