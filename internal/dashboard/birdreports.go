@@ -119,10 +119,9 @@ type BirdReport struct {
 	// Stale marks a summary older than birdStaleAfter. The page sorts these
 	// after the rows that need the operator.
 	Stale bool `json:"stale,omitempty"`
-	// Title and Summary are the sidecar's. The summary has every control
-	// character but a newline and a tab stripped and is cut to
-	// birdSummaryRunes; the title is the bird's own, as it wrote it. Both are
-	// empty on a row withheld or in error.
+	// Title and Summary are the sidecar's. Both have every control character
+	// but a newline and a tab stripped, and the summary is cut to
+	// birdSummaryRunes. Both are empty on a row withheld or in error.
 	Title   string `json:"title,omitempty"`
 	Summary string `json:"summary,omitempty"`
 	// NeedsOperator is the bird's own ask for the operator's attention, and
@@ -268,7 +267,7 @@ func (r *BirdReportsReader) readBird(now time.Time, name string) (BirdReport, bo
 
 	row.State = BirdReportFresh
 	row.Written = written
-	row.Title = side.Title
+	row.Title = reportsText(side.Title)
 	row.Summary = birdSummaryText(side.Summary)
 	row.NeedsOperator = side.NeedsOperator
 	row.Decisions = side.Decisions

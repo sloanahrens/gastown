@@ -212,6 +212,74 @@ func TestBirdReportsSkipsDirsThatAreNotBirdsWithReports(t *testing.T) {
 	}
 }
 
+// A real bird directory may still point its reports directory, or a page in
+// it, at another bird's output. Neither is that bird's report: the reports
+// directory must be a real directory and a page a regular file, so following
+// either link would put another path's text on this page.
+func TestBirdReportsRefusesSymlinkedReportsAndPages(t *testing.T) {
+	t.Parallel()
+
+	now := birdReportsNow
+	root := t.TempDir()
+
+	// The bird whose output the links below point at.
+	writeBird(t, root, "plain", birdWrites{
+		json: birdSidecarJSON(t, birdSidecarFor("plain", now, "plain title", "plain summary")),
+		page: "<html>plain</html>",
+		prev: "<html>plain yesterday</html>",
+	})
+
+	// A real bird directory whose reports directory is a link to plain's:
+	// following it would show plain's report under this bird's name.
+	if err := os.MkdirAll(filepath.Join(root, "linked-reports"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(
+		filepath.Join(root, "plain", "reports"),
+		filepath.Join(root, "linked-reports", "reports"),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// A bird with its own sidecar whose two pages are links to plain's: the
+	// summary is this bird's, the pages are not, so neither is a page to serve.
+	writeBird(t, root, "linked-pages", birdWrites{
+		json: birdSidecarJSON(t, birdSidecarFor("linked-pages", now, "title", "summary")),
+	})
+	for link, target := range map[string]string{
+		"daily.html":      filepath.Join(root, "plain", "reports", "daily.html"),
+		"daily.prev.html": filepath.Join(root, "plain", "reports", "daily.prev.html"),
+	} {
+		if err := os.Symlink(target, filepath.Join(root, "linked-pages", "reports", link)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A bird whose only page is a link and that has no sidecar: it names no
+	// report at all, because the page is not one the reader can serve.
+	writeBird(t, root, "linked-page-only", birdWrites{})
+	if err := os.Symlink(
+		filepath.Join(root, "plain", "reports", "daily.html"),
+		filepath.Join(root, "linked-page-only", "reports", "daily.html"),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	rows := NewBirdReportsReader(root).Read(now)
+	if got, want := birdNames(rows), []string{"linked-pages", "plain"}; !slices.Equal(got, want) {
+		t.Fatalf("rows %v, want %v", got, want)
+	}
+
+	linked := birdByName(rows)["linked-pages"]
+	if linked.State != BirdReportFresh || linked.Summary != "summary" {
+		t.Errorf("linked-pages: state %q summary %q, want its own fresh summary", linked.State, linked.Summary)
+	}
+	if linked.HasPage || linked.HasPrev {
+		t.Errorf("linked-pages: has_page %v has_prev %v, want neither through a link",
+			linked.HasPage, linked.HasPrev)
+	}
+}
+
 // Everything the reader could not use is a row in error whose note names what
 // is wrong, so the operator can tell the bird what to fix. A page with no
 // sidecar is still a row: the page is what the bird wrote it for, and its own
@@ -399,6 +467,36 @@ func TestBirdReportsCleansTheSummary(t *testing.T) {
 	for _, held := range []string{strings.Repeat("k", 8), secret} {
 		if strings.Contains(string(encoded), held) {
 			t.Errorf("a withheld secret reached the JSON-encoded rows: %q", held)
+		}
+	}
+}
+
+// A title goes to the page beside the summary, so it is cleaned the same way:
+// every control character but a newline and a tab, and every invisible format
+// character, is gone. A bird that writes an escape sequence or a bidi
+// override into its title does not get it onto the page.
+func TestBirdReportsCleansTheTitle(t *testing.T) {
+	t.Parallel()
+
+	now := birdReportsNow
+	root := t.TempDir()
+
+	hostile := "title\x07 bell\x1b[31m red\x00 nul‮here"
+	writeBird(t, root, "hostile-title", birdWrites{
+		json: birdSidecarJSON(t, birdSidecarFor("hostile-title", now, hostile, "clean summary")),
+	})
+
+	rows := NewBirdReportsReader(root).Read(now)
+	row := birdByName(rows)["hostile-title"]
+	if row.State != BirdReportFresh {
+		t.Fatalf("hostile-title: state %q note %q, want a fresh row", row.State, row.Note)
+	}
+	if want := "title bell[31m red nulhere"; row.Title != want {
+		t.Errorf("the title is %q, want %q with the control and format runes gone", row.Title, want)
+	}
+	for _, r := range row.Title {
+		if r != '\n' && r != '\t' && (unicode.IsControl(r) || unicode.Is(unicode.Cf, r)) {
+			t.Errorf("the title kept the invisible rune %U: %q", r, row.Title)
 		}
 	}
 }
