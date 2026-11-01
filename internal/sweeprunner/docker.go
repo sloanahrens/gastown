@@ -20,6 +20,10 @@ const (
 	RepoMount = "/repo.git"
 	// OutputDir is where the run writes result.json and its logs.
 	OutputDir = "/out"
+	// RunnerCommand is the program the runner container runs: the sweep-run the
+	// polecat image carries. Both backends name it, because the image's own default
+	// is bash, which exits at once in a container with no terminal.
+	RunnerCommand = "/usr/local/bin/sweep-run"
 
 	// EnvRig is the rig whose sweep the runner runs.
 	EnvRig = "GT_SWEEP_RIG"
@@ -123,6 +127,7 @@ func runnerArgv(spec Spec) []string {
 		"--env", EnvTiers+"="+strings.Join(spec.TiersOrDefault(), ","),
 		"--env", EnvJobs+"="+strconv.Itoa(spec.Jobs),
 		spec.Image,
+		RunnerCommand,
 	)
 }
 

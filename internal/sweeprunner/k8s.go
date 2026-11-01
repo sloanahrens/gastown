@@ -406,6 +406,7 @@ func runnerContainer(spec Spec) Container {
 	return Container{
 		Name:      runnerContainerName,
 		Image:     spec.Image,
+		Command:   []string{RunnerCommand},
 		Env:       env,
 		Resources: &Resources{Requests: share, Limits: share},
 		VolumeMounts: []VolumeMount{
