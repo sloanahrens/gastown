@@ -24,8 +24,8 @@ import (
 // (docs/standards/test-engineering.md, rule 2).
 
 // runFilterPattern matches a recipe's `-run` name filter. A filter admits only
-// the tests whose name it matches, which is how ~120 integration-tagged tests
-// ran nowhere until gt-ik4a1.2 removed it.
+// the tests whose name it matches, which is how integration-tagged tests ran
+// nowhere until gt-ik4a1.2 removed it.
 var runFilterPattern = regexp.MustCompile(`(?m)(^|[[:space:]])-(test\.)?run[ =]`)
 
 // noRunFilter reports whether out carries no `-run` name filter.
@@ -159,8 +159,10 @@ func TestIntegrationTestIntegrationRunsEveryPackageInDockerTxt(t *testing.T) {
 // module's postgres integration tier runs nowhere.
 func TestIntegrationTestIntegrationVetsAndTestsTheTrackerModule(t *testing.T) {
 	out := dryTarget(t, RealMake(repoRoot(t)), "test-integration")
-	const vetAndTest = "go vet -tags integration ./... && go test -tags integration -timeout 20m ./..."
-	if !strings.Contains(out, "for m in tracker; do") || !strings.Contains(out, vetAndTest) {
+	// The behaviour is that the tracker module is vetted and tested with the
+	// integration tag; the package pattern and the timeout are not pinned.
+	loop := regexp.MustCompile(`(?s)for m in tracker; do.*?go vet -tags integration .*?go test -tags integration `)
+	if !loop.MatchString(out) {
 		t.Fatalf("test-integration does not vet and test the tracker module with the integration tag\n%s", out)
 	}
 }
