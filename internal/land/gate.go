@@ -10,12 +10,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/lintlock"
+	"github.com/steveyegge/gastown/internal/shelltier"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -295,17 +297,46 @@ func RigGate(dir string, mq *config.MergeQueueConfig, unitOnly bool) (CommandGat
 	return CommandGate{Steps: steps}, nil
 }
 
-// ShellTierInputs is the ERE of the paths whose change can move the shell
-// tier's verdict: the INPUTS line of scripts/post-land-shell.sh (gt-er6jn),
-// the post-land run's own rule and the one the post-land revert reads
-// (landworker/revert.go). TestShellTierInputsMatchPostLandScript fails when
-// this constant and the script drift.
+// ShellTierInputs returns the ERE of the paths whose change can move the shell
+// tier's verdict, the union of every manifest entry's triggers (gt-u560q.9).
 //
-// internal/cmd/scheduler_integration_test.go is a shell-tier input although it
-// is Go: scripts/makefile-gate_test.sh reads schedulerTownSlots out of it
-// (gt-tqxdd). internal/shelltier/ is the runner the tier execs, and
-// cmd/tier-sweep and internal/tiersweep are the command and package that run it.
-const ShellTierInputs = `^(scripts/|plugins/|\.githooks/|Makefile$|internal/shelltier/|cmd/tier-sweep/|internal/tiersweep/|internal/testpolicy/docker\.txt$|internal/cmd/scheduler_integration_test\.go$)`
+// The post-land revert reads it (landworker/revert.go). It no longer mirrors
+// scripts/post-land-shell.sh's INPUTS line, which the runner replaces.
+func ShellTierInputs() string {
+	return shellTierInputsRE(shelltier.Manifest())
+}
+
+// shellTierInputsRE builds ShellTierInputs from entries' triggers: a trigger
+// ending in "/" matches every path under it, and any other is a file path and
+// matches in full. An empty union matches no path, so a manifest with nothing
+// in it cannot blame a landing for a shell failure.
+func shellTierInputsRE(entries []shelltier.Entry) string {
+	seen := make(map[string]bool)
+	var alts []string
+	for _, e := range entries {
+		for _, trigger := range e.TriggersOrDefault() {
+			alt := shellTierAlternative(trigger)
+			if seen[alt] {
+				continue
+			}
+			seen[alt] = true
+			alts = append(alts, alt)
+		}
+	}
+	if len(alts) == 0 {
+		return `^$`
+	}
+	slices.Sort(alts)
+	return "^(" + strings.Join(alts, "|") + ")"
+}
+
+// shellTierAlternative renders one trigger as an ERE alternative.
+func shellTierAlternative(trigger string) string {
+	if strings.HasSuffix(trigger, "/") {
+		return regexp.QuoteMeta(trigger)
+	}
+	return regexp.QuoteMeta(trigger) + "$"
+}
 
 // ShellTierSummaryRE matches the shell tier's one summary line and captures
 // the scripts it names. The log directory trails the names, and the tier's
