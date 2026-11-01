@@ -507,15 +507,37 @@ func (w *Worker) queueRecentRepairs() {
 		w.logf("reading the landings file for incomplete records: %v", err)
 		return
 	}
+	// Only the worker's own landings, and the distinct beads they name: one
+	// read answers every record of the same bead.
+	owned := make([]land.LandingRecord, 0, len(recs))
+	ids := make([]string, 0, len(recs))
+	seen := make(map[string]struct{}, len(recs))
 	for _, rec := range recs {
-		// Only the worker's own landings, and only while the bead still
-		// waits on them: a bead a human reopened after its landing record
-		// was written is theirs, not a record to finish.
 		if rec.Route != "" && rec.Route != "daemon" {
 			continue
 		}
-		issue, err := w.Beads.Show(rec.BeadID)
-		if err != nil || issue == nil || beads.IssueStatus(strings.TrimSpace(issue.Status)).IsTerminal() {
+		owned = append(owned, rec)
+		if _, ok := seen[rec.BeadID]; !ok {
+			seen[rec.BeadID] = struct{}{}
+			ids = append(ids, rec.BeadID)
+		}
+	}
+	// One call for every bead, not one per record (gt-xzcjh).
+	issues, batched := w.showMultiple(ids)
+	for _, rec := range owned {
+		// Only while the bead still waits on them: a bead a human reopened
+		// after its landing record was written is theirs, not a record to
+		// finish.
+		var issue *beads.Issue
+		if batched {
+			issue = issues[rec.BeadID]
+		} else {
+			var err error
+			if issue, err = w.Beads.Show(rec.BeadID); err != nil {
+				continue
+			}
+		}
+		if issue == nil || beads.IssueStatus(strings.TrimSpace(issue.Status)).IsTerminal() {
 			continue
 		}
 		if hasLandingRecord(issue.Notes, rec.LandedCommit) && !beads.HasLabel(issue, land.LabelReadyToLand) {
@@ -530,6 +552,32 @@ func (w *Worker) queueRecentRepairs() {
 		}
 		w.pendingRepair[rec.BeadID] = workFromRecord(rec, issue)
 	}
+}
+
+// showMultiple reads ids in one call where the beads client can batch them.
+// ok is false when the client has no ShowMultiple or the call failed, and the
+// caller then reads them one at a time: one bad read never drops the repairs
+// of the others.
+func (w *Worker) showMultiple(ids []string) (issues map[string]*beads.Issue, ok bool) {
+	if len(ids) == 0 {
+		return nil, true
+	}
+	batch, can := w.Beads.(interface {
+		ShowMultiple([]string) (map[string]*beads.Issue, error)
+	})
+	if !can {
+		return nil, false
+	}
+	issues, err := batch.ShowMultiple(ids)
+	if err != nil {
+		// A client that cannot batch says so on every pass; only a real
+		// failure is worth a line.
+		if !errors.Is(err, ErrNoShowMultiple) {
+			w.logf("reading the beads of %d landing records in one call: %v", len(ids), err)
+		}
+		return nil, false
+	}
+	return issues, true
 }
 
 func workFromRecord(rec land.LandingRecord, issue *beads.Issue) land.Work {
