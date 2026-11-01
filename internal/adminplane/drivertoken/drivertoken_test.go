@@ -112,19 +112,20 @@ func TestStoreHoldsNoPlainToken(t *testing.T) {
 	if len(rec.Hash) == 0 {
 		t.Fatalf("the returned record carries no hash")
 	}
-	if len(store.records) != 1 {
-		t.Fatalf("stored %d records, want 1", len(store.records))
+	stored := store.Records()
+	if len(stored) != 1 {
+		t.Fatalf("stored %d records, want 1", len(stored))
 	}
 	// %q renders a []byte as the string its bytes spell, so a hash that held the
 	// token's own bytes would show up in plainText.
 	plainText := func(r Record) string {
 		return fmt.Sprintf("%q %q %q", r.ID, r.Workspace, r.Hash)
 	}
-	for _, stored := range store.records {
-		if stored.ID == token {
+	for _, record := range stored {
+		if record.ID == token {
 			t.Errorf("the stored id is the token itself")
 		}
-		if got := plainText(stored); strings.Contains(got, token) {
+		if got := plainText(record); strings.Contains(got, token) {
 			t.Errorf("the stored record holds the token: %s", got)
 		}
 	}
@@ -199,8 +200,8 @@ func TestIssueReturnsTheMembershipRefusalUnchanged(t *testing.T) {
 	if token != "" {
 		t.Errorf("Issue returned a token %q despite the refusal", token)
 	}
-	if len(store.records) != 0 {
-		t.Errorf("stored %d records despite the refusal", len(store.records))
+	if records := store.Records(); len(records) != 0 {
+		t.Errorf("stored %d records despite the refusal", len(records))
 	}
 }
 
@@ -284,14 +285,12 @@ func TestVerifyRefusesAnExpiredToken(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			store := NewMemory()
-			d := newDeps(store)
-			token, rec, err := Issue(ctx, d, "ws-1", allow)
+			token, rec, err := Issue(ctx, newDeps(NewMemory()), "ws-1", allow)
 			if err != nil {
 				t.Fatalf("Issue: %v", err)
 			}
 			rec.ExpiresAt = c.expiresAt
-			store.records = []Record{rec}
+			d := Deps{Store: oneRecord{rec: rec}, Clock: fixedClock}
 
 			ws, err := Verify(ctx, d, token)
 			if !errors.Is(err, c.wantErr) {
@@ -303,6 +302,21 @@ func TestVerifyRefusesAnExpiredToken(t *testing.T) {
 		})
 	}
 }
+
+// oneRecord is a Store holding exactly rec, so a test can drive Verify over a
+// lifetime Issue never sets.
+type oneRecord struct{ rec Record }
+
+func (oneRecord) Put(context.Context, Record) error { return nil }
+
+func (s oneRecord) Lookup(_ context.Context, hash []byte) (Record, error) {
+	if bytes.Equal(s.rec.Hash, hash) {
+		return s.rec, nil
+	}
+	return Record{}, ErrUnknownToken
+}
+
+func (oneRecord) Revoke(context.Context, string, string) error { return ErrNoRecord }
 
 // TestVerifyRefusesAnUnwiredDeps drives the Deps fields Verify cannot work
 // without.

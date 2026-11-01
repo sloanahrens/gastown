@@ -16,6 +16,14 @@ var at = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 // fixedClock always reports at.
 func fixedClock() time.Time { return at }
 
+// sameEntry reports whether a and b are one entry. At is compared with Equal
+// rather than ==, which also weighs the time's location and monotonic reading
+// and so calls two names for one instant unequal.
+func sameEntry(a, b ActionEntry) bool {
+	return a.Actor == b.Actor && a.Workspace == b.Workspace &&
+		a.From == b.From && a.To == b.To && a.At.Equal(b.At)
+}
+
 // fakeStore is Store in memory, recording every save so a test can assert a
 // refused move wrote nothing.
 type fakeStore struct {
@@ -151,7 +159,7 @@ func TestLogFailureAfterSaveIsReported(t *testing.T) {
 		t.Fatalf("error %v is not a *LogFailure, so the caller cannot retry the entry", err)
 	}
 	want := ActionEntry{Actor: "operator", Workspace: "ws-1", From: registry.Active, To: registry.Paused, At: at}
-	if failure.Action != want {
+	if !sameEntry(failure.Action, want) {
 		t.Errorf("failure carries entry %+v, want %+v", failure.Action, want)
 	}
 	if got := store.workspaces["ws-1"].State; got != registry.Paused {
@@ -162,8 +170,31 @@ func TestLogFailureAfterSaveIsReported(t *testing.T) {
 	if err := retry.Append(context.Background(), failure.Action); err != nil {
 		t.Fatalf("appending the failure's entry returned %v, want nil", err)
 	}
-	if len(retry.entries) != 1 || retry.entries[0] != want {
+	if len(retry.entries) != 1 || !sameEntry(retry.entries[0], want) {
 		t.Errorf("retried log holds %+v, want exactly %+v", retry.entries, want)
+	}
+}
+
+// TestEmptyActorRefused keeps a move from leaving an entry that names nobody.
+func TestEmptyActorRefused(t *testing.T) {
+	t.Parallel()
+	store, log := newFakeStore(registry.Active), &fakeLog{}
+	d := Deps{Store: store, Log: log, Clock: fixedClock}
+
+	moves := map[string]func(context.Context, Deps, string, string) error{"Pause": Pause, "Suspend": Suspend}
+	for name, move := range moves {
+		if err := move(context.Background(), d, "ws-1", ""); !errors.Is(err, ErrNoActor) {
+			t.Errorf("%s with no actor returned %v, want ErrNoActor", name, err)
+		}
+	}
+	if len(store.saves) != 0 {
+		t.Errorf("a move with no actor saved %d times: %+v", len(store.saves), store.saves)
+	}
+	if len(log.entries) != 0 {
+		t.Errorf("a move with no actor logged %d entries: %+v", len(log.entries), log.entries)
+	}
+	if got := store.workspaces["ws-1"].State; got != registry.Active {
+		t.Errorf("stored state = %q, want %q unchanged", got, registry.Active)
 	}
 }
 

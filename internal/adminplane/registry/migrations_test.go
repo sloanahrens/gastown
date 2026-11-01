@@ -54,6 +54,9 @@ func TestMigrationsAreOrderedAndNamed(t *testing.T) {
 	}
 }
 
+// TestLoadMigrationsRejectsBadSets drives every refusal. The duplicate row
+// wants the earlier of the two files, which the gap refusal does not name: it
+// names only the file it found.
 func TestLoadMigrationsRejectsBadSets(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
@@ -66,7 +69,7 @@ func TestLoadMigrationsRejectsBadSets(t *testing.T) {
 		"starts at 2":  {fsOf(map[string]string{"schema/0002_a.sql": "x"}), "0001"},
 		"bad name":     {fsOf(map[string]string{"schema/0001_a.sql": "x", "schema/core.sql": "x"}), "core.sql"},
 		"upper case":   {fsOf(map[string]string{"schema/0001_Core.sql": "x"}), "0001_Core.sql"},
-		"duplicate":    {fsOf(map[string]string{"schema/0001_a.sql": "x", "schema/0001_b.sql": "x"}), "0001"},
+		"duplicate":    {fsOf(map[string]string{"schema/0001_a.sql": "x", "schema/0001_b.sql": "x"}), "0001_a.sql"},
 		"none":         {fsOf(map[string]string{"schema/readme.txt": "x"}), "no migrations"},
 		"empty sql":    {fsOf(map[string]string{"schema/0001_a.sql": "  \n"}), "empty"},
 		"non-sql file": {fsOf(map[string]string{"schema/0001_a.sql": "x", "schema/0002_b.txt": "x"}), "0002_b.txt"},
