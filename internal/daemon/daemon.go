@@ -843,6 +843,13 @@ type Daemon struct {
 	// ominstaller.Run (rebuild_om.go).
 	rebuildOMInstallFn rebuildOMInstallFunc
 
+	// rebuildHMRunning is the rebuild_hm job's single-flight guard. The seams
+	// rebuild_hm.go names replace its two renames and its install lock in tests;
+	// nil is the production call.
+	rebuildHMRunning  atomic.Bool
+	rebuildHMRenameFn rebuildHMRenameFunc
+	rebuildHMLockFn   rebuildHMLockFunc
+
 	// jevDedupeRunning is the jev_dedupe pass's single-flight guard
 	// (jev_dedupe.go). A pass makes network calls, so it runs on its own
 	// goroutine and the heartbeat never waits for it.
@@ -973,6 +980,7 @@ type Daemon struct {
 	wispReaperRun     patrolLastRunMemory
 	tierSweepRun      patrolLastRunMemory
 	rebuildOMRun      patrolLastRunMemory
+	rebuildHMRun      patrolLastRunMemory
 	jsonlGitBackupRun patrolLastRunMemory
 	overrunGuardRun   patrolLastRunMemory
 	eventsPruneRun    patrolLastRunMemory
@@ -2122,6 +2130,11 @@ var heartbeatSteps = []heartbeatStep{
 	// Keep the installed om at the om origin's main (gt-0f228). lifecycle: an
 	// install changes a binary on the machine, which the town E-stop holds.
 	{name: "rebuild-om", lifecycle: true, run: (*Daemon).triggerRebuildOM},
+
+	// Install the hm origin's main when the hm-skew monitor reads the installed
+	// hm as behind (gt-bllo8). Opt-in. lifecycle: the swap changes the hm binary
+	// on the machine, which the town E-stop holds.
+	{name: "rebuild-hm", lifecycle: true, run: (*Daemon).triggerRebuildHM},
 
 	// Suggest the bead each new finding duplicates, and log every suggestion
 	// (internal/jev/dedupe). Opt-in, and lifecycle: each pass spends on Jev, so
