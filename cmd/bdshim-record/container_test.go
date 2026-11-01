@@ -56,9 +56,10 @@ func mountOf(argv []string) string {
 
 // TestContainerArgsMountOnlyTheDirectoryAndPassOnlyTheDoltNames: one child's docker command mounts
 // the directory it works in at /work and nothing else, runs there, and carries no environment
-// beyond the BEADS_DOLT_ names and the recorder's pinned identity, so the home directory, the town
-// and every other inherited value stay outside the container. Each -e names a variable and never
-// its value, so a secret cannot be read out of the command line (gt-p85pw.117).
+// beyond the BEADS_DOLT_ names, the recorder's pinned identity and bd's test-server opt-in, so the
+// home directory, the town and every other inherited value stay outside the container. Each -e names
+// a variable and never its value, so a secret cannot be read out of the command line
+// (gt-p85pw.117, gt-czb3c).
 func TestContainerArgsMountOnlyTheDirectoryAndPassOnlyTheDoltNames(t *testing.T) {
 	t.Parallel()
 	c := container{
@@ -84,7 +85,7 @@ func TestContainerArgsMountOnlyTheDirectoryAndPassOnlyTheDoltNames(t *testing.T)
 	for _, pinned := range pinnedIdentity {
 		want = append(want, "-e", pinned[0])
 	}
-	want = append(want, "-e", doltHostVar, "bd-image:test", "/usr/local/bin/bd", "show", "fx-1")
+	want = append(want, "-e", doltHostVar, "-e", testServerOptIn[0], "bd-image:test", "/usr/local/bin/bd", "show", "fx-1")
 	if !slices.Equal(got, want) {
 		t.Fatalf("docker arguments = %v, want %v", got, want)
 	}
@@ -99,8 +100,8 @@ func TestContainerArgsMountOnlyTheDirectoryAndPassOnlyTheDoltNames(t *testing.T)
 		if strings.Contains(name, "=") {
 			t.Errorf("-e %s carries a value on the command line, want only the name", name)
 		}
-		if !strings.HasPrefix(name, doltEnvPrefix) && !pinnedName(name) {
-			t.Errorf("-e names %s, want a %s name or a pinned identity name", name, doltEnvPrefix)
+		if !strings.HasPrefix(name, doltEnvPrefix) && !pinnedName(name) && name != testServerOptIn[0] {
+			t.Errorf("-e names %s, want a %s name, a pinned identity name or %s", name, doltEnvPrefix, testServerOptIn[0])
 		}
 	}
 	if value, ok := envValue(env, "BEADS_DOLT_SERVER_PORT"); !ok || value != testScratchPort {
@@ -171,11 +172,13 @@ func TestContainerArgsWithoutADirectoryMountNothing(t *testing.T) {
 	}
 }
 
-// TestContainerEnvMapsTheHostAndKeepsTheOtherNames: only the BEADS_DOLT_ names cross into the
-// container, and the host the recording names for this machine becomes the one the container
-// reaches it on, since 127.0.0.1 inside the container is the container itself (gt-p85pw.117).
+// TestContainerEnvMapsTheHostAndKeepsTheOtherNames: only the BEADS_DOLT_ names and the recorder's
+// own opt-in cross into the container, and the host the recording names for this machine becomes the
+// one the container reaches it on, since 127.0.0.1 inside the container is the container itself
+// (gt-p85pw.117, gt-czb3c).
 func TestContainerEnvMapsTheHostAndKeepsTheOtherNames(t *testing.T) {
 	t.Parallel()
+	optIn := testServerOptIn[0] + "=" + testServerOptIn[1]
 	tests := []struct {
 		name string
 		env  []string
@@ -184,17 +187,17 @@ func TestContainerEnvMapsTheHostAndKeepsTheOtherNames(t *testing.T) {
 		{
 			"a loopback host becomes the container's",
 			[]string{"BEADS_DOLT_SERVER_HOST=127.0.0.1", "BEADS_DOLT_SERVER_PORT=13307"},
-			[]string{doltHostVar + "=" + testDoltHost, "BEADS_DOLT_SERVER_PORT=13307"},
+			[]string{doltHostVar + "=" + testDoltHost, "BEADS_DOLT_SERVER_PORT=13307", optIn},
 		},
 		{
 			"no host named is the container's",
 			[]string{"BEADS_DOLT_SERVER_PORT=13307"},
-			[]string{"BEADS_DOLT_SERVER_PORT=13307", doltHostVar + "=" + testDoltHost},
+			[]string{"BEADS_DOLT_SERVER_PORT=13307", doltHostVar + "=" + testDoltHost, optIn},
 		},
 		{
 			"another host is left as it is",
 			[]string{"BEADS_DOLT_SERVER_HOST=dolt.example"},
-			[]string{"BEADS_DOLT_SERVER_HOST=dolt.example"},
+			[]string{"BEADS_DOLT_SERVER_HOST=dolt.example", optIn},
 		},
 	}
 	for _, tc := range tests {
@@ -204,6 +207,110 @@ func TestContainerEnvMapsTheHostAndKeepsTheOtherNames(t *testing.T) {
 				t.Errorf("containerEnv(%v) = %v, want %v", tc.env, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestContainerPinsTheTestServerOptIn: bd refuses to make a database on a server it cannot vouch
+// for unless BEADS_TEST_SERVER=1 is set, and a recording's scratch database is always made on a
+// throwaway server, so every container call carries the recorder's own opt-in. An operator's value
+// never decides: the pin is the recorder's constant, whether the operator's environment sets the
+// name to 0, to 1 or not at all (gt-czb3c).
+func TestContainerPinsTheTestServerOptIn(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		base []string
+	}{
+		{"the operator sets nothing", nil},
+		{"the operator sets 0", []string{"BEADS_TEST_SERVER=0"}},
+		{"the operator sets 1", []string{"BEADS_TEST_SERVER=1"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var envs, argvs [][]string
+			c := container{
+				image:    "bd-image:test",
+				bin:      "bd",
+				doltHost: testDoltHost,
+				base:     append([]string{"BEADS_DOLT_SERVER_PORT=" + testScratchPort}, tc.base...),
+				docker: func(env []string, argv []string) ([]byte, int, error) {
+					envs = append(envs, env)
+					argvs = append(argvs, argv)
+					if slices.Contains(argv, "where") {
+						return []byte(`{"data":{"path":"/work/.beads"}}`), 0, nil
+					}
+					return []byte(forkContainerVersion), 0, nil
+				},
+			}
+			child := containerChild(c)
+			if _, _, err := child.Run("", []string{"version"}); err != nil {
+				t.Fatalf("the container's version call = %v, want it run", err)
+			}
+			if _, err := child.Where("", child.Env("")); err != nil {
+				t.Fatalf("the container's where call = %v, want it answered", err)
+			}
+			if len(envs) != 2 {
+				t.Fatalf("docker ran %d calls, want the version and the where", len(envs))
+			}
+			for i, env := range envs {
+				if got, ok := envValue(env, testServerOptIn[0]); !ok || got != testServerOptIn[1] {
+					t.Errorf("call %d carries %s=%q, found=%v, want the recorder's %s", i, testServerOptIn[0], got, ok, testServerOptIn[1])
+				}
+				if !slices.Contains(argvs[i], testServerOptIn[0]) {
+					t.Errorf("call %d docker arguments = %v, want -e %s", i, argvs[i], testServerOptIn[0])
+				}
+			}
+		})
+	}
+}
+
+// TestTownServerRefusalPrecedesThePin: the pin is added when a call's environment is built, after
+// the guard has read the environment it refuses the town's server from, so a run aimed at the
+// town's Dolt server is still refused before any database is made and no database-making call ever
+// carries the pin. The version call the build proof runs first is not database-making and does carry
+// it (gt-czb3c).
+func TestTownServerRefusalPrecedesThePin(t *testing.T) {
+	t.Parallel()
+	const townPort = "13399"
+	town := tempDir(t)
+	mustWrite(t, filepath.Join(town, "mayor", "town.json"), `{"name":"temp","dolt":{"port":`+townPort+`}}`)
+	var envs, argvs [][]string
+	c := container{
+		image:    "bd-image:test",
+		bin:      "bd",
+		doltHost: testDoltHost,
+		base:     []string{"PATH=/usr/bin", "BEADS_DOLT_SERVER_PORT=" + townPort},
+		docker: func(env []string, argv []string) ([]byte, int, error) {
+			envs = append(envs, env)
+			argvs = append(argvs, argv)
+			return []byte(forkContainerVersion), 0, nil
+		},
+	}
+	child := containerChild(c)
+	scratch := filepath.Join(town, "scratch")
+	err := guardRun(cwdAt(town), scratch, child)
+	if err == nil || !strings.Contains(err.Error(), "port "+townPort) {
+		t.Fatalf("guardRun in a town that serves Dolt on %s = %v, want its port refused", townPort, err)
+	}
+	if _, ok := envValue(child.Env(scratch), testServerOptIn[0]); ok {
+		t.Errorf("the environment the town-server refusal reads names %s, want the pin added only after the refusal", testServerOptIn[0])
+	}
+	if _, statErr := os.Stat(scratch); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("scratch %s stat = %v, want no directory made for a refused server", scratch, statErr)
+	}
+	if len(envs) == 0 {
+		t.Fatalf("docker ran no call, want the build proof's version call before the refusal")
+	}
+	for i, argv := range argvs {
+		if slices.Contains(argv, "init") {
+			t.Errorf("docker ran the database-making call %v, want the town's server refused before it", argv)
+		}
+		if slices.Contains(argv, "version") {
+			if got, ok := envValue(envs[i], testServerOptIn[0]); !ok || got != testServerOptIn[1] {
+				t.Errorf("the version call carries %s=%q, found=%v, want the recorder's %s", testServerOptIn[0], got, ok, testServerOptIn[1])
+			}
+		}
 	}
 }
 
