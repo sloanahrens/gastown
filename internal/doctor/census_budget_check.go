@@ -38,9 +38,16 @@ const (
 // census exceeds the budget internal/beads/census_budgets.go records for it,
 // and warns about a caller the table does not name (gt-gojo0). The census names
 // the landing step that decided to read rather than the retry wrapper it used
-// to name, so those reads are summed onto the wrapper's row (gt-krmal). A
-// window lists only its eight busiest rows, so an average is a floor: calls the
-// log leaves out are never counted against a caller.
+// to name, so those reads are summed onto the wrapper's row (gt-krmal).
+//
+// A window lists only its eight busiest rows. For a caller the table names
+// directly, an average is a floor: calls the log leaves out are never counted
+// against it, and the baseline measured the same floor. A folded wrapper row is
+// different: its measured rate was one key's count, and the sum of the step
+// reads behind it spreads over many keys that mostly miss the window's eight
+// rows. When a window's listed rows account for fewer calls than its total, the
+// folded rows are reported but neither passed nor failed, and the check reports
+// the window incomplete (gt-krmal).
 type CensusBudgetCheck struct {
 	BaseCheck
 	// Now is the clock the staleness guard reads; nil is time.Now.
@@ -111,11 +118,28 @@ func (c *CensusBudgetCheck) Run(ctx *CheckContext) *CheckResult {
 	for _, b := range c.budgetTable() {
 		budgets[b.Caller] = b.CallsPerMinute
 	}
-	rowCalls, unbudgetedCalls := censusReadRows(censusReadCalls(samples), budgets, censusWrapperRows(budgets))
+	folded := censusWrapperRows(budgets)
+	foldedRows := make(map[string]bool, len(folded))
+	for _, row := range folded {
+		foldedRows[row] = true
+	}
+	rowCalls, unbudgetedCalls := censusReadRows(censusReadCalls(samples), budgets, folded)
+	listing, total := censusListedAndTotal(samples)
+	complete := listing == total
 
-	var over, unbudgeted []string
+	var over, unbudgeted, visible []string
 	for _, row := range sortedKeys(rowCalls) {
-		if average := float64(rowCalls[row]) / minutes; average > budgets[row] {
+		average := float64(rowCalls[row]) / minutes
+		if !complete && foldedRows[row] {
+			// The listed rows are a sample of the window, so their sum is a
+			// floor below the rate the wrapper rows were measured at. Report
+			// what is visible and leave the row ungated rather than pass it on
+			// an undercount.
+			visible = append(visible,
+				fmt.Sprintf("%s shows %.1f calls/min over %d windows, budget %.1f: not gated, the window lists only its busiest rows", row, average, len(samples), budgets[row]))
+			continue
+		}
+		if average > budgets[row] {
 			over = append(over,
 				fmt.Sprintf("%s averages %.1f calls/min over %d windows, budget %.1f", row, average, len(samples), budgets[row]))
 		}
@@ -125,15 +149,31 @@ func (c *CensusBudgetCheck) Run(ctx *CheckContext) *CheckResult {
 		unbudgeted = append(unbudgeted,
 			fmt.Sprintf("%s averages %.1f calls/min over %d windows and has no budget", caller, average, len(samples)))
 	}
+	// incomplete names the calls the measured windows counted but did not list.
+	incomplete := fmt.Sprintf("incomplete: %d of %d reads visible", listing, total)
 
 	switch {
 	case len(over) > 0:
+		details := append([]string(nil), over...)
+		if !complete {
+			details = append(details, incomplete+": the retry-wrapper rows were not gated on a partial fold")
+		}
+		details = append(append(details, visible...), unbudgeted...)
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusError,
 			Message: fmt.Sprintf("%d bd caller(s) over budget in the last %d census windows", len(over), len(samples)),
-			Details: append(append(append([]string(nil), over...), unbudgeted...), censusNoteDetails(read)...),
+			Details: append(details, censusNoteDetails(read)...),
 			FixHint: "Cut the caller's bd calls, or raise its row in internal/beads/census_budgets.go (a data edit om reviews)",
+		}
+	case !complete:
+		details := append(append(append([]string(nil), visible...), unbudgeted...), censusNoteDetails(read)...)
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusWarning,
+			Message: fmt.Sprintf("%s across the last %d census windows: the retry-wrapper rows are not gated on a partial fold", incomplete, len(samples)),
+			Details: details,
+			FixHint: "A window lists only its busiest rows, so a sum of them misses calls: the wrapper rows are reported but not gated until a window's rows account for its total",
 		}
 	case len(unbudgeted) > 0:
 		return &CheckResult{
@@ -270,6 +310,17 @@ func censusReadCalls(samples []censusSample) map[censusReadKey]int {
 		}
 	}
 	return calls
+}
+
+// censusListedAndTotal is the calls the measured windows' listed rows account
+// for and the calls their totals count. A window's total covers every call it
+// saw, so a listed sum below it means the log left rows out.
+func censusListedAndTotal(samples []censusSample) (listing, total int) {
+	for _, sample := range samples {
+		listing += beads.CensusRowsTotal(sample.Window.Rows)
+		total += sample.Window.Total
+	}
+	return listing, total
 }
 
 // censusWrapperRows maps each read a retry-wrapper budget row counts to that

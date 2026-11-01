@@ -33,8 +33,10 @@ type CensusBudget struct {
 // it looks through that wrapper and names the landing step that decided to read
 // (gt-krmal). censusWrapperReads lists the reads each row still counts, so the
 // gate sums them and compares the sum with the rate measured under the wrapper
-// name. A later edit re-keys them from a post-install census; until then the
-// names and numbers stay as measured.
+// name. A census window lists only its busiest rows, so that sum is a floor: a
+// window whose listed rows account for fewer calls than its total leaves these
+// rows ungated and is reported incomplete. A later edit re-keys them from a
+// post-install census; until then the names and numbers stay as measured.
 var censusCallerBudgets = []CensusBudget{
 	// Baseline 762 calls, 12.7 a minute: one ready-to-land list per rig per
 	// metrics sample (gt-hw6ih moves the column onto the landing worker's

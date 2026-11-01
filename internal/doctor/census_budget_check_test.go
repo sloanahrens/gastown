@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -30,16 +31,48 @@ func censusCheck() *CensusBudgetCheck {
 }
 
 // writeCensusLog writes a daemon log holding one census record a minute from
-// censusLogStart, the rows func returning each record's rows.
+// censusLogStart, the rows func returning each record's rows. Each record's
+// total is the calls its rows list, so every window is complete.
 func writeCensusLog(t *testing.T, town string, windows int, rows func(i int) []string) string {
+	return writeCensusLogTotal(t, town, windows, -1, rows)
+}
+
+// writeCensusLogTotal writes the same log with every record carrying total as
+// its call count instead of its listed calls, so a record can count calls its
+// top rows leave out. A negative total writes the listed calls.
+func writeCensusLogTotal(t *testing.T, town string, windows, total int, rows func(i int) []string) string {
 	t.Helper()
 	var b strings.Builder
 	for i := 0; i < windows; i++ {
-		fmt.Fprintf(&b, "%s bd census: total=99 window=60s top: %s\n",
+		listed := rows(i)
+		recordTotal := total
+		if recordTotal < 0 {
+			recordTotal = censusFixtureListed(t, listed)
+		}
+		fmt.Fprintf(&b, "%s bd census: total=%d window=60s top: %s\n",
 			censusLogStart.Add(time.Duration(i)*time.Minute).Format("2006/01/02 15:04:05"),
-			strings.Join(rows(i), " "))
+			recordTotal, strings.Join(listed, " "))
 	}
 	return writeDoctorTownFile(t, town, "daemon/daemon.log", b.String())
+}
+
+// censusFixtureListed is the calls the fixture rows list, so a written record's
+// total can account for every call it makes.
+func censusFixtureListed(t *testing.T, rows []string) int {
+	t.Helper()
+	total := 0
+	for _, row := range rows {
+		_, count, ok := strings.Cut(row, "=")
+		if !ok {
+			t.Fatalf("fixture row %q is not verb@caller=count", row)
+		}
+		n, err := strconv.Atoi(count)
+		if err != nil {
+			t.Fatalf("fixture row %q: count: %v", row, err)
+		}
+		total += n
+	}
+	return total
 }
 
 // censusDetail returns the detail line naming caller, or "" when none does.
@@ -207,6 +240,50 @@ func TestCensusBudgetCheckPassesTheStepsUnderTheWrapperBudgets(t *testing.T) {
 	}
 }
 
+// TestCensusBudgetCheckReportsAnIncompleteWindow: a window lists only its
+// busiest rows, so a folded wrapper sum below the window's total is a partial
+// fold. The check reports the window incomplete and neither passes nor fails
+// the wrapper row on the partial sum; a window whose rows account for its total
+// folds as before (gt-krmal). Mutation: drop the incomplete branch and the
+// first case reads OK.
+func TestCensusBudgetCheckReportsAnIncompleteWindow(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		total int
+		calls int
+		want  CheckStatus
+	}{
+		{name: "a partial fold under the budget is not a pass", total: 11, calls: 8, want: StatusWarning},
+		{name: "a partial fold over the budget is not a failure", total: 99, calls: 12, want: StatusWarning},
+		{name: "a complete window folds as before", total: 12, calls: 12, want: StatusError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			writeCensusLogTotal(t, town, 60, tc.total, func(int) []string {
+				return []string{fmt.Sprintf("show@landworker.(*Worker).outcomeRow=%d", tc.calls)}
+			})
+
+			r := censusCheck().Run(&CheckContext{TownRoot: town})
+
+			if r.Status != tc.want {
+				t.Fatalf("status = %v (%s, %q), want %v", r.Status, r.Message, r.Details, tc.want)
+			}
+			if tc.want != StatusWarning {
+				return
+			}
+			incomplete := fmt.Sprintf("incomplete: %d of %d reads visible", 60*tc.calls, 60*tc.total)
+			if !strings.Contains(r.Message, incomplete) {
+				t.Errorf("message %q must hold %q", r.Message, incomplete)
+			}
+			if detail := censusDetail(r, "landworker.RetryBeads.Show"); !strings.Contains(detail, "not gated") {
+				t.Errorf("details %q must report the wrapper row as not gated", r.Details)
+			}
+		})
+	}
+}
+
 // TestCensusBudgetCheckPassesWithinBudget: every caller under its row passes.
 func TestCensusBudgetCheckPassesWithinBudget(t *testing.T) {
 	t.Parallel()
@@ -260,11 +337,11 @@ func TestCensusBudgetCheckMeasuresOnlyTheNewestWindows(t *testing.T) {
 	var b strings.Builder
 	for i := 0; i < censusBudgetWindows; i++ {
 		stamp := censusLogStart.Add(-time.Hour + time.Duration(i)*time.Minute)
-		fmt.Fprintf(&b, "%s bd census: total=99 window=60s top: list@metrics.queueLandingColumn=1\n", stamp.Format("2006/01/02 15:04:05"))
+		fmt.Fprintf(&b, "%s bd census: total=1 window=60s top: list@metrics.queueLandingColumn=1\n", stamp.Format("2006/01/02 15:04:05"))
 	}
 	for i := 0; i < censusBudgetWindows; i++ {
 		stamp := censusLogStart.Add(time.Duration(i) * time.Minute)
-		fmt.Fprintf(&b, "%s bd census: total=99 window=60s top: list@metrics.queueLandingColumn=20\n", stamp.Format("2006/01/02 15:04:05"))
+		fmt.Fprintf(&b, "%s bd census: total=20 window=60s top: list@metrics.queueLandingColumn=20\n", stamp.Format("2006/01/02 15:04:05"))
 	}
 	writeDoctorTownFile(t, town, "daemon/daemon.log", b.String())
 
@@ -292,8 +369,9 @@ func TestCensusBudgetCheckAveragesOverTheSpanNotTheLoggedMinutes(t *testing.T) {
 		if i == 10 {
 			rows = "list@landworker.RetryBeads.AppendNotes=60"
 		}
-		fmt.Fprintf(&b, "%s bd census: total=99 window=60s top: %s\n",
-			censusLogStart.Add(time.Duration(i)*3*time.Minute).Format("2006/01/02 15:04:05"), rows)
+		fmt.Fprintf(&b, "%s bd census: total=%d window=60s top: %s\n",
+			censusLogStart.Add(time.Duration(i)*3*time.Minute).Format("2006/01/02 15:04:05"),
+			censusFixtureListed(t, []string{rows}), rows)
 	}
 	writeDoctorTownFile(t, town, "daemon/daemon.log", b.String())
 
@@ -476,10 +554,10 @@ func TestCensusBudgetCheckCountsTheRecordsItCannotPlace(t *testing.T) {
 	town := t.TempDir()
 	var b strings.Builder
 	for i := 0; i < 2; i++ {
-		b.WriteString("bd census: total=99 window=60s top: list@metrics.queueLandingColumn=1\n")
+		b.WriteString("bd census: total=1 window=60s top: list@metrics.queueLandingColumn=1\n")
 	}
 	for i := 0; i < censusBudgetWindows; i++ {
-		fmt.Fprintf(&b, "%s bd census: total=99 window=60s top: list@metrics.queueLandingColumn=2\n",
+		fmt.Fprintf(&b, "%s bd census: total=2 window=60s top: list@metrics.queueLandingColumn=2\n",
 			censusLogStart.Add(time.Duration(i)*time.Minute).Format("2006/01/02 15:04:05"))
 	}
 	writeDoctorTownFile(t, town, "daemon/daemon.log", b.String())
@@ -507,10 +585,10 @@ func TestCensusBudgetCheckWarnsOnTornRecords(t *testing.T) {
 		stamp := censusLogStart.Add(time.Duration(i) * time.Minute).Format("2006/01/02 15:04:05")
 		if i%20 == 7 {
 			// Cut after the marker: three windows' worth of rows are gone.
-			fmt.Fprintf(&b, "%s bd census: total=99 window=60s top: list@metrics.queueLa\n", stamp)
+			fmt.Fprintf(&b, "%s bd census: total=6 window=60s top: list@metrics.queueLa\n", stamp)
 			continue
 		}
-		fmt.Fprintf(&b, "%s bd census: total=99 window=60s top: list@landworker.RetryBeads.List=6\n", stamp)
+		fmt.Fprintf(&b, "%s bd census: total=6 window=60s top: list@landworker.RetryBeads.List=6\n", stamp)
 	}
 	writeDoctorTownFile(t, town, "daemon/daemon.log", b.String())
 
