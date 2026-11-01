@@ -126,3 +126,31 @@ func TestSpendLedgerMissingIsEmpty(t *testing.T) {
 	assert.NotNil(t, rep.ByCaller)
 	assert.Empty(t, rep.ByCaller)
 }
+
+// The dashboard's Jev row shows the last hour, today, yesterday and the last
+// week beside the day: one pass of the
+// ledger, days cut at the clock's local midnight.
+func TestReadSpendPeriodsCutsHourTodayYesterdayAndWeek(t *testing.T) {
+	t.Parallel()
+	loc := time.FixedZone("test", -5*3600)
+	now := time.Date(2026, 10, 31, 20, 0, 0, 0, loc)
+	midnight := time.Date(2026, 10, 31, 0, 0, 0, 0, loc)
+	path := writeSpendLedger(t, t.TempDir(),
+		ledgerLine(now.Add(-30*time.Minute), "a", 1000, 0),    // hour, today, week
+		ledgerLine(now.Add(-5*time.Hour), "a", 2000, 0),       // today, week
+		ledgerLine(midnight.Add(-time.Hour), "a", 4000, 0),    // yesterday, week
+		ledgerLine(midnight.Add(-30*time.Hour), "a", 8000, 0), // before yesterday, week
+		ledgerLine(now.Add(-200*time.Hour), "a", 16000, 0),    // outside the week
+		ledgerLine(now.Add(time.Hour), "a", 32000, 0),         // after now
+	)
+	got, err := ReadSpendPeriods(path, now, 1e9)
+	require.NoError(t, err)
+	assert.Equal(t, SpendPeriods{Last1hUSD: 1000, TodayUSD: 3000, YesterdayUSD: 4000, Last7dUSD: 15000}, got)
+}
+
+func TestReadSpendPeriodsMissingLedgerIsZeros(t *testing.T) {
+	t.Parallel()
+	got, err := ReadSpendPeriods(filepath.Join(t.TempDir(), "none.jsonl"), time.Now(), 1e9)
+	require.NoError(t, err)
+	assert.Equal(t, SpendPeriods{}, got)
+}

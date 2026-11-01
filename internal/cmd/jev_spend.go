@@ -43,8 +43,9 @@ ledger stores tokens and never dollars. A missing ledger prints zeros; a line
 that does not parse is skipped and counted in lines_skipped.
 
 --json prints {calls, input_tokens, output_tokens, usd, lines_skipped,
-by_caller}, where by_caller maps each caller to its {calls, usd}, for a
-dashboard that draws Jev spend beside DeepSeek's and Claude's.
+by_caller, periods}, where by_caller maps each caller to its {calls, usd}
+and periods holds the dollars of the last hour, today (since local midnight),
+yesterday and the last 168 hours, for a dashboard that draws Jev spend beside DeepSeek's and Claude's.
 
 Examples:
   gt jev spend --usd-per-billion-tokens 3 --json
@@ -86,9 +87,19 @@ func jevSpendWithFlags(w io.Writer, townRoot string, hours int, usdPerBillion fl
 		return err
 	}
 	if asJSON {
+		// The periods ride beside the window's own fields, for the dashboard's
+		// Jev row (today, yesterday, 7 days, last hour); a reader that does not
+		// know them ignores them.
+		periods, err := jev.ReadSpendPeriods(jev.UsageLedgerPath(townRoot), now, usdPerBillion)
+		if err != nil {
+			return err
+		}
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
-		return enc.Encode(rep)
+		return enc.Encode(struct {
+			jev.SpendReport
+			Periods jev.SpendPeriods `json:"periods"`
+		}{rep, periods})
 	}
 	return writeJevSpendTable(w, rep)
 }
