@@ -2,6 +2,7 @@ package config
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -102,5 +103,14 @@ func TestProviderPassthroughNamesNoCredential(t *testing.T) {
 				t.Errorf("%s is forwarded from the spawning process but names a credential (%s)", k, m)
 			}
 		}
+	}
+}
+
+// The sbx-haiku seat's setup-token credential is on the guard list, so the loop
+// tests above plant a fake value of it in the parent environment.
+func TestUnforwardedCredentialListHoldsTheOAuthToken(t *testing.T) {
+	t.Parallel()
+	if !slices.Contains(UnforwardedCredentialEnvVars(), "CLAUDE_CODE_OAUTH_TOKEN") {
+		t.Errorf("UnforwardedCredentialEnvVars() does not name CLAUDE_CODE_OAUTH_TOKEN")
 	}
 }

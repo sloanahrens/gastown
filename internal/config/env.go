@@ -417,6 +417,10 @@ var unforwardedCredentialEnvVars = []string{
 	"AWS_BEARER_TOKEN_BEDROCK",
 	"ANTHROPIC_FOUNDRY_API_KEY",
 	"CLAUDE_CODE_CLIENT_KEY_PASSPHRASE",
+
+	// A setup-token subscription credential (gt-l0k3s), reached by agents as a
+	// ${VAR} reference to settings/daemon.env like the others above.
+	"CLAUDE_CODE_OAUTH_TOKEN",
 }
 
 // UnforwardedCredentialEnvVars names the credentials no spawn path takes from
