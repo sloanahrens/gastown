@@ -105,12 +105,34 @@ func TestManifestOrderIsToday(t *testing.T) {
 	}
 }
 
-func TestManifestStartsSerial(t *testing.T) {
+// forgejoParallelScripts are the scripts whose own bead proved they can share
+// a pool (gt-u560q.12, proven by
+// TestIntegrationForgejoTestsRunConcurrentlyThreeTimesGreen in the integration
+// build). A further script becomes Parallel only in its own bead, with the same
+// proof. scripts/forgejo-provision_test.sh is not here: its token-mode checks
+// fail on GNU stat even when the script runs alone, so it stays Serial.
+var forgejoParallelScripts = []string{
+	"scripts/forgejo-cutover_test.sh",
+	"scripts/forgejo-probe_test.sh",
+	"scripts/forgejo-resync_test.sh",
+}
+
+func TestManifestMarksExactlyTheProvenScriptsParallel(t *testing.T) {
 	t.Parallel()
 	for _, e := range Manifest() {
-		if e.Mode != Serial {
-			t.Errorf("%s: Mode=%v, want Serial", e.Path, e.Mode)
+		want := Serial
+		if slices.Contains(forgejoParallelScripts, e.Path) {
+			want = Parallel
 		}
+		if e.Mode != want {
+			t.Errorf("%s: Mode=%v, want %v: only a script with its own concurrent-run proof is Parallel", e.Path, e.Mode, want)
+		}
+	}
+}
+
+func TestManifestEntriesRepeatTheDefaultTriggers(t *testing.T) {
+	t.Parallel()
+	for _, e := range Manifest() {
 		// A declared list is the entry's whole trigger set, so it repeats the
 		// defaults rather than dropping them.
 		for _, want := range DefaultTriggers {

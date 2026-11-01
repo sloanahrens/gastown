@@ -76,6 +76,9 @@ func hasGoDeclaration(s string) bool {
 // Manifest lists every shell test in the order the runner runs them: the
 // scripts/test-makefile.sh order first, then the tests the shell tier adds.
 //
+// An entry is Parallel only where its own bead proved three concurrent green
+// runs (gt-u560q.12); every other script is Serial.
+//
 // An entry declares Triggers when its script names a repo path the default
 // triggers do not cover; the declared list repeats the defaults, since a
 // declared list is the whole set. TestEveryReferencedRepoPathIsATrigger holds
@@ -91,10 +94,10 @@ func Manifest() []Entry {
 			Triggers: []string{"scripts/", "Makefile", "internal/"}},
 		{Path: "scripts/gate-vs-load_test.sh", StubsGo: "none: names no go command"},
 		{Path: "scripts/forgejo-provision_test.sh", StubsGo: "none: names no go command"},
-		{Path: "scripts/forgejo-probe_test.sh", StubsGo: "none: names no go command",
+		{Path: "scripts/forgejo-probe_test.sh", StubsGo: "none: names no go command", Mode: Parallel,
 			Triggers: []string{"scripts/", "Makefile", ".githooks/"}},
-		{Path: "scripts/forgejo-resync_test.sh", StubsGo: "none: names no go command"},
-		{Path: "scripts/forgejo-cutover_test.sh", StubsGo: "none: names no go command"},
+		{Path: "scripts/forgejo-resync_test.sh", StubsGo: "none: names no go command", Mode: Parallel},
+		{Path: "scripts/forgejo-cutover_test.sh", StubsGo: "none: names no go command", Mode: Parallel},
 		{Path: "deploy/k8s/kind/kind_test.sh", StubsGo: "none: names no go command",
 			Triggers: []string{"scripts/", "Makefile", "deploy/"}},
 		{Path: "scripts/resource-sampler_test.sh", StubsGo: "none: go test appears only in a ps fixture line"},
