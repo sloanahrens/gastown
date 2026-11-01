@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A push draws a pane only when the reading it is drawn from changed since its
@@ -80,6 +81,120 @@ func TestPageDrawsAPaneOnlyWhenItsReadingChanged(t *testing.T) {
 	// The change reached the body the reader is looking at.
 	if text := dom.element(t, "attention").Text; !strings.Contains(text, "the dome is open") {
 		t.Errorf("#attention reads %q, want the changed row's title", text)
+	}
+}
+
+// TestPageRedrawsAPaneWhenOnlyItsReadStatusChanged: a panel draws the read
+// behind its numbers too — the caption's words and the grey — so a read that
+// failed while the value it last returned stayed put is a change its draw must
+// see (gt-q6h8e, gt-quuq5). The rigs pane reads one source and the Work pane
+// two, so the one reading that moved is checked both ways.
+func TestPageRedrawsAPaneWhenOnlyItsReadStatusChanged(t *testing.T) {
+	t.Parallel()
+
+	stamp := time.Now().UTC().Format(time.RFC3339)
+	fresh := map[string]any{"at": stamp, "every_sec": 60}
+	failed := map[string]any{"at": stamp, "every_sec": 60, "error": true, "stale": true}
+
+	t.Run("the rigs pane", func(t *testing.T) {
+		t.Parallel()
+
+		dom := newPageDOM(t)
+		if !dom.fold(t, "rigs").Collapsed {
+			t.Fatal("the rigs section starts closed for a reader with no saved choice")
+		}
+		dom.press(t, "rigs", "click")
+		draws := countPaneDraws(t, dom, "rigs")
+		reading := func(status map[string]any) map[string]any {
+			s := rigsReading(2)
+			s["reads"] = map[string]any{"queue": status}
+			return s
+		}
+		pushState(t, dom, reading(fresh))
+		if got := draws(); got != 1 {
+			t.Fatalf("the first reading drew #rigs %d times, want once", got)
+		}
+		// The same rigs and the same queue stamp: only the read behind them failed.
+		pushState(t, dom, reading(failed))
+		if got := draws(); got != 2 {
+			t.Errorf("a failed read drew #rigs %d times, want 2: the value it returned did not move, the status did", got)
+		}
+		if got := dom.element(t, "rigsnote").Text; !strings.Contains(got, "read failed") {
+			t.Errorf("#rigsnote reads %q, want the failed read named", got)
+		}
+	})
+
+	t.Run("the Work pane", func(t *testing.T) {
+		t.Parallel()
+
+		dom := newPageDOM(t)
+		if dom.fold(t, "work").Collapsed {
+			t.Fatal("the work section starts open for a reader with no saved choice")
+		}
+		// Every stamp is the test's, and the seat carries no age of its own, so
+		// the readings below differ in one field: the status of the seats read.
+		reading := func(seats map[string]any) map[string]any {
+			s := workState([]any{seat("gastown", "dementus", "working", "gt-vcr3z", "one Work panel", "deepseek-flash", 0)}, workQueueReading(3, 0, 0, 0))
+			s["summary_at"] = stamp
+			s["queue"].(map[string]any)["at"] = stamp
+			s["reads"].(map[string]any)["seats"] = seats
+			s["reads"].(map[string]any)["queue"] = fresh
+			return s
+		}
+		pushState(t, dom, reading(fresh))
+		pushState(t, dom, reading(fresh))
+		if got := dom.element(t, "worknote").Text; strings.Contains(got, "failed") {
+			t.Fatalf("#worknote reads %q before any read failed", got)
+		}
+		pushState(t, dom, reading(failed))
+		if got := dom.element(t, "worknote").Text; !strings.Contains(got, "the seats read failed") {
+			t.Errorf("#worknote reads %q after the seats read failed, want it named", got)
+		}
+	})
+}
+
+// TestPageRetriesAPaneWhoseDrawThrew: a draw that threw has not drawn the
+// reading, so the push that ran it must not record that reading as drawn — the
+// next push has to draw the pane again (gt-quuq5).
+func TestPageRetriesAPaneWhoseDrawThrew(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	draws := countPaneDraws(t, dom, "attention")
+	pushState(t, dom, attentionReading("is the dome open"))
+	if got := draws(); got != 1 {
+		t.Fatalf("the first reading drew #attention %d times, want once", got)
+	}
+	// The next draw throws, from the first thing every draw of the body does, so
+	// the pane keeps the reading it was drawn from.
+	if _, err := dom.vm.RunString(`(function () {
+		var box = __byId["attention"], orig = box.replaceChildren, thrown = false;
+		box.replaceChildren = function () {
+			if (!thrown) { thrown = true; throw new Error("a draw that threw"); }
+			return orig.apply(this, arguments);
+		};
+	})()`); err != nil {
+		t.Fatalf("arming a draw that throws: %v", err)
+	}
+	data, err := json.Marshal(attentionReading("the dome is open"))
+	if err != nil {
+		t.Fatalf("encoding the reading: %v", err)
+	}
+	// The browser does not stop delivering because one push threw.
+	if _, err := dom.vm.RunString(`try { __fire(__sources[` + liveStream + `], "state", (` + string(data) + `)); } catch (e) {}`); err != nil {
+		t.Fatalf("delivering a reading whose draw throws: %v", err)
+	}
+	// The throw left the pane as it was: still on the old reading, and not
+	// counted as drawn because the throw came before the body was touched.
+	if got := dom.element(t, "attention").Text; !strings.Contains(got, "is the dome open") {
+		t.Fatalf("#attention reads %q after a draw that threw, want the reading it already had", got)
+	}
+	pushState(t, dom, attentionReading("the dome is open"))
+	if got := draws(); got != 2 {
+		t.Fatalf("#attention was drawn %d times, want 2: the first reading and the retry", got)
+	}
+	if text := dom.element(t, "attention").Text; !strings.Contains(text, "the dome is open") {
+		t.Errorf("#attention reads %q, want the reading the retried push drew", text)
 	}
 }
 
