@@ -1,0 +1,29 @@
+# The CONTROL kind cluster: the services the town needs to stay up (the first
+# workload is hm, later Forgejo and its runner). It runs on the gt-kind Colima
+# VM, never on gt-control (that VM is the sweep runner's engine) and never in
+# the gt-sbx work cluster. See README.md in this directory.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: gt-ctl
+containerdConfigPatches:
+- |-
+  [plugins."io.containerd.grpc.v1.cri".registry]
+    config_path = "/etc/containerd/certs.d"
+nodes:
+- role: control-plane
+- role: worker
+  labels:
+    gt.dev/pool: core
+# The privileged pool is for the Forgejo runner (docker-in-docker needs
+# privilege), kept off the core node by a taint so nothing else lands there.
+- role: worker
+  labels:
+    gt.dev/pool: privileged
+  kubeadmConfigPatches:
+  - |
+    kind: JoinConfiguration
+    nodeRegistration:
+      taints:
+      - key: gt.dev/pool
+        value: privileged
+        effect: NoSchedule
