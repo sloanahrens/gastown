@@ -232,17 +232,27 @@ var pkgDefault = regexp.MustCompile(`(^|[^A-Za-z_])PKGS *\?=`)
 
 // TestIntegrationGateNoRecipeDefaultsTheContainerOptIn checks "no recipe
 // defaults the container opt-in from the environment".
-// Mutation: write GT_TEST_DOCKER=$(GT_TEST_DOCKER:-0), and a caller's exported
-// 1 becomes the default on every target.
+// Mutation: write GT_TEST_DOCKER=$(GT_TEST_DOCKER:-0), GT_TEST_DOCKER ?= 0, or
+// GT_TEST_DOCKER=$(GT_TEST_DOCKER), and a caller's exported 1 becomes the
+// default on every target.
 func TestIntegrationGateNoRecipeDefaultsTheContainerOptIn(t *testing.T) {
 	if line := firstLineMatching(makefileText(t, repoRoot(t)), containerOptInDefault); line != "" {
 		t.Fatalf("the Makefile defaults the container opt-in from the environment: %s", line)
 	}
 }
 
-// containerOptInDefault matches a recipe defaulting GT_TEST_DOCKER from the
-// environment.
-var containerOptInDefault = regexp.MustCompile(`GT_TEST_DOCKER:-`)
+// containerOptInDefault matches an assignment that takes GT_TEST_DOCKER from
+// the environment instead of writing a literal:
+//
+//	GT_TEST_DOCKER ?= 0                    make leaves an inherited value set
+//	GT_TEST_DOCKER=$(GT_TEST_DOCKER)       a recipe takes the inherited value
+//	GT_TEST_DOCKER=${GT_TEST_DOCKER}       the same, in make's brace form
+//	GT_TEST_DOCKER=$$GT_TEST_DOCKER        the shell takes the inherited value
+//	GT_TEST_DOCKER=$${GT_TEST_DOCKER:-0}   the shell supplies a default
+var containerOptInDefault = regexp.MustCompile(
+	`GT_TEST_DOCKER\s*\?=` +
+		`|GT_TEST_DOCKER\s*[+:]?=\s*\$\$?[({]?GT_TEST_DOCKER` +
+		`|GT_TEST_DOCKER:-`)
 
 // firstLineMatching returns the first line of text that matches re, or "".
 func firstLineMatching(text string, re *regexp.Regexp) string {
