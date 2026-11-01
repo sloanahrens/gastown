@@ -2747,7 +2747,7 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 			}
 			return children(id)
 		},
-		RigHold:        func(rig string) string { return dispatch.RigHold(townRoot, rig) },
+		RigHold: func(rig string) string { return dispatch.RigHold(townRoot, rig) },
 		RevertInFlight: specRevertInFlight(townRoot, reads, reverts, func(name string) beads.Client {
 			return beads.NewPinned(beads.ResolveBeadsDir(filepath.Join(townRoot, name)))
 		}),
