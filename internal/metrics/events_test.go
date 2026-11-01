@@ -228,7 +228,7 @@ func TestRegimeEventsReaderRefusesAnUnusableRecord(t *testing.T) {
 			files := map[string]string{filepath.Join(runtimeDir, "regime-events.jsonl"): tc.record}
 			env := runtimeRegimeEnv(files, []DirEntry{{Name: "regime-events.jsonl"}})
 			events, err := ReadRegimeEvents(env)
-			if err == nil || events != nil {
+			if err == nil || len(events) != 0 {
 				t.Fatalf("ReadRegimeEvents = %v, %v; want an error and no events", events, err)
 			}
 			if !strings.Contains(err.Error(), tc.wantErr) {
@@ -290,7 +290,7 @@ func TestRegimeEventsReaderRefusesAnUnreadableRecord(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			events, err := ReadRegimeEvents(tc.env)
-			if err == nil || events != nil {
+			if err == nil || len(events) != 0 {
 				t.Fatalf("ReadRegimeEvents = %v, %v; want an error and no events", events, err)
 			}
 			if !strings.Contains(err.Error(), tc.wantErr) {
@@ -551,5 +551,100 @@ func TestRegimeEventsReaderCutsALongRecordReason(t *testing.T) {
 	want := string([]rune("gate: " + long)[:120])
 	if len(events) != 1 || events[0].What != want {
 		t.Fatalf("events = %#v; want one event whose what is the first 120 runes %q", events, want)
+	}
+}
+
+// The backfill files merge in name order, whatever order the directory lists
+// them in: two backfill files holding the same event at one instant keep the
+// earlier-named file's twin, and two different events at one instant keep the
+// earlier-named file's first (gt-ng1lc).
+func TestRegimeEventsReaderReadsBackfillFilesInNameOrder(t *testing.T) {
+	t.Parallel()
+	runtimeDir := filepath.Join("/town", ".runtime", "metrics")
+	const at = `"ts":"2026-10-05T12:00:00Z","kind":"gate","before_ref":"","after_ref":`
+	files := map[string]string{
+		filepath.Join(runtimeDir, "regime-events.jsonl"):                   "",
+		filepath.Join(runtimeDir, "regime-events-backfill-20261101.jsonl"): `{` + at + `"b","commit":"","reason":"from the later file","actor":"a"}` + "\n",
+		filepath.Join(runtimeDir, "regime-events-backfill-20261031.jsonl"): `{` + at + `"a","commit":"","reason":"from the earlier file","actor":"a"}` + "\n",
+	}
+	listings := [][]DirEntry{
+		{{Name: "regime-events-backfill-20261101.jsonl"}, {Name: "regime-events-backfill-20261031.jsonl"}},
+		{{Name: "regime-events-backfill-20261031.jsonl"}, {Name: "regime-events-backfill-20261101.jsonl"}},
+	}
+	want := []RegimeEvent{
+		{Date: "2026-10-05", What: "gate: from the earlier file", Confirmed: true},
+		{Date: "2026-10-05", What: "gate: from the later file", Confirmed: true},
+	}
+	for _, entries := range listings {
+		events, err := ReadRegimeEvents(runtimeRegimeEnv(files, entries))
+		if err != nil {
+			t.Fatalf("ReadRegimeEvents: %v", err)
+		}
+		if !reflect.DeepEqual(events, want) {
+			t.Fatalf("listing %v: events = %#v; want %#v whatever the listing order", entries, events, want)
+		}
+	}
+}
+
+// A runtime line the reader cannot use is an error, and the settings events,
+// which do not depend on it, still come back beside it (gt-ng1lc).
+func TestRegimeEventsReaderKeepsSettingsEventsWhenTheRecordIsBad(t *testing.T) {
+	t.Parallel()
+	runtimeDir := filepath.Join("/town", ".runtime", "metrics")
+	files := map[string]string{
+		filepath.Join("/town", "settings", "regime-events.json"): `{"v":1,"events":[{"date":"2026-10-05","what":"flash seats replaced by Sonnet seats"}]}`,
+		filepath.Join(runtimeDir, "regime-events.jsonl"):         "{not json\n",
+	}
+	events, err := ReadRegimeEvents(runtimeRegimeEnv(files, []DirEntry{{Name: "regime-events.jsonl"}}))
+	if err == nil || !strings.Contains(err.Error(), "decoding") {
+		t.Fatalf("error = %v; want the record's decoding error", err)
+	}
+	want := []RegimeEvent{{Date: "2026-10-05", What: "flash seats replaced by Sonnet seats"}}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %#v; want the settings event kept: %#v", events, want)
+	}
+	var reports []string
+	marks := panelEvents(runtimeRegimeEnv(files, []DirEntry{{Name: "regime-events.jsonl"}}), func(format string, args ...any) {
+		reports = append(reports, fmt.Sprintf(format, args...))
+	})
+	if len(marks) != 1 || marks[0].What != want[0].What {
+		t.Fatalf("panel marks = %#v; want the settings mark", marks)
+	}
+	if len(reports) != 1 || !strings.Contains(reports[0], "decoding") {
+		t.Fatalf("reports = %q; want one line naming the record error", reports)
+	}
+}
+
+// The writer's file is what the reader reads: records appended with
+// RecordRegimeEvent to a real town layout, one in the main file and one in a
+// backfill file beside it, come back through the host's directory and file
+// reads, oldest first (gt-ng1lc).
+func TestRegimeEventsWriterToReaderRoundTrip(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	rec := func(ts, kind, reason string) RegimeEventRecord {
+		at, err := time.Parse(time.RFC3339, ts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return RegimeEventRecord{TS: at, Kind: kind, Reason: reason, Actor: "tester"}
+	}
+	if err := RecordRegimeEvent(RegimeEventsPath(town), rec("2026-10-02T09:00:00Z", "gate", "gate raised")); err != nil {
+		t.Fatal(err)
+	}
+	backfill := filepath.Join(town, regimeEventsRuntimeDir, "regime-events-backfill-20261101.jsonl")
+	if err := RecordRegimeEvent(backfill, rec("2026-09-20T08:00:00Z", "install", "gt installed")); err != nil {
+		t.Fatal(err)
+	}
+	events, err := ReadRegimeEvents(OSEnv(town))
+	if err != nil {
+		t.Fatalf("ReadRegimeEvents: %v", err)
+	}
+	want := []RegimeEvent{
+		{Date: "2026-09-20", What: "install: gt installed", Confirmed: true},
+		{Date: "2026-10-02", What: "gate: gate raised", Confirmed: true},
+	}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %#v; want what the writer recorded: %#v", events, want)
 	}
 }

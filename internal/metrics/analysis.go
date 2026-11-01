@@ -390,13 +390,14 @@ func panelWeekly(landings []Row, reportf func(format string, args ...any)) []Pan
 
 // panelEvents is the regime events the panel marks, as the reader returns them;
 // BuildPanel establishes the order, validity and cap it writes. A file the
-// reader cannot use costs the panel its marks rather than the run, so it goes
-// on the analysis's own report line and the list stays empty.
+// reader cannot use costs the panel that file's marks rather than the run, so
+// the error goes on the analysis's own report line and the panel carries the
+// marks the reader could still read (the settings events, when only the runtime
+// record is bad).
 func panelEvents(env Env, reportf func(format string, args ...any)) []PanelEvent {
 	events, err := ReadRegimeEvents(env)
 	if err != nil {
-		reportf("metrics: %v; the panel carries no events", err)
-		return nil
+		reportf("metrics: %v; the panel carries the events that could be read (%d)", err, len(events))
 	}
 	marked := make([]PanelEvent, 0, len(events))
 	for _, event := range events {

@@ -256,13 +256,11 @@ func (c *BurstBoardCache) count(rig string, now time.Time) (int, bool) {
 	if !ok {
 		return 0, false
 	}
+	// A count stamped after now means the clock stepped back since the read.
+	// Its age is unknown, so it is not kept: clamping the age to zero would let
+	// a backward step of an hour keep the count for the hour plus a minute.
 	age := now.Sub(kept.at)
-	if age < 0 {
-		// A count stamped after now is the town's clocks disagreeing, not an
-		// old read.
-		age = 0
-	}
-	if age >= BurstSlowInterval {
+	if age < 0 || age >= BurstSlowInterval {
 		return 0, false
 	}
 	return kept.n, true

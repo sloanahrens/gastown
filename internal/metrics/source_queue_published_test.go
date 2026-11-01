@@ -325,3 +325,31 @@ func TestWaitingToLandNamesTheListedRigsOnceAMinute(t *testing.T) {
 		t.Fatalf("the sample past the minute took the lines to %d; want a second one", len(lines))
 	}
 }
+
+// A count stamped after the sample's clock means the clock stepped back since
+// the read. The count's age is unknown, so the cache does not answer from it:
+// otherwise a step back of an hour would keep the count for an hour and a
+// minute (gt-t8b09).
+func TestBoardCacheDoesNotKeepACountStampedAfterNow(t *testing.T) {
+	t.Parallel()
+	read := fixedNow()
+	cache := NewBurstBoardCache(nil)
+	cache.keep("alpha", 3, read)
+	tests := []struct {
+		name   string
+		now    time.Time
+		wantOK bool
+	}{
+		{name: "inside the interval", now: read.Add(BurstSlowInterval - time.Second), wantOK: true},
+		{name: "at the read instant", now: read, wantOK: true},
+		{name: "one second before the read", now: read.Add(-time.Second), wantOK: false},
+		{name: "an hour before the read", now: read.Add(-time.Hour), wantOK: false},
+		{name: "at the interval", now: read.Add(BurstSlowInterval), wantOK: false},
+	}
+	for _, tc := range tests {
+		n, ok := cache.count("alpha", tc.now)
+		if ok != tc.wantOK || (ok && n != 3) {
+			t.Errorf("%s: count = %d, %v; want kept=%v", tc.name, n, ok, tc.wantOK)
+		}
+	}
+}

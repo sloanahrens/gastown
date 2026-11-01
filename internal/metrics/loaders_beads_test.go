@@ -274,6 +274,9 @@ func TestLoadBeadsBareArrayStillWorks(t *testing.T) {
 	t.Parallel()
 	var calls []bdCall
 	rows := LoadBeads(fakeBd(bdListFixture, true, &calls), []string{"/g"}, &Dropped{})
+	if len(rows) < 2 {
+		t.Fatalf("rows = %d, want at least the 2 fixture beads", len(rows))
+	}
 	if got := []string{rows[0].ID, rows[1].ID}; !reflect.DeepEqual(got, []string{"gt-1", "gt-2"}) {
 		t.Fatalf("ids = %v, want gt-1 and gt-2", got)
 	}

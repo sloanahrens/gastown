@@ -229,7 +229,10 @@ type regimeEventOn struct {
 // ReadRegimeEvents reads the town's regime events from the settings file and the
 // runtime record, merged oldest first. A missing file or runtime directory means
 // no events are known there, and returns an empty, non-nil list rather than an
-// error; a file that is there and cannot be read or decoded is an error.
+// error; a file that is there and cannot be read or decoded is an error. When the
+// settings file reads but the runtime record does not, the error comes back
+// beside the settings events alone; an unreadable settings file returns no
+// events.
 func ReadRegimeEvents(env Env) ([]RegimeEvent, error) {
 	settings, err := readSettingsRegimeEvents(env)
 	if err != nil {
@@ -237,7 +240,10 @@ func ReadRegimeEvents(env Env) ([]RegimeEvent, error) {
 	}
 	records, err := readRegimeRecords(env)
 	if err != nil {
-		return nil, err
+		// The settings events do not depend on the runtime record, so a record
+		// the reader cannot use costs the caller the record's marks and the
+		// error, not the settings marks as well.
+		return mergeRegimeEvents(settings, nil), err
 	}
 	return mergeRegimeEvents(settings, records), nil
 }
@@ -260,7 +266,7 @@ func readSettingsRegimeEvents(env Env) ([]regimeEventOn, error) {
 
 // readRegimeRecords reads the runtime record and any backfill files beside it,
 // in the order they are merged: the main file first, then the backfill files in
-// the order the directory lists them. The directory is listed first, because a
+// name order, whatever order the directory lists them in. The directory is listed first, because a
 // missing directory means there is no record to read. A file that is not there
 // has no records; a file that is there and cannot be read or decoded, and a
 // directory that cannot be listed, are errors rather than an empty record.
@@ -286,6 +292,7 @@ func readRegimeRecords(env Env) ([]RegimeEventRecord, error) {
 			names = append(names, name)
 		}
 	}
+	sort.Strings(names[1:])
 	var records []RegimeEventRecord
 	for _, name := range names {
 		rel := filepath.Join(regimeEventsRuntimeDir, name)
