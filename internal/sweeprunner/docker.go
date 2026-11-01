@@ -34,9 +34,6 @@ const (
 const (
 	// program is the CLI every step runs.
 	program = "docker"
-	// dindAlias names the sidecar on the run's private network; the runner
-	// resolves its engine by this name, as the daemon's compose project does.
-	dindAlias = "sweep-dind"
 	// dindPort is the engine's plain-TCP port: the sidecar runs with --tls=false
 	// on an internal network and publishes nothing.
 	dindPort = "2375"
@@ -67,7 +64,7 @@ func (Docker) Render(spec Spec) (Plan, error) {
 			dockerStep(spec, "network", "create", "--internal", networkName(spec)),
 			dockerStep(spec, "volume", "create", volumeName(spec)),
 			// The engine is the plan's only privileged container, and it is
-			// reached over plain TCP on the internal network: dockerd runs the
+			// reached over plain TCP on the run's own loopback: dockerd runs the
 			// packages' containers, and nothing else needs a capability. The
 			// step returns before dockerd listens, so the run's entrypoint
 			// waits for `docker info` before a package that needs it.
@@ -75,10 +72,10 @@ func (Docker) Render(spec Spec) (Plan, error) {
 				"--name", dindName(spec),
 				"--privileged",
 				"--network", networkName(spec),
-				"--network-alias", dindAlias,
 				"--env", "DOCKER_TLS_CERTDIR=",
 				"--volume", volumeName(spec)+":"+dindDataPath,
 				templates.DindImage,
+				"--host=tcp://"+dindAddress+":"+dindPort,
 				"--tls=false",
 			),
 		)
@@ -107,9 +104,15 @@ func runnerArgv(spec Spec) []string {
 		"--memory", strconv.Itoa(spec.MemoryGB) + "G",
 	}
 	if spec.Dind {
+		// The runner shares the sidecar's network namespace. The engine is then
+		// on its loopback, and so is every test container the engine publishes:
+		// internal/testutil dials the published Dolt port at 127.0.0.1, which two
+		// containers on a bridge network cannot answer (gt-9lmam). The sidecar
+		// step above must run first: a network namespace can be joined only
+		// once its container exists.
 		argv = append(argv,
-			"--network", networkName(spec),
-			"--env", "DOCKER_HOST=tcp://"+dindAlias+":"+dindPort,
+			"--network", "container:"+dindName(spec),
+			"--env", "DOCKER_HOST=tcp://"+dindAddress+":"+dindPort,
 		)
 	}
 	return append(argv,

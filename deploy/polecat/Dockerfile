@@ -9,7 +9,20 @@
 # `openshell sandbox create -- ...`.
 #
 # Every download is pinned to a version and checked against a digest recorded
-# here. Update a digest only together with the version it belongs to.
+# here, and every external image stage is pinned by digest. Update a digest only
+# together with the version it belongs to.
+
+# The Docker client, for the tier-sweep runner's container-backed packages:
+# internal/testutil decides Docker is available with `docker info`, and the
+# runner reaches the town's engine over TCP, never a mounted socket. The client
+# is copied from the engine image the sweep's Docker-in-Docker sidecar runs
+# (internal/templates/images.go DindImage), pinned by that image's index
+# digest: a registry pull verifies every layer, where a tarball fetched in a
+# RUN is verified only if a sha256 is written out beside it and kept in step.
+# Only the client binary reaches the image below, so a sandbox gets a CLI and
+# no daemon (gt-9lmam). Moving DindImage means moving this digest with it.
+ARG DOCKER_CLI_DIGEST=sha256:7dcdfc4a20246236f558175182ccace1eb15a41bd3eb119dd2284f393498b7c1
+FROM data.forgejo.org/oci/docker@${DOCKER_CLI_DIGEST} AS docker-cli
 
 # GNU Make 4.4.1 built from source: Ubuntu's Make 4.3 fails inside OpenShell
 # sandboxes because its recipe child calls setresuid/setresgid with unchanged
@@ -120,6 +133,11 @@ RUN ARCH=$(dpkg --print-architecture) \
     && tar -C /tmp -xzf /tmp/dolt.tgz \
     && install -m 0755 "/tmp/dolt-linux-${ARCH}/bin/dolt" /usr/local/bin/dolt \
     && rm -rf /tmp/dolt.tgz "/tmp/dolt-linux-${ARCH}"
+
+# The Docker client, from the image above: the CLI alone. The engine's dockerd
+# and containerd stay out of this image, so a seat that runs it gets no daemon
+# and no new capability (gt-9lmam).
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 
 # Refuse the image when its Go is below GO_FLOOR (see go-floor.sh for the rule).
 COPY go-floor.sh /usr/local/lib/gastown/go-floor.sh

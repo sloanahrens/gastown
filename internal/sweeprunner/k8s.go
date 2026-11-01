@@ -44,10 +44,12 @@ const (
 	outVolume  = "out"
 	dindVolume = "dind-data"
 
-	// dindAddress is where the runner reaches the sidecar: the pod's own network
-	// namespace, so nothing outside the pod reaches the engine. The sidecar binds
-	// this address too; a bind on 0.0.0.0 would answer at the pod IP, where every
-	// other pod in the cluster could drive the privileged engine (gt-7zy61).
+	// dindAddress is where the runner reaches the sidecar: the runner's own
+	// loopback, because it shares the sidecar's network namespace (the pod's,
+	// with the Kubernetes backend; the sidecar container's, which the Docker
+	// backend's runner joins). The sidecar binds this address too; a bind on
+	// 0.0.0.0 would answer at the pod IP or the run network, where another
+	// workload could drive the privileged engine (gt-7zy61).
 	dindAddress = "127.0.0.1"
 
 	// dindCPU and dindMemory are the sidecar's share, requested and limited like
