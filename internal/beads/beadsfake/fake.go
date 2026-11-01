@@ -281,6 +281,22 @@ func hasLabels(is *beads.Issue, labels []string) bool {
 	return true
 }
 
+// hasAnyLabel reports whether is carries at least one of labels; no label
+// named keeps every issue.
+func hasAnyLabel(is *beads.Issue, labels []string) bool {
+	named := false
+	for _, l := range labels {
+		if l == "" {
+			continue
+		}
+		named = true
+		if hasLabel(is, l) {
+			return true
+		}
+	}
+	return !named
+}
+
 func hasLabel(is *beads.Issue, label string) bool {
 	for _, l := range is.Labels {
 		if l == label {
@@ -312,6 +328,7 @@ func (f *Fake) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 			!statusMatches(is.Status, opts.Status),
 			label != "" && !hasLabel(is, label),
 			!hasLabels(is, opts.Labels),
+			!hasAnyLabel(is, opts.LabelsAny),
 			!opts.Priority.Matches(is.Priority),
 			opts.Parent != "" && is.Parent != opts.Parent,
 			opts.Assignee != "" && is.Assignee != opts.Assignee,

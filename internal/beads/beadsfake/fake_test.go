@@ -2,6 +2,7 @@ package beadsfake
 
 import (
 	"errors"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -159,4 +160,36 @@ func TestWispGCCandidatesCascadeAndHooks(t *testing.T) {
 	if !has[young.ID] {
 		t.Errorf("candidates = %v, want the dependent %s by cascade", all, young.ID)
 	}
+}
+
+// ListOptions.LabelsAny keeps an issue carrying at least one of the labels,
+// combines with Labels as an AND, and an empty entry names nothing (gt-5nq22).
+func TestFakeListLabelsAny(t *testing.T) {
+	t.Parallel()
+	f := New()
+	a, _ := f.Create(beads.CreateOptions{Title: "a", Priority: -1, Labels: []string{"gt:needs-human"}})
+	b, _ := f.Create(beads.CreateOptions{Title: "b", Priority: -1, Labels: []string{"gt:needs-operator", "rig:x"}})
+	c, _ := f.Create(beads.CreateOptions{Title: "c", Priority: -1, Labels: []string{"other"}})
+	ids := func(opts beads.ListOptions) string {
+		got, err := f.List(opts)
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		var out []string
+		for _, is := range got {
+			out = append(out, is.Title)
+		}
+		sort.Strings(out)
+		return strings.Join(out, ",")
+	}
+	if got := ids(beads.ListOptions{LabelsAny: []string{"gt:needs-human", "gt:needs-operator"}, Priority: -1}); got != "a,b" {
+		t.Errorf("any of two labels = %q, want a,b (c carries neither)", got)
+	}
+	if got := ids(beads.ListOptions{LabelsAny: []string{"gt:needs-human", "gt:needs-operator"}, Labels: []string{"rig:x"}, Priority: -1}); got != "b" {
+		t.Errorf("any of two AND rig:x = %q, want b", got)
+	}
+	if got := ids(beads.ListOptions{LabelsAny: []string{""}, Priority: -1}); got != "a,b,c" {
+		t.Errorf("an empty label named nothing = %q, want every issue", got)
+	}
+	_, _, _ = a, b, c
 }

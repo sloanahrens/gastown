@@ -51,6 +51,8 @@ func refusedListFilter(o beads.ListOptions) error {
 		return fmt.Errorf("List{NotesContains}: %w", ErrListFilter)
 	case !o.UpdatedAfter.IsZero():
 		return fmt.Errorf("List{UpdatedAfter}: %w", ErrListFilter)
+	case len(o.LabelsAny) > 0:
+		return fmt.Errorf("List{LabelsAny}: %w", ErrListFilter)
 	}
 	return nil
 }
