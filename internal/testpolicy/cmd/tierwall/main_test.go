@@ -437,16 +437,48 @@ func TestTownRootAtReadsTheOutermostTown(t *testing.T) {
 	}
 }
 
-// TestSeries_UnencodableLineIsAnError checks that a line the encoder cannot
-// render is an error the caller sees, not a record silently dropped from the
-// series.
-func TestSeries_UnencodableLineIsAnError(t *testing.T) {
+// TestAppendSeries_UnencodableLineIsAnError checks that a line the encoder
+// cannot render is refused by the appending call site, not written without its
+// time and not reported as a series it recorded.
+func TestAppendSeries_UnencodableLineIsAnError(t *testing.T) {
 	t.Parallel()
+	path := filepath.Join(t.TempDir(), "gate-walls.jsonl")
 	r := newReport(io.Discard)
 	r.results["example.com/a"] = "pass"
 	r.first = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
-	if _, err := r.series("gate-1", fixedHost()); err == nil {
-		t.Fatal("series returned no error for a timestamp json cannot encode")
+
+	if err := appendSeries(path, "gate-1", r, fixedHost(), io.Discard); err == nil {
+		t.Fatal("appendSeries returned no error for a timestamp json cannot encode")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("stat %s = %v, want no file: a refused series writes nothing", path, err)
+	}
+}
+
+// TestGitCommonDirFromReadsTheCommand checks the one git call the town lookup
+// makes: its output names the common dir, and a command that fails is an error
+// the caller sees rather than an empty path read as "no repository".
+func TestGitCommonDirFromReadsTheCommand(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		run     func() ([]byte, error)
+		want    string
+		wantErr bool
+	}{
+		{"the command answers", func() ([]byte, error) { return []byte(" /town/rig/.git\n"), nil }, "/town/rig/.git", false},
+		{"the command fails", func() ([]byte, error) { return nil, errors.New("exit status 128") }, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := gitCommonDirFrom(tc.run)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("error = %v, want error: %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("common dir = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

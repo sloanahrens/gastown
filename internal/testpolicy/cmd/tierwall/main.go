@@ -453,13 +453,25 @@ const gitTimeout = 2 * time.Second
 // gitCommonDir is the repository's shared .git directory, which a linked
 // worktree points at even when its own directory sits outside the town.
 func gitCommonDir() (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
+	return gitCommonDirFrom(runGitRevParse)
+}
+
+// gitCommonDirFrom is gitCommonDir over the command it runs, so a test can
+// drive the failure path without a repository.
+func gitCommonDirFrom(run func() ([]byte, error)) (string, error) {
+	out, err := run()
 	if err != nil {
 		return "", fmt.Errorf("git rev-parse --git-common-dir: %w", err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// runGitRevParse runs the one git command the town lookup makes. It is bounded
+// so a repository that cannot answer costs the series, never the run.
+func runGitRevParse() ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	return exec.CommandContext(ctx, "git", "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
 }
 
 func (r *report) printLines(lines []string) {
