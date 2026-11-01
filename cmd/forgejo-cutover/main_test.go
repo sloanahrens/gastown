@@ -147,6 +147,9 @@ func execHelperArgv(t *testing.T, mode string) []string {
 // TestExecHelperProcess is not a test: started with the helper marker, it stands
 // in for a child process, so the exec seam is exercised against a real one.
 func TestExecHelperProcess(t *testing.T) {
+	// Parallel because the tree-wide policy asks every test for it; the body
+	// below runs only in the child process, where this is the one test selected.
+	t.Parallel()
 	i := slices.Index(os.Args, execHelperMarker)
 	if i < 0 || i+1 >= len(os.Args) {
 		return
