@@ -23,6 +23,7 @@ const recorderWait = 10 * time.Second
 // TestSampleLoopAppends drives the sampling loop on a fake clock: one JSON
 // line appended per interval, in order, and a clean stop on the cancel.
 func TestSampleLoopAppends(t *testing.T) {
+	t.Parallel()
 	const interval = 10 * time.Second
 	clk := clockwork.NewFakeClockAt(sampleEpoch)
 	lines := make(chan []byte, 8)
@@ -87,6 +88,7 @@ func TestSampleLoopAppends(t *testing.T) {
 // start or carry on: a bad interval, a missing seam, a sample it cannot
 // encode and a write that failed all end the loop with an error.
 func TestRecorderRefusesUnusableSettings(t *testing.T) {
+	t.Parallel()
 	okSample := func(context.Context) Sample { return Sample{} }
 	okAppend := func([]byte) error { return nil }
 	cases := []struct {

@@ -14,6 +14,7 @@ import (
 // TestHostLoadHeaderStatesLimit checks the printed header says which processes
 // the table cannot see, before the table it limits.
 func TestHostLoadHeaderStatesLimit(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	writeHostLoadReport(&buf, hostload.Sample{
 		At:          time.Date(2026, time.November, 1, 12, 0, 0, 0, time.UTC),
@@ -44,6 +45,7 @@ func TestHostLoadHeaderStatesLimit(t *testing.T) {
 // change nothing, and a sampler that would write nowhere, are refused before
 // the host is read.
 func TestHostLoadRefusesUnusedFlags(t *testing.T) {
+	t.Parallel()
 	d := hostLoadDeps{
 		findTownRoot: func() (string, error) {
 			t.Fatal("the town was read before the flags were checked")

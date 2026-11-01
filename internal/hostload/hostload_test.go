@@ -74,6 +74,7 @@ n/Users/op/gt/gastown/crew/egret/gastown`
 // is credited to the owner that used it: a crew worktree, a landing gate tree,
 // the installer, Dolt and a VM, plus the daemon, the dashboard and the rest.
 func TestClassifyOwners(t *testing.T) {
+	t.Parallel()
 	rows, err := Table(cannedPS, cannedTop, cannedLsof)
 	if err != nil {
 		t.Fatalf("Table: %v", err)
@@ -98,6 +99,7 @@ func TestClassifyOwners(t *testing.T) {
 // TestParsersRefuseMalformedOutput drives each parser's refusal: a reading
 // this package cannot read is an error, never an empty table or a zero.
 func TestParsersRefuseMalformedOutput(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name  string
 		parse func() error
@@ -190,6 +192,7 @@ func TestParsersRefuseMalformedOutput(t *testing.T) {
 // TestParseTickTook reads the tick duration off the daemon's line, and
 // refuses text that carries none.
 func TestParseTickTook(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		text string

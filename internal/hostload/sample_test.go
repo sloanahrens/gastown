@@ -98,6 +98,7 @@ func sampleProber(t *testing.T, run hostprobe.Runner, readLog func(string, int64
 // TestSampleRecordProbeFailure checks a sample carries its readings and that
 // one probe's failure sets that probe's error without taking the others.
 func TestSampleRecordProbeFailure(t *testing.T) {
+	t.Parallel()
 	t.Run("a failed bd call leaves the rest of the record", func(t *testing.T) {
 		p := sampleProber(t, sampleRun("bd"), func(string, int64) ([]byte, error) {
 			return []byte(tickLog), nil
@@ -157,6 +158,7 @@ func TestSampleRecordProbeFailure(t *testing.T) {
 // without its seams hits: every probe reports its error, and none of them
 // reports an empty reading as a quiet host.
 func TestSampleWithoutSeamsRefusesEachProbe(t *testing.T) {
+	t.Parallel()
 	rec := record(t, &Prober{TownRoot: t.TempDir()})
 	fields := map[string]string{
 		"load":   rec.Load.Err,
