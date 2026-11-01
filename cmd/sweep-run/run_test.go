@@ -418,8 +418,8 @@ func TestRunKeepsTheResultWhenCleanupFails(t *testing.T) {
 }
 
 // TestCloneWithReportsGitFailures: the clone the result records is the one this
-// file builds (safe.directory on the read-only mount, no hard links, a detached
-// checkout), and a step that fails is the error the run reports rather than a
+// file builds (safe.directory for the read-only mount on the upload-pack process, no hard
+// links, a detached checkout), and a step that fails is the error the run reports rather than a
 // tree the sweep would test at the wrong commit.
 func TestCloneWithReportsGitFailures(t *testing.T) {
 	t.Parallel()
@@ -432,7 +432,7 @@ func TestCloneWithReportsGitFailures(t *testing.T) {
 	}{
 		{
 			name:  "the clone",
-			fails: func(args []string) bool { return args[2] == "clone" },
+			fails: func(args []string) bool { return args[0] == "clone" },
 			out:   "fatal: '/repo.git' does not appear to be a git repository",
 			want:  "git clone /repo.git: fatal: '/repo.git' does not appear to be a git repository",
 			calls: 1, // the checkout is not attempted on a tree that was never made
@@ -463,7 +463,7 @@ func TestCloneWithReportsGitFailures(t *testing.T) {
 			if len(calls) != tc.calls {
 				t.Fatalf("git ran %d times, want %d: %q", len(calls), tc.calls, calls)
 			}
-			if got, want := strings.Join(calls[0], " "), "-c safe.directory=/repo.git clone --no-hardlinks /repo.git /work"; got != want {
+			if got, want := strings.Join(calls[0], " "), "clone --no-hardlinks --upload-pack git -c safe.directory='/repo.git' upload-pack /repo.git /work"; got != want {
 				t.Errorf("clone ran %q, want %q", got, want)
 			}
 			if tc.calls > 1 {
@@ -977,4 +977,40 @@ func equal(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+// TestCloneTrustsOnlyTheGivenRepositoryOnTheUploadPackProcess: the exception for a
+// mount owned by another user is on the upload-pack command, for exactly the path
+// the runner was handed and never a wildcard, and a path with a quote or a space
+// cannot end the quoting. A clone with no upload-pack exception, or a widened one,
+// turns this red.
+func TestCloneTrustsOnlyTheGivenRepositoryOnTheUploadPackProcess(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ name, repo, want string }{
+		{"plain", "/repo.git", `git -c safe.directory='/repo.git' upload-pack`},
+		{"with space", "/my repo.git", `git -c safe.directory='/my repo.git' upload-pack`},
+		{"with quote", "'; touch x; '", `git -c safe.directory=''\''; touch x; '\''' upload-pack`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var cloneArgs []string
+			run := func(_ string, args ...string) (int, string) {
+				if args[0] == "clone" {
+					cloneArgs = args
+				}
+				return 0, ""
+			}
+			if err := cloneWith(run, tc.repo, testSHA, "/work"); err != nil {
+				t.Fatalf("cloneWith: %v", err)
+			}
+			i := slices.Index(cloneArgs, "--upload-pack")
+			if i < 0 || i+1 >= len(cloneArgs) || cloneArgs[i+1] != tc.want {
+				t.Fatalf("clone args %q: --upload-pack value is not %q", cloneArgs, tc.want)
+			}
+			if strings.Contains(strings.Join(cloneArgs, " "), "safe.directory=*") || strings.Contains(strings.Join(cloneArgs, " "), "safe.directory='*'") {
+				t.Errorf("clone args %q trust every repository", cloneArgs)
+			}
+		})
+	}
 }

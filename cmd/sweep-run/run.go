@@ -576,16 +576,32 @@ func gitClone(repo, sha, work string) error { return cloneWith(runGit, repo, sha
 // links, since the mount is read-only and the clone must not share its objects,
 // then the sha checked out detached.
 //
-// safe.directory is set for the bare repository because the mount can be owned
-// by another user, and git refuses to read a repository it does not trust.
+// The mount can be owned by another user, and git refuses to read a repository it
+// does not trust. The exception has to reach the git upload-pack process a local
+// clone starts to read it: a command-line "-c safe.directory" on the clone does
+// not reach that process and the clone still fails (git 2.43, checked in the
+// runner image on 2026-11-01), so the exception rides the upload-pack command
+// itself, for this one path.
 func cloneWith(run gitRunner, repo, sha, work string) error {
-	if code, out := run("", "-c", "safe.directory="+repo, "clone", "--no-hardlinks", repo, work); code != 0 {
+	if code, out := run("", "clone", "--no-hardlinks", "--upload-pack", uploadPackCommand(repo), repo, work); code != 0 {
 		return fmt.Errorf("git clone %s: %s", repo, out)
 	}
 	if code, out := run(work, "checkout", "--detach", sha); code != 0 {
 		return fmt.Errorf("git checkout %s: %s", sha, out)
 	}
 	return nil
+}
+
+// uploadPackCommand is the command git runs to read repo, with repo trusted for
+// that process only. Git hands the command to a shell, so the path is quoted.
+func uploadPackCommand(repo string) string {
+	return "git -c safe.directory=" + shellQuote(repo) + " upload-pack"
+}
+
+// shellQuote wraps s in single quotes for a POSIX shell, closing and reopening
+// the quotes around each single quote s holds.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // runGit runs one git command in dir and returns its exit code and its output
