@@ -132,9 +132,15 @@ func (c *CensusBudgetCheck) Run(ctx *CheckContext) *CheckResult {
 		average := float64(rowCalls[row]) / minutes
 		if !complete && foldedRows[row] {
 			// The listed rows are a sample of the window, so their sum is a
-			// floor below the rate the wrapper rows were measured at. Report
-			// what is visible and leave the row ungated rather than pass it on
-			// an undercount.
+			// floor below the rate the wrapper rows were measured at. A floor
+			// over the budget still proves a breach, so it fails; a floor under
+			// it proves nothing, so the row is reported and left ungated rather
+			// than passed on an undercount.
+			if average > budgets[row] {
+				over = append(over,
+					fmt.Sprintf("%s shows at least %.1f calls/min over %d windows (a floor: the window lists only its busiest rows), budget %.1f", row, average, len(samples), budgets[row]))
+				continue
+			}
 			visible = append(visible,
 				fmt.Sprintf("%s shows %.1f calls/min over %d windows, budget %.1f: not gated, the window lists only its busiest rows", row, average, len(samples), budgets[row]))
 			continue

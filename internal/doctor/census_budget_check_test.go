@@ -255,7 +255,7 @@ func TestCensusBudgetCheckReportsAnIncompleteWindow(t *testing.T) {
 		want  CheckStatus
 	}{
 		{name: "a partial fold under the budget is not a pass", total: 11, calls: 8, want: StatusWarning},
-		{name: "a partial fold over the budget is not a failure", total: 99, calls: 12, want: StatusWarning},
+		{name: "a partial fold whose visible floor is over the budget is a failure", total: 99, calls: 12, want: StatusError},
 		{name: "a complete window folds as before", total: 12, calls: 12, want: StatusError},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
