@@ -11,7 +11,7 @@ The probes are the supervisor's own: `openshell-sandbox` runs them while a sandb
 ## Before the window
 
 - S2's preview deploy is clean, the operator has said go and the grant window is open. Those are the row's wait conditions.
-- The pool is GKE Standard with the Ubuntu containerd image and AppArmor on, which is GKE's Ubuntu default, and it holds one node so the sandbox provably lands on the node checked here. Landlock is compiled out of Container-Optimized OS, so confirm the image before starting:
+- The pool is GKE Standard with the Ubuntu containerd image and AppArmor on, which is GKE's Ubuntu default, and it is created for this window with Spot nodes (the cost line assumes it). The run asserts the node the sandbox lands on, so the pool size does not have to prove it. Landlock is compiled out of Container-Optimized OS, so confirm the image before starting (`$NODE` is the probe pool's node):
 
 ```bash
 kubectl get nodes -o wide
@@ -20,49 +20,79 @@ kubectl get node "$NODE" -o jsonpath='{.status.nodeInfo.osImage}{"\n"}'
 
 A line starting `Ubuntu` passes this check; `Container-Optimized OS` stops the run.
 
-- The cluster's gateway is registered and healthy: `openshell -g "$GATEWAY" status`. `$GATEWAY`, `$NODE` and `$DATE` are set in the window and recorded nowhere else.
+- The cluster's gateway is registered and healthy: `openshell -g "$GATEWAY" status`. `$GATEWAY`, `$NODE`, `$DATE`, `$POOL`, `$CLUSTER` and `$LOCATION` are set in the window and recorded nowhere else.
 
 ## The run
 
-One sandbox start runs all three probes. The supervisor admits the workload only after every probe passes, so `create` exiting 0 with the sandbox `Ready` is the pass for all three; a failed probe exits non-zero and names the check. Capture the command's output, the sandbox's phase and the supervisor log:
+One sandbox start runs all three probes. The supervisor admits the workload only after every probe passes, so a sandbox that is admitted and `Ready` is the evidence for all three, and a failed probe exits non-zero and names the check. Capture the exit status, the sandbox list, the node the sandbox's pod landed on and the supervisor log, each in its own file:
 
 ```bash
-OUT=~/gt/.runtime/gke-isolation/results-$DATE.txt
-mkdir -p "$(dirname "$OUT")"
-{
-  echo "# isolation probes $DATE gateway=$GATEWAY node=$NODE"
-  openshell -g "$GATEWAY" sandbox create --name isolation-probe \
-    --no-auto-providers --no-tty -- echo "sandbox ready"
-} 2>&1 | tee "$OUT"
-openshell -g "$GATEWAY" sandbox list | grep isolation-probe | tee -a "$OUT"
-openshell -g "$GATEWAY" logs isolation-probe -n 200 | tee -a "$OUT"
+DIR=~/gt/.runtime/gke-isolation/run-$DATE
+mkdir -p "$DIR"
+openshell -g "$GATEWAY" sandbox create --name isolation-probe \
+  --no-auto-providers --no-tty -- echo "sandbox ready" > "$DIR/create.txt" 2>&1
+echo $? > "$DIR/create.status"
+openshell -g "$GATEWAY" sandbox list > "$DIR/list.txt" 2>&1
+kubectl get pods -A -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeName}{"\n"}{end}' \
+  | grep -F isolation-probe > "$DIR/placement.txt"
+openshell -g "$GATEWAY" logs isolation-probe -n 200 > "$DIR/log.txt" 2>&1
 ```
 
-Each probe's line is read from `$OUT` by its own command, and recorded whether it prints or not:
-
-| Probe | Read its line | Pass | Fail |
-|---|---|---|---|
-| Landlock | `grep -niE 'landlock\|abi' "$OUT"` | admitted, the sandbox is `Ready`, and no Landlock failure is logged (the log names ABI 3 or newer when it logs one) | `Landlock probe child exited with status 1` or `incompatible access-rights`, or an ABI below 3 |
-| seccomp user-notify | `grep -niE 'seccomp\|notification\|listener' "$OUT"` | admitted, the sandbox is `Ready`, and no seccomp failure is logged; below Linux 5.19 it falls back to the legacy read-only listener, still a pass, with mediated memory writes failing closed | `seccomp notification probe: notification launcher disappeared` or `ControlSupervisorStartFailed` |
-| task-memory (`process_vm_readv`) | `grep -niE 'task.?memory\|vm_readv\|/proc/.*/mem' "$OUT"` | admitted, the sandbox is `Ready`, and no task-memory failure is logged; `process_vm_readv` or the `/proc/<pid>/mem` fallback satisfies it | the log names the task-memory check as failed |
+Nothing in this block is required to print: an empty file is read as a failure by the verdict below.
 
 ## The verdict
 
-Append one line to `$OUT`: `VERDICT PASS` only when `create` exited 0, the sandbox is `Ready` and none of the three failure lines is present. Any other outcome is `VERDICT FAIL probe=<landlock|seccomp-user-notify|task-memory>`: a non-zero exit, a sandbox that is not `Ready`, a failure line, or a log that could not be read. A missing pass line is not a pass on its own; record it as `(no line)` and rely on the supervisor's admit, never on a grep that printed nothing.
+The verdict is computed, not judged. It fails closed: a probe is `pass` only when every positive condition holds, and a missing, empty or unreadable input makes it `fail`. The positive conditions are that `create` exited 0, the list shows `isolation-probe` as `Ready`, the pod's node is `$NODE`, and the log is non-empty. The failure patterns are the supervisor's own messages, one set per probe:
+
+| Probe | Failure pattern (extended regex) |
+|---|---|
+| Landlock | `Landlock probe child exited with status 1`, `incompatible access-rights`, or an `ABI` below 3 |
+| seccomp user-notify | `notification launcher disappeared`, `ControlSupervisorStartFailed` |
+| task-memory (`process_vm_readv`) | `task-memory` or `process_vm_readv` on a line with `fail` or `denied` |
+
+Below Linux 5.19 seccomp falls back to the legacy read-only listener; that is still a pass, with mediated memory writes failing closed. `process_vm_readv` or the `/proc/<pid>/mem` fallback satisfies the task-memory probe.
+
+```bash
+verdict() {  # verdict DIR NODE: prints one line per probe, then the VERDICT line
+  local d=$1 node=$2 ok=1 failed=""
+  [ "$(cat "$d/create.status" 2>/dev/null)" = 0 ] || ok=0
+  grep -qE 'isolation-probe.*Ready' "$d/list.txt" 2>/dev/null || ok=0
+  awk -v n="$node" '$2 == n { f = 1 } END { exit !f }' "$d/placement.txt" 2>/dev/null || ok=0
+  [ -s "$d/log.txt" ] || ok=0
+  local name pat
+  for name in landlock seccomp-user-notify task-memory; do
+    case $name in
+      landlock) pat='Landlock probe child exited with status 1|incompatible access-rights|ABI[ =:]*[0-2]([^0-9]|$)' ;;
+      seccomp-user-notify) pat='notification launcher disappeared|ControlSupervisorStartFailed' ;;
+      task-memory) pat='(task-memory|process_vm_readv).*(fail|denied)' ;;
+    esac
+    if [ "$ok" = 1 ] && ! grep -qiE "$pat" "$d/log.txt"; then
+      echo "probe=$name result=pass"
+    else
+      echo "probe=$name result=fail"; failed="$failed${failed:+,}$name"
+    fi
+  done
+  if [ -z "$failed" ]; then echo "VERDICT PASS"; else echo "VERDICT FAIL probe=$failed"; fi
+}
+verdict "$DIR" "$NODE" | tee "$DIR/verdict.txt"
+```
+
+How this was checked: the function was run against sample directories before this page was written: a clean run printed three `pass` lines and `VERDICT PASS`; each of the failure patterns in a log printed `VERDICT FAIL` naming its probe; and a missing `create.status`, an empty log, a list without `Ready`, and a placement file naming another node each printed `VERDICT FAIL` for all three probes.
 
 ## Where the result is recorded
 
-1. `$OUT` keeps the create output, the supervisor log and the verdict line, so an agent can read the run back.
-2. Paste the verdict line and the three probe lines into a comment on the map ticket claude-29a.13, with `$OUT`'s path. That comment is the record; the row reads no other place.
-3. A FAIL keeps co-tenancy off. No outside customer is onboarded, and no two workspaces share a node, until claude-29a.13 carries a PASS naming the node image and kernel the run used.
+1. `$DIR` keeps the create output, the list, the placement, the supervisor log and `verdict.txt`, so an agent can read the run back.
+2. Paste `verdict.txt` (the three probe lines and the verdict line) into a comment on the map ticket claude-29a.13, with `$DIR`'s path and the node image and kernel the run used. That comment is the record; the row reads no other place.
+3. A FAIL keeps co-tenancy off until a later run passes.
 
 ## Teardown
 
 ```bash
 openshell -g "$GATEWAY" sandbox delete isolation-probe
+gcloud container node-pools delete "$POOL" --cluster "$CLUSTER" --location "$LOCATION"
 ```
 
-Delete a probe pool the window created too; nothing else in the cluster changes.
+`$POOL` is the probe pool the window created (set it where `$NODE` is set); delete only that pool. Nothing else in the cluster changes.
 
 ## Cloud-change review answers
 
