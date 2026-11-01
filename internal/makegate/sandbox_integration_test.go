@@ -182,16 +182,30 @@ const gateRunTimeout = 2 * time.Minute
 
 // The gate failure-path stubs. Each logs its call to $STUB_LOG so a case sees
 // which stages ran, and refuses only when the case's variable says so, as the
-// shell fixture's stubs do.
+// shell fixture's stubs do. STUB_GO_FAIL_DIR limits the go failure to a run
+// inside that directory name, or (with a leading !) to a run anywhere else, so
+// a case can fail the tracker module alone or the root suite alone; the
+// `in tracker` line records the module a run happened in.
 const (
 	gateStubGo = `#!/bin/sh
 echo "go $1 GT_TEST_DOCKER=${GT_TEST_DOCKER:-unset}" >>"$STUB_LOG"
-[ "$1" = "${STUB_GO_FAIL:-}" ] && exit 1
+[ "${PWD##*/}" = tracker ] && echo "go $1 in tracker" >>"$STUB_LOG"
+dir_ok=1
+if [ -n "${STUB_GO_FAIL_DIR:-}" ]; then
+	if [ "${STUB_GO_FAIL_DIR#!}" != "$STUB_GO_FAIL_DIR" ]; then
+		[ "${PWD##*/}" != "${STUB_GO_FAIL_DIR#!}" ] || dir_ok=0
+	else
+		[ "${PWD##*/}" = "$STUB_GO_FAIL_DIR" ] || dir_ok=0
+	fi
+fi
+[ "$1" = "${STUB_GO_FAIL:-}" ] && [ "$dir_ok" = 1 ] && exit 1
 exit 0
 `
 	gateStubLint = `#!/bin/sh
 echo "golangci-lint $*" >>"$STUB_LOG"
+[ "${PWD##*/}" = tracker ] && echo "golangci-lint in tracker" >>"$STUB_LOG"
 [ "$1" = run ] && [ -n "${STUB_LINT_FAIL:-}" ] && exit 1
+[ "$1" = run ] && [ "${PWD##*/}" = "${STUB_LINT_FAIL_DIR:-}" ] && exit 1
 exit 0
 `
 	gateStubPreflight = `#!/bin/sh
@@ -214,9 +228,12 @@ type GateSandbox struct {
 }
 
 // GateRun is one gate run against a GateSandbox's stubs: the exit code, the
-// gate's stderr (where it prints its stage and wall) and the stub call log.
+// gate's stdout and stderr, and the stub call log. stdout carries the recipe's
+// own messages (make runs the lint loop's `lint failed in $m` there), stderr
+// the gate's stage and wall lines.
 type GateRun struct {
 	Code   int
+	Stdout string
 	Stderr string
 	Calls  []string
 }
@@ -283,7 +300,8 @@ func (g *GateSandbox) writeStub(name, body string) {
 // flags; vars are environment assignments for the run (STUB_GO_FAIL and
 // friends). The inherited GT_TEST_DOCKER=1 is set too, so a recipe that
 // forgets to turn containers off is seen to pass it on. The call log is
-// truncated first, so a case reads only this run's calls.
+// truncated first, so a case reads only this run's calls; the recipe's stdout
+// and stderr come back on the GateRun.
 func (g *GateSandbox) Run(makeFlags []string, vars ...string) GateRun {
 	g.t.Helper()
 	calls := g.Path("calls")
@@ -298,7 +316,8 @@ func (g *GateSandbox) Run(makeFlags []string, vars ...string) GateRun {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "make", argv...)
 	cmd.Env = g.gateEnv(vars)
-	var stderr bytes.Buffer
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	code := 0
 	if err := cmd.Run(); err != nil {
@@ -321,7 +340,7 @@ func (g *GateSandbox) Run(makeFlags []string, vars ...string) GateRun {
 			log = append(log, line)
 		}
 	}
-	return GateRun{Code: code, Stderr: stderr.String(), Calls: log}
+	return GateRun{Code: code, Stdout: stdout.String(), Stderr: stderr.String(), Calls: log}
 }
 
 // gateEnv is the environment the gate runs in: the sandbox environment with
