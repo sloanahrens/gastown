@@ -973,13 +973,184 @@ func TestTheWorkQueueScrollsOnlyItsBeadRows(t *testing.T) {
 		t.Fatalf("the queue list's last child is not the scrolling rows region: %v", got.Kids)
 	}
 	fixed := strings.Join(got.Kids[:len(got.Kids)-1], " ")
-	// The caption wears its own class: the generic "empty" one also marks the
-	// "nothing matches these filters" placeholder inside the scrolling rows, so
-	// a test looking for it would pass on a queue list with no caption at all.
-	for _, want := range []string{"qtabs", "qcaption"} {
+	// The caption wears a class of its own: the generic "empty" one also marks
+	// the "nothing matches these filters" placeholder inside the scrolling rows,
+	// so a test looking for it would pass on a queue list with no caption at
+	// all. Since gt-mxn86 the caption rides inside the "qhint" disclosure, which
+	// is what has to stay above the scrolling rows.
+	for _, want := range []string{"qtabs", "qhint"} {
 		if !strings.Contains(fixed, want) {
 			t.Errorf("the queue list draws no %s above its scrolling rows, so it scrolls out of view: %v", want, got.Kids)
 		}
+	}
+}
+
+// queueHelp is the queue list's help as a test reads it back: how many
+// disclosures the list drew, the one's tag, open state and summary, and the
+// caption element inside it. Covered walks up from that caption for a closed
+// details, which is the browser's rule for what a shut disclosure draws.
+type queueHelp struct {
+	Hints    int    `json:"hints"`
+	Tag      string `json:"tag"`
+	Open     bool   `json:"open"`
+	Summary  string `json:"summary"`
+	Captions int    `json:"captions"`
+	InHint   bool   `json:"inHint"`
+	Covered  bool   `json:"covered"`
+	Text     string `json:"text"`
+}
+
+// workQueueHelp reads the help disclosure the queue list drew under #work.
+func workQueueHelp(t *testing.T, dom *pageDOM) queueHelp {
+	t.Helper()
+
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
+		const cls = (e, c) => String(e.className).split(" ").indexOf(c) >= 0;
+		const under = (n, fn) => { for (const c of (n.children || [])) { fn(c); under(c, fn); } };
+		let list = null;
+		under(__byId["work"], c => { if (cls(c, "qlist")) list = c; });
+		if (!list) return {hints: 0, captions: 0};
+		const all = [];
+		under(list, c => all.push(c));
+		const hints = all.filter(c => cls(c, "qhint"));
+		const caps = all.filter(c => cls(c, "qcaption"));
+		const hint = hints.length === 1 ? hints[0] : null;
+		const sum = hint ? hint.children.find(c => c.tagName === "SUMMARY") : null;
+		const cap = hint ? hint.children.find(c => cls(c, "qcaption")) : null;
+		const covered = e => {
+			for (let p = e.parentNode; p; p = p.parentNode) if (p.tagName === "DETAILS" && !p.open) return true;
+			return false;
+		};
+		return {
+			hints: hints.length, tag: hint ? hint.tagName : "", open: hint ? !!hint.open : false,
+			summary: sum ? sum.textContent : "",
+			captions: caps.length,
+			inHint: !!cap && caps.length === 1,
+			covered: cap ? covered(cap) : false,
+			text: cap ? cap.textContent : ""
+		};
+	})())`)
+	if err != nil {
+		t.Fatalf("reading the queue list's help: %v", err)
+	}
+	var h queueHelp
+	if err := json.Unmarshal([]byte(v.String()), &h); err != nil {
+		t.Fatalf("reading the queue list's help: %v", err)
+	}
+	return h
+}
+
+// TestWorkQueueHelpIsADisclosureClosedByDefault drives the queue list: the
+// help paragraph sits inside one closed disclosure beside the tabs, the browser
+// draws nothing of it until the operator opens it, and the caption then reads
+// word for word (gt-mxn86).
+func TestWorkQueueHelpIsADisclosureClosedByDefault(t *testing.T) {
+	t.Parallel()
+
+	readyHelp := "Open beads with nothing blocking them. Only the green “ready” ones are taken by the spec dispatcher: shaped, unassigned, not an epic, and in a rig that is not parked. Beads held by an assignee wait for that person; beads in parked rigs wait until the rig is re-enabled."
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderWork", workState([]any{
+		seat("gastown", "dementus", "working", "gt-vcr3z", "one Work panel", "deepseek-flash", time.Minute),
+	}, workQueueReading(57, 1, 3, 0)))
+
+	h := workQueueHelp(t, dom)
+	if h.Hints != 1 {
+		t.Fatalf("the queue list draws %d help disclosures, want one", h.Hints)
+	}
+	if h.Tag != "DETAILS" {
+		t.Errorf("the help is a %s, want a details element the browser folds", h.Tag)
+	}
+	if words := strings.Fields(h.Summary); len(words) != 1 {
+		t.Errorf("the disclosure's summary reads %q, want one word", h.Summary)
+	}
+	if h.Open {
+		t.Error("the help starts open; it takes the place of rows the operator reads")
+	} else if !h.Covered {
+		t.Error("the caption is drawn while the help's disclosure is closed")
+	}
+	if !h.InHint {
+		t.Errorf("the caption is not the one element inside the help disclosure (%d captions), so it is drawn outside it", h.Captions)
+	}
+	if h.Text != readyHelp {
+		t.Errorf("the help reads %q, want the caption word for word: %q", h.Text, readyHelp)
+	}
+	// The rest of the panel is still drawn beside the folded help: the seats,
+	// their summary, the blocked line and the queue list each keep their place.
+	if rows := workRows(t, dom); len(rows) < 2 {
+		t.Errorf("the panel drew %d seat rows, want the header and a seat", len(rows))
+	}
+	for _, class := range []string{"wsum", "wblocked", "wqueue"} {
+		workChild(t, dom, class)
+	}
+
+	// A click on the summary is the operator opening it: the caption is then
+	// the element the browser draws, unchanged.
+	if _, err := dom.vm.RunString(`(() => {
+		const cls = (e, c) => String(e.className).split(" ").indexOf(c) >= 0;
+		let hint = null;
+		(function walk(n) {
+			for (const c of (n.children || [])) { if (cls(c, "qhint")) hint = c; walk(c); }
+		})(__byId["work"]);
+		if (!hint) throw new Error("the queue list drew no help disclosure");
+		__clickSummary(hint);
+	})()`); err != nil {
+		t.Fatal(err)
+	}
+	h = workQueueHelp(t, dom)
+	if !h.Open {
+		t.Error("a click on the help's summary left it closed")
+	} else if h.Covered {
+		t.Error("the opened help's caption is covered by a closed disclosure")
+	}
+	if h.Text != readyHelp {
+		t.Errorf("the opened help reads %q, want the caption unchanged", h.Text)
+	}
+}
+
+// TestWorkQueueHelpStaysOpenAcrossRedraw opens the queue help and then redraws
+// the panel the way the next poll does: the redraw rebuilds the queue list, and
+// the help must come back open rather than snap shut under the operator's
+// click (gt-mxn86).
+func TestWorkQueueHelpStaysOpenAcrossRedraw(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderWork", workState([]any{
+		seat("gastown", "dementus", "working", "gt-vcr3z", "one Work panel", "deepseek-flash", time.Minute),
+	}, workQueueReading(57, 1, 3, 0)))
+	before := workChild(t, dom, "wsum")
+	if !strings.Contains(before.Text, "57ready") {
+		t.Fatalf("the queue summary reads %q, want the 57 the first reading carried", before.Text)
+	}
+
+	if _, err := dom.vm.RunString(`(() => {
+		const cls = (e, c) => String(e.className).split(" ").indexOf(c) >= 0;
+		let hint = null;
+		(function walk(n) {
+			for (const c of (n.children || [])) { if (cls(c, "qhint")) hint = c; walk(c); }
+		})(__byId["work"]);
+		if (!hint) throw new Error("the queue list drew no help disclosure");
+		__clickSummary(hint);
+	})()`); err != nil {
+		t.Fatal(err)
+	}
+
+	// A poll brings a new reading, so the panel redraws and builds the queue
+	// list and its help from scratch.
+	dom.call(t, "renderWork", workState([]any{
+		seat("gastown", "dementus", "working", "gt-vcr3z", "one Work panel", "deepseek-flash", time.Minute),
+	}, workQueueReading(58, 1, 3, 0)))
+	after := workChild(t, dom, "wsum")
+	if !strings.Contains(after.Text, "58ready") {
+		t.Fatalf("the queue summary reads %q after a new reading, want the 58 that proves the panel redrew", after.Text)
+	}
+
+	h := workQueueHelp(t, dom)
+	if !h.Open {
+		t.Error("the redraw closed the help the operator had opened")
+	} else if h.Covered {
+		t.Error("the opened help's caption is covered by a closed disclosure")
 	}
 }
 

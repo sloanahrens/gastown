@@ -53,6 +53,7 @@ td.n,th.n{text-align:right}
 .rbeadrow{margin-top:6px}
 .empty{color:var(--dim);padding:6px 0}
 .qcaption{color:var(--dim);padding:6px 0}
+.qhint summary{cursor:pointer}
 .body.stale,#cost .spendpart.stale{opacity:.55}
 .spark{width:100%;height:56px;display:block}
 .chart{width:100%;height:64px;display:block}
@@ -934,13 +935,15 @@ const STATE_HELP = {
   idle: "holds nothing"
 };
 // The Work panel's folds (the seats that need a look, idle seats, parked-rig
-// seats, the queue list) last for the session and are not stored. The queue
-// list starts open, so the operator reads the beads without a click; closing it
-// holds across the polls.
+// seats, the queue list, the queue help) last for the session and are not
+// stored. The queue list starts open, so the operator reads the beads without a
+// click; the help starts closed, out of the rows' way. Either choice holds
+// across the polls.
 let openIdle = false;
 let openParkedRig = false;
 let openNeedsLook = false;
 let openQueueList = true;
+let openQueueHelp = false;
 // The om panel's Stats and Scores sections start closed and keep the viewer's
 // choice across the periodic redraw and a reload, keyed by section name. Storage
 // that throws — a locked-down browser, private mode — leaves them closed and
@@ -4807,10 +4810,20 @@ function drawQueueList(box, s) {
   const caption = {ready: "Open beads with nothing blocking them. Only the green “ready” ones are taken by the spec dispatcher: shaped, unassigned, not an epic, and in a rig that is not parked. Beads held by an assignee wait for that person; beads in parked rigs wait until the rig is re-enabled.",
     landing: "Submitted by a polecat or crew and waiting for the landing worker.",
     blocked: "Open beads waiting on another bead to close. Wisp steps left by retired patrols and old polecat runs are hidden by default; the wisps chip shows them."}[qTab];
-  // The caption wears a class of its own: "empty" also marks the placeholder
-  // inside the scrolling rows, so a test looking for it cannot tell a queue
-  // list with a caption from one without.
-  box.append(el("div", "qcaption", caption));
+  // The help paragraph takes the place of rows the operator reads, so it folds
+  // behind a one-word disclosure beside the tabs (gt-mxn86). openQueueHelp
+  // holds the open state, so the redraw that rebuilds this list every poll
+  // leaves the help as the operator set it. The caption keeps a class of its
+  // own: "empty" also marks the placeholder inside the scrolling rows, so a
+  // test looking for it cannot tell a queue list with a caption from one
+  // without.
+  const help = document.createElement("details");
+  help.className = "qhint";
+  help.open = openQueueHelp;
+  help.ontoggle = () => { openQueueHelp = help.open; };
+  help.append(el("summary", "title", "help"));
+  help.append(el("div", "qcaption", caption));
+  box.append(help);
   const [, , totalKey, listKey] = QTABS.find(t => t[0] === qTab);
   const all = q[listKey] || [];
   // A ledger the page cannot call current backs no skip at all: the note under
