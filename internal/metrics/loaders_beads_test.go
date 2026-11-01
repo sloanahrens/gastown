@@ -18,6 +18,15 @@ const bdListFixture = `[
   "labels": null, "dependency_count": 0, "comment_count": 0}
 ]`
 
+// bdListEnvelopeFixture is the same listing as bdListFixture in the envelope
+// bd 1.2.2 prints: the rows sit under data, beside pagination and
+// schema_version (gt-rgj98).
+const bdListEnvelopeFixture = `{
+ "schema_version": 1,
+ "pagination": {"limit": 0, "offset": 0, "total": 2},
+ "data": ` + bdListFixture + `
+}`
+
 // bdCall is one call a fake bd took.
 type bdCall struct {
 	dir  string
@@ -160,10 +169,12 @@ func TestHandoffBytesFailedShowIsDroppedAndNotCached(t *testing.T) {
 	}
 }
 
-// A show whose output is JSON but holds no bead is dropped the same way.
+// A show whose output is JSON but holds no bead is dropped the same way. An
+// object with a data member and no schema_version is not a bd envelope: only
+// bd's own wrapper is unwrapped.
 func TestHandoffBytesShowWithNoBeadIsDropped(t *testing.T) {
 	t.Parallel()
-	for _, out := range []string{"null", "[]", "{}"} {
+	for _, out := range []string{"null", "[]", "{}", `{"data": [{"notes": "a"}]}`} {
 		var calls []bdCall
 		var d Dropped
 		got := HandoffBytes(fakeBd(out, true, &calls), map[string]string{"gt-1": "/g"}, &d, 150, nil)
@@ -177,10 +188,11 @@ func TestHandoffBytesShowWithNoBeadIsDropped(t *testing.T) {
 }
 
 // A bd list whose output is JSON null, an object or a list of non-beads is a
-// failed source, not a listing with no beads.
+// failed source, not a listing with no beads. An object with a data member and
+// no schema_version is not a bd envelope: only bd's own wrapper is unwrapped.
 func TestLoadBeadsRefusesAListingThatIsNotAnArrayOfBeads(t *testing.T) {
 	t.Parallel()
-	for _, out := range []string{"null", `{"id": "gt-1"}`, "[1, 2]"} {
+	for _, out := range []string{"null", `{"id": "gt-1"}`, "[1, 2]", `{"data": [{"id": "gt-1"}]}`} {
 		var calls []bdCall
 		var d Dropped
 		rows := LoadBeads(fakeBd(out, true, &calls), []string{"/g"}, &d)
@@ -202,6 +214,81 @@ func TestLoadersAcceptANilDroppedLog(t *testing.T) {
 	}
 	if got := HandoffBytes(fakeBd("", false, &calls), map[string]string{"gt-1": "/g"}, nil, 150, nil); len(got) != 0 {
 		t.Errorf("sizes = %v, want none", got)
+	}
+}
+
+// bd wraps a listing in an envelope; the rows are the envelope's data, so both
+// shapes must load the same beads (gt-rgj98).
+func TestLoadBeadsAcceptsTheBdEnvelope(t *testing.T) {
+	t.Parallel()
+	var bareCalls, envelopeCalls []bdCall
+	want := LoadBeads(fakeBd(bdListFixture, true, &bareCalls), []string{"/g"}, &Dropped{})
+	var d Dropped
+	got := LoadBeads(fakeBd(bdListEnvelopeFixture, true, &envelopeCalls), []string{"/g"}, &d)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("enveloped rows = %+v, want the bare array's %+v", got, want)
+	}
+	if d.Count() != 0 {
+		t.Errorf("dropped = %+v, want none", d.Items)
+	}
+}
+
+func TestHandoffBytesAcceptsTheBdEnvelope(t *testing.T) {
+	t.Parallel()
+	show := `{"schema_version": 1, "data": [{"notes": "abcd", "comments": [{"text": "ef"}, {"text": "ghi"}]}]}`
+	var calls []bdCall
+	got := HandoffBytes(fakeBd(show, true, &calls), map[string]string{"gt-1": "/g"}, &Dropped{}, 150, nil)
+	if want := map[string]int{"gt-1": 9}; !reflect.DeepEqual(got, want) {
+		t.Errorf("sizes = %v, want %v", got, want)
+	}
+}
+
+func TestLoadBeadsBareArrayStillWorks(t *testing.T) {
+	t.Parallel()
+	var calls []bdCall
+	rows := LoadBeads(fakeBd(bdListFixture, true, &calls), []string{"/g"}, &Dropped{})
+	if got := []string{rows[0].ID, rows[1].ID}; !reflect.DeepEqual(got, []string{"gt-1", "gt-2"}) {
+		t.Fatalf("ids = %v, want gt-1 and gt-2", got)
+	}
+}
+
+// An envelope that carries no data is a read with no answer, not a listing of
+// no beads: reading it as empty would report a rig as quiet when it is unread.
+func TestLoadBeadsRefusesAnEnvelopeWithNoData(t *testing.T) {
+	t.Parallel()
+	for _, out := range []string{
+		`{"schema_version": 1}`,
+		`{"schema_version": 1, "data": null}`,
+		`{"schema_version": 1, "data": {"id": "gt-1"}}`,
+	} {
+		var calls []bdCall
+		var d Dropped
+		rows := LoadBeads(fakeBd(out, true, &calls), []string{"/g"}, &d)
+		if len(rows) != 0 {
+			t.Errorf("output %s: rows = %d, want none", out, len(rows))
+		}
+		if want := []string{"bd:/g"}; !reflect.DeepEqual(d.Failed, want) {
+			t.Errorf("output %s: failed = %v, want %v", out, d.Failed, want)
+		}
+	}
+}
+
+func TestHandoffBytesRefusesAnEnvelopeWithNoBead(t *testing.T) {
+	t.Parallel()
+	for _, out := range []string{
+		`{"schema_version": 1}`,
+		`{"schema_version": 1, "data": []}`,
+		`{"schema_version": 1, "data": {"id": "gt-1"}}`,
+	} {
+		var calls []bdCall
+		var d Dropped
+		got := HandoffBytes(fakeBd(out, true, &calls), map[string]string{"gt-1": "/g"}, &d, 150, nil)
+		if len(got) != 0 {
+			t.Errorf("output %s: sizes = %v, want none", out, got)
+		}
+		if want := []DroppedItem{{Source: "bd:gt-1", Reason: "bd show failed"}}; !reflect.DeepEqual(d.Items, want) {
+			t.Errorf("output %s: dropped = %+v, want %+v", out, d.Items, want)
+		}
 	}
 }
 
