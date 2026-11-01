@@ -2,9 +2,9 @@
 # image uses, running `gt daemon run` as a container (gt-qpeei.16).
 #
 # Built by internal/daemonimage's Builder.BuildImage, which passes this file with
-# -f, the directory of the binaries (gt, bd, om and claude) as the context, and
-# the tag gt-daemon:<rev>. Nothing is compiled here: the deployer cross-compiles
-# gt, bd and om on this Mac and fetches the pinned claude CLI, then COPYs them
+# -f, the directory of the binaries as the context, and the tag gt-daemon:<rev>.
+# Nothing is compiled here: the deployer cross-compiles gt, bd and om on this Mac
+# and fetches the pinned claude CLI and the pinned client tools, then COPYs them
 # in, so the image is exactly the code the tag's rev names.
 #
 # The base image and the Dolt version are internal/templates/images.go's
@@ -47,6 +47,14 @@ COPY --chmod=0755 om /usr/local/bin/om
 # templates.ClaudeCLISHA256, and places it in the build context; nothing here
 # downloads it or runs an install script for it.
 COPY --chmod=0755 claude /usr/local/bin/claude
+
+# The client tools the daemon execs for dispatch (openshell, kubectl) and for the
+# tier sweep (docker, to the sweep engine through DOCKER_HOST): pinned linux-arm64
+# downloads the deployer verifies by sha256 (templates.DaemonClientTools) and
+# places in the build context. Nothing here downloads them.
+COPY --chmod=0755 openshell /usr/local/bin/openshell
+COPY --chmod=0755 docker /usr/local/bin/docker
+COPY --chmod=0755 kubectl /usr/local/bin/kubectl
 
 # The scratch town's first start runs a dolt preflight that copies git's global
 # user.name and user.email into dolt's config, and fails the install without them
