@@ -376,6 +376,14 @@ func runArgv(ctx context.Context, dir string, argv []string) ([]byte, error) {
 	return cmd.Output()
 }
 
+// tailReader is what a tail read needs of an open log: *os.File in production,
+// and a fake in a test, since a file on disk cannot be made to fail Stat or
+// ReadAt on demand.
+type tailReader interface {
+	Stat() (os.FileInfo, error)
+	ReadAt(p []byte, off int64) (int, error)
+}
+
 // readTail returns the last n bytes of path, dropping a partial first line so
 // every line returned is whole.
 func readTail(path string, n int64) ([]byte, error) {
@@ -384,21 +392,38 @@ func readTail(path string, n int64) ([]byte, error) {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
+	return tail(f, n)
+}
+
+// tail returns the last n bytes of f, dropping a partial first line so every
+// line returned is whole. A tail that is one partial line returns no lines.
+func tail(f tailReader, n int64) ([]byte, error) {
 	st, err := f.Stat()
 	if err != nil {
 		return nil, err
 	}
-	off := max(st.Size()-n, 0)
-	buf := make([]byte, st.Size()-off)
+	size := st.Size()
+	off := max(size-n, 0)
+	// Read one byte before the bound when it cuts into the file, so the read
+	// can tell a line boundary from the middle of a line.
+	if off > 0 {
+		off--
+	}
+	buf := make([]byte, size-off)
 	if _, err := f.ReadAt(buf, off); err != nil {
 		return nil, err
 	}
-	if off > 0 {
-		if i := bytes.IndexByte(buf, '\n'); i >= 0 {
-			buf = buf[i+1:]
-		}
+	if off == 0 {
+		return buf, nil
 	}
-	return buf, nil
+	if buf[0] == '\n' {
+		return buf[1:], nil
+	}
+	i := bytes.IndexByte(buf, '\n')
+	if i < 0 {
+		return nil, nil
+	}
+	return buf[i+1:], nil
 }
 
 // townSeatCount reads the town's seat capacity from its settings; a town with

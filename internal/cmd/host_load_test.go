@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -38,6 +39,55 @@ func TestHostLoadHeaderStatesLimit(t *testing.T) {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("the report does not print %q:\n%s", want, buf.String())
 		}
+	}
+}
+
+// TestHostLoadReportsAMissingTown checks the command says why it has no town to
+// report on.
+func TestHostLoadReportsAMissingTown(t *testing.T) {
+	t.Parallel()
+	d := hostLoadDeps{
+		findTownRoot: func() (string, error) { return "", errors.New("not a workspace") },
+		out:          io.Discard,
+	}
+	cmd := newHostLoadCmd(d)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SilenceUsage = true
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "not in a Gas Town workspace") {
+		t.Errorf("error = %v, want it to name the missing workspace", err)
+	}
+}
+
+// TestHostLoadRefusesAnOutFileItCannotOpen checks a sampler that cannot open
+// its record file stops instead of sampling into nothing.
+func TestHostLoadRefusesAnOutFileItCannotOpen(t *testing.T) {
+	t.Parallel()
+	d := hostLoadDeps{
+		findTownRoot: func() (string, error) { return t.TempDir(), nil },
+		newProber:    func(string) *hostload.Prober { return &hostload.Prober{} },
+		openOut:      func(string) (io.WriteCloser, error) { return nil, errors.New("permission denied") },
+		out:          io.Discard,
+	}
+	cmd := newHostLoadCmd(d)
+	cmd.SetArgs([]string{"--sample", "--out", "load.jsonl"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SilenceUsage = true
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Errorf("error = %v, want the open failure", err)
+	}
+}
+
+// TestHostLoadAppendReportsAFailedWrite checks a failed append returns its
+// error, so a record file that stopped taking lines does not look like a
+// sampler that kept writing.
+func TestHostLoadAppendReportsAFailedWrite(t *testing.T) {
+	t.Parallel()
+	if err := hostLoadAppend(failingWriter{}, []byte("line\n")); err == nil {
+		t.Fatal("hostLoadAppend reported a failed write as a success")
 	}
 }
 

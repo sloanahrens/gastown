@@ -96,6 +96,32 @@ func TestClassifyOwners(t *testing.T) {
 	}
 }
 
+// TestTableRefusesMalformedReadings checks the table reaches its parse errors:
+// a reading it cannot parse is an error, never a table built from the rest.
+func TestTableRefusesMalformedReadings(t *testing.T) {
+	t.Parallel()
+	const goodPS = "    1 /sbin/launchd\n"
+	const goodTop = "PID %CPU\n1 0.5\n"
+	cases := []struct {
+		name          string
+		ps, top, lsof string
+		want          string
+	}{
+		{name: "ps", ps: "nope /bin/zsh\n", top: goodTop, want: `not "pid command"`},
+		{name: "top", ps: goodPS, top: "no table here\n", want: "no process table"},
+		{name: "lsof", ps: goodPS, top: goodTop, lsof: "q1\n", want: "is not a pid or a path"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Table(tc.ps, tc.top, tc.lsof)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("Table = %v, want it to name %q", err, tc.want)
+			}
+		})
+	}
+}
+
 // TestParsersRefuseMalformedOutput drives each parser's refusal: a reading
 // this package cannot read is an error, never an empty table or a zero.
 func TestParsersRefuseMalformedOutput(t *testing.T) {

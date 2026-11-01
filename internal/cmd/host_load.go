@@ -118,12 +118,15 @@ func runHostLoad(cmd *cobra.Command, d hostLoadDeps, flags hostLoadFlags) error 
 	rec := &hostload.Recorder{
 		Interval: flags.every,
 		Sample:   p.Sample,
-		Append: func(line []byte) error {
-			_, err := f.Write(line)
-			return err
-		},
+		Append:   func(line []byte) error { return hostLoadAppend(f, line) },
 	}
 	return rec.Run(ctx)
+}
+
+// hostLoadAppend appends one sample line to the --out file.
+func hostLoadAppend(w io.Writer, line []byte) error {
+	_, err := w.Write(line)
+	return err
 }
 
 // writeHostLoadReport prints one sample: a header stating what it measured and

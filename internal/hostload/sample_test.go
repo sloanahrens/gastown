@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -172,6 +174,143 @@ func TestSampleWithoutSeamsRefusesEachProbe(t *testing.T) {
 			t.Errorf("the %s probe carried no error without its seam", name)
 		}
 	}
+}
+
+// TestOwnersProbeRefusesAFailedRead drives each read the owners probe can lose:
+// a ps or top that failed, and a top that printed no table.
+func TestOwnersProbeRefusesAFailedRead(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		run  hostprobe.Runner
+		want string
+	}{
+		{
+			name: "ps failed",
+			run: func(_ context.Context, argv []string) ([]byte, error) {
+				if argv[0] == "ps" {
+					return nil, errors.New("exit status 1")
+				}
+				return nil, fmt.Errorf("unexpected command %q", argv[0])
+			},
+			want: "ps:",
+		},
+		{
+			name: "top failed",
+			run: func(_ context.Context, argv []string) ([]byte, error) {
+				switch argv[0] {
+				case "ps":
+					return []byte(cannedPS), nil
+				case "top":
+					return nil, errors.New("exit status 1")
+				}
+				return nil, fmt.Errorf("unexpected command %q", argv[0])
+			},
+			want: "top:",
+		},
+		{
+			name: "top printed no table",
+			run: func(_ context.Context, argv []string) ([]byte, error) {
+				switch argv[0] {
+				case "ps":
+					return []byte(cannedPS), nil
+				case "top":
+					return []byte("no table here\n"), nil
+				}
+				return nil, fmt.Errorf("unexpected command %q", argv[0])
+			},
+			want: "no process table",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := sampleProber(t, tc.run, func(string, int64) ([]byte, error) {
+				return []byte(tickLog), nil
+			})
+			rec := record(t, p)
+			if !strings.Contains(rec.Owners.Err, tc.want) {
+				t.Errorf("owners error = %q, want it to name %q", rec.Owners.Err, tc.want)
+			}
+			// Tick and seats do not go through the runner, so they carry
+			// while the owners probe refuses.
+			if rec.Seats.Err != "" || rec.Tick.Err != "" {
+				t.Errorf("record = %+v, want the probes beside owners to carry", rec)
+			}
+		})
+	}
+}
+
+// TestLoadProbeRefusesBothReads checks a host that answers neither the kernel
+// file nor sysctl reports an error instead of an idle host.
+func TestLoadProbeRefusesBothReads(t *testing.T) {
+	t.Parallel()
+	p := &Prober{
+		ReadFile: func(string) ([]byte, error) { return nil, errors.New("no /proc/loadavg") },
+		Run: func(_ context.Context, argv []string) ([]byte, error) {
+			return nil, fmt.Errorf("%s failed", argv[0])
+		},
+		Clock: clockwork.NewFakeClockAt(sampleEpoch),
+	}
+	l, err := p.load(context.Background())
+	if err == nil {
+		t.Fatalf("load = %+v, want an error when neither read answers", l)
+	}
+	if l != (Load{}) {
+		t.Errorf("load = %+v, want no reading beside the error", l)
+	}
+	if !strings.Contains(err.Error(), "sysctl -n vm.loadavg") {
+		t.Errorf("error = %q, want it to name the sysctl fallback", err)
+	}
+}
+
+// TestRunArgvRefusesAnEmptyCommand checks the command runner refuses an empty
+// argv instead of starting nothing.
+func TestRunArgvRefusesAnEmptyCommand(t *testing.T) {
+	t.Parallel()
+	if _, err := runArgv(context.Background(), t.TempDir(), nil); err == nil {
+		t.Fatal("runArgv ran an empty command")
+	}
+}
+
+// TestTownSeatCountReadsTheSeats reads the seat capacity from a town's
+// settings file.
+func TestTownSeatCountReadsTheSeats(t *testing.T) {
+	t.Parallel()
+	town := writeTownSettings(t, `{"polecat_pool":{"seats":{"claude":{"cap":2},"codex":{"cap":3}}}}`)
+	got, err := townSeatCount(town)
+	if err != nil {
+		t.Fatalf("townSeatCount: %v", err)
+	}
+	if want := 5; got != want {
+		t.Errorf("seat count = %d, want %d", got, want)
+	}
+}
+
+// TestTownSeatCountRefusesBrokenSettings checks a settings file this package
+// cannot read is an error, not a town with no seats.
+func TestTownSeatCountRefusesBrokenSettings(t *testing.T) {
+	t.Parallel()
+	town := writeTownSettings(t, `{"polecat_pool":`)
+	_, err := townSeatCount(town)
+	if err == nil || !strings.Contains(err.Error(), "town settings") {
+		t.Errorf("townSeatCount = %v, want a town settings error", err)
+	}
+}
+
+// writeTownSettings writes settings/config.json under a fresh town and returns
+// the town's root.
+func writeTownSettings(t *testing.T, settings string) string {
+	t.Helper()
+	town := t.TempDir()
+	dir := filepath.Join(town, "settings")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return town
 }
 
 // hasOwner reports whether rows holds the named owner.
