@@ -52,7 +52,7 @@ func eligible() *fakeReapEnv {
 	}
 }
 
-func reapScanner(env *fakeReapEnv, o ReapOptions) *Scanner {
+func reapScanner(env Env, o ReapOptions) *Scanner {
 	return New(env, memLedger{}, Options{
 		Now:       func() time.Time { return now },
 		IsRefusal: func(err error) bool { return errors.Is(err, errRefused) },
@@ -322,5 +322,160 @@ func TestSummaryLineCountsReapOutcomes(t *testing.T) {
 	want := "1 reaped, 1 would-reap, 2 blocked"
 	if got := r.Lines()[0]; !strings.Contains(got, want) {
 		t.Fatalf("summary %q lacks %q", got, want)
+	}
+}
+
+// fakeTrimEnv adds the directory-cap trim half to fakeReapEnv.
+type fakeTrimEnv struct {
+	*fakeReapEnv
+	trimmable []string
+	trimErr   error
+}
+
+func (f *fakeTrimEnv) TrimmableSeats(string) ([]string, error) { return f.trimmable, f.trimErr }
+
+// trimmable wraps env with the trim half a host at its directory cap answers
+// with: names are the seats the rig's cap may trim this tick.
+func trimmable(e *fakeReapEnv, names ...string) *fakeTrimEnv {
+	return &fakeTrimEnv{fakeReapEnv: e, trimmable: names}
+}
+
+// reusableSeat makes onyx a live, clean, reusable seat: the capacity the pass
+// never reaps unless the directory cap trims it.
+func reusableSeat(e *fakeReapEnv) {
+	e.recovery["onyx"] = Recovery{Verdict: "SAFE_TO_NUKE", SafeToNuke: true, Reusable: true, GitStateSource: "live", Branch: "polecat/onyx/gt-1"}
+}
+
+// TestDirCapTrimReapsIdleCleanSandboxSeat guards gt-xlazq. The seat is reusable
+// capacity, which the pass leaves alone, and the host names it trimmable
+// because the rig is at its directory cap: the removal is what admits a new
+// seat.
+func TestDirCapTrimReapsIdleCleanSandboxSeat(t *testing.T) {
+	t.Parallel()
+	env := eligible()
+	reusableSeat(env)
+	r := reapScanner(trimmable(env, "onyx"), ReapOptions{}).Tick("gastown")
+	f, ok := reapFinding(t, r, "onyx")
+	if !ok || f.Outcome != OutcomeReaped {
+		t.Fatalf("finding = %+v, %v; want reaped", f, ok)
+	}
+	if !strings.Contains(f.Detail, "trimmed at the rig's directory cap") {
+		t.Errorf("detail = %q; want it to name the trim", f.Detail)
+	}
+	if len(env.reaped) != 1 || env.reaped[0] != "onyx" {
+		t.Fatalf("reaped = %v, want [onyx]", env.reaped)
+	}
+}
+
+// TestDirCapTrimOffUnderTheCap pins Q1: a rig under its cap may not trim a
+// reusable seat, and the host says so by naming none.
+func TestDirCapTrimOffUnderTheCap(t *testing.T) {
+	t.Parallel()
+	env := eligible()
+	reusableSeat(env)
+	r := reapScanner(trimmable(env), ReapOptions{}).Tick("gastown")
+	if f, ok := reapFinding(t, r, "onyx"); ok {
+		t.Fatalf("finding = %+v; want a quiet skip under the cap", f)
+	}
+	if len(env.reaped) != 0 {
+		t.Fatalf("reaped %v under the cap", env.reaped)
+	}
+}
+
+// TestDirCapTrimReapsTheOldestIdleSeatFirst: the per-tick removal budget goes
+// to the seat that has been idle longest, not the first name in the listing.
+func TestDirCapTrimReapsTheOldestIdleSeatFirst(t *testing.T) {
+	t.Parallel()
+	env := eligible()
+	env.polecats = []string{"a", "b", "c"}
+	env.recovery = map[string]Recovery{}
+	env.idleSince = map[string]time.Time{"a": now.Add(-time.Hour), "b": now.Add(-3 * time.Hour), "c": now.Add(-2 * time.Hour)}
+	for _, p := range env.polecats {
+		env.recovery[p] = Recovery{Verdict: "SAFE_TO_NUKE", SafeToNuke: true, Reusable: true, GitStateSource: "live"}
+	}
+	reapScanner(trimmable(env, "a", "b", "c"), ReapOptions{MaxPerTick: 1}).Tick("gastown")
+	if len(env.reaped) != 1 || env.reaped[0] != "b" {
+		t.Fatalf("reaped = %v, want [b] (idle three hours, the oldest)", env.reaped)
+	}
+}
+
+// TestDirCapTrimNeverReapsPreservedWork: the trim lifts the reusable veto and
+// nothing else. A seat whose work is not proven safe, or whose branch another
+// bead claims, is never removed at the cap.
+func TestDirCapTrimNeverReapsPreservedWork(t *testing.T) {
+	t.Parallel()
+	rows := []struct {
+		name   string
+		mutate func(*fakeReapEnv)
+		quiet  bool
+		want   Outcome
+	}{
+		{"unpushed work", func(e *fakeReapEnv) {
+			e.recovery["onyx"] = Recovery{Verdict: "NEEDS_RECOVERY", Reusable: true, Blockers: []string{"3 unpushed commits"}, GitStateSource: "live"}
+		}, false, OutcomeBlocked},
+		{"uncommitted files", func(e *fakeReapEnv) {
+			e.recovery["onyx"] = Recovery{Verdict: "NEEDS_RECOVERY", Reusable: true, Blockers: []string{"2 uncommitted files"}, GitStateSource: "live"}
+		}, false, OutcomeBlocked},
+		{"git state only recorded", func(e *fakeReapEnv) {
+			e.recovery["onyx"] = Recovery{Verdict: "SAFE_TO_NUKE", SafeToNuke: true, Reusable: true, GitStateSource: "recorded"}
+		}, false, OutcomeBlocked},
+		{"branch claimed by open bead", func(e *fakeReapEnv) {
+			reusableSeat(e)
+			e.claimed["polecat/onyx/gt-1"] = "gt-2"
+		}, false, OutcomeSkipped},
+		{"live session", func(e *fakeReapEnv) {
+			reusableSeat(e)
+			e.sessions = map[string]bool{"onyx": true}
+		}, true, ""},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			env := eligible()
+			reusableSeat(env)
+			row.mutate(env)
+			r := reapScanner(trimmable(env, "onyx"), ReapOptions{}).Tick("gastown")
+			f, ok := reapFinding(t, r, "onyx")
+			if row.quiet && ok {
+				t.Fatalf("want no reap finding, got %+v", f)
+			}
+			if !row.quiet && (!ok || f.Outcome != row.want) {
+				t.Fatalf("finding = %+v, %v; want %s", f, ok, row.want)
+			}
+			if len(env.reaped) != 0 {
+				t.Fatalf("reaped %v with work at risk", env.reaped)
+			}
+		})
+	}
+}
+
+// TestDirCapTrimFailsClosed: a rig whose cap or seat kinds cannot be read trims
+// nothing, and says so on the report rather than reading the failed read as a
+// rig under its cap.
+func TestDirCapTrimFailsClosed(t *testing.T) {
+	t.Parallel()
+	env := eligible()
+	reusableSeat(env)
+	r := reapScanner(&fakeTrimEnv{fakeReapEnv: env, trimErr: errors.New("cap unreadable")}, ReapOptions{}).Tick("gastown")
+	if len(r.Errors) == 0 || !strings.Contains(strings.Join(r.Errors, " "), "cap unreadable") {
+		t.Fatalf("errors = %v; want the unreadable cap reported", r.Errors)
+	}
+	if len(env.reaped) != 0 {
+		t.Fatalf("reaped %v with the cap unreadable", env.reaped)
+	}
+}
+
+// TestDirCapTrimIgnoresASeatWithoutADirectory: a name the tick did not list in
+// the rig has no directory to remove, so it is not a trim seat.
+func TestDirCapTrimIgnoresASeatWithoutADirectory(t *testing.T) {
+	t.Parallel()
+	env := eligible()
+	reusableSeat(env)
+	r := reapScanner(trimmable(env, "onyx", "gone"), ReapOptions{}).Tick("gastown")
+	if _, ok := reapFinding(t, r, "gone"); ok {
+		t.Fatalf("findings = %+v; want no finding for a seat with no directory", r.Findings)
+	}
+	if len(env.reaped) != 1 || env.reaped[0] != "onyx" {
+		t.Fatalf("reaped = %v, want [onyx]", env.reaped)
 	}
 }
