@@ -8,21 +8,34 @@
 // stack that runs the local town and a later cloud town are meant to render
 // through Render; nothing calls it yet, so wiring them in is a later bead.
 //
-// The rendered NetworkPolicy denies all ingress and egress. The allow rules a
-// running town needs (daemon to trackerd, DNS, egress to the tracker's host)
-// are not rendered here; they are a later bead, and until it lands the town
-// is isolated and cannot run. It has not been run under kind.
+// The rendered NetworkPolicies deny all ingress and egress, then allow only
+// what a running town needs: the daemon reaches trackerd on its port in the
+// workspace namespace, and every pod resolves names through the cluster DNS.
+// Every allow rule selects the workspace's own pods and labels, so one
+// workspace's pods never reach another's. The renderer makes no cluster call
+// and the output has not been run under kind.
 package deploytree
 
 import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+)
+
+const (
+	// trackerPort is trackerd's port, on its Service and on the allow rules
+	// that admit the daemon to it.
+	trackerPort = 7433
+	// dnsPort is the cluster DNS port the allow rules open on UDP and TCP. The
+	// DNS pods are labelled k8s-app: kube-dns in kube-system, which is the
+	// standard label on kind and the hosted clusters.
+	dnsPort = 53
 )
 
 // Values is one workspace's values file.
@@ -63,14 +76,24 @@ var (
 // NamespaceFor is the namespace of a workspace's town.
 func NamespaceFor(workspace string) string { return "gt-" + workspace }
 
-// Load parses a values file strictly: an unknown key is an error, and the
-// result is validated.
+// Load parses a values file strictly: an unknown key is an error, the result
+// is validated, and a second YAML document is refused so extra content is
+// never silently dropped.
 func Load(data []byte) (Values, error) {
 	var v Values
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err := dec.Decode(&v); err != nil {
 		return Values{}, fmt.Errorf("%w: %v", ErrBadValues, err)
+	}
+	// A values file is one document. Any second decode that is not EOF means
+	// another document followed the first, empty or not, and it is refused.
+	var extra yaml.Node
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return Values{}, fmt.Errorf("%w: after the first document: %v", ErrBadValues, err)
+		}
+		return Values{}, fmt.Errorf("%w: the values file must hold one YAML document", ErrBadValues)
 	}
 	if err := v.Validate(); err != nil {
 		return Values{}, err
@@ -169,9 +192,48 @@ func render(v Values, marshal func(any) ([]byte, error)) ([]Resource, error) {
 	add("NetworkPolicy", "networking.k8s.io/v1", true, ws+"-default-deny", map[string]any{
 		"spec": map[string]any{"podSelector": map[string]any{}, "policyTypes": []any{"Ingress", "Egress"}},
 	})
+	// The daemon reaches the tracker: trackerd's pods accept the daemon's on
+	// trackerd's port, and the daemon may egress to them. The peers are
+	// podSelectors with no namespaceSelector, so they select pods in this
+	// namespace only, by this workspace's labels.
+	add("NetworkPolicy", "networking.k8s.io/v1", true, ws+"-allow-ingress", map[string]any{
+		"spec": map[string]any{
+			"podSelector": labelSelector(componentLabels(ws, "trackerd")),
+			"policyTypes": []any{"Ingress"},
+			"ingress": []any{map[string]any{
+				"from":  []any{map[string]any{"podSelector": labelSelector(componentLabels(ws, "daemon"))}},
+				"ports": []any{tcpPort(trackerPort)},
+			}},
+		},
+	})
+	// Egress is open to the tracker's host (trackerd's pods, by their labels in
+	// this namespace) and to the cluster DNS, and to nothing else. The DNS peer
+	// is the one rule naming another namespace: kube-system's kube-dns pods.
+	add("NetworkPolicy", "networking.k8s.io/v1", true, ws+"-allow-egress", map[string]any{
+		"spec": map[string]any{
+			"podSelector": labelSelector(map[string]any{"gt.dev/workspace": ws}),
+			"policyTypes": []any{"Egress"},
+			"egress": []any{
+				map[string]any{
+					"to":    []any{map[string]any{"podSelector": labelSelector(componentLabels(ws, "trackerd"))}},
+					"ports": []any{tcpPort(trackerPort)},
+				},
+				map[string]any{
+					"to": []any{map[string]any{
+						"namespaceSelector": labelSelector(map[string]any{"kubernetes.io/metadata.name": "kube-system"}),
+						"podSelector":       labelSelector(map[string]any{"k8s-app": "kube-dns"}),
+					}},
+					"ports": []any{
+						map[string]any{"protocol": "UDP", "port": dnsPort},
+						map[string]any{"protocol": "TCP", "port": dnsPort},
+					},
+				},
+			},
+		},
+	})
 	for _, c := range Components {
 		name := ws + "-" + c
-		sel := map[string]any{"gt.dev/workspace": ws, "gt.dev/component": c}
+		sel := componentLabels(ws, c)
 		add("ServiceAccount", "v1", true, name, nil)
 		container := map[string]any{"name": c, "image": v.Images[c]}
 		if c == "trackerd" {
@@ -188,7 +250,7 @@ func render(v Values, marshal func(any) ([]byte, error)) ([]Resource, error) {
 		}})
 		if c == "trackerd" {
 			add("Service", "v1", true, name, map[string]any{"spec": map[string]any{
-				"selector": sel, "ports": []any{map[string]any{"port": 7433}},
+				"selector": sel, "ports": []any{map[string]any{"port": trackerPort}},
 			}})
 		}
 	}
@@ -206,6 +268,22 @@ func render(v Values, marshal func(any) ([]byte, error)) ([]Resource, error) {
 		return a.Name < b.Name
 	})
 	return res, nil
+}
+
+// componentLabels are the labels a rendered Deployment puts on its pods, and
+// the labels every allow rule selects them by.
+func componentLabels(ws, component string) map[string]any {
+	return map[string]any{"gt.dev/workspace": ws, "gt.dev/component": component}
+}
+
+// labelSelector wraps matchLabels as a NetworkPolicy selector takes them.
+func labelSelector(matchLabels map[string]any) map[string]any {
+	return map[string]any{"matchLabels": matchLabels}
+}
+
+// tcpPort is one allow rule's port.
+func tcpPort(port int) map[string]any {
+	return map[string]any{"protocol": "TCP", "port": port}
 }
 
 func merge(a, b map[string]any) map[string]any {
