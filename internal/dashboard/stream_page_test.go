@@ -213,6 +213,56 @@ func TestTheWatchdogReplacesAStreamQuietForNinetySeconds(t *testing.T) {
 	}
 }
 
+// A hidden or asleep tab holds its timers: the clock runs while no tick does,
+// so the first tick after the tab wakes is far later than the interval. The
+// stream itself is healthy and its events are queued behind that tick, so the
+// late tick says nothing about it and must not drop it (gt-t0qi7).
+func TestWatchdogIgnoresALateTick(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	openStream(t, dom)
+	pageExpr(t, dom, "__sleep(95000)") // 95 s of held timers, then the late tick runs
+
+	if got := pageStreams(t, dom); got != 1 {
+		t.Fatalf("the page had %d streams after a 95 s late tick, want the stream left alone", got)
+	}
+	if d := dom.element(t, "conn"); d.Text != "live" {
+		t.Errorf("#conn reads %q after a late tick, want the live stream untouched", d.Text)
+	}
+
+	// The late tick is forgiven, not the stream: once the ticks run on time
+	// again, 90 s without a named event still replaces it.
+	advanceTimers(t, dom, 90000)
+	if got := pageStreams(t, dom); got != 2 {
+		t.Fatalf("the page had %d streams 90 s after the late tick, want the stream replaced", got)
+	}
+}
+
+// A tab that becomes visible again can have its stream's events still queued,
+// so its return is not evidence the stream died either: the page moves the
+// silence clock when the tab comes back (gt-t0qi7).
+func TestWatchdogResetsOnVisible(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	openStream(t, dom)
+	pageExpr(t, dom, "__visibility(true)") // the tab goes hidden
+	advanceTimers(t, dom, 89000)           // on-time ticks, and the stream sends nothing
+	if got := pageStreams(t, dom); got != 1 {
+		t.Fatalf("the page had %d streams after 89 s hidden, want the stream left alone", got)
+	}
+
+	pageExpr(t, dom, "__visibility(false)") // the tab comes back before the ninth tick
+	advanceTimers(t, dom, 2000)             // the ninth tick falls here
+	if got := pageStreams(t, dom); got != 1 {
+		t.Fatalf("the page had %d streams when the ninth tick came 90 s after load, want the visible tab's reset", got)
+	}
+	if d := dom.element(t, "conn"); d.Text != "live" {
+		t.Errorf("#conn reads %q after the tab became visible, want the live stream untouched", d.Text)
+	}
+}
+
 // A connect that works clears the backoff, and it clears it before the reload a
 // dropped stream takes the page on: the reload ends the page in a browser, so a
 // reset that came after it would never run (gt-3q3go).
