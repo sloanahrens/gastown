@@ -336,20 +336,45 @@ func RejectionForAttempt(notes string, attempt int) (RejectionNote, bool) {
 }
 
 // priorReviewFindings is the previous round's findings for the next review over
-// a bead's diff: the findings in the last MERGE REJECTION block, which is the
-// round that sent the work back (gt-cz07b). om classifies each as resolved,
-// unresolved or regressed, so a rework round is scored on what is still wrong
-// rather than on a fresh set of minors invented about an unchanged diff.
+// a bead's diff: the findings of the newest refusal that carried a verdict's
+// findings (gt-cz07b). om classifies each as resolved, unresolved or regressed,
+// so a rework round is scored on what is still wrong rather than on a fresh set
+// of minors invented about an unchanged diff.
+//
+// It reads past the last block when that block is a non-review refusal: a gate,
+// conflict or policy refusal carries no om verdict, so the refusal before it is
+// still the round that sent the work back (gt-g8otg). A gate refusal after an
+// om approve answers itself, because that block carries the approve's findings.
+//
+// It stops at the newest review block whether or not that block raised
+// findings: a review that found nothing leaves the next round nothing to
+// classify, and an older round's findings must not outlive the round that
+// answered them.
 //
 // Empty on a bead no refusal has rejected — which is exactly attempt 1 — and on
-// a refusal that raised none, such as a gate failure: that round has nothing
-// for om to classify, and the review runs cold.
+// a refusal that raised none: that round has nothing for om to classify, and
+// the review runs cold.
 func priorReviewFindings(notes string) []Finding {
-	last, ok := ParseRejectionNote(notes)
-	if !ok {
-		return nil
+	blocks := rejectionBlockRE.FindAllStringIndex(notes, -1)
+	for i := len(blocks) - 1; i >= 0; i-- {
+		end := len(notes)
+		if i+1 < len(blocks) {
+			end = blocks[i+1][0]
+		}
+		n, ok := ParseRejectionNote(notes[blocks[i][0]:end])
+		if !ok {
+			continue
+		}
+		// A block with no class is a review too (gt-1jig), and a review block
+		// answers even when it raised nothing.
+		if n.Kind == "" || n.Kind == string(RejectReview) {
+			return n.Findings
+		}
+		if len(n.Findings) > 0 {
+			return n.Findings
+		}
 	}
-	return last.Findings
+	return nil
 }
 
 // parseRejectionHeader reads the "MERGE REJECTION (attempt N): kind - reason"
