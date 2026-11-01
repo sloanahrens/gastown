@@ -1,16 +1,18 @@
-// Command forgejo-cutover cuts a rig over to Forgejo-primary landing (gt-fn9e6.12).
-// Until the run is ported, a valid command line exits 1 and says so, and
-// scripts/forgejo-cutover.sh still performs the cutover. It exits 0 for help, 1
-// when the run fails, and 2 when the command line is refused.
+// Command forgejo-cutover cuts a rig over to Forgejo-primary landing (gt-fn9e6.12,
+// gt-tpg0p.51). It exits 0 for a finished run and for the help request, 1 when a
+// run fails, and 2 when the command line is refused.
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 
 	"github.com/steveyegge/gastown/internal/forgejocut"
+	"github.com/steveyegge/gastown/internal/forgejoprov"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -24,18 +26,23 @@ func main() {
 // usage error takes.
 type parseOptions func(args []string, env forgejocut.Env) (*forgejocut.Options, error)
 
+// cutoverRun is the seam runParse hands the parsed command line to: forgejocut.Run
+// in the process, a stub in a test that drives the exit code mapping without a
+// town.
+type cutoverRun func(ctx context.Context, opts *forgejocut.Options, env forgejocut.RunEnv) int
+
 // run is the process minus os.Exit: a test hands it a command line, the seam set
 // the parse reads through and the streams, and reads the code the process would
 // have exited with.
 func run(args []string, env forgejocut.Env, stdout, stderr io.Writer) int {
-	return runParse(args, env, stdout, stderr, forgejocut.Parse)
+	return runParse(args, env, stdout, stderr, forgejocut.Parse, forgejocut.Run)
 }
 
 // runParse turns what Parse returned into the script's exit codes: the help
 // request is the usage text and success, a refused command line is its message and
 // the usage hint, and any other error is a run that failed. A command line that
-// parses reaches the run, which is not ported yet.
-func runParse(args []string, env forgejocut.Env, stdout, stderr io.Writer, parse parseOptions) int {
+// parses reaches the cutover run.
+func runParse(args []string, env forgejocut.Env, stdout, stderr io.Writer, parse parseOptions, cutover cutoverRun) int {
 	opts, err := parse(args, env)
 	switch {
 	case errors.Is(err, forgejocut.ErrHelp):
@@ -55,8 +62,7 @@ func runParse(args []string, env forgejocut.Env, stdout, stderr io.Writer, parse
 		fmt.Fprintln(stderr, "forgejo-cutover: the command line parsed to no options")
 		return forgejocut.ExitFailure
 	}
-	fmt.Fprintf(stderr, "forgejo-cutover: the cutover run is not ported yet; scripts/forgejo-cutover.sh still performs it for %s\n", opts.Rig)
-	return forgejocut.ExitFailure
+	return cutover(context.Background(), opts, liveRunEnv(stdout, stderr))
 }
 
 // liveEnv is the seam set the process reads: the environment, the filesystem, the
@@ -78,6 +84,18 @@ func liveEnv() forgejocut.Env {
 	}
 }
 
+// liveRunEnv is the seam set the cutover run reads: the process's streams, the
+// real children, and the environment and token file the admin token resolves from,
+// which is the same seam the provisioning run is given.
+func liveRunEnv(stdout, stderr io.Writer) forgejocut.RunEnv {
+	return forgejocut.RunEnv{
+		Runner:       execRunner{stdout: stdout, stderr: stderr},
+		ProvisionEnv: forgejoprov.Env{Getenv: os.Getenv, ReadFile: os.ReadFile},
+		Stdout:       stdout,
+		Stderr:       stderr,
+	}
+}
+
 // townFromCwd is the town root the working directory is in, or "" when there is
 // none: the helper the other commands find their town through.
 func townFromCwd() string {
@@ -95,6 +113,33 @@ type bareGit struct{}
 // OriginURL reads the origin URL of the bare repository.
 func (bareGit) OriginURL(bareRepo string) (string, error) {
 	return git.NewGitWithDir(bareRepo, "").RemoteURL("origin")
+}
+
+// execRunner is forgejocut.Runner over the operating system: Output captures a
+// read's stdout, and Run lets a child's own output reach the operator's streams —
+// the probe's log is the operator's to read.
+type execRunner struct {
+	stdout io.Writer
+	stderr io.Writer
+}
+
+// Output runs argv and returns its stdout.
+func (r execRunner) Output(argv []string) ([]byte, error) {
+	if len(argv) == 0 {
+		return nil, errors.New("no command to run")
+	}
+	return exec.Command(argv[0], argv[1:]...).Output()
+}
+
+// Run runs argv with the run's own stdout and stderr.
+func (r execRunner) Run(argv []string) error {
+	if len(argv) == 0 {
+		return errors.New("no command to run")
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Stdout = r.stdout
+	cmd.Stderr = r.stderr
+	return cmd.Run()
 }
 
 // usage is the text -h prints. Every default it names is read from the constant

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -15,6 +17,16 @@ func TestMain(m *testing.M) { os.Exit(unittier.Main(m)) }
 // noEnv is the empty environment: every default these tests read is one no
 // variable moved.
 func noEnv(string) string { return "" }
+
+// neverRuns is the cutover seam a parse-failure test hands runParse: reaching the
+// run from a command line that did not parse is the bug under test.
+func neverRuns(t *testing.T) cutoverRun {
+	t.Helper()
+	return func(context.Context, *forgejocut.Options, forgejocut.RunEnv) int {
+		t.Error("the cutover ran from a command line that did not parse")
+		return forgejocut.ExitFailure
+	}
+}
 
 // homeEnv is the environment with only HOME set, so a command line reaches the
 // town's default.
@@ -115,24 +127,100 @@ func TestMainUsageExitsTwoAndHelpExitsZero(t *testing.T) {
 	}
 }
 
-// TestMainValidCommandLineIsNotYetRunExitsOne: a command line that parses reaches
-// the run, which is not ported, so the command exits 1 and says where the cutover
-// still runs. The usage hint is left out, since the command line was valid.
-func TestMainValidCommandLineIsNotYetRunExitsOne(t *testing.T) {
+// TestMainValidCommandLineRunsTheCutover: a command line that parses reaches the
+// cutover run, with the parsed options and the process's streams. The run's own
+// exit code is the command's.
+func TestMainValidCommandLineRunsTheCutover(t *testing.T) {
 	t.Parallel()
-	var stdout, stderr strings.Builder
-	got := run([]string{"gastown", "--repo", "acme/gastown"}, stubEnv(homeEnv), &stdout, &stderr)
-	if got != forgejocut.ExitFailure {
-		t.Fatalf("run = %d, want 1 (stderr: %s)", got, stderr.String())
+	var gotOpts *forgejocut.Options
+	var gotEnv forgejocut.RunEnv
+	cutover := func(_ context.Context, opts *forgejocut.Options, env forgejocut.RunEnv) int {
+		gotOpts, gotEnv = opts, env
+		fmt.Fprintln(env.Stdout, "the cutover ran")
+		return forgejocut.ExitOK
 	}
-	if !strings.Contains(stderr.String(), "not ported yet") || !strings.Contains(stderr.String(), "scripts/forgejo-cutover.sh") {
-		t.Errorf("stderr = %q, want the port named and the script that still runs", stderr.String())
+	var parseOut, parseErr strings.Builder
+	got := runParse([]string{"gastown", "--repo", "acme/gastown"}, stubEnv(homeEnv), &parseOut, &parseErr, forgejocut.Parse, cutover)
+	if got != forgejocut.ExitOK {
+		t.Fatalf("runParse = %d, want the run's 0 (stderr: %s)", got, parseErr.String())
 	}
-	if strings.Contains(stderr.String(), "usage: forgejo-cutover --help") {
-		t.Errorf("stderr = %q, want no usage hint: the command line was valid", stderr.String())
+	if gotOpts == nil || gotOpts.Rig != "gastown" || gotOpts.Repo != "acme/gastown" {
+		t.Fatalf("the run received %+v, want the parsed gastown options", gotOpts)
 	}
-	if stdout.Len() != 0 {
-		t.Errorf("stdout = %q, want nothing from a run that did not start", stdout.String())
+	if gotEnv.Stdout != &parseOut || gotEnv.Stderr != &parseErr {
+		t.Errorf("the run received the streams %v/%v, want the command's own", gotEnv.Stdout, gotEnv.Stderr)
+	}
+	if gotEnv.Runner == nil {
+		t.Error("the run received no exec seam")
+	}
+	if strings.Contains(parseErr.String(), "usage: forgejo-cutover --help") {
+		t.Errorf("stderr = %q, want no usage hint: the command line was valid", parseErr.String())
+	}
+	if !strings.Contains(parseOut.String(), "the cutover ran") {
+		t.Errorf("stdout = %q, want the run's own output", parseOut.String())
+	}
+}
+
+// TestRunExitCodes holds the exit contract the command owns: a refused command
+// line is 2 and never reaches the run, the help request is 0, and a run that
+// reports failure is 1. The no-admin-token refusal, which is also 1, is pinned in
+// internal/forgejocut (TestRunExitCodes there).
+func TestRunExitCodes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		args    []string
+		code    int
+		ran     bool
+		parse   parseOptions
+		cutover cutoverRun
+	}{
+		{
+			name: "a refused command line exits 2 without running",
+			args: []string{"gastown", "--nope"},
+			code: forgejocut.ExitUsage,
+		},
+		{
+			name: "help exits 0 without running",
+			args: []string{"--help"},
+			code: forgejocut.ExitOK,
+		},
+		{
+			name: "a failed run exits 1",
+			args: []string{"gastown", "--repo", "acme/gastown"},
+			code: forgejocut.ExitFailure,
+			ran:  true,
+			cutover: func(context.Context, *forgejocut.Options, forgejocut.RunEnv) int {
+				return forgejocut.ExitFailure
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ran := false
+			cutover := tt.cutover
+			if cutover == nil {
+				cutover = func(context.Context, *forgejocut.Options, forgejocut.RunEnv) int {
+					ran = true
+					return forgejocut.ExitOK
+				}
+			} else {
+				inner := cutover
+				cutover = func(ctx context.Context, opts *forgejocut.Options, env forgejocut.RunEnv) int {
+					ran = true
+					return inner(ctx, opts, env)
+				}
+			}
+			var stdout, stderr strings.Builder
+			got := runParse(tt.args, stubEnv(homeEnv), &stdout, &stderr, forgejocut.Parse, cutover)
+			if got != tt.code {
+				t.Fatalf("runParse(%v) = %d, want %d (stderr: %s)", tt.args, got, tt.code, stderr.String())
+			}
+			if ran != tt.ran {
+				t.Errorf("runParse(%v) ran the cutover = %v, want %v", tt.args, ran, tt.ran)
+			}
+		})
 	}
 }
 
@@ -164,7 +252,7 @@ func TestRunParseWithoutOptionsExitsOne(t *testing.T) {
 		return nil, nil
 	}
 	var stdout, stderr strings.Builder
-	if got := runParse(nil, stubEnv(noEnv), &stdout, &stderr, empty); got != forgejocut.ExitFailure {
+	if got := runParse(nil, stubEnv(noEnv), &stdout, &stderr, empty, neverRuns(t)); got != forgejocut.ExitFailure {
 		t.Fatalf("runParse = %d, want 1", got)
 	}
 	if !strings.Contains(stderr.String(), "parsed to no options") {
@@ -180,7 +268,7 @@ func TestRunParseFailedParseIsAFailedRun(t *testing.T) {
 		return nil, errors.New("no origin URL")
 	}
 	var stdout, stderr strings.Builder
-	if got := runParse(nil, stubEnv(noEnv), &stdout, &stderr, failing); got != forgejocut.ExitFailure {
+	if got := runParse(nil, stubEnv(noEnv), &stdout, &stderr, failing, neverRuns(t)); got != forgejocut.ExitFailure {
 		t.Fatalf("runParse = %d, want 1", got)
 	}
 	if !strings.Contains(stderr.String(), "no origin URL") || strings.Contains(stderr.String(), "usage:") {
