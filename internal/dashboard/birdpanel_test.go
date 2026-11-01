@@ -105,30 +105,41 @@ type birdDrawnRow struct {
 	Body  *birdDrawnCell  `json:"body"`
 }
 
-// birdRows reads the rows the panel drew under the Birds heading. A panel that
-// drew no such block fails here rather than reading as an empty list.
+// birdRows reads the rows the Birds panel drew into its own body, in the order
+// the panel drew them. The "Needs you" list is not a row, so it is left out.
 func birdRows(t *testing.T, dom *pageDOM) []birdDrawnRow {
 	t.Helper()
 
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
-		const b = __byId["overseer"].children.find(x => x.children[0].children[0].textContent === "Birds");
-		if (!b) return null;
 		const cell = c => ({text: c.textContent, class: c.className, href: c.href || "", target: c.target || "", rel: c.rel || "", kids: c.children.length});
-		return b.children[1].children.map(row => ({
+		return __byId["birds"].children.filter(c => (" " + (c.className || "") + " ").indexOf(" brow ") >= 0).map(row => ({
 			class: row.className,
 			head: (row.children[0] ? row.children[0].children : []).map(cell),
 			body: row.children[1] ? cell(row.children[1]) : null
 		}));
 	})())`)
 	if err != nil {
-		t.Fatalf("reading the Birds block's rows: %v", err)
-	}
-	if v.String() == "null" {
-		t.Fatal("the panel drew no Birds block")
+		t.Fatalf("reading the Birds panel's rows: %v", err)
 	}
 	var out []birdDrawnRow
 	if err := json.Unmarshal([]byte(v.String()), &out); err != nil {
-		t.Fatalf("reading the Birds block's rows: %v", err)
+		t.Fatalf("reading the Birds panel's rows: %v", err)
+	}
+	return out
+}
+
+// birdLines reads the class of every line the Birds panel drew into its body,
+// in the order it drew them: the rows and the "Needs you" list.
+func birdLines(t *testing.T, dom *pageDOM) []string {
+	t.Helper()
+
+	v, err := dom.vm.RunString(`JSON.stringify(__byId["birds"].children.map(c => c.className))`)
+	if err != nil {
+		t.Fatalf("reading the Birds panel's lines: %v", err)
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(v.String()), &out); err != nil {
+		t.Fatalf("reading the Birds panel's lines: %v", err)
 	}
 	return out
 }
@@ -144,7 +155,7 @@ func TestBirdPanelDrawsAgeStaleSummaryAndLinks(t *testing.T) {
 	written := time.Now().UTC().Add(-30 * time.Minute).Format(time.RFC3339)
 	stamp := time.Now().UTC().Format(time.RFC3339)
 	dom := newPageDOM(t)
-	dom.call(t, "renderOverseer", map[string]any{
+	dom.call(t, "renderBirds", map[string]any{
 		"birds": []any{
 			map[string]any{
 				"bird": "dunlin", "state": "fresh", "written": written,
@@ -182,25 +193,27 @@ func TestBirdPanelDrawsAgeStaleSummaryAndLinks(t *testing.T) {
 		t.Errorf("the row's summary reads %+v, want %+v", rows[0].Body, wantBody)
 	}
 
-	// The stale bird wears the amber mark, wrote no page and no summary, so its
-	// head carries only its name and the age.
-	if rows[1].Class != "brow warnc" {
-		t.Errorf("a stale row is drawn as %q, want the amber mark", rows[1].Class)
+	// The bird the reader could not use shows what is wrong in the alert class,
+	// and no age, because the reader had no instant to show. It is not marked
+	// stale, so it stays above the stale row below.
+	if rows[1].Body == nil || rows[1].Body.Class != "badc" || rows[1].Body.Text != "daily.json is not valid JSON" {
+		t.Errorf("the error row's note reads %+v, want the reader's words in the alert class", rows[1].Body)
 	}
-	if len(rows[1].Head) != 2 || rows[1].Head[0].Text != "heron" || rows[1].Head[1].Class != "bage" {
-		t.Errorf("the stale row's head reads %+v, want its name and age", rows[1].Head)
-	}
-	if rows[1].Body != nil {
-		t.Errorf("the stale row drew a body line it has no words for: %+v", rows[1].Body)
+	if len(rows[1].Head) != 1 || rows[1].Head[0].Text != "curlew" {
+		t.Errorf("the error row's head reads %+v, want its name alone", rows[1].Head)
 	}
 
-	// The bird the reader could not use shows what is wrong in the alert class,
-	// and no age, because the reader had no instant to show.
-	if rows[2].Body == nil || rows[2].Body.Class != "badc" || rows[2].Body.Text != "daily.json is not valid JSON" {
-		t.Errorf("the error row's note reads %+v, want the reader's words in the alert class", rows[2].Body)
+	// The stale bird wears the amber mark and sorts after the fresh and failed
+	// rows. It wrote no page and no summary, so its head carries only its name
+	// and the age.
+	if rows[2].Class != "brow warnc" {
+		t.Errorf("a stale row is drawn as %q, want the amber mark", rows[2].Class)
 	}
-	if len(rows[2].Head) != 1 || rows[2].Head[0].Text != "curlew" {
-		t.Errorf("the error row's head reads %+v, want its name alone", rows[2].Head)
+	if len(rows[2].Head) != 2 || rows[2].Head[0].Text != "heron" || rows[2].Head[1].Class != "bage" {
+		t.Errorf("the stale row's head reads %+v, want its name and age", rows[2].Head)
+	}
+	if rows[2].Body != nil {
+		t.Errorf("the stale row drew a body line it has no words for: %+v", rows[2].Body)
 	}
 }
 
@@ -234,19 +247,20 @@ func TestBirdPanelDrawsAReadWithNoBirds(t *testing.T) {
 	}
 	for _, tc := range cases {
 		dom := newPageDOM(t)
-		dom.call(t, "renderOverseer", map[string]any{
+		dom.call(t, "renderBirds", map[string]any{
 			"birds": []any{},
 			"reads": map[string]any{"birds": tc.status},
 		})
-		block := blockNamed(t, overseerBlocks(t, dom), "Birds")
-		if block.Text != tc.wantText {
-			t.Errorf("%s: the block reads %q, want %q", tc.name, block.Text, tc.wantText)
+		if got := dom.element(t, "birds").Text; got != tc.wantText {
+			t.Errorf("%s: the panel reads %q, want %q", tc.name, got, tc.wantText)
 		}
-		if classes := blockClasses(t, dom, "Birds"); !slices.Equal(classes, []string{tc.wantClass}) {
-			t.Errorf("%s: the block's line is drawn as %v, want %q", tc.name, classes, tc.wantClass)
+		if classes := birdLines(t, dom); !slices.Equal(classes, []string{tc.wantClass}) {
+			t.Errorf("%s: the panel's line is drawn as %v, want %q", tc.name, classes, tc.wantClass)
 		}
-		if tc.wantNote != "" && !strings.Contains(block.Note, tc.wantNote) {
-			t.Errorf("%s: the block's note reads %q, want it to name %q", tc.name, block.Note, tc.wantNote)
+		if tc.wantNote != "" {
+			if note := dom.element(t, "birdsnote").Text; !strings.Contains(note, tc.wantNote) {
+				t.Errorf("%s: the panel's note reads %q, want it to name %q", tc.name, note, tc.wantNote)
+			}
 		}
 	}
 }
@@ -258,7 +272,7 @@ func TestBirdPanelDrawsARowsNoteOrItsState(t *testing.T) {
 
 	stamp := time.Now().UTC().Format(time.RFC3339)
 	dom := newPageDOM(t)
-	dom.call(t, "renderOverseer", map[string]any{
+	dom.call(t, "renderBirds", map[string]any{
 		"birds": []any{
 			map[string]any{"bird": "curlew", "state": "error", "note": "daily.json is not valid JSON"},
 			map[string]any{"bird": "heron", "state": "withheld"},
@@ -286,7 +300,7 @@ func TestBirdPanelRedrawsWhenOnlyItsReadStatusChanged(t *testing.T) {
 
 	stamp := time.Now().UTC().Format(time.RFC3339)
 	dom := newPageDOM(t)
-	draws := countPaneDraws(t, dom, "overseer")
+	draws := countPaneDraws(t, dom, "birds")
 	reading := func(status map[string]any) map[string]any {
 		return map[string]any{
 			"birds": []any{map[string]any{"bird": "dunlin", "state": "fresh", "written": stamp, "summary": "the day in one line"}},
@@ -302,8 +316,8 @@ func TestBirdPanelRedrawsWhenOnlyItsReadStatusChanged(t *testing.T) {
 	if got := draws(); got != 2 {
 		t.Errorf("a failed birds read drew the pane %d times, want 2: the rows did not move, the status did", got)
 	}
-	if note := blockNamed(t, overseerBlocks(t, dom), "Birds").Note; !strings.Contains(note, "read failed") {
-		t.Errorf("the birds block's note reads %q after the failed read, want it named", note)
+	if note := dom.element(t, "birdsnote").Text; !strings.Contains(note, "read failed") {
+		t.Errorf("the birds panel's note reads %q after the failed read, want it named", note)
 	}
 }
 
@@ -360,8 +374,8 @@ type drawnNeedsGroup struct {
 	Parts []string `json:"parts"`
 }
 
-// needsYouWalk reads every details element the page drew under #overseer, in
-// document order, with what it shows.
+// needsYouWalk reads every details element the page drew under the Birds
+// panel's body, in document order, with what it shows.
 const needsYouWalk = `JSON.stringify((() => {
   const out = [];
   (function walk(n) {
@@ -379,23 +393,17 @@ const needsYouWalk = `JSON.stringify((() => {
       }
       walk(c);
     }
-  })(document.getElementById("overseer"));
+  })(__byId["birds"]);
   return out;
 })())`
 
-// drawBirdsInDOM runs the page's own drawBirds over a state and answers the
+// drawBirdsInDOM runs the page's own renderBirds over a state and answers the
 // "Needs you" sections it drew.
 func drawBirdsInDOM(t *testing.T, state map[string]any) []drawnNeeds {
 	t.Helper()
 
-	dom := newPage(t, nil, "")
-	payload, err := json.Marshal(state)
-	if err != nil {
-		t.Fatalf("marshal state: %v", err)
-	}
-	if _, err := dom.vm.RunString("drawBirds(document.getElementById(\"overseer\"), " + string(payload) + ");"); err != nil {
-		t.Fatalf("drawBirds: %v", err)
-	}
+	dom := newPageDOM(t)
+	dom.call(t, "renderBirds", state)
 	v, err := dom.vm.RunString(needsYouWalk)
 	if err != nil {
 		t.Fatalf("reading the drawn Birds block: %v", err)
@@ -409,9 +417,9 @@ func drawBirdsInDOM(t *testing.T, state map[string]any) []drawnNeeds {
 
 // Every reporter's decisions are one list under the rows: grouped by reporter,
 // the reporter that wrote most recently first (by name when two wrote in the
-// same second), closed until the operator opens it, and left out whole when no
-// reporter has a decision to show. The blocked reporter's dropped item is
-// named as withheld without its text.
+// same second), open when a reporter has an item to put, and left out whole
+// when no reporter has a decision to show. The blocked reporter's dropped item
+// is named as withheld without its text.
 func TestBirdsPanelNeedsYou(t *testing.T) {
 	t.Parallel()
 
@@ -446,8 +454,8 @@ func TestBirdsPanelNeedsYou(t *testing.T) {
 	if ny.Class != "needsyou" {
 		t.Errorf("the section's class is %q, want needsyou", ny.Class)
 	}
-	if ny.Open {
-		t.Error("the Needs you section is drawn open, want it closed until the operator opens it")
+	if !ny.Open {
+		t.Error("the Needs you section is drawn closed, want it open when a reporter has an item to put")
 	}
 	if ny.Summary != "Needs you (4)" {
 		t.Errorf("the summary reads %q, want every reporter's item counted", ny.Summary)
@@ -507,5 +515,128 @@ func TestBirdsPanelNeedsYouWithheldOnly(t *testing.T) {
 	}
 	if want := "withheld: a decision item looks like it holds a secret (credential-assignment)"; ny.Groups[0].Parts[1] != want {
 		t.Errorf("the group reads %q, want %q", ny.Groups[0].Parts[1], want)
+	}
+}
+
+// The birds are the operator's first read of the town: the panel is its own
+// top-level section, first among the panels and ahead of the Overseer panel,
+// and a reader with no saved choice sees it open — so the reports are on the
+// page at load instead of behind a collapse (gt-0g6z9).
+func TestBirdsPanelOpenByDefault(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	keys := dom.foldKeys(t)
+	birds, overseer := slices.Index(keys, "birds"), slices.Index(keys, "overseer")
+	if birds < 0 || overseer < 0 {
+		t.Fatalf("the page's sections are %v, want a Birds panel and an Overseer panel among them", keys)
+	}
+	if birds > overseer {
+		t.Errorf("the Birds panel sits at %d and the Overseer panel at %d, want the birds drawn first", birds, overseer)
+	}
+	if birds != 0 {
+		t.Errorf("the page's sections are %v, want the Birds panel first among the panels", keys)
+	}
+	fold := dom.fold(t, "birds")
+	wantFold(t, fold, "birds", false)
+	// The heading's note is what the panel's read age is drawn into, and what
+	// dashboard-watch.sh reads a section's staleness from.
+	if fold.NoteHidden == nil {
+		t.Error("the Birds heading carries no .r note span")
+	}
+}
+
+// The Overseer panel no longer draws the birds: they are a panel of their own.
+// Its other blocks are the ones it drew before, in the same order.
+func TestOverseerPanelHasNoBirds(t *testing.T) {
+	t.Parallel()
+
+	stamp := time.Now().UTC().Format(time.RFC3339)
+	dom := newPageDOM(t)
+	dom.call(t, "renderOverseer", map[string]any{
+		"birds": []any{map[string]any{"bird": "dunlin", "state": "fresh", "written": stamp, "summary": "the day in one line"}},
+		"reads": map[string]any{"birds": map[string]any{"at": stamp, "every_sec": 60}},
+	})
+
+	var names []string
+	for _, b := range overseerBlocks(t, dom) {
+		names = append(names, b.Name)
+	}
+	want := []string{"Heartbeat", "Digest", "Deep review", "Dispatcher", "For the overseer"}
+	if !slices.Equal(names, want) {
+		t.Errorf("the panel drew %v, want %v", names, want)
+	}
+	if text := dom.element(t, "overseer").Text; strings.Contains(text, "dunlin") {
+		t.Errorf("the Overseer panel still draws a bird's row: %q", text)
+	}
+}
+
+// The combined Needs you list starts open when at least one reporter has an
+// item to put — the operator meets the question without opening anything — and
+// is left out whole when none has.
+func TestBirdsNeedsYouOpen(t *testing.T) {
+	t.Parallel()
+
+	written := time.Date(2026, 11, 1, 11, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	withItems := drawBirdsInDOM(t, map[string]any{"birds": []map[string]any{
+		{"bird": "dunlin", "state": "fresh", "written": written,
+			"decision_items": []map[string]string{{"question": "ship it?", "recommendation": "yes"}}},
+		{"bird": "heron", "state": "fresh", "written": written},
+	}})
+	if len(withItems) != 1 {
+		t.Fatalf("the panel drew %d Needs you sections for a reporter with an item, want 1", len(withItems))
+	}
+	if !withItems[0].Open {
+		t.Error("the Needs you section is drawn closed, want it open when a reporter has an item")
+	}
+	if withItems[0].Summary != "Needs you (1)" {
+		t.Errorf("the summary reads %q, want %q", withItems[0].Summary, "Needs you (1)")
+	}
+
+	none := drawBirdsInDOM(t, map[string]any{"birds": []map[string]any{
+		{"bird": "heron", "state": "fresh", "written": written},
+	}})
+	if len(none) != 0 {
+		t.Errorf("the panel drew %d Needs you sections for reporters with no item, want none", len(none))
+	}
+}
+
+// A reporter whose summary the reader marked stale keeps its amber marker and
+// sorts after the fresh reporters, in the reader's order within each group: a
+// bird that wrote today is never pushed down by one a day behind (gt-0g6z9).
+func TestBirdsStaleLast(t *testing.T) {
+	t.Parallel()
+
+	stamp := time.Now().UTC().Format(time.RFC3339)
+	dom := newPageDOM(t)
+	dom.call(t, "renderBirds", map[string]any{
+		"birds": []any{
+			map[string]any{"bird": "heron", "state": "stale", "written": stamp, "stale": true},
+			map[string]any{"bird": "dunlin", "state": "fresh", "written": stamp},
+			map[string]any{"bird": "curlew", "state": "stale", "written": stamp, "stale": true},
+			map[string]any{"bird": "egret", "state": "fresh", "written": stamp},
+		},
+		"reads": map[string]any{"birds": map[string]any{"at": stamp, "every_sec": 60}},
+	})
+
+	rows := birdRows(t, dom)
+	if len(rows) != 4 {
+		t.Fatalf("the panel drew %d rows, want the reader's four: %+v", len(rows), rows)
+	}
+	var names []string
+	for _, r := range rows {
+		names = append(names, r.Head[0].Text)
+	}
+	if want := []string{"dunlin", "egret", "heron", "curlew"}; !slices.Equal(names, want) {
+		t.Errorf("the rows read %v, want the fresh reporters first in the reader's order: %v", names, want)
+	}
+	for i, r := range rows {
+		wantClass := "brow"
+		if i >= 2 {
+			wantClass = "brow warnc"
+		}
+		if r.Class != wantClass {
+			t.Errorf("row %d (%s) wears %q, want %q", i, r.Head[0].Text, r.Class, wantClass)
+		}
 	}
 }

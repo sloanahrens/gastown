@@ -469,6 +469,7 @@ a.hrow:hover{background:#19212b}
 
 <div class="grid">
   <div class="col">
+    <section data-fold="birds"><h2>Birds <span class="r" id="birdsnote"></span></h2><div class="body" id="birds"></div></section>
     <section data-fold="attention"><h2>Attention <span class="chips" id="attentionchips"></span> <span class="r" id="attentionnote"></span></h2><div class="body" id="attention"></div></section>
     <section id="eventssec" data-fold="events" data-default-collapsed><h2>EVENTS <span class="chips" id="eventschips"></span> <span class="r" id="eventsnote"></span></h2><div class="body" id="events"></div></section>
     <section data-fold="overseer"><h2>Overseer <span class="r" id="overseernote"></span></h2><div class="body" id="overseer"></div></section>
@@ -2165,7 +2166,7 @@ function drawDigestSections(box, text, prefixes) {
   }
 }
 
-// The Birds block draws the birds' daily reports, one row each: the bird's name
+// The Birds panel draws the birds' daily reports, one row each: the bird's name
 // and the pages it wrote, the age of the summary it left, the summary itself,
 // and the bird's own ask for the operator as a badge. What a row shows is the
 // sidecar the reader read, so a summary holding markup goes through el() and
@@ -2178,11 +2179,17 @@ function drawDigestSections(box, text, prefixes) {
 // rows names that state instead of drawing nothing. The heading's note ages the
 // read, so rows kept through a failed read are drawn as the last reading they
 // are (gt-q6h8e).
-function drawBirds(panel, s) {
-  const { box, note } = oblock(panel, "Birds");
-  const r = readOf(s, "birds");
+//
+// The rows keep the reader's order within each group, with the stale reporters
+// moved after the fresh ones: a reporter a day behind is still worth reading,
+// but never in place of one that wrote today. The panel is a section of its own
+// and the first one, because the operator opens the page to read the birds
+// (gt-0g6z9).
+function drawBirds(box, s) {
+  const r = readOf(s, "birds"), note = $("birdsnote");
   paintsRead(box, note, r);
-  const rows = s.birds || [];
+  const all = s.birds || [];
+  const rows = all.filter(b => !b.stale).concat(all.filter(b => b.stale));
   note.textContent = readCaption(r, [rows.length ? rows.length + (rows.length === 1 ? " bird" : " birds") : null, r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : null]);
   if (!rows.length) {
     box.append(el("div", r && r.error ? "badc" : "empty", r && r.error ? "the birds read failed" : "no bird has written a daily report yet"));
@@ -2219,11 +2226,11 @@ function drawBirds(panel, s) {
   // The decisions the reporters put to the operator, in one list under the
   // rows so they are answered in one place. The group of the reporter that
   // wrote most recently comes first, because its question is the one the day
-  // is about. The list is closed until the operator opens it — the rows above
-  // already say who is asking — and left out whole when no reporter has a
-  // decision to show. A reporter whose every item was withheld still gets its
-  // group: the item's text is gone, so the note that one was withheld is all
-  // the operator would otherwise never see.
+  // is about. The list starts open when a reporter has an item to put, so the
+  // operator meets the question without opening anything, and it is left out
+  // whole when no reporter has a decision to show. A reporter whose every item
+  // was withheld still gets its group: the item's text is gone, so the note
+  // that one was withheld is all the operator would otherwise never see.
   const asks = rows.filter(b => (b.decision_items && b.decision_items.length) ||
                                 (b.decision_items_withheld && b.decision_items_withheld.length));
   asks.sort((a, b) => {
@@ -2238,6 +2245,7 @@ function drawBirds(panel, s) {
     // decisions says how many were withheld rather than "Needs you (0)".
     const held = asks.reduce((n, b) => n + (b.decision_items_withheld || []).length, 0);
     const needs = el("details", "needsyou");
+    needs.open = true;
     needs.append(el("summary", "nysum", total ? "Needs you (" + total + ")" : "Needs you (" + held + " withheld)"));
     for (const b of asks) {
       const group = el("div", "nygroup");
@@ -2253,6 +2261,18 @@ function drawBirds(panel, s) {
     }
     box.append(needs);
   }
+}
+
+// renderBirds draws the Birds section: its own top-level panel, open on a fresh
+// load, so the operator reads the reports the moment the page arrives. A closed
+// section's body is a detached box for the length of a push, and the note is a
+// real element either way, so a panel the operator closed still ages its read
+// on its heading (gt-quuq5, gt-0g6z9).
+function renderBirds(s) {
+  if (pushSkip("birds", s)) return;
+  const box = $("birds");
+  box.replaceChildren();
+  drawBirds(box, s);
 }
 
 // The Deploys block draws the deploy workflows' runs — a release and a
@@ -3077,7 +3097,6 @@ function renderOverseer(s) {
   box.replaceChildren();
   drawHeartbeat(box, s);
   drawDigest(box, s);
-  drawBirds(box, s);
   drawDeepReview(box, s);
   drawDispatch(box, s);
   drawOverseerQueue(box, s);
@@ -5148,7 +5167,8 @@ const PANES = {
   hold: {read: s => s.hold, draw: s => renderHold(s)},
   healthmark: {read: s => s.deploys, draw: s => renderHealthMark(s)},
   attention: {sec: "attention", body: ["attention"], read: s => s.attention, draw: s => renderAttention(s)},
-  overseer: {sec: "overseer", body: ["overseer"], read: s => [s.overseer, s.dispatch, s.reports, s.birds, s.queue, s.attention, s.deepreview, readInput(s, "birds")], draw: s => renderOverseer(s)},
+  birds: {sec: "birds", body: ["birds"], read: s => [s.birds, readInput(s, "birds")], draw: s => renderBirds(s)},
+  overseer: {sec: "overseer", body: ["overseer"], read: s => [s.overseer, s.dispatch, s.reports, s.queue, s.attention, s.deepreview], draw: s => renderOverseer(s)},
   cost: {sec: "cost", body: ["cost"], read: s => [s.spend, s.usage, s.cost_providers, s.cloud, s.cost_charts, s.rework, s.jev_spend, s.deepreview, readInput(s, "spend")], draw: s => renderCost(s)},
   rigs: {sec: "rigs", body: ["rigs"], read: s => [s.rigs, s.queue, readInput(s, "queue")], draw: s => renderRigs(s)},
   // The work pane's own key holds the list's filters and the rows a reader has
@@ -5228,7 +5248,7 @@ function openSection(key) {
 function renderAll() {
   if (!state) return;
   pushBegin(state);
-  try { renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderHold(state); renderAttention(state); renderOverseer(state); renderCost(state); renderRigs(state); renderWork(state); renderTrend(state); renderNews(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderJev(state); renderMango(state); renderOM(state); renderEvents(state); pushCommit(); }
+  try { renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderHold(state); renderAttention(state); renderBirds(state); renderOverseer(state); renderCost(state); renderRigs(state); renderWork(state); renderTrend(state); renderNews(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderJev(state); renderMango(state); renderOM(state); renderEvents(state); pushCommit(); }
   finally { pushEnd(); }
   paintFolds(state);
 }
@@ -5353,7 +5373,7 @@ const FOLD_KEY = "gt-fold";
 // every other section starts closed. A pane that opts out with
 // data-default-collapsed starts closed whatever this holds. This list is the
 // operator's to edit.
-const FOLD_DEFAULT_OPEN = ["attention", "overseer", "work", "landings"];
+const FOLD_DEFAULT_OPEN = ["birds", "attention", "overseer", "work", "landings"];
 // FOLD_ALWAYS_CLOSED is the sections that start closed on every load, whatever
 // was saved: the operator opens them for a look, and a reload closes them
 // again. A toggle still works for the rest of the page session (gt-7swd8).
@@ -5590,7 +5610,7 @@ setInterval(() => {
 // pane's reading, so the tick redraws the panes whose drawing carries one from
 // the reading the page already holds — forced past the push's skip, and still
 // leaving a closed section's body alone (gt-quuq5).
-setInterval(() => { if (state) { pushBegin(state, true); try { renderStrip(state); renderWork(state); renderTierSweep(state); renderForgejo(state); renderNews(state); renderHold(state); renderRigs(state); renderMachine(state); renderCost(state); renderOM(state); renderJev(state); renderOverseer(state); renderAttention(state); renderCloud(state); renderDeploys(state); renderTrend(state); renderMango(state); renderEvents(state); pushCommit(); } finally { pushEnd(); } paintFolds(state); } }, 15000);
+setInterval(() => { if (state) { pushBegin(state, true); try { renderStrip(state); renderWork(state); renderTierSweep(state); renderForgejo(state); renderNews(state); renderHold(state); renderRigs(state); renderMachine(state); renderCost(state); renderOM(state); renderJev(state); renderBirds(state); renderOverseer(state); renderAttention(state); renderCloud(state); renderDeploys(state); renderTrend(state); renderMango(state); renderEvents(state); pushCommit(); } finally { pushEnd(); } paintFolds(state); } }, 15000);
 </script>
 </body>
 </html>
