@@ -178,3 +178,60 @@ func TestAttentionTickStopsOnTheDaemonContext(t *testing.T) {
 	f.d.cancel()
 	within(t, 5*time.Second, "the tick after the cancel", attentionDrained(f.d))
 }
+
+// A heartbeat that outlived the cancel (the abandoned heartbeat of gt-lbqgz)
+// starts no tick, so nothing runs against a canceled context and no state is
+// written after shutdown.
+func TestAttentionStepStartsNothingAfterTheCancel(t *testing.T) {
+	t.Parallel()
+	d, logs := signalTestDaemon(t)
+	var ticks atomic.Int32
+	d.attention.tick = func() { ticks.Add(1) }
+	d.cancel()
+
+	d.startAttention()
+	within(t, signalWait, "the attention group", attentionDrained(d))
+
+	if got := ticks.Load(); got != 0 {
+		t.Errorf("%s: %d ticks ran after the cancel, want 0", t.Name(), got)
+	}
+	if !strings.Contains(logs.String(), "attention: not started, the daemon is stopping") {
+		t.Errorf("%s: the refusal was not logged:\n%s", t.Name(), logs)
+	}
+}
+
+// Once shutdown has begun to wait for the tick, no tick starts, so a late
+// start cannot Add to the group while the wait is under way.
+func TestAttentionStepStartsNothingOnceShutdownWaits(t *testing.T) {
+	t.Parallel()
+	d, _ := signalTestDaemon(t)
+	var ticks atomic.Int32
+	d.attention.tick = func() { ticks.Add(1) }
+
+	d.waitForAttention()
+	d.startAttention()
+	within(t, signalWait, "the attention group", attentionDrained(d))
+
+	if got := ticks.Load(); got != 0 {
+		t.Errorf("%s: %d ticks started after the shutdown wait began, want 0", t.Name(), got)
+	}
+}
+
+// Starts racing the shutdown wait leave every started tick finished when the
+// wait ends (run under -race).
+func TestAttentionStepStartRacingShutdownWait(t *testing.T) {
+	t.Parallel()
+	d, _ := signalTestDaemon(t)
+	d.attention.tick = func() {}
+
+	starts := make(chan struct{})
+	go func() {
+		defer close(starts)
+		for range 200 {
+			d.startAttention()
+		}
+	}()
+	d.waitForAttention()
+	within(t, signalWait, "the starter", starts)
+	within(t, signalWait, "the attention group", attentionDrained(d))
+}

@@ -2280,8 +2280,7 @@ var heartbeatSteps = []heartbeatStep{
 	// Write the attention queue from the collectors (gt-vsct7.2). After
 	// townhealth, so the bd-slow collector can read this tick's Dolt verdict;
 	// non-lifecycle, so an E-stopped town still gets its queue. The tick runs
-	// in the background, one at a time (attention_background.go, gt-zszj0): it
-	// took most of a long heartbeat.
+	// in the background, one at a time (attention_background.go, gt-zszj0).
 	{name: "attention", run: (*Daemon).startAttention},
 
 	// Tell the human once about each escalation the overseer left open past
