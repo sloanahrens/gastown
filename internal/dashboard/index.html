@@ -1266,7 +1266,7 @@ function workQueue(box, s, q, r) {
     box.append(el("div", "empty", r ? "unavailable — the work queue could not be read" : "reading the work queue…"));
     return;
   }
-  const ok = (q.ready || []).filter(b => b.shape === "ok").length;
+  const ok = (q.ready || []).filter(b => b.shape === "ok" && !isTownStore(b)).length;
   const sum = el("div", "kv wsum");
   const add = (v, k, tip) => { const x = el("div"); x.title = tip; x.append(el("b", "", String(v)), el("span", "", k)); sum.append(x); };
   add(ok, "dispatchable", "ready beads the spec dispatcher would slot: shaped, unassigned and in a rig that is not parked");
@@ -4958,6 +4958,13 @@ function skipClass(reason) {
   return /^no seat/.test(skipWhy(reason)) ? "waiting for a seat" : "skipped";
 }
 
+// TOWN_STORE is the town's own store. The spec dispatcher reads one store per
+// rig, so a bead here is never dispatched however well it is shaped, and the
+// ready view lists it under its own chip rather than as ready to dispatch
+// (gt-50dkq).
+const TOWN_STORE = "hq";
+const isTownStore = b => b.rig === TOWN_STORE;
+
 // isReadyToDispatch is the one "ready to dispatch" set: the beads the dispatcher
 // would slot plus those its last tick passed over (gt-qt0ym).
 function isReadyToDispatch(b) { return b.shape === "ok" || b.shape === "skipped"; }
@@ -5010,7 +5017,7 @@ function drawQueueList(box, s) {
     tabs.append(b);
   });
   box.append(tabs);
-  const caption = {ready: "Open beads with nothing blocking them. Only the green “ready” ones are taken by the spec dispatcher: shaped, unassigned, not an epic, and in a rig that is not parked. Beads held by an assignee wait for that person; beads in parked rigs wait until the rig is re-enabled.",
+  const caption = {ready: "Open beads with nothing blocking them. Only the green “ready” ones are taken by the spec dispatcher: shaped, unassigned, not an epic, and in a rig that is not parked. Beads held by an assignee wait for that person; beads in parked rigs wait until the rig is re-enabled. Beads in the town store are never taken: the dispatcher reads each rig's store only, so they wait under their own chip.",
     landing: "Submitted by a polecat or crew and waiting for the landing worker.",
     blocked: "Open beads waiting on another bead to close. Wisp steps left by retired patrols and old polecat runs are hidden by default; the wisps chip shows them."}[qTab];
   // The help paragraph takes the place of rows the operator reads, so it folds
@@ -5039,16 +5046,30 @@ function drawQueueList(box, s) {
   if (!Object.keys(rigs).length) all.forEach(b => rigs[b.rig] = (rigs[b.rig] || 0) + 1);
   const rigNames = Object.keys(rigs).sort((a, b) => rigs[b] - rigs[a]);
   if (qRig !== "all" && !rigs[qRig]) qRig = "all";
+  // The ready tab's all-stores view is the dispatcher's own set, and the town's
+  // store is not in it: its beads are listed under their own chip instead. The
+  // landing and blocked views list it like any store (gt-50dkq).
+  const inStore = b => qRig === "all" ? qTab !== "ready" || !isTownStore(b) : b.rig === qRig;
+  // On the ready tab the town store gets a chip of its own even when it is the
+  // only store with rows: its beads are listed there and nowhere else, so
+  // without the chip a town of nothing but town-store beads would show no way
+  // to reach them.
+  const townListed = rigNames.indexOf(TOWN_STORE) >= 0;
   if (rigNames.length > 1 || qTab === "ready" || qTab === "blocked") {
     const f = el("div", "qtabs");
     const chip = (label, count, on, fn, tip) => { const b = el("button", "chip" + (on ? " on" : ""), label); if (tip) b.title = tip; b.append(el("b", "", String(count))); b.onclick = fn; f.append(b); };
-    if (rigNames.length > 1) {
+    if (rigNames.length > 1 || townListed) {
       chip("all stores", q[totalKey] || all.length, qRig === "all", () => { qRig = "all"; renderWork(state, true); });
       const parkedRigs = q.parked_rigs || [];
-      rigNames.forEach(r => chip(r + (parkedRigs.indexOf(r) >= 0 ? " (parked)" : ""), rigs[r], qRig === r, () => { qRig = r; renderWork(state, true); }));
+      // The town's store is named for what it means to the operator: its beads
+      // are listed like any store's, and the dispatcher never takes them.
+      rigNames.forEach(r => chip((r === TOWN_STORE ? (qTab === "ready" ? "town store, not dispatched" : "town store") : r) + (parkedRigs.indexOf(r) >= 0 ? " (parked)" : ""), rigs[r], qRig === r, () => { qRig = r; renderWork(state, true); },
+        r === TOWN_STORE ? "the town's own store (hq): the spec dispatcher reads each rig's store, never this one" : ""));
     }
-    if (qTab === "ready") {
-      const inRig = all.filter(b => qRig === "all" || b.rig === qRig);
+    // No shape chip applies to the town store: none of its beads is dispatched,
+    // so its chip lists every ready bead it holds.
+    if (qTab === "ready" && qRig !== TOWN_STORE) {
+      const inRig = all.filter(inStore);
       // One chip: a bead the last tick passed over lints clean exactly like
       // one it has not reached yet, so both are "ready to dispatch" and the
       // row's tag says which kind (gt-qt0ym, gt-e2cif).
@@ -5058,7 +5079,7 @@ function drawQueueList(box, s) {
       chip("held", inRig.filter(b => b.shape === "held").length, qShape === "held", () => { qShape = qShape === "held" ? "all" : "held"; renderWork(state, true); });
     }
     if (qTab === "blocked") {
-      const inRig = all.filter(b => qRig === "all" || b.rig === qRig);
+      const inRig = all.filter(inStore);
       chip("wisps", inRig.filter(isWisp).length, qWisp, () => { qWisp = !qWisp; renderWork(state, true); });
     }
     box.append(f);
@@ -5080,13 +5101,15 @@ function drawQueueList(box, s) {
   // Only the bead rows scroll: the caption and the chips above stay in view.
   const rowsBox = el("div", "qrows");
   box.append(rowsBox);
-  const rows = all.filter(b => (qRig === "all" || b.rig === qRig) && (qTab !== "ready" || qShape === "all" || (qShape === "ok" ? isReadyToDispatch(b) : b.shape === qShape)) && (qTab !== "blocked" || qWisp || !isWisp(b)));
+  // The town store's own chip bypasses the shape filter: it lists every ready
+  // bead the town holds, since no shape of it is dispatched.
+  const rows = all.filter(b => inStore(b) && (qTab !== "ready" || qRig === TOWN_STORE || qShape === "all" || (qShape === "ok" ? isReadyToDispatch(b) : b.shape === qShape)) && (qTab !== "blocked" || qWisp || !isWisp(b)));
   if (!rows.length) {
     let msg;
     // The pane opens on the ready-to-dispatch view, so an empty one reports
     // what the beads are waiting on instead of "no filter matched" (gt-x9gk4).
     if (qTab === "ready" && qShape === "ok") {
-      const inRig = all.filter(b => qRig === "all" || b.rig === qRig);
+      const inRig = all.filter(inStore);
       const shaping = inRig.filter(b => b.shape === "fix").length;
       const held = inRig.filter(b => b.shape === "held").length;
       const parts = [];
@@ -5094,6 +5117,10 @@ function drawQueueList(box, s) {
         parts.push(shaping === 1 ? "1 bead needs shaping" : shaping + " beads need shaping");
         parts.push(held === 1 ? "1 bead is held" : held + " beads are held");
       }
+      // A town of nothing but town-store beads is the case the old view
+      // misreported as dispatchable, so the empty view names it (gt-50dkq).
+      const town = qRig === "all" ? all.filter(isTownStore).length : 0;
+      if (town) parts.push(town === 1 ? "1 bead waits in the town store, which the dispatcher does not read" : town + " beads wait in the town store, which the dispatcher does not read");
       msg = "nothing is dispatchable right now" + (parts.length ? " — " + parts.join(", ") : "");
     } else if (qTab === "blocked" && !qWisp) {
       // With wisps hidden the blocked list can empty out even when the tab
@@ -5121,7 +5148,11 @@ function drawQueueList(box, s) {
     const idc = el("span", "bead"); idc.append(el("span", "caret", open ? "▾" : "▸"), document.createTextNode(b.id));
     head.append(idc);
     const t = el("span", "t", b.title || "(no title)");
-    if (b.shape === "ok") { const g = el("span", "tag good", "ready"); g.title = "the spec dispatcher would slot this bead"; t.append(document.createTextNode(" "), g); }
+    // A town-store row never reads "ready": the page shows it under its own
+    // chip, and the rule the tag would otherwise state does not reach it
+    // (gt-50dkq).
+    if (isTownStore(b)) { const g = el("span", "tag", "not dispatched"); g.title = "the spec dispatcher reads each rig's store, never the town's, so this bead is not dispatched"; t.append(document.createTextNode(" "), g); }
+    else if (b.shape === "ok") { const g = el("span", "tag good", "ready"); g.title = "the spec dispatcher would slot this bead"; t.append(document.createTextNode(" "), g); }
     else if (b.shape === "skipped") {
       // A stale ledger's skipped shape is left over from a tick the page
       // cannot vouch for, so the row is only "ready" (gt-e2cif). A current one

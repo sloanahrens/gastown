@@ -1047,7 +1047,7 @@ func workQueueHelp(t *testing.T, dom *pageDOM) queueHelp {
 func TestWorkQueueHelpIsADisclosureClosedByDefault(t *testing.T) {
 	t.Parallel()
 
-	readyHelp := "Open beads with nothing blocking them. Only the green “ready” ones are taken by the spec dispatcher: shaped, unassigned, not an epic, and in a rig that is not parked. Beads held by an assignee wait for that person; beads in parked rigs wait until the rig is re-enabled."
+	readyHelp := "Open beads with nothing blocking them. Only the green “ready” ones are taken by the spec dispatcher: shaped, unassigned, not an epic, and in a rig that is not parked. Beads held by an assignee wait for that person; beads in parked rigs wait until the rig is re-enabled. Beads in the town store are never taken: the dispatcher reads each rig's store only, so they wait under their own chip."
 
 	dom := newPageDOM(t)
 	dom.call(t, "renderWork", workState([]any{
