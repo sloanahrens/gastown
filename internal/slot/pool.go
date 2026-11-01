@@ -1051,7 +1051,8 @@ func (g *Gate) StatusPool(townRoot string, pool Pool) (Report, error) {
 // needs to name the check that failed, not a busy slot it cannot vouch for.
 // Both answers stop the wait, so neither reads an unchecked host as free.
 //
-// The daemon cutover's quiet gate (internal/cmd/daemon_quiet.go) is the
+// The answer is busy when ANY slot is held (a gate job is running), not only
+// when every slot is. The daemon cutover's quiet gate (internal/cmd/daemon_quiet.go) is the
 // caller: it must be able to give up having changed nothing (gt-qpeei.22).
 func PoolBusyReadOnly(townRoot string, pool Pool) (bool, error) {
 	return NewGate().PoolBusyReadOnly(townRoot, pool)
@@ -1089,7 +1090,10 @@ func (g *Gate) PoolBusyReadOnly(townRoot string, pool Pool) (bool, error) {
 			}
 		}
 	}
-	return held == len(idx), nil
+	// Any held slot is a gate job running: a pool of 8 slots with one `go test`
+	// in it is busy, not "almost free" (the 2026-11-01 cutover read it free and
+	// stopped the live daemon under a running gate).
+	return held > 0, nil
 }
 
 // StatusPoolLocksOnly is StatusPool without the `docker ps` cross-check: the

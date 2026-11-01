@@ -407,7 +407,7 @@ var daemonCutoverCmd = &cobra.Command{
 budget and a stated ending when it runs out:
 
   1. wait for a quiet town (dispatch hold on, no gt sling running, container-gate
-     slot free), 30 minutes; nothing is changed if it never comes
+     no gate job running), 30 minutes; nothing is changed if it never comes
   2. check quiet again immediately before the next step
   3. stop the old daemon and wait for proof it stopped: state.json records a clean
      stop and the old job reads as not running; on timeout the new side is not
