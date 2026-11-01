@@ -514,7 +514,7 @@ func TestFindingsFilerMarkFailureDoesNotFileTwice(t *testing.T) {
 	}
 }
 
-// TestFindingsFilerSameSubjectOnOneBead pins what a filed bead is recognised
+// TestFindingsFilerSameSubjectOnOneBead pins what a filed bead is recognized
 // by on a later pass: the finding's own text, not the title its first line
 // makes. Two findings on one source bead can share that line, and a mark the
 // first pass could not write must not cost the second finding its own bead.
@@ -527,7 +527,7 @@ func TestFindingsFilerSameSubjectOnOneBead(t *testing.T) {
 	}
 
 	// No mark lands: the pass files the first finding and stops at its failed
-	// mark. The next pass must recognise that bead by the finding's text, not
+	// mark. The next pass must recognize that bead by the finding's text, not
 	// by the title it shares with the finding it held back.
 	town.stores["gastown"].markErr = errors.New("the comment write failed")
 	if got := town.pass(5).Filed; got != 1 {

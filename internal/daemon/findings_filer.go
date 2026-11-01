@@ -388,7 +388,7 @@ func findingsFilerDescription(f findingsFilerFinding, sourceID, fallback string)
 
 // findingsFilerGoal is the Goal section a filed Found bead carries for f: the
 // finding's text verbatim, or the sentence a finding with no text says. It is
-// also what a later pass recognises an existing bead by, so it holds nothing
+// also what a later pass recognizes an existing bead by, so it holds nothing
 // that changes between passes.
 func findingsFilerGoal(f findingsFilerFinding) string {
 	if f.text == "" {
@@ -417,7 +417,7 @@ func findingsFilerShapeNote(body, title string, tmpl specdispatch.Template) stri
 }
 
 // findingsFilerFiled is one Found bead a source bead already produced, with
-// the description the pass recognises as its finding.
+// the description the pass recognizes as its finding.
 type findingsFilerFiled struct {
 	id          string
 	description string

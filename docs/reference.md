@@ -519,7 +519,7 @@ note in front of the body rather than dropped.
 Once the Found bead exists the pass comments `FINDING-FILED: <new bead id>` on
 the source bead. A create that fails writes no mark and the next interval
 retries the finding. A mark that fails to write is written by a later pass from
-the Found bead itself, which the pass recognises by the finding text under Goal,
+the Found bead itself, which the pass recognizes by the finding text under Goal,
 so a mark failure costs a delay and never a second bead.
 
 The block is decoded strictly: an unknown key, a duration that is not positive,
