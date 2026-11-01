@@ -69,8 +69,9 @@ func BurstInterval(idlePct, execTaxMS *float64) time.Duration {
 // pass for a quiet host.
 //
 // One sample costs the host_cpu group's four process-table reads and its
-// one-second window, one top, one daemon-log tail and one bd read per rig for
-// the landing queue: a price worth paying while the host is pressed, and what
+// one-second window, one top, one daemon-log tail and one bd read per rig
+// whose landing-queue count is neither published nor kept from a read within
+// BurstSlowInterval: a price worth paying while the host is pressed, and what
 // BurstInterval's slow cadence keeps from being paid all day.
 //
 // A daemon in a container cannot take the host readings with top and ps, so in
@@ -557,8 +558,10 @@ const burstLandingTimeout = BurstFastInterval
 // burstLandingQueue counts the beads waiting to land, summed over the rigs by
 // queueSumCount for the waiting_to_land column (queueLandingColumn). A rig
 // whose landing worker's published count is fresh is answered from that count;
-// every other rig is read from its board. nil is a registry or a rig that could
-// not be read: a partial sum would read as a queue that shrank.
+// a rig whose board a sample read less than BurstSlowInterval before is
+// answered from the kept count; every other rig is read from its board. nil is
+// a registry or a rig that could not be read: a partial sum would read as a
+// queue that shrank.
 func burstLandingQueue(ctx context.Context, env Env) *int {
 	if env.Beads == nil || env.ReadFile == nil {
 		return nil

@@ -95,8 +95,12 @@ type burstSamplerSeams struct {
 // single: two samplers would write two rows per cadence and pay the sample's
 // price twice.
 type burstSampler struct {
-	town    string
-	logf    func(format string, args ...any)
+	town string
+	logf func(format string, args ...any)
+	// board keeps the ready-to-land board counts the samples had to list, so a
+	// rig whose landing worker publishes no count is read once a minute rather
+	// than once a sample (metrics.BurstBoardCache).
+	board   *metrics.BurstBoardCache
 	clock   clockwork.Clock
 	seams   burstSamplerSeams
 	started atomic.Bool
@@ -110,7 +114,8 @@ type burstSampler struct {
 // read beside the resource rows as one town's metrics: a town that turned its
 // sampler off would otherwise get a second log written behind it. The sample's
 // cost is what makes the switch worth obeying: four process-table reads, a
-// one-second top window, one daemon-log tail and one bd read per rig.
+// one-second top window, one daemon-log tail and one bd read per rig whose
+// landing-queue count is neither published nor kept from a read this minute.
 func (d *Daemon) startBurstSamplerIfEnabled() (stop func()) {
 	if d.config == nil || !d.isPatrolActive("resource_sampler") {
 		return func() {}
@@ -140,6 +145,9 @@ func (d *Daemon) burstSampler() *burstSampler {
 	if d.logger != nil {
 		s.logf = d.logger.Printf
 	}
+	// The sampler owns the cache, so its samples reuse each other's landing
+	// board reads and one line a minute names the rigs they listed.
+	s.board = metrics.NewBurstBoardCache(s.logf)
 	if s.seams.run == nil {
 		s.seams.run = metrics.RunBurst
 	}
@@ -243,6 +251,7 @@ func (s *burstSampler) run(ctx context.Context) {
 // stopped would otherwise thin out.
 func (s *burstSampler) sampleEnv() (metrics.Env, error) {
 	env := s.seams.env(s.town)
+	env.BurstBoard = s.board
 	if s.seams.host == nil {
 		return env, nil
 	}
