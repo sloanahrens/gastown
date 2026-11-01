@@ -109,7 +109,11 @@ func contains(list []string, s string) bool {
 
 // Render returns the workspace's town as resources sorted by kind, namespace
 // and name. Same values, same bytes.
-func Render(v Values) ([]Resource, error) {
+func Render(v Values) ([]Resource, error) { return render(v, yaml.Marshal) }
+
+// render is Render over a marshal function, so a test can make marshalling
+// fail.
+func render(v Values, marshal func(any) ([]byte, error)) ([]Resource, error) {
 	if err := v.Validate(); err != nil {
 		return nil, err
 	}
@@ -123,58 +127,55 @@ func Render(v Values) ([]Resource, error) {
 		return m
 	}
 	var res []Resource
-	add := func(kind, apiVersion string, namespaced bool, name string, body map[string]any) error {
+	var failed error // the first marshal failure; later objects are skipped
+	add := func(kind, apiVersion string, namespaced bool, name string, body map[string]any) {
+		if failed != nil {
+			return
+		}
 		doc := map[string]any{"apiVersion": apiVersion, "kind": kind, "metadata": meta(name, namespaced)}
 		for k, x := range body {
 			doc[k] = x
 		}
-		out, err := yaml.Marshal(doc)
+		out, err := marshal(doc)
 		if err != nil {
-			return fmt.Errorf("deploytree: marshal %s %s: %w", kind, name, err)
+			failed = fmt.Errorf("deploytree: marshal %s %s: %w", kind, name, err)
+			return
 		}
 		r := Resource{Kind: kind, Name: name, YAML: out}
 		if namespaced {
 			r.Namespace = ns
 		}
 		res = append(res, r)
-		return nil
 	}
-	if err := add("Namespace", "v1", false, ns, nil); err != nil {
-		return nil, err
-	}
-	if err := add("NetworkPolicy", "networking.k8s.io/v1", true, ws+"-default-deny", map[string]any{
+	add("Namespace", "v1", false, ns, nil)
+	add("NetworkPolicy", "networking.k8s.io/v1", true, ws+"-default-deny", map[string]any{
 		"spec": map[string]any{"podSelector": map[string]any{}, "policyTypes": []any{"Ingress", "Egress"}},
-	}); err != nil {
-		return nil, err
-	}
+	})
 	for _, c := range Components {
 		name := ws + "-" + c
 		sel := map[string]any{"gt.dev/workspace": ws, "gt.dev/component": c}
-		if err := add("ServiceAccount", "v1", true, name, nil); err != nil {
-			return nil, err
-		}
+		add("ServiceAccount", "v1", true, name, nil)
 		container := map[string]any{"name": c, "image": v.Images[c]}
 		if c == "trackerd" {
 			container["env"] = []any{map[string]any{"name": "TRACKER_DSN", "valueFrom": map[string]any{
 				"secretKeyRef": map[string]any{"name": v.TrackerDSNSecret, "key": "dsn"}}}}
 		}
-		if err := add("Deployment", "apps/v1", true, name, map[string]any{"spec": map[string]any{
+		add("Deployment", "apps/v1", true, name, map[string]any{"spec": map[string]any{
 			"replicas": 1,
 			"selector": map[string]any{"matchLabels": sel},
 			"template": map[string]any{
 				"metadata": map[string]any{"labels": merge(labels, sel)},
 				"spec":     map[string]any{"serviceAccountName": name, "containers": []any{container}},
 			},
-		}}); err != nil {
-			return nil, err
-		}
+		}})
 		if c == "trackerd" {
-			if err := add("Service", "v1", true, name, map[string]any{"spec": map[string]any{
+			add("Service", "v1", true, name, map[string]any{"spec": map[string]any{
 				"selector": sel, "ports": []any{map[string]any{"port": 7433}},
-			}}); err != nil {
-				return nil, err
-			}
+			}})
 		}
+	}
+	if failed != nil {
+		return nil, failed
 	}
 	sort.Slice(res, func(i, j int) bool {
 		a, b := res[i], res[j]

@@ -122,3 +122,26 @@ func TestValuesAreValidated(t *testing.T) {
 		}
 	}
 }
+
+func TestMarshalFailureFailsTheRender(t *testing.T) {
+	t.Parallel()
+	v, err := Load(valuesFile("alpha"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	boom := errors.New("marshal refused")
+	res, err := render(v, func(any) ([]byte, error) { return nil, boom })
+	if !errors.Is(err, boom) {
+		t.Fatalf("render returned %v, want the marshal error", err)
+	}
+	if res != nil {
+		t.Errorf("failed render returned %d resources, want none", len(res))
+	}
+}
+
+func TestRenderRefusesInvalidValues(t *testing.T) {
+	t.Parallel()
+	if _, err := Render(Values{Workspace: "alpha"}); !errors.Is(err, ErrBadValues) {
+		t.Fatalf("Render of incomplete values returned %v, want ErrBadValues", err)
+	}
+}
