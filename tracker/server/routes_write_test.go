@@ -194,6 +194,50 @@ func TestUpdateUsesTheTokensActorTheIDAndTheGuardAnswers204(t *testing.T) {
 	}
 }
 
+// A seat's PATCH that reassigns an issue another actor holds reaches the store
+// with the seat's identity, and the store's refusal answers 409 guard_failed
+// naming the holder. The holder rule itself is in the store's contract cases.
+func TestReassignOfAHeldIssueReachesTheStoreAsTheSeatAnd409sItsRefusal(t *testing.T) {
+	t.Parallel()
+	var scope api.Scope
+	var ctxActor string
+	st := okStub()
+	st.update = func(ctx context.Context, _ string, p api.UpdatePatch, _ api.Guard) error {
+		scope, ctxActor = api.ScopeFrom(ctx), api.ActorFrom(ctx)
+		if p.Assignee != nil {
+			return api.GuardFailed(`gt-abc is held by "alice"; only the holder can reassign it`)
+		}
+		return nil
+	}
+	ts := writeServer(t, st)
+	code, body := writeCall(t, "PATCH", ts.URL+"/v1/issues/gt-abc", `{"patch":{"assignee":"dipper"}}`)
+	if e := decodeErr(t, body); code != 409 || e.Kind != api.KindGuardFailed || !strings.Contains(e.Message, `held by "alice"`) {
+		t.Errorf("seat reassign = %d %q, want 409 guard_failed naming the holder", code, body)
+	}
+	if ctxActor != tokenActor || scope != api.ScopeSeat {
+		t.Errorf("store saw actor %q scope %q, want %q seat", ctxActor, scope, tokenActor)
+	}
+}
+
+// The admin token reaches the store with admin scope, so the store can let the
+// daemon recover a dead holder's bead.
+func TestReassignByTheAdminTokenReachesTheStoreWithAdminScope(t *testing.T) {
+	t.Parallel()
+	var scope api.Scope
+	st := okStub()
+	st.update = func(ctx context.Context, _ string, _ api.UpdatePatch, _ api.Guard) error {
+		scope = api.ScopeFrom(ctx)
+		return nil
+	}
+	ts := writeServer(t, st)
+	if code, body := writeCallAs(t, "admin-token", "PATCH", ts.URL+"/v1/issues/gt-abc", `{"patch":{"assignee":"dipper"},"guard":{"if_assignee":"alice"}}`); code != 204 || body != "" {
+		t.Fatalf("admin reassign = %d %q, want 204", code, body)
+	}
+	if scope != api.ScopeAdmin {
+		t.Errorf("store saw scope %q, want admin", scope)
+	}
+}
+
 func TestAssignRoutesUseTheTokenActorAndAnswer204(t *testing.T) {
 	t.Parallel()
 	type call struct{ verb, id, status, assignee, actor string }

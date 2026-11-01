@@ -18,7 +18,7 @@ func init() {
 	register(Case{Name: "update guards: a guard that does not hold writes nothing", Run: updateGuards})
 	register(Case{Name: "two racing claims with a guard have exactly one winner", Run: updateClaimRace})
 	register(Case{Name: "another actor's live in_progress claim is not overwritten without a guard or force", Run: updateClaimFence})
-	register(Case{Name: "a reassignment needs the holder on every status, and only an admin's force takes an abandoned claim", Run: updateReassignHolder})
+	register(Case{Name: "a reassignment needs the holder on every status, and only an admin token takes a held issue", Run: updateReassignHolder})
 	register(Case{Name: "update persistent promotes a wisp", Run: updatePersistent})
 }
 
@@ -181,7 +181,7 @@ func updateClaimFence(t *testing.T, s store.Store) {
 
 // updateReassignHolder holds a reassignment to the issue's holder on every
 // status. A guard and a seat's force do not make the caller the holder; only
-// an admin-scope token's force takes an abandoned claim.
+// an admin-scope token takes a held issue, with or without force.
 func updateReassignHolder(t *testing.T, s store.Store) {
 	admin := api.WithIdentity(ctx(), api.Identity{Actor: "town/daemon", Scope: api.ScopeAdmin})
 	for _, tc := range []struct {
@@ -201,6 +201,8 @@ func updateReassignHolder(t *testing.T, s store.Store) {
 			guard: api.Guard{IfAssignee: str("alice")}, refused: true, want: "alice"},
 		{name: "a seat's force does not authorize another seat", holder: "alice", status: "in_progress", ctx: as("bob"), patch: api.UpdatePatch{Assignee: str("bob"), Force: true}, refused: true, want: "alice"},
 		{name: "an admin's force takes an abandoned claim", holder: "alice", status: "in_progress", ctx: admin, patch: api.UpdatePatch{Assignee: str("bob"), Force: true}, want: "bob"},
+		{name: "an admin takes a held issue without force, as the daemon's dead-holder reopen does", holder: "alice", status: "open", ctx: admin,
+			patch: api.UpdatePatch{Assignee: str("bob")}, guard: api.Guard{IfAssignee: str("alice")}, want: "bob"},
 		{name: "an unheld issue can be assigned", holder: "", status: "open", ctx: as("bob"), patch: api.UpdatePatch{Assignee: str("bob")}, want: "bob"},
 		{name: "the holder can reassign its issue", holder: "alice", status: "open", ctx: as("alice"), patch: api.UpdatePatch{Assignee: str("bob")}, want: "bob"},
 	} {
