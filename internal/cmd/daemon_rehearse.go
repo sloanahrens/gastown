@@ -121,6 +121,7 @@ var rehearsalChecks = []rehearsalCheck{
 	{"binaries", "every program the settings and the daemon exec is on the image's PATH", true, checkImageBinaries},
 	{"paths", "every absolute path a setting names exists in the image or lies under a bind of the live compose", true, checkSettingPaths},
 	{"addresses", "every host.docker.internal address a setting names accepts a TCP connect from the image", true, checkSettingAddresses},
+	{"plugins", "every plugin and patrol is classified, the ones that cannot run in the container are in daemon.container_off, and the image carries what the rest exec", true, checkDaemonSteps},
 	{"images", "every image the live compose pulls (the sweep engine's) is served by digest on the engine the daemon uses", true, checkComposeImagesPull},
 	{"heartbeat", "the entrypoint on the scratch town records a heartbeat within the budget", true, checkFirstHeartbeat},
 }
@@ -130,6 +131,7 @@ var rehearsalChecks = []rehearsalCheck{
 type rehearsal struct {
 	f      rehearseFlags
 	d      rehearseDeps
+	config []byte   // the staged config.json, which the plugins check reads
 	values []string // the string values of the staged JSON settings; what the path and address checks scan
 }
 
@@ -282,6 +284,9 @@ func (r *rehearsal) stage() error {
 				return fmt.Errorf("the live setting %s: %w", name, err)
 			}
 			r.values = append(r.values, values...)
+			if name == "config.json" {
+				r.config = data
+			}
 		}
 		files[filepath.Join("settings", name)] = data
 	}
