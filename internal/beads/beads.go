@@ -1438,11 +1438,17 @@ func (b *Beads) targetBeadsDirForCreate(opts CreateOptions) (string, error) {
 	townRoot := b.getTownRoot()
 
 	if opts.Rig != "" {
-		if targetDir, ok := ResolveRepoAliasBeadsDir(townRoot, opts.Rig); ok {
+		if targetDir, ok := ResolveRepoAliasBeadsDirForCreate(townRoot, opts.Rig); ok {
 			if opts.Rig != "hq" && opts.Rig != "town" {
-				prefix := GetPrefixForRig(townRoot, opts.Rig)
-				if err := EnsureConfigYAML(targetDir, prefix); err != nil {
-					return "", fmt.Errorf("ensuring beads config for rig %q: %w", opts.Rig, err)
+				// A workspace this town does not hold (a sandbox seat's
+				// skeleton carries the seat's rig alone) is still the rig
+				// route's address, and the create is pinned to the database
+				// the registry names for it. Writing config.yaml into it
+				// would create that workspace here, outside the target
+				// database, so config is ensured only where it exists
+				// (gt-dmtmv).
+				if err := ensureCreateConfigYAML(targetDir, townRoot, opts.Rig); err != nil {
+					return "", err
 				}
 			}
 			return targetDir, nil
@@ -1455,6 +1461,30 @@ func (b *Beads) targetBeadsDirForCreate(opts CreateOptions) (string, error) {
 	}
 
 	return fallback, nil
+}
+
+// ensureCreateConfigYAML makes sure the rig workspace bd is about to be pinned
+// to carries a config.yaml, without creating the workspace. A directory that is
+// absent is left absent: the create is addressed by the route and the registry's
+// database name, and a directory written here would sit outside that database.
+// Any other stat failure is returned, since a workspace that cannot be inspected
+// is not one to write into.
+func ensureCreateConfigYAML(targetDir, townRoot, rig string) error {
+	info, err := os.Stat(targetDir)
+	switch {
+	case err == nil && info.IsDir():
+		prefix := GetPrefixForRig(townRoot, rig)
+		if err := EnsureConfigYAML(targetDir, prefix); err != nil {
+			return fmt.Errorf("ensuring beads config for rig %q: %w", rig, err)
+		}
+		return nil
+	case err == nil:
+		return fmt.Errorf("beads workspace for rig %q is not a directory: %s", rig, targetDir)
+	case os.IsNotExist(err):
+		return nil
+	default:
+		return fmt.Errorf("inspecting beads workspace for rig %q: %w", rig, err)
+	}
 }
 
 // forIssueID returns a Beads wrapper bound to the correct beads directory for

@@ -932,6 +932,133 @@ func renderRigWithout(t *testing.T, drop []string, add map[string]string) (map[s
 	return renderTown(t, writeTown(t, files))
 }
 
+// TestSkeletonCarriesRoutedRigWorkspaces: a polecat files a bead in another rig
+// with `gt bead create --rig <rig>`, and bd opens that rig's database only
+// through a workspace whose metadata.json names it. Every rig the routes table
+// names therefore travels with the seat, pointed at the control plane and
+// keeping its identity; a rig the host has no workspace for is skipped rather
+// than failing the seat (gt-dmtmv).
+func TestSkeletonCarriesRoutedRigWorkspaces(t *testing.T) {
+	t.Parallel()
+
+	const beadsProjectID = "00000000-0000-4000-8000-0000000000be"
+	files := minimalTown()
+	files[".beads/routes.jsonl"] = `{"prefix":"gt-","path":"gastown"}` + "\n" +
+		`{"prefix":"be-","path":"beads/mayor/rig"}` + "\n" +
+		`{"prefix":"gh-","path":"ghost/mayor/rig"}` + "\n"
+	files["beads/mayor/rig/.beads/metadata.json"] = `{"dolt_database":"be","dolt_server_host":"127.0.0.1","dolt_server_port":3307,"project_id":"` + beadsProjectID + `"}`
+	files["beads/mayor/rig/.beads/config.yaml"] = "issue_prefix: be\n"
+	got, err := renderTown(t, writeTown(t, files))
+	if err != nil {
+		t.Fatalf("RenderSkeleton: %v", err)
+	}
+
+	if _, ok := got["gt/beads/mayor/rig/.beads/"]; !ok {
+		t.Error("rig b's beads directory is not listed, so it extracts 0755 and bd warns on every call")
+	}
+	meta := decodeJSON(t, got["gt/beads/mayor/rig/.beads/metadata.json"])
+	if meta["dolt_database"] != "be" {
+		t.Errorf("dolt_database = %v, want be", meta["dolt_database"])
+	}
+	if meta["dolt_server_host"] != "host.docker.internal" {
+		t.Errorf("dolt_server_host = %v, want the control plane", meta["dolt_server_host"])
+	}
+	if meta["project_id"] != beadsProjectID {
+		t.Errorf("project_id = %v, want it kept: bd refuses a database whose identity does not match", meta["project_id"])
+	}
+	if c := string(got["gt/beads/mayor/rig/.beads/config.yaml"]); !strings.Contains(c, "issue_prefix: be") {
+		t.Errorf("config = %q, want the rig's own config", c)
+	}
+	if _, ok := got["gt/ghost/mayor/rig/.beads/metadata.json"]; ok {
+		t.Error("the skeleton carries a workspace for a rig the host has none for")
+	}
+}
+
+// TestSkeletonRefusesAnUnusableRoutedRigWorkspace: the routed rigs are rendered
+// from host files like every other, so a metadata.json or config.yaml the
+// render cannot read stops it instead of shipping a seat that cannot reach that
+// rig's database (gt-dmtmv).
+func TestSkeletonRefusesAnUnusableRoutedRigWorkspace(t *testing.T) {
+	t.Parallel()
+
+	routedTown := func(t *testing.T) string {
+		t.Helper()
+		files := minimalTown()
+		files[".beads/routes.jsonl"] = `{"prefix":"be-","path":"beads/mayor/rig"}` + "\n"
+		files["beads/mayor/rig/.beads/metadata.json"] = `{"dolt_database":"be"}`
+		files["beads/mayor/rig/.beads/config.yaml"] = "issue-prefix: be\n"
+		return writeTown(t, files)
+	}
+
+	t.Run("malformed metadata", func(t *testing.T) {
+		t.Parallel()
+		townRoot := routedTown(t)
+		if err := os.WriteFile(filepath.Join(townRoot, "beads", "mayor", "rig", ".beads", "metadata.json"), []byte("not json\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := renderTown(t, townRoot)
+		if err == nil || !strings.Contains(err.Error(), "beads/mayor/rig/.beads/metadata.json") {
+			t.Fatalf("RenderSkeleton error = %v, want it to name the malformed metadata", err)
+		}
+	})
+
+	t.Run("metadata is a directory", func(t *testing.T) {
+		t.Parallel()
+		townRoot := routedTown(t)
+		path := filepath.Join(townRoot, "beads", "mayor", "rig", ".beads", "metadata.json")
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := renderTown(t, townRoot); err == nil {
+			t.Fatal("RenderSkeleton succeeded with an unreadable routed rig metadata.json")
+		}
+	})
+
+	t.Run("config is a directory", func(t *testing.T) {
+		t.Parallel()
+		townRoot := routedTown(t)
+		path := filepath.Join(townRoot, "beads", "mayor", "rig", ".beads", "config.yaml")
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := renderTown(t, townRoot); err == nil {
+			t.Fatal("RenderSkeleton succeeded with an unreadable routed rig config.yaml")
+		}
+	})
+}
+
+// TestSkeletonRequiresTheBeadsMetadata: the town's and the seat rig's beads
+// metadata are what bd opens a database with, so a town missing or mangling one
+// stops the render.
+func TestSkeletonRequiresTheBeadsMetadata(t *testing.T) {
+	t.Parallel()
+
+	t.Run("missing", func(t *testing.T) {
+		t.Parallel()
+		files := minimalTown()
+		delete(files, ".beads/metadata.json")
+		if _, err := renderTown(t, writeTown(t, files)); err == nil {
+			t.Fatal("RenderSkeleton succeeded without the town's beads metadata")
+		}
+	})
+
+	t.Run("malformed", func(t *testing.T) {
+		t.Parallel()
+		files := minimalTown()
+		files[".beads/metadata.json"] = "not json\n"
+		_, err := renderTown(t, writeTown(t, files))
+		if err == nil || !strings.Contains(err.Error(), ".beads/metadata.json") {
+			t.Fatalf("RenderSkeleton error = %v, want it to name the malformed metadata", err)
+		}
+	})
+}
+
 // renderTown renders the skeleton for rig gastown from townRoot and returns the
 // archive's entries.
 func renderTown(t *testing.T, townRoot string) (map[string][]byte, error) {

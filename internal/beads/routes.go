@@ -2,7 +2,6 @@
 package beads
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/townconfig"
 )
 
 // Route represents a prefix-to-path routing rule.
@@ -51,36 +51,42 @@ const RoutesTempPrefix = ".routes-"
 // Returns an empty slice if the file doesn't exist.
 func LoadRoutes(beadsDir string) ([]Route, error) {
 	routesPath := filepath.Join(beadsDir, RoutesFileName)
-	file, err := os.Open(routesPath)
+	data, err := os.ReadFile(routesPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil // No routes file is not an error
 		}
 		return nil, err
 	}
-	defer file.Close()
+	return ParseRoutes(data, func(line int, err error) {
+		fmt.Fprintf(os.Stderr, "Warning: skipping malformed route at %s:%d: %v\n", routesPath, line, err)
+	}), nil
+}
 
+// ParseRoutes parses routes.jsonl contents. Blank lines and comments are
+// skipped, and a malformed line is reported to warn (nil ignores it) and
+// skipped. It takes the document rather than a path so a caller that already
+// holds the bytes parses them without reading the file twice (gt-dmtmv); a
+// byte slice cannot fail to read, so it returns no error.
+func ParseRoutes(data []byte, warn func(line int, err error)) []Route {
 	var routes []Route
-	scanner := bufio.NewScanner(file)
-	lineNum := 0
-	for scanner.Scan() {
-		lineNum++
-		line := strings.TrimSpace(scanner.Text())
+	for i, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
-			continue // Skip empty lines and comments
+			continue
 		}
-
 		var route Route
 		if err := json.Unmarshal([]byte(line), &route); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: skipping malformed route at %s:%d: %v\n", routesPath, lineNum, err)
+			if warn != nil {
+				warn(i+1, err)
+			}
 			continue
 		}
 		if route.Prefix != "" && route.Path != "" {
 			routes = append(routes, route)
 		}
 	}
-
-	return routes, scanner.Err()
+	return routes
 }
 
 // AppendRoute appends a route to routes.jsonl in the town's beads directory.
@@ -453,18 +459,62 @@ func GetRigDirForName(townRoot, rigName string) string {
 	return ""
 }
 
-// ResolveRepoAliasBeadsDir resolves a Gas Town repo alias to its canonical
-// .beads directory. Bare aliases are route names like "gastown" plus the
-// town aliases "hq" and "town"; path-like repo values are intentionally left
-// unresolved so callers can preserve bd's native --repo path semantics.
+// ResolveRepoAliasBeadsDir resolves a Gas Town repo alias to the .beads
+// directory its workspace holds on disk. Bare aliases are route names like
+// "gastown" plus the town aliases "hq" and "town"; path-like repo values are
+// intentionally left unresolved so callers can preserve bd's native --repo
+// path semantics.
+//
+// A rig the routes name but whose workspace this town does not hold is refused.
+// Its callers open the result (sling's target-rig verification opens the
+// target database, dispatch aims a sling at it), so an address the host cannot
+// open would send them at whatever bd fell back to. A create resolves that case
+// through ResolveRepoAliasBeadsDirForCreate.
 func ResolveRepoAliasBeadsDir(townRoot, repo string) (string, bool) {
+	beadsDir, ok := repoAliasBeadsDir(townRoot, repo)
+	if !ok || !validRepoAliasBeadsDir(townRoot, beadsDir) {
+		return "", false
+	}
+	return beadsDir, true
+}
+
+// ResolveRepoAliasBeadsDirForCreate is ResolveRepoAliasBeadsDir for a create,
+// which pins bd to the target database by name instead of opening the
+// workspace. It also resolves a rig whose workspace is not on disk: a sandbox
+// seat's town skeleton holds the seat's own rig alone while routes.jsonl names
+// every rig in the town, so a polecat there could not file a bead in another
+// rig and filed it in hq instead, which the spec dispatcher never reads
+// (gt-dmtmv).
+//
+// The absent case is narrower than the present one: the alias must be a rig the
+// routes name, and the town registry must name that rig's database, so a create
+// pinned to the result addresses that database and nothing else. An absent
+// workspace stays absent: the returned directory is bd's address, and the
+// create's own preparation writes only into a workspace that is already there.
+func ResolveRepoAliasBeadsDirForCreate(townRoot, repo string) (string, bool) {
+	beadsDir, ok := repoAliasBeadsDir(townRoot, repo)
+	if !ok {
+		return "", false
+	}
+	if validRepoAliasBeadsDir(townRoot, beadsDir) {
+		return beadsDir, true
+	}
+	if absentRepoAliasBeadsDir(beadsDir) {
+		return beadsDir, true
+	}
+	return "", false
+}
+
+// repoAliasBeadsDir maps a bare alias to the .beads directory its route names,
+// or the town's for "hq" and "town", whether or not that directory exists. An
+// alias no route names is refused, and so is a route path that leaves the town.
+func repoAliasBeadsDir(townRoot, repo string) (string, bool) {
 	if townRoot == "" || isRepoPathLike(repo) {
 		return "", false
 	}
 
 	if repo == "hq" || repo == "town" {
-		beadsDir := filepath.Join(townRoot, ".beads")
-		return beadsDir, validRepoAliasBeadsDir(townRoot, beadsDir)
+		return filepath.Join(townRoot, ".beads"), true
 	}
 
 	rigDir := GetRigDirForName(townRoot, repo)
@@ -473,10 +523,25 @@ func ResolveRepoAliasBeadsDir(townRoot, repo string) (string, bool) {
 	}
 
 	beadsDir := ResolveBeadsDir(rigDir)
-	if !validRepoAliasBeadsDir(townRoot, beadsDir) {
+	if !pathWithin(townRoot, beadsDir) {
 		return "", false
 	}
 	return beadsDir, true
+}
+
+// absentRepoAliasBeadsDir reports whether beadsDir can be a rig route's beads
+// directory although it is not on disk. GetRigDirForName only hands back a
+// directory the routes name, and a directory the town registry cannot place on
+// a database is refused: a create aimed there would have no database to name
+// and would land in whatever bd fell back to, hq included.
+func absentRepoAliasBeadsDir(beadsDir string) bool {
+	if filepath.Base(filepath.Clean(beadsDir)) != ".beads" {
+		return false
+	}
+	if _, err := os.Stat(beadsDir); !os.IsNotExist(err) {
+		return false
+	}
+	return townconfig.DatabaseForBeadsDir(beadsDir) != ""
 }
 
 // RewriteBDCreateRepoAlias removes a single bd create --repo alias from argv
@@ -506,7 +571,7 @@ func RewriteBDCreateRepoAlias(townRoot string, argv []string) ([]string, string)
 				continue
 			}
 			value := argv[i+1]
-			if beadsDir, ok := ResolveRepoAliasBeadsDir(townRoot, value); ok {
+			if beadsDir, ok := ResolveRepoAliasBeadsDirForCreate(townRoot, value); ok {
 				i++
 				return append(rewritten, argv[i+1:]...), beadsDir
 			}
@@ -517,7 +582,7 @@ func RewriteBDCreateRepoAlias(townRoot string, argv []string) ([]string, string)
 
 		if strings.HasPrefix(arg, "--repo=") {
 			value := strings.TrimPrefix(arg, "--repo=")
-			if beadsDir, ok := ResolveRepoAliasBeadsDir(townRoot, value); ok {
+			if beadsDir, ok := ResolveRepoAliasBeadsDirForCreate(townRoot, value); ok {
 				return append(rewritten, argv[i+1:]...), beadsDir
 			}
 		}
