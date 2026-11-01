@@ -42,12 +42,19 @@ those beads are counted as edited_same_day. Buckets under 20 beads are marked
 thin. The export is read only: git log, git show and git ls-tree, never a write.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		town, err := workspace.FindFromCwdOrError()
-		if err != nil {
-			return err
-		}
-		return runMetricsShapeOutcome(cmd.Context(), cmd.OutOrStdout(), shapeArchiveOSEnv(town, metricsShapeRig))
+		return runMetricsShapeOutcomeIn(cmd.Context(), cmd.OutOrStdout(), workspace.FindFromCwdOrError, metricsShapeRig)
 	},
+}
+
+// runMetricsShapeOutcomeIn finds the town with find and runs the join with the
+// real archive. find is workspace.FindFromCwdOrError in the command and a fake
+// in the test, so the lookup's failure path is driven without a town.
+func runMetricsShapeOutcomeIn(ctx context.Context, out io.Writer, find func() (string, error), rig string) error {
+	town, err := find()
+	if err != nil {
+		return err
+	}
+	return runMetricsShapeOutcome(ctx, out, shapeArchiveOSEnv(town, rig))
 }
 
 // shapeArchiveEnv is everything the command reads outside its own process: the

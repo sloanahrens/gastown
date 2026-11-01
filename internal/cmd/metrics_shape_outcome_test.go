@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -45,19 +46,22 @@ func shapeRow(t *testing.T, out, feature, bucket string) []string {
 	return nil
 }
 
-func TestMetricsShapeOutcomeUsesTheInjectedRunner(t *testing.T) {
-	t.Parallel()
+// shapeGoodEnv is a town whose archive and review log answer one landed bead,
+// and the runner calls it made. It takes the run to the print stage, so a test
+// can drive any later failure.
+func shapeGoodEnv(t *testing.T) (shapeArchiveEnv, *[][]string) {
+	t.Helper()
 	town := shapeTown(t)
-	issues := `{"id":"gt-a","description":"## Size\nOne worker, one landing.","acceptance_criteria":"- [ ] a","status":"closed","created_at":"2026-09-10T09:00:00Z"}` + "\n"
+	issues := `{"id":"gt-a","description":"## Size\nOne worker, one landing.","acceptance_criteria":"- [ ] a","created_at":"2026-09-10T09:00:00Z"}` + "\n"
 	events := `{"issue_id":"gt-a","event_type":"created","created_at":"2026-09-10 09:00:00"}` + "\n" +
 		`{"issue_id":"gt-a","event_type":"closed","created_at":"2026-09-10 21:00:00"}` + "\n"
-	var calls [][]string
+	calls := &[][]string{}
 	env := shapeArchiveEnv{
 		Town:     town,
 		Rig:      "gt",
 		ReadFile: os.ReadFile,
 		Run: func(_ context.Context, argv []string) ([]byte, error) {
-			calls = append(calls, argv)
+			*calls = append(*calls, argv)
 			joined := strings.Join(argv, " ")
 			switch {
 			case strings.Contains(joined, " log "):
@@ -73,10 +77,18 @@ func TestMetricsShapeOutcomeUsesTheInjectedRunner(t *testing.T) {
 			}
 		},
 	}
+	return env, calls
+}
+
+func TestMetricsShapeOutcomeUsesTheInjectedRunner(t *testing.T) {
+	t.Parallel()
+	env, callsPtr := shapeGoodEnv(t)
+	town := env.Town
 	var out bytes.Buffer
 	if err := runMetricsShapeOutcome(context.Background(), &out, env); err != nil {
 		t.Fatalf("runMetricsShapeOutcome: %v", err)
 	}
+	calls := *callsPtr
 	if len(calls) < 4 {
 		t.Fatalf("runner calls = %d, want the log, the tree listing and both shows", len(calls))
 	}
@@ -103,6 +115,40 @@ func TestMetricsShapeOutcomeUsesTheInjectedRunner(t *testing.T) {
 	gotRow := shapeRow(t, got, "acceptance_boxes", "1")
 	if strings.Join(gotRow, " ") != strings.Join(want, " ") {
 		t.Fatalf("acceptance_boxes 1 row = %v, want %v", gotRow, want)
+	}
+}
+
+// TestMetricsShapeOutcomeStopsWhenTheOutputFails drives each write the run
+// makes: the receipt, the table header and a table row.
+func TestMetricsShapeOutcomeStopsWhenTheOutputFails(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		// accept is how many writes reach the output before it fails.
+		accept int
+	}{
+		{"the receipt", 0},
+		{"the table header", 1},
+		{"a table row", 2},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			env, _ := shapeGoodEnv(t)
+			if err := runMetricsShapeOutcome(context.Background(), &acceptWriter{accept: c.accept}, env); err == nil {
+				t.Fatalf("a failed write at %s did not stop the run", c.name)
+			}
+		})
+	}
+}
+
+func TestMetricsShapeOutcomeRefusesAnUnknownTown(t *testing.T) {
+	t.Parallel()
+	err := runMetricsShapeOutcomeIn(context.Background(), io.Discard, func() (string, error) {
+		return "", errors.New("no town here")
+	}, "gt")
+	if err == nil || !strings.Contains(err.Error(), "no town here") {
+		t.Fatalf("error = %v, want the town lookup's failure", err)
 	}
 }
 
