@@ -412,6 +412,7 @@ environment knobs and one key under `daemon` in `settings/config.json`:
 | `POLECAT_IMAGE_REGISTRY_PRUNE` | `dry-run` | the `polecat-image` plugin only: `off`, `dry-run` or `apply` |
 | `POLECAT_CACHE_CAP` | `10GB` | the size each per-rig cache volume is trimmed under, and the size the patrol trims the shared cache claim under (`internal/daemon/cache_trim.go`) |
 | `daemon.patrols.disk_maintenance` | disabled; once enabled, `{"interval": "daily", "window": "04:30", "mode": "dry_run", "targets": {"civol": {"interval": "2h"}}}` (`mode` may be `apply`) | the daemon patrol |
+| `daemon.patrols.overseer_report.stale_crew` | off; `true` adds a `STALE CREW CLONES` section to each overseer report, listing the crew clones not fetched in a day, oldest fetch first. Needs `overseer_report.enabled`. Read only: nothing is fetched | the overseer_report patrol (`internal/daemon/overseer_report.go`, the same list as `gt crew stale`) |
 
 A `targets` entry gives one target a cadence of its own, such as civol's `2h`
 for the CI cache volumes; a target without one runs in the daily window. An

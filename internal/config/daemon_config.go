@@ -1233,6 +1233,10 @@ type OverseerReportConfig struct {
 
 	// IntervalStr is the slot length and cadence (default "15m").
 	IntervalStr string `json:"interval,omitempty"`
+
+	// StaleCrew adds the stale crew clones section, which lists the crew
+	// clones not fetched in a day (gt-t3mky). Default off.
+	StaleCrew bool `json:"stale_crew,omitempty"`
 }
 
 // PatrolScanConfig configures the patrol_scan tick (ADR 0005, gt-4k3fj.6):
