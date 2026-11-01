@@ -1,13 +1,15 @@
 // Package storetest holds the in-memory store.Store for the unit tier. It
 // implements the methods its Fake-flagged contract cases cover: create and
 // get, the claim, release and transfer guards, the plain close those guards
-// refuse, the creates a Batch applies, the comments and links an export
-// reads, the counts a stats read reports, and the tokens an admin issues and
-// revokes. GetIssues fills Dependencies and Dependents, as the real store
-// does; ListIssues, ChildrenOf and Comments answer the reads the bd shim's
-// handlers make (gt-p85pw.94). Every other method returns
-// store.ErrUnimplemented, so a unit test that reaches past them fails loudly
-// rather than reading a store that only looks modeled.
+// refuse, a status write with the guards and the close fences, the creates a
+// Batch applies, the comments and links an export reads, the counts a stats
+// read reports, and the tokens an admin issues and revokes. GetIssues fills
+// Dependencies and Dependents, as the real store does; ListIssues, ChildrenOf
+// and Comments answer the reads the bd shim's handlers make (gt-p85pw.94), and
+// UpdateIssue answers the status the shim's update, close and reopen write
+// (gt-p85pw.96). Every other method returns store.ErrUnimplemented, so a unit
+// test that reaches past them fails loudly rather than reading a store that
+// only looks modeled.
 package storetest
 
 import (
@@ -259,8 +261,129 @@ func (*Fake) CountIssues(context.Context, api.ListFilter) (int, error) {
 func (*Fake) Assigned(context.Context, api.AssignedRequest) (api.AssignedPage, error) {
 	return api.AssignedPage{}, unimplemented("Assigned")
 }
-func (*Fake) UpdateIssue(context.Context, string, api.UpdatePatch, api.Guard) error {
-	return unimplemented("UpdateIssue")
+
+// builtinStatuses are the statuses a write may name without a custom status,
+// as the Postgres store's isBuiltinStatus decides it. The fake keeps no
+// custom_statuses table, so a name outside this list is refused rather than
+// stored.
+var builtinStatuses = []string{"open", "in_progress", "closed", "deferred", "hooked", "pinned"}
+
+// UpdateIssue applies the status of patch while g holds: the one patch field
+// the fake models, because it is the one the bd shim's update, close and reopen
+// handlers write (gt-p85pw.96). A status of closed obeys the close fences and a
+// status that leaves closed clears the close, as the Postgres store does; a
+// guard that does not hold writes nothing. Any other patch field is refused
+// rather than applied in part. (contract: updateStatusOnly)
+func (f *Fake) UpdateIssue(_ context.Context, id string, patch api.UpdatePatch, g api.Guard) error {
+	if err := fakePatch(patch); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	is, ok := f.issues[id]
+	if !ok {
+		return api.NotFound(id)
+	}
+	if g.IfAssignee != nil && is.Assignee != *g.IfAssignee {
+		return api.GuardFailed(fmt.Sprintf("%s is assigned to %q, not %q", id, is.Assignee, *g.IfAssignee))
+	}
+	if g.IfStatus != nil && is.Status != *g.IfStatus {
+		return api.GuardFailed(fmt.Sprintf("%s has status %q, not %q", id, is.Status, *g.IfStatus))
+	}
+	if patch.Status == nil || *patch.Status == is.Status {
+		return nil
+	}
+	status := *patch.Status
+	if !slices.Contains(builtinStatuses, status) {
+		return api.Invalid("unknown status %q", status)
+	}
+	now := f.now()
+	switch {
+	case status == "closed":
+		if err := f.fenceCloseLocked(is, []string{id}, patch.Force, patch.Actor); err != nil {
+			return err
+		}
+		closedAt := now
+		is.Status, is.CloseReason, is.ClosedAt, is.UpdatedAt = "closed", "", &closedAt, now
+	case is.Status == "closed":
+		is.Status, is.CloseReason, is.ClosedAt, is.UpdatedAt = status, "", nil, now
+	default:
+		is.Status, is.UpdatedAt = status, now
+	}
+	f.issues[id] = is
+	return nil
+}
+
+// fakePatch refuses a patch carrying a field the fake does not model, so a
+// caller never reads a write that happened in part. Actor is the request's
+// identity, not a field, and status is the modeled one.
+func fakePatch(patch api.UpdatePatch) error {
+	switch {
+	case patch.Title != nil, patch.Priority != nil, patch.Description != nil, patch.Assignee != nil,
+		patch.Acceptance != nil, len(patch.AddLabels) > 0, len(patch.RemoveLabels) > 0, len(patch.SetLabels) > 0,
+		patch.AppendNotes != "", patch.Persistent, patch.DeferUntil != nil:
+		return unimplemented("UpdateIssue: a patch field other than status")
+	}
+	return nil
+}
+
+// fenceCloseLocked refuses the close of is that the Postgres store refuses
+// unless forced (closeRow): a pinned issue, an issue another actor holds, an
+// open child and an unresolved blocker, where the ids the same call closes
+// (closing) do not count. A child is a parent_id or a parent-child link, since
+// the fixture seeds either. f.mu is held.
+func (f *Fake) fenceCloseLocked(is api.Issue, closing []string, force bool, actor string) error {
+	if force {
+		return nil
+	}
+	if is.Status == "pinned" {
+		return api.Conflict("%s is pinned (release it, or force)", is.ID)
+	}
+	if is.Assignee != "" && is.Assignee != actor {
+		return api.Conflict("%s is assigned to %s, not to %s (release it, or force)", is.ID, is.Assignee, actor)
+	}
+	inBatch := make(map[string]bool, len(closing))
+	for _, id := range closing {
+		inBatch[id] = true
+	}
+	var children, blockers []string
+	for id, kid := range f.issues {
+		if inBatch[id] || kid.Status == "closed" {
+			continue
+		}
+		if kid.Parent == is.ID || f.hasLink(id, is.ID, "parent-child") {
+			children = append(children, id)
+		}
+	}
+	for _, l := range f.links {
+		if l.IssueID != is.ID || !slices.Contains(api.BlockingLinkTypes, l.Type) {
+			continue
+		}
+		target, ok := f.issues[l.DependsOn]
+		if !ok || inBatch[l.DependsOn] || slices.Contains(api.ResolvedStatuses, target.Status) {
+			continue
+		}
+		blockers = append(blockers, l.DependsOn)
+	}
+	slices.Sort(children)
+	slices.Sort(blockers)
+	if len(children) > 0 {
+		return api.Conflict("%s has open children: %s (close them first, or force)", is.ID, strings.Join(children, ", "))
+	}
+	if len(blockers) > 0 {
+		return api.Conflict("%s is blocked by open issues: %s (close them first, or force)", is.ID, strings.Join(blockers, ", "))
+	}
+	return nil
+}
+
+// hasLink reports whether issue dependsOn link of type exists. f.mu is held.
+func (f *Fake) hasLink(issue, dependsOn, depType string) bool {
+	for _, l := range f.links {
+		if l.IssueID == issue && l.DependsOn == dependsOn && l.Type == depType {
+			return true
+		}
+	}
+	return false
 }
 
 // assignVerb runs one assignment verb on issue id: it refuses a request with
@@ -337,15 +460,26 @@ func (f *Fake) Transfer(ctx context.Context, id, status, assignee string) error 
 	})
 }
 
-// CloseIssues closes the issues of ids, or none when one is missing. It models
-// only what the assignment guards read: status, close reason and times.
-// Children and blockers are not modeled, so no close is ever refused.
-func (f *Fake) CloseIssues(_ context.Context, ids []string, reason string, _ bool) error {
+// CloseIssues closes the issues of ids, or none when one is missing or fenced.
+// The fences are the Postgres store's: a pin, another actor's claim, an open
+// child and an unresolved blocker, with the ids this call closes counted as
+// closed. An issue already closed is skipped, not refused.
+func (f *Fake) CloseIssues(ctx context.Context, ids []string, reason string, force bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, id := range ids {
 		if _, ok := f.issues[id]; !ok {
 			return api.NotFound(id)
+		}
+	}
+	actor := api.ActorFrom(ctx)
+	for _, id := range ids {
+		is := f.issues[id]
+		if is.Status == "closed" {
+			continue
+		}
+		if err := f.fenceCloseLocked(is, ids, force, actor); err != nil {
+			return err
 		}
 	}
 	now := f.now()

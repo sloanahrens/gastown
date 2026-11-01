@@ -28,6 +28,11 @@ const routeFixture = `{"path":".","prefix":"fx-","backend":"tracker"}`
 // same author bd recorded.
 const fixtureActor = "bdshim-record"
 
+// fixtureAuthorEmail is the author email the recorder pinned beside the actor,
+// which bd stamps on a created bead as its owner (cmd/bdshim-record/container.go,
+// pinnedIdentity).
+const fixtureAuthorEmail = "bdshim-record@example.invalid"
+
 // The recorder's outputs, read from the package the shim's test runs in.
 const (
 	goldenDirectory = "../../cmd/bdshim/testdata/golden"
@@ -98,10 +103,6 @@ var knownUnhandledVerbs = map[string]bool{
 	"dep":      true,
 	"label":    true,
 	"events":   true,
-	"create":   true,
-	"update":   true,
-	"close":    true,
-	"reopen":   true,
 	"delete":   true,
 	"defer":    true,
 	"undefer":  true,
@@ -281,6 +282,12 @@ func fixtureEnv(t *testing.T, town string, fixture []fixtureBead, argv []string)
 			return ts.URL
 		case "TRACKER_TOKEN":
 			return token
+		case "GIT_AUTHOR_EMAIL":
+			// A seat is spawned with its git identity in the environment
+			// (config.GitIdentityEnv), and bd stamps a new bead's owner from
+			// it. The replay carries the identity the recorder pinned, so a
+			// create row is compared with bd's answer to the same environment.
+			return fixtureAuthorEmail
 		}
 		return ""
 	}

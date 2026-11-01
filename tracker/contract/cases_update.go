@@ -20,6 +20,51 @@ func init() {
 	register(Case{Name: "another actor's live in_progress claim is not overwritten without a guard or force", Run: updateClaimFence})
 	register(Case{Name: "a reassignment needs the holder on every status, and only an admin token takes a held issue", Run: updateReassignHolder})
 	register(Case{Name: "update persistent promotes a wisp", Run: updatePersistent})
+	register(Case{Name: "a status write alone obeys the guards, the close fences and the reopen clear", Fake: true, Run: updateStatusOnly})
+}
+
+// updateStatusOnly is the status write the bd shim's update, close and reopen
+// handlers make (gt-p85pw.96), and the fences that answer them: the fake models
+// this write and nothing more of a patch, so the case is flagged Fake.
+func updateStatusOnly(t *testing.T, s store.Store) {
+	is := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "t"})
+	mustUpdate(t, s, is.ID, api.UpdatePatch{Status: str("in_progress")}, api.Guard{})
+	if got := mustGet(t, s, is.ID); got.Status != "in_progress" {
+		t.Errorf("status = %q after the update, want in_progress", got.Status)
+	}
+	if err := s.UpdateIssue(ctx(), is.ID, api.UpdatePatch{Status: str("wip")}, api.Guard{}); !errors.Is(err, api.ErrInvalid) {
+		t.Errorf("an unknown status = %v, want api.ErrInvalid", err)
+	}
+	if err := s.UpdateIssue(ctx(), is.ID, api.UpdatePatch{Status: str("open")}, api.Guard{IfStatus: str("open")}); !errors.Is(err, api.ErrGuardFailed) {
+		t.Errorf("a guard that did not hold = %v, want api.ErrGuardFailed", err)
+	}
+	if got := mustGet(t, s, is.ID); got.Status != "in_progress" {
+		t.Errorf("a refused status write changed the issue: %+v", got)
+	}
+
+	blocker := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "blocker"})
+	work := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "blocked"})
+	mustDep(t, s, work.ID, blocker.ID, "blocks")
+	if err := s.UpdateIssue(ctx(), work.ID, api.UpdatePatch{Status: str("closed")}, api.Guard{}); !errors.Is(err, api.ErrConflict) {
+		t.Errorf("closing a blocked issue = %v, want api.ErrConflict", err)
+	}
+	mustUpdate(t, s, work.ID, api.UpdatePatch{Status: str("closed"), Force: true}, api.Guard{})
+	if got := mustGet(t, s, work.ID); got.Status != "closed" || got.ClosedAt == nil {
+		t.Errorf("after a forced close: %+v", got)
+	}
+	mustUpdate(t, s, work.ID, api.UpdatePatch{Status: str("open")}, api.Guard{})
+	if got := mustGet(t, s, work.ID); got.Status != "open" || got.ClosedAt != nil || got.CloseReason != "" {
+		t.Errorf("after the reopen: %+v, want open with no close time or reason", got)
+	}
+
+	parent := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "epic"})
+	mustCreate(t, s, api.CreateParams{Rig: "gt", Parent: parent.ID, Title: "kid"})
+	if err := s.CloseIssues(ctx(), []string{parent.ID}, "r", false); !errors.Is(err, api.ErrConflict) {
+		t.Errorf("closing a parent with an open child = %v, want api.ErrConflict", err)
+	}
+	if err := s.CloseIssues(ctx(), []string{parent.ID}, "r", true); err != nil {
+		t.Errorf("forcing the parent closed = %v, want nil", err)
+	}
 }
 
 func str(s string) *string { return &s }
