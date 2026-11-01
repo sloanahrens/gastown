@@ -428,8 +428,11 @@ func dindContainer() Container {
 	share := ResourceList{CPU: dindCPU, Memory: dindMemory}
 	return Container{
 		Name:  dindContainerName,
-		Image: templates.DindImage,
+		Image: templates.SweepDindImage,
 		Args: []string{
+			// dockerd named as the command, so the image's entrypoint adds no
+			// host of its own on 0.0.0.0:2375 beside the loopback one below.
+			"dockerd",
 			// Without an explicit host dockerd binds 0.0.0.0, which is the pod IP
 			// and a privileged Docker API for every pod on the cluster network.
 			"--host=tcp://" + dindAddress + ":" + dindPort,
