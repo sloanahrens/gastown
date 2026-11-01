@@ -132,9 +132,10 @@ func bdListRow(is *beads.Issue, commentCount int) bdListIssue {
 // among targets: bd prints the target's own fields, and a row with an empty
 // description would be an answer the shim guessed.
 //
-// show's counts are bd's raw link counts and keep a parent-child link, where
-// the list's leave it out: the recorded show row for fx-1 says dependency_count
-// 2 and its list row says 1, the difference being the link to its parent.
+// show's counts are the raw link counts and keep a parent-child link, where the
+// list's use countWorkRelations. The recorded rows agree on dependent_count (0)
+// and differ on dependency_count: show says 2 for fx-1, list says 1, the
+// difference being the link to its parent.
 func bdShowRow(is *beads.Issue, targets map[string]*beads.Issue, commentCount int) (bdShowIssue, error) {
 	deps := make([]bdShowDep, 0, len(is.Dependencies))
 	for _, d := range is.Dependencies {
@@ -162,7 +163,7 @@ func bdShowRow(is *beads.Issue, targets map[string]*beads.Issue, commentCount in
 }
 
 // countWorkRelations counts the links a list's count prints: every relation but
-// parent-child. show does not use it; bd's show counts the raw links.
+// parent-child. show does not use it: bdShowRow prints the raw link counts.
 func countWorkRelations(deps []beads.IssueDep) int {
 	n := 0
 	for _, d := range deps {
