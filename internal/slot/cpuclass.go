@@ -19,25 +19,6 @@ import (
 	"github.com/steveyegge/gastown/internal/procid"
 )
 
-// The CPU class is a second slot pool beside the container gate: it bounds how
-// many CPU-heavy host builds (go build, go vet, go test from a crew checkout)
-// run at once, so a burst of crew presubmits cannot starve the daemon, bd and
-// the dispatcher. Measured 2026-11-01: nine birds building in parallel took
-// host load from 21 to 62 on 24 cores, one `bd list` took 5.9 s and a gt
-// install build took over ten minutes (gt-bq68w).
-//
-// It is deliberately not the container-gate pool: a crew build starts no
-// container and must never take a landing slot, and a landing never waits
-// behind one. Like the presubmit pool it is a set of kernel-released flocks
-// (one per slot), so a holder that dies releases its slot with no reclaim
-// path; the owner file beside each lock is display-only metadata.
-//
-// Waiting callers are served in arrival order. A kernel flock grants whoever
-// wins the race, not whoever came first, so the slots are fronted by an
-// arrival queue: every caller takes a ticket under a short admission flock and
-// only the head of the live queue may take a free slot. A dead waiter's ticket
-// is reaped by the same liveness rule the owner files use (Gate.ownerGone).
-
 // DefaultCPUClassSize is how many CPU-class builds may run at once townwide
 // when operational.daemon.cpu_class_size is unset.
 const DefaultCPUClassSize = config.DefaultCPUClassSize
@@ -76,7 +57,10 @@ func CPUClassSize(townRoot string) int {
 }
 
 // cpuQueue is the arrival queue on disk: the next ticket sequence number and
-// every live waiter's ticket, ordered by Seq.
+// every live waiter's ticket, ordered by Seq. It orders the waiters because a
+// kernel flock grants whoever wins the race, not whoever arrived first; only
+// the head of the live queue may take a free slot, and a dead waiter's ticket
+// is reaped by the owner files' liveness rule (Gate.ownerGone).
 type cpuQueue struct {
 	Next    uint64      `json:"next"`
 	Tickets []cpuTicket `json:"tickets"`
@@ -146,9 +130,8 @@ type CPUHandle struct {
 	released  bool
 }
 
-// Release removes the display-only owner file and drops the flock. It is a
-// no-op on a second call, and the kernel would drop the flock on process death
-// anyway; this makes a graceful release immediate.
+// Release removes the display-only owner file and drops the flock; a second
+// call is a no-op, and the kernel drops the flock on process death.
 func (h *CPUHandle) Release() error {
 	if h.released {
 		return nil
@@ -159,12 +142,9 @@ func (h *CPUHandle) Release() error {
 	return nil
 }
 
-// AcquireCPU blocks until one of size CPU-class slots is free and this caller's
-// ticket is at the head of the arrival queue, then holds the slot. timeout <= 0
-// waits indefinitely; a caller that exhausts it withdraws its ticket and
-// returns an error naming the holders it queued behind. RunCPU is the caller
-// (the cpuslot wrapper); the other pools' package-level acquire functions have
-// no counterpart here because nothing outside RunCPU takes a CPU-class slot.
+// AcquireCPU holds one of size CPU-class slots for role, waiting in arrival
+// order until timeout (zero waits forever) and failing with the holders it
+// waited behind.
 func (g *Gate) AcquireCPU(townRoot, role string, timeout time.Duration, size int) (*CPUHandle, error) {
 	size = normalizedCPUClassSize(size)
 	if err := os.MkdirAll(LockDir(townRoot), 0755); err != nil {
@@ -467,9 +447,6 @@ func newCPUTicketID(r io.Reader) (string, error) {
 
 // CPUBuildRole reports whether dir is a crew checkout inside townRoot
 // (<town>/<rig>/crew/<name>...) and, if so, the role its builds queue under.
-// Only crew worktrees run under the CPU class: a polecat's sandboxed pod and
-// the landing worker's gate are bounded elsewhere, and their builds must keep
-// their current path (gt-bq68w).
 func CPUBuildRole(townRoot, dir string) (string, bool) {
 	if townRoot == "" || dir == "" {
 		return "", false

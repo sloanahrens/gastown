@@ -5,6 +5,7 @@ package slot
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -258,5 +259,28 @@ func requireSlotFree(t *testing.T, town string) {
 		if time.Now().After(deadline) {
 			t.Fatalf("the slot is still held after the wrapped command exited: %v", err)
 		}
+	}
+}
+
+// TestIntegrationCPUExecReportsAKilledChild checks that a child killed by a
+// signal comes back as the shell's 128+signal through the real executor, not as
+// 255 from a -1 exit code.
+// Mutation: return exitErr.ExitCode() on its own, and this reads 255.
+func TestIntegrationCPUExecReportsAKilledChild(t *testing.T) {
+	prog, err := exec.LookPath("sh")
+	if err != nil {
+		t.Fatalf("no sh to kill: %v", err)
+	}
+	code, runErr := runCPUExec(CPUExecRequest{
+		Program: prog,
+		Args:    []string{"sh", "-c", "kill -KILL $$"},
+		Env:     os.Environ(),
+		Stderr:  io.Discard,
+	})
+	if runErr != nil {
+		t.Fatalf("runCPUExec: %v", runErr)
+	}
+	if code != 137 {
+		t.Fatalf("exit code = %d, want 137 (128+SIGKILL)", code)
 	}
 }

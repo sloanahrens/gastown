@@ -6,10 +6,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -92,23 +92,24 @@ func driveCPU(t *testing.T, tg *testGate, done <-chan acquiredCPU) acquiredCPU {
 	}
 }
 
-// waitCPUQueueLen waits until the arrival queue holds tickets, so a test that
-// releases a slot knows every caller it started has joined (and so has a place
-// in arrival order). The loop is bounded and yields rather than sleeping: the
-// waiters are already running.
-func waitCPUQueueLen(t *testing.T, tg *testGate, town string, tickets int) {
+// waitCPUQueued waits until n callers hold a place in the arrival queue, so a
+// test that releases a slot knows every caller it started has joined. An
+// acquire writes its ticket before its first sleep on the fake clock, so n
+// sleepers are n tickets.
+func waitCPUQueued(t *testing.T, tg *testGate, town string, n int) {
 	t.Helper()
-	for i := 0; i < 100000; i++ {
-		queue, err := tg.readCPUQueue(town)
-		if err != nil {
-			t.Fatalf("reading the CPU-class queue: %v", err)
-		}
-		if len(queue.Tickets) == tickets {
-			return
-		}
-		runtime.Gosched()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := tg.clk.BlockUntilContext(ctx, n); err != nil {
+		t.Fatalf("fewer than %d CPU-class caller(s) reached the queue: %v", n, err)
 	}
-	t.Fatalf("the CPU-class queue never reached %d tickets", tickets)
+	queue, err := tg.readCPUQueue(town)
+	if err != nil {
+		t.Fatalf("reading the CPU-class queue: %v", err)
+	}
+	if len(queue.Tickets) != n {
+		t.Fatalf("the CPU-class queue holds %d tickets, want %d", len(queue.Tickets), n)
+	}
 }
 
 // TestCPUClassQueuesBeyondSize: with a class size of two, a third holder waits
@@ -153,11 +154,11 @@ func TestCPUClassQueuesBeyondSize(t *testing.T) {
 	fourthDone := goAcquireCPU(func() (*CPUHandle, error) {
 		return tg.AcquireCPU(town, "gastown/crew/sable", 20*tg.pollInterval, 2)
 	})
-	waitCPUQueueLen(t, tg, town, 1)
+	waitCPUQueued(t, tg, town, 1)
 	fifthDone := goAcquireCPU(func() (*CPUHandle, error) {
 		return tg.AcquireCPU(town, "gastown/crew/umber", 20*tg.pollInterval, 2)
 	})
-	waitCPUQueueLen(t, tg, town, 2)
+	waitCPUQueued(t, tg, town, 2)
 
 	releaseCPU(t, second)
 	late, _, err := tg.admitCPU(town, "gastown/crew/latecomer", "latecomer", 2)
@@ -576,6 +577,20 @@ func TestCPUClassExitResultWrapsANonExitWaitError(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error = %q, want it to name %q", err, want)
 		}
+	}
+}
+
+// TestCPUClassExitCodeForASignalledChild: a child killed by a signal reports
+// the shell's 128+signal, not -1 read as 255, so a caller sees the same code
+// the shell would have reported.
+// Mutation: return exitErr.ExitCode() alone, and a killed build reads as 255.
+func TestCPUClassExitCodeForASignalledChild(t *testing.T) {
+	t.Parallel()
+	if got := shellExitCode(syscall.WaitStatus(9)); got != 137 {
+		t.Errorf("shellExitCode(SIGKILL) = %d, want 137", got)
+	}
+	if got := shellExitCode(syscall.WaitStatus(2 << 8)); got != 2 {
+		t.Errorf("shellExitCode(exit 2) = %d, want 2", got)
 	}
 }
 

@@ -38,8 +38,6 @@ type CPURunOptions struct {
 	// Path is the caller's own PATH, used to resolve a command that names no
 	// PATH of its own.
 	Path string
-	// Dir is the child's working directory; "" keeps the wrapper's.
-	Dir string
 	// Environ reads the caller's environment, which the child inherits with
 	// the CPU class's GOFLAGS adjustment applied. Nil reads os.Environ.
 	Environ func() []string
@@ -61,7 +59,6 @@ type CPUExecRequest struct {
 	Program string
 	Args    []string
 	Env     []string
-	Dir     string
 	// Nice is the niceness to set before the command starts (setpriority on
 	// the process that spawns it, which the child inherits; 0 leaves the
 	// inherited priority).
@@ -80,16 +77,10 @@ type CPUExecRequest struct {
 // injects a fake (WithCPUExecutor) so no unit test starts a process.
 type CPUExecutor func(CPUExecRequest) (int, error)
 
-// RunCPU acquires a CPU-class slot for opts.Role, runs opts.Args under it, and
-// reports the command's exit code. It is the engine of the cpuslot wrapper that
-// the gate and presubmit recipes call from a crew checkout; the command that
-// invokes it decides whether the checkout is crew (CPUBuildRole).
-//
-// The command is resolved before the slot is taken, so a command that cannot
-// run does not hold a slot. The hold is always released before RunCPU returns,
-// recording nothing else: the class is a load bound, and a build's own exit
-// code is the verdict.
+// RunCPU holds a CPU-class slot for opts.Role while it runs opts.Args and
+// reports the command's exit code.
 func RunCPU(townRoot string, opts CPURunOptions) (int, error) {
+	// Resolve first, so a command that cannot run does not hold a slot.
 	envAssigns, cmdArgs := SplitEnvPrefix(opts.Args)
 	program, err := resolveCommand(envAssigns, cmdArgs, opts.Path)
 	if err != nil {
@@ -126,7 +117,6 @@ func RunCPU(townRoot string, opts CPURunOptions) (int, error) {
 		Program: program,
 		Args:    cmdArgs,
 		Env:     cpuClassEnv(environ(), envAssigns),
-		Dir:     opts.Dir,
 		Nice:    defaultCPUClassNice,
 		Stdin:   opts.Stdin,
 		Stdout:  opts.Stdout,
@@ -141,9 +131,8 @@ func RunCPU(townRoot string, opts CPURunOptions) (int, error) {
 
 // RunCommandUnslotted runs args exactly as the shell would have, for a tree the
 // CPU class does not cover: no slot, no priority change and GOFLAGS untouched,
-// so the wrapper is invisible to a polecat's or the landing worker's build.
-// Leading VAR=value assignments apply, and the program is resolved against the
-// PATH the child will see.
+// with leading VAR=value assignments applied and the program resolved against
+// pathEnv.
 func RunCommandUnslotted(args []string, pathEnv string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 	envAssigns, cmdArgs := SplitEnvPrefix(args)
 	program, err := resolveCommand(envAssigns, cmdArgs, pathEnv)
@@ -217,7 +206,6 @@ func runCPUExec(req CPUExecRequest) (int, error) {
 		Path:   req.Program,
 		Args:   req.Args,
 		Env:    req.Env,
-		Dir:    req.Dir,
 		Stdin:  req.Stdin,
 		Stdout: req.Stdout,
 		Stderr: req.Stderr,
@@ -245,17 +233,31 @@ func runCPUExec(req CPUExecRequest) (int, error) {
 }
 
 // exitResult is what a finished command reports: its exit code, or the error
-// that stopped it from finishing. A child that exited reports its code; any
-// other wait error — a write to the caller's own stream that failed, a wait the
-// kernel refused — is the wrapper's failure, and the build must not read as
-// run.
+// that stopped it from finishing. A child that exited reports its code; a child
+// killed by a signal reports the shell's 128+signal; any other wait error is the
+// wrapper's failure, and the build must not read as run.
 func exitResult(program string, waitErr error) (int, error) {
 	if waitErr == nil {
 		return 0, nil
 	}
 	var exitErr *exec.ExitError
 	if errors.As(waitErr, &exitErr) {
-		return exitErr.ExitCode(), nil
+		if code := exitErr.ExitCode(); code >= 0 {
+			return code, nil
+		}
+		if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+			return shellExitCode(ws), nil
+		}
+		return 1, nil
 	}
 	return 0, fmt.Errorf("running %s: %w", program, waitErr)
+}
+
+// shellExitCode is the code a shell reports for a finished status: the exit
+// status, or 128+signal when the process was killed.
+func shellExitCode(ws syscall.WaitStatus) int {
+	if ws.Signaled() {
+		return 128 + int(ws.Signal())
+	}
+	return ws.ExitStatus()
 }

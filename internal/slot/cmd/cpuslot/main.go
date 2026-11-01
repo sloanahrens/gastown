@@ -7,12 +7,13 @@
 // The wrapper's own flags come before the command, and leading VAR=value
 // assignments are env(1) assignments the command runs under:
 //
-//	go run ./internal/slot/cmd/cpuslot -dir tracker GT_TEST_DOCKER=0 go test ./...
+//	go run ./internal/slot/cmd/cpuslot GT_TEST_DOCKER=0 go test ./...
 package main
 
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -22,10 +23,9 @@ import (
 
 func main() {
 	timeout := flag.Duration("timeout", slot.DefaultCPUClassWait, "how long to wait for a CPU-class slot before failing")
-	dir := flag.String("dir", "", "working directory for the command (default: the wrapper's own)")
 	flag.Parse()
 
-	code, err := run(*timeout, *dir, flag.Args())
+	code, err := run(*timeout, flag.Args())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "cpuslot:", err)
 		os.Exit(1)
@@ -33,50 +33,69 @@ func main() {
 	os.Exit(code)
 }
 
-// run decides whether the caller's checkout is a crew worktree and runs args
-// under the CPU class when it is. Every other tree — a polecat's sandbox
-// checkout, the landing worker's gate, a run outside a town — gets the command
-// untouched, so the wrapper changes nothing there.
-func run(timeout time.Duration, dir string, args []string) (int, error) {
-	return runFrom(timeout, dir, args, os.Getwd, workspace.Find)
+// host is what run needs from its process, injected so a test drives every
+// branch without changing its own process's directory.
+type host struct {
+	// getwd and find locate the town above the caller.
+	getwd func() (string, error)
+	find  func(string) (string, error)
+	// run executes the command outside the CPU class, unchanged.
+	run func([]string) (int, error)
+	// queued executes the command after taking a CPU-class slot.
+	queued func(townRoot, role string, args []string) (int, error)
+	// warn receives the notice a failed town lookup prints before the command
+	// runs unchanged.
+	warn io.Writer
 }
 
-// runFrom is run with the working directory and the town lookup injected, so a
-// test drives the failure paths without changing its own process's directory.
-// A town lookup that fails refuses rather than running the command unqueued: a
-// crew build whose tree could not be read is exactly the build the class must
-// not let loose on the host.
-func runFrom(timeout time.Duration, dir string, args []string, getwd func() (string, error), find func(string) (string, error)) (int, error) {
+// run decides whether the caller's checkout is a crew worktree and runs args
+// under the CPU class when it is; every other tree gets the command untouched.
+func run(timeout time.Duration, args []string) (int, error) {
+	return runFrom(args, host{
+		getwd: os.Getwd,
+		find:  workspace.Find,
+		run: func(args []string) (int, error) {
+			return slot.RunCommandUnslotted(args, os.Getenv("PATH"), os.Stdin, os.Stdout, os.Stderr)
+		},
+		queued: func(townRoot, role string, args []string) (int, error) {
+			return slot.RunCPU(townRoot, slot.CPURunOptions{
+				Role:    role,
+				Timeout: timeout,
+				Size:    slot.CPUClassSize(townRoot),
+				Args:    args,
+				Path:    os.Getenv("PATH"),
+				Stdin:   os.Stdin,
+				Stdout:  os.Stdout,
+				Stderr:  os.Stderr,
+			})
+		},
+		warn: os.Stderr,
+	})
+}
+
+// runFrom runs args under a CPU-class slot only when cwd is inside a crew
+// checkout of the town find reports. A town that cannot be read is not a crew
+// checkout: the command runs unchanged, since the class is a load bound and a
+// build outside it must not fail over the bound's own books.
+func runFrom(args []string, h host) (int, error) {
 	if len(args) == 0 {
 		return 0, fmt.Errorf("no command given")
 	}
-	unslotted := func() (int, error) {
-		return slot.RunCommandUnslotted(args, os.Getenv("PATH"), os.Stdin, os.Stdout, os.Stderr)
-	}
-	cwd, err := getwd()
+	cwd, err := h.getwd()
 	if err != nil {
 		return 0, fmt.Errorf("reading the working directory: %w", err)
 	}
-	townRoot, err := find(cwd)
+	townRoot, err := h.find(cwd)
 	if err != nil {
-		return 0, fmt.Errorf("looking for the town above %s: %w", cwd, err)
+		fmt.Fprintf(h.warn, "cpuslot: looking for the town above %s: %v; running the command without a CPU-class slot\n", cwd, err)
+		return h.run(args)
 	}
 	if townRoot == "" {
-		return unslotted()
+		return h.run(args)
 	}
 	role, crew := slot.CPUBuildRole(townRoot, cwd)
 	if !crew {
-		return unslotted()
+		return h.run(args)
 	}
-	return slot.RunCPU(townRoot, slot.CPURunOptions{
-		Role:    role,
-		Timeout: timeout,
-		Size:    slot.CPUClassSize(townRoot),
-		Args:    args,
-		Path:    os.Getenv("PATH"),
-		Dir:     dir,
-		Stdin:   os.Stdin,
-		Stdout:  os.Stdout,
-		Stderr:  os.Stderr,
-	})
+	return h.queued(townRoot, role, args)
 }
