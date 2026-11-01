@@ -60,6 +60,7 @@ func newComposeRig(t *testing.T) *composeRig {
 		doltHost:     func(string) (string, bool) { return composeTestDoltHost, true },
 		containerEnv: func(string) (map[string]string, error) { return map[string]string{}, nil },
 		readFile:     func(string) ([]byte, error) { return nil, fs.ErrNotExist },
+		evalSymlinks: func(p string) (string, error) { return p, nil },
 		files: composeFiles{
 			mkdirAll: func(dir string) error {
 				if r.mkdirErr != nil {

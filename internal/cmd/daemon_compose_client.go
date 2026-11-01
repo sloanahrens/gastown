@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -25,24 +26,39 @@ var containerEnvDeniedNames = map[string]bool{
 // containerEnvDeniedPrefix names the terminal multiplexer's per-session entries.
 const containerEnvDeniedPrefix = "CMUX_"
 
-// settingsEnvRef is a ${NAME} reference in the town's settings: a secret the
-// settings resolve by name from daemon.env or the process, never one the
-// compose file carries.
-var settingsEnvRef = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+// settingsEnvRef is a reference to an environment name in either syntax,
+// ${NAME} or $NAME: a secret the settings resolve by name from daemon.env or the
+// process, never one the compose file carries.
+var settingsEnvRef = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)`)
+
+// containerEnvSecretName matches the daemon.env names that hold a credential.
+// Such an entry is never rendered, referenced or not.
+var containerEnvSecretName = regexp.MustCompile(`(?i)token|secret|passw|credential|api[_-]?key|private`)
 
 // containerEnv is the part of daemon.env the container's environment carries:
-// every entry except the host-only ones and any whose name the settings
-// reference as ${NAME}. A referenced secret stays resolved by the daemon's own
-// read of settings/daemon.env over the bind, so its value is never written to
-// the compose file.
-func containerEnv(daemonEnv map[string]string, settings []byte) map[string]string {
+// every entry except the host-only ones (containerEnvDeniedNames and
+// containerEnvDeniedPrefix are the one list), any whose name is secret-like, and
+// any whose name some settings file, or another daemon.env value, references in
+// either syntax. A referenced secret stays resolved by the daemon's own read of
+// settings/daemon.env over the bind, so its value is never written to the
+// compose file.
+func containerEnv(daemonEnv map[string]string, settingsFiles [][]byte) map[string]string {
 	refs := map[string]bool{}
-	for _, m := range settingsEnvRef.FindAllSubmatch(settings, -1) {
-		refs[string(m[1])] = true
+	scan := func(text []byte) {
+		for _, m := range settingsEnvRef.FindAllSubmatch(text, -1) {
+			refs[string(m[1])+string(m[2])] = true
+		}
+	}
+	for _, f := range settingsFiles {
+		scan(f)
+	}
+	for _, v := range daemonEnv {
+		scan([]byte(v))
 	}
 	out := map[string]string{}
 	for name, value := range daemonEnv {
-		if containerEnvDeniedNames[name] || strings.HasPrefix(name, containerEnvDeniedPrefix) || refs[name] {
+		if containerEnvDeniedNames[name] || strings.HasPrefix(name, containerEnvDeniedPrefix) ||
+			containerEnvSecretName.MatchString(name) || refs[name] {
 			continue
 		}
 		out[name] = value
@@ -50,19 +66,33 @@ func containerEnv(daemonEnv map[string]string, settings []byte) map[string]strin
 	return out
 }
 
-// containerEnvFor loads the town's daemon.env and settings through load and
-// read and returns the container's environment. A town without settings has no
+// containerEnvFor loads the town's daemon.env and every regular file in its
+// settings directory through load, readDir and read, and returns the
+// container's environment. A town without a settings directory has no
 // references to protect.
-func containerEnvFor(townRoot string, load func(string) (map[string]string, error), read func(string) ([]byte, error)) (map[string]string, error) {
+func containerEnvFor(townRoot string, load func(string) (map[string]string, error),
+	readDir func(string) ([]os.DirEntry, error), read func(string) ([]byte, error)) (map[string]string, error) {
 	env, err := load(townRoot)
 	if err != nil {
 		return nil, err
 	}
-	settings, err := read(filepath.Join(townRoot, "settings", "config.json"))
+	dir := filepath.Join(townRoot, "settings")
+	entries, err := readDir(dir)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("read the town's settings to find the secrets it references: %w", err)
+		return nil, fmt.Errorf("list the town's settings to find the secrets they reference: %w", err)
 	}
-	return containerEnv(env, settings), nil
+	var files [][]byte
+	for _, e := range entries {
+		if !e.Type().IsRegular() || e.Name() == "daemon.env" {
+			continue
+		}
+		data, err := read(filepath.Join(dir, e.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("read the setting %s to find the secrets it references: %w", e.Name(), err)
+		}
+		files = append(files, data)
+	}
+	return containerEnv(env, files), nil
 }
 
 // Container kubeconfig facts: the host name Docker Desktop gives the Mac, and
@@ -92,8 +122,10 @@ type kubeconfigFile struct {
 // localhost. It holds no user and no credential: kubectl merges a KUBECONFIG list
 // by name, first file first, so this file is listed before the original, whose
 // contexts and users (and their credentials, by the original's own file) apply
-// unchanged. The certificate authority is public and is copied with its cluster.
-func containerKubeconfig(original []byte) ([]byte, error) {
+// unchanged. The certificate authority is public and is copied with its cluster;
+// a certificate-authority file path is made absolute against dir, the original's
+// directory, because the derived file lives in another one.
+func containerKubeconfig(original []byte, dir string) ([]byte, error) {
 	var in kubeconfigFile
 	if err := yaml.Unmarshal(original, &in); err != nil {
 		return nil, fmt.Errorf("the kubeconfig does not parse: %w", err)
@@ -122,8 +154,12 @@ func containerKubeconfig(original []byte) ([]byte, error) {
 			return nil, fmt.Errorf("cluster %q has server %q, which is not a URL with a host", c.Name, c.Cluster.Server)
 		}
 		u.Host = containerKubeHost + portSuffix(u.Port())
+		caFile := c.Cluster.CAFile
+		if caFile != "" && !filepath.IsAbs(caFile) {
+			caFile = filepath.Join(dir, caFile)
+		}
 		out.Clusters = append(out.Clusters, entry{Name: c.Name, Cluster: cluster{
-			Server: u.String(), TLSServerName: containerKubeTLSName, CAData: c.Cluster.CAData, CAFile: c.Cluster.CAFile,
+			Server: u.String(), TLSServerName: containerKubeTLSName, CAData: c.Cluster.CAData, CAFile: caFile,
 		}})
 	}
 	// The value is plain strings and slices of them, which yaml.Marshal cannot

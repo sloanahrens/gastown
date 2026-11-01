@@ -58,6 +58,9 @@ type daemonComposeDeps struct {
 	// daemon.env; readFile reads the kubeconfig the derived one comes from.
 	containerEnv func(townRoot string) (map[string]string, error)
 	readFile     func(path string) ([]byte, error)
+	// evalSymlinks resolves the kubeconfig and the town for the under-the-town
+	// check.
+	evalSymlinks func(path string) (string, error)
 	files        composeFiles
 	out          io.Writer
 }
@@ -94,9 +97,10 @@ func realDaemonComposeDeps(out io.Writer) daemonComposeDeps {
 		daemonConfig: realDaemonControl().townDaemonConfig,
 		doltHost:     containerDoltHost(config.ResolveDoltEndpointFor),
 		containerEnv: func(townRoot string) (map[string]string, error) {
-			return containerEnvFor(townRoot, config.LoadDaemonEnv, os.ReadFile)
+			return containerEnvFor(townRoot, config.LoadDaemonEnv, os.ReadDir, os.ReadFile)
 		},
-		readFile: os.ReadFile,
+		readFile:     os.ReadFile,
+		evalSymlinks: filepath.EvalSymlinks,
 		files: composeFiles{
 			mkdirAll: func(dir string) error { return os.MkdirAll(dir, 0o755) },
 			write:    daemonimage.WriteComposeFile,
@@ -160,9 +164,10 @@ the cluster and the gateway. The render writes a derived kubeconfig beside the
 town's .runtime (the original's cluster entries on host.docker.internal with
 tls-server-name localhost, no user, no credential), lists it before the original
 in KUBECONFIG, and mounts the openshell directory read-only; only paths appear in
-the compose file. The daemon.env entries that are not host-only (never PATH,
-SDKROOT, DEVELOPER_DIR, GOTMPDIR, TMPDIR or CMUX_*, and never a name the
-settings reference as a secret) go into the container's environment.
+the compose file. The daemon.env entries that are not host-only (containerEnvDeniedNames
+in internal/cmd/daemon_compose_client.go is the list), not secret-named and not
+referenced as $NAME or ${NAME} by any settings file go into the container's
+environment.
 
 --print prints the render and writes no file.`,
 		Args: cobra.NoArgs,
@@ -175,7 +180,7 @@ settings reference as a secret) go into the container's environment.
 	write.Flags().StringVar(&f.omTokenFile, config.OMTokenFileFlag, "",
 		"om token file's absolute path on the host, mounted read-only into the container; unset renders neither the mount nor the flag, and a blank value is refused")
 	write.Flags().StringVar(&f.kubeconfig, "kubeconfig", "",
-		"the host kubeconfig (an absolute path under the town); the render adds a derived copy on host.docker.internal with tls-server-name localhost and sets KUBECONFIG; unset renders neither")
+		"the host kubeconfig (an absolute path under the town, checked on resolved paths); the render adds a derived copy on host.docker.internal with tls-server-name localhost and sets KUBECONFIG; unset renders neither")
 	write.Flags().StringVar(&f.openShellConfigDir, "openshell-config-dir", "",
 		"the host's openshell config directory (gateway metadata and mTLS client certificates), an absolute path mounted read-only; unset renders neither the mount nor XDG_CONFIG_HOME")
 	write.Flags().BoolVar(&f.print, "print", false, "print the render and write no file")
@@ -239,11 +244,14 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 	var overlay []byte
 	var kubeconfigFiles []string
 	if kubeconfig != "" {
+		if err := requireUnderTown(townRoot, kubeconfig, d.evalSymlinks); err != nil {
+			return err
+		}
 		original, err := d.readFile(kubeconfig)
 		if err != nil {
 			return fmt.Errorf("reading the kubeconfig %s: %w", kubeconfig, err)
 		}
-		if overlay, err = containerKubeconfig(original); err != nil {
+		if overlay, err = containerKubeconfig(original, filepath.Dir(kubeconfig)); err != nil {
 			return fmt.Errorf("deriving the container kubeconfig from %s: %w", kubeconfig, err)
 		}
 		kubeconfigFiles = []string{containerKubeconfigPath(townRoot), kubeconfig}
@@ -281,5 +289,23 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 	}
 	fmt.Fprintf(d.out, "%s Wrote %s: container %s, compose project %s, image %s.\n",
 		style.Bold.Render("✓"), path, spec.ContainerName, project, spec.Image)
+	return nil
+}
+
+// requireUnderTown refuses a kubeconfig that is not inside the town on resolved
+// paths: the container sees only the town bind, so a file elsewhere would be
+// listed in KUBECONFIG and not be there.
+func requireUnderTown(townRoot, path string, eval func(string) (string, error)) error {
+	town, err := eval(townRoot)
+	if err != nil {
+		return fmt.Errorf("the town root %s cannot be resolved: %w", townRoot, err)
+	}
+	real, err := eval(path)
+	if err != nil {
+		return fmt.Errorf("--kubeconfig %s cannot be resolved: %w", path, err)
+	}
+	if !filepath.IsAbs(path) || !pathWithin(real, town) {
+		return fmt.Errorf("--kubeconfig %s resolves to %s, which is not an absolute path under the town %s; the container reads only the town bind", path, real, town)
+	}
 	return nil
 }
