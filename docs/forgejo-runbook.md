@@ -224,6 +224,16 @@ undo for one directory is `git -C <dir> remote set-url origin <old url>`. Before
 undo is copying that file back over `town.json`; a `git_url` that already matches
 is left alone and gets no backup.
 
+Step 6 in Go (`WriteSettings`, same package and same status) sets
+`merge_queue.forgejo` in the rig's `settings/config.json`: the Forgejo URL, the
+gate workflow, one bot login per role, and the promote target and key file. Every
+other key keeps its place; a block that already means the same thing is left
+alone with no backup; a missing file is created with its type and version. The
+file is copied to `config.json.bak-<yyyymmdd-hhmmss>` first, and the undo is
+copying that backup back over `config.json`. The daemon reads the block at start,
+so it is also a live step: after the promote key exists and the first L3 checks
+pass, never from a landing.
+
 When the rig's credential-helper hostname is not the admin base — the usual
 case, since it is the form every rig remote carries — pass `--forgejo-url` that
 hostname form. It is what lands in the remotes, `town.json` and the rig block;
