@@ -5,6 +5,11 @@
 // paths and the reaper, which arrive in the third build bead and the wiring
 // after it (design: docs/research/tracker/K1b-seat-token-as-provider-placeholder.md,
 // question 1, option A). Every call runs against openshell's active gateway.
+//
+// The token reaches the gateway only through the environment of the child
+// process that runs "openshell provider create"; it is never in argv. A process
+// of the same user can read a child's environment, which is the tradeoff of
+// handing a credential to a CLI by variable name.
 package seatprovider
 
 import (
@@ -46,11 +51,21 @@ const digestWidth = 8
 // that knows the seat is dead deletes that provider and creates again.
 var ErrExists = errors.New(Name + ": a provider already holds this seat's name")
 
-// ErrNoLiveSeats reports a Sweep call whose live set names no seat. Sweep refuses
-// it because a read of the live seats that failed or came back empty looks the
-// same as a town with none, and deleting every provider is not recoverable. A
-// caller that has established no seat is live calls SweepAll.
-var ErrNoLiveSeats = errors.New(Name + ": sweeping needs the live seats; pass SweepAll to delete every provider this package created")
+// ErrNoLiveSeats reports a Sweep whose live read named no seat. Sweep refuses it
+// because a read of the live seats that came back empty looks the same as a read
+// that went wrong, and deleting every provider is not recoverable. This package
+// offers no way to delete every provider; a later bead adds one if a shutdown
+// needs it.
+var ErrNoLiveSeats = errors.New(Name + ": sweeping needs the live seats, and the live read named none")
+
+// ErrNotOwned reports a Delete of a name this package did not create, such as
+// the model provider. Delete is for the provider a seat's Create made.
+var ErrNotOwned = errors.New(Name + ": not a provider this package created")
+
+// LiveSeats reads the seats that are live now, as a set keyed by seat address.
+// Sweep calls it after it has listed the providers, so a seat that registered
+// before its Create began is in the set whenever its provider is in the list.
+type LiveSeats func(ctx context.Context) (map[string]bool, error)
 
 // Runner runs one provider CLI call and returns its stdout. It is the only path
 // to the gateway, so a unit test runs no process; env holds the variables added
@@ -107,9 +122,14 @@ func Create(ctx context.Context, r Runner, seat, token string) (string, error) {
 	return name, nil
 }
 
-// Delete removes the provider name. A name the gateway does not list is not an
-// error, so a seat end that runs twice still succeeds.
+// Delete removes the provider name, which must be one this package created
+// (ErrNotOwned otherwise, so a seat end can never delete the model provider).
+// A name the gateway does not list is not an error, so a seat end that runs
+// twice still succeeds.
 func Delete(ctx context.Context, r Runner, name string) error {
+	if !ownsName(name) {
+		return fmt.Errorf("%w: %q", ErrNotOwned, name)
+	}
 	names, err := listProviders(ctx, r)
 	if err != nil {
 		return err
@@ -120,36 +140,31 @@ func Delete(ctx context.Context, r Runner, name string) error {
 	return deleteProvider(ctx, r, name)
 }
 
-// Sweep deletes every provider this package created whose seat is not a key of
-// live, and returns their names in listing order. A live seat's provider
-// survives. live is the caller's liveness authority: a seat is in it before
-// Create runs for that seat, so a sweep cannot reap a provider still being
-// created. A live set that names no seat is ErrNoLiveSeats. A failed delete
-// stops the sweep, which returns the names it deleted before it.
-func Sweep(ctx context.Context, r Runner, live map[string]bool) ([]string, error) {
-	if len(live) == 0 {
-		return nil, ErrNoLiveSeats
-	}
-	liveNames := make(map[string]bool, len(live))
-	for seat := range live {
-		liveNames[NameFor(seat)] = true
-	}
-	return sweep(ctx, r, liveNames)
-}
-
-// SweepAll deletes every provider this package created and returns their names in
-// listing order. It exists for the caller that has established no seat is live,
-// which Sweep refuses to infer from an empty live set.
-func SweepAll(ctx context.Context, r Runner) ([]string, error) {
-	return sweep(ctx, r, nil)
-}
-
-// sweep deletes each owned provider that is not a key of keep, which nil keeps
-// none of. A failed delete stops it, with the names deleted so far.
-func sweep(ctx context.Context, r Runner, keep map[string]bool) ([]string, error) {
+// Sweep deletes every provider this package created whose seat is not live, and
+// returns their names in listing order. It lists the providers first and reads
+// the live seats second, which is what keeps it from reaping a provider whose
+// seat is starting: the seat is in the live set before its Create begins, so a
+// provider that Sweep's list shows belongs to a seat that the later live read
+// already includes. Reading live first would open the window the other way.
+//
+// A live read that fails is the sweep's failure, and one that names no seat is
+// ErrNoLiveSeats; nothing is deleted in either case. A failed delete stops the
+// sweep, which returns the names it deleted before it.
+func Sweep(ctx context.Context, r Runner, live LiveSeats) ([]string, error) {
 	names, err := listProviders(ctx, r)
 	if err != nil {
 		return nil, err
+	}
+	seats, err := live(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%s: reading the live seats failed, so nothing was deleted", Name)
+	}
+	if len(seats) == 0 {
+		return nil, ErrNoLiveSeats
+	}
+	keep := make(map[string]bool, len(seats))
+	for seat := range seats {
+		keep[NameFor(seat)] = true
 	}
 	var deleted []string
 	for _, name := range names {
@@ -171,9 +186,14 @@ func createArgs(name string) []string {
 	return []string{"provider", "create", "--name", name, "--type", providerType, "--credential", tokenEnv}
 }
 
-// deleteArgs returns the argv that deletes name. openshell's provider reference
-// gives delete positional names, "provider delete NAME [NAME...]", and a name
-// NameFor returns starts with a letter, so none can be read as a flag.
+// deleteArgs returns the argv that deletes name: "provider delete NAME".
+//
+// Source of the form: openshell 0.1.5, "openshell provider delete --help" prints
+// "USAGE  openshell provider delete [OPTIONS] <NAME>..." with the flags
+// --gateway and --gateway-endpoint only (read 2026-11-01). Delete and Sweep
+// apply ownsName first, so the name starts with namePrefix and can never be read
+// as a flag. The form has not been run against a gateway; the live proof of the
+// K1b research doc runs it once.
 func deleteArgs(name string) []string {
 	return []string{"provider", "delete", name}
 }

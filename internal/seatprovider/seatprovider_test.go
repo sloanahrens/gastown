@@ -72,6 +72,11 @@ func (f *fakeRunner) callsOf(verb string) []call {
 	return got
 }
 
+// liveOf is a LiveSeats that always reads set.
+func liveOf(set map[string]bool) LiveSeats {
+	return func(context.Context) (map[string]bool, error) { return set, nil }
+}
+
 // listJSON returns a provider list as openshell prints it with --output json, the
 // shape internal/doctor decodes too.
 func listJSON(names ...string) string {
@@ -227,7 +232,7 @@ func TestCreateReportsAFailedCreateWithoutTheToken(t *testing.T) {
 func TestDeleteMissingProviderIsNotAnError(t *testing.T) {
 	t.Parallel()
 	r := newFake("deepseek", "generic")
-	if err := Delete(context.Background(), r, "seat-gone"); err != nil {
+	if err := Delete(context.Background(), r, NameFor("gastown/polecats/gone")); err != nil {
 		t.Fatalf("Delete of an unlisted provider: %v, want nil so a seat end that runs twice succeeds", err)
 	}
 	if deletes := r.callsOf("delete"); len(deletes) != 0 {
@@ -255,7 +260,7 @@ func TestDeleteReportsAListFailure(t *testing.T) {
 	t.Parallel()
 	r := newFake()
 	r.listErr = errors.New("exit status 1")
-	if err := Delete(context.Background(), r, "seat-x"); err == nil {
+	if err := Delete(context.Background(), r, NameFor("gastown/polecats/x")); err == nil {
 		t.Fatal("Delete returned no error on a failed list, want the failure")
 	}
 }
@@ -284,7 +289,7 @@ func TestSweepDeletesOnlyOrphansWithThePrefix(t *testing.T) {
 		namePrefix+"no-digest-suffix", // this prefix, but not a name NameFor makes
 	)
 
-	deleted, err := Sweep(context.Background(), r, map[string]bool{liveSeat: true})
+	deleted, err := Sweep(context.Background(), r, liveOf(map[string]bool{liveSeat: true}))
 	if err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
@@ -310,12 +315,12 @@ func TestSweepRefusesALiveSetNamingNoSeat(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			r := newFake(NameFor("gastown/polecats/ace"))
-			deleted, err := Sweep(context.Background(), r, tt.live)
+			deleted, err := Sweep(context.Background(), r, liveOf(tt.live))
 			if !errors.Is(err, ErrNoLiveSeats) {
 				t.Fatalf("Sweep error = %v, want ErrNoLiveSeats, because an unread live set looks like a town with no seats", err)
 			}
-			if len(deleted) != 0 || len(r.calls) != 0 {
-				t.Fatalf("Sweep made calls %q and reported %q, want none: it must not delete before it knows the live seats", r.verbs(), deleted)
+			if deletes := r.callsOf("delete"); len(deleted) != 0 || len(deletes) != 0 {
+				t.Fatalf("Sweep deleted %q with calls %q, want none: it must not delete before it knows the live seats", deleted, r.verbs())
 			}
 		})
 	}
@@ -325,7 +330,7 @@ func TestSweepReportsAListFailure(t *testing.T) {
 	t.Parallel()
 	r := newFake()
 	r.listErr = errors.New("exit status 1")
-	if _, err := Sweep(context.Background(), r, map[string]bool{"gastown/polecats/ace": true}); err == nil {
+	if _, err := Sweep(context.Background(), r, liveOf(map[string]bool{"gastown/polecats/ace": true})); err == nil {
 		t.Fatal("Sweep returned no error on a failed list, want the failure, so orphans are not reported as swept")
 	}
 	if deletes := r.callsOf("delete"); len(deletes) != 0 {
@@ -341,7 +346,7 @@ func TestSweepReportsAFailedDeleteWithWhatItDeleted(t *testing.T) {
 	r := newFake(first, second, third)
 	r.deleteFail = map[string]error{second: errors.New("exit status 1")}
 
-	deleted, err := Sweep(context.Background(), r, map[string]bool{"gastown/polecats/live": true})
+	deleted, err := Sweep(context.Background(), r, liveOf(map[string]bool{"gastown/polecats/live": true}))
 	if err == nil {
 		t.Fatal("Sweep returned no error on a failed delete, want the failure")
 	}
@@ -356,17 +361,58 @@ func TestSweepReportsAFailedDeleteWithWhatItDeleted(t *testing.T) {
 	}
 }
 
-func TestSweepAllDeletesEveryProviderItCreated(t *testing.T) {
+func TestDeleteRefusesAProviderThisPackageDidNotCreate(t *testing.T) {
 	t.Parallel()
-	liveName := NameFor("gastown/polecats/ace")
-	orphan := NameFor("gastown/polecats/dead")
-	r := newFake(liveName, "deepseek", orphan)
-
-	deleted, err := SweepAll(context.Background(), r)
-	if err != nil {
-		t.Fatalf("SweepAll: %v", err)
+	for _, name := range []string{"deepseek", "seat-other-client-1234abcd", namePrefix + "no-digest-suffix", "--all"} {
+		r := newFake(name)
+		err := Delete(context.Background(), r, name)
+		if !errors.Is(err, ErrNotOwned) {
+			t.Errorf("Delete(%q) = %v, want ErrNotOwned", name, err)
+		}
+		if len(r.calls) != 0 {
+			t.Errorf("Delete(%q) made calls %q, want none for a name it does not own", name, r.verbs())
+		}
 	}
-	if want := []string{liveName, orphan}; !slices.Equal(deleted, want) {
-		t.Fatalf("deleted = %q, want every provider this package created, %q", deleted, want)
+}
+
+// A seat registers as live before its Create runs, so a provider the list shows
+// is for a seat the live read already includes. The live read here only knows
+// the seat once the list has been read, as it would for a seat that registered
+// and created between a sweep's start and its live read; a sweep that read live
+// first would see no seat and delete the new provider.
+func TestSweepReadsTheLiveSeatsAfterListingTheProviders(t *testing.T) {
+	t.Parallel()
+	seat := "gastown/polecats/starting"
+	r := newFake(NameFor(seat))
+	live := func(context.Context) (map[string]bool, error) {
+		if len(r.callsOf("list")) == 0 {
+			return map[string]bool{"gastown/polecats/other": true}, nil
+		}
+		return map[string]bool{seat: true, "gastown/polecats/other": true}, nil
+	}
+
+	deleted, err := Sweep(context.Background(), r, live)
+	if err != nil || len(deleted) != 0 {
+		t.Fatalf("Sweep = %q, %v; want the starting seat's provider kept", deleted, err)
+	}
+	if deletes := r.callsOf("delete"); len(deletes) != 0 {
+		t.Fatalf("delete ran for %q, want none", deletes)
+	}
+}
+
+func TestSweepFailsWithoutDeletingWhenTheLiveReadFails(t *testing.T) {
+	t.Parallel()
+	r := newFake(NameFor("gastown/polecats/ace"))
+	live := func(context.Context) (map[string]bool, error) { return nil, errors.New("tracker down") }
+
+	_, err := Sweep(context.Background(), r, live)
+	if err == nil {
+		t.Fatal("Sweep returned no error when the live read failed")
+	}
+	if errors.Is(err, ErrNoLiveSeats) {
+		t.Fatalf("Sweep reported a failed live read as %v, want it reported as a failure to read, not as a town with no seats", err)
+	}
+	if deletes := r.callsOf("delete"); len(deletes) != 0 {
+		t.Fatalf("delete ran %d times after a failed live read, want none", len(deletes))
 	}
 }
