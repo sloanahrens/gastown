@@ -5600,6 +5600,10 @@ $("models").addEventListener("click", toggleModels);
 paintModelsLine();
 renderChips();
 connect();
+// A tab that comes back has a stream whose events may still be queued behind
+// the tab's own held timers, so the silence belongs to the tab, not the
+// stream (gt-t0qi7).
+document.addEventListener("visibilitychange", () => { if (!document.hidden) lastEvent = Date.now(); });
 // The watchdog is for a stream the browser has lost without saying so: a
 // half-open connection never reaches CLOSED and never calls back, and an open
 // one that sends nothing reports nothing. A named event is the only liveness the
@@ -5610,9 +5614,18 @@ connect();
 // only a stalled or restarted server reaches it; a server quiet that long costs
 // the refresh that follows the drop, and the page holds the state it has until
 // then (gt-rpble, gt-3q3go).
+// A tick more than two intervals after the last one is the page's own timer
+// having been held — a hidden, frozen or asleep tab — and says nothing about the
+// stream, whose events are still queued behind it. Such a tick moves the clock
+// rather than dropping, so only a stream silent for SILENT_MS of page-awake time
+// is replaced (gt-t0qi7).
+let lastTick = Date.now();
 setInterval(() => {
+  const now = Date.now(), late = now - lastTick > 2 * WATCHDOG_MS;
+  lastTick = now;
   if (reconnecting) return; // a replacement is already on its way
-  if (Date.now() - lastEvent < SILENT_MS) return;
+  if (late) { lastEvent = now; return; }
+  if (now - lastEvent < SILENT_MS) return;
   dropStream();
   stream.close();
   connect();

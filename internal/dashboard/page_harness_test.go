@@ -230,12 +230,23 @@ var document = {
   querySelectorAll: function (sel) {
     return String(sel).indexOf("section") >= 0 ? __sections.slice() : [];
   },
-  addEventListener: function () {},
+  // The document's own listeners are kept so a test can deliver a browser event
+  // — visibilitychange — to the page the way the browser does (gt-t0qi7).
+  addEventListener: function (type, fn) {
+    if (!this._listeners) this._listeners = {};
+    (this._listeners[type] = this._listeners[type] || []).push(fn);
+  },
   title: "", hidden: false, activeElement: null,
   body: __el("body"),
   hasFocus: function () { return true; },
   execCommand: function () { return true; }
 };
+// __visibility is the browser telling the page its tab was hidden or shown:
+// document.hidden carries the new state, visibilitychange the event.
+function __visibility(hidden) {
+  document.hidden = !!hidden;
+  __fireOn(document, "visibilitychange", { type: "visibilitychange", target: document });
+}
 // __storageThrows is a browser that refuses storage outright — private mode, a
 // locked-down policy. A test sets it before the page runs, so the page meets the
 // refusal where it reads its first choice.
@@ -365,6 +376,24 @@ function __advance(ms) {
     next.fn.apply(null, next.args);
   }
   __clock = end;
+}
+// __sleep moves the page's clock by ms without running any timer, the way a
+// hidden or frozen tab holds them, then runs each timer that fell due once at
+// the new time: a browser coalesces a held interval's missed ticks into one.
+function __sleep(ms) {
+  __clock += ms;
+  var due = [];
+  __timers = __timers.filter(function (t) {
+    if (t.at > __clock) return true;
+    due.push(t);
+    return false;
+  });
+  due.sort(function (a, b) { return a.at - b.at || a.id - b.id; });
+  for (var i = 0; i < due.length; i++) {
+    var t = due[i];
+    if (t.every) { t.at = __clock + t.every; __timers.push(t); }
+    t.fn.apply(null, t.args);
+  }
 }
 var window = this;
 function __snapEl(e) {
