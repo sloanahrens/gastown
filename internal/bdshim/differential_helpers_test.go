@@ -78,6 +78,7 @@ var differentialRows = []differentialRow{
 	{stem: "create-title-fixture-created-type-task-priority-3-json", argv: []string{"create", "--title", "fixture-created", "--type", "task", "--priority", "3", "--json"}},
 	{stem: "update-status-in-progress", argv: []string{"update", "--status", "in_progress", "fx-1"}},
 	{stem: "close-reason-fixture-close", argv: []string{"close", "--reason", "fixture-close", "fx-1"}},
+	{stem: "close-force-reason-fixture-close", argv: []string{"close", "--force", "--reason", "fixture-close", "fx-1"}},
 	{stem: "reopen", argv: []string{"reopen", "fx-1"}},
 	{stem: "delete-force", argv: []string{"delete", "--force", "fx-1"}},
 	{stem: "defer-reason-fixture-defer", argv: []string{"defer", "--reason", "fixture-defer", "fx-1"}},
@@ -110,6 +111,30 @@ var knownUnhandledVerbs = map[string]bool{
 	"comment":  true,
 }
 
+// seatDivergence is the answer the shim gives where bd's differs by design.
+type seatDivergence struct {
+	stdout string
+	exit   int
+}
+
+// knownSeatDivergences names the golden rows whose shim answer is NOT bd's, by
+// design (gt-jbetd). close --force: bd closes past the blocker; the shim's close
+// handler answers only --reason and refuses --force by name before it reaches
+// the tracker, with nothing on stdout and exit 1, which is also what gt-gk7ga
+// wants for a seat (only an admin token closes past the fences). The map only
+// shrinks: an entry whose shim answer has become bd's fails the run.
+var knownSeatDivergences = map[string]seatDivergence{
+	"close-force-reason-fixture-close": {stdout: "", exit: 1},
+}
+
+// awaitingRecording names the divergence rows whose golden bdshim-record has
+// not written yet (the live recording needs a stamped image). The shim's side
+// is asserted now; the golden side once the file exists, and an entry whose
+// golden exists fails, so the list only shrinks.
+var awaitingRecording = map[string]bool{
+	"close-force-reason-fixture-close": true,
+}
+
 // newDifferentialCase is the run the committed goldens get: the real golden
 // directory, the fixture file the recorder seeded from, and the shim's own
 // handler registry.
@@ -125,6 +150,8 @@ func newDifferentialCase(t *testing.T) differentialCase {
 		rows:     differentialRows,
 		handlers: handlers,
 		known:    knownUnhandledVerbs,
+		diverge:  knownSeatDivergences,
+		awaiting: awaitingRecording,
 		keep:     keep,
 		run: func(argv []string) ([]byte, int, error) {
 			return runFixtureRow(t, town, fixture, argv)
