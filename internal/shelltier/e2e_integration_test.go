@@ -212,3 +212,41 @@ func killRecordedGroup(t *testing.T, pidFile string) {
 		t.Logf("kill process group %d: %v", pgid, err)
 	}
 }
+
+func TestIntegrationOSTimingAppendCreatesTheLogAndAppends(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), ".runtime", "tiertiming", "shell.jsonl")
+	files := OSTimingFiles{}
+	for _, line := range []string{"{\"script\":\"a\"}\n", "{\"script\":\"b\"}\n"} {
+		if err := files.Append(path, []byte(line)); err != nil {
+			t.Fatalf("append %q: %v", line, err)
+		}
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the log: %v", err)
+	}
+	if want := "{\"script\":\"a\"}\n{\"script\":\"b\"}\n"; string(got) != want {
+		t.Fatalf("log = %q, want %q", got, want)
+	}
+}
+
+func TestIntegrationOSTimingAppendRefusesAPathUnderAFile(t *testing.T) {
+	t.Parallel()
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := OSTimingFiles{}.Append(filepath.Join(blocker, "shell.jsonl"), []byte("{}\n"))
+	if err == nil {
+		t.Fatal("Append under a regular file = nil, want an error")
+	}
+}
+
+func TestIntegrationOSTimingAppendRefusesADirectoryAsTheLog(t *testing.T) {
+	t.Parallel()
+	err := OSTimingFiles{}.Append(t.TempDir(), []byte("{}\n"))
+	if err == nil {
+		t.Fatal("Append to a directory = nil, want an error")
+	}
+}

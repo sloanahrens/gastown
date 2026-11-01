@@ -5,8 +5,10 @@
 //	go run ./internal/shelltier/cmd/shelltier --since-green --town <dir>
 //
 // Before each script it writes `tier-sweep: shell <path> ...` to stderr, and it
-// writes the summary line there last. It exits with the tier's verdict: 0 when
-// green, 1 when red, 2 on a usage error or when the log dir cannot be made.
+// writes the summary line there last. It appends each script's wall time to the
+// town's timing log (gt-u560q.10) and says on stderr when that log cannot be
+// written. It exits with the tier's verdict: 0 when green, 1 when red, 2 on a
+// usage error or when the log dir cannot be made.
 package main
 
 import (
@@ -21,6 +23,7 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/shelltier"
 	"github.com/steveyegge/gastown/internal/tiertrigger"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // usage is the line a usage error prints, the one a caller greps for.
@@ -47,6 +50,12 @@ type Env struct {
 	Checkout func(root string) shelltier.Checkout
 	// Zone is the zone the daily window is read in.
 	Zone func() (*time.Location, error)
+	// Timing appends each script's wall time to the run's timing log. Nil
+	// records no timing.
+	Timing shelltier.TimingFiles
+	// Town is the town root the timing log is written under, looked up from the
+	// run's root when --town does not name it. Nil can only use --town.
+	Town func(root string) (string, error)
 }
 
 func main() {
@@ -61,7 +70,41 @@ func main() {
 		Files:       tiertrigger.OSFiles{},
 		Checkout:    gitCheckout,
 		Zone:        tiertrigger.DailyZoneLocation,
+		Timing:      shelltier.OSTimingFiles{},
+		Town:        townOf,
 	}))
+}
+
+// townOf is the town root that contains root, which is the town a run without
+// --town records its timing under. The tier's callers start the runner from a
+// worktree inside the town.
+func townOf(root string) (string, error) {
+	return workspace.FindOrError(root)
+}
+
+// timingLog is the appender and the log the run records each script's wall time
+// to. The town is --town when given, else the town the run's root is in. A run
+// that finds no town records no timing and says so on the error stream, rather
+// than writing the log outside a town.
+func timingLog(env Env, town, root string) (shelltier.TimingFiles, string) {
+	if env.Timing == nil {
+		return nil, ""
+	}
+	if town == "" {
+		if env.Town == nil {
+			return nil, ""
+		}
+		found, err := env.Town(root)
+		if err == nil && found == "" {
+			err = fmt.Errorf("%q names no town", root)
+		}
+		if err != nil {
+			fmt.Fprintf(env.Err, "shelltier: no town root for the timing log: %v: recording no timing\n", err)
+			return nil, ""
+		}
+		town = found
+	}
+	return env.Timing, shelltier.TimingPath(town)
 }
 
 // gitCheckout is the repository at root, read through git.
@@ -150,6 +193,7 @@ func Main(args []string, out io.Writer, env Env) int {
 		plan = shelltier.PlanSinceGreen(env.Entries, *town, env.Files, env.Checkout(*root), env.Zone, env.Now(), env.Err)
 	}
 
+	timing, timingPath := timingLog(env, *town, *root)
 	result := shelltier.Run(context.Background(), shelltier.Config{
 		Entries:     plan.Run,
 		Root:        *root,
@@ -158,6 +202,9 @@ func Main(args []string, out io.Writer, env Env) int {
 		Exec:        announce(env.Err, env.Exec),
 		Now:         env.Now,
 		WithTimeout: env.WithTimeout,
+		Timing:      timing,
+		TimingPath:  timingPath,
+		Err:         env.Err,
 	})
 	result.Skipped = plan.Skipped
 	plan.Finish(result, env.Now(), env.Err)

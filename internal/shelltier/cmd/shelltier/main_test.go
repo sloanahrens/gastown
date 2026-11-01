@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -381,5 +382,117 @@ func TestSinceGreenRefusesAMissingTownValue(t *testing.T) {
 				t.Fatalf("ran %d scripts without a town, want 0", len(f.cmds))
 			}
 		})
+	}
+}
+
+func TestMainRecordsEachScriptsTimeUnderTheTown(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		args []string
+		// found is the town root the lookup answers.
+		found string
+		// looked is the root the lookup must be given, or "" when --town must
+		// keep the lookup from being consulted at all.
+		looked string
+		want   string
+	}{
+		{
+			name:   "the town flag names the town",
+			args:   []string{"--all", "--town", "/flag-town", "--logdir", "/logs"},
+			found:  "/looked-up-town",
+			looked: "",
+			want:   shelltier.TimingPath("/flag-town"),
+		},
+		{
+			name:   "the town is looked up from the run's root",
+			args:   []string{"--all", "--logdir", "/logs"},
+			found:  "/found-town",
+			looked: ".",
+			want:   shelltier.TimingPath("/found-town"),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFixture(nil, twoScripts()...)
+			timing := &shelltiertest.Timing{}
+			looked := ""
+			f.env.Timing = timing
+			f.env.Town = func(root string) (string, error) {
+				looked = root
+				return tc.found, nil
+			}
+			if code := Main(tc.args, &f.out, f.env); code != 0 {
+				t.Fatalf("exit = %d, want 0", code)
+			}
+			if looked != tc.looked {
+				t.Errorf("town lookup root = %q, want %q", looked, tc.looked)
+			}
+			if len(timing.Lines) != 2 {
+				t.Fatalf("appended %d lines, want one per script", len(timing.Lines))
+			}
+			for i, line := range timing.Lines {
+				if timing.Paths[i] != tc.want {
+					t.Errorf("line %d appended to %q, want %q", i, timing.Paths[i], tc.want)
+				}
+				if path := twoScripts()[i].Path; !strings.Contains(line, path) {
+					t.Errorf("line %d = %q, want it to name %s", i, line, path)
+				}
+			}
+		})
+	}
+}
+
+func TestMainRecordsNoTimingWithoutATown(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		town func(root string) (string, error)
+	}{
+		{"the lookup fails", func(string) (string, error) { return "", errors.New("not in a workspace") }},
+		{"the lookup finds no town", func(string) (string, error) { return "", nil }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFixture(nil, twoScripts()...)
+			timing := &shelltiertest.Timing{}
+			f.env.Timing, f.env.Town = timing, tc.town
+			if code := Main([]string{"--all", "--logdir", "/logs"}, &f.out, f.env); code != 0 {
+				t.Fatalf("exit = %d, want 0: a missing town must not change the verdict", code)
+			}
+			if len(timing.Lines) != 0 {
+				t.Errorf("appended %q, want nothing without a town", timing.Lines)
+			}
+			if !strings.Contains(f.err.String(), "no town root for the timing log") {
+				t.Errorf("error stream = %q, want the missing town said", f.err.String())
+			}
+		})
+	}
+}
+
+// TestTownOfFindsTheTownContainingTheRoot drives the production town lookup:
+// the runner starts in a worktree inside a town and records its timing under
+// the town root, whatever the depth.
+func TestTownOfFindsTheTownContainingTheRoot(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(town, "mayor", "town.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	worktree := filepath.Join(town, "gastown", "polecats", "ace")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := townOf(worktree)
+	if err != nil {
+		t.Fatalf("townOf(%q): %v", worktree, err)
+	}
+	if got != town {
+		t.Errorf("townOf(%q) = %q, want the town root %q", worktree, got, town)
 	}
 }

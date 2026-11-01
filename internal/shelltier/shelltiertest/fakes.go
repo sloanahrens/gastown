@@ -30,3 +30,19 @@ func (m MemFiles) RemoveFile(path string) error {
 	delete(m, path)
 	return nil
 }
+
+// Timing records each timing line appended and answers with Err, so a test
+// drives the runner's timing log without touching the disk.
+type Timing struct {
+	// Err is what Append answers.
+	Err   error
+	Paths []string
+	Lines []string
+}
+
+// Append records path and line, and answers with Err.
+func (t *Timing) Append(path string, line []byte) error {
+	t.Paths = append(t.Paths, path)
+	t.Lines = append(t.Lines, string(line))
+	return t.Err
+}

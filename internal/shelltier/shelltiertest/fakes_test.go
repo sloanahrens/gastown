@@ -25,3 +25,15 @@ func TestMemFilesReportsAMissingFileAsNotExist(t *testing.T) {
 		t.Fatalf("error = %v, want fs.ErrNotExist", err)
 	}
 }
+
+func TestTimingAppendRecordsTheLineAndAnswersWithItsError(t *testing.T) {
+	t.Parallel()
+	denied := errors.New("permission denied")
+	files := &Timing{Err: denied}
+	if err := files.Append("/town/shell.jsonl", []byte("{}\n")); !errors.Is(err, denied) {
+		t.Fatalf("Append = %v, want the configured error", err)
+	}
+	if len(files.Lines) != 1 || files.Lines[0] != "{}\n" || files.Paths[0] != "/town/shell.jsonl" {
+		t.Fatalf("recorded paths=%v lines=%v, want the line and its path", files.Paths, files.Lines)
+	}
+}
