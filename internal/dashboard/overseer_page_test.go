@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -15,262 +15,6 @@ import (
 // schedules, the dispatcher's tick and what waits on the overseer — so the
 // blocks have no ids of their own and a test finds one by the name the panel
 // gives it.
-
-// overseerBlock is one block of the panel as the page drew it: the name its
-// heading carries, the heading's note and the text under it.
-type overseerBlock struct {
-	Name string `json:"name"`
-	Note string `json:"note"`
-	Text string `json:"text"`
-}
-
-// overseerBlocks reads the blocks of #overseer in the order the panel drew
-// them.
-func overseerBlocks(t *testing.T, dom *pageDOM) []overseerBlock {
-	t.Helper()
-
-	v, err := dom.vm.RunString(`JSON.stringify(__byId["overseer"].children.__arr.map(b => ({
-		name: b.children[0].children[0].textContent, note: b.children[0].children[1].textContent,
-		text: b.children[1].textContent})))`)
-	if err != nil {
-		t.Fatalf("reading the panel's blocks: %v", err)
-	}
-	var out []overseerBlock
-	if err := json.Unmarshal([]byte(v.String()), &out); err != nil {
-		t.Fatalf("reading the panel's blocks: %v", err)
-	}
-	return out
-}
-
-// blockNamed returns the block the panel drew under name, failing the test for
-// a name the panel does not draw: a test naming a block that is gone checks
-// nothing.
-func blockNamed(t *testing.T, blocks []overseerBlock, name string) overseerBlock {
-	t.Helper()
-
-	for _, b := range blocks {
-		if b.Name == name {
-			return b
-		}
-	}
-	t.Fatalf("the panel drew no %q block: %+v", name, blocks)
-	return overseerBlock{}
-}
-
-// blockTable reads the first table one block drew, as rows of cell text: the
-// Deep review block's rows are a table, and a test reads the cells rather than
-// searching the block's text for them.
-func blockTable(t *testing.T, dom *pageDOM, name string) [][]string {
-	t.Helper()
-
-	js := `JSON.stringify((() => {
-		const b = __byId["overseer"].children.__arr.find(x => x.children[0].children[0].textContent === ` + strconv.Quote(name) + `);
-		if (!b) return null;
-		const t = b.children[1].children.__arr.find(c => c.tagName === "TABLE");
-		if (!t) return null;
-		return t.children.__arr.map(tr => tr.children.__arr.map(td => td.textContent));
-	})())`
-	v, err := dom.vm.RunString(js)
-	if err != nil {
-		t.Fatalf("reading the %s block's table: %v", name, err)
-	}
-	if v.String() == "null" {
-		t.Fatalf("the %s block drew no table", name)
-	}
-	var out [][]string
-	if err := json.Unmarshal([]byte(v.String()), &out); err != nil {
-		t.Fatalf("reading the %s block's table: %v", name, err)
-	}
-	return out
-}
-
-// blockClasses reads the classes of one block's drawn children, in the order
-// the block drew them, so a test can tell a warning that is drawn in the page's
-// amber from one that is only words.
-func blockClasses(t *testing.T, dom *pageDOM, name string) []string {
-	t.Helper()
-
-	js := `JSON.stringify((() => {
-		const b = __byId["overseer"].children.__arr.find(x => x.children[0].children[0].textContent === ` + strconv.Quote(name) + `);
-		if (!b) return null;
-		return b.children[1].children.__arr.map(c => c.className);
-	})())`
-	v, err := dom.vm.RunString(js)
-	if err != nil {
-		t.Fatalf("reading the %s block's classes: %v", name, err)
-	}
-	if v.String() == "null" {
-		t.Fatalf("the panel drew no %q block", name)
-	}
-	var out []string
-	if err := json.Unmarshal([]byte(v.String()), &out); err != nil {
-		t.Fatalf("reading the %s block's classes: %v", name, err)
-	}
-	return out
-}
-
-// The panel is the overseer's side of the town in one panel, so it draws its
-// blocks in the order that side reads in: what the overseer is doing, what the
-// town did, what the review is doing, what the dispatcher is doing, and what
-// waits on the overseer (gt-uv08f). The birds are a panel of their own and are
-// drawn first on the page (gt-0g6z9).
-func TestOverseerPanelDrawsItsBlocksInOrder(t *testing.T) {
-	t.Parallel()
-
-	dom := newPageDOM(t)
-	dom.call(t, "renderOverseer", map[string]any{})
-	var names []string
-	for _, b := range overseerBlocks(t, dom) {
-		names = append(names, b.Name)
-	}
-	want := []string{"Heartbeat", "Digest", "Deep review", "Dispatcher", "For the overseer"}
-	if strings.Join(names, "|") != strings.Join(want, "|") {
-		t.Errorf("the panel drew %v, want %v", names, want)
-	}
-
-	// The page draws it once, with every other panel: the four panels this one
-	// replaces are not drawn at all.
-	all := pageFunc(t, "renderAll")
-	for _, gone := range []string{"renderReports(state)", "renderDeepReview(state)", "renderDispatch(state)"} {
-		if strings.Contains(all, gone) {
-			t.Errorf("renderAll still calls %s", gone)
-		}
-	}
-	if n := strings.Count(all, "renderOverseer(state)"); n != 1 {
-		t.Errorf("renderAll draws the Overseer panel %d times, want once", n)
-	}
-}
-
-// The panel's note is the two readings on it that go stale — the overseer's
-// standing and how long ago the dispatcher ticked — and the dispatcher's tick
-// is the reading the daemon's dispatcher-silence watcher already dates a pane
-// by, so it stays in the note rather than moving into the block.
-func TestOverseerPanelNoteCarriesTheStandingAndTheTick(t *testing.T) {
-	t.Parallel()
-
-	tick := time.Now().UTC().Add(-time.Second).Format(time.RFC3339)
-	dom := newPageDOM(t)
-	dom.call(t, "renderOverseer", map[string]any{
-		"overseer": map[string]any{"status": "alive", "silent_after_sec": 5400, "last_active_sec": 120},
-		"dispatch": map[string]any{"at": tick},
-	})
-	note := dom.element(t, "overseernote")
-	if !strings.Contains(note.Text, "alive") || !strings.Contains(note.Text, "last tick") {
-		t.Errorf("the note reads %q, want the standing and the tick", note.Text)
-	}
-	if note.Class != "r" {
-		t.Errorf("the note wears %q with a live overseer and a fresh tick, want the plain note", note.Class)
-	}
-
-	// A silent overseer is the amber the page marks every stale reading with,
-	// and the words are the reader's own window.
-	dom = newPageDOM(t)
-	dom.call(t, "renderOverseer", map[string]any{
-		"overseer": map[string]any{"status": "silent", "silent_after_sec": 5400, "last_active_sec": 9000},
-	})
-	note = dom.element(t, "overseernote")
-	if !strings.Contains(note.Text, "silent window 1h30m") || !strings.Contains(note.Class, "warnc") {
-		t.Errorf("a silent overseer reads %q wearing %q", note.Text, note.Class)
-	}
-
-	// A dispatcher that stopped is the alert red: it ticks every minute, so the
-	// note the watcher dates a pane by says so.
-	dom = newPageDOM(t)
-	dom.call(t, "renderOverseer", map[string]any{
-		"overseer": map[string]any{"status": "alive", "silent_after_sec": 5400, "last_active_sec": 120},
-		"dispatch": map[string]any{"at": time.Now().UTC().Add(-20 * time.Minute).Format(time.RFC3339)},
-	})
-	note = dom.element(t, "overseernote")
-	if !strings.Contains(note.Text, "last tick 20m ago") || !strings.Contains(note.Class, "badc") {
-		t.Errorf("a stopped dispatcher reads %q wearing %q", note.Text, note.Class)
-	}
-}
-
-// The heartbeat block is drawn from the state the reader decided: an unreadable
-// read is named rather than drawn as a silent overseer, and the status word is
-// the reader's own.
-func TestOverseerHeartbeatDrawsTheStateTheReaderDecided(t *testing.T) {
-	t.Parallel()
-
-	draw := pageFunc(t, "drawHeartbeat")
-	for _, want := range []string{
-		`const o = s.overseer;`,
-		`box.append(el("div", "badc", "unavailable: the overseer's heartbeat or journal could not be read"))`,
-		`const alive = o.status === "alive";`,
-		`el("b", alive ? "good" : "warnc", o.status === "none" ? "no heartbeat" : o.status)`,
-		`"last active " + fmtDur(o.last_active_sec) + " ago"`,
-		`"has never beaten"`,
-		`"last 7 days: " + counts.map(c => c.kind + " " + c.count).join(" · ")`,
-		`o.open_questions != null`,
-		`const lines = o.journal || [];`,
-	} {
-		if !strings.Contains(draw, want) {
-			t.Errorf("drawHeartbeat has no %q", want)
-		}
-	}
-	// The journal text is the overseer's own, so every cell goes through el(),
-	// which writes textContent: a tag in it shows as that text, never markup.
-	if strings.Contains(draw, "innerHTML") {
-		t.Error("drawHeartbeat sets markup from the journal's text")
-	}
-
-	dom := newPageDOM(t)
-	age := int64(120)
-	dom.call(t, "renderOverseer", map[string]any{"overseer": map[string]any{
-		"status": "alive", "state": "working", "last_active_sec": age, "silent_after_sec": 5400,
-		"interventions": []any{map[string]any{"kind": "hold", "count": 3}},
-		"journal":       []any{map[string]any{"age_sec": 30, "kind": "hold", "text": "parked gt-abc", "bead": "gt-abc"}},
-	}})
-	block := blockNamed(t, overseerBlocks(t, dom), "Heartbeat")
-	for _, want := range []string{"alive", "last active 2m ago", "working", "last 7 days: hold 3", "parked gt-abc"} {
-		if !strings.Contains(block.Text, want) {
-			t.Errorf("the heartbeat block reads %q, want %q in it", block.Text, want)
-		}
-	}
-}
-
-// The rows the overseer owes a move on are the attention list's own rows, drawn
-// with the row the Attention panel draws them with: the panel opens on the
-// human's rows, so the overseer reads its own here without switching that
-// panel's chips (gt-bi6w0, gt-uv08f).
-func TestOverseerQueueDrawsTheRowsTheOverseerOwns(t *testing.T) {
-	t.Parallel()
-
-	dom := newPageDOM(t)
-	dom.call(t, "renderOverseer", map[string]any{"attention": map[string]any{"rows": []any{
-		map[string]any{"kind": "item", "owner": "overseer", "rule": "landing.risk_path", "id": "risk:gt-abc:deadbeef",
-			"title": "gt-abc landed deadbeef touching internal/land; overseer review wanted", "level": "crit", "age_sec": 7200},
-		map[string]any{"kind": "item", "owner": "overseer", "rule": "dispatch.idle", "id": "dispatch:idle",
-			"title": "5 idle ticks with 2 beads waiting", "level": "warn"},
-		map[string]any{"kind": "question", "owner": "operator", "id": "gt-q1", "title": "retry policy", "state": "awaiting"},
-	}}})
-
-	block := blockNamed(t, overseerBlocks(t, dom), "For the overseer")
-	if block.Note != "2 waiting" {
-		t.Errorf("the block's note reads %q, want the two rows it holds", block.Note)
-	}
-	if !strings.Contains(block.Text, "overseer review wanted") || !strings.Contains(block.Text, "dispatch.idle") {
-		t.Errorf("the block does not draw the overseer's rows: %q", block.Text)
-	}
-	// The human's row is the Attention panel's: showing it here as well would
-	// be one fact in two panels.
-	if strings.Contains(block.Text, "retry policy") {
-		t.Errorf("the block draws a row the human owns: %q", block.Text)
-	}
-
-	// Nothing waiting is one line, and a reader that has not reported is a
-	// named state, not the same thing.
-	dom = newPageDOM(t)
-	dom.call(t, "renderOverseer", map[string]any{"attention": map[string]any{"rows": []any{}}})
-	if got := blockNamed(t, overseerBlocks(t, dom), "For the overseer"); !strings.Contains(got.Text, "nothing is waiting on the overseer") {
-		t.Errorf("an empty list reads %q", got.Text)
-	}
-	dom = newPageDOM(t)
-	dom.call(t, "renderOverseer", map[string]any{})
-	if got := blockNamed(t, overseerBlocks(t, dom), "For the overseer"); !strings.Contains(got.Text, "reading…") {
-		t.Errorf("a reader that has not reported reads %q", got.Text)
-	}
-}
 
 // The state the page reads carries the panel: /api/state serves what the hub
 // holds, and a panel nobody configured is absent rather than empty.
@@ -309,5 +53,159 @@ func TestOverseerReachesTheAPI(t *testing.T) {
 	bare := NewHub(Config{Now: func() time.Time { return questionPageNow }})
 	if bare.State().Overseer != nil {
 		t.Error("a hub with no Overseer reader holds a panel")
+	}
+}
+
+// The Overseer panel is gone (gt-ztrv1): no section, no fold, no draw code for
+// it, and nothing in the registry, the default-open list or the redraw loops
+// still names it. The state fields it read stay on the server's side.
+func TestNoOverseerPanel(t *testing.T) {
+	t.Parallel()
+
+	page := string(indexHTML)
+	for _, gone := range []string{
+		`data-fold="overseer"`,
+		`id="overseernote"`,
+		"function renderOverseer",
+		"renderOverseer(",
+		"function drawHeartbeat",
+		"function drawDigest",
+		"function drawDispatch",
+		"function drawDeepReview",
+		"function drawOverseerQueue",
+		"function paintOverseerNote",
+		"function oblock",
+		"  overseer: {sec:",
+	} {
+		if strings.Contains(page, gone) {
+			t.Errorf("the page still holds %q", gone)
+		}
+	}
+	for _, sp := range pageSections(t) {
+		if sp.Key == "overseer" {
+			t.Errorf("the page still folds a section under the key %q", sp.Key)
+		}
+	}
+	if m := regexp.MustCompile(`const FOLD_DEFAULT_OPEN = \[([^\]]*)\];`).FindStringSubmatch(page); m == nil || strings.Contains(m[1], "overseer") {
+		t.Errorf("FOLD_DEFAULT_OPEN still names the overseer: %v", m)
+	}
+	for _, key := range newPageDOM(t).foldKeys(t) {
+		if key == "overseer" {
+			t.Error("the folded page still has an overseer section")
+		}
+	}
+}
+
+// stripFacts reads the header strip's facts, in order, as text, class and hover.
+func stripFacts(t *testing.T, dom *pageDOM) []struct{ Text, Class, Title string } {
+	t.Helper()
+
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
+		const out = [];
+		for (const f of __byId["strip"].children) {
+			if (!f.children) continue;
+			out.push({text: f.textContent, class: (f.children.__arr.filter(c => c.tagName === "B")[0] || {className: ""}).className, title: f.title || ""});
+		}
+		return out;
+	})())`)
+	if err != nil {
+		t.Fatalf("reading the strip: %v", err)
+	}
+	var raw []struct {
+		Text, Class, Title string
+	}
+	if err := json.Unmarshal([]byte(v.String()), &raw); err != nil {
+		t.Fatalf("reading the strip: %v", err)
+	}
+	return raw
+}
+
+// stripFact finds the one fact whose text names label, failing for none or two:
+// each reading lives in one place.
+func stripFact(t *testing.T, dom *pageDOM, label string) struct{ Text, Class, Title string } {
+	t.Helper()
+
+	var found []struct{ Text, Class, Title string }
+	for _, f := range stripFacts(t, dom) {
+		if strings.Contains(f.Text, label) {
+			found = append(found, f)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("the strip holds %d facts naming %q, want one: %+v", len(found), label, stripFacts(t, dom))
+	}
+	return found[0]
+}
+
+// The Overseer panel's two readings that go stale move to the header strip, one
+// place each, with the panel note's rule: the overseer's standing is the
+// reader's verdict (amber when not alive), and the dispatcher's tick is aged
+// live, amber past 150 s and alert red past 300 s (gt-ztrv1).
+func TestHeaderKeepsOverseerAndDispatchReadings(t *testing.T) {
+	t.Parallel()
+
+	state := func(overseer, dispatch map[string]any) map[string]any {
+		s := map[string]any{}
+		if overseer != nil {
+			s["overseer"] = overseer
+		}
+		if dispatch != nil {
+			s["dispatch"] = dispatch
+		}
+		return s
+	}
+	tickAgo := func(d time.Duration) map[string]any {
+		return map[string]any{"at": time.Now().UTC().Add(-d).Format(time.RFC3339)}
+	}
+	alive := map[string]any{"status": "alive", "silent_after_sec": 5400, "last_active_sec": 120}
+
+	cases := []struct {
+		name         string
+		overseer     map[string]any
+		dispatch     map[string]any
+		wantOverseer string
+		wantOvClass  string
+		wantTick     string
+		wantTickCls  string
+	}{
+		{"alive and fresh", alive, tickAgo(time.Second), "overseer alive", "v", "dispatcher last tick ", "v"},
+		{"silent overseer", map[string]any{"status": "silent", "silent_after_sec": 5400, "last_active_sec": 9000}, tickAgo(time.Second), "overseer silent window 1h30m", "warn", "dispatcher last tick ", "v"},
+		{"no heartbeat", map[string]any{"status": "none", "silent_after_sec": 5400}, nil, "overseer no heartbeat", "warn", "dispatcher last tick none logged", ""},
+		{"unreadable", map[string]any{"unavailable": true}, nil, "overseer unavailable", "warn", "dispatcher last tick none logged", ""},
+		{"tick amber", alive, tickAgo(200 * time.Second), "overseer alive", "v", "dispatcher last tick 3m", "warn"},
+		{"tick stopped", alive, tickAgo(20 * time.Minute), "overseer alive", "v", "dispatcher last tick 20m", "bad"},
+		{"not read yet", nil, nil, "overseer –", "", "dispatcher last tick none logged", ""},
+	}
+	for _, c := range cases {
+		dom := newPageDOM(t)
+		dom.call(t, "renderStrip", state(c.overseer, c.dispatch))
+		ov := stripFact(t, dom, "overseer")
+		tick := stripFact(t, dom, "dispatcher last tick")
+		if !strings.HasPrefix(ov.Text, c.wantOverseer) || ov.Class != c.wantOvClass {
+			t.Errorf("%s: the overseer fact reads %q wearing %q, want %q wearing %q", c.name, ov.Text, ov.Class, c.wantOverseer, c.wantOvClass)
+		}
+		if !strings.HasPrefix(tick.Text, c.wantTick) || tick.Class != c.wantTickCls || (c.dispatch != nil && !strings.Contains(tick.Text, " ago")) {
+			t.Errorf("%s: the dispatcher fact reads %q wearing %q, want %q wearing %q", c.name, tick.Text, tick.Class, c.wantTick, c.wantTickCls)
+		}
+	}
+
+	// A stopped dispatcher says so in the strip itself, not only on a hover: the
+	// visible text carries "not ticking" once the tick is red, and not before.
+	for _, c := range []struct {
+		ago  time.Duration
+		want bool
+	}{{20 * time.Minute, true}, {200 * time.Second, false}, {time.Second, false}} {
+		d := newPageDOM(t)
+		d.call(t, "renderStrip", state(alive, tickAgo(c.ago)))
+		if got := strings.Contains(stripFact(t, d, "dispatcher last tick").Text, "not ticking"); got != c.want {
+			t.Errorf("a tick %v old reads %q, want not-ticking visible: %v", c.ago, stripFact(t, d, "dispatcher last tick").Text, c.want)
+		}
+	}
+
+	// A stopped dispatcher's hover says so in the words the panel's block used.
+	dom := newPageDOM(t)
+	dom.call(t, "renderStrip", state(alive, tickAgo(20*time.Minute)))
+	if tip := stripFact(t, dom, "dispatcher last tick").Title; !strings.Contains(tip, "has not ticked for") || !strings.Contains(tip, "ticks every minute") {
+		t.Errorf("a stopped dispatcher's hover reads %q, want the warning the dispatcher block carried", tip)
 	}
 }

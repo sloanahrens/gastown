@@ -166,25 +166,16 @@ whether that is overdue, the projects it watches and its open findings by
 severity, and it writes nothing there. On a machine with no reports directory
 the panel says so and is re-read at a slow interval rather than every minute.
 
-The Overseer panel is the overseer's whole side of the town in one panel, in
-five blocks. The heartbeat reads .runtime/overseer: alive or silent against
-overseer.silent_after, the last active time and state, the newest eight journal
-lines, the last seven days of interventions by kind and the open question count.
-The digest reads the daemon's own report from .runtime/overseer/reports — the
-newest file named for the instant it was written — and draws its DONE, IN
-PROGRESS and LEFT sections, naming any heading it does not draw, with when the
-writes before that one happened behind a disclosure; a report that is late is
-marked, and an earlier one can be read in its place. The Deep review block lists every schedule
-daemon.patrols.scheduled_slings configures — each with when it is next due, or
-that the patrol is switched off — the "paused: <reason>" a hold file or ESTOP
-parks dispatch with, and the newest run it filed with its findings and the beads
-filed. The Dispatcher block reads the spec dispatcher's last tick from the
-daemon log: its roster, counts and the beads it skipped. The last block is the
-rows of the attention list the overseer owes a move on. Every read that fails
-says so rather than reading as an empty block, the panel writes nothing, and a
-deep-review run's own digest is drawn as its bead and comment count, never as
-the comment's text. gt overseer beat and gt overseer log write the heartbeat and
-journal.
+The overseer's two readings that go stale ride the top strip: "overseer" says
+alive, a silent window, no heartbeat or unavailable, judged against
+overseer.silent_after (amber unless alive), and "dispatcher last tick" says how
+long ago the spec dispatcher last ticked, amber past 150 seconds and red past
+300, with "not ticking" beside the age once it is red. The state still carries
+the heartbeat and journal (overseer), the dispatcher's last tick and skipped
+beads (dispatch), the deep review schedules and runs (deepreview) and the
+daemon's reports (reports) on /api/state and their routes; the Cost panel joins
+the deep review's runs to its usage, and no panel draws the rest. gt overseer
+beat and gt overseer log write the heartbeat and journal.
 
 The Birds panel lists the daily reports the town's birds leave for the operator:
 one row per bird with a report under <town>/.runtime/<bird>/reports, from its

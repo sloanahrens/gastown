@@ -1,6 +1,7 @@
 package dashboard
 
-// The deep review's payload, drawn as a block of the Overseer panel: one line
+// The deep review's payload, carried in the state and read by the Cost panel's
+// usage joins (no panel draws the schedule list now): one line
 // per configured schedule — every entry of the town's
 // daemon.patrols.scheduled_slings — with when that schedule is next due and the
 // newest run it filed, and the review's newest runs, which the Usage panel

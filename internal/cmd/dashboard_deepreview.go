@@ -14,7 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/question"
 )
 
-// The deep review's block of the Overseer panel: one row per entry of the
+// The deep review's state: one row per entry of the
 // town's daemon.patrols.scheduled_slings — the schedule's name, when it is next
 // due and the newest run it filed, with what that run found and how many beads
 // it filed — and the review's newest runs, which the Usage panel joins its own
