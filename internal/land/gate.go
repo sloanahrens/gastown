@@ -306,8 +306,11 @@ func RigGate(dir string, mq *config.MergeQueueConfig, unitOnly bool) (CommandGat
 var shellTierMachinery = []string{"internal/shelltier/", "cmd/tier-sweep/", "internal/tiersweep/"}
 
 // ShellTierInputs returns the ERE of the paths whose change can move the shell
-// tier's verdict: the tier's own machinery and the union of every manifest
-// entry's triggers (gt-u560q.9).
+// tier's verdict: the union of every manifest entry's triggers (gt-u560q.9).
+// The union reaches the tier's own machinery (internal/shelltier, cmd/tier-sweep,
+// internal/tiersweep) through the GoTriggers an entry that does not exempt
+// itself from Go changes contributes; shellTierInputsRE adds the machinery
+// itself only when no entry does.
 //
 // The post-land revert reads it (landworker/revert.go). It no longer mirrors
 // scripts/post-land-shell.sh's INPUTS line, which the runner replaces.
@@ -315,14 +318,42 @@ func ShellTierInputs() string {
 	return shellTierInputsRE(shelltier.Manifest())
 }
 
-// shellTierInputsRE builds ShellTierInputs from the tier's machinery and the
-// entries' triggers.
+// shellTierInputsRE builds ShellTierInputs from the entries' triggers. The
+// tier's machinery is added only when the union does not already cover it, so
+// the rule is the manifest union wherever that union names the tier's own code
+// and falls back to the machinery only for an all-exempt manifest.
 func shellTierInputsRE(entries []shelltier.Entry) string {
-	triggers := slices.Clone(shellTierMachinery)
+	var triggers []string
 	for _, e := range entries {
 		triggers = append(triggers, e.TriggersOrDefault()...)
 	}
+	if !shellTierCovers(triggers, shellTierMachinery) {
+		triggers = append(triggers, shellTierMachinery...)
+	}
 	return shellTierTriggersRE(triggers)
+}
+
+// shellTierCovers reports whether triggers cover every path the way
+// shellTierTriggersRE reads them: a trigger ending in "/" covers the paths
+// under it, and any other is a file path and covers only itself.
+func shellTierCovers(triggers, paths []string) bool {
+	for _, path := range paths {
+		covered := false
+		for _, trigger := range triggers {
+			if strings.HasSuffix(trigger, "/") {
+				covered = strings.HasPrefix(path, trigger)
+			} else {
+				covered = path == trigger
+			}
+			if covered {
+				break
+			}
+		}
+		if !covered {
+			return false
+		}
+	}
+	return true
 }
 
 // shellTierTriggersRE renders triggers as one ERE: a trigger ending in "/"

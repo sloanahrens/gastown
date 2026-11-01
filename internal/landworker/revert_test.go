@@ -137,6 +137,24 @@ func TestRedMainSkipsTheRevertWhenTheLandingCannotHaveFailedTheScript(t *testing
 	}
 }
 
+// gt-u560q.9: the shell-tier rule is the manifest's trigger union, which runs
+// a shell test on the Go tree under internal/. A landing that changed a Go file
+// there can have failed the script and is reverted.
+func TestRedMainRevertsALandingThatChangedTheGoTreeTheShellTierRuns(t *testing.T) {
+	t.Parallel()
+	h := newRevertHarness(t, greenSHA)
+	h.changed = []string{"internal/attention/attention.go", "docs/reference.md"}
+	h.redShell(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"}, "scripts/test-makefile.sh")
+
+	rv := h.revertBeads(t)
+	if len(h.reverts) != 1 || len(rv) != 1 {
+		t.Fatalf("reverts %v, beads %+v; want the landing that changed a shell-tier input reverted", h.reverts, rv)
+	}
+	if s := h.lastStatus(); !strings.Contains(s, "reverting gt-cul as "+rv[0].ID) {
+		t.Fatalf("status %q", s)
+	}
+}
+
 func TestRedMainRevertsWhenTheLandingTouchedTheFailingScript(t *testing.T) {
 	t.Parallel()
 	h := newRevertHarness(t, greenSHA)

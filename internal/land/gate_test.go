@@ -860,6 +860,17 @@ func TestShellTierInputsNameTheTierMachinery(t *testing.T) {
 	}
 }
 
+// TestShellTierInputsAreTheUnionWhenItCoversTheMachinery: an entry without a
+// StubsGo reason pulls in GoTriggers, which names internal/ and cmd/, so the
+// rule is the manifest union and adds no machinery path of its own (gt-u560q.9).
+func TestShellTierInputsAreTheUnionWhenItCoversTheMachinery(t *testing.T) {
+	t.Parallel()
+	entries := []shelltier.Entry{{Path: "scripts/one_test.sh"}}
+	if got, want := shellTierInputsRE(entries), shellTierTriggersRE(entries[0].TriggersOrDefault()); got != want {
+		t.Fatalf("shellTierInputsRE(%v) = %q, want the union %q", entries, got, want)
+	}
+}
+
 // TestShellTierInputsOfAnEmptyUnionMatchNothing: a rule built from no trigger
 // can blame no landing for a shell failure.
 func TestShellTierInputsOfAnEmptyUnionMatchNothing(t *testing.T) {
