@@ -16,6 +16,8 @@ const (
 	testRev      = "0123456789abcdef0123456789abcdef01234567"
 	testBDCommit = "fedcba9876543210fedcba9876543210fedcba98"
 	testOMCommit = "abcdef0123456789abcdef0123456789abcdef01"
+	// testBDShort is what the fake git answers for testBDCommit's abbreviation.
+	testBDShort = "fedcba9"
 )
 
 // testEnv is the host environment the builds start from in tests: one that
@@ -37,9 +39,15 @@ type worktreeAdd struct{ src, dir, commit string }
 // build that succeeds writes its -o path, as go build does. It also records the
 // worktrees the builds add and remove, through git.
 type fakeRunner struct {
-	calls      []recorded
-	adds       []worktreeAdd
-	removed    []string
+	calls   []recorded
+	adds    []worktreeAdd
+	removed []string
+	// shortDirs records the directory each `rev-parse --short` was asked in.
+	shortDirs []string
+	// shortOut, when set, is what git answers a `rev-parse --short`; shortErr
+	// makes that call fail instead.
+	shortOut   string
+	shortErr   error
 	failPkg    string
 	failAdd    bool
 	failDocker bool
@@ -76,12 +84,22 @@ func (f *fakeRunner) git(known map[string]string) bdbuild.Git {
 		if len(args) == 4 && args[0] == "worktree" && args[1] == "remove" {
 			f.removed = append(f.removed, args[3])
 		}
+		if len(args) == 3 && args[0] == "rev-parse" && args[1] == "--short" {
+			f.shortDirs = append(f.shortDirs, dir)
+			if f.shortErr != nil {
+				return nil, f.shortErr
+			}
+			if f.shortOut != "" {
+				return []byte(f.shortOut + "\n"), nil
+			}
+		}
 		return holding(dir, args...)
 	}
 }
 
 // gitHolding is a git that resolves each commit in known to the full sha it
 // names, and fails every other commit the way git does for one it does not hold.
+// `rev-parse --short` answers the commit's first seven characters.
 // Worktree commands succeed without touching a checkout.
 func gitHolding(known map[string]string) bdbuild.Git {
 	return func(_ string, args ...string) ([]byte, error) {
@@ -92,6 +110,9 @@ func gitHolding(known map[string]string) bdbuild.Git {
 		full, ok := known[commit]
 		if !ok {
 			return nil, errors.New("fatal: bad revision '" + commit + "'")
+		}
+		if args[0] == "rev-parse" && len(args) == 3 && args[1] == "--short" && len(full) > 7 {
+			full = full[:7]
 		}
 		return []byte(full + "\n"), nil
 	}
@@ -240,17 +261,82 @@ func TestBuildBinariesStampsGTWithTheResolvedRev(t *testing.T) {
 	}
 }
 
-func TestBuildBinariesStampsBDWithItsCommitAndLeavesOMUnstamped(t *testing.T) {
+// TestBuildBinariesStampsBDWithItsBuildIDAndCommit: the image's bd carries both
+// halves of the build id `bd version` prints, main.Build before main.Commit, the
+// way bdbuild stamps the polecat image's bd (gt-glsx8). gt's and om's stamps are
+// unchanged: gt keeps the resolved rev alone, om none.
+func TestBuildBinariesStampsBDWithItsBuildIDAndCommit(t *testing.T) {
 	t.Parallel()
 	b, run := builderFor(t)
 	if _, err := b.BuildBinaries(context.Background(), testRev); err != nil {
 		t.Fatalf("BuildBinaries: %v", err)
 	}
-	if got := ldflagsOf(run.calls[1].argv); !reflect.DeepEqual(got, []string{bdCommitFlag + testBDCommit}) {
-		t.Errorf("bd build ldflags = %q, want [%q]", got, bdCommitFlag+testBDCommit)
+	want := bdBuildFlag + testBDShort + " " + bdCommitFlag + testBDCommit
+	if got := ldflagsOf(run.calls[1].argv); !reflect.DeepEqual(got, []string{want}) {
+		t.Errorf("bd build ldflags = %q, want [%q]", got, want)
+	}
+	if got := ldflagsOf(run.calls[0].argv); !reflect.DeepEqual(got, []string{gtCommitFlag + testRev}) {
+		t.Errorf("gt build ldflags = %q, want [%q]", got, gtCommitFlag+testRev)
 	}
 	if got := ldflagsOf(run.calls[2].argv); len(got) != 0 {
 		t.Errorf("om build ldflags = %q, want none", got)
+	}
+}
+
+// TestBuildBinariesReadsBDBuildIDInItsWorktree: the abbreviation is git's answer
+// in the worktree the bd build runs in, asked once and only for bd, so the id
+// names the commit actually compiled there.
+func TestBuildBinariesReadsBDBuildIDInItsWorktree(t *testing.T) {
+	t.Parallel()
+	b, run := builderFor(t)
+	if _, err := b.BuildBinaries(context.Background(), testRev); err != nil {
+		t.Fatalf("BuildBinaries: %v", err)
+	}
+	if len(run.shortDirs) != 1 {
+		t.Fatalf("git was asked for a short sha in %d directories, want once, for bd", len(run.shortDirs))
+	}
+	if bdWorktree := run.adds[1].dir; run.shortDirs[0] != bdWorktree {
+		t.Errorf("git was asked for the short sha in %q, want the bd worktree %q", run.shortDirs[0], bdWorktree)
+	}
+}
+
+// TestBuildBinariesFailsWithoutABDBuildID: an abbreviation git cannot answer, or
+// answers with something that is not a commit, fails the build naming bd and
+// stamps nothing, so no binary reaches Out.
+func TestBuildBinariesFailsWithoutABDBuildID(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		run  *fakeRunner
+		want string
+	}{
+		{"git fails", &fakeRunner{shortErr: errors.New("fatal: not a git repository")}, "cannot read bd's build id"},
+		{"not a commit", &fakeRunner{shortOut: "main"}, `printed "main" as the build id`},
+		{"empty", &fakeRunner{shortOut: "   "}, `printed "" as the build id`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b := validBuilder(tc.run, t.TempDir())
+			paths, err := b.BuildBinaries(context.Background(), testRev)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("BuildBinaries = %q, %v; want an error naming %q", paths, err, tc.want)
+			}
+			if len(paths) != 0 {
+				t.Errorf("a failed build listed %q, want no paths", paths)
+			}
+			for _, call := range tc.run.calls {
+				if call.argv[len(call.argv)-1] == BDPackage {
+					t.Errorf("bd was compiled with %q, want no compile after a refused build id", call.argv)
+				}
+			}
+			entries, err := os.ReadDir(b.Out)
+			if err != nil {
+				t.Fatalf("reading the output directory: %v", err)
+			}
+			if len(entries) != 0 {
+				t.Errorf("a failed build left %d entries in the output directory, want none", len(entries))
+			}
+		})
 	}
 }
 
@@ -403,16 +489,13 @@ func TestBDPinMatchesThePolecatImageFlow(t *testing.T) {
 	}
 	// Drop the leading "go": bdbuild's argv starts at the go subcommand.
 	got := run.calls[1].argv[1:]
-	// The stamps differ on purpose: the polecat image's bd carries the host
-	// build id in main.Build beside main.Commit (gt-glsx8), the daemon image's bd
-	// the commit alone. The source, package and flags stay pinned, and the
-	// daemon image's own stamp is asserted below, so a build that drops it still
-	// fails here. The polecat side's stamp is bdbuild's own tests' to assert.
-	if !reflect.DeepEqual(withOut(withoutLdflags(got)), withOut(withoutLdflags(compiled))) {
+	// Both images' bd are stamped with the same build id (gt-glsx8, gt-15amz),
+	// so the whole argv is pinned, ldflags included.
+	if !reflect.DeepEqual(withOut(got), withOut(compiled)) {
 		t.Errorf("the daemon image builds bd with %q, the polecat image with %q", got, compiled)
 	}
-	if want := []string{bdCommitFlag + testBDCommit}; !reflect.DeepEqual(ldflagsOf(run.calls[1].argv), want) {
-		t.Errorf("the daemon image stamps bd with %q, want %q", ldflagsOf(run.calls[1].argv), want)
+	if want := []string{bdBuildFlag + testBDShort + " " + bdCommitFlag + testBDCommit}; !reflect.DeepEqual(ldflagsOf(got), want) {
+		t.Errorf("the daemon image stamps bd with %q, want %q", ldflagsOf(got), want)
 	}
 }
 

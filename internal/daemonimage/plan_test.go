@@ -49,7 +49,10 @@ func planBuilder(t *testing.T) Builder {
 
 // Plan names each step a full build runs, in order, with the argv the build runs,
 // and runs, writes and fetches nothing. The claude step names the URL that
-// FetchClaudeCLI requests, taken from the fetch itself.
+// FetchClaudeCLI requests, taken from the fetch itself. The bd line prints
+// planBuildID for main.Build, the argv value only the worktree a build makes can
+// answer: Plan makes none, and the Git seam above fails the test if it reads one
+// from anywhere.
 func TestPlanNamesEachStepAndRunsNothing(t *testing.T) {
 	t.Parallel()
 	b := planBuilder(t)
@@ -72,7 +75,7 @@ func TestPlanNamesEachStepAndRunsNothing(t *testing.T) {
 
 	steps := []struct{ label, names string }{
 		{"build gt: ", "go build -trimpath -ldflags " + gtCommitFlag + testRev + " -o " + filepath.Join(b.Out, "gt") + " " + GTPackage + "   (clean worktree of /src/gt at " + testRev + ")"},
-		{"build bd: ", "go build -trimpath -ldflags " + bdCommitFlag + testBDCommit + " -o " + filepath.Join(b.Out, "bd") + " " + BDPackage},
+		{"build bd: ", "go build -trimpath -ldflags " + bdBuildFlag + planBuildID + " " + bdCommitFlag + testBDCommit + " -o " + filepath.Join(b.Out, "bd") + " " + BDPackage + "   (clean worktree of /src/beads at " + testBDCommit + ")"},
 		{"build om: ", "go build -trimpath -o " + filepath.Join(b.Out, "om") + " " + OMPackage + "   (clean worktree of /src/om at HEAD)"},
 		{"fetch claude: ", "GET " + fetched + " -> " + filepath.Join(b.Out, claudeCLIName) + "   (sha256 " + templates.ClaudeCLISHA256 + ")"},
 		{"image: ", "docker --context " + DockerContext + " build -f " + b.Dockerfile + " -t " + ImageTag(testRev) + " " + b.Out},

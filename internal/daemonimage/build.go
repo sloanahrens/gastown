@@ -45,9 +45,12 @@ const (
 // The -X stamps the gt and bd binaries are built with. gt reports rev, the commit
 // its image tag names: it falls back to the VCS stamp of the tree it was built
 // in (internal/cmd.resolveCommitHash), so the stamp names rev outright. bd reports
-// its commit the way bdbuild stamps it.
+// the two halves of its build id the way bdbuild stamps them: main.Build, git's
+// abbreviation of the commit in the worktree, then main.Commit, the full sha, so
+// both images' bd report one build id (gt-glsx8).
 const (
 	gtCommitFlag = "-X github.com/steveyegge/gastown/internal/cmd.Commit="
+	bdBuildFlag  = "-X main.Build="
 	bdCommitFlag = "-X main.Commit="
 )
 
@@ -107,6 +110,10 @@ func ImageTag(rev string) string { return "gt-daemon:" + rev }
 // of that checkout it is built at, and the package and stamp it is built with.
 type binary struct {
 	name, src, commit, pkg, ldflags string
+	// stampsBuildID marks a build whose main.Build is stamped beside main.Commit
+	// with git's abbreviation of the commit in its worktree, which only exists
+	// once the build has made it.
+	stampsBuildID bool
 }
 
 // BuildBinaries writes gt, bd and om to b.Out and returns their paths in that
@@ -139,7 +146,7 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 	}
 	builds := []binary{
 		{name: "gt", src: b.GTSrc, commit: gtCommit, pkg: GTPackage, ldflags: gtCommitFlag + gtCommit},
-		{name: "bd", src: b.BDSrc, commit: bdCommit, pkg: BDPackage, ldflags: bdCommitFlag + bdCommit},
+		{name: "bd", src: b.BDSrc, commit: bdCommit, pkg: BDPackage, ldflags: bdCommitFlag + bdCommit, stampsBuildID: true},
 		{name: "om", src: b.OMSrc, commit: omCommit, pkg: OMPackage},
 	}
 	stage, err := os.MkdirTemp(b.Out, ".daemonimage-")
@@ -240,7 +247,15 @@ func (b Builder) build(ctx context.Context, build binary, stage string, env []st
 		return fmt.Errorf("daemonimage: cannot check commit %s out of %s: %w", build.commit, build.src, err)
 	}
 	defer func() { _, _ = b.Git(build.src, "worktree", "remove", "--force", dir) }()
-	argv := goBuildArgv(filepath.Join(stage, build.name), build.pkg, build.ldflags)
+	ldflags := build.ldflags
+	if build.stampsBuildID {
+		short, err := bdBuildID(b.Git, dir, build.commit)
+		if err != nil {
+			return err
+		}
+		ldflags = bdBuildFlag + short + " " + ldflags
+	}
+	argv := goBuildArgv(filepath.Join(stage, build.name), build.pkg, ldflags)
 	if err := b.Run(ctx, dir, env, argv); err != nil {
 		return fmt.Errorf("daemonimage: building %s from %s failed: %w", build.name, build.pkg, err)
 	}
@@ -273,6 +288,24 @@ func (b Builder) resolve(src, commit string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// bdBuildID returns the value bd's main.Build is stamped with: the abbreviation
+// git prints for commit in dir, the worktree the build runs in. git picks its
+// length from the checkout's object count, the rule the host's own bd build
+// answers under. An answer that is not a commit is refused rather than stamped,
+// because a bd with an empty main.Build reports a build id no host build has
+// (gt-glsx8).
+func bdBuildID(git bdbuild.Git, dir, commit string) (string, error) {
+	out, err := git(dir, "rev-parse", "--short", commit)
+	if err != nil {
+		return "", fmt.Errorf("daemonimage: cannot read bd's build id of %s in its worktree %s: %w", commit, dir, err)
+	}
+	short := strings.TrimSpace(string(out))
+	if !isCommit(short) {
+		return "", fmt.Errorf("daemonimage: git in the bd worktree %s printed %q as the build id of %s, which is not a 7+ character hex commit", dir, short, commit)
+	}
+	return short, nil
+}
+
 // isCommit reports whether s has the shape of an abbreviated or full commit, so
 // git never reads it as an option or a revision expression.
 func isCommit(s string) bool {
@@ -295,7 +328,9 @@ func isCommit(s string) bool {
 // absolute regular file). It does
 // not check the claude CLI pin, and it does not check that a commit exists in its
 // checkout: a build checks both when it runs, so a plan that prints can still
-// fail there. The commits in it are the ones named, not resolved.
+// fail there. The commits in it are the ones named, not resolved, and the bd
+// line's main.Build is planBuildID: the build id is git's abbreviation of the
+// commit in the worktree a build makes, and Plan makes none.
 func (b Builder) Plan(rev string) ([]string, error) {
 	rev, bdCommit, err := b.checkBuildInputs(rev)
 	if err != nil {
@@ -313,12 +348,16 @@ func (b Builder) Plan(rev string) ([]string, error) {
 	tag := ImageTag(rev)
 	return []string{
 		fmt.Sprintf("build gt: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "gt"), GTPackage, gtCommitFlag+rev), " "), b.GTSrc, rev),
-		fmt.Sprintf("build bd: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "bd"), BDPackage, bdCommitFlag+bdCommit), " "), b.BDSrc, bdCommit),
+		fmt.Sprintf("build bd: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "bd"), BDPackage, bdBuildFlag+planBuildID+" "+bdCommitFlag+bdCommit), " "), b.BDSrc, bdCommit),
 		fmt.Sprintf("build om: %s   (clean worktree of %s at HEAD)", strings.Join(goBuildArgv(filepath.Join(b.Out, "om"), OMPackage, ""), " "), b.OMSrc),
 		fmt.Sprintf("fetch claude: GET %s -> %s   (sha256 %s)", fmt.Sprintf(templates.ClaudeCLIURLFormat, templates.ClaudeCLIVersion), filepath.Join(b.Out, claudeCLIName), templates.ClaudeCLISHA256),
 		fmt.Sprintf("image: %s", strings.Join(imageArgv(b.Dockerfile, tag, b.Out), " ")),
 	}, nil
 }
+
+// planBuildID is what Plan prints in place of bd's build id: git answers it inside
+// the worktree BuildBinaries makes, and Plan makes none.
+const planBuildID = "<short sha of the commit, read in the worktree>"
 
 // claudeCLIName is the file the claude CLI is written to in the build context;
 // the Dockerfile's COPY reads it by this name.
