@@ -287,3 +287,147 @@ func TestCodeUsesTheWholeAlphabetFromTheLastEightBytes(t *testing.T) {
 		t.Errorf("code = %q, want STUVWXYZ", got.code)
 	}
 }
+
+// failStore wraps a Store and fails the named operations.
+type failStore struct {
+	Store
+	put, fail, consume error
+}
+
+func (f failStore) Put(ctx context.Context, inv Invitation) error {
+	if f.put != nil {
+		return f.put
+	}
+	return f.Store.Put(ctx, inv)
+}
+
+func (f failStore) Fail(ctx context.Context, id string) (int, error) {
+	if f.fail != nil {
+		return 0, f.fail
+	}
+	return f.Store.Fail(ctx, id)
+}
+
+func (f failStore) Consume(ctx context.Context, id string) error {
+	if f.consume != nil {
+		return f.consume
+	}
+	return f.Store.Consume(ctx, id)
+}
+
+// shortReader yields fewer bytes than asked, then ends.
+type shortReader struct{}
+
+func (shortReader) Read(p []byte) (int, error) { return 0, errors.New("entropy exhausted") }
+
+// service builds a Service over st and rnd, with org-1 present and the
+// sends recorded in the returned slice.
+func service(t *testing.T, st Store, rnd interface{ Read([]byte) (int, error) }) (*Service, *membership.Memory, *[]sent) {
+	t.Helper()
+	mem := membership.NewMemory()
+	if err := mem.AddOrg(context.Background(), membership.Org{ID: "org-1", Name: "One"}); err != nil {
+		t.Fatal(err)
+	}
+	var out []sent
+	svc, err := New(Config{
+		Store: st, Members: mem,
+		Send: func(_ context.Context, email, id, code string) error {
+			out = append(out, sent{email, id, code})
+			return nil
+		},
+		Now: func() time.Time { return t0 }, Rand: rnd, TTL: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return svc, mem, &out
+}
+
+func TestCreateFailsWhenTheRandomSourceFailsOrTheStoreRefuses(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	svc, _, sentTo := service(t, NewMemory(), shortReader{})
+	if id, err := svc.Create(ctx, "org-1", "a@example.com", membership.RoleMember); err == nil || id != "" || !strings.Contains(err.Error(), "random source") {
+		t.Errorf("Create with a dead random source = %q, %v, want an error naming the random source", id, err)
+	}
+	boom := errors.New("store down")
+	svc, _, sentTo = service(t, failStore{Store: NewMemory(), put: boom}, &ascending{})
+	if _, err := svc.Create(ctx, "org-1", "a@example.com", membership.RoleMember); !errors.Is(err, boom) {
+		t.Errorf("Create with a failing store = %v, want the store's error", err)
+	}
+	if len(*sentTo) != 0 {
+		t.Errorf("a code was sent although the invitation was not stored")
+	}
+}
+
+func TestBindRefusesUnknownInvitationEmptySubAndStoreFailures(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	r := newRig(t)
+	in := r.invite(t)
+	if _, err := r.svc.Bind(ctx, "no-such-id", in.code, "sub", "ann@example.com", true); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Bind with an unknown id = %v, want ErrNotFound", err)
+	}
+	if _, err := r.svc.Bind(ctx, in.id, in.code, "", "ann@example.com", true); !errors.Is(err, ErrNoSub) {
+		t.Errorf("Bind with no sub = %v, want ErrNoSub", err)
+	}
+
+	boom := errors.New("store down")
+	svc, _, sentTo := service(t, failStore{Store: NewMemory(), fail: boom}, &ascending{})
+	if _, err := svc.Create(ctx, "org-1", "a@example.com", membership.RoleMember); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := svc.Bind(ctx, (*sentTo)[0].id, "WRONGCOD", "sub", "a@example.com", true); !errors.Is(err, boom) {
+		t.Errorf("Bind with a wrong code and a failing Fail = %v, want the store's error", err)
+	}
+
+	svc, _, sentTo = service(t, failStore{Store: NewMemory(), consume: boom}, &ascending{})
+	if _, err := svc.Create(ctx, "org-1", "a@example.com", membership.RoleMember); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := svc.Bind(ctx, (*sentTo)[0].id, (*sentTo)[0].code, "sub", "a@example.com", true); !errors.Is(err, boom) {
+		t.Errorf("Bind with a failing Consume = %v, want the store's error", err)
+	}
+}
+
+func TestBindOfAnExistingMemberFailsAndLeavesTheInvitationUsed(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	r := newRig(t)
+	in := r.invite(t)
+	if _, err := r.svc.Bind(ctx, in.id, in.code, "sub-ann", "ann@example.com", true); err != nil {
+		t.Fatalf("first Bind: %v", err)
+	}
+	in2 := r.invite(t)
+	m, err := r.svc.Bind(ctx, in2.id, in2.code, "sub-ann", "ann@example.com", true)
+	if err == nil || m != (membership.Member{}) {
+		t.Fatalf("Bind of an existing member = %+v, %v, want an error and no member", m, err)
+	}
+	if _, err := r.svc.Bind(ctx, in2.id, in2.code, "sub-bob", "ann@example.com", true); !errors.Is(err, ErrUsed) {
+		t.Errorf("second try after the failed add = %v, want ErrUsed (the invitation was consumed)", err)
+	}
+}
+
+func TestMemoryStoreRefusesUnknownAndUsedInvitations(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	m := NewMemory()
+	if _, err := m.Get(ctx, "x"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Get unknown = %v, want ErrNotFound", err)
+	}
+	if err := m.Consume(ctx, "x"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Consume unknown = %v, want ErrNotFound", err)
+	}
+	if n, err := m.Fail(ctx, "x"); !errors.Is(err, ErrNotFound) || n != 0 {
+		t.Errorf("Fail unknown = %d, %v, want 0 and ErrNotFound", n, err)
+	}
+	if err := m.Put(ctx, Invitation{ID: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Consume(ctx, "x"); err != nil {
+		t.Fatalf("first Consume: %v", err)
+	}
+	if err := m.Consume(ctx, "x"); !errors.Is(err, ErrUsed) {
+		t.Errorf("second Consume = %v, want ErrUsed", err)
+	}
+}
