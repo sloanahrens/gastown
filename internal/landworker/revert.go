@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/promote"
+	"github.com/steveyegge/gastown/internal/shelltier"
 )
 
 // LabelRevert marks a work bead the red-main owner filed to revert one
@@ -335,26 +336,101 @@ var (
 	// verdict: the sources, the module files, the Makefile whose targets run
 	// the tier, and the test policy that decides which packages pass.
 	goVerdictInputsRE = regexp.MustCompile(`(\.go$|go\.mod$|go\.sum$|Makefile$|^internal/testpolicy/)`)
-	// shellVerdictInputsRE is the same rule for the shell tier, the union of
-	// the shell tier manifest's triggers (land.ShellTierInputs).
+	// shellVerdictInputsRE is the union of the shell-tier manifest's triggers
+	// (land.ShellTierInputs). A failing script the manifest lists is judged by
+	// its own triggers instead; the union is the rule for one the manifest does
+	// not list, whose triggers are unknown (gt-r0vuk).
 	shellVerdictInputsRE = regexp.MustCompile(land.ShellTierInputs())
 )
 
 // unattributable names a unit a red run blamed that a landing with those
 // changed paths cannot have moved, or "" when it can have moved every blamed
-// unit: a failing script only by a shell-tier input, a failing Go package only
-// by a Go input. Every Go input counts for every package (a package's
-// dependencies span the module), so the check over-approximates "downstream"
-// instead of guessing an import graph: only a landing that changed no Go code
-// at all is ruled out of a Go failure (gt-40so9).
+// unit: a failing script only by its own triggers (or the tier-wide union,
+// for a script the manifest does not list), a failing Go package only by a Go
+// input. Every Go input counts for every package (a package's dependencies
+// span the module), so the check over-approximates "downstream" instead of
+// guessing an import graph: only a landing that changed no Go code at all is
+// ruled out of a Go failure (gt-40so9). A landing is reverted for several
+// failing scripts when it can have moved any one of them (gt-r0vuk).
 func unattributable(changed []string, b blame) string {
 	if len(b.packages) > 0 && !anyMatch(changed, goVerdictInputsRE) {
 		return fmt.Sprintf("%s: the landing changed no Go input (%s)", strings.Join(b.packages, ", "), pathsBrief(changed))
 	}
-	if len(b.scripts) > 0 && !anyMatch(changed, shellVerdictInputsRE) {
-		return fmt.Sprintf("%s: the landing changed no shell-tier input (%s)", strings.Join(b.scripts, ", "), pathsBrief(changed))
+	if len(b.scripts) > 0 && !anyScriptMoved(changed, b.scripts) {
+		return shellBlame(changed, b.scripts)
 	}
 	return ""
+}
+
+// anyScriptMoved reports whether the landing can have moved any failing
+// script's verdict.
+func anyScriptMoved(changed, scripts []string) bool {
+	for _, script := range scripts {
+		if shellScriptMoved(script, changed) {
+			return true
+		}
+	}
+	return false
+}
+
+// shellScriptMoved reports whether a change to any of changed can have moved
+// script's verdict: a script the shell-tier manifest lists moves only by its
+// own triggers, while one the manifest does not list falls back to the
+// tier-wide union, since nothing says which paths it reads (gt-r0vuk).
+func shellScriptMoved(script string, changed []string) bool {
+	e, listed := shellScriptEntry(script)
+	if !listed {
+		return anyMatch(changed, shellVerdictInputsRE)
+	}
+	return triggerCovers(e.TriggersOrDefault(), changed)
+}
+
+// shellScriptEntry is the shell-tier manifest entry for script, if it has one.
+func shellScriptEntry(script string) (shelltier.Entry, bool) {
+	script = strings.TrimSpace(script)
+	for _, e := range shelltier.Manifest() {
+		if e.Path == script {
+			return e, true
+		}
+	}
+	return shelltier.Entry{}, false
+}
+
+// triggerCovers reports whether any of paths is at or under one of triggers.
+// It reads a trigger as land.ShellTierInputs does: one ending in "/" covers
+// the paths under it, and any other is a file path covering only itself.
+// TestTriggerCoversReadsLikeTheLandRule pins the two readings together.
+func triggerCovers(triggers, paths []string) bool {
+	for _, p := range paths {
+		p = strings.TrimSpace(p)
+		for _, trigger := range triggers {
+			if strings.HasSuffix(trigger, "/") {
+				if strings.HasPrefix(p, trigger) {
+					return true
+				}
+			} else if p == trigger {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// shellBlame is why the landing cannot have failed any of scripts, for the
+// status line: the union rule when no failing script has a manifest entry,
+// since that is the rule that judged them, and their own triggers when one
+// does (gt-r0vuk).
+func shellBlame(changed, scripts []string) string {
+	for _, script := range scripts {
+		if _, listed := shellScriptEntry(script); listed {
+			noun := "script"
+			if len(scripts) > 1 {
+				noun = "scripts"
+			}
+			return fmt.Sprintf("%s: the landing changed no input of the failing %s (%s)", strings.Join(scripts, ", "), noun, pathsBrief(changed))
+		}
+	}
+	return fmt.Sprintf("%s: the landing changed no shell-tier input (%s)", strings.Join(scripts, ", "), pathsBrief(changed))
 }
 
 // unattributableFromDiff is unattributable over the landing of rec. A red run

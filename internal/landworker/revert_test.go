@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/shelltier"
 )
 
 const (
@@ -63,7 +65,12 @@ func (h *revertHarness) red(ctx context.Context, pl PostLand) {
 // redShell is a red run the post-land shell tier caused: it names no Go
 // package, only the script that failed, so nothing is rerun.
 func (h *revertHarness) redShell(ctx context.Context, pl PostLand, script string) {
-	h.r.Red(ctx, "bash scripts/post-land-shell.sh", pl, PostLandResult{ExitCode: 1, ShellFailures: []string{script}})
+	h.redShells(ctx, pl, script)
+}
+
+// redShells is redShell for a run whose tier sweep named several scripts.
+func (h *revertHarness) redShells(ctx context.Context, pl PostLand, scripts ...string) {
+	h.r.Red(ctx, "bash scripts/post-land-shell.sh", pl, PostLandResult{ExitCode: 1, ShellFailures: scripts})
 }
 
 func (h *revertHarness) revertBeads(t *testing.T) []*beads.Issue {
@@ -167,6 +174,147 @@ func TestRedMainRevertsWhenTheLandingTouchedTheFailingScript(t *testing.T) {
 	}
 	if s := h.lastStatus(); !strings.Contains(s, "reverting gt-cul as "+rv[0].ID) {
 		t.Fatalf("status %q", s)
+	}
+}
+
+// gt-r0vuk: the manifest decides a failing script's verdict by that script's
+// own triggers, not by the union every script contributes to. A landing that
+// changed a Go file no listed script runs on is not reverted for it, and one
+// that changed a path the script runs on still is.
+func TestRedMainBlamesAFailingScriptByItsOwnTriggers(t *testing.T) {
+	t.Parallel()
+	const (
+		// gate-vs-load declares no triggers, so it runs on scripts/ and the
+		// Makefile and not on the Go tree.
+		gateVsLoad = "scripts/gate-vs-load_test.sh"
+		// post-land-shell declares internal/, so it runs on the Go tree.
+		postLandShell = "scripts/post-land-shell_test.sh"
+	)
+	for _, tc := range []struct {
+		name       string
+		changed    []string
+		script     string
+		wantRevert bool
+	}{
+		{name: "a Go change and a script that runs on no Go path", changed: []string{"internal/a/a.go"}, script: gateVsLoad},
+		{name: "a Go change and a script that runs on internal/", changed: []string{"internal/a/a.go"}, script: postLandShell, wantRevert: true},
+		{name: "the file a trigger names", changed: []string{"Makefile"}, script: gateVsLoad, wantRevert: true},
+		{name: "a file a file trigger only shares a prefix with", changed: []string{"Makefile.bak"}, script: gateVsLoad},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newRevertHarness(t, greenSHA)
+			h.changed = tc.changed
+			h.redShell(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"}, tc.script)
+
+			rv := h.revertBeads(t)
+			if tc.wantRevert {
+				if len(h.reverts) != 1 || len(rv) != 1 {
+					t.Fatalf("reverts %v, beads %+v; want the landing that changed an input of %s reverted", h.reverts, rv, tc.script)
+				}
+				if s := h.lastStatus(); !strings.Contains(s, "reverting gt-cul as "+rv[0].ID) {
+					t.Fatalf("status %q", s)
+				}
+				return
+			}
+			if len(h.reverts) != 0 || len(rv) != 0 {
+				t.Fatalf("reverted a landing that changed no input of %s: %v %+v", tc.script, h.reverts, rv)
+			}
+			want := "no revert: " + tc.script + ": the landing changed no input of the failing script (" + strings.Join(tc.changed, ", ") + ")"
+			if s := h.lastStatus(); !strings.Contains(s, want) {
+				t.Fatalf("status %q; want it to contain %q", s, want)
+			}
+		})
+	}
+}
+
+// gt-r0vuk: with several failing scripts the landing is the culprit when it
+// can have moved any one of them, and is spared only when it moved none. A
+// script the manifest does not list keeps the tier-wide union rule, so nothing
+// new escapes blame.
+func TestRedMainBlamesSeveralFailingScriptsByAnyOfTheirInputs(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		changed    []string
+		scripts    []string
+		wantRevert bool
+		wantStatus string
+	}{
+		{
+			name:       "one of the scripts runs on the changed path",
+			changed:    []string{"internal/a/a.go"},
+			scripts:    []string{"scripts/gate-vs-load_test.sh", "scripts/post-land-shell_test.sh"},
+			wantRevert: true,
+		},
+		{
+			name:       "a script the manifest does not list keeps the union rule",
+			changed:    []string{"internal/a/a.go"},
+			scripts:    []string{"scripts/gate-vs-load_test.sh", "scripts/test-makefile.sh"},
+			wantRevert: true,
+		},
+		{
+			name:    "no script runs on the changed path",
+			changed: []string{"tracker/api/actor.go"},
+			scripts: []string{"scripts/gate-vs-load_test.sh", "scripts/post-land-shell_test.sh"},
+			wantStatus: "no revert: scripts/gate-vs-load_test.sh, scripts/post-land-shell_test.sh: " +
+				"the landing changed no input of the failing scripts (tracker/api/actor.go)",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newRevertHarness(t, greenSHA)
+			h.changed = tc.changed
+			h.redShells(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"}, tc.scripts...)
+
+			rv := h.revertBeads(t)
+			if tc.wantRevert {
+				if len(h.reverts) != 1 || len(rv) != 1 {
+					t.Fatalf("reverts %v, beads %+v; want the landing that moved a failing script reverted", h.reverts, rv)
+				}
+				if s := h.lastStatus(); !strings.Contains(s, "reverting gt-cul as "+rv[0].ID) {
+					t.Fatalf("status %q", s)
+				}
+				return
+			}
+			if len(h.reverts) != 0 || len(rv) != 0 {
+				t.Fatalf("reverted a landing that moved no failing script: %v %+v", h.reverts, rv)
+			}
+			if s := h.lastStatus(); !strings.Contains(s, tc.wantStatus) {
+				t.Fatalf("status %q; want it to contain %q", s, tc.wantStatus)
+			}
+		})
+	}
+}
+
+// TestTriggerCoversReadsLikeTheLandRule pins triggerCovers to the reading
+// land.ShellTierInputs uses, so a drift in either one fails here: over every
+// manifest trigger, a path is covered exactly when the land rule matches it
+// (gt-r0vuk).
+func TestTriggerCoversReadsLikeTheLandRule(t *testing.T) {
+	t.Parallel()
+	var triggers []string
+	for _, e := range shelltier.Manifest() {
+		triggers = append(triggers, e.TriggersOrDefault()...)
+	}
+	if len(triggers) == 0 {
+		t.Fatal("the shell tier manifest is empty, so the union covers nothing")
+	}
+	re := regexp.MustCompile(land.ShellTierInputs())
+	var paths []string
+	for _, trigger := range triggers {
+		paths = append(paths, trigger)
+		if strings.HasSuffix(trigger, "/") {
+			paths = append(paths, trigger+"changed.txt")
+		} else {
+			paths = append(paths, trigger+".bak", trigger+"/changed.txt")
+		}
+	}
+	paths = append(paths, "docs/reference.md", "tracker/api/actor.go")
+	for _, p := range paths {
+		if got, want := triggerCovers(triggers, []string{p}), re.MatchString(p); got != want {
+			t.Errorf("triggerCovers(%q) = %v, land.ShellTierInputs() = %q matches it: %v", p, got, land.ShellTierInputs(), want)
+		}
 	}
 }
 
