@@ -15,7 +15,7 @@
 // no logger. Who may invite is the caller's decision, made before Create.
 //
 // Nothing calls it yet. Its callers are the console and dashboard handlers (later
-// beads), with a verified identity from internal/signin. Storage is a Store
+// beads), with the verified identity that sign-in (plan row O2, a separate package) yields. Storage is a Store
 // interface with an in-memory fake; the Postgres tables come later. The package
 // does no network I/O.
 package invite
@@ -73,7 +73,8 @@ type Store interface {
 	Get(ctx context.Context, id string) (Invitation, error)
 	// Consume marks the invitation used, or returns ErrUsed if it already is.
 	Consume(ctx context.Context, id string) error
-	// Fail counts one wrong code and returns the total so far.
+	// Fail counts one redemption attempt and returns the total so far. Bind
+	// calls it before it compares the code, so the count is the lock.
 	Fail(ctx context.Context, id string) (int, error)
 }
 
@@ -135,6 +136,8 @@ func (s *Service) Create(ctx context.Context, orgID, email string, role membersh
 	if err := s.cfg.Store.Put(ctx, inv); err != nil {
 		return "", err
 	}
+	// A failed send leaves the stored invitation valid until its TTL. Nobody
+	// holds its code, so it cannot be redeemed; the owner re-invites.
 	if err := s.cfg.Send(ctx, email, id, string(code)); err != nil {
 		return "", fmt.Errorf("invite: send code: %w", err)
 	}
@@ -169,12 +172,20 @@ func (s *Service) Bind(ctx context.Context, id, code, sub, email string, emailVe
 	if !strings.EqualFold(strings.TrimSpace(email), inv.Email) {
 		return membership.Member{}, ErrEmailMismatch
 	}
+	// The attempt is counted before the code is compared, and the store's
+	// atomic count decides whether this call may compare at all. A burst of
+	// parallel guesses therefore makes at most MaxAttempts comparisons; the
+	// read of Attempts above is only a cheap early exit.
+	n, err := s.cfg.Store.Fail(ctx, id)
+	if err != nil {
+		return membership.Member{}, err
+	}
+	if n > MaxAttempts {
+		return membership.Member{}, ErrLocked
+	}
 	want := inv.CodeHash
 	got := hashCode(inv.ID, strings.ToUpper(strings.TrimSpace(code)))
 	if subtle.ConstantTimeCompare([]byte(want), []byte(got)) != 1 {
-		if _, err := s.cfg.Store.Fail(ctx, id); err != nil {
-			return membership.Member{}, err
-		}
 		return membership.Member{}, ErrWrongCode
 	}
 	if err := s.cfg.Store.Consume(ctx, id); err != nil {
@@ -188,7 +199,12 @@ func (s *Service) Bind(ctx context.Context, id, code, sub, email string, emailVe
 }
 
 // hashCode salts the code with the invitation id so equal codes on two
-// invitations hash differently.
+// invitations hash differently. Threat model: the code is 40 bits and lives
+// for the invitation's TTL, so a fast hash does not stop someone who can read
+// the invitation table from recovering it offline; what it prevents is the
+// code sitting in the table in clear. Redeeming still needs a verified token
+// for the invited email. A keyed hash with a secret held outside the table is
+// the upgrade, owed when the Postgres store is built.
 func hashCode(id, code string) string {
 	sum := sha256.Sum256([]byte(id + ":" + code))
 	return hex.EncodeToString(sum[:])

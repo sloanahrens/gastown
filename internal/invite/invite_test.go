@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -149,7 +150,7 @@ func TestExpiredAndReusedInvitationsFail(t *testing.T) {
 	}
 }
 
-func TestCodeIsHashedAndNeverLogged(t *testing.T) {
+func TestStoredHashAndErrorsDoNotHoldTheCode(t *testing.T) {
 	t.Parallel()
 	r := newRig(t)
 	in := r.invite(t)
@@ -262,7 +263,7 @@ func (r *ascending) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func TestCodeUsesTheWholeAlphabetFromTheLastEightBytes(t *testing.T) {
+func TestCodeMapsTheLastEightBytesOntoTheAlphabet(t *testing.T) {
 	t.Parallel()
 	var got sent
 	svc, err := New(Config{
@@ -430,4 +431,63 @@ func TestMemoryStoreRefusesUnknownAndUsedInvitations(t *testing.T) {
 	if err := m.Consume(ctx, "x"); !errors.Is(err, ErrUsed) {
 		t.Errorf("second Consume = %v, want ErrUsed", err)
 	}
+}
+
+// TestParallelWrongCodesMakeAtMostMaxAttemptsComparisons drives a burst of
+// parallel wrong guesses: the lock must hold under concurrency, not only in
+// sequence, so at most MaxAttempts of them reach the code comparison.
+func TestParallelWrongCodesMakeAtMostMaxAttemptsComparisons(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	in := r.invite(t)
+	// Every Get reads the invitation as it was before any guess, which is what
+	// racing calls see; only the store's atomic Fail count can hold the line.
+	svc, err := New(Config{
+		Store: staleStore{r.store}, Members: r.members,
+		Send: func(context.Context, string, string, string) error { return nil },
+		Now:  func() time.Time { return r.now }, Rand: &seqReader{}, TTL: 48 * time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const burst = 40
+	results := make(chan error, burst)
+	var wg sync.WaitGroup
+	for i := 0; i < burst; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := svc.Bind(context.Background(), in.id, "BADBADXX", "s", "ann@example.com", true)
+			results <- err
+		}()
+	}
+	wg.Wait()
+	close(results)
+	wrong, locked := 0, 0
+	for err := range results {
+		switch {
+		case errors.Is(err, ErrWrongCode):
+			wrong++
+		case errors.Is(err, ErrLocked):
+			locked++
+		default:
+			t.Errorf("unexpected error %v", err)
+		}
+	}
+	if wrong > MaxAttempts {
+		t.Errorf("%d guesses were compared, want at most %d", wrong, MaxAttempts)
+	}
+	if wrong+locked != burst {
+		t.Errorf("wrong %d + locked %d != %d", wrong, locked, burst)
+	}
+}
+
+// staleStore returns every invitation with its attempt count reset, as a
+// reader that raced the other guesses would see it.
+type staleStore struct{ Store }
+
+func (s staleStore) Get(ctx context.Context, id string) (Invitation, error) {
+	inv, err := s.Store.Get(ctx, id)
+	inv.Attempts = 0
+	return inv, err
 }
