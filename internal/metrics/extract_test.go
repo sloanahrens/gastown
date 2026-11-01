@@ -592,9 +592,83 @@ func TestExtractFailingBdLeavesNoBeadsCSVAndNamesTheSource(t *testing.T) {
 	}
 }
 
-// TestExtractWritesFooterJSONInFieldOrder checks footer.json holds the four
-// counts in field order, with empty lists where no row was dropped, and no
-// trailing newline.
+// extractBdListStamped is extractBdList with gt-b's notes carrying the READY TO
+// LAND block gt done writes, so the extract has a note stamp to prefer.
+const extractBdListStamped = `[
+ {"id": "gt-a", "created_at": "2026-10-12T00:00:00Z", "issue_type": "task",
+  "labels": ["handoff"], "dependency_count": 1, "comment_count": 0, "acceptance_criteria": "- [ ] x",
+  "notes": "MERGE REJECTION (attempt 1): conflict"},
+ {"id": "gt-b", "created_at": "2026-10-12T00:00:00Z", "issue_type": "task", "labels": [], "dependency_count": 3,
+  "notes": "READY TO LAND\nBranch: polecat/bravo/gt-b\nHead: abc\nTarget: main\nWorker: bravo\nSubmitted: 2026-10-13T06:00:00Z"}
+]`
+
+// TestExtractWritesTheStageStampsFromTheFeedAndNotes: dispatched_at comes from
+// the event feed and submitted_at from the bead's READY TO LAND stamp, so a
+// landing row carries its run's clock instead of a per-row bd read.
+func TestExtractWritesTheStageStampsFromTheFeedAndNotes(t *testing.T) {
+	t.Parallel()
+	env, files := extractCase(t)
+	env.RunBd = func(_ string, args []string) ([]byte, bool) {
+		if len(args) > 0 && args[0] == "list" {
+			return []byte(extractBdListStamped), true
+		}
+		return []byte(extractBdShow), true
+	}
+	env.EventLines = []string{
+		stageEventLine(t, "2026-10-12T06:00:00Z", "sling", map[string]string{"bead": "gt-a"}),
+	}
+	res := extractRun(t, env)
+	_, by := extractLandings(t, files)
+	for _, tc := range []struct{ bead, column, want string }{
+		{"gt-a", "created_at", "2026-10-12T00:00:00Z"},
+		{"gt-a", "dispatched_at", "2026-10-12T06:00:00Z"},
+		{"gt-a", "submitted_at", ""},
+		{"gt-a", "time_to_land_s", "172800"},
+		{"gt-b", "dispatched_at", ""},
+		{"gt-b", "submitted_at", "2026-10-13T06:00:00Z"},
+	} {
+		if got := by[tc.bead][tc.column]; got != tc.want {
+			t.Errorf("%s %s = %q, want %q", tc.bead, tc.column, got, tc.want)
+		}
+	}
+	if got, want := res.Footer.StageStampMissingDispatchedAt, 1; got != want {
+		t.Errorf("stage_stamp_missing_dispatched_at = %d, want %d", got, want)
+	}
+	if got, want := res.Footer.StageStampMissingSubmittedAt, 1; got != want {
+		t.Errorf("stage_stamp_missing_submitted_at = %d, want %d", got, want)
+	}
+}
+
+// TestStageStampMissingCreatedAtIsCounted: a landing whose bead the listing does
+// not carry keeps an empty created_at and time_to_land_s, and the footer counts
+// it rather than the extract dropping the row.
+func TestStageStampMissingCreatedAtIsCounted(t *testing.T) {
+	t.Parallel()
+	env, files := extractCase(t)
+	env.RunBd = func(_ string, args []string) ([]byte, bool) {
+		if len(args) > 0 && args[0] == "list" {
+			return []byte(`[{"id": "gt-a", "created_at": "2026-10-12T00:00:00Z", "issue_type": "task"}]`), true
+		}
+		return []byte(extractBdShow), true
+	}
+	res := extractRun(t, env)
+	_, by := extractLandings(t, files)
+	if got := by["gt-b"]["created_at"]; got != "" {
+		t.Errorf("gt-b created_at = %q, want empty for a bead the listing does not carry", got)
+	}
+	if got := by["gt-b"]["time_to_land_s"]; got != "" {
+		t.Errorf("gt-b time_to_land_s = %q, want empty without a created_at", got)
+	}
+	if got, want := res.Footer.StageStampMissingCreatedAt, 1; got != want {
+		t.Errorf("stage_stamp_missing_created_at = %d, want %d", got, want)
+	}
+}
+
+// TestExtractWritesFooterJSONInFieldOrder checks footer.json holds the counts
+// in field order, with empty lists where no row was dropped, and no trailing
+// newline. The stage counts are the fixture's: both beads carry a created_at,
+// no event feed and no READY TO LAND block stamp the other two stamps, and gt-b
+// has no usage model.
 func TestExtractWritesFooterJSONInFieldOrder(t *testing.T) {
 	t.Parallel()
 	env, files := extractCase(t)
@@ -603,7 +677,8 @@ func TestExtractWritesFooterJSONInFieldOrder(t *testing.T) {
 	if !ok {
 		t.Fatalf("%s was not written; wrote %v", footerName, files.names)
 	}
-	want := `{"rows_read":{"ledger":2,"reviews":0,"beads":2,"usage":1},"rows_dropped":[],"gaps":[],"sources_unreadable":[]}`
+	want := `{"rows_read":{"ledger":2,"reviews":0,"beads":2,"usage":1},"rows_dropped":[],"gaps":[],"sources_unreadable":[],` +
+		`"model_unknown":1,"stage_stamp_missing_created_at":0,"stage_stamp_missing_dispatched_at":2,"stage_stamp_missing_submitted_at":2}`
 	if got := buf.String(); got != want {
 		t.Errorf("%s = %s, want %s", footerName, got, want)
 	}

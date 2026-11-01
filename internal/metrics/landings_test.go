@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -78,6 +79,197 @@ func TestLandingColumnsMatchThePythonExtract(t *testing.T) {
 	}
 	if !slices.Equal(landingColumns, want) {
 		t.Errorf("landingColumns = %v, want the extract's %v", landingColumns, want)
+	}
+}
+
+// buildLedgerLandings runs BuildLandings, the production join Extract calls,
+// for ledger, so a test drives the model, stage stamps and time to land the
+// extract actually writes rather than a helper beside it.
+func buildLedgerLandings(t *testing.T, ledger []LedgerRow, beads map[string]BeadRow, usage map[string]Usage, stamps StageStamps) []Row {
+	t.Helper()
+	rows, err := BuildLandings(context.Background(), ledger, nil, fakeDiffSource{},
+		beads, usage, nil, nil, nil, stamps, &Dropped{})
+	if err != nil {
+		t.Fatalf("BuildLandings: %v", err)
+	}
+	return rows
+}
+
+// TestLedgerNewColumnsAppendAtTheEnd: the stage and time-to-land columns extend
+// the header, so a reader of the extract's existing columns finds each in the
+// place it was written (gt-p9pok).
+func TestLedgerNewColumnsAppendAtTheEnd(t *testing.T) {
+	t.Parallel()
+	legacy := []string{
+		"bead", "rig", "landed_at", "week", "route", "om_verdict", "gate_result",
+		"lines_added", "lines_deleted", "lines_total", "files_touched",
+		"file_entropy", "package_entropy", "attempts", "rejected_before_landing",
+		"manual_rescue", "reached_overrun_stop", "unreadable", "type", "priority",
+		"shaped", "label_count", "model", "om_threshold", "dominant_model",
+	}
+	appended := []string{"created_at", "dispatched_at", "submitted_at", "time_to_land_s"}
+	if len(landingColumns) != len(legacy)+len(appended) {
+		t.Fatalf("landingColumns has %d columns, want %d", len(landingColumns), len(legacy)+len(appended))
+	}
+	if got := landingColumns[:len(legacy)]; !slices.Equal(got, legacy) {
+		t.Errorf("existing columns = %v, want the extract's %v", got, legacy)
+	}
+	if got := landingColumns[len(legacy):]; !slices.Equal(got, appended) {
+		t.Errorf("appended columns = %v, want %v", got, appended)
+	}
+}
+
+// TestLedgerModelFilledFromSeatRecords: a landing whose bead left no usage
+// model takes the model of the seat that wrote the landed branch, read from
+// that seat's other records; a landing no record names keeps the cell empty.
+func TestLedgerModelFilledFromSeatRecords(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		branch string
+		files  map[string]UsageFile
+		want   string
+	}{
+		{
+			name:   "the landed seat's model answers a bead with no record of its own",
+			branch: "polecat/alfa/gt-1",
+			files: map[string]UsageFile{
+				"gt-other": {Rig: "gastown", Seat: "alfa", Models: map[string]UsageModel{"claude-opus": {Calls: 2}}},
+			},
+			want: "claude-opus",
+		},
+		{
+			name:   "the bead's own record answers when it names the landed seat",
+			branch: "polecat/alfa/gt-1",
+			files: map[string]UsageFile{
+				"gt-1": {Rig: "gastown", Seat: "alfa", Models: map[string]UsageModel{"claude-haiku": {Calls: 1}}},
+			},
+			want: "claude-haiku",
+		},
+		{
+			name:   "a record of another seat is not the landed attempt's model",
+			branch: "polecat/alfa/gt-1",
+			files: map[string]UsageFile{
+				"gt-1":     {Rig: "gastown", Seat: "bravo", Models: map[string]UsageModel{"claude-haiku": {Calls: 1}}},
+				"gt-other": {Rig: "gastown", Seat: "alfa", Models: map[string]UsageModel{"claude-opus": {Calls: 2}}},
+			},
+			want: "claude-opus",
+		},
+		{
+			name:   "a landing with no seat record and no usage keeps the model empty",
+			branch: "",
+			want:   "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ledger := []LedgerRow{{
+				Bead: "gt-1", Rig: "gastown", LandedCommit: "c1",
+				LandedAt: "2026-10-14T00:00:00Z", Branch: tc.branch,
+			}}
+			stamps := StageStamps{Seats: ReadUsageSeats(tc.files)}
+			rows := buildLedgerLandings(t, ledger, map[string]BeadRow{}, LoadUsage(tc.files), stamps)
+			if got := rows[0]["model"]; got != tc.want {
+				t.Errorf("gt-1 model = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLedgerModelUnknownIsCountedNotDropped: the landing a record cannot name
+// keeps its row with an empty model, and the footer count says how many are
+// like it.
+func TestLedgerModelUnknownIsCountedNotDropped(t *testing.T) {
+	t.Parallel()
+	ledger := []LedgerRow{
+		{Bead: "gt-1", Rig: "gastown", LandedCommit: "c1", LandedAt: "2026-10-14T00:00:00Z"},
+		{Bead: "gt-2", Rig: "gastown", LandedCommit: "c2", LandedAt: "2026-10-14T00:00:00Z", Branch: "crew/merlin/gt-2"},
+	}
+	rows := buildLedgerLandings(t, ledger, map[string]BeadRow{}, map[string]Usage{"gt-2": {Model: "opus"}}, StageStamps{})
+	if got := len(rows); got != 2 {
+		t.Fatalf("rows = %d, want both landings kept", got)
+	}
+	if got, want := CountLandingGaps(rows).ModelUnknown, 1; got != want {
+		t.Errorf("model_unknown = %d, want %d", got, want)
+	}
+}
+
+// TestLedgerTimeToLand: the cell is created_at to landed_at in seconds, and it
+// is empty when a stamp is missing or the bead was created after it landed,
+// with the footer counting each empty stamp.
+func TestLedgerTimeToLand(t *testing.T) {
+	t.Parallel()
+	beads := map[string]BeadRow{
+		"gt-a": {ID: "gt-a", CreatedAt: "2026-10-12T00:00:00Z"},
+		"gt-b": {ID: "gt-b"},
+		"gt-c": {ID: "gt-c", CreatedAt: "2026-10-15T00:00:00Z"},
+	}
+	ledger := []LedgerRow{
+		{Bead: "gt-a", Rig: "gastown", LandedCommit: "c1", LandedAt: "2026-10-14T00:00:00Z"},
+		{Bead: "gt-b", Rig: "gastown", LandedCommit: "c2", LandedAt: "2026-10-14T00:00:00Z"},
+		{Bead: "gt-c", Rig: "gastown", LandedCommit: "c3", LandedAt: "2026-10-14T00:00:00Z"},
+	}
+	rows := buildLedgerLandings(t, ledger, beads, nil, StageStamps{})
+	want := map[string]string{"gt-a": "172800", "gt-b": "", "gt-c": ""}
+	for _, row := range rows {
+		if got, ok := want[row["bead"]]; !ok || row["time_to_land_s"] != got {
+			t.Errorf("%s time_to_land_s = %q, want %q", row["bead"], row["time_to_land_s"], got)
+		}
+	}
+	// gt-b names no created_at; gt-c's is present but follows its landing, so
+	// only the time to land is empty for it.
+	if got, want := CountLandingGaps(rows).StageStampMissing["created_at"], 1; got != want {
+		t.Errorf("stage_stamp_missing_created_at = %d, want %d", got, want)
+	}
+}
+
+// TestLedgerSubmittedPrefersTheNoteStamp: the READY TO LAND block's stamp is
+// the submission gt done wrote, so it answers before the feed's done event.
+func TestLedgerSubmittedPrefersTheNoteStamp(t *testing.T) {
+	t.Parallel()
+	ledger := []LedgerRow{{Bead: "gt-a", Rig: "gastown", LandedCommit: "c1", LandedAt: "2026-10-14T00:00:00Z"}}
+	beads := map[string]BeadRow{"gt-a": {ID: "gt-a", SubmittedAt: "2026-10-13T06:00:00Z"}}
+	stamps := StageStamps{Submitted: map[string]string{"gt-a": "2026-10-13T09:00:00Z"}}
+	rows := buildLedgerLandings(t, ledger, beads, nil, stamps)
+	if got, want := rows[0]["submitted_at"], "2026-10-13T06:00:00Z"; got != want {
+		t.Errorf("submitted_at = %q, want the READY TO LAND stamp %q", got, want)
+	}
+}
+
+// TestLedgerDispatchedStampFromTheFeed: the feed's dispatch answers a landing's
+// cell, and a bead the feed never slung keeps it empty and counted.
+func TestLedgerDispatchedStampFromTheFeed(t *testing.T) {
+	t.Parallel()
+	ledger := []LedgerRow{
+		{Bead: "gt-a", Rig: "gastown", LandedCommit: "c1", LandedAt: "2026-10-14T00:00:00Z"},
+		{Bead: "gt-b", Rig: "gastown", LandedCommit: "c2", LandedAt: "2026-10-14T00:00:00Z"},
+	}
+	stamps := StageStamps{Dispatched: map[string]string{"gt-a": "2026-10-13T00:00:00Z"}}
+	rows := buildLedgerLandings(t, ledger, map[string]BeadRow{}, nil, stamps)
+	if got, want := rows[0]["dispatched_at"], "2026-10-13T00:00:00Z"; got != want {
+		t.Errorf("gt-a dispatched_at = %q, want %q", got, want)
+	}
+	if got := rows[1]["dispatched_at"]; got != "" {
+		t.Errorf("gt-b dispatched_at = %q, want empty for a bead the feed never slung", got)
+	}
+	if got, want := CountLandingGaps(rows).StageStampMissing["dispatched_at"], 1; got != want {
+		t.Errorf("stage_stamp_missing_dispatched_at = %d, want %d", got, want)
+	}
+}
+
+// TestLedgerSubmittedAfterTheLandingIsMissing: a done event after the landing
+// belongs to a later run and is not this landing's submission stamp.
+func TestLedgerSubmittedAfterTheLandingIsMissing(t *testing.T) {
+	t.Parallel()
+	stamps := StageStamps{Submitted: map[string]string{"gt-a": "2026-10-15T00:00:00Z"}}
+	ledger := []LedgerRow{{Bead: "gt-a", Rig: "gastown", LandedCommit: "c1", LandedAt: "2026-10-14T00:00:00Z"}}
+	rows := buildLedgerLandings(t, ledger, map[string]BeadRow{"gt-a": {ID: "gt-a"}}, nil, stamps)
+	if got := rows[0]["submitted_at"]; got != "" {
+		t.Errorf("submitted_at = %q, want empty for a done event after the landing", got)
+	}
+	if got, want := CountLandingGaps(rows).StageStampMissing["submitted_at"], 1; got != want {
+		t.Errorf("stage_stamp_missing_submitted_at = %d, want %d", got, want)
 	}
 }
 

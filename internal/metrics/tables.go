@@ -13,8 +13,9 @@ import (
 // never a predictor, only joined back to explain a box. They are kept in the
 // sorted order the sidecar writes.
 var explainOnlyColumns = []string{
-	"attempts", "file_entropy", "files_touched", "gate_result", "lines_added",
-	"lines_deleted", "lines_total", "om_verdict", "package_entropy", "unreadable",
+	"attempts", "created_at", "dispatched_at", "file_entropy", "files_touched",
+	"gate_result", "lines_added", "lines_deleted", "lines_total", "om_verdict",
+	"package_entropy", "submitted_at", "time_to_land_s", "unreadable",
 }
 
 // DiffSource is where a landing's size and spread columns come from: Stats
@@ -26,15 +27,16 @@ type DiffSource interface {
 
 // BuildLandings joins the loaded sources into one landings.csv row per ledger
 // row, as tables.py's build_landings does: the ledger's own fields, the
-// rework depth, the diff's size and spread, the bead's shape, and the regime
-// in force when it landed.
+// rework depth, the diff's size and spread, the bead's shape, the regime in
+// force when it landed, and the stage stamps and model the join derives.
 //
 // A landing whose diff cannot be read keeps its row, with empty size and spread
 // cells and unreadable=1, and is named in dropped. A landing with no rework
-// entry is a first attempt.
+// entry is a first attempt. A stage stamp or model no source supplies is an
+// empty cell, counted in the extract's footer rather than dropped.
 func BuildLandings(ctx context.Context, ledger []LedgerRow, rework map[string]Rework, diffs DiffSource,
 	beadsByID map[string]BeadRow, usage map[string]Usage, overrun map[string]bool,
-	eras map[string][]OMEra, shapedIDs map[string]bool, dropped *Dropped) ([]Row, error) {
+	eras map[string][]OMEra, shapedIDs map[string]bool, stamps StageStamps, dropped *Dropped) ([]Row, error) {
 	rows := make([]Row, 0, len(ledger))
 	for _, l := range ledger {
 		rw, ok := rework[l.Bead]
@@ -56,17 +58,21 @@ func BuildLandings(ctx context.Context, ledger []LedgerRow, rework map[string]Re
 			dropped.Add("git:"+l.Rig, "unreadable diff for "+l.Bead)
 		}
 
-		week, err := WeekOf(l.LandedAt)
+		landed, err := ParseTS(l.LandedAt)
 		if err != nil {
 			return nil, fmt.Errorf("landing %s: %w", l.Bead, err)
 		}
+		week := weekOf(landed)
 		threshold, err := EraOf(eras[l.Rig], l.LandedAt)
 		if err != nil {
 			return nil, fmt.Errorf("landing %s: %w", l.Bead, err)
 		}
 
 		b := beadsByID[l.Bead]
-		model := usage[l.Bead].Model
+		model := landingModel(l, usage, stamps.Seats)
+		createdAt := b.CreatedAt
+		dispatchedAt := stamps.Dispatched[l.Bead]
+		submittedAt := landingSubmitted(l.Bead, b, stamps, landed)
 		// A nil value is written as an empty cell.
 		var linesAdded, linesDeleted, linesTotal, filesTouched, fileEntropy, packageEntropy string
 		if d != nil {
@@ -103,6 +109,10 @@ func BuildLandings(ctx context.Context, ledger []LedgerRow, rework map[string]Re
 			"model":                   model,
 			"om_threshold":            thresholdCell(threshold),
 			"dominant_model":          model,
+			"created_at":              createdAt,
+			"dispatched_at":           dispatchedAt,
+			"submitted_at":            submittedAt,
+			"time_to_land_s":          timeToLandSeconds(createdAt, l.LandedAt),
 		})
 	}
 	return rows, nil

@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/events"
 )
 
 // This file is the real-environment wiring. It wires the town the extract reads:
@@ -174,6 +176,15 @@ func RealEnv(ctx context.Context, opts RealEnvOptions) (RealTown, error) {
 		reviews = nil
 		unreadable = append(unreadable, "reviews")
 	}
+	// The feed is read whole: a landing's dispatch clock needs the slings of
+	// the run it landed under, and a window that started inside that run would
+	// date the landing from a repeat sling. A town that never logged an event
+	// has no feed, which is no dispatch and not an unreadable source.
+	eventLines, err := readLines(files, filepath.Join(town, events.EventsFile))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		eventLines = nil
+		unreadable = append(unreadable, "events")
+	}
 	usage, err := realUsageFiles(files, filepath.Join(runtime, "usage", "beads"))
 	if err != nil {
 		return real, fmt.Errorf("real env: usage: %w", err)
@@ -215,6 +226,7 @@ func RealEnv(ctx context.Context, opts RealEnvOptions) (RealTown, error) {
 	real.Extract = ExtractEnv{
 		LedgerLines:   ledger,
 		ReviewLines:   reviews,
+		EventLines:    eventLines,
 		Diffs:         diffs,
 		RunBd:         realBd(ctx, opts.Run),
 		BeadDirs:      beadDirs,

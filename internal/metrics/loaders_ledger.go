@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
@@ -32,8 +34,9 @@ func jsonRows(lines []string, source string, dropped *Dropped) []json.RawMessage
 	return rows
 }
 
-// LedgerRow is one line of a rig's ledger.jsonl: the seven fields the
-// loader keeps, with Rig filled from the source rig when the line names none.
+// LedgerRow is one line of a rig's ledger.jsonl: the fields the loader keeps,
+// with Rig filled from the source rig when the line names none. Branch is kept
+// because it names the seat that wrote the work that landed.
 type LedgerRow struct {
 	Bead         string `json:"bead"`
 	Rig          string `json:"rig"`
@@ -42,6 +45,7 @@ type LedgerRow struct {
 	Route        string `json:"route"`
 	OMVerdict    string `json:"om_verdict"`
 	GateResult   string `json:"gate_result"`
+	Branch       string `json:"branch"`
 }
 
 // LoadLedger parses each rig's ledger lines into rows. A line that is not JSON,
@@ -78,6 +82,115 @@ func LoadLedger(sources map[string][]string, dropped *Dropped) []LedgerRow {
 		}
 	}
 	return rows
+}
+
+// StageStamps is the per-bead stage data the landings join reads besides the
+// ledger, the beads and the usage summary: the event feed's dispatch and done
+// clocks, and the seats the usage records name. A bead with no entry keeps its
+// landing's column empty and is counted in the footer, never dropped.
+type StageStamps struct {
+	// Dispatched is each bead's run dispatch in RFC3339: when the run that
+	// produced its landing went out (events.DispatchedBy).
+	Dispatched map[string]string
+	// Submitted is each bead's latest done event in RFC3339, the fallback for a
+	// bead whose notes carry no submission stamp.
+	Submitted map[string]string
+	// Seats is who the usage records say ran each bead and on what model.
+	Seats UsageSeats
+}
+
+// LoadStageStamps folds the events feed's lines once for every landed bead in
+// landedAt. A line that is not an event is recorded in dropped rather than read
+// as a dispatch or a submission.
+//
+// A dispatch is the sling of the run that ended in the bead's last submission
+// before it landed: the feed's slings and run ends before that submission,
+// folded in order (the same clock the landing worker times a bead from,
+// gt-v7ptp). The landed run is read through its submission because a done event
+// ends its run; read at landed_at instead, the clock would be the empty run the
+// done left behind. A bead the feed holds no such sling for has no dispatch, so
+// the cell stays empty rather than borrow a later run's.
+func LoadStageStamps(lines []string, landedAt map[string]string, dropped *Dropped) StageStamps {
+	stamps := StageStamps{
+		Dispatched: make(map[string]string, len(landedAt)),
+		Submitted:  make(map[string]string),
+		Seats: UsageSeats{
+			SeatModels: map[string]string{},
+			BeadSeats:  map[string]string{},
+		},
+	}
+	byBead := make(map[string][]events.Event)
+	submitted := make(map[string]time.Time)
+	done := make(map[string][]time.Time)
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var ev events.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil || ev.Type == "" {
+			dropped.Add("events", "unparseable event")
+			continue
+		}
+		bead, _ := ev.Payload["bead"].(string)
+		if bead == "" {
+			continue
+		}
+		byBead[bead] = append(byBead[bead], ev)
+		if ev.Type != events.TypeDone {
+			continue
+		}
+		at, err := doneEventTime(ev)
+		if err != nil {
+			continue
+		}
+		done[bead] = append(done[bead], at)
+		if at.After(submitted[bead]) {
+			submitted[bead] = at
+		}
+	}
+	for bead, at := range submitted {
+		stamps.Submitted[bead] = at.UTC().Format(time.RFC3339)
+	}
+	for bead, landed := range landedAt {
+		end, err := ParseTS(landed)
+		if err != nil {
+			// BuildLandings refuses the unparsable landing; no stamp is read
+			// for it here, so this pass never guesses one.
+			continue
+		}
+		// The run that landed is the one the last submission before the landing
+		// ended, not the run open at the landing: a done event ends its run, so
+		// the clock read at landed_at would be the empty run after it.
+		var lastDone time.Time
+		for _, at := range done[bead] {
+			if !at.After(end) && at.After(lastDone) {
+				lastDone = at
+			}
+		}
+		if !lastDone.IsZero() {
+			end = lastDone
+		}
+		at, _, ok := events.DispatchedBy(byBead[bead], bead, end)
+		if !ok || at.IsZero() {
+			continue
+		}
+		stamps.Dispatched[bead] = at.UTC().Format(time.RFC3339)
+	}
+	return stamps
+}
+
+// doneEventTime is when a done event's submission happened: the "at" its writer
+// recorded, or the event's own timestamp when it recorded none. A done event a
+// sandbox seat could not write is re-recorded by the host with the submission's
+// own time, so the "at" is the seat's turn ending and the timestamp is only
+// when it reached this log (gt-1m9gr).
+func doneEventTime(ev events.Event) (time.Time, error) {
+	if at, ok := ev.Payload["at"].(string); ok && at != "" {
+		if ts, err := time.Parse(time.RFC3339, at); err == nil {
+			return ts, nil
+		}
+	}
+	return time.Parse(time.RFC3339, ev.Timestamp)
 }
 
 // Review is one line of reviews.jsonl: the om verdict that judged a tree.

@@ -7,10 +7,12 @@ from .loaders import era_of
 LANDING_COLUMNS = ["bead", "rig", "landed_at", "week", "route", "om_verdict", "gate_result", "lines_added",
                    "lines_deleted", "lines_total", "files_touched", "file_entropy", "package_entropy", "attempts",
                    "rejected_before_landing", "manual_rescue", "reached_overrun_stop", "unreadable", "type",
-                   "priority", "shaped", "label_count", "model", "om_threshold", "dominant_model"]
+                   "priority", "shaped", "label_count", "model", "om_threshold", "dominant_model",
+                   "created_at", "dispatched_at", "submitted_at", "time_to_land_s"]
 # Known only after the landing: never a predictor, only joined back to explain a box.
 EXPLAIN_ONLY = {"lines_added", "lines_deleted", "lines_total", "files_touched", "file_entropy", "package_entropy",
-                "attempts", "gate_result", "om_verdict", "unreadable"}
+                "attempts", "gate_result", "om_verdict", "unreadable", "created_at", "dispatched_at",
+                "submitted_at", "time_to_land_s"}
 
 
 def build_landings(ledger, rework, diff_source, beads_by_id, usage, overrun, eras, shaped_ids, dropped):
