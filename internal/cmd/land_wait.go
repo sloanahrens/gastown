@@ -95,12 +95,18 @@ func runLandWait(cmd *cobra.Command, _ []string) error {
 		out:      cmd.OutOrStdout(),
 		errOut:   cmd.ErrOrStderr(),
 	})
-	err = landWaitAnswer(cmd.OutOrStdout(), err)
-	if _, ok := IsSilentExit(err); ok {
-		// The exit code is the answer; cobra must not print it as an error.
+	return landWaitFinish(cmd, err)
+}
+
+// landWaitFinish is what the command returns: the run-again line with exit 3
+// when nothing arrived, the wait's own error otherwise. A silent exit is the
+// answer, so cobra is told not to print it as a failure; a real error still is.
+func landWaitFinish(cmd *cobra.Command, err error) error {
+	answer := landWaitAnswer(cmd.OutOrStdout(), err)
+	if _, ok := IsSilentExit(answer); ok {
 		cmd.SilenceUsage, cmd.SilenceErrors = true, true
 	}
-	return err
+	return answer
 }
 
 // landWaitAnswer turns the wait's end into what the command reports: the

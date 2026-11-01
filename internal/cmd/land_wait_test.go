@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/steveyegge/gastown/internal/land"
 )
 
@@ -331,6 +333,39 @@ func TestLandWaitTimesOutWithTheRunAgainLine(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "no outcome yet, run again") {
 		t.Errorf("output = %q, want the run-again line", out.String())
+	}
+}
+
+// The run-again answer is the exit code, so cobra must not print it as a
+// failure; an error that is not the answer is still the command's to report.
+func TestLandWaitFinish(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	idle := &cobra.Command{}
+	idle.SetOut(&out)
+	if err := landWaitFinish(idle, errLandWaitNoOutcome); err == nil {
+		t.Fatal("landWaitFinish() = nil, want exit 3")
+	} else if code, ok := IsSilentExit(err); !ok || code != 3 {
+		t.Errorf("landWaitFinish() error = %v (silent %v), want exit 3", err, ok)
+	}
+	if !idle.SilenceUsage || !idle.SilenceErrors {
+		t.Error("landWaitFinish() left cobra to print the silent exit as an error")
+	}
+	if !strings.Contains(out.String(), "no outcome yet, run again") {
+		t.Errorf("output = %q, want the run-again line", out.String())
+	}
+
+	var failed bytes.Buffer
+	loud := &cobra.Command{}
+	loud.SetOut(&failed)
+	if err := landWaitFinish(loud, landWaitErrTestRead); err != landWaitErrTestRead {
+		t.Errorf("landWaitFinish() = %v, want the read's own error", err)
+	}
+	if loud.SilenceUsage || loud.SilenceErrors {
+		t.Error("landWaitFinish() silenced a failure the bird has to read")
+	}
+	if failed.Len() != 0 {
+		t.Errorf("output = %q, want the error left to cobra", failed.String())
 	}
 }
 
