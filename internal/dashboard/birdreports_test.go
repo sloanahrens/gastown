@@ -747,3 +747,149 @@ func TestBirdReportsDecisionItemsWithheld(t *testing.T) {
 		t.Errorf("the rows do not carry the rule that withheld an item: %s", encoded)
 	}
 }
+
+// The reporters write decision_items as objects with the keys q and rec, so
+// those are the spellings the list is read from: the short question becomes the
+// row's question and the short recommendation its recommendation.
+func TestBirdReportsDecisionItemShortKeys(t *testing.T) {
+	t.Parallel()
+
+	now := birdReportsNow
+	root := t.TempDir()
+
+	asker := birdSidecarFor("asker", now, "title", "summary")
+	asker.DecisionItems = json.RawMessage(`[
+		{"q": "ship the darker palette?", "rec": "yes, ship it"},
+		{"q": "and the rollback plan?", "rec": "the flag"}
+	]`)
+	writeBird(t, root, "asker", birdWrites{json: birdSidecarJSON(t, asker)})
+
+	byName := birdByName(NewBirdReportsReader(root).Read(now))
+
+	got := byName["asker"].DecisionItems
+	if len(got) != 2 {
+		t.Fatalf("asker carried %d items, want both short-key items", len(got))
+	}
+	if got[0].Question != "ship the darker palette?" || got[0].Recommendation != "yes, ship it" {
+		t.Errorf("asker's first item is %+v, want the short keys read as question and recommendation", got[0])
+	}
+	if got[1].Question != "and the rollback plan?" || got[1].Recommendation != "the flag" {
+		t.Errorf("asker's second item is %+v, want the short keys read as question and recommendation", got[1])
+	}
+
+	// The JSON the page reads keeps the long names whatever the sidecar wrote.
+	encoded, err := json.Marshal(byName["asker"])
+	if err != nil {
+		t.Fatalf("marshal row: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"question":"ship the darker palette?"`) || !strings.Contains(string(encoded), `"recommendation":"yes, ship it"`) {
+		t.Errorf("the row does not serve the item under the long names: %s", encoded)
+	}
+}
+
+// Both spellings are read. An item written with the long keys is unchanged, an
+// item that wrote both answers to the long one, and an item that wrote no
+// question under either spelling is not a decision and is dropped.
+func TestBirdReportsDecisionItemKeyPrecedence(t *testing.T) {
+	t.Parallel()
+
+	now := birdReportsNow
+	root := t.TempDir()
+
+	asker := birdSidecarFor("asker", now, "title", "summary")
+	asker.DecisionItems = json.RawMessage(`[
+		{"question": "long question?", "recommendation": "long rec"},
+		{"question": "the long one", "q": "the short one", "recommendation": "long rec", "rec": "short rec"},
+		{"q": "short only?", "rec": "short rec"},
+		{"rec": "an answer with no question"},
+		{"q": "", "rec": "an empty short question"}
+	]`)
+	writeBird(t, root, "asker", birdWrites{json: birdSidecarJSON(t, asker)})
+
+	byName := birdByName(NewBirdReportsReader(root).Read(now))
+
+	got := byName["asker"].DecisionItems
+	if len(got) != 3 {
+		t.Fatalf("asker carried %d items, want the long-only, both-keys and short-only items", len(got))
+	}
+	if got[0].Question != "long question?" || got[0].Recommendation != "long rec" {
+		t.Errorf("the long-key item is %+v, want its own text", got[0])
+	}
+	if got[1].Question != "the long one" || got[1].Recommendation != "long rec" {
+		t.Errorf("the both-keys item is %+v, want the long spelling to win on both fields", got[1])
+	}
+	if got[2].Question != "short only?" || got[2].Recommendation != "short rec" {
+		t.Errorf("the short-key item is %+v, want its own text", got[2])
+	}
+}
+
+// Reading the short keys does not move the guards after them: a short-key item
+// still spends the cap, is still cut to the rune limit, and a short-key
+// recommendation that looks like a secret is still dropped and its rule named.
+func TestBirdReportsDecisionItemShortKeysScreened(t *testing.T) {
+	t.Parallel()
+
+	now := birdReportsNow
+	root := t.TempDir()
+	// Positive inputs are joined from pieces so that no secret-looking literal
+	// sits in this file for the repository's own scanners to flag.
+	secret := "password=" + strings.Repeat("k", 16)
+
+	// Nine short-key items: the ninth is past the cap.
+	capped := birdSidecarFor("capped", now, "title", "summary")
+	capped.DecisionItems = json.RawMessage(`[
+		{"q": "one", "rec": "r"},
+		{"q": "two", "rec": "r"},
+		{"q": "three", "rec": "r"},
+		{"q": "four", "rec": "r"},
+		{"q": "five", "rec": "r"},
+		{"q": "six", "rec": "r"},
+		{"q": "seven", "rec": "r"},
+		{"q": "eight", "rec": "r"},
+		{"q": "nine", "rec": "r"}
+	]`)
+	writeBird(t, root, "capped", birdWrites{json: birdSidecarJSON(t, capped)})
+
+	long := birdSidecarFor("long", now, "title", "summary")
+	long.DecisionItems = json.RawMessage(`[{"q": "` + strings.Repeat("日", 300) + `", "rec": "` + strings.Repeat("文", 300) + `"}]`)
+	writeBird(t, root, "long", birdWrites{json: birdSidecarJSON(t, long)})
+
+	leaky := birdSidecarFor("leaky", now, "title", "summary")
+	leaky.DecisionItems = json.RawMessage(`[
+		{"q": "what is the token?", "rec": "` + secret + `"},
+		{"q": "and then?", "rec": "wait"}
+	]`)
+	writeBird(t, root, "leaky", birdWrites{json: birdSidecarJSON(t, leaky)})
+
+	byName := birdByName(NewBirdReportsReader(root).Read(now))
+
+	cappedItems := byName["capped"].DecisionItems
+	if len(cappedItems) != 8 {
+		t.Fatalf("capped carried %d items, want the first 8 short-key items", len(cappedItems))
+	}
+	if cappedItems[7].Question != "eight" {
+		t.Errorf("capped's last item is %q, want eight: the list was not cut at 8 in order", cappedItems[7].Question)
+	}
+
+	cut := byName["long"].DecisionItems
+	if len(cut) != 1 {
+		t.Fatalf("long carried %d items, want 1", len(cut))
+	}
+	if n := utf8.RuneCountInString(cut[0].Question); n != 240 {
+		t.Errorf("the long short-key question is %d runes, want 240", n)
+	}
+	if n := utf8.RuneCountInString(cut[0].Recommendation); n != 240 {
+		t.Errorf("the long short-key recommendation is %d runes, want 240", n)
+	}
+	if strings.Trim(cut[0].Question, "日") != "" || strings.Trim(cut[0].Recommendation, "文") != "" {
+		t.Errorf("a short-key field was cut mid-rune: %+v", cut[0])
+	}
+
+	leakyRow := byName["leaky"]
+	if len(leakyRow.DecisionItems) != 1 || leakyRow.DecisionItems[0].Question != "and then?" {
+		t.Errorf("leaky carried %+v, want only the clean short-key item", leakyRow.DecisionItems)
+	}
+	if !slices.Equal(leakyRow.DecisionItemsWithheld, []string{"credential-assignment"}) {
+		t.Errorf("leaky withheld %v, want the one rule a short-key recommendation matched", leakyRow.DecisionItemsWithheld)
+	}
+}
