@@ -10,7 +10,9 @@ import (
 // the rework share and the loops out. The reviewer's own configuration — model,
 // depth, threshold, timeout — is drawn in the panel's body, which a reader who
 // wants it opens (gt-bz0pn). Where the threshold came from rides that body line
-// as a hover, not as text (gt-7swd8).
+// as a hover, not as text (gt-7swd8). Every test here carries OMHeader in its
+// name, which is the pattern gt-7swd8's gate runs; gt-bz0pn's gate matches the
+// TestOM prefix, which the same names also satisfy.
 
 // omPanelState is the om read the server sends with the review log beside it.
 func omPanelState(rework any, threshold any, source string) map[string]any {
@@ -51,7 +53,7 @@ func drawOMPanel(t *testing.T, state map[string]any) *pageDOM {
 	return dom
 }
 
-func TestOMLineCarriesTheReviewFigures(t *testing.T) {
+func TestOMHeaderLineCarriesTheReviewFigures(t *testing.T) {
 	t.Parallel()
 
 	got := drawOMPanel(t, omPanelState(omReviewLog(), 0.75, "gastown .om.json")).element(t, "omnote")
@@ -68,7 +70,7 @@ func TestOMLineCarriesTheReviewFigures(t *testing.T) {
 // The line's hover says which stretch of the review log the figures count and
 // what each means, so a figure that looks wrong can be checked without opening
 // the panel.
-func TestOMLineHoversWhatItCounts(t *testing.T) {
+func TestOMHeaderLineHoversWhatItCounts(t *testing.T) {
 	t.Parallel()
 
 	got := drawOMPanel(t, omPanelState(omReviewLog(), 0.75, "gastown .om.json")).element(t, "omnote")
@@ -79,7 +81,7 @@ func TestOMLineHoversWhatItCounts(t *testing.T) {
 	}
 }
 
-func TestOMPanelBodyCarriesTheConfig(t *testing.T) {
+func TestOMHeaderPanelBodyCarriesTheConfig(t *testing.T) {
 	t.Parallel()
 
 	dom := drawOMPanel(t, omPanelState(omReviewLog(), 0.75, "gastown .om.json"))
@@ -92,7 +94,7 @@ func TestOMPanelBodyCarriesTheConfig(t *testing.T) {
 	}
 }
 
-func TestOMConfigKeepsTheReasonWhenTheThresholdIsUnknown(t *testing.T) {
+func TestOMHeaderConfigKeepsTheReasonWhenTheThresholdIsUnknown(t *testing.T) {
 	t.Parallel()
 
 	dom := drawOMPanel(t, omPanelState(omReviewLog(), nil, "rig .om.json unreadable"))
@@ -101,7 +103,7 @@ func TestOMConfigKeepsTheReasonWhenTheThresholdIsUnknown(t *testing.T) {
 
 // A review log that could not be read is a named state on the line, never a
 // week with no rework.
-func TestOMLineMarksAnUnreadableReviewLog(t *testing.T) {
+func TestOMHeaderLineMarksAnUnreadableReviewLog(t *testing.T) {
 	t.Parallel()
 
 	got := drawOMPanel(t, omPanelState(map[string]any{"unavailable": true}, 0.75, "")).element(t, "omnote")
@@ -118,7 +120,7 @@ func TestOMLineMarksAnUnreadableReviewLog(t *testing.T) {
 
 // A review log the server has not sent yet contributes no figure: a missing
 // reading is not a week of 0%.
-func TestOMLineDrawsNoFigureBeforeTheReviewLogArrives(t *testing.T) {
+func TestOMHeaderLineDrawsNoFigureBeforeTheReviewLogArrives(t *testing.T) {
 	t.Parallel()
 
 	got := drawOMPanel(t, omPanelState(nil, 0.75, "")).element(t, "omnote")
@@ -130,7 +132,7 @@ func TestOMLineDrawsNoFigureBeforeTheReviewLogArrives(t *testing.T) {
 // A bar the reader sent with no reviews must not divide by zero: the first-pass
 // share still reads, and the share of an empty window is left out rather than
 // drawn as a rate over nothing.
-func TestOMLineDrawsNoShareForAWindowWithNoReviews(t *testing.T) {
+func TestOMHeaderLineDrawsNoShareForAWindowWithNoReviews(t *testing.T) {
 	t.Parallel()
 
 	log := map[string]any{"windows": []any{map[string]any{"bars": []any{
@@ -139,5 +141,19 @@ func TestOMLineDrawsNoShareForAWindowWithNoReviews(t *testing.T) {
 	got := drawOMPanel(t, omPanelState(log, 0.75, "")).element(t, "omnote")
 	if want := "50% first pass"; got.Text != want {
 		t.Errorf("the collapsed line reads %q, want %q", got.Text, want)
+	}
+}
+
+// A review log that arrived with no window in it names that on the line: a blank
+// collapsed line would read as the log not having been read yet.
+func TestOMHeaderLineSaysAReviewLogWithNoWindowHoldsNone(t *testing.T) {
+	t.Parallel()
+
+	got := drawOMPanel(t, omPanelState(map[string]any{"windows": []any{}}, 0.75, "")).element(t, "omnote")
+	if want := "no review window"; got.Text != want {
+		t.Errorf("the collapsed line reads %q, want %q", got.Text, want)
+	}
+	if got.Title == "" {
+		t.Error("the collapsed line has no hover saying why it holds no figures")
 	}
 }

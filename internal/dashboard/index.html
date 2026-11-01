@@ -3067,7 +3067,8 @@ function renderOM(s) {
 // threshold (or why it is unknown) and the timeout — as the om panel draws it
 // in its body. It used to be the panel's collapsed line, which is where the
 // operator reads figures, not settings (gt-bz0pn). Where the threshold came
-// from is the line's hover, not its text (gt-7swd8).
+// from is this body line's hover, not its text (gt-7swd8); the collapsed
+// line's own hover explains its figures (omFiguresTitle).
 function omConfig(om) {
   return {
     text: [om.model, om.depth, om.threshold != null ? "threshold " + om.threshold : (om.threshold_source ? "threshold unknown (" + om.threshold_source + ")" : null), om.timeout_s ? om.timeout_s + "s timeout" : null].filter(Boolean).join(" · "),
@@ -3079,14 +3080,15 @@ function omConfig(om) {
 // reading's age: the latest window of the review log the om rework fold draws —
 // the share of beads approved on their first review, the reviews rejected, the
 // rework share and the loops out. A window with no reviews gives no rework
-// share rather than dividing by nothing; a log that has not been read yet adds
-// no figure at all, so a missing reading is never a week of zero; and a log
+// share rather than dividing by nothing; a log with no window says so, not
+// nothing; a log that has not been read yet adds no figure at all, so a
+// missing reading is never a week of zero; and a log
 // that could not be read says so instead of reading as a clean week.
 function omFigures(r) {
   if (!r) return [];
   if (r.unavailable) return ["om rework unreadable"];
   const w = (r.windows || [])[0];
-  if (!w) return [];
+  if (!w) return ["no review window"];
   const share = reworkShare(w), out = [];
   if (share.beads) out.push(Math.round(100 * share.firstTry / share.beads) + "% first pass");
   if (share.reviews) {
@@ -3104,7 +3106,7 @@ function omFiguresTitle(r) {
   if (!r) return "";
   if (r.unavailable) return "the review log could not be read, so the om figures are unknown";
   const w = (r.windows || [])[0];
-  if (!w) return "";
+  if (!w) return "the review log arrived with no window in it, so there are no om figures to count";
   return reworkWindowLabel(w) + ": first pass is the beads approved on their first review, rejected is the reviews om refused, and rework is their share of every review";
 }
 
