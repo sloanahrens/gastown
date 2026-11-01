@@ -7,6 +7,22 @@ import (
 	"github.com/steveyegge/gastown/internal/templates"
 )
 
+// RunnerArgv is the command the Docker backend starts the runner container with.
+// The container starts as root so that its first process (the init) is root's, as
+// a seat's is: a test that signals pid 1 needs another user's process there. The
+// sweep itself runs as the image's unprivileged polecat user, which setpriv (util-linux,
+// in the image's base; `command -v setpriv` answers /usr/bin/setpriv in the image
+// built at 534b955e8) drops to. The image's own default command is bash, which
+// exits at once in a container with no terminal, so the command is named. HOME is
+// /tmp because the user's own home belongs to another user.
+//
+// The Kubernetes backend does not use it: the pod's shared process namespace has a
+// root pause process as pid 1, so the runner there is the unprivileged user from
+// the start and holds no root at all (runnerContainer).
+func RunnerArgv() []string {
+	return []string{"setpriv", "--reuid", runnerID, "--regid", runnerID, "--clear-groups", "env", "HOME=/tmp", RunnerCommand}
+}
+
 // Platform is the architecture the runner image is built for: the Mac hosts a
 // sweep runs off are arm64.
 const Platform = "linux/arm64"
@@ -25,6 +41,11 @@ const (
 	// backends name it, because the image's own default is bash, which exits at once
 	// in a container with no terminal.
 	RunnerCommand = "/usr/local/bin/sweep-run"
+	// runnerID is the user and group the sweep runs as: the image's unprivileged
+	// polecat user.
+	runnerID = "10001"
+	// runnerUser is runnerID as the number a pod's securityContext takes.
+	runnerUser int64 = 10001
 
 	// EnvRig is the rig whose sweep the runner runs.
 	EnvRig = "GT_SWEEP_RIG"
@@ -104,6 +125,11 @@ func runnerArgv(spec Spec) []string {
 		"--platform", Platform,
 		"--cpus", strconv.Itoa(spec.CPUs),
 		"--memory", strconv.Itoa(spec.MemoryGB) + "G",
+		// An init as the container's first process reaps the orphans the tests
+		// kill; without one a killed grandchild stays a zombie and still answers
+		// kill(pid, 0). It runs as root, with the user the command drops to.
+		"--init",
+		"--user", "0:0",
 	}
 	if spec.Dind {
 		// The runner shares the sidecar's network namespace. The engine is then
@@ -117,7 +143,7 @@ func runnerArgv(spec Spec) []string {
 			"--env", "DOCKER_HOST=tcp://"+dindAddress+":"+dindPort,
 		)
 	}
-	return append(argv,
+	return append(append(argv,
 		"--volume", spec.RepoDir+":"+RepoMount+":ro",
 		"--volume", spec.OutDir+":"+OutputDir,
 		"--env", EnvRig+"="+spec.Rig,
@@ -125,8 +151,7 @@ func runnerArgv(spec Spec) []string {
 		"--env", EnvTiers+"="+strings.Join(spec.TiersOrDefault(), ","),
 		"--env", EnvJobs+"="+strconv.Itoa(spec.Jobs),
 		spec.Image,
-		RunnerCommand,
-	)
+	), RunnerArgv()...)
 }
 
 // dockerStep is one docker command against the Spec's context: the flag is

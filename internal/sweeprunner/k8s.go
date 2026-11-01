@@ -122,6 +122,7 @@ type PodTemplate struct {
 type PodSpec struct {
 	PriorityClassName     string      `json:"priorityClassName,omitempty"`
 	RestartPolicy         string      `json:"restartPolicy"`
+	ShareProcessNamespace *bool       `json:"shareProcessNamespace,omitempty"`
 	ActiveDeadlineSeconds *int64      `json:"activeDeadlineSeconds,omitempty"`
 	Containers            []Container `json:"containers"`
 	Volumes               []Volume    `json:"volumes"`
@@ -191,8 +192,9 @@ type ResourceList struct {
 // is a pointer so an explicit false is rendered; an absent value leaves the
 // cluster's default, which allows escalation.
 type SecurityContext struct {
-	Privileged               bool  `json:"privileged,omitempty"`
-	AllowPrivilegeEscalation *bool `json:"allowPrivilegeEscalation,omitempty"`
+	Privileged               bool   `json:"privileged,omitempty"`
+	RunAsUser                *int64 `json:"runAsUser,omitempty"`
+	AllowPrivilegeEscalation *bool  `json:"allowPrivilegeEscalation,omitempty"`
 }
 
 // VolumeMount is one mount of a container.
@@ -373,8 +375,12 @@ func renderJob(spec Spec) *Job {
 			Template: PodTemplate{Spec: PodSpec{
 				PriorityClassName: PriorityClass,
 				RestartPolicy:     "Never",
-				Containers:        containers,
-				Volumes:           volumes,
+				// The pod's pause process is pid 1 of the shared namespace and
+				// reaps the orphans the tests kill; without it a killed
+				// grandchild stays a zombie and still answers kill(pid, 0).
+				ShareProcessNamespace: boolPtr(true),
+				Containers:            containers,
+				Volumes:               volumes,
 			}},
 		},
 	}
@@ -387,6 +393,8 @@ func runnerContainer(spec Spec) Container {
 		env = append(env, EnvVar{Name: "DOCKER_HOST", Value: "tcp://" + dindAddress + ":" + dindPort})
 	}
 	env = append(env,
+		// The unprivileged user's own home belongs to another user.
+		EnvVar{Name: "HOME", Value: "/tmp"},
 		EnvVar{Name: EnvRig, Value: spec.Rig},
 		EnvVar{Name: EnvSHA, Value: spec.SHA},
 		EnvVar{Name: EnvTiers, Value: strings.Join(spec.TiersOrDefault(), ",")},
@@ -396,11 +404,16 @@ func runnerContainer(spec Spec) Container {
 	// instead of letting it burst into a neighbour's (design 2026-10-30).
 	share := ResourceList{CPU: strconv.Itoa(spec.CPUs), Memory: strconv.Itoa(spec.MemoryGB) + "Gi"}
 	return Container{
-		Name:      runnerContainerName,
-		Image:     spec.Image,
-		Command:   []string{RunnerCommand},
-		Env:       env,
-		Resources: &Resources{Requests: share, Limits: share},
+		Name:    runnerContainerName,
+		Image:   spec.Image,
+		Command: []string{RunnerCommand},
+		// The unprivileged polecat user from the start: the pod's shared process
+		// namespace has a root pause process as pid 1, so a test that signals
+		// pid 1 still sees another user's process, and the runner holds no root
+		// next to the privileged dind sidecar it shares that namespace with.
+		SecurityContext: &SecurityContext{RunAsUser: int64Ptr(runnerUser)},
+		Env:             env,
+		Resources:       &Resources{Requests: share, Limits: share},
 		VolumeMounts: []VolumeMount{
 			{Name: repoVolume, MountPath: RepoMount, ReadOnly: true},
 			{Name: outVolume, MountPath: OutputDir},

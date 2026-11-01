@@ -508,16 +508,50 @@ func valueAfter(argv []string, flag string) (string, bool) {
 	return "", false
 }
 
-// The runner container is started with the sweep-run command after the image: the
-// image's own default is bash, which exits at once with no terminal, and the
-// daemon would wait for a result that never comes. Dropping the command turns this
-// red, as it does the golden.
-func TestDockerRunnerNamesTheSweepRunCommand(t *testing.T) {
+// The runner container is started with the command RunnerArgv names after the
+// image: the image's own default is bash, which exits at once with no terminal.
+// It starts under an init, so the orphans the tests kill are reaped, and as root,
+// so the sweep's first processes are root's while the sweep itself runs as the
+// unprivileged user. Dropping the command, the init or the user turns this red,
+// as it does the golden.
+func TestDockerRunnerStartsUnderAnInitAsRootAndDropsToThePolecatUser(t *testing.T) {
 	t.Parallel()
 	argv := runnerArgv(goldenSpec())
 
-	n := len(argv)
-	if n < 2 || argv[n-2] != goldenSpec().Image || argv[n-1] != RunnerCommand {
-		t.Errorf("runner argv ends %q, want the image %q then %q", argv[max(0, n-2):], goldenSpec().Image, RunnerCommand)
+	image := slices.Index(argv, goldenSpec().Image)
+	if image < 0 || !slices.Equal(argv[image+1:], RunnerArgv()) {
+		t.Fatalf("runner argv %q does not end with the image then %q", argv, RunnerArgv())
+	}
+	if !slices.Contains(argv[:image], "--init") {
+		t.Errorf("runner argv %q has no --init before the image: killed grandchildren would stay zombies", argv)
+	}
+	if user := slices.Index(argv[:image], "--user"); user < 0 || argv[user+1] != "0:0" {
+		t.Errorf("runner argv %q does not start the container as root", argv)
+	}
+}
+
+// RunnerArgv runs the sweep-run binary as uid and gid 10001 with no supplementary
+// groups, through setpriv, with a writable HOME. The observable contract is
+// checked, not the flag order.
+func TestRunnerArgvDropsToThePolecatUser(t *testing.T) {
+	t.Parallel()
+	argv := RunnerArgv()
+
+	if argv[0] != "setpriv" {
+		t.Errorf("RunnerArgv() = %q, want it to start with setpriv", argv)
+	}
+	for _, flag := range []string{"--reuid", "--regid"} {
+		if i := slices.Index(argv, flag); i < 0 || argv[i+1] != "10001" {
+			t.Errorf("RunnerArgv() = %q, want %s 10001", argv, flag)
+		}
+	}
+	if !slices.Contains(argv, "--clear-groups") {
+		t.Errorf("RunnerArgv() = %q keeps the caller's supplementary groups", argv)
+	}
+	if !slices.Contains(argv, "HOME=/tmp") {
+		t.Errorf("RunnerArgv() = %q sets no writable HOME", argv)
+	}
+	if argv[len(argv)-1] != RunnerCommand {
+		t.Errorf("RunnerArgv() = %q does not end with %s", argv, RunnerCommand)
 	}
 }
