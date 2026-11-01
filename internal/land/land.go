@@ -1021,11 +1021,13 @@ func (l *Lander) rescoreBorderline(ctx context.Context, v Verdict, in ReviewInpu
 // carries the author's branch and seat kind, and the prompt its bead's stamp
 // names, so a per-kind view needs no other file (gt-b9j3o.16), and each finding
 // whole, so a follow-up bead filed later is written from the record rather than
-// from a verdict nobody kept (gt-3arxj). A failed
+// from a verdict nobody kept (gt-3arxj). head is the commit the review judged —
+// the merge candidate the om stage was handed — so the record names the judged
+// tree rather than the sha the target ends on after a squash (gt-lh22v). A failed
 // append never holds a landing, but the line it loses is a hole in the rework
 // table, so it is also written on the work bead, where the table's reader can
 // find it.
-func (l *Lander) logReview(issue *beads.Issue, w Work, comments []beads.Comment, repo Repo, base string, v Verdict, rejected bool) {
+func (l *Lander) logReview(issue *beads.Issue, w Work, comments []beads.Comment, repo Repo, base, head string, v Verdict, rejected bool) {
 	if l.Reviews == nil || (v.Verdict != VerdictApprove && v.Verdict != VerdictRequestChanges) {
 		return
 	}
@@ -1043,7 +1045,7 @@ func (l *Lander) logReview(issue *beads.Issue, w Work, comments []beads.Comment,
 	if v.Verdict == VerdictRequestChanges || rejected {
 		attempt = attemptAtCeiling(attempt)
 	}
-	rec := ReviewRecord{BeadID: w.BeadID, Rig: w.Rig, Attempt: attempt,
+	rec := ReviewRecord{BeadID: w.BeadID, Rig: w.Rig, Attempt: attempt, Head: head,
 		Score: v.Score, Verdict: v.Verdict, Rejected: rejected, Agent: w.Agent, Findings: len(v.Findings), Bar: bar, At: l.now().UTC(),
 		Branch: w.Branch, AuthorKind: authorkind.Kind(w.Branch), PromptSHA: promptStampSHA(comments, w),
 		FindingText: reviewFindingTexts(v.Findings)}
@@ -1531,7 +1533,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	// findings decide the approval's fate before the line is written, so an
 	// approval they bounce is logged as the rejection it is (gt-vu18r).
 	findingsRej := findingsRejection(verdict)
-	l.logReview(issue, w, comments, g, base, verdict, findingsRej != nil)
+	l.logReview(issue, w, comments, g, base, merged, verdict, findingsRej != nil)
 	l.logRounds(issue, w, verdict)
 	l.commentVerdict(w, verdict, reviewStart, time.Now())
 	if verdict.Verdict == VerdictRequestChanges {

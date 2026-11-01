@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 	"testing/iotest"
@@ -475,4 +476,33 @@ func TestAggregateOmStatsRecordMeansIgnoreAbsentFigures(t *testing.T) {
 	// The absent line is a rejection but no sample, so the named figures and
 	// gt-c's named zeros are the two samples: findings 4/2, score 0.60/2.
 	wantOmStatsDay(t, stats, OmStatsDay{Day: "2026-10-16", Rejections: 3, Rate: 1, MeanFindings: 2, MeanScore: 0.30})
+}
+
+// TestOmStatsIgnoresTheHeadField: the head names the tree a record judged, for
+// the readers that join a round on (bead, attempt). It is no figure the report
+// counts, so the report over the same records is the same whether or not they
+// carry it (gt-lh22v).
+func TestOmStatsIgnoresTheHeadField(t *testing.T) {
+	t.Parallel()
+	plain := []ReviewRecord{
+		{BeadID: "gt-a", Rig: "gastown", Attempt: 1, Score: 0.40, Verdict: VerdictRequestChanges, Findings: 2, Agent: "opus", At: omStatsAt(16, 10, 0, 0)},
+		{BeadID: "gt-a", Rig: "gastown", Attempt: 2, Score: 0.90, Verdict: VerdictApprove, Agent: "opus", At: omStatsAt(16, 11, 0, 0)},
+		{BeadID: "gt-b", Rig: "longeye", Attempt: 1, Score: 0.80, Verdict: VerdictApprove, Findings: 1, At: omStatsAt(17, 9, 0, 0)},
+	}
+	headed := make([]ReviewRecord, len(plain))
+	for i, rec := range plain {
+		rec.Head = fmt.Sprintf("%040x", i+1)
+		headed[i] = rec
+	}
+	without, err := AggregateOmStats(strings.NewReader(omStatsRecords(t, plain...)), nil, time.Time{})
+	if err != nil {
+		t.Fatalf("AggregateOmStats without head: %v", err)
+	}
+	with, err := AggregateOmStats(strings.NewReader(omStatsRecords(t, headed...)), nil, time.Time{})
+	if err != nil {
+		t.Fatalf("AggregateOmStats with head: %v", err)
+	}
+	if !reflect.DeepEqual(with, without) {
+		t.Errorf("the report changed when the records carried a head:\nwith    %+v\nwithout %+v", with, without)
+	}
 }

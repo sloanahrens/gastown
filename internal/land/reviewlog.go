@@ -69,7 +69,13 @@ type ReviewRecord struct {
 	// refuses stops at MaxReworkAttempts with the block it writes, so a reader
 	// matching a refusal to its MERGE REJECTION block by number finds it
 	// (gt-k10bq).
-	Attempt int     `json:"attempt"`
+	Attempt int `json:"attempt"`
+	// Head is the full 40-hex commit the verdict judged: the merge candidate om
+	// was handed. It is never the commit the landing makes on the target, which
+	// a squash turns into a different sha, so without this the judged tree
+	// cannot be recovered from the record (gt-lh22v). A reader joins a round on
+	// (bead, attempt); lines written before the field carry none.
+	Head    string  `json:"head,omitempty"`
 	Score   float64 `json:"score"`
 	Verdict string  `json:"verdict"`
 	// Rejected says the landing refused the work on this verdict, whatever the
