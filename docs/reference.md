@@ -1269,8 +1269,8 @@ unacked key, quoted, and the counts, and no heartbeat is written. `idle` and `aw
 `nuke_seat`, `answer`, `decision`, `fix_by_hand`; any other kind is refused with
 that list. The text is cut to 300 characters and collapsed to one line. The
 journal is pruned the way the events log is (`events.Prune`, 90 days or 1 MB),
-and the dashboard's Overseer panel counts its last seven days by kind: the
-backlog for what to automate next.
+and the dashboard's state (`overseer.interventions`) counts its last seven days
+by kind: the backlog for what to automate next. No panel draws the counts now.
 
 The `overseer.silent` rule (info, no wake) holds while the heartbeat is older
 than `overseer.silent_after` (default `90m`) and either the spec dispatcher's
