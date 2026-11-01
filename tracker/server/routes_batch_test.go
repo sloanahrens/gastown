@@ -170,3 +170,57 @@ func TestAnEmptyBatchReachesTheStore(t *testing.T) {
 		t.Errorf("the store was called %d times, want 1: the handler does not decide what an empty batch means", calls)
 	}
 }
+
+// One force close anywhere in a batch refuses the whole batch before the
+// store: the store applies all operations or none, so a seat's force close
+// writes nothing, not even the operations before it (gt-gk7ga).
+func TestBatchForceCloseNeedsAdmin(t *testing.T) {
+	t.Parallel()
+	for name, op := range map[string]string{
+		"close op":              `{"op":"close","close":{"ids":["gt-a"],"force":true}}`,
+		"update op that closes": `{"op":"update","update":{"id":"gt-a","patch":{"status":"closed","force":true}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			calls := 0
+			ts := writeServer(t, batchStub{batch: func(context.Context, api.BatchRequest) (api.BatchResult, error) {
+				calls++
+				return api.BatchResult{}, nil
+			}})
+			// a create precedes the force close, so a batch that applied part of
+			// itself would show in the store call count
+			body := `{"operations":[{"op":"create","create":{"rig":"gt","title":"t"}},` + op + `]}`
+			code, got := writeCall(t, "POST", ts.URL+"/v1/batch", body)
+			if e := decodeErr(t, got); code != 403 || e.Kind != api.KindForbidden || e.Message != forceCloseRefusal {
+				t.Errorf("seat batch %s = %d %q, want 403 forbidden %q", name, code, got, forceCloseRefusal)
+			}
+			if calls != 0 {
+				t.Fatalf("the store saw a refused seat batch %d times, want none", calls)
+			}
+			if code, got := writeCallAs(t, "admin-token", "POST", ts.URL+"/v1/batch", body); code != http.StatusOK {
+				t.Errorf("admin batch %s = %d %q, want 200", name, code, got)
+			}
+			if calls != 1 {
+				t.Errorf("the store saw the admin batch %d times, want 1", calls)
+			}
+		})
+	}
+}
+
+// A batch close without force is unchanged for a seat token.
+func TestBatchCloseWithoutForceUnchanged(t *testing.T) {
+	t.Parallel()
+	var force bool
+	calls := 0
+	ts := writeServer(t, batchStub{batch: func(_ context.Context, req api.BatchRequest) (api.BatchResult, error) {
+		calls++
+		force = req.Operations[0].Close.Force
+		return api.BatchResult{}, nil
+	}})
+	if code, body := writeCall(t, "POST", ts.URL+"/v1/batch", `{"operations":[{"op":"close","close":{"ids":["gt-a"]}}]}`); code != http.StatusOK {
+		t.Errorf("seat batch close = %d %q, want 200", code, body)
+	}
+	if calls != 1 || force {
+		t.Errorf("the store saw %d batch closes with force=%v, want one without force", calls, force)
+	}
+}

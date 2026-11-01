@@ -71,6 +71,14 @@ func TestAssignedAcrossTheWire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	adminTok, err := pg.IssueTokenScoped(ctx, "town/daemon", api.ScopeAdmin, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, err := client.New(client.Config{BaseURL: srv.URL, Token: adminTok, SchemaLevel: store.SchemaLevel()})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	create := func(p api.CreateParams) api.Issue {
 		t.Helper()
@@ -86,8 +94,9 @@ func TestAssignedAcrossTheWire(t *testing.T) {
 		t.Fatal(err)
 	}
 	closed := create(api.CreateParams{Rig: "gt", Title: "a closed", Assignee: "seat-a"})
-	// force: closing a seat's issue is normally refused without it.
-	if err := c.Close(ctx, []string{closed.ID}, "r", true); err != nil {
+	// force, as the admin token: closing a seat's issue is normally refused
+	// without it, and the flag itself needs the admin scope.
+	if err := admin.Close(ctx, []string{closed.ID}, "r", true); err != nil {
 		t.Fatal(err)
 	}
 	hqOpen := create(api.CreateParams{Rig: "hq", Title: "hq open", Assignee: "seat-a", Priority: 2})
