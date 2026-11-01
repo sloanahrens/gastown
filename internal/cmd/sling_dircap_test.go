@@ -104,7 +104,7 @@ func TestSlingRefusedAtDirCapRecordsNoRespawn(t *testing.T) {
 	info, err := reuseOrRefuseAtDirCap(fake, fakeIdleReuseEnv(), townRoot, "rig", 30,
 		SlingSpawnOptions{HookBead: bead}, recordRespawnFn(t, townRoot, bead))
 
-	if err == nil || !strings.Contains(err.Error(), "30 polecat directories (max 30)") {
+	if err == nil || !strings.Contains(err.Error(), "30 live polecat seats (max 30)") {
 		t.Fatalf("err = %v; want the directory-cap refusal", err)
 	}
 	if info != nil {
@@ -227,8 +227,57 @@ func TestSlingExhaustedSeatsRefusedOnlyAtCap(t *testing.T) {
 				}
 				return
 			}
-			if err == nil || !strings.Contains(err.Error(), "30 polecat directories (max 30)") {
+			if err == nil || !strings.Contains(err.Error(), "30 live polecat seats (max 30)") {
 				t.Errorf("err = %v; want the directory-cap refusal", err)
+			}
+		})
+	}
+}
+
+// liveSeatEnv is fakeIdleReuseEnv with the cap's seat question answered by
+// live: a directory whose name live refuses holds no live seat.
+func liveSeatEnv(live func(string) bool) idleReuseEnv {
+	env := fakeIdleReuseEnv()
+	env.seatLive = live
+	return env
+}
+
+// TestSlingDirCapCountsLiveSeatsNotDirectories guards gt-xlazq. A rig holds 30
+// polecat directories, the number the cap names, but a sandbox seat whose
+// sandbox is gone holds no seat: once those are the only directories left the
+// rig is below its cap and the sling must allocate, or every finished seat's
+// leftover directory would keep it at 30 for ever.
+func TestSlingDirCapCountsLiveSeatsNotDirectories(t *testing.T) {
+	t.Parallel()
+	const bead = "gt-next"
+	tests := []struct {
+		name   string
+		live   func(string) bool
+		refuse bool
+	}{
+		{"no live seats allocates", func(string) bool { return false }, false},
+		{"one live seat under the cap allocates", func(name string) bool { return name == "p00" }, false},
+		{"every directory a live seat refuses", func(string) bool { return true }, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot, _ := fullRig(t, 30)
+
+			info, err := reuseOrRefuseAtDirCap(&idlePolecatReuseFake{}, liveSeatEnv(tt.live), townRoot, "rig", 30,
+				SlingSpawnOptions{HookBead: bead}, recordRespawnFn(t, townRoot, bead))
+
+			if info != nil {
+				t.Fatalf("sling returned %+v with no seat reused", info)
+			}
+			if tt.refuse {
+				if err == nil || !strings.Contains(err.Error(), "30 live polecat seats (max 30)") {
+					t.Fatalf("err = %v; want the live-seat cap refusal", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v; want nil so the caller allocates below the cap", err)
 			}
 		})
 	}

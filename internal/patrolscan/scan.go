@@ -778,8 +778,26 @@ func (s *Scanner) Tick(rig string) Report {
 		if s.reapEnv != nil {
 			left = s.o.Reap.MaxPerTick
 		}
+		// A rig at its directory cap trims before the ordinary pass, in the
+		// order the trim ranks its seats: those seats are what the removal
+		// budget is for, and the one idle longest goes first. The trim reports
+		// a seat once, so the ordinary pass skips it and walks the rest.
+		trimmed := map[string]bool{}
+		trim, trimErr := s.trimAtDirCap(rig, polecats)
+		if trimErr != nil {
+			r.Errors = append(r.Errors, "trimming at the directory cap: "+trimErr.Error())
+		}
+		for i := range trim {
+			trimmed[trim[i].name] = true
+			if f, ok := s.reap(rig, trim[i].name, &left, &trim[i]); ok {
+				r.Findings = append(r.Findings, f)
+			}
+		}
 		for _, name := range polecats {
-			if f, ok := s.reap(rig, name, &left); ok {
+			if _, isTrim := trimmed[name]; isTrim {
+				continue
+			}
+			if f, ok := s.reap(rig, name, &left, nil); ok {
 				r.Findings = append(r.Findings, f)
 			}
 		}

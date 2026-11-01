@@ -393,9 +393,14 @@ type patrolScanHost struct {
 	// record no agent. The host lives one tick (patrol_scan.go), so each tick
 	// logs them once however many restarts ask.
 	unrecordedLogged bool
+	// polecatDirCap reads a rig's polecat directory cap when nil:
+	// polecatDirCapFor, the same number a sling admits against. A seam for the
+	// unit tier, whose temp town carries no rig registry (gt-xlazq).
+	polecatDirCap func(rigName string) (int, error)
 }
 
 var _ patrolscan.Env = (*patrolScanHost)(nil)
+var _ patrolscan.TrimEnv = (*patrolScanHost)(nil)
 
 func (h *patrolScanHost) town() string { return h.d.config.TownRoot }
 

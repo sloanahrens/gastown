@@ -466,6 +466,47 @@ func TestCheckPolecatSafetyOfADeadSandboxSeat(t *testing.T) {
 	}
 }
 
+// An idle, clean sandbox seat is nukable without --force: the daemon's reap
+// pass runs `gt polecat nuke` with no --force flag, so a seat it trims must
+// pass the same gate a person's nuke does. This one has a gone sandbox, a clean
+// cleanup_status, and no hook, which is every fact the gate reads (gt-xlazq).
+func TestNukeOfAnIdleCleanSandboxSeatNeedsNoForce(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	r := &rig.Rig{Name: "gastown", Path: filepath.Join(town, "gastown")}
+	fake := mrlessBeads{beadsfake.New()}
+	agentID := polecatBeadIDForRig(r, "gastown", "ember")
+	if _, err := fake.Create(beads.CreateOptions{
+		ID: agentID, Title: agentID, Labels: []string{"gt:agent"}, Priority: -1,
+		Description: beads.FormatAgentDescription(agentID, &beads.AgentFields{
+			RoleType: "polecat", Rig: "gastown", AgentState: string(beads.AgentStateIdle),
+			CleanupStatus: string(polecat.CleanupClean), Agent: sandboxSeatAgent,
+			Branch: "polecat/ember/gt-a+x",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	env := sandboxSeatEnv{
+		probe: func(string, string) (polecat.LiveGitState, bool) {
+			return polecat.SandboxSeatGitState("", false, nil, "gt-gastown-p-ember"), true
+		},
+		remoteBranch: func(_, _ string) (bool, error) { return true, nil },
+	}
+	get := func(string) (*polecat.Polecat, error) {
+		return &polecat.Polecat{Name: "ember", Branch: "polecat/ember/gt-a+x"}, nil
+	}
+
+	var out strings.Builder
+	err := nukeSafetyRefusal(&out, []polecatTarget{{rigName: "gastown", polecatName: "ember"}}, false, false,
+		func(p polecatTarget) *SafetyCheckResult {
+			return checkPolecatSafetyWith(p.rigName, p.polecatName, r, get, fake, env)
+		})
+
+	if err != nil {
+		t.Fatalf("the nuke gate refused an idle clean sandbox seat: %v\n%s", err, out.String())
+	}
+}
+
 // Both lost-work checks now ask origin about the branch one shared rule names,
 // and that rule trims: a record that is only whitespace names nothing to ask
 // about, so the checks fail closed rather than query origin for " ". A parsed

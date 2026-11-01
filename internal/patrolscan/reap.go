@@ -2,6 +2,7 @@ package patrolscan
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -30,6 +31,30 @@ type ReapEnv interface {
 	Reap(rig, polecat string) error
 }
 
+// TrimEnv is the optional half of ReapEnv the directory-cap trim needs. The
+// reap pass never touches a reusable seat: that is a rig's capacity, and a
+// quiet skip is how a healthy pool reads. A rig at its polecat directory cap is
+// the exception the trim exists for — the seats it holds are a directory apiece,
+// so a sandbox seat whose work is finished and safe leaves the rig one short of
+// admitting new work for ever. A host that does not implement it never trims.
+type TrimEnv interface {
+	// TrimmableSeats names the rig's sandbox seats when the rig holds at least
+	// as many polecat directories as its cap, and returns nil when it is under
+	// the cap. Only sandbox seats are ever named: a tmux seat's reuse is what
+	// the pool is for. The order is the caller's business; an error means the
+	// cap or a seat's kind could not be read, and the tick trims nothing on it.
+	TrimmableSeats(rig string) ([]string, error)
+}
+
+// trimSeat is a seat the directory cap may trim this tick: its name, and the
+// idle time its place in the trim order was decided by, so the pass reads that
+// clock once.
+type trimSeat struct {
+	name    string
+	idle    time.Time
+	idleErr error
+}
+
 // Recovery is the slice of the check-recovery verdict the reap pass reads.
 type Recovery struct {
 	Verdict        string
@@ -55,7 +80,12 @@ type ReapOptions struct {
 // first to fire wins. A failed read is Unknown and never acts. A quiet veto
 // (someone else owns the seat, or it is reusable capacity) reports nothing.
 // left is the removals still allowed this tick.
-func (s *Scanner) reap(rig, name string, left *int) (Finding, bool) {
+//
+// trim is nil for every seat the directory-cap trim did not name, and holds the
+// idle time the trim order was sorted by for one it did. A trim seat may be
+// reusable: that veto is the only one the trim lifts, so every fact the pass
+// measures about the seat's work still decides (gt-xlazq).
+func (s *Scanner) reap(rig, name string, left *int, trim *trimSeat) (Finding, bool) {
 	if s.reapEnv == nil || s.o.Reap == nil {
 		return Finding{}, false
 	}
@@ -118,13 +148,19 @@ func (s *Scanner) reap(rig, name string, left *int) (Finding, bool) {
 	// the case this pass exists for — un-reapable forever (gt-2knum). Safety
 	// still rests on the SAFE_TO_NUKE verdict, live git state, the vetoes
 	// above, and the longer ParkedGrace below.
-	if rv.Reusable && !parked {
+	if rv.Reusable && !parked && trim == nil {
 		return Finding{}, false // reusable capacity is never reaped
 	}
 
-	since, err := s.reapEnv.IdleSince(rig, name)
-	if err != nil {
-		return unknown("idle-since unreadable", err)
+	var since time.Time
+	var idleErr error
+	if trim != nil {
+		since, idleErr = trim.idle, trim.idleErr
+	} else {
+		since, idleErr = s.reapEnv.IdleSince(rig, name)
+	}
+	if idleErr != nil {
+		return unknown("idle-since unreadable", idleErr)
 	}
 	if since.IsZero() {
 		f.Outcome, f.Detail = OutcomeSkipped, "idle-since unknown; not eligible"
@@ -143,9 +179,16 @@ func (s *Scanner) reap(rig, name string, left *int) (Finding, bool) {
 		f.Outcome, f.Detail = OutcomeBlocked, blockedDetail(rv)
 		return f, true
 	}
+	removedDetail := func() string {
+		detail := fmt.Sprintf("idle %s, %s, git state live", now.Sub(since).Round(time.Minute), rv.Verdict)
+		if trim != nil {
+			detail += ", trimmed at the rig's directory cap"
+		}
+		return detail
+	}
 	if s.o.Reap.DryRun {
 		f.Outcome = OutcomeWouldReap
-		f.Detail = fmt.Sprintf("idle %s, %s, git state live", now.Sub(since).Round(time.Minute), rv.Verdict)
+		f.Detail = removedDetail()
 		return f, true
 	}
 	if *left <= 0 {
@@ -161,8 +204,57 @@ func (s *Scanner) reap(rig, name string, left *int) (Finding, bool) {
 		return f, true
 	}
 	*left--
-	f.Outcome, f.Detail = OutcomeReaped, fmt.Sprintf("idle %s, %s, git state live", now.Sub(since).Round(time.Minute), rv.Verdict)
+	f.Outcome, f.Detail = OutcomeReaped, removedDetail()
 	return f, true
+}
+
+// trimAtDirCap is the tick's trim order: the seats the rig's directory cap may
+// remove this tick, oldest idle first. It is empty when the host has no trim
+// half or the rig is under its cap, and an error when the cap or a seat's kind
+// could not be read — the tick then trims nothing, because a seat it cannot
+// classify may be one the pass must never touch.
+//
+// A seat whose idle time cannot be read sorts last: it cannot be the oldest,
+// and reap reports it Unknown rather than removing it.
+func (s *Scanner) trimAtDirCap(rig string, polecats []string) ([]trimSeat, error) {
+	if s.reapEnv == nil {
+		return nil, nil
+	}
+	te, ok := s.reapEnv.(TrimEnv)
+	if !ok {
+		return nil, nil
+	}
+	seats, err := te.TrimmableSeats(rig)
+	if err != nil {
+		return nil, err
+	}
+	if len(seats) == 0 {
+		return nil, nil
+	}
+	inRig := make(map[string]bool, len(polecats))
+	for _, name := range polecats {
+		inRig[name] = true
+	}
+	trim := make([]trimSeat, 0, len(seats))
+	for _, name := range seats {
+		if !inRig[name] {
+			continue // a seat the tick did not list has no directory this tick
+		}
+		since, idleErr := s.reapEnv.IdleSince(rig, name)
+		trim = append(trim, trimSeat{name: name, idle: since, idleErr: idleErr})
+	}
+	sort.SliceStable(trim, func(i, j int) bool {
+		iUnknown := trim[i].idleErr != nil || trim[i].idle.IsZero()
+		jUnknown := trim[j].idleErr != nil || trim[j].idle.IsZero()
+		if iUnknown != jUnknown {
+			return !iUnknown
+		}
+		if !trim[i].idle.Equal(trim[j].idle) {
+			return trim[i].idle.Before(trim[j].idle)
+		}
+		return trim[i].name < trim[j].name
+	})
+	return trim, nil
 }
 
 // blockedDetail names why a seat is not safe: the verdict, its blockers, and a

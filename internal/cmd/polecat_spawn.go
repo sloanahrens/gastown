@@ -29,8 +29,6 @@ import (
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
-const minPolecatDirsPerRig = 30
-
 // SpawnedPolecatInfo contains info about a spawned polecat session.
 type SpawnedPolecatInfo struct {
 	RigName     string // Rig name (e.g., "gastown")
@@ -202,13 +200,6 @@ func slingAddOptions(opts SlingSpawnOptions, baseBranch, resumeBranch string, al
 	}
 }
 
-func effectivePolecatDirCap(configured int) int {
-	if configured < minPolecatDirsPerRig {
-		return minPolecatDirsPerRig
-	}
-	return configured
-}
-
 // polecatIntegrationEnabled reports whether a hooked bead's parent epic
 // integration branch should be auto-sourced for a spawning polecat's
 // worktree, resolved across rig-root -> repo -> rig-local (gt-xwt9), the
@@ -286,6 +277,10 @@ type idlePolecatReuse interface {
 // is not blocked by a full rig. A refusal is a sling that never started a
 // polecat, so it does not count as a respawn.
 //
+// The cap counts live seats (env.seatLive), not directories: a finished sandbox
+// seat whose sandbox is gone leaves a directory that holds no seat, and counting
+// it would wedge a rig whose seats have all finished (gt-xlazq).
+//
 // A rig whose polecat directories cannot be read is refused rather than
 // allocated into: the cap cannot be checked, so the sling does not proceed.
 //
@@ -309,16 +304,19 @@ func reuseOrRefuseAtDirCap(
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("cannot read polecat directories of rig %s to check the cap: %w", rigName, err)
 	}
-	dirCount := 0
+	seatCount := 0
 	for _, e := range entries {
-		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
-			dirCount++
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		if env.seatLive == nil || env.seatLive(e.Name()) {
+			seatCount++
 		}
 	}
-	if dirCount >= dirCap {
-		return nil, fmt.Errorf("rig %s has %d polecat directories (max %d). "+
+	if seatCount >= dirCap {
+		return nil, fmt.Errorf("rig %s has %d live polecat seats (max %d). "+
 			"Resolve recovery-needed polecats before allocating more slots: gt polecat list %s",
-			rigName, dirCount, dirCap, rigName)
+			rigName, seatCount, dirCap, rigName)
 	}
 	return nil, nil
 }
@@ -345,16 +343,24 @@ type idleReuseEnv struct {
 	// verify the sandbox, so the failures after it have to undo that write
 	// (gt-pa676).
 	releaseReused func(rigName, polecatName, hookBead string)
+	// seatLive answers the directory cap's question about one polecat
+	// directory: does it hold a live seat? Nil counts every directory, which is
+	// the answer a host that cannot classify its seats gives (gt-xlazq).
+	seatLive liveSeatCounter
 }
 
 func realIdleReuseEnv(t *tmux.Tmux, r *rig.Rig, townRoot, rigName string, step func(name string)) idleReuseEnv {
+	sessionName := polecat.NewSessionManager(t, r, townRegistry()).SessionName
 	return idleReuseEnv{
 		integrationBranch: func(hookBead string) string {
 			return detectSpawnIntegrationBranch(townRoot, rigName, r, hookBead)
 		},
 		verifyWorktree: verifyWorktreeExists,
-		sessionName:    polecat.NewSessionManager(t, r, townRegistry()).SessionName,
-		defaultBranch:  r.DefaultBranch,
+		sessionName:    sessionName,
+		seatLive: newLiveSeatCounter(beads.New(r.Path), func(name string) string {
+			return polecatBeadIDForRig(r, rigName, name)
+		}, sessionName, sandboxSeatProbeFor(townRoot, nil)),
+		defaultBranch: r.DefaultBranch,
 		logSpawn: func(rigName, polecatName string) {
 			_ = events.LogFeed(events.TypeSpawn, events.ActorGt, events.SpawnPayload(rigName, polecatName))
 		},
@@ -1018,7 +1024,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions, store
 	// paying for a new worktree.
 	reusedIdle, err := reuseOrRefuseAtDirCap(polecatMgr,
 		realIdleReuseEnv(t, r, townRoot, rigName, opts.step), townRoot, rigName,
-		effectivePolecatDirCap(r.GetIntConfig("max_polecats")), opts, recordRespawn)
+		rig.EffectivePolecatDirCap(r.GetIntConfig("max_polecats")), opts, recordRespawn)
 	if err != nil {
 		return nil, err
 	}
