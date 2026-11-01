@@ -89,6 +89,75 @@ func TestMetricsSnapshotReceiptSaysWhetherAPlacementIsKnown(t *testing.T) {
 	}
 }
 
+// The daily step's receipt names the day and the file, and a second run the
+// same day says the rig was already recorded.
+func TestRunBdDailyPrintsItsReceipt(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	env := metrics.Env{
+		Town: town,
+		ReadFile: func(path string) ([]byte, error) {
+			if path == filepath.Join(town, "mayor", "rigs.json") {
+				return []byte(`{"version":1,"rigs":{"gastown":{}}}`), nil
+			}
+			return os.ReadFile(path)
+		},
+		RunDir: func(context.Context, string, []string) ([]byte, error) { return []byte(`[]`), nil },
+		Now:    func() time.Time { return now },
+	}
+	var out bytes.Buffer
+	if err := runBdDaily(context.Background(), &out, env); err != nil {
+		t.Fatalf("runBdDaily: %v", err)
+	}
+	want := "bd-daily 2026-11-01 appended to " + metrics.BdDailyPath(town) + " (1 rigs written, 0 already recorded, 0 gaps)\n"
+	if out.String() != want {
+		t.Fatalf("receipt = %q, want %q", out.String(), want)
+	}
+	out.Reset()
+	if err := runBdDaily(context.Background(), &out, env); err != nil {
+		t.Fatalf("second runBdDaily: %v", err)
+	}
+	if !strings.Contains(out.String(), "(0 rigs written, 1 already recorded, 0 gaps)") {
+		t.Fatalf("second receipt = %q", out.String())
+	}
+}
+
+// The two steps are independent: a snapshot whose append fails still leaves the
+// day's step to run, and the error names both failures.
+func TestRunMetricsStepsReportsBothFailures(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.WriteFile(filepath.Join(town, ".runtime"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := metrics.Env{Town: town, Now: func() time.Time { return time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC) }}
+	var out bytes.Buffer
+	err := runMetricsSteps(context.Background(), &out, env, []metrics.Source{
+		fakeSource{group: "alpha", cols: map[string]any{"n": 1}},
+	})
+	if err == nil {
+		t.Fatal("runMetricsSteps accepted two failed steps")
+	}
+	for _, want := range []string{"appending the snapshot", "bd daily:"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to name %q", err.Error(), want)
+		}
+	}
+}
+
+// A day the daily step cannot write fails the step rather than passing as an
+// hour that recorded it.
+func TestRunBdDailyFailureIsTheStepsFailure(t *testing.T) {
+	t.Parallel()
+	env := metrics.Env{Town: t.TempDir(), Now: func() time.Time { return time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC) }}
+	var out bytes.Buffer
+	err := runBdDaily(context.Background(), &out, env)
+	if err == nil || !strings.Contains(err.Error(), "bd daily:") {
+		t.Fatalf("runBdDaily without a file reader = %v, want a bd daily error", err)
+	}
+}
+
 // A collection that carries no columns — every source a stub's empty map, a
 // source's nil, or an empty placement — must not print an unqualified success
 // receipt (gt-pmovc).
