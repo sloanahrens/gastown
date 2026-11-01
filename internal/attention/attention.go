@@ -66,7 +66,7 @@ const (
 	// KindQuestionNew: an overseer question has been filed and nobody has
 	// commented on it yet.
 	KindQuestionNew Kind = "question-new"
-	// KindQuestionAnswered: Sloan answered an overseer question and the
+	// KindQuestionAnswered: the operator answered an overseer question and the
 	// overseer has not yet commented on the answer.
 	KindQuestionAnswered Kind = "question-answered"
 	// KindQuestionStale: an overseer question has been open more than a day.
