@@ -76,11 +76,11 @@ func budgetFor(row censusCopyRow) float64 {
 }
 
 // TestCensusBudgetsAreTheBaseline: the shipped table names the baseline's
-// callers, in its order, at each one's baseline rate when a hot-path bead cuts
-// it and at 1.25 times it when none does (gt-gojo0), except a row a later
-// census re-based, which carries the rate testdata/census-rebase-20261101.txt
-// records (gt-1rub5). A table that only counted sixteen rows would pass while
-// naming the wrong sixteen or holding a budget the baseline never allowed.
+// callers, in its order, at the budget the censusCallerBudgets comment derives
+// from each one (gt-gojo0), except a re-based row, which carries the rate
+// testdata/census-rebase-20261101.txt records (gt-1rub5). A table that only
+// counted sixteen rows would pass while naming the wrong sixteen or holding a
+// budget the baseline never allowed.
 func TestCensusBudgetsAreTheBaseline(t *testing.T) {
 	baseline := readCensusBaseline(t)
 	rebased := readCensusRebase(t)
@@ -135,37 +135,87 @@ func TestCensusBudgetsNeverFallBelowTheBaseline(t *testing.T) {
 	}
 }
 
-// TestCensusBudgetScanRowIsTheMeasuredScan: the sling-context scan reads each
-// of the town's 14 databases once a minute, one bd query each, after gt-s0xpe
-// cut it from 23 queries. The census measured 14 calls a minute, and
-// testdata/census-rebase-20261101.txt pins that rate, so a later change to the
-// row fails here with the reason (gt-1rub5).
+// TestCensusBudgetScanRowIsTheMeasuredScan: the re-based scan row stands on the
+// census windows recorded verbatim in testdata/census-recorded-20261101.txt, not
+// on a number typed beside it: every recorded window shows the scan at one
+// count, the override file carries that count, and the shipped budget equals it
+// (gt-1rub5).
 func TestCensusBudgetScanRowIsTheMeasuredScan(t *testing.T) {
 	const caller = "schedulerrun.listAllSlingContextRecords"
-	var measured float64
+	counts := recordedCallerCounts(t, "testdata/census-recorded-20261101.txt", caller)
+	if len(counts) == 0 {
+		t.Fatalf("no recorded census window lists %s", caller)
+	}
+	measured := float64(counts[0])
+	for _, n := range counts {
+		if float64(n) != measured {
+			t.Fatalf("the recorded windows show %s at %v, not one count", caller, counts)
+		}
+	}
+	var override float64
 	found := false
 	for _, row := range readCensusRebase(t) {
 		if row.Caller == caller {
-			measured, found = row.Rate, true
-			break
+			override, found = row.Rate, true
 		}
 	}
-	if !found {
-		t.Fatalf("%s has no re-base row: the scan reads the town's 14 databases once a minute, one bd query each, and the census measured 14 calls a minute (gt-1rub5)", caller)
+	if !found || override != measured {
+		t.Errorf("the override for %s is %v (found %v), the recorded windows show %v", caller, override, found, measured)
 	}
-	var budget float64
-	found = false
 	for _, b := range CensusBudgets() {
-		if b.Caller == caller {
-			budget, found = b.CallsPerMinute, true
-			break
+		if b.Caller == caller && b.CallsPerMinute != measured {
+			t.Errorf("%s: budget %v, want the recorded %v", caller, b.CallsPerMinute, measured)
 		}
 	}
-	if !found {
-		t.Fatalf("%s has no budget row: the scan reads the town's 14 databases once a minute, one bd query each (gt-1rub5)", caller)
+}
+
+// recordedCallerCounts returns, for each census window line in path that lists
+// caller, the count it shows.
+func recordedCallerCounts(t *testing.T, path, caller string) []int {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
 	}
-	if budget != measured {
-		t.Errorf("%s: budget %v, want the measured %v: the scan reads the town's 14 databases once a minute, one bd query each (gt-1rub5)", caller, budget, measured)
+	var out []int
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		_, rest, ok := strings.Cut(line, "@"+caller+"=")
+		if !ok {
+			continue
+		}
+		digits := rest
+		if i := strings.IndexByte(rest, ' '); i >= 0 {
+			digits = rest[:i]
+		}
+		n, err := strconv.Atoi(digits)
+		if err != nil {
+			t.Fatalf("%s: window line shows %s with %q: %v", path, caller, digits, err)
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// TestCensusRebaseRowsOnlyRise: an override is for a rate a later census
+// measured ABOVE the baseline budget; one at or below it is an edit that cuts a
+// budget past the shrink-only guard, so it fails here (gt-1rub5).
+func TestCensusRebaseRowsOnlyRise(t *testing.T) {
+	baselineBudget := map[string]float64{}
+	for _, row := range readCensusBaseline(t) {
+		baselineBudget[row.Caller] = budgetFor(row)
+	}
+	for _, row := range readCensusRebase(t) {
+		base, ok := baselineBudget[row.Caller]
+		if !ok {
+			t.Errorf("re-base row %q names no caller in the baseline", row.Caller)
+			continue
+		}
+		if row.Rate <= base {
+			t.Errorf("re-base row %s is %v, not above its baseline budget %v: an override may only raise", row.Caller, row.Rate, base)
+		}
 	}
 }
 

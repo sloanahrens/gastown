@@ -1,15 +1,5 @@
-# The budget rows a later census re-based above the pinned baseline in
-# census-baseline-20261030.txt.
-#
-# The baseline derivation only lowers a budget: a caller a bead cuts keeps its
-# baseline rate, tightened after a post-install census. A rate a later census
-# measured higher is therefore an explicit override row in the budget table,
-# not an edit to the pinned baseline, and the test that reads this file pins
-# each override to the shipped table.
-#
-# Columns: calls per minute, caller, the bead that cut the caller.
-#
-# gt-1rub5: after gt-s0xpe cut the sling-context scan from 23 queries to one
-# `bd query` per database, the census measured 14 calls a minute in the windows
-# that listed it, 2026-11-01 14:00 to 14:03. Decision: overseer.
+# The budget rows a later census re-based above the pinned baseline: the
+# explicit override the census_budgets.go comment describes. Columns: calls per
+# minute, caller, the bead that cut the caller. Each rate is the count the
+# recorded census windows in census-recorded-20261101.txt show.
 14.0	schedulerrun.listAllSlingContextRecords	gt-s0xpe

@@ -56,11 +56,9 @@ var censusCallerBudgets = []CensusBudget{
 	// which stays (gt-r9pj9 leaves it alone). Summed through censusWrapperReads
 	// (gt-krmal).
 	{Caller: "landworker.RetryBeads.List", CallsPerMinute: 8.63},
-	// gt-1rub5 re-bases this row above its baseline rate: after gt-s0xpe cut
-	// the scan to one `bd query` per database, the census measured 14 a
-	// minute for the town's 14 databases. The derivation only lowers a
-	// budget, so the rise is this explicit override row, pinned by
-	// testdata/census-rebase-20261101.txt.
+	// Re-based above its baseline rate (gt-1rub5): the scan reads each of the
+	// town's 14 databases once a minute, after gt-s0xpe. See the override
+	// paragraph above the table.
 	{Caller: "schedulerrun.listAllSlingContextRecords", CallsPerMinute: 14.00},
 	// Baseline 198 calls, 3.3 a minute: the held beads' children (gt-r9pj9).
 	// Summed through censusWrapperReads (gt-krmal).
