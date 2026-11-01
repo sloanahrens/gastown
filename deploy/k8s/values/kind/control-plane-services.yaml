@@ -1,0 +1,23 @@
+# GENERATED from values/kind/hosts.yaml by `go run ./cmd/render-services`; do not edit.
+# Names a sandbox uses for the control plane, all resolving to the Mac as seen from
+# the cluster's nodes. They are ExternalName Services, so the cluster DNS answers with
+# the host's address and the sandbox policy pins it (see `go run ./cmd/render-policy`).
+apiVersion: v1
+kind: Service
+metadata: {name: control-plane, namespace: openshell}
+spec: {type: ExternalName, externalName: host.lima.internal}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: dolt, namespace: openshell}
+spec: {type: ExternalName, externalName: host.lima.internal}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: forgejo, namespace: openshell}
+spec: {type: ExternalName, externalName: host.lima.internal}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: tracker, namespace: openshell}
+spec: {type: ExternalName, externalName: host.lima.internal}

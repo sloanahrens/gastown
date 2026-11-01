@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -156,7 +157,7 @@ func TestKindValuesPullSandboxImageAlways(t *testing.T) {
 
 func TestStaticManifestsParse(t *testing.T) {
 	t.Parallel()
-	for _, rel := range []string{"kind/gateway-nodeport.yaml", "services/control-plane.yaml", "policy/kind.yaml"} {
+	for _, rel := range []string{"kind/gateway-nodeport.yaml", "values/kind/control-plane-services.yaml", "values/kind/hosts.yaml", "values/cloud/control-plane-services.yaml", "values/cloud/hosts.yaml", "policy/kind.yaml"} {
 		if len(decodeDocs(t, rel)) == 0 {
 			t.Errorf("%s has no documents", rel)
 		}
@@ -165,21 +166,124 @@ func TestStaticManifestsParse(t *testing.T) {
 
 func TestControlPlaneServicesAreExternalNames(t *testing.T) {
 	t.Parallel()
-	seen := map[string]bool{}
-	for _, d := range decodeDocs(t, "services/control-plane.yaml") {
-		name := at(t, d, "metadata", "name").(string)
-		seen[name] = true
-		if got := at(t, d, "spec", "type"); got != "ExternalName" {
-			t.Errorf("service %s type = %v, want ExternalName", name, got)
+	for _, env := range []string{"kind", "cloud"} {
+		want := decodeDocs(t, "values/"+env+"/hosts.yaml")[0]["control_plane_host"]
+		seen := map[string]bool{}
+		for _, d := range decodeDocs(t, "values/"+env+"/control-plane-services.yaml") {
+			name := at(t, d, "metadata", "name").(string)
+			seen[name] = true
+			if got := at(t, d, "spec", "type"); got != "ExternalName" {
+				t.Errorf("%s: service %s type = %v, want ExternalName", env, name, got)
+			}
+			if got := at(t, d, "spec", "externalName"); got != want {
+				t.Errorf("%s: service %s externalName = %v, want the hosts file's control_plane_host %v", env, name, got, want)
+			}
 		}
-		if got := at(t, d, "spec", "externalName"); got != "host.lima.internal" {
-			t.Errorf("service %s externalName = %v, want host.lima.internal", name, got)
+		for _, w := range []string{"control-plane", "dolt", "forgejo", "tracker"} {
+			if !seen[w] {
+				t.Errorf("%s: service %s is missing", env, w)
+			}
 		}
 	}
-	for _, want := range []string{"control-plane", "dolt", "forgejo", "tracker"} {
-		if !seen[want] {
-			t.Errorf("service %s is missing", want)
+}
+
+// A move to the cloud is a swap of one values directory, so the two
+// environments must name the same keys, each with a value, and a stateful claim
+// must name a reclaim policy the cluster accepts.
+func TestHostsValuesFilesCarrySameKeys(t *testing.T) {
+	t.Parallel()
+	kind := decodeDocs(t, "values/kind/hosts.yaml")[0]
+	cloud := decodeDocs(t, "values/cloud/hosts.yaml")[0]
+	for k := range kind {
+		if _, ok := cloud[k]; !ok {
+			t.Errorf("values/cloud/hosts.yaml lacks key %q that values/kind/hosts.yaml has", k)
 		}
+	}
+	for k := range cloud {
+		if _, ok := kind[k]; !ok {
+			t.Errorf("values/kind/hosts.yaml lacks key %q that values/cloud/hosts.yaml has", k)
+		}
+	}
+	for _, key := range []string{"control_plane_host", "registry_host", "storage_class", "reclaim_policy"} {
+		for env, doc := range map[string]map[string]any{"kind": kind, "cloud": cloud} {
+			if v, _ := doc[key].(string); v == "" {
+				t.Errorf("values/%s/hosts.yaml: %s is missing or empty", env, key)
+			}
+		}
+	}
+	for env, doc := range map[string]map[string]any{"kind": kind, "cloud": cloud} {
+		if r := doc["reclaim_policy"]; r != "Delete" && r != "Retain" {
+			t.Errorf("values/%s/hosts.yaml: reclaim_policy = %v, want Delete or Retain", env, r)
+		}
+	}
+}
+
+// hardCodedAddresses returns the files below root that spell an environment's
+// address instead of reading it from a values file. The values directory and
+// testdata hold environments by design, and a *_test.go file may name the
+// strings it guards.
+func hardCodedAddresses(t *testing.T, root string) []string {
+	t.Helper()
+	var hits []string
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if rel, _ := filepath.Rel(root, path); rel == "values" || d.Name() == "testdata" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, bad := range []string{"localhost:5001", "host.lima.internal"} {
+			if bytes.Contains(raw, []byte(bad)) {
+				rel, _ := filepath.Rel(root, path)
+				hits = append(hits, rel+" names "+bad)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking %s: %v", root, err)
+	}
+	return hits
+}
+
+func TestNoHardCodedRegistryOrHostLimaInManifests(t *testing.T) {
+	t.Parallel()
+	for _, h := range hardCodedAddresses(t, ".") {
+		t.Errorf("%s: move the address into values/<env>/hosts.yaml and read it from there", h)
+	}
+}
+
+// The guard has to go red when an address is spelled in a manifest, and stay
+// quiet for the values directory.
+func TestHardCodedAddressGuardFiresOnAPlantedAddress(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	for rel, text := range map[string]string{
+		"a/ok.yaml":          "image: from-values\n",
+		"a/bad.yaml":         "image: localhost:5001/x\n",
+		"values/kind/h.yaml": "host: host.lima.internal\n",
+	} {
+		full := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := hardCodedAddresses(t, root)
+	if len(got) != 1 || !strings.Contains(got[0], "bad.yaml") {
+		t.Fatalf("guard hits = %v, want exactly a/bad.yaml", got)
 	}
 }
 

@@ -143,8 +143,24 @@ func TestCheckedInKindPolicyIsTheRender(t *testing.T) {
 	if msg := kindDrift(t, "../../deploy/polecat/policy.yaml", "../../deploy/k8s/policy/kind.yaml"); msg != "" {
 		t.Error(msg)
 	}
-	for _, p := range servicesProblems(readRepoFile(t, "../../deploy/k8s/services/control-plane.yaml")) {
+	for _, p := range servicesProblems(readRepoFile(t, "../../deploy/k8s/values/kind/control-plane-services.yaml")) {
 		t.Error(p)
+	}
+}
+
+// The checked-in Services of each environment are exactly the render of that
+// environment's hosts file, so the host is written in one place (gt-ht5he).
+func TestCheckedInServicesAreTheRenderOfTheirHostsFile(t *testing.T) {
+	t.Parallel()
+	for _, env := range []string{"kind", "cloud"} {
+		dir := "../../deploy/k8s/values/" + env + "/"
+		want, err := RenderServices(env, []byte(readRepoFile(t, dir+"hosts.yaml")))
+		if err != nil {
+			t.Fatalf("%s: %v", env, err)
+		}
+		if got := readRepoFile(t, dir+"control-plane-services.yaml"); got != want {
+			t.Errorf("%s: control-plane-services.yaml is not the render of hosts.yaml; run: go run ./cmd/render-services deploy/k8s/values/%s/hosts.yaml > deploy/k8s/values/%s/control-plane-services.yaml", env, env, env)
+		}
 	}
 }
 

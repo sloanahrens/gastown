@@ -117,13 +117,13 @@ How the environment is delivered:
 | Docker sandbox policy | `deploy/polecat/policy.yaml:75-78` | `dolt` egress to `host.docker.internal:3307`, binaries `bd`/`gt` | **yes** — a tracker port needs its own endpoint block and binaries |
 | kind sandbox policy | `deploy/k8s/policy/kind.yaml:76-80` | `dolt` egress to `control-plane.openshell.svc.cluster.local:3307`, pinned `allowed_ips` | **yes** |
 | Policy renderer | `deploy/k8s/render-policy.sh:20`, `:87` | rewrites `host.docker.internal` to the in-cluster name; port `3307` → `dolt`, `3000` → `forgejo` | **yes** — a tracker port needs a third name |
-| k8s control-plane names | `deploy/k8s/services/control-plane.yaml:13-16` | ExternalName `dolt` (and `control-plane`) → `host.lima.internal` | **yes** — a `tracker` name belongs here |
+| k8s control-plane names | `deploy/k8s/values/kind/control-plane-services.yaml:13-16` | ExternalName `dolt` (and `control-plane`) → `host.lima.internal` | **yes** — a `tracker` name belongs here |
 
 **The sandbox's path to the host is a host alias, not a port forward.** Docker: the profile's
 `control_plane_host`, default `host.docker.internal` (`backend_openshell.go:686-691`), reaches the
 Mac's service. kind/Kubernetes: an ExternalName Service (`dolt`, `control-plane`) that resolves to
 `host.lima.internal`, with the policy pinning the address the name resolves to
-(`deploy/k8s/services/control-plane.yaml:1-16`, `deploy/k8s/policy/kind.yaml:78-80`,
+(`deploy/k8s/values/kind/control-plane-services.yaml:1-16`, `deploy/k8s/policy/kind.yaml:78-80`,
 `deploy/k8s/render-policy.sh:80-100`). The design note is explicit that the gateway is reached
 through a kind port mapping and a NodePort Service, **not** `kubectl port-forward`
 (`docs/design/k8s-sandboxes.md:14`). The tracker plan's phrase "the same port forward as 3307"
@@ -224,7 +224,7 @@ config groundwork, (4)-(8) the seat wiring, (9)-(12) cleanup and the k8s route.
     (`internal/daemon/daemon.go:3578`): the worktree survives and the seat may be restarted with
     the same token, which is the design's rule — revoked at removal.
 12. **k8s route.** Add a `tracker` ExternalName Service beside `dolt`
-    (`deploy/k8s/services/control-plane.yaml:13-16`), a tracker endpoint block in the rendered
+    (`deploy/k8s/values/kind/control-plane-services.yaml:13-16`), a tracker endpoint block in the rendered
     policy (`deploy/k8s/policy/kind.yaml:76-80` via `render-policy.sh:80-100`, which needs a third
     port→name mapping at `:87`), and the same endpoint in the Docker policy
     (`deploy/polecat/policy.yaml:75-78`) with `gt` and `bd` in its `binaries` list. Without the

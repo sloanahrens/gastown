@@ -1,0 +1,12 @@
+# Environment hosts for the local kind clusters. A move to another environment
+# is a swap of the values/<env> directory: the hosts, the registry and the
+# storage settings below are the only places a manifest's environment is named.
+# The sandbox cluster's Services are in control-plane-services.yaml beside this
+# file and name control_plane_host.
+control_plane_host: host.lima.internal
+registry_host: localhost:5001
+# storage_class and reclaim_policy are the contract for stateful claims; no manifest reads
+# them yet (the gt-cache claim leaves its class to the cluster default on purpose), so a
+# claim that names a class takes it from here.
+storage_class: local-path
+reclaim_policy: Delete
