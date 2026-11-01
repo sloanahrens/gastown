@@ -28,7 +28,7 @@ func TestAttentionStepDoesNotHoldTheHeartbeat(t *testing.T) {
 	started := make(chan struct{})
 	d.attention.tick = func() {
 		close(started)
-		<-d.ctx.Done()
+		blockUntil(t, "the daemon context to be canceled", d.ctx.Done())
 	}
 
 	returned := make(chan struct{})
@@ -37,7 +37,7 @@ func TestAttentionStepDoesNotHoldTheHeartbeat(t *testing.T) {
 		close(returned)
 	}()
 	within(t, time.Second, "the attention step", returned)
-	<-started
+	reached(t, "the attention tick", started)
 
 	d.cancel()
 	within(t, 5*time.Second, "the canceled tick", attentionDrained(d))
@@ -54,11 +54,11 @@ func TestAttentionStepIsSingleFlight(t *testing.T) {
 	d.attention.tick = func() {
 		ticks.Add(1)
 		started <- struct{}{}
-		<-release
+		blockUntil(t, "the release", release)
 	}
 
 	d.startAttention()
-	<-started
+	reached(t, "the first attention tick", started)
 	d.startAttention()
 	if got := ticks.Load(); got != 1 {
 		t.Fatalf("ticks started = %d while the first was running, want 1", got)
@@ -70,7 +70,7 @@ func TestAttentionStepIsSingleFlight(t *testing.T) {
 	close(release)
 	within(t, 5*time.Second, "the first tick", attentionDrained(d))
 	d.startAttention()
-	<-started
+	reached(t, "the second attention tick", started)
 	if got := ticks.Load(); got != 2 {
 		t.Errorf("ticks after the first ended = %d, want 2", got)
 	}
@@ -113,10 +113,10 @@ func TestShutdownWaitsForAttentionAtMostFiveSeconds(t *testing.T) {
 		started := make(chan struct{})
 		d.attention.tick = func() {
 			close(started)
-			<-d.ctx.Done()
+			blockUntil(t, "the daemon context to be canceled", d.ctx.Done())
 		}
 		d.startAttention()
-		<-started
+		reached(t, "the attention tick", started)
 
 		done := make(chan error, 1)
 		go func() { done <- d.shutdown(&State{Running: true}) }()
@@ -136,10 +136,10 @@ func TestShutdownWaitsForAttentionAtMostFiveSeconds(t *testing.T) {
 		t.Cleanup(func() { close(release) })
 		d.attention.tick = func() {
 			close(started)
-			<-release
+			blockUntil(t, "the release", release)
 		}
 		d.startAttention()
-		<-started
+		reached(t, "the attention tick", started)
 
 		done := make(chan error, 1)
 		go func() { done <- d.shutdown(&State{Running: true}) }()
@@ -166,7 +166,7 @@ func TestAttentionTickStopsOnTheDaemonContext(t *testing.T) {
 	reading := make(chan struct{})
 	f.src.escalations = func(ctx context.Context) ([]*beads.Issue, error) {
 		close(reading)
-		<-ctx.Done()
+		blockUntil(t, "the tick context to end", ctx.Done())
 		return nil, ctx.Err()
 	}
 	f.d.attention.tick = func() {
@@ -174,7 +174,7 @@ func TestAttentionTickStopsOnTheDaemonContext(t *testing.T) {
 	}
 
 	f.d.startAttention()
-	<-reading
+	reached(t, "the tick's read", reading)
 	f.d.cancel()
 	within(t, 5*time.Second, "the tick after the cancel", attentionDrained(f.d))
 }

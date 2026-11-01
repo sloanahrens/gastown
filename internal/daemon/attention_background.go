@@ -7,9 +7,8 @@ import (
 )
 
 // attentionShutdownWait bounds how long shutdown waits for a running attention
-// tick after it has canceled the daemon context (gt-zszj0). The tick stops on
-// that context; a read that does not come back is left behind rather than
-// holding the exit.
+// tick after it has canceled the daemon context (gt-zszj0); a tick that does
+// not stop is left behind rather than holding the exit.
 const attentionShutdownWait = 5 * time.Second
 
 // attentionRun is the background attention tick: the flag that keeps one tick
@@ -23,13 +22,11 @@ type attentionRun struct {
 	tick func()
 }
 
-// startAttention is the attention heartbeat step. The tick took 75 to 86 % of
-// the 92 to 114 s heartbeats measured on 2026-11-01 and the heartbeat runs on
-// the main loop, so it runs beside the heartbeat instead: one tick at a time,
-// under the daemon context. A heartbeat that finds the previous tick still
-// running starts nothing. The tick's content, budget and state file are
-// writeAttention's, unchanged; the attention cache (d.lastAttention) is read
-// and written by that one tick alone, which the single flight guarantees.
+// startAttention is the attention heartbeat step (gt-zszj0). The tick runs
+// beside the heartbeat, one at a time, under the daemon context; a heartbeat
+// that finds the previous tick running starts nothing. The tick's content,
+// budget and state file are writeAttention's. d.lastAttention is read and
+// written by that one tick alone, which the single flight guarantees.
 func (d *Daemon) startAttention() {
 	if !d.attention.running.CompareAndSwap(false, true) {
 		d.logger.Println("attention: previous tick still running, skipping")
