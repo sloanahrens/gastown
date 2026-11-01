@@ -9,28 +9,10 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
-// The directory-cap trim (gt-xlazq).
-//
-// A polecat directory cap bounds the directories a rig holds. A sandbox seat's
-// directory is single-use host state: bead A's seat end removes it once the
-// seat's work has landed, but a seat that finishes by another road, or whose end
-// step never ran, keeps its directory. Those directories are what puts a rig at
-// its cap while it runs nothing, and the reap pass alone cannot clear them: a
-// clean finished seat is reusable capacity, which the pass never touches.
-//
-// So when a rig holds at least its cap in polecat directories, the pass may trim
-// its idle, clean sandbox seats, one directory apiece, oldest first. The trim
-// lifts the reusable-capacity veto and nothing else: every fact the pass
-// measures about the seat's work — its landing, its cleanup status, its hook,
-// its branch, the grace clock — still decides, and a seat whose work is not
-// proven safe stays. A tmux seat is never trimmed: its directory is its seat.
-//
-// This trigger counts directories, though the cap a sling admits against counts
-// live seats (internal/cmd's liveSeatCounter). They answer different questions.
-// Admission must not be wedged by a leftover directory, so it discounts them;
-// the trim is what removes them, so it has to see them, and waiting for live
-// seats to reach the cap would let leftovers grow without bound. Both use the
-// same cap number (rig.EffectivePolecatDirCap).
+// The directory-cap trim (gt-xlazq). The trigger counts a rig's polecat
+// directories where a sling's admission counts live seats: admission must not be
+// wedged by a leftover directory, and this trim is what removes it. Both read
+// the same cap number (rig.EffectivePolecatDirCap).
 
 // TrimmableSeats implements patrolscan.TrimEnv: the rig's sandbox seats, when
 // the rig holds at least as many polecat directories as its cap, and nil when it
