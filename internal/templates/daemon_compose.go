@@ -104,8 +104,8 @@ type ComposeSpec struct {
 	// and the operator's home give the host daemon. Env is rendered into the
 	// daemon's environment, sorted; it is the caller's already filtered
 	// daemon.env, and the render refuses a name it sets itself. KubeconfigFiles
-	// are absolute paths (under the town bind) joined into KUBECONFIG, first
-	// file first. OpenShellConfigDir is the host's openshell config directory,
+	// are absolute paths joined into KUBECONFIG, first file first; the render checks
+	// they are absolute, and the caller sees to it that they lie under the town bind. OpenShellConfigDir is the host's openshell config directory,
 	// mounted read-only at LiveOpenShellConfigPath, with XDG_CONFIG_HOME set to
 	// its parent. A scratch spec sets none of them.
 	Env                map[string]string

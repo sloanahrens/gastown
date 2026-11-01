@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"gopkg.in/yaml.v3"
 )
 
@@ -30,10 +31,6 @@ const containerEnvDeniedPrefix = "CMUX_"
 // ${NAME} or $NAME: a secret the settings resolve by name from daemon.env or the
 // process, never one the compose file carries.
 var settingsEnvRef = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)`)
-
-// containerEnvSecretName matches the daemon.env names that hold a credential.
-// Such an entry is never rendered, referenced or not.
-var containerEnvSecretName = regexp.MustCompile(`(?i)token|secret|passw|credential|api[_-]?key|private`)
 
 // containerEnv is the part of daemon.env the container's environment carries:
 // every entry except the host-only ones (containerEnvDeniedNames and
@@ -58,7 +55,7 @@ func containerEnv(daemonEnv map[string]string, settingsFiles [][]byte) map[strin
 	out := map[string]string{}
 	for name, value := range daemonEnv {
 		if containerEnvDeniedNames[name] || strings.HasPrefix(name, containerEnvDeniedPrefix) ||
-			containerEnvSecretName.MatchString(name) || refs[name] {
+			config.SecretNamePattern.MatchString(name) || refs[name] {
 			continue
 		}
 		out[name] = value
@@ -66,31 +63,77 @@ func containerEnv(daemonEnv map[string]string, settingsFiles [][]byte) map[strin
 	return out
 }
 
-// containerEnvFor loads the town's daemon.env and every regular file in its
-// settings directory through load, readDir and read, and returns the
-// container's environment. A town without a settings directory has no
+// settingsFS is the filesystem the secret-reference scan reads through; a test
+// stands in its own.
+type settingsFS struct {
+	readDir func(string) ([]os.DirEntry, error)
+	read    func(string) ([]byte, error)
+	eval    func(string) (string, error)
+}
+
+// containerEnvFor loads the town's daemon.env and reads every file under its
+// settings directory, subdirectories included, through fsys, and returns the
+// container's environment. The scan covers that directory only (the other
+// directories the compose binds are not scanned). A skipped file is an
+// unscanned file, so nothing is skipped: a link is resolved and its target read
+// when the target stays under the town, and a link that points outside the
+// town, cannot be resolved, or an entry that is neither a file, a directory nor
+// a link, refuses the whole compose. A town without a settings directory has no
 // references to protect.
-func containerEnvFor(townRoot string, load func(string) (map[string]string, error),
-	readDir func(string) ([]os.DirEntry, error), read func(string) ([]byte, error)) (map[string]string, error) {
+func containerEnvFor(townRoot string, load func(string) (map[string]string, error), fsys settingsFS) (map[string]string, error) {
 	env, err := load(townRoot)
 	if err != nil {
 		return nil, err
 	}
-	dir := filepath.Join(townRoot, "settings")
-	entries, err := readDir(dir)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("list the town's settings to find the secrets they reference: %w", err)
+	town, err := fsys.eval(townRoot)
+	if err != nil {
+		return nil, fmt.Errorf("the town root %s cannot be resolved: %w", townRoot, err)
 	}
 	var files [][]byte
-	for _, e := range entries {
-		if !e.Type().IsRegular() || e.Name() == "daemon.env" {
-			continue
+	var walk func(dir string, top bool) error
+	walk = func(dir string, top bool) error {
+		entries, err := fsys.readDir(dir)
+		if top && errors.Is(err, fs.ErrNotExist) {
+			return nil
 		}
-		data, err := read(filepath.Join(dir, e.Name()))
 		if err != nil {
-			return nil, fmt.Errorf("read the setting %s to find the secrets it references: %w", e.Name(), err)
+			return fmt.Errorf("list %s to find the secrets the settings reference: %w", dir, err)
 		}
-		files = append(files, data)
+		for _, e := range entries {
+			path := filepath.Join(dir, e.Name())
+			switch {
+			case top && e.Name() == "daemon.env":
+			case e.Type()&fs.ModeSymlink != 0:
+				target, err := fsys.eval(path)
+				if err != nil {
+					return fmt.Errorf("the setting %s is a link that cannot be resolved, so it cannot be scanned: %w", path, err)
+				}
+				if !pathWithin(target, town) {
+					return fmt.Errorf("the setting %s is a link to %s, outside the town %s, so it cannot be scanned or bound", path, target, town)
+				}
+				data, err := fsys.read(target)
+				if err != nil {
+					return fmt.Errorf("read the setting %s (a link to %s): %w", path, target, err)
+				}
+				files = append(files, data)
+			case e.IsDir():
+				if err := walk(path, false); err != nil {
+					return err
+				}
+			case e.Type().IsRegular():
+				data, err := fsys.read(path)
+				if err != nil {
+					return fmt.Errorf("read the setting %s to find the secrets it references: %w", path, err)
+				}
+				files = append(files, data)
+			default:
+				return fmt.Errorf("the setting %s is neither a file, a directory nor a link, so it cannot be scanned", path)
+			}
+		}
+		return nil
+	}
+	if err := walk(filepath.Join(townRoot, "settings"), true); err != nil {
+		return nil, err
 	}
 	return containerEnv(env, files), nil
 }
@@ -124,8 +167,9 @@ type kubeconfigFile struct {
 // contexts and users (and their credentials, by the original's own file) apply
 // unchanged. The certificate authority is public and is copied with its cluster;
 // a certificate-authority file path is made absolute against dir, the original's
-// directory, because the derived file lives in another one.
-func containerKubeconfig(original []byte, dir string) ([]byte, error) {
+// directory, because the derived file lives in another one; one outside the
+// town is refused, because the container binds only the town.
+func containerKubeconfig(original []byte, dir, townRoot string) ([]byte, error) {
 	var in kubeconfigFile
 	if err := yaml.Unmarshal(original, &in); err != nil {
 		return nil, fmt.Errorf("the kubeconfig does not parse: %w", err)
@@ -157,6 +201,9 @@ func containerKubeconfig(original []byte, dir string) ([]byte, error) {
 		caFile := c.Cluster.CAFile
 		if caFile != "" && !filepath.IsAbs(caFile) {
 			caFile = filepath.Join(dir, caFile)
+		}
+		if caFile != "" && !pathWithin(caFile, townRoot) {
+			return nil, fmt.Errorf("cluster %q names the certificate authority file %s, outside the town %s, which the container does not bind", c.Name, caFile, townRoot)
 		}
 		out.Clusters = append(out.Clusters, entry{Name: c.Name, Cluster: cluster{
 			Server: u.String(), TLSServerName: containerKubeTLSName, CAData: c.Cluster.CAData, CAFile: caFile,

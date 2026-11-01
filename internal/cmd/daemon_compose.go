@@ -97,7 +97,7 @@ func realDaemonComposeDeps(out io.Writer) daemonComposeDeps {
 		daemonConfig: realDaemonControl().townDaemonConfig,
 		doltHost:     containerDoltHost(config.ResolveDoltEndpointFor),
 		containerEnv: func(townRoot string) (map[string]string, error) {
-			return containerEnvFor(townRoot, config.LoadDaemonEnv, os.ReadDir, os.ReadFile)
+			return containerEnvFor(townRoot, config.LoadDaemonEnv, settingsFS{readDir: os.ReadDir, read: os.ReadFile, eval: filepath.EvalSymlinks})
 		},
 		readFile:     os.ReadFile,
 		evalSymlinks: filepath.EvalSymlinks,
@@ -160,14 +160,15 @@ entrypoint, which writes the helper line; the file's path, never its contents,
 reaches the compose file. They are accepted only together.
 
 --kubeconfig and --openshell-config-dir give the container's kubectl and openshell
-the cluster and the gateway. The render writes a derived kubeconfig beside the
+the cluster and the gateway. The render writes a derived kubeconfig inside the
 town's .runtime (the original's cluster entries on host.docker.internal with
 tls-server-name localhost, no user, no credential), lists it before the original
 in KUBECONFIG, and mounts the openshell directory read-only; only paths appear in
 the compose file. The daemon.env entries that are not host-only (containerEnvDeniedNames
 in internal/cmd/daemon_compose_client.go is the list), not secret-named and not
-referenced as $NAME or ${NAME} by any settings file go into the container's
-environment.
+referenced as $NAME or ${NAME} by any file under the town's settings directory (links
+that stay under the town are followed; one that leaves it refuses the render; other
+bound directories are not scanned) go into the container's environment.
 
 --print prints the render and writes no file.`,
 		Args: cobra.NoArgs,
@@ -251,7 +252,7 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 		if err != nil {
 			return fmt.Errorf("reading the kubeconfig %s: %w", kubeconfig, err)
 		}
-		if overlay, err = containerKubeconfig(original, filepath.Dir(kubeconfig)); err != nil {
+		if overlay, err = containerKubeconfig(original, filepath.Dir(kubeconfig), townRoot); err != nil {
 			return fmt.Errorf("deriving the container kubeconfig from %s: %w", kubeconfig, err)
 		}
 		kubeconfigFiles = []string{containerKubeconfigPath(townRoot), kubeconfig}

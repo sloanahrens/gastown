@@ -2,9 +2,9 @@ package cmd
 
 import (
 	"errors"
+	"github.com/steveyegge/gastown/internal/config"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -33,7 +33,7 @@ users:
 
 func TestContainerKubeconfigPointsAtHostDockerInternalWithTLSServerName(t *testing.T) {
 	t.Parallel()
-	out, err := containerKubeconfig([]byte(hostKubeconfig), "/towns/t/.runtime/sbx-k8s")
+	out, err := containerKubeconfig([]byte(hostKubeconfig), "/towns/t/.runtime/sbx-k8s", "/towns/t")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,11 +65,11 @@ func TestContainerKubeconfigRefusesWhatItCannotDerive(t *testing.T) {
 		"no cluster": {"apiVersion: v1\nkind: Config\n", "names no cluster"},
 		"no host":    {"clusters:\n- name: a\n  cluster: {server: 'not a url'}\n", "not a URL with a host"},
 	} {
-		if _, err := containerKubeconfig([]byte(tc.in), "/d"); err == nil || !strings.Contains(err.Error(), tc.want) {
+		if _, err := containerKubeconfig([]byte(tc.in), "/d", "/"); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: error = %v, want one containing %q", name, err, tc.want)
 		}
 	}
-	out, err := containerKubeconfig([]byte("clusters:\n- name: a\n  cluster: {server: 'https://api.example'}\n"), "/d")
+	out, err := containerKubeconfig([]byte("clusters:\n- name: a\n  cluster: {server: 'https://api.example'}\n"), "/d", "/")
 	if err != nil || !strings.Contains(string(out), "server: https://host.docker.internal\n") {
 		t.Errorf("a server without a port: %q, %v", out, err)
 	}
@@ -131,48 +131,147 @@ func (e fakeSettingsEntry) IsDir() bool                { return e.mode.IsDir() }
 func (e fakeSettingsEntry) Type() fs.FileMode          { return e.mode.Type() }
 func (e fakeSettingsEntry) Info() (fs.FileInfo, error) { return nil, errors.New("unused") }
 
-// Every regular settings file is read for references, not config.json alone; the
-// directories and daemon.env itself are not.
+// tree is a fake settings directory: directory path -> entries, file path -> content,
+// link path -> target.
+type tree struct {
+	dirs  map[string][]os.DirEntry
+	files map[string]string
+	links map[string]string
+	boom  map[string]error // path -> error from readDir, read or eval
+}
+
+func (tr tree) fsys() settingsFS {
+	return settingsFS{
+		readDir: func(p string) ([]os.DirEntry, error) {
+			if err := tr.boom["dir:"+p]; err != nil {
+				return nil, err
+			}
+			e, ok := tr.dirs[p]
+			if !ok {
+				return nil, fs.ErrNotExist
+			}
+			return e, nil
+		},
+		read: func(p string) ([]byte, error) {
+			if err := tr.boom["read:"+p]; err != nil {
+				return nil, err
+			}
+			c, ok := tr.files[p]
+			if !ok {
+				return nil, errors.New("read " + p + ": not a file")
+			}
+			return []byte(c), nil
+		},
+		eval: func(p string) (string, error) {
+			if err := tr.boom["eval:"+p]; err != nil {
+				return "", err
+			}
+			if t, ok := tr.links[p]; ok {
+				return t, nil
+			}
+			return p, nil
+		},
+	}
+}
+
+func reg(name string) os.DirEntry  { return fakeSettingsEntry{name, 0} }
+func dir(name string) os.DirEntry  { return fakeSettingsEntry{name, fs.ModeDir} }
+func link(name string) os.DirEntry { return fakeSettingsEntry{name, fs.ModeSymlink} }
+
+func envWithRefs() func(string) (map[string]string, error) {
+	return func(string) (map[string]string, error) {
+		return map[string]string{"REF_A": "v", "REF_B": "v", "REF_C": "v", "PLAIN": "v"}, nil
+	}
+}
+
+// Every file under settings/ is read for references, subdirectories and links
+// that stay under the town included; daemon.env itself is not.
 func TestContainerEnvForReadsEverySettingsFile(t *testing.T) {
 	t.Parallel()
-	boom := errors.New("boom")
-	load := func(string) (map[string]string, error) {
-		return map[string]string{"REF_A": "v", "REF_B": "v", "PLAIN": "v"}, nil
+	tr := tree{
+		dirs: map[string][]os.DirEntry{
+			"/t/settings":        {reg("config.json"), reg("daemon.env"), dir("themes"), link("shared.json")},
+			"/t/settings/themes": {reg("x.json")},
+		},
+		files: map[string]string{
+			"/t/settings/config.json":   `{"a":"${REF_A}"}`,
+			"/t/settings/themes/x.json": `{"b":"$REF_B"}`,
+			"/t/shared/real.json":       `{"c":"${REF_C}"}`,
+		},
+		links: map[string]string{"/t/settings/shared.json": "/t/shared/real.json"},
 	}
-	dir := func(string) ([]os.DirEntry, error) {
-		return []os.DirEntry{fakeSettingsEntry{"config.json", 0}, fakeSettingsEntry{"escalation.json", 0}, fakeSettingsEntry{"daemon.env", 0}, fakeSettingsEntry{"sub", fs.ModeDir}}, nil
-	}
-	read := func(p string) ([]byte, error) {
-		switch filepath.Base(p) {
-		case "config.json":
-			return []byte(`{"a":"${REF_A}"}`), nil
-		case "escalation.json":
-			return []byte(`{"b":"$REF_B"}`), nil
-		}
-		return nil, errors.New("read " + p + " but it is not a settings file to scan")
-	}
-	got, err := containerEnvFor("/t", load, dir, read)
+	got, err := containerEnvFor("/t", envWithRefs(), tr.fsys())
 	if err != nil || len(got) != 1 || got["PLAIN"] != "v" {
-		t.Fatalf("env = %v, %v; want PLAIN only (both files' references honoured)", got, err)
+		t.Fatalf("env = %v, %v; want PLAIN only (references in a file, a subdirectory and a link target honoured)", got, err)
 	}
-	if _, err := containerEnvFor("/t", func(string) (map[string]string, error) { return nil, boom }, dir, read); !errors.Is(err, boom) {
+}
+
+// A skipped file is an unscanned file: a link that leaves the town or cannot be
+// resolved, an unreadable entry, and an entry that is not a file, directory or
+// link each refuse the compose.
+func TestContainerEnvForRefusesWhatItCannotScan(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	base := func() tree {
+		return tree{
+			dirs:  map[string][]os.DirEntry{"/t/settings": {reg("config.json")}},
+			files: map[string]string{"/t/settings/config.json": `{}`},
+		}
+	}
+	for name, tc := range map[string]struct {
+		set  func(*tree)
+		want string
+	}{
+		"link out of the town": {func(tr *tree) {
+			tr.dirs["/t/settings"] = []os.DirEntry{link("x.json")}
+			tr.links = map[string]string{"/t/settings/x.json": "/etc/secrets.json"}
+		}, "outside the town"},
+		"link into a sibling prefix": {func(tr *tree) {
+			tr.dirs["/t/settings"] = []os.DirEntry{link("x.json")}
+			tr.links = map[string]string{"/t/settings/x.json": "/tother/x.json"}
+		}, "outside the town"},
+		"link unresolvable": {func(tr *tree) {
+			tr.dirs["/t/settings"] = []os.DirEntry{link("x.json")}
+			tr.boom = map[string]error{"eval:/t/settings/x.json": boom}
+		}, "cannot be resolved"},
+		"link target unreadable": {func(tr *tree) {
+			tr.dirs["/t/settings"] = []os.DirEntry{link("x.json")}
+			tr.links = map[string]string{"/t/settings/x.json": "/t/shared/gone.json"}
+		}, "a link to"},
+		"irregular entry": {func(tr *tree) {
+			tr.dirs["/t/settings"] = []os.DirEntry{fakeSettingsEntry{"sock", fs.ModeSocket}}
+		}, "neither a file, a directory nor a link"},
+		"file unreadable":  {func(tr *tree) { tr.boom = map[string]error{"read:/t/settings/config.json": boom} }, "read the setting"},
+		"top dir unlisted": {func(tr *tree) { tr.boom = map[string]error{"dir:/t/settings": boom} }, "list /t/settings"},
+		"subdir unlisted": {func(tr *tree) {
+			tr.dirs["/t/settings"] = []os.DirEntry{dir("sub")}
+			tr.boom = map[string]error{"dir:/t/settings/sub": boom}
+		}, "list /t/settings/sub"},
+		"town unresolvable": {func(tr *tree) { tr.boom = map[string]error{"eval:/t": boom} }, "town root"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			tr := base()
+			tc.set(&tr)
+			_, err := containerEnvFor("/t", envWithRefs(), tr.fsys())
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want one containing %q", err, tc.want)
+			}
+		})
+	}
+	if _, err := containerEnvFor("/t", func(string) (map[string]string, error) { return nil, boom }, base().fsys()); !errors.Is(err, boom) {
 		t.Errorf("load error = %v", err)
 	}
-	if _, err := containerEnvFor("/t", load, func(string) ([]os.DirEntry, error) { return nil, boom }, read); !errors.Is(err, boom) {
-		t.Errorf("list error = %v", err)
-	}
-	if _, err := containerEnvFor("/t", load, dir, func(string) ([]byte, error) { return nil, boom }); !errors.Is(err, boom) {
-		t.Errorf("read error = %v", err)
-	}
-	got, err = containerEnvFor("/t", load, func(string) ([]os.DirEntry, error) { return nil, fs.ErrNotExist }, read)
-	if err != nil || got["PLAIN"] != "v" || len(got) != 3 {
-		t.Errorf("a town without a settings directory: %v, %v", got, err)
+	// A town without a settings directory has no references to protect.
+	none := tree{}
+	if got, err := containerEnvFor("/t", envWithRefs(), none.fsys()); err != nil || len(got) != 4 {
+		t.Errorf("a town without settings: %v, %v", got, err)
 	}
 }
 
 func TestContainerKubeconfigMakesARelativeCAFileAbsolute(t *testing.T) {
 	t.Parallel()
-	out, err := containerKubeconfig([]byte("clusters:\n- name: a\n  cluster: {server: 'https://127.0.0.1:1', certificate-authority: ca.crt}\n"), "/towns/t/.runtime/sbx-k8s")
+	out, err := containerKubeconfig([]byte("clusters:\n- name: a\n  cluster: {server: 'https://127.0.0.1:1', certificate-authority: ca.crt}\n"), "/towns/t/.runtime/sbx-k8s", "/towns/t")
 	if err != nil || !strings.Contains(string(out), "certificate-authority: /towns/t/.runtime/sbx-k8s/ca.crt") {
 		t.Errorf("derived = %q, %v; want the CA file resolved against the original's directory", out, err)
 	}
@@ -277,5 +376,27 @@ func TestComposeWriteRefusesBeforeWritingWhenTheClientConfigurationFails(t *test
 				t.Error("a compose file was written despite the refusal")
 			}
 		})
+	}
+}
+
+func TestContainerKubeconfigRefusesACAFileOutsideTheTown(t *testing.T) {
+	t.Parallel()
+	in := []byte("clusters:\n- name: a\n  cluster: {server: 'https://127.0.0.1:1', certificate-authority: ../../../../etc/ca.crt}\n")
+	if _, err := containerKubeconfig(in, "/towns/t/.runtime/sbx-k8s", "/towns/t"); err == nil || !strings.Contains(err.Error(), "outside the town") {
+		t.Errorf("error = %v, want the outside-the-town refusal", err)
+	}
+}
+
+func TestSecretNamePatternCoversCommonCredentialNames(t *testing.T) {
+	t.Parallel()
+	for _, n := range []string{"GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "DB_PASSWORD", "SSH_PRIVATE_KEY", "STRIPE_KEY", "Authorization", "SESSION_COOKIE", "BEARER", "API_KEY", "ACCESS_KEY_ID", "KEY"} {
+		if !config.SecretNamePattern.MatchString(n) {
+			t.Errorf("%s is not matched as a credential name", n)
+		}
+	}
+	for _, n := range []string{"BEADS_DOLT_POOL_READ_TIMEOUT", "TZ", "PATH", "KEYBOARD_LAYOUT_X"} {
+		if config.SecretNamePattern.MatchString(n) && n != "KEYBOARD_LAYOUT_X" {
+			t.Errorf("%s is matched as a credential name", n)
+		}
 	}
 }
