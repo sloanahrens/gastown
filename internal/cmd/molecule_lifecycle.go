@@ -558,14 +558,22 @@ func forceCloseDescendants(b beads.Client, parentID string) (int, error) {
 // first, in the batch closeChildrenOf makes for each parent. The tree is read
 // one level at a time and held in memory, so a molecule of N nodes costs one
 // read per level, not one per node (gt-p9m39). ChildrenOf reads bd's `show
-// --children` view, the one that sees ephemeral wisp children; `list --parent`
-// misses them and leaked step wisps (gt-43t7).
+// --children` view, which sees ephemeral wisp children (gt-43t7). A child that
+// several parents list is closed once.
 func closeDescendantsImpl(b beads.Client, parentID string, force bool) (int, error) {
 	levels, errs := readDescendantLevels(b, parentID)
 	totalClosed := 0
+	closing := map[string]bool{}
 	for i := len(levels) - 1; i >= 0; i-- {
 		for _, parent := range levels[i].parents {
-			closed, err := closeChildrenOf(b, parent, levels[i].byParent[parent], force)
+			var children []*beads.Issue
+			for _, child := range levels[i].byParent[parent] {
+				if !closing[child.ID] {
+					closing[child.ID] = true
+					children = append(children, child)
+				}
+			}
+			closed, err := closeChildrenOf(b, parent, children, force)
 			totalClosed += closed
 			if err != nil {
 				errs = append(errs, err)
@@ -591,19 +599,16 @@ type descendantLevel struct {
 // the root's children first: each level is one ChildrenOf call for every
 // parent in it. The walk ends at a level with no children. A node is
 // descended into under the first parent that names it, so a tree that links
-// one node to two parents still ends. A level whose read fails ends the walk,
-// and the levels above it are still returned so what was found is closed; the
-// error comes back with them.
+// one node to two parents still ends. A parent whose children cannot be read
+// costs its own subtree and nothing else: the levels found are still returned
+// so what was found is closed, and the error comes back with them.
 func readDescendantLevels(b beads.Client, parentID string) ([]descendantLevel, []error) {
 	var levels []descendantLevel
 	var errs []error
 	seen := map[string]bool{parentID: true}
 	for level := []string{parentID}; len(level) > 0; {
-		byParent, err := b.ChildrenOf(level...)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("listing children of %s: %w", strings.Join(level, ", "), err))
-			break
-		}
+		byParent, levelErrs := readLevelChildren(b, level)
+		errs = append(errs, levelErrs...)
 		next := descendantLevel{byParent: make(map[string][]*beads.Issue, len(level))}
 		var below []string
 		for _, parent := range level {
@@ -627,6 +632,50 @@ func readDescendantLevels(b beads.Client, parentID string) ([]descendantLevel, [
 		level = below
 	}
 	return levels, errs
+}
+
+// readLevelChildren reads the children of every parent in one level. Parents
+// are grouped by id prefix, because ChildrenOf routes a whole call by its first
+// parent, and each group is one call. A group whose call fails is read again
+// one parent at a time, so one parent that cannot be read costs its own
+// subtree and not its siblings'.
+func readLevelChildren(b beads.Client, level []string) (map[string][]*beads.Issue, []error) {
+	var order []string
+	groups := map[string][]string{}
+	for _, id := range level {
+		prefix := beads.ExtractPrefix(id)
+		if _, ok := groups[prefix]; !ok {
+			order = append(order, prefix)
+		}
+		groups[prefix] = append(groups[prefix], id)
+	}
+	out := make(map[string][]*beads.Issue, len(level))
+	var errs []error
+	for _, prefix := range order {
+		group := groups[prefix]
+		byParent, err := b.ChildrenOf(group...)
+		if err == nil {
+			for parent, children := range byParent {
+				out[parent] = children
+			}
+			continue
+		}
+		if len(group) == 1 {
+			errs = append(errs, fmt.Errorf("listing children of %s: %w", group[0], err))
+			continue
+		}
+		for _, parent := range group {
+			one, oneErr := b.ChildrenOf(parent)
+			if oneErr != nil {
+				errs = append(errs, fmt.Errorf("listing children of %s: %w", parent, oneErr))
+				continue
+			}
+			for p, children := range one {
+				out[p] = children
+			}
+		}
+	}
+	return out, errs
 }
 
 // closeChildrenOf closes the open children of one parent and reports how many

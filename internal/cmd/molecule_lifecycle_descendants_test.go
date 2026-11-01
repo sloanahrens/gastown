@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -259,4 +260,119 @@ func equalCloseCall(a, b closeCall) bool {
 	slices.Sort(x)
 	slices.Sort(y)
 	return slices.Equal(x, y)
+}
+
+// One parent whose children cannot be read costs its own subtree and not its
+// siblings': the level's batched read fails, each parent is read again alone,
+// the readable subtrees are closed and the error names the unreadable one.
+func TestCloseDescendantsAFailedParentCostsOnlyItsSubtree(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	root := mustCreateBead(t, db, beads.CreateOptions{Title: "mol-polecat-work"})
+	var steps, leaves []string
+	for i := 0; i < 3; i++ {
+		step := childOf(t, db, fmt.Sprintf("step %d", i), root.ID)
+		steps = append(steps, step.ID)
+		leaves = append(leaves, childOf(t, db, fmt.Sprintf("leaf %d", i), step.ID).ID)
+	}
+	counter := &descendantsReadCounter{Client: db, refuse: map[string]bool{steps[1]: true}}
+
+	n, err := forceCloseDescendants(counter, root.ID)
+
+	if err == nil || !strings.Contains(err.Error(), steps[1]) {
+		t.Fatalf("%s: error = %v, want one naming %s", t.Name(), err, steps[1])
+	}
+	wantStatus(t, db, steps, string(beads.StatusClosed))
+	wantStatus(t, db, []string{leaves[0], leaves[2]}, string(beads.StatusClosed))
+	if got, err := db.Show(leaves[1]); err != nil || got.Status == string(beads.StatusClosed) {
+		t.Errorf("%s: the unreadable subtree's leaf %s: %+v err %v, want it left open", t.Name(), leaves[1], got, err)
+	}
+	if n != 5 {
+		t.Errorf("%s: closed %d, want 5 (3 steps and 2 readable leaves)", t.Name(), n)
+	}
+}
+
+// sharedChildStore reports one child under two parents.
+type sharedChildStore struct {
+	beads.Client
+	root, p1, p2 string
+	shared       *beads.Issue
+}
+
+func (s *sharedChildStore) ForceCloseWithReason(string, ...string) error { return nil }
+
+func (s *sharedChildStore) ChildrenOf(ids ...string) (map[string][]*beads.Issue, error) {
+	out := map[string][]*beads.Issue{}
+	for _, id := range ids {
+		switch id {
+		case s.root:
+			out[id] = []*beads.Issue{{ID: s.p1, Status: "open"}, {ID: s.p2, Status: "open"}}
+		case s.p1, s.p2:
+			out[id] = []*beads.Issue{s.shared}
+		}
+	}
+	return out, nil
+}
+
+// A child two parents list is in one close batch, not two.
+func TestCloseDescendantsClosesASharedChildOnce(t *testing.T) {
+	t.Parallel()
+	store := &sharedChildStore{root: "gt-root", p1: "gt-p1", p2: "gt-p2", shared: &beads.Issue{ID: "gt-shared", Status: "open"}}
+	rec := &closeBatchRecorder{Client: store}
+
+	if _, err := forceCloseDescendants(rec, "gt-root"); err != nil {
+		t.Fatalf("%s: forceCloseDescendants: %v", t.Name(), err)
+	}
+
+	seen := 0
+	for _, call := range rec.calls {
+		if slices.Contains(call.ids, "gt-shared") {
+			seen++
+		}
+	}
+	if seen != 1 {
+		t.Errorf("%s: gt-shared is in %d close batches %v, want 1", t.Name(), seen, rec.calls)
+	}
+}
+
+// prefixedStore answers a root whose two children have different id prefixes
+// and records the parents of every ChildrenOf call.
+type prefixedStore struct {
+	beads.Client
+	calls [][]string
+}
+
+func (s *prefixedStore) ChildrenOf(ids ...string) (map[string][]*beads.Issue, error) {
+	s.calls = append(s.calls, append([]string(nil), ids...))
+	out := map[string][]*beads.Issue{}
+	for _, id := range ids {
+		if id == "gt-root" {
+			out[id] = []*beads.Issue{{ID: "gt-a", Status: "closed"}, {ID: "hq-b", Status: "closed"}}
+		}
+	}
+	return out, nil
+}
+
+// A level whose parents carry different id prefixes is read one call per
+// prefix: ChildrenOf routes a whole call by its first parent.
+func TestCloseDescendantsReadsEachPrefixOfALevelSeparately(t *testing.T) {
+	t.Parallel()
+	store := &prefixedStore{}
+
+	if _, err := forceCloseDescendants(store, "gt-root"); err != nil {
+		t.Fatalf("%s: forceCloseDescendants: %v", t.Name(), err)
+	}
+
+	for _, call := range store.calls {
+		prefixes := map[string]bool{}
+		for _, id := range call {
+			prefixes[beads.ExtractPrefix(id)] = true
+		}
+		if len(prefixes) > 1 {
+			t.Errorf("%s: one ChildrenOf call %v mixes id prefixes", t.Name(), call)
+		}
+	}
+	if len(store.calls) != 3 {
+		t.Errorf("%s: %d ChildrenOf calls %v, want 3 (the root, then gt-a and hq-b)", t.Name(), len(store.calls), store.calls)
+	}
 }
