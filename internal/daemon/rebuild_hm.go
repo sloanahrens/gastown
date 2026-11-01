@@ -48,12 +48,12 @@ const (
 	// rebuildHMPrevName is the installed hm once the swap has kept it, beside it.
 	rebuildHMPrevName = "hm.prev"
 
-	// rebuildHMVersionVar is the -X target the build stamps the commit into. The
-	// bead names it as Version. -X needs the package-qualified symbol, and hm's
-	// cmd/hm is package main, so the target is main.Version. The hm source is not
-	// on this host, so the name is unverified here: a wrong name fails the version
-	// check and nothing is installed.
-	rebuildHMVersionVar = "main.Version"
+	// rebuildHMVersionVar is the -X target the build stamps the commit into. It is
+	// the one hm's own Makefile uses (LDFLAGS in hm/Makefile): the Version variable
+	// of hm's internal/cli package, whose import path is the module path of hm's
+	// go.mod. cmd/hm prints cli.Version, so a build stamped with any other symbol
+	// reports "dev", and the version check below refuses it.
+	rebuildHMVersionVar = "github.com/sloanahrens/history-man/internal/cli.Version"
 )
 
 // rebuildHMRenameFunc is the seam for the two renames the swap makes. nil is
@@ -320,6 +320,12 @@ func (d *Daemon) rebuildHMRename(from, to string) error {
 func (d *Daemon) rebuildHMAcquire(path string) (func(), error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("cannot create the install lock directory: %w", err)
+	}
+	// flock opens the path read-only and so locks a directory without complaint on
+	// every platform; a directory at the lock path is a broken town, and the cycle
+	// defers rather than serialize on it.
+	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+		return nil, fmt.Errorf("the install lock path %s is a directory", path)
 	}
 	lock := flock.New(path)
 	locked, err := lock.TryLock()

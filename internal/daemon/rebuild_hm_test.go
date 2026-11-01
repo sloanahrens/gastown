@@ -705,3 +705,17 @@ func TestRebuildHMInterval(t *testing.T) {
 		})
 	}
 }
+
+// TestRebuildHMVersionVarIsHMsOwnStampTarget pins the -X target to the symbol hm's
+// own Makefile stamps (LDFLAGS in hm/Makefile): hm's module path plus
+// internal/cli.Version. cmd/hm prints cli.Version, so any other symbol, main.Version
+// included, builds a binary that reports "dev" and fails the job's version check on
+// every install (gt-bllo8). A scratch build of hm with each target showed the
+// cli.Version stamp printing the sha and main.Version printing dev.
+func TestRebuildHMVersionVarIsHMsOwnStampTarget(t *testing.T) {
+	t.Parallel()
+	const want = "github.com/sloanahrens/history-man/internal/cli.Version"
+	if rebuildHMVersionVar != want {
+		t.Fatalf("rebuildHMVersionVar = %q, want hm's stamp target %q", rebuildHMVersionVar, want)
+	}
+}
