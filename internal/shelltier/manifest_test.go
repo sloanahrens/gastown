@@ -192,11 +192,14 @@ func TestEveryEntryDeclaresItsGoUse(t *testing.T) {
 func TestMakefileGateRunsOnShelltierChanges(t *testing.T) {
 	t.Parallel()
 	// The selection is the production matcher's: a change to a Go file under
-	// internal/shelltier must run the go: row and must not run a none: row on
-	// the default triggers. A none: row that declares internal/ runs because
-	// its script names a path there, which TestEveryReferencedRepoPathIsATrigger
-	// requires; the exemption is about go, not about what the script reads.
+	// internal/shelltier must run the go: row, and a none: row must not run on a
+	// Go change its own triggers do not name. The probe is go.mod rather than
+	// internal/shelltier because an entry whose script reads a path under
+	// internal/ declares internal/ as a trigger, which
+	// TestEveryReferencedRepoPathIsATrigger requires; go.mod stands in for the
+	// Go tree no entry names, so the assertion holds for every none: row.
 	goChange := []string{"internal/shelltier/manifest.go"}
+	goModChange := []string{"go.mod"}
 	var gateSeen, exemptSeen bool
 	for _, e := range Manifest() {
 		switch {
@@ -205,9 +208,9 @@ func TestMakefileGateRunsOnShelltierChanges(t *testing.T) {
 				t.Fatalf("a change to %s does not run %s (triggers %q)", goChange[0], e.Path, e.TriggersOrDefault())
 			}
 			gateSeen = true
-		case strings.HasPrefix(e.StubsGo, "none:") && hasReason(e.StubsGo) && len(e.Triggers) == 0:
-			if tiertrigger.Runs(e.TriggersOrDefault(), goChange, false) {
-				t.Errorf("%s is exempt (%q) but runs on a change to %s", e.Path, e.StubsGo, goChange[0])
+		case strings.HasPrefix(e.StubsGo, "none:") && hasReason(e.StubsGo):
+			if tiertrigger.Runs(e.TriggersOrDefault(), goModChange, false) {
+				t.Errorf("%s is exempt (%q) but runs on a change to %s", e.Path, e.StubsGo, goModChange[0])
 			}
 			exemptSeen = true
 		}
