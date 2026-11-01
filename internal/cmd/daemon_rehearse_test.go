@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/templates"
 )
 
 // rehearseLive is the fake live town; the scratch root is outside it.
@@ -472,5 +474,38 @@ func TestBlankEnvValuesKeepsKeysOnly(t *testing.T) {
 	got := string(blankEnvValues([]byte("A=1\n\n# c=2\nB=x=y\nnoequals\n")))
 	if want := "A=\n\n# c=2\nB=\nnoequals\n"; got != want {
 		t.Errorf("blankEnvValues = %q, want %q", got, want)
+	}
+}
+
+func TestContainerRehearsalFailsLoudlyWhenAPinnedImageIsNotServed(t *testing.T) {
+	t.Parallel()
+	h := newRehearseHost()
+	h.failing = []string{"pull " + templates.DindImage}
+	var out bytes.Buffer
+	err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
+	if err == nil || !strings.Contains(out.String(), "images           FAIL") || !strings.Contains(out.String(), templates.DindImage+": cannot be pulled by digest") {
+		t.Fatalf("err=%v\n%s", err, out.String())
+	}
+}
+
+func TestContainerRehearsalRootGuardReportsPathsItCannotResolve(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	for name, bad := range map[string]string{"the live root": rehearseLive, "the scratch root": rehearseRoot} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newRehearseHost()
+			d := h.deps(&bytes.Buffer{})
+			d.evalSymlinks = func(p string) (string, error) {
+				if p == bad {
+					return "", boom
+				}
+				return p, nil
+			}
+			err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), d)
+			if !errors.Is(err, boom) || len(h.writes) != 0 {
+				t.Errorf("err=%v writes=%v", err, h.writes)
+			}
+		})
 	}
 }

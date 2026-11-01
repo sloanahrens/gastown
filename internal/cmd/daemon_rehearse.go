@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/daemonimage"
+	"github.com/steveyegge/gastown/internal/templates"
 )
 
 // The container-config rehearsal (gt-unkq3). The 2026-11-01 L3 attempt found its
@@ -104,6 +105,7 @@ var rehearsalChecks = []rehearsalCheck{
 	{"binaries", "every program the settings and the daemon exec is on the image's PATH", true, checkImageBinaries},
 	{"paths", "every absolute path a setting names exists in the image or lies in the town bind", true, checkSettingPaths},
 	{"addresses", "every host.docker.internal address a setting names accepts a TCP connect from the image", true, checkSettingAddresses},
+	{"images", "every image the live compose pulls (the sweep engine's) is served by digest on the engine the daemon uses", true, checkComposeImagesPull},
 	{"heartbeat", "the entrypoint on the scratch town records a heartbeat within the budget", true, checkFirstHeartbeat},
 }
 
@@ -435,6 +437,21 @@ func checkSettingAddresses(ctx context.Context, r *rehearsal) []string {
 // checkFirstHeartbeat starts the image's own entrypoint on the scratch town with
 // no network, waits at most the budget for state.json to record a heartbeat, and
 // removes the container. On failure it prints the tail of the container's log.
+// composeImages are the images the live compose pulls besides the daemon image
+// itself. A pin the registry no longer serves is found here, loudly, and not by
+// the cutover on an engine that has not cached it.
+func composeImages() []string { return []string{templates.DindImage} }
+
+func checkComposeImagesPull(ctx context.Context, r *rehearsal) []string {
+	var fails []string
+	for _, img := range composeImages() {
+		if err := r.docker(ctx, "pull", img); err != nil {
+			fails = append(fails, img+": cannot be pulled by digest on this engine: "+err.Error())
+		}
+	}
+	return fails
+}
+
 func checkFirstHeartbeat(ctx context.Context, r *rehearsal) []string {
 	// One name per run, so a container of another run is never this run's to remove.
 	name := fmt.Sprintf("gt-rehearsal-%d", r.d.now().Unix())
