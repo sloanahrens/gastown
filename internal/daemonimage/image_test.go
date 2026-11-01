@@ -30,7 +30,7 @@ func imageBuilder(t *testing.T) (Builder, *fakeRunner) {
 }
 
 // imageBinaryNames is the binaries the image copies from its build context.
-var imageBinaryNames = []string{"gt", "bd", "om", "claude"}
+var imageBinaryNames = []string{"gt", "bd", "om", "claude", "openshell", "docker", "kubectl"}
 
 // imageBinaries is the list of the image's binaries in b.Out, in the order
 // imageBinaryNames names them.

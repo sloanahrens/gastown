@@ -48,6 +48,14 @@ COPY --chmod=0755 om /usr/local/bin/om
 # downloads it or runs an install script for it.
 COPY --chmod=0755 claude /usr/local/bin/claude
 
+# The client tools the daemon execs for dispatch (openshell, kubectl) and for the
+# tier sweep (docker, to the sweep engine through DOCKER_HOST): pinned linux-arm64
+# downloads the deployer verifies by sha256 (templates.DaemonClientTools) and
+# places in the build context. Nothing here downloads them.
+COPY --chmod=0755 openshell /usr/local/bin/openshell
+COPY --chmod=0755 docker /usr/local/bin/docker
+COPY --chmod=0755 kubectl /usr/local/bin/kubectl
+
 # The scratch town's first start runs a dolt preflight that copies git's global
 # user.name and user.email into dolt's config, and fails the install without them
 # (internal/cmd/install.go). A host has a person's identity to copy; an image has

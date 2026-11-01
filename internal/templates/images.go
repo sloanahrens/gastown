@@ -70,3 +70,47 @@ const (
 	ForgePostgresImage = "postgres:17.11"
 	ForgejoRunnerImage = "data.forgejo.org/forgejo/runner:13.2.0"
 )
+
+// ClientToolPin is one pinned client program of the daemon image (see
+// DaemonClientTools).
+type ClientToolPin struct {
+	Name   string
+	URL    string
+	SHA256 string
+	Member string
+}
+
+// DaemonClientTools are the client programs the daemon image carries beside gt,
+// bd, om and claude, each a pinned linux-arm64 download whose sha256 the
+// deployer verifies before it writes the file the Dockerfile COPYs. Name is
+// that file's name in the build context and in /usr/local/bin. A Member names
+// the file to take out of a .tar.gz download; empty means the download is the
+// binary itself. The sha256 is of the download as published.
+//
+//   - openshell is the NVIDIA/OpenShell release asset openshell-aarch64-unknown-linux-musl.tar.gz
+//     at v0.1.5, the version the host runs; its sha256 is the one in that
+//     release's openshell-checksums-sha256.txt (read 2026-11-01).
+//   - docker is the static client from download.docker.com at 29.8.2, the
+//     version inside the sweep engine (DindImage). Docker publishes no checksum
+//     file, so this sha256 is our own pin of the download.
+//   - kubectl is the v1.37.0 binary from dl.k8s.io, the cluster's node version,
+//     with the sha256 published beside it as kubectl.sha256.
+var DaemonClientTools = []ClientToolPin{
+	{
+		Name:   "openshell",
+		URL:    "https://github.com/NVIDIA/OpenShell/releases/download/v0.1.5/openshell-aarch64-unknown-linux-musl.tar.gz",
+		SHA256: "30c949b4ac07a9c8245c1248eb82e4eb241615134fcabf3c9bf30dec7d00addf",
+		Member: "openshell",
+	},
+	{
+		Name:   "docker",
+		URL:    "https://download.docker.com/linux/static/stable/aarch64/docker-29.8.2.tgz",
+		SHA256: "922df28df248cc00a9e025f947704f1d1482de64ece54cfe57e61f19eaf1eef3",
+		Member: "docker/docker",
+	},
+	{
+		Name:   "kubectl",
+		URL:    "https://dl.k8s.io/release/v1.37.0/bin/linux/arm64/kubectl",
+		SHA256: "76a624e4a8e5da654d1150e808175125efb5a6f1b6aa1cbd9caee18f51047a50",
+	},
+}

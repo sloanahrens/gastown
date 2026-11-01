@@ -346,13 +346,17 @@ func (b Builder) Plan(rev string) ([]string, error) {
 		return nil, fmt.Errorf("daemonimage: Dockerfile %s is not a file", b.Dockerfile)
 	}
 	tag := ImageTag(rev)
-	return []string{
+	lines := []string{
 		fmt.Sprintf("build gt: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "gt"), GTPackage, gtCommitFlag+rev), " "), b.GTSrc, rev),
 		fmt.Sprintf("build bd: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "bd"), BDPackage, bdBuildFlag+planBuildID+" "+bdCommitFlag+bdCommit), " "), b.BDSrc, bdCommit),
 		fmt.Sprintf("build om: %s   (clean worktree of %s at HEAD)", strings.Join(goBuildArgv(filepath.Join(b.Out, "om"), OMPackage, ""), " "), b.OMSrc),
 		fmt.Sprintf("fetch claude: GET %s -> %s   (sha256 %s)", fmt.Sprintf(templates.ClaudeCLIURLFormat, templates.ClaudeCLIVersion), filepath.Join(b.Out, claudeCLIName), templates.ClaudeCLISHA256),
-		fmt.Sprintf("image: %s", strings.Join(imageArgv(b.Dockerfile, tag, b.Out), " ")),
-	}, nil
+	}
+	for _, t := range templates.DaemonClientTools {
+		lines = append(lines, fmt.Sprintf("fetch %s: GET %s -> %s   (sha256 %s)", t.Name, t.URL, filepath.Join(b.Out, t.Name), t.SHA256))
+	}
+	lines = append(lines, fmt.Sprintf("image: %s", strings.Join(imageArgv(b.Dockerfile, tag, b.Out), " ")))
+	return lines, nil
 }
 
 // planBuildID is what Plan prints in place of bd's build id: git answers it inside
@@ -533,12 +537,12 @@ func (b Builder) BuildImage(ctx context.Context, rev string, bins []string) (str
 // would report a missing or misplaced one only after the package install ran, so
 // it is caught here first, against what the caller passed.
 func (b Builder) checkImageBinaries(bins []string) error {
-	want := []string{"gt", "bd", "om", claudeCLIName}
+	want := append([]string{"gt", "bd", "om", claudeCLIName}, ClientToolNames()...)
 	seen := make(map[string]bool, len(want))
 	for _, p := range bins {
 		name := filepath.Base(p)
 		if !slices.Contains(want, name) {
-			return fmt.Errorf("daemonimage: %q is not one of the image's binaries gt, bd, om and claude", p)
+			return fmt.Errorf("daemonimage: %q is not one of the image's binaries %s", p, strings.Join(want, ", "))
 		}
 		if filepath.Dir(filepath.Clean(p)) != filepath.Clean(b.Out) {
 			return fmt.Errorf("daemonimage: %q is outside the build context %s, so the Dockerfile's COPY %s reads nothing", p, b.Out, name)
@@ -553,7 +557,7 @@ func (b Builder) checkImageBinaries(bins []string) error {
 	}
 	for _, name := range want {
 		if !seen[name] {
-			return fmt.Errorf("daemonimage: no %s binary among the %d given; the image copies gt, bd, om and claude", name, len(bins))
+			return fmt.Errorf("daemonimage: no %s binary among the %d given; the image copies %s", name, len(bins), strings.Join(want, ", "))
 		}
 	}
 	return nil

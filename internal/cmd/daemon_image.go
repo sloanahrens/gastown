@@ -38,6 +38,7 @@ type daemonImageFlags struct {
 type imageBuilder interface {
 	BuildBinaries(ctx context.Context, rev string) ([]string, error)
 	FetchClaudeCLI(ctx context.Context) (string, error)
+	FetchClientTools(ctx context.Context) ([]string, error)
 	BuildImage(ctx context.Context, rev string, bins []string) (string, error)
 }
 
@@ -178,7 +179,11 @@ func runDaemonImage(ctx context.Context, f daemonImageFlags, d daemonImageDeps) 
 	if err != nil {
 		return err
 	}
-	tag, err := build.BuildImage(ctx, f.rev, append(bins, claude))
+	tools, err := build.FetchClientTools(ctx)
+	if err != nil {
+		return err
+	}
+	tag, err := build.BuildImage(ctx, f.rev, append(append(bins, claude), tools...))
 	if err != nil {
 		return err
 	}
