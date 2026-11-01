@@ -54,6 +54,12 @@ const (
 	// go.mod. cmd/hm prints cli.Version, so a build stamped with any other symbol
 	// reports "dev", and the version check below refuses it.
 	rebuildHMVersionVar = "github.com/sloanahrens/history-man/internal/cli.Version"
+
+	// rebuildHMAlertKey is the key the job's own failures escalate under. It is not
+	// hm-skew's key: the monitor re-fires that key every hour while hm is behind, and
+	// gt escalate re-sends a repeat only after its renotify window, so a failure under
+	// hm-skew can go unsent or have its text rewritten by the next skew reading.
+	rebuildHMAlertKey = "hm-rebuild"
 )
 
 // rebuildHMRenameFunc is the seam for the two renames the swap makes. nil is
@@ -118,6 +124,7 @@ func (d *Daemon) rebuildHMCycle(ctx context.Context, cycle *dogCycle) bool {
 	if !r.behind {
 		cycle.closeStep("force")
 		d.logger.Printf("rebuild_hm: the installed hm %s is current with origin/main %s", shortOMSHA(r.installed), shortOMSHA(r.remote))
+		d.rebuildHMClear("the installed hm is current with origin/main")
 		return true
 	}
 
@@ -223,11 +230,12 @@ func (d *Daemon) rebuildHMInstall(ctx context.Context, cycle *dogCycle, src, ins
 
 	cycle.closeStep("install")
 	d.logger.Printf("rebuild_hm: installed hm %s; the previous one is kept at %s", shortOMSHA(head), prev)
+	d.rebuildHMClear("the installed hm is the build of origin/main")
 	return true
 }
 
 // rebuildHMFail ends a cycle whose install did not land: the step is recorded,
-// the failure is escalated under the hm-skew key at MEDIUM, and the cycle reaches
+// the failure is escalated under the job's own key at MEDIUM, and the cycle reaches
 // its verdict so the interval holds. The installed hm is still at its path: a
 // half-done swap is undone by the caller before it calls this.
 func (d *Daemon) rebuildHMFail(cycle *dogCycle, step, msg, head string) bool {
@@ -241,18 +249,27 @@ func (d *Daemon) rebuildHMHalted(cycle *dogCycle, msg, head string) bool {
 		"the installed hm is not at its path: restore it by hand from hm.prev beside it")
 }
 
-// rebuildHMReport records the failed step, escalates it under hm-skew at severity,
-// and says in the escalation what state the install was left in.
+// rebuildHMReport records the failed step, escalates it under the job's own key at
+// severity, and says in the escalation what state the install was left in.
 func (d *Daemon) rebuildHMReport(cycle *dogCycle, severity, step, msg, head, standing string) bool {
 	cycle.failStep(step, msg)
 	d.logger.Printf("rebuild_hm: install of %s failed (%s); %s", shortOMSHA(head), msg, standing)
-	if err := d.escalateAlertSeverity(severity, hmSkewAlertKey, hmSkewSource,
+	if err := d.escalateAlertSeverity(severity, rebuildHMAlertKey, hmSkewSource,
 		fmt.Sprintf("rebuild_hm: installing hm %s failed (%s); %s", shortOMSHA(head), msg, standing)); err != nil {
 		// The escalation never reached the town: log it. The next interval finds
 		// the same skew and tries again.
 		d.logger.Printf("rebuild_hm: the failure escalation did not reach the town: %v", err)
 	}
 	return true
+}
+
+// rebuildHMClear closes the job's failure alert once a cycle reaches a verdict
+// that leaves no failed install: hm is current, or the install landed. A clear
+// that does not reach the town is logged, and the next such verdict clears it again.
+func (d *Daemon) rebuildHMClear(reason string) {
+	if err := d.clearAlertsErr(reason, rebuildHMAlertKey); err != nil {
+		d.logger.Printf("rebuild_hm: clearing the failure alert did not reach the town; retrying next cycle: %v", err)
+	}
 }
 
 // rebuildHMHead reads origin/main's tip in the clone. The reading has already
