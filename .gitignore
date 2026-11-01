@@ -77,6 +77,9 @@ settings/
 .sqlhistory
 .fork-integration.json
 
+# The tracker Postgres password, beside deploy/tracker/docker-compose.yml (gt-n2z79)
+/deploy/tracker/tracker-db.env
+
 # Nix build
 result
 
