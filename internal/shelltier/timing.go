@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -42,7 +43,8 @@ type timingRecord struct {
 // recordTiming appends e's line, as out ran it, to cfg's timing log. It reports
 // nothing to Run: the timing log is a measurement of the run, never part of its
 // verdict, so a line written, lost or refused changes no result and no exit
-// code. A line that cannot be written is said on cfg.Err instead.
+// code. A line that cannot be written is said on cfg.Err, or on the process's
+// error stream when cfg.Err is nil, so no failure is dropped in silence.
 func recordTiming(cfg Config, e Entry, out outcome) {
 	if cfg.Timing == nil || cfg.TimingPath == "" {
 		return
@@ -56,9 +58,18 @@ func recordTiming(cfg Config, e Entry, out outcome) {
 	if err == nil {
 		err = cfg.Timing.Append(cfg.TimingPath, line)
 	}
-	if err != nil && cfg.Err != nil {
-		fmt.Fprintf(cfg.Err, "shelltier: record %s's wall time in %s: %v\n", e.Path, cfg.TimingPath, err)
+	if err != nil {
+		fmt.Fprintf(errorStream(cfg.Err), "shelltier: record %s's wall time in %s: %v\n", e.Path, cfg.TimingPath, err)
 	}
+}
+
+// errorStream is the stream a timing failure is said on: w when it is set, the
+// process's error stream when it is not.
+func errorStream(w io.Writer) io.Writer {
+	if w == nil {
+		return os.Stderr
+	}
+	return w
 }
 
 // timingLine renders rec as one line, newline included.
@@ -70,17 +81,32 @@ func timingLine(rec timingRecord) ([]byte, error) {
 	return append(line, '\n'), nil
 }
 
-// OSTimingFiles is the timing log on the local filesystem.
-type OSTimingFiles struct{}
+// OSTimingFiles is the timing log on the local filesystem. Its zero value
+// writes through the os package; mkdirAll and openFile are the seam a test
+// drives, so no unit test touches the disk.
+type OSTimingFiles struct {
+	mkdirAll func(path string, perm os.FileMode) error
+	openFile func(path string, flag int, perm os.FileMode) (appendTarget, error)
+}
 
 // Append adds line with one write to a file opened for appending, so two
 // runners writing to the same log add whole lines rather than interleaving part
 // of a line each.
-func (OSTimingFiles) Append(path string, line []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+func (o OSTimingFiles) Append(path string, line []byte) error {
+	mkdirAll := o.mkdirAll
+	if mkdirAll == nil {
+		mkdirAll = os.MkdirAll
+	}
+	openFile := o.openFile
+	if openFile == nil {
+		openFile = func(path string, flag int, perm os.FileMode) (appendTarget, error) {
+			return os.OpenFile(path, flag, perm)
+		}
+	}
+	if err := mkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("make the log's directory: %w", err)
 	}
-	fh, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o644)
+	fh, err := openFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o644)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", path, err)
 	}

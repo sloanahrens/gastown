@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -384,19 +385,6 @@ func TestSinceGreenRefusesAMissingTownValue(t *testing.T) {
 	}
 }
 
-// memTiming records the timing lines a run appends, and answers with err.
-type memTiming struct {
-	err   error
-	paths []string
-	lines []string
-}
-
-func (m *memTiming) Append(path string, line []byte) error {
-	m.paths = append(m.paths, path)
-	m.lines = append(m.lines, string(line))
-	return m.err
-}
-
 func TestMainRecordsEachScriptsTimeUnderTheTown(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -428,7 +416,7 @@ func TestMainRecordsEachScriptsTimeUnderTheTown(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f := newFixture(nil, twoScripts()...)
-			timing := &memTiming{}
+			timing := &shelltiertest.Timing{}
 			looked := ""
 			f.env.Timing = timing
 			f.env.Town = func(root string) (string, error) {
@@ -441,12 +429,12 @@ func TestMainRecordsEachScriptsTimeUnderTheTown(t *testing.T) {
 			if looked != tc.looked {
 				t.Errorf("town lookup root = %q, want %q", looked, tc.looked)
 			}
-			if len(timing.lines) != 2 {
-				t.Fatalf("appended %d lines, want one per script", len(timing.lines))
+			if len(timing.Lines) != 2 {
+				t.Fatalf("appended %d lines, want one per script", len(timing.Lines))
 			}
-			for i, line := range timing.lines {
-				if timing.paths[i] != tc.want {
-					t.Errorf("line %d appended to %q, want %q", i, timing.paths[i], tc.want)
+			for i, line := range timing.Lines {
+				if timing.Paths[i] != tc.want {
+					t.Errorf("line %d appended to %q, want %q", i, timing.Paths[i], tc.want)
 				}
 				if path := twoScripts()[i].Path; !strings.Contains(line, path) {
 					t.Errorf("line %d = %q, want it to name %s", i, line, path)
@@ -469,17 +457,42 @@ func TestMainRecordsNoTimingWithoutATown(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f := newFixture(nil, twoScripts()...)
-			timing := &memTiming{}
+			timing := &shelltiertest.Timing{}
 			f.env.Timing, f.env.Town = timing, tc.town
 			if code := Main([]string{"--all", "--logdir", "/logs"}, &f.out, f.env); code != 0 {
 				t.Fatalf("exit = %d, want 0: a missing town must not change the verdict", code)
 			}
-			if len(timing.lines) != 0 {
-				t.Errorf("appended %q, want nothing without a town", timing.lines)
+			if len(timing.Lines) != 0 {
+				t.Errorf("appended %q, want nothing without a town", timing.Lines)
 			}
 			if !strings.Contains(f.err.String(), "no town root for the timing log") {
 				t.Errorf("error stream = %q, want the missing town said", f.err.String())
 			}
 		})
+	}
+}
+
+// TestTownOfFindsTheTownContainingTheRoot drives the production town lookup:
+// the runner starts in a worktree inside a town and records its timing under
+// the town root, whatever the depth.
+func TestTownOfFindsTheTownContainingTheRoot(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(town, "mayor", "town.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	worktree := filepath.Join(town, "gastown", "polecats", "ace")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := townOf(worktree)
+	if err != nil {
+		t.Fatalf("townOf(%q): %v", worktree, err)
+	}
+	if got != town {
+		t.Errorf("townOf(%q) = %q, want the town root %q", worktree, got, town)
 	}
 }

@@ -42,7 +42,8 @@ type Config struct {
 	Timing TimingFiles
 	// TimingPath is the log Timing appends to. Empty records none.
 	TimingPath string
-	// Err receives each timing line that could not be appended. Nil discards it.
+	// Err receives each timing line that could not be appended. Nil sends them
+	// to the process's error stream.
 	Err io.Writer
 }
 
@@ -61,8 +62,9 @@ type Result struct {
 type outcome struct {
 	// passed is whether the script passed; timedOut whether its own Budget ran out.
 	passed, timedOut bool
-	// exit is the code Exec reported, or -1 when it reported none: the command
-	// could not start, or its context ended.
+	// exit is the code Exec reported for a script that finished on its own, or
+	// -1 when it reported none or the script's context ended: the command could
+	// not start, or it was cut short.
 	exit int
 	// began and ended bound the script's wall time.
 	began, ended time.Time
@@ -121,7 +123,7 @@ func runOne(ctx context.Context, cfg Config, e Entry) outcome {
 	ended := cfg.Now()
 	cut := sctx.Err() != nil
 	exit := code
-	if err != nil {
+	if err != nil || cut {
 		exit = -1
 	}
 	return outcome{
