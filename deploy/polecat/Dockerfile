@@ -4,7 +4,7 @@
 # docker build on this directory and tags gastown-polecat:<short sha> and :dev).
 #
 # The image carries the Claude Code CLI, the Go toolchain and git, plus the
-# town's own `gt` and `bd` binaries from bin/. OpenShell ignores ENTRYPOINT and
+# town's own binaries from bin/. OpenShell ignores ENTRYPOINT and
 # CMD: the sandbox runtime starts the main process given on
 # `openshell sandbox create -- ...`.
 #
@@ -102,6 +102,24 @@ RUN ARCH=$(dpkg --print-architecture) \
     && curl -fsSL -o /tmp/go.tgz "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" \
     && echo "${SHA}  /tmp/go.tgz" | sha256sum -c - \
     && tar -C /usr/local -xzf /tmp/go.tgz && rm /tmp/go.tgz
+
+# The Dolt client, at the version the town's server runs (internal/templates/
+# images.go DoltVersion): the sweep runner's internal/doltserver, internal/deps
+# and internal/cmd tests start or check a server and need it on PATH (gt-q7wkn).
+ARG DOLT_VERSION=2.3.2
+# sha256 of dolt-linux-arm64.tar.gz and dolt-linux-amd64.tar.gz at
+# https://github.com/dolthub/dolt/releases/download/v2.3.2/, read from the
+# release page and re-computed from each tarball on the host on 2026-10-31.
+# Update a digest only together with DOLT_VERSION.
+ARG DOLT_SHA256_ARM64=b2231e84e06adf95ea81c6e889409ee7a72de5a96cb03bbf1bf3433ac763cf9c
+ARG DOLT_SHA256_AMD64=7a2949fa2b2b3799ee1e57e6d64519a8d65d675fd832f6469d4e07e5a1c72b14
+RUN ARCH=$(dpkg --print-architecture) \
+    && case "$ARCH" in arm64) SHA="$DOLT_SHA256_ARM64" ;; amd64) SHA="$DOLT_SHA256_AMD64" ;; *) echo "unsupported arch $ARCH" >&2; exit 1 ;; esac \
+    && curl -fsSL -o /tmp/dolt.tgz "https://github.com/dolthub/dolt/releases/download/v${DOLT_VERSION}/dolt-linux-${ARCH}.tar.gz" \
+    && echo "${SHA}  /tmp/dolt.tgz" | sha256sum -c - \
+    && tar -C /tmp -xzf /tmp/dolt.tgz \
+    && install -m 0755 "/tmp/dolt-linux-${ARCH}/bin/dolt" /usr/local/bin/dolt \
+    && rm -rf /tmp/dolt.tgz "/tmp/dolt-linux-${ARCH}"
 
 # Refuse the image when its Go is below GO_FLOOR (see go-floor.sh for the rule).
 COPY go-floor.sh /usr/local/lib/gastown/go-floor.sh
@@ -207,7 +225,9 @@ COPY bin/bd /usr/local/bin/bd
 # The trim helper a cache-volume container runs; plugin.md, "Per-rig cache
 # volumes", says why the trim has to run in the image.
 COPY bin/polecat-image /usr/local/bin/polecat-image
-RUN chmod 0755 /usr/local/bin/gt /usr/local/bin/bd /usr/local/bin/polecat-image
+# The entrypoint a tier-sweep runner container runs (cmd/sweep-run, gt-q7wkn).
+COPY bin/sweep-run /usr/local/bin/sweep-run
+RUN chmod 0755 /usr/local/bin/gt /usr/local/bin/bd /usr/local/bin/polecat-image /usr/local/bin/sweep-run
 
 ENV PATH="/usr/local/go/bin:/sandbox/go/bin:${PATH}" \
     GOPATH=/sandbox/go \
