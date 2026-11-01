@@ -3,6 +3,7 @@ package dashboard
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -142,5 +143,138 @@ func TestBirdPanelStateEncodesTheRows(t *testing.T) {
 		if !strings.Contains(string(payload), want) {
 			t.Errorf("the state payload has no %s: %s", want, payload)
 		}
+	}
+}
+
+// drawnNeeds is the "Needs you" section as the page drew it: the element, its
+// summary line, whether it came up open, and one entry per reporter group with
+// the text of each child in order.
+type drawnNeeds struct {
+	Class   string            `json:"cls"`
+	Open    bool              `json:"open"`
+	Summary string            `json:"summary"`
+	Groups  []drawnNeedsGroup `json:"groups"`
+}
+
+type drawnNeedsGroup struct {
+	Class string   `json:"cls"`
+	Parts []string `json:"parts"`
+}
+
+// needsYouWalk reads every details element the page drew under #overseer, in
+// document order, with what it shows.
+const needsYouWalk = `JSON.stringify((() => {
+  const out = [];
+  (function walk(n) {
+    for (const c of (n.children || [])) {
+      if (c.tagName === "DETAILS") {
+        out.push({
+          cls: c.className,
+          open: !!c.open,
+          summary: c.children.length ? c.children[0].textContent : "",
+          groups: c.children.slice(1).map(g => ({
+            cls: g.className,
+            parts: g.children.map(x => x.textContent)
+          }))
+        });
+      }
+      walk(c);
+    }
+  })(document.getElementById("overseer"));
+  return out;
+})())`
+
+// drawBirdsInDOM runs the page's own drawBirds over a state and answers the
+// "Needs you" sections it drew.
+func drawBirdsInDOM(t *testing.T, state map[string]any) []drawnNeeds {
+	t.Helper()
+
+	dom := newPage(t, nil, "")
+	payload, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal state: %v", err)
+	}
+	if _, err := dom.vm.RunString("drawBirds(document.getElementById(\"overseer\"), " + string(payload) + ");"); err != nil {
+		t.Fatalf("drawBirds: %v", err)
+	}
+	v, err := dom.vm.RunString(needsYouWalk)
+	if err != nil {
+		t.Fatalf("reading the drawn Birds block: %v", err)
+	}
+	var got []drawnNeeds
+	if err := json.Unmarshal([]byte(v.String()), &got); err != nil {
+		t.Fatalf("reading the drawn Birds block: %v", err)
+	}
+	return got
+}
+
+// Every reporter's decisions are one list under the rows: grouped by reporter,
+// the reporter that wrote most recently first (by name when two wrote in the
+// same second), closed until the operator opens it, and left out whole when no
+// reporter has a decision to show. The blocked reporter's dropped item is
+// named as withheld without its text.
+func TestBirdsPanelNeedsYou(t *testing.T) {
+	t.Parallel()
+
+	older := time.Date(2026, 11, 1, 8, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	newer := time.Date(2026, 11, 1, 11, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	item := func(question, recommendation string) map[string]string {
+		return map[string]string{"question": question, "recommendation": recommendation}
+	}
+	bird := func(name, written string, items ...map[string]string) map[string]any {
+		b := map[string]any{"bird": name, "state": "fresh", "written": written}
+		if len(items) > 0 {
+			b["decision_items"] = items
+		}
+		return b
+	}
+
+	albatross := bird("albatross", older, item("old question?", "old answer"))
+	albatross["decision_items_withheld"] = []string{"credential-assignment"}
+	state := map[string]any{"birds": []map[string]any{
+		albatross,
+		bird("crane", newer, item("crane question?", "crane answer")),
+		bird("dunlin", newer, item("ship it?", "yes"), item("and the other?", "later")),
+		bird("egret", older),
+		bird("heron", newer),
+	}}
+
+	got := drawBirdsInDOM(t, state)
+	if len(got) != 1 {
+		t.Fatalf("drawBirds drew %d Needs you sections, want 1", len(got))
+	}
+	ny := got[0]
+	if ny.Class != "needsyou" {
+		t.Errorf("the section's class is %q, want needsyou", ny.Class)
+	}
+	if ny.Open {
+		t.Error("the Needs you section is drawn open, want it closed until the operator opens it")
+	}
+	if ny.Summary != "Needs you (4)" {
+		t.Errorf("the summary reads %q, want every reporter's item counted", ny.Summary)
+	}
+
+	var names []string
+	for _, g := range ny.Groups {
+		names = append(names, g.Parts[0])
+	}
+	if want := []string{"crane", "dunlin", "albatross"}; !slices.Equal(names, want) {
+		t.Errorf("the groups are %v, want %v: newest reporter first, by name on a tie", names, want)
+	}
+	if want := []string{"dunlin", "ship it?", "→ yes", "and the other?", "→ later"}; !slices.Equal(ny.Groups[1].Parts, want) {
+		t.Errorf("dunlin's group reads %q, want %q", ny.Groups[1].Parts, want)
+	}
+	last := ny.Groups[2].Parts
+	if len(last) != 4 || last[3] != "withheld: a decision item looks like it holds a secret (credential-assignment)" {
+		t.Errorf("albatross's group reads %q, want the withheld item named after its clean one", last)
+	}
+
+	// No reporter with an item, no section: the panel is the rows it was.
+	none := drawBirdsInDOM(t, map[string]any{"birds": []map[string]any{
+		bird("egret", older),
+		bird("heron", newer),
+	}})
+	if len(none) != 0 {
+		t.Errorf("drawBirds drew %d Needs you sections for reporters with no items, want none", len(none))
 	}
 }

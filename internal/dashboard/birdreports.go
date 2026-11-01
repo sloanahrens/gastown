@@ -55,6 +55,16 @@ const (
 	// summary, not a transcript; the page beside it holds the rest.
 	birdSummaryRunes = 1200
 
+	// birdDecisionItemsMax is how many decisions of one reporter a row carries.
+	// The combined list is read in one glance, so a reporter that writes more
+	// than this has its list cut rather than the page grown.
+	birdDecisionItemsMax = 8
+
+	// birdDecisionItemRunes is how much of one decision's question or
+	// recommendation a row carries. An item is a question with an answer in a
+	// sentence, not the reasoning behind it.
+	birdDecisionItemRunes = 240
+
 	// birdStaleAfter is how old a summary may be before its row reads as
 	// stale. Birds report daily, so a summary more than a day and a couple of
 	// hours old is one the bird did not rewrite.
@@ -111,6 +121,13 @@ var (
 	errBirdPageSecret  = errors.New("birds: page looks like it holds a secret")
 )
 
+// BirdDecisionItem is one decision a reporter puts to the operator: the
+// question it asks and the answer it recommends.
+type BirdDecisionItem struct {
+	Question       string `json:"question"`
+	Recommendation string `json:"recommendation"`
+}
+
 // BirdReport is one bird's daily report as the Reports page draws it: what the
 // bird's sidecar says, whether its page is there to open, and, when the reader
 // could not use the sidecar, what is wrong with it.
@@ -136,6 +153,14 @@ type BirdReport struct {
 	// Decisions how many decisions it recorded.
 	NeedsOperator bool `json:"needs_operator,omitempty"`
 	Decisions     int  `json:"decisions,omitempty"`
+	// DecisionItems are the decisions this reporter puts to the operator: at
+	// most birdDecisionItemsMax, each cleaned like the summary and cut to
+	// birdDecisionItemRunes. An item the secret screen flagged is not here.
+	DecisionItems []BirdDecisionItem `json:"decision_items,omitempty"`
+	// DecisionItemsWithheld names the rule that matched each decision item the
+	// reader dropped, never the item's text. The row's own state is unchanged:
+	// the item is withheld, the reporter's summary is still shown.
+	DecisionItemsWithheld []string `json:"decision_items_withheld,omitempty"`
 	// HasPage and HasPrev say whether daily.html and daily.prev.html are
 	// regular files small enough to serve. The reader does not open them.
 	HasPage bool `json:"has_page"`
@@ -153,6 +178,9 @@ type birdSidecar struct {
 	Summary       string `json:"summary"`
 	NeedsOperator bool   `json:"needs_operator"`
 	Decisions     int    `json:"decisions"`
+	// DecisionItems is held as written and decoded on its own, so a malformed
+	// array costs the row its items and not its summary or its row.
+	DecisionItems json.RawMessage `json:"decision_items,omitempty"`
 }
 
 // BirdReportsReader reads the birds of one runtime directory.
@@ -306,9 +334,10 @@ func (r *BirdReportsReader) readBird(now time.Time, name string) (BirdReport, bo
 	row.State = BirdReportFresh
 	row.Written = written
 	row.Title = reportsText(side.Title)
-	row.Summary = birdSummaryText(side.Summary)
+	row.Summary = birdTextCut(side.Summary, birdSummaryRunes)
 	row.NeedsOperator = side.NeedsOperator
 	row.Decisions = side.Decisions
+	row.DecisionItems, row.DecisionItemsWithheld = birdDecisionItems(side.DecisionItems)
 	if now.Sub(written) > birdStaleAfter {
 		row.State, row.Stale = BirdReportStale, true
 	}
@@ -329,6 +358,53 @@ func (r *BirdReportsReader) readBird(now time.Time, name string) (BirdReport, bo
 	return row, true
 }
 
+// birdDecisionItems decodes a sidecar's decision_items into the items a row may
+// show, and the rule each dropped item matched. A missing, null or malformed
+// array yields no items: the decisions are a convenience over the summary, so
+// one that is not the array of questions the writer promises costs the row its
+// list and nothing else. Only the first birdDecisionItemsMax entries are read,
+// and an entry with no question left after cleaning is not a decision.
+func birdDecisionItems(raw json.RawMessage) (items []BirdDecisionItem, withheld []string) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var wire []struct {
+		Question       string `json:"question"`
+		Recommendation string `json:"recommendation"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return nil, nil
+	}
+	if len(wire) > birdDecisionItemsMax {
+		wire = wire[:birdDecisionItemsMax]
+	}
+	for _, w := range wire {
+		question := birdTextCut(w.Question, birdDecisionItemRunes)
+		if question == "" {
+			continue
+		}
+		item := BirdDecisionItem{
+			Question:       question,
+			Recommendation: birdTextCut(w.Recommendation, birdDecisionItemRunes),
+		}
+		// Each field is screened as the text the page would show, the way the
+		// summary is: a flagged item is dropped whole rather than shown with
+		// half of it missing.
+		dropped := false
+		for _, text := range []string{item.Question, item.Recommendation} {
+			if class, flagged := screenSecret([]byte(text)); flagged {
+				withheld = append(withheld, class)
+				dropped = true
+				break
+			}
+		}
+		if !dropped {
+			items = append(items, item)
+		}
+	}
+	return items, withheld
+}
+
 // birdRealDir reports whether path is a directory in its own right. The Lstat
 // is what refuses a symlink: a bird directory or a reports directory that is a
 // link to somewhere else is not that bird's output.
@@ -337,14 +413,14 @@ func birdRealDir(path string) bool {
 	return err == nil && fi.IsDir()
 }
 
-// birdSummaryText is the summary as a row may show it: the control characters
-// reportsText strips, then cut to birdSummaryRunes so a bird that pastes a
-// transcript into its summary cannot grow the page with it. The cut is by
-// rune, so a multi-byte character is never split in half.
-func birdSummaryText(s string) string {
+// birdTextCut is a sidecar field as a row may show it: the control characters
+// reportsText strips, then cut to max runes so a bird that pastes a transcript
+// into a field cannot grow the page with it. The cut is by rune, so a
+// multi-byte character is never split in half.
+func birdTextCut(s string, max int) string {
 	s = reportsText(s)
-	if runes := []rune(s); len(runes) > birdSummaryRunes {
-		return string(runes[:birdSummaryRunes])
+	if runes := []rune(s); len(runes) > max {
+		return string(runes[:max])
 	}
 	return s
 }

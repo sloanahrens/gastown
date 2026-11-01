@@ -405,6 +405,12 @@ h3.ohead .r{margin-left:auto;text-transform:none;letter-spacing:0;white-space:no
 .bhead a:hover{text-decoration:underline}
 .bhead .bage{margin-left:auto;color:var(--dim);white-space:nowrap}
 .brow .bsum{margin:2px 0 0;white-space:pre-wrap;overflow-wrap:anywhere}
+.needsyou{margin-top:6px;border-top:1px solid var(--line);padding-top:4px}
+.nysum{cursor:pointer;color:var(--dim);font-size:11px}
+.nygroup{margin:4px 0 0 8px}
+.nybird{font-weight:600}
+.nyq{margin-top:2px;white-space:pre-wrap;overflow-wrap:anywhere}
+.nyr{margin-left:12px;color:var(--dim);white-space:pre-wrap;overflow-wrap:anywhere}
 .arow .qrec,.arow .qheld{color:var(--dim);display:block;margin:2px 0}
 .arow .qtext{display:block;margin:2px 0}
 .qage{color:var(--dim)}
@@ -2205,6 +2211,37 @@ function drawBirds(panel, s) {
     if (b.state === "error" || b.state === "withheld") row.append(el("div", "badc", b.note || b.state));
     else if (b.summary) row.append(el("div", "bsum", b.summary));
     box.append(row);
+  }
+  // The decisions the reporters put to the operator, in one list under the
+  // rows so they are answered in one place. The group of the reporter that
+  // wrote most recently comes first, because its question is the one the day
+  // is about. The list is closed until the operator opens it — the rows above
+  // already say who is asking — and left out whole when no reporter has a
+  // decision to show.
+  const asks = rows.filter(b => b.decision_items && b.decision_items.length);
+  asks.sort((a, b) => {
+    const at = a.written ? new Date(a.written).getTime() : 0;
+    const bt = b.written ? new Date(b.written).getTime() : 0;
+    if (at !== bt) return bt - at;
+    return a.bird < b.bird ? -1 : a.bird > b.bird ? 1 : 0;
+  });
+  if (asks.length) {
+    const total = asks.reduce((n, b) => n + b.decision_items.length, 0);
+    const needs = el("details", "needsyou");
+    needs.append(el("summary", "nysum", "Needs you (" + total + ")"));
+    for (const b of asks) {
+      const group = el("div", "nygroup");
+      group.append(el("div", "nybird", b.bird || "–"));
+      for (const it of b.decision_items) {
+        group.append(el("div", "nyq", it.question || ""));
+        if (it.recommendation) group.append(el("div", "nyr", "→ " + it.recommendation));
+      }
+      for (const why of b.decision_items_withheld || []) {
+        group.append(el("div", "badc", "withheld: a decision item looks like it holds a secret (" + why + ")"));
+      }
+      needs.append(group);
+    }
+    box.append(needs);
   }
 }
 
