@@ -740,8 +740,14 @@ mkdir -p "$TMP/bin"
 # subcommand named in STUB_GO_FAIL (build or test).
 cat >"$TMP/bin/go" <<'STUB'
 #!/usr/bin/env bash
+# The module a call runs in: the working directory, or the directory named by
+# go's -C flag, which go accepts only as the FIRST argument (go -C dir test):
+# the nested-module steps use it so the CPU-class wrapper runs from the root
+# (gt-bhah3). Any other position is not recognized, as in real go.
+wd="${PWD##*/}"
+if [[ "${1:-}" == -C ]]; then wd="${2##*/}"; shift 2; fi
 echo "go $1 GT_TEST_DOCKER=${GT_TEST_DOCKER:-unset}" >>"$STUB_LOG"
-[[ "${PWD##*/}" == tracker ]] && echo "go $1 in tracker" >>"$STUB_LOG"
+[[ "$wd" == tracker ]] && echo "go $1 in tracker" >>"$STUB_LOG"
 if [[ "$1" == test && -n "${STUB_GO_INTERRUPT:-}" ]]; then
   # Signal the recipe shell (the parent), then wait to be killed.
   kill -TERM "$PPID"
@@ -753,9 +759,9 @@ fi
 dir_ok=1
 if [[ -n "${STUB_GO_FAIL_DIR:-}" ]]; then
   if [[ "$STUB_GO_FAIL_DIR" == '!'* ]]; then
-    [[ "${PWD##*/}" != "${STUB_GO_FAIL_DIR#!}" ]] || dir_ok=0
+    [[ "$wd" != "${STUB_GO_FAIL_DIR#!}" ]] || dir_ok=0
   else
-    [[ "${PWD##*/}" == "$STUB_GO_FAIL_DIR" ]] || dir_ok=0
+    [[ "$wd" == "$STUB_GO_FAIL_DIR" ]] || dir_ok=0
   fi
 fi
 [[ "$1" == "${STUB_GO_FAIL:-}" && $dir_ok == 1 ]] && exit 1
@@ -995,6 +1001,24 @@ if [[ ! -e "$ROOT/scripts/polecat-caches.sh" ]]; then
   pass "the Docker volume script scripts/polecat-caches.sh is gone"
 else
   fail "the Docker volume script scripts/polecat-caches.sh is gone" "$ROOT/scripts/polecat-caches.sh still exists"
+fi
+
+# The nested-module steps pass go's -C first (go -C dir build, go -C dir vet,
+# go -C dir test): this runs the REAL go, not a stub, on a
+# throwaway module so a toolchain that rejected that order would fail here
+# (gt-bhah3). The module and its build output live under $TMP.
+nm="$TMP/nestedmod"
+mkdir -p "$nm"
+printf 'module example.test/nested\n\ngo 1.21\n' >"$nm/go.mod"
+printf 'package main\n\nfunc main() {}\n' >"$nm/main.go"
+nout=""
+if realgo=$(command -v go) \
+  && nout=$("$realgo" -C "$nm" build -o "$TMP/nested-out" ./... 2>&1 \
+    && "$realgo" -C "$nm" vet ./... 2>&1 \
+    && "$realgo" -C "$nm" test ./... 2>&1) && [[ -x "$TMP/nested-out" ]]; then
+  pass "the real go ($("$realgo" version | cut -d' ' -f3)) accepts -C first, before build, vet and test (the nested-module step shape)"
+else
+  fail "the real go accepts -C first, before build, vet and test (the nested-module step shape)" "$nout"
 fi
 
 echo ""
