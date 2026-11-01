@@ -2870,11 +2870,20 @@ function renderOM(s) {
     // still "reading…" (gt-q6h8e).
     box.append(el("div", "empty", r ? "unavailable — the om records could not be read" : "reading the landings and the daemon log…"));
     $("omnote").textContent = "";
+    $("omnote").title = "";
     return;
   }
-  $("omnote").textContent = readCaption(r, [om.model, om.depth, om.threshold != null ? "threshold " + om.threshold : (om.threshold_source ? "threshold unknown (" + om.threshold_source + ")" : null), om.timeout_s ? om.timeout_s + "s timeout" : null, r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : null]);
-  // Where the threshold came from is a hover, not header text (gt-7swd8).
-  $("omnote").title = om.threshold != null && om.threshold_source ? om.threshold_source : "";
+  // The collapsed line carries the figures the operator watches while reading
+  // the rest of the page, and the age of the read behind them; the reviewer's
+  // own configuration it used to hold is drawn in the panel below (gt-bz0pn).
+  $("omnote").textContent = readCaption(r, omFigures(s.rework).concat([r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : null]));
+  $("omnote").title = omFiguresTitle(s.rework);
+  const cfg = omConfig(om);
+  if (cfg.text) {
+    const line = el("div", "title", cfg.text);
+    line.title = cfg.title;
+    box.append(line);
+  }
 
   // Running now, then the last five om ran, above both folds. A server that
   // sends neither list draws neither block.
@@ -2996,6 +3005,51 @@ function renderOM(s) {
   }
   const scored = day && day.avg_score != null ? day : wins.find(w => w.avg_score != null);
   fold("Scores" + (scored ? " · avg " + scored.avg_score.toFixed(2) : ""), openOMScores, v => { openOMScores = v; }, ...scoreKids);
+}
+
+// omConfig is the reviewer's own configuration — the model, the depth, the
+// threshold (or why it is unknown) and the timeout — as the om panel draws it
+// in its body. It used to be the panel's collapsed line, which is where the
+// operator reads figures, not settings (gt-bz0pn). Where the threshold came
+// from is the line's hover, not its text (gt-7swd8).
+function omConfig(om) {
+  return {
+    text: [om.model, om.depth, om.threshold != null ? "threshold " + om.threshold : (om.threshold_source ? "threshold unknown (" + om.threshold_source + ")" : null), om.timeout_s ? om.timeout_s + "s timeout" : null].filter(Boolean).join(" · "),
+    title: om.threshold != null && om.threshold_source ? om.threshold_source : "",
+  };
+}
+
+// omFigures is what the om review panel's collapsed line says before the
+// reading's age: the latest window of the review log the om rework fold draws —
+// the share of beads approved on their first review, the reviews rejected, the
+// rework share and the loops out. A window with no reviews gives no rework
+// share rather than dividing by nothing; a log that has not been read yet adds
+// no figure at all, so a missing reading is never a week of zero; and a log
+// that could not be read says so instead of reading as a clean week.
+function omFigures(r) {
+  if (!r) return [];
+  if (r.unavailable) return ["om rework unreadable"];
+  const w = (r.windows || [])[0];
+  if (!w) return [];
+  const share = reworkShare(w), out = [];
+  if (share.beads) out.push(Math.round(100 * share.firstTry / share.beads) + "% first pass");
+  if (share.reviews) {
+    out.push(share.rejected + " rejected");
+    out.push(Math.round(100 * share.rejected / share.reviews) + "% rework");
+    out.push(share.loops + (share.loops === 1 ? " loop out" : " loops out"));
+  }
+  return out;
+}
+
+// omFiguresTitle is what the collapsed line says behind its figures: which
+// stretch of the review log they cover and how each is counted, so a number
+// that looks wrong can be checked without opening the fold.
+function omFiguresTitle(r) {
+  if (!r) return "";
+  if (r.unavailable) return "the review log could not be read, so the om figures are unknown";
+  const w = (r.windows || [])[0];
+  if (!w) return "";
+  return reworkWindowLabel(w) + ": first pass is the beads approved on their first review, rejected is the reviews om refused, and rework is their share of every review";
 }
 
 // The Overseer panel: the overseer's whole side of the town in one panel — its
@@ -3763,12 +3817,19 @@ function reworkLine(r) {
   if (r.unavailable) return "review log unreadable";
   const w = (r.windows || [])[0];
   if (!w) return "no om reviews";
-  const bars = w.bars || [];
+  const share = reworkShare(w);
+  if (!share.reviews) return "no om reviews, " + reworkWindowLabel(w);
+  return reworkWindowLabel(w) + ": " + Math.round(100 * share.rejected / share.reviews) + "% rework · " + share.loops + (share.loops === 1 ? " loop out" : " loops out");
+}
+
+// reworkShare sums one window's bars into the figures both the om rework fold
+// and the om review panel's collapsed line read, so the two cannot disagree
+// about a week: the beads counted under a bar, the ones approved on their first
+// review, every review, the ones om refused, and the loops out.
+function reworkShare(w) {
+  const bars = (w && w.bars) || [];
   const sum = k => bars.reduce((n, b) => n + (Number(b && b[k]) || 0), 0);
-  const reviews = sum("reviews");
-  if (!reviews) return "no om reviews, " + reworkWindowLabel(w);
-  const loops = sum("loops_out");
-  return reworkWindowLabel(w) + ": " + Math.round(100 * sum("rejected") / reviews) + "% rework · " + loops + (loops === 1 ? " loop out" : " loops out");
+  return {beads: sum("beads"), firstTry: sum("first_try"), reviews: sum("reviews"), rejected: sum("rejected"), loops: sum("loops_out")};
 }
 
 // reworkWindowLabel dates a window by its own span, since the reader names both
@@ -5099,7 +5160,9 @@ const PANES = {
   tiersweep: {sec: "tiersweep", body: ["tiersweep"], read: s => s.tiersweep, draw: s => renderTierSweep(s)},
   jev: {sec: "jev", body: ["jev"], read: s => [s.jev_scorecard, readInput(s, "jev_scorecard")], draw: s => renderJev(s)},
   mango: {sec: "mango", body: ["mango"], read: s => s.mango, draw: s => renderMango(s)},
-  om: {sec: "om", body: ["om"], read: s => [s.om, readInput(s, "om")], draw: s => renderOM(s)},
+  // The om note also carries the review log's figures, so a rework reading that
+  // moves draws the pane even when the om read has not changed (gt-bz0pn).
+  om: {sec: "om", body: ["om"], read: s => [s.om, s.rework, readInput(s, "om")], draw: s => renderOM(s)},
   events: {sec: "events", body: ["events"], read: s => s.alerts, draw: s => renderEvents(s)},
 };
 const PANE_NAMES = Object.keys(PANES);
