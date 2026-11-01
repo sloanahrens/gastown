@@ -52,13 +52,14 @@ func townSlots(t *testing.T, root string) string {
 	return string(m[1])
 }
 
-// initPoolLines counts the lines in out that hold
-// GT_TEST_DOLT_INIT_CONCURRENCY=slots, as the shell case greps for it.
+// initPoolLines counts the lines in out that set GT_TEST_DOLT_INIT_CONCURRENCY
+// to exactly slots: as a whole assignment, so a longer value (80 for 8) is not a
+// match.
 func initPoolLines(out, slots string) int {
-	want := "GT_TEST_DOLT_INIT_CONCURRENCY=" + slots
+	want := regexp.MustCompile(`(^|[ \t])GT_TEST_DOLT_INIT_CONCURRENCY=` + regexp.QuoteMeta(slots) + `([ \t;]|$)`)
 	n := 0
 	for _, line := range strings.Split(out, "\n") {
-		if strings.Contains(line, want) {
+		if want.MatchString(line) {
 			n++
 		}
 	}

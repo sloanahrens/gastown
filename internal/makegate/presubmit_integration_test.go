@@ -3,12 +3,6 @@
 package makegate
 
 import (
-	"bytes"
-	"context"
-	"errors"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -30,17 +24,15 @@ import (
 // that turns it red. The make calls are processes, so this file is integration
 // tier (docs/standards/test-engineering.md, rule 2).
 
-// gateStubGoInterrupt is the gate family's go stub: gateStubGo's call log,
-// module marker and failure switch, plus the interrupt path the shell fixture's
-// stub carries. A `go test` under STUB_GO_INTERRUPT logs `go test interrupt`,
-// signals its parent recipe shell, and then blocks reading a fifo it opens
-// read-write. A gate whose trap stops the suite kills the stub before the read
-// times out, so no `survived` call is logged; the read is bash's own timer and
-// starts no child, which would outlive the stub and hold the run's pipe open.
-const gateStubGoInterrupt = `#!/bin/bash
-echo "go $1 GT_TEST_DOCKER=${GT_TEST_DOCKER:-unset}" >>"$STUB_LOG"
-[ "${PWD##*/}" = tracker ] && echo "go $1 in tracker" >>"$STUB_LOG"
-if [ "$1" = test ] && [ -n "${STUB_GO_INTERRUPT:-}" ]; then
+// gateStubGoInterrupt is the gate family's go stub with the interrupt path the
+// shell fixture's stub carries, built from gateStubGo's own pieces (its call
+// log, module marker and failure switch) rather than copied. A `go test` under
+// STUB_GO_INTERRUPT logs `go test interrupt`, signals its parent recipe shell,
+// and then blocks reading a fifo it opens read-write. A gate whose trap stops
+// the suite kills the stub before the read times out, so no `survived` call is
+// logged; the read is bash's own timer and starts no child, which would outlive
+// the stub and hold the run's pipe open.
+const gateStubGoInterrupt = "#!/bin/bash\n" + gateStubHead + `if [ "$1" = test ] && [ -n "${STUB_GO_INTERRUPT:-}" ]; then
 	echo "go test interrupt" >>"$STUB_LOG"
 	fifo="$STUB_LOG.fifo"
 	[ -p "$fifo" ] || mkfifo "$fifo"
@@ -50,17 +42,7 @@ if [ "$1" = test ] && [ -n "${STUB_GO_INTERRUPT:-}" ]; then
 	fi
 	echo "go test survived the interrupt" >>"$STUB_LOG"
 fi
-dir_ok=1
-if [ -n "${STUB_GO_FAIL_DIR:-}" ]; then
-	if [ "${STUB_GO_FAIL_DIR#!}" != "$STUB_GO_FAIL_DIR" ]; then
-		[ "${PWD##*/}" != "${STUB_GO_FAIL_DIR#!}" ] || dir_ok=0
-	else
-		[ "${PWD##*/}" = "$STUB_GO_FAIL_DIR" ] || dir_ok=0
-	fi
-fi
-[ "$1" = "${STUB_GO_FAIL:-}" ] && [ "$dir_ok" = 1 ] && exit 1
-exit 0
-`
+` + gateStubTail
 
 // gateStubShellTestsFail is the shell-tests stub: it logs its call and fails
 // when STUB_SHELL_FAIL is set, as the shell fixture's stub does.
@@ -89,59 +71,9 @@ func newGateScratch(t *testing.T) *gateScratch {
 	g.writeStub("shell-tests", gateStubShellTestsFail)
 	dir := g.Checkout("scratch")
 	g.repo = dir
-	first := g.Commit(dir, "first", map[string]string{
-		"Makefile":                       makefileText(t, repoRoot(t)),
-		"tracker/go.mod":                 "module example.invalid/tracker\n\ngo 1.21\n",
-		"internal/testpolicy/docker.txt": "internal/cmd # scratch fixture\n",
-	})
+	first := g.Commit(dir, "first", gateScratchFiles(t))
 	g.Commit(dir, "second", map[string]string{"tracker/changed.go": "package tracker\n"})
 	return &gateScratch{GateSandbox: g, first: first}
-}
-
-// runTarget runs the named make goal in the scratch checkout against the
-// stubs, as the shell fixture's run_gate runs the goal its TARGET names.
-// GateSandbox.Run fixes the goal to gate; this family also runs presubmit,
-// test-slow and test-integration. The call log is truncated first, so a case
-// reads only this run's calls.
-func (g *GateSandbox) runTarget(target string, makeFlags []string, vars ...string) GateRun {
-	g.t.Helper()
-	calls := g.Path("calls")
-	if err := os.WriteFile(calls, nil, 0o644); err != nil {
-		g.t.Fatalf("truncate the stub call log %s: %v", calls, err)
-	}
-	argv := append([]string{"-C", g.repo, "--no-print-directory"}, makeFlags...)
-	argv = append(argv, target,
-		"SHELL_TESTS="+filepath.Join(g.bin, "shell-tests"),
-		"EXEC_TAX_PREFLIGHT="+filepath.Join(g.bin, "preflight"))
-	ctx, cancel := context.WithTimeout(context.Background(), gateRunTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "make", argv...)
-	cmd.Env = g.gateEnv(vars)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	code := 0
-	if err := cmd.Run(); err != nil {
-		var exit *exec.ExitError
-		if !errors.As(err, &exit) {
-			g.t.Fatalf("run make %s: %v\n%s", target, err, stderr.String())
-		}
-		code = exit.ExitCode()
-	}
-	if ctx.Err() != nil {
-		g.t.Fatalf("make %s did not finish within %s: %v\n%s", target, gateRunTimeout, ctx.Err(), stderr.String())
-	}
-	data, err := os.ReadFile(calls)
-	if err != nil {
-		g.t.Fatalf("read the stub call log %s: %v", calls, err)
-	}
-	var log []string
-	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
-		if line != "" {
-			log = append(log, line)
-		}
-	}
-	return GateRun{Code: code, Stdout: stdout.String(), Stderr: stderr.String(), Calls: log}
 }
 
 // TestIntegrationPresubmitChangedTrackerModuleTestsFail checks "presubmit: a
