@@ -22,6 +22,7 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dispatch"
@@ -542,6 +543,11 @@ type Daemon struct {
 	// through (see reaperWriter); nil uses reaper.WriterForDatabase. Tests set
 	// it so no bd runs.
 	reaperWriterForFn func(townRoot, dbName string) (reaper.Writer, error)
+
+	// reaperOpenDBFn opens the events retention step's connection to one
+	// database (see openReaperDB); nil uses reaper.OpenDB. A test sets it to
+	// drive a per-database retention failure without a Dolt server.
+	reaperOpenDBFn func(dbName string, readTimeout, writeTimeout time.Duration) (*beadsql.DB, error)
 
 	// rigPool runs per-rig heartbeat operations (witness checks, refinery checks,
 	// polecat health, idle reaping, branch pruning) with bounded concurrency and

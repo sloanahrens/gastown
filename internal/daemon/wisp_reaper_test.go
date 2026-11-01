@@ -130,34 +130,6 @@ func TestWispReaperStaleIssueAge(t *testing.T) {
 	}
 }
 
-func TestParseAgeDuration(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		in      string
-		want    time.Duration
-		wantErr bool
-	}{
-		{in: "30d", want: 30 * 24 * time.Hour},
-		{in: "1d", want: 24 * time.Hour},
-		{in: "720h", want: 720 * time.Hour},
-		{in: "90m", want: 90 * time.Minute},
-		{in: " 7d ", want: 7 * 24 * time.Hour},
-		{in: "d", wantErr: true},
-		{in: "1.5d", wantErr: true},
-		{in: "", wantErr: true},
-	}
-	for _, c := range cases {
-		got, err := ParseAgeDuration(c.in)
-		if (err != nil) != c.wantErr {
-			t.Errorf("ParseAgeDuration(%q) error = %v, wantErr %v", c.in, err, c.wantErr)
-			continue
-		}
-		if !c.wantErr && got != c.want {
-			t.Errorf("ParseAgeDuration(%q) = %v, want %v", c.in, got, c.want)
-		}
-	}
-}
-
 func TestWispReaperAutoCloseKnob(t *testing.T) {
 	t.Parallel()
 	yes, no := true, false

@@ -6,13 +6,46 @@ import (
 	"time"
 )
 
-// TestParseAgeDurationRejectsANonIntegerDaySuffix: a day-suffix age whose
-// number is not a whole count of days is an error, not a silently shorter or
-// zero duration.
-func TestParseAgeDurationRejectsANonIntegerDaySuffix(t *testing.T) {
+// TestParseAgeDuration: the day suffix the mol-dog-reaper formula emits parses
+// to whole days, time.ParseDuration's units pass through, and a day count that
+// is not a whole number, or one too large to fit a duration, is an error rather
+// than a silently shorter, zero or wrapped age.
+func TestParseAgeDuration(t *testing.T) {
 	t.Parallel()
-	if _, err := ParseAgeDuration("1.5d"); err == nil || !strings.Contains(err.Error(), "invalid day suffix") {
-		t.Errorf("ParseAgeDuration(\"1.5d\") error = %v, want an invalid day suffix", err)
+	tests := []struct {
+		name    string
+		in      string
+		want    time.Duration
+		wantErr bool
+	}{
+		{name: "day suffix", in: "30d", want: 30 * 24 * time.Hour},
+		{name: "one day", in: "1d", want: 24 * time.Hour},
+		{name: "day suffix padded", in: " 7d ", want: 7 * 24 * time.Hour},
+		{name: "hours", in: "720h", want: 720 * time.Hour},
+		{name: "minutes", in: "90m", want: 90 * time.Minute},
+		{name: "day suffix with no number", in: "d", wantErr: true},
+		{name: "fractional days", in: "1.5d", wantErr: true},
+		{name: "empty", in: "", wantErr: true},
+		{name: "day count past the duration range", in: "106752d", wantErr: true},
+		{name: "day count far past the duration range", in: "999999999999d", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ParseAgeDuration(tt.in)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ParseAgeDuration(%q) = %s, want an error", tt.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseAgeDuration(%q): %v", tt.in, err)
+			}
+			if got != tt.want {
+				t.Errorf("ParseAgeDuration(%q) = %s, want %s", tt.in, got, tt.want)
+			}
+		})
 	}
 }
 

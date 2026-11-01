@@ -46,7 +46,7 @@ const (
 func wispReaperInterval(config *DaemonPatrolConfig) time.Duration {
 	if config != nil && config.Patrols != nil && config.Patrols.WispReaper != nil {
 		if config.Patrols.WispReaper.IntervalStr != "" {
-			if d, err := ParseAgeDuration(config.Patrols.WispReaper.IntervalStr); err == nil && d > 0 {
+			if d, err := agentconfig.ParseAgeDuration(config.Patrols.WispReaper.IntervalStr); err == nil && d > 0 {
 				return d
 			}
 		}
@@ -58,7 +58,7 @@ func wispReaperInterval(config *DaemonPatrolConfig) time.Duration {
 func wispReaperMaxAge(config *DaemonPatrolConfig) time.Duration {
 	if config != nil && config.Patrols != nil && config.Patrols.WispReaper != nil {
 		if config.Patrols.WispReaper.MaxAgeStr != "" {
-			if d, err := ParseAgeDuration(config.Patrols.WispReaper.MaxAgeStr); err == nil && d > 0 {
+			if d, err := agentconfig.ParseAgeDuration(config.Patrols.WispReaper.MaxAgeStr); err == nil && d > 0 {
 				return d
 			}
 		}
@@ -70,7 +70,7 @@ func wispReaperMaxAge(config *DaemonPatrolConfig) time.Duration {
 func wispDeleteAge(config *DaemonPatrolConfig) time.Duration {
 	if config != nil && config.Patrols != nil && config.Patrols.WispReaper != nil {
 		if config.Patrols.WispReaper.DeleteAgeStr != "" {
-			if d, err := ParseAgeDuration(config.Patrols.WispReaper.DeleteAgeStr); err == nil && d > 0 {
+			if d, err := agentconfig.ParseAgeDuration(config.Patrols.WispReaper.DeleteAgeStr); err == nil && d > 0 {
 				return d
 			}
 		}
@@ -83,7 +83,7 @@ func wispDeleteAge(config *DaemonPatrolConfig) time.Duration {
 func wispReaperStaleIssueAge(config *DaemonPatrolConfig) time.Duration {
 	if config != nil && config.Patrols != nil && config.Patrols.WispReaper != nil {
 		if config.Patrols.WispReaper.StaleIssueAgeStr != "" {
-			if d, err := ParseAgeDuration(config.Patrols.WispReaper.StaleIssueAgeStr); err == nil && d > 0 {
+			if d, err := agentconfig.ParseAgeDuration(config.Patrols.WispReaper.StaleIssueAgeStr); err == nil && d > 0 {
 				return d
 			}
 		}
@@ -117,12 +117,6 @@ func wispReaperAutoCloseEnabled(config *DaemonPatrolConfig) bool {
 	}
 	knob := config.Patrols.WispReaper.AutoClose
 	return knob != nil && *knob
-}
-
-// ParseAgeDuration parses an age string through config.ParseAgeDuration, which
-// the daemon's config values are parsed with.
-func ParseAgeDuration(s string) (time.Duration, error) {
-	return agentconfig.ParseAgeDuration(s)
 }
 
 // triggerWispReaper runs a wisp_reaper cycle when the patrol is due, on its
@@ -237,6 +231,14 @@ func (d *Daemon) reaperWriter(dbName string, dryRun bool) (reaper.Writer, error)
 		return d.reaperWriterForFn(d.config.TownRoot, dbName)
 	}
 	return reaper.WriterForDatabase(d.config.TownRoot, dbName)
+}
+
+// openReaperDB opens the events retention step's connection to dbName.
+func (d *Daemon) openReaperDB(dbName string, readTimeout, writeTimeout time.Duration) (*beadsql.DB, error) {
+	if d.reaperOpenDBFn != nil {
+		return d.reaperOpenDBFn(dbName, readTimeout, writeTimeout)
+	}
+	return reaper.OpenDB(d.doltUserInfo(), d.doltServerHost(), d.doltServerPort(), dbName, readTimeout, writeTimeout)
 }
 
 // reapWispsInline runs the reaper cycle in the daemon, recording each step on
@@ -458,7 +460,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 			if err := reaper.ValidateDBName(dbName); err != nil {
 				continue
 			}
-			db, err := reaper.OpenDB(d.doltUserInfo(), host, port, dbName, 10*time.Second, 30*time.Second)
+			db, err := d.openReaperDB(dbName, 10*time.Second, 30*time.Second)
 			if err != nil {
 				if errors.Is(err, beadsql.ErrNotBeads) {
 					continue

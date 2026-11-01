@@ -17,20 +17,21 @@ var bdTableWrite = regexp.MustCompile(`\b(INSERT\s+(IGNORE\s+)?INTO|REPLACE\s+IN
 	"(`?[%\\w]+`?\\.)?`?" +
 	`(issues|wisps|labels|wisp_labels|comments|wisp_comments|events|wisp_events|dependencies|wisp_dependencies|config)\b`)
 
-// allowedBdTableWrites is the complete set of DML gastown may send to a bd
-// table. Events retention is the one exception (gt-hk21d): bd has no verb
-// that deletes audit rows, events is dolt_ignored so the DELETE leaves no
-// Dolt commit, and nothing is derived from an old row. The match is the whole
-// statement, so a different delete — another table, or this one without its
-// LIMIT — is still refused.
+// allowedBdTableWrites is the complete set of source lines that carry the only
+// DML gastown may send to a bd table: the events retention delete
+// (reaper.PurgeEvents, gt-hk21d). A line is exempt only when, trimmed, it is
+// exactly one of these, so a changed statement — another table, no LIMIT, or a
+// second statement sharing the line — is still refused.
 var allowedBdTableWrites = []string{
-	"DELETE FROM events WHERE created_at < ? ORDER BY created_at LIMIT ?",
+	`const deleteEventsBefore = "DELETE FROM events WHERE created_at < ? ORDER BY created_at LIMIT ?"`,
 }
 
-// bdTableWriteAllowed reports whether line carries one of allowedBdTableWrites.
+// bdTableWriteAllowed reports whether line is exactly one of
+// allowedBdTableWrites.
 func bdTableWriteAllowed(line string) bool {
+	trimmed := strings.TrimSpace(line)
 	for _, allowed := range allowedBdTableWrites {
-		if strings.Contains(line, allowed) {
+		if trimmed == allowed {
 			return true
 		}
 	}
@@ -70,21 +71,25 @@ func TestNoGoSourceWritesBdTables(t *testing.T) {
 
 // TestBdTableWriteAllowedIsTheEventsPurgeStatement: the exemption admits the
 // events purge statement and nothing that differs from it, so it cannot be
-// widened into a delete of another table or one without a LIMIT.
+// widened into a delete of another table, one without a LIMIT, or a line that
+// carries a second statement beside it.
 func TestBdTableWriteAllowedIsTheEventsPurgeStatement(t *testing.T) {
 	t.Parallel()
-	allowed := `deleteEventsBefore = "` + allowedBdTableWrites[0] + `"`
+	allowed := allowedBdTableWrites[0]
 	if !bdTableWrite.MatchString(allowed) {
 		t.Fatalf("the allowed statement is not one the guard would flag, so the exemption is dead: %s", allowed)
 	}
-	if !bdTableWriteAllowed(allowed) {
-		t.Errorf("bdTableWriteAllowed(%q) = false, want true", allowed)
+	for _, line := range []string{allowed, "  " + allowed + "  "} {
+		if !bdTableWriteAllowed(line) {
+			t.Errorf("bdTableWriteAllowed(%q) = false, want true", line)
+		}
 	}
 	for _, line := range []string{
 		`deleteEventsBefore = "DELETE FROM events WHERE created_at < ?"`,
 		`deleteEventsBefore = "DELETE FROM events WHERE created_at < ? ORDER BY created_at LIMIT 10"`,
 		`deleteEventsBefore = "DELETE FROM wisp_events WHERE created_at < ? ORDER BY created_at LIMIT ?"`,
 		`deleteEventsBefore = "DELETE FROM bd_events_journal WHERE created_at < ? ORDER BY created_at LIMIT ?"`,
+		allowed + `; db.Exec("DELETE FROM wisp_events WHERE x")`,
 	} {
 		if bdTableWriteAllowed(line) {
 			t.Errorf("bdTableWriteAllowed(%q) = true, want false", line)

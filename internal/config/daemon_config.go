@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -639,15 +640,23 @@ type WispReaperConfig struct {
 	EventsRetentionStr string `json:"events_retention,omitempty"`
 }
 
+// maxDayCount is the most whole days a time.Duration holds. A larger day count
+// wraps the multiplication into a different duration, so ParseAgeDuration
+// refuses it rather than return an age the operator did not ask for.
+const maxDayCount = int64(math.MaxInt64) / int64(24*time.Hour)
+
 // ParseAgeDuration parses an age string, accepting the day suffix the retired
 // mol-dog-reaper formula emitted for its 30d default (gt-2qzr). time.ParseDuration
 // rejects "30d" as "unknown unit d".
 func ParseAgeDuration(s string) (time.Duration, error) {
 	s = strings.TrimSpace(s)
 	if days, ok := strings.CutSuffix(s, "d"); ok {
-		n, err := strconv.Atoi(strings.TrimSpace(days))
+		n, err := strconv.ParseInt(strings.TrimSpace(days), 10, 64)
 		if err != nil {
 			return 0, fmt.Errorf("invalid day suffix in %q: %w", s, err)
+		}
+		if n > maxDayCount || n < -maxDayCount {
+			return 0, fmt.Errorf("day count in %q is out of range", s)
 		}
 		return time.Duration(n) * 24 * time.Hour, nil
 	}

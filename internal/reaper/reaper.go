@@ -4,7 +4,7 @@
 // candidates with read-only SQL and write only through a bd Writer (bd close,
 // bd delete), never with DML, so bd keeps is_blocked, the events journal and
 // its own commits (gt-fcxe9.12). Events retention (events.go) is the one DML
-// exception, and it touches only the events table (gt-hk21d).
+// exception (gt-hk21d).
 // They do not make eligibility decisions — the caller decides what to reap,
 // purge, and auto-close.
 package reaper

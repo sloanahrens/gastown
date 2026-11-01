@@ -6,11 +6,10 @@ import (
 	"time"
 )
 
-// The events table is the one bd table gastown deletes from with SQL: bd has
-// no verb that removes audit rows, the table is dolt_ignored so a DELETE
-// creates no Dolt commit, and nothing is derived from an old row (gt-hk21d).
-// The statements stay here so the table text lives with every other statement
-// gastown sends, and the read-only guard keeps every other DB call as it was.
+// The events retention statements are the one DML gastown sends to a bd table;
+// reaper.PurgeEvents carries the rationale (gt-hk21d). They stay here so the
+// table text lives with every other statement gastown sends, and the read-only
+// guard keeps every other DB call as it was.
 
 // countEventsBefore counts the connected database's events rows older than
 // cutoff.
