@@ -23,6 +23,10 @@ type Cutover struct {
 	Git forgejoresync.Runner
 	// Log writes one line to the run's stderr; nil writes nothing.
 	Log func(string)
+	// Runner runs the child processes that are not git: the landing-queue read and
+	// the daemon restart. A test injects a fake; nil means the exec seam is not
+	// wired, and a step that needs it refuses rather than skip its child.
+	Runner Runner
 	// MkdirTemp and RemoveAll make and remove the scratch directory the import's
 	// repository sits in; nil means os.MkdirTemp and os.RemoveAll.
 	MkdirTemp func(dir, pattern string) (string, error)
