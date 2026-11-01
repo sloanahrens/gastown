@@ -6,8 +6,8 @@
 // a pure function of the export and the terms. The package prints the invoice
 // and does nothing else; sending, storing and the PDF are later beads.
 //
-// The package has no caller yet. Its caller is the operator runbook (plan row
-// I2), which reads the operator's price sheet into Terms and prints the text.
+// The package has no caller yet. Its expected caller is the operator runbook,
+// which reads the operator's price sheet into Terms and prints the text.
 package invoice
 
 import (
@@ -111,7 +111,12 @@ func chargeLines(we export.WorkspaceExport, t Terms) ([]string, int64, error) {
 	}
 	var lines []string
 	var subtotal int64
+	seen := make(map[string]bool, len(we.SeatHours))
 	for _, p := range we.SeatHours {
+		if seen[p.Profile] {
+			return nil, 0, fmt.Errorf("invoice: profile %q appears more than once in the export", p.Profile)
+		}
+		seen[p.Profile] = true
 		unit, err := seatHourPrice(we, t, p.Profile)
 		if err != nil {
 			return nil, 0, err
@@ -120,7 +125,10 @@ func chargeLines(we export.WorkspaceExport, t Terms) ([]string, int64, error) {
 		if err != nil {
 			return nil, 0, err
 		}
-		subtotal += amount
+		subtotal, err = addCents(subtotal, amount)
+		if err != nil {
+			return nil, 0, err
+		}
 		lines = append(lines, fmt.Sprintf("seat-hours %s: %.2f h x %s/h = %s",
 			p.Profile, p.Hours, formatCents(unit), formatCents(amount)))
 	}
@@ -133,7 +141,10 @@ func chargeLines(we export.WorkspaceExport, t Terms) ([]string, int64, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	subtotal += storageAmount
+	subtotal, err = addCents(subtotal, storageAmount)
+	if err != nil {
+		return nil, 0, err
+	}
 	lines = append(lines, fmt.Sprintf("storage: %.2f GB-months x %s/GB-month = %s",
 		we.StorageGBMonths, formatCents(storageUnit), formatCents(storageAmount)))
 
@@ -144,9 +155,21 @@ func chargeLines(we export.WorkspaceExport, t Terms) ([]string, int64, error) {
 	if we.ZeroPrice {
 		overhead = 0
 	}
-	subtotal += overhead
+	subtotal, err = addCents(subtotal, overhead)
+	if err != nil {
+		return nil, 0, err
+	}
 	lines = append(lines, fmt.Sprintf("overhead share: %s", formatCents(overhead)))
 	return lines, subtotal, nil
+}
+
+// addCents adds a non-negative charge to a running subtotal, refusing a sum
+// that does not fit in int64 rather than letting it wrap.
+func addCents(subtotal, amount int64) (int64, error) {
+	if amount > math.MaxInt64-subtotal {
+		return 0, errors.New("invoice: subtotal is out of range")
+	}
+	return subtotal + amount, nil
 }
 
 // seatHourPrice is a profile's price in cents; a zero-price workspace applies
