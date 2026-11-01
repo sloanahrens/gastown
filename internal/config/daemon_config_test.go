@@ -121,6 +121,26 @@ func TestDaemonPatrolConfigDecodesRebuildOM(t *testing.T) {
 	}
 }
 
+func TestDaemonPatrolConfigDecodesRebuildHM(t *testing.T) {
+	t.Parallel()
+	var cfg DaemonPatrolConfig
+	body := `{"patrols":{"rebuild_hm":{"enabled":true,"interval":"30m"}}}`
+	if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
+		t.Fatalf("patrols.rebuild_hm = %v", err)
+	}
+	if got := cfg.Patrols.RebuildHM; got == nil || !got.Enabled || got.Interval != "30m" {
+		t.Fatalf("decoded %+v", got)
+	}
+	// Absent is nil, which the daemon reads as off.
+	var empty DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(`{"patrols":{}}`), &empty); err != nil {
+		t.Fatal(err)
+	}
+	if empty.Patrols.RebuildHM != nil {
+		t.Errorf("an absent rebuild_hm decoded as %+v", empty.Patrols.RebuildHM)
+	}
+}
+
 // TestPatrolMinIntervalDecodesAndDefaults pins the optional key a patrol that
 // coalesces forced runs reads: strict decoding accepts it, an absent or
 // unusable value yields the patrol's own fallback, and a nil patrol yields it

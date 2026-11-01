@@ -391,6 +391,11 @@ type PatrolsConfig struct {
 	// the landing worker execs, so the operator turns it on.
 	RebuildOM *PatrolConfig `json:"rebuild_om,omitempty"`
 
+	// RebuildHM installs the hm origin's main when the hm-skew monitor reads the
+	// installed hm as behind (internal/daemon/rebuild_hm.go). Opt-in: it swaps
+	// the hm binary on the machine, so the operator turns it on.
+	RebuildHM *PatrolConfig `json:"rebuild_hm,omitempty"`
+
 	// MainBranchTest is the deleted main_branch_test patrol's key
 	// (gt-v4ssj.4: the landing worker's post-landing run owns red main). It is
 	// accepted and ignored so a daemon.json that still carries it parses.

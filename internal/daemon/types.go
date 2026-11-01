@@ -492,6 +492,13 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		}
 		return config.Patrols.RebuildOM.Enabled
 	}
+	// rebuild_hm is opt-in for the same reason: it swaps the hm binary (gt-bllo8).
+	if patrol == "rebuild_hm" {
+		if config == nil || config.Patrols == nil || config.Patrols.RebuildHM == nil {
+			return false
+		}
+		return config.Patrols.RebuildHM.Enabled
+	}
 	// overseer_report defaults OFF: the operator retires the overseer's cron
 	// prompt before the daemon takes the digest over (gt-a6fg7).
 	if patrol == "overseer_report" {
