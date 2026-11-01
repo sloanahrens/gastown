@@ -13,8 +13,13 @@ import (
 //go:embed daily-request.md
 var dailyRequest string
 
-// Request returns the request text addressed to reporter: every <NAME> in it
-// is replaced with the reporter's name.
-func Request(reporter string) string {
-	return strings.ReplaceAll(dailyRequest, "<NAME>", reporter)
+// Request returns the request text addressed to reporter, telling it to publish
+// under runtimeDir: every <NAME> is replaced with the reporter's name and every
+// <RUNTIME_DIR> with the runtime directory the caller reads reports from, so
+// the request names the path the reader looks at rather than a fixed one.
+func Request(reporter, runtimeDir string) string {
+	return strings.NewReplacer(
+		"<NAME>", reporter,
+		"<RUNTIME_DIR>", runtimeDir,
+	).Replace(dailyRequest)
 }
