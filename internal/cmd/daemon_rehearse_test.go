@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -19,7 +18,8 @@ import (
 // rehearseLive is the fake live town; the scratch root is outside it.
 const (
 	rehearseLive = "/live/gt"
-	rehearseRoot = "/scratch/rehearsal/town"
+	rehearseDir  = "/live/gt/.runtime/rehearsal/run-t1"
+	rehearseRoot = rehearseDir + "/town"
 	rehearseImg  = "gt-daemon:test"
 )
 
@@ -64,10 +64,11 @@ func newRehearseHost() *rehearseHost {
 	return &rehearseHost{
 		clock: time.Unix(1_000_000, 0),
 		files: map[string][]byte{
-			rehearseLive + "/settings/config.json": []byte(`{"landing":{"work_root":"/opt/missing"},"gate":"host.docker.internal:28443","forge":"https://example.test/api/v1","api_key":"sk-live-key","ref":"${KEEP_ME}","auth":{"token":"tok-123"}}`),
-			rehearseLive + "/settings/secrets.env": []byte("RAW=raw-secret-value\n"),
-			rehearseLive + "/settings/daemon.env":  []byte("# comment\nDEEPSEEK_KEY=sk-secret-value\nexport PATH=/usr/bin:/bin\n"),
-			rehearseLive + "/mayor/town.json":      []byte(`{"name":"gt"}`),
+			rehearseLive + "/settings/config.json":         []byte(`{"landing":{"work_root":"/opt/missing","clones":"/h/landing/x","town":"/live/gt/.runtime/y"},"gate":"host.docker.internal:28443","forge":"https://example.test/api/v1","api_key":"sk-live-key","ref":"${KEEP_ME}","auth":{"token":"tok-123"}}`),
+			rehearseLive + "/settings/secrets.env":         []byte("RAW=raw-secret-value\n"),
+			rehearseLive + "/settings/daemon.env":          []byte("# comment\nDEEPSEEK_KEY=sk-secret-value\nexport PATH=/usr/bin:/bin\n"),
+			rehearseLive + "/mayor/town.json":              []byte(`{"name":"gt"}`),
+			rehearseLive + "/daemon/container/compose.yml": []byte("services:\n  daemon:\n    volumes:\n      - type: bind\n        source: /live/gt\n        target: /live/gt\n      - type: bind\n        source: /h/landing\n        target: /h/landing\n      - type: volume\n        source: v\n        target: /vol\n"),
 		},
 		heartbeat: true,
 	}
@@ -134,13 +135,14 @@ func (h *rehearseHost) deps(out *bytes.Buffer) rehearseDeps {
 			}
 			return p, nil
 		},
+		newID: func() string { return "t1" },
 		now:   func() time.Time { return h.clock },
 		sleep: func(d time.Duration) { h.clock = h.clock.Add(d); h.slept += d },
 	}
 }
 
 func rehearseFlagsFor() rehearseFlags {
-	return rehearseFlags{liveRoot: rehearseLive, root: rehearseRoot, image: rehearseImg, budget: time.Minute}
+	return rehearseFlags{liveRoot: rehearseLive, image: rehearseImg, budget: time.Minute}
 }
 
 func TestContainerRehearsalListsEveryFailingCheck(t *testing.T) {
@@ -258,60 +260,85 @@ func TestContainerRehearsalRemovesTheScratchTownOnEveryExit(t *testing.T) {
 			h := newRehearseHost()
 			set(h)
 			_ = runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&bytes.Buffer{}))
-			if len(h.removed) != 2 || h.removed[0] != rehearseRoot || h.removed[1] != rehearseRoot {
-				t.Errorf("removed %v, want the scratch root before and after", h.removed)
+			if len(h.removed) != 1 || h.removed[0] != rehearseDir {
+				t.Errorf("removed %v, want exactly this run's directory %s", h.removed, rehearseDir)
 			}
 		})
 	}
 }
 
-func TestContainerRehearsalReportsAScratchTownItCannotRemove(t *testing.T) {
+func TestContainerRehearsalReportsARunDirectoryItCannotRemove(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("boom")
 	h := newRehearseHost()
 	h.removeErr = []error{boom}
-	if err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&bytes.Buffer{})); !errors.Is(err, boom) || len(h.writes) != 0 {
-		t.Errorf("a leftover that cannot be removed: err=%v writes=%v", err, h.writes)
-	}
-	h = newRehearseHost()
-	h.removeErr = []error{nil, boom}
 	if err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&bytes.Buffer{})); !errors.Is(err, boom) {
 		t.Errorf("a final removal that fails must be reported, got %v", err)
 	}
 }
 
-// The root may not be the live town, inside it (except strictly under
-// .runtime/rehearsal) or around it, on resolved paths.
-func TestContainerRehearsalRootGuardUsesResolvedPaths(t *testing.T) {
+// Nothing is deleted that this run did not create and mark: a directory whose
+// marker is missing or names another run is left alone, and the rehearsal has
+// no flag that names a root to delete.
+func TestContainerRehearsalDeletesOnlyADirectoryItMarked(t *testing.T) {
 	t.Parallel()
+	for name, marker := range map[string][]byte{"no marker": nil, "another run's marker": []byte("gt rehearsal run run-other\n")} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newRehearseHost()
+			d := h.deps(&bytes.Buffer{})
+			write := d.write
+			d.write = func(p string, data []byte, m os.FileMode) error {
+				if strings.HasSuffix(p, rehearseMarker) {
+					if marker == nil {
+						return nil // the marker never lands
+					}
+					data = marker
+				}
+				return write(p, data, m)
+			}
+			err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), d)
+			if err == nil || !strings.Contains(err.Error(), "does not carry this run's marker") || len(h.removed) != 0 {
+				t.Errorf("err=%v removed=%v, want a refusal to delete", err, h.removed)
+			}
+		})
+	}
+	if daemonRehearseCmd.Flags().Lookup("root") != nil {
+		t.Error("the rehearsal takes a --root: it must delete only a directory it created itself")
+	}
+}
+
+// The run directory is chosen on resolved paths: one that leads out of the live
+// town is refused before anything is written, and so is an unresolvable one.
+func TestContainerRehearsalRunDirectoryStaysInsideTheLiveTown(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
 	for name, tc := range map[string]struct {
-		root  string
 		links map[string]string
-		ok    bool
+		bad   string
+		want  string
 	}{
-		"inside the live daemon dir": {rehearseLive + "/daemon", nil, false},
-		"inside the live beads":      {rehearseLive + "/.beads/x", nil, false},
-		"the runtime dir":            {rehearseLive + "/.runtime", nil, false},
-		"the rehearsal home itself":  {rehearseLive + "/.runtime/rehearsal", nil, false},
-		"around the live town":       {"/live", nil, false},
-		"a link into the live town":  {"/scratch/link", map[string]string{"/scratch/link": rehearseLive + "/.beads"}, false},
-		"under the rehearsal home":   {rehearseLive + "/.runtime/rehearsal/town", nil, true},
-		"outside the live town":      {rehearseRoot, nil, true},
+		"runtime links out":    {map[string]string{rehearseLive + "/.runtime/rehearsal/run-t1": "/elsewhere/run-t1"}, "", "outside the live town"},
+		"live unresolvable":    {nil, rehearseLive, "cannot be resolved"},
+		"run dir unresolvable": {nil, rehearseDir, "cannot be resolved"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			h := newRehearseHost()
 			h.links = tc.links
-			f := rehearseFlagsFor()
-			f.root = tc.root
-			// The fake serves the live files under rehearseLive; the settings read does not depend on the root.
-			err := runDaemonRehearse(context.Background(), f, h.deps(&bytes.Buffer{}))
-			refused := err != nil && strings.Contains(err.Error(), "the scratch town is outside the live town")
-			if refused == tc.ok {
-				t.Fatalf("root %s: err=%v, want ok=%v", tc.root, err, tc.ok)
+			d := h.deps(&bytes.Buffer{})
+			if tc.bad != "" {
+				inner := d.evalSymlinks
+				d.evalSymlinks = func(p string) (string, error) {
+					if p == tc.bad {
+						return "", boom
+					}
+					return inner(p)
+				}
 			}
-			if refused && (len(h.writes) != 0 || len(h.removed) != 0 || len(h.runs) != 0) {
-				t.Errorf("a refused root was written, removed or run: %v %v %v", h.writes, h.removed, h.runs)
+			err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), d)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || len(h.writes) != 0 || len(h.removed) != 0 || len(h.runs) != 0 {
+				t.Fatalf("err=%v writes=%v removed=%v runs=%v", err, h.writes, h.removed, h.runs)
 			}
 		})
 	}
@@ -321,7 +348,7 @@ func TestContainerRehearsalReportsAContainerThatExits(t *testing.T) {
 	t.Parallel()
 	h := newRehearseHost()
 	h.heartbeat = false
-	h.failing = []string{"exec gt-rehearsal"}
+	h.failing = []string{"exec gt-run-t1"}
 	var out bytes.Buffer
 	err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
 	if err == nil || !strings.Contains(out.String(), "exited before a heartbeat") {
@@ -355,13 +382,13 @@ func TestContainerRehearsalTouchesNothingLive(t *testing.T) {
 		t.Fatal("nothing was staged")
 	}
 	for _, p := range append(append(append([]string{}, h.writes...), h.mkdirs...), h.removed...) {
-		if !pathWithin(p, rehearseRoot) {
+		if !pathWithin(p, rehearseDir) {
 			t.Errorf("a write targets %s, outside the scratch root", p)
 		}
 	}
 	for _, argv := range h.runs {
 		for _, a := range argv {
-			if strings.Contains(a, rehearseLive) {
+			if strings.Contains(strings.ReplaceAll(a, rehearseDir, ""), rehearseLive) {
 				t.Errorf("a command names the live town: %v", argv)
 			}
 		}
@@ -409,11 +436,8 @@ func TestContainerRehearsalRefusesBeforeWritingAnything(t *testing.T) {
 		mutate func(*rehearseFlags)
 		want   string
 	}{
-		"no image":       {func(f *rehearseFlags) { f.image = "" }, "--image are required"},
-		"relative live":  {func(f *rehearseFlags) { f.liveRoot = "live" }, "required"},
-		"root is live":   {func(f *rehearseFlags) { f.root = rehearseLive }, "the scratch town is outside"},
-		"root in config": {func(f *rehearseFlags) { f.root = rehearseLive + "/settings/x" }, "the scratch town is outside"},
-		"relative root":  {func(f *rehearseFlags) { f.root = "rel" }, "is not absolute"},
+		"no image":      {func(f *rehearseFlags) { f.image = "" }, "--image are required"},
+		"relative live": {func(f *rehearseFlags) { f.liveRoot = "live" }, "required"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newRehearseHost()
@@ -427,18 +451,6 @@ func TestContainerRehearsalRefusesBeforeWritingAnything(t *testing.T) {
 				t.Errorf("a refused rehearsal wrote %v and ran %v", h.writes, h.runs)
 			}
 		})
-	}
-}
-
-func TestContainerRehearsalDefaultRootIsUnderTheLiveRuntime(t *testing.T) {
-	t.Parallel()
-	h := newRehearseHost()
-	f := rehearseFlagsFor()
-	f.root = ""
-	_ = runDaemonRehearse(context.Background(), f, h.deps(&bytes.Buffer{}))
-	want := filepath.Join(rehearseLive, ".runtime", "rehearsal", "town", "settings", "config.json")
-	if len(h.writes) == 0 || !slices.Contains(h.writes, want) {
-		t.Errorf("writes = %v, want %s among them", h.writes, want)
 	}
 }
 
@@ -488,24 +500,103 @@ func TestContainerRehearsalFailsLoudlyWhenAPinnedImageIsNotServed(t *testing.T) 
 	}
 }
 
-func TestContainerRehearsalRootGuardReportsPathsItCannotResolve(t *testing.T) {
+// A path under a bind of the rendered compose is not looked for in the image; a
+// path outside every bind is. The compose file itself is required.
+func TestContainerRehearsalChecksPathsAgainstTheComposeBinds(t *testing.T) {
 	t.Parallel()
-	boom := errors.New("boom")
-	for name, bad := range map[string]string{"the live root": rehearseLive, "the scratch root": rehearseRoot} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			h := newRehearseHost()
-			d := h.deps(&bytes.Buffer{})
-			d.evalSymlinks = func(p string) (string, error) {
-				if p == bad {
-					return "", boom
-				}
-				return p, nil
-			}
-			err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), d)
-			if !errors.Is(err, boom) || len(h.writes) != 0 {
-				t.Errorf("err=%v writes=%v", err, h.writes)
-			}
-		})
+	h := newRehearseHost()
+	var out bytes.Buffer
+	_ = runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
+	var probed []string
+	for _, argv := range h.runs {
+		if j := strings.Join(argv, " "); strings.Contains(j, "--entrypoint test") {
+			probed = append(probed, argv[len(argv)-1])
+		}
+	}
+	if !slices.Equal(probed, []string{"/opt/missing"}) {
+		t.Errorf("probed %v, want only /opt/missing (/h/landing/x and /live/gt/.runtime/y lie under binds)", probed)
+	}
+	for name, content := range map[string][]byte{"missing": nil, "unparseable": []byte("services: [")} {
+		h := newRehearseHost()
+		if content == nil {
+			delete(h.files, rehearseLive+"/daemon/container/compose.yml")
+		} else {
+			h.files[rehearseLive+"/daemon/container/compose.yml"] = content
+		}
+		var out bytes.Buffer
+		err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
+		if err == nil || !strings.Contains(out.String(), "paths            FAIL") || !strings.Contains(out.String(), "compose") {
+			t.Errorf("%s compose: err=%v\n%s", name, err, out.String())
+		}
+	}
+}
+
+// A docker call that blocks ends at its deadline instead of hanging the
+// rehearsal, in the heartbeat wait and in a check.
+func TestContainerRehearsalBoundsEveryDockerCall(t *testing.T) {
+	t.Parallel()
+	h := newRehearseHost()
+	h.heartbeat = false
+	f := rehearseFlagsFor()
+	f.budget = 50 * time.Millisecond
+	d := h.deps(&bytes.Buffer{})
+	inner := d.run
+	d.run = func(ctx context.Context, dir string, env, argv []string) error {
+		if slices.Contains(argv, "exec") { // the liveness probe hangs until its context ends
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return inner(ctx, dir, env, argv)
+	}
+	var out bytes.Buffer
+	d.out = &out
+	_ = runDaemonRehearse(context.Background(), f, d)
+	if !strings.Contains(out.String(), "no heartbeat in 50ms") {
+		t.Errorf("a hung docker call must end the wait at the budget:\n%s", out.String())
+	}
+}
+
+// An engine that is down or an image that is unknown (docker's own exit codes,
+// not the probe's) is reported as a docker failure for every probe kind.
+func TestContainerRehearsalReportsDockerFailuresAsDockerFailures(t *testing.T) {
+	t.Parallel()
+	h := newRehearseHost()
+	h.failing = []string{"validate", "test -e /opt/missing", "/dev/tcp/host.docker.internal/28443"}
+	h.codes = map[string]int{"validate": 125, "test -e": 125, "/dev/tcp": 125}
+	var out bytes.Buffer
+	_ = runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
+	got := out.String()
+	for _, want := range []string{"gt config validate: the probe did not run", "/opt/missing: the probe did not run", "host.docker.internal:28443: the probe did not run"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+	for _, wrong := range []string{"the settings do not load", "absent from the image", "does not accept a TCP connect"} {
+		if strings.Contains(got, wrong) {
+			t.Errorf("a docker failure read as %q:\n%s", wrong, got)
+		}
+	}
+}
+
+// One docker call in a check that hangs fails that probe at the call budget and
+// leaves the other checks to run.
+func TestContainerRehearsalBoundsAHungCheckCall(t *testing.T) {
+	t.Parallel()
+	h := newRehearseHost()
+	d := h.deps(&bytes.Buffer{})
+	d.callBudget = 20 * time.Millisecond
+	inner := d.run
+	d.run = func(ctx context.Context, dir string, env, argv []string) error {
+		if slices.Contains(argv, "command -v tmux") {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return inner(ctx, dir, env, argv)
+	}
+	var out bytes.Buffer
+	d.out = &out
+	err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), d)
+	if err == nil || !strings.Contains(out.String(), "tmux: the probe did not run") || !strings.Contains(out.String(), "heartbeat        ok") {
+		t.Fatalf("err=%v\n%s", err, out.String())
 	}
 }
