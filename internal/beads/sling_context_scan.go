@@ -49,8 +49,11 @@ func SlingContextSearchDirs(townRoot string) ([]string, error) {
 // (GH#3468), so it scans the town plus every rig. It does not filter by
 // readiness or circuit breaker.
 //
-// It deduplicates by store and context ID: two search dirs can resolve to
-// one database (a rig's top-level .beads redirecting to mayor/rig/.beads).
+// Each database is read once: two search dirs can resolve to one database
+// (a rig's top-level .beads redirecting to mayor/rig/.beads, or the reverse),
+// and the first such dir in SlingContextSearchDirs order is the one queried.
+// Its records carry that dir as WorkDir, and they are still deduplicated by
+// store and context ID.
 func ListOpenSlingContextRecords(townRoot string) ([]SlingContextRecord, error) {
 	return listOpenSlingContextRecords(townRoot, nil)
 }
@@ -60,12 +63,17 @@ func ListOpenSlingContextRecords(townRoot string) ([]SlingContextRecord, error) 
 func listOpenSlingContextRecords(townRoot string, open func(dir string) Client) ([]SlingContextRecord, error) {
 	var records []SlingContextRecord
 	seen := make(map[string]bool)
+	queried := make(map[string]bool)
 	dirs, err := SlingContextSearchDirs(townRoot)
 	if err != nil {
 		return nil, err
 	}
 	for _, dir := range dirs {
 		beadsDir := ResolveBeadsDir(dir)
+		if queried[beadsDir] {
+			continue
+		}
+		queried[beadsDir] = true
 		var store Client
 		if open != nil {
 			store = open(dir)
