@@ -56,9 +56,17 @@ func (s *attentionSources) auditResolvedRiskFails(ctx context.Context) ([]string
 	read := map[string]*beads.Issue{}
 	since := s.now.Add(-attentionRiskPathWindow)
 	rigs := s.landingRigs()
-	// The pass starts at the rig after the last one the previous pass finished,
-	// so a pass cut short by its share does not starve the rigs behind the
-	// first (auditNext is carried across ticks by the attention cache).
+	// auditNext is where the next tick starts: the rig after the last one this
+	// pass finished or was cut inside, so a rig whose read always outlasts the
+	// share cannot hold the rigs behind it back (carried across ticks by the
+	// attention cache). A pass stopped by the write cap stays on its rig: it
+	// made progress and has records left.
+	cut := func(err error) error {
+		if firstErr == nil {
+			return err
+		}
+		return errors.Join(firstErr, err)
+	}
 	start := 0
 	if len(rigs) > 0 {
 		start = s.auditStart % len(rigs)
@@ -67,8 +75,9 @@ func (s *attentionSources) auditResolvedRiskFails(ctx context.Context) ([]string
 	for i := range rigs {
 		idx := (start + i) % len(rigs)
 		rig := rigs[idx]
+		s.auditNext = idx
 		if err := ctx.Err(); err != nil {
-			return wrote, err
+			return wrote, cut(err)
 		}
 		recs, err := s.riskLandings(rig, since)
 		if err != nil {
@@ -82,6 +91,7 @@ func (s *attentionSources) auditResolvedRiskFails(ctx context.Context) ([]string
 		if err != nil {
 			note(fmt.Errorf("%s: %w", rig, err))
 			if ctx.Err() != nil {
+				s.auditNext = (idx + 1) % len(rigs)
 				return wrote, firstErr
 			}
 			// A batch that read nothing skips the rig; a per-bead fallback
@@ -96,7 +106,8 @@ func (s *attentionSources) auditResolvedRiskFails(ctx context.Context) ([]string
 				return wrote, firstErr
 			}
 			if err := ctx.Err(); err != nil {
-				return wrote, err
+				s.auditNext = (idx + 1) % len(rigs)
+				return wrote, cut(err)
 			}
 			if rec.BeadID == "" || rec.Head == "" || len(rec.RiskPaths) == 0 {
 				continue
@@ -159,8 +170,8 @@ func (s *attentionSources) auditResolvedRiskFails(ctx context.Context) ([]string
 
 // riskIssuesBatch reads the work beads of rig's qualifying landing records (a
 // bead id, a head and risk paths) in one batched call, keyed by bead id. A
-// source without a batch read (riskIssues nil) reads them one at a time, as
-// the pass did before gt-5req0.
+// source without a batch read (riskIssues nil) reads each id with riskIssue
+// (gt-5req0).
 func (s *attentionSources) riskIssuesBatch(ctx context.Context, rig string, recs []land.LandingRecord) (map[string]*beads.Issue, error) {
 	var ids []string
 	seen := map[string]bool{}

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -148,8 +149,8 @@ func TestRiskAuditRotatesAfterATimeout(t *testing.T) {
 	if _, err := f.src.auditResolvedRiskFails(ctx); err == nil {
 		t.Fatalf("%s: the cut-short pass returned no error", t.Name())
 	}
-	if f.src.auditNext != 1 {
-		t.Fatalf("%s: auditNext = %d after alpha finished and beta was cut, want 1", t.Name(), f.src.auditNext)
+	if f.src.auditNext != 2 {
+		t.Fatalf("%s: auditNext = %d after alpha finished and beta was cut, want 2 (the rig after the cut one)", t.Name(), f.src.auditNext)
 	}
 
 	w.batches = nil
@@ -157,8 +158,8 @@ func TestRiskAuditRotatesAfterATimeout(t *testing.T) {
 	if _, err := f.src.auditResolvedRiskFails(context.Background()); err != nil {
 		t.Fatalf("%s: second pass: %v", t.Name(), err)
 	}
-	if got := strings.Join(w.batches, ","); got != "beta:1,gamma:1,alpha:1" {
-		t.Errorf("%s: second pass read %s, want it to begin at beta", t.Name(), got)
+	if got := strings.Join(w.batches, ","); got != "gamma:1,alpha:1,beta:1" {
+		t.Errorf("%s: second pass read %s, want it to begin at gamma", t.Name(), got)
 	}
 }
 
@@ -250,4 +251,108 @@ func TestAttentionRiskIssuesBatchesOrFallsBack(t *testing.T) {
 			t.Errorf("%s: a canceled context returned no error", t.Name())
 		}
 	})
+}
+
+// A rig whose batched read always outlasts the share is skipped past by the
+// next tick: every tick that is cut inside it starts one rig later, so the
+// rigs behind it are reached (gt-5req0 round 1).
+func TestRiskAuditDoesNotStayOnARigThatIsAlwaysCut(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	w := newBatchAuditWorld(f, "alpha", "beta", "gamma")
+	head := strings.Repeat("e", 40)
+	for _, rig := range w.rigs {
+		w.landIn(rig, "gt-"+rig[:1]+"1", head, "ok")
+	}
+	inner := f.src.riskIssues
+	cutAlpha := func(c context.Context, cancel context.CancelFunc) {
+		f.src.riskIssues = func(cc context.Context, rig string, ids []string) (map[string]*beads.Issue, error) {
+			if rig == "alpha" && cc == c {
+				cancel()
+				return nil, cc.Err()
+			}
+			return inner(cc, rig, ids)
+		}
+	}
+
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	defer cancel1()
+	cutAlpha(ctx1, cancel1)
+	if _, err := f.src.auditResolvedRiskFails(ctx1); err == nil {
+		t.Fatalf("%s: the cut pass returned no error", t.Name())
+	}
+	if f.src.auditNext != 1 {
+		t.Fatalf("%s: auditNext = %d after a cut inside the first rig, want 1 (the rig after it)", t.Name(), f.src.auditNext)
+	}
+
+	w.batches = nil
+	f.src.auditStart = f.src.auditNext
+	if _, err := f.src.auditResolvedRiskFails(context.Background()); err != nil {
+		t.Fatalf("%s: second pass: %v", t.Name(), err)
+	}
+	if got := strings.Join(w.batches, ","); got != "beta:1,gamma:1,alpha:1" {
+		t.Errorf("%s: second pass read %s, want beta and gamma reached first", t.Name(), got)
+	}
+}
+
+// A batch that fails for a reason other than the context skips that rig, keeps
+// the error for the caller, and the next rig is still audited; a pass cut short
+// later returns the earlier error with the cut.
+func TestRiskAuditSkipsARigWhoseBatchFailsAndGoesOn(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	w := newBatchAuditWorld(f, "alpha", "beta")
+	head := strings.Repeat("f", 40)
+	w.landIn("alpha", "gt-a1", head, failNote(head, "gt-fa"))
+	w.landIn("beta", "gt-b1", head, failNote(head, "gt-fb"))
+	w.status["gt-fa"], w.status["gt-fb"] = "closed", "closed"
+	inner := f.src.riskIssues
+	f.src.riskIssues = func(c context.Context, rig string, ids []string) (map[string]*beads.Issue, error) {
+		if rig == "alpha" {
+			return nil, errors.New("bd show: boom")
+		}
+		return inner(c, rig, ids)
+	}
+
+	wrote, err := f.src.auditResolvedRiskFails(context.Background())
+
+	if err == nil || !strings.Contains(err.Error(), "alpha") || !strings.Contains(err.Error(), "boom") {
+		t.Errorf("%s: error = %v, want one naming alpha and the failure", t.Name(), err)
+	}
+	if len(wrote) != 1 || !strings.HasPrefix(wrote[0], "gt-b1: ") {
+		t.Errorf("%s: wrote %v, want only beta's FAIL audited", t.Name(), wrote)
+	}
+	if f.src.auditNext != 0 {
+		t.Errorf("%s: auditNext = %d after a full pass, want it back at the start", t.Name(), f.src.auditNext)
+	}
+}
+
+// A cut-short pass keeps an earlier rig's error: the caller logs one error, and
+// it must not be only the cut.
+func TestRiskAuditCutKeepsAnEarlierRigsError(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	w := newBatchAuditWorld(f, "alpha", "beta")
+	head := strings.Repeat("a", 40)
+	w.landIn("alpha", "gt-a1", head, "ok")
+	w.landIn("beta", "gt-b1", head, "ok")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	inner := f.src.riskIssues
+	f.src.riskIssues = func(c context.Context, rig string, ids []string) (map[string]*beads.Issue, error) {
+		if rig == "alpha" {
+			return nil, errors.New("bd show: boom")
+		}
+		cancel()
+		return inner(c, rig, ids)
+	}
+
+	_, err := f.src.auditResolvedRiskFails(ctx)
+
+	if err == nil || !strings.Contains(err.Error(), "boom") || !errors.Is(err, context.Canceled) {
+		t.Errorf("%s: error = %v, want the earlier rig's failure joined with the cut", t.Name(), err)
+	}
 }
