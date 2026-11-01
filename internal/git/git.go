@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -4511,6 +4512,15 @@ type UncommittedWorkStatus struct {
 	// (sourceBeside.spares).
 	beside sourceBeside
 
+	// overlayCLAUDE records that the worktree's root CLAUDE.md carries
+	// templates.PolecatLifecycleMarker, so the file is the rig-written polecat
+	// overlay rather than repo source. autoSaveUncommittedWork in gt done
+	// unstages the same file by the same marker test, and the submission path
+	// strips it from the branch, so the uncommitted-work check ignores it too
+	// (gt-iv92k). A file the marker cannot be read from is not an overlay and
+	// blocks like any other change.
+	overlayCLAUDE bool
+
 	changedSources     []string
 	changedSourcesDone bool
 
@@ -4860,11 +4870,22 @@ func (s *UncommittedWorkStatus) changedSourceFiles() []string {
 
 // isRuntimeArtifact is isGasTownRuntimePath for a path in this status, by the
 // same rule RuntimeArtifactPaths resets by (sourceBeside.spares), so gt done
-// ignores what the checkpoint dog leaves out of its commit.
+// ignores what the checkpoint dog leaves out of its commit. The root CLAUDE.md
+// is classified by its content rather than its name: it is an artifact exactly
+// when the worktree's copy carries the polecat lifecycle marker
+// (overlayCLAUDE).
 func (s *UncommittedWorkStatus) isRuntimeArtifact(path string) bool {
+	if s.overlayCLAUDE && normalizeArtifactPath(path) == polecatOverlayCLAUDE {
+		return true
+	}
 	root, ok := runtimeArtifactRoot(path)
 	return ok && !s.beside.spares(root, path, s.changedSourceFiles())
 }
+
+// polecatOverlayCLAUDE is the worktree-root file a polecat's spawn writes the
+// lifecycle overlay into. git can only report that it changed; whether it is
+// overlay or repo source is in its content.
+const polecatOverlayCLAUDE = "CLAUDE.md"
 
 // NonRuntimePaths returns uncommitted paths that are not covered by the runtime
 // artifact policy. Recovery checks use this to ignore generated tool state while
@@ -5195,6 +5216,7 @@ func (g *Git) checkUncommittedWork(unpushedCommits func() (int, error)) (*Uncomm
 	status.UnmergedFiles = gitStatus.Unmerged
 	status.StagedOnly = gitStatus.StagedOnly
 	status.beside = g.besideSource(append(append([]string{}, status.ModifiedFiles...), status.UntrackedFiles...))
+	status.overlayCLAUDE = g.hasOverlayCLAUDE(status.ModifiedFiles, status.UntrackedFiles)
 
 	// Check stashes
 	stashCount, err := g.StashCount()
@@ -5219,6 +5241,28 @@ func (g *Git) checkUncommittedWork(unpushedCommits func() (int, error)) (*Uncomm
 	status.UnpushedCommits = unpushed
 
 	return status, nil
+}
+
+// hasOverlayCLAUDE reports whether the worktree's root CLAUDE.md carries
+// templates.PolecatLifecycleMarker, the test autoSaveUncommittedWork applies
+// before it unstages the file. The worktree is read only when one of the
+// changed paths could be that file, and a missing or unreadable file has no
+// marker: the path then keeps blocking a submit.
+func (g *Git) hasOverlayCLAUDE(modified, untracked []string) bool {
+	if g.workDir == "" {
+		return false
+	}
+	isRootCLAUDE := func(path string) bool {
+		return normalizeArtifactPath(path) == polecatOverlayCLAUDE
+	}
+	if !slices.ContainsFunc(modified, isRootCLAUDE) && !slices.ContainsFunc(untracked, isRootCLAUDE) {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(g.workDir, polecatOverlayCLAUDE))
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), templates.PolecatLifecycleMarker)
 }
 
 // besideSource returns the coverage/ and .cache/ roots of paths that hold a

@@ -829,6 +829,23 @@ func TestSubmitRefusesUncommittedWork(t *testing.T) {
 	}
 }
 
+// TestSubmitAcceptsRuntimeOnlyUncommittedWork: the refusal is
+// CleanExcludingRuntime's, so a worktree whose only uncommitted paths are
+// toolchain state submits. The rig-written CLAUDE.md is the overlay
+// CheckUncommittedWork classifies as runtime by its marker (gt-iv92k), and
+// these rows are the other artifacts that rule already covers.
+func TestSubmitAcceptsRuntimeOnlyUncommittedWork(t *testing.T) {
+	t.Parallel()
+	h := newSubmitHarness(t)
+	h.repo.dirty = &git.UncommittedWorkStatus{
+		HasUncommittedChanges: true,
+		UntrackedFiles:        []string{".runtime/state.json", "CLAUDE.local.md"},
+	}
+	if err := h.submit(); err != nil {
+		t.Fatalf("submit = %v, want a runtime-only worktree to submit", err)
+	}
+}
+
 // TestSubmitDropsAnOverseerReview: an overseer review covers one head, and a
 // submission brings a new one, so gt done removes the label (gt-g8t3m).
 func TestSubmitDropsAnOverseerReview(t *testing.T) {
