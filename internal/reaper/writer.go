@@ -72,33 +72,28 @@ const (
 )
 
 // transientDeleteErrors are the substrings of a bd delete failure a retry can
-// clear: a Dolt serialization conflict, a lock wait timeout, or a connection
-// that timed out or dropped. A refusal or a bad id matches none of them and
-// fails the chunk at once (gt-ujklm).
+// clear. Each is a marker the repo has seen in real bd or Dolt output, and each
+// names a failure where the delete did not apply: a rolled-back conflict, or a
+// connection that died before the command ran. A lost reply is left out: the
+// delete may have landed, and a retry would then report a landed delete as
+// failed (the same line bdSerializationFailure draws in cmd/bd_contention_retry.go,
+// gt-ye21). A refusal or a bad id matches none of them and fails at once (gt-ujklm).
 var transientDeleteErrors = []string{
-	// Serialization failure: the transaction was rolled back, so retrying
-	// cannot apply a delete twice.
+	// Serialization failure: Dolt rolled the transaction back, so a retry
+	// cannot apply a delete twice (cmd/bd_contention_retry.go, landworker/retry.go).
 	"error 1213",
 	"serialization failure",
-	"deadlock found",
 	"try restarting transaction",
-	// Lock wait timeout.
-	"error 1205",
+	// Lock wait timeout, which the Dolt server layer already treats as retryable (doltserver.go).
 	"lock wait timeout",
-	// Connection timeout or a dropped connection.
-	"error 2013",
-	"error 2006",
-	"i/o timeout",
+	// The connection died before bd ran the command (beads/bd_container_retry.go).
 	"invalid connection",
-	"connection reset",
-	"connection refused",
-	"connection timed out",
-	"context deadline exceeded",
 }
 
 // isTransientDeleteError reports whether a failed bd delete chunk may succeed
-// on a retry. Everything else is permanent: a refusal ("is still referenced"),
-// a bad id or a malformed request fails the chunk without waiting (gt-ujklm).
+// on a retry. Everything else is permanent or ambiguous: a refusal ("is still
+// referenced"), a bad id, a malformed request, or a lost reply fails the chunk
+// without waiting (gt-ujklm, gt-n0mcm).
 func isTransientDeleteError(err error) bool {
 	if err == nil {
 		return false
@@ -115,8 +110,9 @@ func isTransientDeleteError(err error) bool {
 // deleteInChunks deletes ids DefaultBatchSize at a time and returns how many
 // were deleted, the chunks that failed, and every failure joined. bd deletes a
 // chunk all or nothing, so a failed chunk adds no count and the rest still run.
-// A chunk that fails on a transient error is retried deleteChunkAttempts times
-// with a doubling backoff before it is reported failed (gt-ujklm).
+// A chunk that fails on a transient error is tried deleteChunkAttempts times in
+// all (the first try and two retries) with a doubling backoff before it is
+// reported failed (gt-ujklm).
 func deleteInChunks(w Writer, ids []string) (int, int, []PurgeChunkFailure, error) {
 	return deleteInChunksSleeping(w, ids, time.Sleep)
 }
