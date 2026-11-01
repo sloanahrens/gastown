@@ -128,7 +128,7 @@ func (r execRunner) Output(argv []string) ([]byte, error) {
 	if len(argv) == 0 {
 		return nil, errors.New("no command to run")
 	}
-	return exec.Command(argv[0], argv[1:]...).Output()
+	return exec.Command(argv[0], argv[1:]...).Output() //nolint:gosec // G204: argv is the cutover's own line, its paths from validated flags
 }
 
 // Run runs argv with the run's own stdout and stderr.
@@ -136,7 +136,7 @@ func (r execRunner) Run(argv []string) error {
 	if len(argv) == 0 {
 		return errors.New("no command to run")
 	}
-	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd := exec.Command(argv[0], argv[1:]...) //nolint:gosec // G204: argv is the cutover's own line, its paths from validated flags
 	cmd.Stdout = r.stdout
 	cmd.Stderr = r.stderr
 	return cmd.Run()

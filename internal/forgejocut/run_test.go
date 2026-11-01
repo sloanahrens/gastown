@@ -1247,9 +1247,9 @@ func TestRunRefusesAnUnwiredSeam(t *testing.T) {
 	})
 }
 
-// TestRunCancelledContext: a cancelled context stops the run before the step it
+// TestRunCanceledContext: a canceled context stops the run before the step it
 // names, so nothing past the operator's stop is done.
-func TestRunCancelledContext(t *testing.T) {
+func TestRunCanceledContext(t *testing.T) {
 	t.Parallel()
 	w := newRunWorld(t, false)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1257,10 +1257,10 @@ func TestRunCancelledContext(t *testing.T) {
 	if code := w.run(t, ctx); code != ExitFailure {
 		t.Fatalf("Run = %d, want 1 (output: %s)", code, w.output())
 	}
-	if !strings.Contains(w.stderr.String(), "cancelled before step 1 (refusing a landing in flight)") {
+	if !strings.Contains(w.stderr.String(), "canceled before step 1 (refusing a landing in flight)") {
 		t.Errorf("stderr = %q, want the step the run stopped before", w.stderr.String())
 	}
 	if len(w.exec.calls) != 0 || len(w.git.calls) != 0 {
-		t.Errorf("a cancelled run reached the outside world: bd %q, git %q", w.exec.calls, w.git.calls)
+		t.Errorf("a canceled run reached the outside world: bd %q, git %q", w.exec.calls, w.git.calls)
 	}
 }

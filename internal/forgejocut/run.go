@@ -181,7 +181,7 @@ func Run(ctx context.Context, opts *Options, env RunEnv) int {
 	}
 	for _, step := range steps {
 		if err := ctx.Err(); err != nil {
-			fmt.Fprintf(stderr, "forgejo-cutover: the run was cancelled before %s: %v\n", step.name, err)
+			fmt.Fprintf(stderr, "forgejo-cutover: the run was canceled before %s: %v\n", step.name, err)
 			return ExitFailure
 		}
 		if err := step.run(); err != nil {
