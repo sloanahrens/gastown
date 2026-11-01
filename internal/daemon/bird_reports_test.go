@@ -92,13 +92,13 @@ func TestBirdReportsItemShapes(t *testing.T) {
 		{
 			name:    "missing",
 			want:    true,
-			summary: []string{"dunlin", "missing", "gt birds due"},
+			summary: []string{"dunlin", "missing", "send dunlin the daily request"},
 		},
 		{
 			name:    "older than the maximum",
 			setup:   func(t *testing.T, town string) { birdReportsWriteDaily(t, town, "dunlin", now.Add(-27*time.Hour)) },
 			want:    true,
-			summary: []string{"dunlin", "27h00m", "gt birds due"},
+			summary: []string{"dunlin", "27h00m", "send dunlin the daily request"},
 		},
 		{
 			name:  "exactly at the maximum is fresh",
@@ -109,8 +109,10 @@ func TestBirdReportsItemShapes(t *testing.T) {
 			setup: func(t *testing.T, town string) { birdReportsWriteDaily(t, town, "dunlin", now.Add(-25*time.Hour)) },
 		},
 		{
-			name:  "a future written_at is fresh",
-			setup: func(t *testing.T, town string) { birdReportsWriteDaily(t, town, "dunlin", now.Add(time.Hour)) },
+			name:    "a future written_at is an item",
+			setup:   func(t *testing.T, town string) { birdReportsWriteDaily(t, town, "dunlin", now.Add(time.Hour)) },
+			want:    true,
+			summary: []string{"dunlin", "1h00m in the future", "send dunlin the daily request"},
 		},
 		{
 			name: "not JSON",
@@ -118,13 +120,13 @@ func TestBirdReportsItemShapes(t *testing.T) {
 				birdReportsWriteRaw(t, town, "dunlin", []byte("this is not a report"))
 			},
 			want:    true,
-			summary: []string{"dunlin", "age: unknown", "gt birds due"},
+			summary: []string{"dunlin", "age: unknown", "send dunlin the daily request"},
 		},
 		{
 			name:    "no written_at",
 			setup:   func(t *testing.T, town string) { birdReportsWriteRaw(t, town, "dunlin", []byte(`{"body":"hello"}`)) },
 			want:    true,
-			summary: []string{"dunlin", "no readable written_at", "gt birds due"},
+			summary: []string{"dunlin", "no readable written_at", "send dunlin the daily request"},
 		},
 		{
 			name: "unreadable file",
@@ -135,7 +137,7 @@ func TestBirdReportsItemShapes(t *testing.T) {
 				}
 			},
 			want:    true,
-			summary: []string{"dunlin", "could not be read", "gt birds due"},
+			summary: []string{"dunlin", "could not be read", "send dunlin the daily request"},
 		},
 	}
 	for _, tc := range cases {
@@ -243,66 +245,83 @@ func TestBirdReportsOverseerIsTheTenthReporter(t *testing.T) {
 	}
 }
 
-// TestBirdReportsOffOrUnreadableSettingChecksNothing holds the two ways the
-// patrol declines to act: a disabled patrol records nothing, and a max_age it
-// cannot parse keeps the last check's items instead of clearing them.
-func TestBirdReportsOffOrUnreadableSettingChecksNothing(t *testing.T) {
+// TestBirdReportsDisabledRecordsNothing holds the opt-in switch: a patrol the
+// town did not enable records nothing, so an item never outlives its setting.
+func TestBirdReportsDisabledRecordsNothing(t *testing.T) {
 	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 11, 1, 9, 0, 0, 0, birdReportsTestZone)
+	d := birdReportsTestDaemon(town, now, &BirdReportsConfig{Enabled: false, Reporters: []string{"dunlin"}})
+	d.runBirdReports()
+	if got := d.birdReportStale.observed(); len(got) != 0 {
+		t.Errorf("a disabled patrol observed %+v, want nothing", got)
+	}
+}
 
-	t.Run("disabled", func(t *testing.T) {
-		t.Parallel()
-		town := t.TempDir()
-		now := time.Date(2026, 11, 1, 9, 0, 0, 0, birdReportsTestZone)
-		d := birdReportsTestDaemon(town, now, &BirdReportsConfig{Enabled: false, Reporters: []string{"dunlin"}})
-		d.runBirdReports()
-		if got := d.birdReportStale.observed(); len(got) != 0 {
-			t.Errorf("a disabled patrol observed %+v, want nothing", got)
-		}
-	})
+// TestBirdReportsFailedCheckIsAnItem holds the alarm path: a setting the check
+// cannot act on raises the check-failed item in place of the unverified
+// reporter items, and a check that runs again clears it. A failed check that
+// left the queue quiet would look exactly like a town whose reports are fresh.
+func TestBirdReportsFailedCheckIsAnItem(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 11, 1, 9, 0, 0, 0, birdReportsTestZone)
+	cfg := &BirdReportsConfig{Enabled: true, Reporters: []string{"dunlin"}}
+	d := birdReportsTestDaemon(town, now, cfg)
+	d.runBirdReports()
+	if got := d.birdReportStale.observed(); len(got) != 1 || got[0].Key != "bird-report-stale:dunlin" {
+		t.Fatalf("setup: %+v, want the missing report's item", got)
+	}
 
-	t.Run("unreadable max_age keeps the last check", func(t *testing.T) {
-		t.Parallel()
-		town := t.TempDir()
-		now := time.Date(2026, 11, 1, 9, 0, 0, 0, birdReportsTestZone)
-		cfg := &BirdReportsConfig{Enabled: true, Reporters: []string{"dunlin"}}
-		d := birdReportsTestDaemon(town, now, cfg)
-		d.runBirdReports()
-		if got := d.birdReportStale.observed(); len(got) != 1 {
-			t.Fatalf("setup: %+v, want the missing report's item", got)
-		}
-		// Only a config built in code can carry a value decoding refuses.
-		cfg.MaxAgeStr = "soon"
-		d.runBirdReports()
-		got := d.birdReportStale.observed()
-		if len(got) != 1 || got[0].Key != "bird-report-stale:dunlin" {
-			t.Errorf("after the unreadable setting: %+v, want the last check's item kept", got)
-		}
-	})
+	// Only a config built in code can carry a value decoding refuses.
+	cfg.MaxAgeStr = "soon"
+	d.runBirdReports()
+	got := d.birdReportStale.observed()
+	if len(got) != 1 {
+		t.Fatalf("after the failed check: %+v, want exactly the check-failed item", got)
+	}
+	if got[0].Key != birdReportsCheckFailedKey || got[0].Kind != attention.KindBirdReportStale || got[0].Severity != attention.SeverityHigh {
+		t.Errorf("item = %+v, want a high bird-report-check-failed item", got[0])
+	}
+	if !strings.Contains(got[0].Summary, "cannot check") || !strings.Contains(got[0].Summary, "max_age") {
+		t.Errorf("summary = %q, want the failed check and its setting named", got[0].Summary)
+	}
 
-	t.Run("no town root", func(t *testing.T) {
-		t.Parallel()
-		d := &Daemon{
-			logger:       discardLogger,
-			patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{BirdReports: &BirdReportsConfig{Enabled: true}}},
-		}
-		d.runBirdReports()
-		if got := d.birdReportStale.observed(); len(got) != 0 {
-			t.Errorf("a daemon with no town root observed %+v, want nothing", got)
-		}
-	})
+	cfg.MaxAgeStr = ""
+	d.runBirdReports()
+	if got := d.birdReportStale.observed(); len(got) != 1 || got[0].Key != "bird-report-stale:dunlin" {
+		t.Errorf("after the check runs again: %+v, want the reporter's item back", got)
+	}
+}
 
-	t.Run("an unset zone reads the local clock", func(t *testing.T) {
-		t.Parallel()
-		town := t.TempDir()
-		now := time.Date(2026, 11, 1, 9, 0, 0, 0, birdReportsTestZone)
-		hour := 0 // no hour is before midnight, so the gate cannot hide the item
-		d := birdReportsTestDaemon(town, now, &BirdReportsConfig{Enabled: true, StartHour: &hour, Reporters: []string{"dunlin"}})
-		d.birdReportLoc = nil
-		d.runBirdReports()
-		if got := d.birdReportStale.observed(); len(got) != 1 {
-			t.Errorf("with an unset zone: %+v, want the missing report's item", got)
-		}
-	})
+// TestBirdReportsWithNoDaemonConfigRecordsNothing covers a daemon that never
+// loaded a config: the check has no town to read, so it is not run at all.
+func TestBirdReportsWithNoDaemonConfigRecordsNothing(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{
+		logger:       discardLogger,
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{BirdReports: &BirdReportsConfig{Enabled: true}}},
+	}
+	d.runBirdReports()
+	if got := d.birdReportStale.observed(); len(got) != 0 {
+		t.Errorf("a daemon with no config observed %+v, want nothing", got)
+	}
+}
+
+// TestBirdReportsUnsetZoneUsesLocalClock pins the fallback zone: with no zone
+// injected the check reads the host's local hour, so the start-hour gate still
+// opens.
+func TestBirdReportsUnsetZoneUsesLocalClock(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 11, 1, 9, 0, 0, 0, birdReportsTestZone)
+	hour := 0 // no hour is before midnight, so the gate cannot hide the item
+	d := birdReportsTestDaemon(town, now, &BirdReportsConfig{Enabled: true, StartHour: &hour, Reporters: []string{"dunlin"}})
+	d.birdReportLoc = nil
+	d.runBirdReports()
+	if got := d.birdReportStale.observed(); len(got) != 1 {
+		t.Errorf("with an unset zone: %+v, want the missing report's item", got)
+	}
 }
 
 // TestBirdReportsCollectorReadsTheSnapshot is the wiring: with no patrol the
@@ -323,10 +342,10 @@ func TestBirdReportsCollectorReadsTheSnapshot(t *testing.T) {
 	}
 }
 
-// TestBirdReportsIsRegisteredInTheAttentionQueue drives the collector through
-// the queue's collector set, so dropping the registration turns it red: an
-// item no collector returns would clear on the next tick.
-func TestBirdReportsIsRegisteredInTheAttentionQueue(t *testing.T) {
+// TestBirdReportsCollectorIsInTheCollectorSet drives the collector through the
+// attention sources' collector set, so dropping the registration turns it red:
+// an item no collector returns would clear on the next tick.
+func TestBirdReportsCollectorIsInTheCollectorSet(t *testing.T) {
 	t.Parallel()
 	s := &attentionSources{birdReports: func() []attention.Item {
 		return []attention.Item{{Key: "bird-report-stale:dunlin", Kind: attention.KindBirdReportStale}}
@@ -398,9 +417,9 @@ func TestBirdReportsReadsOfDecodesTheBlock(t *testing.T) {
 	}
 }
 
-// TestBirdReportsReadsOnlyWrittenAt holds the report shape: written_at is the
-// field the check judges, and another field or key beside it changes nothing.
-func TestBirdReportsReadsOnlyWrittenAt(t *testing.T) {
+// TestBirdReportsIgnoresFieldsBesideWrittenAt holds the report shape: another
+// field or key beside written_at does not change the check's judgment.
+func TestBirdReportsIgnoresFieldsBesideWrittenAt(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	now := time.Date(2026, 11, 1, 9, 0, 0, 0, birdReportsTestZone)
