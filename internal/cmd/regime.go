@@ -55,6 +55,27 @@ func runRegimeRecord(d regimeDeps, in regimeFlags, out io.Writer) error {
 	return nil
 }
 
+// runRegimeCheck reads the town's regime events with the same reader the metrics
+// analysis uses and reports how many it found, or why it cannot: one record the
+// reader rejects costs the analysis every record in that file, so a hand-written
+// backfill is checked here before an install carries the reader to it.
+func runRegimeCheck(townRoot string, out io.Writer) error {
+	events, err := metrics.ReadRegimeEvents(metrics.OSEnv(townRoot))
+	if err != nil {
+		return fmt.Errorf("the regime events are not readable: %w", err)
+	}
+	fmt.Fprintf(out, "regime events readable: %d, oldest %s, newest %s\n", len(events), eventDay(events, 0), eventDay(events, len(events)-1))
+	return nil
+}
+
+// eventDay is the day of events[i], or "-" when there is none.
+func eventDay(events []metrics.RegimeEvent, i int) string {
+	if i < 0 || i >= len(events) {
+		return "-"
+	}
+	return events[i].Date
+}
+
 // newRegimeCommand builds gt regime over find, now and actor: find resolves the
 // town, now stamps the record, and actor names the recorder when --actor is not
 // given. gt registers the command over the working directory, the wall clock and
@@ -85,6 +106,18 @@ func newRegimeCommand(find func() (string, error), now func() time.Time, actor f
 	for _, name := range []string{"kind", "before", "after", "reason"} {
 		_ = record.MarkFlagRequired(name)
 	}
+	check := &cobra.Command{
+		Use:   "check",
+		Short: "Read the town's regime events with the real reader and report what it finds",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			townRoot, err := find()
+			if err != nil {
+				return fmt.Errorf("not in a Gas Town workspace: %w", err)
+			}
+			return runRegimeCheck(townRoot, cmd.OutOrStdout())
+		},
+	}
 	regime := &cobra.Command{
 		Use:     "regime",
 		GroupID: GroupConfig,
@@ -92,6 +125,7 @@ func newRegimeCommand(find func() (string, error), now func() time.Time, actor f
 		Long: `Record a regime change in the town's append-only regime events file.
 
   gt regime record   Append one change to .runtime/metrics/regime-events.jsonl
+  gt regime check    Read every regime events file with the analysis's reader
 
 The metrics analysis reads that file with settings/regime-events.json and marks
 every series at each change. Run it at an install, directive, gate, seat-model
@@ -99,7 +133,7 @@ or pool change: the reason, and the refs either side of it, are what a reader
 has to judge the change by.`,
 		RunE: requireSubcommand,
 	}
-	regime.AddCommand(record)
+	regime.AddCommand(record, check)
 	return regime
 }
 
