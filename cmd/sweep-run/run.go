@@ -579,9 +579,8 @@ func gitClone(repo, sha, work string) error { return cloneWith(runGit, repo, sha
 // The mount can be owned by another user, and git refuses to read a repository it
 // does not trust. The exception has to reach the git upload-pack process a local
 // clone starts to read it: a command-line "-c safe.directory" on the clone does
-// not reach that process and the clone still fails (git 2.43, checked in the
-// runner image on 2026-11-01), so the exception rides the upload-pack command
-// itself, for this one path.
+// not reach that process and the clone still fails, so the exception rides the
+// upload-pack command itself, for this one path.
 func cloneWith(run gitRunner, repo, sha, work string) error {
 	if code, out := run("", "clone", "--no-hardlinks", "--upload-pack", uploadPackCommand(repo), repo, work); code != 0 {
 		return fmt.Errorf("git clone %s: %s", repo, out)

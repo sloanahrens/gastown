@@ -51,6 +51,36 @@ func TestIntegrationGitCloneChecksOutTheSHA(t *testing.T) {
 	}
 }
 
+// TestIntegrationGitCloneReadsARepositoryWhoseQuotedPathNeedsTheShell clones, with
+// the real git, a repository whose path holds a space and a single quote: the
+// upload-pack command carrying the safe.directory exception goes through a
+// shell, so a path the quoting got wrong would fail here and not in the unit
+// tier's fake runner (gt-4t115). It does not reproduce a mount owned by another
+// user, which needs a second uid.
+func TestIntegrationGitCloneReadsARepositoryWhoseQuotedPathNeedsTheShell(t *testing.T) {
+	t.Parallel()
+	repo := filepath.Join(t.TempDir(), "it's a repo")
+	if err := os.Mkdir(repo, 0o755); err != nil {
+		t.Fatalf("make the repository directory: %v", err)
+	}
+	runGitIn(t, repo, "init", "--quiet")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("quoted\n"), 0o644); err != nil {
+		t.Fatalf("write the fixture: %v", err)
+	}
+	runGitIn(t, repo, "add", "README.md")
+	runGitIn(t, repo, "-c", "user.email=sweep-run@example.invalid", "-c", "user.name=sweep-run",
+		"commit", "--quiet", "--no-gpg-sign", "-m", "quoted")
+	want := strings.TrimSpace(runGitIn(t, repo, "rev-parse", "HEAD"))
+
+	work := filepath.Join(t.TempDir(), "work")
+	if err := gitClone(repo, want, work); err != nil {
+		t.Fatalf("gitClone of a path with a space and a quote: %v", err)
+	}
+	if got := strings.TrimSpace(runGitIn(t, work, "rev-parse", "HEAD")); got != want {
+		t.Errorf("checked out %s, want %s", got, want)
+	}
+}
+
 // runGitIn runs one git command in dir and returns its output, failing the test
 // if git refuses.
 func runGitIn(t *testing.T, dir string, args ...string) string {

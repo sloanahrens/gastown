@@ -92,12 +92,16 @@ func TestPolecatImageInstallsLsofPinned(t *testing.T) {
 
 	installs := 0
 	for _, in := range ins {
-		if strings.HasPrefix(in, "RUN apt-get update") && strings.Contains(in, `"lsof=${LSOF_VERSION}"`) {
+		// The base-tools layer is the apt line that installs build-essential and
+		// git beside it: the layer the bead names, not any apt line that happens
+		// to carry the pin.
+		if strings.HasPrefix(in, "RUN apt-get update") && strings.Contains(in, `"lsof=${LSOF_VERSION}"`) &&
+			strings.Contains(in, "build-essential") && strings.Contains(in, " git ") {
 			installs++
 		}
 	}
 	if installs != 1 {
-		t.Errorf("%d apt install lines name \"lsof=${LSOF_VERSION}\", want exactly 1: the image needs lsof pinned in the base-tools layer", installs)
+		t.Errorf("%d base-tools apt install lines (build-essential, git) name \"lsof=${LSOF_VERSION}\", want exactly 1: the image needs lsof pinned in the base-tools layer", installs)
 	}
 }
 
