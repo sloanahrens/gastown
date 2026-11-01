@@ -336,8 +336,9 @@ func RejectionForAttempt(notes string, attempt int) (RejectionNote, bool) {
 }
 
 // priorReviewFindings is the previous round's findings for the next review over
-// a bead's diff: the findings of the newest refusal that carried a verdict's
-// findings (gt-cz07b). om classifies each as resolved, unresolved or regressed,
+// a bead's diff: the findings of the newest refusal that answers for the round,
+// which is the newest review refusal or any refusal that carried findings
+// (gt-cz07b). om classifies each as resolved, unresolved or regressed,
 // so a rework round is scored on what is still wrong rather than on a fresh set
 // of minors invented about an unchanged diff.
 //
