@@ -236,7 +236,7 @@ func TestMainTreatsAnUnreadableBdAsCurrent(t *testing.T) {
 			if got := len(tr.callsTo("make")); got != 0 {
 				t.Errorf("make was called %d times, want none: the image is current and the bd is unreadable", got)
 			}
-			tr.wantLogged(t, "current at abc1234")
+			tr.wantLogged(t, "current at abc1234; the installed bd was not read")
 			if got := strings.Count(tr.output(), "cannot read the installed bd's commit"); got != 1 {
 				t.Errorf("the unreadable bd was logged %d times, want once: %s", got, tr.output())
 			}
@@ -271,6 +271,130 @@ func TestMainStopsWhenTheBuiltBdLabelStillDiffers(t *testing.T) {
 	if got := len(tr.callsTo("make")); got != 3 {
 		t.Errorf("make was called %d times, want %d: the round limit ends the run", got, 3)
 	}
+}
+
+// TestMainRebuildsWhenTheImageHasNoBdLabel is an image built before the bd label
+// existed: the label reads as missing or empty, so the run builds it once and
+// the build's label makes it current (gt-xudej).
+func TestMainRebuildsWhenTheImageHasNoBdLabel(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		bdLabel string // what docker's inspect prints for the bd label
+	}{
+		{name: "label missing", bdLabel: dockerNoValue},
+		{name: "label empty", bdLabel: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tr := newTestRun(t)
+			tr.Cfg.Registry = ""
+			reply := newRunReply("abc1234")
+			reply.label = "abc1234"
+			reply.bdLabel = tc.bdLabel
+			tr.reply = reply.answer(t, labelFormat(tr))
+			t.Cleanup(tr.Cleanup)
+			if err := tr.Main(); err != nil {
+				t.Fatalf("Main() failed: %v", err)
+			}
+			if got := len(tr.callsTo("make")); got != 1 {
+				t.Errorf("make was called %d times, want one build", got)
+			}
+			tr.wantLogged(t, "current at abc1234")
+		})
+	}
+}
+
+// stuckReply answers a run whose installed bd moved while a Makefile BD_COMMIT
+// pin keeps every build's bd label at the old commit.
+func stuckReply(t *testing.T, tr *testRun) *runReply {
+	tr.Cfg.Registry = ""
+	reply := newRunReply("abc1234")
+	reply.label = "abc1234"
+	reply.bd = "bd11111"
+	reply.bdLabel = testBdCommit
+	reply.bdBuilt = testBdCommit
+	tr.reply = reply.answer(t, labelFormat(tr))
+	return reply
+}
+
+// TestMainDoesNotBuildAPinnedBdAgain is the cross-cycle half of the bd pin: a
+// run that ended stuck recorded its pair, so the next cycle fails at once for
+// the same pair and builds nothing, until the installed bd or the image's bd
+// moves (gt-xudej).
+func TestMainDoesNotBuildAPinnedBdAgain(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	stuckReply(t, tr)
+	t.Cleanup(tr.Cleanup)
+	if err := tr.Main(); err == nil {
+		t.Fatal("first Main() = nil, want the stuck failure")
+	}
+	builds := len(tr.callsTo("make"))
+	if builds != maxRounds {
+		t.Fatalf("first run made %d builds, want %d", builds, maxRounds)
+	}
+	// The first run's process exits between cycles, which releases its lock.
+	tr.Cleanup()
+	err := tr.Main()
+	if err == nil {
+		t.Fatal("second Main() = nil, want the pinned failure")
+	}
+	for _, want := range []string{testBdCommit, "bd11111", "not building again"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("second Main() = %v, want it to name %q", err, want)
+		}
+	}
+	if got := len(tr.callsTo("make")); got != builds {
+		t.Errorf("second run made %d more builds, want none", got-builds)
+	}
+}
+
+// TestMainBuildsAgainWhenThePinnedBdMoves: a further bd release changes the
+// installed commit, so the recorded pair no longer applies and the run builds.
+func TestMainBuildsAgainWhenThePinnedBdMoves(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	reply := stuckReply(t, tr)
+	t.Cleanup(tr.Cleanup)
+	if err := tr.Main(); err == nil {
+		t.Fatal("first Main() = nil, want the stuck failure")
+	}
+	reply.bd = "bd22222"
+	tr.Cleanup()
+	if err := tr.Main(); err == nil {
+		t.Fatal("second Main() = nil, want the stuck failure for the new bd")
+	}
+	if got := len(tr.callsTo("make")); got != 2*maxRounds {
+		t.Errorf("make was called %d times, want %d: the moved bd builds again", got, 2*maxRounds)
+	}
+}
+
+// TestMainClearsThePinOnceTheImageIsCurrent: once the image's bd label matches
+// the installed bd, no pin is left to skip a build.
+func TestMainClearsThePinOnceTheImageIsCurrent(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	reply := stuckReply(t, tr)
+	t.Cleanup(tr.Cleanup)
+	if err := tr.Main(); err == nil {
+		t.Fatal("first Main() = nil, want the stuck failure")
+	}
+	if _, err := os.Stat(tr.Cfg.BdStuck); err != nil {
+		t.Fatalf("the pin was not recorded: %v", err)
+	}
+	// The image's bd is brought to the installed one by a build that is not pinned.
+	reply.builtBd = ""
+	reply.bdLabel = "bd11111"
+	tr.Cleanup()
+	if err := tr.Main(); err != nil {
+		t.Fatalf("Main() = %v, want the image current", err)
+	}
+	if _, err := os.Stat(tr.Cfg.BdStuck); !os.IsNotExist(err) {
+		t.Errorf("the pin outlived the current image: stat = %v", err)
+	}
+	tr.wantLogged(t, "current at abc1234")
 }
 
 func TestMainDefersWhenDockerIsUnavailable(t *testing.T) {

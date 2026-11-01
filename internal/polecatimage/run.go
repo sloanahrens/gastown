@@ -45,6 +45,10 @@ type Config struct {
 	// Published records the "<image id> <registry>" a complete push left, so
 	// the next run retries one that did not finish.
 	Published string
+	// BdStuck records the "<installed bd> <image bd>" pair of a run that ended
+	// with the image's bd label behind the installed bd. Later runs fail at once
+	// for that pair instead of building again, until either commit moves.
+	BdStuck string
 	// Crane pushes the image's first tag and makes every later tag on the
 	// registry.
 	Crane string

@@ -59,6 +59,7 @@ func newTestRun(t *testing.T) *testRun {
 			BdLabel:        bdLabelName,
 			Registry:       testRegistry,
 			Published:      filepath.Join(root, "runtime", "polecat-image.published"),
+			BdStuck:        filepath.Join(root, "runtime", "polecat-image.bd-stuck"),
 			Crane:          "crane",
 			PID:            4242,
 			Keep:           "3",

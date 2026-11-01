@@ -78,6 +78,7 @@ func ConfigFromEnv(get func(string) string) (Config, error) {
 		BdLabel:        "org.gastown.bd-commit",
 		Registry:       registry,
 		Published:      envOr(get, "POLECAT_IMAGE_PUBLISHED", filepath.Join(town, ".runtime", "polecat-image.published")),
+		BdStuck:        filepath.Join(town, ".runtime", "polecat-image.bd-stuck"),
 		// Only 1 turns it on, so a stray POLECAT_IMAGE_FAIL_CLOSED=0 cannot fail
 		// a run (gt-efupr).
 		FailClosed:         get("POLECAT_IMAGE_FAIL_CLOSED") == "1",

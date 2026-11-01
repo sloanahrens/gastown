@@ -6,7 +6,7 @@ them; see Scheduling below.
 ## Plugins
 
 - `app-promote` — promotes each app rig's prod-proven release commit to GitHub.
-- `polecat-image` — rebuilds `gastown-polecat:dev` at the installed gt's and bd's commits after each install.
+- `polecat-image` — rebuilds `gastown-polecat:dev` when the installed gt or bd moves.
 - `tool-updater` — reports outdated Homebrew tools; upgrades stay manual.
 - `town-metrics` — appends one town snapshot an hour with `gt metrics snapshot`.
 
