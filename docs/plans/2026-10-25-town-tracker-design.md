@@ -28,7 +28,7 @@ The figures below were measured on 2026-10-25 and are the baseline for the exit 
 | 2 | Cheap Dolt fixes proceed in parallel under claude-477: verify what landed, offline flatten of gt and hq at a scheduled shutdown with a verified backup, memory cap on the server. Do not land be-c94.2 in the fork. |
 | 3 | Build in the gastown repo as its own Go module (`tracker/`, own `go.mod`, no imports of gt internals). Fallback: same module with an enforced import boundary, same directory. |
 | 4 | A long-lived Go service (`trackerd`) in front of Postgres, a thin Go client behind the existing `beads.Client` seam (ADR 0001). The CLI is a wrapper. |
-| 5 | Postgres 17 on this Mac under launchd first, plain connection string, no extensions. Hosting and cost for k8s is a separate ticket under claude-wkb.8. SQLite is ruled out. |
+| 5 | Postgres 17 is a centralized database reached by DSN, one per workspace, plain connection string, no extensions. Locally it is a Docker container with CPU, memory and connection limits (`deploy/tracker/docker-compose.yml`, bead gt-n2z79), not installed natively on the host and not a pod in any cluster. In the cloud it is a managed database (Cloud SQL, RDS or equivalent); only `TRACKER_DSN` changes. Hosting and cost for the managed database is a separate ticket under claude-wkb.8. SQLite is ruled out. |
 | 6 | No Dolt-style history. An append-only `events` table plus backups. `AS OF`, `DOLT_REVERT`, `gt history` over `dolt_log`, and the `gt compact` AS-OF safety net go. |
 | 7 | The contract test suite comes first. It runs against both `bd` and the service. Old beads tests are not ported. |
 | 8 | A crew session builds schema, service core and contract suite; polecats take verb-by-verb beads afterwards. |
@@ -39,7 +39,7 @@ The figures below were measured on 2026-10-25 and are the baseline for the exit 
 | 13 | A `bd` shim binary routes by ID prefix to old `bd` or the service. The long-term surface is `gt` verbs; the shim is deleted after the last rig flips. |
 | 14 | No dual-write. Cutover rig by rig; smallest first; hq and gastown last. |
 | 15 | See 2. |
-| 16 | Skip the Dolt StatefulSet (claude-wkb.4) unless cutover slips. Postgres joins the k8s move order next to hm-postgres. The checkpoint date is set after the slice estimate. |
+| 16 | Skip the Dolt StatefulSet (claude-wkb.4) unless cutover slips. Postgres is not in the k8s move order: it is never a pod, and in the cloud it is the managed database of decision 5. The checkpoint date is set after the slice estimate. |
 
 ## 3. Architecture
 
@@ -139,11 +139,11 @@ Rollback: flip the route back. Writes made on the service since the flip are rep
 
 ## 10. Operations
 
-- Postgres 17 installed natively through brew (same major as hm and Forgejo), data in `~/gt/.pg-data`, two launchd jobs with `KeepAlive`: the database, then `trackerd`. The gt daemon only probes `/readyz` (ADR 0003: one supervisor, no process ownership in the daemon).
+- Postgres 17 (same major as hm and Forgejo) runs as the container `tracker-db` from `deploy/tracker/docker-compose.yml` (bead gt-n2z79): published on `127.0.0.1` only, data in `~/gt/.pg-data` through `TRACKER_PG_DATA`, with its CPU, memory, pid and connection limits set in that file. The database has no host service of its own. One launchd job with `KeepAlive` runs `trackerd`, which reaches the database by `TRACKER_DSN`. In the cloud the database is a managed one (Cloud SQL, RDS or equivalent), one per workspace, and only `TRACKER_DSN` changes. The gt daemon only probes `/readyz` (ADR 0003: one supervisor, no process ownership in the daemon).
 - `trackerd` holds a bounded connection pool; clients never connect to Postgres. Every client call has a bounded timeout and a capped retry (the B2-04 class). `/readyz` runs `SELECT 1` plus a write probe, and a doctor check mirrors it.
 - Backup: nightly `pg_dump` at 03:00 into `~/gt-backups/tracker/<date>`, 7 kept; the git JSONL export stays as the human-readable fallback, now including wisps. A restore runbook with a proof (restore into a scratch database, run a contract subset) is a bead. No WAL archiving in slice 1.
 - Maintenance in `trackerd`: wisp TTL reaper (policy as today), event-payload pruning, autovacuum defaults. No gc, flatten or pause marker.
-- Resource limits: the pool bounds concurrency now; CPU and memory limits arrive with k8s requests and limits.
+- Resource limits: the local container carries CPU, memory, pid and connection limits (above); the pool bounds client concurrency. Sizing for the managed database in the cloud is open (WF2).
 
 ## 11. Security
 
@@ -176,7 +176,7 @@ Defaults for slice 1, to confirm at review: the dispatch tick needs at most 5 HT
 5. A single service is a single point of failure. launchd restarts it and bounded timeouts keep clients from hanging.
 6. Test cost, and wiring a nested module into the gate.
 7. Scope creep toward rebuilding all of `bd`.
-8. Host change: Postgres must be installed on this Mac and on the Forgejo runner images.
+8. Host change: Docker must run on this Mac for the `tracker-db` container, and the Forgejo runner images need the Postgres test binaries (the hermetic harness).
 
 ## 15. Out of scope
 

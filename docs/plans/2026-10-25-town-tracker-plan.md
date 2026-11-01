@@ -10,7 +10,7 @@ Approved by Sloan 2026-10-25 (claude-477). The beads under epic gt-p85pw are the
 
 **Architecture:** `tracker/` is a nested Go module in the gastown repo (service, store, client, migrate, contract). gt reaches it through a `trackerclient` that implements the existing `beads.Client` and `beads.Admin` seam. A `bd` shim routes by ID prefix to old `bd` or the service. No dual-write; cutover per rig from a Dolt import.
 
-**Tech stack:** Go 1.26, `net/http`, `pgx/v5` (pool), Postgres 17 (native, launchd), server-sent events over `LISTEN/NOTIFY`. No Postgres extensions.
+**Tech stack:** Go 1.26, `net/http`, `pgx/v5` (pool), Postgres 17 (a Docker container locally, a managed database in the cloud, reached by DSN; `trackerd` runs under launchd), server-sent events over `LISTEN/NOTIFY`. No Postgres extensions.
 
 **Spec:** `docs/plans/2026-10-25-town-tracker-design.md`. Handoff bead: claude-477 (in `~/.claude`).
 
@@ -82,7 +82,7 @@ Fallback if wiring fights the landing pipeline: same module, same directory, enf
 
 ### C2 CREW: Postgres test harness, measured
 Files: `tracker/store/pgtest/` (start `postgres` on a unix socket in a temp dir, `initdb` once per package, template database, `New(t) *pgxpool.Pool` cloning the template).
-Precondition owed by Sloan: `brew install postgresql@17` on this Mac (a host change, not mine to do unasked). Acceptance: 50 cases clone-and-drop inside a measured budget; the measured per-case cost and the one-time cost go in the plan and on the bead before any other task quotes a number; the harness never listens on TCP; teardown leaves no process (test asserts the pid is gone); tests are parallel-safe.
+Precondition owed by Sloan, for the test harness only: PostgreSQL 17 server binaries on this Mac (`brew install postgresql@17` is one way) so `postgres` and `initdb` run on a unix socket. The runtime database is the container in `deploy/tracker/docker-compose.yml`, not a brew install (a host change, not mine to do unasked). Acceptance: 50 cases clone-and-drop inside a measured budget; the measured per-case cost and the one-time cost go in the plan and on the bead before any other task quotes a number; the harness never listens on TCP; teardown leaves no process (test asserts the pid is gone); tests are parallel-safe.
 
 ### C3 CREW: schema v1 and migrations runner
 Files: `tracker/store/schema/0001_core.sql` (rigs, issues, dependencies, labels, comments, events, kv, config, custom_types, custom_statuses, child_counters, tokens, schema_migrations), `tracker/store/migrate.go`.
@@ -205,7 +205,7 @@ Each bead delivers the endpoint end to end: Postgres store method, handler, clie
 
 ## 12. Ops beads (track O)
 
-- **O1** launchd jobs `com.gastown.tracker-db` and `com.gastown.trackerd` (`KeepAlive`), data in `~/gt/.pg-data`; the plist generator is Go with a golden test (no hand-written plist script). The install is owed by the crew session and needs `postgresql@17`.
+- **O1** the local database is the container `tracker-db` in `deploy/tracker/docker-compose.yml` (bead gt-n2z79: 127.0.0.1 port, limits, data in `~/gt/.pg-data` through `TRACKER_PG_DATA`, pool bound in the DSN). The one launchd job is `com.gastown.trackerd` (`KeepAlive`); the plist generator is Go with a golden test (no hand-written plist script). The container start is owed by the overseer and needs Docker. Removing the old `com.gastown.tracker-db` job is its own bead.
 - **O2** nightly `pg_dump` at 03:00 to `~/gt-backups/tracker/<date>`, 7 kept, failure escalates; Go with a fake runner and clock.
 - **O3** restore runbook and proof: `docs/tracker-restore.md` plus a Go check that restores a dump into a scratch database and runs a contract subset. The live restore proof is in Gate, owed by the crew session.
 - **O4** doctor check `tracker` (readyz plus write probe) and `gt tracker status`.
@@ -259,7 +259,7 @@ The exit criteria are in the design spec, section 13. This plan only maps them t
 Create a new map (`wayfinder:map` epic) "Town tracker program", linked to claude-1ey and claude-wkb; one ticket per open decision, resolved one per session:
 
 - **WF1** checkpoint date for re-opening claude-wkb.4 (Dolt StatefulSet), set from the S1 estimate.
-- **WF2** Postgres hosting and cost for k8s (in-cluster operator vs managed; sizing and price table; extends claude-wkb.8; separate budget decision).
+- **WF2** managed Postgres in the cloud for the tracker (Cloud SQL, RDS or equivalent, one per workspace; sizing, price table and cost still open; extends claude-wkb.8; separate budget decision). No operator running inside a cluster.
 - **WF3** mail and receipts schema details (columns, TTL, label-compatible mapping until built, inbox with CC).
 - **WF4** formula port scope (from R1: port everything the 21 formulas use or a subset; ownership of cook).
 - **WF5** `gt` verb naming and the shim retirement date (long-term surface after the last rig flips).
