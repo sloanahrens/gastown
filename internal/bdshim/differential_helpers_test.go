@@ -91,12 +91,7 @@ var differentialRows = []differentialRow{
 // entry whose verb has gained a handler, and on a golden row whose verb is
 // neither handled nor listed.
 var knownUnhandledVerbs = map[string]bool{
-	"ready":    true,
-	"query":    true,
-	"search":   true,
-	"blocked":  true,
 	"comments": true,
-	"count":    true,
 	"stats":    true,
 	"config":   true,
 	"kv":       true,
