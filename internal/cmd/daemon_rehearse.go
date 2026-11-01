@@ -45,6 +45,9 @@ const (
 // be on the image's PATH.
 var rehearseBinaries = []string{"docker", "kubectl", "openshell", "git", "tmux", "dolt", "claude"}
 
+// rehearseEnvRef is a ${NAME} reference, which names a secret without holding one.
+var rehearseEnvRef = regexp.MustCompile(`\$\{[A-Za-z_][A-Za-z0-9_]*\}`)
+
 var rehearseAddr = regexp.MustCompile(rehearseAddrPattern)
 
 // rehearseFlags are the values `gt daemon rehearse` parsed.
@@ -65,14 +68,19 @@ type rehearseDeps struct {
 	readDir  func(path string) ([]os.DirEntry, error)
 	mkdirAll func(path string, perm os.FileMode) error
 	write    func(path string, data []byte, perm os.FileMode) error
-	now      func() time.Time
-	sleep    func(time.Duration)
+	// removeAll deletes the scratch town; evalSymlinks resolves a path for the
+	// root guard.
+	removeAll    func(path string) error
+	evalSymlinks func(path string) (string, error)
+	now          func() time.Time
+	sleep        func(time.Duration)
 }
 
 func realRehearseDeps(out io.Writer) rehearseDeps {
 	return rehearseDeps{
 		run: execImageRunner, environ: os.Environ(), out: out,
 		readFile: os.ReadFile, readDir: os.ReadDir, mkdirAll: os.MkdirAll, write: os.WriteFile,
+		removeAll: os.RemoveAll, evalSymlinks: filepath.EvalSymlinks,
 		now: time.Now, sleep: time.Sleep,
 	}
 }
@@ -87,7 +95,10 @@ type rehearsalCheck struct {
 	run      func(ctx context.Context, r *rehearsal) []string
 }
 
-// rehearsalChecks is the table, in the order it prints.
+// rehearsalChecks is the table, in the order it prints. It lives here and not
+// beside the config types because every check runs the image through docker,
+// and the config package has no docker seam; each row names the setting kind it
+// reads (config.json values, daemon.env keys, the compose binds).
 var rehearsalChecks = []rehearsalCheck{
 	{"config-validate", "gt config validate loads the scratch settings inside the image", true, checkConfigValidates},
 	{"binaries", "every program the settings and the daemon exec is on the image's PATH", true, checkImageBinaries},
@@ -99,9 +110,9 @@ var rehearsalChecks = []rehearsalCheck{
 // rehearsal is one run: the flags, the host seams and the staged settings text
 // the checks read.
 type rehearsal struct {
-	f        rehearseFlags
-	d        rehearseDeps
-	settings string // the staged settings files, concatenated; what the path and address checks scan
+	f      rehearseFlags
+	d      rehearseDeps
+	values []string // the string values of the staged JSON settings; what the path and address checks scan
 }
 
 func newDaemonRehearseCmd(run func(ctx context.Context, out io.Writer, f rehearseFlags) error) *cobra.Command {
@@ -109,8 +120,9 @@ func newDaemonRehearseCmd(run func(ctx context.Context, out io.Writer, f rehears
 	cmd := &cobra.Command{
 		Use:   "rehearse",
 		Short: "Rehearse the daemon container's configuration on a scratch copy of the live settings",
-		Long: `Stages a scratch copy of the live town's settings (daemon.env keeps its keys and
-loses every value), checks the daemon image against it, starts the image's
+		Long: `Stages a scratch copy of the live town's settings (JSON settings with secret-named
+values blanked, daemon.env with every value blanked, mayor/town.json; no other file),
+checks the daemon image against it, starts the image's
 entrypoint on the copy to its first heartbeat, and prints a table of every check
 with its result. It lists all failures and exits non-zero if any required check
 failed.
@@ -142,18 +154,28 @@ func init() {
 // runDaemonRehearse stages the scratch copy, runs every check, prints the table
 // and fails if a required check did. Every refusal comes before anything is
 // written.
-func runDaemonRehearse(ctx context.Context, f rehearseFlags, d rehearseDeps) error {
+func runDaemonRehearse(ctx context.Context, f rehearseFlags, d rehearseDeps) (err error) {
 	if f.liveRoot == "" || f.image == "" || !filepath.IsAbs(f.liveRoot) {
 		return errors.New("--live-root (absolute) and --image are required")
 	}
+	rehearsalHome := filepath.Join(f.liveRoot, ".runtime", "rehearsal")
 	if f.root == "" {
-		f.root = filepath.Join(f.liveRoot, ".runtime", "rehearsal", "town")
+		f.root = filepath.Join(rehearsalHome, "town")
 	}
-	if !filepath.IsAbs(f.root) || pathWithin(f.root, filepath.Join(f.liveRoot, "settings")) ||
-		pathWithin(f.root, filepath.Join(f.liveRoot, "mayor")) || filepath.Clean(f.root) == filepath.Clean(f.liveRoot) {
-		return fmt.Errorf("--root %q must be an absolute directory that is not the live town or its settings or mayor directory", f.root)
+	if err := checkRehearsalRoot(f, rehearsalHome, d); err != nil {
+		return err
 	}
 	r := &rehearsal{f: f, d: d}
+	// The scratch copy is removed on every exit, the failures included, and a
+	// copy an earlier run left is removed first: nothing of it outlives a run.
+	if err := d.removeAll(f.root); err != nil {
+		return fmt.Errorf("remove the earlier scratch town %s: %w", f.root, err)
+	}
+	defer func() {
+		if rmErr := d.removeAll(f.root); rmErr != nil && err == nil {
+			err = fmt.Errorf("the rehearsal's scratch town %s could not be removed: %w", f.root, rmErr)
+		}
+	}()
 	if err := r.stage(); err != nil {
 		return err
 	}
@@ -179,8 +201,34 @@ func runDaemonRehearse(ctx context.Context, f rehearseFlags, d rehearseDeps) err
 	return nil
 }
 
-// stage writes the scratch copy: the live settings files (daemon.env with its
-// values blanked) and mayor/town.json, all under r.f.root.
+// checkRehearsalRoot refuses a scratch root the rehearsal may not write, mount
+// or delete. On resolved paths (a link into the live town names it under another
+// spelling), the root must be absolute and either outside the live town and not
+// containing it, or strictly under <live>/.runtime/rehearsal.
+func checkRehearsalRoot(f rehearseFlags, rehearsalHome string, d rehearseDeps) error {
+	if !filepath.IsAbs(f.root) {
+		return fmt.Errorf("--root %q is not absolute", f.root)
+	}
+	live, err := d.evalSymlinks(f.liveRoot)
+	if err != nil {
+		return fmt.Errorf("--live-root %q cannot be resolved: %w", f.liveRoot, err)
+	}
+	root, err := resolveThroughExisting(f.root, d.evalSymlinks)
+	if err != nil {
+		return fmt.Errorf("--root %q cannot be resolved: %w", f.root, err)
+	}
+	home := filepath.Join(live, ".runtime", "rehearsal")
+	underHome := pathWithin(root, home) && filepath.Clean(root) != home
+	if (pathWithin(root, live) || pathWithin(live, root)) && !underHome {
+		return fmt.Errorf("--root %q resolves to %q, which is the live town %q, inside it or around it; the scratch town is outside the live town or strictly under %s", f.root, root, live, rehearsalHome)
+	}
+	return nil
+}
+
+// stage writes the scratch copy under r.f.root: the live JSON settings files
+// with secret-named values blanked, daemon.env with every value blanked, and
+// mayor/town.json. Nothing else in settings/ is copied, so a file the daemon
+// does not read cannot carry a credential into the copy.
 func (r *rehearsal) stage() error {
 	src := filepath.Join(r.f.liveRoot, "settings")
 	entries, err := r.d.readDir(src)
@@ -188,28 +236,32 @@ func (r *rehearsal) stage() error {
 		return fmt.Errorf("read the live settings directory: %w", err)
 	}
 	files := map[string][]byte{}
-	var text strings.Builder
 	for _, e := range entries {
-		if !e.Type().IsRegular() {
+		name := e.Name()
+		isEnv, isJSON := name == "daemon.env", strings.HasSuffix(name, ".json")
+		if !e.Type().IsRegular() || !(isEnv || isJSON) {
 			continue
 		}
-		data, err := r.d.readFile(filepath.Join(src, e.Name()))
+		data, err := r.d.readFile(filepath.Join(src, name))
 		if err != nil {
-			return fmt.Errorf("read the live setting %s: %w", e.Name(), err)
+			return fmt.Errorf("read the live setting %s: %w", name, err)
 		}
-		if e.Name() == "daemon.env" {
+		if isEnv {
 			data = blankEnvValues(data)
+		} else {
+			var values []string
+			if data, values, err = redactSettingsJSON(data); err != nil {
+				return fmt.Errorf("the live setting %s: %w", name, err)
+			}
+			r.values = append(r.values, values...)
 		}
-		files[filepath.Join("settings", e.Name())] = data
-		text.Write(data)
-		text.WriteByte('\n')
+		files[filepath.Join("settings", name)] = data
 	}
 	town, err := r.d.readFile(filepath.Join(r.f.liveRoot, "mayor", "town.json"))
 	if err != nil {
 		return fmt.Errorf("read the live mayor/town.json: %w", err)
 	}
 	files[filepath.Join("mayor", "town.json")] = town
-	r.settings = text.String()
 	names := make([]string, 0, len(files))
 	for n := range files {
 		names = append(names, n)
@@ -225,6 +277,45 @@ func (r *rehearsal) stage() error {
 		}
 	}
 	return nil
+}
+
+// rehearseSecretKey matches the JSON keys whose string values are credentials.
+var rehearseSecretKey = regexp.MustCompile(`(?i)token|secret|passw|credential|api[_-]?key|private`)
+
+// redactSettingsJSON blanks the value of every secret-named key (a ${NAME}
+// reference stays: it names a secret, it is not one) and returns the staged
+// bytes with every string value the staged file holds. A file that is not JSON
+// is refused rather than copied.
+func redactSettingsJSON(data []byte) ([]byte, []string, error) {
+	var doc any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, nil, fmt.Errorf("is not JSON, so it cannot be redacted and is not staged: %w", err)
+	}
+	var values []string
+	var walk func(v any) any
+	walk = func(v any) any {
+		switch t := v.(type) {
+		case map[string]any:
+			for k, x := range t {
+				if str, ok := x.(string); ok && rehearseSecretKey.MatchString(k) && !rehearseEnvRef.MatchString(str) {
+					t[k] = ""
+					continue
+				}
+				t[k] = walk(x)
+			}
+		case []any:
+			for i, x := range t {
+				t[i] = walk(x)
+			}
+		case string:
+			values = append(values, t)
+		}
+		return v
+	}
+	doc = walk(doc)
+	// A decoded JSON document always encodes.
+	out, _ := json.MarshalIndent(doc, "", "  ")
+	return out, values, nil
 }
 
 // blankEnvValues keeps every key of an env file and drops every value, so no
@@ -269,27 +360,49 @@ func checkConfigValidates(ctx context.Context, r *rehearsal) []string {
 func checkImageBinaries(ctx context.Context, r *rehearsal) []string {
 	var fails []string
 	for _, b := range rehearseBinaries {
-		if err := r.inImage(ctx, "none", "bash", "-c", "command -v "+b); err != nil {
+		err := r.inImage(ctx, "none", "bash", "-c", "command -v "+b)
+		switch {
+		case err == nil:
+		case exitCodeOf(err) == 1:
 			fails = append(fails, b+": not on the image's PATH")
+		default:
+			// Not a "not found": docker could not run the probe (it is down, or
+			// the image is unknown), so the binary was not looked for.
+			fails = append(fails, b+": the probe did not run: "+err.Error())
 		}
 	}
 	return fails
 }
 
-// settingPaths returns the distinct absolute paths the staged settings name, in
-// order, skipping the town root and its children (the bind).
+// settingPaths returns the distinct file paths the staged settings name, sorted,
+// skipping the scratch town and its children (the bind). A value is split on
+// whitespace, commas, colons and equals signs, so a PATH-like list gives each
+// entry; a token is a path when it starts with one slash, which leaves out a
+// URL (its "//host/path" remainder starts with two).
 func (r *rehearsal) settingPaths() []string {
 	seen := map[string]bool{}
 	var paths []string
-	for _, tok := range strings.FieldsFunc(r.settings, func(c rune) bool { return strings.ContainsRune("\"' ,=:\n\t[]{}", c) }) {
-		if !strings.HasPrefix(tok, "/") || len(tok) < 2 || seen[tok] || pathWithin(tok, r.f.root) {
-			continue
+	for _, v := range r.values {
+		for _, tok := range strings.FieldsFunc(v, func(c rune) bool { return strings.ContainsRune(" \t\n,:=", c) }) {
+			if !strings.HasPrefix(tok, "/") || strings.HasPrefix(tok, "//") || len(tok) < 2 || seen[tok] || pathWithin(tok, r.f.root) {
+				continue
+			}
+			seen[tok] = true
+			paths = append(paths, tok)
 		}
-		seen[tok] = true
-		paths = append(paths, tok)
 	}
 	sort.Strings(paths)
 	return paths
+}
+
+// exitCodeOf is the exit status a command's error carries (*exec.ExitError has
+// ExitCode), or -1 for an error that is not a command's exit.
+func exitCodeOf(err error) int {
+	var e interface{ ExitCode() int }
+	if errors.As(err, &e) {
+		return e.ExitCode()
+	}
+	return -1
 }
 
 func checkSettingPaths(ctx context.Context, r *rehearsal) []string {
@@ -305,7 +418,7 @@ func checkSettingPaths(ctx context.Context, r *rehearsal) []string {
 func checkSettingAddresses(ctx context.Context, r *rehearsal) []string {
 	var fails []string
 	seen := map[string]bool{}
-	for _, a := range rehearseAddr.FindAllString(r.settings, -1) {
+	for _, a := range rehearseAddr.FindAllString(strings.Join(r.values, "\n"), -1) {
 		if seen[a] {
 			continue
 		}
@@ -323,35 +436,52 @@ func checkSettingAddresses(ctx context.Context, r *rehearsal) []string {
 // no network, waits at most the budget for state.json to record a heartbeat, and
 // removes the container. On failure it prints the tail of the container's log.
 func checkFirstHeartbeat(ctx context.Context, r *rehearsal) []string {
-	name := "gt-rehearsal-" + filepath.Base(filepath.Dir(r.f.root))
-	_ = r.docker(ctx, "rm", "-f", name) // a leftover from an earlier run; absent is the normal case
+	// One name per run, so a container of another run is never this run's to remove.
+	name := fmt.Sprintf("gt-rehearsal-%d", r.d.now().Unix())
 	defer func() { _ = r.docker(context.WithoutCancel(ctx), "rm", "-f", name) }()
 	if err := r.docker(ctx, "run", "-d", "--name", name, "--network", "none",
 		"-v", r.f.root+":"+r.f.root, "-e", config.ContainerModeEnv+"="+config.SupervisorContainer,
 		"-e", "GT_TOWN_ROOT="+r.f.root, r.f.image); err != nil {
 		return []string{"the entrypoint container did not start: " + err.Error()}
 	}
-	if r.waitForHeartbeat() {
+	switch r.waitForHeartbeat(ctx, name) {
+	case waitHeartbeat:
 		return nil
+	case waitExited:
+		_ = r.docker(ctx, "logs", "--tail", rehearseTailLines, name)
+		return []string{"the entrypoint container exited before a heartbeat; its log tail is printed above"}
 	}
 	_ = r.docker(ctx, "logs", "--tail", rehearseTailLines, name)
 	return []string{fmt.Sprintf("no heartbeat in %s; the container log tail is printed above", r.f.budget)}
 }
 
+// waitResult is how waitForHeartbeat ended.
+type waitResult int
+
+const (
+	waitHeartbeat waitResult = iota // state.json records a heartbeat
+	waitExited                      // the container is no longer running
+	waitBudget                      // the budget is spent
+)
+
 // waitForHeartbeat polls the scratch town's state.json until it records a
-// heartbeat or the budget is spent, and reports which.
-func (r *rehearsal) waitForHeartbeat() bool {
+// heartbeat, the container stops running (a crash is named when it happens, not
+// after the budget), or the budget is spent.
+func (r *rehearsal) waitForHeartbeat(ctx context.Context, name string) waitResult {
 	deadline := r.d.now().Add(r.f.budget)
 	state := filepath.Join(r.f.root, "daemon", "state.json")
 	for {
 		if data, err := r.d.readFile(state); err == nil {
 			var s daemon.State
 			if json.Unmarshal(data, &s) == nil && !s.LastHeartbeat.IsZero() {
-				return true
+				return waitHeartbeat
 			}
 		}
+		if r.docker(ctx, "exec", name, "true") != nil {
+			return waitExited
+		}
 		if !r.d.now().Before(deadline) {
-			return false
+			return waitBudget
 		}
 		r.d.sleep(rehearsePoll)
 	}
