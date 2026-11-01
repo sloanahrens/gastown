@@ -88,6 +88,19 @@ func TestExtractContentRefs(t *testing.T) {
 			wantFiles: []string{"sling.go"},
 		},
 		{
+			// fr-zdzs named the file this way while fr-z64c spelled its path,
+			// and the guard compared neither spelling against the other
+			// (gt-n6jbw).
+			name:      "a bare test-file name counts",
+			text:      "wanderHops.test.ts: keep the per-hop assertions",
+			wantFiles: []string{"wanderHops.test.ts"},
+		},
+		{
+			name:      "a bare spec-file name counts",
+			text:      "the share test in tour.spec.tsx",
+			wantFiles: []string{"tour.spec.tsx"},
+		},
+		{
 			name: "urls are not repo paths",
 			text: "see https://github.com/steveyegge/gastown/blob/main/internal/cmd/sling.go and " +
 				"docs at github.com/steveyegge/gastown/docs/policy.md",

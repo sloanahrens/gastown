@@ -62,6 +62,12 @@ type Duplicate struct {
 	// to tell a bead of the candidate's own chain from a duplicate: a chain's
 	// beads share tests because they are one piece of work (gt-xydyc).
 	Blockers []string
+	// Landed marks a closed bead whose close reason records a landing, so its
+	// work is on the branch a candidate would rebase onto. The spec
+	// dispatcher's target-claim rule reads it: a bead filed before a landing
+	// on the same test file was written against the base that landing replaced
+	// (gt-n6jbw).
+	Landed bool
 }
 
 // IsEpic reports whether the bead is an epic. An epic is a container for other
