@@ -2962,6 +2962,9 @@ function renderOM(s) {
     // A read that has failed says so; only a read that has not happened yet is
     // still "reading…" (gt-q6h8e).
     box.append(el("div", "empty", r ? "unavailable — the om records could not be read" : "reading the landings and the daemon log…"));
+    // The rework fold reads the review log, not the om records, so a failed or
+    // absent om read must not take it or its unreadable alarm with it (gt-ddxrq).
+    omRework(box, s.rework);
     $("omnote").textContent = "";
     $("omnote").title = "";
     return;

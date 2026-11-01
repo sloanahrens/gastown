@@ -16,7 +16,9 @@ func TestOMPanelOpensWithRunningAndLastFiveAboveItsFolds(t *testing.T) {
 	running := strings.Index(body, `"running now"`)
 	last := strings.Index(body, `om.last`)
 	stats := strings.Index(body, `fold("Stats`)
-	rework := strings.Index(body, "omRework(box, s.rework)")
+	// The last call is the one on the om-present path: renderOM also draws the
+	// fold before returning from an absent om read (gt-ddxrq).
+	rework := strings.LastIndex(body, "omRework(box, s.rework)")
 	scores := strings.Index(body, `fold("Scores`)
 	if running < 0 || last < 0 || stats < 0 || rework < 0 || scores < 0 {
 		t.Fatalf("renderOM is missing a block (running=%d last=%d stats=%d rework=%d scores=%d)", running, last, stats, rework, scores)

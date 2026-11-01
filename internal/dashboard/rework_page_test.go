@@ -439,7 +439,9 @@ func TestOMPanelNamesTheReworkStates(t *testing.T) {
 		t.Error("the om review section is no longer a section whose h2 holds the title and a span.r")
 	}
 	om := pageFunc(t, "renderOM")
-	if stats, rework := strings.Index(om, `fold("Stats`), strings.Index(om, "omRework(box, s.rework)"); rework < stats || rework < 0 {
+	// The last call is the one on the om-present path; the first is the absent
+	// om read's, which returns before Stats (gt-ddxrq).
+	if stats, rework := strings.Index(om, `fold("Stats`), strings.LastIndex(om, "omRework(box, s.rework)"); rework < stats || rework < 0 {
 		t.Error("renderOM does not draw the rework table after the Stats fold")
 	}
 	if cost := pageFunc(t, "renderCost"); strings.Contains(cost, "omRework(") {
@@ -480,6 +482,74 @@ func TestReworkFoldIsDrawnUnderOMReviewAndNotCost(t *testing.T) {
 		if n := foldCount(t, cost, key); n != 0 {
 			t.Errorf("the Cost panel drew %d %s folds, want none", n, key)
 		}
+	}
+}
+
+// The rework fold reads the review log, not the om records, so an om read that
+// is absent or failed must not take the fold off the page or empty it: under
+// Cost it was drawn whatever the om read did (gt-ddxrq).
+func TestReworkFoldIsDrawnWithoutTheOMRead(t *testing.T) {
+	t.Parallel()
+
+	// No om read at all: the panel's own block says so, and the fold keeps the
+	// table it would draw beside a good om read.
+	dom, fold := drawRework(t, map[string]any{"rework": reworkPayload()})
+	if !fold.Closed {
+		t.Error("the om rework fold is open on load, want it closed like its siblings")
+	}
+	v, err := dom.vm.RunString(`String(panelFolds["om.rework"].sec.parentNode === __byId["om"] ? "om" : "elsewhere")`)
+	if err != nil {
+		t.Fatalf("reading where the rework fold hangs: %v", err)
+	}
+	if got := v.String(); got != "om" {
+		t.Errorf("the rework fold hangs under #%s, want #om", got)
+	}
+
+	tables := panelFoldTables(t, dom, "om.rework")
+	if len(tables) != 1 {
+		t.Fatalf("drew %d rework tables without the om read, want one for both windows", len(tables))
+	}
+	want := [][]string{
+		{"last 7 days", "0.70", "2", "0/1", "50%", "2.00", "2:25", "0", "0.71"},
+		{"last 7 days", "0.80", "7", "1/3", "71%", "2.00", "3:10", "1", "0.58"},
+	}
+	rows := tables[0][1:]
+	if len(rows) != len(want) {
+		t.Fatalf("rows = %v, want %v", rows, want)
+	}
+	for i := range want {
+		if strings.Join(rows[i], "|") != strings.Join(want[i], "|") {
+			t.Errorf("row %d = %v, want %v", i, rows[i], want[i])
+		}
+	}
+}
+
+// The fold's line about the review log is drawn without the om read too: an
+// unreadable log keeps its alarm instead of vanishing, and a log not read yet
+// still says it is reading.
+func TestReworkFoldSaysItsLogStateWithoutTheOMRead(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		rework map[string]any
+		want   string
+	}{
+		{"unreadable review log", map[string]any{"unavailable": true}, "om rework · review log unreadable"},
+		{"review log not read yet", nil, "om rework · reading…"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := map[string]any{}
+			if tc.rework != nil {
+				s["rework"] = tc.rework
+			}
+			dom, _ := drawRework(t, s)
+			lines := panelFoldLines(t, dom, "om.rework")
+			if len(lines) != 1 || lines[0].Text != tc.want {
+				t.Errorf("the fold holds %v, want the one line %q", lines, tc.want)
+			}
+		})
 	}
 }
 
