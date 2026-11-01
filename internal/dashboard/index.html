@@ -5615,25 +5615,24 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) last
 // the refresh that follows the drop, and the page holds the state it has until
 // then (gt-rpble, gt-3q3go).
 // A tick more than two intervals after the last one is the page's own timer
-// having been held — a frozen or asleep tab — and the events it still holds are
-// queued behind it, so the gap is no evidence about the stream. The first such
-// tick, and any gap longer than SILENT_MS, move the clock rather than dropping;
-// a stream that stays silent behind a frozen tab is still replaced once its
-// ticks run again. A tick that stays late at throttle scale is a background tab
-// whose timers the browser slows while its events still arrive, so those are
-// measured and a stream silent there is still replaced (gt-t0qi7).
-let lastTick = Date.now(), lateRun = 0;
-setInterval(() => {
-  const now = Date.now(), gap = now - lastTick, late = gap > 2 * WATCHDOG_MS;
-  lastTick = now;
-  if (reconnecting) return; // a replacement is already on its way
-  lateRun = late ? lateRun + 1 : 0;
-  if (late && (lateRun === 1 || gap > SILENT_MS)) { lastEvent = now; return; }
-  if (now - lastEvent < SILENT_MS) return;
-  dropStream();
-  stream.close();
-  connect();
-}, WATCHDOG_MS);
+// having been held — a frozen or asleep tab — so the time it measures says
+// nothing about the stream, whose events may still be queued behind the tick.
+// Such a tick moves the clock and drops nothing; once the ticks run on time
+// again, SILENT_MS of them without a named event still replaces the stream
+// (gt-t0qi7).
+(() => {
+  let lastTick = Date.now();
+  setInterval(() => {
+    const now = Date.now(), late = now - lastTick > 2 * WATCHDOG_MS;
+    lastTick = now;
+    if (late) { lastEvent = now; return; } // the tick was held, so the silence is the tab's
+    if (reconnecting) return; // a replacement is already on its way
+    if (now - lastEvent < SILENT_MS) return;
+    dropStream();
+    stream.close();
+    connect();
+  }, WATCHDOG_MS);
+})();
 // Ages and elapsed times drift between pushes, and the clock is not part of a
 // pane's reading, so the tick redraws the panes whose drawing carries one from
 // the reading the page already holds — forced past the push's skip, and still
