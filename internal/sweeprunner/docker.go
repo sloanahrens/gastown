@@ -97,7 +97,11 @@ func (Docker) Render(spec Spec) (Plan, error) {
 				"--network", networkName(spec),
 				"--env", "DOCKER_TLS_CERTDIR=",
 				"--volume", volumeName(spec)+":"+dindDataPath,
-				templates.DindImage,
+				templates.SweepDindImage,
+				// dockerd named as the command: the image's entrypoint adds its
+				// own host on 0.0.0.0:2375 to any arguments that do not start
+				// with it, which collides with the loopback host asked for here.
+				"dockerd",
 				"--host=tcp://"+dindAddress+":"+dindPort,
 				"--tls=false",
 			),

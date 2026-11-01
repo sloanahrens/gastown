@@ -1,8 +1,6 @@
 package metrics
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -42,7 +40,11 @@ type RepeatReport struct {
 	// findings are in neither Findings nor Repeated.
 	NoText int `json:"no_text"`
 	// Skipped counts the lines the reader could not use as a review record.
-	Skipped int          `json:"skipped"`
+	Skipped int `json:"skipped"`
+	// NoLogAt is the path of a review log that does not exist, set by the
+	// caller that looked for it: a missing log reads as an empty report, and
+	// this says it was missing, so a wrong town does not look like a quiet one.
+	NoLogAt string       `json:"no_log_at,omitempty"`
 	Beads   []RepeatBead `json:"beads"`
 }
 
@@ -233,30 +235,29 @@ func ReadRepeatReport(r io.Reader, since time.Time) (RepeatReport, error) {
 }
 
 // readRepeatRecords decodes each line of r as a review record and counts the
-// lines it could not use.
+// lines it could not use. The lines are read as the review log's own readers
+// read them (land.ScanReviewLines): a line past the length cap is counted and
+// skipped, not a failed read.
 func readRepeatRecords(r io.Reader) ([]land.ReviewRecord, int, error) {
 	var records []land.ReviewRecord
 	skipped := 0
-	br := bufio.NewReader(r)
-	for {
-		line, err := br.ReadBytes('\n')
-		raw := bytes.TrimSpace(line)
+	tooLong, err := land.ScanReviewLines(r, func(raw []byte) {
 		// A queue line carries a bead and an instant like a verdict, so it is
 		// refused before it can pass as one (gt-3arxj).
-		if len(raw) > 0 && !land.IsQueueLine(raw) {
-			if rec, ok := parseRepeatRecord(raw); ok {
-				records = append(records, rec)
-			} else {
-				skipped++
-			}
+		if len(raw) == 0 || land.IsQueueLine(raw) {
+			return
 		}
-		if err == io.EOF {
-			return records, skipped, nil
+		if rec, ok := parseRepeatRecord(raw); ok {
+			records = append(records, rec)
+		} else {
+			skipped++
 		}
-		if err != nil {
-			return nil, skipped, fmt.Errorf("reading review records: %w", err)
-		}
+	})
+	skipped += tooLong
+	if err != nil {
+		return nil, skipped, fmt.Errorf("reading review records: %w", err)
 	}
+	return records, skipped, nil
 }
 
 // parseRepeatRecord decodes raw as one review record. A line that does not

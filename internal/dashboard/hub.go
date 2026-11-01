@@ -1040,6 +1040,14 @@ func (h *Hub) pollSpend() {
 	if h.cfg.SpendHours != nil {
 		read = h.cfg.SpendHours()
 	}
+	// The reading the rest of the town reads is kept current from the report
+	// this poll just took, before the lock: the write is the disk's, and the
+	// hub's lock does not wait on it. A report that never came back writes
+	// nothing, so a failed read leaves the file's own age showing.
+	var writeErr error
+	if len(sp) != 0 {
+		writeErr = writeSpendWatch(h.cfg.WatchDir, sp, h.cfg.Now())
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.cfg.SpendHours != nil {
@@ -1057,7 +1065,16 @@ func (h *Hub) pollSpend() {
 	}
 	h.state.Spend = sp
 	h.rebuildCostChartsLocked()
-	h.readOKLocked(SourceSpend, h.cfg.SpendEvery)
+	// The report answered, so the panel draws it either way; a watch file that
+	// could not be rewritten is a problem with the copy every other reader
+	// takes, and it is recorded on the spend read's status so the Reads pane
+	// names it rather than leaving it silent. The next successful write clears
+	// it.
+	if writeErr != nil {
+		h.readFailedLocked(SourceSpend, h.cfg.SpendEvery)
+	} else {
+		h.readOKLocked(SourceSpend, h.cfg.SpendEvery)
+	}
 	h.publishLocked()
 }
 

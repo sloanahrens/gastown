@@ -16,13 +16,13 @@
 # internal/testutil decides Docker is available with `docker info`, and the
 # runner reaches the town's engine over TCP, never a mounted socket. The client
 # is copied from the engine image the sweep's Docker-in-Docker sidecar runs
-# (internal/templates/images.go DindImage), pinned by that image's index
+# (internal/templates/images.go SweepDindImage), pinned by that image's index
 # digest: a registry pull verifies every layer, where a tarball fetched in a
 # RUN is verified only if a sha256 is written out beside it and kept in step.
 # Only the client binary reaches the image below, so a sandbox gets a CLI and
 # no daemon (gt-9lmam). TestPolecatImageInstallsDockerCLIPinned keeps this digest
-# equal to DindImage's.
-ARG DOCKER_CLI_DIGEST=sha256:7dcdfc4a20246236f558175182ccace1eb15a41bd3eb119dd2284f393498b7c1
+# equal to SweepDindImage's.
+ARG DOCKER_CLI_DIGEST=sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977
 FROM data.forgejo.org/oci/docker@${DOCKER_CLI_DIGEST} AS docker-cli
 
 # GNU Make 4.4.1 built from source: Ubuntu's Make 4.3 fails inside OpenShell

@@ -133,7 +133,7 @@ func newInterventionCommand(find func() (string, error), now func() time.Time, a
 	intervention := &cobra.Command{
 		Use:     "intervention",
 		GroupID: GroupConfig,
-		Short:   "Record when the loop needed a person, so the weekly report can count it",
+		Short:   "Record when the loop needed a person",
 		Long: `Record one intervention in the town's append-only intervention record.
 
   gt intervention record   Append one intervention to .runtime/metrics/interventions.jsonl
@@ -141,8 +141,9 @@ func newInterventionCommand(find func() (string, error), now func() time.Time, a
 Run it whenever a person or the overseer steps in where the loop could not: a
 waiver, a take-over of a bead, a fix by hand, a hold, a restart, a rescue of a
 landing. Each line is the time, the kind, the bead and rig it concerned, why, and
-who intervened. The record is what the weekly report counts interventions from,
-so a kind is one of the words the command lists, never free text.`,
+who intervened. A report is meant to count interventions from this record and
+nothing reads it yet, so a kind is one of the words the command lists, never
+free text.`,
 		RunE: requireSubcommand,
 	}
 	intervention.AddCommand(record)

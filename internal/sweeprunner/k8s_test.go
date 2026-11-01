@@ -2,6 +2,7 @@ package sweeprunner
 
 import (
 	"encoding/json"
+	"github.com/steveyegge/gastown/internal/templates"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -90,7 +91,10 @@ func TestK8sRenderPriorityAndSafety(t *testing.T) {
 	if !ok {
 		t.Fatalf("the Job renders no %q container", dindContainerName)
 	}
-	if got, want := dind.Args, []string{"--host=tcp://127.0.0.1:" + dindPort, "--tls=false"}; !slices.Equal(got, want) {
+	if dind.Image != templates.SweepDindImage {
+		t.Errorf("dind image = %q, want templates.SweepDindImage %q", dind.Image, templates.SweepDindImage)
+	}
+	if got, want := dind.Args, []string{"dockerd", "--host=tcp://127.0.0.1:" + dindPort, "--tls=false"}; !slices.Equal(got, want) {
 		t.Errorf("dind args = %v, want %v: an engine bound to any other address answers at the pod IP, where every pod on the cluster can drive it", got, want)
 	}
 	if dind.Resources == nil {

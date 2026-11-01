@@ -202,6 +202,23 @@ func TestMetricsRepeatsMissingLogIsEmptyReport(t *testing.T) {
 	if raw := out.String(); !strings.Contains(raw, `"beads": []`) {
 		t.Errorf("empty report does not carry an empty beads list:\n%s", raw)
 	}
+	if report.NoLogAt == "" {
+		t.Error("the JSON report does not say the log was missing: a wrong town reads as a quiet one")
+	}
+}
+
+// The table says the log is missing, with its path, so an empty report from the
+// wrong town is not mistaken for a clean one (gt-algrd).
+func TestMetricsRepeatsMissingLogIsSaidInTheTable(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	var out bytes.Buffer
+	if err := metricsRepeatsReportFrom(&metricsRepeatsFakeFS{}, func() (string, error) { return townRoot, nil }, &out, "", false); err != nil {
+		t.Fatalf("metricsRepeatsReportFrom: %v", err)
+	}
+	if !strings.Contains(out.String(), "no review log at "+townRoot) {
+		t.Errorf("table = %q, want it to name the missing log under %s", out.String(), townRoot)
+	}
 }
 
 // TestMetricsRepeatsUnreadableLogFails: a log that exists and cannot be read

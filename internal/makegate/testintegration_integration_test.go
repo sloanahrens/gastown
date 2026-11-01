@@ -52,17 +52,43 @@ func townSlots(t *testing.T, root string) string {
 	return string(m[1])
 }
 
-// initPoolLines counts the lines in out that hold
-// GT_TEST_DOLT_INIT_CONCURRENCY=slots, as the shell case greps for it.
+// initPoolLines counts the lines in out that set GT_TEST_DOLT_INIT_CONCURRENCY
+// to exactly slots: as a whole assignment, so a longer value (80 for 8) is not a
+// match.
 func initPoolLines(out, slots string) int {
-	want := "GT_TEST_DOLT_INIT_CONCURRENCY=" + slots
+	want := regexp.MustCompile(`(^|[ \t])GT_TEST_DOLT_INIT_CONCURRENCY=` + regexp.QuoteMeta(slots) + `([ \t;]|$)`)
 	n := 0
 	for _, line := range strings.Split(out, "\n") {
-		if strings.Contains(line, want) {
+		if want.MatchString(line) {
 			n++
 		}
 	}
 	return n
+}
+
+// TestIntegrationInitPoolLinesMatchesTheWholeValue pins the matcher itself: the
+// pool count must be the whole assignment, so a longer value (80, 8x) and a
+// different variable that merely contains the name do not count for 8.
+// Mutation: go back to a substring match (strings.Contains(line,
+// "GT_TEST_DOLT_INIT_CONCURRENCY=8")), and the 80 line is counted.
+func TestIntegrationInitPoolLinesMatchesTheWholeValue(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		out  string
+		want int
+	}{
+		{"exact, then a command", "GT_TEST_DOCKER=1 GT_TEST_DOLT_INIT_CONCURRENCY=8 go test ./...", 1},
+		{"exact, before a semicolon", "export GT_TEST_DOLT_INIT_CONCURRENCY=8;", 1},
+		{"exact, at the end of the line", "GT_TEST_DOLT_INIT_CONCURRENCY=8", 1},
+		{"a longer value", "GT_TEST_DOCKER=1 GT_TEST_DOLT_INIT_CONCURRENCY=80 go test ./...", 0},
+		{"a longer value with a letter", "GT_TEST_DOLT_INIT_CONCURRENCY=8x go test", 0},
+		{"another variable ending in the name", "X_GT_TEST_DOLT_INIT_CONCURRENCY=8 go test", 0},
+		{"two lines, one wrong", "GT_TEST_DOLT_INIT_CONCURRENCY=8 a\nGT_TEST_DOLT_INIT_CONCURRENCY=88 b", 1},
+	} {
+		if got := initPoolLines(tc.out, "8"); got != tc.want {
+			t.Errorf("%s: initPoolLines counted %d lines, want %d\n%s", tc.name, got, tc.want, tc.out)
+		}
+	}
 }
 
 // TestIntegrationTestIntegrationDryRunExitsZero checks "make -n test-integration

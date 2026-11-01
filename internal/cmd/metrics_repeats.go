@@ -107,7 +107,9 @@ func metricsRepeatsReportFrom(fsys metricsRepeatsFS, findTown func() (string, er
 func metricsRepeatsRead(fsys metricsRepeatsFS, path string, since time.Time) (metrics.RepeatReport, error) {
 	f, err := fsys.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return metrics.RepeatedFindings(nil), nil
+		report := metrics.RepeatedFindings(nil)
+		report.NoLogAt = path
+		return report, nil
 	}
 	if err != nil {
 		return metrics.RepeatReport{}, fmt.Errorf("opening %s: %w", path, err)
@@ -140,6 +142,9 @@ func writeMetricsRepeatsTable(w io.Writer, report metrics.RepeatReport, since ti
 	}
 	fmt.Fprintln(w, header)
 	fmt.Fprintf(w, "Findings %d, repeated %d (%s)\n", report.Findings, report.Repeated, metricsRepeatsPercent(report.RepeatShare))
+	if report.NoLogAt != "" {
+		fmt.Fprintf(w, "\nno review log at %s: nothing has landed in this town yet, or this is not the town you meant\n", report.NoLogAt)
+	}
 	if len(report.Beads) > 0 {
 		fmt.Fprintln(w, "\nBeads repeating most")
 		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
