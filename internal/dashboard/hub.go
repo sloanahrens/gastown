@@ -176,6 +176,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.Reports != nil {
 		start(h.cfg.ReportsEvery, h.pollReports)
 	}
+	if h.cfg.Birds != nil {
+		start(h.cfg.BirdsEvery, h.pollBirds)
+	}
 	if h.cfg.Questions != nil {
 		start(h.cfg.QuestionsEvery, h.pollQuestions)
 	}
@@ -837,6 +840,27 @@ func (h *Hub) pollReports() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.Reports = rep
+	h.publishLocked()
+}
+
+// pollBirds reads the birds' daily reports for the Reports page's list. A read
+// that returns no rows is a read that failed, not a town holding no birds: the
+// rows it last read stay in the state and the read is flagged, so the pane ages
+// them and says so instead of drawing an empty list (gt-q6h8e).
+func (h *Hub) pollBirds() {
+	if h.cfg.Birds == nil {
+		return
+	}
+	rows := h.cfg.Birds()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(rows) == 0 {
+		h.readFailedLocked(SourceBirds, h.cfg.BirdsEvery)
+		h.publishLocked()
+		return
+	}
+	h.state.Birds = rows
+	h.readOKLocked(SourceBirds, h.cfg.BirdsEvery)
 	h.publishLocked()
 }
 

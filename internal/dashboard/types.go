@@ -150,6 +150,9 @@ const (
 	SourceJevScorecard = "jev_scorecard"
 	SourceOM           = "om"
 	SourceQueue        = "queue"
+	// SourceBirds is the birds' rows on the Reports page's list, read apart
+	// from the overseer's report beside them.
+	SourceBirds = "birds"
 )
 
 // readStaleFactor is how many of a poll's own intervals a reading may age
@@ -699,6 +702,11 @@ type State struct {
 	// own beads database. It is nil until the reader first reports.
 	Reports   *Reports   `json:"reports,omitempty"`
 	Questions *Questions `json:"questions,omitempty"`
+	// Birds is the birds' daily reports as the Reports page lists them, read
+	// from the runtime directory each bird writes under. A read that returns
+	// no rows keeps the rows it last read, so the list ages with its read
+	// rather than emptying under an operator working from it (gt-q6h8e).
+	Birds []BirdReport `json:"birds,omitempty"`
 	// Overseer is the overseer's heartbeat, journal and open-question count,
 	// read from the files it writes under the town root. It is nil until the
 	// reader first reports.
@@ -909,6 +917,7 @@ type Config struct {
 	NewsEvery         time.Duration
 	DeploysEvery      time.Duration
 	ReportsEvery      time.Duration
+	BirdsEvery        time.Duration
 	QuestionsEvery    time.Duration
 	OverseerEvery     time.Duration
 	DeepReviewEvery   time.Duration
@@ -964,6 +973,10 @@ func (c *Config) defaults() {
 	// The overseer's report is written hourly, so its own minute is a page's
 	// worth of slack: nothing there changes between one minute and the next.
 	def(&c.ReportsEvery, 60*time.Second)
+	// A bird writes its daily report once a day, so a minute is slack to
+	// spare: the rows change when a bird rewrites its summary, not between one
+	// poll and the next.
+	def(&c.BirdsEvery, 60*time.Second)
 	// A question waits on a person, so it changes on the minute at the
 	// soonest: the reader runs bd per open question, and a page asks nothing
 	// faster than that.

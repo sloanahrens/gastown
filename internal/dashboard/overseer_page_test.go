@@ -111,8 +111,8 @@ func blockClasses(t *testing.T, dom *pageDOM, name string) []string {
 
 // The panel is the overseer's side of the town in one panel, so it draws its
 // blocks in the order that side reads in: what the overseer is doing, what the
-// town did, what the review is doing, what the dispatcher is doing, and what
-// waits on the overseer (gt-uv08f).
+// town did, what the birds last reported, what the review is doing, what the
+// dispatcher is doing, and what waits on the overseer (gt-uv08f).
 func TestOverseerPanelDrawsItsBlocksInOrder(t *testing.T) {
 	t.Parallel()
 
@@ -122,7 +122,7 @@ func TestOverseerPanelDrawsItsBlocksInOrder(t *testing.T) {
 	for _, b := range overseerBlocks(t, dom) {
 		names = append(names, b.Name)
 	}
-	want := []string{"Heartbeat", "Digest", "Deep review", "Dispatcher", "For the overseer"}
+	want := []string{"Heartbeat", "Digest", "Birds", "Deep review", "Dispatcher", "For the overseer"}
 	if strings.Join(names, "|") != strings.Join(want, "|") {
 		t.Errorf("the panel drew %v, want %v", names, want)
 	}
