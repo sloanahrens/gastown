@@ -24,12 +24,14 @@ import (
 //
 // Each bead column is one store read per registered rig, summed, except
 // waiting_to_land, which a rig's landing worker's published count answers
-// while that count is fresh, and whose rigs a store that holds several of them
-// answers in one request (queueLandingColumn, beads.ListAcross). The rigs come
-// from mayor/rigs.json, or from the registry section of mayor/town.json on the
-// two-file layout (internal/config/layout.go). Each read goes through a store
-// opened for the rig's own directory, which is the scoping `bd -C <town>/<rig>`
-// gave, and the filters each column asks for are queueBeadColumns' own.
+// while that count is fresh, whose board a burst sample lists at most once a
+// minute per rig (BurstBoardCache), and whose rigs a store that holds several
+// of them answers in one request (queueLandingColumn, beads.ListAcross). The
+// rigs come from mayor/rigs.json, or from the registry section of
+// mayor/town.json on the two-file layout (internal/config/layout.go). Each
+// read goes through a store opened for the rig's own directory, which is the
+// scoping `bd -C <town>/<rig>` gave, and the filters each column asks for are
+// queueBeadColumns' own.
 //
 // A read that fails, or a ready page bd reports as cut, nils its column; the
 // store's own argv and failure classification are the seam's business.
@@ -184,7 +186,9 @@ func queueBeadColumns() []queueBeadColumn {
 // The landing worker lists this board at the top of every pass anyway, so a
 // sample reads the count that pass published (Env.LandingQueue) and lists the
 // board only for a rig whose count is stale or was never published
-// (gt-hw6ih).
+// (gt-hw6ih). A rig the landing worker does not pass never publishes, so a
+// burst sample keeps the count it listed for that rig and reuses it for
+// BurstSlowInterval before listing the board again (BurstBoardCache).
 //
 // List adds no status filter of its own, so the label and bd's default list
 // scope are the whole query, as they were for the pre-seam `bd list`; Limit 0
@@ -207,6 +211,106 @@ func queueLandingColumn() queueBeadColumn {
 		list:       &opts,
 		readAcross: func(l beads.Lister) ([]*beads.Issue, error) { return l.List(opts) },
 	}
+}
+
+// BurstBoardCache keeps the ready-to-land board count a sample had to list,
+// and the sample instant that listed it, so a rig whose landing worker
+// publishes no fresh count is listed once a BurstSlowInterval rather than once
+// a sample: a rig the landing worker does not pass never publishes, and its
+// board changes little in a minute.
+//
+// The daemon's burst sampler owns one and hands it to every sample through
+// Env.BurstBoard; nil is a process that keeps nothing, such as a snapshot's
+// queue group, and every sample then lists the board.
+type BurstBoardCache struct {
+	mu       sync.Mutex
+	counts   map[string]burstBoardCount
+	listed   map[string]struct{}
+	lastLine time.Time
+	logf     func(format string, args ...any)
+}
+
+// burstBoardCount is one rig's listed board count and the sample instant the
+// read was taken at.
+type burstBoardCount struct {
+	n  int
+	at time.Time
+}
+
+// NewBurstBoardCache returns a cache that names the rigs whose board it had to
+// list in one logf line at most once a BurstSlowInterval; a nil logf logs
+// nothing.
+func NewBurstBoardCache(logf func(format string, args ...any)) *BurstBoardCache {
+	return &BurstBoardCache{logf: logf}
+}
+
+// count returns rig's kept count when a sample listed its board less than
+// BurstSlowInterval before now.
+func (c *BurstBoardCache) count(rig string, now time.Time) (int, bool) {
+	if c == nil {
+		return 0, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	kept, ok := c.counts[rig]
+	if !ok {
+		return 0, false
+	}
+	age := now.Sub(kept.at)
+	if age < 0 {
+		// A count stamped after now is the town's clocks disagreeing, not an
+		// old read.
+		age = 0
+	}
+	if age >= BurstSlowInterval {
+		return 0, false
+	}
+	return kept.n, true
+}
+
+// keep records the count a sample listed for rig at now. A read that did not
+// answer is never kept: it would answer the next sample with a number nobody
+// read.
+func (c *BurstBoardCache) keep(rig string, n int, now time.Time) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.counts == nil {
+		c.counts = make(map[string]burstBoardCount)
+	}
+	c.counts[rig] = burstBoardCount{n: n, at: now}
+}
+
+// noteListed records the rigs a sample is about to list and names them, once a
+// BurstSlowInterval has passed since the last line, so the census's list count
+// can be matched to rigs. A rig whose read failed is listed again on the next
+// sample, and a line per sample would bury the log's next real line.
+func (c *BurstBoardCache) noteListed(rigs []queueRig, now time.Time) {
+	if c == nil || len(rigs) == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.listed == nil {
+		c.listed = make(map[string]struct{}, len(rigs))
+	}
+	for _, rig := range rigs {
+		c.listed[rig.name] = struct{}{}
+	}
+	if !c.lastLine.IsZero() && now.Sub(c.lastLine) < BurstSlowInterval {
+		return
+	}
+	names := make([]string, 0, len(c.listed))
+	for name := range c.listed {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if c.logf != nil {
+		c.logf("burst_sampler: landing queue: listed the board of %s", strings.Join(names, ", "))
+	}
+	c.lastLine, c.listed = now, nil
 }
 
 func (queueSource) Group() string { return "queue" }
@@ -314,11 +418,21 @@ func queueSumBeads(ctx context.Context, env Env, rigs []queueRig, col queueBeadC
 // queueSumCount is queueSumBeads's reading as a number and a flag: ok is false
 // when any rig failed, so a caller that needs the count cannot mistake a
 // failed read for an empty queue. A rig the column's published count answers
-// costs no store read; the rigs it does not answer are read as before.
+// costs no store read; a rig the column's board cache kept a recent count for
+// costs none either, and the rigs left are read and their counts kept.
 func queueSumCount(ctx context.Context, env Env, rigs []queueRig, col queueBeadColumn) (int, bool) {
+	now := env.now()
 	var published map[string]int
 	if col.published != nil {
-		published = col.published(env, env.now())
+		published = col.published(env, now)
+	}
+	// Only the column a published count answers keeps its board: it is the
+	// ready-to-land board, which a rig's landing worker lists at the top of
+	// every pass, and the other columns change too fast for a kept count to be
+	// one (queueLandingColumn).
+	cache := env.BurstBoard
+	if col.published == nil {
+		cache = nil
 	}
 	sum := 0
 	read := make([]queueRig, 0, len(rigs))
@@ -327,14 +441,20 @@ func queueSumCount(ctx context.Context, env Env, rigs []queueRig, col queueBeadC
 			sum += n
 			continue
 		}
+		if n, ok := cache.count(rig.name, now); ok {
+			sum += n
+			continue
+		}
 		read = append(read, rig)
 	}
+	cache.noteListed(read, now)
 	counts, ok := queueRigCounts(ctx, env, read, col)
 	if !ok {
 		return 0, false
 	}
-	for _, n := range counts {
+	for name, n := range counts {
 		sum += n
+		cache.keep(name, n, now)
 	}
 	return sum, true
 }

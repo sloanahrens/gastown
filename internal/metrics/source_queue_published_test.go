@@ -2,6 +2,8 @@ package metrics
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -167,5 +169,159 @@ func TestQueueLandingColumnMakesNoBdCallForAFreshView(t *testing.T) {
 	}
 	if calls := queueLandingLists(); calls != 20 {
 		t.Fatalf("list calls = %d with no published count; want one per rig per sample (20)", calls)
+	}
+}
+
+// A rig the landing worker does not pass publishes no count, so a burst sample
+// lists its board; every sample inside BurstSlowInterval of that read answers
+// from the kept count instead, and the sample after the interval lists again
+// (gt-pg5rb).
+func TestWaitingToLandReusesABoardReadForOneMinute(t *testing.T) {
+	t.Parallel()
+	fake := &queueStores{rows: map[string]int{
+		"alpha/waiting_to_land": 3, "beta/waiting_to_land": 2,
+	}}
+	now := fixedNow()
+	env := queueTestEnv(t, queueTestRigs("alpha", "beta"), fake, nil)
+	env.Now = func() time.Time { return now }
+	env.BurstBoard = NewBurstBoardCache(nil)
+	sample := func() *int {
+		t.Helper()
+		got := burstLandingQueue(context.Background(), env)
+		if got == nil {
+			t.Fatalf("the landing queue is nil; want both boards' sum")
+		}
+		return got
+	}
+	listings := func() int { return queueLandingReads(fake, "alpha") + queueLandingReads(fake, "beta") }
+
+	for i := 0; i < 4; i++ {
+		if got := *sample(); got != 5 {
+			t.Fatalf("sample %d = %d; want 5", i, got)
+		}
+		now = now.Add(BurstFastInterval)
+	}
+	if n := listings(); n != 2 {
+		t.Fatalf("four samples inside one minute listed the boards %d time(s); want the first sample's 2", n)
+	}
+
+	now = now.Add(BurstSlowInterval)
+	if got := *sample(); got != 5 {
+		t.Fatalf("the sample past the minute = %d; want 5", got)
+	}
+	if n := listings(); n != 4 {
+		t.Fatalf("the sample past the minute took the listings to %d; want 4", n)
+	}
+}
+
+// A fresh published count answers its rig even when a sample kept a board count
+// for it: the published number is the landing worker's own read of the board.
+func TestWaitingToLandPrefersAFreshPublishedCount(t *testing.T) {
+	t.Parallel()
+	fake := &queueStores{rows: map[string]int{
+		"alpha/waiting_to_land": 3, "beta/waiting_to_land": 2,
+	}}
+	now := fixedNow()
+	env := queueTestEnv(t, queueTestRigs("alpha", "beta"), fake, nil)
+	env.Now = func() time.Time { return now }
+	env.BurstBoard = NewBurstBoardCache(nil)
+	env.LandingQueue = func(time.Time) map[string]int { return map[string]int{"alpha": 7} }
+
+	first := burstLandingQueue(context.Background(), env)
+	if first == nil || *first != 9 {
+		t.Fatalf("the first sample = %v; want the published 7 plus the listed 2", first)
+	}
+	if n := queueLandingReads(fake, "beta"); n != 1 {
+		t.Fatalf("beta's board was listed %d time(s); want the one read that kept its count", n)
+	}
+
+	now = now.Add(BurstFastInterval)
+	env.LandingQueue = func(time.Time) map[string]int { return map[string]int{"alpha": 7, "beta": 4} }
+	second := burstLandingQueue(context.Background(), env)
+	if second == nil || *second != 11 {
+		t.Fatalf("the second sample = %v; want the published 7 and 4", second)
+	}
+	if n := queueLandingReads(fake, "alpha"); n != 0 {
+		t.Errorf("alpha's board was listed %d time(s); the published count answered it", n)
+	}
+	if n := queueLandingReads(fake, "beta"); n != 1 {
+		t.Errorf("beta's board was listed %d time(s); the published count answered over the kept count", n)
+	}
+}
+
+// A failed board read is not kept: the next sample lists that rig again and the
+// column stays nil until a read answers.
+func TestWaitingToLandDoesNotKeepAFailedRead(t *testing.T) {
+	t.Parallel()
+	fake := &queueStores{
+		rows: map[string]int{"alpha/waiting_to_land": 3, "beta/waiting_to_land": 2},
+		fail: map[string]bool{"beta/waiting_to_land": true},
+	}
+	now := fixedNow()
+	env := queueTestEnv(t, queueTestRigs("alpha", "beta"), fake, nil)
+	env.Now = func() time.Time { return now }
+	env.BurstBoard = NewBurstBoardCache(nil)
+
+	for i := 0; i < 2; i++ {
+		if got := burstLandingQueue(context.Background(), env); got != nil {
+			t.Fatalf("sample %d = %d; want nil while beta's board cannot be read", i, *got)
+		}
+		now = now.Add(BurstFastInterval)
+	}
+	if n := queueLandingReads(fake, "beta"); n != 2 {
+		t.Fatalf("beta's board was listed %d time(s) over two samples; want 2, since a failed read is not kept", n)
+	}
+
+	fake.mu.Lock()
+	fake.fail["beta/waiting_to_land"] = false
+	fake.mu.Unlock()
+	answered := burstLandingQueue(context.Background(), env)
+	if answered == nil || *answered != 5 {
+		t.Fatalf("the sample after beta's read answered = %v; want 5", answered)
+	}
+	if n := queueLandingReads(fake, "beta"); n != 3 {
+		t.Fatalf("beta's board was listed %d time(s); want the third read that answered", n)
+	}
+}
+
+// The sample names, in one line a minute, the rigs whose board it had to list,
+// so the census's list count can be matched to rigs. A published rig is not
+// named, and a read that fails is listed on every fast sample but still named
+// once, which is the case the once-a-minute line exists for.
+func TestWaitingToLandNamesTheListedRigsOnceAMinute(t *testing.T) {
+	t.Parallel()
+	fake := &queueStores{
+		rows: map[string]int{"alpha/waiting_to_land": 3, "beta/waiting_to_land": 2},
+		fail: map[string]bool{"beta/waiting_to_land": true},
+	}
+	now := fixedNow()
+	var lines []string
+	env := queueTestEnv(t, queueTestRigs("alpha", "beta"), fake, nil)
+	env.Now = func() time.Time { return now }
+	env.BurstBoard = NewBurstBoardCache(func(format string, args ...any) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	})
+	env.LandingQueue = func(time.Time) map[string]int { return map[string]int{"alpha": 3} }
+
+	for i := 0; i < 4; i++ {
+		if got := burstLandingQueue(context.Background(), env); got != nil {
+			t.Fatalf("sample %d = %d; want nil while beta's board cannot be read", i, *got)
+		}
+		now = now.Add(BurstFastInterval)
+	}
+	if n := queueLandingReads(fake, "beta"); n != 4 {
+		t.Fatalf("beta's board was listed %d time(s) over four fast samples; want 4, since a failed read is not kept", n)
+	}
+	if len(lines) != 1 {
+		t.Fatalf("four samples inside one minute wrote %d line(s); want one", len(lines))
+	}
+	if got := lines[0]; !strings.Contains(got, "beta") || strings.Contains(got, "alpha") {
+		t.Errorf("the line = %q; want beta named and alpha left out, since its published count answered it", got)
+	}
+
+	now = now.Add(BurstSlowInterval)
+	burstLandingQueue(context.Background(), env)
+	if len(lines) != 2 {
+		t.Fatalf("the sample past the minute took the lines to %d; want a second one", len(lines))
 	}
 }

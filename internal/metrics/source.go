@@ -139,6 +139,12 @@ type Env struct {
 	// out is read from its store. nil reads every rig from its store, which is
 	// what a process with no landing worker (gt metrics snapshot) does.
 	LandingQueue func(now time.Time) map[string]int
+	// BurstBoard, when set, keeps the ready-to-land board counts a sample had
+	// to list, so a rig with no fresh published count is listed once a
+	// BurstSlowInterval rather than once a sample. The daemon's burst sampler
+	// owns one and hands it in; nil keeps nothing, which is what a snapshot's
+	// queue group does.
+	BurstBoard *BurstBoardCache
 	// Now is the time the snapshot is taken; Collect writes it as the record's
 	// ts. nil means the wall clock.
 	Now func() time.Time

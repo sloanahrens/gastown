@@ -1118,3 +1118,29 @@ func TestBurstSamplerEnvReadsTheLandingQueueView(t *testing.T) {
 		t.Fatalf("the sample read %v after a second publish; want gastown 5", got)
 	}
 }
+
+// Every sample the sampler takes carries the sampler's one board cache, so two
+// samples less than a minute apart reuse each other's job of listing a rig that
+// publishes no count (gt-pg5rb).
+func TestBurstSamplerSamplesShareTheBoardCache(t *testing.T) {
+	t.Parallel()
+	clk := newFixedClock()
+	d := burstTestDaemon(t, t.TempDir(), clk, io.Discard)
+	d.burstSeams = burstSamplerSeams{env: burstTestEnv(clk)}
+	s := d.burstSampler()
+
+	first, err := s.sampleEnv()
+	if err != nil {
+		t.Fatalf("sampleEnv: %v", err)
+	}
+	second, err := s.sampleEnv()
+	if err != nil {
+		t.Fatalf("sampleEnv: %v", err)
+	}
+	if first.BurstBoard == nil {
+		t.Fatal("the sample's Env carries no board cache; every sample would list each unpublished rig's board again")
+	}
+	if first.BurstBoard != second.BurstBoard {
+		t.Fatal("two samples carry different board caches; each would list the board the other just read")
+	}
+}
