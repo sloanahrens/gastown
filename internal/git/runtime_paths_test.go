@@ -2,9 +2,13 @@ package git
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/templates"
 )
 
 func TestIsGasTownRuntimePath(t *testing.T) {
@@ -172,6 +176,86 @@ func TestCleanExcludingRuntime(t *testing.T) {
 			got := tt.s.CleanExcludingRuntime()
 			if got != tt.want {
 				t.Errorf("CleanExcludingRuntime() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCheckUncommittedWorkExcludesMarkerBearingCLAUDEmd drives the status
+// CheckUncommittedWork builds from a real worktree CLAUDE.md: the rig-written
+// overlay must read clean for gt done, while a project CLAUDE.md, a nested one,
+// and any real source file beside the overlay still block (gt-iv92k).
+func TestCheckUncommittedWorkExcludesMarkerBearingCLAUDEmd(t *testing.T) {
+	t.Parallel()
+	overlay := "# Polecat\n\n## " + templates.PolecatLifecycleMarker + "\n"
+	tests := []struct {
+		name      string
+		claude    string
+		noFile    bool
+		status    string
+		wantClean bool
+	}{
+		{
+			name:      "marker-bearing CLAUDE.md only",
+			claude:    overlay,
+			status:    "?? CLAUDE.md\n",
+			wantClean: true,
+		},
+		{
+			name:      "tracked marker-bearing CLAUDE.md edited",
+			claude:    overlay,
+			status:    " M CLAUDE.md\n",
+			wantClean: true,
+		},
+		{
+			name:      "project CLAUDE.md without the marker",
+			claude:    "# Project instructions\n",
+			status:    "?? CLAUDE.md\n",
+			wantClean: false,
+		},
+		{
+			name:      "deleted CLAUDE.md cannot be read for the marker",
+			noFile:    true,
+			status:    " D CLAUDE.md\n",
+			wantClean: false,
+		},
+		{
+			name:      "marker-bearing CLAUDE.md beside a source file",
+			claude:    overlay,
+			status:    "?? CLAUDE.md\n?? main.go\n",
+			wantClean: false,
+		},
+		{
+			name:      "marker-bearing nested CLAUDE.md",
+			claude:    overlay,
+			status:    "?? docs/CLAUDE.md\n",
+			wantClean: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			g := newTestGit(t, newScripted(map[string]reply{
+				"status --porcelain -uall": ok(tt.status),
+				"ls-files -v -z":           ok(""),
+				"stash list":               ok(""),
+			}))
+			if !tt.noFile {
+				if err := os.WriteFile(filepath.Join(g.WorkDir(), "CLAUDE.md"), []byte(tt.claude), 0o644); err != nil {
+					t.Fatalf("write CLAUDE.md: %v", err)
+				}
+			}
+
+			status, err := g.checkUncommittedWork(func() (int, error) { return 0, nil })
+			if err != nil {
+				t.Fatalf("checkUncommittedWork: %v", err)
+			}
+			if !status.HasUncommittedChanges {
+				t.Fatal("status reports a clean worktree for a listed uncommitted path")
+			}
+			if got := status.CleanExcludingRuntime(); got != tt.wantClean {
+				t.Errorf("CleanExcludingRuntime() = %v, want %v", got, tt.wantClean)
 			}
 		})
 	}
