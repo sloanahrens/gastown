@@ -619,6 +619,14 @@ type Daemon struct {
 	// name. The patrol goroutine writes it and the attention tick reads it.
 	scheduledGateFailures scheduledGateCounts
 
+	// birdReportStale is the bird_reports patrol's last check: the reporters
+	// whose daily report was missing or late (gt-cbsat). The check replaces it
+	// and the attention tick reads it, both on the run loop.
+	birdReportStale birdReportStale
+	// birdReportLoc is the zone start_hour is read in; nil is time.Local. A
+	// test sets a fixed zone so the check does not depend on the host's clock.
+	birdReportLoc *time.Location
+
 	// scheduledSlingsHold and queuedWorkHold remember the operator dispatch
 	// hold each dispatcher last saw, so a hold is logged once when it appears,
 	// changes, or lifts rather than on every tick (gt-ifijm).
@@ -1774,6 +1782,19 @@ func (d *Daemon) Run() (err error) {
 		d.triggerOverseerReport()
 	}
 
+	// Start the bird_reports ticker if enabled (default off, gt-cbsat). It
+	// checks once at startup so a daemon that restarts after start_hour does
+	// not leave the morning's lapse unnoticed until the next tick.
+	var birdReportsTicker *time.Ticker
+	var birdReportsChan <-chan time.Time
+	if d.isPatrolActive("bird_reports") {
+		birdReportsTicker = time.NewTicker(birdReportsCheckEvery)
+		birdReportsChan = birdReportsTicker.C
+		defer birdReportsTicker.Stop()
+		d.logger.Printf("Bird reports ticker started (check every %v)", birdReportsCheckEvery)
+		d.runBirdReports()
+	}
+
 	// Start the patrol_scan tick if enabled (default off, gt-4k3fj.6): the
 	// deterministic replacement for the witness LLM's patrol.
 	var patrolScanTicker *time.Ticker
@@ -1940,6 +1961,13 @@ func (d *Daemon) Run() (err error) {
 			// its own goroutine (gt-a6fg7).
 			if !d.isShutdownInProgress() {
 				d.triggerOverseerReport()
+			}
+
+		case <-birdReportsChan:
+			// Bird reports tick — re-reads the expected daily reports and
+			// updates the attention items that describe them (gt-cbsat).
+			if !d.isShutdownInProgress() {
+				d.runBirdReports()
 			}
 
 		case <-resourceSamplerChan:

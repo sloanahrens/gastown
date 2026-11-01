@@ -140,6 +140,7 @@ type (
 	HMSyncConfig               = agentconfig.HMSyncConfig
 	SpecDispatchConfig         = agentconfig.SpecDispatchConfig
 	OverseerReportConfig       = agentconfig.OverseerReportConfig
+	BirdReportsConfig          = agentconfig.BirdReportsConfig
 	PatrolScanConfig           = agentconfig.PatrolScanConfig
 	EventsPruneConfig          = agentconfig.EventsPruneConfig
 	JevDedupeConfig            = agentconfig.JevDedupeConfig
@@ -506,6 +507,15 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.OverseerReport.Enabled
+	}
+	// bird_reports defaults OFF: a town with no birds would otherwise raise an
+	// item for every reporter whose daily.json was never going to exist
+	// (gt-cbsat).
+	if patrol == "bird_reports" {
+		if config == nil || config.Patrols == nil || config.Patrols.BirdReports == nil {
+			return false
+		}
+		return config.Patrols.BirdReports.Enabled
 	}
 	// patrol_scan defaults OFF: it restarts polecats on its own, so the
 	// operator opts in (gt-4k3fj.6, ADR 0005).
