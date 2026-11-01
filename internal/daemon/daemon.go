@@ -86,6 +86,9 @@ type Daemon struct {
 	// hbGrace overrides heartbeatSignalGrace in tests.
 	hb      heartbeatRun
 	hbGrace time.Duration
+	// attention is the background attention tick (attention_background.go,
+	// gt-zszj0).
+	attention attentionRun
 
 	config       *Config
 	patrolConfig *DaemonPatrolConfig
@@ -2276,8 +2279,10 @@ var heartbeatSteps = []heartbeatStep{
 
 	// Write the attention queue from the collectors (gt-vsct7.2). After
 	// townhealth, so the bd-slow collector can read this tick's Dolt verdict;
-	// non-lifecycle, so an E-stopped town still gets its queue.
-	{name: "attention", run: (*Daemon).writeAttention},
+	// non-lifecycle, so an E-stopped town still gets its queue. The tick runs
+	// in the background, one at a time (attention_background.go, gt-zszj0): it
+	// took most of a long heartbeat.
+	{name: "attention", run: (*Daemon).startAttention},
 
 	// Tell the human once about each escalation the overseer left open past
 	// its unhandled window (gt-71714). Last, so it reads the escalations the
@@ -2924,6 +2929,9 @@ func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return
 	if d.cancel != nil {
 		d.cancel()
 	}
+
+	// The background attention tick stops on that cancel; wait for it, bounded.
+	d.waitForAttention()
 
 	// Join the sandbox seat ends the cancel just stopped (their remaining
 	// reads go through Dolt, so this comes before the stop) and refuse any
