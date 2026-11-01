@@ -4,11 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -44,6 +47,20 @@ const (
 	// file that is not a bird's sidecar cannot be read into memory to be
 	// rejected. A sidecar is a short summary and a handful of counts.
 	birdSidecarMaxBytes = 16 << 10
+
+	// birdTopicPageShape is the name of a topic page a bird writes beside its
+	// daily one: a slug and .html, no dots in the slug, so daily.json, a dot
+	// segment and another extension never match. daily.html fits the shape and is
+	// the daily page, listed apart from the topic pages.
+	birdTopicPageShape = `^[a-z0-9][a-z0-9-]{0,60}\.html$`
+
+	// birdTopicPagesMax is how many topic pages a row lists, newest first.
+	birdTopicPagesMax = 10
+
+	// birdTopicTitleRunes is how much of a page's <title> a listing carries, and
+	// birdTopicTitleScanBytes how much of the page is read to find it.
+	birdTopicTitleRunes     = 120
+	birdTopicTitleScanBytes = 16 << 10
 
 	// birdPageMaxBytes is the size at which has_page and has_prev stop calling
 	// a file a page: a page is a regular file under it. The page itself is
@@ -130,6 +147,15 @@ type BirdDecisionItem struct {
 	Recommendation string `json:"recommendation"`
 }
 
+// BirdPage is one of a bird's topic pages as the Birds panel lists it: the file
+// name the route serves, the page's own <title> (the name when it has none, or
+// when the title looks like it holds a secret), and when it was last written.
+type BirdPage struct {
+	Name  string    `json:"name"`
+	Title string    `json:"title"`
+	MTime time.Time `json:"mtime"`
+}
+
 // BirdReport is one bird's daily report as the Reports page draws it: what the
 // bird's sidecar says, whether its page is there to open, and, when the reader
 // could not use the sidecar, what is wrong with it.
@@ -167,6 +193,9 @@ type BirdReport struct {
 	// regular files small enough to serve. The reader does not open them.
 	HasPage bool `json:"has_page"`
 	HasPrev bool `json:"has_prev"`
+	// Pages are the bird's other pages in its reports directory (topic reports),
+	// newest first, at most birdTopicPagesMax. The route serves each by Name.
+	Pages []BirdPage `json:"pages,omitempty"`
 	// Note names what the reader could not use, or that the page is older
 	// than its summary. It is empty on a row it read whole.
 	Note string `json:"note,omitempty"`
@@ -228,8 +257,8 @@ func (r *BirdReportsReader) Read(now time.Time) []BirdReport {
 	return rows
 }
 
-// ReadPage returns the bytes of one of a bird's two pages, daily.html or
-// daily.prev.html, for the route that serves it. The bird and the file are
+// ReadPage returns the bytes of one of a bird's pages, daily.html,
+// daily.prev.html or a topic page named <slug>.html, for the route that serves it. The bird and the file are
 // checked against the names a bird writes before the path is built from them,
 // so the route never reaches another file: a name of another shape is refused,
 // and the path is joined from the two validated parts, never from a URL. The
@@ -241,7 +270,7 @@ func (r *BirdReportsReader) ReadPage(bird, file string) ([]byte, error) {
 	if !birdReportsNameRe.MatchString(bird) {
 		return nil, errBirdPageRefused
 	}
-	if file != birdPageName && file != birdPrevPageName {
+	if file != birdPageName && file != birdPrevPageName && !birdTopicPageRe.MatchString(file) {
 		return nil, errBirdPageRefused
 	}
 	reports := filepath.Join(r.runtimeDir, bird, birdReportsSubdir)
@@ -282,6 +311,7 @@ func (r *BirdReportsReader) readBird(now time.Time, name string) (BirdReport, bo
 		Bird:    name,
 		HasPage: pageIsFile && pageFi.Size() < birdPageMaxBytes,
 		HasPrev: prevIsFile && prevFi.Size() < birdPageMaxBytes,
+		Pages:   birdTopicPages(reports),
 	}
 
 	raw, err := readReportsFile(filepath.Join(reports, birdSidecarName), birdSidecarMaxBytes)
@@ -472,4 +502,69 @@ func birdTextCut(s string, n int) string {
 		return string(runes[:n])
 	}
 	return s
+}
+
+var (
+	birdTopicPageRe = regexp.MustCompile(birdTopicPageShape)
+	birdTitleRe     = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
+)
+
+// birdTopicPages lists a bird's topic pages: regular files directly inside its
+// reports directory whose names match birdTopicPageShape, other than the daily
+// page, under the size cap. Each is listed by its own <title>, read from the
+// first birdTopicTitleScanBytes of the page; a page with no title, or one whose
+// title looks like it holds a secret, is listed by its name. Newest first, the
+// name breaking a tie, at most birdTopicPagesMax. A directory that cannot be
+// read lists nothing.
+func birdTopicPages(reports string) []BirdPage {
+	entries, err := os.ReadDir(reports)
+	if err != nil {
+		return nil
+	}
+	var pages []BirdPage
+	for _, e := range entries {
+		name := e.Name()
+		if name == birdPageName || !birdTopicPageRe.MatchString(name) {
+			continue
+		}
+		fi, err := os.Lstat(filepath.Join(reports, name))
+		if err != nil || !fi.Mode().IsRegular() || fi.Size() >= birdPageMaxBytes {
+			continue
+		}
+		pages = append(pages, BirdPage{Name: name, Title: birdTopicTitle(filepath.Join(reports, name), name), MTime: fi.ModTime().UTC()})
+	}
+	sort.SliceStable(pages, func(i, j int) bool {
+		if !pages[i].MTime.Equal(pages[j].MTime) {
+			return pages[i].MTime.After(pages[j].MTime)
+		}
+		return pages[i].Name < pages[j].Name
+	})
+	if len(pages) > birdTopicPagesMax {
+		pages = pages[:birdTopicPagesMax]
+	}
+	return pages
+}
+
+// birdTopicTitle is the <title> of the page at path, cleaned like any bird text,
+// or fallback when the page has none or the title is flagged by the secret screen.
+func birdTopicTitle(path, fallback string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return fallback
+	}
+	defer f.Close()
+	buf := make([]byte, birdTopicTitleScanBytes)
+	n, _ := io.ReadFull(f, buf)
+	m := birdTitleRe.FindSubmatch(buf[:n])
+	if m == nil {
+		return fallback
+	}
+	title := strings.TrimSpace(birdTextCut(html.UnescapeString(string(m[1])), birdTopicTitleRunes))
+	if title == "" {
+		return fallback
+	}
+	if _, withheld := screenSecret([]byte(title)); withheld {
+		return fallback
+	}
+	return title
 }
