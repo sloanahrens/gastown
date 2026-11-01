@@ -23,7 +23,9 @@ const (
 // infraTypes are the issue types `bd list` leaves out unless asked.
 var infraTypes = []string{"agent", "role", "message"}
 
-func isInfraType(t string) bool { return slices.Contains(infraTypes, t) }
+// IsInfraType reports whether t is a type a list leaves out unless it is asked
+// for infrastructure issues. The in-memory fake applies the same rule.
+func IsInfraType(t string) bool { return slices.Contains(infraTypes, t) }
 
 func pageSize(limit int) int {
 	switch {

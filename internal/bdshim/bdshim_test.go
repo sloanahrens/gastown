@@ -978,15 +978,18 @@ func TestMainRefusesATrackerVerb(t *testing.T) {
 		cwd  string
 		want string
 	}{
-		{"an id names the tracker rig", []string{"show", "bt-abc"}, town, "bdshim: verb show is not implemented for tracker rig bt-\n"},
-		{"an id after a boolean flag names the tracker rig", []string{"show", "--json", "bt-abc"}, town, "bdshim: verb show is not implemented for tracker rig bt-\n"},
+		// show is answered by a tracker handler, which refuses below because
+		// this town has no tracker endpoint; the refusal message is the
+		// store's, and bd.real is still never run.
+		{"an id names the tracker rig", []string{"show", "--json", "bt-abc"}, town, "bdshim: backend: rig bt- is on the tracker but TRACKER_URL is not set\n"},
+		{"an id after a boolean flag names the tracker rig", []string{"show", "--json", "bt-abc"}, town, "bdshim: backend: rig bt- is on the tracker but TRACKER_URL is not set\n"},
 		{"a verb with no id takes its cwd's rig", []string{"create", "--title", "x"}, filepath.Join(town, "beta", "mayor", "rig"), "bdshim: verb create is not implemented for tracker rig bt-\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			proc := &fakeProcess{}
-			e, stderr, _ := shimEnv(t, tc.cwd, "", proc, nil, tc.args...)
+			e, stderr, _ := shimEnv(t, tc.cwd, "", proc, handlers, tc.args...)
 			if got := Main(e); got != 1 {
 				t.Errorf("Main = %d, want 1", got)
 			}

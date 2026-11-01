@@ -309,7 +309,7 @@ func matchesList(is api.Issue, f api.ListFilter) bool {
 	switch {
 	case is.Ephemeral != f.Ephemeral:
 		return false
-	case !f.IncludeInfra && f.IssueType == "" && isInfraType(is.Type):
+	case !f.IncludeInfra && f.IssueType == "" && IsInfraType(is.Type):
 		return false
 	case f.IssueType != "" && is.Type != f.IssueType:
 		return false

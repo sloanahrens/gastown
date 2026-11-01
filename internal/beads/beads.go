@@ -634,6 +634,14 @@ type IssueDep struct {
 	Type           string `json:"issue_type"`
 	DependencyType string `json:"dependency_type,omitempty"`
 	CloseReason    string `json:"close_reason,omitempty"`
+
+	// CreatedAt, CreatedBy and Metadata are the link's own record, not the
+	// target's: when the relation was written, by whom, and its stored JSON.
+	// A dependency read fills them; a read that only lists what an issue
+	// depends on leaves them empty.
+	CreatedAt string `json:"created_at,omitempty"`
+	CreatedBy string `json:"created_by,omitempty"`
+	Metadata  string `json:"metadata,omitempty"`
 }
 
 // UnmarshalJSON accepts both bd dependency relation field names. Some lower-level
@@ -649,6 +657,9 @@ func (d *IssueDep) UnmarshalJSON(data []byte) error {
 		DependencyType string `json:"dependency_type,omitempty"`
 		RelationType   string `json:"type"`
 		CloseReason    string `json:"close_reason,omitempty"`
+		CreatedAt      string `json:"created_at,omitempty"`
+		CreatedBy      string `json:"created_by,omitempty"`
+		Metadata       string `json:"metadata,omitempty"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -661,6 +672,9 @@ func (d *IssueDep) UnmarshalJSON(data []byte) error {
 	d.Type = raw.Type
 	d.DependencyType = raw.DependencyType
 	d.CloseReason = raw.CloseReason
+	d.CreatedAt = raw.CreatedAt
+	d.CreatedBy = raw.CreatedBy
+	d.Metadata = raw.Metadata
 	if strings.TrimSpace(d.DependencyType) == "" {
 		d.DependencyType = knownDependencyRelation(raw.RelationType)
 	}

@@ -243,7 +243,7 @@ func (p *Postgres) GetIssues(ctx context.Context, ids []string) (map[string]api.
 // (external references) are left out.
 func fillDependencies(ctx context.Context, q querier, ids []string, out map[string]api.Issue) error {
 	rows, err := q.Query(ctx, `SELECT d.issue_id, t.id, t.title, t.status, t.priority, t.issue_type, d.type, t.close_reason,
-  (d.type IN `+blocking+` AND `+unresolved+`) AS blocks_now
+  (d.type IN `+blocking+` AND `+unresolved+`) AS blocks_now, d.created_at, d.created_by, d.metadata
 FROM tracker.dependencies d JOIN tracker.issues t ON t.id = d.depends_on
 WHERE d.issue_id = ANY($1) ORDER BY d.issue_id, d.created_at, t.id`, ids)
 	if err != nil {
@@ -255,9 +255,11 @@ WHERE d.issue_id = ANY($1) ORDER BY d.issue_id, d.created_at, t.id`, ids)
 		var dep api.IssueDep
 		var priority int16
 		var blocksNow bool
-		if err := rows.Scan(&owner, &dep.ID, &dep.Title, &dep.Status, &priority, &dep.Type, &dep.DependencyType, &dep.CloseReason, &blocksNow); err != nil {
+		var metadata []byte
+		if err := rows.Scan(&owner, &dep.ID, &dep.Title, &dep.Status, &priority, &dep.Type, &dep.DependencyType, &dep.CloseReason, &blocksNow, &dep.CreatedAt, &dep.CreatedBy, &metadata); err != nil {
 			return fmt.Errorf("store: get dependencies: %w", err)
 		}
+		dep.Metadata = metadata
 		dep.Priority = int(priority)
 		is, ok := out[owner]
 		if !ok {

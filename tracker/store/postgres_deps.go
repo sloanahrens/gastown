@@ -176,7 +176,8 @@ func (p *Postgres) Dependencies(ctx context.Context, id, depType string) ([]api.
 	if !exists {
 		return nil, api.NotFound(id)
 	}
-	rows, err := p.pool.Query(ctx, `SELECT t.id, t.title, t.status, t.priority, t.issue_type, d.type, t.close_reason
+	rows, err := p.pool.Query(ctx, `SELECT t.id, t.title, t.status, t.priority, t.issue_type, d.type, t.close_reason,
+  d.created_at, d.created_by, d.metadata
 FROM tracker.dependencies d JOIN tracker.issues t ON t.id = d.depends_on
 WHERE d.issue_id = $1 AND ($2 = '' OR d.type = $2) ORDER BY d.type, t.id`, id, depType)
 	if err != nil {
@@ -186,9 +187,11 @@ WHERE d.issue_id = $1 AND ($2 = '' OR d.type = $2) ORDER BY d.type, t.id`, id, d
 	out := []api.IssueDep{}
 	for rows.Next() {
 		var d api.IssueDep
-		if err := rows.Scan(&d.ID, &d.Title, &d.Status, &d.Priority, &d.Type, &d.DependencyType, &d.CloseReason); err != nil {
+		var metadata []byte
+		if err := rows.Scan(&d.ID, &d.Title, &d.Status, &d.Priority, &d.Type, &d.DependencyType, &d.CloseReason, &d.CreatedAt, &d.CreatedBy, &metadata); err != nil {
 			return nil, fmt.Errorf("store: dependencies: %w", err)
 		}
+		d.Metadata = metadata
 		out = append(out, d)
 	}
 	return out, rows.Err()
