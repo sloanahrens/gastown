@@ -139,22 +139,109 @@ func TestBdDailyCountsByStatusPriorityAndLabel(t *testing.T) {
 	}
 	p50, p90, max := 1.4, 12.0, 12.0
 	want := BdDailyLine{
-		Date:            bdDailyRecordedDay,
-		Rig:             "gastown",
-		Total:           7,
-		ByStatus:        map[string]int{"open": 3, "closed": 3, "in_progress": 1},
-		ByPriority:      map[string]int{"0": 1, "1": 1, "2": 2, "3": 1, "4": 1, "none": 1},
-		ByType:          map[string]int{"task": 4, "bug": 3},
-		ByLabel:         map[string]int{"common": 3, "other": 4},
-		DependencyCount: map[string]int{"0": 4, "1": 1, "2": 0, "3-5": 1, "6+": 1},
-		OpenAgeDays:     BdDailyAges{P50: &p50, P90: &p90, Max: &max, OldestID: "gt-3"},
-		CreatedToday:    1,
-		ClosedToday:     1,
-		ShapedOpen:      1,
-		UnshapedOpen:    2,
+		Date:             bdDailyRecordedDay,
+		Rig:              "gastown",
+		Total:            7,
+		ByStatus:         map[string]int{"open": 3, "closed": 3, "in_progress": 1},
+		ByPriority:       map[string]int{"0": 1, "1": 1, "2": 2, "3": 1, "4": 1, "none": 1},
+		ByType:           map[string]int{"task": 4, "bug": 3},
+		ByLabel:          map[string]int{"common": 3, "other": 4},
+		DependencyCount:  map[string]int{"0": 4, "1": 1, "2": 0, "3-5": 1, "6+": 1},
+		OpenAgeDays:      BdDailyAges{P50: &p50, P90: &p90, Max: &max, OldestID: "gt-3"},
+		OpenAgeDaysWork:  BdDailyAges{P50: &p50, P90: &p90, Max: &max, OldestID: "gt-3"},
+		CreatedToday:     1,
+		ClosedToday:      1,
+		ShapedOpen:       1,
+		UnshapedOpen:     2,
+		ShapedOpenWork:   1,
+		UnshapedOpenWork: 2,
 	}
 	if !reflect.DeepEqual(lines[0], want) {
 		t.Fatalf("line = %+v\nwant %+v", lines[0], want)
+	}
+}
+
+// bdDailyAgesField is the age block a line carries under key, so a test reads
+// the block the run wrote rather than the one it computed.
+func bdDailyAgesField(t *testing.T, line map[string]any, key string) BdDailyAges {
+	t.Helper()
+	raw, ok := line[key]
+	if !ok {
+		t.Fatalf("line has no %s: %v", key, line)
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatalf("%s: %v", key, err)
+	}
+	var ages BdDailyAges
+	if err := json.Unmarshal(data, &ages); err != nil {
+		t.Fatalf("%s: %v", key, err)
+	}
+	return ages
+}
+
+// An old rig bead, gt:agent bead and handoff bead stay open for the life of the
+// town, so the raw age block names the rig bead as oldest while the work block
+// covers the two work beads and leaves them out.
+func TestBdDailyWorkAgesSkipIdentityBeads(t *testing.T) {
+	t.Parallel()
+	listing := `[
+	 {"id":"gt-rig","created_at":"2026-04-15T12:00:00Z","status":"open","issue_type":"rig","labels":[]},
+	 {"id":"gt-agent","created_at":"2026-07-24T12:00:00Z","status":"open","issue_type":"task","labels":["gt:agent"]},
+	 {"id":"gt-hook","created_at":"2026-08-03T12:00:00Z","status":"open","issue_type":"task","labels":["handoff"]},
+	 {"id":"gt-w1","created_at":"2026-10-30T12:00:00Z","status":"open","issue_type":"task","labels":[]},
+	 {"id":"gt-w2","created_at":"2026-10-22T12:00:00Z","status":"open","issue_type":"bug","labels":["handoff-ish"]}
+	]`
+	env := bdDailyEnv(t, bdDailyNow, bdDailyRigs("gastown"), listing)
+	if _, err := RunBdDaily(context.Background(), env); err != nil {
+		t.Fatalf("RunBdDaily: %v", err)
+	}
+	lines := bdDailyRead(t, env)
+	if len(lines) != 1 {
+		t.Fatalf("wrote %d lines, want 1", len(lines))
+	}
+	work := bdDailyAgesField(t, lines[0], "open_age_days_work")
+	workP50, workP90, workMax := 2.0, 10.0, 10.0
+	if want := (BdDailyAges{P50: &workP50, P90: &workP90, Max: &workMax, OldestID: "gt-w2"}); !reflect.DeepEqual(work, want) {
+		t.Fatalf("open_age_days_work = %+v, want %+v", work, want)
+	}
+	raw := bdDailyAgesField(t, lines[0], "open_age_days")
+	rawP50, rawP90, rawMax := 90.0, 200.0, 200.0
+	if want := (BdDailyAges{P50: &rawP50, P90: &rawP90, Max: &rawMax, OldestID: "gt-rig"}); !reflect.DeepEqual(raw, want) {
+		t.Fatalf("open_age_days = %+v, want %+v over all five open beads", raw, want)
+	}
+}
+
+// The work-only shaped counts leave the identity beads out, while the raw
+// counts still cover every open bead.
+func TestBdDailyWorkShapedCounts(t *testing.T) {
+	t.Parallel()
+	listing := `[
+	 {"id":"gt-shaped","created_at":"2026-10-30T12:00:00Z","status":"open","issue_type":"task",
+	  "labels":[],"acceptance_criteria":"- [ ] x"},
+	 {"id":"gt-plain","created_at":"2026-10-30T12:00:00Z","status":"open","issue_type":"task","labels":[]},
+	 {"id":"gt-agent","created_at":"2026-10-30T12:00:00Z","status":"open","issue_type":"task",
+	  "labels":["gt:agent"],"acceptance_criteria":"- [ ] x"},
+	 {"id":"gt-hook","created_at":"2026-10-30T12:00:00Z","status":"open","issue_type":"task","labels":["handoff"]},
+	 {"id":"gt-rig","created_at":"2026-10-30T12:00:00Z","status":"open","issue_type":"rig","labels":[]}
+	]`
+	env := bdDailyEnv(t, bdDailyNow, bdDailyRigs("gastown"), listing)
+	if _, err := RunBdDaily(context.Background(), env); err != nil {
+		t.Fatalf("RunBdDaily: %v", err)
+	}
+	lines := bdDailyRead(t, env)
+	if len(lines) != 1 {
+		t.Fatalf("wrote %d lines, want 1", len(lines))
+	}
+	line := lines[0]
+	want := map[string]float64{
+		"shaped_open": 2, "unshaped_open": 3,
+		"shaped_open_work": 1, "unshaped_open_work": 1,
+	}
+	for key, w := range want {
+		if got := line[key]; got != w {
+			t.Errorf("%s = %v, want %v", key, got, w)
+		}
 	}
 }
 
