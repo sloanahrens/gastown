@@ -89,7 +89,7 @@ func TestUsagePanelBlocksAreFoldsUnderTheirOwnKeys(t *testing.T) {
 	if err := json.Unmarshal([]byte(v.String()), &keys); err != nil {
 		t.Fatalf("reading the Cost panel's folds: %v", err)
 	}
-	want := []string{"cost.byclass", "cost.deepreview", "cost.topbeads", "cost.over20", "cost.quality", "cost.jev", "cost.rework"}
+	want := []string{"cost.byclass", "cost.deepreview", "cost.topbeads", "cost.over20", "cost.quality", "cost.jev"}
 	if strings.Join(keys, "|") != strings.Join(want, "|") {
 		t.Errorf("Cost panel folds = %v, want one per usage block: %v", keys, want)
 	}
@@ -107,13 +107,13 @@ func TestUsagePanelSetsNoMarkup(t *testing.T) {
 		}
 	}
 	// Every cell is built through el(), which writes textContent, in the table
-	// helper the Usage and rework parts share.
-	if !strings.Contains(draw, `const table = costTable;`) {
-		t.Error("costUsage does not draw its tables through costTable")
+	// helper the Usage part and the om review panel's rework fold share.
+	if !strings.Contains(draw, `const table = panelTable;`) {
+		t.Error("costUsage does not draw its tables through panelTable")
 	}
-	cells := pageFunc(t, "costTable")
+	cells := pageFunc(t, "panelTable")
 	if !strings.Contains(cells, `const td = el("td", cls || "", text);`) || !strings.Contains(cells, "tr.append(td)") {
-		t.Error("costTable does not draw its cells through el()")
+		t.Error("panelTable does not draw its cells through el()")
 	}
 	for _, bad := range []string{"innerHTML", "insertAdjacentHTML", "outerHTML", "document.write"} {
 		if strings.Contains(cells, bad) {

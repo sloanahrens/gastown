@@ -8,42 +8,19 @@ import (
 	"time"
 )
 
-// The Cost panel draws the om rework table in a fold of its own, closed like its
-// siblings, under its Usage part. These tests run the page's own renderCost over
-// a reading and read back what it drew (gt-mctxx, gt-uapj6).
+// The om review panel draws the om rework table in a fold of its own, closed
+// like its siblings, under the review's Stats. These tests run the page's own
+// renderOM over a reading and read back what it drew (gt-mctxx, gt-uapj6,
+// gt-ddxrq).
 
-// reworkChild is one top-level child of the Cost panel, with the cell text of
-// a table.
-type reworkChild struct {
-	Tag   string     `json:"tag"`
-	Class string     `json:"class"`
-	Text  string     `json:"text"`
-	Rows  [][]string `json:"rows"`
-}
-
-func drawCostChildren(t *testing.T, s map[string]any) (kids []reworkChild, note drawn) {
-	t.Helper()
-	dom := newPageDOM(t)
-	dom.call(t, "renderCost", s)
-	v, err := dom.vm.RunString(`JSON.stringify(__byId["cost"].children.__arr.map(c => ({tag: c.tagName, class: c.className, text: c.textContent,
-		rows: c.tagName === "TABLE" ? c.children.__arr.map(r => r.children.__arr.map(x => x.textContent)) : null})))`)
-	if err != nil {
-		t.Fatalf("reading the Cost panel: %v", err)
-	}
-	if err := json.Unmarshal([]byte(v.String()), &kids); err != nil {
-		t.Fatalf("reading the Cost panel: %v", err)
-	}
-	return kids, dom.element(t, "costnote")
-}
-
-// drawRework runs renderCost over s and reads back the om rework fold, failing
+// drawRework runs renderOM over s and reads back the om rework fold, failing
 // when the page keeps none or titles it something else.
-func drawRework(t *testing.T, s map[string]any) (*pageDOM, costFoldState) {
+func drawRework(t *testing.T, s map[string]any) (*pageDOM, panelFoldState) {
 	t.Helper()
 	dom := newPageDOM(t)
-	dom.call(t, "renderCost", s)
-	state := readCostFold(t, dom, "cost.rework")
-	v, err := dom.vm.RunString(`String(costFolds["cost.rework"].head._text || "")`)
+	dom.call(t, "renderOM", s)
+	state := readPanelFold(t, dom, "om.rework")
+	v, err := dom.vm.RunString(`String(panelFolds["om.rework"].head._text || "")`)
 	if err != nil {
 		t.Fatalf("reading the rework fold's title: %v", err)
 	}
@@ -82,28 +59,27 @@ func reworkBarReading(reviews int) map[string]any {
 	return map[string]any{"bar": 0.8, "reviews": reviews, "rejected": 0, "beads": 1, "first_try": 1, "landed": 1, "reviews_per_landed": 1.0, "loops_out": 0, "mean_score": 0.8}
 }
 
-func costSpendUsage() map[string]any {
-	return map[string]any{
-		"spend": map[string]any{"balance": 12.5, "live": map[string]any{"ok": true}},
-		"usage": map[string]any{"window": "24h"},
-	}
+// omReworkState is the om review panel's reading with no review log yet, so a
+// test sets rework on it only when it has a log to draw.
+func omReworkState() map[string]any {
+	return omPanelState(nil, nil, "")
 }
 
 // The fold is titled om rework, closed on load like its siblings, and holds one
 // table over both windows with a Window column in front and a row per bar. A
 // window with no reviews says so under the table rather than drawing an empty
 // table of its own.
-func TestCostPanelDrawsTheReworkTable(t *testing.T) {
+func TestOMPanelDrawsTheReworkTable(t *testing.T) {
 	t.Parallel()
 
-	s := costSpendUsage()
+	s := omReworkState()
 	s["rework"] = reworkPayload()
 	dom, fold := drawRework(t, s)
 	if !fold.Closed {
 		t.Error("the om rework fold is open on load, want it closed like its siblings")
 	}
 
-	tables := costFoldTables(t, dom, "cost.rework")
+	tables := panelFoldTables(t, dom, "om.rework")
 	if len(tables) != 1 {
 		t.Fatalf("drew %d rework tables, want one for both windows", len(tables))
 	}
@@ -124,7 +100,7 @@ func TestCostPanelDrawsTheReworkTable(t *testing.T) {
 		}
 	}
 	empty := false
-	for _, line := range costFoldLines(t, dom, "cost.rework") {
+	for _, line := range panelFoldLines(t, dom, "om.rework") {
 		empty = empty || (line.Class == "empty" && line.Text == "the 7 days before: no om reviews")
 	}
 	if !empty {
@@ -132,12 +108,54 @@ func TestCostPanelDrawsTheReworkTable(t *testing.T) {
 	}
 }
 
-// A bar of 0 is a tree that named none, so the row reads "?" and keeps its
-// reviews.
-func TestCostPanelDrawsTheUnknownBar(t *testing.T) {
+// The table holds one row per window and bar, in the window's order, and keeps a
+// bar that reviewed many times: three bars over two windows, the one that saw a
+// single review dropping out.
+func TestOMReworkDrawsOneRowPerWindowAndBar(t *testing.T) {
 	t.Parallel()
 
-	s := costSpendUsage()
+	s := omReworkState()
+	s["rework"] = map[string]any{"windows": []any{
+		map[string]any{"name": "last 7 days", "bars": []any{
+			map[string]any{"bar": 0.8, "reviews": 3, "rejected": 1, "beads": 2, "first_try": 1, "landed": 2, "reviews_per_landed": 1.5, "loops_out": 0, "mean_score": 0.8,
+				"mean_om_secs": 190.0, "om_beads": 2, "median_om_secs": 190.0, "slowest_om_secs": 300.0, "slowest_om_bead": "gt-c"},
+		}},
+		map[string]any{"name": "the 7 days before", "bars": []any{
+			map[string]any{"bar": 0.6, "reviews": 1, "rejected": 0, "beads": 1, "first_try": 1, "landed": 1, "reviews_per_landed": 1.0, "loops_out": 0, "mean_score": 0.6,
+				"mean_om_secs": 60.0, "om_beads": 1, "median_om_secs": 60.0, "slowest_om_secs": 60.0, "slowest_om_bead": "gt-x"},
+			map[string]any{"bar": 0.75, "reviews": 1046, "rejected": 500, "beads": 300, "first_try": 200, "landed": 250, "reviews_per_landed": 4.18, "loops_out": 2, "mean_score": 0.7,
+				"mean_om_secs": 900.0, "om_beads": 250, "median_om_secs": 800.0, "slowest_om_secs": 3000.0, "slowest_om_bead": "gt-y"},
+		}},
+	}}
+	dom, _ := drawRework(t, s)
+	tables := panelFoldTables(t, dom, "om.rework")
+	if len(tables) != 1 {
+		t.Fatalf("drew %d tables, want one for both windows", len(tables))
+	}
+	if head := strings.Join(tables[0][0], "|"); !strings.HasPrefix(head, "Window|Bar|Reviews|") {
+		t.Errorf("columns = %q, want the Window column in front", head)
+	}
+	rows := tables[0][1:]
+	want := [][]string{
+		{"last 7 days", "0.80", "3"},
+		{"the 7 days before", "0.75", "1046"},
+	}
+	if len(rows) != len(want) {
+		t.Fatalf("rows = %v, want one per window and bar with more than one review", rows)
+	}
+	for i := range want {
+		if got := rows[i][:3]; strings.Join(got, "|") != strings.Join(want[i], "|") {
+			t.Errorf("row %d = %v, want %v", i, got, want[i])
+		}
+	}
+}
+
+// A bar of 0 is a tree that named none, so the row reads "?" and keeps its
+// reviews.
+func TestOMPanelDrawsTheUnknownBar(t *testing.T) {
+	t.Parallel()
+
+	s := omReworkState()
 	s["rework"] = map[string]any{"windows": []any{
 		map[string]any{"name": "last 7 days", "bars": []any{
 			map[string]any{"bar": 0, "reviews": 2, "rejected": 0, "beads": 1, "first_try": 1, "landed": 1, "reviews_per_landed": 2.0, "loops_out": 0, "mean_score": 0.8},
@@ -145,7 +163,7 @@ func TestCostPanelDrawsTheUnknownBar(t *testing.T) {
 	}}
 	dom, _ := drawRework(t, s)
 
-	tables := costFoldTables(t, dom, "cost.rework")
+	tables := panelFoldTables(t, dom, "om.rework")
 	if len(tables) != 1 || len(tables[0]) != 2 {
 		t.Fatalf("drew %v, want the one row of the one rework table", tables)
 	}
@@ -156,10 +174,10 @@ func TestCostPanelDrawsTheUnknownBar(t *testing.T) {
 
 // The closed heading says what rework cost: the latest window's share, its loops
 // out and the window it reached.
-func TestCostPanelHeadlineNamesWeeksReworkAndLoops(t *testing.T) {
+func TestOMPanelHeadlineNamesWeeksReworkAndLoops(t *testing.T) {
 	t.Parallel()
 
-	s := costSpendUsage()
+	s := omReworkState()
 	s["rework"] = reworkPayload()
 	_, fold := drawRework(t, s)
 	if want := "last 7 days: 70% rework · 1 loop out"; fold.Summary != want {
@@ -187,12 +205,12 @@ func TestCostPanelHeadlineNamesWeeksReworkAndLoops(t *testing.T) {
 
 // The older stretches are dated by their own span, so the seven days before the
 // last seven cannot read the same as the week before that.
-func TestCostPanelDatesTheOlderReworkWindows(t *testing.T) {
+func TestOMPanelDatesTheOlderReworkWindows(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
 	day := 24 * time.Hour
-	s := costSpendUsage()
+	s := omReworkState()
 	s["rework"] = map[string]any{"windows": []any{
 		reworkWindowReading(now, 7*day, 0, 9),
 		reworkWindowReading(now, 14*day, 7*day, 6),
@@ -200,7 +218,7 @@ func TestCostPanelDatesTheOlderReworkWindows(t *testing.T) {
 	}}
 	dom, _ := drawRework(t, s)
 
-	tables := costFoldTables(t, dom, "cost.rework")
+	tables := panelFoldTables(t, dom, "om.rework")
 	if len(tables) != 1 {
 		t.Fatalf("drew %d rework tables, want one", len(tables))
 	}
@@ -216,15 +234,15 @@ func TestCostPanelDatesTheOlderReworkWindows(t *testing.T) {
 
 // A window that ends now is named for the span it covers, so a reader's own
 // "the 7 days before" does not land on the week that just closed.
-func TestCostPanelNamesTheWindowEndingNow(t *testing.T) {
+func TestOMPanelNamesTheWindowEndingNow(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
-	s := costSpendUsage()
+	s := omReworkState()
 	s["rework"] = map[string]any{"windows": []any{reworkWindowReading(now, 2*24*time.Hour, 0, 3)}}
 	dom, _ := drawRework(t, s)
 
-	tables := costFoldTables(t, dom, "cost.rework")
+	tables := panelFoldTables(t, dom, "om.rework")
 	if len(tables) != 1 || len(tables[0]) != 2 {
 		t.Fatalf("drew %v, want the one row of the one rework table", tables)
 	}
@@ -236,7 +254,7 @@ func TestCostPanelNamesTheWindowEndingNow(t *testing.T) {
 // The label dates a span against the clock it is handed, so a caller can pin the
 // day boundary instead of reading the wall clock, and a span whose end precedes
 // its start keeps the reader's name rather than drawing "14-7 days ago".
-func TestCostPanelWindowLabelUsesTheClockItIsGiven(t *testing.T) {
+func TestOMPanelWindowLabelUsesTheClockItIsGiven(t *testing.T) {
 	t.Parallel()
 
 	dom := newPageDOM(t)
@@ -271,17 +289,17 @@ func TestCostPanelWindowLabelUsesTheClockItIsGiven(t *testing.T) {
 
 // A window whose span is missing or unreadable keeps the name the reader sent,
 // since a dated label the page cannot compute would be a guess.
-func TestCostPanelNamesAnUndatedWindowByItsReaderName(t *testing.T) {
+func TestOMPanelNamesAnUndatedWindowByItsReaderName(t *testing.T) {
 	t.Parallel()
 
-	s := costSpendUsage()
+	s := omReworkState()
 	s["rework"] = map[string]any{"windows": []any{
 		map[string]any{"name": "no span sent", "bars": []any{reworkBarReading(3)}},
 		map[string]any{"name": "span unreadable", "from": "yesterday", "to": "today", "bars": []any{reworkBarReading(3)}},
 	}}
 	dom, _ := drawRework(t, s)
 
-	tables := costFoldTables(t, dom, "cost.rework")
+	tables := panelFoldTables(t, dom, "om.rework")
 	if len(tables) != 1 {
 		t.Fatalf("drew %d rework tables, want one", len(tables))
 	}
@@ -297,10 +315,10 @@ func TestCostPanelNamesAnUndatedWindowByItsReaderName(t *testing.T) {
 // A window's bar that saw a single review draws no row: one review is 1/1 and
 // 0% beside bars that carry enough reviews to say something. A window left with
 // no row at all draws nothing and does not claim it had no reviews.
-func TestCostPanelDropsSingleReviewRows(t *testing.T) {
+func TestOMPanelDropsSingleReviewRows(t *testing.T) {
 	t.Parallel()
 
-	s := costSpendUsage()
+	s := omReworkState()
 	s["rework"] = map[string]any{"windows": []any{
 		map[string]any{"name": "last 7 days", "bars": []any{
 			map[string]any{"bar": 0.8, "reviews": 1, "rejected": 0, "beads": 1, "first_try": 1, "landed": 1, "reviews_per_landed": 1.0, "loops_out": 0, "mean_score": 0.8},
@@ -312,7 +330,7 @@ func TestCostPanelDropsSingleReviewRows(t *testing.T) {
 	}}
 	dom, _ := drawRework(t, s)
 
-	tables := costFoldTables(t, dom, "cost.rework")
+	tables := panelFoldTables(t, dom, "om.rework")
 	if len(tables) != 1 {
 		t.Fatalf("drew %d rework tables, want one", len(tables))
 	}
@@ -320,7 +338,7 @@ func TestCostPanelDropsSingleReviewRows(t *testing.T) {
 	if len(rows) != 1 || rows[0][1] != "0.70" || rows[0][2] != "3" {
 		t.Errorf("rows = %v, want only the bar that reviewed more than once", rows)
 	}
-	for _, line := range costFoldLines(t, dom, "cost.rework") {
+	for _, line := range panelFoldLines(t, dom, "om.rework") {
 		if strings.HasSuffix(line.Text, ": no om reviews") {
 			t.Errorf("drew %q for a window whose only bar reviewed once", line.Text)
 		}
@@ -330,10 +348,10 @@ func TestCostPanelDropsSingleReviewRows(t *testing.T) {
 // The Mean om time cell's hover carries what the figure is made of: how many
 // landed beads it averages, the median bead total, the slowest one and how many
 // reviews had no om time to count. A bar with no such bead has nothing to say.
-func TestCostPanelHoversTheMeanOMTime(t *testing.T) {
+func TestOMPanelHoversTheMeanOMTime(t *testing.T) {
 	t.Parallel()
 
-	s := costSpendUsage()
+	s := omReworkState()
 	s["rework"] = reworkPayload()
 	dom, _ := drawRework(t, s)
 	hovers := omTimeHovers(t, dom)
@@ -355,7 +373,7 @@ func TestCostPanelHoversTheMeanOMTime(t *testing.T) {
 // text and hover together.
 func omTimeHovers(t *testing.T, dom *pageDOM) []string {
 	t.Helper()
-	v, err := dom.vm.RunString(`JSON.stringify(costFolds["cost.rework"].body.children
+	v, err := dom.vm.RunString(`JSON.stringify(panelFolds["om.rework"].body.children
 		.__arr.filter(c => c.tagName === "TABLE")
 		.reduce((all, tb) => all.concat(tb.children.__arr.slice(1).map(r => r.children[6].title)), []))`)
 	if err != nil {
@@ -371,35 +389,35 @@ func omTimeHovers(t *testing.T, dom *pageDOM) []string {
 // An unreadable daemon log is named in the fold, which still draws the table:
 // the review figures are the review log's own and the missing part is the om
 // time.
-func TestCostPanelNamesAnUnreadableOMTimeLog(t *testing.T) {
+func TestOMPanelNamesAnUnreadableOMTimeLog(t *testing.T) {
 	t.Parallel()
 
-	s := costSpendUsage()
+	s := omReworkState()
 	r := reworkPayload()
 	r["om_unavailable"] = true
 	s["rework"] = r
 	dom, _ := drawRework(t, s)
 
 	var named int
-	for _, line := range costFoldLines(t, dom, "cost.rework") {
+	for _, line := range panelFoldLines(t, dom, "om.rework") {
 		if line.Class == "badc" && strings.Contains(line.Text, "daemon log could not be read") {
 			named++
 		}
 	}
-	if tables := costFoldTables(t, dom, "cost.rework"); named != 1 || len(tables) == 0 {
+	if tables := panelFoldTables(t, dom, "om.rework"); named != 1 || len(tables) == 0 {
 		t.Errorf("drew %d naming lines and %d tables, want one line and the table", named, len(tables))
 	}
 }
 
 // A read that failed is named, and a read still pending is reading; neither
 // draws a table, and the panel's section contract stays.
-func TestCostPanelNamesTheReworkStates(t *testing.T) {
+func TestOMPanelNamesTheReworkStates(t *testing.T) {
 	t.Parallel()
 
-	s := costSpendUsage()
+	s := omReworkState()
 	s["rework"] = map[string]any{"unavailable": true}
 	dom, fold := drawRework(t, s)
-	lines := costFoldLines(t, dom, "cost.rework")
+	lines := panelFoldLines(t, dom, "om.rework")
 	if len(lines) != 1 || lines[0].Class != "badc" || !strings.Contains(lines[0].Text, "review log unreadable") {
 		t.Errorf("unreadable log drew %+v, want one badc line naming it", lines)
 	}
@@ -407,30 +425,60 @@ func TestCostPanelNamesTheReworkStates(t *testing.T) {
 		t.Errorf("unreadable log's closed line = %q, want it named there too", fold.Summary)
 	}
 
-	dom, fold = drawRework(t, costSpendUsage())
-	lines = costFoldLines(t, dom, "cost.rework")
+	dom, fold = drawRework(t, omReworkState())
+	lines = panelFoldLines(t, dom, "om.rework")
 	if len(lines) != 1 || lines[0].Class != "empty" || !strings.Contains(lines[0].Text, "reading") {
 		t.Errorf("pending read drew %+v, want one reading line", lines)
 	}
 	if fold.Summary != "reading…" {
 		t.Errorf("pending read's closed line = %q, want reading", fold.Summary)
 	}
-	if _, note := drawCostChildren(t, costSpendUsage()); strings.Contains(note.Text, "undefined") {
-		t.Errorf("caption = %q", note.Text)
-	}
 
 	page := string(indexHTML)
-	if !strings.Contains(page, `<section data-fold="cost"><h2>Cost <span class="r" id="costnote"></span></h2><div class="body" id="cost"></div></section>`) {
-		t.Error("the Cost section is no longer a section whose h2 holds the title and a span.r")
+	if !strings.Contains(page, `<section data-fold="om"><h2>om review <span class="r" id="omnote"></span></h2><div class="body" id="om"></div></section>`) {
+		t.Error("the om review section is no longer a section whose h2 holds the title and a span.r")
 	}
-	cost := pageFunc(t, "renderCost")
-	if usage, rework := strings.Index(cost, "costUsage("), strings.Index(cost, "costRework(box, s.rework)"); rework < usage || rework < 0 {
-		t.Error("renderCost does not draw the rework table after the Usage part")
+	om := pageFunc(t, "renderOM")
+	if stats, rework := strings.Index(om, `fold("Stats`), strings.Index(om, "omRework(box, s.rework)"); rework < stats || rework < 0 {
+		t.Error("renderOM does not draw the rework table after the Stats fold")
 	}
-	body := pageFunc(t, "costRework")
+	if cost := pageFunc(t, "renderCost"); strings.Contains(cost, "omRework(") {
+		t.Error("renderCost still draws the rework table")
+	}
+	body := pageFunc(t, "omRework")
 	for _, bad := range []string{"innerHTML", "insertAdjacentHTML", "outerHTML", "document.write"} {
 		if strings.Contains(body, bad) {
-			t.Errorf("costRework uses %s", bad)
+			t.Errorf("omRework uses %s", bad)
+		}
+	}
+}
+
+// The rework table is drawn by the om review panel and no longer by the Cost
+// panel: the fold is keyed om.rework, its section hangs under #om, and drawing
+// the Cost panel over the same review log draws no rework fold at all.
+func TestReworkFoldIsDrawnUnderOMReviewAndNotCost(t *testing.T) {
+	t.Parallel()
+
+	s := omReworkState()
+	s["rework"] = reworkPayload()
+	dom, _ := drawRework(t, s)
+	v, err := dom.vm.RunString(`String(panelFolds["om.rework"].sec.parentNode === __byId["om"] ? "om" : panelFolds["om.rework"].sec.parentNode === __byId["cost"] ? "cost" : "elsewhere")`)
+	if err != nil {
+		t.Fatalf("reading where the rework fold hangs: %v", err)
+	}
+	if got := v.String(); got != "om" {
+		t.Errorf("the rework fold hangs under #%s, want #om", got)
+	}
+
+	cost := newPageDOM(t)
+	cost.call(t, "renderCost", map[string]any{
+		"spend":  map[string]any{"balance": 12.5, "live": map[string]any{"ok": true}},
+		"usage":  map[string]any{"window": "24h"},
+		"rework": reworkPayload(),
+	})
+	for _, key := range []string{"om.rework", "cost.rework"} {
+		if n := foldCount(t, cost, key); n != 0 {
+			t.Errorf("the Cost panel drew %d %s folds, want none", n, key)
 		}
 	}
 }
@@ -438,10 +486,10 @@ func TestCostPanelNamesTheReworkStates(t *testing.T) {
 // A bar that landed beads but has no om time for any of them draws a dash, and
 // its hover names only the reviews that had none: no mean, median or slowest
 // bead to describe.
-func TestCostPanelHoversABarWithNoLandedOMTime(t *testing.T) {
+func TestOMPanelHoversABarWithNoLandedOMTime(t *testing.T) {
 	t.Parallel()
 
-	s := costSpendUsage()
+	s := omReworkState()
 	s["rework"] = map[string]any{"windows": []any{
 		map[string]any{"name": "last 7 days", "bars": []any{
 			map[string]any{"bar": 0.8, "reviews": 3, "rejected": 1, "beads": 2, "first_try": 1, "landed": 2, "reviews_per_landed": 1.5, "loops_out": 0, "mean_score": 0.8,
@@ -449,7 +497,7 @@ func TestCostPanelHoversABarWithNoLandedOMTime(t *testing.T) {
 		}},
 	}}
 	dom, _ := drawRework(t, s)
-	v, err := dom.vm.RunString(`JSON.stringify(costFolds["cost.rework"].body.children
+	v, err := dom.vm.RunString(`JSON.stringify(panelFolds["om.rework"].body.children
 		.__arr.filter(c => c.tagName === "TABLE")
 		.reduce((all, tb) => all.concat(tb.children.__arr.slice(1).map(r => [r.children[6].textContent, r.children[6].title])), []))`)
 	if err != nil {

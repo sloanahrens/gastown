@@ -9,29 +9,28 @@ import (
 )
 
 // The Cost panel's usage blocks are folds of their own: each closed on load with
-// one line on its heading, money and tokens in separate columns, one rework
-// table with a window column, and the Deep reviews heading carries its state
-// chip. These tests run the page's own renderCost over a reading and read back
-// what it drew (gt-bocqt).
+// one line on its heading, money and tokens in separate columns, and the Deep
+// reviews heading carries its state chip. These tests run the page's own
+// renderCost over a reading and read back what it drew (gt-bocqt).
 
-// costFoldState is one of the Cost panel's folds as the page keeps it: whether it
-// is closed, the line its heading shows while closed, and what a redraw set in
-// the heading beside its title.
-type costFoldState struct {
+// panelFoldState is one of a panel's folds as the page keeps it: whether it is
+// closed, the line its heading shows while closed, and what a redraw set in the
+// heading beside its title.
+type panelFoldState struct {
 	Closed  bool   `json:"closed"`
 	Summary string `json:"summary"`
 	Bits    string `json:"bits"`
 }
 
-// readCostFold reads back the fold keyed key, failing when the page keeps none.
-func readCostFold(t *testing.T, dom *pageDOM, key string) costFoldState {
+// readPanelFold reads back the fold keyed key, failing when the page keeps none.
+func readPanelFold(t *testing.T, dom *pageDOM, key string) panelFoldState {
 	t.Helper()
 
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
 		const f = folds.filter(x => x.key === ` + quoteJS(key) + `)[0];
 		if (!f) return null;
 		const sum = __find(__find(f.el, ":scope > h2"), ".foldsum");
-		return {closed: f.closed, summary: sum ? sum.textContent : "", bits: costFolds[` + quoteJS(key) + `].bits.textContent};
+		return {closed: f.closed, summary: sum ? sum.textContent : "", bits: panelFolds[` + quoteJS(key) + `].bits.textContent};
 	})())`)
 	if err != nil {
 		t.Fatalf("reading the %s fold: %v", key, err)
@@ -39,7 +38,7 @@ func readCostFold(t *testing.T, dom *pageDOM, key string) costFoldState {
 	if v.String() == "null" {
 		t.Fatalf("the page keeps no %s fold", key)
 	}
-	var out costFoldState
+	var out panelFoldState
 	if err := json.Unmarshal([]byte(v.String()), &out); err != nil {
 		t.Fatalf("reading the %s fold: %v", key, err)
 	}
@@ -58,11 +57,11 @@ func foldCount(t *testing.T, dom *pageDOM, key string) int {
 	return int(v.ToInteger())
 }
 
-// costFoldLines reads the lines a fold's body holds, each with its class and text.
-func costFoldLines(t *testing.T, dom *pageDOM, key string) []costLine {
+// panelFoldLines reads the lines a fold's body holds, each with its class and text.
+func panelFoldLines(t *testing.T, dom *pageDOM, key string) []costLine {
 	t.Helper()
 
-	v, err := dom.vm.RunString(`JSON.stringify(costFolds[` + quoteJS(key) + `].body.children.__arr.map(c => ({class: c.className, text: c.textContent, title: c.title})))`)
+	v, err := dom.vm.RunString(`JSON.stringify(panelFolds[` + quoteJS(key) + `].body.children.__arr.map(c => ({class: c.className, text: c.textContent, title: c.title})))`)
 	if err != nil {
 		t.Fatalf("reading the %s fold: %v", key, err)
 	}
@@ -73,11 +72,11 @@ func costFoldLines(t *testing.T, dom *pageDOM, key string) []costLine {
 	return lines
 }
 
-// costFoldTables reads each table a fold's body holds as its rows of cell text.
-func costFoldTables(t *testing.T, dom *pageDOM, key string) [][][]string {
+// panelFoldTables reads each table a fold's body holds as its rows of cell text.
+func panelFoldTables(t *testing.T, dom *pageDOM, key string) [][][]string {
 	t.Helper()
 
-	v, err := dom.vm.RunString(`JSON.stringify(costFolds[` + quoteJS(key) + `].body.children
+	v, err := dom.vm.RunString(`JSON.stringify(panelFolds[` + quoteJS(key) + `].body.children
 		.__arr.filter(c => c.tagName === "TABLE")
 		.map(tb => tb.children.__arr.map(r => r.children.__arr.map(x => x.textContent))))`)
 	if err != nil {
@@ -139,7 +138,7 @@ func TestCostPanelFoldsStartClosedWithOneLineSummaries(t *testing.T) {
 		"cost.jev":      "12 calls in 24h · top caller placeholder-caller (5 calls)",
 	}
 	for key, text := range want {
-		got := readCostFold(t, dom, key)
+		got := readPanelFold(t, dom, key)
 		if !got.Closed {
 			t.Errorf("%s starts open, want closed", key)
 		}
@@ -149,7 +148,7 @@ func TestCostPanelFoldsStartClosedWithOneLineSummaries(t *testing.T) {
 	}
 
 	// Deep reviews names its run count and the age of the newest run, not a date.
-	deep := readCostFold(t, dom, "cost.deepreview")
+	deep := readPanelFold(t, dom, "cost.deepreview")
 	if !deep.Closed || !strings.HasPrefix(deep.Summary, "1 run · last ") || !strings.HasSuffix(deep.Summary, " ago") {
 		t.Errorf("cost.deepreview = closed %v, summary %q, want closed with one run and its age", deep.Closed, deep.Summary)
 	}
@@ -190,7 +189,7 @@ func TestCostUnitsSplitDollarsFromTokens(t *testing.T) {
 		}},
 	}
 	for _, tc := range cases {
-		tables := costFoldTables(t, dom, tc.key)
+		tables := panelFoldTables(t, dom, tc.key)
 		if len(tables) != 1 {
 			t.Fatalf("%s drew %d tables, want one", tc.key, len(tables))
 		}
@@ -211,50 +210,6 @@ func TestCostUnitsSplitDollarsFromTokens(t *testing.T) {
 			if spend, tokens := row[3], row[4]; !spendCell.MatchString(spend) || !tokenCell.MatchString(tokens) {
 				t.Errorf("%s row %d: spend %q and tokens %q are not one dollar cell and one token cell", tc.key, i, spend, tokens)
 			}
-		}
-	}
-}
-
-// The rework table holds one row per window and bar, in the window's order, and
-// keeps a bar that reviewed many times. The screenshot's data is three bars: the
-// last seven days hold one and the seven days before them hold two, the one that
-// saw a single review dropping out of the table.
-func TestCostReworkDrawsOneRowPerWindowAndBar(t *testing.T) {
-	t.Parallel()
-
-	s := costSpendUsage()
-	s["rework"] = map[string]any{"windows": []any{
-		map[string]any{"name": "last 7 days", "bars": []any{
-			map[string]any{"bar": 0.8, "reviews": 3, "rejected": 1, "beads": 2, "first_try": 1, "landed": 2, "reviews_per_landed": 1.5, "loops_out": 0, "mean_score": 0.8,
-				"mean_om_secs": 190.0, "om_beads": 2, "median_om_secs": 190.0, "slowest_om_secs": 300.0, "slowest_om_bead": "gt-c"},
-		}},
-		map[string]any{"name": "the 7 days before", "bars": []any{
-			map[string]any{"bar": 0.6, "reviews": 1, "rejected": 0, "beads": 1, "first_try": 1, "landed": 1, "reviews_per_landed": 1.0, "loops_out": 0, "mean_score": 0.6,
-				"mean_om_secs": 60.0, "om_beads": 1, "median_om_secs": 60.0, "slowest_om_secs": 60.0, "slowest_om_bead": "gt-x"},
-			map[string]any{"bar": 0.75, "reviews": 1046, "rejected": 500, "beads": 300, "first_try": 200, "landed": 250, "reviews_per_landed": 4.18, "loops_out": 2, "mean_score": 0.7,
-				"mean_om_secs": 900.0, "om_beads": 250, "median_om_secs": 800.0, "slowest_om_secs": 3000.0, "slowest_om_bead": "gt-y"},
-		}},
-	}}
-	dom := newPageDOM(t)
-	dom.call(t, "renderCost", s)
-	tables := costFoldTables(t, dom, "cost.rework")
-	if len(tables) != 1 {
-		t.Fatalf("drew %d tables, want one for both windows", len(tables))
-	}
-	if head := strings.Join(tables[0][0], "|"); !strings.HasPrefix(head, "Window|Bar|Reviews|") {
-		t.Errorf("columns = %q, want the Window column in front", head)
-	}
-	rows := tables[0][1:]
-	want := [][]string{
-		{"last 7 days", "0.80", "3"},
-		{"the 7 days before", "0.75", "1046"},
-	}
-	if len(rows) != len(want) {
-		t.Fatalf("rows = %v, want one per window and bar with more than one review", rows)
-	}
-	for i := range want {
-		if got := rows[i][:3]; strings.Join(got, "|") != strings.Join(want[i], "|") {
-			t.Errorf("row %d = %v, want %v", i, got, want[i])
 		}
 	}
 }
@@ -298,7 +253,7 @@ func TestCostDeepReviewsChipIsPausedOrScheduled(t *testing.T) {
 			dom := newPageDOM(t)
 			dom.call(t, "renderCost", s)
 
-			bits := readCostFold(t, dom, "cost.deepreview").Bits
+			bits := readPanelFold(t, dom, "cost.deepreview").Bits
 			if tc.chip == "" {
 				if strings.Contains(bits, "paused") || strings.Contains(bits, "scheduled") {
 					t.Errorf("heading holds %q, want no state chip", bits)
@@ -336,7 +291,7 @@ func TestCostPanelDataQualityAndJevFolds(t *testing.T) {
 	dom.call(t, "renderCost", s)
 
 	var scanned, counts bool
-	for _, l := range costFoldLines(t, dom, "cost.quality") {
+	for _, l := range panelFoldLines(t, dom, "cost.quality") {
 		if l.Class == "empty warnc" && strings.HasPrefix(l.Text, "records last scanned ") && strings.HasSuffix(l.Text, "(stale)") {
 			scanned = true
 		}
@@ -345,10 +300,10 @@ func TestCostPanelDataQualityAndJevFolds(t *testing.T) {
 		}
 	}
 	if !scanned || !counts {
-		t.Errorf("data quality fold = %+v, want the stale scan age and the three counts", costFoldLines(t, dom, "cost.quality"))
+		t.Errorf("data quality fold = %+v, want the stale scan age and the three counts", panelFoldLines(t, dom, "cost.quality"))
 	}
 
-	jev := costFoldLines(t, dom, "cost.jev")
+	jev := panelFoldLines(t, dom, "cost.jev")
 	if len(jev) != 1 || jev[0].Text != "12 calls in 24h · top caller placeholder-caller (5 calls)" {
 		t.Errorf("jev fold = %+v, want the calls, window and top caller line", jev)
 	}
@@ -358,7 +313,7 @@ func TestCostPanelDataQualityAndJevFolds(t *testing.T) {
 	delete(failed, "jev_spend")
 	dom = newPageDOM(t)
 	dom.call(t, "renderCost", failed)
-	if lines := costFoldLines(t, dom, "cost.jev"); len(lines) != 1 || lines[0].Class != "badc" {
+	if lines := panelFoldLines(t, dom, "cost.jev"); len(lines) != 1 || lines[0].Class != "badc" {
 		t.Errorf("jev fold with a failed read = %+v, want one failure line", lines)
 	}
 
@@ -408,7 +363,7 @@ func TestCostJevFoldLeavesTheDollarsToTheProviderRow(t *testing.T) {
 	}
 
 	// The fold itself carries calls and the top caller, and no dollar figure.
-	for _, l := range costFoldLines(t, dom, "cost.jev") {
+	for _, l := range panelFoldLines(t, dom, "cost.jev") {
 		if strings.Contains(l.Text, "$") {
 			t.Errorf("jev fold line %q holds a dollar figure, want the dollars on the provider row", l.Text)
 		}
@@ -442,12 +397,12 @@ func TestCostPanelFoldsNameTheirEmptyStates(t *testing.T) {
 		"cost.over20":     "none in the last 48h",
 	}
 	for key, text := range want {
-		lines := costFoldLines(t, dom, key)
+		lines := panelFoldLines(t, dom, key)
 		if len(lines) != 1 || lines[0].Text != text {
 			t.Errorf("%s = %+v, want the empty line %q", key, lines, text)
 		}
 	}
-	quality := costFoldLines(t, dom, "cost.quality")
+	quality := panelFoldLines(t, dom, "cost.quality")
 	if len(quality) != 2 || quality[0].Class != "empty warnc" || quality[0].Text != "never scanned" || quality[1].Text != "0 unmatched · 0 incomplete · 0 skipped" {
 		t.Errorf("data quality fold = %+v, want the never-scanned warning and the counts", quality)
 	}
