@@ -1,4 +1,4 @@
-.PHONY: build install gt-installer install-local uninstall check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-integration-wall test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate gate-lint gate-test tier-check presubmit exec-tax-preflight polecat-image polecat-seed-stage polecat-seed-pins polecat-caches openshell-providers
+.PHONY: build install gt-installer install-local uninstall check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-integration-wall test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate gate-lint gate-test tier-check presubmit exec-tax-preflight polecat-image polecat-seed-stage polecat-seed-pins polecat-caches polecat-node-prune openshell-providers
 
 # The gate (docs/testing.md, "The gate"). Three tiers, each one target, and
 # every caller runs them verbatim: CI, gt done, the land path and a human at a

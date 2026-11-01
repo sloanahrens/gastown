@@ -431,7 +431,7 @@ else
   fail "polecat-node-prune leaves a node it cannot list alone and names the failure" "$pout"
 fi
 
-for t in polecat-image polecat-seed-stage polecat-seed-pins polecat-caches openshell-providers; do
+for t in polecat-image polecat-seed-stage polecat-seed-pins polecat-caches polecat-node-prune openshell-providers; do
   grep -q -E "^$t:" "$ROOT/Makefile" && grep -q -E "^\.PHONY:.* $t( |\$)" <<<"$phony" || missing="$missing $t"
 done
 if [[ -z "$missing" ]]; then

@@ -201,7 +201,7 @@ func TestIntegrationSandboxTargetsAreDeclaredAndPhony(t *testing.T) {
 	text := makefileText(t, repoRoot(t))
 	phony := phonyTargets(text)
 	var missing []string
-	for _, target := range []string{"polecat-image", "polecat-seed-stage", "polecat-seed-pins", "polecat-caches", "openshell-providers"} {
+	for _, target := range []string{"polecat-image", "polecat-seed-stage", "polecat-seed-pins", "polecat-caches", "polecat-node-prune", "openshell-providers"} {
 		if !hasTargetLine(text, target) {
 			missing = append(missing, target+" (not declared)")
 		} else if !phony[target] {
