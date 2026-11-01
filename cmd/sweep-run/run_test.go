@@ -135,6 +135,9 @@ func TestRunWritesResultForAPassingSweep(t *testing.T) {
 	if got := h.overrides[envJobs]; got != "4" {
 		t.Errorf("sweep jobs = %q, want 4", got)
 	}
+	if got := h.overrides[tiersweep.EnvNoSlot]; got != "1" {
+		t.Errorf("sweep %s = %q, want 1: the runner container has no town for gt slot run", tiersweep.EnvNoSlot, got)
+	}
 	// The summary lines are echoed to the process's stdout, which is what the
 	// container's log shows a reader.
 	for _, tier := range []string{"integration", "race"} {
