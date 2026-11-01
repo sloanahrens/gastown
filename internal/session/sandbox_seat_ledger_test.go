@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -101,6 +102,40 @@ func TestSeatLineEndedAtIsTheInjectedClock(t *testing.T) {
 	}
 }
 
+// A removal that fails writes no seat-end line, so the retry that removes the
+// record lines the seat once. The line used to be written before the unlink: a
+// failed removal put a line in the ledger, and the retry put a second one in
+// (gt-pe98l).
+func TestRemoveRetriedWritesOneSeatLine(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	rec := SandboxRecord{Session: "gt-gastown-box", Rig: "gastown", Polecat: "box"}
+	if err := WriteSandboxRecord(town, rec); err != nil {
+		t.Fatalf("writing the record: %v", err)
+	}
+	locked := errors.New("registry locked")
+	calls := 0
+	remove := func(path string) error {
+		calls++
+		if calls == 1 {
+			return locked
+		}
+		return os.Remove(path)
+	}
+	if err := removeSandboxRecordWith(town, rec.Session, time.Now, remove); !errors.Is(err, locked) {
+		t.Fatalf("first removal = %v, want the unlink's failure", err)
+	}
+	if _, err := os.Stat(SandboxSeatLedgerPath(town)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a failed removal wrote its seat-end line; the retry would write it twice (stat %v)", err)
+	}
+	if err := removeSandboxRecordWith(town, rec.Session, time.Now, remove); err != nil {
+		t.Fatalf("retried removal: %v", err)
+	}
+	if lines := readSeatLines(t, town); len(lines) != 1 {
+		t.Fatalf("seat-end lines = %d, want 1: %+v", len(lines), lines)
+	}
+}
+
 func TestRemoveMissingRecordWritesNoLine(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -163,10 +198,11 @@ func TestSeatLineAppendFailureStillRemoves(t *testing.T) {
 
 func TestSeatLineWriteFailureIsReturned(t *testing.T) {
 	t.Parallel()
-	_, w, err := os.Pipe()
+	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("opening a pipe: %v", err)
 	}
+	t.Cleanup(func() { _ = r.Close() })
 	if err := w.Close(); err != nil {
 		t.Fatalf("closing the pipe's write end: %v", err)
 	}
@@ -196,38 +232,127 @@ func TestRemoveUnreadableRecordStillRemoves(t *testing.T) {
 	}
 }
 
+// The record's workspace comes from the town's map through the rig's beads
+// prefix: the map is keyed by prefix, not by rig name, so a map that names the
+// prefix is not missed because the rig is called something else. A town with no
+// registry takes the default prefix, which is what the map names then.
 func TestOpenShellPrepareRecordsTheRigsWorkspace(t *testing.T) {
 	t.Parallel()
-	town, work := openshellTown(t)
-	writeOpenshellFile(t, filepath.Join(town, "settings", "workspaces.json"),
-		`{"default":"customer-zero","rigs":{"`+openshellTestRig+`":"acme"}}`)
-	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
-	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
-	if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err != nil {
-		t.Fatalf("Prepare: %v", err)
-	}
-	rec, ok, err := ReadSandboxRecord(town, openshellTestSession)
-	if err != nil || !ok {
-		t.Fatalf("record after Prepare: ok=%v err=%v", ok, err)
-	}
-	if rec.Workspace != "acme" {
-		t.Fatalf("record workspace = %q, want the rig's mapping acme", rec.Workspace)
+	for _, c := range []struct {
+		name      string
+		rigsJSON  string // "" leaves the town with no rig registry
+		workspace string
+		want      string
+	}{
+		{
+			name:      "the map is keyed by the rig's beads prefix",
+			rigsJSON:  `{"version":1,"rigs":{"` + openshellTestRig + `":{"git_url":"http://host.docker.internal:3000/sloan/gastown.git","beads":{"repo":"","prefix":"gst-"}}}}`,
+			workspace: `{"default":"customer-zero","rigs":{"gst":"acme"}}`,
+			want:      "acme",
+		},
+		{
+			name:      "a town with no rig registry takes the default prefix",
+			workspace: `{"default":"customer-zero","rigs":{"gt":"acme"}}`,
+			want:      "acme",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town, work := openshellTown(t)
+			if c.rigsJSON != "" {
+				writeOpenshellFile(t, filepath.Join(town, "mayor", "rigs.json"), c.rigsJSON)
+			}
+			writeOpenshellFile(t, filepath.Join(town, "settings", "workspaces.json"), c.workspace)
+			fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
+			b, _ := openshellTestBackend(town, openshellTestProfile, fake)
+			if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err != nil {
+				t.Fatalf("Prepare: %v", err)
+			}
+			rec, ok, err := ReadSandboxRecord(town, openshellTestSession)
+			if err != nil || !ok {
+				t.Fatalf("record after Prepare: ok=%v err=%v", ok, err)
+			}
+			if rec.Workspace != c.want {
+				t.Fatalf("record workspace = %q, want the prefix's mapping %q", rec.Workspace, c.want)
+			}
+		})
 	}
 }
 
-func TestOpenShellPrepareRefusesAnUnreadableWorkspaceMap(t *testing.T) {
+// A seat-end line that cannot be written does not turn a completed rollback
+// into a failed one: the sandbox and its record are gone, the loss is warned
+// like a failed token revoke, and the spawn's own failure is what returns
+// (gt-pe98l).
+func TestOpenShellPrepareRollbackWarnsWhenTheSeatLineCannotBeWritten(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
-	writeOpenshellFile(t, filepath.Join(town, "settings", "workspaces.json"), `{"default":""}`)
+	// A record left by an earlier partial write for this session.
+	if err := WriteSandboxRecord(town, SandboxRecord{Session: openshellTestSession, Rig: openshellTestRig, Polecat: openshellTestPolecat, Profile: "polecat-default"}); err != nil {
+		t.Fatal(err)
+	}
+	// A directory where the ledger file goes: the line cannot be appended.
+	if err := os.MkdirAll(SandboxSeatLedgerPath(town), 0o755); err != nil {
+		t.Fatalf("blocking the ledger: %v", err)
+	}
+	// The sandbox never becomes Ready, so Prepare rolls back.
 	fake := openshellPrepareFake(nil)
-	b, pushes := openshellTestBackend(town, openshellTestProfile, fake)
-	if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err == nil {
-		t.Fatal("Prepare accepted a workspace map with no default")
+	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
+	var warnings []string
+	b.warnf = func(format string, args ...any) { warnings = append(warnings, fmt.Sprintf(format, args...)) }
+
+	_, err := b.Prepare(context.Background(), openshellSpawn(town, work))
+	if err == nil {
+		t.Fatal("Prepare succeeded with a sandbox that never became Ready")
 	}
-	if len(*pushes) != 0 {
-		t.Fatalf("pushes = %d, want none before the workspace map was read", len(*pushes))
+	if strings.Contains(err.Error(), "rolling back sandbox") {
+		t.Errorf("Prepare error = %v, want the spawn's failure without a rollback failure", err)
 	}
-	if calls := fake.Calls(); len(calls) != 0 {
-		t.Fatalf("sandbox calls = %v, want none", calls)
+	if _, ok, readErr := ReadSandboxRecord(town, openshellTestSession); ok || readErr != nil {
+		t.Fatalf("record after the rollback: ok=%v err=%v, want gone", ok, readErr)
+	}
+	if !strings.Contains(strings.Join(warnings, "\n"), "removing its record while rolling back") {
+		t.Errorf("warnings = %q, want the unwritten seat-end line named", warnings)
+	}
+}
+
+// A town whose workspace map, or whose rig registry, cannot be read refuses the
+// spawn before anything is pushed or created: the record would carry an empty
+// or guessed workspace id (plan row M5).
+func TestOpenShellPrepareRefusesAnUnreadableWorkspaceMap(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name    string
+		prepare func(t *testing.T, town string)
+	}{
+		{
+			name: "a workspace map with no default",
+			prepare: func(t *testing.T, town string) {
+				writeOpenshellFile(t, filepath.Join(town, "settings", "workspaces.json"), `{"default":""}`)
+			},
+		},
+		{
+			name: "a rig registry that cannot be read",
+			prepare: func(t *testing.T, town string) {
+				writeOpenshellFile(t, filepath.Join(town, "settings", "workspaces.json"), `{"default":"customer-zero"}`)
+				writeOpenshellFile(t, filepath.Join(town, "mayor", "rigs.json"), "{not json")
+			},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town, work := openshellTown(t)
+			c.prepare(t, town)
+			fake := openshellPrepareFake(nil)
+			b, pushes := openshellTestBackend(town, openshellTestProfile, fake)
+			if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err == nil {
+				t.Fatal("Prepare accepted a town whose workspace id cannot be resolved")
+			}
+			if len(*pushes) != 0 {
+				t.Fatalf("pushes = %d, want none before the workspace was resolved", len(*pushes))
+			}
+			if calls := fake.Calls(); len(calls) != 0 {
+				t.Fatalf("sandbox calls = %v, want none", calls)
+			}
+		})
 	}
 }
