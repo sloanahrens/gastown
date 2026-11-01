@@ -245,3 +245,23 @@ func TestFetchClientToolsRefusesWithoutAFetcherOrAbsoluteOut(t *testing.T) {
 		t.Errorf("error = %v, want the relative-directory refusal", err)
 	}
 }
+
+// A pinned archive that is small as a download but expands past the bound is
+// refused, and nothing is placed.
+func TestFetchedClientToolRefusesAMemberThatExpandsPastTheBound(t *testing.T) {
+	t.Parallel()
+	b, _ := imageBuilder(t)
+	archive := tgzOf(t, map[string]string{"bomb": strings.Repeat("0", 1<<16)}, []string{"bomb"})
+	max := int64(len(archive)) + 16
+	if max >= 1<<16 {
+		t.Fatalf("the archive is %d bytes; the test needs it smaller than the member", len(archive))
+	}
+	pin := templates.ClientToolPin{Name: "bomb", URL: "https://example.test/bomb.tgz", SHA256: sumHex(archive), Member: "bomb"}
+	b.Fetch = fetchOf(archive)
+	if _, err := b.fetchClientTool(context.Background(), pin, max); err == nil || !strings.Contains(err.Error(), "expands past") {
+		t.Fatalf("error = %v, want the expansion refusal", err)
+	}
+	if _, err := os.Stat(filepath.Join(b.Out, "bomb")); !os.IsNotExist(err) {
+		t.Errorf("a refused archive left a file in the build context (stat error %v)", err)
+	}
+}

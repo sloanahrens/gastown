@@ -57,7 +57,7 @@ func (b Builder) FetchClientTools(ctx context.Context) ([]string, error) {
 // download is held in memory until its sha256 verifies, so a refused download
 // leaves nothing in b.Out.
 func (b Builder) fetchClientTool(ctx context.Context, pin templates.ClientToolPin, max int64) (string, error) {
-	if !claudeSHA256.MatchString(pin.SHA256) {
+	if !sha256Pin.MatchString(pin.SHA256) {
 		return "", fmt.Errorf("daemonimage: the %s pin %q is not a sha256 of 64 lower-case hex digits", pin.Name, pin.SHA256)
 	}
 	body, err := b.Fetch(ctx, pin.URL)
@@ -70,14 +70,14 @@ func (b Builder) fetchClientTool(ctx context.Context, pin templates.ClientToolPi
 		return "", fmt.Errorf("daemonimage: cannot download %s from %s: %w", pin.Name, pin.URL, err)
 	}
 	if int64(len(data)) > max {
-		return "", fmt.Errorf("daemonimage: %s from %s is over the %d-byte bound; nothing was written to %s", pin.Name, pin.URL, max, b.Out)
+		return "", errOverBound(pin.Name, pin.URL, max, b.Out)
 	}
 	sum := sha256.Sum256(data)
-	if got := hex.EncodeToString(sum[:]); got != pin.SHA256 {
-		return "", fmt.Errorf("daemonimage: %s from %s has sha256 %s, not the pinned %s; nothing was written to %s", pin.Name, pin.URL, got, pin.SHA256, b.Out)
+	if err := verifySum(pin.Name, pin.URL, hex.EncodeToString(sum[:]), pin.SHA256, b.Out); err != nil {
+		return "", err
 	}
 	if pin.Member != "" {
-		if data, err = extractMember(data, pin.Member); err != nil {
+		if data, err = extractMember(data, pin.Member, max); err != nil {
 			return "", fmt.Errorf("daemonimage: %s from %s: %w", pin.Name, pin.URL, err)
 		}
 	}
@@ -90,8 +90,10 @@ func (b Builder) fetchClientTool(ctx context.Context, pin templates.ClientToolPi
 
 // extractMember returns the bytes of the one regular file named member in the
 // .tar.gz archive. The name is compared whole and nothing is written to a path
-// taken from the archive, so a hostile member name cannot place a file.
-func extractMember(archive []byte, member string) ([]byte, error) {
+// taken from the archive, so a hostile member name cannot place a file. The
+// member is read to at most max bytes, so a pinned archive that expands past the
+// download bound is refused.
+func extractMember(archive []byte, member string, max int64) ([]byte, error) {
 	zr, err := gzip.NewReader(bytes.NewReader(archive))
 	if err != nil {
 		return nil, fmt.Errorf("the download is not gzip: %w", err)
@@ -106,9 +108,12 @@ func extractMember(archive []byte, member string) ([]byte, error) {
 			return nil, fmt.Errorf("the archive does not read: %w", err)
 		}
 		if h.Typeflag == tar.TypeReg && h.Name == member {
-			data, err := io.ReadAll(tr)
+			data, err := io.ReadAll(io.LimitReader(tr, max+1))
 			if err != nil {
 				return nil, fmt.Errorf("cannot read %q from the archive: %w", member, err)
+			}
+			if int64(len(data)) > max {
+				return nil, fmt.Errorf("%q expands past the %d-byte bound", member, max)
 			}
 			return data, nil
 		}

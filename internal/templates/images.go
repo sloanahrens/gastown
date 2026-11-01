@@ -92,7 +92,9 @@ type ClientToolPin struct {
 //     release's openshell-checksums-sha256.txt (read 2026-11-01).
 //   - docker is the static client from download.docker.com at 29.8.2, the
 //     version inside the sweep engine (DindImage). Docker publishes no checksum
-//     file, so this sha256 is our own pin of the download.
+//     file, so this sha256 is our own pin of the download: it was taken from
+//     the download of 2026-11-01 (trust on first use), so it guards later
+//     builds against change, not the first download.
 //   - kubectl is the v1.37.0 binary from dl.k8s.io, the cluster's node version,
 //     with the sha256 published beside it as kubectl.sha256.
 var DaemonClientTools = []ClientToolPin{

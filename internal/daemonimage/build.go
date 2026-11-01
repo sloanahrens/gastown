@@ -371,8 +371,9 @@ const claudeCLIName = "claude"
 // a floating tag such as latest or stable cannot match.
 var claudeVersion = regexp.MustCompile(`^[0-9]+(\.[0-9]+)+$`)
 
-// claudeSHA256 is the form a sha256 sum prints in: 64 lower-case hex digits.
-var claudeSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
+// sha256Pin is the form a sha256 sum prints in: 64 lower-case hex digits. The
+// claude CLI pin and every client tool pin are checked against it.
+var sha256Pin = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // FetchClaudeCLI downloads the pinned linux/arm64 claude CLI, verifies its sha256
 // against templates.ClaudeCLISHA256, and writes it to b.Out/claude, the build
@@ -453,13 +454,13 @@ func (b Builder) fetchClaudeCLIWith(ctx context.Context, url, version, want stri
 	}
 	if n > max {
 		_ = tmp.Close()
-		return "", fmt.Errorf("daemonimage: the claude CLI from %s is over the %d-byte bound; nothing was written to %s", url, max, b.Out)
+		return "", errOverBound("the claude CLI", url, max, b.Out)
 	}
 	if err := tmp.Close(); err != nil {
 		return "", fmt.Errorf("daemonimage: cannot write the claude CLI in %s: %w", b.Out, err)
 	}
-	if got := hex.EncodeToString(sum.Sum(nil)); got != want {
-		return "", fmt.Errorf("daemonimage: the claude CLI from %s has sha256 %s, not the pinned %s; nothing was written to %s", url, got, want, b.Out)
+	if err := verifySum("the claude CLI", url, hex.EncodeToString(sum.Sum(nil)), want, b.Out); err != nil {
+		return "", err
 	}
 	// The Dockerfile's COPY sets the binary's mode, so the file keeps the
 	// temporary file's.
@@ -471,6 +472,21 @@ func (b Builder) fetchClaudeCLIWith(ctx context.Context, url, version, want stri
 	return path, nil
 }
 
+// errOverBound is the refusal for a download that reaches past its size bound,
+// shared by the claude CLI and the client tools so the two read alike.
+func errOverBound(what, url string, max int64, out string) error {
+	return fmt.Errorf("daemonimage: %s from %s is over the %d-byte bound; nothing was written to %s", what, url, max, out)
+}
+
+// verifySum is the refusal for a download whose sha256 is not its pin, shared
+// by the claude CLI and the client tools.
+func verifySum(what, url, got, want, out string) error {
+	if got != want {
+		return fmt.Errorf("daemonimage: %s from %s has sha256 %s, not the pinned %s; nothing was written to %s", what, url, got, want, out)
+	}
+	return nil
+}
+
 // checkClaudePin refuses a claude CLI pin that is not an exact version and a
 // sha256 in the form a sum prints, so a build never fetches a moving target or
 // checks against a value that cannot match.
@@ -478,7 +494,7 @@ func checkClaudePin(version, sha string) error {
 	if !claudeVersion.MatchString(version) {
 		return fmt.Errorf("daemonimage: claude CLI version %q is not an exact dotted version such as 2.1.314; a floating tag would fetch a binary the pin does not name", version)
 	}
-	if !claudeSHA256.MatchString(sha) {
+	if !sha256Pin.MatchString(sha) {
 		return fmt.Errorf("daemonimage: claude CLI sha256 %q is not 64 lower-case hex digits", sha)
 	}
 	return nil
@@ -533,7 +549,8 @@ func (b Builder) BuildImage(ctx context.Context, rev string, bins []string) (str
 }
 
 // checkImageBinaries refuses a set of binaries the Dockerfile's COPY lines could
-// not read: gt, bd, om and claude once each, as files in the build context. Docker
+// not read: each of the image's binaries (gt, bd, om, claude and ClientToolNames)
+// once, as files in the build context. Docker
 // would report a missing or misplaced one only after the package install ran, so
 // it is caught here first, against what the caller passed.
 func (b Builder) checkImageBinaries(bins []string) error {
