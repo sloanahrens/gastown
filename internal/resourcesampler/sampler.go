@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/workspaceid"
 )
 
@@ -63,11 +64,6 @@ type Row struct {
 	Workspace     string   `json:"workspace"`
 }
 
-// unresolvedWorkspace is the id a row carries when its rig names no usable
-// prefix. It is the id events.WorkspaceUnresolved stamps, so the two feeds mark
-// the same loss the same way.
-const unresolvedWorkspace = "unresolved"
-
 // SetWorkspace stamps the row with the workspace id the map gives the rig it
 // names, or the map's default when it names none. A rig that is present but
 // empty is unresolved rather than the default, which would attribute the row to
@@ -80,7 +76,7 @@ func (r *Row) SetWorkspace(m *workspaceid.Map) {
 	}
 	id, err := m.For(*r.Rig)
 	if err != nil {
-		r.Workspace = unresolvedWorkspace
+		r.Workspace = events.WorkspaceUnresolved
 		return
 	}
 	r.Workspace = id

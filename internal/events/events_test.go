@@ -642,9 +642,9 @@ func lastEventWorkspace(t *testing.T, townRoot string) string {
 }
 
 // TestEventWorkspaceFollowsTheMapFile covers the map cache. A map the operator
-// edits changes size or modification time, and the next event reads it. The
-// cache is keyed on those two, so a rewrite that keeps both is not read again;
-// the last case restores the modification time to pin that key.
+// edits is read again by the next event, including a rewrite that keeps the
+// size and the modification time: the cache is keyed on the file's content, so
+// the same-size rewrite below must show its new id, not the id read before it.
 func TestEventWorkspaceFollowsTheMapFile(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
@@ -678,7 +678,52 @@ func TestEventWorkspaceFollowsTheMapFile(t *testing.T) {
 		t.Fatalf("Chtimes: %v", err)
 	}
 	boot()
-	if got := lastEventWorkspace(t, townRoot); got != "fr-longer-id" {
-		t.Errorf("event after a same-size rewrite = %q, want the map read before it, fr-longer-id", got)
+	if got := lastEventWorkspace(t, townRoot); got != "fr-LONGER-ID" {
+		t.Errorf("event after a same-size rewrite = %q, want the rewritten map's fr-LONGER-ID", got)
+	}
+}
+
+// TestEventWorkspaceWhenTheMapFileFails covers the cache's error and missing
+// file paths. A malformed map or an unreadable one stamps the event unresolved
+// and does not serve the id from the last good read; a removed map reads as the
+// absent-file default.
+func TestEventWorkspaceWhenTheMapFileFails(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	path := filepath.Join(townRoot, workspaceid.File)
+	boot := func() {
+		t.Helper()
+		if err := LogFeedTo(townRoot, TypeBoot, "fr/witness", BootPayload("fr", nil)); err != nil {
+			t.Fatalf("LogFeedTo: %v", err)
+		}
+	}
+
+	writeWorkspaceMap(t, townRoot, `{"default":"town-default","rigs":{"fr":"fr-one"}}`)
+	boot()
+	if got := lastEventWorkspace(t, townRoot); got != "fr-one" {
+		t.Fatalf("good map: event workspace = %q, want fr-one", got)
+	}
+
+	writeWorkspaceMap(t, townRoot, `{"default":"town-default","rigs":{"fr":`)
+	boot()
+	if got := lastEventWorkspace(t, townRoot); got != WorkspaceUnresolved {
+		t.Errorf("malformed map: event workspace = %q, want %q and not the id of the last good read", got, WorkspaceUnresolved)
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	boot()
+	if got := lastEventWorkspace(t, townRoot); got != workspaceid.CustomerZero {
+		t.Errorf("removed map: event workspace = %q, want the absent-file default %q", got, workspaceid.CustomerZero)
+	}
+
+	// A directory where the file should be cannot be read at all.
+	if err := os.MkdirAll(path, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	boot()
+	if got := lastEventWorkspace(t, townRoot); got != WorkspaceUnresolved {
+		t.Errorf("unreadable map: event workspace = %q, want %q", got, WorkspaceUnresolved)
 	}
 }

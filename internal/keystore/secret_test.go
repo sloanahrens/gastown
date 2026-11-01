@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -78,5 +79,46 @@ func TestDestroyClearsASecretAlreadyRead(t *testing.T) {
 	}
 	if got := secret.Bytes(); len(got) != 0 {
 		t.Errorf("Bytes of a Secret read before Destroy = %q, want it cleared", got)
+	}
+}
+
+// Destroy wipes a value that readers hold while they read it. Each read must
+// return the whole value or nothing: a copy taken mid-wipe would hold a value
+// with some bytes already zeroed.
+func TestDestroyNeverShowsAPartlyWipedValue(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := NewFake()
+	value := strings.Repeat("k", 1<<16)
+	rev := put(t, f, "ws", "api-key", value)
+	secret, err := f.Get(ctx, "ws", "api-key")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	const readers = 8
+	const readsEach = 200
+	torn := make([]bool, readers)
+	var wg sync.WaitGroup
+	for i := range readers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range readsEach {
+				if got := string(secret.Bytes()); got != "" && got != value {
+					torn[i] = true
+					return
+				}
+			}
+		}()
+	}
+	if err := f.Destroy(ctx, "ws", "api-key", rev); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	wg.Wait()
+	for i, saw := range torn {
+		if saw {
+			t.Errorf("reader %d saw a partly wiped value", i)
+		}
 	}
 }

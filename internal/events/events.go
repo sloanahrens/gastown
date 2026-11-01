@@ -4,6 +4,7 @@
 package events
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -337,15 +338,14 @@ func workspaceOf(townRoot string, payload map[string]interface{}) string {
 	return id
 }
 
-// workspaceMapRead is one read of a town's workspace map, with the file's
-// modification time and size at that read.
+// workspaceMapRead is one parse of a town's workspace map: the file's contents
+// and the map parsed from exactly those contents.
 type workspaceMapRead struct {
-	modTime time.Time
-	size    int64
-	m       *workspaceid.Map
+	raw []byte
+	m   *workspaceid.Map
 }
 
-// workspaceMapCache holds the last read of each town's workspace map, keyed by
+// workspaceMapCache holds the last parse of each town's workspace map, keyed by
 // town root.
 type workspaceMapCache struct {
 	mu    sync.Mutex
@@ -355,21 +355,27 @@ type workspaceMapCache struct {
 var cachedWorkspaceMaps workspaceMapCache
 
 // loadWorkspaceMap returns the town's workspace map. Every event write asks for
-// it, so it is parsed again only when the file's modification time or size has
-// changed since the last read. A map file that cannot be stat'ed is read in full,
-// so an unreadable file is still an error and never a cached answer.
+// it. The file is read each time, and parsed again only when its contents differ
+// from the last parse, so an edit is never missed: the key is the content itself,
+// not a modification time or size that a rewrite can leave unchanged. A file that
+// cannot be read is not cached: workspaceid.Load decides the result, as it does
+// for an absent file.
 func loadWorkspaceMap(townRoot string) (*workspaceid.Map, error) {
-	info, err := os.Stat(filepath.Join(townRoot, workspaceid.File))
+	if townRoot == "" {
+		return workspaceid.Load(townRoot)
+	}
+	path := filepath.Join(townRoot, workspaceid.File)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is the town root the caller named
 	if err != nil {
 		return workspaceid.Load(townRoot)
 	}
 	c := &cachedWorkspaceMaps
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if r, ok := c.towns[townRoot]; ok && r.modTime.Equal(info.ModTime()) && r.size == info.Size() {
+	if r, ok := c.towns[townRoot]; ok && bytes.Equal(r.raw, data) {
 		return r.m, nil
 	}
-	m, err := workspaceid.Load(townRoot)
+	m, err := workspaceid.Parse(path, data)
 	if err != nil {
 		delete(c.towns, townRoot)
 		return nil, err
@@ -377,7 +383,7 @@ func loadWorkspaceMap(townRoot string) (*workspaceid.Map, error) {
 	if c.towns == nil {
 		c.towns = make(map[string]workspaceMapRead)
 	}
-	c.towns[townRoot] = workspaceMapRead{modTime: info.ModTime(), size: info.Size(), m: m}
+	c.towns[townRoot] = workspaceMapRead{raw: data, m: m}
 	return m, nil
 }
 
