@@ -1625,6 +1625,13 @@ type riskRead struct {
 // that tier, because that is what rewrites the record's verdict; nothing
 // clears it by hand, and a Partial cycle that never reached the tier leaves the
 // RED standing (gt-euxf1).
+//
+// It also raises one item per rig and tier a stage has starved
+// tierSweepStarvedAlertAfter cycles in a row (gt-r2e0h): the tier's verdict is
+// then stale, and a regression in it stays hidden behind an earlier stage that
+// keeps the tier from running. The key is its own, so the item stands beside a
+// RED one rather than replacing it, and the sweep's record resetting the count
+// is what clears it.
 func (s *attentionSources) collectTierSweepRed(ctx context.Context) ([]attention.Item, error) {
 	var out []attention.Item
 	for _, rig := range s.tierSweepRigs() {
@@ -1648,8 +1655,31 @@ func (s *attentionSources) collectTierSweepRed(ctx context.Context) ([]attention
 				Summary:  fmt.Sprintf("tier sweep %s %s RED (%d failed%s)", rig, tier, res.Failed, tierSweepFailureNames(res.FailedNames)),
 			})
 		}
+		for tier, cycles := range st.Starved {
+			if cycles < tierSweepStarvedAlertAfter {
+				continue
+			}
+			out = append(out, attention.Item{
+				Key:      "sweep-starved:" + rig + ":" + tier,
+				Kind:     attention.KindTierSweepRed,
+				Severity: attention.SeverityHigh,
+				Rig:      rig,
+				SHA:      st.Tiers[tier].SHA,
+				Summary: fmt.Sprintf("tier sweep %s %s starved %d cycles in a row (last verdict %s)",
+					rig, tier, cycles, tierSweepStarvedVerdict(st.Tiers[tier])),
+			})
+		}
 	}
 	return out, nil
+}
+
+// tierSweepStarvedVerdict is the verdict a starved tier is still carrying, for
+// the starved item's summary; a tier no cycle ever judged carries none.
+func tierSweepStarvedVerdict(res tierSweepTierResult) string {
+	if res.Verdict == "" {
+		return "none"
+	}
+	return res.Verdict
 }
 
 // riskPathList is a landing's risk paths as one line, capped so a landing that
