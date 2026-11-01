@@ -120,6 +120,8 @@ func TestBirdRoutesRefuseEverythingElse(t *testing.T) {
 // A hub with no birds directory serves no page, even when the working directory
 // holds a file at the relative path an empty directory name would build: the
 // route refuses before it reads anything.
+//
+//testpolicy:allow parallel — the working directory is the input under test, and the test changes it for the process
 func TestBirdRoutesRefuseAnUnwiredHub(t *testing.T) {
 	dir := t.TempDir()
 	reports := filepath.Join(dir, "dunlin", "reports")
@@ -129,6 +131,7 @@ func TestBirdRoutesRefuseAnUnwiredHub(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(reports, "daily.html"), []byte("a page joined from the working directory"), 0o644); err != nil {
 		t.Fatalf("write the page at the relative path: %v", err)
 	}
+	//testpolicy:allow no-chdir — the cwd is the input under test: an empty birds directory would resolve against it
 	t.Chdir(dir)
 
 	if rec := birdRouteGet(t, NewHub(Config{}), "/birds/dunlin/daily.html"); rec.Code != http.StatusNotFound {
