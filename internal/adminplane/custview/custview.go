@@ -64,9 +64,25 @@ type Spend struct {
 // Usage is the month's metering totals, shaped as the M8 export computes them:
 // seat hours by profile, storage GB-months, and unpriced token counts.
 type Usage struct {
-	SeatHours       []export.ProfileHours `json:"seat_hours"`
-	StorageGBMonths float64               `json:"storage_gb_months"`
-	Tokens          export.Tokens         `json:"tokens"`
+	SeatHours       []ProfileHours `json:"seat_hours"`
+	StorageGBMonths float64        `json:"storage_gb_months"`
+	Tokens          Tokens         `json:"tokens"`
+}
+
+// ProfileHours is one profile's seat hours for the month. It is the view's own
+// type, not the export's, so a field the export gains cannot reach a view.
+type ProfileHours struct {
+	Profile string
+	Hours   float64
+}
+
+// Tokens is a workspace's token counts for the month. It is the view's own
+// type, for the same reason as ProfileHours.
+type Tokens struct {
+	Input         int64
+	Output        int64
+	CacheCreation int64
+	CacheRead     int64
 }
 
 // Action is one dashboard button a workspace's state offers.
@@ -267,12 +283,22 @@ func monthToDate(recs []spendcap.Record, workspace string, now time.Time) float6
 
 // usage copies the export's per-workspace figures and its seat-hours slice, so
 // a later change to the source's record cannot change a view already returned.
-// The seat hours are never nil, so a month with none serializes as an empty
-// list, as Actions does.
+// Each field is copied into the view's own type, so no export type reaches the
+// view. The seat hours are never nil, so a month with none serializes as an
+// empty list, as Actions does.
 func usage(w export.WorkspaceExport) Usage {
+	seats := make([]ProfileHours, 0, len(w.SeatHours))
+	for _, s := range w.SeatHours {
+		seats = append(seats, ProfileHours{Profile: s.Profile, Hours: s.Hours})
+	}
 	return Usage{
-		SeatHours:       append(make([]export.ProfileHours, 0, len(w.SeatHours)), w.SeatHours...),
+		SeatHours:       seats,
 		StorageGBMonths: w.StorageGBMonths,
-		Tokens:          w.Tokens,
+		Tokens: Tokens{
+			Input:         w.Tokens.Input,
+			Output:        w.Tokens.Output,
+			CacheCreation: w.Tokens.CacheCreation,
+			CacheRead:     w.Tokens.CacheRead,
+		},
 	}
 }

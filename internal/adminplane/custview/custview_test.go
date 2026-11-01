@@ -269,9 +269,9 @@ func TestUsageCopiesMonthTotals(t *testing.T) {
 		t.Fatalf("Build returned %v, want nil", err)
 	}
 	want := Usage{
-		SeatHours:       []export.ProfileHours{{Profile: "standard", Hours: 12.5}},
+		SeatHours:       []ProfileHours{{Profile: "standard", Hours: 12.5}},
 		StorageGBMonths: 1.5,
-		Tokens:          export.Tokens{Input: 10, Output: 20, CacheCreation: 30, CacheRead: 40},
+		Tokens:          Tokens{Input: 10, Output: 20, CacheCreation: 30, CacheRead: 40},
 	}
 	if !reflect.DeepEqual(v.Usage, want) {
 		t.Fatalf("usage = %+v, want %+v", v.Usage, want)
@@ -280,6 +280,40 @@ func TestUsageCopiesMonthTotals(t *testing.T) {
 	if v.Usage.SeatHours[0].Hours == 999 {
 		t.Error("view usage changed with the record's seat hours, want its own copy")
 	}
+}
+
+// TestUsageHoldsNoExportType pins that no field of Usage is a type the metering
+// export declares, including inside a slice or a struct field, so a field the
+// export gains cannot reach a view through the usage.
+func TestUsageHoldsNoExportType(t *testing.T) {
+	t.Parallel()
+	exportPkg := reflect.TypeOf(export.Tokens{}).PkgPath()
+	usageType := reflect.TypeOf(Usage{})
+	for i := 0; i < usageType.NumField(); i++ {
+		field := usageType.Field(i)
+		if name := exportTypeIn(field.Type, exportPkg); name != "" {
+			t.Errorf("Usage.%s holds %s, a type from the metering export", field.Name, name)
+		}
+	}
+}
+
+// exportTypeIn returns the name of the first type in t, or in its slice
+// elements or struct fields, that is declared in exportPkg, or "" if none is.
+func exportTypeIn(t reflect.Type, exportPkg string) string {
+	for t.Kind() == reflect.Slice {
+		t = t.Elem()
+	}
+	if t.PkgPath() == exportPkg {
+		return t.String()
+	}
+	if t.Kind() == reflect.Struct {
+		for i := 0; i < t.NumField(); i++ {
+			if name := exportTypeIn(t.Field(i).Type, exportPkg); name != "" {
+				return name
+			}
+		}
+	}
+	return ""
 }
 
 func TestBuildAcceptsNoCap(t *testing.T) {
