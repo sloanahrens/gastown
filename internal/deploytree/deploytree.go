@@ -7,6 +7,11 @@
 // The package renders manifests as data and makes no cluster call. The kind
 // stack that runs the local town and a later cloud town are meant to render
 // through Render; nothing calls it yet, so wiring them in is a later bead.
+//
+// The rendered NetworkPolicy denies all ingress and egress. The allow rules a
+// running town needs (daemon to trackerd, DNS, egress to the tracker's host)
+// are not rendered here; they are a later bead, and until it lands the town
+// is isolated and cannot run. It has not been run under kind.
 package deploytree
 
 import (
@@ -73,8 +78,11 @@ func Load(data []byte) (Values, error) {
 	return v, nil
 }
 
-// Validate checks the values. The DSN field must be a bare Secret name, so a
-// URL or credentials pasted into it fail here, before they reach a manifest.
+// Validate checks the values. The DSN field must be a Secret name (lower-case
+// letters, digits and dashes), so a URL or a credential pair, which carry
+// characters a name cannot, fail here before they reach a manifest. The check
+// is the shape of a name and cannot tell a name from a secret that happens to
+// have that shape.
 func (v Values) Validate() error {
 	if !idRe.MatchString(v.Workspace) {
 		return fmt.Errorf("%w: workspace %q is not a short lower-case id", ErrBadValues, v.Workspace)
@@ -90,7 +98,12 @@ func (v Values) Validate() error {
 			return fmt.Errorf("%w: images.%s must be repo@sha256:<digest>", ErrBadValues, c)
 		}
 	}
+	keys := make([]string, 0, len(v.Images))
 	for c := range v.Images {
+		keys = append(keys, c)
+	}
+	sort.Strings(keys) // the error names the first unknown key, the same on every run
+	for _, c := range keys {
 		if !contains(Components, c) {
 			return fmt.Errorf("%w: images.%s is not a component", ErrBadValues, c)
 		}

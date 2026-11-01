@@ -93,7 +93,7 @@ func TestDSNIsASecretReferenceOnly(t *testing.T) {
 	}
 	// The rendered town refers to the Secret by name and holds no DSN.
 	for _, r := range mustRender(t, "alpha") {
-		if strings.Contains(string(r.YAML), "://") && r.Kind == "Deployment" {
+		if strings.Contains(string(r.YAML), "://") {
 			t.Errorf("%s %s carries a URL:\n%s", r.Kind, r.Name, r.YAML)
 		}
 	}
@@ -143,5 +143,17 @@ func TestRenderRefusesInvalidValues(t *testing.T) {
 	t.Parallel()
 	if _, err := Render(Values{Workspace: "alpha"}); !errors.Is(err, ErrBadValues) {
 		t.Fatalf("Render of incomplete values returned %v, want ErrBadValues", err)
+	}
+}
+
+func TestUnknownImageErrorNamesTheFirstKeyEveryTime(t *testing.T) {
+	t.Parallel()
+	file := string(valuesFile("alpha")) + "  zeta: registry.local/z@sha256:" + strings.Repeat("c", 64) +
+		"\n  beta: registry.local/b@sha256:" + strings.Repeat("c", 64) + "\n"
+	for i := 0; i < 20; i++ {
+		_, err := Load([]byte(file))
+		if err == nil || !strings.Contains(err.Error(), "images.beta") {
+			t.Fatalf("Load = %v, want the error to name images.beta every time", err)
+		}
 	}
 }
