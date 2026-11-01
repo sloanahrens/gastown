@@ -237,7 +237,7 @@ func monthToDate(recs []spendcap.Record, workspace string, now time.Time) float6
 
 // usage copies the export's per-workspace figures and its seat-hours slice, so
 // a later change to the source's record cannot change a view already returned.
-// The seat hours are never nil, so a month with none serialises as an empty
+// The seat hours are never nil, so a month with none serializes as an empty
 // list, as Actions does.
 func usage(w export.WorkspaceExport) Usage {
 	return Usage{

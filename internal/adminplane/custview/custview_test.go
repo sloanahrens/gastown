@@ -327,7 +327,7 @@ func TestBuildRefusesCapForAnotherWorkspaceWithoutDailyLimit(t *testing.T) {
 	}
 }
 
-func TestUsageSerialisesNoSeatHoursAsEmptyList(t *testing.T) {
+func TestUsageSerializesNoSeatHoursAsEmptyList(t *testing.T) {
 	t.Parallel()
 	rec := record()
 	rec.Usage.SeatHours = nil
