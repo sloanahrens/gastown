@@ -1,0 +1,17 @@
+
+Configuration:
+  auto_compact_enabled = false
+  compact_batch_size = 50
+  compact_parallel_workers = 5
+  compact_tier1_days = 30
+  compact_tier1_dep_levels = 2
+  compact_tier2_commits = 100
+  compact_tier2_days = 90
+  compact_tier2_dep_levels = 5
+  compaction_enabled = false
+  issue_prefix = fx
+
+⚠ Environment variable overrides detected:
+  actor: env BD_ACTOR="bdshim-record" overrides config
+
+Tip: Run 'bd config show' for all effective config with provenance.

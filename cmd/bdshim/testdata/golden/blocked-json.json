@@ -1,0 +1,22 @@
+{
+  "data": [
+    {
+      "id": "fx-1",
+      "title": "fixture bead one",
+      "description": "The fixture's first bead. It is blocked by fx-2, a child of fx-parent, carries a label and a comment, and is the bead most rows name.",
+      "status": "open",
+      "priority": 2,
+      "issue_type": "task",
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-01-01T00:00:00Z",
+      "labels": [
+        "fixture-label"
+      ],
+      "blocked_by_count": 1,
+      "blocked_by": [
+        "fx-2"
+      ]
+    }
+  ],
+  "schema_version": 1
+}

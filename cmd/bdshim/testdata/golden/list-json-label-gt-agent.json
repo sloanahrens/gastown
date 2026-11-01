@@ -1,0 +1,21 @@
+{
+  "data": [
+    {
+      "id": "fx-agent",
+      "title": "fixture agent",
+      "description": "A bead labeled gt:agent, so a label filter on the agent label has an answer.",
+      "status": "open",
+      "priority": 2,
+      "issue_type": "task",
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-01-01T00:00:00Z",
+      "labels": [
+        "gt:agent"
+      ],
+      "dependency_count": 0,
+      "dependent_count": 0,
+      "comment_count": 0
+    }
+  ],
+  "schema_version": 1
+}

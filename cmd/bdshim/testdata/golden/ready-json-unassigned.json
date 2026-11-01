@@ -1,0 +1,47 @@
+{
+  "data": [
+    {
+      "id": "fx-2",
+      "title": "fixture bead two",
+      "description": "The bead fx-1 waits on, so it is ready while fx-1 is blocked.",
+      "status": "open",
+      "priority": 2,
+      "issue_type": "task",
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-01-01T00:00:00Z",
+      "dependency_count": 0,
+      "dependent_count": 1,
+      "comment_count": 0
+    },
+    {
+      "id": "fx-agent",
+      "title": "fixture agent",
+      "description": "A bead labeled gt:agent, so a label filter on the agent label has an answer.",
+      "status": "open",
+      "priority": 2,
+      "issue_type": "task",
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-01-01T00:00:00Z",
+      "labels": [
+        "gt:agent"
+      ],
+      "dependency_count": 0,
+      "dependent_count": 0,
+      "comment_count": 0
+    },
+    {
+      "id": "fx-parent",
+      "title": "fixture parent",
+      "description": "The parent of fx-1, so a children read and a parent filter have an answer.",
+      "status": "open",
+      "priority": 2,
+      "issue_type": "epic",
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-01-01T00:00:00Z",
+      "dependency_count": 0,
+      "dependent_count": 0,
+      "comment_count": 0
+    }
+  ],
+  "schema_version": 1
+}
