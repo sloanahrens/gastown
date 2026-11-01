@@ -19,7 +19,7 @@ import (
 // saved choice. The list is a constant in the page's script and the operator's
 // to edit; this test pins what the bead asked for, and the rest of this file
 // reads the page's own list rather than assuming it.
-var foldDefaultOpen = []string{"birds", "attention", "overseer", "work", "landings"}
+var foldDefaultOpen = []string{"attention", "overseer", "work", "landings"}
 
 // foldIsDefaultOpen reports whether key is one of the sections the page opens.
 func foldIsDefaultOpen(key string) bool {

@@ -409,6 +409,7 @@ h3.ohead .r{margin-left:auto;text-transform:none;letter-spacing:0;white-space:no
 .bhead{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
 .bhead .bname{font-weight:600}
 .bhead a{color:var(--blue);text-decoration:none;font-size:11px}
+.bhead a.bname{color:inherit;font-size:inherit}
 .bhead a:hover{text-decoration:underline}
 .bhead .bage{margin-left:auto;color:var(--dim);white-space:nowrap}
 .brow .bsum{margin:2px 0 0;white-space:pre-wrap;overflow-wrap:anywhere}
@@ -472,7 +473,7 @@ a.hrow:hover{background:#19212b}
 
 <div class="grid">
   <div class="col">
-    <section data-fold="birds"><h2>Birds <span class="r" id="birdsnote"></span></h2><div class="body" id="birds"></div></section>
+    <section data-fold="birds" data-default-collapsed><h2>Birds <span class="r" id="birdsnote"></span></h2><div class="body" id="birds"></div></section>
     <section data-fold="attention"><h2>Attention <span class="chips" id="attentionchips"></span> <span class="r" id="attentionnote"></span></h2><div class="body" id="attention"></div></section>
     <section id="eventssec" data-fold="events" data-default-collapsed><h2>EVENTS <span class="chips" id="eventschips"></span> <span class="r" id="eventsnote"></span></h2><div class="body" id="events"></div></section>
     <section data-fold="overseer"><h2>Overseer <span class="r" id="overseernote"></span></h2><div class="body" id="overseer"></div></section>
@@ -2177,12 +2178,14 @@ function drawDigestSections(box, text, prefixes) {
   }
 }
 
+// OVERSEER_BIRD is the reporter whose own daily report is the day's headline.
+const OVERSEER_BIRD = "overseer";
 // The Birds panel draws the birds' daily reports, one row each: the bird's name
 // and the pages it wrote, the age of the summary it left, the summary itself,
 // and the bird's own ask for the operator as a badge. What a row shows is the
 // sidecar the reader read, so a summary holding markup goes through el() and
-// reads as that text; the page beside it is a link the route serves in a
-// sandbox, opened in a new tab.
+// reads as that text; the name is itself the link to the bird's report, and the
+// "report" and "yesterday" links beside it open the two pages in a new tab.
 //
 // The reader's verdicts are drawn rather than smoothed over: a stale row
 // carries the amber the digest marks an overdue report with, a row in error or
@@ -2193,15 +2196,26 @@ function drawDigestSections(box, text, prefixes) {
 //
 // The rows keep the reader's order within each group, with the stale reporters
 // moved after the fresh ones: a reporter a day behind is still worth reading,
-// but never in place of one that wrote today. The panel is a section of its own
-// and the first one, because the operator opens the page to read the birds
-// (gt-0g6z9).
+// but never in place of one that wrote today. The overseer's row leads them all,
+// stale or not, because its report is the day's headline (gt-gm9lq). The panel
+// is a section of its own and the first one, and it starts closed, so its
+// heading note carries the bird count and the need-you count for the operator
+// who does not open it (gt-0g6z9, gt-gm9lq).
 function drawBirds(box, s) {
   const r = readOf(s, "birds"), note = $("birdsnote");
   paintsRead(box, note, r);
   const all = s.birds || [];
-  const rows = all.filter(b => !b.stale).concat(all.filter(b => b.stale));
-  note.textContent = readCaption(r, [rows.length ? rows.length + (rows.length === 1 ? " bird" : " birds") : null, r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : null]);
+  const rest = all.filter(b => b.bird !== OVERSEER_BIRD);
+  const rows = all.filter(b => b.bird === OVERSEER_BIRD)
+    .concat(rest.filter(b => !b.stale), rest.filter(b => b.stale));
+  // The counts sit in the note, which the closed panel's header shows as its
+  // summary line, so a closed panel still says whether anything waits.
+  const need = all.filter(b => b.needs_operator).length;
+  note.textContent = readCaption(r, [
+    all.length ? all.length + (all.length === 1 ? " bird" : " birds") : null,
+    all.length ? need + " need you" : null,
+    r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : null,
+  ]);
   if (!rows.length) {
     box.append(el("div", r && r.error ? "badc" : "empty", r && r.error ? "the birds read failed" : "no bird has written a daily report yet"));
     return;
@@ -2209,19 +2223,25 @@ function drawBirds(box, s) {
   for (const b of rows) {
     const row = el("div", "brow" + (b.stale ? " warnc" : ""));
     const head = el("div", "bhead");
-    head.append(el("span", "bname", b.bird || "–"));
     // The bird name is the one the reader validated before it built a path,
-    // and the route checks it again before it opens anything: the link is
+    // and the route checks it again before it opens anything: every link is
     // joined from that name and the path is never decoded from free text.
+    const birdName = el(b.has_page ? "a" : "span", "bname", b.bird || "–");
     if (b.has_page) {
-      const page = el("a", "bpage", "page");
+      birdName.href = "/birds/" + b.bird + "/daily.html";
+      birdName.target = "_blank";
+      birdName.rel = "noopener";
+    }
+    head.append(birdName);
+    if (b.has_page) {
+      const page = el("a", "bpage", "report");
       page.href = "/birds/" + b.bird + "/daily.html";
       page.target = "_blank";
       page.rel = "noopener";
       head.append(page);
     }
     if (b.has_prev) {
-      const prev = el("a", "bprev", "previous");
+      const prev = el("a", "bprev", "yesterday");
       prev.href = "/birds/" + b.bird + "/daily.prev.html";
       prev.target = "_blank";
       prev.rel = "noopener";
@@ -2274,11 +2294,12 @@ function drawBirds(box, s) {
   }
 }
 
-// renderBirds draws the Birds section: its own top-level panel, open on a fresh
-// load, so the operator reads the reports the moment the page arrives. A closed
+// renderBirds draws the Birds section: its own top-level panel, closed on a
+// fresh load, so the heading's counts say whether anything waits before the
+// operator opens it, while the fold key keeps it open once they do. A closed
 // section's body is a detached box for the length of a push, and the note is a
 // real element either way, so a panel the operator closed still ages its read
-// on its heading (gt-quuq5, gt-0g6z9).
+// on its heading (gt-quuq5, gt-0g6z9, gt-gm9lq).
 function renderBirds(s) {
   if (pushSkip("birds", s)) return;
   const box = $("birds");
@@ -5430,7 +5451,7 @@ const FOLD_KEY = "gt-fold";
 // every other section starts closed. A pane that opts out with
 // data-default-collapsed starts closed whatever this holds. This list is the
 // operator's to edit.
-const FOLD_DEFAULT_OPEN = ["birds", "attention", "overseer", "work", "landings"];
+const FOLD_DEFAULT_OPEN = ["attention", "overseer", "work", "landings"];
 // FOLD_ALWAYS_CLOSED is the sections that start closed on every load, whatever
 // was saved: the operator opens them for a look, and a reload closes them
 // again. A toggle still works for the rest of the page session (gt-7swd8).
