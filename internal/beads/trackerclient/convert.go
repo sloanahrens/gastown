@@ -83,7 +83,11 @@ func comments(in []api.Comment) []beads.Comment {
 func deps(in []api.IssueDep) []beads.IssueDep {
 	out := make([]beads.IssueDep, len(in))
 	for i, d := range in {
-		out[i] = beads.IssueDep{ID: d.ID, Title: d.Title, Status: d.Status, Priority: d.Priority, Type: d.Type, DependencyType: d.DependencyType, CloseReason: d.CloseReason}
+		out[i] = beads.IssueDep{
+			ID: d.ID, Title: d.Title, Status: d.Status, Priority: d.Priority, Type: d.Type,
+			DependencyType: d.DependencyType, CloseReason: d.CloseReason,
+			CreatedAt: ts(d.CreatedAt), CreatedBy: d.CreatedBy, Metadata: compactJSON(string(d.Metadata)),
+		}
 	}
 	return out
 }

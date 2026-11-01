@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/bdshim/golden"
 	"github.com/steveyegge/gastown/tracker/api"
@@ -90,14 +91,11 @@ var differentialRows = []differentialRow{
 // entry whose verb has gained a handler, and on a golden row whose verb is
 // neither handled nor listed.
 var knownUnhandledVerbs = map[string]bool{
-	"show":     true,
-	"list":     true,
 	"ready":    true,
 	"query":    true,
 	"search":   true,
 	"blocked":  true,
 	"comments": true,
-	"children": true,
 	"count":    true,
 	"stats":    true,
 	"config":   true,
@@ -202,12 +200,18 @@ func readFixture(t *testing.T) ([]fixtureBead, map[string]bool) {
 	return fixture, keep
 }
 
+// fixtureTime is when the recorder's fixture database holds every bead: one
+// import, one timestamp. Seeding at a fixed time reproduces both the golden's
+// times and bd's list order, which breaks equal-priority ties by id; a real
+// clock would stamp each bead separately and order them by seed time instead.
+var fixtureTime = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
 // seedFixture returns a tracker store holding the fixture's beads, with their
 // dependencies, comments and closed state.
 func seedFixture(t *testing.T, fixture []fixtureBead) *storetest.Fake {
 	t.Helper()
 	ctx := api.WithIdentity(context.Background(), api.Identity{Actor: fixtureActor, Scope: api.ScopeAdmin})
-	st := storetest.NewFake()
+	st := storetest.NewFakeWithClock(func() time.Time { return fixtureTime })
 	for _, bead := range fixture {
 		_, err := st.CreateIssue(ctx, api.CreateParams{
 			ID: bead.ID, Title: bead.Title, Description: bead.Description,
@@ -243,17 +247,38 @@ func seedFixture(t *testing.T, fixture []fixtureBead) *storetest.Fake {
 // seeded afresh, so a mutating row cannot change another row's answer.
 func runFixtureRow(t *testing.T, town string, fixture []fixtureBead, argv []string) ([]byte, int, error) {
 	t.Helper()
+	env, stdout, _ := fixtureEnv(t, town, fixture, argv)
+	// A row the router sends anywhere but the tracker rig cannot be compared
+	// with a handler's answer, so it fails as a fixture the test cannot answer
+	// rather than being diffed against bd.real.
+	d, err := Decide(env.Getenv, env.Getwd, argv)
+	if err != nil {
+		return nil, 0, fmt.Errorf("routing %v: %w", argv, err)
+	}
+	if !d.Tracker {
+		return nil, 0, fmt.Errorf("the fixture town routes %v to bd.real, not to its tracker rig", argv)
+	}
+	code := Main(env)
+	return stdout.Bytes(), code, nil
+}
+
+// fixtureEnv is the environment one row reaches the shim's handlers with: a
+// town of the fixture's, a tracker server holding a fresh copy of the fixture,
+// and the token a seat carries. It also hands back the streams the answer and
+// the shim's own messages are captured on.
+func fixtureEnv(t *testing.T, town string, fixture []fixtureBead, argv []string) (Env, *bytes.Buffer, *bytes.Buffer) {
+	t.Helper()
 	ctx := context.Background()
 	st := seedFixture(t, fixture)
 	token, err := st.IssueTokenScoped(ctx, fixtureActor, api.ScopeAdmin, nil)
 	if err != nil {
-		return nil, 0, fmt.Errorf("issuing the fixture store's token: %w", err)
+		t.Fatalf("issuing the fixture store's token: %v", err)
 	}
 	//testpolicy:allow no-network — a handler builds its tracker client from the environment (backend.FromEnv), so there is no HTTP seam to script: the row is only answered if the handler takes its own request path to this server, which is in-process over the in-memory store on loopback and never leaves the test
 	ts := httptest.NewServer(server.New(server.Config{
 		Store: st, Auth: st, Health: fixtureHealth{}, SchemaLevel: api.SchemaLevel,
 	}).Handler())
-	defer ts.Close()
+	t.Cleanup(ts.Close)
 
 	getenv := func(name string) string {
 		switch name {
@@ -279,18 +304,7 @@ func runFixtureRow(t *testing.T, town string, fixture []fixtureBead, argv []stri
 		Stdout:   stdout,
 		Stderr:   stderr,
 	}
-	// A row the router sends anywhere but the tracker rig cannot be compared
-	// with a handler's answer, so it fails as a fixture the test cannot answer
-	// rather than being diffed against bd.real.
-	d, err := Decide(getenv, env.Getwd, argv)
-	if err != nil {
-		return nil, 0, fmt.Errorf("routing %v: %w", argv, err)
-	}
-	if !d.Tracker {
-		return nil, 0, fmt.Errorf("the fixture town routes %v to bd.real, not to its tracker rig", argv)
-	}
-	code := Main(env)
-	return stdout.Bytes(), code, nil
+	return env, stdout, stderr
 }
 
 // runInShim is a run that answers argv through Main against town, with the

@@ -9,10 +9,13 @@ import (
 	"syscall"
 )
 
-// handlers is the tracker verb registry. This skeleton ships none, so every
-// tracker verb is refused rather than falling back to bd.real; X3-X6 of
-// gt-p85pw fill it from this package.
-var handlers = map[string]Handler{}
+// handlers is the tracker verb registry. A verb absent here is refused rather
+// than falling back to bd.real; X3-X6 of gt-p85pw fill it from this package.
+var handlers = map[string]Handler{
+	"show":     showHandler,
+	"list":     listHandler,
+	"children": childrenHandler,
+}
 
 // OsMain is the production entry: this process's argv, environment and working
 // directory, and bd.real beside the running binary.

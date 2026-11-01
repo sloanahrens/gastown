@@ -3,9 +3,11 @@
 // get, the claim, release and transfer guards, the plain close those guards
 // refuse, the creates a Batch applies, the comments and links an export
 // reads, the counts a stats read reports, and the tokens an admin issues and
-// revokes. GetIssues also fills Dependents, as the real store does. Every
-// other method returns store.ErrUnimplemented, so a unit test that reaches
-// past them fails loudly rather than reading a store that only looks modeled.
+// revokes. GetIssues fills Dependencies and Dependents, as the real store
+// does; ListIssues, ChildrenOf and Comments answer the reads the bd shim's
+// handlers make (gt-p85pw.94). Every other method returns
+// store.ErrUnimplemented, so a unit test that reaches past them fails loudly
+// rather than reading a store that only looks modeled.
 package storetest
 
 import (
@@ -112,6 +114,10 @@ func (f *Fake) createLocked(p api.CreateParams) (api.Issue, error) {
 	return is, nil
 }
 
+// GetIssues returns the issues that exist among ids, with their links. Every
+// caller sees Dependencies filled, as it does on Postgres: a named read
+// answers what the issue depends on, and the contract case "a named read
+// carries each link's own record" holds both stores to it.
 func (f *Fake) GetIssues(_ context.Context, ids []string) (map[string]api.Issue, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -124,8 +130,52 @@ func (f *Fake) GetIssues(_ context.Context, ids []string) (map[string]api.Issue,
 			out[id] = is
 		}
 	}
+	f.fillDependenciesLocked(out)
 	f.fillDependentsLocked(out)
 	return out, nil
+}
+
+// fillDependenciesLocked sets Dependencies on the issues in out from the
+// links, in the order Postgres lists them (link creation, then the target's
+// id). Targets that are not issues here (external references) are left out,
+// as the real store does. f.mu is held.
+func (f *Fake) fillDependenciesLocked(out map[string]api.Issue) {
+	type link struct {
+		dep api.IssueDep
+		at  time.Time
+	}
+	byOwner := map[string][]link{}
+	for _, l := range f.links {
+		target, ok := f.issues[l.DependsOn]
+		if !ok {
+			continue
+		}
+		byOwner[l.IssueID] = append(byOwner[l.IssueID], link{
+			dep: api.IssueDep{
+				ID: target.ID, Title: target.Title, Status: target.Status, Priority: target.Priority,
+				Type: target.Type, DependencyType: l.Type, CloseReason: target.CloseReason,
+				CreatedAt: l.CreatedAt, CreatedBy: l.CreatedBy, Metadata: l.Metadata,
+			},
+			at: l.CreatedAt,
+		})
+	}
+	for owner, links := range byOwner {
+		is, ok := out[owner]
+		if !ok {
+			continue
+		}
+		slices.SortStableFunc(links, func(a, b link) int {
+			if c := a.at.Compare(b.at); c != 0 {
+				return c
+			}
+			return strings.Compare(a.dep.ID, b.dep.ID)
+		})
+		is.Dependencies = make([]api.IssueDep, 0, len(links))
+		for _, l := range links {
+			is.Dependencies = append(is.Dependencies, l.dep)
+		}
+		out[owner] = is
+	}
 }
 
 // fillDependentsLocked sets Dependents on the issues in out from the links, in
@@ -203,9 +253,6 @@ func unimplemented(method string) error {
 	return fmt.Errorf("%w: Fake.%s", store.ErrUnimplemented, method)
 }
 
-func (*Fake) ListIssues(context.Context, api.ListFilter) (api.IssuePage, error) {
-	return api.IssuePage{}, unimplemented("ListIssues")
-}
 func (*Fake) CountIssues(context.Context, api.ListFilter) (int, error) {
 	return 0, unimplemented("CountIssues")
 }
@@ -328,13 +375,10 @@ func (f *Fake) AddComment(_ context.Context, id, author, text string) error {
 	})
 	return nil
 }
-func (*Fake) Comments(context.Context, string) ([]api.Comment, error) {
-	return nil, unimplemented("Comments")
-}
 
-// AddDependency records a link from issue to dependsOn. Export and the
-// Dependents that GetIssues fills read the links; Dependencies stays
-// unimplemented.
+// AddDependency records a link from issue to dependsOn. Export, the Dependents
+// that GetIssues fills, and the dependency reads GetIssues and ListIssues answer
+// all read the links.
 func (f *Fake) AddDependency(ctx context.Context, issue, dependsOn, depType string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -344,6 +388,15 @@ func (f *Fake) AddDependency(ctx context.Context, issue, dependsOn, depType stri
 	f.links = append(f.links, api.ExportDependency{
 		IssueID: issue, DependsOn: dependsOn, Type: depType, CreatedBy: api.ActorFrom(ctx), CreatedAt: f.now(),
 	})
+	// The real store keeps a child's parent on the issue row as well as in the
+	// link, and ChildrenOf and a list's parent field read it.
+	if depType == "parent-child" {
+		is := f.issues[issue]
+		if is.Parent == "" {
+			is.Parent = dependsOn
+			f.issues[issue] = is
+		}
+	}
 	return nil
 }
 func (*Fake) RemoveDependency(context.Context, string, string) error {
@@ -357,9 +410,6 @@ func (*Fake) Ready(context.Context, api.ReadyFilter) (api.IssuePage, error) {
 }
 func (*Fake) Blocked(context.Context, api.ReadyFilter) (api.IssuePage, error) {
 	return api.IssuePage{}, unimplemented("Blocked")
-}
-func (*Fake) ChildrenOf(context.Context, []string) (map[string][]api.Issue, error) {
-	return nil, unimplemented("ChildrenOf")
 }
 
 // Batch applies the creates the fake models in request order, and restores the

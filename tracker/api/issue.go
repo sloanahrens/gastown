@@ -91,6 +91,14 @@ type IssueDep struct {
 	Type           string `json:"issue_type"`
 	DependencyType string `json:"dependency_type"`
 	CloseReason    string `json:"close_reason,omitempty"`
+
+	// CreatedAt, CreatedBy and Metadata are the link's own record, not the
+	// target's: when the relation was written, by whom, and its stored JSON.
+	// A dependency read fills them; a read that only answers what an issue
+	// depends on leaves them zero, so they are omitted from the wire.
+	CreatedAt time.Time       `json:"created_at,omitzero"`
+	CreatedBy string          `json:"created_by,omitempty"`
+	Metadata  json.RawMessage `json:"metadata,omitempty"`
 }
 
 // Event is one row of the append-only events feed.

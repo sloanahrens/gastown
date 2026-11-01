@@ -20,11 +20,6 @@ const (
 	maxPageSize     = 1000
 )
 
-// infraTypes are the issue types `bd list` leaves out unless asked.
-var infraTypes = []string{"agent", "role", "message"}
-
-func isInfraType(t string) bool { return slices.Contains(infraTypes, t) }
-
 func pageSize(limit int) int {
 	switch {
 	case limit <= 0:
@@ -82,7 +77,7 @@ func buildListWhere(f api.ListFilter, cur *listCursor) (string, []any, error) {
 
 	where = append(where, "issues.ephemeral = "+arg(f.Ephemeral))
 	if !f.IncludeInfra && f.IssueType == "" {
-		where = append(where, "issues.issue_type <> ALL("+arg(infraTypes)+")")
+		where = append(where, "issues.issue_type <> ALL("+arg(api.InfraTypes)+")")
 	}
 	switch {
 	case len(f.Statuses) == 0:

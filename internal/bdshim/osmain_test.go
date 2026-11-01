@@ -106,12 +106,14 @@ func TestProcessWiringRoutesLikeTheShim(t *testing.T) {
 	town := newTown(t, routeTown, routeAlpha, routeBeta)
 	alpha := filepath.Join(town, "alpha", "mayor", "rig")
 	beta := filepath.Join(town, "beta", "mayor", "rig")
-	const refusalBeta = "bdshim: verb list is not implemented for tracker rig bt-\n"
+	// list is answered by a tracker handler, which refuses below because this
+	// town has no tracker endpoint.
+	const refusalBeta = "bdshim: backend: rig bt- is on the tracker but TRACKER_URL is not set\n"
 
 	t.Run("a tracker cwd refuses a verb without running bd.real", func(t *testing.T) {
 		t.Parallel()
 		proc := &fakeProcess{}
-		got, stderr, _ := processRun(t, beta, "", proc, "list")
+		got, stderr, _ := processRun(t, beta, "", proc, "list", "--json")
 
 		if got != 1 {
 			t.Errorf("Main = %d, want 1", got)
@@ -132,7 +134,7 @@ func TestProcessWiringRoutesLikeTheShim(t *testing.T) {
 		if got != 1 {
 			t.Errorf("Main = %d, want 1", got)
 		}
-		if want := "bdshim: verb show is not implemented for tracker rig bt-\n"; stderr.String() != want {
+		if want := "bdshim: backend: rig bt- is on the tracker but TRACKER_URL is not set\n"; stderr.String() != want {
 			t.Errorf("stderr = %q, want %q", stderr.String(), want)
 		}
 		if proc.ran != nil {
@@ -160,7 +162,7 @@ func TestProcessWiringRoutesLikeTheShim(t *testing.T) {
 	t.Run("a relative BEADS_DIR routes from the cwd to the tracker rig", func(t *testing.T) {
 		t.Parallel()
 		proc := &fakeProcess{}
-		got, stderr, _ := processRun(t, alpha, "../../../beta/mayor/rig/.beads", proc, "list")
+		got, stderr, _ := processRun(t, alpha, "../../../beta/mayor/rig/.beads", proc, "list", "--json")
 
 		if got != 1 {
 			t.Errorf("Main = %d, want 1", got)

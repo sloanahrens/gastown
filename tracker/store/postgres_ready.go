@@ -78,7 +78,7 @@ func scopeCTE(rootArg string) string {
 // as bd's does: the infrastructure types, and the kinds of bead that are not
 // work to pick up (merge requests, gates, molecule roots, rig identity beads).
 // Inside one molecule only the infrastructure types are left out.
-var readyExcludedTypes = append(slices.Clone(infraTypes), "merge-request", "gate", "molecule", "rig")
+var readyExcludedTypes = append(slices.Clone(api.InfraTypes), "merge-request", "gate", "molecule", "rig")
 
 // buildReadyQuery builds the ready query (blocked=false) or the blocked one.
 // Ready is open (or deferred and woken), unblocked, not ephemeral (unless scoped to a
@@ -111,7 +111,7 @@ func buildReadyQuery(f api.ReadyFilter, cur *listCursor, limit int, blocked bool
 	if f.Molecule == "" {
 		where = append(where, "issues.issue_type <> ALL("+arg(readyExcludedTypes)+")")
 	} else {
-		where = append(where, "issues.issue_type <> ALL("+arg(infraTypes)+")")
+		where = append(where, "issues.issue_type <> ALL("+arg(api.InfraTypes)+")")
 	}
 	if f.Rig != "" {
 		where = append(where, "issues.rig = "+arg(f.Rig))

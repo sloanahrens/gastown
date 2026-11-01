@@ -978,20 +978,52 @@ func TestMainRefusesATrackerVerb(t *testing.T) {
 		cwd  string
 		want string
 	}{
-		{"an id names the tracker rig", []string{"show", "bt-abc"}, town, "bdshim: verb show is not implemented for tracker rig bt-\n"},
-		{"an id after a boolean flag names the tracker rig", []string{"show", "--json", "bt-abc"}, town, "bdshim: verb show is not implemented for tracker rig bt-\n"},
 		{"a verb with no id takes its cwd's rig", []string{"create", "--title", "x"}, filepath.Join(town, "beta", "mayor", "rig"), "bdshim: verb create is not implemented for tracker rig bt-\n"},
+		{"a verb with an id names the id's rig", []string{"ready", "--json", "bt-abc"}, town, "bdshim: verb ready is not implemented for tracker rig bt-\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			proc := &fakeProcess{}
-			e, stderr, _ := shimEnv(t, tc.cwd, "", proc, nil, tc.args...)
+			e, stderr, _ := shimEnv(t, tc.cwd, "", proc, handlers, tc.args...)
 			if got := Main(e); got != 1 {
 				t.Errorf("Main = %d, want 1", got)
 			}
 			if stderr.String() != tc.want {
 				t.Errorf("stderr = %q, want %q", stderr.String(), tc.want)
+			}
+			if proc.ran != nil {
+				t.Errorf("Main ran %v, want no fallback to bd.real", proc.ran)
+			}
+		})
+	}
+}
+
+// TestMainRefusesATrackerRigItCannotOpen: a verb a handler answers still refuses
+// when the rig's store cannot be opened, and bd.real is never run in its place.
+func TestMainRefusesATrackerRigItCannotOpen(t *testing.T) {
+	t.Parallel()
+	town := newTown(t, routeTown, routeAlpha, routeBeta)
+	const want = "bdshim: backend: rig bt- is on the tracker but TRACKER_URL is not set\n"
+
+	cases := []struct {
+		name string
+		args []string
+		cwd  string
+	}{
+		{"an id after a boolean flag names the tracker rig", []string{"show", "--json", "bt-abc"}, town},
+		{"a verb with no id takes its cwd's rig", []string{"list", "--json"}, filepath.Join(town, "beta", "mayor", "rig")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			proc := &fakeProcess{}
+			e, stderr, _ := shimEnv(t, tc.cwd, "", proc, handlers, tc.args...)
+			if got := Main(e); got != 1 {
+				t.Errorf("Main = %d, want 1", got)
+			}
+			if stderr.String() != want {
+				t.Errorf("stderr = %q, want %q", stderr.String(), want)
 			}
 			if proc.ran != nil {
 				t.Errorf("Main ran %v, want no fallback to bd.real", proc.ran)
