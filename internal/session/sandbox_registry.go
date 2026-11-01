@@ -103,19 +103,43 @@ func writeSeatLine(f *os.File, line []byte) error {
 // sandboxRecordWorkspace is the workspace id a record for rig carries. The
 // town's workspace map is keyed by rig prefix, not rig name, so the rig's
 // prefix is resolved from the town registry first; a registry this town cannot
-// read is an error, never the "gt" fallback. A map that cannot be read is an
-// error too, never an empty or guessed id (plan rows M1 and M5).
+// read, or one that does not name the rig with a prefix, is an error, never the
+// "gt" fallback. A map that cannot be read is an error too, never an empty or
+// guessed id (plan rows M1 and M5).
 func sandboxRecordWorkspace(townRoot, rig string) (string, error) {
-	prefix := config.GetRigPrefix(townRoot, rig)
-	if prefix == "" {
-		return "", fmt.Errorf("sandbox record: rig %q has no readable beads prefix in %s",
-			rig, filepath.Join(townRoot, "mayor", "rigs.json"))
+	prefix, err := sandboxRigPrefix(townRoot, rig)
+	if err != nil {
+		return "", err
 	}
 	m, err := workspaceid.Load(townRoot)
 	if err != nil {
 		return "", err
 	}
 	return m.For(prefix)
+}
+
+// sandboxRigPrefix is the beads prefix the town's registry gives rig. Only a
+// registry file that is absent takes config.GetRigPrefix's default: a registry
+// that exists must name the rig, because "gt" for a missing entry guesses the
+// workspace of another rig.
+func sandboxRigPrefix(townRoot, rig string) (string, error) {
+	path := filepath.Join(townRoot, "mayor", "rigs.json")
+	cfg, err := config.LoadRigsConfig(path)
+	if errors.Is(err, config.ErrNotFound) {
+		return config.GetRigPrefix(townRoot, rig), nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("sandbox record: rig %q has no readable beads prefix in %s: %w", rig, path, err)
+	}
+	entry, ok := cfg.Rigs[rig]
+	if !ok || entry.BeadsConfig == nil {
+		return "", fmt.Errorf("sandbox record: rig %q has no beads prefix in %s", rig, path)
+	}
+	prefix := strings.TrimSuffix(entry.BeadsConfig.Prefix, "-")
+	if prefix == "" {
+		return "", fmt.Errorf("sandbox record: rig %q has no beads prefix in %s", rig, path)
+	}
+	return prefix, nil
 }
 
 // WriteSandboxRecord records r for its session.
