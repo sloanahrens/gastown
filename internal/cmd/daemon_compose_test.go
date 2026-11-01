@@ -452,3 +452,33 @@ func TestDaemonComposeCommandIsWired(t *testing.T) {
 		t.Errorf("compose is not registered under gt daemon (%v)", err)
 	}
 }
+
+// A blank --om-token-file is refused when the command parses it, so the
+// Changed wiring is what marks the flag as given. Driving the flag, not the
+// flags struct, is what proves that wiring is live.
+func TestDaemonComposeBlankTokenFlagIsRefusedThroughFlag(t *testing.T) {
+	t.Parallel()
+	for _, value := range []string{"", "  "} {
+		t.Run(fmt.Sprintf("value %q", value), func(t *testing.T) {
+			t.Parallel()
+			r := newComposeRig(t)
+			old := []byte("old render")
+			r.disk[r.composePath()] = old
+			c := newDaemonComposeCmd(func(_ io.Writer, f daemonComposeFlags) error {
+				return runDaemonCompose(f, r.deps)
+			})
+			c.SetArgs([]string{"write", "--image", daemonimage.ImageTag(composeTestRev), "--" + config.OMTokenFileFlag, value})
+			c.SilenceUsage, c.SilenceErrors = true, true
+			err := c.Execute()
+			if err == nil || !strings.Contains(err.Error(), "was given blank") {
+				t.Fatalf("error = %v, want it to contain %q", err, "was given blank")
+			}
+			if len(r.wrote) != 0 {
+				t.Errorf("a refusal wrote %v", r.wrote)
+			}
+			if got := r.disk[r.composePath()]; !bytes.Equal(got, old) {
+				t.Errorf("compose file = %q, want the old render %q kept", got, old)
+			}
+		})
+	}
+}
