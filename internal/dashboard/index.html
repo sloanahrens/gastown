@@ -16,6 +16,12 @@ header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:14px 0;bo
 h1{font-size:15px;margin:0;letter-spacing:.08em;text-transform:uppercase;color:var(--teal)}
 .pill{padding:3px 10px;border-radius:999px;font-weight:700;font-size:12px;border:1px solid currentColor}
 .pill.green{color:var(--green)}.pill.degraded{color:var(--amber)}.pill.red{color:var(--red)}.pill.unknown{color:var(--dim)}
+/* The header's dispatch-hold chip: one compact mark beside the verdict pill.
+   Amber while the operator's hold file is present, quiet while the town is
+   dispatching, and amber "hold?" when the file could not be read (gt-zzkhh). */
+#hold{padding:2px 9px;border-radius:999px;font-size:12px;border:1px solid currentColor;white-space:nowrap}
+#hold.warn{color:var(--amber)}
+#hold.quiet{color:var(--dim)}
 #healthline{color:var(--dim);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #healthmark{white-space:nowrap}
 #strip{color:var(--dim);min-width:0}
@@ -422,6 +428,7 @@ a.hrow:hover{background:#19212b}
 <header>
   <h1>Gas Town</h1>
   <span id="verdict" class="pill unknown">UNKNOWN</span>
+  <span id="hold" class="quiet" hidden></span>
   <span id="healthline">waiting for the town…</span>
   <span id="healthmark" class="pill red" hidden></span>
   <span id="strip"></span>
@@ -598,6 +605,36 @@ function renderHealthMark(s) {
   box.hidden = !m;
   box.className = "pill " + (m && m.state === "red" ? "red" : "degraded");
   box.textContent = m ? m.text : "";
+}
+
+// renderHold draws the header's dispatch-hold chip: "hold" in amber while the
+// operator's hold file is present, a quiet "dispatch on" when it is not, and
+// "hold?" when the file could not be read. Only a reading that says the file
+// is absent draws "dispatch on": a failed read, and equally a reading that
+// says neither present nor absent, tells the operator nothing, and "dispatch
+// on" would claim a hold is off that nothing has ruled out (gt-ifijm,
+// gt-zzkhh). The note and the age sit in the title, where a long note costs the
+// header no width. A reader that has not reported yet draws "dispatch ?"
+// rather than no chip, since an absent chip would read as a town that is
+// dispatching.
+function renderHold(s) {
+  const box = $("hold"), h = (s && s.hold) || null;
+  box.hidden = false;
+  if (!h) { box.className = "quiet"; box.textContent = "dispatch ?"; box.title = "the hold file has not been read yet"; return; }
+  if (h.error) { box.className = "warn"; box.textContent = "hold?"; box.title = "the hold file could not be read: " + h.error; return; }
+  if (h.present === true) {
+    const set = h.age_seconds == null ? "" : "set " + fmtDur(h.age_seconds) + " ago";
+    box.className = "warn"; box.textContent = "hold";
+    box.title = [set, h.note].filter(Boolean).join(": ");
+    return;
+  }
+  if (h.present === false) {
+    box.className = "quiet"; box.textContent = "dispatch on";
+    box.title = "no operator dispatch hold: automatic dispatch may run";
+    return;
+  }
+  box.className = "warn"; box.textContent = "hold?";
+  box.title = "the hold file's state is unknown: the reader reported neither a hold nor none";
 }
 
 // renderHealth shows the verdict and, when it is not green, the worst cause
@@ -4868,7 +4905,7 @@ function drawQueueList(box, s) {
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderAttention(state); renderOverseer(state); renderCost(state); renderRigs(state); renderWork(state); renderTrend(state); renderNews(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderJev(state); renderMango(state); renderOM(state); renderEvents(state); paintFolds(state); }
+function renderAll() { if (!state) return; renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderHold(state); renderAttention(state); renderOverseer(state); renderCost(state); renderRigs(state); renderWork(state); renderTrend(state); renderNews(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderJev(state); renderMango(state); renderOM(state); renderEvents(state); paintFolds(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 // The feed's class chips: every class but "plain" is on until the reader turns
@@ -5221,7 +5258,7 @@ setInterval(() => {
   connect();
 }, WATCHDOG_MS);
 // Ages and elapsed times drift between pushes; redraw the cheap parts locally.
-setInterval(() => { if (state) { renderStrip(state); renderWork(state); renderTierSweep(state); renderForgejo(state); renderNews(state); } }, 15000);
+setInterval(() => { if (state) { renderStrip(state); renderWork(state); renderTierSweep(state); renderForgejo(state); renderNews(state); renderHold(state); } }, 15000);
 </script>
 </body>
 </html>

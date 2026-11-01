@@ -206,6 +206,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.Models != nil {
 		start(h.cfg.ModelsEvery, h.pollModels)
 	}
+	if h.cfg.Hold != nil {
+		start(h.cfg.HoldEvery, h.pollHold)
+	}
 	if h.cfg.Queue != nil {
 		start(h.cfg.QueueEvery, h.pollQueue)
 	}
@@ -717,6 +720,20 @@ func (h *Hub) pollOM() {
 	}
 	h.state.OM = om
 	h.readOKLocked(SourceOM, h.cfg.OMEvery)
+	h.publishLocked()
+}
+
+// pollHold reads the operator's dispatch hold file for the header's chip. A
+// nil read is a reader that has nothing to report and leaves the last reading
+// standing, the way every other poller does.
+func (h *Hub) pollHold() {
+	hd := h.cfg.Hold()
+	if hd == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.state.Hold = hd
 	h.publishLocked()
 }
 

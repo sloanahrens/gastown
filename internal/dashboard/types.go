@@ -752,6 +752,9 @@ type State struct {
 	// Models is the header strip: the polecat model, the pool's seats against
 	// its cap, and the reviewer's model. It is nil until the reader reports.
 	Models *Models `json:"models,omitempty"`
+	// Hold is the operator's dispatch hold file at the town root, which the
+	// header's chip draws. It is nil until the reader first reports.
+	Hold *Hold `json:"hold,omitempty"`
 	// Forgejo is the viewer's recent-activity feed, oldest first. It is nil for
 	// a town with no viewer token, and until the reader first reports.
 	Forgejo  *ForgejoFeed `json:"forgejo,omitempty"`
@@ -863,6 +866,9 @@ type Config struct {
 	LandingRisk func() (attention.LandingRisks, error)
 	// Models reads the header strip's models from the configs the town keeps.
 	Models func() *Models
+	// Hold reads the operator's dispatch hold file at the town root, for the
+	// header's chip.
+	Hold func() *Hold
 	// SeatRoster reads the occupancy the spec dispatcher counts, for the
 	// strip's seat counts. Nil leaves them unread.
 	SeatRoster func() SeatRoster
@@ -907,6 +913,7 @@ type Config struct {
 	DispatchEvery     time.Duration
 	AttentionEvery    time.Duration
 	ModelsEvery       time.Duration
+	HoldEvery         time.Duration
 	QueueEvery        time.Duration
 	TrendEvery        time.Duration
 
@@ -980,6 +987,10 @@ func (c *Config) defaults() {
 	// them on the same minute the other slow readers use: a mode switched in
 	// settings shows within one poll, and a poll is a page's worth of slack.
 	def(&c.ModelsEvery, 60*time.Second)
+	// The hold file is written by hand, so it moves on the operator's clock and
+	// a minute is a page's worth of slack: a page that opens wakes the reader,
+	// and the chip draws the file as it stood within the same poll.
+	def(&c.HoldEvery, 60*time.Second)
 	def(&c.QueueEvery, 60*time.Second)
 	def(&c.TrendEvery, 60*time.Second)
 	if c.RingSize <= 0 {
