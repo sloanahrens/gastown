@@ -60,6 +60,9 @@ type SeedCmd struct {
 	Dir string
 	// Argv is the command and its arguments.
 	Argv []string
+	// Env is set in the child's environment, which otherwise inherits the container's. The clone
+	// token travels here so it never reaches an argument.
+	Env []string
 	// UID and GID are the user the child runs as; a negative UID runs it as the seed Job's own
 	// user, which is the root the Job's pod security context gives it.
 	UID int
@@ -197,7 +200,10 @@ func markerHoldsPins(files SeedFiles, root string, pins []cachevol.Pin) (bool, e
 // claim is the mounted cache claim, whose marker says what the claim was seeded from: when it
 // already holds these pins, a rerun clones nothing, because the seed pass will do nothing either
 // (gt-posdj). An absent or different marker still clones every pin.
-func CloneSeed(dest, claim string, pins []cachevol.Pin, files SeedFiles, run SeedRunner, logf func(string, ...any)) error {
+//
+// token authenticates the clones when Forgejo does not serve them anonymously: it reaches git in
+// the child's environment only, and a child's output is scrubbed of it before it can reach an error.
+func CloneSeed(dest, claim string, pins []cachevol.Pin, token string, files SeedFiles, run SeedRunner, logf func(string, ...any)) error {
 	if len(pins) == 0 {
 		return errors.New("the seed clone names no pin, so it would check nothing out")
 	}
@@ -222,6 +228,7 @@ func CloneSeed(dest, claim string, pins []cachevol.Pin, files SeedFiles, run See
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return fmt.Errorf("creating %s: %w", dest, err)
 	}
+	env := cloneTokenEnv(token)
 	for _, pin := range pins {
 		dir := path.Join(dest, pin.Rig)
 		logf("seed: cloning %s at %s", pin.Rig, pin.Commit)
@@ -231,13 +238,40 @@ func CloneSeed(dest, claim string, pins []cachevol.Pin, files SeedFiles, run See
 			{"git", "clone", "--no-checkout", "--quiet", pin.URL, dir},
 			{"git", "-C", dir, "checkout", "--quiet", "--detach", pin.Commit},
 		} {
-			out, err := run(SeedCmd{Argv: argv, UID: -1, GID: -1})
+			out, err := run(SeedCmd{Argv: argv, Env: env, UID: -1, GID: -1})
 			if err != nil {
-				return fmt.Errorf("the seed clone of %s at %s: %w: %s", pin.Rig, pin.Commit, err, scrubURL(reason(out), pin.URL))
+				return fmt.Errorf("the seed clone of %s at %s: %w: %s", pin.Rig, pin.Commit, err, scrubToken(scrubURL(reason(out), pin.URL), token))
 			}
 		}
 	}
 	return nil
+}
+
+// cloneTokenEnv answers the environment that hands git a token: GIT_CONFIG_* is git's mechanism for
+// a config value set for one process, so the Authorization header never appears in an argument.
+func cloneTokenEnv(token string) []string {
+	if token == "" {
+		return nil
+	}
+	return []string{
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=http.extraHeader",
+		"GIT_CONFIG_VALUE_0=Authorization: token " + token,
+	}
+}
+
+// readCloneToken reads the token file the seed Job mounted. The error names the file and the read's
+// reason, never its contents, so a Secret cannot reach a log through a failure.
+func readCloneToken(p string) (string, error) {
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return "", fmt.Errorf("reading the clone token file %s: %w", p, err)
+	}
+	token := strings.TrimSpace(string(data))
+	if token == "" {
+		return "", fmt.Errorf("the clone token file %s is empty: name no --token-file to clone anonymously", p)
+	}
+	return token, nil
 }
 
 // reason is a failed child's last output line, or that it printed none: a failure whose output is
@@ -258,6 +292,14 @@ func scrubURL(out, raw string) string {
 	return strings.ReplaceAll(out, raw, "<clone url>")
 }
 
+// scrubToken removes a clone token from a child's output, for git that reports the config it used.
+func scrubToken(out, token string) string {
+	if token == "" {
+		return out
+	}
+	return strings.ReplaceAll(out, token, "<clone token>")
+}
+
 // execSeedRun answers SeedRunner on this container: the child inherits the container's environment,
 // which carries GOCACHE and GOMODCACHE, and runs as the uid SeedCmd names.
 func execSeedRun(c SeedCmd) (string, error) {
@@ -272,6 +314,9 @@ func runSeedChild(spawn func(name string, arg ...string) *exec.Cmd, c SeedCmd) (
 	}
 	cmd := spawn(c.Argv[0], c.Argv[1:]...)
 	cmd.Dir = c.Dir
+	if len(c.Env) > 0 {
+		cmd.Env = append(cmd.Environ(), c.Env...)
+	}
 	if c.UID >= 0 {
 		seedAs(cmd, c.UID, c.GID)
 	}

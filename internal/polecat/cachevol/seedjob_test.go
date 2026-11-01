@@ -2,6 +2,8 @@ package cachevol
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -204,6 +206,7 @@ func TestBuildSeedJobRefusesWhatItCannotRender(t *testing.T) {
 		{name: "a clone URL with no host", change: func(in *SeedJobInput) { in.Pins[0].URL = "http:///town/gastown.git" }, wantErr: "host"},
 		{name: "a scp-style clone URL", change: func(in *SeedJobInput) { in.Pins[0].URL = "git@forgejo:town/gastown.git" }, wantErr: "http"},
 		{name: "a clone URL with userinfo", change: func(in *SeedJobInput) { in.Pins[0].URL = "https://bot:s3cret@forgejo:3000/town/gastown.git" }, wantErr: "userinfo"},
+		{name: "a clone token Secret that is not a DNS-1123 label", change: func(in *SeedJobInput) { in.CloneTokenSecret = "Clone_Token" }, wantErr: "clone token Secret"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -221,6 +224,100 @@ func TestBuildSeedJobRefusesWhatItCannotRender(t *testing.T) {
 				t.Errorf("error quotes the URL's password: %q", err)
 			}
 		})
+	}
+}
+
+// TestBuildSeedJobMountsTokenOnlyInCloneContainer pins the token Secret's reach: one owner-readable
+// file mounted in the clone init container, whose helper is told the file, and never in the seed
+// container or the claim.
+func TestBuildSeedJobMountsTokenOnlyInCloneContainer(t *testing.T) {
+	t.Parallel()
+	in := seedInput()
+	in.CloneTokenSecret = "gt-clone-token"
+	job, err := BuildSeedJob(in)
+	if err != nil {
+		t.Fatalf("BuildSeedJob: %v", err)
+	}
+	var secret *SecretVolumeSource
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		if v.Name == "seed-token" {
+			secret = v.Secret
+		}
+	}
+	if secret == nil || secret.SecretName != "gt-clone-token" {
+		t.Fatalf("seed-token volume = %+v, want the gt-clone-token Secret", secret)
+	}
+	if secret.DefaultMode == nil || *secret.DefaultMode != 0o400 {
+		t.Errorf("seed-token defaultMode = %v, want 0400: the token file is owner-readable only", secret.DefaultMode)
+	}
+
+	clone := job.Spec.Template.Spec.InitContainers[0]
+	if got := argValue(clone.Args, "--token-file"); got != SeedTokenPath {
+		t.Errorf("clone --token-file = %q, want %s", got, SeedTokenPath)
+	}
+	mounts := map[string]VolumeMount{}
+	for _, m := range clone.VolumeMounts {
+		mounts[m.Name] = m
+	}
+	if got := mounts["seed-token"]; got.MountPath != SeedTokenDir || !got.ReadOnly {
+		t.Errorf("clone seed-token mount = %+v, want %s read-only", got, SeedTokenDir)
+	}
+
+	seed := job.Spec.Template.Spec.Containers[0]
+	for _, m := range seed.VolumeMounts {
+		if m.Name == "seed-token" {
+			t.Errorf("the seed container mounts the token Secret at %s, want the clone container alone", m.MountPath)
+		}
+	}
+	// The rendered document is what the cluster reads, so the mount appears once there too.
+	if n := strings.Count(string(job.JSON()), `"mountPath": "`+SeedTokenDir+`"`); n != 1 {
+		t.Errorf("the document mounts %s %d times, want the clone container alone", SeedTokenDir, n)
+	}
+	// And the volume's own fields survive the encoder: a Secret the document names wrongly, or a
+	// mode it drops, is a token file the container cannot read.
+	var doc struct {
+		Spec struct {
+			Template struct {
+				Spec struct {
+					Volumes []struct {
+						Secret *struct {
+							SecretName  string `json:"secretName"`
+							DefaultMode int32  `json:"defaultMode"`
+						} `json:"secret"`
+					} `json:"volumes"`
+				} `json:"spec"`
+			} `json:"template"`
+		} `json:"spec"`
+	}
+	if err := json.Unmarshal(job.JSON(), &doc); err != nil {
+		t.Fatalf("the document is not a Job: %v", err)
+	}
+	var rendered string
+	var mode int32
+	for _, v := range doc.Spec.Template.Spec.Volumes {
+		if v.Secret != nil {
+			rendered, mode = v.Secret.SecretName, v.Secret.DefaultMode
+		}
+	}
+	if rendered != "gt-clone-token" || mode != 0o400 {
+		t.Errorf("the document's Secret = %q mode %o, want gt-clone-token at 0400", rendered, mode)
+	}
+}
+
+// TestBuildSeedJobWithoutTokenSecretIsUnchanged pins the default manifest against the rendering
+// taken before the token flag existed: an input naming no Secret applies exactly as it did.
+func TestBuildSeedJobWithoutTokenSecretIsUnchanged(t *testing.T) {
+	t.Parallel()
+	golden, err := os.ReadFile(filepath.Join("testdata", "seedjob-no-token.json"))
+	if err != nil {
+		t.Fatalf("reading the golden manifest: %v", err)
+	}
+	job, err := BuildSeedJob(seedInput())
+	if err != nil {
+		t.Fatalf("BuildSeedJob: %v", err)
+	}
+	if got := string(job.JSON()); got != string(golden) {
+		t.Errorf("the manifest for an input naming no token Secret changed:\n--- got ---\n%s\n--- want ---\n%s", got, golden)
 	}
 }
 

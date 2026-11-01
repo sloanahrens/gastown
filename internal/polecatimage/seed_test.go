@@ -319,7 +319,7 @@ func TestCloneSeedRefusesWhatItCannotClone(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if err := CloneSeed(tc.dest, "/cache", tc.pins, h, h.run, func(string, ...any) {}); err == nil {
+			if err := CloneSeed(tc.dest, "/cache", tc.pins, "", h, h.run, func(string, ...any) {}); err == nil {
 				t.Fatal("CloneSeed() = nil, want the pin refused")
 			}
 			if len(h.events) != 0 {
@@ -358,6 +358,164 @@ func TestRunSeedChildReportsAFailedChild(t *testing.T) {
 	}
 }
 
+// TestRunSeedChildPutsTheTokenEnvInTheChild pins the runner's wiring: the environment a SeedCmd
+// names reaches the child, which is the only place the clone token travels.
+func TestRunSeedChildPutsTheTokenEnvInTheChild(t *testing.T) {
+	t.Parallel()
+	var child *exec.Cmd
+	spawn := func(name string, arg ...string) *exec.Cmd {
+		child = &exec.Cmd{Err: errors.New("exit status 7")}
+		return child
+	}
+	env := cloneTokenEnv("gt-read-token")
+	_, err := runSeedChild(spawn, SeedCmd{Argv: []string{"git", "clone", "http://forgejo/town/gastown.git"}, Env: env})
+	if err == nil {
+		t.Fatal("runSeedChild() = nil, want the child's failure")
+	}
+	var found bool
+	for _, kv := range child.Env {
+		if kv == "GIT_CONFIG_VALUE_0=Authorization: token gt-read-token" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the child's environment = %v, want the token header", child.Env)
+	}
+}
+
+// TestSeedCloneSendsTokenThroughEnvNotArgv: the clone authenticates through the git children's
+// environment, and the token reaches neither an argument nor a log line.
+func TestSeedCloneSendsTokenThroughEnvNotArgv(t *testing.T) {
+	t.Parallel()
+	const token = "gt-forgejo-read-token-0123456789"
+	var cmds []SeedCmd
+	var logged strings.Builder
+	run := func(c SeedCmd) (string, error) {
+		cmds = append(cmds, c)
+		return "", nil
+	}
+	logf := func(format string, args ...any) { fmt.Fprintf(&logged, format+"\n", args...) }
+	if err := CloneSeed(t.TempDir(), "/cache", twoPins(), token, newSeedHarness(t), run, logf); err != nil {
+		t.Fatalf("CloneSeed: %v", err)
+	}
+	if len(cmds) != 2*len(twoPins()) {
+		t.Fatalf("CloneSeed ran %d children, want a clone and a checkout per pin", len(cmds))
+	}
+	for _, c := range cmds {
+		if strings.Contains(strings.Join(c.Argv, " "), token) {
+			t.Errorf("a child's argument carries the token: %v", c.Argv)
+		}
+		env := map[string]string{}
+		for _, kv := range c.Env {
+			name, value, _ := strings.Cut(kv, "=")
+			env[name] = value
+		}
+		if env["GIT_CONFIG_COUNT"] != "1" {
+			t.Errorf("child %v carries GIT_CONFIG_COUNT %q, want 1", c.Argv, env["GIT_CONFIG_COUNT"])
+		}
+		if env["GIT_CONFIG_KEY_0"] != "http.extraHeader" {
+			t.Errorf("child %v carries GIT_CONFIG_KEY_0 %q, want http.extraHeader", c.Argv, env["GIT_CONFIG_KEY_0"])
+		}
+		if env["GIT_CONFIG_VALUE_0"] != "Authorization: token "+token {
+			t.Errorf("child %v carries GIT_CONFIG_VALUE_0 %q, want the token header", c.Argv, env["GIT_CONFIG_VALUE_0"])
+		}
+	}
+	if strings.Contains(logged.String(), token) {
+		t.Errorf("the log carries the token: %q", logged.String())
+	}
+}
+
+// TestCloneSeedWithoutATokenSetsNoHeader: an anonymous run hands git no credential at all, so the
+// existing behavior is unchanged when the Job names no Secret.
+func TestCloneSeedWithoutATokenSetsNoHeader(t *testing.T) {
+	t.Parallel()
+	var cmds []SeedCmd
+	run := func(c SeedCmd) (string, error) {
+		cmds = append(cmds, c)
+		return "", nil
+	}
+	if err := CloneSeed(t.TempDir(), "/cache", twoPins(), "", newSeedHarness(t), run, func(string, ...any) {}); err != nil {
+		t.Fatalf("CloneSeed: %v", err)
+	}
+	for _, c := range cmds {
+		if len(c.Env) != 0 {
+			t.Errorf("an anonymous clone ran with env %v, want none", c.Env)
+		}
+	}
+}
+
+// TestCloneSeedScrubsTheTokenFromAFailedChild: a git that reports its config must not put the token
+// into the Job's error and log.
+func TestCloneSeedScrubsTheTokenFromAFailedChild(t *testing.T) {
+	t.Parallel()
+	const token = "gt-forgejo-read-token-0123456789"
+	h := newSeedHarness(t)
+	h.reply = func(SeedCmd) (string, error) {
+		return "fatal: bad config: Authorization: token " + token + "\n", errors.New("exit status 128")
+	}
+	err := CloneSeed(t.TempDir(), "/cache", twoPins()[:1], token, h, h.run, func(string, ...any) {})
+	if err == nil {
+		t.Fatal("CloneSeed() = nil, want the failed clone")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Errorf("error quotes the token: %q", err)
+	}
+}
+
+// TestSeedCloneTokenFileErrorsDoNotQuoteTheToken: an empty and an unreadable token file both stop
+// the clone step, and neither reason carries what the file held.
+func TestSeedCloneTokenFileErrorsDoNotQuoteTheToken(t *testing.T) {
+	t.Parallel()
+	pins, err := json.Marshal(twoPins())
+	if err != nil {
+		t.Fatalf("marshal pins: %v", err)
+	}
+	tests := []struct {
+		name  string
+		plant func(t *testing.T) string
+		want  string
+	}{
+		{name: "an empty file", plant: func(t *testing.T) string {
+			p := filepath.Join(t.TempDir(), "token")
+			if err := os.WriteFile(p, nil, 0o400); err != nil {
+				t.Fatalf("planting the empty token file: %v", err)
+			}
+			return p
+		}, want: "is empty"},
+		{name: "a file holding only whitespace", plant: func(t *testing.T) string {
+			p := filepath.Join(t.TempDir(), "token")
+			if err := os.WriteFile(p, []byte(" \t\n"), 0o400); err != nil {
+				t.Fatalf("planting the whitespace token file: %v", err)
+			}
+			return p
+		}, want: "is empty"},
+		{name: "a file that cannot be read", plant: func(t *testing.T) string {
+			p := filepath.Join(t.TempDir(), "token")
+			if err := os.Mkdir(p, 0o700); err != nil {
+				t.Fatalf("planting the unreadable token file: %v", err)
+			}
+			return p
+		}, want: "reading the clone token file"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := tc.plant(t)
+			var stdout, stderr bytes.Buffer
+			code := seedCloneMain([]string{"--pins", string(pins), "--dest", filepath.Join(t.TempDir(), "seed"), "--root", t.TempDir(), "--token-file", path}, &stdout, &stderr)
+			if code != 3 {
+				t.Fatalf("seedCloneMain() = %d, want 3: %s", code, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tc.want) {
+				t.Errorf("stderr = %q, want it to carry %q", stderr.String(), tc.want)
+			}
+			if strings.Contains(stderr.String(), " \t") {
+				t.Errorf("stderr quotes the file's whitespace: %q", stderr.String())
+			}
+		})
+	}
+}
+
 // TestCloneSeedChecksEachPinOutAtItsCommit pins the init container's children: a clone of the pin's
 // URL into dest/<rig>, then that commit checked out detached.
 func TestCloneSeedChecksEachPinOutAtItsCommit(t *testing.T) {
@@ -365,7 +523,7 @@ func TestCloneSeedChecksEachPinOutAtItsCommit(t *testing.T) {
 	h := newSeedHarness(t)
 	dest := t.TempDir()
 	var log []string
-	if err := CloneSeed(dest, "/cache", twoPins(), h, h.run, func(format string, args ...any) {
+	if err := CloneSeed(dest, "/cache", twoPins(), "", h, h.run, func(format string, args ...any) {
 		log = append(log, fmt.Sprintf(format, args...))
 	}); err != nil {
 		t.Fatalf("CloneSeed: %v", err)
@@ -390,7 +548,7 @@ func TestCloneSeedSkipsTheCloneWhenTheMarkerHoldsThePins(t *testing.T) {
 	h.files["/cache/.seed-pins"] = []byte(cachevol.SeedMarker(twoPins()))
 	dest := filepath.Join(t.TempDir(), "seed")
 	var log []string
-	if err := CloneSeed(dest, "/cache", twoPins(), h, h.run, func(format string, args ...any) {
+	if err := CloneSeed(dest, "/cache", twoPins(), "", h, h.run, func(format string, args ...any) {
 		log = append(log, fmt.Sprintf(format, args...))
 	}); err != nil {
 		t.Fatalf("CloneSeed: %v", err)
@@ -416,7 +574,7 @@ func TestCloneSeedClonesWhenTheMarkerHoldsOtherPins(t *testing.T) {
 	other := twoPins()
 	other[1].Commit = seedOtherSH
 	h.files["/cache/.seed-pins"] = []byte(cachevol.SeedMarker(other))
-	if err := CloneSeed(t.TempDir(), "/cache", twoPins(), h, h.run, func(string, ...any) {}); err != nil {
+	if err := CloneSeed(t.TempDir(), "/cache", twoPins(), "", h, h.run, func(string, ...any) {}); err != nil {
 		t.Fatalf("CloneSeed: %v", err)
 	}
 	var clones int
@@ -436,7 +594,7 @@ func TestCloneSeedRefusesAMarkerItCannotRead(t *testing.T) {
 	t.Parallel()
 	h := newSeedHarness(t)
 	h.readErr = &fs.PathError{Op: "open", Path: "/cache/.seed-pins", Err: fs.ErrPermission}
-	err := CloneSeed(t.TempDir(), "/cache", twoPins(), h, h.run, func(string, ...any) {})
+	err := CloneSeed(t.TempDir(), "/cache", twoPins(), "", h, h.run, func(string, ...any) {})
 	if err == nil || !strings.Contains(err.Error(), "reading the seed marker") {
 		t.Fatalf("CloneSeed() = %v, want the unreadable marker reported", err)
 	}
@@ -450,7 +608,7 @@ func TestCloneSeedRefusesAMarkerItCannotRead(t *testing.T) {
 func TestCloneSeedRefusesNoClaim(t *testing.T) {
 	t.Parallel()
 	h := newSeedHarness(t)
-	err := CloneSeed(t.TempDir(), "", twoPins(), h, h.run, func(string, ...any) {})
+	err := CloneSeed(t.TempDir(), "", twoPins(), "", h, h.run, func(string, ...any) {})
 	if err == nil || !strings.Contains(err.Error(), "no claim") {
 		t.Fatalf("CloneSeed() = %v, want the missing claim refused", err)
 	}
@@ -490,7 +648,7 @@ func TestSeedMarkerRoundTripsThroughTheClaimFiles(t *testing.T) {
 		return "", nil
 	}
 	dest := filepath.Join(t.TempDir(), "seed")
-	if err := CloneSeed(dest, root, twoPins(), OSFiles{}, clone, func(string, ...any) {}); err != nil {
+	if err := CloneSeed(dest, root, twoPins(), "", OSFiles{}, clone, func(string, ...any) {}); err != nil {
 		t.Fatalf("CloneSeed: %v", err)
 	}
 	if clones != 0 {
@@ -520,7 +678,7 @@ func TestSeedMarkerReseedsWhenThePinsChange(t *testing.T) {
 		}
 		return "", nil
 	}
-	if err := CloneSeed(filepath.Join(t.TempDir(), "seed"), root, changed, OSFiles{}, clone, func(string, ...any) {}); err != nil {
+	if err := CloneSeed(filepath.Join(t.TempDir(), "seed"), root, changed, "", OSFiles{}, clone, func(string, ...any) {}); err != nil {
 		t.Fatalf("CloneSeed: %v", err)
 	}
 	if clones != len(changed) {
@@ -563,7 +721,7 @@ func TestCloneSeedRefusesAMarkerThatIsALink(t *testing.T) {
 		clones++
 		return "", nil
 	}
-	err := CloneSeed(filepath.Join(t.TempDir(), "seed"), root, twoPins(), OSFiles{}, clone, func(string, ...any) {})
+	err := CloneSeed(filepath.Join(t.TempDir(), "seed"), root, twoPins(), "", OSFiles{}, clone, func(string, ...any) {})
 	if err == nil || !strings.Contains(err.Error(), "reading the seed marker") {
 		t.Fatalf("CloneSeed() = %v, want the linked marker refused", err)
 	}
@@ -626,7 +784,7 @@ func TestCloneSeedFailureNamesTheRigAndScrubsTheURL(t *testing.T) {
 	h.reply = func(SeedCmd) (string, error) {
 		return "fatal: could not read from '" + url + "'\n", errors.New("exit status 128")
 	}
-	err := CloneSeed(t.TempDir(), "/cache", twoPins()[:1], h, h.run, func(string, ...any) {})
+	err := CloneSeed(t.TempDir(), "/cache", twoPins()[:1], "", h, h.run, func(string, ...any) {})
 	if err == nil {
 		t.Fatal("CloneSeed() = nil, want the failed clone")
 	}

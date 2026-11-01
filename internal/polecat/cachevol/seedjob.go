@@ -34,6 +34,12 @@ const (
 	HelperPath = "/usr/local/bin/polecat-image"
 	// DefaultSeedJobName is the Job's name when the input names none.
 	DefaultSeedJobName = "gt-cache-seed"
+	// SeedTokenDir is where the clone init container mounts the read-only clone token Secret.
+	SeedTokenDir = "/run/seed-token" //nolint:gosec // G101: a mount path, not a credential
+	// SeedTokenKey is the Secret key the token is read from, so the mounted file is SeedTokenPath.
+	SeedTokenKey = "token"
+	// SeedTokenPath is the token file the clone helper reads at run time.
+	SeedTokenPath = SeedTokenDir + "/" + SeedTokenKey
 )
 
 // SeedJobInput is what the seed Job is built from: the polecat image tag its containers run, the
@@ -55,6 +61,9 @@ type SeedJobInput struct {
 	// a plain cluster (gt-5paez).
 	NodeSelector map[string]string
 	Tolerations  []Toleration
+	// CloneTokenSecret is the Secret holding the read-only Forgejo token the clone init container
+	// reads; empty clones anonymously.
+	CloneTokenSecret string
 }
 
 // SeedJob is the seed Job as the values kubectl applies. It is a copy of batch/v1's Job, so this
@@ -147,6 +156,7 @@ type Volume struct {
 	PersistentVolumeClaim *PersistentVolumeClaimRef `json:"persistentVolumeClaim,omitempty"`
 	EmptyDir              *EmptyDirVolumeSource     `json:"emptyDir,omitempty"`
 	ConfigMap             *ConfigMapVolumeSource    `json:"configMap,omitempty"`
+	Secret                *SecretVolumeSource       `json:"secret,omitempty"`
 }
 
 // PersistentVolumeClaimRef names the claim a volume mounts.
@@ -160,6 +170,13 @@ type EmptyDirVolumeSource struct{}
 // ConfigMapVolumeSource mounts a ConfigMap's data as a directory of files, one file per key.
 type ConfigMapVolumeSource struct {
 	Name string `json:"name"`
+}
+
+// SecretVolumeSource mounts a Secret's data as a directory of files; DefaultMode 0400 leaves the
+// files owner-readable only.
+type SecretVolumeSource struct {
+	SecretName  string `json:"secretName"`
+	DefaultMode *int32 `json:"defaultMode,omitempty"`
 }
 
 // BuildSeedJob returns the seed Job for in, or the reason it cannot be rendered.
@@ -183,6 +200,9 @@ func BuildSeedJob(in SeedJobInput) (*SeedJob, error) {
 	}
 	if !validDNS1123Label(in.ClaimName) {
 		return nil, fmt.Errorf("the seed Job claim %q: want a DNS-1123 label of at most 63 characters", in.ClaimName)
+	}
+	if in.CloneTokenSecret != "" && !validDNS1123Label(in.CloneTokenSecret) {
+		return nil, fmt.Errorf("the seed Job clone token Secret %q: want a DNS-1123 label of at most 63 characters", in.CloneTokenSecret)
 	}
 	if len(in.Pins) == 0 {
 		return nil, errors.New("the seed Job names no pin, so it would seed nothing")
@@ -214,12 +234,9 @@ func BuildSeedJob(in SeedJobInput) (*SeedJob, error) {
 					NodeSelector:    in.NodeSelector,
 					Tolerations:     in.Tolerations,
 					SecurityContext: &PodSecurityContext{RunAsUser: int64Ptr(0), RunAsGroup: int64Ptr(0)},
-					InitContainers:  []Container{cloneContainer(in.Image, pins)},
+					InitContainers:  []Container{cloneContainer(in.Image, pins, in.CloneTokenSecret)},
 					Containers:      []Container{seedContainer(in.Image, pins)},
-					Volumes: []Volume{
-						{Name: "cache", PersistentVolumeClaim: &PersistentVolumeClaimRef{ClaimName: in.ClaimName}},
-						{Name: "source", EmptyDir: &EmptyDirVolumeSource{}},
-					},
+					Volumes:         seedVolumes(in.ClaimName, in.CloneTokenSecret),
 				},
 			},
 		},
@@ -328,25 +345,50 @@ func pinsJSON(pins []Pin) string {
 	return strings.TrimSuffix(buf.String(), "\n")
 }
 
+// seedVolumes is the pod's volumes: the claim, the checkouts' scratch directory, and the clone
+// token Secret when the input names one.
+func seedVolumes(claim, tokenSecret string) []Volume {
+	volumes := []Volume{
+		{Name: "cache", PersistentVolumeClaim: &PersistentVolumeClaimRef{ClaimName: claim}},
+		{Name: "source", EmptyDir: &EmptyDirVolumeSource{}},
+	}
+	if tokenSecret != "" {
+		volumes = append(volumes, Volume{
+			Name:   "seed-token",
+			Secret: &SecretVolumeSource{SecretName: tokenSecret, DefaultMode: int32Ptr(0o400)},
+		})
+	}
+	return volumes
+}
+
 // cloneContainer checks each pinned commit out under SeedSourceRoot. It runs before the seed and as
 // the pod's user, so a clone a pin's URL cannot serve fails the Job before the claim is touched.
 //
 // The claim is mounted read-only so the container can read the marker: a rerun with the same pins
 // finds its pins there and clones nothing, while an absent or different marker still clones
 // (gt-posdj). Read-only because the init container's job is to observe the claim, never to write it.
-func cloneContainer(image, pins string) Container {
+//
+// The token Secret is mounted here alone: the seed container never reads it, and the helper takes it
+// from a file rather than an argument so the token stays out of the rendered manifest.
+func cloneContainer(image, pins, tokenSecret string) Container {
+	args := []string{"--pins", pins, "--dest", SeedSourceRoot, "--root", SeedCacheRoot}
+	mounts := []VolumeMount{
+		{Name: "source", MountPath: SeedSourceRoot},
+		{Name: "cache", MountPath: SeedCacheRoot, ReadOnly: true},
+	}
+	if tokenSecret != "" {
+		args = append(args, "--token-file", SeedTokenPath)
+		mounts = append(mounts, VolumeMount{Name: "seed-token", MountPath: SeedTokenDir, ReadOnly: true})
+	}
 	return Container{
 		Name:    "clone",
 		Image:   image,
 		Command: []string{HelperPath, "seed-clone"},
-		Args:    []string{"--pins", pins, "--dest", SeedSourceRoot, "--root", SeedCacheRoot},
+		Args:    args,
 		// A Forgejo that asks for credentials gets no prompt: the Job fails with the URL's reason
 		// instead of hanging until its deadline.
-		Env: []EnvVar{{Name: "GIT_TERMINAL_PROMPT", Value: "0"}},
-		VolumeMounts: []VolumeMount{
-			{Name: "source", MountPath: SeedSourceRoot},
-			{Name: "cache", MountPath: SeedCacheRoot, ReadOnly: true},
-		},
+		Env:          []EnvVar{{Name: "GIT_TERMINAL_PROMPT", Value: "0"}},
+		VolumeMounts: mounts,
 	}
 }
 

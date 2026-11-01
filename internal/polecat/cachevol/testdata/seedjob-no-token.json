@@ -1,0 +1,119 @@
+{
+  "apiVersion": "batch/v1",
+  "kind": "Job",
+  "metadata": {
+    "name": "gt-cache-seed",
+    "namespace": "gt",
+    "labels": {
+      "app.kubernetes.io/managed-by": "gt",
+      "app.kubernetes.io/name": "polecat-cache-seed"
+    }
+  },
+  "spec": {
+    "backoffLimit": 0,
+    "template": {
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "gt",
+          "app.kubernetes.io/name": "polecat-cache-seed"
+        }
+      },
+      "spec": {
+        "restartPolicy": "Never",
+        "securityContext": {
+          "runAsUser": 0,
+          "runAsGroup": 0
+        },
+        "initContainers": [
+          {
+            "name": "clone",
+            "image": "gastown-polecat:dev",
+            "command": [
+              "/usr/local/bin/polecat-image",
+              "seed-clone"
+            ],
+            "args": [
+              "--pins",
+              "[{\"rig\":\"gastown\",\"commit\":\"0123456789abcdef0123456789abcdef01234567\",\"url\":\"http://forgejo:3000/town/gastown.git\"},{\"rig\":\"devops\",\"commit\":\"abababababababababababababababababababab\",\"url\":\"http://forgejo:3000/town/devops.git\"}]",
+              "--dest",
+              "/seed",
+              "--root",
+              "/cache"
+            ],
+            "env": [
+              {
+                "name": "GIT_TERMINAL_PROMPT",
+                "value": "0"
+              }
+            ],
+            "volumeMounts": [
+              {
+                "name": "source",
+                "mountPath": "/seed"
+              },
+              {
+                "name": "cache",
+                "mountPath": "/cache",
+                "readOnly": true
+              }
+            ]
+          }
+        ],
+        "containers": [
+          {
+            "name": "seed",
+            "image": "gastown-polecat:dev",
+            "command": [
+              "/usr/local/bin/polecat-image",
+              "seed-cache"
+            ],
+            "args": [
+              "--pins",
+              "[{\"rig\":\"gastown\",\"commit\":\"0123456789abcdef0123456789abcdef01234567\",\"url\":\"http://forgejo:3000/town/gastown.git\"},{\"rig\":\"devops\",\"commit\":\"abababababababababababababababababababab\",\"url\":\"http://forgejo:3000/town/devops.git\"}]",
+              "--root",
+              "/cache",
+              "--source",
+              "/seed"
+            ],
+            "env": [
+              {
+                "name": "GOCACHE",
+                "value": "/cache/gocache"
+              },
+              {
+                "name": "GOMODCACHE",
+                "value": "/cache/gomodcache"
+              },
+              {
+                "name": "GOFLAGS",
+                "value": "-p=4 -modcacherw"
+              }
+            ],
+            "volumeMounts": [
+              {
+                "name": "cache",
+                "mountPath": "/cache"
+              },
+              {
+                "name": "source",
+                "mountPath": "/seed"
+              }
+            ]
+          }
+        ],
+        "volumes": [
+          {
+            "name": "cache",
+            "persistentVolumeClaim": {
+              "claimName": "gt-shared-cache"
+            }
+          },
+          {
+            "name": "source",
+            "emptyDir": {}
+          }
+        ]
+      }
+    }
+  }
+}

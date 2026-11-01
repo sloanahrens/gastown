@@ -232,6 +232,74 @@ func TestRunSwapsTheCloneHost(t *testing.T) {
 	}
 }
 
+// TestCloneTokenSecretFlag pins the token Secret flag: a named Secret reaches
+// the clone container alone, no flag means no volume, and a name Kubernetes
+// would not accept is refused before kubectl runs.
+func TestCloneTokenSecretFlag(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a named Secret reaches the clone container", func(t *testing.T) {
+		t.Parallel()
+		f := newFake()
+		if code, _, stderr := run(t, f, baseArgs("-clone-token-secret", "gt-clone-token")...); code != 0 {
+			t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
+		}
+		job := appliedJob(t, f)
+		var secret *cachevol.SecretVolumeSource
+		for _, v := range job.Spec.Template.Spec.Volumes {
+			if v.Secret != nil {
+				secret = v.Secret
+			}
+		}
+		if secret == nil || secret.SecretName != "gt-clone-token" {
+			t.Fatalf("secret volume = %+v, want gt-clone-token", secret)
+		}
+		clone := job.Spec.Template.Spec.InitContainers[0]
+		var mounted bool
+		for _, m := range clone.VolumeMounts {
+			if m.Name == "seed-token" && m.MountPath == cachevol.SeedTokenDir && m.ReadOnly {
+				mounted = true
+			}
+		}
+		if !mounted {
+			t.Errorf("clone mounts = %+v, want the token Secret at %s read-only", clone.VolumeMounts, cachevol.SeedTokenDir)
+		}
+		for _, m := range job.Spec.Template.Spec.Containers[0].VolumeMounts {
+			if m.Name == "seed-token" {
+				t.Errorf("the seed container mounts the token Secret at %s", m.MountPath)
+			}
+		}
+	})
+
+	t.Run("no flag means no token volume", func(t *testing.T) {
+		t.Parallel()
+		f := newFake()
+		if code, _, stderr := run(t, f, baseArgs()...); code != 0 {
+			t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
+		}
+		for _, v := range appliedJob(t, f).Spec.Template.Spec.Volumes {
+			if v.Secret != nil {
+				t.Errorf("the Job mounts Secret volume %+v, want none without -clone-token-secret", v)
+			}
+		}
+	})
+
+	t.Run("a name that is not a DNS-1123 label is refused", func(t *testing.T) {
+		t.Parallel()
+		f := newFake()
+		code, _, stderr := run(t, f, baseArgs("-clone-token-secret", "Clone_Token")...)
+		if code != 1 {
+			t.Errorf("exit = %d, want 1; stderr: %s", code, stderr)
+		}
+		if !strings.Contains(stderr, "clone token Secret") {
+			t.Errorf("stderr = %q, want the Secret name refused", stderr)
+		}
+		if len(f.calls) != 0 {
+			t.Errorf("kubectl calls = %d, want none before a refused name", len(f.calls))
+		}
+	})
+}
+
 // TestRunPassesTheNamespaceToTheDeleteAndTheManifest keeps the Job and the
 // delete that precedes it in one namespace.
 func TestRunPassesTheNamespaceToTheDeleteAndTheManifest(t *testing.T) {

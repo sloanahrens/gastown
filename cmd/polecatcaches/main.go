@@ -83,6 +83,7 @@ func runWith(args []string, out, errw io.Writer, d deps) int {
 	namespace := fs.String("namespace", "", "the Job's namespace; empty uses the kubectl context's namespace")
 	name := fs.String("name", "", "the Job's name; empty uses the builder's default")
 	forgejoHost := fs.String("forgejo-host", "", "the host[:port] the Job clones from; empty keeps each rig's configured host")
+	cloneTokenSecret := fs.String("clone-token-secret", "", "the Secret holding the read-only Forgejo token, whose token key the clone container reads; empty clones anonymously")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -114,13 +115,14 @@ func runWith(args []string, out, errw io.Writer, d deps) int {
 	}
 
 	job, err := cachevol.BuildSeedJob(cachevol.SeedJobInput{
-		Name:         *name,
-		Namespace:    *namespace,
-		Image:        *image,
-		ClaimName:    *claim,
-		Pins:         pins,
-		NodeSelector: nodeSelector,
-		Tolerations:  tolerations,
+		Name:             *name,
+		Namespace:        *namespace,
+		Image:            *image,
+		ClaimName:        *claim,
+		Pins:             pins,
+		NodeSelector:     nodeSelector,
+		Tolerations:      tolerations,
+		CloneTokenSecret: *cloneTokenSecret,
 	})
 	if err != nil {
 		fmt.Fprintf(errw, "polecatcaches: %v\n", err)
