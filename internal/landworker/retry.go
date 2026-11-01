@@ -1,12 +1,18 @@
 package landworker
 
 import (
+	"errors"
 	"math/rand/v2"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 )
+
+// ErrNoShowMultiple reports an inner client that cannot read several beads in
+// one call; a caller with a per-record read to fall back on takes it as "read
+// them one at a time", not as a failed read.
+var ErrNoShowMultiple = errors.New("landworker: the beads client has no ShowMultiple")
 
 // RetryBeads retries bd calls that Dolt refused with a serialization
 // failure (Error 1213) under load. Such a transaction was rolled back, so the
@@ -29,6 +35,11 @@ type RetryInner interface {
 var (
 	_ Beads        = RetryBeads{}
 	_ RedMainBeads = RetryBeads{}
+	// The daemon hands the worker a RetryBeads, so the worker's batch read
+	// reaches the store through this method.
+	_ interface {
+		ShowMultiple([]string) (map[string]*beads.Issue, error)
+	} = RetryBeads{}
 )
 
 // IsSerializationFailure reports whether err is Dolt's retryable
@@ -78,6 +89,19 @@ func (r RetryBeads) do(fn func() error) error {
 func (r RetryBeads) Show(id string) (is *beads.Issue, err error) {
 	err = r.do(func() error { is, err = r.Inner.Show(id); return err })
 	return is, err
+}
+
+// ShowMultiple retries a batch read as Show does; an inner client without it
+// reports ErrNoShowMultiple unretried.
+func (r RetryBeads) ShowMultiple(ids []string) (out map[string]*beads.Issue, err error) {
+	inner, ok := r.Inner.(interface {
+		ShowMultiple([]string) (map[string]*beads.Issue, error)
+	})
+	if !ok {
+		return nil, ErrNoShowMultiple
+	}
+	err = r.do(func() error { out, err = inner.ShowMultiple(ids); return err })
+	return out, err
 }
 
 func (r RetryBeads) Update(id string, opts beads.UpdateOptions) error {
