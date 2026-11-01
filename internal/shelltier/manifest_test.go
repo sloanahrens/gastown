@@ -105,11 +105,18 @@ func TestManifestOrderIsToday(t *testing.T) {
 	}
 }
 
-func TestManifestStartsSerialWithNoTriggersOfItsOwn(t *testing.T) {
+func TestManifestStartsSerial(t *testing.T) {
 	t.Parallel()
 	for _, e := range Manifest() {
-		if e.Mode != Serial || len(e.Triggers) != 0 {
-			t.Errorf("%s: Mode=%v Triggers=%q, want Serial with no triggers of its own", e.Path, e.Mode, e.Triggers)
+		if e.Mode != Serial {
+			t.Errorf("%s: Mode=%v, want Serial", e.Path, e.Mode)
+		}
+		// A declared list is the entry's whole trigger set, so it repeats the
+		// defaults rather than dropping them.
+		for _, want := range DefaultTriggers {
+			if !slices.Contains(e.TriggersOrDefault(), want) {
+				t.Errorf("%s: Triggers=%q lose the default %q", e.Path, e.Triggers, want)
+			}
 		}
 	}
 }
@@ -185,7 +192,10 @@ func TestEveryEntryDeclaresItsGoUse(t *testing.T) {
 func TestMakefileGateRunsOnShelltierChanges(t *testing.T) {
 	t.Parallel()
 	// The selection is the production matcher's: a change to a Go file under
-	// internal/shelltier must run the go: row and must not run a none: row.
+	// internal/shelltier must run the go: row and must not run a none: row on
+	// the default triggers. A none: row that declares internal/ runs because
+	// its script names a path there, which TestEveryReferencedRepoPathIsATrigger
+	// requires; the exemption is about go, not about what the script reads.
 	goChange := []string{"internal/shelltier/manifest.go"}
 	var gateSeen, exemptSeen bool
 	for _, e := range Manifest() {
@@ -195,7 +205,7 @@ func TestMakefileGateRunsOnShelltierChanges(t *testing.T) {
 				t.Fatalf("a change to %s does not run %s (triggers %q)", goChange[0], e.Path, e.TriggersOrDefault())
 			}
 			gateSeen = true
-		case strings.HasPrefix(e.StubsGo, "none:") && hasReason(e.StubsGo):
+		case strings.HasPrefix(e.StubsGo, "none:") && hasReason(e.StubsGo) && len(e.Triggers) == 0:
 			if tiertrigger.Runs(e.TriggersOrDefault(), goChange, false) {
 				t.Errorf("%s is exempt (%q) but runs on a change to %s", e.Path, e.StubsGo, goChange[0])
 			}

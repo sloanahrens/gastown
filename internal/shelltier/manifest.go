@@ -75,23 +75,37 @@ func hasGoDeclaration(s string) bool {
 
 // Manifest lists every shell test in the order the runner runs them: the
 // scripts/test-makefile.sh order first, then the tests the shell tier adds.
+//
+// An entry declares Triggers when its script names a repo path the default
+// triggers do not cover; the declared list repeats the defaults, since a
+// declared list is the whole set. TestEveryReferencedRepoPathIsATrigger holds
+// the lists to every path the scripts name, and the cost of a trigger that is
+// too wide is a spurious run.
 func Manifest() []Entry {
 	return []Entry{
 		{Path: "scripts/check-install-path_test.sh", StubsGo: "none: names no go command"},
-		{Path: "scripts/polecat-go-floor_test.sh", StubsGo: "stub: scripts/polecat-go-floor_test.sh:66 defines fake GO_BIN binaries"},
+		{Path: "scripts/polecat-go-floor_test.sh", StubsGo: "stub: scripts/polecat-go-floor_test.sh:66 defines fake GO_BIN binaries",
+			Triggers: []string{"scripts/", "Makefile", "deploy/"}},
 		{Path: "scripts/install-local_test.sh", StubsGo: "none: names no go command"},
-		{Path: "scripts/deep-review_test.sh", StubsGo: "none: go test appears only in fixture text"},
+		{Path: "scripts/deep-review_test.sh", StubsGo: "none: go test appears only in fixture text",
+			Triggers: []string{"scripts/", "Makefile", "internal/"}},
 		{Path: "scripts/gate-vs-load_test.sh", StubsGo: "none: names no go command"},
 		{Path: "scripts/forgejo-provision_test.sh", StubsGo: "none: names no go command"},
-		{Path: "scripts/forgejo-probe_test.sh", StubsGo: "none: names no go command"},
+		{Path: "scripts/forgejo-probe_test.sh", StubsGo: "none: names no go command",
+			Triggers: []string{"scripts/", "Makefile", ".githooks/"}},
 		{Path: "scripts/forgejo-resync_test.sh", StubsGo: "none: names no go command"},
 		{Path: "scripts/forgejo-cutover_test.sh", StubsGo: "none: names no go command"},
-		{Path: "deploy/k8s/kind/kind_test.sh", StubsGo: "none: names no go command"},
+		{Path: "deploy/k8s/kind/kind_test.sh", StubsGo: "none: names no go command",
+			Triggers: []string{"scripts/", "Makefile", "deploy/"}},
 		{Path: "scripts/resource-sampler_test.sh", StubsGo: "none: go test appears only in a ps fixture line"},
-		{Path: "scripts/makefile-gate_test.sh", StubsGo: "go: the shell-test list case runs the real shelltier through go run (gt-chlve)"},
-		{Path: ".githooks/pre-push_test.sh", StubsGo: "none: names no go command"},
-		{Path: "scripts/post-land-shell_test.sh", StubsGo: "stub: scripts/post-land-shell_test.sh puts a fake go on PATH"},
-		{Path: "scripts/town_metrics_test.sh", StubsGo: "none: names no go command"},
+		{Path: "scripts/makefile-gate_test.sh", StubsGo: "go: the shell-test list case runs the real shelltier through go run (gt-chlve)",
+			Triggers: []string{"scripts/", "Makefile", "deploy/", ".githooks/"}},
+		{Path: ".githooks/pre-push_test.sh", StubsGo: "none: names no go command",
+			Triggers: []string{"scripts/", "Makefile", ".githooks/", "internal/"}},
+		{Path: "scripts/post-land-shell_test.sh", StubsGo: "stub: scripts/post-land-shell_test.sh puts a fake go on PATH",
+			Triggers: []string{"scripts/", "Makefile", ".githooks/", "internal/", "plugins/"}},
+		{Path: "scripts/town_metrics_test.sh", StubsGo: "none: names no go command",
+			Triggers: []string{"scripts/", "Makefile", "internal/"}},
 	}
 }
 
