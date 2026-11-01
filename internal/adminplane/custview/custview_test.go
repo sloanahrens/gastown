@@ -409,3 +409,70 @@ func TestBuildRefusesCapForAnotherWorkspace(t *testing.T) {
 		t.Fatalf("Build with a cap for another workspace returned %v, want ErrCapWorkspace", err)
 	}
 }
+
+func TestBuildRefusesUsageNotForThisWorkspace(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		owner string
+	}{
+		{name: "another workspace", owner: "ws-2"},
+		{name: "no workspace", owner: ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			rec := record()
+			rec.Usage.Workspace = c.owner
+			v, err := Build(fakeSource{rec: rec})
+			if !errors.Is(err, ErrUsageWorkspace) {
+				t.Fatalf("Build with usage for %q returned %v, want ErrUsageWorkspace", c.owner, err)
+			}
+			if !reflect.DeepEqual(v, View{}) {
+				t.Errorf("refused view = %+v, want the zero value", v)
+			}
+		})
+	}
+}
+
+func TestBuildRefusesUnknownBeadStateWithoutEchoingIt(t *testing.T) {
+	t.Parallel()
+	rec := record()
+	rec.Beads = []Bead{{State: "open"}, {State: beadBodyValue}}
+	v, err := Build(fakeSource{rec: rec})
+	if !errors.Is(err, ErrUnknownBeadState) {
+		t.Fatalf("Build with a body as bead state returned %v, want ErrUnknownBeadState", err)
+	}
+	if strings.Contains(err.Error(), beadBodyValue) {
+		t.Errorf("error %q echoes the bead body", err)
+	}
+	if !reflect.DeepEqual(v, View{}) {
+		t.Errorf("refused view = %+v, want the zero value", v)
+	}
+}
+
+func TestMonthToDateNeverReadsBelowDecisionSpend(t *testing.T) {
+	t.Parallel()
+	rec := record()
+	// The month's only spend is the day's, with one record late in the day: a
+	// month figure that stopped at Now would read below the decision.
+	rec.SpendRecords = []spendcap.Record{
+		{Workspace: "ws-1", EndedAt: time.Date(2026, 3, 14, 0, 0, 0, 0, time.UTC), CostUSD: 2},
+		{Workspace: "ws-1", EndedAt: time.Date(2026, 3, 14, 23, 59, 0, 0, time.UTC), CostUSD: 4},
+		{Workspace: "ws-1", EndedAt: time.Date(2026, 2, 28, 23, 59, 0, 0, time.UTC), CostUSD: 100},
+		{Workspace: "ws-1", EndedAt: time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC), CostUSD: 100},
+	}
+	v, err := Build(fakeSource{rec: rec})
+	if err != nil {
+		t.Fatalf("Build returned %v, want nil", err)
+	}
+	if v.Spend.Decision.Spent != 6 {
+		t.Fatalf("decision spend = %v, want the day's 6", v.Spend.Decision.Spent)
+	}
+	if v.Spend.MonthToDateUSD < v.Spend.Decision.Spent {
+		t.Errorf("month-to-date %v reads below the decision's spend %v", v.Spend.MonthToDateUSD, v.Spend.Decision.Spent)
+	}
+	if v.Spend.MonthToDateUSD != 6 {
+		t.Errorf("month-to-date = %v, want 6", v.Spend.MonthToDateUSD)
+	}
+}

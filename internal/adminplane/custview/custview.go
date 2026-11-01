@@ -135,7 +135,27 @@ var (
 	// workspace would show that workspace's spend on this one's dashboard, even
 	// when the cap sets no daily limit.
 	ErrCapWorkspace = errors.New("custview: the daily cap names a different workspace")
+	// ErrUsageWorkspace is Build's refusal of a usage export that names another
+	// workspace, or none. Its totals would be copied into this workspace's view,
+	// so an export that cannot name this workspace is refused.
+	ErrUsageWorkspace = errors.New("custview: the usage export does not name this workspace")
+	// ErrUnknownBeadState is Build's refusal of a bead state the bead store does
+	// not define. A state is copied into the view as a label, so a value outside
+	// the store's set could carry a bead's body into it.
+	ErrUnknownBeadState = errors.New("custview: a bead has a state the bead store does not define")
 )
+
+// beadStates is the bead store's status set, as the bead CLI reference names
+// it. A bead in any other state is refused.
+var beadStates = map[string]bool{
+	"open":        true,
+	"in_progress": true,
+	"blocked":     true,
+	"deferred":    true,
+	"closed":      true,
+	"pinned":      true,
+	"hooked":      true,
+}
 
 // Build returns the dashboard view of src's workspace.
 func Build(src Source) (View, error) {
@@ -158,6 +178,11 @@ func Build(src Source) (View, error) {
 	// Evaluate would sum that workspace's spend here.
 	if rec.Cap.Workspace != "" && rec.Cap.Workspace != rec.ID {
 		return View{}, fmt.Errorf("%w: cap for %q, workspace %q", ErrCapWorkspace, rec.Cap.Workspace, rec.ID)
+	}
+	// The usage totals are copied as this workspace's, so an export that names
+	// another workspace, or none, is refused.
+	if rec.Usage.Workspace != rec.ID {
+		return View{}, fmt.Errorf("%w: usage for %q, workspace %q", ErrUsageWorkspace, rec.Usage.Workspace, rec.ID)
 	}
 	counts, err := countsByState(rec.Beads)
 	if err != nil {
@@ -196,12 +221,17 @@ func actionsFor(state registry.State) ([]Action, bool) {
 }
 
 // countsByState tallies beads by state, in state-name order so the view does
-// not depend on the order the source holds its beads in.
+// not depend on the order the source holds its beads in. A bead whose state is
+// not the store's set is refused by its index alone: the state may hold text
+// the view must not echo.
 func countsByState(beads []Bead) ([]StateCount, error) {
 	tally := make(map[string]int, len(beads))
 	for i, b := range beads {
 		if b.State == "" {
 			return nil, fmt.Errorf("%w: bead %d", ErrEmptyBeadState, i)
+		}
+		if !beadStates[b.State] {
+			return nil, fmt.Errorf("%w: bead %d", ErrUnknownBeadState, i)
 		}
 		tally[b.State]++
 	}
