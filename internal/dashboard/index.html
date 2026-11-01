@@ -5615,16 +5615,20 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) last
 // the refresh that follows the drop, and the page holds the state it has until
 // then (gt-rpble, gt-3q3go).
 // A tick more than two intervals after the last one is the page's own timer
-// having been held — a hidden, frozen or asleep tab — and says nothing about the
-// stream, whose events are still queued behind it. Such a tick moves the clock
-// rather than dropping, so only a stream silent for SILENT_MS of page-awake time
-// is replaced (gt-t0qi7).
-let lastTick = Date.now();
+// having been held — a frozen or asleep tab — and the events it still holds are
+// queued behind it, so the gap is no evidence about the stream. The first such
+// tick, and any gap longer than SILENT_MS, move the clock rather than dropping;
+// a stream that stays silent behind a frozen tab is still replaced once its
+// ticks run again. A tick that stays late at throttle scale is a background tab
+// whose timers the browser slows while its events still arrive, so those are
+// measured and a stream silent there is still replaced (gt-t0qi7).
+let lastTick = Date.now(), lateRun = 0;
 setInterval(() => {
-  const now = Date.now(), late = now - lastTick > 2 * WATCHDOG_MS;
+  const now = Date.now(), gap = now - lastTick, late = gap > 2 * WATCHDOG_MS;
   lastTick = now;
   if (reconnecting) return; // a replacement is already on its way
-  if (late) { lastEvent = now; return; }
+  lateRun = late ? lateRun + 1 : 0;
+  if (late && (lateRun === 1 || gap > SILENT_MS)) { lastEvent = now; return; }
   if (now - lastEvent < SILENT_MS) return;
   dropStream();
   stream.close();

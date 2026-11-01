@@ -263,6 +263,49 @@ func TestWatchdogResetsOnVisible(t *testing.T) {
 	}
 }
 
+// Browsers slow a background tab's timers rather than holding them, so its
+// watchdog ticks arrive late every time. That is not a held tab: its events
+// still arrive, so a stream that stays silent there is the page's to replace,
+// and the amnesty for one late tick must not cover the whole run (gt-t0qi7).
+func TestWatchdogDropsASilentStreamInAThrottledTab(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	openStream(t, dom)
+	// A background tab's timers run about once a minute, and the stream sends
+	// nothing: the first late tick is the amnesty, and the run after it is
+	// measured.
+	for i := 0; i < 3; i++ {
+		pageExpr(t, dom, "__sleep(60000)")
+	}
+	if got := pageStreams(t, dom); got != 2 {
+		t.Fatalf("the page had %d streams after 3 min of throttled ticks, want the silent stream replaced", got)
+	}
+	if d := dom.element(t, "conn"); d.Text != "reconnecting" {
+		t.Errorf("#conn reads %q after the silent stream was replaced, want reconnecting", d.Text)
+	}
+}
+
+// A tab that sleeps has a gap no throttled tick has, so the sleep is forgivable
+// even when the tick before it was late: the page cannot tell a stream silent
+// through a sleep from a stream whose events are still queued behind it, and a
+// sleep is the tab's, not the stream's (gt-t0qi7).
+func TestWatchdogIgnoresASleepAfterALateTick(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	openStream(t, dom)
+	pageExpr(t, dom, "__sleep(60000)")  // the first throttled tick, amnestied
+	pageExpr(t, dom, "__sleep(60000)")  // the second, measured: 60 s of silence
+	pageExpr(t, dom, "__sleep(600000)") // then the machine sleeps for 10 min
+	if got := pageStreams(t, dom); got != 1 {
+		t.Fatalf("the page had %d streams after a sleep on a throttled tab, want the stream left alone", got)
+	}
+	if d := dom.element(t, "conn"); d.Text != "live" {
+		t.Errorf("#conn reads %q after the sleep, want the live stream untouched", d.Text)
+	}
+}
+
 // A connect that works clears the backoff, and it clears it before the reload a
 // dropped stream takes the page on: the reload ends the page in a browser, so a
 // reset that came after it would never run (gt-3q3go).
