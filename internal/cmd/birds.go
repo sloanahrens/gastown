@@ -26,9 +26,8 @@ var birdsCmd = &cobra.Command{
 	Long: `Check the birds' daily reports.
 
 A bird writes its daily report to <town>/.runtime/<bird>/reports/daily.json,
-the sidecar the dashboard's Birds panel reads. The bird_reports patrol raises an
-attention item when one is missing or late; gt birds due is the same check run
-by hand.`,
+the sidecar the dashboard's Birds panel reads. gt birds due prints the late
+ones.`,
 	RunE: requireSubcommand,
 }
 
@@ -70,7 +69,8 @@ func runBirdsDueCommand(cmd *cobra.Command, args []string, findTownRoot func() (
 
 // runBirdsDue prints one line per due reporter, then the request for it. It
 // returns a silent exit 1 when any report is due, so the caller's prompt can
-// branch on the status without parsing the text.
+// branch on the status without parsing the text. A failed write returns that
+// error instead, so a truncated list is never reported as a clean run.
 func runBirdsDue(w io.Writer, runtimeDir string, now time.Time, reporters []string) error {
 	reports := birdreports.ReadAll(runtimeDir, reporters, now, birdreports.MaxAge)
 	due := 0
@@ -79,21 +79,29 @@ func runBirdsDue(w io.Writer, runtimeDir string, now time.Time, reporters []stri
 			continue
 		}
 		if due > 0 {
-			fmt.Fprintln(w)
+			if _, err := fmt.Fprintln(w); err != nil {
+				return err
+			}
 		}
 		due++
-		fmt.Fprintln(w, birdDueLine(report))
-		fmt.Fprintln(w)
+		if _, err := fmt.Fprintln(w, birdDueLine(report)); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
 		request := birdreports.Request(report.Reporter, runtimeDir)
+		if !strings.HasSuffix(request, "\n") {
+			request += "\n"
+		}
 		if _, err := fmt.Fprint(w, request); err != nil {
 			return err
 		}
-		if !strings.HasSuffix(request, "\n") {
-			fmt.Fprintln(w)
-		}
 	}
 	if due == 0 {
-		fmt.Fprintf(w, "all %d daily reports are fresh\n", len(reports))
+		if _, err := fmt.Fprintf(w, "all %d daily reports are fresh\n", len(reports)); err != nil {
+			return err
+		}
 		return nil
 	}
 	return NewSilentExit(1)

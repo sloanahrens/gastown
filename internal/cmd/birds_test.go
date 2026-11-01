@@ -152,6 +152,98 @@ func TestBirdsDueCommandSilencesTheExitStatus(t *testing.T) {
 	}
 }
 
+// failOnPayload passes every write but the nth whose payload is exactly want,
+// which it fails. A test drives one output line's failure with it: which line
+// the writer is asked for is the command's own output, not a call count.
+type failOnPayload struct {
+	want   string
+	nth    int // the matching write to fail, counted from 1; 0 fails the first
+	seen   int
+	failed bool
+}
+
+func (w *failOnPayload) Write(p []byte) (int, error) {
+	if string(p) != w.want {
+		return len(p), nil
+	}
+	w.seen++
+	if w.seen == max(w.nth, 1) {
+		w.failed = true
+		return 0, errors.New("broken pipe")
+	}
+	return len(p), nil
+}
+
+// assertWriteFailure fails the test unless the write of what failed in w
+// surfaced as runBirdsDue's error, unsilenced: a failed line is a failed run,
+// never the exit status the caller reads as the answer.
+func assertWriteFailure(t *testing.T, w *failOnPayload, err error, what string) {
+	t.Helper()
+	if !w.failed {
+		t.Fatalf("the command never wrote %s, so no write failed", what)
+	}
+	if err == nil {
+		t.Fatalf("a failed write of %s did not fail the command", what)
+	}
+	if _, silent := IsSilentExit(err); silent {
+		t.Errorf("a failed write of %s exited silently as %v", what, err)
+	}
+}
+
+func TestBirdsDueReportsAFailedWriteOnEachLine(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		reporters []string
+		payload   string
+		nth       int
+	}{
+		{
+			name:      "the reporter's line",
+			reporters: []string{"owl"},
+			payload:   "owl: missing (no daily.json)\n",
+			nth:       1,
+		},
+		{
+			name:      "the blank line after a reporter's line",
+			reporters: []string{"owl"},
+			payload:   "\n",
+			nth:       1,
+		},
+		{
+			name:      "the blank line between two reporters",
+			reporters: []string{"eagle", "owl"},
+			payload:   "\n",
+			nth:       2,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// A town with no reports: every named reporter is due.
+			w := &failOnPayload{want: tt.payload, nth: tt.nth}
+			assertWriteFailure(t, w, runBirdsDue(w, t.TempDir(), birdsNow, tt.reporters), tt.name)
+		})
+	}
+}
+
+func TestBirdsDueReportsAFailedRequestWrite(t *testing.T) {
+	t.Parallel()
+	// A town with no reports: the reporter is due, so its request is written.
+	runtimeDir := t.TempDir()
+	w := &failOnPayload{want: birdreports.Request("owl", runtimeDir)}
+	assertWriteFailure(t, w, runBirdsDue(w, runtimeDir, birdsNow, []string{"owl"}), "the request")
+}
+
+func TestBirdsDueReportsAFailedAllFreshWrite(t *testing.T) {
+	t.Parallel()
+	runtimeDir := t.TempDir()
+	writeBirdReport(t, runtimeDir, "dunlin", time.Hour)
+	writeBirdReport(t, runtimeDir, "owl", 25*time.Hour)
+
+	w := &failOnPayload{want: "all 2 daily reports are fresh\n"}
+	assertWriteFailure(t, w, runBirdsDue(w, runtimeDir, birdsNow, []string{"dunlin", "owl"}), "the all-fresh line")
+}
+
 func TestBirdsDueNamesAReportItCannotRead(t *testing.T) {
 	t.Parallel()
 	runtimeDir := t.TempDir()
