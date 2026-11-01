@@ -220,7 +220,7 @@ func (r *BirdReportsReader) readBird(now time.Time, name string) (BirdReport, bo
 	raw, err := readReportsFile(filepath.Join(reports, birdSidecarName), birdSidecarMaxBytes)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		// No sidecar: the bird wrote a page and nothing to summarise it. The
+		// No sidecar: the bird wrote a page and nothing to summarize it. The
 		// page is still worth a row, and its own mtime is the only instant
 		// there is.
 		if !pageIsFile {
