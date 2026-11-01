@@ -1,6 +1,11 @@
 package cmd
 
 import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,47 +15,87 @@ import (
 	"github.com/steveyegge/gastown/internal/dashboard"
 )
 
-// The birds' reader is built over the town's runtime directory, and the command
-// says what its Birds panel reads.
-func TestDashboardBirdsWiring(t *testing.T) {
+// The birds' reader is built over the town's runtime directory.
+func TestDashboardBirdsRuntimeDir(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
 	if path, want := dashboardRuntimeDir(root), filepath.Join(root, ".runtime"); path != want {
 		t.Errorf("the birds are read from %q, want %q", path, want)
 	}
+}
 
-	long := dashboardCmd.Long
-	for _, want := range []string{"Birds panel", "daily.json", "26 hours"} {
-		if !strings.Contains(long, want) {
-			t.Errorf("gt dashboard's help does not name %q", want)
+// gt dashboard's help says what its Birds panel reads, in the whole paragraph
+// the command shows.
+func TestDashboardBirdsHelpParagraph(t *testing.T) {
+	t.Parallel()
+
+	const want = `The Birds panel lists the daily reports the town's birds leave for the operator:
+one row per bird with a report under <town>/.runtime/<bird>/reports, from its
+daily.json, with the daily.html page beside it openable from the row. A summary
+older than 26 hours is marked stale. The panel reads those files and writes
+nothing.`
+	var found []string
+	for _, para := range strings.Split(dashboardCmd.Long, "\n\n") {
+		if strings.Contains(para, "Birds panel") {
+			found = append(found, para)
 		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("gt dashboard's help has %d paragraphs about its Birds panel, want 1", len(found))
+	}
+	if found[0] != want {
+		t.Errorf("gt dashboard's Birds paragraph reads:\n%s\nwant:\n%s", found[0], want)
 	}
 }
 
-// The reader the command builds over the town's runtime directory returns the
-// row for a bird that wrote its daily report there. Pointing the helper at the
-// town root instead of its runtime directory leaves no row (gt-7f7nn).
-func TestDashboardBirdsReaderReadsTheRuntimeDir(t *testing.T) {
+// The hub the command builds answers /api/birds with the row for a bird that
+// wrote its daily report under the town's runtime directory, and serves the
+// bird's page from that directory. A hub wired to the town root instead of its
+// runtime directory answers no row and no page (gt-7f7nn).
+func TestDashboardHubServesTheBirdsRuntimeDir(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	// The town holds the report under its own .runtime; the reader is built by
-	// the helper the command uses, so a helper naming another directory leaves
-	// no row.
 	runtimeDir := filepath.Join(root, ".runtime")
-	writeBirdReport(t, runtimeDir, "dunlin", 2*time.Hour)
-	page := filepath.Join(runtimeDir, "dunlin", "reports", "daily.html")
-	if err := os.WriteFile(page, []byte("<html>all quiet</html>"), 0o644); err != nil {
+	reports := filepath.Join(runtimeDir, "dunlin", "reports")
+	if err := os.MkdirAll(reports, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The sidecar is dated off the same clock the hub's reader calls, so the
+	// row is fresh whatever date the suite runs on.
+	written := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	sidecar := fmt.Sprintf(`{"bird":"dunlin","written_at":%q,"title":"t","summary":"s"}`, written)
+	if err := os.WriteFile(filepath.Join(reports, "daily.json"), []byte(sidecar), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(reports, "daily.html"), []byte("<html>all quiet</html>"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	rows := dashboard.NewBirdReportsReader(dashboardRuntimeDir(root)).Read(birdsNow)
-
-	if len(rows) != 1 {
-		t.Fatalf("the reader wired to the town's runtime dir returned %d rows, want 1: %+v", len(rows), rows)
+	hub, closeSources, err := newDashboardHub(root, birdsNow, time.UTC, "", nil, nil, 0, 0, "", io.Discard)
+	if err != nil {
+		t.Fatalf("building the dashboard's hub: %v", err)
 	}
-	if got := rows[0]; got.Bird != "dunlin" || got.State != dashboard.BirdReportFresh || !got.HasPage {
-		t.Errorf("row for dunlin reads %+v, want a fresh row with its page", got)
+	defer closeSources()
+	handler := hub.Handler()
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/birds", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/api/birds: status %d (%s), want 200", rec.Code, rec.Body.String())
+	}
+	var rows []dashboard.BirdReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decoding /api/birds: %v (body %q)", err, rec.Body.String())
+	}
+	if len(rows) != 1 || rows[0].Bird != "dunlin" || rows[0].State != dashboard.BirdReportFresh {
+		t.Fatalf("/api/birds returned %+v, want the fresh row for dunlin", rows)
+	}
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://127.0.0.1/birds/dunlin/daily.html", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "all quiet") {
+		t.Errorf("/birds/dunlin/daily.html: status %d body %q, want the bird's page", rec.Code, rec.Body.String())
 	}
 }
