@@ -86,8 +86,8 @@ func TestSpecTickStopsSlingingAfterAnImageDriftRefusal(t *testing.T) {
 	if len(r.Deferred) != 4 {
 		t.Errorf("%s: deferred = %+v, want the refusal and the three not-tried skips", t.Name(), r.Deferred)
 	}
-	if len(f.labels) != 0 {
-		t.Errorf("%s: labels = %v, want none: a drift deferral is not a failure", t.Name(), f.labels)
+	if len(f.labels) != 0 || len(f.notes) != 0 {
+		t.Errorf("%s: labels = %v notes = %v, want no bead write: a drift deferral is not a failure and a held sling writes nothing", t.Name(), f.labels, f.notes)
 	}
 }
 
@@ -216,6 +216,20 @@ func TestSpecImageDriftMarkerFailuresDoNotStopASling(t *testing.T) {
 		r := runSpecDispatchCycle(env)
 		if *calls != 4 || len(r.Dispatched) != 4 {
 			t.Errorf("%s: Sling calls %d dispatched %d, want 4 and 4", t.Name(), *calls, len(r.Dispatched))
+		}
+		// The first sling says the hold check failed; its success then clears
+		// the broken file, so the slings after it read no marker at all.
+		said := 0
+		for _, e := range r.Dispatched {
+			if strings.Contains(e.Line, "image-drift marker unreadable, not holding") {
+				said++
+			}
+		}
+		if said != 1 {
+			t.Errorf("%s: %d lines say the hold check failed, want exactly the first sling's: %+v", t.Name(), said, r.Dispatched)
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("%s: the broken marker was not cleared by the sling that reached a session: %v", t.Name(), err)
 		}
 	})
 	t.Run("a marker that cannot be written", func(t *testing.T) {

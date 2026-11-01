@@ -39,7 +39,10 @@ type Marker struct {
 }
 
 // Store is the marker file. The zero Store has no file: it records nothing
-// and holds nothing.
+// and holds nothing. The file holds one marker: a refusal for another agent
+// replaces a standing one, so the first agent's slings are tried again before
+// HoldFor, and a sling that reaches a session clears only a marker that names
+// its own agent.
 type Store struct{ path string }
 
 // StoreFor is the marker of townRoot's town.

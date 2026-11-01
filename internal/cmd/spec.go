@@ -2194,13 +2194,21 @@ func specApplyOutcome(env specDispatchEnv, report *specDispatchReport, o specSli
 func specSlingOne(env specDispatchEnv, p specPendingSling) specSlingOutcome {
 	start := env.Now()
 	id, c, seat, entry := p.id, p.c, p.seat, p.entry
+	// driftNote says the hold check failed (an unreadable marker); it rides on
+	// the sling's line, whatever the outcome, so the failure is seen.
+	driftNote := ""
 	done := func(o specSlingOutcome) specSlingOutcome {
 		o.took = env.Now().Sub(start)
+		if driftNote != "" {
+			o.entry.Line += " (" + driftNote + ")"
+		}
 		return o
 	}
 	// A refusal for the lagging image stands for HoldFor: the slings behind it
 	// are not tried, so none creates a molecule it would burn (gt-uisom).
-	if held, line := env.imageDriftSkip(id, seat.Agent); held {
+	held, line, note := env.imageDriftSkip(id, seat.Agent)
+	driftNote = note
+	if held {
 		entry.Line = line
 		return done(specSlingOutcome{kind: specSlingSkipped, entry: entry})
 	}
@@ -3643,12 +3651,16 @@ func refuseOpenBlockers(read func(townRoot, beadID string) (*beadInfo, error)) f
 
 // imageDriftSkip reports whether a refusal of agent's seat for a lagging sandbox
 // image stands, and the skip line for bead when it does. A marker that cannot
-// be read holds nothing: the sling is tried as it was before the marker.
-func (e specDispatchEnv) imageDriftSkip(bead, agent string) (bool, string) {
+// be read holds nothing: the sling is tried as it was before the marker, and
+// note says so for the sling's line.
+func (e specDispatchEnv) imageDriftSkip(bead, agent string) (held bool, line, note string) {
 	held, m, err := e.Drift.Held(e.Now(), agent)
-	if err != nil || !held {
-		return false, ""
+	if err != nil {
+		return false, "", "image-drift marker unreadable, not holding: " + err.Error()
+	}
+	if !held {
+		return false, "", ""
 	}
 	return true, fmt.Sprintf("%s: not tried, the sandbox image lags the installed gt (a sling to %s was refused for it %s ago)",
-		bead, agent, e.Now().Sub(m.At).Round(time.Second))
+		bead, agent, e.Now().Sub(m.At).Round(time.Second)), ""
 }

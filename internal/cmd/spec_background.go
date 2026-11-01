@@ -151,12 +151,16 @@ func specHandOffPendingSlings(env specDispatchEnv, pending []specPendingSling, r
 		entry := p.entry
 		// A sling refused for the lagging image a moment ago holds the ones
 		// behind it: no job process is started for them (gt-uisom).
-		if held, line := env.imageDriftSkip(p.id, p.seat.Agent); held {
+		held, line, note := env.imageDriftSkip(p.id, p.seat.Agent)
+		if held {
 			entry.Line = line
 			specApplyOutcome(env, report, specSlingOutcome{kind: specSlingSkipped, entry: entry})
 			continue
 		}
 		entry.Line = fmt.Sprintf("%s: sling to %s on %s (%s) started in the background", p.id, p.c.Rig, p.seat.Agent, p.seat.Reason)
+		if note != "" {
+			entry.Line += " (" + note + ")"
+		}
 		report.Dispatched = append(report.Dispatched, entry)
 		report.Pending = append(report.Pending, specSlingJob{
 			Bead: p.id, Rig: p.c.Rig, Agent: p.seat.Agent, Reason: p.seat.Reason,
