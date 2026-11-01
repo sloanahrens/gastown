@@ -254,6 +254,58 @@ func TestPurgeDeletesThroughBd(t *testing.T) {
 	}
 }
 
+// flakyWriter refuses its first transient DeleteIssues calls with a Dolt
+// serialization failure, then hands every call to the wrapped writer.
+type flakyWriter struct {
+	Writer
+	transient int
+}
+
+func (w *flakyWriter) DeleteIssues(ids ...string) error {
+	if w.transient > 0 {
+		w.transient--
+		return errors.New("bd delete: serialization failure: transaction conflict")
+	}
+	return w.Writer.DeleteIssues(ids...)
+}
+
+// TestPurgeCountsRetriedChunks: a purge whose delete chunk rides out two
+// serialization failures deletes the chunk, reports no failed chunk, and counts
+// the chunk once in RetriedChunks. The backoff is injected, so nothing waits
+// (gt-ujklm, gt-n0mcm).
+func TestPurgeCountsRetriedChunks(t *testing.T) {
+	t.Parallel()
+	old := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	state := &fakeReaperState{
+		wisps: map[string]*fakeWisp{
+			"done-a": {id: "done-a", status: "closed", issueType: "task", createdAt: old, closedAt: old},
+			"done-b": {id: "done-b", status: "closed", issueType: "task", createdAt: old, closedAt: old},
+		},
+		ops: map[int][]string{},
+	}
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+	sleep, waits := recordingSleep()
+	w := &flakyWriter{Writer: state.writer(), transient: 2}
+
+	res, err := purge(db, w, "testdb", 7*24*time.Hour, 7*24*time.Hour, false, sleep)
+	if err != nil {
+		t.Fatalf("purge = %v, want nil after the retry succeeds", err)
+	}
+	if res.WispsPurged != 2 {
+		t.Errorf("WispsPurged = %d, want 2", res.WispsPurged)
+	}
+	if res.RetriedChunks != 1 {
+		t.Errorf("RetriedChunks = %d, want 1 (the one chunk that needed retries)", res.RetriedChunks)
+	}
+	if len(res.FailedChunks) != 0 {
+		t.Errorf("FailedChunks = %+v, want none", res.FailedChunks)
+	}
+	if !reflect.DeepEqual(*waits, []time.Duration{time.Second, 2 * time.Second}) {
+		t.Errorf("waits = %v, want [1s 2s] between the attempts", *waits)
+	}
+}
+
 // chunkWriter records the delete batches it receives and fails the batch that
 // holds an id in failOn, as bd refuses a chunk all or nothing.
 type chunkWriter struct {
@@ -429,9 +481,10 @@ func TestDeleteInChunksGivesUpAfterThreeAttempts(t *testing.T) {
 	}
 }
 
-// TestIsTransientDeleteError is the classification on its own: a serialization
-// failure, a lock wait timeout and a connection timeout may be retried, while
-// a refusal, a bad id and a nil error may not (gt-ujklm).
+// TestIsTransientDeleteError is the classification on its own: a rolled-back
+// conflict and a connection that died before the command ran may be retried.
+// A lost reply may not, because the delete may have landed; a refusal, a bad
+// id and a nil error may not either (gt-ujklm, gt-n0mcm).
 func TestIsTransientDeleteError(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -439,10 +492,14 @@ func TestIsTransientDeleteError(t *testing.T) {
 		err  error
 		want bool
 	}{
-		{name: "serialization failure", err: errors.New("Error 1213: Deadlock found"), want: true},
+		{name: "serialization failure", err: errors.New("Error 1213 (40001): serialization failure: transaction conflict"), want: true},
+		{name: "restart advice", err: errors.New("Error 1213 (40001): try restarting transaction"), want: true},
 		{name: "lock wait timeout", err: errors.New("Error 1205: Lock wait timeout exceeded"), want: true},
-		{name: "connection timeout", err: errors.New("read tcp: i/o timeout"), want: true},
-		{name: "dropped connection", err: errors.New("invalid connection"), want: true},
+		{name: "dropped before the command ran", err: errors.New("Error: failed to open database: schema skew check: probing schema_migrations existence: invalid connection"), want: true},
+		{name: "reply lost to a read timeout", err: errors.New("[mysql] read tcp 127.0.0.1:65473->127.0.0.1:55107: i/o timeout"), want: false},
+		{name: "connection refused", err: errors.New("dial tcp 127.0.0.1:3307: connect: connection refused"), want: false},
+		{name: "connection reset by peer", err: errors.New("read tcp: connection reset by peer"), want: false},
+		{name: "context deadline exceeded", err: errors.New("bd delete: context deadline exceeded"), want: false},
 		{name: "refused chunk", err: errors.New("bd delete: w-a is still referenced"), want: false},
 		{name: "bad id", err: errors.New("no such issue: w-a"), want: false},
 		{name: "nil", err: nil, want: false},
