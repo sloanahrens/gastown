@@ -847,6 +847,8 @@ type Daemon struct {
 	// rebuildHMRenameFn replaces the swap's renames in tests; nil is os.Rename.
 	rebuildHMRunning  atomic.Bool
 	rebuildHMRenameFn rebuildHMRenameFunc
+	// rebuildHMAlert is the job's failure alert state (rebuild_hm.go).
+	rebuildHMAlert rebuildHMAlertState
 
 	// jevDedupeRunning is the jev_dedupe pass's single-flight guard
 	// (jev_dedupe.go). A pass makes network calls, so it runs on its own

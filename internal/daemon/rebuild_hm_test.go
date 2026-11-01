@@ -622,6 +622,43 @@ func TestRebuildHMFailedInstallEscalatesUnderItsOwnKey(t *testing.T) {
 	}
 }
 
+// TestRebuildHMFailedInstallClearsNothing: a failed install leaves the job's alert
+// open for the operator to read, so a cycle that fails sends no clear under any
+// key. Each row first checks that its install did fail, so the clear check runs on
+// a real failure.
+func TestRebuildHMFailedInstallClearsNothing(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		mutate func(*rebuildHMAnswers)
+	}{
+		{name: "checkout fails", mutate: func(a *rebuildHMAnswers) { a.checkoutErr = true }},
+		{name: "go install fails", mutate: func(a *rebuildHMAnswers) { a.buildErr = true }},
+		{name: "the build does not report its sha", mutate: func(a *rebuildHMAnswers) { a.builtOut = "hm dev\n" }},
+		{name: "keeping the installed hm fails", mutate: func(a *rebuildHMAnswers) { a.renameAsideErr = true }},
+		{name: "the new hm does not rename into place, and the rollback holds", mutate: func(a *rebuildHMAnswers) { a.renameIntoErr = true }},
+		{name: "the new hm does not rename into place, and the rollback fails", mutate: func(a *rebuildHMAnswers) { a.renameIntoErr, a.rollbackErr = true, true }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			a := rebuildHMBehindAnswers()
+			tc.mutate(&a)
+			r := newRebuildHMRig(t, a)
+
+			if !r.d.runRebuildHM() {
+				t.Fatal("a failed install reached no verdict, so the interval would not hold")
+			}
+			if n := len(r.rec.Escalations()); n != 1 {
+				t.Fatalf("escalations = %d, want the one failed install", n)
+			}
+			if clears := r.rec.Clears(); len(clears) != 0 {
+				t.Errorf("clears = %+v, want none: a failed install must leave the alert open", clears)
+			}
+		})
+	}
+}
+
 // TestRebuildHMHaltedSwapEscalatesHighUnderItsOwnKey: a swap whose rollback also
 // failed leaves the installed path empty. It escalates at HIGH under the job's own
 // key, and the message names hm.prev as the file to restore from (acceptance 2).
@@ -775,6 +812,97 @@ func TestRebuildHMIsQuietWhenCurrent(t *testing.T) {
 		t.Errorf("the cycle built an hm that is already current: %v", c.argv)
 	}
 	r.wantNoInstall()
+}
+
+// TestRebuildHMClearsOnceWhileCurrent: an hm that stays current is cleared once by
+// this process. Each hourly cycle after that has no alert to close and sends no clear.
+func TestRebuildHMClearsOnceWhileCurrent(t *testing.T) {
+	t.Parallel()
+	a := rebuildHMBehindAnswers()
+	a.installedSHA = rebuildHMHeadSHA
+	r := newRebuildHMRig(t, a)
+
+	for i := 0; i < 2; i++ {
+		if !r.d.runRebuildHM() {
+			t.Fatalf("cycle %d: a current hm reported no verdict", i+1)
+		}
+	}
+	if clears := r.rec.Clears(); len(clears) != 1 {
+		t.Errorf("clears over two current cycles = %d, want 1", len(clears))
+	}
+}
+
+// TestRebuildHMClearsAgainAfterAFailedInstall: a failed install raises the alert, so
+// the next verdict that leaves no failed install clears it, and the verdicts after
+// that send no clear. The answers carry over from one step to the next.
+func TestRebuildHMClearsAgainAfterAFailedInstall(t *testing.T) {
+	t.Parallel()
+	r := newRebuildHMRig(t, rebuildHMBehindAnswers())
+
+	steps := []struct {
+		name       string
+		mutate     func(*rebuildHMAnswers)
+		wantClears int
+	}{
+		{
+			name:       "hm is current",
+			mutate:     func(a *rebuildHMAnswers) { a.installedSHA = rebuildHMHeadSHA },
+			wantClears: 1,
+		},
+		{
+			name: "the install fails",
+			mutate: func(a *rebuildHMAnswers) {
+				a.installedSHA, a.buildErr = rebuildHMInstalledSHA, true
+			},
+			wantClears: 1,
+		},
+		{
+			name:       "hm is current again",
+			mutate:     func(a *rebuildHMAnswers) { a.installedSHA, a.buildErr = rebuildHMHeadSHA, false },
+			wantClears: 2,
+		},
+		{
+			name:       "hm is still current",
+			mutate:     func(*rebuildHMAnswers) {},
+			wantClears: 2,
+		},
+	}
+	for _, step := range steps {
+		step.mutate(&r.a)
+		if !r.d.runRebuildHM() {
+			t.Fatalf("%s: the cycle reported no verdict", step.name)
+		}
+		if clears := r.rec.Clears(); len(clears) != step.wantClears {
+			t.Errorf("%s: clears = %d, want %d", step.name, len(clears), step.wantClears)
+		}
+	}
+}
+
+// TestRebuildHMRetriesAFailedClear: a clear that does not reach the town is sent
+// again on the next verdict, and once one reaches the town the job sends no more.
+func TestRebuildHMRetriesAFailedClear(t *testing.T) {
+	t.Parallel()
+	a := rebuildHMBehindAnswers()
+	a.installedSHA = rebuildHMHeadSHA
+	r := newRebuildHMRig(t, a)
+	r.rec.Fail(notifyfake.KindClear, errors.New("gt escalate: Dolt is unreachable"))
+
+	if !r.d.runRebuildHM() {
+		t.Fatal("the first current cycle reported no verdict")
+	}
+	if clears := r.rec.Clears(); len(clears) != 1 {
+		t.Fatalf("clears after the failed clear = %d, want 1", len(clears))
+	}
+
+	r.rec.Fail(notifyfake.KindClear, nil)
+	for _, want := range []int{2, 2} {
+		if !r.d.runRebuildHM() {
+			t.Fatal("a current cycle reported no verdict")
+		}
+		if clears := r.rec.Clears(); len(clears) != want {
+			t.Errorf("clears = %d, want %d", len(clears), want)
+		}
+	}
 }
 
 // buildCallOrNil is the go install call the cycle made, or nil when it made none.
