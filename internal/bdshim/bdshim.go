@@ -53,6 +53,10 @@ type Env struct {
 	Run func(path string, argv []string) error
 	// Handlers is the tracker verb registry.
 	Handlers map[string]Handler
+	// Stdout takes a tracker handler's answer, in bd's shape; a command a
+	// handler does not answer writes nothing here, since bd.real keeps the
+	// process's own stdout.
+	Stdout io.Writer
 	// Stderr takes the shim's own messages, never bd's.
 	Stderr io.Writer
 }
