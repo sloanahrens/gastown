@@ -349,6 +349,8 @@ func TestDaemonScratchRefusesBeforeAnyFileOrCommand(t *testing.T) {
 		{"a relative --root", func(_ *testing.T, r *daemonScratchRig) { r.flags.root = "town" }, "--root \"town\" is not absolute"},
 		{"a relative --compose-file", func(_ *testing.T, r *daemonScratchRig) { r.flags.composeFile = "compose.yml" }, "--compose-file \"compose.yml\" is not absolute"},
 		{"a relative token file", func(_ *testing.T, r *daemonScratchRig) { r.flags.omTokenFile = "secrets/om-token" }, "--om-token-file \"secrets/om-token\" is not absolute"},
+		{"a token file flag given blank", func(_ *testing.T, r *daemonScratchRig) { r.flags.omTokenFile, r.flags.omTokenFileSet = "", true }, "was given blank"},
+		{"a token file flag given whitespace", func(_ *testing.T, r *daemonScratchRig) { r.flags.omTokenFile, r.flags.omTokenFileSet = "   ", true }, "was given blank"},
 		{"the compose file inside --root", func(_ *testing.T, r *daemonScratchRig) {
 			r.flags.composeFile = filepath.Join(r.flags.root, "compose.yml")
 		}, "inside --root"},
@@ -473,7 +475,7 @@ func TestDaemonScratchFlagsAreWired(t *testing.T) {
 	if err := c.Execute(); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	want := scratchFlags{liveRoot: "/l", root: "/r", composeFile: "/c", image: "gt-daemon:abc1234", project: "gt-scratch", container: "gt-scratch-daemon-1", omTokenFile: "/t",
+	want := scratchFlags{liveRoot: "/l", root: "/r", composeFile: "/c", image: "gt-daemon:abc1234", project: "gt-scratch", container: "gt-scratch-daemon-1", omTokenFile: "/t", omTokenFileSet: true,
 		forge: forgePorts{httpPort: 3100, sshPort: 2322, httpSet: true, sshSet: true}}
 	if gotAction != "up" || got != want {
 		t.Errorf("action %q flags %+v, want up and %+v", gotAction, got, want)
@@ -492,6 +494,29 @@ func TestDaemonScratchFlagsAreWired(t *testing.T) {
 	c2.SilenceUsage, c2.SilenceErrors = true, true
 	if err := c2.Execute(); err != nil || gotAction != "down" || got.composeFile != "/c" {
 		t.Errorf("down: err %v action %q flags %+v", err, gotAction, got)
+	}
+}
+
+// A --om-token-file given blank through the command is refused by render before
+// anything is printed or run: the flag's presence is read from the command's
+// flag set, so this is the path that sets omTokenFileSet in production.
+func TestDaemonScratchBlankTokenFlagRefusedThroughTheCommand(t *testing.T) {
+	t.Parallel()
+	r := newDaemonScratchRig(t)
+	c := newDaemonScratchCmd(func(ctx context.Context, action string, out io.Writer, f scratchFlags) error {
+		return runDaemonScratch(ctx, action, f, r.deps)
+	})
+	c.SetArgs([]string{"render", "--live-root", r.flags.liveRoot, "--root", r.flags.root, "--compose-file", r.flags.composeFile,
+		"--image", r.flags.image, "--project", r.flags.project, "--container", r.flags.container, "--" + config.OMTokenFileFlag, ""})
+	c.SilenceUsage, c.SilenceErrors = true, true
+
+	err := c.Execute()
+
+	if err == nil || !strings.Contains(err.Error(), "was given blank") {
+		t.Fatalf("render error = %v, want a refusal for the blank token file", err)
+	}
+	if r.out.Len() != 0 || len(r.runs) != 0 {
+		t.Errorf("a refusal printed %d bytes and ran %d commands", r.out.Len(), len(r.runs))
 	}
 }
 

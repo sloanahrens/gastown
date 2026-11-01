@@ -29,7 +29,11 @@ type scratchFlags struct {
 	project     string
 	container   string
 	omTokenFile string // optional: the token file's path inside the container
-	forge       forgePorts
+	// omTokenFileSet is whether --om-token-file was given at all. A blank value on
+	// a flag the operator named is refused rather than read as unset, since it
+	// names no file and the render would carry no token mount.
+	omTokenFileSet bool
+	forge          forgePorts
 }
 
 // forgePorts are the scratch forge's two host ports as the flags gave them:
@@ -104,6 +108,7 @@ the live town.`,
 		sub.RunE = func(cmd *cobra.Command, _ []string) error {
 			f.forge.httpSet = cmd.Flags().Changed("forge-http-port")
 			f.forge.sshSet = cmd.Flags().Changed("forge-ssh-port")
+			f.omTokenFileSet = cmd.Flags().Changed(config.OMTokenFileFlag)
 			return run(cmd.Context(), name, cmd.OutOrStdout(), f)
 		}
 		if name != "down" {
@@ -194,6 +199,9 @@ func scratchSpecFor(f scratchFlags, d scratchDeps) (templates.ComposeSpec, error
 	}
 	if err := scratchGuards(f, d); err != nil {
 		return templates.ComposeSpec{}, err
+	}
+	if f.omTokenFileSet && strings.TrimSpace(f.omTokenFile) == "" {
+		return templates.ComposeSpec{}, fmt.Errorf("--%s was given blank; name the token file's absolute path inside the container, or leave the flag out to render no token mount", config.OMTokenFileFlag)
 	}
 	if f.omTokenFile != "" {
 		if err := requireAbs("--"+config.OMTokenFileFlag, f.omTokenFile); err != nil {
