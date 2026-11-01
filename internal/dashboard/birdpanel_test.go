@@ -84,7 +84,7 @@ func TestBirdPanelWithNoReaderReadsNothing(t *testing.T) {
 	}
 }
 
-// birdDrawnCell is one element the Birds block drew: its tag, its text and
+// birdDrawnCell is one element the Birds panel drew: its tag, its text and
 // class, the link it carries when it is one, and how many children it holds — a
 // leaf written through textContent has none.
 type birdDrawnCell struct {
@@ -97,7 +97,7 @@ type birdDrawnCell struct {
 	Kids   int    `json:"kids"`
 }
 
-// birdDrawnRow is one row of the Birds block: the class it wears, the cells of
+// birdDrawnRow is one row of the Birds panel: the class it wears, the cells of
 // its head in the order the block appended them, and its body line when it drew
 // one.
 type birdDrawnRow struct {
@@ -411,11 +411,11 @@ func drawBirdsInDOM(t *testing.T, state map[string]any) []drawnNeeds {
 	dom.call(t, "renderBirds", state)
 	v, err := dom.vm.RunString(needsYouWalk)
 	if err != nil {
-		t.Fatalf("reading the drawn Birds block: %v", err)
+		t.Fatalf("reading the drawn Birds panel: %v", err)
 	}
 	var got []drawnNeeds
 	if err := json.Unmarshal([]byte(v.String()), &got); err != nil {
-		t.Fatalf("reading the drawn Birds block: %v", err)
+		t.Fatalf("reading the drawn Birds panel: %v", err)
 	}
 	return got
 }
