@@ -467,7 +467,12 @@ a.hrow:hover{background:#19212b}
 
 <script>
 "use strict";
-const $ = id => document.getElementById(id);
+// blindBoxes is set for the length of a push to the detached box each closed
+// section's body ids answer with: a closed pane still draws its heading's note
+// and its section's summary line, while the body the reader cannot see costs
+// nothing until they open the section (gt-quuq5).
+let blindBoxes = null;
+const $ = id => (blindBoxes && blindBoxes[id]) || document.getElementById(id);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 const fmtDur = s => {
   if (s == null || s < 0) return "–";
@@ -601,6 +606,7 @@ function causeText(c) {
 // renderHealthMark draws the strip's pill as the deploys reader decided it
 // (health_mark: red, degraded or absent); an absent mark hides the pill.
 function renderHealthMark(s) {
+  if (pushSkip("healthmark", s)) return;
   const box = $("healthmark"), m = (s && s.deploys && s.deploys.health_mark) || null;
   box.hidden = !m;
   box.className = "pill " + (m && m.state === "red" ? "red" : "degraded");
@@ -618,6 +624,7 @@ function renderHealthMark(s) {
 // rather than no chip, since an absent chip would read as a town that is
 // dispatching.
 function renderHold(s) {
+  if (pushSkip("hold", s)) return;
   const box = $("hold"), h = (s && s.hold) || null;
   box.hidden = false;
   if (!h) { box.className = "quiet"; box.textContent = "dispatch ?"; box.title = "the hold file has not been read yet"; return; }
@@ -640,6 +647,7 @@ function renderHold(s) {
 // renderHealth shows the verdict and, when it is not green, the worst cause
 // beside it, so the pill answers "why" without reading the line under it.
 function renderHealth(h) {
+  if (pushSkip("health", h)) return;
   const v = (h && h.verdict) || "unknown";
   const causes = (h && h.causes) || [];
   const p = $("verdict");
@@ -691,6 +699,7 @@ function seatFacts(m) {
 // says so, in the strip's own dim: a strip that drew a zero it had not read
 // would answer the operator with a fact it invented.
 function renderStrip(s) {
+  if (pushSkip("strip", s)) return;
   const box = $("strip");
   box.replaceChildren();
   const sm = s.summary || {};
@@ -825,6 +834,7 @@ function toggleModels() {
 // that looks like a value. A folded line keeps no table in the DOM, and one
 // with nothing to open says so in a line.
 function renderModelsPanel(s) {
+  if (pushSkip("models", s)) return;
   const box = $("modelspanel");
   if (!modelsOpen) { box.replaceChildren(); return; }
   const m = s.models;
@@ -954,6 +964,7 @@ function polecatNames(polecats) {
 // One compact line per rig: whether it is parked, and where its work is. A
 // count the dashboard could not read says so rather than showing a zero.
 function renderRigs(s) {
+  if (pushSkip("rigs", s)) return;
   const box = $("rigs");
   box.replaceChildren();
   const rows = s.rigs || [];
@@ -1249,6 +1260,7 @@ function workKey(s) {
 }
 
 function renderWork(s, force) {
+  if (!force && pushSkip("work", s)) return;
   const box = $("work");
   const pcs = s.polecats || [], q = s.queue;
   const rSeats = readOf(s, "seats"), rQueue = readOf(s, "queue");
@@ -1435,6 +1447,7 @@ function loadSummary(loads) {
 }
 
 function renderTrend(s) {
+  if (pushSkip("trend", s)) return;
   const sec = $("trendsec"), box = $("trend");
   const top = landingsScroll(box);
   const t = s.trend;
@@ -1643,6 +1656,7 @@ function landingTable(s, names, rows, waiting) {
 // settings/config.json. Every string goes through el(), which writes
 // textContent, so a title carrying markup reads as that markup (gt-9ktrr).
 function renderNews(s) {
+  if (pushSkip("news", s)) return;
   const sec = $("newssec"), box = $("news"), note = $("newsnote");
   const f = s.news;
   if (!f) { sec.hidden = true; box.replaceChildren(); box.classList.remove("stale"); note.textContent = ""; note.className = "r"; return; }
@@ -1681,6 +1695,7 @@ function renderNews(s) {
 }
 
 function renderMachine(s) {
+  if (pushSkip("machine", s)) return;
   const box = $("machine");
   box.replaceChildren();
   const r = readOf(s, "machine");
@@ -1780,6 +1795,7 @@ function drawAppPower(box, p) {
 }
 
 function renderCloud(s) {
+  if (pushSkip("cloud", s)) return;
   const box = $("cloud"), note = $("cloudnote");
   box.replaceChildren();
   const c = s.cloud;
@@ -2140,6 +2156,7 @@ const DEPLOY_REF_CH = 13;
 const DEPLOY_STAGING_TAG_CH = 9;
 
 function renderDeploys(s) {
+  if (pushSkip("deploys", s)) return;
   const box = $("deploys"), note = $("deploysnote");
   box.replaceChildren();
   const d = s.deploys;
@@ -2371,6 +2388,7 @@ function paintTierIcon(ts) {
 }
 
 function renderTierSweep(s) {
+  if (pushSkip("tiersweep", s)) return;
   const box = $("tiersweep");
   box.replaceChildren();
   const ts = s.tiersweep;
@@ -2606,6 +2624,7 @@ function renderForgejoActs(a) {
 // replaced, so a reader who has scrolled up keeps their place and following
 // resumes on its own once they come back to the bottom.
 function renderForgejo(s) {
+  if (pushSkip("forgejo", s)) return;
   const box = $("forgejo");
   const follow = box.scrollHeight - box.scrollTop - box.clientHeight <= 4;
   box.replaceChildren();
@@ -2716,6 +2735,7 @@ function costHeadline(list) {
 
 function sec(v) { return v == null ? "–" : fmtDur(v); }
 function renderOM(s) {
+  if (pushSkip("om", s)) return;
   const box = $("om");
   box.replaceChildren();
   const om = s.om;
@@ -2870,6 +2890,7 @@ function renderOM(s) {
 // the block because a panel's note is where a reading's age is read from, so a
 // stopped dispatcher is one reading in one place.
 function renderOverseer(s) {
+  if (pushSkip("overseer", s)) return;
   const box = $("overseer");
   box.replaceChildren();
   drawHeartbeat(box, s);
@@ -3048,6 +3069,7 @@ function foldAttnRow(head, caret, body, r) {
 // a question is answered with gt answer, a comment on the bead, from a
 // terminal.
 function renderAttention(s) {
+  if (pushSkip("attention", s)) return;
   attentionState = s;
   const note = $("attentionnote");
   const at = s.attention;
@@ -3784,6 +3806,7 @@ function jevRow(b) {
 // folded. The counts come from the server's Tally, so the page never adds them
 // up.
 function renderJev(s) {
+  if (pushSkip("jev", s)) return;
   const sec = $("jevsec"), box = $("jev"), note = $("jevnote");
   const sc = s.jev_scorecard, r = readOf(s, "jev_scorecard");
   box.replaceChildren();
@@ -3842,6 +3865,7 @@ const MG_MEANING = {
 // Every string is the reader's, already stripped and capped, and is set with
 // textContent only.
 function renderMango(s) {
+  if (pushSkip("mango", s)) return;
   const sec = $("mangosec"), box = $("mango"), note = $("mangonote");
   const m = s.mango;
   box.replaceChildren();
@@ -4443,6 +4467,7 @@ function costSummary(box, s, d, u) {
 // and the GCP budget line go above and under the table, and the charts stay in
 // the greyed part.
 function renderCost(s) {
+  if (pushSkip("cost", s)) return;
   const box = $("cost"), note = $("costnote");
   box.replaceChildren();
   // The header starts every render with no status class: the colour is whatever
@@ -4589,6 +4614,7 @@ function paintEvents() {
 // newest ends up at the top. The state repeats alerts the stream has already
 // delivered, which takeEvent drops.
 function renderEvents(s) {
+  if (pushSkip("events", s)) return;
   ((s && s.alerts) || []).forEach(a => takeEvent(a, eventsPrimed));
   eventsPrimed = true;
   paintEvents();
@@ -4905,7 +4931,91 @@ function drawQueueList(box, s) {
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderHold(state); renderAttention(state); renderOverseer(state); renderCost(state); renderRigs(state); renderWork(state); renderTrend(state); renderNews(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderJev(state); renderMango(state); renderOM(state); renderEvents(state); paintFolds(state); }
+// A push draws a pane only when the reading it is drawn from changed since its
+// last draw, and leaves a closed section's body for the reader to open
+// (gt-quuq5). PANES is the one list of what a push draws: the section a pane
+// lives in (none for the top strip and the models line, which do not fold), the
+// body ids its draw writes, the reading it is drawn from, and the draw itself.
+// A field a draw reads belongs in its read list: a pane whose list leaves one
+// out stops following the reading the moment that field is the only one moving.
+const PANES = {
+  health: {read: h => h, draw: s => renderHealth(s.health)},
+  strip: {read: s => [s.summary, s.strip, s.trend, s.models, s.polecats, s.attention, s.machine], draw: s => renderStrip(s)},
+  models: {read: s => s.models, draw: s => renderModelsPanel(s)},
+  hold: {read: s => s.hold, draw: s => renderHold(s)},
+  healthmark: {read: s => s.deploys, draw: s => renderHealthMark(s)},
+  attention: {sec: "attention", body: ["attention"], read: s => s.attention, draw: s => renderAttention(s)},
+  overseer: {sec: "overseer", body: ["overseer"], read: s => [s.overseer, s.dispatch, s.reports, s.queue, s.attention, s.deepreview], draw: s => renderOverseer(s)},
+  cost: {sec: "cost", body: ["cost"], read: s => [s.spend, s.usage, s.cost_providers, s.cloud, s.cost_charts, s.rework, s.jev_spend, s.deepreview], draw: s => renderCost(s)},
+  rigs: {sec: "rigs", body: ["rigs"], read: s => [s.rigs, s.queue], draw: s => renderRigs(s)},
+  // The work pane's own key holds the list's filters and the rows a reader has
+  // opened, so a section opened after a blind draw asks for the body it never
+  // drew rather than one renderWork's key says is current.
+  work: {sec: "work", body: ["work"], read: s => [s.polecats, s.queue, s.summary, s.summary_at, s.dispatch], draw: s => renderWork(s, true)},
+  trend: {sec: "landings", body: ["trend"], read: s => [s.trend, s.queue, s.polecats, s.om], draw: s => renderTrend(s)},
+  news: {sec: "news", body: ["news"], read: s => s.news, draw: s => renderNews(s)},
+  machine: {sec: "machine", body: ["machine"], read: s => [s.machine, s.loads], draw: s => renderMachine(s)},
+  cloud: {sec: "cloud", body: ["cloud"], read: s => s.cloud, draw: s => renderCloud(s)},
+  deploys: {sec: "cloud", body: ["deploys"], read: s => s.deploys, draw: s => renderDeploys(s)},
+  forgejo: {sec: "forgejo", body: ["forgejoacts", "forgejo"], read: s => s.forgejo, draw: s => renderForgejo(s)},
+  tiersweep: {sec: "tiersweep", body: ["tiersweep"], read: s => s.tiersweep, draw: s => renderTierSweep(s)},
+  jev: {sec: "jev", body: ["jev"], read: s => s.jev_scorecard, draw: s => renderJev(s)},
+  mango: {sec: "mango", body: ["mango"], read: s => s.mango, draw: s => renderMango(s)},
+  om: {sec: "om", body: ["om"], read: s => s.om, draw: s => renderOM(s)},
+  events: {sec: "events", body: ["events"], read: s => s.alerts, draw: s => renderEvents(s)},
+};
+const PANE_NAMES = Object.keys(PANES);
+// pushing is the reading a push is drawing, or null when a reader's click drew
+// a pane: a click's draw follows the click and is never skipped.
+let pushing = null;
+let pushForce = false;
+const pushKeys = {};
+// The fold a section key names, or null for a pane that is not in a section.
+function paneFold(key) {
+  for (const f of folds) if (f.key === key) return f;
+  return null;
+}
+// pushBegin opens a push. Every closed section's body ids answer with a detached
+// box for its length (gt-quuq5), and force redraws each pane whatever its
+// reading, which is what the 15 s tick asks for.
+function pushBegin(s, force) {
+  pushing = s;
+  pushForce = !!force;
+  blindBoxes = {};
+  for (const name of PANE_NAMES) {
+    const p = PANES[name];
+    if (!p.sec) continue;
+    const f = paneFold(p.sec);
+    if (!f || !f.closed) continue;
+    for (const id of p.body) blindBoxes[id] = document.createElement("div");
+  }
+}
+// pushEnd closes it. It runs in a finally, so a draw that throws cannot leave
+// the page answering every body read from a detached box.
+function pushEnd() { pushing = null; pushForce = false; blindBoxes = null; }
+// pushSkip is a pane's first line on a push: true leaves the pane where it is
+// because nothing it draws from moved since its last draw.
+function pushSkip(name, s) {
+  if (!pushing) return false;
+  const key = JSON.stringify([PANES[name].read(s)]);
+  if (!pushForce && pushKeys[name] === key) return true;
+  pushKeys[name] = key;
+  return false;
+}
+// openSection draws the panes of a section the reader has just opened: a closed
+// section's body is skipped on every push, so the open is what draws it.
+function openSection(key) {
+  if (!state) return;
+  for (const name of PANE_NAMES) if (PANES[name].sec === key) PANES[name].draw(state);
+}
+
+function renderAll() {
+  if (!state) return;
+  pushBegin(state);
+  try { renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderHold(state); renderAttention(state); renderOverseer(state); renderCost(state); renderRigs(state); renderWork(state); renderTrend(state); renderNews(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderJev(state); renderMango(state); renderOM(state); renderEvents(state); }
+  finally { pushEnd(); }
+  paintFolds(state);
+}
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 // The feed's class chips: every class but "plain" is on until the reader turns
@@ -5157,6 +5267,9 @@ function foldable(root, opts) {
   const toggle = () => {
     fold.closed = !fold.closed;
     fold.paint(state);
+    // A closed section's body is skipped on every push (gt-quuq5), so opening
+    // it is what draws it.
+    if (!fold.closed) openSection(key);
     foldSave(key, fold.closed);
     if (opts.onToggle) opts.onToggle(fold.closed);
   };
@@ -5257,8 +5370,11 @@ setInterval(() => {
   stream.close();
   connect();
 }, WATCHDOG_MS);
-// Ages and elapsed times drift between pushes; redraw the cheap parts locally.
-setInterval(() => { if (state) { renderStrip(state); renderWork(state); renderTierSweep(state); renderForgejo(state); renderNews(state); renderHold(state); } }, 15000);
+// Ages and elapsed times drift between pushes, and the clock is not part of a
+// pane's reading, so the tick redraws the panes whose drawing carries one from
+// the reading the page already holds — forced past the push's skip, and still
+// leaving a closed section's body alone (gt-quuq5).
+setInterval(() => { if (state) { pushBegin(state, true); try { renderStrip(state); renderWork(state); renderTierSweep(state); renderForgejo(state); renderNews(state); renderHold(state); renderRigs(state); renderMachine(state); renderCost(state); renderOM(state); renderJev(state); renderOverseer(state); renderAttention(state); renderCloud(state); renderDeploys(state); renderMango(state); renderEvents(state); } finally { pushEnd(); } } }, 15000);
 </script>
 </body>
 </html>
