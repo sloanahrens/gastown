@@ -253,6 +253,8 @@ func (d *Daemon) runLandingWorkerManager(lw *landingWorkers) {
 			// The om the workers review with is a per-daemon reading, not a
 			// per-rig one, and it lives off this loop's goroutine (om_skew.go).
 			d.startOMSkewMonitor()
+			// The hm that the hm_sync patrol runs is a per-daemon reading too (hm_skew.go).
+			d.startHMSkewMonitor()
 			// So is the watch over the deploys that run after these landings
 			// (deploy_watch.go): it polls the same rigs' repositories.
 			d.startDeployWatch()
