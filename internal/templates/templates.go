@@ -107,10 +107,12 @@ func (t *Templates) RoleNames() []string {
 }
 
 // PolecatLifecycleMarker is a unique string present in the polecat CLAUDE.md
-// template. Used to detect whether a CLAUDE.md file contains the Gas Town
-// overlay (vs. project-specific content). If an existing CLAUDE.md lacks this
-// marker, polecat lifecycle instructions are appended — the agent won't know
-// to call `gt done` otherwise.
+// template, and the one statement of the overlay rule: a root CLAUDE.md that
+// carries it is the rig-written Gas Town overlay, not repo source. gt done
+// unstages such a file, the submission path strips it from the branch, and the
+// uncommitted-work check (internal/git hasOverlayCLAUDE) ignores it. If an
+// existing CLAUDE.md lacks the marker, polecat lifecycle instructions are
+// appended: the agent won't know to call `gt done` otherwise.
 const PolecatLifecycleMarker = "IDLE POLECAT HERESY"
 
 // CreatePolecatCLAUDEmd writes the polecat CLAUDE.md template to the worktree.
