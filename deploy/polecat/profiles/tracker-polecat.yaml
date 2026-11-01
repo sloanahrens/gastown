@@ -16,7 +16,7 @@
 # /v1/issues/* and the batch update op both set assignee on any bead that another
 # actor does not hold in_progress (tracker/store/postgres_update.go). A rule
 # matches method and path, not the body, so no line here can refuse that. The
-# server guard is gt-26dvk.
+# server guard is gt-fxwh7.
 # The admin routes, and the four routes the doc marks not verified, are left out
 # so a seat token that was ever minted with admin scope still could not reach
 # them from a sandbox. A grep of the four found no polecat caller: stats and

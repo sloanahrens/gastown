@@ -361,19 +361,35 @@ func TestTrackerPolecatProfileAllowsNoAdminRoute(t *testing.T) {
 	}
 }
 
-// TestTrackerPolecatProfileAllowsNoDeleteRoute proves the profile refuses
-// POST /v1/issues:delete in each form a server resolves to it. A bead delete is
-// town-side, and the server does not check that the caller owns the bead, so a
-// seat must not reach it (gt-zbpf0).
-func TestTrackerPolecatProfileAllowsNoDeleteRoute(t *testing.T) {
-	t.Parallel()
-	p := readProfile(t, trackerProfilePath)
-	for _, form := range routedForms("/v1/issues:delete") {
-		route := requestPath(t, form)
-		if profileAllows(p, "POST", route) {
-			t.Errorf("POST %s (requested as %s) matches an allow rule in %s, and the profile must refuse it", route, form, trackerProfilePath)
+// refuseEveryMethod fails the test when an allow rule in p admits any method on
+// route in a form a server resolves it to. pattern is a glob that admits route, so
+// a canary rule shows the matcher reaches route in every form: a refusal cannot
+// pass only because nothing is admitted.
+func refuseEveryMethod(t *testing.T, p profileFile, route, pattern string) {
+	t.Helper()
+	for _, method := range httpMethods {
+		for _, form := range routedForms(route) {
+			got := requestPath(t, form)
+			if profileAllows(p, method, got) {
+				t.Errorf("%s %s (requested as %s) matches an allow rule in %s, and the profile must refuse it (gt-zbpf0)", method, got, form, trackerProfilePath)
+			}
 		}
 	}
+	canary := profileFile{Endpoints: []profileEndpoint{{Rules: []profileRule{allowRule("POST", pattern)}}}}
+	for _, form := range routedForms(route) {
+		if got := requestPath(t, form); !profileAllows(canary, "POST", got) {
+			t.Fatalf("%s resolves to %s, which the canary rule POST %s does not admit, so the refusal check would pass whatever the profile says", form, got, pattern)
+		}
+	}
+}
+
+// TestTrackerPolecatProfileAllowsNoDeleteRoute proves no method reaches
+// POST /v1/issues:delete in any form a server resolves it to. A bead delete is
+// town-side, and the server does not check that the caller owns the bead, so a
+// seat must not reach it through any method (gt-zbpf0).
+func TestTrackerPolecatProfileAllowsNoDeleteRoute(t *testing.T) {
+	t.Parallel()
+	refuseEveryMethod(t, readProfile(t, trackerProfilePath), "/v1/issues:delete", "/v1/issues:delete")
 }
 
 // TestTrackerPolecatProfileTransferRule holds the transfer route to the case the
@@ -381,29 +397,11 @@ func TestTrackerPolecatProfileAllowsNoDeleteRoute(t *testing.T) {
 // (tracker/client.Transfer is called only from the tracker's contract cases and
 // server tests). The effect checked is that no method reaches the route in any
 // form a server resolves to it, so a seat cannot hand a bead to another assignee
-// through it. This covers the transfer route only. Reassignment through PATCH and
-// the batch update op is not refused here, because a rule matches no body (gt-26dvk).
-// If a seat caller appears, name it on gt-zbpf0 and change this test to allow
-// the route.
+// through it. This covers the transfer route only. If a seat caller appears, name
+// it on gt-zbpf0 and change this test to allow the route.
 func TestTrackerPolecatProfileTransferRule(t *testing.T) {
 	t.Parallel()
-	p := readProfile(t, trackerProfilePath)
-	for _, method := range httpMethods {
-		for _, form := range routedForms("/v1/issues/gt-0f305/transfer") {
-			route := requestPath(t, form)
-			if profileAllows(p, method, route) {
-				t.Errorf("%s %s (requested as %s) matches an allow rule in %s, so a seat could hand a bead to another assignee through it (gt-zbpf0)", method, route, form, trackerProfilePath)
-			}
-		}
-	}
-	// A matcher that admits nothing would pass the loop above whatever the file
-	// says, so a canary rule that does admit the route must be seen to.
-	canary := profileFile{Endpoints: []profileEndpoint{{Rules: []profileRule{allowRule("POST", "/v1/issues/*/transfer")}}}}
-	for _, form := range routedForms("/v1/issues/gt-0f305/transfer") {
-		if route := requestPath(t, form); !profileAllows(canary, "POST", route) {
-			t.Fatalf("%s resolves to %s, which the canary transfer rule does not admit, so the refusal check above would pass whatever the profile says", form, route)
-		}
-	}
+	refuseEveryMethod(t, readProfile(t, trackerProfilePath), "/v1/issues/gt-0f305/transfer", "/v1/issues/*/transfer")
 }
 
 // TestTrackerPolecatProfileAllowsSeatRoutes proves each read and write the
