@@ -63,7 +63,27 @@ const (
 	// dindDataPath is where the sidecar's engine keeps its state, on the run's
 	// own volume.
 	dindDataPath = "/var/lib/docker"
+	// SeedVolume is the engine state a seed run (RenderSeed) fills with the images
+	// the packages' tests start. Each run copies it into the run's own volume
+	// before the sidecar starts, so the sidecar's engine has the images without
+	// any network and the seed itself is never written by a run.
+	SeedVolume = "gt-sweep-dind-seed"
+	// seedMount is where the copy step reads the seed, read-only.
+	seedMount = "/seed"
+	// ryukDisabled turns off the testcontainers reaper in the runner. The reaper
+	// is a container image the sidecar's engine cannot pull, and the sidecar's
+	// teardown removes every container the tests started.
+	ryukDisabledName  = "TESTCONTAINERS_RYUK_DISABLED"
+	ryukDisabledValue = "true"
+	// ContainerPrefix starts the name of every container a run makes (the runner,
+	// the sidecar), so a caller can tell whether a sweep is running.
+	ContainerPrefix = "gt-sweep-"
 )
+
+// seedCopyScript copies the seed into the run's volume, and fails the run when
+// the seed is empty: a seed that was never filled would otherwise copy nothing and
+// every Dolt-backed package would fail later on a missing image.
+const seedCopyScript = `[ -n "$(ls -A ` + seedMount + `)" ] || { echo "the seed volume ` + SeedVolume + ` is empty: run sweep-seed" >&2; exit 1; }; cp -a ` + seedMount + `/. ` + dindDataPath + `/`
 
 // Docker renders a sweep run as docker CLI argv against the Spec's context.
 type Docker struct{}
@@ -86,6 +106,18 @@ func (Docker) Render(spec Spec) (Plan, error) {
 		start = append(start,
 			dockerStep(spec, "network", "create", "--internal", networkName(spec)),
 			dockerStep(spec, "volume", "create", volumeName(spec)),
+			// The run's volume starts as a copy of the seed: the sidecar sits on
+			// an internal network and cannot pull the images the tests start, so
+			// they come from the seed filled once by RenderSeed. The seed is
+			// mounted read-only, and a seed that was never filled is an empty
+			// copy: the packages that need an image then fail on it by name.
+			dockerStep(spec, "run", "--rm", "--network", "none",
+				"--entrypoint", "sh",
+				"--volume", SeedVolume+":"+seedMount+":ro",
+				"--volume", volumeName(spec)+":"+dindDataPath,
+				templates.SweepDindImage,
+				"-c", seedCopyScript,
+			),
 			// The engine is the plan's only privileged container, and it is
 			// reached over plain TCP on the run's own loopback: dockerd runs the
 			// packages' containers, and nothing else needs a capability. The
@@ -154,6 +186,7 @@ func runnerArgv(spec Spec) []string {
 		"--env", EnvSHA+"="+spec.SHA,
 		"--env", EnvTiers+"="+strings.Join(spec.TiersOrDefault(), ","),
 		"--env", EnvJobs+"="+strconv.Itoa(spec.Jobs),
+		"--env", ryukDisabledName+"="+ryukDisabledValue,
 		spec.Image,
 	), RunnerArgv()...)
 }
@@ -179,12 +212,12 @@ func teardownStep(spec Spec, args ...string) Step {
 
 // runnerName is the container the sweep runs in.
 func runnerName(spec Spec) string {
-	return "gt-sweep-" + spec.Rig + "-" + spec.SHA[:8] + "-" + spec.RunID
+	return ContainerPrefix + spec.Rig + "-" + spec.SHA[:8] + "-" + spec.RunID
 }
 
 // dindName is the sidecar's container name.
 func dindName(spec Spec) string {
-	return "gt-sweep-dind-" + spec.Rig + "-" + spec.SHA[:8] + "-" + spec.RunID
+	return ContainerPrefix + "dind-" + spec.Rig + "-" + spec.SHA[:8] + "-" + spec.RunID
 }
 
 // networkName is the run's private network, which only the sidecar and the

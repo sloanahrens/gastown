@@ -30,6 +30,10 @@
                 "value": "/tmp"
               },
               {
+                "name": "TESTCONTAINERS_RYUK_DISABLED",
+                "value": "true"
+              },
+              {
                 "name": "GT_SWEEP_RIG",
                 "value": "gastown"
               },

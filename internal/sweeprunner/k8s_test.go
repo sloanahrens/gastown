@@ -512,3 +512,33 @@ func TestK8sRunnerCommandUserAndSharedProcessNamespace(t *testing.T) {
 		t.Error("the pod does not share its process namespace: killed grandchildren would stay zombies")
 	}
 }
+
+// The runner container turns the testcontainers reaper off, as the Docker one does.
+func TestK8sRunnerDisablesTheTestcontainersReaper(t *testing.T) {
+	t.Parallel()
+	plan, err := Kubernetes{}.Render(goldenSpec())
+	if err != nil {
+		t.Fatalf("rendering: %v", err)
+	}
+	runner, ok := containerNamed(plan.Job, runnerContainerName)
+	if !ok {
+		t.Fatalf("the Job renders no %q container", runnerContainerName)
+	}
+	if !slices.Contains(runner.Env, EnvVar{Name: "TESTCONTAINERS_RYUK_DISABLED", Value: "true"}) {
+		t.Errorf("runner env %v does not disable the reaper", runner.Env)
+	}
+}
+
+// The Kubernetes sidecar has the pod's network and pulls the test images itself,
+// so the Job renders no seed volume, claim or init container; adding a seed to one
+// backend without the other is a decision this test makes visible.
+func TestK8sJobRendersNoSeedStep(t *testing.T) {
+	t.Parallel()
+	plan, err := Kubernetes{}.Render(goldenSpec())
+	if err != nil {
+		t.Fatalf("rendering: %v", err)
+	}
+	if strings.Contains(string(plan.Job.JSON()), SeedVolume) {
+		t.Error("the Job mentions the seed volume: the Kubernetes sidecar pulls its images and needs none")
+	}
+}
