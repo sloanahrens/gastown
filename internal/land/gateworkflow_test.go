@@ -89,28 +89,139 @@ func gateFetchProblems(steps []gateStep) (problems []string, deepensMain bool) {
 	return problems, deepensMain
 }
 
-// gitFetchWords returns the words after each git fetch in a run script. A
-// backslash at a line end continues the line, and && || ; | end a command.
-// Quotes are dropped from each word; the refspecs here hold no spaces.
+// gitGlobalValueFlags are git's global options that take their value as the
+// next word, so that word is not read as the subcommand. The =form of an option
+// carries its value in the same word and needs no entry.
+var gitGlobalValueFlags = map[string]bool{
+	"-C": true, "-c": true, "--git-dir": true, "--work-tree": true, "--namespace": true,
+	"--config-env": true,
+}
+
+// gitFetchWords returns the words after each git fetch in a run script. git's
+// global options (-C dir, --no-pager, ...) may come before fetch, and a fetch
+// may sit in a subshell, a command substitution, or backticks.
 func gitFetchWords(run string) [][]string {
-	run = strings.ReplaceAll(run, "\\\n", " ")
-	for _, sep := range []string{"&&", "||", ";", "|"} {
-		run = strings.ReplaceAll(run, sep, "\n")
-	}
 	var fetches [][]string
-	for _, line := range strings.Split(run, "\n") {
-		words := strings.Fields(line)
-		for i := range words {
-			words[i] = strings.Trim(words[i], `"'`)
-		}
-		for i := 1; i < len(words); i++ {
-			if words[i-1] == "git" && words[i] == "fetch" {
-				fetches = append(fetches, words[i+1:])
-				break
+	for _, cmd := range shellCommands(run) {
+		for i, w := range cmd {
+			if w != "git" {
+				continue
+			}
+			j := i + 1
+			for j < len(cmd) && strings.HasPrefix(cmd[j], "-") {
+				if gitGlobalValueFlags[cmd[j]] {
+					j++
+				}
+				j++
+			}
+			if j < len(cmd) && cmd[j] == "fetch" {
+				fetches = append(fetches, cmd[j+1:])
 			}
 		}
 	}
 	return fetches
+}
+
+// shellCommands splits a run script into commands, each a list of words. A
+// backslash at a line end continues the line. Whitespace separates words, and
+// a newline, && || ; | & ( ) or a backtick ends a command. Quotes group a word
+// and are dropped, but a double-quoted $( or backtick still opens a command,
+// and a quote opened inside it nests. A backslash escapes the next character,
+// or inside double quotes only " \ $ and a backtick. A quote left open at the
+// end of the run takes the rest of the run as its word.
+func shellCommands(run string) [][]string {
+	run = strings.ReplaceAll(run, "\\\n", " ")
+	var cmds [][]string
+	var words []string
+	var word strings.Builder
+	inWord := false
+	// open holds the frames the scanner is inside: a single quote, a double
+	// quote, a ( group or $( substitution, or a backtick substitution.
+	var open []rune
+	top := func() rune {
+		if len(open) == 0 {
+			return 0
+		}
+		return open[len(open)-1]
+	}
+	pop := func() { open = open[:len(open)-1] }
+	endWord := func() {
+		if inWord {
+			words = append(words, word.String())
+			word.Reset()
+			inWord = false
+		}
+	}
+	endCmd := func() {
+		endWord()
+		if len(words) > 0 {
+			cmds = append(cmds, words)
+		}
+		words = nil
+	}
+	rs := []rune(run)
+	for i := 0; i < len(rs); i++ {
+		r := rs[i]
+		switch top() {
+		case '\'':
+			if r == '\'' {
+				pop()
+			} else {
+				word.WriteRune(r)
+			}
+			continue
+		case '"':
+			switch {
+			case r == '\\' && i+1 < len(rs) && strings.ContainsRune("\"\\$`", rs[i+1]):
+				i++
+				word.WriteRune(rs[i])
+			case r == '"':
+				pop()
+			case r == '(' && i > 0 && rs[i-1] == '$':
+				open = append(open, '(')
+				endCmd()
+			case r == '`':
+				open = append(open, '`')
+				endCmd()
+			default:
+				word.WriteRune(r)
+			}
+			continue
+		}
+		switch {
+		case r == '\\' && i+1 < len(rs):
+			i++
+			word.WriteRune(rs[i])
+			inWord = true
+		case r == '\'' || r == '"':
+			open = append(open, r)
+			inWord = true
+		case r == '`':
+			if top() == '`' {
+				pop()
+			} else {
+				open = append(open, '`')
+			}
+			endCmd()
+		case r == '(':
+			open = append(open, '(')
+			endCmd()
+		case r == ')':
+			if top() == '(' {
+				pop()
+			}
+			endCmd()
+		case r == ' ' || r == '\t' || r == '\r':
+			endWord()
+		case r == '\n' || r == ';' || r == '&' || r == '|':
+			endCmd()
+		default:
+			word.WriteRune(r)
+			inWord = true
+		}
+	}
+	endCmd()
+	return cmds
 }
 
 // fetchesEveryHead reports whether a git fetch's words take a ref for every
@@ -174,6 +285,43 @@ func TestGateFetchProblemsNamesEveryHeadFetch(t *testing.T) {
 			steps: []gateStep{{Run: "git fetch --no-tags origin \\\n  \"+refs/heads/*:refs/remotes/origin/*\""}}, wantProblems: 1},
 		{name: "a fetch after a separator is read",
 			steps: []gateStep{{Run: "make gate && git fetch origin"}}, wantProblems: 1},
+		{name: "a -C path before the subcommand does not hide --all",
+			steps: []gateStep{{Run: "git -C repo fetch --all"}}, wantProblems: 1},
+		{name: "a quoted -C path with a space does not hide --all",
+			steps: []gateStep{{Run: `git -C "my repo" fetch --all`}}, wantProblems: 1},
+		{name: "a -c config before the subcommand does not hide a bare fetch",
+			steps: []gateStep{{Run: "git -c protocol.version=2 fetch origin"}}, wantProblems: 1},
+		{name: "a --no-pager before the subcommand does not hide --all",
+			steps: []gateStep{{Run: "git --no-pager fetch --all"}}, wantProblems: 1},
+		{name: "a --git-dir before the subcommand does not hide --all",
+			steps: []gateStep{{Run: "git --git-dir=.git fetch --all"}}, wantProblems: 1},
+		{name: "a fetch in a subshell is read",
+			steps: []gateStep{{Run: "(git fetch --all)"}}, wantProblems: 1},
+		{name: "a fetch in a command substitution is read",
+			steps: []gateStep{{Run: "x=$(git fetch --all)"}}, wantProblems: 1},
+		{name: "a fetch in backticks is read",
+			steps: []gateStep{{Run: "echo `git fetch --all`"}}, wantProblems: 1},
+		{name: "a fetch in a double-quoted command substitution is read",
+			steps: []gateStep{{Run: `x="$(git fetch --all)"`}}, wantProblems: 1},
+		{name: "a -C path with a space in a double-quoted substitution does not hide --all",
+			steps: []gateStep{{Run: `x="$(git -C "my repo" fetch --all)"`}}, wantProblems: 1},
+		{name: "a fetch in double-quoted backticks is read",
+			steps: []gateStep{{Run: "echo \"`git fetch --all`\""}}, wantProblems: 1},
+		{name: "an escaped quote does not hide a fetch after the quoted word",
+			steps: []gateStep{{Run: `echo "a\"" && git fetch --all`}}, wantProblems: 1},
+		{name: "a fetch named in single quotes is text, not a command",
+			steps: []gateStep{{Run: "echo 'git fetch --all'"}}},
+		{name: "a fetch named in double quotes is text, not a command",
+			steps: []gateStep{{Run: `echo "git fetch --all"`}}},
+		{name: "a fetch after a background operator is read",
+			steps: []gateStep{{Run: "make gate & git fetch --all"}}, wantProblems: 1},
+		{name: "a -C path with a named branch is allowed",
+			steps: []gateStep{{Run: "git -C repo fetch origin main"}}},
+		{name: "a -C path with a status command is not a fetch",
+			steps: []gateStep{{Run: "git -C repo status --all"}}},
+		{name: "the deepening fetch with a -C path still deepens main",
+			steps:       []gateStep{{Run: `git -C . fetch --no-tags --prune --depth=2147483647 origin "+refs/heads/main:refs/remotes/origin/main"`}},
+			wantDeepens: true},
 		{name: "a checkout with every head",
 			steps: []gateStep{{Uses: "actions/checkout@v4", With: map[string]any{"fetch-depth": 0}}}, wantProblems: 1},
 		{name: "a tag glob is not a head",
