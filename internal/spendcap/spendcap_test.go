@@ -128,6 +128,35 @@ func TestOtherWorkspacesAndOtherDaysIgnored(t *testing.T) {
 	}
 }
 
+// A cost or cap that is not a number cannot be judged against the other, so the
+// day is Unknown rather than Under: a dispatch must not be allowed on it.
+func TestNotANumberIsUnknown(t *testing.T) {
+	t.Parallel()
+	nan := math.NaN()
+	cases := []struct {
+		name   string
+		capUSD float64
+		costs  []float64
+	}{
+		{name: "a NaN cost over a cap", capUSD: 10, costs: []float64{4, nan}},
+		{name: "a NaN cost with no cap", capUSD: 0, costs: []float64{nan}},
+		{name: "a NaN cap", capUSD: nan, costs: []float64{4}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			var spend []Record
+			for _, cost := range c.costs {
+				spend = append(spend, Record{Workspace: "acme", EndedAt: noon().Add(-time.Hour), CostUSD: cost})
+			}
+			got := Evaluate(Cap{Workspace: "acme", DailyUSD: c.capUSD}, spend, noon())
+			if got.Level != Unknown {
+				t.Errorf("Level = %q, want %q", got.Level, Unknown)
+			}
+		})
+	}
+}
+
 func TestZeroCapMeansNoCap(t *testing.T) {
 	t.Parallel()
 	spend := []Record{

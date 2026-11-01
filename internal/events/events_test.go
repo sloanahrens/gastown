@@ -627,3 +627,58 @@ func TestSessionPayload_ReasonAndCallerAlwaysPresent(t *testing.T) {
 		}
 	}
 }
+
+// lastEventWorkspace returns the workspace id of the newest event in townRoot.
+func lastEventWorkspace(t *testing.T, townRoot string) string {
+	t.Helper()
+	got, err := Read(townRoot)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("Read returned no events")
+	}
+	return got[len(got)-1].Workspace
+}
+
+// TestEventWorkspaceFollowsTheMapFile covers the map cache. A map the operator
+// edits changes size or modification time, and the next event reads it. The
+// cache is keyed on those two, so a rewrite that keeps both is not read again;
+// the last case restores the modification time to pin that key.
+func TestEventWorkspaceFollowsTheMapFile(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	path := filepath.Join(townRoot, workspaceid.File)
+	boot := func() {
+		t.Helper()
+		if err := LogFeedTo(townRoot, TypeBoot, "fr/witness", BootPayload("fr", nil)); err != nil {
+			t.Fatalf("LogFeedTo: %v", err)
+		}
+	}
+
+	writeWorkspaceMap(t, townRoot, `{"default":"town-default","rigs":{"fr":"fr-one"}}`)
+	boot()
+	if got := lastEventWorkspace(t, townRoot); got != "fr-one" {
+		t.Fatalf("first event workspace = %q, want fr-one", got)
+	}
+
+	writeWorkspaceMap(t, townRoot, `{"default":"town-default","rigs":{"fr":"fr-longer-id"}}`)
+	boot()
+	if got := lastEventWorkspace(t, townRoot); got != "fr-longer-id" {
+		t.Fatalf("event after an edit = %q, want the edited map's fr-longer-id", got)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	// Same size as the map just read, different content, modification time put back.
+	writeWorkspaceMap(t, townRoot, `{"default":"town-default","rigs":{"fr":"fr-LONGER-ID"}}`)
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+	boot()
+	if got := lastEventWorkspace(t, townRoot); got != "fr-longer-id" {
+		t.Errorf("event after a same-size rewrite = %q, want the map read before it, fr-longer-id", got)
+	}
+}

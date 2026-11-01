@@ -30,9 +30,10 @@ type keyEntry struct {
 	revs map[Revision]*revEntry
 }
 
-// revEntry is one revision's value and whether Get may still read it.
+// revEntry is one revision's value and whether Get may still read it. Get hands
+// out this same Secret, so Destroy can wipe the value a reader already holds.
 type revEntry struct {
-	value   []byte
+	secret  Secret
 	enabled bool
 }
 
@@ -59,7 +60,7 @@ func (f *Fake) Put(ctx context.Context, workspace, name string, value []byte) (R
 		f.keys[ref] = entry
 	}
 	entry.next++
-	entry.revs[entry.next] = &revEntry{value: append([]byte(nil), value...), enabled: true}
+	entry.revs[entry.next] = &revEntry{secret: newSecret(value), enabled: true}
 	return entry.next, nil
 }
 
@@ -83,7 +84,7 @@ func (f *Fake) Get(ctx context.Context, workspace, name string) (Secret, error) 
 	if !found {
 		return Secret{}, fmt.Errorf("%w: workspace %q key %q", ErrNotFound, workspace, name)
 	}
-	return newSecret(entry.revs[latest].value), nil
+	return entry.revs[latest].secret, nil
 }
 
 // Disable stops new reads of rev. Disabling a revision that is already disabled
@@ -109,9 +110,11 @@ func (f *Fake) Destroy(ctx context.Context, workspace, name string, rev Revision
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if _, err := f.revision(workspace, name, rev); err != nil {
+	r, err := f.revision(workspace, name, rev)
+	if err != nil {
 		return err
 	}
+	r.secret.wipe()
 	delete(f.keys[keyRef{workspace: workspace, name: name}].revs, rev)
 	return nil
 }

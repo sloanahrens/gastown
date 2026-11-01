@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -317,7 +318,7 @@ func writeTo(townRoot string, event Event) error {
 // is present but not a usable prefix, are WorkspaceUnresolved rather than a
 // dropped event or a guessed id (gt-91ty4).
 func workspaceOf(townRoot string, payload map[string]interface{}) string {
-	m, err := workspaceid.Load(townRoot)
+	m, err := loadWorkspaceMap(townRoot)
 	if err != nil {
 		return WorkspaceUnresolved
 	}
@@ -334,6 +335,50 @@ func workspaceOf(townRoot string, payload map[string]interface{}) string {
 		return WorkspaceUnresolved
 	}
 	return id
+}
+
+// workspaceMapRead is one read of a town's workspace map, with the file's
+// modification time and size at that read.
+type workspaceMapRead struct {
+	modTime time.Time
+	size    int64
+	m       *workspaceid.Map
+}
+
+// workspaceMapCache holds the last read of each town's workspace map, keyed by
+// town root.
+type workspaceMapCache struct {
+	mu    sync.Mutex
+	towns map[string]workspaceMapRead
+}
+
+var cachedWorkspaceMaps workspaceMapCache
+
+// loadWorkspaceMap returns the town's workspace map. Every event write asks for
+// it, so it is parsed again only when the file's modification time or size has
+// changed since the last read. A map file that cannot be stat'ed is read in full,
+// so an unreadable file is still an error and never a cached answer.
+func loadWorkspaceMap(townRoot string) (*workspaceid.Map, error) {
+	info, err := os.Stat(filepath.Join(townRoot, workspaceid.File))
+	if err != nil {
+		return workspaceid.Load(townRoot)
+	}
+	c := &cachedWorkspaceMaps
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if r, ok := c.towns[townRoot]; ok && r.modTime.Equal(info.ModTime()) && r.size == info.Size() {
+		return r.m, nil
+	}
+	m, err := workspaceid.Load(townRoot)
+	if err != nil {
+		delete(c.towns, townRoot)
+		return nil, err
+	}
+	if c.towns == nil {
+		c.towns = make(map[string]workspaceMapRead)
+	}
+	c.towns[townRoot] = workspaceMapRead{modTime: info.ModTime(), size: info.Size(), m: m}
+	return m, nil
 }
 
 // Payload helpers for common event structures.

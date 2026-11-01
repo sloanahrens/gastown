@@ -799,7 +799,7 @@ func TestRowWorkspaceField(t *testing.T) {
 		{"a rig the map names", &rig, "acme"},
 		{"a rig the map does not name", &unmapped, "customer-zero"},
 		{"no rig at all", nil, "customer-zero"},
-		{"a rig that is present but empty", &empty, ""},
+		{"a rig that is present but empty", &empty, "unresolved"},
 	} {
 		row := Row{Rig: tc.rig}
 		row.SetWorkspace(m)

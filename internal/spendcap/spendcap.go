@@ -11,7 +11,10 @@
 // by its cost. A per-sandbox cap is a later bead.
 package spendcap
 
-import "time"
+import (
+	"math"
+	"time"
+)
 
 // Level is where a workspace's spend for a day stands against its cap.
 type Level string
@@ -23,6 +26,9 @@ const (
 	At Level = "at"
 	// Over is a spend above the cap: a new dispatch stops.
 	Over Level = "over"
+	// Unknown is a spend or cap that is not a number, so the day cannot be
+	// judged: a new dispatch stops, as it does at At and Over.
+	Unknown Level = "unknown"
 )
 
 // epsilon is the tolerance the cap comparison carries, because a sum of float
@@ -72,6 +78,11 @@ func Evaluate(cap Cap, spend []Record, now time.Time) Decision {
 			continue
 		}
 		spent += r.CostUSD
+	}
+	// A NaN compares false against every number, so it would fall through to
+	// Under: a corrupt cost or cap is refused instead of allowed.
+	if math.IsNaN(spent) || math.IsNaN(cap.DailyUSD) {
+		return Decision{Level: Unknown, Spent: spent}
 	}
 	if cap.DailyUSD <= 0 {
 		return Decision{Level: Under, Spent: spent}

@@ -28,6 +28,16 @@ func newSecret(value []byte) Secret {
 	return Secret{v: &secretValue{value: append([]byte(nil), value...)}}
 }
 
+// wipe zeroes the value every copy of s shares and drops it, so a Secret that
+// was read before its revision was destroyed holds nothing afterwards.
+func (s Secret) wipe() {
+	if s.v == nil {
+		return
+	}
+	clear(s.v.value)
+	s.v.value = nil
+}
+
 // Bytes returns a copy of the value.
 func (s Secret) Bytes() []byte {
 	if s.v == nil {
