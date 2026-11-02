@@ -324,8 +324,8 @@ func TestUnitSweepHelperAnswersTheCgoEnvItself(t *testing.T) {
 	t.Parallel()
 	fake := &fakeTier{head: "abc123"}
 	s, _ := newIntegration(t, taggedRootRepo(), fake, "", "")
-	if s.CgoEnv == nil {
-		t.Fatal("a unit test's Sweep has no CgoEnv, so its gt build reaches buildflags.ICUCgoEnv and starts brew on a Mac")
+	if got := s.cgoEnv()([]string{"PATH=/fake/bin"}); got != nil {
+		t.Fatalf("the helper's cgo seam answered %v, want nil: its gt build would take icu4c entries from the host", got)
 	}
 	s.Integration()
 	got := builds(fake)
