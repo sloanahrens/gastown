@@ -393,6 +393,65 @@ func TestTierSweepRunnerRefusesWhatItCannotLaunch(t *testing.T) {
 	})
 }
 
+// TestTierSweepRunnerSpec_TakesEverySlotStage pins which stages the configured
+// runner takes: a slot stage leaves the host whatever command its tree runs,
+// the rig's own script included, because cmd/sweep-run runs that script in the
+// container. A stage with no runner block, and a stage that starts no
+// container, stay on the host. Restoring the script exclusion turns the
+// script row red (gt-rhwx1).
+func TestTierSweepRunnerSpec_TakesEverySlotStage(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		runner bool // whether the patrol config names a runner block
+		stage  tierSweepStage
+		wantOK bool
+	}{
+		{
+			name:   "a script stage with a runner block is rendered",
+			runner: true,
+			stage:  tierSweepStage{tiers: []string{"integration", "race"}, slot: true, script: true, rig: "devops", tested: runnerTestSHA},
+			wantOK: true,
+		},
+		{
+			name:  "a script stage with no runner block stays on the host",
+			stage: tierSweepStage{tiers: []string{"integration", "race"}, slot: true, script: true, rig: "devops", tested: runnerTestSHA},
+		},
+		{
+			name:   "a stage that starts no container stays on the host",
+			runner: true,
+			stage:  tierSweepStage{tiers: []string{"shell"}, script: true, rig: "devops", tested: runnerTestSHA},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, _, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "devops")
+			var cfg *config.TierSweepRunnerConfig
+			if tc.runner {
+				cfg = runnerTestConfig(t)
+				d.patrolConfig.Patrols.TierSweep.Runner = cfg
+			}
+
+			spec, ok, err := d.tierSweepRunnerSpec(tc.stage)
+			if err != nil {
+				t.Fatalf("tierSweepRunnerSpec = %v, want no error", err)
+			}
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if !ok {
+				return
+			}
+			if spec.Rig != tc.stage.rig || spec.SHA != runnerTestSHA || !slices.Equal(spec.Tiers, tc.stage.tiers) {
+				t.Errorf("spec = %+v, want the stage's rig %s, sha %s and tiers %q", spec, tc.stage.rig, runnerTestSHA, tc.stage.tiers)
+			}
+			if spec.Image != cfg.Image {
+				t.Errorf("spec.Image = %q, want the runner block's image %q", spec.Image, cfg.Image)
+			}
+		})
+	}
+}
+
 // A stage that asked for no tier judged nothing: it starts no run and folds no
 // result, and an empty fold never reads as a clean sweep of nothing (gt-z4ppb).
 func TestTierSweepRunnerNoTiersIsRed(t *testing.T) {
