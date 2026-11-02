@@ -729,7 +729,7 @@ func TestContainerRehearsalPluginsCheckRefusesAnUnclassifiedPlugin(t *testing.T)
 	t.Parallel()
 	h := newRehearseHost()
 	h.plugins = []string{"mystery", "polecat-image"}
-	h.files[rehearseLive+"/settings/config.json"] = []byte(`{"daemon":{"container_off":` + offJSON()[:len(offJSON())-1] + `,"typo-plugin"],"patrols":{"new_patrol":{"enabled":true}}}}`)
+	h.files[rehearseLive+"/settings/config.json"] = settingsWithOff(append(containerOffNames(), "typo-plugin"), `"new_patrol":{"enabled":true}`)
 	var out bytes.Buffer
 	err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
 	got := out.String()
@@ -742,7 +742,7 @@ func TestContainerRehearsalPluginsCheckRefusesAnUnclassifiedPlugin(t *testing.T)
 		t.Error("a classified plugin was reported")
 	}
 	h = newRehearseHost()
-	h.files[rehearseLive+"/settings/config.json"] = []byte(`{"daemon":{"container_off":"polecat-image"}}`)
+	h.files[rehearseLive+"/settings/config.json"] = []byte(`{"daemon":{"container_off":"polecat-image"}}`) // not a list
 	out.Reset()
 	_ = runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
 	if !strings.Contains(out.String(), "does not give daemon.container_off") {
@@ -778,5 +778,42 @@ func TestContainerRehearsalClassifiesJevPatrols(t *testing.T) {
 	}
 	if stepNamed("jevish") {
 		t.Error("a name that only resembles the prefix was classified")
+	}
+}
+
+// settingsWithOff is a config.json whose daemon section lists off and carries
+// the extra patrols entries.
+func settingsWithOff(off []string, patrols string) []byte {
+	b, _ := json.Marshal(off)
+	return []byte(`{"daemon":{"container_off":` + string(b) + `,"patrols":{` + patrols + `}}}`)
+}
+
+// A patrol the daemon's config type declares, enabled by its default and absent
+// from the settings, is still checked against the table.
+func TestContainerRehearsalPluginsCheckKnowsPatrolsTheSettingsOmit(t *testing.T) {
+	t.Parallel()
+	if got := unclassifiedNames([]string{"landing_worker", "brand_new_default_on_patrol", "jev_x"}); !slices.Equal(got, []string{"brand_new_default_on_patrol"}) {
+		t.Errorf("unclassifiedNames = %v", got)
+	}
+	// Every patrol the real type declares is classified, so a patrol added to
+	// config.PatrolsConfig without a table row fails here.
+	if got := unclassifiedNames(knownPatrolKeys()); len(got) != 0 {
+		t.Errorf("patrols the audit table does not classify: %v", got)
+	}
+	if len(knownPatrolKeys()) < 20 {
+		t.Errorf("knownPatrolKeys found %d keys; the reflection over config.PatrolsConfig is not reading the tags", len(knownPatrolKeys()))
+	}
+}
+
+func TestContainerRehearsalPluginsCheckFailsForAnUnlistedDefaultOnPatrol(t *testing.T) {
+	t.Parallel()
+	h := newRehearseHost()
+	d := h.deps(&bytes.Buffer{})
+	d.patrolKeys = func() []string { return []string{"landing_worker", "brand_new_default_on_patrol"} }
+	var out bytes.Buffer
+	d.out = &out
+	err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), d)
+	if err == nil || !strings.Contains(out.String(), "brand_new_default_on_patrol: a patrol the daemon knows") {
+		t.Fatalf("err=%v\n%s", err, out.String())
 	}
 }

@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // The container daemon cannot run everything the launchd daemon runs: some
@@ -34,47 +37,56 @@ const (
 // daemonStep is one row of the audit: a plugin (a directory with plugin.md) or
 // a patrol (a key of daemon.patrols), what it needs, and why it is classed so.
 type daemonStep struct {
-	name   string
-	plugin bool // a plugin; otherwise a patrol
-	class  stepClass
-	needs  []string // programs it execs, for stepRuns
-	why    string
+	name  string
+	class stepClass
+	needs []string // programs it execs, for stepRuns
+	why   string
 }
 
 // daemonSteps is the audit, read from the code and the daemon log on 2026-11-01
 // (seagull and dipper). A plugin or patrol the town has that this table does not
 // name fails the rehearsal until it is classified.
 var daemonSteps = []daemonStep{
-	{"polecat-image", true, stepHost, nil, "go, make, crane and the Docker Desktop engine build and publish the polecat image; a stale image refuses every sandbox sling"},
-	{"hm-sync", true, stepHost, nil, "hm, make and go against hm-postgres on Docker Desktop"},
-	{"tool-updater", true, stepHost, nil, "manual plugin that runs brew"},
-	{"cloud-check", true, stepHost, nil, "launchctl, the Docker Desktop engine and /Users/Shared/gt-cloud"},
-	{"app-promote", true, stepSeam, nil, "needs the Forgejo viewer token, the deploy key, outbound ssh to GitHub and the Forgejo API address"},
-	{"devops-reporter", true, stepSeam, nil, "bd and gt only, but reads /Users/Shared/gt-cloud/reports"},
-	{"release-reporter", true, stepSeam, nil, "bd and gt only, but reads /Users/Shared/gt-cloud/releases and two files under HOME"},
-	{"town-metrics", true, stepSeam, nil, "its lsof, ps and desktop-linux docker probes would measure the container, not the host"},
+	{"polecat-image", stepHost, nil, "go, make, crane and the Docker Desktop engine build and publish the polecat image; a stale image refuses every sandbox sling"},
+	{"hm-sync", stepHost, nil, "hm, make and go against hm-postgres on Docker Desktop"},
+	{"tool-updater", stepHost, nil, "manual plugin that runs brew"},
+	{"cloud-check", stepHost, nil, "launchctl, the Docker Desktop engine and /Users/Shared/gt-cloud"},
+	{"app-promote", stepSeam, nil, "needs the Forgejo viewer token, the deploy key, outbound ssh to GitHub and the Forgejo API address"},
+	{"devops-reporter", stepSeam, nil, "bd and gt only, but reads /Users/Shared/gt-cloud/reports"},
+	{"release-reporter", stepSeam, nil, "bd and gt only, but reads /Users/Shared/gt-cloud/releases and two files under HOME"},
+	{"town-metrics", stepSeam, nil, "its lsof, ps and desktop-linux docker probes would measure the container, not the host"},
 
-	{"landing_worker", false, stepHost, nil, "gates with make gate: go, make and golangci-lint"},
-	{"rebuild_gt", false, stepHost, nil, "make install and launchctl"},
-	{"rebuild_om", false, stepHost, nil, "go build"},
-	{"rebuild_hm", false, stepHost, nil, "go build"},
-	{"disk_maintenance", false, stepHost, nil, "every target is the Mac, Colima or Docker Desktop"},
-	{"main_branch_test", false, stepHost, nil, "go test"},
-	{"doctor_dog", false, stepSeam, nil, "gt doctor does not finish in the image; Dolt and the backup directory need the same addresses and mounts"},
-	{"health_notify", false, stepSeam, nil, "the macOS notify scripts (deferred by the operator)"},
+	{"landing_worker", stepHost, nil, "gates with make gate: go, make and golangci-lint"},
+	{"rebuild_gt", stepHost, nil, "make install and launchctl"},
+	{"rebuild_om", stepHost, nil, "go build"},
+	{"rebuild_hm", stepHost, nil, "go build"},
+	{"disk_maintenance", stepHost, nil, "every target is the Mac, Colima or Docker Desktop"},
+	{"main_branch_test", stepHost, nil, "go test"},
+	{"doctor_dog", stepSeam, nil, "gt doctor does not finish in the image; Dolt and the backup directory need the same addresses and mounts"},
+	{"health_notify", stepSeam, nil, "the macOS notify scripts (deferred by the operator)"},
 
-	{"handler", false, stepRuns, []string{"bash"}, "dispatches the plugins that run here"},
-	{"tier_sweep", false, stepRuns, []string{"docker"}, "drives the sweep engine over DOCKER_HOST"},
-	{"spec_dispatch", false, stepRuns, []string{"openshell", "kubectl"}, "gt sling through the gateway and the cluster"},
-	{"jsonl_git_backup", false, stepRuns, []string{"dolt", "git"}, "dolt and git"},
-	{"patrol_scan", false, stepRuns, []string{"git"}, "git and gt"},
-	{"checkpoint_dog", false, stepRuns, []string{"git"}, "git"},
-	{"overrun_guard", false, stepRuns, []string{"ps"}, "ps"},
-	{"overseer_report", false, stepRuns, nil, "in process"},
-	{"compactor_dog", false, stepRuns, nil, "in process"},
-	{"scheduled_maintenance", false, stepRuns, nil, "in process"},
-	{"scheduled_slings", false, stepRuns, nil, "gt sling"},
-	{"wisp_reaper", false, stepRuns, nil, "in process"},
+	{"dolt_server", stepHost, nil, "starts and watches the Dolt server, which runs on the host; the container reaches it over host.docker.internal"},
+	{"hm_sync", stepHost, nil, "hm on the host (the plugin of the same name does the same)"},
+	{"landing_infra", stepHost, nil, "the landing worker's companion: watches Forgejo and its run queue for a landing worker that runs on the host"},
+	{"resource_sampler", stepSeam, nil, "ps rows for the host's components would describe the container"},
+
+	{"handler", stepRuns, []string{"bash"}, "dispatches the plugins that run here"},
+	{"tier_sweep", stepRuns, []string{"docker"}, "drives the sweep engine over DOCKER_HOST"},
+	{"spec_dispatch", stepRuns, []string{"openshell", "kubectl"}, "gt sling through the gateway and the cluster"},
+	{"jsonl_git_backup", stepRuns, []string{"dolt", "git"}, "dolt and git"},
+	{"patrol_scan", stepRuns, []string{"git"}, "git and gt"},
+	{"checkpoint_dog", stepRuns, []string{"git"}, "git"},
+	{"overrun_guard", stepRuns, []string{"ps"}, "ps"},
+	{"overseer_report", stepRuns, nil, "in process"},
+	{"refinery", stepRuns, nil, "retired and ignored; the key stays in the schema so old files load"},
+	{"bird_reports", stepRuns, nil, "in process"},
+	{"findings_filer", stepRuns, nil, "in process"},
+	{"events_prune", stepRuns, nil, "in process"},
+	{"git_hygiene", stepRuns, []string{"git"}, "git and git gc in the rigs' repositories under the town"},
+	{"compactor_dog", stepRuns, nil, "in process"},
+	{"scheduled_maintenance", stepRuns, nil, "in process"},
+	{"scheduled_slings", stepRuns, nil, "gt sling"},
+	{"wisp_reaper", stepRuns, nil, "in process"},
 }
 
 // jev_ patrols are in-process readers of the town's own files.
@@ -87,9 +99,8 @@ func stepNamed(name string) bool {
 	return slices.ContainsFunc(daemonSteps, func(s daemonStep) bool { return s.name == name })
 }
 
-// ContainerOffNames are the names the container's settings must list in
-// daemon.container_off: every step that is not stepRuns, sorted. The host agent
-// runs the host-side subset, so the two lists come from this one table.
+// containerOffNames are the names daemon.container_off must list in the
+// container's settings: every step that is not stepRuns, sorted.
 func containerOffNames() []string {
 	var names []string
 	for _, s := range daemonSteps {
@@ -134,9 +145,16 @@ func checkDaemonSteps(ctx context.Context, r *rehearsal) []string {
 		}
 	}
 	for _, name := range r.discoverSteps() {
-		if !stepNamed(name.name) {
-			fails = append(fails, fmt.Sprintf("%s: a %s the audit table does not classify; add it to daemonSteps", name.name, name.kind()))
+		if !stepNamed(name) {
+			fails = append(fails, name+": a plugin the audit table does not classify; add it to daemonSteps")
 		}
+	}
+	keys := knownPatrolKeys()
+	if r.d.patrolKeys != nil {
+		keys = r.d.patrolKeys()
+	}
+	for _, name := range unclassifiedNames(keys) {
+		fails = append(fails, name+": a patrol the daemon knows (config.PatrolsConfig) that the audit table does not classify, enabled by its default or by the settings; add it to daemonSteps")
 	}
 	for name := range st.Daemon.Patrols {
 		if !stepNamed(name) {
@@ -146,19 +164,11 @@ func checkDaemonSteps(ctx context.Context, r *rehearsal) []string {
 	return append(fails, r.missingStepPrograms(ctx)...)
 }
 
-// discoveredStep is a plugin directory found in the live town.
-type discoveredStep struct {
-	name   string
-	plugin bool
-}
-
-func (d discoveredStep) kind() string { return "plugin" }
-
 // discoverSteps lists the plugins the daemon would find: a directory with a
 // plugin.md under <town>/plugins and under each rig's plugins directory. Dot
 // directories are not plugins (the daemon disables one by renaming it so).
-func (r *rehearsal) discoverSteps() []discoveredStep {
-	var found []discoveredStep
+func (r *rehearsal) discoverSteps() []string {
+	var found []string
 	roots := []string{filepath.Join(r.f.liveRoot, "plugins")}
 	if rigs, err := r.d.readDir(r.f.liveRoot); err == nil {
 		for _, e := range rigs {
@@ -177,7 +187,7 @@ func (r *rehearsal) discoverSteps() []discoveredStep {
 				continue
 			}
 			if _, err := r.d.readFile(filepath.Join(root, e.Name(), "plugin.md")); err == nil {
-				found = append(found, discoveredStep{name: e.Name(), plugin: true})
+				found = append(found, e.Name())
 			}
 		}
 	}
@@ -212,4 +222,32 @@ func (r *rehearsal) missingStepPrograms(ctx context.Context) []string {
 		}
 	}
 	return fails
+}
+
+// knownPatrolKeys are the patrol keys the daemon's own config type declares,
+// retired ones (kept only as raw JSON so old files decode) excluded. A patrol the
+// daemon enables by its default appears here whether or not the settings name it.
+func knownPatrolKeys() []string {
+	t := reflect.TypeOf(config.PatrolsConfig{})
+	var keys []string
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		if name == "" || name == "-" || f.Type == reflect.TypeOf(json.RawMessage(nil)) {
+			continue
+		}
+		keys = append(keys, name)
+	}
+	return keys
+}
+
+// unclassifiedNames are the names the audit table does not classify.
+func unclassifiedNames(names []string) []string {
+	var out []string
+	for _, n := range names {
+		if !stepNamed(n) {
+			out = append(out, n)
+		}
+	}
+	return out
 }

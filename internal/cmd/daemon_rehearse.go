@@ -86,6 +86,8 @@ type rehearseDeps struct {
 	evalSymlinks func(path string) (string, error)
 	// callBudget bounds one docker call; zero means rehearseCallBudget.
 	callBudget time.Duration
+	// patrolKeys overrides the daemon config type's patrol keys, for a test.
+	patrolKeys func() []string
 	// newID is a unique run id (the pid and the time in the real one).
 	newID func() string
 	now   func() time.Time
