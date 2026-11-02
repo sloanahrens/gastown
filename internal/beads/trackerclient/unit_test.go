@@ -50,7 +50,7 @@ func TestIssueConversionCarriesFieldsTimesAndDependencies(t *testing.T) {
 			{ID: "gt-b", Title: "b", Status: "open", DependencyType: "blocks"},
 			{ID: "external:om:om-7", DependencyType: "tracks", CreatedBy: "town/crew/fixture"},
 		},
-		Dependents:   []api.IssueDep{{ID: "gt-w", Title: "w", Status: "open", DependencyType: "tracks"}},
+		Dependents: []api.IssueDep{{ID: "gt-w", Title: "w", Status: "open", DependencyType: "tracks"}},
 	})
 	if got.CreatedAt != "2026-10-01T09:00:00Z" || got.ClosedAt != "2026-10-01T10:00:00Z" || got.DeferUntil != "2026-10-01T11:00:00Z" {
 		t.Errorf("times = %q / %q / %q, want RFC3339 in UTC", got.CreatedAt, got.ClosedAt, got.DeferUntil)
