@@ -295,8 +295,13 @@ func TestEmbeddedRequestIsTheDocsCopy(t *testing.T) {
 			t.Errorf("the request does not name the daily.json field %q", field)
 		}
 	}
-	if !strings.Contains(request, "slug") {
-		t.Error("the request does not name the fixed slug the artifact is published under")
+	for _, file := range []string{"daily.html", "daily.json"} {
+		if !strings.Contains(request, file) {
+			t.Errorf("the request does not name the %s file the dashboard reads", file)
+		}
+	}
+	if strings.Contains(strings.ToLower(request), "artifact") {
+		t.Error("the request tells the reporter to publish an artifact; the report lives in daily.html and daily.json only")
 	}
 	if !strings.Contains(request, "<NAME>") {
 		t.Error("the request has no <NAME> placeholder to fill in")
