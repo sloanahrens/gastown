@@ -2349,10 +2349,11 @@ func tierSweepRunnerBackend(name string) (sweeprunner.Backend, error) {
 }
 
 // tierSweepLaunchRunner renders spec through the configured backend and starts
-// it detached: the plan's start steps run in order and stop at the first
-// failure, and the plan's teardown comes back for the caller to run once it has
-// read the result. A start that failed still returns the teardown, so a
-// network, volume or sidecar an earlier step made is removed.
+// it detached: the plan's guards run first and refuse the run while an object it
+// shares is in use, then its start steps run in order and stop at the first
+// failure. The plan's teardown comes back for the caller to run once it has read
+// the result. A start that failed still returns the teardown, so a network,
+// volume or sidecar an earlier step made is removed.
 func (d *Daemon) tierSweepLaunchRunner(ctx context.Context, st tierSweepStage, spec sweeprunner.Spec) tierSweepLaunch {
 	cfg := tierSweepRunnerConfig(d.patrolConfig)
 	if cfg == nil {
@@ -2367,10 +2368,19 @@ func (d *Daemon) tierSweepLaunchRunner(ctx context.Context, st tierSweepStage, s
 	if err != nil {
 		return tierSweepLaunch{exitCode: -1, err: err}
 	}
-	// The plan's apply steps create the run's objects (a Kubernetes claim, then
-	// its Job) and run before its start steps. Only those run here: the teardown
-	// steps in the same plan run once the caller has read the result, and running
-	// them at launch would take the run down the moment it started (gt-z4ppb).
+	launch := tierSweepLaunch{}
+	launch.stop = func() { d.tierSweepRunnerStop(ctx, spec) }
+	// The guards run before anything is applied, and a refusal leaves nothing
+	// to apply: the run would share an engine object with a run still using it.
+	if guardOut, code, guardErr := d.tierSweepRunnerGuards(ctx, plan.Guards); guardErr != nil {
+		launch.output, launch.exitCode, launch.err = guardOut, code, guardErr
+		return launch
+	}
+	// The plan's apply steps create the run's objects (a Kubernetes repo claim,
+	// a sync pod that fills it, then the output claim and the Job) and run
+	// before its start steps. Only those run here: the teardown steps in the
+	// same plan run once the caller has read the result, and running them at
+	// launch would take the run down the moment it started (gt-z4ppb).
 	start := make([]sweeprunner.Step, 0, len(plan.Apply)+len(plan.Steps))
 	start = append(start, plan.Apply...)
 	for _, step := range plan.Steps {
@@ -2379,12 +2389,55 @@ func (d *Daemon) tierSweepLaunchRunner(ctx context.Context, st tierSweepStage, s
 		}
 	}
 	out, code := tierSweepRunSteps(ctx, d, start)
-	launch := tierSweepLaunch{output: out, exitCode: code}
-	launch.stop = func() { d.tierSweepRunnerStop(ctx, spec) }
+	launch.output, launch.exitCode = out, code
 	if code != 0 {
 		launch.err = fmt.Errorf("the run did not start (exit %d)", code)
 	}
 	return launch
+}
+
+// tierSweepRunnerGuards runs a plan's guards in order and stops at the first
+// that refuses. It returns the combined output of the steps it ran and the
+// refusal as an error; the caller then applies nothing. A guard command that
+// cannot run is a refusal too: a check that did not answer is not a pass.
+func (d *Daemon) tierSweepRunnerGuards(ctx context.Context, guards []sweeprunner.Guard) (string, int, error) {
+	var b strings.Builder
+	for _, guard := range guards {
+		step := guard.Step
+		// A guard that was not rendered has not passed: an unset command or
+		// refusal is a plan the daemon cannot trust, not one it may skip.
+		if len(step.Argv) == 0 {
+			err := errors.New("the run's guard has no command to run")
+			fmt.Fprintf(&b, "sweep-run: %v\n", err)
+			return b.String(), -1, err
+		}
+		if guard.Refuse == nil {
+			err := errors.New("the run's guard has no refusal to run")
+			fmt.Fprintf(&b, "sweep-run: %v\n", err)
+			return b.String(), -1, err
+		}
+		cmd := exec.CommandContext(ctx, step.Argv[0], step.Argv[1:]...) //nolint:gosec // G204: the argv a Backend rendered from a validated Spec, run directly and never through a shell
+		if step.Stdin != nil {
+			cmd.Stdin = bytes.NewReader(step.Stdin)
+		}
+		stdout, stderr, err := d.runCmd(cmd)
+		b.Write(stdout)
+		b.Write(stderr)
+		if err != nil {
+			code := -1
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				code = exitErr.ExitCode()
+			}
+			fmt.Fprintf(&b, "sweep-run: %s failed (exit %d): %v\n", strings.Join(step.Argv, " "), code, err)
+			return b.String(), code, fmt.Errorf("the run's guard did not pass (exit %d)", code)
+		}
+		if err := guard.Refuse(stdout); err != nil {
+			fmt.Fprintf(&b, "sweep-run: %v\n", err)
+			return b.String(), -1, err
+		}
+	}
+	return b.String(), 0, nil
 }
 
 // tierSweepRunnerStop takes the run in spec.OutDir down: it renders the Spec

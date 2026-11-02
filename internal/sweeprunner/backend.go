@@ -29,15 +29,20 @@ type Backend interface {
 // Plan is one rendered run: the objects it applies, the steps a caller runs in
 // the order it runs them, and how a caller learns the run has ended.
 //
-// A caller runs Apply in order, then the steps whose Teardown is false in order,
-// and stops at the first failure, then runs Teardown whether or not a step
-// before it failed. A run that fails at its own start step has still made the
-// network, the volume, the claim and the sidecar, so a teardown that waited for
-// success would leak them.
+// A caller runs Guards first and applies nothing while one refuses, then Apply
+// in order, then the steps whose Teardown is false in order, and stops at the
+// first failure, then runs Teardown whether or not a step before it failed. A
+// run that fails at its own start step has still made the network, the volume,
+// the claim and the sidecar, so a teardown that waited for success would leak
+// them.
 type Plan struct {
 	// Job is the batch/v1 Job a Kubernetes backend applies, and nil for a
 	// backend that renders argv alone. Apply carries the document it applies.
 	Job *Job
+	// Guards are the checks a caller runs before it applies anything: each
+	// lists objects that must not share the engine with this run, and its
+	// Refuse reads the listing and reports the objects that refuse the run.
+	Guards []Guard
 	// Apply are the steps that create the run's objects before its start
 	// steps, each with the document it applies as Stdin. Nil for a backend
 	// that renders argv alone.
@@ -48,6 +53,18 @@ type Plan struct {
 	// for a backend whose result stays on the engine. Nil when the run writes
 	// its result into the output directory itself.
 	Poll *Poll
+}
+
+// Guard is one check a caller runs before a Plan's Apply steps: a program that
+// lists objects on the engine, and what its listing refuses.
+type Guard struct {
+	// Step is the program that lists the objects, run directly like any step.
+	Step Step
+	// Refuse reads Step's stdout and returns the error naming the objects that
+	// make the run unsafe to start, or nil when its listing names none. An
+	// output it cannot read is an error too: a check that cannot run is not a
+	// pass.
+	Refuse func(stdout []byte) error
 }
 
 // Poll is how a caller learns that a run has ended and brings its result out.

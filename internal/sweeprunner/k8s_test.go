@@ -328,6 +328,8 @@ func TestK8sNamesFitTheObjectRules(t *testing.T) {
 		"Job":        plan.Job.Metadata.Name,
 		"repo claim": RepoClaimName(spec.Rig),
 		"out claim":  OutClaimName(spec),
+		"sync pod":   syncPodName(spec),
+		"reader pod": readerName(spec),
 	}
 	for _, volume := range plan.Job.Spec.Template.Spec.Volumes {
 		if volume.PersistentVolumeClaim != nil {
@@ -337,6 +339,11 @@ func TestK8sNamesFitTheObjectRules(t *testing.T) {
 	for what, name := range names {
 		if len(name) > 63 || !k8sNamePattern.MatchString(name) {
 			t.Errorf("the %s name %q is not a DNS-1123 label of at most 63 characters", what, name)
+		}
+	}
+	for key, value := range plan.Job.Metadata.Labels {
+		if len(value) > 63 || !k8sNamePattern.MatchString(value) {
+			t.Errorf("the Job's %s label value %q is not a DNS-1123 label of at most 63 characters", key, value)
 		}
 	}
 
@@ -370,10 +377,11 @@ func TestK8sNamesFitTheObjectRules(t *testing.T) {
 	}
 }
 
-// TestK8sRenderTeardownRemovesTheJobItRenders points the plan's removal at the
-// objects the run made — the Job and the output claim — so a caller that applies
-// the Job and stops still leaves nothing behind.
-func TestK8sRenderTeardownRemovesTheJobItRenders(t *testing.T) {
+// TestTeardownRemovesTheSyncPodButNotTheRepoClaim holds the teardown to every
+// object the run made and to the claim it must leave: the sync pod, the Job, the
+// reader pod and the output claim are removed, and the repo claim is not,
+// because every run of the rig reuses it.
+func TestTeardownRemovesTheSyncPodButNotTheRepoClaim(t *testing.T) {
 	t.Parallel()
 	spec := goldenSpec()
 	plan, err := Kubernetes{}.Render(spec)
@@ -384,61 +392,209 @@ func TestK8sRenderTeardownRemovesTheJobItRenders(t *testing.T) {
 		t.Errorf("the plan renders %d steps beside the teardown; the Job is the run's whole start", got)
 	}
 	teardown := plan.Teardown()
-	if len(teardown) != 3 {
-		t.Fatalf("the plan renders %d teardown steps, want the Job's removal, the reader pod's and the output claim's: %v", len(teardown), teardown)
+	want := []struct {
+		resource string
+		selects  string
+	}{
+		// The sync pod is selected by the run label, so a launch that lost the
+		// create race removes no other run's pod.
+		{"pod", runLabelSelector(spec)},
+		{"job", JobName(spec)},
+		{"pod", readerName(spec)},
+		{"persistentvolumeclaim", OutClaimName(spec)},
 	}
-	if !slices.Contains(teardown[0].Argv, plan.Job.Metadata.Name) {
-		t.Errorf("the teardown %v does not name the Job %q", teardown[0].Argv, plan.Job.Metadata.Name)
+	if len(teardown) != len(want) {
+		t.Fatalf("the plan renders %d teardown steps, want %d: %v", len(teardown), len(want), teardown)
 	}
-	if !slices.Contains(teardown[0].Argv, "job") {
-		t.Errorf("the teardown %v does not remove a Job", teardown[0].Argv)
-	}
-	if !slices.Contains(teardown[1].Argv, readerName(spec)) || !slices.Contains(teardown[1].Argv, "pod") {
-		t.Errorf("the teardown %v does not remove the reader pod %q, which mounts the claim", teardown[1].Argv, readerName(spec))
-	}
-	if !slices.Contains(teardown[2].Argv, OutClaimName(spec)) {
-		t.Errorf("the teardown %v does not name the output claim %q, so every run's claim is left behind", teardown[2].Argv, OutClaimName(spec))
-	}
-	if !slices.Contains(teardown[2].Argv, "persistentvolumeclaim") {
-		t.Errorf("the teardown %v does not remove a claim", teardown[2].Argv)
+	for i, w := range want {
+		argv := teardown[i].Argv
+		if !slices.Contains(argv, "delete") || !slices.Contains(argv, w.resource) || !slices.Contains(argv, w.selects) {
+			t.Errorf("teardown %d runs %v, want the %s selected by %q removed", i, argv, w.resource, w.selects)
+		}
+		if slices.Contains(argv, RepoClaimName(spec.Rig)) {
+			t.Errorf("teardown %d runs %v, which removes the repo claim %q every run reuses", i, argv, RepoClaimName(spec.Rig))
+		}
 	}
 }
 
-// TestK8sRenderAppliesTheClaimBeforeTheJob holds the launch to its order: the
-// output claim is applied first, then the Job, each as the document the plan
-// rendered, so the Job never starts with nothing to write its result to.
-func TestK8sRenderAppliesTheClaimBeforeTheJob(t *testing.T) {
+// TestRenderPlanSyncsTheRepoClaimFirst holds the launch to the sync stage's
+// order: the repo claim is applied, a sync pod is applied and waited for, the
+// host bare repository's contents are copied in, the copy is chowned to the
+// runner, the sync pod is removed, and only then are the output claim and the
+// Job applied.
+func TestRenderPlanSyncsTheRepoClaimFirst(t *testing.T) {
 	t.Parallel()
 	spec := goldenSpec()
 	plan, err := Kubernetes{}.Render(spec)
 	if err != nil {
 		t.Fatalf("rendering the golden spec: %v", err)
 	}
-	if len(plan.Apply) != 2 {
-		t.Fatalf("the plan applies %d objects, want the output claim then the Job", len(plan.Apply))
+	if len(plan.Apply) != 8 {
+		t.Fatalf("the plan applies %d steps, want the repo claim, the sync pod, its Ready wait, the copy, the chown, its removal, the output claim and the Job: %v", len(plan.Apply), plan.Apply)
 	}
-	var claim Claim
-	if err := json.Unmarshal(plan.Apply[0].Stdin, &claim); err != nil {
+
+	var repoClaim Claim
+	if err := json.Unmarshal(plan.Apply[0].Stdin, &repoClaim); err != nil {
 		t.Fatalf("the first apply is not a document: %v", err)
 	}
-	if claim.Kind != "PersistentVolumeClaim" || claim.Metadata.Name != OutClaimName(spec) {
-		t.Errorf("the first apply is a %s %q, want the output claim %q", claim.Kind, claim.Metadata.Name, OutClaimName(spec))
+	if repoClaim.Kind != "PersistentVolumeClaim" || repoClaim.Metadata.Name != RepoClaimName(spec.Rig) {
+		t.Errorf("the first apply is a %s %q, want the repo claim %q", repoClaim.Kind, repoClaim.Metadata.Name, RepoClaimName(spec.Rig))
 	}
-	if !slices.Equal(claim.Spec.AccessModes, []string{"ReadWriteOnce"}) {
-		t.Errorf("the claim's access modes are %v, want one read-write mount", claim.Spec.AccessModes)
+	if !slices.Equal(repoClaim.Spec.AccessModes, []string{"ReadWriteOnce"}) {
+		t.Errorf("the repo claim's access modes are %v, want one read-write mount", repoClaim.Spec.AccessModes)
 	}
-	if got := claim.Spec.Resources.Requests["storage"]; got != outClaimStorage {
-		t.Errorf("the claim requests storage %q, want %q", got, outClaimStorage)
+	if got := repoClaim.Spec.Resources.Requests["storage"]; got != repoClaimStorage {
+		t.Errorf("the repo claim requests storage %q, want %q", got, repoClaimStorage)
 	}
-	if !slices.Equal(plan.Apply[0].Argv, plan.Apply[1].Argv) {
-		t.Errorf("the applies run %v and %v, want the same kubectl apply", plan.Apply[0].Argv, plan.Apply[1].Argv)
+
+	var syncPod Pod
+	if err := json.Unmarshal(plan.Apply[1].Stdin, &syncPod); err != nil {
+		t.Fatalf("the second apply is not a document: %v", err)
 	}
-	if !slices.Contains(plan.Apply[1].Argv, "apply") {
-		t.Errorf("the Job's apply runs %v, which does not apply", plan.Apply[1].Argv)
+	if syncPod.Kind != "Pod" || syncPod.Metadata.Name != syncPodName(spec) {
+		t.Errorf("the second apply is a %s %q, want the sync pod %q", syncPod.Kind, syncPod.Metadata.Name, syncPodName(spec))
 	}
-	if string(plan.Apply[1].Stdin) != string(plan.Job.JSON()) {
-		t.Errorf("the Job's apply does not carry the rendered Job document")
+	// Created, not applied: a second sync pod for the rig must fail
+	// AlreadyExists rather than take the claim from a sync already using it.
+	if argv := plan.Apply[1].Argv; !slices.Contains(argv, "create") || slices.Contains(argv, "apply") {
+		t.Errorf("the second apply runs %v, want a kubectl create of the sync pod", argv)
 	}
+	if len(syncPod.Spec.Containers) != 1 || syncPod.Spec.Containers[0].Image != spec.Image {
+		t.Errorf("the sync pod's containers are %+v, want one running the Spec's image %q", syncPod.Spec.Containers, spec.Image)
+	}
+
+	if argv := plan.Apply[2].Argv; !slices.Contains(argv, "wait") || !slices.Contains(argv, "pod/"+syncPodName(spec)) {
+		t.Errorf("the third apply runs %v, want a wait for the sync pod %q", argv, syncPodName(spec))
+	}
+	cp := plan.Apply[3].Argv
+	if !slices.Contains(cp, "cp") || !slices.Contains(cp, spec.RepoDir+"/.") || !slices.Contains(cp, syncPodName(spec)+":"+RepoMount) {
+		t.Errorf("the fourth apply runs %v, want the repo contents %q copied into the sync pod at %s", cp, spec.RepoDir+"/.", RepoMount)
+	}
+	exec := strings.Join(plan.Apply[4].Argv, " ")
+	if !strings.Contains(exec, "exec "+syncPodName(spec)) ||
+		!strings.Contains(exec, "chown -R 10001:10001 "+RepoMount) ||
+		!strings.Contains(exec, "chmod -R a+rX "+RepoMount) {
+		t.Errorf("the fifth apply runs %q, want a chown and chmod of the copied tree", exec)
+	}
+	if argv := plan.Apply[5].Argv; !slices.Contains(argv, "delete") || !slices.Contains(argv, "pod") || !slices.Contains(argv, syncPodName(spec)) {
+		t.Errorf("the sixth apply runs %v, want the sync pod %q removed", argv, syncPodName(spec))
+	}
+
+	var outClaim Claim
+	if err := json.Unmarshal(plan.Apply[6].Stdin, &outClaim); err != nil {
+		t.Fatalf("the seventh apply is not a document: %v", err)
+	}
+	if outClaim.Metadata.Name != OutClaimName(spec) {
+		t.Errorf("the seventh apply is the claim %q, want the output claim %q", outClaim.Metadata.Name, OutClaimName(spec))
+	}
+	if string(plan.Apply[7].Stdin) != string(plan.Job.JSON()) {
+		t.Errorf("the last apply does not carry the rendered Job document")
+	}
+}
+
+// TestSyncPodHasNoServiceAccountToken holds the sync pod to no API access: it
+// runs as root to chown the copy, so the default service-account token mounted
+// into it would be a root token.
+func TestSyncPodHasNoServiceAccountToken(t *testing.T) {
+	t.Parallel()
+	spec := goldenSpec()
+	plan, err := Kubernetes{}.Render(spec)
+	if err != nil {
+		t.Fatalf("rendering the golden spec: %v", err)
+	}
+	pod := syncPodFromPlan(t, plan, spec)
+	if pod.Spec.AutomountServiceAccountToken == nil {
+		t.Fatalf("the sync pod renders no automountServiceAccountToken, so the cluster's default token is mounted into a root pod")
+	}
+	if *pod.Spec.AutomountServiceAccountToken {
+		t.Errorf("the sync pod's automountServiceAccountToken is true; it needs no API access")
+	}
+}
+
+// TestSyncGuardReadsConditionsNotCount holds the refusal before the repo claim
+// is written to the name prefix and the condition types, not to a label or a
+// condition count: every Job is listed, only this rig's names are read, and a
+// Job is ended when any true condition is Complete or Failed, whatever other
+// types the cluster lists beside it and in whatever order.
+func TestSyncGuardReadsConditionsNotCount(t *testing.T) {
+	t.Parallel()
+	spec := goldenSpec()
+	plan, err := Kubernetes{}.Render(spec)
+	if err != nil {
+		t.Fatalf("rendering the golden spec: %v", err)
+	}
+	if len(plan.Guards) != 1 {
+		t.Fatalf("the plan renders %d guards, want the one listing this rig's active sweep Jobs", len(plan.Guards))
+	}
+	guard := plan.Guards[0]
+	if !slices.Contains(guard.Step.Argv, "get") || !slices.Contains(guard.Step.Argv, "jobs") {
+		t.Errorf("the guard runs %v, want a listing of the Jobs", guard.Step.Argv)
+	}
+	if slices.Contains(guard.Step.Argv, "-l") {
+		t.Errorf("the guard runs %v, want an unlabelled listing: a run that lost its labels still reads the claim", guard.Step.Argv)
+	}
+	if want := sweepJobPrefix(spec.Rig); !strings.HasPrefix("gt-sweep-gastown-deadbeef-run", want) {
+		t.Errorf("the guard's prefix %q does not match a Job's name %q", want, "gt-sweep-gastown-deadbeef-run")
+	}
+
+	for _, tc := range []struct {
+		name    string
+		listing string
+		refused string
+	}{
+		{name: "an unlabelled running Job", listing: "gt-sweep-gastown-deadbeef-otherrun\n", refused: "gt-sweep-gastown-deadbeef-otherrun"},
+		{name: "a true condition neither ended type", listing: "gt-sweep-gastown-deadbeef-otherrun Suspended\n", refused: "gt-sweep-gastown-deadbeef-otherrun"},
+		{name: "three condition types ending in Failed", listing: "gt-sweep-gastown-deadbeef-run SuccessCriteriaMet FailureTarget Failed\n", refused: ""},
+		{name: "three condition types holding Complete", listing: "gt-sweep-gastown-deadbeef-run SuccessCriteriaMet Complete FailureTarget\n", refused: ""},
+		{name: "another rig's running Job", listing: "gt-sweep-otherrig-deadbeef-otherrun\n", refused: ""},
+		{name: "an empty listing", listing: "", refused: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := guard.Refuse([]byte(tc.listing))
+			if tc.refused == "" {
+				if err != nil {
+					t.Errorf("Refuse(%q) = %v, want it to pass", tc.listing, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.refused) {
+				t.Errorf("Refuse(%q) = %v, want it refused naming %q", tc.listing, err, tc.refused)
+			}
+		})
+	}
+
+	pod := syncPodFromPlan(t, plan, spec)
+	if pod.Metadata.Labels[runLabelKey] != runLabelValue(spec.RunID) {
+		t.Errorf("the sync pod's labels are %v, want %q=%q so its own run's teardown selects it",
+			pod.Metadata.Labels, runLabelKey, runLabelValue(spec.RunID))
+	}
+	if len(pod.Spec.Containers) != 1 {
+		t.Fatalf("the sync pod renders %d containers, want one", len(pod.Spec.Containers))
+	}
+	command := pod.Spec.Containers[0].Command
+	if len(command) < 3 || command[0] != "sh" || command[1] != "-c" {
+		t.Fatalf("the sync pod's command is %v, want a shell script", command)
+	}
+	if want := "find " + RepoMount + " -mindepth 1 -delete"; !strings.HasPrefix(command[2], want) {
+		t.Errorf("the sync pod's script is %q, want it to start by clearing the claim with %q so no stale object survives the copy", command[2], want)
+	}
+}
+
+// syncPodFromPlan is the sync pod document among the plan's apply steps.
+func syncPodFromPlan(t *testing.T, plan Plan, spec Spec) Pod {
+	t.Helper()
+	for _, step := range plan.Apply {
+		var pod Pod
+		if step.Stdin == nil || json.Unmarshal(step.Stdin, &pod) != nil {
+			continue
+		}
+		if pod.Kind == "Pod" && pod.Metadata.Name == syncPodName(spec) {
+			return pod
+		}
+	}
+	t.Fatalf("the plan applies no sync pod %q", syncPodName(spec))
+	return Pod{}
 }
 
 // TestK8sPollCopiesTheResultOutOfTheClaim holds the copy-out to its reader: the

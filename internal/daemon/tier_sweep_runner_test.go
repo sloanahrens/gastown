@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -909,43 +910,68 @@ func runnerKubernetesDaemon(t *testing.T, now time.Time) (*Daemon, sweeprunner.S
 
 // runnerCluster answers the kubectl commands one Kubernetes run makes. The Job
 // prints status when it is asked: statusErr fails every read, and flakyStatus
-// fails only the first that many. A copy writes result into the directory it
-// names, fails the way kubectl does when the claim holds no result, or succeeds
-// and writes nothing when skipWrite is set; failCopy fails it outright. failApply
-// is the 1-based apply that fails, 0 for none: 1 is the claim, 2 the Job and 3
-// the reader pod. failWait fails the reader pod's readiness wait.
+// fails only the first that many. The sync guard's listing of the Jobs answers
+// jobs, or fails when jobsErr is set. A copy writes result into the directory
+// it names, fails the way kubectl does when the claim holds no result, or
+// succeeds and writes nothing when skipWrite is set; failCopy fails the copy out
+// of the output claim outright, and failSyncCopy the copy into the repo claim.
+// failSyncCreate fails the sync pod's create the way a concurrent sync's does,
+// with AlreadyExists. failApply is the 1-based apply that fails, 0 for none: 1
+// is the repo claim, 2 the output claim, 3 the Job and 4 the reader pod.
+// failWait fails the reader pod's readiness wait, not the sync pod's.
 type runnerCluster struct {
-	t           *testing.T
-	status      string
-	statusErr   bool
-	flakyStatus int
-	statusReads int
-	result      *sweeprunner.Result
-	skipWrite   bool
-	failCopy    bool
-	failWait    bool
-	failApply   int
-	applies     int
+	t              *testing.T
+	status         string
+	statusErr      bool
+	flakyStatus    int
+	statusReads    int
+	jobs           string
+	jobsErr        bool
+	result         *sweeprunner.Result
+	skipWrite      bool
+	failCopy       bool
+	failSyncCopy   bool
+	failSyncCreate bool
+	failWait       bool
+	failApply      int
+	applies        int
 }
 
 func (c *runnerCluster) answer(argv []string) ([]byte, []byte, error) {
 	switch {
+	case slices.Contains(argv, "get") && slices.Contains(argv, "jobs"):
+		if c.jobsErr {
+			return nil, []byte("Error from server (Forbidden): jobs.batch is forbidden\n"), errors.New("exit status 1")
+		}
+		return []byte(c.jobs), nil, nil
 	case slices.Contains(argv, "get"):
 		c.statusReads++
 		if c.statusErr || c.statusReads <= c.flakyStatus {
 			return nil, []byte("Error from server (NotFound): jobs.batch not found\n"), errors.New("exit status 1")
 		}
 		return []byte(c.status), nil, nil
+	case slices.Contains(argv, "create"):
+		if c.failSyncCreate {
+			return nil, []byte("Error from server (AlreadyExists): pods \"gt-sweep-sync-gastown\" already exists\n"), errors.New("exit status 1")
+		}
 	case slices.Contains(argv, "apply"):
 		c.applies++
 		if c.applies == c.failApply {
 			return nil, []byte("error: the server refused the document\n"), errors.New("exit status 1")
 		}
 	case slices.Contains(argv, "wait"):
-		if c.failWait {
+		if c.failWait && !slices.ContainsFunc(argv, func(arg string) bool { return strings.HasPrefix(arg, "pod/gt-sweep-sync-") }) {
 			return nil, []byte("error: timed out waiting for the condition\n"), errors.New("exit status 1")
 		}
 	case slices.Contains(argv, "cp"):
+		// The sync stage's copy lands in the repo claim; the reader's copy is
+		// the one that brings the result home.
+		if strings.HasSuffix(argv[len(argv)-1], sweeprunner.RepoMount) {
+			if c.failSyncCopy {
+				return nil, []byte("error: unable to copy into the sync pod\n"), errors.New("exit status 1")
+			}
+			return nil, nil, nil
+		}
 		if c.failCopy {
 			return nil, []byte("error: unable to copy from the pod\n"), errors.New("exit status 1")
 		}
@@ -980,9 +1006,10 @@ func runnerCalls(ran []string, words ...string) []int {
 	return at
 }
 
-// A Kubernetes run is launched as its plan renders it: the output claim is
-// applied before the Job, both as the rendered documents, and the stage folds
-// the verdicts of the result the copy brought back (gt-2j3t7).
+// A Kubernetes run is launched as its plan renders it: the sync stage fills the
+// repo claim, the output claim is applied before the Job, both as the rendered
+// documents, and the stage folds the verdicts of the result the copy brought
+// back (gt-2j3t7).
 func TestTierSweepRunnerKubernetesLaunchesJob(t *testing.T) {
 	t.Parallel()
 	now := atHour(time.Now(), 15)
@@ -997,13 +1024,26 @@ func TestTierSweepRunnerKubernetesLaunchesJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rendering the spec: %v", err)
 	}
-	claimAt, jobAt := -1, -1
+	// The output claim's document, wherever in the plan it is applied.
+	var outClaim []byte
+	for _, step := range plan.Apply {
+		var claim sweeprunner.Claim
+		if json.Unmarshal(step.Stdin, &claim) == nil && claim.Metadata.Name == sweeprunner.OutClaimName(spec) {
+			outClaim = step.Stdin
+		}
+	}
+	if outClaim == nil {
+		t.Fatalf("the rendered plan applies no output claim %q", sweeprunner.OutClaimName(spec))
+	}
+	claimAt, jobAt, syncAt := -1, -1, -1
 	for i := range cmds.ran {
 		switch {
-		case claimAt < 0 && bytes.Equal(cmds.stdin[i], plan.Apply[0].Stdin):
+		case claimAt < 0 && bytes.Equal(cmds.stdin[i], outClaim):
 			claimAt = i
 		case jobAt < 0 && bytes.Equal(cmds.stdin[i], plan.Job.JSON()):
 			jobAt = i
+		case syncAt < 0 && bytes.Equal(cmds.stdin[i], plan.Apply[1].Stdin):
+			syncAt = i
 		}
 	}
 	if claimAt < 0 {
@@ -1014,6 +1054,9 @@ func TestTierSweepRunnerKubernetesLaunchesJob(t *testing.T) {
 	}
 	if jobAt < claimAt {
 		t.Errorf("the Job was applied at command %d, before its claim at %d: it would have nothing to write its result to", jobAt, claimAt)
+	}
+	if syncAt < 0 || syncAt > claimAt {
+		t.Errorf("the sync pod was applied at command %d, want it before the output claim at %d: the Job would read a claim the sync stage never filled", syncAt, claimAt)
 	}
 	if stage.reason != "" {
 		t.Fatalf("stage = %+v, want the copied result folded, not RED", stage)
@@ -1028,9 +1071,199 @@ func TestTierSweepRunnerKubernetesLaunchesJob(t *testing.T) {
 	}
 }
 
+// TestRenderPlanSyncStepFailureIsRed drives the sync stage's copy through a
+// fake kubectl that fails it: the launch stops at the failing step, so the Job
+// is never applied, and the stage is RED carrying the step's stderr.
+func TestRenderPlanSyncStepFailureIsRed(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, spec, st := runnerKubernetesDaemon(t, now)
+	result := runnerTestResult(spec, now)
+	cluster := &runnerCluster{t: t, status: "Complete", result: &result, failSyncCopy: true}
+	cmds := &runnerFakeCmds{answer: cluster.answer}
+	d.execCmd = cmds.run
+
+	stage := d.tierSweepRunRunner(context.Background(), st, spec)
+
+	if stage.reason != tierSweepRunnerNoResult {
+		t.Fatalf("stage = %+v, want RED with reason %q", stage, tierSweepRunnerNoResult)
+	}
+	if stage.exitCode == 0 {
+		t.Error("exit code 0 for a run whose sync stage never filled the repo claim")
+	}
+	if !strings.Contains(stage.output, "unable to copy into the sync pod") {
+		t.Errorf("stage output does not carry the failed step's stderr:\n%s", stage.output)
+	}
+	plan, err := sweeprunner.Kubernetes{}.Render(spec)
+	if err != nil {
+		t.Fatalf("rendering the spec: %v", err)
+	}
+	for i := range cmds.ran {
+		if bytes.Equal(cmds.stdin[i], plan.Job.JSON()) {
+			t.Errorf("the Job was applied at command %q after the sync copy failed", cmds.ran[i])
+		}
+	}
+}
+
+// TestSyncPodIsCreatedAtomicallyAndTeardownCountIsExact drives a sync whose pod
+// already exists: the create fails AlreadyExists, so the stage is RED carrying
+// that stderr, no Job is applied, and the teardown's exact four removals run.
+func TestSyncPodIsCreatedAtomicallyAndTeardownCountIsExact(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, spec, st := runnerKubernetesDaemon(t, now)
+	result := runnerTestResult(spec, now)
+	cluster := &runnerCluster{t: t, status: "Complete", result: &result, failSyncCreate: true}
+	cmds := &runnerFakeCmds{answer: cluster.answer}
+	d.execCmd = cmds.run
+
+	stage := d.tierSweepRunRunner(context.Background(), st, spec)
+
+	if stage.reason != tierSweepRunnerNoResult {
+		t.Fatalf("stage = %+v, want RED with reason %q: a sync that never filled the claim has no run", stage, tierSweepRunnerNoResult)
+	}
+	if stage.exitCode == 0 {
+		t.Error("exit code 0 for a run whose sync pod already existed")
+	}
+	if !strings.Contains(stage.output, "AlreadyExists") {
+		t.Errorf("stage output does not carry the create's stderr:\n%s", stage.output)
+	}
+	if n := len(runnerCalls(cmds.ran, "create")); n != 1 {
+		t.Errorf("creates = %d, want the one atomic create of the sync pod: %q", n, cmds.ran)
+	}
+	plan, err := sweeprunner.Kubernetes{}.Render(spec)
+	if err != nil {
+		t.Fatalf("rendering the spec: %v", err)
+	}
+	for i := range cmds.ran {
+		if bytes.Equal(cmds.stdin[i], plan.Job.JSON()) {
+			t.Errorf("the Job was applied at command %q after the sync pod's create failed", cmds.ran[i])
+		}
+	}
+	if n := len(runnerCalls(cmds.ran, "delete")); n != 4 {
+		t.Errorf("removals = %d, want the teardown's exact four and no sync stage removal: %q", n, cmds.ran)
+	}
+}
+
+// TestTierSweepRunnerGuardsRefuseAMalformedGuard holds the guard loop to deny:
+// a guard with no command, or one with no refusal to apply to its listing, is
+// not a check that passed.
+func TestTierSweepRunnerGuardsRefuseAMalformedGuard(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		guard sweeprunner.Guard
+		want  string
+	}{
+		{
+			name:  "a guard with no command",
+			guard: sweeprunner.Guard{Refuse: func([]byte) error { return nil }},
+			want:  "no command",
+		},
+		{
+			name:  "a guard with no refusal",
+			guard: sweeprunner.Guard{Step: sweeprunner.Step{Argv: []string{"kubectl", "get", "jobs"}}},
+			want:  "no refusal",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := &Daemon{}
+			out, code, err := d.tierSweepRunnerGuards(context.Background(), []sweeprunner.Guard{tc.guard})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("guards error = %v, want one naming %q", err, tc.want)
+			}
+			if code == 0 {
+				t.Errorf("exit code = %d for a guard the daemon cannot run, want a refusal", code)
+			}
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("output does not carry %q:\n%s", tc.want, out)
+			}
+		})
+	}
+}
+
+// TestSyncRefusesWhileASweepJobReadsTheClaim drives the guard through a fake
+// kubectl: a rig sweep Job still active refuses the run, naming it, and nothing
+// is applied; a listing that cannot be read refuses too. A Job whose listing
+// holds three true condition types ending in Complete is ended, not refused, so
+// the run goes on in its order.
+func TestSyncRefusesWhileASweepJobReadsTheClaim(t *testing.T) {
+	t.Parallel()
+	const activeJob = "gt-sweep-gastown-deadbeef-otherrun"
+	for _, tc := range []struct {
+		name string
+		jobs string
+		err  bool
+		want string
+	}{
+		{name: "an unlabelled active Job", jobs: activeJob + "\n", want: activeJob},
+		{name: "a true condition neither ended type", jobs: activeJob + " Suspended\n", want: activeJob},
+		{name: "a listing that cannot be read", err: true, want: "the run's guard did not pass"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			now := atHour(time.Now(), 15)
+			d, spec, st := runnerKubernetesDaemon(t, now)
+			result := runnerTestResult(spec, now)
+			cluster := &runnerCluster{t: t, jobs: tc.jobs, jobsErr: tc.err, status: "Complete", result: &result}
+			cmds := &runnerFakeCmds{answer: cluster.answer}
+			d.execCmd = cmds.run
+
+			stage := d.tierSweepRunRunner(context.Background(), st, spec)
+
+			if stage.reason != tierSweepRunnerNoResult {
+				t.Fatalf("stage = %+v, want RED with reason %q", stage, tierSweepRunnerNoResult)
+			}
+			if stage.exitCode == 0 {
+				t.Error("exit code 0 for a run the guard refused")
+			}
+			if !strings.Contains(stage.output, tc.want) {
+				t.Errorf("stage output does not name %q:\n%s", tc.want, stage.output)
+			}
+			for _, argv := range cmds.ran {
+				if slices.Contains(strings.Fields(argv), "apply") || slices.Contains(strings.Fields(argv), "create") {
+					t.Errorf("a step applied %q after the guard refused; nothing must be applied", argv)
+				}
+			}
+			if len(cmds.ran) == 0 || !slices.Contains(strings.Fields(cmds.ran[0]), "jobs") {
+				t.Errorf("commands = %q, want the first to be the guard's listing of the Jobs", cmds.ran)
+			}
+			if len(cmds.ran) > 0 && slices.Contains(strings.Fields(cmds.ran[0]), "-l") {
+				t.Errorf("the guard runs %q, want an unlabelled listing: a Job that lost its labels still reads the claim", cmds.ran[0])
+			}
+		})
+	}
+
+	t.Run("three condition types ending in Complete", func(t *testing.T) {
+		t.Parallel()
+		now := atHour(time.Now(), 15)
+		d, spec, st := runnerKubernetesDaemon(t, now)
+		result := runnerTestResult(spec, now)
+		cluster := &runnerCluster{
+			t:      t,
+			jobs:   "gt-sweep-gastown-deadbeef-donerun SuccessCriteriaMet Complete FailureTarget\n",
+			status: "Complete",
+			result: &result,
+		}
+		cmds := &runnerFakeCmds{answer: cluster.answer}
+		d.execCmd = cmds.run
+
+		stage := d.tierSweepRunRunner(context.Background(), st, spec)
+
+		if stage.reason != "" {
+			t.Fatalf("stage = %+v, want the ended Job to pass the guard and the copied result folded", stage)
+		}
+		if len(runnerCalls(cmds.ran, "create")) == 0 {
+			t.Errorf("commands = %q, want the sync pod created after the guard passed", cmds.ran)
+		}
+	})
+}
+
 // A run's objects come down only after its result is read, whichever way the
-// Job ended: the copy runs first, then the Job, the reader pod and the claim are
-// removed (gt-2j3t7).
+// Job ended: the copy runs first, then the teardown removes the sync pod, the
+// Job, the reader pod and the output claim. The repo claim every run reuses is
+// never removed (gt-2j3t7).
 func TestTierSweepRunnerKubernetesTeardown(t *testing.T) {
 	t.Parallel()
 	for _, status := range []string{"Complete", "Failed"} {
@@ -1047,20 +1280,32 @@ func TestTierSweepRunnerKubernetesTeardown(t *testing.T) {
 			if stage.reason != "" {
 				t.Fatalf("stage = %+v, want the copied result folded", stage)
 			}
+			// The sync stage copies into the repo claim; the last copy is the
+			// result coming home.
 			copies := runnerCalls(cmds.ran, "cp")
-			if len(copies) != 1 {
-				t.Fatalf("copies = %d, want the one copy of the result: %q", len(copies), cmds.ran)
+			if len(copies) != 2 {
+				t.Fatalf("copies = %d, want the sync copy and the copy of the result: %q", len(copies), cmds.ran)
 			}
+			resultCopy := copies[len(copies)-1]
 			deletes := runnerCalls(cmds.ran, "delete")
-			if len(deletes) != 3 {
-				t.Fatalf("removals = %d, want the Job, the reader pod and the claim: %q", len(deletes), cmds.ran)
+			// The sync stage removes its pod itself, and the teardown removes
+			// it again with --ignore-not-found along with the rest.
+			if len(deletes) != 5 {
+				t.Fatalf("removals = %d, want the sync stage's and the teardown's four: %q", len(deletes), cmds.ran)
 			}
-			for i, word := range []string{"job", "pod", "persistentvolumeclaim"} {
-				if at := deletes[i]; !slices.Contains(strings.Fields(cmds.ran[at]), word) {
-					t.Errorf("removal %d is %q, want one that removes a %s", i, cmds.ran[at], word)
+			teardown := deletes[len(deletes)-4:]
+			for i, word := range []string{"pod", "job", "pod", "persistentvolumeclaim"} {
+				at := teardown[i]
+				if !slices.Contains(strings.Fields(cmds.ran[at]), word) {
+					t.Errorf("teardown removal %d is %q, want one that removes a %s", i, cmds.ran[at], word)
 				}
-				if deletes[i] < copies[0] {
-					t.Errorf("removal %q ran before the result was read", cmds.ran[deletes[i]])
+				if at < resultCopy {
+					t.Errorf("teardown removal %q ran before the result was read", cmds.ran[at])
+				}
+			}
+			for _, at := range deletes {
+				if strings.Contains(cmds.ran[at], sweeprunner.RepoClaimName(spec.Rig)) {
+					t.Errorf("a removal runs %q, which removes the repo claim every run reuses", cmds.ran[at])
 				}
 			}
 		})
@@ -1073,30 +1318,36 @@ func TestTierSweepRunnerKubernetesTeardown(t *testing.T) {
 func TestTierSweepRunnerKubernetesRedAndTornDown(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name      string
-		status    string
-		statusErr bool
-		noResult  bool
-		skipWrite bool
-		failCopy  bool
-		failWait  bool
-		failApply int
+		name           string
+		status         string
+		statusErr      bool
+		noResult       bool
+		skipWrite      bool
+		failCopy       bool
+		failWait       bool
+		failSyncCreate bool
+		failApply      int
+		// wantDeletes is the teardown's four removals, plus the sync stage's
+		// own removal when the launch reached it.
+		wantDeletes int
 	}{
-		{name: "the Job ended with no result", status: "Failed", noResult: true},
-		{name: "the status cannot be read", statusErr: true},
-		{name: "the copy succeeds and writes nothing", status: "Complete", skipWrite: true},
-		{name: "the copy fails", status: "Complete", failCopy: true},
-		{name: "the reader pod never becomes ready", status: "Complete", failWait: true},
-		{name: "the claim cannot be applied", status: "Complete", failApply: 1},
-		{name: "the Job cannot be applied", status: "Complete", failApply: 2},
-		{name: "the reader pod cannot be applied", status: "Complete", failApply: 3},
+		{name: "the Job ended with no result", status: "Failed", noResult: true, wantDeletes: 5},
+		{name: "the status cannot be read", statusErr: true, wantDeletes: 5},
+		{name: "the copy succeeds and writes nothing", status: "Complete", skipWrite: true, wantDeletes: 5},
+		{name: "the copy fails", status: "Complete", failCopy: true, wantDeletes: 5},
+		{name: "the reader pod never becomes ready", status: "Complete", failWait: true, wantDeletes: 5},
+		{name: "the repo claim cannot be applied", status: "Complete", failApply: 1, wantDeletes: 4},
+		{name: "the sync pod already exists", status: "Complete", failSyncCreate: true, wantDeletes: 4},
+		{name: "the output claim cannot be applied", status: "Complete", failApply: 2, wantDeletes: 5},
+		{name: "the Job cannot be applied", status: "Complete", failApply: 3, wantDeletes: 5},
+		{name: "the reader pod cannot be applied", status: "Complete", failApply: 4, wantDeletes: 5},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			now := atHour(time.Now(), 15)
 			d, spec, st := runnerKubernetesDaemon(t, now)
-			cluster := &runnerCluster{t: t, status: tc.status, statusErr: tc.statusErr, skipWrite: tc.skipWrite, failCopy: tc.failCopy, failWait: tc.failWait, failApply: tc.failApply}
+			cluster := &runnerCluster{t: t, status: tc.status, statusErr: tc.statusErr, skipWrite: tc.skipWrite, failCopy: tc.failCopy, failWait: tc.failWait, failSyncCreate: tc.failSyncCreate, failApply: tc.failApply}
 			if !tc.noResult {
 				result := runnerTestResult(spec, now)
 				cluster.result = &result
@@ -1115,8 +1366,10 @@ func TestTierSweepRunnerKubernetesRedAndTornDown(t *testing.T) {
 			if tc.statusErr && !strings.Contains(stage.output, "the run's status cannot be read") {
 				t.Errorf("stage output does not name the status read that failed for the whole budget:\n%s", stage.output)
 			}
-			if n := len(runnerCalls(cmds.ran, "delete")); n != 3 {
-				t.Errorf("removals = %d, want the Job, the reader pod and the claim removed once the run was judged: %q", n, cmds.ran)
+			// The teardown's four removals run whether or not the launch got as
+			// far as its own sync-pod removal.
+			if n := len(runnerCalls(cmds.ran, "delete")); n != tc.wantDeletes {
+				t.Errorf("removals = %d, want %d, the teardown's four and the sync stage's own when the launch reached it: %q", n, tc.wantDeletes, cmds.ran)
 			}
 		})
 	}
@@ -1140,14 +1393,14 @@ func TestTierSweepRunnerKubernetesStatusReadRetried(t *testing.T) {
 	if stage.reason != "" {
 		t.Fatalf("stage = %+v, want the copied result folded, not RED on the one failed read", stage)
 	}
-	if n := len(runnerCalls(cmds.ran, "get")); n < 2 {
+	if n := len(runnerCalls(cmds.ran, "get", "job")); n < 2 {
 		t.Errorf("status reads = %d, want the poll to ask again after the failed one: %q", n, cmds.ran)
 	}
 	if !strings.Contains(stage.output, "integration GREEN passed=66") {
 		t.Errorf("stage output does not carry the copied verdict:\n%s", stage.output)
 	}
-	if n := len(runnerCalls(cmds.ran, "delete")); n != 3 {
-		t.Errorf("removals = %d, want the Job, the reader pod and the claim once the result was read: %q", n, cmds.ran)
+	if n := len(runnerCalls(cmds.ran, "delete")); n != 5 {
+		t.Errorf("removals = %d, want the sync pod, the Job, the reader pod and the claim once the result was read, plus the sync stage's own removal: %q", n, cmds.ran)
 	}
 }
 
@@ -1244,7 +1497,15 @@ func TestTierSweepRunnerKubernetesCycleEndsDuringCollect(t *testing.T) {
 	if stage.reason != "" {
 		t.Errorf("stage reason = %q, want none: a cycle that ended the wait learned nothing about the tree", stage.reason)
 	}
-	if n := len(runnerCalls(cmds.ran, "delete")); n != 0 {
-		t.Errorf("removals = %d, want none: the run keeps going for the next cycle to adopt: %q", n, cmds.ran)
+	// The sync stage removed its own pod while filling the claim; the run's Job
+	// and its output claim must stay for the next cycle to adopt.
+	for _, argv := range cmds.ran {
+		fields := strings.Fields(argv)
+		if !slices.Contains(fields, "delete") {
+			continue
+		}
+		if slices.Contains(fields, "job") || slices.Contains(fields, sweeprunner.OutClaimName(spec)) {
+			t.Errorf("the run's objects were removed on a cycle that only ended the wait: %q", argv)
+		}
 	}
 }
