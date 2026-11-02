@@ -303,12 +303,18 @@ func triggerArgv(verb string) []string {
 
 // slotPrefix runs a package under gt slot run with the container tests on, and
 // with --nice when TIER_SWEEP_NICE set one. A nil nice passes no flag, so gt
-// slot run keeps its own default. With noSlot the wrapper is dropped and only the
+// slot run keeps its own default. With noSlot the wrapper is dropped and the
 // container-test environment remains: the runner container has no town for
-// gt slot run to find (TIER_SWEEP_NOSLOT).
+// gt slot run to find (TIER_SWEEP_NOSLOT). A positive nice value is not dropped
+// with it: nice(1) applies it ahead of env, so TIER_SWEEP_NICE still reaches every
+// package, and 0 adds no wrapper just as --nice 0 disables gt slot run's own.
 func slotPrefix(nice *int, noSlot bool) []string {
 	if noSlot {
-		return []string{"env", "GT_TEST_DOCKER=1"}
+		var prefix []string
+		if nice != nil && *nice > 0 {
+			prefix = []string{"nice", "-n", strconv.Itoa(*nice)}
+		}
+		return append(prefix, "env", "GT_TEST_DOCKER=1")
 	}
 	prefix := []string{"gt", "slot", "run"}
 	if nice != nil {
