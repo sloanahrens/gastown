@@ -6,8 +6,9 @@
 // The stored text is bead text as filed, never another tenant's text: callers
 // must not put any content that is not the bead's own.
 //
-// The package performs no I/O, reads no environment, and has no caller yet: the
-// file-backed store and the callers are later beads (gt-d7c99).
+// The package reads no environment. MemoryStore keeps versions in memory;
+// FileStore appends them to one JSONL file and assumes one writer per file,
+// taking no lock across processes. The callers are later beads (gt-d7c99).
 package beadversions
 
 import (
