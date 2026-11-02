@@ -36,10 +36,11 @@ import (
 // about depth.
 //
 // The age and shaped blocks also carry a work-only twin over the beads that
-// are not identity beads (type rig, or label gt:agent or handoff). Those stay
-// open for the life of the town, so a raw block can name one as the oldest
-// open bead or count it as unshaped; the twin is what says whether any work is
-// stuck (gt-9iel9).
+// are not identity beads (type rig, or label gt:agent or handoff). Rig and
+// gt:agent beads stay open for the life of the town, and a handoff bead is a
+// note, not work, so a raw block can name one of these as the oldest open bead
+// or count it as unshaped; the twin is what says whether any work is stuck
+// (gt-9iel9).
 
 // bdDailyCallTimeout bounds one rig's bd listing: the town's largest rig lists
 // in a few seconds, and the loader retries once, so a store hung on a dead Dolt
@@ -406,9 +407,11 @@ type bdDailyBeadAge struct {
 	id   string
 }
 
-// bdDailyWorkBead reports whether a bead is work. The beads whose type is rig
-// or whose labels hold gt:agent or handoff are identity beads: they stay open
-// for the life of the town, so counting them says nothing about stuck work.
+// bdDailyWorkBead reports whether a bead is work. Rig and gt:agent beads are
+// identity beads that stay open for the life of the town. A handoff bead is a
+// note that gets closed, not work. The beads whose type is rig or whose labels
+// hold gt:agent or handoff are left out, since counting them says nothing about
+// stuck work.
 func bdDailyWorkBead(b BeadRow) bool {
 	if b.Type == "rig" {
 		return false
