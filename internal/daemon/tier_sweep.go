@@ -486,6 +486,9 @@ type tierSweepStage struct {
 	// slot is true when the stage starts containers and so must run under the
 	// town's container-gate slot.
 	slot bool
+	// shell is true for the shell stage. It starts no container, so it leaves
+	// the host only when the runner block's Shell asks for it.
+	shell bool
 	// role is the slot role the stage holds, once, for every tier it runs.
 	role string
 	// step names the gate step: "test" for a slot stage, because
@@ -1054,6 +1057,7 @@ func tierSweepStages(rig string) []tierSweepStage {
 		budget: tierSweepShellBudget,
 		runner: tierSweepShellCommand,
 		goDir:  tierSweepShellDir,
+		shell:  true,
 		rig:    rig,
 		step:   "shell",
 	}, {
@@ -1600,10 +1604,11 @@ func tierSweepMainSHA(ctx context.Context, repo string) (string, error) {
 // the host is rendered as a Spec, launched detached and read back from its
 // result.json; every other stage runs in dir as its own step.
 //
-// The host stage: the shell stage runs as its own step. The integration stage
-// is named "test" so land.WithSlot holds the town's container-gate slot around
-// it under the sweep's non-gate role: the script's inner `gt slot run` calls
-// inherit that role and ride the one hold reentrantly.
+// A stage the config leaves on the host: the shell stage runs as its own step.
+// The integration stage is named "test" so land.WithSlot holds the town's
+// container-gate slot around it under the sweep's non-gate role: the script's
+// inner `gt slot run` calls inherit that role and ride the one hold
+// reentrantly.
 func (d *Daemon) tierSweepRunStage(ctx context.Context, dir string, st tierSweepStage) tierSweepStageResult {
 	spec, offHost, err := d.tierSweepRunnerSpec(st)
 	switch {
@@ -1644,18 +1649,18 @@ func tierSweepRunnerRunID(rig, sha string, tiers []string) string {
 }
 
 // tierSweepRunnerSpec returns the Spec a stage renders off-host, and whether
-// the runner takes the stage at all. Only the stage that starts containers
-// leaves the host, and only when the config names a runner: the shell stage
-// stays on the host. A slot stage whose tree ships the rig's own script instead
-// of the Go sweep command leaves it too, because cmd/sweep-run makes the same
-// per-tree choice the host sweep does and runs that script in the container
-// (gt-rhwx1).
+// the runner takes the stage at all. A stage leaves the host only when the
+// config names a runner and either starts containers or is the shell stage the
+// runner block's Shell opts in: the shell stage otherwise stays on the host. A
+// slot stage whose tree ships the rig's own script instead of the Go sweep
+// command leaves it too, because cmd/sweep-run makes the same per-tree choice
+// the host sweep does and runs that script in the container (gt-rhwx1).
 //
 // An error is a runner the config names whose Spec cannot be rendered: the
 // stage is then RED, never run on the host instead.
 func (d *Daemon) tierSweepRunnerSpec(st tierSweepStage) (sweeprunner.Spec, bool, error) {
 	cfg := tierSweepRunnerConfig(d.patrolConfig)
-	if cfg == nil || !st.slot {
+	if cfg == nil || !(st.slot || (st.shell && cfg.Shell)) {
 		return sweeprunner.Spec{}, false, nil
 	}
 	runID := tierSweepRunnerRunID(st.rig, st.tested, st.tiers)
