@@ -8,10 +8,11 @@ import (
 	"time"
 )
 
-// The Work panel is one section, so a test drives renderWork over the reading
-// the server would send and reads back what it drew: the seat rows, the queue
-// summary, the blocked line and the folded list. The panel replaced the
-// Polecats and Work queue panels (gt-vcr3z), which drew the same beads twice.
+// The Polecats and Beads panels are drawn by workSeats and workQueue, so a test
+// feeds the page the reading the server would send and reads back what the
+// panels drew: the seat rows, the queue summary, the blocked line and the folded
+// list. Work replaced the Polecats and Work queue panels (gt-vcr3z), which drew
+// the same beads twice, and Polecats and Beads replaced Work (gt-sfpm6).
 
 // workState is one page state for the panel: the seats and the queue reading,
 // with both read statuses fresh.
@@ -1188,13 +1189,25 @@ func TestWorkIsSplitIntoPolecatsAndBeads(t *testing.T) {
 		t.Errorf("the pair is not immediately before the Landings section: %.80q follows it", rest)
 	}
 	for _, key := range []string{"polecats", "beads"} {
-		tag := page[strings.Index(page, `data-fold="`+key+`"`):]
-		tag = tag[:strings.Index(tag, ">")]
+		start := strings.Index(page, `data-fold="`+key+`"`)
+		if start < 0 {
+			t.Fatalf("the page has no section folded under %q", key)
+		}
+		tag := page[start:]
+		end := strings.Index(tag, ">")
+		if end < 0 {
+			t.Fatalf("the %s section's tag never closes", key)
+		}
+		tag = tag[:end]
 		if strings.Contains(tag, "data-default-collapsed") {
 			t.Errorf("the %s section starts collapsed by default: %s", key, tag)
 		}
 	}
-	if grid := page[strings.Index(page, `<div class="grid">`):at]; strings.Contains(grid, `data-fold="polecats"`) || strings.Contains(grid, `data-fold="beads"`) {
+	gridAt := strings.Index(page, `<div class="grid">`)
+	if gridAt < 0 || gridAt > at {
+		t.Fatal("the page has no grid above the Polecats and Beads pair")
+	}
+	if grid := page[gridAt:at]; strings.Contains(grid, `data-fold="polecats"`) || strings.Contains(grid, `data-fold="beads"`) {
 		t.Error("Polecats or Beads is inside the grid's columns")
 	}
 	if css := cssDecls(t, "pair"); css["display"] != "grid" {
