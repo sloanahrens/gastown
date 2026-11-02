@@ -312,12 +312,17 @@ func write(townRoot string, hostOf func(key string) (host string, ok bool), rec 
 // trust. The update's callback writes the section itself and never calls
 // Write, which would take the same lock again.
 func Renew(townRoot string, key []byte, now time.Time, actor string) (Record, error) {
-	return renew(townRoot, config.SectionHost, key, now, actor)
+	return renew(townRoot, config.SectionHost, config.UpdateRawJSON, key, now, actor)
 }
 
-// renew is Renew over a section lookup, so a test can drive the refusal no
-// build with the layout's registration in place can reach.
-func renew(townRoot string, hostOf func(key string) (host string, ok bool), key []byte, now time.Time, actor string) (Record, error) {
+// updateFunc is the shape of config.UpdateRawJSON, so a test can drive the
+// update's own failure without a file system that refuses writes.
+type updateFunc func(path string, mutate func(tree map[string]any) (changed bool, err error)) error
+
+// renew is Renew over a section lookup and over the update, so a test can
+// drive the write refusal no build with the layout's registration in place can
+// reach.
+func renew(townRoot string, hostOf func(key string) (host string, ok bool), update updateFunc, key []byte, now time.Time, actor string) (Record, error) {
 	if len(key) == 0 {
 		return Record{}, ErrNoKey
 	}
@@ -326,14 +331,17 @@ func renew(townRoot string, hostOf func(key string) (host string, ok bool), key 
 		return Record{}, err
 	}
 	var rec Record
-	var refusal error
-	err = config.UpdateRawJSON(path, func(tree map[string]any) (bool, error) {
+	var refusal, readErr, signErr error
+	ran := false
+	err = update(path, func(tree map[string]any) (bool, error) {
+		ran = true
 		// The section is read through LoadTownConfig, the same loader Read
 		// uses, so the trust rules see exactly the bytes a reader would. The
-		// file cannot change under us: UpdateRawJSON holds its lock.
+		// file cannot change under us: the update holds its lock.
 		town, err := config.LoadTownConfig(path)
 		if err != nil {
-			return false, err
+			readErr = err
+			return false, nil
 		}
 		if st := classify(town.Ring, key, now); st.Kind == Absent {
 			refusal = fmt.Errorf("no Ring; forge it (%s)", st.Reason)
@@ -341,17 +349,34 @@ func renew(townRoot string, hostOf func(key string) (host string, ok bool), key 
 		}
 		signed, err := Sign(Record{ForgedAt: now, ExpiresAt: now.Add(Lease), ForgedBy: actor}, key)
 		if err != nil {
-			return false, err
+			signErr = err
+			return false, nil
 		}
 		tree[SectionKey] = signed
 		rec = signed
 		return true, nil
 	})
-	if err != nil {
-		return Record{}, fmt.Errorf("reading the Ring: %w", err)
-	}
-	if refusal != nil {
+	// Each failure is named for the step it came from. The callback reports its
+	// own refusals instead of returning them, so an update error after the
+	// callback ran is the write's. One before it ran is the update's own and
+	// does not say whether the lock or the first read failed, so it is named
+	// for the update — except a file whose content does not decode, which is
+	// the read.
+	switch {
+	case readErr != nil:
+		return Record{}, fmt.Errorf("reading the Ring: %w", readErr)
+	case signErr != nil:
+		return Record{}, fmt.Errorf("signing the Ring: %w", signErr)
+	case refusal != nil:
 		return Record{}, refusal
+	case err != nil && ran:
+		return Record{}, fmt.Errorf("writing the Ring: %w", err)
+	case err != nil:
+		var parseErr *config.ParseError
+		if errors.As(err, &parseErr) {
+			return Record{}, fmt.Errorf("reading the Ring: %w", err)
+		}
+		return Record{}, fmt.Errorf("updating the Ring: %w", err)
 	}
 	return rec, nil
 }
