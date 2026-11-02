@@ -1,6 +1,6 @@
 ## Changelog
 
-- 2026-11-02 gt-2iro9: added rule 16, one workspace per answer: code that builds a view, a total, a bill or a limit for one workspace checks that every record it reads names that workspace, and a missing registry, prefix or map is an error (sixteen rules); the rule-count test is now TestPolecatDirectiveRuleHeadings.
+- 2026-11-01 gt-2iro9: added rule 16, one workspace per answer: code that builds a view, a total, a bill or a limit for one workspace checks that every record it reads names that workspace, and a missing registry, prefix or map is an error (sixteen rules); the rule-count test is now TestPolecatDirectiveRuleHeadings.
 - 2026-10-31 gt-pccx7: one coherent revision from the 2026-10-28..31 rejection record (842 majors): a plan section first, town rules and tests merged to one copy each, rules 12-15 (cloud) leave for the devops layer, new rules 12-14 (finish and wire, state and locks, docs say what the code does), rule 16 becomes 15, and a closing pre-submit checklist ordered by rounds burned (fifteen rules).
 - 2026-11-01 gt-9givh: added a "Before gt done: five checks on your added lines" checklist after rule 16; it cites existing rules, so the count stays sixteen.
 - 2026-10-31 gt-9ptn8: merged the scratch and shell-script pairs into their policy sections; rules 7 and 8 point at them; intro counts dropped (sixteen rules).
@@ -145,6 +145,6 @@ Run these on your added lines, in the order om rejects most. A hit is a question
 7. Test hygiene (7, 8): `D -- '*_test.go' | grep -nE '^\+.*(time\.Sleep|time\.After|Setenv|Getenv|UserHomeDir|/tmp|exec\.Command)'` is empty or justified.
 8. Secrets (11): no added error or log line prints captured output, a token or a password.
 9. Scope (9): `git diff --stat origin/main...HEAD` lists only files your Constraints name; go.mod changes carry a Rationale line.
-10. Workspace (16): list every record type the diff reads for one workspace and grep each for its workspace field; a read with no check is a question.
+10. Workspace (rule 16): list every record type the diff reads for one workspace and grep each for its workspace field; a read with no check is a question.
 
 Tick each acceptance box only after its test exists.

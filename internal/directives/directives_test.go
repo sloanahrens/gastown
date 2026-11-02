@@ -154,3 +154,24 @@ func TestPolecatDirectiveRuleHeadings(t *testing.T) {
 		t.Error("polecat.md still carries the probe line")
 	}
 }
+
+// TestPolecatDirectiveRule16HasItsBody pins gt-2iro9's review finding: the
+// heading count passes with rule 16 empty, so this test reads the rule's own
+// section and requires the bulleted om flags line that names its findings.
+func TestPolecatDirectiveRule16HasItsBody(t *testing.T) {
+	t.Parallel()
+	text := readDirective(t, "polecat.md")
+	const heading = "\n## 16. One workspace per answer\n"
+	start := strings.Index(text, heading)
+	if start < 0 {
+		t.Fatal("polecat.md has no rule 16 titled \"One workspace per answer\"")
+	}
+	body := text[start+len(heading):]
+	end := strings.Index(body, "\n# Before gt done")
+	if end < 0 {
+		t.Fatal("polecat.md has no \"# Before gt done\" checklist after rule 16")
+	}
+	if !strings.Contains(body[:end], "- om flags: ") {
+		t.Error("rule 16 has no om flags line before the pre-submit checklist")
+	}
+}
