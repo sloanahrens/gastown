@@ -244,6 +244,55 @@ func TestDecideRefusesAStoreSelectingFlagOnAPassThroughVerb(t *testing.T) {
 	}
 }
 
+// cook opens a store with --persist (R1), so a tracker rig refuses that form
+// through the guard the store-selecting flags use: a bare --persist, the
+// =true form, and the flag after the formula operand all name a store this
+// shim cannot route. A cook without it still reaches bd.real (gt-p85pw.100).
+func TestCookPersistFromATrackerRigIsRefused(t *testing.T) {
+	t.Parallel()
+	town := newTown(t, routeTown, routeAlpha, routeBeta)
+	beta := filepath.Join(town, "beta", "mayor", "rig")
+
+	refused := []struct {
+		name string
+		args []string
+	}{
+		{"the bare flag", []string{"cook", "--persist"}},
+		{"the =true form", []string{"cook", "--persist=true"}},
+		{"the =1 form pflag also reads as true", []string{"cook", "--persist=1"}},
+		{"the flag after the formula operand", []string{"cook", "mol-polecat-work", "--persist"}},
+		{"the =true form after the formula operand", []string{"cook", "mol-polecat-work", "--persist=true", "--var", "issue=bt-abc"}},
+	}
+	for _, tc := range refused {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := decide(t, beta, "", tc.args...); err == nil || !strings.Contains(err.Error(), "selects a store") {
+				t.Errorf("Decide(%v) from a tracker rig = %v, want a refusal naming --persist", tc.args, err)
+			}
+		})
+	}
+
+	passed := []struct {
+		name string
+		args []string
+	}{
+		{"a cook with no persist flag", []string{"cook", "mol-polecat-work"}},
+		{"a cook whose persist is explicitly false", []string{"cook", "--persist=false"}},
+		// Only cook documents --persist as the flag that opens a store; on
+		// another command this guard leaves the flag to bd.real.
+		{"a formula subcommand naming --persist", []string{"formula", "list", "--persist"}},
+	}
+	for _, tc := range passed {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := decide(t, beta, "", tc.args...)
+			if err != nil || got.Tracker {
+				t.Errorf("Decide(%v) from a tracker rig = %+v, %v, want bd.real and no error", tc.args, got, err)
+			}
+		})
+	}
+}
+
 // With no tracker rig the same flags pass: nothing is routed, bd.real answers.
 func TestDecideAllowsAStoreSelectingFlagWithoutATracker(t *testing.T) {
 	t.Parallel()
@@ -1051,6 +1100,26 @@ func TestMainPassesCookAndFormulaToRealBd(t *testing.T) {
 				t.Errorf("Main(%v) ran %q, want bd.real at %q", tc.args, proc.path, want)
 			}
 		})
+	}
+}
+
+// The entry point refuses cook --persist in a tracker rig before bd.real runs,
+// so the store the flag opens is never reached from there (gt-p85pw.100).
+func TestMainRefusesCookPersistBeforeRealBd(t *testing.T) {
+	t.Parallel()
+	town := newTown(t, routeTown, routeAlpha, routeBeta)
+	beta := filepath.Join(town, "beta", "mayor", "rig")
+
+	proc := &fakeProcess{}
+	e, stderr, _ := shimEnv(t, beta, "", proc, handlers, "cook", "mol-polecat-work", "--persist")
+	if got := Main(e); got != 1 {
+		t.Errorf("Main(cook --persist) = %d, want 1", got)
+	}
+	if !strings.Contains(stderr.String(), "--persist selects a store") {
+		t.Errorf("stderr = %q, want a refusal naming --persist", stderr.String())
+	}
+	if proc.ran != nil {
+		t.Errorf("Main(cook --persist) ran %v, want no bd.real", proc.ran)
 	}
 }
 
