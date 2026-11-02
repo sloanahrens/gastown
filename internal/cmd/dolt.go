@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1047,33 +1046,7 @@ func (r doltArchiveReader) eventsBehind(ctx context.Context, db string, wm daemo
 		return 0, err
 	}
 	defer rows.Close()
-	columns, err := rows.Columns()
-	if err != nil {
-		return 0, err
-	}
-	idColumn := slices.Index(columns, "id")
-	if idColumn < 0 {
-		return 0, fmt.Errorf("database %q: the events read has no id column: %v", db, columns)
-	}
-	archived := wm.ArchivedIDs()
-	var behind int64
-	for rows.Next() {
-		values := make([]sql.NullString, len(columns))
-		dest := make([]any, len(columns))
-		for i := range values {
-			dest[i] = &values[i]
-		}
-		if err := rows.Scan(dest...); err != nil {
-			return 0, err
-		}
-		if values[idColumn].Valid && !archived[values[idColumn].String] {
-			behind++
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return 0, err
-	}
-	return behind, nil
+	return daemon.UnarchivedEvents(rows, wm.ArchivedIDs())
 }
 
 // eventsBehindQuery renders the count's SELECT: the whole table with no

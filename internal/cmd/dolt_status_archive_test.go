@@ -391,8 +391,11 @@ func TestDoltArchiveReaderFailures(t *testing.T) {
 	t.Run("an events count subtracts the ids in the lookback window", func(t *testing.T) {
 		t.Parallel()
 		server := &archiveCountServer{
-			columns: []string{"id"},
-			rows:    [][]driver.Value{{"archived"}, {"late"}},
+			columns: []string{"id", "created_at"},
+			rows: [][]driver.Value{
+				{"archived", "2026-10-01 00:00:00"},
+				{"late", "2026-10-01 00:00:00"},
+			},
 		}
 		reader := doltArchiveReader{config: config, openDB: archiveCountOpener(t, server)}
 		wm := daemon.EventsArchiveWatermark{
@@ -446,8 +449,22 @@ func TestDoltArchiveReaderFailures(t *testing.T) {
 				rows:    [][]driver.Value{{"x"}},
 			}),
 		}
-		if _, err := reader.eventsBehind(ctx, "gt", windowed); err == nil || !strings.Contains(err.Error(), "no id column") {
+		if _, err := reader.eventsBehind(ctx, "gt", windowed); err == nil || !strings.Contains(err.Error(), "no created_at and id columns") {
 			t.Errorf("count of a result set without id = %v, want it refused", err)
+		}
+	})
+
+	t.Run("a windowed events count reports a row it cannot scan", func(t *testing.T) {
+		t.Parallel()
+		reader := doltArchiveReader{
+			config: config,
+			openDB: archiveCountOpener(t, &archiveCountServer{
+				columns: []string{"id", "created_at"},
+				rows:    [][]driver.Value{{struct{}{}, "2026-10-01 00:00:00"}},
+			}),
+		}
+		if _, err := reader.eventsBehind(ctx, "gt", windowed); err == nil {
+			t.Error("a row whose id is not a string was read")
 		}
 	})
 
@@ -456,7 +473,7 @@ func TestDoltArchiveReaderFailures(t *testing.T) {
 		reader := doltArchiveReader{
 			config: config,
 			openDB: archiveCountOpener(t, &archiveCountServer{
-				columns: []string{"id"},
+				columns: []string{"id", "created_at"},
 				nextErr: errors.New("row read failed"),
 			}),
 		}

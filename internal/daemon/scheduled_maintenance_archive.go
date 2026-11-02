@@ -974,9 +974,6 @@ func (d *Daemon) doltArchiveLog(ctx context.Context, db string, after ArchiveWat
 	if err := validMaintenanceDBName(db); err != nil {
 		return nil, err
 	}
-	if err := after.Validate(); err != nil {
-		return nil, err
-	}
 	query, args, err := doltArchiveLogQuery(after)
 	if err != nil {
 		return nil, err
@@ -1073,6 +1070,29 @@ func (d *Daemon) doltArchiveEvents(ctx context.Context, db, since string) (archi
 // engine instead of a Go fake that would only repeat the WHERE clause.
 func eventsArchiveQuery(db, since string) (string, error) {
 	return beadsql.BackupEvents(db, since).Inline()
+}
+
+// UnarchivedEvents counts the rows an open events read returns whose id the
+// watermark does not hold: `gt dolt status`'s events-behind number. It reads the
+// result set with the archive's own scanner, so the status and the export
+// interpret the columns and NULLs the same way. The caller opens and closes the
+// rows.
+func UnarchivedEvents(rows *sql.Rows, archived map[string]bool) (int64, error) {
+	batch, err := eventsArchiveRows(rows)
+	if err != nil {
+		return 0, err
+	}
+	_, idColumn, err := eventsWatermarkColumns(batch.Columns)
+	if err != nil {
+		return 0, err
+	}
+	var behind int64
+	for _, row := range batch.Rows {
+		if idColumn < len(row) && !archived[row[idColumn]] {
+			behind++
+		}
+	}
+	return behind, nil
 }
 
 // eventsArchiveRows reads every column of an open result set into one events
