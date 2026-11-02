@@ -1187,15 +1187,31 @@ func hmHintSource(run hmhints.Runner) specHintSource {
 	}
 }
 
+// slowHintQuery reports whether a bead's text mentions a slow or timed-out
+// test and, when it does, the query a hint source takes: the title plus the
+// words its prior records are likely to use. Both the polecat's prime hint and
+// the spec lint's hint build the trigger and query here, so they ask hm the
+// same question (gt-jamix).
+func slowHintQuery(title, description string) (string, bool) {
+	if !specdispatch.SlowTextHint(title + "\n" + description) {
+		return "", false
+	}
+	return strings.TrimSpace(title + " " + specHintWords), true
+}
+
 // specSlowHints asks hint for the top prior records on slow tests when the
 // bead's text mentions one, and returns nothing otherwise. A nil source, and
 // any hm failure (unavailable, timeout, bad output), is a bead without hints
 // (gt-p07bw).
 func specSlowHints(spec specdispatch.Spec, hint specHintSource) []hmhints.Hit {
-	if hint == nil || !specdispatch.SlowTextHint(spec.Title+"\n"+spec.Description) {
+	if hint == nil {
 		return nil
 	}
-	hits, err := hint(context.Background(), strings.TrimSpace(spec.Title+" "+specHintWords), specHintLimit)
+	query, ok := slowHintQuery(spec.Title, spec.Description)
+	if !ok {
+		return nil
+	}
+	hits, err := hint(context.Background(), query, specHintLimit)
 	if err != nil {
 		return nil
 	}

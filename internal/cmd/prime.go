@@ -922,12 +922,14 @@ func (p primeTools) mailCheck(workDir string) {
 // hookedBead is pre-fetched by the caller (runPrime) via findAgentWork to avoid a
 // redundant lookup and ensure work context is already injected before output runs.
 func checkSlungWork(w io.Writer, ctx RoleContext, hookedBead *beads.Issue) (bool, error) {
-	return checkSlungWorkIn(w, primeContinuationMode, ctx, hookedBead)
+	return checkSlungWorkIn(w, primeContinuationMode, ctx, hookedBead, nil)
 }
 
 // checkSlungWorkIn is checkSlungWork in continuation mode (a compacted
-// session resuming its work) when continuation is set.
-func checkSlungWorkIn(w io.Writer, continuation bool, ctx RoleContext, hookedBead *beads.Issue) (bool, error) {
+// session resuming its work) when continuation is set. hint is the slow-test
+// hint source: nil queries the real hm, and a test passes a fake so no
+// process starts, which is how the skipHints wiring below is driven.
+func checkSlungWorkIn(w io.Writer, continuation bool, ctx RoleContext, hookedBead *beads.Issue, hint specHintSource) (bool, error) {
 	if hookedBead == nil {
 		return false, nil
 	}
@@ -946,7 +948,7 @@ func checkSlungWorkIn(w io.Writer, continuation bool, ctx RoleContext, hookedBea
 	// failure). It rides this section so hook-budget truncation cannot drop it.
 	// gt-jamix: the slow-test prior-record hint rides the same section, for
 	// the same reason, and is skipped where no subprocess may run.
-	pt := primeTools{out: w, skipDupes: continuation || primeDryRun, skipHints: continuation || primeDryRun}
+	pt := primeTools{out: w, hint: hint, skipDupes: continuation || primeDryRun, skipHints: continuation || primeDryRun}
 	pt.hookedPathDupes(ctx, hookedBead)
 	pt.hookedSlowHints(ctx, hookedBead)
 

@@ -3,10 +3,8 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
 // hookedSlowHints shows a polecat the town's top prior records on slow or
@@ -17,14 +15,15 @@ func (p primeTools) hookedSlowHints(ctx RoleContext, hookedBead *beads.Issue) {
 	if p.skipHints || ctx.Role != RolePolecat || hookedBead == nil {
 		return
 	}
-	if !specdispatch.SlowTextHint(hookedBead.Title + "\n" + hookedBead.Description) {
+	query, ok := slowHintQuery(hookedBead.Title, hookedBead.Description)
+	if !ok {
 		return
 	}
 	hint := p.hint
 	if hint == nil {
 		hint = hmHintSource(nil)
 	}
-	hits, err := hint(context.Background(), strings.TrimSpace(hookedBead.Title+" "+specHintWords), specHintLimit)
+	hits, err := hint(context.Background(), query, specHintLimit)
 	if err != nil || len(hits) == 0 {
 		return
 	}

@@ -661,7 +661,7 @@ func TestCheckSlungWork_StandaloneFormulaUsesWorkflowOutput(t *testing.T) {
 	}
 
 	var outputBuf bytes.Buffer
-	found, gotErr := checkSlungWorkIn(&outputBuf, false, ctx, hookedBead)
+	found, gotErr := checkSlungWorkIn(&outputBuf, false, ctx, hookedBead, nil)
 	output := outputBuf.String()
 	if gotErr != nil {
 		t.Fatalf("checkSlungWork() error = %v", gotErr)
