@@ -19,10 +19,11 @@ var dailyRequest string
 // reporter is sent carries no note about how this package is built.
 const pointerClose = "-->\n\n"
 
-// Request returns the request text addressed to reporter, telling it to publish
-// under runtimeDir: every <NAME> is replaced with the reporter's name and every
-// <RUNTIME_DIR> with the runtime directory the caller reads reports from, so
-// the request names the path the reader looks at rather than a fixed one.
+// Request returns the request text addressed to reporter, telling it to write
+// its daily report under runtimeDir: every <NAME> is replaced with the
+// reporter's name and every <RUNTIME_DIR> with the runtime directory the
+// caller reads reports from, so the request names the path the reader looks at
+// rather than a fixed one.
 func Request(reporter, runtimeDir string) string {
 	text := dailyRequest
 	if i := strings.Index(text, pointerClose); i >= 0 {

@@ -1,4 +1,4 @@
-<NAME>: it is time for your daily report. Write it, publish it, and tell the overseer it is in.
+<NAME>: it is time for your daily report. Write it, write the two files the dashboard reads, and tell the overseer it is in.
 
 Write the report in these eight sections, in this order:
 
@@ -11,9 +11,8 @@ Write the report in these eight sections, in this order:
 7. Filed — beads filed, closed, rejected or reassigned since your last report.
 8. Next — what you will do next, in the order you will do it.
 
-Publish it as you always do:
+Write the two files the dashboard's Reports page reads:
 
-- Update your fixed daily artifact: the same slug every day, titled "<NAME> Daily". A new artifact each day leaves duplicates the operator has to delete.
 - Write the page to <RUNTIME_DIR>/<NAME>/reports/daily.html and the sidecar <RUNTIME_DIR>/<NAME>/reports/daily.json beside it, with exactly these fields:
   {"bird":"<NAME>","written_at":"<RFC 3339 instant>","title":"<the report's headline>","summary":"<the report in three sentences>","needs_operator":false,"decisions":0}
   - bird is your name, and must match the directory the files are in.
@@ -23,4 +22,4 @@ Publish it as you always do:
   - needs_operator is true when section 5 holds a decision waiting on the operator.
   - decisions is how many decisions section 5 records.
 
-Send the overseer one line when it is published: the artifact link and whether needs_operator is true.
+Send the overseer one line when both files are written, saying whether needs_operator is true.
