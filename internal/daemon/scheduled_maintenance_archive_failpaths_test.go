@@ -241,16 +241,33 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 	t.Run("an events export refuses an uncomparable watermark", func(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
-		bad := EventsArchiveWatermark{CreatedAt: "yesterday", ID: "1"}
+		bad := EventsArchiveWatermark{
+			CreatedAt: "yesterday",
+			Archived:  []ArchivedEventsRow{{CreatedAt: "2026-11-02 09:15:00", ID: "1"}},
+		}
 		if err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", bad); err == nil {
 			t.Error("a watermark Dolt cannot compare was used")
+		}
+	})
+
+	t.Run("an events export refuses a watermark whose date cannot be placed", func(t *testing.T) {
+		t.Parallel()
+		d, _ := gcTestDaemon(t)
+		// TimestampLiteral accepts this shape; the parser that computes the
+		// window does not, so the export cannot start.
+		bad := EventsArchiveWatermark{
+			CreatedAt: "2026-13-45 99:99:99",
+			Archived:  []ArchivedEventsRow{{CreatedAt: "2026-11-02 09:15:00", ID: "1"}},
+		}
+		if err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", bad); err == nil {
+			t.Error("a watermark with an impossible date was used")
 		}
 	})
 
 	t.Run("an events export refuses a table without the cursor columns", func(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
-		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, EventsArchiveWatermark, int) (archiveEvents, error) {
+		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, eventsArchiveRead, int) (archiveEvents, error) {
 			return archiveEvents{Columns: []string{"payload"}, Rows: [][]string{{"x"}}}, nil
 		}
 		err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", zero)
@@ -263,7 +280,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
 		calls := 0
-		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, EventsArchiveWatermark, int) (archiveEvents, error) {
+		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, eventsArchiveRead, int) (archiveEvents, error) {
 			calls++
 			if calls == 1 {
 				rows := make([][]string, maintenanceArchiveEventsBatch)
@@ -286,7 +303,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 	t.Run("an events export refuses a row it cannot turn into a cursor", func(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
-		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, EventsArchiveWatermark, int) (archiveEvents, error) {
+		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, eventsArchiveRead, int) (archiveEvents, error) {
 			return archiveEvents{
 				Columns: []string{"id", "created_at"},
 				Rows:    [][]string{{"1", "yesterday"}},
@@ -301,7 +318,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 	t.Run("an events export reports a watermark it cannot record", func(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
-		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, EventsArchiveWatermark, int) (archiveEvents, error) {
+		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, eventsArchiveRead, int) (archiveEvents, error) {
 			return archiveEvents{
 				Columns: []string{"id", "created_at"},
 				Rows:    [][]string{{"1", "2026-10-01 00:00:00"}},
@@ -618,7 +635,7 @@ func TestDoltArchiveLogKeepsNullMessageDistinctFromEmpty(t *testing.T) {
 func TestDoltArchiveEventsFailures(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	zero := EventsArchiveWatermark{}
+	zero := eventsArchiveRead{}
 
 	t.Run("a pool that cannot be opened", func(t *testing.T) {
 		t.Parallel()

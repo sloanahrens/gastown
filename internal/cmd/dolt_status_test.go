@@ -247,8 +247,14 @@ func TestDoltStatusShowsArchiveWatermark(t *testing.T) {
 			"om": {Date: time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC), Hashes: []string{"jkl"}},
 		},
 		Events: map[string]daemon.EventsArchiveWatermark{
-			"gt": {CreatedAt: "2026-11-02 09:15:00", ID: "99"},
-			"hq": {CreatedAt: "2026-11-01 22:00:00", ID: "7"},
+			"gt": {
+				CreatedAt: "2026-11-02 09:15:00",
+				Archived:  []daemon.ArchivedEventsRow{{CreatedAt: "2026-11-02 09:15:00", ID: "99"}},
+			},
+			"hq": {
+				CreatedAt: "2026-11-01 22:00:00",
+				Archived:  []daemon.ArchivedEventsRow{{CreatedAt: "2026-11-01 22:00:00", ID: "7"}},
+			},
 		},
 	}
 	reader := stubArchiveBehindReader{

@@ -540,8 +540,9 @@ func BackupEvents(database, since string) Query {
 	return declared(text + " ORDER BY created_at, id")
 }
 
-// eventsAfter is the WHERE clause selecting the rows after the (created_at, id)
-// cursor. An empty cursor is the start of the table; one Dolt cannot compare is
+// eventsAfter is the condition selecting the rows after the (created_at, id)
+// cursor: the paging position inside the history archive's lookback window.
+// An empty cursor is the window's first row; one Dolt cannot compare is
 // refused rather than spliced in, because a literal it cannot compare matches
 // no row and reads as "nothing new" (gt-7nxj4).
 func eventsAfter(afterCreatedAt, afterID string) (string, error) {
@@ -551,40 +552,67 @@ func eventsAfter(afterCreatedAt, afterID string) (string, error) {
 	if !TimestampLiteral(afterCreatedAt) {
 		return "", fmt.Errorf("beadsql: invalid events cursor %q", afterCreatedAt)
 	}
-	if _, err := strconv.ParseInt(afterID, 10, 64); err != nil {
-		return "", fmt.Errorf("beadsql: invalid events cursor id %q", afterID)
+	if afterID == "" {
+		return "", fmt.Errorf("beadsql: events cursor %q has no id", afterCreatedAt)
 	}
-	return " WHERE created_at > " + quote(afterCreatedAt) +
-		" OR (created_at = " + quote(afterCreatedAt) + " AND id > " + afterID + ")", nil
+	return "created_at > " + quote(afterCreatedAt) +
+		" OR (created_at = " + quote(afterCreatedAt) + " AND id > " + quote(afterID) + ")", nil
 }
 
-// ArchiveEvents reads every column of database's events rows after the
+// ArchiveEventsSince reads every column of database's events rows with
+// created_at at or after since and, when a cursor is set, after the
 // (created_at, id) cursor, oldest first, at most limit rows: one batch of the
-// history archive's events export (gt-7nxj4).
-func ArchiveEvents(database, afterCreatedAt, afterID string, limit int) Query {
+// history archive's lookback re-read (gt-7nxj4). The cursor is (created_at,
+// id) because events.id is a UUID: id orders rows within one created_at, and
+// the window start is what finds a row inserted with an earlier created_at.
+func ArchiveEventsSince(database, since, afterCreatedAt, afterID string, limit int) Query {
 	if err := ident(database); err != nil {
 		return Query{err: err}
 	}
 	if limit <= 0 {
 		return Query{err: fmt.Errorf("beadsql: events limit %d is not positive", limit)}
 	}
-	where, err := eventsAfter(afterCreatedAt, afterID)
+	text := "SELECT * FROM `" + database + "`.events"
+	var where []string
+	if since != "" {
+		if !TimestampLiteral(since) {
+			return Query{err: fmt.Errorf("beadsql: invalid events window start %q", since)}
+		}
+		where = append(where, "created_at >= "+quote(since))
+	}
+	after, err := eventsAfter(afterCreatedAt, afterID)
 	if err != nil {
 		return Query{err: err}
 	}
-	return declared("SELECT * FROM `" + database + "`.events" + where +
-		" ORDER BY created_at, id LIMIT " + strconv.Itoa(limit))
+	if after != "" {
+		where = append(where, "("+after+")")
+	}
+	if len(where) > 0 {
+		text += " WHERE " + strings.Join(where, " AND ")
+	}
+	return declared(text + " ORDER BY created_at, id LIMIT " + strconv.Itoa(limit))
 }
 
-// CountEventsAfter counts database's events rows after the (created_at, id)
-// cursor: the rows the history archive has not written out (gt-7nxj4).
-func CountEventsAfter(database, afterCreatedAt, afterID string) Query {
+// CountEvents counts all of database's events rows: the never-archived case,
+// where every row is behind and a count by the index is cheaper than reading
+// the window's ids (gt-7nxj4).
+func CountEvents(database string) Query {
 	if err := ident(database); err != nil {
 		return Query{err: err}
 	}
-	where, err := eventsAfter(afterCreatedAt, afterID)
-	if err != nil {
+	return declared("SELECT COUNT(*) AS cnt FROM `" + database + "`.events")
+}
+
+// EventsSinceIDs reads the ids of database's events rows with created_at at or
+// after since. The status count subtracts the ids the events watermark holds,
+// so it measures the same window the archive reads and never a full row scan
+// of the table (gt-7nxj4).
+func EventsSinceIDs(database, since string) Query {
+	if err := ident(database); err != nil {
 		return Query{err: err}
 	}
-	return declared("SELECT COUNT(*) AS cnt FROM `" + database + "`.events" + where)
+	if !TimestampLiteral(since) {
+		return Query{err: fmt.Errorf("beadsql: invalid events window start %q", since)}
+	}
+	return declared("SELECT id FROM `" + database + "`.events WHERE created_at >= " + quote(since))
 }

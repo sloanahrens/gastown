@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"database/sql"
 	"encoding/csv"
 	"errors"
 	"io/fs"
@@ -78,8 +79,8 @@ func withArchiveFakes(d *Daemon, f *gcFakes, commits map[string][]archiveCommit,
 
 // eventsFake is the events read seam: columns, the rows a database holds (in
 // created_at, id order) and a per-database read error. It pages like the
-// production query, returning only rows after the cursor and at most limit of
-// them.
+// production query: rows at or after the lookback window's start, after the
+// paging cursor, at most limit of them.
 type eventsFake struct {
 	columns []string
 	rows    map[string][][]string
@@ -91,7 +92,7 @@ type eventsFake struct {
 // which serves no rows.
 func withEventsFake(d *Daemon, columns []string, rows map[string][][]string, errs map[string]error) *eventsFake {
 	f := &eventsFake{columns: columns, rows: rows, errs: errs}
-	d.maint.archiveEventsRead = func(_ context.Context, _ *Daemon, db string, after EventsArchiveWatermark, limit int) (archiveEvents, error) {
+	d.maint.archiveEventsRead = func(_ context.Context, _ *Daemon, db string, read eventsArchiveRead, limit int) (archiveEvents, error) {
 		f.reads++
 		if err := f.errs[db]; err != nil {
 			return archiveEvents{}, err
@@ -108,7 +109,7 @@ func withEventsFake(d *Daemon, columns []string, rows map[string][][]string, err
 			if len(batch.Rows) == limit {
 				break
 			}
-			if !eventsRowAfter(row[createdAt], row[id], after) {
+			if !eventsRowInRead(row[createdAt], row[id], read) {
 				continue
 			}
 			batch.Rows = append(batch.Rows, row)
@@ -118,18 +119,19 @@ func withEventsFake(d *Daemon, columns []string, rows map[string][][]string, err
 	return f
 }
 
-// eventsRowAfter reports whether a row's (created_at, id) cursor is past after,
-// the comparison the production WHERE clause makes.
-func eventsRowAfter(createdAt, id string, after EventsArchiveWatermark) bool {
-	if after.CreatedAt == "" {
+// eventsRowInRead reports whether a row is inside the read's window and past
+// its cursor, the comparison the production WHERE clause makes.
+func eventsRowInRead(createdAt, id string, read eventsArchiveRead) bool {
+	if read.Since != "" && createdAt < read.Since {
+		return false
+	}
+	if read.After.CreatedAt == "" && read.After.ID == "" {
 		return true
 	}
-	if createdAt != after.CreatedAt {
-		return createdAt > after.CreatedAt
+	if createdAt != read.After.CreatedAt {
+		return createdAt > read.After.CreatedAt
 	}
-	a, errA := strconv.ParseInt(id, 10, 64)
-	b, errB := strconv.ParseInt(after.ID, 10, 64)
-	return errA == nil && errB == nil && a > b
+	return id > read.After.ID
 }
 
 // readArchiveCSV reads one archive file back as CSV rows.
@@ -150,6 +152,12 @@ func readArchiveCSV(t *testing.T, path string) [][]string {
 		t.Fatalf("reading %s as CSV: %v", path, err)
 	}
 	return rows
+}
+
+// sameEventsWatermark compares two events watermarks field by field; the
+// archived ids are a slice, so the struct is not comparable with ==.
+func sameEventsWatermark(a, b EventsArchiveWatermark) bool {
+	return a.CreatedAt == b.CreatedAt && slices.Equal(a.Archived, b.Archived)
 }
 
 func csvRowsEqual(got, want [][]string) bool {
@@ -545,7 +553,7 @@ func TestMaintenanceArchiveOffWithoutArchiveDir(t *testing.T) {
 		t.Error("the dolt_log read ran with archive_dir unset")
 		return nil, nil
 	}
-	d.maint.archiveEventsRead = func(context.Context, *Daemon, string, EventsArchiveWatermark, int) (archiveEvents, error) {
+	d.maint.archiveEventsRead = func(context.Context, *Daemon, string, eventsArchiveRead, int) (archiveEvents, error) {
 		t.Error("the events read ran with archive_dir unset")
 		return archiveEvents{}, nil
 	}
@@ -664,6 +672,16 @@ func TestMaintenanceArchiveRollsBackWhenTheWatermarkCannotBeRecorded(t *testing.
 		}
 		return []archiveCommit{{Hash: "h1", Committer: "c", Date: gcTestNow.Add(-time.Hour), Message: "first"}}, nil
 	}
+	// This test drives the commit export. The events read is injected too: a
+	// run that reached its default would open a real connection, and the
+	// failure it reported would be the connection's, not the watermark's.
+	d.maint.archiveEventsRead = func(context.Context, *Daemon, string, eventsArchiveRead, int) (archiveEvents, error) {
+		return archiveEvents{}, nil
+	}
+	d.maint.archiveOpenDB = func(string) (*sql.DB, error) {
+		t.Error("the default events reader was reached")
+		return nil, errors.New("not reached")
+	}
 
 	d.runScheduledMaintenance()
 
@@ -688,7 +706,10 @@ func TestLoadArchiveWatermarks(t *testing.T) {
 	if err := recordArchiveWatermark(town, "gt", wm); err != nil {
 		t.Fatalf("recording commit watermark: %v", err)
 	}
-	events := EventsArchiveWatermark{CreatedAt: "2026-10-01 03:00:00", ID: "42"}
+	events := EventsArchiveWatermark{
+		CreatedAt: "2026-10-01 03:00:00",
+		Archived:  []ArchivedEventsRow{{CreatedAt: "2026-10-01 03:00:00", ID: "42"}},
+	}
 	if err := recordEventsArchiveWatermark(town, "gt", events); err != nil {
 		t.Fatalf("recording events watermark: %v", err)
 	}
@@ -699,7 +720,7 @@ func TestLoadArchiveWatermarks(t *testing.T) {
 	if !got.Commits["gt"].Date.Equal(wm.Date) || !slices.Equal(got.Commits["gt"].Hashes, wm.Hashes) {
 		t.Errorf("commit watermarks = %+v, want gt=%+v", got.Commits, wm)
 	}
-	if got.Events["gt"] != events {
+	if !sameEventsWatermark(got.Events["gt"], events) {
 		t.Errorf("events watermarks = %+v, want gt=%+v", got.Events, events)
 	}
 
@@ -716,6 +737,187 @@ func TestLoadArchiveWatermarks(t *testing.T) {
 	}
 }
 
+// TestLoadArchivedCommitHashes: the pre-flatten check's set is every hash the
+// database's commit archive files hold, across every gzip member. A file or a
+// name it cannot account for is an error, never a smaller set that would call
+// an unarchived commit safe; a database with no file yet is an empty set.
+func TestLoadArchivedCommitHashes(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	first := filepath.Join(dir, "dolt-log-gt-20261101.csv.gz")
+	if err := appendArchiveTable(first, archiveCSVHeader, [][]string{
+		{"h1", "c", "2026-11-01T00:00:00Z", "one"},
+	}); err != nil {
+		t.Fatalf("writing the first archive file: %v", err)
+	}
+	// The archive appends a second member to the same day's file.
+	if err := appendArchiveTable(first, archiveCSVHeader, [][]string{
+		{"h2", "c", "2026-11-01T01:00:00Z", "two"},
+	}); err != nil {
+		t.Fatalf("appending the second member: %v", err)
+	}
+	second := filepath.Join(dir, "dolt-log-gt-20261102.csv.gz")
+	if err := appendArchiveTable(second, archiveCSVHeader, [][]string{
+		{"h3", "c", "2026-11-02T00:00:00Z", "three"},
+	}); err != nil {
+		t.Fatalf("writing the next day's file: %v", err)
+	}
+	// Another database's file is not gt's.
+	other := filepath.Join(dir, "dolt-log-hq-20261102.csv.gz")
+	if err := appendArchiveTable(other, archiveCSVHeader, [][]string{
+		{"h4", "c", "2026-11-02T00:00:00Z", "other db"},
+	}); err != nil {
+		t.Fatalf("writing another database's file: %v", err)
+	}
+
+	got, err := LoadArchivedCommitHashes(dir, "gt")
+	if err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+	if len(got) != 3 {
+		t.Errorf("archived hashes = %v, want h1, h2 and h3 across both files and both members", got)
+	}
+	for _, hash := range []string{"h1", "h2", "h3"} {
+		if _, ok := got[hash]; !ok {
+			t.Errorf("archived hashes = %v, want %s", got, hash)
+		}
+	}
+	if _, ok := got["h4"]; ok {
+		t.Error("another database's archive hash was loaded")
+	}
+
+	t.Run("a database with no file yet is an empty set", func(t *testing.T) {
+		t.Parallel()
+		got, err := LoadArchivedCommitHashes(dir, "be")
+		if err != nil || len(got) != 0 {
+			t.Errorf("archived hashes for a never-archived database = %v, %v; want an empty set", got, err)
+		}
+	})
+
+	t.Run("a missing directory is refused", func(t *testing.T) {
+		t.Parallel()
+		if _, err := LoadArchivedCommitHashes(filepath.Join(dir, "absent"), "gt"); err == nil {
+			t.Error("a missing archive directory loaded as an empty set")
+		}
+	})
+
+	t.Run("a path-like database name is refused", func(t *testing.T) {
+		t.Parallel()
+		if _, err := LoadArchivedCommitHashes(dir, "../gt"); err == nil {
+			t.Error("a path-like database name was read")
+		}
+	})
+
+	t.Run("a name shaped like an archive file without a date is refused", func(t *testing.T) {
+		t.Parallel()
+		bad := t.TempDir()
+		if err := appendArchiveTable(filepath.Join(bad, "dolt-log-gt-today.csv.gz"), archiveCSVHeader, [][]string{
+			{"h1", "c", "2026-11-01T00:00:00Z", "one"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadArchivedCommitHashes(bad, "gt"); err == nil {
+			t.Error("a file named without a date was skipped")
+		}
+	})
+
+	t.Run("a file that is not gzip is refused", func(t *testing.T) {
+		t.Parallel()
+		bad := t.TempDir()
+		if err := os.WriteFile(filepath.Join(bad, "dolt-log-gt-20261101.csv.gz"), []byte("not gzip"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadArchivedCommitHashes(bad, "gt"); err == nil {
+			t.Error("an unreadable archive file loaded as a smaller set")
+		}
+	})
+
+	t.Run("a file without commit_hash is refused", func(t *testing.T) {
+		t.Parallel()
+		bad := t.TempDir()
+		if err := appendArchiveTable(filepath.Join(bad, "dolt-log-gt-20261101.csv.gz"), []string{"other"}, [][]string{{"x"}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadArchivedCommitHashes(bad, "gt"); err == nil {
+			t.Error("a file without commit_hash loaded as an empty set")
+		}
+	})
+
+	t.Run("a directory named like an archive file is refused", func(t *testing.T) {
+		t.Parallel()
+		bad := t.TempDir()
+		if err := os.Mkdir(filepath.Join(bad, "dolt-log-gt-20261101.csv.gz"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadArchivedCommitHashes(bad, "gt"); err == nil {
+			t.Error("a directory named like an archive file was read")
+		}
+	})
+
+	t.Run("a file that cannot be opened is refused", func(t *testing.T) {
+		t.Parallel()
+		bad := t.TempDir()
+		if err := os.Symlink("does-not-exist", filepath.Join(bad, "dolt-log-gt-20261101.csv.gz")); err != nil {
+			t.Fatalf("creating a dangling archive symlink: %v", err)
+		}
+		if _, err := LoadArchivedCommitHashes(bad, "gt"); err == nil {
+			t.Error("an archive file that cannot be opened loaded as an empty set")
+		}
+	})
+
+	t.Run("a gzip file with no content is refused", func(t *testing.T) {
+		t.Parallel()
+		bad := t.TempDir()
+		path := filepath.Join(bad, "dolt-log-gt-20261101.csv.gz")
+		f, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gz := gzip.NewWriter(f)
+		if err := gz.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadArchivedCommitHashes(bad, "gt"); err == nil {
+			t.Error("an empty gzip file loaded as an empty set")
+		}
+	})
+
+	t.Run("a row that is not valid CSV is refused", func(t *testing.T) {
+		t.Parallel()
+		bad := t.TempDir()
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		if _, err := gz.Write([]byte("commit_hash,committer,date,message\nx\"y,c,d,e\n")); err != nil {
+			t.Fatal(err)
+		}
+		if err := gz.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(bad, "dolt-log-gt-20261101.csv.gz"), buf.Bytes(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadArchivedCommitHashes(bad, "gt"); err == nil {
+			t.Error("a malformed CSV row loaded as a shorter set")
+		}
+	})
+
+	t.Run("a row without a hash is refused", func(t *testing.T) {
+		t.Parallel()
+		bad := t.TempDir()
+		if err := appendArchiveTable(filepath.Join(bad, "dolt-log-gt-20261101.csv.gz"), archiveCSVHeader, [][]string{
+			{"", "c", "2026-11-01T00:00:00Z", "one"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadArchivedCommitHashes(bad, "gt"); err == nil {
+			t.Error("a row without a hash loaded as a shorter set")
+		}
+	})
+}
+
 // TestMaintenanceArchivesNewEventsRows: the events rows past the watermark land
 // in events-<db>-<date>.csv.gz with every column, in created_at then id order;
 // the watermark moves only once the file is closed; a failed events export
@@ -728,7 +930,13 @@ func TestMaintenanceArchivesNewEventsRows(t *testing.T) {
 		{"1", "gt-a", "created", "crew/overseer", "", "", "2026-09-30 10:00:00"},
 		{"2", "gt-a", "status", "cheedo", "open", "closed", "2026-10-01 02:00:00"},
 	}
-	lastCursor := EventsArchiveWatermark{CreatedAt: rows[1][6], ID: rows[1][0]}
+	lastCursor := EventsArchiveWatermark{
+		CreatedAt: rows[1][6],
+		Archived: []ArchivedEventsRow{
+			{CreatedAt: rows[0][6], ID: rows[0][0]},
+			{CreatedAt: rows[1][6], ID: rows[1][0]},
+		},
+	}
 
 	t.Run("every column in created_at then id order", func(t *testing.T) {
 		t.Parallel()
@@ -750,7 +958,7 @@ func TestMaintenanceArchivesNewEventsRows(t *testing.T) {
 		if err != nil {
 			t.Fatalf("loading state: %v", err)
 		}
-		if got := st.ArchiveEventsWatermarks["gt"]; got != lastCursor {
+		if got := st.ArchiveEventsWatermarks["gt"]; !sameEventsWatermark(got, lastCursor) {
 			t.Errorf("events watermark = %+v, want %+v", got, lastCursor)
 		}
 		if len(f.escalations) != 0 {
@@ -793,7 +1001,10 @@ func TestMaintenanceArchivesNewEventsRows(t *testing.T) {
 		f.sizes = map[string]gcMeasure{"gt": {633 * mib, 0}}
 		dir := t.TempDir()
 		d.patrolConfig = archiveConfig(dir)
-		old := EventsArchiveWatermark{CreatedAt: "2026-09-01 00:00:00", ID: "7"}
+		old := EventsArchiveWatermark{
+			CreatedAt: "2026-09-01 00:00:00",
+			Archived:  []ArchivedEventsRow{{CreatedAt: "2026-09-01 00:00:00", ID: "7"}},
+		}
 		if err := recordEventsArchiveWatermark(d.config.TownRoot, "gt", old); err != nil {
 			t.Fatalf("seeding the events watermark: %v", err)
 		}
@@ -808,7 +1019,7 @@ func TestMaintenanceArchivesNewEventsRows(t *testing.T) {
 		if err != nil {
 			t.Fatalf("loading state: %v", err)
 		}
-		if got := st.ArchiveEventsWatermarks["gt"]; got != old {
+		if got := st.ArchiveEventsWatermarks["gt"]; !sameEventsWatermark(got, old) {
 			t.Errorf("events watermark = %+v, want its old one kept %+v", got, old)
 		}
 		if wm := st.ArchiveWatermarks["gt"]; !slices.Equal(wm.Hashes, []string{"h1"}) {
@@ -855,8 +1066,8 @@ func TestMaintenanceArchivesNewEventsRows(t *testing.T) {
 			t.Fatalf("loading state: %v", err)
 		}
 		last := many[len(many)-1]
-		if got := st.ArchiveEventsWatermarks["gt"]; got.CreatedAt != last[6] || got.ID != last[0] {
-			t.Errorf("events watermark = %+v, want %s/%s", got, last[6], last[0])
+		if got := st.ArchiveEventsWatermarks["gt"]; got.CreatedAt != last[6] || !got.ArchivedIDs()[last[0]] {
+			t.Errorf("events watermark = %+v, want %s and id %s in the window", got, last[6], last[0])
 		}
 	})
 
@@ -874,7 +1085,7 @@ func TestMaintenanceArchivesNewEventsRows(t *testing.T) {
 		for i := range stuck {
 			stuck[i] = []string{strconv.Itoa(i + 1), "gt-a", "x", "c", "", "", "2026-09-30 10:00:00"}
 		}
-		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, EventsArchiveWatermark, int) (archiveEvents, error) {
+		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, eventsArchiveRead, int) (archiveEvents, error) {
 			return archiveEvents{Columns: columns, Rows: stuck}, nil
 		}
 
@@ -893,9 +1104,82 @@ func TestMaintenanceArchivesNewEventsRows(t *testing.T) {
 	})
 }
 
+// TestMaintenanceEventsCursorReadsBackThroughTheLookbackWindow: events.id is a
+// UUID, so the cursor cannot be "the newest id". Each run re-reads the window
+// ending at the newest written created_at minus the lookback and skips the ids
+// the watermark holds. A row inserted with an earlier created_at but not yet
+// archived is written exactly once; a row already in the set is not written
+// again; a row older than the window is the accepted limit and is not read
+// (gt-7nxj4).
+func TestMaintenanceEventsCursorReadsBackThroughTheLookbackWindow(t *testing.T) {
+	t.Parallel()
+	columns := []string{"id", "issue_id", "created_at"}
+	rows := [][]string{
+		{"outside-window", "gt-a", "2026-09-29 01:00:00"},
+		{"backdated", "gt-a", "2026-09-30 10:00:00"},
+		{"archived-at-cursor", "gt-a", "2026-10-01 02:00:00"},
+		{"new", "gt-a", "2026-10-01 03:00:00"},
+	}
+
+	d, _ := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"gt": {633 * mib, 0}}
+	dir := t.TempDir()
+	d.patrolConfig = archiveConfig(dir)
+	withArchiveFakes(d, f, nil, nil)
+	withEventsFake(d, columns, map[string][][]string{"gt": rows}, nil)
+	seeded := EventsArchiveWatermark{
+		CreatedAt: "2026-10-01 02:00:00",
+		Archived:  []ArchivedEventsRow{{CreatedAt: "2026-10-01 02:00:00", ID: "archived-at-cursor"}},
+	}
+	if err := recordEventsArchiveWatermark(d.config.TownRoot, "gt", seeded); err != nil {
+		t.Fatalf("seeding the events watermark: %v", err)
+	}
+
+	d.runScheduledMaintenance()
+
+	want := [][]string{columns, rows[1], rows[3]}
+	if got := readArchiveCSV(t, eventsArchiveFile(dir, "gt")); !csvRowsEqual(got, want) {
+		t.Errorf("events archive = %v\nwant %v: the backdated row once, the archived row never, the out-of-window row not at all", got, want)
+	}
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	wm := st.ArchiveEventsWatermarks["gt"]
+	if wm.CreatedAt != "2026-10-01 03:00:00" {
+		t.Errorf("events watermark = %+v, want the newest written created_at", wm)
+	}
+	for _, id := range []string{"backdated", "archived-at-cursor", "new"} {
+		if !wm.ArchivedIDs()[id] {
+			t.Errorf("events watermark does not hold id %q in its window: %+v", id, wm)
+		}
+	}
+	if wm.ArchivedIDs()["outside-window"] {
+		t.Errorf("events watermark holds a row older than the window: %+v", wm)
+	}
+
+	// A second run re-reads the same window and must not append anything: every
+	// row it can see is already in the id set.
+	before, err := os.Stat(eventsArchiveFile(dir, "gt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.lastMaintenanceRun = time.Time{}
+	d.runScheduledMaintenance()
+	after, err := os.Stat(eventsArchiveFile(dir, "gt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() != before.Size() {
+		t.Errorf("the second run appended to the events file (%d -> %d bytes); the lookback repeated rows", before.Size(), after.Size())
+	}
+}
+
 // TestEventsArchiveWatermarkValidate: a cursor is usable only when Dolt can
-// compare it; text it cannot compare is refused rather than matched against no
-// row and read as "nothing new".
+// compare it and it says which ids in the window are already written; text it
+// cannot compare, or a date with no ids, is refused rather than read as the
+// start of the table and written out twice.
 func TestEventsArchiveWatermarkValidate(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -904,12 +1188,14 @@ func TestEventsArchiveWatermarkValidate(t *testing.T) {
 		wantErr bool
 	}{
 		{"nothing archived yet", EventsArchiveWatermark{}, false},
-		{"timestamp and id", EventsArchiveWatermark{CreatedAt: "2026-11-02 09:15:00", ID: "42"}, false},
-		{"timestamp with fraction", EventsArchiveWatermark{CreatedAt: "2026-11-02 09:15:00.123456", ID: "42"}, false},
-		{"text is not a timestamp", EventsArchiveWatermark{CreatedAt: "yesterday", ID: "42"}, true},
-		{"missing created_at", EventsArchiveWatermark{ID: "42"}, true},
-		{"id is not a number", EventsArchiveWatermark{CreatedAt: "2026-11-02 09:15:00", ID: "abc"}, true},
-		{"missing id", EventsArchiveWatermark{CreatedAt: "2026-11-02 09:15:00"}, true},
+		{"timestamp and id", EventsArchiveWatermark{CreatedAt: "2026-11-02 09:15:00", Archived: []ArchivedEventsRow{{CreatedAt: "2026-11-02 09:15:00", ID: "42"}}}, false},
+		{"timestamp with fraction", EventsArchiveWatermark{CreatedAt: "2026-11-02 09:15:00.123456", Archived: []ArchivedEventsRow{{CreatedAt: "2026-11-02 09:15:00.123456", ID: "42"}}}, false},
+		{"id with a UUID", EventsArchiveWatermark{CreatedAt: "2026-11-02 09:15:00", Archived: []ArchivedEventsRow{{CreatedAt: "2026-11-02 09:15:00", ID: "3f2b9c8e-1a4d-4e7f-9b6a-2c5d8e1f0a3b"}}}, false},
+		{"text is not a timestamp", EventsArchiveWatermark{CreatedAt: "yesterday", Archived: []ArchivedEventsRow{{CreatedAt: "2026-11-02 09:15:00", ID: "42"}}}, true},
+		{"ids without created_at", EventsArchiveWatermark{Archived: []ArchivedEventsRow{{CreatedAt: "2026-11-02 09:15:00", ID: "42"}}}, true},
+		{"created_at with no ids", EventsArchiveWatermark{CreatedAt: "2026-11-02 09:15:00"}, true},
+		{"archived row without a timestamp", EventsArchiveWatermark{CreatedAt: "2026-11-02 09:15:00", Archived: []ArchivedEventsRow{{CreatedAt: "yesterday", ID: "42"}}}, true},
+		{"archived row with an empty id", EventsArchiveWatermark{CreatedAt: "2026-11-02 09:15:00", Archived: []ArchivedEventsRow{{CreatedAt: "2026-11-02 09:15:00"}}}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -925,7 +1211,7 @@ func TestEventsArchiveWatermarkValidate(t *testing.T) {
 	}
 }
 
-// TestEventsArchiveColumns: the watermark is built from the created_at and id
+// TestEventsArchiveColumns: the cursor is built from the created_at and id
 // columns, and an events table without them, or a row too short to hold them,
 // is refused rather than archived with a cursor it cannot advance.
 func TestEventsArchiveColumns(t *testing.T) {
@@ -939,14 +1225,64 @@ func TestEventsArchiveColumns(t *testing.T) {
 	if _, _, err := eventsWatermarkColumns([]string{"created_at", "issue_id"}); err == nil {
 		t.Error("columns without id accepted")
 	}
-	if _, err := eventsWatermarkFrom([]string{"id", "created_at"}, []string{"1"}); err == nil {
-		t.Error("a short row was turned into a watermark")
+	if _, err := eventsCursorFrom([]string{"id", "created_at"}, []string{"1"}); err == nil {
+		t.Error("a short row was turned into a cursor")
 	}
-	if _, err := eventsWatermarkFrom([]string{"id"}, []string{"1"}); err == nil {
-		t.Error("a watermark was built from columns without created_at")
+	if _, err := eventsCursorFrom([]string{"id"}, []string{"1"}); err == nil {
+		t.Error("a cursor was built from columns without created_at")
 	}
-	if _, err := eventsWatermarkFrom([]string{"created_at", "id"}, []string{"yesterday", "1"}); err == nil {
-		t.Error("a watermark was built from text Dolt cannot compare")
+	if _, err := eventsCursorFrom([]string{"created_at", "id"}, []string{"yesterday", "1"}); err == nil {
+		t.Error("a cursor was built from text Dolt cannot compare")
+	}
+	if _, err := eventsCursorFrom([]string{"created_at", "id"}, []string{"2026-11-02 09:15:00", ""}); err == nil {
+		t.Error("a cursor was built with an empty id")
+	}
+}
+
+// TestEventsWatermarkRefusesUnusableRows: a row the cursor or the window
+// cannot place is refused, so the export never records a watermark that cannot
+// bound the next read. A date of the right shape that no calendar has is one
+// case: TimestampLiteral accepts it, the parser that computes the window does
+// not.
+func TestEventsWatermarkRefusesUnusableRows(t *testing.T) {
+	t.Parallel()
+	columns := []string{"id", "created_at"}
+	good := [][]string{{"1", "2026-11-02 09:15:00"}}
+	tests := []struct {
+		name    string
+		wm      EventsArchiveWatermark
+		columns []string
+		rows    [][]string
+	}{
+		{"columns without created_at", EventsArchiveWatermark{}, []string{"id"}, good},
+		{"a row too short for its columns", EventsArchiveWatermark{}, columns, [][]string{{"1"}}},
+		{"a row whose created_at is not a timestamp", EventsArchiveWatermark{}, columns, [][]string{{"1", "yesterday"}}},
+		{"a row with no id", EventsArchiveWatermark{}, columns, [][]string{{"", "2026-11-02 09:15:00"}}},
+		{"a row whose created_at no calendar has", EventsArchiveWatermark{}, columns, [][]string{{"1", "2026-13-45 99:99:99"}}},
+		{
+			name: "a previous watermark whose date cannot be parsed",
+			wm: EventsArchiveWatermark{
+				CreatedAt: "2026-13-45 99:99:99",
+				Archived:  []ArchivedEventsRow{{CreatedAt: "2026-11-02 09:15:00", ID: "1"}},
+			},
+			columns: columns,
+			rows:    good,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := tt.wm.written(tt.columns, tt.rows); err == nil {
+				t.Errorf("written(%v, %v) = nil, want an error", tt.columns, tt.rows)
+			}
+		})
+	}
+
+	if _, err := (EventsArchiveWatermark{CreatedAt: "2026-13-45 99:99:99"}).Since(); err == nil {
+		t.Error("Since accepted a date no calendar has")
+	}
+	if _, err := (EventsArchiveWatermark{CreatedAt: "yesterday"}).Since(); err == nil {
+		t.Error("Since accepted text that is not a timestamp")
 	}
 }
 
@@ -961,19 +1297,22 @@ func TestArchiveMemberRefusesRowWidthMismatch(t *testing.T) {
 	}
 }
 
-// TestDoltArchiveEventsRefusesBadBounds: an unusable limit or watermark is
+// TestDoltArchiveEventsRefusesBadBounds: an unusable limit or window start is
 // refused before a connection is opened, so it cannot read as "nothing new".
 func TestDoltArchiveEventsRefusesBadBounds(t *testing.T) {
 	t.Parallel()
 	d, _ := gcTestDaemon(t)
 	ctx := context.Background()
-	if _, err := d.doltArchiveEvents(ctx, "gt", EventsArchiveWatermark{}, 0); err == nil {
+	if _, err := d.doltArchiveEvents(ctx, "gt", eventsArchiveRead{Since: "2026-11-02 09:15:00"}, 0); err == nil {
 		t.Error("a zero limit was accepted")
 	}
-	if _, err := d.doltArchiveEvents(ctx, "gt", EventsArchiveWatermark{CreatedAt: "yesterday", ID: "1"}, 10); err == nil {
-		t.Error("an uncomparable watermark was accepted")
+	if _, err := d.doltArchiveEvents(ctx, "gt", eventsArchiveRead{Since: "yesterday"}, 10); err == nil {
+		t.Error("an uncomparable window start was accepted")
 	}
-	if _, err := d.doltArchiveEvents(ctx, "../gt", EventsArchiveWatermark{}, 10); err == nil {
+	if _, err := d.doltArchiveEvents(ctx, "gt", eventsArchiveRead{After: eventsCursor{CreatedAt: "yesterday", ID: "1"}}, 10); err == nil {
+		t.Error("an uncomparable paging cursor was accepted")
+	}
+	if _, err := d.doltArchiveEvents(ctx, "../gt", eventsArchiveRead{Since: "2026-11-02 09:15:00"}, 10); err == nil {
 		t.Error("a path-escaping database name was accepted")
 	}
 }
@@ -1056,7 +1395,7 @@ func TestMaintenanceArchiveEventsRollsBackAFailedExport(t *testing.T) {
 		first[i] = []string{strconv.Itoa(i + 1), "2026-10-01 00:00:00"}
 	}
 	reads := 0
-	d.maint.archiveEventsRead = func(context.Context, *Daemon, string, EventsArchiveWatermark, int) (archiveEvents, error) {
+	d.maint.archiveEventsRead = func(context.Context, *Daemon, string, eventsArchiveRead, int) (archiveEvents, error) {
 		reads++
 		if reads == 1 {
 			return archiveEvents{Columns: columns, Rows: first}, nil
@@ -1096,7 +1435,7 @@ func TestMaintenanceArchiveDefersWhileTheTownIsBusy(t *testing.T) {
 		t.Error("the commit read ran while the town was busy")
 		return nil, nil
 	}
-	d.maint.archiveEventsRead = func(context.Context, *Daemon, string, EventsArchiveWatermark, int) (archiveEvents, error) {
+	d.maint.archiveEventsRead = func(context.Context, *Daemon, string, eventsArchiveRead, int) (archiveEvents, error) {
 		t.Error("the events read ran while the town was busy")
 		return archiveEvents{}, nil
 	}
@@ -1163,7 +1502,7 @@ func TestMaintenanceArchiveReportsAFailedRollback(t *testing.T) {
 	}
 	path := eventsArchiveFile(dir, "gt")
 	reads := 0
-	d.maint.archiveEventsRead = func(context.Context, *Daemon, string, EventsArchiveWatermark, int) (archiveEvents, error) {
+	d.maint.archiveEventsRead = func(context.Context, *Daemon, string, eventsArchiveRead, int) (archiveEvents, error) {
 		reads++
 		if reads == 1 {
 			return archiveEvents{Columns: columns, Rows: full}, nil

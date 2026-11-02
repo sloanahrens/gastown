@@ -12,9 +12,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -79,8 +79,10 @@ var archiveCSVHeader = []string{"commit_hash", "committer", "date", "message"}
 // the old history, so it and everything after it lands above the date cursor.
 // The accepted limit is a commit whose date is behind the cursor when it is
 // read: a clock skewed backwards, or a history imported with older dates. The
-// archive and its status count share this cursor, so such a commit is invisible
-// to both.
+// export does not read such a commit, but the pre-flatten check in `gt dolt
+// status` does not share this cursor: it compares every hash in dolt_log with
+// the hashes the archive files hold, so it counts the commit and refuses the
+// flatten.
 type ArchiveWatermark struct {
 	Date   time.Time `json:"date"`
 	Hashes []string  `json:"hashes"`
@@ -117,38 +119,168 @@ func (w ArchiveWatermark) covers(hash string) bool {
 	return slices.Contains(w.Hashes, hash)
 }
 
-// EventsArchiveWatermark is the newest events row a database's history archive
-// last wrote out, in the order the archive writes rows. The zero value means
-// nothing has been archived yet.
+// eventsArchiveLookback is how far before the newest events row the archive
+// re-reads on the next run. events.id is a UUID, so it cannot order rows the
+// way the (created_at, id) cursor used to: a row inserted with a created_at
+// behind the watermark sorts behind it and would never be read. Re-reading
+// the window and skipping the ids already archived picks such a row up.
 //
-// The cursor is (created_at, id), the order the work item specifies, and it
-// carries one accepted limit: a row whose created_at is at or before the
-// watermark's, but which becomes visible only after a run that passed it,
-// sorts behind the cursor and is never read, however many times the export
-// runs. A writer that supplies a backdated created_at, or a transaction that
-// commits after the archive has moved past the insert's timestamp, produces
-// one; the retention step (gt-2i850) must not treat this watermark as covering
-// such a row.
-type EventsArchiveWatermark struct {
+// The one accepted limit: a row inserted more than this long after its own
+// created_at stays outside the window and is never read. A backdated writer
+// is the usual cause.
+const eventsArchiveLookback = 24 * time.Hour
+
+// ArchivedEventsRow is one events row the archive has written, kept so the
+// lookback re-read can skip it.
+type ArchivedEventsRow struct {
 	CreatedAt string `json:"created_at"`
 	ID        string `json:"id"`
 }
 
-// Validate reports whether the watermark can bound a query: a zero watermark
-// (nothing archived yet) is valid, and so is a created_at Dolt can compare and
-// a numeric id. Text it cannot compare is refused rather than matched against
-// no row, which would read as "nothing new" (gt-7nxj4).
+// EventsArchiveWatermark is the events archive's position: the newest
+// created_at it wrote out, and the ids of every row it wrote whose created_at
+// is at or after that date minus eventsArchiveLookback. The next read starts
+// at the window's start and skips these ids, so a backdated row is archived
+// once and a row already written is not appended again. The zero value means
+// nothing has been archived yet.
+type EventsArchiveWatermark struct {
+	CreatedAt string              `json:"created_at,omitempty"`
+	Archived  []ArchivedEventsRow `json:"archived,omitempty"`
+}
+
+// Validate reports whether the watermark can bound a read: a zero watermark
+// (nothing archived yet) is valid, and so is a timestamp with the ids written
+// in its window. A timestamp with no id cannot say which rows at it are
+// already archived, so it is refused rather than read as the start of the
+// table (which would write those rows out twice); an id without a timestamp
+// cannot be placed in the window at all (gt-7nxj4).
 func (w EventsArchiveWatermark) Validate() error {
-	if w.CreatedAt == "" && w.ID == "" {
+	if w.CreatedAt == "" {
+		if len(w.Archived) > 0 {
+			return fmt.Errorf("events archive watermark lists %d id(s) but no created_at; refusing to read past it", len(w.Archived))
+		}
 		return nil
 	}
 	if !beadsql.TimestampLiteral(w.CreatedAt) {
 		return fmt.Errorf("events archive watermark created_at %q is not a timestamp", w.CreatedAt)
 	}
-	if _, err := strconv.ParseInt(w.ID, 10, 64); err != nil {
-		return fmt.Errorf("events archive watermark id %q is not an integer", w.ID)
+	if len(w.Archived) == 0 {
+		return fmt.Errorf("events archive watermark for %s lists no ids; refusing to read past it", w.CreatedAt)
+	}
+	for _, row := range w.Archived {
+		if !beadsql.TimestampLiteral(row.CreatedAt) {
+			return fmt.Errorf("events archive watermark for %s carries an id with created_at %q, which is not a timestamp", w.CreatedAt, row.CreatedAt)
+		}
+		if row.ID == "" {
+			return fmt.Errorf("events archive watermark for %s carries an empty id; refusing to read past it", w.CreatedAt)
+		}
 	}
 	return nil
+}
+
+// Since returns the first created_at the next read looks at: the newest
+// written row's date minus the lookback window. An empty watermark has no
+// lower bound.
+func (w EventsArchiveWatermark) Since() (string, error) {
+	if w.CreatedAt == "" {
+		return "", nil
+	}
+	at, err := parseEventsTimestamp(w.CreatedAt)
+	if err != nil {
+		return "", err
+	}
+	return at.Add(-eventsArchiveLookback).UTC().Format("2006-01-02 15:04:05"), nil
+}
+
+// ArchivedIDs is the set of ids the next read must skip.
+func (w EventsArchiveWatermark) ArchivedIDs() map[string]bool {
+	if len(w.Archived) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(w.Archived))
+	for _, row := range w.Archived {
+		out[row.ID] = true
+	}
+	return out
+}
+
+// written is the watermark after rows were written: the newest created_at
+// written, and every id written at or after that date minus the lookback. A
+// pair from the old window whose created_at is now outside it is dropped, so
+// the set stays the size of one window's rows instead of growing with the
+// archive (gt-7nxj4).
+func (w EventsArchiveWatermark) written(columns []string, rows [][]string) (EventsArchiveWatermark, error) {
+	createdAt, id, err := eventsWatermarkColumns(columns)
+	if err != nil {
+		return EventsArchiveWatermark{}, err
+	}
+	var newest time.Time
+	if w.CreatedAt != "" {
+		if newest, err = parseEventsTimestamp(w.CreatedAt); err != nil {
+			return EventsArchiveWatermark{}, err
+		}
+	}
+	newestText := w.CreatedAt
+	for _, row := range rows {
+		if createdAt >= len(row) || id >= len(row) {
+			return EventsArchiveWatermark{}, fmt.Errorf("events row of %d values is missing column %d or %d", len(row), createdAt, id)
+		}
+		if !beadsql.TimestampLiteral(row[createdAt]) {
+			return EventsArchiveWatermark{}, fmt.Errorf("events row created_at %q is not a timestamp", row[createdAt])
+		}
+		if row[id] == "" {
+			return EventsArchiveWatermark{}, fmt.Errorf("events row with created_at %s has no id", row[createdAt])
+		}
+		at, err := parseEventsTimestamp(row[createdAt])
+		if err != nil {
+			return EventsArchiveWatermark{}, err
+		}
+		if newest.IsZero() || at.After(newest) {
+			newest = at
+			newestText = row[createdAt]
+		}
+	}
+	if newest.IsZero() {
+		return w, nil
+	}
+	windowStart := newest.Add(-eventsArchiveLookback)
+	set := make(map[string]ArchivedEventsRow, len(w.Archived)+len(rows))
+	for _, pair := range w.Archived {
+		if at, err := parseEventsTimestamp(pair.CreatedAt); err == nil && !at.Before(windowStart) {
+			set[pair.ID] = pair
+		}
+	}
+	for _, row := range rows {
+		set[row[id]] = ArchivedEventsRow{CreatedAt: row[createdAt], ID: row[id]}
+	}
+	out := make([]ArchivedEventsRow, 0, len(set))
+	for _, pair := range set {
+		out = append(out, pair)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt != out[j].CreatedAt {
+			return out[i].CreatedAt < out[j].CreatedAt
+		}
+		return out[i].ID < out[j].ID
+	})
+	return EventsArchiveWatermark{CreatedAt: newestText, Archived: out}, nil
+}
+
+// parseEventsTimestamp parses the forms Dolt emits for a datetime column, in
+// the forms beadsql.TimestampLiteral accepts.
+func parseEventsTimestamp(s string) (time.Time, error) {
+	layouts := []string{
+		"2006-01-02 15:04:05.999999999Z07:00",
+		"2006-01-02T15:04:05.999999999Z07:00",
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02T15:04:05.999999999",
+	}
+	for _, layout := range layouts {
+		if at, err := time.Parse(layout, s); err == nil {
+			return at, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("events timestamp %q cannot be parsed", s)
 }
 
 // ArchiveWatermarks is one town's history archive cursors, per database.
@@ -398,11 +530,12 @@ func archiveWatermarkAfter(prev ArchiveWatermark, commits []archiveCommit) (Arch
 	return ArchiveWatermark{Date: newest, Hashes: hashes}, nil
 }
 
-// maintenanceArchiveEvents exports one database's new events rows, one batch
-// at a time, and advances the events watermark once the last batch is on disk.
-// Every batch of the export is rolled back together if a later read, write or
-// the watermark record fails, so a half-exported table is never left ahead of
-// the watermark for the next run to append again.
+// maintenanceArchiveEvents exports one database's events rows in the lookback
+// window, one batch at a time, skipping the ids the watermark already holds,
+// and advances the watermark once the last batch is on disk. Every batch of the
+// export is rolled back together if a later read, write or the watermark record
+// fails, so a half-exported table is never left ahead of the watermark for the
+// next run to append again.
 func (d *Daemon) maintenanceArchiveEvents(parent context.Context, dir, db string, wm EventsArchiveWatermark) error {
 	if err := validMaintenanceDBName(db); err != nil {
 		return err
@@ -419,13 +552,18 @@ func (d *Daemon) maintenanceArchiveEvents(parent context.Context, dir, db string
 	if err != nil {
 		return err
 	}
+	since, err := wm.Since()
+	if err != nil {
+		return err
+	}
+	archived := wm.ArchivedIDs()
 	var (
 		columns  []string
-		last     []string
+		after    eventsCursor
 		exported int
 	)
 	for {
-		batch, err := s.archiveEventsRead(ctx, d, db, wm, maintenanceArchiveEventsBatch)
+		batch, err := s.archiveEventsRead(ctx, d, db, eventsArchiveRead{Since: since, After: after}, maintenanceArchiveEventsBatch)
 		if err != nil {
 			return exp.fail(fmt.Errorf("reading events: %w", err))
 		}
@@ -440,22 +578,41 @@ func (d *Daemon) maintenanceArchiveEvents(parent context.Context, dir, db string
 		} else if !slices.Equal(columns, batch.Columns) {
 			return exp.fail(fmt.Errorf("events columns changed between batches: %v then %v", columns, batch.Columns))
 		}
-		if err := exp.append(s, columns, batch.Rows); err != nil {
-			return exp.fail(fmt.Errorf("writing %s: %w", path, err))
-		}
-		exported += len(batch.Rows)
-		last = batch.Rows[len(batch.Rows)-1]
 
-		next, err := eventsWatermarkFrom(columns, last)
+		// The cursor advances over every row the read returned, including the
+		// ones this run must skip: a read that hands back the cursor it was
+		// given cannot make progress, and a window made only of archived rows
+		// still pages forward instead of stopping or repeating.
+		next, err := eventsCursorFrom(columns, batch.Rows[len(batch.Rows)-1])
 		if err != nil {
 			return exp.fail(err)
 		}
-		if next == wm {
-			// A read that hands back the cursor it was given cannot advance the
-			// export; stopping here keeps the loop bounded.
-			return exp.fail(fmt.Errorf("events read made no progress past %s/%s", wm.CreatedAt, wm.ID))
+		if next == after {
+			return exp.fail(fmt.Errorf("events read made no progress past %s/%s", after.CreatedAt, after.ID))
 		}
-		wm = next
+		_, idColumn, err := eventsWatermarkColumns(columns)
+		if err != nil {
+			return exp.fail(err)
+		}
+		fresh := make([][]string, 0, len(batch.Rows))
+		for _, row := range batch.Rows {
+			if archived[row[idColumn]] {
+				continue
+			}
+			fresh = append(fresh, row)
+		}
+		if len(fresh) > 0 {
+			if err := exp.append(s, columns, fresh); err != nil {
+				return exp.fail(fmt.Errorf("writing %s: %w", path, err))
+			}
+			exported += len(fresh)
+			nextWM, err := wm.written(columns, fresh)
+			if err != nil {
+				return exp.fail(err)
+			}
+			wm = nextWM
+		}
+		after = next
 		if len(batch.Rows) < maintenanceArchiveEventsBatch {
 			break
 		}
@@ -467,8 +624,8 @@ func (d *Daemon) maintenanceArchiveEvents(parent context.Context, dir, db string
 	if err := recordEventsArchiveWatermark(d.config.TownRoot, db, wm); err != nil {
 		return exp.fail(fmt.Errorf("the watermark for %s cannot be recorded: %w", path, err))
 	}
-	d.logger.Printf("scheduled_maintenance: archive %s events: %d row(s) to %s, through %s id %s",
-		db, exported, path, wm.CreatedAt, wm.ID)
+	d.logger.Printf("scheduled_maintenance: archive %s events: %d row(s) to %s, through %s (%d id(s) in the window)",
+		db, exported, path, wm.CreatedAt, len(wm.Archived))
 	return nil
 }
 
@@ -548,20 +705,38 @@ func eventsWatermarkColumns(columns []string) (createdAt, id int, err error) {
 	return createdAt, id, nil
 }
 
-// eventsWatermarkFrom builds the watermark a written row ends at.
-func eventsWatermarkFrom(columns, row []string) (EventsArchiveWatermark, error) {
+// eventsCursor is one position in the events read: a row's created_at and id,
+// the order the read pages in.
+type eventsCursor struct {
+	CreatedAt string
+	ID        string
+}
+
+// eventsArchiveRead is where one events read starts: the lookback window's
+// lower bound and the row after which it pages. An empty Since starts at the
+// table's oldest row; an empty After starts at Since.
+type eventsArchiveRead struct {
+	Since string
+	After eventsCursor
+}
+
+// eventsCursorFrom builds the cursor a written row ends at.
+func eventsCursorFrom(columns, row []string) (eventsCursor, error) {
 	createdAt, id, err := eventsWatermarkColumns(columns)
 	if err != nil {
-		return EventsArchiveWatermark{}, err
+		return eventsCursor{}, err
 	}
 	if createdAt >= len(row) || id >= len(row) {
-		return EventsArchiveWatermark{}, fmt.Errorf("events row of %d values is missing column %d or %d", len(row), createdAt, id)
+		return eventsCursor{}, fmt.Errorf("events row of %d values is missing column %d or %d", len(row), createdAt, id)
 	}
-	wm := EventsArchiveWatermark{CreatedAt: row[createdAt], ID: row[id]}
-	if err := wm.Validate(); err != nil {
-		return EventsArchiveWatermark{}, err
+	cursor := eventsCursor{CreatedAt: row[createdAt], ID: row[id]}
+	if !beadsql.TimestampLiteral(cursor.CreatedAt) {
+		return eventsCursor{}, fmt.Errorf("events row created_at %q is not a timestamp", cursor.CreatedAt)
 	}
-	return wm, nil
+	if cursor.ID == "" {
+		return eventsCursor{}, fmt.Errorf("events row with created_at %s has no id", cursor.CreatedAt)
+	}
+	return cursor, nil
 }
 
 // archiveFileName is <kind>-<db>-<UTC date>.csv.gz: one file per database per
@@ -712,6 +887,95 @@ func LoadArchiveWatermarks(townRoot string) (ArchiveWatermarks, error) {
 	return ArchiveWatermarks{Commits: st.ArchiveWatermarks, Events: st.ArchiveEventsWatermarks}, nil
 }
 
+// archiveDatePart matches the UTC date an archive file is named by.
+var archiveDatePart = regexp.MustCompile(`^\d{8}$`)
+
+// LoadArchivedCommitHashes returns every commit hash db's history archive
+// holds: the commit_hash column of each dolt-log-<db>-<date>.csv.gz directly
+// under dir. It is the pre-flatten check's authority (gt dolt status): a
+// commit in dolt_log whose hash is not here is not archived, whatever its
+// date.
+//
+// A file that cannot be read, or a name that is shaped like an archive file
+// but carries no date, is an error: a partial set would let the check call an
+// unarchived commit safe. A directory with no file for db is an empty set, not
+// an error: that database has archived nothing yet.
+func LoadArchivedCommitHashes(dir, db string) (map[string]struct{}, error) {
+	if err := validMaintenanceDBName(db); err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("reading the history archive %s: %w", dir, err)
+	}
+	prefix := "dolt-log-" + db + "-"
+	out := map[string]struct{}{}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".csv.gz") {
+			continue
+		}
+		if entry.IsDir() {
+			return nil, fmt.Errorf("%s is a directory, not an archive file", filepath.Join(dir, name))
+		}
+		if day := strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".csv.gz"); !archiveDatePart.MatchString(day) {
+			return nil, fmt.Errorf("%s is named like an archive file but carries no UTC date", filepath.Join(dir, name))
+		}
+		hashes, err := archivedCommitHashesFromFile(filepath.Join(dir, name))
+		if err != nil {
+			return nil, err
+		}
+		for _, hash := range hashes {
+			out[hash] = struct{}{}
+		}
+	}
+	return out, nil
+}
+
+// archivedCommitHashesFromFile reads one commit archive file's commit_hash
+// column, every gzip member in it. The reader's close runs even on an error
+// path, and its error is reported only when the read itself found nothing
+// wrong.
+func archivedCommitHashesFromFile(path string) (out []string, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s as gzip: %w", path, err)
+	}
+	defer func() {
+		if cerr := gz.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("reading %s: %w", path, cerr)
+		}
+	}()
+	r := csv.NewReader(gz)
+	header, err := r.Read()
+	if err != nil {
+		return nil, fmt.Errorf("reading %s's header: %w", path, err)
+	}
+	hashColumn := slices.Index(header, "commit_hash")
+	if hashColumn < 0 {
+		return nil, fmt.Errorf("%s has no commit_hash column: %v", path, header)
+	}
+	for {
+		row, err := r.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading %s: %w", path, err)
+		}
+		if hashColumn >= len(row) || row[hashColumn] == "" {
+			return nil, fmt.Errorf("%s has a row with no commit_hash", path)
+		}
+		out = append(out, row[hashColumn])
+	}
+	return out, nil
+}
+
 // doltArchiveLog reads db's dolt_log rows after the watermark, oldest first by
 // (date, commit_hash). It is the commit archive's only SQL, a read-only SELECT
 // through the running server. The date bound is inclusive so every commit at
@@ -784,20 +1048,26 @@ func newArchiveCommits(commits []archiveCommit, wm ArchiveWatermark) []archiveCo
 	return out
 }
 
-// doltArchiveEvents reads up to limit of db's events rows after the watermark,
-// oldest first. It is the events archive's only SQL, a read-only SELECT through
-// the running server, and every column is read in the table's own order.
-func (d *Daemon) doltArchiveEvents(ctx context.Context, db string, after EventsArchiveWatermark, limit int) (archiveEvents, error) {
+// doltArchiveEvents reads up to limit of db's events rows at or after the
+// lookback window's start (and after the paging cursor when one is set), oldest
+// first. It is the events archive's only SQL, a read-only SELECT through the
+// running server, and every column is read in the table's own order.
+func (d *Daemon) doltArchiveEvents(ctx context.Context, db string, read eventsArchiveRead, limit int) (archiveEvents, error) {
 	if err := validMaintenanceDBName(db); err != nil {
 		return archiveEvents{}, err
 	}
 	if limit <= 0 {
 		return archiveEvents{}, fmt.Errorf("events read limit %d is not positive", limit)
 	}
-	if err := after.Validate(); err != nil {
-		return archiveEvents{}, err
+	if read.Since != "" && !beadsql.TimestampLiteral(read.Since) {
+		return archiveEvents{}, fmt.Errorf("events read since %q is not a timestamp", read.Since)
 	}
-	query, err := beadsql.ArchiveEvents(db, after.CreatedAt, after.ID, limit).Inline()
+	if read.After.CreatedAt != "" || read.After.ID != "" {
+		if _, err := eventsCursorFrom([]string{"created_at", "id"}, []string{read.After.CreatedAt, read.After.ID}); err != nil {
+			return archiveEvents{}, err
+		}
+	}
+	query, err := beadsql.ArchiveEventsSince(db, read.Since, read.After.CreatedAt, read.After.ID, limit).Inline()
 	if err != nil {
 		return archiveEvents{}, err
 	}

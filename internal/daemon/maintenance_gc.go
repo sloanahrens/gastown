@@ -152,9 +152,10 @@ type maintenanceGCState struct {
 	ArchiveWatermarks map[string]ArchiveWatermark `json:"archive_watermarks,omitempty"`
 
 	// ArchiveEventsWatermarks is, per database, the newest events row the
-	// history archive last wrote out. The events table is in Dolt's
-	// dolt_ignore list, so it is in no commit and no backup: this cursor is
-	// the live server's only durable position (gt-7nxj4).
+	// history archive last wrote out and the ids inside its lookback window.
+	// The events table is in Dolt's dolt_ignore list, so it is in no commit and
+	// no backup: this cursor is the live server's only durable position
+	// (gt-7nxj4).
 	ArchiveEventsWatermarks map[string]EventsArchiveWatermark `json:"archive_events_watermarks,omitempty"`
 }
 

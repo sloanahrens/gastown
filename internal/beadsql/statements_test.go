@@ -35,9 +35,11 @@ func TestDeclaredQueriesAreReadOnlyBdReads(t *testing.T) {
 		"BackupTable":                 BackupTable("hq", "labels"),
 		"BackupEvents":                BackupEvents("hq", ""),
 		"BackupEventsSince":           BackupEvents("hq", "2026-10-31 16:53:07"),
-		"ArchiveEvents":               ArchiveEvents("hq", "", "", 100),
-		"ArchiveEventsAfter":          ArchiveEvents("hq", "2026-10-31 16:53:07", "42", 100),
-		"CountEventsAfter":            CountEventsAfter("hq", "2026-10-31 16:53:07", "42"),
+		"ArchiveEvents":               ArchiveEventsSince("hq", "", "", "", 100),
+		"ArchiveEventsWindow":         ArchiveEventsSince("hq", "2026-10-31 16:53:07", "", "", 100),
+		"ArchiveEventsAfter":          ArchiveEventsSince("hq", "2026-10-31 16:53:07", "2026-10-31 16:53:07", "42", 100),
+		"CountEvents":                 CountEvents("hq"),
+		"EventsSinceIDs":              EventsSinceIDs("hq", "2026-10-31 16:53:07"),
 	} {
 		s, err := q.Inline()
 		if err != nil {
@@ -62,17 +64,18 @@ func TestDeclaredQueriesAreReadOnlyBdReads(t *testing.T) {
 func TestQueriesRefuseBadIdentifiers(t *testing.T) {
 	t.Parallel()
 	for name, q := range map[string]Query{
-		"TableProbe":           TableProbe("x`; DROP TABLE issues"),
-		"TableRowCount":        TableRowCount("hq`", "issues"),
-		"BackupIssues":         BackupIssues("a b", true, nil),
-		"BackupTable":          BackupTable("hq", "labels;"),
-		"BackupEvents":         BackupEvents("hq; DROP TABLE events", ""),
-		"BackupEventBound":     BackupEvents("hq", "2026-10-31' OR '1'='1"),
-		"ArchiveEvents":        ArchiveEvents("hq; DROP TABLE events", "", "", 10),
-		"ArchiveEventCursor":   ArchiveEvents("hq", "2026-10-31' OR '1'='1", "1", 10),
-		"ArchiveEventCursorID": ArchiveEvents("hq", "2026-10-31 16:53:07", "1 OR 1=1", 10),
-		"ArchiveEventLimit":    ArchiveEvents("hq", "", "", 0),
-		"CountEventsAfter":     CountEventsAfter("hq", "yesterday", "1"),
+		"TableProbe":         TableProbe("x`; DROP TABLE issues"),
+		"TableRowCount":      TableRowCount("hq`", "issues"),
+		"BackupIssues":       BackupIssues("a b", true, nil),
+		"BackupTable":        BackupTable("hq", "labels;"),
+		"BackupEvents":       BackupEvents("hq; DROP TABLE events", ""),
+		"BackupEventBound":   BackupEvents("hq", "2026-10-31' OR '1'='1"),
+		"ArchiveEvents":      ArchiveEventsSince("hq; DROP TABLE events", "", "", "", 10),
+		"ArchiveEventSince":  ArchiveEventsSince("hq", "2026-10-31' OR '1'='1", "", "", 10),
+		"ArchiveEventCursor": ArchiveEventsSince("hq", "2026-10-31 16:53:07", "2026-10-31' OR '1'='1", "1", 10),
+		"ArchiveEventLimit":  ArchiveEventsSince("hq", "", "", "", 0),
+		"CountEvents":        CountEvents("hq;"),
+		"EventsSinceIDs":     EventsSinceIDs("hq", "yesterday"),
 	} {
 		if _, err := q.BdArgs(); err == nil {
 			t.Errorf("%s: BdArgs accepted %s", name, q)
@@ -322,28 +325,32 @@ func TestBackupEventsReadsFromItsBoundary(t *testing.T) {
 	}
 }
 
-// TestArchiveEventsReadsPastItsCursor: the history archive's events read takes
-// rows strictly after the (created_at, id) cursor, oldest first and bounded by
-// the batch size; a cursor Dolt cannot compare is refused rather than sent as a
-// literal it would compare against nothing (gt-7nxj4).
-func TestArchiveEventsReadsPastItsCursor(t *testing.T) {
+// TestArchiveEventsReadsTheLookbackWindow: the history archive's events read
+// takes rows at or after the window's start and after the (created_at, id)
+// cursor, oldest first and bounded by the batch size; text Dolt cannot compare
+// is refused rather than sent as a literal it would compare against nothing
+// (gt-7nxj4). The id is compared as a string literal because events.id is a
+// UUID, not a number.
+func TestArchiveEventsReadsTheLookbackWindow(t *testing.T) {
 	t.Parallel()
-	text, err := ArchiveEvents("hq", "2026-10-31 16:53:07", "42", 5000).Inline()
+	const id = "3f2b9c8e-1a4d-4e7f-9b6a-2c5d8e1f0a3b"
+	text, err := ArchiveEventsSince("hq", "2026-10-31 16:53:07", "2026-10-31 17:00:00", id, 5000).Inline()
 	if err != nil {
 		t.Fatalf("Inline: %v", err)
 	}
 	for _, want := range []string{
 		"FROM `hq`.events",
-		"created_at > '2026-10-31 16:53:07'",
-		"(created_at = '2026-10-31 16:53:07' AND id > 42)",
+		"created_at >= '2026-10-31 16:53:07'",
+		"created_at > '2026-10-31 17:00:00'",
+		"(created_at = '2026-10-31 17:00:00' AND id > '" + id + "')",
 		"ORDER BY created_at, id LIMIT 5000",
 	} {
 		if !strings.Contains(text, want) {
-			t.Errorf("ArchiveEvents lacks %q:\n%s", want, text)
+			t.Errorf("ArchiveEventsSince lacks %q:\n%s", want, text)
 		}
 	}
 
-	whole, err := ArchiveEvents("hq", "", "", 10).Inline()
+	whole, err := ArchiveEventsSince("hq", "", "", "", 10).Inline()
 	if err != nil {
 		t.Fatalf("Inline (whole table): %v", err)
 	}
@@ -351,20 +358,39 @@ func TestArchiveEventsReadsPastItsCursor(t *testing.T) {
 		t.Errorf("the whole-table read is filtered:\n%s", whole)
 	}
 
-	count, err := CountEventsAfter("hq", "2026-10-31 16:53:07", "42").Inline()
+	count, err := CountEvents("hq").Inline()
 	if err != nil {
-		t.Fatalf("CountEventsAfter Inline: %v", err)
+		t.Fatalf("CountEvents Inline: %v", err)
 	}
-	if !strings.Contains(count, "COUNT(*)") || !strings.Contains(count, "id > 42") {
-		t.Errorf("CountEventsAfter = %s", count)
+	if !strings.Contains(count, "COUNT(*)") || strings.Contains(count, "WHERE") {
+		t.Errorf("CountEvents = %s", count)
 	}
-	if _, err := ArchiveEvents("hq", "yesterday", "42", 10).Inline(); err == nil {
+	ids, err := EventsSinceIDs("hq", "2026-10-31 16:53:07").Inline()
+	if err != nil {
+		t.Fatalf("EventsSinceIDs Inline: %v", err)
+	}
+	if !strings.Contains(ids, "SELECT id FROM `hq`.events") || !strings.Contains(ids, "created_at >= '2026-10-31 16:53:07'") {
+		t.Errorf("EventsSinceIDs = %s", ids)
+	}
+	if _, err := ArchiveEventsSince("hq", "2026-10-31 16:53:07", "yesterday", "42", 10).Inline(); err == nil {
 		t.Error("a cursor that is not a timestamp was sent to Dolt")
 	}
-	if _, err := ArchiveEvents("hq", "2026-10-31 16:53:07", "fourty-two", 10).Inline(); err == nil {
-		t.Error("a cursor id that is not an integer was sent to Dolt")
+	if _, err := ArchiveEventsSince("hq", "2026-10-31 16:53:07", "2026-10-31 16:53:07", "", 10).Inline(); err == nil {
+		t.Error("a cursor without an id was sent to Dolt")
 	}
-	if _, err := ArchiveEvents("hq", "", "", 0).Inline(); err == nil {
+	// The id is a UUID, so it is a quoted literal, never spliced in: a
+	// quote-bearing id is escaped rather than executed.
+	injected, err := ArchiveEventsSince("hq", "2026-10-31 16:53:07", "2026-10-31 16:53:07", "1' OR '1'='1", 10).Inline()
+	if err != nil {
+		t.Fatalf("Inline (quoted id): %v", err)
+	}
+	if !strings.Contains(injected, `id > '1'' OR ''1''=''1'`) {
+		t.Errorf("a quote-bearing id was not escaped:\n%s", injected)
+	}
+	if _, err := ArchiveEventsSince("hq", "yesterday", "", "", 10).Inline(); err == nil {
+		t.Error("a window start that is not a timestamp was sent to Dolt")
+	}
+	if _, err := ArchiveEventsSince("hq", "", "", "", 0).Inline(); err == nil {
 		t.Error("a non-positive limit was sent to Dolt")
 	}
 }

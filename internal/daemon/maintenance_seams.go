@@ -39,9 +39,10 @@ type maintenanceSeams struct {
 	// archiveRead reads a database's dolt_log rows after the history archive's
 	// watermark, oldest first (a read-only SELECT).
 	archiveRead func(ctx context.Context, d *Daemon, db string, after ArchiveWatermark) ([]archiveCommit, error)
-	// archiveEventsRead reads up to limit of a database's events rows after the
-	// events archive's watermark, oldest first (a read-only SELECT).
-	archiveEventsRead func(ctx context.Context, d *Daemon, db string, after EventsArchiveWatermark, limit int) (archiveEvents, error)
+	// archiveEventsRead reads up to limit of a database's events rows at or
+	// after the lookback window's start (and after the paging cursor), oldest
+	// first (a read-only SELECT).
+	archiveEventsRead func(ctx context.Context, d *Daemon, db string, read eventsArchiveRead, limit int) (archiveEvents, error)
 	// archiveOpenDB opens the pool an archive read runs on. A test injects a
 	// fake driver so a read's failure paths are reachable without a server.
 	archiveOpenDB func(dsn string) (*sql.DB, error)
@@ -109,8 +110,8 @@ func (d *Daemon) maintenance() maintenanceSeams {
 		}
 	}
 	if s.archiveEventsRead == nil {
-		s.archiveEventsRead = func(ctx context.Context, d *Daemon, db string, after EventsArchiveWatermark, limit int) (archiveEvents, error) {
-			return d.doltArchiveEvents(ctx, db, after, limit)
+		s.archiveEventsRead = func(ctx context.Context, d *Daemon, db string, read eventsArchiveRead, limit int) (archiveEvents, error) {
+			return d.doltArchiveEvents(ctx, db, read, limit)
 		}
 	}
 	if s.archiveOpenDB == nil {
