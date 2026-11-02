@@ -97,6 +97,42 @@ func TestPlanNamesEachStepAndRunsNothing(t *testing.T) {
 	}
 }
 
+// TestPlanBuildIDIsAShellSafeToken: Plan prints main.Build's value inside a
+// command line, so the placeholder standing in for the build id git answers in
+// the worktree is one shell-safe token: letters, digits and underscores. A space
+// there splits the printed argv into two words, and a shell reads angle brackets
+// as redirection (om finding 31169d4cb6bf).
+func TestPlanBuildIDIsAShellSafeToken(t *testing.T) {
+	t.Parallel()
+	b := planBuilder(t)
+	lines, err := b.Plan(testRev)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	var bd string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "build bd: ") {
+			bd = line
+		}
+	}
+	if bd == "" {
+		t.Fatalf("plan has no build bd: line:\n%s", strings.Join(lines, "\n"))
+	}
+	i := strings.Index(bd, bdBuildFlag)
+	if i < 0 {
+		t.Fatalf("the build bd: line does not stamp main.Build: %q", bd)
+	}
+	value, rest, _ := strings.Cut(bd[i+len(bdBuildFlag):], " ")
+	if value == "" || rest == "" {
+		t.Fatalf("the build bd: line stamps main.Build with %q, want a token followed by the commit stamp: %q", value, bd)
+	}
+	for _, r := range value {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_') {
+			t.Errorf("the plan's main.Build placeholder %q holds %q, which a shell does not read as one word; want letters, digits and underscores", value, r)
+		}
+	}
+}
+
 // Plan refuses each input the build's own checks refuse before it runs anything,
 // and a refused call prints no step.
 func TestPlanRefusesWhatABuildRefuses(t *testing.T) {
