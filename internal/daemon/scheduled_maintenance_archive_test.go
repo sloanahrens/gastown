@@ -37,26 +37,25 @@ func archiveConfig(dir string) *DaemonPatrolConfig {
 }
 
 // commitFake is the dolt_log read seam: the commits a database's fake log
-// holds and a per-database read error. It applies the archive's cursor the way
-// the production read does: commits dated at or after the watermark's date,
-// minus the hashes the watermark already holds, oldest first by (date, hash).
+// holds and a per-database read error. It applies the archive's selection the
+// way the production read does: commits whose hashes no archive file holds,
+// oldest first by (date, hash). TestCommitArchiveQuerySelectsByArchivedHashSet
+// runs the production query itself against an in-process MySQL engine, so this
+// fake only has to drive the export.
 type commitFake struct {
 	commits map[string][]archiveCommit
 	errs    map[string]error
 	reads   int
 }
 
-func (f *commitFake) read(_ context.Context, _ *Daemon, db string, after ArchiveWatermark) ([]archiveCommit, error) {
+func (f *commitFake) read(_ context.Context, _ *Daemon, db string, archived map[string]struct{}) ([]archiveCommit, error) {
 	f.reads++
 	if err := f.errs[db]; err != nil {
 		return nil, err
 	}
 	var out []archiveCommit
 	for _, c := range f.commits[db] {
-		if !after.Date.IsZero() && c.Date.Before(after.Date) {
-			continue
-		}
-		if after.covers(c.Hash) {
+		if _, ok := archived[c.Hash]; ok {
 			continue
 		}
 		out = append(out, c)
@@ -75,9 +74,9 @@ func (f *commitFake) read(_ context.Context, _ *Daemon, db string, after Archive
 // unless a test installs rows through withEventsFake.
 func withArchiveFakes(d *Daemon, f *gcFakes, commits map[string][]archiveCommit, errs map[string]error) *commitFake {
 	fake := &commitFake{commits: commits, errs: errs}
-	d.maint.archiveRead = func(ctx context.Context, d *Daemon, db string, after ArchiveWatermark) ([]archiveCommit, error) {
+	d.maint.archiveRead = func(ctx context.Context, d *Daemon, db string, archived map[string]struct{}) ([]archiveCommit, error) {
 		f.events = append(f.events, "archive "+db)
-		return fake.read(ctx, d, db, after)
+		return fake.read(ctx, d, db, archived)
 	}
 	withEventsFake(d, nil, nil, nil)
 	return fake
@@ -310,9 +309,90 @@ func TestMaintenanceCommitCursorSurvivesAFlatten(t *testing.T) {
 	}
 }
 
-// TestArchiveWatermarkValidate: a cursor is usable only when it says both the
-// date and the hashes written at it; text it cannot place in the log is
-// refused rather than read as the start of the log.
+// TestMaintenanceCommitExportSelectsByArchivedHashSet: the export selects the
+// commits the pre-flatten check counts — the dolt_log hashes no archive file
+// holds — so a commit dated before the watermark but missing from the files is
+// archived on the next run, exactly once, and the check then finds every log
+// hash in the set (gt-98eug).
+func TestMaintenanceCommitExportSelectsByArchivedHashSet(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"gt": {633 * mib, 0}}
+	dir := t.TempDir()
+	d.patrolConfig = archiveConfig(dir)
+
+	// h1 was archived on an earlier day. h0 is dated before the watermark and
+	// was never exported: the date cursor cannot see it, but the check counts
+	// it, so the old design could never reach 0 behind.
+	if err := appendArchiveTable(filepath.Join(dir, "dolt-log-gt-20260930.csv.gz"), archiveCSVHeader, [][]string{
+		{"h1", "c", gcTestNow.Add(-72 * time.Hour).UTC().Format(time.RFC3339), "already archived"},
+	}); err != nil {
+		t.Fatalf("seeding the archive: %v", err)
+	}
+	if err := recordArchiveWatermark(d.config.TownRoot, "gt", ArchiveWatermark{
+		Date:   gcTestNow.Add(-time.Hour),
+		Hashes: []string{"h1"},
+	}); err != nil {
+		t.Fatalf("seeding the watermark: %v", err)
+	}
+
+	log := []archiveCommit{
+		{Hash: "h0", Committer: "c", Date: gcTestNow.Add(-48 * time.Hour), Message: "backdated"},
+		{Hash: "h1", Committer: "c", Date: gcTestNow.Add(-time.Hour), Message: "already archived"},
+		{Hash: "h2", Committer: "c", Date: gcTestNow.Add(-time.Minute), Message: "new"},
+	}
+	fake := withArchiveFakes(d, f, map[string][]archiveCommit{"gt": log}, nil)
+
+	d.runScheduledMaintenance()
+
+	want := [][]string{
+		archiveCSVHeader,
+		{"h0", "c", log[0].Date.UTC().Format(time.RFC3339), "backdated"},
+		{"h2", "c", log[2].Date.UTC().Format(time.RFC3339), "new"},
+	}
+	if got := readArchiveCSV(t, archiveFile(dir, "gt")); !csvRowsEqual(got, want) {
+		t.Errorf("archive rows = %v\nwant %v (the backdated commit exported, the archived one not repeated)", got, want)
+	}
+
+	archived, err := LoadArchivedCommitHashes(dir, "gt")
+	if err != nil {
+		t.Fatalf("loading the archived set: %v", err)
+	}
+	var missing int
+	for _, c := range log {
+		if _, ok := archived[c.Hash]; !ok {
+			missing++
+		}
+	}
+	if missing != 0 {
+		t.Errorf("%d log hash(es) not in the archive after the export; want 0 (the check's rule)", missing)
+	}
+
+	// A second run over the same log appends nothing: the file set now holds
+	// every hash.
+	before, err := os.Stat(archiveFile(dir, "gt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstReads := fake.reads
+	d.lastMaintenanceRun = time.Time{}
+	d.runScheduledMaintenance()
+	if fake.reads == firstReads {
+		t.Fatal("the second run never read dolt_log; the size check below would prove nothing")
+	}
+	after, err := os.Stat(archiveFile(dir, "gt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() != before.Size() {
+		t.Errorf("the second run appended to the day's file (%d -> %d bytes); an archived hash was written twice", before.Size(), after.Size())
+	}
+}
+
+// TestArchiveWatermarkValidate: a watermark is usable only when it says both
+// the date and the hashes written at it; text it cannot place in the log is
+// refused rather than shown as a clean archive.
 func TestArchiveWatermarkValidate(t *testing.T) {
 	t.Parallel()
 	when := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
@@ -355,7 +435,7 @@ func TestMaintenanceArchiveAdvancesTheWatermarkOnlyAfterTheFileIsClosed(t *testi
 		d, _ := gcTestDaemon(t)
 		dir := t.TempDir()
 		statePath := maintenanceGCStatePath(d.config.TownRoot)
-		d.maint.archiveRead = func(context.Context, *Daemon, string, ArchiveWatermark) ([]archiveCommit, error) {
+		d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {
 			return rows, nil
 		}
 		var stateAtAppend []byte
@@ -393,7 +473,7 @@ func TestMaintenanceArchiveAdvancesTheWatermarkOnlyAfterTheFileIsClosed(t *testi
 	t.Run("a failed append records no watermark", func(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
-		d.maint.archiveRead = func(context.Context, *Daemon, string, ArchiveWatermark) ([]archiveCommit, error) {
+		d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {
 			return rows, nil
 		}
 		d.maint.archiveAppend = func(string, []string, [][]string) error {
@@ -435,6 +515,38 @@ func TestMaintenanceArchiveAppendsToTodaysFile(t *testing.T) {
 	}
 	if strings.Join(rows[0], ",") == strings.Join(rows[1], ",") {
 		t.Error("second append repeated the header")
+	}
+}
+
+// TestMaintenanceArchiveFilesAreOwnerOnly: the archive holds the town's commit
+// messages and event rows, so the export creates its files 0600 and its
+// directory 0700.
+func TestMaintenanceArchiveFilesAreOwnerOnly(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"gt": {633 * mib, 0}}
+	dir := filepath.Join(t.TempDir(), "archive")
+	d.patrolConfig = archiveConfig(dir)
+	withArchiveFakes(d, f, map[string][]archiveCommit{
+		"gt": {{Hash: "h1", Committer: "c", Date: gcTestNow.Add(-time.Hour), Message: "first"}},
+	}, nil)
+
+	d.runScheduledMaintenance()
+
+	file, err := os.Stat(archiveFile(dir, "gt"))
+	if err != nil {
+		t.Fatalf("stat archive file: %v", err)
+	}
+	if got := file.Mode().Perm(); got != 0o600 {
+		t.Errorf("archive file mode = %04o, want 0600", got)
+	}
+	archiveDir, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat archive directory: %v", err)
+	}
+	if got := archiveDir.Mode().Perm(); got != 0o700 {
+		t.Errorf("archive directory mode = %04o, want 0700", got)
 	}
 }
 
@@ -538,7 +650,7 @@ func TestMaintenanceArchiveOffWithoutArchiveDir(t *testing.T) {
 	f := withGCFakes(t, d)
 	f.sizes = map[string]gcMeasure{"gt": {633 * mib, 0}}
 	d.patrolConfig = gcModeConfig() // no archive_dir
-	d.maint.archiveRead = func(context.Context, *Daemon, string, ArchiveWatermark) ([]archiveCommit, error) {
+	d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {
 		t.Error("the dolt_log read ran with archive_dir unset")
 		return nil, nil
 	}
@@ -571,7 +683,7 @@ func TestMaintenanceArchiveRefusesUnusableDirectory(t *testing.T) {
 		f := withGCFakes(t, d)
 		f.sizes = map[string]gcMeasure{"gt": {633 * mib, 0}}
 		d.patrolConfig = archiveConfig("relative/archive")
-		d.maint.archiveRead = func(context.Context, *Daemon, string, ArchiveWatermark) ([]archiveCommit, error) {
+		d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {
 			t.Error("the dolt_log read ran with a relative archive_dir")
 			return nil, nil
 		}
@@ -599,7 +711,7 @@ func TestMaintenanceArchiveRefusesUnusableDirectory(t *testing.T) {
 			t.Fatal(err)
 		}
 		d.patrolConfig = archiveConfig(filepath.Join(parent, "archive"))
-		d.maint.archiveRead = func(context.Context, *Daemon, string, ArchiveWatermark) ([]archiveCommit, error) {
+		d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {
 			t.Error("the dolt_log read ran with an archive directory that cannot be created")
 			return nil, nil
 		}
@@ -627,7 +739,7 @@ func TestMaintenanceArchiveRefusesUnusableDirectory(t *testing.T) {
 		if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		d.maint.archiveRead = func(context.Context, *Daemon, string, ArchiveWatermark) ([]archiveCommit, error) {
+		d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {
 			t.Error("the dolt_log read ran with an unreadable watermark file")
 			return nil, nil
 		}
@@ -658,7 +770,7 @@ func TestMaintenanceArchiveRollsBackWhenTheWatermarkCannotBeRecorded(t *testing.
 	dir := t.TempDir()
 	d.patrolConfig = archiveConfig(dir)
 	statePath := maintenanceGCStatePath(d.config.TownRoot)
-	d.maint.archiveRead = func(context.Context, *Daemon, string, ArchiveWatermark) ([]archiveCommit, error) {
+	d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {
 		// The state file becomes a directory after the run's load, so the
 		// watermark write fails while the archive file itself still can be
 		// written.
@@ -1406,7 +1518,7 @@ func TestMaintenanceArchiveDefersWhileTheTownIsBusy(t *testing.T) {
 	f.sizes = map[string]gcMeasure{"gt": {633 * mib, 0}}
 	f.quietUntil = 0 // busy on the first probe
 	d.patrolConfig = archiveConfig(t.TempDir())
-	d.maint.archiveRead = func(context.Context, *Daemon, string, ArchiveWatermark) ([]archiveCommit, error) {
+	d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {
 		t.Error("the commit read ran while the town was busy")
 		return nil, nil
 	}
@@ -1442,7 +1554,7 @@ func TestMaintenanceArchiveBoundsTheWholeStep(t *testing.T) {
 	f.sizes = map[string]gcMeasure{"gt": {633 * mib, 0}}
 	d.patrolConfig = archiveConfig(t.TempDir())
 	var deadline, atRead time.Time
-	d.maint.archiveRead = func(ctx context.Context, _ *Daemon, _ string, _ ArchiveWatermark) ([]archiveCommit, error) {
+	d.maint.archiveRead = func(ctx context.Context, _ *Daemon, _ string, _ map[string]struct{}) ([]archiveCommit, error) {
 		deadline, _ = ctx.Deadline()
 		atRead = time.Now()
 		return nil, nil
@@ -1550,6 +1662,117 @@ func TestEventsArchiveQueryReadsTheLookbackWindow(t *testing.T) {
 	if got, want := archiveEngineIDs(t, ctx, engine, query), []string{"before", "at-start", "inside-a", "inside-b"}; !slices.Equal(got, want) {
 		t.Errorf("unbounded rows = %v, want the whole table %v", got, want)
 	}
+}
+
+// TestCommitArchiveQuerySelectsByArchivedHashSet runs the production query
+// text (doltArchiveLogQuery) against an in-process MySQL engine, not a Go fake
+// that would only repeat its WHERE clause: an archived hash is excluded
+// whatever its date, a commit dated before the others is still selected, and
+// rows come back oldest first (gt-98eug).
+func TestCommitArchiveQuerySelectsByArchivedHashSet(t *testing.T) {
+	t.Parallel()
+	ctx, engine := newCommitArchiveEngine(t)
+	insert := func(hash, date string) {
+		archiveEngineExec(t, ctx, engine, fmt.Sprintf(
+			"INSERT INTO dolt_log (commit_hash, committer, date, message) VALUES ('%s', 'c', '%s', 'm')", hash, date))
+	}
+	insert("archived-new", "2026-10-02 09:00:00")
+	insert("backdated", "2026-10-01 09:00:00")
+	insert("later", "2026-10-03 09:00:00")
+	insert("archived-old", "2026-09-01 09:00:00")
+
+	archived := map[string]struct{}{"archived-new": {}, "archived-old": {}}
+	if got, want := archiveEngineCommitHashes(t, ctx, engine, archived), []string{"backdated", "later"}; !slices.Equal(got, want) {
+		t.Errorf("unarchived hashes = %v, want %v (archived excluded, backdated kept)", got, want)
+	}
+	if got, want := archiveEngineCommitHashes(t, ctx, engine, nil), []string{"archived-old", "backdated", "archived-new", "later"}; !slices.Equal(got, want) {
+		t.Errorf("whole log = %v, want %v (oldest first)", got, want)
+	}
+}
+
+// TestCommitArchiveQueryLeavesTheRestForTheNextRun: the export reads at most
+// maintenanceArchiveCommitLimit commits per run; the rest are read by the next
+// run from the widened archived set, so the pre-flatten check's remainder
+// shrinks to zero (gt-98eug).
+func TestCommitArchiveQueryLeavesTheRestForTheNextRun(t *testing.T) {
+	t.Parallel()
+	ctx, engine := newCommitArchiveEngine(t)
+	const total = maintenanceArchiveCommitLimit + 2
+	values := make([]string, 0, total)
+	for i := 1; i <= total; i++ {
+		values = append(values, fmt.Sprintf("('h%05d', 'c', '2026-10-01 09:00:00', 'm')", i))
+	}
+	archiveEngineExec(t, ctx, engine,
+		"INSERT INTO dolt_log (commit_hash, committer, date, message) VALUES "+strings.Join(values, ","))
+
+	first := archiveEngineCommitHashes(t, ctx, engine, nil)
+	if len(first) != maintenanceArchiveCommitLimit {
+		t.Fatalf("first read returned %d commits, want the %d bound", len(first), maintenanceArchiveCommitLimit)
+	}
+	if first[0] != "h00001" || first[len(first)-1] != fmt.Sprintf("h%05d", maintenanceArchiveCommitLimit) {
+		t.Errorf("first read = %s..%s, want the oldest %d", first[0], first[len(first)-1], maintenanceArchiveCommitLimit)
+	}
+
+	archived := make(map[string]struct{}, len(first))
+	for _, hash := range first {
+		archived[hash] = struct{}{}
+	}
+	want := []string{
+		fmt.Sprintf("h%05d", maintenanceArchiveCommitLimit+1),
+		fmt.Sprintf("h%05d", total),
+	}
+	if got := archiveEngineCommitHashes(t, ctx, engine, archived); !slices.Equal(got, want) {
+		t.Errorf("next read = %v, want the remaining %v", got, want)
+	}
+}
+
+// newCommitArchiveEngine builds an in-memory go-mysql-server engine with a gt
+// database and the dolt_log table the commit archive query reads.
+func newCommitArchiveEngine(t *testing.T) (*gmssql.Context, *sqle.Engine) {
+	t.Helper()
+	db := memory.NewDatabase("gt")
+	pro := memory.NewDBProvider(db)
+	session := memory.NewSession(gmssql.NewBaseSession(), pro)
+	ctx := gmssql.NewContext(context.Background(), gmssql.WithSession(session))
+	ctx.SetCurrentDatabase("gt")
+	db.AddTable("dolt_log", memory.NewTable(ctx, db, "dolt_log", gmssql.NewPrimaryKeySchema(gmssql.Schema{
+		{Name: "commit_hash", Type: types.Text, Nullable: false, Source: "dolt_log"},
+		{Name: "committer", Type: types.Text, Nullable: false, Source: "dolt_log"},
+		{Name: "date", Type: types.Datetime, Nullable: false, Source: "dolt_log"},
+		{Name: "message", Type: types.Text, Nullable: false, Source: "dolt_log"},
+	}), db.GetForeignKeyCollection()))
+	engine := sqle.NewDefault(pro)
+	t.Cleanup(func() {
+		if err := engine.Close(); err != nil {
+			t.Errorf("closing the test engine: %v", err)
+		}
+	})
+	return ctx, engine
+}
+
+// archiveEngineCommitHashes runs the production commit archive query with its
+// positional arguments inlined as quoted literals. The engine's parameterized
+// form needs the vitess parser types, which the module does not depend on
+// directly, so the test binds the query's own arguments rather than building a
+// second WHERE clause.
+func archiveEngineCommitHashes(t *testing.T, ctx *gmssql.Context, engine *sqle.Engine, archived map[string]struct{}) []string {
+	t.Helper()
+	query, args := doltArchiveLogQuery(archived)
+	parts := strings.Split(query, "?")
+	if len(parts) != len(args)+1 {
+		t.Fatalf("query has %d placeholders, want %d arguments", len(parts)-1, len(args))
+	}
+	var bound strings.Builder
+	bound.WriteString(parts[0])
+	for i, arg := range args {
+		hash, ok := arg.(string)
+		if !ok {
+			t.Fatalf("argument %d is %T, want a commit hash string", i, arg)
+		}
+		bound.WriteString("'" + strings.ReplaceAll(hash, "'", "''") + "'")
+		bound.WriteString(parts[i+1])
+	}
+	return archiveEngineIDs(t, ctx, engine, bound.String())
 }
 
 // newEventsArchiveEngine builds an in-memory go-mysql-server engine with a gt

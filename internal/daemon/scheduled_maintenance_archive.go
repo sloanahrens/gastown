@@ -69,34 +69,23 @@ const (
 // archiveCSVHeader is the commit file's column order (gt-7nxj4).
 var archiveCSVHeader = []string{"commit_hash", "committer", "date", "message"}
 
-// ArchiveWatermark is the commit cursor a database's history archive last
-// wrote out: the newest commit date written, and every commit hash written at
-// that date. The next read takes commits dated at or after Date and drops the
-// hashes in Hashes, so it neither repeats the boundary commits nor skips one
-// that shares their date (gt-7nxj4).
-//
-// The cursor is a date rather than dolt_log's commit_order because the archive
-// exists to survive a flatten, and a flatten replaces the history with a root
-// commit whose height restarts from zero: a height cursor would then read
-// every new commit as already archived. A flatten's root commit is dated after
-// the old history, so it and everything after it lands above the date cursor.
-// The accepted limit is a commit whose date is behind the cursor when it is
-// read: a clock skewed backwards, or a history imported with older dates. The
-// export does not read such a commit, but the pre-flatten check in `gt dolt
-// status` does not share this cursor: it compares every hash in dolt_log with
-// the hashes the archive files hold, so it counts the commit and refuses the
-// flatten.
+// ArchiveWatermark records how far a database's commit archive has been read:
+// the newest commit date written, and every commit hash written at that date.
+// It is the status line's "archived through" date, not the export's cursor. The
+// export selects every dolt_log hash that no archive file holds, the same rule
+// the pre-flatten check reads, so a commit dated before this date but missing
+// from the files is still exported and still counts as behind until it is
+// (gt-7nxj4, gt-98eug).
 type ArchiveWatermark struct {
 	Date   time.Time `json:"date"`
 	Hashes []string  `json:"hashes"`
 }
 
-// Validate reports whether the watermark can bound a read: a zero watermark
+// Validate reports whether the watermark is a usable record: a zero watermark
 // (nothing archived yet) is valid, and so is a date with the hashes written at
-// it. A date with no hash cannot say which commits at that date are archived,
-// so it is refused rather than read as the start of the log (which would
-// export the boundary commits twice); a hash without a date cannot be placed
-// in the log at all.
+// it. A date with no hash cannot say which commits at that date were written,
+// so it is refused rather than shown as a clean archive; a hash without a date
+// cannot be placed in the log at all.
 func (w ArchiveWatermark) Validate() error {
 	if w.Date.IsZero() {
 		if len(w.Hashes) > 0 {
@@ -115,11 +104,6 @@ func (w ArchiveWatermark) Validate() error {
 		}
 	}
 	return nil
-}
-
-// covers reports whether hash was already written out at the watermark's date.
-func (w ArchiveWatermark) covers(hash string) bool {
-	return slices.Contains(w.Hashes, hash)
 }
 
 // eventsArchiveLookback is how far before the newest events row the archive
@@ -379,7 +363,7 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 			err))
 		return maintenanceGCResult{outcome: gcOutcomeCompleted}, allUnarchived(databases)
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		d.logger.Printf("scheduled_maintenance: archive: cannot create %s: %v — no history archived this run", dir, err)
 		d.maintenance().escalate(d, maintenanceArchiveSource, fmt.Sprintf(
 			"scheduled_maintenance: history archive: cannot create %s: %v\n"+
@@ -459,8 +443,11 @@ func (d *Daemon) maintenanceArchiveDir() (string, error) {
 	return d.patrolConfig.Patrols.ScheduledMaintenance.ParseArchiveDir()
 }
 
-// maintenanceArchiveCommits exports one database's new commits and then
-// advances the commit watermark. The file and the watermark move as one unit:
+// maintenanceArchiveCommits exports one database's unarchived commits and then
+// advances the commit watermark. The commits selected are the dolt_log hashes
+// no archive file holds — the same set the pre-flatten check compares against —
+// so a commit dated before the watermark or out of order is exported rather
+// than counted as behind forever. The file and the watermark move as one unit:
 // a failure after the file is written rolls the appended members back, so the
 // next run re-exports them instead of appending them twice.
 func (d *Daemon) maintenanceArchiveCommits(ctx context.Context, dir, db string, wm ArchiveWatermark) error {
@@ -470,8 +457,14 @@ func (d *Daemon) maintenanceArchiveCommits(ctx context.Context, dir, db string, 
 	if err := wm.Validate(); err != nil {
 		return err
 	}
+	archived, err := LoadArchivedCommitHashes(dir, db)
+	if err != nil {
+		// Without the set the export cannot tell an archived commit from a new
+		// one; reading it as empty would write the whole log out again.
+		return fmt.Errorf("reading the archived commit hashes: %w", err)
+	}
 	s := d.maintenance()
-	commits, err := s.archiveRead(ctx, d, db, wm)
+	commits, err := s.archiveRead(ctx, d, db, archived)
 	if err != nil {
 		return fmt.Errorf("reading dolt_log: %w", err)
 	}
@@ -504,11 +497,13 @@ func (d *Daemon) maintenanceArchiveCommits(ctx context.Context, dir, db string, 
 	return nil
 }
 
-// archiveWatermarkAfter is the cursor the commits just written leave behind:
-// the newest date written and every hash written at it. The previous
-// watermark's hashes join the set when the newest date is still the previous
-// one, so the boundary commits are recorded together rather than one per run.
-// Hashes are sorted so the state file does not depend on read order.
+// archiveWatermarkAfter is the record the commits just written leave behind:
+// the newest date written and every hash written at it. A commit dated before
+// the previous newest — a backdated or imported one — still counts as written,
+// but it does not move the date back. The previous watermark's hashes join the
+// set when the newest date is still the previous one, so the commits sharing
+// that date are recorded together rather than one per run. Hashes are sorted so
+// the state file does not depend on read order.
 func archiveWatermarkAfter(prev ArchiveWatermark, commits []archiveCommit) (ArchiveWatermark, error) {
 	newest := prev.Date
 	for _, c := range commits {
@@ -517,13 +512,6 @@ func archiveWatermarkAfter(prev ArchiveWatermark, commits []archiveCommit) (Arch
 		}
 		if c.Date.IsZero() {
 			return ArchiveWatermark{}, fmt.Errorf("dolt_log read returned commit %s with no date", c.Hash)
-		}
-		if !prev.Date.IsZero() && c.Date.Before(prev.Date) {
-			// Writing it would not move the cursor past it, so the next run
-			// would append it again. The read is bounded at the watermark's
-			// date; a row below it means the read ignored its cursor.
-			return ArchiveWatermark{}, fmt.Errorf("dolt_log read returned commit %s dated %s, before the watermark %s",
-				c.Hash, c.Date.UTC().Format(time.RFC3339), prev.Date.UTC().Format(time.RFC3339))
 		}
 		if c.Date.After(newest) {
 			newest = c.Date
@@ -715,9 +703,11 @@ type archiveAppendTarget interface {
 	Close() error
 }
 
-// openArchiveForAppend opens path for a gzip member to be appended.
+// openArchiveForAppend opens path for a gzip member to be appended. The archive
+// is owner-only: it holds the town's commit messages, and nothing else needs to
+// read it.
 func openArchiveForAppend(path string) (archiveAppendTarget, error) {
-	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 }
 
 // appendArchiveMember encodes the rows into one complete gzip member and
@@ -941,43 +931,41 @@ func archivedCommitHashesFromFile(path string) (out []string, err error) {
 	return out, nil
 }
 
-// doltArchiveLogQuery renders the commit archive's SELECT: commits at or after
-// the watermark's date, minus the hashes already written at that date, oldest
-// first, at most maintenanceArchiveCommitLimit. Excluding the boundary hashes
-// in the query rather than after the read is what keeps the limit counting
-// fresh commits: a run that read a full limit of already-archived boundary
-// rows would find nothing new and never advance.
-func doltArchiveLogQuery(after ArchiveWatermark) (string, []any, error) {
-	if err := after.Validate(); err != nil {
-		return "", nil, err
-	}
+// doltArchiveLogQuery renders the commit archive's SELECT: every dolt_log hash
+// no archive file holds — the rule the pre-flatten check uses — oldest first,
+// at most maintenanceArchiveCommitLimit. Excluding the archived hashes in the
+// query rather than after the read is what keeps the limit counting fresh
+// commits and lets a backdated or out-of-order commit through: a date bound
+// would never read one, while the check counts it as behind forever.
+func doltArchiveLogQuery(archived map[string]struct{}) (string, []any) {
 	query := "SELECT commit_hash, committer, date, message FROM dolt_log"
 	var args []any
-	if !after.Date.IsZero() {
-		query += " WHERE date > ? OR (date = ? AND commit_hash NOT IN (" +
-			strings.TrimSuffix(strings.Repeat("?,", len(after.Hashes)), ",") + "))"
-		args = append(args, after.Date, after.Date)
-		for _, hash := range after.Hashes {
+	if len(archived) > 0 {
+		hashes := make([]string, 0, len(archived))
+		for hash := range archived {
+			hashes = append(hashes, hash)
+		}
+		sort.Strings(hashes)
+		query += " WHERE commit_hash NOT IN (" +
+			strings.TrimSuffix(strings.Repeat("?,", len(hashes)), ",") + ")"
+		for _, hash := range hashes {
 			args = append(args, hash)
 		}
 	}
 	query += fmt.Sprintf(" ORDER BY date ASC, commit_hash ASC LIMIT %d", maintenanceArchiveCommitLimit)
-	return query, args, nil
+	return query, args
 }
 
-// doltArchiveLog reads db's dolt_log rows after the watermark, oldest first by
-// (date, commit_hash). It is the commit archive's only SQL, a read-only SELECT
-// through the running server. The date bound is inclusive so every commit at
-// the cursor's date is read; the hashes the watermark already holds are then
-// dropped, leaving exactly the commits not yet archived.
-func (d *Daemon) doltArchiveLog(ctx context.Context, db string, after ArchiveWatermark) ([]archiveCommit, error) {
+// doltArchiveLog reads db's dolt_log rows no archive file holds, oldest first
+// by (date, commit_hash). It is the commit archive's only SQL, a read-only
+// SELECT through the running server. The hashes are excluded in the query, so
+// the bound counts unarchived commits and a commit whose date is behind every
+// other is still read.
+func (d *Daemon) doltArchiveLog(ctx context.Context, db string, archived map[string]struct{}) ([]archiveCommit, error) {
 	if err := validMaintenanceDBName(db); err != nil {
 		return nil, err
 	}
-	query, args, err := doltArchiveLogQuery(after)
-	if err != nil {
-		return nil, err
-	}
+	query, args := doltArchiveLogQuery(archived)
 
 	conn, err := d.maintenance().archiveOpenDB(d.maintenanceDSN(db, maintenanceArchiveReadTimeout) + "&parseTime=true")
 	if err != nil {
@@ -1010,25 +998,7 @@ func (d *Daemon) doltArchiveLog(ctx context.Context, db string, after ArchiveWat
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("dolt_log read: %w", err)
 	}
-	return newArchiveCommits(out, after), nil
-}
-
-// newArchiveCommits drops the commits a watermark already holds at its date.
-// The read's date bound is inclusive, so the boundary commits come back with
-// the new ones; without this filter every run would append them to the day's
-// file again.
-func newArchiveCommits(commits []archiveCommit, wm ArchiveWatermark) []archiveCommit {
-	if len(wm.Hashes) == 0 {
-		return commits
-	}
-	out := commits[:0]
-	for _, c := range commits {
-		if wm.covers(c.Hash) {
-			continue
-		}
-		out = append(out, c)
-	}
-	return out
+	return out, nil
 }
 
 // doltArchiveEvents reads db's events rows at or after the lookback window's

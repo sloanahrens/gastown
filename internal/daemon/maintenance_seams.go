@@ -36,9 +36,9 @@ type maintenanceSeams struct {
 	backupRoot func() (string, error)
 	// backupExec copies one database into the backup directory dest.
 	backupExec func(ctx context.Context, d *Daemon, db, dest string) error
-	// archiveRead reads a database's dolt_log rows after the history archive's
-	// watermark, oldest first (a read-only SELECT).
-	archiveRead func(ctx context.Context, d *Daemon, db string, after ArchiveWatermark) ([]archiveCommit, error)
+	// archiveRead reads a database's dolt_log rows whose hashes no archive file
+	// holds, oldest first (a read-only SELECT).
+	archiveRead func(ctx context.Context, d *Daemon, db string, archived map[string]struct{}) ([]archiveCommit, error)
 	// archiveEventsRead reads a database's events rows at or after the lookback
 	// window's start, oldest first (a read-only SELECT).
 	archiveEventsRead func(ctx context.Context, d *Daemon, db, since string) (archiveEvents, error)
@@ -104,8 +104,8 @@ func (d *Daemon) maintenance() maintenanceSeams {
 		}
 	}
 	if s.archiveRead == nil {
-		s.archiveRead = func(ctx context.Context, d *Daemon, db string, after ArchiveWatermark) ([]archiveCommit, error) {
-			return d.doltArchiveLog(ctx, db, after)
+		s.archiveRead = func(ctx context.Context, d *Daemon, db string, archived map[string]struct{}) ([]archiveCommit, error) {
+			return d.doltArchiveLog(ctx, db, archived)
 		}
 	}
 	if s.archiveEventsRead == nil {
