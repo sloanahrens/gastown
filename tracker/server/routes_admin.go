@@ -16,6 +16,8 @@ import (
 //
 // registerAdminRoutes registers the maintenance reads and the configuration
 // routes: GET /v1/stats?rig=, GET /v1/config/{key} and PUT /v1/config/{key};
+// the key-value routes GET /v1/kv, GET /v1/kv/{key} and PUT /v1/kv/{key},
+// which carry the same scope rule as the configuration pair;
 // the token routes POST /v1/tokens (issue) and POST /v1/tokens:revoke, so
 // a caller can hand a seat its token without holding the database password;
 // and POST /v1/wisps:purge, which deletes the expired wisps among the ids named.
@@ -23,6 +25,9 @@ func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/stats", s.stats)
 	mux.HandleFunc("GET /v1/config/{key}", s.configGet)
 	mux.HandleFunc("PUT /v1/config/{key}", requireAdmin(s.configSet))
+	mux.HandleFunc("GET /v1/kv", s.kvList)
+	mux.HandleFunc("GET /v1/kv/{key}", s.kvGet)
+	mux.HandleFunc("PUT /v1/kv/{key}", requireAdmin(s.kvSet))
 	mux.HandleFunc("POST /v1/tokens", requireAdmin(s.issueToken))
 	mux.HandleFunc("POST /v1/wisps:purge", requireAdmin(s.purgeWisps))
 	mux.HandleFunc("POST /v1/tokens:revoke", requireAdmin(s.revokeTokens))
@@ -127,6 +132,46 @@ func (s *Server) configSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// kvGet answers one key's value and whether it is set; a key that is unset is
+// a success answering set:false, not a 404, as for config.
+func (s *Server) kvGet(w http.ResponseWriter, r *http.Request) {
+	v, ok, err := s.cfg.Store.KVGet(r.Context(), r.PathValue("key"))
+	if err != nil {
+		writeError(w, err, s.cfg.Log)
+		return
+	}
+	writeJSON(w, http.StatusOK, api.KVValue{Value: v, Set: ok})
+}
+
+// kvSet stores a key's value, replacing an earlier one; an empty value is a
+// value and reads back as set.
+func (s *Server) kvSet(w http.ResponseWriter, r *http.Request) {
+	var req api.KVSetRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err, s.cfg.Log)
+		return
+	}
+	if err := s.cfg.Store.KVSet(r.Context(), r.PathValue("key"), req.Value); err != nil {
+		writeError(w, err, s.cfg.Log)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// kvList answers every key-value pair; an empty table is an empty object, not
+// null, as stats answers an empty by_status.
+func (s *Server) kvList(w http.ResponseWriter, r *http.Request) {
+	items, err := s.cfg.Store.KVList(r.Context())
+	if err != nil {
+		writeError(w, err, s.cfg.Log)
+		return
+	}
+	if items == nil {
+		items = map[string]string{}
+	}
+	writeJSON(w, http.StatusOK, api.KVListResponse{Items: items})
 }
 
 // reapPassTimeout bounds one reaper pass; a pass that outlives it is cut off

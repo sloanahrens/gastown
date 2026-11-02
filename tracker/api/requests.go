@@ -323,6 +323,24 @@ type ConfigSetRequest struct {
 	Value string `json:"value"`
 }
 
+// KVValue is a key-value pair's value; Set is false for a key that has none,
+// whose Value is then empty.
+type KVValue struct {
+	Value string `json:"value"`
+	Set   bool   `json:"set"`
+}
+
+// KVSetRequest sets a key-value pair. An empty Value is a value, kept and
+// reported as set.
+type KVSetRequest struct {
+	Value string `json:"value"`
+}
+
+// KVListResponse holds every key-value pair the store holds.
+type KVListResponse struct {
+	Items map[string]string `json:"items"`
+}
+
 // Limits on one graph.
 const (
 	MaxGraphNodes = 500
