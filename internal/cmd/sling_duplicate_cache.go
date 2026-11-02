@@ -172,18 +172,23 @@ func loadDuplicateDetailCacheAt(path, owner string, limit int, now func() time.T
 // readDuplicateDetailCache is loadDuplicateDetailCache for a reader that must
 // not write: the entries the file holds, held in memory with no file to save
 // to, so save does nothing. It takes nothing over, since it has no file to
-// keep.
+// keep. A file another owner wrote is not read: its entries are not this
+// tick's to serve, so it holds nothing and the error says whose it is.
 func readDuplicateDetailCache(path, owner string, limit int) *duplicateDetailCache {
 	c := newDuplicateDetailCache("", owner, limit)
-	entries, _, _, err := readDetailFile(path, c.rigs)
+	entries, fileOwner, _, err := readDetailFile(path, c.rigs)
+	if err == nil && fileOwner != "" && fileOwner != owner {
+		entries, err = c.rigs, fmt.Errorf("the file was written by %q, not by the daemon that planned this sling (%q)", fileOwner, owner)
+	}
 	c.rigs, c.loadErr = entries, err
 	return c
 }
 
 // readDetailFile is the file at path: the entries it holds, and the owner and
 // stamp it was written under. A missing file is empty and no error; one that
-// cannot be read or does not parse is empty with the error that stopped it, so
-// the tick can say the cache it could not read rather than look cold.
+// cannot be read, does not parse, or names no owner is empty with the error
+// that stopped it, so the tick can say the cache it could not read rather than
+// look cold. A file that names no owner is one no daemon wrote.
 func readDetailFile(path string, empty map[string]map[string]cachedDetail) (entries map[string]map[string]cachedDetail, owner string, writtenAt time.Time, err error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -198,6 +203,9 @@ func readDetailFile(path string, empty map[string]map[string]cachedDetail) (entr
 	}
 	if f.Rigs == nil {
 		return empty, "", time.Time{}, errors.New("the file holds no rigs")
+	}
+	if f.Owner == "" {
+		return empty, "", time.Time{}, errors.New("the file names no owner")
 	}
 	return f.Rigs, f.Owner, f.WrittenAt, nil
 }
@@ -214,7 +222,8 @@ func specDetailCacheFor(townRoot, owner string) *duplicateDetailCache {
 // specSlingDetailCacheFor is the cache a `gt spec sling` child reads through:
 // the file the tick that planned its sling saved, served as it stands and never
 // written back. The child owns nothing: the tick refills what it needs, and a
-// child writing the file could lose entries a newer tick had just saved.
+// child writing the file could lose entries a newer tick had just saved. A file
+// another daemon has since written is not served (readDuplicateDetailCache).
 //
 // owner "" is a sling no daemon planned, which reads no cache and shows every
 // pool bead.

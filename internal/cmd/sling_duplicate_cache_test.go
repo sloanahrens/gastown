@@ -15,6 +15,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/dispatch"
 )
 
 // cacheTick is what one tick of the daemon's pool fetch reports: the pool, the
@@ -219,6 +220,7 @@ func TestDuplicateDetailCacheReportsAFileItCannotRead(t *testing.T) {
 	for _, tc := range []struct{ name, body, want string }{
 		{"a file that does not parse", "{not json", "does not parse"},
 		{"a file with no rigs", `{"owner":"daemon-1"}`, "holds no rigs"},
+		{"a file that names no owner", `{"rigs":{"rig":{}}}`, "names no owner"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "cache.json")
@@ -235,6 +237,35 @@ func TestDuplicateDetailCacheReportsAFileItCannotRead(t *testing.T) {
 				t.Errorf("a cache built on a file it could not read showed %d beads, want all 8", shown)
 			}
 		})
+	}
+}
+
+// A child reads only the file the tick that planned its sling wrote. A file a
+// different daemon has since written is not served: the child names the writer
+// and shows the pool from bd, as a child with no file does (gt-aaa5a). The
+// mutation this pins is the child serving the file whatever its owner: the
+// eight beads are then all answered from the file and none is shown.
+//
+//testpolicy:allow parallel — installs the process-wide design/notes cache the sling's pool fetch reads, which another test must not see mid-run
+func TestSlingChildRefusesAFileAnotherDaemonWrote(t *testing.T) {
+	db := duplicateGuardFixture(t)
+	townRoot := t.TempDir()
+	path := dispatch.SpecDetailCachePath(townRoot)
+	tickOver(t, newCountingStore(listLikeBD{Client: db}), path, "daemon-2", duplicateDetailMissLimit)
+
+	details := slingChildEnv(t, townRoot, "daemon-1")
+	store := newCountingStore(listLikeBD{Client: db})
+	pool, _ := slingChildPool(t, store, details)
+
+	errs := details.Errors()
+	if len(errs) != 1 || !strings.Contains(errs[0], `written by "daemon-2"`) {
+		t.Fatalf("the child's cache errors = %q, want one naming daemon-2 as the writer", errs)
+	}
+	if shown := len(shownIDs(store)); shown != 8 {
+		t.Errorf("the child showed %d beads, want all 8 of the pool: a file another daemon wrote is not served", shown)
+	}
+	if len(pool) != 8 {
+		t.Errorf("pool = %d candidates, want the 8 the tick's pool has", len(pool))
 	}
 }
 
@@ -857,7 +888,12 @@ func TestDuplicateDetailColdCacheDrainsAcrossTicks(t *testing.T) {
 		got := tickOverCache(t, newCountingStore(listLikeBD{Client: db}), cache, "rig")
 		if tick == 2 {
 			second = got
-			t.Logf("second tick: %d fetched, %d cached, %d unread", second.fetched, second.cached, second.unread)
+			wantFetched, wantCached := duplicateDetailMissLimit, duplicateDetailMissLimit
+			wantUnread := poolSize - 2*duplicateDetailMissLimit
+			if got.fetched != wantFetched || got.cached != wantCached || got.unread != wantUnread {
+				t.Fatalf("second tick reported %d fetched, %d cached, %d unread; want %d, %d, %d",
+					got.fetched, got.cached, got.unread, wantFetched, wantCached, wantUnread)
+			}
 		}
 		want := min(tick*duplicateDetailMissLimit, poolSize)
 		entries, owner, writtenAt, err := readDetailFile(path, nil)
