@@ -45,6 +45,11 @@ type maintenanceSeams struct {
 	// archiveOpenDB opens the pool an archive read runs on. A test injects a
 	// fake driver so a read's failure paths are reachable without a server.
 	archiveOpenDB func(dsn string) (*sql.DB, error)
+	// archiveAppend appends one gzip CSV member to an archive file and returns
+	// only once the file is closed. A test injects one that observes the state
+	// file while the member is written, proving the watermark moves after the
+	// close and not before.
+	archiveAppend func(path string, columns []string, rows [][]string) error
 	// quiet is the quiet-window guard, re-checked before each database.
 	quiet func(d *Daemon) (bool, string)
 	// slotHolders lists the roles holding a container-gate slot.
@@ -110,6 +115,9 @@ func (d *Daemon) maintenance() maintenanceSeams {
 	}
 	if s.archiveOpenDB == nil {
 		s.archiveOpenDB = func(dsn string) (*sql.DB, error) { return sql.Open("mysql", dsn) }
+	}
+	if s.archiveAppend == nil {
+		s.archiveAppend = appendArchiveTable
 	}
 	if s.quiet == nil {
 		s.quiet = (*Daemon).maintenanceQuiet

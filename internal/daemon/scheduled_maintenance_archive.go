@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -65,21 +66,69 @@ const (
 // archiveCSVHeader is the commit file's column order (gt-7nxj4).
 var archiveCSVHeader = []string{"commit_hash", "committer", "date", "message"}
 
-// ArchiveWatermark is the commit a database's history archive last wrote out.
-// Order is dolt_log's commit_order, the topological height the cursor reads by:
-// a commit's date can be older than its parent's (a cherry-pick, clock skew),
-// while a commit's height is always its parents' plus one, so a date bound
-// would silently skip it (gt-7nxj4). Hash breaks ties between the commits that
-// share a height on parallel branches, and Date is kept for the status line.
+// ArchiveWatermark is the commit cursor a database's history archive last
+// wrote out: the newest commit date written, and every commit hash written at
+// that date. The next read takes commits dated at or after Date and drops the
+// hashes in Hashes, so it neither repeats the boundary commits nor skips one
+// that shares their date (gt-7nxj4).
+//
+// The cursor is a date rather than dolt_log's commit_order because the archive
+// exists to survive a flatten, and a flatten replaces the history with a root
+// commit whose height restarts from zero: a height cursor would then read
+// every new commit as already archived. A flatten's root commit is dated after
+// the old history, so it and everything after it lands above the date cursor.
+// The accepted limit is a commit whose date is behind the cursor when it is
+// read: a clock skewed backwards, or a history imported with older dates. The
+// archive and its status count share this cursor, so such a commit is invisible
+// to both.
 type ArchiveWatermark struct {
-	Hash  string    `json:"hash"`
-	Date  time.Time `json:"date"`
-	Order uint64    `json:"commit_order"`
+	Date   time.Time `json:"date"`
+	Hashes []string  `json:"hashes"`
+}
+
+// Validate reports whether the watermark can bound a read: a zero watermark
+// (nothing archived yet) is valid, and so is a date with the hashes written at
+// it. A date with no hash cannot say which commits at that date are archived,
+// so it is refused rather than read as the start of the log (which would
+// export the boundary commits twice); a hash without a date cannot be placed
+// in the log at all.
+func (w ArchiveWatermark) Validate() error {
+	if w.Date.IsZero() {
+		if len(w.Hashes) > 0 {
+			return fmt.Errorf("commit archive watermark lists %d hash(es) but no date; refusing to read past it", len(w.Hashes))
+		}
+		return nil
+	}
+	if len(w.Hashes) == 0 {
+		return fmt.Errorf("commit archive watermark for %s lists no hashes; refusing to read past it",
+			w.Date.UTC().Format(time.RFC3339))
+	}
+	for _, h := range w.Hashes {
+		if h == "" {
+			return fmt.Errorf("commit archive watermark for %s lists an empty hash; refusing to read past it",
+				w.Date.UTC().Format(time.RFC3339))
+		}
+	}
+	return nil
+}
+
+// covers reports whether hash was already written out at the watermark's date.
+func (w ArchiveWatermark) covers(hash string) bool {
+	return slices.Contains(w.Hashes, hash)
 }
 
 // EventsArchiveWatermark is the newest events row a database's history archive
 // last wrote out, in the order the archive writes rows. The zero value means
 // nothing has been archived yet.
+//
+// The cursor is (created_at, id), the order the work item specifies, and it
+// carries one accepted limit: a row whose created_at is at or before the
+// watermark's, but which becomes visible only after a run that passed it,
+// sorts behind the cursor and is never read, however many times the export
+// runs. A writer that supplies a backdated created_at, or a transaction that
+// commits after the archive has moved past the insert's timestamp, produces
+// one; the retention step (gt-2i850) must not treat this watermark as covering
+// such a row.
 type EventsArchiveWatermark struct {
 	CreatedAt string `json:"created_at"`
 	ID        string `json:"id"`
@@ -108,15 +157,14 @@ type ArchiveWatermarks struct {
 	Events  map[string]EventsArchiveWatermark
 }
 
-// archiveCommit is one dolt_log row the archive writes. Order is the row's
-// commit_order, the watermark's cursor; it is not written to the CSV, whose
-// columns are the four the operator reads.
+// archiveCommit is one dolt_log row the archive writes. Message is already
+// encoded for the CSV (encodeArchiveCell), so a NULL and an empty message stay
+// distinguishable.
 type archiveCommit struct {
 	Hash      string
 	Committer string
 	Date      time.Time
 	Message   string
-	Order     uint64
 }
 
 // archiveEvents is one batch of events rows: the table's columns in query
@@ -148,16 +196,17 @@ func encodeArchiveCell(v sql.NullString) string {
 
 // maintenanceArchive appends every database's new commits and new events rows
 // to the archive. One export failing keeps its watermark and is named in the
-// log; the database's other export, the other databases, and the gc still run.
-// A failed export does not skip that database's gc either: CALL
-// dolt_gc('--full') never rewrites history, and an archive outage must not
-// stall the weekly gc.
+// log; the database's other export and the other databases still export.
+//
+// It returns the databases whose archive failed, and the cycle skips their gc:
+// history is not collected for a database whose archive step did not finish.
+// The gc of every other database still runs.
 //
 // The step reads beside a live town, but it still asks the gc's quiet-window
 // guard: a busy window is a deferral (the next tick retries, as the gc's own
 // deferrals do), not a failure, and the backup and gc behind it wait with it.
 // A misconfigured directory is a failure and does not stop the backup or gc.
-func (d *Daemon) maintenanceArchive(databases []string) maintenanceGCResult {
+func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, map[string]bool) {
 	dir, err := d.maintenanceArchiveDir()
 	if err != nil {
 		// A set directory the daemon cannot use is a misconfiguration, not
@@ -168,16 +217,16 @@ func (d *Daemon) maintenanceArchive(databases []string) maintenanceGCResult {
 			"scheduled_maintenance: history archive: %v\nNo database's dolt_log or events was archived this run. "+
 				"Fix %s in the daemon config; until then a flatten discards history it has not written out.",
 			err, maintenanceArchiveDirKey))
-		return maintenanceGCResult{outcome: gcOutcomeCompleted}
+		return maintenanceGCResult{outcome: gcOutcomeCompleted}, nil
 	}
 	if dir == "" {
 		// Once per run, not once per database: the step is off, not broken.
 		d.logger.Printf("scheduled_maintenance: archive: %s unset — history archiving is off", maintenanceArchiveDirKey)
-		return maintenanceGCResult{outcome: gcOutcomeCompleted}
+		return maintenanceGCResult{outcome: gcOutcomeCompleted}, nil
 	}
 	if quiet, why := d.maintenance().quiet(d); !quiet {
 		d.logger.Printf("scheduled_maintenance: archive held: %s", why)
-		return maintenanceGCResult{outcome: gcOutcomeDeferred, reason: "archive: " + why}
+		return maintenanceGCResult{outcome: gcOutcomeDeferred, reason: "archive: " + why}, nil
 	}
 
 	st, err := loadMaintenanceGCState(d.config.TownRoot)
@@ -189,7 +238,7 @@ func (d *Daemon) maintenanceArchive(databases []string) maintenanceGCResult {
 			"scheduled_maintenance: history archive: cannot read the watermarks: %v\n"+
 				"No database's dolt_log or events was archived this run. A flatten discards history it has not written out.",
 			err))
-		return maintenanceGCResult{outcome: gcOutcomeCompleted}
+		return maintenanceGCResult{outcome: gcOutcomeCompleted}, nil
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		d.logger.Printf("scheduled_maintenance: archive: cannot create %s: %v — no history archived this run", dir, err)
@@ -197,7 +246,7 @@ func (d *Daemon) maintenanceArchive(databases []string) maintenanceGCResult {
 			"scheduled_maintenance: history archive: cannot create %s: %v\n"+
 				"No database's dolt_log or events was archived this run. A flatten discards history it has not written out.",
 			dir, err))
-		return maintenanceGCResult{outcome: gcOutcomeCompleted}
+		return maintenanceGCResult{outcome: gcOutcomeCompleted}, nil
 	}
 
 	parent := d.ctx
@@ -208,13 +257,16 @@ func (d *Daemon) maintenanceArchive(databases []string) maintenanceGCResult {
 	defer cancel()
 
 	var failed []string
+	unarchived := map[string]bool{}
 	for _, db := range databases {
 		if err := d.maintenanceArchiveCommits(ctx, dir, db, st.ArchiveWatermarks[db]); err != nil {
 			failed = append(failed, db+" dolt_log: "+err.Error())
+			unarchived[db] = true
 			d.logger.Printf("scheduled_maintenance: archive %s dolt_log: FAILED: %v — watermark kept", db, err)
 		}
 		if err := d.maintenanceArchiveEvents(ctx, dir, db, st.ArchiveEventsWatermarks[db]); err != nil {
 			failed = append(failed, db+" events: "+err.Error())
+			unarchived[db] = true
 			d.logger.Printf("scheduled_maintenance: archive %s events: FAILED: %v — watermark kept", db, err)
 		}
 	}
@@ -223,10 +275,29 @@ func (d *Daemon) maintenanceArchive(databases []string) maintenanceGCResult {
 		d.maintenance().escalate(d, maintenanceArchiveSource, fmt.Sprintf(
 			"scheduled_maintenance: history archive failed for %d export(s):\n%s\n"+
 				"Each keeps its previous watermark, so the next run exports those rows again. "+
-				"Archiving to %s.",
+				"The gc of those databases is skipped until their archive completes. Archiving to %s.",
 			len(failed), strings.Join(failed, "\n"), dir))
 	}
-	return maintenanceGCResult{outcome: gcOutcomeCompleted}
+	return maintenanceGCResult{outcome: gcOutcomeCompleted}, unarchived
+}
+
+// gcDatabasesAfterArchive is the databases a cycle may gc: every database whose
+// archive completed. A database whose export failed skips its gc, because
+// history is not collected where its archive step did not finish. Each skip is
+// logged by name.
+func (d *Daemon) gcDatabasesAfterArchive(databases []string, unarchived map[string]bool) []string {
+	if len(unarchived) == 0 {
+		return databases
+	}
+	out := make([]string, 0, len(databases))
+	for _, db := range databases {
+		if unarchived[db] {
+			d.logger.Printf("scheduled_maintenance: gc %s: skipped — its history archive failed this run", db)
+			continue
+		}
+		out = append(out, db)
+	}
+	return out
 }
 
 // maintenanceArchiveDir returns the configured archive directory, empty when
@@ -246,6 +317,9 @@ func (d *Daemon) maintenanceArchiveCommits(ctx context.Context, dir, db string, 
 	if err := validMaintenanceDBName(db); err != nil {
 		return err
 	}
+	if err := wm.Validate(); err != nil {
+		return err
+	}
 	s := d.maintenance()
 	commits, err := s.archiveRead(ctx, d, db, wm)
 	if err != nil {
@@ -254,11 +328,9 @@ func (d *Daemon) maintenanceArchiveCommits(ctx context.Context, dir, db string, 
 	if len(commits) == 0 {
 		return nil // nothing new: no file, and the watermark stays put
 	}
-	last := commits[len(commits)-1]
-	if last.Order == 0 {
-		// A zero order would make the next read refuse its own watermark; fail
-		// here, where the read is, rather than write rows no cursor can follow.
-		return fmt.Errorf("dolt_log read returned commit %s with commit_order 0", last.Hash)
+	next, err := archiveWatermarkAfter(wm, commits)
+	if err != nil {
+		return err
 	}
 
 	path := filepath.Join(dir, archiveFileName("dolt-log", db, s.now()))
@@ -270,16 +342,60 @@ func (d *Daemon) maintenanceArchiveCommits(ctx context.Context, dir, db string, 
 	for _, c := range commits {
 		rows = append(rows, []string{c.Hash, c.Committer, c.Date.UTC().Format(time.RFC3339), c.Message})
 	}
-	if err := exp.appendTable(archiveCSVHeader, rows); err != nil {
+	if err := exp.append(s, archiveCSVHeader, rows); err != nil {
 		return exp.fail(fmt.Errorf("writing %s: %w", path, err))
 	}
 
-	if err := recordArchiveWatermark(d.config.TownRoot, db, ArchiveWatermark{Hash: last.Hash, Date: last.Date, Order: last.Order}); err != nil {
+	if err := recordArchiveWatermark(d.config.TownRoot, db, next); err != nil {
 		return exp.fail(fmt.Errorf("the watermark for %s cannot be recorded: %w", path, err))
 	}
-	d.logger.Printf("scheduled_maintenance: archive %s: %d commit(s) to %s, through %s order %d",
-		db, len(commits), path, last.Date.UTC().Format(time.RFC3339), last.Order)
+	d.logger.Printf("scheduled_maintenance: archive %s: %d commit(s) to %s, through %s (%d hash(es) at that date)",
+		db, len(commits), path, next.Date.UTC().Format(time.RFC3339), len(next.Hashes))
 	return nil
+}
+
+// archiveWatermarkAfter is the cursor the commits just written leave behind:
+// the newest date written and every hash written at it. The previous
+// watermark's hashes join the set when the newest date is still the previous
+// one, so the boundary commits are recorded together rather than one per run.
+// Hashes are sorted so the state file does not depend on read order.
+func archiveWatermarkAfter(prev ArchiveWatermark, commits []archiveCommit) (ArchiveWatermark, error) {
+	newest := prev.Date
+	for _, c := range commits {
+		if c.Hash == "" {
+			return ArchiveWatermark{}, fmt.Errorf("dolt_log read returned a commit with no hash")
+		}
+		if c.Date.IsZero() {
+			return ArchiveWatermark{}, fmt.Errorf("dolt_log read returned commit %s with no date", c.Hash)
+		}
+		if !prev.Date.IsZero() && c.Date.Before(prev.Date) {
+			// Writing it would not move the cursor past it, so the next run
+			// would append it again. The read is bounded at the watermark's
+			// date; a row below it means the read ignored its cursor.
+			return ArchiveWatermark{}, fmt.Errorf("dolt_log read returned commit %s dated %s, before the watermark %s",
+				c.Hash, c.Date.UTC().Format(time.RFC3339), prev.Date.UTC().Format(time.RFC3339))
+		}
+		if c.Date.After(newest) {
+			newest = c.Date
+		}
+	}
+	set := make(map[string]bool, len(prev.Hashes)+len(commits))
+	if !newest.IsZero() && newest.Equal(prev.Date) {
+		for _, h := range prev.Hashes {
+			set[h] = true
+		}
+	}
+	for _, c := range commits {
+		if c.Date.Equal(newest) {
+			set[c.Hash] = true
+		}
+	}
+	hashes := make([]string, 0, len(set))
+	for h := range set {
+		hashes = append(hashes, h)
+	}
+	sort.Strings(hashes)
+	return ArchiveWatermark{Date: newest, Hashes: hashes}, nil
 }
 
 // maintenanceArchiveEvents exports one database's new events rows, one batch
@@ -324,7 +440,7 @@ func (d *Daemon) maintenanceArchiveEvents(parent context.Context, dir, db string
 		} else if !slices.Equal(columns, batch.Columns) {
 			return exp.fail(fmt.Errorf("events columns changed between batches: %v then %v", columns, batch.Columns))
 		}
-		if err := exp.appendTable(columns, batch.Rows); err != nil {
+		if err := exp.append(s, columns, batch.Rows); err != nil {
 			return exp.fail(fmt.Errorf("writing %s: %w", path, err))
 		}
 		exported += len(batch.Rows)
@@ -381,10 +497,11 @@ func beginArchiveExport(path string) (*archiveExport, error) {
 	return &archiveExport{path: path, existed: true, start: info.Size()}, nil
 }
 
-// appendTable appends one gzip CSV member and marks the export as having
-// written to the file.
-func (e *archiveExport) appendTable(columns []string, rows [][]string) error {
-	if err := appendArchiveTable(e.path, columns, rows); err != nil {
+// append appends one gzip CSV member through the injected append seam,
+// returning only after the file is closed, and marks the export as having
+// written to it.
+func (e *archiveExport) append(s maintenanceSeams, columns []string, rows [][]string) error {
+	if err := s.archiveAppend(e.path, columns, rows); err != nil {
 		return err
 	}
 	e.wrote = true
@@ -596,26 +713,24 @@ func LoadArchiveWatermarks(townRoot string) (ArchiveWatermarks, error) {
 }
 
 // doltArchiveLog reads db's dolt_log rows after the watermark, oldest first by
-// Dolt's commit_order. It is the commit archive's only SQL, a read-only SELECT
-// through the running server.
+// (date, commit_hash). It is the commit archive's only SQL, a read-only SELECT
+// through the running server. The date bound is inclusive so every commit at
+// the cursor's date is read; the hashes the watermark already holds are then
+// dropped, leaving exactly the commits not yet archived.
 func (d *Daemon) doltArchiveLog(ctx context.Context, db string, after ArchiveWatermark) ([]archiveCommit, error) {
 	if err := validMaintenanceDBName(db); err != nil {
 		return nil, err
 	}
-	query := "SELECT commit_hash, committer, date, message, commit_order FROM dolt_log"
-	var args []any
-	if after.Hash != "" {
-		// Newer is later by (commit_order, commit_hash), the order the archive
-		// writes in. commit_order is a topological height, not the date: a
-		// cherry-picked or clock-skewed commit still has a greater height than
-		// its parents, which a date bound would silently skip.
-		if after.Order == 0 {
-			return nil, fmt.Errorf("commit archive watermark %q has no commit_order; refusing to read past it", after.Hash)
-		}
-		query += " WHERE commit_order > ? OR (commit_order = ? AND commit_hash > ?)"
-		args = append(args, after.Order, after.Order, after.Hash)
+	if err := after.Validate(); err != nil {
+		return nil, err
 	}
-	query += " ORDER BY commit_order ASC, commit_hash ASC"
+	query := "SELECT commit_hash, committer, date, message FROM dolt_log"
+	var args []any
+	if !after.Date.IsZero() {
+		query += " WHERE date >= ?"
+		args = append(args, after.Date)
+	}
+	query += " ORDER BY date ASC, commit_hash ASC"
 
 	conn, err := d.maintenance().archiveOpenDB(d.maintenanceDSN(db, maintenanceArchiveReadTimeout) + "&parseTime=true")
 	if err != nil {
@@ -639,16 +754,34 @@ func (d *Daemon) doltArchiveLog(ctx context.Context, db string, after ArchiveWat
 			c       archiveCommit
 			message sql.NullString
 		)
-		if err := rows.Scan(&c.Hash, &c.Committer, &c.Date, &message, &c.Order); err != nil {
+		if err := rows.Scan(&c.Hash, &c.Committer, &c.Date, &message); err != nil {
 			return nil, fmt.Errorf("dolt_log read: %w", err)
 		}
-		c.Message = message.String
+		c.Message = encodeArchiveCell(message)
 		out = append(out, c)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("dolt_log read: %w", err)
 	}
-	return out, nil
+	return newArchiveCommits(out, after), nil
+}
+
+// newArchiveCommits drops the commits a watermark already holds at its date.
+// The read's date bound is inclusive, so the boundary commits come back with
+// the new ones; without this filter every run would append them to the day's
+// file again.
+func newArchiveCommits(commits []archiveCommit, wm ArchiveWatermark) []archiveCommit {
+	if len(wm.Hashes) == 0 {
+		return commits
+	}
+	out := commits[:0]
+	for _, c := range commits {
+		if wm.covers(c.Hash) {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 // doltArchiveEvents reads up to limit of db's events rows after the watermark,

@@ -1,13 +1,16 @@
 package daemon
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/csv"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -26,18 +29,51 @@ func archiveConfig(dir string) *DaemonPatrolConfig {
 	return cfg
 }
 
+// commitFake is the dolt_log read seam: the commits a database's fake log
+// holds and a per-database read error. It applies the archive's cursor the way
+// the production read does: commits dated at or after the watermark's date,
+// minus the hashes the watermark already holds, oldest first by (date, hash).
+type commitFake struct {
+	commits map[string][]archiveCommit
+	errs    map[string]error
+	reads   int
+}
+
+func (f *commitFake) read(_ context.Context, _ *Daemon, db string, after ArchiveWatermark) ([]archiveCommit, error) {
+	f.reads++
+	if err := f.errs[db]; err != nil {
+		return nil, err
+	}
+	var out []archiveCommit
+	for _, c := range f.commits[db] {
+		if !after.Date.IsZero() && c.Date.Before(after.Date) {
+			continue
+		}
+		if after.covers(c.Hash) {
+			continue
+		}
+		out = append(out, c)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Date.Equal(out[j].Date) {
+			return out[i].Date.Before(out[j].Date)
+		}
+		return out[i].Hash < out[j].Hash
+	})
+	return out, nil
+}
+
 // withArchiveFakes supplies both reads, recording "archive <db>" in the event
 // trail so a test can see where the step ran. The events read returns nothing
 // unless a test installs rows through withEventsFake.
-func withArchiveFakes(d *Daemon, f *gcFakes, commits map[string][]archiveCommit, errs map[string]error) {
-	d.maint.archiveRead = func(_ context.Context, _ *Daemon, db string, _ ArchiveWatermark) ([]archiveCommit, error) {
+func withArchiveFakes(d *Daemon, f *gcFakes, commits map[string][]archiveCommit, errs map[string]error) *commitFake {
+	fake := &commitFake{commits: commits, errs: errs}
+	d.maint.archiveRead = func(ctx context.Context, d *Daemon, db string, after ArchiveWatermark) ([]archiveCommit, error) {
 		f.events = append(f.events, "archive "+db)
-		if err := errs[db]; err != nil {
-			return nil, err
-		}
-		return commits[db], nil
+		return fake.read(ctx, d, db, after)
 	}
 	withEventsFake(d, nil, nil, nil)
+	return fake
 }
 
 // eventsFake is the events read seam: columns, the rows a database holds (in
@@ -153,8 +189,9 @@ func TestMaintenanceArchivesNewCommitsBeforeGc(t *testing.T) {
 	d.patrolConfig = archiveConfig(dir)
 
 	commits := []archiveCommit{
-		{Hash: "h1", Committer: "gastown/crew/overseer", Date: gcTestNow.Add(-2 * time.Hour), Message: "first", Order: 1},
-		{Hash: "h2", Committer: "gastown/polecats/cheedo", Date: gcTestNow.Add(-time.Hour), Message: "second, with a comma", Order: 2},
+		{Hash: "h1", Committer: "gastown/crew/overseer", Date: gcTestNow.Add(-2 * time.Hour), Message: "first"},
+		{Hash: "h2", Committer: "gastown/polecats/cheedo", Date: gcTestNow.Add(-time.Hour), Message: "second, with a comma"},
+		{Hash: "h3", Committer: "gastown/polecats/furiosa", Date: gcTestNow.Add(-time.Hour), Message: "third, same second"},
 	}
 	withArchiveFakes(d, f, map[string][]archiveCommit{"gt": commits}, nil)
 
@@ -164,6 +201,7 @@ func TestMaintenanceArchivesNewCommitsBeforeGc(t *testing.T) {
 		archiveCSVHeader,
 		{"h1", "gastown/crew/overseer", commits[0].Date.UTC().Format(time.RFC3339), "first"},
 		{"h2", "gastown/polecats/cheedo", commits[1].Date.UTC().Format(time.RFC3339), "second, with a comma"},
+		{"h3", "gastown/polecats/furiosa", commits[2].Date.UTC().Format(time.RFC3339), "third, same second"},
 	}
 	if got := readArchiveCSV(t, archiveFile(dir, "gt")); !csvRowsEqual(got, want) {
 		t.Errorf("archive rows = %v\nwant %v", got, want)
@@ -177,8 +215,10 @@ func TestMaintenanceArchivesNewCommitsBeforeGc(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loading state: %v", err)
 	}
-	if wm := st.ArchiveWatermarks["gt"]; wm.Hash != "h2" || !wm.Date.Equal(commits[1].Date) || wm.Order != commits[1].Order {
-		t.Errorf("gt watermark = %+v, want hash h2 at %v order %d", wm, commits[1].Date, commits[1].Order)
+	// The two commits sharing the newest date are both in the cursor's hash
+	// set, so the next read neither repeats nor skips either.
+	if wm := st.ArchiveWatermarks["gt"]; !wm.Date.Equal(commits[1].Date) || !slices.Equal(wm.Hashes, []string{"h2", "h3"}) {
+		t.Errorf("gt watermark = %+v, want the date %v with hashes [h2 h3]", wm, commits[1].Date)
 	}
 	if _, ok := st.ArchiveWatermarks["hq"]; ok {
 		t.Errorf("hq watermark recorded with no commits exported: %+v", st.ArchiveWatermarks["hq"])
@@ -200,6 +240,179 @@ func TestMaintenanceArchivesNewCommitsBeforeGc(t *testing.T) {
 	if len(f.gcCalls) != 2 {
 		t.Errorf("gc calls = %v, want both databases", f.gcCalls)
 	}
+}
+
+// TestMaintenanceCommitCursorSurvivesAFlatten: the commit cursor is a date
+// plus the hashes archived at it, not commit_order. A flatten replaces the
+// history with one root commit dated after the watermark; the run archives it
+// and every commit after it exactly once, and a second run over the same log
+// repeats neither the boundary commits nor anything below them (gt-7nxj4).
+func TestMaintenanceCommitCursorSurvivesAFlatten(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"gt": {633 * mib, 0}}
+	dir := t.TempDir()
+	d.patrolConfig = archiveConfig(dir)
+
+	// Before the flatten the archive had written through this date; those
+	// commits no longer exist, and a height cursor would now be far ahead of
+	// the rebuilt history's heights.
+	if err := recordArchiveWatermark(d.config.TownRoot, "gt",
+		ArchiveWatermark{Date: gcTestNow.Add(-72 * time.Hour), Hashes: []string{"old-boundary"}}); err != nil {
+		t.Fatalf("seeding the pre-flatten watermark: %v", err)
+	}
+
+	root := gcTestNow.Add(-2 * time.Hour)
+	log := []archiveCommit{
+		{Hash: "root", Committer: "c", Date: root, Message: "flattened history"},
+		{Hash: "n1", Committer: "c", Date: root.Add(time.Minute), Message: "after the flatten"},
+		{Hash: "n2", Committer: "c", Date: root.Add(2 * time.Minute), Message: "latest"},
+		{Hash: "n2b", Committer: "c", Date: root.Add(2 * time.Minute), Message: "same second as latest"},
+	}
+	fake := withArchiveFakes(d, f, map[string][]archiveCommit{"gt": log}, nil)
+
+	d.runScheduledMaintenance()
+
+	want := [][]string{
+		archiveCSVHeader,
+		{"root", "c", root.UTC().Format(time.RFC3339), "flattened history"},
+		{"n1", "c", root.Add(time.Minute).UTC().Format(time.RFC3339), "after the flatten"},
+		{"n2", "c", root.Add(2 * time.Minute).UTC().Format(time.RFC3339), "latest"},
+		{"n2b", "c", root.Add(2 * time.Minute).UTC().Format(time.RFC3339), "same second as latest"},
+	}
+	if got := readArchiveCSV(t, archiveFile(dir, "gt")); !csvRowsEqual(got, want) {
+		t.Errorf("archive after the flatten = %v\nwant %v", got, want)
+	}
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	if wm := st.ArchiveWatermarks["gt"]; !wm.Date.Equal(root.Add(2*time.Minute)) || !slices.Equal(wm.Hashes, []string{"n2", "n2b"}) {
+		t.Errorf("watermark = %+v, want the newest date with both hashes written at it", wm)
+	}
+
+	// A second run over the same log must not append anything: every commit
+	// at or above the cursor is already in its hash set.
+	before, err := os.Stat(archiveFile(dir, "gt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstReads := fake.reads
+	d.lastMaintenanceRun = time.Time{}
+	d.runScheduledMaintenance()
+	if fake.reads == firstReads {
+		t.Fatal("the second run never read dolt_log; the size check below would prove nothing")
+	}
+	after, err := os.Stat(archiveFile(dir, "gt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() != before.Size() {
+		t.Errorf("the second run appended to the day's file (%d -> %d bytes); the cursor repeated rows", before.Size(), after.Size())
+	}
+}
+
+// TestArchiveWatermarkValidate: a cursor is usable only when it says both the
+// date and the hashes written at it; text it cannot place in the log is
+// refused rather than read as the start of the log.
+func TestArchiveWatermarkValidate(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		wm      ArchiveWatermark
+		wantErr bool
+	}{
+		{"nothing archived yet", ArchiveWatermark{}, false},
+		{"date and hashes", ArchiveWatermark{Date: when, Hashes: []string{"a", "b"}}, false},
+		{"date with no hashes", ArchiveWatermark{Date: when}, true},
+		{"hashes with no date", ArchiveWatermark{Hashes: []string{"a"}}, true},
+		{"an empty hash", ArchiveWatermark{Date: when, Hashes: []string{""}}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := tt.wm.Validate()
+			if tt.wantErr && err == nil {
+				t.Errorf("Validate(%+v) = nil, want an error", tt.wm)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("Validate(%+v): %v", tt.wm, err)
+			}
+		})
+	}
+}
+
+// TestMaintenanceArchiveAdvancesTheWatermarkOnlyAfterTheFileIsClosed: while the
+// member is being appended — which includes the close — the state file holds no
+// watermark yet; one is recorded only after the append returns. An append that
+// fails leaves the watermark where it was.
+func TestMaintenanceArchiveAdvancesTheWatermarkOnlyAfterTheFileIsClosed(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	rows := []archiveCommit{{Hash: "h1", Committer: "c", Date: gcTestNow.Add(-time.Hour), Message: "first"}}
+
+	t.Run("the watermark is absent while the member is appended", func(t *testing.T) {
+		t.Parallel()
+		d, _ := gcTestDaemon(t)
+		dir := t.TempDir()
+		statePath := maintenanceGCStatePath(d.config.TownRoot)
+		d.maint.archiveRead = func(context.Context, *Daemon, string, ArchiveWatermark) ([]archiveCommit, error) {
+			return rows, nil
+		}
+		var stateAtAppend []byte
+		var appended bool
+		d.maint.archiveAppend = func(path string, columns []string, rowValues [][]string) error {
+			appended = true
+			var readErr error
+			stateAtAppend, readErr = os.ReadFile(statePath)
+			// A missing state file is the expected first run; any other error
+			// would make the assertion below vacuous.
+			if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
+				t.Errorf("reading the state file while appending: %v", readErr)
+			}
+			return appendArchiveTable(path, columns, rowValues)
+		}
+
+		if err := d.maintenanceArchiveCommits(ctx, dir, "gt", ArchiveWatermark{}); err != nil {
+			t.Fatalf("export: %v", err)
+		}
+		if !appended {
+			t.Fatal("the export never appended")
+		}
+		if bytes.Contains(stateAtAppend, []byte(`"h1"`)) {
+			t.Errorf("the watermark was recorded before the archive file was closed: %s", stateAtAppend)
+		}
+		st, err := loadMaintenanceGCState(d.config.TownRoot)
+		if err != nil {
+			t.Fatalf("loading state: %v", err)
+		}
+		if wm := st.ArchiveWatermarks["gt"]; !slices.Equal(wm.Hashes, []string{"h1"}) {
+			t.Errorf("watermark = %+v, want h1 recorded after the close", wm)
+		}
+	})
+
+	t.Run("a failed append records no watermark", func(t *testing.T) {
+		t.Parallel()
+		d, _ := gcTestDaemon(t)
+		d.maint.archiveRead = func(context.Context, *Daemon, string, ArchiveWatermark) ([]archiveCommit, error) {
+			return rows, nil
+		}
+		d.maint.archiveAppend = func(string, []string, [][]string) error {
+			return errors.New("close failed")
+		}
+		if err := d.maintenanceArchiveCommits(ctx, t.TempDir(), "gt", ArchiveWatermark{}); err == nil {
+			t.Fatal("an append that failed reported success")
+		}
+		st, err := loadMaintenanceGCState(d.config.TownRoot)
+		if err != nil {
+			t.Fatalf("loading state: %v", err)
+		}
+		if _, ok := st.ArchiveWatermarks["gt"]; ok {
+			t.Errorf("a failed append still recorded a watermark: %+v", st.ArchiveWatermarks["gt"])
+		}
+	})
 }
 
 // TestMaintenanceArchiveAppendsToTodaysFile: a second run on the same UTC day
@@ -244,8 +457,8 @@ func TestMaintenanceArchiveLeavesWatermarkPutWhenTheFileCannotBeWritten(t *testi
 		t.Fatal(err)
 	}
 	withArchiveFakes(d, f, map[string][]archiveCommit{
-		"gt": {{Hash: "h1", Committer: "c", Date: gcTestNow.Add(-time.Hour), Message: "first", Order: 1}},
-		"hq": {{Hash: "q1", Committer: "c", Date: gcTestNow.Add(-time.Hour), Message: "hq first", Order: 1}},
+		"gt": {{Hash: "h1", Committer: "c", Date: gcTestNow.Add(-time.Hour), Message: "first"}},
+		"hq": {{Hash: "q1", Committer: "c", Date: gcTestNow.Add(-time.Hour), Message: "hq first"}},
 	}, nil)
 
 	d.runScheduledMaintenance()
@@ -257,7 +470,7 @@ func TestMaintenanceArchiveLeavesWatermarkPutWhenTheFileCannotBeWritten(t *testi
 	if _, ok := st.ArchiveWatermarks["gt"]; ok {
 		t.Errorf("gt watermark advanced although its file could not be written: %+v", st.ArchiveWatermarks["gt"])
 	}
-	if wm := st.ArchiveWatermarks["hq"]; wm.Hash != "q1" {
+	if wm := st.ArchiveWatermarks["hq"]; !slices.Equal(wm.Hashes, []string{"q1"}) {
 		t.Errorf("hq watermark = %+v, want q1 (one database's write failure must not stop the others)", wm)
 	}
 	if !strings.Contains(logs.String(), "archive gt dolt_log: FAILED") {
@@ -267,7 +480,8 @@ func TestMaintenanceArchiveLeavesWatermarkPutWhenTheFileCannotBeWritten(t *testi
 
 // TestMaintenanceArchiveFailureKeepsWatermarkAndOtherDatabasesRun: a database
 // whose dolt_log read fails keeps its watermark, is named in the log and the
-// run's one attention item, and the other databases are archived and gc'd.
+// run's one attention item, its gc is skipped, and the other databases are
+// archived and gc'd.
 func TestMaintenanceArchiveFailureKeepsWatermarkAndOtherDatabasesRun(t *testing.T) {
 	t.Parallel()
 	d, logs := gcTestDaemon(t)
@@ -276,12 +490,12 @@ func TestMaintenanceArchiveFailureKeepsWatermarkAndOtherDatabasesRun(t *testing.
 	dir := t.TempDir()
 	d.patrolConfig = archiveConfig(dir)
 
-	old := ArchiveWatermark{Hash: "old-gt", Date: gcTestNow.Add(-48 * time.Hour), Order: 7}
+	old := ArchiveWatermark{Date: gcTestNow.Add(-48 * time.Hour), Hashes: []string{"old-gt"}}
 	if err := recordArchiveWatermark(d.config.TownRoot, "gt", old); err != nil {
 		t.Fatalf("seeding gt's watermark: %v", err)
 	}
 	withArchiveFakes(d, f,
-		map[string][]archiveCommit{"hq": {{Hash: "q1", Committer: "c", Date: gcTestNow.Add(-time.Hour), Message: "hq first", Order: 1}}},
+		map[string][]archiveCommit{"hq": {{Hash: "q1", Committer: "c", Date: gcTestNow.Add(-time.Hour), Message: "hq first"}}},
 		map[string]error{"gt": errors.New("connection refused")})
 
 	d.runScheduledMaintenance()
@@ -290,10 +504,10 @@ func TestMaintenanceArchiveFailureKeepsWatermarkAndOtherDatabasesRun(t *testing.
 	if err != nil {
 		t.Fatalf("loading state: %v", err)
 	}
-	if wm := st.ArchiveWatermarks["gt"]; wm.Hash != old.Hash || !wm.Date.Equal(old.Date) {
+	if wm := st.ArchiveWatermarks["gt"]; !wm.Date.Equal(old.Date) || !slices.Equal(wm.Hashes, old.Hashes) {
 		t.Errorf("gt watermark = %+v, want its old one kept %+v", wm, old)
 	}
-	if wm := st.ArchiveWatermarks["hq"]; wm.Hash != "q1" {
+	if wm := st.ArchiveWatermarks["hq"]; !slices.Equal(wm.Hashes, []string{"q1"}) {
 		t.Errorf("hq watermark = %+v, want q1", wm)
 	}
 	if rows := readArchiveCSV(t, archiveFile(dir, "hq")); len(rows) != 2 {
@@ -308,8 +522,14 @@ func TestMaintenanceArchiveFailureKeepsWatermarkAndOtherDatabasesRun(t *testing.
 	if !strings.Contains(f.escalations[0], "gt dolt_log: reading dolt_log: connection refused") {
 		t.Errorf("attention item = %q, want it to name gt's dolt_log export", f.escalations[0])
 	}
-	if strings.Join(f.gcCalls, ",") != "gt,hq" {
-		t.Errorf("gc calls = %v, want both databases (a failed archive does not skip the gc)", f.gcCalls)
+	// History is not collected for a database whose archive step did not
+	// finish; the other database's gc still runs, and the skip is logged by
+	// name.
+	if strings.Join(f.gcCalls, ",") != "hq" {
+		t.Errorf("gc calls = %v, want hq only (gt's archive failed)", f.gcCalls)
+	}
+	if !strings.Contains(logs.String(), "gc gt: skipped") {
+		t.Errorf("log does not name gt's skipped gc:\n%s", logs.String())
 	}
 }
 
@@ -442,7 +662,7 @@ func TestMaintenanceArchiveRollsBackWhenTheWatermarkCannotBeRecorded(t *testing.
 		if err := os.Mkdir(statePath, 0o755); err != nil {
 			t.Errorf("making the state path unwritable: %v", err)
 		}
-		return []archiveCommit{{Hash: "h1", Committer: "c", Date: gcTestNow.Add(-time.Hour), Message: "first", Order: 1}}, nil
+		return []archiveCommit{{Hash: "h1", Committer: "c", Date: gcTestNow.Add(-time.Hour), Message: "first"}}, nil
 	}
 
 	d.runScheduledMaintenance()
@@ -464,7 +684,7 @@ func TestMaintenanceArchiveRollsBackWhenTheWatermarkCannotBeRecorded(t *testing.
 func TestLoadArchiveWatermarks(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	wm := ArchiveWatermark{Hash: "abc123", Date: gcTestNow, Order: 42}
+	wm := ArchiveWatermark{Date: gcTestNow, Hashes: []string{"abc123", "def456"}}
 	if err := recordArchiveWatermark(town, "gt", wm); err != nil {
 		t.Fatalf("recording commit watermark: %v", err)
 	}
@@ -476,7 +696,7 @@ func TestLoadArchiveWatermarks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loading: %v", err)
 	}
-	if !got.Commits["gt"].Date.Equal(wm.Date) || got.Commits["gt"].Hash != wm.Hash || got.Commits["gt"].Order != wm.Order {
+	if !got.Commits["gt"].Date.Equal(wm.Date) || !slices.Equal(got.Commits["gt"].Hashes, wm.Hashes) {
 		t.Errorf("commit watermarks = %+v, want gt=%+v", got.Commits, wm)
 	}
 	if got.Events["gt"] != events {
@@ -578,7 +798,7 @@ func TestMaintenanceArchivesNewEventsRows(t *testing.T) {
 			t.Fatalf("seeding the events watermark: %v", err)
 		}
 		withArchiveFakes(d, f,
-			map[string][]archiveCommit{"gt": {{Hash: "h1", Committer: "c", Date: gcTestNow.Add(-time.Hour), Message: "first", Order: 1}}},
+			map[string][]archiveCommit{"gt": {{Hash: "h1", Committer: "c", Date: gcTestNow.Add(-time.Hour), Message: "first"}}},
 			nil)
 		withEventsFake(d, columns, nil, map[string]error{"gt": errors.New("connection refused")})
 
@@ -591,7 +811,7 @@ func TestMaintenanceArchivesNewEventsRows(t *testing.T) {
 		if got := st.ArchiveEventsWatermarks["gt"]; got != old {
 			t.Errorf("events watermark = %+v, want its old one kept %+v", got, old)
 		}
-		if wm := st.ArchiveWatermarks["gt"]; wm.Hash != "h1" {
+		if wm := st.ArchiveWatermarks["gt"]; !slices.Equal(wm.Hashes, []string{"h1"}) {
 			t.Errorf("commit watermark = %+v, want h1 (the commit export still runs)", wm)
 		}
 		if rows := readArchiveCSV(t, archiveFile(dir, "gt")); len(rows) != 2 {

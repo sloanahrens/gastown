@@ -28,6 +28,7 @@ type archiveCountServer struct {
 	queryErr error
 	null     bool
 	query    string
+	args     []driver.NamedValue
 }
 
 // archiveCountDriverID keeps each registration's driver name its own, so the
@@ -59,8 +60,9 @@ func (archiveCountConn) Begin() (driver.Tx, error) {
 	return nil, errors.New("transactions are not used by the archive count")
 }
 
-func (c archiveCountConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+func (c archiveCountConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	c.server.query = query
+	c.server.args = args
 	if c.server.queryErr != nil {
 		return nil, c.server.queryErr
 	}
@@ -86,7 +88,8 @@ func (r *archiveCountRows) Next(dest []driver.Value) error {
 }
 
 // TestArchiveNotesReportsUnreadableWatermarks: an unreadable state file is an
-// error the status prints, not a set of databases that read as never archived.
+// error the status prints, and every listed database still carries its state
+// as a note rather than going missing from the lines the flatten check reads.
 func TestArchiveNotesReportsUnreadableWatermarks(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
@@ -97,8 +100,21 @@ func TestArchiveNotesReportsUnreadableWatermarks(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := archiveNotes(townRoot, &doltserver.Config{}, []string{"gt"}); err == nil {
-		t.Error("an unreadable watermark file was read as no watermarks")
+	notes, err := archiveNotes(townRoot, &doltserver.Config{}, []string{"gt", "hq"})
+	if err == nil {
+		t.Fatal("an unreadable watermark file was read as no watermarks")
+	}
+	for _, db := range []string{"gt", "hq"} {
+		line := databaseStatusLine(db, "", notes[db])
+		if !strings.Contains(line, "archive state unreadable") {
+			t.Errorf("%s line = %q, want it to say the archive state cannot be read", db, line)
+		}
+		if strings.Contains(line, "0 commits behind") {
+			t.Errorf("%s line = %q, want no reading that could pass the pre-flatten check", db, line)
+		}
+	}
+	if header := archiveUnreadableLine(err); !strings.Contains(header, "Archive watermarks unreadable") || !strings.Contains(header, err.Error()) {
+		t.Errorf("header = %q, want the unreadable watermarks named", header)
 	}
 }
 
@@ -170,18 +186,40 @@ func TestDoltArchiveReaderFailures(t *testing.T) {
 		}
 	})
 
-	t.Run("a commit count refuses a watermark without a commit_order", func(t *testing.T) {
+	t.Run("a commit count refuses a watermark without hashes", func(t *testing.T) {
 		t.Parallel()
 		reader := doltArchiveReader{
 			config: config,
 			openDB: func(string) (*sql.DB, error) {
-				t.Error("a connection was opened for a watermark without a commit_order")
+				t.Error("a connection was opened for a watermark with no hashes")
 				return nil, errors.New("not reached")
 			},
 		}
-		wm := daemon.ArchiveWatermark{Hash: "h", Date: time.Now()}
-		if _, err := reader.commitsBehind(ctx, "gt", wm); err == nil || !strings.Contains(err.Error(), "no commit_order") {
-			t.Errorf("count with an orderless watermark = %v, want it refused", err)
+		wm := daemon.ArchiveWatermark{Date: time.Now()}
+		if _, err := reader.commitsBehind(ctx, "gt", wm); err == nil || !strings.Contains(err.Error(), "lists no hashes") {
+			t.Errorf("count with a hashless watermark = %v, want it refused", err)
+		}
+	})
+
+	t.Run("a commit count binds the boundary date and the hashes at it", func(t *testing.T) {
+		t.Parallel()
+		server := &archiveCountServer{}
+		reader := doltArchiveReader{config: config, openDB: archiveCountOpener(t, server)}
+		when := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
+		wm := daemon.ArchiveWatermark{Date: when, Hashes: []string{"a", "b"}}
+		if _, err := reader.commitsBehind(ctx, "gt", wm); err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		// The count asks for rows from the cursor's date, then removes the
+		// hashes already archived at it: the same cursor the archive reads by.
+		if len(server.args) != 3 {
+			t.Fatalf("count args = %v, want the date and both hashes", server.args)
+		}
+		if got, ok := server.args[0].Value.(time.Time); !ok || !got.Equal(when) {
+			t.Errorf("first bound = %v, want the watermark's date %v", server.args[0].Value, when)
+		}
+		if server.args[1].Value != "a" || server.args[2].Value != "b" {
+			t.Errorf("hash bounds = %v, want a then b", server.args[1:])
 		}
 	})
 

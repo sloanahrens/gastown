@@ -241,10 +241,10 @@ func TestDoltStatusShowsArchiveWatermark(t *testing.T) {
 	t.Parallel()
 	wms := daemon.ArchiveWatermarks{
 		Commits: map[string]daemon.ArchiveWatermark{
-			"gt": {Hash: "abc", Date: time.Date(2026, 11, 2, 9, 30, 0, 0, time.UTC)},
-			"hq": {Hash: "def", Date: time.Date(2026, 11, 1, 23, 0, 0, 0, time.UTC)},
-			"be": {Hash: "ghi", Date: time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)},
-			"om": {Hash: "jkl", Date: time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)},
+			"gt": {Date: time.Date(2026, 11, 2, 9, 30, 0, 0, time.UTC), Hashes: []string{"abc"}},
+			"hq": {Date: time.Date(2026, 11, 1, 23, 0, 0, 0, time.UTC), Hashes: []string{"def"}},
+			"be": {Date: time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC), Hashes: []string{"ghi"}},
+			"om": {Date: time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC), Hashes: []string{"jkl"}},
 		},
 		Events: map[string]daemon.EventsArchiveWatermark{
 			"gt": {CreatedAt: "2026-11-02 09:15:00", ID: "99"},

@@ -145,9 +145,10 @@ type maintenanceGCState struct {
 	// still has to be cleared (gt-g49yk).
 	StaleGCAlerts map[string]bool `json:"stale_gc_alerts,omitempty"`
 
-	// ArchiveWatermarks is, per database, the commit the history archive last
-	// wrote out (scheduled_maintenance_archive.go, gt-7nxj4). The next run
-	// reads commits after it.
+	// ArchiveWatermarks is, per database, the commit cursor the history archive
+	// last wrote out (scheduled_maintenance_archive.go, gt-7nxj4): the newest
+	// date written and the hashes written at it. The next run reads commits at
+	// or after that date and drops those hashes.
 	ArchiveWatermarks map[string]ArchiveWatermark `json:"archive_watermarks,omitempty"`
 
 	// ArchiveEventsWatermarks is, per database, the newest events row the
@@ -730,20 +731,21 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time) {
 	d.maintenance().dispatch(func() {
 		defer d.maintenanceGCRunning.Store(false)
 		// Archive first (scheduled_maintenance_archive.go): dolt_log is copied to
-		// the history archive before the gc it has to survive. Its per-database
-		// failures are contained inside the step; a busy window defers the whole
-		// cycle, as the gc's own quiet guard does, so the backup and gc wait for
-		// the retry rather than running ahead of an unarchived database.
-		if res := d.maintenanceArchive(databases); res.outcome == gcOutcomeDeferred {
-			d.logger.Printf("scheduled_maintenance: cycle %s", res.outcome)
-			d.recordGCDeferral(windowEnd, res.reason, res.pending)
+		// the history archive before the gc it has to survive. A busy window
+		// defers the whole cycle, as the gc's own quiet guard does, so the backup
+		// and gc wait for the retry rather than running ahead of an unarchived
+		// database.
+		archiveRes, unarchived := d.maintenanceArchive(databases)
+		if archiveRes.outcome == gcOutcomeDeferred {
+			d.logger.Printf("scheduled_maintenance: cycle %s", archiveRes.outcome)
+			d.recordGCDeferral(windowEnd, archiveRes.reason, archiveRes.pending)
 			return
 		}
 		// Backup next (maintenance_backup.go); the gc only runs once the
 		// night's backup is on disk.
 		res := d.maintenanceBackup(databases)
 		if res.outcome == gcOutcomeCompleted {
-			res = d.maintenanceGCCycle(databases, dataDir)
+			res = d.maintenanceGCCycle(d.gcDatabasesAfterArchive(databases, unarchived), dataDir)
 		}
 		d.logger.Printf("scheduled_maintenance: cycle %s", res.outcome)
 		if res.outcome == gcOutcomeDeferred {

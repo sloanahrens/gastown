@@ -609,7 +609,7 @@ func runDoltStatus(cmd *cobra.Command, args []string) error {
 				owners := doltserver.CollectDatabaseOwners(townRoot)
 				notes, noteErr := archiveNotes(townRoot, config, databases)
 				if noteErr != nil {
-					fmt.Printf("  %s Archive watermarks unreadable: %v\n", style.Bold.Render("!"), noteErr)
+					fmt.Print(archiveUnreadableLine(noteErr))
 				}
 				fmt.Printf("  %s\n", dbLabel)
 				for _, db := range databases {
@@ -800,11 +800,26 @@ func databaseStatusLine(db, owner, note string) string {
 func archiveNotes(townRoot string, config *doltserver.Config, databases []string) (map[string]string, error) {
 	wms, err := daemon.LoadArchiveWatermarks(townRoot)
 	if err != nil {
-		return nil, err
+		// No database can be read as caught up when the watermarks are
+		// unreadable, and a line that simply went missing would let the
+		// pre-flatten check pass over it: give every database the state itself
+		// as its note, and hand the error back for the header line.
+		notes := make(map[string]string, len(databases))
+		for _, db := range databases {
+			notes[db] = fmt.Sprintf("archive state unreadable: %v", err)
+		}
+		return notes, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	return archiveBehindNotes(ctx, doltArchiveReader{config: config}, wms, databases), nil
+}
+
+// archiveUnreadableLine is the header `gt dolt status` prints when the
+// watermarks cannot be read. Each database's own line then carries the same
+// error, so no database reads as if the archive covered it.
+func archiveUnreadableLine(err error) string {
+	return fmt.Sprintf("  %s Archive watermarks unreadable: %v\n", style.Bold.Render("!"), err)
 }
 
 // archiveBehindReader counts the rows newer than a database's archive
@@ -836,7 +851,7 @@ func commitArchiveNote(ctx context.Context, reader archiveBehindReader, db strin
 	if err != nil {
 		return fmt.Sprintf("archive behind count unavailable: %v", err)
 	}
-	if wm.Hash == "" {
+	if wm.Date.IsZero() {
 		return fmt.Sprintf("not archived yet, %s", commitsBehindText(behind))
 	}
 	return fmt.Sprintf("archived through %s, %s", wm.Date.UTC().Format("2006-01-02"), commitsBehindText(behind))
@@ -887,22 +902,33 @@ func (r doltArchiveReader) open(dsn string) (*sql.DB, error) {
 	return sql.Open("mysql", dsn)
 }
 
-// commitsBehind counts db's dolt_log rows newer than the watermark, by the
-// same (commit_order, commit_hash) order the archive writes them in. An empty
+// commitsBehind counts db's dolt_log rows the archive has not written out, by
+// the same cursor the archive reads by: commits dated at or after the
+// watermark's date, minus the hashes it already holds at that date. An empty
 // watermark counts the whole log: a database never archived is entirely
 // behind, and a zero that read as caught up would be a lie.
 func (r doltArchiveReader) commitsBehind(ctx context.Context, db string, wm daemon.ArchiveWatermark) (int64, error) {
 	if !dbNameRe.MatchString(db) {
 		return 0, fmt.Errorf("database name %q is not a plain identifier — refusing to query it", db)
 	}
+	if err := wm.Validate(); err != nil {
+		// A watermark the archive itself would refuse cannot bound a count
+		// either; counting it as caught up would be the lie this guards.
+		return 0, err
+	}
 	query := "SELECT COUNT(*) FROM dolt_log"
 	var args []any
-	if wm.Hash != "" {
-		if wm.Order == 0 {
-			return 0, fmt.Errorf("archive watermark %q has no commit_order — refusing to count it as caught up", wm.Hash)
+	if !wm.Date.IsZero() {
+		// date >= the cursor, not >: the boundary commits the watermark's
+		// hashes cover are removed by NOT IN, and one added at that date since
+		// the last run must still count as behind.
+		// Validate guarantees at least one hash here.
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(wm.Hashes)), ",")
+		query += " WHERE date >= ? AND commit_hash NOT IN (" + placeholders + ")"
+		args = append(args, wm.Date)
+		for _, h := range wm.Hashes {
+			args = append(args, h)
 		}
-		query += " WHERE commit_order > ? OR (commit_order = ? AND commit_hash > ?)"
-		args = append(args, wm.Order, wm.Order, wm.Hash)
 	}
 	dsn := buildDoltDSNFromConfig(r.config, db, dsnOpts{
 		Timeout:      "5s",

@@ -161,15 +161,53 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 		}
 	})
 
-	t.Run("a commit export refuses a commit with no commit_order", func(t *testing.T) {
+	t.Run("a commit export refuses a commit with no date", func(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
 		d.maint.archiveRead = func(context.Context, *Daemon, string, ArchiveWatermark) ([]archiveCommit, error) {
-			return []archiveCommit{{Hash: "h1", Committer: "c", Date: gcTestNow, Message: "first"}}, nil // Order 0
+			return []archiveCommit{{Hash: "h1", Committer: "c", Message: "first"}}, nil // zero Date
 		}
 		err := d.maintenanceArchiveCommits(context.Background(), t.TempDir(), "gt", ArchiveWatermark{})
-		if err == nil || !strings.Contains(err.Error(), "commit_order 0") {
-			t.Errorf("commit without a commit_order = %v, want it refused", err)
+		if err == nil || !strings.Contains(err.Error(), "with no date") {
+			t.Errorf("commit without a date = %v, want it refused", err)
+		}
+	})
+
+	t.Run("a commit export refuses a commit with no hash", func(t *testing.T) {
+		t.Parallel()
+		d, _ := gcTestDaemon(t)
+		d.maint.archiveRead = func(context.Context, *Daemon, string, ArchiveWatermark) ([]archiveCommit, error) {
+			return []archiveCommit{{Committer: "c", Date: gcTestNow, Message: "first"}}, nil
+		}
+		err := d.maintenanceArchiveCommits(context.Background(), t.TempDir(), "gt", ArchiveWatermark{})
+		if err == nil || !strings.Contains(err.Error(), "with no hash") {
+			t.Errorf("commit without a hash = %v, want it refused", err)
+		}
+	})
+
+	t.Run("a commit export refuses a commit dated before the watermark", func(t *testing.T) {
+		t.Parallel()
+		d, _ := gcTestDaemon(t)
+		d.maint.archiveRead = func(context.Context, *Daemon, string, ArchiveWatermark) ([]archiveCommit, error) {
+			return []archiveCommit{{Hash: "h1", Committer: "c", Date: gcTestNow.Add(-48 * time.Hour), Message: "stale"}}, nil
+		}
+		wm := ArchiveWatermark{Date: gcTestNow.Add(-24 * time.Hour), Hashes: []string{"old"}}
+		err := d.maintenanceArchiveCommits(context.Background(), t.TempDir(), "gt", wm)
+		if err == nil || !strings.Contains(err.Error(), "before the watermark") {
+			t.Errorf("commit dated below the cursor = %v, want it refused rather than written where the cursor cannot pass it", err)
+		}
+	})
+
+	t.Run("a commit export refuses an unusable watermark", func(t *testing.T) {
+		t.Parallel()
+		d, _ := gcTestDaemon(t)
+		d.maint.archiveRead = func(context.Context, *Daemon, string, ArchiveWatermark) ([]archiveCommit, error) {
+			t.Error("a read ran with a watermark the cursor cannot use")
+			return nil, nil
+		}
+		err := d.maintenanceArchiveCommits(context.Background(), t.TempDir(), "gt", ArchiveWatermark{Date: gcTestNow})
+		if err == nil || !strings.Contains(err.Error(), "lists no hashes") {
+			t.Errorf("export with a hashless watermark = %v, want it refused", err)
 		}
 	})
 
@@ -177,7 +215,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
 		d.maint.archiveRead = func(context.Context, *Daemon, string, ArchiveWatermark) ([]archiveCommit, error) {
-			return []archiveCommit{{Hash: "h1", Committer: "c", Date: gcTestNow, Message: "first", Order: 1}}, nil
+			return []archiveCommit{{Hash: "h1", Committer: "c", Date: gcTestNow, Message: "first"}}, nil
 		}
 		parent := filepath.Join(t.TempDir(), "not-a-dir")
 		if err := os.WriteFile(parent, []byte("x"), 0o644); err != nil {
@@ -460,8 +498,8 @@ func TestDoltArchiveLogFailures(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
 		d.maint.archiveOpenDB = archiveFakeOpener(t, &archiveFakeServer{
-			columns: []string{"commit_hash", "committer", "date", "message", "commit_order"},
-			rows:    [][]driver.Value{{"h1", "c", "not-a-time", nil, int64(1)}},
+			columns: []string{"commit_hash", "committer", "date", "message"},
+			rows:    [][]driver.Value{{"h1", "c", "not-a-time", nil}},
 		})
 		if _, err := d.doltArchiveLog(ctx, "gt", ArchiveWatermark{}); err == nil {
 			t.Error("a row whose date is not a time was read")
@@ -472,7 +510,7 @@ func TestDoltArchiveLogFailures(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
 		d.maint.archiveOpenDB = archiveFakeOpener(t, &archiveFakeServer{
-			columns: []string{"commit_hash", "committer", "date", "message", "commit_order"},
+			columns: []string{"commit_hash", "committer", "date", "message"},
 			nextErr: errors.New("row read failed"),
 		})
 		if _, err := d.doltArchiveLog(ctx, "gt", ArchiveWatermark{}); err == nil || !strings.Contains(err.Error(), "row read failed") {
@@ -485,65 +523,92 @@ func TestDoltArchiveLogFailures(t *testing.T) {
 		d, _ := gcTestDaemon(t)
 		when := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
 		d.maint.archiveOpenDB = archiveFakeOpener(t, &archiveFakeServer{
-			columns: []string{"commit_hash", "committer", "date", "message", "commit_order"},
-			rows:    [][]driver.Value{{"h1", "c", when, "first", int64(7)}},
+			columns: []string{"commit_hash", "committer", "date", "message"},
+			rows:    [][]driver.Value{{"h1", "c", when, "first"}},
 		})
 		got, err := d.doltArchiveLog(ctx, "gt", ArchiveWatermark{})
 		if err != nil {
 			t.Fatalf("read: %v", err)
 		}
-		if len(got) != 1 || got[0].Hash != "h1" || !got[0].Date.Equal(when) || got[0].Message != "first" || got[0].Order != 7 {
+		if len(got) != 1 || got[0].Hash != "h1" || !got[0].Date.Equal(when) || got[0].Message != "first" {
 			t.Errorf("commits = %+v, want the fake row", got)
 		}
 	})
 }
 
-// TestDoltArchiveLogUsesCommitOrder: the cursor is (commit_order, commit_hash),
-// not the commit date, so a commit whose date is older than the watermark's
-// but whose height is greater is still read (gt-7nxj4).
-func TestDoltArchiveLogUsesCommitOrder(t *testing.T) {
+// TestDoltArchiveLogReadsPastItsCursor: the read binds the watermark's date
+// and drops the commits the watermark already holds at that date, so the
+// boundary commits are neither repeated nor hidden behind the cursor.
+func TestDoltArchiveLogReadsPastItsCursor(t *testing.T) {
 	t.Parallel()
 	d, _ := gcTestDaemon(t)
+	boundary := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
+	later := boundary.Add(time.Hour)
 	server := &archiveFakeServer{
-		columns: []string{"commit_hash", "committer", "date", "message", "commit_order"},
+		columns: []string{"commit_hash", "committer", "date", "message"},
+		rows: [][]driver.Value{
+			{"archived", "c", boundary, "already out"},
+			{"same-second", "c", boundary, "new, same date"},
+			{"after", "c", later, "new, later date"},
+		},
 	}
 	d.maint.archiveOpenDB = archiveFakeOpener(t, server)
-	wm := ArchiveWatermark{
-		Hash:  "h9",
-		Date:  time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC),
-		Order: 42,
-	}
+	wm := ArchiveWatermark{Date: boundary, Hashes: []string{"archived"}}
 
-	if _, err := d.doltArchiveLog(context.Background(), "gt", wm); err != nil {
+	got, err := d.doltArchiveLog(context.Background(), "gt", wm)
+	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
 
-	if strings.Contains(server.query, "date >") {
-		t.Errorf("query still bounds by date: %s", server.query)
+	var hashes []string
+	for _, c := range got {
+		hashes = append(hashes, c.Hash)
 	}
-	for _, want := range []string{"commit_order > ?", "ORDER BY commit_order ASC, commit_hash ASC"} {
-		if !strings.Contains(server.query, want) {
-			t.Errorf("query %q does not hold %q", server.query, want)
-		}
+	if !slices.Equal(hashes, []string{"same-second", "after"}) {
+		t.Errorf("commits read = %v, want the boundary commit already archived dropped and both new commits kept", hashes)
 	}
-	if len(server.args) != 3 || server.args[0].Value != int64(wm.Order) || server.args[1].Value != int64(wm.Order) || server.args[2].Value != wm.Hash {
-		t.Errorf("query args = %v, want the watermark's order twice and its hash", server.args)
+	if len(server.args) != 1 || !server.args[0].Value.(time.Time).Equal(boundary) {
+		t.Errorf("read bound = %v, want the watermark's date %v", server.args, boundary)
 	}
 }
 
-// TestDoltArchiveLogRefusesAWatermarkWithoutOrder: a watermark from before
-// commit_order tracking cannot bound the read, so it is refused rather than
-// treated as the start of the log (which would export everything twice).
-func TestDoltArchiveLogRefusesAWatermarkWithoutOrder(t *testing.T) {
+// TestDoltArchiveLogRefusesAWatermarkWithoutHashes: a watermark with a date
+// but no hashes cannot say which boundary commits are archived, so it is
+// refused rather than treated as the start of the log (which would export them
+// twice).
+func TestDoltArchiveLogRefusesAWatermarkWithoutHashes(t *testing.T) {
 	t.Parallel()
 	d, _ := gcTestDaemon(t)
 	d.maint.archiveOpenDB = func(string) (*sql.DB, error) {
-		t.Error("a connection was opened for a watermark without a commit_order")
+		t.Error("a connection was opened for a watermark with no hashes")
 		return nil, errors.New("not reached")
 	}
-	wm := ArchiveWatermark{Hash: "h9", Date: time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)}
-	if _, err := d.doltArchiveLog(context.Background(), "gt", wm); err == nil || !strings.Contains(err.Error(), "no commit_order") {
-		t.Errorf("read with an orderless watermark = %v, want it refused", err)
+	wm := ArchiveWatermark{Date: time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)}
+	if _, err := d.doltArchiveLog(context.Background(), "gt", wm); err == nil || !strings.Contains(err.Error(), "lists no hashes") {
+		t.Errorf("read with a hashless watermark = %v, want it refused", err)
+	}
+}
+
+// TestDoltArchiveLogKeepsNullMessageDistinctFromEmpty: a commit whose message
+// is NULL and one whose message is empty string archive as different fields,
+// as the events archive does (gt-7nxj4).
+func TestDoltArchiveLogKeepsNullMessageDistinctFromEmpty(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	when := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
+	d.maint.archiveOpenDB = archiveFakeOpener(t, &archiveFakeServer{
+		columns: []string{"commit_hash", "committer", "date", "message"},
+		rows: [][]driver.Value{
+			{"h1", "c", when, nil},
+			{"h2", "c", when, ""},
+		},
+	})
+	got, err := d.doltArchiveLog(context.Background(), "gt", ArchiveWatermark{})
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(got) != 2 || got[0].Message != archiveNullCell || got[1].Message != "" {
+		t.Errorf("messages = %v, want NULL as %q and empty as a distinct empty field", got, archiveNullCell)
 	}
 }
 
