@@ -355,6 +355,90 @@ func TestClaimInFlightExactPathStillHolds(t *testing.T) {
 	}
 }
 
+// TestClaimHandoffBeadIsNotAPeer is gt-d5f5q's first acceptance row: a handoff
+// note carries an in-flight status for as long as its session runs and cites
+// whatever that session read, so it is no peer a candidate waits behind.
+func TestClaimHandoffBeadIsNotAPeer(t *testing.T) {
+	t.Parallel()
+	candidate := Claimant{
+		ID: "gt-new", Status: "open", Priority: 2,
+		CreatedAt: "2026-11-02T12:00:00Z",
+		Paths:     []string{"internal/bdshim/differential_helpers_test.go"},
+	}
+	for _, tc := range []struct {
+		name     string
+		labels   []string
+		assignee string
+	}{
+		{name: "the crew spelling", labels: []string{"handoff"}, assignee: "town/crew/dipper"},
+		{name: "the runtime spelling", labels: []string{"gt:handoff"}, assignee: "town/crew/dipper"},
+		{name: "a handoff note among other labels", labels: []string{"gt:task", "handoff"}, assignee: "town/crew/dipper"},
+		// The label alone marks the note: a polecat's own handoff bead is
+		// still not work on the file (gt-asvow).
+		{name: "a polecat's handoff note", labels: []string{"handoff"}, assignee: "gastown/polecats/dipper"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			peer := Claimant{
+				ID: "gt-dipper", Status: "in_progress", Assignee: tc.assignee,
+				Labels: tc.labels,
+				Paths:  []string{"internal/bdshim/differential_helpers_test.go"},
+			}
+			if why, held := TargetClaimHold(candidate, []Claimant{peer}, map[string]bool{}, claimTestNow); held {
+				t.Fatalf("held = true (%q), want a handoff note to hold nothing", why)
+			}
+		})
+	}
+}
+
+// TestClaimCrewAssigneeIsNotAPeer is gt-d5f5q's second acceptance row: a bead
+// held by a crew or bird identity is not work on the file, while the same bead
+// on a polecat seat still holds the candidate and the reason names the seat. An
+// assignee the rule cannot read is not a crew session, so it keeps holding
+// rather than release the file on a record that lost its seat (gt-d5f5q).
+func TestClaimCrewAssigneeIsNotAPeer(t *testing.T) {
+	t.Parallel()
+	const path = "internal/bdshim/differential_helpers_test.go"
+	candidate := Claimant{ID: "gt-new", Status: "open", Priority: 2, Paths: []string{path}}
+	for _, tc := range []struct {
+		name     string
+		assignee string
+		want     bool
+	}{
+		{name: "a crew session's bead does not hold", assignee: "town/crew/overseer"},
+		// A bird is a crew session of the town (gt-dipper's own bead is
+		// town/crew/dipper).
+		{name: "a bird's bead does not hold", assignee: "town/crew/dipper"},
+		{name: "a polecat seat's bead still holds", assignee: "gastown/polecats/bullet", want: true},
+		{name: "another rig's polecat seat still holds", assignee: "fractals/polecats/cantor", want: true},
+		// Only a crew address is excluded: an assignee the rule cannot place
+		// and one the record lost both keep holding, as they did before.
+		{name: "an assignee that is neither seat nor crew still holds", assignee: "gastown/witness", want: true},
+		{name: "an assignee the record lost still holds", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			peer := Claimant{ID: "gt-peer", Status: "in_progress", Assignee: tc.assignee, Paths: []string{path}}
+			why, held := TargetClaimHold(candidate, []Claimant{peer}, map[string]bool{}, claimTestNow)
+			if held != tc.want {
+				t.Fatalf("held = %v (%q), want %v", held, why, tc.want)
+			}
+			if !tc.want {
+				return
+			}
+			if !strings.Contains(why, peer.ID) {
+				t.Errorf("reason %q should name the peer %q", why, peer.ID)
+			}
+			if tc.assignee != "" && !strings.Contains(why, tc.assignee) {
+				t.Errorf("reason %q should name the seat %q", why, tc.assignee)
+			}
+			if tc.assignee == "" && strings.Contains(why, "()") {
+				t.Errorf("reason %q should name no seat when the record lost its assignee", why)
+			}
+		})
+	}
+}
+
 // TestTargetClaimHoldLowestIDAnswers keeps a bead several peers claim on one
 // reason, so its skip line does not change with the pool's order.
 func TestTargetClaimHoldLowestIDAnswers(t *testing.T) {

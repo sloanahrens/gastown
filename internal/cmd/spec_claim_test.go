@@ -278,6 +278,97 @@ func TestSpecDispatchDoesNotHoldALandedPeer(t *testing.T) {
 	}
 }
 
+// TestSpecDispatchDoesNotHoldForACrewOrHandoffPeer drives gt-d5f5q through the
+// production pool: a handoff note and a crew session's bead carry an in-flight
+// status while nothing is being built on the candidate's test file, so neither
+// is a peer it waits behind. The list row is what carries the label and the
+// assignee, so this also pins claimOf's wiring of them.
+func TestSpecDispatchDoesNotHoldForACrewOrHandoffPeer(t *testing.T) {
+	t.Parallel()
+	const claimFile = "internal/bdshim/differential_helpers_test.go"
+	body := "- `" + claimFile + "` only."
+	for _, tc := range []struct {
+		name     string
+		labels   []string
+		assignee string
+	}{
+		// The label is the only thing that tells this bead from work: its
+		// assignee is a polecat seat.
+		{name: "a handoff note on a seat", labels: []string{"handoff"}, assignee: "gastown/polecats/dipper"},
+		{name: "a crew session's bead", assignee: "town/crew/overseer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			peer := beads.Issue{
+				ID: "gt-peer", Title: "Session notes", Status: "in_progress",
+				Assignee: tc.assignee, Labels: tc.labels, Priority: 2,
+				CreatedAt: "2026-11-01T09:00:00Z", Description: body,
+			}
+			peers := peerClaims(t, peer)
+			candidate := cleanSpec("gt-new", 2, "2026-11-02T12:00:00Z")
+			candidate.Description = specConstraints(&body)
+
+			f := newFakeSpecTown(candidate)
+			f.claims = map[string][]specdispatch.Claimant{"gt-new": peers}
+			env := f.env()
+			env.ShapeGate = specdispatch.ShapeGateOff
+
+			r := runSpecDispatchCycle(env)
+
+			if len(f.slung) != 1 {
+				t.Fatalf("slung %v, want the candidate to dispatch past %s (%+v)", f.slung, tc.assignee, r.Skipped)
+			}
+			if len(r.Skipped) != 0 {
+				t.Fatalf("skipped = %+v, want none", r.Skipped)
+			}
+		})
+	}
+}
+
+// TestSpecDispatchHoldsForAPolecatInFlightPeer is the other half of gt-d5f5q's
+// exclusion, through the same production pool: a bead a polecat seat has in
+// flight still holds the candidate naming its test file, and the skip line
+// names the peer and its seat. The pool row carries the assignee, so this pins
+// that the exclusion released only a crew address.
+func TestSpecDispatchHoldsForAPolecatInFlightPeer(t *testing.T) {
+	t.Parallel()
+	const claimFile = "internal/bdshim/differential_helpers_test.go"
+	body := "- `" + claimFile + "` only."
+	peer := beads.Issue{
+		ID: "gt-peer", Title: "Rewrite the helper assertions", Status: "in_progress",
+		Assignee: "gastown/polecats/onyx", Priority: 2,
+		CreatedAt: "2026-11-01T09:00:00Z", Description: body,
+	}
+	peers := peerClaims(t, peer)
+	candidate := cleanSpec("gt-new", 2, "2026-11-02T12:00:00Z")
+	candidate.Description = specConstraints(&body)
+
+	f := newFakeSpecTown(candidate)
+	f.claims = map[string][]specdispatch.Claimant{"gt-new": peers}
+	env := f.env()
+	env.ShapeGate = specdispatch.ShapeGateOff
+
+	r := runSpecDispatchCycle(env)
+
+	if len(f.slung) != 0 {
+		t.Fatalf("slung %v, want the polecat seat's in-flight peer to hold the file", f.slung)
+	}
+	var held string
+	for _, e := range r.Skipped {
+		if e.Bead == "gt-new" {
+			held = e.Line
+		}
+	}
+	if held == "" {
+		t.Fatalf("gt-new was not held: skipped %+v", r.Skipped)
+	}
+	for _, want := range []string{"held:", "gt-peer", "gastown/polecats/onyx", "differential_helpers_test.go"} {
+		if !strings.Contains(held, want) {
+			t.Errorf("hold line %q should name %q", held, want)
+		}
+	}
+}
+
 // TestSpecTargetClaimsFailsOnAnUnreadableRig is the production half of the
 // no-fail-open rule: the claim set the tick reads is an error when the rig's
 // beads directory cannot be resolved or its pool will not load, which the tick
