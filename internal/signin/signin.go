@@ -218,11 +218,14 @@ func verify(ctx context.Context, cfg Config, token string) (claims, error) {
 		return claims{}, fmt.Errorf("%w: signature encoding", ErrMalformed)
 	}
 	if !validKid(h.Kid) {
-		return claims{}, fmt.Errorf("%w: key id is not acceptable", ErrKey)
+		return claims{}, fmt.Errorf("%w: key id of %d bytes is not 1 to %d bytes of letters, digits, underscore, hyphen or dot", ErrKey, len(h.Kid), maxKidLen)
 	}
 	key, err := cfg.Keys.Key(ctx, h.Kid)
-	if err != nil || key == nil {
-		return claims{}, fmt.Errorf("%w: kid %q: %v", ErrKey, h.Kid, err)
+	if err != nil {
+		return claims{}, fmt.Errorf("%w: kid %q: %w", ErrKey, h.Kid, err)
+	}
+	if key == nil {
+		return claims{}, fmt.Errorf("%w: kid %q: the fetcher returned no key and no error", ErrKey, h.Kid)
 	}
 	sum := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
 	if err := rsa.VerifyPKCS1v15(key, crypto.SHA256, sum[:], sig); err != nil {
