@@ -357,9 +357,11 @@ func renew(townRoot string, hostOf func(key string) (host string, ok bool), upda
 		return true, nil
 	})
 	// Each failure is named for the step it came from. The callback reports its
-	// own refusals instead of returning them, so the update's error is the
-	// update's: a failure after the callback asked for the write is the write,
-	// and one before it ran is the read the update starts with.
+	// own refusals instead of returning them, so an update error after the
+	// callback ran is the write's. One before it ran is the update's own and
+	// does not say whether the lock or the first read failed, so it is named
+	// for the update — except a file whose content does not decode, which is
+	// the read.
 	switch {
 	case readErr != nil:
 		return Record{}, fmt.Errorf("reading the Ring: %w", readErr)
@@ -370,7 +372,11 @@ func renew(townRoot string, hostOf func(key string) (host string, ok bool), upda
 	case err != nil && ran:
 		return Record{}, fmt.Errorf("writing the Ring: %w", err)
 	case err != nil:
-		return Record{}, fmt.Errorf("reading the Ring: %w", err)
+		var parseErr *config.ParseError
+		if errors.As(err, &parseErr) {
+			return Record{}, fmt.Errorf("reading the Ring: %w", err)
+		}
+		return Record{}, fmt.Errorf("updating the Ring: %w", err)
 	}
 	return rec, nil
 }

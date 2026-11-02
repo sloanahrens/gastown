@@ -215,9 +215,9 @@ func TestRingRenewReportsATownThatDoesNotParseAsARead(t *testing.T) {
 	}
 }
 
-// TestRingRenewReportsAWriteFailureAsAWrite: a failure after the update's
-// callback asks for the write, such as a refused rename, is reported as a
-// write, never as a read of the Ring.
+// TestRingRenewReportsAWriteFailureAsAWrite: an update that reports a change
+// and then fails, as the real one does when it cannot replace the file, is
+// reported as a write, never as a read of the Ring.
 func TestRingRenewReportsAWriteFailureAsAWrite(t *testing.T) {
 	t.Parallel()
 	root := townWith(t, wanedRecord(t))
@@ -244,20 +244,66 @@ func TestRingRenewReportsAWriteFailureAsAWrite(t *testing.T) {
 	}
 }
 
-// TestRingRenewDoesNotRelockInsideItsUpdate: Renew is one locked update. The
-// file lock is not reentrant, so a Write from inside the update would wait on
-// the lock Renew holds and never return. The suite's own timeout is the hang
-// detector, so a re-lock turns this test red by hanging the package rather
-// than passing it, and no wall-clock bound is needed here.
+// TestRingRenewDoesNotRelockInsideItsUpdate: Renew is one locked update, so
+// its callback must not call anything that takes the town file's lock again.
+// It runs under an update seam that takes no lock and leaves the real lock
+// path a directory, so a lock taken from the callback fails at once instead
+// of waiting on a lock the test never took: a regression returns an error
+// here rather than hanging the package.
 func TestRingRenewDoesNotRelockInsideItsUpdate(t *testing.T) {
 	t.Parallel()
 	root := townWith(t, wanedRecord(t))
-	if _, err := Renew(root, testKey, now, "slit"); err != nil {
-		t.Fatalf("Renew: %v", err)
+	path := mustTownPath(t, root)
+	if err := os.Remove(path + ".lock"); err != nil {
+		t.Fatal(err)
 	}
-	st := mustState(t, root)
-	if st.Kind != Valid || st.Record == nil {
-		t.Fatalf("state after Renew = %s, want valid", st)
+	if err := os.Mkdir(path+".lock", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var stored map[string]any
+	update := func(_ string, mutate func(tree map[string]any) (bool, error)) error {
+		tree := map[string]any{}
+		changed, err := mutate(tree)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			t.Fatal("the callback did not ask for the write")
+		}
+		stored = tree
+		return nil
+	}
+	if _, err := renew(root, config.SectionHost, update, testKey, now, "slit"); err != nil {
+		t.Fatalf("renew whose callback takes no lock = %v, want no error", err)
+	}
+	rec, ok := stored[SectionKey].(Record)
+	if !ok || !rec.ExpiresAt.Equal(now.Add(Lease)) || rec.ForgedBy != "slit" {
+		t.Fatalf("the callback stored %v, want a lease forged now for slit", stored[SectionKey])
+	}
+}
+
+// TestRingRenewReportsALockFailureAsAnUpdate: a town file whose lock cannot be
+// taken fails the update before its callback runs; that is the update's own
+// failure, not a read of the Ring.
+func TestRingRenewReportsALockFailureAsAnUpdate(t *testing.T) {
+	t.Parallel()
+	root := townWith(t, wanedRecord(t))
+	path := mustTownPath(t, root)
+	if err := os.Remove(path + ".lock"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path+".lock", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Renew(root, testKey, now, "slit")
+	if err == nil {
+		t.Fatal("Renew with a lock it cannot take = nil error, want a refusal")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("updating the Ring")) {
+		t.Fatalf("Renew with a lock it cannot take = %v, want an update label", err)
+	}
+	if bytes.Contains([]byte(err.Error()), []byte("reading the Ring")) {
+		t.Fatalf("Renew with a lock it cannot take = %v, want no read label", err)
 	}
 }
 
