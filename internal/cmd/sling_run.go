@@ -202,6 +202,9 @@ type slingDeps struct {
 
 	// The sling context a scheduled bead waits in, in the target rig's beads.
 	slingContexts func(rigBeadsDir string) slingContextStore
+	// touchSlingContextStamp announces a created sling context to the dispatch
+	// heartbeat, whose scan skip rests on it (gt-66e5d).
+	touchSlingContextStamp func(townRoot string, now time.Time) error
 
 	// Undoing a partial sling.
 	rollbackArtifacts func(spawn *SpawnedPolecatInfo, townRoot, beadID, hookWorkDir string)
@@ -312,6 +315,7 @@ func realSlingDeps() *slingDeps {
 		slingContexts: func(rigBeadsDir string) slingContextStore {
 			return beads.NewWithBeadsDir(filepath.Dir(rigBeadsDir), rigBeadsDir)
 		},
+		touchSlingContextStamp: beads.TouchSlingContextStamp,
 
 		rollbackArtifacts: rollbackSlingArtifactsFn,
 		restoreRawFields:  restoreRollbackRawWorkflowFieldsFromCurrent,

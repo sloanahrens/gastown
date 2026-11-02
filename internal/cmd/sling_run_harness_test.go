@@ -297,6 +297,10 @@ func newSlingHarness(t *testing.T) *slingHarness {
 		nudgePane: func(pane, msg string) error { h.record("nudge pane %s: %s", pane, msg); return nil },
 
 		slingContexts: func(string) slingContextStore { return fakeSlingContexts{h} },
+		touchSlingContextStamp: func(townRoot string, now time.Time) error {
+			h.record("touch sling context stamp %s", townRoot)
+			return nil
+		},
 
 		rollbackArtifacts: func(s *SpawnedPolecatInfo, _, id, _ string) {
 			name := ""

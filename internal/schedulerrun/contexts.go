@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
@@ -72,6 +74,35 @@ func warnf(w io.Writer, format string, args ...interface{}) {
 	fmt.Fprintf(w, format, args...)
 }
 
+// scanStateWarner rate-limits the unreadable-scan-state warning by town. The
+// daemon heartbeat reads the scan state once a minute in this process, so a
+// runtime directory that stays unreadable would otherwise repeat the same line
+// on every cycle; one line per scan ceiling keeps it visible without filling the
+// log. Process-local, like crossRigEscalations: a restarted daemon reports the
+// condition again, which is what a new process should do.
+type scanStateWarner struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+}
+
+// shouldWarn reports whether a warning for key speaks now, and records now when
+// it does. A clock that steps back warns rather than suppressing the line.
+func (s *scanStateWarner) shouldWarn(key string, now time.Time, window time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if last, ok := s.last[key]; ok && !now.Before(last) && now.Sub(last) < window {
+		return false
+	}
+	if s.last == nil {
+		s.last = make(map[string]time.Time)
+	}
+	s.last[key] = now
+	return true
+}
+
+// slingContextScanWarnings is the heartbeat's debounce state.
+var slingContextScanWarnings scanStateWarner
+
 func beadsForContextRecord(rec contextRecord) beads.Client {
 	return beads.NewWithBeadsDir(rec.workDir, rec.beadsDir)
 }
@@ -88,7 +119,10 @@ func ListScheduled(townRoot string) ([]ContextInfo, error) {
 // zero value is production. A scan that fails lists nothing: a partial answer
 // would read as "only these are scheduled".
 func listScheduledWith(townRoot string, store contextStore) ([]ContextInfo, error) {
-	contexts, err := store.readAll(townRoot)
+	// The operator's listing always reads every database: answering "nothing
+	// is scheduled" from the heartbeat's skip would be a wrong answer to a
+	// direct question (gt-66e5d).
+	contexts, err := store.readAllFresh(townRoot)
 	if err != nil {
 		return nil, fmt.Errorf("listing sling contexts: %w", err)
 	}
@@ -106,8 +140,12 @@ func listScheduledWith(townRoot string, store contextStore) ([]ContextInfo, erro
 // Deduplicates by context ID: different search dirs can resolve to the same
 // underlying beads DB (e.g., when a rig's top-level .beads is a redirect to
 // mayor/rig/.beads), and both paths would otherwise return the same contexts.
+//
+// It always reads every database: the heartbeat's skip (gt-66e5d) is for the
+// dispatch cycle, and an operator asking for the contexts gets an answer read
+// now.
 func ListAllSlingContexts(townRoot string) ([]*beads.Issue, error) {
-	records, err := listAllSlingContextRecords(townRoot)
+	records, err := scanAllSlingContextRecords(townRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -118,21 +156,90 @@ func ListAllSlingContexts(townRoot string) ([]*beads.Issue, error) {
 	return all, nil
 }
 
+// listAllSlingContextRecords is the dispatch heartbeat's and cycle's read of
+// the open sling contexts. It answers with none without opening a store while a
+// full scan found none, no context has been created since that scan started,
+// and the scan started less than beads.SlingContextScanMaxAge ago (gt-66e5d).
+//
+// The read is a literal here rather than a call to scanAllSlingContextRecords
+// so this function is the heartbeat's one read of the stores, with the skip in
+// front of it; the operator surfaces go through scanAllSlingContextRecords
+// instead. The bd call has to stay declared in this function: the census charges
+// a read to the nearest function outside internal/beads, and
+// censusCallerBudgets keys the heartbeat's row to this name (gt-gojo0), so
+// routing the read through a helper would re-key the row.
 func listAllSlingContextRecords(townRoot string) ([]contextRecord, error) {
+	scan := func(townRoot string) ([]contextRecord, error) {
+		recs, err := beads.ListOpenSlingContextRecords(townRoot)
+		if err != nil {
+			return nil, err
+		}
+		return contextRecordsFrom(recs), nil
+	}
+	return listAllSlingContextRecordsWith(townRoot, time.Now, scan, nil, nil)
+}
+
+// listAllSlingContextRecordsWith is listAllSlingContextRecords reading through
+// scan at now, recording the outcome through record (nil is
+// beads.RecordSlingContextScan). Warnings go to w, defaulting to stderr.
+func listAllSlingContextRecordsWith(townRoot string, now func() time.Time, scan contextScan, record contextScanRecorder, w io.Writer) ([]contextRecord, error) {
+	if record == nil {
+		record = beads.RecordSlingContextScan
+	}
+	started := now()
+	empty, skipErr := beads.SlingContextScanIsEmpty(townRoot, started)
+	if skipErr == nil && empty {
+		return nil, nil
+	}
+	// An unreadable stamp or marker falls through to the full scan: the skip
+	// may only rest on evidence that was read. The read is reported rather than
+	// swallowed, so a runtime directory the daemon cannot read is visible; one
+	// town hears it once per scan ceiling rather than on every heartbeat.
+	if skipErr != nil && slingContextScanWarnings.shouldWarn(townRoot, started, beads.SlingContextScanMaxAge) {
+		warnf(w, "%s Warning: reading the sling-context scan state failed; reading every database: %v\n", style.Dim.Render("⚠"), skipErr)
+	}
+	records, err := scan(townRoot)
+	if err != nil {
+		// A scan that failed says nothing about what is scheduled, so it leaves
+		// the marker as it was rather than recording an answer it did not get.
+		return nil, err
+	}
+	if err := record(townRoot, started, len(records) > 0); err != nil {
+		// The scan already answered; a marker it could not write only costs the
+		// next scan its skip, so it never fails this one.
+		warnf(w, "%s Warning: could not record the sling-context scan: %v\n", style.Dim.Render("⚠"), err)
+	}
+	return records, nil
+}
+
+// scanAllSlingContextRecords reads every open sling context from every
+// database, without the heartbeat's skip. The operator surfaces and the
+// `gt scheduler` commands use it: a listing must show what is scheduled even
+// while the heartbeat would answer from its marker (gt-66e5d).
+func scanAllSlingContextRecords(townRoot string) ([]contextRecord, error) {
 	recs, err := beads.ListOpenSlingContextRecords(townRoot)
 	if err != nil {
 		return nil, err
 	}
+	return contextRecordsFrom(recs), nil
+}
+
+// contextRecordsFrom converts the beads package's records to the scheduler's.
+func contextRecordsFrom(recs []beads.SlingContextRecord) []contextRecord {
 	records := make([]contextRecord, 0, len(recs))
 	for _, r := range recs {
 		records = append(records, contextRecord{issue: r.Issue, workDir: r.WorkDir, beadsDir: r.BeadsDir})
 	}
-	return records, nil
+	return records
 }
 
 // contextScan reads every open sling context the town has. nil is the
 // production scan, which issues one store read per search dir.
 type contextScan func(townRoot string) ([]contextRecord, error)
+
+// contextScanRecorder records a full scan's start and outcome. nil is
+// beads.RecordSlingContextScan.
+type contextScanRecorder func(townRoot string, startedAt time.Time, found bool) error
 
 // workBeadInfoFetch reads the status of the named work beads, keyed by ID.
 // nil is the production batch fetch.
@@ -158,6 +265,16 @@ func (s contextStore) readAll(townRoot string) ([]contextRecord, error) {
 		return s.scan(townRoot)
 	}
 	return listAllSlingContextRecords(townRoot)
+}
+
+// readAllFresh reads every database without the heartbeat's skip. The operator
+// listing uses it so the answer is read now rather than from a scan marker
+// (gt-66e5d).
+func (s contextStore) readAllFresh(townRoot string) ([]contextRecord, error) {
+	if s.scan != nil {
+		return s.scan(townRoot)
+	}
+	return scanAllSlingContextRecords(townRoot)
 }
 
 func (s contextStore) workBeadInfo(townRoot string, ids []string) map[string]beadStatusInfo {
