@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -60,31 +61,43 @@ func TestPaneColumns(t *testing.T) {
 	}
 }
 
-// The activity Feed is gone from the page: no section, no ids, no script that
-// draws it, and no feed-only styling (gt-069f5). The hub's frames for it are
-// still sent and still count as a sign the stream is alive.
+// The activity Feed is gone from the page: no feed or chips element and no fold
+// under the feed's key (gt-069f5). trendsec is the positive control: a lookup
+// that found nothing would pass the absence checks.
 func TestNoFeedPanel(t *testing.T) {
 	t.Parallel()
 
-	page := string(indexHTML)
-	if got := strings.Count(page, `data-fold="feed"`); got != 0 {
-		t.Errorf("the page has %d data-fold=\"feed\" sections, want 0", got)
+	dom := newPageDOM(t)
+	if got := pageExpr(t, dom, `document.getElementById("trendsec") !== null`); got != "true" {
+		t.Fatal("the stub's element lookup finds no #trendsec, so the absence checks below prove nothing")
 	}
-	for _, gone := range []string{`id="feed"`, `id="chips"`, `$("feed")`, `$("chips")`, "function pushEntry", "function renderChips", "function rowFor", "function applyFilter", `"gt-chips"`, "#feed{"} {
-		if strings.Contains(page, gone) {
-			t.Errorf("the page still holds %q", gone)
+	for _, id := range []string{"feed", "chips"} {
+		if got := pageExpr(t, dom, `document.getElementById(`+quoteJS(id)+`) === null`); got != "true" {
+			t.Errorf("the page still has #%s", id)
 		}
 	}
-	for _, sp := range pageSections(t) {
-		if sp.Key == "feed" {
+	for _, key := range dom.foldKeys(t) {
+		if key == "feed" {
 			t.Error("the page still folds a section under the key \"feed\"")
 		}
 	}
+}
 
-	// The backlog and entry frames are still liveness: they refresh the stream's
-	// last-seen time and draw nothing.
-	if !strings.Contains(page, `["backlog", "entry"]`) {
-		t.Fatal("the page no longer listens for the backlog and entry frames, so a stream that only carries them reads as silent")
+// The entry frame is still a sign the stream is alive: a stream that carries
+// only entry frames restarts the watchdog's clock and is never replaced. The
+// backlog frame is covered by TestANamedEventRestartsTheWatchdog (gt-069f5).
+func TestEntryFramesRestartTheWatchdog(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	advanceTimers(t, dom, 89000)
+	deliverStream(t, dom, "entry", "{}")
+
+	// Without the entry frame's reset the stream is replaced at 90 s from load,
+	// which falls inside this advance.
+	advanceTimers(t, dom, 2000)
+	if got := pageStreams(t, dom); got != 1 {
+		t.Fatalf("the page had %d streams after an entry frame 89 s in, want the replacement clock reset", got)
 	}
 }
 
@@ -98,6 +111,16 @@ func TestSavedFoldsNamingRemovedSectionsAreIgnored(t *testing.T) {
 	wantFold(t, dom.fold(t, "landings"), "landings", true)
 	wantFold(t, dom.fold(t, "birds"), "birds", false)
 	wantFold(t, dom.fold(t, "rigs"), "rigs", true)
+
+	// A save that names only the dropped sections reads every section the way a
+	// reader with no saved choice does.
+	onlyDropped := newPageDOMStoring(t, map[string]string{"gt-fold": `{"feed":false,"overseer":false}`})
+	fresh := newPageDOM(t)
+	for _, key := range fresh.foldKeys(t) {
+		if got, want := onlyDropped.fold(t, key), fresh.fold(t, key); !reflect.DeepEqual(got, want) {
+			t.Errorf("the %s section reads %+v after a save naming only dropped sections, want %+v", key, got, want)
+		}
+	}
 }
 
 // Jev and Mango sit in the right-hand column directly under om review, Jev first
