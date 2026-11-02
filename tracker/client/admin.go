@@ -39,6 +39,32 @@ func (c *Client) ConfigSet(ctx context.Context, key, value string) error {
 	return c.do(ctx, http.MethodPut, "/v1/config/"+url.PathEscape(key), api.ConfigSetRequest{Value: value}, nil, false)
 }
 
+// KVGet returns a key's value; ok is false when it is unset.
+func (c *Client) KVGet(ctx context.Context, key string) (value string, ok bool, err error) {
+	var out api.KVValue
+	if err := c.do(ctx, http.MethodGet, "/v1/kv/"+url.PathEscape(key), nil, &out, true); err != nil {
+		return "", false, err
+	}
+	return out.Value, out.Set, nil
+}
+
+// KVSet sets a key's value.
+func (c *Client) KVSet(ctx context.Context, key, value string) error {
+	return c.do(ctx, http.MethodPut, "/v1/kv/"+url.PathEscape(key), api.KVSetRequest{Value: value}, nil, false)
+}
+
+// KVList returns every key-value pair; an empty table is an empty map.
+func (c *Client) KVList(ctx context.Context) (map[string]string, error) {
+	var out api.KVListResponse
+	if err := c.do(ctx, http.MethodGet, "/v1/kv", nil, &out, true); err != nil {
+		return nil, err
+	}
+	if out.Items == nil {
+		out.Items = map[string]string{}
+	}
+	return out.Items, nil
+}
+
 // IssueToken returns a new token for actor with scope, a seat's when empty;
 // this answer is the one copy the tracker ever makes in the clear, and a
 // repeated call issues another token rather than reusing one.
