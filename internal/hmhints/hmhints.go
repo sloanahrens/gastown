@@ -73,7 +73,8 @@ func ExecRunner(ctx context.Context, argv []string) ([]byte, error) {
 	// util.ProcessGroupKillGrace before escalating, which would put a grace
 	// the caller never asked for past its context.
 	util.SetDetachedProcessGroup(cmd)
-	cmd.Cancel = func() error { return cancelGroup(cmd) }
+	cancel := realGroupCancel()
+	cmd.Cancel = func() error { return cancel.cancel(cmd) }
 	cmd.WaitDelay = execWaitDelay
 	out := &cappedOutput{limit: maxOutputBytes}
 	errOut := &cappedOutput{limit: maxStderrBytes}
@@ -82,14 +83,28 @@ func ExecRunner(ctx context.Context, argv []string) ([]byte, error) {
 	return execOutcome(argv[0], out, errOut, cmd.Run())
 }
 
-// cancelGroup ends cmd's whole process group at once when ctx ends. hm query
+// groupCancel ends cmd's whole process group at once when ctx ends. hm query
 // holds nothing a SIGTERM would flush, and waiting out a grace period is time
-// the caller spent before its context ended.
-func cancelGroup(cmd *exec.Cmd) error {
+// the caller spent before its context ended. Its signals are fields so a test
+// drives every outcome without a process.
+type groupCancel struct {
+	killGroup func(pid int, sig syscall.Signal) error // a negative pid is a group
+	killPid   func(p *os.Process) error
+}
+
+// realGroupCancel is groupCancel wired to the kernel.
+func realGroupCancel() groupCancel {
+	return groupCancel{
+		killGroup: syscall.Kill,
+		killPid:   func(p *os.Process) error { return p.Kill() },
+	}
+}
+
+func (g groupCancel) cancel(cmd *exec.Cmd) error {
 	if cmd.Process == nil {
 		return nil
 	}
-	err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	err := g.killGroup(-cmd.Process.Pid, syscall.SIGKILL)
 	switch {
 	case err == nil:
 		return nil
@@ -102,7 +117,7 @@ func cancelGroup(cmd *exec.Cmd) error {
 		// An OpenShell sandbox refuses a group signal with EPERM while
 		// allowing a single pid; hm itself is what the caller waits on, so
 		// kill it and let WaitDelay cut off a child still holding the pipe.
-		return cmd.Process.Kill()
+		return g.killPid(cmd.Process)
 	}
 	return err
 }
