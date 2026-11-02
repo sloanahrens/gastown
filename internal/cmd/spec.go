@@ -2892,6 +2892,13 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 	report.Notices = append(report.Notices, slingTraces.notices()...)
 	annotations.save()
 	report.DetailsFetched, report.DetailsCached, report.DetailsUnread = details.Counts()
+	// A cache the tick could not read or keep is reported here, not on stderr:
+	// the daemon discards a successful tick's stderr, and a cache that silently
+	// stops being saved leaves every later tick cold (gt-aaa5a).
+	report.Errors = append(report.Errors, details.Errors()...)
+	if taken := details.TakenOver(); taken != "" {
+		report.Notices = append(report.Notices, taken)
+	}
 	if report.Hold == "" {
 		// The slings of a background tick run after it, so they are no part of
 		// its cost.
