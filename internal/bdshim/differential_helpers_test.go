@@ -105,10 +105,6 @@ var knownUnhandledVerbs = map[string]bool{
 	"dep":      true,
 	"label":    true,
 	"events":   true,
-	"delete":   true,
-	"defer":    true,
-	"undefer":  true,
-	"unclaim":  true,
 	"comment":  true,
 }
 
@@ -292,6 +288,14 @@ func runFixtureRow(t *testing.T, town string, fixture []fixtureBead, argv []stri
 // the shim's own messages are captured on.
 func fixtureEnv(t *testing.T, town string, fixture []fixtureBead, argv []string) (Env, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
+	env, stdout, stderr, _ := fixtureEnvWithStore(t, town, fixture, argv)
+	return env, stdout, stderr
+}
+
+// fixtureEnvWithStore is fixtureEnv with the seeded store in hand, for a test
+// that changes what the row will read.
+func fixtureEnvWithStore(t *testing.T, town string, fixture []fixtureBead, argv []string) (Env, *bytes.Buffer, *bytes.Buffer, *storetest.Fake) {
+	t.Helper()
 	ctx := context.Background()
 	st := seedFixture(t, fixture)
 	token, err := st.IssueTokenScoped(ctx, fixtureActor, api.ScopeAdmin, nil)
@@ -321,7 +325,7 @@ func fixtureEnv(t *testing.T, town string, fixture []fixtureBead, argv []string)
 	}
 	env, stdout, stderr := differentialEnv(argv, getenv, town)
 	env.Handlers = handlers
-	return env, stdout, stderr
+	return env, stdout, stderr, st
 }
 
 // differentialEnv is the Env both runs share: the town as working directory, no

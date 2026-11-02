@@ -149,3 +149,104 @@ func TestFakeDependentsOfExternalTargets(t *testing.T) {
 		t.Errorf("Dependents of gt-12 = %v, want %v", dependents("gt-12"), want)
 	}
 }
+
+// The delete the bd shim answers is the store's: all-or-nothing, links gone in
+// both directions, and a surviving child left without a parent.
+func TestTheFakeDeletesABatchAllOrNothing(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := NewFake()
+	parent, err := f.CreateIssue(ctx, api.CreateParams{Rig: "gt", Title: "parent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kid, err := f.CreateIssue(ctx, api.CreateParams{Rig: "gt", Title: "kid", Parent: parent.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := f.CreateIssue(ctx, api.CreateParams{Rig: "gt", Title: "other"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.AddDependency(ctx, other.ID, parent.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.DeleteIssues(ctx, []string{parent.ID, "gt-missing"}); !errors.Is(err, api.ErrNotFound) {
+		t.Fatalf("delete with a missing id = %v, want api.ErrNotFound", err)
+	}
+	if got, err := f.GetIssues(ctx, []string{parent.ID, other.ID}); err != nil || len(got) != 2 {
+		t.Fatalf("after the refused batch: %v (%v), want both issues still there", got, err)
+	}
+
+	if err := f.DeleteIssues(ctx, []string{parent.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if gone, err := f.GetIssues(ctx, []string{parent.ID}); err != nil || len(gone) != 0 {
+		t.Fatalf("the deleted parent still exists: %v (%v)", gone, err)
+	}
+	got, err := f.GetIssues(ctx, []string{kid.ID, other.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k, ok := got[kid.ID]; !ok || k.Parent != "" {
+		t.Errorf("child after its parent was deleted = %+v (exists %v), want it kept with no parent", k, ok)
+	}
+	var links []string
+	if err := f.Export(ctx, "gt", func(r api.ExportRecord) error {
+		if r.Dependency != nil {
+			links = append(links, r.Dependency.IssueID+" -> "+r.Dependency.DependsOn)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(links, other.ID+" -> "+parent.ID) {
+		t.Errorf("the links of a deleted issue survive: %v", links)
+	}
+}
+
+// The fake writes the text fields the bd shim's delete and defer handlers
+// write, and still refuses a patch field it does not model rather than applying
+// the rest of the patch.
+func TestTheFakeWritesTheTextFieldsTheShimUpdates(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := NewFake()
+	is, err := f.CreateIssue(ctx, api.CreateParams{Rig: "gt", Title: "before", Description: "before"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	title, desc, acceptance := "after", "after [deleted:gt-2]", "- [ ] done"
+	if err := f.UpdateIssue(ctx, is.ID, api.UpdatePatch{
+		Title: &title, Description: &desc, Acceptance: &acceptance, AppendNotes: "first",
+	}, api.Guard{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.UpdateIssue(ctx, is.ID, api.UpdatePatch{AppendNotes: "second"}, api.Guard{}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.GetIssues(ctx, []string{is.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := got[is.ID]
+	if after.Title != title || after.Description != desc || after.AcceptanceCriteria != acceptance {
+		t.Errorf("after the text write: %+v, want %q, %q and %q", after, title, desc, acceptance)
+	}
+	if want := "first\nsecond"; after.Notes != want {
+		t.Errorf("notes = %q, want %q", after.Notes, want)
+	}
+
+	priority := 1
+	if err := f.UpdateIssue(ctx, is.ID, api.UpdatePatch{Priority: &priority, Description: &title}, api.Guard{}); !errors.Is(err, store.ErrUnimplemented) {
+		t.Fatalf("a patch with an unmodeled field = %v, want store.ErrUnimplemented", err)
+	}
+	refused, err := f.GetIssues(ctx, []string{is.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refused[is.ID].Description != desc {
+		t.Errorf("the refused patch wrote its modeled field: %q", refused[is.ID].Description)
+	}
+}
