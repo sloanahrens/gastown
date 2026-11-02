@@ -51,7 +51,7 @@ const (
 
 	// slingContextScanFound and slingContextScanEmpty are the marker's
 	// content. Only slingContextScanEmpty orders a skip; content this binary
-	// does not recognise is read as "found", so a marker written by another
+	// does not recognize is read as "found", so a marker written by another
 	// version cannot hide a context this one does not understand.
 	slingContextScanFound = "found"
 	slingContextScanEmpty = "empty"

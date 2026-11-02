@@ -119,7 +119,7 @@ func TestSlingContextStamp(t *testing.T) {
 // TestSlingContextScanMarker pins the mark the skip reads: a full scan's start
 // and whether it found a context, the zero value when no scan is on record, and
 // an error for a marker that cannot be read. Content this binary does not
-// recognise counts as "found", so a marker it cannot understand never orders a
+// recognize counts as "found", so a marker it cannot understand never orders a
 // skip.
 func TestSlingContextScanMarker(t *testing.T) {
 	t.Parallel()
@@ -187,7 +187,7 @@ func TestSlingContextScanMarker(t *testing.T) {
 		}
 	})
 
-	t.Run("unrecognised content reads as found", func(t *testing.T) {
+	t.Run("unrecognized content reads as found", func(t *testing.T) {
 		t.Parallel()
 		townRoot := t.TempDir()
 		if err := os.MkdirAll(filepath.Dir(SlingContextScanMarkerPath(townRoot)), 0o755); err != nil {
