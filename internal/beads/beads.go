@@ -2122,7 +2122,8 @@ func (b *Beads) KVGet(key string) (string, error) {
 
 // KVSet stores value at key, replacing what the store held there. A key bd
 // would read as a flag is refused before it reaches argv, and a value bd would
-// read as one is passed after "--" so it reaches the store as text.
+// read as one is passed after "--" so it reaches the store as text. A failure
+// names bd's own reason (see withKVSetReason).
 func (b *Beads) KVSet(key, value string) error {
 	if key == "" || strings.HasPrefix(key, "-") {
 		return fmt.Errorf("kv set: invalid key %q", key)
@@ -2134,7 +2135,41 @@ func (b *Beads) KVSet(key, value string) error {
 		args = append(args, "--")
 	}
 	_, err := b.run(append(args, value)...)
-	return err
+	if err != nil {
+		return withKVSetReason(err)
+	}
+	return nil
+}
+
+// withKVSetReason adds bd's own explanation to a failed kv set. bd runs in
+// machine mode, where it reports a failure's reason in the stdout error
+// envelope and writes nothing to stderr, so the run error alone reads as a
+// bare exit status (gt-gjuvg). A reason the error already carries — bd's
+// stderr, or the same message — is not repeated.
+func withKVSetReason(err error) error {
+	var failed *unavailableError
+	if !errors.As(err, &failed) {
+		return err
+	}
+	var envelope struct {
+		Error json.RawMessage `json:"error"`
+	}
+	if json.Unmarshal(bytes.TrimSpace(failed.stdout), &envelope) != nil || len(envelope.Error) == 0 {
+		return err
+	}
+	var reason string
+	var typed struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(envelope.Error, &typed) == nil {
+		reason = typed.Message
+	} else if json.Unmarshal(envelope.Error, &reason) != nil {
+		return err
+	}
+	if reason == "" || strings.Contains(err.Error(), reason) {
+		return err
+	}
+	return fmt.Errorf("%w: %s", err, reason)
 }
 
 // The key prefixes that name a memory: gt.* and the legacy memory.*. The
