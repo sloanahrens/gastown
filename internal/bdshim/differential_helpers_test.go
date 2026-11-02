@@ -322,16 +322,49 @@ func fixtureEnvWithStore(t *testing.T, town string, fixture []fixtureBead, argv 
 			// create row is compared with bd's answer to the same environment.
 			return fixtureAuthorEmail
 		case "BD_ACTOR":
-			// The recorder pinned the actor too (container.go, pinnedIdentity),
-			// and the config-list golden carries it as the environment override
-			// bd reports, so the replay names the same actor.
-			return fixtureActor
+			// The recorder pinned the actor for every child (container.go,
+			// pinnedIdentity), and the config-list golden carries it as the
+			// environment override bd reports. The shim reads the actor only for
+			// its config answers, so a row of another verb runs without it: a
+			// handler that starts reading the actor is not handed one by the
+			// fixture (gt-ec6vd).
+			if verbOf(argv) == "config" {
+				return fixtureActor
+			}
 		}
 		return ""
 	}
 	env, stdout, stderr := differentialEnv(argv, getenv, town)
 	env.Handlers = handlers
 	return env, stdout, stderr, st
+}
+
+// TestFixtureEnvNamesTheActorOnlyOnAConfigRow: the recorder pinned BD_ACTOR for
+// every child, but the shim reads it only for its config answers, so only a
+// config row is replayed with it. A row of another verb runs without, so a
+// handler that starts reading the actor is not silently answered by the fixture
+// (gt-ec6vd).
+func TestFixtureEnvNamesTheActorOnlyOnAConfigRow(t *testing.T) {
+	t.Parallel()
+	fixture, _ := readFixture(t)
+	town := newTown(t, routeFixture)
+	tests := []struct {
+		name string
+		argv []string
+		want string
+	}{
+		{name: "a config row names the recorder's actor", argv: []string{"config", "list"}, want: fixtureActor},
+		{name: "another verb's row names no actor", argv: []string{"show", "fx-1"}, want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env, _, _ := fixtureEnv(t, town, fixture, tc.argv)
+			if got := env.Getenv("BD_ACTOR"); got != tc.want {
+				t.Errorf("BD_ACTOR = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
 
 // differentialEnv is the Env both runs share: the town as working directory, no
