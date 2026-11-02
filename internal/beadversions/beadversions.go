@@ -6,8 +6,9 @@
 // The stored text is bead text as filed, never another tenant's text: callers
 // must not put any content that is not the bead's own.
 //
-// The package performs no I/O, reads no environment, and has no caller yet: the
-// file-backed store and the callers are later beads (gt-d7c99).
+// The package reads no environment. MemoryStore keeps versions in memory;
+// FileStore appends them to one JSONL file and assumes one writer per file,
+// taking no lock across processes. The callers are later beads (gt-d7c99).
 package beadversions
 
 import (
@@ -34,12 +35,15 @@ var (
 
 // Version is one recorded state of a bead's text. Text is the shaped bead text
 // as filed and Hash is the sha256 hex of Text.
+//
+// The JSON names are FileStore's on-disk schema, so renaming one changes the
+// file for every reader.
 type Version struct {
-	Bead  string
-	Text  string
-	Hash  string
-	Actor string
-	At    time.Time
+	Bead  string    `json:"bead"`
+	Text  string    `json:"text"`
+	Hash  string    `json:"hash"`
+	Actor string    `json:"actor"`
+	At    time.Time `json:"at"`
 }
 
 // Store records bead text versions and answers which text was in force at a
