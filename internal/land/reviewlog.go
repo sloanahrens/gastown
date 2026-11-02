@@ -331,14 +331,14 @@ func (f *ReviewsFile) Queued() ([]QueuedFollowup, error) {
 	return queued, nil
 }
 
-// ScanReviewLines calls fn with each line of r, trimmed, and skips a line
-// longer than maxReviewLineBytes rather than failing the read. A failed read
-// would be the same failure on every later read, so one bad line would stop the
-// queue for its rig for good; the lines around it are still the log, as with a
-// torn line (gt-3arxj). tooLong counts the lines skipped for their length, so a
-// reader that reports what it could not use can say so. Only an I/O error is
-// returned.
+// ScanReviewLines calls fn with each trimmed line of r, counts a line longer
+// than maxReviewLineBytes in tooLong instead of failing the read, and returns
+// only an I/O error.
 func ScanReviewLines(r io.Reader, fn func(line []byte)) (tooLong int, err error) {
+	// A line past the cap is skipped and counted rather than returned as an
+	// error: the same read would fail on every later one, so one bad line would
+	// stop a rig's queue for good, and the lines around it are still the log
+	// (gt-3arxj).
 	br := bufio.NewReaderSize(r, 64*1024)
 	buf := make([]byte, 0, 64*1024)
 	over := false
