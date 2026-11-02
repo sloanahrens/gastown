@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -180,13 +181,23 @@ func TestLandWaitNoteOutcome(t *testing.T) {
 		{
 			name:  "a refusal reads its kind, score, findings and round",
 			notes: landWaitRejectionNotes(2, "review", "crew/dunlin/gt-a-x", 3, landWaitScore(0.42)),
-			ev:    landWaitEvent{Bead: "gt-a", Kind: "review"},
+			ev:    landWaitEvent{Bead: "gt-a", Kind: "review", Attempt: 2},
 			want:  landWaitOutcome{Bead: "gt-a", Branch: "crew/dunlin/gt-a-x", Kind: "review", Score: 0.42, HasScore: true, Findings: 3, Attempt: 2},
 			ok:    true,
 		},
 		{
 			name:  "a refusal of another kind is no answer",
 			notes: landWaitRejectionNotes(1, "gate", "crew/dunlin/gt-a-x", 0, nil),
+			ev:    landWaitEvent{Bead: "gt-a", Kind: "review", Attempt: 1},
+		},
+		{
+			name:  "an earlier refusal of the same kind is no answer to a later one",
+			notes: landWaitRejectionNotes(1, "review", "crew/dunlin/gt-a-x", 3, landWaitScore(0.2)),
+			ev:    landWaitEvent{Bead: "gt-a", Kind: "review", Attempt: 2},
+		},
+		{
+			name:  "a refusal event with no attempt is no answer",
+			notes: landWaitRejectionNotes(1, "review", "crew/dunlin/gt-a-x", 3, landWaitScore(0.2)),
 			ev:    landWaitEvent{Bead: "gt-a", Kind: "review"},
 		},
 		{
@@ -197,7 +208,7 @@ func TestLandWaitNoteOutcome(t *testing.T) {
 		{
 			name:  "a gate refusal with no om score",
 			notes: landWaitRejectionNotes(1, "gate", "crew/dunlin/gt-a-x", 0, nil),
-			ev:    landWaitEvent{Bead: "gt-a", Kind: "gate"},
+			ev:    landWaitEvent{Bead: "gt-a", Kind: "gate", Attempt: 1},
 			want:  landWaitOutcome{Bead: "gt-a", Branch: "crew/dunlin/gt-a-x", Kind: "gate", Findings: 0, Attempt: 1},
 			ok:    true,
 		},
@@ -215,6 +226,61 @@ func TestLandWaitNoteOutcome(t *testing.T) {
 	}
 }
 
+// A miss still names the branch the bead's notes record, so an outcome whose
+// record has not landed yet can be told apart from one that is someone else's.
+func TestLandWaitNoteOutcomeMissNamesTheRecordedBranch(t *testing.T) {
+	t.Parallel()
+	notes := landWaitRejectionNotes(1, "gate", "crew/egret/gt-a-x", 0, nil)
+	got, ok := landWaitNoteOutcome(notes, landWaitEvent{Bead: "gt-a", Landed: true, Commit: "1a2b3c4d"})
+	if ok {
+		t.Fatalf("landWaitNoteOutcome() ok for a landing the notes do not record")
+	}
+	if got.Branch != "crew/egret/gt-a-x" {
+		t.Errorf("miss named branch %q, want the one the notes record", got.Branch)
+	}
+}
+
+// A refusal whose record is still the one before it is not answered by that
+// record: the poll retries, and reports the outcome as unattributed when the
+// record never comes, rather than printing the earlier attempt as this one.
+func TestLandWaitDoesNotAnswerWithAnEarlierAttempt(t *testing.T) {
+	t.Parallel()
+	notes := map[string]string{"gt-a": landWaitRejectionNotes(1, "review", "crew/dunlin/gt-a-x", 2, landWaitScore(0.3))}
+	clock := newLandWaitClock()
+	stdout, stderr, err := landWaitRun(t, clock, landWaitDeps{
+		agent: "dunlin", timeout: time.Minute, interval: time.Second,
+		source: landWaitFixtureSource(landWaitEvent{At: landWaitEpoch, Bead: "gt-a", Kind: "review", Attempt: 2}),
+		detail: landWaitFixtureDetail(notes),
+	})
+	if !isLandWaitNoOutcome(err) {
+		t.Fatalf("landWaitPoll() error = %v, want the run-again answer", err)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q: an earlier attempt was printed as the answer to a later refusal", stdout)
+	}
+	if !strings.Contains(stderr, "skipped the outcome of gt-a (rejected (review))") {
+		t.Errorf("stderr = %q, want the unattributed refusal named", stderr)
+	}
+}
+
+// Another crew member's refusal whose record has not landed yet is theirs: the
+// bird stays silent about it instead of naming it unattributed.
+func TestLandWaitSilentForAnotherCrewMembersUnrecordedRefusal(t *testing.T) {
+	t.Parallel()
+	notes := map[string]string{"gt-a": landWaitRejectionNotes(1, "review", "crew/egret/gt-a-x", 2, landWaitScore(0.3))}
+	stdout, stderr, err := landWaitRun(t, newLandWaitClock(), landWaitDeps{
+		agent: "dunlin", timeout: 3 * time.Second, interval: time.Second,
+		source: landWaitFixtureSource(landWaitEvent{At: landWaitEpoch, Bead: "gt-a", Kind: "review", Attempt: 2}),
+		detail: landWaitFixtureDetail(notes),
+	})
+	if !isLandWaitNoOutcome(err) {
+		t.Fatalf("landWaitPoll() error = %v, want the run-again answer", err)
+	}
+	if stdout != "" || stderr != "" {
+		t.Errorf("printed stdout %q stderr %q, want nothing for another crew member's outcome", stdout, stderr)
+	}
+}
+
 func TestLandWaitPrintsOwnOutcomes(t *testing.T) {
 	t.Parallel()
 	// Another agent's landing shares the poll and must print nothing.
@@ -227,7 +293,7 @@ func TestLandWaitPrintsOwnOutcomes(t *testing.T) {
 	}
 	events := []landWaitEvent{
 		{At: landWaitEpoch.Add(time.Second), Bead: "gt-landed", Landed: true, Commit: "1a2b3c4d"},
-		{At: landWaitEpoch.Add(2 * time.Second), Bead: "gt-refused", Kind: "review"},
+		{At: landWaitEpoch.Add(2 * time.Second), Bead: "gt-refused", Kind: "review", Attempt: 2},
 		{At: landWaitEpoch.Add(3 * time.Second), Bead: "gt-other", Landed: true, Commit: "aaaa1111"},
 	}
 	stdout, stderr, err := landWaitRun(t, newLandWaitClock(), landWaitDeps{
@@ -254,7 +320,7 @@ func TestLandWaitThirdRefusalNamesTheOverseer(t *testing.T) {
 	notes := map[string]string{"gt-a": landWaitRejectionNotes(land.MaxReworkAttempts, "review", "crew/dunlin/gt-a-x", 1, landWaitScore(0.2))}
 	stdout, _, err := landWaitRun(t, newLandWaitClock(), landWaitDeps{
 		agent: "dunlin", timeout: time.Minute, interval: time.Second,
-		source: landWaitFixtureSource(landWaitEvent{At: landWaitEpoch, Bead: "gt-a", Kind: "review"}),
+		source: landWaitFixtureSource(landWaitEvent{At: landWaitEpoch, Bead: "gt-a", Kind: "review", Attempt: land.MaxReworkAttempts}),
 		detail: landWaitFixtureDetail(notes),
 	})
 	if err != nil {
@@ -502,10 +568,9 @@ func TestLandWaitBeadNotes(t *testing.T) {
 		Target: "main", LandedCommit: "1a2b3c4d5e6f", LandedAt: landWaitEpoch}.NoteBlock()
 	ev := landWaitEvent{Bead: "gt-a", Landed: true, Commit: "1a2b3c4d"}
 	for _, tc := range []struct {
-		name  string
-		open  func(string) (landWaitBeadReader, error)
-		want  string
-		found bool
+		name string
+		open func(string) (landWaitBeadReader, error)
+		want string
 	}{
 		{
 			name: "a store that cannot be opened",
@@ -529,7 +594,6 @@ func TestLandWaitBeadNotes(t *testing.T) {
 			open: func(string) (landWaitBeadReader, error) {
 				return landWaitFakeBeads{issue: &beads.Issue{ID: "gt-a", Notes: landed}}, nil
 			},
-			found: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -544,11 +608,30 @@ func TestLandWaitBeadNotes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("landWaitBeadNotes() error = %v", err)
 			}
-			if found != tc.found || !found {
-				t.Fatalf("landWaitBeadNotes() found = %v, want %v", found, tc.found)
+			if !found {
+				t.Fatalf("landWaitBeadNotes() found = false, want the bead's record")
 			}
 			if outcome.Commit != "1a2b3c4d5e6f" || outcome.Branch != "crew/dunlin/gt-a-x" {
 				t.Errorf("outcome = %+v, want the landing's commit and branch", outcome)
+			}
+		})
+	}
+}
+
+// A bead id the log names is checked before any store is opened for it, so a
+// line cannot steer the read to a flag or a path.
+func TestLandWaitBeadNotesRefusesANonBeadID(t *testing.T) {
+	t.Parallel()
+	for _, bead := range []string{"--flag", "../gt-a", "gt-a;rm", "gt-a/..", "", "-gt-a"} {
+		t.Run(bead, func(t *testing.T) {
+			t.Parallel()
+			open := func(string) (landWaitBeadReader, error) {
+				t.Fatalf("landWaitBeadNotes() opened a store for %q", bead)
+				return nil, nil
+			}
+			_, _, err := landWaitBeadNotes(open)(landWaitEvent{Bead: bead, Landed: true, Commit: "1a2b3c4d"})
+			if err == nil {
+				t.Fatalf("landWaitBeadNotes() = nil error for the bead id %q", bead)
 			}
 		})
 	}
@@ -587,7 +670,7 @@ func TestLandWaitCommandRefusals(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			cmd := &cobra.Command{}
-			err := landWaitCommand(cmd, tc.agentFlag, tc.timeoutFlag, landWaitEnv(tc.gtRole), os.Getwd, tc.findTown)
+			err := landWaitCommand(cmd, tc.agentFlag, tc.timeoutFlag, landWaitTestHost(tc.gtRole, tc.findTown, newLandWaitClock()))
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("landWaitCommand() error = %v, want it to name %q", err, tc.want)
 			}
@@ -598,29 +681,48 @@ func TestLandWaitCommandRefusals(t *testing.T) {
 	}
 }
 
-// The command's whole body runs against a town whose log holds nothing: it
-// answers with the run-again line and exit 3.
+// The command's whole body runs against a town whose daemon log holds nothing:
+// it waits out its timeout on the fake clock and answers with the run-again
+// line and exit 3.
 func TestLandWaitCommandAnswersWithNoOutcome(t *testing.T) {
 	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "daemon"), 0o700); err != nil {
+		t.Fatalf("making the daemon directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(town, "daemon", "daemon.log"), nil, 0o600); err != nil {
+		t.Fatalf("writing the empty log: %v", err)
+	}
+	clock := newLandWaitClock()
 	var out bytes.Buffer
 	cmd := &cobra.Command{}
 	cmd.SetOut(&out)
-	err := landWaitCommand(cmd, "dunlin", "1ns", landWaitEnv(""), os.Getwd, func() (string, error) { return t.TempDir(), nil })
+	err := landWaitCommand(cmd, "dunlin", "30s", landWaitTestHost("", func() (string, error) { return town, nil }, clock))
 	if code, ok := IsSilentExit(err); !ok || code != 3 {
 		t.Fatalf("landWaitCommand() error = %v (silent %v), want exit 3", err, ok)
 	}
 	if !strings.Contains(out.String(), "no outcome yet, run again") {
 		t.Errorf("output = %q, want the run-again line", out.String())
 	}
+	if got, want := len(clock.slept), 30/5; got != want {
+		t.Errorf("slept %d times, want %d on the fake clock", got, want)
+	}
 }
 
-// landWaitEnv is a GT_ROLE lookup a test steers.
-func landWaitEnv(gtRole string) func(string) string {
-	return func(key string) string {
-		if key == "GT_ROLE" {
-			return gtRole
-		}
-		return ""
+// landWaitTestHost is the host a command test runs on: the GT_ROLE the test
+// names, the working directory, the town it finds, and a clock it drives.
+func landWaitTestHost(gtRole string, findTown func() (string, error), clock *landWaitClock) landWaitHost {
+	return landWaitHost{
+		getenv: func(key string) string {
+			if key == "GT_ROLE" {
+				return gtRole
+			}
+			return ""
+		},
+		getwd:    os.Getwd,
+		findTown: findTown,
+		now:      clock.now,
+		sleep:    clock.sleep,
 	}
 }
 
@@ -647,6 +749,63 @@ func TestLandWaitLogSourceReadsSinceTheStart(t *testing.T) {
 	}
 }
 
+// A refusal's attempt is its place among the bead's refusals of its kind, so
+// the refusals before the start count, and a review's attempt stops at the
+// rework ceiling as the landing's record does.
+func TestLandWaitLogSourceNumbersRefusalsAcrossHistory(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	var lines []string
+	for i := 0; i < land.MaxReworkAttempts+1; i++ {
+		lines = append(lines, "2026/11/01 08:5"+string(rune('0'+i))+":00 landing_worker: [land] gt-a: rejected (review): the work was refused")
+	}
+	lines = append(lines,
+		"2026/11/01 09:00:01 landing_worker: [land] gt-a: rejected (review): the work was refused",
+		"2026/11/01 09:00:02 landing_worker: [land] gt-a: rejected (gate): make gate failed",
+	)
+	if err := os.WriteFile(filepath.Join(dir, "daemon.log"), []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("writing the log: %v", err)
+	}
+	since := time.Date(2026, 11, 1, 9, 0, 0, 0, time.Local)
+	events, err := landWaitLogSource(dir)(since)
+	if err != nil {
+		t.Fatalf("landWaitLogSource() error = %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("events = %+v, want the review and the gate refusal after the start", events)
+	}
+	if events[0].Kind != "review" || events[0].Attempt != land.MaxReworkAttempts {
+		t.Errorf("review after %d earlier ones: attempt %d, want the ceiling %d",
+			land.MaxReworkAttempts+1, events[0].Attempt, land.MaxReworkAttempts)
+	}
+	if events[1].Kind != "gate" || events[1].Attempt != 1 {
+		t.Errorf("first gate refusal: attempt %d, want 1 (gates number among gates)", events[1].Attempt)
+	}
+}
+
+// A town with no daemon log is misconfigured, not quiet: a missing log is an
+// error, unless a rotated copy since the start shows the log was just rotated.
+func TestLandWaitLogSourceMissingLog(t *testing.T) {
+	t.Parallel()
+	since := landWaitEpoch
+	t.Run("no log and no rotated copy", func(t *testing.T) {
+		t.Parallel()
+		if _, err := landWaitLogSource(t.TempDir())(since); err == nil || !strings.Contains(err.Error(), "daemon log is missing") {
+			t.Fatalf("landWaitLogSource() error = %v, want the missing log named", err)
+		}
+	})
+	t.Run("a rotated copy since the start", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "daemon-2026-11-01T09-30-00.000.log"), nil, 0o600); err != nil {
+			t.Fatalf("writing the rotated log: %v", err)
+		}
+		if _, err := landWaitLogSource(dir)(since); err != nil {
+			t.Fatalf("landWaitLogSource() error = %v, want the rotation read through", err)
+		}
+	})
+}
+
 // A log that cannot be read is an error, not a town that logged nothing: the
 // two look the same to the wait, and only one of them is worth exiting 3 on.
 func TestLandWaitLogSourceRefusesAnUnreadableLog(t *testing.T) {
@@ -663,5 +822,5 @@ func TestLandWaitLogSourceRefusesAnUnreadableLog(t *testing.T) {
 
 // isLandWaitNoOutcome reports whether err is the wait's own no-outcome answer.
 func isLandWaitNoOutcome(err error) bool {
-	return err != nil && err.Error() == errLandWaitNoOutcome.Error()
+	return errors.Is(err, errLandWaitNoOutcome)
 }

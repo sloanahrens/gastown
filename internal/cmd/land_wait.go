@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -72,22 +73,38 @@ func init() {
 }
 
 func runLandWait(cmd *cobra.Command, _ []string) error {
-	return landWaitCommand(cmd, landWaitAgent, landWaitTimeout, os.Getenv, os.Getwd, workspace.FindFromCwdOrError)
+	return landWaitCommand(cmd, landWaitAgent, landWaitTimeout, landWaitHost{
+		getenv:   os.Getenv,
+		getwd:    os.Getwd,
+		findTown: workspace.FindFromCwdOrError,
+		now:      time.Now,
+		sleep:    time.Sleep,
+	})
 }
 
-// landWaitCommand is the command body over injected inputs, so a test drives
-// each refusal without a flag, the host's environment or its town.
-func landWaitCommand(cmd *cobra.Command, agentFlag, timeoutFlag string, getenv func(string) string,
-	getwd func() (string, error), findTown func() (string, error)) error {
+// landWaitHost is what the command reads from its host: the environment, the
+// working directory, the town and the clock. The command body takes it whole,
+// so a test drives each refusal and each wait without a flag, the host's
+// environment, its town or a real sleep.
+type landWaitHost struct {
+	getenv   func(string) string
+	getwd    func() (string, error)
+	findTown func() (string, error)
+	now      func() time.Time
+	sleep    func(time.Duration)
+}
+
+// landWaitCommand is the command body over the host it is given.
+func landWaitCommand(cmd *cobra.Command, agentFlag, timeoutFlag string, host landWaitHost) error {
 	timeout, err := landWaitParseTimeout(timeoutFlag)
 	if err != nil {
 		return err
 	}
-	agent, err := landWaitAgentFrom(agentFlag, getenv)
+	agent, err := landWaitAgentFrom(agentFlag, host.getenv)
 	if err != nil {
 		return err
 	}
-	townRoot, err := findTown()
+	townRoot, err := host.findTown()
 	if err != nil {
 		return fmt.Errorf("resolving the town: %w", err)
 	}
@@ -95,11 +112,11 @@ func landWaitCommand(cmd *cobra.Command, agentFlag, timeoutFlag string, getenv f
 		agent:    agent,
 		timeout:  timeout,
 		interval: landWaitInterval,
-		now:      time.Now,
-		sleep:    time.Sleep,
+		now:      host.now,
+		sleep:    host.sleep,
 		source:   landWaitLogSource(filepath.Join(townRoot, "daemon")),
 		detail: landWaitBeadNotes(func(bead string) (landWaitBeadReader, error) {
-			return landWaitBeadStore(getwd, bead)
+			return landWaitBeadStore(host.getwd, bead)
 		}),
 		out:    cmd.OutOrStdout(),
 		errOut: cmd.ErrOrStderr(),
@@ -209,8 +226,13 @@ func landWaitPoll(deps landWaitDeps) (reported int, err error) {
 				if misses[key]++; misses[key] < landWaitDetailMisses {
 					continue
 				}
-				fmt.Fprintf(deps.errOut, "skipped the outcome of %s (%s): the bead's notes carry no matching record\n", ev.Bead, ev.outcomeWord())
 				seen[key] = true
+				// The bead's notes name another crew member's branch, so this
+				// outcome is theirs and not reported to this bird.
+				if outcome.Branch != "" && !landWaitOurs(deps.agent, outcome.Branch) {
+					continue
+				}
+				fmt.Fprintf(deps.errOut, "skipped the outcome of %s (%s): the bead's notes carry no matching record\n", ev.Bead, ev.outcomeWord())
 				continue
 			}
 			seen[key] = true
@@ -248,6 +270,11 @@ type landWaitEvent struct {
 	Commit string
 	// Kind is the failure class a refused line names.
 	Kind string
+	// Attempt is the attempt number the refusal's own record carries: the
+	// count of that kind of refusal the bead has had, up to this one. The line
+	// does not name it, so the source derives it from the log (zero for a
+	// landing). A record of any other attempt is an earlier refusal, not this.
+	Attempt int
 }
 
 // key identifies one outcome across polls, so re-reading the log does not
@@ -299,23 +326,67 @@ func parseLandWaitLine(text string) (landWaitEvent, bool) {
 // landWaitLogSource reads the landing outcomes at or after since from the daemon
 // log at dir. Each poll reads the log whole: the prune patrol keeps it small,
 // and daemonlog.Read follows the rotation a tail read cannot.
+//
+// The whole log is read, not only the part since the start, because a
+// refusal's attempt is its place among the bead's refusals of that kind, and
+// the refusals before since are what number the ones after it.
 func landWaitLogSource(dir string) func(since time.Time) ([]landWaitEvent, error) {
 	return func(since time.Time) ([]landWaitEvent, error) {
-		lines, err := daemonlog.Read(dir, since, time.Local)
+		if err := landWaitLogPresent(dir, since); err != nil {
+			return nil, err
+		}
+		lines, err := daemonlog.Read(dir, time.Time{}, time.Local)
 		if err != nil {
 			return nil, fmt.Errorf("reading the daemon log: %w", err)
 		}
 		var events []landWaitEvent
+		refusals := make(map[string]int)
 		for _, line := range lines {
 			ev, ok := parseLandWaitLine(line.Text)
 			if !ok {
 				continue
 			}
 			ev.At = line.At
+			if !ev.Landed {
+				n := refusals[ev.Bead+"\x00"+ev.Kind] + 1
+				refusals[ev.Bead+"\x00"+ev.Kind] = n
+				ev.Attempt = landWaitAttemptOf(ev.Kind, n)
+			}
+			if line.At.Before(since) {
+				continue
+			}
 			events = append(events, ev)
 		}
 		return events, nil
 	}
+}
+
+// landWaitLogPresent refuses a town whose daemon log is missing: a log that
+// is not there reads as no outcome, the same as a quiet town, so the wait
+// would exit 3 forever. A rotation can briefly leave the live log absent, so
+// the log is missing only when no rotated copy from since on exists either.
+func landWaitLogPresent(dir string, since time.Time) error {
+	_, err := os.Stat(filepath.Join(dir, daemonlog.FileName))
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("reading the daemon log: %w", err)
+	}
+	if len(daemonlog.Backups(dir, since)) > 0 {
+		return nil
+	}
+	return fmt.Errorf("the daemon log is missing from %s: no landing outcome can be read from it; is this the town's daemon directory?", dir)
+}
+
+// landWaitAttemptOf is the attempt a refusal of kind on its nth refusal carries
+// in its record. A review's attempt is capped at the rework ceiling (gt-ern0y),
+// and a gate or policy refusal numbers among its own kind, uncapped.
+func landWaitAttemptOf(kind string, n int) int {
+	if kind == string(land.RejectReview) {
+		return min(n, land.MaxReworkAttempts)
+	}
+	return n
 }
 
 // landWaitBeadReader is the one read the waiter makes of a bead: its notes, the
@@ -334,12 +405,20 @@ func landWaitBeadStore(getwd func() (string, error), bead string) (landWaitBeadR
 	return beads.NewWithBeadsDir(cwd, beads.ResolveBeadsDirForID(beads.ResolveBeadsDir(cwd), bead)), nil
 }
 
+// landWaitBeadID is the shape of a bead id the worker's log may name. It is
+// checked before the id reaches a store path or a store command, so a log
+// line cannot steer the read to another path or read as a flag.
+var landWaitBeadID = regexp.MustCompile(`^[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*$`)
+
 // landWaitBeadNotes answers an event from the bead's own record of it. A store
 // that cannot be opened or read is returned rather than read as no outcome: a
 // bird that cannot see its bead's notes has not been told the landing did not
 // happen.
 func landWaitBeadNotes(open func(bead string) (landWaitBeadReader, error)) func(landWaitEvent) (landWaitOutcome, bool, error) {
 	return func(ev landWaitEvent) (landWaitOutcome, bool, error) {
+		if !landWaitBeadID.MatchString(ev.Bead) {
+			return landWaitOutcome{}, false, fmt.Errorf("refusing to read %q: the daemon log names it, but it is not a bead id", ev.Bead)
+		}
 		bd, err := open(ev.Bead)
 		if err != nil {
 			return landWaitOutcome{}, false, err
@@ -360,19 +439,26 @@ func landWaitBeadNotes(open func(bead string) (landWaitBeadReader, error)) func(
 // record of it: the LANDING RECORD block for a landing, the MERGE REJECTION
 // block for a refusal. A note that does not carry the block the event names is
 // no answer, because the landing that wrote it has not recorded itself yet or
-// an earlier landing of the bead has.
+// an earlier landing or refusal of the bead has. A refusal names its attempt,
+// so only the block of that attempt answers it: the earlier block of the same
+// kind is not this refusal's record.
+//
+// A miss still names the branch the bead's notes record, when they record one,
+// so the waiter can tell an outcome that is someone else's from one it cannot
+// attribute.
 func landWaitNoteOutcome(notes string, ev landWaitEvent) (landWaitOutcome, bool) {
+	miss := landWaitOutcome{Bead: ev.Bead, Branch: landWaitNotesBranch(notes)}
 	if ev.Landed {
 		rec, ok := land.ParseLandingRecord(notes)
 		if !ok || !strings.HasPrefix(rec.LandedCommit, ev.Commit) {
-			return landWaitOutcome{}, false
+			return miss, false
 		}
 		return landWaitOutcome{Bead: ev.Bead, Branch: rec.Branch, Landed: true,
 			Commit: rec.LandedCommit, Target: rec.Target}, true
 	}
 	refusal, ok := land.ParseRejectionNote(notes)
-	if !ok || refusal.Kind != ev.Kind {
-		return landWaitOutcome{}, false
+	if !ok || refusal.Kind != ev.Kind || ev.Attempt == 0 || refusal.Attempt != ev.Attempt {
+		return miss, false
 	}
 	out := landWaitOutcome{Bead: ev.Bead, Branch: refusal.Branch, Kind: refusal.Kind,
 		Findings: len(refusal.Findings), Attempt: refusal.Attempt}
@@ -380,6 +466,18 @@ func landWaitNoteOutcome(notes string, ev landWaitEvent) (landWaitOutcome, bool)
 		out.Score, out.HasScore = refusal.Receipt.Score, true
 	}
 	return out, true
+}
+
+// landWaitNotesBranch is the branch the bead's notes record, from its landing
+// record or its last refusal, or empty when they record none.
+func landWaitNotesBranch(notes string) string {
+	if rec, ok := land.ParseLandingRecord(notes); ok && rec.Branch != "" {
+		return rec.Branch
+	}
+	if rej, ok := land.ParseRejectionNote(notes); ok {
+		return rej.Branch
+	}
+	return ""
 }
 
 // landWaitOutcome is one outcome as the waiter prints it.
