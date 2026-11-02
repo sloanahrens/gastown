@@ -53,13 +53,13 @@ The verdict is computed, not judged, and it claims less than a pass. No probe is
 Two fallback paths are `inconclusive`, never a pass: below Linux 5.19 seccomp falls back to the legacy read-only listener (log line naming the `legacy` or `read-only` listener), and the task-memory probe falls back to `/proc/<pid>/mem` instead of `process_vm_readv`. A fallback means the memory-isolation property was not exercised by the primary mechanism, and nothing here shows the fallback holds it, so a person decides. A failure pattern outranks a fallback: the probe is then `fail`.
 
 ```bash
-go run ./cmd/isolation-verdict "$DIR" "$NODE" > "$DIR/verdict.txt"
+go run ./cmd/isolation-verdict "$DIR" "$NODE" > "$DIR/verdict.txt" || echo "verdict exit status $?"
 cat "$DIR/verdict.txt"
 ```
 
 The command prints one line per probe and then the VERDICT line on stdout, and names an unusable input on stderr. Under `go run` it exits 0 only for `VERDICT NO-KNOWN-FAILURE`; every other verdict exits 1, with `go run`'s own `exit status 1` line on stderr. The rules and patterns above are compiled in `internal/isolationprobe`.
 
-`VERDICT NO-KNOWN-FAILURE` is never to be read as proven isolation. Only a person who reads `log.txt` and the node's kernel and image against the supervisor's documentation can say more, and the comment on claude-29a.13 says whether that was done. The package's tests run the command against a sample directory per row of this page: a clean one, one per failure pattern, one per fallback, a `Not Ready` list, another node's placement, a missing `create.status`, an empty log and a 5000-line log. This page records no result of a real run.
+`VERDICT NO-KNOWN-FAILURE` is never to be read as proven isolation. Only a person who reads `log.txt` and the node's kernel and image against the supervisor's documentation can say more, and the comment on claude-29a.13 says whether that was done. The package's tests call `Evaluate` on a sample directory per row of this page: a clean one, one per failure pattern, one per fallback, a `Not Ready` list, another node's placement, a missing `create.status`, an empty log and a 5000-line log. This page records no result of a real run.
 
 ## Where the result is recorded
 
