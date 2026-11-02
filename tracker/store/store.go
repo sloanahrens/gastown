@@ -108,6 +108,13 @@ type Store interface {
 	ConfigGet(ctx context.Context, key string) (value string, ok bool, err error)
 	// ConfigSet sets a configuration key, replacing any earlier value.
 	ConfigSet(ctx context.Context, key, value string) error
+	// KVGet returns a key's value; ok is false when unset.
+	KVGet(ctx context.Context, key string) (value string, ok bool, err error)
+	// KVSet sets a key's value, replacing any earlier one.
+	KVSet(ctx context.Context, key, value string) error
+	// KVList returns every key-value pair; an empty table is an empty,
+	// non-nil map.
+	KVList(ctx context.Context) (map[string]string, error)
 	// IssueTokenScoped creates a token for actor with scope, valid until
 	// expires (never, when nil), keeps its hash and returns it: this is the
 	// one time the token exists in the clear.

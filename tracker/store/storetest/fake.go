@@ -3,8 +3,8 @@
 // get, the claim, release and transfer guards, the plain close those guards
 // refuse, a status write with the guards and the child and blocker fences,
 // the creates a Batch applies, the comments and links an export reads, the
-// counts a stats read reports, and the tokens an admin issues and revokes.
-// GetIssues fills
+// counts a stats read reports, the key-value pairs a kv write sets and a kv
+// read returns, and the tokens an admin issues and revokes. GetIssues fills
 // Dependencies and Dependents, as the real store does; ListIssues, ChildrenOf
 // and Comments answer the reads the bd shim's handlers make (gt-p85pw.94),
 // CommentCounts returns each issue's comment count in one read, UpdateIssue
@@ -40,7 +40,9 @@ type Fake struct {
 	links    []api.ExportDependency
 	// tokens is keyed by the token itself; the fake keeps no hash because
 	// nothing it holds ever leaves this process.
-	tokens    map[string]fakeToken
+	tokens map[string]fakeToken
+	// kv holds the key-value pairs a kv write sets.
+	kv        map[string]string
 	next      int
 	nextToken int
 }
@@ -61,7 +63,7 @@ func NewFake() *Fake { return NewFakeWithClock(time.Now) }
 
 // NewFakeWithClock returns an empty Fake whose timestamps come from now.
 func NewFakeWithClock(now func() time.Time) *Fake {
-	return &Fake{now: now, issues: map[string]api.Issue{}, tokens: map[string]fakeToken{}}
+	return &Fake{now: now, issues: map[string]api.Issue{}, tokens: map[string]fakeToken{}, kv: map[string]string{}}
 }
 
 // rigOf is the rig prefix of an id: the text before its first dash.
@@ -751,6 +753,39 @@ func (*Fake) ConfigGet(context.Context, string) (string, bool, error) {
 	return "", false, unimplemented("ConfigGet")
 }
 func (*Fake) ConfigSet(context.Context, string, string) error { return unimplemented("ConfigSet") }
+
+// KVGet returns the value of a key; ok is false when unset.
+func (f *Fake) KVGet(_ context.Context, key string) (string, bool, error) {
+	if key == "" {
+		return "", false, api.Invalid("a key is required")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.kv[key]
+	return v, ok, nil
+}
+
+// KVSet sets a key's value, replacing an earlier one.
+func (f *Fake) KVSet(_ context.Context, key, value string) error {
+	if key == "" {
+		return api.Invalid("a key is required")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.kv[key] = value
+	return nil
+}
+
+// KVList returns every key-value pair; the fake's own map is never handed out.
+func (f *Fake) KVList(context.Context) (map[string]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[string]string, len(f.kv))
+	for k, v := range f.kv {
+		out[k] = v
+	}
+	return out, nil
+}
 
 // IssueTokenScoped stores a token for actor with scope and returns it. The
 // token is random like the Postgres store's, so two issues never collide, and
