@@ -1416,9 +1416,10 @@ type specDispatchEnv struct {
 	// rig: the test files and test identifiers their own text names, with the
 	// state that decides whether each holds the candidate
 	// (specdispatch.TargetClaimHold, gt-n6jbw). A read that fails holds the
-	// candidate, a peer whose own design and notes were not read holds as a
-	// claim on unknown files, and so does a nil seam — a checker that is not
-	// wired holds rather than dispatching what it never checked.
+	// candidate, and so does a nil seam — a checker that is not wired holds
+	// rather than dispatching what it never checked. A peer whose own design
+	// and notes were not read holds nothing: it names no path the rule can
+	// compare, and the conflict resolves at the merge (gt-dnp9c).
 	Claims func(beadID string) ([]specdispatch.Claimant, error)
 	// Reads is the ledger the tick's own reads go through, so the tick can
 	// name the phase each one was made under (gt-139dp). Nil counts no phase,

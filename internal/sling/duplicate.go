@@ -60,8 +60,8 @@ type Duplicate struct {
 	// ClaimsUnread marks a bead in the active or recently closed pool whose
 	// design and notes were not read at all: the batched show failed, it did
 	// not answer for the row, or the tick's detail cache deferred it. The spec
-	// dispatcher's target-claim rule reads this as a claim on an unknown test
-	// file, never as a bead that claims nothing (gt-n6jbw).
+	// dispatcher's target-claim rule no longer reads it: an unread claim names
+	// no full path the rule can compare, so it holds nothing (gt-dnp9c).
 	ClaimsUnread bool
 	// Blockers lists the IDs this bead has a blocking dependency on, as far as
 	// the caller could read them from bd. The overlap guard walks these edges
@@ -70,9 +70,9 @@ type Duplicate struct {
 	Blockers []string
 	// Landed marks a closed bead whose close reason records a landing, so its
 	// work is on the branch a candidate would rebase onto. The spec
-	// dispatcher's target-claim rule reads it: a bead filed before a landing
-	// on the same test file was written against the base that landing replaced
-	// (gt-n6jbw).
+	// dispatcher's target-claim rule no longer reads it: a polecat starts from
+	// main, which carries the landing, so a landed peer holds nothing
+	// (gt-dnp9c).
 	Landed bool
 }
 
