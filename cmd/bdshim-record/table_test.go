@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -106,7 +107,7 @@ func TestTableHoldsTheCloseForceRowUnderItsOwnName(t *testing.T) {
 		if rows[i].Verb != "close" {
 			continue
 		}
-		if slicesContain(rows[i].Flags, "--force") {
+		if slices.Contains(rows[i].Flags, "--force") {
 			forced = &rows[i]
 		} else {
 			plain = &rows[i]
@@ -124,13 +125,4 @@ func TestTableHoldsTheCloseForceRowUnderItsOwnName(t *testing.T) {
 	if GoldenName(*forced) == GoldenName(*plain) {
 		t.Errorf("%s: the forced and plain close rows share the golden %q", t.Name(), GoldenName(*plain))
 	}
-}
-
-func slicesContain(flags []string, want string) bool {
-	for _, f := range flags {
-		if f == want {
-			return true
-		}
-	}
-	return false
 }
