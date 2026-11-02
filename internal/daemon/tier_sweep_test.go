@@ -66,6 +66,25 @@ func newTierSweepDaemon(t *testing.T, now time.Time, rigs ...string) (*Daemon, *
 	return d, rec, bd, &logs
 }
 
+// The landing work root the shared fixture sets is the one the resolver turns
+// into the sweep work dir, so a TierSweep test never reads the host's landing
+// temp dir (gt-8wf9o).
+func TestNewTierSweepDaemonIsolatesTheSweepWorkRoot(t *testing.T) {
+	t.Parallel()
+	d, _, _, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	cfg := landingWorkerConfig(d.patrolConfig)
+	if cfg == nil || cfg.WorkRoot == "" {
+		t.Fatal("newTierSweepDaemon left the landing work root unset")
+	}
+	dir, err := d.tierSweepWorkDir("gastown")
+	if err != nil {
+		t.Fatalf("tierSweepWorkDir: %v", err)
+	}
+	if !landingPathWithin(dir, cfg.WorkRoot) {
+		t.Errorf("sweep work dir = %q, want it under the test's work root %q", dir, cfg.WorkRoot)
+	}
+}
+
 // goTree is a checked-out tree that ships every path, so each stage runs the Go
 // command. A test reaches the tree check through the seam, never a real stat.
 func goTree(string, string) (bool, error) { return true, nil }
