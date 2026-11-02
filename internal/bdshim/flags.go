@@ -416,6 +416,32 @@ func knownCommand(command string) bool {
 	return valueFlags[command] != nil || boolFlags[command] != nil || operandSlots[command] != nil
 }
 
+// commandNamespace reports whether bd documents a command below command, so
+// commandPath steps through `dolt remote` to `dolt remote reset-data` even
+// though the namespace itself has no flags or operands. Without the step the
+// subverb words would fall back to operands, and `reset-data` would read as a
+// bead id from a prefix no route names, sending the command to bd.real from a
+// tracker rig.
+func commandNamespace(command string) bool {
+	prefix := command + " "
+	for name := range valueFlags {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	for name := range boolFlags {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	for name := range operandSlots {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // verbOf returns bd's subcommand: the first operand. A global value flag is
 // skipped with its value, so `bd --db hq list` names list.
 func verbOf(args []string) string {
@@ -445,7 +471,7 @@ func commandPath(args []string) string {
 			path = command
 			continue
 		}
-		if !knownCommand(candidate) {
+		if !knownCommand(candidate) && !commandNamespace(candidate) {
 			break
 		}
 		path = candidate
