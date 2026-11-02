@@ -157,21 +157,17 @@ func TestPolecatListTrackerRigWarnsNoPreload(t *testing.T) {
 }
 
 // TestBuildRigSeatsTrackerRigSkipsPreload is gt-p85pw.128: a tracker rig has no
-// bd to warm, so the seat build skips the preload instead of sending a read the
-// shim refuses. The runner refuses the preload statement and answers everything
-// else, so a preload that still ran would both be recorded and warn.
+// bd to warm, so the seat build sends no preload read and warns nothing. The
+// runner refuses the preload statement and answers everything else, so a
+// preload that still ran would both be recorded and warn.
 //
-// The rig's own .beads is removed, leaving the town's route as the only thing
-// that names it: PreloadBeads decides by the beads directory its wrapper
-// resolves, so here the seat build's own route check is the one that must skip
-// the read.
+// The verdict is PreloadBeads' own — the only one — from the route that names
+// the wrapper's beads directory; this test pins it end to end through the seat
+// build (gt-mmgum).
 func TestBuildRigSeatsTrackerRigSkipsPreload(t *testing.T) {
 	t.Parallel()
 	rigPath := routeRigTown(t, beads.BackendTracker)
 	seatBuildWorktree(t, rigPath)
-	if err := os.RemoveAll(filepath.Join(rigPath, ".beads")); err != nil {
-		t.Fatalf("remove the rig's beads directory: %v", err)
-	}
 
 	preload := preloadSeatArgs(t)
 	log := &seatCallLog{refuse: preload}
@@ -210,9 +206,45 @@ func TestBuildRigSeatsDoltRigPreloadsOnce(t *testing.T) {
 	}
 }
 
+// TestBuildRigSeatsPreloadFollowsTheStoreNotTheRigName is gt-mmgum's second
+// finding: the seat build must not hold a tracker verdict of its own beside
+// PreloadBeads', because the two rules can disagree. The rig here is named by
+// a tracker route, but its own .beads is gone, so no route names the beads
+// directory the wrapper resolves. That is the answer backend.Open and the bd
+// shim give for this layout — Dolt, since the route lookup is by directory —
+// so the preload runs. A build that skipped on the rig name alone would send
+// no read and warm nothing.
+func TestBuildRigSeatsPreloadFollowsTheStoreNotTheRigName(t *testing.T) {
+	t.Parallel()
+	rigPath := routeRigTown(t, beads.BackendTracker)
+	seatBuildWorktree(t, rigPath)
+	if err := os.RemoveAll(filepath.Join(rigPath, ".beads")); err != nil {
+		t.Fatalf("remove the rig's beads directory: %v", err)
+	}
+
+	preload := preloadSeatArgs(t)
+	log := &seatCallLog{}
+	bd := beads.New(rigPath, beads.WithDirRunner(log.run))
+
+	var warn bytes.Buffer
+	buildRigSeatsOn(&warn, bd, &rig.Rig{Name: "gastown", Path: rigPath}, nil, time.Minute, time.Now(), "")
+
+	if n := log.preloadCalls(preload); n != 1 {
+		t.Fatalf("the seat build sent the preload read %d time(s), want exactly 1: the wrapper's beads directory names no tracker route, so it is Dolt", n)
+	}
+	if got := warn.String(); got != "" {
+		t.Errorf("the seat build warned:\n%s", got)
+	}
+}
+
 // TestBuildRigSeatsUnreadableRouteTableStillPreloads: an unreadable route table
-// is not a tracker verdict. The build still asks the preload, which reads the
-// same table, stops before any store read, and warns — never a silent skip.
+// is not a tracker verdict. The build asks the preload unconditionally;
+// PreloadBeads reads the route table, stops before any store read, and the
+// failure reaches the warning writer — never a silent skip.
+//
+// It asserts the warning preloadRigSeats owns, not the route read's own error
+// text: that the preload failed is the seat build's contract, and what the
+// beads package's error says is pinned there (gt-mmgum).
 func TestBuildRigSeatsUnreadableRouteTableStillPreloads(t *testing.T) {
 	t.Parallel()
 	rigPath := routeRigTown(t, beads.BackendTracker)
@@ -235,9 +267,7 @@ func TestBuildRigSeatsUnreadableRouteTableStillPreloads(t *testing.T) {
 	if n := log.preloadCalls(preload); n != 0 {
 		t.Errorf("the preload sent a store read after an unreadable route table (%d time(s))", n)
 	}
-	for _, want := range []string{"failed to preload beads in gastown", "reading the route table"} {
-		if !strings.Contains(warn.String(), want) {
-			t.Errorf("the seat build's warning does not name %q:\n%s", want, warn.String())
-		}
+	if got := warn.String(); !strings.Contains(got, "failed to preload beads in gastown") {
+		t.Errorf("the seat build did not warn that its preload failed after an unreadable route table:\n%s", got)
 	}
 }

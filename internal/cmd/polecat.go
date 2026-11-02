@@ -643,20 +643,6 @@ func preloadRigSeats(warn io.Writer, bd *beads.Beads, rigName string) {
 	}
 }
 
-// rigRouteOnTracker reports whether the town's route table puts r on the
-// tracker backend: a rig the tracker service answers, with no bd behind it. It
-// asks by the rig name the route's path starts with — the question
-// beads.RigOnTracker answers for a seat's tracker token — from the town root
-// the seat build already joins its park marker from, since a rig lives directly
-// under it. A town with no route table names no tracker rig.
-//
-// An unreadable route table is an error, never "not the tracker": the caller
-// still preloads, and PreloadBeads reads the same table, so its error reaches
-// the warning writer instead of being turned into a silent verdict.
-func rigRouteOnTracker(r *rig.Rig) (bool, error) {
-	return beads.RigOnTracker(filepath.Dir(r.Path), r.Name)
-}
-
 // buildRigSeats gathers one rig's polecat rows for `gt polecat list`: a seat
 // per known worktree, plus a decided row for any zombie/foreign orphan tmux
 // session, in the same order the listing used to produce them when this was
@@ -701,15 +687,14 @@ func buildRigSeatsOn(warn io.Writer, bd *beads.Beads, r *rig.Rig, sessions polec
 		return nil
 	}
 
-	// A tracker rig has no bd to warm: the tracker answers the per-call seam
-	// reads, and a bd sql preload is refused there, so it would cost one
-	// warning per rig per list and warm nothing. Skip it silently
-	// (gt-p85pw.128). A route table that cannot be read is not a tracker
-	// verdict, so the preload still runs: PreloadBeads reads the same table and
-	// reports its error through the warning below.
-	if onTracker, routeErr := rigRouteOnTracker(r); routeErr != nil || !onTracker {
-		preloadRigSeats(warn, bd, r.Name)
-	}
+	// PreloadBeads makes the tracker decision itself: it reads the town's
+	// route table and returns without a store read on a tracker rig, which is
+	// what preloadRigSeats' contract above says. Asking unconditionally leaves
+	// one decision, made by the beads package from the route that names this
+	// wrapper's beads directory; a second opinion here could disagree with it
+	// (a rig name is not that route) and would read the table again on every
+	// Dolt rig (gt-mmgum).
+	preloadRigSeats(warn, bd, r.Name)
 
 	// ONE merge-request query per rig, joined per polecat below — never a
 	// `bd show` per polecat (MRs are ephemeral wisps, and the per-id path is
