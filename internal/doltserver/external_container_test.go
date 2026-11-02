@@ -182,12 +182,13 @@ func TestExternalContainerStateReadsDockerInspect(t *testing.T) {
 	inspect := "docker inspect -f {{.State.Running}} " + name
 
 	tests := []struct {
-		name       string
-		town       func(t *testing.T) string
-		script     *fakeReply
-		want       bool
-		wantErr    bool
-		wantDocker int
+		name        string
+		town        func(t *testing.T) string
+		script      *fakeReply
+		want        bool
+		wantErr     bool
+		wantErrText string
+		wantDocker  int
 	}{
 		{
 			name:       "running",
@@ -218,6 +219,12 @@ func TestExternalContainerStateReadsDockerInspect(t *testing.T) {
 			wantDocker: 1,
 		},
 		{
+			name:        "an unusable setting is refused",
+			town:        func(t *testing.T) string { return externalContainerTown(t, 3307, "-v") },
+			wantErr:     true,
+			wantErrText: "want a Docker container name",
+		},
+		{
 			name:    "a town that names no container is refused",
 			town:    func(t *testing.T) string { return testTown(t) },
 			wantErr: true,
@@ -241,6 +248,9 @@ func TestExternalContainerStateReadsDockerInspect(t *testing.T) {
 				}
 				if running {
 					t.Errorf("ContainerRunning = (true, %v), want false: an unknown state is never running", err)
+				}
+				if tt.wantErrText != "" && !strings.Contains(err.Error(), tt.wantErrText) {
+					t.Errorf("error = %q, want it to name %q", err, tt.wantErrText)
 				}
 			} else {
 				if err != nil {
