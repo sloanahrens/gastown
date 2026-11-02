@@ -86,8 +86,8 @@ const (
 // the filesystem. A test fills every field with a fake, so no run starts git or
 // a sweep, reads the clock or writes outside t.TempDir().
 type Deps struct {
-	// Clone copies repo at sha into work: a clone of the bare repository with no
-	// hard links, then the sha checked out detached. A sha the repository does
+	// Clone copies repo at sha into work: a transport clone of the bare repository,
+	// then the sha fetched and checked out detached. A sha the repository does
 	// not hold is an error naming git's own text, not a panic.
 	Clone func(repo, sha, work string) error
 	// Sweep runs the tiers args names, with work as the repository root. The
@@ -572,23 +572,42 @@ type gitRunner func(dir string, args ...string) (int, string)
 // exercised by the integration tier (clone_integration_test.go).
 func gitClone(repo, sha, work string) error { return cloneWith(runGit, repo, sha, work) }
 
-// cloneWith is gitClone over a runner: the bare repository cloned without hard
-// links, since the mount is read-only and the clone must not share its objects,
-// then the sha checked out detached.
+// fullSHAPattern is a git object name as git prints it in full: 40 lower-case hex
+// digits (SHA-1) or 64 (SHA-256).
+var fullSHAPattern = regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`)
+
+// cloneWith is gitClone over a runner: the bare repository cloned over git's
+// transport (--no-local), which copies only the objects of refs/heads/* and tags,
+// then the sha fetched from origin by name and checked out detached, so the commit
+// comes from origin whichever ref holds it: the clone takes no refs/remotes/* as
+// refs (gt-2jhtv).
 //
 // The mount can be owned by another user, and git refuses to read a repository it
-// does not trust. The exception has to reach the git upload-pack process a local
-// clone starts to read it: a command-line "-c safe.directory" on the clone does
-// not reach that process and the clone still fails, so the exception rides the
-// upload-pack command itself, for this one path.
+// does not trust. The exception has to reach the git upload-pack process the
+// transport clone starts to read it: a command-line "-c safe.directory" on the clone
+// does not reach that process and the clone still fails, so the exception rides the
+// upload-pack command itself, for this one path. The fetch starts the same process,
+// so it carries the same exception.
 func cloneWith(run gitRunner, repo, sha, work string) error {
-	if code, out := run("", "clone", "--no-hardlinks", "--upload-pack", uploadPackCommand(repo), repo, work); code != 0 {
+	if !fullSHAPattern.MatchString(sha) {
+		return fmt.Errorf("sha %q is not 40 or 64 lower-case hex digits", sha)
+	}
+	if code, out := run("", cloneArgs(repo, work)...); code != 0 {
 		return fmt.Errorf("git clone %s: %s", repo, out)
+	}
+	if code, out := run(work, "fetch", "--upload-pack", uploadPackCommand(repo), "origin", "--", sha); code != 0 {
+		return fmt.Errorf("git fetch %s: %s", sha, out)
 	}
 	if code, out := run(work, "checkout", "--detach", sha); code != 0 {
 		return fmt.Errorf("git checkout %s: %s", sha, out)
 	}
 	return nil
+}
+
+// cloneArgs is the git clone cloneWith runs: the transport, so the clone holds only
+// what refs/heads/* and tags reach, and the upload-pack exception for repo.
+func cloneArgs(repo, work string) []string {
+	return []string{"clone", "--no-local", "--upload-pack", uploadPackCommand(repo), repo, work}
 }
 
 // uploadPackCommand is the command git runs to read repo, with repo trusted for
