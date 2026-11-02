@@ -25,7 +25,18 @@ gcloud secrets create customer-zero_api-key --project "$PROJECT_ID" --replicatio
 gcloud secrets versions add customer-zero_api-key --project "$PROJECT_ID" --data-file=-
 ```
 
-Then bind the reader described below. Check the binding by reading the value as an identity that holds none — impersonate another workspace's gateway — and confirming the read fails.
+Then bind the reader described below. Check the binding by reading the value as an identity that holds none — impersonate another workspace's gateway — and confirming the read fails. Discard standard output and judge the read by its exit status and its error, so a binding that is wrong cannot print the value:
+
+```bash
+# The read must fail. stdout is discarded, so a wrong binding that lets it
+# through prints nothing; stderr stays visible, so a refused impersonation can
+# be told apart from a refused read. $OTHER_GATEWAY is another workspace's
+# gateway service account.
+gcloud secrets versions access latest --secret customer-zero_api-key --project "$PROJECT_ID" \
+  --impersonate-service-account="$OTHER_GATEWAY" >/dev/null
+```
+
+A refused read exits non-zero with `PERMISSION_DENIED` on `secretmanager.versions.access`. A read that succeeds exits zero with no output, and is a failure. Any other error — the impersonation refused, the API unreachable — is a check that could not be made, not a pass.
 
 ## Reader identity
 
@@ -49,16 +60,30 @@ Rotation is the K5 package (`internal/keyrotation`, gt-fn9nz). It keeps no state
 
 The check window: step 1 makes the new version the one `Get` returns before step 2 has run, so a seat that starts mid-rotation can read an unchecked key. The store cannot stage a write; closing the window is a separate bead. Rotate while the workspace is quiet.
 
-Nothing calls these packages yet: the gateway wiring, the console's rotate action (plan row O5) and the dispatcher's pre-dispatch check are separate changes. Until they land, the operator does steps 1 to 4 by hand in a grant window:
+Where a workspace has a wired rotate action (plan row O5), it runs steps 1 to 4. Where it has none, the operator does them by hand in a grant window, in the same order:
 
-```bash
-# The replacement value arrives on stdin, so it never reaches a command line.
-gcloud secrets versions add customer-zero_api-key --project "$PROJECT_ID" --data-file=-
-# Once the provider accepts the new version, retire the older one.
-OLD=1
-gcloud secrets versions disable customer-zero_api-key --project "$PROJECT_ID" --version "$OLD"
-gcloud secrets versions destroy customer-zero_api-key --project "$PROJECT_ID" --version "$OLD"
-```
+- Write the replacement; the value arrives on stdin, so it never reaches a command line:
+
+  ```bash
+  gcloud secrets versions add customer-zero_api-key --project "$PROJECT_ID" --data-file=-
+  ```
+
+- Check the new version with the provider, as `keycheck` does, before the old one is touched. Read the new version into the shell with `gcloud secrets versions access`, and send it with the provider request on stdin (`curl --config -`), never as a `-H` argument, so the value stays off the command line. Make HTTP errors non-zero (`--fail`) and discard the response (`-o /dev/null`): the exit status is the verdict.
+
+- On a pass, disable the version it replaces, then destroy it once no seat started on it is still running:
+
+  ```bash
+  OLD=1   # the version being replaced; use the number versions list reports
+  gcloud secrets versions disable customer-zero_api-key --project "$PROJECT_ID" --version "$OLD"
+  gcloud secrets versions destroy customer-zero_api-key --project "$PROJECT_ID" --version "$OLD"
+  ```
+
+- On a refusal, or a check that could not be made, disable the new version and stop. The previous key never stopped serving, so there is nothing else to undo:
+
+  ```bash
+  NEW=2   # the version versions add wrote; use the number versions list reports
+  gcloud secrets versions disable customer-zero_api-key --project "$PROJECT_ID" --version "$NEW"
+  ```
 
 ## Rollback
 
