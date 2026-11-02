@@ -1488,7 +1488,9 @@ func TestTierSweepRunnerCollect(t *testing.T) {
 // TestTierSweepRunnerHostSummary pins the one mapping the recorded line has:
 // a log directory under the engine's OutputDir moves to the same relative path
 // in the host run directory; a line with no group, or a directory the backend
-// does not bring home, is left as printed (gt-4lj2q).
+// does not bring home, is left as printed (gt-4lj2q). A path that walks up out
+// of OutputDir with ".." is left as printed too: joining it would name a host
+// path outside the run directory (gt-s7idr).
 func TestTierSweepRunnerHostSummary(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -1514,6 +1516,18 @@ func TestTierSweepRunnerHostSummary(t *testing.T) {
 			summary: "tier-sweep: shell GREEN passed=3 failed=0 skipped=0 (logs /tmp/tier-sweep.x) in 4s",
 			outDir:  "/host/runs/gastown-abc",
 			want:    "tier-sweep: shell GREEN passed=3 failed=0 skipped=0 (logs /tmp/tier-sweep.x) in 4s",
+		},
+		{
+			name:    "a path that walks up out of the engine's output",
+			summary: "tier-sweep: shell GREEN passed=3 failed=0 skipped=0 (logs /out/../etc) in 4s",
+			outDir:  "/host/runs/gastown-abc",
+			want:    "tier-sweep: shell GREEN passed=3 failed=0 skipped=0 (logs /out/../etc) in 4s",
+		},
+		{
+			name:    "a path that walks up after a subdirectory",
+			summary: "tier-sweep: shell GREEN passed=3 failed=0 skipped=0 (logs /out/logs/../../x) in 4s",
+			outDir:  "/host/runs/gastown-abc",
+			want:    "tier-sweep: shell GREEN passed=3 failed=0 skipped=0 (logs /out/logs/../../x) in 4s",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
