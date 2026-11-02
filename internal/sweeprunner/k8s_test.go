@@ -16,9 +16,9 @@ import (
 // name, spelled out in the test rather than taken from the code it checks.
 var k8sNamePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 
-// TestK8sRenderGolden renders one fixed Spec and compares it to the checked-in
-// Job, so any change to the document is a change the reviewer sees.
-func TestK8sRenderGolden(t *testing.T) {
+// TestRenderJobGoldenMatches renders one fixed Spec and compares it to the
+// checked-in Job, so any change to the document is a change the reviewer sees.
+func TestRenderJobGoldenMatches(t *testing.T) {
 	t.Parallel()
 	plan, err := Kubernetes{}.Render(goldenSpec())
 	if err != nil {
@@ -35,21 +35,86 @@ func TestK8sRenderGolden(t *testing.T) {
 	if got != string(golden) {
 		t.Errorf("rendered Job differs from testdata/k8s-render.golden.json\ngot:\n%s\nwant:\n%s", got, golden)
 	}
+}
 
-	runner, ok := containerNamed(plan.Job, runnerContainerName)
+// TestRenderJobDindIsANativeSidecar holds the engine to a native sidecar: an
+// init container with restartPolicy Always and an exec startup probe on the
+// loopback port it binds, so the kubelet starts it before the runner and stops
+// it when the runner exits. As a regular container it outlived the runner, the
+// Job stayed Running and the run held its share until the deadline (gt-etbor).
+func TestRenderJobDindIsANativeSidecar(t *testing.T) {
+	t.Parallel()
+	plan, err := Kubernetes{}.Render(goldenSpec())
+	if err != nil {
+		t.Fatalf("rendering the golden spec: %v", err)
+	}
+	pod := plan.Job.Spec.Template.Spec
+	var dind *Container
+	for i := range pod.InitContainers {
+		if pod.InitContainers[i].Name == dindContainerName {
+			dind = &pod.InitContainers[i]
+		}
+	}
+	if dind == nil {
+		t.Fatalf("the Job's initContainers %+v do not hold the %q sidecar", pod.InitContainers, dindContainerName)
+	}
+	if dind.RestartPolicy != "Always" {
+		t.Errorf("dind restartPolicy = %q, want Always: only a native sidecar starts before the runner and ends with the pod", dind.RestartPolicy)
+	}
+	if dind.StartupProbe == nil || dind.StartupProbe.Exec == nil {
+		t.Fatalf("dind renders no exec startupProbe, so the runner races the engine's start")
+	}
+	wantCommand := []string{"docker", "-H", "tcp://" + dindAddress + ":" + dindPort, "info"}
+	if got := dind.StartupProbe.Exec.Command; !slices.Equal(got, wantCommand) {
+		t.Errorf("dind startupProbe runs %v, want %v: it must ask the engine on the sidecar's loopback", got, wantCommand)
+	}
+	if len(pod.Containers) != 1 || pod.Containers[0].Name != runnerContainerName {
+		t.Errorf("the Job's containers are %+v, want only %q", pod.Containers, runnerContainerName)
+	}
+}
+
+// TestRenderJobStartupProbeRunsInsideThePod holds the engine's startup probe to
+// an exec action, which the kubelet runs inside the dind container beside
+// dockerd. A tcpSocket or httpGet probe is dialed by the kubelet from the node's
+// network namespace, where the engine's loopback is not listening, so it would
+// never succeed and the runner would never start (gt-etbor).
+func TestRenderJobStartupProbeRunsInsideThePod(t *testing.T) {
+	t.Parallel()
+	plan, err := Kubernetes{}.Render(goldenSpec())
+	if err != nil {
+		t.Fatalf("rendering the golden spec: %v", err)
+	}
+	dind, ok := containerNamed(plan.Job, dindContainerName)
 	if !ok {
-		t.Fatalf("the Job renders no %q container", runnerContainerName)
+		t.Fatalf("the Job renders no %q container", dindContainerName)
 	}
-	if runner.Resources == nil {
-		t.Fatalf("the %q container renders no resources, so the run has no share", runnerContainerName)
+	if dind.StartupProbe == nil || dind.StartupProbe.Exec == nil {
+		t.Fatalf("the dind startupProbe is %+v, want an exec action run inside the container", dind.StartupProbe)
 	}
-	if requests, limits := runner.Resources.Requests, runner.Resources.Limits; requests != limits {
-		t.Errorf("the runner's requests %+v differ from its limits %+v: the share must be promised, not burst", requests, limits)
+	if len(dind.StartupProbe.Exec.Command) == 0 {
+		t.Errorf("the dind startupProbe exec action runs no command")
 	}
-	spec := goldenSpec()
-	share := ResourceList{CPU: strconv.Itoa(spec.CPUs), Memory: strconv.Itoa(spec.MemoryGB) + "Gi"}
-	if got := runner.Resources.Requests; got != share {
-		t.Errorf("the runner's requests are %+v, want the Spec's share %+v", got, share)
+	document := string(plan.Job.JSON())
+	for _, probe := range []string{`"tcpSocket"`, `"httpGet"`} {
+		if strings.Contains(document, probe) {
+			t.Errorf("the Job renders %s, which the kubelet dials from the node and never reaches the engine:\n%s", probe, document)
+		}
+	}
+}
+
+// TestRenderJobRunnerDoesNotWaitForSidecarExit holds Job completion to the
+// runner: the pod's regular containers are the runner alone, so the Job reports
+// Complete when the runner exits rather than waiting for an engine that never
+// exits (gt-etbor).
+func TestRenderJobRunnerDoesNotWaitForSidecarExit(t *testing.T) {
+	t.Parallel()
+	plan, err := Kubernetes{}.Render(goldenSpec())
+	if err != nil {
+		t.Fatalf("rendering the golden spec: %v", err)
+	}
+	containers := plan.Job.Spec.Template.Spec.Containers
+	if len(containers) != 1 || containers[0].Name != runnerContainerName {
+		t.Fatalf("the pod's regular containers are %+v, want only %q: a regular %q container keeps the Job Running after the runner exits", containers, runnerContainerName, dindContainerName)
 	}
 }
 
@@ -75,6 +140,21 @@ func TestK8sRenderPriorityAndSafety(t *testing.T) {
 	}
 	if backoff := plan.Job.Spec.BackoffLimit; backoff == nil || *backoff != 0 {
 		t.Errorf("backoffLimit = %v, want 0: a failed run is not retried", backoff)
+	}
+	runner, ok := containerNamed(plan.Job, runnerContainerName)
+	if !ok {
+		t.Fatalf("the Job renders no %q container", runnerContainerName)
+	}
+	if runner.Resources == nil {
+		t.Fatalf("the %q container renders no resources, so the run has no share", runnerContainerName)
+	}
+	if requests, limits := runner.Resources.Requests, runner.Resources.Limits; requests != limits {
+		t.Errorf("the runner's requests %+v differ from its limits %+v: the share must be promised, not burst", requests, limits)
+	}
+	spec := goldenSpec()
+	share := ResourceList{CPU: strconv.Itoa(spec.CPUs), Memory: strconv.Itoa(spec.MemoryGB) + "Gi"}
+	if got := runner.Resources.Requests; got != share {
+		t.Errorf("the runner's requests are %+v, want the Spec's share %+v", got, share)
 	}
 	if document := string(plan.Job.JSON()); strings.Contains(document, "hostPath") {
 		t.Errorf("the Job mounts a host path, which ties the run to one node:\n%s", document)
@@ -448,23 +528,30 @@ func TestK8sPollEndedIsTrueOnlyOnAnEndedJob(t *testing.T) {
 	}
 }
 
-// containerNamed returns the pod's container called name.
+// containerNamed returns the pod's container called name, init container or
+// regular one.
 func containerNamed(job *Job, name string) (Container, bool) {
-	for _, container := range job.Spec.Template.Spec.Containers {
-		if container.Name == name {
-			return container, true
+	pod := job.Spec.Template.Spec
+	for _, containers := range [][]Container{pod.InitContainers, pod.Containers} {
+		for _, container := range containers {
+			if container.Name == name {
+				return container, true
+			}
 		}
 	}
 	return Container{}, false
 }
 
 // privilegedContainers returns the names of the pod's privileged containers, in
-// the order the pod lists them.
+// the order the pod lists them, its init containers first.
 func privilegedContainers(job *Job) []string {
 	var names []string
-	for _, container := range job.Spec.Template.Spec.Containers {
-		if container.SecurityContext != nil && container.SecurityContext.Privileged {
-			names = append(names, container.Name)
+	pod := job.Spec.Template.Spec
+	for _, containers := range [][]Container{pod.InitContainers, pod.Containers} {
+		for _, container := range containers {
+			if container.SecurityContext != nil && container.SecurityContext.Privileged {
+				names = append(names, container.Name)
+			}
 		}
 	}
 	return names
