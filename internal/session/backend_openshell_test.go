@@ -1676,9 +1676,9 @@ func TestOpenShellKubernetesDriverConfigSendsOnlyWhatIsSet(t *testing.T) {
 			want:   "",
 		},
 		{
-			name:   "a cache claim alone mounts the shared claim at the cache dir",
+			name:   "a cache claim alone mounts the workspace and the shared claim",
 			mutate: func(p *Profile) { p.KubernetesCacheClaim = "gt-shared-cache" },
-			want:   `{"kubernetes":{"containers":{"agent":{"volume_mounts":[{"name":"gt-cache","mount_path":"/sandbox/.cache","read_only":false}]}},"volumes":[{"name":"gt-cache","persistent_volume_claim":{"claim_name":"gt-shared-cache","read_only":false}}]}}`,
+			want:   `{"kubernetes":{"containers":{"agent":{"volume_mounts":[{"name":"workspace","mount_path":"/sandbox","read_only":false},{"name":"gt-cache","mount_path":"/sandbox/.cache","read_only":false}]}},"volumes":[{"name":"gt-cache","persistent_volume_claim":{"claim_name":"gt-shared-cache","read_only":false}}]}}`,
 		},
 		{
 			name: "a cache claim with limits sends both",
@@ -1686,7 +1686,7 @@ func TestOpenShellKubernetesDriverConfigSendsOnlyWhatIsSet(t *testing.T) {
 				p.KubernetesCacheClaim = "gt-shared-cache"
 				p.Limits = &config.SandboxResources{Memory: "4Gi"}
 			},
-			want: `{"kubernetes":{"containers":{"agent":{"resources":{"limits":{"memory":"4Gi"}},"volume_mounts":[{"name":"gt-cache","mount_path":"/sandbox/.cache","read_only":false}]}},"volumes":[{"name":"gt-cache","persistent_volume_claim":{"claim_name":"gt-shared-cache","read_only":false}}]}}`,
+			want: `{"kubernetes":{"containers":{"agent":{"resources":{"limits":{"memory":"4Gi"}},"volume_mounts":[{"name":"workspace","mount_path":"/sandbox","read_only":false},{"name":"gt-cache","mount_path":"/sandbox/.cache","read_only":false}]}},"volumes":[{"name":"gt-cache","persistent_volume_claim":{"claim_name":"gt-shared-cache","read_only":false}}]}}`,
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -1704,6 +1704,87 @@ func TestOpenShellKubernetesDriverConfigSendsOnlyWhatIsSet(t *testing.T) {
 				t.Fatalf("DriverConfigJSON = %s, want %q", cs.DriverConfigJSON, c.want)
 			}
 		})
+	}
+}
+
+// A cache claim makes the driver config's volume_mounts non-empty, and that
+// replaces the gateway's default workspace mount at /sandbox. The driver config
+// names the controller-created workspace volume first so the sandbox keeps a
+// writable /sandbox, and the cache second; volumes lists only the claim gt
+// supplies, because the controller adds the workspace volume itself.
+func TestKubernetesDriverConfigMountsTheWorkspaceWithTheCacheClaim(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	p := Profile{
+		Name:                 "polecat-default",
+		Image:                "img",
+		Policy:               openshellTestProfile.Policy,
+		Driver:               DriverKubernetes,
+		KubernetesCacheClaim: "gt-shared-cache",
+	}
+	b, _ := openshellTestBackend(town, p, &sandbox.Fake{})
+
+	cs, err := b.createSpec(openshellSpawn(town, work), sandboxTracker{})
+	if err != nil {
+		t.Fatalf("createSpec: %v", err)
+	}
+	want := `{"kubernetes":{"containers":{"agent":{"volume_mounts":[{"name":"workspace","mount_path":"/sandbox","read_only":false},{"name":"gt-cache","mount_path":"/sandbox/.cache","read_only":false}]}},"volumes":[{"name":"gt-cache","persistent_volume_claim":{"claim_name":"gt-shared-cache","read_only":false}}]}}`
+	if cs.DriverConfigJSON != want {
+		t.Fatalf("DriverConfigJSON = %s, want %s", cs.DriverConfigJSON, want)
+	}
+}
+
+// A profile with no cache claim keeps today's driver config byte for byte: no
+// volume_mounts and no volumes, so the gateway's own workspace mount stands.
+func TestKubernetesDriverConfigWithoutACacheClaimIsUnchanged(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	p := Profile{
+		Name:          "polecat-default",
+		Image:         "img",
+		Policy:        openshellTestProfile.Policy,
+		Driver:        DriverKubernetes,
+		NodeSelector:  map[string]string{"gt.dev/pool": "sandbox"},
+		Tolerations:   []config.SandboxToleration{{Key: "gt.dev/sandbox", Operator: "Equal", Value: "true", Effect: "NoSchedule"}},
+		PriorityClass: "gt-sandbox",
+		RuntimeClass:  "gvisor",
+		Requests:      &config.SandboxResources{CPU: "1", Memory: "2Gi"},
+		Limits:        &config.SandboxResources{CPU: "2", Memory: "4Gi"},
+	}
+	b, _ := openshellTestBackend(town, p, &sandbox.Fake{})
+
+	cs, err := b.createSpec(openshellSpawn(town, work), sandboxTracker{})
+	if err != nil {
+		t.Fatalf("createSpec: %v", err)
+	}
+	want := `{"kubernetes":{"containers":{"agent":{"resources":{"limits":{"cpu":"2","memory":"4Gi"},"requests":{"cpu":"1","memory":"2Gi"}}}},"pod":{"node_selector":{"gt.dev/pool":"sandbox"},"priority_class_name":"gt-sandbox","runtime_class_name":"gvisor","tolerations":[{"key":"gt.dev/sandbox","operator":"Equal","value":"true","effect":"NoSchedule"}]}}}`
+	if cs.DriverConfigJSON != want {
+		t.Fatalf("DriverConfigJSON = %s, want %s", cs.DriverConfigJSON, want)
+	}
+}
+
+// Resource limits and a cache claim land in one agent container: the sizing is
+// not dropped when the workspace mount joins the cache mount.
+func TestKubernetesDriverConfigWorkspaceMountSurvivesResourceLimits(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	p := Profile{
+		Name:                 "polecat-default",
+		Image:                "img",
+		Policy:               openshellTestProfile.Policy,
+		Driver:               DriverKubernetes,
+		KubernetesCacheClaim: "gt-shared-cache",
+		Limits:               &config.SandboxResources{CPU: "2", Memory: "4Gi"},
+	}
+	b, _ := openshellTestBackend(town, p, &sandbox.Fake{})
+
+	cs, err := b.createSpec(openshellSpawn(town, work), sandboxTracker{})
+	if err != nil {
+		t.Fatalf("createSpec: %v", err)
+	}
+	want := `{"kubernetes":{"containers":{"agent":{"resources":{"limits":{"cpu":"2","memory":"4Gi"}},"volume_mounts":[{"name":"workspace","mount_path":"/sandbox","read_only":false},{"name":"gt-cache","mount_path":"/sandbox/.cache","read_only":false}]}},"volumes":[{"name":"gt-cache","persistent_volume_claim":{"claim_name":"gt-shared-cache","read_only":false}}]}}`
+	if cs.DriverConfigJSON != want {
+		t.Fatalf("DriverConfigJSON = %s, want %s", cs.DriverConfigJSON, want)
 	}
 }
 

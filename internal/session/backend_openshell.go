@@ -1307,8 +1307,9 @@ type kubernetesDriverConfigJSON struct {
 	Kubernetes kubernetesPodDriverConfig `json:"kubernetes"`
 }
 
-// kubernetesPodDriverConfig is placement under pod and the agent container's
-// sizing under containers.agent.resources.
+// kubernetesPodDriverConfig is placement under pod, and the agent container's
+// sizing under containers.agent.resources and its mounts under
+// containers.agent.volume_mounts.
 type kubernetesPodDriverConfig struct {
 	// Containers precedes Pod and Volumes follows them so the marshaled keys stay
 	// alphabetical, the order the golden tests pin.
@@ -1332,6 +1333,15 @@ type kubernetesClaimSource struct {
 
 // kubernetesCacheVolumeName is the fixed name of the cache volume in the pod.
 const kubernetesCacheVolumeName = "gt-cache"
+
+// kubernetesWorkspaceVolumeName is the name of the workspace volume the Agent
+// Sandbox controller creates from the Sandbox's volumeClaimTemplates. The
+// gateway mounts it at sandboxHome by default, but a non-empty
+// containers.agent.volume_mounts replaces that default, so the driver config
+// names the mount explicitly. The volume itself stays out of volumes: the
+// controller adds it from the claim template, so only the mount is configured
+// here.
+const kubernetesWorkspaceVolumeName = "workspace"
 
 // kubernetesVolumeMount mounts one of the pod's volumes into a container.
 type kubernetesVolumeMount struct {
@@ -1395,7 +1405,10 @@ func kubernetesDriverConfig(p Profile) (string, error) {
 			Name:                  kubernetesCacheVolumeName,
 			PersistentVolumeClaim: kubernetesClaimSource{ClaimName: p.KubernetesCacheClaim},
 		}}
-		agent.VolumeMounts = []kubernetesVolumeMount{{Name: kubernetesCacheVolumeName, MountPath: sandboxCacheDir}}
+		agent.VolumeMounts = []kubernetesVolumeMount{
+			{Name: kubernetesWorkspaceVolumeName, MountPath: sandboxHome},
+			{Name: kubernetesCacheVolumeName, MountPath: sandboxCacheDir},
+		}
 	}
 	if agent.Resources != nil || agent.VolumeMounts != nil {
 		cfg.Kubernetes.Containers = &kubernetesContainers{Agent: agent}
