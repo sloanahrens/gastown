@@ -21,8 +21,9 @@ const (
 	OwnerDolt      = "dolt"
 	OwnerDashboard = "dashboard"
 	OwnerOther     = "other"
-	OwnerCrew      = "crew" // prefix: crew/<name>
-	OwnerVM        = "vm"   // prefix: vm/<program>
+	OwnerCrew      = "crew"    // prefix: crew/<name>
+	OwnerPolecat   = "polecat" // prefix: polecat/<name>
+	OwnerVM        = "vm"      // prefix: vm/<program>
 )
 
 // Row is one owner's share of a sample: its processes' CPU summed, in percent
@@ -58,6 +59,8 @@ func Classify(cwd, command string) string {
 var pathRules = []pathRule{
 	// <town>/<rig>/crew/<name>: the worktree a bird or crew session runs in.
 	{owner: OwnerCrew, segment: "crew", each: true},
+	// <town>/<rig>/polecats/<name>: the worktree a polecat session runs in.
+	{owner: OwnerPolecat, segment: "polecats", each: true},
 	// The landing gates' throwaway trees, gt-landing-<uid> and
 	// gt-landing.noindex.
 	{owner: OwnerLanding, segment: "gt-landing", prefix: true},
