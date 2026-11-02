@@ -12,6 +12,9 @@ func TestSlowTextHint(t *testing.T) {
 	}{
 		{"timeout", "the request hit a timeout", true},
 		{"timed out", "TestFoo timed out on CI", true},
+		{"timed-out", "a timed-out request", true},
+		{"time-out", "a time-out occurred", true},
+		{"time-outs", "two time-outs in a row", true},
 		{"times out", "the suite times out on CI", true},
 		{"slow", "this is a slow test", true},
 		{"uppercase", "TIMEOUT while building", true},
@@ -23,6 +26,9 @@ func TestSlowTextHint(t *testing.T) {
 		{"slowly varying", "slowly varying input", false},
 		{"timeline", "the timeline of events", false},
 		{"sleep removed", "the sleep is removed", false},
+		{"metres", "a wall 3 m tall", false},
+		{"metres decimal", "the 2.5 m board", false},
+		{"metres per second", "run at 10 m/s", false},
 		{"empty", "", false},
 	}
 	for _, tt := range tests {
