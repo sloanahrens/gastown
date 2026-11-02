@@ -197,16 +197,32 @@ func TestSlingContextScanMarker(t *testing.T) {
 		}
 	})
 
-	t.Run("content that is not a scan record is an error", func(t *testing.T) {
-		t.Parallel()
-		townRoot := t.TempDir()
-		// A torn write, or a marker from a format this binary does not know: the
-		// skip may not rest on either, so the read fails open to a full scan.
-		writeMarker(t, townRoot, "a newer gt's marker\n")
-		if _, err := slingContextScanMarker(townRoot, osSlingContextStampFS); err == nil {
-			t.Fatal("slingContextScanMarker read a foreign marker as a scan record; it must fail open to a full scan")
-		}
-	})
+	for _, content := range []struct {
+		name    string
+		content string
+	}{
+		{
+			// A torn write, or a marker from a format this binary does not know.
+			name:    "one field",
+			content: "a newer gt's marker\n",
+		},
+		{
+			// Two fields, but the first is not a time: the skip may rest on
+			// neither, so the read fails open to a full scan.
+			name:    "two fields whose date does not parse",
+			content: "not-a-timestamp " + slingContextScanEmpty + "\n",
+		},
+	} {
+		content := content
+		t.Run("content that is not a scan record is an error: "+content.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			writeMarker(t, townRoot, content.content)
+			if _, err := slingContextScanMarker(townRoot, osSlingContextStampFS); err == nil {
+				t.Fatal("slingContextScanMarker read a foreign marker as a scan record; it must fail open to a full scan")
+			}
+		})
+	}
 }
 
 // writeMarker plants marker content at the town's marker path.
