@@ -3,15 +3,15 @@
 // get, the claim, release and transfer guards, the plain close those guards
 // refuse, a status write with the guards and the child and blocker fences,
 // the creates a Batch applies, the comments and links an export reads, the
-// counts a stats read reports, the key-value pairs a kv write sets and a kv
-// read returns, and the tokens an admin issues and revokes. GetIssues fills
-// Dependencies and Dependents, as the real store does; ListIssues, ChildrenOf
-// and Comments answer the reads the bd shim's handlers make (gt-p85pw.94),
-// CommentCounts returns each issue's comment count in one read, UpdateIssue
-// answers the status the shim's update, close and reopen write (gt-p85pw.96),
-// the text fields its delete and defer write (gt-p85pw.97) and the label patches
-// its label handler writes (gt-p85pw.98), and DeleteIssues deletes a batch with
-// its links. Every other method returns
+// counts a stats read reports, and the tokens an admin issues and revokes.
+// The methods also cover the key-value pairs a kv write sets and a kv read
+// returns. GetIssues fills Dependencies and Dependents, as the real store
+// does; ListIssues, ChildrenOf and Comments answer the reads the bd shim's
+// handlers make (gt-p85pw.94), CommentCounts returns each issue's comment
+// count in one read, UpdateIssue answers the status the shim's update, close
+// and reopen write (gt-p85pw.96), the text fields its delete and defer write
+// (gt-p85pw.97) and the label patches its label handler writes (gt-p85pw.98),
+// and DeleteIssues deletes a batch with its links. Every other method returns
 // store.ErrUnimplemented, so a unit test that reaches past them fails loudly
 // rather than reading a store that only looks modeled.
 package storetest
@@ -40,11 +40,11 @@ type Fake struct {
 	links    []api.ExportDependency
 	// tokens is keyed by the token itself; the fake keeps no hash because
 	// nothing it holds ever leaves this process.
-	tokens map[string]fakeToken
-	// kv holds the key-value pairs a kv write sets.
-	kv        map[string]string
+	tokens    map[string]fakeToken
 	next      int
 	nextToken int
+	// kv holds the key-value pairs a kv write sets.
+	kv map[string]string
 }
 
 // fakeToken is one issued token as the fake keeps it.
