@@ -921,6 +921,9 @@ type doneRun struct {
 	// recordAgentState is the CLI layer's agent-bead state write; nil when the
 	// caller has no agent bead to write.
 	recordAgentState func(cwd, townRoot, exitType, issueID string, pending beads.AgentFieldUpdates) (bool, error)
+	// logEvent writes the run's feed events; nil means events.LogFeed. It is a
+	// seam so a test can read what gt done records without a town log.
+	logEvent func(eventType, actor string, payload map[string]interface{}) error
 	// findings are the --finding texts this run records on the source bead.
 	findings []string
 	// recordFindings writes findings; nil skips the write.
@@ -1752,6 +1755,22 @@ func markReadyToLand(bd beads.Client, w land.Work) error {
 	return nil
 }
 
+// recordDoneEvent logs how the run ended, the exit type named in the event's
+// status. The dispatch clock ends a bead's run on this event (events.DispatchStart),
+// so an escalated exit — which submits nothing and so has no submission for the
+// host to repair a lost event from (gt-1m9gr) — must record that its run is
+// over; otherwise the next seat inherits the previous seat's clock and the
+// overrun guard stops it at once (gt-ntvac).
+func (r *doneRun) recordDoneEvent(exitType string) {
+	logEvent := r.logEvent
+	if logEvent == nil {
+		logEvent = events.LogFeed
+	}
+	if err := logEvent(events.TypeDone, r.sender, events.DonePayloadWithStatus(r.issueID, r.branch, exitType)); err != nil {
+		style.PrintWarning("could not log done event: %v", err)
+	}
+}
+
 // reportDone records on the agent bead how the run ended, then retires the
 // session. Only runs that succeeded reach it.
 func reportDone(r *doneRun, exitType string) error {
@@ -1791,9 +1810,7 @@ func reportDone(r *doneRun, exitType string) error {
 		consumed = true
 	}
 
-	if err := events.LogFeed(events.TypeDone, r.sender, events.DonePayload(r.issueID, r.branch)); err != nil {
-		style.PrintWarning("could not log done event: %v", err)
-	}
+	r.recordDoneEvent(exitType)
 
 	// Update agent bead state (ZFC: self-report completion). The write lives
 	// in the CLI layer (it closes the hooked bead against the close

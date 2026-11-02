@@ -429,12 +429,36 @@ func HandoffPayload(subject string, toSession bool) map[string]interface{} {
 	return p
 }
 
-// DonePayload creates a payload for done events.
+// Exit statuses a done event's payload records, the values gt done accepts in
+// --status. They live here because the dispatch clock reads them and this
+// package cannot import internal/done (which imports this one); a test in
+// internal/done holds the two sets equal.
+const (
+	DoneStatusCompleted = "COMPLETED" // the seat submitted the work for landing
+	DoneStatusEscalated = "ESCALATED" // the seat stopped on a blocker, bead left open
+	DoneStatusDeferred  = "DEFERRED"  // the seat paused the work for a later turn
+)
+
+// DonePayload creates a payload for done events that do not record their exit
+// status: the host's repaired event for a sandbox seat's submission, and events
+// written before the status was logged.
 func DonePayload(beadID, branch string) map[string]interface{} {
-	return map[string]interface{}{
+	return DonePayloadWithStatus(beadID, branch, "")
+}
+
+// DonePayloadWithStatus creates a payload for a done event that records how the
+// seat's turn ended. status is the gt done exit type (DoneStatus*), "" to omit
+// it. The dispatch clock reads it to tell a run that ended from a move of the
+// bead between live seats (DispatchStart).
+func DonePayloadWithStatus(beadID, branch, status string) map[string]interface{} {
+	p := map[string]interface{}{
 		"bead":   beadID,
 		"branch": branch,
 	}
+	if status != "" {
+		p["status"] = status
+	}
+	return p
 }
 
 // MailPayload creates a payload for mail events.

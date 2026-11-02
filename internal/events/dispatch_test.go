@@ -523,3 +523,96 @@ func TestDispatchedByReadsTheRunCurrentAtEnd(t *testing.T) {
 		})
 	}
 }
+
+// dispatchDoneEv builds a done event that records the exit status gt done logs
+// (DonePayloadWithStatus), so a test can tell an escalated turn from a
+// submission.
+func dispatchDoneEv(at, bead, status string) Event {
+	return Event{
+		Timestamp: at,
+		Type:      TypeDone,
+		Payload:   DonePayloadWithStatus(bead, "polecat/x/"+bead, status),
+	}
+}
+
+// An escalated seat submits nothing, so no submission repairs a lost done event
+// for it (gt-1m9gr) and its done event is the only record that the run is over.
+// The next dispatch of the bead must start a fresh clock: a run left open dates
+// the next seat from the previous seat's sling, and the overrun guard stops it
+// at once on that clock (gt-ntvac).
+func TestDispatchClockEscalatedDoneEndsRun(t *testing.T) {
+	t.Parallel()
+	clock := NewDispatchClock()
+	clock.Add([]Event{
+		dispatchSlingEv(t9, "gt-a", "gastown/polecats/dementus", "gastown/polecats/dementus"),
+		dispatchDoneEv(t10, "gt-a", DoneStatusEscalated),
+		dispatchSlingEv(t11, "gt-a", "town/crew/overseer", "gastown/polecats/furiosa"),
+	})
+	got, ok := clock.Start("gt-a")
+	if !ok || !got.Equal(mustTime(t, t11)) {
+		t.Errorf("start = %v (%t), want %s: the escalated run's end starts the next run", got, ok, t11)
+	}
+}
+
+// A done event for a submitted bead ends the run as it always has, so a rework
+// slung after it is judged from its own dispatch.
+func TestDispatchClockSubmittedDoneStillEndsRun(t *testing.T) {
+	t.Parallel()
+	clock := NewDispatchClock()
+	clock.Add([]Event{
+		dispatchSlingEv(t9, "gt-a", "gastown/polecats/nux", "gastown/polecats/nux"),
+		dispatchDoneEv(t10, "gt-a", DoneStatusCompleted),
+		dispatchSlingEv(t11, "gt-a", "gastown/polecats/capable", "gastown/polecats/capable"),
+	})
+	got, ok := clock.Start("gt-a")
+	if !ok || !got.Equal(mustTime(t, t11)) {
+		t.Errorf("start = %v (%t), want %s: the submitted run's end starts the rework", got, ok, t11)
+	}
+}
+
+// A bead handed from one live seat to another keeps the clock it went out on:
+// neither seat ended its turn, so there is no run end between the slings and the
+// first dispatch stays the bead's clock (gt-ntvac, gt-3ga5l).
+func TestDispatchClockHandoffKeepsClock(t *testing.T) {
+	t.Parallel()
+	clock := NewDispatchClock()
+	clock.Add([]Event{
+		dispatchSlingEv(t9, "gt-a", "gastown/polecats/nux", "gastown/polecats/nux"),
+		dispatchSlingEv(t11, "gt-a", "gastown/polecats/capable", "gastown/polecats/capable"),
+	})
+	got, ok := clock.Start("gt-a")
+	if !ok || !got.Equal(mustTime(t, t9)) {
+		t.Errorf("start = %v (%t), want %s: a seat-to-seat handoff keeps the run", got, ok, t9)
+	}
+}
+
+// A done event whose status the clock does not know is not read as a turn end:
+// the clock refuses to move a boundary on a value it cannot interpret, and a
+// run left long errs toward not stopping the next seat. A status of the wrong
+// type is the same refusal.
+func TestDispatchClockIgnoresAnUnknownDoneStatus(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name   string
+		status interface{}
+	}{
+		{name: "an exit the clock does not know", status: "PHASE_COMPLETE"},
+		{name: "a status that is not a string", status: 200},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			done := dispatchDoneEv(t10, "gt-a", "")
+			done.Payload["status"] = tt.status
+			clock := NewDispatchClock()
+			clock.Add([]Event{
+				dispatchSlingEv(t9, "gt-a", "gastown/polecats/nux", "gastown/polecats/nux"),
+				done,
+				dispatchSlingEv(t11, "gt-a", "gastown/polecats/capable", "gastown/polecats/capable"),
+			})
+			got, ok := clock.Start("gt-a")
+			if !ok || !got.Equal(mustTime(t, t9)) {
+				t.Errorf("start = %v (%t), want %s: an unreadable status does not end the run", got, ok, t9)
+			}
+		})
+	}
+}
