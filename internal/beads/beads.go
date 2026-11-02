@@ -2144,32 +2144,18 @@ func (b *Beads) KVSet(key, value string) error {
 // withKVSetReason adds bd's own explanation to a failed kv set. bd runs in
 // machine mode, where it reports a failure's reason in the stdout error
 // envelope and writes nothing to stderr, so the run error alone reads as a
-// bare exit status (gt-gjuvg). A reason the error already carries — bd's
-// stderr, or the same message — is not repeated.
+// bare exit status (gt-gjuvg). withBDMessage decodes that envelope, and its
+// message is appended here so the error keeps the command bd ran. A reason
+// the error already carries is not repeated.
 func withKVSetReason(err error) error {
-	var failed *unavailableError
-	if !errors.As(err, &failed) {
+	var named *bdMessageError
+	if !errors.As(withBDMessage(err), &named) {
 		return err
 	}
-	var envelope struct {
-		Error json.RawMessage `json:"error"`
-	}
-	if json.Unmarshal(bytes.TrimSpace(failed.stdout), &envelope) != nil || len(envelope.Error) == 0 {
+	if strings.Contains(err.Error(), named.msg) {
 		return err
 	}
-	var reason string
-	var typed struct {
-		Message string `json:"message"`
-	}
-	if json.Unmarshal(envelope.Error, &typed) == nil {
-		reason = typed.Message
-	} else if json.Unmarshal(envelope.Error, &reason) != nil {
-		return err
-	}
-	if reason == "" || strings.Contains(err.Error(), reason) {
-		return err
-	}
-	return fmt.Errorf("%w: %s", err, reason)
+	return fmt.Errorf("%w: %s", err, named.msg)
 }
 
 // The key prefixes that name a memory: gt.* and the legacy memory.*. The
