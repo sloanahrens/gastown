@@ -1762,8 +1762,10 @@ type SandboxProfile struct {
 	CacheVolume      string   `json:"cache_volume,omitempty"` // "{rig}" expands to the rig name
 	Driver           string   `json:"driver,omitempty"`       // the gateway's compute driver: "docker" (default) or "kubernetes"
 	// KubernetesCacheClaim names a shared PersistentVolumeClaim the kubernetes
-	// driver mounts at /sandbox/.cache; "" means no cache mount. Validate refuses
-	// it on a docker profile (the Docker cache path is closed).
+	// driver mounts at /tmp/gt-cache; "" means no cache mount. It stays outside
+	// /sandbox because a mount under /sandbox replaces the sandbox's workspace
+	// PVC. Validate refuses it on a docker profile (the Docker cache path is
+	// closed).
 	KubernetesCacheClaim string `json:"kubernetes_cache_claim,omitempty"`
 
 	// Kubernetes pod placement and sizing, sent as driver config only for a

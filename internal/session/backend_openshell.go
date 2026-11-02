@@ -39,7 +39,8 @@ func init() { NewOpenShellBackend = newOpenShellBackend }
 const (
 	sandboxHome             = "/sandbox"        // the sandbox's root; uploads land here
 	sandboxTownRoot         = "/sandbox/gt"     // the skeleton's town root inside the sandbox
-	sandboxCacheDir         = "/sandbox/.cache" // the cache volume's mount point
+	sandboxCacheDir         = "/tmp/gt-cache"   // the cache claim's mount point, outside /sandbox
+	dockerCacheDir          = "/sandbox/.cache" // the docker cache volume's mount point
 	sandboxDoltPort         = "3307"
 	defaultControlPlaneHost = "host.docker.internal"
 	skeletonArchive         = "town-skel.tgz"
@@ -1334,15 +1335,6 @@ type kubernetesClaimSource struct {
 // kubernetesCacheVolumeName is the fixed name of the cache volume in the pod.
 const kubernetesCacheVolumeName = "gt-cache"
 
-// kubernetesWorkspaceVolumeName is the name of the workspace volume the Agent
-// Sandbox controller creates from the Sandbox's volumeClaimTemplates. The
-// gateway mounts it at sandboxHome by default, but a non-empty
-// containers.agent.volume_mounts replaces that default, so the driver config
-// names the mount explicitly. The volume itself stays out of volumes: the
-// controller adds it from the claim template, so only the mount is configured
-// here.
-const kubernetesWorkspaceVolumeName = "workspace"
-
 // kubernetesVolumeMount mounts one of the pod's volumes into a container.
 type kubernetesVolumeMount struct {
 	Name      string `json:"name"`
@@ -1405,10 +1397,10 @@ func kubernetesDriverConfig(p Profile) (string, error) {
 			Name:                  kubernetesCacheVolumeName,
 			PersistentVolumeClaim: kubernetesClaimSource{ClaimName: p.KubernetesCacheClaim},
 		}}
-		agent.VolumeMounts = []kubernetesVolumeMount{
-			{Name: kubernetesWorkspaceVolumeName, MountPath: sandboxHome},
-			{Name: kubernetesCacheVolumeName, MountPath: sandboxCacheDir},
-		}
+		// The claim is mounted outside /sandbox: a mount under /sandbox replaces
+		// the sandbox's workspace PVC, and the gateway refuses the workspace
+		// volume the driver config used to name (gt-kih5p).
+		agent.VolumeMounts = []kubernetesVolumeMount{{Name: kubernetesCacheVolumeName, MountPath: sandboxCacheDir}}
 	}
 	if agent.Resources != nil || agent.VolumeMounts != nil {
 		cfg.Kubernetes.Containers = &kubernetesContainers{Agent: agent}
@@ -1426,7 +1418,7 @@ func cacheDriverConfig(volume, rig string) (string, error) {
 	mount := map[string]any{
 		"type":      "volume",
 		"source":    cacheVolumeName(volume, rig),
-		"target":    sandboxCacheDir,
+		"target":    dockerCacheDir,
 		"read_only": false,
 	}
 	cfg, err := json.Marshal(map[string]any{"docker": map[string]any{"mounts": []any{mount}}})

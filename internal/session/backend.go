@@ -30,7 +30,7 @@ type Profile struct {
 	CacheVolume      string   // named volume for /sandbox/.cache; "{rig}" expands; "" = none
 	Driver           string   // the gateway's compute driver: DriverDocker or DriverKubernetes; "" means docker
 	// KubernetesCacheClaim is the shared claim a kubernetes driver mounts at
-	// /sandbox/.cache; "" means no cache mount (gt-zl804).
+	// /tmp/gt-cache, outside /sandbox; "" means no cache mount (gt-zl804).
 	KubernetesCacheClaim string
 
 	// Kubernetes pod placement and sizing; only a kubernetes driver sends

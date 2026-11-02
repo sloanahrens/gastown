@@ -6,7 +6,7 @@ import (
 )
 
 // A kubernetes profile may name a shared cache claim the driver mounts at
-// /sandbox/.cache; a docker or unset-driver profile may not, since the Docker
+// /tmp/gt-cache; a docker or unset-driver profile may not, since the Docker
 // cache path is closed (gt-jofne).
 func TestSandboxProfileKubernetesCacheClaim(t *testing.T) {
 	t.Parallel()

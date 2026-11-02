@@ -1676,9 +1676,9 @@ func TestOpenShellKubernetesDriverConfigSendsOnlyWhatIsSet(t *testing.T) {
 			want:   "",
 		},
 		{
-			name:   "a cache claim alone mounts the workspace and the shared claim",
+			name:   "a cache claim alone mounts the shared claim outside sandbox",
 			mutate: func(p *Profile) { p.KubernetesCacheClaim = "gt-shared-cache" },
-			want:   `{"kubernetes":{"containers":{"agent":{"volume_mounts":[{"name":"workspace","mount_path":"/sandbox","read_only":false},{"name":"gt-cache","mount_path":"/sandbox/.cache","read_only":false}]}},"volumes":[{"name":"gt-cache","persistent_volume_claim":{"claim_name":"gt-shared-cache","read_only":false}}]}}`,
+			want:   `{"kubernetes":{"containers":{"agent":{"volume_mounts":[{"name":"gt-cache","mount_path":"/tmp/gt-cache","read_only":false}]}},"volumes":[{"name":"gt-cache","persistent_volume_claim":{"claim_name":"gt-shared-cache","read_only":false}}]}}`,
 		},
 		{
 			name: "a cache claim with limits sends both",
@@ -1686,7 +1686,7 @@ func TestOpenShellKubernetesDriverConfigSendsOnlyWhatIsSet(t *testing.T) {
 				p.KubernetesCacheClaim = "gt-shared-cache"
 				p.Limits = &config.SandboxResources{Memory: "4Gi"}
 			},
-			want: `{"kubernetes":{"containers":{"agent":{"resources":{"limits":{"memory":"4Gi"}},"volume_mounts":[{"name":"workspace","mount_path":"/sandbox","read_only":false},{"name":"gt-cache","mount_path":"/sandbox/.cache","read_only":false}]}},"volumes":[{"name":"gt-cache","persistent_volume_claim":{"claim_name":"gt-shared-cache","read_only":false}}]}}`,
+			want: `{"kubernetes":{"containers":{"agent":{"resources":{"limits":{"memory":"4Gi"}},"volume_mounts":[{"name":"gt-cache","mount_path":"/tmp/gt-cache","read_only":false}]}},"volumes":[{"name":"gt-cache","persistent_volume_claim":{"claim_name":"gt-shared-cache","read_only":false}}]}}`,
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -1708,11 +1708,11 @@ func TestOpenShellKubernetesDriverConfigSendsOnlyWhatIsSet(t *testing.T) {
 }
 
 // A cache claim makes the driver config's volume_mounts non-empty, and that
-// replaces the gateway's default workspace mount at /sandbox. The driver config
-// names the controller-created workspace volume first so the sandbox keeps a
-// writable /sandbox, and the cache second; volumes lists only the claim gt
-// supplies, because the controller adds the workspace volume itself.
-func TestKubernetesDriverConfigMountsTheWorkspaceWithTheCacheClaim(t *testing.T) {
+// replaces the gateway's default workspace mount at /sandbox. The claim is
+// mounted at /tmp/gt-cache instead: a mount under /sandbox replaces the
+// sandbox's workspace PVC, and the gateway refuses a workspace volume named in
+// the driver config. The claim is the only mount and the only volume.
+func TestKubernetesDriverConfigMountsTheCacheClaimOutsideSandbox(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
 	p := Profile{
@@ -1728,7 +1728,7 @@ func TestKubernetesDriverConfigMountsTheWorkspaceWithTheCacheClaim(t *testing.T)
 	if err != nil {
 		t.Fatalf("createSpec: %v", err)
 	}
-	want := `{"kubernetes":{"containers":{"agent":{"volume_mounts":[{"name":"workspace","mount_path":"/sandbox","read_only":false},{"name":"gt-cache","mount_path":"/sandbox/.cache","read_only":false}]}},"volumes":[{"name":"gt-cache","persistent_volume_claim":{"claim_name":"gt-shared-cache","read_only":false}}]}}`
+	want := `{"kubernetes":{"containers":{"agent":{"volume_mounts":[{"name":"gt-cache","mount_path":"/tmp/gt-cache","read_only":false}]}},"volumes":[{"name":"gt-cache","persistent_volume_claim":{"claim_name":"gt-shared-cache","read_only":false}}]}}`
 	if cs.DriverConfigJSON != want {
 		t.Fatalf("DriverConfigJSON = %s, want %s", cs.DriverConfigJSON, want)
 	}
@@ -1764,8 +1764,8 @@ func TestKubernetesDriverConfigWithoutACacheClaimIsUnchanged(t *testing.T) {
 }
 
 // Resource limits and a cache claim land in one agent container: the sizing is
-// not dropped when the workspace mount joins the cache mount.
-func TestKubernetesDriverConfigWorkspaceMountSurvivesResourceLimits(t *testing.T) {
+// not dropped when the claim's mount joins the container.
+func TestKubernetesDriverConfigCacheClaimSurvivesResourceLimits(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
 	p := Profile{
@@ -1782,7 +1782,7 @@ func TestKubernetesDriverConfigWorkspaceMountSurvivesResourceLimits(t *testing.T
 	if err != nil {
 		t.Fatalf("createSpec: %v", err)
 	}
-	want := `{"kubernetes":{"containers":{"agent":{"resources":{"limits":{"cpu":"2","memory":"4Gi"}},"volume_mounts":[{"name":"workspace","mount_path":"/sandbox","read_only":false},{"name":"gt-cache","mount_path":"/sandbox/.cache","read_only":false}]}},"volumes":[{"name":"gt-cache","persistent_volume_claim":{"claim_name":"gt-shared-cache","read_only":false}}]}}`
+	want := `{"kubernetes":{"containers":{"agent":{"resources":{"limits":{"cpu":"2","memory":"4Gi"}},"volume_mounts":[{"name":"gt-cache","mount_path":"/tmp/gt-cache","read_only":false}]}},"volumes":[{"name":"gt-cache","persistent_volume_claim":{"claim_name":"gt-shared-cache","read_only":false}}]}}`
 	if cs.DriverConfigJSON != want {
 		t.Fatalf("DriverConfigJSON = %s, want %s", cs.DriverConfigJSON, want)
 	}
