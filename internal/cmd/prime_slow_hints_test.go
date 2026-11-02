@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -152,6 +154,41 @@ func TestPrimeSlowHintsSkipped(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Errorf("a skipped hint printed %q", out.String())
+	}
+}
+
+// gt-tdfbk: checkSlungWorkIn sets skipHints from continuation, so a fresh
+// polecat prime asks the hint source for a triggering bead and a continuation
+// prime never does. This drives the call site, not hookedSlowHints directly:
+// dropping the skipHints wiring makes the continuation row ask the source,
+// and dropping the hint parameter makes the fresh row miss the fake.
+func TestSlungWorkWiresTheSlowHint(t *testing.T) {
+	t.Parallel()
+	ctx := RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: t.TempDir()}
+	rows := []struct {
+		name         string
+		continuation bool
+		wantCalls    int
+	}{
+		{"fresh prime asks the source", false, 1},
+		{"continuation prime skips it", true, 0},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			fake := &primeSlowHintFake{hits: threeHintHits}
+			var out bytes.Buffer
+			if _, err := checkSlungWorkIn(&out, row.continuation, ctx, slowBead, fake.source); err != nil {
+				t.Fatalf("checkSlungWorkWithHint: %v", err)
+			}
+			if len(fake.calls) != row.wantCalls {
+				t.Fatalf("source calls = %d, want %d: %q", len(fake.calls), row.wantCalls, fake.calls)
+			}
+			printed := strings.Contains(out.String(), hmSlowHintHeading)
+			if want := row.wantCalls > 0; printed != want {
+				t.Errorf("printed hint heading = %v, want %v", printed, want)
+			}
+		})
 	}
 }
 

@@ -560,7 +560,7 @@ func TestCheckSlungWork_ContinuationModeDoesNotReannounce(t *testing.T) {
 	ctx := RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town, formulaOpen: polecatChecklistRun()}
 	bead := &beads.Issue{ID: "gt-cont1", Title: "Continue me", Description: "attached_formula: mol-polecat-work\n"}
 	var buf bytes.Buffer
-	_, _ = checkSlungWorkIn(&buf, true, ctx, bead)
+	_, _ = checkSlungWorkIn(&buf, true, ctx, bead, nil)
 	out := buf.String()
 	if strings.Contains(out, "AUTONOMOUS WORK MODE") || strings.Contains(out, "Announce:") {
 		t.Fatalf("post-compaction prime must not re-announce (GH#1965):\n%s", out[:min(len(out), 800)])
@@ -714,6 +714,6 @@ func TestPrimeRoleFixturesFitHookBudget(t *testing.T) {
 // renderSlungWork is the hooked-work section checkSlungWork renders for bead.
 func renderSlungWork(ctx RoleContext, bead *beads.Issue) string {
 	var b strings.Builder
-	_, _ = checkSlungWorkIn(&b, false, ctx, bead)
+	_, _ = checkSlungWorkIn(&b, false, ctx, bead, nil)
 	return b.String()
 }
