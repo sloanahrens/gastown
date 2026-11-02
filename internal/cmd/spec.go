@@ -1025,7 +1025,7 @@ func runSpecLint(cmd *cobra.Command, args []string) error {
 		path = specTemplatePath(loadSpecDispatchConfig(townRoot))
 	}
 	spec, err := specForLint(townRoot, args[0], func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) }, openRigTree)
-	return specLint(cmd.OutOrStdout(), cmd.ErrOrStderr(), args[0], spec, err, path, hmHintSource, specLintJSON)
+	return specLint(cmd.OutOrStdout(), cmd.ErrOrStderr(), args[0], spec, err, path, hmHintSource(nil), specLintJSON)
 }
 
 // specForLint reads beadID for gt spec lint with the target inventory the
@@ -1156,8 +1156,7 @@ type specLintReport struct {
 	NeedsPlanning bool                   `json:"needs_planning"`
 	Refusals      []specdispatch.Refusal `json:"refusals"`
 	// Hints are the town's prior records on slow tests, shown when the bead's
-	// text mentions one. The array is omitted when there are none, and it
-	// never changes the verdict (gt-p07bw).
+	// text mentions one. The array is omitted when there are none (gt-p07bw).
 	Hints []hmhints.Hit `json:"hints,omitempty"`
 }
 
@@ -1167,8 +1166,8 @@ type specLintReport struct {
 const (
 	specHintLimit = 3
 	specHintWords = "slow tests timeout"
-	// specHintTimeout bounds the hm query. The hint is advice, so it must
-	// never hold the lint's verdict.
+	// specHintTimeout bounds the hm query, so a hung hm delays the lint by at
+	// most this long.
 	specHintTimeout = 5 * time.Second
 )
 
@@ -1176,18 +1175,22 @@ const (
 // production source queries hm; tests pass a fake so no process starts.
 type specHintSource func(ctx context.Context, text string, limit int) ([]hmhints.Hit, error)
 
-// hmHintSource is the production specHintSource: hmhints.Query with the real
-// hm, under a 5 second context.
-func hmHintSource(ctx context.Context, text string, limit int) ([]hmhints.Hit, error) {
-	ctx, cancel := context.WithTimeout(ctx, specHintTimeout)
-	defer cancel()
-	return hmhints.Query(ctx, nil, text, limit)
+// hmHintSource returns the production specHintSource: hmhints.Query with run
+// (nil runs the real hm) under specHintTimeout. run is the seam hmhints.Query
+// already takes, so a test drives this wrapper with a fake and no hm process
+// starts (gt-xoqk0).
+func hmHintSource(run hmhints.Runner) specHintSource {
+	return func(ctx context.Context, text string, limit int) ([]hmhints.Hit, error) {
+		ctx, cancel := context.WithTimeout(ctx, specHintTimeout)
+		defer cancel()
+		return hmhints.Query(ctx, run, text, limit)
+	}
 }
 
 // specSlowHints asks hint for the top prior records on slow tests when the
 // bead's text mentions one, and returns nothing otherwise. A nil source, and
-// any hm failure (unavailable, timeout, bad output), is a bead without hints:
-// the hint is advice and never changes the verdict (gt-p07bw).
+// any hm failure (unavailable, timeout, bad output), is a bead without hints
+// (gt-p07bw).
 func specSlowHints(spec specdispatch.Spec, hint specHintSource) []hmhints.Hit {
 	if hint == nil || !specdispatch.SlowTextHint(spec.Title+"\n"+spec.Description) {
 		return nil
@@ -1241,7 +1244,7 @@ func specLint(out, errOut io.Writer, beadID string, spec specdispatch.Spec, show
 		code = specLintExitNeedsPlan
 	}
 	// The hint is asked for only after the code is decided, and it is written
-	// to errOut alone, so a hint can never move the verdict line or the exit.
+	// to errOut alone.
 	report.Hints = specSlowHints(spec, hint)
 	if !asJSON {
 		writeSpecHints(errOut, report.Hints)
