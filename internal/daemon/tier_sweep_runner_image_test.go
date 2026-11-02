@@ -17,9 +17,10 @@ import (
 )
 
 // tierSweepInstalledBuild is the revision the runner-image tests pin as the
-// installed gt's build: longer than the image tag names, so a test also holds
-// the tag to its 9 characters.
-const tierSweepInstalledBuild = "0123456789abcdef0123456789abcdef01234567"
+// installed gt's build: twelve characters, the length the installed gt records
+// on this host, so the tag test shows the daemon uses the recorded revision
+// whole rather than shortening it to a width of its own (gt-c3sue).
+const tierSweepInstalledBuild = "0123456789ab"
 
 // tierSweepImageRunner answers the docker commands the runner-image path
 // builds, through the daemon's command runner: the look in the sweep engine,
@@ -129,7 +130,8 @@ func runnerImageDaemon(t *testing.T, now time.Time, image string) (*Daemon, *tie
 // TestTierSweepRunnerImageDefaultsToInstalledBuild: an empty runner.image, or
 // the word installed, names the polecat image at the installed gt's build
 // revision, which is what the launch is handed; an explicit pin is used
-// unchanged; and a build with no revision cannot name an image at all.
+// unchanged; and a build whose recorded revision make never tagged cannot name
+// an image at all.
 func TestTierSweepRunnerImageDefaultsToInstalledBuild(t *testing.T) {
 	t.Parallel()
 
@@ -139,8 +141,8 @@ func TestTierSweepRunnerImageDefaultsToInstalledBuild(t *testing.T) {
 		image string
 		want  string
 	}{
-		{name: "empty follows the installed build", image: "", want: "gastown-polecat:012345678"},
-		{name: "installed follows the installed build", image: config.TierSweepRunnerInstalledImage, want: "gastown-polecat:012345678"},
+		{name: "empty follows the installed build", image: "", want: "gastown-polecat:0123456789ab"},
+		{name: "installed follows the installed build", image: config.TierSweepRunnerInstalledImage, want: "gastown-polecat:0123456789ab"},
 		{name: "an explicit pin stands", image: "gastown-polecat:23017b4dd", want: "gastown-polecat:23017b4dd"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -168,24 +170,86 @@ func TestTierSweepRunnerImageDefaultsToInstalledBuild(t *testing.T) {
 		})
 	}
 
-	t.Run("no installed revision is refused", func(t *testing.T) {
-		t.Parallel()
-		d, _ := runnerImageDaemon(t, atHour(time.Now(), 15), "")
-		d.buildCommitFn = func() string { return "" }
-		var launches int
-		d.tierSweepSeams.launch = func(context.Context, tierSweepStage, sweeprunner.Spec) tierSweepLaunch {
-			launches++
-			return tierSweepLaunch{exitCode: 0}
-		}
+	for _, tc := range []struct {
+		name     string
+		revision string
+		want     string // what the stage output names
+	}{
+		{name: "no installed revision", revision: "", want: "build commit"},
+		{name: "the Makefile's unanswered git", revision: "unknown", want: "build commit"},
+		{
+			// A full hash is the module's vcs.revision, recorded by a build
+			// outside make; make tags the image with the short abbreviation.
+			name:     "a full-length revision",
+			revision: "0123456789abcdef0123456789abcdef01234567",
+			want:     "full-length build commit",
+		},
+	} {
+		t.Run(tc.name+" is refused", func(t *testing.T) {
+			t.Parallel()
+			d, _ := runnerImageDaemon(t, atHour(time.Now(), 15), "")
+			d.buildCommitFn = func() string { return tc.revision }
+			var launches int
+			d.tierSweepSeams.launch = func(context.Context, tierSweepStage, sweeprunner.Spec) tierSweepLaunch {
+				launches++
+				return tierSweepLaunch{exitCode: 0}
+			}
 
-		res := d.tierSweepRunStage(context.Background(), t.TempDir(), st)
-		if !res.ran || res.reason == "" || !strings.Contains(res.reason, "build commit") {
-			t.Fatalf("stage result = %+v, want it RED naming the missing build commit", res)
+			res := d.tierSweepRunStage(context.Background(), t.TempDir(), st)
+			if !res.ran || res.reason == "" || !strings.Contains(res.reason, tc.want) {
+				t.Fatalf("stage result = %+v, want it RED naming the %q", res, tc.want)
+			}
+			if launches != 0 {
+				t.Errorf("launches = %d, want 0: an image no build published is never launched", launches)
+			}
+		})
+	}
+}
+
+// TestTierSweepRunnerImageMatchesMakefile pins the two Makefile facts the
+// installed-image name rests on: POLE_IMAGE is the repository the daemon names,
+// and the revision make embeds in the installed gt (COMMIT) is the same
+// `git rev-parse --short HEAD` that names the image (POLE_TAG), so the revision
+// the daemon reads back from the binary is the tag make polecat-image wrote.
+// Mutation: change either default, or tag the image with a different
+// expression, and this names the mismatch (gt-c3sue).
+func TestTierSweepRunnerImageMatchesMakefile(t *testing.T) {
+	t.Parallel()
+	vars := makefileVariables(t)
+	if got := vars["POLE_IMAGE"]; got != tierSweepPolecatImage {
+		t.Errorf("the Makefile's POLE_IMAGE is %q, want %q: the daemon names the image make polecat-image publishes", got, tierSweepPolecatImage)
+	}
+	const shortHEAD = "git rev-parse --short HEAD"
+	for _, name := range []string{"COMMIT", "POLE_TAG"} {
+		if !strings.Contains(vars[name], shortHEAD) {
+			t.Errorf("the Makefile's %s is %q, want it to expand %q: the daemon names the image with the revision the binary records, so the two must be the same command", name, vars[name], shortHEAD)
 		}
-		if launches != 0 {
-			t.Errorf("launches = %d, want 0: an image no build published is never launched", launches)
+	}
+}
+
+// makefileVariables returns the repository Makefile's simple variable
+// assignments by name, from the value the operator's default expands.
+func makefileVariables(t *testing.T) map[string]string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "..", "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vars := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		name, rest, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
 		}
-	})
+		rest = strings.TrimSpace(rest)
+		for _, op := range []string{":=", "?="} {
+			if value, ok := strings.CutPrefix(rest, op); ok {
+				vars[name] = strings.TrimSpace(value)
+				break
+			}
+		}
+	}
+	return vars
 }
 
 // TestTierSweepLoadsMissingImageIntoSweepEngine: an image the sweep engine does
@@ -295,6 +359,41 @@ func TestTierSweepLoadsMissingImageIntoSweepEngine(t *testing.T) {
 			t.Errorf("launches = %d, want 1", launches)
 		}
 	})
+}
+
+// TestTierSweepRunnerImageKubernetesSkipsTheEngine: putting the image in a
+// Docker sweep engine is the Docker backend's step alone. A Kubernetes run
+// pulls the image through the cluster, so the daemon names the installed tag
+// and asks no engine for it, and a missing local image is never a RED
+// (gt-c3sue).
+func TestTierSweepRunnerImageKubernetesSkipsTheEngine(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, fake := runnerImageDaemon(t, now, "")
+	d.patrolConfig.Patrols.TierSweep.Runner.Backend = config.TierSweepRunnerKubernetes
+	fake.checkErrOut = "no docker engine here\n"
+	fake.checkErr = exitErr(1)
+	var launched sweeprunner.Spec
+	d.tierSweepSeams.launch = func(_ context.Context, _ tierSweepStage, spec sweeprunner.Spec) tierSweepLaunch {
+		launched = spec
+		if err := sweeprunner.Write(spec.OutDir, runnerTestResult(spec, now)); err != nil {
+			t.Fatalf("the fake launch writing a result: %v", err)
+		}
+		return tierSweepLaunch{exitCode: 0}
+	}
+	st := tierSweepStage{tiers: []string{"integration", "race"}, slot: true, rig: "gastown", tested: runnerTestSHA, budget: time.Minute}
+
+	if res := d.tierSweepRunStage(context.Background(), t.TempDir(), st); !res.ran {
+		t.Fatalf("stage result = %+v, want it run", res)
+	}
+	if launched.Image != "gastown-polecat:"+tierSweepInstalledBuild {
+		t.Errorf("launched image = %q, want the installed build's tag", launched.Image)
+	}
+	for _, argv := range fake.callList() {
+		if strings.HasPrefix(argv, "docker ") {
+			t.Errorf("docker call = %q, want none: a Kubernetes run pulls its image through the cluster", argv)
+		}
+	}
 }
 
 // TestTierSweepFailedImageLoadIsRedNotStale: an image the daemon cannot confirm

@@ -158,15 +158,16 @@ const (
 	// against an image nobody confirmed (gt-c3sue).
 	tierSweepRunnerImageBudget = 10 * time.Minute
 
-	// tierSweepPolecatImage must match POLE_IMAGE in the Makefile: it is the
-	// repo make polecat-image tags, so a run naming anything else starts an
-	// image no build on this town wrote.
+	// tierSweepPolecatImage is the repository make polecat-image tags
+	// (POLE_IMAGE), so a run naming anything else starts an image no build on
+	// this town wrote. TestTierSweepRunnerImageMatchesMakefile holds it to the
+	// Makefile's default (gt-c3sue).
 	tierSweepPolecatImage = "gastown-polecat"
 
-	// tierSweepRunnerImageRevisionLen is nine because make polecat-image tags
-	// the image with git's abbreviated build commit, and the town's runner pins
-	// spell nine characters of that commit (gt-c3sue).
-	tierSweepRunnerImageRevisionLen = 9
+	// tierSweepFullCommitLen is the length of a full git commit hash. A
+	// revision that long is the module's vcs.revision, which a build outside
+	// make records, and make never tags an image with it (gt-c3sue).
+	tierSweepFullCommitLen = 40
 )
 
 // The tier verdicts, the words the script's summary line uses.
@@ -1724,18 +1725,26 @@ func tierSweepRunnerConfig(patrols *DaemonPatrolConfig) *config.TierSweepRunnerC
 
 // tierSweepRunnerImage is the image a run's containers use: the pin the config
 // names, or, when it names none or asks for the installed build, the polecat
-// image published at the installed gt's build revision. An installed build the
-// binary records no revision for cannot name an image, and an unnameable image
-// is an error: guessing one would run a tree no build produced (gt-c3sue).
+// image make polecat-image publishes at the installed gt's build revision. An
+// installed build the binary records no usable revision for cannot name an
+// image, and an unnameable image is an error: guessing one would run a tree no
+// build produced (gt-c3sue).
 func (d *Daemon) tierSweepRunnerImage(cfg *config.TierSweepRunnerConfig) (string, error) {
 	if !tierSweepRunnerImageFollowsInstalled(cfg.Image) {
 		return cfg.Image, nil
 	}
-	rev := d.buildCommit()
-	if rev == "" {
+	rev := strings.TrimSpace(d.buildCommit())
+	switch {
+	case rev == "" || rev == "unknown":
 		return "", errors.New("runner.image follows the installed build, but the installed gt records no build commit; rebuild gt with make build")
+	case len(rev) >= tierSweepFullCommitLen:
+		return "", fmt.Errorf("runner.image follows the installed build, but the installed gt records a full-length build commit (%d characters) that make polecat-image never tagged; install gt with make install", len(rev))
 	}
-	return tierSweepPolecatImage + ":" + tierSweepRunnerImageRevision(rev), nil
+	// The recorded revision is the tag verbatim: make embeds
+	// `git rev-parse --short HEAD` in the installed gt (COMMIT) and names the
+	// image with the same expression (POLE_TAG), so git's abbreviation length,
+	// whatever it is for this repository, is already in both.
+	return tierSweepPolecatImage + ":" + rev, nil
 }
 
 // tierSweepRunnerImageFollowsInstalled reports whether image asks the sweep to
@@ -1744,16 +1753,6 @@ func (d *Daemon) tierSweepRunnerImage(cfg *config.TierSweepRunnerConfig) (string
 // it (gt-c3sue).
 func tierSweepRunnerImageFollowsInstalled(image string) bool {
 	return image == "" || image == config.TierSweepRunnerInstalledImage
-}
-
-// tierSweepRunnerImageRevision is the revision make polecat-image tags the
-// image with, so a pin written by hand and a tag written by the build name the
-// same image: the commit's first tierSweepRunnerImageRevisionLen characters.
-func tierSweepRunnerImageRevision(commit string) string {
-	if len(commit) > tierSweepRunnerImageRevisionLen {
-		return commit[:tierSweepRunnerImageRevisionLen]
-	}
-	return commit
 }
 
 // tierSweepEnsureRunnerImage makes sure a run's image is in the sweep engine
