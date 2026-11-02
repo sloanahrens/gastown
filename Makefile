@@ -468,6 +468,19 @@ gate: gate-lint gate-test
 gate-lint: LINT_RUNNER_FLAGS := --allow-serial-runners
 gate-lint: exec-tax-preflight lint
 
+# The unit tier's wall series (gt-u0up0): each run appends one line per package
+# to the town's .runtime/metrics/gate-walls.jsonl, so the gate's time can be
+# read per package over weeks. The path is relative because tierwall finds the
+# town itself (above the checkout, or above the repository a landing's
+# throwaway worktree belongs to), so this file reads no environment of its own:
+# the town walk is workspace.Find, whose only read is the test harness's
+# GT_TEST_FORBIDDEN_TOWN_ROOT guard. A run with no town above it, as in CI,
+# records nothing and says so on stderr. -run is the run's id, expanded by the
+# recipe rather than when make parsed the Makefile, so `make -n` prints one
+# shape; the id's second and the recipe shell's pid together tell apart two
+# gates that started in the same second.
+GATE_WALLS = -jsonl .runtime/metrics/gate-walls.jsonl -run gate-$$(date +%s)-$$$$
+
 # gate-test is build plus the unit tier. Its printed wall is its own: lint
 # reports separately (a target-specific value here wins over the one gate
 # would pass down).
@@ -489,9 +502,24 @@ gate-test:
 	@# TERM (bash defers traps until a foreground child exits); the trap walks
 	@# this shell's whole descendant tree (pgrep -P), so it stops the suite
 	@# whether it is a direct child or behind the CPU-class wrapper.
-	@trap 'killtree() { for c in $$(pgrep -P "$$1" 2>/dev/null); do killtree "$$c"; done; kill "$$1" 2>/dev/null; }; for c in $$(pgrep -P $$$$ 2>/dev/null); do killtree "$$c"; done; exit 130' INT TERM; \
-	$(CPU_CLASS) GT_TEST_DOCKER=0 go test -timeout 20m ./... & gt=$$!; \
+	@# The JSON is written to a temp file and fed to tierwall once the suite
+	@# ends, not piped: a backgrounded pipeline reports only its last element,
+	@# so a pipe would hand back tierwall's status instead of go test's, and
+	@# the subshell a pipefail wrapper needs would become the trap's child in
+	@# place of the suite. tierwall prints the per-package walls and appends the
+	@# series; its exit code is not folded into the suite's, because the gate's
+	@# verdict is go test's. A series that could not be written is tierwall's exit
+	@# code 4 (go run folds any program code to 1 and prints "exit status N"), and
+	@# a passing suite with a non-zero tierwall prints the incomplete-series alarm. -json sits after the
+	@# package list, where the go tool still parses it, so the unit tier's line
+	@# keeps the shape the gate-shape tests pin.
+	@trap 'killtree() { for c in $$(pgrep -P "$$1" 2>/dev/null); do killtree "$$c"; done; kill "$$1" 2>/dev/null; }; for c in $$(pgrep -P $$$$ 2>/dev/null); do killtree "$$c"; done; [ -n "$$stream" ] && rm -f "$$stream"; exit 130' INT TERM; \
+	stream=$$(mktemp); \
+	$(CPU_CLASS) GT_TEST_DOCKER=0 go test -timeout 20m ./... -json >"$$stream" & gt=$$!; \
 	wait $$gt; go_rc=$$?; \
+	go run ./internal/testpolicy/cmd/tierwall $(GATE_WALLS) <"$$stream"; tw_rc=$$?; \
+	rm -f "$$stream"; \
+	if [ $$go_rc -eq 0 ] && [ $$tw_rc -ne 0 ]; then echo "gate: tierwall exited $$tw_rc, so the wall series may be incomplete; the Go suite's verdict stands" >&2; fi; \
 	if [ $$go_rc -eq 0 ]; then for m in $(TESTED_MODULES); do echo "gate: vet and unit tier in $$m" >&2; ($(CPU_CLASS) go -C "$$m" vet ./... && $(CPU_CLASS) GT_TEST_DOCKER=0 go -C "$$m" test ./...) || { go_rc=$$?; break; }; done; fi; \
 	wall=$$(( $$(date +%s) - $(GATE_START) )); \
 	if [ $$go_rc -ne 0 ]; then echo "gate: FAILED at unit tier (Go suite, exit $$go_rc) after $${wall}s wall" >&2; exit 1; fi; \

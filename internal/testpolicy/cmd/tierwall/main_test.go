@@ -2,6 +2,10 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,10 +13,30 @@ import (
 	"time"
 )
 
+// fixedHost is the seam run reads outside the stream: one fixed clock, no
+// load, no town, and real files under the test's own temporary directory, so
+// no test reads the host.
+func fixedHost() host {
+	return host{
+		now:   func() time.Time { return time.Date(2026, 11, 1, 14, 42, 0, 0, time.UTC) },
+		load1: func() (float64, bool) { return 0, false },
+		town:  func() string { return "" },
+		mkdir: func(string) error { return nil },
+		open:  openAppend,
+	}
+}
+
 // runFile feeds a canned go test -json stream from testdata through run, the
 // way the Makefile target feeds a real one through stdin, and returns the
 // exit code with what run wrote on both streams.
 func runFile(t *testing.T, name string, args ...string) (code int, stdout, stderr string) {
+	t.Helper()
+	return runFileWith(t, name, fixedHost(), args...)
+}
+
+// runFileWith runs runFile's stream against a test's own host seam, for a case
+// that carries a load reading or stamps a stream with no timestamps.
+func runFileWith(t *testing.T, name string, h host, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
 	f, err := os.Open(filepath.Join("testdata", name))
 	if err != nil {
@@ -20,7 +44,7 @@ func runFile(t *testing.T, name string, args ...string) (code int, stdout, stder
 	}
 	t.Cleanup(func() { f.Close() })
 	var out, errOut bytes.Buffer
-	code = run(args, f, &out, &errOut)
+	code = run(args, f, &out, &errOut, h)
 	return code, out.String(), errOut.String()
 }
 
@@ -135,7 +159,7 @@ func TestReport_PassesUnknownLinesThrough(t *testing.T) {
 	t.Parallel()
 	var out, errOut bytes.Buffer
 	code := run(nil, strings.NewReader("go: downloading something\n\nnot json at all\n"),
-		&out, &errOut)
+		&out, &errOut, fixedHost())
 	if code != 0 {
 		t.Errorf("exit code = %d, want 0: no event failed", code)
 	}
@@ -158,13 +182,383 @@ func TestReport_BadFlagIsARunnerFailure(t *testing.T) {
 		{args: []string{"-h"}, want: 0},
 	} {
 		var out, errOut bytes.Buffer
-		code := run(tc.args, strings.NewReader(""), &out, &errOut)
+		code := run(tc.args, strings.NewReader(""), &out, &errOut, fixedHost())
 		if code != tc.want {
 			t.Errorf("run(%v) exit code = %d, want %d", tc.args, code, tc.want)
 		}
 		if errOut.Len() == 0 {
 			t.Errorf("run(%v) stderr is empty, want the usage there", tc.args)
 		}
+	}
+}
+
+// TestJSONLAppendsOneLinePerPackage pins the series -jsonl writes: one line
+// per package the stream reported a verdict for, sorted by package, carrying
+// the package's own wall and verdict, the run's id, the run's start, and the
+// load it ran beside. A package that ran no tests is still a package the run
+// covered, so it earns a line at its zero wall.
+// Mutation: ignore -jsonl, and the file the case reads never exists.
+func TestJSONLAppendsOneLinePerPackage(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "gate-walls.jsonl")
+	h := fixedHost()
+	h.load1 = func() (float64, bool) { return 11.3, true }
+
+	code, _, stderr := runFileWith(t, "pass.jsonl", h, "-jsonl", path, "-run", "gate-1")
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0: recording a series fails nothing", code)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want nothing", stderr)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the run wrote no series: %v", err)
+	}
+	want := strings.Join([]string{
+		`{"ts":"2026-10-02T11:00:00-05:00","run":"gate-1","pkg":"github.com/steveyegge/gastown/internal/cmd","wall_s":203.4,"result":"pass","load1":11.3}`,
+		`{"ts":"2026-10-02T11:00:00-05:00","run":"gate-1","pkg":"github.com/steveyegge/gastown/internal/git","wall_s":22.7,"result":"pass","load1":11.3}`,
+		`{"ts":"2026-10-02T11:00:00-05:00","run":"gate-1","pkg":"github.com/steveyegge/gastown/internal/none","wall_s":0,"result":"skip","load1":11.3}`,
+		`{"ts":"2026-10-02T11:00:00-05:00","run":"gate-1","pkg":"github.com/steveyegge/gastown/internal/slot","wall_s":0.1,"result":"pass","load1":11.3}`,
+		`{"ts":"2026-10-02T11:00:00-05:00","run":"gate-1","pkg":"github.com/steveyegge/gastown/internal/tmux","wall_s":19,"result":"pass","load1":11.3}`,
+		"",
+	}, "\n")
+	if string(data) != want {
+		t.Errorf("series = %q, want %q", string(data), want)
+	}
+}
+
+// TestJSONLCachedPackageShipsNoWall pins how the series reads go test's result
+// cache: a cached package keeps its line and its verdict, marked cached, and
+// carries no wall_s, while a package that really ran keeps its wall_s and has
+// no cached key. A reader takes wall_s only from lines without cached.
+// Mutation: write the elapsed time for a cached package, and the cached line
+// grows a wall_s key.
+func TestJSONLCachedPackageShipsNoWall(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "gate-walls.jsonl")
+	const stream = `{"Time":"2026-10-02T11:00:00.000000Z","Action":"start","Package":"example.com/cached"}
+{"Time":"2026-10-02T11:00:00.100000Z","Action":"output","Package":"example.com/cached","Output":"ok  \texample.com/cached\t(cached)\n"}
+{"Time":"2026-10-02T11:00:00.200000Z","Action":"pass","Package":"example.com/cached","Elapsed":0}
+{"Time":"2026-10-02T11:00:00.300000Z","Action":"start","Package":"example.com/ran"}
+{"Time":"2026-10-02T11:00:00.400000Z","Action":"output","Package":"example.com/ran","Output":"ok  \texample.com/ran\t1.500s\n"}
+{"Time":"2026-10-02T11:00:00.500000Z","Action":"pass","Package":"example.com/ran","Elapsed":1.5}
+`
+	var out, errOut bytes.Buffer
+	code := run([]string{"-jsonl", path, "-run", "gate-1"}, strings.NewReader(stream), &out, &errOut, fixedHost())
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0: stderr = %q", code, errOut.String())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the run wrote no series: %v", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("series = %q, want two lines", data)
+	}
+	for i, tc := range []struct {
+		pkg    string
+		keys   []string
+		absent []string
+	}{
+		{"example.com/cached", []string{"cached"}, []string{"wall_s"}},
+		{"example.com/ran", []string{"wall_s"}, []string{"cached"}},
+	} {
+		var line map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(lines[i]), &line); err != nil {
+			t.Fatalf("line %d is not JSON: %v", i, err)
+		}
+		if got := string(line["pkg"]); got != `"`+tc.pkg+`"` {
+			t.Errorf("line %d pkg = %s, want %q", i, got, tc.pkg)
+		}
+		for _, k := range tc.keys {
+			if _, ok := line[k]; !ok {
+				t.Errorf("line %d (%s) has no %q key: %s", i, tc.pkg, k, lines[i])
+			}
+		}
+		for _, k := range tc.absent {
+			if _, ok := line[k]; ok {
+				t.Errorf("line %d (%s) has a %q key: %s", i, tc.pkg, k, lines[i])
+			}
+		}
+	}
+}
+
+// TestJSONLEmptyStreamAppendsNothing checks that a stream with no package
+// verdicts writes no file and says so on stderr: an empty run must not read as
+// a run with nothing slow to report.
+func TestJSONLEmptyStreamAppendsNothing(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "gate-walls.jsonl")
+	var out, errOut bytes.Buffer
+	code := run([]string{"-jsonl", path, "-run", "gate-1"},
+		strings.NewReader("go: downloading something\n"), &out, &errOut, fixedHost())
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0: an empty stream fails nothing", code)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("stat %s = %v, want no file: nothing was appended, so nothing was created", path, err)
+	}
+	if !strings.Contains(errOut.String(), "no package events") {
+		t.Errorf("stderr = %q, want it to say nothing was appended", errOut.String())
+	}
+}
+
+// TestJSONLUntimedStreamIsStampedFromTheClock covers a stream whose events
+// carry no Time: the run is stamped from the clock rather than written with a
+// zero time.
+func TestJSONLUntimedStreamIsStampedFromTheClock(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "gate-walls.jsonl")
+	const stream = `{"Action":"start","Package":"example.com/a"}
+{"Action":"pass","Package":"example.com/a","Elapsed":1.5}
+`
+	var out, errOut bytes.Buffer
+	code := run([]string{"-jsonl", path, "-run", "gate-1"}, strings.NewReader(stream), &out, &errOut, fixedHost())
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0: stderr = %q", code, errOut.String())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the run wrote no series: %v", err)
+	}
+	want := `{"ts":"2026-11-01T14:42:00Z","run":"gate-1","pkg":"example.com/a","wall_s":1.5,"result":"pass"}` + "\n"
+	if string(data) != want {
+		t.Errorf("series = %q, want %q", string(data), want)
+	}
+}
+
+// TestJSONLNeedsARun checks that -jsonl without -run is the runner's own
+// failure and writes nothing: a series line with no run cannot be placed.
+func TestJSONLNeedsARun(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "gate-walls.jsonl")
+	var out, errOut bytes.Buffer
+	code := run([]string{"-jsonl", path}, strings.NewReader(""), &out, &errOut, fixedHost())
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2: the flag set is the runner's failure", code)
+	}
+	if !strings.Contains(errOut.String(), "-run") {
+		t.Errorf("stderr = %q, want it to name the missing -run", errOut.String())
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("stat %s = %v, want no file: a refused run writes no series", path, err)
+	}
+}
+
+// TestJSONLSeriesFailuresLeaveTheVerdictAlone pins the contract the gate is
+// wired on: every way the series can fail is reported on stderr naming the
+// file and by exit code 4, which the gate reads as its "series incomplete"
+// alarm. The report still prints, and a failed package (1) or an over-wall tier
+// (3) keeps its own code, because wall time never fails a run.
+func TestJSONLSeriesFailuresLeaveTheVerdictAlone(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		setup func(h *host)
+	}{
+		{"the directory cannot be made", func(h *host) {
+			h.mkdir = func(string) error { return errors.New("read-only file system") }
+		}},
+		{"the file cannot be opened", func(h *host) {
+			h.open = func(string) (io.WriteCloser, error) { return nil, errors.New("no such device") }
+		}},
+		{"the write is rejected", func(h *host) {
+			h.open = func(string) (io.WriteCloser, error) {
+				return failingFile{writeErr: errors.New("disk full")}, nil
+			}
+		}},
+		{"the close is rejected", func(h *host) {
+			h.open = func(string) (io.WriteCloser, error) {
+				return failingFile{closeErr: errors.New("stale NFS handle")}, nil
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "gate-walls.jsonl")
+			h := fixedHost()
+			tc.setup(&h)
+
+			code, stdout, stderr := runFileWith(t, "pass.jsonl", h, "-jsonl", path, "-run", "gate-1")
+			if code != 4 {
+				t.Errorf("exit code = %d, want 4: a series that could not be written is the gate's alarm", code)
+			}
+			if !strings.Contains(stderr, path) {
+				t.Errorf("stderr = %q, want it to name %s", stderr, path)
+			}
+			if !strings.Contains(stdout, "tierwall: tier ") {
+				t.Errorf("stdout = %q, want the report still printed", stdout)
+			}
+		})
+	}
+}
+
+// failingFile is a series file whose write or close fails: the failures a real
+// file on a healthy host cannot be made to reach.
+type failingFile struct {
+	writeErr error
+	closeErr error
+}
+
+func (f failingFile) Write(p []byte) (int, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
+	return len(p), nil
+}
+
+func (f failingFile) Close() error { return f.closeErr }
+
+// TestJSONLSeriesRelativePathIsTakenFromTheTown pins the wiring's one
+// assumption: the Makefile names the series with a relative path, and the tool
+// places it under the town it found, creating the runtime directory.
+func TestJSONLSeriesRelativePathIsTakenFromTheTown(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	h := fixedHost()
+	h.town = func() string { return town }
+	h.mkdir = func(dir string) error { return os.MkdirAll(dir, 0o755) }
+
+	code, _, stderr := runFileWith(t, "pass.jsonl", h, "-jsonl", ".runtime/metrics/gate-walls.jsonl", "-run", "gate-1")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0: stderr = %q", code, stderr)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want nothing", stderr)
+	}
+	data, err := os.ReadFile(filepath.Join(town, ".runtime", "metrics", "gate-walls.jsonl"))
+	if err != nil {
+		t.Fatalf("the run wrote no series under the town: %v", err)
+	}
+	if got := strings.Count(string(data), "\n"); got != 5 {
+		t.Errorf("series has %d lines, want one per package (5): %q", got, data)
+	}
+}
+
+// TestJSONLSeriesRelativePathWithoutATownWritesNothing checks that a relative
+// path the tool cannot place is reported, not silently read as a clean run.
+func TestJSONLSeriesRelativePathWithoutATownWritesNothing(t *testing.T) {
+	t.Parallel()
+	code, stdout, stderr := runFileWith(t, "pass.jsonl", fixedHost(),
+		"-jsonl", ".runtime/metrics/gate-walls.jsonl", "-run", "gate-1")
+	if code != 4 {
+		t.Errorf("exit code = %d, want 4: a series with no town to go in is the gate's alarm", code)
+	}
+	if !strings.Contains(stderr, ".runtime/metrics/gate-walls.jsonl") {
+		t.Errorf("stderr = %q, want it to name the path it could not place", stderr)
+	}
+	if !strings.Contains(stderr, "no town root") {
+		t.Errorf("stderr = %q, want it to say why nothing was appended", stderr)
+	}
+	if !strings.Contains(stdout, "tierwall: tier ") {
+		t.Errorf("stdout = %q, want the report still printed", stdout)
+	}
+}
+
+// TestTownRootAtReadsTheOutermostTown checks the two places townRoot looks:
+// the working directory, for a gate run inside the town, and the repository's
+// shared git dir, for a landing's throwaway worktree outside it. A rig carries
+// a mayor/ of its own, so only the outermost mayor/town.json is the town.
+func TestTownRootAtReadsTheOutermostTown(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(town, "mayor", "town.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rig := filepath.Join(town, "gastown", "mayor", "rig")
+	if err := os.MkdirAll(rig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	noRepo := func() (string, error) { return "", errors.New("not a repository") }
+
+	for _, tc := range []struct {
+		name   string
+		getwd  func() (string, error)
+		common func() (string, error)
+		want   string
+	}{
+		{"the working directory is in the town", func() (string, error) { return rig, nil }, noRepo, town},
+		{"the repository is in the town", func() (string, error) { return outside, nil }, func() (string, error) { return filepath.Join(rig, ".git"), nil }, town},
+		{"neither is in a town", func() (string, error) { return outside, nil }, noRepo, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := townRootAt(tc.getwd, tc.common); got != tc.want {
+				t.Errorf("townRootAt = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAppendSeries_UnencodableLineIsAnError checks that a line the encoder
+// cannot render is refused by the appending call site, not written without its
+// time and not reported as a series it recorded.
+func TestAppendSeries_UnencodableLineIsAnError(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "gate-walls.jsonl")
+	r := newReport(io.Discard)
+	r.results["example.com/a"] = "pass"
+	r.first = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	if err := appendSeries(path, "gate-1", r, fixedHost(), io.Discard); err == nil {
+		t.Fatal("appendSeries returned no error for a timestamp json cannot encode")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("stat %s = %v, want no file: a refused series writes nothing", path, err)
+	}
+}
+
+// TestGitCommonDirFromReadsTheCommand checks the one git call the town lookup
+// makes: its output names the common dir, and a command that fails is an error
+// the caller sees rather than an empty path read as "no repository".
+func TestGitCommonDirFromReadsTheCommand(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		run     func() ([]byte, error)
+		want    string
+		wantErr bool
+	}{
+		{"the command answers", func() ([]byte, error) { return []byte(" /town/rig/.git\n"), nil }, "/town/rig/.git", false},
+		{"the command fails", func() ([]byte, error) { return nil, errors.New("exit status 128") }, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := gitCommonDirFrom(tc.run)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("error = %v, want error: %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("common dir = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTierwallReportAndExitCodeUnchanged checks that -jsonl and -run add a
+// series and change nothing the report prints or the code it exits.
+func TestTierwallReportAndExitCodeUnchanged(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "gate-walls.jsonl")
+	plainCode, plainOut, plainErr := runFile(t, "pass.jsonl")
+	seriesCode, seriesOut, seriesErr := runFile(t, "pass.jsonl", "-jsonl", path, "-run", "gate-1")
+	if seriesCode != plainCode {
+		t.Errorf("exit code with -jsonl = %d, want %d", seriesCode, plainCode)
+	}
+	if seriesOut != plainOut {
+		t.Errorf("stdout with -jsonl = %q, want the report unchanged: %q", seriesOut, plainOut)
+	}
+	if seriesErr != plainErr {
+		t.Errorf("stderr with -jsonl = %q, want %q", seriesErr, plainErr)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("the flags wrote no series: %v", err)
 	}
 }
 
@@ -190,5 +584,17 @@ func TestSecs_RendersTenthsOfASecond(t *testing.T) {
 		if got := secs(d); got != tc.want {
 			t.Errorf("secs(%s) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// A series failure never hides a verdict: a failed package still exits 1, and
+// an over-wall tier still exits 3, with the series unwritable as well.
+func TestJSONLSeriesFailureDoesNotMaskTheVerdict(t *testing.T) {
+	t.Parallel()
+	h := fixedHost()
+	h.mkdir = func(string) error { return errors.New("read-only file system") }
+	path := filepath.Join(t.TempDir(), "gate-walls.jsonl")
+	if code, _, _ := runFileWith(t, "fail.jsonl", h, "-jsonl", path, "-run", "gate-1"); code != 1 {
+		t.Errorf("failed package with an unwritable series: exit code = %d, want 1", code)
 	}
 }

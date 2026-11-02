@@ -765,6 +765,9 @@ if [[ -n "${STUB_GO_FAIL_DIR:-}" ]]; then
   fi
 fi
 [[ "$1" == "${STUB_GO_FAIL:-}" && $dir_ok == 1 ]] && exit 1
+# The tierwall series run: STUB_TIERWALL_EXIT makes it fail without touching
+# the Go suite's status, and it drains its stream the way the real one reads it.
+if [[ "$1" == run && "$*" == *cmd/tierwall* ]]; then cat >/dev/null; exit "${STUB_TIERWALL_EXIT:-0}"; fi
 exit 0
 STUB
 cat >"$TMP/bin/golangci-lint" <<'STUB'
@@ -812,10 +815,38 @@ run_gate() {
 }
 
 rc=$(run_gate)
-if [[ "$rc" == 0 ]] && grep -q -E 'gate: PASSED in [0-9]+s wall' "$TMP/err" && grep -q -x 'go test GT_TEST_DOCKER=0' "$TMP/calls" && ! grep -q -x 'shell-tests' "$TMP/calls" && grep -q -F 'golangci-lint run --timeout=5m --allow-serial-runners' "$TMP/calls"; then
-  pass "green stubs: exit 0 with the wall printed, lint waited on the lock, only the Go suite ran, and it saw GT_TEST_DOCKER=0 despite an inherited 1"
+if [[ "$rc" == 0 ]] && grep -q -E 'gate: PASSED in [0-9]+s wall' "$TMP/err" && grep -q -x 'go test GT_TEST_DOCKER=0' "$TMP/calls" && ! grep -q -x 'shell-tests' "$TMP/calls" && grep -q -F 'golangci-lint run --timeout=5m --allow-serial-runners' "$TMP/calls" && ! grep -q -F 'wall series may be incomplete' "$TMP/err"; then
+  pass "green stubs: exit 0 with the wall printed, lint waited on the lock, only the Go suite ran, it saw GT_TEST_DOCKER=0 despite an inherited 1, and no series alarm fired"
 else
-  fail "green stubs: exit 0 with the wall printed, lint waited on the lock, only the Go suite ran, and it saw GT_TEST_DOCKER=0 despite an inherited 1 (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+  fail "green stubs: exit 0 with the wall printed, lint waited on the lock, only the Go suite ran, it saw GT_TEST_DOCKER=0 despite an inherited 1, and no series alarm fired (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+fi
+
+# The series fails nothing (gt-u0up0): tierwall exiting non-zero after a
+# passing Go suite leaves the gate green and says the series may be incomplete.
+rc=$(run_gate -o lint -- STUB_TIERWALL_EXIT=2)
+if [[ "$rc" == 0 ]] && grep -q -F "gate: tierwall exited 2, so the wall series may be incomplete; the Go suite's verdict stands" "$TMP/err" && grep -q -E 'gate: PASSED in [0-9]+s wall' "$TMP/err"; then
+  pass "tierwall fails after a passing suite: the gate still passes and names the incomplete series"
+else
+  fail "tierwall fails after a passing suite: the gate still passes and names the incomplete series (rc=$rc)" "$(cat "$TMP/err")"
+fi
+
+# What the recipe really sees for a series that could not be written: tierwall
+# exits 4, and go run folds any program code to 1 (printing "exit status 4").
+# The alarm keys on non-zero, so the folded code fires it.
+rc=$(run_gate -o lint -- STUB_TIERWALL_EXIT=1)
+if [[ "$rc" == 0 ]] && grep -q -F "gate: tierwall exited 1, so the wall series may be incomplete" "$TMP/err" && grep -q -E 'gate: PASSED in [0-9]+s wall' "$TMP/err"; then
+  pass "tierwall's series failure as go run reports it (exit 1): the alarm fires and the gate passes"
+else
+  fail "tierwall's series failure as go run reports it (exit 1): the alarm fires and the gate passes (rc=$rc)" "$(cat "$TMP/err")"
+fi
+
+# The alarm is for a passing suite only: a red suite's verdict is the suite's,
+# and the series is not reported as a second failure.
+rc=$(run_gate -o lint -- STUB_TIERWALL_EXIT=2 STUB_GO_FAIL=test)
+if [[ "$rc" != 0 ]] && grep -q -F 'gate: FAILED at unit tier' "$TMP/err" && ! grep -q -F 'wall series may be incomplete' "$TMP/err"; then
+  pass "tierwall fails after a failing suite: the gate is red at the unit tier and the series alarm is silent"
+else
+  fail "tierwall fails after a failing suite: the gate is red at the unit tier and the series alarm is silent (rc=$rc)" "$(cat "$TMP/err")"
 fi
 
 # The preflight's warning path: a taxed host says so, and the gate still
