@@ -179,6 +179,17 @@ func TestSpendFileWriteIsAtomic(t *testing.T) {
 		}
 	})
 
+	t.Run("a temporary file in a missing directory is a failure", func(t *testing.T) {
+		t.Parallel()
+		// No directory to create the file in refuses it for any user, so this row
+		// runs the production creator on a refusal the OS gives under root too.
+		dir := filepath.Join(t.TempDir(), "missing")
+
+		err := writeSpendWatchVia(dir, []byte(newDoc), createSpendTemp)
+
+		require.ErrorIs(t, err, os.ErrNotExist, "a temporary file in a missing directory reported no error")
+	})
+
 	t.Run("the watch file takes the mode a plain write gives it", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()

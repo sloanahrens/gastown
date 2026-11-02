@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -91,30 +90,21 @@ func writeSpendWatchVia(dir string, data []byte, create func(dir string) (spendT
 	return nil
 }
 
-// spendTempAttempts bounds how many names createSpendTemp tries before it gives
-// up on a directory where every name it draws is already taken.
-const spendTempAttempts = 100
-
 // createSpendTemp creates a temporary file beside the watch file under a random
 // name no other writer holds, so two hubs writing the same town each rename
 // their own reading and neither renames over a file the other is still writing.
 // It is created 0644 as os.WriteFile creates it, so the umask applies as it
-// always has. O_EXCL makes a taken name an error, which the loop retries. A run
-// that died mid-write leaves its own *.tmp behind, where the fixed name used to
-// be overwritten by the next run.
+// always has. O_EXCL means a name already taken is an error the poll reports,
+// never a file it overwrites; a 64-bit random name makes that unlikely, and the
+// next poll draws a new name. A run that died mid-write leaves its own *.tmp
+// behind, where the fixed name used to be overwritten by the next run.
 func createSpendTemp(dir string) (spendTempFile, error) {
-	for range spendTempAttempts {
-		name := filepath.Join(dir, fmt.Sprintf("%s.%016x.tmp", spendWatchName, rand.Uint64()))
-		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-		if errors.Is(err, fs.ErrExist) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		return f, nil
+	name := filepath.Join(dir, fmt.Sprintf("%s.%016x.tmp", spendWatchName, rand.Uint64()))
+	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("no unused temporary name in %s after %d tries", dir, spendTempAttempts)
+	return f, nil
 }
 
 // removeSpendTemp drops the temporary file after a failed write, so nothing is
