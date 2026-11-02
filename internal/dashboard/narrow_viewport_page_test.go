@@ -30,10 +30,10 @@ func TestHealthLineWrapsAtANarrowWidth(t *testing.T) {
 	}
 }
 
-// At 470 px the Polecats table keeps its five columns in the same order, and
-// its age track keeps the width its text needs instead of shrinking to nothing,
-// so the Age cell is never cut off (gt-ec79s). The test reads the narrow
-// template's declarations, as TestLandingsFitsANarrowViewport does.
+// At 470 px the Polecats table keeps its five columns in the same order, every
+// column but the bead holds the width its text needs, and only the bead shrinks
+// (gt-ec79s). The test reads the narrow template's declarations, as
+// TestLandingsFitsANarrowViewport does.
 func TestPolecatsTableFitsANarrowViewport(t *testing.T) {
 	t.Parallel()
 
@@ -64,7 +64,16 @@ func TestPolecatsTableFitsANarrowViewport(t *testing.T) {
 	if len(tracks) != 5 {
 		t.Fatalf("the narrow seat table lays out %d columns (%q), want five", len(tracks), cols)
 	}
-	if age := tracks[4]; strings.HasPrefix(age, "minmax(0,") {
-		t.Errorf("the age column at a narrow width is %q, which can shrink to nothing and cut off its time; it needs a floor at its content", age)
+	for i, name := range names {
+		track := tracks[i]
+		if name == "bead" {
+			if track != "minmax(0,1fr)" {
+				t.Errorf("the narrow seat table gives the bead %q, want minmax(0,1fr): the bead is the one column left to shrink", track)
+			}
+			continue
+		}
+		if !strings.HasPrefix(track, "minmax(max-content,") {
+			t.Errorf("the %s column at a narrow width is %q, which can shrink below its content and cut off its text; it needs a floor at its max-content", name, track)
+		}
 	}
 }

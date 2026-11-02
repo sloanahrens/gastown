@@ -108,13 +108,18 @@ tr.live{background:#101a13}
    start a column where its neighbour started another (gt-n7yb8). Each track is
    named for the cell it holds so a swap in workHead cannot leave the template
    describing the old order. Only the bead takes what is left of the width, and
-   every track may shrink to nothing, so a long bead title cannot carry a row
-   past its panel. */
+   at wide widths every track may shrink to nothing, so a long bead title cannot
+   carry a row past its panel. Below 640 px the four tracks other than the bead
+   hold their content instead (see the rule below). */
 .wtable{display:grid;grid-template-columns:[polecat] minmax(0,max-content) [agent] minmax(0,max-content) [bead] minmax(0,1fr) [state] minmax(0,max-content) [age] minmax(0,8ch);gap:2px 8px;align-items:baseline}
-/* Below 640 px the age track keeps the width its text needs rather than shrinking
-   to nothing, so the Age column is never cut off at 470 px. The polecat, agent,
-   bead and state tracks still shrink first to make room (gt-ec79s). */
-@media (max-width:640px){.wtable{grid-template-columns:[polecat] minmax(0,max-content) [agent] minmax(0,max-content) [bead] minmax(0,1fr) [state] minmax(0,max-content) [age] max-content}}
+/* Below 640 px the four tracks other than the bead hold the width their text
+   needs, so their text is not clipped by its own track at 470 px. The floor
+   is minmax(max-content,max-content), not a bare max-content: a track's minimum
+   is auto, which resolves to 0 here because .workrow>* sets min-width:0, so a bare
+   max-content lets the track shrink. Only the bead shrinks to make room (gt-ec79s);
+   if the four fixed tracks together exceed the panel, the grid overflows rather
+   than shrinking them. */
+@media (max-width:640px){.wtable{grid-template-columns:[polecat] minmax(max-content,max-content) [agent] minmax(max-content,max-content) [bead] minmax(0,1fr) [state] minmax(max-content,max-content) [age] minmax(max-content,max-content)}}
 .workrow{grid-column:1 / -1;display:grid;grid-template-columns:subgrid;align-items:baseline;padding:4px 0;border-top:1px solid var(--line)}
 /* A fold's summary spans the table, and its rows are a subgrid of it, so a
    collapsed group hides rows that would still line up with the live ones. */
