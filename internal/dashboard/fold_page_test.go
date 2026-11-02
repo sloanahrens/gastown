@@ -321,12 +321,27 @@ func TestFoldChoiceFromBeforeTheKeysStillApplies(t *testing.T) {
 func TestFoldOldSavedWorkFoldDoesNotHideThePolecatsAndBeadsPanels(t *testing.T) {
 	t.Parallel()
 
-	dom := newPageDOMStoring(t, map[string]string{
+	// A reader who folded the old Work panel: Polecats still starts open.
+	folded := newPageDOMStoring(t, map[string]string{
 		"gt-fold":      `{"work":true}`,
 		"gt-collapsed": `{"Work":true,"Work queue":true}`,
 	})
-	wantFold(t, dom.fold(t, "polecats"), "polecats", false)
-	wantFold(t, dom.fold(t, "beads"), "beads", true)
+	wantFold(t, folded.fold(t, "polecats"), "polecats", false)
+
+	// A reader who had the old Work panel open: Beads still starts closed by
+	// its own default, so the removed panel's open choice does not reach it.
+	opened := newPageDOMStoring(t, map[string]string{
+		"gt-fold":      `{"work":false}`,
+		"gt-collapsed": `{"Work":false,"Work queue":false}`,
+	})
+	wantFold(t, opened.fold(t, "beads"), "beads", true)
+
+	// Beads' own key still wins over the old names.
+	own := newPageDOMStoring(t, map[string]string{
+		"gt-fold":      `{"work":true,"beads":false}`,
+		"gt-collapsed": `{"Work":true,"Work queue":true}`,
+	})
+	wantFold(t, own.fold(t, "beads"), "beads", false)
 }
 
 // Storage that throws — private mode, a locked-down browser — leaves the page
@@ -404,7 +419,14 @@ func TestFoldSummaryComesFromTheReading(t *testing.T) {
 			{rig: "gastown", name: "merlin", state: "queued"},
 			{rig: "gastown", name: "wren", state: "working", rig_parked: true}
 		],
-		queue: {at: "2026-10-29T00:00:00Z"},
+		queue: {
+			at: "2026-10-29T00:00:00Z",
+			ready: [
+				{id: "gt-r1", rig: "gastown", title: "a shaped bead", priority: 2, shape: "ok"},
+				{id: "gt-r2", rig: "gastown", title: "an unshaped bead", priority: 2, shape: "unshaped"}
+			],
+			ready_total: 61, landing_total: 5, blocked_total: 29
+		},
 		attention: {rows: []}
 	}; renderAll();`); err != nil {
 		t.Fatalf("rendering the page with a reading: %v", err)
@@ -413,9 +435,9 @@ func TestFoldSummaryComesFromTheReading(t *testing.T) {
 	if got, want := dom.fold(t, "polecats").Summary, "2 working"; got != want {
 		t.Errorf("the closed polecats section reads %q, want %q", got, want)
 	}
-	// This reading's queue was read but counts nothing, so the Beads header
-	// says so with four zeros rather than going quiet.
-	if got, want := dom.fold(t, "beads").Summary, "0 dispatchable · 0 ready · 0 landing · 0 blocked"; got != want {
+	// Every field has its own count, so the line proves which figure feeds
+	// which word: one shaped ready bead dispatches of 61 open.
+	if got, want := dom.fold(t, "beads").Summary, "1 dispatchable · 61 ready · 5 landing · 29 blocked"; got != want {
 		t.Errorf("the closed beads section reads %q, want %q", got, want)
 	}
 	// The summary's working count is the top strip's: both leave out the polecat

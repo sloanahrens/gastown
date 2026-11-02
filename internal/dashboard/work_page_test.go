@@ -1208,7 +1208,13 @@ func TestPolecatsAndBeadsAreGridPanels(t *testing.T) {
 		if got := strings.Count(page, `data-fold="`+tc.key+`"`); got != 1 {
 			t.Errorf("the page folds %d sections under %q, want one", got, tc.key)
 		}
-		if tag := page[at:]; strings.Contains(tag[:strings.Index(tag, ">")], "data-default-collapsed") {
+		// at is an offset into the column, so read the tag from the column too.
+		tag := tc.column[at:]
+		end := strings.Index(tag, ">")
+		if end < 0 {
+			t.Fatalf("the %s section's tag never closes", tc.key)
+		}
+		if strings.Contains(tag[:end], "data-default-collapsed") {
 			t.Errorf("the %s section carries data-default-collapsed; its closed default is FOLD_DEFAULT_OPEN leaving it out", tc.key)
 		}
 	}

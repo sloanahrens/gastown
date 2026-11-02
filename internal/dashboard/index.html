@@ -154,8 +154,8 @@ section.collapsed>h2{border-bottom:0}
 section>h2 .foldsum{margin-left:auto;text-transform:none;letter-spacing:0;white-space:normal;text-align:right;color:var(--text)}
 /* A panel whose summary stays in the header while the panel is open (Polecats
    and Beads) keeps its read-age note beside it. The note's own auto margin
-   already takes the free space that pushes the pair right, so the summary
-   beside it must not take a share as well. */
+   already takes the free space and pushes both right, so the summary beside it
+   must not take a share as well. */
 section>h2 .r:not([hidden])+.foldsum{margin-left:0}
 /* The News pane: one line per story, the title taking what the comments link
    leaves. Both tracks may shrink, so a long title is ellipsed rather than
