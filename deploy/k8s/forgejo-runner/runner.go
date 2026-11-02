@@ -5,9 +5,10 @@
 // registration across pod restarts. It renders only, so no apply path and no
 // Kubernetes client lives here.
 //
-// The renderer pins the runner image at Version and the engine at DindTag,
-// gives the pod requests equal to limits (runner DefaultRunnerCPU and
-// DefaultRunnerMemory, engine DefaultDindCPU and DefaultDindMemory), and
+// The renderer pins the runner image at Version and the engine at DindTag, runs
+// one replica under the Recreate strategy so a rollout never overlaps two pods
+// on one claim, gives the pod requests equal to limits (runner DefaultRunnerCPU
+// and DefaultRunnerMemory, engine DefaultDindCPU and DefaultDindMemory), and
 // defaults the engine claim to DefaultDindStorage. Values may override the
 // shares, both claim sizes, the capacity and the labels; the labels and the
 // Forgejo host address have no default, because a runner with no label takes no
@@ -53,6 +54,10 @@ const (
 	ForgejoHostname = "forgejo"
 	// RunnerTimeout is the longest a job may run.
 	RunnerTimeout = "3h"
+	// Recreate is the Deployment's update strategy: a rollout stops the old pod
+	// before it starts the new one, so two engines never mount one dind data
+	// claim and two runners never open one registration file.
+	Recreate = "Recreate"
 
 	// DefaultCapacity is the most jobs the runner takes at once when Values sets
 	// none.
@@ -120,7 +125,17 @@ var (
 	// and one of the four binary suffixes. It is narrower than Kubernetes' own
 	// quantity grammar on purpose, and the error names what it accepts.
 	storageRE = regexp.MustCompile(`^[1-9][0-9]*(Ki|Mi|Gi|Ti)$`)
+	// cpuRE is the CPU grammar this builder accepts: a positive whole or decimal
+	// number of cores, or a whole number of millicores. It is narrower than
+	// Kubernetes' quantity grammar on purpose, and the error names what it accepts.
+	cpuRE = regexp.MustCompile(`^([1-9][0-9]*m?|[1-9][0-9]*\.[0-9]+|0\.[0-9]*[1-9][0-9]*)$`)
+	// memoryRE is the memory grammar: the same whole-number-and-suffix shape as
+	// storage.
+	memoryRE = storageRE
 )
+
+// labelSeparator joins a runner label's name to its image in "name:docker://image".
+const labelSeparator = ":docker://"
 
 // cacheMounts pairs each cache volume with the path a job container mounts it at.
 // The names match the live host runner's, so a job moves between the two runners
@@ -200,8 +215,10 @@ func Build(v Values) (Manifests, error) {
 			Metadata: objectMeta(Name, namespace),
 			Spec: DeploymentSpec{
 				// One replica: two would share the engine claim, and one
-				// registration file.
+				// registration file. Recreate, so a rollout never overlaps the
+				// old pod with the new one on either.
 				Replicas: 1,
+				Strategy: DeploymentStrategy{Type: Recreate},
 				Selector: LabelSelector{MatchLabels: selectorLabels()},
 				Template: PodTemplate{
 					Metadata: TemplateMeta{Labels: labels()},
@@ -349,6 +366,10 @@ func (v Values) validate() error {
 		if strings.ContainsAny(label, " \t\r\n") {
 			return fmt.Errorf("Values.Labels[%d] %q contains whitespace", i, label)
 		}
+		// A label with no separator has no image, so it takes the same refusal.
+		if at := strings.Index(label, labelSeparator); at <= 0 || at+len(labelSeparator) == len(label) {
+			return fmt.Errorf("Values.Labels[%d] %q: want name%simage, such as gate:docker://example:1", i, label, labelSeparator)
+		}
 	}
 	switch {
 	case v.ForgejoHostIP == "":
@@ -361,11 +382,30 @@ func (v Values) validate() error {
 	if v.Capacity < 0 {
 		return fmt.Errorf("Values.Capacity %d: want a job count of zero or more", v.Capacity)
 	}
+	if err := validateShare("Values.RunnerResources", v.RunnerResources); err != nil {
+		return err
+	}
+	if err := validateShare("Values.DindResources", v.DindResources); err != nil {
+		return err
+	}
 	if !storageRE.MatchString(v.DindStorage) {
 		return fmt.Errorf("the engine claim storage %q: want a whole number and one of Ki, Mi, Gi or Ti, such as 40Gi", v.DindStorage)
 	}
 	if !storageRE.MatchString(v.RunnerStorage) {
 		return fmt.Errorf("the runner data claim storage %q: want a whole number and one of Ki, Mi, Gi or Ti, such as 1Gi", v.RunnerStorage)
+	}
+	return nil
+}
+
+// validateShare refuses a share whose CPU or memory is outside the grammar this
+// builder accepts. field names the Values field in the error, so the caller
+// knows which one to correct.
+func validateShare(field string, s Share) error {
+	if !cpuRE.MatchString(s.CPU) {
+		return fmt.Errorf("%s.CPU %q: want a positive core count such as 1 or 2.5, or millicores such as 500m", field, s.CPU)
+	}
+	if !memoryRE.MatchString(s.Memory) {
+		return fmt.Errorf("%s.Memory %q: want a whole number and one of Ki, Mi, Gi or Ti, such as 1Gi", field, s.Memory)
 	}
 	return nil
 }
@@ -504,9 +544,16 @@ type Deployment struct {
 
 // DeploymentSpec is the subset of a Deployment's spec the builder sets.
 type DeploymentSpec struct {
-	Replicas int32         `yaml:"replicas"`
-	Selector LabelSelector `yaml:"selector"`
-	Template PodTemplate   `yaml:"template"`
+	Replicas int32              `yaml:"replicas"`
+	Strategy DeploymentStrategy `yaml:"strategy"`
+	Selector LabelSelector      `yaml:"selector"`
+	Template PodTemplate        `yaml:"template"`
+}
+
+// DeploymentStrategy is how a rollout replaces the pod. The builder sets only
+// the type, Recreate, so the old pod is stopped before the new one starts.
+type DeploymentStrategy struct {
+	Type string `yaml:"type"`
 }
 
 // PodTemplate is the pod the Deployment creates.

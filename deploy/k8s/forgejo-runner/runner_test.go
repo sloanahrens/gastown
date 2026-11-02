@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -14,9 +16,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// updateGoldens records the manifests on purpose. Reading the goldens is the
-// default, so a change to the rendered output fails loudly (gt-67qco).
-var updateGoldens = flag.Bool("update", false, "rewrite testdata/ with the renderer's current output")
+// updatingGoldens reports whether -update was passed. The flag is registered in
+// TestMain, so no test can change it while another reads it: a run without it
+// compares the goldens, so a change to the rendered output fails loudly (gt-67qco).
+func updatingGoldens() bool {
+	f := flag.Lookup("update")
+	return f != nil && f.Value.String() == "true"
+}
 
 // goldenValues is the configuration the goldens record.
 func goldenValues() Values {
@@ -44,7 +50,7 @@ func mustBuild(t *testing.T, v Values) Manifests {
 func compareGolden(t *testing.T, file string, got []byte) {
 	t.Helper()
 	path := filepath.Join("testdata", file)
-	if *updateGoldens {
+	if updatingGoldens() {
 		if err := os.WriteFile(path, got, 0o644); err != nil {
 			t.Fatalf("writing %s: %v", path, err)
 		}
@@ -147,6 +153,31 @@ func TestRenderDeploymentGolden(t *testing.T) {
 	}
 	if runner.SecurityContext != nil && runner.SecurityContext.Privileged {
 		t.Error("the runner container is privileged; the engine is the pod's only privileged container")
+	}
+}
+
+// TestRenderDeploymentRecreates drives the update strategy: Recreate stops the
+// old pod before it starts the new one, so a rollout never runs two engines on
+// one dind data claim or two runners on one registration file.
+func TestRenderDeploymentRecreates(t *testing.T) {
+	t.Parallel()
+	m := mustBuild(t, goldenValues())
+	if got := m.Deployment.Spec.Strategy.Type; got != Recreate {
+		t.Errorf("strategy type = %q, want %q", got, Recreate)
+	}
+
+	// The golden is what an operator applies, so it must carry the strategy too.
+	path := filepath.Join("testdata", "deployment.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	var golden Deployment
+	if err := yaml.Unmarshal(raw, &golden); err != nil {
+		t.Fatalf("decoding %s: %v", path, err)
+	}
+	if got := golden.Spec.Strategy.Type; got != Recreate {
+		t.Errorf("%s sets strategy type %q, want %q", path, got, Recreate)
 	}
 }
 
@@ -310,6 +341,80 @@ func checkClaimGolden(t *testing.T, claim PersistentVolumeClaim, file string) {
 	compareGolden(t, file, buf.Bytes())
 }
 
+// secretWords are names a credential-bearing field is given in a manifest.
+var secretWords = []string{"token", "password", "secret", "registration"}
+
+// secretShapes are the forms a credential's value takes in rendered text. A
+// value is what leaks; a word only says a manifest talks about credentials.
+var secretShapes = []struct {
+	name string
+	re   *regexp.Regexp
+}{
+	{"a 40-character hex token", regexp.MustCompile(`\b[0-9a-fA-F]{40}\b`)},
+	{"a JWT", regexp.MustCompile(`eyJ[A-Za-z0-9_-]{8,}\.`)},
+	{"a PEM private key", regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`)},
+	{"a base64 run of 32 characters or more", regexp.MustCompile(`[A-Za-z0-9+/_-]{32,}`)},
+}
+
+// scanSecretText reports every credential word and every credential shape in
+// text, naming the rule rather than echoing the value: a failure message must
+// not print the credential it found.
+func scanSecretText(text string) []string {
+	var findings []string
+	lower := strings.ToLower(text)
+	for _, word := range secretWords {
+		if strings.Contains(lower, word) {
+			findings = append(findings, fmt.Sprintf("the word %q", word))
+		}
+	}
+	for _, shape := range secretShapes {
+		if shape.re.MatchString(text) {
+			findings = append(findings, shape.name)
+		}
+	}
+	return findings
+}
+
+// TestSecretScanFindsCredentials drives the scan: a text holding a registration
+// token, a JWT and a private key must be reported, and the text a manifest
+// legitimately carries must not.
+func TestSecretScanFindsCredentials(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		text     string
+		findings []string
+	}{
+		{
+			name: "credentials",
+			text: "registration_token: 0123456789abcdef0123456789abcdef01234567\nclient: eyJhbGciOiJIUzI1NiJ9.payload\n" +
+				"key: -----BEGIN RSA PRIVATE KEY-----\n",
+			findings: []string{
+				`the word "registration"`,
+				`the word "token"`,
+				"a 40-character hex token",
+				"a JWT",
+				"a PEM private key",
+				"a base64 run of 32 characters or more",
+			},
+		},
+		{name: "a manifest's own text", text: "name: forgejo-runner\nimage: data.forgejo.org/forgejo/runner:13.2.0\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := scanSecretText(tc.text)
+			for _, want := range tc.findings {
+				if !slices.Contains(got, want) {
+					t.Errorf("the scan reported %q, want it to report %q", got, want)
+				}
+			}
+			if len(tc.findings) == 0 && len(got) != 0 {
+				t.Errorf("the scan reported %q for text that carries no credential", got)
+			}
+		})
+	}
+}
+
 func TestNoSecretInRender(t *testing.T) {
 	t.Parallel()
 	m := mustBuild(t, goldenValues())
@@ -317,10 +422,23 @@ func TestNoSecretInRender(t *testing.T) {
 	if err := Render(&buf, m); err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	text := strings.ToLower(buf.String())
-	for _, word := range []string{"token", "password", "secret", "registration"} {
-		if strings.Contains(text, word) {
-			t.Errorf("the rendered manifests contain %q; the registration token never reaches a manifest", word)
+	text := buf.String()
+	if findings := scanSecretText(text); len(findings) != 0 {
+		t.Errorf("the rendered manifests carry %s; the registration token never reaches a manifest", strings.Join(findings, ", "))
+	}
+	if strings.Contains(text, "kind: Secret") {
+		t.Error("the stream holds a Secret; the renderer has no secret value to put in one")
+	}
+
+	// Every environment variable is one of the four below, so a credential
+	// cannot arrive through an env var by default: a new one is a deliberate
+	// edit here as well as in the renderer.
+	allowedEnv := []string{"DOCKER_HOST", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_TLS_CERTDIR"}
+	for _, c := range m.Deployment.Spec.Template.Spec.Containers {
+		for _, env := range c.Env {
+			if !slices.Contains(allowedEnv, env.Name) {
+				t.Errorf("container %q sets the unvetted environment variable %q", c.Name, env.Name)
+			}
 		}
 	}
 
@@ -515,11 +633,18 @@ func TestBuildRefusesInvalidValues(t *testing.T) {
 		{"labels are empty", func(v *Values) { v.Labels = nil }, "Values.Labels"},
 		{"a label is empty", func(v *Values) { v.Labels = []string{"gate:docker://gate:1", ""} }, "Values.Labels[1]"},
 		{"a label has whitespace", func(v *Values) { v.Labels = []string{"gate label"} }, "whitespace"},
+		{"a label names no image", func(v *Values) { v.Labels = []string{"gate"} }, "Values.Labels[0]"},
+		{"a label name is empty", func(v *Values) { v.Labels = []string{":docker://gate:1"} }, "Values.Labels[0]"},
+		{"a label image is empty", func(v *Values) { v.Labels = []string{"gate:docker://"} }, "Values.Labels[0]"},
 		{"host IP is empty", func(v *Values) { v.ForgejoHostIP = "" }, "Values.ForgejoHostIP"},
 		{"host IP is a name", func(v *Values) { v.ForgejoHostIP = "forgejo.internal" }, "dotted IPv4"},
 		{"host IP has whitespace", func(v *Values) { v.ForgejoHostIP = "192.168.5.2 " }, "whitespace"},
 		{"host IP octet is over 255", func(v *Values) { v.ForgejoHostIP = "192.168.5.256" }, "dotted IPv4"},
 		{"capacity is negative", func(v *Values) { v.Capacity = -1 }, "Values.Capacity"},
+		{"runner CPU is not a quantity", func(v *Values) { v.RunnerResources.CPU = "one" }, "Values.RunnerResources.CPU"},
+		{"runner CPU is zero", func(v *Values) { v.RunnerResources.CPU = "0" }, "Values.RunnerResources.CPU"},
+		{"engine CPU is negative", func(v *Values) { v.DindResources.CPU = "-1" }, "Values.DindResources.CPU"},
+		{"engine memory has no suffix", func(v *Values) { v.DindResources.Memory = "12" }, "Values.DindResources.Memory"},
 		{"engine storage is not a quantity", func(v *Values) { v.DindStorage = "40GB" }, "engine claim storage"},
 		{"engine storage is zero", func(v *Values) { v.DindStorage = "0Gi" }, "engine claim storage"},
 		{"runner storage has no suffix", func(v *Values) { v.RunnerStorage = "10" }, "runner data claim storage"},
@@ -546,7 +671,7 @@ func TestBuildRefusesInvalidValues(t *testing.T) {
 func TestConfigYAMLQuotesAnyLabel(t *testing.T) {
 	t.Parallel()
 	v := goldenValues()
-	v.Labels = []string{"gate:docker://gate:1", "a'b#c"}
+	v.Labels = []string{"gate:docker://gate:1", "a'b#c:docker://gate:1"}
 	doc := decodeConfig(t, mustBuild(t, v))
 	if !slices.Equal(doc.Runner.Labels, v.Labels) {
 		t.Errorf("labels read back as %q, want %q", doc.Runner.Labels, v.Labels)

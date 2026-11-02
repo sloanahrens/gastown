@@ -67,10 +67,11 @@ func importsOf(t *testing.T, path string) []string {
 }
 
 // forbiddenImport reports whether path would give the builder a way to reach a
-// cluster or to run a command: a Kubernetes client, or a process or socket.
+// cluster or to run a command: a Kubernetes client, or a process, socket,
+// dynamic plugin or direct memory access.
 func forbiddenImport(path string) bool {
 	switch {
-	case path == "os/exec":
+	case path == "os/exec", path == "syscall", path == "plugin", path == "unsafe":
 		return true
 	case path == "net", strings.HasPrefix(path, "net/"):
 		return true
@@ -129,7 +130,10 @@ import (
 	_ "k8s.io/client-go/kubernetes"
 	_ "net/http"
 	_ "os/exec"
+	_ "plugin"
 	_ "sigs.k8s.io/controller-runtime"
+	_ "syscall"
+	_ "unsafe"
 )
 `)
 	writeFixture(t, filepath.Join(dir, "apply_test.go"), `package fixture
@@ -141,7 +145,10 @@ import _ "os/exec"
 		`apply.go imports "k8s.io/client-go/kubernetes"`,
 		`apply.go imports "net/http"`,
 		`apply.go imports "os/exec"`,
+		`apply.go imports "plugin"`,
 		`apply.go imports "sigs.k8s.io/controller-runtime"`,
+		`apply.go imports "syscall"`,
+		`apply.go imports "unsafe"`,
 	}
 	if got := scanImports(t, dir); !slices.Equal(got, want) {
 		t.Errorf("the scan reported %q, want %q", got, want)
