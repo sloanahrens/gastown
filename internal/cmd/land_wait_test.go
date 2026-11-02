@@ -17,7 +17,7 @@ import (
 )
 
 // landWaitEpoch is the instant every fixture clock starts at.
-var landWaitEpoch = time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC)
+var landWaitEpoch = time.Date(2026, 11, 1, 9, 0, 0, 0, time.Local)
 
 // landWaitErrTestRead stands in for a failed read of the log or the bead.
 var landWaitErrTestRead = landWaitTestError("the read failed")
@@ -843,8 +843,13 @@ func TestLandWaitLogSourceMissingLog(t *testing.T) {
 	t.Run("a rotated copy since the start", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
-		body := "2026/11/01 09:30:01 landing_worker: [land] gt-a: rejected (gate): make gate failed\n"
-		if err := os.WriteFile(filepath.Join(dir, "daemon-2026-11-01T09-30-00.000.log"), []byte(body), 0o600); err != nil {
+		// The rotated copy's name is the rotation instant in UTC and its lines carry
+		// local wall-clock stamps, so both are built from the epoch, not typed.
+		rotatedAt := landWaitEpoch.Add(30 * time.Minute)
+		stamp := rotatedAt.Add(time.Second).In(time.Local).Format("2006/01/02 15:04:05")
+		body := stamp + " landing_worker: [land] gt-a: rejected (gate): make gate failed\n"
+		name := "daemon-" + rotatedAt.UTC().Format("2006-01-02T15-04-05.000") + ".log"
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
 			t.Fatalf("writing the rotated log: %v", err)
 		}
 		events, err := landWaitLogSource(dir)(since)
