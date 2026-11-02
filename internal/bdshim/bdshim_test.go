@@ -132,6 +132,74 @@ func TestDecideRoutesByStore(t *testing.T) {
 	}
 }
 
+// cook reads a formula file and opens a store only with --persist (R1), so a
+// tracker rig directory passes it to bd.real rather than refusing a verb no
+// handler could answer (gt-p85pw.100).
+func TestDecideCookPassesThrough(t *testing.T) {
+	t.Parallel()
+	town := newTown(t, routeTown, routeAlpha, routeBeta)
+	beta := filepath.Join(town, "beta", "mayor", "rig")
+
+	cases := []struct {
+		name     string
+		cwd      string
+		beadsDir string
+		args     []string
+	}{
+		{"a bare cook", beta, "", []string{"cook"}},
+		{"a cook of a formula file", beta, "", []string{"cook", "mol-polecat-work"}},
+		{"a cook with the vars the town passes", beta, "", []string{"cook", "mol-polecat-work", "--var", "issue=bt-abc", "--mode", "machine"}},
+		{"a cook routed by BEADS_DIR", town, filepath.Join(beta, ".beads"), []string{"cook", "x.formula.toml"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := decide(t, tc.cwd, tc.beadsDir, tc.args...)
+			if err != nil {
+				t.Fatalf("Decide(%v) from a tracker rig = %v, want no error", tc.args, err)
+			}
+			if got.Tracker {
+				t.Errorf("Decide(%v) from a tracker rig = %+v, want bd.real", tc.args, got)
+			}
+		})
+	}
+}
+
+// Every formula subcommand reads formula files and needs no store, so a
+// tracker rig directory passes each to bd.real (gt-p85pw.100).
+func TestDecideFormulaPassesThrough(t *testing.T) {
+	t.Parallel()
+	town := newTown(t, routeTown, routeAlpha, routeBeta)
+	beta := filepath.Join(town, "beta", "mayor", "rig")
+
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"the bare verb", []string{"formula"}},
+		{"list", []string{"formula", "list"}},
+		{"list with a type", []string{"formula", "list", "--type", "work"}},
+		{"show", []string{"formula", "show", "mol-polecat-work"}},
+		{"lint", []string{"formula", "lint", "."}},
+		{"convert", []string{"formula", "convert", "x.formula.toml"}},
+		{"schema", []string{"formula", "schema"}},
+		{"the primitives alias", []string{"formula", "primitives"}},
+		{"a subcommand bd does not document", []string{"formula", "bogus"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := decide(t, beta, "", tc.args...)
+			if err != nil {
+				t.Fatalf("Decide(%v) from a tracker rig = %v, want no error", tc.args, err)
+			}
+			if got.Tracker {
+				t.Errorf("Decide(%v) from a tracker rig = %+v, want bd.real", tc.args, got)
+			}
+		})
+	}
+}
+
 // A store-selecting flag is refused while a tracker rig exists, because the
 // shim routes by the working directory and would answer from the wrong store
 // (gt-p85pw.88).
@@ -154,6 +222,74 @@ func TestDecideRefusesAStoreSelectingFlagWhileATrackerExists(t *testing.T) {
 	// A value after the separator is an operand, not a flag.
 	if _, err := decide(t, alpha, "", "create", "--", "-C"); err != nil {
 		t.Errorf("Decide with -C after the separator = %v, want it treated as an operand", err)
+	}
+}
+
+// cook and the formula verbs pass through only once the store-selecting flag
+// has been refused: a cook with --persist opens the store the flag names, so
+// the passthrough must not decide before the guard (gt-p85pw.100).
+func TestDecideRefusesAStoreSelectingFlagOnAPassThroughVerb(t *testing.T) {
+	t.Parallel()
+	town := newTown(t, routeTown, routeAlpha, routeBeta)
+	beta := filepath.Join(town, "beta", "mayor", "rig")
+	for _, args := range [][]string{
+		{"cook", "x.formula.toml", "-C", "elsewhere"},
+		{"cook", "--persist", "--db", "x.db"},
+		{"formula", "list", "-C", "elsewhere"},
+		{"--directory", "elsewhere", "formula", "list"},
+	} {
+		if _, err := decide(t, beta, "", args...); err == nil || !strings.Contains(err.Error(), "selects a store") {
+			t.Errorf("Decide(%v) from a tracker rig cwd = %v, want a refusal naming the store-selecting flag", args, err)
+		}
+	}
+}
+
+// cook opens a store with --persist (R1), so a tracker rig refuses that form
+// through the guard the store-selecting flags use: a bare --persist, the
+// =true form, and the flag after the formula operand all name a store this
+// shim cannot route. A cook without it still reaches bd.real (gt-p85pw.100).
+func TestCookPersistFromATrackerRigIsRefused(t *testing.T) {
+	t.Parallel()
+	town := newTown(t, routeTown, routeAlpha, routeBeta)
+	beta := filepath.Join(town, "beta", "mayor", "rig")
+
+	refused := []struct {
+		name string
+		args []string
+	}{
+		{"the bare flag", []string{"cook", "--persist"}},
+		{"the =true form", []string{"cook", "--persist=true"}},
+		{"the =1 form pflag also reads as true", []string{"cook", "--persist=1"}},
+		{"the flag after the formula operand", []string{"cook", "mol-polecat-work", "--persist"}},
+		{"the =true form after the formula operand", []string{"cook", "mol-polecat-work", "--persist=true", "--var", "issue=bt-abc"}},
+	}
+	for _, tc := range refused {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := decide(t, beta, "", tc.args...); err == nil || !strings.Contains(err.Error(), "selects a store") {
+				t.Errorf("Decide(%v) from a tracker rig = %v, want a refusal naming --persist", tc.args, err)
+			}
+		})
+	}
+
+	passed := []struct {
+		name string
+		args []string
+	}{
+		{"a cook with no persist flag", []string{"cook", "mol-polecat-work"}},
+		{"a cook whose persist is explicitly false", []string{"cook", "--persist=false"}},
+		// Only cook documents --persist as the flag that opens a store; on
+		// another command this guard leaves the flag to bd.real.
+		{"a formula subcommand naming --persist", []string{"formula", "list", "--persist"}},
+	}
+	for _, tc := range passed {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := decide(t, beta, "", tc.args...)
+			if err != nil || got.Tracker {
+				t.Errorf("Decide(%v) from a tracker rig = %+v, %v, want bd.real and no error", tc.args, got, err)
+			}
+		})
 	}
 }
 
@@ -927,6 +1063,84 @@ func TestMainPassesADoltCommandToRealBd(t *testing.T) {
 				t.Error("Main failed without a message on stderr")
 			}
 		})
+	}
+}
+
+// The entry point runs bd.real for cook and formula in a tracker rig
+// directory, with argv unchanged: a verb that needs no store is never refused
+// for a handler (gt-p85pw.100).
+func TestMainPassesCookAndFormulaToRealBd(t *testing.T) {
+	t.Parallel()
+	town := newTown(t, routeTown, routeAlpha, routeBeta)
+	beta := filepath.Join(town, "beta", "mayor", "rig")
+
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"cook", []string{"cook", "mol-polecat-work", "--var", "issue=bt-abc"}},
+		{"formula list", []string{"formula", "list"}},
+		{"formula show", []string{"formula", "show", "mol-polecat-work"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			proc := &fakeProcess{}
+			e, stderr, shimPath := shimEnv(t, beta, "", proc, handlers, tc.args...)
+			if got := Main(e); got != 0 {
+				t.Errorf("Main(%v) = %d, want bd.real's 0 (stderr %q)", tc.args, got, stderr.String())
+			}
+			if stderr.Len() != 0 {
+				t.Errorf("Main(%v) wrote %q on stderr, want nothing", tc.args, stderr.String())
+			}
+			if strings.Join(proc.ran, " ") != strings.Join(tc.args, " ") {
+				t.Errorf("Main(%v) ran %v, want bd's argv unchanged", tc.args, proc.ran)
+			}
+			if want := filepath.Join(filepath.Dir(shimPath), realName); proc.path != want {
+				t.Errorf("Main(%v) ran %q, want bd.real at %q", tc.args, proc.path, want)
+			}
+		})
+	}
+}
+
+// The entry point refuses cook --persist in a tracker rig before bd.real runs,
+// so the store the flag opens is never reached from there (gt-p85pw.100).
+func TestMainRefusesCookPersistBeforeRealBd(t *testing.T) {
+	t.Parallel()
+	town := newTown(t, routeTown, routeAlpha, routeBeta)
+	beta := filepath.Join(town, "beta", "mayor", "rig")
+
+	proc := &fakeProcess{}
+	e, stderr, _ := shimEnv(t, beta, "", proc, handlers, "cook", "mol-polecat-work", "--persist")
+	if got := Main(e); got != 1 {
+		t.Errorf("Main(cook --persist) = %d, want 1", got)
+	}
+	if !strings.Contains(stderr.String(), "--persist selects a store") {
+		t.Errorf("stderr = %q, want a refusal naming --persist", stderr.String())
+	}
+	if proc.ran != nil {
+		t.Errorf("Main(cook --persist) ran %v, want no bd.real", proc.ran)
+	}
+}
+
+// A tracker rig directory still refuses the verbs it has no handler for: only
+// cook and the formula verbs pass through (gt-p85pw.100).
+func TestMainRefusesAnUnhandledVerbInATrackerRigDirectory(t *testing.T) {
+	t.Parallel()
+	town := newTown(t, routeTown, routeAlpha, routeBeta)
+	beta := filepath.Join(town, "beta", "mayor", "rig")
+
+	proc := &fakeProcess{}
+	e, stderr, _ := shimEnv(t, beta, "", proc, handlers, "sql", "select 1")
+	if got := Main(e); got != 1 {
+		t.Errorf("Main(sql) = %d, want 1", got)
+	}
+	const want = "bdshim: verb sql is not implemented for tracker rig bt-\n"
+	if stderr.String() != want {
+		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	}
+	if proc.ran != nil {
+		t.Errorf("Main(sql) ran %v, want no fallback to bd.real", proc.ran)
 	}
 }
 

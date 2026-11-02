@@ -1,7 +1,8 @@
 // Package bdshim routes a bd command to the store that owns it: a Dolt rig
 // keeps the real bd (bd.real, beside this binary), and a tracker rig answers
-// through a verb handler registered here. X3-X6 of gt-p85pw add the handlers;
-// this skeleton ships none, so every tracker verb is refused.
+// through a verb handler registered here. cook and the formula verbs need no
+// store without cook's --persist, so they reach bd.real from a tracker rig
+// too; a tracker verb with no handler and no such rule is refused.
 package bdshim
 
 import (
@@ -11,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -135,11 +137,25 @@ func Decide(getenv func(string) string, getwd func() (string, error), args []str
 	}
 	town := filepath.Dir(found.table)
 
-	// A flag that selects the store bd opens moves the command off the store the
-	// working directory names, and nothing here follows it, so while a tracker
-	// rig exists it is refused rather than routed by the wrong directory.
+	// A flag that opens a store bd.real would work on moves the command off the
+	// store the working directory names, and nothing here follows it, so while
+	// a tracker rig exists it is refused rather than routed by the wrong
+	// directory. It is checked before the passthrough below, because cook opens
+	// a store with --persist and that store would be out of this routing's
+	// reach.
 	if flag := storeFlag(args); flag != "" && hasTrackerRoute(routes) {
 		return Decision{}, fmt.Errorf("%s selects a store this shim cannot route while a tracker rig exists: run bd from the rig's own directory", flag)
+	}
+
+	// cook and the formula verbs read formula files and need no store
+	// (docs/research/tracker/R1-cook-port.md), so bd.real answers them from a
+	// tracker rig directory. They are decided before any bead id routes them
+	// because neither acts on a bead: a cook's formula file or --var value can
+	// open with a rig prefix without naming one, and a formula subcommand's
+	// operand is a formula name or a path. Routing such an operand would send a
+	// store-free command to the tracker, which has no handler for it.
+	if passesThrough(commandPath(args)) {
+		return d, nil
 	}
 
 	command := commandPath(args)
@@ -191,6 +207,25 @@ func Decide(getenv func(string) string, getwd func() (string, error), args []str
 		}
 	}
 	return d, nil
+}
+
+// passThroughVerbs are the commands a tracker rig hands to bd.real instead of
+// answering or refusing: cook and the formula verbs read formula files and the
+// town overlay, and cook opens a store only with --persist, which the store
+// guard above refuses (docs/research/tracker/R1-cook-port.md). mol, wisp and
+// gate are not here: their handlers wait on recorded goldens, so those verbs
+// stay refused until then (gt-p85pw.101).
+var passThroughVerbs = map[string]bool{
+	"cook":    true,
+	"formula": true,
+}
+
+// passesThrough reports whether command is one a tracker rig hands to
+// bd.real. A formula subcommand passes with its verb: commandPath opens the
+// path with the verb and resolves an alias to the command it stands for.
+func passesThrough(command string) bool {
+	verb, _, _ := strings.Cut(command, " ")
+	return passThroughVerbs[verb]
 }
 
 // Refusal is the message for a tracker verb this binary has no handler for.
@@ -287,21 +322,44 @@ func samePath(path string) string {
 	return filepath.Clean(path)
 }
 
-// storeFlag returns the first bd flag in args that selects the store bd opens
-// (-C, --directory or --db, bare or with =value), or "" when there is none. A
-// token after the -- separator is an operand and never a flag.
+// storeFlag returns the first bd flag in args that opens a store bd.real
+// would work on, or "" when there is none: -C, --directory and --db select
+// one on any command, and --persist makes cook open the store it otherwise
+// skips. A bool flag set to false (--persist=false) leaves the store closed,
+// so it is not one; a value bd cannot parse is reported as opening it, since
+// a store is then out of this routing's reach. A token after the -- separator
+// is an operand and never a flag.
 func storeFlag(args []string) string {
+	command := commandPath(args)
 	for _, arg := range args {
 		if arg == "--" {
 			return ""
 		}
-		name, _, _ := strings.Cut(arg, "=")
+		name, value, inline := strings.Cut(arg, "=")
 		switch name {
 		case "-C", "--directory", "--db":
+			return name
+		case "--persist":
+			if command != "cook" {
+				continue
+			}
+			if inline && !persistOn(value) {
+				continue
+			}
 			return name
 		}
 	}
 	return ""
+}
+
+// persistOn reports whether cook's --persist value asks for a persistent
+// molecule, which opens the store. A bare flag is true; only an explicit
+// false turns it off, as bd's pflag parser reads a bool. A value it cannot
+// parse is true: bd would reject it, and until it does the store it opens is
+// out of this shim's reach.
+func persistOn(value string) bool {
+	on, err := strconv.ParseBool(value)
+	return err != nil || on
 }
 
 // hasTrackerRoute reports whether any route in the table is a tracker rig.
