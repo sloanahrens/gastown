@@ -379,7 +379,7 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 				// removes the claim, so a RED summary's log path resolves on
 				// the host. A run that wrote none leaves the source absent,
 				// which is not a failure (gt-4lj2q).
-				{Argv: kubectlArgv(spec, "cp", reader.Metadata.Name+":"+OutputDir+"/"+LogsDirName, filepath.Join(spec.OutDir, LogsDirName)), MissingSourceOK: true},
+				{Argv: kubectlArgv(spec, "cp", reader.Metadata.Name+":"+OutputDir+"/"+LogsDirName, filepath.Join(spec.OutDir, LogsDirName)), MissingSourcePath: OutputDir + "/" + LogsDirName},
 			},
 		},
 	}, nil
