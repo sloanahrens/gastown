@@ -315,7 +315,7 @@ type Config struct {
 // ExternalContainerSetting returns the Docker container this town's Dolt runs
 // in, "" when gt manages a host process. A set but unusable
 // dolt.external_container is an error: a caller must never read it as unset and
-// fall back to spawning or signalling a host process.
+// fall back to spawning or signaling a host process.
 func (c *Config) ExternalContainerSetting() (string, error) {
 	if c == nil {
 		return "", nil
@@ -2650,7 +2650,7 @@ func (h *host) drainConnectionsBeforeStop(config *Config) {
 // Works for both servers started via gt dolt start AND externally-started servers.
 //
 // A town that sets dolt.external_container stops its Docker container instead
-// of signalling a host process (gt-xeb1x).
+// of signaling a host process (gt-xeb1x).
 func (h *host) Stop(townRoot string) error {
 	config := h.DefaultConfig(townRoot)
 	if name, err := config.ExternalContainerSetting(); err != nil {

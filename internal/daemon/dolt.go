@@ -191,7 +191,7 @@ type doltContainerLifecycle interface {
 // externalContainer is the Docker container the town's Dolt runs in, "" when
 // the daemon manages a host process. An unreadable or unusable
 // dolt.external_container is an error: no tick may fall back to starting,
-// stopping or signalling a host process the town meant to replace (gt-xeb1x).
+// stopping or signaling a host process the town meant to replace (gt-xeb1x).
 func (m *DoltServerManager) externalContainer() (string, error) {
 	return doltserver.DefaultConfig(m.townRoot).ExternalContainerSetting()
 }
