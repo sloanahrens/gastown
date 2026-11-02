@@ -20,15 +20,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 HOOK="$SCRIPT_DIR/pre-push"
 PASS=0
 FAIL=0
-TMPDIR=""
+WORK_DIR=""
 DEFAULT_BRANCH=""
 
 cleanup() {
-  cd /tmp  # Ensure CWD exists before removing TMPDIR
-  if [[ -n "$TMPDIR" && -d "$TMPDIR" ]]; then
-    rm -rf "$TMPDIR"
+  cd /tmp  # Ensure CWD exists before removing WORK_DIR
+  if [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]]; then
+    rm -rf "$WORK_DIR"
   fi
-  TMPDIR=""
+  WORK_DIR=""
 }
 trap cleanup EXIT
 
@@ -38,13 +38,13 @@ trap cleanup EXIT
 # (<town>/<rig>/polecats/<name>/<repo>) without any env vars set.
 setup_repos() {
   local local_rel="${1:-local}"
-  TMPDIR=$(mktemp -d)
+  WORK_DIR=$(mktemp -d)
   # Create a bare "remote" repo
-  git init --bare "$TMPDIR/remote.git" >/dev/null 2>&1
+  git init --bare "$WORK_DIR/remote.git" >/dev/null 2>&1
   # Clone it as the "local" repo
-  mkdir -p "$(dirname "$TMPDIR/$local_rel")"
-  git clone "$TMPDIR/remote.git" "$TMPDIR/$local_rel" >/dev/null 2>&1
-  cd "$TMPDIR/$local_rel"
+  mkdir -p "$(dirname "$WORK_DIR/$local_rel")"
+  git clone "$WORK_DIR/remote.git" "$WORK_DIR/$local_rel" >/dev/null 2>&1
+  cd "$WORK_DIR/$local_rel"
   git config user.email "test@test.com"
   git config user.name "Test"
   # Initial commit
@@ -57,8 +57,8 @@ setup_repos() {
   # Set up origin/HEAD so hook can detect default branch
   git remote set-head origin "$DEFAULT_BRANCH" >/dev/null 2>&1
   # Copy the hook
-  cp "$HOOK" "$TMPDIR/$local_rel/.git/hooks/pre-push"
-  chmod +x "$TMPDIR/$local_rel/.git/hooks/pre-push"
+  cp "$HOOK" "$WORK_DIR/$local_rel/.git/hooks/pre-push"
+  chmod +x "$WORK_DIR/$local_rel/.git/hooks/pre-push"
 }
 
 run_hook() {
@@ -146,7 +146,7 @@ echo ""
 # Test 1: Normal push to default branch (no integration content)
 echo "Test 1: Normal push to default branch (no integration content)"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 remote_sha=$(get_sha HEAD)
 echo "change1" >> file.txt
 git add file.txt && git commit -m "normal change" >/dev/null 2>&1
@@ -157,7 +157,7 @@ cleanup
 # Test 2: Push to polecat/* branch
 echo "Test 2: Push to polecat/* branch"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 git checkout -b polecat/worker1 >/dev/null 2>&1
 echo "polecat work" >> file.txt
 git add file.txt && git commit -m "polecat work" >/dev/null 2>&1
@@ -168,7 +168,7 @@ cleanup
 # Test 3: Push to integration/* branch
 echo "Test 3: Push to integration/* branch"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 git checkout -b integration/epic-1 >/dev/null 2>&1
 echo "integration work" >> file.txt
 git add file.txt && git commit -m "integration work" >/dev/null 2>&1
@@ -179,7 +179,7 @@ cleanup
 # Test 4: Push to feature/* without upstream remote (blocked)
 echo "Test 4: Push to feature/* without upstream remote"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 git checkout -b feature/thing >/dev/null 2>&1
 echo "feature" >> file.txt
 git add file.txt && git commit -m "feature" >/dev/null 2>&1
@@ -190,8 +190,8 @@ cleanup
 # Test 5: Push to feature/* with upstream remote (allowed)
 echo "Test 5: Push to feature/* with upstream remote"
 setup_repos
-cd "$TMPDIR/local"
-git remote add upstream "$TMPDIR/remote.git" >/dev/null 2>&1
+cd "$WORK_DIR/local"
+git remote add upstream "$WORK_DIR/remote.git" >/dev/null 2>&1
 git checkout -b feature/thing >/dev/null 2>&1
 echo "feature" >> file.txt
 git add file.txt && git commit -m "feature" >/dev/null 2>&1
@@ -202,7 +202,7 @@ cleanup
 # Test 6: Push to default branch with integration merge (no env var) — BLOCKED
 echo "Test 6: Push to default branch with integration merge (no env var)"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 # Create and push an integration branch
 git checkout -b integration/epic-2 >/dev/null 2>&1
 echo "epic work" >> file.txt
@@ -223,7 +223,7 @@ cleanup
 # gt mq integration land was removed (gt-fcxe9.4) — BLOCKED
 echo "Test 7: Push to default branch with integration merge + GT_INTEGRATION_LAND=1 — BLOCKED"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 git checkout -b integration/epic-3 >/dev/null 2>&1
 echo "epic work" >> file.txt
 git add file.txt && git commit -m "epic work" >/dev/null 2>&1
@@ -239,7 +239,7 @@ cleanup
 # Test 8: Push to default branch with non-integration merge — allowed
 echo "Test 8: Push to default branch with non-integration merge"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 # Create a local feature branch and merge it (no need to push to origin)
 git checkout -b feature/normal >/dev/null 2>&1
 echo "feature work" >> file.txt
@@ -254,7 +254,7 @@ cleanup
 # Test 9: Tag push — allowed
 echo "Test 9: Tag push"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 local_sha=$(get_sha HEAD)
 assert_pass "Tag push allowed" run_hook "refs/tags/v1.0.0" "$local_sha" "refs/tags/v1.0.0" "0000000000000000000000000000000000000000"
 cleanup
@@ -262,7 +262,7 @@ cleanup
 # Test 10: Push to default branch with fast-forward integration merge (no merge commit) — BLOCKED
 echo "Test 10: Push to default branch with ff integration merge (no merge commit)"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 git checkout -b integration/epic-4 >/dev/null 2>&1
 echo "epic ff work" >> file.txt
 git add file.txt && git commit -m "epic ff work" >/dev/null 2>&1
@@ -280,7 +280,7 @@ cleanup
 # (the classic `git push origin main` from a feature branch). HEAD mismatch — BLOCKED.
 echo "Test 11: Off-branch push (HEAD on session branch, pushing default)"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 git checkout -b session/x >/dev/null 2>&1
 echo "session work" >> file.txt
 git add file.txt && git commit -m "session work" >/dev/null 2>&1
@@ -292,7 +292,7 @@ cleanup
 # Test 12: Off-branch push with GT_ALLOW_OFFBRANCH_PUSH=1 — ALLOWED (override).
 echo "Test 12: Off-branch push with GT_ALLOW_OFFBRANCH_PUSH=1"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 git checkout -b session/y >/dev/null 2>&1
 echo "session work" >> file.txt
 git add file.txt && git commit -m "session work" >/dev/null 2>&1
@@ -303,7 +303,7 @@ cleanup
 # Test 13: Off-branch deletion push (zero local sha) — not a HEAD mismatch, ALLOWED.
 echo "Test 13: Off-branch deletion push (zero local sha)"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 git checkout -b session/z >/dev/null 2>&1
 default_sha=$(get_sha "$DEFAULT_BRANCH")
 unset GT_ALLOW_OFFBRANCH_PUSH 2>/dev/null || true
@@ -313,7 +313,7 @@ cleanup
 # Test 14: Notes ref push (e.g. refs/notes/om) — allowed
 echo "Test 14: Notes ref push"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 local_sha=$(get_sha HEAD)
 assert_pass "Notes ref push allowed" run_hook "refs/notes/om" "$local_sha" "refs/notes/om" "0000000000000000000000000000000000000000"
 cleanup
@@ -325,7 +325,7 @@ cleanup
 # Test 15: polecat (bare GT_ROLE=polecat) pushing the default branch — BLOCKED
 echo "Test 15: Polecat push to default branch (GT_ROLE=polecat)"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 remote_sha=$(get_sha HEAD)
 echo "polecat change" >> file.txt
 git add file.txt && git commit -m "polecat change" >/dev/null 2>&1
@@ -336,7 +336,7 @@ cleanup
 # Test 16: polecat compound role (the form the session manager sets) — BLOCKED
 echo "Test 16: Polecat push to default branch (GT_ROLE=<rig>/polecats/<name>)"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 remote_sha=$(get_sha HEAD)
 echo "polecat change" >> file.txt
 git add file.txt && git commit -m "polecat change" >/dev/null 2>&1
@@ -349,7 +349,7 @@ cleanup
 # refs/heads/* ref, so the off-branch guard does not cover this form.
 echo "Test 17: Detached HEAD, HEAD:<default> refspec, polecat — BLOCKED"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 echo "detached work" >> file.txt
 git add file.txt && git commit -m "detached work" >/dev/null 2>&1
 git checkout --detach HEAD >/dev/null 2>&1
@@ -361,7 +361,7 @@ cleanup
 # Test 18: detached HEAD, `<sha>:<default>` refspec, polecat — BLOCKED
 echo "Test 18: Detached HEAD, <sha>:<default> refspec, polecat — BLOCKED"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 echo "detached work" >> file.txt
 git add file.txt && git commit -m "detached work" >/dev/null 2>&1
 git checkout --detach HEAD >/dev/null 2>&1
@@ -373,7 +373,7 @@ cleanup
 # Test 19: polecat pushing its own polecat/* branch — still allowed
 echo "Test 19: Polecat push to its own polecat/* branch"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 git checkout -b polecat/flint/gt-ibt8 >/dev/null 2>&1
 echo "polecat work" >> file.txt
 git add file.txt && git commit -m "polecat work" >/dev/null 2>&1
@@ -385,7 +385,7 @@ cleanup
 # + GT_ROLE=<rig>/refinery) — allowed
 echo "Test 20: Default push with GT_REFINERY_MERGE=1 + genuine refinery identity"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 remote_sha=$(get_sha HEAD)
 echo "merged MR" >> file.txt
 git add file.txt && git commit -m "merged MR" >/dev/null 2>&1
@@ -398,7 +398,7 @@ cleanup
 # refused like any other polecat push to the default branch.
 echo "Test 21: Default push with GT_DONE_DIRECT_MERGE=1 from a polecat — BLOCKED"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 remote_sha=$(get_sha HEAD)
 echo "direct merge" >> file.txt
 git add file.txt && git commit -m "direct merge" >/dev/null 2>&1
@@ -409,7 +409,7 @@ cleanup
 # Test 22: cwd alone identifies the polecat worktree (no GT_ROLE at all)
 echo "Test 22: Polecat detected from cwd (<town>/<rig>/polecats/<name>/<repo>)"
 setup_repos "town/gastown/polecats/onyx/gastown"
-cd "$TMPDIR/town/gastown/polecats/onyx/gastown"
+cd "$WORK_DIR/town/gastown/polecats/onyx/gastown"
 remote_sha=$(get_sha HEAD)
 echo "cwd-detected change" >> file.txt
 git add file.txt && git commit -m "cwd-detected change" >/dev/null 2>&1
@@ -420,7 +420,7 @@ cleanup
 # Test 23: crew role still pushes the default branch directly (by design)
 echo "Test 23: Crew push to default branch (GT_ROLE=<rig>/crew/<name>)"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 remote_sha=$(get_sha HEAD)
 echo "crew change" >> file.txt
 git add file.txt && git commit -m "crew change" >/dev/null 2>&1
@@ -437,7 +437,7 @@ cleanup
 # Test 24: live `git push origin HEAD:<default>` from a polecat worktree — refused
 echo "Test 24: LIVE push HEAD:$DEFAULT_BRANCH from a polecat worktree (cwd-detected)"
 setup_repos "town/gastown/polecats/flint/gastown"
-cd "$TMPDIR/town/gastown/polecats/flint/gastown"
+cd "$WORK_DIR/town/gastown/polecats/flint/gastown"
 echo "live work" >> file.txt
 git add file.txt && git commit -m "live work" >/dev/null 2>&1
 git checkout --detach HEAD >/dev/null 2>&1
@@ -447,7 +447,7 @@ cleanup
 # Test 25: live `git push origin <sha>:<default>` with GT_ROLE=polecat — refused
 echo "Test 25: LIVE push <sha>:$DEFAULT_BRANCH with GT_ROLE=polecat"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 echo "live sha work" >> file.txt
 git add file.txt && git commit -m "live sha work" >/dev/null 2>&1
 git checkout --detach HEAD >/dev/null 2>&1
@@ -458,7 +458,7 @@ cleanup
 # Test 26: live push of the polecat's own branch — allowed
 echo "Test 26: LIVE push of polecat/* branch with GT_ROLE=polecat"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 git checkout -b polecat/flint/gt-ibt8 >/dev/null 2>&1
 echo "live branch work" >> file.txt
 git add file.txt && git commit -m "live branch work" >/dev/null 2>&1
@@ -469,7 +469,7 @@ cleanup
 # the refusal above is the role check and not a broken test rig)
 echo "Test 27: LIVE push HEAD:$DEFAULT_BRANCH as crew — allowed"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 echo "crew live work" >> file.txt
 git add file.txt && git commit -m "crew live work" >/dev/null 2>&1
 assert_live_pass "LIVE crew default push allowed" "GT_ROLE=gastown/crew/sloan" "HEAD:$DEFAULT_BRANCH"
@@ -488,7 +488,7 @@ cleanup
 # the exact bypass gt-9tf9 closes: the flag alone used to be enough.
 echo "Test 28: Polecat self-granting GT_REFINERY_MERGE=1 (no refinery identity) — BLOCKED"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 remote_sha=$(get_sha HEAD)
 echo "spoofed merge" >> file.txt
 git add file.txt && git commit -m "spoofed merge" >/dev/null 2>&1
@@ -500,7 +500,7 @@ cleanup
 # GT_ROLE at all) — still BLOCKED.
 echo "Test 29: Polecat (cwd-detected) self-granting GT_REFINERY_MERGE=1 — BLOCKED"
 setup_repos "town/gastown/polecats/onyx/gastown"
-cd "$TMPDIR/town/gastown/polecats/onyx/gastown"
+cd "$WORK_DIR/town/gastown/polecats/onyx/gastown"
 remote_sha=$(get_sha HEAD)
 echo "spoofed merge" >> file.txt
 git add file.txt && git commit -m "spoofed merge" >/dev/null 2>&1
@@ -513,7 +513,7 @@ cleanup
 # itself run inside one") — ALLOWED.
 echo "Test 30: GT_REFINERY_MERGE=1 + GT_ROLE=refinery from a polecat-shaped cwd — ALLOWED"
 setup_repos "town/gastown/polecats/onyx/gastown"
-cd "$TMPDIR/town/gastown/polecats/onyx/gastown"
+cd "$WORK_DIR/town/gastown/polecats/onyx/gastown"
 remote_sha=$(get_sha HEAD)
 echo "real merge" >> file.txt
 git add file.txt && git commit -m "real merge" >/dev/null 2>&1
@@ -526,7 +526,7 @@ cleanup
 # polecat-shaped cwd — ALLOWED.
 echo "Test 31: GT_REFINERY_MERGE=1 + GT_REFINERY=1 from a polecat-shaped cwd — ALLOWED"
 setup_repos "town/gastown/polecats/onyx/gastown"
-cd "$TMPDIR/town/gastown/polecats/onyx/gastown"
+cd "$WORK_DIR/town/gastown/polecats/onyx/gastown"
 remote_sha=$(get_sha HEAD)
 echo "real merge" >> file.txt
 git add file.txt && git commit -m "real merge" >/dev/null 2>&1
@@ -539,7 +539,7 @@ cleanup
 # direct flag grants nothing since gt-fcxe9.4.
 echo "Test 32: Both GT_REFINERY_MERGE=1 and GT_DONE_DIRECT_MERGE=1 set from a polecat — BLOCKED"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 remote_sha=$(get_sha HEAD)
 echo "ambiguous merge" >> file.txt
 git add file.txt && git commit -m "ambiguous merge" >/dev/null 2>&1
@@ -554,7 +554,7 @@ cleanup
 # above (gt-9tf9).
 echo "Test 33: Polecat GT_ROLE self-granting GT_REFINERY=1 + GT_REFINERY_MERGE=1 — BLOCKED"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 remote_sha=$(get_sha HEAD)
 echo "spoofed identity merge" >> file.txt
 git add file.txt && git commit -m "spoofed identity merge" >/dev/null 2>&1
@@ -567,7 +567,7 @@ cleanup
 # specifically for this live proof, not just a matcher/stdin test).
 echo "Test 34: LIVE push HEAD:$DEFAULT_BRANCH from a polecat worktree with GT_REFINERY_MERGE=1 — refused"
 setup_repos "town/gastown/polecats/flint/gastown"
-cd "$TMPDIR/town/gastown/polecats/flint/gastown"
+cd "$WORK_DIR/town/gastown/polecats/flint/gastown"
 echo "live spoofed merge" >> file.txt
 git add file.txt && git commit -m "live spoofed merge" >/dev/null 2>&1
 git checkout --detach HEAD >/dev/null 2>&1
@@ -581,7 +581,7 @@ cleanup
 # family left main red with no revert (gt-pihe2).
 echo "Test 35: LIVE push of a revert/<bead>-<sha> branch — allowed"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 echo "revert work" >> file.txt
 git add file.txt && git commit -m "revert work" >/dev/null 2>&1
 assert_live_pass "LIVE revert branch push allowed" "" "HEAD:refs/heads/revert/gt-4k3fj.8.6-69e3bc54"
@@ -592,7 +592,7 @@ cleanup
 # reports before the push is made.
 echo "Test 36: LIVE push of a crew/<user>/<slug> branch under gt done's lease"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 git checkout -b crew/sloan/gt-5tuoe >/dev/null 2>&1
 echo "crew work" >> file.txt
 git add file.txt && git commit -m "crew work" >/dev/null 2>&1
@@ -605,7 +605,7 @@ cleanup
 # refused live, so the two allowances above opened nothing else.
 echo "Test 37: LIVE push of an unrelated branch family — still refused"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 git checkout -b docs/gt-ecqx0-self-probe >/dev/null 2>&1
 echo "docs work" >> file.txt
 git add file.txt && git commit -m "docs work" >/dev/null 2>&1
@@ -619,7 +619,7 @@ cleanup
 # failed a rig's first Forgejo landing at the candidate push (gt-p34tr).
 echo "Test 38: LIVE push of a land/<bead> candidate — allowed"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 echo "candidate work" >> file.txt
 git add file.txt && git commit -m "candidate work" >/dev/null 2>&1
 candidate_sha=$(get_sha HEAD)
@@ -630,7 +630,7 @@ cleanup
 # live, so land/* opened nothing else.
 echo "Test 39: LIVE push of feature/x — still refused"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_DIR/local"
 git checkout -b feature/x >/dev/null 2>&1
 echo "feature work" >> file.txt
 git add file.txt && git commit -m "feature work" >/dev/null 2>&1
@@ -643,7 +643,7 @@ cleanup
 # (gt-fn9e6.43).
 echo "Test 40: LIVE push of a land/<bead> from a polecat caller — allowed"
 setup_repos "town/gastown/polecats/mica/gastown"
-cd "$TMPDIR/town/gastown/polecats/mica/gastown"
+cd "$WORK_DIR/town/gastown/polecats/mica/gastown"
 echo "candidate work" >> file.txt
 git add file.txt && git commit -m "candidate work" >/dev/null 2>&1
 candidate_sha=$(get_sha HEAD)

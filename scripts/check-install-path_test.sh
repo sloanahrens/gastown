@@ -6,22 +6,22 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 MAKE_BIN="$(command -v "${MAKE:-make}")"
 SYSTEM_PATH="/usr/bin:/bin"
-TMPDIR=""
+WORK_DIR=""
 PASS=0
 FAIL=0
 
 cleanup() {
-  if [[ -n "$TMPDIR" && -d "$TMPDIR" ]]; then
-    rm -rf "$TMPDIR"
+  if [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]]; then
+    rm -rf "$WORK_DIR"
   fi
 }
 trap cleanup EXIT
 
 setup_bins() {
-  TMPDIR="$(mktemp -d)"
-  INSTALL_DIR="$TMPDIR/home/.local/bin"
-  BREW_DIR="$TMPDIR/usr/local/bin"
-  OTHER_DIR="$TMPDIR/usr/bin"
+  WORK_DIR="$(mktemp -d)"
+  INSTALL_DIR="$WORK_DIR/home/.local/bin"
+  BREW_DIR="$WORK_DIR/usr/local/bin"
+  OTHER_DIR="$WORK_DIR/usr/bin"
   mkdir -p "$INSTALL_DIR" "$BREW_DIR" "$OTHER_DIR"
   printf '#!/usr/bin/env sh\nexit 0\n' > "$INSTALL_DIR/gt"
   printf '#!/usr/bin/env sh\nexit 0\n' > "$BREW_DIR/gt"
