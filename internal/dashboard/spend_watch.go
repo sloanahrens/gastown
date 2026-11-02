@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -61,22 +62,17 @@ func writeSpendWatch(dir string, report json.RawMessage, now time.Time) error {
 		return fmt.Errorf("spend watch: writing %s: %w", dir, err)
 	}
 	tmp := f.Name()
-	_, werr := f.Write(data)
-	if cerr := f.Close(); werr == nil {
-		werr = cerr
-	}
 	// CreateTemp makes the file 0600; set it to the 0644 the watch file has
-	// always had.
-	if werr == nil {
-		werr = os.Chmod(tmp, 0o644)
+	// always had. A failed write, close or chmod and a refused rename all leave
+	// the same way: the temporary file goes and the reading is reported.
+	_, werr := f.Write(data)
+	err = errors.Join(werr, f.Close(), os.Chmod(tmp, 0o644))
+	if err == nil {
+		err = os.Rename(tmp, path)
 	}
-	if werr != nil {
+	if err != nil {
 		removeSpendTemp(tmp)
-		return fmt.Errorf("spend watch: writing %s: %w", tmp, werr)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		removeSpendTemp(tmp)
-		return fmt.Errorf("spend watch: replacing %s: %w", path, err)
+		return fmt.Errorf("spend watch: writing %s: %w", path, err)
 	}
 	return nil
 }
