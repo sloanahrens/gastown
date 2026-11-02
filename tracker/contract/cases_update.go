@@ -22,6 +22,39 @@ func init() {
 	register(Case{Name: "update persistent promotes a wisp", Run: updatePersistent})
 	register(Case{Name: "a status write alone obeys the guards, the close fences and the reopen clear", Fake: true, Run: updateStatusOnly})
 	register(Case{Name: "update writes the title, description, acceptance and appended notes the shim's delete and defer send", Fake: true, Run: updateTextFields})
+	register(Case{Name: "a label patch sets, then adds, then removes labels, and a patch that changes none leaves the issue alone", Fake: true, Run: updateLabelOrder})
+}
+
+// updateLabelOrder is the label write the bd shim's label handler makes
+// (gt-p85pw.98): SetLabels, then AddLabels, then RemoveLabels, each label kept
+// once, and no updated_at bump for a patch that changes no label. The fake
+// models the same order, so the case is flagged Fake. The labels are compared
+// sorted: Postgres reads them ORDER BY label, and the fake keeps apply order.
+func updateLabelOrder(t *testing.T, s store.Store) {
+	is := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "t", Labels: []string{"a", "b"}})
+	mustUpdate(t, s, is.ID, api.UpdatePatch{
+		SetLabels: []string{"x", "y", "x"}, AddLabels: []string{"y", "z"}, RemoveLabels: []string{"z"},
+	}, api.Guard{})
+	if got := sortedLabels(mustGet(t, s, is.ID)); !slices.Equal(got, []string{"x", "y"}) {
+		t.Errorf("after set, add and remove Labels = %v, want [x y]", got)
+	}
+	before := mustGet(t, s, is.ID).UpdatedAt
+	mustUpdate(t, s, is.ID, api.UpdatePatch{AddLabels: []string{"x"}, RemoveLabels: []string{"q"}}, api.Guard{})
+	if after := mustGet(t, s, is.ID); !after.UpdatedAt.Equal(before) {
+		t.Errorf("a label patch that changed nothing moved UpdatedAt from %v to %v", before, after.UpdatedAt)
+	}
+	mustUpdate(t, s, is.ID, api.UpdatePatch{SetLabels: []string{}}, api.Guard{})
+	if got := mustGet(t, s, is.ID); len(got.Labels) != 0 {
+		t.Errorf("Labels = %v after an empty SetLabels, want none", got.Labels)
+	}
+}
+
+// sortedLabels returns a sorted copy of is's labels, so a case compares the
+// set a read answers without pinning the order a store returns it in.
+func sortedLabels(is api.Issue) []string {
+	out := slices.Clone(is.Labels)
+	slices.Sort(out)
+	return out
 }
 
 // updateStatusOnly is the status write the bd shim's update, close and reopen
