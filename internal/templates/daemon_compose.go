@@ -112,6 +112,17 @@ type ComposeSpec struct {
 	KubeconfigFiles    []string
 	OpenShellConfigDir string
 
+	// OMTokenMetaFile is the host path of the om token's expiry sidecar
+	// (daemon.om_token_meta); the render mounts it read-only at the same path, so
+	// the setting reads it unchanged. LandingWorkRoot is the landing worker's work
+	// directory (patrols.landing_worker.work_root), bound read-write at the same
+	// path so its clones outlive a redeploy. TimeZone is an IANA zone name for TZ,
+	// so the daemon's local windows fall at the host's local times; a name only,
+	// never zone data (gt-vi1p3).
+	OMTokenMetaFile string
+	LandingWorkRoot string
+	TimeZone        string
+
 	// LiveTownRoot is the live town's root, which a scratch spec must not
 	// mount, nor mount anything under. It is required when Scratch is set, and
 	// absolute, so a scratch render is always checked against the live town it

@@ -61,6 +61,7 @@ func newComposeRig(t *testing.T) *composeRig {
 		containerEnv: func(string) (map[string]string, error) { return map[string]string{}, nil },
 		readFile:     func(string) ([]byte, error) { return nil, fs.ErrNotExist },
 		evalSymlinks: func(p string) (string, error) { return p, nil },
+		townZone:     func(string) (string, error) { return "", nil },
 		files: composeFiles{
 			mkdirAll: func(dir string) error {
 				if r.mkdirErr != nil {

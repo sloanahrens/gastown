@@ -18,6 +18,7 @@ services:
       GT_TOWN_ROOT: "/towns/live"
       KUBECONFIG: "/towns/live/.runtime/container/kubeconfig.yaml:/towns/live/.runtime/sbx-k8s/kubeconfig"
       XDG_CONFIG_HOME: "/run/gt/xdg"
+      TZ: "America/Chicago"
       A_FIRST: "x$$y"
       BEADS_DOLT_POOL_READ_TIMEOUT: "30s"
     volumes:
@@ -28,6 +29,13 @@ services:
         source: "/host/home/.config/openshell"
         target: "/run/gt/xdg/openshell"
         read_only: true
+      - type: bind
+        source: "/host/home/.config/gt/om-daemon-token.meta"
+        target: "/host/home/.config/gt/om-daemon-token.meta"
+        read_only: true
+      - type: bind
+        source: "/host/home/gt-landing.noindex"
+        target: "/host/home/gt-landing.noindex"
     networks:
       - default
       - sweep

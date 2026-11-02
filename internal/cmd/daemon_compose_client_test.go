@@ -3,10 +3,13 @@ package cmd
 import (
 	"errors"
 	"github.com/steveyegge/gastown/internal/config"
+	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	_ "time/tzdata" // the zone tests load zones by name; carry the database so they do not depend on the host
 
 	"gopkg.in/yaml.v3"
 )
@@ -398,5 +401,87 @@ func TestSecretNamePatternCoversCommonCredentialNames(t *testing.T) {
 		if config.SecretNamePattern.MatchString(n) && n != "KEYBOARD_LAYOUT_X" {
 			t.Errorf("%s is matched as a credential name", n)
 		}
+	}
+}
+
+func TestContainerZoneIsTheTownsThenTheHostsAndNeverSilentUTC(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	none := func(string) (*config.TownSettings, error) { return nil, nil }
+	named := func(zone string) func(string) (*config.TownSettings, error) {
+		return func(string) (*config.TownSettings, error) {
+			return &config.TownSettings{PolecatPool: &config.PolecatPool{Timezone: zone}}, nil
+		}
+	}
+	link := func(target string, err error) func(string) (string, error) {
+		return func(string) (string, error) { return target, err }
+	}
+	if z, err := containerZone("/t", named("America/Denver"), link("/zoneinfo/Europe/Paris", nil), "/etc/localtime"); z != "America/Denver" || err != nil {
+		t.Errorf("a town naming a zone = %q, %v", z, err)
+	}
+	if z, err := containerZone("/t", none, link("/var/db/timezone/zoneinfo/America/Chicago", nil), "/etc/localtime"); z != "America/Chicago" || err != nil {
+		t.Errorf("the host's zone = %q, %v", z, err)
+	}
+	for name, tc := range map[string]struct {
+		load func(string) (*config.TownSettings, error)
+		rl   func(string) (string, error)
+		want string
+	}{
+		"unreadable host link":      {none, link("", boom), "cannot be read"},
+		"link not under zoneinfo":   {none, link("/etc/other", nil), "not under a zoneinfo directory"},
+		"a misspelt town zone":      {named("America/Chicgo"), link("", nil), "does not load"},
+		"a host link to nonsense":   {none, link("/zoneinfo/Not/AZone", nil), "does not load"},
+		"a link ending at zoneinfo": {none, link("/usr/share/zoneinfo/", nil), "not an IANA zone name"},
+		"a town zone Local":         {named("Local"), link("", nil), "not an IANA zone name"},
+		"unreadable settings":       {func(string) (*config.TownSettings, error) { return nil, boom }, link("", nil), "polecat_pool.timezone"},
+	} {
+		if z, err := containerZone("/t", tc.load, tc.rl, "/etc/localtime"); err == nil || z != "" || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s = %q, %v; want a refusal containing %q", name, z, err, tc.want)
+		}
+	}
+}
+
+// The production seam reads a real link: a temporary symlink into a fake
+// zoneinfo tree stands in for /etc/localtime, and the real deps carry the
+// zone function.
+func TestContainerZoneReadsARealLinkAndTheDepsCarryIt(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	link := filepath.Join(dir, "localtime")
+	if err := os.Symlink("/usr/share/zoneinfo/America/Chicago", link); err != nil {
+		t.Fatal(err)
+	}
+	z, err := containerZone("/t", func(string) (*config.TownSettings, error) { return nil, nil }, os.Readlink, link)
+	if err != nil || z != "America/Chicago" {
+		t.Errorf("zone from a real link = %q, %v", z, err)
+	}
+	if realDaemonComposeDeps(io.Discard).townZone == nil {
+		t.Error("the real deps carry no townZone")
+	}
+}
+
+func TestComposeWriteCarriesTheZoneSidecarAndWorkRoot(t *testing.T) {
+	t.Parallel()
+	r := newComposeRig(t)
+	r.deps.townZone = func(string) (string, error) { return "America/Chicago", nil }
+	r.deps.daemonConfig = func(string) (*config.DaemonPatrolConfig, error) {
+		return &config.DaemonPatrolConfig{
+			ContainerNameSetting: composeTestContainer, ComposeProjectSetting: composeTestProject,
+			OMTokenMetaSetting: "/h/om.meta",
+			Patrols:            &config.PatrolsConfig{LandingWorker: &config.LandingWorkerConfig{WorkRoot: "/h/landing"}},
+		}, nil
+	}
+	if err := runDaemonCompose(r.flags, r.deps); err != nil {
+		t.Fatal(err)
+	}
+	compose := string(r.disk[r.composePath()])
+	for _, want := range []string{`TZ: "America/Chicago"`, `source: "/h/om.meta"`, `source: "/h/landing"`} {
+		if !strings.Contains(compose, want) {
+			t.Errorf("the compose lacks %q:\n%s", want, compose)
+		}
+	}
+	r.deps.townZone = func(string) (string, error) { return "", errors.New("boom") }
+	if err := runDaemonCompose(r.flags, r.deps); err == nil {
+		t.Error("an unreadable zone must refuse")
 	}
 }

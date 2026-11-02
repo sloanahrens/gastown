@@ -24,16 +24,22 @@ const (
 // identity, its Docker engine or its client configuration.
 var composeOwnedEnv = []string{
 	"DOCKER_HOST", "GT_DAEMON_CONTAINER_NAME", "GT_DAEMON_SUPERVISOR", "GT_DAEMON_TAKEOVER",
-	"GT_TOWN_ROOT", "KUBECONFIG", "XDG_CONFIG_HOME",
+	"GT_TOWN_ROOT", "KUBECONFIG", "TZ", "XDG_CONFIG_HOME",
 }
+
+var composeZoneName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+)*$`)
 
 var composeEnvName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // validateClient refuses Env, KubeconfigFiles and OpenShellConfigDir values the
 // render cannot carry, and any of them on a scratch spec.
 func (s ComposeSpec) validateClient() error {
-	if s.Scratch && (len(s.Env) > 0 || len(s.KubeconfigFiles) > 0 || s.OpenShellConfigDir != "") {
-		return fmt.Errorf("compose spec: Env, KubeconfigFiles or OpenShellConfigDir is set on a scratch spec; only the live render carries the client configuration")
+	if s.Scratch && (len(s.Env) > 0 || len(s.KubeconfigFiles) > 0 || s.OpenShellConfigDir != "" ||
+		s.OMTokenMetaFile != "" || s.LandingWorkRoot != "" || s.TimeZone != "") {
+		return fmt.Errorf("compose spec: Env, KubeconfigFiles, OpenShellConfigDir, OMTokenMetaFile, LandingWorkRoot or TimeZone is set on a scratch spec; only the live render carries the client configuration")
+	}
+	if s.TimeZone != "" && !composeZoneName.MatchString(s.TimeZone) {
+		return fmt.Errorf("compose spec: TimeZone %q is not an IANA zone name such as America/Chicago", s.TimeZone)
 	}
 	for name, value := range s.Env {
 		switch {
@@ -45,7 +51,19 @@ func (s ComposeSpec) validateClient() error {
 			return fmt.Errorf("compose spec: Env %s holds a control character, which a compose value cannot carry", name)
 		}
 	}
-	for _, p := range append([]string{s.OpenShellConfigDir}, s.KubeconfigFiles...) {
+	if s.LandingWorkRoot != "" && !filepath.IsAbs(s.LandingWorkRoot) {
+		return fmt.Errorf("compose spec: LandingWorkRoot %q is not absolute; it is bound at the same path in the container, and a relative one would resolve against docker's working directory", s.LandingWorkRoot)
+	}
+	if s.LandingWorkRoot != "" {
+		clean := filepath.Clean(s.LandingWorkRoot)
+		if clean == "/" || pathContains(s.TownRoot, clean) || pathContains(clean, s.TownRoot) {
+			return fmt.Errorf("compose spec: LandingWorkRoot %q is the filesystem root or overlaps the town root %q; it is bound read-write beside the town, not over it", s.LandingWorkRoot, s.TownRoot)
+		}
+		if s.OMTokenMetaFile != "" && (pathContains(clean, s.OMTokenMetaFile) || pathContains(s.OMTokenMetaFile, clean)) {
+			return fmt.Errorf("compose spec: LandingWorkRoot %q and OMTokenMetaFile %q overlap, so two mounts would share a target", s.LandingWorkRoot, s.OMTokenMetaFile)
+		}
+	}
+	for _, p := range append([]string{s.OpenShellConfigDir, s.OMTokenMetaFile, s.LandingWorkRoot}, s.KubeconfigFiles...) {
 		if p == "" {
 			continue
 		}
@@ -79,6 +97,9 @@ func liveClientEnv(s ComposeSpec) string {
 	if s.OpenShellConfigDir != "" {
 		line("XDG_CONFIG_HOME", LiveOpenShellConfigHome)
 	}
+	if s.TimeZone != "" {
+		line("TZ", s.TimeZone)
+	}
 	names := make([]string, 0, len(s.Env))
 	for n := range s.Env {
 		names = append(names, n)
@@ -94,8 +115,22 @@ func liveClientEnv(s ComposeSpec) string {
 // The directory holds client certificates; the render carries its path, never
 // a file's contents.
 func liveClientMounts(s ComposeSpec) string {
-	if s.OpenShellConfigDir == "" {
-		return ""
+	var b strings.Builder
+	if s.OpenShellConfigDir != "" {
+		b.WriteString(liveTokenMount(s.OpenShellConfigDir, LiveOpenShellConfigPath))
 	}
-	return liveTokenMount(s.OpenShellConfigDir, LiveOpenShellConfigPath)
+	if s.OMTokenMetaFile != "" {
+		b.WriteString(liveTokenMount(s.OMTokenMetaFile, s.OMTokenMetaFile))
+	}
+	if s.LandingWorkRoot != "" {
+		q := strconv.Quote(composeLiteral(s.LandingWorkRoot))
+		fmt.Fprintf(&b, "      - type: bind\n        source: %s\n        target: %s\n", q, q)
+	}
+	return b.String()
+}
+
+// pathContains reports whether child is dir or lies under it, on cleaned paths.
+func pathContains(dir, child string) bool {
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(child))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
