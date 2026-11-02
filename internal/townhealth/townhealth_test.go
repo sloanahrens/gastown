@@ -694,6 +694,17 @@ func TestPersonWaitNamesWhoIsWaitedOn(t *testing.T) {
 	}
 }
 
+// gt-4f8pc: a label outside the person set names itself rather than borrowing
+// an operator. Compute only walks the known set, so personWait, the caller of
+// waitedOn, is driven directly.
+func TestPersonWaitNamesALabelOutsideTheSetItself(t *testing.T) {
+	t.Parallel()
+	got := personWait(PersonWait{Label: "needs-auditor", Count: 1}, Inputs{})
+	if want := "1 waiting for needs-auditor"; got.Detail != want {
+		t.Errorf("detail = %q, want %q", got.Detail, want)
+	}
+}
+
 // gt-slmaz: every person label has a field, even when only one label holds
 // beads, so a missing field can never read as nobody waiting.
 func TestPersonFieldsAlwaysPresent(t *testing.T) {
