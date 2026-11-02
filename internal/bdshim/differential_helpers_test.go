@@ -118,10 +118,10 @@ var knownSeatDivergences = map[string]seatDivergence{
 	"close-force-reason-fixture-close": {stdout: "", exit: 1},
 }
 
-// awaitingRecording names the divergence rows whose golden bdshim-record has
-// not written yet (the live recording needs a stamped image). The shim's side
-// is asserted now; the golden side once the file exists, and an entry whose
-// golden exists fails, so the list only shrinks.
+// awaitingRecording names the divergence rows with no golden bdshim-record in
+// the tree. The run asserts the shim's answer against the listed difference and
+// skips the golden comparison, which it makes once the golden exists; an entry
+// whose golden exists fails, so the list only shrinks.
 var awaitingRecording = map[string]bool{
 	"close-force-reason-fixture-close": true,
 }
