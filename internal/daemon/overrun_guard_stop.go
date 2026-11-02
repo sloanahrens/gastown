@@ -703,11 +703,10 @@ func (d *Daemon) overrunPushBranch(seat overrunSeat) error {
 	if err := g.Push("origin", sha+":refs/heads/"+branch, false); err != nil {
 		if isNonFastForwardPush(err) {
 			originSHA := originBranchSHA(g, branch)
-			// Origin holding another history for the branch name used to park the
-			// seat until an operator pushed the branch by hand. When the tip adds
-			// no patch origin lacks, the push had nothing left to send and the
-			// seat holds no work origin needs: let the stop release it (gt-ao7zh).
-			if overrunTipAddsNothing(g, branch, sha, originSHA) {
+			// A tip that adds no patch origin lacks has nothing left to send, so
+			// releasing the seat loses no work; a tip that does add one keeps the
+			// seat paused (gt-ao7zh).
+			if overrunTipAddsNothing(g, sha, originSHA) {
 				d.logger.Printf("overrun_guard: %s/%s: origin refused the push of %s as non-fast-forward, but its tip %s adds nothing origin lacks; treating the push as done",
 					seat.Rig, seat.Polecat, branch, sha)
 				return nil
@@ -720,21 +719,21 @@ func (d *Daemon) overrunPushBranch(seat overrunSeat) error {
 }
 
 // overrunTipAddsNothing reports whether tip adds no patch origin lacks: its
-// commits are already in the commit origin holds for branch, in this clone's
-// remote-tracking copy of it, or in origin's default branch. Only a positive
+// commits are already in the commit origin holds now for the branch, or in the
+// commit origin holds now for its default branch. Both come from ls-remote, so
+// a stale remote-tracking ref cannot pass for origin's content. Only a positive
 // answer counts — an origin that cannot be asked, or a history git cannot
-// compare, answers false, so the seat stays paused rather than released over
+// compare, answers false, and the seat stays paused rather than released over
 // work that may exist only in the worktree.
-func overrunTipAddsNothing(g daemonGit, branch, tip, originSHA string) bool {
+func overrunTipAddsNothing(g daemonGit, tip, originSHA string) bool {
 	var upstreams []string
 	if originSHA != "" {
 		upstreams = append(upstreams, originSHA)
 	}
-	if sha, err := g.Rev("refs/remotes/origin/" + branch); err == nil && sha != "" {
-		upstreams = append(upstreams, sha)
-	}
-	if sha, err := g.Rev(g.CleanDefaultBranchBaseRef("origin", g.RemoteDefaultBranch())); err == nil && sha != "" {
-		upstreams = append(upstreams, sha)
+	if defaultBranch := g.RemoteDefaultBranch(); defaultBranch != "" {
+		if sha := originBranchSHA(g, defaultBranch); sha != "" {
+			upstreams = append(upstreams, sha)
+		}
 	}
 	for _, upstream := range upstreams {
 		if overrunTipInHistory(g, tip, upstream) {

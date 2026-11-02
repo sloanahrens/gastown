@@ -484,7 +484,8 @@ type pushStubGit struct {
 	// means the commit time cannot be read.
 	commitTime time.Time
 	// revs answers Rev for refs beyond the local branch, such as the clone's
-	// remote-tracking copies. ancestors lists the "<ancestor> <descendant>" pairs
+	// remote-tracking copies; the refused-push check must not consult them.
+	// ancestors lists the "<ancestor> <descendant>" pairs
 	// IsAncestor answers true for. cherry maps "<upstream> <head>" to git
 	// cherry's output; a pair it does not list, like any other unknown history,
 	// is an error, and cherryErr fails every call.
@@ -639,16 +640,15 @@ func overrunPushRejected() error {
 }
 
 // A branch whose tip adds no patch origin lacks — origin holds another history
-// for the same branch name, the shape that parked six seats for up to 30 h
-// (gt-ao7zh) — has nothing left for the refused push to send, so the push
-// counts as done and the stop can release the seat.
+// for the same branch name (gt-ao7zh) — has nothing left for the refused push
+// to send, so the push counts as done and the stop can release the seat.
 func TestOverrunPushNonFastForwardNothingUnique(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name      string
-		revs      map[string]string
-		ancestors map[string]bool
-		cherry    map[string]string
+		name       string
+		ancestors  map[string]bool
+		cherry     map[string]string
+		originRefs []git.RemoteRef
 	}{
 		{
 			name:      "the tip is an ancestor of origin's branch",
@@ -660,6 +660,57 @@ func TestOverrunPushNonFastForwardNothingUnique(t *testing.T) {
 		},
 		{
 			name: "origin's branch was never fetched and origin's main holds the tip",
+			originRefs: []git.RemoteRef{
+				{Hash: "9f8e7d6", Name: "refs/heads/" + stopSeat.Branch},
+				{Hash: "abc123", Name: "refs/heads/main"},
+			},
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := newOverrunDaemon(t, false)
+			worktree := filepath.Join(d.config.TownRoot, stopSeat.Rig, "polecats", stopSeat.Polecat, stopSeat.Rig)
+			if err := os.MkdirAll(filepath.Join(worktree, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			originRefs := tt.originRefs
+			if originRefs == nil {
+				originRefs = []git.RemoteRef{{Hash: "9f8e7d6", Name: "refs/heads/" + stopSeat.Branch}}
+			}
+			g := &pushStubGit{
+				branch:     stopSeat.Branch,
+				sha:        "abc123",
+				pushErr:    overrunPushRejected(),
+				originRefs: originRefs,
+				ancestors:  tt.ancestors,
+				cherry:     tt.cherry,
+			}
+			d.openGitFn = func(string) daemonGit { return g }
+
+			if err := d.overrunPushBranch(stopSeat); err != nil {
+				t.Fatalf("push = %v, want nil: the tip adds nothing origin lacks", err)
+			}
+		})
+	}
+}
+
+// A stale remote-tracking ref is not origin's content: with the clone's
+// origin/<branch> and origin's default branch both naming the tip, but origin
+// itself holding history that lacks one of the tip's patches, the push stays
+// refused and the seat paused (gt-ao7zh).
+func TestOverrunPushNonFastForwardStaleTrackingRefStaysPaused(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		revs map[string]string
+	}{
+		{
+			name: "the clone's origin/<branch> ref is stale",
+			revs: map[string]string{"refs/remotes/origin/" + stopSeat.Branch: "abc123"},
+		},
+		{
+			name: "the clone's origin/<default> ref is stale",
 			revs: map[string]string{"origin/main": "abc123"},
 		},
 	}
@@ -672,18 +723,21 @@ func TestOverrunPushNonFastForwardNothingUnique(t *testing.T) {
 				t.Fatal(err)
 			}
 			g := &pushStubGit{
-				branch:     stopSeat.Branch,
-				sha:        "abc123",
-				pushErr:    overrunPushRejected(),
-				originRefs: []git.RemoteRef{{Hash: "9f8e7d6", Name: "refs/heads/" + stopSeat.Branch}},
-				revs:       tt.revs,
-				ancestors:  tt.ancestors,
-				cherry:     tt.cherry,
+				branch:  stopSeat.Branch,
+				sha:     "abc123",
+				pushErr: overrunPushRejected(),
+				originRefs: []git.RemoteRef{
+					{Hash: "9f8e7d6", Name: "refs/heads/" + stopSeat.Branch},
+					{Hash: "9f8e7d6", Name: "refs/heads/main"},
+				},
+				revs:   tt.revs,
+				cherry: map[string]string{"9f8e7d6 abc123": "+ 1234567\n"},
 			}
 			d.openGitFn = func(string) daemonGit { return g }
 
-			if err := d.overrunPushBranch(stopSeat); err != nil {
-				t.Fatalf("push = %v, want nil: the tip adds nothing origin lacks", err)
+			var diverged *overrunPushDivergedError
+			if err := d.overrunPushBranch(stopSeat); !errors.As(err, &diverged) {
+				t.Fatalf("push = %v, want the divergence error: a stale tracking ref is not origin's content", err)
 			}
 		})
 	}

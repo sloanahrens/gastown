@@ -73,6 +73,37 @@ func TestIntegrationOverrunPushNonFastForwardUniqueWork(t *testing.T) {
 	}
 }
 
+// TestIntegrationOverrunPushNonFastForwardStaleTrackingRefStaysPaused moves
+// origin's branch after the seat pushed and fetched it: the clone's
+// origin/<branch> still names the local tip, while origin itself holds a
+// history that lacks the tip's patch. The stale ref is not proof, so the push
+// stays refused and the seat paused (gt-ao7zh).
+func TestIntegrationOverrunPushNonFastForwardStaleTrackingRefStaysPaused(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	f := newOverrunPushFixture(t, d.config.TownRoot)
+	branch := "polecat/stale-tracking-ref"
+	seat := stopSeat
+	seat.Branch = branch
+	f.seatBranchNamedAt(t, branch, "origin/main")
+	f.writeAndCommit(t, f.seat, "unique.txt", "work origin lacks\n")
+	tip := mustRunGit(t, f.seat, "rev-parse", "HEAD")
+	mustRunGit(t, f.seat, "push", "origin", "HEAD:refs/heads/"+branch)
+
+	// Origin takes a different history for the name, so the seat's
+	// remote-tracking ref falls behind origin's content.
+	f.writeAndCommit(t, f.seed, "other.txt", "other history\n")
+	mustRunGit(t, f.seed, "push", "--force", "origin", "HEAD:refs/heads/"+branch)
+	if stale := mustRunGit(t, f.seat, "rev-parse", "refs/remotes/origin/"+branch); stale != tip {
+		t.Fatalf("origin/%s in the seat = %s, want the stale tip %s", branch, stale, tip)
+	}
+
+	var diverged *overrunPushDivergedError
+	if err := d.overrunPushBranch(seat); !errors.As(err, &diverged) {
+		t.Fatalf("push = %v, want the divergence error: the stale ref is not origin's content", err)
+	}
+}
+
 // overrunPushFixture is a bare origin, a seed checkout that writes origin's
 // history, and the seat's clone of origin at the path the stop resolves a
 // polecat worktree to.
@@ -129,7 +160,13 @@ func newOverrunPushFixture(t *testing.T, townRoot string) *overrunPushFixture {
 // seatBranchAt puts the seat's local branch, under stopSeat's name, at start.
 func (f *overrunPushFixture) seatBranchAt(t *testing.T, start string) {
 	t.Helper()
-	mustRunGit(t, f.seat, "checkout", "-b", stopSeat.Branch, start)
+	f.seatBranchNamedAt(t, stopSeat.Branch, start)
+}
+
+// seatBranchNamedAt puts the seat's local branch named branch at start.
+func (f *overrunPushFixture) seatBranchNamedAt(t *testing.T, branch, start string) {
+	t.Helper()
+	mustRunGit(t, f.seat, "checkout", "-b", branch, start)
 }
 
 // mustRunGitDated commits in workDir with a date fixed in the past, so a later
