@@ -1,8 +1,8 @@
 // The intervention record: gt intervention record appends one line to the
-// town's append-only intervention record, so the weekly report can count how
-// often the loop needs a person, and for what, beside its rework figures. The
-// writer and the reader are metrics.RecordIntervention and
-// metrics.CountInterventions.
+// town's append-only intervention record. A weekly report is meant to count
+// from it how often the loop needed a person, and for what, but nothing reads
+// it yet. The writer is metrics.RecordIntervention; the reader a report would
+// use is metrics.CountInterventions.
 package cmd
 
 import (
