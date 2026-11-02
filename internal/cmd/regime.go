@@ -57,8 +57,9 @@ func runRegimeRecord(d regimeDeps, in regimeFlags, out io.Writer) error {
 
 // runRegimeCheck reads the town's regime events with the same reader the metrics
 // analysis uses and reports how many it found, or why it cannot: one record the
-// reader rejects costs the analysis every record in that file, so a hand-written
-// backfill is checked here before an install carries the reader to it.
+// reader rejects costs the analysis every runtime record in every file, the main
+// record and each backfill alike, though the settings marks still reach the panel.
+// A hand-written backfill is checked here before an install carries the reader to it.
 func runRegimeCheck(townRoot string, out io.Writer) error {
 	events, err := metrics.ReadRegimeEvents(metrics.OSEnv(townRoot))
 	if err != nil {

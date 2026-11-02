@@ -217,6 +217,32 @@ func TestRegimeCheckReadsTheFilesWithTheRealReader(t *testing.T) {
 	}
 }
 
+// gt regime check refuses a settings file the reader cannot decode: the command
+// fails with the reader's reason and names the settings file, and prints no event
+// count, so a hand-written settings list is never read as clean.
+func TestRegimeCheckRefusesAFailingSettingsFile(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	find := func() (string, error) { return town, nil }
+	settingsDir := filepath.Join(town, "settings")
+	if err := os.MkdirAll(settingsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bad := `{"v":1,"events":[],"stray":true}`
+	if err := os.WriteFile(filepath.Join(settingsDir, "regime-events.json"), []byte(bad), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := regimeCheckRun(find)
+	if err == nil || !strings.Contains(err.Error(), "not readable") ||
+		!strings.Contains(err.Error(), "regime-events.json") || !strings.Contains(err.Error(), "stray") {
+		t.Fatalf("a settings file with an unknown field: err %v; want the refusal naming the settings file and the reader's reason", err)
+	}
+	if strings.Contains(out, "regime events readable") {
+		t.Fatalf("out %q; want no event count for an unreadable settings file", out)
+	}
+}
+
 func TestRegimeCheckOutsideATown(t *testing.T) {
 	t.Parallel()
 	_, err := regimeCheckRun(func() (string, error) { return "", errors.New("no town here") })
