@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/polecat/spans"
 	"github.com/steveyegge/gastown/internal/session"
@@ -1300,6 +1301,183 @@ func TestCollectOverrunStopped_ItemNamesBeadAndElapsed(t *testing.T) {
 	}
 	if !strings.Contains(it.Summary, "gt-aaa11") || !strings.Contains(it.Summary, "20m3s") {
 		t.Errorf("summary %q lacks the bead or the elapsed time", it.Summary)
+	}
+}
+
+// parkSeatAs writes a seat's intent record as the named actor parked it, so
+// the collector reads the same fields the production writers write.
+func parkSeatAs(t *testing.T, town, rig, name, bead, by string, at time.Time) {
+	t.Helper()
+	if _, err := intent.Update(town, intent.Seat{Rig: rig, Role: constants.RolePolecat, Name: name}, func(r *intent.Record) error {
+		r.Desired = intent.DesiredPark
+		r.Reason = overrunPauseReason
+		r.PausedAt = at
+		r.PausedBy = by
+		r.WorkBead = bead
+		r.Actor, r.UpdatedAt = by, at
+		return nil
+	}); err != nil {
+		t.Fatalf("parking %s/%s: %v", rig, name, err)
+	}
+}
+
+// A seat the guard left paused more than an hour is a stop that never released
+// it: the queue raises one item naming the seat, its bead, the age and both
+// commands, and the same seat raises the same key on the next tick.
+func TestCollectParkedSeatsRaisesAfterOneHour(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	parkSeatAs(t, d.config.TownRoot, "gastown", "capable", "gt-abc12", overrunActor, now.Add(-61*time.Minute))
+	s := &attentionSources{d: d, now: now}
+
+	items, err := s.collectOverrunParkedSeats(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items = %+v, want one", items)
+	}
+	it := items[0]
+	if it.Key != "overrun-parked:gastown/capable" || it.Kind != attention.KindOverrunStopped ||
+		it.Severity != attention.SeverityLow || it.Rig != "gastown" || it.Bead != "gt-abc12" {
+		t.Errorf("item = %+v, want a low overrun-stopped item on the seat and its bead", it)
+	}
+	for _, want := range []string{
+		"gastown/capable", "gt-abc12", "1h1m",
+		"gt polecat check-recovery gastown/capable",
+		"gt polecat nuke gastown/capable",
+	} {
+		if !strings.Contains(it.Summary, want) {
+			t.Errorf("summary %q lacks %q", it.Summary, want)
+		}
+	}
+
+	again, err := s.collectOverrunParkedSeats(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again) != 1 || again[0].Key != it.Key {
+		t.Errorf("second collection = %+v, want the same one key (no duplicate)", again)
+	}
+}
+
+// Under the hour the guard may still be finishing the stop, an operator's own
+// park is not the guard's, and a seat that is not parked raises nothing.
+func TestCollectParkedSeatsQuietUnderOneHour(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	town := d.config.TownRoot
+	parkSeatAs(t, town, "gastown", "capable", "gt-abc12", overrunActor, now.Add(-59*time.Minute))
+	parkSeatAs(t, town, "gastown", "nux", "gt-abc13", "overseer", now.Add(-5*time.Hour))
+	if _, err := intent.Update(town, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "opal"}, func(r *intent.Record) error {
+		r.Desired = intent.DesiredRun
+		r.UpdatedAt = now
+		return nil
+	}); err != nil {
+		t.Fatalf("writing the running seat: %v", err)
+	}
+	s := &attentionSources{d: d, now: now}
+
+	items, err := s.collectOverrunParkedSeats(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 0 {
+		t.Errorf("items = %+v, want none", items)
+	}
+}
+
+// The item is derived from the live pause, so ending the pause — the guard's
+// own release, or gt agent resume — clears it on the next collection.
+func TestCollectParkedSeatsClearsOnRelease(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	town := d.config.TownRoot
+	parkSeatAs(t, town, "gastown", "capable", "gt-abc12", overrunActor, now.Add(-2*time.Hour))
+	s := &attentionSources{d: d, now: now}
+
+	items, err := s.collectOverrunParkedSeats(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items = %+v before the release, want one", items)
+	}
+	if err := agentpause.Resume(town, "gastown", constants.RolePolecat, "capable"); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+
+	items, err = s.collectOverrunParkedSeats(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 0 {
+		t.Errorf("items = %+v after the release, want none", items)
+	}
+}
+
+// The item is in the queue's collector set, so dropping the registration turns
+// this red: an item no collector returns would clear on the next tick.
+func TestCollectParkedSeatsIsInTheCollectorSet(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	parkSeatAs(t, f.d.config.TownRoot, attentionRig, "capable", "gt-abc12", overrunActor, now.Add(-2*time.Hour))
+
+	for _, c := range f.src.collectors() {
+		items, err := c.collect(context.Background())
+		if err != nil {
+			t.Fatalf("collector %s: %v", c.kind, err)
+		}
+		for _, it := range items {
+			if it.Key == "overrun-parked:"+attentionRig+"/capable" {
+				return
+			}
+		}
+	}
+	t.Fatal("the attention queue has no collector for a seat the overrun guard left parked")
+}
+
+// A record the walk cannot parse fails the collection, so the previous tick's
+// items stand rather than the seat's disappearing as clean.
+func TestCollectParkedSeatsFailsOnUnreadableRecord(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	path := intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "capable"}.Path(d.config.TownRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := &attentionSources{d: d, now: now}
+
+	_, err := s.collectOverrunParkedSeats(context.Background())
+	if err == nil {
+		t.Fatal("collector read a malformed record as clean")
+	}
+	if !strings.Contains(err.Error(), "gastown/polecat.capable.json") {
+		t.Errorf("error %q does not name the record", err)
+	}
+}
+
+// A runtime path that is not a directory (ENOTDIR) fails the collection
+// rather than reporting a clean queue.
+func TestCollectParkedSeatsFailsOnUnreadableWalk(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	if err := os.WriteFile(constants.TownRuntimePath(d.config.TownRoot), []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := &attentionSources{d: d, now: time.Now()}
+
+	_, err := s.collectOverrunParkedSeats(context.Background())
+	if err == nil {
+		t.Fatal("collector walked a broken runtime path as clean")
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/polecat/spans"
 	"github.com/steveyegge/gastown/internal/session"
@@ -1209,4 +1210,93 @@ func (s *attentionSources) collectOverrunStopped(ctx context.Context) ([]attenti
 		}
 	}
 	return out, nil
+}
+
+// overrunParkedSeatAfter is how long a seat the guard left paused may sit
+// before the queue asks an operator to look. A stop that finishes releases the
+// seat in its own last step, so a pause that outlives an hour is a stop that
+// has not reached it — it gave up on the checkpoint or push, met a sandbox
+// record that does not parse, or is still retrying one of those — and the seat
+// holds its pool seat and worktree with nothing but a once-a-tick log line
+// saying so (gt-ftva5).
+const overrunParkedSeatAfter = time.Hour
+
+// collectOverrunParkedSeats raises one low item per polecat seat whose intent
+// record is still the overrun guard's park after overrunParkedSeatAfter: a
+// stop that never released its seat. The item names the seat, the bead the
+// seat holds, how long it has been parked and the two commands an operator
+// runs — check-recovery first, then nuke once git shows the work is safe. It
+// clears when the pause ends (the guard's own release, or gt agent resume) or
+// the seat is nuked, because the walk then finds no such park.
+//
+// The record is the only input: paused by overrunActor and not frozen is the
+// park the guard writes, and a seat an operator parked or the supervisor froze
+// is not this item's. An unreadable record fails the collection rather than
+// passing as clean, so the previous tick's items are kept (collectAttention).
+// The key is the seat, so a seat raises one item however many ticks it stays
+// parked.
+func (s *attentionSources) collectOverrunParkedSeats(_ context.Context) ([]attention.Item, error) {
+	dir := filepath.Join(constants.TownRuntimePath(s.d.config.TownRoot), "agents")
+	var out []attention.Item
+	err := filepath.WalkDir(dir, func(path string, e os.DirEntry, err error) error {
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) && path == dir {
+				return filepath.SkipDir
+			}
+			return err
+		}
+		if e.IsDir() || filepath.Ext(path) != ".json" {
+			return nil
+		}
+		// A path WalkDir handed back from under dir is always relative to it
+		// (both are absolute and on one volume), so Rel has no error to take.
+		rel, _ := filepath.Rel(dir, path)
+		rig := filepath.Dir(rel)
+		if rig == "." {
+			return nil // a town-level seat, never a polecat's
+		}
+		stem := strings.TrimSuffix(filepath.Base(rel), ".json")
+		role, name, named := strings.Cut(stem, ".")
+		if !named || role != constants.RolePolecat || name == "" {
+			return nil
+		}
+		rec, rerr := intent.ReadPath(path)
+		if rerr != nil {
+			return fmt.Errorf("%s: %w", rel, rerr)
+		}
+		if !overrunGuardParked(rec) {
+			return nil
+		}
+		parked := s.now.Sub(rec.PausedAt)
+		if parked <= overrunParkedSeatAfter {
+			return nil
+		}
+		seat := rig + "/" + name
+		bead := rec.WorkBead
+		if bead == "" {
+			bead = "no recorded bead"
+		}
+		out = append(out, attention.Item{
+			Key:      "overrun-parked:" + seat,
+			Kind:     attention.KindOverrunStopped,
+			Severity: attention.SeverityLow,
+			Rig:      rig,
+			Bead:     rec.WorkBead,
+			Summary: fmt.Sprintf("%s paused by the overrun guard %s ago on %s; recover with gt polecat check-recovery %s, then gt polecat nuke %s after a live git check",
+				seat, parkedAge(parked), bead, seat, seat),
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// overrunGuardParked reports whether rec is the park the overrun guard writes,
+// read with the shape of the supervisor's own-park check: its actor,
+// desired=park, and no supervisor freeze. An unset paused_at is not a park
+// this collector can age.
+func overrunGuardParked(rec intent.Record) bool {
+	return !rec.Frozen && rec.Desired == intent.DesiredPark && rec.PausedBy == overrunActor && !rec.PausedAt.IsZero()
 }
