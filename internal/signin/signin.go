@@ -1,19 +1,20 @@
 // Package signin verifies the ID tokens that identify a person to the hosted
 // platform (plan row O2): an Identity Platform token for a customer, and a
 // domain-restricted Google token for staff. A verified token yields the Google
-// sub, the email and whether Google verified that email. An identity is the sub
-// only; the email is carried so an invitation can be matched to it (row O3).
+// sub, the verified email and the plane that issued it; an identity names that
+// sub, and carries the email so an invitation can be matched to it (row O3).
 //
 // The two kinds are separate types with separate audiences. A staff token never
 // passes the customer verifier and a customer token never passes the staff one,
 // so neither can stand in for the other at the admin plane or the customer
-// dashboard. A failure returns a typed error and a zero Identity, never part of
-// one.
+// dashboard. Both verifiers refuse a token whose email is not verified
+// (ErrEmailUnverified). A failure returns a typed error and a zero Identity,
+// never part of one.
 //
 // The package does no I/O. The signing keys come from a KeyFetcher the caller
 // injects, and the clock is injected too. Nothing calls it yet; its callers are
 // the console and dashboard handlers (later beads). Tokens are RS256 only: the
-// algorithm comes from the verifier, not from the token header.
+// header alg must equal RS256 and any other value is ErrAlgorithm.
 package signin
 
 import (
@@ -32,16 +33,27 @@ import (
 // MaxSkew is the largest clock skew a verifier accepts in its configuration.
 const MaxSkew = 5 * time.Minute
 
-// Identity is what a verified token proves. EmailVerified is reported as the
-// token states it, never defaulted to true.
+// PlaneCustomer is the Identity.Plane of a token the Customer verifier accepted.
+const PlaneCustomer = "customer"
+
+// PlaneStaff is the Identity.Plane of a token the Staff verifier accepted.
+const PlaneStaff = "staff"
+
+// Identity is what a verified token proves. Plane names the verifier that issued
+// it, PlaneCustomer or PlaneStaff; EmailVerified is always true, because a
+// verifier refuses a token that does not verify its email.
 type Identity struct {
+	Plane         string
 	Sub           string
 	Email         string
 	EmailVerified bool
 }
 
 // KeyFetcher returns the public key that signs tokens with the given key id.
-// The caller owns fetching and caching; an unknown key id is an error.
+// The kid comes from the token header and is untrusted: Key is called only with
+// a kid of 1 to 128 bytes drawn from letters, digits, underscore, hyphen and
+// dot, and a verifier refuses any other kid with ErrKey. The caller owns
+// fetching and caching; an unknown key id is an error.
 type KeyFetcher interface {
 	Key(ctx context.Context, kid string) (*rsa.PublicKey, error)
 }
@@ -59,7 +71,7 @@ var (
 	ErrNotYetValid     = errors.New("signin: token is not valid yet")
 	ErrNoSub           = errors.New("signin: token has no subject")
 	ErrDomain          = errors.New("signin: token is not from the staff domain")
-	ErrEmailUnverified = errors.New("signin: staff email is not verified")
+	ErrEmailUnverified = errors.New("signin: email is not verified")
 )
 
 // Config is what both verifiers share.
@@ -117,13 +129,17 @@ func (c Config) check() error {
 	return nil
 }
 
-// Verify checks a customer token and returns the identity it proves.
+// Verify checks a customer token and returns the identity it proves. A token
+// whose email is not verified is refused.
 func (v *Customer) Verify(ctx context.Context, token string) (Identity, error) {
 	cl, err := verify(ctx, v.cfg, token)
 	if err != nil {
 		return Identity{}, err
 	}
-	return cl.identity(), nil
+	if !cl.EmailVerified {
+		return Identity{}, ErrEmailUnverified
+	}
+	return cl.identity(PlaneCustomer), nil
 }
 
 // Verify checks a staff token: the usual checks, then a verified email and a
@@ -142,12 +158,31 @@ func (v *Staff) Verify(ctx context.Context, token string) (Identity, error) {
 	if !cl.EmailVerified {
 		return Identity{}, ErrEmailUnverified
 	}
-	return cl.identity(), nil
+	return cl.identity(PlaneStaff), nil
 }
 
 type header struct {
 	Alg string `json:"alg"`
 	Kid string `json:"kid"`
+}
+
+// kidChars are the bytes a key id may hold.
+const kidChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-."
+
+// maxKidLen bounds the key id a verifier passes to a KeyFetcher.
+const maxKidLen = 128
+
+// validKid reports whether kid is safe to hand to a KeyFetcher.
+func validKid(kid string) bool {
+	if kid == "" || len(kid) > maxKidLen {
+		return false
+	}
+	for i := 0; i < len(kid); i++ {
+		if strings.IndexByte(kidChars, kid[i]) < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 type claims struct {
@@ -162,8 +197,8 @@ type claims struct {
 	HD            string          `json:"hd"`
 }
 
-func (c claims) identity() Identity {
-	return Identity{Sub: c.Sub, Email: c.Email, EmailVerified: c.EmailVerified}
+func (c claims) identity(plane string) Identity {
+	return Identity{Plane: plane, Sub: c.Sub, Email: c.Email, EmailVerified: c.EmailVerified}
 }
 
 func verify(ctx context.Context, cfg Config, token string) (claims, error) {
@@ -181,6 +216,9 @@ func verify(ctx context.Context, cfg Config, token string) (claims, error) {
 	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil {
 		return claims{}, fmt.Errorf("%w: signature encoding", ErrMalformed)
+	}
+	if !validKid(h.Kid) {
+		return claims{}, fmt.Errorf("%w: key id is not acceptable", ErrKey)
 	}
 	key, err := cfg.Keys.Key(ctx, h.Kid)
 	if err != nil || key == nil {

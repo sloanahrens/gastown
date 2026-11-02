@@ -56,6 +56,19 @@ func (f fetcher) Key(_ context.Context, kid string) (*rsa.PublicKey, error) {
 	return k, nil
 }
 
+// spyFetcher records whether Key was called, so a test can prove a verifier
+// refused a kid before fetching it.
+type spyFetcher struct {
+	calls int
+	key   *rsa.PublicKey
+	err   error
+}
+
+func (f *spyFetcher) Key(context.Context, string) (*rsa.PublicKey, error) {
+	f.calls++
+	return f.key, f.err
+}
+
 func b64(v any) string {
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -146,8 +159,8 @@ func TestVerifyCustomerToken(t *testing.T) {
 			t.Parallel()
 			id, err := customer(t).Verify(context.Background(), c.token)
 			if c.want == nil {
-				if err != nil || id.Sub != "sub-1" || id.Email != "ann@town.example" || !id.EmailVerified {
-					t.Fatalf("Verify = %+v, %v; want sub-1 and no error", id, err)
+				if err != nil || id.Plane != PlaneCustomer || id.Sub != "sub-1" || id.Email != "ann@town.example" || !id.EmailVerified {
+					t.Fatalf("Verify = %+v, %v; want the customer plane, sub-1 and no error", id, err)
 				}
 				return
 			}
@@ -248,23 +261,162 @@ func TestStaffTokenIsNotACustomerToken(t *testing.T) {
 	}
 }
 
-func TestUnverifiedEmailIsReported(t *testing.T) {
+func TestUnverifiedCustomerEmailIsRefused(t *testing.T) {
 	t.Parallel()
 	k, _ := keys(t)
+	ctx := context.Background()
 	for name, claims := range map[string]map[string]any{
 		"false":   edit(good(custAud), func(c map[string]any) { c["email_verified"] = false }),
 		"missing": edit(good(custAud), func(c map[string]any) { delete(c, "email_verified") }),
 	} {
-		id, err := customer(t).Verify(context.Background(), mint(k, "RS256", "k1", claims))
+		id, err := customer(t).Verify(ctx, mint(k, "RS256", "k1", claims))
+		if !errors.Is(err, ErrEmailUnverified) {
+			t.Errorf("%s: customer with an unverified email: %v, want ErrEmailUnverified", name, err)
+		}
+		if id != (Identity{}) {
+			t.Errorf("%s: failed verify returned a partial identity %+v", name, id)
+		}
+	}
+	id, err := customer(t).Verify(ctx, mint(k, "RS256", "k1", good(custAud)))
+	if err != nil {
+		t.Fatalf("customer with a verified email: %v", err)
+	}
+	if id.Plane != PlaneCustomer || id.Sub != "sub-1" || !id.EmailVerified {
+		t.Errorf("identity = %+v, want the customer plane, sub-1 and a verified email", id)
+	}
+}
+
+func TestUntrustedKeyIDIsRefusedBeforeTheFetcher(t *testing.T) {
+	t.Parallel()
+	k, _ := keys(t)
+	refused := map[string]string{
+		"empty":             "",
+		"129 bytes":         strings.Repeat("a", 129),
+		"space":             "k 1",
+		"slash":             "k1/2",
+		"punctuation":       "k1!",
+		"newline":           "k1\n",
+		"non-ASCII":         "k1é",
+		"looks like a path": "../../etc/passwd",
+	}
+	for name, kid := range refused {
+		kid := kid
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			spy := &spyFetcher{key: &k.PublicKey}
+			conf := cfg(t, custAud)
+			conf.Keys = spy
+			v, err := NewCustomer(conf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			id, err := v.Verify(context.Background(), mint(k, "RS256", kid, good(custAud)))
+			if !errors.Is(err, ErrKey) {
+				t.Fatalf("kid %q: error = %v, want ErrKey", kid, err)
+			}
+			if id != (Identity{}) {
+				t.Errorf("kid %q: failed verify returned a partial identity %+v", kid, id)
+			}
+			if spy.calls != 0 {
+				t.Errorf("kid %q: fetcher called %d times, want 0", kid, spy.calls)
+			}
+		})
+	}
+
+	t.Run("128 bytes reaches the fetcher", func(t *testing.T) {
+		t.Parallel()
+		kid := strings.Repeat("a", 128)
+		spy := &spyFetcher{key: &k.PublicKey}
+		conf := cfg(t, custAud)
+		conf.Keys = spy
+		v, err := NewCustomer(conf)
 		if err != nil {
-			t.Fatalf("%s: customer with an unverified email is still a valid token: %v", name, err)
+			t.Fatal(err)
 		}
-		if id.EmailVerified {
-			t.Errorf("%s: EmailVerified = true, want false", name)
+		if _, err := v.Verify(context.Background(), mint(k, "RS256", kid, good(custAud))); err != nil {
+			t.Fatalf("128-byte kid: %v, want the fetcher to answer", err)
 		}
-		if id.Sub != "sub-1" || id.Email != "ann@town.example" {
-			t.Errorf("%s: identity = %+v", name, id)
+		if spy.calls != 1 {
+			t.Errorf("128-byte kid: fetcher called %d times, want 1", spy.calls)
 		}
+	})
+}
+
+func TestIdentityNamesItsPlane(t *testing.T) {
+	t.Parallel()
+	k, _ := keys(t)
+	ctx := context.Background()
+	cust, err := customer(t).Verify(ctx, mint(k, "RS256", "k1", good(custAud)))
+	if err != nil {
+		t.Fatalf("customer token: %v", err)
+	}
+	if cust.Plane != PlaneCustomer {
+		t.Errorf("customer identity plane = %q, want %q", cust.Plane, PlaneCustomer)
+	}
+	stf, err := staff(t).Verify(ctx, mint(k, "RS256", "k1", good(staffAud)))
+	if err != nil {
+		t.Fatalf("staff token: %v", err)
+	}
+	if stf.Plane != PlaneStaff {
+		t.Errorf("staff identity plane = %q, want %q", stf.Plane, PlaneStaff)
+	}
+	if PlaneCustomer == PlaneStaff {
+		t.Fatalf("both planes are named %q", PlaneCustomer)
+	}
+}
+
+func TestNilKeyFutureIatAndSkewBranches(t *testing.T) {
+	t.Parallel()
+	k, _ := keys(t)
+	ctx := context.Background()
+
+	t.Run("a nil key with no error", func(t *testing.T) {
+		t.Parallel()
+		spy := &spyFetcher{}
+		conf := cfg(t, custAud)
+		conf.Keys = spy
+		v, err := NewCustomer(conf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, err := v.Verify(ctx, mint(k, "RS256", "k1", good(custAud)))
+		if !errors.Is(err, ErrKey) {
+			t.Fatalf("nil key from the fetcher: %v, want ErrKey", err)
+		}
+		if id != (Identity{}) {
+			t.Errorf("failed verify returned a partial identity %+v", id)
+		}
+		if spy.calls != 1 {
+			t.Errorf("fetcher called %d times, want 1", spy.calls)
+		}
+	})
+
+	cases := []struct {
+		name   string
+		skew   time.Duration
+		claims map[string]any
+		want   error
+	}{
+		{"iat in the future", 0, edit(good(custAud), func(c map[string]any) { c["iat"] = now.Add(time.Second).Unix() }), ErrNotYetValid},
+		{"nbf inside the skew", time.Minute, edit(good(custAud), func(c map[string]any) { c["nbf"] = now.Add(30 * time.Second).Unix() }), nil},
+		{"iat inside the skew", time.Minute, edit(good(custAud), func(c map[string]any) { c["iat"] = now.Add(30 * time.Second).Unix() }), nil},
+		{"nbf beyond the skew", time.Minute, edit(good(custAud), func(c map[string]any) { c["nbf"] = now.Add(2 * time.Minute).Unix() }), ErrNotYetValid},
+		{"iat beyond the skew", time.Minute, edit(good(custAud), func(c map[string]any) { c["iat"] = now.Add(2 * time.Minute).Unix() }), ErrNotYetValid},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			conf := cfg(t, custAud)
+			conf.Skew = c.skew
+			v, err := NewCustomer(conf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := v.Verify(ctx, mint(k, "RS256", "k1", c.claims)); !errors.Is(err, c.want) {
+				t.Fatalf("Verify = %v, want %v", err, c.want)
+			}
+		})
 	}
 }
 
