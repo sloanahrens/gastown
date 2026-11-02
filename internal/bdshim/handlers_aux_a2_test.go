@@ -3,8 +3,11 @@ package bdshim
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // The kv handler's tests answer the two kv golden rows through Main, compare
@@ -158,12 +161,15 @@ func TestHandlersKvListReportsAnAnswerItCannotWrite(t *testing.T) {
 }
 
 // TestHandlersKvGetAnswersAnUnsetKey: bd exits 1 with nothing on stdout for a
-// key it cannot find, so the shim does too, and the store's error is reported.
+// key it cannot find, so the shim does too, and the store's not-found answer is
+// reported rather than a read failure.
 func TestHandlersKvGetAnswersAnUnsetKey(t *testing.T) {
 	t.Parallel()
 	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
 	env := Env{Stdout: stdout, Stderr: stderr}
-	st := stubAuxKvStore{get: func(string) (string, error) { return "", errors.New("not found") }}
+	st := stubAuxKvStore{get: func(key string) (string, error) {
+		return "", fmt.Errorf("tracker: kv %s: %w", key, beads.ErrNotFound)
+	}}
 	if code := getKV(env, st, "fx-", "fixture-key"); code != 1 {
 		t.Errorf("exit code is %d, want 1", code)
 	}
@@ -172,6 +178,31 @@ func TestHandlersKvGetAnswersAnUnsetKey(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "fixture-key") {
 		t.Errorf("stderr = %q, want it to name the key", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "reading the key") {
+		t.Errorf("stderr = %q, want the unset-key answer, not a read failure", stderr.String())
+	}
+}
+
+// TestHandlersKvGetRefusesAStoreThatCannotAnswer: a store that fails for any
+// reason other than an unset key has not answered, and the shim reports the
+// failed read instead of collapsing it into the unset-key answer.
+func TestHandlersKvGetRefusesAStoreThatCannotAnswer(t *testing.T) {
+	t.Parallel()
+	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+	env := Env{Stdout: stdout, Stderr: stderr}
+	st := stubAuxKvStore{get: func(string) (string, error) { return "", errors.New("store unavailable") }}
+	if code := getKV(env, st, "fx-", "fixture-key"); code != 1 {
+		t.Errorf("exit code is %d, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("wrote %q, want nothing for a store that did not answer", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "reading the key") {
+		t.Errorf("stderr = %q, want the failed read named", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "store unavailable") {
+		t.Errorf("stderr = %q, want the store's error reported", stderr.String())
 	}
 }
 
