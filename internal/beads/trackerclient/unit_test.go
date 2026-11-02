@@ -415,18 +415,75 @@ func TestReadyFilteredCarriesTheFilterAndSignalsACutPage(t *testing.T) {
 	}
 }
 
-// Decision A (gt-rtxfy): the tracker's key-value store is empty and answers
-// every key as unset, which the admin contract requires of a store that holds
-// nothing. This test pins that decision. It starts no tracker server.
-func TestTrackerKVIsEmptyAndAnswersUnset(t *testing.T) {
+// The kv store is the tracker's, reached over the service: a key set reads back
+// with its value, a stored "" is a value rather than an unset key, and a key
+// the tracker does not hold is ErrNotFound. The handler stands in for the
+// tracker in process, so this case starts no server.
+func TestKVReadsAndWritesThroughTheService(t *testing.T) {
 	t.Parallel()
-	c := &Client{}
-	kvs, err := c.KVList()
-	if err != nil || len(kvs) != 0 {
-		t.Errorf("KVList = %v, %v; want an empty map and no error", kvs, err)
+	stored := map[string]string{}
+	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		key := strings.TrimPrefix(r.URL.Path, "/v1/kv/")
+		switch {
+		case r.Method == http.MethodPut:
+			var req api.KVSetRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			stored[key] = req.Value
+			w.WriteHeader(http.StatusNoContent)
+		case r.URL.Path == "/v1/kv":
+			_ = json.NewEncoder(w).Encode(api.KVListResponse{Items: stored})
+		default:
+			v, ok := stored[key]
+			_ = json.NewEncoder(w).Encode(api.KVValue{Value: v, Set: ok})
+		}
+	})
+	if err := c.KVSet("gt.note", "hello"); err != nil {
+		t.Fatalf("KVSet: %v", err)
 	}
-	if _, err := c.KVGet("kv.contract_probe"); !errors.Is(err, beads.ErrNotFound) {
+	if err := c.KVSet("gt.blank", ""); err != nil {
+		t.Fatalf("KVSet(blank): %v", err)
+	}
+	if got, err := c.KVGet("gt.note"); err != nil || got != "hello" {
+		t.Errorf("KVGet(set) = %q, %v; want hello", got, err)
+	}
+	if got, err := c.KVGet("gt.blank"); err != nil || got != "" {
+		t.Errorf("KVGet(blank) = %q, %v; want the stored empty value and no error", got, err)
+	}
+	if _, err := c.KVGet("gt.unset"); !errors.Is(err, beads.ErrNotFound) {
 		t.Errorf("KVGet(unset) = %v, want beads.ErrNotFound", err)
+	}
+	all, err := c.KVList()
+	if err != nil {
+		t.Fatalf("KVList: %v", err)
+	}
+	if got, ok := all["gt.note"]; !ok || got != "hello" {
+		t.Errorf("KVList[gt.note] = %q, present %v; want hello", got, ok)
+	}
+	if got, ok := all["gt.blank"]; !ok || got != "" {
+		t.Errorf("KVList[gt.blank] = %q, present %v; want the stored empty value", got, ok)
+	}
+}
+
+// A tracker that cannot answer is a refusal the caller must act on: every kv
+// verb returns the service's error, and none of them reads it as an unset key.
+func TestKVErrorsKeepTheServiceErrorAndAreNotNotFound(t *testing.T) {
+	t.Parallel()
+	c := serve(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"kind":"unavailable","message":"database does not answer"}`))
+	})
+	if _, err := c.KVGet("gt.note"); !errors.Is(err, api.ErrUnavailable) || errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("KVGet on an unavailable service = %v, want api.ErrUnavailable and not ErrNotFound", err)
+	}
+	if err := c.KVSet("gt.note", "v"); !errors.Is(err, api.ErrUnavailable) {
+		t.Errorf("KVSet on an unavailable service = %v, want api.ErrUnavailable", err)
+	}
+	if got, err := c.KVList(); !errors.Is(err, api.ErrUnavailable) || got != nil {
+		t.Errorf("KVList on an unavailable service = %v, %v; want nil and api.ErrUnavailable", got, err)
 	}
 }
 

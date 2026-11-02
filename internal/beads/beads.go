@@ -2120,6 +2120,23 @@ func (b *Beads) KVGet(key string) (string, error) {
 	return ParseKVGetJSON(out)
 }
 
+// KVSet stores value at key, replacing what the store held there. A key bd
+// would read as a flag is refused before it reaches argv, and a value bd would
+// read as one is passed after "--" so it reaches the store as text.
+func (b *Beads) KVSet(key, value string) error {
+	if key == "" || strings.HasPrefix(key, "-") {
+		return fmt.Errorf("kv set: invalid key %q", key)
+	}
+	args := []string{"kv", "set", key}
+	if strings.HasPrefix(value, "-") {
+		// bd reads a bare argument that starts with a dash as flags, so the
+		// separator keeps a value like "-x" positional (gt-m0fvn).
+		args = append(args, "--")
+	}
+	_, err := b.run(append(args, value)...)
+	return err
+}
+
 // The key prefixes that name a memory: gt.* and the legacy memory.*. The
 // memory index (internal/cmd) reads the same prefixes.
 const (

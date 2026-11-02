@@ -66,6 +66,17 @@ func (f *Fake) KVList() (map[string]string, error) {
 	return out, nil
 }
 
+// KVSet stores value at key, replacing what the fake held there.
+func (f *Fake) KVSet(key, value string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failure("kv set " + key); err != nil {
+		return err
+	}
+	f.kvMap()[key] = value
+	return nil
+}
+
 // KVGet returns key's value, or an error wrapping beads.ErrNotFound.
 func (f *Fake) KVGet(key string) (string, error) {
 	f.mu.Lock()
@@ -276,10 +287,10 @@ func (f *Fake) SQLCSV(query beadsql.Query) ([][]string, error) { return f.runSQL
 
 // FailWith makes the maintenance command named by op fail with err until
 // cleared with a nil err. op is the bd subcommand as the fake names it:
-// "config get <key>", "config set <key>", "kv list", "kv get <key>", "stats",
-// "mol wisp list", "mol wisp gc" (the dry run), "export", "init", "version",
-// "schema level" or "show" (every Show call, for a store whose answer is
-// unknown rather than not-found).
+// "config get <key>", "config set <key>", "kv list", "kv get <key>",
+// "kv set <key>", "stats", "mol wisp list", "mol wisp gc" (the dry run),
+// "export", "init", "version", "schema level" or "show" (every Show call, for
+// a store whose answer is unknown rather than not-found).
 func (f *Fake) FailWith(op string, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

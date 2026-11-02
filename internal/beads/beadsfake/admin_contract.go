@@ -139,15 +139,25 @@ func adminConfig(t *testing.T, s *adminScope) {
 	}
 }
 
-// adminKV pins the kv store's two answers against each other: every key KVList
-// reports is a key KVGet finds with the same value, and a key the store does
-// not hold is ErrNotFound rather than an empty value a caller cannot tell from
-// a stored "". The databases this runs on hold no memories yet, so the list
-// loop pins the read pair without seeding a store Admin cannot write.
+// adminKV pins the kv store's write and reads against each other: a key set is
+// what KVGet finds with the value set last and what KVList reports, and a key
+// the store does not hold is ErrNotFound rather than an empty value a caller
+// cannot tell from a stored "".
 func adminKV(t *testing.T, s *adminScope) {
+	mustDo(t, "KVSet", s.KVSet("kv.contract_probe", "first"))
+	if got, err := s.KVGet("kv.contract_probe"); err != nil || got != "first" {
+		t.Errorf("KVGet after set = %q, %v; want first", got, err)
+	}
+	mustDo(t, "KVSet overwrite", s.KVSet("kv.contract_probe", "second"))
+	if got, err := s.KVGet("kv.contract_probe"); err != nil || got != "second" {
+		t.Errorf("KVGet after overwrite = %q, %v; want second", got, err)
+	}
 	all, err := s.KVList()
 	if err != nil {
 		t.Fatalf("KVList: %v", err)
+	}
+	if got, ok := all["kv.contract_probe"]; !ok || got != "second" {
+		t.Errorf("KVList[kv.contract_probe] = %q, present %v; want second", got, ok)
 	}
 	for k, want := range all {
 		got, err := s.KVGet(k)
@@ -159,7 +169,7 @@ func adminKV(t *testing.T, s *adminScope) {
 			t.Errorf("KVGet(%q) = %q, KVList says %q", k, got, want)
 		}
 	}
-	if _, err := s.KVGet("kv.contract_probe"); !errors.Is(err, beads.ErrNotFound) {
+	if _, err := s.KVGet("kv.contract_unset"); !errors.Is(err, beads.ErrNotFound) {
 		t.Errorf("KVGet(unset) = %v, want beads.ErrNotFound", err)
 	}
 }
