@@ -35,6 +35,13 @@ type daemonComposeFlags struct {
 	// entrypoint. Both or neither; the render refuses one alone (gt-rpx80).
 	forgeHost      string
 	forgeTokenFile string
+	// kubeconfig is the host kubeconfig the container's kubectl and openshell
+	// use, under the town; the render derives a copy that reaches the cluster on
+	// host.docker.internal and lists it first in KUBECONFIG (gt-yj0vh).
+	kubeconfig string
+	// openShellConfigDir is the host's openshell config directory (the gateway's
+	// mTLS client certificates), mounted read-only.
+	openShellConfigDir string
 }
 
 // daemonComposeDeps is what the command takes from the host: where the town is
@@ -47,8 +54,15 @@ type daemonComposeDeps struct {
 	// doltHost is the host the daemon in the container reaches the town's Dolt
 	// through, and whether the town names an endpoint at all.
 	doltHost func(townRoot string) (string, bool)
-	files    composeFiles
-	out      io.Writer
+	// containerEnv is the environment the container carries from the town's
+	// daemon.env; readFile reads the kubeconfig the derived one comes from.
+	containerEnv func(townRoot string) (map[string]string, error)
+	readFile     func(path string) ([]byte, error)
+	// evalSymlinks resolves the kubeconfig and the town for the under-the-town
+	// check.
+	evalSymlinks func(path string) (string, error)
+	files        composeFiles
+	out          io.Writer
 }
 
 // composeFiles is the filesystem the compose file is written through: a
@@ -82,6 +96,11 @@ func realDaemonComposeDeps(out io.Writer) daemonComposeDeps {
 		// cutover refuse from, so this command refuses the same towns they do.
 		daemonConfig: realDaemonControl().townDaemonConfig,
 		doltHost:     containerDoltHost(config.ResolveDoltEndpointFor),
+		containerEnv: func(townRoot string) (map[string]string, error) {
+			return containerEnvFor(townRoot, config.LoadDaemonEnv, settingsFS{readDir: os.ReadDir, read: os.ReadFile, eval: filepath.EvalSymlinks})
+		},
+		readFile:     os.ReadFile,
+		evalSymlinks: filepath.EvalSymlinks,
 		files: composeFiles{
 			mkdirAll: func(dir string) error { return os.MkdirAll(dir, 0o755) },
 			write:    daemonimage.WriteComposeFile,
@@ -140,6 +159,17 @@ The render mounts the token file read-only and passes the pair to the
 entrypoint, which writes the helper line; the file's path, never its contents,
 reaches the compose file. They are accepted only together.
 
+--kubeconfig and --openshell-config-dir give the container's kubectl and openshell
+the cluster and the gateway. The render writes a derived kubeconfig inside the
+town's .runtime (the original's cluster entries on host.docker.internal with
+tls-server-name localhost, no user, no credential), lists it before the original
+in KUBECONFIG, and mounts the openshell directory read-only; only paths appear in
+the compose file. The daemon.env entries that are not host-only (containerEnvDeniedNames
+in internal/cmd/daemon_compose_client.go is the list), not secret-named and not
+referenced as $NAME or ${NAME} by any file under the town's settings directory (links
+that stay under the town are followed; one that leaves it refuses the render; other
+bound directories are not scanned) go into the container's environment.
+
 --print prints the render and writes no file.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -150,6 +180,10 @@ reaches the compose file. They are accepted only together.
 	write.Flags().StringVar(&f.image, "image", "", "daemon image tag, gt-daemon:<rev>")
 	write.Flags().StringVar(&f.omTokenFile, config.OMTokenFileFlag, "",
 		"om token file's absolute path on the host, mounted read-only into the container; unset renders neither the mount nor the flag, and a blank value is refused")
+	write.Flags().StringVar(&f.kubeconfig, "kubeconfig", "",
+		"the host kubeconfig (an absolute path under the town, checked on resolved paths); the render adds a derived copy on host.docker.internal with tls-server-name localhost and sets KUBECONFIG; unset renders neither")
+	write.Flags().StringVar(&f.openShellConfigDir, "openshell-config-dir", "",
+		"the host's openshell config directory (gateway metadata and mTLS client certificates), an absolute path mounted read-only; unset renders neither the mount nor XDG_CONFIG_HOME")
 	write.Flags().BoolVar(&f.print, "print", false, "print the render and write no file")
 	write.Flags().StringVar(&f.forgeHost, config.ForgeHostFlag, "",
 		"Give the container's git this Forgejo host:port; accepted only with --"+config.ForgeTokenFileFlag)
@@ -203,16 +237,39 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 	if !ok {
 		return fmt.Errorf("the town's Dolt endpoint cannot be resolved, so the daemon in the container has no host to reach it on: set mayor/town.json's dolt.container_host (or dolt.host)")
 	}
+	env, err := d.containerEnv(townRoot)
+	if err != nil {
+		return fmt.Errorf("reading the town's daemon.env for the container's environment: %w", err)
+	}
+	kubeconfig := strings.TrimSpace(f.kubeconfig)
+	var overlay []byte
+	var kubeconfigFiles []string
+	if kubeconfig != "" {
+		if err := requireUnderTown(townRoot, kubeconfig, d.evalSymlinks); err != nil {
+			return err
+		}
+		original, err := d.readFile(kubeconfig)
+		if err != nil {
+			return fmt.Errorf("reading the kubeconfig %s: %w", kubeconfig, err)
+		}
+		if overlay, err = containerKubeconfig(original, filepath.Dir(kubeconfig), townRoot); err != nil {
+			return fmt.Errorf("deriving the container kubeconfig from %s: %w", kubeconfig, err)
+		}
+		kubeconfigFiles = []string{containerKubeconfigPath(townRoot), kubeconfig}
+	}
 	spec := templates.ComposeSpec{
-		Project:        project,
-		ContainerName:  cfg.ContainerName(),
-		Image:          image,
-		TownRoot:       townRoot,
-		StopGrace:      templates.MinimumStopGrace,
-		DoltHost:       host,
-		OMTokenFile:    omTokenFile,
-		ForgeHost:      forgeHost,
-		ForgeTokenFile: forgeTokenFile,
+		Env:                env,
+		KubeconfigFiles:    kubeconfigFiles,
+		OpenShellConfigDir: strings.TrimSpace(f.openShellConfigDir),
+		Project:            project,
+		ContainerName:      cfg.ContainerName(),
+		Image:              image,
+		TownRoot:           townRoot,
+		StopGrace:          templates.MinimumStopGrace,
+		DoltHost:           host,
+		OMTokenFile:        omTokenFile,
+		ForgeHost:          forgeHost,
+		ForgeTokenFile:     forgeTokenFile,
 	}
 	content, err := templates.RenderDaemonCompose(spec)
 	if err != nil {
@@ -222,11 +279,34 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 		_, err = d.out.Write(content)
 		return err
 	}
+	if overlay != nil {
+		if err := writeDaemonComposeFile(d.files, containerKubeconfigPath(townRoot), overlay); err != nil {
+			return fmt.Errorf("cannot write the container kubeconfig, and no compose file was written: %w", err)
+		}
+	}
 	path := config.ContainerComposeFile(townRoot)
 	if err := writeDaemonComposeFile(d.files, path, content); err != nil {
 		return fmt.Errorf("cannot write %s, and the old file is as it was: %w", path, err)
 	}
 	fmt.Fprintf(d.out, "%s Wrote %s: container %s, compose project %s, image %s.\n",
 		style.Bold.Render("✓"), path, spec.ContainerName, project, spec.Image)
+	return nil
+}
+
+// requireUnderTown refuses a kubeconfig that is not inside the town on resolved
+// paths: the container sees only the town bind, so a file elsewhere would be
+// listed in KUBECONFIG and not be there.
+func requireUnderTown(townRoot, path string, eval func(string) (string, error)) error {
+	town, err := eval(townRoot)
+	if err != nil {
+		return fmt.Errorf("the town root %s cannot be resolved: %w", townRoot, err)
+	}
+	real, err := eval(path)
+	if err != nil {
+		return fmt.Errorf("--kubeconfig %s cannot be resolved: %w", path, err)
+	}
+	if !filepath.IsAbs(path) || !pathWithin(real, town) {
+		return fmt.Errorf("--kubeconfig %s resolves to %s, which is not an absolute path under the town %s; the container reads only the town bind", path, real, town)
+	}
 	return nil
 }

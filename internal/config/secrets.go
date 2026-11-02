@@ -346,3 +346,9 @@ func doubleQuoteEscape(s string) string {
 	}
 	return b.String()
 }
+
+// SecretNamePattern matches the names (environment variables, settings keys)
+// that hold a credential: whatever carries such a name is never copied into a
+// compose file or a scratch copy of the settings, referenced or not. It is the
+// one list; a name it misses is a leak, so it errs toward matching.
+var SecretNamePattern = regexp.MustCompile(`(?i)token|secret|passw|passwd|pwd|credential|api[_-]?key|access[_-]?key|private|auth|bearer|cookie|session[_-]?key|signature|(^|_)key$|^key$`)
