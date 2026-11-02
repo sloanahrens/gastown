@@ -746,3 +746,78 @@ func TestDoltArchiveEventsFailures(t *testing.T) {
 		}
 	})
 }
+
+// TestUnarchivedEvents: the status count reads an open events result set with
+// the archive's own scanner, counts only the ids the watermark does not hold,
+// and refuses a result set it cannot read or one without the key columns
+// rather than reporting zero (gt-98eug).
+func TestUnarchivedEvents(t *testing.T) {
+	t.Parallel()
+
+	t.Run("counts only ids outside the archived set", func(t *testing.T) {
+		t.Parallel()
+		db, err := archiveFakeOpener(t, &archiveFakeServer{
+			columns: []string{"id", "created_at"},
+			rows: [][]driver.Value{
+				{"archived", "2026-10-01 00:00:00"},
+				{"late", "2026-10-01 00:00:00"},
+			},
+		})("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		rows, err := db.QueryContext(context.Background(), "SELECT * FROM events")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		got, err := UnarchivedEvents(rows, map[string]bool{"archived": true})
+		if err != nil {
+			t.Fatalf("counting: %v", err)
+		}
+		if got != 1 {
+			t.Errorf("unarchived events = %d, want the one id outside the set", got)
+		}
+	})
+
+	t.Run("a result set it cannot read is refused", func(t *testing.T) {
+		t.Parallel()
+		db, err := archiveFakeOpener(t, &archiveFakeServer{
+			columns: []string{"id", "created_at"},
+			nextErr: errors.New("row read failed"),
+		})("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		rows, err := db.QueryContext(context.Background(), "SELECT * FROM events")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		if _, err := UnarchivedEvents(rows, nil); err == nil || !strings.Contains(err.Error(), "row read failed") {
+			t.Errorf("count of an unreadable result set = %v, want the read error", err)
+		}
+	})
+
+	t.Run("a result set without the key columns is refused", func(t *testing.T) {
+		t.Parallel()
+		db, err := archiveFakeOpener(t, &archiveFakeServer{
+			columns: []string{"payload"},
+			rows:    [][]driver.Value{{"x"}},
+		})("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		rows, err := db.QueryContext(context.Background(), "SELECT * FROM events")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		if _, err := UnarchivedEvents(rows, nil); err == nil {
+			t.Error("a result set without created_at and id was counted")
+		}
+	})
+}
