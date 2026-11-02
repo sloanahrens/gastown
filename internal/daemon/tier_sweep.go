@@ -2339,19 +2339,32 @@ func (d *Daemon) tierSweepRunnerStageResult(st tierSweepStage, spec sweeprunner.
 // OutputDir, while the same tree lives on the host at Spec.OutDir: the Docker
 // backend mounts it there, and the Kubernetes backend copies it out before the
 // teardown removes the output claim, so a path left as printed names nothing
-// once the run is taken down (gt-4lj2q). A line with no group, or one naming a
-// directory outside OutputDir, is returned as printed: the daemon has no host
-// path for it.
+// once the run is taken down (gt-4lj2q). A line with no group, one naming a
+// directory outside OutputDir, or one whose path walks up out of it with a ".."
+// element, is returned as printed: the daemon has no host path for it.
 func tierSweepRunnerHostSummary(summary, outDir string) string {
 	m := tierSweepSummaryRE.FindStringSubmatch(strings.TrimRight(summary, "\r"))
 	if m == nil {
 		return summary
 	}
 	rel, ok := strings.CutPrefix(m[7], sweeprunner.OutputDir+"/")
-	if !ok || rel == "" {
+	if !ok || rel == "" || tierSweepRunnerRelEscapes(rel) {
 		return summary
 	}
 	return strings.Replace(summary, "(logs "+m[7]+")", "(logs "+filepath.Join(outDir, rel)+")", 1)
+}
+
+// tierSweepRunnerRelEscapes reports whether a logs path relative to the engine's
+// OutputDir walks up out of it. The engine prints a slash path from the
+// container, so the elements are split on "/"; a ".." element would put the host
+// path outside the run directory the daemon copied home (gt-s7idr).
+func tierSweepRunnerRelEscapes(rel string) bool {
+	for _, elem := range strings.Split(rel, "/") {
+		if elem == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // tierSweepRunnerBackend builds the backend the config names. A backend the
