@@ -773,10 +773,10 @@ func TestContainerRehearsalPluginsCheckNamesAMissingProgram(t *testing.T) {
 // Jev patrols are in-process readers and need no row each.
 func TestContainerRehearsalClassifiesJevPatrols(t *testing.T) {
 	t.Parallel()
-	if s, ok := stepNamed("jev_landing"); !ok || s.class != stepRuns {
-		t.Errorf("jev_landing = %+v, %v", s, ok)
+	if !stepNamed("jev_landing") || slices.Contains(containerOffNames(), "jev_landing") {
+		t.Error("jev_landing must be known and run in the container")
 	}
-	if _, ok := stepNamed("jevish"); ok {
+	if stepNamed("jevish") {
 		t.Error("a name that only resembles the prefix was classified")
 	}
 }

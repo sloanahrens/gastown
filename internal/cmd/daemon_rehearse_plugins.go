@@ -80,16 +80,11 @@ var daemonSteps = []daemonStep{
 // jev_ patrols are in-process readers of the town's own files.
 const jevPatrolPrefix = "jev_"
 
-func stepNamed(name string) (daemonStep, bool) {
-	for _, s := range daemonSteps {
-		if s.name == name {
-			return s, true
-		}
-	}
+func stepNamed(name string) bool {
 	if strings.HasPrefix(name, jevPatrolPrefix) {
-		return daemonStep{name: name, class: stepRuns, why: "in process"}, true
+		return true
 	}
-	return daemonStep{}, false
+	return slices.ContainsFunc(daemonSteps, func(s daemonStep) bool { return s.name == name })
 }
 
 // ContainerOffNames are the names the container's settings must list in
@@ -134,17 +129,17 @@ func checkDaemonSteps(ctx context.Context, r *rehearsal) []string {
 		fails = append(fails, fmt.Sprintf("%s (%s) is not in daemon.container_off: %s", s.name, s.class, s.why))
 	}
 	for _, name := range off {
-		if _, ok := stepNamed(name); !ok {
+		if !stepNamed(name) {
 			fails = append(fails, name+": in daemon.container_off but unknown to the audit table (a typo, or a step to classify)")
 		}
 	}
 	for _, name := range r.discoverSteps() {
-		if _, ok := stepNamed(name.name); !ok {
+		if !stepNamed(name.name) {
 			fails = append(fails, fmt.Sprintf("%s: a %s the audit table does not classify; add it to daemonSteps", name.name, name.kind()))
 		}
 	}
 	for name := range st.Daemon.Patrols {
-		if _, ok := stepNamed(name); !ok {
+		if !stepNamed(name) {
 			fails = append(fails, name+": a patrol the audit table does not classify; add it to daemonSteps")
 		}
 	}
