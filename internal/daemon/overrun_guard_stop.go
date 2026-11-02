@@ -99,17 +99,19 @@ const (
 // worktree may hold uncommitted work, and step 6 is skipped, so the seat stays
 // paused (and the worktree unreused) until an operator looks. The push has the
 // same shape: after overrunPushMaxAttempts failures, or at once when origin
-// rejects the unforced push as non-fast-forward (it holds a different history
-// for the branch), the stop gives up on it, and the comment's note says the
-// branch exists only in the worktree, names the path and says why the push
-// failed; step 6 is skipped. The hand-back's needs-split label raises the
-// attention item; a rework hand-back raises none. A resumed stop first checks
-// the pause is still down, before it stops the session and again before step
-// 3, where it also checks that no session runs on the seat; if not, the seat
-// was taken back and the stop ends without a hand-back. Every stop looks again
-// just before step 6, because the push and hand-back can outlast an operator
-// resume and a new sling: a seat taken back by then keeps the bead handed
-// back, and the release is left to its new holder.
+// rejects the unforced push as non-fast-forward and the tip adds work origin
+// lacks, the stop gives up on it, and the comment's note says the branch
+// exists only in the worktree, names the path and says why the push failed;
+// step 6 is skipped. A non-fast-forward refusal whose tip adds nothing origin
+// lacks counts as a completed push, so step 6 releases the seat. The
+// hand-back's needs-split label raises the attention item; a rework hand-back
+// raises none. A resumed stop first checks the pause is still down, before it
+// stops the session and again before step 3, where it also checks that no
+// session runs on the seat; if not, the seat was taken back and the stop ends
+// without a hand-back. Every stop looks again just before step 6, because the
+// push and hand-back can outlast an operator resume and a new sling: a seat
+// taken back by then keeps the bead handed back, and the release is left to its
+// new holder.
 //
 // Progress is saved after each step, so a step that fails is logged and
 // retried from the failed step on the next tick, never from the top and never
@@ -671,7 +673,9 @@ func overrunSeatOwnsBead(seat overrunSeat, status, assignee string) bool {
 // overrunPushBranch pushes the seat's kept branch to origin at the commit the
 // local branch holds (git push origin <sha>:refs/heads/<branch>), never forced.
 // A seat with no worktree or no branch has nothing to push; a branch that
-// cannot be read or pushed is an error, so the stop retries it.
+// cannot be read or pushed is an error, so the stop retries it. A push origin
+// refuses as non-fast-forward succeeds when the tip adds nothing origin lacks:
+// such a push had nothing left to send.
 func (d *Daemon) overrunPushBranch(seat overrunSeat) error {
 	polecatsDir := filepath.Join(d.config.TownRoot, seat.Rig, "polecats")
 	workDir := resolvePolecatWorktree(polecatsDir, seat.Polecat, seat.Rig)
@@ -698,11 +702,64 @@ func (d *Daemon) overrunPushBranch(seat overrunSeat) error {
 	}
 	if err := g.Push("origin", sha+":refs/heads/"+branch, false); err != nil {
 		if isNonFastForwardPush(err) {
-			return &overrunPushDivergedError{Branch: branch, OriginSHA: originBranchSHA(g, branch), Err: err}
+			originSHA := originBranchSHA(g, branch)
+			// Origin holding another history for the branch name used to park the
+			// seat until an operator pushed the branch by hand. When the tip adds
+			// no patch origin lacks, the push had nothing left to send and the
+			// seat holds no work origin needs: let the stop release it (gt-ao7zh).
+			if overrunTipAddsNothing(g, branch, sha, originSHA) {
+				d.logger.Printf("overrun_guard: %s/%s: origin refused the push of %s as non-fast-forward, but its tip %s adds nothing origin lacks; treating the push as done",
+					seat.Rig, seat.Polecat, branch, sha)
+				return nil
+			}
+			return &overrunPushDivergedError{Branch: branch, OriginSHA: originSHA, Err: err}
 		}
 		return fmt.Errorf("push %s: %w", branch, err)
 	}
 	return nil
+}
+
+// overrunTipAddsNothing reports whether tip adds no patch origin lacks: its
+// commits are already in the commit origin holds for branch, in this clone's
+// remote-tracking copy of it, or in origin's default branch. Only a positive
+// answer counts — an origin that cannot be asked, or a history git cannot
+// compare, answers false, so the seat stays paused rather than released over
+// work that may exist only in the worktree.
+func overrunTipAddsNothing(g daemonGit, branch, tip, originSHA string) bool {
+	var upstreams []string
+	if originSHA != "" {
+		upstreams = append(upstreams, originSHA)
+	}
+	if sha, err := g.Rev("refs/remotes/origin/" + branch); err == nil && sha != "" {
+		upstreams = append(upstreams, sha)
+	}
+	if sha, err := g.Rev(g.CleanDefaultBranchBaseRef("origin", g.RemoteDefaultBranch())); err == nil && sha != "" {
+		upstreams = append(upstreams, sha)
+	}
+	for _, upstream := range upstreams {
+		if overrunTipInHistory(g, tip, upstream) {
+			return true
+		}
+	}
+	return false
+}
+
+// overrunTipInHistory reports whether every commit tip carries is already in
+// upstream, by ancestry first and then by patch identity (git cherry's "-"
+// lines mark a patch upstream already has). A comparison git cannot make is
+// not a match.
+func overrunTipInHistory(g daemonGit, tip, upstream string) bool {
+	if tip == upstream {
+		return true
+	}
+	if ancestor, err := g.IsAncestor(tip, upstream); err == nil && ancestor {
+		return true
+	}
+	out, err := g.Cherry(upstream, tip)
+	if err != nil {
+		return false
+	}
+	return git.CountCherryUnmergedCommits(out) == 0
 }
 
 // overrunResetWorktree is the resetWorktree seam: it puts a released seat's

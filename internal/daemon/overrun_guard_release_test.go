@@ -483,6 +483,15 @@ type pushStubGit struct {
 	// commitTime is what CommitTime answers for the branch head; the zero time
 	// means the commit time cannot be read.
 	commitTime time.Time
+	// revs answers Rev for refs beyond the local branch, such as the clone's
+	// remote-tracking copies. ancestors lists the "<ancestor> <descendant>" pairs
+	// IsAncestor answers true for. cherry maps "<upstream> <head>" to git
+	// cherry's output; a pair it does not list, like any other unknown history,
+	// is an error, and cherryErr fails every call.
+	revs      map[string]string
+	ancestors map[string]bool
+	cherry    map[string]string
+	cherryErr error
 }
 
 func (g *pushStubGit) ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error) {
@@ -499,10 +508,34 @@ func (g *pushStubGit) CommitTime(rev string) (time.Time, error) {
 }
 
 func (g *pushStubGit) Rev(ref string) (string, error) {
-	if ref != "refs/heads/"+g.branch {
-		return "", errors.New("unknown revision " + ref)
+	if ref == "refs/heads/"+g.branch {
+		return g.sha, nil
 	}
-	return g.sha, nil
+	if sha, ok := g.revs[ref]; ok {
+		return sha, nil
+	}
+	return "", errors.New("unknown revision " + ref)
+}
+
+func (g *pushStubGit) IsAncestor(ancestor, descendant string) (bool, error) {
+	return g.ancestors[ancestor+" "+descendant], nil
+}
+
+func (g *pushStubGit) Cherry(upstream, head string) (string, error) {
+	if g.cherryErr != nil {
+		return "", g.cherryErr
+	}
+	out, ok := g.cherry[upstream+" "+head]
+	if !ok {
+		return "", errors.New("no history for " + upstream + " " + head)
+	}
+	return out, nil
+}
+
+func (g *pushStubGit) RemoteDefaultBranch() string { return "main" }
+
+func (g *pushStubGit) CleanDefaultBranchBaseRef(remote, defaultBranch string) string {
+	return remote + "/" + defaultBranch
 }
 
 func (g *pushStubGit) Push(remote, refspec string, force bool) error {
@@ -593,5 +626,188 @@ func TestOverrunPushBranch_NonFastForwardReportsTheOriginSha(t *testing.T) {
 	g.pushErr = &git.GitError{Command: "push", Stderr: "remote: permission denied", Err: errors.New("exit status 1")}
 	if err := d.overrunPushBranch(stopSeat); err == nil || errors.As(err, &diverged) {
 		t.Errorf("error = %v, want a plain push error", err)
+	}
+}
+
+// overrunPushRejected is origin's non-fast-forward refusal of the local tip.
+func overrunPushRejected() error {
+	return &git.GitError{
+		Command: "push",
+		Stderr:  " ! [rejected]  abc123 -> branch (non-fast-forward)",
+		Err:     errors.New("exit status 1"),
+	}
+}
+
+// A branch whose tip adds no patch origin lacks — origin holds another history
+// for the same branch name, the shape that parked six seats for up to 30 h
+// (gt-ao7zh) — has nothing left for the refused push to send, so the push
+// counts as done and the stop can release the seat.
+func TestOverrunPushNonFastForwardNothingUnique(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		revs      map[string]string
+		ancestors map[string]bool
+		cherry    map[string]string
+	}{
+		{
+			name:      "the tip is an ancestor of origin's branch",
+			ancestors: map[string]bool{"abc123 9f8e7d6": true},
+		},
+		{
+			name:   "origin's branch already holds the tip's patches",
+			cherry: map[string]string{"9f8e7d6 abc123": "- 1234567\n"},
+		},
+		{
+			name: "origin's branch was never fetched and origin's main holds the tip",
+			revs: map[string]string{"origin/main": "abc123"},
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := newOverrunDaemon(t, false)
+			worktree := filepath.Join(d.config.TownRoot, stopSeat.Rig, "polecats", stopSeat.Polecat, stopSeat.Rig)
+			if err := os.MkdirAll(filepath.Join(worktree, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			g := &pushStubGit{
+				branch:     stopSeat.Branch,
+				sha:        "abc123",
+				pushErr:    overrunPushRejected(),
+				originRefs: []git.RemoteRef{{Hash: "9f8e7d6", Name: "refs/heads/" + stopSeat.Branch}},
+				revs:       tt.revs,
+				ancestors:  tt.ancestors,
+				cherry:     tt.cherry,
+			}
+			d.openGitFn = func(string) daemonGit { return g }
+
+			if err := d.overrunPushBranch(stopSeat); err != nil {
+				t.Fatalf("push = %v, want nil: the tip adds nothing origin lacks", err)
+			}
+		})
+	}
+}
+
+// A tip that carries a commit origin lacks is work the seat must not lose: the
+// refused push is still given up, with origin's sha in the error, so the seat
+// stays paused (gt-ao7zh).
+func TestOverrunPushNonFastForwardUniqueWork(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	worktree := filepath.Join(d.config.TownRoot, stopSeat.Rig, "polecats", stopSeat.Polecat, stopSeat.Rig)
+	if err := os.MkdirAll(filepath.Join(worktree, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	g := &pushStubGit{
+		branch:     stopSeat.Branch,
+		sha:        "abc123",
+		pushErr:    overrunPushRejected(),
+		originRefs: []git.RemoteRef{{Hash: "9f8e7d6", Name: "refs/heads/" + stopSeat.Branch}},
+		cherry:     map[string]string{"9f8e7d6 abc123": "+ 1234567\n"},
+	}
+	d.openGitFn = func(string) daemonGit { return g }
+
+	var diverged *overrunPushDivergedError
+	if err := d.overrunPushBranch(stopSeat); !errors.As(err, &diverged) || diverged.OriginSHA != "9f8e7d6" {
+		t.Fatalf("push = %v, want the divergence error at origin sha 9f8e7d6", err)
+	}
+}
+
+// A history git cannot compare is no proof the tip adds nothing: cherry failing
+// leaves the push refused and the seat paused, as before (gt-ao7zh).
+func TestOverrunPushNonFastForwardUnreadableHistoryStaysPaused(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	worktree := filepath.Join(d.config.TownRoot, stopSeat.Rig, "polecats", stopSeat.Polecat, stopSeat.Rig)
+	if err := os.MkdirAll(filepath.Join(worktree, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	g := &pushStubGit{
+		branch:     stopSeat.Branch,
+		sha:        "abc123",
+		pushErr:    overrunPushRejected(),
+		originRefs: []git.RemoteRef{{Hash: "9f8e7d6", Name: "refs/heads/" + stopSeat.Branch}},
+		cherryErr:  errors.New("bad object 9f8e7d6"),
+	}
+	d.openGitFn = func(string) daemonGit { return g }
+
+	var diverged *overrunPushDivergedError
+	if err := d.overrunPushBranch(stopSeat); !errors.As(err, &diverged) {
+		t.Fatalf("push = %v, want the divergence error: an uncomparable history is not a match", err)
+	}
+}
+
+// With the production push step in the stop, a refused push whose tip adds
+// nothing origin lacks runs past the push to the seat release: the pause ends
+// and the hand-back note does not claim the branch lives only in the worktree
+// (gt-ao7zh).
+func TestStop_ReleasedWhenRefusedPushAddsNothing(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	worktree := filepath.Join(d.config.TownRoot, stopSeat.Rig, "polecats", stopSeat.Polecat, stopSeat.Rig)
+	if err := os.MkdirAll(filepath.Join(worktree, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	g := &pushStubGit{
+		branch:     stopSeat.Branch,
+		sha:        "abc123",
+		pushErr:    overrunPushRejected(),
+		originRefs: []git.RemoteRef{{Hash: "9f8e7d6", Name: "refs/heads/" + stopSeat.Branch}},
+		ancestors:  map[string]bool{"abc123 9f8e7d6": true},
+	}
+	d.openGitFn = func(string) daemonGit { return g }
+
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	seams := f.seams()
+	seams.push = d.overrunPushBranch
+	d.runOverrunGuard(seams)
+
+	if !slices.Contains(f.calls, "retire "+stopSeat.Rig+"/"+stopSeat.Polecat) {
+		t.Errorf("calls = %q, want the seat retired: the push had nothing left to send", f.calls)
+	}
+	if len(f.handBackNotes) != 1 || strings.Contains(f.handBackNotes[0], "exists only in the seat's worktree") {
+		t.Errorf("hand-back notes = %q, want no note naming the branch as worktree-only", f.handBackNotes)
+	}
+	st, err := readOverrunState(d.config.TownRoot, stopSeat.Bead)
+	if err != nil || st.PushedAt.IsZero() || st.PushGaveUp {
+		t.Errorf("state = %+v (err %v), want the push recorded as done", st, err)
+	}
+}
+
+// A refused push whose tip carries a commit origin lacks still gives up and
+// leaves the seat paused, with the note naming the branch as worktree-only: the
+// release above is for a push with nothing left to send, not for every
+// non-fast-forward refusal (gt-ao7zh).
+func TestStop_PausedWhenRefusedPushCarriesUniqueWork(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	worktree := filepath.Join(d.config.TownRoot, stopSeat.Rig, "polecats", stopSeat.Polecat, stopSeat.Rig)
+	if err := os.MkdirAll(filepath.Join(worktree, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	g := &pushStubGit{
+		branch:     stopSeat.Branch,
+		sha:        "abc123",
+		pushErr:    overrunPushRejected(),
+		originRefs: []git.RemoteRef{{Hash: "9f8e7d6", Name: "refs/heads/" + stopSeat.Branch}},
+		cherry:     map[string]string{"9f8e7d6 abc123": "+ 1234567\n"},
+	}
+	d.openGitFn = func(string) daemonGit { return g }
+
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	seams := f.seams()
+	seams.push = d.overrunPushBranch
+	d.runOverrunGuard(seams)
+
+	if slices.Contains(f.calls, "retire "+stopSeat.Rig+"/"+stopSeat.Polecat) {
+		t.Errorf("calls = %q, want the seat left paused: the tip carries work origin lacks", f.calls)
+	}
+	if len(f.handBackNotes) != 1 || !strings.Contains(f.handBackNotes[0], "exists only in the seat's worktree") {
+		t.Errorf("hand-back notes = %q, want the note naming the branch as worktree-only", f.handBackNotes)
+	}
+	st, err := readOverrunState(d.config.TownRoot, stopSeat.Bead)
+	if err != nil || !st.PushGaveUp || !st.PushedAt.IsZero() {
+		t.Errorf("state = %+v (err %v), want the push given up and no PushedAt", st, err)
 	}
 }
