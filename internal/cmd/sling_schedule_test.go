@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/wisp"
 )
@@ -190,6 +191,67 @@ func TestValidateNoTaskOnlySchedulerFlagsRejectsBranchAndPR(t *testing.T) {
 				if !strings.Contains(err.Error(), "--"+name) {
 					t.Fatalf("validateNoTaskOnlySchedulerFlags(%s) error = %v, want --%s", mode, err, name)
 				}
+			}
+		})
+	}
+}
+
+// failingCreateContexts is a rig's sling contexts whose creation fails. The
+// lookup and every other write still go to the harness fake, so only the one
+// path under test changes.
+type failingCreateContexts struct {
+	fakeSlingContexts
+	err error
+}
+
+func (f failingCreateContexts) Create(beads.CreateOptions) (*beads.Issue, error) {
+	return nil, f.err
+}
+
+// TestScheduleSlingTouchesContextStamp: the dispatch heartbeat answers "nothing
+// is scheduled" without reading a database while no context has been created
+// since its last empty scan, so a schedule that creates one has to stamp it
+// (gt-66e5d). A creation that fails writes no context and touches nothing.
+func TestScheduleSlingTouchesContextStamp(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		createErr error
+		wantStamp bool
+	}{
+		{name: "created context", wantStamp: true},
+		{name: "failed creation", createErr: errors.New("dolt write failed")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			h := newSlingHarness(t)
+			h.addBead(slingBead, beadInfo{Title: "scheduled work"})
+			h.run.townOrEnv = func() (string, error) { return townRoot, nil }
+			if tc.createErr != nil {
+				h.run.slingContexts = func(string) slingContextStore {
+					return failingCreateContexts{fakeSlingContexts{h}, tc.createErr}
+				}
+			}
+
+			err := h.run.scheduleSlingBead(slingBead, "gastown", ScheduleOptions{})
+			if tc.createErr != nil {
+				wantSlingErr(t, err, "creating sling context")
+			} else if err != nil {
+				t.Fatalf("schedule: %v", err)
+			}
+
+			_, stampErr := os.Stat(beads.SlingContextStampPath(townRoot))
+			stamped := stampErr == nil
+			if stampErr != nil && !os.IsNotExist(stampErr) {
+				t.Fatalf("stat stamp: %v", stampErr)
+			}
+			if tc.wantStamp && !stamped {
+				t.Error("a schedule that created a sling context touched no stamp: the heartbeat would keep skipping its scan and never dispatch it")
+			}
+			if !tc.wantStamp && stamped {
+				t.Errorf("a schedule whose context creation failed stamped %s; only a created context may announce itself", beads.SlingContextStampPath(townRoot))
 			}
 		})
 	}

@@ -659,3 +659,129 @@ func TestCloseStaleContextsKeepsAnInvalidContextWhoseCloseFailed(t *testing.T) {
 		t.Fatalf("kept = %+v, want the invalid context whose close failed", kept)
 	}
 }
+
+// contextScanCounter stands in for one full sling-context scan: it counts the
+// scans it is asked to run, which is the bd work the heartbeat would pay.
+type contextScanCounter struct {
+	calls   int
+	records []contextRecord
+}
+
+func (c *contextScanCounter) scan(string) ([]contextRecord, error) {
+	c.calls++
+	return c.records, nil
+}
+
+// seedEmptyScan runs one full scan that finds no context, which is what records
+// the empty-scan marker the next heartbeat reads.
+func seedEmptyScan(t *testing.T, townRoot string, started time.Time, scan *contextScanCounter) {
+	t.Helper()
+	if _, err := listAllSlingContextRecordsWith(townRoot, func() time.Time { return started }, scan.scan); err != nil {
+		t.Fatalf("first scan: %v", err)
+	}
+	if scan.calls != 1 {
+		t.Fatalf("first scan ran %d scans, want 1", scan.calls)
+	}
+}
+
+// While the last full scan found no sling context and nothing has been created
+// since, the heartbeat must answer "nothing scheduled" without opening a store:
+// that empty scan is the eleven to fourteen bd calls a minute a quiet town pays
+// (gt-66e5d).
+func TestScanSkipsWhileNoContextCouldExist(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	start := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	scan := &contextScanCounter{}
+
+	seedEmptyScan(t, townRoot, start, scan)
+
+	records, err := listAllSlingContextRecordsWith(townRoot,
+		func() time.Time { return start.Add(time.Minute) }, scan.scan)
+	if err != nil {
+		t.Fatalf("second scan: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("second scan = %d contexts, want none", len(records))
+	}
+	if scan.calls != 1 {
+		t.Fatalf("a second scan inside ten minutes, with no context created since the empty scan, opened stores again (%d scans); it must answer from the marker", scan.calls)
+	}
+}
+
+// Every fact the skip rests on, once it stops holding, must send the heartbeat
+// back to a full scan. Each row is one of those facts turned against it.
+func TestScanReadsAgainAfterStampOrCeiling(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name string
+		// firstRecords is what the first full scan found: nil records the empty
+		// marker, a context records a marker that found one.
+		firstRecords []contextRecord
+		// change runs after the first scan and before the second.
+		change func(t *testing.T, townRoot string)
+		// at is the second scan's clock.
+		at time.Time
+	}{
+		{
+			name: "a stamp newer than the empty scan",
+			change: func(t *testing.T, townRoot string) {
+				if err := beads.TouchSlingContextStamp(townRoot, start.Add(30*time.Second)); err != nil {
+					t.Fatalf("touch stamp: %v", err)
+				}
+			},
+			at: start.Add(time.Minute),
+		},
+		{
+			name:   "a marker older than ten minutes",
+			change: func(*testing.T, string) {},
+			at:     start.Add(11 * time.Minute),
+		},
+		{
+			name:   "a marker at the ten-minute ceiling",
+			change: func(*testing.T, string) {},
+			at:     start.Add(10 * time.Minute),
+		},
+		{
+			name:         "a marker that found a context",
+			firstRecords: []contextRecord{{issue: &beads.Issue{ID: "gt-wisp-ctx"}}},
+			change:       func(*testing.T, string) {},
+			at:           start.Add(time.Minute),
+		},
+		{
+			name: "a stamp that cannot be read",
+			change: func(t *testing.T, townRoot string) {
+				// A symlink to itself makes stat fail with ELOOP, which is not
+				// "no such file": the scan must not read it as "never created".
+				if err := os.Symlink(beads.SlingContextStampFile, beads.SlingContextStampPath(townRoot)); err != nil {
+					t.Fatalf("plant unreadable stamp: %v", err)
+				}
+			},
+			at: start.Add(time.Minute),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			scan := &contextScanCounter{records: tc.firstRecords}
+
+			seedEmptyScan(t, townRoot, start, scan)
+			tc.change(t, townRoot)
+			scan.records = nil
+
+			records, err := listAllSlingContextRecordsWith(townRoot, func() time.Time { return tc.at }, scan.scan)
+			if err != nil {
+				t.Fatalf("second scan: %v", err)
+			}
+			if len(records) != 0 {
+				t.Fatalf("second scan = %d contexts, want none", len(records))
+			}
+			if scan.calls != 2 {
+				t.Fatalf("%s left the heartbeat answering from its marker (%d scans); it must read every database", tc.name, scan.calls)
+			}
+		})
+	}
+}

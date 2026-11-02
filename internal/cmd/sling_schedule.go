@@ -235,6 +235,17 @@ func (d *slingDeps) scheduleSlingBead(beadID, rigName string, opts ScheduleOptio
 		return fmt.Errorf("creating sling context: %w", err)
 	}
 
+	// The dispatch heartbeat answers "nothing is scheduled" without reading a
+	// database while no context has been created since its last empty scan, so
+	// a created context announces itself (gt-66e5d). A stamp that cannot be
+	// written costs the heartbeat its skip until the scan ceiling passes; the
+	// context bead exists and the schedule stands either way, so this warns
+	// instead of failing a schedule that worked.
+	if stampErr := beads.TouchSlingContextStamp(townRoot, time.Now()); stampErr != nil {
+		fmt.Fprintf(d.out, "%s Warning: the scheduler will scan for this context rather than skip: %v\n",
+			style.Dim.Render("⚠"), stampErr)
+	}
+
 	actor := d.actor()
 	_ = d.logFeed(events.TypeSchedulerEnqueue, actor, events.SchedulerEnqueuePayload(beadID, rigName))
 
