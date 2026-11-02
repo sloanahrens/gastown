@@ -81,20 +81,9 @@ func shapeArchiveOSEnv(town, rig string) shapeArchiveEnv {
 	}
 }
 
-// shapeRigNameRE is the archive directory name the rig may be: a database name,
-// which is alphanumeric with underscores and hyphens (see the daemon's
-// validDBName). It is refused otherwise before it reaches a path or a git path
-// spec, so a name like "../x" can never read outside the archive.
-var shapeRigNameRE = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
-
 // shapeEventShardRE matches a rig's event files in the archive: events.jsonl
 // and its numbered shards.
 var shapeEventShardRE = regexp.MustCompile(`^events(\.[0-9]+)?\.jsonl$`)
-
-// shapeCommitRE is what git log's commit id may be before it is spliced into a
-// git path spec. git prints 40 lowercase hex digits; anything else is not a
-// commit and never reaches argv, where a leading dash would read as a flag.
-var shapeCommitRE = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 func runMetricsShapeOutcome(ctx context.Context, out io.Writer, env shapeArchiveEnv) error {
 	if env.Run == nil {
@@ -107,23 +96,23 @@ func runMetricsShapeOutcome(ctx context.Context, out io.Writer, env shapeArchive
 	if rig == "" {
 		rig = "gt"
 	}
-	if !shapeRigNameRE.MatchString(rig) {
+	if !archiveRigNameRE.MatchString(rig) {
 		return fmt.Errorf("shape-outcome: rig %q is not a database name", rig)
 	}
 	repo := filepath.Join(env.Town, ".dolt-archive", "git")
 	dropped := &metrics.Dropped{}
 
-	commits, err := shapeSampledCommits(ctx, env, repo, rig, dropped)
+	commits, err := archiveSampledCommits(ctx, env.Run, repo, rig, dropped)
 	if err != nil {
-		return err
+		return fmt.Errorf("shape-outcome: %w", err)
 	}
 	if len(commits) == 0 {
 		return fmt.Errorf("shape-outcome: %s holds no commit for %s/issues.jsonl", repo, rig)
 	}
 
-	first, err := shapeFirstFiled(ctx, env, repo, rig, commits, dropped)
+	first, err := archiveFirstFiled(ctx, env.Run, repo, rig, commits, dropped)
 	if err != nil {
-		return err
+		return fmt.Errorf("shape-outcome: %w", err)
 	}
 
 	reviewsPath := land.TownReviewsFile(env.Town).Path
@@ -190,81 +179,6 @@ func shapeIDs(first []metrics.FirstFiled) map[string]struct{} {
 		ids[f.Row.ID] = struct{}{}
 	}
 	return ids
-}
-
-// shapeLogCommit is one commit that touched the archive's issues.jsonl: its id
-// and when it was committed, in the committer's own zone.
-type shapeLogCommit struct {
-	SHA string
-	At  time.Time
-}
-
-// shapeSampledCommits lists the commits that touched the rig's issues.jsonl and
-// keeps one per local day, oldest first.
-//
-// git log prints newest first, so the first commit seen for a day is that
-// day's last export: the most complete version of the day, and the latest
-// point at which a bead filed that day could already have been edited. The
-// list is reversed before it is returned, because FirstFiledVersions reads
-// successive commits oldest first.
-func shapeSampledCommits(ctx context.Context, env shapeArchiveEnv, repo, rig string, dropped *metrics.Dropped) ([]shapeLogCommit, error) {
-	// The committer date travels beside the id in one call: pairing a second
-	// log of dates with this one by position would be a second ordering to get
-	// wrong.
-	raw, err := env.Run(ctx, []string{
-		"git", "-C", repo, "log", "--first-parent", "--format=%H %cI", "--", rig + "/issues.jsonl",
-	})
-	if err != nil {
-		return nil, fmt.Errorf("shape-outcome: reading %s: %w", filepath.Join(repo, rig, "issues.jsonl"), err)
-	}
-	var sampled []shapeLogCommit
-	seenDay := make(map[string]bool)
-	for _, line := range strings.Split(string(raw), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 0 {
-			continue
-		}
-		if len(fields) != 2 || !shapeCommitRE.MatchString(fields[0]) {
-			dropped.Add("git log", "line is not a commit id and a date")
-			continue
-		}
-		at, err := time.Parse(time.RFC3339, fields[1])
-		if err != nil {
-			dropped.Add("git log", "unparseable committer date")
-			continue
-		}
-		day := at.Format(time.DateOnly)
-		if seenDay[day] {
-			continue
-		}
-		seenDay[day] = true
-		sampled = append(sampled, shapeLogCommit{SHA: fields[0], At: at})
-	}
-	for i, j := 0, len(sampled)-1; i < j; i, j = i+1, j-1 {
-		sampled[i], sampled[j] = sampled[j], sampled[i]
-	}
-	return sampled, nil
-}
-
-// shapeFirstFiled reads each sampled commit's issues.jsonl and returns the
-// first row the archive holds per bead. A commit whose file cannot be read
-// fails the run: a silently skipped day is a bead read from a later edit
-// without any sign of it.
-func shapeFirstFiled(ctx context.Context, env shapeArchiveEnv, repo, rig string, commits []shapeLogCommit, dropped *metrics.Dropped) ([]metrics.FirstFiled, error) {
-	batches := make([]metrics.ArchiveCommit, 0, len(commits))
-	for _, c := range commits {
-		data, err := env.Run(ctx, []string{
-			"git", "-C", repo, "show", c.SHA + ":" + rig + "/issues.jsonl",
-		})
-		if err != nil {
-			return nil, fmt.Errorf("shape-outcome: reading %s/issues.jsonl at %s: %w", rig, c.SHA, err)
-		}
-		batches = append(batches, metrics.ArchiveCommit{
-			At:   c.At,
-			Rows: metrics.DecodeArchiveIssues(data, c.SHA, dropped),
-		})
-	}
-	return metrics.FirstFiledVersions(batches), nil
 }
 
 // shapeArchiveEvents reads the rig's event files at the archive's HEAD: the
