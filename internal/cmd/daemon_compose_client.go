@@ -258,6 +258,11 @@ func containerZone(townRoot string, load func(path string) (*config.TownSettings
 // checkedZone returns name when it loads as a zone, and refuses it when it does
 // not (Go would otherwise fall back to UTC without a word).
 func checkedZone(name, source string) (string, error) {
+	// LoadLocation answers UTC for "" and the process's zone for "Local", both
+	// without an error, and neither is a zone name the container can be given.
+	if name == "" || name == "Local" {
+		return "", fmt.Errorf("the zone %q from %s is not an IANA zone name; the container would run in UTC or its own local zone", name, source)
+	}
 	if _, err := time.LoadLocation(name); err != nil {
 		return "", fmt.Errorf("the zone %q from %s does not load: %w", name, source, err)
 	}

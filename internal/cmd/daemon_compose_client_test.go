@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	_ "time/tzdata" // the zone tests load zones by name; carry the database so they do not depend on the host
 
 	"gopkg.in/yaml.v3"
 )
@@ -426,11 +427,13 @@ func TestContainerZoneIsTheTownsThenTheHostsAndNeverSilentUTC(t *testing.T) {
 		rl   func(string) (string, error)
 		want string
 	}{
-		"unreadable host link":    {none, link("", boom), "cannot be read"},
-		"link not under zoneinfo": {none, link("/etc/other", nil), "not under a zoneinfo directory"},
-		"a misspelt town zone":    {named("America/Chicgo"), link("", nil), "does not load"},
-		"a host link to nonsense": {none, link("/zoneinfo/Not/AZone", nil), "does not load"},
-		"unreadable settings":     {func(string) (*config.TownSettings, error) { return nil, boom }, link("", nil), "polecat_pool.timezone"},
+		"unreadable host link":      {none, link("", boom), "cannot be read"},
+		"link not under zoneinfo":   {none, link("/etc/other", nil), "not under a zoneinfo directory"},
+		"a misspelt town zone":      {named("America/Chicgo"), link("", nil), "does not load"},
+		"a host link to nonsense":   {none, link("/zoneinfo/Not/AZone", nil), "does not load"},
+		"a link ending at zoneinfo": {none, link("/usr/share/zoneinfo/", nil), "not an IANA zone name"},
+		"a town zone Local":         {named("Local"), link("", nil), "not an IANA zone name"},
+		"unreadable settings":       {func(string) (*config.TownSettings, error) { return nil, boom }, link("", nil), "polecat_pool.timezone"},
 	} {
 		if z, err := containerZone("/t", tc.load, tc.rl, "/etc/localtime"); err == nil || z != "" || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s = %q, %v; want a refusal containing %q", name, z, err, tc.want)
