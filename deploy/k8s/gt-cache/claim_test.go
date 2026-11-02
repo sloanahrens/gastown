@@ -75,8 +75,10 @@ func TestClaimManifest(t *testing.T) {
 		t.Errorf("spec.storageClassName = %v, want none: the claim takes the cluster default", v)
 	}
 	wantLabels := map[string]any{
-		"app.kubernetes.io/managed-by": "gt",
-		"app.kubernetes.io/name":       "gt-cache",
+		"app.kubernetes.io/managed-by":              "gt",
+		"app.kubernetes.io/name":                    "gt-cache",
+		"openshell.ai/sandbox-attachable":           "true",
+		"openshell.ai/sandbox-attachable-workspace": "default",
 	}
 	if got := at(t, claim, "metadata", "labels"); !reflect.DeepEqual(got, wantLabels) {
 		t.Errorf("metadata.labels = %v, want %v", got, wantLabels)
@@ -96,6 +98,47 @@ func TestClaimHeaderStatesTheBindingRule(t *testing.T) {
 	for _, want := range []struct{ claim, text string }{
 		{"the first-consumer binding rule", "WaitForFirstConsumer"},
 		{"the sandbox pool", "gt.dev/pool=sandbox"},
+	} {
+		if !strings.Contains(header, want.text) {
+			t.Errorf("the header does not name %s: it must contain %q, and the header is:\n%s", want.claim, want.text, header)
+		}
+	}
+}
+
+// TestClaimManifestCarriesTheGatewayAdmissionLabels pins the labels the
+// gateway's resource_admission requires before a sandbox may mount the claim;
+// a claim without them is refused at sandbox create (gt-7bsz9).
+func TestClaimManifestCarriesTheGatewayAdmissionLabels(t *testing.T) {
+	t.Parallel()
+	labelsAny := at(t, readClaim(t), "metadata", "labels")
+	labels, ok := labelsAny.(map[string]any)
+	if !ok {
+		t.Fatalf("metadata.labels = %v (%T), want a map", labelsAny, labelsAny)
+	}
+	for _, want := range []struct{ key, value string }{
+		{"openshell.ai/sandbox-attachable", "true"},
+		{"openshell.ai/sandbox-attachable-workspace", "default"},
+	} {
+		if got := labels[want.key]; got != want.value {
+			t.Errorf("metadata.labels[%q] = %v, want %q", want.key, got, want.value)
+		}
+	}
+}
+
+// TestClaimHeaderStatesTheAdmissionRule reads the header an operator applies
+// the file by: the admission labels are there because resource_admission
+// refuses a claim without them (gt-7bsz9).
+func TestClaimHeaderStatesTheAdmissionRule(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(claimFile)
+	if err != nil {
+		t.Fatalf("reading %s: %v", claimFile, err)
+	}
+	header := commentHeader(raw)
+	for _, want := range []struct{ claim, text string }{
+		{"the admission setting", "resource_admission"},
+		{"the attachable label", "openshell.ai/sandbox-attachable=true"},
+		{"the workspace label", "openshell.ai/sandbox-attachable-workspace=default"},
 	} {
 		if !strings.Contains(header, want.text) {
 			t.Errorf("the header does not name %s: it must contain %q, and the header is:\n%s", want.claim, want.text, header)
