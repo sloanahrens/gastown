@@ -108,6 +108,11 @@ type probe struct {
 // probes are the supervisor's three probes in print order. The patterns are
 // the runbook's table, matched case-insensitively one log line at a time; a
 // fallback pattern only applies once no failure pattern has matched the probe.
+//
+// The source of truth is the supervisor's own log messages, which the runbook's
+// table transcribes and this list is compiled from. When the table and this
+// list disagree, the supervisor's message decides, so change the table first
+// and then this list.
 var probes = []probe{
 	{
 		name: "landlock",
