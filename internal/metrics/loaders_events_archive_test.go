@@ -54,6 +54,21 @@ func eventsArchiveWithHeader(t *testing.T, header []string, rows [][]string) []b
 	return buf.Bytes()
 }
 
+// gzipText builds a gzip blob from raw CSV text, so a test can write a record
+// encoding/csv refuses to produce.
+func gzipText(t *testing.T, text string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write([]byte(text)); err != nil {
+		t.Fatalf("write gzip: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close gzip: %v", err)
+	}
+	return buf.Bytes()
+}
+
 // eventsFS is an archive directory whose files are the given gzip blobs.
 func eventsFS(dir string, files map[string][]byte) fstest.MapFS {
 	fsys := fstest.MapFS{}
@@ -236,11 +251,11 @@ func TestWriteBeadChangesCSVIsStable(t *testing.T) {
 		},
 	}
 	var first, second bytes.Buffer
-	if err := WriteBeadChangesCSV(&first, rows); err != nil {
+	if err := WriteBeadChangesCSV(&first, rows, nil); err != nil {
 		t.Fatalf("first write: %v", err)
 	}
 	reversed := []BeadChangeRow{rows[1], rows[0]}
-	if err := WriteBeadChangesCSV(&second, reversed); err != nil {
+	if err := WriteBeadChangesCSV(&second, reversed, nil); err != nil {
 		t.Fatalf("second write: %v", err)
 	}
 	if !bytes.Equal(first.Bytes(), second.Bytes()) {
@@ -296,7 +311,7 @@ func TestWriteBeadChangesCSVReportsWriteFailures(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := WriteBeadChangesCSV(&failsAfterWriter{allow: tc.allow}, rows)
+			err := WriteBeadChangesCSV(&failsAfterWriter{allow: tc.allow}, rows, nil)
 			if err == nil {
 				t.Fatalf("no error from a writer that fails after %d writes, want one", tc.allow)
 			}
@@ -426,6 +441,11 @@ func TestBeadChangesRefusesBadRows(t *testing.T) {
 			row:  archiveRow("gt-1", "updated", "alice", `{"created_at":7}`, `{"assignee":"bob"}`, "2026-10-01T00:00:00Z"),
 			want: "old_value.created_at",
 		},
+		{
+			name: "old_value created_at is not a timestamp",
+			row:  archiveRow("gt-1", "updated", "alice", `{"created_at":"yesterday"}`, `{"assignee":"bob"}`, "2026-10-01T00:00:00Z"),
+			want: "old_value.created_at",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -463,8 +483,15 @@ func TestBeadChangesFailsUnreadableFiles(t *testing.T) {
 	})
 	var dropped Dropped
 	rows, err := LoadBeadChangesArchive(fsys, "archive", &dropped)
-	if err != nil {
-		t.Fatalf("load: %v", err)
+	// A partial load is not a clean one: the good rows come back beside an error
+	// naming the files that were not read.
+	if err == nil {
+		t.Fatalf("partial load returned no error, want one naming the unreadable files")
+	}
+	for _, want := range []string{"events-.csv.gz", "events-broken.csv.gz"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("load error = %q, want it to name %q", err, want)
+		}
 	}
 	if len(rows) != 1 || rows[0].Database != "gastown" {
 		t.Fatalf("rows = %+v, want only gastown's: one unreadable file does not stop the others", rows)
@@ -485,8 +512,8 @@ func TestBeadChangesFailsFileMissingColumn(t *testing.T) {
 	})
 	var dropped Dropped
 	rows, err := LoadBeadChangesArchive(fsys, "archive", &dropped)
-	if err != nil {
-		t.Fatalf("load: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "events-noactor.csv.gz") {
+		t.Fatalf("load error = %v, want one naming the file whose header lacks a column", err)
 	}
 	if len(rows) != 0 {
 		t.Fatalf("rows = %+v, want none: the file names no actor column", rows)
@@ -513,11 +540,11 @@ func TestBeadChangesStopsAtATruncatedFile(t *testing.T) {
 	})
 	var dropped Dropped
 	rows, err := LoadBeadChangesArchive(fsys, "archive", &dropped)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
 	// The rows before the truncation are complete records and still load; the
-	// file itself is failed so a caller knows its tail is missing.
+	// file itself is failed, and the error says the load is partial.
+	if err == nil || !strings.Contains(err.Error(), "events-gastown.csv.gz") {
+		t.Fatalf("load error = %v, want one naming the truncated file", err)
+	}
 	if len(rows) != 2 {
 		t.Fatalf("rows = %+v, want both databases' records before the truncation", rows)
 	}
@@ -561,5 +588,184 @@ func TestBeadChangesRefusesNilFilesystem(t *testing.T) {
 	t.Parallel()
 	if _, err := LoadBeadChangesArchive(nil, "archive", nil); err == nil {
 		t.Fatal("a nil filesystem returned no error, want an error")
+	}
+}
+
+// A malformed record is a *csv.ParseError, not a read error: encoding/csv is
+// still usable after it, so the row is dropped and the rows after it load.
+func TestBeadChangesDropsAMalformedRecordAndKeepsReading(t *testing.T) {
+	t.Parallel()
+	var text bytes.Buffer
+	w := csv.NewWriter(&text)
+	for _, rec := range [][]string{
+		eventsArchiveHeader,
+		archiveRow("gt-1", "created", "alice", "", `{"title":"t"}`, "2026-10-01T00:00:00Z"),
+		archiveRow("gt-1", "updated", "alice", `{"description":"d"}`, `{"priority":1}`, "2026-10-01T00:01:00Z"),
+		archiveRow("gt-1", "updated", "alice", `{"description":"d"}`, `{"priority":1}`, "2026-10-01T00:02:00Z"),
+	} {
+		if err := w.Write(rec); err != nil {
+			t.Fatalf("write record: %v", err)
+		}
+	}
+	w.Flush()
+	if err := w.Error(); err != nil {
+		t.Fatalf("flush records: %v", err)
+	}
+	// The record on line 3 loses a doubled quote, so its new_value ends a quoted
+	// field with a bare quote; encoding/csv refuses it and reads line 4 next.
+	corrupt, uncorrupted := `"{""priority"":1}"`, `"{"priority":1}"`
+	raw := strings.Replace(text.String(), corrupt, uncorrupted, 1)
+	fsys := eventsFS("archive", map[string][]byte{
+		"events-gastown.csv.gz": gzipText(t, raw),
+	})
+	var dropped Dropped
+	rows, err := LoadBeadChangesArchive(fsys, "archive", &dropped)
+	if err != nil {
+		t.Fatalf("load: %v; a malformed record is not a file failure", err)
+	}
+	if len(rows) != 1 || rows[0].UpdateCount != 1 {
+		t.Fatalf("rows = %+v, want the row after the malformed record to load", rows)
+	}
+	if dropped.Count() != 1 || len(dropped.Failed) != 0 {
+		t.Fatalf("dropped %d items and %d failed files, want one bad row and no failed file", dropped.Count(), len(dropped.Failed))
+	}
+	if reason := dropped.Items[0].Reason; !strings.Contains(reason, "row 3") {
+		t.Errorf("drop reason = %q, want the malformed record's row number", reason)
+	}
+}
+
+// The fallback creation stamp is the earliest old_value.created_at, not the
+// first one the file lists: an archive's rows need not be in event order.
+func TestBeadChangesFallsBackToTheEarliestOldValueCreatedAt(t *testing.T) {
+	t.Parallel()
+	fsys := eventsFS("archive", map[string][]byte{
+		"events-gastown.csv.gz": eventsArchive(t, [][]string{
+			archiveRow("gt-old", "updated", "alice", `{"created_at":"2026-09-05T00:00:00Z","description":"d"}`, `{"assignee":"bob"}`, "2026-10-01T00:01:00Z"),
+			archiveRow("gt-old", "updated", "alice", `{"created_at":"2026-09-01T00:00:00Z","description":"d"}`, `{"description":"revised"}`, "2026-10-01T00:02:00Z"),
+		}),
+	})
+	var dropped Dropped
+	rows, err := LoadBeadChangesArchive(fsys, "archive", &dropped)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	row := findBeadChange(t, rows, "gastown", "gt-old")
+	if row.CreatedAt != "2026-09-01T00:00:00Z" {
+		t.Errorf("created_at = %q, want the earliest old_value.created_at", row.CreatedAt)
+	}
+	// 2026-09-01T00:00:00Z to the text update at 2026-10-01T00:02:00Z.
+	if row.SecondsFromCreatedToFirstTextUpdate == nil || *row.SecondsFromCreatedToFirstTextUpdate != 2592120 {
+		t.Errorf("seconds from created to first text update = %v, want 2592120 from the earliest stamp", row.SecondsFromCreatedToFirstTextUpdate)
+	}
+}
+
+// Every stamp is the earliest or latest event of its kind, whatever order the
+// file lists the rows in.
+func TestBeadChangesReadsStampsOutOfOrder(t *testing.T) {
+	t.Parallel()
+	fsys := eventsFS("archive", map[string][]byte{
+		"events-gastown.csv.gz": eventsArchive(t, [][]string{
+			archiveRow("gt-1", "closed", "bob", "", "", "2026-10-01T03:00:00Z"),
+			archiveRow("gt-1", "updated", "bob", `{"description":"revised"}`, `{"assignee":"bob"}`, "2026-10-01T00:05:00Z"),
+			archiveRow("gt-1", "claimed", "bob", "", "", "2026-10-01T00:20:00Z"),
+			archiveRow("gt-1", "created", "alice", "", `{"title":"t"}`, "2026-10-01T04:00:00Z"),
+			archiveRow("gt-1", "updated", "alice", `{"description":"filed"}`, `{"description":"revised"}`, "2026-10-01T00:01:00Z"),
+			archiveRow("gt-1", "created", "alice", "", `{"title":"t"}`, "2026-10-01T00:00:00Z"),
+			archiveRow("gt-1", "claimed", "alice", "", "", "2026-10-01T00:10:00Z"),
+			archiveRow("gt-1", "closed", "bob", "", "", "2026-10-01T01:00:00Z"),
+		}),
+	})
+	var dropped Dropped
+	rows, err := LoadBeadChangesArchive(fsys, "archive", &dropped)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	row := findBeadChange(t, rows, "gastown", "gt-1")
+	for _, cell := range []struct{ name, got, want string }{
+		{"created_at", row.CreatedAt, "2026-10-01T00:00:00Z"},
+		{"first_update_at", row.FirstUpdateAt, "2026-10-01T00:01:00Z"},
+		{"claimed_at", row.ClaimedAt, "2026-10-01T00:10:00Z"},
+		{"closed_at", row.ClosedAt, "2026-10-01T03:00:00Z"},
+		{"first_filed_description", row.FirstFiledDescription, "filed"},
+	} {
+		if cell.got != cell.want {
+			t.Errorf("%s = %q, want %q whatever the row order", cell.name, cell.got, cell.want)
+		}
+	}
+	if row.SecondsFromCreatedToFirstTextUpdate == nil || *row.SecondsFromCreatedToFirstTextUpdate != 60 {
+		t.Errorf("seconds from created to first text update = %v, want 60 from the earliest update", row.SecondsFromCreatedToFirstTextUpdate)
+	}
+}
+
+// The archive lives in a date-named directory inside .runtime: the loader reads
+// the database exports under that path and ignores the other files a real
+// export directory holds.
+func TestBeadChangesReadsTheProductionArchiveDirectory(t *testing.T) {
+	t.Parallel()
+	const dir = ".runtime/archive/events-20261102"
+	fsys := fstest.MapFS{
+		dir + "/events-gastown.csv.gz": {Data: eventsArchive(t, [][]string{
+			archiveRow("gt-1", "created", "alice", "", `{"title":"t"}`, "2026-10-01T00:00:00Z"),
+		})},
+		dir + "/events-town.csv.gz": {Data: eventsArchive(t, [][]string{
+			archiveRow("gt-1", "created", "frank", "", `{"title":"t"}`, "2026-10-01T00:00:00Z"),
+		})},
+		// Not a database export: a note, a file of another suffix, and a
+		// subdirectory that holds a name the loader would otherwise read.
+		dir + "/README.txt":              {Data: []byte("export notes")},
+		dir + "/events-20261102.csv":     {Data: []byte("not gzip")},
+		dir + "/partial/events-x.csv.gz": {Data: []byte("not gzip")},
+	}
+	var dropped Dropped
+	rows, err := LoadBeadChangesArchive(fsys, dir, &dropped)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if dropped.Count() != 0 {
+		t.Fatalf("dropped %d items from a healthy export directory: %+v", dropped.Count(), dropped.Items)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %+v, want gastown's and town's", rows)
+	}
+	findBeadChange(t, rows, "gastown", "gt-1")
+	findBeadChange(t, rows, "town", "gt-1")
+}
+
+// A caller may share one Dropped between loaders: a source another loader
+// failed is not this load's gap.
+func TestBeadChangesDoesNotFailOnAnotherLoadersFailure(t *testing.T) {
+	t.Parallel()
+	dropped := Dropped{}
+	dropped.Fail("bd:/g", "bd list failed")
+	fsys := eventsFS("archive", map[string][]byte{
+		"events-gastown.csv.gz": eventsArchive(t, [][]string{
+			archiveRow("gt-1", "created", "alice", "", `{"title":"t"}`, "2026-10-01T00:00:00Z"),
+		}),
+	})
+	rows, err := LoadBeadChangesArchive(fsys, "archive", &dropped)
+	if err != nil {
+		t.Fatalf("load: %v; another loader's failed source is not this load's", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %+v, want the healthy file's row", rows)
+	}
+}
+
+// A partial archive would publish as a complete dataset, so the writer refuses
+// it and writes nothing.
+func TestWriteBeadChangesCSVRefusesAPartialArchive(t *testing.T) {
+	t.Parallel()
+	dropped := Dropped{}
+	dropped.Fail("archive:archive/events-town.csv.gz", "not gzip")
+	var buf bytes.Buffer
+	err := WriteBeadChangesCSV(&buf, []BeadChangeRow{{Database: "gastown", IssueID: "gt-a"}}, &dropped)
+	if err == nil {
+		t.Fatal("a dropped file wrote a dataset, want a refusal")
+	}
+	if !strings.Contains(err.Error(), "events-town.csv.gz") {
+		t.Errorf("error = %q, want it to name the unreadable file", err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("wrote %q, want nothing from a partial archive", buf.String())
 	}
 }
