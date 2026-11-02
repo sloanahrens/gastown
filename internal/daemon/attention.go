@@ -591,6 +591,10 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// Reads the count collectRiskPaths just made, so it stays right after it.
 		{kind: attention.KindReviewBacklog, collect: s.collectReviewBacklog},
 		{kind: attention.KindTierSweepRed, collect: s.collectTierSweepRed},
+		// A separate collector rather than a second kind from the one above:
+		// a failed collector keeps the previous tick's items of its own kind,
+		// so one entry cannot preserve two kinds (gt-hkldq).
+		{kind: attention.KindTierSweepStarved, collect: s.collectTierSweepStarved},
 		{kind: attention.KindOverrunStopped, collect: s.collectOverrunStopped},
 		{kind: attention.KindScheduledGate, collect: s.collectScheduledGate},
 		{kind: attention.KindHostDisk, collect: s.collectHostDisk},
@@ -1625,13 +1629,6 @@ type riskRead struct {
 // that tier, because that is what rewrites the record's verdict; nothing
 // clears it by hand, and a Partial cycle that never reached the tier leaves the
 // RED standing (gt-euxf1).
-//
-// It also raises one item per rig and tier a stage has starved
-// tierSweepStarvedAlertAfter cycles in a row (gt-r2e0h): the tier's verdict is
-// then stale, and a regression in it stays hidden behind an earlier stage that
-// keeps the tier from running. The key is its own, so the item stands beside a
-// RED one rather than replacing it, and the sweep's record resetting the count
-// is what clears it.
 func (s *attentionSources) collectTierSweepRed(ctx context.Context) ([]attention.Item, error) {
 	var out []attention.Item
 	for _, rig := range s.tierSweepRigs() {
@@ -1655,14 +1652,36 @@ func (s *attentionSources) collectTierSweepRed(ctx context.Context) ([]attention
 				Summary:  fmt.Sprintf("tier sweep %s %s RED (%d failed%s)", rig, tier, res.Failed, tierSweepFailureNames(res.FailedNames)),
 			})
 		}
+	}
+	return out, nil
+}
+
+// collectTierSweepStarved raises one item per rig and tier a stage has starved
+// tierSweepStarvedAlertAfter cycles in a row (gt-r2e0h): the tier's verdict is
+// then stale, and a regression in it stays hidden behind an earlier stage that
+// keeps the tier from running. Its key is its own, so it stands beside a RED
+// item for the same tier rather than replacing it, and a cycle that judges the
+// tier clears the count that raised it. Its kind and low severity are its own
+// too: the tier is unmeasured, not known bad, and a red verdict raises the RED
+// item on its own.
+func (s *attentionSources) collectTierSweepStarved(ctx context.Context) ([]attention.Item, error) {
+	var out []attention.Item
+	for _, rig := range s.tierSweepRigs() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		st, err := s.tierSweep(rig)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", rig, err)
+		}
 		for tier, cycles := range st.Starved {
 			if cycles < tierSweepStarvedAlertAfter {
 				continue
 			}
 			out = append(out, attention.Item{
 				Key:      "sweep-starved:" + rig + ":" + tier,
-				Kind:     attention.KindTierSweepRed,
-				Severity: attention.SeverityHigh,
+				Kind:     attention.KindTierSweepStarved,
+				Severity: attention.SeverityLow,
 				Rig:      rig,
 				SHA:      st.Tiers[tier].SHA,
 				Summary: fmt.Sprintf("tier sweep %s %s starved %d cycles in a row (last verdict %s)",
