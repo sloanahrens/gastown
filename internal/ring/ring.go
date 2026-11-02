@@ -304,6 +304,58 @@ func write(townRoot string, hostOf func(key string) (host string, ok bool), rec 
 	return nil
 }
 
+// Renew extends the Ring to a lease from now, signed under key for actor, and
+// returns the record it stored. The read of the current section and the write
+// of the new one are one locked update of mayor/town.json, so a concurrent
+// forge, remove or renew cannot land between them and be written back over.
+// An Absent Ring is refused: a lease is not extended from a record nobody can
+// trust. The update's callback writes the section itself and never calls
+// Write, which would take the same lock again.
+func Renew(townRoot string, key []byte, now time.Time, actor string) (Record, error) {
+	return renew(townRoot, config.SectionHost, key, now, actor)
+}
+
+// renew is Renew over a section lookup, so a test can drive the refusal no
+// build with the layout's registration in place can reach.
+func renew(townRoot string, hostOf func(key string) (host string, ok bool), key []byte, now time.Time, actor string) (Record, error) {
+	if len(key) == 0 {
+		return Record{}, ErrNoKey
+	}
+	path, err := hostPath(townRoot, hostOf)
+	if err != nil {
+		return Record{}, err
+	}
+	var rec Record
+	var refusal error
+	err = config.UpdateRawJSON(path, func(tree map[string]any) (bool, error) {
+		// The section is read through LoadTownConfig, the same loader Read
+		// uses, so the trust rules see exactly the bytes a reader would. The
+		// file cannot change under us: UpdateRawJSON holds its lock.
+		town, err := config.LoadTownConfig(path)
+		if err != nil {
+			return false, err
+		}
+		if st := classify(town.Ring, key, now); st.Kind == Absent {
+			refusal = fmt.Errorf("no Ring; forge it (%s)", st.Reason)
+			return false, nil
+		}
+		signed, err := Sign(Record{ForgedAt: now, ExpiresAt: now.Add(Lease), ForgedBy: actor}, key)
+		if err != nil {
+			return false, err
+		}
+		tree[SectionKey] = signed
+		rec = signed
+		return true, nil
+	})
+	if err != nil {
+		return Record{}, fmt.Errorf("reading the Ring: %w", err)
+	}
+	if refusal != nil {
+		return Record{}, refusal
+	}
+	return rec, nil
+}
+
 // Remove deletes the ring section from mayor/town.json, leaving every other
 // section as it is. It reports false when the town had no ring section to
 // delete.

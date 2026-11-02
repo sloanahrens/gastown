@@ -140,6 +140,38 @@ func TestRingRenewRefusesAnAbsentRing(t *testing.T) {
 	}
 }
 
+// TestRingRenewPrintsItsNewExpiryThroughTheCommand: gt ring renew, run as the
+// cobra command gt registers, reports the lease it stored, a lease of 36 hours
+// from the wall clock the command reads.
+func TestRingRenewPrintsItsNewExpiryThroughTheCommand(t *testing.T) {
+	t.Parallel()
+	root := ringTestTown(t)
+	if _, err := ringRun(runRingForge, ringTestDeps(root, ringTestEnv, ringTestNow)); err != nil {
+		t.Fatalf("forge: %v", err)
+	}
+	find := func() (string, error) { return root, nil }
+	before := time.Now()
+	out, err := ringRunVerb(find, ringTestEnv, "renew")
+	after := time.Now()
+	if err != nil {
+		t.Fatalf("renew through the command: %v", err)
+	}
+	const prefix = "renewed: the Ring is valid until "
+	if !strings.HasPrefix(out, prefix) {
+		t.Fatalf("renew printed %q, want it to start %q", out, prefix)
+	}
+	expiry, err := time.Parse(time.RFC3339, strings.TrimSpace(strings.TrimPrefix(out, prefix)))
+	if err != nil {
+		t.Fatalf("renew printed an expiry that is not RFC 3339: %v", err)
+	}
+	// RFC 3339 has whole seconds, so the printed expiry sits between the
+	// lease from the start of the call (floored to the second) and the lease
+	// from its end.
+	if expiry.Before(before.Add(ring.Lease).Truncate(time.Second)) || expiry.After(after.Add(ring.Lease)) {
+		t.Fatalf("renew printed expiry %s, want a lease of %s from now", expiry, ring.Lease)
+	}
+}
+
 func TestRingRemoveThenStatusIsAbsent(t *testing.T) {
 	t.Parallel()
 	root := ringTestTown(t)

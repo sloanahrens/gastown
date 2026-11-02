@@ -66,14 +66,12 @@ func runRingRenew(d ringDeps, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	st, err := ring.Read(d.townRoot, key, d.now)
+	rec, err := ring.Renew(d.townRoot, key, d.now, d.actor)
 	if err != nil {
-		return fmt.Errorf("reading the Ring: %w", err)
+		return err
 	}
-	if st.Kind == ring.Absent {
-		return fmt.Errorf("no Ring; forge it (%s)", st.Reason)
-	}
-	return d.writeLease(key, out, "renewed")
+	reportLease(out, "renewed", rec)
+	return nil
 }
 
 // writeLease stores a lease forged now and reports its new expiry as verb.
@@ -82,8 +80,13 @@ func (d ringDeps) writeLease(key []byte, out io.Writer, verb string) error {
 	if err != nil {
 		return fmt.Errorf("writing the Ring: %w", err)
 	}
-	fmt.Fprintf(out, "%s: the Ring is valid until %s\n", verb, rec.ExpiresAt.Format(time.RFC3339))
+	reportLease(out, verb, rec)
 	return nil
+}
+
+// reportLease prints the new expiry of rec as verb.
+func reportLease(out io.Writer, verb string, rec ring.Record) {
+	fmt.Fprintf(out, "%s: the Ring is valid until %s\n", verb, rec.ExpiresAt.Format(time.RFC3339))
 }
 
 func runRingStatus(d ringDeps, out io.Writer) error {
