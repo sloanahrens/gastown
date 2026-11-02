@@ -43,16 +43,28 @@ func (c *Client) ConfigSet(key, value string) error {
 	return mapErr(c.tc.ConfigSet(ctx(), c.configKey(key), value))
 }
 
-// KVList returns no entries. The tracker has no key-value store yet, and this
-// is decision A: an empty store is the contract's answer, and a rig's kv rows
-// are imported before its flip, with the tracker-kv-store doctor check
-// reporting tracker-routed rigs until then.
-func (c *Client) KVList() (map[string]string, error) { return map[string]string{}, nil }
+// KVList returns every key-value pair the tracker holds.
+func (c *Client) KVList() (map[string]string, error) {
+	pairs, err := c.tc.KVList(ctx())
+	return pairs, mapErr(err)
+}
 
-// KVGet reports every key as unset, the same answer KVList gives: the store
-// holds nothing, so no key is found.
+// KVGet returns key's value, or an error wrapping beads.ErrNotFound when the
+// tracker holds no such key.
 func (c *Client) KVGet(key string) (string, error) {
-	return "", fmt.Errorf("tracker: kv %s: %w", key, beads.ErrNotFound)
+	v, ok, err := c.tc.KVGet(ctx(), key)
+	if err != nil {
+		return "", mapErr(err)
+	}
+	if !ok {
+		return "", fmt.Errorf("tracker: kv %s: %w", key, beads.ErrNotFound)
+	}
+	return v, nil
+}
+
+// KVSet stores value at key, replacing what the tracker held there.
+func (c *Client) KVSet(key, value string) error {
+	return mapErr(c.tc.KVSet(ctx(), key, value))
 }
 
 // CountIssues counts the rig's durable issues, closed ones included and wisps

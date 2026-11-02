@@ -354,7 +354,6 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewOpenShellGatewayCheck())
 	d.Register(doctor.NewStaleAgentBeadsCheck())
 	d.Register(doctor.NewAgentBeadsShadowCheck())
-	d.Register(doctor.NewTrackerKVCheck())
 	d.Register(doctor.NewTrackerCheck())
 	d.Register(doctor.NewRigBeadsCheck())
 	d.Register(doctor.NewOrphanedRoleOverridesCheck())

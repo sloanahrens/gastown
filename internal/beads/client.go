@@ -161,6 +161,8 @@ type Admin interface {
 	KVList() (map[string]string, error)
 	// KVGet returns key's value, or an error wrapping ErrNotFound.
 	KVGet(key string) (string, error)
+	// KVSet stores value at key, replacing what the store held there.
+	KVSet(key, value string) error
 	CountIssues() (int, error)
 	StatsJSON() ([]byte, error)
 	MolWispList() ([]*Issue, error)

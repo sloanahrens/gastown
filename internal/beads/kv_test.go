@@ -272,3 +272,48 @@ func TestKVGetRefusesAFlagLikeKey(t *testing.T) {
 		}
 	}
 }
+
+// KVSet writes the pair through bd kv set, and a value bd would read as a flag
+// is passed after "--" so it stays the value (gt-m0fvn).
+func TestKVSetSendsTheKeyAndValue(t *testing.T) {
+	t.Parallel()
+	rec := newRecorder(nil)
+	b := newRecordedBeads(t.TempDir(), rec)
+	if err := b.KVSet("gt.project.note", "keep me"); err != nil {
+		t.Fatalf("KVSet: %v", err)
+	}
+	if err := b.KVSet("gt.project.note", "-x"); err != nil {
+		t.Fatalf("KVSet(dash value): %v", err)
+	}
+	want := []string{"kv set gt.project.note keep me", "kv set gt.project.note -- -x"}
+	if got := rec.argvs(); strings.Join(got, " | ") != strings.Join(want, " | ") {
+		t.Errorf("bd argv = %q, want %q", got, want)
+	}
+}
+
+// KVSet refuses a key bd would read as a flag before it reaches argv, as KVGet
+// does.
+func TestKVSetRefusesAFlagLikeKey(t *testing.T) {
+	t.Parallel()
+	rec := newRecorder(nil)
+	b := newRecordedBeads(t.TempDir(), rec)
+	for _, key := range []string{"", "--force", "-x"} {
+		if err := b.KVSet(key, "v"); err == nil {
+			t.Errorf("KVSet(%q) returned no error", key)
+		}
+		if got := rec.argvs(); len(got) != 0 {
+			t.Fatalf("KVSet(%q) issued bd argv %q, want none", key, got)
+		}
+	}
+}
+
+// A failed run is the caller's error, never a write reported as done.
+func TestKVSetReportsAFailedRun(t *testing.T) {
+	t.Parallel()
+	rec := newRecorder(func([]string) reply {
+		return reply{stderr: "boom", err: errors.New("exit status 1")}
+	})
+	if err := newRecordedBeads(t.TempDir(), rec).KVSet("gt.project.note", "v"); err == nil {
+		t.Error("KVSet of a failed run returned no error")
+	}
+}
