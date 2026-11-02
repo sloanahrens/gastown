@@ -1755,12 +1755,12 @@ func markReadyToLand(bd beads.Client, w land.Work) error {
 	return nil
 }
 
-// recordDoneEvent logs how the run ended, the exit type named in the event's
-// status. The dispatch clock ends a bead's run on this event (events.DispatchStart),
-// so an escalated exit — which submits nothing and so has no submission for the
-// host to repair a lost event from (gt-1m9gr) — must record that its run is
-// over; otherwise the next seat inherits the previous seat's clock and the
-// overrun guard stops it at once (gt-ntvac).
+// recordDoneEvent logs the end of the seat's turn, naming its exit type in the
+// payload's status. gt done writes it for every exit, including ESCALATED,
+// which submits nothing, and DEFERRED. The dispatch clock ends the bead's run
+// on any done event; for a sandboxed escalation, whose event dies with its
+// town (gt-1m9gr), the run end that reaches the host is the bead's ESCALATED
+// RUN END note (RecordEscalatedRunEnd, gt-ntvac).
 func (r *doneRun) recordDoneEvent(exitType string) {
 	logEvent := r.logEvent
 	if logEvent == nil {
@@ -1942,13 +1942,15 @@ type RunEndAppender interface {
 // (gt-1m9gr), and an escalation submits nothing for the host to repair a lost
 // event from, so the bead's own notes are the copy that reaches the host. The
 // overrun guard dates the next seat's clock from it; without it the next seat
-// is stopped at once on the escalated seat's clock (gt-ntvac).
-func RecordEscalatedRunEnd(bd RunEndAppender, issueID, seat string, at time.Time) {
+// is stopped at once on the escalated seat's clock (gt-ntvac). A failed write
+// warns on warn, naming that consequence: the seat must not be left silently
+// to be stopped on the old clock.
+func RecordEscalatedRunEnd(bd RunEndAppender, issueID, seat string, at time.Time, warn io.Writer) {
 	if bd == nil || issueID == "" {
 		return
 	}
 	if err := bd.AppendNotes(issueID, land.FormatEscalatedEndNote(seat, at)); err != nil {
-		style.PrintWarning("could not record the run end on %s: %v — the next seat may be stopped on this run's clock", issueID, err)
+		style.FprintWarning(warn, "could not record the run end on %s: %v — the next seat may be stopped on this run's clock", issueID, err)
 	}
 }
 
