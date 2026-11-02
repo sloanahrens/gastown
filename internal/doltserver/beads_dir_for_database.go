@@ -10,18 +10,15 @@ import (
 )
 
 // BeadsDirForDatabase returns the beads directory whose metadata.json names
-// dbName as its dolt_database: the town's .beads, a rig in mayor/rigs.json,
-// or a path in the town's routes.jsonl, in that order, then extraRoots in the
-// order given. Each extra root is searched as <root>/.beads and then as
-// <root> itself, so a database whose workspace lives outside the town (the
-// claude database belongs to ~/.claude) still resolves to the bd that writes
-// it (gt-33etw). It is the inverse of DatabaseForBeadsDir, for callers that
-// find a database on the server and must hand the write to bd, which selects
-// its database by beads dir.
+// dbName as its dolt_database.
 func BeadsDirForDatabase(townRoot, dbName string, extraRoots ...string) (string, error) {
 	if townRoot == "" || dbName == "" {
 		return "", fmt.Errorf("beads dir for database: town root and database name are required")
 	}
+	// The inverse of DatabaseForBeadsDir: the caller found a database on the
+	// server and must hand the write to bd, which selects its database by
+	// beads dir. The town's own workspaces are searched first; extraRoots
+	// follow, for a workspace outside the town such as ~/.claude (gt-33etw).
 	for _, dir := range append(candidateBeadsDirs(townRoot), extraRootBeadsDirs(extraRoots)...) {
 		if DatabaseForBeadsDir(dir) == dbName {
 			return dir, nil
