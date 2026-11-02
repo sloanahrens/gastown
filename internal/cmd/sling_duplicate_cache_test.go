@@ -207,18 +207,33 @@ func TestDuplicateDetailCacheTakesOverADeadDaemonsFile(t *testing.T) {
 	if len(entries["rig"]) != 8 {
 		t.Errorf("the taken-over file holds %d of the rig's beads, want 8", len(entries["rig"]))
 	}
+}
 
-	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	broken := loadDuplicateDetailCache(path, "daemon-2", 40)
-	if errs := broken.Errors(); len(errs) != 1 || !strings.Contains(errs[0], "does not parse") {
-		t.Errorf("a file that does not parse was reported as %v, want the parse failure", errs)
-	}
-	store := newCountingStore(listLikeBD{Client: db})
-	tickOverCache(t, store, broken, "rig")
-	if shown := len(shownIDs(store)); shown != 8 {
-		t.Errorf("a cache built on an unparseable file showed %d beads, want all 8", shown)
+// A file the cache cannot read holds nothing and is reported, not read as a
+// cold cache: the tick says the file was lost and shows the pool again
+// (gt-aaa5a).
+func TestDuplicateDetailCacheReportsAFileItCannotRead(t *testing.T) {
+	t.Parallel()
+	db := duplicateGuardFixture(t)
+	for _, tc := range []struct{ name, body, want string }{
+		{"a file that does not parse", "{not json", "does not parse"},
+		{"a file with no rigs", `{"owner":"daemon-1"}`, "holds no rigs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "cache.json")
+			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cache := loadDuplicateDetailCache(path, "daemon-1", 40)
+			if errs := cache.Errors(); len(errs) != 1 || !strings.Contains(errs[0], tc.want) {
+				t.Errorf("cache errors = %v, want one saying the file %s", errs, tc.want)
+			}
+			store := newCountingStore(listLikeBD{Client: db})
+			tickOverCache(t, store, cache, "rig")
+			if shown := len(shownIDs(store)); shown != 8 {
+				t.Errorf("a cache built on a file it could not read showed %d beads, want all 8", shown)
+			}
+		})
 	}
 }
 
