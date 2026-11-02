@@ -547,6 +547,14 @@ func TestReadyForStatsRefusesAnUnreadableDeferralOrMissingParent(t *testing.T) {
 			t.Error("readyForStats accepted a parent the store did not answer")
 		}
 	})
+	t.Run("an unreadable parent defer_until", func(t *testing.T) {
+		t.Parallel()
+		child := &beads.Issue{ID: "fx-1", Status: "open", Parent: "fx-parent"}
+		parent := &beads.Issue{ID: "fx-parent", Status: "open", DeferUntil: "not a time"}
+		if _, err := readyForStats(child, map[string]*beads.Issue{"fx-1": child, "fx-parent": parent}, nil, now); err == nil {
+			t.Error("readyForStats accepted a parent defer_until it could not read")
+		}
+	})
 	t.Run("a future deferral keeps the issue off ready", func(t *testing.T) {
 		t.Parallel()
 		is := &beads.Issue{ID: "fx-1", Status: "open", DeferUntil: now.Add(time.Hour).Format(time.RFC3339)}
@@ -594,6 +602,18 @@ func TestReadStatsReportsEachReadItCannotMake(t *testing.T) {
 				},
 			},
 			want: "links refused",
+		},
+		{
+			name: "a deferral it cannot read",
+			st: stubStatsStore{
+				list: func(beads.ListOptions) ([]*beads.Issue, error) {
+					return []*beads.Issue{{ID: "fx-1", Status: "open", DeferUntil: "not a time"}}, nil
+				},
+				showMany: func([]string) (map[string]*beads.Issue, error) {
+					return map[string]*beads.Issue{"fx-1": {ID: "fx-1", Status: "open", DeferUntil: "not a time"}}, nil
+				},
+			},
+			want: "is not a time",
 		},
 		{
 			name: "the wisp list fails",
