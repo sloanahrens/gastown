@@ -9,12 +9,9 @@ import (
 	"sync"
 	"testing"
 	"time"
-)
 
-// renewBound is how long TestRingRenewDoesNotRelockInsideItsUpdate waits for
-// Renew before it calls the lock re-entered. Renew takes no time on a free
-// lock, so the bound only ever fires on a deadlock.
-const renewBound = 10 * time.Second
+	"github.com/steveyegge/gastown/internal/config"
+)
 
 // wanedRecord is a record signed under testKey whose lease ended a day before now.
 func wanedRecord(t *testing.T) Record {
@@ -134,7 +131,7 @@ func TestRingRenewRefusesNoKey(t *testing.T) {
 func TestRingRenewRefusesAnUnregisteredSection(t *testing.T) {
 	t.Parallel()
 	unregistered := func(string) (string, bool) { return "", false }
-	if _, err := renew(t.TempDir(), unregistered, testKey, now, "slit"); err == nil {
+	if _, err := renew(t.TempDir(), unregistered, config.UpdateRawJSON, testKey, now, "slit"); err == nil {
 		t.Fatal("renew with no registered host = nil error, want a refusal")
 	}
 }
@@ -164,7 +161,8 @@ func TestRingRenewRefusesATownItsLoaderRefuses(t *testing.T) {
 }
 
 // TestRingRenewRefusesALeaseThatCannotExpire: the instant that makes the new
-// lease end at the zero time is refused by Sign, and nothing is stored.
+// lease end at the zero time is refused by Sign, reported as a signing
+// failure, and nothing is stored.
 func TestRingRenewRefusesALeaseThatCannotExpire(t *testing.T) {
 	t.Parallel()
 	at := time.Time{}.Add(-Lease)
@@ -177,8 +175,12 @@ func TestRingRenewRefusesALeaseThatCannotExpire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Renew(root, testKey, at, "slit"); !errors.Is(err, ErrNoExpiry) {
+	_, err = Renew(root, testKey, at, "slit")
+	if !errors.Is(err, ErrNoExpiry) {
 		t.Fatalf("Renew at an instant with a zero expiry = %v, want ErrNoExpiry", err)
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("signing the Ring")) {
+		t.Fatalf("Renew at an instant with a zero expiry = %v, want a signing label", err)
 	}
 	after, err := os.ReadFile(path)
 	if err != nil {
@@ -189,26 +191,73 @@ func TestRingRenewRefusesALeaseThatCannotExpire(t *testing.T) {
 	}
 }
 
+// TestRingRenewReportsATownThatDoesNotParseAsARead: a mayor/town.json that is
+// not JSON fails the update before its callback runs, so the failure is
+// reported as a read, and the file is left as it was.
+func TestRingRenewReportsATownThatDoesNotParseAsARead(t *testing.T) {
+	t.Parallel()
+	root := townWith(t, wanedRecord(t))
+	path := mustTownPath(t, root)
+	const broken = "{not json"
+	if err := os.WriteFile(path, []byte(broken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Renew(root, testKey, now, "slit")
+	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("reading the Ring")) {
+		t.Fatalf("Renew of a town that does not parse = %v, want a read refusal", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != broken {
+		t.Fatalf("a refused Renew changed mayor/town.json to %q, want it left as it was", after)
+	}
+}
+
+// TestRingRenewReportsAWriteFailureAsAWrite: a failure after the update's
+// callback asks for the write, such as a refused rename, is reported as a
+// write, never as a read of the Ring.
+func TestRingRenewReportsAWriteFailureAsAWrite(t *testing.T) {
+	t.Parallel()
+	root := townWith(t, wanedRecord(t))
+	refused := errors.New("the rename was refused")
+	update := func(_ string, mutate func(map[string]any) (bool, error)) error {
+		changed, err := mutate(map[string]any{})
+		if err != nil {
+			return err
+		}
+		if !changed {
+			t.Fatal("the callback did not ask for the write")
+		}
+		return refused
+	}
+	_, err := renew(root, config.SectionHost, update, testKey, now, "slit")
+	if !errors.Is(err, refused) {
+		t.Fatalf("renew with a refused write = %v, want the write's error", err)
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("writing the Ring")) {
+		t.Fatalf("renew with a refused write = %v, want a write label", err)
+	}
+	if bytes.Contains([]byte(err.Error()), []byte("reading the Ring")) {
+		t.Fatalf("renew with a refused write = %v, want no read label", err)
+	}
+}
+
 // TestRingRenewDoesNotRelockInsideItsUpdate: Renew is one locked update. The
 // file lock is not reentrant, so a Write from inside the update would wait on
-// the lock Renew holds and never return; the bounded wait turns that into a
-// failure.
+// the lock Renew holds and never return. The suite's own timeout is the hang
+// detector, so a re-lock turns this test red by hanging the package rather
+// than passing it, and no wall-clock bound is needed here.
 func TestRingRenewDoesNotRelockInsideItsUpdate(t *testing.T) {
 	t.Parallel()
 	root := townWith(t, wanedRecord(t))
-	done := make(chan error, 1)
-	go func() {
-		_, err := Renew(root, testKey, now, "slit")
-		done <- err
-	}()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Renew: %v", err)
-		}
-	//testpolicy:allow no-sleep — the failure under test is a hang (Renew re-taking the file lock it holds), which only a wall-clock bound can detect
-	case <-time.After(renewBound):
-		t.Fatalf("Renew did not return within %s: it re-took the file lock it holds", renewBound)
+	if _, err := Renew(root, testKey, now, "slit"); err != nil {
+		t.Fatalf("Renew: %v", err)
+	}
+	st := mustState(t, root)
+	if st.Kind != Valid || st.Record == nil {
+		t.Fatalf("state after Renew = %s, want valid", st)
 	}
 }
 
