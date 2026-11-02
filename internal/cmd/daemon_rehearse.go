@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -64,6 +65,25 @@ var rehearseBinaries = []string{"docker", "kubectl", "openshell", "git", "tmux",
 var rehearseEnvRef = regexp.MustCompile(`\$\{[A-Za-z_][A-Za-z0-9_]*\}`)
 
 var rehearseAddr = regexp.MustCompile(rehearseAddrPattern)
+
+// rehearseProbeAddr is the only shape the address probe dials: a host name or an
+// IPv4 address, a colon and a port. The probe runs as shell text inside the image,
+// so an address of any other shape (a town.json host with a space or a semicolon)
+// is refused before it reaches that text.
+var rehearseProbeAddr = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9.-]*):([0-9]{1,5})$`)
+
+// probeTarget splits addr into the host and port the probe dials. ok is false for
+// any address outside rehearseProbeAddr's shape, or with a port outside 1-65535.
+func probeTarget(addr string) (host, port string, ok bool) {
+	m := rehearseProbeAddr.FindStringSubmatch(addr)
+	if m == nil {
+		return "", "", false
+	}
+	if n, err := strconv.Atoi(m[2]); err != nil || n < 1 || n > 65535 {
+		return "", "", false
+	}
+	return m[1], m[2], true
+}
 
 // rehearseFlags are the values `gt daemon rehearse` parsed.
 type rehearseFlags struct {
@@ -181,7 +201,8 @@ under a key whose name does not look like one is copied as it stands into that
 mode-0700 directory. The entrypoint container has no network, so it
 cannot reach the live Dolt server, so its bd handshake fails for want of Dolt.
 That handshake line passes the heartbeat check; any other end prints the
-container log tail.`,
+container log tail. The Dolt address mayor/town.json names is probed from the
+image over the bridge network. The accepted paths are listed, not probed.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return run(cmd.Context(), cmd.OutOrStdout(), f)
@@ -637,7 +658,11 @@ func checkSettingAddresses(ctx context.Context, r *rehearsal) []string {
 			continue
 		}
 		seen[a] = true
-		host, port, _ := strings.Cut(a, ":")
+		host, port, ok := probeTarget(a)
+		if !ok {
+			fails = append(fails, a+": is not a host:port the probe can dial")
+			continue
+		}
 		probe := "exec 3<>/dev/tcp/" + host + "/" + port
 		err := r.inImage(ctx, "bridge", "timeout", "5", "bash", "-c", probe)
 		switch {

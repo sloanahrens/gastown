@@ -47,6 +47,7 @@ type rehearseHost struct {
 	files     map[string][]byte // what readFile serves: the live settings and the scratch state
 	failing   []string          // a command whose joined argv contains one of these fails
 	runs      [][]string
+	captures  [][]string // argv of every capture (docker logs), by the capture seam
 	writes    []string
 	mkdirs    []string
 	clock     time.Time
@@ -155,7 +156,8 @@ func (h *rehearseHost) deps(out *bytes.Buffer) rehearseDeps {
 			}
 			return p, nil
 		},
-		capture: func(_ context.Context, _ string, _ []string, _ []string) ([]byte, error) {
+		capture: func(_ context.Context, _ string, _ []string, argv []string) ([]byte, error) {
+			h.captures = append(h.captures, argv)
 			return []byte(h.log), h.logErr
 		},
 		newID: func() string { return "t1" },
@@ -903,6 +905,14 @@ func TestContainerRehearsalHeartbeatPassesAtTheBdHandshake(t *testing.T) {
 			var out bytes.Buffer
 			err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
 			got := out.String()
+			// The log is docker logs of this run's container, read only when no
+			// state.json heartbeat ends the wait first.
+			readLog := slices.ContainsFunc(h.captures, func(a []string) bool {
+				return slices.Contains(a, "logs") && slices.Contains(a, "gt-run-t1")
+			})
+			if readLog == tc.heartbeat {
+				t.Errorf("docker logs of the entrypoint read = %v, want %v", readLog, !tc.heartbeat)
+			}
 			if tc.pass {
 				if err != nil || !strings.Contains(got, "heartbeat        ok") {
 					t.Fatalf("err=%v\n%s", err, got)
@@ -926,6 +936,36 @@ func TestContainerRehearsalHeartbeatPassesAtTheBdHandshake(t *testing.T) {
 	}
 }
 
+// A town.json address the probe cannot dial (a host with shell text in it, a port
+// past the range) fails the addresses row without a probe of that address: the
+// host is never spliced into the text the image's shell runs.
+func TestContainerRehearsalRefusesAnUndialableTownJsonAddress(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		dolt      string
+		probeText string // no probe may carry this text
+	}{
+		"shell text in the host": {`{"container_host":"host.docker.internal;touch pwned","port":3307}`, "touch"},
+		"port past the range":    {`{"container_host":"host.docker.internal","port":70000}`, "70000"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newRehearseHost()
+			h.files[rehearseLive+"/mayor/town.json"] = []byte(`{"dolt":` + tc.dolt + `}`)
+			var out bytes.Buffer
+			err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
+			if err == nil || !strings.Contains(out.String(), "addresses        FAIL") || !strings.Contains(out.String(), "is not a host:port the probe can dial") {
+				t.Fatalf("err=%v\n%s", err, out.String())
+			}
+			for _, argv := range h.runs {
+				if j := strings.Join(argv, " "); strings.Contains(j, "/dev/tcp/") && strings.Contains(j, tc.probeText) {
+					t.Errorf("the refused address reached a probe: %v", argv)
+				}
+			}
+		})
+	}
+}
+
 // The Dolt address the staged town.json names (container_host, else host, with
 // the port) is probed from the image over the bridge network, with the other
 // host.docker.internal addresses. A town.json that cannot be read or parsed, or
@@ -940,14 +980,18 @@ func TestContainerRehearsalProbesTheTownJsonDoltAddress(t *testing.T) {
 		if err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out)); err != nil {
 			t.Fatalf("err=%v\n%s", err, out.String())
 		}
-		var probed bool
+		var bridged, elsewhere int
 		for _, argv := range h.runs {
 			if j := strings.Join(argv, " "); strings.Contains(j, probe) {
-				probed = slices.Contains(argv, "bridge")
+				if slices.Contains(argv, "bridge") {
+					bridged++
+				} else {
+					elsewhere++
+				}
 			}
 		}
-		if !probed {
-			t.Errorf("the town.json address was not probed over the bridge network; runs %v", h.runs)
+		if bridged != 1 || elsewhere != 0 {
+			t.Errorf("the town.json address probed over the bridge %d time(s) and elsewhere %d time(s), want 1 and 0; runs %v", bridged, elsewhere, h.runs)
 		}
 	})
 	t.Run("a refused connect fails the row", func(t *testing.T) {
@@ -999,6 +1043,8 @@ func TestContainerRehearsalListsAcceptedPaths(t *testing.T) {
 		t.Parallel()
 		h := newRehearseHost()
 		h.files[rehearseLive+"/settings/config.json"] = []byte(`{"paths":` + accepted + `,"daemon":{"container_off":` + offJSON() + `}}`)
+		// A probe of any of the three would fail, so a probed accepted path fails the row.
+		h.failing = []string{"-e /Users/"}
 		var out bytes.Buffer
 		err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
 		got := out.String()
@@ -1016,7 +1062,7 @@ func TestContainerRehearsalListsAcceptedPaths(t *testing.T) {
 			}
 		}
 		for _, run := range h.runs {
-			if j := strings.Join(run, " "); strings.Contains(j, "test -e /Users/") {
+			if n := len(run); n >= 2 && run[n-2] == "-e" && strings.HasPrefix(run[n-1], "/Users/") {
 				t.Errorf("an accepted path was probed: %v", run)
 			}
 		}
