@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 )
@@ -55,6 +56,11 @@ type Env struct {
 	// Run execs bd.real with the given path and argv; a child's exit status
 	// rides the returned error as ExitCode.
 	Run func(path string, argv []string) error
+	// Now reads the wall clock a handler dates its decision with; nil is the
+	// process's clock (time.Now). A test injects a fixed instant, so a handler
+	// that tells a future deferral from a past one is not answering differently
+	// on the day it runs.
+	Now func() time.Time
 	// Handlers is the tracker verb registry.
 	Handlers map[string]Handler
 	// Stdout takes a tracker handler's answer, in bd's shape; a command a

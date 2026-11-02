@@ -2,6 +2,7 @@ package bdshim
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/tracker/api"
 )
 
 // The second write handlers' tests answer each verb through Main against the
@@ -147,8 +149,8 @@ func TestDeleteRefusesAnIDTheStoreDoesNotHold(t *testing.T) {
 
 // TestDeleteMarksTheReferencesOfTheLinkedIssues: bd marks the text references
 // to a deleted id in the issues a link joins to it, and the answer counts the
-// issues it changed. The delete runs after the marking, so an issue the caller
-// never reached is not deleted with its references untouched.
+// issues it changed. The delete is the all-or-nothing write and runs before any
+// mark, so the mark is never written for an id that is still there.
 func TestDeleteMarksTheReferencesOfTheLinkedIssues(t *testing.T) {
 	t.Parallel()
 	updates := map[string]beads.UpdateOptions{}
@@ -162,19 +164,20 @@ func TestDeleteMarksTheReferencesOfTheLinkedIssues(t *testing.T) {
 		},
 		showMultiple: func(ids []string) (map[string]*beads.Issue, error) {
 			return map[string]*beads.Issue{
-				"fx-2":      {ID: "fx-2", Description: "The bead fx-1 waits on."},
-				"fx-parent": {ID: "fx-parent", Description: "An issue about fx-10, not fx-1."},
+				"fx-2":      {ID: "fx-2", Description: "The bead fx-1 waits on, and so do fx-1.2, fx-1-x and afx-1."},
+				"fx-parent": {ID: "fx-parent", Description: "An issue about fx-10, and fx-1, not the same."},
 			}, nil
 		},
 		update: func(id string, opts beads.UpdateOptions) error {
 			updates[id] = opts
-			order = append(order, id)
+			order = append(order, "mark:"+id)
 			return nil
 		},
 		delete: func(ids ...string) error {
 			if len(ids) != 1 || ids[0] != "fx-1" {
 				t.Errorf("deleted %v, want only fx-1", ids)
 			}
+			order = append(order, "delete")
 			return nil
 		},
 	}
@@ -183,23 +186,23 @@ func TestDeleteMarksTheReferencesOfTheLinkedIssues(t *testing.T) {
 	if code := deleteIssues(env, st, []string{"fx-1"}); code != 0 {
 		t.Fatalf("delete: exit code is %d, want 0 (stderr %q)", code, stderr.String())
 	}
-	if len(order) != 2 {
-		t.Fatalf("updated %v, want fx-2 and fx-parent", order)
+	if len(order) != 3 || order[0] != "delete" {
+		t.Fatalf("writes ran %v, want the delete first", order)
 	}
 	got := ""
 	if opts := updates["fx-2"]; opts.Description != nil {
 		got = *opts.Description
 	}
-	if want := "The bead [deleted:fx-1] waits on."; got != want {
+	// fx-1.2, fx-1-x and afx-1 are different ids and keep their text, so only
+	// the reference the issue really holds is marked.
+	if want := "The bead [deleted:fx-1] waits on, and so do fx-1.2, fx-1-x and afx-1."; got != want {
 		t.Errorf("fx-2 description = %q, want %q", got, want)
 	}
-	// fx-10 is a different id and keeps its text, so the parent issue is only
-	// marked for the reference it really holds.
 	got = ""
 	if opts := updates["fx-parent"]; opts.Description != nil {
 		got = *opts.Description
 	}
-	if want := "An issue about fx-10, not [deleted:fx-1]."; got != want {
+	if want := "An issue about fx-10, and [deleted:fx-1], not the same."; got != want {
 		t.Errorf("fx-parent description = %q, want %q", got, want)
 	}
 	want := "✓ Deleted fx-1\n  Removed 2 dependency link(s)\n  Updated text references in 2 issue(s)\n"
@@ -233,10 +236,11 @@ func TestDeleteSaysWhenNoLinkedIssueNamesTheBatch(t *testing.T) {
 	}
 }
 
-// TestDeleteRefusesAStoreThatCannotMarkTheReferences: a delete whose marking
-// failed must not go on to remove the issue, or the caller reads a delete of
-// references the store never marked.
-func TestDeleteRefusesAStoreThatCannotMarkTheReferences(t *testing.T) {
+// TestDeleteReportsAStoreThatCannotMarkTheReferences: the batch delete is the
+// all-or-nothing write and it has run by the time a mark is written, so a store
+// that then refuses a mark is reported as a failure (exit 1), with the delete
+// the shim did carry out printed and no count for marks it did not make.
+func TestDeleteReportsAStoreThatCannotMarkTheReferences(t *testing.T) {
 	t.Parallel()
 	deleted := false
 	st := stubDeleteStore{
@@ -254,14 +258,16 @@ func TestDeleteRefusesAStoreThatCannotMarkTheReferences(t *testing.T) {
 	if code := deleteIssues(env, st, []string{"fx-1"}); code != bdFailureExit {
 		t.Errorf("exit code is %d, want %d", code, bdFailureExit)
 	}
-	if deleted {
-		t.Error("the delete ran although the references could not be marked")
+	if !deleted {
+		t.Error("the delete did not run before the marking, so the batch was held for a mark")
 	}
-	if stdout.Len() != 0 {
-		t.Errorf("stdout = %q, want nothing for a refused delete", stdout.String())
+	// The delete happened, so bd's facts about it are printed; the mark count
+	// is not, because the marks were not written.
+	if want := "✓ Deleted fx-1\n  Removed 1 dependency link(s)\n"; stdout.String() != want {
+		t.Errorf("stdout = %q, want %q", stdout.String(), want)
 	}
-	if !strings.Contains(stderr.String(), "fx-1") {
-		t.Errorf("stderr = %q, want the shim's message", stderr.String())
+	if !strings.Contains(stderr.String(), "the store is down") {
+		t.Errorf("stderr = %q, want the store's refusal", stderr.String())
 	}
 }
 
@@ -297,11 +303,20 @@ func TestDeleteRefusesAStoreThatCannotReadTheLinkedIssues(t *testing.T) {
 }
 
 // TestDeleteRefusesAStoreThatCannotDelete: a delete the store refuses is a
-// failure, and nothing of bd's answer is printed for it.
+// failure, and nothing of bd's answer is printed for it. The linked issue names
+// the batch, so the test also pins that a refused delete writes no mark: the
+// text is not rewritten to say an id is deleted while the id is still there.
 func TestDeleteRefusesAStoreThatCannotDelete(t *testing.T) {
 	t.Parallel()
+	marked := false
 	st := stubDeleteStore{
-		show: func(id string) (*beads.Issue, error) { return &beads.Issue{ID: id}, nil },
+		show: func(id string) (*beads.Issue, error) {
+			return &beads.Issue{ID: id, Dependencies: []beads.IssueDep{{ID: "fx-2"}}}, nil
+		},
+		showMultiple: func([]string) (map[string]*beads.Issue, error) {
+			return map[string]*beads.Issue{"fx-2": {ID: "fx-2", Description: "fx-1"}}, nil
+		},
+		update: func(string, beads.UpdateOptions) error { marked = true; return nil },
 		delete: func(...string) error {
 			return errors.New("the store is down")
 		},
@@ -310,6 +325,9 @@ func TestDeleteRefusesAStoreThatCannotDelete(t *testing.T) {
 	env := Env{Stdout: stdout, Stderr: stderr}
 	if code := deleteIssues(env, st, []string{"fx-1"}); code != bdFailureExit {
 		t.Errorf("exit code is %d, want %d", code, bdFailureExit)
+	}
+	if marked {
+		t.Error("a refused delete marked a surviving issue's text")
 	}
 	if stdout.Len() != 0 {
 		t.Errorf("stdout = %q, want nothing for a refused delete", stdout.String())
@@ -450,6 +468,31 @@ func TestUndeferHandlesADeferral(t *testing.T) {
 				t.Errorf("stdout = %q, want an answer only when reopened", stdout.String())
 			}
 		})
+	}
+}
+
+// TestUndeferReadsTheClockFromTheEnvironment: the snooze check compares a
+// bead's deferral to the clock the handler was handed, so a test fixes which
+// side of the deferral it runs on instead of depending on the day it runs.
+func TestUndeferReadsTheClockFromTheEnvironment(t *testing.T) {
+	t.Parallel()
+	fixture, _ := readFixture(t)
+	town := newTown(t, routeFixture)
+	env, stdout, stderr, st := fixtureEnvWithStore(t, town, fixture, []string{"undefer", "fx-1"})
+	status := deferredStatus
+	if err := st.UpdateIssue(context.Background(), "fx-1", api.UpdatePatch{Status: &status}, api.Guard{}); err != nil {
+		t.Fatalf("deferring fx-1 in the fixture store: %v", err)
+	}
+	read := false
+	env.Now = func() time.Time { read = true; return soon() }
+	if code := Main(env); code != 0 {
+		t.Fatalf("undefer: exit code is %d, want 0 (stderr %q)", code, stderr.String())
+	}
+	if !read {
+		t.Error("the handler did not read the clock it was handed")
+	}
+	if want := "* Undeferred fx-1 (now open)\n"; stdout.String() != want {
+		t.Errorf("stdout = %q, want %q", stdout.String(), want)
 	}
 }
 

@@ -21,6 +21,7 @@ func init() {
 	register(Case{Name: "a reassignment needs the holder on every status, and only an admin token takes a held issue", Run: updateReassignHolder})
 	register(Case{Name: "update persistent promotes a wisp", Run: updatePersistent})
 	register(Case{Name: "a status write alone obeys the guards, the close fences and the reopen clear", Fake: true, Run: updateStatusOnly})
+	register(Case{Name: "update writes the title, description, acceptance and appended notes the shim's delete and defer send", Fake: true, Run: updateTextFields})
 }
 
 // updateStatusOnly is the status write the bd shim's update, close and reopen
@@ -64,6 +65,36 @@ func updateStatusOnly(t *testing.T, s store.Store) {
 	}
 	if err := s.CloseIssues(ctx(), []string{parent.ID}, "r", true); err != nil {
 		t.Errorf("forcing the parent closed = %v, want nil", err)
+	}
+}
+
+// updateTextFields is the text write the bd shim's delete and defer handlers
+// make (gt-p85pw.97): delete rewrites references in title, description and
+// acceptance, and defer appends its reason to the notes. The fake models these
+// fields for those handlers' unit tests, so the case is flagged Fake.
+func updateTextFields(t *testing.T, s store.Store) {
+	is := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "old", Description: "first draft", Acceptance: "- [ ] one"})
+	mustUpdate(t, s, is.ID, api.UpdatePatch{
+		Title: str("new"), Description: str("second draft"), Acceptance: str("- [x] one"), AppendNotes: "note one",
+	}, api.Guard{})
+	mustUpdate(t, s, is.ID, api.UpdatePatch{AppendNotes: "note two"}, api.Guard{})
+	got := mustGet(t, s, is.ID)
+	if got.Title != "new" || got.Description != "second draft" || got.AcceptanceCriteria != "- [x] one" {
+		t.Errorf("after the text writes: %+v", got)
+	}
+	if got.Notes != "note one\nnote two" {
+		t.Errorf("Notes = %q, want the two appended notes on separate lines", got.Notes)
+	}
+	before := got.UpdatedAt
+	mustUpdate(t, s, is.ID, api.UpdatePatch{Title: str("new")}, api.Guard{})
+	if after := mustGet(t, s, is.ID).UpdatedAt; !after.Equal(before) {
+		t.Errorf("a patch that changes nothing moved UpdatedAt from %v to %v", before, after)
+	}
+	if err := s.UpdateIssue(ctx(), is.ID, api.UpdatePatch{Title: str("   ")}, api.Guard{}); !errors.Is(err, api.ErrInvalid) {
+		t.Errorf("a whitespace title = %v, want api.ErrInvalid", err)
+	}
+	if got := mustGet(t, s, is.ID); got.Title != "new" {
+		t.Errorf("a refused title write left title %q, want new", got.Title)
 	}
 }
 

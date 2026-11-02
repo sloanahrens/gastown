@@ -15,6 +15,7 @@ func init() {
 	register(Case{Name: "closing a parent together with its children, or a blocked issue with its blocker, works in one call", Run: closeSetTogether})
 	register(Case{Name: "update to closed obeys the same fences and reopen clears the close", Run: closeViaUpdateAndReopen})
 	register(Case{Name: "delete removes issues, orphans their children, and is all-or-nothing", Run: deleteBasics})
+	register(Case{Name: "delete removes the links at both ends, keeps the children, and writes nothing for a missing id", Fake: true, Run: deleteLinksBothEnds})
 }
 
 func closeBasics(t *testing.T, s store.Store) {
@@ -121,6 +122,53 @@ func deleteBasics(t *testing.T, s store.Store) {
 		t.Error("an unrelated issue was deleted")
 	}
 	sameSet(t, "list after delete", ids(mustList(t, s, api.ListFilter{})), kid.ID, other.ID)
+}
+
+// deleteLinksBothEnds is the delete the bd shim's delete handler makes
+// (gt-p85pw.97): the fake models this write for that handler's unit tests, so
+// the case is flagged Fake and holds both stores to it. deleteBasics is not
+// flagged because the fake does not derive a child's rig from its parent; this
+// case names the rig on every create.
+func deleteLinksBothEnds(t *testing.T, s store.Store) {
+	parent := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "parent"})
+	kid := mustCreate(t, s, api.CreateParams{Rig: "gt", Parent: parent.ID, Title: "kid"})
+	other := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "other"})
+	mustDep(t, s, other.ID, parent.ID, "blocks") // other depends on parent
+
+	// A batch naming an id the store does not hold removes nothing, links included.
+	if err := s.DeleteIssues(ctx(), []string{other.ID, "gt-missing"}); !errors.Is(err, api.ErrNotFound) {
+		t.Fatalf("deleting with a missing id = %v, want api.ErrNotFound", err)
+	}
+	if _, ok := mustGetMaybe(t, s, other.ID); !ok {
+		t.Fatal("a failed delete batch removed an issue")
+	}
+	if deps := mustGet(t, s, other.ID).Dependencies; len(deps) != 1 || deps[0].ID != parent.ID {
+		t.Errorf("a failed delete batch changed other's links: %+v", deps)
+	}
+
+	// Deleting a target removes the link that pointed at it and keeps the
+	// child, without a parent.
+	if err := s.DeleteIssues(ctx(), []string{parent.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := mustGetMaybe(t, s, parent.ID); ok {
+		t.Error("the parent still exists after delete")
+	}
+	if k, ok := mustGetMaybe(t, s, kid.ID); !ok || k.Parent != "" {
+		t.Errorf("child after its parent was deleted = %+v (exists %v), want it kept with no parent", k, ok)
+	}
+	if deps := mustGet(t, s, other.ID).Dependencies; len(deps) != 0 {
+		t.Errorf("other's dependencies after its target was deleted = %+v, want none", deps)
+	}
+
+	// Deleting a dependent removes the link from the target's side too.
+	mustDep(t, s, other.ID, kid.ID, "blocks")
+	if err := s.DeleteIssues(ctx(), []string{other.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if deps := mustGet(t, s, kid.ID).Dependents; len(deps) != 0 {
+		t.Errorf("kid's dependents after the dependent was deleted = %+v, want none", deps)
+	}
 }
 
 func mustGetMaybe(t *testing.T, s store.Store, id string) (api.Issue, bool) {
