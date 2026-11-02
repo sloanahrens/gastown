@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -96,12 +97,10 @@ var differentialRows = []differentialRow{
 // (the test below fails on it until then). A golden row
 // whose verb is here is skipped. The list only shrinks: a test fails on an
 // entry whose verb has gained a handler, and on a golden row whose verb is
-// neither handled nor listed.
-var knownUnhandledVerbs = map[string]bool{
-	"stats":  true,
-	"config": true,
-	"events": true,
-}
+// neither handled nor listed. It is empty: every verb a golden row names now
+// has a handler (gt-p85pw.99 answered the last three, config, events and
+// stats).
+var knownUnhandledVerbs = map[string]bool{}
 
 // seatDivergence is the answer the shim gives where bd's differs by design.
 type seatDivergence struct {
@@ -310,7 +309,7 @@ func fixtureEnvWithStore(t *testing.T, town string, fixture []fixtureBead, argv 
 	}
 	//testpolicy:allow no-network — a handler builds its tracker client from the environment (backend.FromEnv), so there is no HTTP seam to script: the row is only answered if the handler takes its own request path to this server, which is in-process over the in-memory store on loopback and never leaves the test
 	ts := httptest.NewServer(server.New(server.Config{
-		Store: st, Auth: st, Health: fixtureHealth{}, SchemaLevel: api.SchemaLevel,
+		Store: &fixtureStore{Fake: st, config: map[string]string{}}, Auth: st, Health: fixtureHealth{}, SchemaLevel: api.SchemaLevel,
 	}).Handler())
 	t.Cleanup(ts.Close)
 
@@ -326,6 +325,11 @@ func fixtureEnvWithStore(t *testing.T, town string, fixture []fixtureBead, argv 
 			// it. The replay carries the identity the recorder pinned, so a
 			// create row is compared with bd's answer to the same environment.
 			return fixtureAuthorEmail
+		case "BD_ACTOR":
+			// The recorder pinned the actor too (container.go, pinnedIdentity),
+			// and the config-list golden carries it as the environment override
+			// bd reports, so the replay names the same actor.
+			return fixtureActor
 		}
 		return ""
 	}
@@ -370,3 +374,37 @@ type fixtureHealth struct{}
 
 func (fixtureHealth) Ping(context.Context) error       { return nil }
 func (fixtureHealth) WriteProbe(context.Context) error { return nil }
+
+// fixtureStore is the fixture's in-process tracker store: storetest.Fake, plus
+// the two parts of the store the bd goldens read that the fake does not model.
+// The configuration starts empty and the events feed stays empty, as the
+// recorder's imported database was: bd init seeds the configuration defaults
+// (the shim carries them) and the import wrote no journal records, which is
+// why the config-list and events-tail goldens read as they do.
+type fixtureStore struct {
+	*storetest.Fake
+	mu     sync.Mutex
+	config map[string]string
+}
+
+// ConfigGet returns the key's value; ok is false when the fixture has none.
+func (s *fixtureStore) ConfigGet(_ context.Context, key string) (string, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.config[key]
+	return v, ok, nil
+}
+
+// ConfigSet stores the key's value, as the tracker's configuration table does.
+func (s *fixtureStore) ConfigSet(_ context.Context, key, value string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.config[key] = value
+	return nil
+}
+
+// EventsAfter answers the empty journal the fixture's import left: the fixture
+// seeds beads through the fake, which records no journal events.
+func (*fixtureStore) EventsAfter(context.Context, int64, int) (api.EventsPage, error) {
+	return api.EventsPage{Events: []api.Event{}}, nil
+}
