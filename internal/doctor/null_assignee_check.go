@@ -52,6 +52,12 @@ func NewNullAssigneeCheck() *NullAssigneeCheck {
 // database list: database names are bead prefixes (gt, be), not rig
 // directories, and the server also hosts trackers that are no rig, such as
 // the operator's own, whose in_progress epics carry no assignee by design.
+//
+// A rig the town route table puts on the tracker is not read: the tracker's
+// assignee column is NOT NULL with an empty-string default
+// (tracker/store/schema/0001_core.sql), so no row can carry the NULL this
+// check looks for, and the backend refuses the sql passthrough. The result
+// names each skipped rig instead of reporting OK having read nothing.
 func (c *NullAssigneeCheck) Run(ctx *CheckContext) *CheckResult {
 	c.affected = nil
 
@@ -70,11 +76,30 @@ func (c *NullAssigneeCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 	sort.Strings(rigs)
 
+	trackerRigs, err := trackerRigNames(ctx.TownRoot)
+	if err != nil {
+		// The route table decides which rigs the tracker holds. An unreadable
+		// table must not read as "no tracker rigs": their sql read fails, the
+		// error is dropped, and the check would report OK having read nothing.
+		return &CheckResult{
+			Name:     c.Name(),
+			Status:   StatusWarning,
+			Message:  "cannot read the town routes, so tracker-routed rigs are not skipped",
+			Details:  []string{err.Error()},
+			Category: c.Category(),
+		}
+	}
+
+	var skipped []string
 	for _, rig := range rigs {
+		if trackerRigs[rig] {
+			skipped = append(skipped, rig)
+			continue
+		}
 		rigDir := filepath.Join(ctx.TownRoot, rig)
 		rows, err := queryNullAssigneeBeads(ctx, rigDir)
 		if err != nil {
-			// Non-fatal: Dolt might not be running or rig may not be bd-managed.
+			// Non-fatal: Dolt might not be running.
 			continue
 		}
 		for _, row := range rows {
@@ -84,19 +109,26 @@ func (c *NullAssigneeCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	if len(c.affected) == 0 {
-		return &CheckResult{
+		res := &CheckResult{
 			Name:     c.Name(),
 			Status:   StatusOK,
 			Message:  "No in_progress beads with NULL assignee found",
 			Category: c.Category(),
 		}
+		if len(skipped) > 0 {
+			res.Message = fmt.Sprintf(
+				"No in_progress beads with NULL assignee found (skipped %d tracker rig(s))", len(skipped))
+			res.Details = skippedTrackerDetails(skipped)
+		}
+		return res
 	}
 
-	details := make([]string, 0, len(c.affected))
+	details := make([]string, 0, len(c.affected)+len(skipped))
 	for _, row := range c.affected {
 		details = append(details, fmt.Sprintf("[%s] %s — %s (updated: %s)",
 			row.RigDB, row.ID, shortenTitle(row.Title, 60), row.UpdatedAt))
 	}
+	details = append(details, skippedTrackerDetails(skipped)...)
 
 	return &CheckResult{
 		Name:   c.Name(),
@@ -159,6 +191,35 @@ func queryNullAssigneeBeads(ctx *CheckContext, rigDir string) ([]nullAssigneeRow
 		})
 	}
 	return rows, nil
+}
+
+// trackerRigNames returns the registered rigs the town route table puts on the
+// tracker. A route path names its rig by the first path component, as
+// rig_beads_check reads it; the town's own route (".") is no rig.
+func trackerRigNames(townRoot string) (map[string]bool, error) {
+	paths, err := trackerRoutedRigs(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	names := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		name := strings.SplitN(filepath.ToSlash(filepath.Clean(p)), "/", 2)[0]
+		if name == "" || name == "." {
+			continue
+		}
+		names[name] = true
+	}
+	return names, nil
+}
+
+// skippedTrackerDetails is the one detail line each skipped tracker rig
+// contributes, so the run says what it did not read.
+func skippedTrackerDetails(rigs []string) []string {
+	details := make([]string, 0, len(rigs))
+	for _, rig := range rigs {
+		details = append(details, fmt.Sprintf("skipped tracker rig %s: the tracker stores no NULL assignee", rig))
+	}
+	return details
 }
 
 // shortenTitle truncates a title with ellipsis if it exceeds n runes.
