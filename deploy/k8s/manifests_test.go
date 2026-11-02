@@ -54,7 +54,29 @@ func at(t *testing.T, m map[string]any, path ...string) any {
 	return cur
 }
 
-func TestPriorityClassesOrderControlPlaneAboveSandboxAboveCI(t *testing.T) {
+// The landing gate outranks a tier sweep, which is what puts a gate ahead of a
+// sweep in the queue when the cluster is short of room (gt-xaokd).
+func TestPriorityClassesDefineTheGateClass(t *testing.T) {
+	t.Parallel()
+	var found bool
+	for _, d := range decodeDocs(t, "priority-classes.yaml") {
+		if at(t, d, "metadata", "name") != "gt-ci-gate" {
+			continue
+		}
+		found = true
+		if got := d["value"]; got != 200 {
+			t.Errorf("gt-ci-gate value = %v, want 200", got)
+		}
+		if got, ok := d["globalDefault"]; !ok || got != false {
+			t.Errorf("gt-ci-gate globalDefault = %v, want false", got)
+		}
+	}
+	if !found {
+		t.Fatal("priority-classes.yaml has no gt-ci-gate PriorityClass")
+	}
+}
+
+func TestPriorityClassOrderSweepGateSandboxControlPlane(t *testing.T) {
 	t.Parallel()
 	docs := decodeDocs(t, "priority-classes.yaml")
 	got := map[string]int{}
@@ -79,7 +101,7 @@ func TestPriorityClassesOrderControlPlaneAboveSandboxAboveCI(t *testing.T) {
 		}
 		got[name] = value
 	}
-	want := map[string]int{"gt-control-plane": 1000000, "gt-sandbox": 1000, "gt-ci": 100}
+	want := map[string]int{"gt-control-plane": 1000000, "gt-sandbox": 1000, "gt-ci-gate": 200, "gt-ci": 100}
 	if len(got) != len(want) {
 		t.Fatalf("classes = %v, want exactly %v", got, want)
 	}
@@ -88,7 +110,7 @@ func TestPriorityClassesOrderControlPlaneAboveSandboxAboveCI(t *testing.T) {
 			t.Errorf("%s value = %d, want %d", name, got[name], v)
 		}
 	}
-	if !(got["gt-control-plane"] > got["gt-sandbox"] && got["gt-sandbox"] > got["gt-ci"]) {
+	if !(got["gt-control-plane"] > got["gt-sandbox"] && got["gt-sandbox"] > got["gt-ci-gate"] && got["gt-ci-gate"] > got["gt-ci"]) {
 		t.Errorf("eviction order broken: %v", got)
 	}
 }
