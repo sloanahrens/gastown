@@ -28,3 +28,24 @@ func TestDaemonClientToolPinsAreDistinctAndWellFormed(t *testing.T) {
 		t.Errorf("%d distinct pins, want 3 (openshell, docker, kubectl)", len(seen))
 	}
 }
+
+// Distinctness cannot see a swap: the table before gt-qmd68 was distinct too,
+// with docker and kubectl exchanged. Each named pin is therefore checked
+// against the digest its tool was verified with. A tool missing from the table
+// reads as "" and fails here.
+func TestDaemonClientToolPinsMatchTheirTool(t *testing.T) {
+	t.Parallel()
+	want := map[string]string{
+		"docker":  "76a624e4a8e5da654d1150e808175125efb5a6f1b6aa1cbd9caee18f51047a50",
+		"kubectl": "922df28df248cc00a9e025f947704f1d1482de64ece54cfe57e61f19eaf1eef3",
+	}
+	got := map[string]string{}
+	for _, p := range templates.DaemonClientTools {
+		got[p.Name] = p.SHA256
+	}
+	for name, sha := range want {
+		if got[name] != sha {
+			t.Errorf("%s pin = %q, want %q", name, got[name], sha)
+		}
+	}
+}

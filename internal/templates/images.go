@@ -112,6 +112,9 @@ var DaemonClientTools = []ClientToolPin{
 		SHA256: "30c949b4ac07a9c8245c1248eb82e4eb241615134fcabf3c9bf30dec7d00addf",
 		Member: "openshell",
 	},
+	// Docker publishes no checksum file beside this tgz, so the docker sha256 is
+	// our own hash of the download, not a publisher digest (trust on first use;
+	// accepted risk, gt-sx34i).
 	{
 		Name:   "docker",
 		URL:    "https://download.docker.com/linux/static/stable/aarch64/docker-29.8.2.tgz",
