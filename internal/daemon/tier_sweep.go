@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -13,7 +14,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/gofrs/flock"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -146,6 +150,24 @@ const (
 	// collide with (the run id is in every name) but the operator has to
 	// remove by hand; it never fails the stage, whose verdict is already in.
 	tierSweepRunnerTeardownBudget = 5 * time.Minute
+
+	// tierSweepRunnerImageBudget bounds putting the runner image where the run
+	// can reach it: the look in the sweep engine, the wait for another sweep's
+	// load to finish, and the save|load of the image when it is missing. An
+	// image that cannot be confirmed or loaded within it is RED, never a run
+	// against an image nobody confirmed (gt-c3sue).
+	tierSweepRunnerImageBudget = 10 * time.Minute
+
+	// tierSweepPolecatImage is the repository make polecat-image tags
+	// (POLE_IMAGE), so a run naming anything else starts an image no build on
+	// this town wrote. TestTierSweepRunnerImageMatchesMakefile holds it to the
+	// Makefile's default (gt-c3sue).
+	tierSweepPolecatImage = "gastown-polecat"
+
+	// tierSweepFullCommitLen is the length of a full git commit hash. A
+	// revision that long is the module's vcs.revision, which a build outside
+	// make records, and make never tags an image with it (gt-c3sue).
+	tierSweepFullCommitLen = 40
 )
 
 // The tier verdicts, the words the script's summary line uses.
@@ -582,6 +604,10 @@ type tierSweepSeams struct {
 	// between looks. Zero is tierSweepRunnerPollInterval; a test sets it short
 	// so a retried read does not wait out real seconds.
 	pollInterval time.Duration
+	// imageBudget bounds confirming the runner image in the sweep engine and
+	// loading it there. Zero is tierSweepRunnerImageBudget; a test sets it short
+	// so a held load lock's wait ends without sitting out the real budget.
+	imageBudget time.Duration
 	// treeHas reports whether the checked-out tree at dir ships rel, a file or a
 	// directory, and an error when the tree cannot be read. Each stage's command
 	// is picked from it before the stage runs.
@@ -1663,11 +1689,15 @@ func (d *Daemon) tierSweepRunnerSpec(st tierSweepStage) (sweeprunner.Spec, bool,
 	if cfg == nil || !(st.slot || (st.shell && cfg.Shell)) {
 		return sweeprunner.Spec{}, false, nil
 	}
+	image, err := d.tierSweepRunnerImage(cfg)
+	if err != nil {
+		return sweeprunner.Spec{}, false, err
+	}
 	runID := tierSweepRunnerRunID(st.rig, st.tested, st.tiers)
 	spec := sweeprunner.Spec{
 		Rig:      st.rig,
 		SHA:      st.tested,
-		Image:    cfg.Image,
+		Image:    image,
 		CPUs:     cfg.CPUs,
 		MemoryGB: cfg.Memory,
 		Tiers:    append([]string(nil), st.tiers...),
@@ -1691,6 +1721,203 @@ func tierSweepRunnerConfig(patrols *DaemonPatrolConfig) *config.TierSweepRunnerC
 		return nil
 	}
 	return patrols.Patrols.TierSweep.Runner
+}
+
+// tierSweepRunnerImage is the image a run's containers use: the pin the config
+// names, or, when it names none or asks for the installed build, the polecat
+// image make polecat-image publishes at the installed gt's build revision. An
+// installed build the binary records no usable revision for cannot name an
+// image, and an unnameable image is an error: guessing one would run a tree no
+// build produced (gt-c3sue).
+func (d *Daemon) tierSweepRunnerImage(cfg *config.TierSweepRunnerConfig) (string, error) {
+	if !tierSweepRunnerImageFollowsInstalled(cfg.Image) {
+		return cfg.Image, nil
+	}
+	rev := strings.TrimSpace(d.buildCommit())
+	switch {
+	case rev == "" || rev == "unknown":
+		return "", errors.New("runner.image follows the installed build, but the installed gt records no build commit; rebuild gt with make build")
+	case len(rev) >= tierSweepFullCommitLen:
+		return "", fmt.Errorf("runner.image follows the installed build, but the installed gt records a full-length build commit (%d characters) that make polecat-image never tagged; install gt with make install", len(rev))
+	}
+	// The recorded revision is the tag verbatim: make embeds
+	// `git rev-parse --short HEAD` in the installed gt (COMMIT) and names the
+	// image with the same expression (POLE_TAG), so git's abbreviation length,
+	// whatever it is for this repository, is already in both.
+	return tierSweepPolecatImage + ":" + rev, nil
+}
+
+// tierSweepRunnerImageFollowsInstalled reports whether image asks the sweep to
+// follow the installed gt's build rather than pin one: empty is what a config
+// that never named an image carries, and installed is the word that asks for
+// it (gt-c3sue).
+func tierSweepRunnerImageFollowsInstalled(image string) bool {
+	return image == "" || image == config.TierSweepRunnerInstalledImage
+}
+
+// tierSweepEnsureRunnerImage makes sure a run's image is in the sweep engine
+// before the run starts. Only an image that follows the installed build is
+// ensured: an explicit pin is the operator's and is used as it always was.
+// A missing image is loaded from the default engine, where make polecat-image
+// publishes it, because the sweep engine is another Docker engine that no
+// build writes to (gt-c3sue).
+//
+// It returns the commands' combined output for the stage log, and an error
+// when the image could not be confirmed or loaded. An image the daemon cannot
+// confirm is never assumed present, and a load that fails is never answered
+// with an older image.
+func (d *Daemon) tierSweepEnsureRunnerImage(ctx context.Context, spec sweeprunner.Spec) (string, error) {
+	cfg := tierSweepRunnerConfig(d.patrolConfig)
+	if cfg == nil || cfg.Backend != config.TierSweepRunnerDocker || !tierSweepRunnerImageFollowsInstalled(cfg.Image) {
+		return "", nil
+	}
+	budget := d.tierSweepSeams.imageBudget
+	if budget == 0 {
+		budget = tierSweepRunnerImageBudget
+	}
+	ensureCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+
+	present, out, err := d.tierSweepRunnerImagePresent(ensureCtx, spec)
+	if err != nil || present {
+		return out, err
+	}
+	// Only the load is serialized: a second sweep, or the daemon an install
+	// restarted, waits here instead of starting a second save|load beside the
+	// one already going (gt-c3sue).
+	release, err := d.tierSweepRunnerImageLock(ensureCtx)
+	if err != nil {
+		return out, err
+	}
+	defer release()
+	// The image may have arrived while this call waited for the lock.
+	present, out, err = d.tierSweepRunnerImagePresent(ensureCtx, spec)
+	if err != nil || present {
+		if err == nil {
+			d.logger.Printf("tier_sweep: %s: %s was loaded into the %s engine while this sweep waited", spec.Rig, spec.Image, spec.Context)
+		}
+		return out, err
+	}
+	d.logger.Printf("tier_sweep: %s: loading %s from the default engine into the %s engine", spec.Rig, spec.Image, spec.Context)
+	return d.tierSweepLoadRunnerImage(ensureCtx, spec)
+}
+
+// tierSweepRunnerImagePresent reports whether image is in the sweep engine, and
+// returns the failing command's output when the engine cannot be asked. An
+// engine that cannot be read is an error, never "missing" or "present": both
+// answers would start a run on a guess (gt-c3sue).
+func (d *Daemon) tierSweepRunnerImagePresent(ctx context.Context, spec sweeprunner.Spec) (bool, string, error) {
+	cmd := exec.CommandContext(ctx, "docker", "--context", spec.Context, "image", "ls", "--quiet", spec.Image) //nolint:gosec // G204: fixed program, argv built from a validated Spec, run directly and never through a shell
+	stdout, stderr, err := d.runCmd(cmd)
+	if err != nil {
+		return false, string(stderr), fmt.Errorf("looking for %s in the %s engine: %w", spec.Image, spec.Context, err)
+	}
+	return strings.TrimSpace(string(stdout)) != "", "", nil
+}
+
+// tierSweepRunnerImageLockPath is the town's lock for loading the runner image
+// into the sweep engine: one file, so a daemon restart and the daemon that was
+// already loading meet here rather than in two docker saves at once.
+func tierSweepRunnerImageLockPath(townRoot string) string {
+	return filepath.Join(constants.TownRuntimePath(townRoot), "tier-sweep", "runner-image.lock")
+}
+
+// tierSweepRunnerImageLock takes the town's runner-image lock, waiting for a
+// load already going to finish. It returns the release, which the caller runs
+// once the image is in the engine.
+func (d *Daemon) tierSweepRunnerImageLock(ctx context.Context) (func(), error) {
+	path := tierSweepRunnerImageLockPath(d.config.TownRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, fmt.Errorf("creating the runner image lock directory: %w", err)
+	}
+	lock := flock.New(path)
+	// TryLockContext answers with the context's error when the wait ends
+	// without the lock, so a load still going is a wait that ran out.
+	if _, err := lock.TryLockContext(ctx, 250*time.Millisecond); err != nil {
+		return nil, fmt.Errorf("another sweep's runner image load did not finish: %w", err)
+	}
+	return func() { _ = lock.Unlock() }, nil
+}
+
+// tierSweepRunnerImageStream is the write half docker save writes into. It
+// closes started on the first write, so the load half starts only once save
+// has output to hand it, and the two commands are ordered without a shell.
+type tierSweepRunnerImageStream struct {
+	w       io.Writer
+	once    sync.Once
+	started chan struct{}
+}
+
+// Write hands the bytes to the pipe and closes started on the first one, which
+// is what lets the load start only once save has output to give it.
+func (s *tierSweepRunnerImageStream) Write(p []byte) (int, error) {
+	s.once.Do(func() { close(s.started) })
+	return s.w.Write(p)
+}
+
+// tierSweepLoadRunnerImage copies image from the default engine into the sweep
+// engine: docker save streams it on stdout and docker load reads it on stdin,
+// both through the daemon's command runner. The pipe is closed from whichever
+// step ends first, so a load that dies cannot leave save blocked on a writer
+// nobody reads. It returns the two commands' output; the error names the step,
+// never its captured output.
+func (d *Daemon) tierSweepLoadRunnerImage(ctx context.Context, spec sweeprunner.Spec) (string, error) {
+	pr, pw := io.Pipe()
+	stream := &tierSweepRunnerImageStream{w: pw, started: make(chan struct{})}
+	type saveResult struct {
+		stderr []byte
+		err    error
+	}
+	saveDone := make(chan saveResult, 1)
+	go func() {
+		cmd := exec.CommandContext(ctx, "docker", "save", spec.Image) //nolint:gosec // G204: fixed program, argv built from a validated Spec, run directly and never through a shell
+		cmd.Stdout = stream
+		_, stderr, err := d.runCmd(cmd)
+		// The stream ends on EOF, not with the save's error: a save that failed
+		// still handed over the bytes it wrote, and the load reads them and
+		// judges its own input. The save's error is judged here unless the load
+		// failed too, whose error then came from that truncated input.
+		_ = pw.Close()
+		saveDone <- saveResult{stderr: stderr, err: err}
+	}()
+
+	var out strings.Builder
+	var save saveResult
+	saved := false
+	select {
+	case <-stream.started:
+	case save = <-saveDone:
+		saved = true
+		out.Write(save.stderr)
+	}
+	if saved && save.err != nil {
+		// The image was never streamed, so there is nothing to load: the save
+		// step's failure is the stage's, named with the engine that gave it.
+		return out.String(), fmt.Errorf("saving %s from the default engine: %w", spec.Image, save.err)
+	}
+
+	loadCmd := exec.CommandContext(ctx, "docker", "--context", spec.Context, "load") //nolint:gosec // G204: fixed program, argv built from a validated Spec, run directly and never through a shell
+	loadCmd.Stdin = pr
+	loadOut, loadStderr, loadErr := d.runCmd(loadCmd)
+	// A load that ended early stops reading, which unblocks a save still
+	// writing into the pipe.
+	_ = pr.CloseWithError(loadErr)
+	if !saved {
+		save = <-saveDone
+		out.Write(save.stderr)
+	}
+	out.Write(loadOut)
+	out.Write(loadStderr)
+
+	switch {
+	case loadErr != nil:
+		// The load's verdict comes first: closing the read half is what ends a
+		// save still writing, so its error there is that close, not the cause.
+		return out.String(), fmt.Errorf("loading %s into the %s engine: %w", spec.Image, spec.Context, loadErr)
+	case save.err != nil:
+		return out.String(), fmt.Errorf("saving %s from the default engine: %w", spec.Image, save.err)
+	}
+	return out.String(), nil
 }
 
 // tierSweepRunnerRecordName is the launch record's name in the run's output
@@ -1830,6 +2057,16 @@ func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec
 	}
 
 	if wait == 0 {
+		// An image that follows the installed build is put in the sweep engine
+		// before anything starts: a run whose image is not there fails in its
+		// first seconds, and a load that fails is the stage's verdict, never a
+		// run against an older image (gt-c3sue).
+		if out, err := d.tierSweepEnsureRunnerImage(ctx, spec); err != nil {
+			if ctx.Err() != nil {
+				return tierSweepStageResult{exitCode: -1, err: ctx.Err()}
+			}
+			return tierSweepRunnerNoResultStage(tierSweepLaunch{exitCode: -1, output: out}, err, false)
+		}
 		launch := d.tierSweepSeams.launch
 		if launch == nil {
 			launch = d.tierSweepLaunchRunner

@@ -771,7 +771,6 @@ func TestTierSweepRunnerConfigStrict(t *testing.T) {
 		"cpus above range": {`{"backend":"docker","image":"i","cpus":17,"memory":24,"jobs":4,"output_root":"/tmp/o","context":"c"}`, "runner.cpus"},
 		"no backend":       {`{"image":"i","cpus":8,"memory":24,"jobs":4,"output_root":"/tmp/o","context":"c"}`, "runner.backend"},
 		"unknown backend":  {`{"backend":"podman","image":"i","cpus":8,"memory":24,"jobs":4,"output_root":"/tmp/o","context":"c"}`, "runner.backend"},
-		"no image":         {`{"backend":"docker","cpus":8,"memory":24,"jobs":4,"output_root":"/tmp/o","context":"c"}`, "runner.image"},
 		"memory too small": {`{"backend":"docker","image":"i","cpus":8,"memory":1,"jobs":4,"output_root":"/tmp/o","context":"c"}`, "runner.memory"},
 		"jobs too small":   {`{"backend":"docker","image":"i","cpus":8,"memory":24,"jobs":0,"output_root":"/tmp/o","context":"c"}`, "runner.jobs"},
 		"relative output":  {`{"backend":"docker","image":"i","cpus":8,"memory":24,"jobs":4,"output_root":"out","context":"c"}`, "runner.output_root"},
@@ -787,6 +786,22 @@ func TestTierSweepRunnerConfigStrict(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.wantKey) {
 				t.Errorf("error = %v, want it to name %q", err, tt.wantKey)
+			}
+		})
+	}
+
+	// The image is the one optional field: empty and installed both decode, so
+	// the daemon follows the installed build (gt-c3sue).
+	for name, image := range map[string]string{"empty": "", "installed": TierSweepRunnerInstalledImage} {
+		t.Run("image "+name, func(t *testing.T) {
+			t.Parallel()
+			block := `{"backend":"docker","image":"` + image + `","cpus":8,"memory":24,"jobs":4,"output_root":"/tmp/o","context":"c"}`
+			var p PatrolsConfig
+			if err := json.Unmarshal([]byte(`{"tier_sweep": {"runner": `+block+`}}`), &p); err != nil {
+				t.Fatalf("a runner block whose image is %q does not decode: %v", image, err)
+			}
+			if r := p.TierSweep.Runner; r == nil || r.Image != image {
+				t.Fatalf("decoded %+v, want image %q", r, image)
 			}
 		})
 	}

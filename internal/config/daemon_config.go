@@ -1823,17 +1823,22 @@ type TierSweepConfig struct {
 }
 
 // TierSweepRunnerConfig is where the sweep's tiers run when they run off the
-// host (gt-z4ppb). Every field but Shell is required: a runner block that names
-// no image, engine or output directory cannot render a run, and a default would
-// start a run the operator never asked for.
+// host (gt-z4ppb). Every field but Image and Shell is required: a runner block
+// that names no engine or output directory cannot render a run, and a default
+// would start a run the operator never asked for. Image may be empty or
+// TierSweepRunnerInstalledImage, which follows the installed build; Shell sends
+// the shell stage off the host too, and defaults to false.
 type TierSweepRunnerConfig struct {
 	// Backend names the engine the run starts on: "docker" for a container
 	// through the Docker CLI's context, or "kubernetes" for a batch/v1 Job
 	// (the two internal/sweeprunner renders).
 	Backend string `json:"backend"`
 
-	// Image is the runner container: the polecat image tag, or the same
-	// reference pinned by digest.
+	// Image is the runner container: the polecat image tag, the same reference
+	// pinned by digest, or empty/installed to follow the installed gt's build.
+	// An installed image is the polecat image make polecat-image publishes at
+	// that build's revision, which the daemon loads into the sweep engine when
+	// it is missing (gt-c3sue).
 	Image string `json:"image"`
 
 	// CPUs is the run's CPU share, 1 to 16.
@@ -1888,6 +1893,11 @@ const (
 	TierSweepRunnerKubernetes = "kubernetes"
 )
 
+// TierSweepRunnerInstalledImage is the runner.image value that follows the
+// installed gt's build: the daemon names the polecat image at that build's
+// revision instead of reading a pin an install has to move by hand (gt-c3sue).
+const TierSweepRunnerInstalledImage = "installed"
+
 // UnmarshalJSON decodes the runner block strictly, refusing a key it does not
 // declare and a value no run can use, naming each. A mistyped key here would
 // otherwise read as a default: the runner starts a container, so a block the
@@ -1920,9 +1930,6 @@ func (c *TierSweepRunnerConfig) validate() error {
 		return errors.New("backend: want " + TierSweepRunnerDocker + " or " + TierSweepRunnerKubernetes)
 	default:
 		return fmt.Errorf("backend = %q: want %s or %s", c.Backend, TierSweepRunnerDocker, TierSweepRunnerKubernetes)
-	}
-	if c.Image == "" {
-		return errors.New("image: want the runner image reference")
 	}
 	if c.CPUs < runnerCPUsMin || c.CPUs > runnerCPUsMax {
 		return fmt.Errorf("cpus = %d: want %d-%d", c.CPUs, runnerCPUsMin, runnerCPUsMax)
