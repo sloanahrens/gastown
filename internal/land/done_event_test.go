@@ -46,6 +46,23 @@ func appendEventFor(t *testing.T, path, actor, bead, branch string, at time.Time
 	appendRawLine(t, path, string(line))
 }
 
+// appendStatusEventFor writes a done event whose payload carries the exit
+// status gt done recorded for it.
+func appendStatusEventFor(t *testing.T, path, actor, bead, status string, at time.Time) {
+	t.Helper()
+	line, err := json.Marshal(map[string]any{
+		"ts":      at.UTC().Format(time.RFC3339),
+		"source":  "gt",
+		"type":    events.TypeDone,
+		"actor":   actor,
+		"payload": map[string]any{"bead": bead, "status": status},
+	})
+	if err != nil {
+		t.Fatalf("encoding event: %v", err)
+	}
+	appendRawLine(t, path, string(line))
+}
+
 // doneWork is a sandbox seat's submission: everything the seat writes into the
 // bead's notes, as the landing worker reads it.
 func doneWork() Work {
@@ -178,6 +195,56 @@ func TestDoneEventRecorderWritesOnceAndSkipsAHostSeatsOwnEvent(t *testing.T) {
 			t.Fatalf("events = %d lines, want only the seat's own", len(lines))
 		}
 	})
+}
+
+// TestDoneEventRecorderWritesOverANonSubmissionDone: an escalated or deferred
+// done event in the log is not a submission, so it does not suppress the host's
+// record of the seat's submission (gt-qqmae).
+func TestDoneEventRecorderWritesOverANonSubmissionDone(t *testing.T) {
+	t.Parallel()
+	for _, status := range []string{events.DoneStatusEscalated, events.DoneStatusDeferred} {
+		t.Run(status, func(t *testing.T) {
+			t.Parallel()
+			w := doneWork()
+			rec, path := newDoneRecorder(t, w)
+			// The seat ended an earlier turn this way, inside the dedupe window.
+			appendStatusEventFor(t, path, w.Rig+"/polecats/"+w.Worker, w.BeadID,
+				status, recordAt.Add(-2*time.Minute))
+
+			wrote, err := rec.Record(w)
+			if err != nil {
+				t.Fatalf("Record: %v", err)
+			}
+			if !wrote {
+				t.Fatalf("Record = false for a bead whose only done event was %s; want the submission recorded", status)
+			}
+			if lines := readEventLines(t, path); len(lines) != 2 {
+				t.Fatalf("events = %d lines, want the %s exit and the submission", len(lines), status)
+			}
+		})
+	}
+}
+
+// TestDoneEventRecorderRefusesAnUnreadableDoneStatus: a done event for the bead
+// whose status cannot be read may or may not be a submission, so the recorder
+// refuses rather than write a duplicate over it (gt-qqmae).
+func TestDoneEventRecorderRefusesAnUnreadableDoneStatus(t *testing.T) {
+	t.Parallel()
+	w := doneWork()
+	rec, path := newDoneRecorder(t, w)
+	appendStatusEventFor(t, path, w.Rig+"/polecats/"+w.Worker, w.BeadID,
+		strings.ToLower(events.DoneStatusEscalated), recordAt.Add(-2*time.Minute))
+
+	wrote, err := rec.Record(w)
+	if err == nil {
+		t.Fatal("Record = nil error over a done event whose status cannot be read; want it refused")
+	}
+	if wrote {
+		t.Fatal("Record = true over a done event whose status cannot be read")
+	}
+	if lines := readEventLines(t, path); len(lines) != 1 {
+		t.Fatalf("events = %d lines, want only the unreadable one", len(lines))
+	}
 }
 
 // The seat's stamp may pull the end no later than the host's first sight, and

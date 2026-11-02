@@ -221,20 +221,21 @@ func validEventPayload(s string, limit int) bool {
 // log the prune replaces under it.
 //
 // A line that is not a JSON event cannot name a bead and is skipped. A done
-// event that names the bead but carries no readable time marks the bead
-// unjudged, and a bead stays unjudged for the life of this read: the recorder
-// then fails closed rather than risk a duplicate, which is what a bead's
-// remaining passes pay for one corrupt line (gt-1m9gr).
+// event that names the bead but carries no readable time, or whose status
+// cannot be read, marks the bead unjudged with that reason, and a bead stays
+// unjudged for the life of this read: the recorder then fails closed rather
+// than risk a duplicate, which is what a bead's remaining passes pay for one
+// corrupt line (gt-1m9gr, gt-qqmae).
 type doneEventLog struct {
 	latest   map[string]time.Time
-	unjudged map[string]bool
+	unjudged map[string]string
 }
 
 // refresh reads the log at path into the per-bead state. A missing log is a
 // town that logged nothing: it reads as empty rather than as an error.
 func (l *doneEventLog) refresh(path string) error {
 	l.latest = make(map[string]time.Time)
-	l.unjudged = make(map[string]bool)
+	l.unjudged = make(map[string]string)
 	data, err := os.ReadFile(path) //nolint:gosec // G304: the path is the town's own events log
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -246,12 +247,12 @@ func (l *doneEventLog) refresh(path string) error {
 	return nil
 }
 
-// alreadyDone reports whether the log holds a done event for bead dated at or
-// after cutoff, and refuses to judge the bead when one of its done events has
-// no readable time.
+// alreadyDone reports whether the log holds a submitted done event for bead
+// dated at or after cutoff, and refuses to judge the bead when one of its done
+// events has no readable time or a status that cannot be read.
 func (l *doneEventLog) alreadyDone(bead string, cutoff time.Time) (bool, error) {
-	if l.unjudged[bead] {
-		return false, fmt.Errorf("done event for %s: the log holds a done event for it with no readable time, so a duplicate cannot be ruled out", bead)
+	if reason, ok := l.unjudged[bead]; ok {
+		return false, fmt.Errorf("done event for %s: %s, so a duplicate cannot be ruled out", bead, reason)
 	}
 	if at, ok := l.latest[bead]; ok && !at.Before(cutoff) {
 		return true, nil
@@ -259,18 +260,18 @@ func (l *doneEventLog) alreadyDone(bead string, cutoff time.Time) (bool, error) 
 	return false, nil
 }
 
-// fold reads every line of b, keeping each done event's bead and the latest
-// time the bead's events carry.
+// fold reads every line of b, keeping each submitted done event's bead and the
+// latest time the bead's submissions carry. An escalated or deferred exit
+// writes a done event but submits nothing, so it does not stand in for the
+// seat's submission; a done event whose status cannot be read may or may not be
+// one, so it leaves the bead unjudged rather than let a duplicate through
+// (gt-qqmae).
 func (l *doneEventLog) fold(b []byte) {
 	for _, line := range bytes.Split(b, []byte("\n")) {
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
-		var ev struct {
-			Type    string         `json:"type"`
-			TS      string         `json:"ts"`
-			Payload map[string]any `json:"payload"`
-		}
+		var ev events.Event
 		if err := json.Unmarshal(line, &ev); err != nil || ev.Type != events.TypeDone {
 			continue
 		}
@@ -278,9 +279,16 @@ func (l *doneEventLog) fold(b []byte) {
 		if bead == "" {
 			continue
 		}
-		at, ok := doneEventTime(ev.Payload, ev.TS)
+		if !events.DoneEventStatusKnown(ev) {
+			l.unjudged[bead] = "the log holds a done event for it whose status could not be read"
+			continue
+		}
+		if !events.DoneEventIsSubmission(ev) {
+			continue
+		}
+		at, ok := doneEventTime(ev.Payload, ev.Timestamp)
 		if !ok {
-			l.unjudged[bead] = true
+			l.unjudged[bead] = "the log holds a submitted done event for it with no readable time"
 			continue
 		}
 		if at.After(l.latest[bead]) {

@@ -108,6 +108,13 @@ func seatEventLine(ts time.Time, typ, actor, bead string) string {
 		ts.UTC().Format(time.RFC3339), typ, actor, bead)
 }
 
+// seatStatusEventLine is seatEventLine with the done event's exit status in
+// the payload.
+func seatStatusEventLine(ts time.Time, typ, actor, bead, status string) string {
+	return fmt.Sprintf(`{"ts":%q,"source":"gt","type":%q,"actor":%q,"payload":{"bead":%q,"status":%q},"visibility":"feed"}`,
+		ts.UTC().Format(time.RFC3339), typ, actor, bead, status)
+}
+
 // TestCheckPolecatHealth_DoneEventIsAFinishedTurn covers gt-0p9pv: a seat
 // whose own last event is a `done` for the bead it still holds ended its turn,
 // and the bead's close is what has not caught up. Within the grace the dead
@@ -188,6 +195,48 @@ func TestCheckPolecatHealth_DoneEventIsAFinishedTurn(t *testing.T) {
 			}
 			if strings.Contains(string(logged), events.TypeSessionDeath) {
 				t.Errorf("a finished turn must not emit a session_death event: %q", logged)
+			}
+		})
+	}
+}
+
+// TestCheckPolecatHealth_NonSubmissionDoneIsStillAFinishedTurn: crash detection
+// asks whether the seat's turn ended, not whether the seat submitted work. An
+// ESCALATED or DEFERRED exit ended the turn (gt-0p9pv's incident was a DEFERRED
+// exit), so a dead session over the bead the seat still holds is a finished
+// turn within the close grace, not a crash. Reading the exit status as a
+// condition here would restart a seat that stopped on purpose (gt-qqmae).
+func TestCheckPolecatHealth_NonSubmissionDoneIsStillAFinishedTurn(t *testing.T) {
+	t.Parallel()
+	const seat = "myr/polecats/mycat"
+	for _, status := range []string{events.DoneStatusEscalated, events.DoneStatusDeferred} {
+		t.Run(status, func(t *testing.T) {
+			t.Parallel()
+			bd := hookedWorkBD(t, "gt-xyz", time.Hour)
+			townRoot := t.TempDir()
+			line := seatStatusEventLine(testEpoch.Add(-time.Minute), events.TypeDone, seat, "gt-xyz", status)
+			if err := os.WriteFile(filepath.Join(townRoot, events.EventsFile), []byte(line+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			var logBuf strings.Builder
+			d := &Daemon{
+				config:        &Config{TownRoot: townRoot},
+				logger:        log.New(&logBuf, "", 0),
+				clock:         newFixedClock(),
+				tmux:          newFakeTmux(newFixedClock()),
+				notifier:      notifyfake.New(),
+				openWorkBeads: bd.open,
+				execCmd:       bd.run,
+			}
+
+			d.checkPolecatHealth("myr", "mycat")
+
+			got := logBuf.String()
+			if strings.Contains(got, "CRASH DETECTED") {
+				t.Errorf("CRASH DETECTED for a %s exit within the close grace; log: %q", status, got)
+			}
+			if !strings.Contains(got, "ran gt done for gt-xyz") {
+				t.Errorf("expected the skip to name the done that ended the turn, got: %q", got)
 			}
 		})
 	}
