@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -73,6 +74,35 @@ func warnf(w io.Writer, format string, args ...interface{}) {
 	fmt.Fprintf(w, format, args...)
 }
 
+// scanStateWarner rate-limits the unreadable-scan-state warning by town. The
+// daemon heartbeat reads the scan state once a minute in this process, so a
+// runtime directory that stays unreadable would otherwise repeat the same line
+// on every cycle; one line per scan ceiling keeps it visible without filling the
+// log. Process-local, like crossRigEscalations: a restarted daemon reports the
+// condition again, which is what a new process should do.
+type scanStateWarner struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+}
+
+// shouldWarn reports whether a warning for key speaks now, and records now when
+// it does. A clock that steps back warns rather than suppressing the line.
+func (s *scanStateWarner) shouldWarn(key string, now time.Time, window time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if last, ok := s.last[key]; ok && !now.Before(last) && now.Sub(last) < window {
+		return false
+	}
+	if s.last == nil {
+		s.last = make(map[string]time.Time)
+	}
+	s.last[key] = now
+	return true
+}
+
+// slingContextScanWarnings is the heartbeat's debounce state.
+var slingContextScanWarnings scanStateWarner
+
 func beadsForContextRecord(rec contextRecord) beads.Client {
 	return beads.NewWithBeadsDir(rec.workDir, rec.beadsDir)
 }
@@ -134,7 +164,10 @@ func ListAllSlingContexts(townRoot string) ([]*beads.Issue, error) {
 // The read is a literal here rather than a call to scanAllSlingContextRecords
 // so this function is the heartbeat's one read of the stores, with the skip in
 // front of it; the operator surfaces go through scanAllSlingContextRecords
-// instead.
+// instead. The bd call has to stay declared in this function: the census charges
+// a read to the nearest function outside internal/beads, and
+// censusCallerBudgets keys the heartbeat's row to this name (gt-gojo0), so
+// routing the read through a helper would re-key the row.
 func listAllSlingContextRecords(townRoot string) ([]contextRecord, error) {
 	scan := func(townRoot string) ([]contextRecord, error) {
 		recs, err := beads.ListOpenSlingContextRecords(townRoot)
@@ -160,8 +193,9 @@ func listAllSlingContextRecordsWith(townRoot string, now func() time.Time, scan 
 	}
 	// An unreadable stamp or marker falls through to the full scan: the skip
 	// may only rest on evidence that was read. The read is reported rather than
-	// swallowed, so a runtime directory the daemon cannot read is visible.
-	if skipErr != nil {
+	// swallowed, so a runtime directory the daemon cannot read is visible; one
+	// town hears it once per scan ceiling rather than on every heartbeat.
+	if skipErr != nil && slingContextScanWarnings.shouldWarn(townRoot, started, beads.SlingContextScanMaxAge) {
 		warnf(w, "%s Warning: reading the sling-context scan state failed; reading every database: %v\n", style.Dim.Render("⚠"), skipErr)
 	}
 	records, err := scan(townRoot)

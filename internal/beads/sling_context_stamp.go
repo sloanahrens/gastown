@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
@@ -31,9 +30,9 @@ import (
 // is an error, and the caller must scan in full rather than read it as "nothing
 // exists": the skip may only rest on evidence it could read.
 //
-// The marker is dated by the scan's start, not its end, so a context created
-// while the scan was reading it is newer than the marker and the next scan sees
-// it. The ceiling bounds the damage of a creation whose stamp write was lost: a
+// The marker records the scan's start, not its end, so a context created while
+// the scan was reading it is newer than the marker and the next scan sees it.
+// The ceiling bounds the damage of a creation whose stamp write was lost: a
 // full scan runs at least every SlingContextScanMaxAge.
 
 const (
@@ -51,7 +50,7 @@ const (
 	SlingContextScanMaxAge = 10 * time.Minute
 
 	// slingContextScanFound and slingContextScanEmpty are the marker's
-	// content. Only slingContextScanEmpty orders a skip; content this binary
+	// outcome. Only slingContextScanEmpty orders a skip; an outcome this binary
 	// does not recognize is read as "found", so a marker written by another
 	// version cannot hide a context this one does not understand.
 	slingContextScanFound = "found"
@@ -76,6 +75,20 @@ type SlingContextScan struct {
 	Found     bool
 }
 
+// SlingContextStampError is a stamp touch that failed. MarkerDropped reports
+// whether the empty-scan marker was removed with the failure: when it was not,
+// a scan the marker already ordered stays in force and the next full scan may
+// be up to SlingContextScanMaxAge away. Callers tell the operator which of the
+// two happened instead of promising a scan the marker does not allow.
+type SlingContextStampError struct {
+	Err           error
+	MarkerDropped bool
+}
+
+func (e *SlingContextStampError) Error() string { return e.Err.Error() }
+
+func (e *SlingContextStampError) Unwrap() error { return e.Err }
+
 // slingContextStampFS is the filesystem the stamp and marker are read and
 // written through, so a test can take the failure paths a writable host does
 // not offer. A scan that cannot read either file must scan in full, and a
@@ -87,7 +100,6 @@ type slingContextStampFS struct {
 	chtimes   func(path string, atime, mtime time.Time) error
 	readFile  func(path string) ([]byte, error)
 	remove    func(path string) error
-	rename    func(oldpath, newpath string) error
 }
 
 var osSlingContextStampFS = slingContextStampFS{
@@ -97,12 +109,7 @@ var osSlingContextStampFS = slingContextStampFS{
 	chtimes:   os.Chtimes,
 	readFile:  os.ReadFile,
 	remove:    os.Remove,
-	rename:    os.Rename,
 }
-
-// slingContextMarkerTmpSeq keeps two markers written in one process from
-// sharing a temporary file name.
-var slingContextMarkerTmpSeq atomic.Uint64
 
 // TouchSlingContextStamp records that townRoot created a sling context at now.
 func TouchSlingContextStamp(townRoot string, now time.Time) error {
@@ -149,12 +156,12 @@ func touchSlingContextStamp(townRoot string, now time.Time, fsys slingContextSta
 		// The context bead already exists, so its source cannot undo it; what
 		// it can do is make sure the next scan looks. An empty-scan marker that
 		// outlives a stamp that was never written would hide the new context
-		// until the marker ages out, so the marker goes first.
+		// until the marker ages out, so the marker goes with the failure.
 		markerPath := SlingContextScanMarkerPath(townRoot)
 		if rmErr := fsys.remove(markerPath); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
-			return fmt.Errorf("%w (and the empty-scan marker %s could not be removed: %v)", err, markerPath, rmErr)
+			return &SlingContextStampError{Err: fmt.Errorf("%w (and the empty-scan marker %s could not be removed: %v)", err, markerPath, rmErr)}
 		}
-		return err
+		return &SlingContextStampError{Err: err, MarkerDropped: true}
 	}
 	return nil
 }
@@ -180,20 +187,26 @@ func writeSlingContextStamp(townRoot string, now time.Time, fsys slingContextSta
 
 func slingContextScanMarker(townRoot string, fsys slingContextStampFS) (SlingContextScan, error) {
 	path := SlingContextScanMarkerPath(townRoot)
-	fi, err := fsys.stat(path)
+	data, err := fsys.readFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return SlingContextScan{}, nil
 	}
 	if err != nil {
 		return SlingContextScan{}, fmt.Errorf("reading the sling-context scan marker %s: %w", path, err)
 	}
-	data, err := fsys.readFile(path)
+	fields := strings.Fields(string(data))
+	if len(fields) != 2 {
+		// A torn or foreign write says nothing the skip may rest on. Fail open
+		// to a full scan rather than guess what it meant.
+		return SlingContextScan{}, fmt.Errorf("reading the sling-context scan marker %s: not a scan record", path)
+	}
+	startedAt, err := time.Parse(time.RFC3339Nano, fields[0])
 	if err != nil {
-		return SlingContextScan{}, fmt.Errorf("reading the sling-context scan marker %s: %w", path, err)
+		return SlingContextScan{}, fmt.Errorf("reading the sling-context scan marker %s: not a scan record", path)
 	}
 	return SlingContextScan{
-		StartedAt: fi.ModTime(),
-		Found:     strings.TrimSpace(string(data)) != slingContextScanEmpty,
+		StartedAt: startedAt,
+		Found:     fields[1] != slingContextScanEmpty,
 	}, nil
 }
 
@@ -202,38 +215,20 @@ func recordSlingContextScan(townRoot string, startedAt time.Time, found bool, fs
 	if err := fsys.mkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("creating the runtime directory for the sling-context scan marker: %w", err)
 	}
-	body := slingContextScanEmpty + "\n"
+	outcome := slingContextScanEmpty
 	if found {
-		body = slingContextScanFound + "\n"
+		outcome = slingContextScanFound
 	}
-	// The marker is dated by the scan's start, not its end, so a creation that
-	// lands while the scan reads a database carries a newer stamp and the next
-	// scan sees it, instead of waiting out the ceiling. For that date to be
-	// what a reader sees, it is set before the marker is published: a plain
-	// write dates the file now, later than the scan's start. So the dated
-	// content goes to a temporary file in the same directory and replaces the
-	// marker in one rename, and a reader only ever sees a finished marker.
-	tmp := fmt.Sprintf("%s.%d.%d.tmp", path, os.Getpid(), slingContextMarkerTmpSeq.Add(1))
-	if err := fsys.writeFile(tmp, []byte(body), 0o644); err != nil {
+	// The scan's start is written into the marker rather than dated onto it: a
+	// write dates the file now, later than the scan started, and a creation
+	// that lands during the scan would then look older than the marker and wait
+	// out the ceiling. One write leaves no temporary file that a crash could
+	// strand in the runtime directory.
+	body := startedAt.UTC().Format(time.RFC3339Nano) + " " + outcome + "\n"
+	if err := fsys.writeFile(path, []byte(body), 0o644); err != nil {
 		return fmt.Errorf("writing the sling-context scan marker %s: %w", path, err)
 	}
-	if err := fsys.chtimes(tmp, startedAt, startedAt); err != nil {
-		return discardSlingContextMarkerTemp(fmt.Errorf("dating the sling-context scan marker %s: %w", path, err), tmp, fsys)
-	}
-	if err := fsys.rename(tmp, path); err != nil {
-		return discardSlingContextMarkerTemp(fmt.Errorf("publishing the sling-context scan marker %s: %w", path, err), tmp, fsys)
-	}
 	return nil
-}
-
-// discardSlingContextMarkerTemp removes a temporary marker that never replaced
-// the real one, so a failed write leaves no stray file beside it. A removal
-// that also fails is reported alongside err, not instead of it.
-func discardSlingContextMarkerTemp(err error, tmp string, fsys slingContextStampFS) error {
-	if rmErr := fsys.remove(tmp); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
-		return fmt.Errorf("%w (and the temporary marker %s could not be removed: %v)", err, tmp, rmErr)
-	}
-	return err
 }
 
 func slingContextScanIsEmpty(townRoot string, now time.Time, fsys slingContextStampFS) (bool, error) {

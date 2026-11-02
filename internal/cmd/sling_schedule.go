@@ -237,14 +237,21 @@ func (d *slingDeps) scheduleSlingBead(beadID, rigName string, opts ScheduleOptio
 
 	// The dispatch heartbeat answers "nothing is scheduled" without reading a
 	// database while no context has been created since its last empty scan, so
-	// a created context announces itself (gt-66e5d). A stamp that cannot be
-	// written usually leaves the next scan to find the context, but the touch
-	// can also fail to drop an empty-scan marker, which would hide it until the
-	// scan ceiling passes; the context bead exists and the schedule stands
-	// either way, so this warns instead of failing a schedule that worked.
-	if stampErr := beads.TouchSlingContextStamp(townRoot, time.Now()); stampErr != nil {
-		fmt.Fprintf(d.out, "%s Warning: the dispatch heartbeat may not see this context until its next full scan: %v\n",
-			style.Dim.Render("⚠"), stampErr)
+	// a created context announces itself (gt-66e5d). The context bead exists and
+	// the schedule stands either way, so a stamp that cannot be written warns
+	// instead of failing a schedule that worked. The warning says what the
+	// failure actually costs: a dropped empty-scan marker leaves the next scan
+	// to find the context, while a marker the touch could not drop keeps the
+	// heartbeat answering from it until the scan ceiling passes.
+	if stampErr := d.touchSlingContextStamp(townRoot, time.Now()); stampErr != nil {
+		var stampTouchErr *beads.SlingContextStampError
+		if errors.As(stampErr, &stampTouchErr) && stampTouchErr.MarkerDropped {
+			fmt.Fprintf(d.out, "%s Warning: the sling context was created but its stamp could not be written; the next dispatch scan will read every database and see it: %v\n",
+				style.Dim.Render("⚠"), stampErr)
+		} else {
+			fmt.Fprintf(d.out, "%s Warning: the sling context was created but its stamp could not be written and the empty-scan marker could not be dropped; the next full scan may be up to %s away: %v\n",
+				style.Dim.Render("⚠"), beads.SlingContextScanMaxAge, stampErr)
+		}
 	}
 
 	actor := d.actor()

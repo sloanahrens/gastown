@@ -12,12 +12,6 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 )
 
-// stampFS is the production filesystem; a test replaces the operations it
-// needs to fail. It is a value copy, so a replacement stays local to the test.
-func stampFS() slingContextStampFS {
-	return osSlingContextStampFS
-}
-
 // TestSlingContextStamp pins the reader and writer the dispatch heartbeat's
 // skip rests on: a touched stamp reads back at the time of the creation, a town
 // that never scheduled a context has none (the zero time, not an error), and a
@@ -64,7 +58,7 @@ func TestSlingContextStamp(t *testing.T) {
 	t.Run("an unreadable stamp is an error", func(t *testing.T) {
 		t.Parallel()
 		boom := errors.New("permission denied")
-		fsys := stampFS()
+		fsys := osSlingContextStampFS
 		fsys.stat = func(string) (fs.FileInfo, error) { return nil, boom }
 
 		got, err := slingContextStamp("/town", fsys)
@@ -154,87 +148,76 @@ func TestSlingContextScanMarker(t *testing.T) {
 		})
 	}
 
-	t.Run("the marker is dated before it is published", func(t *testing.T) {
+	t.Run("the marker records the scan's start, not the write's time", func(t *testing.T) {
 		t.Parallel()
-		townRoot := t.TempDir()
-		markerPath := SlingContextScanMarkerPath(townRoot)
-		fsys := stampFS()
-		var publishedFrom string
-		fsys.rename = func(oldpath, newpath string) error {
-			// A reader that sees the marker at any instant must read the scan's
-			// start, never the write's time, which is later: a later date lets a
-			// context created during the scan wait out the ceiling.
-			fi, err := os.Stat(oldpath)
-			if err != nil {
-				return err
+		fsys := osSlingContextStampFS
+		fsys.mkdirAll = func(string, os.FileMode) error { return nil }
+		var written []byte
+		fsys.writeFile = func(path string, data []byte, perm os.FileMode) error {
+			if path != SlingContextScanMarkerPath("/town") {
+				t.Errorf("marker written to %s, want %s", path, SlingContextScanMarkerPath("/town"))
 			}
-			if !fi.ModTime().Equal(at) {
-				t.Errorf("the marker was published dated %v, want the scan start %v", fi.ModTime(), at)
-			}
-			publishedFrom = oldpath
-			return os.Rename(oldpath, newpath)
+			written = append([]byte(nil), data...)
+			return nil
 		}
 
-		if err := recordSlingContextScan(townRoot, at, false, fsys); err != nil {
+		if err := recordSlingContextScan("/town", at, false, fsys); err != nil {
 			t.Fatalf("recordSlingContextScan = %v", err)
 		}
-		// The replacement is only atomic while both names sit in one directory.
-		if filepath.Dir(publishedFrom) != filepath.Dir(markerPath) {
-			t.Errorf("the marker was published from %s, not from its own directory %s; a rename across directories is not atomic",
-				publishedFrom, filepath.Dir(markerPath))
-		}
-		got, err := slingContextScanMarker(townRoot, osSlingContextStampFS)
-		if err != nil {
-			t.Fatalf("SlingContextScanMarker = %v", err)
-		}
-		if !got.StartedAt.Equal(at) || got.Found {
-			t.Errorf("marker = %+v, want the empty scan at %v", got, at)
+		// A creation that lands during the scan carries a stamp newer than the
+		// scan start; a marker dated at its write, which is later, would let the
+		// new context wait out the ceiling.
+		want := at.UTC().Format(time.RFC3339Nano) + " " + slingContextScanEmpty + "\n"
+		if string(written) != want {
+			t.Errorf("marker content = %q, want %q", written, want)
 		}
 	})
 
-	t.Run("an unreadable marker is an error", func(t *testing.T) {
+	t.Run("a marker that cannot be read is an error", func(t *testing.T) {
 		t.Parallel()
 		boom := errors.New("permission denied")
-		fsys := stampFS()
-		fsys.stat = func(string) (fs.FileInfo, error) { return nil, boom }
+		fsys := osSlingContextStampFS
+		fsys.readFile = func(string) ([]byte, error) { return nil, boom }
 
 		if _, err := slingContextScanMarker("/town", fsys); !errors.Is(err, boom) {
 			t.Fatalf("slingContextScanMarker = %v, want it to wrap %v", err, boom)
 		}
 	})
 
-	t.Run("a marker whose content cannot be read is an error", func(t *testing.T) {
+	t.Run("an outcome this binary does not recognize reads as found", func(t *testing.T) {
 		t.Parallel()
 		townRoot := t.TempDir()
-		if err := RecordSlingContextScan(townRoot, at, false); err != nil {
-			t.Fatalf("seed marker: %v", err)
-		}
-		boom := errors.New("i/o error")
-		fsys := stampFS()
-		fsys.readFile = func(string) ([]byte, error) { return nil, boom }
-
-		if _, err := slingContextScanMarker(townRoot, fsys); !errors.Is(err, boom) {
-			t.Fatalf("slingContextScanMarker = %v, want it to wrap %v", err, boom)
-		}
-	})
-
-	t.Run("unrecognized content reads as found", func(t *testing.T) {
-		t.Parallel()
-		townRoot := t.TempDir()
-		if err := os.MkdirAll(filepath.Dir(SlingContextScanMarkerPath(townRoot)), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(SlingContextScanMarkerPath(townRoot), []byte("a newer gt's marker\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeMarker(t, townRoot, at.UTC().Format(time.RFC3339Nano)+" a-newer-outcome\n")
 		got, err := slingContextScanMarker(townRoot, osSlingContextStampFS)
 		if err != nil {
 			t.Fatalf("SlingContextScanMarker = %v", err)
 		}
 		if !got.Found {
-			t.Error("a marker this binary does not understand read as empty; it must read as found so the scan is not skipped")
+			t.Error("a marker outcome this binary does not understand read as empty; it must read as found so the scan is not skipped")
 		}
 	})
+
+	t.Run("content that is not a scan record is an error", func(t *testing.T) {
+		t.Parallel()
+		townRoot := t.TempDir()
+		// A torn write, or a marker from a format this binary does not know: the
+		// skip may not rest on either, so the read fails open to a full scan.
+		writeMarker(t, townRoot, "a newer gt's marker\n")
+		if _, err := slingContextScanMarker(townRoot, osSlingContextStampFS); err == nil {
+			t.Fatal("slingContextScanMarker read a foreign marker as a scan record; it must fail open to a full scan")
+		}
+	})
+}
+
+// writeMarker plants marker content at the town's marker path.
+func writeMarker(t *testing.T, townRoot, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(SlingContextScanMarkerPath(townRoot)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(SlingContextScanMarkerPath(townRoot), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestTouchSlingContextStampDropsTheEmptyScanMarkerOnFailure: a creation whose
@@ -271,7 +254,7 @@ func TestTouchSlingContextStampDropsTheEmptyScanMarkerOnFailure(t *testing.T) {
 			if err := RecordSlingContextScan(townRoot, at.Add(-time.Minute), false); err != nil {
 				t.Fatalf("seed empty-scan marker: %v", err)
 			}
-			fsys := stampFS()
+			fsys := osSlingContextStampFS
 			fsys.writeFile = func(string, []byte, os.FileMode) error { return boom }
 			fsys.remove = tc.remove
 
@@ -281,6 +264,16 @@ func TestTouchSlingContextStampDropsTheEmptyScanMarkerOnFailure(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.wantErr) {
 				t.Errorf("touchSlingContextStamp error = %q, want it to name %q", err, tc.wantErr)
+			}
+			// A caller tells the operator whether the next scan is already
+			// ordered or may wait out the ceiling, which it can only do from
+			// MarkerDropped.
+			var stampErr *SlingContextStampError
+			if !errors.As(err, &stampErr) {
+				t.Fatalf("touchSlingContextStamp error = %T, want a *SlingContextStampError", err)
+			}
+			if wantDropped := !tc.wantMarker; stampErr.MarkerDropped != wantDropped {
+				t.Errorf("MarkerDropped = %v, want %v", stampErr.MarkerDropped, wantDropped)
 			}
 			_, statErr := os.Stat(SlingContextScanMarkerPath(townRoot))
 			wantGone := !tc.wantMarker
@@ -323,7 +316,7 @@ func TestWriteSlingContextStampReportsEachFailure(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			fsys := stampFS()
+			fsys := osSlingContextStampFS
 			// No marker exists, so the touch's fail-open removal has nothing to
 			// do and cannot mask the write failure under test.
 			fsys.remove = func(string) error { return fs.ErrNotExist }
@@ -363,29 +356,11 @@ func TestRecordSlingContextScanReportsEachFailure(t *testing.T) {
 			mutate:  func(f *slingContextStampFS) { f.writeFile = func(string, []byte, os.FileMode) error { return boom } },
 			wantErr: "writing the sling-context scan marker",
 		},
-		{
-			name:    "marker cannot be dated",
-			mutate:  func(f *slingContextStampFS) { f.chtimes = func(string, time.Time, time.Time) error { return boom } },
-			wantErr: "dating the sling-context scan marker",
-		},
-		{
-			name: "marker cannot be dated and its temporary file cannot be removed",
-			mutate: func(f *slingContextStampFS) {
-				f.chtimes = func(string, time.Time, time.Time) error { return boom }
-				f.remove = func(string) error { return errors.New("read-only directory") }
-			},
-			wantErr: "could not be removed",
-		},
-		{
-			name:    "marker cannot be published",
-			mutate:  func(f *slingContextStampFS) { f.rename = func(string, string) error { return boom } },
-			wantErr: "publishing the sling-context scan marker",
-		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			fsys := stampFS()
+			fsys := osSlingContextStampFS
 			tc.mutate(&fsys)
 
 			err := recordSlingContextScan(t.TempDir(), at, false, fsys)
@@ -410,8 +385,8 @@ func TestSlingContextScanIsEmptyReportsUnreadableInput(t *testing.T) {
 
 	t.Run("the marker cannot be read", func(t *testing.T) {
 		t.Parallel()
-		fsys := stampFS()
-		fsys.stat = func(string) (fs.FileInfo, error) { return nil, boom }
+		fsys := osSlingContextStampFS
+		fsys.readFile = func(string) ([]byte, error) { return nil, boom }
 
 		skip, err := slingContextScanIsEmpty("/town", at, fsys)
 		if !errors.Is(err, boom) {
@@ -430,7 +405,7 @@ func TestSlingContextScanIsEmptyReportsUnreadableInput(t *testing.T) {
 			t.Fatalf("seed marker: %v", err)
 		}
 		markerPath := SlingContextScanMarkerPath(townRoot)
-		fsys := stampFS()
+		fsys := osSlingContextStampFS
 		fsys.stat = func(path string) (fs.FileInfo, error) {
 			if path == markerPath {
 				return os.Stat(path)

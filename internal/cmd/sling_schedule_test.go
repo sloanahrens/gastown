@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
@@ -242,17 +243,82 @@ func TestScheduleSlingTouchesContextStamp(t *testing.T) {
 				t.Fatalf("schedule: %v", err)
 			}
 
-			_, stampErr := os.Stat(beads.SlingContextStampPath(townRoot))
-			stamped := stampErr == nil
-			if stampErr != nil && !os.IsNotExist(stampErr) {
-				t.Fatalf("stat stamp: %v", stampErr)
+			touches := h.matching("touch sling context stamp")
+			if tc.wantStamp && len(touches) != 1 {
+				t.Errorf("a schedule that created a sling context touched the stamp %d time(s), want 1: the heartbeat would keep skipping its scan and never dispatch it\nfull log:\n  %s",
+					len(touches), strings.Join(h.log(), "\n  "))
 			}
-			if tc.wantStamp && !stamped {
-				t.Error("a schedule that created a sling context touched no stamp: the heartbeat would keep skipping its scan and never dispatch it")
+			if !tc.wantStamp && len(touches) != 0 {
+				t.Errorf("a schedule whose context creation failed touched the stamp %d time(s); only a created context may announce itself", len(touches))
 			}
-			if !tc.wantStamp && stamped {
-				t.Errorf("a schedule whose context creation failed stamped %s; only a created context may announce itself", beads.SlingContextStampPath(townRoot))
+			if tc.wantStamp && len(touches) == 1 && touches[0] != "touch sling context stamp "+townRoot {
+				t.Errorf("touched the stamp for %q, want the town root %q", touches[0], townRoot)
 			}
 		})
+	}
+}
+
+// TestScheduleStampFailureWarningIsAccurateAndDriven drives a failing stamp
+// write through the schedule path through its injected seam, not a real
+// filesystem fault, and pins what the operator is told. A touch that dropped the
+// empty-scan marker leaves the next scan to see the context; a touch that could
+// not drop it means the heartbeat may keep answering from the marker until the
+// scan ceiling passes, and the warning must say so rather than promise a scan
+// the marker does not allow.
+func TestScheduleStampFailureWarningIsAccurateAndDriven(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("disk full")
+	tests := []struct {
+		name string
+		// touchErr is what the injected stamp write returns.
+		touchErr error
+		// want is the claim the warning must make.
+		want string
+		// wantAbsent is the claim it must not make.
+		wantAbsent string
+	}{
+		{
+			name:       "the marker was dropped",
+			touchErr:   &beads.SlingContextStampError{Err: boom, MarkerDropped: true},
+			want:       "the next dispatch scan will read every database and see it",
+			wantAbsent: "may be up to",
+		},
+		{
+			name:       "the marker could not be dropped",
+			touchErr:   &beads.SlingContextStampError{Err: boom},
+			want:       "the next full scan may be up to " + beads.SlingContextScanMaxAge.String() + " away",
+			wantAbsent: "will read every database and see it",
+		},
+	}
+	var texts []string
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newSlingHarness(t)
+			h.addBead(slingBead, beadInfo{Title: "scheduled work"})
+			townRoot := t.TempDir()
+			h.run.townOrEnv = func() (string, error) { return townRoot, nil }
+			h.run.touchSlingContextStamp = func(string, time.Time) error { return tc.touchErr }
+
+			// The context exists and the schedule stands: a stamp failure is a
+			// warning, not a failed sling.
+			if err := h.run.scheduleSlingBead(slingBead, "gastown", ScheduleOptions{}); err != nil {
+				t.Fatalf("schedule = %v, want it to stand", err)
+			}
+			out := h.out.String()
+			if !strings.Contains(out, "Warning") {
+				t.Fatalf("output = %q, want a warning naming the failed stamp", out)
+			}
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("warning = %q, want it to say %q", out, tc.want)
+			}
+			if strings.Contains(out, tc.wantAbsent) {
+				t.Errorf("warning = %q, must not say %q: the cost depends on whether the marker was dropped", out, tc.wantAbsent)
+			}
+			texts = append(texts, out)
+		})
+	}
+	if len(texts) == 2 && texts[0] == texts[1] {
+		t.Errorf("both stamp-failure cases printed the same warning %q; the operator cannot tell an ordered next scan from one up to %s away",
+			texts[0], beads.SlingContextScanMaxAge)
 	}
 }
