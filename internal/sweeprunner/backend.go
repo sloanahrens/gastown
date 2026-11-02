@@ -1,5 +1,7 @@
 package sweeprunner
 
+import "strings"
+
 // The sidecar engine's address and port, which both backends hand the runner
 // (DOCKER_HOST) and the sidecar (--host).
 const (
@@ -75,8 +77,9 @@ type Poll struct {
 	// Ended reports from Status's stdout whether the run has ended, whether it
 	// succeeded or not.
 	Ended func(stdout []byte) bool
-	// Collect copies the result into the output directory. A caller runs it
-	// once Ended reports true, in order, and stops at the first failure.
+	// Collect brings the run's result, and the logs the backend keeps on its
+	// engine, into the output directory. A caller runs it once Ended reports
+	// true, in order, and stops at the first failure a Step does not tolerate.
 	Collect []Step
 }
 
@@ -103,4 +106,22 @@ type Step struct {
 	// Teardown marks a step that removes what an earlier step made; it runs
 	// even when an earlier step failed.
 	Teardown bool
+	// MissingSourceOK marks a step whose failure is the absent source it
+	// copies, not a failure: a run that wrote no logs leaves /out/logs
+	// absent, and the copy of it then fails. The caller tolerates only a
+	// failure whose output names the missing source; any other failure is
+	// still the run's (gt-4lj2q).
+	MissingSourceOK bool
+}
+
+// missingSourceMarker is what a failed copy prints when its source is not
+// there: kubectl cp reports tar's "No such file or directory" (gt-4lj2q).
+const missingSourceMarker = "no such file"
+
+// MissingSource reports whether a failed step is the absent source it
+// tolerates: the step is marked MissingSourceOK and its output says the source
+// is not there. A step that failed another way, or one that does not tolerate
+// the absence, reports false (gt-4lj2q).
+func (s Step) MissingSource(output []byte) bool {
+	return s.MissingSourceOK && strings.Contains(strings.ToLower(string(output)), missingSourceMarker)
 }

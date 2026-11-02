@@ -142,8 +142,8 @@ func TestTierSweepRunnerStageLaunchesAndReadsTheResult(t *testing.T) {
 	if race.Verdict != tierSweepRed || race.Failed != 1 || !slices.Contains(race.FailedNames, "./internal/cmd") {
 		t.Errorf("race = %+v, want RED naming ./internal/cmd from the result's own summary line", race)
 	}
-	if race.LogDir != "/out/logs" {
-		t.Errorf("race log dir = %q, want the unit log directory the result names", race.LogDir)
+	if want := filepath.Join(got.spec.OutDir, sweeprunner.LogsDirName); race.LogDir != want {
+		t.Errorf("race log dir = %q, want the host run directory %q, not the engine's /out/logs", race.LogDir, want)
 	}
 	if !strings.HasSuffix(race.Log, filepath.Join("logs", "gastown", "integration.log")) {
 		t.Errorf("race log = %q, want the stage log the daemon wrote", race.Log)
@@ -915,6 +915,7 @@ func runnerKubernetesDaemon(t *testing.T, now time.Time) (*Daemon, sweeprunner.S
 // it names, fails the way kubectl does when the claim holds no result, or
 // succeeds and writes nothing when skipWrite is set; failCopy fails the copy out
 // of the output claim outright, and failSyncCopy the copy into the repo claim.
+// noLogs fails the logs copy the way kubectl does when the run wrote none.
 // failSyncCreate fails the sync pod's create the way a concurrent sync's does,
 // with AlreadyExists. failApply is the 1-based apply that fails, 0 for none: 1
 // is the repo claim, 2 the output claim, 3 the Job and 4 the reader pod.
@@ -930,6 +931,7 @@ type runnerCluster struct {
 	result         *sweeprunner.Result
 	skipWrite      bool
 	failCopy       bool
+	noLogs         bool
 	failSyncCopy   bool
 	failSyncCreate bool
 	failWait       bool
@@ -964,11 +966,18 @@ func (c *runnerCluster) answer(argv []string) ([]byte, []byte, error) {
 			return nil, []byte("error: timed out waiting for the condition\n"), errors.New("exit status 1")
 		}
 	case slices.Contains(argv, "cp"):
-		// The sync stage's copy lands in the repo claim; the reader's copy is
-		// the one that brings the result home.
+		// The sync stage's copy lands in the repo claim; the reader's copies
+		// bring the result and the per-unit logs home.
 		if strings.HasSuffix(argv[len(argv)-1], sweeprunner.RepoMount) {
 			if c.failSyncCopy {
 				return nil, []byte("error: unable to copy into the sync pod\n"), errors.New("exit status 1")
+			}
+			return nil, nil, nil
+		}
+		logsSrc := ":" + sweeprunner.OutputDir + "/" + sweeprunner.LogsDirName
+		if slices.ContainsFunc(argv, func(arg string) bool { return strings.HasSuffix(arg, logsSrc) }) {
+			if c.noLogs {
+				return nil, []byte("error: tar: /out/logs: Cannot stat: No such file or directory\n"), errors.New("exit status 1")
 			}
 			return nil, nil, nil
 		}
@@ -1280,13 +1289,13 @@ func TestTierSweepRunnerKubernetesTeardown(t *testing.T) {
 			if stage.reason != "" {
 				t.Fatalf("stage = %+v, want the copied result folded", stage)
 			}
-			// The sync stage copies into the repo claim; the last copy is the
-			// result coming home.
+			// The sync stage copies into the repo claim; then the result and
+			// its logs come home, the result first.
 			copies := runnerCalls(cmds.ran, "cp")
-			if len(copies) != 2 {
-				t.Fatalf("copies = %d, want the sync copy and the copy of the result: %q", len(copies), cmds.ran)
+			if len(copies) != 3 {
+				t.Fatalf("copies = %d, want the sync copy, the result and the logs: %q", len(copies), cmds.ran)
 			}
-			resultCopy := copies[len(copies)-1]
+			lastCopy := copies[len(copies)-1]
 			deletes := runnerCalls(cmds.ran, "delete")
 			// The sync stage removes its pod itself, and the teardown removes
 			// it again with --ignore-not-found along with the rest.
@@ -1299,8 +1308,8 @@ func TestTierSweepRunnerKubernetesTeardown(t *testing.T) {
 				if !slices.Contains(strings.Fields(cmds.ran[at]), word) {
 					t.Errorf("teardown removal %d is %q, want one that removes a %s", i, cmds.ran[at], word)
 				}
-				if at < resultCopy {
-					t.Errorf("teardown removal %q ran before the result was read", cmds.ran[at])
+				if at < lastCopy {
+					t.Errorf("teardown removal %q ran before the result and its logs were copied out", cmds.ran[at])
 				}
 			}
 			for _, at := range deletes {
@@ -1473,6 +1482,123 @@ func TestTierSweepRunnerCollect(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestTierSweepRunnerHostSummary pins the one mapping the recorded line has:
+// a log directory under the engine's OutputDir moves to the same relative path
+// in the host run directory; a line with no group, or a directory the backend
+// does not bring home, is left as printed (gt-4lj2q).
+func TestTierSweepRunnerHostSummary(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		summary string
+		outDir  string
+		want    string
+	}{
+		{
+			name:    "a run path moves to the host run directory",
+			summary: "tier-sweep: integration RED passed=1 failed=1 skipped=0 failed: ./internal/cmd (logs /out/logs/integration) in 2m1s",
+			outDir:  "/host/runs/gastown-abc",
+			want:    "tier-sweep: integration RED passed=1 failed=1 skipped=0 failed: ./internal/cmd (logs /host/runs/gastown-abc/logs/integration) in 2m1s",
+		},
+		{
+			name:    "a line with no log group",
+			summary: "tier-sweep: shell GREEN passed=3 failed=0 skipped=0 in 4s",
+			outDir:  "/host/runs/gastown-abc",
+			want:    "tier-sweep: shell GREEN passed=3 failed=0 skipped=0 in 4s",
+		},
+		{
+			name:    "a directory outside the engine's output",
+			summary: "tier-sweep: shell GREEN passed=3 failed=0 skipped=0 (logs /tmp/tier-sweep.x) in 4s",
+			outDir:  "/host/runs/gastown-abc",
+			want:    "tier-sweep: shell GREEN passed=3 failed=0 skipped=0 (logs /tmp/tier-sweep.x) in 4s",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tierSweepRunnerHostSummary(tc.summary, tc.outDir); got != tc.want {
+				t.Errorf("summary = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A run that wrote no logs leaves the reader's /out/logs absent, and the copy
+// of it fails with "no such file": that is not the run's failure, so the copied
+// result's verdicts stand and the collect reports no error. Any other copy
+// failure is still the run's (gt-4lj2q).
+func TestK8sCollectToleratesNoLogsDirectory(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, spec, st := runnerKubernetesDaemon(t, now)
+	result := runnerTestResult(spec, now)
+	cluster := &runnerCluster{t: t, status: "Complete", result: &result, noLogs: true}
+	cmds := &runnerFakeCmds{answer: cluster.answer}
+	d.execCmd = cmds.run
+
+	stage := d.tierSweepRunRunner(context.Background(), st, spec)
+
+	if stage.reason != "" {
+		t.Fatalf("stage = %+v, want the copied result folded with no error: an absent logs directory is not a failure", stage)
+	}
+	for _, want := range []string{"integration GREEN passed=66", "race RED"} {
+		if !strings.Contains(stage.output, want) {
+			t.Errorf("stage output does not carry the copied verdict %q:\n%s", want, stage.output)
+		}
+	}
+	if stage.exitCode != tierSweepRedExit {
+		t.Errorf("exit code = %d, want the sweep's RED exit: the race tier is RED", stage.exitCode)
+	}
+	if _, err := sweeprunner.Read(spec.OutDir, spec.Rig, spec.SHA); err != nil {
+		t.Errorf("the result was not brought home past the absent logs directory: %v", err)
+	}
+	if n := len(runnerCalls(cmds.ran, "cp")); n != 3 {
+		t.Errorf("copies = %d, want the sync copy, the result and the attempted logs copy: %q", n, cmds.ran)
+	}
+}
+
+// The summary the daemon records names the host directory the logs were copied
+// to, not the engine's /out/logs, which the teardown removes with the claim
+// (gt-4lj2q).
+func TestTierSweepSummaryNamesTheHostLogPath(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	const shellSummary = "tier-sweep: shell GREEN passed=3 failed=0 skipped=0 (logs /tmp/tier-sweep.x)\n"
+	cfg := runnerTestConfig(t)
+	cfg.Backend = config.TierSweepRunnerKubernetes
+	d, _ := runnerCycleDaemon(t, now, cfg, shellSummary)
+	st := tierSweepStage{tiers: []string{"integration", "race"}, slot: true, rig: "gastown", tested: runnerTestSHA, budget: time.Second}
+	spec, ok, err := d.tierSweepRunnerSpec(st)
+	if err != nil || !ok {
+		t.Fatalf("spec = %+v, ok = %v, err = %v; want the runner to take the stage", spec, ok, err)
+	}
+	result := runnerTestResult(spec, now)
+	cmds := &runnerFakeCmds{answer: (&runnerCluster{t: t, status: "Complete", result: &result}).answer}
+	d.execCmd = cmds.run
+
+	cycle := d.startDogCycle("tier_sweep")
+	defer cycle.close()
+	if !d.runTierSweepRig(context.Background(), cycle, "gastown", now) {
+		t.Fatal("the cycle deferred; both stages ran and reported")
+	}
+
+	race := tierSweepTestState(t, d, "gastown").Tiers["race"]
+	if race.Verdict != tierSweepRed {
+		t.Fatalf("race = %+v, want the RED the result names", race)
+	}
+	want := filepath.Join(spec.OutDir, sweeprunner.LogsDirName)
+	if race.LogDir != want {
+		t.Errorf("race log dir = %q, want the host run directory %q", race.LogDir, want)
+	}
+	if strings.HasPrefix(race.LogDir, sweeprunner.OutputDir+"/") {
+		t.Errorf("race log dir = %q, want it away from the engine's %s: the teardown deletes that claim", race.LogDir, sweeprunner.OutputDir)
+	}
+	if out, err := os.ReadFile(race.Log); err != nil {
+		t.Errorf("reading the stage log %q: %v", race.Log, err)
+	} else if !strings.Contains(string(out), "tier-sweep: race RED") {
+		t.Errorf("the stage log %q does not hold the result's summary line:\n%s", race.Log, out)
 	}
 }
 

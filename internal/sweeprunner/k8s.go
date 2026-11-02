@@ -309,8 +309,8 @@ type EmptyDirVolumeSource struct{}
 // the output claim and the Job. The teardown removes the sync pod, the Job, the
 // reader pod and the output claim, in that order, and never the repo claim,
 // which every run reuses. Poll reports when the run has ended and copies its
-// result out of the output claim onto the host; the caller reads the host copy,
-// and runs the teardown after that read.
+// result and its per-unit logs out of the output claim onto the host; the
+// caller reads the host copy, and runs the teardown after that read.
 func (Kubernetes) Render(spec Spec) (Plan, error) {
 	if err := spec.Validate(); err != nil {
 		return Plan{}, err
@@ -375,6 +375,11 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 				{Argv: kubectlArgv(spec, "apply", "-f", "-"), Stdin: reader.JSON()},
 				{Argv: kubectlArgv(spec, "wait", "--for=condition=Ready", "pod/"+reader.Metadata.Name, "--timeout="+readyTimeout)},
 				{Argv: kubectlArgv(spec, "cp", reader.Metadata.Name+":"+OutputDir+"/"+ResultFileName, filepath.Join(spec.OutDir, ResultFileName))},
+				// The per-unit logs go beside the result before the teardown
+				// removes the claim, so a RED summary's log path resolves on
+				// the host. A run that wrote none leaves the source absent,
+				// which is not a failure (gt-4lj2q).
+				{Argv: kubectlArgv(spec, "cp", reader.Metadata.Name+":"+OutputDir+"/"+LogsDirName, filepath.Join(spec.OutDir, LogsDirName)), MissingSourceOK: true},
 			},
 		},
 	}, nil
