@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -80,6 +81,7 @@ func TestSpendFileWriteIsAtomic(t *testing.T) {
 	t.Parallel()
 
 	oldDoc := `{"ts":"2026-10-14T21:06:00Z","per_hour":0.12,"balance":5.2}`
+	newDoc := `{"ts":"2026-11-01T17:04:05Z","per_hour":1.25,"balance":74.55}`
 
 	t.Run("a good report replaces the file by rename", func(t *testing.T) {
 		t.Parallel()
@@ -98,6 +100,25 @@ func TestSpendFileWriteIsAtomic(t *testing.T) {
 		require.NotNil(t, doc.Balance)
 		assert.InDelta(t, 74.55, *doc.Balance, 1e-9)
 		assert.Empty(t, spendTemps(t, dir), "a temporary file was left beside the reading")
+	})
+
+	t.Run("another hub's in-flight temporary file is left alone", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		// A second hub writing the same town holds its own temporary file. The
+		// name seeded here is the fixed one a writer would otherwise truncate and
+		// rename over, which is the collision gt-h7vex fixes.
+		other := filepath.Join(dir, spendWatchName+".tmp")
+		require.NoError(t, os.WriteFile(other, []byte("the other hub's reading in flight"), 0o644))
+
+		require.NoError(t, writeSpendWatch(dir, spendReport(t, 74.55, 1.25, 2.5), spendWatchNow))
+
+		data, err := os.ReadFile(other)
+		require.NoError(t, err, "the writer took the other hub's temporary file")
+		assert.Equal(t, "the other hub's reading in flight", string(data), "the writer overwrote the other hub's temporary file")
+		doc, _ := readSpendWatch(t, dir)
+		require.NotNil(t, doc.Balance)
+		assert.InDelta(t, 74.55, *doc.Balance, 1e-9)
 	})
 
 	t.Run("a report with no balance writes nothing", func(t *testing.T) {
@@ -127,27 +148,63 @@ func TestSpendFileWriteIsAtomic(t *testing.T) {
 		assert.Equal(t, oldDoc, string(data), "a failed write left the reading altered")
 	})
 
-	t.Run("a failed write leaves the old file intact", func(t *testing.T) {
+	// The temporary file's creation, write and close each refuse in turn. The
+	// refusals are scripted rather than made by the directory's mode, which root
+	// does not respect, so every row runs under any user.
+	t.Run("a failed temporary file leaves the old file intact", func(t *testing.T) {
+		t.Parallel()
+		refused := errors.New("the directory refuses the write")
+		for _, tc := range []struct {
+			name   string
+			create func(dir string) (spendTempFile, error)
+		}{
+			{"creation refused", scriptedTemp(refused, nil, nil)},
+			{"write refused", scriptedTemp(nil, refused, nil)},
+			{"close refused", scriptedTemp(nil, nil, refused)},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				dir := t.TempDir()
+				path := filepath.Join(dir, spendWatchName)
+				require.NoError(t, os.WriteFile(path, []byte(oldDoc), 0o644))
+
+				err := writeSpendWatchVia(dir, []byte(newDoc), tc.create)
+
+				require.ErrorIs(t, err, refused, "a refused temporary file reported no error")
+				data, readErr := os.ReadFile(path)
+				require.NoError(t, readErr)
+				assert.Equal(t, oldDoc, string(data), "a refused temporary file did not leave the old reading in place")
+				assert.Empty(t, spendTemps(t, dir), "a refused temporary file left a temporary file behind")
+			})
+		}
+	})
+
+	t.Run("a temporary file in a missing directory is a failure", func(t *testing.T) {
+		t.Parallel()
+		// No directory to create the file in refuses it for any user, so this row
+		// runs the production creator on a refusal the OS gives under root too.
+		dir := filepath.Join(t.TempDir(), "missing")
+
+		err := writeSpendWatchVia(dir, []byte(newDoc), createSpendTemp)
+
+		require.ErrorIs(t, err, os.ErrNotExist, "a temporary file in a missing directory reported no error")
+	})
+
+	t.Run("the watch file takes the mode a plain write gives it", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
-		path := filepath.Join(dir, spendWatchName)
-		require.NoError(t, os.WriteFile(path, []byte(oldDoc), 0o644))
-		// A directory that refuses new entries is the write failing on a town
-		// whose watch directory the dashboard cannot write.
-		//testpolicy:allow no-exec-files — a directory needs its search bit to be entered, so 0500 is this fixture's read-only state: it drops the write bit
-		require.NoError(t, os.Chmod(dir, 0o500))
-		//testpolicy:allow no-exec-files — the cleanup restores the fixture directory's write bit so the test's own tree can be removed
-		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+		// The umask applies to a plain 0644 write, so that file's mode is the one
+		// the reading must match whatever the umask is.
+		plain := filepath.Join(dir, "plain")
+		require.NoError(t, os.WriteFile(plain, nil, 0o644))
+		want, err := os.Stat(plain)
+		require.NoError(t, err)
 
-		err := writeSpendWatch(dir, spendReport(t, 74.55, 1.25, 2.5), spendWatchNow)
+		require.NoError(t, writeSpendWatch(dir, spendReport(t, 74.55, 1.25, 2.5), spendWatchNow))
 
-		require.Error(t, err, "a write into a directory that refuses it reported no error")
-		//testpolicy:allow no-exec-files — restores the write bit so the failed write's file can be read back
-		require.NoError(t, os.Chmod(dir, 0o700))
-		data, readErr := os.ReadFile(path)
-		require.NoError(t, readErr)
-		assert.Equal(t, oldDoc, string(data), "a failed write did not leave the old reading in place")
-		assert.Empty(t, spendTemps(t, dir), "a failed write left a temporary file behind")
+		got, err := os.Stat(filepath.Join(dir, spendWatchName))
+		require.NoError(t, err)
+		assert.Equal(t, want.Mode().Perm(), got.Mode().Perm(), "the watch file's mode is not the one a plain 0644 write gives")
 	})
 
 	t.Run("a rename that is refused is a failure", func(t *testing.T) {
@@ -163,6 +220,7 @@ func TestSpendFileWriteIsAtomic(t *testing.T) {
 		err := writeSpendWatch(dir, spendReport(t, 74.55, 1.25, 2.5), spendWatchNow)
 
 		require.Error(t, err, "a rename that the target refused reported no error")
+		assert.ErrorContains(t, err, "replacing", "a refused rename is not reported as a replacement")
 		data, readErr := os.ReadFile(held)
 		require.NoError(t, readErr)
 		assert.Equal(t, "kept", string(data), "a refused rename changed what was there")
@@ -189,6 +247,45 @@ func spendTemps(t *testing.T, dir string) []string {
 	found, err := filepath.Glob(filepath.Join(dir, "*.tmp"))
 	require.NoError(t, err)
 	return found
+}
+
+// scriptedTemp is a temporary file creator that refuses the creation, the write
+// or the close as its arguments say. Each file it hands out is a real temporary
+// file from createSpendTemp, so a refusal after creation is cleaned up as a
+// real one would be.
+func scriptedTemp(createErr, writeErr, closeErr error) func(dir string) (spendTempFile, error) {
+	return func(dir string) (spendTempFile, error) {
+		if createErr != nil {
+			return nil, createErr
+		}
+		f, err := createSpendTemp(dir)
+		if err != nil {
+			return nil, err
+		}
+		return &scriptedFile{spendTempFile: f, writeErr: writeErr, closeErr: closeErr}, nil
+	}
+}
+
+// scriptedFile is a temporary file whose write or close is refused as scripted.
+// The real file is always closed, so no descriptor is left open by a refusal.
+type scriptedFile struct {
+	spendTempFile
+	writeErr, closeErr error
+}
+
+func (f *scriptedFile) Write(p []byte) (int, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
+	return f.spendTempFile.Write(p)
+}
+
+func (f *scriptedFile) Close() error {
+	err := f.spendTempFile.Close()
+	if f.closeErr != nil {
+		return f.closeErr
+	}
+	return err
 }
 
 // A dashboard that cannot write the watch file still draws the report it read:
