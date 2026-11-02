@@ -1,7 +1,9 @@
 // Package bdshim routes a bd command to the store that owns it: a Dolt rig
 // keeps the real bd (bd.real, beside this binary), and a tracker rig answers
-// through a verb handler registered here. X3-X6 of gt-p85pw add the handlers;
-// this skeleton ships none, so every tracker verb is refused.
+// through a verb handler registered here. cook and the formula verbs work
+// without a store (cook needs one only with --persist), so they reach bd.real
+// from a tracker rig too; a tracker verb with no handler and no such rule is
+// refused.
 package bdshim
 
 import (
@@ -135,6 +137,14 @@ func Decide(getenv func(string) string, getwd func() (string, error), args []str
 	}
 	town := filepath.Dir(found.table)
 
+	// cook and the formula verbs read formula files, and cook opens a store
+	// only with --persist (docs/research/tracker/R1-cook-port.md), so bd.real
+	// answers them from a tracker rig directory: the verb decides before any
+	// flag or bead id routes it.
+	if passesThrough(commandPath(args)) {
+		return d, nil
+	}
+
 	// A flag that selects the store bd opens moves the command off the store the
 	// working directory names, and nothing here follows it, so while a tracker
 	// rig exists it is refused rather than routed by the wrong directory.
@@ -191,6 +201,25 @@ func Decide(getenv func(string) string, getwd func() (string, error), args []str
 		}
 	}
 	return d, nil
+}
+
+// passThroughVerbs are the commands a tracker rig hands to bd.real instead of
+// answering or refusing: cook and the formula verbs read formula files and the
+// town overlay, and cook opens a store only with --persist
+// (docs/research/tracker/R1-cook-port.md). mol, wisp and gate are not here:
+// their handlers wait on recorded goldens, so those verbs stay refused until
+// then (gt-p85pw.101).
+var passThroughVerbs = map[string]bool{
+	"cook":    true,
+	"formula": true,
+}
+
+// passesThrough reports whether command is one a tracker rig hands to
+// bd.real. A formula subcommand passes with its verb: commandPath opens the
+// path with the verb and resolves an alias to the command it stands for.
+func passesThrough(command string) bool {
+	verb, _, _ := strings.Cut(command, " ")
+	return passThroughVerbs[verb]
 }
 
 // Refusal is the message for a tracker verb this binary has no handler for.
