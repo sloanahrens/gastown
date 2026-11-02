@@ -19,11 +19,10 @@ timeout = "15m"
 
 # Polecat Image
 
-A sandbox polecat runs the **image's** gt (hooks, `gt done`, `bd` access), so
-the image must carry the installed gt's commit. The sandbox backend refuses a sling whose image carries another
-commit (gt-pmxo9); gt is reinstalled after most landings, so without this
-plugin every sandbox sling would be refused until someone rebuilt the image by
-hand.
+A sandbox polecat runs the **image's** gt (hooks, `gt done`, `bd` access), and
+the sandbox backend refuses a sling whose image carries another commit
+(gt-pmxo9). gt is reinstalled after most landings, so without this plugin every
+sandbox sling would be refused until someone rebuilt the image by hand.
 
 `rebuild_gt` installs at most once per 30 minutes, so this plugin builds about
 48 times a day; a build is three cross-compiles and a `docker build`, about a
@@ -125,12 +124,10 @@ The build cache is not touched. A `POLECAT_IMAGE_KEEP` that is not a whole
 number, or a tag listing docker cannot answer, keeps every tag and logs why; the
 rest of the run carries on.
 
-`POLECAT_IMAGE_TRIM_CONTEXT` adds the sweep runner's Docker context as a second
-trim target: the same newest-N rule with `docker --context <name>`, except a tag
-any container there uses is kept and logged `in use by a container`, and every
-line names the context. The daemon sets it for the installer it runs, from
-`tier_sweep.runner.context` when the sweep is on and the backend is docker or
-kubernetes (gt-bxp17).
+`POLECAT_IMAGE_TRIM_CONTEXT` runs the same newest-N trim on another Docker
+context (`docker --context <name>`), keeping any tag a container uses and naming
+the context in each line. The daemon sets it from
+`tier_sweep.runner.context` for docker and kubernetes (gt-bxp17).
 
 ## Build cache
 
@@ -140,11 +137,10 @@ toolchain, golangci-lint, the gt and bd compiles), which grew to 20 GB unused
 `docker builder prune --keep-storage 8GB -f` (`POLECAT_IMAGE_BUILDER_KEEP`):
 LRU, so the most recently used layers stay and the next rebuild is warm. It runs
 that command and no wider prune (never a system, image, volume or `--all`
-prune), and it runs under the plugin's lock: a run that built already owns it,
-any other takes it, and a run that finds another's lock, or whose lock was taken
-during the build, skips with a logged line, so a trim never overlaps a build. A
-down docker, a failed build or a failing prune trims nothing and does not fail
-the run.
+prune), and it runs under the plugin's lock: a run that finds another's lock, or
+whose lock was taken during the build, skips with a logged line, so a trim
+never overlaps a build. A down docker, a failed build or a failing prune trims
+nothing and does not fail the run.
 
 ## Per-rig cache volumes
 
@@ -168,18 +164,17 @@ removes a path outside the volume. No volume is removed and no `docker volume
 prune` runs.
 
 A sandbox starting between the in-use check and the helper can lose a cache
-entry; Go rebuilds the miss, so the window is accepted, not locked.
+entry; Go rebuilds the miss.
 
 Every failure exits non-zero with the tail of the failing command: a commit the
 rig repo does not know, a failed build, an image still carrying another commit,
-an installed gt whose commit cannot be read. A deferral exits 0 and prints why,
-unless `POLECAT_IMAGE_FAIL_CLOSED=1` makes it exit non-zero; read "Publishing to
-a registry" before setting that variable. A plugin whose receipts show
-`deferred:` run after run is stuck behind that reason, with the sandbox sling's
-refusal as the net.
+an installed gt whose commit cannot be read. A deferral prints why and exits 0
+unless `POLECAT_IMAGE_FAIL_CLOSED=1`; read "Publishing to a registry" first. A
+plugin whose receipts show `deferred:` run after run is stuck behind that
+reason, with the sandbox sling's refusal as the net.
 
-Run it directly; before building or syncing this plugin, read "Script entry
-point" in `plugins/README.md`:
+Run it directly; read "Script entry point" in `plugins/README.md` before
+building or syncing:
 
 ```bash
 ~/gt/plugins/polecat-image/bin/polecat-image
