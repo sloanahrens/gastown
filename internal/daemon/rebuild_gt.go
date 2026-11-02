@@ -1036,11 +1036,13 @@ func (d *Daemon) rebuildGTInstall(ctx context.Context, cycle *dogCycle, repoRoot
 	out := &rebuildGTInstallLog{}
 	cmd := exec.CommandContext(ctx, program, args...)
 	cmd.Dir = repoRoot
-	// The environment carries only the two knobs the plugin set (gt-9jax).
-	cmd.Env = append(os.Environ(),
+	// The environment carries the two knobs the plugin set (gt-9jax) and,
+	// when the sweep has an engine of its own, the context the polecat-image
+	// plugin trims beside the default one (gt-bxp17).
+	cmd.Env = d.withPolecatImageTrimContext(append(os.Environ(),
 		fmt.Sprintf("INSTALL_GT_LOCK_WAIT=%d", int(rebuildGTInstallLockWait.Seconds())),
 		"INSTALL_GT_RIG_DIR="+repoRoot,
-	)
+	))
 	cmd.Stdout = out
 	cmd.Stderr = out
 

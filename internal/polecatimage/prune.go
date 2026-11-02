@@ -63,21 +63,21 @@ func KeepCount(v string) (int, bool) {
 // A listing it cannot read prunes nothing and says so, so a broken docker never
 // reads as "no old tags" (gt-tpg0p.7).
 func (r *Run) PruneOldImages() {
-	r.pruneImages("", false)
+	r.pruneImages("")
 	trimContext := r.Cfg.TrimContext
 	if trimContext == "" {
 		return
 	}
-	if !contextName(trimContext) {
+	if !ContextName(trimContext) {
 		r.Logf("images on context %s: not trimmed: not one Docker context name", trimContext)
 		return
 	}
-	r.pruneImages(trimContext, true)
+	r.pruneImages(trimContext)
 }
 
 // pruneImages is PruneOldImages on one engine: "" is the default engine, and
-// checkInUse skips a tag a container there uses, running or stopped.
-func (r *Run) pruneImages(context string, checkInUse bool) {
+// any other engine skips a tag a container there uses, running or stopped.
+func (r *Run) pruneImages(context string) {
 	label, on := "images", ""
 	if context != "" {
 		label, on = "images on context "+context, " on context "+context
@@ -94,7 +94,7 @@ func (r *Run) pruneImages(context string, checkInUse bool) {
 		return
 	}
 	used := map[string]struct{}{}
-	if checkInUse {
+	if context != "" {
 		res := r.dockerCall(context, "ps", "-a", "--format", containersFormat)
 		if res.failed() {
 			r.Logf("%s: cannot list the containers (%s); nothing pruned", label, lastLine(res.combined()))
@@ -134,11 +134,9 @@ func (r *Run) pruneImages(context string, checkInUse bool) {
 		if id == devID {
 			continue
 		}
-		if checkInUse {
-			if _, ok := used[ref]; ok || imageInUse(used, id) {
-				r.Logf("kept %s%s (in use by a container)", ref, on)
-				continue
-			}
+		if context != "" && imageInUse(used, ref, id) {
+			r.Logf("kept %s%s (in use by a container)", ref, on)
+			continue
 		}
 		if context == "" {
 			if err := r.DropRegistryAlias(ref); err != nil {
@@ -166,10 +164,10 @@ func (r *Run) imageIDOn(context, ref string) string {
 	return strings.TrimSpace(r.dockerCall(context, "image", "inspect", "--format", imageIDFormat, ref).output())
 }
 
-// contextName reports whether name can stand after docker's --context: the
+// ContextName reports whether name can stand after docker's --context: the
 // shape the sweep runner accepts, so a typo or a leading dash keeps every tag
 // rather than reaching docker as another option.
-func contextName(name string) bool {
+func ContextName(name string) bool {
 	if name == "" || name == "." || name == ".." || strings.HasPrefix(name, "-") {
 		return false
 	}
@@ -178,21 +176,37 @@ func contextName(name string) bool {
 	})
 }
 
-// imageInUse reports whether a container on the engine uses the image: docker
-// ps names either the reference it was created with or the image id, often the
-// 12-character one.
-func imageInUse(used map[string]struct{}, id string) bool {
-	if _, ok := used[id]; ok {
-		return true
-	}
-	short := strings.TrimPrefix(id, "sha256:")
-	for ref := range used {
-		ref = strings.TrimPrefix(ref, "sha256:")
-		if len(ref) >= 12 && strings.HasPrefix(short, ref) {
+// imageInUse reports whether a container on the engine uses ref: docker ps
+// names the reference the container was created with, or the image id, often
+// the 12-character one.
+func imageInUse(used map[string]struct{}, ref, id string) bool {
+	id = strings.TrimPrefix(id, "sha256:")
+	for image := range used {
+		image = strings.TrimPrefix(image, "sha256:")
+		if image == id || image == ref {
+			return true
+		}
+		// docker may name the id by its 12-character prefix.
+		if len(image) >= 12 && strings.HasPrefix(id, image) {
+			return true
+		}
+		// A container created from a registry-prefixed reference names the
+		// whole repo; the tag it selects is the last path segment. Comparing
+		// segments can keep an old tag needlessly when two registries hold the
+		// same short name, which is the safe direction.
+		if lastPathSegment(image) == lastPathSegment(ref) {
 			return true
 		}
 	}
 	return false
+}
+
+// lastPathSegment is ref's repository and tag without a registry prefix.
+func lastPathSegment(ref string) string {
+	if i := strings.LastIndex(ref, "/"); i >= 0 {
+		return ref[i+1:]
+	}
+	return ref
 }
 
 // PruneBuildCache brings Docker's build cache back under Cfg.BuilderKeep by

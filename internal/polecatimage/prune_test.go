@@ -309,6 +309,20 @@ func TestTrimContextSkipsAnImageInUse(t *testing.T) {
 	tr.wantLogged(t, "kept gastown-polecat:aaa1111 on context colima-gt-control (in use by a container)")
 }
 
+// TestTrimContextSkipsAnImageAContainerNamesByRegistryRef covers a container
+// created from a registry-prefixed reference: docker ps names the whole repo,
+// so the tag it selects is matched by its last path segment (gt-bxp17).
+func TestTrimContextSkipsAnImageAContainerNamesByRegistryRef(t *testing.T) {
+	t.Parallel()
+	tr, pr := trimContextRun(t, "colima-gt-control")
+	pr.used = result{stdout: "colima-registry.local:5000/gastown-polecat:aaa1111\n"}
+	tr.PruneOldImages()
+	if anyCallNamed(tr.callsTo("docker"), "--context", "colima-gt-control", "rmi") {
+		t.Errorf("an image a container uses by registry reference was untagged: %v", callLines(tr, "docker"))
+	}
+	tr.wantLogged(t, "kept gastown-polecat:aaa1111 on context colima-gt-control (in use by a container)")
+}
+
 // TestTrimContextSkipsAnImageAContainerNamesByID covers docker ps reporting the
 // image id rather than the tag the container was created from.
 func TestTrimContextSkipsAnImageAContainerNamesByID(t *testing.T) {

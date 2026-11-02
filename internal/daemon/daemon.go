@@ -1255,9 +1255,15 @@ func New(config *Config) (*Daemon, error) {
 		// settings/config.json, not the retired mayor/daemon.json (gt-y3pgh.12).
 		source := PatrolConfigSource(config.TownRoot)
 		logger.Printf("Loaded patrol config from %s", source)
-		// Propagate the daemon config's env to this process and all spawned
-		// sessions, and the polecat-image plugin's trim context with it.
-		applyDaemonEnv(patrolConfig, source, processEnv{}.Setenv, logger.Printf)
+		// Propagate the daemon config's env to this process and all spawned sessions.
+		for k, v := range patrolConfig.Env {
+			processEnv{}.Setenv(k, v)
+			if agentconfig.LooksLikeSecret(k, v) {
+				logger.Printf("Set env %s=<redacted> from %s", k, source)
+			} else {
+				logger.Printf("Set env %s=%s from %s", k, v, source)
+			}
+		}
 	}
 	doltEnv := agentconfig.ConfiguredDoltEnv(config.TownRoot)
 	for _, key := range agentconfig.DoltEndpointEnvKeys {
