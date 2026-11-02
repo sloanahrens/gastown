@@ -214,11 +214,16 @@ func (m *DoltServerManager) containerStop(townRoot string) error {
 
 // containerIsRunning reports whether the town's Dolt container answers.
 func (m *DoltServerManager) containerIsRunning(townRoot string) (bool, error) {
-	if m.containerLifecycle != nil {
-		running, _, err := m.containerLifecycle.IsRunning(townRoot)
-		return running, err
+	var (
+		running bool
+		err     error
+	)
+	switch {
+	case m.containerLifecycle != nil:
+		running, _, err = m.containerLifecycle.IsRunning(townRoot)
+	default:
+		running, _, err = doltserver.IsRunning(townRoot)
 	}
-	running, _, err := doltserver.IsRunning(townRoot)
 	return running, err
 }
 

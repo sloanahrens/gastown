@@ -238,6 +238,23 @@ func TestExternalContainerStartAndStopCallDocker(t *testing.T) {
 		noHostProcess(t, f)
 	})
 
+	t.Run("start reports a docker that cannot run", func(t *testing.T) {
+		t.Parallel()
+		townRoot := externalContainerTown(t, port, name)
+		f := newFakeHost()
+		h := f.host()
+		f.on("docker start "+name, fakeReply{err: errors.New(`exec: "docker": executable file not found in $PATH`)})
+
+		err := h.Start(townRoot)
+		if err == nil {
+			t.Fatal("Start with docker unavailable succeeded, want an error")
+		}
+		if !strings.Contains(err.Error(), name) || !strings.Contains(err.Error(), "could not be run") {
+			t.Errorf("error %q does not report the docker command that could not run for %q", err, name)
+		}
+		noHostProcess(t, f)
+	})
+
 	t.Run("stop runs docker stop with the stop timeout", func(t *testing.T) {
 		t.Parallel()
 		townRoot := externalContainerTown(t, port, name)
@@ -267,6 +284,23 @@ func TestExternalContainerStartAndStopCallDocker(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), name) {
 			t.Errorf("error %q does not name the container %q", err, name)
+		}
+		noHostProcess(t, f)
+	})
+
+	t.Run("stop reports a docker that cannot run", func(t *testing.T) {
+		t.Parallel()
+		townRoot := externalContainerTown(t, port, name)
+		f := newFakeHost()
+		h := f.host()
+		f.on("docker stop -t 5 "+name, fakeReply{err: errors.New(`exec: "docker": executable file not found in $PATH`)})
+
+		err := h.Stop(townRoot)
+		if err == nil {
+			t.Fatal("Stop with docker unavailable succeeded, want an error")
+		}
+		if !strings.Contains(err.Error(), name) || !strings.Contains(err.Error(), "could not be run") {
+			t.Errorf("error %q does not report the docker command that could not run for %q", err, name)
 		}
 		noHostProcess(t, f)
 	})

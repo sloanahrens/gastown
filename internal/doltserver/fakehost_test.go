@@ -76,10 +76,12 @@ type fakeSignal struct {
 }
 
 // fakeReply is a canned command result: stdout, stderr and the exit status
-// (0 is success).
+// (0 is success). err, when set, is the whole failure: an error with no exit
+// status, the way a missing executable reads.
 type fakeReply struct {
 	stdout, stderr string
 	code           int
+	err            error
 }
 
 // fakeExit is a command's exit status, read through ExitCode().
@@ -336,6 +338,9 @@ func (f *fakeHost) run(c hostCall) ([]byte, []byte, error) {
 	r := queue[0]
 	if len(queue) > 1 {
 		f.answers[key] = queue[1:]
+	}
+	if r.err != nil {
+		return nil, nil, r.err
 	}
 	if r.code != 0 {
 		return []byte(r.stdout), []byte(r.stderr), fakeExit(r.code)
