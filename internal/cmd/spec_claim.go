@@ -36,7 +36,7 @@ func claimOf(c duplicateCandidate) specdispatch.Claimant {
 		ID:       c.ID,
 		Status:   c.Status,
 		Assignee: c.Ready.Assignee,
-		// Labels come from the list row, so a handoff note is recognised as
+		// Labels come from the list row, so a handoff note is recognized as
 		// one even when its design and notes went unread (gt-d5f5q).
 		Labels:    c.Ready.Labels,
 		Priority:  c.Priority,
