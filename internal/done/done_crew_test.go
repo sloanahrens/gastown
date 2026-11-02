@@ -1,6 +1,7 @@
 package done
 
 import (
+	"bytes"
 	"errors"
 	"regexp"
 	"strings"
@@ -76,6 +77,23 @@ func TestCrewSubmitMarksPushedBranchReadyToLand(t *testing.T) {
 	m := crewSubmittedRE.FindStringSubmatch(comments[0].Text)
 	if m == nil || m[1] != crewTestBranch || m[2] != head || m[3] != "main" {
 		t.Errorf("submission comment %q does not parse as %s @ %s onto main (got %v)", comments[0].Text, crewTestBranch, head, m)
+	}
+}
+
+// TestCrewSubmitPrintsNextStep: a crew submission that marks the bead ready
+// ends its output with the line naming gt land wait, so a crew session that
+// has forgotten its workflow still learns what to do next (gt-2ass0).
+func TestCrewSubmitPrintsNextStep(t *testing.T) {
+	t.Parallel()
+	h := newCrewSubmitHarness(t)
+	var out bytes.Buffer
+	h.r.out = &out
+	if err := submitCrewForLanding(h.r); err != nil {
+		t.Fatalf("crew submit: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	if last := lines[len(lines)-1]; !strings.Contains(last, "gt land wait") {
+		t.Errorf("last crew output line = %q, want the line naming gt land wait", last)
 	}
 }
 
