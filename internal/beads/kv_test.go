@@ -109,10 +109,11 @@ func TestKVGetFailureWithoutAFoundFalseAnswerIsNotNotFound(t *testing.T) {
 }
 
 // A failed kv set names bd's reason instead of leaving only an exit status:
-// bd writes the reason to stderr, or in machine mode only to the error
-// envelope on stdout (gt-gjuvg). A reason the error already carries is not
-// repeated, and nothing is added when bd gave no reason to add.
-func TestKVSetErrorCarriesBdStderr(t *testing.T) {
+// KVSet runs bd in machine mode, where the reason is in the stdout error
+// envelope, and a bd that writes it to stderr leaves the run error carrying
+// it. A reason the error already carries is not repeated, and nothing is
+// added when bd gave no reason to add.
+func TestKVSetErrorCarriesBdReason(t *testing.T) {
 	t.Parallel()
 	const reason = "invalid key: key cannot start with 'kv.' (would create nested prefix)"
 	envelope := `{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":{"kind":"internal","message":"` + reason + `"}}`
@@ -120,13 +121,13 @@ func TestKVSetErrorCarriesBdStderr(t *testing.T) {
 		stdout, stderr string
 		wantReason     bool
 	}{
-		"stderr":                 {stderr: "Error: " + reason, wantReason: true},
-		"machine envelope":       {stdout: envelope, wantReason: true},
-		"reason already carried": {stdout: envelope, stderr: "Error: " + reason, wantReason: true},
-		"no envelope":            {},
-		"unreadable envelope":    {stdout: "not json"},
-		"empty reason":           {stdout: `{"error":{"kind":"internal","message":""}}`},
-		"non-string error value": {stdout: `{"error":42}`},
+		"stderr reason already in the run error": {stderr: "Error: " + reason, wantReason: true},
+		"machine envelope":                       {stdout: envelope, wantReason: true},
+		"reason already carried":                 {stdout: envelope, stderr: "Error: " + reason, wantReason: true},
+		"no envelope":                            {},
+		"unreadable envelope":                    {stdout: "not json"},
+		"empty reason":                           {stdout: `{"error":{"kind":"internal","message":""}}`},
+		"non-string error value":                 {stdout: `{"error":42}`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
