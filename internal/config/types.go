@@ -58,7 +58,33 @@ type TownConfig struct {
 type DoltEndpoint struct {
 	Host          string `json:"host,omitempty"`
 	ContainerHost string `json:"container_host,omitempty"`
-	Port          int    `json:"port"`
+	// ExternalContainer names the Docker container that runs this town's Dolt
+	// server, for a town that keeps Dolt in a container under a memory limit
+	// (gt-xeb1x). Unset is the host-process server gt starts itself; set, gt
+	// starts and stops the container with docker and reads its health from a
+	// SQL ping, never from a pid. Parse it with ParseExternalContainer.
+	ExternalContainer string `json:"external_container,omitempty"`
+	Port              int    `json:"port"`
+}
+
+// dockerContainerName is the shape of a container name gt passes to docker: it
+// starts with a letter or digit, and the rest are letters, digits, '_', '.' or
+// '-'. A name outside this set is refused rather than handed to docker, where a
+// leading '-' would read as a flag.
+var dockerContainerName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+
+// ParseExternalContainer returns the container name dolt.external_container
+// names, or "" (with no error) when it is unset. A value set but not a Docker
+// container name is an error, never an empty answer: a town that meant to name
+// a container must not be read as one that manages a host process.
+func (d *DoltEndpoint) ParseExternalContainer() (string, error) {
+	if d == nil || d.ExternalContainer == "" {
+		return "", nil
+	}
+	if !dockerContainerName.MatchString(d.ExternalContainer) {
+		return "", fmt.Errorf("dolt.external_container = %q: want a Docker container name (letters, digits, '_', '.' and '-', starting with a letter or digit)", d.ExternalContainer)
+	}
+	return d.ExternalContainer, nil
 }
 
 // TrackerEndpoint is where the town's tracker (trackerd) listens. An empty

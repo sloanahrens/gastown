@@ -295,8 +295,35 @@ type Config struct {
 	// disable it without a source revert+rebuild — a runtime escape hatch.
 	AutoGC string
 
+	// ExternalContainer is the Docker container that runs this town's Dolt
+	// server (town.json dolt.external_container), "" when gt manages a host
+	// process. Set, the server is somebody else's process: gt starts and stops
+	// the container with docker and reads its health from a SQL ping, and no
+	// path writes a pid file, spawns dolt sql-server or signals a pid
+	// (gt-xeb1x). Read it through ExternalContainerSetting, which carries a
+	// setting that would not parse.
+	ExternalContainer string
+
+	// externalContainerErr is the parse failure of a set but unusable
+	// dolt.external_container; ExternalContainer stays empty in that case.
+	externalContainerErr error
+
 	// lookupHost resolves Host for IsRemote; nil is net.LookupHost.
 	lookupHost func(string) ([]string, error)
+}
+
+// ExternalContainerSetting returns the Docker container this town's Dolt runs
+// in, "" when gt manages a host process. A set but unusable
+// dolt.external_container is an error: a caller must never read it as unset and
+// fall back to spawning or signaling a host process.
+func (c *Config) ExternalContainerSetting() (string, error) {
+	if c == nil {
+		return "", nil
+	}
+	if c.externalContainerErr != nil {
+		return "", c.externalContainerErr
+	}
+	return c.ExternalContainer, nil
 }
 
 // ErrNoEndpoint: the town names no Dolt endpoint, neither in mayor/town.json
@@ -350,6 +377,14 @@ func (h *host) DefaultConfig(townRoot string) *Config {
 	// refuses: there is no fallback to DefaultPort.
 	ep, _ := h.resolveDoltEndpoint(townRoot)
 	config.Host, config.Port = ep.Host, ep.Port
+	// A town that names a container for its Dolt manages no host process
+	// (gt-xeb1x). A name that does not parse is carried as an error so every
+	// caller refuses instead of falling back to one.
+	if name, err := ep.ParseExternalContainer(); err != nil {
+		config.externalContainerErr = err
+	} else {
+		config.ExternalContainer = name
+	}
 	if scheduler, ok := doltCfg.EventSchedulerSetting(); ok {
 		config.EventScheduler = scheduler
 	}
@@ -735,6 +770,19 @@ func countDoltDatabases(dataDir string) int {
 // For remote servers, skips PID/port scan and just does TCP reachability.
 func (h *host) IsRunning(townRoot string) (bool, int, error) {
 	config := h.DefaultConfig(townRoot)
+
+	// A Dolt gt runs in a Docker container (dolt.external_container) is not
+	// this host's process: only its listener can answer, so a SQL ping is the
+	// status. No pid file is read or removed, no ps lookup runs, and no pid is
+	// returned (gt-xeb1x).
+	if name, err := config.ExternalContainerSetting(); err != nil {
+		return false, 0, err
+	} else if name != "" {
+		if err := h.pingSQL(config); err != nil {
+			return false, 0, nil
+		}
+		return true, 0, nil
+	}
 
 	// Remote server: no local PID/process to check — just TCP reachability.
 	if config.IsRemote() {
@@ -1335,6 +1383,14 @@ func VerifyServerDataDir(townRoot string) guard.Result {
 // from a different directory, hijacking the port.
 func (h *host) KillImposters(townRoot string) error {
 	config := h.DefaultConfig(townRoot)
+	// A container's port is held by the container's own forward, not by an
+	// imposter, and a container town has no host process for gt to signal at
+	// all (gt-xeb1x). Refusing here covers every caller of this function.
+	if name, err := config.ExternalContainerSetting(); err != nil {
+		return err
+	} else if name != "" {
+		return fmt.Errorf("dolt.external_container = %q: the port is held by the container's own forward, and gt never signals a process it did not start", name)
+	}
 	pid := h.findDoltServerOnPort(config.Port)
 	if pid == 0 {
 		return nil // No server on port
@@ -2009,14 +2065,118 @@ behavior:
 	return atomicfile.WriteFile(configPath, []byte(content), 0600)
 }
 
+// sqlPingTimeout bounds one SQL ping: the status read IsRunning makes in
+// container mode and one attempt of Start's wait for the container's listener.
+const sqlPingTimeout = 2 * time.Second
+
+// pingSQL opens a MySQL connection to config's listener and pings it. TCP
+// reachability alone would accept a port forward whose container is not up, or
+// a foreign server on the port; the driver's ping asks the server itself.
+func (h *host) pingSQL(config *Config) error {
+	dsn := config.tcpDSN() + "?timeout=2s&readTimeout=2s&writeTimeout=2s"
+	db, err := h.openMySQL(dsn)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), sqlPingTimeout)
+	defer cancel()
+	return db.PingContext(ctx)
+}
+
+// The bounds on Start's wait for a container it just started. A container
+// boots Dolt for every database it serves, so the budget grows with the
+// database directories the data dir holds, with a floor for a cold container
+// start and a ceiling so a wedged container fails the command instead of
+// hanging it.
+const (
+	externalContainerStartFloor = 30 * time.Second
+	externalContainerStartPerDB = 5 * time.Second
+	externalContainerStartCap   = 5 * time.Minute
+	externalContainerStartPoll  = 500 * time.Millisecond
+)
+
+// doltStopGracePeriod is the window Stop gives a Dolt server to flush and
+// exit. On the host it is the wait for the SIGTERM'd process; in container mode
+// it is docker stop's -t. A SIGKILL mid-journal-write needs dolt fsck.
+const doltStopGracePeriod = 5 * time.Second
+
+// externalStartTimeout is how long Start waits for the container's listener:
+// externalContainerStartFloor, grown by externalContainerStartPerDB per
+// database directory and capped at externalContainerStartCap.
+func externalStartTimeout(dataDir string) time.Duration {
+	timeout := time.Duration(countDoltDatabases(dataDir)) * externalContainerStartPerDB
+	if timeout < externalContainerStartFloor {
+		timeout = externalContainerStartFloor
+	}
+	if timeout > externalContainerStartCap {
+		timeout = externalContainerStartCap
+	}
+	return timeout
+}
+
+// startExternalContainer starts the named Docker container and waits, bounded,
+// until its Dolt listener answers a SQL ping. It never spawns dolt sql-server,
+// writes a pid file or signals a process: the container owns its server, and
+// docker is the only thing gt asks to change its state (gt-xeb1x).
+func (h *host) startExternalContainer(config *Config, name string) error {
+	if config.Port == 0 {
+		return fmt.Errorf("dolt.external_container = %q names a Dolt container, but %w", name, ErrNoEndpoint)
+	}
+	if _, err := h.exec(exec.Command("docker", "start", name)); err != nil {
+		if status := exitCode(err); status >= 0 {
+			return fmt.Errorf("docker start %s exited with status %d: dolt.external_container names this container, so it must exist before gt can start it", name, status)
+		}
+		return fmt.Errorf("running docker start %s: the docker command could not be run", name)
+	}
+
+	timeout := externalStartTimeout(config.DataDir)
+	deadline := h.clockNow().Add(timeout)
+	for {
+		if err := h.pingSQL(config); err == nil {
+			return nil
+		}
+		remaining := deadline.Sub(h.clockNow())
+		if remaining <= 0 {
+			return fmt.Errorf("Dolt container %q started but did not answer a SQL ping at %s within %v; check that dolt.external_container names this container and that the town's port reaches it (docker logs %s)", name, config.HostPort(), timeout, name)
+		}
+		wait := externalContainerStartPoll
+		if wait > remaining {
+			wait = remaining
+		}
+		h.wait(wait)
+	}
+}
+
+// stopExternalContainer stops the named Docker container through docker stop,
+// with doltStopGracePeriod as the grace the server gets to exit.
+func (h *host) stopExternalContainer(name string) error {
+	grace := strconv.Itoa(int(doltStopGracePeriod / time.Second))
+	if _, err := h.exec(exec.Command("docker", "stop", "-t", grace, name)); err != nil {
+		if status := exitCode(err); status >= 0 {
+			return fmt.Errorf("docker stop %s exited with status %d: dolt.external_container names this container", name, status)
+		}
+		return fmt.Errorf("running docker stop %s: the docker command could not be run", name)
+	}
+	return nil
+}
+
 // Start starts the Dolt SQL server. It refuses while the town's Dolt pause
 // marker holds (gt-8z769.2): the pause owner removes the marker before it
 // brings the server back.
+//
+// A town that sets dolt.external_container starts its Docker container instead
+// of a host process (gt-xeb1x).
 func (h *host) Start(townRoot string) error {
 	if p := doltpause.Current(townRoot, h.clockNow()); p != nil {
 		return &doltpause.Error{Marker: *p}
 	}
 	config := h.DefaultConfig(townRoot)
+	if name, err := config.ExternalContainerSetting(); err != nil {
+		return err
+	} else if name != "" {
+		return h.startExternalContainer(config, name)
+	}
 	if config.Port == 0 {
 		return ErrNoEndpoint
 	}
@@ -2488,8 +2648,16 @@ func (h *host) drainConnectionsBeforeStop(config *Config) {
 
 // Stop stops the Dolt SQL server.
 // Works for both servers started via gt dolt start AND externally-started servers.
+//
+// A town that sets dolt.external_container stops its Docker container instead
+// of signaling a host process (gt-xeb1x).
 func (h *host) Stop(townRoot string) error {
 	config := h.DefaultConfig(townRoot)
+	if name, err := config.ExternalContainerSetting(); err != nil {
+		return err
+	} else if name != "" {
+		return h.stopExternalContainer(name)
+	}
 
 	running, pid, err := h.IsRunning(townRoot)
 	if err != nil {
@@ -2567,6 +2735,24 @@ func (h *host) Stop(townRoot string) error {
 // Stop is (*host).Stop on the real machine.
 func Stop(townRoot string) error {
 	return std.Stop(townRoot)
+}
+
+// Restart stops and then starts the server: docker stop followed by docker
+// start in container mode, Stop followed by Start on the host. An unusable
+// dolt.external_container reaches the caller through Stop, which refuses it, so
+// no restart can fall back to a host process (gt-xeb1x). A stopped host server
+// has nothing to stop — use Start for it; docker stop, by contrast, is a no-op
+// on a container already stopped.
+func (h *host) Restart(townRoot string) error {
+	if err := h.Stop(townRoot); err != nil {
+		return err
+	}
+	return h.Start(townRoot)
+}
+
+// Restart is (*host).Restart on the real machine.
+func Restart(townRoot string) error {
+	return std.Restart(townRoot)
 }
 
 // GetConnectionString returns the MySQL connection string for the server.
