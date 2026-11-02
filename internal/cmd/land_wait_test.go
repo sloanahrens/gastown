@@ -820,6 +820,21 @@ func TestLandWaitLogSourceRefusesAnUnreadableLog(t *testing.T) {
 	}
 }
 
+// A daemon path that is a file, not a directory, cannot hold the log: the look
+// at it fails for a reason other than the log being absent, and that failure is
+// the wait's to report, not a missing log to wait out.
+func TestLandWaitLogSourceRefusesADaemonPathThatIsAFile(t *testing.T) {
+	t.Parallel()
+	daemon := filepath.Join(t.TempDir(), "daemon")
+	if err := os.WriteFile(daemon, nil, 0o600); err != nil {
+		t.Fatalf("making the daemon path a file: %v", err)
+	}
+	_, err := landWaitLogSource(daemon)(landWaitEpoch)
+	if err == nil || !strings.Contains(err.Error(), "reading the daemon log") {
+		t.Fatalf("landWaitLogSource() error = %v, want the failed look at the log named", err)
+	}
+}
+
 // isLandWaitNoOutcome reports whether err is the wait's own no-outcome answer.
 func isLandWaitNoOutcome(err error) bool {
 	return errors.Is(err, errLandWaitNoOutcome)
