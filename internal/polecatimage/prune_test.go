@@ -212,6 +212,265 @@ func TestPruneOldImagesDoesNothingWhenDockerIsDown(t *testing.T) {
 	}
 }
 
+// trimContextReply answers a run that trims a named context: the default
+// engine reports no per-commit tags, and the context answers its own listing,
+// container list and image ids.
+type trimContextReply struct {
+	context string
+	tags    result
+	used    result
+	ids     map[string]string
+	fail    map[string]result
+}
+
+func (pr *trimContextReply) answer(c command) result {
+	args := c.args
+	if c.name != "docker" || len(args) == 0 {
+		return result{}
+	}
+	if res, ok := pr.fail[callKey(c.name, c.args...)]; ok {
+		return res
+	}
+	if len(args) >= 2 && args[0] == "--context" {
+		if args[1] != pr.context {
+			return result{exit: 1, stderr: "context " + args[1] + " does not exist"}
+		}
+		args = args[2:]
+		switch {
+		case len(args) == 0:
+			return result{}
+		case args[0] == "images":
+			return pr.tags
+		case args[0] == "ps":
+			return pr.used
+		case args[0] == "image" && len(args) > 2 && args[1] == "inspect":
+			if id, ok := pr.ids[args[len(args)-1]]; ok {
+				return result{stdout: id + "\n"}
+			}
+			return result{exit: 1, stderr: "no such image"}
+		}
+		return result{}
+	}
+	if args[0] == "image" {
+		return result{exit: 1, stderr: "no such image"}
+	}
+	return result{}
+}
+
+// trimContextRun is a run whose tag prune targets the named context, with four
+// tags on it in newest-first order.
+func trimContextRun(t *testing.T, context string) (*testRun, *trimContextReply) {
+	t.Helper()
+	tr := newTestRun(t)
+	tr.Cfg.Registry = ""
+	tr.Cfg.Keep = "3"
+	tr.Cfg.TrimContext = context
+	pr := &trimContextReply{
+		context: context,
+		tags:    result{stdout: "ddd4444\nccc3333\nbbb2222\naaa1111\n"},
+		ids: map[string]string{
+			"gastown-polecat:ddd4444": "sha256:ddd",
+			"gastown-polecat:ccc3333": "sha256:ccc",
+			"gastown-polecat:bbb2222": "sha256:bbb",
+			"gastown-polecat:aaa1111": "sha256:aaa",
+		},
+		fail: map[string]result{},
+	}
+	tr.reply = pr.answer
+	return tr, pr
+}
+
+// TestTrimContextRemovesOldTagsOnTheNamedContext is the second trim target: the
+// newest three tags stay on the sweep runner's engine and the oldest is
+// untagged there (gt-bxp17).
+func TestTrimContextRemovesOldTagsOnTheNamedContext(t *testing.T) {
+	t.Parallel()
+	tr, _ := trimContextRun(t, "colima-gt-control")
+	tr.PruneOldImages()
+	tr.wantCall(t, "docker", "--context", "colima-gt-control", "rmi", "gastown-polecat:aaa1111")
+	for _, kept := range []string{"ddd4444", "ccc3333", "bbb2222"} {
+		if anyCallNamed(tr.callsTo("docker"), "rmi", "gastown-polecat:"+kept) {
+			t.Errorf("the context prune untagged the kept %s", kept)
+		}
+	}
+	tr.wantLogged(t, "removed gastown-polecat:aaa1111 on context colima-gt-control")
+}
+
+// TestTrimContextSkipsAnImageInUse is the safety rule on the second engine: a
+// container, running or stopped, keeps the image it runs (gt-bxp17).
+func TestTrimContextSkipsAnImageInUse(t *testing.T) {
+	t.Parallel()
+	tr, pr := trimContextRun(t, "colima-gt-control")
+	pr.used = result{stdout: "gastown-polecat:aaa1111\n"}
+	tr.PruneOldImages()
+	if anyCallNamed(tr.callsTo("docker"), "--context", "colima-gt-control", "rmi") {
+		t.Errorf("an image a container uses was untagged: %v", callLines(tr, "docker"))
+	}
+	tr.wantLogged(t, "kept gastown-polecat:aaa1111 on context colima-gt-control (in use by a container)")
+}
+
+// TestTrimContextSkipsAnImageAContainerNamesByRegistryRef covers a container
+// created from a registry-prefixed reference: docker ps names the whole repo,
+// so the tag it selects is matched by its last path segment (gt-bxp17).
+func TestTrimContextSkipsAnImageAContainerNamesByRegistryRef(t *testing.T) {
+	t.Parallel()
+	tr, pr := trimContextRun(t, "colima-gt-control")
+	pr.used = result{stdout: "colima-registry.local:5000/gastown-polecat:aaa1111\n"}
+	tr.PruneOldImages()
+	if anyCallNamed(tr.callsTo("docker"), "--context", "colima-gt-control", "rmi") {
+		t.Errorf("an image a container uses by registry reference was untagged: %v", callLines(tr, "docker"))
+	}
+	tr.wantLogged(t, "kept gastown-polecat:aaa1111 on context colima-gt-control (in use by a container)")
+}
+
+// TestTrimContextSkipsAnImageAContainerNamesByID covers docker ps reporting the
+// image id rather than the tag the container was created from.
+func TestTrimContextSkipsAnImageAContainerNamesByID(t *testing.T) {
+	t.Parallel()
+	tr, pr := trimContextRun(t, "colima-gt-control")
+	pr.ids["gastown-polecat:aaa1111"] = "sha256:0123456789ab"
+	pr.used = result{stdout: "0123456789ab\n"}
+	tr.PruneOldImages()
+	if anyCallNamed(tr.callsTo("docker"), "--context", "colima-gt-control", "rmi") {
+		t.Errorf("an image a container names by id was untagged: %v", callLines(tr, "docker"))
+	}
+	tr.wantLogged(t, "kept gastown-polecat:aaa1111 on context colima-gt-control (in use by a container)")
+}
+
+// TestTrimContextDropsTheRegistryAliasFirst keeps the second engine's trim the
+// same trim: an alias tag loaded beside the image would keep it on disk, so it
+// is untagged there before the per-commit tag, with the context named
+// (gt-bxp17).
+func TestTrimContextDropsTheRegistryAliasFirst(t *testing.T) {
+	t.Parallel()
+	tr, pr := trimContextRun(t, "colima-gt-control")
+	tr.Cfg.Registry = testRegistry
+	alias := testRegistry + "/gastown-polecat:aaa1111"
+	pr.ids[alias] = "sha256:aaa"
+	tr.PruneOldImages()
+	tr.wantCall(t, "docker", "--context", "colima-gt-control", "rmi", alias)
+	tr.wantCall(t, "docker", "--context", "colima-gt-control", "rmi", "gastown-polecat:aaa1111")
+	aliasAt := callPosition(tr, "--context", "colima-gt-control", "rmi", alias)
+	tagAt := callPosition(tr, "--context", "colima-gt-control", "rmi", "gastown-polecat:aaa1111")
+	if aliasAt < 0 || tagAt < 0 || aliasAt > tagAt {
+		t.Errorf("alias untagged at %d, tag at %d; want the alias first: %v", aliasAt, tagAt, callLines(tr, "docker"))
+	}
+	tr.wantLogged(t, "removed "+alias+" on context colima-gt-control")
+}
+
+// TestTrimContextKeepsATagWhoseAliasWillNotGo is the alias rule on the second
+// engine: a tag whose alias docker refuses to untag is kept, so the image is
+// never left on disk with no tag naming it (gt-bxp17).
+func TestTrimContextKeepsATagWhoseAliasWillNotGo(t *testing.T) {
+	t.Parallel()
+	tr, pr := trimContextRun(t, "colima-gt-control")
+	tr.Cfg.Registry = testRegistry
+	alias := testRegistry + "/gastown-polecat:aaa1111"
+	pr.ids[alias] = "sha256:aaa"
+	pr.fail[callKey("docker", "--context", "colima-gt-control", "rmi", alias)] = result{exit: 1, stderr: "image is in use"}
+	tr.PruneOldImages()
+	if anyCallNamed(tr.callsTo("docker"), "--context", "colima-gt-control", "rmi", "gastown-polecat:aaa1111") {
+		t.Errorf("a tag whose alias would not go was untagged: %v", callLines(tr, "docker"))
+	}
+	tr.wantLogged(t, "kept gastown-polecat:aaa1111 on context colima-gt-control ("+alias+": rmi failed: image is in use)")
+}
+
+// callPosition is the index of the docker call carrying exactly want, -1 when
+// there is none.
+func callPosition(tr *testRun, want ...string) int {
+	for i, c := range tr.callsTo("docker") {
+		if callKey(c.name, c.args...) == callKey("docker", want...) {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestTrimContextPrunesNothingWhenTheEngineIsUnreachable names the engine's
+// own failure: a context docker cannot reach prunes nothing and says so
+// (gt-bxp17).
+func TestTrimContextPrunesNothingWhenTheEngineIsUnreachable(t *testing.T) {
+	t.Parallel()
+	tr, pr := trimContextRun(t, "colima-gt-control")
+	pr.fail[callKey("docker", "--context", "colima-gt-control", "info")] = result{exit: 1, stderr: "no such context"}
+	tr.PruneOldImages()
+	if anyCallNamed(tr.callsTo("docker"), "--context", "colima-gt-control", "rmi") {
+		t.Errorf("an unreachable engine was pruned: %v", callLines(tr, "docker"))
+	}
+	tr.wantLogged(t, "images on context colima-gt-control: engine unreachable (no such context); nothing pruned")
+}
+
+// TestTrimContextPrunesNothingWhenContainersCannotBeRead is the fail-closed
+// probe: a container list the plugin cannot read never reads as "no container
+// uses these" (gt-bxp17).
+func TestTrimContextPrunesNothingWhenContainersCannotBeRead(t *testing.T) {
+	t.Parallel()
+	tr, pr := trimContextRun(t, "colima-gt-control")
+	pr.fail[callKey("docker", "--context", "colima-gt-control", "ps", "-a", "--format", containersFormat)] = result{exit: 1, stderr: "engine unreachable"}
+	tr.PruneOldImages()
+	if anyCallNamed(tr.callsTo("docker"), "--context", "colima-gt-control", "rmi") {
+		t.Errorf("a run that could not read the containers pruned anyway: %v", callLines(tr, "docker"))
+	}
+	tr.wantLogged(t, "images on context colima-gt-control: cannot list the containers (engine unreachable); nothing pruned")
+}
+
+// TestTrimContextKeepsATagWhoseImageIDCannotBeRead is the same rule per tag: an
+// id the plugin cannot read is not a candidate for removal (gt-bxp17).
+func TestTrimContextKeepsATagWhoseImageIDCannotBeRead(t *testing.T) {
+	t.Parallel()
+	tr, pr := trimContextRun(t, "colima-gt-control")
+	delete(pr.ids, "gastown-polecat:aaa1111")
+	tr.PruneOldImages()
+	if anyCallNamed(tr.callsTo("docker"), "--context", "colima-gt-control", "rmi") {
+		t.Errorf("a tag whose image id was unreadable was untagged: %v", callLines(tr, "docker"))
+	}
+	tr.wantLogged(t, "kept gastown-polecat:aaa1111 on context colima-gt-control (cannot read its image id: no such image)")
+}
+
+// TestTrimContextUnsetKeepsTodaysBehaviour pins the single-engine run: with
+// POLECAT_IMAGE_TRIM_CONTEXT unset, no call names a context and the default
+// engine is trimmed exactly as before (gt-bxp17).
+func TestTrimContextUnsetKeepsTodaysBehaviour(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	tr.Cfg.Registry = ""
+	tr.Cfg.Keep = "1"
+	pr := newPruneReply("aaa1111", "bbb2222")
+	pr.tags = result{stdout: "aaa1111\nbbb2222\n"}
+	tr.reply = pr.answer
+	tr.PruneOldImages()
+	tr.wantCall(t, "docker", "rmi", "gastown-polecat:bbb2222")
+	tr.wantLogged(t, "removed gastown-polecat:bbb2222")
+	if strings.Contains(tr.output(), "on context") {
+		t.Errorf("a run with no trim context named one: %s", tr.output())
+	}
+	for _, c := range tr.callsTo("docker") {
+		if hasArg(c.args, "--context") {
+			t.Errorf("a run with no trim context called docker with --context: %v", callLines(tr, "docker"))
+			break
+		}
+	}
+}
+
+// TestPruneOldImagesRefusesAnUnsafeTrimContext is the input guard: a value
+// that is not one Docker context name stops that trim and never reaches
+// docker's argv (gt-bxp17).
+func TestPruneOldImagesRefusesAnUnsafeTrimContext(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"-rf", "colima/gt", "colima:gt", "colima gt", ".."} {
+		tr := newTestRun(t)
+		tr.Cfg.TrimContext = name
+		tr.PruneOldImages()
+		for _, c := range tr.callsTo("docker") {
+			if hasArg(c.args, "--context") {
+				t.Errorf("the context %q reached docker: %v", name, callLines(tr, "docker"))
+				break
+			}
+		}
+		tr.wantLogged(t, "images on context "+name+": not trimmed: not one Docker context name")
+	}
+}
+
 // TestDropRegistryAliasDoesNothingWithoutARegistry pins the step's no-op: no
 // registry means no alias to untag.
 func TestDropRegistryAliasDoesNothingWithoutARegistry(t *testing.T) {

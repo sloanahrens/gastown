@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/slot"
@@ -468,6 +469,45 @@ func TestRebuildGTCycle_InstallerBuildFailureDoesNotRunIt(t *testing.T) {
 	esc := rec.Escalations()
 	if len(esc) != 1 || esc[0].Escalation.Fingerprint != alertKeyRebuildGTInstallFail {
 		t.Fatalf("escalations = %+v, want one under %s", esc, alertKeyRebuildGTInstallFail)
+	}
+}
+
+// TestRebuildGTInstallCarriesTheTrimContext is the call site: the installer
+// the daemon runs is told the sweep engine's context, so the polecat-image
+// plugin it starts trims that engine too (gt-bxp17).
+func TestRebuildGTInstallCarriesTheTrimContext(t *testing.T) {
+	t.Parallel()
+	d, _ := rebuildGTTown(t)
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{TierSweep: &TierSweepConfig{
+		Enabled: true,
+		Runner: &agentconfig.TierSweepRunnerConfig{
+			Backend: agentconfig.TierSweepRunnerDocker,
+			Context: "colima-gt-control",
+		},
+	}}}
+	cli := withRebuildGTCli(t, d, func(c cliCall) cliReply {
+		switch {
+		case gitSub(c, "rev-parse"):
+			return cliReply{stdout: "abc1234567890\n"}
+		case c.name == "gt-installer":
+			return cliReply{stdout: "install-gt: RESULT ok abc1234567890 - -\n"}
+		}
+		return cliReply{}
+	})
+	if settled := d.rebuildGTInstall(t.Context(), &dogCycle{}, filepath.Join(d.config.TownRoot, "gastown"), 0); !settled {
+		t.Fatal("a successful install did not reach a verdict")
+	}
+	installs := gtInstallerCalls(cli)
+	if len(installs) != 1 {
+		t.Fatalf("installs = %v, want the one the install ran", installs)
+	}
+	for _, c := range cli.recorded() {
+		if c.name != "gt-installer" {
+			continue
+		}
+		if got := c.getenv(polecatImageTrimContextEnv); got != "colima-gt-control" {
+			t.Errorf("%s = %q, want the sweep runner's context", polecatImageTrimContextEnv, got)
+		}
 	}
 }
 

@@ -111,19 +111,21 @@ outcome fails the run. The rules are in the `BuildPlan` comment in
 
 ## Old images
 
-Every build tags the image `gastown-polecat:<short sha>` as well as `:dev`, and
-nothing else removes the old tags (gt-mexpf). At the end of every run (current,
-deferred or built, never after a failure) the plugin untags the per-commit tags
-beyond the newest 3 (`POLECAT_IMAGE_KEEP`) with a plain `docker rmi
-<repo>:<sha>`. It never touches `:dev` or a tag that is not a hex commit, and never passes
-`-f`. A failed
-removal keeps the tag and logs docker's own reason, `kept ... (rmi failed:
-<reason>)`, so a container using the image and a real error read differently.
-With a registry set, the tag's `<registry>/…:<sha>` alias is untagged first (it
-would keep the image on disk); an alias docker refuses to untag keeps the tag.
-The build cache is not touched. A `POLECAT_IMAGE_KEEP` that is not a whole
-number, or a tag listing docker cannot answer, keeps every tag and logs why; the
-rest of the run carries on.
+Every build tags the image `gastown-polecat:<short sha>` and `:dev`, and nothing
+else removes old tags (gt-mexpf). At every run's end (current, deferred or
+built, never a failure) the plugin untags per-commit tags beyond the newest 3
+(`POLECAT_IMAGE_KEEP`) with a plain `docker rmi <repo>:<sha>`: never `:dev`, a
+non-hex tag or `-f`. A failed removal keeps the tag and logs docker's reason
+(`kept ... (rmi failed: <reason>)`), so an in-use image and a real error read
+differently. With a registry, the `<registry>/…:<sha>` alias is untagged first
+(it would keep the image on disk); a refused alias keeps the tag. The build
+cache is untouched. A `POLECAT_IMAGE_KEEP` that is not a whole number, or an
+unreadable listing, keeps every tag and logs why; the run continues.
+
+`POLECAT_IMAGE_TRIM_CONTEXT`, which the daemon sets from
+`tier_sweep.runner.context` for docker and kubernetes, repeats the trim with
+`docker --context <name>`, keeping any tag a container there uses and naming
+the context in each line.
 
 ## Build cache
 

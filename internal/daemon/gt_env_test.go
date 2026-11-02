@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log"
@@ -39,6 +40,116 @@ func assertDaemonIdentity(t *testing.T, what string, env []string, allowed ...st
 		if k != "BD_ACTOR" && slices.Contains(agentconfig.IdentityEnvVars, k) && !slices.Contains(allowed, kv) {
 			t.Errorf("%s: carries another identity: %s", what, kv)
 		}
+	}
+}
+
+// TestWithPolecatImageTrimContext pins the one place the plugin's trim context
+// is published: the installer's environment, never this process's, and only
+// when the sweep is on and runs on an engine of its own (gt-bxp17).
+func TestWithPolecatImageTrimContext(t *testing.T) {
+	t.Parallel()
+	runner := func(backend, context string) *DaemonPatrolConfig {
+		return &DaemonPatrolConfig{Patrols: &PatrolsConfig{TierSweep: &TierSweepConfig{
+			Enabled: true,
+			Runner:  &agentconfig.TierSweepRunnerConfig{Backend: backend, Context: context},
+		}}}
+	}
+	for _, tc := range []struct {
+		name string
+		cfg  *DaemonPatrolConfig
+		want string
+	}{
+		{name: "a docker engine", cfg: runner(agentconfig.TierSweepRunnerDocker, "colima-gt-control"), want: "colima-gt-control"},
+		{name: "a kubernetes engine", cfg: runner(agentconfig.TierSweepRunnerKubernetes, "colima-gt-control"), want: "colima-gt-control"},
+		{name: "no patrol config"},
+		{name: "no patrols", cfg: &DaemonPatrolConfig{}},
+		{name: "no tier sweep", cfg: &DaemonPatrolConfig{Patrols: &PatrolsConfig{}}},
+		{name: "a disabled sweep", cfg: &DaemonPatrolConfig{Patrols: &PatrolsConfig{TierSweep: &TierSweepConfig{Runner: &agentconfig.TierSweepRunnerConfig{
+			Backend: agentconfig.TierSweepRunnerDocker, Context: "colima-gt-control",
+		}}}}},
+		{name: "no runner", cfg: &DaemonPatrolConfig{Patrols: &PatrolsConfig{TierSweep: &TierSweepConfig{Enabled: true}}}},
+		{name: "an unknown backend", cfg: runner("podman", "colima-gt-control")},
+		{name: "an empty context", cfg: runner(agentconfig.TierSweepRunnerDocker, "")},
+		{name: "a context docker would read as another option", cfg: runner(agentconfig.TierSweepRunnerDocker, "-rf")},
+		{name: "a context that is a path", cfg: runner(agentconfig.TierSweepRunnerDocker, "colima/gt")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := &Daemon{patrolConfig: tc.cfg, logger: log.New(io.Discard, "", 0)}
+			env := d.withPolecatImageTrimContext([]string{"PATH=/usr/bin"})
+			got := cliCall{env: env}.getenv(polecatImageTrimContextEnv)
+			if got != tc.want {
+				t.Errorf("%s = %q, want %q", polecatImageTrimContextEnv, got, tc.want)
+			}
+			if tc.want == "" && len(env) != 1 {
+				t.Errorf("env = %q, want the input alone", env)
+			}
+		})
+	}
+}
+
+// TestWithPolecatImageTrimContextReplacesAnInheritedValue pins that a value the
+// daemon inherited does not survive beside the one it sets: the last entry
+// wins for a child that reads the environment (gt-bxp17).
+func TestWithPolecatImageTrimContextReplacesAnInheritedValue(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{TierSweep: &TierSweepConfig{
+			Enabled: true,
+			Runner:  &agentconfig.TierSweepRunnerConfig{Backend: agentconfig.TierSweepRunnerDocker, Context: "colima-gt-control"},
+		}}},
+		logger: log.New(io.Discard, "", 0),
+	}
+	env := d.withPolecatImageTrimContext([]string{polecatImageTrimContextEnv + "=stale"})
+	var values []string
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == polecatImageTrimContextEnv {
+			values = append(values, v)
+		}
+	}
+	if len(values) != 1 || values[0] != "colima-gt-control" {
+		t.Errorf("%s entries = %q, want only the configured context", polecatImageTrimContextEnv, values)
+	}
+}
+
+// TestWithPolecatImageTrimContextRefusesADisabledSweep pins the town's disabled
+// list, which IsPatrolEnabled alone does not read (gt-bxp17).
+func TestWithPolecatImageTrimContextRefusesADisabledSweep(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{TierSweep: &TierSweepConfig{
+			Enabled: true,
+			Runner:  &agentconfig.TierSweepRunnerConfig{Backend: agentconfig.TierSweepRunnerDocker, Context: "colima-gt-control"},
+		}}},
+		disabledPatrols: map[string]bool{"tier_sweep": true},
+		logger:          log.New(io.Discard, "", 0),
+	}
+	if env := d.withPolecatImageTrimContext([]string{"PATH=/usr/bin"}); len(env) != 1 {
+		t.Errorf("env = %q, want the input alone for a disabled sweep", env)
+	}
+}
+
+// TestUnsafeTrimContextIsRefusedAndLogged is the alarm for the input guard: a
+// town whose runner context is not one Docker context name publishes nothing to
+// the plugin, and the log names the value it refused so the typo is findable
+// (gt-bxp17).
+func TestUnsafeTrimContextIsRefusedAndLogged(t *testing.T) {
+	t.Parallel()
+	var logged bytes.Buffer
+	d := &Daemon{
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{TierSweep: &TierSweepConfig{
+			Enabled: true,
+			Runner:  &agentconfig.TierSweepRunnerConfig{Backend: agentconfig.TierSweepRunnerDocker, Context: "-rf"},
+		}}},
+		logger: log.New(&logged, "", 0),
+	}
+	env := d.withPolecatImageTrimContext([]string{"PATH=/usr/bin"})
+	if got := (cliCall{env: env}).getenv(polecatImageTrimContextEnv); got != "" {
+		t.Errorf("%s = %q, want nothing published for an unsafe name", polecatImageTrimContextEnv, got)
+	}
+	want := `tier_sweep runner context "-rf" is not one Docker context name; the polecat-image plugin will not trim it`
+	if got := logged.String(); !strings.Contains(got, want) {
+		t.Errorf("log = %q, want it to name the refused value: %q", got, want)
 	}
 }
 

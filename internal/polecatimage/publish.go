@@ -39,7 +39,7 @@ func (r *Run) publishFailed(why string) error {
 
 // ImageID is the id of the image, "" when it is missing.
 func (r *Run) ImageID() string {
-	return strings.TrimRight(r.call(r.Cfg.Docker, "image", "inspect", "--format", imageIDFormat, r.Cfg.Image).output(), "\n")
+	return r.imageIDOn("", r.Cfg.Image)
 }
 
 // PublishStamp is what Published holds after a complete push of the current
