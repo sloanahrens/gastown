@@ -171,6 +171,55 @@ type DoltServerManager struct {
 	// portListenerFn names the PID listening on a port (see
 	// portListenerPID); nil asks doltserver.
 	portListenerFn func(port int) int
+	// containerLifecycle, when non-nil, replaces the container-mode lifecycle
+	// (doltserver's Start, Stop and IsRunning, which run docker start/stop and
+	// a SQL ping). A test sets it to observe the daemon's calls; nil is the
+	// real functions.
+	containerLifecycle doltContainerLifecycle
+}
+
+// doltContainerLifecycle is the lifecycle of a town whose Dolt runs in a
+// Docker container (dolt.external_container): internal/doltserver's Start,
+// Stop and IsRunning, which ask docker and a SQL ping and never spawn or
+// signal a host process.
+type doltContainerLifecycle interface {
+	Start(townRoot string) error
+	Stop(townRoot string) error
+	IsRunning(townRoot string) (bool, int, error)
+}
+
+// externalContainer is the Docker container the town's Dolt runs in, "" when
+// the daemon manages a host process. An unreadable or unusable
+// dolt.external_container is an error: no tick may fall back to starting,
+// stopping or signalling a host process the town meant to replace (gt-xeb1x).
+func (m *DoltServerManager) externalContainer() (string, error) {
+	return doltserver.DefaultConfig(m.townRoot).ExternalContainerSetting()
+}
+
+// containerStart starts the town's Dolt container through doltserver.
+func (m *DoltServerManager) containerStart(townRoot string) error {
+	if m.containerLifecycle != nil {
+		return m.containerLifecycle.Start(townRoot)
+	}
+	return doltserver.Start(townRoot)
+}
+
+// containerStop stops the town's Dolt container through doltserver.
+func (m *DoltServerManager) containerStop(townRoot string) error {
+	if m.containerLifecycle != nil {
+		return m.containerLifecycle.Stop(townRoot)
+	}
+	return doltserver.Stop(townRoot)
+}
+
+// containerIsRunning reports whether the town's Dolt container answers.
+func (m *DoltServerManager) containerIsRunning(townRoot string) (bool, error) {
+	if m.containerLifecycle != nil {
+		running, _, err := m.containerLifecycle.IsRunning(townRoot)
+		return running, err
+	}
+	running, _, err := doltserver.IsRunning(townRoot)
+	return running, err
 }
 
 // clk is the manager's clock: the real one unless a test set another.
@@ -370,6 +419,29 @@ func (m *DoltServerManager) Status() *DoltServerStatus {
 		Host: m.config.Host,
 	}
 
+	// A container's Dolt has no pid here: its status is the SQL ping's answer
+	// (gt-xeb1x). A setting that will not parse is reported, never read as a
+	// stopped server.
+	if name, err := m.externalContainer(); err != nil {
+		status.Error = err.Error()
+		return status
+	} else if name != "" {
+		running, err := m.containerIsRunning(m.townRoot)
+		status.Running = running
+		if err != nil {
+			status.Error = fmt.Sprintf("pinging Dolt container %q: %v", name, err)
+		}
+		if running {
+			if version, err := m.getDoltVersion(); err == nil {
+				status.Version = version
+			}
+			if databases, err := m.listDatabases(); err == nil {
+				status.Databases = databases
+			}
+		}
+		return status
+	}
+
 	// Check if process is running
 	pid, running := m.isRunning()
 	status.Running = running
@@ -401,6 +473,20 @@ func (m *DoltServerManager) Status() *DoltServerStatus {
 func (m *DoltServerManager) isRunning() (int, bool) {
 	if m.runningFn != nil {
 		return m.runningFn()
+	}
+	if name, err := m.externalContainer(); err != nil {
+		// IsRunning has no error to carry this: the paths that act on the
+		// answer (EnsureRunning, Stop) read the setting themselves first and
+		// refuse, so this one is reached by a status read alone.
+		m.logger("Cannot tell whether Dolt container is running: %v", err)
+		return 0, false
+	} else if name != "" {
+		running, err := m.containerIsRunning(m.townRoot)
+		if err != nil {
+			m.logger("Cannot tell whether Dolt container %q is running: %v", name, err)
+			return 0, false
+		}
+		return 0, running
 	}
 	deadPID := 0
 	// First check our tracked process
@@ -524,6 +610,18 @@ func (m *DoltServerManager) EnsureRunning() error {
 		return m.checkHealth()
 	}
 
+	// A town whose Dolt runs in a named container (dolt.external_container) is
+	// managed through internal/doltserver's container path: a SQL ping says
+	// whether it is up, and start and stop run docker. The setting is read
+	// here, before anything acts, so a value that will not parse refuses the
+	// tick rather than falling through to a host process (gt-xeb1x).
+	containerMode := false
+	if name, err := m.externalContainer(); err != nil {
+		return err
+	} else if name != "" {
+		containerMode = true
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -583,9 +681,13 @@ func (m *DoltServerManager) EnsureRunning() error {
 		}
 		// Periodic identity check: verify the server is serving the correct databases.
 		// Runs every 5 minutes (not every health tick) since imposters are rare.
+		// A container's Dolt is not a host process whose argv and data dir prove
+		// its identity, so the check does not apply: it reads no host process
+		// table, and its failure path would signal whatever holds the port, the
+		// container's own proxy (gt-xeb1x).
 		const identityCheckInterval = 5 * time.Minute
 		now := m.now()
-		if now.Sub(m.lastIdentityCheck) >= identityCheckInterval {
+		if !containerMode && now.Sub(m.lastIdentityCheck) >= identityCheckInterval {
 			m.lastIdentityCheck = now
 			if err := m.checkDatabaseIdentityLocked(); err != nil {
 				m.clearHealthyClock()
@@ -1021,6 +1123,18 @@ func (m *DoltServerManager) Start() error {
 
 // startLocked starts the Dolt server. Must be called with m.mu held.
 func (m *DoltServerManager) startLocked() error {
+	// Container mode first: the mode picks the implementation, and startFn
+	// replaces only the host one. docker start is idempotent, and
+	// internal/doltserver waits, bounded, for the SQL ping (gt-xeb1x).
+	if name, err := m.externalContainer(); err != nil {
+		return err
+	} else if name != "" {
+		if _, running := m.isRunning(); running {
+			m.logger("Dolt server already running, skipping start")
+			return nil
+		}
+		return m.containerStart(m.townRoot)
+	}
 	if m.startFn != nil {
 		return m.startFn()
 	}
@@ -1165,6 +1279,12 @@ func (m *DoltServerManager) Stop() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopRequested = true
+	if name, err := m.externalContainer(); err != nil {
+		return err
+	} else if name != "" {
+		// docker stop is the container path's whole stop: no pid, no signal.
+		return m.containerStop(m.townRoot)
+	}
 	m.stopLocked()
 	return nil
 }
@@ -1172,6 +1292,18 @@ func (m *DoltServerManager) Stop() error {
 // stopLocked stops the Dolt server. Must be called with m.mu held.
 func (m *DoltServerManager) stopLocked() {
 	m.clearHealthyClock()
+	// Container mode first: the mode picks the implementation, and stopFn
+	// replaces only the host one. The restart path reaches here without
+	// EnsureRunning's check, so the setting is read again (gt-xeb1x).
+	if name, err := m.externalContainer(); err != nil {
+		m.logger("Not stopping the Dolt container: %v", err)
+		return
+	} else if name != "" {
+		if err := m.containerStop(m.townRoot); err != nil {
+			m.logger("Warning: could not stop Dolt container %q: %v", name, err)
+		}
+		return
+	}
 	if m.stopFn != nil {
 		m.stopFn()
 		return

@@ -484,7 +484,7 @@ func ResolveDoltEndpointFor(townRoot string, inContainer bool) (DoltEndpoint, bo
 		if containerHost := strings.TrimSpace(town.Dolt.ContainerHost); containerHost != "" && inContainer {
 			host = containerHost
 		}
-		return DoltEndpoint{Host: host, Port: town.Dolt.Port}, true
+		return DoltEndpoint{Host: host, Port: town.Dolt.Port, ExternalContainer: town.Dolt.ExternalContainer}, true
 	}
 	data, err := os.ReadFile(filepath.Join(townRoot, ".dolt-data", "config.yaml")) //nolint:gosec // G304: managed file under the town root
 	if err != nil {

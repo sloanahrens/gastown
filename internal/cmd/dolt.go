@@ -283,6 +283,22 @@ func runDoltStart(cmd *cobra.Command, args []string) error {
 	}
 
 	config := doltserver.DefaultConfig(townRoot)
+	container, err := config.ExternalContainerSetting()
+	if err != nil {
+		return err
+	}
+	if container != "" {
+		// The container serves its own databases, so the host filesystem guard
+		// below says nothing about this town, and the endpoint may well be a
+		// remote docker host: gt still starts the container it named (gt-xeb1x).
+		if err := doltserver.Start(townRoot); err != nil {
+			return err
+		}
+		fmt.Printf("%s Dolt container %s is running (port %d)\n",
+			style.Bold.Render("✓"), container, config.Port)
+		fmt.Printf("  Connection: %s\n", style.Dim.Render(doltserver.GetConnectionString(townRoot)))
+		return nil
+	}
 	if config.IsRemote() {
 		return fmt.Errorf("Dolt server is remote (%s) — start/stop managed externally", config.HostPort())
 	}
@@ -335,6 +351,14 @@ func runDoltKillImposters(cmd *cobra.Command, args []string) error {
 	}
 
 	config := doltserver.DefaultConfig(townRoot)
+	// Imposter detection names whatever holds the port and signals it. In
+	// container mode that holder is the container's own port forward, not an
+	// imposter, and gt sends no signal in this mode at all (gt-xeb1x).
+	if container, err := config.ExternalContainerSetting(); err != nil {
+		return err
+	} else if container != "" {
+		return fmt.Errorf("dolt.external_container = %q: a container's port is held by its own docker forward, and gt never signals a process it did not start — nothing to kill", container)
+	}
 	if config.IsRemote() {
 		return fmt.Errorf("Dolt server is remote — imposter detection requires local server")
 	}
@@ -369,6 +393,17 @@ func runDoltStop(cmd *cobra.Command, args []string) error {
 	}
 
 	config := doltserver.DefaultConfig(townRoot)
+	container, err := config.ExternalContainerSetting()
+	if err != nil {
+		return err
+	}
+	if container != "" {
+		if err := doltserver.Stop(townRoot); err != nil {
+			return err
+		}
+		fmt.Printf("%s Dolt container %s stopped\n", style.Bold.Render("✓"), container)
+		return nil
+	}
 	if config.IsRemote() {
 		return fmt.Errorf("Dolt server is remote (%s) — start/stop managed externally", config.HostPort())
 	}
@@ -390,6 +425,22 @@ func runDoltRestart(cmd *cobra.Command, args []string) error {
 	}
 
 	config := doltserver.DefaultConfig(townRoot)
+	container, err := config.ExternalContainerSetting()
+	if err != nil {
+		return err
+	}
+	if container != "" {
+		// Container mode has no pid to stop, no imposter to kill and no host
+		// data dir to inspect: the restart is docker stop then docker start
+		// through internal/doltserver (gt-xeb1x).
+		if err := doltserver.Restart(townRoot); err != nil {
+			return fmt.Errorf("restart failed: %w", err)
+		}
+		fmt.Printf("%s Dolt container %s restarted (port %d)\n",
+			style.Bold.Render("✓"), container, config.Port)
+		fmt.Printf("  Connection: %s\n", style.Dim.Render(doltserver.GetConnectionString(townRoot)))
+		return nil
+	}
 	if config.IsRemote() {
 		return fmt.Errorf("Dolt server is remote (%s) — start/stop managed externally", config.HostPort())
 	}
@@ -467,6 +518,25 @@ func runDoltStatus(cmd *cobra.Command, args []string) error {
 
 	if p := doltpause.Current(townRoot, time.Now()); p != nil {
 		fmt.Printf("%s %s\n", style.Bold.Render("⏸"), p.Message())
+	}
+
+	// A container's Dolt has no pid here and no state file to read: the SQL
+	// ping IsRunning made is the status, and the metrics come from the server
+	// over SQL (gt-xeb1x).
+	if container, err := config.ExternalContainerSetting(); err != nil {
+		return err
+	} else if container != "" {
+		if running {
+			fmt.Printf("%s Dolt server is %s (container %s)\n",
+				style.Bold.Render("●"), style.Bold.Render("running"), container)
+			printResourceMetrics(os.Stdout, doltserver.GetHealthMetrics(townRoot))
+		} else {
+			fmt.Printf("%s Dolt server is %s (container %s)\n",
+				style.Dim.Render("○"), "not running", container)
+		}
+		fmt.Printf("  Connection: %s\n", doltserver.GetConnectionString(townRoot))
+		printBeadsRuntimeConfig(townRoot)
+		return nil
 	}
 
 	if config.IsRemote() {
