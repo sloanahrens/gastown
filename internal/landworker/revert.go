@@ -543,9 +543,19 @@ func (r *RedMain) fileRevert(rec land.LandingRecord, branch, head string) (strin
 }
 
 // queueRevert puts the ready label on a revert bead, the only write that makes
-// the landing worker see it.
+// the landing worker see it, then touches the rig's ready stamp so an idle
+// worker lists it on its next pass instead of waiting for its ceiling
+// (gt-flo7a). A failed stamp is logged and not returned: the label is what
+// queues the work, and the ceiling bounds the delay the stamp would have
+// removed.
 func (r *RedMain) queueRevert(id string) error {
-	return r.Beads.Update(id, beads.UpdateOptions{AddLabels: []string{land.LabelReadyToLand}})
+	if err := r.Beads.Update(id, beads.UpdateOptions{AddLabels: []string{land.LabelReadyToLand}}); err != nil {
+		return err
+	}
+	if err := land.TouchReadyStamp(r.TownRoot, r.Rig, time.Now()); err != nil {
+		r.logf("stamping the ready-to-land list for queued revert %s: %v", id, err)
+	}
+	return nil
 }
 
 // strandedOutcome is what requeueStranded did with an open revert bead.

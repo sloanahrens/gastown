@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -114,7 +115,7 @@ func runLandRequeue(cmd *cobra.Command, args []string) error {
 	if reason == "" {
 		reason = "(no reason given)"
 	}
-	return requeueRejectedLanding(bd, repo, remote, beadID, reason, requeueActor(os.Getenv), cmd.OutOrStdout())
+	return requeueRejectedLanding(bd, repo, remote, beadID, reason, requeueActor(os.Getenv), townRoot, rigName, cmd.OutOrStdout())
 }
 
 // requeueActor names the session behind a re-queue for the durable record:
@@ -138,7 +139,7 @@ func requeueActor(getenv func(string) string) string {
 // unchanged head: the bead must be in the rework state, its live rejection must
 // name a branch and a head, and the branch's tip on the remote must be that
 // head. Every other input is refused with a message naming what to do instead.
-func requeueRejectedLanding(bd landRequeueBeads, remote landRequeueRemote, remoteName, beadID, reason, actor string, out io.Writer) error {
+func requeueRejectedLanding(bd landRequeueBeads, remote landRequeueRemote, remoteName, beadID, reason, actor, townRoot, rigName string, out io.Writer) error {
 	issue, err := bd.Show(beadID)
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", beadID, err)
@@ -202,6 +203,12 @@ func requeueRejectedLanding(bd landRequeueBeads, remote landRequeueRemote, remot
 	}
 	if after == nil || !beads.HasLabel(after, land.LabelReadyToLand) || beads.HasLabel(after, land.LabelRework) {
 		return fmt.Errorf("%s does not carry %s after the requeue", beadID, land.LabelReadyToLand)
+	}
+	// The label is back on the board, so an idle worker must list it on its
+	// next pass rather than wait out its ceiling (gt-flo7a). A failed touch is a
+	// warning: the requeue stands, and the ceiling bounds the delay.
+	if err := land.TouchReadyStamp(townRoot, rigName, time.Now()); err != nil {
+		style.FprintWarning(out, "Re-queued %s, but its rig's ready-to-land list could not be stamped (its worker lists within three minutes at most): %v", beadID, err)
 	}
 
 	comment := land.FormatRequeueComment(actor, branch, head, note.Attempt, land.RejectionBlocks(after.Notes), reason)
