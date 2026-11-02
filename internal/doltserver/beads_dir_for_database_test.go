@@ -54,3 +54,52 @@ func TestBeadsDirForDatabase(t *testing.T) {
 		t.Errorf("unmapped database error = %v, want one naming the database", err)
 	}
 }
+
+// TestBeadsDirForDatabaseSearchesExtraRoots: a database whose beads workspace
+// lives outside the town resolves through an extra root, which is the case for
+// the claude database in the ~/.claude workspace; the town's own workspaces are
+// still searched first, and a database named nowhere is still an error that
+// says where the search looked (gt-33etw).
+func TestBeadsDirForDatabaseSearchesExtraRoots(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	setupRigsJSON(t, townRoot, []string{"gastown"})
+	setupRigMetadata(t, townRoot, "gastown", "gt")
+
+	extraRoot := t.TempDir()
+	extraBeads := filepath.Join(extraRoot, ".beads")
+	if err := os.MkdirAll(extraBeads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extraBeads, "metadata.json"), []byte(`{"dolt_database":"claude"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := BeadsDirForDatabase(townRoot, "claude", extraRoot)
+	if err != nil {
+		t.Fatalf("BeadsDirForDatabase(claude, extra root): %v", err)
+	}
+	if got != extraBeads {
+		t.Errorf("BeadsDirForDatabase(claude) = %q, want %q", got, extraBeads)
+	}
+
+	// The town is searched before the extra roots, so an extra root cannot
+	// take over a database the town already claims.
+	got, err = BeadsDirForDatabase(townRoot, "gt", extraRoot)
+	if err != nil {
+		t.Fatalf("BeadsDirForDatabase(gt, extra root): %v", err)
+	}
+	if want := filepath.Join(townRoot, "gastown", "mayor", "rig", ".beads"); got != want {
+		t.Errorf("BeadsDirForDatabase(gt) = %q, want the town's workspace %q", got, want)
+	}
+
+	// A database no workspace names, town or extra root, is still an error,
+	// and the error names the roots that were searched.
+	_, err = BeadsDirForDatabase(townRoot, "probe", extraRoot)
+	if err == nil {
+		t.Fatal("BeadsDirForDatabase(probe) resolved a database named nowhere")
+	}
+	if !strings.Contains(err.Error(), "probe") || !strings.Contains(err.Error(), extraRoot) {
+		t.Errorf("unmapped database error = %v, want it to name the database and the extra root searched", err)
+	}
+}

@@ -37,9 +37,11 @@ var _ Writer = (*beads.Beads)(nil)
 // WriterForDatabase returns a Writer pinned to the beads directory whose
 // metadata.json names dbName, so bd writes to exactly the database the
 // candidates were read from. Prefix routing is off: an id's prefix does not
-// get to send the write to another database.
-func WriterForDatabase(townRoot, dbName string) (Writer, error) {
-	beadsDir, err := doltserver.BeadsDirForDatabase(townRoot, dbName)
+// get to send the write to another database. extraRoots are the directories
+// searched after the town root (see doltserver.BeadsDirForDatabase), for a
+// database whose workspace lives outside the town (gt-33etw).
+func WriterForDatabase(townRoot, dbName string, extraRoots ...string) (Writer, error) {
+	beadsDir, err := doltserver.BeadsDirForDatabase(townRoot, dbName, extraRoots...)
 	if err != nil {
 		return nil, fmt.Errorf("resolve bd writer for %s: %w", dbName, err)
 	}
