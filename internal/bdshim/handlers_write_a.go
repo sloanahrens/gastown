@@ -256,16 +256,18 @@ func closeIssues(env Env, st writeStore, ids []string, reason string) int {
 		}
 		return 0
 	case errors.As(err, &partial):
+		refusal := partial.Err
+		if refusal == nil {
+			refusal = beads.ErrCloseRefused
+		}
+		// The refusal is reported before the close lines, so an answer stream
+		// that refuses a write cannot drop the ids that stayed open and why.
+		fmt.Fprintf(env.Stderr, "bdshim: close %s: %v\n", strings.Join(partial.NotClosed, " "), refusal)
 		for _, id := range partial.Closed {
 			if code := closeLine(env, id, reason); code != 0 {
 				return code
 			}
 		}
-		refusal := partial.Err
-		if refusal == nil {
-			refusal = beads.ErrCloseRefused
-		}
-		fmt.Fprintf(env.Stderr, "bdshim: close %s: %v\n", strings.Join(partial.NotClosed, " "), refusal)
 		// bd's 0 is for a batch that closed some of its ids; one that closed
 		// none is the failure a single refused close is.
 		if len(partial.Closed) > 0 {
