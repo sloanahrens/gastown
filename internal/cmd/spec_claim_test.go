@@ -325,6 +325,50 @@ func TestSpecDispatchDoesNotHoldForACrewOrHandoffPeer(t *testing.T) {
 	}
 }
 
+// TestSpecDispatchHoldsForAPolecatInFlightPeer is the other half of gt-d5f5q's
+// exclusion, through the same production pool: a bead a polecat seat has in
+// flight still holds the candidate naming its test file, and the skip line
+// names the peer and its seat. The pool row carries the assignee, so this pins
+// that the exclusion released only a crew address.
+func TestSpecDispatchHoldsForAPolecatInFlightPeer(t *testing.T) {
+	t.Parallel()
+	const claimFile = "internal/bdshim/differential_helpers_test.go"
+	body := "- `" + claimFile + "` only."
+	peer := beads.Issue{
+		ID: "gt-peer", Title: "Rewrite the helper assertions", Status: "in_progress",
+		Assignee: "gastown/polecats/onyx", Priority: 2,
+		CreatedAt: "2026-11-01T09:00:00Z", Description: body,
+	}
+	peers := peerClaims(t, peer)
+	candidate := cleanSpec("gt-new", 2, "2026-11-02T12:00:00Z")
+	candidate.Description = specConstraints(&body)
+
+	f := newFakeSpecTown(candidate)
+	f.claims = map[string][]specdispatch.Claimant{"gt-new": peers}
+	env := f.env()
+	env.ShapeGate = specdispatch.ShapeGateOff
+
+	r := runSpecDispatchCycle(env)
+
+	if len(f.slung) != 0 {
+		t.Fatalf("slung %v, want the polecat seat's in-flight peer to hold the file", f.slung)
+	}
+	var held string
+	for _, e := range r.Skipped {
+		if e.Bead == "gt-new" {
+			held = e.Line
+		}
+	}
+	if held == "" {
+		t.Fatalf("gt-new was not held: skipped %+v", r.Skipped)
+	}
+	for _, want := range []string{"held:", "gt-peer", "gastown/polecats/onyx", "differential_helpers_test.go"} {
+		if !strings.Contains(held, want) {
+			t.Errorf("hold line %q should name %q", held, want)
+		}
+	}
+}
+
 // TestSpecTargetClaimsFailsOnAnUnreadableRig is the production half of the
 // no-fail-open rule: the claim set the tick reads is an error when the rig's
 // beads directory cannot be resolved or its pool will not load, which the tick

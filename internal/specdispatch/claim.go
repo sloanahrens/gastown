@@ -29,12 +29,6 @@ import (
 // empty, though, so UnreadClaimPeers names such a peer for the tick to report
 // rather than let an unread seat look like an idle one (gt-dnp9c).
 //
-// A bead in flight holds only when a polecat seat works it. A handoff note and
-// a crew session's bead carry an in-flight status for as long as that session
-// runs while nothing is being built on the file, and their notes cite whatever
-// the session read, so they are not peers a candidate waits behind (WorksSeat,
-// gt-d5f5q).
-//
 // The hold is the spec dispatcher's, applied in its tick beside the other
 // holds, and it is a skip rather than a failure: the bead stays ready and is
 // slung once the claim lifts.
@@ -147,9 +141,8 @@ func spellsDirectory(path string) bool { return strings.Contains(path, "/") }
 type Claimant struct {
 	ID     string
 	Status string
-	// Assignee and Labels decide the in-flight half of the rule through
-	// WorksSeat: only a polecat seat's bead that is not a handoff note is work
-	// on a file (gt-d5f5q).
+	// Assignee and Labels decide the in-flight half of the rule
+	// (inFlightPeerHolds, gt-d5f5q).
 	Assignee string
 	Labels   []string
 	Priority int
@@ -191,17 +184,15 @@ func NamesTestFile(candidate Claimant) bool { return len(testFiles(candidate.Pat
 //
 // A claim is a test file the candidate names by its full path. A peer claims it
 // when it spells that same path and is one of:
-//   - in flight on a polecat seat's bead, a seat already on the file; the hold
-//     lifts when it closes;
+//   - in flight, a seat's bead already on the file (inFlightPeerHolds); the
+//     hold lifts when it closes;
 //   - open and slated, and ahead of the candidate in dispatch order, so at most
 //     one bead of a ready cluster spends a seat.
 //
-// No other peer holds: a handoff note or a crew session's bead is in flight
-// without building on the file (WorksSeat, gt-d5f5q); a closed or landed
-// peer's work is already on main, which the candidate starts from; and a peer
-// that names the file only by a bare name or whose claim could not be read
-// names no path this rule can compare (gt-dnp9c). An unread peer that would
-// otherwise hold is named by
+// No other peer holds: a closed or landed peer's work is already on main, which
+// the candidate starts from, and a peer that names the file only by a bare name
+// or whose claim could not be read names no path this rule can compare
+// (gt-dnp9c). An unread peer that would otherwise hold is named by
 // UnreadClaimPeers, which the tick reports as a notice.
 //
 // slated is the set of beads the tick has decided to sling this tick, not the
@@ -262,15 +253,46 @@ func TargetClaimHold(candidate Claimant, peers []Claimant, slated map[string]boo
 }
 
 // holdsStatus reports whether peer is in a state that holds a candidate naming
-// the same test file: a polecat seat already on it, or an open bead the tick
-// slates ahead of the candidate. An in-flight status on its own is not enough:
-// a handoff note and a crew session's bead carry one too, and WorksSeat tells
-// them from work on the file (gt-d5f5q).
+// the same test file: a seat already on it (inFlightPeerHolds), or an open bead
+// the tick slates ahead of the candidate.
 func holdsStatus(peer, candidate Claimant, slated map[string]bool) bool {
 	if claimLiveStatuses[peer.Status] {
-		return WorksSeat(peer.Assignee, peer.Labels)
+		return inFlightPeerHolds(peer)
 	}
 	return peer.Status == "open" && slated[peer.ID] && precedes(peer, candidate)
+}
+
+// inFlightPeerHolds reports whether an in-flight peer is work on a candidate's
+// file: a seat's bead, not a handoff note and not a crew or bird session's bead.
+// Those two wear an in-flight status for as long as the session runs and their
+// notes cite whatever the session read, though nothing is being built on the
+// file, so neither is a peer a candidate waits behind (gt-d5f5q). An assignee
+// this rule cannot read is not a crew session: the hold fails closed there
+// rather than release the file on a record that lost its seat.
+func inFlightPeerHolds(peer Claimant) bool {
+	for _, label := range peer.Labels {
+		if isHandoffLabel(label) {
+			return false
+		}
+	}
+	return !namesCrewSeat(peer.Assignee)
+}
+
+// namesCrewSeat reports whether an assignee addresses a crew session: a "crew"
+// path component followed by the session's name, wherever the two sit in the
+// path (role.Actor writes "<rig>/crew/<name>"). Birds run as crew sessions of
+// the town ("town/crew/dipper"), so one rule names both (gt-d5f5q). Read the
+// way namesPolecatSeat reads a seat, so an assignee with an extra or missing
+// segment is still recognized; an empty or unrecognized assignee addresses no
+// crew session.
+func namesCrewSeat(assignee string) bool {
+	parts := strings.Split(strings.TrimSpace(assignee), "/")
+	for i := 0; i+1 < len(parts); i++ {
+		if parts[i] == "crew" && parts[i+1] != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // UnreadClaimPeers names the peers whose claim could not be read and whose

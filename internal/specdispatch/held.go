@@ -27,11 +27,10 @@ type HeldBead struct {
 }
 
 // WorksSeat reports whether a bead with this assignee and these labels is work
-// on a seat the dispatcher's file holds protect: a polecat seat's bead that is
-// not a handoff note (gt-asvow). Both the overlap hold and the target-claim
-// rule read it for an in-flight peer (gt-d5f5q). Before changing what holds,
-// read step 5 of docs/guides/spec-dispatcher.md: it states the rule and why a
-// crew session's bead and a handoff log are not work on a candidate's files.
+// on a seat the overlap hold protects: a polecat seat's bead that is not a
+// handoff note (gt-asvow). Before changing what holds, read step 5 of
+// docs/guides/spec-dispatcher.md: it states the rule and why a crew session's
+// bead and a handoff log are not work on a candidate's files.
 func WorksSeat(assignee string, labels []string) bool {
 	if !namesPolecatSeat(assignee) {
 		return false

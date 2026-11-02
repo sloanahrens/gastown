@@ -393,7 +393,9 @@ func TestClaimHandoffBeadIsNotAPeer(t *testing.T) {
 
 // TestClaimCrewAssigneeIsNotAPeer is gt-d5f5q's second acceptance row: a bead
 // held by a crew or bird identity is not work on the file, while the same bead
-// on a polecat seat still holds the candidate and the reason names the seat.
+// on a polecat seat still holds the candidate and the reason names the seat. An
+// assignee the rule cannot read is not a crew session, so it keeps holding
+// rather than release the file on a record that lost its seat (gt-d5f5q).
 func TestClaimCrewAssigneeIsNotAPeer(t *testing.T) {
 	t.Parallel()
 	const path = "internal/bdshim/differential_helpers_test.go"
@@ -404,9 +406,15 @@ func TestClaimCrewAssigneeIsNotAPeer(t *testing.T) {
 		want     bool
 	}{
 		{name: "a crew session's bead does not hold", assignee: "town/crew/overseer"},
-		{name: "a bird's bead does not hold", assignee: "gastown/witness"},
+		// A bird is a crew session of the town (gt-dipper's own bead is
+		// town/crew/dipper).
+		{name: "a bird's bead does not hold", assignee: "town/crew/dipper"},
 		{name: "a polecat seat's bead still holds", assignee: "gastown/polecats/bullet", want: true},
 		{name: "another rig's polecat seat still holds", assignee: "fractals/polecats/cantor", want: true},
+		// Only a crew address is excluded: an assignee the rule cannot place
+		// and one the record lost both keep holding, as they did before.
+		{name: "an assignee that is neither seat nor crew still holds", assignee: "gastown/witness", want: true},
+		{name: "an assignee the record lost still holds", want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -415,8 +423,17 @@ func TestClaimCrewAssigneeIsNotAPeer(t *testing.T) {
 			if held != tc.want {
 				t.Fatalf("held = %v (%q), want %v", held, why, tc.want)
 			}
-			if tc.want && !strings.Contains(why, tc.assignee) {
+			if !tc.want {
+				return
+			}
+			if !strings.Contains(why, peer.ID) {
+				t.Errorf("reason %q should name the peer %q", why, peer.ID)
+			}
+			if tc.assignee != "" && !strings.Contains(why, tc.assignee) {
 				t.Errorf("reason %q should name the seat %q", why, tc.assignee)
+			}
+			if tc.assignee == "" && strings.Contains(why, "()") {
+				t.Errorf("reason %q should name no seat when the record lost its assignee", why)
 			}
 		})
 	}
