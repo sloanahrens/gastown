@@ -42,41 +42,43 @@ func SandboxSeatGitState(branch string, exists bool, existsErr error, sandboxNam
 	return LiveGitState{Branch: branch, Source: GitStateSourceLive}
 }
 
-// SandboxSeatHostGitState judges a gone sandbox seat from what survives in its
-// host worktree: HEAD's commits are compared with the pushed branch on origin
-// by patch identity (git cherry), and the worktree's dirt and stashes are read
-// too. All commits present on origin and a clean worktree read clean and
-// pushed; a unique commit, a stash or dirt keeps the seat blocked with the fact
-// that blocks it. A worktree directory that no longer exists has nothing left
-// to lose and reads clean; a path the caller could not resolve, one that cannot
-// be read, or an unreadable comparison is unknown, which is never clean. A
+// SandboxSeatHostGitState judges a gone sandbox seat from what survives on the
+// host: its worktree while that directory exists, the branch ref it left in the
+// rig's shared repository once it does not. A worktree's HEAD is compared with
+// the pushed branch on origin by patch identity (git cherry) and its dirt and
+// stashes are read too; a shared repository's copy of the seat's local branch
+// is compared the same way. Commits already on the pushed branch and a clean
+// worktree read clean and pushed; a unique commit, a stash or dirt keeps the
+// seat blocked with the fact that blocks it. A path the caller could not
+// resolve, a branch ref that cannot be read, a shared repository that cannot be
+// located, or an unreadable comparison is unknown, which is never clean. A
 // running sandbox or a gateway error passes through unchanged. worktreePath is
-// the seat's host clone; pushedBranch is the branch the sandbox pushed (empty
-// compares against the worktree's own branch).
-func SandboxSeatHostGitState(gone LiveGitState, worktreePath, pushedBranch string) LiveGitState {
-	return sandboxSeatHostGitState(gitOpener{}, gone, worktreePath, pushedBranch)
+// the seat's host clone; rigRoot holds the shared repository that survives the
+// clone; pushedBranch is the branch the sandbox pushed (empty compares against
+// the worktree's own branch while it exists, and names no local ref once it is
+// gone, which leaves the lost-work rule to judge the seat).
+func SandboxSeatHostGitState(gone LiveGitState, worktreePath, rigRoot, pushedBranch string) LiveGitState {
+	return sandboxSeatHostGitState(gitOpener{}, gone, worktreePath, rigRoot, pushedBranch)
 }
 
 // sandboxSeatHostGitState is SandboxSeatHostGitState over the injected git
 // seam. Only a gone seat (a live source) is measured; every other answer is
 // returned unchanged, so a caller may pass any sandbox seat's state.
-func sandboxSeatHostGitState(gits gitOpener, gone LiveGitState, worktreePath, pushedBranch string) LiveGitState {
+func sandboxSeatHostGitState(gits gitOpener, gone LiveGitState, worktreePath, rigRoot, pushedBranch string) LiveGitState {
 	if gone.Source != GitStateSourceLive {
 		return gone
 	}
-	return sandboxSeatGoneHostGitState(gits, worktreePath, pushedBranch, gone.Branch)
+	return sandboxSeatGoneHostGitState(gits, worktreePath, rigRoot, pushedBranch, gone.Branch)
 }
 
 // sandboxSeatGoneHostGitState is the host measurement behind
 // SandboxSeatHostGitState. An unresolved path, or one that is present but
 // cannot be read, is unknown, never clean, because a comparison that did not
 // run says nothing about the work it holds. A worktree directory that is gone
-// cannot be opened at all: the .git link that located its shared repo lived
-// inside that directory, and this function is given no other repository
-// handle, so a branch ref left in that repo is not compared. The pushed
-// branch on origin is the durable copy, and the lost-work rule blocks a seat
-// that pushed none and has no resume branch (gt-zgoo3).
-func sandboxSeatGoneHostGitState(gits gitOpener, worktreePath, pushedBranch, label string) LiveGitState {
+// is judged from the shared repository the rig still holds: the seat's branch
+// ref outlives its worktree, and a commit only that ref holds has no equivalent
+// on the pushed branch (gt-zgoo3).
+func sandboxSeatGoneHostGitState(gits gitOpener, worktreePath, rigRoot, pushedBranch, label string) LiveGitState {
 	path := strings.TrimSpace(worktreePath)
 	if path == "" {
 		return liveGitUnknown("(none)", "resolving the host worktree",
@@ -84,7 +86,7 @@ func sandboxSeatGoneHostGitState(gits gitOpener, worktreePath, pushedBranch, lab
 	}
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
-			return LiveGitState{Branch: label, Source: GitStateSourceLive}
+			return sandboxSeatGoneSharedRepoGitState(gits, path, rigRoot, pushedBranch, label)
 		}
 		return liveGitUnknown(path, "reading the host worktree", err)
 	}
@@ -139,4 +141,62 @@ func sandboxSeatGoneHostGitState(gits gitOpener, worktreePath, pushedBranch, lab
 		state.DirtyReason = fmt.Sprintf("git_state=has_uncommitted uncommitted_files=%d", len(status.NonRuntimeNonSkewPaths(g)))
 	}
 	return state
+}
+
+// sandboxSeatGoneSharedRepoGitState judges a gone seat whose host worktree
+// directory is missing by the branch ref that worktree leaves in the rig's
+// shared repository. A seat with no ref there has nothing unpushed; a ref whose
+// commits have no equivalent patch on the pushed branch keeps them counted. A
+// recorded branch that cannot name a ref, a rig with no repository, and a
+// comparison that cannot be read are all unknown, never clean (gt-zgoo3).
+func sandboxSeatGoneSharedRepoGitState(gits gitOpener, worktreePath, rigRoot, pushedBranch, label string) LiveGitState {
+	branch := strings.TrimSpace(pushedBranch)
+	if branch == "" {
+		// No branch was recorded, so no ref is named to compare. The
+		// lost-work rule is the guard for such a seat, and it fails closed
+		// unless the issue landed with nothing left on origin (gt-xhnn3).
+		return LiveGitState{Branch: strings.TrimSpace(label), Source: GitStateSourceLive}
+	}
+	if branch == "HEAD" || strings.ContainsAny(branch, " \t\n\r") {
+		return liveGitUnknown(worktreePath, "naming the seat's local branch",
+			errors.New("the recorded branch names no local ref"))
+	}
+	root := strings.TrimSpace(rigRoot)
+	if root == "" {
+		return liveGitUnknown(worktreePath, "locating the shared repository",
+			errors.New("the caller named no rig root"))
+	}
+	repo := rigGitRepo(root)
+	if repo == "" {
+		return liveGitUnknown(worktreePath, "locating the shared repository",
+			errors.New("no .repo.git or mayor/rig under the rig root"))
+	}
+	g := openRigRepo(gits, repo)
+
+	localRef := "refs/heads/" + branch
+	exists, err := g.RefExists(localRef)
+	if err != nil {
+		return liveGitUnknown(worktreePath, "reading "+localRef, err)
+	}
+	if !exists {
+		return LiveGitState{Branch: strings.TrimSpace(label), Source: GitStateSourceLive}
+	}
+
+	// The pushed branch is read from the shared repo's own refs; one it never
+	// fetched falls back to the remote's default branch, which can keep
+	// already-pushed commits counted. That over-counts (blocks a recoverable
+	// seat) rather than clearing a seat holding unpushed work.
+	ref := "origin/" + branch
+	if _, err := g.Rev(ref); err != nil {
+		ref = "origin/" + g.RemoteDefaultBranch()
+	}
+	preservation, err := g.RefPreservedByRef(localRef, ref)
+	if err != nil {
+		return liveGitUnknown(worktreePath, "comparing "+localRef+" with "+ref, err)
+	}
+	return LiveGitState{
+		Branch:          strings.TrimSpace(label),
+		UnpushedCommits: preservation.UnpreservedPatchCount,
+		Source:          GitStateSourceLive,
+	}
 }

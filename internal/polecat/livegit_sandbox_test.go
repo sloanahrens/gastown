@@ -60,7 +60,7 @@ func TestSandboxSeatHostGitStateLeavesEveryOtherAnswerAlone(t *testing.T) {
 		SandboxSeatGitState("label", true, nil, "sb"),
 		SandboxSeatGitState("", false, errors.New("gateway unreachable"), "sb"),
 	} {
-		got := SandboxSeatHostGitState(live, t.TempDir(), "polecat/toast/gt-a+x")
+		got := SandboxSeatHostGitState(live, t.TempDir(), "", "polecat/toast/gt-a+x")
 		if got != live {
 			t.Errorf("state %+v was rewritten to %+v", live, got)
 		}
@@ -85,7 +85,13 @@ func sandboxHostRepo(t *testing.T) (*world, string, string) {
 
 // judgeGone measures a gone sandbox seat's host worktree in w.
 func judgeGone(w *world, worktreePath, pushedBranch string) LiveGitState {
-	return sandboxSeatHostGitState(w.opener(), SandboxSeatGitState("", false, nil, "sb"), worktreePath, pushedBranch)
+	return judgeGoneIn(w, worktreePath, "", pushedBranch)
+}
+
+// judgeGoneIn is judgeGone with the seat's rig root, which holds the shared
+// repository a missing worktree is judged from.
+func judgeGoneIn(w *world, worktreePath, rigRoot, pushedBranch string) LiveGitState {
+	return sandboxSeatHostGitState(w.opener(), SandboxSeatGitState("", false, nil, "sb"), worktreePath, rigRoot, pushedBranch)
 }
 
 // A gone sandbox seat is judged from its host worktree: commits whose patches
@@ -156,11 +162,11 @@ func TestSandboxSeatGitStateGoneSandboxJudgesTheHostWorktree(t *testing.T) {
 		}
 	})
 
-	t.Run("a missing worktree is nothing to lose", func(t *testing.T) {
+	t.Run("a missing worktree with no shared repository is unknown", func(t *testing.T) {
 		t.Parallel()
-		st := judgeGone(newWorld(), filepath.Join(t.TempDir(), "gone"), "polecat/toast/gt-a+x")
-		if st.Source != GitStateSourceLive {
-			t.Errorf("Source = %q, want live for a host worktree that no longer exists (reason %q)", st.Source, st.FailedReason)
+		st := judgeGoneIn(newWorld(), filepath.Join(t.TempDir(), "gone"), t.TempDir(), "polecat/toast/gt-a+x")
+		if st.Source != GitStateSourceUnknown || !strings.Contains(st.FailedReason, "locating the shared repository") {
+			t.Errorf("state = %+v, want unknown naming the shared repository", st)
 		}
 	})
 
@@ -244,6 +250,91 @@ func TestSandboxSeatGitStateGoneSandboxJudgesTheHostWorktree(t *testing.T) {
 		st := judgeGone(w, dir, "polecat/toast/gt-a+x")
 		if st.Source != GitStateSourceUnknown || !strings.Contains(st.FailedReason, "comparing HEAD with") {
 			t.Errorf("state = %+v, want unknown naming the comparison", st)
+		}
+	})
+}
+
+const sharedRepoBranch = "polecat/toast/gt-a+x"
+
+// sharedRepoRig builds a rig whose mayor/rig shared repository holds the
+// seat's branch with one commit, and returns the world, the rig root, and the
+// path the seat's gone worktree directory is named by.
+func sharedRepoRig(t *testing.T) (*world, string, string) {
+	t.Helper()
+	w := newWorld()
+	rigRoot := t.TempDir()
+	buildRigIn(t, w, rigRoot, map[string]string{"README.md": "# Test\n"})
+	shared := filepath.Join(rigRoot, "mayor", "rig")
+	w.SetRef(t, shared, "refs/heads/"+sharedRepoBranch, w.rev(t, shared, "refs/heads/main"))
+	w.Commit(t, shared, sharedRepoBranch, "the seat's commit", map[string]string{"fix.txt": "x\n"})
+	return w, rigRoot, filepath.Join(rigRoot, "polecats", "toast", "gastown")
+}
+
+// A gone sandbox seat whose host worktree directory is missing is judged from
+// the branch ref that worktree left in the rig's shared repository: a commit
+// only that ref holds blocks and is counted, a ref whose work is on the pushed
+// branch — or no ref at all — reads clean, and a comparison that cannot run is
+// unknown. Without this, unpushed commits outlive the worktree that held them
+// (gt-zgoo3).
+func TestSandboxSeatGoneSeatMissingWorktreeJudgesTheSharedRepo(t *testing.T) {
+	t.Parallel()
+
+	t.Run("an unpushed local branch is counted", func(t *testing.T) {
+		t.Parallel()
+		w, rigRoot, gone := sharedRepoRig(t)
+		st := judgeGoneIn(w, gone, rigRoot, sharedRepoBranch)
+		if st.Source != GitStateSourceLive {
+			t.Fatalf("Source = %q, want live (reason %q)", st.Source, st.FailedReason)
+		}
+		if st.UnpushedCommits != 1 {
+			t.Errorf("UnpushedCommits = %d, want the local branch's one unique commit", st.UnpushedCommits)
+		}
+	})
+
+	t.Run("a local branch already pushed reads clean", func(t *testing.T) {
+		t.Parallel()
+		w, rigRoot, gone := sharedRepoRig(t)
+		shared := filepath.Join(rigRoot, "mayor", "rig")
+		pushed := w.rev(t, shared, "refs/heads/"+sharedRepoBranch)
+		mainTip := w.rev(t, shared, "refs/heads/main")
+		w.SetRef(t, shared, "refs/remotes/origin/"+sharedRepoBranch, pushed)
+		// The host's copy is the same patch under a different SHA, so only
+		// patch identity sees that nothing is unique to the shared repo.
+		w.SetRef(t, shared, "refs/heads/"+sharedRepoBranch, mainTip)
+		w.Commit(t, shared, sharedRepoBranch, "the host's copy of the fix", map[string]string{"fix.txt": "x\n"})
+
+		st := judgeGoneIn(w, gone, rigRoot, sharedRepoBranch)
+		if st.Source != GitStateSourceLive || st.UnpushedCommits != 0 {
+			t.Errorf("state = %+v, want a live clean answer from patch identity", st)
+		}
+	})
+
+	t.Run("no local branch reads clean", func(t *testing.T) {
+		t.Parallel()
+		w, rigRoot, gone := sharedRepoRig(t)
+		w.DeleteRef(t, filepath.Join(rigRoot, "mayor", "rig"), "refs/heads/"+sharedRepoBranch)
+		st := judgeGoneIn(w, gone, rigRoot, sharedRepoBranch)
+		if st.Source != GitStateSourceLive || st.UnpushedCommits != 0 {
+			t.Errorf("state = %+v, want live clean for a branch the shared repo never held", st)
+		}
+	})
+
+	t.Run("an unreadable comparison is unknown", func(t *testing.T) {
+		t.Parallel()
+		w, rigRoot, gone := sharedRepoRig(t)
+		w.DeleteRef(t, filepath.Join(rigRoot, "mayor", "rig"), "refs/remotes/origin/main")
+		st := judgeGoneIn(w, gone, rigRoot, sharedRepoBranch)
+		if st.Source != GitStateSourceUnknown || !strings.Contains(st.FailedReason, "comparing refs/heads/") {
+			t.Errorf("state = %+v, want unknown naming the comparison", st)
+		}
+	})
+
+	t.Run("no recorded branch names no ref to compare", func(t *testing.T) {
+		t.Parallel()
+		w, rigRoot, gone := sharedRepoRig(t)
+		st := judgeGoneIn(w, gone, rigRoot, "")
+		if st.Source != GitStateSourceLive || st.UnpushedCommits != 0 {
+			t.Errorf("state = %+v, want live with nothing named to compare", st)
 		}
 	})
 }

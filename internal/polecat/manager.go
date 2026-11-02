@@ -3414,7 +3414,7 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	var targetRefs []string
 	if sandboxed {
 		gone := sandboxLive.Source == GitStateSourceLive
-		sandboxLive = sandboxSeatHostGitState(m.gits, sandboxLive, clonePath, strings.TrimSpace(fields.Branch))
+		sandboxLive = sandboxSeatHostGitState(m.gits, sandboxLive, clonePath, m.rig.Path, strings.TrimSpace(fields.Branch))
 		applySandboxSeatFacts(&facts, sandboxLive, fields)
 		if gone {
 			m.applySandboxLostWorkFacts(&facts, fields, sourceHint, name)

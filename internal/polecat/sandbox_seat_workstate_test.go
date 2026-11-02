@@ -604,6 +604,140 @@ func TestSandboxGoneWithAUniqueCommitStillBlocks(t *testing.T) {
 	}
 }
 
+// A gone sandbox seat whose host worktree directory is missing is judged from
+// the branch ref that worktree left in the rig's shared repository: a commit
+// only that ref holds blocks and names its count, work already pushed and a
+// ref the repo never held read safe, and a comparison that cannot run blocks
+// (gt-zgoo3).
+func TestGoneSandboxMissingWorktreeWithUnpushedLocalBranchBlocks(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		mutate      func(t *testing.T, w *world, mayorRig string, p *Polecat)
+		wantBlocker string // "" means the seat must be safe
+	}{
+		{
+			name:        "an unpushed local branch blocks and counts its commits",
+			mutate:      func(*testing.T, *world, string, *Polecat) {},
+			wantBlocker: "unpushed_commits=1",
+		},
+		{
+			name: "a local branch already pushed reads safe",
+			mutate: func(t *testing.T, w *world, _ string, p *Polecat) {
+				if err := w.repo(p.ClonePath).Push("origin", p.Branch, false); err != nil {
+					t.Fatalf("push %s: %v", p.Branch, err)
+				}
+			},
+		},
+		{
+			name: "a local branch the shared repo never held reads safe",
+			mutate: func(t *testing.T, w *world, mayorRig string, p *Polecat) {
+				w.DeleteRef(t, mayorRig, "refs/heads/"+p.Branch)
+			},
+		},
+		{
+			name: "an unreadable comparison blocks",
+			mutate: func(t *testing.T, w *world, mayorRig string, p *Polecat) {
+				w.DeleteRef(t, mayorRig, "refs/remotes/origin/"+p.Branch)
+				w.DeleteRef(t, mayorRig, "refs/remotes/origin/main")
+			},
+			wantBlocker: "comparing refs/heads/",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mgr, mayorRig, bd, added, w := canonicalWithPolecats(t, true, "toast")
+			p := added["toast"]
+			w.Commit(t, p.ClonePath, p.Branch, "only the host has this", map[string]string{"host.txt": "y\n"})
+			w.checkout(t, p.ClonePath)
+			tt.mutate(t, w, mayorRig, p)
+			// The sandbox's host worktree directory is gone; only the shared
+			// repository's branch ref survives.
+			if err := os.RemoveAll(p.ClonePath); err != nil {
+				t.Fatal(err)
+			}
+			bd.setAgent(t, mgr.agentBeadID("toast"), func(f *beads.AgentFields) {
+				f.Agent, f.Branch = "deepseek-flash-sandbox", p.Branch
+			})
+			mgr.sandboxSeat = func(string, string) (LiveGitState, bool) {
+				return SandboxSeatGitState("", false, nil, "sb"), true
+			}
+
+			d := mgr.WorkstateDispositionForPolecat("toast", StateIdle, "")
+
+			blockers := strings.Join(d.Blockers, "\n")
+			if tt.wantBlocker == "" {
+				if d.NeedsRecovery || !d.Reusable || !d.SafeToNuke {
+					t.Fatalf("seat with nothing at risk reusable=%v safe=%v needs_recovery=%v (reason=%s blockers=%v)",
+						d.Reusable, d.SafeToNuke, d.NeedsRecovery, d.Reason, d.Blockers)
+				}
+				return
+			}
+			if !strings.Contains(blockers, tt.wantBlocker) {
+				t.Fatalf("blockers = %v, want one containing %q (reason=%s)", d.Blockers, tt.wantBlocker, d.Reason)
+			}
+			if d.Reusable || d.SafeToNuke || !d.NeedsRecovery {
+				t.Errorf("seat with %s reusable=%v safe=%v needs_recovery=%v", tt.wantBlocker, d.Reusable, d.SafeToNuke, d.NeedsRecovery)
+			}
+		})
+	}
+}
+
+// A gone sandbox seat whose host worktree still exists keeps its dirt and
+// stashes as blockers, not only its unique commits (gt-zgoo3).
+func TestGoneSandboxWithHostWorktreeDirtOrStashBlocks(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		mutate func(t *testing.T, w *world, dir string)
+		want   string
+	}{
+		{
+			name: "dirt",
+			mutate: func(t *testing.T, w *world, dir string) {
+				if err := os.WriteFile(filepath.Join(dir, "churn.txt"), []byte("churn\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "has_uncommitted",
+		},
+		{
+			name: "a stash",
+			mutate: func(t *testing.T, w *world, dir string) {
+				if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("changed\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				w.Stash(t, dir, "wip")
+			},
+			want: "stash_count=1",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mgr, _, bd, added, w := canonicalWithPolecats(t, true, "toast")
+			p := added["toast"]
+			tt.mutate(t, w, p.ClonePath)
+			bd.setAgent(t, mgr.agentBeadID("toast"), func(f *beads.AgentFields) {
+				f.Agent, f.Branch = "deepseek-flash-sandbox", p.Branch
+			})
+			mgr.sandboxSeat = func(string, string) (LiveGitState, bool) {
+				return SandboxSeatGitState("", false, nil, "sb"), true
+			}
+
+			d := mgr.WorkstateDispositionForPolecat("toast", StateIdle, "")
+
+			if blockers := strings.Join(d.Blockers, "\n"); !strings.Contains(blockers, tt.want) {
+				t.Fatalf("blockers = %v, want one containing %q (reason=%s)", d.Blockers, tt.want, d.Reason)
+			}
+			if d.Reusable || d.SafeToNuke || !d.NeedsRecovery {
+				t.Errorf("seat with %s reusable=%v safe=%v needs_recovery=%v", tt.want, d.Reusable, d.SafeToNuke, d.NeedsRecovery)
+			}
+		})
+	}
+}
+
 // A seat whose sandbox still exists keeps today's answer byte for byte: the
 // host worktree is not consulted, and the running sandbox is the git state.
 func TestRunningSandboxSeatKeepsTodaysGitCheckFailed(t *testing.T) {

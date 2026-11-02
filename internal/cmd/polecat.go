@@ -1729,7 +1729,8 @@ func checkRecoveryForPolecat(bd recoveryBeads, preloadedAgentBeads map[string]*b
 // passed in: a running sandbox seat's host worktree is a stale leftover, so its
 // git facts come from the gateway and the host clone is never measured
 // (gt-qq6rg.2). A seat whose sandbox the gateway affirms gone is judged from
-// what survives in the host worktree (gt-zgoo3).
+// what survives on the host, its worktree or the shared repo's branch ref
+// (gt-zgoo3).
 func checkRecoveryForPolecatWith(sandboxEnv sandboxSeatEnv, bd recoveryBeads, preloadedAgentBeads map[string]*beads.Issue, r *rig.Rig, rigName, polecatName string, p *polecat.Polecat, reconcileCleanup bool) RecoveryStatus {
 	// Get cleanup_status from agent bead
 	// We need to read it directly from beads since manager doesn't expose it
@@ -1746,7 +1747,7 @@ func checkRecoveryForPolecatWith(sandboxEnv sandboxSeatEnv, bd recoveryBeads, pr
 		sandboxLive, sandboxed = sandboxEnv.probe(strings.TrimSpace(fields.Agent), polecatSessionNameIn(rigName, polecatName))
 		if sandboxed {
 			sandboxGone = sandboxLive.Source == polecat.GitStateSourceLive
-			sandboxLive = polecat.SandboxSeatHostGitState(sandboxLive, p.ClonePath, strings.TrimSpace(fields.Branch))
+			sandboxLive = sandboxEnv.judgeGoneSeat(sandboxLive, p.ClonePath, r.Path, strings.TrimSpace(fields.Branch))
 		}
 	}
 

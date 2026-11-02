@@ -15,6 +15,11 @@ import (
 // of its (possibly gone) sandbox and whether its branch is on the remote.
 type sandboxSeatEnv struct {
 	probe sandboxSeatProbe
+	// hostGitState judges a gone sandbox seat from its host worktree and the
+	// rig's shared repository; nil means polecat.SandboxSeatHostGitState.
+	// Tests supply a modeled measurement so the recovery path runs with no
+	// repository.
+	hostGitState func(gone polecat.LiveGitState, worktreePath, rigRoot, pushedBranch string) polecat.LiveGitState
 	// remoteBranch reports whether branch exists on origin, asked of the rig's
 	// shared bare repo; nil means ls-remote there.
 	remoteBranch func(rigPath, branch string) (bool, error)
@@ -38,6 +43,17 @@ func (e sandboxSeatEnv) branchesForIssue(rigPath, issueID string) ([]string, err
 		return e.survivingBranches(rigPath, issueID)
 	}
 	return polecat.FindSurvivingBranchesForIssue(rigPath, issueID)
+}
+
+// judgeGoneSeat measures a gone sandbox seat from what survives on the host:
+// its worktree, or the branch ref the shared repository still holds once the
+// worktree directory is gone (gt-zgoo3). A test's measurement runs instead of
+// the repository read.
+func (e sandboxSeatEnv) judgeGoneSeat(gone polecat.LiveGitState, worktreePath, rigRoot, pushedBranch string) polecat.LiveGitState {
+	if e.hostGitState != nil {
+		return e.hostGitState(gone, worktreePath, rigRoot, pushedBranch)
+	}
+	return polecat.SandboxSeatHostGitState(gone, worktreePath, rigRoot, pushedBranch)
 }
 
 // applySandboxLostWorkFacts gives the verdict what it needs to tell lost work
