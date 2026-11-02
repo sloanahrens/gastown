@@ -1465,27 +1465,19 @@ func TestCollectParkedSeatsFailsOnUnreadableRecord(t *testing.T) {
 	}
 }
 
-// A rig directory the walk cannot read fails the collection rather than
-// reporting a clean queue.
+// A runtime path that is not a directory (ENOTDIR) fails the collection
+// rather than reporting a clean queue.
 func TestCollectParkedSeatsFailsOnUnreadableWalk(t *testing.T) {
 	t.Parallel()
-	if os.Geteuid() == 0 {
-		t.Skip("root reads a 0000 directory, so the walk cannot fail")
-	}
 	d, _ := newOverrunDaemon(t, false)
-	rigDir := filepath.Join(constants.TownRuntimePath(d.config.TownRoot), "agents", "gastown")
-	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+	if err := os.WriteFile(constants.TownRuntimePath(d.config.TownRoot), []byte("not a directory\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(rigDir, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(rigDir, 0o755) })
 	s := &attentionSources{d: d, now: time.Now()}
 
 	_, err := s.collectOverrunParkedSeats(context.Background())
 	if err == nil {
-		t.Fatal("collector walked a directory it cannot read as clean")
+		t.Fatal("collector walked a broken runtime path as clean")
 	}
 }
 
