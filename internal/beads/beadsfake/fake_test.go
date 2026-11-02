@@ -125,6 +125,21 @@ func TestVersionReadsReportScriptedFailures(t *testing.T) {
 	}
 }
 
+// TestKVSetReportsAScriptedFailure: a write a test scripted to fail is the
+// caller's error, and nothing is stored.
+func TestKVSetReportsAScriptedFailure(t *testing.T) {
+	t.Parallel()
+	f := New()
+	boom := errors.New("boom")
+	f.FailWith("kv set gt.note", boom)
+	if err := f.KVSet("gt.note", "v"); !errors.Is(err, boom) {
+		t.Errorf("KVSet with FailWith(kv set) = %v, want boom", err)
+	}
+	if _, err := f.KVGet("gt.note"); !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("KVGet after the failed write = %v, want beads.ErrNotFound", err)
+	}
+}
+
 func TestSeedStoresTheGivenID(t *testing.T) {
 	t.Parallel()
 	f := New()
