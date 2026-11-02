@@ -28,6 +28,9 @@ var handlers = map[string]Handler{
 	"defer":    deferHandler,
 	"undefer":  undeferHandler,
 	"unclaim":  unclaimHandler,
+	"comments": commentsHandler,
+	"comment":  commentHandler,
+	"label":    labelHandler,
 }
 
 // OsMain is the production entry: this process's argv, environment and working

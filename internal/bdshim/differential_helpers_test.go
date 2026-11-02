@@ -98,14 +98,11 @@ var differentialRows = []differentialRow{
 // entry whose verb has gained a handler, and on a golden row whose verb is
 // neither handled nor listed.
 var knownUnhandledVerbs = map[string]bool{
-	"comments": true,
-	"stats":    true,
-	"config":   true,
-	"kv":       true,
-	"dep":      true,
-	"label":    true,
-	"events":   true,
-	"comment":  true,
+	"stats":  true,
+	"config": true,
+	"kv":     true,
+	"dep":    true,
+	"events": true,
 }
 
 // seatDivergence is the answer the shim gives where bd's differs by design.
@@ -182,6 +179,7 @@ type fixtureDep struct {
 
 // fixtureComment is one comment a fixture line holds.
 type fixtureComment struct {
+	ID      string `json:"id"`
 	IssueID string `json:"issue_id"`
 	Author  string `json:"author"`
 	Text    string `json:"text"`
@@ -248,8 +246,14 @@ func seedFixture(t *testing.T, fixture []fixtureBead) *storetest.Fake {
 			}
 		}
 		for _, comment := range bead.Comments {
-			if err := st.AddComment(ctx, comment.IssueID, comment.Author, comment.Text); err != nil {
-				t.Fatalf("seeding comment on %s: %v", comment.IssueID, err)
+			// The golden holds the comment id bd's import read from the
+			// fixture, so the store is seeded with that id rather than one the
+			// fake mints; a fixture comment with no id cannot be replayed.
+			if comment.ID == "" {
+				t.Fatalf("the fixture's comment on %s has no id", comment.IssueID)
+			}
+			if err := st.SeedComment(comment.ID, comment.IssueID, comment.Author, comment.Text); err != nil {
+				t.Fatalf("seeding comment %s on %s: %v", comment.ID, comment.IssueID, err)
 			}
 		}
 		if bead.Status == "closed" {
