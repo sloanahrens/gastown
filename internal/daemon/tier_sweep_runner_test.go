@@ -393,13 +393,12 @@ func TestTierSweepRunnerRefusesWhatItCannotLaunch(t *testing.T) {
 	})
 }
 
-// TestTierSweepRunnerSpec_TakesEverySlotStage pins which stages the configured
-// runner takes: a slot stage leaves the host whatever command its tree runs,
-// the rig's own script included, because cmd/sweep-run runs that script in the
-// container. A stage with no runner block, and a stage that starts no
-// container, stay on the host. Restoring the script exclusion turns the
-// script row red (gt-rhwx1).
-func TestTierSweepRunnerSpec_TakesEverySlotStage(t *testing.T) {
+// TestTierSweepRunnerSpec_TakesAScriptSlotStage pins which stages the
+// configured runner takes: a script slot stage leaves the host whatever command
+// its tree runs, because cmd/sweep-run runs that script in the container. A
+// slot stage with no runner block, and a stage that starts no container, stay on
+// the host. Restoring the script exclusion turns the first row red (gt-rhwx1).
+func TestTierSweepRunnerSpec_TakesAScriptSlotStage(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name   string
@@ -449,6 +448,48 @@ func TestTierSweepRunnerSpec_TakesEverySlotStage(t *testing.T) {
 				t.Errorf("spec.Image = %q, want the runner block's image %q", spec.Image, cfg.Image)
 			}
 		})
+	}
+}
+
+// TestTierSweepRunnerStageLaunchesAndFoldsAScriptStage drives the stage
+// dispatch a cycle calls: a script slot stage with a runner configured leaves
+// the host, its launch is handed the script stage, and the run's result folds
+// into the summary lines and RED exit the cycle records. The context is
+// cancelled first so that, with the script exclusion restored, the stage falls
+// to the host gate and that gate refuses its slot at once instead of waiting on
+// the town's real one: the launch count is then what goes red (gt-rhwx1).
+func TestTierSweepRunnerStageLaunchesAndFoldsAScriptStage(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, _ := runnerCycleDaemon(t, now, runnerTestConfig(t), "")
+	var (
+		launches int
+		launched tierSweepStage
+	)
+	d.tierSweepSeams.launch = func(_ context.Context, st tierSweepStage, spec sweeprunner.Spec) tierSweepLaunch {
+		launches++
+		launched = st
+		if err := sweeprunner.Write(spec.OutDir, runnerTestResult(spec, now)); err != nil {
+			t.Fatalf("the fake launch writing a result: %v", err)
+		}
+		return tierSweepLaunch{exitCode: 0}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	st := tierSweepStage{tiers: []string{"integration", "race"}, slot: true, script: true, rig: "gastown", tested: runnerTestSHA, budget: time.Minute}
+	res := d.tierSweepRunStage(ctx, t.TempDir(), st)
+	if launches != 1 {
+		t.Fatalf("launches = %d, want 1: a script stage a runner is configured for leaves the host", launches)
+	}
+	if !launched.script || !slices.Equal(launched.tiers, st.tiers) {
+		t.Errorf("launched stage = %+v, want the script flag and tiers %q", launched, st.tiers)
+	}
+	if !res.ran || res.exitCode != tierSweepRedExit {
+		t.Fatalf("stage result = %+v, want it run and RED from the race tier's summary", res)
+	}
+	if !strings.Contains(res.output, "tier-sweep: integration GREEN") || !strings.Contains(res.output, "tier-sweep: race RED") {
+		t.Errorf("folded output does not hold the result's summary lines:\n%s", res.output)
 	}
 }
 
