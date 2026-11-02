@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"os/exec"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"unicode/utf8"
 )
@@ -184,5 +186,131 @@ func TestExecRunnerRejectsEmptyArgv(t *testing.T) {
 	t.Parallel()
 	if _, err := ExecRunner(context.Background(), nil); err == nil {
 		t.Fatal("ExecRunner with an empty argv = nil error, want one")
+	}
+}
+
+// TestExecOutcome covers execOutcome's mapping of Run's result to
+// ExecRunner's: a cut answer is an error, a child holding the pipe after a
+// successful exit is not, another failure is returned, and an exit error keeps
+// hm's stderr. The integration tests drive the same outcomes through a real
+// process.
+func TestExecOutcome(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("hm failed")
+	exitErr := &exec.ExitError{}
+	tests := []struct {
+		name       string
+		limit      int
+		written    string
+		stderr     string
+		err        error
+		want       string
+		wantErr    error
+		wantStderr string
+	}{
+		{name: "answer within the bound", limit: 8, written: `[]`, want: `[]`},
+		{name: "answer past the bound", limit: 4, written: "abcdefgh", wantErr: errOutputTooLong},
+		{name: "child holds the pipe after a successful exit", limit: 8, written: `[]`, err: exec.ErrWaitDelay, want: `[]`},
+		{name: "hm fails", limit: 8, err: boom, wantErr: boom},
+		{name: "hm exits non-zero keeps stderr", limit: 8, stderr: "hm: no such index", err: exitErr, wantErr: exitErr, wantStderr: "hm: no such index"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			out := &cappedOutput{limit: tt.limit}
+			if _, err := out.Write([]byte(tt.written)); err != nil {
+				t.Fatalf("seeding output: %v", err)
+			}
+			errOut := &cappedOutput{limit: maxStderrBytes}
+			if _, err := errOut.Write([]byte(tt.stderr)); err != nil {
+				t.Fatalf("seeding stderr: %v", err)
+			}
+			got, err := execOutcome("hm", out, errOut, tt.err)
+			if !errors.Is(err, tt.wantErr) || (err == nil) != (tt.wantErr == nil) {
+				t.Fatalf("execOutcome error = %v, want %v", err, tt.wantErr)
+			}
+			if string(got) != tt.want {
+				t.Fatalf("execOutcome = %q, want %q", got, tt.want)
+			}
+			var gotExit *exec.ExitError
+			if errors.As(err, &gotExit) && string(gotExit.Stderr) != tt.wantStderr {
+				t.Fatalf("ExitError.Stderr = %q, want %q", gotExit.Stderr, tt.wantStderr)
+			}
+		})
+	}
+}
+
+// TestGroupCancel drives every outcome of the group signal a context ending
+// sends: the signals are stubbed, because a real group signal needs a running
+// process and its failure modes are platform-dependent.
+func TestGroupCancel(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("signal refused")
+	cmd := &exec.Cmd{Process: &os.Process{Pid: 4321}}
+	tests := []struct {
+		name      string
+		cmd       *exec.Cmd
+		killGroup func(pid int, sig syscall.Signal) error
+		killPid   func(p *os.Process) error
+		wantErr   error
+	}{
+		{name: "no process has started", cmd: &exec.Cmd{}},
+		{name: "group signal sent", cmd: cmd, killGroup: func(int, syscall.Signal) error { return nil }},
+		{name: "group already gone", cmd: cmd, killGroup: func(int, syscall.Signal) error { return syscall.ESRCH }, wantErr: os.ErrProcessDone},
+		{
+			name:      "group signal refused, single pid killed",
+			cmd:       cmd,
+			killGroup: func(int, syscall.Signal) error { return syscall.EPERM },
+			killPid:   func(*os.Process) error { return nil },
+		},
+		{
+			name:      "group signal refused, single pid kill fails",
+			cmd:       cmd,
+			killGroup: func(int, syscall.Signal) error { return syscall.EPERM },
+			killPid:   func(*os.Process) error { return boom },
+			wantErr:   boom,
+		},
+		{name: "group signal fails", cmd: cmd, killGroup: func(int, syscall.Signal) error { return boom }, wantErr: boom},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var gotPid int
+			var gotSig syscall.Signal
+			var gotPidTarget *os.Process
+			g := groupCancel{
+				killGroup: func(pid int, sig syscall.Signal) error {
+					gotPid, gotSig = pid, sig
+					return tt.killGroup(pid, sig)
+				},
+				killPid: func(p *os.Process) error {
+					gotPidTarget = p
+					return tt.killPid(p)
+				},
+			}
+			if err := g.cancel(tt.cmd); !errors.Is(err, tt.wantErr) || (err == nil) != (tt.wantErr == nil) {
+				t.Fatalf("cancel error = %v, want %v", err, tt.wantErr)
+			}
+			if tt.killGroup == nil {
+				return
+			}
+			if want := -tt.cmd.Process.Pid; gotPid != want || gotSig != syscall.SIGKILL {
+				t.Fatalf("signaled pid %d with %v, want group %d with SIGKILL", gotPid, gotSig, want)
+			}
+			if tt.killPid != nil && gotPidTarget != tt.cmd.Process {
+				t.Fatalf("killPid got %v, want the command's process %v", gotPidTarget, tt.cmd.Process)
+			}
+		})
+	}
+}
+
+// TestExecRunnerReportsAMissingBinary: a bare name goes through exec's PATH
+// lookup, which fails before any process starts, so the unit tier stays
+// hermetic. The name is one no PATH entry holds.
+func TestExecRunnerReportsAMissingBinary(t *testing.T) {
+	t.Parallel()
+	_, err := ExecRunner(context.Background(), []string{"gt-hmhints-no-such-binary", "query"})
+	if !errors.Is(err, exec.ErrNotFound) {
+		t.Fatalf("ExecRunner error = %v, want exec.ErrNotFound in its chain", err)
 	}
 }
