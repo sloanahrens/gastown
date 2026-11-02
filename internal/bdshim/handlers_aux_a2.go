@@ -7,40 +7,45 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
-// The second auxiliary handler: kv for a tracker rig (gt-p85pw.119). A tracker
-// has no key-value store yet (internal/beads/trackerclient/admin.go: KVList
-// answers an empty store and KVGet reports every key unset), so the shim
-// answers the two reads from that answer and refuses every write by name: a
-// write that cannot be stored is never reported as done.
+// The second auxiliary handler: kv for a tracker rig (gt-p85pw.119). The
+// tracker keeps a rig's key-value pairs in its one database, reached through
+// the store's Admin seam, so the shim answers all three kv verbs from it. The
+// goldens record an empty list, an unset key and one write, so a store holding
+// entries or a set key's value is refused rather than printed in a shape bd did
+// not record.
 //
 // kv is one verb with three subcommands, so the handler reads which one the
-// argv names before it does anything: list and get are answered, and set and
-// any other subcommand are refused by name before their flags or operands are
-// read as the answered commands'.
+// argv names before it does anything: list, get and set are answered, and any
+// other subcommand is refused by name before its flags or operands are read as
+// the answered commands'.
 
-// The flag set each kv subcommand answers: none. The goldens record both
-// commands without a flag, so a flag is refused rather than ignored.
+// The flag set each kv subcommand answers: none. The goldens record every
+// command without a flag, so a flag is refused rather than ignored.
 var (
 	kvListFlags = readFlagSpec{}
 	kvGetFlags  = readFlagSpec{}
+	kvSetFlags  = readFlagSpec{}
 )
 
-// auxKvStore is the part of a rig's store the kv handlers read. The handlers
+// auxKvStore is the part of a rig's store the kv handlers use. The handlers
 // open the full backend.Store; the narrow interface lets a test drive each
 // refusal without a tracker server.
 type auxKvStore interface {
 	KVList() (map[string]string, error)
 	KVGet(key string) (string, error)
+	KVSet(key, value string) error
 }
 
-// kvHandler answers bd kv list and kv get for a tracker rig, and refuses every
-// other kv subcommand by name.
+// kvHandler answers bd kv list, kv get and kv set for a tracker rig, and
+// refuses every other kv subcommand by name.
 func kvHandler(env Env, d Decision) int {
 	switch command := kvCommand(env.Args); command {
 	case "kv list":
 		return kvListCommand(env, d)
 	case "kv get":
 		return kvGetCommand(env, d)
+	case "kv set":
+		return kvSetCommand(env, d)
 	default:
 		return shimError(env, fmt.Errorf("%s is not implemented for tracker rig %s", command, d.Route.Prefix))
 	}
@@ -137,4 +142,49 @@ func getKV(env Env, st auxKvStore, prefix, key string) int {
 		return shimError(env, fmt.Errorf("kv get %s: reading the key: %w", key, err))
 	}
 	return shimError(env, fmt.Errorf("kv get of a set key is not implemented for tracker rig %s", prefix))
+}
+
+// kvSetCommand answers bd kv set for a tracker rig. The golden records no flag
+// and two operands, so a flag, a missing operand or a third operand is refused
+// by name before anything is written, as is an empty key, which the store's
+// contract rejects.
+func kvSetCommand(env Env, d Decision) int {
+	fl, err := parseReadArgs("kv set", env.Args)
+	if err != nil {
+		return shimError(env, err)
+	}
+	if err := refuseUnknownFlags(fl, kvSetFlags, d.Route.Prefix); err != nil {
+		return shimError(env, err)
+	}
+	switch len(fl.operands) {
+	case 0:
+		return shimError(env, errors.New("kv set needs a key and a value"))
+	case 1:
+		return shimError(env, errors.New("kv set needs a value"))
+	case 2:
+	default:
+		return shimError(env, fmt.Errorf("kv set takes a key and a value; %q is not implemented for tracker rig %s", fl.operands[2], d.Route.Prefix))
+	}
+	key, value := fl.operands[0], fl.operands[1]
+	if key == "" {
+		return shimError(env, errors.New("kv set needs a non-empty key"))
+	}
+	st, err := openTrackerStore(env, d)
+	if err != nil {
+		return shimError(env, err)
+	}
+	return setKV(env, st, key, value)
+}
+
+// setKV stores the value and prints bd's line. The line is printed only after
+// the write, so a failed print says the value was stored rather than reading as
+// a set the caller should retry.
+func setKV(env Env, st auxKvStore, key, value string) int {
+	if err := st.KVSet(key, value); err != nil {
+		return shimError(env, fmt.Errorf("kv set %s: %w", key, err))
+	}
+	if _, err := fmt.Fprintf(env.Stdout, "Set %s = %s\n", key, value); err != nil {
+		return shimError(env, fmt.Errorf("kv set %s: the value was stored but bd's answer could not be printed: %w", key, err))
+	}
+	return 0
 }

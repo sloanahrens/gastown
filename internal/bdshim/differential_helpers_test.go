@@ -112,14 +112,10 @@ type seatDivergence struct {
 // design (gt-jbetd). close --force: bd closes past the blocker; the shim's close
 // handler answers only --reason and refuses --force by name before it reaches
 // the tracker, with nothing on stdout and exit 1, which is also what gt-gk7ga
-// wants for a seat (only an admin token closes past the fences). kv set: the
-// tracker has no key-value store yet (gt-p85pw.121), so bd writes where the
-// shim refuses the write by name, with nothing on stdout and exit 1, rather
-// than reporting a write it did not make. The map only shrinks: an entry whose
-// shim answer has become bd's fails the run.
+// wants for a seat (only an admin token closes past the fences). The map only
+// shrinks: an entry whose shim answer has become bd's fails the run.
 var knownSeatDivergences = map[string]seatDivergence{
 	"close-force-reason-fixture-close": {stdout: "", exit: 1},
-	"kv-set":                           {stdout: "", exit: 1},
 }
 
 // awaitingRecording names the divergence rows whose golden bdshim-record has
