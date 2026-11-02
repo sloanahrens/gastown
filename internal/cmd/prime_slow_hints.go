@@ -22,7 +22,7 @@ func (p primeTools) hookedSlowHints(ctx RoleContext, hookedBead *beads.Issue) {
 	}
 	hint := p.hint
 	if hint == nil {
-		hint = hmHintSource
+		hint = hmHintSource(nil)
 	}
 	hits, err := hint(context.Background(), strings.TrimSpace(hookedBead.Title+" "+specHintWords), specHintLimit)
 	if err != nil || len(hits) == 0 {

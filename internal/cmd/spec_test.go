@@ -2330,6 +2330,63 @@ func TestSpecLintJSONCarriesHints(t *testing.T) {
 	})
 }
 
+// hmHintSource is the production specHintSource. Its runner is the seam
+// hmhints.Query already takes, so these tests drive the real wrapper with a
+// fake and no hm process starts (gt-xoqk0).
+
+// The wrapper hands the query a context bound by specHintTimeout, so a hung hm
+// delays the lint by at most that long.
+func TestSpecHintSourceBoundsTheQuery(t *testing.T) {
+	t.Parallel()
+	var bounded bool
+	var remaining time.Duration
+	run := func(ctx context.Context, _ []string) ([]byte, error) {
+		deadline, ok := ctx.Deadline()
+		bounded = ok
+		if ok {
+			remaining = time.Until(deadline)
+		}
+		return []byte(`[]`), nil
+	}
+	if _, err := hmHintSource(run)(context.Background(), "slow tests", 3); err != nil {
+		t.Fatalf("hmHintSource: %v", err)
+	}
+	if !bounded {
+		t.Fatal("hmhints.Query ran without a deadline; the wrapper did not bound the query")
+	}
+	if remaining <= 0 || remaining > specHintTimeout {
+		t.Errorf("query deadline was %v away, want within (0, %v]", remaining, specHintTimeout)
+	}
+}
+
+// The wrapper returns the hits hmhints.Query parsed from the runner's answer.
+func TestSpecHintSourceReturnsTheQueryHits(t *testing.T) {
+	t.Parallel()
+	run := func(context.Context, []string) ([]byte, error) {
+		return []byte(`[{"rank":1,"score":0.9,"kind":"bead","rig":"gastown","id":"gt-a","title":"first"}]`), nil
+	}
+	hits, err := hmHintSource(run)(context.Background(), "slow tests", 3)
+	if err != nil {
+		t.Fatalf("hmHintSource: %v", err)
+	}
+	want := []hmhints.Hit{{Rank: 1, Score: 0.9, Kind: "bead", Rig: "gastown", ID: "gt-a", Title: "first"}}
+	if !reflect.DeepEqual(hits, want) {
+		t.Fatalf("hmHintSource = %+v, want %+v", hits, want)
+	}
+}
+
+// A failed query is returned, never swallowed: the caller decides that a hint
+// failure is silent (gt-xoqk0).
+func TestSpecHintSourceReturnsTheQueryError(t *testing.T) {
+	t.Parallel()
+	run := func(context.Context, []string) ([]byte, error) {
+		return nil, hmhints.ErrUnavailable
+	}
+	if _, err := hmHintSource(run)(context.Background(), "slow tests", 3); !errors.Is(err, hmhints.ErrUnavailable) {
+		t.Fatalf("hmHintSource error = %v, want hmhints.ErrUnavailable in its chain", err)
+	}
+}
+
 // specTown is a temp town with one operational rig whose .beads looks like a
 // database, so specCandidates walks it. The board itself is served by the
 // specReadyBoard seam.
