@@ -112,10 +112,13 @@ type seatDivergence struct {
 // design (gt-jbetd). close --force: bd closes past the blocker; the shim's close
 // handler answers only --reason and refuses --force by name before it reaches
 // the tracker, with nothing on stdout and exit 1, which is also what gt-gk7ga
-// wants for a seat (only an admin token closes past the fences). The map only
-// shrinks: an entry whose shim answer has become bd's fails the run.
+// wants for a seat (only an admin token closes past the fences). config set: bd
+// writes and names config.yaml; a tracker rig writes the tracker config table,
+// so the shim names that rather than a file it never touches (gt-ec6vd). An
+// entry whose shim answer has become bd's fails the run.
 var knownSeatDivergences = map[string]seatDivergence{
 	"close-force-reason-fixture-close": {stdout: "", exit: 1},
+	"config-set":                       {stdout: "Set export.auto = false (in the tracker config table)\n", exit: 0},
 }
 
 // awaitingRecording names the divergence rows with no golden bdshim-record in
@@ -322,16 +325,49 @@ func fixtureEnvWithStore(t *testing.T, town string, fixture []fixtureBead, argv 
 			// create row is compared with bd's answer to the same environment.
 			return fixtureAuthorEmail
 		case "BD_ACTOR":
-			// The recorder pinned the actor too (container.go, pinnedIdentity),
-			// and the config-list golden carries it as the environment override
-			// bd reports, so the replay names the same actor.
-			return fixtureActor
+			// The recorder pinned the actor for every child (container.go,
+			// pinnedIdentity), and the config-list golden carries it as the
+			// environment override bd reports. The shim reads the actor only for
+			// its config answers, so a row of another verb runs without it: a
+			// handler that starts reading the actor is not handed one by the
+			// fixture (gt-ec6vd).
+			if verbOf(argv) == "config" {
+				return fixtureActor
+			}
 		}
 		return ""
 	}
 	env, stdout, stderr := differentialEnv(argv, getenv, town)
 	env.Handlers = handlers
 	return env, stdout, stderr, st
+}
+
+// TestFixtureEnvNamesTheActorOnlyOnAConfigRow: the recorder pinned BD_ACTOR for
+// every child, but the shim reads it only for its config answers, so only a
+// config row is replayed with it. A row of another verb runs without, so a
+// handler that starts reading the actor is not silently answered by the fixture
+// (gt-ec6vd).
+func TestFixtureEnvNamesTheActorOnlyOnAConfigRow(t *testing.T) {
+	t.Parallel()
+	fixture, _ := readFixture(t)
+	town := newTown(t, routeFixture)
+	tests := []struct {
+		name string
+		argv []string
+		want string
+	}{
+		{name: "a config row names the recorder's actor", argv: []string{"config", "list"}, want: fixtureActor},
+		{name: "another verb's row names no actor", argv: []string{"show", "fx-1"}, want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env, _, _ := fixtureEnv(t, town, fixture, tc.argv)
+			if got := env.Getenv("BD_ACTOR"); got != tc.want {
+				t.Errorf("BD_ACTOR = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
 
 // differentialEnv is the Env both runs share: the town as working directory, no
