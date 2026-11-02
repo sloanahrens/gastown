@@ -22,19 +22,30 @@ const containersFormat = "{{.Image}}"
 // answered as an error, so the caller keeps the tag rather than removing the
 // local one and orphaning the alias (gt-tpg0p.7).
 func (r *Run) DropRegistryAlias(ref string) error {
+	return r.DropRegistryAliasOn("", ref)
+}
+
+// DropRegistryAliasOn is DropRegistryAlias on the named engine, "" for the
+// default one: an alias tag a load carried into the sweep engine keeps the
+// image there just as it does here, so the trim removes it on both (gt-bxp17).
+func (r *Run) DropRegistryAliasOn(context, ref string) error {
 	if r.Cfg.Registry == "" {
 		return nil
 	}
 	alias := r.Cfg.Registry + "/" + ref
-	if r.call(r.Cfg.Docker, "image", "inspect", "--format", imageIDFormat, alias).failed() {
+	on := ""
+	if context != "" {
+		on = " on context " + context
+	}
+	if r.dockerCall(context, "image", "inspect", "--format", imageIDFormat, alias).failed() {
 		return nil
 	}
-	res := r.call(r.Cfg.Docker, "rmi", alias)
+	res := r.dockerCall(context, "rmi", alias)
 	if res.failed() {
-		r.Logf("kept %s (%s: rmi failed: %s)", ref, alias, lastLine(res.combined()))
+		r.Logf("kept %s%s (%s: rmi failed: %s)", ref, on, alias, lastLine(res.combined()))
 		return fmt.Errorf("docker could not untag %s", alias)
 	}
-	r.Logf("removed %s", alias)
+	r.Logf("removed %s%s", alias, on)
 	return nil
 }
 
@@ -95,6 +106,9 @@ func (r *Run) pruneImages(context string) {
 	}
 	used := map[string]struct{}{}
 	if context != "" {
+		// Only this engine's containers are listed: a Kubernetes pod runs
+		// from its own runtime's store, so its image is either a docker
+		// container below or a copy this engine does not hold (gt-bxp17).
 		res := r.dockerCall(context, "ps", "-a", "--format", containersFormat)
 		if res.failed() {
 			r.Logf("%s: cannot list the containers (%s); nothing pruned", label, lastLine(res.combined()))
@@ -138,10 +152,8 @@ func (r *Run) pruneImages(context string) {
 			r.Logf("kept %s%s (in use by a container)", ref, on)
 			continue
 		}
-		if context == "" {
-			if err := r.DropRegistryAlias(ref); err != nil {
-				continue
-			}
+		if err := r.DropRegistryAliasOn(context, ref); err != nil {
+			continue
 		}
 		if res := r.dockerCall(context, "rmi", ref); res.failed() {
 			r.Logf("kept %s%s (rmi failed: %s)", ref, on, lastLine(res.combined()))

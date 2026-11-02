@@ -337,6 +337,55 @@ func TestTrimContextSkipsAnImageAContainerNamesByID(t *testing.T) {
 	tr.wantLogged(t, "kept gastown-polecat:aaa1111 on context colima-gt-control (in use by a container)")
 }
 
+// TestTrimContextDropsTheRegistryAliasFirst keeps the second engine's trim the
+// same trim: an alias tag loaded beside the image would keep it on disk, so it
+// is untagged there before the per-commit tag, with the context named
+// (gt-bxp17).
+func TestTrimContextDropsTheRegistryAliasFirst(t *testing.T) {
+	t.Parallel()
+	tr, pr := trimContextRun(t, "colima-gt-control")
+	tr.Cfg.Registry = testRegistry
+	alias := testRegistry + "/gastown-polecat:aaa1111"
+	pr.ids[alias] = "sha256:aaa"
+	tr.PruneOldImages()
+	tr.wantCall(t, "docker", "--context", "colima-gt-control", "rmi", alias)
+	tr.wantCall(t, "docker", "--context", "colima-gt-control", "rmi", "gastown-polecat:aaa1111")
+	aliasAt := callPosition(tr, "--context", "colima-gt-control", "rmi", alias)
+	tagAt := callPosition(tr, "--context", "colima-gt-control", "rmi", "gastown-polecat:aaa1111")
+	if aliasAt < 0 || tagAt < 0 || aliasAt > tagAt {
+		t.Errorf("alias untagged at %d, tag at %d; want the alias first: %v", aliasAt, tagAt, callLines(tr, "docker"))
+	}
+	tr.wantLogged(t, "removed "+alias+" on context colima-gt-control")
+}
+
+// TestTrimContextKeepsATagWhoseAliasWillNotGo is the alias rule on the second
+// engine: a tag whose alias docker refuses to untag is kept, so the image is
+// never left on disk with no tag naming it (gt-bxp17).
+func TestTrimContextKeepsATagWhoseAliasWillNotGo(t *testing.T) {
+	t.Parallel()
+	tr, pr := trimContextRun(t, "colima-gt-control")
+	tr.Cfg.Registry = testRegistry
+	alias := testRegistry + "/gastown-polecat:aaa1111"
+	pr.ids[alias] = "sha256:aaa"
+	pr.fail[callKey("docker", "--context", "colima-gt-control", "rmi", alias)] = result{exit: 1, stderr: "image is in use"}
+	tr.PruneOldImages()
+	if anyCallNamed(tr.callsTo("docker"), "--context", "colima-gt-control", "rmi", "gastown-polecat:aaa1111") {
+		t.Errorf("a tag whose alias would not go was untagged: %v", callLines(tr, "docker"))
+	}
+	tr.wantLogged(t, "kept gastown-polecat:aaa1111 on context colima-gt-control ("+alias+": rmi failed: image is in use)")
+}
+
+// callPosition is the index of the docker call carrying exactly want, -1 when
+// there is none.
+func callPosition(tr *testRun, want ...string) int {
+	for i, c := range tr.callsTo("docker") {
+		if callKey(c.name, c.args...) == callKey("docker", want...) {
+			return i
+		}
+	}
+	return -1
+}
+
 // TestTrimContextPrunesNothingWhenTheEngineIsUnreachable names the engine's
 // own failure: a context docker cannot reach prunes nothing and says so
 // (gt-bxp17).

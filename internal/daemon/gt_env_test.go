@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log"
@@ -125,6 +126,30 @@ func TestWithPolecatImageTrimContextRefusesADisabledSweep(t *testing.T) {
 	}
 	if env := d.withPolecatImageTrimContext([]string{"PATH=/usr/bin"}); len(env) != 1 {
 		t.Errorf("env = %q, want the input alone for a disabled sweep", env)
+	}
+}
+
+// TestUnsafeTrimContextIsRefusedAndLogged is the alarm for the input guard: a
+// town whose runner context is not one Docker context name publishes nothing to
+// the plugin, and the log names the value it refused so the typo is findable
+// (gt-bxp17).
+func TestUnsafeTrimContextIsRefusedAndLogged(t *testing.T) {
+	t.Parallel()
+	var logged bytes.Buffer
+	d := &Daemon{
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{TierSweep: &TierSweepConfig{
+			Enabled: true,
+			Runner:  &agentconfig.TierSweepRunnerConfig{Backend: agentconfig.TierSweepRunnerDocker, Context: "-rf"},
+		}}},
+		logger: log.New(&logged, "", 0),
+	}
+	env := d.withPolecatImageTrimContext([]string{"PATH=/usr/bin"})
+	if got := (cliCall{env: env}).getenv(polecatImageTrimContextEnv); got != "" {
+		t.Errorf("%s = %q, want nothing published for an unsafe name", polecatImageTrimContextEnv, got)
+	}
+	want := `tier_sweep runner context "-rf" is not one Docker context name; the polecat-image plugin will not trim it`
+	if got := logged.String(); !strings.Contains(got, want) {
+		t.Errorf("log = %q, want it to name the refused value: %q", got, want)
 	}
 }
 
