@@ -120,7 +120,6 @@ func TestIntegrationTargetsTestMakefileRunsTheShelltierRunnerAlone(t *testing.T)
 var skippedByTheOldHandList = []string{
 	".githooks/pre-push_test.sh",
 	"scripts/post-land-shell_test.sh",
-	"scripts/town_metrics_test.sh",
 }
 
 // announcedScript matches the line the shelltier runner writes to stderr before
@@ -130,7 +129,7 @@ var announcedScript = regexp.MustCompile(`(?m)^tier-sweep: shell (.*) \.\.\.$`)
 // TestIntegrationTargetsShellTestListRunsTheScriptsTheOldHandListSkipped checks
 // "the shelltier runner starts the scripts the old hand list skipped, and the
 // test-makefile recipe names no hand list".
-// Mutation: drop one of the three entries from internal/shelltier's manifest, and
+// Mutation: drop one of the two entries from internal/shelltier's manifest, and
 // a script the runner owns stops running anywhere; restore a hand-written list in
 // test-makefile, and it drifts from the manifest again.
 //

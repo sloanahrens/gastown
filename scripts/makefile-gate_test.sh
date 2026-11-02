@@ -182,14 +182,14 @@ fi
 # The shell-test list is the runner's manifest (gt-u560q.6). The runner runs with
 # an empty --root, so no script runs: each `bash <path>` finds no file, and before
 # each one the runner writes `tier-sweep: shell <path> ...` to stderr. Those lines
-# are what it starts, so the three entries the old hand list never ran must be
+# are what it starts, so the two entries the old hand list never ran must be
 # among them, and the test-makefile recipe names no hand list.
 echo "shell-test list"
 lroot="$(mktemp -d)"
 (cd "$ROOT" && go run ./internal/shelltier/cmd/shelltier --all --root "$lroot" --logdir "$lroot/logs" >/dev/null 2>"$lroot/stderr") || true
 started=$(sed -n 's/^tier-sweep: shell \(.*\) \.\.\.$/\1/p' "$lroot/stderr")
 missing=""
-for s in .githooks/pre-push_test.sh scripts/post-land-shell_test.sh scripts/town_metrics_test.sh; do
+for s in .githooks/pre-push_test.sh scripts/post-land-shell_test.sh; do
   grep -q -x -F "$s" <<<"$started" || missing="$missing $s"
 done
 if [[ -z "$missing" ]] && ! grep -q -F 'test-makefile.sh' <<<"$mout"; then

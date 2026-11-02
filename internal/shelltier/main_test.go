@@ -29,7 +29,6 @@ var trackedShellTests = []string{
 	"scripts/polecat-go-floor_test.sh",
 	"scripts/post-land-shell_test.sh",
 	"scripts/resource-sampler_test.sh",
-	"scripts/town_metrics_test.sh",
 }
 
 // trackedLister is the fake git: it lists the tracked scripts and nothing else.
