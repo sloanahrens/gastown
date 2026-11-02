@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -66,14 +67,23 @@ func tierSweepWriteTemplate(t *testing.T, d *Daemon, sections ...string) string 
 	return path
 }
 
-// tierSweepWriteDockerList writes the container package list the failing run
-// used into the daemon's sweep worktree, the path production reads it from.
-func tierSweepWriteDockerList(t *testing.T, d *Daemon, pkgs ...string) {
+// tierSweepDockerWorkTree is the sweep worktree production builds beneath the
+// landing work root this daemon's fixture configured. It is built from that
+// root rather than read back from d.tierSweepWorkDir, so the fixture never
+// takes its path from the resolver the test is meant to exercise (gt-8wf9o).
+func tierSweepDockerWorkTree(t *testing.T, d *Daemon) string {
 	t.Helper()
-	dir, err := d.tierSweepWorkDir("gastown")
-	if err != nil {
-		t.Fatal(err)
+	cfg := landingWorkerConfig(d.patrolConfig)
+	if cfg == nil || cfg.WorkRoot == "" {
+		t.Fatal("newTierSweepDaemon left the landing work root unset, so the test would write under the host temp dir")
 	}
+	return filepath.Join(cfg.WorkRoot, "gastown", "tier-sweep", "wt")
+}
+
+// tierSweepWriteDockerList writes the container package list the failing run
+// used into dir, the worktree the caller built from the configured root.
+func tierSweepWriteDockerList(t *testing.T, dir string, pkgs ...string) {
+	t.Helper()
 	path := filepath.Join(dir, tierSweepDockerListPath)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
@@ -81,6 +91,18 @@ func tierSweepWriteDockerList(t *testing.T, d *Daemon, pkgs ...string) {
 	body := "# written by the test\n" + strings.Join(pkgs, "\n") + "\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The docker list is read from the worktree the configured landing work root
+// builds, so a read that ignores the configured root finds no list (gt-8wf9o).
+func TestTierSweepDockerListReadsTheConfiguredWorkRoot(t *testing.T) {
+	t.Parallel()
+	d, _, _, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	tierSweepWriteDockerList(t, tierSweepDockerWorkTree(t, d), "internal/beads")
+
+	if got, want := d.tierSweepDockerList("gastown"), []string{"./internal/beads"}; !slices.Equal(got, want) {
+		t.Errorf("docker list = %v, want %v written under the configured work root", got, want)
 	}
 }
 
@@ -778,7 +800,7 @@ func TestTierSweepBeadForADockerPackageHasASandboxTickableAcceptance(t *testing.
 			t.Parallel()
 			d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
 			d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
-			tierSweepWriteDockerList(t, d, "internal/beads", "internal/testutil")
+			tierSweepWriteDockerList(t, tierSweepDockerWorkTree(t, d), "internal/beads", "internal/testutil")
 			logPath := tc.log(t)
 
 			red := map[string]tierSweepTierResult{
@@ -852,7 +874,7 @@ func TestTierSweepBeadForAPlainPackageIsUnchanged(t *testing.T) {
 			t.Parallel()
 			d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
 			d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
-			tierSweepWriteDockerList(t, d, "internal/beads")
+			tierSweepWriteDockerList(t, tierSweepDockerWorkTree(t, d), "internal/beads")
 
 			red := map[string]tierSweepTierResult{
 				"integration": {Verdict: tierSweepRed, Passed: 32, Failed: 1, FailedNames: []string{"./internal/cmd"}, Log: tc.log},
