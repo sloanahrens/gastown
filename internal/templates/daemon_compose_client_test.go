@@ -18,6 +18,9 @@ func clientSpec() templates.ComposeSpec {
 	s.Env = map[string]string{"BEADS_DOLT_POOL_READ_TIMEOUT": "30s", "A_FIRST": "x$y"}
 	s.KubeconfigFiles = []string{"/towns/live/.runtime/container/kubeconfig.yaml", "/towns/live/.runtime/sbx-k8s/kubeconfig"}
 	s.OpenShellConfigDir = "/host/home/.config/openshell"
+	s.OMTokenMetaFile = "/host/home/.config/gt/om-daemon-token.meta"
+	s.LandingWorkRoot = "/host/home/gt-landing.noindex"
+	s.TimeZone = "America/Chicago"
 	return s
 }
 
@@ -120,5 +123,29 @@ func TestComposeSetsTZFromTheTownZone(t *testing.T) {
 		if _, err := templates.RenderDaemonCompose(s); err == nil || !strings.Contains(err.Error(), "IANA zone name") {
 			t.Errorf("TimeZone %q: error = %v, want the zone-name refusal", bad, err)
 		}
+	}
+}
+
+// A work root that is the filesystem root, overlaps the town, or shares a target
+// with the sidecar is refused at render time.
+func TestRenderDaemonComposeRefusesALandingWorkRootThatOverlaps(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		root, meta string
+	}{
+		"the filesystem root": {"/", ""},
+		"the town root":       {"/towns/live", ""},
+		"inside the town":     {"/towns/live/work", ""},
+		"around the town":     {"/towns", ""},
+		"the sidecar's dir":   {"/h/gt", "/h/gt/om.meta"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			s := liveSpec()
+			s.LandingWorkRoot, s.OMTokenMetaFile = tc.root, tc.meta
+			if _, err := templates.RenderDaemonCompose(s); err == nil || !strings.Contains(err.Error(), "LandingWorkRoot") {
+				t.Fatalf("error = %v, want the overlap refusal", err)
+			}
+		})
 	}
 }

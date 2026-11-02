@@ -3,8 +3,10 @@ package cmd
 import (
 	"errors"
 	"github.com/steveyegge/gastown/internal/config"
+	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -401,29 +403,57 @@ func TestSecretNamePatternCoversCommonCredentialNames(t *testing.T) {
 	}
 }
 
-func TestContainerZoneIsTheTownsThenTheHosts(t *testing.T) {
+func TestContainerZoneIsTheTownsThenTheHostsAndNeverSilentUTC(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("boom")
 	none := func(string) (*config.TownSettings, error) { return nil, nil }
+	named := func(zone string) func(string) (*config.TownSettings, error) {
+		return func(string) (*config.TownSettings, error) {
+			return &config.TownSettings{PolecatPool: &config.PolecatPool{Timezone: zone}}, nil
+		}
+	}
 	link := func(target string, err error) func(string) (string, error) {
 		return func(string) (string, error) { return target, err }
 	}
-	named := func(string) (*config.TownSettings, error) {
-		return &config.TownSettings{PolecatPool: &config.PolecatPool{Timezone: "America/Denver"}}, nil
-	}
-	if z, err := containerZone("/t", named, link("/var/db/timezone/zoneinfo/Europe/Paris", nil)); z != "America/Denver" || err != nil {
+	if z, err := containerZone("/t", named("America/Denver"), link("/zoneinfo/Europe/Paris", nil), "/etc/localtime"); z != "America/Denver" || err != nil {
 		t.Errorf("a town naming a zone = %q, %v", z, err)
 	}
-	if z, err := containerZone("/t", none, link("/var/db/timezone/zoneinfo/America/Chicago", nil)); z != "America/Chicago" || err != nil {
+	if z, err := containerZone("/t", none, link("/var/db/timezone/zoneinfo/America/Chicago", nil), "/etc/localtime"); z != "America/Chicago" || err != nil {
 		t.Errorf("the host's zone = %q, %v", z, err)
 	}
-	for name, l := range map[string]func(string) (string, error){"no link": link("", boom), "a link that is not zoneinfo": link("/etc/other", nil)} {
-		if z, err := containerZone("/t", none, l); z != "" || err != nil {
-			t.Errorf("%s = %q, %v; want no TZ", name, z, err)
+	for name, tc := range map[string]struct {
+		load func(string) (*config.TownSettings, error)
+		rl   func(string) (string, error)
+		want string
+	}{
+		"unreadable host link":    {none, link("", boom), "cannot be read"},
+		"link not under zoneinfo": {none, link("/etc/other", nil), "not under a zoneinfo directory"},
+		"a misspelt town zone":    {named("America/Chicgo"), link("", nil), "does not load"},
+		"a host link to nonsense": {none, link("/zoneinfo/Not/AZone", nil), "does not load"},
+		"unreadable settings":     {func(string) (*config.TownSettings, error) { return nil, boom }, link("", nil), "polecat_pool.timezone"},
+	} {
+		if z, err := containerZone("/t", tc.load, tc.rl, "/etc/localtime"); err == nil || z != "" || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s = %q, %v; want a refusal containing %q", name, z, err, tc.want)
 		}
 	}
-	if _, err := containerZone("/t", func(string) (*config.TownSettings, error) { return nil, boom }, link("", nil)); !errors.Is(err, boom) {
-		t.Errorf("unreadable settings: %v", err)
+}
+
+// The production seam reads a real link: a temporary symlink into a fake
+// zoneinfo tree stands in for /etc/localtime, and the real deps carry the
+// zone function.
+func TestContainerZoneReadsARealLinkAndTheDepsCarryIt(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	link := filepath.Join(dir, "localtime")
+	if err := os.Symlink("/usr/share/zoneinfo/America/Chicago", link); err != nil {
+		t.Fatal(err)
+	}
+	z, err := containerZone("/t", func(string) (*config.TownSettings, error) { return nil, nil }, os.Readlink, link)
+	if err != nil || z != "America/Chicago" {
+		t.Errorf("zone from a real link = %q, %v", z, err)
+	}
+	if realDaemonComposeDeps(io.Discard).townZone == nil {
+		t.Error("the real deps carry no townZone")
 	}
 }
 

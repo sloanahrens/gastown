@@ -1045,7 +1045,7 @@ day.
 - [ ] **The container keeps the host's clock and files.** The render sets `TZ` to
       the zone `polecat_pool.timezone` names (else the host's zoneinfo link), binds
       `daemon.om_token_meta` read-only and `patrols.landing_worker.work_root`
-      read-write, each at the same path as on the host.
+      read-write, each at the same path as on the host. The write refuses (it does not default to UTC) when the zone cannot be read or does not load, and when the work root overlaps the town; set `polecat_pool.timezone` if the host link cannot be read.
 - [ ] **The live compose file is written.** `gt daemon compose write --image
       gt-daemon:<rev>` renders `<live-town>/daemon/container/compose.yml` from
       the town's settings and starts nothing. To let the container's landing

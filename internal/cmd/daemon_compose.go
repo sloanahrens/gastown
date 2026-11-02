@@ -104,7 +104,7 @@ func realDaemonComposeDeps(out io.Writer) daemonComposeDeps {
 		readFile:     os.ReadFile,
 		evalSymlinks: filepath.EvalSymlinks,
 		townZone: func(townRoot string) (string, error) {
-			return containerZone(townRoot, config.LoadTownSettings, os.Readlink)
+			return containerZone(townRoot, config.LoadTownSettings, os.Readlink, "/etc/localtime")
 		},
 		files: composeFiles{
 			mkdirAll: func(dir string) error { return os.MkdirAll(dir, 0o755) },

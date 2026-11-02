@@ -54,6 +54,15 @@ func (s ComposeSpec) validateClient() error {
 	if s.LandingWorkRoot != "" && !filepath.IsAbs(s.LandingWorkRoot) {
 		return fmt.Errorf("compose spec: LandingWorkRoot %q is not absolute; it is bound at the same path in the container, and a relative one would resolve against docker's working directory", s.LandingWorkRoot)
 	}
+	if s.LandingWorkRoot != "" {
+		clean := filepath.Clean(s.LandingWorkRoot)
+		if clean == "/" || pathContains(s.TownRoot, clean) || pathContains(clean, s.TownRoot) {
+			return fmt.Errorf("compose spec: LandingWorkRoot %q is the filesystem root or overlaps the town root %q; it is bound read-write beside the town, not over it", s.LandingWorkRoot, s.TownRoot)
+		}
+		if s.OMTokenMetaFile != "" && (pathContains(clean, s.OMTokenMetaFile) || pathContains(s.OMTokenMetaFile, clean)) {
+			return fmt.Errorf("compose spec: LandingWorkRoot %q and OMTokenMetaFile %q overlap, so two mounts would share a target", s.LandingWorkRoot, s.OMTokenMetaFile)
+		}
+	}
 	for _, p := range append([]string{s.OpenShellConfigDir, s.OMTokenMetaFile, s.LandingWorkRoot}, s.KubeconfigFiles...) {
 		if p == "" {
 			continue
@@ -118,4 +127,10 @@ func liveClientMounts(s ComposeSpec) string {
 		fmt.Fprintf(&b, "      - type: bind\n        source: %s\n        target: %s\n", q, q)
 	}
 	return b.String()
+}
+
+// pathContains reports whether child is dir or lies under it, on cleaned paths.
+func pathContains(dir, child string) bool {
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(child))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }

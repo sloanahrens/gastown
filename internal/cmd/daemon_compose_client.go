@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"gopkg.in/yaml.v3"
@@ -229,23 +230,36 @@ func containerKubeconfigPath(townRoot string) string {
 }
 
 // containerZone is the IANA zone name the container's TZ carries: the zone
-// polecat_pool.timezone names when set, else the host's own (the zoneinfo name
-// /etc/localtime links to), else "" and no TZ. A name only, never zone data: the
-// gt binary embeds the database (gt-yrxhs).
-func containerZone(townRoot string, load func(path string) (*config.TownSettings, error), readlink func(string) (string, error)) (string, error) {
+// polecat_pool.timezone names when set, else the zone the host's localtime link
+// (localtime, /etc/localtime on a host) points into. A name only, never zone
+// data: the gt binary embeds the database (gt-yrxhs). A name that does not load
+// as a zone is refused here, as is a host whose zone cannot be read when the
+// town names none: a container without TZ runs in UTC and its 04:30 and 03:00
+// windows move by hours, so there is no silent default.
+func containerZone(townRoot string, load func(path string) (*config.TownSettings, error), readlink func(string) (string, error), localtime string) (string, error) {
 	settings, err := load(config.TownSettingsPath(townRoot))
 	if err != nil {
 		return "", fmt.Errorf("read the town's settings for polecat_pool.timezone: %w", err)
 	}
 	if settings != nil && settings.PolecatPool != nil && settings.PolecatPool.Timezone != "" {
-		return settings.PolecatPool.Timezone, nil
+		return checkedZone(settings.PolecatPool.Timezone, "polecat_pool.timezone")
 	}
-	target, err := readlink("/etc/localtime")
+	target, err := readlink(localtime)
 	if err != nil {
-		return "", nil // no readable host zone link: the container keeps UTC rather than a guess
+		return "", fmt.Errorf("the town sets no polecat_pool.timezone and the host zone cannot be read from %s (%v); set polecat_pool.timezone so the container's clock matches the host's", localtime, err)
 	}
-	if _, name, ok := strings.Cut(target, "zoneinfo/"); ok {
-		return name, nil
+	_, name, ok := strings.Cut(target, "zoneinfo/")
+	if !ok {
+		return "", fmt.Errorf("the town sets no polecat_pool.timezone and %s points at %q, which is not under a zoneinfo directory; set polecat_pool.timezone so the container's clock matches the host's", localtime, target)
 	}
-	return "", nil
+	return checkedZone(name, localtime)
+}
+
+// checkedZone returns name when it loads as a zone, and refuses it when it does
+// not (Go would otherwise fall back to UTC without a word).
+func checkedZone(name, source string) (string, error) {
+	if _, err := time.LoadLocation(name); err != nil {
+		return "", fmt.Errorf("the zone %q from %s does not load: %w", name, source, err)
+	}
+	return name, nil
 }
