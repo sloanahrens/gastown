@@ -1059,3 +1059,113 @@ func TestCutoverRefusesWhenStateSaysStoppedAndTheJobCannotBeRead(t *testing.T) {
 		t.Errorf("commands ran with the job unreadable: %v", r.calls)
 	}
 }
+
+// containerToLaunchdRig is a container town's cutover to launchd, with the
+// container side built by cutoverSides from the town's settings, so its teardown
+// is the argv production runs. The rest of the rig stands in for the host: the
+// container stops when it is stopped, and launchd takes the town and beats.
+func containerToLaunchdRig(t *testing.T) (string, *cutoverRig, *cutoverPlan) {
+	t.Helper()
+	town := startGuardTown(t)
+	writeComposeFile(t, town)
+	c, _ := stubContainerTown(t, containerTownConfig("scratch-daemon-1", "scratch"))
+	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	c.plistPath = func() (string, error) { return plist, nil }
+	_, container, err := c.cutoverSides(town)
+	if err != nil {
+		t.Fatalf("cutoverSides: %v", err)
+	}
+
+	r := newCutoverRig()
+	r.state = &daemon.State{Running: true, Owner: &cutoverContainer, HeartbeatCount: 40}
+	r.toJob = templates.SupervisorState{Loaded: true, Status: "running", LastExit: -1}
+	r.onStop = func(r *cutoverRig) {
+		r.state = &daemon.State{Running: false, Owner: &cutoverContainer, HeartbeatCount: 40}
+		r.toJob = templates.SupervisorState{Loaded: true, Status: "exited", LastExit: -1}
+	}
+	r.onStart = func(r *cutoverRig) { r.beatsFrom(r.clk.Now(), &cutoverLaunchd) }
+	p := r.plan(config.SupervisorLaunchd)
+	p.from.job = func() templates.SupervisorState { return r.toJob }
+	p.from.teardown = container.teardown
+	return town, r, p
+}
+
+// The cutover to launchd removes both containers once launchd has beaten twice:
+// one compose down on the container's project, without -v, after the launchd
+// start, and it is the last command the cutover runs.
+func TestCutoverToLaunchdRemovesBothContainersKeepingVolumes(t *testing.T) {
+	t.Parallel()
+	town, r, p := containerToLaunchdRig(t)
+	if err := p.execute(context.Background()); err != nil {
+		t.Fatalf("execute: %v\n%s", err, r.out.String())
+	}
+	down := "docker --context " + defaultDockerContext + " compose -p scratch -f " + composeFilePath(town) + " down"
+	want := []string{
+		"docker compose stop daemon",
+		"launchctl bootstrap gui/501 /plist",
+		"launchctl kickstart -k gui/501/com.gastown.daemon",
+		down,
+	}
+	if strings.Join(r.calls, "\n") != strings.Join(want, "\n") {
+		t.Errorf("commands = %v, want %v", r.calls, want)
+	}
+}
+
+// A compose down that fails does not undo the cutover: launchd still owns the
+// town and has beaten twice, so execute succeeds. The command to run by hand is
+// printed, and nothing runs after the failed down.
+func TestCutoverToLaunchdDownFailureIsReportedNotRolledBack(t *testing.T) {
+	t.Parallel()
+	town, r, p := containerToLaunchdRig(t)
+	r.runErr["docker --context"] = errors.New("compose down exited 1")
+	if err := p.execute(context.Background()); err != nil {
+		t.Fatalf("execute returned %v, want success: launchd owns the town\n%s", err, r.out.String())
+	}
+	down := "docker --context " + defaultDockerContext + " compose -p scratch -f " + composeFilePath(town) + " down"
+	if !strings.Contains(r.out.String(), down) {
+		t.Errorf("output does not print the command to run by hand (%s):\n%s", down, r.out.String())
+	}
+	if r.state == nil || r.state.Owner == nil || *r.state.Owner != cutoverLaunchd || !r.state.Running {
+		t.Errorf("state after a failed down = %+v, want launchd still owning the town", r.state)
+	}
+	if last := r.calls[len(r.calls)-1]; last != down {
+		t.Errorf("last command = %q, want the failed down and nothing after it", last)
+	}
+}
+
+// Step 6 runs only once launchd has beaten twice: a launchd that takes the town
+// and never beats leaves the containers standing for the rollback.
+func TestCutoverRemovesNothingBeforeLaunchdHasBeaten(t *testing.T) {
+	t.Parallel()
+	_, r, p := containerToLaunchdRig(t)
+	r.onStart = func(r *cutoverRig) {
+		r.state = &daemon.State{Running: true, Owner: &cutoverLaunchd}
+	}
+	if err := p.execute(context.Background()); err == nil {
+		t.Fatalf("execute succeeded with launchd never beating\n%s", r.out.String())
+	}
+	for _, call := range r.calls {
+		if strings.Contains(call, " down") {
+			t.Errorf("containers were removed before launchd beat twice: %q", call)
+		}
+	}
+}
+
+// A teardown the settings refuse to build runs nothing and does not undo the
+// cutover: the refusal is printed, and launchd still owns the town.
+func TestCutoverToLaunchdTeardownRefusalRunsNothing(t *testing.T) {
+	t.Parallel()
+	_, r, p := containerToLaunchdRig(t)
+	p.from.teardown = func() ([]string, error) { return nil, errContainerSettingsUnset }
+	if err := p.execute(context.Background()); err != nil {
+		t.Fatalf("execute returned %v, want success: launchd owns the town\n%s", err, r.out.String())
+	}
+	if !strings.Contains(r.out.String(), "were not removed") {
+		t.Errorf("output does not report the containers left standing:\n%s", r.out.String())
+	}
+	for _, call := range r.calls {
+		if strings.Contains(call, " down") {
+			t.Errorf("a teardown that refused to build still ran: %q", call)
+		}
+	}
+}

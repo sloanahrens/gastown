@@ -39,6 +39,10 @@ type daemonSupervisor struct {
 	// stop leaves the job unloaded, so the daemon stays down: signaling the
 	// process alone leaves a KeepAlive job to respawn it (gt-sq9e).
 	stop func() ([]string, error)
+	// down removes the kind's containers and keeps their volumes. Only the
+	// container kind sets it; the cutover runs it once the other side has taken
+	// the town, so the town's containers do not outlive the move.
+	down func() ([]string, error)
 	// bootstrap loads the job when the service manager does not know it — the
 	// state a stop leaves behind on macOS, where bootout unloads and
 	// kickstart then cannot reach the job.
@@ -430,8 +434,10 @@ func (c *daemonControl) containerSupervisor(composeFile string, cfg *config.Daem
 		// (SIGTERM, so a clean stop is recorded) and starts a new one that
 		// re-reads the compose file and its environment, under the same owner
 		// id. `compose restart` would keep the container and do neither.
-		restart:   compose("up", "-d", "--force-recreate", "daemon"),
-		stop:      compose("stop", "daemon"),
+		restart: compose("up", "-d", "--force-recreate", "daemon"),
+		stop:    compose("stop", "daemon"),
+		// No -v: the volumes are the town's seeded state and stay.
+		down:      compose("down"),
 		bootstrap: compose("up", "-d"),
 		load:      fmt.Sprintf("docker --context %s compose -p %s -f %s up -d daemon", c.dockerCLIContext(), project, composeFile),
 		fallback:  "or unset daemon.supervisor to run the daemon by hand",
