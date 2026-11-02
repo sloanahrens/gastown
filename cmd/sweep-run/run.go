@@ -239,9 +239,15 @@ func sweepTiers(opts options, work string, d Deps, stdout, stderr io.Writer) (ti
 		// The rig's own script takes the tiers as arguments, in the work tree, as
 		// the host sweep runs it, and reads the run's log directory from the
 		// environment. It gets none of the Go sweep's timings or resume file: the
-		// host sweep passes a script stage none either (tierSweepStageEnv).
+		// host sweep passes a script stage none either (tierSweepStageEnv). It
+		// does get the no-slot setting the in-process sweep gets: the container
+		// holds no town for the script's own gt slot run calls to find, and the
+		// runner holds its own reservation.
 		code = d.RunScript(scriptProgram, append([]string{scriptPath}, opts.Tiers...), work,
-			environWith(d.Environ, map[string]string{tiersweep.EnvLogDir: opts.logDir()}),
+			environWith(d.Environ, map[string]string{
+				tiersweep.EnvLogDir: opts.logDir(),
+				tiersweep.EnvNoSlot: "1",
+			}),
 			io.MultiWriter(stdout, captured),
 			io.MultiWriter(stderr, sweepErrs))
 	} else {
@@ -743,18 +749,32 @@ func runGit(dir string, args ...string) (int, string) {
 	return 127, oneLine(err.Error())
 }
 
-// treeHas answers whether the work tree at work ships rel. A path that is not
-// there is false; any other error is returned, so a tree the run cannot read is
-// never taken for a tree without the sweep.
+// treeHas answers whether the work tree at work ships rel itself: every
+// component from the root down is there and none of them is a symbolic link.
+// The tree is a clone of the rig's repository, so what it holds is content the
+// run did not write, and a link can point anywhere outside the clone; a path
+// reached through one is not the entry the tree ships, and the run does not
+// start it as the sweep. A component that is not there is false; any other
+// error is returned, so a tree the run cannot read is never taken for a tree
+// without the sweep.
 func treeHas(work, rel string) (bool, error) {
-	_, err := os.Stat(filepath.Join(work, rel)) //nolint:gosec // G304: rel is one of this file's constants and work is the directory the run made
-	if err == nil {
-		return true, nil
+	path := work
+	var seen []string
+	for _, name := range strings.Split(rel, "/") {
+		path = filepath.Join(path, name)
+		seen = append(seen, name)
+		info, err := os.Lstat(path) //nolint:gosec // G304: rel is one of this file's constants and work is the directory the run made
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return false, fmt.Errorf("%s in the work tree is a symbolic link", strings.Join(seen, "/"))
+		}
 	}
-	if errors.Is(err, fs.ErrNotExist) {
-		return false, nil
-	}
-	return false, err
+	return true, nil
 }
 
 // runScript runs the rig's tier script: the program and arguments are the host

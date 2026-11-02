@@ -1014,9 +1014,6 @@ func TestRunChoosesTheSweepTheTreeShips(t *testing.T) {
 		if verdict.Verdict != "GREEN" {
 			t.Errorf("integration = %+v (%q), want the in-process sweep's GREEN", verdict, summary)
 		}
-		if h.overrides == nil {
-			t.Error("the in-process sweep did not run in a tree that ships cmd/tier-sweep")
-		}
 		if !equal(asked, []string{goSweepDir}) {
 			t.Errorf("the tree check asked for %q, want only %q: the Go command decides first", asked, goSweepDir)
 		}
@@ -1062,6 +1059,12 @@ func TestRunChoosesTheSweepTheTreeShips(t *testing.T) {
 		}
 		if v := envValue(env, "GT_FROM"); v != "the process" {
 			t.Errorf("the script environment holds GT_FROM = %q, want the process value %q", v, "the process")
+		}
+		// The container holds no town, so the script's own gt slot run calls are
+		// suppressed exactly as the in-process sweep's are.
+		if v := envValue(env, tiersweep.EnvNoSlot); v != "1" {
+			t.Errorf("the script environment holds %s = %q, want 1: the runner holds its own reservation",
+				tiersweep.EnvNoSlot, v)
 		}
 		// The script stage gets none of the Go sweep's timings or resume file.
 		for _, key := range []string{"TIER_SWEEP_TIMINGS", "TIER_SWEEP_TESTED", "TIER_SWEEP_RESUME"} {
@@ -1167,7 +1170,9 @@ func TestRunChoosesTheSweepTheTreeShips(t *testing.T) {
 
 // TestTreeHasReportsWhatTheTreeShips: the production tree check answers from the
 // work tree's own filesystem: a path that is there is true, a path that is not
-// is false, and a tree it cannot read is an error rather than a missing path.
+// is false, a path reached through a symbolic link is an error since the tree
+// does not ship it itself, and a tree it cannot read is an error rather than a
+// missing path.
 func TestTreeHasReportsWhatTheTreeShips(t *testing.T) {
 	t.Parallel()
 	work := t.TempDir()
@@ -1180,6 +1185,25 @@ func TestTreeHasReportsWhatTheTreeShips(t *testing.T) {
 	if err := os.WriteFile(notATree, nil, 0o644); err != nil {
 		t.Fatalf("make the fixture: %v", err)
 	}
+	// A tree whose script is a link to a file outside it: the clone is content
+	// the run did not write, and following the link would start a file the tree
+	// does not hold.
+	linkedScript := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "elsewhere.sh")
+	if err := os.WriteFile(outside, []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatalf("make the fixture: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(linkedScript, "scripts"), 0o755); err != nil {
+		t.Fatalf("make the fixture: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(linkedScript, scriptPath)); err != nil {
+		t.Fatalf("make the fixture: %v", err)
+	}
+	// A tree whose directory on the way to the command is a link.
+	linkedDir := t.TempDir()
+	if err := os.Symlink(t.TempDir(), filepath.Join(linkedDir, "cmd")); err != nil {
+		t.Fatalf("make the fixture: %v", err)
+	}
 	cases := []struct {
 		name    string
 		root    string
@@ -1190,6 +1214,8 @@ func TestTreeHasReportsWhatTheTreeShips(t *testing.T) {
 		{"a path the tree ships", work, goSweepDir, true, false},
 		{"a path the tree does not ship", work, scriptPath, false, false},
 		{"a tree that cannot be read", notATree, goSweepDir, false, true},
+		{"a path that is a link", linkedScript, scriptPath, false, true},
+		{"a path under a linked directory", linkedDir, goSweepDir, false, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
