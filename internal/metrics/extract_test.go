@@ -527,8 +527,7 @@ func TestExtractRefusesAReviewsLoaderThatLosesARow(t *testing.T) {
 // The loader skips them without a row or a drop, so the row-count assertion
 // counts them as a third kind of line: a log of one review and two queue
 // entries extracts, and the same log with a loader that loses the review is
-// still refused with the queue count in the message (the 2026-11-01 hourly
-// failure: 4998 rows + 0 drops != 5004 lines, six of them queue entries).
+// still refused with the queue count in the message (gt-sla8g).
 func TestExtractAccountsForQueueLinesInTheReviewsLog(t *testing.T) {
 	t.Parallel()
 	const review = `{"bead": "gt-a", "rig": "gastown", "attempt": 1, "score": 0.5, "verdict": "request_changes", "at": "2026-10-13T00:00:00Z"}`
