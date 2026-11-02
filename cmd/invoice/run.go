@@ -7,7 +7,6 @@ import (
 	"io"
 	"io/fs"
 	"math"
-	"path"
 	"slices"
 	"sort"
 	"strconv"
@@ -63,14 +62,30 @@ func run(args []string, fsys fs.FS, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "invoice: %v\n", err)
 		return 1
 	}
-	storage, err := storagesrc.Samples(rooted(fsys, metricsDir))
+	metrics, err := rooted(fsys, metricsDir)
 	if err != nil {
 		fmt.Fprintf(stderr, "invoice: %v\n", err)
 		return 1
 	}
-	usage, err := tokensrc.Tokens(rooted(fsys, usageDir), month)
+	storage, err := storagesrc.Samples(metrics)
 	if err != nil {
 		fmt.Fprintf(stderr, "invoice: %v\n", err)
+		return 1
+	}
+	usageRoot, err := rooted(fsys, usageDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "invoice: %v\n", err)
+		return 1
+	}
+	usage, err := tokensrc.Tokens(usageRoot, month)
+	if err != nil {
+		fmt.Fprintf(stderr, "invoice: %v\n", err)
+		return 1
+	}
+	if len(usage.Unreadable) > 0 {
+		// A usage record that exists but cannot be read leaves tokens unseen,
+		// so the invoice would understate the month: fail as a source failure.
+		fmt.Fprintf(stderr, "invoice: usage records unreadable: %s\n", quotedList(usage.Unreadable))
 		return 1
 	}
 
@@ -92,8 +107,11 @@ func run(args []string, fsys fs.FS, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if err := writeNotes(stderr, seats, storage, usage); err != nil {
-		// stderr is the only channel left to report a stderr failure on.
-		return 1
+		// The invoice printed, and exit 1 means a source or the render failed
+		// (see main.go's exit status). The notes are advisory, and stderr is
+		// the channel that just failed, so there is nowhere left to report
+		// this and it must not be reported as a failed invoice.
+		return 0
 	}
 	return 0
 }
@@ -161,20 +179,13 @@ func readSeats(fsys fs.FS) (seatLedger, error) {
 }
 
 // rooted returns fsys rooted at dir, the form the source packages read from.
-// It is fs.Sub without an error return: dir is one of this file's constants,
-// so it is always a valid fs path.
-func rooted(fsys fs.FS, dir string) fs.FS {
-	return rootFS{fsys: fsys, dir: dir}
-}
-
-// rootFS serves the names under fsys's dir subtree.
-type rootFS struct {
-	fsys fs.FS
-	dir  string
-}
-
-func (r rootFS) Open(name string) (fs.File, error) {
-	return r.fsys.Open(path.Join(r.dir, name))
+// fs.Sub rejects a dir that is not a valid fs path.
+func rooted(fsys fs.FS, dir string) (fs.FS, error) {
+	sub, err := fs.Sub(fsys, dir)
+	if err != nil {
+		return nil, fmt.Errorf("rooting the metering files at %s: %w", dir, err)
+	}
+	return sub, nil
 }
 
 // writeNotes prints what the invoice leaves out and why: the lines each source
@@ -193,7 +204,7 @@ func writeNotes(w io.Writer, seats seatLedger, storage storagesrc.Result, usage 
 	}
 	fmt.Fprintf(&b, "  size records skipped: %s\n", reasonCounts(sizeCounts))
 	for _, dir := range storage.Absent {
-		fmt.Fprintf(&b, "  %s absent: its days count as zero\n", dir)
+		fmt.Fprintf(&b, "  %s absent: its days count as zero\n", strconv.Quote(dir))
 	}
 	fmt.Fprintf(&b, "  usage records skipped: %s\n", usageCounts(usage))
 	if unattributed := usage.Unattributed; unattributed.Input != 0 || unattributed.Output != 0 ||
@@ -225,19 +236,21 @@ func reasonCounts(counts map[string]int) string {
 	return strings.Join(parts, ", ")
 }
 
-// usageCounts renders the usage records the month left out: those outside it,
-// and the files that could not be read, which are named so a short total says
-// which files it is missing.
+// usageCounts renders the usage records the month left out. An unreadable
+// record is a source failure rather than a note, so it never reaches here.
 func usageCounts(usage tokensrc.Result) string {
-	var parts []string
-	if usage.OutOfMonth > 0 {
-		parts = append(parts, fmt.Sprintf("out of month: %d", usage.OutOfMonth))
-	}
-	if len(usage.Unreadable) > 0 {
-		parts = append(parts, "unreadable: "+strings.Join(usage.Unreadable, ", "))
-	}
-	if len(parts) == 0 {
+	if usage.OutOfMonth == 0 {
 		return "0"
+	}
+	return fmt.Sprintf("out of month: %d", usage.OutOfMonth)
+}
+
+// quotedList renders names as quoted, comma-separated text, so a name holding
+// a space or a newline cannot reshape the line it appears on.
+func quotedList(names []string) string {
+	parts := make([]string, len(names))
+	for i, name := range names {
+		parts[i] = strconv.Quote(name)
 	}
 	return strings.Join(parts, ", ")
 }

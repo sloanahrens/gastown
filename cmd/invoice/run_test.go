@@ -48,6 +48,12 @@ func fixtureWithTerms(terms string) fstest.MapFS {
 	return m
 }
 
+// withFile is m with one more file at name.
+func withFile(m fstest.MapFS, name, data string) fstest.MapFS {
+	m[name] = &fstest.MapFile{Data: []byte(data)}
+	return m
+}
+
 // termsWith is testTerms with edit applied to its keys.
 func termsWith(t *testing.T, edit func(map[string]any)) string {
 	t.Helper()
@@ -80,6 +86,13 @@ func runFor(t *testing.T, fsys fs.FS, args []string) (stdout, stderr string, cod
 	var out, errw bytes.Buffer
 	code = run(args, fsys, &out, &errw)
 	return out.String(), errw.String(), code
+}
+
+func TestRootedRefusesAPathOutsideTheTree(t *testing.T) {
+	t.Parallel()
+	if _, err := rooted(fixtureFS(), "../escape"); err == nil {
+		t.Error("rooted accepted a dir that escapes the tree")
+	}
 }
 
 func TestRunPrintsInvoiceFromFixtures(t *testing.T) {
@@ -402,6 +415,18 @@ func TestRunSourceFailureWritesNoInvoice(t *testing.T) {
 			"tokensrc",
 		},
 		{
+			"usage record cannot be read",
+			errorOnPath{FS: fixtureFS(), path: "usage/beads/gt-abc.json", err: errors.New("the record is unreadable")},
+			baseArgs(),
+			`usage records unreadable: "gt-abc.json"`,
+		},
+		{
+			"usage record cannot be decoded",
+			withFile(fixtureFS(), "usage/beads/bad.json", "not json"),
+			baseArgs(),
+			`usage records unreadable: "bad.json"`,
+		},
+		{
 			"workspace absent from the export",
 			fixtureFS(),
 			[]string{"-town", "/town", "-month", "2026-10", "-workspace", "nobody", "-terms", "terms.json"},
@@ -445,7 +470,7 @@ func TestRunNotesGoToStderr(t *testing.T) {
 		"invoice: notes",
 		"seat ledger skipped: empty workspace: 1",
 		"size records skipped: invalid JSON: 1",
-		"usage records skipped: out of month: 1, unreadable: broken.json",
+		"usage records skipped: out of month: 1",
 		"records naming no workspace are not billed: input 7",
 		"seats still running are not in the seat ledger until they end",
 		"token counts are printed unpriced",
@@ -461,7 +486,7 @@ func TestRunNotesGoToStderr(t *testing.T) {
 }
 
 // notesFixture is fixtureFS with one skipped line per source, an out-of-month
-// usage record, an unreadable usage file and an unattributed usage record.
+// usage record and an unattributed usage record.
 func notesFixture() fs.FS {
 	m := fixtureFS()
 	m["metrics/sandbox-seats.jsonl"] = &fstest.MapFile{Data: []byte(
@@ -478,8 +503,7 @@ not json
 	m["usage/beads/unattributed.json"] = &fstest.MapFile{Data: []byte(
 		`{"end":"2026-10-05T00:00:00Z","totals":{"input":7}}
 `)}
-	m["usage/beads/broken.json"] = &fstest.MapFile{Data: []byte(`{}`)}
-	return errorOnPath{FS: m, path: "usage/beads/broken.json", err: errors.New("the record is unreadable")}
+	return m
 }
 
 func TestRunNotesAbsentSources(t *testing.T) {
@@ -495,7 +519,7 @@ func TestRunNotesAbsentSources(t *testing.T) {
 		"seat ledger skipped: 0",
 		"usage records skipped: 0",
 		"seat ledger absent: no seat has ended yet",
-		"tracker-sizes absent: its days count as zero",
+		`"tracker-sizes" absent: its days count as zero`,
 	} {
 		if !strings.Contains(stderr, note) {
 			t.Errorf("stderr does not hold %q:\n%s", note, stderr)
@@ -530,8 +554,8 @@ func TestRunReportsWriteFailures(t *testing.T) {
 		t.Parallel()
 		var out bytes.Buffer
 		code := run(baseArgs(), fixtureFS(), &out, failingWriter{errors.New("the pipe is closed")})
-		if code != 1 {
-			t.Errorf("exit %d, want 1", code)
+		if code != 0 {
+			t.Errorf("exit %d, want 0: the invoice printed and the notes are advisory", code)
 		}
 		if !strings.Contains(out.String(), "Invoice INV-2026-10-0001") {
 			t.Errorf("stdout does not hold the invoice:\n%s", out.String())
