@@ -197,26 +197,53 @@ func TestDoneEventRecorderWritesOnceAndSkipsAHostSeatsOwnEvent(t *testing.T) {
 	})
 }
 
-// TestDoneEventRecorderWritesOverAnEscalatedDone: an escalated done event in
-// the log is not a submission, so it does not suppress the host's record of
-// the seat's submission (gt-qqmae).
-func TestDoneEventRecorderWritesOverAnEscalatedDone(t *testing.T) {
+// TestDoneEventRecorderWritesOverANonSubmissionDone: an escalated or deferred
+// done event in the log is not a submission, so it does not suppress the host's
+// record of the seat's submission (gt-qqmae).
+func TestDoneEventRecorderWritesOverANonSubmissionDone(t *testing.T) {
+	t.Parallel()
+	for _, status := range []string{events.DoneStatusEscalated, events.DoneStatusDeferred} {
+		t.Run(status, func(t *testing.T) {
+			t.Parallel()
+			w := doneWork()
+			rec, path := newDoneRecorder(t, w)
+			// The seat ended an earlier turn this way, inside the dedupe window.
+			appendStatusEventFor(t, path, w.Rig+"/polecats/"+w.Worker, w.BeadID,
+				status, recordAt.Add(-2*time.Minute))
+
+			wrote, err := rec.Record(w)
+			if err != nil {
+				t.Fatalf("Record: %v", err)
+			}
+			if !wrote {
+				t.Fatalf("Record = false for a bead whose only done event was %s; want the submission recorded", status)
+			}
+			if lines := readEventLines(t, path); len(lines) != 2 {
+				t.Fatalf("events = %d lines, want the %s exit and the submission", len(lines), status)
+			}
+		})
+	}
+}
+
+// TestDoneEventRecorderRefusesAnUnreadableDoneStatus: a done event for the bead
+// whose status cannot be read may or may not be a submission, so the recorder
+// refuses rather than write a duplicate over it (gt-qqmae).
+func TestDoneEventRecorderRefusesAnUnreadableDoneStatus(t *testing.T) {
 	t.Parallel()
 	w := doneWork()
 	rec, path := newDoneRecorder(t, w)
-	// The seat escalated earlier in the run, inside the dedupe window.
 	appendStatusEventFor(t, path, w.Rig+"/polecats/"+w.Worker, w.BeadID,
-		events.DoneStatusEscalated, recordAt.Add(-2*time.Minute))
+		strings.ToLower(events.DoneStatusEscalated), recordAt.Add(-2*time.Minute))
 
 	wrote, err := rec.Record(w)
-	if err != nil {
-		t.Fatalf("Record: %v", err)
+	if err == nil {
+		t.Fatal("Record = nil error over a done event whose status cannot be read; want it refused")
 	}
-	if !wrote {
-		t.Fatal("Record = false for a bead whose only done event was an escalation; want the submission recorded")
+	if wrote {
+		t.Fatal("Record = true over a done event whose status cannot be read")
 	}
-	if lines := readEventLines(t, path); len(lines) != 2 {
-		t.Fatalf("events = %d lines, want the escalation and the submission", len(lines))
+	if lines := readEventLines(t, path); len(lines) != 1 {
+		t.Fatalf("events = %d lines, want only the unreadable one", len(lines))
 	}
 }
 

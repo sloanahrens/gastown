@@ -200,6 +200,48 @@ func TestCheckPolecatHealth_DoneEventIsAFinishedTurn(t *testing.T) {
 	}
 }
 
+// TestCheckPolecatHealth_NonSubmissionDoneIsStillAFinishedTurn: crash detection
+// asks whether the seat's turn ended, not whether the seat submitted work. An
+// ESCALATED or DEFERRED exit ended the turn (gt-0p9pv's incident was a DEFERRED
+// exit), so a dead session over the bead the seat still holds is a finished
+// turn within the close grace, not a crash. Reading the exit status as a
+// condition here would restart a seat that stopped on purpose (gt-qqmae).
+func TestCheckPolecatHealth_NonSubmissionDoneIsStillAFinishedTurn(t *testing.T) {
+	t.Parallel()
+	const seat = "myr/polecats/mycat"
+	for _, status := range []string{events.DoneStatusEscalated, events.DoneStatusDeferred} {
+		t.Run(status, func(t *testing.T) {
+			t.Parallel()
+			bd := hookedWorkBD(t, "gt-xyz", time.Hour)
+			townRoot := t.TempDir()
+			line := seatStatusEventLine(testEpoch.Add(-time.Minute), events.TypeDone, seat, "gt-xyz", status)
+			if err := os.WriteFile(filepath.Join(townRoot, events.EventsFile), []byte(line+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			var logBuf strings.Builder
+			d := &Daemon{
+				config:        &Config{TownRoot: townRoot},
+				logger:        log.New(&logBuf, "", 0),
+				clock:         newFixedClock(),
+				tmux:          newFakeTmux(newFixedClock()),
+				notifier:      notifyfake.New(),
+				openWorkBeads: bd.open,
+				execCmd:       bd.run,
+			}
+
+			d.checkPolecatHealth("myr", "mycat")
+
+			got := logBuf.String()
+			if strings.Contains(got, "CRASH DETECTED") {
+				t.Errorf("CRASH DETECTED for a %s exit within the close grace; log: %q", status, got)
+			}
+			if !strings.Contains(got, "ran gt done for gt-xyz") {
+				t.Errorf("expected the skip to name the done that ended the turn, got: %q", got)
+			}
+		})
+	}
+}
+
 // TestSeatLastDoneAge_UnreadableLogIsNoEvidence: the events log is a
 // best-effort record, so a town with none — and a seat with no events in it —
 // must answer false rather than date a turn nothing recorded.
@@ -209,46 +251,6 @@ func TestSeatLastDoneAge_UnreadableLogIsNoEvidence(t *testing.T) {
 
 	if age, ok := d.seatLastDoneAge("myr", "mycat", "gt-xyz", testEpoch); ok {
 		t.Errorf("dated a done from an empty log: age %s", age)
-	}
-}
-
-// TestSeatLastDoneAge_SkipsANonSubmissionDone: a seat that deferred its turn
-// wrote a done event but submitted nothing, so it is not a finished turn the
-// crash detector can trust; a submitted done is still read as one (gt-qqmae).
-func TestSeatLastDoneAge_SkipsANonSubmissionDone(t *testing.T) {
-	t.Parallel()
-	const seat = "myr/polecats/mycat"
-	tests := []struct {
-		name   string
-		status string
-		wantOK bool
-	}{
-		{"the deferred exit", events.DoneStatusDeferred, false},
-		{"the escalated exit", events.DoneStatusEscalated, false},
-		{"the completed exit", events.DoneStatusCompleted, true},
-		{"no status: an older event", "", true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			townRoot := t.TempDir()
-			line := seatEventLine(testEpoch.Add(-time.Minute), events.TypeDone, seat, "gt-xyz")
-			if tc.status != "" {
-				line = seatStatusEventLine(testEpoch.Add(-time.Minute), events.TypeDone, seat, "gt-xyz", tc.status)
-			}
-			if err := os.WriteFile(filepath.Join(townRoot, events.EventsFile), []byte(line+"\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			d := &Daemon{config: &Config{TownRoot: townRoot}, logger: discardLogger}
-
-			age, ok := d.seatLastDoneAge("myr", "mycat", "gt-xyz", testEpoch)
-			if ok != tc.wantOK {
-				t.Fatalf("seatLastDoneAge ok = %v (age %s), want %v", ok, age, tc.wantOK)
-			}
-			if ok && age != time.Minute {
-				t.Errorf("seatLastDoneAge = %s, want one minute", age)
-			}
-		})
 	}
 }
 

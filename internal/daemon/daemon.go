@@ -4120,8 +4120,7 @@ const polecatSpawnGrace = 5 * time.Minute
 const polecatDoneCloseGrace = 5 * time.Minute
 
 // seatLastDoneAge returns how long ago the seat's own most recent event was,
-// when that event is a submitted `done` naming hookBead; an escalated or
-// deferred exit submits nothing (gt-qqmae). The event log is a best-effort
+// when that event is a `done` naming hookBead. The event log is a best-effort
 // record, so a log that cannot be read, a seat with no events, and a newer
 // event of the seat's all answer false: none of them shows a finished turn.
 func (d *Daemon) seatLastDoneAge(rigName, polecatName, hookBead string, now time.Time) (time.Duration, bool) {
@@ -4146,7 +4145,7 @@ func (d *Daemon) seatLastDoneAge(rigName, polecatName, hookBead string, now time
 			last, lastAt = ev, ts
 		}
 	}
-	if lastAt.IsZero() || last.Type != events.TypeDone || !events.DoneEventIsSubmission(last) {
+	if lastAt.IsZero() || last.Type != events.TypeDone {
 		return 0, false
 	}
 	bead, _ := last.Payload["bead"].(string)

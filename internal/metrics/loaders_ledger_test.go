@@ -3,6 +3,7 @@ package metrics
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/events"
@@ -207,7 +208,7 @@ func TestLedgerSubmittedIgnoresAnUnknownDoneStatus(t *testing.T) {
 	t.Parallel()
 	lines := []string{
 		stageEventLine(t, "2026-10-13T00:00:00Z", "done",
-			map[string]string{"bead": "gt-a", "status": "WAITING"}),
+			map[string]string{"bead": "gt-a", "status": strings.ToLower(events.DoneStatusDeferred)}),
 	}
 	stamps := LoadStageStamps(lines, map[string]string{}, &Dropped{})
 	if got, ok := stamps.Submitted["gt-a"]; ok {
