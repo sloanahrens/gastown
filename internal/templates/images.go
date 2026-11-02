@@ -115,12 +115,12 @@ var DaemonClientTools = []ClientToolPin{
 	{
 		Name:   "docker",
 		URL:    "https://download.docker.com/linux/static/stable/aarch64/docker-29.8.2.tgz",
-		SHA256: "922df28df248cc00a9e025f947704f1d1482de64ece54cfe57e61f19eaf1eef3",
+		SHA256: "76a624e4a8e5da654d1150e808175125efb5a6f1b6aa1cbd9caee18f51047a50", // docker-29.8.2.tgz, hashed after a direct download (2026-11-02)
 		Member: "docker/docker",
 	},
 	{
 		Name:   "kubectl",
 		URL:    "https://dl.k8s.io/release/v1.37.0/bin/linux/arm64/kubectl",
-		SHA256: "76a624e4a8e5da654d1150e808175125efb5a6f1b6aa1cbd9caee18f51047a50",
+		SHA256: "922df28df248cc00a9e025f947704f1d1482de64ece54cfe57e61f19eaf1eef3", // equals dl.k8s.io/release/v1.37.0/bin/linux/arm64/kubectl.sha256 (2026-11-02)
 	},
 }
