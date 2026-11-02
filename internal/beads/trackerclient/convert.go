@@ -2,7 +2,6 @@ package trackerclient
 
 import (
 	"encoding/json"
-	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -82,21 +81,19 @@ func comments(in []api.Comment) []beads.Comment {
 	return out
 }
 
-// deps converts the wire links to the seam's. The seam keeps bd's answer,
-// which omits a target outside this database (external:<rig>:<id>): the
-// tracker lists such a link id-only on its own reads, but Show and DepList
-// here answer this rig's edges, as they did before the tracker returned them.
+// deps converts the wire links to the seam's, keeping every one. A link to a
+// target outside this database (external:<rig>:<id>) arrives id-only — the
+// reference, the relation and the link's own record, with the target's fields
+// empty — so Show and DepList answer the whole dependency set. bd's own reads
+// leave such a link out; a consumer must not read the empty fields as a target.
 func deps(in []api.IssueDep) []beads.IssueDep {
-	out := make([]beads.IssueDep, 0, len(in))
-	for _, d := range in {
-		if strings.HasPrefix(d.ID, "external:") {
-			continue
-		}
-		out = append(out, beads.IssueDep{
+	out := make([]beads.IssueDep, len(in))
+	for i, d := range in {
+		out[i] = beads.IssueDep{
 			ID: d.ID, Title: d.Title, Status: d.Status, Priority: d.Priority, Type: d.Type,
 			DependencyType: d.DependencyType, CloseReason: d.CloseReason,
 			CreatedAt: ts(d.CreatedAt), CreatedBy: d.CreatedBy, Metadata: compactJSON(string(d.Metadata)),
-		})
+		}
 	}
 	return out
 }

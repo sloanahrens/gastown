@@ -9,12 +9,12 @@ import (
 )
 
 // The third auxiliary handler: dep for a tracker rig (gt-p85pw.120). A tracker
-// keeps every link it writes in the town's one database, and its dependency
-// reads join tracker.issues, so a link to another rig (stored as
-// external:<rig>:<id>) has no target row to list. The shim therefore never
-// creates what it cannot list: dep add refuses a target outside the rig before
-// the store is touched, dep list answers the rig's own edges, and every other
-// dep subcommand is refused by name.
+// keeps every link it writes in the town's one database, and a link to another
+// rig is stored as external:<rig>:<id>, which has no target row here. The
+// tracker lists such a link id-only, but bd's own dep list leaves it out and
+// the shim answers as bd does, so dep list shows the rig's own edges only (see
+// bdView). dep add refuses a target outside the rig until its bd answer is
+// pinned (gt-p85pw.120), and every other dep subcommand is refused by name.
 //
 // dep is one verb with several subcommands, so the handler reads which one the
 // argv names before it does anything: add and list are answered, and the rest
@@ -100,9 +100,8 @@ func depAddCommand(env Env, d Decision) int {
 	}
 	issue, target := fl.operands[0], fl.operands[1]
 	// A target outside this rig, plain or already wrapped as external:<rig>:<id>,
-	// is refused before the store is opened: the tracker would keep the link but
-	// its dependency reads never return it, and a link that cannot be listed is
-	// not created.
+	// is refused before the store is opened: the shim has no pinned bd answer
+	// for writing a cross-rig link (gt-p85pw.120), so it does not write one.
 	if strings.HasPrefix(target, "external:") || beads.ExtractPrefix(target) != d.Route.Prefix {
 		return shimError(env, fmt.Errorf("dep add of a cross-rig target %s is not implemented for tracker rig %s", target, d.Route.Prefix))
 	}
@@ -176,12 +175,11 @@ func depListCommand(env Env, d Decision) int {
 	return listDeps(env, st, fl.operands[0])
 }
 
-// listDeps prints the links the issue depends on. The named read fills them
-// from tracker.dependencies joined to tracker.issues, so a link to another rig
-// (external:<rig>:<id>) is left out of the list: dep list answers this rig's
-// own edges until the tracker serves external links on reads (gt-p85pw.122).
-// bd prints each row's created_at and updated_at from the target bead, which
-// the link does not carry, so the targets are read once more.
+// listDeps prints the links the issue depends on, as bd lists them: the view
+// opened by openTrackerStore leaves out a target outside this database
+// (external:<rig>:<id>), so dep list answers this rig's own edges. bd prints
+// each row's created_at and updated_at from the target bead, which the link
+// does not carry, so the targets are read once more.
 func listDeps(env Env, st auxDepStore, id string) int {
 	is, err := st.Show(id)
 	if err != nil {

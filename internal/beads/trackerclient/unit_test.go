@@ -55,13 +55,15 @@ func TestIssueConversionCarriesFieldsTimesAndDependencies(t *testing.T) {
 	if got.CreatedAt != "2026-10-01T09:00:00Z" || got.ClosedAt != "2026-10-01T10:00:00Z" || got.DeferUntil != "2026-10-01T11:00:00Z" {
 		t.Errorf("times = %q / %q / %q, want RFC3339 in UTC", got.CreatedAt, got.ClosedAt, got.DeferUntil)
 	}
-	if got.BlockedByCount != 2 || len(got.Dependencies) != 1 || got.Dependencies[0].DependencyType != "blocks" || got.Dependencies[0].Title != "b" {
+	if got.BlockedByCount != 2 || len(got.Dependencies) != 2 || got.Dependencies[0].DependencyType != "blocks" || got.Dependencies[0].Title != "b" {
 		t.Errorf("BlockedByCount = %d, Dependencies = %+v", got.BlockedByCount, got.Dependencies)
 	}
-	for _, d := range got.Dependencies {
-		if d.ID == "external:om:om-7" {
-			t.Errorf("Dependencies listed the external target %+v; the seam omits it as bd's show does", d)
-		}
+	external := got.Dependencies[1]
+	if external.ID != "external:om:om-7" || external.DependencyType != "tracks" || external.CreatedBy != "town/crew/fixture" {
+		t.Errorf("external dependency = %+v, want the id, the relation and the link's record", external)
+	}
+	if external.Title != "" || external.Status != "" || external.Type != "" || external.Priority != 0 {
+		t.Errorf("external dependency = %+v, want the target's fields empty", external)
 	}
 	if len(got.Dependents) != 1 || got.Dependents[0].ID != "gt-w" || got.Dependents[0].DependencyType != "tracks" {
 		t.Errorf("Dependents = %+v, want the issue that depends on this one, with its relation", got.Dependents)
@@ -455,23 +457,33 @@ func TestShowTextRefusesAFlagWithoutARequest(t *testing.T) {
 	}
 }
 
-// DepList keeps bd's answer: the seam omits a target outside this database
-// (external:<rig>:<id>) even though the tracker lists the link id-only on its
-// own reads.
-func TestDepListOmitsAnExternalTarget(t *testing.T) {
+// DepList keeps the tracker's whole answer: a target outside this database
+// (external:<rig>:<id>) is listed id-only, so DepList answers the whole
+// dependency set rather than bd's local edges.
+func TestDepListCarriesAnExternalTargetIDOnly(t *testing.T) {
 	t.Parallel()
 	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"dependencies":[` +
-			`{"id":"gt-b","title":"b","status":"open","priority":2,"issue_type":"task","dependency_type":"blocks"},` +
-			`{"id":"external:om:om-7","dependency_type":"tracks","created_by":"town/crew/fixture"}]}`))
+			`{"id":"external:om:om-7","dependency_type":"tracks","created_by":"town/crew/fixture"},` +
+			`{"id":"gt-b","title":"b","status":"open","priority":2,"issue_type":"task","dependency_type":"blocks"}]}`))
 	})
 	got, err := c.DepList("gt-x", "")
 	if err != nil {
 		t.Fatalf("DepList: %v", err)
 	}
-	if len(got) != 1 || got[0].ID != "gt-b" || got[0].DependencyType != "blocks" {
-		t.Errorf("DepList = %+v, want only the local link gt-b blocks", got)
+	if len(got) != 2 {
+		t.Fatalf("DepList = %+v, want the local link and the external one", got)
+	}
+	external := got[0]
+	if external.ID != "external:om:om-7" || external.DependencyType != "tracks" || external.CreatedBy != "town/crew/fixture" {
+		t.Errorf("external dependency = %+v, want the id, the relation and the link's record", external)
+	}
+	if external.Title != "" || external.Status != "" || external.Type != "" || external.Priority != 0 {
+		t.Errorf("external dependency = %+v, want the target's fields empty", external)
+	}
+	if local := got[1]; local.ID != "gt-b" || local.DependencyType != "blocks" {
+		t.Errorf("local dependency = %+v, want gt-b blocks", local)
 	}
 }
 

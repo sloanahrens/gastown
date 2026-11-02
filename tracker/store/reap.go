@@ -73,6 +73,8 @@ type Verdict struct {
 type WispFacts struct {
 	Wisp api.Issue
 	// Parents are the wisp's parent-child targets, with their status and type.
+	// A target outside this database is listed id-only, so its status and type
+	// are empty and the policy cannot read them.
 	Parents []api.IssueDep
 	// Referenced is true when a live agent bead names the wisp as its hook_bead
 	// or active_mr.
@@ -115,9 +117,10 @@ func Classify(f WispFacts, now time.Time, p ReapPolicy) Verdict {
 		}
 	}
 	switch {
-	case w.Parent != "" && !slices.ContainsFunc(f.Parents, func(par api.IssueDep) bool { return par.ID == w.Parent }):
-		// Dependencies leaves out external targets, so a parent it does not
-		// list is external. Its status is not readable here, so the wisp stays.
+	case w.Parent != "" && !slices.ContainsFunc(f.Parents, func(par api.IssueDep) bool { return par.ID == w.Parent && par.Status != "" }):
+		// A parent outside this database is listed id-only, with no status to
+		// read, so the wisp stays; so does one the read does not list at all.
+		// A local parent always carries its target row's status.
 		return keep("an external parent keeps it; its status is not read here")
 	case openParent:
 		return keep("an open parent keeps it")

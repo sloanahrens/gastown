@@ -900,6 +900,14 @@ func contractComments(t *testing.T, s *scope) {
 	}
 }
 
+// idOnly reports whether d is an id-only entry at relation typ: the reference
+// and the link's relation, with none of the target's own fields. A store lists
+// a link to a target it does not hold that way; a row it invented would fail.
+func idOnly(d beads.IssueDep, typ string) bool {
+	return d.DependencyType == typ && d.Title == "" && d.Status == "" && d.Type == "" &&
+		d.Priority == 0 && d.CloseReason == ""
+}
+
 // depOn returns is's dependency on id of relation typ, or nil.
 func depOn(is *beads.Issue, id, typ string) *beads.IssueDep {
 	for i, d := range is.Dependencies {
@@ -947,7 +955,13 @@ func contractDependencies(t *testing.T, s *scope) {
 // contractTypedDependencies pins AddTypedDependency the way a tracks edge uses
 // it: a tracks edge to a local issue shows on Show and does not block, a tracks
 // edge to an external:<rig>:<id> target is accepted although no such issue
-// exists here (bd's show omits it), and RemoveDependency drops either.
+// exists here, and RemoveDependency drops either.
+//
+// The external edge is the one answer the stores may differ on. bd's show and
+// dep list leave it out; the tracker keeps the whole dependency set and lists
+// it id-only, with the target's fields empty. Both answers pass here, and a
+// listed edge must be id-only at the relation the link holds: a store may not
+// invent target fields for a row it does not have.
 func contractTypedDependencies(t *testing.T, s *scope) {
 	tracker := s.mustCreate(t, beads.CreateOptions{Title: "tracker", Priority: -1})
 	local := s.mustCreate(t, beads.CreateOptions{Title: "tracked", Priority: -1})
@@ -959,19 +973,31 @@ func contractTypedDependencies(t *testing.T, s *scope) {
 		t.Fatalf("Show(tracker).Dependencies = %+v, want tracks on %s", got.Dependencies, local.ID)
 	}
 	for _, d := range got.Dependencies {
-		if d.ID == external {
-			t.Errorf("Show(tracker) listed the external edge %+v; bd's show omits external targets", d)
+		if d.ID == external && !idOnly(d, "tracks") {
+			t.Errorf("Show(tracker) listed the external edge %+v; when listed it is id-only at relation tracks", d)
 		}
 	}
 	ready, err := s.Ready()
 	s.want(t, "Ready with a tracks edge", ready, err, tracker.ID, local.ID)
 	blocker := s.mustCreate(t, beads.CreateOptions{Title: "blocker", Priority: -1})
 	mustDo(t, "AddDependency(blocker)", s.AddDependency(tracker.ID, blocker.ID))
-	if deps, err := s.DepList(tracker.ID, "tracks"); err != nil || len(deps) != 1 || deps[0].ID != local.ID || deps[0].DependencyType != "tracks" {
-		t.Errorf("DepList(tracker, tracks) = %+v, %v; want only %s (tracks), no external edge", deps, err, local.ID)
+	if deps, err := s.DepList(tracker.ID, "tracks"); err != nil || depOn(&beads.Issue{Dependencies: deps}, local.ID, "tracks") == nil {
+		t.Errorf("DepList(tracker, tracks) = %+v, %v; want %s (tracks)", deps, err, local.ID)
+	} else {
+		for _, d := range deps {
+			if d.ID == external && !idOnly(d, "tracks") {
+				t.Errorf("DepList(tracker, tracks) listed the external edge %+v; when listed it is id-only", d)
+			}
+		}
 	}
-	if deps, err := s.DepList(tracker.ID, ""); err != nil || len(deps) != 2 || depOn(&beads.Issue{Dependencies: deps}, blocker.ID, "blocks") == nil {
+	if deps, err := s.DepList(tracker.ID, ""); err != nil || depOn(&beads.Issue{Dependencies: deps}, local.ID, "tracks") == nil || depOn(&beads.Issue{Dependencies: deps}, blocker.ID, "blocks") == nil {
 		t.Errorf("DepList(tracker, any) = %+v, %v; want %s (tracks) and %s (blocks)", deps, err, local.ID, blocker.ID)
+	} else {
+		for _, d := range deps {
+			if d.ID == external && !idOnly(d, "tracks") {
+				t.Errorf("DepList(tracker, any) listed the external edge %+v; when listed it is id-only", d)
+			}
+		}
 	}
 	if deps, err := s.DepList(local.ID, "tracks"); err != nil || len(deps) != 0 {
 		t.Errorf("DepList(tracked) = %+v, %v; want none (edges point down only)", deps, err)

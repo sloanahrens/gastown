@@ -136,6 +136,13 @@ func TestUnresolvedBlockingDependencyIDs(t *testing.T) {
 			want: []string{"gt-blocker"},
 		},
 		{
+			// The tracker lists a link to another rig id-only, with no status:
+			// an external target never blocks, so the empty status here is
+			// not the fail-closed case below.
+			name: "an id-only external link does not block",
+			deps: []IssueDep{{ID: "external:om:om-7", DependencyType: "blocks"}},
+		},
+		{
 			name: "missing status fails closed",
 			deps: []IssueDep{{ID: "gt-unknown-status", DependencyType: "blocks"}},
 			want: []string{"gt-unknown-status"},
