@@ -137,19 +137,22 @@ func Decide(getenv func(string) string, getwd func() (string, error), args []str
 	}
 	town := filepath.Dir(found.table)
 
-	// cook and the formula verbs read formula files, and cook opens a store
-	// only with --persist (docs/research/tracker/R1-cook-port.md), so bd.real
-	// answers them from a tracker rig directory: the verb decides before any
-	// flag or bead id routes it.
-	if passesThrough(commandPath(args)) {
-		return d, nil
-	}
-
 	// A flag that selects the store bd opens moves the command off the store the
 	// working directory names, and nothing here follows it, so while a tracker
-	// rig exists it is refused rather than routed by the wrong directory.
+	// rig exists it is refused rather than routed by the wrong directory. It is
+	// checked before the passthrough below, because cook opens a store with
+	// --persist and the flag would put that store out of this routing's reach.
 	if flag := storeFlag(args); flag != "" && hasTrackerRoute(routes) {
 		return Decision{}, fmt.Errorf("%s selects a store this shim cannot route while a tracker rig exists: run bd from the rig's own directory", flag)
+	}
+
+	// cook and the formula verbs read formula files, and cook opens a store
+	// only with --persist (docs/research/tracker/R1-cook-port.md), so bd.real
+	// answers them from a tracker rig directory. They are decided before any
+	// bead id routes them: a cook's formula file or --var value can open with a
+	// rig prefix without naming a bead.
+	if passesThrough(commandPath(args)) {
+		return d, nil
 	}
 
 	command := commandPath(args)

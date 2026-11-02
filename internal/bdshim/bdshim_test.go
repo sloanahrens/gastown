@@ -150,7 +150,6 @@ func TestDecideCookPassesThrough(t *testing.T) {
 		{"a cook of a formula file", beta, "", []string{"cook", "mol-polecat-work"}},
 		{"a cook with the vars the town passes", beta, "", []string{"cook", "mol-polecat-work", "--var", "issue=bt-abc", "--mode", "machine"}},
 		{"a cook routed by BEADS_DIR", town, filepath.Join(beta, ".beads"), []string{"cook", "x.formula.toml"}},
-		{"a cook with a store-selecting flag", beta, "", []string{"cook", "x.formula.toml", "-C", "elsewhere"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -223,6 +222,25 @@ func TestDecideRefusesAStoreSelectingFlagWhileATrackerExists(t *testing.T) {
 	// A value after the separator is an operand, not a flag.
 	if _, err := decide(t, alpha, "", "create", "--", "-C"); err != nil {
 		t.Errorf("Decide with -C after the separator = %v, want it treated as an operand", err)
+	}
+}
+
+// cook and the formula verbs pass through only once the store-selecting flag
+// has been refused: a cook with --persist opens the store the flag names, so
+// the passthrough must not decide before the guard (gt-p85pw.100).
+func TestDecideRefusesAStoreSelectingFlagOnAPassThroughVerb(t *testing.T) {
+	t.Parallel()
+	town := newTown(t, routeTown, routeAlpha, routeBeta)
+	beta := filepath.Join(town, "beta", "mayor", "rig")
+	for _, args := range [][]string{
+		{"cook", "x.formula.toml", "-C", "elsewhere"},
+		{"cook", "--persist", "--db", "x.db"},
+		{"formula", "list", "-C", "elsewhere"},
+		{"--directory", "elsewhere", "formula", "list"},
+	} {
+		if _, err := decide(t, beta, "", args...); err == nil || !strings.Contains(err.Error(), "selects a store") {
+			t.Errorf("Decide(%v) from a tracker rig cwd = %v, want a refusal naming the store-selecting flag", args, err)
+		}
 	}
 }
 
