@@ -37,8 +37,7 @@ func TestHandlersStats(t *testing.T) {
 }
 
 // TestHandlersConfigReadsBackWhatItSets: the value config set stores is the
-// value config get reads, and the line the handler prints names the tracker's
-// config table, where the write went.
+// value config get reads, so the line the handler prints is the write it made.
 func TestHandlersConfigReadsBackWhatItSets(t *testing.T) {
 	t.Parallel()
 	fixture, _ := readFixture(t)
@@ -47,7 +46,7 @@ func TestHandlersConfigReadsBackWhatItSets(t *testing.T) {
 	if code := Main(env); code != 0 {
 		t.Fatalf("config set: exit code is %d, want 0 (stderr %q)", code, stderr.String())
 	}
-	if want := "Set export.auto = true (in the tracker config table)\n"; stdout.String() != want {
+	if want := "Set export.auto = true (in config.yaml)\n"; stdout.String() != want {
 		t.Errorf("config set stdout = %q, want %q", stdout.String(), want)
 	}
 	env.Args = []string{"config", "get", "export.auto"}

@@ -267,9 +267,10 @@ func getConfig(env Env, st auxConfigStore, key, prefix string) int {
 }
 
 // configSet answers bd config set for a tracker rig: the write through the
-// store, then a line naming where it went. bd names config.yaml, the file a Dolt
-// rig keeps this setting in; the shim writes the tracker's config table, so the
-// line names that rather than a file it never touches (gt-ec6vd).
+// store, then bd's line. bd's message names config.yaml, the file a Dolt rig
+// keeps this class of setting in; the tracker's configuration table is the
+// flipped rig's equivalent, so the line is bd's even though the file is not
+// written.
 func configSet(env Env, d Decision) int {
 	fl, err := parseReadArgs("config set", env.Args)
 	if err != nil {
@@ -298,15 +299,15 @@ func configSet(env Env, d Decision) int {
 	return setConfig(env, st, key, value)
 }
 
-// setConfig stores the value and prints the line naming where it went. The line
-// is printed only after the write, so a failed print says the value was stored
-// rather than reading as a set the caller should retry.
+// setConfig stores the value and prints bd's line. The line is printed only
+// after the write, so a failed print says the value was stored rather than
+// reading as a set the caller should retry.
 func setConfig(env Env, st auxConfigStore, key, value string) int {
 	if err := st.ConfigSet(key, value); err != nil {
 		return shimError(env, fmt.Errorf("config set %s: %w", key, err))
 	}
-	if _, err := fmt.Fprintf(env.Stdout, "Set %s = %s (in the tracker config table)\n", key, value); err != nil {
-		return shimError(env, fmt.Errorf("config set %s: the value was stored but the line could not be printed: %w", key, err))
+	if _, err := fmt.Fprintf(env.Stdout, "Set %s = %s (in config.yaml)\n", key, value); err != nil {
+		return shimError(env, fmt.Errorf("config set %s: the value was stored but bd's answer could not be printed: %w", key, err))
 	}
 	return 0
 }
