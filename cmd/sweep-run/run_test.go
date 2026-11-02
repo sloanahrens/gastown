@@ -154,6 +154,47 @@ func TestRunWritesResultForAPassingSweep(t *testing.T) {
 	}
 }
 
+// TestSweepRunShellTierRunsTheShelltierCommand: a run asked for the shell tier
+// hands the tree's own sweep the clone as its root and the tier name, so the
+// shared shelltier command runs against the checked-out tree, and the runner's
+// summary line and exit reach result.json like any other tier's (gt-b0mwr).
+func TestSweepRunShellTierRunsTheShelltierCommand(t *testing.T) {
+	t.Parallel()
+	const shellSummary = "tier-sweep: shell RED passed=12 failed=1 skipped=0 failed: scripts/a_test.sh (logs %s) in 3m2s"
+	h := newHarness(t, nil, func(_ []string, overrides map[string]string, stdout, _ io.Writer) int {
+		fmt.Fprintf(stdout, "tier-sweep: shell scripts/a_test.sh ...\n")
+		fmt.Fprintf(stdout, shellSummary+"\n", overrides[tiersweep.EnvLogDir])
+		return 1
+	})
+	if code := h.run("--rig", "gastown", "--sha", testSHA, "--tiers", "shell", "--out", h.out, "--repo", "/repo.git"); code != 0 {
+		t.Fatalf("exit code = %d, want 0: a RED tier still leaves a result (stderr %q)", code, h.stderr.String())
+	}
+	if want := []string{"--root", h.work, "shell"}; !equal(h.sweepAt, want) {
+		t.Errorf("sweep ran with %q, want %q: the shell tier runs in the clone", h.sweepAt, want)
+	}
+	r, err := sweeprunner.Read(h.out, "gastown", testSHA)
+	if err != nil {
+		t.Fatalf("read the result: %v", err)
+	}
+	if len(r.Tiers) != 1 || r.Tiers[0].Tier != tiersweep.TierShell {
+		t.Fatalf("result tiers = %+v, want one %s tier", r.Tiers, tiersweep.TierShell)
+	}
+	verdicts, err := sweeprunner.ToTierResults(r)
+	if err != nil {
+		t.Fatalf("convert the result: %v", err)
+	}
+	shell := verdicts[tiersweep.TierShell]
+	if shell.Verdict != "RED" || shell.Passed != 12 || shell.Failed != 1 {
+		t.Errorf("shell = %+v, want RED passed=12 failed=1 from the runner's line and exit", shell)
+	}
+	if !slices.Contains(shell.FailedNames, "scripts/a_test.sh") {
+		t.Errorf("shell failed names = %q, want the script the runner blamed", shell.FailedNames)
+	}
+	if want := filepath.Join(h.out, "logs"); shell.LogDir != want {
+		t.Errorf("shell log dir = %q, want the run's log directory %q", shell.LogDir, want)
+	}
+}
+
 // TestRunReadsTheContainerEnvironment: with no --rig, --sha, --tiers or --jobs on
 // the command line, the run takes the values the rendered container sets.
 func TestRunReadsTheContainerEnvironment(t *testing.T) {

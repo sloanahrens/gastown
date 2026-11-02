@@ -451,6 +451,101 @@ func TestTierSweepRunnerSpec_TakesAScriptSlotStage(t *testing.T) {
 	}
 }
 
+// TestTierSweepShellStageGoesToTheRunnerWhenEnabled: runner.shell is the
+// opt-in that sends the shell stage to the runner. With it set the stage is
+// launched, and the result's shell summary and exit are recorded exactly as
+// the integration and race results are; without it the stage runs on the host
+// and the host runner's summary is what the record holds (gt-b0mwr).
+func TestTierSweepShellStageGoesToTheRunnerWhenEnabled(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	const (
+		hostShell   = "tier-sweep: shell GREEN passed=3 failed=0 skipped=0 (logs /out/host-logs)\n"
+		foldedShell = "tier-sweep: shell RED passed=2 failed=1 skipped=0 failed: scripts/a_test.sh (logs /out/logs) in 1m1s"
+		otherTiers  = "tier-sweep: integration GREEN passed=5 failed=0 skipped=0 (logs /out/logs) in 1m\ntier-sweep: race GREEN passed=2 failed=0 skipped=0 (logs /out/logs) in 1m\n"
+	)
+	for _, tc := range []struct {
+		name           string
+		shell          bool
+		wantOffHost    bool
+		wantVerdict    string
+		wantPassed     int
+		wantFailedName string
+	}{
+		{name: "enabled", shell: true, wantOffHost: true, wantVerdict: tierSweepRed, wantPassed: 2, wantFailedName: "scripts/a_test.sh"},
+		{name: "disabled", shell: false, wantOffHost: false, wantVerdict: tierSweepGreen, wantPassed: 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := runnerTestConfig(t)
+			cfg.Shell = tc.shell
+			d, _ := runnerCycleDaemon(t, now, cfg, hostShell)
+			var launched []sweeprunner.Spec
+			d.tierSweepSeams.launch = func(_ context.Context, _ tierSweepStage, spec sweeprunner.Spec) tierSweepLaunch {
+				launched = append(launched, spec)
+				if err := sweeprunner.Write(spec.OutDir, sweeprunner.Result{
+					Rig:      spec.Rig,
+					SHA:      spec.SHA,
+					Started:  now.Add(-time.Minute),
+					Finished: now,
+					Runner:   sweeprunner.Runner{Backend: config.TierSweepRunnerDocker, Image: spec.Image, CPUs: spec.CPUs},
+					Tiers:    []sweeprunner.Tier{{Tier: "shell", Summary: foldedShell}},
+				}); err != nil {
+					t.Fatalf("the fake launch writing a result: %v", err)
+				}
+				return tierSweepLaunch{exitCode: 0}
+			}
+			// The integration stage is answered on the host so only the shell
+			// stage can reach the launcher; the shell stage takes the production
+			// dispatch when runner.shell sends it off the host.
+			d.tierSweepSeams.run = func(ctx context.Context, dir string, st tierSweepStage) tierSweepStageResult {
+				if !st.shell {
+					return tierSweepStageResult{output: otherTiers, exitCode: 0, ran: true}
+				}
+				if !tc.wantOffHost {
+					return tierSweepStageResult{output: hostShell, exitCode: 0, ran: true}
+				}
+				return d.tierSweepRunStage(ctx, dir, st)
+			}
+
+			shellStage := tierSweepStages("gastown")[0]
+			shellStage.tested = runnerTestSHA
+			_, offHost, err := d.tierSweepRunnerSpec(shellStage)
+			if err != nil {
+				t.Fatalf("tierSweepRunnerSpec of the shell stage = %v", err)
+			}
+			if offHost != tc.wantOffHost {
+				t.Fatalf("the shell stage off the host = %v, want %v with runner.shell %v", offHost, tc.wantOffHost, tc.shell)
+			}
+
+			cycle := d.startDogCycle("tier_sweep")
+			defer cycle.close()
+			if !d.runTierSweepRig(context.Background(), cycle, "gastown", now) {
+				t.Fatal("the cycle deferred; both stages ran and reported")
+			}
+
+			if tc.wantOffHost {
+				if len(launched) != 1 {
+					t.Fatalf("launches = %d, want 1: the shell stage leaves the host", len(launched))
+				}
+				if want := []string{"shell"}; !slices.Equal(launched[0].Tiers, want) {
+					t.Errorf("launched tiers = %q, want %q", launched[0].Tiers, want)
+				}
+			} else if len(launched) != 0 {
+				t.Fatalf("launches = %d, want none: runner.shell is off", len(launched))
+			}
+
+			shell := tierSweepTestState(t, d, "gastown").Tiers["shell"]
+			if shell.Verdict != tc.wantVerdict || shell.Passed != tc.wantPassed {
+				t.Errorf("shell = %+v, want %s passed=%d", shell, tc.wantVerdict, tc.wantPassed)
+			}
+			if tc.wantFailedName != "" && !slices.Contains(shell.FailedNames, tc.wantFailedName) {
+				t.Errorf("shell failed names = %q, want %q from the result's summary", shell.FailedNames, tc.wantFailedName)
+			}
+		})
+	}
+}
+
 // TestTierSweepRunnerStageLaunchesAndFoldsAScriptStage drives the stage
 // dispatch a cycle calls: a script slot stage with a runner configured leaves
 // the host, its launch is handed the script stage, and the run's result folds

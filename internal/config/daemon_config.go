@@ -1817,14 +1817,15 @@ type TierSweepConfig struct {
 	// Runner, when set, runs the integration and race tiers off the host: the
 	// daemon renders the run through internal/sweeprunner, starts it detached,
 	// and reads the result.json it writes (gt-z4ppb). Nil runs them on the
-	// host, as before, and the shell stage always stays on the host.
+	// host, as before. The shell stage leaves the host only when the runner
+	// block's Shell is set.
 	Runner *TierSweepRunnerConfig `json:"runner,omitempty"`
 }
 
-// TierSweepRunnerConfig is where the sweep's integration and race tiers run
-// when they run off the host (gt-z4ppb). Every field is required: a runner
-// block that names no image, engine or output directory cannot render a run,
-// and a default would start a run the operator never asked for.
+// TierSweepRunnerConfig is where the sweep's tiers run when they run off the
+// host (gt-z4ppb). Every field but Shell is required: a runner block that names
+// no image, engine or output directory cannot render a run, and a default would
+// start a run the operator never asked for.
 type TierSweepRunnerConfig struct {
 	// Backend names the engine the run starts on: "docker" for a container
 	// through the Docker CLI's context, or "kubernetes" for a batch/v1 Job
@@ -1858,6 +1859,12 @@ type TierSweepRunnerConfig struct {
 	// Dind starts a Docker-in-Docker sidecar for the packages whose tests need
 	// a Docker API (internal/testutil starts Dolt through testcontainers).
 	Dind bool `json:"dind"`
+
+	// Shell sends the shell stage to the runner too, so the stage's tests run
+	// in the container rather than on the host. Defaults to false: the shell
+	// stage runs on the host as before, and the operator turns it on after
+	// reading one container sweep (gt-b0mwr).
+	Shell bool `json:"shell,omitempty"`
 }
 
 // The ranges TierSweepRunnerConfig accepts, matching sweeprunner.Spec.Validate.

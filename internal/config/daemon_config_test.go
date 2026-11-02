@@ -733,10 +733,10 @@ func TestDiskMaintenanceConfigRefusesWhatThePatrolCannotActOn(t *testing.T) {
 	}
 }
 
-// A runner block moves the integration and race tiers off the host, so every
-// field is required and a key or value no run can use is refused at decode,
-// naming the key: a block the daemon half-understands would start a container
-// the operator never described (gt-z4ppb).
+// A runner block moves the integration and race tiers off the host, so the
+// engine and limit fields are required and a key or value no run can use is
+// refused at decode, naming the key: a block the daemon half-understands would
+// start a container the operator never described (gt-z4ppb).
 func TestTierSweepRunnerConfigStrict(t *testing.T) {
 	t.Parallel()
 
@@ -789,6 +789,41 @@ func TestTierSweepRunnerConfigStrict(t *testing.T) {
 				t.Errorf("error = %v, want it to name %q", err, tt.wantKey)
 			}
 		})
+	}
+}
+
+// TestTierSweepConfigRunnerShellDefaultsFalse: runner.shell is the opt-in that
+// sends the shell stage to the runner. A block that omits it keeps the shell
+// stage on the host, and one that sets it decodes true through both the plain
+// and the kernel decoders (gt-b0mwr).
+func TestTierSweepConfigRunnerShellDefaultsFalse(t *testing.T) {
+	t.Parallel()
+	const block = `{"backend": "docker", "image": "gt-polecat:main", "cpus": 8, "memory": 24, "jobs": 4, "output_root": "/out/gt-sweep", "context": "colima-gt-sbx"`
+
+	var without PatrolsConfig
+	if err := json.Unmarshal([]byte(`{"tier_sweep": {"runner": `+block+`}}}`), &without); err != nil {
+		t.Fatalf("a runner block without shell does not decode: %v", err)
+	}
+	if without.TierSweep.Runner == nil || without.TierSweep.Runner.Shell {
+		t.Fatalf("runner without a shell key = %+v, want Shell false", without.TierSweep.Runner)
+	}
+
+	const withShell = `{"tier_sweep": {"runner": ` + block + `, "shell": true}}}`
+	var with PatrolsConfig
+	if err := json.Unmarshal([]byte(withShell), &with); err != nil {
+		t.Fatalf("a runner block with shell does not decode: %v", err)
+	}
+	if with.TierSweep.Runner == nil || !with.TierSweep.Runner.Shell {
+		t.Fatalf("runner with shell true = %+v, want Shell true", with.TierSweep.Runner)
+	}
+
+	doc := `{"type":"daemon-patrol-config","version":1,"patrols":` + withShell + `}`
+	var cfg DaemonPatrolConfig
+	if err := DecodeJSONFile("settings.json", []byte(doc), &cfg); err != nil {
+		t.Fatalf("settings.json with runner.shell = %v", err)
+	}
+	if cfg.Patrols.TierSweep.Runner == nil || !cfg.Patrols.TierSweep.Runner.Shell {
+		t.Error("the kernel's decode dropped runner.shell")
 	}
 }
 
