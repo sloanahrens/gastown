@@ -1,7 +1,8 @@
 // Command sweep-run is the entrypoint of the container that runs one rig's tier
 // sweep off the host: it clones the rig's bare repository at the commit, runs
-// internal/tiersweep in this process, and leaves result.json and the logs in its
-// output directory for the daemon to read (gt-dibnm).
+// the sweep the tree ships — internal/tiersweep in this process where the tree
+// has cmd/tier-sweep, else the rig's own tier script — and leaves result.json
+// and the logs in its output directory for the daemon to read (gt-dibnm).
 //
 //	sweep-run --rig R --sha S [--tiers a,b] [--jobs N] [--out DIR] [--repo DIR]
 //
@@ -31,6 +32,8 @@ func depsWith(env []string) Deps {
 	return Deps{
 		Clone:       gitClone,
 		Sweep:       processSweep,
+		TreeHas:     treeHas,
+		RunScript:   runScript,
 		WriteResult: sweeprunner.Write,
 		MkdirTemp:   os.MkdirTemp,
 		MkdirAll:    os.MkdirAll,

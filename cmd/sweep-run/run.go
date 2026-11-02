@@ -67,10 +67,28 @@ const (
 	failedLabel = " failed: "
 )
 
-// sweepNoExit is what the Sweep seam returns when the sweep produced no exit
-// status: the process died on a signal or never started. Any negative value
-// means the same thing.
+// sweepNoExit is what the Sweep and RunScript seams return when the sweep
+// produced no exit status: the process died on a signal or never started. Any
+// negative value means the same thing.
 const sweepNoExit = -1
+
+// The sweep a work tree ships, and the reason a tree that ships neither has.
+// The daemon's host sweep makes the same choice per checked-out tree (resolveIn
+// in internal/daemon/tier_sweep.go): the Go command where its directory exists,
+// else the rig's tier script.
+const (
+	// goSweepDir is the directory whose presence means the tree ships the Go
+	// sweep this run starts in process.
+	goSweepDir = "cmd/tier-sweep"
+	// scriptPath is the rig's own tier script, relative to the tree: the host
+	// sweep's tierSweepScriptPath.
+	scriptPath = "scripts/tier-sweep.sh"
+	// scriptProgram runs the script, as the host sweep runs it.
+	scriptProgram = "bash"
+	// noSweepReason is the RED reason of a tree that ships neither the Go
+	// command nor the script. Nothing ran, so nothing is green.
+	noSweepReason = "no sweep command in the tree"
+)
 
 // The result's runner block. The engine that started the container is not
 // observable from inside it, and the rendered run passes the container the
@@ -82,9 +100,9 @@ const (
 	runnerImage   = "unrecorded"
 )
 
-// Deps are the seams one run reads through: the clone, the sweep, the clock and
-// the filesystem. A test fills every field with a fake, so no run starts git or
-// a sweep, reads the clock or writes outside t.TempDir().
+// Deps are the seams one run reads through: the clone, the sweep, the tree
+// check, the clock and the filesystem. A test fills every field with a fake, so
+// no run starts git or a sweep, reads the clock or writes outside t.TempDir().
 type Deps struct {
 	// Clone copies repo at sha into work: a transport clone of the bare repository,
 	// then the sha fetched and checked out detached. A sha the repository does
@@ -97,6 +115,17 @@ type Deps struct {
 	// whatever the summary lines say. A negative value means the sweep produced
 	// no exit status (sweepNoExit), which is a run that cannot report a result.
 	Sweep func(args []string, overrides map[string]string, stdout, stderr io.Writer) int
+	// TreeHas reports whether the work tree at root ships rel, a path relative to
+	// that root. An error means the tree could not be read, which the run reports
+	// as RED rather than as a tree quietly without the sweep. The choice itself
+	// reads a func(rel string) (bool, error) bound to the work directory
+	// (chooseSweep), so a test answers from a table and touches no filesystem.
+	TreeHas func(root, rel string) (bool, error)
+	// RunScript runs one program in dir with the environment it is given and
+	// returns its exit status, or a negative value (sweepNoExit) when it produced
+	// none: it never started, or a signal killed it. It runs the rig's tier
+	// script, the sweep of a tree that ships no Go command.
+	RunScript func(program string, args []string, dir string, env []string, stdout, stderr io.Writer) int
 	// WriteResult records a result as result.json in dir, as sweeprunner.Write.
 	WriteResult func(dir string, r sweeprunner.Result) error
 	// MkdirTemp creates the work directory the clone lands in.
@@ -106,7 +135,8 @@ type Deps struct {
 	// RemoveAll deletes the work directory after the run.
 	RemoveAll func(path string) error
 	// Environ is the process environment: where a flag left out takes the
-	// container's value, and what the sweep's children inherit.
+	// container's value, what the sweep's children inherit, and the base of the
+	// environment the tier script runs with.
 	Environ []string
 	// Now is the clock the result's started and finished times are read from.
 	Now func() time.Time
@@ -170,6 +200,51 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 		// GREEN (gt-dibnm).
 		res.Tiers = redTiers(opts.Tiers, opts.logDir(), sanitize(err.Error(), maxSummaryBytes))
 	} else {
+		tiers, ok := sweepTiers(opts, work, d, stdout, stderr)
+		if !ok {
+			return FailureExit
+		}
+		res.Tiers = tiers
+	}
+	res.Finished = now()
+	if err := d.WriteResult(opts.Out, res); err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", name, err)
+		return FailureExit
+	}
+	return 0
+}
+
+// sweepTiers runs the sweep the work tree ships and returns the result's tiers:
+// one per requested tier, in the requested order. ok is false when the sweep
+// produced no exit status, which is a run that cannot report a result; a tier
+// that did not pass is in the tiers, not in ok, because its verdict is what the
+// daemon reads.
+func sweepTiers(opts options, work string, d Deps, stdout, stderr io.Writer) (tiers []sweeprunner.Tier, ok bool) {
+	choice, err := chooseSweep(d.TreeHas, work)
+	if err != nil {
+		// No tier ran, so every requested tier is RED with the reason: a tree
+		// with no sweep command, or one the run cannot read, must never leave a
+		// tier it did not test looking GREEN (gt-dibnm).
+		return redTiers(opts.Tiers, opts.logDir(), sanitize(err.Error(), maxSummaryBytes)), true
+	}
+	// The sweep's summary lines are echoed as it prints them, so the container's
+	// log reads like a host sweep's, and captured for the result. The capture is
+	// bounded and the echo is not: the sweep's whole output reaches the container
+	// log, and only the copy the result is built from is capped, at its end
+	// (gt-dibnm). The script writes through the same writers, so the same
+	// captured tails and summary parsing read its output.
+	captured, sweepErrs := newTail(maxCaptureBytes), newTail(maxStderrCapture)
+	var code int
+	if choice == sweepScript {
+		// The rig's own script takes the tiers as arguments, in the work tree, as
+		// the host sweep runs it, and reads the run's log directory from the
+		// environment. It gets none of the Go sweep's timings or resume file: the
+		// host sweep passes a script stage none either (tierSweepStageEnv).
+		code = d.RunScript(scriptProgram, append([]string{scriptPath}, opts.Tiers...), work,
+			environWith(d.Environ, map[string]string{tiersweep.EnvLogDir: opts.logDir()}),
+			io.MultiWriter(stdout, captured),
+			io.MultiWriter(stderr, sweepErrs))
+	} else {
 		overrides := map[string]string{
 			tiersweep.EnvLogDir: opts.logDir(),
 			tiersweep.EnvTested: opts.SHA,
@@ -178,30 +253,58 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 			// without gt slot run; the runner holds its own reservation.
 			tiersweep.EnvNoSlot: "1",
 		}
-		// The sweep's summary lines are echoed as it prints them, so the
-		// container's log reads like a host sweep's, and captured for the result.
-		// The capture is bounded and the echo is not: the sweep's whole output
-		// reaches the container log, and only the copy the result is built from
-		// is capped, at its end (gt-dibnm).
-		captured, sweepErrs := newTail(maxCaptureBytes), newTail(maxStderrCapture)
-		code := d.Sweep(sweepArgs(work, opts.Tiers), overrides,
+		code = d.Sweep(sweepArgs(work, opts.Tiers), overrides,
 			io.MultiWriter(stdout, captured),
 			io.MultiWriter(stderr, sweepErrs))
-		// No exit status is no verdict: a sweep that was killed or never started
-		// did not produce one, so the run reports that it could not produce a
-		// result rather than recording a tier it does not know about (gt-dibnm).
-		if code < 0 {
-			fmt.Fprintf(stderr, "%s: the sweep did not exit (%d): it was killed or never started\n", name, code)
-			return FailureExit
-		}
-		res.Tiers = tiersFrom(opts.Tiers, reportOf(captured, sweepErrs), code, opts.logDir())
 	}
-	res.Finished = now()
-	if err := d.WriteResult(opts.Out, res); err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", name, err)
-		return FailureExit
+	// No exit status is no verdict: a sweep that was killed or never started did
+	// not produce one, so the run reports that it could not produce a result
+	// rather than recording a tier it does not know about (gt-dibnm).
+	if code < 0 {
+		fmt.Fprintf(stderr, "%s: the sweep did not exit (%d): it was killed or never started\n", name, code)
+		return nil, false
 	}
-	return 0
+	return tiersFrom(opts.Tiers, reportOf(captured, sweepErrs), code, opts.logDir()), true
+}
+
+// sweepChoice is how one work tree's tiers run.
+type sweepChoice int
+
+const (
+	// sweepInProcess runs internal/tiersweep in this process: the tree ships
+	// the Go command.
+	sweepInProcess sweepChoice = iota
+	// sweepScript runs the rig's own tier script with the tiers as arguments.
+	sweepScript
+)
+
+// chooseSweep picks the sweep a work tree runs, as the daemon's host sweep does
+// per checked-out tree (resolveIn in internal/daemon/tier_sweep.go): the Go
+// command where its directory exists, else the rig's tier script with the same
+// tiers. A tree that ships neither has no sweep, and the error is noSweepReason.
+// has reports whether the tree ships a path; an error from it is a tree that
+// cannot be read, returned rather than read as a tree without the sweep. A check
+// that is not wired refuses instead of choosing for the tree.
+func chooseSweep(treeHas func(root, rel string) (bool, error), root string) (sweepChoice, error) {
+	if treeHas == nil {
+		return 0, fmt.Errorf("the tree check is not wired: %s", noSweepReason)
+	}
+	has := func(rel string) (bool, error) { return treeHas(root, rel) }
+	goOK, err := has(goSweepDir)
+	if err != nil {
+		return 0, err
+	}
+	if goOK {
+		return sweepInProcess, nil
+	}
+	scriptOK, err := has(scriptPath)
+	if err != nil {
+		return 0, err
+	}
+	if scriptOK {
+		return sweepScript, nil
+	}
+	return 0, errors.New(noSweepReason)
 }
 
 // parseArgs resolves the command line and the environment it falls back to,
@@ -638,6 +741,41 @@ func runGit(dir string, args ...string) (int, string) {
 	// git could not be started at all: the shell's code for a command it cannot
 	// find, so the run reads as a failure rather than a pass.
 	return 127, oneLine(err.Error())
+}
+
+// treeHas answers whether the work tree at work ships rel. A path that is not
+// there is false; any other error is returned, so a tree the run cannot read is
+// never taken for a tree without the sweep.
+func treeHas(work, rel string) (bool, error) {
+	_, err := os.Stat(filepath.Join(work, rel)) //nolint:gosec // G304: rel is one of this file's constants and work is the directory the run made
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
+}
+
+// runScript runs the rig's tier script: the program and arguments are the host
+// sweep's stage command (tierSweepStage.command), with the environment the run
+// built and its output streaming into the writers the in-process sweep gets.
+func runScript(program string, args []string, dir string, env []string, stdout, stderr io.Writer) int {
+	cmd := exec.Command(program, args...) //nolint:gosec // G204: the program is the constant bash, and the arguments are the tree's own script path and the run's tiers
+	cmd.Dir = dir
+	cmd.Env = env
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	err := cmd.Run()
+	var exitErr *exec.ExitError
+	switch {
+	case err == nil:
+		return 0
+	case errors.As(err, &exitErr):
+		return exitErr.ExitCode()
+	}
+	// The script could not be started at all: no status, so no verdict.
+	return sweepNoExit
 }
 
 // processSweep runs the sweep in this process with its real seams: git, go and
