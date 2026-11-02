@@ -68,13 +68,34 @@ Where a workspace has a wired rotate action (plan row O5), it runs steps 1 to 4.
   gcloud secrets versions add customer-zero_api-key --project "$PROJECT_ID" --data-file=-
   ```
 
-- Check the new version with the provider, as `keycheck` does, before the old one is touched. Read the new version into the shell with `gcloud secrets versions access`, and send it with the provider request on stdin (`curl --config -`), never as a `-H` argument, so the value stays off the command line. Make HTTP errors non-zero (`--fail`) and discard the response (`-o /dev/null`): the exit status is the verdict.
+- Check the new version with the provider before the old one is touched, the verification `keycheck` asks its `Provider` for. Send the request a seat sends: a `POST` to the provider's Messages endpoint with the key in `x-api-key` and the `anthropic-version` header. `$PROVIDER_URL` is that endpoint and `$MODEL` the model the workspace's seats run, both set in the window and recorded nowhere; for an Anthropic key the endpoint is `https://api.anthropic.com/v1/messages`, and an Anthropic-compatible provider uses its own base URL with `/v1/messages`. The key streams from `gcloud` into curl's config on stdin, so it is never an argument, a shell variable or a file:
 
-- On a pass, disable the version it replaces, then destroy it once no seat started on it is still running:
+  ```bash
+  {
+    printf 'url = "%s"\n' "$PROVIDER_URL"
+    printf 'header = "x-api-key: '
+    gcloud secrets versions access latest --project "$PROJECT_ID" --secret customer-zero_api-key | tr -d '\n'
+    printf '"\n'
+    printf 'header = "anthropic-version: 2023-06-01"\n'
+    printf 'header = "content-type: application/json"\n'
+    printf 'data = "{\\"model\\":\\"%s\\",\\"max_tokens\\":1,\\"messages\\":[{\\"role\\":\\"user\\",\\"content\\":\\"ping\\"}]}"\n' "$MODEL"
+  } | curl --fail --silent --output /dev/null --write-out '%{http_code}\n' --config - \
+    | grep -qx '2[0-9][0-9]'
+  ```
+
+  The pipeline exits zero only on a `2xx`: the write-out prints the status and `grep -qx` accepts nothing else, so a redirect, a key the provider refuses (`401`), an HTTP error or a failed read all stop the rotation with the previous key still serving.
+
+- On a pass, disable the version it replaces. New seats then read only the replacement; a seat that already started on the old version keeps the value it read:
 
   ```bash
   OLD=1   # the version being replaced; use the number versions list reports
   gcloud secrets versions disable customer-zero_api-key --project "$PROJECT_ID" --version "$OLD"
+  ```
+
+- Destroy the disabled version only after the last seat started on it has ended — later, never in the same run as the disable. It stays disabled until then, so no new seat reads it, and a seat that still holds it keeps working. `keyrotation.SeatEnded` makes this call when rotation is wired and refuses while a seat is still running; by hand, destroy only when no seat started on that version is still running:
+
+  ```bash
+  OLD=1   # the disabled version being replaced; use the number versions list reports
   gcloud secrets versions destroy customer-zero_api-key --project "$PROJECT_ID" --version "$OLD"
   ```
 
