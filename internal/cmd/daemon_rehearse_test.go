@@ -59,14 +59,14 @@ type rehearseHost struct {
 	removeErr []error           // consumed one per removeAll call
 	links     map[string]string // evalSymlinks answers; other paths resolve to themselves
 	codes     map[string]int    // exit code of a failing command by substring; default 1
-	extra     []string          // extra settings entries readDir lists
+	plugins   []string          // plugin directories under <live>/plugins
 }
 
 func newRehearseHost() *rehearseHost {
 	return &rehearseHost{
 		clock: time.Unix(1_000_000, 0),
 		files: map[string][]byte{
-			rehearseLive + "/settings/config.json":         []byte(`{"landing":{"work_root":"/opt/missing","clones":"/h/landing/x","town":"/live/gt/.runtime/y"},"gate":"host.docker.internal:28443","forge":"https://example.test/api/v1","api_key":"sk-live-key","ref":"${KEEP_ME}","auth":{"token":"tok-123"}}`),
+			rehearseLive + "/settings/config.json":         []byte(`{"landing":{"work_root":"/opt/missing","clones":"/h/landing/x","town":"/live/gt/.runtime/y"},"gate":"host.docker.internal:28443","forge":"https://example.test/api/v1","api_key":"sk-live-key","ref":"${KEEP_ME}","auth":{"token":"tok-123"},"daemon":{"container_off":` + offJSON() + `}}`),
 			rehearseLive + "/settings/secrets.env":         []byte("RAW=raw-secret-value\n"),
 			rehearseLive + "/settings/daemon.env":          []byte("# comment\nDEEPSEEK_KEY=sk-secret-value\nexport PATH=/usr/bin:/bin\n"),
 			rehearseLive + "/mayor/town.json":              []byte(`{"name":"gt"}`),
@@ -108,11 +108,27 @@ func (h *rehearseHost) deps(out *bytes.Buffer) rehearseDeps {
 			if b, ok := h.files[p]; ok {
 				return b, nil
 			}
+			if strings.HasPrefix(p, rehearseLive+"/plugins/") && strings.HasSuffix(p, "/plugin.md") {
+				return []byte("+++\n+++\n"), nil
+			}
 			return nil, fs.ErrNotExist
 		},
 		readDir: func(p string) ([]os.DirEntry, error) {
 			if err := h.readErr[p]; err != nil {
 				return nil, err
+			}
+			if p == rehearseLive {
+				return []os.DirEntry{fakeEntry{"plugins", fs.ModeDir}, fakeEntry{"settings", fs.ModeDir}}, nil
+			}
+			if p == rehearseLive+"/plugins" {
+				var es []os.DirEntry
+				for _, n := range h.plugins {
+					es = append(es, fakeEntry{n, fs.ModeDir})
+				}
+				return es, nil
+			}
+			if p != rehearseLive+"/settings" {
+				return nil, fs.ErrNotExist
 			}
 			return []os.DirEntry{fakeEntry{"config.json", 0}, fakeEntry{"daemon.env", 0}, fakeEntry{"secrets.env", 0}, fakeEntry{"sub", fs.ModeDir}}, nil
 		},
@@ -158,7 +174,7 @@ func TestContainerRehearsalListsEveryFailingCheck(t *testing.T) {
 	}
 	got := out.String()
 	for _, want := range []string{
-		"config-validate  FAIL", "binaries         FAIL", "paths            FAIL", "addresses        FAIL", "heartbeat        ok",
+		"config-validate  FAIL", "binaries         FAIL", "plugins          FAIL", "paths            FAIL", "addresses        FAIL", "heartbeat        ok",
 		"kubectl: not on the image's PATH", "openshell: not on the image's PATH",
 		"/opt/missing: named by a setting", "host.docker.internal:28443: does not accept a TCP connect",
 	} {
@@ -166,7 +182,7 @@ func TestContainerRehearsalListsEveryFailingCheck(t *testing.T) {
 			t.Errorf("the table lacks %q:\n%s", want, got)
 		}
 	}
-	if !strings.Contains(err.Error(), "4 required check(s)") {
+	if !strings.Contains(err.Error(), "5 required check(s)") {
 		t.Errorf("error = %v, want the count of failed checks", err)
 	}
 }
@@ -659,5 +675,182 @@ func TestContainerRehearsalRedactionFailsClosedForEveryValueType(t *testing.T) {
 		"passwords": []any{}, "private_flag": false, "credential": nil, "plain": "keep-me"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("staged = %v, want %v", got, want)
+	}
+}
+
+// offJSON is the container_off list a passing town carries: every name the
+// audit table says cannot run in the container.
+func offJSON() string {
+	b, _ := json.Marshal(containerOffNames())
+	return string(b)
+}
+
+// Every host-side or needs-a-seam step must be in daemon.container_off in the
+// staged settings; each missing one is named with its reason.
+func TestContainerRehearsalPluginsCheckFlagsEveryUnlistedHostSideEntry(t *testing.T) {
+	t.Parallel()
+	h := newRehearseHost()
+	h.files[rehearseLive+"/settings/config.json"] = []byte(`{"daemon":{"container_off":["polecat-image"]}}`)
+	var out bytes.Buffer
+	err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
+	got := out.String()
+	if err == nil || !strings.Contains(got, "plugins          FAIL") {
+		t.Fatalf("err=%v\n%s", err, got)
+	}
+	for _, s := range daemonSteps {
+		listed := s.name == "polecat-image"
+		if s.class != stepRuns && !listed && !strings.Contains(got, s.name+" ("+string(s.class)+") is not in daemon.container_off") {
+			t.Errorf("%s (%s) is not reported:\n%s", s.name, s.class, got)
+		}
+		if (s.class == stepRuns || listed) && strings.Contains(got, s.name+" (") {
+			t.Errorf("%s was reported although it needs no entry", s.name)
+		}
+	}
+	// A patrol explicitly disabled is off for every supervisor and needs no entry.
+	h2 := newRehearseHost()
+	h2.files[rehearseLive+"/settings/config.json"] = []byte(`{"daemon":{"container_off":` + offJSONWithout("landing_worker") + `,"patrols":{"landing_worker":{"enabled":false}}}}`)
+	var out2 bytes.Buffer
+	if err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h2.deps(&out2)); err != nil {
+		t.Errorf("a disabled patrol still failed: %v\n%s", err, out2.String())
+	}
+}
+
+func offJSONWithout(name string) string {
+	var keep []string
+	for _, n := range containerOffNames() {
+		if n != name {
+			keep = append(keep, n)
+		}
+	}
+	b, _ := json.Marshal(keep)
+	return string(b)
+}
+
+// A plugin directory or a patrol the audit table does not name fails the check,
+// as does a container_off name it does not know and a malformed settings shape.
+func TestContainerRehearsalPluginsCheckRefusesAnUnclassifiedPlugin(t *testing.T) {
+	t.Parallel()
+	h := newRehearseHost()
+	h.plugins = []string{"mystery", "polecat-image"}
+	h.files[rehearseLive+"/settings/config.json"] = settingsWithOff(append(containerOffNames(), "typo-plugin"), `"new_patrol":{"enabled":true}`)
+	var out bytes.Buffer
+	err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
+	got := out.String()
+	for _, want := range []string{"mystery: a plugin the audit table does not classify", "new_patrol: a patrol the audit table does not classify", "typo-plugin: in daemon.container_off but unknown"} {
+		if err == nil || !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "polecat-image: a plugin") {
+		t.Error("a classified plugin was reported")
+	}
+	h = newRehearseHost()
+	h.files[rehearseLive+"/settings/config.json"] = []byte(`{"daemon":{"container_off":"polecat-image"}}`) // not a list
+	out.Reset()
+	_ = runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
+	if !strings.Contains(out.String(), "does not give daemon.container_off") {
+		t.Errorf("a container_off that is not a list:\n%s", out.String())
+	}
+}
+
+// Every program a runs-in-container step execs must be on the image's PATH.
+func TestContainerRehearsalPluginsCheckNamesAMissingProgram(t *testing.T) {
+	t.Parallel()
+	h := newRehearseHost()
+	h.failing = []string{"command -v dolt"}
+	var out bytes.Buffer
+	_ = runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
+	if !strings.Contains(out.String(), "dolt: not on the image's PATH, needed by jsonl_git_backup") {
+		t.Errorf("the missing program is not tied to its step:\n%s", out.String())
+	}
+	h = newRehearseHost()
+	h.failing = []string{"command -v ps"}
+	h.codes = map[string]int{"command -v ps": 125}
+	out.Reset()
+	_ = runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
+	if !strings.Contains(out.String(), "ps: the probe did not run") {
+		t.Errorf("a docker failure on a step program:\n%s", out.String())
+	}
+}
+
+// Jev patrols are in-process readers and need no row each.
+func TestContainerRehearsalClassifiesJevPatrols(t *testing.T) {
+	t.Parallel()
+	if !stepNamed("jev_landing", kindPatrol) || slices.Contains(containerOffNames(), "jev_landing") {
+		t.Error("jev_landing must be known and run in the container")
+	}
+	if stepNamed("jevish", kindPatrol) || stepNamed("jev_landing", kindPlugin) {
+		t.Error("a name that only resembles the prefix was classified")
+	}
+}
+
+// settingsWithOff is a config.json whose daemon section lists off and carries
+// the extra patrols entries.
+func settingsWithOff(off []string, patrols string) []byte {
+	b, _ := json.Marshal(off)
+	return []byte(`{"daemon":{"container_off":` + string(b) + `,"patrols":{` + patrols + `}}}`)
+}
+
+// A patrol the daemon's config type declares, enabled by its default and absent
+// from the settings, is still checked against the table.
+func TestContainerRehearsalPluginsCheckKnowsPatrolsTheSettingsOmit(t *testing.T) {
+	t.Parallel()
+	if got := unclassifiedNames([]string{"landing_worker", "brand_new_default_on_patrol", "jev_x"}); !slices.Equal(got, []string{"brand_new_default_on_patrol"}) {
+		t.Errorf("unclassifiedNames = %v", got)
+	}
+	// Every patrol the real type declares is classified, so a patrol added to
+	// config.PatrolsConfig without a table row fails here.
+	if got := unclassifiedNames(knownPatrolKeys()); len(got) != 0 {
+		t.Errorf("patrols the audit table does not classify: %v", got)
+	}
+	if len(knownPatrolKeys()) < 20 {
+		t.Errorf("knownPatrolKeys found %d keys; the reflection over config.PatrolsConfig is not reading the tags", len(knownPatrolKeys()))
+	}
+}
+
+func TestContainerRehearsalPluginsCheckFailsForAnUnlistedDefaultOnPatrol(t *testing.T) {
+	t.Parallel()
+	h := newRehearseHost()
+	d := h.deps(&bytes.Buffer{})
+	d.patrolKeys = func() []string { return []string{"landing_worker", "brand_new_default_on_patrol"} }
+	var out bytes.Buffer
+	d.out = &out
+	err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), d)
+	if err == nil || !strings.Contains(out.String(), "brand_new_default_on_patrol: a patrol the daemon knows") {
+		t.Fatalf("err=%v\n%s", err, out.String())
+	}
+}
+
+// The check that stops an unclassified plugin must not pass when it could not
+// look: an unlistable town, plugins directory, or an unreadable plugin.md fails
+// it, and a rig without a plugins directory does not.
+func TestContainerRehearsalPluginsCheckFailsWhenItCannotLook(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	for name, tc := range map[string]struct {
+		set  func(*rehearseHost)
+		want string
+	}{
+		"town unlistable":    {func(h *rehearseHost) { h.readErr = map[string]error{rehearseLive: boom} }, "cannot be listed, so its rigs' plugins are unknown"},
+		"plugins unlistable": {func(h *rehearseHost) { h.readErr = map[string]error{rehearseLive + "/plugins": boom} }, "plugins directory " + rehearseLive + "/plugins cannot be listed"},
+		"plugin.md unreadable": {func(h *rehearseHost) {
+			h.plugins = []string{"polecat-image"}
+			h.readErr = map[string]error{rehearseLive + "/plugins/polecat-image/plugin.md": boom}
+		}, "cannot be read"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newRehearseHost()
+			tc.set(h)
+			var out bytes.Buffer
+			err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
+			if err == nil || !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("err=%v, want %q:\n%s", err, tc.want, out.String())
+			}
+		})
+	}
+	h := newRehearseHost() // the default fixture has a town with no rig plugins directory
+	if err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&bytes.Buffer{})); err != nil {
+		t.Errorf("a town whose rigs have no plugins directory failed: %v", err)
 	}
 }
