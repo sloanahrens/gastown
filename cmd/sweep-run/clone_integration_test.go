@@ -54,11 +54,11 @@ func TestIntegrationGitCloneChecksOutTheSHA(t *testing.T) {
 
 // TestIntegrationGitCloneChecksOutACommitOnlyARemoteTrackingRefHolds clones, with
 // the real git, a repository whose only ref to the commit is refs/remotes/origin/main,
-// as the rig's bare repository holds its main. The clone runs over git's transport,
+// as the rig's bare repository holds its main. cloneWith clones over git's transport,
 // which copies only refs/heads/* and tags, so the commit is in no ref the clone
 // takes: a checkout of the sha alone fails there, and cloneWith must fetch the sha
-// by name to check it out. A local clone without --no-local copies the whole object
-// store and hides the failure, so this test forces the transport (gt-2jhtv).
+// by name to check it out. The baseline clones with cloneArgs, the clone production
+// runs, so a clone shape that hides the failure turns the baseline red (gt-2jhtv).
 func TestIntegrationGitCloneChecksOutACommitOnlyARemoteTrackingRefHolds(t *testing.T) {
 	t.Parallel()
 	repo := t.TempDir()
@@ -76,7 +76,7 @@ func TestIntegrationGitCloneChecksOutACommitOnlyARemoteTrackingRefHolds(t *testi
 
 	// The bug on this fixture: the clone alone cannot check the commit out.
 	plain := filepath.Join(t.TempDir(), "plain")
-	if code, out := runGitOverTransport("", "clone", "--quiet", repo, plain); code != 0 {
+	if code, out := runGit("", cloneArgs(repo, plain)...); code != 0 {
 		t.Fatalf("plain clone: exit %d: %s", code, out)
 	}
 	code, out := runGit(plain, "checkout", "--detach", want)
@@ -88,7 +88,7 @@ func TestIntegrationGitCloneChecksOutACommitOnlyARemoteTrackingRefHolds(t *testi
 	}
 
 	work := filepath.Join(t.TempDir(), "work")
-	if err := cloneWith(runGitOverTransport, repo, want, work); err != nil {
+	if err := cloneWith(runGit, repo, want, work); err != nil {
 		t.Fatalf("cloneWith of a commit only refs/remotes/origin/main holds: %v", err)
 	}
 	if got := strings.TrimSpace(runGitIn(t, work, "rev-parse", "HEAD")); got != want {
@@ -124,16 +124,6 @@ func TestIntegrationGitCloneReadsARepositoryWhoseQuotedPathNeedsTheShell(t *test
 	if got := strings.TrimSpace(runGitIn(t, work, "rev-parse", "HEAD")); got != want {
 		t.Errorf("checked out %s, want %s", got, want)
 	}
-}
-
-// runGitOverTransport is runGit with a clone forced onto git's transport: the
-// --no-local flag stops the local copy of the object store, which is the path that
-// hides a commit held only by a non-heads ref.
-func runGitOverTransport(dir string, args ...string) (int, string) {
-	if len(args) > 0 && args[0] == "clone" {
-		args = append([]string{"clone", "--no-local"}, args[1:]...)
-	}
-	return runGit(dir, args...)
 }
 
 // runGitIn runs one git command in dir and returns its output, failing the test

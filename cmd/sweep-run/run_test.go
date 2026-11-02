@@ -418,8 +418,8 @@ func TestRunKeepsTheResultWhenCleanupFails(t *testing.T) {
 }
 
 // TestCloneWithReportsGitFailures: the clone the result records is the one this
-// file builds (safe.directory for the read-only mount on the upload-pack process, no hard
-// links, the sha fetched from origin, a detached checkout), and a step that fails is the error
+// file builds (safe.directory for the read-only mount on the upload-pack process, a
+// transport clone, the sha fetched from origin, a detached checkout), and a step that fails is the error
 // the run reports rather than a tree the sweep would test at the wrong commit.
 func TestCloneWithReportsGitFailures(t *testing.T) {
 	t.Parallel()
@@ -470,7 +470,7 @@ func TestCloneWithReportsGitFailures(t *testing.T) {
 			if len(calls) != tc.calls {
 				t.Fatalf("git ran %d times, want %d: %q", len(calls), tc.calls, calls)
 			}
-			if got, want := strings.Join(calls[0], " "), "clone --no-hardlinks --upload-pack git -c safe.directory='/repo.git' upload-pack /repo.git /work"; got != want {
+			if got, want := strings.Join(calls[0], " "), "clone --no-local --upload-pack git -c safe.directory='/repo.git' upload-pack /repo.git /work"; got != want {
 				t.Errorf("clone ran %q, want %q", got, want)
 			}
 			if tc.calls > 2 {
@@ -504,7 +504,7 @@ func TestCloneFetchesTheShaAfterTheCloneAndBeforeTheCheckout(t *testing.T) {
 		t.Fatalf("git ran %d times, want 3 (clone, fetch, checkout): %q", len(calls), calls)
 	}
 	wantArgs := []string{
-		"clone --no-hardlinks --upload-pack git -c safe.directory='/repo.git' upload-pack /repo.git /work",
+		"clone --no-local --upload-pack git -c safe.directory='/repo.git' upload-pack /repo.git /work",
 		"fetch --upload-pack git -c safe.directory='/repo.git' upload-pack origin -- " + testSHA,
 		"checkout --detach " + testSHA,
 	}
@@ -523,14 +523,17 @@ func TestCloneFetchesTheShaAfterTheCloneAndBeforeTheCheckout(t *testing.T) {
 	}
 }
 
-// TestCloneRefusesANonHexSHABeforeAnyGitCall: a sha that is not 40 lower-case hex
-// digits never reaches git's argv, so no git step runs for it.
+// TestCloneRefusesANonHexSHABeforeAnyGitCall: a sha that is neither 40 nor 64
+// lower-case hex digits never reaches git's argv, so no git step runs for it.
 func TestCloneRefusesANonHexSHABeforeAnyGitCall(t *testing.T) {
 	t.Parallel()
 	cases := []struct{ name, sha string }{
 		{"short", testSHA[:39]},
+		{"one digit over SHA-1", testSHA + "0"},
+		{"between the two lengths", strings.Repeat("a", 50)},
 		{"upper case", strings.ToUpper(testSHA)},
 		{"not hex", strings.Repeat("g", 40)},
+		{"SHA-256 length, not hex", strings.Repeat("g", 64)},
 		{"flag-like", "--upload-pack=touch x"},
 		{"with a space", testSHA + " HEAD"},
 	}
@@ -543,7 +546,7 @@ func TestCloneRefusesANonHexSHABeforeAnyGitCall(t *testing.T) {
 				return 0, ""
 			}
 			err := cloneWith(run, "/repo.git", tc.sha, "/work")
-			if err == nil || !strings.Contains(err.Error(), "is not 40 lower-case hex digits") {
+			if err == nil || !strings.Contains(err.Error(), "is not 40 or 64 lower-case hex digits") {
 				t.Fatalf("error = %v, want the refusal for %q", err, tc.sha)
 			}
 			if calls != 0 {
@@ -1055,6 +1058,27 @@ func equal(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+// TestCloneAcceptsAFullSHA256ObjectName: a 64-digit lower-case hex name is a full
+// object name git prints, so it passes the check and reaches the fetch and checkout.
+func TestCloneAcceptsAFullSHA256ObjectName(t *testing.T) {
+	t.Parallel()
+	sha256 := strings.Repeat("ab", 32)
+	var calls [][]string
+	run := func(_ string, args ...string) (int, string) {
+		calls = append(calls, args)
+		return 0, ""
+	}
+	if err := cloneWith(run, "/repo.git", sha256, "/work"); err != nil {
+		t.Fatalf("cloneWith of a SHA-256 name: %v", err)
+	}
+	if len(calls) != 3 {
+		t.Fatalf("git ran %d times, want 3 (clone, fetch, checkout): %q", len(calls), calls)
+	}
+	if got, want := strings.Join(calls[2], " "), "checkout --detach "+sha256; got != want {
+		t.Errorf("checkout ran %q, want %q", got, want)
+	}
 }
 
 // TestCloneTrustsOnlyTheGivenRepositoryOnTheUploadPackProcess: the exception for a
