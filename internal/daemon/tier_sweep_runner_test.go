@@ -502,13 +502,22 @@ func TestTierSweepShellStageGoesToTheRunnerWhenEnabled(t *testing.T) {
 				if !st.shell {
 					return tierSweepStageResult{output: otherTiers, exitCode: 0, ran: true}
 				}
-				if !tc.wantOffHost {
-					return tierSweepStageResult{output: hostShell, exitCode: 0, ran: true}
+				// Which branch the stage takes is the production dispatch's
+				// call, not this test's expectation: only the host step's
+				// execution is stubbed below, because a unit test starts no
+				// process.
+				if _, offHost, err := d.tierSweepRunnerSpec(st); err != nil || offHost {
+					return d.tierSweepRunStage(ctx, dir, st)
 				}
-				return d.tierSweepRunStage(ctx, dir, st)
+				return tierSweepStageResult{output: hostShell, exitCode: 0, ran: true}
 			}
 
-			shellStage := tierSweepStages("gastown")[0]
+			stages := tierSweepStages("gastown")
+			shellIdx := slices.IndexFunc(stages, func(st tierSweepStage) bool { return st.shell })
+			if shellIdx < 0 {
+				t.Fatal("tierSweepStages has no stage with shell set")
+			}
+			shellStage := stages[shellIdx]
 			shellStage.tested = runnerTestSHA
 			_, offHost, err := d.tierSweepRunnerSpec(shellStage)
 			if err != nil {
