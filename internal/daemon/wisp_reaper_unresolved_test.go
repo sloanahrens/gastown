@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beadsql"
+	"github.com/steveyegge/gastown/internal/reaper"
 )
 
 // TestWispReaperUnresolvedDatabaseStaysLoud drives two cycles over one
@@ -35,40 +36,44 @@ func TestWispReaperUnresolvedDatabaseStaysLoud(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(beadsRig, "metadata.json"), []byte(`{"dolt_database":"beads_db"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	var reaped []string
-	p.d.reaperOpenDBFn = func(dbName string, _, _ time.Duration) (*beadsql.DB, error) {
-		return openEmptySweepDB(t, func(query string) {
-			// The molecule-step SELECT is the reap step's own query, so seeing
-			// it means the sweep got as far as reaping this database.
-			if strings.Contains(query, "closed_molecule_step") {
-				reaped = append(reaped, dbName)
-			}
-		}), nil
+	p.d.reaperOpenDBFn = func(string, time.Duration, time.Duration) (*beadsql.DB, error) {
+		return openEmptySweepDB(t), nil
+	}
+	// A database the sweep can write to resolves a bd writer; ghost_db resolves
+	// none, which is the no-beads-directory failure under test. Recording the
+	// production resolution watches for a sweep that stopped before reaching
+	// the resolvable database without reading either database's query text.
+	var swept []string
+	p.d.reaperWriterForFn = func(townRoot, dbName string) (reaper.Writer, error) {
+		w, err := reaper.WriterForDatabase(townRoot, dbName)
+		if err != nil {
+			return nil, err
+		}
+		swept = append(swept, dbName)
+		return w, nil
 	}
 
 	// The unresolved database is swept first, so a pass that gave up at the
 	// first failure would never reach beads_db.
+	var cycleLogs []string
 	for i := 0; i < 2; i++ {
+		start := p.log.Len()
 		p.d.reapWispsInline(&WispReaperConfig{Databases: []string{"ghost_db", "beads_db"}}, 0, 0, 0,
 			p.d.startDogCycle("wisp_reaper"))
+		// What the log grew by while this cycle ran is this cycle's section.
+		cycleLogs = append(cycleLogs, p.log.String()[start:])
 	}
 
-	// "cycle complete" ends each cycle's section of the log, so a section is
-	// what one cycle said.
-	sections := strings.Split(p.log.String(), "cycle complete")
-	if len(sections) < 3 {
-		t.Fatalf("the log carries %d cycle sections, want 2: %q", len(sections)-1, p.log.String())
-	}
-	for i := 0; i < 2; i++ {
-		if !strings.Contains(sections[i], "no beads directory") || !strings.Contains(sections[i], "ghost_db") {
-			t.Errorf("cycle %d log = %q, want the no-beads-directory error for the unresolved database", i+1, sections[i])
+	for i, cycleLog := range cycleLogs {
+		if !strings.Contains(cycleLog, "no beads directory") || !strings.Contains(cycleLog, "ghost_db") {
+			t.Errorf("cycle %d log = %q, want the no-beads-directory error for the unresolved database", i+1, cycleLog)
 		}
-		if strings.Contains(sections[i], "beads_db: reap error") || strings.Contains(sections[i], "beads_db: connect error") {
-			t.Errorf("cycle %d log = %q, want the resolvable database reaped without an error", i+1, sections[i])
+		if strings.Contains(cycleLog, "beads_db: reap error") || strings.Contains(cycleLog, "beads_db: connect error") {
+			t.Errorf("cycle %d log = %q, want the resolvable database reaped without an error", i+1, cycleLog)
 		}
 	}
-	if !slices.Contains(reaped, "beads_db") {
-		t.Errorf("the unresolvable database stopped the sweep before beads_db was reaped: reaped %v", reaped)
+	if !slices.Contains(swept, "beads_db") {
+		t.Errorf("the unresolvable database stopped the sweep before beads_db was reached: swept %v", swept)
 	}
 }
 
@@ -82,7 +87,7 @@ func TestWispReaperRefusesAnUnusableExtraBeadsRoot(t *testing.T) {
 	opened := false
 	p.d.reaperOpenDBFn = func(string, time.Duration, time.Duration) (*beadsql.DB, error) {
 		opened = true
-		return openEmptySweepDB(t, nil), nil
+		return openEmptySweepDB(t), nil
 	}
 
 	p.d.reapWispsInline(&WispReaperConfig{
@@ -105,11 +110,10 @@ func TestWispReaperRefusesAnUnusableExtraBeadsRoot(t *testing.T) {
 // HasReaperSchema asks the way a beads database does and returns no rows for
 // everything else, so a whole sweep runs over it without a Dolt server. It
 // refuses every Exec: the reaper reads with SQL and writes only through bd.
-// onQuery, when set, sees each query the sweep issues.
-func openEmptySweepDB(t *testing.T, onQuery func(query string)) *beadsql.DB {
+func openEmptySweepDB(t *testing.T) *beadsql.DB {
 	t.Helper()
 	driverName := fmt.Sprintf("fake_empty_sweep_%d", atomic.AddUint64(&emptySweepDriverID, 1))
-	sql.Register(driverName, &emptySweepDriver{onQuery: onQuery})
+	sql.Register(driverName, &emptySweepDriver{})
 	raw, err := sql.Open(driverName, "")
 	if err != nil {
 		t.Fatalf("open empty sweep db: %v", err)
@@ -123,13 +127,13 @@ func openEmptySweepDB(t *testing.T, onQuery func(query string)) *beadsql.DB {
 
 var emptySweepDriverID uint64
 
-type emptySweepDriver struct{ onQuery func(string) }
+type emptySweepDriver struct{}
 
-func (d *emptySweepDriver) Open(string) (driver.Conn, error) {
-	return emptySweepConn{onQuery: d.onQuery}, nil
+func (*emptySweepDriver) Open(string) (driver.Conn, error) {
+	return emptySweepConn{}, nil
 }
 
-type emptySweepConn struct{ onQuery func(string) }
+type emptySweepConn struct{}
 
 func (emptySweepConn) Prepare(string) (driver.Stmt, error) {
 	return nil, fmt.Errorf("prepare not implemented")
@@ -139,10 +143,7 @@ func (emptySweepConn) Begin() (driver.Tx, error) { return emptySweepTx{}, nil }
 
 func (emptySweepConn) CheckNamedValue(*driver.NamedValue) error { return nil }
 
-func (c emptySweepConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
-	if c.onQuery != nil {
-		c.onQuery(query)
-	}
+func (emptySweepConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
 	normalized := strings.Join(strings.Fields(strings.ToUpper(query)), " ")
 	switch {
 	case query == beadsql.SchemaLevelQuery:
