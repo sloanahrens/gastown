@@ -130,6 +130,15 @@ const (
 	// enough that two names a plain cut would run together stay apart.
 	nameDigestLength = 12
 
+	// jobNameHead is how much of a name the renderer keeps before the digest
+	// when it cuts one for length: the cut leaves room for a dash and the
+	// digest.
+	jobNameHead = maxNameLength - 1 - nameDigestLength
+
+	// shortSHALength is how much of the commit's sha a name carries: enough to
+	// tell two runs apart, short enough to leave the run id its room.
+	shortSHALength = 8
+
 	// partDigestLength is how much of a sanitized name part's digest the name
 	// carries: enough that two ids a label cannot tell apart stay apart.
 	partDigestLength = 8
@@ -318,9 +327,10 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 			// mounts it read-only while the sweep runs: rewriting it under an
 			// active run replaces the repository that run is still reading. The
 			// listing takes every Job, because an unlabelled run still reads the
-			// claim; the names decide which Jobs are this rig's.
+			// claim; the names decide which Jobs are this rig's, by the structure
+			// the Job renderer gives them.
 			Step:   Step{Argv: kubectlArgv(spec, "get", "jobs", "-o", syncJobsJSONPath)},
-			Refuse: refuseActiveSweepJobs(sweepJobPrefix(spec.Rig)),
+			Refuse: refuseActiveSweepJobs(spec),
 		}},
 		Apply: []Step{
 			// The repo claim is created before the sync pod mounts it, and stays
@@ -647,16 +657,98 @@ func jobLabels(spec Spec) map[string]string {
 	return map[string]string{sweepJobLabel: sweepJobValue, rigLabelKey: rigLabelValue(spec.Rig)}
 }
 
-// sweepJobPrefix is the name prefix every sweep Job of rig carries, which the
-// guard matches so an unlabelled run is still found. A rig long enough to push
-// the prefix past the cut is cut to the same head in every run of the rig.
-func sweepJobPrefix(rig string) string {
-	prefix := k8sPart("gt-sweep") + "-" + k8sPart(rig) + "-"
-	// k8sName cuts a long name to this many characters before its digest.
-	if head := maxNameLength - 1 - nameDigestLength; len(prefix) > head {
-		return strings.TrimRight(prefix[:head], "-")
+// sweepJobStem is the part of a sweep Job's name every run of the rig shares:
+// the name the renderer makes for spec, without the run-specific short sha and
+// run id. A name the renderer cut for length carries a digest of the whole name
+// in their place, so there is none to cut off and the stem is the rig's own
+// head of the name.
+func sweepJobStem(spec Spec) string {
+	name := JobName(spec)
+	tail := "-" + k8sPart(shortSHA(spec.SHA)) + "-" + k8sPart(spec.RunID)
+	if stem, ok := strings.CutSuffix(name, tail); ok {
+		return stem
 	}
-	return prefix
+	return k8sPart("gt-sweep") + "-" + k8sPart(spec.Rig)
+}
+
+// sweepJobSelector returns the test the guard applies to a listed Job's name: it
+// reports whether the name is one the renderer makes for spec's rig. The
+// renderer names a Job "<stem>-<short sha>-<run id>", so a name belongs when
+// the segment after the stem is a run's short sha. A rig whose name extends
+// this one's — "gastown-x" beside "gastown" — contributes "x" there and is not
+// counted, whichever of the two is being run. A rig whose own name continues
+// with eight hex digits reads as this rig's short sha: the names cannot tell
+// those apart, and counting both refuses a run rather than let it rewrite the
+// claim under a sweep.
+//
+// A name the renderer cut for length keeps that part only as far as the cut,
+// so the test reads the kept prefix instead.
+func sweepJobSelector(spec Spec) func(string) bool {
+	stem := sweepJobStem(spec)
+	// A stem this long fills the head the renderer keeps before the short sha
+	// starts, leaving no run part to read.
+	if len(stem) >= jobNameHead-1 {
+		head := stem
+		if len(head) > jobNameHead {
+			head = strings.TrimRight(head[:jobNameHead], "-")
+		}
+		// The kept head is all a cut name of this rig can share; a longer rig
+		// that shares it is refused too, which only leaves the claim alone.
+		return func(name string) bool { return strings.HasPrefix(name, head+"-") }
+	}
+	return func(name string) bool {
+		tail, ok := strings.CutPrefix(name, stem+"-")
+		return ok && isJobRunTail(tail)
+	}
+}
+
+// isJobRunTail reports whether tail is what the renderer appends after a rig's
+// stem: a run's short sha and run id, or the part of them a cut for length kept
+// ahead of the digest the cut appends.
+func isJobRunTail(tail string) bool {
+	if len(tail) > nameDigestLength && tail[len(tail)-nameDigestLength-1] == '-' &&
+		isHex(tail[len(tail)-nameDigestLength:]) &&
+		isRunTailPrefix(tail[:len(tail)-nameDigestLength-1]) {
+		return true
+	}
+	return isRunTailPrefix(tail)
+}
+
+// isRunTailPrefix reports whether s is a prefix of a run tail, the run's short
+// sha and run id the renderer appends after the rig's stem.
+func isRunTailPrefix(s string) bool {
+	sha, rest, ok := strings.Cut(s, "-")
+	if !ok {
+		return len(sha) <= shortSHALength && isHex(sha)
+	}
+	return len(sha) == shortSHALength && isHex(sha) && isNamePartChars(rest)
+}
+
+// isHex reports whether s holds only lower-case hex digits, as the short sha a
+// name carries and the digest a cut appends do.
+func isHex(s string) bool {
+	for _, r := range s {
+		if !isHexDigit(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// isHexDigit reports whether r is one lower-case hex digit.
+func isHexDigit(r rune) bool {
+	return r >= '0' && r <= '9' || r >= 'a' && r <= 'f'
+}
+
+// isNamePartChars reports whether s holds only the characters one part of a
+// rendered name carries: lower-case letters, digits and dashes.
+func isNamePartChars(s string) bool {
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // runLabelSelector selects the sync pod a run created.
@@ -685,17 +777,20 @@ func labelValue(v string) string {
 }
 
 // refuseActiveSweepJobs reads the guard's listing of every Job — one
-// "<name> <true condition>..." line each — and refuses while a Job whose name
-// carries this rig's prefix has not ended: that Job may still be reading the
-// repo claim this run is about to rewrite. A Job has ended when any true
-// condition is Complete or Failed, whatever other conditions the cluster lists
-// beside it and in whatever order; a line naming no such condition refuses,
-// because a Job whose state is unknown is not a Job known to have ended.
-func refuseActiveSweepJobs(prefix string) func(stdout []byte) error {
+// "<name> <true condition>..." line each — and refuses while a Job the renderer
+// made for spec's rig has not ended: that Job may still be reading the repo
+// claim this run is about to rewrite. A name belongs to the rig when the
+// renderer's structure says so, so a rig whose name extends this one's is not
+// counted by the shorter one. A Job has ended when any true condition is
+// Complete or Failed, whatever other conditions the cluster lists beside it and
+// in whatever order; a line naming no such condition refuses, because a Job
+// whose state is unknown is not a Job known to have ended.
+func refuseActiveSweepJobs(spec Spec) func(stdout []byte) error {
+	selector := sweepJobSelector(spec)
 	return func(stdout []byte) error {
 		for _, line := range strings.Split(string(stdout), "\n") {
 			fields := strings.Fields(line)
-			if len(fields) == 0 || !strings.HasPrefix(fields[0], prefix) {
+			if len(fields) == 0 || !selector(fields[0]) {
 				continue
 			}
 			if hasEndedCondition(fields[1:]) {
@@ -775,14 +870,14 @@ func partDigest(v string) string {
 	return hex.EncodeToString(sum[:])[:partDigestLength]
 }
 
-// shortSHA is the sha's first eight characters, or all of a sha too short to
-// cut: a name built from it must not panic on a Spec that has not been
+// shortSHA is the sha's first shortSHALength characters, or all of a sha too
+// short to cut: a name built from it must not panic on a Spec that has not been
 // validated yet.
 func shortSHA(sha string) string {
-	if len(sha) < 8 {
+	if len(sha) < shortSHALength {
 		return sha
 	}
-	return sha[:8]
+	return sha[:shortSHALength]
 }
 
 // int32Ptr returns a pointer to v, for the fields a Job's absent value differs

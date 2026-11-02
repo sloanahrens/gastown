@@ -533,8 +533,8 @@ func TestSyncGuardReadsConditionsNotCount(t *testing.T) {
 	if slices.Contains(guard.Step.Argv, "-l") {
 		t.Errorf("the guard runs %v, want an unlabelled listing: a run that lost its labels still reads the claim", guard.Step.Argv)
 	}
-	if want := sweepJobPrefix(spec.Rig); !strings.HasPrefix("gt-sweep-gastown-deadbeef-run", want) {
-		t.Errorf("the guard's prefix %q does not match a Job's name %q", want, "gt-sweep-gastown-deadbeef-run")
+	if selector := sweepJobSelector(spec); !selector(plan.Job.Metadata.Name) {
+		t.Errorf("the guard's selector does not count the Job name the renderer made, %q", plan.Job.Metadata.Name)
 	}
 
 	for _, tc := range []struct {
@@ -579,6 +579,162 @@ func TestSyncGuardReadsConditionsNotCount(t *testing.T) {
 	if want := "find " + RepoMount + " -mindepth 1 -delete"; !strings.HasPrefix(command[2], want) {
 		t.Errorf("the sync pod's script is %q, want it to start by clearing the claim with %q so no stale object survives the copy", command[2], want)
 	}
+}
+
+// TestSyncGuardIgnoresAnotherRigWhoseNameExtendsThisOne holds the guard to the
+// rig that rendered the Job: "gastown-x" beside "gastown" makes Job names that
+// start with "gt-sweep-gastown-", so a plain prefix match made the gastown run
+// refuse on a gastown-x sweep's Job. The Job's own rendered name is the listing
+// line, so the match is read from the name the renderer makes, not a literal.
+func TestSyncGuardIgnoresAnotherRigWhoseNameExtendsThisOne(t *testing.T) {
+	t.Parallel()
+	short := goldenSpec()
+	extended := goldenSpec()
+	extended.Rig = short.Rig + "-x"
+
+	shortPlan, err := Kubernetes{}.Render(short)
+	if err != nil {
+		t.Fatalf("rendering rig %q: %v", short.Rig, err)
+	}
+	extendedPlan, err := Kubernetes{}.Render(extended)
+	if err != nil {
+		t.Fatalf("rendering rig %q: %v", extended.Rig, err)
+	}
+	shortJob := shortPlan.Job.Metadata.Name
+	extendedJob := extendedPlan.Job.Metadata.Name
+
+	if err := shortPlan.Guards[0].Refuse([]byte(extendedJob + "\n")); err != nil {
+		t.Errorf("the guard for rig %q refused on the running Job %q of rig %q: %v", short.Rig, extendedJob, extended.Rig, err)
+	}
+	if err := extendedPlan.Guards[0].Refuse([]byte(extendedJob + "\n")); err == nil || !strings.Contains(err.Error(), extendedJob) {
+		t.Errorf("the guard for rig %q on its own running Job %q = %v, want it refused and named", extended.Rig, extendedJob, err)
+	}
+	if err := shortPlan.Guards[0].Refuse([]byte(shortJob + "\n")); err == nil || !strings.Contains(err.Error(), shortJob) {
+		t.Errorf("the guard for rig %q on its own running Job %q = %v, want it refused and named", short.Rig, shortJob, err)
+	}
+}
+
+// TestSyncGuardSelectorIsBuiltFromTheRenderedJobName holds the guard's match to
+// the name the Job renderer makes: the run being rendered is counted, another
+// run of the same rig is counted by its own rendered name, and a rig the
+// renderer sanitises is matched by the name it rendered rather than the rig as
+// written.
+func TestSyncGuardSelectorIsBuiltFromTheRenderedJobName(t *testing.T) {
+	t.Parallel()
+	spec := goldenSpec()
+	plan, err := Kubernetes{}.Render(spec)
+	if err != nil {
+		t.Fatalf("rendering the golden spec: %v", err)
+	}
+	rendered := plan.Job.Metadata.Name
+	if stem := sweepJobStem(spec); !strings.HasPrefix(rendered, stem+"-") {
+		t.Errorf("the guard's stem %q is not the head of the Job name the renderer made, %q: the stem must come from the rendered name", stem, rendered)
+	}
+	if err := plan.Guards[0].Refuse([]byte(rendered + "\n")); err == nil || !strings.Contains(err.Error(), rendered) {
+		t.Errorf("the guard on the rendered Job name %q = %v, want it refused as this rig's running Job", rendered, err)
+	}
+
+	other := spec
+	other.SHA = strings.Repeat("ab", 20)
+	other.RunID = "another-run"
+	otherPlan, err := Kubernetes{}.Render(other)
+	if err != nil {
+		t.Fatalf("rendering a second run of the rig: %v", err)
+	}
+	otherRendered := otherPlan.Job.Metadata.Name
+	if otherRendered == rendered {
+		t.Fatalf("two runs of the rig render the same Job name %q", otherRendered)
+	}
+	if err := plan.Guards[0].Refuse([]byte(otherRendered + "\n")); err == nil || !strings.Contains(err.Error(), otherRendered) {
+		t.Errorf("the guard on another run's rendered name %q = %v, want it refused: every run of the rig reads the one repo claim", otherRendered, err)
+	}
+
+	t.Run("a rig the renderer sanitises", func(t *testing.T) {
+		t.Parallel()
+		sanitised := goldenSpec()
+		sanitised.Rig = "Gastown"
+		sanitisedPlan, err := Kubernetes{}.Render(sanitised)
+		if err != nil {
+			t.Fatalf("rendering rig %q: %v", sanitised.Rig, err)
+		}
+		name := sanitisedPlan.Job.Metadata.Name
+		if stem := sweepJobStem(sanitised); !strings.HasPrefix(name, stem+"-") {
+			t.Errorf("the guard's stem %q is not the head of the Job name the renderer made for rig %q, %q: a stem built from the rig as written would miss it", stem, sanitised.Rig, name)
+		}
+		if err := sanitisedPlan.Guards[0].Refuse([]byte(name + "\n")); err == nil || !strings.Contains(err.Error(), name) {
+			t.Errorf("the guard on %q, the name the renderer made for rig %q, = %v, want it refused", name, sanitised.Rig, err)
+		}
+	})
+}
+
+// TestSyncGuardMatchesTruncatedJobNames holds the guard to names the renderer
+// cut for length: a long rig, a cut that lands inside the short sha, or a long
+// run id leaves the name ending in a digest. A running Job there is still one of
+// the rig's and must refuse the run, or the sync rewrites the repo claim under
+// it.
+func TestSyncGuardMatchesTruncatedJobNames(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		rig   string
+		runID string
+	}{
+		{name: "a rig that fills the cut", rig: strings.Repeat("rig", 15), runID: "mvv8asko"},
+		{name: "a cut inside the short sha", rig: strings.Repeat("rig", 12), runID: "mvv8asko-run"},
+		{name: "a run id that overflows the name", rig: "gastown", runID: strings.Repeat("run", 25)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec := goldenSpec()
+			spec.Rig, spec.RunID = tc.rig, tc.runID
+			plan, err := Kubernetes{}.Render(spec)
+			if err != nil {
+				t.Fatalf("rendering rig %q with run id %q: %v", spec.Rig, spec.RunID, err)
+			}
+			name := plan.Job.Metadata.Name
+			if len(name) != maxNameLength {
+				t.Fatalf("the rendered Job name %q is %d characters, want a name cut to %d: this test covers the cut names", name, len(name), maxNameLength)
+			}
+			if err := plan.Guards[0].Refuse([]byte(name + "\n")); err == nil || !strings.Contains(err.Error(), name) {
+				t.Errorf("the guard on the cut Job name %q = %v, want it refused as this rig's running Job", name, err)
+			}
+
+			other := spec
+			other.SHA = strings.Repeat("ab", 20)
+			other.RunID += "x"
+			otherPlan, err := Kubernetes{}.Render(other)
+			if err != nil {
+				t.Fatalf("rendering a second run of the rig: %v", err)
+			}
+			otherName := otherPlan.Job.Metadata.Name
+			if err := plan.Guards[0].Refuse([]byte(otherName + "\n")); err == nil || !strings.Contains(err.Error(), otherName) {
+				t.Errorf("the guard on another run's cut name %q = %v, want it refused: the cut keeps no run part, so every run's name still counts", otherName, err)
+			}
+		})
+	}
+
+	t.Run("a longer rig whose name is also cut", func(t *testing.T) {
+		t.Parallel()
+		short := goldenSpec()
+		short.Rig, short.RunID = strings.Repeat("rig", 12), "mvv8asko-run"
+		extended := short
+		extended.Rig = short.Rig + "-x"
+		shortPlan, err := Kubernetes{}.Render(short)
+		if err != nil {
+			t.Fatalf("rendering rig %q: %v", short.Rig, err)
+		}
+		extendedPlan, err := Kubernetes{}.Render(extended)
+		if err != nil {
+			t.Fatalf("rendering rig %q: %v", extended.Rig, err)
+		}
+		extendedName := extendedPlan.Job.Metadata.Name
+		if err := shortPlan.Guards[0].Refuse([]byte(extendedName + "\n")); err != nil {
+			t.Errorf("the guard for rig %q refused on the running Job %q of rig %q: %v", short.Rig, extendedName, extended.Rig, err)
+		}
+		if err := extendedPlan.Guards[0].Refuse([]byte(extendedName + "\n")); err == nil || !strings.Contains(err.Error(), extendedName) {
+			t.Errorf("the guard for rig %q on its own running Job %q = %v, want it refused and named", extended.Rig, extendedName, err)
+		}
+	})
 }
 
 // syncPodFromPlan is the sync pod document among the plan's apply steps.
