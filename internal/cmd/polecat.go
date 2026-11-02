@@ -643,6 +643,20 @@ func preloadRigSeats(warn io.Writer, bd *beads.Beads, rigName string) {
 	}
 }
 
+// rigRouteOnTracker reports whether the town's route table puts r on the
+// tracker backend: a rig the tracker service answers, with no bd behind it. It
+// asks by the rig name the route's path starts with — the question
+// beads.RigOnTracker answers for a seat's tracker token — from the town root
+// the seat build already joins its park marker from, since a rig lives directly
+// under it. A town with no route table names no tracker rig.
+//
+// An unreadable route table is an error, never "not the tracker": the caller
+// still preloads, and PreloadBeads reads the same table, so its error reaches
+// the warning writer instead of being turned into a silent verdict.
+func rigRouteOnTracker(r *rig.Rig) (bool, error) {
+	return beads.RigOnTracker(filepath.Dir(r.Path), r.Name)
+}
+
 // buildRigSeats gathers one rig's polecat rows for `gt polecat list`: a seat
 // per known worktree, plus a decided row for any zombie/foreign orphan tmux
 // session, in the same order the listing used to produce them when this was
@@ -659,13 +673,14 @@ func buildRigSeats(r *rig.Rig, sessions polecatSessionSet, spawnWindow time.Dura
 // uses it so the state it prints comes out of the same row builder `gt polecat
 // list` renders, not a second derivation that can disagree (gt-aj7).
 func buildRigSeatsFor(r *rig.Rig, sessions polecatSessionSet, spawnWindow time.Duration, now time.Time, only string) []polecatSeat {
-	return buildRigSeatsOn(beads.New(r.Path), r, sessions, spawnWindow, now, only)
+	return buildRigSeatsOn(os.Stderr, beads.New(r.Path), r, sessions, spawnWindow, now, only)
 }
 
 // buildRigSeatsOn is buildRigSeatsFor reading through bd, the rig's beads
-// wrapper. The build is the same; the caller passes the wrapper in so a test can
-// run every bd call of the build through the wrapper's runner.
-func buildRigSeatsOn(bd *beads.Beads, r *rig.Rig, sessions polecatSessionSet, spawnWindow time.Duration, now time.Time, only string) []polecatSeat {
+// wrapper, and writing its warnings to warn. The build is the same; the caller
+// passes the wrapper in so a test can run every bd call of the build through
+// the wrapper's runner, and the writer in so that test can read the warnings.
+func buildRigSeatsOn(warn io.Writer, bd *beads.Beads, r *rig.Rig, sessions polecatSessionSet, spawnWindow time.Duration, now time.Time, only string) []polecatSeat {
 	// The filesystem read and the session filter are the two cheap facts that
 	// decide whether this rig has anything to report. Both are local (a
 	// directory listing, an in-memory lookup), so they come first: the
@@ -674,7 +689,7 @@ func buildRigSeatsOn(bd *beads.Beads, r *rig.Rig, sessions polecatSessionSet, sp
 	// to build out of any of them (gt-8q0s).
 	polecatNames, err := listPolecatDirectoryNames(r.Path)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to list polecats in %s: %v\n", r.Name, err)
+		fmt.Fprintf(warn, "warning: failed to list polecats in %s: %v\n", r.Name, err)
 		return nil
 	}
 	sessionPolecats := sessions.polecatsForRig(r.Name)
@@ -686,7 +701,15 @@ func buildRigSeatsOn(bd *beads.Beads, r *rig.Rig, sessions polecatSessionSet, sp
 		return nil
 	}
 
-	preloadRigSeats(os.Stderr, bd, r.Name)
+	// A tracker rig has no bd to warm: the tracker answers the per-call seam
+	// reads, and a bd sql preload is refused there, so it would cost one
+	// warning per rig per list and warm nothing. Skip it silently
+	// (gt-p85pw.128). A route table that cannot be read is not a tracker
+	// verdict, so the preload still runs: PreloadBeads reads the same table and
+	// reports its error through the warning below.
+	if onTracker, routeErr := rigRouteOnTracker(r); routeErr != nil || !onTracker {
+		preloadRigSeats(warn, bd, r.Name)
+	}
 
 	// ONE merge-request query per rig, joined per polecat below — never a
 	// `bd show` per polecat (MRs are ephemeral wisps, and the per-id path is
@@ -696,19 +719,19 @@ func buildRigSeatsOn(bd *beads.Beads, r *rig.Rig, sessions polecatSessionSet, sp
 		// The index is empty and every active_mr reads status=unknown
 		// (fail-closed, as before), but say so — a silently unreadable queue
 		// is how the original hardcoded "unknown" hid real state.
-		fmt.Fprintf(os.Stderr, "warning: failed to list merge requests in %s: %v — MR status reported as unknown\n", r.Name, mrErr)
+		fmt.Fprintf(warn, "warning: failed to list merge requests in %s: %v — MR status reported as unknown\n", r.Name, mrErr)
 	}
 
 	agents, agentErr := beads.ListAgentBeads(bd)
 	agentLookupFailed := agentErr != nil
 	if agentLookupFailed {
-		fmt.Fprintf(os.Stderr, "warning: failed to list agent beads in %s: %v — orphan sessions in this rig cannot be confirmed foreign, treating as zombie\n", r.Name, agentErr)
+		fmt.Fprintf(warn, "warning: failed to list agent beads in %s: %v — orphan sessions in this rig cannot be confirmed foreign, treating as zombie\n", r.Name, agentErr)
 		agents = nil
 	}
 	hooks := polecatHookBeads(polecatNames, func(name string) string { return polecatBeadIDForRig(r, r.Name, name) }, agents)
 	activeWork, activeWorkErr := listActivePolecatWorkByName(bd, r.Name, hooks)
 	if activeWorkErr != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to list active polecat work in %s: %v\n", r.Name, activeWorkErr)
+		fmt.Fprintf(warn, "warning: failed to list active polecat work in %s: %v\n", r.Name, activeWorkErr)
 		activeWork = nil
 	}
 
