@@ -57,7 +57,8 @@ func NewNullAssigneeCheck() *NullAssigneeCheck {
 // assignee column is NOT NULL with an empty-string default
 // (tracker/store/schema/0001_core.sql), so no row can carry the NULL this
 // check looks for, and the backend refuses the sql passthrough. The result
-// names each skipped rig instead of reporting OK having read nothing.
+// names each skipped rig instead of reporting OK having read nothing. An
+// unreadable route table is a warning, and every rig is read as before.
 func (c *NullAssigneeCheck) Run(ctx *CheckContext) *CheckResult {
 	c.affected = nil
 
@@ -76,18 +77,16 @@ func (c *NullAssigneeCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 	sort.Strings(rigs)
 
-	trackerRigs, err := trackerRigNames(ctx.TownRoot)
-	if err != nil {
-		// The route table decides which rigs the tracker holds. An unreadable
-		// table must not read as "no tracker rigs": their sql read fails, the
-		// error is dropped, and the check would report OK having read nothing.
-		return &CheckResult{
-			Name:     c.Name(),
-			Status:   StatusWarning,
-			Message:  "cannot read the town routes, so tracker-routed rigs are not skipped",
-			Details:  []string{err.Error()},
-			Category: c.Category(),
-		}
+	trackerRigs, routesErr := trackerRigNames(ctx.TownRoot)
+	routesDetail := ""
+	if routesErr != nil {
+		// The route table names the rigs the tracker holds. Without it every
+		// rig is read as before (a tracker refusal drops out with the other
+		// read errors), and the result says the table could not be read so
+		// the run cannot pass as clean.
+		trackerRigs = nil
+		routesDetail = fmt.Sprintf(
+			"cannot read the town routes, so tracker-routed rigs are not skipped: %v", routesErr)
 	}
 
 	var skipped []string
@@ -108,6 +107,8 @@ func (c *NullAssigneeCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
+	skipDetails := skippedTrackerDetails(skipped)
+
 	if len(c.affected) == 0 {
 		res := &CheckResult{
 			Name:     c.Name(),
@@ -118,25 +119,41 @@ func (c *NullAssigneeCheck) Run(ctx *CheckContext) *CheckResult {
 		if len(skipped) > 0 {
 			res.Message = fmt.Sprintf(
 				"No in_progress beads with NULL assignee found (skipped %d tracker rig(s))", len(skipped))
-			res.Details = skippedTrackerDetails(skipped)
+			res.Details = skipDetails
+		}
+		if routesErr != nil {
+			res.Status = StatusWarning
+			res.Message = "No in_progress beads with NULL assignee found, but the town routes could not be read"
+			res.Details = append([]string{routesDetail}, res.Details...)
 		}
 		return res
 	}
 
-	details := make([]string, 0, len(c.affected)+len(skipped))
+	details := make([]string, 0, len(c.affected)+len(skipDetails)+1)
 	for _, row := range c.affected {
 		details = append(details, fmt.Sprintf("[%s] %s — %s (updated: %s)",
 			row.RigDB, row.ID, shortenTitle(row.Title, 60), row.UpdatedAt))
 	}
-	details = append(details, skippedTrackerDetails(skipped)...)
+	details = append(details, skipDetails...)
+	if routesErr != nil {
+		details = append(details, routesDetail)
+	}
+
+	message := fmt.Sprintf(
+		"%d in_progress bead(s) with NULL assignee — invisible to bd, blocking molecule progress",
+		len(c.affected),
+	)
+	if len(skipped) > 0 {
+		message += fmt.Sprintf(" (skipped %d tracker rig(s))", len(skipped))
+	}
+	if routesErr != nil {
+		message += " (the town routes could not be read)"
+	}
 
 	return &CheckResult{
-		Name:   c.Name(),
-		Status: StatusWarning,
-		Message: fmt.Sprintf(
-			"%d in_progress bead(s) with NULL assignee — invisible to bd, blocking molecule progress",
-			len(c.affected),
-		),
+		Name:     c.Name(),
+		Status:   StatusWarning,
+		Message:  message,
 		Details:  details,
 		FixHint:  "Run 'gt doctor fix null-assignee-steps' to reset to open for re-dispatch",
 		Category: c.Category(),
