@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -36,7 +37,8 @@ if [ "$1" = "version" ]; then
 fi
 if [ "$1" = "show" ]; then
   # bd show prints the issues of the ids it is given, the id in any position
-  # next to --json: one fixture per id, merged into one array.
+  # next to --json: one fixture per id, each the bead's object, wrapped in one
+  # array. The file is copied whole, so its layout does not matter.
   shift
   found=""
   for arg in "$@"; do
@@ -49,7 +51,7 @@ if [ "$1" = "show" ]; then
     for id in $found; do
       [ "$first" = 1 ] || printf ','
       first=0
-      sed -e 's/^\[//' -e 's/\]$//' %s/"$id".json
+      cat %s/"$id".json
     done
     printf ']\n'
     exit 0
@@ -65,12 +67,12 @@ echo '[]'
 	return path
 }
 
-// writeStubBead answers `bd show <id> --json` for one bead: bd prints the
-// issues of the id, so the fixture is a one-element array.
+// writeStubBead answers `bd show <id> --json` for one bead: the fixture is the
+// bead's object, and the stub wraps it in the array bd prints.
 func writeStubBead(t *testing.T, fixtures, id string, fields map[string]any) {
 	t.Helper()
 	fields["id"] = id
-	data, err := json.Marshal([]map[string]any{fields})
+	data, err := json.Marshal(fields)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,6 +90,33 @@ func stubCalls(t *testing.T, logPath string) []string {
 		t.Fatalf("reading the bd stub's log: %v", err)
 	}
 	return strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+}
+
+// TestIntegrationRiskAuditBDStubShowsMultiLineFixture guards the stub's show
+// path against a fixture that spans lines (om finding 923498dfe154): bd prints
+// a JSON array of the beads it was given, whatever the layout of each file.
+func TestIntegrationRiskAuditBDStubShowsMultiLineFixture(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the bd stub is a POSIX shell script")
+	}
+	fixtures := t.TempDir()
+	const multiLine = "{\n  \"id\": \"tr-abc\",\n  \"labels\": [\n    \"om-followup\"\n  ]\n}\n"
+	if err := os.WriteFile(filepath.Join(fixtures, "tr-abc.json"), []byte(multiLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bdPath := writeRiskAuditBDStub(t, t.TempDir(), filepath.Join(t.TempDir(), "bd-calls"), fixtures)
+
+	out, err := exec.Command(bdPath, "show", "tr-abc", "--json").Output()
+	if err != nil {
+		t.Fatalf("bd show: %v", err)
+	}
+	var beads []map[string]any
+	if err := json.Unmarshal(out, &beads); err != nil {
+		t.Fatalf("bd show did not print a JSON array: %v", err)
+	}
+	if len(beads) != 1 || beads[0]["id"] != "tr-abc" {
+		t.Fatalf("bd show printed %d beads, want the one bead tr-abc", len(beads))
+	}
 }
 
 // TestIntegrationAttentionRiskAuditWritesTheAuditedLine is the wiring guard for
