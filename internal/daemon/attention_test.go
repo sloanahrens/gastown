@@ -1780,6 +1780,41 @@ func TestAttentionRiskPathKeepsItemsWhenTheReadFails(t *testing.T) {
 	}
 }
 
+// gt-hkldq: the starved tiers are their own collector, so a record that will
+// not read carries the starved items forward rather than clearing them with
+// the RED ones the other collector keeps.
+func TestAttentionStarvedTierKeepsItemsWhenTheReadFails(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	f.src.tierSweepRigs = func() []string { return []string{attentionRig} }
+	f.src.tierSweep = func(string) (tierSweepState, error) {
+		return tierSweepState{}, errors.New("record unreadable")
+	}
+	prev := attention.State{Updated: now, Items: []attention.Item{{
+		Key: "sweep-starved:gastown:race", Kind: attention.KindTierSweepStarved,
+		Severity: attention.SeverityLow, Rig: attentionRig, Summary: "race starved",
+	}}}
+	collectors := []attentionCollector{{kind: attention.KindTierSweepStarved, collect: f.src.collectTierSweepStarved}}
+	observed := collectAttention(context.Background(), prev, collectors, func(string, ...any) {})
+	if len(observed) != 1 || observed[0].Key != "sweep-starved:gastown:race" {
+		t.Fatalf("observed = %+v, want the previous starved item kept", observed)
+	}
+}
+
+// gt-hkldq: the starved collector stops on a cancelled tick rather than
+// reading a record nobody is left to see.
+func TestCollectTierSweepStarvedStopsOnACancelledTick(t *testing.T) {
+	t.Parallel()
+	f := newAttentionFixture(t, time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC))
+	f.src.tierSweepRigs = func() []string { return []string{attentionRig} }
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := f.src.collectTierSweepStarved(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
 // gt-pqpq8: one failed bd show skips that bead alone. The landing whose read
 // failed keeps the item it had, a bead that reads back with a PASS for its head
 // raises nothing, and the collector returns no error, so the kind is not carried
@@ -2054,6 +2089,38 @@ func TestCollectTierSweepRed_RaisesTheRedTiersAndClearsOnGreen(t *testing.T) {
 	st = f.tick(t, now.Add(time.Minute))
 	if _, ok := attention.Find(st, "sweep:gastown:shell"); ok {
 		t.Errorf("items = %+v, want the shell item cleared", st.Items)
+	}
+}
+
+// gt-hkldq: a starved tier is not a red one. The tick raises it through its
+// own collector, at its own kind and low severity, so the queue does not read a
+// tier nobody measured as a tier that failed.
+func TestAttentionTickRaisesAStarvedTierApartFromRed(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 15, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	f.src.tierSweepRigs = func() []string { return []string{attentionRig} }
+	f.src.tierSweep = func(string) (tierSweepState, error) {
+		return tierSweepState{
+			Tiers:   map[string]tierSweepTierResult{"race": {Verdict: tierSweepRed, SHA: "abc123"}},
+			Starved: map[string]int{"race": tierSweepStarvedAlertAfter},
+		}, nil
+	}
+
+	st := f.tick(t, now)
+	red, ok := attention.Find(st, "sweep:gastown:race")
+	if !ok {
+		t.Fatalf("items = %+v, want sweep:gastown:race", st.Items)
+	}
+	if red.Kind != attention.KindTierSweepRed || red.Severity != attention.SeverityHigh {
+		t.Errorf("red item = %+v, want the sweep's RED kind at high severity", red)
+	}
+	starved, ok := attention.Find(st, "sweep-starved:gastown:race")
+	if !ok {
+		t.Fatalf("items = %+v, want sweep-starved:gastown:race", st.Items)
+	}
+	if starved.Kind != attention.KindTierSweepStarved || starved.Severity != attention.SeverityLow {
+		t.Errorf("starved item = %+v, want the starved kind at low severity", starved)
 	}
 }
 

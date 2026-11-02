@@ -44,6 +44,9 @@ const (
 	KindBDSlow Kind = "bd-slow"
 	// KindTierSweepRed: the hourly tier sweep failed.
 	KindTierSweepRed Kind = "tier-sweep-red"
+	// KindTierSweepStarved: a tier the schedule names has not been judged for
+	// several cycles in a row, so its last verdict is stale (gt-r2e0h).
+	KindTierSweepStarved Kind = "tier-sweep-starved"
 	// KindRevertRefused: gt done refused a branch as a revert.
 	KindRevertRefused Kind = "revert-refused"
 	// KindBlockedMail: a polecat reported itself BLOCKED by mail.
@@ -95,6 +98,7 @@ func Kinds() []Kind {
 		KindRiskPath, KindRedMain, KindRejectedTwice, KindEscalation,
 		KindPolecatStall, KindLandingStuck, KindQueueStuck, KindDirectPush,
 		KindSlotHeld, KindSlotDeadHolder, KindBDSlow, KindTierSweepRed,
+		KindTierSweepStarved,
 		KindRevertRefused, KindBlockedMail, KindOverrunStopped, KindScheduledGate,
 		KindHostDisk, KindHostMem, KindHostDocker, KindHostProbe,
 		KindQuestionNew, KindQuestionAnswered, KindQuestionStale,

@@ -68,6 +68,9 @@ func TestRuleFlagsAssignments(t *testing.T) {
 	if f, _ := Flags(RuleOverrunStopped); f.Wake || f.Handled != HandledSelfHealed {
 		t.Errorf("%s = %+v, want self_healed and no wake", RuleOverrunStopped, f)
 	}
+	if f, _ := Flags(RuleTierSweepStarved); f.Wake || f.Handled != HandledOperatorAction {
+		t.Errorf("%s = %+v, want operator_action and no wake", RuleTierSweepStarved, f)
+	}
 }
 
 func TestRuleIDsAreDistinctAndDotted(t *testing.T) {

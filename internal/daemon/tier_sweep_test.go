@@ -2671,7 +2671,7 @@ func tierSweepCycle(t *testing.T, d *Daemon, now time.Time) {
 }
 
 // tierSweepStarvedItems is the attention the tick raises for a tier starved
-// across cycles, read through the collector the tick itself runs.
+// across cycles, read through the collectors the tick itself runs.
 func tierSweepStarvedItems(t *testing.T, d *Daemon, now time.Time, tier string) []attention.Item {
 	t.Helper()
 	var out []attention.Item
@@ -2711,8 +2711,8 @@ func TestTierSweepStarvedThreeCyclesAlarms(t *testing.T) {
 		t.Fatalf("items after three starved cycles = %+v, want exactly one", items)
 	}
 	it := items[0]
-	if it.Kind != attention.KindTierSweepRed || it.Severity != attention.SeverityHigh || it.Rig != "gastown" {
-		t.Errorf("item = %+v, want the sweep's RED kind at high severity for gastown", it)
+	if it.Kind != attention.KindTierSweepStarved || it.Severity != attention.SeverityLow || it.Rig != "gastown" {
+		t.Errorf("item = %+v, want the starved kind at low severity for gastown", it)
 	}
 	if !strings.Contains(it.Summary, "gastown") || !strings.Contains(it.Summary, "race") {
 		t.Errorf("summary = %q, want it to name the rig and the tier", it.Summary)
@@ -2724,6 +2724,60 @@ func TestTierSweepStarvedThreeCyclesAlarms(t *testing.T) {
 	tierSweepCycle(t, d, now)
 	if items := tierSweepStarvedItems(t, d, now, "race"); len(items) != 1 {
 		t.Errorf("items after four starved cycles = %+v, want the same single item", items)
+	}
+}
+
+// gt-hkldq: a cycle whose stage never started learned nothing about the tiers
+// that stage covers, so their counts stand rather than starting over, and the
+// third starved cycle still raises the item even with a deferred cycle between
+// two of them.
+func TestTierSweepDeferredCycleKeepsStarvedCounts(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec := tierSweepStarvingDaemon(t, now, "tips1", "tips2", "tips3", "tips4")
+	tierSweepStarvedSeed(t, d)
+
+	tierSweepCycle(t, d, now)
+	tierSweepCycle(t, d, now)
+	if got := tierSweepTestState(t, d, "gastown").Starved["race"]; got != 2 {
+		t.Fatalf("race starved %d cycles after two, want 2", got)
+	}
+
+	// The slot stage never starts (a slot the cycle could not take), so the
+	// cycle defers and the tiers that stage covers are neither judged nor
+	// starved this time.
+	rec.result = func(st tierSweepStage) tierSweepStageResult {
+		if st.slot {
+			return tierSweepStageResult{ran: false, err: errors.New("slot busy")}
+		}
+		return tierSweepStageResult{output: tierSweepShellGreenStage, exitCode: 0, ran: true}
+	}
+	cycle := d.startDogCycle("tier_sweep")
+	complete := d.runTierSweepRig(context.Background(), cycle, "gastown", now)
+	cycle.close()
+	if complete {
+		t.Fatal("the cycle reported every stage ran; its slot stage never started")
+	}
+	if got := tierSweepTestState(t, d, "gastown").Starved["race"]; got != 2 {
+		t.Fatalf("race starved %d cycles after a deferred cycle, want the 2 it had: a deferral says nothing about the tier", got)
+	}
+	if items := tierSweepStarvedItems(t, d, now, "race"); len(items) != 0 {
+		t.Fatalf("items after a deferred cycle = %+v, want none", items)
+	}
+
+	// The next cycle starves race again: the third in a row, so it raises.
+	rec.result = func(st tierSweepStage) tierSweepStageResult {
+		if st.slot {
+			return tierSweepStageResult{output: tierSweepIntegrationRedStage, exitCode: tierSweepRedExit, ran: true}
+		}
+		return tierSweepStageResult{output: tierSweepShellGreenStage, exitCode: 0, ran: true}
+	}
+	tierSweepCycle(t, d, now)
+	if got := tierSweepTestState(t, d, "gastown").Starved["race"]; got != 3 {
+		t.Fatalf("race starved %d cycles, want 3: the starved cycles count through the deferred one", got)
+	}
+	if items := tierSweepStarvedItems(t, d, now, "race"); len(items) != 1 {
+		t.Fatalf("items after three starved cycles = %+v, want exactly one", items)
 	}
 }
 
@@ -2891,9 +2945,15 @@ func tierSweepItems(t *testing.T, d *Daemon, now time.Time, rig string) []attent
 		tierSweepRigs: func() []string { return []string{rig} },
 		tierSweep:     func(r string) (tierSweepState, error) { return readTierSweepState(d.config.TownRoot, r) },
 	}
-	items, err := src.collectTierSweepRed(context.Background())
-	if err != nil {
-		t.Fatal(err)
+	var items []attention.Item
+	for _, collect := range []func(context.Context) ([]attention.Item, error){
+		src.collectTierSweepRed, src.collectTierSweepStarved,
+	} {
+		got, err := collect(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		items = append(items, got...)
 	}
 	return items
 }

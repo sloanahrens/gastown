@@ -32,27 +32,28 @@ type RuleFlags struct {
 // flags table; adding a collector means adding its rule here, which
 // TestEveryRuleHasFlags enforces.
 const (
-	RuleRiskPath       = "landing.risk_path"
-	RuleRedMain        = "main.red"
-	RuleRejectedTwice  = "landing.rejected_twice"
-	RuleEscalation     = "escalation.open"
-	RulePolecatStall   = "polecat.stall"
-	RuleLandingStuck   = "landing.stuck_inflight"
-	RuleQueueStuck     = "landing.queue_stuck"
-	RuleDirectPush     = "main.direct_push"
-	RuleSlotHeld       = "slot.held"
-	RuleSlotDeadHolder = "slot.dead_holder"
-	RuleBDSlow         = "bd.slow"
-	RuleTierSweepRed   = "sweep.tier_red"
-	RuleRevertRefused  = "landing.revert_refused"
-	RuleBlockedMail    = "polecat.blocked"
-	RuleOverrunStopped = "polecat.overrun_stopped"
-	RuleScheduledGate  = "schedule.gate_failed"
-	RuleHostDiskWarn   = "host.disk_warn"
-	RuleHostDiskCrit   = "host.disk_crit"
-	RuleHostMemLow     = "host.mem_low"
-	RuleHostDockerDown = "host.docker_stack_down"
-	RuleHostProbe      = "host.probe_failed"
+	RuleRiskPath         = "landing.risk_path"
+	RuleRedMain          = "main.red"
+	RuleRejectedTwice    = "landing.rejected_twice"
+	RuleEscalation       = "escalation.open"
+	RulePolecatStall     = "polecat.stall"
+	RuleLandingStuck     = "landing.stuck_inflight"
+	RuleQueueStuck       = "landing.queue_stuck"
+	RuleDirectPush       = "main.direct_push"
+	RuleSlotHeld         = "slot.held"
+	RuleSlotDeadHolder   = "slot.dead_holder"
+	RuleBDSlow           = "bd.slow"
+	RuleTierSweepRed     = "sweep.tier_red"
+	RuleTierSweepStarved = "sweep.tier_starved"
+	RuleRevertRefused    = "landing.revert_refused"
+	RuleBlockedMail      = "polecat.blocked"
+	RuleOverrunStopped   = "polecat.overrun_stopped"
+	RuleScheduledGate    = "schedule.gate_failed"
+	RuleHostDiskWarn     = "host.disk_warn"
+	RuleHostDiskCrit     = "host.disk_crit"
+	RuleHostMemLow       = "host.mem_low"
+	RuleHostDockerDown   = "host.docker_stack_down"
+	RuleHostProbe        = "host.probe_failed"
 
 	// The overseer-question rules (gt-47rea).
 	RuleQuestionNew      = "question.new"
@@ -98,11 +99,15 @@ var ruleFlags = map[string]RuleFlags{
 	RuleSlotDeadHolder: flagsWake,
 	RuleBDSlow:         flagsWake,
 	RuleTierSweepRed:   flagsWake,
-	RuleBlockedMail:    flagsWake,
-	RuleScheduledGate:  flagsWake,
-	RuleHostDiskCrit:   flagsWake,
-	RuleHostMemLow:     flagsWake,
-	RuleHostDockerDown: flagsWake,
+	// A starved tier is a measurement that stopped, not a failure: the queue
+	// is where the overseer looks for it, and a tier that is actually red
+	// already raised a wake under sweep.tier_red.
+	RuleTierSweepStarved: flagsAsk,
+	RuleBlockedMail:      flagsWake,
+	RuleScheduledGate:    flagsWake,
+	RuleHostDiskCrit:     flagsWake,
+	RuleHostMemLow:       flagsWake,
+	RuleHostDockerDown:   flagsWake,
 	// Free seats and dispatchable beads with nothing started is work that is
 	// not happening, which no rule over existing work can see.
 	RuleDispatchIdle: flagsWake,
@@ -189,6 +194,7 @@ var kindRules = map[Kind]string{
 	KindSlotDeadHolder:   RuleSlotDeadHolder,
 	KindBDSlow:           RuleBDSlow,
 	KindTierSweepRed:     RuleTierSweepRed,
+	KindTierSweepStarved: RuleTierSweepStarved,
 	KindRevertRefused:    RuleRevertRefused,
 	KindBlockedMail:      RuleBlockedMail,
 	KindOverrunStopped:   RuleOverrunStopped,

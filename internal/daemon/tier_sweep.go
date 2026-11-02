@@ -198,9 +198,9 @@ type tierSweepState struct {
 	// Starved counts the consecutive cycles that stopped before reaching each
 	// tier the schedule names: a cut-off stage starves every tier of its own
 	// that never began. A cycle that judges the tier drops it from the map,
-	// which is what resets the count. The RED collector raises an attention
-	// item at tierSweepStarvedAlertAfter, so a tier an earlier stage always
-	// keeps from running is not silently stale (gt-r2e0h).
+	// which is what resets the count. collectTierSweepStarved raises an
+	// attention item at tierSweepStarvedAlertAfter, so a tier an earlier stage
+	// always keeps from running is not silently stale (gt-r2e0h).
 	Starved map[string]int `json:"starved_cycles,omitempty"`
 }
 
