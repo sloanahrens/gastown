@@ -17,11 +17,13 @@ type mrlessBeads struct{ *beadsfake.Fake }
 
 func (mrlessBeads) FindMRForBranchAny(string) (*beads.Issue, error) { return nil, nil }
 
-// A sandbox seat's host worktree is a stale leftover, so check-recovery takes
-// its git facts from the sandbox probe and never measures the host clone: a
-// gone sandbox with nothing hooked reads clean, a running one or a gateway that
-// cannot be asked reads unknown and keeps the seat out of reuse and nuke. A host
-// seat is measured as before, here against a clone that does not exist (gt-qq6rg.2).
+// A running sandbox's host worktree is a stale leftover, so check-recovery
+// takes its git facts from the sandbox probe and never measures the host clone:
+// a running sandbox or a gateway that cannot be asked reads unknown and keeps
+// the seat out of reuse and nuke. A gone sandbox with nothing hooked reads
+// clean, and the lost-work rule decides whether its work survived (gt-qq6rg.2);
+// what survives in its host worktree is judged there (gt-zgoo3). A host seat is
+// measured as before, here against a clone that does not exist.
 func TestCheckRecoveryOfASandboxSeat(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -787,5 +789,47 @@ func TestCheckRecoveryReconcilesCleanupOfALandedSandboxSeatWithNoBranch(t *testi
 				t.Errorf("recorded cleanup_status = %q, want %q", fields.CleanupStatus, want)
 			}
 		})
+	}
+}
+
+// A gone sandbox seat's host facts reach the recovery verdict instead of
+// reading as a blind clean, and a state the probe could name no dirty files
+// for still blocks (gt-zgoo3).
+func TestSandboxSeatHostGitStateCarriesHostFacts(t *testing.T) {
+	t.Parallel()
+	const pushed = "polecat/ember/gt-a+x"
+
+	gone := polecat.SandboxSeatGitState("", false, nil, "gt-ember")
+	// A deleted worktree directory has no repository left to open through the
+	// worktree path; the pushed branch is the durable copy.
+	if st := polecat.SandboxSeatHostGitState(gone, filepath.Join(t.TempDir(), "gone"), pushed); st.Source != polecat.GitStateSourceLive || st.UnpushedCommits != 0 {
+		t.Errorf("a gone sandbox with no host worktree = %+v, want a live clean answer", st)
+	}
+	running := polecat.SandboxSeatGitState("", true, nil, "gt-ember")
+	if st := polecat.SandboxSeatHostGitState(running, t.TempDir(), pushed); st.Source != polecat.GitStateSourceUnknown || !strings.Contains(st.FailedReason, "running sandbox") {
+		t.Errorf("a running sandbox = %+v, want the running-sandbox unknown", st)
+	}
+
+	host := polecat.LiveGitState{Source: polecat.GitStateSourceLive, UnpushedCommits: 2, StashCount: 1}
+	st, err := sandboxSeatGitState(host)
+	if err != nil || st.Clean || st.UnpushedCommits != 2 || st.StashCount != 1 {
+		t.Fatalf("host facts = %+v, %v; want a not-clean state carrying the unique commits and stash", st, err)
+	}
+	facts := polecat.WorkstateFacts{State: polecat.StateIdle, CleanupStatus: polecat.CleanupClean, HookBeadSafe: true}
+	applyGitStateToWorkstateFacts(&facts, "", st, nil)
+	if d := polecat.DecideWorkstate(polecat.NewWorkstateInput(facts)); d.SafeToNuke || d.Reusable {
+		t.Errorf("a host-only commit decided %+v, want a blocker", d)
+	}
+
+	// Dirt the probe could name no files for still blocks: LiveGitState carries
+	// no paths, and a not-clean state must never read as clean.
+	dirty, err := sandboxSeatGitState(polecat.LiveGitState{Source: polecat.GitStateSourceLive, Dirty: true})
+	if err != nil || dirty.Clean {
+		t.Fatalf("dirty host = %+v, %v; want a not-clean state", dirty, err)
+	}
+	facts = polecat.WorkstateFacts{State: polecat.StateIdle, CleanupStatus: polecat.CleanupClean, HookBeadSafe: true}
+	applyGitStateToWorkstateFacts(&facts, "", dirty, nil)
+	if !facts.GitDirty {
+		t.Error("a dirty host worktree with no named files did not set GitDirty")
 	}
 }

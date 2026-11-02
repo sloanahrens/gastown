@@ -1,21 +1,27 @@
 package polecat
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"strings"
 )
 
-// SandboxSeatGitState is the host's git answer for a sandbox seat. It never
-// reads the seat's host worktree, because a sandbox polecat edits and commits
-// inside its sandbox and the host copy goes stale.
+// SandboxSeatGitState is the gateway's git answer for a sandbox seat. It never
+// reads the host worktree, because a sandbox polecat edits and commits inside
+// its sandbox and the host copy goes stale.
 //
 //   - While the sandbox runs, or when the gateway errors, the work may live in
 //     the sandbox and the host cannot know: the answer is unknown. A gateway
 //     blip must never read as a gone sandbox, or a live one would look clean.
 //   - Once the gateway affirmatively reports no sandbox of that name, only what
-//     was pushed survives. The host has nothing left to measure, so it reports
-//     a clean seat. Clean is not "safe to discard": a seat holding a bead with
-//     no pushed or resume branch is still lost work, and the recovery verdict
-//     turns it into a rework.
+//     was pushed survives, and this answer is a clean seat with no measured
+//     facts. A caller that can name the seat's host worktree replaces it with
+//     the host's measurement (SandboxSeatHostGitState); a caller with no
+//     worktree to measure (the gateway probe itself) keeps this answer. Clean
+//     is not "safe to discard": a seat holding a bead with no pushed or resume
+//     branch is still lost work, and the recovery verdict turns it into a
+//     rework.
 //
 // branch is the host worktree's branch name, kept as a label only.
 func SandboxSeatGitState(branch string, exists bool, existsErr error, sandboxName string) LiveGitState {
@@ -34,4 +40,103 @@ func SandboxSeatGitState(branch string, exists bool, existsErr error, sandboxNam
 		}
 	}
 	return LiveGitState{Branch: branch, Source: GitStateSourceLive}
+}
+
+// SandboxSeatHostGitState judges a gone sandbox seat from what survives in its
+// host worktree: HEAD's commits are compared with the pushed branch on origin
+// by patch identity (git cherry), and the worktree's dirt and stashes are read
+// too. All commits present on origin and a clean worktree read clean and
+// pushed; a unique commit, a stash or dirt keeps the seat blocked with the fact
+// that blocks it. A worktree directory that no longer exists has nothing left
+// to lose and reads clean; a path the caller could not resolve, one that cannot
+// be read, or an unreadable comparison is unknown, which is never clean. A
+// running sandbox or a gateway error passes through unchanged. worktreePath is
+// the seat's host clone; pushedBranch is the branch the sandbox pushed (empty
+// compares against the worktree's own branch).
+func SandboxSeatHostGitState(gone LiveGitState, worktreePath, pushedBranch string) LiveGitState {
+	return sandboxSeatHostGitState(gitOpener{}, gone, worktreePath, pushedBranch)
+}
+
+// sandboxSeatHostGitState is SandboxSeatHostGitState over the injected git
+// seam. Only a gone seat (a live source) is measured; every other answer is
+// returned unchanged, so a caller may pass any sandbox seat's state.
+func sandboxSeatHostGitState(gits gitOpener, gone LiveGitState, worktreePath, pushedBranch string) LiveGitState {
+	if gone.Source != GitStateSourceLive {
+		return gone
+	}
+	return sandboxSeatGoneHostGitState(gits, worktreePath, pushedBranch, gone.Branch)
+}
+
+// sandboxSeatGoneHostGitState is the host measurement behind
+// SandboxSeatHostGitState. An unresolved path, or one that is present but
+// cannot be read, is unknown, never clean, because a comparison that did not
+// run says nothing about the work it holds. A worktree directory that is gone
+// cannot be opened at all: the .git link that located its shared repo lived
+// inside that directory, and this function is given no other repository
+// handle, so a branch ref left in that repo is not compared. The pushed
+// branch on origin is the durable copy, and the lost-work rule blocks a seat
+// that pushed none and has no resume branch (gt-zgoo3).
+func sandboxSeatGoneHostGitState(gits gitOpener, worktreePath, pushedBranch, label string) LiveGitState {
+	path := strings.TrimSpace(worktreePath)
+	if path == "" {
+		return liveGitUnknown("(none)", "resolving the host worktree",
+			errors.New("the caller resolved no host worktree path"))
+	}
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return LiveGitState{Branch: label, Source: GitStateSourceLive}
+		}
+		return liveGitUnknown(path, "reading the host worktree", err)
+	}
+	if !isWorktreeRoot(gits, path) {
+		// Git resolves upward, so a directory that is not a worktree root would
+		// answer with the enclosing repository's branch and commits — a "live"
+		// verdict about the wrong tree. Fail closed instead.
+		return liveGitUnknown(path, "resolving worktree root", errors.New("path is not a git worktree root"))
+	}
+
+	g := gits.Open(path)
+	hostBranch, err := g.CurrentBranch()
+	if err != nil {
+		return liveGitUnknown(path, "reading branch", err)
+	}
+	// The label stays a label: the agent bead's recorded branch names what the
+	// sandbox pushed, and replacing it with the stale host clone's branch would
+	// mislabel the seat. Only the comparison falls back to the host branch.
+	pushed := strings.TrimSpace(pushedBranch)
+	if pushed == "" {
+		pushed = hostBranch
+	}
+
+	// Patch identity, not ancestry: a commit whose patch is already on the
+	// pushed branch is not unique work, however its SHA was rewritten. When the
+	// pushed branch is not on this clone's view of origin — the seat pushed
+	// nothing, or the branch was pruned after landing — the remote's default
+	// branch is the comparison that still proves the host's commits are not
+	// unique; a missing default branch too fails the comparison, and unknown is
+	// never clean.
+	ref := "origin/" + pushed
+	if _, err := g.Rev(ref); err != nil {
+		ref = "origin/" + g.RemoteDefaultBranch()
+	}
+	preservation, err := g.RefPreservedByRef("HEAD", ref)
+	if err != nil {
+		return liveGitUnknown(path, "comparing HEAD with "+ref, err)
+	}
+	status, err := g.CheckUncommittedWork()
+	if err != nil {
+		return liveGitUnknown(path, "checking worktree state", err)
+	}
+
+	state := LiveGitState{
+		Branch:          strings.TrimSpace(label),
+		StashCount:      status.StashCount,
+		UnpushedCommits: preservation.UnpreservedPatchCount,
+		Source:          GitStateSourceLive,
+	}
+	if !status.CleanExcludingRuntimeAndIndexSkew(g) {
+		state.Dirty = true
+		state.DirtyReason = fmt.Sprintf("git_state=has_uncommitted uncommitted_files=%d", len(status.NonRuntimeNonSkewPaths(g)))
+	}
+	return state
 }

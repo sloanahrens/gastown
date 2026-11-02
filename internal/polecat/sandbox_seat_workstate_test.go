@@ -11,41 +11,50 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 )
 
-// A sandbox seat's host worktree is a stale leftover, so the reuse gate takes
-// the seat's git facts from the sandbox probe and never measures the host clone,
-// where a commit only the sandbox ever pushed from reads as unpushed work. A
-// sandbox the gateway says is gone reads clean (its pushed work is the recovery
-// verdict's to judge, gt-qq6rg), a running one or a gateway that cannot be
-// asked reads unknown (never clean), and a host seat is still measured
-// (gt-qq6rg.1).
+// A sandbox seat's git answer comes from the gateway. While the sandbox runs
+// (or when the gateway cannot be asked) the host clone is not measured and the
+// answer is unknown, never clean, because a commit only the sandbox pushed
+// would read as unpushed work (gt-qq6rg.1). Once the gateway affirms the
+// sandbox gone, the seat is judged from what survives in the host worktree —
+// HEAD's commits against the pushed branch on origin — so work already pushed
+// reads clean and host-only work blocks (gt-zgoo3). A host seat is measured
+// either way.
 func TestWorkstateDispositionForASandboxSeat(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name          string
 		agent         string
 		probe         func(agent, session string) (LiveGitState, bool)
+		pushBranch    bool   // the sandbox pushed the host commit: nothing is unique to the host
 		wantHostBlock bool   // the host clone's commit (on no remote, with no MR) blocks the seat
 		wantReason    string // non-empty: the git state is unknown and the reason contains this
 	}{
-		{"sandbox_gone_reads_clean", "deepseek-flash-sandbox",
-			func(string, string) (LiveGitState, bool) { return SandboxSeatGitState("", false, nil, "sb"), true }, false, ""},
+		{"sandbox_gone_with_pushed_host_work_is_clean", "deepseek-flash-sandbox",
+			func(string, string) (LiveGitState, bool) { return SandboxSeatGitState("", false, nil, "sb"), true },
+			true, false, ""},
 		{"sandbox_running_is_unknown", "deepseek-flash-sandbox",
-			func(string, string) (LiveGitState, bool) { return SandboxSeatGitState("", true, nil, "sb"), true }, false,
-			"git state lives in the running sandbox sb"},
+			func(string, string) (LiveGitState, bool) { return SandboxSeatGitState("", true, nil, "sb"), true },
+			false, false, "git state lives in the running sandbox sb"},
 		{"gateway_error_is_unknown", "deepseek-flash-sandbox",
 			func(string, string) (LiveGitState, bool) {
 				return SandboxSeatGitState("", false, errors.New("connection refused"), "sb"), true
-			}, false, "connection refused"},
+			}, false, false, "connection refused"},
 		{"host_seat_is_measured", "deepseek-flash",
-			func(string, string) (LiveGitState, bool) { return LiveGitState{}, false }, true, ""},
+			func(string, string) (LiveGitState, bool) { return LiveGitState{}, false }, false, true, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			mgr, _, bd, added, w := canonicalWithPolecats(t, true, "toast")
 			p := added["toast"]
-			// The host worktree holds a commit that is on no remote.
+			// The host worktree holds a commit that is on no remote, unless the
+			// case pushes it as the sandbox's own work.
 			w.Commit(t, p.ClonePath, p.Branch, "only the sandbox pushed this", map[string]string{"stale.txt": "x\n"})
+			if tt.pushBranch {
+				if err := w.repo(p.ClonePath).Push("origin", p.Branch, false); err != nil {
+					t.Fatalf("push %s: %v", p.Branch, err)
+				}
+			}
 			w.checkout(t, p.ClonePath)
 			bd.setAgent(t, mgr.agentBeadID("toast"), func(f *beads.AgentFields) { f.Agent = tt.agent; f.Branch = p.Branch })
 			var asked []string
@@ -521,5 +530,102 @@ func TestWorkstateDispositionOfASandboxSeatWithNoBranchTellsItsLanding(t *testin
 				t.Errorf("landed seat reusable=%v safe=%v (reason %s blockers %v), want a safe, reusable seat", d.Reusable, d.SafeToNuke, d.Reason, d.Blockers)
 			}
 		})
+	}
+}
+
+// A gone sandbox seat is judged from what survives on the host: the host
+// worktree's commits are compared with the pushed branch on origin by patch
+// identity, so work the sandbox already pushed is not reported as a git check
+// failure, while a commit only the host holds still blocks and names its count
+// (gt-zgoo3).
+func TestSandboxGoneWithEveryCommitOnOriginIsNotGitCheckFailed(t *testing.T) {
+	t.Parallel()
+	mgr, _, bd, added, w := canonicalWithPolecats(t, true, "toast")
+	p := added["toast"]
+	// The sandbox pushed this commit; the host worktree holds the same patch
+	// under a rewritten SHA, so only patch identity (git cherry) sees that
+	// nothing is unique to the host.
+	base := w.rev(t, p.ClonePath, "main")
+	w.Commit(t, p.ClonePath, p.Branch, "the sandbox's fix", map[string]string{"fix.txt": "x\n"})
+	if err := w.repo(p.ClonePath).Push("origin", p.Branch, false); err != nil {
+		t.Fatalf("push %s: %v", p.Branch, err)
+	}
+	w.SetRef(t, p.ClonePath, "refs/heads/"+p.Branch, base)
+	w.Commit(t, p.ClonePath, p.Branch, "the host's copy of the fix", map[string]string{"fix.txt": "x\n"})
+	w.checkout(t, p.ClonePath)
+	bd.setAgent(t, mgr.agentBeadID("toast"), func(f *beads.AgentFields) {
+		f.Agent, f.Branch = "deepseek-flash-sandbox", p.Branch
+	})
+	mgr.sandboxSeat = func(string, string) (LiveGitState, bool) {
+		return SandboxSeatGitState("", false, nil, "sb"), true
+	}
+
+	d := mgr.WorkstateDispositionForPolecat("toast", StateIdle, "")
+
+	blockers := strings.Join(d.Blockers, "\n")
+	if strings.Contains(blockers, "git-check-failed") || d.GitStateReason != "" {
+		t.Fatalf("a gone sandbox whose host commits are all on origin is git-check-failed: reason=%q blockers=%v", d.GitStateReason, d.Blockers)
+	}
+	if !d.Reusable || !d.SafeToNuke {
+		t.Errorf("seat with nothing at risk reusable=%v safe=%v (reason=%s blockers=%v)", d.Reusable, d.SafeToNuke, d.Reason, d.Blockers)
+	}
+}
+
+// The same gone sandbox seat, with one host commit that has no equivalent on
+// the pushed branch, is a blocker that names the unique commit count.
+func TestSandboxGoneWithAUniqueCommitStillBlocks(t *testing.T) {
+	t.Parallel()
+	mgr, _, bd, added, w := canonicalWithPolecats(t, true, "toast")
+	p := added["toast"]
+	base := w.rev(t, p.ClonePath, "main")
+	// The sandbox pushed one commit; the host worktree holds a different one.
+	w.Commit(t, p.ClonePath, p.Branch, "the sandbox's fix", map[string]string{"pushed.txt": "x\n"})
+	if err := w.repo(p.ClonePath).Push("origin", p.Branch, false); err != nil {
+		t.Fatalf("push %s: %v", p.Branch, err)
+	}
+	w.SetRef(t, p.ClonePath, "refs/heads/"+p.Branch, base)
+	w.Commit(t, p.ClonePath, p.Branch, "only the host has this", map[string]string{"host.txt": "y\n"})
+	w.checkout(t, p.ClonePath)
+	bd.setAgent(t, mgr.agentBeadID("toast"), func(f *beads.AgentFields) {
+		f.Agent, f.Branch = "deepseek-flash-sandbox", p.Branch
+	})
+	mgr.sandboxSeat = func(string, string) (LiveGitState, bool) {
+		return SandboxSeatGitState("", false, nil, "sb"), true
+	}
+
+	d := mgr.WorkstateDispositionForPolecat("toast", StateIdle, "")
+
+	blockers := strings.Join(d.Blockers, "\n")
+	if !strings.Contains(blockers, "unpushed_commits=1") {
+		t.Fatalf("blockers = %v, want one naming the unique commit count (reason=%s)", d.Blockers, d.Reason)
+	}
+	if d.Reusable || d.SafeToNuke || !d.NeedsRecovery {
+		t.Errorf("seat with a host-only commit reusable=%v safe=%v needs_recovery=%v", d.Reusable, d.SafeToNuke, d.NeedsRecovery)
+	}
+}
+
+// A seat whose sandbox still exists keeps today's answer byte for byte: the
+// host worktree is not consulted, and the running sandbox is the git state.
+func TestRunningSandboxSeatKeepsTodaysGitCheckFailed(t *testing.T) {
+	t.Parallel()
+	mgr, _, bd, added, w := canonicalWithPolecats(t, true, "toast")
+	p := added["toast"]
+	// A stale host commit proves the running seat is not judged from it.
+	w.Commit(t, p.ClonePath, p.Branch, "only the sandbox pushed this", map[string]string{"stale.txt": "x\n"})
+	w.checkout(t, p.ClonePath)
+	bd.setAgent(t, mgr.agentBeadID("toast"), func(f *beads.AgentFields) {
+		f.Agent, f.Branch = "deepseek-flash-sandbox", p.Branch
+	})
+	mgr.sandboxSeat = func(string, string) (LiveGitState, bool) {
+		return SandboxSeatGitState("", true, nil, "sb"), true
+	}
+
+	d := mgr.WorkstateDispositionForPolecat("toast", StateIdle, "")
+
+	if d.GitStateSource != GitStateSourceUnknown || !strings.Contains(d.GitStateReason, "git state lives in the running sandbox sb") {
+		t.Fatalf("git state = %q %q, want the running-sandbox unknown", d.GitStateSource, d.GitStateReason)
+	}
+	if d.Reusable || d.SafeToNuke || !d.NeedsRecovery {
+		t.Errorf("running-sandbox seat reusable=%v safe=%v needs_recovery=%v", d.Reusable, d.SafeToNuke, d.NeedsRecovery)
 	}
 }

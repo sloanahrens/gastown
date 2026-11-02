@@ -105,12 +105,12 @@ func applySandboxLostWorkFacts(facts *polecat.WorkstateFacts, env sandboxSeatEnv
 	facts.SandboxBranchPreserved = preserved
 }
 
-// sandboxSeatGitState turns a sandbox seat's gateway-derived git state into the
-// GitState the recovery and nuke checks read. A seat whose sandbox the gateway
-// says is gone has nothing left on the host to lose: what was pushed is what
-// survived, so it reads clean. A running sandbox, or a gateway that could not be
-// asked, is an error, which every caller already treats as "cannot check" and
-// fails closed on (gt-qq6rg.2).
+// sandboxSeatGitState turns a sandbox seat's git state into the GitState the
+// recovery and nuke checks read. Once the sandbox is gone the state may carry
+// the host worktree's dirt, stashes and unique commits, which keep the seat
+// blocked; a gone sandbox with nothing left on the host reads clean. A running
+// sandbox, or a gateway that could not be asked, is an error, which every
+// caller already treats as "cannot check" and fails closed on (gt-qq6rg.2).
 func sandboxSeatGitState(live polecat.LiveGitState) (*GitState, error) {
 	if live.Source != polecat.GitStateSourceLive {
 		reason := live.FailedReason
@@ -119,7 +119,12 @@ func sandboxSeatGitState(live polecat.LiveGitState) (*GitState, error) {
 		}
 		return nil, errors.New(reason)
 	}
-	return &GitState{Clean: true, UncommittedFiles: []string{}}, nil
+	return &GitState{
+		Clean:            !live.Dirty && live.StashCount == 0 && live.UnpushedCommits == 0,
+		UncommittedFiles: []string{},
+		UnpushedCommits:  live.UnpushedCommits,
+		StashCount:       live.StashCount,
+	}, nil
 }
 
 // sandboxSeatGitSafe is the active-MR "git safe" answer for a sandbox seat: only

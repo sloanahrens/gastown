@@ -427,6 +427,11 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 	sandboxLive, sandboxSeat := polecat.LiveGitState{}, false
 	if env.SandboxSeat != nil && fields != nil {
 		sandboxLive, sandboxSeat = env.SandboxSeat(strings.TrimSpace(fields.Agent), polecatSessionNameIn(rigName, polecatName))
+		if sandboxSeat {
+			// A gone sandbox seat is judged from its host worktree; a running
+			// one or a gateway error passes through (gt-zgoo3).
+			sandboxLive = polecat.SandboxSeatHostGitState(sandboxLive, env.WorktreePath, strings.TrimSpace(fields.Branch))
+		}
 	}
 	if env.WorktreePath != "" || sandboxSeat {
 		live := sandboxLive

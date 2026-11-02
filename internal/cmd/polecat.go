@@ -1726,8 +1726,10 @@ func checkRecoveryForPolecat(bd recoveryBeads, preloadedAgentBeads map[string]*b
 }
 
 // checkRecoveryForPolecatWith is checkRecoveryForPolecat with the sandbox probe
-// passed in: a sandbox seat's host worktree is a stale leftover, so its git
-// facts come from the gateway and the host clone is never measured (gt-qq6rg.2).
+// passed in: a running sandbox seat's host worktree is a stale leftover, so its
+// git facts come from the gateway and the host clone is never measured
+// (gt-qq6rg.2). A seat whose sandbox the gateway affirms gone is judged from
+// what survives in the host worktree (gt-zgoo3).
 func checkRecoveryForPolecatWith(sandboxEnv sandboxSeatEnv, bd recoveryBeads, preloadedAgentBeads map[string]*beads.Issue, r *rig.Rig, rigName, polecatName string, p *polecat.Polecat, reconcileCleanup bool) RecoveryStatus {
 	// Get cleanup_status from agent bead
 	// We need to read it directly from beads since manager doesn't expose it
@@ -1736,8 +1738,16 @@ func checkRecoveryForPolecatWith(sandboxEnv sandboxSeatEnv, bd recoveryBeads, pr
 	agentIssue, fields, err := recoveryAgentBead(bd, preloadedAgentBeads, agentBeadID)
 	var sandboxLive polecat.LiveGitState
 	sandboxed := false
+	// sandboxGone records the gateway's affirmative answer before the host
+	// worktree is measured: the lost-work rule reads it even when the
+	// measurement itself fails closed (gt-zgoo3).
+	sandboxGone := false
 	if err == nil && fields != nil && sandboxEnv.probe != nil {
 		sandboxLive, sandboxed = sandboxEnv.probe(strings.TrimSpace(fields.Agent), polecatSessionNameIn(rigName, polecatName))
+		if sandboxed {
+			sandboxGone = sandboxLive.Source == polecat.GitStateSourceLive
+			sandboxLive = polecat.SandboxSeatHostGitState(sandboxLive, p.ClonePath, strings.TrimSpace(fields.Branch))
+		}
 	}
 
 	status := RecoveryStatus{
@@ -1899,7 +1909,7 @@ func checkRecoveryForPolecatWith(sandboxEnv sandboxSeatEnv, bd recoveryBeads, pr
 		applyGitStateToWorkstateFacts(&facts, p.ClonePath, gitState, gitErr)
 		if !sandboxed {
 			applyWorkLandedToWorkstateFacts(&facts, nil, p.ClonePath, r.Path, bd, facts.HookBead, p.Branch)
-		} else if sandboxLive.Source == polecat.GitStateSourceLive {
+		} else if sandboxGone {
 			applySandboxLostWorkFacts(&facts, sandboxEnv, bd, r.Path, fields, hookBead, sourceHint, polecatName)
 		}
 		// gt-ivvgu: this diagnostic used to call ResolveIgnoreCleanupStatus
@@ -2147,6 +2157,17 @@ func applyGitStateToWorkstateFacts(facts *polecat.WorkstateFacts, worktreePath s
 	if len(gitState.UncommittedFiles) > 0 {
 		facts.GitDirty = true
 		facts.GitDirtyReason = fmt.Sprintf("git_state=has_uncommitted uncommitted_files=%d", len(gitState.UncommittedFiles))
+	}
+	// A state that says it is not clean while naming no counted fact still has
+	// to block. It is reachable through the sandbox seat's host answer, whose
+	// LiveGitState carries the dirt flag but no file paths; a host measurement
+	// (gitStateOf) always names the fact that cleared Clean, so no host-seat
+	// verdict changes today. The guard stays unconditional: any future state
+	// that reports "not clean" without a counted fact must block rather than
+	// pass (gt-zgoo3).
+	if !gitState.Clean && facts.UnpushedCommits == 0 && facts.StashCount == 0 && !facts.GitDirty {
+		facts.GitDirty = true
+		facts.GitDirtyReason = "git_state=has_uncommitted"
 	}
 }
 
