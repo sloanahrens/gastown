@@ -10,6 +10,8 @@ import (
 // attributes: one crew session's shell and build, two landing gates' builds,
 // Dolt, a Docker VM, the installer, the daemon, the dashboard, a qemu VM, a
 // polecat session's claude and a second crew session.
+// Pid 112 is an unclassified process: no owner's directory names it, and its
+// command names no owner.
 const cannedPS = `    1 /sbin/launchd
   100 -zsh
   101 go test ./internal/hostload
@@ -22,6 +24,7 @@ const cannedPS = `    1 /sbin/launchd
   108 qemu-system-aarch64 -m 8G
   109 claude
   110 -zsh
+  112 /usr/local/bin/indexer --watch
   111 go build ./...`
 
 // cannedTop is `top -l 2 -s 1 -o cpu -stats pid,cpu`. The first table is each
@@ -46,6 +49,7 @@ PID    %CPU
 108    6.0
 109    2.0
 110    1.0
+112    1.5
 111    2.0`
 
 // cannedLsof is `lsof -a -d cwd -Fpn` for the processes that used CPU. pid
@@ -72,6 +76,8 @@ p109
 n/Users/op/gt/gastown/polecats/capable/gastown
 p110
 n/Users/op/gt/gastown/crew/egret/gastown
+p112
+n/Users/op/Library/indexer
 p111
 n/private/tmp/gt-landing-501/gastown`
 
@@ -94,6 +100,7 @@ func TestHostLoadClassifyOwners(t *testing.T) {
 		{Owner: OwnerDaemon, CPU: 4, Procs: 1},
 		{Owner: OwnerDashboard, CPU: 3, Procs: 1},
 		{Owner: "polecat/capable", CPU: 2, Procs: 1},
+		{Owner: OwnerOther, CPU: 1.5, Procs: 1},
 		{Owner: "crew/egret", CPU: 1, Procs: 1},
 	}
 	if !reflect.DeepEqual(rows, want) {

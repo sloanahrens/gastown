@@ -14,6 +14,7 @@ import (
 // Owner names are the rows a table prints. A crew session and a VM get a row
 // each, so their names carry the session or the program: crew/dunlin,
 // vm/qemu-system-aarch64.
+// A polecat session gets a row the same way: polecat/capable.
 const (
 	OwnerLanding   = "landing"
 	OwnerInstaller = "installer"
