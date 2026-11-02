@@ -21,6 +21,253 @@ func TestFakeSatisfiesItsPartOfTheStoreContract(t *testing.T) {
 	contract.RunFakeContract(t, func(*testing.T) store.Store { return NewFake() })
 }
 
+// closeFenceCase seeds one close and says what the fake must answer and hold
+// afterwards. seed returns the ids the close names.
+type closeFenceCase struct {
+	name    string
+	seed    func(t *testing.T, f *Fake) []string
+	actor   string
+	force   bool
+	wantErr error
+	want    map[string]string // id -> status after the call
+}
+
+// TestFakeCloseIssuesRefusesEveryFenceThePostgresCloseVerbRefuses pins every
+// fence Fake.CloseIssues applies, as closeRow(fromClose=true) does: a pin,
+// another actor's claim, an open child and an open blocker. The fake took these
+// on as a global behaviour change for the bd shim's close answer (gt-p85pw.96),
+// so each row holds the statuses after the call and a refusal that closed half
+// a batch is red as well as one that closed what the real store refuses.
+func TestFakeCloseIssuesRefusesEveryFenceThePostgresCloseVerbRefuses(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []closeFenceCase{
+		{
+			name: "a pinned issue is refused",
+			seed: func(t *testing.T, f *Fake) []string {
+				mustFakeCreate(t, f, api.CreateParams{ID: "gt-1", Title: "pinned"})
+				mustFakeStatus(t, f, "gt-1", "pinned")
+				return []string{"gt-1"}
+			},
+			wantErr: api.ErrConflict,
+			want:    map[string]string{"gt-1": "pinned"},
+		},
+		{
+			name: "another actor's claim is refused",
+			seed: func(t *testing.T, f *Fake) []string {
+				mustFakeCreate(t, f, api.CreateParams{ID: "gt-1", Title: "held", Assignee: "alice"})
+				return []string{"gt-1"}
+			},
+			actor:   "bob",
+			wantErr: api.ErrConflict,
+			want:    map[string]string{"gt-1": "open"},
+		},
+		{
+			name: "an open child is refused",
+			seed: func(t *testing.T, f *Fake) []string {
+				mustFakeCreate(t, f, api.CreateParams{ID: "gt-1", Title: "epic"})
+				mustFakeCreate(t, f, api.CreateParams{ID: "gt-2", Title: "kid", Parent: "gt-1"})
+				return []string{"gt-1"}
+			},
+			wantErr: api.ErrConflict,
+			want:    map[string]string{"gt-1": "open", "gt-2": "open"},
+		},
+		{
+			name: "an open blocker is refused",
+			seed: func(t *testing.T, f *Fake) []string {
+				mustFakeCreate(t, f, api.CreateParams{ID: "gt-1", Title: "work"})
+				mustFakeCreate(t, f, api.CreateParams{ID: "gt-2", Title: "blocker"})
+				mustFakeDep(t, f, "gt-1", "gt-2", "blocks")
+				return []string{"gt-1"}
+			},
+			wantErr: api.ErrConflict,
+			want:    map[string]string{"gt-1": "open"},
+		},
+		{
+			name: "the holder's own claim is not a fence",
+			seed: func(t *testing.T, f *Fake) []string {
+				mustFakeCreate(t, f, api.CreateParams{ID: "gt-1", Title: "held", Assignee: "alice"})
+				return []string{"gt-1"}
+			},
+			actor: "alice",
+			want:  map[string]string{"gt-1": "closed"},
+		},
+		{
+			name: "a child the same call closes does not fence it",
+			seed: func(t *testing.T, f *Fake) []string {
+				mustFakeCreate(t, f, api.CreateParams{ID: "gt-1", Title: "epic"})
+				mustFakeCreate(t, f, api.CreateParams{ID: "gt-2", Title: "kid", Parent: "gt-1"})
+				return []string{"gt-1", "gt-2"}
+			},
+			want: map[string]string{"gt-1": "closed", "gt-2": "closed"},
+		},
+		{
+			name: "force closes through a pin and an open child",
+			seed: func(t *testing.T, f *Fake) []string {
+				mustFakeCreate(t, f, api.CreateParams{ID: "gt-1", Title: "epic"})
+				mustFakeCreate(t, f, api.CreateParams{ID: "gt-2", Title: "kid", Parent: "gt-1"})
+				mustFakeStatus(t, f, "gt-1", "pinned")
+				return []string{"gt-1"}
+			},
+			force: true,
+			want:  map[string]string{"gt-1": "closed", "gt-2": "open"},
+		},
+		{
+			name: "an already closed issue is skipped, not refused",
+			seed: func(t *testing.T, f *Fake) []string {
+				mustFakeCreate(t, f, api.CreateParams{ID: "gt-1", Title: "done", Assignee: "alice"})
+				if err := f.CloseIssues(api.WithActor(t.Context(), "alice"), []string{"gt-1"}, "r", false); err != nil {
+					t.Fatalf("the first close: %v", err)
+				}
+				return []string{"gt-1"}
+			},
+			actor: "bob",
+			want:  map[string]string{"gt-1": "closed"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := NewFake()
+			ids := tc.seed(t, f)
+			err := f.CloseIssues(api.WithActor(t.Context(), tc.actor), ids, "r", tc.force)
+			if !errors.Is(err, tc.wantErr) {
+				t.Errorf("CloseIssues(%v) = %v, want %v", ids, err, tc.wantErr)
+			}
+			for id, want := range tc.want {
+				if got := mustFakeGet(t, f, id).Status; got != want {
+					t.Errorf("%s after CloseIssues(%v) = %s, want %s", id, ids, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestFakeStatusWriteObeysOnlyTheFencesPostgresAppliesToIt pins the narrower
+// half of the same behaviour: the status write is not the close verb, so
+// Postgres runs closeRow with fromClose=false there (postgres_update.go) and a
+// pin or another actor's claim does not refuse it. The open child and blocker
+// still do, and a refused write leaves the issue as it was.
+func TestFakeStatusWriteObeysOnlyTheFencesPostgresAppliesToIt(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		seed    func(t *testing.T, f *Fake) string
+		actor   string
+		force   bool
+		wantErr error
+		want    map[string]string // id -> status after the call
+	}{
+		{
+			name: "a pinned issue closes",
+			seed: func(t *testing.T, f *Fake) string {
+				mustFakeCreate(t, f, api.CreateParams{ID: "gt-1", Title: "pinned"})
+				mustFakeStatus(t, f, "gt-1", "pinned")
+				return "gt-1"
+			},
+			want: map[string]string{"gt-1": "closed"},
+		},
+		{
+			name: "another actor's claim does not fence it",
+			seed: func(t *testing.T, f *Fake) string {
+				mustFakeCreate(t, f, api.CreateParams{ID: "gt-1", Title: "held", Assignee: "alice"})
+				return "gt-1"
+			},
+			actor: "bob",
+			want:  map[string]string{"gt-1": "closed"},
+		},
+		{
+			name: "an open child is refused",
+			seed: func(t *testing.T, f *Fake) string {
+				mustFakeCreate(t, f, api.CreateParams{ID: "gt-1", Title: "epic"})
+				mustFakeCreate(t, f, api.CreateParams{ID: "gt-2", Title: "kid", Parent: "gt-1"})
+				return "gt-1"
+			},
+			wantErr: api.ErrConflict,
+			want:    map[string]string{"gt-1": "open", "gt-2": "open"},
+		},
+		{
+			name: "an open blocker is refused",
+			seed: func(t *testing.T, f *Fake) string {
+				mustFakeCreate(t, f, api.CreateParams{ID: "gt-1", Title: "work"})
+				mustFakeCreate(t, f, api.CreateParams{ID: "gt-2", Title: "blocker"})
+				mustFakeDep(t, f, "gt-1", "gt-2", "blocks")
+				return "gt-1"
+			},
+			wantErr: api.ErrConflict,
+			want:    map[string]string{"gt-1": "open"},
+		},
+		{
+			name: "force closes through an open child",
+			seed: func(t *testing.T, f *Fake) string {
+				mustFakeCreate(t, f, api.CreateParams{ID: "gt-1", Title: "epic"})
+				mustFakeCreate(t, f, api.CreateParams{ID: "gt-2", Title: "kid", Parent: "gt-1"})
+				return "gt-1"
+			},
+			force: true,
+			want:  map[string]string{"gt-1": "closed", "gt-2": "open"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := NewFake()
+			id := tc.seed(t, f)
+			closed := "closed"
+			err := f.UpdateIssue(t.Context(), id, api.UpdatePatch{Status: &closed, Force: tc.force, Actor: tc.actor}, api.Guard{})
+			if !errors.Is(err, tc.wantErr) {
+				t.Errorf("UpdateIssue(%s, status closed) = %v, want %v", id, err, tc.wantErr)
+			}
+			for wantID, want := range tc.want {
+				got := mustFakeGet(t, f, wantID)
+				if got.Status != want {
+					t.Errorf("%s after the status write = %s, want %s", wantID, got.Status, want)
+				}
+				if want == "closed" {
+					if got.ClosedAt == nil || got.CloseReason != "" {
+						t.Errorf("%s after a closed status write: ClosedAt = %v, CloseReason = %q, want the close time and no reason", wantID, got.ClosedAt, got.CloseReason)
+					}
+					continue
+				}
+				if got.ClosedAt != nil {
+					t.Errorf("%s after a refused status write has ClosedAt = %v, want the issue untouched", wantID, *got.ClosedAt)
+				}
+			}
+		})
+	}
+}
+
+// Tests use these four helpers to lay a state down without asserting on the
+// setup itself; a setup the fake refuses fails the test at once.
+func mustFakeCreate(t *testing.T, f *Fake, p api.CreateParams) {
+	t.Helper()
+	if _, err := f.CreateIssue(t.Context(), p); err != nil {
+		t.Fatalf("CreateIssue(%s): %v", p.ID, err)
+	}
+}
+
+func mustFakeStatus(t *testing.T, f *Fake, id, status string) {
+	t.Helper()
+	if err := f.UpdateIssue(t.Context(), id, api.UpdatePatch{Status: &status}, api.Guard{}); err != nil {
+		t.Fatalf("UpdateIssue(%s, status %s): %v", id, status, err)
+	}
+}
+
+func mustFakeDep(t *testing.T, f *Fake, issue, dependsOn, depType string) {
+	t.Helper()
+	if err := f.AddDependency(t.Context(), issue, dependsOn, depType); err != nil {
+		t.Fatalf("AddDependency(%s -> %s): %v", issue, dependsOn, err)
+	}
+}
+
+func mustFakeGet(t *testing.T, f *Fake, id string) api.Issue {
+	t.Helper()
+	got, err := f.GetIssues(t.Context(), []string{id})
+	if err != nil {
+		t.Fatalf("GetIssues(%s): %v", id, err)
+	}
+	is, ok := got[id]
+	if !ok {
+		t.Fatalf("%s is missing after the write", id)
+	}
+	return is
+}
+
 // A token is issued and revoked for an actor the token routes accept, so the
 // fake refuses the actors they refuse: a unit test cannot mint or end a token
 // for an identity the API never names.
