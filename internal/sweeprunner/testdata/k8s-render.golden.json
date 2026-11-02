@@ -30,9 +30,13 @@
               }
             ],
             "startupProbe": {
-              "tcpSocket": {
-                "host": "127.0.0.1",
-                "port": 2375
+              "exec": {
+                "command": [
+                  "docker",
+                  "-H",
+                  "tcp://127.0.0.1:2375",
+                  "info"
+                ]
               },
               "periodSeconds": 2,
               "failureThreshold": 30

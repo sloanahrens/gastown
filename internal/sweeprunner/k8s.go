@@ -50,10 +50,6 @@ const (
 	dindCPU    = "2"
 	dindMemory = "4Gi"
 
-	// dindProbePort is dindPort as the integer a tcpSocket probe takes; the two
-	// are held equal by TestRenderJobDindIsANativeSidecar.
-	dindProbePort int32 = 2375
-
 	// dindProbePeriodSeconds and dindProbeFailureThreshold bound a sidecar whose
 	// engine never starts listening: the kubelet restarts it within about a
 	// minute instead of holding the pod, and its share, until the Job's deadline.
@@ -185,16 +181,15 @@ type Container struct {
 // Probe is a container's health check: the action that reports it healthy and
 // the cadence the kubelet runs it at.
 type Probe struct {
-	TCPSocket        *TCPSocketAction `json:"tcpSocket,omitempty"`
-	PeriodSeconds    int32            `json:"periodSeconds,omitempty"`
-	FailureThreshold int32            `json:"failureThreshold,omitempty"`
+	Exec             *ExecAction `json:"exec,omitempty"`
+	PeriodSeconds    int32       `json:"periodSeconds,omitempty"`
+	FailureThreshold int32       `json:"failureThreshold,omitempty"`
 }
 
-// TCPSocketAction is a probe that succeeds when the address accepts a TCP
-// connection. An empty host is the pod's IP, not the pod's loopback.
-type TCPSocketAction struct {
-	Host string `json:"host,omitempty"`
-	Port int32  `json:"port"`
+// ExecAction is a probe that runs a command inside the container, in the
+// container's own network namespace.
+type ExecAction struct {
+	Command []string `json:"command"`
 }
 
 // EnvVar is one environment variable.
@@ -483,11 +478,12 @@ func dindContainer() Container {
 		},
 		RestartPolicy: "Always",
 		Env:           []EnvVar{{Name: "DOCKER_TLS_CERTDIR", Value: ""}},
-		// The runner starts only after the engine accepts connections on the
-		// port it is handed; the host is the sidecar's own loopback, since an
-		// empty host would probe the pod IP where nothing listens.
+		// The runner starts only after the engine answers, and the probe must run
+		// inside this container: the kubelet dials a tcpSocket or httpGet probe
+		// from the node's network namespace, where the engine's loopback is not
+		// listening, while an exec probe runs beside dockerd and reaches it.
 		StartupProbe: &Probe{
-			TCPSocket:        &TCPSocketAction{Host: dindAddress, Port: dindProbePort},
+			Exec:             &ExecAction{Command: []string{"docker", "-H", "tcp://" + dindAddress + ":" + dindPort, "info"}},
 			PeriodSeconds:    dindProbePeriodSeconds,
 			FailureThreshold: dindProbeFailureThreshold,
 		},

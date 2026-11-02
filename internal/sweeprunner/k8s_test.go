@@ -38,10 +38,10 @@ func TestRenderJobGoldenMatches(t *testing.T) {
 }
 
 // TestRenderJobDindIsANativeSidecar holds the engine to a native sidecar: an
-// init container with restartPolicy Always and a startup probe on the loopback
-// port it binds, so the kubelet starts it before the runner and stops it when
-// the runner exits. As a regular container it outlived the runner, the Job
-// stayed Running and the run held its share until the deadline (gt-etbor).
+// init container with restartPolicy Always and an exec startup probe on the
+// loopback port it binds, so the kubelet starts it before the runner and stops
+// it when the runner exits. As a regular container it outlived the runner, the
+// Job stayed Running and the run held its share until the deadline (gt-etbor).
 func TestRenderJobDindIsANativeSidecar(t *testing.T) {
 	t.Parallel()
 	plan, err := Kubernetes{}.Render(goldenSpec())
@@ -61,17 +61,44 @@ func TestRenderJobDindIsANativeSidecar(t *testing.T) {
 	if dind.RestartPolicy != "Always" {
 		t.Errorf("dind restartPolicy = %q, want Always: only a native sidecar starts before the runner and ends with the pod", dind.RestartPolicy)
 	}
-	if dind.StartupProbe == nil || dind.StartupProbe.TCPSocket == nil {
-		t.Fatalf("dind renders no tcpSocket startupProbe, so the runner races the engine's start")
+	if dind.StartupProbe == nil || dind.StartupProbe.Exec == nil {
+		t.Fatalf("dind renders no exec startupProbe, so the runner races the engine's start")
 	}
-	if got := dind.StartupProbe.TCPSocket; got.Host != dindAddress || got.Port != dindProbePort {
-		t.Errorf("dind startupProbe connects to %s:%d, want the engine's own loopback %s:%d", got.Host, got.Port, dindAddress, dindProbePort)
-	}
-	if got := strconv.Itoa(int(dindProbePort)); got != dindPort {
-		t.Errorf("the startupProbe port %s and the engine's --host port %s differ, so the probe watches an address nothing answers", got, dindPort)
+	wantCommand := []string{"docker", "-H", "tcp://" + dindAddress + ":" + dindPort, "info"}
+	if got := dind.StartupProbe.Exec.Command; !slices.Equal(got, wantCommand) {
+		t.Errorf("dind startupProbe runs %v, want %v: it must ask the engine on the sidecar's loopback", got, wantCommand)
 	}
 	if len(pod.Containers) != 1 || pod.Containers[0].Name != runnerContainerName {
 		t.Errorf("the Job's containers are %+v, want only %q", pod.Containers, runnerContainerName)
+	}
+}
+
+// TestRenderJobStartupProbeRunsInsideThePod holds the engine's startup probe to
+// an exec action, which the kubelet runs inside the dind container beside
+// dockerd. A tcpSocket or httpGet probe is dialed by the kubelet from the node's
+// network namespace, where the engine's loopback is not listening, so it would
+// never succeed and the runner would never start (gt-etbor).
+func TestRenderJobStartupProbeRunsInsideThePod(t *testing.T) {
+	t.Parallel()
+	plan, err := Kubernetes{}.Render(goldenSpec())
+	if err != nil {
+		t.Fatalf("rendering the golden spec: %v", err)
+	}
+	dind, ok := containerNamed(plan.Job, dindContainerName)
+	if !ok {
+		t.Fatalf("the Job renders no %q container", dindContainerName)
+	}
+	if dind.StartupProbe == nil || dind.StartupProbe.Exec == nil {
+		t.Fatalf("the dind startupProbe is %+v, want an exec action run inside the container", dind.StartupProbe)
+	}
+	if len(dind.StartupProbe.Exec.Command) == 0 {
+		t.Errorf("the dind startupProbe exec action runs no command")
+	}
+	document := string(plan.Job.JSON())
+	for _, probe := range []string{`"tcpSocket"`, `"httpGet"`} {
+		if strings.Contains(document, probe) {
+			t.Errorf("the Job renders %s, which the kubelet dials from the node and never reaches the engine:\n%s", probe, document)
+		}
 	}
 }
 
