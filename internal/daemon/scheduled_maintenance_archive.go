@@ -55,9 +55,9 @@ const (
 	// maintenanceArchiveCommitLimit bounds one database's dolt_log read. A
 	// first export can face a whole history, so the read holds at most this
 	// many commits; the watermark advances past them and the next run reads
-	// the rest. The boundary hashes in the watermark are excluded in the
-	// query, so the bound counts fresh commits and a run cannot stall on a
-	// full limit of already-archived ones.
+	// the rest. Archived hashes are skipped as the rows stream past, so the
+	// bound counts fresh commits and a run cannot stall on a full limit of
+	// already-archived ones.
 	maintenanceArchiveCommitLimit = 5000
 
 	// maintenanceArchiveDirKey names the setting in log and error text.
@@ -931,41 +931,51 @@ func archivedCommitHashesFromFile(path string) (out []string, err error) {
 	return out, nil
 }
 
-// doltArchiveLogQuery renders the commit archive's SELECT: every dolt_log hash
-// no archive file holds — the rule the pre-flatten check uses — oldest first,
-// at most maintenanceArchiveCommitLimit. Excluding the archived hashes in the
-// query rather than after the read is what keeps the limit counting fresh
-// commits and lets a backdated or out-of-order commit through: a date bound
-// would never read one, while the check counts it as behind forever.
-func doltArchiveLogQuery(archived map[string]struct{}) (string, []any) {
-	query := "SELECT commit_hash, committer, date, message FROM dolt_log"
-	var args []any
-	if len(archived) > 0 {
-		hashes := make([]string, 0, len(archived))
-		for hash := range archived {
-			hashes = append(hashes, hash)
+// doltArchiveLogQuery is the commit archive's SELECT: every dolt_log row, oldest
+// first by (date, commit_hash), with no WHERE clause and no argument list. The
+// archived hashes are skipped in Go (firstUnarchivedCommits), because a
+// NOT IN list holds one placeholder per archived hash and grows with every
+// commit ever archived, toward the driver's placeholder cap (gt-98eug). Skipping
+// after the read still lets a backdated or out-of-order commit through, which a
+// date bound would never read while the pre-flatten check counts it as behind
+// forever, and the limit counts only fresh commits.
+func doltArchiveLogQuery() string {
+	return "SELECT commit_hash, committer, date, message FROM dolt_log ORDER BY date ASC, commit_hash ASC"
+}
+
+// firstUnarchivedCommits reads commits from next, oldest first, and returns the
+// first maintenanceArchiveCommitLimit whose hash is not in archived. next
+// reports ok false at the end of the log. It stops reading as soon as it has
+// the limit, so a run never holds more than the bound and the rest is read by
+// the next run from the widened archived set.
+func firstUnarchivedCommits(next func() (c archiveCommit, ok bool, err error), archived map[string]struct{}) ([]archiveCommit, error) {
+	var out []archiveCommit
+	for len(out) < maintenanceArchiveCommitLimit {
+		c, ok, err := next()
+		if err != nil {
+			return nil, err
 		}
-		sort.Strings(hashes)
-		query += " WHERE commit_hash NOT IN (" +
-			strings.TrimSuffix(strings.Repeat("?,", len(hashes)), ",") + ")"
-		for _, hash := range hashes {
-			args = append(args, hash)
+		if !ok {
+			break
 		}
+		if _, done := archived[c.Hash]; done {
+			continue
+		}
+		out = append(out, c)
 	}
-	query += fmt.Sprintf(" ORDER BY date ASC, commit_hash ASC LIMIT %d", maintenanceArchiveCommitLimit)
-	return query, args
+	return out, nil
 }
 
 // doltArchiveLog reads db's dolt_log rows no archive file holds, oldest first
 // by (date, commit_hash). It is the commit archive's only SQL, a read-only
-// SELECT through the running server. The hashes are excluded in the query, so
-// the bound counts unarchived commits and a commit whose date is behind every
-// other is still read.
+// SELECT through the running server. The archived hashes are skipped as the
+// rows stream past (firstUnarchivedCommits), so the bound counts unarchived
+// commits and a commit whose date is behind every other is still read.
 func (d *Daemon) doltArchiveLog(ctx context.Context, db string, archived map[string]struct{}) ([]archiveCommit, error) {
 	if err := validMaintenanceDBName(db); err != nil {
 		return nil, err
 	}
-	query, args := doltArchiveLogQuery(archived)
+	query := doltArchiveLogQuery()
 
 	conn, err := d.maintenance().archiveOpenDB(d.maintenanceDSN(db, maintenanceArchiveReadTimeout) + "&parseTime=true")
 	if err != nil {
@@ -974,7 +984,7 @@ func (d *Daemon) doltArchiveLog(ctx context.Context, db string, archived map[str
 	defer conn.Close()
 	conn.SetMaxOpenConns(1)
 
-	rows, err := conn.QueryContext(ctx, query, args...)
+	rows, err := conn.QueryContext(ctx, query)
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return nil, fmt.Errorf("dolt_log read: timeout: %w", err)
@@ -983,22 +993,23 @@ func (d *Daemon) doltArchiveLog(ctx context.Context, db string, archived map[str
 	}
 	defer rows.Close()
 
-	var out []archiveCommit
-	for rows.Next() {
+	return firstUnarchivedCommits(func() (archiveCommit, bool, error) {
+		if !rows.Next() {
+			if err := rows.Err(); err != nil {
+				return archiveCommit{}, false, fmt.Errorf("dolt_log read: %w", err)
+			}
+			return archiveCommit{}, false, nil
+		}
 		var (
 			c       archiveCommit
 			message sql.NullString
 		)
 		if err := rows.Scan(&c.Hash, &c.Committer, &c.Date, &message); err != nil {
-			return nil, fmt.Errorf("dolt_log read: %w", err)
+			return archiveCommit{}, false, fmt.Errorf("dolt_log read: %w", err)
 		}
 		c.Message = encodeArchiveCell(message)
-		out = append(out, c)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("dolt_log read: %w", err)
-	}
-	return out, nil
+		return c, true, nil
+	}, archived)
 }
 
 // doltArchiveEvents reads db's events rows at or after the lookback window's

@@ -1750,29 +1750,78 @@ func newCommitArchiveEngine(t *testing.T) (*gmssql.Context, *sqle.Engine) {
 	return ctx, engine
 }
 
-// archiveEngineCommitHashes runs the production commit archive query with its
-// positional arguments inlined as quoted literals. The engine's parameterized
-// form needs the vitess parser types, which the module does not depend on
-// directly, so the test binds the query's own arguments rather than building a
-// second WHERE clause.
+// archiveEngineCommitHashes runs the production commit archive query
+// (doltArchiveLogQuery, which takes no arguments) against the in-process engine
+// and feeds its rows, oldest first, through the production selection
+// (firstUnarchivedCommits), so the test drives the code that skips archived
+// hashes and applies the per-run bound rather than a second copy of it.
 func archiveEngineCommitHashes(t *testing.T, ctx *gmssql.Context, engine *sqle.Engine, archived map[string]struct{}) []string {
 	t.Helper()
-	query, args := doltArchiveLogQuery(archived)
-	parts := strings.Split(query, "?")
-	if len(parts) != len(args)+1 {
-		t.Fatalf("query has %d placeholders, want %d arguments", len(parts)-1, len(args))
+	_, iter, _, err := engine.Query(ctx, doltArchiveLogQuery())
+	if err != nil {
+		t.Fatalf("commit archive query: %v", err)
 	}
-	var bound strings.Builder
-	bound.WriteString(parts[0])
-	for i, arg := range args {
-		hash, ok := arg.(string)
-		if !ok {
-			t.Fatalf("argument %d is %T, want a commit hash string", i, arg)
+	rows, err := gmssql.RowIterToRows(ctx, iter)
+	if err != nil {
+		t.Fatalf("reading the commit archive rows: %v", err)
+	}
+	i := 0
+	commits, err := firstUnarchivedCommits(func() (archiveCommit, bool, error) {
+		if i >= len(rows) {
+			return archiveCommit{}, false, nil
 		}
-		bound.WriteString("'" + strings.ReplaceAll(hash, "'", "''") + "'")
-		bound.WriteString(parts[i+1])
+		row := rows[i]
+		i++
+		hash, ok := row[0].(string)
+		if !ok {
+			return archiveCommit{}, false, fmt.Errorf("row hash is %T, want string", row[0])
+		}
+		return archiveCommit{Hash: hash}, true, nil
+	}, archived)
+	if err != nil {
+		t.Fatalf("selecting the unarchived commits: %v", err)
 	}
-	return archiveEngineIDs(t, ctx, engine, bound.String())
+	hashes := make([]string, 0, len(commits))
+	for _, c := range commits {
+		hashes = append(hashes, c.Hash)
+	}
+	return hashes
+}
+
+// TestFirstUnarchivedCommitsStopsReadingAtTheBound: the selection stops asking
+// for rows once it holds maintenanceArchiveCommitLimit fresh commits, so a run
+// never reads past the bound, and archived rows before the bound do not count
+// toward it.
+func TestFirstUnarchivedCommitsStopsReadingAtTheBound(t *testing.T) {
+	t.Parallel()
+	archived := map[string]struct{}{"a1": {}, "a2": {}}
+	reads := 0
+	next := func() (archiveCommit, bool, error) {
+		reads++
+		switch reads {
+		case 1:
+			return archiveCommit{Hash: "a1"}, true, nil
+		case 2:
+			return archiveCommit{Hash: "a2"}, true, nil
+		}
+		// A finite source: if the bound were missing the selection would run on
+		// to the end and return more than the bound, which the assertion below
+		// reports, instead of looping on an endless stream until memory is gone.
+		if reads > maintenanceArchiveCommitLimit+len(archived)+100 {
+			return archiveCommit{}, false, nil
+		}
+		return archiveCommit{Hash: fmt.Sprintf("n%05d", reads)}, true, nil
+	}
+	got, err := firstUnarchivedCommits(next, archived)
+	if err != nil {
+		t.Fatalf("selection failed: %v", err)
+	}
+	if len(got) != maintenanceArchiveCommitLimit {
+		t.Fatalf("selected %d commits, want the %d bound", len(got), maintenanceArchiveCommitLimit)
+	}
+	if want := maintenanceArchiveCommitLimit + len(archived); reads != want {
+		t.Errorf("read %d rows, want exactly %d (the bound plus the skipped archived rows)", reads, want)
+	}
 }
 
 // newEventsArchiveEngine builds an in-memory go-mysql-server engine with a gt
