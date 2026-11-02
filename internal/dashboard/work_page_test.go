@@ -1163,69 +1163,66 @@ func TestWorkQueueHelpStaysOpenAcrossRedraw(t *testing.T) {
 	}
 }
 
-// TestWorkIsSplitIntoPolecatsAndBeads reads the embedded page: the Work panel is
-// two sections, Polecats and Beads, side by side directly above Landings and
-// outside the grid's columns, both open by default, and no Work section or
-// renderer remains (gt-sfpm6, gt-vcr3z).
-func TestWorkIsSplitIntoPolecatsAndBeads(t *testing.T) {
+// TestPolecatsAndBeadsAreGridPanels reads the embedded page: the Work panel's
+// two halves are ordinary panels of the dashboard's grid now — Polecats the
+// left column's last section below the tier sweeps, Beads the right column's
+// last below Mango — with no .pair wrapper or rule left, and Landings still the
+// page's last block (gt-sfpm6, gt-vcr3z, gt-lpo20).
+func TestPolecatsAndBeadsAreGridPanels(t *testing.T) {
 	t.Parallel()
 
 	page := string(indexHTML)
-	for _, gone := range []string{`id="seats"`, `id="queuenote"`, `id="seatsnote"`, "<h2>Work", `data-fold="work"`, `id="work"`, `id="worknote"`, "<h2>Work queue", "renderSeats", "renderQueue", "function renderWork"} {
+	for _, gone := range []string{`id="seats"`, `id="queuenote"`, `id="seatsnote"`, "<h2>Work", `data-fold="work"`, `id="work"`, `id="worknote"`, "<h2>Work queue", "renderSeats", "renderQueue", "function renderWork", `class="pair"`, ".pair{"} {
 		if strings.Contains(page, gone) {
 			t.Errorf("index.html still carries %q", gone)
 		}
 	}
-	pair := `<div class="pair">
-  <section data-fold="polecats"><h2>Polecats <span class="r" id="polecatsnote"></span></h2><div class="body" id="polecats"></div></section>
-  <section data-fold="beads"><h2>Beads <span class="r" id="beadsnote"></span></h2><div class="body" id="beads"></div></section>
-</div>
-`
-	at := strings.Index(page, pair)
+	cols := strings.Split(page, `<div class="col">`)
+	if len(cols) != 3 {
+		t.Fatalf("index.html splits into %d columns, want 2", len(cols)-1)
+	}
+	// The right column's split runs on past the grid, so it ends where the
+	// full-width Landings block begins.
+	right := cols[2]
+	if end := strings.Index(right, `<section id="trendsec"`); end >= 0 {
+		right = right[:end]
+	}
+	for _, tc := range []struct {
+		key, before string
+		column      string
+	}{
+		{"polecats", "tiersweep", cols[1]},
+		{"beads", "mango", right},
+	} {
+		at := strings.Index(tc.column, `data-fold="`+tc.key+`"`)
+		if at < 0 {
+			t.Errorf("the %s section is not in its column", tc.key)
+			continue
+		}
+		if before := strings.Index(tc.column, `data-fold="`+tc.before+`"`); before < 0 || before > at {
+			t.Errorf("the %s section does not follow the %s section in its column", tc.key, tc.before)
+		}
+		if strings.Contains(tc.column[at:], "<section") {
+			t.Errorf("the %s section is not the last section of its column", tc.key)
+		}
+		if got := strings.Count(page, `data-fold="`+tc.key+`"`); got != 1 {
+			t.Errorf("the page folds %d sections under %q, want one", got, tc.key)
+		}
+		if tag := page[at:]; strings.Contains(tag[:strings.Index(tag, ">")], "data-default-collapsed") {
+			t.Errorf("the %s section carries data-default-collapsed; its closed default is FOLD_DEFAULT_OPEN leaving it out", tc.key)
+		}
+	}
+	// Landings is still the one full-width block after the grid, last on the page.
+	at := strings.Index(page, `<section id="trendsec" class="wide" data-fold="landings" hidden>`)
 	if at < 0 {
-		t.Fatal("the page has no Polecats and Beads pair in the shape the page's panels take")
+		t.Fatal("the page has no Landings section below the grid")
 	}
-	if rest := page[at+len(pair):]; !strings.HasPrefix(rest, `<section id="trendsec" class="wide" data-fold="landings"`) {
-		t.Errorf("the pair is not immediately before the Landings section: %.80q follows it", rest)
+	if gridAt := strings.Index(page, `<div class="grid">`); gridAt < 0 || gridAt > at {
+		t.Fatal("the Landings section does not follow the panel grid")
 	}
-	for _, key := range []string{"polecats", "beads"} {
-		start := strings.Index(page, `data-fold="`+key+`"`)
-		if start < 0 {
-			t.Fatalf("the page has no section folded under %q", key)
-		}
-		tag := page[start:]
-		end := strings.Index(tag, ">")
-		if end < 0 {
-			t.Fatalf("the %s section's tag never closes", key)
-		}
-		tag = tag[:end]
-		if strings.Contains(tag, "data-default-collapsed") {
-			t.Errorf("the %s section starts collapsed by default: %s", key, tag)
-		}
-	}
-	gridAt := strings.Index(page, `<div class="grid">`)
-	if gridAt < 0 || gridAt > at {
-		t.Fatal("the page has no grid above the Polecats and Beads pair")
-	}
-	if grid := page[gridAt:at]; strings.Contains(grid, `data-fold="polecats"`) || strings.Contains(grid, `data-fold="beads"`) {
-		t.Error("Polecats or Beads is inside the grid's columns")
-	}
-	if css := cssDecls(t, "pair"); css["display"] != "grid" {
-		t.Errorf("the .pair rule has display %q, want grid", css["display"])
-	}
-	// Side by side on a wide screen, stacked on a narrow one by the page's
-	// existing max-width:1000px rule.
-	if tracks := declOf(t, topRule(t, ".pair"), "grid-template-columns"); len(strings.Fields(tracks)) != 2 {
-		t.Errorf("the .pair draws %d tracks (%q), want two side by side", len(strings.Fields(tracks)), tracks)
-	}
-	stacked := false
-	for _, rule := range landingsConditionalRules(t) {
-		if rule.Sel == ".pair" && strings.Contains(rule.At, "max-width:1000px") && rule.Decls["grid-template-columns"] == "1fr" {
-			stacked = true
-		}
-	}
-	if !stacked {
-		t.Error("no max-width:1000px rule stacks the .pair to one track, so a narrow page keeps two squeezed panels")
+	tail := page[at+len("<section"):]
+	if end := strings.Index(tail, "<script>"); end < 0 || strings.Contains(tail[:end], "<section") {
+		t.Error("a section follows the Landings section: it is not the last block")
 	}
 	// Each panel draws its own half.
 	if !strings.Contains(page, "workSeats(box, s, pcs, rSeats);") || !strings.Contains(page, "workQueue(box, s, q, rQueue);") {

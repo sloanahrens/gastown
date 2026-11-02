@@ -358,9 +358,11 @@ func TestStreamListEventsDrawTheSameRowsAsTheWholeState(t *testing.T) {
 		first.Write(f)
 	}
 
-	split := newPageDOM(t)
+	// Beads starts closed and a closed section's body is skipped on a push, so
+	// both windows open it to compare the rows it draws.
+	split := newPageDOMOpening(t, "beads")
 	deliverFrames(t, split, first.String())
-	whole := newPageDOM(t)
+	whole := newPageDOMOpening(t, "beads")
 	deliverStream(t, whole, "state", mustJSONString(t, h.State()))
 
 	assertSameDrawing := func(when string) {

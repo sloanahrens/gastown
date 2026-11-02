@@ -597,8 +597,8 @@ func hasClassToken(attr, class string) bool {
 }
 
 // The Landings pane is the one the operator reads daily, so it sits below the
-// panel grid at the full page width, last on the page, and is the only panel
-// that starts open (gt-bqxpz).
+// panel grid at the full page width and last on the page (gt-bqxpz). Of the
+// panels outside that grid only Landings and Polecats start open (gt-lpo20).
 func TestLandingsIsFullWidthAndOnlyOpenPanel(t *testing.T) {
 	t.Parallel()
 
@@ -629,15 +629,15 @@ func TestLandingsIsFullWidthAndOnlyOpenPanel(t *testing.T) {
 	if m == nil {
 		t.Fatal("index.html has no FOLD_DEFAULT_OPEN list")
 	}
-	if got := strings.Join(strings.Fields(m[1]), " "); got != `"polecats", "beads", "landings"` {
-		t.Errorf("FOLD_DEFAULT_OPEN is [%s], want only the three panels below the grid: polecats, beads, landings", got)
+	if got := strings.Join(strings.Fields(m[1]), " "); got != `"polecats", "landings"` {
+		t.Errorf("FOLD_DEFAULT_OPEN is [%s], want only polecats and landings open", got)
 	}
 
 	dom := newPageDOM(t)
 	for _, sp := range pageSections(t) {
-		below := sp.Key == "polecats" || sp.Key == "beads" || sp.Key == "landings"
-		if closed := dom.fold(t, sp.Key).Collapsed; closed == below {
-			t.Errorf("the %s section starts collapsed=%v for a reader with no saved choice, want only polecats, beads and landings open", sp.Key, closed)
+		open := sp.Key == "polecats" || sp.Key == "landings"
+		if closed := dom.fold(t, sp.Key).Collapsed; closed == open {
+			t.Errorf("the %s section starts collapsed=%v for a reader with no saved choice, want only polecats and landings open", sp.Key, closed)
 		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The page folds every section of its grid (gt-5de3i): one foldable() owns the
@@ -19,7 +20,7 @@ import (
 // saved choice. The list is a constant in the page's script and the operator's
 // to edit; this test pins what the bead asked for, and the rest of this file
 // reads the page's own list rather than assuming it.
-var foldDefaultOpen = []string{"polecats", "beads", "landings"}
+var foldDefaultOpen = []string{"polecats", "landings"}
 
 // newPageDOMOpening is a page whose reader has opened the named sections by
 // hand: a saved choice is the page's own way to start a section open, now that
@@ -315,7 +316,8 @@ func TestFoldChoiceFromBeforeTheKeysStillApplies(t *testing.T) {
 
 // The Work section the split removed saved its fold under the key "work" and
 // under its old heading text. Neither applies to Polecats or Beads, so a reader
-// who had folded the old panel still finds the two new panels open (gt-sfpm6).
+// who had folded the old panel still gets the two new panels' own defaults:
+// Polecats open, Beads closed (gt-sfpm6, gt-lpo20).
 func TestFoldOldSavedWorkFoldDoesNotHideThePolecatsAndBeadsPanels(t *testing.T) {
 	t.Parallel()
 
@@ -324,7 +326,7 @@ func TestFoldOldSavedWorkFoldDoesNotHideThePolecatsAndBeadsPanels(t *testing.T) 
 		"gt-collapsed": `{"Work":true,"Work queue":true}`,
 	})
 	wantFold(t, dom.fold(t, "polecats"), "polecats", false)
-	wantFold(t, dom.fold(t, "beads"), "beads", false)
+	wantFold(t, dom.fold(t, "beads"), "beads", true)
 }
 
 // Storage that throws — private mode, a locked-down browser — leaves the page
@@ -386,9 +388,9 @@ func TestFoldSummaryComesFromTheReading(t *testing.T) {
 
 	// The reader folds the sections first: the summary is what a closed section
 	// says when a reading arrives behind it, not something a toggle recomputes.
+	// Polecats starts open and Beads closed, so only Polecats needs a click.
 	dom := newPageDOMOpening(t, "attention")
 	dom.press(t, "polecats", "click")
-	dom.press(t, "beads", "click")
 	dom.press(t, "attention", "click")
 	// Cost starts closed on every load (gt-7swd8): no click needed.
 
@@ -411,7 +413,9 @@ func TestFoldSummaryComesFromTheReading(t *testing.T) {
 	if got, want := dom.fold(t, "polecats").Summary, "2 working"; got != want {
 		t.Errorf("the closed polecats section reads %q, want %q", got, want)
 	}
-	if got, want := dom.fold(t, "beads").Summary, "1 waiting to land"; got != want {
+	// This reading's queue was read but counts nothing, so the Beads header
+	// says so with four zeros rather than going quiet.
+	if got, want := dom.fold(t, "beads").Summary, "0 dispatchable · 0 ready · 0 landing · 0 blocked"; got != want {
 		t.Errorf("the closed beads section reads %q, want %q", got, want)
 	}
 	// The summary's working count is the top strip's: both leave out the polecat
@@ -511,6 +515,117 @@ func TestFoldAttentionSummaryWhenEveryOwnerChipIsOff(t *testing.T) {
 
 	if got, want := dom.fold(t, "attention").Summary, "every owner chip is off"; got != want {
 		t.Errorf("the closed attention section reads %q, want %q", got, want)
+	}
+}
+
+// Polecats starts open and Beads starts closed for a reader with no saved
+// choice: the grid's two new panels take different defaults, and a choice the
+// reader saved still wins over either (gt-lpo20).
+func TestPolecatsOpenBeadsClosedByDefault(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	wantFold(t, dom.fold(t, "polecats"), "polecats", false)
+	wantFold(t, dom.fold(t, "beads"), "beads", true)
+
+	beadsOpen := newPageDOMStoring(t, map[string]string{"gt-fold": `{"beads":false}`})
+	wantFold(t, beadsOpen.fold(t, "beads"), "beads", false)
+	polecatsClosed := newPageDOMStoring(t, map[string]string{"gt-fold": `{"polecats":true}`})
+	wantFold(t, polecatsClosed.fold(t, "polecats"), "polecats", true)
+}
+
+// The Polecats and Beads headers carry their summary while open as well as
+// closed: Polecats the seats the table folds, Beads the queue's four figures.
+// The counts come from the same reading the panels draw, so the header and the
+// panel cannot disagree, and a queue nobody has read is no line at all
+// (gt-lpo20).
+func TestPolecatsAndBeadsHeadersCarryASummary(t *testing.T) {
+	t.Parallel()
+
+	lookStates := []string{"needs-human", "needs-overseer", "needs-operator", "stalled", "recovery"}
+	pcs := []any{seat("gastown", "working", "working", "gt-one", "a bead", "", 0)}
+	for i, state := range lookStates {
+		pcs = append(pcs, seat("gastown", "look"+strconv.Itoa(i), state, "", "", "", 0))
+	}
+	for i := 0; i < 17; i++ {
+		pcs = append(pcs, seat("gastown", "idle"+strconv.Itoa(i), "idle", "", "", "", 0))
+	}
+	ready := []any{}
+	for i := 0; i < 4; i++ {
+		ready = append(ready, map[string]any{"id": "gt-ready" + strconv.Itoa(i), "rig": "gastown", "title": "a ready bead", "priority": 2, "shape": "ok"})
+	}
+	q := map[string]any{
+		"at": time.Now().UTC().Format(time.RFC3339), "ready_total": 61, "landing_total": 0,
+		"blocked_total": 29, "blocked_work": 29, "blocked_wisps": 0,
+		"ready": ready, "landing": []any{}, "blocked": []any{},
+	}
+
+	dom := newPageDOM(t)
+	renderWorkReading(t, dom, workState(pcs, q))
+
+	// Polecats starts open: its summary and its note share the header.
+	if got, want := dom.fold(t, "polecats").Summary, "1 working · 5 need a look · 17 idle"; got != want {
+		t.Errorf("the open polecats header reads %q, want %q", got, want)
+	}
+	if f := dom.fold(t, "polecats"); f.SummaryHidden || (f.NoteHidden != nil && *f.NoteHidden) {
+		t.Errorf("the open polecats header hides its summary (hidden=%v) or its note (hidden=%v)", f.SummaryHidden, f.NoteHidden)
+	}
+	// The table it summarises counts the same seats.
+	table := dom.element(t, "polecats").Text
+	for _, want := range []string{"needs a look (5)", "17 idle ("} {
+		if !strings.Contains(table, want) {
+			t.Errorf("the polecats table does not carry %q: %.200q", want, table)
+		}
+	}
+
+	// Beads starts closed: four figures in the note's place.
+	if got, want := dom.fold(t, "beads").Summary, "4 dispatchable · 61 ready · 0 landing · 29 blocked"; got != want {
+		t.Errorf("the closed beads header reads %q, want %q", got, want)
+	}
+	if f := dom.fold(t, "beads"); f.SummaryHidden || f.NoteHidden == nil || !*f.NoteHidden {
+		t.Errorf("the closed beads header shows no summary (hidden=%v) or still shows the note (hidden=%v)", f.SummaryHidden, f.NoteHidden)
+	}
+
+	// Opening Beads keeps its figures and gives the note back beside them.
+	dom.press(t, "beads", "click")
+	if got, want := dom.fold(t, "beads").Summary, "4 dispatchable · 61 ready · 0 landing · 29 blocked"; got != want {
+		t.Errorf("the opened beads header reads %q, want %q", got, want)
+	}
+	if f := dom.fold(t, "beads"); f.SummaryHidden || (f.NoteHidden != nil && *f.NoteHidden) {
+		t.Errorf("the opened beads header hides its summary (hidden=%v) or its note (hidden=%v)", f.SummaryHidden, f.NoteHidden)
+	}
+	queue := dom.element(t, "beads").Text
+	for _, want := range []string{"4", "dispatchable", "61", "ready", "29 beads blocked"} {
+		if !strings.Contains(queue, want) {
+			t.Errorf("the beads panel does not carry %q: %.200q", want, queue)
+		}
+	}
+
+	// Closing Polecats moves its summary into the note's place, unchanged.
+	dom.press(t, "polecats", "click")
+	if got, want := dom.fold(t, "polecats").Summary, "1 working · 5 need a look · 17 idle"; got != want {
+		t.Errorf("the closed polecats header reads %q, want %q", got, want)
+	}
+
+	// No queue read yet is no Beads line, not four zeros.
+	unread := newPageDOM(t)
+	renderWorkReading(t, unread, workState(pcs, nil))
+	if f := unread.fold(t, "beads"); f.Summary != "" || !f.SummaryHidden {
+		t.Errorf("beads with no queue read shows the summary %q (hidden=%v), want none", f.Summary, f.SummaryHidden)
+	}
+}
+
+// renderWorkReading hands the page a reading and redraws every panel, so the
+// folds' summaries are repainted the way a push repaints them.
+func renderWorkReading(t *testing.T, dom *pageDOM, st map[string]any) {
+	t.Helper()
+
+	raw, err := json.Marshal(st)
+	if err != nil {
+		t.Fatalf("encoding the reading: %v", err)
+	}
+	if _, err := dom.vm.RunString("state = " + string(raw) + "; renderAll();"); err != nil {
+		t.Fatalf("rendering the reading: %v", err)
 	}
 }
 
