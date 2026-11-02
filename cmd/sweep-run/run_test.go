@@ -419,8 +419,8 @@ func TestRunKeepsTheResultWhenCleanupFails(t *testing.T) {
 
 // TestCloneWithReportsGitFailures: the clone the result records is the one this
 // file builds (safe.directory for the read-only mount on the upload-pack process, no hard
-// links, a detached checkout), and a step that fails is the error the run reports rather than a
-// tree the sweep would test at the wrong commit.
+// links, the sha fetched from origin, a detached checkout), and a step that fails is the error
+// the run reports rather than a tree the sweep would test at the wrong commit.
 func TestCloneWithReportsGitFailures(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -435,14 +435,21 @@ func TestCloneWithReportsGitFailures(t *testing.T) {
 			fails: func(args []string) bool { return args[0] == "clone" },
 			out:   "fatal: '/repo.git' does not appear to be a git repository",
 			want:  "git clone /repo.git: fatal: '/repo.git' does not appear to be a git repository",
-			calls: 1, // the checkout is not attempted on a tree that was never made
+			calls: 1, // the fetch and the checkout are not attempted on a tree that was never made
+		},
+		{
+			name:  "the fetch",
+			fails: func(args []string) bool { return args[0] == "fetch" },
+			out:   "fatal: remote error: upload-pack: not our ref " + testSHA,
+			want:  "git fetch " + testSHA + ": fatal: remote error: upload-pack: not our ref " + testSHA,
+			calls: 2, // the checkout is not attempted without the commit in the clone
 		},
 		{
 			name:  "the checkout",
 			fails: func(args []string) bool { return args[0] == "checkout" },
 			out:   "fatal: reference is not a tree",
 			want:  "git checkout " + testSHA + ": fatal: reference is not a tree",
-			calls: 2,
+			calls: 3,
 		},
 	}
 	for _, tc := range cases {
@@ -466,10 +473,81 @@ func TestCloneWithReportsGitFailures(t *testing.T) {
 			if got, want := strings.Join(calls[0], " "), "clone --no-hardlinks --upload-pack git -c safe.directory='/repo.git' upload-pack /repo.git /work"; got != want {
 				t.Errorf("clone ran %q, want %q", got, want)
 			}
-			if tc.calls > 1 {
-				if got, want := strings.Join(calls[1], " "), "checkout --detach "+testSHA; got != want {
+			if tc.calls > 2 {
+				if got, want := strings.Join(calls[2], " "), "checkout --detach "+testSHA; got != want {
 					t.Errorf("checkout ran %q, want %q", got, want)
 				}
+			}
+		})
+	}
+}
+
+// TestCloneFetchesTheShaAfterTheCloneAndBeforeTheCheckout pins the order a sweep's
+// tree is made in, and the directory each step runs in: the clone runs where no
+// tree exists yet, and the fetch and the checkout run in the work tree the clone made.
+// Dropping the fetch leaves two calls and turns this red.
+func TestCloneFetchesTheShaAfterTheCloneAndBeforeTheCheckout(t *testing.T) {
+	t.Parallel()
+	type call struct {
+		dir  string
+		args []string
+	}
+	var calls []call
+	run := func(dir string, args ...string) (int, string) {
+		calls = append(calls, call{dir, args})
+		return 0, ""
+	}
+	if err := cloneWith(run, "/repo.git", testSHA, "/work"); err != nil {
+		t.Fatalf("cloneWith: %v", err)
+	}
+	if len(calls) != 3 {
+		t.Fatalf("git ran %d times, want 3 (clone, fetch, checkout): %q", len(calls), calls)
+	}
+	wantArgs := []string{
+		"clone --no-hardlinks --upload-pack git -c safe.directory='/repo.git' upload-pack /repo.git /work",
+		"fetch --upload-pack git -c safe.directory='/repo.git' upload-pack origin -- " + testSHA,
+		"checkout --detach " + testSHA,
+	}
+	for i, want := range wantArgs {
+		if got := strings.Join(calls[i].args, " "); got != want {
+			t.Errorf("git call %d ran %q, want %q", i, got, want)
+		}
+	}
+	if calls[0].dir != "" {
+		t.Errorf("clone ran in %q, want no directory", calls[0].dir)
+	}
+	for _, c := range calls[1:] {
+		if c.dir != "/work" {
+			t.Errorf("%s ran in %q, want the work tree /work", c.args[0], c.dir)
+		}
+	}
+}
+
+// TestCloneRefusesANonHexSHABeforeAnyGitCall: a sha that is not 40 lower-case hex
+// digits never reaches git's argv, so no git step runs for it.
+func TestCloneRefusesANonHexSHABeforeAnyGitCall(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ name, sha string }{
+		{"short", testSHA[:39]},
+		{"upper case", strings.ToUpper(testSHA)},
+		{"not hex", strings.Repeat("g", 40)},
+		{"flag-like", "--upload-pack=touch x"},
+		{"with a space", testSHA + " HEAD"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			calls := 0
+			run := func(_ string, _ ...string) (int, string) {
+				calls++
+				return 0, ""
+			}
+			err := cloneWith(run, "/repo.git", tc.sha, "/work")
+			if err == nil || !strings.Contains(err.Error(), "is not 40 lower-case hex digits") {
+				t.Fatalf("error = %v, want the refusal for %q", err, tc.sha)
+			}
+			if calls != 0 {
+				t.Errorf("git ran %d times for a refused sha, want 0", calls)
 			}
 		})
 	}
@@ -982,7 +1060,8 @@ func equal(got, want []string) bool {
 // TestCloneTrustsOnlyTheGivenRepositoryOnTheUploadPackProcess: the exception for a
 // mount owned by another user is on the upload-pack command, for exactly the path
 // the runner was handed and never a wildcard, and a path with a quote or a space
-// cannot end the quoting. A clone with no upload-pack exception, or a widened one,
+// cannot end the quoting. The fetch starts the same upload-pack process, so it carries
+// the same exception. A clone or fetch with no upload-pack exception, or a widened one,
 // turns this red.
 func TestCloneTrustsOnlyTheGivenRepositoryOnTheUploadPackProcess(t *testing.T) {
 	t.Parallel()
@@ -994,22 +1073,30 @@ func TestCloneTrustsOnlyTheGivenRepositoryOnTheUploadPackProcess(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var cloneArgs []string
+			var cloneArgs, fetchArgs []string
 			run := func(_ string, args ...string) (int, string) {
-				if args[0] == "clone" {
+				switch args[0] {
+				case "clone":
 					cloneArgs = args
+				case "fetch":
+					fetchArgs = args
 				}
 				return 0, ""
 			}
 			if err := cloneWith(run, tc.repo, testSHA, "/work"); err != nil {
 				t.Fatalf("cloneWith: %v", err)
 			}
-			i := slices.Index(cloneArgs, "--upload-pack")
-			if i < 0 || i+1 >= len(cloneArgs) || cloneArgs[i+1] != tc.want {
-				t.Fatalf("clone args %q: --upload-pack value is not %q", cloneArgs, tc.want)
-			}
-			if strings.Contains(strings.Join(cloneArgs, " "), "safe.directory=*") || strings.Contains(strings.Join(cloneArgs, " "), "safe.directory='*'") {
-				t.Errorf("clone args %q trust every repository", cloneArgs)
+			for _, step := range []struct {
+				name string
+				args []string
+			}{{"clone", cloneArgs}, {"fetch", fetchArgs}} {
+				i := slices.Index(step.args, "--upload-pack")
+				if i < 0 || i+1 >= len(step.args) || step.args[i+1] != tc.want {
+					t.Fatalf("%s args %q: --upload-pack value is not %q", step.name, step.args, tc.want)
+				}
+				if strings.Contains(strings.Join(step.args, " "), "safe.directory=*") || strings.Contains(strings.Join(step.args, " "), "safe.directory='*'") {
+					t.Errorf("%s args %q trust every repository", step.name, step.args)
+				}
 			}
 		})
 	}

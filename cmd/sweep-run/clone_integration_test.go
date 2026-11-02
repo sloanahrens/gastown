@@ -40,14 +40,44 @@ func TestIntegrationGitCloneChecksOutTheSHA(t *testing.T) {
 	}
 
 	// A commit the repository does not hold is the error the run records, not a
-	// tree the sweep would test at the wrong commit.
+	// tree the sweep would test at the wrong commit. The fetch is the step that
+	// refuses it, before any checkout runs.
 	missing := strings.Repeat("0", 40)
 	err := gitClone(repo, missing, filepath.Join(t.TempDir(), "missing"))
 	if err == nil {
 		t.Fatal("gitClone accepted a commit the repository does not hold")
 	}
-	if !strings.Contains(err.Error(), "git checkout "+missing) {
-		t.Errorf("error = %v, want it to name the failed checkout", err)
+	if !strings.Contains(err.Error(), "git fetch "+missing) {
+		t.Errorf("error = %v, want it to name the failed fetch", err)
+	}
+}
+
+// TestIntegrationGitCloneChecksOutACommitOnlyARemoteTrackingRefHolds clones, with
+// the real git, a repository whose only ref to the commit is refs/remotes/origin/main,
+// as the rig's bare repository holds its main. gitClone must check that commit out.
+// Under git 2.43 a local clone copies the whole object store, so a plain clone also
+// passes here: this test pins the path the fetch takes, not a failure without it.
+func TestIntegrationGitCloneChecksOutACommitOnlyARemoteTrackingRefHolds(t *testing.T) {
+	t.Parallel()
+	repo := t.TempDir()
+	runGitIn(t, repo, "init", "--quiet")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("tracked\n"), 0o644); err != nil {
+		t.Fatalf("write the fixture: %v", err)
+	}
+	runGitIn(t, repo, "add", "README.md")
+	runGitIn(t, repo, "-c", "user.email=sweep-run@example.invalid", "-c", "user.name=sweep-run",
+		"commit", "--quiet", "--no-gpg-sign", "-m", "tracked")
+	want := strings.TrimSpace(runGitIn(t, repo, "rev-parse", "HEAD"))
+	branch := strings.TrimSpace(runGitIn(t, repo, "symbolic-ref", "--short", "HEAD"))
+	runGitIn(t, repo, "update-ref", "refs/remotes/origin/main", want)
+	runGitIn(t, repo, "update-ref", "-d", "refs/heads/"+branch)
+
+	work := filepath.Join(t.TempDir(), "work")
+	if err := gitClone(repo, want, work); err != nil {
+		t.Fatalf("gitClone of a commit only refs/remotes/origin/main holds: %v", err)
+	}
+	if got := strings.TrimSpace(runGitIn(t, work, "rev-parse", "HEAD")); got != want {
+		t.Errorf("checked out %s, want %s", got, want)
 	}
 }
 

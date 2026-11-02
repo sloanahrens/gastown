@@ -572,18 +572,30 @@ type gitRunner func(dir string, args ...string) (int, string)
 // exercised by the integration tier (clone_integration_test.go).
 func gitClone(repo, sha, work string) error { return cloneWith(runGit, repo, sha, work) }
 
+// fullSHAPattern is a git commit name as git prints it: 40 lower-case hex digits.
+var fullSHAPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
 // cloneWith is gitClone over a runner: the bare repository cloned without hard
 // links, since the mount is read-only and the clone must not share its objects,
-// then the sha checked out detached.
+// then the sha fetched from origin by name and checked out detached, so the commit
+// comes from origin whichever ref holds it: the clone takes only refs/heads/* and
+// tags as refs (gt-2jhtv).
 //
 // The mount can be owned by another user, and git refuses to read a repository it
 // does not trust. The exception has to reach the git upload-pack process a local
 // clone starts to read it: a command-line "-c safe.directory" on the clone does
 // not reach that process and the clone still fails, so the exception rides the
-// upload-pack command itself, for this one path.
+// upload-pack command itself, for this one path. The fetch starts the same process,
+// so it carries the same exception.
 func cloneWith(run gitRunner, repo, sha, work string) error {
+	if !fullSHAPattern.MatchString(sha) {
+		return fmt.Errorf("sha %q is not 40 lower-case hex digits", sha)
+	}
 	if code, out := run("", "clone", "--no-hardlinks", "--upload-pack", uploadPackCommand(repo), repo, work); code != 0 {
 		return fmt.Errorf("git clone %s: %s", repo, out)
+	}
+	if code, out := run(work, "fetch", "--upload-pack", uploadPackCommand(repo), "origin", "--", sha); code != 0 {
+		return fmt.Errorf("git fetch %s: %s", sha, out)
 	}
 	if code, out := run(work, "checkout", "--detach", sha); code != 0 {
 		return fmt.Errorf("git checkout %s: %s", sha, out)
