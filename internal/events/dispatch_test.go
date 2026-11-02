@@ -536,7 +536,8 @@ func dispatchDoneEv(at, bead, status string) Event {
 }
 
 // An escalated seat submits nothing, so no submission repairs a lost done event
-// for it (gt-1m9gr) and its done event is the only record that the run is over.
+// for it (gt-1m9gr): the event, or the run-end block gt done writes on the work
+// bead for a sandbox seat whose log dies with it, is what says the run is over.
 // The next dispatch of the bead must start a fresh clock: a run left open dates
 // the next seat from the previous seat's sling, and the overrun guard stops it
 // at once on that clock (gt-ntvac).
@@ -586,11 +587,12 @@ func TestDispatchClockHandoffKeepsClock(t *testing.T) {
 	}
 }
 
-// A done event whose status the clock does not know is not read as a turn end:
-// the clock refuses to move a boundary on a value it cannot interpret, and a
-// run left long errs toward not stopping the next seat. A status of the wrong
-// type is the same refusal.
-func TestDispatchClockIgnoresAnUnknownDoneStatus(t *testing.T) {
+// A done event ends the run whatever status it carries. The status says which
+// exit ended the turn; it is not a condition on the end. A done whose status the
+// clock cannot read — an exit added later, or a value of another type — must
+// still end the run: leaving it open is the reading that hands the next seat the
+// previous seat's clock and stops it at once (gt-ntvac).
+func TestDispatchClockADoneWithAnyStatusEndsTheRun(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
 		name   string
@@ -598,11 +600,16 @@ func TestDispatchClockIgnoresAnUnknownDoneStatus(t *testing.T) {
 	}{
 		{name: "an exit the clock does not know", status: "PHASE_COMPLETE"},
 		{name: "a status that is not a string", status: 200},
+		{name: "no status at all", status: nil},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			done := dispatchDoneEv(t10, "gt-a", "")
-			done.Payload["status"] = tt.status
+			if tt.status == nil {
+				delete(done.Payload, "status")
+			} else {
+				done.Payload["status"] = tt.status
+			}
 			clock := NewDispatchClock()
 			clock.Add([]Event{
 				dispatchSlingEv(t9, "gt-a", "gastown/polecats/nux", "gastown/polecats/nux"),
@@ -610,8 +617,8 @@ func TestDispatchClockIgnoresAnUnknownDoneStatus(t *testing.T) {
 				dispatchSlingEv(t11, "gt-a", "gastown/polecats/capable", "gastown/polecats/capable"),
 			})
 			got, ok := clock.Start("gt-a")
-			if !ok || !got.Equal(mustTime(t, t9)) {
-				t.Errorf("start = %v (%t), want %s: an unreadable status does not end the run", got, ok, t9)
+			if !ok || !got.Equal(mustTime(t, t11)) {
+				t.Errorf("start = %v (%t), want %s: every done event ends the run", got, ok, t11)
 			}
 		})
 	}

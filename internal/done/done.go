@@ -1930,6 +1930,28 @@ func NotifyDoneEscalated(bd beads.Client, issueID string) {
 	fmt.Printf("%s Recorded escalation on %s\n", style.Bold.Render("✓"), issueID)
 }
 
+// RunEndAppender is the write RecordEscalatedRunEnd needs from a bead store;
+// beads.Client satisfies it. A caller's narrower fake can satisfy it too.
+type RunEndAppender interface {
+	AppendNotes(id, note string) error
+}
+
+// RecordEscalatedRunEnd appends the block that ends the bead's run to the work
+// bead's notes (land.FormatEscalatedEndNote). The done event says the same, but
+// a sandboxed seat writes its events into the skeleton town deleted with it
+// (gt-1m9gr), and an escalation submits nothing for the host to repair a lost
+// event from, so the bead's own notes are the copy that reaches the host. The
+// overrun guard dates the next seat's clock from it; without it the next seat
+// is stopped at once on the escalated seat's clock (gt-ntvac).
+func RecordEscalatedRunEnd(bd RunEndAppender, issueID, seat string, at time.Time) {
+	if bd == nil || issueID == "" {
+		return
+	}
+	if err := bd.AppendNotes(issueID, land.FormatEscalatedEndNote(seat, at)); err != nil {
+		style.PrintWarning("could not record the run end on %s: %v — the next seat may be stopped on this run's clock", issueID, err)
+	}
+}
+
 // noteVerifiedPushFailure records a push or landing check that could not be
 // verified on the bead. reopen sets the bead back to in_progress; the no-code
 // path passes false for a bead the polecat already closed, because reopening

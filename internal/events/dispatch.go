@@ -16,13 +16,15 @@ const SpecDispatchActor = "daemon/spec-dispatch"
 // belongs to the bead, not to one seat, so a bead handed from one seat to
 // another keeps the dispatch it first went out on and cannot restart its clock
 // by moving. A run-end event closes the run, so a bead dispatched again after
-// one starts over: TypeDone, whichever exit ended the seat's turn — a
-// submission (and so also a landed bead, whose landing follows its gt done), an
-// escalation that leaves the bead open for the next seat, or a deferral —
-// TypeBeadClosed, when the bead was closed by hand, and TypeOverrunStop, when
-// the overrun guard stopped the seat and handed the bead back (a stop ends that
-// run; the dispatch after it is policed afresh). A sling by the spec dispatcher to a DIFFERENT
-// seat than the bead's last sling ends the run before it too, though no event
+// one starts over: TypeDone, when the seat's own turn ended — it submits the
+// work (and so also lands or closes it), escalates, or defers, and the payload's
+// "status" says which (DoneStatus*), or carries none on an event written before
+// the status was logged; every done event ends the run — TypeBeadClosed, when
+// the bead was closed by hand, and
+// TypeOverrunStop, when the overrun guard stopped the seat and handed the bead
+// back (a stop ends that run; the dispatch after it is policed afresh). A sling
+// by the spec dispatcher to a DIFFERENT seat than the bead's last sling ends
+// the run before it too, though no event
 // recorded that end: the bead moved, so the run its earlier sling began has no
 // seat and its time is not the new seat's to answer for (gt-3ga5l). A repeat
 // sling to the seat that already holds the bead is the same run and keeps its
@@ -105,57 +107,20 @@ func (c *DispatchClock) add(ev Event) {
 			c.targets[bead] = target
 		}
 		c.addStart(bead, ts, target)
-	case TypeDone:
-		// A done event ends the seat's turn, and with it the bead's run:
-		// the seat submitted the work (COMPLETED), stopped on a blocker
-		// (ESCALATED, the bead left open), or deferred it (DEFERRED). A done
-		// written before the event recorded its exit carries no status and
-		// ended the turn as it always has. A status the clock does not know is
-		// not read as a turn end: the clock refuses to move a boundary on a
-		// value it cannot interpret, and the run left long errs toward not
-		// stopping the next seat, as the agent-bead fallback does.
-		//
-		// ESCALATED matters most here: an escalated seat submits nothing, so
-		// no submission repairs a lost done event for it (gt-1m9gr), and a run
-		// its done does not end is inherited by the next seat, which the
-		// overrun guard then stops on the previous seat's clock (gt-ntvac).
-		if !doneEndsRun(ev) {
-			return
-		}
-		at, err := runEndTime(ev)
-		if err != nil {
-			return
-		}
-		c.EndRun(bead, at)
-	case TypeBeadClosed, TypeOverrunStop:
+	case TypeDone, TypeBeadClosed, TypeOverrunStop:
+		// A done event ends the seat's turn whatever exit it records: the seat
+		// submitted the work, stopped on a blocker, or deferred it. The status
+		// the payload carries (DonePayloadWithStatus) says which, and it is not
+		// a condition on the end: a run left open is inherited by the next
+		// seat, which the overrun guard then stops on the previous seat's clock
+		// (gt-ntvac). A status the clock cannot read is still a done event, and
+		// ending the run is the reading that cannot stop a fresh seat.
 		at, err := runEndTime(ev)
 		if err != nil {
 			return
 		}
 		c.EndRun(bead, at)
 	}
-}
-
-// doneEndsRun reports whether a done event ended the seat's turn (add). The
-// payload's status is the exit type gt done recorded (DoneStatus*, from
-// DonePayloadWithStatus); a done with no status key was written before the
-// status was logged, and ended its turn as one always has. A status that is not
-// one of those strings — an unknown exit, or a value of another type — is a
-// turn end the clock cannot read, and it does not move the boundary.
-func doneEndsRun(ev Event) bool {
-	raw, present := ev.Payload["status"]
-	if !present {
-		return true
-	}
-	status, ok := raw.(string)
-	if !ok {
-		return false
-	}
-	switch status {
-	case DoneStatusCompleted, DoneStatusEscalated, DoneStatusDeferred:
-		return true
-	}
-	return false
 }
 
 // DispatchedBy returns when the run bead was working under at end was

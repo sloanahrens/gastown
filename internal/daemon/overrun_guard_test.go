@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
@@ -1125,6 +1126,106 @@ func TestOverrunSlungReader_ASubmissionEndsTheRun(t *testing.T) {
 				t.Errorf("slungAt = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// A seat that exits ESCALATED ends its run without submitting anything, and a
+// sandbox seat's done event dies with its town (gt-1m9gr). The bead's own
+// ESCALATED RUN END block is the end that reaches the host, so the next seat's
+// clock starts at its own sling; without it the seat inherits the escalated
+// run's clock and is stopped at once (gt-ntvac).
+func TestOverrunSlungReader_AnEscalatedEndStartsAFreshClock(t *testing.T) {
+	t.Parallel()
+	line := func(ts, typ, target string) string {
+		return fmt.Sprintf(`{"ts":%q,"source":"gt","type":%q,"actor":"x","payload":{"bead":"gt-aaa11","target":%q},"visibility":"both"}`,
+			ts, typ, target)
+	}
+	slungAgain := time.Date(2026, 11, 2, 8, 48, 0, 0, time.UTC)
+	escalated := time.Date(2026, 11, 2, 1, 34, 0, 0, time.UTC)
+	for _, tt := range []struct {
+		name         string
+		events       []string
+		escalatedEnd time.Time
+		submittedAt  time.Time
+		want         time.Time
+	}{
+		{
+			name: "the escalation ends the run the sling began",
+			events: []string{
+				line("2026-11-01T23:11:00Z", events.TypeSling, "gastown/polecats/dementus"),
+				line("2026-11-02T08:48:00Z", events.TypeSling, "gastown/polecats/furiosa"),
+			},
+			escalatedEnd: escalated,
+			want:         slungAgain,
+		},
+		{
+			// A submission at 01:00 and an escalation at 01:34: only the later
+			// end drops the 01:15 sling, so the max of the two is what dates
+			// the run.
+			name: "the later of a submission and an escalation ends the run",
+			events: []string{
+				line("2026-11-01T23:11:00Z", events.TypeSling, "gastown/polecats/dementus"),
+				line("2026-11-02T01:15:00Z", events.TypeSling, "gastown/polecats/nux"),
+				line("2026-11-02T08:48:00Z", events.TypeSling, "gastown/polecats/furiosa"),
+			},
+			submittedAt:  time.Date(2026, 11, 2, 1, 0, 0, 0, time.UTC),
+			escalatedEnd: escalated,
+			want:         slungAgain,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			body := strings.Join(tt.events, "\n") + "\n"
+			if err := os.WriteFile(filepath.Join(town, events.EventsFile), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0)}
+
+			r := &overrunSlungReader{d: d}
+			got, ok := r.slungAt(overrunSeat{
+				Rig: "gastown", Polecat: "furiosa", Bead: "gt-aaa11",
+				EscalatedEnd: tt.escalatedEnd, SubmittedAt: tt.submittedAt,
+			})
+			if !ok {
+				t.Fatal("slungAt: not found")
+			}
+			if !got.Equal(tt.want) {
+				t.Errorf("slungAt = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// The seat's bead read answers the escalation end too, from the block gt done
+// writes on an ESCALATED exit (gt-ntvac). The clock is dated from it by the
+// same read that answers the submission, so a re-slung bead is judged on its
+// own run.
+func TestOverrunSeatFor_ReadsTheEscalatedRunEnd(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	tm := newFakeTmux(newFixedClock())
+	d.tmux = tm
+	ended := time.Date(2026, 11, 2, 1, 34, 0, 0, time.UTC)
+	d.openWorkBeads = workBeadStore{
+		"gt-aaa11": {ID: "gt-aaa11", Notes: land.FormatEscalatedEndNote("gastown/polecats/dementus", ended)},
+	}.open
+
+	seatFor := supervisor.SeatFor("gastown", string(constants.RolePolecat), "furiosa")
+	if _, err := intent.Update(d.config.TownRoot, supervisor.IntentSeat(seatFor), func(r *intent.Record) error {
+		r.WorkBead = "gt-aaa11"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tm.addSession(session.PolecatSessionName(d.prefixRegistry().PrefixForRig("gastown"), "furiosa"), "node", time.Now())
+
+	seat, ok := d.overrunSeatFor(t.TempDir(), "gastown", "furiosa")
+	if !ok {
+		t.Fatalf("a readable seat was dropped:\n%s", buf.String())
+	}
+	if !seat.EscalatedEnd.Equal(ended) {
+		t.Errorf("EscalatedEnd = %v, want the ESCALATED RUN END block's time %v", seat.EscalatedEnd, ended)
 	}
 }
 

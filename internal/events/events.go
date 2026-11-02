@@ -72,8 +72,10 @@ const (
 	// TypeOverrunStop records the overrun guard ending a bead's run: it
 	// stopped the seat and handed the bead back, so the next dispatch of that
 	// bead is a new run with its own clock (DispatchStart). It is not
-	// TypeDone, which means the seat itself submitted, landed or closed the
-	// work: a stop is the guard's act, and gt log reads the two differently.
+	// TypeDone, which records the seat's own turn ending: its submission (which
+	// also lands or closes the work), an escalation, or a deferral, with the
+	// payload's status saying which. A stop is the guard's act, and gt log reads
+	// the two differently.
 	// Its payload may carry "at", the time the run ended when that is not the
 	// time the record was written (a stop retried on later ticks), so a
 	// repeated record does not move the boundary.
@@ -430,9 +432,11 @@ func HandoffPayload(subject string, toSession bool) map[string]interface{} {
 }
 
 // Exit statuses a done event's payload records, the values gt done accepts in
-// --status. They live here because the dispatch clock reads them and this
-// package cannot import internal/done (which imports this one); a test in
-// internal/done holds the two sets equal.
+// --status. They live here because this package cannot import internal/done
+// (which imports this one); a test in internal/done holds the two sets equal.
+// The status says how the seat's turn ended; it is not what ends the bead's run
+// — every done event does (DispatchStart) — so a reader that cannot read it
+// still knows the turn is over.
 const (
 	DoneStatusCompleted = "COMPLETED" // the seat submitted the work for landing
 	DoneStatusEscalated = "ESCALATED" // the seat stopped on a blocker, bead left open
@@ -448,8 +452,8 @@ func DonePayload(beadID, branch string) map[string]interface{} {
 
 // DonePayloadWithStatus creates a payload for a done event that records how the
 // seat's turn ended. status is the gt done exit type (DoneStatus*), "" to omit
-// it. The dispatch clock reads it to tell a run that ended from a move of the
-// bead between live seats (DispatchStart).
+// it. Readers use it to tell an escalation from a submission; the clock does not
+// need it, since every done event ends the bead's run (DispatchStart).
 func DonePayloadWithStatus(beadID, branch, status string) map[string]interface{} {
 	p := map[string]interface{}{
 		"bead":   beadID,
