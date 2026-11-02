@@ -1226,8 +1226,9 @@ Before it, these must be true:
 
 Expected on success: `launchd owns the town and has beaten twice.`, then
 `Removed the container side's containers with compose down; their volumes are
-kept.`, then `✓ Cutover to launchd done.` If a step fails, the command prints the state it
-left and the command to restore the other side, as it does going forward.
+kept.`, then `✓ Cutover to launchd done.` If a step fails, the command prints
+the state it left and the command to restore the other side, as it does
+going forward.
 
 The cutover removes both containers, the daemon's and `sweep-dind`'s. It stops
 the daemon container, then, once launchd has beaten twice, runs
@@ -1236,6 +1237,13 @@ That is `down` without `-v`, so the volumes are kept. If the `down` fails, the
 cutover prints the same command for the operator to run by hand. launchd still
 owns the town, so the rollback has succeeded and the cutover exits zero.
 Never add `-v` without the overseer.
+
+If the `down` cannot be built, nothing is run. That happens when the container
+settings do not name a compose project: both `daemon.container_name` and
+`daemon.compose_project` must be set, and a name that fails validation is
+refused the same way. The cutover then prints that the containers were not
+removed, with the reason, and asks for them to be removed by hand, keeping the
+volumes. launchd still owns the town, so the cutover exits zero.
 
 **After the rollback, switch the setting back.** The rollback does not switch
 `daemon.supervisor` either. Make the switch described in the cutover section
