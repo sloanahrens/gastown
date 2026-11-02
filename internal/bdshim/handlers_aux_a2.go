@@ -3,6 +3,8 @@ package bdshim
 import (
 	"errors"
 	"fmt"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // The second auxiliary handler: kv for a tracker rig (gt-p85pw.119). A tracker
@@ -121,13 +123,18 @@ func kvGetCommand(env Env, d Decision) int {
 }
 
 // getKV answers a key the store does not hold as bd does: bd prints nothing on
-// stdout for an unset key and exits 1, so the store's error is the whole
-// answer and the shim prints its own message naming the key. The goldens record
-// only that answer; a store that found a value is refused rather than printed
-// in a shape bd did not record.
+// stdout for an unset key and exits 1, so the shim prints its own message
+// naming the key. Only the store's not-found answer is that key-unset answer;
+// any other error is a read that failed, and the message says so rather than
+// reporting a broken store as a key that is merely unset. The goldens record
+// only the unset answer; a store that found a value is refused rather than
+// printed in a shape bd did not record.
 func getKV(env Env, st auxKvStore, prefix, key string) int {
 	if _, err := st.KVGet(key); err != nil {
-		return shimError(env, fmt.Errorf("kv get %s: %w", key, err))
+		if errors.Is(err, beads.ErrNotFound) {
+			return shimError(env, fmt.Errorf("kv get %s: %w", key, err))
+		}
+		return shimError(env, fmt.Errorf("kv get %s: reading the key: %w", key, err))
 	}
 	return shimError(env, fmt.Errorf("kv get of a set key is not implemented for tracker rig %s", prefix))
 }
