@@ -1874,7 +1874,11 @@ func (d *Daemon) tierSweepLoadRunnerImage(ctx context.Context, spec sweeprunner.
 		cmd := exec.CommandContext(ctx, "docker", "save", spec.Image) //nolint:gosec // G204: fixed program, argv built from a validated Spec, run directly and never through a shell
 		cmd.Stdout = stream
 		_, stderr, err := d.runCmd(cmd)
-		_ = pw.CloseWithError(err)
+		// The stream ends on EOF, not with the save's error: a save that failed
+		// still handed over the bytes it wrote, and the load reads them and
+		// judges its own input. The save's error is judged here unless the load
+		// failed too, whose error then came from that truncated input.
+		_ = pw.Close()
 		saveDone <- saveResult{stderr: stderr, err: err}
 	}()
 

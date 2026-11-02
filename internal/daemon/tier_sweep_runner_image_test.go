@@ -3,13 +3,16 @@ package daemon
 import (
 	"context"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/sweeprunner"
 )
 
@@ -325,6 +328,15 @@ func TestTierSweepFailedImageLoadIsRedNotStale(t *testing.T) {
 			want: "no such image on the default engine",
 		},
 		{
+			name: "the save fails after its stream started but the load read it whole",
+			set: func(f *tierSweepImageRunner) {
+				f.saveOut = "the image tar"
+				f.saveErrOut = "the default engine dropped the image at the end\n"
+				f.saveErr = exitErr(1)
+			},
+			want: "the default engine dropped the image at the end",
+		},
+		{
 			name: "the sweep engine cannot be asked",
 			set: func(f *tierSweepImageRunner) {
 				f.checkErrOut = "cannot connect to the sweep engine\n"
@@ -397,5 +409,35 @@ func TestTierSweepRunnerImageLoadWaitsForAnotherLoad(t *testing.T) {
 	}
 	if got := fake.callsMatching("save"); len(got) != 0 {
 		t.Errorf("save calls = %q, want none: another sweep holds the load lock", got)
+	}
+}
+
+// TestTierSweepRunnerImageLockDirectoryRefused: a lock the daemon cannot create
+// is a RED stage, never a load started without it.
+func TestTierSweepRunnerImageLockDirectoryRefused(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, _ := runnerImageDaemon(t, now, "")
+	// A file where the lock's directory belongs makes creating it fail.
+	dir := filepath.Join(constants.TownRuntimePath(d.config.TownRoot), "tier-sweep")
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var launches int
+	d.tierSweepSeams.launch = func(context.Context, tierSweepStage, sweeprunner.Spec) tierSweepLaunch {
+		launches++
+		return tierSweepLaunch{exitCode: 0}
+	}
+
+	st := tierSweepStage{tiers: []string{"integration", "race"}, slot: true, rig: "gastown", tested: runnerTestSHA, budget: time.Minute}
+	res := d.tierSweepRunStage(context.Background(), t.TempDir(), st)
+	if !res.ran || res.reason == "" || !strings.Contains(res.output, "lock directory") {
+		t.Fatalf("stage result = %+v, want it RED naming the lock directory", res)
+	}
+	if launches != 0 {
+		t.Errorf("launches = %d, want 0", launches)
 	}
 }
