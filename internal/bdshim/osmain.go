@@ -33,6 +33,9 @@ var handlers = map[string]Handler{
 	"label":    labelHandler,
 	"kv":       kvHandler,
 	"dep":      depHandler,
+	"config":   configHandler,
+	"events":   eventsHandler,
+	"stats":    statsHandler,
 }
 
 // OsMain is the production entry: this process's argv, environment and working
