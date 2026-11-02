@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"os"
-	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -76,48 +74,25 @@ func TestReadLandingsReadsTheExtractHeader(t *testing.T) {
 	}
 }
 
-// pythonStringList reads a Python module's NAME = [...] or NAME = {...} literal
-// as a list of strings, the other half of the contract the Go tables mirror.
-func pythonStringList(t *testing.T, file, name string) []string {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join("..", "..", "scripts", "town_metrics", file))
-	if err != nil {
-		t.Fatalf("read the Python extract's %s: %v", file, err)
-	}
-	literal := regexp.MustCompile(`(?s)` + regexp.QuoteMeta(name) + `\s*=\s*[\[{](.*?)[\]}]`).FindSubmatch(data)
-	if literal == nil {
-		t.Fatalf("%s has no %s = [...] literal", file, name)
-	}
-	var values []string
-	for _, quoted := range regexp.MustCompile(`"([^"]*)"`).FindAllSubmatch(literal[1], -1) {
-		values = append(values, string(quoted[1]))
-	}
-	return values
-}
-
-// pythonLandingColumns reads LANDING_COLUMNS out of the Python extract, the
-// other half of the contract landingColumns mirrors.
-func pythonLandingColumns(t *testing.T) []string {
-	t.Helper()
-	return pythonStringList(t, "tables.py", "LANDING_COLUMNS")
-}
-
-// TestLandingColumnsKeepThePythonExtractsHeader: the Python extract's columns
-// are the head of landingColumns, in its order, and the stage columns this join
-// appends are the only ones after them. The Python reference stays at the
-// header it was ported with, so the Go contract extends it append-only: an
-// existing column keeps its name and place (gt-p9pok).
-func TestLandingColumnsKeepThePythonExtractsHeader(t *testing.T) {
+// TestLandingColumnsKeepThePinnedHeader: the pinned column list is the head of
+// landingColumns, in its order, and the stage columns this join appends are the
+// only ones after them. The pinned reference stays at the header the extract was
+// ported with, so the Go contract extends it append-only: an existing column
+// keeps its name and place (gt-p9pok).
+func TestLandingColumnsKeepThePinnedHeader(t *testing.T) {
 	t.Parallel()
-	legacy := pythonLandingColumns(t)
-	if len(legacy) == 0 {
-		t.Fatal("read no columns out of tables.py")
+	legacy := []string{
+		"bead", "rig", "landed_at", "week", "route", "om_verdict", "gate_result",
+		"lines_added", "lines_deleted", "lines_total", "files_touched",
+		"file_entropy", "package_entropy", "attempts", "rejected_before_landing",
+		"manual_rescue", "reached_overrun_stop", "unreadable", "type", "priority",
+		"shaped", "label_count", "model", "om_threshold", "dominant_model",
 	}
 	if len(landingColumns) < len(legacy) {
-		t.Fatalf("landingColumns has %d columns, want at least the Python extract's %d", len(landingColumns), len(legacy))
+		t.Fatalf("landingColumns has %d columns, want at least the pinned %d", len(landingColumns), len(legacy))
 	}
 	if got := landingColumns[:len(legacy)]; !slices.Equal(got, legacy) {
-		t.Errorf("landingColumns starts %v, want the Python extract's %v", got, legacy)
+		t.Errorf("landingColumns starts %v, want the pinned header %v", got, legacy)
 	}
 	if got := landingColumns[len(legacy):]; !slices.Equal(got, appendedLandingColumns) {
 		t.Errorf("appended columns = %v, want %v", got, appendedLandingColumns)

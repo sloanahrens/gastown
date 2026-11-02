@@ -6,16 +6,20 @@ import (
 	"testing"
 )
 
-// TestWeeklyColumnsMatchThePythonExtract checks weekly.csv's header is the
-// Python extract's WEEKLY_COLUMNS, in its order.
-func TestWeeklyColumnsMatchThePythonExtract(t *testing.T) {
+// TestWeeklyColumnsAreThePinnedHeader checks weekly.csv's header is the pinned
+// column list, in its order: the header the extract was ported with, pinned
+// here so a column that is added, removed or moved fails the test.
+func TestWeeklyColumnsAreThePinnedHeader(t *testing.T) {
 	t.Parallel()
-	want := pythonStringList(t, "metrics.py", "WEEKLY_COLUMNS")
-	if len(want) == 0 {
-		t.Fatal("read no columns out of metrics.py")
+	want := []string{
+		"week", "rig", "thin", "landings", "unreadable", "size_median", "size_p90", "file_entropy_mean",
+		"package_entropy_mean", "attempts_mean", "rejected_share", "first_try_share", "manual_rescue_count",
+		"h_labels", "h_rigs", "h_types", "handoff_bytes_total", "handoff_bytes_median", "sessions_median",
+		"rho_numerator", "rho_denominator", "rho", "dependency_density", "rejections", "conflict_gate_share",
+		"unknown_share", "mode_shift", "om_threshold", "dominant_model",
 	}
 	if !slices.Equal(WeeklyColumns, want) {
-		t.Errorf("WeeklyColumns = %v, want the extract's %v", WeeklyColumns, want)
+		t.Errorf("WeeklyColumns = %v, want the pinned header %v", WeeklyColumns, want)
 	}
 }
 

@@ -199,16 +199,17 @@ func extractLanding(t *testing.T, rows []Row, bead string) Row {
 	return nil
 }
 
-// TestBeadColumnsMatchThePythonExtract checks beads.csv's header is the Python
-// extract's BEAD_COLUMNS, in its order.
-func TestBeadColumnsMatchThePythonExtract(t *testing.T) {
+// TestBeadColumnsAreThePinnedHeader checks beads.csv's header is the pinned
+// column list, in its order: the header the extract was ported with, pinned
+// here so a column that is added, removed or moved fails the test.
+func TestBeadColumnsAreThePinnedHeader(t *testing.T) {
 	t.Parallel()
-	want := pythonStringList(t, "cli.py", "BEAD_COLUMNS")
-	if len(want) == 0 {
-		t.Fatal("read no columns out of cli.py")
+	want := []string{
+		"id", "rig", "created_at", "closed_at", "type", "labels", "dependency_count",
+		"comment_count", "handoff_bytes", "sessions",
 	}
 	if !slices.Equal(beadColumns, want) {
-		t.Errorf("beadColumns = %v, want the extract's %v", beadColumns, want)
+		t.Errorf("beadColumns = %v, want the pinned header %v", beadColumns, want)
 	}
 }
 

@@ -212,23 +212,23 @@ func TestExplainOnlyContainsOnlyPostHocColumns(t *testing.T) {
 	}
 }
 
-// TestExplainOnlyColumnsExtendThePythonExtracts checks the sidecar's keys are
-// the Python extract's EXPLAIN_ONLY set plus the stage columns this join
-// appends: the Python reference stays at the ported schema, and the mango stage
-// drops exactly the explain-only columns from its predictors.
-func TestExplainOnlyColumnsExtendThePythonExtracts(t *testing.T) {
+// TestExplainOnlyColumnsExtendThePinnedSet checks the sidecar's keys are the
+// pinned EXPLAIN_ONLY set plus the stage columns this join appends: the pinned
+// reference stays at the ported schema, and the mango stage drops exactly the
+// explain-only columns from its predictors.
+func TestExplainOnlyColumnsExtendThePinnedSet(t *testing.T) {
 	t.Parallel()
-	legacy := pythonStringList(t, "tables.py", "EXPLAIN_ONLY")
-	if len(legacy) == 0 {
-		t.Fatal("read no columns out of tables.py")
+	legacy := []string{
+		"lines_added", "lines_deleted", "lines_total", "files_touched", "file_entropy", "package_entropy",
+		"attempts", "gate_result", "om_verdict", "unreadable",
 	}
 	for _, column := range legacy {
 		if !slices.Contains(explainOnlyColumns, column) {
-			t.Errorf("explainOnlyColumns omits %q, which the Python extract marks explain-only", column)
+			t.Errorf("explainOnlyColumns omits %q, which the pinned set marks explain-only", column)
 		}
 	}
 	if got, want := len(explainOnlyColumns), len(legacy)+len(appendedLandingColumns); got != want {
-		t.Fatalf("explainOnlyColumns has %d columns, want the Python extract's %d plus %d appended",
+		t.Fatalf("explainOnlyColumns has %d columns, want the pinned %d plus %d appended",
 			got, len(legacy), len(appendedLandingColumns))
 	}
 	for _, column := range appendedLandingColumns {
