@@ -313,6 +313,20 @@ func TestFoldChoiceFromBeforeTheKeysStillApplies(t *testing.T) {
 	wantFold(t, both.fold(t, "polecats"), "polecats", false)
 }
 
+// The Work section the split removed saved its fold under the key "work" and
+// under its old heading text. Neither applies to Polecats or Beads, so a reader
+// who had folded the old panel still finds the two new panels open (gt-sfpm6).
+func TestFoldOldSavedWorkFoldDoesNotHideThePolecatsAndBeadsPanels(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOMStoring(t, map[string]string{
+		"gt-fold":      `{"work":true}`,
+		"gt-collapsed": `{"Work":true,"Work queue":true}`,
+	})
+	wantFold(t, dom.fold(t, "polecats"), "polecats", false)
+	wantFold(t, dom.fold(t, "beads"), "beads", false)
+}
+
 // Storage that throws — private mode, a locked-down browser — leaves the page
 // on its defaults and folding working for the session, and saves nothing it
 // cannot save.
