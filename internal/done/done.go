@@ -932,6 +932,16 @@ type doneRun struct {
 	sourceBD    beads.Client
 	opts        doneOptions
 	deps        doneSubmitDeps
+	// out is where a submission prints its outcome; nil means os.Stdout.
+	out io.Writer
+}
+
+// stdout is the writer a submission prints its outcome to.
+func (r *doneRun) stdout() io.Writer {
+	if r.out != nil {
+		return r.out
+	}
+	return os.Stdout
 }
 
 // resolveLandingRemote is the rig's configured landing remote, which can fail
@@ -1384,12 +1394,12 @@ func submitForLanding(r *doneRun) error {
 	}
 	recordSubmittedIntent(r)
 
-	fmt.Printf("%s Submitted for landing\n", style.Bold.Render("✓"))
-	fmt.Printf("  Branch: %s @ %s\n", r.branch, ShortSHA(head))
-	fmt.Printf("  Target: %s\n", target)
-	fmt.Printf("  Issue:  %s\n", r.issueID)
-	fmt.Printf("  Worker: %s\n\n", r.polecatName)
-	fmt.Printf("%s\n", style.Dim.Render("The daemon's landing worker merges it after gating the merged tree."))
+	fmt.Fprintf(r.stdout(), "%s Submitted for landing\n", style.Bold.Render("✓"))
+	fmt.Fprintf(r.stdout(), "  Branch: %s @ %s\n", r.branch, ShortSHA(head))
+	fmt.Fprintf(r.stdout(), "  Target: %s\n", target)
+	fmt.Fprintf(r.stdout(), "  Issue:  %s\n", r.issueID)
+	fmt.Fprintf(r.stdout(), "  Worker: %s\n\n", r.polecatName)
+	fmt.Fprintf(r.stdout(), "%s\n", style.Dim.Render("The daemon's landing worker merges it after gating the merged tree."))
 	return nil
 }
 

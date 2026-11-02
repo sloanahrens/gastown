@@ -383,14 +383,21 @@ func submitCrewForLanding(r *doneRun) error {
 	// release its seat rather than sit on work another branch is landing.
 	standDownCrewHolder(r, issue, bd, head)
 
-	fmt.Printf("%s Submitted for landing\n", style.Bold.Render("✓"))
-	fmt.Printf("  Bead:   %s\n", r.issueID)
-	fmt.Printf("  Branch: %s @ %s\n", r.branch, ShortSHA(head))
-	fmt.Printf("  Target: %s\n", target)
-	fmt.Printf("  Actor:  %s\n\n", r.sender)
-	fmt.Printf("%s\n", style.Dim.Render("The daemon's landing worker merges it after gating the merged tree."))
+	fmt.Fprintf(r.stdout(), "%s Submitted for landing\n", style.Bold.Render("✓"))
+	fmt.Fprintf(r.stdout(), "  Bead:   %s\n", r.issueID)
+	fmt.Fprintf(r.stdout(), "  Branch: %s @ %s\n", r.branch, ShortSHA(head))
+	fmt.Fprintf(r.stdout(), "  Target: %s\n", target)
+	fmt.Fprintf(r.stdout(), "  Actor:  %s\n\n", r.sender)
+	fmt.Fprintf(r.stdout(), "%s\n", style.Dim.Render("The daemon's landing worker merges it after gating the merged tree."))
+	fmt.Fprintln(r.stdout(), crewNextStepLine)
 	return nil
 }
+
+// crewNextStepLine is the last line a crew submission prints. A crew session
+// that has forgotten its workflow still reads what to do next in the output
+// it just got: keep building, and when there is nothing to build, wait for
+// the landing outcomes (gt-2ass0).
+const crewNextStepLine = "Next: keep building. When you have nothing to build, run `gt land wait` to print the outcome of your landings."
 
 // firstNonEmpty is the first of values that is not blank, trimmed.
 func firstNonEmpty(values ...string) string {

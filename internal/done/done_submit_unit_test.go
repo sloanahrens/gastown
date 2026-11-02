@@ -1,6 +1,7 @@
 package done
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -453,6 +454,27 @@ func TestSubmitRebasesGatesPushesAndMarksReady(t *testing.T) {
 	}
 	if h.r.cleanupStatus != cleanupStatusAfterSuccessfulPush("unpushed") {
 		t.Errorf("cleanup status = %q after a verified push", h.r.cleanupStatus)
+	}
+}
+
+// TestSubmitOutputHasNoNextStep: a polecat's gt done output never names
+// gt land wait, which only a crew session is told to run, and still ends with
+// the landing worker line (gt-2ass0).
+func TestSubmitOutputHasNoNextStep(t *testing.T) {
+	t.Parallel()
+	h := newSubmitHarness(t)
+	var out bytes.Buffer
+	h.r.out = &out
+	if err := h.submit(); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	text := out.String()
+	if strings.Contains(text, "gt land wait") {
+		t.Errorf("polecat output names gt land wait:\n%s", text)
+	}
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	if last := lines[len(lines)-1]; !strings.Contains(last, "The daemon's landing worker merges it") {
+		t.Errorf("last polecat output line = %q, want the landing worker line", last)
 	}
 }
 
