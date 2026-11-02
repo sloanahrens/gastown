@@ -36,6 +36,11 @@ const (
 	RepoMount = "/repo.git"
 	// OutputDir is where the run writes result.json and its logs.
 	OutputDir = "/out"
+	// LogsDirName is the directory under OutputDir the run writes each unit's
+	// own log into. The Docker backend leaves it on the host under the run
+	// directory; the Kubernetes backend copies it out of the output claim
+	// before its teardown removes the claim (gt-4lj2q).
+	LogsDirName = "logs"
 	// RunnerCommand is the program the runner container runs: the sweep-run the
 	// polecat image carries (deploy/polecat/Dockerfile copies it to this path). Both
 	// backends name it, because the image's own default is bash, which exits at once

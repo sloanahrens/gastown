@@ -802,8 +802,8 @@ func TestK8sPollCopiesTheResultOutOfTheClaim(t *testing.T) {
 		t.Errorf("the reader's volumes = %+v, want only the output claim, read-only", pod.Spec.Volumes)
 	}
 
-	if len(plan.Poll.Collect) != 3 {
-		t.Fatalf("the copy renders %d steps, want the reader's apply, its readiness wait and the copy", len(plan.Poll.Collect))
+	if len(plan.Poll.Collect) != 4 {
+		t.Fatalf("the copy renders %d steps, want the reader's apply, its readiness wait, the result copy and the logs copy", len(plan.Poll.Collect))
 	}
 	dst := filepath.Join(spec.OutDir, ResultFileName)
 	if cp := plan.Poll.Collect[2].Argv; !slices.Contains(cp, "cp") || !slices.Contains(cp, readerName(spec)+":"+OutputDir+"/"+ResultFileName) || cp[len(cp)-1] != dst {
@@ -811,6 +811,45 @@ func TestK8sPollCopiesTheResultOutOfTheClaim(t *testing.T) {
 	}
 	if got := plan.Poll.Status.Argv; !slices.Contains(got, "get") || !slices.Contains(got, "job") || !slices.Contains(got, plan.Job.Metadata.Name) {
 		t.Errorf("the status reads %v, want the Job's status", got)
+	}
+}
+
+// TestK8sCollectCopiesTheLogsDirectory holds the per-unit logs to the same
+// reader: the whole /out/logs directory is copied into the run's host directory
+// after result.json, and removed from the claim only after that copy, so a RED
+// summary's log path resolves on the host (gt-4lj2q).
+func TestK8sCollectCopiesTheLogsDirectory(t *testing.T) {
+	t.Parallel()
+	spec := goldenSpec()
+	plan, err := Kubernetes{}.Render(spec)
+	if err != nil {
+		t.Fatalf("rendering the golden spec: %v", err)
+	}
+	if plan.Poll == nil {
+		t.Fatal("the Kubernetes plan renders no poll; the run's logs are never copied out")
+	}
+	if len(plan.Poll.Collect) < 4 {
+		t.Fatalf("the copy renders %d steps, want the logs copy after the result copy: %+v", len(plan.Poll.Collect), plan.Poll.Collect)
+	}
+	src := readerName(spec) + ":" + OutputDir + "/" + LogsDirName
+	dst := filepath.Join(spec.OutDir, LogsDirName)
+	at := slices.IndexFunc(plan.Poll.Collect, func(step Step) bool {
+		return slices.Contains(step.Argv, "cp") && slices.Contains(step.Argv, src) && step.Argv[len(step.Argv)-1] == dst
+	})
+	if at < 0 {
+		t.Fatalf("the copy steps %+v hold no kubectl cp of %s into %q", plan.Poll.Collect, src, dst)
+	}
+	resultCopy := slices.IndexFunc(plan.Poll.Collect, func(step Step) bool {
+		return slices.Contains(step.Argv, "cp") && slices.Contains(step.Argv, readerName(spec)+":"+OutputDir+"/"+ResultFileName)
+	})
+	if resultCopy < 0 {
+		t.Fatalf("the copy steps %+v hold no kubectl cp of %s", plan.Poll.Collect, ResultFileName)
+	}
+	if at < resultCopy {
+		t.Errorf("the logs copy is step %d, before the result copy at %d; the result decides whether the run ended", at, resultCopy)
+	}
+	if !plan.Poll.Collect[at].MissingSourceOK {
+		t.Error("the logs copy does not tolerate an absent /out/logs; a run that wrote no logs would be RED")
 	}
 }
 

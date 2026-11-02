@@ -2249,9 +2249,9 @@ func (d *Daemon) tierSweepRunnerCollect(ctx context.Context, spec sweeprunner.Sp
 	}
 	out, code := tierSweepRunSteps(ctx, d, plan.Poll.Collect)
 	if code != 0 {
-		d.logger.Printf("tier_sweep: %s: copying run %s's result out (exit %d); last lines:\n%s",
+		d.logger.Printf("tier_sweep: %s: copying run %s's result and logs out (exit %d); last lines:\n%s",
 			spec.Rig, spec.RunID, code, lastLines(out))
-		return false, fmt.Errorf("copying the run's result out of its output claim (exit %d)", code)
+		return false, fmt.Errorf("copying the run's result and logs out of its output claim (exit %d)", code)
 	}
 	return true, nil
 }
@@ -2301,7 +2301,7 @@ func (d *Daemon) tierSweepRunnerStageResult(st tierSweepStage, spec sweeprunner.
 	}
 	summaries := make(map[string]string, len(res.Tiers))
 	for _, tier := range res.Tiers {
-		summaries[tier.Tier] = tier.Summary
+		summaries[tier.Tier] = tierSweepRunnerHostSummary(tier.Summary, spec.OutDir)
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "sweep-run: %s@%s in %s finished at %s\n", spec.Rig, shortSHA(spec.SHA), spec.Image, res.Finished.Format(time.RFC3339))
@@ -2332,6 +2332,26 @@ func (d *Daemon) tierSweepRunnerStageResult(st tierSweepStage, spec sweeprunner.
 		exitCode = tierSweepRedExit
 	}
 	return tierSweepStageResult{output: b.String(), exitCode: exitCode, ran: true}
+}
+
+// tierSweepRunnerHostSummary returns a tier's summary line with its "(logs
+// <dir>)" group naming the run's host directory. The run prints the engine's
+// OutputDir, while the same tree lives on the host at Spec.OutDir: the Docker
+// backend mounts it there, and the Kubernetes backend copies it out before the
+// teardown removes the output claim, so a path left as printed names nothing
+// once the run is taken down (gt-4lj2q). A line with no group, or one naming a
+// directory outside OutputDir, is returned as printed: the daemon has no host
+// path for it.
+func tierSweepRunnerHostSummary(summary, outDir string) string {
+	m := tierSweepSummaryRE.FindStringSubmatch(strings.TrimRight(summary, "\r"))
+	if m == nil {
+		return summary
+	}
+	rel, ok := strings.CutPrefix(m[7], sweeprunner.OutputDir+"/")
+	if !ok || rel == "" {
+		return summary
+	}
+	return strings.Replace(summary, "(logs "+m[7]+")", "(logs "+filepath.Join(outDir, rel)+")", 1)
 }
 
 // tierSweepRunnerBackend builds the backend the config names. A backend the
@@ -2502,6 +2522,12 @@ func tierSweepRunSteps(ctx context.Context, d *Daemon, steps []sweeprunner.Step)
 		stdout, stderr, err := d.runCmd(cmd)
 		b.Write(stdout)
 		b.Write(stderr)
+		if err != nil && step.MissingSource(slices.Concat(stdout, stderr)) {
+			// The source this step copies is absent, which the step declares
+			// is not a failure: a run that wrote no logs leaves /out/logs
+			// absent (gt-4lj2q). Any other failure still stops the run.
+			continue
+		}
 		if err != nil {
 			code := -1
 			var exitErr *exec.ExitError
