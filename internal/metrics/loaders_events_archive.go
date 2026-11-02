@@ -25,7 +25,9 @@ import (
 //
 // Every row the loader refuses is recorded in the Dropped log with its file and
 // row number, so the row counts a report publishes always account for the
-// archive.
+// archive. A file the loader cannot read in full is recorded as failed and
+// returned as an error beside the rows that did load, so a caller never
+// publishes a partial archive as complete.
 
 const (
 	eventsArchivePrefix = "events-"
@@ -99,9 +101,13 @@ type BeadChangeRow struct {
 // LoadBeadChangesArchive reads every events-*.csv.gz file directly under dir of
 // fsys and returns one BeadChangeRow per database and issue id, sorted by
 // database then issue id. A row it cannot parse is recorded in dropped and the
-// other rows still load; a file it cannot read is recorded as failed. A
-// directory that cannot be listed is an error, since no rows there does not
-// mean no changes were archived.
+// other rows still load; a file it cannot read is recorded as failed, and the
+// rows that did load are returned beside an error naming that file. A directory
+// that cannot be listed is an error, since no rows there does not mean no
+// changes were archived.
+//
+// Only the files this load failed count against it: a caller may share one
+// Dropped between loaders.
 func LoadBeadChangesArchive(fsys fs.FS, dir string, dropped *Dropped) ([]BeadChangeRow, error) {
 	if fsys == nil {
 		return nil, errors.New("events archive: nil filesystem")
@@ -109,6 +115,7 @@ func LoadBeadChangesArchive(fsys fs.FS, dir string, dropped *Dropped) ([]BeadCha
 	if dropped == nil {
 		dropped = &Dropped{}
 	}
+	failedBefore := len(dropped.Failed)
 	entries, err := fs.ReadDir(fsys, dir)
 	if err != nil {
 		return nil, fmt.Errorf("events archive: listing %s: %w", dir, err)
@@ -137,6 +144,10 @@ func LoadBeadChangesArchive(fsys fs.FS, dir string, dropped *Dropped) ([]BeadCha
 		}
 		return rows[i].IssueID < rows[j].IssueID
 	})
+	if failed := dropped.Failed[failedBefore:]; len(failed) > 0 {
+		return rows, fmt.Errorf("events archive: %d file(s) not read in full, rows are partial: %s",
+			len(failed), strings.Join(failed, ", "))
+	}
 	return rows, nil
 }
 
@@ -244,12 +255,16 @@ func readEventsArchiveCSV(r *csv.Reader, source, database string, aggs map[strin
 			return
 		}
 		if err != nil {
-			// A record of the wrong width is one bad row and the reader moves
-			// on. Any other read error — a truncated gzip, an unreadable
-			// stream — leaves the reader at the same error for every later
-			// call, so the file stops there and is recorded as failed rather
-			// than looped over.
-			if errors.Is(err, csv.ErrFieldCount) {
+			// encoding/csv reports a malformed record — a wrong field count, a
+			// stray quote — as a *csv.ParseError, which is one bad record, not
+			// a failed stream: the reader carries on after it (an unterminated
+			// quoted field runs to the next quote, or the file's end), so the
+			// row is dropped and the rows the reader can still read load. Any
+			// other read error — a truncated gzip, an unreadable stream — is
+			// returned by every later call, so the file stops there and is
+			// recorded as failed rather than looped over.
+			var parseErr *csv.ParseError
+			if errors.As(err, &parseErr) {
 				dropped.Add(source, fmt.Sprintf("row %d: %v", n, err))
 				continue
 			}
@@ -281,6 +296,9 @@ type archiveEvent struct {
 	atText  string
 	changed map[string]json.RawMessage
 	old     map[string]json.RawMessage
+	// oldCreatedAt is the creation stamp inside old_value, parsed so an
+	// unreadable one refuses the row rather than being skipped.
+	oldCreatedAt time.Time
 }
 
 // parseArchiveEvent validates one CSV record and decodes the JSON the rollup
@@ -326,7 +344,8 @@ func parseArchiveEvent(rec []string, columns map[string]int) (archiveEvent, erro
 		}
 		// Both fields are read as strings: description becomes the row's filed
 		// description, created_at the creation stamp when no created event
-		// exists. A value of another JSON type is corrupt, not empty.
+		// exists. A value of another JSON type, or a created_at that is not a
+		// stamp, is corrupt, not empty.
 		for _, name := range []string{"description", "created_at"} {
 			raw, ok := ev.old[name]
 			if !ok {
@@ -336,6 +355,13 @@ func parseArchiveEvent(rec []string, columns map[string]int) (archiveEvent, erro
 			if err := json.Unmarshal(raw, &s); err != nil {
 				return archiveEvent{}, fmt.Errorf("old_value.%s is not a string", name)
 			}
+		}
+		if created := archiveStringField(ev.old, "created_at"); created != "" {
+			at, err := parseArchiveTimestamp(created)
+			if err != nil {
+				return archiveEvent{}, fmt.Errorf("old_value.created_at %q: invalid timestamp", created)
+			}
+			ev.oldCreatedAt = at
 		}
 	}
 	return ev, nil
@@ -387,12 +413,12 @@ func (a *beadChangeAgg) apply(ev archiveEvent) {
 				a.descriptionText = archiveStringField(ev.old, "description")
 			}
 		}
-		if a.fallbackCreatedAtText == "" && ev.old != nil {
-			if created := archiveStringField(ev.old, "created_at"); created != "" {
-				if at, err := parseArchiveTimestamp(created); err == nil {
-					a.fallbackCreatedAt = at
-					a.fallbackCreatedAtText = created
-				}
+		// The fallback is the earliest creation stamp the old_value rows carry,
+		// not the first one the file happens to list: rows may be out of order.
+		if !ev.oldCreatedAt.IsZero() {
+			if a.fallbackCreatedAtText == "" || ev.oldCreatedAt.Before(a.fallbackCreatedAt) {
+				a.fallbackCreatedAt = ev.oldCreatedAt
+				a.fallbackCreatedAtText = archiveStringField(ev.old, "created_at")
 			}
 		}
 	case "claimed":
@@ -443,7 +469,17 @@ func archiveStringField(fields map[string]json.RawMessage, name string) string {
 // database then issue id and then by the remaining cells, so the same rows in
 // any input order produce byte-identical output. A bead text cell is written as
 // the archive carried it, quoted when it holds a comma, a quote or a newline.
-func WriteBeadChangesCSV(w io.Writer, rows []BeadChangeRow) error {
+//
+// When dropped names a failed source, the writer refuses and writes nothing:
+// rows from that source are missing from rows, and a CSV that silently leaves
+// out a database would read as complete. Pass the log the load recorded into,
+// not one shared with other loaders; dropped may be nil when the rows did not
+// come from an archive load.
+func WriteBeadChangesCSV(w io.Writer, rows []BeadChangeRow, dropped *Dropped) error {
+	if dropped != nil && len(dropped.Failed) > 0 {
+		return fmt.Errorf("bead changes csv: partial archive would publish as complete, unreadable: %s",
+			strings.Join(dropped.Failed, ", "))
+	}
 	sorted := append([]BeadChangeRow(nil), rows...)
 	sort.SliceStable(sorted, func(i, j int) bool { return beadChangeLess(sorted[i], sorted[j]) })
 	if err := writeRecord(w, BeadChangeColumns); err != nil {
