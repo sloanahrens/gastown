@@ -109,8 +109,9 @@ func noHostProcess(t *testing.T, f *fakeHost) {
 
 // TestExternalContainerStatusUsesTheListenerNotThePid: with
 // dolt.external_container set, IsRunning is true when the fake listener answers
-// a SQL ping and false when it does not, even while a pid file names a live
-// dolt sql-server listening on the port, and no pid file is read or written.
+// a SQL ping and false (returning the ping failure) when it does not, even
+// while a pid file names a live dolt sql-server listening on the port, and no
+// pid file is read or written.
 func TestExternalContainerStatusUsesTheListenerNotThePid(t *testing.T) {
 	t.Parallel()
 	const port = 3307
@@ -132,8 +133,10 @@ func TestExternalContainerStatusUsesTheListenerNotThePid(t *testing.T) {
 	}
 
 	running, gotPID, err := h.IsRunning(townRoot)
-	if err != nil {
-		t.Fatalf("IsRunning with the container's listener down: %v", err)
+	if err == nil {
+		t.Error("IsRunning with the container's listener down returned no error: the ping failure must be reported, not read as a stopped server")
+	} else if !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("IsRunning error = %q, want the ping failure", err)
 	}
 	if running || gotPID != 0 {
 		t.Errorf("IsRunning = (%v, %d) with the listener down, want (false, 0): the pid file and port must not answer for a container", running, gotPID)
@@ -214,6 +217,26 @@ func TestExternalContainerStartAndStopCallDocker(t *testing.T) {
 		}
 		if strings.Contains(err.Error(), "No such container") {
 			t.Errorf("error %q carries docker's captured output", err)
+		}
+		noHostProcess(t, f)
+	})
+
+	t.Run("start does not blame a missing container for a different exit", func(t *testing.T) {
+		t.Parallel()
+		townRoot := externalContainerTown(t, port, name)
+		f := newFakeHost()
+		h := f.host()
+		f.on("docker start "+name, fakeReply{stderr: "Error response from daemon: Ports are not available: port is already allocated", code: 1})
+
+		err := h.Start(townRoot)
+		if err == nil {
+			t.Fatal("Start with a docker start that exited non-zero succeeded, want an error")
+		}
+		if strings.Contains(err.Error(), "must exist") {
+			t.Errorf("error %q attributes a port clash to a missing container", err)
+		}
+		if !strings.Contains(err.Error(), "docker start "+name) {
+			t.Errorf("error %q does not name the failed command", err)
 		}
 		noHostProcess(t, f)
 	})

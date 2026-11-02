@@ -774,12 +774,15 @@ func (h *host) IsRunning(townRoot string) (bool, int, error) {
 	// A Dolt gt runs in a Docker container (dolt.external_container) is not
 	// this host's process: only its listener can answer, so a SQL ping is the
 	// status. No pid file is read or removed, no ps lookup runs, and no pid is
-	// returned (gt-xeb1x).
+	// returned (gt-xeb1x). A failed ping is returned rather than folded into
+	// "not running": a stopped container and a server that answered wrongly
+	// both fail the ping, so the daemon reports the failure instead of
+	// presenting it as a stopped server (gt-0v0bg).
 	if name, err := config.ExternalContainerSetting(); err != nil {
 		return false, 0, err
 	} else if name != "" {
 		if err := h.pingSQL(config); err != nil {
-			return false, 0, nil
+			return false, 0, err
 		}
 		return true, 0, nil
 	}
@@ -2125,7 +2128,12 @@ func (h *host) startExternalContainer(config *Config, name string) error {
 	}
 	if _, err := h.exec(exec.Command("docker", "start", name)); err != nil {
 		if status := exitCode(err); status >= 0 {
-			return fmt.Errorf("docker start %s exited with status %d: dolt.external_container names this container, so it must exist before gt can start it", name, status)
+			// A non-zero exit is any reason docker refuses the start — no such
+			// container, a port clash, an engine that is down — so the message
+			// names both checks instead of asserting the container is missing
+			// (gt-0v0bg). docker's stderr is not repeated: it can carry host
+			// detail, and it is not needed to act.
+			return fmt.Errorf("docker start %s exited with status %d: check that dolt.external_container names a container that exists and that Docker can start it", name, status)
 		}
 		return fmt.Errorf("running docker start %s: the docker command could not be run", name)
 	}
