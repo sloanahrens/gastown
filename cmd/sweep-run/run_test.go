@@ -1190,7 +1190,7 @@ func TestTreeHasReportsWhatTheTreeShips(t *testing.T) {
 	// does not hold.
 	linkedScript := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "elsewhere.sh")
-	if err := os.WriteFile(outside, []byte("#!/bin/sh\n"), 0o644); err != nil {
+	if err := os.WriteFile(outside, nil, 0o644); err != nil {
 		t.Fatalf("make the fixture: %v", err)
 	}
 	if err := os.MkdirAll(filepath.Join(linkedScript, "scripts"), 0o755); err != nil {
