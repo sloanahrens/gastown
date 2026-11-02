@@ -642,7 +642,7 @@ type IssueDep struct {
 	// depends on leaves them empty.
 	//
 	// Metadata is the value of a JSON string, or the raw text of any other JSON
-	// value (bd prints object metadata as an object; gt-l40eg).
+	// value (gt-l40eg).
 	CreatedAt string `json:"created_at,omitempty"`
 	CreatedBy string `json:"created_by,omitempty"`
 	Metadata  string `json:"metadata,omitempty"`
