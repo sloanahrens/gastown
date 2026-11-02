@@ -502,7 +502,7 @@ func TestMultiDocumentValuesAreRefused(t *testing.T) {
 		"a scalar second document":    string(one) + "---\n42\n",
 		"an empty second document":    string(one) + "---\n",
 		"a comment-only document":     string(one) + "---\n# nothing\n",
-		"a malformed second document": string(one) + "---\n\tworkspace: beta\n",
+		"a malformed second document": string(one) + "---\n[[[[\n",
 	}
 	for name, input := range cases {
 		if _, err := Load([]byte(input)); !errors.Is(err, ErrBadValues) {
