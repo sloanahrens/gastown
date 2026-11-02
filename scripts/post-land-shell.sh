@@ -19,17 +19,12 @@
 # --since syntax. A history that cannot be read runs the tier: no skip
 # without evidence.
 #
-# INPUTS is every path a shell-tier verdict can move on: the shell tier
-# manifest's trigger union (internal/shelltier), which is scripts/ and the
-# Makefile by default, the per-entry deploy/ and .githooks/, and the Go tree
-# (go.mod, go.sum, cmd/, internal/, plugins/) every entry that names no stub-go
-# reason contributes. internal/ reaches internal/cmd/scheduler_integration_test.go,
-# which scripts/makefile-gate_test.sh reads schedulerTownSlots out of (gt-tqxdd),
-# and the tier's own machinery (internal/shelltier, cmd/tier-sweep,
-# internal/tiersweep). TestPostLandShellInputsCoverTheManifestTriggers holds
-# this line to the manifest trigger by trigger, so a trigger added there cannot
-# leave this skip behind; the post-land revert reads the same union (gt-u560q.9,
-# gt-vt2g4).
+# INPUTS is the shell tier manifest's trigger union (internal/shelltier):
+# TestPostLandShellInputsCoverTheManifestTriggers holds the INPUTS line to it
+# trigger by trigger, so a trigger added to the manifest cannot leave this skip
+# behind, and the post-land revert reads the same union (gt-u560q.9, gt-vt2g4).
+# internal/ covers internal/cmd/scheduler_integration_test.go, from which
+# scripts/makefile-gate_test.sh reads schedulerTownSlots (gt-tqxdd).
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 
