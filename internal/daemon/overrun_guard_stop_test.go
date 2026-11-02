@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1474,11 +1475,107 @@ func TestCollectParkedSeatsFailsOnUnreadableWalk(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := &attentionSources{d: d, now: time.Now()}
+	dir := filepath.Join(constants.TownRuntimePath(d.config.TownRoot), "agents")
 
 	_, err := s.collectOverrunParkedSeats(context.Background())
-	if err == nil {
-		t.Fatal("collector walked a broken runtime path as clean")
+	if !errors.Is(err, syscall.ENOTDIR) {
+		t.Fatalf("err = %v, want ENOTDIR from the walk root", err)
 	}
+	if !strings.Contains(err.Error(), dir) {
+		t.Errorf("error %q does not name the walk root %s", err, dir)
+	}
+}
+
+// A fresh town has no agents directory: the walk reports no parked seats
+// rather than failing the collection (gt-r6vjf).
+func TestCollectParkedSeatsOnAFreshTown(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	s := &attentionSources{d: d, now: time.Now()}
+	if _, err := os.Stat(filepath.Join(constants.TownRuntimePath(d.config.TownRoot), "agents")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("agents directory stat err = %v, want a fresh town without one", err)
+	}
+
+	items, err := s.collectOverrunParkedSeats(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v, want none when the town has no agents directory", err)
+	}
+	if len(items) != 0 {
+		t.Errorf("items = %+v, want none", items)
+	}
+}
+
+// The bead list and the seat walk share one kind, so a failed collector that
+// kept every item of that kind would carry the sibling's stale items forward.
+// Each keeps only the items it raised (gt-r6vjf).
+func TestCollectAttentionKeepsOnlyTheFailedOverrunCollectorItems(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	beadItem := attention.Item{
+		Key: "overrun:gt-aaa11", Kind: attention.KindOverrunStopped, Severity: attention.SeverityLow,
+		Rig: "gastown", Bead: "gt-aaa11", Summary: "gt-aaa11 needs a split",
+	}
+	seatItem := attention.Item{
+		Key: "overrun-parked:gastown/capable", Kind: attention.KindOverrunStopped, Severity: attention.SeverityLow,
+		Rig: "gastown", Bead: "gt-abc12", Summary: "capable left parked",
+	}
+	for _, tc := range []struct {
+		name           string
+		breakCollector func(t *testing.T, d *Daemon)
+		kept, dropped  string
+	}{
+		{
+			name: "the bead list fails",
+			breakCollector: func(_ *testing.T, d *Daemon) {
+				d.openWorkBeads = failingWorkBeads{}.open
+			},
+			kept: beadItem.Key, dropped: seatItem.Key,
+		},
+		{
+			name: "the seat walk fails",
+			breakCollector: func(t *testing.T, d *Daemon) {
+				d.openWorkBeads = workBeadStore{}.open
+				if err := os.WriteFile(constants.TownRuntimePath(d.config.TownRoot), []byte("not a directory\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			kept: seatItem.Key, dropped: beadItem.Key,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newAttentionFixture(t, now)
+			f.d.knownRigsCache, f.d.knownRigsCacheValid = []string{"gastown"}, true
+			tc.breakCollector(t, f.d)
+
+			var overrun []attentionCollector
+			for _, c := range f.src.collectors() {
+				if c.kind == attention.KindOverrunStopped {
+					overrun = append(overrun, c)
+				}
+			}
+			if len(overrun) != 2 {
+				t.Fatalf("overrun-stopped collectors = %d, want the bead list and the seat walk", len(overrun))
+			}
+
+			prev := attention.State{Updated: now, Items: []attention.Item{beadItem, seatItem}}
+			observed := collectAttention(context.Background(), prev, overrun, func(string, ...any) {})
+			if len(observed) != 1 || observed[0].Key != tc.kept {
+				t.Errorf("observed = %+v, want only %s kept and the sibling's %s dropped", observed, tc.kept, tc.dropped)
+			}
+		})
+	}
+}
+
+// failingWorkBeads is a work-bead store whose reads fail.
+type failingWorkBeads struct{}
+
+func (failingWorkBeads) open([]string, time.Duration) workBeadReader { return failingWorkBeads{} }
+func (failingWorkBeads) Show(string) (*beads.Issue, error) {
+	return nil, errors.New("bd show: store unavailable")
+}
+func (failingWorkBeads) List(beads.ListOptions) ([]*beads.Issue, error) {
+	return nil, errors.New("bd list: store unavailable")
 }
 
 // needsSplitReader answers every list with its one issue.
