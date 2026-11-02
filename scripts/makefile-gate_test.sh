@@ -830,6 +830,16 @@ else
   fail "tierwall fails after a passing suite: the gate still passes and names the incomplete series (rc=$rc)" "$(cat "$TMP/err")"
 fi
 
+# What the recipe really sees for a series that could not be written: tierwall
+# exits 4, and go run folds any program code to 1 (printing "exit status 4").
+# The alarm keys on non-zero, so the folded code fires it.
+rc=$(run_gate -o lint -- STUB_TIERWALL_EXIT=1)
+if [[ "$rc" == 0 ]] && grep -q -F "gate: tierwall exited 1, so the wall series may be incomplete" "$TMP/err" && grep -q -E 'gate: PASSED in [0-9]+s wall' "$TMP/err"; then
+  pass "tierwall's series failure as go run reports it (exit 1): the alarm fires and the gate passes"
+else
+  fail "tierwall's series failure as go run reports it (exit 1): the alarm fires and the gate passes (rc=$rc)" "$(cat "$TMP/err")"
+fi
+
 # The alarm is for a passing suite only: a red suite's verdict is the suite's,
 # and the series is not reported as a second failure.
 rc=$(run_gate -o lint -- STUB_TIERWALL_EXIT=2 STUB_GO_FAIL=test)

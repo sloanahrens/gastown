@@ -349,8 +349,9 @@ func TestJSONLNeedsARun(t *testing.T) {
 
 // TestJSONLSeriesFailuresLeaveTheVerdictAlone pins the contract the gate is
 // wired on: every way the series can fail is reported on stderr naming the
-// file, and the exit code stays go test's verdict, because wall time never
-// fails a run.
+// file and by exit code 4, which the gate reads as its "series incomplete"
+// alarm. The report still prints, and a failed package (1) or an over-wall tier
+// (3) keeps its own code, because wall time never fails a run.
 func TestJSONLSeriesFailuresLeaveTheVerdictAlone(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -381,8 +382,8 @@ func TestJSONLSeriesFailuresLeaveTheVerdictAlone(t *testing.T) {
 			tc.setup(&h)
 
 			code, stdout, stderr := runFileWith(t, "pass.jsonl", h, "-jsonl", path, "-run", "gate-1")
-			if code != 0 {
-				t.Errorf("exit code = %d, want 0: a series failure never fails the run", code)
+			if code != 4 {
+				t.Errorf("exit code = %d, want 4: a series that could not be written is the gate's alarm", code)
 			}
 			if !strings.Contains(stderr, path) {
 				t.Errorf("stderr = %q, want it to name %s", stderr, path)
@@ -442,8 +443,8 @@ func TestJSONLSeriesRelativePathWithoutATownWritesNothing(t *testing.T) {
 	t.Parallel()
 	code, stdout, stderr := runFileWith(t, "pass.jsonl", fixedHost(),
 		"-jsonl", ".runtime/metrics/gate-walls.jsonl", "-run", "gate-1")
-	if code != 0 {
-		t.Errorf("exit code = %d, want 0: a series never fails the run", code)
+	if code != 4 {
+		t.Errorf("exit code = %d, want 4: a series with no town to go in is the gate's alarm", code)
 	}
 	if !strings.Contains(stderr, ".runtime/metrics/gate-walls.jsonl") {
 		t.Errorf("stderr = %q, want it to name the path it could not place", stderr)
@@ -583,5 +584,17 @@ func TestSecs_RendersTenthsOfASecond(t *testing.T) {
 		if got := secs(d); got != tc.want {
 			t.Errorf("secs(%s) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// A series failure never hides a verdict: a failed package still exits 1, and
+// an over-wall tier still exits 3, with the series unwritable as well.
+func TestJSONLSeriesFailureDoesNotMaskTheVerdict(t *testing.T) {
+	t.Parallel()
+	h := fixedHost()
+	h.mkdir = func(string) error { return errors.New("read-only file system") }
+	path := filepath.Join(t.TempDir(), "gate-walls.jsonl")
+	if code, _, _ := runFileWith(t, "fail.jsonl", h, "-jsonl", path, "-run", "gate-1"); code != 1 {
+		t.Errorf("failed package with an unwritable series: exit code = %d, want 1", code)
 	}
 }

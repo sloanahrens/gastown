@@ -508,7 +508,9 @@ gate-test:
 	@# the subshell a pipefail wrapper needs would become the trap's child in
 	@# place of the suite. tierwall prints the per-package walls and appends the
 	@# series; its exit code is not folded into the suite's, because the gate's
-	@# verdict is go test's and the series fails nothing. -json sits after the
+	@# verdict is go test's. A series that could not be written is tierwall's exit
+	@# code 4 (go run folds any program code to 1 and prints "exit status N"), and
+	@# a passing suite with a non-zero tierwall prints the incomplete-series alarm. -json sits after the
 	@# package list, where the go tool still parses it, so the unit tier's line
 	@# keeps the shape the gate-shape tests pin.
 	@trap 'killtree() { for c in $$(pgrep -P "$$1" 2>/dev/null); do killtree "$$c"; done; kill "$$1" 2>/dev/null; }; for c in $$(pgrep -P $$$$ 2>/dev/null); do killtree "$$c"; done; [ -n "$$stream" ] && rm -f "$$stream"; exit 130' INT TERM; \

@@ -92,8 +92,10 @@ type host struct {
 
 // run reads a go test -json stream from stdin and writes the report to
 // stdout. The exit code is 1 when any package or test failed, else 3 when
-// -max-wall is set and the tier is over it, else 0; 2 means the runner
-// itself failed, which the series never does.
+// -max-wall is set and the tier is over it, else 4 when the -jsonl series could
+// not be written, else 0; 2 means the runner itself failed. The series code is
+// last in that order so it never hides a verdict: the gate, which keeps go
+// test's verdict, reads it as the alarm that the wall series is incomplete.
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer, h host) int {
 	fs := flag.NewFlagSet("tierwall", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -117,11 +119,15 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, h host) int {
 		fmt.Fprintln(stderr, "tierwall:", err)
 		return 2
 	}
+	seriesFailed := false
 	if *jsonl != "" {
-		// A series that cannot be written is reported and fails nothing: the
-		// gate's verdict is go test's, and wall time never fails a run.
+		// A series that cannot be written is reported on stderr and by exit
+		// code 4, and it fails no verdict: the gate's verdict is go test's, and
+		// wall time never fails a run. The code is how the gate learns the
+		// series is incomplete, since stderr is not something its recipe reads.
 		if err := appendSeries(*jsonl, *runID, r, h, stderr); err != nil {
 			fmt.Fprintln(stderr, "tierwall:", err)
+			seriesFailed = true
 		}
 	}
 	if err := r.print(*bar); err != nil {
@@ -133,6 +139,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, h host) int {
 		return 1
 	case *maxWall > 0 && r.tier() > *maxWall:
 		return 3
+	case seriesFailed:
+		return 4
 	default:
 		return 0
 	}
