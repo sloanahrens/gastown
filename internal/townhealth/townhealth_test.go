@@ -667,6 +667,33 @@ func TestAgeFields(t *testing.T) {
 	}
 }
 
+// gt-l49x8: the detail names the person behind the label, so a hold for the
+// overseer does not read as one waiting on the operator. The age suffix is
+// unchanged.
+func TestPersonWaitNamesWhoIsWaitedOn(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		label  string
+		oldest time.Time
+		want   string
+	}{
+		"overseer":        {label: FieldNeedsOverseer, want: "1 waiting for overseer"},
+		"operator":        {label: FieldNeedsOperator, want: "1 waiting for operator"},
+		"old human label": {label: FieldNeedsHuman, want: "1 waiting for operator"},
+		"with an age":     {label: FieldNeedsOverseer, oldest: ago(2 * time.Hour), want: "1 waiting for overseer, oldest 2h"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := healthy()
+			f.waits = []PersonWait{{Label: tc.label, Count: 1, Oldest: tc.oldest}}
+			got := field(t, Compute(context.Background(), inputs(f)), tc.label)
+			if got.Detail != tc.want {
+				t.Errorf("%s detail = %q, want %q", tc.label, got.Detail, tc.want)
+			}
+		})
+	}
+}
+
 // gt-slmaz: every person label has a field, even when only one label holds
 // beads, so a missing field can never read as nobody waiting.
 func TestPersonFieldsAlwaysPresent(t *testing.T) {

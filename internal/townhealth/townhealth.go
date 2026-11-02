@@ -1231,11 +1231,25 @@ func unknownPersonFields(err error) []Field {
 	return out
 }
 
-// personWait is one label's field: its count, how long the oldest has waited
-// and the verdict that age earns.
+// waitedOn names the person behind a person label, so the line and the pill
+// say who must act rather than speaking of "a person" (gt-l49x8). The old
+// needs-human label predates the split and was always the operator's; a label
+// outside the set names itself.
+func waitedOn(label string) string {
+	switch label {
+	case FieldNeedsOverseer:
+		return "overseer"
+	case FieldNeedsOperator, FieldNeedsHuman:
+		return "operator"
+	}
+	return label
+}
+
+// personWait is one label's field: its count, who is waited on, how long the
+// oldest has waited and the verdict that age earns.
 func personWait(w PersonWait, in Inputs) Field {
 	f := Field{Name: w.Label, Tag: Live, Verdict: Degraded, Value: strconv.Itoa(w.Count),
-		Detail: fmt.Sprintf("%d waiting on a person", w.Count)}
+		Detail: fmt.Sprintf("%d waiting for %s", w.Count, waitedOn(w.Label))}
 	if !w.Oldest.IsZero() {
 		age := in.Now.Sub(w.Oldest)
 		f.Verdict = f.Verdict.Worse(in.Thresholds.NeedsHuman.judge(age))
