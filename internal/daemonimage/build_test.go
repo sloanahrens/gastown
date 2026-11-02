@@ -99,7 +99,8 @@ func (f *fakeRunner) git(known map[string]string) bdbuild.Git {
 
 // gitHolding is a git that resolves each commit in known to the full sha it
 // names, and fails every other commit the way git does for one it does not hold.
-// `rev-parse --short` answers the commit's first seven characters.
+// `rev-parse --short` answers git's abbreviation of the commit: at least seven
+// characters, and longer while another commit the fake knows shares them.
 // Worktree commands succeed without touching a checkout.
 func gitHolding(known map[string]string) bdbuild.Git {
 	return func(_ string, args ...string) ([]byte, error) {
@@ -111,11 +112,34 @@ func gitHolding(known map[string]string) bdbuild.Git {
 		if !ok {
 			return nil, errors.New("fatal: bad revision '" + commit + "'")
 		}
-		if args[0] == "rev-parse" && len(args) == 3 && args[1] == "--short" && len(full) > 7 {
-			full = full[:7]
+		if args[0] == "rev-parse" && len(args) == 3 && args[1] == "--short" {
+			full = abbreviate(full, known)
 		}
 		return []byte(full + "\n"), nil
 	}
+}
+
+// abbreviate is the abbreviation `git rev-parse --short` prints for full: the
+// shortest prefix of at least seven characters that no other commit in known
+// holds, so a commit that collides on a shorter prefix gets a longer one.
+func abbreviate(full string, known map[string]string) string {
+	if len(full) <= 7 {
+		return full
+	}
+	for n := 7; n < len(full); n++ {
+		prefix := full[:n]
+		shared := false
+		for _, other := range known {
+			if other != full && strings.HasPrefix(other, prefix) {
+				shared = true
+				break
+			}
+		}
+		if !shared {
+			return prefix
+		}
+	}
+	return full
 }
 
 // validBuilder is a Builder with every source named, every commit held, and
@@ -280,6 +304,27 @@ func TestBuildBinariesStampsBDWithItsBuildIDAndCommit(t *testing.T) {
 	}
 	if got := ldflagsOf(run.calls[2].argv); len(got) != 0 {
 		t.Errorf("om build ldflags = %q, want none", got)
+	}
+}
+
+// TestBuildBinariesStampsTheAbbreviationGitGives: git lengthens an abbreviation
+// past seven characters while another commit it holds shares them, and the build
+// stamps what git answers in the worktree. The fake's `rev-parse --short` models
+// that rule, so a fixed seven-character cut fails here (om finding
+// db910e50df3d).
+func TestBuildBinariesStampsTheAbbreviationGitGives(t *testing.T) {
+	t.Parallel()
+	// collider shares testBDCommit's first seven characters and differs at the
+	// eighth, so the abbreviation git would print is eight characters.
+	const collider = "fedcba9000000000000000000000000000000000"
+	b, run := builderFor(t)
+	b.Git = run.git(map[string]string{testRev: testRev, testBDCommit: testBDCommit, "HEAD": testOMCommit, collider: collider})
+	if _, err := b.BuildBinaries(context.Background(), testRev); err != nil {
+		t.Fatalf("BuildBinaries: %v", err)
+	}
+	want := bdBuildFlag + testBDCommit[:8] + " " + bdCommitFlag + testBDCommit
+	if got := ldflagsOf(run.calls[1].argv); !reflect.DeepEqual(got, []string{want}) {
+		t.Errorf("bd build ldflags = %q, want [%q]", got, want)
 	}
 }
 

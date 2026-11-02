@@ -361,9 +361,12 @@ func (b Builder) Plan(rev string) ([]string, error) {
 	return lines, nil
 }
 
-// planBuildID is what Plan prints in place of bd's build id: git answers it inside
-// the worktree BuildBinaries makes, and Plan makes none.
-const planBuildID = "<short sha of the commit, read in the worktree>"
+// planBuildID is what Plan prints in place of bd's build id: git answers it
+// inside the worktree BuildBinaries makes, and Plan makes none. It is one
+// shell-safe token, letters, digits and underscores, because Plan prints it
+// inside a command line: a space there would split the printed argv into two
+// words, and a shell reads angle brackets as redirection.
+const planBuildID = "short_sha_read_in_worktree"
 
 // claudeCLIName is the file the claude CLI is written to in the build context;
 // the Dockerfile's COPY reads it by this name.
