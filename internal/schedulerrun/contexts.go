@@ -132,9 +132,9 @@ func ListAllSlingContexts(townRoot string) ([]*beads.Issue, error) {
 // and the scan started less than beads.SlingContextScanMaxAge ago (gt-66e5d).
 //
 // The read is a literal here rather than a call to scanAllSlingContextRecords
-// because the census budgets the bd calls under this function's name
-// (internal/beads/census_budgets.go), and it names a closure after the function
-// that declares it.
+// so this function is the heartbeat's one read of the stores, with the skip in
+// front of it; the operator surfaces go through scanAllSlingContextRecords
+// instead.
 func listAllSlingContextRecords(townRoot string) ([]contextRecord, error) {
 	scan := func(townRoot string) ([]contextRecord, error) {
 		recs, err := beads.ListOpenSlingContextRecords(townRoot)
@@ -143,12 +143,16 @@ func listAllSlingContextRecords(townRoot string) ([]contextRecord, error) {
 		}
 		return contextRecordsFrom(recs), nil
 	}
-	return listAllSlingContextRecordsWith(townRoot, time.Now, scan)
+	return listAllSlingContextRecordsWith(townRoot, time.Now, scan, nil, nil)
 }
 
 // listAllSlingContextRecordsWith is listAllSlingContextRecords reading through
-// scan at now.
-func listAllSlingContextRecordsWith(townRoot string, now func() time.Time, scan contextScan) ([]contextRecord, error) {
+// scan at now, recording the outcome through record (nil is
+// beads.RecordSlingContextScan). Warnings go to w, defaulting to stderr.
+func listAllSlingContextRecordsWith(townRoot string, now func() time.Time, scan contextScan, record contextScanRecorder, w io.Writer) ([]contextRecord, error) {
+	if record == nil {
+		record = beads.RecordSlingContextScan
+	}
 	started := now()
 	empty, skipErr := beads.SlingContextScanIsEmpty(townRoot, started)
 	if skipErr == nil && empty {
@@ -158,7 +162,7 @@ func listAllSlingContextRecordsWith(townRoot string, now func() time.Time, scan 
 	// may only rest on evidence that was read. The read is reported rather than
 	// swallowed, so a runtime directory the daemon cannot read is visible.
 	if skipErr != nil {
-		warnf(nil, "%s Warning: reading the sling-context scan state failed; reading every database: %v\n", style.Dim.Render("⚠"), skipErr)
+		warnf(w, "%s Warning: reading the sling-context scan state failed; reading every database: %v\n", style.Dim.Render("⚠"), skipErr)
 	}
 	records, err := scan(townRoot)
 	if err != nil {
@@ -166,10 +170,10 @@ func listAllSlingContextRecordsWith(townRoot string, now func() time.Time, scan 
 		// the marker as it was rather than recording an answer it did not get.
 		return nil, err
 	}
-	if err := beads.RecordSlingContextScan(townRoot, started, len(records) > 0); err != nil {
+	if err := record(townRoot, started, len(records) > 0); err != nil {
 		// The scan already answered; a marker it could not write only costs the
 		// next scan its skip, so it never fails this one.
-		warnf(nil, "%s Warning: could not record the sling-context scan: %v\n", style.Dim.Render("⚠"), err)
+		warnf(w, "%s Warning: could not record the sling-context scan: %v\n", style.Dim.Render("⚠"), err)
 	}
 	return records, nil
 }
@@ -198,6 +202,10 @@ func contextRecordsFrom(recs []beads.SlingContextRecord) []contextRecord {
 // contextScan reads every open sling context the town has. nil is the
 // production scan, which issues one store read per search dir.
 type contextScan func(townRoot string) ([]contextRecord, error)
+
+// contextScanRecorder records a full scan's start and outcome. nil is
+// beads.RecordSlingContextScan.
+type contextScanRecorder func(townRoot string, startedAt time.Time, found bool) error
 
 // workBeadInfoFetch reads the status of the named work beads, keyed by ID.
 // nil is the production batch fetch.

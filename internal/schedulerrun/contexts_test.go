@@ -676,7 +676,7 @@ func (c *contextScanCounter) scan(string) ([]contextRecord, error) {
 // the empty-scan marker the next heartbeat reads.
 func seedEmptyScan(t *testing.T, townRoot string, started time.Time, scan *contextScanCounter) {
 	t.Helper()
-	if _, err := listAllSlingContextRecordsWith(townRoot, func() time.Time { return started }, scan.scan); err != nil {
+	if _, err := listAllSlingContextRecordsWith(townRoot, func() time.Time { return started }, scan.scan, nil, io.Discard); err != nil {
 		t.Fatalf("first scan: %v", err)
 	}
 	if scan.calls != 1 {
@@ -697,7 +697,7 @@ func TestScanSkipsWhileNoContextCouldExist(t *testing.T) {
 	seedEmptyScan(t, townRoot, start, scan)
 
 	records, err := listAllSlingContextRecordsWith(townRoot,
-		func() time.Time { return start.Add(time.Minute) }, scan.scan)
+		func() time.Time { return start.Add(time.Minute) }, scan.scan, nil, io.Discard)
 	if err != nil {
 		t.Fatalf("second scan: %v", err)
 	}
@@ -772,7 +772,7 @@ func TestScanReadsAgainAfterStampOrCeiling(t *testing.T) {
 			tc.change(t, townRoot)
 			scan.records = nil
 
-			records, err := listAllSlingContextRecordsWith(townRoot, func() time.Time { return tc.at }, scan.scan)
+			records, err := listAllSlingContextRecordsWith(townRoot, func() time.Time { return tc.at }, scan.scan, nil, io.Discard)
 			if err != nil {
 				t.Fatalf("second scan: %v", err)
 			}
@@ -786,23 +786,9 @@ func TestScanReadsAgainAfterStampOrCeiling(t *testing.T) {
 	}
 }
 
-// TestListAllSlingContextRecordsReportsAScanFailure runs the production scan
-// against a town it cannot read: the failure is returned rather than read as
-// "nothing scheduled", and no marker is recorded, because a failed scan is not
-// an empty one.
-func TestListAllSlingContextRecordsReportsAScanFailure(t *testing.T) {
-	t.Parallel()
-	missing := filepath.Join(t.TempDir(), "missing")
-	if _, err := listAllSlingContextRecords(missing); err == nil {
-		t.Fatal("listAllSlingContextRecords on an unreadable town = nil, want the scan failure")
-	}
-	if _, err := os.Stat(beads.SlingContextScanMarkerPath(missing)); !os.IsNotExist(err) {
-		t.Errorf("a failed scan left a marker (stat: %v); only a completed scan may record one", err)
-	}
-}
-
-// TestListAllSlingContextRecordsWithReportsAScanFailure is the same rule for an
-// injected scan: its error reaches the caller, and the marker is left as it was.
+// TestListAllSlingContextRecordsWithReportsAScanFailure: a scan failure reaches
+// the caller rather than reading as "nothing scheduled", and the marker is left
+// as it was, because a failed scan is not an empty one.
 func TestListAllSlingContextRecordsWithReportsAScanFailure(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
@@ -810,11 +796,87 @@ func TestListAllSlingContextRecordsWithReportsAScanFailure(t *testing.T) {
 	scanErr := errors.New("bd down")
 
 	_, err := listAllSlingContextRecordsWith(townRoot, func() time.Time { return start },
-		func(string) ([]contextRecord, error) { return nil, scanErr })
+		func(string) ([]contextRecord, error) { return nil, scanErr }, nil, io.Discard)
 	if !errors.Is(err, scanErr) {
 		t.Fatalf("listAllSlingContextRecordsWith = %v, want the scan's failure", err)
 	}
 	if _, err := os.Stat(beads.SlingContextScanMarkerPath(townRoot)); !os.IsNotExist(err) {
 		t.Errorf("a failed scan left a marker (stat: %v); only a completed scan may record one", err)
+	}
+}
+
+// TestListAllSlingContextRecordsReportsATownItCannotList drives the production
+// read to its failure without a bd store in sight: the town root is a file, so
+// search-dir discovery fails before any store is opened. The heartbeat gets the
+// read's error rather than an empty answer.
+func TestListAllSlingContextRecordsReportsATownItCannotList(t *testing.T) {
+	t.Parallel()
+	townRoot := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(townRoot, []byte("not a town"), 0o644); err != nil {
+		t.Fatalf("plant the unlistable town root: %v", err)
+	}
+
+	if _, err := listAllSlingContextRecords(townRoot); err == nil {
+		t.Fatal("listAllSlingContextRecords on an unlistable town = nil, want the read's failure")
+	}
+}
+
+// A stamp or marker the heartbeat cannot read costs it the skip, and the
+// operator must hear that the scan is running in full: the failure is visible
+// rather than silently paid for.
+func TestListAllSlingContextRecordsWarnsOnUnreadableScanState(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	start := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	// An empty-scan marker makes the skip reach the stamp read.
+	if err := beads.RecordSlingContextScan(townRoot, start.Add(-time.Minute), false); err != nil {
+		t.Fatalf("seed empty-scan marker: %v", err)
+	}
+	// A symlink to itself makes stat fail with ELOOP, which is not "no such
+	// file": the scan must not read it as "never created".
+	if err := os.Symlink(beads.SlingContextStampFile, beads.SlingContextStampPath(townRoot)); err != nil {
+		t.Fatalf("plant unreadable stamp: %v", err)
+	}
+	scan := &contextScanCounter{}
+	var warned strings.Builder
+
+	records, err := listAllSlingContextRecordsWith(townRoot,
+		func() time.Time { return start }, scan.scan, nil, &warned)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("scan = %d contexts, want none", len(records))
+	}
+	if scan.calls != 1 {
+		t.Fatalf("an unreadable stamp left the heartbeat answering from its marker (%d scans); it must read every database", scan.calls)
+	}
+	if got := warned.String(); !strings.Contains(got, "reading the sling-context scan state failed") {
+		t.Errorf("warnings = %q, want one naming the unreadable scan state", got)
+	}
+}
+
+// A marker the scan cannot write costs the next heartbeat its skip, not this
+// scan its answer: the failure is warned about and the records are still
+// returned.
+func TestListAllSlingContextRecordsWarnsWhenTheScanCannotBeRecorded(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	start := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	recordErr := errors.New("disk full")
+	scan := &contextScanCounter{records: []contextRecord{{issue: &beads.Issue{ID: "gt-wisp-ctx"}}}}
+	record := func(string, time.Time, bool) error { return recordErr }
+	var warned strings.Builder
+
+	records, err := listAllSlingContextRecordsWith(townRoot,
+		func() time.Time { return start }, scan.scan, record, &warned)
+	if err != nil {
+		t.Fatalf("scan = %v, want the scan's own answer", err)
+	}
+	if len(records) != 1 || records[0].issue.ID != "gt-wisp-ctx" {
+		t.Fatalf("scan = %+v, want the context the scan read", records)
+	}
+	if got := warned.String(); !strings.Contains(got, "could not record the sling-context scan") {
+		t.Errorf("warnings = %q, want one naming the unwritten marker", got)
 	}
 }

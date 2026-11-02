@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
@@ -86,6 +87,7 @@ type slingContextStampFS struct {
 	chtimes   func(path string, atime, mtime time.Time) error
 	readFile  func(path string) ([]byte, error)
 	remove    func(path string) error
+	rename    func(oldpath, newpath string) error
 }
 
 var osSlingContextStampFS = slingContextStampFS{
@@ -95,7 +97,12 @@ var osSlingContextStampFS = slingContextStampFS{
 	chtimes:   os.Chtimes,
 	readFile:  os.ReadFile,
 	remove:    os.Remove,
+	rename:    os.Rename,
 }
+
+// slingContextMarkerTmpSeq keeps two markers written in one process from
+// sharing a temporary file name.
+var slingContextMarkerTmpSeq atomic.Uint64
 
 // TouchSlingContextStamp records that townRoot created a sling context at now.
 func TouchSlingContextStamp(townRoot string, now time.Time) error {
@@ -199,16 +206,34 @@ func recordSlingContextScan(townRoot string, startedAt time.Time, found bool, fs
 	if found {
 		body = slingContextScanFound + "\n"
 	}
-	if err := fsys.writeFile(path, []byte(body), 0o644); err != nil {
+	// The marker is dated by the scan's start, not its end, so a creation that
+	// lands while the scan reads a database carries a newer stamp and the next
+	// scan sees it, instead of waiting out the ceiling. For that date to be
+	// what a reader sees, it is set before the marker is published: a plain
+	// write dates the file now, later than the scan's start. So the dated
+	// content goes to a temporary file in the same directory and replaces the
+	// marker in one rename, and a reader only ever sees a finished marker.
+	tmp := fmt.Sprintf("%s.%d.%d.tmp", path, os.Getpid(), slingContextMarkerTmpSeq.Add(1))
+	if err := fsys.writeFile(tmp, []byte(body), 0o644); err != nil {
 		return fmt.Errorf("writing the sling-context scan marker %s: %w", path, err)
 	}
-	// The marker is dated by the scan's start: a creation that lands while the
-	// scan reads a database then carries a newer stamp and the next scan sees
-	// it, instead of waiting out the ceiling.
-	if err := fsys.chtimes(path, startedAt, startedAt); err != nil {
-		return fmt.Errorf("dating the sling-context scan marker %s: %w", path, err)
+	if err := fsys.chtimes(tmp, startedAt, startedAt); err != nil {
+		return discardSlingContextMarkerTemp(fmt.Errorf("dating the sling-context scan marker %s: %w", path, err), tmp, fsys)
+	}
+	if err := fsys.rename(tmp, path); err != nil {
+		return discardSlingContextMarkerTemp(fmt.Errorf("publishing the sling-context scan marker %s: %w", path, err), tmp, fsys)
 	}
 	return nil
+}
+
+// discardSlingContextMarkerTemp removes a temporary marker that never replaced
+// the real one, so a failed write leaves no stray file beside it. A removal
+// that also fails is reported alongside err, not instead of it.
+func discardSlingContextMarkerTemp(err error, tmp string, fsys slingContextStampFS) error {
+	if rmErr := fsys.remove(tmp); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
+		return fmt.Errorf("%w (and the temporary marker %s could not be removed: %v)", err, tmp, rmErr)
+	}
+	return err
 }
 
 func slingContextScanIsEmpty(townRoot string, now time.Time, fsys slingContextStampFS) (bool, error) {
