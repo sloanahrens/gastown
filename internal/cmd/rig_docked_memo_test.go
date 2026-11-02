@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/sling"
 )
@@ -289,6 +290,22 @@ func TestTickDockedMemoDoesNotHoldUpOtherRigs(t *testing.T) {
 	<-otherrigDone
 }
 
+// writeRigDockedRecord puts rec in testrig's verdict file.
+func writeRigDockedRecord(t *testing.T, town string, rec rigDockedRecord) {
+	t.Helper()
+	path, err := rigDockedFilePath(town, "testrig")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // writeRigDockedFileAt answers one not-blocked check for testrig at at, so the
 // verdict file a later tick reads exists.
 func writeRigDockedFileAt(t *testing.T, town string, at time.Time) {
@@ -368,19 +385,20 @@ func TestRigDockedFileDropsOnStampOrAge(t *testing.T) {
 		{
 			name: "a file naming another rig",
 			break_: func(t *testing.T, town string, memo *rigDockedMemo) {
-				t.Helper()
-				path, err := rigDockedFilePath(town, "testrig")
-				if err != nil {
-					t.Fatal(err)
-				}
-				rec := rigDockedRecord{Rig: "otherrig", Stamp: now, ReadAt: now}
-				data, err := json.Marshal(rec)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(path, data, 0o644); err != nil {
-					t.Fatal(err)
-				}
+				writeRigDockedRecord(t, town, rigDockedRecord{Rig: "otherrig", Stamp: now, ReadAt: now})
+			},
+		},
+		{
+			name: "a record with no read time",
+			break_: func(t *testing.T, town string, memo *rigDockedMemo) {
+				writeRigDockedRecord(t, town, rigDockedRecord{Rig: "testrig", Stamp: now})
+			},
+		},
+		{
+			name: "a record whose read time has not arrived",
+			break_: func(t *testing.T, town string, memo *rigDockedMemo) {
+				// The check runs at now+1m, so this record is still "future".
+				writeRigDockedRecord(t, town, rigDockedRecord{Rig: "testrig", Stamp: now, ReadAt: now.Add(2 * time.Minute)})
 			},
 		},
 		{
@@ -457,24 +475,80 @@ func TestRigDockedFileNeverStoresUnverified(t *testing.T) {
 // simply reads bd again (gt-ejxjh).
 func TestRigDockedFileWriteFailureStillAnswers(t *testing.T) {
 	t.Parallel()
-	town := tickDockedTown(t)
+	cases := []struct {
+		name   string
+		break_ func(t *testing.T, memo *rigDockedMemo)
+	}{
+		{
+			name: "the directory cannot be created",
+			break_: func(t *testing.T, memo *rigDockedMemo) {
+				memo.files.mkdirAll = func(string, os.FileMode) error {
+					return errors.New("permission denied")
+				}
+			},
+		},
+		{
+			name: "the file cannot be written",
+			break_: func(t *testing.T, memo *rigDockedMemo) {
+				memo.files.writeFile = func(string, []byte, os.FileMode) error {
+					return errors.New("disk full")
+				}
+			},
+		},
+		{
+			name: "the record cannot be encoded",
+			break_: func(t *testing.T, memo *rigDockedMemo) {
+				// time.Time marshals no year outside 0-9999, and the clock is
+				// what produces the record's read time.
+				memo.now = func() time.Time { return time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC) }
+			},
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := tickDockedTown(t)
+			store := newDockedBeads(false)
+			memo := newRigDockedMemo(store)
+			tc.break_(t, memo)
+
+			blocked, reason := memo.parkedOrDocked(town, "testrig")
+			if blocked || reason != "" {
+				t.Errorf("check = %v, %q; want the read's not-blocked verdict", blocked, reason)
+			}
+			if n := store.shows["tr-rig-testrig"]; n != 1 {
+				t.Errorf("identity bead read %d time(s), want 1", n)
+			}
+
+			next := newDockedBeads(true)
+			nextMemo := newRigDockedMemo(next)
+			if blocked, _ := nextMemo.parkedOrDocked(town, "testrig"); !blocked {
+				t.Error("the next tick was served a verdict a failed write should not have left")
+			}
+		})
+	}
+}
+
+// TestRigDockedFileRefusesARigNameThatLeavesTheDirectory: a rig name that could
+// leave the runtime directory gets no verdict file. The check still answers with
+// its read, and the write creates nothing (gt-ejxjh). The stamp is replaced
+// because rig.DockStamp refuses the same name, which would decide the check
+// before the file is reached.
+func TestRigDockedFileRefusesARigNameThatLeavesTheDirectory(t *testing.T) {
+	t.Parallel()
+	town := writeTownFiles(t, map[string]string{
+		"mayor/town.json": `{"type":"town","version":2,"name":"t"}`,
+		"mayor/rigs.json": `{"version":1,"rigs":{"../evil":{"git_url":"x","added_at":"2026-09-07T00:00:00Z","beads":{"repo":"","prefix":"ev"}}}}`,
+	})
 	store := newDockedBeads(false)
 	memo := newRigDockedMemo(store)
-	memo.files.writeFile = func(string, []byte, os.FileMode) error {
-		return errors.New("disk full")
-	}
+	memo.stamp = func(string, string) (time.Time, error) { return time.Time{}, nil }
 
-	blocked, reason := memo.parkedOrDocked(town, "testrig")
-	if blocked || reason != "" {
+	if blocked, reason := memo.parkedOrDocked(town, "../evil"); blocked || reason != "" {
 		t.Errorf("check = %v, %q; want the read's not-blocked verdict", blocked, reason)
 	}
-	if n := store.shows["tr-rig-testrig"]; n != 1 {
-		t.Errorf("identity bead read %d time(s), want 1", n)
-	}
-
-	next := newDockedBeads(true)
-	nextMemo := newRigDockedMemo(next)
-	if blocked, _ := nextMemo.parkedOrDocked(town, "testrig"); !blocked {
-		t.Error("the next tick was served a verdict a failed write should not have left")
+	if _, err := os.Stat(constants.TownRuntimePath(town)); !errors.Is(err, fs.ErrNotExist) {
+		t.Error("a refused verdict path created the runtime directory")
 	}
 }

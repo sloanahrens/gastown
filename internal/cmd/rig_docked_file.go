@@ -40,6 +40,7 @@ type rigDockedRecord struct {
 // undock (a newer stamp) and one older than the ttl must be read from bd again.
 // A read time that has not arrived yet (the clock moved back) does not answer
 // either: reading bd is always safe, and a record must not outlive its window.
+// A record with no read time at all is already older than the window.
 func (rec rigDockedRecord) fresh(rigName string, stamp, now time.Time) bool {
 	if rec.Rig != rigName {
 		return false
@@ -47,7 +48,7 @@ func (rec rigDockedRecord) fresh(rigName string, stamp, now time.Time) bool {
 	if stamp.After(rec.Stamp) {
 		return false
 	}
-	if rec.ReadAt.IsZero() || now.Before(rec.ReadAt) {
+	if now.Before(rec.ReadAt) {
 		return false
 	}
 	return now.Sub(rec.ReadAt) < rigDockedFileTTL
