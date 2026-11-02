@@ -2,6 +2,7 @@ package contract
 
 import (
 	"errors"
+	"maps"
 	"testing"
 
 	"github.com/steveyegge/gastown/tracker/api"
@@ -12,6 +13,7 @@ func init() {
 	register(Case{Name: "comments come back oldest first with their author and text", Run: commentsRoundTrip})
 	register(Case{Name: "a comment needs an author, text and an existing issue", Run: commentsRefusals})
 	register(Case{Name: "a comment counts as activity and shows in the list count", Run: commentsActivityAndCount})
+	register(Case{Name: "comment counts for many issues in one read, refusing an id the store does not hold", Fake: true, Run: commentCountsBatch})
 }
 
 func commentsRoundTrip(t *testing.T, s store.Store) {
@@ -52,6 +54,45 @@ func commentsRefusals(t *testing.T, s store.Store) {
 	}
 	if _, err := s.Comments(ctx(), "gt-nope"); !errors.Is(err, api.ErrNotFound) {
 		t.Errorf("Comments of a missing issue = %v, want api.ErrNotFound", err)
+	}
+}
+
+func commentCountsBatch(t *testing.T, s store.Store) {
+	busy := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "busy"})
+	quiet := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "quiet"})
+	other := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "other"})
+	for _, text := range []string{"one", "two", "three"} {
+		if err := s.AddComment(ctx(), busy.ID, "me", text); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.AddComment(ctx(), other.ID, "me", "not named"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.CommentCounts(ctx(), []string{busy.ID, quiet.ID})
+	if err != nil {
+		t.Fatalf("CommentCounts: %v", err)
+	}
+	if want := map[string]int{busy.ID: 3, quiet.ID: 0}; !maps.Equal(got, want) {
+		t.Errorf("CommentCounts = %v, want %v", got, want)
+	}
+	if err := s.AddComment(ctx(), busy.ID, "me", "four"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.CommentCounts(ctx(), []string{busy.ID}); err != nil || got[busy.ID] != 4 {
+		t.Errorf("CommentCounts after a new comment = %v, %v; want %s at 4", got, err, busy.ID)
+	}
+	if got, err := s.CommentCounts(ctx(), nil); err != nil || got == nil || len(got) != 0 {
+		t.Errorf("CommentCounts(nil) = %#v, %v; want an empty non-nil map", got, err)
+	}
+	if got, err := s.CommentCounts(ctx(), []string{"", ""}); err != nil || len(got) != 0 {
+		t.Errorf("CommentCounts of empty ids = %v, %v; want an empty map", got, err)
+	}
+	if _, err := s.CommentCounts(ctx(), []string{"gt-nope"}); !errors.Is(err, api.ErrNotFound) {
+		t.Errorf("CommentCounts of a missing id = %v, want api.ErrNotFound", err)
+	}
+	if _, err := s.CommentCounts(ctx(), []string{busy.ID, "gt-nope"}); !errors.Is(err, api.ErrNotFound) {
+		t.Errorf("CommentCounts with one missing id = %v, want api.ErrNotFound", err)
 	}
 }
 
