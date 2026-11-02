@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/workspaceid"
 )
 
@@ -57,7 +58,9 @@ func SandboxSeatLedgerPath(townRoot string) string {
 }
 
 // sandboxSeatEndLine is one line of the seat-end ledger: the record a removal
-// deleted, stamped with when it ended.
+// deleted, stamped with when it ended. WorkBead is the bead the seat was
+// submitted on, from its intent record; the key is absent when that record
+// names none or cannot be read.
 type sandboxSeatEndLine struct {
 	Session   string    `json:"session"`
 	Rig       string    `json:"rig"`
@@ -66,10 +69,29 @@ type sandboxSeatEndLine struct {
 	Profile   string    `json:"profile"`
 	CreatedAt time.Time `json:"created_at"`
 	EndedAt   time.Time `json:"ended_at"`
+	WorkBead  string    `json:"work_bead,omitempty"`
 }
 
-// appendSandboxSeatEnd appends rec's seat-end line to townRoot's ledger.
-func appendSandboxSeatEnd(townRoot string, rec SandboxRecord, now time.Time) error {
+// sandboxSeatBead is the bead rec's seat was submitted on, read from the seat's
+// intent record. An absent record, or one that names no bead, is "" with no
+// error. A record that names no seat has no intent to read, so it has no bead
+// and no error either. A record whose intent cannot be read is an error: the
+// bead is unknown, and the removal reports it.
+func sandboxSeatBead(townRoot string, rec SandboxRecord) (string, error) {
+	if !plainPathName(rec.Rig) || !plainPathName(rec.Polecat) {
+		return "", nil
+	}
+	seat := intent.Seat{Rig: rec.Rig, Role: "polecats", Name: rec.Polecat}
+	r, err := intent.Read(townRoot, seat)
+	if err != nil {
+		return "", fmt.Errorf("reading the intent of seat %s for its seat-end line: %w", seat, err)
+	}
+	return r.WorkBead, nil
+}
+
+// appendSandboxSeatEnd appends rec's seat-end line to townRoot's ledger, naming
+// bead when it is set.
+func appendSandboxSeatEnd(townRoot string, rec SandboxRecord, bead string, now time.Time) error {
 	// The line holds only strings and times, so its JSON cannot fail to encode.
 	line, _ := json.Marshal(sandboxSeatEndLine{
 		Session:   rec.Session,
@@ -79,6 +101,7 @@ func appendSandboxSeatEnd(townRoot string, rec SandboxRecord, now time.Time) err
 		Profile:   rec.Profile,
 		CreatedAt: rec.CreatedAt.UTC(),
 		EndedAt:   now.UTC(),
+		WorkBead:  bead,
 	})
 	path := SandboxSeatLedgerPath(townRoot)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -183,7 +206,8 @@ func ReadSandboxRecord(townRoot, session string) (r SandboxRecord, ok bool, err 
 // removal already took, writes no line, and a failed removal writes none
 // either, so a retry cannot line the same seat twice. A ledger that cannot be
 // written still leaves the removal done, its error joined with the removal's
-// (plan row M5).
+// (plan row M5). A seat whose bead cannot be read gets its line without the bead,
+// and that error is joined the same way.
 func RemoveSandboxRecord(townRoot, session string) error {
 	return removeSandboxRecord(townRoot, session, time.Now)
 }
@@ -216,11 +240,13 @@ func removeSandboxRecordWith(townRoot, session string, now func() time.Time, rem
 		// line cannot be written, so say so rather than meter nothing.
 		return errors.Join(fmt.Errorf("reading %s for its seat-end line: %w", session, readErr), removeErr)
 	}
-	var ledgerErr error
+	var ledgerErr, beadErr error
 	if ok {
-		ledgerErr = appendSandboxSeatEnd(townRoot, rec, now())
+		bead, err := sandboxSeatBead(townRoot, rec)
+		beadErr = err
+		ledgerErr = appendSandboxSeatEnd(townRoot, rec, bead, now())
 	}
-	return errors.Join(ledgerErr, removeErr)
+	return errors.Join(ledgerErr, beadErr, removeErr)
 }
 
 // ListSandboxSessions returns the recorded session names, sorted; a

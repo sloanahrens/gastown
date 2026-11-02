@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/intent"
 )
 
 // readSeatLines reads the town's seat-end ledger.
@@ -327,6 +329,159 @@ func TestSandboxRigPrefixAbsentRegistryTakesTheDefault(t *testing.T) {
 	}
 	if want := "gt"; got != want {
 		t.Fatalf("sandboxRigPrefix = %q, want the default prefix %q", got, want)
+	}
+}
+
+// The seat-end line names the bead the seat was submitted on, read from the
+// seat's intent record, so the landings join has a second bead-to-seat source
+// when the usage scan missed a run (gt-yhr6i).
+func TestSeatLineCarriesTheSubmittedBead(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	rec := SandboxRecord{Session: "gt-gastown-box", Rig: "gastown", Polecat: "box"}
+	seat := intent.Seat{Rig: rec.Rig, Role: "polecats", Name: rec.Polecat}
+	if err := WriteSandboxRecord(town, rec); err != nil {
+		t.Fatalf("writing the record: %v", err)
+	}
+	if err := intent.MarkSubmitted(town, seat, "gt-abc", "furiosa", time.Now()); err != nil {
+		t.Fatalf("marking the seat submitted: %v", err)
+	}
+	if err := RemoveSandboxRecord(town, rec.Session); err != nil {
+		t.Fatalf("removing the record: %v", err)
+	}
+	lines := readSeatLines(t, town)
+	if len(lines) != 1 {
+		t.Fatalf("seat-end lines = %d, want 1: %+v", len(lines), lines)
+	}
+	if got := lines[0].WorkBead; got != "gt-abc" {
+		t.Fatalf("seat-end line work_bead = %q, want the submitted bead gt-abc", got)
+	}
+}
+
+// A seat whose intent names no bead, or has no intent record at all, writes a
+// line with no work_bead key: the bead is left out rather than written empty.
+func TestSeatLineOmitsTheBeadWhenNoneIsKnown(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name  string
+		write func(t *testing.T, town string, seat intent.Seat)
+	}{
+		{
+			name:  "no intent record",
+			write: func(*testing.T, string, intent.Seat) {},
+		},
+		{
+			name: "an intent record that names no bead",
+			write: func(t *testing.T, town string, seat intent.Seat) {
+				t.Helper()
+				if err := intent.MarkSlung(town, seat, "claude", "furiosa", time.Now()); err != nil {
+					t.Fatalf("marking the seat slung: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			rec := SandboxRecord{Session: "gt-gastown-box", Rig: "gastown", Polecat: "box"}
+			seat := intent.Seat{Rig: rec.Rig, Role: "polecats", Name: rec.Polecat}
+			if err := WriteSandboxRecord(town, rec); err != nil {
+				t.Fatalf("writing the record: %v", err)
+			}
+			c.write(t, town, seat)
+			if err := RemoveSandboxRecord(town, rec.Session); err != nil {
+				t.Fatalf("removing the record: %v", err)
+			}
+			if lines := readSeatLines(t, town); len(lines) != 1 {
+				t.Fatalf("seat-end lines = %d, want 1: %+v", len(lines), lines)
+			}
+			raw, err := os.ReadFile(SandboxSeatLedgerPath(town))
+			if err != nil {
+				t.Fatalf("reading the ledger's text: %v", err)
+			}
+			if strings.Contains(string(raw), "work_bead") {
+				t.Fatalf("seat-end line names a bead it does not know: %s", raw)
+			}
+		})
+	}
+}
+
+// An intent record that cannot be read leaves the bead out of the line, and the
+// removal returns the read error: the seat still ended and its hours are still
+// metered, but the bead is not taken for absent (gt-yhr6i).
+func TestSeatLineLeavesOutAnUnreadableBead(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	rec := SandboxRecord{Session: "gt-gastown-box", Rig: "gastown", Polecat: "box"}
+	seat := intent.Seat{Rig: rec.Rig, Role: "polecats", Name: rec.Polecat}
+	if err := WriteSandboxRecord(town, rec); err != nil {
+		t.Fatalf("writing the record: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(seat.Path(town)), 0o755); err != nil {
+		t.Fatalf("creating the intent directory: %v", err)
+	}
+	if err := os.WriteFile(seat.Path(town), []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("writing the unreadable intent record: %v", err)
+	}
+	if err := RemoveSandboxRecord(town, rec.Session); err == nil {
+		t.Fatal("removal with an unreadable intent record returned no error")
+	}
+	if _, ok, err := ReadSandboxRecord(town, rec.Session); ok || err != nil {
+		t.Fatalf("record after removal: ok=%v err=%v, want gone", ok, err)
+	}
+	lines := readSeatLines(t, town)
+	if len(lines) != 1 {
+		t.Fatalf("seat-end lines = %d, want 1: %+v", len(lines), lines)
+	}
+	if lines[0].WorkBead != "" {
+		t.Fatalf("seat-end line work_bead = %q, want the bead left out", lines[0].WorkBead)
+	}
+}
+
+// A record whose rig or polecat is not one plain path element names no seat, so
+// no intent is read for it. An intent file planted where the unchecked name
+// would lead is not this seat's, so the line leaves the bead out and the removal
+// stays a success, as the delete path's warning for such a record expects
+// (gt-yhr6i).
+func TestSeatLineReadsNoIntentForARecordThatNamesNoSeat(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name    string
+		rig     string
+		polecat string
+	}{
+		{name: "a rig that climbs out of the intent directory", rig: "../gastown", polecat: "box"},
+		{name: "a polecat that holds a separator", rig: "gastown", polecat: "a/b"},
+		{name: "a polecat with no name", rig: "gastown", polecat: ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			rec := SandboxRecord{Session: "gt-gastown-box", Rig: c.rig, Polecat: c.polecat}
+			if err := WriteSandboxRecord(town, rec); err != nil {
+				t.Fatalf("writing the record: %v", err)
+			}
+			planted := intent.Seat{Rig: c.rig, Role: "polecats", Name: c.polecat}.Path(town)
+			if err := os.MkdirAll(filepath.Dir(planted), 0o755); err != nil {
+				t.Fatalf("creating the planted intent's directory: %v", err)
+			}
+			if err := os.WriteFile(planted, []byte(`{"desired":"submitted","work_bead":"gt-evil"}`), 0o644); err != nil {
+				t.Fatalf("planting an intent record: %v", err)
+			}
+			if err := RemoveSandboxRecord(town, rec.Session); err != nil {
+				t.Fatalf("removing a record that names no seat: %v", err)
+			}
+			if _, ok, err := ReadSandboxRecord(town, rec.Session); ok || err != nil {
+				t.Fatalf("record after removal: ok=%v err=%v, want gone", ok, err)
+			}
+			lines := readSeatLines(t, town)
+			if len(lines) != 1 {
+				t.Fatalf("seat-end lines = %d, want 1: %+v", len(lines), lines)
+			}
+			if lines[0].WorkBead != "" {
+				t.Fatalf("seat-end line work_bead = %q, want the bead left out", lines[0].WorkBead)
+			}
+		})
 	}
 }
 
