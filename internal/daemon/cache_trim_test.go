@@ -26,6 +26,10 @@ const (
 	cacheTrimNamespace = "openshell"
 	// cacheTrimJob is the Job the pass names after that claim.
 	cacheTrimJob = cachevol.DefaultTrimJobName + "-" + cacheTrimClaimName
+	// cacheTrimMountPath is where a sandbox pod mounts the claim, the root the
+	// pass reads the listing through. It matches the kubernetes driver's mount,
+	// outside /sandbox so it does not replace the workspace.
+	cacheTrimMountPath = "/tmp/gt-cache"
 )
 
 // cacheTrimClaimsJSON is the cluster's claim listing: the fixture's claim, in
@@ -35,7 +39,7 @@ const cacheTrimClaimsJSON = `{"items":[{"metadata":{"name":"` + cacheTrimClaimNa
 // cacheTrimPodsJSON is one running sandbox pod that mounts the claim, the pod
 // a listing is read through and PlanTrim's sandbox count.
 const cacheTrimPodsJSON = `{"items":[{"metadata":{"name":"sbx-a","namespace":"` + cacheTrimNamespace + `"},` +
-	`"spec":{"containers":[{"name":"agent","volumeMounts":[{"name":"gt-cache","mountPath":"/sandbox/.cache"}]}],` +
+	`"spec":{"containers":[{"name":"agent","volumeMounts":[{"name":"gt-cache","mountPath":"` + cacheTrimMountPath + `"}]}],` +
 	`"volumes":[{"name":"gt-cache","persistentVolumeClaim":{"claimName":"` + cacheTrimClaimName + `"}}]},` +
 	`"status":{"phase":"Running"}}]}`
 
@@ -349,8 +353,8 @@ func TestDiskMaintenanceDryRunAppliesNothing(t *testing.T) {
 func TestDiskMaintenanceCacheTrimRefusesAnUnreadableListing(t *testing.T) {
 	t.Parallel()
 	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
-		"exec -n " + cacheTrimNamespace + " sbx-a -c agent -- " + cachevol.HelperPath + " trim-list --root /sandbox/.cache": {
-			stderr: "trim-list: the claim at /sandbox/.cache: no such file", code: 3,
+		"exec -n " + cacheTrimNamespace + " sbx-a -c agent -- " + cachevol.HelperPath + " trim-list --root " + cacheTrimMountPath: {
+			stderr: "trim-list: the claim at " + cacheTrimMountPath + ": no such file", code: 3,
 		},
 	})
 	f.d.runDiskMaintenance()
@@ -372,7 +376,7 @@ func TestDiskMaintenanceCacheTrimRefusesWhenNoPodMountsTheClaim(t *testing.T) {
 	t.Parallel()
 	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
 		"get pods -n " + cacheTrimNamespace + " -o json": {stdout: `{"items":[{"metadata":{"name":"sbx-b","namespace":"` + cacheTrimNamespace + `"},` +
-			`"spec":{"containers":[{"name":"agent","volumeMounts":[{"name":"gt-cache","mountPath":"/sandbox/.cache"}]}],` +
+			`"spec":{"containers":[{"name":"agent","volumeMounts":[{"name":"gt-cache","mountPath":"` + cacheTrimMountPath + `"}]}],` +
 			`"volumes":[{"name":"gt-cache","persistentVolumeClaim":{"claimName":"` + cacheTrimClaimName + `"}}]},` +
 			`"status":{"phase":"Pending"}}]}`},
 	})
@@ -426,7 +430,7 @@ func cacheTrimPodJSON(name, phase, claim string) string {
 // mounting claim.
 func cacheTrimPodJSONIn(name, phase, claim, namespace string) string {
 	return `{"metadata":{"name":"` + name + `","namespace":"` + namespace + `"},` +
-		`"spec":{"containers":[{"name":"agent","volumeMounts":[{"name":"gt-cache","mountPath":"/sandbox/.cache"}]}],` +
+		`"spec":{"containers":[{"name":"agent","volumeMounts":[{"name":"gt-cache","mountPath":"` + cacheTrimMountPath + `"}]}],` +
 		`"volumes":[{"name":"gt-cache","persistentVolumeClaim":{"claimName":"` + claim + `"}}]},` +
 		`"status":{"phase":"` + phase + `"}}`
 }
@@ -572,7 +576,7 @@ func TestDiskMaintenanceCacheTrimStopsAtTheReadItCannotMake(t *testing.T) {
 	const (
 		getClaims  = cacheTrimClaimsVerb
 		getPods    = "get pods -n " + cacheTrimNamespace + " -o json"
-		execList   = "exec -n " + cacheTrimNamespace + " sbx-a -c agent -- " + cachevol.HelperPath + " trim-list --root /sandbox/.cache"
+		execList   = "exec -n " + cacheTrimNamespace + " sbx-a -c agent -- " + cachevol.HelperPath + " trim-list --root " + cacheTrimMountPath
 		getObjects = "get job,configmap -n " + cacheTrimNamespace + " -l app.kubernetes.io/managed-by=gt,app.kubernetes.io/name=polecat-cache-trim -o json"
 		deleteJob  = "delete job " + cacheTrimJob + " -n " + cacheTrimNamespace + " --ignore-not-found --wait=true --timeout=60s"
 		apply      = "apply -f - -n " + cacheTrimNamespace
