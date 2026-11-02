@@ -116,13 +116,13 @@ var ruleCountWords = []string{"", "One", "Two", "Three", "Four", "Five", "Six",
 	"Seven", "Eight", "Nine", "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen",
 	"Fifteen", "Sixteen", "Seventeen", "Eighteen", "Nineteen", "Twenty"}
 
-// polecat.md carries the fifteen "What om rejects" rules, numbered 1 to 15 in
-// order and each once, an intro stating that count, the rework rule's and rule
-// 9's quoted findings, and no probe line (gt-dabdh, gt-o87rv; eleven merged into
-// rule 1 under gt-u3hr0; the rework rule added under gt-wfohy; the cloud rules left for the devops layer and three rules added under gt-pccx7).
-func TestPolecatDirectiveHasFifteenRules(t *testing.T) {
+// polecat.md carries the "What om rejects" rules, numbered from 1 in order and
+// each once, an intro stating their count, the rework rule's and rule 9's quoted
+// findings, and no probe line. The changelog in polecat.md records how the set
+// grew (gt-o87rv, gt-pccx7, gt-2iro9).
+func TestPolecatDirectiveRuleHeadings(t *testing.T) {
 	t.Parallel()
-	const rules = 15
+	const rules = 16
 	text := readDirective(t, "polecat.md")
 	var got []string
 	for _, line := range strings.Split(text, "\n") {
@@ -152,5 +152,35 @@ func TestPolecatDirectiveHasFifteenRules(t *testing.T) {
 	}
 	if strings.Contains(text, "Probe word") {
 		t.Error("polecat.md still carries the probe line")
+	}
+}
+
+// TestPolecatDirectiveRule16HasItsBody pins gt-2iro9's review findings: the
+// heading count passes with rule 16 empty or cut to a fragment, so this test
+// reads the rule's own section and requires each clause the rule rests on, and
+// the bulleted om flags line that names its findings.
+func TestPolecatDirectiveRule16HasItsBody(t *testing.T) {
+	t.Parallel()
+	text := readDirective(t, "polecat.md")
+	const heading = "\n## 16. One workspace per answer\n"
+	start := strings.Index(text, heading)
+	if start < 0 {
+		t.Fatal("polecat.md has no rule 16 titled \"One workspace per answer\"")
+	}
+	body := text[start+len(heading):]
+	end := strings.Index(body, "\n# Before gt done")
+	if end < 0 {
+		t.Fatal("polecat.md has no \"# Before gt done\" checklist after rule 16")
+	}
+	rule := body[:end]
+	for _, clause := range []string{
+		"checks that every record it reads names that workspace",
+		"and with an empty workspace id",
+		"A missing registry, prefix or map is an error",
+		"\n- om flags: ",
+	} {
+		if !strings.Contains(rule, clause) {
+			t.Errorf("rule 16 lacks the clause %q", clause)
+		}
 	}
 }
