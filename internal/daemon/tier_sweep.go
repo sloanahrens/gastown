@@ -1810,13 +1810,18 @@ func tierSweepRunnerImageFollowsInstalled(image string) bool {
 // publishes it, because the sweep engine is another Docker engine that no
 // build writes to (gt-c3sue).
 //
+// The engine is the one the run's context names, on both backends: a
+// Kubernetes cluster on the Docker runtime runs its pods from that engine's
+// images, so it gets the same presence check and the same save-and-load the
+// Docker backend does (gt-uv611).
+//
 // It returns the commands' combined output for the stage log, and an error
 // when the image could not be confirmed or loaded. An image the daemon cannot
 // confirm is never assumed present, and a load that fails is never answered
 // with an older image.
 func (d *Daemon) tierSweepEnsureRunnerImage(ctx context.Context, spec sweeprunner.Spec) (string, error) {
 	cfg := tierSweepRunnerConfig(d.patrolConfig)
-	if cfg == nil || cfg.Backend != config.TierSweepRunnerDocker || !tierSweepRunnerImageFollowsInstalled(cfg.Image) {
+	if cfg == nil || !tierSweepRunnerImageFollowsInstalled(cfg.Image) {
 		return "", nil
 	}
 	budget := d.tierSweepSeams.imageBudget

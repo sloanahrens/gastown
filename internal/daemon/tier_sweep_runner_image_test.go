@@ -361,18 +361,116 @@ func TestTierSweepLoadsMissingImageIntoSweepEngine(t *testing.T) {
 	})
 }
 
-// TestTierSweepRunnerImageKubernetesSkipsTheEngine: putting the image in a
-// Docker sweep engine is the Docker backend's step alone. A Kubernetes run
-// pulls the image through the cluster, so the daemon names the installed tag
-// and asks no engine for it, and a missing local image is never a RED
-// (gt-c3sue).
-func TestTierSweepRunnerImageKubernetesSkipsTheEngine(t *testing.T) {
+// runnerImageKubernetesDaemon is runnerImageDaemon with the Kubernetes backend
+// selected: its pods run from the images of the engine its context names, just
+// as the Docker backend's containers do (gt-uv611).
+func runnerImageKubernetesDaemon(t *testing.T, now time.Time, image string) (*Daemon, *tierSweepImageRunner) {
+	t.Helper()
+	d, fake := runnerImageDaemon(t, now, image)
+	d.patrolConfig.Patrols.TierSweep.Runner.Backend = config.TierSweepRunnerKubernetes
+	return d, fake
+}
+
+// TestTierSweepEnsureLoadsTheInstalledImageForTheKubernetesBackend: a
+// Kubernetes cluster on the Docker runtime runs its pods from the images of the
+// engine its context names, so an installed-build image that engine lacks is
+// streamed in before the launch, through that context; an image it already has
+// causes no load. Without the ensure step the run waits on a sync pod that
+// never becomes Ready (gt-uv611).
+func TestTierSweepEnsureLoadsTheInstalledImageForTheKubernetesBackend(t *testing.T) {
+	t.Parallel()
+
+	st := func() tierSweepStage {
+		return tierSweepStage{tiers: []string{"integration", "race"}, slot: true, rig: "gastown", tested: runnerTestSHA, budget: time.Minute}
+	}
+
+	t.Run("a missing image is loaded before the launch", func(t *testing.T) {
+		t.Parallel()
+		now := atHour(time.Now(), 15)
+		d, fake := runnerImageKubernetesDaemon(t, now, config.TierSweepRunnerInstalledImage)
+		fake.saveOut = "the image tar"
+		var launches int
+		d.tierSweepSeams.launch = func(_ context.Context, _ tierSweepStage, spec sweeprunner.Spec) tierSweepLaunch {
+			launches++
+			if got := fake.loadRead(); got != fake.saveOut {
+				t.Errorf("the launch ran with the load having read %q, want the save's stream %q: the image is in the engine before the run", got, fake.saveOut)
+			}
+			if err := sweeprunner.Write(spec.OutDir, runnerTestResult(spec, now)); err != nil {
+				t.Fatalf("the fake launch writing a result: %v", err)
+			}
+			return tierSweepLaunch{exitCode: 0}
+		}
+
+		if res := d.tierSweepRunStage(context.Background(), t.TempDir(), st()); !res.ran {
+			t.Fatalf("stage result = %+v, want it run", res)
+		}
+		// One look finds the image missing; the second, under the lock,
+		// confirms no other sweep loaded it while this one waited.
+		looks := fake.callsMatching("image ls")
+		if len(looks) != 2 {
+			t.Fatalf("image looks = %q, want the miss and the re-check under the lock", looks)
+		}
+		engineContext := d.patrolConfig.Patrols.TierSweep.Runner.Context
+		for _, want := range []string{"image ls", "save", "load"} {
+			calls := fake.callsMatching(want)
+			if len(calls) == 0 {
+				t.Errorf("%s calls = %q, want at least one", want, calls)
+				continue
+			}
+			for _, argv := range calls {
+				// The save names the default engine, where make
+				// polecat-image publishes the image; the look and the load
+				// name the run's own engine.
+				if want == "save" && strings.Contains(argv, "--context ") {
+					t.Errorf("save call = %q, want the default engine", argv)
+				}
+				if want != "save" && !strings.Contains(argv, "--context "+engineContext+" ") {
+					t.Errorf("%s call = %q, want it against the %q engine", want, argv, engineContext)
+				}
+			}
+		}
+		if launches != 1 {
+			t.Errorf("launches = %d, want 1 after the image reached the engine", launches)
+		}
+	})
+
+	t.Run("a present image is not loaded", func(t *testing.T) {
+		t.Parallel()
+		now := atHour(time.Now(), 15)
+		d, fake := runnerImageKubernetesDaemon(t, now, config.TierSweepRunnerInstalledImage)
+		fake.checkOut = "sha256:abc\n"
+		var launches int
+		d.tierSweepSeams.launch = func(_ context.Context, _ tierSweepStage, spec sweeprunner.Spec) tierSweepLaunch {
+			launches++
+			if err := sweeprunner.Write(spec.OutDir, runnerTestResult(spec, now)); err != nil {
+				t.Fatalf("the fake launch writing a result: %v", err)
+			}
+			return tierSweepLaunch{exitCode: 0}
+		}
+
+		if res := d.tierSweepRunStage(context.Background(), t.TempDir(), st()); !res.ran {
+			t.Fatalf("stage result = %+v, want it run", res)
+		}
+		if got := fake.callsMatching("save"); len(got) != 0 {
+			t.Errorf("save calls = %q, want none: the image is already in the context's engine", got)
+		}
+		if got := fake.callsMatching("load"); len(got) != 0 {
+			t.Errorf("load calls = %q, want none: the image is already in the context's engine", got)
+		}
+		if launches != 1 {
+			t.Errorf("launches = %d, want 1", launches)
+		}
+	})
+}
+
+// TestTierSweepEnsureStaysOffForAPinnedImage: an explicit image pin on the
+// Kubernetes backend is the operator's and is used as it always was: the daemon
+// asks no engine for it and starts no load (gt-uv611).
+func TestTierSweepEnsureStaysOffForAPinnedImage(t *testing.T) {
 	t.Parallel()
 	now := atHour(time.Now(), 15)
-	d, fake := runnerImageDaemon(t, now, "")
-	d.patrolConfig.Patrols.TierSweep.Runner.Backend = config.TierSweepRunnerKubernetes
-	fake.checkErrOut = "no docker engine here\n"
-	fake.checkErr = exitErr(1)
+	const pin = "gastown-polecat:23017b4dd"
+	d, fake := runnerImageKubernetesDaemon(t, now, pin)
 	var launched sweeprunner.Spec
 	d.tierSweepSeams.launch = func(_ context.Context, _ tierSweepStage, spec sweeprunner.Spec) tierSweepLaunch {
 		launched = spec
@@ -386,14 +484,83 @@ func TestTierSweepRunnerImageKubernetesSkipsTheEngine(t *testing.T) {
 	if res := d.tierSweepRunStage(context.Background(), t.TempDir(), st); !res.ran {
 		t.Fatalf("stage result = %+v, want it run", res)
 	}
-	if launched.Image != "gastown-polecat:"+tierSweepInstalledBuild {
-		t.Errorf("launched image = %q, want the installed build's tag", launched.Image)
+	if launched.Image != pin {
+		t.Errorf("launched image = %q, want the pin %q", launched.Image, pin)
 	}
-	for _, argv := range fake.callList() {
-		if strings.HasPrefix(argv, "docker ") {
-			t.Errorf("docker call = %q, want none: a Kubernetes run pulls its image through the cluster", argv)
+	for _, want := range []string{"image ls", "save", "load"} {
+		if got := fake.callsMatching(want); len(got) != 0 {
+			t.Errorf("%s calls = %q, want none: a pinned image is never checked or loaded", want, got)
 		}
 	}
+}
+
+// TestTierSweepEnsureFailureIsRedForTheKubernetesBackend: an image the daemon
+// cannot stream into the context's engine, or cannot confirm within the budget,
+// is a RED stage naming the failure, and neither the host nor the cluster runs
+// anything against the image that was there before (gt-uv611).
+func TestTierSweepEnsureFailureIsRedForTheKubernetesBackend(t *testing.T) {
+	t.Parallel()
+
+	st := tierSweepStage{tiers: []string{"integration", "race"}, slot: true, rig: "gastown", tested: runnerTestSHA, budget: time.Minute}
+
+	t.Run("the load fails", func(t *testing.T) {
+		t.Parallel()
+		now := atHour(time.Now(), 15)
+		d, fake := runnerImageKubernetesDaemon(t, now, config.TierSweepRunnerInstalledImage)
+		fake.saveOut = "the image tar"
+		fake.loadErrOut = "no space left on device\n"
+		fake.loadErr = exitErr(1)
+		var launches int
+		d.tierSweepSeams.launch = func(context.Context, tierSweepStage, sweeprunner.Spec) tierSweepLaunch {
+			launches++
+			return tierSweepLaunch{exitCode: 0}
+		}
+
+		res := d.tierSweepRunStage(context.Background(), t.TempDir(), st)
+		if !res.ran || res.exitCode == 0 || res.reason == "" {
+			t.Fatalf("stage result = %+v, want it run and RED with a reason", res)
+		}
+		if !strings.Contains(res.output, "no space left on device") {
+			t.Errorf("stage output does not name the engine's error:\n%s", res.output)
+		}
+		if launches != 0 {
+			t.Errorf("launches = %d, want 0: a failed image load never starts a run", launches)
+		}
+	})
+
+	t.Run("the budget runs out", func(t *testing.T) {
+		t.Parallel()
+		now := atHour(time.Now(), 15)
+		d, fake := runnerImageKubernetesDaemon(t, now, config.TierSweepRunnerInstalledImage)
+		var launches int
+		d.tierSweepSeams.launch = func(context.Context, tierSweepStage, sweeprunner.Spec) tierSweepLaunch {
+			launches++
+			return tierSweepLaunch{exitCode: 0}
+		}
+		// Another sweep's load holds the town lock, and the stage's budget is
+		// shorter than the wait, so the ensure step gives up rather than
+		// loading beside it.
+		release, err := d.tierSweepRunnerImageLock(context.Background())
+		if err != nil {
+			t.Fatalf("taking the runner image lock: %v", err)
+		}
+		defer release()
+		d.tierSweepSeams.imageBudget = 50 * time.Millisecond
+
+		res := d.tierSweepRunStage(context.Background(), t.TempDir(), st)
+		if !res.ran || res.exitCode == 0 || res.reason == "" {
+			t.Fatalf("stage result = %+v, want it run and RED with a reason", res)
+		}
+		if !strings.Contains(res.output, "did not finish") {
+			t.Errorf("stage output does not name the unfinished load:\n%s", res.output)
+		}
+		if launches != 0 {
+			t.Errorf("launches = %d, want 0: an unconfirmed image never starts a run", launches)
+		}
+		if got := fake.callsMatching("save"); len(got) != 0 {
+			t.Errorf("save calls = %q, want none: the budget ended before a load started", got)
+		}
+	})
 }
 
 // TestTierSweepFailedImageLoadIsRedNotStale: an image the daemon cannot confirm
