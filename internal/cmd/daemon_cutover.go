@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/jonboulle/clockwork"
@@ -77,6 +78,10 @@ type cutoverSide struct {
 	// a heartbeat completed (gt-xplg3). It is set for the launchd side, whose
 	// daemon answers SIGTERM only between its loop iterations.
 	stopAtHeartbeat bool
+	// teardown builds the argv that removes this side's containers and keeps
+	// their volumes. Step 6 runs it once the other side has taken the town. Nil
+	// when the side has no containers to remove.
+	teardown func() ([]string, error)
 }
 
 // cutoverPlan is one cutover run: which side goes down, which comes up, and the
@@ -103,10 +108,10 @@ type cutoverPlan struct {
 	baseline *daemon.State
 }
 
-// execute runs the five steps. Every ending that is not success is an error
-// whose message the operator can act on; the text printed before it says what
-// state the town is left in and the exact command to restore it. Nothing is
-// rolled back by itself.
+// execute runs the five steps, then step 6 when the old side has containers to
+// remove. Every ending that is not success is an error whose message the
+// operator can act on; the text printed before it says what state the town is
+// left in and the exact command to restore it. Nothing is rolled back by itself.
 func (p *cutoverPlan) execute(ctx context.Context) error {
 	// Steps 1 and 2: quiet, twice. Neither has changed anything yet.
 	if err := p.quiet(ctx, cutoverQuietBudget); err != nil {
@@ -173,7 +178,31 @@ func (p *cutoverPlan) execute(ctx context.Context) error {
 		return fmt.Errorf("%s owns the town but wrote no second heartbeat within %s: %s", p.to.name, cutoverHeartbeatBudget, why)
 	}
 	p.say("%s owns the town and has beaten twice.", p.to.name)
+	p.removeOldContainers()
 	return nil
+}
+
+// removeOldContainers is step 6: compose down on the old side's project, which
+// removes its containers and keeps their volumes. It runs only after the new side
+// has beaten twice, so the town is on the new side whatever happens here. A
+// failure does not undo the cutover: the command is printed for the operator to
+// run by hand, and the caller still returns nil.
+func (p *cutoverPlan) removeOldContainers() {
+	if p.from.teardown == nil {
+		return
+	}
+	argv, err := p.from.teardown()
+	if err != nil {
+		p.say("The %s side's containers were not removed (%v). Remove them by hand, keeping the volumes.", p.from.name, err)
+		return
+	}
+	// The run's error carries the command's output, which is left out here: the
+	// command printed below is the one to run, and its own output says why.
+	if err := p.run(argv); err != nil {
+		p.say("compose down for the %s side failed, so its containers may still be running. %s owns the town and is unaffected. Run this by hand, keeping the volumes: %s", p.from.name, p.to.name, strings.Join(argv, " "))
+		return
+	}
+	p.say("Removed the %s side's containers with compose down; their volumes are kept.", p.from.name)
 }
 
 // daemonRunning says whether the heartbeat wait applies: state.json records a
@@ -402,6 +431,7 @@ func (c *daemonControl) cutoverSides(townRoot string) (launchd, container cutove
 		name:     config.SupervisorContainer,
 		stop:     k.stop,
 		start:    k.start,
+		teardown: k.down,
 		job:      k.jobState,
 		stopped:  containerStopped,
 		restore:  k.load,
@@ -495,6 +525,11 @@ budget and a stated ending when it runs out:
      command are printed
   5. wait for the new daemon's second heartbeat; on timeout it is reported
      unhealthy with the rollback command
+
+After step 5, a cutover from the container to launchd runs compose down on the
+container's project, without -v, so both containers (the daemon and sweep-dind)
+are removed and their volumes are kept. A failure is printed with the command to
+run by hand; launchd still owns the town, so the cutover succeeds.
 
 Nothing is rolled back by itself. The operator creates the dispatch hold; this
 command only reads it. After a cutover set daemon.supervisor to match the new

@@ -1220,17 +1220,22 @@ Before it, these must be true:
   quiet town: no `gt sling` running and no container-gate job running.
 - Run it from `<live-town>`. It stops the container, proves it stopped, starts
   launchd through the startup guard, and waits for `state.json` to name
-  `launchd` / `com.gastown.daemon` and for the second heartbeat.
+  `launchd` / `com.gastown.daemon` and for the second heartbeat. Then it runs
+  `compose down` on the container's project, which removes both containers and
+  keeps their volumes.
 
-Expected on success: `launchd owns the town and has beaten twice.` then
-`✓ Cutover to launchd done.` If a step fails, the command prints the state it
+Expected on success: `launchd owns the town and has beaten twice.`, then
+`Removed the container side's containers with compose down; their volumes are
+kept.`, then `✓ Cutover to launchd done.` If a step fails, the command prints the state it
 left and the command to restore the other side, as it does going forward.
 
-The cutover stops only the daemon container (`compose stop daemon`); `sweep-dind`
-keeps running, with its volume. To remove both containers, run
-`docker --context desktop-linux compose -p gt-live -f <live-town>/daemon/container/compose.yml down`
-once the rollback has succeeded. It keeps the volume; never add `-v` without the
-overseer.
+The cutover removes both containers, the daemon's and `sweep-dind`'s. It stops
+the daemon container, then, once launchd has beaten twice, runs
+`docker --context desktop-linux compose -p gt-live -f <live-town>/daemon/container/compose.yml down`.
+That is `down` without `-v`, so the volumes are kept. If the `down` fails, the
+cutover prints the same command for the operator to run by hand. launchd still
+owns the town, so the rollback has succeeded and the cutover exits zero.
+Never add `-v` without the overseer.
 
 **After the rollback, switch the setting back.** The rollback does not switch
 `daemon.supervisor` either. Make the switch described in the cutover section
@@ -1256,6 +1261,8 @@ The points most likely to differ:
   owned: the reverse direction is built from the same code and tested on fakes,
   not run.
 - The format of the `Supervised:` line for launchd after the rollback.
+- That the `compose down` step removes `sweep-dind` as well as the daemon on the
+  live project, and that its printed line matches the one above.
 - Whether a freshly restarted live daemon writes the `owner` the first
   precondition needs: the field is written by the code on `main`, and the
   installed `gt` may be older.
