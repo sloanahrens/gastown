@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"io"
 	"net"
@@ -871,6 +872,18 @@ func eventsBehindText(n int64) string {
 // doltArchiveReader counts archive lag against the live server.
 type doltArchiveReader struct {
 	config *doltserver.Config
+	// openDB opens the pool a count runs on; nil opens with the MySQL driver.
+	// A test injects a fake driver so the failure paths are reachable without
+	// a server.
+	openDB func(dsn string) (*sql.DB, error)
+}
+
+// open opens the read-only pool one count runs on.
+func (r doltArchiveReader) open(dsn string) (*sql.DB, error) {
+	if r.openDB != nil {
+		return r.openDB(dsn)
+	}
+	return sql.Open("mysql", dsn)
 }
 
 // commitsBehind counts db's dolt_log rows newer than the watermark, by the
@@ -885,7 +898,7 @@ func (r doltArchiveReader) commitsBehind(ctx context.Context, db string, wm daem
 		ReadTimeout:  "10s",
 		WriteTimeout: "10s",
 	})
-	conn, err := beadsql.Open(ctx, dsn, db)
+	conn, err := r.open(dsn)
 	if err != nil {
 		return 0, fmt.Errorf("database %q not readable: %w", db, err)
 	}
@@ -906,7 +919,8 @@ func (r doltArchiveReader) eventsBehind(ctx context.Context, db string, wm daemo
 	if !dbNameRe.MatchString(db) {
 		return 0, fmt.Errorf("database name %q is not a plain identifier — refusing to query it", db)
 	}
-	if err := wm.Validate(); err != nil {
+	query, err := beadsql.CountEventsAfter(db, wm.CreatedAt, wm.ID).Inline()
+	if err != nil {
 		return 0, err
 	}
 	dsn := buildDoltDSNFromConfig(r.config, db, dsnOpts{
@@ -914,16 +928,12 @@ func (r doltArchiveReader) eventsBehind(ctx context.Context, db string, wm daemo
 		ReadTimeout:  "10s",
 		WriteTimeout: "10s",
 	})
-	conn, err := beadsql.Open(ctx, dsn, db)
+	conn, err := r.open(dsn)
 	if err != nil {
 		return 0, fmt.Errorf("database %q not readable: %w", db, err)
 	}
 	defer conn.Close()
 
-	query, err := beadsql.CountEventsAfter(db, wm.CreatedAt, wm.ID).Inline()
-	if err != nil {
-		return 0, err
-	}
 	var count int64
 	if err := conn.QueryRowContext(ctx, query).Scan(&count); err != nil {
 		return 0, err

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/doltbackup"
@@ -41,6 +42,9 @@ type maintenanceSeams struct {
 	// archiveEventsRead reads up to limit of a database's events rows after the
 	// events archive's watermark, oldest first (a read-only SELECT).
 	archiveEventsRead func(ctx context.Context, d *Daemon, db string, after EventsArchiveWatermark, limit int) (archiveEvents, error)
+	// archiveOpenDB opens the pool an archive read runs on. A test injects a
+	// fake driver so a read's failure paths are reachable without a server.
+	archiveOpenDB func(dsn string) (*sql.DB, error)
 	// quiet is the quiet-window guard, re-checked before each database.
 	quiet func(d *Daemon) (bool, string)
 	// slotHolders lists the roles holding a container-gate slot.
@@ -103,6 +107,9 @@ func (d *Daemon) maintenance() maintenanceSeams {
 		s.archiveEventsRead = func(ctx context.Context, d *Daemon, db string, after EventsArchiveWatermark, limit int) (archiveEvents, error) {
 			return d.doltArchiveEvents(ctx, db, after, limit)
 		}
+	}
+	if s.archiveOpenDB == nil {
+		s.archiveOpenDB = func(dsn string) (*sql.DB, error) { return sql.Open("mysql", dsn) }
 	}
 	if s.quiet == nil {
 		s.quiet = (*Daemon).maintenanceQuiet

@@ -419,26 +419,33 @@ func archiveMember(columns []string, rows [][]string, newFile bool) ([]byte, err
 		}
 	}
 	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
+	if err := writeArchiveMember(&buf, columns, rows, newFile); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// writeArchiveMember writes one gzip CSV member to dst. The caller has checked
+// that every row has the columns' width. Its failures are the CSV and gzip
+// writers', which a test drives with a destination that refuses the write.
+func writeArchiveMember(dst io.Writer, columns []string, rows [][]string, newFile bool) error {
+	gz := gzip.NewWriter(dst)
 	w := csv.NewWriter(gz)
 	if newFile {
 		if err := w.Write(columns); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	for _, row := range rows {
 		if err := w.Write(row); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	w.Flush()
 	if err := w.Error(); err != nil {
-		return nil, err
+		return err
 	}
-	if err := gz.Close(); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	return gz.Close()
 }
 
 // recordArchiveWatermark advances one database's commit archive watermark.
@@ -477,7 +484,7 @@ func (d *Daemon) doltArchiveLog(ctx context.Context, db string, after ArchiveWat
 	if err := validMaintenanceDBName(db); err != nil {
 		return nil, err
 	}
-	conn, err := sql.Open("mysql", d.maintenanceDSN(db, maintenanceArchiveReadTimeout)+"&parseTime=true")
+	conn, err := d.maintenance().archiveOpenDB(d.maintenanceDSN(db, maintenanceArchiveReadTimeout) + "&parseTime=true")
 	if err != nil {
 		return nil, err
 	}
@@ -535,19 +542,19 @@ func (d *Daemon) doltArchiveEvents(ctx context.Context, db string, after EventsA
 	if err := after.Validate(); err != nil {
 		return archiveEvents{}, err
 	}
+	query, err := beadsql.ArchiveEvents(db, after.CreatedAt, after.ID, limit).Inline()
+	if err != nil {
+		return archiveEvents{}, err
+	}
 	// No parseTime: the row is archived as the text Dolt renders it, and every
 	// column is scanned as text.
-	conn, err := sql.Open("mysql", d.maintenanceDSN(db, maintenanceArchiveReadTimeout))
+	conn, err := d.maintenance().archiveOpenDB(d.maintenanceDSN(db, maintenanceArchiveReadTimeout))
 	if err != nil {
 		return archiveEvents{}, err
 	}
 	defer conn.Close()
 	conn.SetMaxOpenConns(1)
 
-	query, err := beadsql.ArchiveEvents(db, after.CreatedAt, after.ID, limit).Inline()
-	if err != nil {
-		return archiveEvents{}, err
-	}
 	rows, err := conn.QueryContext(ctx, query)
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {

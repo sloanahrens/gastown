@@ -721,6 +721,12 @@ func TestEventsArchiveColumns(t *testing.T) {
 	if _, err := eventsWatermarkFrom([]string{"id", "created_at"}, []string{"1"}); err == nil {
 		t.Error("a short row was turned into a watermark")
 	}
+	if _, err := eventsWatermarkFrom([]string{"id"}, []string{"1"}); err == nil {
+		t.Error("a watermark was built from columns without created_at")
+	}
+	if _, err := eventsWatermarkFrom([]string{"created_at", "id"}, []string{"yesterday", "1"}); err == nil {
+		t.Error("a watermark was built from text Dolt cannot compare")
+	}
 }
 
 // TestArchiveMemberRefusesRowWidthMismatch: a row whose values do not line up
