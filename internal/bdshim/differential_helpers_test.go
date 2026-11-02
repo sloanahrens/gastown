@@ -100,7 +100,6 @@ var differentialRows = []differentialRow{
 var knownUnhandledVerbs = map[string]bool{
 	"stats":  true,
 	"config": true,
-	"dep":    true,
 	"events": true,
 }
 

@@ -32,6 +32,7 @@ var handlers = map[string]Handler{
 	"comment":  commentHandler,
 	"label":    labelHandler,
 	"kv":       kvHandler,
+	"dep":      depHandler,
 }
 
 // OsMain is the production entry: this process's argv, environment and working
