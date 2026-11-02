@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,6 +17,9 @@ type fakeContainerLifecycle struct {
 	mu      sync.Mutex
 	running bool
 	calls   []string
+	// pingErr, when set, is what the SQL ping answers: the container cannot be
+	// reached at all.
+	pingErr error
 }
 
 func (f *fakeContainerLifecycle) Start(string) error {
@@ -37,6 +41,9 @@ func (f *fakeContainerLifecycle) Stop(string) error {
 func (f *fakeContainerLifecycle) IsRunning(string) (bool, int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.pingErr != nil {
+		return false, 0, f.pingErr
+	}
 	return f.running, 0, nil
 }
 
@@ -210,6 +217,22 @@ func TestStatus_ExternalContainerReadsTheListener(t *testing.T) {
 		}
 	})
 
+	t.Run("a ping that fails is reported", func(t *testing.T) {
+		t.Parallel()
+		townRoot := t.TempDir()
+		writeExternalContainerTown(t, townRoot, 3307, "gt-dolt")
+		lifecycle := &fakeContainerLifecycle{running: true, pingErr: errors.New("dial tcp 127.0.0.1:3307: i/o timeout")}
+		m, _ := containerManager(t, townRoot, lifecycle, nil)
+
+		status := m.Status()
+		if status.Running {
+			t.Error("Status.Running = true for a ping that failed")
+		}
+		if !strings.Contains(status.Error, "i/o timeout") {
+			t.Errorf("Status.Error = %q, want the ping failure", status.Error)
+		}
+	})
+
 	t.Run("an unusable setting is an error", func(t *testing.T) {
 		t.Parallel()
 		townRoot := t.TempDir()
@@ -233,10 +256,11 @@ func TestExternalContainerRefusedWhenTheSettingIsUnusable(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
-		stop bool
+		run  func(m *DoltServerManager) error
 	}{
-		{name: "health tick"},
-		{name: "daemon stop", stop: true},
+		{name: "health tick", run: func(m *DoltServerManager) error { return m.EnsureRunning() }},
+		{name: "daemon start", run: func(m *DoltServerManager) error { return m.Start() }},
+		{name: "daemon stop", run: func(m *DoltServerManager) error { return m.Stop() }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -246,12 +270,7 @@ func TestExternalContainerRefusedWhenTheSettingIsUnusable(t *testing.T) {
 			lifecycle := &fakeContainerLifecycle{running: true}
 			m, hostCalls := containerManager(t, townRoot, lifecycle, nil)
 
-			var err error
-			if tt.stop {
-				err = m.Stop()
-			} else {
-				err = m.EnsureRunning()
-			}
+			err := tt.run(m)
 			if err == nil {
 				t.Fatal("an unusable dolt.external_container was accepted, want an error")
 			}

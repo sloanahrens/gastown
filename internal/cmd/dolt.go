@@ -509,12 +509,19 @@ func runDoltStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
+	config := doltserver.DefaultConfig(townRoot)
+	// An unusable dolt.external_container is named here rather than read as a
+	// host server, and before the status probe, which would report the same
+	// setting error as "checking server status" (gt-xeb1x).
+	container, err := config.ExternalContainerSetting()
+	if err != nil {
+		return err
+	}
+
 	running, pid, err := doltserver.IsRunning(townRoot)
 	if err != nil {
 		return fmt.Errorf("checking server status: %w", err)
 	}
-
-	config := doltserver.DefaultConfig(townRoot)
 
 	if p := doltpause.Current(townRoot, time.Now()); p != nil {
 		fmt.Printf("%s %s\n", style.Bold.Render("⏸"), p.Message())
@@ -523,9 +530,7 @@ func runDoltStatus(cmd *cobra.Command, args []string) error {
 	// A container's Dolt has no pid here and no state file to read: the SQL
 	// ping IsRunning made is the status, and the metrics come from the server
 	// over SQL (gt-xeb1x).
-	if container, err := config.ExternalContainerSetting(); err != nil {
-		return err
-	} else if container != "" {
+	if container != "" {
 		if running {
 			fmt.Printf("%s Dolt server is %s (container %s)\n",
 				style.Bold.Render("●"), style.Bold.Render("running"), container)

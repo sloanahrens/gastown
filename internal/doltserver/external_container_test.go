@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	configpkg "github.com/steveyegge/gastown/internal/config"
 )
 
 // externalContainerTown writes a town root whose mayor/town.json names the
@@ -318,6 +320,12 @@ func TestExternalContainerRefusesAnUnusableSetting(t *testing.T) {
 	if err := h.Stop(townRoot); err == nil {
 		t.Error("Stop with dolt.external_container = \"-v\" succeeded, want an error")
 	}
+	if err := h.KillImposters(townRoot); err == nil {
+		t.Error("KillImposters with dolt.external_container = \"-v\" succeeded, want an error")
+	}
+	if err := h.Restart(townRoot); err == nil {
+		t.Error("Restart with dolt.external_container = \"-v\" succeeded, want an error")
+	}
 	if got := f.ranMatching("docker"); len(got) != 0 {
 		t.Errorf("an unusable container name reached docker: %q", got)
 	}
@@ -345,6 +353,30 @@ func TestExternalContainerKillImpostersRefuses(t *testing.T) {
 	noHostProcess(t, f)
 }
 
+// TestExternalContainerWithoutAnEndpoint: a town that names a container but no
+// listener has no address to ping, so Start refuses before it runs docker
+// rather than waiting out a budget against port 0 (gt-xeb1x).
+func TestExternalContainerWithoutAnEndpoint(t *testing.T) {
+	t.Parallel()
+	townRoot := testTown(t)
+	f := newFakeHost()
+	h := f.host()
+	h.doltEndpoint = func(string) (configpkg.DoltEndpoint, bool) {
+		return configpkg.DoltEndpoint{ExternalContainer: "gt-dolt"}, true
+	}
+
+	err := h.Start(townRoot)
+	if err == nil {
+		t.Fatal("Start with a container and no endpoint succeeded, want an error")
+	}
+	if !strings.Contains(err.Error(), "gt-dolt") || !errors.Is(err, ErrNoEndpoint) {
+		t.Errorf("error = %v, want it to name the container and ErrNoEndpoint", err)
+	}
+	if got := f.ranMatching("docker"); len(got) != 0 {
+		t.Errorf("an endpointless town reached docker: %q", got)
+	}
+}
+
 // TestDefaultModeIsUnchanged: with dolt.external_container unset, docker is
 // never run and the host path starts and stops the server as before.
 func TestDefaultModeIsUnchanged(t *testing.T) {
@@ -368,14 +400,18 @@ func TestDefaultModeIsUnchanged(t *testing.T) {
 		t.Errorf("the default mode ran docker: %q", got)
 	}
 
-	// Restart of a stopped host server is a start, through the same functions.
+	// Restart of a running host server is Stop then Start, on the same
+	// functions; a new dolt sql-server process replaces the old one.
 	f.onStart = func(newPID int, _ *exec.Cmd) { f.listenOn(newPID, port) }
+	if err := h.Start(townRoot); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
 	if err := h.Restart(townRoot); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 	starts := f.startedCommands()
-	if len(starts) != 1 || len(starts[0].Args) < 2 || starts[0].Args[1] != "sql-server" {
-		t.Errorf("host Restart started %v, want one dolt sql-server", starts)
+	if len(starts) != 2 {
+		t.Errorf("Start then Restart started %d process(es), want two dolt sql-servers: %v", len(starts), starts)
 	}
 	if got := f.ranMatching("docker"); len(got) != 0 {
 		t.Errorf("the default mode's Restart ran docker: %q", got)

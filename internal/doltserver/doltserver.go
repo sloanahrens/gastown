@@ -2737,27 +2737,13 @@ func Stop(townRoot string) error {
 	return std.Stop(townRoot)
 }
 
-// Restart stops and then starts the server. In container mode that is docker
-// stop followed by docker start; on the host it is Stop (when the server is
-// running) followed by Start. No pause marker is cleared here: Start refuses
-// while one holds, as it does for a stop-then-start by hand (gt-xeb1x).
+// Restart stops and then starts the server: docker stop followed by docker
+// start in container mode, Stop followed by Start on the host. An unusable
+// dolt.external_container reaches the caller through Stop, which refuses it, so
+// no restart can fall back to a host process (gt-xeb1x). A stopped host server
+// has nothing to stop — use Start for it; docker stop, by contrast, is a no-op
+// on a container already stopped.
 func (h *host) Restart(townRoot string) error {
-	config := h.DefaultConfig(townRoot)
-	name, err := config.ExternalContainerSetting()
-	if err != nil {
-		return err
-	}
-	if name == "" {
-		// The host path's Stop refuses a server that is not running; a restart
-		// of one is just a start.
-		running, _, err := h.IsRunning(townRoot)
-		if err != nil {
-			return err
-		}
-		if !running {
-			return h.Start(townRoot)
-		}
-	}
 	if err := h.Stop(townRoot); err != nil {
 		return err
 	}
