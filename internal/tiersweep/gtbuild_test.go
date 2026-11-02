@@ -315,17 +315,20 @@ func TestRunCarriesDepsCgoEnvToTheBuild(t *testing.T) {
 	}
 }
 
-// TestUnitSweepHelperAnswersTheCgoEnvItself: a Sweep the shared helper builds
-// has its own CgoEnv, so its gt build never asks buildflags.ICUCgoEnv, whether
-// or not the host has brew. On a Mac with brew the package's subprocess
-// tripwire says the same for every other test; this one holds on a host without
-// it (gt-0brwb).
+// TestUnitSweepHelperAnswersTheCgoEnvItself: the build a Sweep the shared helper
+// builds takes its cgo entries from the helper's testCgoEnv, so it never asks
+// buildflags.ICUCgoEnv, whether or not the host has brew. The seam is checked by
+// identity, without calling the fallback, so the guard is red on a host without
+// brew too and starts no brew on a Mac (gt-0brwb).
 func TestUnitSweepHelperAnswersTheCgoEnvItself(t *testing.T) {
 	t.Parallel()
 	fake := &fakeTier{head: "abc123"}
 	s, _ := newIntegration(t, taggedRootRepo(), fake, "", "")
-	if s.CgoEnv == nil {
-		t.Fatal("a unit test's Sweep has no CgoEnv, so its gt build reaches buildflags.ICUCgoEnv and starts brew on a Mac")
+	if reflect.ValueOf(s.cgoEnv()).Pointer() != reflect.ValueOf(testCgoEnv).Pointer() {
+		t.Fatal("the build's cgo seam is not the helper's testCgoEnv: a Sweep with no CgoEnv takes buildflags.ICUCgoEnv, which starts brew on a Mac (gt-0brwb)")
+	}
+	if got := s.cgoEnv()([]string{"PATH=/fake/bin"}); got != nil {
+		t.Fatalf("the helper's cgo seam answered %v, want nil: its gt build would take icu4c entries from the host", got)
 	}
 	s.Integration()
 	got := builds(fake)
