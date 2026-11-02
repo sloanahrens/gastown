@@ -25,7 +25,18 @@ gcloud secrets create customer-zero_api-key --project "$PROJECT_ID" --replicatio
 gcloud secrets versions add customer-zero_api-key --project "$PROJECT_ID" --data-file=-
 ```
 
-Then bind the reader described below. Check the binding by reading the value as an identity that holds none — impersonate another workspace's gateway — and confirming the read fails.
+Then bind the reader described below. Check the binding by reading the value as an identity that holds none — impersonate another workspace's gateway — and confirming the read fails. Discard standard output and judge the read by its exit status and its error, so a binding that is wrong cannot print the value:
+
+```bash
+# The read must fail. stdout is discarded, so a wrong binding that lets it
+# through prints nothing; stderr stays visible, so a refused impersonation can
+# be told apart from a refused read. $OTHER_GATEWAY is another workspace's
+# gateway service account.
+gcloud secrets versions access latest --secret customer-zero_api-key --project "$PROJECT_ID" \
+  --impersonate-service-account="$OTHER_GATEWAY" >/dev/null
+```
+
+A refused read exits non-zero with `PERMISSION_DENIED` on `secretmanager.versions.access`. A read that succeeds exits zero with no output, and is a failure. Any other error — the impersonation refused, the API unreachable — is a check that could not be made, not a pass.
 
 ## Reader identity
 
@@ -49,16 +60,51 @@ Rotation is the K5 package (`internal/keyrotation`, gt-fn9nz). It keeps no state
 
 The check window: step 1 makes the new version the one `Get` returns before step 2 has run, so a seat that starts mid-rotation can read an unchecked key. The store cannot stage a write; closing the window is a separate bead. Rotate while the workspace is quiet.
 
-Nothing calls these packages yet: the gateway wiring, the console's rotate action (plan row O5) and the dispatcher's pre-dispatch check are separate changes. Until they land, the operator does steps 1 to 4 by hand in a grant window:
+Where a workspace has a wired rotate action (plan row O5), it runs steps 1 to 4. Where it has none, the operator does them by hand in a grant window, in the same order:
 
-```bash
-# The replacement value arrives on stdin, so it never reaches a command line.
-gcloud secrets versions add customer-zero_api-key --project "$PROJECT_ID" --data-file=-
-# Once the provider accepts the new version, retire the older one.
-OLD=1
-gcloud secrets versions disable customer-zero_api-key --project "$PROJECT_ID" --version "$OLD"
-gcloud secrets versions destroy customer-zero_api-key --project "$PROJECT_ID" --version "$OLD"
-```
+- Write the replacement; the value arrives on stdin, so it never reaches a command line:
+
+  ```bash
+  gcloud secrets versions add customer-zero_api-key --project "$PROJECT_ID" --data-file=-
+  ```
+
+- Check the new version with the provider before the old one is touched, the verification `keycheck` asks its `Provider` for. Send the request a seat sends: a `POST` to the provider's Messages endpoint with the key in `x-api-key` and the `anthropic-version` header. `$PROVIDER_URL` is that endpoint and `$MODEL` the model the workspace's seats run, both set in the window and recorded nowhere; for an Anthropic key the endpoint is `https://api.anthropic.com/v1/messages`, and an Anthropic-compatible provider uses its own base URL with `/v1/messages`. The key streams from `gcloud` into curl's config on stdin, so it is never an argument, a shell variable or a file:
+
+  ```bash
+  {
+    printf 'url = "%s"\n' "$PROVIDER_URL"
+    printf 'header = "x-api-key: '
+    gcloud secrets versions access latest --project "$PROJECT_ID" --secret customer-zero_api-key | tr -d '\n'
+    printf '"\n'
+    printf 'header = "anthropic-version: 2023-06-01"\n'
+    printf 'header = "content-type: application/json"\n'
+    printf 'data = "{\\"model\\":\\"%s\\",\\"max_tokens\\":1,\\"messages\\":[{\\"role\\":\\"user\\",\\"content\\":\\"ping\\"}]}"\n' "$MODEL"
+  } | curl --fail --silent --output /dev/null --write-out '%{http_code}\n' --config - \
+    | grep -qx '2[0-9][0-9]'
+  ```
+
+  The pipeline exits zero only on a `2xx`: the write-out prints the status and `grep -qx` accepts nothing else, so a redirect, a key the provider refuses (`401`), an HTTP error or a failed read all stop the rotation with the previous key still serving.
+
+- On a pass, disable the version it replaces. New seats then read only the replacement; a seat that already started on the old version keeps the value it read:
+
+  ```bash
+  OLD=1   # the version being replaced; use the number versions list reports
+  gcloud secrets versions disable customer-zero_api-key --project "$PROJECT_ID" --version "$OLD"
+  ```
+
+- Destroy the disabled version only after the last seat started on it has ended — later, never in the same run as the disable. It stays disabled until then, so no new seat reads it, and a seat that still holds it keeps working. `keyrotation.SeatEnded` makes this call when rotation is wired and refuses while a seat is still running; by hand, destroy only when no seat started on that version is still running:
+
+  ```bash
+  OLD=1   # the disabled version being replaced; use the number versions list reports
+  gcloud secrets versions destroy customer-zero_api-key --project "$PROJECT_ID" --version "$OLD"
+  ```
+
+- On a refusal, or a check that could not be made, disable the new version and stop. The previous key never stopped serving, so there is nothing else to undo:
+
+  ```bash
+  NEW=2   # the version versions add wrote; use the number versions list reports
+  gcloud secrets versions disable customer-zero_api-key --project "$PROJECT_ID" --version "$NEW"
+  ```
 
 ## Rollback
 
