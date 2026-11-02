@@ -92,16 +92,58 @@ func TestPolecatImageInstallsLsofPinned(t *testing.T) {
 
 	installs := 0
 	for _, in := range ins {
-		// The base-tools layer is the apt line that installs build-essential and
-		// git beside it: the layer the bead names, not any apt line that happens
-		// to carry the pin.
-		if strings.HasPrefix(in, "RUN apt-get update") && strings.Contains(in, `"lsof=${LSOF_VERSION}"`) &&
-			strings.Contains(in, "build-essential") && strings.Contains(in, " git ") {
+		if isBaseToolsLsofInstall(in) {
 			installs++
 		}
 	}
 	if installs != 1 {
 		t.Errorf("%d base-tools apt install lines (build-essential, git) name \"lsof=${LSOF_VERSION}\", want exactly 1: the image needs lsof pinned in the base-tools layer", installs)
+	}
+}
+
+// isBaseToolsLsofInstall reports whether a Dockerfile instruction is the
+// base-tools apt line: the layer that installs build-essential and git beside
+// the pinned lsof. It matches whole tokens, so git counts whether it is
+// followed by another package or ends the line.
+func isBaseToolsLsofInstall(in string) bool {
+	if !strings.HasPrefix(in, "RUN apt-get update") {
+		return false
+	}
+	tokens := strings.Fields(in)
+	for _, want := range []string{"build-essential", "git", `"lsof=${LSOF_VERSION}"`} {
+		if !slices.Contains(tokens, want) {
+			return false
+		}
+	}
+	return true
+}
+
+// TestIsBaseToolsLsofInstall pins which instructions the base-tools selector
+// accepts. The refusal rows are lines it must not count: a package name has to
+// match as a whole token, not as a substring of another token or of the line.
+func TestIsBaseToolsLsofInstall(t *testing.T) {
+	t.Parallel()
+	const base = `RUN apt-get update && apt-get install -y --no-install-recommends build-essential ca-certificates curl git gnupg jq "lsof=${LSOF_VERSION}"`
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"git followed by another package", base, true},
+		{"git ends the line", `RUN apt-get update && apt-get install -y build-essential "lsof=${LSOF_VERSION}" git`, true},
+		{"no git token", `RUN apt-get update && apt-get install -y build-essential "lsof=${LSOF_VERSION}"`, false},
+		{"git only as a prefix of a longer token", `RUN apt-get update && apt-get install -y build-essential gitk "lsof=${LSOF_VERSION}"`, false},
+		{"no lsof pin", `RUN apt-get update && apt-get install -y build-essential git`, false},
+		{"lsof pin without quotes", `RUN apt-get update && apt-get install -y build-essential git lsof=${LSOF_VERSION}`, false},
+		{"not an apt-get update line", `RUN echo build-essential git "lsof=${LSOF_VERSION}"`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isBaseToolsLsofInstall(tt.in); got != tt.want {
+				t.Errorf("isBaseToolsLsofInstall(%q) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
 	}
 }
 
