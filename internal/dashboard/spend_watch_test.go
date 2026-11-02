@@ -151,6 +151,7 @@ func TestSpendFileWriteIsAtomic(t *testing.T) {
 		// Root writes into a directory whatever its mode, so the 0500 fixture
 		// below cannot refuse the write for it; the subtest needs a non-root run.
 		if os.Geteuid() == 0 {
+			//testpolicy:allow no-skip — root bypasses the directory's write bit, so under root there is no refused write for this fixture to assert; the condition is the host's uid, as a platform skip is
 			t.Skip("root bypasses the directory's write bit, so the 0500 fixture cannot refuse the write")
 		}
 		dir := t.TempDir()
