@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -917,5 +918,137 @@ func TestDuplicateDetailCacheReportsASaveItCouldNotWrite(t *testing.T) {
 	}
 	if string(after) != string(before) {
 		t.Errorf("a failed write changed the file on disk")
+	}
+}
+
+// bdRowJSON and bdDepJSON are the row shapes real bd prints, the dependency
+// carrying the target's own metadata: an object when the bead's metadata was
+// written as one (the dispatcher's spec_dispatch_timeout_attempts is).
+type bdDepJSON struct {
+	ID             string            `json:"id"`
+	Title          string            `json:"title"`
+	Status         string            `json:"status"`
+	Priority       int               `json:"priority"`
+	Type           string            `json:"issue_type"`
+	DependencyType string            `json:"dependency_type"`
+	Metadata       map[string]string `json:"metadata,omitempty"`
+}
+
+type bdRowJSON struct {
+	ID              string      `json:"id"`
+	Title           string      `json:"title"`
+	Status          string      `json:"status"`
+	Priority        int         `json:"priority"`
+	Type            string      `json:"issue_type"`
+	CreatedAt       string      `json:"created_at"`
+	UpdatedAt       string      `json:"updated_at"`
+	DependencyCount int         `json:"dependency_count"`
+	DependentCount  int         `json:"dependent_count"`
+	CommentCount    int         `json:"comment_count"`
+	Dependencies    []bdDepJSON `json:"dependencies,omitempty"`
+}
+
+// bdJSONStore is a pinned store whose bd answers are canned JSON, so the cache
+// is driven through the parser a real tick uses: list answers the pool's ids,
+// and every show answers the issue with one blocking dependency whose metadata
+// is a JSON object.
+func bdJSONStore(t *testing.T, ids []string) *beads.Beads {
+	t.Helper()
+	rowOf := func(id string) bdRowJSON {
+		return bdRowJSON{ID: id, Title: "pool bead " + id, Status: "open", Priority: 2, Type: "task",
+			CreatedAt: "2026-10-15T09:00:00Z", UpdatedAt: "2026-10-18T09:00:00Z", DependencyCount: 1}
+	}
+	answer := func(data any) []byte {
+		out, err := json.Marshal(map[string]any{"contract_version": 1, "schema_version": 1, "data": data})
+		if err != nil {
+			t.Fatalf("rendering bd's answer: %v", err)
+		}
+		return out
+	}
+	return beads.NewPinned(t.TempDir(), beads.WithRunner(func(_ context.Context, args []string) ([]byte, []byte, error) {
+		if len(args) > 0 && args[0] == "--allow-stale" {
+			args = args[1:]
+		}
+		if len(args) == 0 {
+			return nil, nil, errors.New("bd called with no verb")
+		}
+		switch args[0] {
+		case "version":
+			return []byte("bd version 1.2.2\n"), nil, nil
+		case "list":
+			// The pool's live list carries the beads; the closed list and the
+			// custom-status refinement are empty in this pool.
+			if !slices.Contains(args, "--status="+strings.Join(duplicatePoolStatuses, ",")) {
+				return answer([]bdRowJSON{}), nil, nil
+			}
+			rows := make([]bdRowJSON, len(ids))
+			for i, id := range ids {
+				rows[i] = rowOf(id)
+			}
+			return answer(rows), nil, nil
+		case "show":
+			var shown []bdRowJSON
+			for _, id := range args[1:] {
+				if id == "--json" {
+					continue
+				}
+				row := rowOf(id)
+				row.Dependencies = []bdDepJSON{{
+					ID: "gt-blocker", Title: "blocker", Status: "closed", Priority: 2, Type: "task",
+					DependencyType: "blocks", Metadata: map[string]string{"spec_dispatch_timeout_attempts": "1"},
+				}}
+				shown = append(shown, row)
+			}
+			return answer(shown), nil, nil
+		}
+		return nil, nil, fmt.Errorf("unexpected bd call %v", args)
+	}))
+}
+
+// A tick's fetched beads are answered from the cache by the next tick, over
+// bd's own JSON: with the pool at 90 beads and the limit at 40, the second
+// tick answers the first tick's 40 from the cache, the file holds the two
+// ticks' 80, and unread falls by the limit until it reaches zero. Before
+// gt-l40eg a dependency whose metadata is an object failed the whole show, so
+// nothing was ever cached and every tick showed the same 40 beads.
+func TestDuplicateDetailCacheDrainsOverBdJSONWithObjectMetadata(t *testing.T) {
+	t.Parallel()
+	const poolSize = 90
+	ids := make([]string, poolSize)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("gt-j%03d", i)
+	}
+	store := bdJSONStore(t, ids)
+	path := filepath.Join(t.TempDir(), "spec_detail_cache.json")
+
+	want := []struct{ fetched, cached, unread, file int }{
+		{duplicateDetailMissLimit, 0, poolSize - duplicateDetailMissLimit, duplicateDetailMissLimit},
+		{duplicateDetailMissLimit, duplicateDetailMissLimit, poolSize - 2*duplicateDetailMissLimit, 2 * duplicateDetailMissLimit},
+		{poolSize - 2*duplicateDetailMissLimit, 2 * duplicateDetailMissLimit, 0, poolSize},
+	}
+	for tickNo, w := range want {
+		tick := tickOver(t, store, path, "daemon-1", duplicateDetailMissLimit)
+		t.Logf("tick %d: %d fetched, %d cached, %d unread", tickNo+1, tick.fetched, tick.cached, tick.unread)
+		if tick.fetched != w.fetched || tick.cached != w.cached || tick.unread != w.unread {
+			t.Errorf("tick %d counts = %d fetched, %d cached, %d unread; want %d, %d, %d",
+				tickNo+1, tick.fetched, tick.cached, tick.unread, w.fetched, w.cached, w.unread)
+		}
+		for _, warning := range tick.warnings {
+			// The deferred-limit warning is the pool's normal report while
+			// beads wait; anything else is a read that failed.
+			if !strings.Contains(warning, "not read this tick") {
+				t.Errorf("tick %d warned: %s", tickNo+1, warning)
+			}
+		}
+		entries, owner, _, err := readDetailFile(path, nil)
+		if err != nil {
+			t.Fatalf("tick %d: reading the file it saved: %v", tickNo+1, err)
+		}
+		if got := len(entries["rig"]); got != w.file {
+			t.Errorf("tick %d: the file holds %d beads, want the %d read so far", tickNo+1, got, w.file)
+		}
+		if owner != "daemon-1" {
+			t.Errorf("tick %d: the file is owned by %q, want this tick's daemon", tickNo+1, owner)
+		}
 	}
 }
