@@ -142,22 +142,24 @@ func adminConfig(t *testing.T, s *adminScope) {
 // adminKV pins the kv store's write and reads against each other: a key set is
 // what KVGet finds with the value set last and what KVList reports, and a key
 // the store does not hold is ErrNotFound rather than an empty value a caller
-// cannot tell from a stored "".
+// cannot tell from a stored "". The key sits outside bd's reserved "kv."
+// namespace, which bd refuses to write, so the same case holds for the bd
+// store as for the fake and the tracker.
 func adminKV(t *testing.T, s *adminScope) {
-	mustDo(t, "KVSet", s.KVSet("kv.contract_probe", "first"))
-	if got, err := s.KVGet("kv.contract_probe"); err != nil || got != "first" {
+	mustDo(t, "KVSet", s.KVSet("contract.probe", "first"))
+	if got, err := s.KVGet("contract.probe"); err != nil || got != "first" {
 		t.Errorf("KVGet after set = %q, %v; want first", got, err)
 	}
-	mustDo(t, "KVSet overwrite", s.KVSet("kv.contract_probe", "second"))
-	if got, err := s.KVGet("kv.contract_probe"); err != nil || got != "second" {
+	mustDo(t, "KVSet overwrite", s.KVSet("contract.probe", "second"))
+	if got, err := s.KVGet("contract.probe"); err != nil || got != "second" {
 		t.Errorf("KVGet after overwrite = %q, %v; want second", got, err)
 	}
 	all, err := s.KVList()
 	if err != nil {
 		t.Fatalf("KVList: %v", err)
 	}
-	if got, ok := all["kv.contract_probe"]; !ok || got != "second" {
-		t.Errorf("KVList[kv.contract_probe] = %q, present %v; want second", got, ok)
+	if got, ok := all["contract.probe"]; !ok || got != "second" {
+		t.Errorf("KVList[contract.probe] = %q, present %v; want second", got, ok)
 	}
 	for k, want := range all {
 		got, err := s.KVGet(k)
@@ -169,7 +171,7 @@ func adminKV(t *testing.T, s *adminScope) {
 			t.Errorf("KVGet(%q) = %q, KVList says %q", k, got, want)
 		}
 	}
-	if _, err := s.KVGet("kv.contract_unset"); !errors.Is(err, beads.ErrNotFound) {
+	if _, err := s.KVGet("contract.unset"); !errors.Is(err, beads.ErrNotFound) {
 		t.Errorf("KVGet(unset) = %v, want beads.ErrNotFound", err)
 	}
 }

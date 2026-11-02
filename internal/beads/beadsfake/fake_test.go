@@ -102,6 +102,27 @@ func TestFakeAdminContract(t *testing.T) {
 	RunAdminContract(t, func(t *testing.T) AdminClient { return New() })
 }
 
+// bdReservedKV is the fake with bd's key rule: a write under the "kv." prefix
+// is refused, as bd refuses it. The admin contract also runs against a real bd
+// in the integration tier, so it must pass on this store too.
+type bdReservedKV struct{ *Fake }
+
+func (b bdReservedKV) KVSet(key, value string) error {
+	if strings.HasPrefix(key, "kv.") {
+		return errors.New("invalid key: key cannot start with 'kv.' (would create nested prefix)")
+	}
+	return b.Fake.KVSet(key, value)
+}
+
+// TestFakeAdminContractHoldsUnderBDsKeyRule runs the admin contract on a store
+// that refuses bd's reserved "kv." namespace. A contract that writes such a key
+// fails the bd run only in the container tier, so this case catches it in the
+// unit tier (gt-dzvo3).
+func TestFakeAdminContractHoldsUnderBDsKeyRule(t *testing.T) {
+	t.Parallel()
+	RunAdminContract(t, func(t *testing.T) AdminClient { return bdReservedKV{New()} })
+}
+
 // TestFakeAdminVersionContract runs the version suite against the fake, so it
 // is runnable alone: go test ./internal/beads/beadsfake -run Admin.
 func TestFakeAdminVersionContract(t *testing.T) {
