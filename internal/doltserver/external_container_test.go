@@ -182,12 +182,12 @@ func TestExternalContainerStateReadsDockerInspect(t *testing.T) {
 	inspect := "docker inspect -f {{.State.Running}} " + name
 
 	tests := []struct {
-		name        string
-		town        func(t *testing.T) string
-		script      *fakeReply
-		want        bool
-		wantErr     bool
-		wantDocker  int
+		name       string
+		town       func(t *testing.T) string
+		script     *fakeReply
+		want       bool
+		wantErr    bool
+		wantDocker int
 	}{
 		{
 			name:       "running",
