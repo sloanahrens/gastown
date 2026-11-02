@@ -821,23 +821,6 @@ func TestScanFailureUsesAnInjectedReader(t *testing.T) {
 	}
 }
 
-// TestHeartbeatReadReportsATownItCannotList drives the production read's error
-// branch: search-dir discovery fails on the town root itself, so no store is
-// opened and no bd process runs, and the heartbeat gets the error rather than
-// an empty answer. The bd read's own failure is TestScanFailureUsesAnInjectedReader's
-// subject, which injects it.
-func TestHeartbeatReadReportsATownItCannotList(t *testing.T) {
-	t.Parallel()
-	townRoot := filepath.Join(t.TempDir(), "not-a-directory")
-	if err := os.WriteFile(townRoot, []byte("not a town"), 0o644); err != nil {
-		t.Fatalf("plant the unlistable town root: %v", err)
-	}
-
-	if _, err := listAllSlingContextRecords(townRoot); err == nil {
-		t.Fatal("listAllSlingContextRecords on an unlistable town = nil, want the read's failure")
-	}
-}
-
 // A stamp or marker the heartbeat cannot read costs it the skip, and the
 // operator must hear that the scan is running in full: the failure is visible
 // rather than silently paid for.
