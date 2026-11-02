@@ -394,9 +394,11 @@ func TestTeardownRemovesTheSyncPodButNotTheRepoClaim(t *testing.T) {
 	teardown := plan.Teardown()
 	want := []struct {
 		resource string
-		name     string
+		selects  string
 	}{
-		{"pod", syncPodName(spec)},
+		// The sync pod is selected by the run label, so a launch that lost the
+		// create race removes no other run's pod.
+		{"pod", runLabelSelector(spec)},
 		{"job", JobName(spec)},
 		{"pod", readerName(spec)},
 		{"persistentvolumeclaim", OutClaimName(spec)},
@@ -406,8 +408,8 @@ func TestTeardownRemovesTheSyncPodButNotTheRepoClaim(t *testing.T) {
 	}
 	for i, w := range want {
 		argv := teardown[i].Argv
-		if !slices.Contains(argv, "delete") || !slices.Contains(argv, w.resource) || !slices.Contains(argv, w.name) {
-			t.Errorf("teardown %d runs %v, want the %s %q removed", i, argv, w.resource, w.name)
+		if !slices.Contains(argv, "delete") || !slices.Contains(argv, w.resource) || !slices.Contains(argv, w.selects) {
+			t.Errorf("teardown %d runs %v, want the %s selected by %q removed", i, argv, w.resource, w.selects)
 		}
 		if slices.Contains(argv, RepoClaimName(spec.Rig)) {
 			t.Errorf("teardown %d runs %v, which removes the repo claim %q every run reuses", i, argv, RepoClaimName(spec.Rig))
@@ -451,6 +453,11 @@ func TestRenderPlanSyncsTheRepoClaimFirst(t *testing.T) {
 	}
 	if syncPod.Kind != "Pod" || syncPod.Metadata.Name != syncPodName(spec) {
 		t.Errorf("the second apply is a %s %q, want the sync pod %q", syncPod.Kind, syncPod.Metadata.Name, syncPodName(spec))
+	}
+	// Created, not applied: a second sync pod for the rig must fail
+	// AlreadyExists rather than take the claim from a sync already using it.
+	if argv := plan.Apply[1].Argv; !slices.Contains(argv, "create") || slices.Contains(argv, "apply") {
+		t.Errorf("the second apply runs %v, want a kubectl create of the sync pod", argv)
 	}
 	if len(syncPod.Spec.Containers) != 1 || syncPod.Spec.Containers[0].Image != spec.Image {
 		t.Errorf("the sync pod's containers are %+v, want one running the Spec's image %q", syncPod.Spec.Containers, spec.Image)
@@ -504,12 +511,12 @@ func TestSyncPodHasNoServiceAccountToken(t *testing.T) {
 	}
 }
 
-// TestSyncRefusesWhileASweepJobReadsTheClaim holds the refusal before the repo
-// claim is written: the plan's guard lists this rig's sweep Jobs and refuses
-// while one is still active, naming it, and the sync pod clears the claim before
-// the copy so no object of an earlier run survives it. Both are read from the
-// Render plan.
-func TestSyncRefusesWhileASweepJobReadsTheClaim(t *testing.T) {
+// TestSyncGuardReadsConditionsNotCount holds the refusal before the repo claim
+// is written to the name prefix and the condition types, not to a label or a
+// condition count: every Job is listed, only this rig's names are read, and a
+// Job is ended when any true condition is Complete or Failed, whatever other
+// types the cluster lists beside it and in whatever order.
+func TestSyncGuardReadsConditionsNotCount(t *testing.T) {
 	t.Parallel()
 	spec := goldenSpec()
 	plan, err := Kubernetes{}.Render(spec)
@@ -521,44 +528,47 @@ func TestSyncRefusesWhileASweepJobReadsTheClaim(t *testing.T) {
 	}
 	guard := plan.Guards[0]
 	if !slices.Contains(guard.Step.Argv, "get") || !slices.Contains(guard.Step.Argv, "jobs") {
-		t.Errorf("the guard runs %v, want a listing of the rig's sweep Jobs", guard.Step.Argv)
+		t.Errorf("the guard runs %v, want a listing of the Jobs", guard.Step.Argv)
 	}
-	if !slices.Contains(guard.Step.Argv, "-l") || !slices.Contains(guard.Step.Argv, sweepJobSelector(spec.Rig)) {
-		t.Errorf("the guard runs %v, want the selector %q that finds this rig's sweep Jobs", guard.Step.Argv, sweepJobSelector(spec.Rig))
+	if slices.Contains(guard.Step.Argv, "-l") {
+		t.Errorf("the guard runs %v, want an unlabelled listing: a run that lost its labels still reads the claim", guard.Step.Argv)
 	}
-	// The selector finds the Jobs only if the Job carries what it selects.
-	labels := plan.Job.Metadata.Labels
-	if labels[sweepJobLabel] != sweepJobValue || labels[rigLabelKey] != rigLabelValue(spec.Rig) {
-		t.Errorf("the Job's labels are %v, want %q=%q and %q=%q as the guard's selector expects",
-			labels, sweepJobLabel, sweepJobValue, rigLabelKey, rigLabelValue(spec.Rig))
+	if want := sweepJobPrefix(spec.Rig); !strings.HasPrefix("gt-sweep-gastown-deadbeef-run", want) {
+		t.Errorf("the guard's prefix %q does not match a Job's name %q", want, "gt-sweep-gastown-deadbeef-run")
 	}
-	// A running Job has no Complete or Failed condition, so its line is its
-	// name alone.
-	active := "gt-sweep-gastown-deadbeef-otherrun\n"
-	err = guard.Refuse([]byte(active))
-	if err == nil || !strings.Contains(err.Error(), "gt-sweep-gastown-deadbeef-otherrun") {
-		t.Fatalf("Refuse(%q) = %v, want it refused naming the running Job", active, err)
-	}
-	for _, ended := range []string{"Complete", "Failed"} {
-		line := "gt-sweep-gastown-deadbeef-donerun " + ended + "\n"
-		if err := guard.Refuse([]byte(line)); err != nil {
-			t.Errorf("Refuse of an ended Job %q = %v, want it to pass", line, err)
-		}
-	}
-	if err := guard.Refuse(nil); err != nil {
-		t.Errorf("Refuse of an empty listing = %v, want it to pass", err)
-	}
-	// A state the guard cannot read is not a Job known to have ended.
-	for _, line := range []string{
-		"gt-sweep-gastown-deadbeef-otherrun Suspended\n",
-		"gt-sweep-gastown-deadbeef-otherrun Complete Failed\n",
+
+	for _, tc := range []struct {
+		name    string
+		listing string
+		refused string
+	}{
+		{name: "an unlabelled running Job", listing: "gt-sweep-gastown-deadbeef-otherrun\n", refused: "gt-sweep-gastown-deadbeef-otherrun"},
+		{name: "a true condition neither ended type", listing: "gt-sweep-gastown-deadbeef-otherrun Suspended\n", refused: "gt-sweep-gastown-deadbeef-otherrun"},
+		{name: "three condition types ending in Failed", listing: "gt-sweep-gastown-deadbeef-run SuccessCriteriaMet FailureTarget Failed\n", refused: ""},
+		{name: "three condition types holding Complete", listing: "gt-sweep-gastown-deadbeef-run SuccessCriteriaMet Complete FailureTarget\n", refused: ""},
+		{name: "another rig's running Job", listing: "gt-sweep-otherrig-deadbeef-otherrun\n", refused: ""},
+		{name: "an empty listing", listing: "", refused: ""},
 	} {
-		if err := guard.Refuse([]byte(line)); err == nil {
-			t.Errorf("Refuse(%q) passed; a Job whose state is unknown is not a Job known to have ended", line)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := guard.Refuse([]byte(tc.listing))
+			if tc.refused == "" {
+				if err != nil {
+					t.Errorf("Refuse(%q) = %v, want it to pass", tc.listing, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.refused) {
+				t.Errorf("Refuse(%q) = %v, want it refused naming %q", tc.listing, err, tc.refused)
+			}
+		})
 	}
 
 	pod := syncPodFromPlan(t, plan, spec)
+	if pod.Metadata.Labels[runLabelKey] != runLabelValue(spec.RunID) {
+		t.Errorf("the sync pod's labels are %v, want %q=%q so its own run's teardown selects it",
+			pod.Metadata.Labels, runLabelKey, runLabelValue(spec.RunID))
+	}
 	if len(pod.Spec.Containers) != 1 {
 		t.Fatalf("the sync pod renders %d containers, want one", len(pod.Spec.Containers))
 	}

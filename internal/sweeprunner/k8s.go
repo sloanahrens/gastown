@@ -91,16 +91,20 @@ const (
 	// race a delete that is still removing the previous run's objects.
 	syncReadyFile = "/tmp/sync-ready"
 
-	// sweepJobLabel and rigLabelKey label every sweep Job, so a run can list
-	// the other runs of its rig that may still be reading the shared repo claim.
+	// sweepJobLabel and rigLabelKey label every sweep Job with the backend and
+	// rig that made it. The sync guard finds the rig's Jobs by name, not label,
+	// because a Job that lost its labels still reads the claim.
 	sweepJobLabel = "app.kubernetes.io/name"
 	sweepJobValue = "gt-sweep"
 	rigLabelKey   = "gt.dev/rig"
 
-	// syncJobsJSONPath prints one "<name> <ended condition>" line per sweep Job
-	// a selector matched, for the sync stage's guard to read: a Job still
-	// running has no Complete or Failed condition, so its line carries the name
-	// alone.
+	// runLabelKey labels a sync pod with the run that made it, so a launch that
+	// lost the create race removes no other run's pod in its teardown.
+	runLabelKey = "gt.dev/run"
+
+	// syncJobsJSONPath prints one "<name> <true condition>..." line per Job,
+	// for the sync guard to read: a Job whose line names no true Complete or
+	// Failed condition is still running.
 	syncJobsJSONPath = `jsonpath={range .items[*]}{.metadata.name}{" "}{.status.conditions[?(@.status=="True")].type}{"\n"}{end}`
 
 	// readerLifetimeSeconds bounds the reader pod that copies the result out:
@@ -121,6 +125,10 @@ const (
 
 	// maxNameLength is the most characters a Kubernetes object's name may hold.
 	maxNameLength = 63
+
+	// nameDigestLength is how much of a cut name's digest the name carries:
+	// enough that two names a plain cut would run together stay apart.
+	nameDigestLength = 12
 
 	// partDigestLength is how much of a sanitized name part's digest the name
 	// carries: enough that two ids a label cannot tell apart stay apart.
@@ -308,15 +316,20 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 		Guards: []Guard{{
 			// The repo claim is shared by every run of the rig, and a run's Job
 			// mounts it read-only while the sweep runs: rewriting it under an
-			// active Job replaces the repository that Job is still reading.
-			Step:   Step{Argv: kubectlArgv(spec, "get", "jobs", "-l", sweepJobSelector(spec.Rig), "-o", syncJobsJSONPath)},
-			Refuse: refuseActiveSweepJobs,
+			// active run replaces the repository that run is still reading. The
+			// listing takes every Job, because an unlabelled run still reads the
+			// claim; the names decide which Jobs are this rig's.
+			Step:   Step{Argv: kubectlArgv(spec, "get", "jobs", "-o", syncJobsJSONPath)},
+			Refuse: refuseActiveSweepJobs(sweepJobPrefix(spec.Rig)),
 		}},
 		Apply: []Step{
 			// The repo claim is created before the sync pod mounts it, and stays
 			// for the next run: only its contents change per run.
 			{Argv: kubectlArgv(spec, "apply", "-f", "-"), Stdin: repoClaim.JSON()},
-			{Argv: kubectlArgv(spec, "apply", "-f", "-"), Stdin: sync.JSON()},
+			// Created, not applied: there is one sync pod per rig, so a second
+			// sync started while this one runs fails AlreadyExists instead of
+			// clearing the claim under it.
+			{Argv: kubectlArgv(spec, "create", "-f", "-"), Stdin: sync.JSON()},
 			// The pod clears the claim before it reports ready, so the copy starts
 			// on an empty mount and no object of the previous run survives.
 			{Argv: kubectlArgv(spec, "wait", "--for=condition=Ready", "pod/"+sync.Metadata.Name, "--timeout="+readyTimeout)},
@@ -333,8 +346,10 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 		},
 		Steps: []Step{
 			// The sync pod mounts the repo claim, so a teardown after a failed
-			// sync removes it too; the claim itself is never removed.
-			{Argv: kubectlArgv(spec, "delete", "pod", sync.Metadata.Name, "--ignore-not-found"), Teardown: true},
+			// sync removes it too; the claim itself is never removed. The run
+			// label selects only a pod this run created: a launch that lost the
+			// create race shares the pod's name and made nothing.
+			{Argv: kubectlArgv(spec, "delete", "pod", "-l", runLabelSelector(spec), "--ignore-not-found"), Teardown: true},
 			{Argv: kubectlArgv(spec, "delete", "job", job.Metadata.Name, "--ignore-not-found"), Teardown: true},
 			// The reader pod mounts the claim, so it goes before the claim does.
 			{Argv: kubectlArgv(spec, "delete", "pod", reader.Metadata.Name, "--ignore-not-found"), Teardown: true},
@@ -364,12 +379,7 @@ func kubectlArgv(spec Spec, args ...string) []string {
 // with no true condition is still running, and one with Complete or Failed true
 // has ended, whichever way it went.
 func jobEnded(stdout []byte) bool {
-	for _, field := range strings.Fields(string(stdout)) {
-		if field == "Complete" || field == "Failed" {
-			return true
-		}
-	}
-	return false
+	return hasEndedCondition(strings.Fields(string(stdout)))
 }
 
 // manifestJSON is a document as kubectl applies it.
@@ -446,7 +456,7 @@ func renderSyncPod(spec Spec) *Pod {
 	return &Pod{
 		APIVersion: "v1",
 		Kind:       "Pod",
-		Metadata:   ObjectMeta{Name: syncPodName(spec)},
+		Metadata:   ObjectMeta{Name: syncPodName(spec), Labels: map[string]string{runLabelKey: runLabelValue(spec.RunID)}},
 		Spec: PodSpec{
 			PriorityClassName:     PriorityClass,
 			RestartPolicy:         "Never",
@@ -493,10 +503,11 @@ func syncChownCommand() string {
 	return "chown -R " + owner + " " + RepoMount + " && chmod -R a+rX " + RepoMount
 }
 
-// syncPodName is the sync pod's name, which the run id makes unique to the
-// launch.
+// syncPodName is the sync pod's name, which one rig shares: a second sync
+// started while it exists fails AlreadyExists, so two runs never clear and copy
+// into the claim at once.
 func syncPodName(spec Spec) string {
-	return k8sName("gt-sweep-sync", spec.Rig, shortSHA(spec.SHA), spec.RunID)
+	return k8sName("gt-sweep-sync", spec.Rig)
 }
 
 // renderJob is the Job for a Spec that has passed Validate.
@@ -631,46 +642,80 @@ func JobName(spec Spec) string {
 // mount read-only.
 func RepoClaimName(rig string) string { return k8sName("gt-sweep-repo", rig) }
 
-// jobLabels mark a sweep Job as this rig's, so a later run can list the rig's
-// Jobs that are still active before it rewrites the repo claim they read.
+// jobLabels mark a sweep Job with the backend and rig that made it.
 func jobLabels(spec Spec) map[string]string {
 	return map[string]string{sweepJobLabel: sweepJobValue, rigLabelKey: rigLabelValue(spec.Rig)}
 }
 
-// sweepJobSelector selects the sweep Jobs of one rig.
-func sweepJobSelector(rig string) string {
-	return sweepJobLabel + "=" + sweepJobValue + "," + rigLabelKey + "=" + rigLabelValue(rig)
+// sweepJobPrefix is the name prefix every sweep Job of rig carries, which the
+// guard matches so an unlabelled run is still found. A rig long enough to push
+// the prefix past the cut is cut to the same head in every run of the rig.
+func sweepJobPrefix(rig string) string {
+	prefix := k8sPart("gt-sweep") + "-" + k8sPart(rig) + "-"
+	// k8sName cuts a long name to this many characters before its digest.
+	if head := maxNameLength - 1 - nameDigestLength; len(prefix) > head {
+		return strings.TrimRight(prefix[:head], "-")
+	}
+	return prefix
 }
 
-// rigLabelValue is the rig's value for the Job's rig label: the same sanitized
-// part its object names carry, cut to the label rule's 63 characters with a
-// digest when the rig is long, so one rig's runs are never selected as another's.
-func rigLabelValue(rig string) string {
-	part := k8sPart(rig)
+// runLabelSelector selects the sync pod a run created.
+func runLabelSelector(spec Spec) string {
+	return runLabelKey + "=" + runLabelValue(spec.RunID)
+}
+
+// runLabelValue is the run's value for the sync pod's run label: the sanitized
+// run id, cut to the label rule, so one run's teardown never selects another
+// run's pod.
+func runLabelValue(runID string) string { return labelValue(runID) }
+
+// rigLabelValue is the rig's value for the Job's rig label, so one rig's runs
+// are never mistaken for another's.
+func rigLabelValue(rig string) string { return labelValue(rig) }
+
+// labelValue cuts v to a label value of at most 63 characters, with a digest of
+// the original when the cut loses part of it.
+func labelValue(v string) string {
+	part := k8sPart(v)
 	if len(part) <= maxNameLength {
 		return part
 	}
-	digest := partDigest(rig)
+	digest := partDigest(v)
 	return strings.TrimRight(part[:maxNameLength-1-len(digest)], "-") + "-" + digest
 }
 
-// refuseActiveSweepJobs reads the guard's listing of this rig's sweep Jobs — one
-// "<name> <ended condition>" line per Job — and refuses while any has not ended
-// Complete or Failed: that Job may still be reading the repo claim this run is
-// about to rewrite. A line it cannot read refuses too, because a Job whose state
-// is unknown is not a Job known to have ended.
-func refuseActiveSweepJobs(stdout []byte) error {
-	for _, line := range strings.Split(string(stdout), "\n") {
-		fields := strings.Fields(line)
-		switch {
-		case len(fields) == 0:
-			continue
-		case len(fields) == 2 && (fields[1] == "Complete" || fields[1] == "Failed"):
-			continue
+// refuseActiveSweepJobs reads the guard's listing of every Job — one
+// "<name> <true condition>..." line each — and refuses while a Job whose name
+// carries this rig's prefix has not ended: that Job may still be reading the
+// repo claim this run is about to rewrite. A Job has ended when any true
+// condition is Complete or Failed, whatever other conditions the cluster lists
+// beside it and in whatever order; a line naming no such condition refuses,
+// because a Job whose state is unknown is not a Job known to have ended.
+func refuseActiveSweepJobs(prefix string) func(stdout []byte) error {
+	return func(stdout []byte) error {
+		for _, line := range strings.Split(string(stdout), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) == 0 || !strings.HasPrefix(fields[0], prefix) {
+				continue
+			}
+			if hasEndedCondition(fields[1:]) {
+				continue
+			}
+			return fmt.Errorf("sweep job %s has not ended and may still be reading the repo claim", fields[0])
 		}
-		return fmt.Errorf("sweep job %s has not ended and may still be reading the repo claim", fields[0])
+		return nil
 	}
-	return nil
+}
+
+// hasEndedCondition reports whether any of a Job's true condition types is
+// Complete or Failed.
+func hasEndedCondition(conditions []string) bool {
+	for _, condition := range conditions {
+		if condition == "Complete" || condition == "Failed" {
+			return true
+		}
+	}
+	return false
 }
 
 // OutClaimName is the claim this run writes its result and logs to: the caller
@@ -693,7 +738,7 @@ func k8sName(parts ...string) string {
 		return name
 	}
 	sum := sha256.Sum256([]byte(name))
-	digest := hex.EncodeToString(sum[:])[:12]
+	digest := hex.EncodeToString(sum[:])[:nameDigestLength]
 	head := strings.TrimRight(name[:maxNameLength-1-len(digest)], "-")
 	return head + "-" + digest
 }
