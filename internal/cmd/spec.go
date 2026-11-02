@@ -1205,9 +1205,9 @@ func writeSpecHints(w io.Writer, hits []hmhints.Hit) {
 	if len(hits) == 0 {
 		return
 	}
-	fmt.Fprintln(w, "hint: this bead mentions slow or timed-out tests; prior records:")
+	fmt.Fprintln(w, hmSlowHintHeading)
 	for _, h := range hits {
-		fmt.Fprintf(w, "hint: hm #%d %s %s: %s\n", h.Rank, h.Kind, h.ID, h.Title)
+		fmt.Fprintf(w, "hint: %s\n", hmHitLine(h))
 	}
 }
 

@@ -718,6 +718,12 @@ type primeTools struct {
 	// skipDupes turns off the pre-work duplicate check: set in continuation
 	// and dry-run primes.
 	skipDupes bool
+	// skipHints turns off the slow-test prior-record hint: set wherever no
+	// subprocess may run, as for skipDupes.
+	skipHints bool
+	// hint answers the slow-test prior-record hint. The zero value queries
+	// the real hm; tests set a fake so no process starts.
+	hint specHintSource
 	// kv reads the rig key-value store when set: the unit tier's stand-in
 	// for the beads client, which would start a real bd.
 	kv func(workDir string) (map[string]string, error)
@@ -938,7 +944,11 @@ func checkSlungWorkIn(w io.Writer, continuation bool, ctx RoleContext, hookedBea
 	// gt-csng: polecat-side pre-work duplicate check — two bounded local git
 	// commands against origin/main, terse output, best-effort (silent on any
 	// failure). It rides this section so hook-budget truncation cannot drop it.
-	primeTools{out: w, skipDupes: continuation || primeDryRun}.hookedPathDupes(ctx, hookedBead)
+	// gt-jamix: the slow-test prior-record hint rides the same section, for
+	// the same reason, and is skipped where no subprocess may run.
+	pt := primeTools{out: w, skipDupes: continuation || primeDryRun, skipHints: continuation || primeDryRun}
+	pt.hookedPathDupes(ctx, hookedBead)
+	pt.hookedSlowHints(ctx, hookedBead)
 
 	if hasWorkflow {
 		if err := outputMoleculeWorkflow(w, ctx, attachment); err != nil {
