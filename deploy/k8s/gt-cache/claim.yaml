@@ -1,4 +1,11 @@
-# The shared Go cache claim. The default StorageClass is local-path with
+# The shared Go cache claim. The gateway runs with resource_admission on: a
+# sandbox may mount a claim only when the claim carries
+# openshell.ai/sandbox-attachable=true and
+# openshell.ai/sandbox-attachable-workspace=default, the workspace the town's
+# sandboxes run in. Without both it refuses the sandbox create, so every sling
+# that names gt-cache fails (gt-7bsz9).
+#
+# The default StorageClass is local-path with
 # WaitForFirstConsumer, so the claim binds on the node of its first consumer:
 # every pod that mounts it must be on the sandbox pool (nodeSelector
 # gt.dev/pool=sandbox, taint gt.dev/pool=sandbox:NoSchedule), the sandbox pods
@@ -12,6 +19,8 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: gt
     app.kubernetes.io/name: gt-cache
+    openshell.ai/sandbox-attachable: "true"
+    openshell.ai/sandbox-attachable-workspace: default
 spec:
   accessModes:
     - ReadWriteOnce
