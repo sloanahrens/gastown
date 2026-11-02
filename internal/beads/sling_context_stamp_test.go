@@ -259,3 +259,147 @@ func TestTouchSlingContextStampDropsTheEmptyScanMarkerOnFailure(t *testing.T) {
 		})
 	}
 }
+
+// TestWriteSlingContextStampReportsEachFailure: each step of writing the stamp
+// can fail, and a host where one does must hear about it rather than keep a
+// stamp that was never written.
+func TestWriteSlingContextStampReportsEachFailure(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	boom := errors.New("disk full")
+
+	tests := []struct {
+		name    string
+		mutate  func(*slingContextStampFS)
+		wantErr string
+	}{
+		{
+			name:    "runtime directory cannot be made",
+			mutate:  func(f *slingContextStampFS) { f.mkdirAll = func(string, os.FileMode) error { return boom } },
+			wantErr: "creating the runtime directory for the sling-context stamp",
+		},
+		{
+			name:    "stamp cannot be written",
+			mutate:  func(f *slingContextStampFS) { f.writeFile = func(string, []byte, os.FileMode) error { return boom } },
+			wantErr: "writing the sling-context stamp",
+		},
+		{
+			name:    "stamp cannot be dated",
+			mutate:  func(f *slingContextStampFS) { f.chtimes = func(string, time.Time, time.Time) error { return boom } },
+			wantErr: "dating the sling-context stamp",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fsys := stampFS()
+			// No marker exists, so the touch's fail-open removal has nothing to
+			// do and cannot mask the write failure under test.
+			fsys.remove = func(string) error { return fs.ErrNotExist }
+			tc.mutate(&fsys)
+
+			err := touchSlingContextStamp(t.TempDir(), at, fsys)
+			if !errors.Is(err, boom) {
+				t.Fatalf("touchSlingContextStamp = %v, want it to wrap %v", err, boom)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("touchSlingContextStamp error = %q, want it to name %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestRecordSlingContextScanReportsEachFailure: a marker the scan cannot write
+// fails open (the next scan reads in full), but the writer reports it so a
+// runtime directory that is not writable is visible.
+func TestRecordSlingContextScanReportsEachFailure(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	boom := errors.New("disk full")
+
+	tests := []struct {
+		name    string
+		mutate  func(*slingContextStampFS)
+		wantErr string
+	}{
+		{
+			name:    "runtime directory cannot be made",
+			mutate:  func(f *slingContextStampFS) { f.mkdirAll = func(string, os.FileMode) error { return boom } },
+			wantErr: "creating the runtime directory for the sling-context scan marker",
+		},
+		{
+			name:    "marker cannot be written",
+			mutate:  func(f *slingContextStampFS) { f.writeFile = func(string, []byte, os.FileMode) error { return boom } },
+			wantErr: "writing the sling-context scan marker",
+		},
+		{
+			name:    "marker cannot be dated",
+			mutate:  func(f *slingContextStampFS) { f.chtimes = func(string, time.Time, time.Time) error { return boom } },
+			wantErr: "dating the sling-context scan marker",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fsys := stampFS()
+			tc.mutate(&fsys)
+
+			err := recordSlingContextScan(t.TempDir(), at, false, fsys)
+			if !errors.Is(err, boom) {
+				t.Fatalf("recordSlingContextScan = %v, want it to wrap %v", err, boom)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("recordSlingContextScan error = %q, want it to name %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestSlingContextScanIsEmptyReportsUnreadableInput: the skip is refused, with
+// the error, when the marker or the stamp cannot be read. A false answer with a
+// nil error would hide the failure; a true answer would skip on evidence the
+// scan never read.
+func TestSlingContextScanIsEmptyReportsUnreadableInput(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	boom := errors.New("permission denied")
+
+	t.Run("the marker cannot be read", func(t *testing.T) {
+		t.Parallel()
+		fsys := stampFS()
+		fsys.stat = func(string) (fs.FileInfo, error) { return nil, boom }
+
+		skip, err := slingContextScanIsEmpty("/town", at, fsys)
+		if !errors.Is(err, boom) {
+			t.Fatalf("slingContextScanIsEmpty = (%v, %v), want the read error %v", skip, err, boom)
+		}
+		if skip {
+			t.Error("slingContextScanIsEmpty skipped on a marker it could not read")
+		}
+	})
+
+	t.Run("the stamp cannot be read", func(t *testing.T) {
+		t.Parallel()
+		townRoot := t.TempDir()
+		// A real empty-scan marker, so the decision reaches the stamp read.
+		if err := recordSlingContextScan(townRoot, at.Add(-time.Minute), false, osSlingContextStampFS); err != nil {
+			t.Fatalf("seed marker: %v", err)
+		}
+		markerPath := SlingContextScanMarkerPath(townRoot)
+		fsys := stampFS()
+		fsys.stat = func(path string) (fs.FileInfo, error) {
+			if path == markerPath {
+				return os.Stat(path)
+			}
+			return nil, boom
+		}
+
+		skip, err := slingContextScanIsEmpty(townRoot, at, fsys)
+		if !errors.Is(err, boom) {
+			t.Fatalf("slingContextScanIsEmpty = (%v, %v), want the read error %v", skip, err, boom)
+		}
+		if skip {
+			t.Error("slingContextScanIsEmpty skipped on a stamp it could not read")
+		}
+	})
+}

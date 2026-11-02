@@ -785,3 +785,36 @@ func TestScanReadsAgainAfterStampOrCeiling(t *testing.T) {
 		})
 	}
 }
+
+// TestListAllSlingContextRecordsReportsAScanFailure runs the production scan
+// against a town it cannot read: the failure is returned rather than read as
+// "nothing scheduled", and no marker is recorded, because a failed scan is not
+// an empty one.
+func TestListAllSlingContextRecordsReportsAScanFailure(t *testing.T) {
+	t.Parallel()
+	missing := filepath.Join(t.TempDir(), "missing")
+	if _, err := listAllSlingContextRecords(missing); err == nil {
+		t.Fatal("listAllSlingContextRecords on an unreadable town = nil, want the scan failure")
+	}
+	if _, err := os.Stat(beads.SlingContextScanMarkerPath(missing)); !os.IsNotExist(err) {
+		t.Errorf("a failed scan left a marker (stat: %v); only a completed scan may record one", err)
+	}
+}
+
+// TestListAllSlingContextRecordsWithReportsAScanFailure is the same rule for an
+// injected scan: its error reaches the caller, and the marker is left as it was.
+func TestListAllSlingContextRecordsWithReportsAScanFailure(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	start := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	scanErr := errors.New("bd down")
+
+	_, err := listAllSlingContextRecordsWith(townRoot, func() time.Time { return start },
+		func(string) ([]contextRecord, error) { return nil, scanErr })
+	if !errors.Is(err, scanErr) {
+		t.Fatalf("listAllSlingContextRecordsWith = %v, want the scan's failure", err)
+	}
+	if _, err := os.Stat(beads.SlingContextScanMarkerPath(townRoot)); !os.IsNotExist(err) {
+		t.Errorf("a failed scan left a marker (stat: %v); only a completed scan may record one", err)
+	}
+}
