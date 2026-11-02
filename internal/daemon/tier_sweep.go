@@ -510,8 +510,11 @@ func (s tierSweepStage) command() string {
 // with the same tiers; a tree with neither has no command (runnable is false),
 // and the stage is RED, never skipped or GREEN. A check that errors returns
 // that error, so a tree that cannot be read is not taken for one without the
-// command. The returned stage is what the cycle runs and reads: a script stage
-// carries no runner, so its output is read as the script's.
+// command. The returned stage is what the cycle runs and reads: a script stage's
+// runner field is cleared, so its host command is the script and its output is
+// read as the script's. The script flag does not keep the stage on the host: a
+// slot stage still leaves it for the configured sweep runner, which runs the
+// same script in the container (gt-rhwx1).
 func (s tierSweepStage) resolveIn(has func(rel string) (bool, error)) (st tierSweepStage, runnable bool, err error) {
 	goOK, err := has(s.goDir)
 	if err != nil {
@@ -1642,15 +1645,17 @@ func tierSweepRunnerRunID(rig, sha string, tiers []string) string {
 
 // tierSweepRunnerSpec returns the Spec a stage renders off-host, and whether
 // the runner takes the stage at all. Only the stage that starts containers
-// leaves the host, and only when the config names a runner and the stage runs
-// the Go sweep command: the shell stage stays on the host, and so does a rig's
-// own script, which cmd/sweep-run does not run.
+// leaves the host, and only when the config names a runner: the shell stage
+// stays on the host. A slot stage whose tree ships the rig's own script instead
+// of the Go sweep command leaves it too, because cmd/sweep-run makes the same
+// per-tree choice the host sweep does and runs that script in the container
+// (gt-rhwx1).
 //
 // An error is a runner the config names whose Spec cannot be rendered: the
 // stage is then RED, never run on the host instead.
 func (d *Daemon) tierSweepRunnerSpec(st tierSweepStage) (sweeprunner.Spec, bool, error) {
 	cfg := tierSweepRunnerConfig(d.patrolConfig)
-	if cfg == nil || !st.slot || st.script {
+	if cfg == nil || !st.slot {
 		return sweeprunner.Spec{}, false, nil
 	}
 	runID := tierSweepRunnerRunID(st.rig, st.tested, st.tiers)
@@ -2281,6 +2286,12 @@ func parseTierSweepUnknownTiers(output string) map[string]bool {
 // script declines, and only by exiting tierSweepDeclineExit at a tier it does
 // not offer. The Go command offers every tier the stage asks for, so a Go
 // stage's output never excuses a tier, whatever it prints.
+//
+// A script stage the sweep runner took never takes this shape: the run's result
+// holds a summary line for every tier it was asked for, and the fold exits 0 or
+// the RED exit, so neither the script's own unknown-tier line nor its exit
+// status reaches here (gt-rhwx1). A tier the script declined is then RED with
+// the runner's reason, which is the runner's contract for every off-host stage.
 func tierSweepDeclined(st tierSweepStage, res tierSweepStageResult) map[string]bool {
 	if !st.script || res.exitCode != tierSweepDeclineExit {
 		return map[string]bool{}
