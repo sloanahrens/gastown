@@ -247,6 +247,8 @@ func labelAdd(env Env, d Decision) int {
 // router's own (slotOf), so an operand the router does not read as a bead is
 // not read as one here either. A command that names no issue, or an empty
 // label, is refused rather than written as the other slot's value.
+// An operand past the declared slots is read as an issue id, as the router
+// reads it.
 func labelAddOperands(ops []string) (ids, labels []string, err error) {
 	slots := operandSlots["label add"]
 	for i, op := range ops {
