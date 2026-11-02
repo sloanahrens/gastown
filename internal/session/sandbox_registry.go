@@ -77,6 +77,9 @@ type sandboxSeatEndLine struct {
 // error. A record that names no seat has no intent to read, so it has no bead
 // and no error either. A record whose intent cannot be read is an error: the
 // bead is unknown, and the removal reports it.
+// The intent is keyed by seat, not by session, so it can name a bead from
+// another assignment: only a submission made at or after the record was
+// created, and still standing, is this record's bead. Any other intent is "".
 func sandboxSeatBead(townRoot string, rec SandboxRecord) (string, error) {
 	if !plainPathName(rec.Rig) || !plainPathName(rec.Polecat) {
 		return "", nil
@@ -85,6 +88,9 @@ func sandboxSeatBead(townRoot string, rec SandboxRecord) (string, error) {
 	r, err := intent.Read(townRoot, seat)
 	if err != nil {
 		return "", fmt.Errorf("reading the intent of seat %s for its seat-end line: %w", seat, err)
+	}
+	if !r.Submitted() || r.UpdatedAt.Before(rec.CreatedAt) {
+		return "", nil
 	}
 	return r.WorkBead, nil
 }

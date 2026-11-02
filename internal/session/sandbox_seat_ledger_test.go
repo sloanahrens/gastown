@@ -358,6 +358,75 @@ func TestSeatLineCarriesTheSubmittedBead(t *testing.T) {
 	}
 }
 
+// The intent is keyed by seat, so it can hold a bead from another assignment.
+// The line names only the bead this record's own submission made: an intent
+// submitted before the record existed belongs to an earlier assignment, and one
+// that names a bead but is no longer submitted names nothing (gt-v5nb1).
+func TestSeatLineNamesOnlyTheRecordsOwnSubmittedBead(t *testing.T) {
+	t.Parallel()
+	created := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name     string
+		write    func(t *testing.T, town string, seat intent.Seat)
+		wantBead string
+	}{
+		{
+			name: "submitted after the record was created",
+			write: func(t *testing.T, town string, seat intent.Seat) {
+				t.Helper()
+				if err := intent.MarkSubmitted(town, seat, "gt-abc", "furiosa", created.Add(time.Minute)); err != nil {
+					t.Fatalf("marking the seat submitted: %v", err)
+				}
+			},
+			wantBead: "gt-abc",
+		},
+		{
+			name: "submitted before the record was created",
+			write: func(t *testing.T, town string, seat intent.Seat) {
+				t.Helper()
+				if err := intent.MarkSubmitted(town, seat, "gt-old", "furiosa", created.Add(-time.Hour)); err != nil {
+					t.Fatalf("marking the seat submitted: %v", err)
+				}
+			},
+		},
+		{
+			name: "names a bead but is no longer submitted",
+			write: func(t *testing.T, town string, seat intent.Seat) {
+				t.Helper()
+				if _, err := intent.Update(town, seat, func(r *intent.Record) error {
+					r.WorkBead = "gt-abc"
+					r.Desired = intent.DesiredRun
+					r.UpdatedAt = created.Add(time.Minute)
+					return nil
+				}); err != nil {
+					t.Fatalf("writing the seat's intent: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			rec := SandboxRecord{Session: "gt-gastown-box", Rig: "gastown", Polecat: "box", CreatedAt: created}
+			seat := intent.Seat{Rig: rec.Rig, Role: "polecats", Name: rec.Polecat}
+			if err := WriteSandboxRecord(town, rec); err != nil {
+				t.Fatalf("writing the record: %v", err)
+			}
+			c.write(t, town, seat)
+			if err := RemoveSandboxRecord(town, rec.Session); err != nil {
+				t.Fatalf("removing the record: %v", err)
+			}
+			lines := readSeatLines(t, town)
+			if len(lines) != 1 {
+				t.Fatalf("seat-end lines = %d, want 1: %+v", len(lines), lines)
+			}
+			if got := lines[0].WorkBead; got != c.wantBead {
+				t.Fatalf("seat-end line work_bead = %q, want %q", got, c.wantBead)
+			}
+		})
+	}
+}
+
 // A seat whose intent names no bead, or has no intent record at all, writes a
 // line with no work_bead key: the bead is left out rather than written empty.
 func TestSeatLineOmitsTheBeadWhenNoneIsKnown(t *testing.T) {
