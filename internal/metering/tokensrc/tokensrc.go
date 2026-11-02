@@ -1,7 +1,7 @@
-// Package tokensrc turns the per-bead usage records into the month's token
-// counts per workspace, the adapter internal/metering/export calls the usage
-// records reader for plan rows M3 and M8. Its caller is the invoice command
-// bead filed with this one.
+// Package tokensrc is the usage records adapter internal/metering/export names
+// for plan rows M3 and M8: it totals the per-bead usage records into the
+// month's token counts per workspace. Its caller is the invoice command bead
+// filed with this one.
 //
 // It reads no record of its own and keeps no clock: the tree comes in as an
 // io/fs.FS and the month as an export.CalendarMonth, so the counts are a pure
