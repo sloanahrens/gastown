@@ -19,19 +19,22 @@
 # --since syntax. A history that cannot be read runs the tier: no skip
 # without evidence.
 #
-# INPUTS is every path a shell-tier verdict can move on, internal/cmd/
-# scheduler_integration_test.go included: scripts/makefile-gate_test.sh reads
-# schedulerTownSlots out of it (gt-tqxdd). internal/shelltier/ is the runner
-# the tier execs, and cmd/tier-sweep and internal/tiersweep are the command
-# and package that run it, so a change to any of them moves the verdict too.
-# internal/land's ShellTierInputs no longer mirrors this line: it is built from
-# the shell tier manifest's triggers (internal/shelltier), and the post-land
-# revert reads it (gt-u560q.9).
+# INPUTS is every path a shell-tier verdict can move on: the shell tier
+# manifest's trigger union (internal/shelltier), which is scripts/ and the
+# Makefile by default, the per-entry deploy/ and .githooks/, and the Go tree
+# (go.mod, go.sum, cmd/, internal/, plugins/) every entry that names no stub-go
+# reason contributes. internal/ reaches internal/cmd/scheduler_integration_test.go,
+# which scripts/makefile-gate_test.sh reads schedulerTownSlots out of (gt-tqxdd),
+# and the tier's own machinery (internal/shelltier, cmd/tier-sweep,
+# internal/tiersweep). TestPostLandShellInputsCoverTheManifestTriggers holds
+# this line to the manifest trigger by trigger, so a trigger added there cannot
+# leave this skip behind; the post-land revert reads the same union (gt-u560q.9,
+# gt-vt2g4).
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 
 WINDOW=${POST_LAND_SHELL_WINDOW:-2 hours}
-INPUTS='^(scripts/|plugins/|\.githooks/|Makefile$|internal/shelltier/|cmd/tier-sweep/|internal/tiersweep/|internal/testpolicy/docker\.txt$|internal/cmd/scheduler_integration_test\.go$)'
+INPUTS='^(scripts/|plugins/|\.githooks/|deploy/|Makefile$|go\.mod$|go\.sum$|internal/|cmd/)'
 
 if ! changed=$(git log --first-parent --since="$WINDOW" --name-only --format= HEAD 2>/dev/null); then
   echo "post-land-shell: cannot read main's history; running the shell tier"

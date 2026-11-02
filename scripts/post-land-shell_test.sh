@@ -26,9 +26,9 @@ new_repo() {
   git -C "$r" config user.email t@example.com
   git -C "$r" config user.name t
   git -C "$r" config core.hooksPath /dev/null
-  mkdir -p "$r/scripts" "$r/internal/x"
+  mkdir -p "$r/scripts" "$r/docs"
   cp "$SRC" "$r/scripts/post-land-shell.sh"
-  echo base > "$r/internal/x/x.go"
+  echo base > "$r/docs/x.md"
   git -C "$r" add -A
   GIT_COMMITTER_DATE="2020-01-01T00:00:00Z" GIT_AUTHOR_DATE="2020-01-01T00:00:00Z" \
     git -C "$r" commit -q -m base
@@ -48,32 +48,34 @@ commit_at() {
   fi
 }
 
-# --- A Go-only landing skips the tier ---
+# --- A landing that moves no input skips the tier ---
 R=$(new_repo)
-commit_at "$R" internal/x/x.go ""
+commit_at "$R" docs/x.md ""
 out=$(bash "$R/scripts/post-land-shell.sh" 2>&1); rc=$?
 if [ "$rc" = 0 ] && ! grep -q TIER-RAN <<<"$out" && grep -q "shell tier skipped" <<<"$out"; then
-  pass "go-only change: skipped"
+  pass "docs-only change: skipped"
 else
-  fail "go-only change: rc=$rc out=$out"
+  fail "docs-only change: rc=$rc out=$out"
 fi
 rm -rf "$R"
 
-# --- A sibling directory of the runner's is not the runner: the prefix ends in a slash ---
+# --- A sibling directory of a trigger's is not the trigger: the prefix ends in a slash ---
 R=$(new_repo)
-commit_at "$R" internal/shelltierx/x.go ""
+commit_at "$R" deployx/x.sh ""
 out=$(bash "$R/scripts/post-land-shell.sh" 2>&1); rc=$?
 if [ "$rc" = 0 ] && ! grep -q TIER-RAN <<<"$out" && grep -q "shell tier skipped" <<<"$out"; then
-  pass "sibling of the runner (internal/shelltierx): skipped"
+  pass "a trigger's sibling directory (deployx/): skipped"
 else
-  fail "sibling of the runner: rc=$rc out=$out"
+  fail "a trigger's sibling directory: rc=$rc out=$out"
 fi
 rm -rf "$R"
 
 # --- A recent change to each kind of input runs the tier ---
 # internal/cmd/scheduler_integration_test.go is Go but a shell-tier input
-# (gt-tqxdd): makefile-gate_test.sh reads schedulerTownSlots out of it.
-for path in scripts/install-local_test.sh plugins/p/run.sh .githooks/pre-push Makefile internal/shelltier/run.go cmd/tier-sweep/main.go internal/tiersweep/sweep.go internal/testpolicy/docker.txt internal/cmd/scheduler_integration_test.go; do
+# (gt-tqxdd): makefile-gate_test.sh reads schedulerTownSlots out of it. go.mod
+# and cmd/ are manifest Go triggers too, since the post-land revert blames a
+# landing by the same union (gt-vt2g4).
+for path in scripts/install-local_test.sh plugins/p/run.sh .githooks/pre-push Makefile go.mod internal/shelltier/run.go cmd/tier-sweep/main.go internal/tiersweep/sweep.go internal/testpolicy/docker.txt internal/cmd/scheduler_integration_test.go; do
   R=$(new_repo)
   commit_at "$R" "$path" ""
   out=$(bash "$R/scripts/post-land-shell.sh" 2>&1); rc=$?
@@ -88,7 +90,7 @@ done
 # --- A coalesced landing: the input changed one commit before the tip ---
 R=$(new_repo)
 commit_at "$R" scripts/a.sh ""
-commit_at "$R" internal/x/x.go ""
+commit_at "$R" docs/x.md ""
 out=$(bash "$R/scripts/post-land-shell.sh" 2>&1)
 grep -q "TIER-RAN shell" <<<"$out" && pass "coalesced: an earlier landing's input still runs the tier" \
   || fail "coalesced: $out"
@@ -97,7 +99,7 @@ rm -rf "$R"
 # --- An input changed outside the window does not run it ---
 R=$(new_repo)
 commit_at "$R" scripts/a.sh "2020-06-01T00:00:00Z"
-commit_at "$R" internal/x/x.go ""
+commit_at "$R" docs/x.md ""
 out=$(bash "$R/scripts/post-land-shell.sh" 2>&1)
 ! grep -q TIER-RAN <<<"$out" && pass "old input: skipped" || fail "old input: $out"
 rm -rf "$R"
