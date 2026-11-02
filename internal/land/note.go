@@ -235,7 +235,39 @@ func ParseRejectionNote(notes string) (RejectionNote, bool) {
 	if len(blocks) == 0 {
 		return RejectionNote{}, false
 	}
-	lines := strings.Split(notes[blocks[len(blocks)-1][0]:], "\n")
+	return parseRejectionBlock(notes[blocks[len(blocks)-1][0]:])
+}
+
+// RejectionsOfKind returns the rejection blocks of kind in notes, in the order
+// they were written: the record of each refusal of that kind, so a reader that
+// needs the nth one counts from the notes, which are never pruned. A block with
+// no class reads as a review (gt-1jig). Each block runs to the next header, so
+// a block's fields are never read from the block after it.
+func RejectionsOfKind(notes, kind string) []RejectionNote {
+	starts := rejectionBlockRE.FindAllStringIndex(notes, -1)
+	var out []RejectionNote
+	for i, b := range starts {
+		end := len(notes)
+		if i+1 < len(starts) {
+			end = starts[i+1][0]
+		}
+		rej, ok := parseRejectionBlock(notes[b[0]:end])
+		if !ok {
+			continue
+		}
+		if rej.Kind == "" {
+			rej.Kind = string(RejectReview)
+		}
+		if rej.Kind == kind {
+			out = append(out, rej)
+		}
+	}
+	return out
+}
+
+// parseRejectionBlock reads one block, from its header to the end of block.
+func parseRejectionBlock(block string) (RejectionNote, bool) {
+	lines := strings.Split(block, "\n")
 	var n RejectionNote
 	attempt, kind, reason, ok := parseRejectionHeader(lines[0])
 	if !ok {

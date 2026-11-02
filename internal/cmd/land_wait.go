@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,6 +32,16 @@ const landWaitInterval = 5 * time.Second
 // record, so a first read can arrive early; a record that never appears is
 // reported rather than waited on until the timeout.
 const landWaitDetailMisses = 3
+
+// landWaitSettle is how long a refusal is held after its log line before its
+// record is read. The record is the bead write that follows the line, which
+// lands well inside this; a newer refusal may not have it yet, so the refusals
+// of its bead and kind wait with it (gt-hmxex).
+const landWaitSettle = landWaitInterval * landWaitDetailMisses
+
+// landWaitPlainRE is what a printed branch, target or commit may hold: a plain
+// token, with no space or control character to reach the agent's terminal.
+var landWaitPlainRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/+-]*$`)
 
 // errLandWaitNoOutcome is the answer to a wait that saw nothing: the bird runs
 // the command again, which is what its next turn is for.
@@ -112,6 +123,7 @@ func landWaitCommand(cmd *cobra.Command, agentFlag, timeoutFlag string, host lan
 		agent:    agent,
 		timeout:  timeout,
 		interval: landWaitInterval,
+		settle:   landWaitSettle,
 		now:      host.now,
 		sleep:    host.sleep,
 		source:   landWaitLogSource(filepath.Join(townRoot, "daemon")),
@@ -184,12 +196,14 @@ type landWaitDeps struct {
 	agent    string
 	timeout  time.Duration
 	interval time.Duration
-	now      func() time.Time
-	sleep    func(time.Duration)
-	source   func(since time.Time) ([]landWaitEvent, error)
-	detail   func(landWaitEvent) (landWaitOutcome, bool, error)
-	out      io.Writer
-	errOut   io.Writer
+	// settle is how old a refusal must be before its record is read.
+	settle time.Duration
+	now    func() time.Time
+	sleep  func(time.Duration)
+	source func(since time.Time) ([]landWaitEvent, error)
+	detail func(landWaitEvent) (landWaitOutcome, bool, error)
+	out    io.Writer
+	errOut io.Writer
 }
 
 // landWaitPoll prints one line per outcome of the agent's own branches and
@@ -212,7 +226,11 @@ func landWaitPoll(deps landWaitDeps) (reported int, err error) {
 		if err != nil {
 			return reported, err
 		}
+		held := landWaitHeld(events, deps.now(), deps.settle)
 		for _, ev := range events {
+			if !ev.Landed && held[ev.pair()] {
+				continue
+			}
 			key := ev.key()
 			if seen[key] {
 				continue
@@ -252,6 +270,27 @@ func landWaitPoll(deps landWaitDeps) (reported int, err error) {
 	}
 }
 
+// landWaitHeld names the bead and kind pairs whose newest refusal since the
+// start is younger than settle. Each refusal's record is found by counting from
+// the newest block of its kind, so while that newest record is unwritten every
+// refusal of the pair waits with it: an earlier block would otherwise be read
+// as a later refusal's record.
+func landWaitHeld(events []landWaitEvent, now time.Time, settle time.Duration) map[string]bool {
+	held := make(map[string]bool)
+	if settle <= 0 {
+		return held
+	}
+	for _, ev := range events {
+		if ev.Landed || ev.Ordinal != ev.Window {
+			continue
+		}
+		if now.Sub(ev.At) < settle {
+			held[ev.pair()] = true
+		}
+	}
+	return held
+}
+
 // landWaitOurs reports whether branch is the agent's own crew branch: the crew
 // member's checkout branch, or a submission made from it.
 func landWaitOurs(agent, branch string) bool {
@@ -270,17 +309,30 @@ type landWaitEvent struct {
 	Commit string
 	// Kind is the failure class a refused line names.
 	Kind string
-	// Attempt is the attempt number the refusal's own record carries: the
-	// count of that kind of refusal the bead has had, up to this one. The line
-	// does not name it, so the source derives it from the log (zero for a
-	// landing). A record of any other attempt is an earlier refusal, not this.
-	Attempt int
+	// Ordinal is which refusal of its kind this is for the bead, counted from
+	// the start, and Window is how many refusals of that kind the bead has had
+	// since the start, this one included (both zero for a landing). A refusal's
+	// record is found from the newest block of its kind, so the log's history
+	// before the start is never needed to place it.
+	Ordinal int
+	Window  int
+}
+
+// pair names the bead and kind a refusal belongs to: the blocks of that kind
+// number its refusals.
+func (e landWaitEvent) pair() string {
+	return e.Bead + "\x00" + e.Kind
 }
 
 // key identifies one outcome across polls, so re-reading the log does not
-// repeat a line already printed or skipped.
+// repeat a line already printed or skipped. A refusal is named by its ordinal,
+// which the window since the start keeps fixed as later refusals arrive; two
+// refusals in one second are two keys, where a time stamp would fold them.
 func (e landWaitEvent) key() string {
-	return e.Bead + "\x00" + e.outcomeWord() + "\x00" + e.At.UTC().Format(time.RFC3339Nano)
+	if e.Landed {
+		return "landed\x00" + e.Bead + "\x00" + e.Commit
+	}
+	return "rejected\x00" + e.pair() + "\x00" + strconv.Itoa(e.Ordinal)
 }
 
 // outcomeWord names the outcome in a message a bird reads.
@@ -324,40 +376,50 @@ func parseLandWaitLine(text string) (landWaitEvent, bool) {
 }
 
 // landWaitLogSource reads the landing outcomes at or after since from the daemon
-// log at dir. Each poll reads the log whole: the prune patrol keeps it small,
-// and daemonlog.Read follows the rotation a tail read cannot.
-//
-// The whole log is read, not only the part since the start, because a
-// refusal's attempt is its place among the bead's refusals of that kind, and
-// the refusals before since are what number the ones after it.
+// log at dir. Each poll reads the log from since on: daemonlog.Read follows the
+// rotation a tail read cannot. Nothing before since is read, so the log's own
+// history, pruned by rotation, never changes the numbering of a refusal; its
+// record is found in the notes, which keep every block.
 func landWaitLogSource(dir string) func(since time.Time) ([]landWaitEvent, error) {
 	return func(since time.Time) ([]landWaitEvent, error) {
 		if err := landWaitLogPresent(dir, since); err != nil {
 			return nil, err
 		}
-		lines, err := daemonlog.Read(dir, time.Time{}, time.Local)
+		lines, err := daemonlog.Read(dir, since, time.Local)
 		if err != nil {
 			return nil, fmt.Errorf("reading the daemon log: %w", err)
 		}
 		var events []landWaitEvent
-		refusals := make(map[string]int)
 		for _, line := range lines {
 			ev, ok := parseLandWaitLine(line.Text)
 			if !ok {
 				continue
 			}
 			ev.At = line.At
-			if !ev.Landed {
-				n := refusals[ev.Bead+"\x00"+ev.Kind] + 1
-				refusals[ev.Bead+"\x00"+ev.Kind] = n
-				ev.Attempt = landWaitAttemptOf(ev.Kind, n)
-			}
-			if line.At.Before(since) {
-				continue
-			}
 			events = append(events, ev)
 		}
+		landWaitNumber(events)
 		return events, nil
+	}
+}
+
+// landWaitNumber places each refusal in its window: its ordinal among the
+// bead's refusals of its kind since the start, and how many the window holds.
+func landWaitNumber(events []landWaitEvent) {
+	window := make(map[string]int)
+	for _, ev := range events {
+		if !ev.Landed {
+			window[ev.pair()]++
+		}
+	}
+	seen := make(map[string]int)
+	for i := range events {
+		ev := &events[i]
+		if ev.Landed {
+			continue
+		}
+		seen[ev.pair()]++
+		ev.Ordinal, ev.Window = seen[ev.pair()], window[ev.pair()]
 	}
 }
 
@@ -439,13 +501,12 @@ func landWaitBeadNotes(open func(bead string) (landWaitBeadReader, error)) func(
 // record of it: the LANDING RECORD block for a landing, the MERGE REJECTION
 // block for a refusal. A note that does not carry the block the event names is
 // no answer, because the landing that wrote it has not recorded itself yet or
-// an earlier landing or refusal of the bead has. A refusal names its attempt,
-// so only the block of that attempt answers it: the earlier block of the same
-// kind is not this refusal's record.
+// an earlier landing or refusal of the bead has.
 //
 // A miss still names the branch the bead's notes record, when they record one,
 // so the waiter can tell an outcome that is someone else's from one it cannot
-// attribute.
+// attribute. A record whose branch, target or commit is not a plain token is a
+// miss too: its text is never printed to the agent.
 func landWaitNoteOutcome(notes string, ev landWaitEvent) (landWaitOutcome, bool) {
 	miss := landWaitOutcome{Bead: ev.Bead, Branch: landWaitNotesBranch(notes)}
 	if ev.Landed {
@@ -453,11 +514,15 @@ func landWaitNoteOutcome(notes string, ev landWaitEvent) (landWaitOutcome, bool)
 		if !ok || !strings.HasPrefix(rec.LandedCommit, ev.Commit) {
 			return miss, false
 		}
-		return landWaitOutcome{Bead: ev.Bead, Branch: rec.Branch, Landed: true,
-			Commit: rec.LandedCommit, Target: rec.Target}, true
+		out := landWaitOutcome{Bead: ev.Bead, Branch: rec.Branch, Landed: true,
+			Commit: rec.LandedCommit, Target: rec.Target}
+		if !landWaitPrintable(out) {
+			return miss, false
+		}
+		return out, true
 	}
-	refusal, ok := land.ParseRejectionNote(notes)
-	if !ok || refusal.Kind != ev.Kind || ev.Attempt == 0 || refusal.Attempt != ev.Attempt {
+	refusal, ok := landWaitRefusalRecord(notes, ev)
+	if !ok {
 		return miss, false
 	}
 	out := landWaitOutcome{Bead: ev.Bead, Branch: refusal.Branch, Kind: refusal.Kind,
@@ -465,7 +530,44 @@ func landWaitNoteOutcome(notes string, ev landWaitEvent) (landWaitOutcome, bool)
 	if refusal.Receipt != nil {
 		out.Score, out.HasScore = refusal.Receipt.Score, true
 	}
+	if !landWaitPrintable(out) {
+		return miss, false
+	}
 	return out, true
+}
+
+// landWaitRefusalRecord is the block that recorded ev's refusal. The blocks of
+// the event's kind are the bead's refusals of that kind, in order, and the
+// window's last refusal is the newest of them, so the event's block is
+// Window-Ordinal blocks older than the newest. The notes must hold Window blocks:
+// with fewer, the newest refusal's block is not written yet, and counting from
+// the end would name an earlier refusal's block. A block whose number is not its
+// place answers nothing; review numbers stop at the rework ceiling, as the
+// landing's records do.
+func landWaitRefusalRecord(notes string, ev landWaitEvent) (land.RejectionNote, bool) {
+	blocks := land.RejectionsOfKind(notes, ev.Kind)
+	if ev.Ordinal < 1 || ev.Ordinal > ev.Window || len(blocks) < ev.Window {
+		return land.RejectionNote{}, false
+	}
+	pos := len(blocks) - ev.Window + ev.Ordinal
+	rec := blocks[pos-1]
+	if rec.Attempt != landWaitAttemptOf(ev.Kind, pos) {
+		return land.RejectionNote{}, false
+	}
+	return rec, true
+}
+
+// landWaitPrintable reports whether the outcome's printed fields are plain
+// tokens. A refusal prints its branch; a landing prints its branch, target and
+// commit.
+func landWaitPrintable(o landWaitOutcome) bool {
+	if !landWaitPlainRE.MatchString(o.Branch) {
+		return false
+	}
+	if o.Landed {
+		return landWaitPlainRE.MatchString(o.Target) && landWaitPlainRE.MatchString(o.Commit)
+	}
+	return true
 }
 
 // landWaitNotesBranch is the branch the bead's notes record, from its landing

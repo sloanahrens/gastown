@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -135,6 +136,12 @@ func TestParseLandWaitLine(t *testing.T) {
 	}
 }
 
+// landWaitHistory is a bead's notes holding each block in order, as the landing
+// worker appends them: every refusal of the bead stays in its notes.
+func landWaitHistory(blocks ...string) string {
+	return strings.Join(blocks, "\n")
+}
+
 // landWaitRejectionNotes is a bead's notes carrying a refusal block the landing
 // worker writes, in the writer's own format. A nil score is a refusal om never
 // scored, as a gate refusal on a waived review is.
@@ -179,26 +186,53 @@ func TestLandWaitNoteOutcome(t *testing.T) {
 			ev:    landWaitEvent{Bead: "gt-a", Landed: true, Commit: "ffffffff"},
 		},
 		{
-			name:  "a refusal reads its kind, score, findings and round",
-			notes: landWaitRejectionNotes(2, "review", "crew/dunlin/gt-a-x", 3, landWaitScore(0.42)),
-			ev:    landWaitEvent{Bead: "gt-a", Kind: "review", Attempt: 2},
-			want:  landWaitOutcome{Bead: "gt-a", Branch: "crew/dunlin/gt-a-x", Kind: "review", Score: 0.42, HasScore: true, Findings: 3, Attempt: 2},
-			ok:    true,
+			name: "a refusal reads its kind, score, findings and round",
+			notes: landWaitHistory(
+				landWaitRejectionNotes(1, "review", "crew/dunlin/gt-a-x", 0, nil),
+				landWaitRejectionNotes(2, "review", "crew/dunlin/gt-a-x", 3, landWaitScore(0.42))),
+			ev:   landWaitEvent{Bead: "gt-a", Kind: "review", Ordinal: 1, Window: 1},
+			want: landWaitOutcome{Bead: "gt-a", Branch: "crew/dunlin/gt-a-x", Kind: "review", Score: 0.42, HasScore: true, Findings: 3, Attempt: 2},
+			ok:   true,
+		},
+		{
+			name: "a refusal is numbered among its own kind, past a gate",
+			notes: landWaitHistory(
+				landWaitRejectionNotes(1, "review", "crew/dunlin/gt-a-x", 0, nil),
+				landWaitRejectionNotes(1, "gate", "crew/dunlin/gt-a-x", 0, nil),
+				landWaitRejectionNotes(2, "review", "crew/dunlin/gt-a-x", 2, landWaitScore(0.5))),
+			ev:   landWaitEvent{Bead: "gt-a", Kind: "review", Ordinal: 2, Window: 2},
+			want: landWaitOutcome{Bead: "gt-a", Branch: "crew/dunlin/gt-a-x", Kind: "review", Score: 0.5, HasScore: true, Findings: 2, Attempt: 2},
+			ok:   true,
 		},
 		{
 			name:  "a refusal of another kind is no answer",
 			notes: landWaitRejectionNotes(1, "gate", "crew/dunlin/gt-a-x", 0, nil),
-			ev:    landWaitEvent{Bead: "gt-a", Kind: "review", Attempt: 1},
+			ev:    landWaitEvent{Bead: "gt-a", Kind: "review", Ordinal: 1, Window: 1},
 		},
 		{
 			name:  "an earlier refusal of the same kind is no answer to a later one",
 			notes: landWaitRejectionNotes(1, "review", "crew/dunlin/gt-a-x", 3, landWaitScore(0.2)),
-			ev:    landWaitEvent{Bead: "gt-a", Kind: "review", Attempt: 2},
+			ev:    landWaitEvent{Bead: "gt-a", Kind: "review", Ordinal: 2, Window: 2},
 		},
 		{
-			name:  "a refusal event with no attempt is no answer",
+			name:  "a refusal whose window the notes do not yet hold is no answer",
+			notes: landWaitRejectionNotes(1, "review", "crew/dunlin/gt-a-x", 3, landWaitScore(0.2)),
+			ev:    landWaitEvent{Bead: "gt-a", Kind: "review", Ordinal: 1, Window: 2},
+		},
+		{
+			name:  "a block numbered for another place is no answer",
+			notes: landWaitRejectionNotes(2, "review", "crew/dunlin/gt-a-x", 3, landWaitScore(0.2)),
+			ev:    landWaitEvent{Bead: "gt-a", Kind: "review", Ordinal: 1, Window: 1},
+		},
+		{
+			name:  "a refusal event with no place in its window is no answer",
 			notes: landWaitRejectionNotes(1, "review", "crew/dunlin/gt-a-x", 3, landWaitScore(0.2)),
 			ev:    landWaitEvent{Bead: "gt-a", Kind: "review"},
+		},
+		{
+			name:  "a record whose branch is not a plain token is no answer",
+			notes: "MERGE REJECTION (attempt 1): review - refused\nBranch: crew/dunlin/gt-a\x1b]0;x\x07\nTarget: main\nMR: gt-a\n",
+			ev:    landWaitEvent{Bead: "gt-a", Kind: "review", Ordinal: 1, Window: 1},
 		},
 		{
 			name:  "a bead with no record",
@@ -208,7 +242,7 @@ func TestLandWaitNoteOutcome(t *testing.T) {
 		{
 			name:  "a gate refusal with no om score",
 			notes: landWaitRejectionNotes(1, "gate", "crew/dunlin/gt-a-x", 0, nil),
-			ev:    landWaitEvent{Bead: "gt-a", Kind: "gate", Attempt: 1},
+			ev:    landWaitEvent{Bead: "gt-a", Kind: "gate", Ordinal: 1, Window: 1},
 			want:  landWaitOutcome{Bead: "gt-a", Branch: "crew/dunlin/gt-a-x", Kind: "gate", Findings: 0, Attempt: 1},
 			ok:    true,
 		},
@@ -249,7 +283,7 @@ func TestLandWaitDoesNotAnswerWithAnEarlierAttempt(t *testing.T) {
 	clock := newLandWaitClock()
 	stdout, stderr, err := landWaitRun(t, clock, landWaitDeps{
 		agent: "dunlin", timeout: time.Minute, interval: time.Second,
-		source: landWaitFixtureSource(landWaitEvent{At: landWaitEpoch, Bead: "gt-a", Kind: "review", Attempt: 2}),
+		source: landWaitFixtureSource(landWaitEvent{At: landWaitEpoch, Bead: "gt-a", Kind: "review", Ordinal: 2, Window: 2}),
 		detail: landWaitFixtureDetail(notes),
 	})
 	if !isLandWaitNoOutcome(err) {
@@ -270,7 +304,7 @@ func TestLandWaitSilentForAnotherCrewMembersUnrecordedRefusal(t *testing.T) {
 	notes := map[string]string{"gt-a": landWaitRejectionNotes(1, "review", "crew/egret/gt-a-x", 2, landWaitScore(0.3))}
 	stdout, stderr, err := landWaitRun(t, newLandWaitClock(), landWaitDeps{
 		agent: "dunlin", timeout: 3 * time.Second, interval: time.Second,
-		source: landWaitFixtureSource(landWaitEvent{At: landWaitEpoch, Bead: "gt-a", Kind: "review", Attempt: 2}),
+		source: landWaitFixtureSource(landWaitEvent{At: landWaitEpoch, Bead: "gt-a", Kind: "review", Ordinal: 2, Window: 2}),
 		detail: landWaitFixtureDetail(notes),
 	})
 	if !isLandWaitNoOutcome(err) {
@@ -287,13 +321,15 @@ func TestLandWaitPrintsOwnOutcomes(t *testing.T) {
 	notes := map[string]string{
 		"gt-landed": land.LandingRecord{BeadID: "gt-landed", Branch: "crew/dunlin/gt-landed-x",
 			Target: "main", LandedCommit: "1a2b3c4d5e6f", LandedAt: landWaitEpoch}.NoteBlock(),
-		"gt-refused": landWaitRejectionNotes(2, "review", "crew/dunlin/gt-refused-x", 3, landWaitScore(0.42)),
+		"gt-refused": landWaitHistory(
+			landWaitRejectionNotes(1, "review", "crew/dunlin/gt-refused-x", 0, nil),
+			landWaitRejectionNotes(2, "review", "crew/dunlin/gt-refused-x", 3, landWaitScore(0.42))),
 		"gt-other": land.LandingRecord{BeadID: "gt-other", Branch: "crew/egret/gt-other-x",
 			Target: "main", LandedCommit: "aaaa1111bbbb", LandedAt: landWaitEpoch}.NoteBlock(),
 	}
 	events := []landWaitEvent{
 		{At: landWaitEpoch.Add(time.Second), Bead: "gt-landed", Landed: true, Commit: "1a2b3c4d"},
-		{At: landWaitEpoch.Add(2 * time.Second), Bead: "gt-refused", Kind: "review", Attempt: 2},
+		{At: landWaitEpoch.Add(2 * time.Second), Bead: "gt-refused", Kind: "review", Ordinal: 1, Window: 1},
 		{At: landWaitEpoch.Add(3 * time.Second), Bead: "gt-other", Landed: true, Commit: "aaaa1111"},
 	}
 	stdout, stderr, err := landWaitRun(t, newLandWaitClock(), landWaitDeps{
@@ -317,10 +353,14 @@ func TestLandWaitPrintsOwnOutcomes(t *testing.T) {
 // has the bead and not to push (gt-hmxex).
 func TestLandWaitThirdRefusalNamesTheOverseer(t *testing.T) {
 	t.Parallel()
-	notes := map[string]string{"gt-a": landWaitRejectionNotes(land.MaxReworkAttempts, "review", "crew/dunlin/gt-a-x", 1, landWaitScore(0.2))}
+	var blocks []string
+	for attempt := 1; attempt <= land.MaxReworkAttempts; attempt++ {
+		blocks = append(blocks, landWaitRejectionNotes(attempt, "review", "crew/dunlin/gt-a-x", 1, landWaitScore(0.2)))
+	}
+	notes := map[string]string{"gt-a": landWaitHistory(blocks...)}
 	stdout, _, err := landWaitRun(t, newLandWaitClock(), landWaitDeps{
 		agent: "dunlin", timeout: time.Minute, interval: time.Second,
-		source: landWaitFixtureSource(landWaitEvent{At: landWaitEpoch, Bead: "gt-a", Kind: "review", Attempt: land.MaxReworkAttempts}),
+		source: landWaitFixtureSource(landWaitEvent{At: landWaitEpoch, Bead: "gt-a", Kind: "review", Ordinal: 1, Window: 1}),
 		detail: landWaitFixtureDetail(notes),
 	})
 	if err != nil {
@@ -749,19 +789,21 @@ func TestLandWaitLogSourceReadsSinceTheStart(t *testing.T) {
 	}
 }
 
-// A refusal's attempt is its place among the bead's refusals of its kind, so
-// the refusals before the start count, and a review's attempt stops at the
-// rework ceiling as the landing's record does.
-func TestLandWaitLogSourceNumbersRefusalsAcrossHistory(t *testing.T) {
+// A refusal is placed by its window since the start: its ordinal among the
+// bead's refusals of its kind, and how many there are. The refusals before the
+// start do not count, so a log rotated or pruned before the start places the
+// same refusals the same way.
+func TestLandWaitLogSourceNumbersRefusalsSinceTheStart(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	var lines []string
 	for i := 0; i < land.MaxReworkAttempts+1; i++ {
-		lines = append(lines, "2026/11/01 08:5"+string(rune('0'+i))+":00 landing_worker: [land] gt-a: rejected (review): the work was refused")
+		lines = append(lines, fmt.Sprintf("2026/11/01 08:50:%02d landing_worker: [land] gt-a: rejected (review): the work was refused", i))
 	}
 	lines = append(lines,
 		"2026/11/01 09:00:01 landing_worker: [land] gt-a: rejected (review): the work was refused",
 		"2026/11/01 09:00:02 landing_worker: [land] gt-a: rejected (gate): make gate failed",
+		"2026/11/01 09:00:03 landing_worker: [land] gt-a: rejected (review): the work was refused",
 	)
 	if err := os.WriteFile(filepath.Join(dir, "daemon.log"), []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
 		t.Fatalf("writing the log: %v", err)
@@ -771,15 +813,19 @@ func TestLandWaitLogSourceNumbersRefusalsAcrossHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("landWaitLogSource() error = %v", err)
 	}
-	if len(events) != 2 {
-		t.Fatalf("events = %+v, want the review and the gate refusal after the start", events)
+	want := []struct {
+		kind    string
+		ordinal int
+		window  int
+	}{{"review", 1, 2}, {"gate", 1, 1}, {"review", 2, 2}}
+	if len(events) != len(want) {
+		t.Fatalf("events = %+v, want the three refusals after the start", events)
 	}
-	if events[0].Kind != "review" || events[0].Attempt != land.MaxReworkAttempts {
-		t.Errorf("review after %d earlier ones: attempt %d, want the ceiling %d",
-			land.MaxReworkAttempts+1, events[0].Attempt, land.MaxReworkAttempts)
-	}
-	if events[1].Kind != "gate" || events[1].Attempt != 1 {
-		t.Errorf("first gate refusal: attempt %d, want 1 (gates number among gates)", events[1].Attempt)
+	for i, w := range want {
+		if ev := events[i]; ev.Kind != w.kind || ev.Ordinal != w.ordinal || ev.Window != w.window {
+			t.Errorf("event %d = kind %s ordinal %d window %d, want kind %s ordinal %d window %d",
+				i, ev.Kind, ev.Ordinal, ev.Window, w.kind, w.ordinal, w.window)
+		}
 	}
 }
 
@@ -797,11 +843,16 @@ func TestLandWaitLogSourceMissingLog(t *testing.T) {
 	t.Run("a rotated copy since the start", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(dir, "daemon-2026-11-01T09-30-00.000.log"), nil, 0o600); err != nil {
+		body := "2026/11/01 09:30:01 landing_worker: [land] gt-a: rejected (gate): make gate failed\n"
+		if err := os.WriteFile(filepath.Join(dir, "daemon-2026-11-01T09-30-00.000.log"), []byte(body), 0o600); err != nil {
 			t.Fatalf("writing the rotated log: %v", err)
 		}
-		if _, err := landWaitLogSource(dir)(since); err != nil {
+		events, err := landWaitLogSource(dir)(since)
+		if err != nil {
 			t.Fatalf("landWaitLogSource() error = %v, want the rotation read through", err)
+		}
+		if len(events) != 1 || events[0].Bead != "gt-a" || events[0].Kind != "gate" {
+			t.Errorf("events = %+v, want the gate refusal in the rotated copy", events)
 		}
 	})
 }
@@ -832,6 +883,75 @@ func TestLandWaitLogSourceRefusesADaemonPathThatIsAFile(t *testing.T) {
 	_, err := landWaitLogSource(daemon)(landWaitEpoch)
 	if err == nil || !strings.Contains(err.Error(), "reading the daemon log") {
 		t.Fatalf("landWaitLogSource() error = %v, want the failed look at the log named", err)
+	}
+}
+
+// A refusal is held until its record can be read. While the newest refusal of
+// its bead and kind is unsettled, the earlier block is not read as the record
+// of a later refusal: nothing prints, and no refusal is given up on as missing.
+// Once the newest record lands, every refusal of the window prints (gt-hmxex).
+func TestLandWaitHoldsARefusalUntilItSettles(t *testing.T) {
+	t.Parallel()
+	first := landWaitRejectionNotes(1, "review", "crew/dunlin/gt-a-x", 0, nil)
+	second := landWaitRejectionNotes(2, "review", "crew/dunlin/gt-a-x", 1, landWaitScore(0.4))
+	notes := map[string]string{"gt-a": first}
+	clock := newLandWaitClock()
+	var out, errOut bytes.Buffer
+	settle := 10 * time.Second
+	deps := landWaitDeps{
+		agent: "dunlin", timeout: time.Minute, interval: time.Second, settle: settle,
+		source: landWaitFixtureSource(
+			landWaitEvent{At: landWaitEpoch, Bead: "gt-a", Kind: "review", Ordinal: 1, Window: 2},
+			landWaitEvent{At: landWaitEpoch, Bead: "gt-a", Kind: "review", Ordinal: 2, Window: 2}),
+		detail: landWaitFixtureDetail(notes),
+		now:    clock.now,
+		out:    &out,
+		errOut: &errOut,
+	}
+	deps.sleep = func(d time.Duration) {
+		clock.sleep(d)
+		if clock.now().Sub(landWaitEpoch) < settle && out.Len() > 0 {
+			t.Errorf("printed %q before the newest refusal settled", out.String())
+		}
+		if clock.now().Sub(landWaitEpoch) >= settle {
+			notes["gt-a"] = landWaitHistory(first, second)
+		}
+	}
+	if _, err := landWaitPoll(deps); err != nil {
+		t.Fatalf("landWaitPoll() error = %v", err)
+	}
+	for _, want := range []string{"refusal 1 of 3", "refusal 2 of 3"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("stdout %q does not carry %q once the newest refusal settled", out.String(), want)
+		}
+	}
+	if errOut.Len() != 0 {
+		t.Errorf("stderr = %q, want nothing: a held refusal is not a missing record", errOut.String())
+	}
+}
+
+// Two refusals of one bead and kind in the same second are two outcomes: the
+// log's stamp does not fold the second into the first (gt-hmxex).
+func TestLandWaitPrintsEveryRefusalInTheSameSecond(t *testing.T) {
+	t.Parallel()
+	notes := map[string]string{"gt-a": landWaitHistory(
+		landWaitRejectionNotes(1, "review", "crew/dunlin/gt-a-x", 0, nil),
+		landWaitRejectionNotes(2, "review", "crew/dunlin/gt-a-x", 0, nil))}
+	stdout, stderr, err := landWaitRun(t, newLandWaitClock(), landWaitDeps{
+		agent: "dunlin", timeout: time.Minute, interval: time.Second,
+		source: landWaitFixtureSource(
+			landWaitEvent{At: landWaitEpoch, Bead: "gt-a", Kind: "review", Ordinal: 1, Window: 2},
+			landWaitEvent{At: landWaitEpoch, Bead: "gt-a", Kind: "review", Ordinal: 2, Window: 2}),
+		detail: landWaitFixtureDetail(notes),
+	})
+	if err != nil {
+		t.Fatalf("landWaitPoll() error = %v", err)
+	}
+	if n := strings.Count(stdout, "rejected gt-a"); n != 2 {
+		t.Errorf("printed %d refusal line(s), want both refusals:\n%s", n, stdout)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want nothing", stderr)
 	}
 }
 
