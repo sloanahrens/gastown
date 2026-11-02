@@ -1,0 +1,15 @@
+runner:
+  file: '.runner'
+  capacity: 1
+  timeout: '3h'
+  labels:
+    - 'docker-cli:docker://data.forgejo.org/oci/docker:28.5-cli'
+    - 'node:docker://data.forgejo.org/oci/node:20.19'
+    - 'ci-base:docker://data.forgejo.org/oci/gastown-runner:go1.27-node20'
+container:
+  network: 'host'
+  options: '--add-host=forgejo:192.168.5.2 -v ci-gomod:/home/ci/go/pkg/mod -v ci-gocache:/home/ci/.cache/go-build -v ci-npm:/home/ci/.npm'
+  valid_volumes:
+    - 'ci-gomod'
+    - 'ci-gocache'
+    - 'ci-npm'
