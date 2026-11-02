@@ -520,7 +520,16 @@ func runDoltStatus(cmd *cobra.Command, args []string) error {
 
 	running, pid, err := doltserver.IsRunning(townRoot)
 	if err != nil {
-		return fmt.Errorf("checking server status: %w", err)
+		// dolt.external_container was resolved above and host and remote modes
+		// report no error, so this is the container's failed SQL ping: report
+		// it as the status it is, with the failure named, rather than failing
+		// the command (gt-0v0bg).
+		fmt.Printf("%s Dolt server is %s (container %s)\n",
+			style.Dim.Render("○"), "not running", container)
+		fmt.Printf("  Ping: %s\n", style.Dim.Render(err.Error()))
+		fmt.Printf("  Connection: %s\n", doltserver.GetConnectionString(townRoot))
+		printBeadsRuntimeConfig(townRoot)
+		return nil
 	}
 
 	if p := doltpause.Current(townRoot, time.Now()); p != nil {

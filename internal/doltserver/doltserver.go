@@ -775,14 +775,15 @@ func (h *host) IsRunning(townRoot string) (bool, int, error) {
 	// this host's process: only its listener can answer, so a SQL ping is the
 	// status. No pid file is read or removed, no ps lookup runs, and no pid is
 	// returned (gt-xeb1x). A failed ping is returned rather than folded into
-	// "not running": a stopped container and a server that answered wrongly
-	// both fail the ping, so the daemon reports the failure instead of
-	// presenting it as a stopped server (gt-0v0bg).
+	// "not running": the failure reaches the caller as itself instead of being
+	// presented as a stopped container (gt-0v0bg). A caller that only reports
+	// status (gt dolt status) reads that error as "not running" itself; the
+	// daemon's health tick raises it as an incident.
 	if name, err := config.ExternalContainerSetting(); err != nil {
 		return false, 0, err
 	} else if name != "" {
-		if err := h.pingSQL(config); err != nil {
-			return false, 0, err
+		if pingErr := h.pingSQL(config); pingErr != nil {
+			return false, 0, pingErr
 		}
 		return true, 0, nil
 	}

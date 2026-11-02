@@ -162,8 +162,119 @@ func TestEnsureRunning_ExternalContainerStartsAnUnansweredContainer(t *testing.T
 	if got := lifecycle.snapshot(); len(got) != 1 || got[0] != "start" {
 		t.Errorf("container calls = %v, want [start]", got)
 	}
+	if _, err := os.Stat(m.unhealthySignalFile()); !os.IsNotExist(err) {
+		t.Errorf("a stopped container raised an unhealthy signal: %v", err)
+	}
 	if len(*hostCalls) != 0 {
 		t.Errorf("container mode took host-process path(s) %v, want none", *hostCalls)
+	}
+}
+
+// TestEnsureRunning_ExternalContainerReportsAPingFailure: a container whose
+// Dolt does not answer is an incident of its own, not a stopped container to
+// start: the tick writes the unhealthy signal, alerts the failure and heals it
+// with docker stop and start (gt-0v0bg).
+func TestEnsureRunning_ExternalContainerReportsAPingFailure(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeExternalContainerTown(t, townRoot, 3307, "gt-dolt")
+	pingErr := errors.New("fake container: the SQL ping timed out")
+	lifecycle := &fakeContainerLifecycle{running: true, pingErr: pingErr}
+	m, hostCalls := containerManager(t, townRoot, lifecycle, nil)
+	var alerts []error
+	m.unhealthyAlertFn = func(err error) { alerts = append(alerts, err) }
+
+	if err := m.EnsureRunning(); err != nil {
+		t.Fatalf("EnsureRunning: %v", err)
+	}
+	if got := lifecycle.snapshot(); len(got) != 2 || got[0] != "stop" || got[1] != "start" {
+		t.Errorf("container calls = %v, want [stop start]: an unresponsive container is restarted", got)
+	}
+	if len(alerts) != 1 || !errors.Is(alerts[0], pingErr) {
+		t.Errorf("unhealthy alerts = %v, want the ping failure %v", alerts, pingErr)
+	}
+	signal, err := os.ReadFile(m.unhealthySignalFile())
+	if err != nil {
+		t.Fatalf("no unhealthy signal written: %v", err)
+	}
+	if !strings.Contains(string(signal), `"reason":"ping_failed"`) {
+		t.Errorf("signal file = %s, want reason ping_failed", signal)
+	}
+	if len(*hostCalls) != 0 {
+		t.Errorf("container mode took host-process path(s) %v, want none", *hostCalls)
+	}
+}
+
+// TestEnsureRunning_ExternalContainerPingFailureDefersToAGCInFlight: a ping
+// failure during a scheduled GC is deferred like the health check's other
+// restarts, so the container is left to finish the GC (gt-0v0bg).
+func TestEnsureRunning_ExternalContainerPingFailureDefersToAGCInFlight(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeExternalContainerTown(t, townRoot, 3307, "gt-dolt")
+	lifecycle := &fakeContainerLifecycle{running: true, pingErr: errors.New("fake container: the SQL ping timed out")}
+	m, hostCalls := containerManager(t, townRoot, lifecycle, nil)
+	m.SetRestartSuppressor(func() bool { return true })
+
+	if err := m.EnsureRunning(); err != nil {
+		t.Fatalf("EnsureRunning: %v", err)
+	}
+	if got := lifecycle.snapshot(); len(got) != 0 {
+		t.Errorf("container calls = %v, want none: a GC in flight defers the restart", got)
+	}
+	if _, err := os.Stat(m.unhealthySignalFile()); !os.IsNotExist(err) {
+		t.Errorf("a deferred ping failure raised an unhealthy signal: %v", err)
+	}
+	if len(*hostCalls) != 0 {
+		t.Errorf("container mode took host-process path(s) %v, want none", *hostCalls)
+	}
+}
+
+// TestEnsureRunning_ExternalContainerPingFailureLeavesTheContainerUpWhenAutoRestartIsOff:
+// auto_restart:false still reports a ping failure, and leaves the container for
+// the operator instead of stopping and starting it (gt-0v0bg).
+func TestEnsureRunning_ExternalContainerPingFailureLeavesTheContainerUpWhenAutoRestartIsOff(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeExternalContainerTown(t, townRoot, 3307, "gt-dolt")
+	lifecycle := &fakeContainerLifecycle{running: true, pingErr: errors.New("fake container: the SQL ping timed out")}
+	m, hostCalls := containerManager(t, townRoot, lifecycle, nil)
+	off := false
+	m.config.AutoRestart = &off
+	var alerts int
+	m.unhealthyAlertFn = func(error) { alerts++ }
+
+	if err := m.EnsureRunning(); err != nil {
+		t.Fatalf("EnsureRunning: %v", err)
+	}
+	if got := lifecycle.snapshot(); len(got) != 0 {
+		t.Errorf("container calls = %v, want none: auto_restart:false forbids the restart", got)
+	}
+	if alerts != 1 {
+		t.Errorf("unhealthy alerts = %d, want 1", alerts)
+	}
+	if len(*hostCalls) != 0 {
+		t.Errorf("container mode took host-process path(s) %v, want none", *hostCalls)
+	}
+}
+
+// TestIsRunningWithErrorRefusesAnUnusableContainerSetting: an unreadable
+// dolt.external_container is carried as the failure, never read as a stopped
+// container, by the reader that reports it (gt-0v0bg).
+func TestIsRunningWithErrorRefusesAnUnusableContainerSetting(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeExternalContainerTown(t, townRoot, 3307, "-v")
+	m, _ := containerManager(t, townRoot, &fakeContainerLifecycle{running: true}, nil)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, running, err := m.isRunningWithError()
+	if err == nil {
+		t.Error("isRunningWithError read an unusable dolt.external_container as a stopped container, want the setting's error")
+	}
+	if running {
+		t.Error("isRunningWithError reported an unusable dolt.external_container as running")
 	}
 }
 

@@ -32,12 +32,19 @@ func externalContainerTown(t *testing.T, port int, container string) string {
 	return townRoot
 }
 
+// errFakeListenerRefused is the ping failure an externalFakeListener gives
+// when a test names none: the container's listener refuses the connection.
+var errFakeListenerRefused = errors.New("dial tcp 127.0.0.1:3307: connect: connection refused")
+
 // externalFakeListener answers the host's openDB seam for a container's Dolt:
 // it refuses the first failOpens connections and answers every later one, so a
-// test can script a container whose Dolt needs time to boot.
+// test can script a container whose Dolt needs time to boot. failErr, when set,
+// is what the refused opens report, so a test can assert its own failure rather
+// than the fake's text.
 type externalFakeListener struct {
 	mu        sync.Mutex
 	failOpens int
+	failErr   error
 	opens     int
 }
 
@@ -46,7 +53,10 @@ func (l *externalFakeListener) open(string) (*sql.DB, error) {
 	defer l.mu.Unlock()
 	l.opens++
 	if l.opens <= l.failOpens {
-		return nil, errors.New("dial tcp 127.0.0.1:3307: connect: connection refused")
+		if l.failErr != nil {
+			return nil, l.failErr
+		}
+		return nil, errFakeListenerRefused
 	}
 	return sql.OpenDB(externalFakeConnector{l}), nil
 }
@@ -115,10 +125,12 @@ func noHostProcess(t *testing.T, f *fakeHost) {
 func TestExternalContainerStatusUsesTheListenerNotThePid(t *testing.T) {
 	t.Parallel()
 	const port = 3307
-	townRoot := externalContainerTown(t, port, "gt-dolt")
+	const name = "gt-dolt"
+	townRoot := externalContainerTown(t, port, name)
 	f := newFakeHost()
 	h := f.host()
-	listener := &externalFakeListener{failOpens: 1 << 30}
+	pingErr := errors.New("fake listener: the ping timed out")
+	listener := &externalFakeListener{failOpens: 1 << 30, failErr: pingErr}
 	h.openDB = listener.open
 
 	// A live dolt sql-server of this town on the port, named by the pid file:
@@ -133,10 +145,8 @@ func TestExternalContainerStatusUsesTheListenerNotThePid(t *testing.T) {
 	}
 
 	running, gotPID, err := h.IsRunning(townRoot)
-	if err == nil {
-		t.Error("IsRunning with the container's listener down returned no error: the ping failure must be reported, not read as a stopped server")
-	} else if !strings.Contains(err.Error(), "connection refused") {
-		t.Errorf("IsRunning error = %q, want the ping failure", err)
+	if !errors.Is(err, pingErr) {
+		t.Errorf("IsRunning with the container up and its listener down: error = %v, want the ping failure %v", err, pingErr)
 	}
 	if running || gotPID != 0 {
 		t.Errorf("IsRunning = (%v, %d) with the listener down, want (false, 0): the pid file and port must not answer for a container", running, gotPID)
@@ -237,6 +247,9 @@ func TestExternalContainerStartAndStopCallDocker(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "docker start "+name) {
 			t.Errorf("error %q does not name the failed command", err)
+		}
+		if !strings.Contains(err.Error(), "exists") || !strings.Contains(err.Error(), "Docker can start") {
+			t.Errorf("error %q does not name both checks a non-zero docker start leaves open", err)
 		}
 		noHostProcess(t, f)
 	})

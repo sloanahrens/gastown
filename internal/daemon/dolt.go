@@ -474,25 +474,46 @@ func (m *DoltServerManager) Status() *DoltServerStatus {
 // isRunning reports whether the Dolt server process is running, and on the
 // false path what it observed gone: the tracked process's pid, or the pid the
 // pid file names, or 0 when the only pid in hand is alive but not answering.
+// A container-mode ping failure reads as not running here; EnsureRunning is
+// the one caller that also needs the failure, through isRunningWithError.
 // Must be called with m.mu held.
 func (m *DoltServerManager) isRunning() (int, bool) {
+	pid, running, _ := m.isRunningWithError()
+	return pid, running
+}
+
+// isRunningWithError is isRunning with the container-mode ping's failure: a
+// container whose Dolt does not answer is (0, false, err). The health tick
+// reports that failure as an incident instead of reading it as a stopped
+// container, which is what the bare false names (gt-0v0bg). Must be called
+// with m.mu held.
+func (m *DoltServerManager) isRunningWithError() (int, bool, error) {
 	if m.runningFn != nil {
-		return m.runningFn()
+		pid, running := m.runningFn()
+		return pid, running, nil
 	}
 	if name, err := m.externalContainer(); err != nil {
-		// IsRunning has no error to carry this: the paths that act on the
-		// answer (EnsureRunning, Stop) read the setting themselves first and
-		// refuse, so this one is reached by a status read alone.
+		// The paths that act on the answer (EnsureRunning, Stop) read the
+		// setting themselves first and refuse, so no acting caller reaches
+		// this: the answer carries the failure rather than reading the
+		// unreadable setting as a stopped container (gt-0v0bg).
 		m.logger("Cannot tell whether Dolt container is running: %v", err)
-		return 0, false
+		return 0, false, err
 	} else if name != "" {
 		running, err := m.containerIsRunning(m.townRoot)
 		if err != nil {
 			m.logger("Cannot tell whether Dolt container %q is running: %v", name, err)
-			return 0, false
+			return 0, false, err
 		}
-		return 0, running
+		return 0, running, nil
 	}
+	pid, running := m.isRunningHost()
+	return pid, running, nil
+}
+
+// isRunningHost is the host-process half of isRunning. Must be called with
+// m.mu held.
+func (m *DoltServerManager) isRunningHost() (int, bool) {
 	deadPID := 0
 	// First check our tracked process
 	if m.process != nil {
@@ -642,7 +663,7 @@ func (m *DoltServerManager) EnsureRunning() error {
 		return nil
 	}
 
-	pid, running := m.isRunning()
+	pid, running, pingErr := m.isRunningWithError()
 	if running {
 		// Already running, check health
 		m.lastCheck = m.now()
@@ -727,6 +748,26 @@ func (m *DoltServerManager) EnsureRunning() error {
 	}
 
 	// Not running, start it
+	if pingErr != nil {
+		// The container's Dolt does not answer the SQL ping: the failure is an
+		// incident of its own, not the stopped container to start below.
+		// Report it, then heal it with docker stop and start (gt-0v0bg).
+		m.clearHealthyClock()
+		if m.restartHeldLocked("not answering its SQL ping", pingErr) {
+			return nil
+		}
+		if m.writeUnhealthySignal("ping_failed", pingErr.Error()) {
+			m.sendUnhealthyAlert(pingErr)
+		} else {
+			m.logger("Dolt incident already active; suppressing duplicate unhealthy alert")
+		}
+		if m.restartRefused("is not answering its SQL ping") {
+			return nil
+		}
+		m.logger("Dolt container is not answering its SQL ping: %v, restarting...", pingErr)
+		m.stopLocked()
+		return m.restartWithBackoff()
+	}
 	if pid > 0 {
 		if m.writeUnhealthySignal("server_dead", fmt.Sprintf("PID %d is dead", pid)) {
 			m.sendCrashAlert(pid)
