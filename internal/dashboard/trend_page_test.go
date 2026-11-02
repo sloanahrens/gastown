@@ -75,16 +75,14 @@ func TestQueuedLandingRowAgesTheWaitFromTheBeadsLastUpdate(t *testing.T) {
 	if want := `const m = /^([^/]+)\/polecats\/([^/]+)$/.exec(b.assignee || "");`; !strings.Contains(holder, want) {
 		t.Errorf("queueHolder has no %q", want)
 	}
-	if want := `const by = el("span", "by", names.label(h.rig, h.name));`; !strings.Contains(tbl, want) {
-		t.Errorf("a queued row's holder is not named through the shared helper: %s", want)
-	}
 }
 
 // A crew member's claim is "town/crew/name" or "rig/crew/name" — claude-agent
 // sets the actor that way — and the By column shows the bare name, as it does
 // for a polecat; any other assignee is shown as it was written. The page draws
 // the rows here rather than being read as source, so the cell the By column
-// ends up holding is what decides (gt-zc45r, gt-t76l2).
+// ends up holding is what decides (gt-zc45r, gt-t76l2). A queued row puts the
+// holder in the By column, not in the Landing cell (gt-duuq1).
 func TestAQueuedRowNamesACrewAssigneeByBareName(t *testing.T) {
 	t.Parallel()
 
@@ -98,9 +96,8 @@ func TestAQueuedRowNamesACrewAssigneeByBareName(t *testing.T) {
 		}},
 	})
 
-	// A waiting row's title cell spans the cost cells and the By column
-	// (gt-uvpo1), so the holder is the .by span that cell draws. The table is
-	// found by its class: the caption above it is not part of the row count.
+	// The table is found by its class: the caption above it is not part of the
+	// row count. The By cell is the third, after When and the Landing cell.
 	var rows []struct {
 		Main  string `json:"main"`
 		By    string `json:"by"`
@@ -109,8 +106,7 @@ func TestAQueuedRowNamesACrewAssigneeByBareName(t *testing.T) {
 	got, err := dom.vm.RunString(`JSON.stringify((function () {
   var tbl = __find(document.getElementById("trend"), ".ltable");
   return tbl.children.__arr.slice(1).map(function (tr) {
-    var main = tr.children[1], by = __find(main, ".by");
-    return {main: main.textContent, by: by ? by.textContent : "", title: by ? by.title : ""};
+    return {main: tr.children[1].textContent, by: tr.children[2].textContent, title: tr.children[2].title};
   });
 })())`)
 	if err != nil {
@@ -135,6 +131,37 @@ func TestAQueuedRowNamesACrewAssigneeByBareName(t *testing.T) {
 		}
 		if rows[i].By != want.by || rows[i].Title != want.title {
 			t.Errorf("%s reads %q (%q) as its holder, want %q (%q)", want.bead, rows[i].By, rows[i].Title, want.by, want.title)
+		}
+	}
+}
+
+// The holder left the Landing cell when the queued row took the By column: a
+// queued row whose bead has an assignee reads its id, tag and title there and
+// no "by <name>" text (gt-duuq1).
+func TestAQueuedRowsLandingCellCarriesNoHolder(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderTrend", map[string]any{
+		"queue": map[string]any{"landing": []any{
+			map[string]any{"id": "gt-held", "assignee": "gastown/polecats/dag", "title": "the queue that never drains"},
+		}},
+	})
+
+	v, err := dom.vm.RunString(`(function () {
+  var tbl = __find(document.getElementById("trend"), ".ltable");
+  return tbl.children[1].children[1].textContent;
+})()`)
+	if err != nil {
+		t.Fatalf("reading the queued row's Landing cell: %v", err)
+	}
+	main := v.String()
+	if strings.Contains(main, "by ") {
+		t.Errorf("the Landing cell reads %q, want no by reading: the holder belongs in the By column", main)
+	}
+	for _, want := range []string{"gt-held", "queued", "the queue that never drains"} {
+		if !strings.Contains(main, want) {
+			t.Errorf("the Landing cell reads %q, want it to keep %q", main, want)
 		}
 	}
 }

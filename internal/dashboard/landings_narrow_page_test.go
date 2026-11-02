@@ -333,11 +333,13 @@ func landingsHeaderCells(t *testing.T, p *pageDOM) int {
 	return int(v.ToInteger())
 }
 
-// A waiting row has no stage readings, so its five cost cells held nothing but
-// dashes and its title sat in the Landing column alone, wrapping over six or
-// seven lines. The title cell now spans the columns those cells and By would
-// have taken, so the title reads in a line or two (gt-uvpo1).
-func TestLandingsAWaitingRowTitleCellSpansTheEmptyCells(t *testing.T) {
+// A queued row draws the same cells in the same columns as a running one: When,
+// Landing, By, Polecat, Score, Gate, om and Ship, every cell one column wide.
+// The holder sits in By, so the Landing cell carries no "by <name>" text, and
+// the columns with no queued reading hold the dash a running row uses for a
+// column it has no value for (gt-duuq1). Mutation: drop the queued row's By cell
+// or one of its dashes and the row no longer covers the header's columns.
+func TestAQueuedRowDrawsTheRunningRowsCells(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 10, 31, 16, 0, 0, 0, time.Local)
@@ -352,58 +354,66 @@ func TestLandingsAWaitingRowTitleCellSpansTheEmptyCells(t *testing.T) {
 	if len(rows) != 3 {
 		t.Fatalf("the table drew %d rows, want the queued bead, the running landing and the finished one", len(rows))
 	}
-	waiting := rows[0]
-	if len(waiting.Cells) != 2 {
-		t.Fatalf("the waiting row drew %d cells, want its When cell and one title cell", len(waiting.Cells))
+	queued, running := rows[0], rows[1]
+	if len(queued.Cells) != head {
+		t.Fatalf("the queued row drew %d cells, want the %d the table heads", len(queued.Cells), head)
 	}
-	if got := waiting.Cells[0].Span + waiting.Cells[1].Span; got != head {
-		t.Errorf("the waiting row covers %d columns, want the %d the table heads", got, head)
+	for i, c := range queued.Cells {
+		if c.Span != 1 {
+			t.Errorf("the queued row's cell %d spans %d columns, want 1 as the running row's holds", i, c.Span)
+		}
+		if c.Class != running.Cells[i].Class {
+			t.Errorf("the queued row's cell %d carries class %q, want the running row's %q in that column", i, c.Class, running.Cells[i].Class)
+		}
 	}
-	if got := waiting.Cells[1].Span; got != head-1 {
-		t.Errorf("the waiting row's title cell spans %d columns, want %d: it takes the five cost cells and By", got, head-1)
+	if got := queued.Cells[1].Text; strings.Contains(got, "by ") {
+		t.Errorf("the queued row's Landing cell reads %q, want no by reading: the holder sits in the By column", got)
 	}
-	if !hasClassToken(waiting.Cells[1].Class, "main") {
-		t.Errorf("the waiting row's title cell carries class %q, want the main class the title rule names", waiting.Cells[1].Class)
+	for i := 2; i < head; i++ {
+		if got := queued.Cells[i].Text; got != "–" {
+			t.Errorf("the queued row's cell %d reads %q, want a dash for a stat the queue reading has not got", i, got)
+		}
 	}
 }
 
-// waitingRowParts is what one waiting row's cells read back: the parts of its
-// title cell, and the When cell beside it.
-type waitingRowParts struct {
-	When  drawn  `json:"when"`
-	Bead  drawn  `json:"bead"`
-	Tag   drawn  `json:"tag"`
-	By    *drawn `json:"by"`
-	Title drawn  `json:"title"`
+// queuedRowParts is what one queued row reads back: its When and By cells, and
+// the parts of the Landing cell the row draws inside.
+type queuedRowParts struct {
+	When    drawn `json:"when"`
+	Landing drawn `json:"landing"`
+	By      drawn `json:"by"`
+	Bead    drawn `json:"bead"`
+	Tag     drawn `json:"tag"`
+	Title   drawn `json:"title"`
 }
 
-// waitingRow reads back the first waiting row's When cell and the parts its
-// title cell drew.
-func waitingRow(t *testing.T, p *pageDOM) waitingRowParts {
+// queuedRow reads back the first queued row's cells and the parts of its
+// Landing cell.
+func queuedRow(t *testing.T, p *pageDOM) queuedRowParts {
 	t.Helper()
 
 	v, err := p.vm.RunString(`JSON.stringify((function () {
   var tbl = __find(document.getElementById("trend"), ".ltable");
   var tr = tbl.children[1], main = tr.children[1];
   function part(e) { return e ? {text: e.textContent, class: e.className || "", title: e.title || ""} : null; }
-  return {when: part(tr.children[0]), bead: part(__find(main, ".bead")), tag: part(__find(main, ".tag")),
-          by: part(__find(main, ".by")), title: part(__find(main, ".title"))};
+  return {when: part(tr.children[0]), landing: part(main), by: part(tr.children[2]),
+          bead: part(__find(main, ".bead")), tag: part(__find(main, ".tag")), title: part(__find(main, ".title"))};
 })())`)
 	if err != nil {
-		t.Fatalf("reading the waiting row: %v", err)
+		t.Fatalf("reading the queued row: %v", err)
 	}
-	var got waitingRowParts
+	var got queuedRowParts
 	if err := json.Unmarshal([]byte(v.String()), &got); err != nil {
-		t.Fatalf("reading the waiting row: %v", err)
+		t.Fatalf("reading the queued row: %v", err)
 	}
 	return got
 }
 
-// The span does not cost the row a field: the When cell still ages the wait from
-// the bead's last update, and the title cell still carries the bead id, the
-// queued tag and why it says that, the holder with the store it names, and the
-// rig and title of the bead (gt-uvpo1).
-func TestAWaitingRowKeepsEveryFieldItsSpanCovers(t *testing.T) {
+// The layout costs the row no field: the When cell ages the wait from the bead's
+// last update, the Landing cell keeps the bead id, the queued tag and why it
+// says that, and the rig and title of the bead, and the By cell names the holder
+// with the store it names (gt-duuq1).
+func TestAQueuedRowKeepsEveryField(t *testing.T) {
 	t.Parallel()
 
 	// The page ages the wait against its own clock, which starts at the real one
@@ -417,7 +427,7 @@ func TestAWaitingRowKeepsEveryFieldItsSpanCovers(t *testing.T) {
 		}}},
 	})
 
-	got := waitingRow(t, p)
+	got := queuedRow(t, p)
 	if got.When.Text != "waiting 12m" {
 		t.Errorf("the When cell reads %q, want the wait aged from the bead's last update", got.When.Text)
 	}
@@ -425,25 +435,25 @@ func TestAWaitingRowKeepsEveryFieldItsSpanCovers(t *testing.T) {
 		t.Errorf("the When cell's hover reads %q, want it to say what the wait is aged from", got.When.Title)
 	}
 	if got.Bead.Text != "gt-loqew" {
-		t.Errorf("the title cell's bead reads %q, want the queued bead's id", got.Bead.Text)
+		t.Errorf("the Landing cell's bead reads %q, want the queued bead's id", got.Bead.Text)
 	}
 	if got.Tag.Text != "queued" || !strings.Contains(got.Tag.Title, "the landing worker has not taken it") {
-		t.Errorf("the title cell's tag reads %q (%q), want the queued tag and why it says that", got.Tag.Text, got.Tag.Title)
-	}
-	if got.By == nil {
-		t.Fatal("the title cell draws no holder: the row lost the By reading it carried in the By column")
-	}
-	if got.By.Text != "dag" || got.By.Title != "gastown/dag" {
-		t.Errorf("the title cell's holder reads %q (%q), want the bare name and the store it names", got.By.Text, got.By.Title)
+		t.Errorf("the Landing cell's tag reads %q (%q), want the queued tag and why it says that", got.Tag.Text, got.Tag.Title)
 	}
 	if got.Title.Text != "gastown · the queue that never drains" {
-		t.Errorf("the title cell's title reads %q, want the bead's rig and title", got.Title.Text)
+		t.Errorf("the Landing cell's title reads %q, want the bead's rig and title", got.Title.Text)
+	}
+	if strings.Contains(got.Landing.Text, "by ") {
+		t.Errorf("the Landing cell reads %q, want no holder reading", got.Landing.Text)
+	}
+	if got.By.Text != "dag" || got.By.Title != "gastown/dag" {
+		t.Errorf("the By cell reads %q (%q), want the bare name and the store it names", got.By.Text, got.By.Title)
 	}
 }
 
-// A bead nobody holds draws no holder rather than a placeholder for one: the
-// row says waiting, and its title cell carries no "by" reading (gt-uvpo1).
-func TestAWaitingRowWithNoHolderDrawsNoByReading(t *testing.T) {
+// A bead nobody holds draws the dash every other row draws for a holder, never
+// a placeholder name, and the Landing cell carries no "by" reading (gt-duuq1).
+func TestAQueuedRowWithNoHolderDrawsTheDash(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 10, 31, 16, 0, 0, 0, time.Local)
@@ -454,24 +464,83 @@ func TestAWaitingRowWithNoHolderDrawsNoByReading(t *testing.T) {
 		}}},
 	})
 
-	rows := landingsRows(t, p)
-	if len(rows) != 1 {
-		t.Fatalf("the table drew %d rows, want the one queued bead", len(rows))
+	got := queuedRow(t, p)
+	if got.By.Text != "–" {
+		t.Errorf("the By cell reads %q, want the dash a row with no holder draws", got.By.Text)
 	}
-	if len(rows[0].Cells) != 2 {
-		t.Fatalf("the waiting row drew %d cells, want its When cell and one title cell", len(rows[0].Cells))
+	if got.By.Title != "" {
+		t.Errorf("the By cell carries the hover %q, want none for a bead nobody holds", got.By.Title)
 	}
-	if got := rows[0].Cells[1].Text; strings.Contains(got, "· by") {
-		t.Errorf("the title cell reads %q, want no holder reading for a bead nobody holds", got)
-	}
-	if got := waitingRow(t, p); got.By != nil {
-		t.Errorf("the title cell draws a holder %q, want none for a bead nobody holds", got.By.Text)
+	if strings.Contains(got.Landing.Text, "by ") {
+		t.Errorf("the Landing cell reads %q, want no holder reading for a bead nobody holds", got.Landing.Text)
 	}
 }
 
-// The span is the waiting row's alone: a finished landing and one the worker is
-// running still draw all eight cells, with the readings the server sent and
-// dashes where a stage has not run (gt-uvpo1).
+// The Polecat column's dev time is one computation, polecatTimeCell, over the
+// reading a row carries: a running row's polecat_secs renders through polecatDur,
+// its floor keeping the + (gt-duuq1). A queued row takes the same cell, but its
+// queue reading carries no polecat time; see TestAQueuedRowWithNoDevTimeReadsTheDash.
+// Mutation: hard-code the cell's dash and this row reads "–" where the reading
+// says "13m+".
+func TestTheRunningRowsPolecatCellDrawsTheSharedDevTime(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 31, 16, 0, 0, 0, time.Local)
+	p := newPageDOM(t)
+	p.call(t, "renderTrend", map[string]any{
+		"trend": map[string]any{
+			"hours":  []map[string]any{{"hour": now.Add(-time.Hour).Format(time.RFC3339), "landed": 1, "rejected": 0}},
+			"stages": []any{},
+			"recent": []any{
+				map[string]any{"at": now.Add(-2 * time.Minute).Format(time.RFC3339), "bead": "gt-timed", "outcome": "running", "polecat": "dag",
+					"polecat_secs": 780.0, "polecat_lower_bound": true,
+					"polecat_attempts": []any{map[string]any{"seat": "dag", "secs": 780.0, "lower_bound": true}}},
+			},
+		},
+	})
+
+	cells := landingsRows(t, p)[0].Cells
+	if got := cells[3].Text; got != "13m+" {
+		t.Errorf("the running row's Polecat cell reads %q, want 13m+ as polecatDur reads a floor of 780s", got)
+	}
+	if title := cells[3].Title; !strings.Contains(title, "1 attempt: 13m+") {
+		t.Errorf("the Polecat cell's hover reads %q, want the attempt polecatDur draws for a running row", title)
+	}
+}
+
+// A queued row's queue reading is a QueueBead, which carries no polecat time: the
+// wait is aged from updated_at, and that is not a start the polecat worked from.
+// So the Polecat cell reads the dash the shared cell draws for a row with no
+// reading, never a figure guessed from the wait (gt-duuq1). The payload's keys
+// are QueueBead's json tags, so the page reads the shape production sends.
+// Mutation: derive the cell from updated_at and this row reads an age where the
+// dash belongs.
+func TestAQueuedRowWithNoDevTimeReadsTheDash(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 31, 16, 0, 0, 0, time.Local)
+	p := newPageDOM(t)
+	p.call(t, "renderTrend", map[string]any{
+		"queue": map[string]any{"landing": []any{map[string]any{
+			"id": "gt-untimed", "rig": "gastown", "title": "a queued bead",
+			"status": "open", "assignee": "gastown/polecats/dag", "priority": 2,
+			"labels":     []string{"merge-ready"},
+			"created_at": now.Add(-time.Hour).Format(time.RFC3339),
+			"updated_at": now.Add(-2 * time.Minute).Format(time.RFC3339),
+		}}},
+	})
+
+	cells := landingsRows(t, p)[0].Cells
+	if got := cells[3].Text; got != "–" {
+		t.Errorf("the queued row's Polecat cell reads %q, want a dash when the queue reading carries no dev time", got)
+	}
+	if got := cells[3].Title; got != "" {
+		t.Errorf("the queued row's Polecat cell carries the hover %q, want none for a row with no reading", got)
+	}
+}
+
+// A finished landing and one the worker is running draw all eight cells, with
+// the readings the server sent and dashes where a stage has not run.
 func TestFinishedAndRunningRowsKeepEveryCell(t *testing.T) {
 	t.Parallel()
 
@@ -495,14 +564,14 @@ func TestFinishedAndRunningRowsKeepEveryCell(t *testing.T) {
 	if len(rows) != 3 {
 		t.Fatalf("the table drew %d rows, want the queued bead, the running landing and the finished one", len(rows))
 	}
-	for _, row := range rows[1:] {
+	for _, row := range rows {
 		bead := row.Cells[1].Text
 		if len(row.Cells) != head {
 			t.Fatalf("the %q row drew %d cells, want the %d columns the table heads", bead, len(row.Cells), head)
 		}
 		for i, c := range row.Cells {
 			if c.Span != 1 {
-				t.Errorf("the %q row's cell %d spans %d columns, want 1: only a waiting row spans cells", bead, i, c.Span)
+				t.Errorf("the %q row's cell %d spans %d columns, want 1", bead, i, c.Span)
 			}
 		}
 	}
@@ -641,16 +710,13 @@ func TestLandingsFitsANarrowViewport(t *testing.T) {
 		t.Fatalf("the table drew %d rows, want 3", len(rows))
 	}
 	wantLabels := []string{"When", "", "By", "Polecat", "Score", "Gate", "om", "Ship"}
-	for _, row := range rows[1:] {
+	for _, row := range rows {
 		if strings.Join(row.Labels, "|") != strings.Join(wantLabels, "|") {
-			t.Errorf("a finished row's cells are labelled %q, want %q", row.Labels, wantLabels)
+			t.Errorf("a landings row's cells are labelled %q, want %q", row.Labels, wantLabels)
 		}
 		if row.Title != "" {
 			t.Errorf("a landings row carries the hover %q on the whole row, want it on the bead id so the tip does not open over the row", row.Title)
 		}
-	}
-	if rows[0].Title != "" {
-		t.Errorf("the waiting row carries the hover %q on the whole row", rows[0].Title)
 	}
 }
 

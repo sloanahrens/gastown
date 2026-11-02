@@ -191,9 +191,6 @@ section>h2 .foldsum{margin-left:auto;text-transform:none;letter-spacing:0;white-
 /* The When cell is one reading, never a sentence split over two lines: "merging
    47s" reads as one value (gt-u7xe9). */
 .ltable td.when{white-space:nowrap}
-/* A waiting row's title cell spans the cost cells and By, so the holder the row
-   carries rides on its first line, in the dim the By column wears (gt-uvpo1). */
-.ltable td.main .by{color:var(--dim)}
 .lrows{max-height:70vh;overflow-y:auto}
 /* Below 640 px the eight columns cannot sit side by side, so each row stacks: the
    title first on a full line (two lines at most, the rest on its hover), then the
@@ -1615,6 +1612,43 @@ function renderTrend(s) {
   keepLandingsScroll(box, top);
 }
 
+// holderCell is the Landings table's By column for one row: the holder's short
+// name, its rig only where two rigs in view use that name, and the dash a row
+// with no holder draws. fallback stands in for a dash on the one row that names
+// its rig there instead (gt-duuq1).
+function holderCell(names, rig, who, fallback) {
+  const by = el("td", "title");
+  if (who) { by.textContent = names.label(rig, who); by.title = rig ? rig + "/" + who : who; }
+  else by.textContent = fallback || "–";
+  return by;
+}
+
+// polecatTimeCell is the Landings table's Polecat column, for every kind of row:
+// the dev time the row carries, by polecatDur's one computation, and on hover
+// each seat's share of it, "2 attempts: 14m + 9m". An attempt whose span never
+// closed adds no time to the record and reads "open", and an attempt that is
+// itself a floor keeps its +, which is why the total may be a lower bound
+// (gt-90wi1). A bird or crew branch's landing has no polecat, so its cell says
+// bird rather than reading as a dash, which would look like missing data
+// (gt-kmp7c); the tooltip says why there is no polecat time (gt-rxs7w). A row
+// that carries no reading — a queued bead, whose queue reading (QueueBead) has
+// no polecat time — reads the dash, never a figure guessed from its wait
+// (gt-duuq1).
+function polecatTimeCell(row) {
+  const pc = el("td", "n", row.crew ? "bird" : polecatDur(row.polecat_secs, row.polecat_lower_bound, row.polecat_upper_bound));
+  const attempts = row.polecat_attempts || [];
+  if (row.crew) pc.title = "bird or crew branch: no polecat time exists";
+  else if (attempts.length) pc.title = attempts.length + (attempts.length === 1 ? " attempt: " : " attempts: ") + attempts.map(a => a.secs > 0 ? polecatDur(a.secs, a.lower_bound, a.upper_bound) : "open").join(" + ");
+  return pc;
+}
+
+// labelCells names each cell of a landings row for the stacked layout: a narrow
+// page (see the max-width rule on .ltable) puts the title on a line of its own
+// and hides the header row, so every other cell carries its column's heading.
+function labelCells(tr, cols) {
+  Array.from(tr.children).forEach((td, i) => { if (i !== 1) td.setAttribute("data-label", cols[i][0]); });
+}
+
 // The Landings table: waiting-to-land beads first, then the rows the worker
 // holds, then the day's finished ones. Null when there is nothing to draw.
 // Every cell goes through el(), which writes textContent, so a bead's own text
@@ -1631,34 +1665,35 @@ function landingTable(s, names, rows, waiting) {
   cols.forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); });
   tbl.append(hr);
   const today = new Date().toDateString();
-  // No stage has run yet, so the five cost columns hold nothing a reader can
-  // use: a waiting row drops them rather than filling them with dashes, and its
-  // title cell spans the columns they and By would have taken, so the title
-  // reads in a line or two instead of wrapping down the Landing column. The
-  // holder then rides on the row's first line, which keeps the By reading the
-  // table draws for every other row (gt-uvpo1). The wait is aged from the bead's
-  // last update — the label write gt done makes is normally its last write. The
-  // worker's order is not known to this page, so a row says waiting and nothing
-  // about position.
+  // A queued bead reads in the same grid as a running one (gt-duuq1): the holder
+  // is the bead's assignee, so it belongs in the By column rather than riding on
+  // the Landing cell's first line, and the title and every reading then sit in
+  // the column the running and finished rows put them. The title no longer spans
+  // the empty cells (gt-uvpo1): it sits in the Landing column, whose min-width
+  // and break-word rule (.ltable td.main) keep it readable as a finished row's
+  // title is, and TestLandingsTitleCellKeepsAReadableWidth pins that rule. The
+  // wait is aged from the bead's last update — the label write gt done makes is
+  // normally its last write. No stage has run, so Score, Gate, om and Ship hold
+  // the empty-column dash a running row draws. The queue reading carries no
+  // polecat time, so the Polecat cell has no reading to draw and reads the dash
+  // polecatTimeCell draws for a row with none, never a time guessed from the
+  // wait. The worker's order is not known to this page, so a row says waiting
+  // and nothing about position.
   for (const b of shown) {
     const tr = el("tr");
     const when = el("td", "when title", b.updated_at ? "waiting " + age(b.updated_at) : "waiting");
     when.title = "submitted and waiting for the landing worker to take it; waiting since the bead's last update, which gt done moves";
     tr.append(when);
     const main = el("td", "main");
-    main.colSpan = cols.length - 1;
     main.append(el("span", "bead", b.id));
     const tag = el("span", "tag", "queued");
     tag.title = "submitted; the landing worker has not taken it yet";
     main.append(document.createTextNode(" "), tag);
-    const h = queueHolder(b);
-    if (h.name) {
-      const by = el("span", "by", names.label(h.rig, h.name));
-      by.title = h.rig ? h.rig + "/" + h.name : h.name;
-      main.append(document.createTextNode(" · by "), by);
-    }
     if (b.title) main.append(document.createElement("br"), el("span", "title", (b.rig ? b.rig + " · " : "") + b.title));
     tr.append(main);
+    const h = queueHolder(b);
+    tr.append(holderCell(names, h.rig, h.name, ""), polecatTimeCell(b), el("td", "n", "–"), el("td", "n", "–"), el("td", "n", "–"), el("td", "n", "–"));
+    labelCells(tr, cols);
     tbl.append(tr);
   }
   for (const r of rows) {
@@ -1689,24 +1724,7 @@ function landingTable(s, names, rows, waiting) {
     // the polecat roster, so a shared short name still gets its rig.
     const who = r.polecat || (r.route ? r.route.replace(/^overseer-/, "") : "");
     const rig = r.rig || names.rigOf(who);
-    const by = el("td", "title");
-    if (who) { by.textContent = names.label(rig, who); by.title = rig ? rig + "/" + who : who; }
-    else if (r.outcome === "running" && r.rig) by.textContent = r.rig;
-    else by.textContent = "–";
-    tr.append(by);
-    // The polecat time the landing's record carries, and on hover each seat's
-    // share of it: "2 attempts: 14m + 9m". An attempt whose span never closed
-    // adds no time to the record and reads "open", and an attempt that is itself
-    // a floor keeps its +, which is why the total may be a lower bound
-    // (gt-90wi1).
-    // A bird or crew branch's landing has no polecat, so its cell says bird rather
-    // than reading as a dash, which would look like missing data (gt-kmp7c). The
-    // tooltip says why there is no polecat time (gt-rxs7w).
-    const pc = el("td", "n", r.crew ? "bird" : polecatDur(r.polecat_secs, r.polecat_lower_bound, r.polecat_upper_bound));
-    const pa = r.polecat_attempts || [];
-    if (r.crew) pc.title = "bird or crew branch: no polecat time exists";
-    else if (pa.length) pc.title = pa.length + (pa.length === 1 ? " attempt: " : " attempts: ") + pa.map(a => a.secs > 0 ? polecatDur(a.secs, a.lower_bound, a.upper_bound) : "open").join(" + ");
-    tr.append(pc);
+    tr.append(holderCell(names, rig, who, r.outcome === "running" ? r.rig : ""), polecatTimeCell(r));
     tr.append(el("td", "n" + (r.score != null && thr != null && r.score < thr ? " badc" : ""), r.score != null ? r.score.toFixed(2) : "–"));
     tr.append(el("td", "n" + (r.gate_secs > 180 ? " warnc" : ""), r.gate_secs != null ? fmtDur(r.gate_secs) : "–"));
     tr.append(el("td", "n" + (r.om_secs > 240 ? " warnc" : ""), r.om_secs != null ? fmtDur(r.om_secs) : "–"));
@@ -1717,10 +1735,7 @@ function landingTable(s, names, rows, waiting) {
     else if (r.ship_pending) { ship.textContent = "pending"; ship.title = appRig ? "landed; waiting for the staging deploy" : "landed; waiting for the restart that installs it"; }
     else ship.textContent = "–";
     tr.append(ship);
-    // A narrow page stacks each row (see the max-width rule on .ltable): the
-    // title on a line of its own, then the other cells, each named by its
-    // column's heading because the header row is hidden there.
-    Array.from(tr.children).forEach((td, i) => { if (i !== 1) td.setAttribute("data-label", cols[i][0]); });
+    labelCells(tr, cols);
     tbl.append(tr);
   }
   // Every finished landing of the window is a row; the rows scroll inside a fixed
