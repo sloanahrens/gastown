@@ -1,9 +1,10 @@
 // Package storetest holds the in-memory store.Store for the unit tier. It
 // implements the methods its Fake-flagged contract cases cover: create and
 // get, the claim, release and transfer guards, the plain close those guards
-// refuse, a status write with the guards and the close fences, the creates a
-// Batch applies, the comments and links an export reads, the counts a stats
-// read reports, and the tokens an admin issues and revokes. GetIssues fills
+// refuse, a status write with the guards and the child and blocker fences,
+// the creates a Batch applies, the comments and links an export reads, the
+// counts a stats read reports, and the tokens an admin issues and revokes.
+// GetIssues fills
 // Dependencies and Dependents, as the real store does; ListIssues, ChildrenOf
 // and Comments answer the reads the bd shim's handlers make (gt-p85pw.94),
 // CommentCounts returns each issue's comment count in one read, UpdateIssue
@@ -275,8 +276,10 @@ var builtinStatuses = []string{"open", "in_progress", "closed", "deferred", "hoo
 // status the bd shim's update, close and reopen handlers write (gt-p85pw.96),
 // the title, description, acceptance criteria and appended notes its delete
 // and defer handlers write (gt-p85pw.97), and the labels its label handler
-// writes (gt-p85pw.98). A status of closed obeys the close fences and a status
-// that leaves closed clears the close, as the Postgres store does; the labels
+// writes (gt-p85pw.98). A status of closed obeys the fences Postgres applies to
+// a status write, the open children and blockers; the pin and another-actor
+// claim fences belong to the close verb alone. A status that leaves closed
+// clears the close, as the Postgres store does; the labels
 // are applied in the Postgres store's order (SetLabels, AddLabels,
 // RemoveLabels); a guard that does not hold writes nothing. Any other patch
 // field is refused rather than applied in part. (contract: updateStatusOnly)
@@ -323,7 +326,7 @@ func (f *Fake) UpdateIssue(_ context.Context, id string, patch api.UpdatePatch, 
 		}
 		switch {
 		case status == "closed":
-			if err := f.fenceCloseLocked(is, []string{id}, patch.Force, patch.Actor); err != nil {
+			if err := f.fenceCloseLocked(is, []string{id}, patch.Force, patch.Actor, false); err != nil {
 				return err
 			}
 			closedAt := now
@@ -390,18 +393,19 @@ func fakePatch(patch api.UpdatePatch) error {
 }
 
 // fenceCloseLocked refuses the close of is that the Postgres store refuses
-// unless forced (closeRow): a pinned issue, an issue another actor holds, an
-// open child and an unresolved blocker, where the ids the same call closes
-// (closing) do not count. A child is a parent_id or a parent-child link, since
-// the fixture seeds either. f.mu is held.
-func (f *Fake) fenceCloseLocked(is api.Issue, closing []string, force bool, actor string) error {
+// unless forced (closeRow): an open child and an unresolved blocker always,
+// and, when fromClose is true, the two fences only the close verb applies, a
+// pinned issue and one another actor holds. The ids the same call closes
+// (closing) do not count as children or blockers. A child is a parent_id or a
+// parent-child link, since the fixture seeds either. f.mu is held.
+func (f *Fake) fenceCloseLocked(is api.Issue, closing []string, force bool, actor string, fromClose bool) error {
 	if force {
 		return nil
 	}
-	if is.Status == "pinned" {
+	if fromClose && is.Status == "pinned" {
 		return api.Conflict("%s is pinned (release it, or force)", is.ID)
 	}
-	if is.Assignee != "" && is.Assignee != actor {
+	if fromClose && is.Assignee != "" && is.Assignee != actor {
 		return api.Conflict("%s is assigned to %s, not to %s (release it, or force)", is.ID, is.Assignee, actor)
 	}
 	inBatch := make(map[string]bool, len(closing))
@@ -540,7 +544,7 @@ func (f *Fake) CloseIssues(ctx context.Context, ids []string, reason string, for
 		if is.Status == "closed" {
 			continue
 		}
-		if err := f.fenceCloseLocked(is, ids, force, actor); err != nil {
+		if err := f.fenceCloseLocked(is, ids, force, actor, true); err != nil {
 			return err
 		}
 	}
