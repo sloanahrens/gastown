@@ -32,12 +32,19 @@ func externalContainerTown(t *testing.T, port int, container string) string {
 	return townRoot
 }
 
+// errFakeListenerRefused is the ping failure an externalFakeListener gives
+// when a test names none: the container's listener refuses the connection.
+var errFakeListenerRefused = errors.New("dial tcp 127.0.0.1:3307: connect: connection refused")
+
 // externalFakeListener answers the host's openDB seam for a container's Dolt:
 // it refuses the first failOpens connections and answers every later one, so a
-// test can script a container whose Dolt needs time to boot.
+// test can script a container whose Dolt needs time to boot. failErr, when set,
+// is what the refused opens report, so a test can assert its own failure rather
+// than the fake's text.
 type externalFakeListener struct {
 	mu        sync.Mutex
 	failOpens int
+	failErr   error
 	opens     int
 }
 
@@ -46,7 +53,10 @@ func (l *externalFakeListener) open(string) (*sql.DB, error) {
 	defer l.mu.Unlock()
 	l.opens++
 	if l.opens <= l.failOpens {
-		return nil, errors.New("dial tcp 127.0.0.1:3307: connect: connection refused")
+		if l.failErr != nil {
+			return nil, l.failErr
+		}
+		return nil, errFakeListenerRefused
 	}
 	return sql.OpenDB(externalFakeConnector{l}), nil
 }
@@ -109,15 +119,18 @@ func noHostProcess(t *testing.T, f *fakeHost) {
 
 // TestExternalContainerStatusUsesTheListenerNotThePid: with
 // dolt.external_container set, IsRunning is true when the fake listener answers
-// a SQL ping and false when it does not, even while a pid file names a live
-// dolt sql-server listening on the port, and no pid file is read or written.
+// a SQL ping and false (returning the ping failure) when it does not, even
+// while a pid file names a live dolt sql-server listening on the port, and no
+// pid file is read or written.
 func TestExternalContainerStatusUsesTheListenerNotThePid(t *testing.T) {
 	t.Parallel()
 	const port = 3307
-	townRoot := externalContainerTown(t, port, "gt-dolt")
+	const name = "gt-dolt"
+	townRoot := externalContainerTown(t, port, name)
 	f := newFakeHost()
 	h := f.host()
-	listener := &externalFakeListener{failOpens: 1 << 30}
+	pingErr := errors.New("fake listener: the ping timed out")
+	listener := &externalFakeListener{failOpens: 1 << 30, failErr: pingErr}
 	h.openDB = listener.open
 
 	// A live dolt sql-server of this town on the port, named by the pid file:
@@ -132,8 +145,8 @@ func TestExternalContainerStatusUsesTheListenerNotThePid(t *testing.T) {
 	}
 
 	running, gotPID, err := h.IsRunning(townRoot)
-	if err != nil {
-		t.Fatalf("IsRunning with the container's listener down: %v", err)
+	if !errors.Is(err, pingErr) {
+		t.Errorf("IsRunning with the container up and its listener down: error = %v, want the ping failure %v", err, pingErr)
 	}
 	if running || gotPID != 0 {
 		t.Errorf("IsRunning = (%v, %d) with the listener down, want (false, 0): the pid file and port must not answer for a container", running, gotPID)
@@ -157,6 +170,102 @@ func TestExternalContainerStatusUsesTheListenerNotThePid(t *testing.T) {
 		t.Errorf("IsRunning touched the pid file in container mode: %v", err)
 	}
 	noHostProcess(t, f)
+}
+
+// TestExternalContainerStateReadsDockerInspect: ContainerRunning asks docker
+// for the container's running state. A read that says true or false answers;
+// a failed or uninterpretable read is an error (the state is unknown, never
+// stopped); and a town that names no container is refused (gt-0v0bg).
+func TestExternalContainerStateReadsDockerInspect(t *testing.T) {
+	t.Parallel()
+	const name = "gt-dolt"
+	inspect := "docker inspect -f {{.State.Running}} " + name
+
+	tests := []struct {
+		name        string
+		town        func(t *testing.T) string
+		script      *fakeReply
+		want        bool
+		wantErr     bool
+		wantErrText string
+		wantDocker  int
+	}{
+		{
+			name:       "running",
+			town:       func(t *testing.T) string { return externalContainerTown(t, 3307, name) },
+			script:     &fakeReply{stdout: "true\n"},
+			want:       true,
+			wantDocker: 1,
+		},
+		{
+			name:       "stopped",
+			town:       func(t *testing.T) string { return externalContainerTown(t, 3307, name) },
+			script:     &fakeReply{stdout: "false\n"},
+			want:       false,
+			wantDocker: 1,
+		},
+		{
+			name:       "a failed read is unknown, not stopped",
+			town:       func(t *testing.T) string { return externalContainerTown(t, 3307, name) },
+			script:     &fakeReply{stderr: "Error response from daemon: context deadline exceeded", code: 1},
+			wantErr:    true,
+			wantDocker: 1,
+		},
+		{
+			name:       "an uninterpretable read is unknown, not stopped",
+			town:       func(t *testing.T) string { return externalContainerTown(t, 3307, name) },
+			script:     &fakeReply{stdout: "yes\n"},
+			wantErr:    true,
+			wantDocker: 1,
+		},
+		{
+			name:        "an unusable setting is refused",
+			town:        func(t *testing.T) string { return externalContainerTown(t, 3307, "-v") },
+			wantErr:     true,
+			wantErrText: "want a Docker container name",
+		},
+		{
+			name:    "a town that names no container is refused",
+			town:    func(t *testing.T) string { return testTown(t) },
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := tt.town(t)
+			f := newFakeHost()
+			h := f.host()
+			if tt.script != nil {
+				f.on(inspect, *tt.script)
+			}
+
+			running, err := h.ContainerRunning(townRoot)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ContainerRunning = (%v, nil), want an error for an unknown state", running)
+				}
+				if running {
+					t.Errorf("ContainerRunning = (true, %v), want false: an unknown state is never running", err)
+				}
+				if tt.wantErrText != "" && !strings.Contains(err.Error(), tt.wantErrText) {
+					t.Errorf("error = %q, want it to name %q", err, tt.wantErrText)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("ContainerRunning: %v", err)
+				}
+				if running != tt.want {
+					t.Errorf("ContainerRunning = %v, want %v", running, tt.want)
+				}
+			}
+			if got := f.ranMatching("docker"); len(got) != tt.wantDocker {
+				t.Errorf("docker commands = %q, want %d", got, tt.wantDocker)
+			}
+			noHostProcess(t, f)
+		})
+	}
 }
 
 // TestExternalContainerStartAndStopCallDocker: Start runs docker start and
@@ -214,6 +323,24 @@ func TestExternalContainerStartAndStopCallDocker(t *testing.T) {
 		}
 		if strings.Contains(err.Error(), "No such container") {
 			t.Errorf("error %q carries docker's captured output", err)
+		}
+		noHostProcess(t, f)
+	})
+
+	t.Run("start does not blame a missing container for a different exit", func(t *testing.T) {
+		t.Parallel()
+		townRoot := externalContainerTown(t, port, name)
+		f := newFakeHost()
+		h := f.host()
+		f.on("docker start "+name, fakeReply{stderr: "Error response from daemon: Ports are not available: port is already allocated", code: 1})
+
+		err := h.Start(townRoot)
+		if err == nil {
+			t.Fatal("Start with a docker start that exited non-zero succeeded, want an error")
+		}
+		want := "docker start " + name + " exited with status 1: check that dolt.external_container names a container that exists and that Docker can start it"
+		if got := err.Error(); got != want {
+			t.Errorf("error = %q, want %q", got, want)
 		}
 		noHostProcess(t, f)
 	})

@@ -87,6 +87,27 @@ and for every other supervisor, the key is ignored (gt-qpeei.17). Set it by
 hand before a cutover to the container supervisor; it is the same server in
 both places.
 
+**A Dolt server in a Docker container**: to run the town's server under a
+container memory limit, name the container in the `dolt` block:
+
+```json
+"dolt": {"host": "127.0.0.1", "port": 3307, "external_container": "gt-dolt"}
+```
+
+Set, that container owns the server and gt manages it from outside: `gt dolt
+start`, `stop` and `restart` run `docker start` and `docker stop` on it.
+`gt dolt status` reads the server from a SQL ping at the town's endpoint. The
+daemon's health tick first reads the container's state with `docker inspect`
+and pings only a container that reports running; a state it cannot read is left
+alone for that tick, with no stop and no start, so a transient Docker failure
+cannot stop a healthy Dolt server. In this mode gt reads and writes no pid file
+and never spawns or signals a host `dolt` process. The value is a Docker container name
+(letters, digits, `_`, `.` and `-`, starting with a letter or digit); a value
+outside that shape is an error, never a fallback to a host process. gt never
+creates, removes or reconfigures the container: it must already run Dolt on the
+town's `.dolt-data`. Set the key by hand in `mayor/town.json`; `gt config set`
+has no key for it, and removing it returns the town to the host-process server.
+
 ## Commands
 
 ```bash

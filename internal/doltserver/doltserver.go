@@ -774,12 +774,16 @@ func (h *host) IsRunning(townRoot string) (bool, int, error) {
 	// A Dolt gt runs in a Docker container (dolt.external_container) is not
 	// this host's process: only its listener can answer, so a SQL ping is the
 	// status. No pid file is read or removed, no ps lookup runs, and no pid is
-	// returned (gt-xeb1x).
+	// returned (gt-xeb1x). A failed ping is returned rather than folded into
+	// "not running": the failure reaches the caller as itself instead of being
+	// presented as a stopped container (gt-0v0bg). A caller that only reports
+	// status (gt dolt status) reads that error as "not running" itself; the
+	// daemon's health tick raises it as an incident.
 	if name, err := config.ExternalContainerSetting(); err != nil {
 		return false, 0, err
 	} else if name != "" {
-		if err := h.pingSQL(config); err != nil {
-			return false, 0, nil
+		if pingErr := h.pingSQL(config); pingErr != nil {
+			return false, 0, pingErr
 		}
 		return true, 0, nil
 	}
@@ -2125,7 +2129,12 @@ func (h *host) startExternalContainer(config *Config, name string) error {
 	}
 	if _, err := h.exec(exec.Command("docker", "start", name)); err != nil {
 		if status := exitCode(err); status >= 0 {
-			return fmt.Errorf("docker start %s exited with status %d: dolt.external_container names this container, so it must exist before gt can start it", name, status)
+			// A non-zero exit is any reason docker refuses the start — no such
+			// container, a port clash, an engine that is down — so the message
+			// names both checks instead of asserting the container is missing
+			// (gt-0v0bg). docker's stderr is not repeated: it can carry host
+			// detail, and it is not needed to act.
+			return fmt.Errorf("docker start %s exited with status %d: check that dolt.external_container names a container that exists and that Docker can start it", name, status)
 		}
 		return fmt.Errorf("running docker start %s: the docker command could not be run", name)
 	}
@@ -2159,6 +2168,48 @@ func (h *host) stopExternalContainer(name string) error {
 		return fmt.Errorf("running docker stop %s: the docker command could not be run", name)
 	}
 	return nil
+}
+
+// containerRunningState asks docker whether the named container is running.
+// A successful read that says stopped returns (false, nil); a failed or
+// uninterpretable read is an error, never a stopped answer, so a caller that
+// heals a town cannot act on a state it cannot see (gt-0v0bg).
+func (h *host) containerRunningState(name string) (bool, error) {
+	// A hung docker fails the read at the probe deadline rather than blocking
+	// the daemon's health tick.
+	out, err := h.probe("docker", "inspect", "-f", "{{.State.Running}}", name)
+	if err != nil {
+		return false, fmt.Errorf("reading Dolt container %q state: %w", name, err)
+	}
+	switch strings.TrimSpace(string(out)) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	}
+	// The output is not repeated: it can carry host detail and is not needed
+	// to act.
+	return false, fmt.Errorf("reading Dolt container %q state: docker inspect did not print the container's running state", name)
+}
+
+// ContainerRunning reports whether the town's Dolt container is running, as
+// docker inspect reports it. A town with no dolt.external_container, or a
+// setting that does not parse, is an error: this answers only for a container
+// town (gt-0v0bg).
+func ContainerRunning(townRoot string) (bool, error) {
+	return std.ContainerRunning(townRoot)
+}
+
+// ContainerRunning is ContainerRunning on this host.
+func (h *host) ContainerRunning(townRoot string) (bool, error) {
+	name, err := h.DefaultConfig(townRoot).ExternalContainerSetting()
+	if err != nil {
+		return false, err
+	}
+	if name == "" {
+		return false, errors.New("no dolt.external_container is set")
+	}
+	return h.containerRunningState(name)
 }
 
 // Start starts the Dolt SQL server. It refuses while the town's Dolt pause
