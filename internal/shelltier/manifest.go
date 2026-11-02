@@ -107,8 +107,6 @@ func Manifest() []Entry {
 			Triggers: []string{"scripts/", "Makefile", ".githooks/", "internal/"}},
 		{Path: "scripts/post-land-shell_test.sh", StubsGo: "stub: scripts/post-land-shell_test.sh:16 writes a fake go into FAKE_BIN",
 			Triggers: []string{"scripts/", "Makefile", ".githooks/", "internal/", "plugins/"}},
-		{Path: "scripts/town_metrics_test.sh", StubsGo: "none: names no go command",
-			Triggers: []string{"scripts/", "Makefile", "internal/"}},
 	}
 }
 

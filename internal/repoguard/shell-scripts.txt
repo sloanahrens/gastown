@@ -46,4 +46,3 @@ scripts/post-land-shell_test.sh	port: gt-tpg0p
 scripts/refresh-bd-command-tree.sh	glue: Makefile target
 scripts/resource-sampler_test.sh	port: gt-tpg0p
 scripts/test-makefile.sh	port: gt-tpg0p
-scripts/town_metrics_test.sh	port: gt-tpg0p

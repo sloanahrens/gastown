@@ -78,7 +78,7 @@ func TestManifestEntriesExist(t *testing.T) {
 func TestManifestOrderIsToday(t *testing.T) {
 	t.Parallel()
 	// The first 12 are the scripts/test-makefile.sh order, ending with
-	// makefile-gate_test.sh; the last three are the extras the shell tier adds.
+	// makefile-gate_test.sh; the last two are the extras the shell tier adds.
 	want := []string{
 		"scripts/check-install-path_test.sh",
 		"scripts/polecat-go-floor_test.sh",
@@ -94,7 +94,6 @@ func TestManifestOrderIsToday(t *testing.T) {
 		"scripts/makefile-gate_test.sh",
 		".githooks/pre-push_test.sh",
 		"scripts/post-land-shell_test.sh",
-		"scripts/town_metrics_test.sh",
 	}
 	var got []string
 	for _, e := range Manifest() {
