@@ -42,8 +42,6 @@ h1{font-size:15px;margin:0;letter-spacing:.08em;text-transform:uppercase;color:v
 .grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);gap:12px}
 @media (max-width:1000px){.grid{grid-template-columns:1fr}}
 section.wide{margin-top:12px}
-.pair{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;margin-top:12px}
-@media (max-width:1000px){.pair{grid-template-columns:1fr}}
 .col{display:flex;flex-direction:column;gap:12px;min-width:0}
 section{background:var(--panel);border:1px solid var(--line);border-radius:8px;min-width:0}
 section>h2{white-space:nowrap;margin:0;padding:9px 12px;border-bottom:1px solid var(--line);font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:var(--dim);display:flex;gap:10px;align-items:center}
@@ -154,6 +152,11 @@ section.collapsed>h2{border-bottom:0}
    header keeps the title and the caret, and the figures the operator would
    otherwise open the section to read (foldable, index.html's script). */
 section>h2 .foldsum{margin-left:auto;text-transform:none;letter-spacing:0;white-space:normal;text-align:right;color:var(--text)}
+/* A panel whose summary stays in the header while the panel is open (Polecats
+   and Beads) keeps its read-age note beside it. The note's own auto margin
+   already takes the free space and pushes both right, so the summary beside it
+   must not take a share as well. */
+section>h2 .r:not([hidden])+.foldsum{margin-left:0}
 /* The News pane: one line per story, the title taking what the comments link
    leaves. Both tracks may shrink, so a long title is ellipsed rather than
    widening the panel. */
@@ -476,6 +479,7 @@ a.hrow:hover{background:#19212b}
     <section data-fold="cost"><h2>Cost <span class="r" id="costnote"></span></h2><div class="body" id="cost"></div></section>
     <section data-fold="rigs"><h2>Rigs <span class="r" id="rigsnote"></span></h2><div class="body" id="rigs"></div></section>
     <section data-fold="tiersweep"><h2><span class="sweepico" id="tiersweepico"></span>Tier sweeps <span class="r" id="tiersweepnote"></span></h2><div class="body" id="tiersweep"></div></section>
+    <section data-fold="polecats"><h2>Polecats <span class="r" id="polecatsnote"></span></h2><div class="body" id="polecats"></div></section>
   </div>
   <div class="col">
     <section id="newssec" data-fold="news" hidden><h2>Hacker News <span class="r" id="newsnote"></span></h2><div class="body" id="news"></div></section>
@@ -485,13 +489,10 @@ a.hrow:hover{background:#19212b}
     <section data-fold="om"><h2>om review <span class="r" id="omnote"></span></h2><div class="body" id="om"></div></section>
     <section id="jevsec" data-fold="jev" data-default-collapsed hidden><h2>JEV · <span class="r" id="jevnote"></span></h2><div class="body" id="jev"></div></section>
     <section id="mangosec" data-fold="mango" data-default-collapsed hidden><h2>Mango · <span class="r" id="mangonote"></span></h2><div class="body" id="mango"></div></section>
+    <section data-fold="beads"><h2>Beads <span class="r" id="beadsnote"></span></h2><div class="body" id="beads"></div></section>
   </div>
 </div>
-<!-- Below the grid, full width: Polecats and Beads side by side (the two halves of what was the Work panel), then Landings, the pane the operator reads daily. All three start open. -->
-<div class="pair">
-  <section data-fold="polecats"><h2>Polecats <span class="r" id="polecatsnote"></span></h2><div class="body" id="polecats"></div></section>
-  <section data-fold="beads"><h2>Beads <span class="r" id="beadsnote"></span></h2><div class="body" id="beads"></div></section>
-</div>
+<!-- Below the grid, full width: Landings, the pane the operator reads daily. -->
 <section id="trendsec" class="wide" data-fold="landings" hidden><h2>Landings <span class="r" id="trendnote"></span></h2><div class="body" id="trend"></div></section>
 
 <script>
@@ -1210,6 +1211,20 @@ const WORK_RANK = {working: 0, spawning: 1, queued: 2, gating: 3, quiet: 4,
 const WORK_LOOK = new Set(["needs-human", "needs-overseer", "needs-operator", "stalled", "unknown", "recovery", "review-needed"]);
 const workRank = p => WORK_RANK[p.state] == null ? 10 : WORK_RANK[p.state];
 
+// workGroups is how the Polecats table splits the seats: the live seats at
+// work, the seats that want a look, the parked rigs and the idle pool. The
+// table draws these groups and the fold header counts the look and idle ones
+// from them, so the two cannot disagree (gt-lpo20).
+function workGroups(pcs) {
+  pcs = pcs || [];
+  return {
+    live: pcs.filter(p => !p.rig_parked && p.state !== "idle" && !WORK_LOOK.has(p.state)),
+    look: pcs.filter(p => !p.rig_parked && p.state !== "idle" && WORK_LOOK.has(p.state)),
+    parked: pcs.filter(p => p.rig_parked),
+    idle: pcs.filter(p => p.state === "idle" && !p.rig_parked),
+  };
+}
+
 // workSeats draws the seats in the table: the live seats first in rank order,
 // then the seats that want an operator, the parked rigs and the idle pool, each
 // folded under a summary.
@@ -1225,10 +1240,11 @@ function workSeats(box, s, pcs, r) {
   const now = Date.now();
   const byName = (x, y) => (x.rig + x.name).localeCompare(y.rig + y.name);
   const ranked = list => list.sort((x, y) => workRank(x) - workRank(y) || byName(x, y));
-  const live = ranked(pcs.filter(p => !p.rig_parked && p.state !== "idle" && !WORK_LOOK.has(p.state)));
-  const look = ranked(pcs.filter(p => !p.rig_parked && p.state !== "idle" && WORK_LOOK.has(p.state)));
-  const parked = pcs.filter(p => p.rig_parked).sort((x, y) => (x.state === "idle") - (y.state === "idle") || byName(x, y));
-  const idle = pcs.filter(p => p.state === "idle" && !p.rig_parked).sort((x, y) => ((y.landed_24h || 0) - (x.landed_24h || 0)) || byName(x, y));
+  const groups = workGroups(pcs);
+  const live = ranked(groups.live);
+  const look = ranked(groups.look);
+  const parked = groups.parked.sort((x, y) => (x.state === "idle") - (y.state === "idle") || byName(x, y));
+  const idle = groups.idle.sort((x, y) => ((y.landed_24h || 0) - (x.landed_24h || 0)) || byName(x, y));
   const table = el("div", "wtable");
   box.append(table);
   table.append(workHead());
@@ -1278,6 +1294,13 @@ function blockedLine(q, r) {
   return line;
 }
 
+// dispatchableCount is the queue's dispatchable figure: the shaped, unassigned
+// ready beads outside the town store. workQueue's summary row draws it and the
+// Beads fold header repeats it (gt-lpo20).
+function dispatchableCount(q) {
+  return ((q && q.ready) || []).filter(b => b.shape === "ok" && !isTownStore(b)).length;
+}
+
 // workQueue draws what is waiting: the summary, the blocked line, and the whole
 // list folded below them.
 function workQueue(box, s, q, r) {
@@ -1285,7 +1308,7 @@ function workQueue(box, s, q, r) {
     box.append(el("div", "empty", r ? "unavailable — the work queue could not be read" : "reading the work queue…"));
     return;
   }
-  const ok = (q.ready || []).filter(b => b.shape === "ok" && !isTownStore(b)).length;
+  const ok = dispatchableCount(q);
   const sum = el("div", "kv wsum");
   const add = (v, k, tip) => { const x = el("div"); x.title = tip; x.append(el("b", "", String(v)), el("span", "", k)); sum.append(x); };
   add(ok, "dispatchable", "ready beads the spec dispatcher would slot: shaped, unassigned and in a rig that is not parked");
@@ -5014,7 +5037,7 @@ const FOLD_KEY = "gt-fold";
 // every other section starts closed. A pane that opts out with
 // data-default-collapsed starts closed whatever this holds. This list is the
 // operator's to edit.
-const FOLD_DEFAULT_OPEN = ["polecats", "beads", "landings"];
+const FOLD_DEFAULT_OPEN = ["polecats", "landings"];
 // FOLD_ALWAYS_CLOSED is the sections that start closed on every load, whatever
 // was saved: the operator opens them for a look, and a reload closes them
 // again. A toggle still works for the rest of the page session (gt-7swd8).
@@ -5027,17 +5050,34 @@ function foldNoteIsAge(text) {
   const parts = String(text || "").split(" · ").map(p => p.trim()).filter(Boolean);
   return parts.length > 0 && parts.every(p => FOLD_AGE_RE.test(p));
 }
-// FOLD_SUMMARY is what a closed section says about itself when its note is only
-// a read age: the figures the operator would otherwise open it to read, taken
-// from the same fields the panel and the top strip draw. A section with nothing
-// to add there returns null and shows only its title.
+// FOLD_SUMMARY is what a section says about itself: the figures the operator
+// would otherwise open it to read, taken from the same fields the panel and the
+// top strip draw. A closed section shows it in the note's place when the note
+// is only a read age; a section in FOLD_SUMMARY_ALWAYS shows it open too. A
+// section with nothing to add there returns null and shows only its title.
 const FOLD_SUMMARY = {
-  // The top strip's two counts: polecats holding work with a live session, and
-  // what is submitted and waiting for the landing worker.
-  polecats: s => (s && s.polecats ? polecatsWorking(s.polecats) + " working" : null),
+  // The Polecats panel in one line: the strip's working count, then the seats
+  // the table folds under "needs a look" and its idle pool. Working is always
+  // said; a part counting nothing is left out (gt-lpo20).
+  polecats: s => {
+    if (!s || !s.polecats) return null;
+    const g = workGroups(s.polecats);
+    const parts = [polecatsWorking(s.polecats) + " working"];
+    if (g.look.length) parts.push(g.look.length + " need a look");
+    if (g.idle.length) parts.push(g.idle.length + " idle");
+    return parts.join(" · ");
+  },
+  // The Beads panel in one line: the four figures its summary row and blocked
+  // line read. No queue read yet is no line, not four zeros (gt-lpo20).
   beads: s => {
-    const q = s && s.summary ? s.summary.ready_to_land : null;
-    return q != null ? q + " waiting to land" : null;
+    const q = s && s.queue;
+    if (!q) return null;
+    return [
+      dispatchableCount(q) + " dispatchable",
+      (q.ready_total || 0) + " ready",
+      (q.landing_total || 0) + " landing",
+      (q.blocked_total || 0) + " blocked",
+    ].join(" · ");
   },
   // The one attention list's split, exactly as the panel's own note counts it:
   // the rows that need a person, then the rows only waiting on work in flight.
@@ -5053,6 +5093,11 @@ const FOLD_SUMMARY = {
   // The Cost panel's providers, one figure and status each, in the array's order.
   cost: s => costHeadline(s && s.cost_providers),
 };
+// FOLD_SUMMARY_ALWAYS is the sections whose summary stays in the header while
+// they are open, beside their note, rather than standing in for the note only
+// while closed: Polecats and Beads, whose count line is what the operator reads
+// the header for (gt-lpo20).
+const FOLD_SUMMARY_ALWAYS = ["polecats", "beads"];
 // FOLD_ON_TOGGLE is what a section does when its reader opens or closes it, for
 // the one section whose unread count is cleared by opening it.
 const FOLD_ON_TOGGLE = {events: closed => { if (!closed) eventsRead(); }};
@@ -5084,13 +5129,16 @@ const folds = [];
 function paintFolds(s) { for (const f of folds) f.paint(s); }
 // foldable is what makes an element fold under its own heading, and the only
 // fold the page's sections use: it owns the caret, aria-expanded, Enter and
-// Space, the saved choice and the one line a closed section shows. Options:
+// Space, the saved choice and the summary line the section shows. Options:
 //
 //   key         the section's stable key, which its choice is saved under
 //   head        the heading element that carries the caret and acts as a
 //               button (default: the element's own first h2 child)
 //   summary     a function of the last reading returning the summary line, or
 //               null when the section has nothing to add there
+//   summaryAlways whether the summary stays in the header while the section is
+//               open too, beside the note, rather than standing in for the note
+//               only while it is closed
 //   defaultOpen whether a reader with no saved choice sees it open
 //   legacy      the title its choice was saved under before keys existed, so
 //               an entry written then still applies
@@ -5129,15 +5177,19 @@ function foldable(root, opts) {
     key: key,
     closed: opts.alwaysClosed || (remembered !== undefined ? !!remembered : !defaultOpen),
     summaryOf: opts.summary,
+    summaryAlways: !!opts.summaryAlways,
   };
   fold.paint = s => {
-    const text = fold.closed ? foldSummaryLine(fold, s, note) : "";
+    // A closed section shows the summary in the note's place. One that opted
+    // into summaryAlways shows it while open too, the note beside it.
+    const text = fold.closed ? foldSummaryLine(fold, s, note)
+      : (fold.summaryAlways && fold.summaryOf ? (fold.summaryOf(s || {}) || "") : "");
     root.classList.toggle("collapsed", fold.closed);
     caret.textContent = fold.closed ? "▸" : "▾";
     head.setAttribute("aria-expanded", fold.closed ? "false" : "true");
     if (note) note.hidden = fold.closed;
     summary.textContent = text;
-    summary.hidden = !fold.closed || !text;
+    summary.hidden = !text || (!fold.closed && !fold.summaryAlways);
   };
   const toggle = () => {
     fold.closed = !fold.closed;
@@ -5171,9 +5223,9 @@ function foldSummaryLine(fold, s, note) {
 // setupCollapse makes every section of the page foldable, with the key its
 // markup declares.
 function setupCollapse() {
-  // section.wide is the Landings block below the grid and .pair holds Polecats
-  // and Beads above it, which no .grid section selector reaches; "main section" is not on the page and is kept as it was.
-  document.querySelectorAll("main section, .grid section, .pair section, section.wide").forEach(sec => {
+  // section.wide is the Landings block below the grid, which no .grid section
+  // selector reaches; "main section" is not on the page and is kept as it was.
+  document.querySelectorAll("main section, .grid section, section.wide").forEach(sec => {
     const head = sec.querySelector(":scope > h2");
     if (!head) return;
     const key = sec.dataset.fold;
@@ -5181,6 +5233,7 @@ function setupCollapse() {
       key: key,
       head: head,
       summary: FOLD_SUMMARY[key],
+      summaryAlways: FOLD_SUMMARY_ALWAYS.indexOf(key) >= 0,
       defaultOpen: FOLD_DEFAULT_OPEN.indexOf(key) >= 0,
       alwaysClosed: FOLD_ALWAYS_CLOSED.indexOf(key) >= 0,
       legacy: foldLegacyTitle(head),

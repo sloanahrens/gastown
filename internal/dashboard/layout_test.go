@@ -28,12 +28,14 @@ func TestPaneColumns(t *testing.T) {
 		{"costnote", "left", "attentionnote", "rigsnote"},
 		{"rigsnote", "left", "costnote", "tiersweepnote"},
 		{"tiersweepnote", "left", "rigsnote", ""},
+		{"polecatsnote", "left", "tiersweepnote", ""},
 		{"machnote", "right", "", "cloudnote"},
 		{"cloudnote", "right", "machnote", "forgejonote"},
 		{"forgejonote", "right", "cloudnote", "omnote"},
 		{"omnote", "right", "forgejonote", "jevnote"},
 		{"jevnote", "right", "omnote", "mangonote"},
 		{"mangonote", "right", "jevnote", ""},
+		{"beadsnote", "right", "mangonote", ""},
 	} {
 		got := left
 		other := right
