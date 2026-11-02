@@ -48,6 +48,46 @@ func addCommentInTx(ctx context.Context, tx pgx.Tx, id, author, text string) err
 	return appendEvent(ctx, tx, "commented", id, author, nil, &text, nil)
 }
 
+// CommentCounts returns how many comments each of ids has, keyed by id, in one
+// read. An id the store does not hold is api.ErrNotFound; an issue with no
+// comments counts 0. Empty ids are ignored.
+func (p *Postgres) CommentCounts(ctx context.Context, ids []string) (map[string]int, error) {
+	out := map[string]int{}
+	ids = uniqueStrings(ids)
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := p.pool.Query(ctx, `
+		SELECT i.id, count(c.id)
+		FROM tracker.issues i
+		LEFT JOIN tracker.comments c ON c.issue_id = i.id
+		WHERE i.id = ANY($1)
+		GROUP BY i.id`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("store: comment counts: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, fmt.Errorf("store: comment counts: %w", err)
+		}
+		out[id] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: comment counts: %w", err)
+	}
+	// A named id absent from the rows is one the store does not hold: refused,
+	// never answered as a count of 0.
+	for _, id := range ids {
+		if _, ok := out[id]; !ok {
+			return nil, api.NotFound(id)
+		}
+	}
+	return out, nil
+}
+
 // Comments returns an issue's comments, oldest first.
 func (p *Postgres) Comments(ctx context.Context, id string) ([]api.Comment, error) {
 	var exists bool

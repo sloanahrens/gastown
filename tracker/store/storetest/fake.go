@@ -5,9 +5,10 @@
 // Batch applies, the comments and links an export reads, the counts a stats
 // read reports, and the tokens an admin issues and revokes. GetIssues fills
 // Dependencies and Dependents, as the real store does; ListIssues, ChildrenOf
-// and Comments answer the reads the bd shim's handlers make (gt-p85pw.94), and
-// UpdateIssue answers the status the shim's update, close and reopen write
-// (gt-p85pw.96). Every other method returns store.ErrUnimplemented, so a unit
+// and Comments answer the reads the bd shim's handlers make (gt-p85pw.94),
+// CommentCounts returns each issue's comment count in one read, and UpdateIssue
+// answers the status the shim's update, close and reopen write (gt-p85pw.96).
+// Every other method returns store.ErrUnimplemented, so a unit
 // test that reaches past them fails loudly rather than reading a store that
 // only looks modeled.
 package storetest
@@ -508,6 +509,29 @@ func (f *Fake) AddComment(_ context.Context, id, author, text string) error {
 		ID: fmt.Sprintf("comment-%d", len(f.comments)+1), IssueID: id, Author: author, Text: text, CreatedAt: f.now(),
 	})
 	return nil
+}
+
+// CommentCounts returns how many comments each of ids has, refusing an id the
+// fake does not hold as the real store does. Empty ids are ignored.
+func (f *Fake) CommentCounts(_ context.Context, ids []string) (map[string]int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := map[string]int{}
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, ok := f.issues[id]; !ok {
+			return nil, api.NotFound(id)
+		}
+		out[id] = 0
+	}
+	for _, c := range f.comments {
+		if _, ok := out[c.IssueID]; ok {
+			out[c.IssueID]++
+		}
+	}
+	return out, nil
 }
 
 // AddDependency records a link from issue to dependsOn. Export, the Dependents

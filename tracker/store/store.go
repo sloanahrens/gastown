@@ -63,6 +63,10 @@ type Store interface {
 	AddComment(ctx context.Context, id, author, text string) error
 	// Comments returns the issue's comments, oldest first.
 	Comments(ctx context.Context, id string) ([]api.Comment, error)
+	// CommentCounts returns how many comments each of ids has, keyed by id, in
+	// one read. An id the store does not hold is api.ErrNotFound; an issue
+	// with no comments counts 0. Empty ids are ignored.
+	CommentCounts(ctx context.Context, ids []string) (map[string]int, error)
 	// AddDependency records that issue depends on dependsOn with relation
 	// depType. dependsOn may be external:<rig>:<id>.
 	AddDependency(ctx context.Context, issue, dependsOn, depType string) error
