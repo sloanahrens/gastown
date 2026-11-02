@@ -43,8 +43,11 @@ type RedMainBeads interface {
 // landed through Land by the worker. With more than one change in between, or
 // a failure the diff cannot have moved, the red-main beads stand alone.
 type RedMain struct {
-	Rig   string
-	Beads RedMainBeads
+	Rig string
+	// TownRoot is where the rig's ready stamp lives (land.ReadyStamp), which
+	// queueing a revert touches so the landing worker lists it on its next pass.
+	TownRoot string
+	Beads    RedMainBeads
 	// Rerun runs one package's tests at pl.Commit for the tier cmd ran.
 	Rerun func(ctx context.Context, cmd, pkg string, pl PostLand) PostLandResult
 	// Status records the rig's one-line main status.

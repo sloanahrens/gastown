@@ -375,7 +375,7 @@ func submitCrewForLanding(r *doneRun) error {
 	// Worker names a polecat seat whose intent record the landing worker
 	// clears; a crew member has none, so it stays empty.
 	work := land.Work{BeadID: r.issueID, Rig: r.rigName, Branch: r.branch, Head: head, Target: target}
-	if err := markReadyToLand(bd, work); err != nil {
+	if err := markReadyToLand(bd, r.townRoot, work); err != nil {
 		return doneExit(doneExitReadyFailed, fmt.Sprintf("branch %s is on origin at %s but %s could not be marked ready to land", r.branch, ShortSHA(head), r.issueID), err)
 	}
 

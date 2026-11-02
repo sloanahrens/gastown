@@ -1392,7 +1392,7 @@ func submitForLanding(r *doneRun) error {
 	r.cleanupStatus = cleanupStatusAfterSuccessfulPush(r.cleanupStatus)
 
 	work := land.Work{BeadID: r.issueID, Rig: r.rigName, Branch: r.branch, Head: head, Target: target, Worker: r.polecatName}
-	if err := markReadyToLand(sub.sourceBD, work); err != nil {
+	if err := markReadyToLand(sub.sourceBD, r.townRoot, work); err != nil {
 		return doneExit(doneExitReadyFailed, fmt.Sprintf("branch %s is on origin at %s but the work bead could not be marked ready to land", r.branch, ShortSHA(head)), err)
 	}
 	recordSubmittedIntent(r)
@@ -1730,7 +1730,12 @@ func recordSubmittedIntent(r *doneRun) {
 // one Dolt commit, and a bead that carries the label always says what to
 // land: a crash cannot split the two. The block carries the submission time,
 // which is what the landing worker orders the queue by (gt-t2jhf).
-func markReadyToLand(bd beads.Client, w land.Work) error {
+//
+// The rig's ready stamp is touched last, after the write is verified, so an
+// idle rig's worker lists the board on its next pass instead of waiting for its
+// ceiling (gt-flo7a). A failed touch is a warning: the label is what queues the
+// work, and the ceiling bounds the delay the stamp would have removed.
+func markReadyToLand(bd beads.Client, townRoot string, w land.Work) error {
 	if bd == nil {
 		return errors.New("no beads client for the work bead")
 	}
@@ -1751,6 +1756,9 @@ func markReadyToLand(bd beads.Client, w land.Work) error {
 	}
 	if !beads.HasLabel(issue, land.LabelReadyToLand) {
 		return fmt.Errorf("%s does not carry %s after the write", w.BeadID, land.LabelReadyToLand)
+	}
+	if err := land.TouchReadyStamp(townRoot, w.Rig, time.Now()); err != nil {
+		style.PrintWarning("couldn't stamp rig %s's ready-to-land list (its worker lists within three minutes at most): %v", w.Rig, err)
 	}
 	return nil
 }

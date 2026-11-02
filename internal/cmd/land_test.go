@@ -59,8 +59,16 @@ func TestRequeueRejectedLandingRestoresTheQueue(t *testing.T) {
 	remote := &fakeRequeueRemote{tip: requeueHead}
 	var out bytes.Buffer
 
-	if err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "runner fault, not the diff", "sloan", &out); err != nil {
+	townRoot := t.TempDir()
+	if err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "runner fault, not the diff", "sloan", townRoot, "gastown", &out); err != nil {
 		t.Fatalf("requeue: %v", err)
+	}
+	stamp, err := land.ReadyStamp(townRoot, "gastown")
+	if err != nil {
+		t.Fatalf("ReadyStamp: %v", err)
+	}
+	if stamp.IsZero() {
+		t.Error("a requeue left no ready stamp; an idle worker would wait out its ceiling (gt-flo7a)")
 	}
 
 	issue, err := bd.Show("gt-3e1z4")
@@ -108,7 +116,7 @@ func TestRequeueRejectedLandingRecordsTheAttempt(t *testing.T) {
 	}))
 	remote := &fakeRequeueRemote{tip: requeueHead}
 
-	if err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "x", "sloan", &bytes.Buffer{}); err != nil {
+	if err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "x", "sloan", t.TempDir(), "gastown", &bytes.Buffer{}); err != nil {
 		t.Fatalf("requeue: %v", err)
 	}
 	comments, err := bd.Comments("gt-3e1z4")
@@ -129,7 +137,7 @@ func TestRequeueRejectedLandingRefusesChangedHead(t *testing.T) {
 	seedReworkBead(bd, []string{land.LabelRework}, requeueRejectionNote(requeueBranch, requeueHead))
 	remote := &fakeRequeueRemote{tip: "2222222222222222222222222222222222222222"}
 
-	err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "x", "sloan", &bytes.Buffer{})
+	err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "x", "sloan", t.TempDir(), "gastown", &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "the head changed since the rejection") {
 		t.Fatalf("changed head: err = %v, want a refusal naming the change", err)
 	}
@@ -142,7 +150,7 @@ func TestRequeueRejectedLandingRefusesMissingBranch(t *testing.T) {
 	seedReworkBead(bd, []string{land.LabelRework}, requeueRejectionNote(requeueBranch, requeueHead))
 	remote := &fakeRequeueRemote{} // no tip: the branch is gone from the remote
 
-	err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "x", "sloan", &bytes.Buffer{})
+	err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "x", "sloan", t.TempDir(), "gastown", &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "is not on origin") {
 		t.Fatalf("missing branch: err = %v, want a refusal naming the remote", err)
 	}
@@ -168,7 +176,7 @@ func TestRequeueRejectedLandingRefusesNotRejected(t *testing.T) {
 			bd := beadsfake.New(beadsfake.WithPrefix("gt"))
 			seedReworkBead(bd, tc.labels, tc.notes)
 			remote := &fakeRequeueRemote{tip: requeueHead}
-			err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "x", "sloan", &bytes.Buffer{})
+			err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "x", "sloan", t.TempDir(), "gastown", &bytes.Buffer{})
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err = %v, want a refusal containing %q", err, tc.want)
 			}
@@ -185,9 +193,17 @@ func TestRequeueRejectedLandingRefusesAlreadyQueued(t *testing.T) {
 	seedReworkBead(bd, []string{land.LabelReadyToLand}, requeueRejectionNote(requeueBranch, requeueHead))
 	remote := &fakeRequeueRemote{tip: requeueHead}
 
-	err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "x", "sloan", &bytes.Buffer{})
+	townRoot := t.TempDir()
+	err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "x", "sloan", townRoot, "gastown", &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "already carries gt:ready-to-land") {
 		t.Fatalf("already queued: err = %v, want a refusal naming the label", err)
+	}
+	stamp, err := land.ReadyStamp(townRoot, "gastown")
+	if err != nil {
+		t.Fatalf("ReadyStamp: %v", err)
+	}
+	if !stamp.IsZero() {
+		t.Errorf("a refused requeue left ready stamp %v, want none", stamp)
 	}
 }
 
@@ -197,7 +213,7 @@ func TestRequeueRejectedLandingSurfacesARemoteReadError(t *testing.T) {
 	seedReworkBead(bd, []string{land.LabelRework}, requeueRejectionNote(requeueBranch, requeueHead))
 	remote := &fakeRequeueRemote{err: errors.New("no such remote")}
 
-	err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "x", "sloan", &bytes.Buffer{})
+	err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "x", "sloan", t.TempDir(), "gastown", &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "reading refs/heads/"+requeueBranch+" from origin") {
 		t.Fatalf("remote read error: err = %v, want it surfaced", err)
 	}

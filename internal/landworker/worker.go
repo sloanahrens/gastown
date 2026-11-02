@@ -120,11 +120,19 @@ const (
 	// maxErrorLine bounds the error text a backoff record and a health detail
 	// carry, so a failure whose message is a wall of output stays one phrase.
 	maxErrorLine = 160
+	// readyListCeiling bounds how long a submission can wait when a pass skipped
+	// the list: a label written by hand with bd touches no stamp, so nothing
+	// else guarantees a list sooner (gt-flo7a).
+	readyListCeiling = 3 * time.Minute
 )
 
 // Worker lands one rig's ready work, serially.
 type Worker struct {
-	Rig      string
+	Rig string
+	// TownRoot is where the rig's ready stamp lives (land.ReadyStamp), which
+	// every writer of the ready label touches. "" turns the idle skip off: the
+	// pass lists every time.
+	TownRoot string
 	Beads    Beads
 	Remote   Remote
 	Lander   Lander
@@ -254,6 +262,13 @@ type Worker struct {
 	// firstSightFailing is true while the last first-sight write failed, so
 	// a failing log is reported once, not once per pass.
 	firstSightFailing bool
+	// lastListAt is when the pass last listed the ready label, taken before the
+	// call so a label written during it is not missed; lastListEmpty is whether
+	// that list held nothing, and lastListCount is what it held, the count a
+	// skipped pass republishes (gt-flo7a).
+	lastListAt    time.Time
+	lastListEmpty bool
+	lastListCount int
 }
 
 // RevertHooks is the red-main owner's side of an automatic revert.
@@ -454,12 +469,28 @@ func (w *Worker) landReady(ctx context.Context) Report {
 		w.landOne(ctx, work, &rep)
 	}
 
+	if count, skip := w.skipReadyList(); skip {
+		// The count the queue reads until this rig's next pass (gt-hw6ih). A
+		// skipped pass is not a queue that emptied, so it republishes the last
+		// list's count rather than leaving the column unanswered.
+		w.Queue.Publish(w.Rig, count)
+		return rep
+	}
+	// Taken before the list: a label written while the list runs must make the
+	// stamp newer than this pass's, so the next pass lists and sees it.
+	listedAt := w.now()
 	issues, err := w.Beads.List(beads.ListOptions{Label: land.LabelReadyToLand, Priority: -1})
 	if err != nil {
+		// A list that failed read nothing, so no empty list may stand in for it
+		// next pass.
+		w.lastListAt = time.Time{}
 		w.logf("listing %s beads: %v", land.LabelReadyToLand, err)
 		rep.Failed++
 		return rep
 	}
+	w.lastListAt = listedAt
+	w.lastListEmpty = len(issues) == 0
+	w.lastListCount = len(issues)
 	// The count the queue reads until this rig's next pass (gt-hw6ih). It is
 	// the whole list, not the beads this pass still has to land, because the
 	// column it answers counts what waits.
@@ -496,6 +527,33 @@ func (w *Worker) landReady(ctx context.Context) Report {
 		w.rememberOutcome(issue)
 	}
 	return rep
+}
+
+// skipReadyList reports the count to publish and whether this pass can skip
+// listing the ready label: the last list was empty, no ready stamp is newer
+// than that list, and the list is younger than readyListCeiling.
+//
+// Only an empty list is skippable: a non-empty one must be listed again to see
+// the beads land and the column fall to zero. A stamp that cannot be read lists
+// (fail open), because it is not evidence that nothing was submitted
+// (gt-flo7a).
+func (w *Worker) skipReadyList() (int, bool) {
+	if w.TownRoot == "" || w.lastListAt.IsZero() || !w.lastListEmpty {
+		return 0, false
+	}
+	age := w.now().Sub(w.lastListAt)
+	if age < 0 || age >= readyListCeiling {
+		return 0, false
+	}
+	stamp, err := land.ReadyStamp(w.TownRoot, w.Rig)
+	if err != nil {
+		w.logf("reading the ready stamp; listing the board instead: %v", err)
+		return 0, false
+	}
+	if stamp.After(w.lastListAt) {
+		return 0, false
+	}
+	return w.lastListCount, true
 }
 
 // queueRecentRepairs finds landings the file records whose bead is still

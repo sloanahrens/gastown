@@ -35,9 +35,9 @@ func TestMarkReadyToLandIsOneBdWrite(t *testing.T) {
 	fake.Seed(beads.Issue{ID: "bd-source", Title: "the work", Type: "task", Status: string(beads.StatusHooked),
 		Labels: []string{land.LabelRework, land.LabelOverseerReviewed}})
 	bd := &writeCountingClient{Client: fake}
-	work := land.Work{BeadID: "bd-source", Branch: "polecat/refuge/bd-source", Head: strings.Repeat("a", 40), Target: "main"}
+	work := land.Work{BeadID: "bd-source", Rig: "gastown", Branch: "polecat/refuge/bd-source", Head: strings.Repeat("a", 40), Target: "main"}
 
-	if err := markReadyToLand(bd, work); err != nil {
+	if err := markReadyToLand(bd, t.TempDir(), work); err != nil {
 		t.Fatalf("markReadyToLand: %v", err)
 	}
 	if len(bd.writes) != 1 || bd.writes[0] != "update" {

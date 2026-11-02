@@ -666,8 +666,9 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	refreshAuthorSeat := func(polecat string) error { return d.refreshAuthorSeat(rigName, polecat) }
 	mainState := fileMainState{path: RedMainStatePath(townRoot, rigName)}
 	redMain := &landworker.RedMain{
-		Rig:   rigName,
-		Beads: bd,
+		Rig:      rigName,
+		TownRoot: townRoot,
+		Beads:    bd,
 		Rerun: func(ctx context.Context, cmd, pkg string, pl landworker.PostLand) landworker.PostLandResult {
 			rerun, err := postLandRerunCommand(cmd, pkg)
 			if err != nil {
@@ -731,6 +732,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	}
 	return &landworker.Worker{
 		Rig:        rigName,
+		TownRoot:   townRoot,
 		HumanActor: human.Name,
 		Beads:      bd,
 		Remote:     gitRemote{g: git.NewGit(repo), remote: landingRemote},
