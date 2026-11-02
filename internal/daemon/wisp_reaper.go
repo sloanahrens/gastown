@@ -223,14 +223,16 @@ func (d *Daemon) sweepTargets(configured []string, discover func() []string) ([]
 // reaperWriter returns the bd writer for a live run against dbName, pinned to
 // the beads dir whose metadata names that database, and nil for a dry run:
 // the reaper selects with SQL but writes only through bd (gt-fcxe9.12).
-func (d *Daemon) reaperWriter(dbName string, dryRun bool) (reaper.Writer, error) {
+// extraRoots are the directories searched after the town root for that beads
+// dir (gt-33etw).
+func (d *Daemon) reaperWriter(dbName string, dryRun bool, extraRoots ...string) (reaper.Writer, error) {
 	if dryRun {
 		return nil, nil
 	}
 	if d.reaperWriterForFn != nil {
 		return d.reaperWriterForFn(d.config.TownRoot, dbName)
 	}
-	return reaper.WriterForDatabase(d.config.TownRoot, dbName)
+	return reaper.WriterForDatabase(d.config.TownRoot, dbName, extraRoots...)
 }
 
 // openReaperDB opens the events retention step's connection to dbName.
@@ -264,10 +266,19 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 		cycle.closeStep("scan")
 		return
 	}
+
+	// A set but unusable extra_beads_roots is refused: reading it as "search
+	// the town only" would leave the databases it was added for unresolved,
+	// and say nothing about why (gt-33etw).
+	extraRoots, rootsErr := config.ParseExtraBeadsRoots()
+	if rootsErr != nil {
+		d.logger.Printf("wisp_reaper: refusing the sweep: %v", rootsErr)
+		cycle.failStep("scan", "patrols.wisp_reaper.extra_beads_roots is not a list of absolute paths")
+		return
+	}
 	d.logger.Printf("wisp_reaper: scanning %d databases", len(databases))
 	cycle.closeStep("scan")
 
-	port := d.doltServerPort()
 	dryRun := config.DryRun
 	var totalReaped, totalMoleculeSteps, totalOpen, totalPurged, totalMailPurged, totalAutoClosed int
 	// openDBs counts the databases totalOpen covers, so the alert can compare
@@ -280,7 +291,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 		if err := reaper.ValidateDBName(dbName); err != nil {
 			continue
 		}
-		db, err := reaper.OpenDB(d.doltUserInfo(), host, port, dbName, 10*time.Second, 10*time.Second)
+		db, err := d.openReaperDB(dbName, 10*time.Second, 10*time.Second)
 		if err != nil {
 			if errors.Is(err, beadsql.ErrNotBeads) {
 				continue
@@ -294,7 +305,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 			db.Close()
 			continue
 		}
-		w, err := d.reaperWriter(dbName, dryRun)
+		w, err := d.reaperWriter(dbName, dryRun, extraRoots...)
 		if err != nil {
 			db.Close()
 			d.logger.Printf("wisp_reaper: %s: %v", dbName, err)
@@ -332,7 +343,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 		if err := reaper.ValidateDBName(dbName); err != nil {
 			continue
 		}
-		db, err := reaper.OpenDB(d.doltUserInfo(), host, port, dbName, 30*time.Second, 30*time.Second)
+		db, err := d.openReaperDB(dbName, 30*time.Second, 30*time.Second)
 		if err != nil {
 			if errors.Is(err, beadsql.ErrNotBeads) {
 				continue
@@ -344,7 +355,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 			db.Close()
 			continue
 		}
-		w, err := d.reaperWriter(dbName, dryRun)
+		w, err := d.reaperWriter(dbName, dryRun, extraRoots...)
 		if err != nil {
 			db.Close()
 			d.logger.Printf("wisp_reaper: %s: %v", dbName, err)
@@ -377,7 +388,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 		if err := reaper.ValidateDBName(dbName); err != nil {
 			continue
 		}
-		db, err := reaper.OpenDB(d.doltUserInfo(), host, port, dbName, 10*time.Second, 10*time.Second)
+		db, err := d.openReaperDB(dbName, 10*time.Second, 10*time.Second)
 		if err != nil {
 			if errors.Is(err, beadsql.ErrNotBeads) {
 				continue
@@ -388,7 +399,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 			db.Close()
 			continue
 		}
-		w, err := d.reaperWriter(dbName, dryRun)
+		w, err := d.reaperWriter(dbName, dryRun, extraRoots...)
 		if err != nil {
 			db.Close()
 			d.logger.Printf("wisp_reaper: %s: %v", dbName, err)
@@ -414,7 +425,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 		if err := reaper.ValidateDBName(dbName); err != nil {
 			continue
 		}
-		db, err := reaper.OpenDB(d.doltUserInfo(), host, port, dbName, 10*time.Second, 10*time.Second)
+		db, err := d.openReaperDB(dbName, 10*time.Second, 10*time.Second)
 		if err != nil {
 			if errors.Is(err, beadsql.ErrNotBeads) {
 				continue
@@ -425,7 +436,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 			db.Close()
 			continue
 		}
-		w, err := d.reaperWriter(dbName, dryRun)
+		w, err := d.reaperWriter(dbName, dryRun, extraRoots...)
 		if err != nil {
 			db.Close()
 			d.logger.Printf("wisp_reaper: %s: %v", dbName, err)
@@ -511,7 +522,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 			if err := reaper.ValidateDBName(dbName); err != nil {
 				continue
 			}
-			db, err := reaper.OpenDB(d.doltUserInfo(), host, port, dbName, 10*time.Second, 10*time.Second)
+			db, err := d.openReaperDB(dbName, 10*time.Second, 10*time.Second)
 			if err != nil {
 				if errors.Is(err, beadsql.ErrNotBeads) {
 					continue
@@ -525,7 +536,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 				db.Close()
 				continue
 			}
-			closed, err := d.autoCloseDB(db, dbName, staleIssueAge, dryRun)
+			closed, err := d.autoCloseDB(db, dbName, staleIssueAge, dryRun, extraRoots...)
 			db.Close()
 			if err != nil {
 				d.logger.Printf("wisp_reaper: %s: auto-close error: %v", dbName, err)
@@ -596,8 +607,9 @@ func (d *Daemon) reportOpenWispAlert(sample reaper.OpenWispSample) {
 // returns the set the mis-set threshold would take alongside ErrStaleAgeTooLow,
 // so this logs the notice and reports zero closed. Failing the step instead
 // would stop a patrol over a config value, which is the stop the soft refusal
-// exists to remove.
-func (d *Daemon) autoCloseDB(db *beadsql.DB, dbName string, staleIssueAge time.Duration, dryRun bool) (int, error) {
+// exists to remove. extraRoots are the directories searched after the town
+// root when it resolves the writer (gt-33etw).
+func (d *Daemon) autoCloseDB(db *beadsql.DB, dbName string, staleIssueAge time.Duration, dryRun bool, extraRoots ...string) (int, error) {
 	preview, err := reaper.AutoClose(db, nil, dbName, reaper.AutoCloseOptions{
 		StaleAge: staleIssueAge,
 		DryRun:   true,
@@ -610,7 +622,7 @@ func (d *Daemon) autoCloseDB(db *beadsql.DB, dbName string, staleIssueAge time.D
 	// preview with nothing to close, needs no bd.
 	var w reaper.Writer
 	if !dryRun && preview.Closed > 0 && !preview.Floored {
-		if w, err = d.reaperWriter(dbName, dryRun); err != nil {
+		if w, err = d.reaperWriter(dbName, dryRun, extraRoots...); err != nil {
 			return 0, err
 		}
 	}

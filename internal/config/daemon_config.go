@@ -653,6 +653,13 @@ type WispReaperConfig struct {
 	// leaves the step off (gt-hk21d, opt-in because deleting audit rows is the
 	// operator's call).
 	EventsRetentionStr string `json:"events_retention,omitempty"`
+
+	// ExtraBeadsRoots are directories searched for a database's beads
+	// directory after the town root, so the reaper can reach a workspace
+	// outside the town (the claude database lives in the ~/.claude
+	// workspace). Empty searches the town alone. Read it through
+	// ParseExtraBeadsRoots, which refuses a relative path (gt-33etw).
+	ExtraBeadsRoots []string `json:"extra_beads_roots,omitempty"`
 }
 
 // maxDayCount is the most whole days a time.Duration holds. A larger day count
@@ -691,6 +698,30 @@ func (c *WispReaperConfig) EventsRetention() (time.Duration, error) {
 			c.EventsRetentionStr, "30d")
 	}
 	return d, nil
+}
+
+// ParseExtraBeadsRoots parses extra_beads_roots: nil (with no error) means the
+// town root is the only place searched. A set entry that is empty or not an
+// absolute path is refused rather than skipped: a relative root is resolved
+// against the daemon's working directory, not the operator's, so it would
+// silently search a tree nobody meant while the databases it was added for
+// still had no writer (gt-33etw).
+func (c *WispReaperConfig) ParseExtraBeadsRoots() ([]string, error) {
+	if c == nil || len(c.ExtraBeadsRoots) == 0 {
+		return nil, nil
+	}
+	roots := make([]string, 0, len(c.ExtraBeadsRoots))
+	for _, root := range c.ExtraBeadsRoots {
+		root = strings.TrimSpace(root)
+		if root == "" {
+			return nil, fmt.Errorf("patrols.wisp_reaper.extra_beads_roots holds an empty entry: want an absolute directory path")
+		}
+		if !filepath.IsAbs(root) {
+			return nil, fmt.Errorf("patrols.wisp_reaper.extra_beads_roots = %q: want an absolute path", root)
+		}
+		roots = append(roots, filepath.Clean(root))
+	}
+	return roots, nil
 }
 
 // DoctorDogConfig holds configuration for the doctor_dog patrol.
