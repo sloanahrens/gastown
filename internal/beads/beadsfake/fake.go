@@ -312,8 +312,9 @@ func hasLabel(is *beads.Issue, label string) bool {
 // keeps them; Type is read as the label "gt:<Type>"; Labels must all be
 // present; PriorityAny (the zero value) means any. NotesContains matches a
 // note substring case-insensitively; UpdatedAfter keeps issues updated at or
-// after it. LabelsAny with Ephemeral is refused, as the real List does. Rig is ignored: a Fake is one database. IncludeInfra changes
-// nothing: no fake issue has an infrastructure type.
+// after it. LabelsAny with Ephemeral is refused, as the real List does. Rig
+// is ignored: a Fake is one database. IncludeInfra changes nothing: no fake
+// issue has an infrastructure type.
 func (f *Fake) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 	// The real Beads.List refuses the pair: bd's wisp query has no --label-any.
 	if opts.Ephemeral && len(opts.LabelsAny) > 0 {
