@@ -49,9 +49,14 @@ func newTierSweepDaemon(t *testing.T, now time.Time, rigs ...string) (*Daemon, *
 	var logs bytes.Buffer
 	rec := &tierSweepRunRecorder{}
 	bd := &tierSweepFakeBeads{}
+	// The work root is the test's own, so a bead's container-list read finds
+	// only what the test wrote there, never a real sweep's checkout (gt-rtwca).
 	d := &Daemon{
-		config:         &Config{TownRoot: town},
-		patrolConfig:   &DaemonPatrolConfig{Patrols: &PatrolsConfig{TierSweep: &TierSweepConfig{Enabled: true}}},
+		config: &Config{TownRoot: town},
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+			TierSweep:     &TierSweepConfig{Enabled: true},
+			LandingWorker: &LandingWorkerConfig{WorkRoot: t.TempDir()},
+		}},
 		logger:         log.New(&logs, "", 0),
 		clock:          clockwork.NewFakeClockAt(now),
 		dogFeedFn:      (&feedCapture{}).record,
@@ -3586,7 +3591,7 @@ func TestTierSweepFileRed_LeavesShapedAndClaimedBeadsAlone(t *testing.T) {
 	d, _, _, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
 	ts := tierSweepTierResult{Verdict: tierSweepRed, Failed: 1, FailedNames: []string{"./internal/x"}}
 	shapedDesc, shapedAcc := tierSweepBeadShape("integration", "./internal/x", "abc123", ts,
-		specdispatch.Template{Sections: specdispatch.DefaultSections, Source: "built-in"})
+		specdispatch.Template{Sections: specdispatch.DefaultSections, Source: "built-in"}, nil)
 	bd := &byStatusBeads{byStatus: map[string][]*beads.Issue{
 		"open": {{
 			ID:                 "gt-shaped",

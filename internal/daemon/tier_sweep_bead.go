@@ -280,6 +280,11 @@ type tierSweepUnitRed struct {
 	// BuildTag is the build tag the unit's runs used, empty for the untagged
 	// docker list.
 	BuildTag string
+	// DockerPkg is the ./pkg path docker.txt lists for this unit, empty when
+	// the unit is not a container package. A container package's tests need a
+	// Docker daemon a polecat sandbox does not have, so its bead's check is
+	// the unit tier instead of a re-run (gt-rtwca).
+	DockerPkg string
 }
 
 // tierSweepReadUnitRed reads what a red run of one unit left in the sweep's
@@ -415,12 +420,51 @@ func tierSweepRecordCommand(tier string, ts tierSweepTierResult) string {
 	return ts.Command
 }
 
+// tierSweepDockerListPath is where a checkout keeps the sweep's container
+// package list, relative to its root.
+const tierSweepDockerListPath = "internal/testpolicy/docker.txt"
+
+// tierSweepDockerName returns the ./pkg path docker lists for unit, false when
+// it lists none. The sweep labels a container package's name "untagged:" in the
+// integration summary, so that label is read off first. The path is the form
+// the sweep itself runs, so the unit-tier command names the package the sweep
+// ran (gt-rtwca).
+func tierSweepDockerName(unit string, docker []string) (string, bool) {
+	name := strings.TrimPrefix(unit, "untagged:")
+	// The name is written into a command in the bead, so it must pass the
+	// same check every other unit name does before it is used.
+	if !tierSweepUnitIsName(name) || !slices.Contains(docker, name) {
+		return "", false
+	}
+	return name, true
+}
+
+// tierSweepDockerAcceptanceItem is the criterion for a package docker.txt
+// lists. Its failing tests need a Docker daemon and a Dolt test container,
+// which a polecat sandbox does not have, so the box is the package's unit
+// tier, which runs here, and the container-backed re-run is left to the
+// overseer after landing. The names the sweep captured are quoted rather than
+// turned into a -run filter: a filter over the container test skips here and
+// passes having run nothing (gt-rtwca).
+func tierSweepDockerAcceptanceItem(pkg string, red tierSweepUnitRed) string {
+	item := fmt.Sprintf("- [ ] The unit tier for `%s` passes: `GT_TEST_DOCKER=0 go test %s` passes on a worktree rebased onto main.", pkg, pkg)
+	if len(red.Names) > 0 {
+		item += fmt.Sprintf(" The sweep saw `%s` fail: read the failure from this bead, fix it, and land.", strings.Join(red.Names, "`, `"))
+	}
+	return item
+}
+
 // tierSweepAcceptanceItem is the one criterion a polecat ticks: the narrow
 // re-run of the failing unit. When the sweep cannot name a command (a missing
 // log, no failing test line, a unit name it cannot trust) it asks the polecat
 // to read the log and re-run the test, which is still a check one worker can
-// do alone.
+// do alone. A container package gets the unit tier instead: the log lives on
+// the daemon host and the test needs a Docker daemon, so neither half of that
+// fallback is reachable from a polecat sandbox (gt-rtwca).
 func tierSweepAcceptanceItem(tier, unit string, ts tierSweepTierResult, red tierSweepUnitRed) string {
+	if red.DockerPkg != "" {
+		return tierSweepDockerAcceptanceItem(red.DockerPkg, red)
+	}
 	if cmd := tierSweepCheckCommand(tier, unit, tierSweepRecordCommand(tier, ts), red); cmd != "" {
 		item := "- [ ] `" + cmd + "` passes on a worktree rebased onto main."
 		if tier != "shell" {
@@ -514,6 +558,24 @@ func tierSweepFindingsBlock(red tierSweepUnitRed) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// tierSweepDockerList reads the container package list the failing run used,
+// with the sweep's own reader (tiersweep.DockerPackages). It is read from the
+// cycle's checkout, where it names the packages the failing run used. A list
+// that cannot be read contributes nothing: the bead keeps the text a plain
+// package gets, and filing never depends on the checkout surviving, the same
+// rule tierSweepReadUnitRed follows for a tier log (gt-rtwca).
+func (d *Daemon) tierSweepDockerList(rig string) []string {
+	dir, err := d.tierSweepWorkDir(rig)
+	if err != nil {
+		return nil
+	}
+	text, err := os.ReadFile(filepath.Join(dir, tierSweepDockerListPath))
+	if err != nil {
+		return nil
+	}
+	return tiersweep.DockerPackages(string(text))
+}
+
 // tierSweepTemplate is the spec template the dispatcher lints against: the
 // patrol block's template field, else the operator's default file, read by the
 // same loader the dispatcher uses (gt-uzkic). The patrol block is read through
@@ -534,18 +596,28 @@ func (d *Daemon) tierSweepTemplate() specdispatch.Template {
 
 // tierSweepSectionBody is the body the sweep writes under one section of the
 // spec template. A section the sweep does not know points at the acceptance
-// check, so the lint reads it as non-empty.
-func tierSweepSectionBody(section, tier, subject, sha, item string) string {
+// check, so the lint reads it as non-empty. dockerPkg is the package's path
+// when docker.txt lists it: the Gate then says the container-backed re-run is
+// owed, because the acceptance box is the unit tier (gt-rtwca).
+func tierSweepSectionBody(section, tier, subject, sha, item, dockerPkg string) string {
 	switch strings.ToLower(section) {
 	case "goal":
 		return fmt.Sprintf("Make the %s tier green on main again. %s is red at %s, so the sweep re-files this bead on every landing until the tier passes.", tier, subject, shortSHA(sha))
 	case "constraints":
+		if dockerPkg != "" {
+			return fmt.Sprintf("- Fix the failure in %s; the sweep closes this bead by itself once the tier is green.\n", subject) +
+				"- Check it with the package's unit tier in ## Acceptance: its container tests skip in a polecat sandbox, and their re-run is owed by the overseer after landing.\n" +
+				"- Leave cmd/tier-sweep, its TIER_SWEEP_SKIP list and the sweep's schedule alone."
+		}
 		return fmt.Sprintf("- Fix the failure in %s; the sweep closes this bead by itself once the tier is green.\n", subject) +
 			"- Re-run with the narrow filter below, not the whole package: the polecat test guard refuses an unfiltered run of internal/cmd, internal/daemon and internal/polecat.\n" +
 			"- Leave cmd/tier-sweep, its TIER_SWEEP_SKIP list and the sweep's schedule alone."
 	case "out of scope":
 		return "The other tiers, the sweep's own scheduling, and any change to cmd/tier-sweep."
 	case "gate":
+		if dockerPkg != "" {
+			return "make gate, plus the check in ## Acceptance. The container-backed re-run is owed by the overseer after landing; the next sweep closes this bead by itself when it is green."
+		}
 		return "make gate, plus the check in ## Acceptance."
 	case "size":
 		return tierSweepBeadSize
@@ -564,9 +636,14 @@ func tierSweepSectionBody(section, tier, subject, sha, item string) string {
 // The sections come from tmpl, the template the dispatcher lints against, in
 // its order, so a template that adds or renames a section still yields a bead
 // that passes the lint (gt-uzkic). The Acceptance section always closes the
-// description unless the template names it itself.
-func tierSweepBeadShape(tier, unit, sha string, ts tierSweepTierResult, tmpl specdispatch.Template) (description, acceptance string) {
+// description unless the template names it itself. docker is the container
+// package list the failing run used; a unit it names gets the unit-tier
+// acceptance item and the owed container re-run in the Gate (gt-rtwca).
+func tierSweepBeadShape(tier, unit, sha string, ts tierSweepTierResult, tmpl specdispatch.Template, docker []string) (description, acceptance string) {
 	red := tierSweepReadUnitRed(ts, tier, unit)
+	if pkg, ok := tierSweepDockerName(unit, docker); ok {
+		red.DockerPkg = pkg
+	}
 	item := tierSweepAcceptanceItem(tier, unit, ts, red)
 	subject := tierSweepUnitSubject(tier, unit)
 	names := append([]string(nil), tmpl.Sections...)
@@ -575,7 +652,7 @@ func tierSweepBeadShape(tier, unit, sha string, ts tierSweepTierResult, tmpl spe
 	}
 	parts := make([]string, 0, len(names))
 	for _, name := range names {
-		body := tierSweepSectionBody(name, tier, subject, sha, item)
+		body := tierSweepSectionBody(name, tier, subject, sha, item, red.DockerPkg)
 		parts = append(parts, "## "+name+"\n\n"+body)
 	}
 	detail := tierSweepBeadIntro + tierSweepRedDetail(tier, sha, ts)
@@ -608,7 +685,7 @@ func (d *Daemon) tierSweepReshapeOpen(bd tierSweepBeadStore, rig, tier, name, sh
 	if !tierSweepUnshaped(spec, tmpl) {
 		return
 	}
-	description, acceptance := tierSweepBeadShape(tier, name, sha, ts, tmpl)
+	description, acceptance := tierSweepBeadShape(tier, name, sha, ts, tmpl, d.tierSweepDockerList(rig))
 	if err := bd.Update(open.id, beads.UpdateOptions{Description: &description, Acceptance: &acceptance}); err != nil {
 		d.logger.Printf("tier_sweep: %s: reshaping %s (%s %s): %v", rig, open.id, tier, name, err)
 	}
