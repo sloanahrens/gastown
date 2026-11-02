@@ -1067,6 +1067,14 @@ func TestCutoverRefusesWhenStateSaysStoppedAndTheJobCannotBeRead(t *testing.T) {
 func containerToLaunchdRig(t *testing.T) (string, *cutoverRig, *cutoverPlan) {
 	t.Helper()
 	town := startGuardTown(t)
+	_, r, p := containerToLaunchdRigIn(t, town)
+	return town, r, p
+}
+
+// containerToLaunchdRigIn is containerToLaunchdRig over a town the caller made,
+// so a test can give it a path that needs quoting.
+func containerToLaunchdRigIn(t *testing.T, town string) (string, *cutoverRig, *cutoverPlan) {
+	t.Helper()
 	writeComposeFile(t, town)
 	c, _ := stubContainerTown(t, containerTownConfig("scratch-daemon-1", "scratch"))
 	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
@@ -1130,6 +1138,34 @@ func TestCutoverToLaunchdDownFailureIsReportedNotRolledBack(t *testing.T) {
 	}
 	if last := r.calls[len(r.calls)-1]; last != down {
 		t.Errorf("last command = %q, want the failed down and nothing after it", last)
+	}
+}
+
+// The command printed for the operator to run by hand is the argv, shell-quoted,
+// so a compose file path with a space stays one word on the line.
+func TestCutoverToLaunchdDownFailurePrintsQuotedCommand(t *testing.T) {
+	t.Parallel()
+	town := filepath.Join(t.TempDir(), "live town")
+	if err := os.MkdirAll(filepath.Join(town, "daemon"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, r, p := containerToLaunchdRigIn(t, town)
+	r.runErr["docker --context"] = errors.New("compose down exited 1")
+	if err := p.execute(context.Background()); err != nil {
+		t.Fatalf("execute returned %v, want success: launchd owns the town\n%s", err, r.out.String())
+	}
+	want := "-f '" + composeFilePath(town) + "' down"
+	if !strings.Contains(r.out.String(), want) {
+		t.Errorf("output does not print the compose file path quoted (%s):\n%s", want, r.out.String())
+	}
+}
+
+// The help says what the step does and names the Rollback section that holds
+// the rest, so a reader of --help is sent to the one copy of the rollback steps.
+func TestDaemonCutoverHelpPointsToRollbackDoc(t *testing.T) {
+	t.Parallel()
+	if !strings.Contains(daemonCutoverCmd.Long, "docs/daemon-container.md") {
+		t.Errorf("cutover help does not point to the Rollback section of docs/daemon-container.md:\n%s", daemonCutoverCmd.Long)
 	}
 }
 

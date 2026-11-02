@@ -199,10 +199,20 @@ func (p *cutoverPlan) removeOldContainers() {
 	// The run's error carries the command's output, which is left out here: the
 	// command printed below is the one to run, and its own output says why.
 	if err := p.run(argv); err != nil {
-		p.say("compose down for the %s side failed, so its containers may still be running. %s owns the town and is unaffected. Run this by hand, keeping the volumes: %s", p.from.name, p.to.name, strings.Join(argv, " "))
+		p.say("compose down for the %s side failed, so its containers may still be running. %s owns the town and is unaffected. Run this by hand, keeping the volumes: %s", p.from.name, p.to.name, shellCommand(argv))
 		return
 	}
 	p.say("Removed the %s side's containers with compose down; their volumes are kept.", p.from.name)
+}
+
+// shellCommand joins argv into a line the operator can paste into a shell, each
+// word quoted where the shell would split or expand it.
+func shellCommand(argv []string) string {
+	words := make([]string, len(argv))
+	for i, a := range argv {
+		words[i] = config.ShellQuote(a)
+	}
+	return strings.Join(words, " ")
 }
 
 // daemonRunning says whether the heartbeat wait applies: state.json records a
@@ -527,9 +537,9 @@ budget and a stated ending when it runs out:
      unhealthy with the rollback command
 
 After step 5, a cutover from the container to launchd runs compose down on the
-container's project, without -v, so both containers (the daemon and sweep-dind)
-are removed and their volumes are kept. A failure is printed with the command to
-run by hand; launchd still owns the town, so the cutover succeeds.
+container's project, without -v. Read the Rollback section of
+docs/daemon-container.md before a cutover: it says what that removes and what a
+failed down leaves for the operator.
 
 Nothing is rolled back by itself. The operator creates the dispatch hold; this
 command only reads it. After a cutover set daemon.supervisor to match the new
