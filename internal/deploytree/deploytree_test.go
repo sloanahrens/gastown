@@ -4,24 +4,32 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 )
 
-const digestA = "registry.local/gt/daemon@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-const digestB = "registry.local/gt/trackerd@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+const (
+	digestA = "registry.local/gt/daemon@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	digestB = "registry.local/gt/trackerd@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	// testTrackerHost is the tracker address the fixtures state. It is in
+	// TEST-NET-3, so it is obviously not a real host.
+	testTrackerHost = "203.0.113.5"
+	testTrackerCIDR = testTrackerHost + "/32"
+)
 
 // valuesFile is a valid values file for the workspace id.
 func valuesFile(ws string) []byte {
 	return []byte(fmt.Sprintf(`workspace: %s
 namespace: gt-%s
 trackerDSNSecret: %s-tracker-dsn
+trackerHost: %s
 images:
   daemon: %s
   trackerd: %s
-`, ws, ws, ws, digestA, digestB))
+`, ws, ws, ws, testTrackerHost, digestA, digestB))
 }
 
 func mustRender(t *testing.T, ws string) []Resource {
@@ -170,6 +178,36 @@ func TestTwoWorkspacesCannotNameOneDSNSecret(t *testing.T) {
 	}
 }
 
+// TestTrackerHostMustBeOneAddress pins the tracker address to one IP: a name
+// cannot be matched by a NetworkPolicy, and a range could admit another
+// workspace's pods.
+func TestTrackerHostMustBeOneAddress(t *testing.T) {
+	t.Parallel()
+	line := "trackerHost: " + testTrackerHost + "\n"
+	cases := []struct {
+		name string
+		file string
+		ok   bool
+	}{
+		{"an IPv4 address", string(valuesFile("alpha")), true},
+		{"an IPv6 address", strings.Replace(string(valuesFile("alpha")), line, "trackerHost: 2001:db8::1\n", 1), true},
+		{"missing", strings.Replace(string(valuesFile("alpha")), line, "", 1), false},
+		{"a hostname", strings.Replace(string(valuesFile("alpha")), line, "trackerHost: tracker.example\n", 1), false},
+		{"a range", strings.Replace(string(valuesFile("alpha")), line, "trackerHost: 10.20.0.0/16\n", 1), false},
+		{"the whole IPv4 space", strings.Replace(string(valuesFile("alpha")), line, "trackerHost: 0.0.0.0/0\n", 1), false},
+		{"an address with a port", strings.Replace(string(valuesFile("alpha")), line, "trackerHost: 203.0.113.5:5432\n", 1), false},
+	}
+	for _, c := range cases {
+		_, err := Load([]byte(c.file))
+		if c.ok && err != nil {
+			t.Errorf("%s: Load = %v, want accepted", c.name, err)
+		}
+		if !c.ok && !errors.Is(err, ErrBadValues) {
+			t.Errorf("%s: Load = %v, want ErrBadValues", c.name, err)
+		}
+	}
+}
+
 // networkPolicy is the part of a rendered NetworkPolicy these tests read.
 type networkPolicy struct {
 	Metadata struct {
@@ -187,9 +225,14 @@ type selectorSpec struct {
 	MatchLabels map[string]string `yaml:"matchLabels"`
 }
 
+type ipBlock struct {
+	CIDR string `yaml:"cidr"`
+}
+
 type policyPeer struct {
 	PodSelector       *selectorSpec `yaml:"podSelector"`
 	NamespaceSelector *selectorSpec `yaml:"namespaceSelector"`
+	IPBlock           *ipBlock      `yaml:"ipBlock"`
 }
 
 type policyRule struct {
@@ -201,12 +244,6 @@ type policyRule struct {
 type policyPort struct {
 	Protocol string `yaml:"protocol"`
 	Port     int    `yaml:"port"`
-}
-
-// nsRef is a namespace by name and labels.
-type nsRef struct {
-	name   string
-	labels map[string]string
 }
 
 // policies returns the rendered NetworkPolicies of a workspace by name.
@@ -262,48 +299,6 @@ func peers(p networkPolicy) []policyPeer {
 	return out
 }
 
-// matches reports whether a selector selects an object with these labels. An
-// empty selector selects everything.
-func matches(sel selectorSpec, labels map[string]string) bool {
-	for k, v := range sel.MatchLabels {
-		if labels[k] != v {
-			return false
-		}
-	}
-	return true
-}
-
-// peerAllows reports whether a rule peer admits a pod labeled pod in a
-// namespace labeled ns. A peer with no namespaceSelector admits only pods in
-// the policy's own namespace, by name.
-func peerAllows(peer policyPeer, policyNS, ns nsRef, pod map[string]string) bool {
-	if peer.NamespaceSelector != nil {
-		if !matches(*peer.NamespaceSelector, ns.labels) {
-			return false
-		}
-	} else if ns.name != policyNS.name {
-		return false
-	}
-	if peer.PodSelector != nil && !matches(*peer.PodSelector, pod) {
-		return false
-	}
-	return true
-}
-
-// portsAllow reports whether a rule's port list admits port. An empty list
-// admits every port.
-func portsAllow(ports []policyPort, port policyPort) bool {
-	if len(ports) == 0 {
-		return true
-	}
-	for _, p := range ports {
-		if p == port {
-			return true
-		}
-	}
-	return false
-}
-
 func hasType(p networkPolicy, policyType string) bool {
 	for _, t := range p.Spec.PolicyTypes {
 		if t == policyType {
@@ -313,165 +308,175 @@ func hasType(p networkPolicy, policyType string) bool {
 	return false
 }
 
-// allowsEgress reports whether any of ps admits a pod labeled src in
-// policyNS, selected by the policy, egressing to a pod labeled dst in dstNS on
-// port.
-func allowsEgress(ps map[string]networkPolicy, policyNS nsRef, src map[string]string, dstNS nsRef, dst map[string]string, port policyPort) bool {
-	for _, p := range ps {
-		if !hasType(p, "Egress") || !matches(p.Spec.PodSelector, src) {
-			continue
-		}
-		for _, rule := range p.Spec.Egress {
-			if !portsAllow(rule.Ports, port) {
-				continue
-			}
-			for _, peer := range rule.To {
-				if peerAllows(peer, policyNS, dstNS, dst) {
-					return true
-				}
-			}
+// podLabels are the labels the renderer puts on a component's pods and selects
+// them by.
+func podLabels(ws, component string) map[string]string {
+	return map[string]string{"gt.dev/workspace": ws, "gt.dev/component": component}
+}
+
+// selectorLabelsMatch reports whether sel names exactly want.
+func selectorLabelsMatch(sel *selectorSpec, want map[string]string) bool {
+	return sel != nil && maps.Equal(sel.MatchLabels, want)
+}
+
+func samePorts(got, want []policyPort) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
-// allowsIngress reports whether any of ps admits a pod labeled src in srcNS
-// reaching a pod labeled dst on port, where the policy selects dst in
-// policyNS.
-func allowsIngress(ps map[string]networkPolicy, policyNS, srcNS nsRef, src map[string]string, dst map[string]string, port policyPort) bool {
-	for _, p := range ps {
-		if !hasType(p, "Ingress") || !matches(p.Spec.PodSelector, dst) {
-			continue
-		}
-		for _, rule := range p.Spec.Ingress {
-			if !portsAllow(rule.Ports, port) {
-				continue
-			}
-			for _, peer := range rule.From {
-				if peerAllows(peer, policyNS, srcNS, src) {
-					return true
-				}
-			}
-		}
-	}
-	return false
+func isDNSPeer(peer policyPeer) bool {
+	return peer.IPBlock == nil &&
+		selectorLabelsMatch(peer.NamespaceSelector, map[string]string{"kubernetes.io/metadata.name": "kube-system"}) &&
+		selectorLabelsMatch(peer.PodSelector, map[string]string{"k8s-app": "kube-dns"})
 }
 
-// workspaceNS is a workspace's namespace as a cluster labels it: the rendered
-// labels plus the name label Kubernetes adds.
-func workspaceNS(ws string) nsRef {
-	return nsRef{name: "gt-" + ws, labels: map[string]string{
-		"gt.dev/workspace": ws, "app.kubernetes.io/part-of": "gt-" + ws, "kubernetes.io/metadata.name": "gt-" + ws,
-	}}
-}
-
-func componentPod(ws, component string) map[string]string {
-	return map[string]string{"gt.dev/workspace": ws, "gt.dev/component": component, "app.kubernetes.io/part-of": "gt-" + ws}
-}
-
+// TestAllowRulesNameOnlyTheWorkspacesOwnLabels reads the rendered policies
+// directly: every peer is this workspace's own pod, the cluster DNS, or the
+// one tracker address, so no rule selects a namespace or label of another
+// workspace.
 func TestAllowRulesNameOnlyTheWorkspacesOwnLabels(t *testing.T) {
 	t.Parallel()
-	alpha, beta := policies(t, "alpha"), policies(t, "beta")
-	alphaNS, betaNS := workspaceNS("alpha"), workspaceNS("beta")
-	betaPods := []map[string]string{componentPod("beta", "daemon"), componentPod("beta", "trackerd")}
-
-	namesOwnLabels := false
-	for name, p := range alpha {
-		if !strings.HasPrefix(name, "alpha-") {
-			t.Errorf("policy %q does not carry the workspace id", name)
-		}
-		for _, sel := range selectors(p) {
-			if ws, ok := sel.MatchLabels["gt.dev/workspace"]; ok && ws != "alpha" {
-				t.Errorf("policy %s selects label gt.dev/workspace=%s", name, ws)
+	for _, ws := range []string{"alpha", "beta"} {
+		ownLabels := false
+		for name, p := range policies(t, ws) {
+			if !strings.HasPrefix(name, ws+"-") {
+				t.Errorf("policy %q does not carry the workspace id", name)
 			}
-			if ns, ok := sel.MatchLabels["kubernetes.io/metadata.name"]; ok && ns != "kube-system" {
-				t.Errorf("policy %s selects namespace %s", name, ns)
+			for _, sel := range selectors(p) {
+				if got, ok := sel.MatchLabels["gt.dev/workspace"]; ok && got != ws {
+					t.Errorf("policy %s selects label gt.dev/workspace=%s, want %s", name, got, ws)
+				}
+				if got, ok := sel.MatchLabels["kubernetes.io/metadata.name"]; ok && got != "kube-system" {
+					t.Errorf("policy %s selects namespace %s, want only kube-system", name, got)
+				}
+				if sel.MatchLabels["gt.dev/workspace"] == ws {
+					ownLabels = true
+				}
 			}
-			if ws, ok := sel.MatchLabels["gt.dev/workspace"]; ok && ws == "alpha" {
-				namesOwnLabels = true
-			}
-		}
-		for _, peer := range peers(p) {
-			for _, pod := range betaPods {
-				if peerAllows(peer, alphaNS, betaNS, pod) {
-					t.Errorf("policy %s admits a beta pod with peer %+v", name, peer)
+			for _, peer := range peers(p) {
+				switch {
+				case peer.IPBlock != nil:
+					if peer.PodSelector != nil || peer.NamespaceSelector != nil {
+						t.Errorf("policy %s: an ipBlock peer also names pods or a namespace", name)
+					}
+					if peer.IPBlock.CIDR != testTrackerCIDR {
+						t.Errorf("policy %s: ipBlock admits %s, want only the tracker at %s", name, peer.IPBlock.CIDR, testTrackerCIDR)
+					}
+				case peer.NamespaceSelector != nil:
+					if !isDNSPeer(peer) {
+						t.Errorf("policy %s: peer %+v names another namespace, want only cluster DNS", name, peer)
+					}
+				case peer.PodSelector != nil:
+					if peer.PodSelector.MatchLabels["gt.dev/workspace"] != ws {
+						t.Errorf("policy %s: podSelector %v does not name workspace %s", name, peer.PodSelector.MatchLabels, ws)
+					}
+				default:
+					t.Errorf("policy %s: a peer selects everything", name)
 				}
 			}
 		}
-	}
-	if !namesOwnLabels {
-		t.Fatal("no allow rule names the workspace's own labels")
-	}
-
-	// The same holds for the other workspace: its rules name beta, never alpha.
-	betaNamesOwnLabels := false
-	for name, p := range beta {
-		for _, sel := range selectors(p) {
-			if ws, ok := sel.MatchLabels["gt.dev/workspace"]; ok {
-				if ws != "beta" {
-					t.Errorf("policy %s selects label gt.dev/workspace=%s", name, ws)
-				}
-				betaNamesOwnLabels = true
-			}
+		if !ownLabels {
+			t.Errorf("%s's allow rules do not name its own labels", ws)
 		}
-		for _, peer := range peers(p) {
-			for _, pod := range []map[string]string{componentPod("alpha", "daemon"), componentPod("alpha", "trackerd")} {
-				if peerAllows(peer, betaNS, alphaNS, pod) {
-					t.Errorf("policy %s admits an alpha pod with peer %+v", name, peer)
-				}
-			}
-		}
-	}
-	if !betaNamesOwnLabels {
-		t.Fatal("beta's allow rules do not name its own labels")
 	}
 }
 
 func TestDaemonToTrackerdAndDNSAreAllowed(t *testing.T) {
 	t.Parallel()
 	alpha := policies(t, "alpha")
-	alphaNS := workspaceNS("alpha")
-	daemon, trackerd := componentPod("alpha", "daemon"), componentPod("alpha", "trackerd")
-	dnsNS := nsRef{name: "kube-system", labels: map[string]string{"kubernetes.io/metadata.name": "kube-system"}}
-	dnsPod := map[string]string{"k8s-app": "kube-dns"}
 
-	if !allowsIngress(alpha, alphaNS, alphaNS, daemon, trackerd, policyPort{"TCP", trackerPort}) {
-		t.Error("the daemon is not allowed to reach trackerd on its port")
+	ing, ok := alpha["alpha-allow-ingress"]
+	if !ok {
+		t.Fatal("alpha-allow-ingress is not rendered")
 	}
-	if !allowsEgress(alpha, alphaNS, daemon, alphaNS, trackerd, policyPort{"TCP", trackerPort}) {
-		t.Error("the daemon is not allowed to egress to trackerd on its port")
+	if !hasType(ing, "Ingress") {
+		t.Error("alpha-allow-ingress does not declare Ingress")
 	}
-	for _, port := range []policyPort{{"UDP", dnsPort}, {"TCP", dnsPort}} {
-		if !allowsEgress(alpha, alphaNS, daemon, dnsNS, dnsPod, port) {
-			t.Errorf("the daemon is not allowed to egress to cluster DNS over %s/%d", port.Protocol, port.Port)
+	if !selectorLabelsMatch(&ing.Spec.PodSelector, podLabels("alpha", "trackerd")) {
+		t.Errorf("alpha-allow-ingress selects pods %v, want trackerd", ing.Spec.PodSelector.MatchLabels)
+	}
+	if len(ing.Spec.Ingress) != 1 {
+		t.Fatalf("alpha-allow-ingress has %d ingress rules, want one", len(ing.Spec.Ingress))
+	}
+	in := ing.Spec.Ingress[0]
+	if len(in.From) != 1 || !selectorLabelsMatch(in.From[0].PodSelector, podLabels("alpha", "daemon")) {
+		t.Errorf("alpha-allow-ingress admits %+v, want the daemon only", in.From)
+	}
+	if !samePorts(in.Ports, []policyPort{{"TCP", trackerdPort}}) {
+		t.Errorf("alpha-allow-ingress opens ports %+v, want TCP/%d only", in.Ports, trackerdPort)
+	}
+
+	eg, ok := alpha["alpha-allow-egress"]
+	if !ok {
+		t.Fatal("alpha-allow-egress is not rendered")
+	}
+	if !hasType(eg, "Egress") {
+		t.Error("alpha-allow-egress does not declare Egress")
+	}
+	if !selectorLabelsMatch(&eg.Spec.PodSelector, map[string]string{"gt.dev/workspace": "alpha"}) {
+		t.Errorf("alpha-allow-egress selects pods %v, want the workspace's pods", eg.Spec.PodSelector.MatchLabels)
+	}
+	if len(eg.Spec.Egress) != 2 {
+		t.Fatalf("alpha-allow-egress has %d egress rules, want two", len(eg.Spec.Egress))
+	}
+	var toTrackerd, toDNS bool
+	for _, rule := range eg.Spec.Egress {
+		if len(rule.To) == 1 &&
+			selectorLabelsMatch(rule.To[0].PodSelector, podLabels("alpha", "trackerd")) &&
+			rule.To[0].NamespaceSelector == nil && rule.To[0].IPBlock == nil &&
+			samePorts(rule.Ports, []policyPort{{"TCP", trackerdPort}}) {
+			toTrackerd = true
 		}
+		if len(rule.To) == 1 && isDNSPeer(rule.To[0]) &&
+			samePorts(rule.Ports, []policyPort{{"UDP", dnsPort}, {"TCP", dnsPort}}) {
+			toDNS = true
+		}
+	}
+	if !toTrackerd {
+		t.Error("no rule admits the workspace's pods to trackerd on its port")
+	}
+	if !toDNS {
+		t.Error("no rule admits the workspace's pods to cluster DNS")
 	}
 }
 
-func TestEgressWiderThanTheAllowRulesIsNotAllowed(t *testing.T) {
+// TestTrackerHostEgressReachesTheTracker pins the rule that lets trackerd reach
+// the tracker database: without it the tracker is unreachable from the
+// rendered town.
+func TestTrackerHostEgressReachesTheTracker(t *testing.T) {
 	t.Parallel()
-	alpha := policies(t, "alpha")
-	alphaNS := workspaceNS("alpha")
-	daemon, trackerd := componentPod("alpha", "daemon"), componentPod("alpha", "trackerd")
-	dnsNS := nsRef{name: "kube-system", labels: map[string]string{"kubernetes.io/metadata.name": "kube-system"}}
-	dnsPod := map[string]string{"k8s-app": "kube-dns"}
-
-	cases := []struct {
-		name  string
-		src   map[string]string
-		dstNS nsRef
-		dst   map[string]string
-		port  policyPort
-	}{
-		{"trackerd on another port", daemon, alphaNS, trackerd, policyPort{"TCP", trackerPort + 1}},
-		{"another component on trackerd's port", daemon, alphaNS, daemon, policyPort{"TCP", trackerPort}},
-		{"trackerd on another protocol", daemon, alphaNS, trackerd, policyPort{"UDP", trackerPort}},
-		{"DNS on another port", daemon, dnsNS, dnsPod, policyPort{"UDP", dnsPort + 1}},
+	p, ok := policies(t, "alpha")["alpha-allow-tracker-egress"]
+	if !ok {
+		t.Fatal("alpha-allow-tracker-egress is not rendered")
 	}
-	for _, c := range cases {
-		if allowsEgress(alpha, alphaNS, c.src, c.dstNS, c.dst, c.port) {
-			t.Errorf("%s: egress is allowed, want it refused", c.name)
-		}
+	if !hasType(p, "Egress") {
+		t.Error("alpha-allow-tracker-egress does not declare Egress")
+	}
+	if !selectorLabelsMatch(&p.Spec.PodSelector, podLabels("alpha", "trackerd")) {
+		t.Errorf("alpha-allow-tracker-egress selects pods %v, want trackerd, the component holding the DSN", p.Spec.PodSelector.MatchLabels)
+	}
+	if len(p.Spec.Egress) != 1 {
+		t.Fatalf("alpha-allow-tracker-egress has %d egress rules, want one", len(p.Spec.Egress))
+	}
+	rule := p.Spec.Egress[0]
+	if len(rule.Ports) != 0 {
+		t.Errorf("the tracker rule pins ports %+v, but the DSN's port lives in the Secret", rule.Ports)
+	}
+	if len(rule.To) != 1 || rule.To[0].IPBlock == nil {
+		t.Fatalf("the tracker rule admits %+v, want one ipBlock", rule.To)
+	}
+	if got := rule.To[0].IPBlock.CIDR; got != testTrackerCIDR {
+		t.Errorf("the tracker rule admits %s, want the tracker's address %s", got, testTrackerCIDR)
+	}
+	if rule.To[0].PodSelector != nil || rule.To[0].NamespaceSelector != nil {
+		t.Error("the tracker peer also names pods or a namespace, want the address only")
 	}
 }
 

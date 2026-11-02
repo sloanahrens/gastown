@@ -1,8 +1,10 @@
 // Package deploytree renders one town per workspace from a values file (plan
 // row S1 of the hosted-platform plan). Two workspaces rendered from the same
 // code share no resource name: every name, label and the namespace carry the
-// workspace id. The tracker is a value, a reference to a Secret that holds the
-// workspace's DSN, so no Postgres workload appears in the rendered town.
+// workspace id. The tracker database is reached through a per-workspace Secret
+// that holds the DSN, so no Postgres workload appears in the rendered town; the
+// values also state the tracker's address, because a NetworkPolicy can match an
+// address but not a name.
 //
 // The package renders manifests as data and makes no cluster call. The kind
 // stack that runs the local town and a later cloud town are meant to render
@@ -10,10 +12,12 @@
 //
 // The rendered NetworkPolicies deny all ingress and egress, then allow only
 // what a running town needs: the daemon reaches trackerd on its port in the
-// workspace namespace, and every pod resolves names through the cluster DNS.
-// Every allow rule selects the workspace's own pods and labels, so one
-// workspace's pods never reach another's. The renderer makes no cluster call
-// and the output has not been run under kind.
+// workspace namespace, every pod resolves names through the cluster DNS, and
+// trackerd reaches the tracker's address. The in-namespace allow rules select
+// the workspace's own pods and labels, so one workspace's pods never reach
+// another's. Two peers sit outside the namespace and each admits one target:
+// kube-system's kube-dns pods, and the tracker's address. The renderer makes no
+// cluster call and the output has not been run under kind.
 package deploytree
 
 import (
@@ -21,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"regexp"
 	"sort"
 	"strings"
@@ -29,9 +34,10 @@ import (
 )
 
 const (
-	// trackerPort is trackerd's port, on its Service and on the allow rules
-	// that admit the daemon to it.
-	trackerPort = 7433
+	// trackerdPort is trackerd's port, on its Service and on the allow rules
+	// that admit the daemon to it. The tracker database's port is absent: it
+	// lives in the DSN Secret, so the tracker egress rule names no port.
+	trackerdPort = 7433
 	// dnsPort is the cluster DNS port the allow rules open on UDP and TCP. The
 	// DNS pods are labeled k8s-app: kube-dns in kube-system, which is the
 	// standard label on kind and the hosted clusters.
@@ -48,6 +54,12 @@ type Values struct {
 	// TrackerDSNSecret names the Secret holding the workspace's tracker DSN.
 	// It is a name only; a DSN in this field is refused.
 	TrackerDSNSecret string `yaml:"trackerDSNSecret"`
+	// TrackerHost is the tracker database's address: one IP address, not a name
+	// or a range, and the host the DSN in TrackerDSNSecret points at. A
+	// NetworkPolicy ipBlock matches only addresses, and a range could admit
+	// another workspace's pods; the renderer cannot read the Secret, so the
+	// values state the address.
+	TrackerHost string `yaml:"trackerHost"`
 	// Images maps a component (see Components) to an image digest reference
 	// "repo@sha256:<64 hex>". A tag is refused.
 	Images map[string]string `yaml:"images"`
@@ -107,23 +119,35 @@ func Load(data []byte) (Values, error) {
 // is the shape of a name and cannot tell a name from a secret that happens to
 // have that shape.
 func (v Values) Validate() error {
+	_, err := v.validated()
+	return err
+}
+
+// validated applies Validate's checks and returns a copy whose TrackerHost is
+// the single-address CIDR the tracker egress rule writes.
+func (v Values) validated() (Values, error) {
 	if !idRe.MatchString(v.Workspace) {
-		return fmt.Errorf("%w: workspace %q is not a short lower-case id", ErrBadValues, v.Workspace)
+		return Values{}, fmt.Errorf("%w: workspace %q is not a short lower-case id", ErrBadValues, v.Workspace)
 	}
 	if v.Namespace != NamespaceFor(v.Workspace) {
-		return fmt.Errorf("%w: namespace %q, want %q", ErrBadValues, v.Namespace, NamespaceFor(v.Workspace))
+		return Values{}, fmt.Errorf("%w: namespace %q, want %q", ErrBadValues, v.Namespace, NamespaceFor(v.Workspace))
 	}
 	if !nameRe.MatchString(v.TrackerDSNSecret) {
-		return fmt.Errorf("%w: trackerDSNSecret must be a Secret name, not a DSN", ErrBadValues)
+		return Values{}, fmt.Errorf("%w: trackerDSNSecret must be a Secret name, not a DSN", ErrBadValues)
 	}
 	// The Secret is the workspace's own: its name starts with the workspace id,
 	// so two workspaces cannot name one Secret and share a tracker database.
 	if !strings.HasPrefix(v.TrackerDSNSecret, v.Workspace+"-") {
-		return fmt.Errorf("%w: trackerDSNSecret %q must start with %q", ErrBadValues, v.TrackerDSNSecret, v.Workspace+"-")
+		return Values{}, fmt.Errorf("%w: trackerDSNSecret %q must start with %q", ErrBadValues, v.TrackerDSNSecret, v.Workspace+"-")
 	}
+	host, err := trackerHostPrefix(v.TrackerHost)
+	if err != nil {
+		return Values{}, err
+	}
+	v.TrackerHost = host.String()
 	for _, c := range Components {
 		if !digestRe.MatchString(v.Images[c]) {
-			return fmt.Errorf("%w: images.%s must be repo@sha256:<digest>", ErrBadValues, c)
+			return Values{}, fmt.Errorf("%w: images.%s must be repo@sha256:<digest>", ErrBadValues, c)
 		}
 	}
 	keys := make([]string, 0, len(v.Images))
@@ -133,10 +157,10 @@ func (v Values) Validate() error {
 	sort.Strings(keys) // the error names the first unknown key, the same on every run
 	for _, c := range keys {
 		if !contains(Components, c) {
-			return fmt.Errorf("%w: images.%s is not a component", ErrBadValues, c)
+			return Values{}, fmt.Errorf("%w: images.%s is not a component", ErrBadValues, c)
 		}
 	}
-	return nil
+	return v, nil
 }
 
 func contains(list []string, s string) bool {
@@ -148,6 +172,17 @@ func contains(list []string, s string) bool {
 	return false
 }
 
+// trackerHostPrefix returns the tracker's address as the single-address prefix
+// a NetworkPolicy ipBlock takes.
+func trackerHostPrefix(host string) (netip.Prefix, error) {
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("%w: trackerHost %q must be one IP address, not a name or a range", ErrBadValues, host)
+	}
+	addr = addr.Unmap()
+	return netip.PrefixFrom(addr, addr.BitLen()), nil
+}
+
 // Render returns the workspace's town as resources sorted by kind, namespace
 // and name. Same values, same bytes.
 func Render(v Values) ([]Resource, error) { return render(v, yaml.Marshal) }
@@ -155,7 +190,8 @@ func Render(v Values) ([]Resource, error) { return render(v, yaml.Marshal) }
 // render is Render over a marshal function, so a test can make marshaling
 // fail.
 func render(v Values, marshal func(any) ([]byte, error)) ([]Resource, error) {
-	if err := v.Validate(); err != nil {
+	v, err := v.validated()
+	if err != nil {
 		return nil, err
 	}
 	ws, ns := v.Workspace, v.Namespace
@@ -192,8 +228,8 @@ func render(v Values, marshal func(any) ([]byte, error)) ([]Resource, error) {
 	add("NetworkPolicy", "networking.k8s.io/v1", true, ws+"-default-deny", map[string]any{
 		"spec": map[string]any{"podSelector": map[string]any{}, "policyTypes": []any{"Ingress", "Egress"}},
 	})
-	// The daemon reaches the tracker: trackerd's pods accept the daemon's on
-	// trackerd's port, and the daemon may egress to them. The peers are
+	// The daemon reaches trackerd: trackerd's pods accept the daemon's traffic
+	// on trackerd's port, and the daemon may egress to them. The peers are
 	// podSelectors with no namespaceSelector, so they select pods in this
 	// namespace only, by this workspace's labels.
 	add("NetworkPolicy", "networking.k8s.io/v1", true, ws+"-allow-ingress", map[string]any{
@@ -202,13 +238,13 @@ func render(v Values, marshal func(any) ([]byte, error)) ([]Resource, error) {
 			"policyTypes": []any{"Ingress"},
 			"ingress": []any{map[string]any{
 				"from":  []any{map[string]any{"podSelector": labelSelector(componentLabels(ws, "daemon"))}},
-				"ports": []any{tcpPort(trackerPort)},
+				"ports": []any{tcpPort(trackerdPort)},
 			}},
 		},
 	})
-	// Egress is open to the tracker's host (trackerd's pods, by their labels in
-	// this namespace) and to the cluster DNS, and to nothing else. The DNS peer
-	// is the one rule naming another namespace: kube-system's kube-dns pods.
+	// A workspace pod egresses to this workspace's trackerd and to the cluster
+	// DNS, and to nothing else. The DNS peer is one of the two rules that name
+	// something outside this namespace: kube-system's kube-dns pods.
 	add("NetworkPolicy", "networking.k8s.io/v1", true, ws+"-allow-egress", map[string]any{
 		"spec": map[string]any{
 			"podSelector": labelSelector(map[string]any{"gt.dev/workspace": ws}),
@@ -216,7 +252,7 @@ func render(v Values, marshal func(any) ([]byte, error)) ([]Resource, error) {
 			"egress": []any{
 				map[string]any{
 					"to":    []any{map[string]any{"podSelector": labelSelector(componentLabels(ws, "trackerd"))}},
-					"ports": []any{tcpPort(trackerPort)},
+					"ports": []any{tcpPort(trackerdPort)},
 				},
 				map[string]any{
 					"to": []any{map[string]any{
@@ -229,6 +265,19 @@ func render(v Values, marshal func(any) ([]byte, error)) ([]Resource, error) {
 					},
 				},
 			},
+		},
+	})
+	// trackerd reaches the tracker database outside the rendered town. The
+	// values state its address because a NetworkPolicy ipBlock matches only
+	// addresses; the rule admits every port on that one address, since the port
+	// lives in the DSN Secret, which the renderer cannot read.
+	add("NetworkPolicy", "networking.k8s.io/v1", true, ws+"-allow-tracker-egress", map[string]any{
+		"spec": map[string]any{
+			"podSelector": labelSelector(componentLabels(ws, "trackerd")),
+			"policyTypes": []any{"Egress"},
+			"egress": []any{map[string]any{
+				"to": []any{map[string]any{"ipBlock": map[string]any{"cidr": v.TrackerHost}}},
+			}},
 		},
 	})
 	for _, c := range Components {
@@ -250,7 +299,7 @@ func render(v Values, marshal func(any) ([]byte, error)) ([]Resource, error) {
 		}})
 		if c == "trackerd" {
 			add("Service", "v1", true, name, map[string]any{"spec": map[string]any{
-				"selector": sel, "ports": []any{map[string]any{"port": trackerPort}},
+				"selector": sel, "ports": []any{map[string]any{"port": trackerdPort}},
 			}})
 		}
 	}
