@@ -161,6 +161,45 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 		}
 	})
 
+	t.Run("a commit export refuses a commit with no commit_order", func(t *testing.T) {
+		t.Parallel()
+		d, _ := gcTestDaemon(t)
+		d.maint.archiveRead = func(context.Context, *Daemon, string, ArchiveWatermark) ([]archiveCommit, error) {
+			return []archiveCommit{{Hash: "h1", Committer: "c", Date: gcTestNow, Message: "first"}}, nil // Order 0
+		}
+		err := d.maintenanceArchiveCommits(context.Background(), t.TempDir(), "gt", ArchiveWatermark{})
+		if err == nil || !strings.Contains(err.Error(), "commit_order 0") {
+			t.Errorf("commit without a commit_order = %v, want it refused", err)
+		}
+	})
+
+	t.Run("a commit export reports an archive path it cannot stat", func(t *testing.T) {
+		t.Parallel()
+		d, _ := gcTestDaemon(t)
+		d.maint.archiveRead = func(context.Context, *Daemon, string, ArchiveWatermark) ([]archiveCommit, error) {
+			return []archiveCommit{{Hash: "h1", Committer: "c", Date: gcTestNow, Message: "first", Order: 1}}, nil
+		}
+		parent := filepath.Join(t.TempDir(), "not-a-dir")
+		if err := os.WriteFile(parent, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.maintenanceArchiveCommits(context.Background(), parent, "gt", ArchiveWatermark{}); err == nil {
+			t.Error("a commit export used an archive path under a regular file")
+		}
+	})
+
+	t.Run("an events export reports an archive path it cannot stat", func(t *testing.T) {
+		t.Parallel()
+		d, _ := gcTestDaemon(t)
+		parent := filepath.Join(t.TempDir(), "not-a-dir")
+		if err := os.WriteFile(parent, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.maintenanceArchiveEvents(context.Background(), parent, "gt", zero); err == nil {
+			t.Error("an events export used an archive path under a regular file")
+		}
+	})
+
 	t.Run("an events export refuses an uncomparable watermark", func(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)

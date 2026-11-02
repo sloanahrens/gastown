@@ -923,3 +923,48 @@ func TestMaintenanceArchiveBoundsTheWholeStep(t *testing.T) {
 		t.Errorf("archive read deadline = %v, want it within %v of now", deadline, maintenanceArchiveTimeout)
 	}
 }
+
+// TestMaintenanceArchiveReportsAFailedRollback: an export that wrote rows and
+// then cannot undo them reports the failed rollback, so the leftover is visible
+// rather than read as a clean export (gt-7nxj4).
+func TestMaintenanceArchiveReportsAFailedRollback(t *testing.T) {
+	t.Parallel()
+	d, logs := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"gt": {633 * mib, 0}}
+	dir := t.TempDir()
+	d.patrolConfig = archiveConfig(dir)
+	withArchiveFakes(d, f, nil, nil)
+
+	columns := []string{"id", "created_at"}
+	full := make([][]string, maintenanceArchiveEventsBatch) // a full batch keeps the loop reading
+	for i := range full {
+		full[i] = []string{strconv.Itoa(i + 1), "2026-10-01 00:00:00"}
+	}
+	path := eventsArchiveFile(dir, "gt")
+	reads := 0
+	d.maint.archiveEventsRead = func(context.Context, *Daemon, string, EventsArchiveWatermark, int) (archiveEvents, error) {
+		reads++
+		if reads == 1 {
+			return archiveEvents{Columns: columns, Rows: full}, nil
+		}
+		// Replace the written file with a non-empty directory: the export's
+		// rollback (remove, because it created the file) must fail and say so.
+		if err := os.Remove(path); err != nil {
+			t.Errorf("removing the written archive: %v", err)
+		}
+		if err := os.Mkdir(path, 0o755); err != nil {
+			t.Errorf("replacing the archive with a directory: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "keep"), []byte("x"), 0o644); err != nil {
+			t.Errorf("filling the replacement directory: %v", err)
+		}
+		return archiveEvents{}, errors.New("read failed")
+	}
+
+	d.runScheduledMaintenance()
+
+	if !strings.Contains(logs.String(), "could not be rolled back") {
+		t.Errorf("log does not report the failed rollback:\n%s", logs.String())
+	}
+}
