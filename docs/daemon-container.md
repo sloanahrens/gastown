@@ -1083,8 +1083,16 @@ day.
 - [ ] **No `gt sling` is running and no container-gate job is running.** The
       cutover waits for both (below), but look first: a window that starts with
       either busy spends its 30 minutes waiting.
+- [ ] **The live compose starts two containers.** Besides the daemon it starts
+      `sweep-dind`, a privileged Docker-in-Docker engine on the project's
+      internal network that the daemon waits on. The compose names its image by
+      digest (`templates.DindImage`, `data.forgejo.org/oci/docker@sha256:...`);
+      that digest must still be served by the engine the daemon will use
+      (`gt daemon rehearse` pulls it). Reasons:
+      `docs/plans/2026-10-28-daemon-container-design.md`.
 - [ ] **A recorded baseline.** Before starting, keep the output of
-      `docker --context desktop-linux ps --format '{{.Names}} {{.Status}}'`,
+      `docker --context desktop-linux ps --format '{{.Names}} {{.Status}}'`
+      (it shows neither container yet),
       `cat <live-town>/daemon/state.json`, and
       `launchctl print gui/$(id -u)/com.gastown.daemon`, for the comparison at
       the end and for the rollback.
@@ -1119,10 +1127,11 @@ in whenever one ends badly. Nothing is rolled back by itself.
    `state.json` to name `container` and the container's name as owner. If the
    guard refuses, it prints that the old daemon is stopped and the restore
    command. If the container starts and never takes the town, it prints the
-   container's logs command and the rollback.
+   container's logs command and the rollback. Starting the daemon starts
+   `sweep-dind` first; the daemon waits for it to be healthy.
 5. **Wait for the container daemon's second heartbeat**, up to 6 minutes. If
    there is none it reports the container unhealthy, with its logs command and
-   the rollback.
+   the rollback. `docker ps` now shows `sweep-dind` and the daemon.
 
 Expected on success, last lines: `container owns the town and has beaten twice.`
 then `✓ Cutover to container done.`
@@ -1167,7 +1176,7 @@ at the first sign of trouble.
 - [ ] `<live-town>/.runtime/host/probes.json` was modified in the last 180
       seconds, and the host agent tab is still running.
 - [ ] `docker --context desktop-linux ps --format '{{.Names}} {{.Status}}'`
-      shows the live container and its engine up and not restarting, and
+      shows the live container and `sweep-dind` up and not restarting, and
       matches the baseline otherwise.
 - [ ] `gt doctor --check om-token-expiry` reports OK or a warning with a date
       and the days left; it is skipped only while the setting is unset.
@@ -1210,6 +1219,12 @@ Before it, these must be true:
 Expected on success: `launchd owns the town and has beaten twice.` then
 `✓ Cutover to launchd done.` If a step fails, the command prints the state it
 left and the command to restore the other side, as it does going forward.
+
+The cutover stops only the daemon container (`compose stop daemon`); `sweep-dind`
+keeps running, with its volume. To remove both containers, run
+`docker --context desktop-linux compose -p gt-live -f <live-town>/daemon/container/compose.yml down`
+once the rollback has succeeded. It keeps the volume; never add `-v` without the
+overseer.
 
 **After the rollback, switch the setting back.** The rollback does not switch
 `daemon.supervisor` either. Make the switch described in the cutover section
