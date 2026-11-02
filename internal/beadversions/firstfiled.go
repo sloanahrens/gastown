@@ -19,12 +19,13 @@ func FiledText(row metrics.ArchiveIssueRow) string {
 
 // ImportFirstFiled records each row as the bead's version at its created_at
 // under the archive actor, and returns how many it recorded and how many the
-// store already held.
+// store already held. A row the store refuses does not stop the rest; the
+// returned error names every refused row and still carries the counts reached.
 //
 // It records every row it is given, so the caller must not pass a row whose
-// text may not be the text as filed: metrics.FirstFiled.EditedSameDay marks a
-// row first carried by a commit on its own filed day, which may already hold
-// an edit, and the command leaves those out.
+// text may not be the text as filed: metrics.FirstFiled.AsFiled marks a row
+// the archive shows unwritten since creation, and the command leaves the rest
+// out.
 func ImportFirstFiled(store Store, first []metrics.FirstFiled, text func(metrics.ArchiveIssueRow) string) (put, skipped int, err error) {
 	if store == nil {
 		return 0, 0, errors.New("beadversions: import with no store")
@@ -32,11 +33,16 @@ func ImportFirstFiled(store Store, first []metrics.FirstFiled, text func(metrics
 	if text == nil {
 		return 0, 0, errors.New("beadversions: import with no text function")
 	}
+	// One bead the store refuses must not cost the rest of the import: each row
+	// stands alone, so the loop records what it can and returns every refusal at
+	// the end with the counts it reached.
+	var refused []error
 	for _, f := range first {
 		bead := f.Row.ID
 		versions, err := store.Versions(bead)
 		if err != nil {
-			return put, skipped, fmt.Errorf("importing bead %s: %w", bead, err)
+			refused = append(refused, fmt.Errorf("importing bead %s: %w", bead, err))
+			continue
 		}
 		t := text(f.Row)
 		if len(versions) > 0 && versions[len(versions)-1].Text == t {
@@ -48,7 +54,8 @@ func ImportFirstFiled(store Store, first []metrics.FirstFiled, text func(metrics
 		}
 		recorded, err := store.Put(bead, t, archiveActor, f.Row.CreatedAt)
 		if err != nil {
-			return put, skipped, fmt.Errorf("importing bead %s: %w", bead, err)
+			refused = append(refused, fmt.Errorf("importing bead %s: %w", bead, err))
+			continue
 		}
 		if !recorded {
 			skipped++
@@ -56,5 +63,5 @@ func ImportFirstFiled(store Store, first []metrics.FirstFiled, text func(metrics
 		}
 		put++
 	}
-	return put, skipped, nil
+	return put, skipped, errors.Join(refused...)
 }

@@ -65,6 +65,34 @@ func TestFirstFiledVersionsComparesDaysInTheCommitsZone(t *testing.T) {
 	}
 }
 
+// TestFirstFiledVersionsMarksAsFiledFromUpdatedAt pins the import's proof: a
+// row is the text as filed only when its updated_at equals its created_at, and
+// a row that does not date its last write is never taken as filed.
+func TestFirstFiledVersionsMarksAsFiledFromUpdatedAt(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 9, 10, 9, 0, 0, 0, time.UTC)
+	got := FirstFiledVersions([]ArchiveCommit{{
+		At: at,
+		Rows: []ArchiveIssueRow{
+			{ID: "gt-clean", CreatedAt: at, UpdatedAt: at},
+			{ID: "gt-edited", CreatedAt: at, UpdatedAt: at.Add(time.Hour)},
+			{ID: "gt-undated", CreatedAt: at},
+		},
+	}})
+	if len(got) != 3 {
+		t.Fatalf("rows = %d, want 3", len(got))
+	}
+	if !got[0].AsFiled {
+		t.Error("gt-clean, written no more than at creation, is not marked as filed")
+	}
+	if got[1].AsFiled {
+		t.Error("gt-edited, written an hour after creation, is marked as filed")
+	}
+	if got[2].AsFiled {
+		t.Error("gt-undated, with no updated_at, is marked as filed")
+	}
+}
+
 func TestShapeFeaturesCountsBoxesAndConstraintWords(t *testing.T) {
 	t.Parallel()
 	row := ArchiveIssueRow{

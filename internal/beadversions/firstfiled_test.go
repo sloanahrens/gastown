@@ -108,6 +108,42 @@ func (s *stubStore) AsOf(string, time.Time) (Version, error) {
 	return Version{}, errors.New("AsOf is not used by the import")
 }
 
+// TestImportFirstFiledKeepsGoingAfterARefusedRow drives a store that refuses
+// one bead: the rows after it are still recorded, and the error names the
+// refused bead.
+func TestImportFirstFiledKeepsGoingAfterARefusedRow(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 9, 10, 9, 0, 0, 0, time.UTC)
+	store := NewMemoryStore()
+	// gt-b already ends at a later text, so its first-filed row cannot be
+	// appended in order.
+	if _, err := store.Put("gt-b", "later text", "dispatch", at.Add(time.Hour)); err != nil {
+		t.Fatalf("seeding the store: %v", err)
+	}
+	first := []metrics.FirstFiled{
+		filedRow("gt-a", "## Goal\na", "- [ ] a", at),
+		filedRow("gt-b", "## Goal\nb", "- [ ] b", at.Add(time.Minute)),
+		filedRow("gt-c", "## Goal\nc", "- [ ] c", at.Add(2*time.Minute)),
+	}
+
+	put, skipped, err := ImportFirstFiled(store, first, FiledText)
+	if err == nil || !strings.Contains(err.Error(), "importing bead gt-b") {
+		t.Fatalf("error = %v, want it to name the refused bead gt-b", err)
+	}
+	if put != 2 || skipped != 0 {
+		t.Fatalf("put, skipped = %d, %d, want 2, 0: the rows around the refusal are recorded", put, skipped)
+	}
+	for _, id := range []string{"gt-a", "gt-c"} {
+		versions, err := store.Versions(id)
+		if err != nil {
+			t.Fatalf("Versions(%s): %v", id, err)
+		}
+		if len(versions) != 1 {
+			t.Errorf("%s has %d version(s), want the 1 recorded after the refusal", id, len(versions))
+		}
+	}
+}
+
 func TestImportFirstFiledRefusesWhatItCannotRecord(t *testing.T) {
 	t.Parallel()
 	day := time.Date(2026, 9, 10, 9, 0, 0, 0, time.UTC)

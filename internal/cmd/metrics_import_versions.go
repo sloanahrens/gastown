@@ -33,16 +33,18 @@ var metricsImportVersionsCmd = &cobra.Command{
 each bead's text as filed as its version at the bead's created_at, under the
 actor "archive".
 
-One export commit is sampled per local day, the day's last, and the first commit
-carrying a bead supplies its text, so the store starts with history from before
-it existed. The text is the description, a blank line, then the acceptance
-criteria. A bead whose created_at falls on the sampled day of the commit that
-first carries it cannot be told apart from a bead edited later that day, so it
-is not imported: the store would hold a possibly edited text as the text as
-filed, and it cannot correct that text afterwards, because a later version
-must carry a later time than the created_at it would replace. The receipt
-counts those beads as edited_same_day. Running the command again records
-nothing: a bead whose store already ends with the text is skipped.
+One export commit is sampled per local day, the day's last, and the first
+sampled commit carrying a bead supplies its text, so the store starts with
+history from before it existed. The text is the description, a blank line, then
+the acceptance criteria.
+
+The export proves a text is the text as filed only when the row's updated_at
+equals its created_at: a bead written after creation may hold an edit, and the
+store cannot correct a text recorded at its created_at, because a later version
+must carry a later time than the created_at it would replace. The import leaves
+those beads out, and the receipt counts them as edited after creation. Running
+the command again records nothing: a bead whose store already ends with the
+text is skipped.
 
 The export is read only: git log and git show, never a write.`,
 	Args: cobra.NoArgs,
@@ -138,15 +140,16 @@ func runMetricsImportVersions(ctx context.Context, out io.Writer, env importVers
 	}
 	damaged := store.Skipped()
 
-	// A row first carried by a commit on its own filed day may already hold an
-	// edit made that day, and the store refuses a time that does not advance,
-	// so a wrong text recorded now could never be corrected. Leave those rows
-	// out and count them.
+	// The store refuses a time that does not advance, so a text it records now
+	// at created_at could never be corrected. Import only a row whose
+	// updated_at still equals its created_at: the archive then shows no write
+	// since the bead was created, and the row is the text as filed. Leave the
+	// rest out and count them.
 	importable := make([]metrics.FirstFiled, 0, len(first))
-	sameDay := 0
+	edited := 0
 	for _, f := range first {
-		if f.EditedSameDay {
-			sameDay++
+		if !f.AsFiled {
+			edited++
 			continue
 		}
 		importable = append(importable, f)
@@ -156,12 +159,12 @@ func runMetricsImportVersions(ctx context.Context, out io.Writer, env importVers
 
 	window := commits[0].At.Format(time.DateOnly) + ".." + commits[len(commits)-1].At.Format(time.DateOnly)
 	line := fmt.Sprintf(
-		"import-versions %s: %d sampled day(s) %s, %d first-filed bead(s), %d edited_same_day (not imported); put %d, skipped %d; %d row(s) dropped, %d damaged store line(s); store %s",
-		rig, len(commits), window, len(first), sameDay, put, skipped, dropped.Count(), damaged, path)
+		"import-versions %s: %d sampled day(s) %s, %d first-filed bead(s), %d edited after creation (not imported); put %d, skipped %d; %d row(s) dropped, %d damaged store line(s); store %s",
+		rig, len(commits), window, len(first), edited, put, skipped, dropped.Count(), damaged, path)
 	if importErr != nil {
-		// The receipt still reports what was recorded before the refusal, so a
-		// failed import says how far it got.
-		line += fmt.Sprintf("; stopped: %v", importErr)
+		// The import carries on past a refused row, so the receipt reports what
+		// it recorded and this names every row it could not.
+		line += fmt.Sprintf("; failed: %v", importErr)
 	}
 	if _, err := io.WriteString(out, line+"\n"); err != nil {
 		return err

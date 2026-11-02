@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -18,19 +17,38 @@ import (
 	"github.com/steveyegge/gastown/internal/metrics"
 )
 
-// importVersionsIssues is one archive issues.jsonl with a bead filed the day
-// before the sampled commit, so its text is the text as filed.
-const importVersionsIssues = `{"id":"gt-a","description":"## Goal\ntext","acceptance_criteria":"- [ ] a","created_at":"2026-09-09T09:00:00Z"}` + "\n"
+// importVersionsSHA is the sampled commit the fake archive answers for: 40
+// lowercase hex digits, the form git prints.
+const importVersionsSHA = "0123456789abcdef0123456789abcdef01234567"
 
-// importVersionsTwoIssues holds two beads filed before the sampled commit, so
-// a test that stops midway has a first row already recorded.
+// importVersionsIssues is one archive issues.jsonl with a bead written no more
+// since creation than at creation, so its text is the text as filed.
+const importVersionsIssues = `{"id":"gt-a","description":"## Goal\ntext","acceptance_criteria":"- [ ] a","created_at":"2026-09-09T09:00:00Z","updated_at":"2026-09-09T09:00:00Z"}` + "\n"
+
+// importVersionsTwoIssues holds two as-filed beads, so a test that refuses one
+// append has another row either side of it.
 const importVersionsTwoIssues = importVersionsIssues +
-	`{"id":"gt-b","description":"## Goal\nother","acceptance_criteria":"- [ ] b","created_at":"2026-09-09T10:00:00Z"}` + "\n"
+	`{"id":"gt-b","description":"## Goal\nother","acceptance_criteria":"- [ ] b","created_at":"2026-09-09T10:00:00Z","updated_at":"2026-09-09T10:00:00Z"}` + "\n"
 
-// importVersionsSameDayIssues holds one bead filed before the sampled commit
-// and one filed on the commit's own day.
-const importVersionsSameDayIssues = importVersionsIssues +
-	`{"id":"gt-b","description":"## Goal\nedited","acceptance_criteria":"- [ ] b","created_at":"2026-09-10T09:00:00Z"}` + "\n"
+// importVersionsThreeIssues holds three as-filed beads, so a row after a
+// refused one can still be recorded.
+const importVersionsThreeIssues = importVersionsTwoIssues +
+	`{"id":"gt-c","description":"## Goal\nthird","acceptance_criteria":"- [ ] c","created_at":"2026-09-09T11:00:00Z","updated_at":"2026-09-09T11:00:00Z"}` + "\n"
+
+// importVersionsEditedIssues holds one as-filed bead and one bead filed on the
+// sampled commit's own day and written again later that day, so its text is
+// not the text as filed.
+const importVersionsEditedIssues = importVersionsIssues +
+	`{"id":"gt-b","description":"## Goal\nedited","acceptance_criteria":"- [ ] b","created_at":"2026-09-10T09:00:00Z","updated_at":"2026-09-10T12:00:00Z"}` + "\n"
+
+// importVersionsLateFiledIssues holds a bead filed after its day's last export
+// and so first carried by the next day's sample, in two forms: one written
+// again before the sample and one untouched. The filed-day flag cannot tell
+// them apart, because neither was filed on the sample's day; the row's own
+// updated_at can.
+const importVersionsLateFiledIssues = importVersionsIssues +
+	`{"id":"gt-edited","description":"## Goal\nedited late","acceptance_criteria":"- [ ] e","created_at":"2026-09-09T23:50:00Z","updated_at":"2026-09-10T08:00:00Z"}` + "\n" +
+	`{"id":"gt-clean","description":"## Goal\nuntouched late","acceptance_criteria":"- [ ] c","created_at":"2026-09-09T23:50:00Z","updated_at":"2026-09-09T23:50:00Z"}` + "\n"
 
 // importVersionsRunner is the archive's 15-minute export as the fake git
 // answers it: one commit holding issues, and the commit's issues.jsonl.
@@ -42,7 +60,7 @@ func importVersionsRunner(issues string, failOn string) metrics.Runner {
 		}
 		switch {
 		case strings.Contains(joined, " log "):
-			return []byte(shapeSHA + " 2026-09-10T23:00:00Z\n"), nil
+			return []byte(importVersionsSHA + " 2026-09-10T23:00:00Z\n"), nil
 		case strings.Contains(joined, " show ") && strings.Contains(joined, ":gt/issues.jsonl"):
 			return []byte(issues), nil
 		default:
@@ -68,6 +86,25 @@ func importVersionsStore(t *testing.T, path string) beadversions.Version {
 		t.Fatalf("store line is not a version: %v", err)
 	}
 	return v
+}
+
+// importVersionsBeads reads every version the store holds, keyed by bead, so a
+// test asserts which beads were recorded rather than how.
+func importVersionsBeads(t *testing.T, path string) map[string]beadversions.Version {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the store was not written: %v", err)
+	}
+	beads := make(map[string]beadversions.Version)
+	for _, line := range bytes.Split(bytes.TrimSpace(data), []byte("\n")) {
+		var v beadversions.Version
+		if err := json.Unmarshal(line, &v); err != nil {
+			t.Fatalf("store line is not a version: %v", err)
+		}
+		beads[v.Bead] = v
+	}
+	return beads
 }
 
 // importVersionsFakeStore is a store the test drives. It answers versions from
@@ -101,12 +138,15 @@ func (importVersionsRefusingWriter) Write([]byte) (int, error) {
 	return 0, errors.New("output refused")
 }
 
+// TestMetricsImportVersionsUsesTheInjectedRunner proves the archive is read
+// only through the injected runner: the runner's issues are what the store
+// holds, and the town it names has no archive of its own.
 func TestMetricsImportVersionsUsesTheInjectedRunner(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	calls := &[][]string{}
+	calls := 0
 	run := func(ctx context.Context, argv []string) ([]byte, error) {
-		*calls = append(*calls, argv)
+		calls++
 		return importVersionsRunner(importVersionsIssues, "")(ctx, argv)
 	}
 	env := importVersionsEnv{Town: town, Rig: "gt", Run: run}
@@ -115,14 +155,8 @@ func TestMetricsImportVersionsUsesTheInjectedRunner(t *testing.T) {
 	if err := runMetricsImportVersions(context.Background(), &out, env); err != nil {
 		t.Fatalf("runMetricsImportVersions: %v", err)
 	}
-
-	repo := filepath.Join(town, ".dolt-archive", "git")
-	wantLog := []string{"git", "-C", repo, "log", "--first-parent", "--format=%H %cI", "--", "gt/issues.jsonl"}
-	if len(*calls) == 0 || !slices.Equal((*calls)[0], wantLog) {
-		t.Fatalf("first runner call = %v, want the archive log %v", *calls, wantLog)
-	}
-	if want := []string{"git", "-C", repo, "show", shapeSHA + ":gt/issues.jsonl"}; !slices.ContainsFunc(*calls, func(argv []string) bool { return slices.Equal(argv, want) }) {
-		t.Errorf("no call read the sampled commit's issues.jsonl (%v): %v", want, *calls)
+	if calls == 0 {
+		t.Fatal("the injected runner never ran, so the archive was not read through it")
 	}
 
 	// The default path is <town>/.runtime/metrics/bead-versions.jsonl, and the
@@ -166,13 +200,13 @@ func TestMetricsImportVersionsWritesTheGivenPath(t *testing.T) {
 	}
 }
 
-// TestMetricsImportVersionsLeavesOutABeadFromItsFiledDay drives the import's
-// same-day limit: a bead first carried by a commit on its own filed day may
-// already hold an edit, so it is not recorded and the receipt counts it.
-func TestMetricsImportVersionsLeavesOutABeadFromItsFiledDay(t *testing.T) {
+// TestMetricsImportVersionsLeavesOutABeadEditedAfterCreation drives the
+// import's proof: a bead written again after its created_at may not hold its
+// filed text, so it is not recorded and the receipt counts it.
+func TestMetricsImportVersionsLeavesOutABeadEditedAfterCreation(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	env := importVersionsEnv{Town: town, Rig: "gt", Run: importVersionsRunner(importVersionsSameDayIssues, "")}
+	env := importVersionsEnv{Town: town, Rig: "gt", Run: importVersionsRunner(importVersionsEditedIssues, "")}
 
 	var out bytes.Buffer
 	if err := runMetricsImportVersions(context.Background(), &out, env); err != nil {
@@ -181,10 +215,39 @@ func TestMetricsImportVersionsLeavesOutABeadFromItsFiledDay(t *testing.T) {
 
 	path := filepath.Join(town, ".runtime", "metrics", "bead-versions.jsonl")
 	if v := importVersionsStore(t, path); v.Bead != "gt-a" {
-		t.Errorf("stored bead = %q, want gt-a: gt-b was filed on the sampled day", v.Bead)
+		t.Errorf("stored bead = %q, want gt-a: gt-b was written after creation", v.Bead)
 	}
-	if got := out.String(); !strings.Contains(got, "1 edited_same_day (not imported)") || !strings.Contains(got, "put 1, skipped 0") {
-		t.Errorf("receipt = %q, want the same-day bead counted and only gt-a put", got)
+	if got := out.String(); !strings.Contains(got, "1 edited after creation (not imported)") || !strings.Contains(got, "put 1, skipped 0") {
+		t.Errorf("receipt = %q, want the edited bead counted and only gt-a put", got)
+	}
+}
+
+// TestMetricsImportVersionsLeavesOutALateFiledBeadThatWasEdited is the om
+// finding's regression: a bead filed after its day's last export is first
+// carried by the next day's sample, so the filed-day flag does not mark it; its
+// own updated_at does, and the untouched bead beside it is still imported.
+func TestMetricsImportVersionsLeavesOutALateFiledBeadThatWasEdited(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	env := importVersionsEnv{Town: town, Rig: "gt", Run: importVersionsRunner(importVersionsLateFiledIssues, "")}
+
+	var out bytes.Buffer
+	if err := runMetricsImportVersions(context.Background(), &out, env); err != nil {
+		t.Fatalf("runMetricsImportVersions: %v", err)
+	}
+
+	path := filepath.Join(town, ".runtime", "metrics", "bead-versions.jsonl")
+	beads := importVersionsBeads(t, path)
+	if _, ok := beads["gt-edited"]; ok {
+		t.Error("gt-edited was recorded: it was written after creation, so its text is not the text as filed")
+	}
+	for _, id := range []string{"gt-a", "gt-clean"} {
+		if _, ok := beads[id]; !ok {
+			t.Errorf("%s was not recorded: nothing wrote it after creation", id)
+		}
+	}
+	if got := out.String(); !strings.Contains(got, "1 edited after creation (not imported)") || !strings.Contains(got, "put 2, skipped 0") {
+		t.Errorf("receipt = %q, want the edited late-filed bead counted and the other two put", got)
 	}
 }
 
@@ -251,7 +314,7 @@ func TestMetricsImportVersionsRefusesWhatItCannotRead(t *testing.T) {
 		{
 			name: "a sampled commit cannot be read",
 			env: func(t *testing.T) importVersionsEnv {
-				return importVersionsEnv{Town: t.TempDir(), Rig: "gt", Run: importVersionsRunner(importVersionsIssues, "show "+shapeSHA)}
+				return importVersionsEnv{Town: t.TempDir(), Rig: "gt", Run: importVersionsRunner(importVersionsIssues, "show "+importVersionsSHA)}
 			},
 			want: "issues.jsonl at",
 		},
@@ -280,14 +343,14 @@ func TestMetricsImportVersionsRefusesWhatItCannotRead(t *testing.T) {
 	}
 }
 
-// TestMetricsImportVersionsStopsWhenTheStoreCannotBeAppended drives a refused
-// second Put: the run fails, and the receipt still reports the row it recorded
-// before the refusal.
-func TestMetricsImportVersionsStopsWhenTheStoreCannotBeAppended(t *testing.T) {
+// TestMetricsImportVersionsKeepsGoingWhenTheStoreRefusesARow drives a refused
+// second Put: the third row is still recorded, the run fails naming the
+// refused bead, and the receipt reports every row it recorded.
+func TestMetricsImportVersionsKeepsGoingWhenTheStoreRefusesARow(t *testing.T) {
 	t.Parallel()
 	env := importVersionsEnv{
 		Town: t.TempDir(), Rig: "gt",
-		Run: importVersionsRunner(importVersionsTwoIssues, ""),
+		Run: importVersionsRunner(importVersionsThreeIssues, ""),
 		NewStore: func(string) versionStore {
 			return &importVersionsFakeStore{Store: beadversions.NewMemoryStore(), failPut: 2}
 		},
@@ -295,11 +358,11 @@ func TestMetricsImportVersionsStopsWhenTheStoreCannotBeAppended(t *testing.T) {
 
 	var out bytes.Buffer
 	err := runMetricsImportVersions(context.Background(), &out, env)
-	if err == nil || !strings.Contains(err.Error(), "import-versions: importing bead") {
-		t.Fatalf("error = %v, want the refused append named", err)
+	if err == nil || !strings.Contains(err.Error(), "importing bead gt-b") {
+		t.Fatalf("error = %v, want it to name the refused bead gt-b", err)
 	}
-	if got := out.String(); !strings.Contains(got, "put 1") || !strings.Contains(got, "stopped:") {
-		t.Errorf("receipt = %q, want it to report the one put and the stop", got)
+	if got := out.String(); !strings.Contains(got, "put 2, skipped 0") || !strings.Contains(got, "failed:") {
+		t.Errorf("receipt = %q, want the two puts and the failure", got)
 	}
 }
 

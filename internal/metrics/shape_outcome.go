@@ -41,6 +41,11 @@ type ArchiveIssueRow struct {
 	Description        string
 	AcceptanceCriteria string
 	CreatedAt          time.Time
+	// UpdatedAt is the row's last-write stamp as the commit carries it. It
+	// equals CreatedAt while the tracker shows no write since the bead was
+	// created, and is zero when the row does not date its last write (which is
+	// never equal to the required non-zero CreatedAt).
+	UpdatedAt time.Time
 }
 
 // archiveIssueJSON is the part of one issues.jsonl line the decode reads.
@@ -49,6 +54,7 @@ type archiveIssueJSON struct {
 	Description        string `json:"description"`
 	AcceptanceCriteria string `json:"acceptance_criteria"`
 	CreatedAt          string `json:"created_at"`
+	UpdatedAt          string `json:"updated_at"`
 }
 
 // DecodeArchiveIssues parses one archive commit's issues.jsonl. A line that is
@@ -79,11 +85,19 @@ func DecodeArchiveIssues(data []byte, source string, dropped *Dropped) []Archive
 			dropped.Add(source, "missing or unparseable created_at")
 			continue
 		}
+		// A row the decode cannot date at its last write keeps its text and its
+		// created_at — the shape query reads neither UpdatedAt nor AsFiled — but
+		// UpdatedAt stays zero, so the import never reads it as as-filed.
+		updated, err := ParseTS(raw.UpdatedAt)
+		if err != nil {
+			updated = time.Time{}
+		}
 		rows = append(rows, ArchiveIssueRow{
 			ID:                 raw.ID,
 			Description:        raw.Description,
 			AcceptanceCriteria: raw.AcceptanceCriteria,
 			CreatedAt:          created,
+			UpdatedAt:          updated,
 		})
 	}
 	return rows
@@ -107,6 +121,12 @@ type ArchiveCommit struct {
 type FirstFiled struct {
 	Row           ArchiveIssueRow
 	EditedSameDay bool
+	// AsFiled says the row's UpdatedAt equals its CreatedAt: the archive shows
+	// no write since the bead was created, so the row's description and
+	// acceptance criteria are the text as filed. The import records a bead only
+	// when this holds, because it cannot correct a text stored at created_at.
+	// A row with no updated_at is not as filed.
+	AsFiled bool
 }
 
 // FirstFiledVersions walks the sampled commits oldest first and keeps, per
@@ -126,6 +146,7 @@ func FirstFiledVersions(commits []ArchiveCommit) []FirstFiled {
 			out = append(out, FirstFiled{
 				Row:           row,
 				EditedSameDay: row.CreatedAt.In(c.At.Location()).Format(time.DateOnly) == day,
+				AsFiled:       !row.UpdatedAt.IsZero() && row.UpdatedAt.Equal(row.CreatedAt),
 			})
 		}
 	}
