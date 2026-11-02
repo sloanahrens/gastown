@@ -2033,14 +2033,15 @@ function drawBirds(box, s) {
     if (b.state === "error" || b.state === "withheld") row.append(el("div", "badc", b.note || b.state));
     else if (b.summary) row.append(el("div", "bsum", b.summary));
     // The bird's topic pages, newest first, as links to the same sandboxed route.
-    // The name is checked against the shape the server serves before it is joined
-    // into a path, the title is text, and a row with no pages draws nothing.
-    const pages = (b.pages || []).filter(p => /^[a-z0-9][a-z0-9-]{0,60}\.html$/.test(p.name || ""));
+    // The server lists only the names its route serves. The name is encoded as one
+    // path segment, so a link stays in the bird's directory even for a name it
+    // does not serve. The title is text, and a row with no pages draws nothing.
+    const pages = b.pages || [];
     if (pages.length) {
       const list = el("div", "bpages");
       for (const p of pages) {
         const a = el("a", "", p.title || p.name);
-        a.href = "/birds/" + b.bird + "/" + p.name;
+        a.href = "/birds/" + b.bird + "/" + encodeURIComponent(p.name);
         a.target = "_blank";
         a.rel = "noopener";
         if (p.mtime) a.title = "written " + new Date(p.mtime).toLocaleString();

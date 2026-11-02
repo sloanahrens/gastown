@@ -276,14 +276,14 @@ func (r *BirdReportsReader) Read(now time.Time) []BirdReport {
 }
 
 // ReadPage returns the bytes of one of a bird's pages, daily.html,
-// daily.prev.html or a topic page named <slug>.html, for the route that serves it. The bird and the file are
-// checked against the names a bird writes before the path is built from them,
-// so the route never reaches another file: a name of another shape is refused,
-// and the path is joined from the two validated parts, never from a URL. The
-// bird directory and its reports directory must be real directories, and the
-// page a regular file under birdPageMaxBytes, so a link is refused rather than
-// followed. A page whose text looks like it holds a secret is refused too, and
-// the error names no part of that text.
+// daily.prev.html or a topic page named <slug>.html, for the route that serves
+// it. The bird and the file are checked against the names a bird writes before
+// the path is built from them, so the route never reaches another file: a name
+// of another shape is refused, and the path is joined from the two validated
+// parts, never from a URL. The bird directory and its reports directory must be
+// real directories, and the page a regular file under birdPageMaxBytes, so a
+// link is refused rather than followed. A page whose text looks like it holds a
+// secret is refused too, and the error names no part of that text.
 func (r *BirdReportsReader) ReadPage(bird, file string) ([]byte, error) {
 	if !birdReportsNameRe.MatchString(bird) {
 		return nil, errBirdPageRefused
@@ -330,7 +330,7 @@ func (r *BirdReportsReader) readBird(now time.Time, name string) (BirdReport, bo
 		Headline: name == r.headline,
 		HasPage:  pageIsFile && pageFi.Size() < birdPageMaxBytes,
 		HasPrev:  prevIsFile && prevFi.Size() < birdPageMaxBytes,
-		Pages:    birdTopicPages(reports),
+		Pages:    birdTopicPages(reports, birdTopicTitle),
 	}
 
 	raw, err := readReportsFile(filepath.Join(reports, birdSidecarName), birdSidecarMaxBytes)
@@ -533,9 +533,9 @@ var (
 // page, under the size cap. Each is listed by its own <title>, read from the
 // first birdTopicTitleScanBytes of the page; a page with no title, or one whose
 // title looks like it holds a secret, is listed by its name. Newest first, the
-// name breaking a tie, at most birdTopicPagesMax. A directory that cannot be
-// read lists nothing.
-func birdTopicPages(reports string) []BirdPage {
+// name breaking a tie, at most birdTopicPagesMax. Only the pages kept are read
+// for a title, through title. A directory that cannot be read lists nothing.
+func birdTopicPages(reports string, title func(path, fallback string) string) []BirdPage {
 	entries, err := os.ReadDir(reports)
 	if err != nil {
 		return nil
@@ -550,7 +550,7 @@ func birdTopicPages(reports string) []BirdPage {
 		if err != nil || !fi.Mode().IsRegular() || fi.Size() >= birdPageMaxBytes {
 			continue
 		}
-		pages = append(pages, BirdPage{Name: name, Title: birdTopicTitle(filepath.Join(reports, name), name), MTime: fi.ModTime().UTC()})
+		pages = append(pages, BirdPage{Name: name, MTime: fi.ModTime().UTC()})
 	}
 	sort.SliceStable(pages, func(i, j int) bool {
 		if !pages[i].MTime.Equal(pages[j].MTime) {
@@ -560,6 +560,9 @@ func birdTopicPages(reports string) []BirdPage {
 	})
 	if len(pages) > birdTopicPagesMax {
 		pages = pages[:birdTopicPagesMax]
+	}
+	for i := range pages {
+		pages[i].Title = title(filepath.Join(reports, pages[i].Name), pages[i].Name)
 	}
 	return pages
 }
