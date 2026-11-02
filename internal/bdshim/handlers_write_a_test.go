@@ -106,8 +106,8 @@ func TestHandlersRefuseAStoreThatCannotAnswer(t *testing.T) {
 		if code := Main(env); code != 1 {
 			t.Errorf("create with a flag-like title: exit code is %d, want 1", code)
 		}
-		if !strings.Contains(stderr.String(), "create") {
-			t.Errorf("create with a flag-like title: stderr = %q, want the shim's message", stderr.String())
+		if !strings.Contains(stderr.String(), beads.ErrFlagTitle.Error()) {
+			t.Errorf("create with a flag-like title: stderr = %q, want the store's refusal %q", stderr.String(), beads.ErrFlagTitle)
 		}
 		if stdout.Len() != 0 {
 			t.Errorf("create with a flag-like title: wrote %q, want nothing", stdout.String())
@@ -284,6 +284,24 @@ func TestCloseIssuesExitsZeroOnAPartialClose(t *testing.T) {
 	}
 	if want := "✓ Closed fx-1: fixture-close\n"; stdout.String() != want {
 		t.Errorf("stdout = %q, want %q", stdout.String(), want)
+	}
+	if !strings.Contains(stderr.String(), "fx-2") || !strings.Contains(stderr.String(), bound) {
+		t.Errorf("stderr = %q, want it to name the id that stayed open and why", stderr.String())
+	}
+}
+
+// TestCloseIssuesReportsARefusalWhenTheAnswerCannotBeWritten: a partial close
+// whose answer stream refuses the write still names the ids that stayed open
+// and why, and exits 1 rather than reporting a write that did not happen.
+func TestCloseIssuesReportsARefusalWhenTheAnswerCannotBeWritten(t *testing.T) {
+	t.Parallel()
+	bound := "fx-1 depends on fx-2"
+	st := stubWriteStore{close: func(_ string, _ ...string) error {
+		return &beads.PartialCloseError{Closed: []string{"fx-1"}, NotClosed: []string{"fx-2"}, Err: errors.New(bound)}
+	}}
+	env, stderr := writeEnv(failingWriter{})
+	if code := closeIssues(env, st, []string{"fx-1", "fx-2"}, "fixture-close"); code != 1 {
+		t.Errorf("partial close with an unwritable answer: exit code is %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), "fx-2") || !strings.Contains(stderr.String(), bound) {
 		t.Errorf("stderr = %q, want it to name the id that stayed open and why", stderr.String())
