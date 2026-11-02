@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -39,6 +40,9 @@ const (
 	// readerContainerName names the reader pod's one container.
 	readerContainerName = "reader"
 
+	// syncContainerName names the sync pod's one container.
+	syncContainerName = "sync"
+
 	// repoVolume, outVolume and dindVolume name the pod's volumes.
 	repoVolume = "repo"
 	outVolume  = "out"
@@ -50,11 +54,13 @@ const (
 	dindCPU    = "2"
 	dindMemory = "4Gi"
 
-	// dindProbePeriodSeconds and dindProbeFailureThreshold bound a sidecar whose
-	// engine never starts listening: the kubelet restarts it within about a
-	// minute instead of holding the pod, and its share, until the Job's deadline.
-	dindProbePeriodSeconds    int32 = 2
-	dindProbeFailureThreshold int32 = 30
+	// probePeriodSeconds and probeFailureThreshold are the cadence a kubelet
+	// checks a container at: the dind sidecar's startup probe, and the sync
+	// pod's readiness probe. For the sidecar they bound an engine that never
+	// starts listening: the kubelet restarts it within about a minute instead of
+	// holding the pod, and its share, until the Job's deadline.
+	probePeriodSeconds    int32 = 2
+	probeFailureThreshold int32 = 30
 
 	// jobDeadlineSeconds stops a run that hangs on one package, so the share it
 	// holds returns to the cluster and the daemon reads the missing result.json
@@ -70,6 +76,32 @@ const (
 	// outClaimStorage is the output claim's requested size, for the result and
 	// the logs of one sweep.
 	outClaimStorage = "5Gi"
+
+	// repoClaimStorage is the repo claim's requested size: the rig's bare
+	// repository, with room for the objects a fetch adds.
+	repoClaimStorage = "2Gi"
+
+	// syncLifetimeSeconds bounds the sync pod that fills the repo claim: it
+	// sleeps this long and the pod is ended at the same mark, so a teardown
+	// that never ran leaves no pod running past it.
+	syncLifetimeSeconds = 900
+
+	// syncReadyFile is written once the sync pod has cleared the claim, and its
+	// readiness probe waits for it: the copy must land on an empty claim, not
+	// race a delete that is still removing the previous run's objects.
+	syncReadyFile = "/tmp/sync-ready"
+
+	// sweepJobLabel and rigLabelKey label every sweep Job, so a run can list
+	// the other runs of its rig that may still be reading the shared repo claim.
+	sweepJobLabel = "app.kubernetes.io/name"
+	sweepJobValue = "gt-sweep"
+	rigLabelKey   = "gt.dev/rig"
+
+	// syncJobsJSONPath prints one "<name> <ended condition>" line per sweep Job
+	// a selector matched, for the sync stage's guard to read: a Job still
+	// running has no Complete or Failed condition, so its line carries the name
+	// alone.
+	syncJobsJSONPath = `jsonpath={range .items[*]}{.metadata.name}{" "}{.status.conditions[?(@.status=="True")].type}{"\n"}{end}`
 
 	// readerLifetimeSeconds bounds the reader pod that copies the result out:
 	// it sleeps this long and the pod is ended at the same mark, so a teardown
@@ -104,9 +136,11 @@ type Job struct {
 	Spec       JobSpec    `json:"spec"`
 }
 
-// ObjectMeta is the Job's name, which is what a caller reads and removes it by.
+// ObjectMeta is an object's name, which is what a caller reads and removes it
+// by, and the labels a caller selects it by.
 type ObjectMeta struct {
-	Name string `json:"name"`
+	Name   string            `json:"name"`
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // JobSpec is the Job's single attempt, the deadline it runs under, and the pod
@@ -123,17 +157,21 @@ type PodTemplate struct {
 	Spec PodSpec `json:"spec"`
 }
 
-// PodSpec is the pod's priority, its restart policy, its deadline, the init
-// containers and sidecars that start first, the containers that run the work and
-// the volumes they mount.
+// PodSpec is the pod's priority, its restart policy and deadline, whether it
+// mounts the default service-account token, the init containers and sidecars
+// that start first, the containers that run the work and the volumes they mount.
 type PodSpec struct {
-	PriorityClassName     string      `json:"priorityClassName,omitempty"`
-	RestartPolicy         string      `json:"restartPolicy"`
-	ShareProcessNamespace *bool       `json:"shareProcessNamespace,omitempty"`
-	ActiveDeadlineSeconds *int64      `json:"activeDeadlineSeconds,omitempty"`
-	InitContainers        []Container `json:"initContainers,omitempty"`
-	Containers            []Container `json:"containers"`
-	Volumes               []Volume    `json:"volumes"`
+	PriorityClassName     string `json:"priorityClassName,omitempty"`
+	RestartPolicy         string `json:"restartPolicy"`
+	ShareProcessNamespace *bool  `json:"shareProcessNamespace,omitempty"`
+	ActiveDeadlineSeconds *int64 `json:"activeDeadlineSeconds,omitempty"`
+	// AutomountServiceAccountToken is a pointer so an explicit false is
+	// rendered; an absent value leaves the cluster's default, which mounts the
+	// namespace's service-account token into every container.
+	AutomountServiceAccountToken *bool       `json:"automountServiceAccountToken,omitempty"`
+	InitContainers               []Container `json:"initContainers,omitempty"`
+	Containers                   []Container `json:"containers"`
+	Volumes                      []Volume    `json:"volumes"`
 }
 
 // Pod is a single pod the caller applies on its own, outside any Job.
@@ -173,6 +211,7 @@ type Container struct {
 	RestartPolicy   string           `json:"restartPolicy,omitempty"`
 	Env             []EnvVar         `json:"env,omitempty"`
 	StartupProbe    *Probe           `json:"startupProbe,omitempty"`
+	ReadinessProbe  *Probe           `json:"readinessProbe,omitempty"`
 	Resources       *Resources       `json:"resources,omitempty"`
 	SecurityContext *SecurityContext `json:"securityContext,omitempty"`
 	VolumeMounts    []VolumeMount    `json:"volumeMounts,omitempty"`
@@ -246,27 +285,56 @@ type ClaimRef struct {
 type EmptyDirVolumeSource struct{}
 
 // Render returns the run as a Job and the steps that remove it, or the Validate
-// error that refuses the Spec. Apply creates the output claim, then the Job. The
-// teardown removes the Job, the reader pod and the claim, in that order, so the
-// claim is not removed while a pod still mounts it. Poll reports when the run
-// has ended and copies its result out of the claim onto the host; the caller
-// reads the host copy, and runs the teardown after that read.
+// error that refuses the Spec. The guard refuses while another sweep Job of the
+// rig is still active, because every run of the rig reads the one repo claim.
+// Apply then creates the repo claim, fills it through a short-lived root sync pod
+// (cleared, copied into, chowned to the runner, removed), and only then creates
+// the output claim and the Job. The teardown removes the sync pod, the Job, the
+// reader pod and the output claim, in that order, and never the repo claim,
+// which every run reuses. Poll reports when the run has ended and copies its
+// result out of the output claim onto the host; the caller reads the host copy,
+// and runs the teardown after that read.
 func (Kubernetes) Render(spec Spec) (Plan, error) {
 	if err := spec.Validate(); err != nil {
 		return Plan{}, err
 	}
 	job := renderJob(spec)
-	claim := renderOutClaim(spec)
+	repoClaim := renderClaim(RepoClaimName(spec.Rig), repoClaimStorage)
+	claim := renderClaim(OutClaimName(spec), outClaimStorage)
 	reader := renderReader(spec)
+	sync := renderSyncPod(spec)
 	return Plan{
 		Job: job,
+		Guards: []Guard{{
+			// The repo claim is shared by every run of the rig, and a run's Job
+			// mounts it read-only while the sweep runs: rewriting it under an
+			// active Job replaces the repository that Job is still reading.
+			Step:   Step{Argv: kubectlArgv(spec, "get", "jobs", "-l", sweepJobSelector(spec.Rig), "-o", syncJobsJSONPath)},
+			Refuse: refuseActiveSweepJobs,
+		}},
 		Apply: []Step{
-			// The claim goes first: a Job applied before its claim has nothing to
-			// write its result to.
+			// The repo claim is created before the sync pod mounts it, and stays
+			// for the next run: only its contents change per run.
+			{Argv: kubectlArgv(spec, "apply", "-f", "-"), Stdin: repoClaim.JSON()},
+			{Argv: kubectlArgv(spec, "apply", "-f", "-"), Stdin: sync.JSON()},
+			// The pod clears the claim before it reports ready, so the copy starts
+			// on an empty mount and no object of the previous run survives.
+			{Argv: kubectlArgv(spec, "wait", "--for=condition=Ready", "pod/"+sync.Metadata.Name, "--timeout="+readyTimeout)},
+			// kubectl cp restores the ids the host user's files carried, which
+			// the runner cannot use, so the exec that follows gives the tree to
+			// the runner's user and makes it readable.
+			{Argv: kubectlArgv(spec, "cp", spec.RepoDir+"/.", sync.Metadata.Name+":"+RepoMount)},
+			{Argv: kubectlArgv(spec, "exec", sync.Metadata.Name, "--", "sh", "-c", syncChownCommand())},
+			{Argv: kubectlArgv(spec, "delete", "pod", sync.Metadata.Name, "--ignore-not-found")},
+			// The claim the Job writes its result to goes before the Job, which
+			// has nothing to write to otherwise.
 			{Argv: kubectlArgv(spec, "apply", "-f", "-"), Stdin: claim.JSON()},
 			{Argv: kubectlArgv(spec, "apply", "-f", "-"), Stdin: job.JSON()},
 		},
 		Steps: []Step{
+			// The sync pod mounts the repo claim, so a teardown after a failed
+			// sync removes it too; the claim itself is never removed.
+			{Argv: kubectlArgv(spec, "delete", "pod", sync.Metadata.Name, "--ignore-not-found"), Teardown: true},
 			{Argv: kubectlArgv(spec, "delete", "job", job.Metadata.Name, "--ignore-not-found"), Teardown: true},
 			// The reader pod mounts the claim, so it goes before the claim does.
 			{Argv: kubectlArgv(spec, "delete", "pod", reader.Metadata.Name, "--ignore-not-found"), Teardown: true},
@@ -323,17 +391,16 @@ func (c *Claim) JSON() []byte { return manifestJSON(c) }
 // JSON is the pod as the document kubectl applies.
 func (p *Pod) JSON() []byte { return manifestJSON(p) }
 
-// renderOutClaim is the claim this run writes its result and logs to. It is
-// ReadWriteOnce, so one node mounts it at a time: the Job writes it, and the
-// reader mounts it only after the Job has ended.
-func renderOutClaim(spec Spec) *Claim {
+// renderClaim is a claim the plan applies: ReadWriteOnce, so one node mounts it
+// at a time, asking for the given storage.
+func renderClaim(name, storage string) *Claim {
 	return &Claim{
 		APIVersion: "v1",
 		Kind:       "PersistentVolumeClaim",
-		Metadata:   ObjectMeta{Name: OutClaimName(spec)},
+		Metadata:   ObjectMeta{Name: name},
 		Spec: ClaimSpec{
 			AccessModes: []string{"ReadWriteOnce"},
-			Resources:   ClaimResources{Requests: map[string]string{"storage": outClaimStorage}},
+			Resources:   ClaimResources{Requests: map[string]string{"storage": storage}},
 		},
 	}
 }
@@ -370,6 +437,68 @@ func readerName(spec Spec) string {
 	return k8sName("gt-sweep-read", spec.Rig, shortSHA(spec.SHA), spec.RunID)
 }
 
+// renderSyncPod is the short-lived pod that refills the repo claim before the
+// Job starts: it mounts the claim read-write as root, clears it, and holds its
+// mount while kubectl copies the host bare repository into it and chowns it to
+// the runner. It ends at its deadline whether or not a teardown removed it.
+func renderSyncPod(spec Spec) *Pod {
+	share := ResourceList{CPU: readerCPU, Memory: readerMemory}
+	return &Pod{
+		APIVersion: "v1",
+		Kind:       "Pod",
+		Metadata:   ObjectMeta{Name: syncPodName(spec)},
+		Spec: PodSpec{
+			PriorityClassName:     PriorityClass,
+			RestartPolicy:         "Never",
+			ActiveDeadlineSeconds: int64Ptr(syncLifetimeSeconds),
+			// It runs as root to chown what the copy leaves and needs no API
+			// access, so it must not carry the namespace's service-account
+			// token, which would be a root token.
+			AutomountServiceAccountToken: boolPtr(false),
+			Containers: []Container{{
+				Name:    syncContainerName,
+				Image:   spec.Image,
+				Command: []string{"sh", "-c", syncCommand()},
+				// Cleared before the pod reports ready, so the copy starts on an
+				// empty mount.
+				ReadinessProbe: &Probe{
+					Exec:             &ExecAction{Command: []string{"sh", "-c", "test -f " + syncReadyFile}},
+					PeriodSeconds:    probePeriodSeconds,
+					FailureThreshold: probeFailureThreshold,
+				},
+				Resources:       &Resources{Requests: share, Limits: share},
+				SecurityContext: &SecurityContext{RunAsUser: int64Ptr(0), AllowPrivilegeEscalation: boolPtr(false)},
+				VolumeMounts:    []VolumeMount{{Name: repoVolume, MountPath: RepoMount}},
+			}},
+			// Read-write: the pod clears the claim and the copy fills it.
+			Volumes: []Volume{{Name: repoVolume, PersistentVolumeClaim: &ClaimRef{ClaimName: RepoClaimName(spec.Rig)}}},
+		},
+	}
+}
+
+// syncCommand is the sync pod's command: clear the claim, mark it ready for the
+// copy, and hold the mount until the teardown removes the pod or its deadline
+// ends it. The marker is what the readiness probe waits on, so a delete that
+// failed leaves the pod not ready and the stage RED rather than copying into a
+// claim still holding the previous run's objects.
+func syncCommand() string {
+	return "find " + RepoMount + " -mindepth 1 -delete && touch " + syncReadyFile +
+		" && sleep " + strconv.Itoa(syncLifetimeSeconds)
+}
+
+// syncChownCommand gives the copied tree to the runner's user and makes it
+// readable, because kubectl cp restores the ids the host user's files carried.
+func syncChownCommand() string {
+	owner := strconv.FormatInt(runnerUser, 10) + ":" + strconv.FormatInt(runnerUser, 10)
+	return "chown -R " + owner + " " + RepoMount + " && chmod -R a+rX " + RepoMount
+}
+
+// syncPodName is the sync pod's name, which the run id makes unique to the
+// launch.
+func syncPodName(spec Spec) string {
+	return k8sName("gt-sweep-sync", spec.Rig, shortSHA(spec.SHA), spec.RunID)
+}
+
 // renderJob is the Job for a Spec that has passed Validate.
 func renderJob(spec Spec) *Job {
 	containers := []Container{runnerContainer(spec)}
@@ -393,7 +522,7 @@ func renderJob(spec Spec) *Job {
 	return &Job{
 		APIVersion: "batch/v1",
 		Kind:       "Job",
-		Metadata:   ObjectMeta{Name: JobName(spec)},
+		Metadata:   ObjectMeta{Name: JobName(spec), Labels: jobLabels(spec)},
 		Spec: JobSpec{
 			// A failed run reports itself once: the result the runner did not
 			// write is what the daemon reads as RED, and a retried pod would
@@ -484,8 +613,8 @@ func dindContainer() Container {
 		// listening, while an exec probe runs beside dockerd and reaches it.
 		StartupProbe: &Probe{
 			Exec:             &ExecAction{Command: []string{"docker", "-H", "tcp://" + dindAddress + ":" + dindPort, "info"}},
-			PeriodSeconds:    dindProbePeriodSeconds,
-			FailureThreshold: dindProbeFailureThreshold,
+			PeriodSeconds:    probePeriodSeconds,
+			FailureThreshold: probeFailureThreshold,
 		},
 		Resources:       &Resources{Requests: share, Limits: share},
 		SecurityContext: &SecurityContext{Privileged: true},
@@ -501,6 +630,48 @@ func JobName(spec Spec) string {
 // RepoClaimName is the claim holding the rig's bare repository, which its runs
 // mount read-only.
 func RepoClaimName(rig string) string { return k8sName("gt-sweep-repo", rig) }
+
+// jobLabels mark a sweep Job as this rig's, so a later run can list the rig's
+// Jobs that are still active before it rewrites the repo claim they read.
+func jobLabels(spec Spec) map[string]string {
+	return map[string]string{sweepJobLabel: sweepJobValue, rigLabelKey: rigLabelValue(spec.Rig)}
+}
+
+// sweepJobSelector selects the sweep Jobs of one rig.
+func sweepJobSelector(rig string) string {
+	return sweepJobLabel + "=" + sweepJobValue + "," + rigLabelKey + "=" + rigLabelValue(rig)
+}
+
+// rigLabelValue is the rig's value for the Job's rig label: the same sanitized
+// part its object names carry, cut to the label rule's 63 characters with a
+// digest when the rig is long, so one rig's runs are never selected as another's.
+func rigLabelValue(rig string) string {
+	part := k8sPart(rig)
+	if len(part) <= maxNameLength {
+		return part
+	}
+	digest := partDigest(rig)
+	return strings.TrimRight(part[:maxNameLength-1-len(digest)], "-") + "-" + digest
+}
+
+// refuseActiveSweepJobs reads the guard's listing of this rig's sweep Jobs — one
+// "<name> <ended condition>" line per Job — and refuses while any has not ended
+// Complete or Failed: that Job may still be reading the repo claim this run is
+// about to rewrite. A line it cannot read refuses too, because a Job whose state
+// is unknown is not a Job known to have ended.
+func refuseActiveSweepJobs(stdout []byte) error {
+	for _, line := range strings.Split(string(stdout), "\n") {
+		fields := strings.Fields(line)
+		switch {
+		case len(fields) == 0:
+			continue
+		case len(fields) == 2 && (fields[1] == "Complete" || fields[1] == "Failed"):
+			continue
+		}
+		return fmt.Errorf("sweep job %s has not ended and may still be reading the repo claim", fields[0])
+	}
+	return nil
+}
 
 // OutClaimName is the claim this run writes its result and logs to: the caller
 // creates it before applying the Job and reads the run from it.
