@@ -68,20 +68,30 @@ func TestPolecatNamesAreShortUnlessTwoRigsShareOne(t *testing.T) {
 		t.Errorf("a polecat's cell does not carry the full rig/name: %s", want)
 	}
 
-	// The Landings table draws its By cell — for a landing's holder and for a
-	// queued bead's — through holderCell, which shows the short name and keeps
-	// the rig on the cell.
-	landing := pageFunc(t, "landingTable")
-	if want := "const rig = r.rig || names.rigOf(who);"; !strings.Contains(landing, want) {
-		t.Errorf("the landings table has no %q", want)
+	// A queued bead's holder reads in the Landings table's By cell by the same
+	// rule: the short name, with the rig only where two rigs in view use that
+	// name. Read back as drawn, so the cell is what decides (gt-duuq1).
+	dom := newPageDOM(t)
+	dom.call(t, "renderTrend", map[string]any{
+		"polecats": []any{
+			map[string]any{"rig": "gastown", "name": "dag"},
+			map[string]any{"rig": "beads", "name": "dag"},
+			map[string]any{"rig": "gastown", "name": "nux"},
+		},
+		"queue": map[string]any{"landing": []any{
+			map[string]any{"id": "gt-shared", "rig": "gastown", "assignee": "gastown/polecats/dag"},
+			map[string]any{"id": "gt-alone", "rig": "gastown", "assignee": "gastown/polecats/nux"},
+		}},
+	})
+
+	rows := landingsRows(t, dom)
+	if len(rows) != 2 {
+		t.Fatalf("the table drew %d rows, want the two queued beads", len(rows))
 	}
-	by := pageFunc(t, "holderCell")
-	for _, want := range []string{
-		"by.textContent = names.label(rig, who);",
-		"by.title = rig ? rig + \"/\" + who : who;",
-	} {
-		if !strings.Contains(by, want) {
-			t.Errorf("the landings table's By cell has no %q", want)
-		}
+	if got, title := rows[0].Cells[2].Text, rows[0].Cells[2].Title; got != "gastown/dag" || title != "gastown/dag" {
+		t.Errorf("the shared name's By cell reads %q (%q), want the rig named: two rigs use dag", got, title)
+	}
+	if got, title := rows[1].Cells[2].Text, rows[1].Cells[2].Title; got != "nux" || title != "gastown/nux" {
+		t.Errorf("the unshared name's By cell reads %q (%q), want the bare name with the rig in its hover", got, title)
 	}
 }

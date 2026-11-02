@@ -476,35 +476,44 @@ func TestAQueuedRowWithNoHolderDrawsTheDash(t *testing.T) {
 	}
 }
 
-// The queued row's Polecat cell is the shared dev-time computation applied to
-// the bead: a reading the queue carries renders through polecatDur, its floor
-// keeping the + (gt-duuq1). Mutation: hard-code the cell's dash and this row
-// reads "–" where the reading says "13m+".
-func TestAQueuedRowPolecatCellUsesTheSharedDevTime(t *testing.T) {
+// The Polecat column's dev time is one computation, polecatTimeCell, over the
+// reading a row carries: a running row's polecat_secs renders through polecatDur,
+// its floor keeping the + (gt-duuq1). A queued row takes the same cell; see
+// TestAQueuedRowWithNoDevTimeReadsTheDash for the reading it does have. Mutation:
+// hard-code the cell's dash and this row reads "–" where the reading says "13m+".
+func TestTheRunningRowsPolecatCellDrawsTheSharedDevTime(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 10, 31, 16, 0, 0, 0, time.Local)
 	p := newPageDOM(t)
 	p.call(t, "renderTrend", map[string]any{
-		"queue": map[string]any{"landing": []any{map[string]any{
-			"id": "gt-timed", "updated_at": now.Add(-2 * time.Minute).Format(time.RFC3339),
-			"polecat_secs": 780.0, "polecat_lower_bound": true,
-			"polecat_attempts": []any{map[string]any{"seat": "dag", "secs": 780.0, "lower_bound": true}},
-		}}},
+		"trend": map[string]any{
+			"hours":  []map[string]any{{"hour": now.Add(-time.Hour).Format(time.RFC3339), "landed": 1, "rejected": 0}},
+			"stages": []any{},
+			"recent": []any{
+				map[string]any{"at": now.Add(-2 * time.Minute).Format(time.RFC3339), "bead": "gt-timed", "outcome": "running", "polecat": "dag",
+					"polecat_secs": 780.0, "polecat_lower_bound": true,
+					"polecat_attempts": []any{map[string]any{"seat": "dag", "secs": 780.0, "lower_bound": true}}},
+			},
+		},
 	})
 
 	cells := landingsRows(t, p)[0].Cells
 	if got := cells[3].Text; got != "13m+" {
-		t.Errorf("the queued row's Polecat cell reads %q, want 13m+ as polecatDur reads a floor of 780s", got)
+		t.Errorf("the running row's Polecat cell reads %q, want 13m+ as polecatDur reads a floor of 780s", got)
 	}
 	if title := cells[3].Title; !strings.Contains(title, "1 attempt: 13m+") {
-		t.Errorf("the Polecat cell's hover reads %q, want the attempt polecatDur draws for a landed row", title)
+		t.Errorf("the Polecat cell's hover reads %q, want the attempt polecatDur draws for a running row", title)
 	}
 }
 
-// A queue reading with no dev time for the bead reads the dash: the wait, the
-// last update and the creation are not a start the polecat worked from, so no
-// figure is invented for the cell (gt-duuq1).
+// A queued row's queue reading is a QueueBead, which carries no polecat time: the
+// wait is aged from updated_at, and that is not a start the polecat worked from.
+// So the Polecat cell reads the dash the shared cell draws for a row with no
+// reading, never a figure guessed from the wait (gt-duuq1). The payload's keys
+// are QueueBead's json tags, so the page reads the shape production sends.
+// Mutation: derive the cell from updated_at and this row reads "2m" where the
+// dash belongs.
 func TestAQueuedRowWithNoDevTimeReadsTheDash(t *testing.T) {
 	t.Parallel()
 
@@ -512,12 +521,20 @@ func TestAQueuedRowWithNoDevTimeReadsTheDash(t *testing.T) {
 	p := newPageDOM(t)
 	p.call(t, "renderTrend", map[string]any{
 		"queue": map[string]any{"landing": []any{map[string]any{
-			"id": "gt-untimed", "updated_at": now.Add(-2 * time.Minute).Format(time.RFC3339),
+			"id": "gt-untimed", "rig": "gastown", "title": "a queued bead",
+			"status": "open", "assignee": "gastown/polecats/dag", "priority": 2,
+			"labels":     []string{"merge-ready"},
+			"created_at": now.Add(-time.Hour).Format(time.RFC3339),
+			"updated_at": now.Add(-2 * time.Minute).Format(time.RFC3339),
 		}}},
 	})
 
-	if got := landingsRows(t, p)[0].Cells[3].Text; got != "–" {
+	cells := landingsRows(t, p)[0].Cells
+	if got := cells[3].Text; got != "–" {
 		t.Errorf("the queued row's Polecat cell reads %q, want a dash when the queue reading carries no dev time", got)
+	}
+	if got := cells[3].Title; got != "" {
+		t.Errorf("the queued row's Polecat cell carries the hover %q, want none for a row with no reading", got)
 	}
 }
 

@@ -1631,8 +1631,9 @@ function holderCell(names, rig, who, fallback) {
 // (gt-90wi1). A bird or crew branch's landing has no polecat, so its cell says
 // bird rather than reading as a dash, which would look like missing data
 // (gt-kmp7c); the tooltip says why there is no polecat time (gt-rxs7w). A row
-// that carries no reading — a queued bead, whose queue reading has no polecat
-// time yet — reads the dash, never a figure guessed from it (gt-duuq1).
+// that carries no reading — a queued bead, whose queue reading (QueueBead) has
+// no polecat time — reads the dash, never a figure guessed from its wait
+// (gt-duuq1).
 function polecatTimeCell(row) {
   const pc = el("td", "n", row.crew ? "bird" : polecatDur(row.polecat_secs, row.polecat_lower_bound, row.polecat_upper_bound));
   const attempts = row.polecat_attempts || [];
@@ -1667,13 +1668,17 @@ function landingTable(s, names, rows, waiting) {
   // A queued bead reads in the same grid as a running one (gt-duuq1): the holder
   // is the bead's assignee, so it belongs in the By column rather than riding on
   // the Landing cell's first line, and the title and every reading then sit in
-  // the column the running and finished rows put them. The wait is aged from the
-  // bead's last update — the label write gt done makes is normally its last
-  // write. No stage has run, so Score, Gate, om and Ship hold the dash a running
-  // row uses for a column it has no value for. The queue reading carries no
-  // polecat time, so Polecat takes the shared cell and reads its dash rather
-  // than a time guessed from the wait. The worker's order is not known to this
-  // page, so a row says waiting and nothing about position.
+  // the column the running and finished rows put them. The title no longer spans
+  // the empty cells (gt-uvpo1): it sits in the Landing column, whose min-width
+  // and break-word rule (.ltable td.main) keep it readable as a finished row's
+  // title is, and TestLandingsTitleCellKeepsAReadableWidth pins that rule. The
+  // wait is aged from the bead's last update — the label write gt done makes is
+  // normally its last write. No stage has run, so Score, Gate, om and Ship hold
+  // the empty-column dash a running row draws. The queue reading carries no
+  // polecat time, so the Polecat cell has no reading to draw and reads the dash
+  // polecatTimeCell draws for a row with none, never a time guessed from the
+  // wait. The worker's order is not known to this page, so a row says waiting
+  // and nothing about position.
   for (const b of shown) {
     const tr = el("tr");
     const when = el("td", "when title", b.updated_at ? "waiting " + age(b.updated_at) : "waiting");
