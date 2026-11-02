@@ -287,7 +287,8 @@ The bead comes from `--bead`, else from a branch name carrying a routed bead id;
 `Submitted for landing: <branch> @ <sha> onto <target>`, the READY TO LAND block and the
 `gt:ready-to-land` label. It pushes nothing and rebases nothing.
 `BD_ACTOR` falls back to `git config user.name`. A polecat's `gt done` refuses
-`--pre-verified`.
+`--pre-verified`. The last line a crew submission prints names `gt land wait` for the
+landing outcomes; its text is `crewNextStepLine` in `internal/done/done_crew.go` (gt-2ass0).
 
 **The submission's actor (gt-2ge3z).** The landing worker refuses a submission recorded under
 the human's own identity, the town's overseer name, and leaves one comment naming that actor:

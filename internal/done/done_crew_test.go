@@ -92,8 +92,8 @@ func TestCrewSubmitPrintsNextStep(t *testing.T) {
 		t.Fatalf("crew submit: %v", err)
 	}
 	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
-	if last := lines[len(lines)-1]; !strings.Contains(last, "gt land wait") {
-		t.Errorf("last crew output line = %q, want the line naming gt land wait", last)
+	if last := lines[len(lines)-1]; last != crewNextStepLine {
+		t.Errorf("last crew output line = %q, want %q", last, crewNextStepLine)
 	}
 }
 
