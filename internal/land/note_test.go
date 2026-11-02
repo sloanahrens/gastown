@@ -105,6 +105,43 @@ func TestCountRejectionsCountsOnlyReviews(t *testing.T) {
 	}
 }
 
+// RejectionsOfKind returns the blocks of one kind in the order written, each
+// read up to the next header, so a block's score is its own and not the next
+// block's (gt-hmxex).
+func TestRejectionsOfKindReadsEachBlockOfTheKind(t *testing.T) {
+	t.Parallel()
+	notes := strings.Join([]string{
+		FormatRejectionNote(RejectionNote{Attempt: 1, Kind: "review", Reason: "r1", Branch: "crew/a/x", Receipt: &Receipt{Score: 0.1}}),
+		FormatRejectionNote(RejectionNote{Attempt: 1, Kind: "gate", Reason: "g1", Branch: "crew/a/x"}),
+		FormatRejectionNote(RejectionNote{Attempt: 2, Kind: "review", Reason: "r2", Branch: "crew/a/x", Receipt: &Receipt{Score: 0.2}}),
+		FormatRejectionNote(RejectionNote{Attempt: 3, Kind: "review", Reason: "r3", Branch: "crew/a/x"}),
+	}, "\n")
+	got := RejectionsOfKind(notes, string(RejectReview))
+	if len(got) != 3 {
+		t.Fatalf("RejectionsOfKind(review) = %d blocks, want 3", len(got))
+	}
+	for i, want := range []struct {
+		attempt int
+		reason  string
+		score   float64
+		scored  bool
+	}{{1, "r1", 0.1, true}, {2, "r2", 0.2, true}, {3, "r3", 0, false}} {
+		rej := got[i]
+		if rej.Attempt != want.attempt || rej.Reason != want.reason {
+			t.Errorf("block %d = attempt %d reason %q, want attempt %d reason %q", i, rej.Attempt, rej.Reason, want.attempt, want.reason)
+		}
+		if (rej.Receipt != nil) != want.scored || (want.scored && rej.Receipt.Score != want.score) {
+			t.Errorf("block %d receipt = %+v, want score %v scored %v", i, rej.Receipt, want.score, want.scored)
+		}
+	}
+	if gates := RejectionsOfKind(notes, string(RejectGate)); len(gates) != 1 || gates[0].Reason != "g1" {
+		t.Errorf("RejectionsOfKind(gate) = %+v, want the one gate block", gates)
+	}
+	if none := RejectionsOfKind("no block here", string(RejectReview)); len(none) != 0 {
+		t.Errorf("RejectionsOfKind over no block = %+v, want none", none)
+	}
+}
+
 // TestFormatRejectionNoteDefusesReasonAndTitle: the reason and each finding
 // title are stripped of the block markers too, so agent text cannot forge a
 // block or a field through them (gt-zqqcr).

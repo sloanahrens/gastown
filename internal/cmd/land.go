@@ -29,17 +29,19 @@ var landCmd = &cobra.Command{
 	Long: `Operate on a rig's landing queue.
 
 Landings are queued by gt done and drained by the daemon's landing worker. A
-landing the worker refuses goes back to dispatch labeled rework. These commands
-are the operator's sanctioned way to act on that queue.
+landing the worker refuses goes back to dispatch labeled rework. The operator's
+commands act on that queue; wait reports a crew member's own landing outcomes.
 
 Subcommands:
   requeue     Put a rejected landing back in the queue unchanged
   om-stats    Report how often om rejects landings, by day, rig and agent
   om-lessons  Cluster om's findings into rejection classes, by window
+  wait        Wait for the outcome of a crew member's own landings
 
 Examples:
   gt land requeue gt-3e1z4 --reason "the gate failed on a runner fault, not the diff"
-  gt land om-stats --since 2026-10-20`,
+  gt land om-stats --since 2026-10-20
+  gt land wait --agent dunlin --timeout 20m`,
 	RunE: requireSubcommand,
 }
 
