@@ -9,8 +9,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -24,26 +24,15 @@ const (
 
 var now = time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
 
-var (
-	keyOnce  sync.Once
-	signKey  *rsa.PrivateKey
-	otherKey *rsa.PrivateKey
-)
-
-// keys generates the two test keys once for the package: key generation is the
-// only costly step and every case reuses it.
-func keys(t *testing.T) (*rsa.PrivateKey, *rsa.PrivateKey) {
+// newKey returns a fresh signing key for one test. Each test mints and
+// publishes its own key, so no key state is shared between parallel tests.
+func newKey(t *testing.T) *rsa.PrivateKey {
 	t.Helper()
-	keyOnce.Do(func() {
-		var err error
-		if signKey, err = rsa.GenerateKey(rand.Reader, 2048); err != nil {
-			panic(err)
-		}
-		if otherKey, err = rsa.GenerateKey(rand.Reader, 2048); err != nil {
-			panic(err)
-		}
-	})
-	return signKey, otherKey
+	k, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate a test key: %v", err)
+	}
+	return k
 }
 
 type fetcher map[string]*rsa.PublicKey
@@ -97,24 +86,23 @@ func good(aud string) map[string]any {
 	}
 }
 
-func cfg(t *testing.T, aud string) Config {
+func cfg(t *testing.T, k *rsa.PrivateKey, aud string) Config {
 	t.Helper()
-	k, _ := keys(t)
 	return Config{Issuer: issuer, Audience: aud, Keys: fetcher{"k1": &k.PublicKey}, Now: func() time.Time { return now }}
 }
 
-func customer(t *testing.T) *Customer {
+func customer(t *testing.T, k *rsa.PrivateKey) *Customer {
 	t.Helper()
-	v, err := NewCustomer(cfg(t, custAud))
+	v, err := NewCustomer(cfg(t, k, custAud))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return v
 }
 
-func staff(t *testing.T) *Staff {
+func staff(t *testing.T, k *rsa.PrivateKey) *Staff {
 	t.Helper()
-	v, err := NewStaff(cfg(t, staffAud), staffDomain)
+	v, err := NewStaff(cfg(t, k, staffAud), staffDomain)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +120,7 @@ func edit(base map[string]any, f func(map[string]any)) map[string]any {
 
 func TestVerifyCustomerToken(t *testing.T) {
 	t.Parallel()
-	k, other := keys(t)
+	k, other := newKey(t), newKey(t)
 	cases := []struct {
 		name  string
 		token string
@@ -157,7 +145,7 @@ func TestVerifyCustomerToken(t *testing.T) {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			id, err := customer(t).Verify(context.Background(), c.token)
+			id, err := customer(t, k).Verify(context.Background(), c.token)
 			if c.want == nil {
 				if err != nil || id.Plane != PlaneCustomer || id.Sub != "sub-1" || id.Email != "ann@town.example" || !id.EmailVerified {
 					t.Fatalf("Verify = %+v, %v; want the customer plane, sub-1 and no error", id, err)
@@ -176,8 +164,8 @@ func TestVerifyCustomerToken(t *testing.T) {
 
 func TestSkewIsBoundedAndApplied(t *testing.T) {
 	t.Parallel()
-	k, _ := keys(t)
-	c := cfg(t, custAud)
+	k := newKey(t)
+	c := cfg(t, k, custAud)
 	c.Skew = time.Minute
 	v, err := NewCustomer(c)
 	if err != nil {
@@ -199,7 +187,8 @@ func TestSkewIsBoundedAndApplied(t *testing.T) {
 
 func TestConfigRefusals(t *testing.T) {
 	t.Parallel()
-	base := cfg(t, custAud)
+	k := newKey(t)
+	base := cfg(t, k, custAud)
 	for name, mutate := range map[string]func(*Config){
 		"no issuer":   func(c *Config) { c.Issuer = "" },
 		"no audience": func(c *Config) { c.Audience = "" },
@@ -222,9 +211,9 @@ func TestConfigRefusals(t *testing.T) {
 
 func TestStaffRequiresTheStaffDomain(t *testing.T) {
 	t.Parallel()
-	k, _ := keys(t)
+	k := newKey(t)
 	ok := mint(k, "RS256", "k1", good(staffAud))
-	if id, err := staff(t).Verify(context.Background(), ok); err != nil || id.Sub != "sub-1" {
+	if id, err := staff(t, k).Verify(context.Background(), ok); err != nil || id.Sub != "sub-1" {
 		t.Fatalf("staff token from the domain: %+v, %v", id, err)
 	}
 	cases := map[string]map[string]any{
@@ -234,7 +223,7 @@ func TestStaffRequiresTheStaffDomain(t *testing.T) {
 		"suffix lookalike":    edit(good(staffAud), func(c map[string]any) { c["email"] = "ann@evil-town.example" }),
 	}
 	for name, claims := range cases {
-		id, err := staff(t).Verify(context.Background(), mint(k, "RS256", "k1", claims))
+		id, err := staff(t, k).Verify(context.Background(), mint(k, "RS256", "k1", claims))
 		if !errors.Is(err, ErrDomain) {
 			t.Errorf("%s: error = %v, want ErrDomain", name, err)
 		}
@@ -243,33 +232,33 @@ func TestStaffRequiresTheStaffDomain(t *testing.T) {
 		}
 	}
 	unverified := mint(k, "RS256", "k1", edit(good(staffAud), func(c map[string]any) { c["email_verified"] = false }))
-	if _, err := staff(t).Verify(context.Background(), unverified); !errors.Is(err, ErrEmailUnverified) {
+	if _, err := staff(t, k).Verify(context.Background(), unverified); !errors.Is(err, ErrEmailUnverified) {
 		t.Errorf("unverified staff email: %v, want ErrEmailUnverified", err)
 	}
 }
 
 func TestStaffTokenIsNotACustomerToken(t *testing.T) {
 	t.Parallel()
-	k, _ := keys(t)
+	k := newKey(t)
 	staffTok := mint(k, "RS256", "k1", good(staffAud))
 	custTok := mint(k, "RS256", "k1", good(custAud))
-	if _, err := customer(t).Verify(context.Background(), staffTok); !errors.Is(err, ErrAudience) {
+	if _, err := customer(t, k).Verify(context.Background(), staffTok); !errors.Is(err, ErrAudience) {
 		t.Errorf("customer verifier on a staff token: %v, want ErrAudience", err)
 	}
-	if _, err := staff(t).Verify(context.Background(), custTok); !errors.Is(err, ErrAudience) {
+	if _, err := staff(t, k).Verify(context.Background(), custTok); !errors.Is(err, ErrAudience) {
 		t.Errorf("staff verifier on a customer token: %v, want ErrAudience", err)
 	}
 }
 
 func TestUnverifiedCustomerEmailIsRefused(t *testing.T) {
 	t.Parallel()
-	k, _ := keys(t)
+	k := newKey(t)
 	ctx := context.Background()
 	for name, claims := range map[string]map[string]any{
 		"false":   edit(good(custAud), func(c map[string]any) { c["email_verified"] = false }),
 		"missing": edit(good(custAud), func(c map[string]any) { delete(c, "email_verified") }),
 	} {
-		id, err := customer(t).Verify(ctx, mint(k, "RS256", "k1", claims))
+		id, err := customer(t, k).Verify(ctx, mint(k, "RS256", "k1", claims))
 		if !errors.Is(err, ErrEmailUnverified) {
 			t.Errorf("%s: customer with an unverified email: %v, want ErrEmailUnverified", name, err)
 		}
@@ -277,7 +266,7 @@ func TestUnverifiedCustomerEmailIsRefused(t *testing.T) {
 			t.Errorf("%s: failed verify returned a partial identity %+v", name, id)
 		}
 	}
-	id, err := customer(t).Verify(ctx, mint(k, "RS256", "k1", good(custAud)))
+	id, err := customer(t, k).Verify(ctx, mint(k, "RS256", "k1", good(custAud)))
 	if err != nil {
 		t.Fatalf("customer with a verified email: %v", err)
 	}
@@ -288,7 +277,7 @@ func TestUnverifiedCustomerEmailIsRefused(t *testing.T) {
 
 func TestUntrustedKeyIDIsRefusedBeforeTheFetcher(t *testing.T) {
 	t.Parallel()
-	k, _ := keys(t)
+	k := newKey(t)
 	refused := map[string]string{
 		"empty":             "",
 		"129 bytes":         strings.Repeat("a", 129),
@@ -304,7 +293,7 @@ func TestUntrustedKeyIDIsRefusedBeforeTheFetcher(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			spy := &spyFetcher{key: &k.PublicKey}
-			conf := cfg(t, custAud)
+			conf := cfg(t, k, custAud)
 			conf.Keys = spy
 			v, err := NewCustomer(conf)
 			if err != nil {
@@ -313,6 +302,11 @@ func TestUntrustedKeyIDIsRefusedBeforeTheFetcher(t *testing.T) {
 			id, err := v.Verify(context.Background(), mint(k, "RS256", kid, good(custAud)))
 			if !errors.Is(err, ErrKey) {
 				t.Fatalf("kid %q: error = %v, want ErrKey", kid, err)
+			}
+			// The refusal names the rule it enforced rather than presenting an
+			// unsafe kid as a key that is merely missing.
+			if want := fmt.Sprintf("key id of %d bytes is not 1 to %d bytes", len(kid), maxKidLen); !strings.Contains(err.Error(), want) {
+				t.Errorf("kid %q: error %q does not say %q", kid, err, want)
 			}
 			if id != (Identity{}) {
 				t.Errorf("kid %q: failed verify returned a partial identity %+v", kid, id)
@@ -327,7 +321,7 @@ func TestUntrustedKeyIDIsRefusedBeforeTheFetcher(t *testing.T) {
 		t.Parallel()
 		kid := strings.Repeat("a", 128)
 		spy := &spyFetcher{key: &k.PublicKey}
-		conf := cfg(t, custAud)
+		conf := cfg(t, k, custAud)
 		conf.Keys = spy
 		v, err := NewCustomer(conf)
 		if err != nil {
@@ -344,36 +338,36 @@ func TestUntrustedKeyIDIsRefusedBeforeTheFetcher(t *testing.T) {
 
 func TestIdentityNamesItsPlane(t *testing.T) {
 	t.Parallel()
-	k, _ := keys(t)
+	k := newKey(t)
 	ctx := context.Background()
-	cust, err := customer(t).Verify(ctx, mint(k, "RS256", "k1", good(custAud)))
+	cust, err := customer(t, k).Verify(ctx, mint(k, "RS256", "k1", good(custAud)))
 	if err != nil {
 		t.Fatalf("customer token: %v", err)
 	}
 	if cust.Plane != PlaneCustomer {
 		t.Errorf("customer identity plane = %q, want %q", cust.Plane, PlaneCustomer)
 	}
-	stf, err := staff(t).Verify(ctx, mint(k, "RS256", "k1", good(staffAud)))
+	stf, err := staff(t, k).Verify(ctx, mint(k, "RS256", "k1", good(staffAud)))
 	if err != nil {
 		t.Fatalf("staff token: %v", err)
 	}
 	if stf.Plane != PlaneStaff {
 		t.Errorf("staff identity plane = %q, want %q", stf.Plane, PlaneStaff)
 	}
-	if PlaneCustomer == PlaneStaff {
-		t.Fatalf("both planes are named %q", PlaneCustomer)
+	if cust.Plane == stf.Plane {
+		t.Fatalf("customer and staff identities both name plane %q", cust.Plane)
 	}
 }
 
 func TestNilKeyFutureIatAndSkewBranches(t *testing.T) {
 	t.Parallel()
-	k, _ := keys(t)
+	k := newKey(t)
 	ctx := context.Background()
 
 	t.Run("a nil key with no error", func(t *testing.T) {
 		t.Parallel()
 		spy := &spyFetcher{}
-		conf := cfg(t, custAud)
+		conf := cfg(t, k, custAud)
 		conf.Keys = spy
 		v, err := NewCustomer(conf)
 		if err != nil {
@@ -382,6 +376,11 @@ func TestNilKeyFutureIatAndSkewBranches(t *testing.T) {
 		id, err := v.Verify(ctx, mint(k, "RS256", "k1", good(custAud)))
 		if !errors.Is(err, ErrKey) {
 			t.Fatalf("nil key from the fetcher: %v, want ErrKey", err)
+		}
+		// The message names the nil key instead of printing "<nil>" for a
+		// fetcher that returned no key and no error.
+		if !strings.Contains(err.Error(), "returned no key and no error") {
+			t.Errorf("nil key from the fetcher: error %q does not name the nil key", err)
 		}
 		if id != (Identity{}) {
 			t.Errorf("failed verify returned a partial identity %+v", id)
@@ -407,7 +406,7 @@ func TestNilKeyFutureIatAndSkewBranches(t *testing.T) {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			conf := cfg(t, custAud)
+			conf := cfg(t, k, custAud)
 			conf.Skew = c.skew
 			v, err := NewCustomer(conf)
 			if err != nil {
@@ -420,9 +419,29 @@ func TestNilKeyFutureIatAndSkewBranches(t *testing.T) {
 	}
 }
 
+func TestFetcherFailureKeepsItsCause(t *testing.T) {
+	t.Parallel()
+	k := newKey(t)
+	cause := errors.New("key service is unavailable")
+	conf := cfg(t, k, custAud)
+	conf.Keys = &spyFetcher{err: cause}
+	v, err := NewCustomer(conf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := v.Verify(context.Background(), mint(k, "RS256", "k1", good(custAud)))
+	if !errors.Is(err, ErrKey) || !errors.Is(err, cause) {
+		t.Fatalf("fetcher error = %v, want ErrKey wrapping %v", err, cause)
+	}
+	if id != (Identity{}) {
+		t.Errorf("failed verify returned a partial identity %+v", id)
+	}
+}
+
 func TestNewStaffRefusesABadConfig(t *testing.T) {
 	t.Parallel()
-	c := cfg(t, staffAud)
+	k := newKey(t)
+	c := cfg(t, k, staffAud)
 	c.Issuer = ""
 	if s, err := NewStaff(c, staffDomain); !errors.Is(err, ErrConfig) || s != nil {
 		t.Errorf("NewStaff with no issuer = %v, %v, want ErrConfig and no verifier", s, err)
@@ -431,10 +450,10 @@ func TestNewStaffRefusesABadConfig(t *testing.T) {
 
 func TestMalformedSignatureAndClaimsAreRefused(t *testing.T) {
 	t.Parallel()
-	sk, _ := keys(t)
-	c := customer(t)
+	k := newKey(t)
+	c := customer(t, k)
 	ctx := context.Background()
-	valid := mint(sk, "RS256", "k1", good(custAud))
+	valid := mint(k, "RS256", "k1", good(custAud))
 	parts := strings.Split(valid, ".")
 
 	badSig := parts[0] + "." + parts[1] + ".!!not-base64!!"
@@ -445,7 +464,7 @@ func TestMalformedSignatureAndClaimsAreRefused(t *testing.T) {
 	// A correctly signed token whose payload is not JSON claims.
 	signing := parts[0] + "." + base64.RawURLEncoding.EncodeToString([]byte("not json"))
 	sum := sha256.Sum256([]byte(signing))
-	sig, err := rsa.SignPKCS1v15(rand.Reader, sk, crypto.SHA256, sum[:])
+	sig, err := rsa.SignPKCS1v15(rand.Reader, k, crypto.SHA256, sum[:])
 	if err != nil {
 		t.Fatalf("sign: %v", err)
 	}
