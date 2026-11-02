@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -77,6 +79,23 @@ func (r *archiveCountRows) Next(dest []driver.Value) error {
 	}
 	dest[0] = int64(3)
 	return nil
+}
+
+// TestArchiveNotesReportsUnreadableWatermarks: an unreadable state file is an
+// error the status prints, not a set of databases that read as never archived.
+func TestArchiveNotesReportsUnreadableWatermarks(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	path := filepath.Join(townRoot, "daemon", "maintenance_state.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := archiveNotes(townRoot, &doltserver.Config{}, []string{"gt"}); err == nil {
+		t.Error("an unreadable watermark file was read as no watermarks")
+	}
 }
 
 // TestDoltArchiveReaderFailures: an unusable database name, a pool that cannot

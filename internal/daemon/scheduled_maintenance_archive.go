@@ -419,10 +419,8 @@ func archiveMember(columns []string, rows [][]string, newFile bool) ([]byte, err
 		}
 	}
 	var buf bytes.Buffer
-	if err := writeArchiveMember(&buf, columns, rows, newFile); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	err := writeArchiveMember(&buf, columns, rows, newFile)
+	return buf.Bytes(), err
 }
 
 // writeArchiveMember writes one gzip CSV member to dst. The caller has checked
@@ -564,6 +562,12 @@ func (d *Daemon) doltArchiveEvents(ctx context.Context, db string, after EventsA
 	}
 	defer rows.Close()
 
+	return eventsArchiveRows(rows)
+}
+
+// eventsArchiveRows reads every column of an open result set into one events
+// archive batch, oldest first.
+func eventsArchiveRows(rows *sql.Rows) (archiveEvents, error) {
 	columns, err := rows.Columns()
 	if err != nil {
 		return archiveEvents{}, fmt.Errorf("events read: %w", err)

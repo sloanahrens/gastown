@@ -294,6 +294,28 @@ func (r *archiveFakeRows) Next(dest []driver.Value) error {
 	return io.EOF
 }
 
+// TestEventsArchiveRowsReportsAClosedResultSet: a result set closed before it
+// was read is an error, not an empty batch that the watermark would walk past.
+func TestEventsArchiveRowsReportsAClosedResultSet(t *testing.T) {
+	t.Parallel()
+	open := archiveFakeOpener(t, &archiveFakeServer{columns: []string{"id", "created_at"}})
+	db, err := open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rows, err := db.QueryContext(context.Background(), "SELECT id, created_at FROM events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eventsArchiveRows(rows); err == nil {
+		t.Error("a closed result set was read as an empty batch")
+	}
+}
+
 // TestDoltArchiveLogFailures: every failure of the dolt_log read is an error
 // the archive cannot mistake for "no new commits"; an unreadable row is not
 // dropped silently either.
