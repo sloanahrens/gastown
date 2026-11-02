@@ -19,7 +19,7 @@ func init() {
 	register(Case{Name: "adding a link twice is a no-op and a different type is a conflict", Run: depsIdempotent})
 	register(Case{Name: "a cycle of blocking links is refused and other types may cycle", Run: depsCycles})
 	register(Case{Name: "opposite blocking links added at the same instant never both succeed", Run: depsCycleRace})
-	register(Case{Name: "an external target needs no row and is left out of the list", Run: depsExternal})
+	register(Case{Name: "an external target is listed id-only, never blocks, and still counts", Run: depsExternal})
 	register(Case{Name: "a named read carries each link's own record: who wrote it and when", Fake: true, Run: depsReadCarriesTheLinkRecord})
 	register(Case{Name: "a dependent of an external:<rig>:<id> target is listed by its id once, and a near-miss suffix is not", Fake: true, Run: depsExternalDependents})
 	register(Case{Name: "a named read of an issue nothing depends on sends an empty dependents list, not an unfilled one", Fake: true, Run: depsNoDependentsIsEmpty})
@@ -148,15 +148,73 @@ func depsCycles(t *testing.T, s store.Store) {
 	mustDep(t, s, a.ID, c.ID, "relates-to")
 }
 
+// depsExternal: a link to another rig's bead is stored as external:<rig>:<id>
+// and has no target row here. Both dependency reads list it id-only — the
+// reference, the relation and the link's own record, with the target's fields
+// empty — so the whole dependency set is visible; the link still counts, and
+// with no unresolved target row it never blocks (BlockedBy and close ignore it).
 func depsExternal(t *testing.T, s store.Store) {
 	a := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "a"})
-	mustDep(t, s, a.ID, "external:om:om-7", "tracks")
-	if got, err := s.Dependencies(ctx(), a.ID, ""); err != nil || len(got) != 0 {
-		t.Errorf("Dependencies = %v, %v; want the external target left out", got, err)
+	const first, second = "external:om:om-7", "external:hq:hq-9"
+	const writer = "town/crew/fixture"
+	writeCtx := api.WithActor(context.Background(), writer)
+	for ref, typ := range map[string]string{first: "tracks", second: "blocks"} {
+		if err := s.AddDependency(writeCtx, a.ID, ref, typ); err != nil {
+			t.Fatalf("AddDependency(%s, %s, %s): %v", a.ID, ref, typ, err)
+		}
 	}
+
+	listed, err := s.Dependencies(ctx(), a.ID, "")
+	if err != nil {
+		t.Fatalf("Dependencies: %v", err)
+	}
+	if len(listed) != 2 {
+		t.Fatalf("Dependencies = %+v, want both external links", listed)
+	}
+	byID := map[string]api.IssueDep{}
+	for _, d := range listed {
+		byID[d.ID] = d
+	}
+	for ref, typ := range map[string]string{first: "tracks", second: "blocks"} {
+		d, ok := byID[ref]
+		if !ok {
+			t.Errorf("Dependencies = %+v, want the external link %s listed", listed, ref)
+			continue
+		}
+		if d.DependencyType != typ || d.Title != "" || d.Status != "" || d.Type != "" || d.Priority != 0 {
+			t.Errorf("external entry %s = %+v, want id-only with relation %s", ref, d, typ)
+		}
+		if d.CreatedBy != writer || d.CreatedAt.IsZero() {
+			t.Errorf("external entry %s link record = %q, %v; want the writer and the time", ref, d.CreatedBy, d.CreatedAt)
+		}
+	}
+
+	// The named read fills the same links, ordered by the link's creation time
+	// and then its target id.
+	got := mustGet(t, s, a.ID)
+	if len(got.Dependencies) != 2 {
+		t.Fatalf("named read Dependencies = %+v, want both external links", got.Dependencies)
+	}
+	if !slices.IsSortedFunc(got.Dependencies, func(x, y api.IssueDep) int {
+		if c := x.CreatedAt.Compare(y.CreatedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(x.ID, y.ID)
+	}) {
+		t.Errorf("named read Dependencies = %+v, want creation time then id", got.Dependencies)
+	}
+	for _, d := range got.Dependencies {
+		if d.Title != "" || d.Status != "" || d.Type != "" || d.Priority != 0 {
+			t.Errorf("named read external entry %s = %+v, want the target's fields empty", d.ID, d)
+		}
+	}
+	if len(got.BlockedBy) != 0 {
+		t.Errorf("BlockedBy = %v, want none: an external target never blocks", got.BlockedBy)
+	}
+
 	page := mustList(t, s, api.ListFilter{})
-	if len(page.Issues) != 1 || page.Issues[0].DependencyCount != 1 {
-		t.Errorf("listed %+v, want DependencyCount 1 (the external link still counts)", page.Issues)
+	if len(page.Issues) != 1 || page.Issues[0].DependencyCount != 2 {
+		t.Errorf("listed %+v, want DependencyCount 2 (external links still count)", page.Issues)
 	}
 	if err := s.CloseIssues(ctx(), []string{a.ID}, "r", false); err != nil {
 		t.Errorf("an external link must not block close: %v", err)

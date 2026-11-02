@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -167,7 +168,10 @@ func (p *Postgres) RemoveDependency(ctx context.Context, issue, dependsOn string
 }
 
 // Dependencies returns what id depends on with relation depType ("" for any),
-// each with its relation. External targets have no row here and are left out.
+// each with its relation. A target that is not an issue here (an
+// external:<rig>:<id> reference) is listed id-only and carries the link's own
+// record; a local target leaves that record zero, as this read answers only
+// what the issue depends on.
 func (p *Postgres) Dependencies(ctx context.Context, id, depType string) ([]api.IssueDep, error) {
 	var exists bool
 	if err := p.pool.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM tracker.issues WHERE id = $1)", id).Scan(&exists); err != nil {
@@ -176,9 +180,10 @@ func (p *Postgres) Dependencies(ctx context.Context, id, depType string) ([]api.
 	if !exists {
 		return nil, api.NotFound(id)
 	}
-	rows, err := p.pool.Query(ctx, `SELECT t.id, t.title, t.status, t.priority, t.issue_type, d.type, t.close_reason
-FROM tracker.dependencies d JOIN tracker.issues t ON t.id = d.depends_on
-WHERE d.issue_id = $1 AND ($2 = '' OR d.type = $2) ORDER BY d.type, t.id`, id, depType)
+	rows, err := p.pool.Query(ctx, `SELECT d.depends_on, coalesce(t.title, ''), coalesce(t.status, ''), coalesce(t.priority, 0::smallint), coalesce(t.issue_type, ''), d.type, coalesce(t.close_reason, ''),
+  t.id IS NOT NULL, d.created_at, d.created_by, d.metadata
+FROM tracker.dependencies d LEFT JOIN tracker.issues t ON t.id = d.depends_on
+WHERE d.issue_id = $1 AND ($2 = '' OR d.type = $2) ORDER BY d.type, d.depends_on`, id, depType)
 	if err != nil {
 		return nil, fmt.Errorf("store: dependencies: %w", err)
 	}
@@ -186,8 +191,16 @@ WHERE d.issue_id = $1 AND ($2 = '' OR d.type = $2) ORDER BY d.type, t.id`, id, d
 	out := []api.IssueDep{}
 	for rows.Next() {
 		var d api.IssueDep
-		if err := rows.Scan(&d.ID, &d.Title, &d.Status, &d.Priority, &d.Type, &d.DependencyType, &d.CloseReason); err != nil {
+		var local bool
+		var createdAt time.Time
+		var createdBy string
+		var metadata []byte
+		if err := rows.Scan(&d.ID, &d.Title, &d.Status, &d.Priority, &d.Type, &d.DependencyType, &d.CloseReason,
+			&local, &createdAt, &createdBy, &metadata); err != nil {
 			return nil, fmt.Errorf("store: dependencies: %w", err)
+		}
+		if !local {
+			d.CreatedAt, d.CreatedBy, d.Metadata = createdAt, createdBy, metadata
 		}
 		out = append(out, d)
 	}
