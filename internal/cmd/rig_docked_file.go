@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/constants"
 )
 
@@ -78,8 +79,10 @@ type rigDockedFiles struct {
 }
 
 // osRigDockedFiles returns the filesystem the dispatcher uses on a real host.
+// writeFile is atomic (temp file and rename), so a reader never parses a torn
+// record and a crash between ticks leaves the previous record or the new one.
 func osRigDockedFiles() rigDockedFiles {
-	return rigDockedFiles{readFile: os.ReadFile, mkdirAll: os.MkdirAll, writeFile: os.WriteFile}
+	return rigDockedFiles{readFile: os.ReadFile, mkdirAll: os.MkdirAll, writeFile: atomicfile.WriteFile}
 }
 
 // load returns the record rigName's file holds. It reports false when there is
@@ -107,9 +110,9 @@ func (f rigDockedFiles) load(townRoot, rigName string) (rigDockedRecord, bool) {
 }
 
 // save writes rec to rigName's file. The caller logs the error: a record that
-// cannot be written only costs the next tick one bd read. The write is a single
-// WriteFile, so a reader that catches a torn file parses it as corrupt and
-// reads bd, the same fallback a corrupt file already takes.
+// cannot be written only costs the next tick one bd read. The write is atomic
+// (the os filesystem's writeFile is atomicfile.WriteFile, a temp file and a
+// rename), so a reader never sees a partially written record.
 func (f rigDockedFiles) save(townRoot, rigName string, rec rigDockedRecord) error {
 	path, err := rigDockedFilePath(townRoot, rigName)
 	if err != nil {

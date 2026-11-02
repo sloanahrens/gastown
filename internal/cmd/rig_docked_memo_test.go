@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/sling"
@@ -340,6 +342,91 @@ func TestRigDockedFileServesAcrossTicks(t *testing.T) {
 	}
 	if n := store.shows["tr-rig-testrig"]; n != 0 {
 		t.Errorf("second tick read the identity bead %d time(s), want 0: the verdict file answers", n)
+	}
+}
+
+// TestRigDockedFileReadsParkStateEveryCheck: the verdict file holds only the
+// docked label, and every check reads the park state from the registry first.
+// A rig parked after a not-blocked file was written is blocked as parked, and
+// once unparked the same file answers again (gt-ejxjh). Mutation: load and
+// serve the file before the park check, and the parked check returns the
+// file's stale not-blocked verdict.
+func TestRigDockedFileReadsParkStateEveryCheck(t *testing.T) {
+	t.Parallel()
+	town := tickDockedTown(t)
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	writeRigDockedFileAt(t, town, now)
+
+	// The store cannot answer, so a check that reads bd is blocked as
+	// unverified: an answer proves the file served it.
+	store := newDockedBeads(true)
+	memo := newRigDockedMemo(store)
+	memo.now = func() time.Time { return now.Add(time.Minute) }
+
+	var out bytes.Buffer
+	rec := config.RigParked{Since: now.Add(30 * time.Second), By: "test", Reason: "rework"}
+	if err := parkRigs(&out, town, []string{"testrig"}, rec); err != nil {
+		t.Fatalf("parkRigs = %v\n%s", err, out.String())
+	}
+	if blocked, reason := memo.parkedOrDocked(town, "testrig"); !blocked || reason != "parked" {
+		t.Errorf("check after park = %v, %q; want blocked as %q despite the fresh not-blocked file", blocked, reason, "parked")
+	}
+	if n := store.shows["tr-rig-testrig"]; n != 0 {
+		t.Errorf("the parked check read the identity bead %d time(s), want 0: park is the registry's", n)
+	}
+
+	journal := func(string) (bool, error) { return false, nil }
+	if err := unparkRigs(&out, town, []string{"testrig"}, journal); err != nil {
+		t.Fatalf("unparkRigs = %v\n%s", err, out.String())
+	}
+	if blocked, reason := memo.parkedOrDocked(town, "testrig"); blocked || reason != "" {
+		t.Errorf("check after unpark = %v, %q; want the file's not-blocked verdict", blocked, reason)
+	}
+	if n := store.shows["tr-rig-testrig"]; n != 0 {
+		t.Errorf("the unparked check read the identity bead %d time(s), want 0: the file still answers", n)
+	}
+}
+
+// TestRigDockedFileDoesNotStoreAParkVerdict: the file records only the docked
+// label. A park that lands between a check's registry read and its label read
+// is not stored, so once the rig is unparked a later tick is not blocked by a
+// stale "parked" verdict (gt-ejxjh). The dock-stamp read runs between the two,
+// so parking there reproduces the race. Mutation: read the park state again
+// behind the label read and store that answer, and the fresh tick after the
+// unpark serves "parked" from the file.
+func TestRigDockedFileDoesNotStoreAParkVerdict(t *testing.T) {
+	t.Parallel()
+	town := tickDockedTown(t)
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	rec := config.RigParked{Since: now, By: "test", Reason: "rework"}
+
+	store := newDockedBeads(false)
+	memo := newRigDockedMemo(store)
+	memo.now = func() time.Time { return now }
+	var out bytes.Buffer
+	var parkErr error
+	memo.stamp = func(string, string) (time.Time, error) {
+		parkErr = parkRigs(&out, town, []string{"testrig"}, rec)
+		return time.Time{}, nil
+	}
+
+	if blocked, reason := memo.parkedOrDocked(town, "testrig"); blocked || reason != "" {
+		t.Fatalf("check under the park race = %v, %q; want the docked-label read's not-blocked verdict", blocked, reason)
+	}
+	if parkErr != nil {
+		t.Fatalf("parking inside the race = %v\n%s", parkErr, out.String())
+	}
+
+	journal := func(string) (bool, error) { return false, nil }
+	if err := unparkRigs(&out, town, []string{"testrig"}, journal); err != nil {
+		t.Fatalf("unparkRigs = %v\n%s", err, out.String())
+	}
+
+	// A new tick: the park race's record is all the file holds.
+	next := newRigDockedMemo(newDockedBeads(true))
+	next.now = func() time.Time { return now.Add(time.Minute) }
+	if blocked, reason := next.parkedOrDocked(town, "testrig"); blocked {
+		t.Errorf("tick after unpark = %v, %q; want the file's not-blocked verdict, not the race's park", blocked, reason)
 	}
 }
 

@@ -197,9 +197,11 @@ type rigDockedEntry struct {
 //
 // A later tick is served from a per-rig verdict file under the town runtime
 // directory (rigDockedFileTTL), so a quiet tick reads no identity beads at all
-// (gt-ejxjh). The file holds the verdict, the dock stamp observed before the
-// read, and the read time; it answers only while that stamp is not newer than
-// the check's and the read is younger than five minutes.
+// (gt-ejxjh). The file holds the docked-label verdict, the dock stamp observed
+// before the read, and the read time; it answers only while that stamp is not
+// newer than the check's and the read is younger than five minutes. The park
+// state is never in the file: every check reads it from the registry first, so
+// a park or unpark after a file was written is seen by the next check.
 //
 // The memo is not frozen for the tick. `gt rig dock` and `gt rig undock` stamp
 // the rig (internal/rig.DockStamp), the tick compares the stamp with the one
@@ -246,6 +248,8 @@ func (m *rigDockedMemo) parkedOrDocked(townRoot, rigName string) (bool, string) 
 	}
 	// The park state is the registry's, read through the config kernel: no bd
 	// call, so it is re-read on every check and a park inside the tick holds.
+	// It is never part of the verdict file: the file answers only the docked
+	// label, after this read.
 	if IsRigParked(townRoot, rigName) {
 		return true, "parked"
 	}
@@ -259,7 +263,7 @@ func (m *rigDockedMemo) parkedOrDocked(townRoot, rigName string) (bool, string) 
 		// nothing may be cached without it. This check reads the label fresh,
 		// as every check did before the memo: slower on a host that cannot
 		// stat the stamp, never stale.
-		return rigParkedOrDockedWith(townRoot, rigName, m.store)
+		return rigDockedWith(townRoot, rigName, m.store)
 	}
 
 	entry := m.entry(rigName)
@@ -281,7 +285,10 @@ func (m *rigDockedMemo) parkedOrDocked(townRoot, rigName string) (bool, string) 
 		return entry.read.blocked, entry.read.reason
 	}
 
-	blocked, reason := rigParkedOrDockedWith(townRoot, rigName, m.store)
+	// Only the docked-label read reaches the file: the park state this check
+	// just read from the registry is never stored, so a later check's park
+	// read decides a park on its own and the file cannot serve a stale one.
+	blocked, reason := rigDockedWith(townRoot, rigName, m.store)
 	if reason == sling.RigStatusUnverified {
 		// A failed read is not remembered, so it stays fail-closed and the
 		// next check asks bd again. It writes no file either: an unverified
@@ -326,7 +333,13 @@ func rigParkedOrDockedWith(townRoot, rigName string, store beads.Client) (bool, 
 	if IsRigParked(townRoot, rigName) {
 		return true, "parked"
 	}
+	return rigDockedWith(townRoot, rigName, store)
+}
 
+// rigDockedWith is the docked-label half of IsRigParkedOrDocked: the rig
+// registry's park state is the caller's to read, so a memo's verdict file
+// holds only this answer and never a park.
+func rigDockedWith(townRoot, rigName string, store beads.Client) (bool, string) {
 	// Look up the beads prefix from the rig registry, with fallback
 	// to the rig's own config.json for isolated/test scenarios.
 	rigPath := filepath.Join(townRoot, rigName)
