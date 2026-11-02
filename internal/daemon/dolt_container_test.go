@@ -104,10 +104,10 @@ func containerManager(t *testing.T, townRoot string, lifecycle doltContainerLife
 	return m, &hostCalls
 }
 
-// TestEnsureRunning_ExternalContainerRestartsTheContainer: the daemon's health
+// TestHealthRecoveryInExternalModeRestartsTheContainer: the daemon's health
 // recovery in container mode stops and starts the Docker container through
 // internal/doltserver and never the host process path (gt-xeb1x).
-func TestEnsureRunning_ExternalContainerRestartsTheContainer(t *testing.T) {
+func TestHealthRecoveryInExternalModeRestartsTheContainer(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	writeExternalContainerTown(t, townRoot, 3307, "gt-dolt")
