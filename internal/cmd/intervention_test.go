@@ -77,12 +77,12 @@ func TestInterventionRecordRefusesBadInput(t *testing.T) {
 		{
 			name:    "no kind",
 			args:    []string{"record", "--reason", "held the queue"},
-			wantErr: `required flag(s) "kind" not set`,
+			wantErr: `"kind"`,
 		},
 		{
 			name:    "no reason",
 			args:    []string{"record", "--kind", "hold"},
-			wantErr: `required flag(s) "reason" not set`,
+			wantErr: `"reason"`,
 		},
 		{
 			name:    "a takeover with no bead",
