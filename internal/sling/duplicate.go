@@ -60,8 +60,10 @@ type Duplicate struct {
 	// ClaimsUnread marks a bead in the active or recently closed pool whose
 	// design and notes were not read at all: the batched show failed, it did
 	// not answer for the row, or the tick's detail cache deferred it. The spec
-	// dispatcher's target-claim rule no longer reads it: an unread claim names
-	// no full path the rule can compare, so it holds nothing (gt-dnp9c).
+	// dispatcher's target-claim rule holds nothing for it: an unread claim
+	// names no full path the rule can compare (gt-dnp9c). The rule names such a
+	// peer to the tick so it can report the unknown claim, rather than let an
+	// unread seat look idle (UnreadClaimPeers).
 	ClaimsUnread bool
 	// Blockers lists the IDs this bead has a blocking dependency on, as far as
 	// the caller could read them from bd. The overlap guard walks these edges

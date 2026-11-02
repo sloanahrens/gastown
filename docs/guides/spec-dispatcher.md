@@ -140,8 +140,10 @@ decides and reports without slinging, labeling or commenting.
    name states no directory, so it names no one file and never matches, and a
    path in one package never matches a path in another. A peer that already
    landed holds nothing — a polecat starts from main, which carries the landing
-   — and neither does a peer whose own design and notes could not be read; both
-   conflicts resolve at the merge (gt-dnp9c). Two beads naming different tests
+   — and neither does a peer whose own design and notes could not be read: an
+   unread claim names no full path, so the tick slings past it and notes the
+   peer rather than letting the unknown claim look idle, and any conflict
+   resolves at the merge (gt-dnp9c). Two beads naming different tests
    of one file (`TestFoo` against `TestBar`) target different assertions and do
    not hold each other, and a bead naming no test file claims nothing. Before
    changing what holds, read `specdispatch.TargetClaimHold`. A claim set the

@@ -41,8 +41,8 @@ func claimOf(c duplicateCandidate) specdispatch.Claimant {
 		ClosedAt:  c.ClosedAt,
 		Landed:    c.Landed,
 		// An unread claim names no full path TargetClaimHold can compare, so it
-		// holds nothing (gt-dnp9c); the flag is still carried for the pool's
-		// record of what it read.
+		// holds nothing (gt-dnp9c); UnreadClaimPeers reads the flag so the
+		// tick can report the peer rather than treat it as idle.
 		ClaimUnread: c.ClaimsUnread,
 		Paths:       specHoldFiles(c.Refs.Files, c.Ready.Description, c.Refs.Text),
 		Tests:       c.Refs.Tests,

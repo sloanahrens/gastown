@@ -349,27 +349,41 @@ func (s droppedShow) ShowMultiple(ids []string) (map[string]*beads.Issue, error)
 // TestSpecDispatchDoesNotHoldForAPeerWhoseClaimWasNotRead is gt-dnp9c's unread
 // row through the production pool: a peer whose design and notes were not read
 // names no full path the rule can compare, so it holds nothing and the
-// candidate dispatches. A claim set that cannot be read at all still holds,
-// which is TestSpecDispatchHoldsWhenClaimsCannotBeRead's rule.
+// candidate dispatches. The list row may still spell the path while the claim
+// behind it is unread, so the rule must read the flag, and the tick notes the
+// peer rather than letting the unknown claim look idle. A claim set that cannot
+// be read at all still holds, which is
+// TestSpecDispatchHoldsWhenClaimsCannotBeRead's rule.
 func TestSpecDispatchDoesNotHoldForAPeerWhoseClaimWasNotRead(t *testing.T) {
 	t.Parallel()
-	peer := beads.Issue{ID: "fr-z64c", Title: "Pool the repeat rate over many seeds", Status: "in_progress",
-		Assignee: "fractals/polecats/cantor", Priority: 1, CreatedAt: "2026-10-31T09:00:00Z",
-		Description: "Pool the repeat rate of the walk over many seeds."}
+	// The file the candidate names, so a list-only peer row would match it.
+	const claimFile = "src/lib/__tests__/wanderHops.test.ts"
+	// A list row that names the candidate's file: the leftover path would
+	// match, which is exactly why the unread flag has to decide.
+	withFile := "Pool the repeat rate of " + claimFile + " over many seeds."
+	noFile := "Pool the repeat rate of the walk over many seeds."
 	candidate := beads.Issue{ID: "fr-zdzs", Title: frZ64cTitle, Status: "open", Priority: 1,
 		CreatedAt: "2026-10-31T15:00:00Z", Description: frZ64cDesc}
 
 	for _, tc := range []struct {
-		name    string
-		drop    map[string]bool
-		showErr bool
+		name     string
+		drop     map[string]bool
+		showErr  bool
+		peerDesc string
+		wantNote bool
 	}{
-		{name: "a peer whose design and notes were not read dispatches", drop: map[string]bool{"fr-z64c": true}},
-		{name: "a pool whose batched show failed dispatches", showErr: true},
-		{name: "a peer read to completion that names no file dispatches"},
+		{name: "a peer whose design and notes were not read dispatches and is noted",
+			drop: map[string]bool{"fr-z64c": true}, peerDesc: withFile, wantNote: true},
+		{name: "a pool whose batched show failed dispatches and is noted",
+			showErr: true, peerDesc: withFile, wantNote: true},
+		{name: "a peer read to completion that names no file dispatches",
+			peerDesc: noFile},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			peer := beads.Issue{ID: "fr-z64c", Title: "Pool the repeat rate over many seeds", Status: "in_progress",
+				Assignee: "fractals/polecats/cantor", Priority: 1, CreatedAt: "2026-10-31T09:00:00Z",
+				Description: tc.peerDesc}
 			db := beadsfake.New()
 			db.Seed(peer, candidate)
 			dir := t.TempDir()
@@ -409,6 +423,15 @@ func TestSpecDispatchDoesNotHoldForAPeerWhoseClaimWasNotRead(t *testing.T) {
 			}
 			if len(r.Skipped) != 0 {
 				t.Fatalf("skipped = %+v, want none", r.Skipped)
+			}
+			noted := false
+			for _, n := range r.Notices {
+				if strings.Contains(n, "fr-z64c") && strings.Contains(n, "claim that could not be read") {
+					noted = true
+				}
+			}
+			if noted != tc.wantNote {
+				t.Fatalf("notices = %+v, want an unread-peer notice = %v", r.Notices, tc.wantNote)
 			}
 		})
 	}

@@ -217,6 +217,14 @@ func TestClaimBareNameAndUnreadClaimDoNotHold(t *testing.T) {
 			peer:      Claimant{ID: "fr-z64c", Status: "in_progress", Assignee: seat, ClaimUnread: true},
 		},
 		{
+			// The list row can still carry the path while design and notes go
+			// unread. The rule must read the flag, not the leftover path: an
+			// unread claim is unknown, so it holds nothing (gt-dnp9c).
+			name:      "an unread peer whose row still spells the file",
+			candidate: fullPath,
+			peer:      Claimant{ID: "fr-z64c", Status: "in_progress", Assignee: seat, ClaimUnread: true, Paths: []string{claimTestFile}},
+		},
+		{
 			name:      "an unread peer slated ahead",
 			candidate: fullPath,
 			peer:      Claimant{ID: "fr-z64c", Status: "open", Priority: 1, CreatedAt: "2026-10-31T09:00:00Z", ClaimUnread: true},
@@ -227,6 +235,79 @@ func TestClaimBareNameAndUnreadClaimDoNotHold(t *testing.T) {
 			t.Parallel()
 			if why, held := TargetClaimHold(tc.candidate, []Claimant{tc.peer}, tc.slated, claimTestNow); held {
 				t.Fatalf("held = true (%q), want no hold", why)
+			}
+		})
+	}
+}
+
+// TestUnreadClaimPeers names the peers whose unknown claim must be reported:
+// one in flight, or one the tick slates ahead, holds nothing in
+// TargetClaimHold, so the tick says which peer it could not read rather than
+// letting the unknown claim look idle (gt-dnp9c).
+func TestUnreadClaimPeers(t *testing.T) {
+	t.Parallel()
+	const seat = "fractals/polecats/cantor"
+	candidate := Claimant{
+		ID: "fr-zdzs", Status: "open", Priority: 1,
+		CreatedAt: "2026-10-31T15:00:00Z",
+		Paths:     []string{claimTestFile},
+	}
+	for _, tc := range []struct {
+		name   string
+		peers  []Claimant
+		slated map[string]bool
+		want   []string
+	}{
+		{
+			name:  "an unread peer in flight is named",
+			peers: []Claimant{{ID: "fr-z64c", Status: "in_progress", Assignee: seat, ClaimUnread: true}},
+			want:  []string{"fr-z64c"},
+		},
+		{
+			name:  "an unread hooked peer is named",
+			peers: []Claimant{{ID: "fr-z64c", Status: "hooked", Assignee: seat, ClaimUnread: true}},
+			want:  []string{"fr-z64c"},
+		},
+		{
+			name:   "an unread peer slated ahead is named",
+			peers:  []Claimant{{ID: "fr-z64c", Status: "open", Priority: 1, CreatedAt: "2026-10-31T09:00:00Z", ClaimUnread: true}},
+			slated: map[string]bool{"fr-z64c": true},
+			want:   []string{"fr-z64c"},
+		},
+		{
+			name:   "an unread peer the tick does not slate is not named",
+			peers:  []Claimant{{ID: "fr-z64c", Status: "open", Priority: 1, CreatedAt: "2026-10-31T09:00:00Z", ClaimUnread: true}},
+			slated: map[string]bool{"fr-other": true},
+		},
+		{
+			name:   "an unread peer behind in dispatch order is not named",
+			peers:  []Claimant{{ID: "fr-z64c", Status: "open", Priority: 1, CreatedAt: "2026-10-31T20:00:00Z", ClaimUnread: true}},
+			slated: map[string]bool{"fr-z64c": true},
+		},
+		{
+			name:  "a closed unread peer is not named",
+			peers: []Claimant{{ID: "fr-z64c", Status: "closed", ClaimUnread: true}},
+		},
+		{
+			name:  "a read peer is not named even in flight on the path",
+			peers: []Claimant{{ID: "fr-z64c", Status: "in_progress", Assignee: seat, Paths: []string{claimTestFile}}},
+		},
+		{
+			name:  "the candidate's own unread claim is not named",
+			peers: []Claimant{{ID: candidate.ID, Status: "in_progress", Assignee: seat, ClaimUnread: true}},
+		},
+		{
+			name:   "the names are sorted",
+			peers:  []Claimant{{ID: "fr-zzz", Status: "in_progress", Assignee: seat, ClaimUnread: true}, {ID: "fr-aaa", Status: "in_progress", Assignee: seat, ClaimUnread: true}},
+			want:   []string{"fr-aaa", "fr-zzz"},
+			slated: map[string]bool{},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := UnreadClaimPeers(candidate, tc.peers, tc.slated)
+			if strings.Join(got, " ") != strings.Join(tc.want, " ") {
+				t.Errorf("UnreadClaimPeers() = %v, want %v", got, tc.want)
 			}
 		})
 	}

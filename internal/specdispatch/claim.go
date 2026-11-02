@@ -24,6 +24,10 @@ import (
 // (gt-dnp9c). A peer that already landed holds nothing either: a polecat
 // starts from main, which carries that landing, and holding the bead behind it
 // left seats idle while the conflict would have merged normally (gt-dnp9c).
+// A peer whose design and notes could not be read likewise holds nothing: its
+// claim is unknown, so the rule cannot compare it to a path. Unknown is not
+// empty, though, so UnreadClaimPeers names such a peer for the tick to report
+// rather than let an unread seat look like an idle one (gt-dnp9c).
 //
 // The hold is the spec dispatcher's, applied in its tick beside the other
 // holds, and it is a skip rather than a failure: the bead stays ready and is
@@ -149,9 +153,10 @@ type Claimant struct {
 	// target-claim rule does not read it: a landed peer holds nothing, because
 	// the candidate starts from main and already has that work (gt-dnp9c).
 	Landed bool
-	// ClaimUnread marks a peer whose design and notes were not read. The
-	// target-claim rule does not read it either: a peer that names no readable
-	// full path holds nothing (gt-dnp9c).
+	// ClaimUnread marks a peer whose design and notes were not read. An unread
+	// claim is unknown, not empty: it may name any test file, so the
+	// target-claim rule holds nothing for it and UnreadClaimPeers names it for
+	// the tick's notice (gt-dnp9c).
 	ClaimUnread bool
 	Paths       []string
 	Tests       []string
@@ -183,7 +188,8 @@ func NamesTestFile(candidate Claimant) bool { return len(testFiles(candidate.Pat
 // No other peer holds: a closed or landed peer's work is already on main, which
 // the candidate starts from, and a peer that names the file only by a bare name
 // or whose claim could not be read names no path this rule can compare
-// (gt-dnp9c).
+// (gt-dnp9c). An unread peer that would otherwise hold is named by
+// UnreadClaimPeers, which the tick reports as a notice.
 //
 // slated is the set of beads the tick has decided to sling this tick, not the
 // set its ready board carries. A board-carried peer the tick holds for a reason
@@ -214,19 +220,25 @@ func TargetClaimHold(candidate Claimant, peers []Claimant, slated map[string]boo
 		if peer.ID == "" || peer.ID == candidate.ID || (heldID != "" && peer.ID >= heldID) {
 			continue
 		}
+		// An unread claim is unknown, not empty: it spells no path this rule
+		// can compare, so it holds nothing here and is reported by
+		// UnreadClaimPeers instead (gt-dnp9c).
+		if peer.ClaimUnread {
+			continue
+		}
 		shared := sharedTestFile(files, peer.Paths)
 		if shared == "" || distinctTests(candidate.Tests, peer.Tests) {
 			continue
 		}
+		if !holdsStatus(peer, candidate, slated) {
+			continue
+		}
 		match := fmt.Sprintf("names the same test file, %s,", shared)
 		var why string
-		switch {
-		case claimLiveStatuses[peer.Status]:
+		if claimLiveStatuses[peer.Status] {
 			why = fmt.Sprintf("%s %s and is in flight on it%s; the hold lifts when that bead closes", peer.ID, match, seatOf(peer))
-		case peer.Status == "open" && slated[peer.ID] && precedes(peer, candidate):
+		} else {
 			why = fmt.Sprintf("%s %s and comes first in dispatch order; the hold lifts when that bead closes", peer.ID, match)
-		default:
-			continue
 		}
 		heldID, reason = peer.ID, why
 	}
@@ -234,6 +246,38 @@ func TargetClaimHold(candidate Claimant, peers []Claimant, slated map[string]boo
 		return "", false
 	}
 	return reason, true
+}
+
+// holdsStatus reports whether peer is in a state that holds a candidate naming
+// the same test file: a seat already on it, or an open bead the tick slates
+// ahead of the candidate.
+func holdsStatus(peer, candidate Claimant, slated map[string]bool) bool {
+	if claimLiveStatuses[peer.Status] {
+		return true
+	}
+	return peer.Status == "open" && slated[peer.ID] && precedes(peer, candidate)
+}
+
+// UnreadClaimPeers names the peers whose claim could not be read and whose
+// state would otherwise hold candidate. TargetClaimHold holds nothing for such
+// a peer, since an unread claim spells no path the rule can compare, but an
+// unread seat in flight must not look the same as an idle one: the tick
+// reports each name as a notice, so an unknown claim is visible rather than a
+// silent pass (gt-dnp9c). The names are sorted so the report does not depend on
+// the pool's order.
+func UnreadClaimPeers(candidate Claimant, peers []Claimant, slated map[string]bool) []string {
+	var out []string
+	for _, peer := range peers {
+		if peer.ID == "" || peer.ID == candidate.ID || !peer.ClaimUnread {
+			continue
+		}
+		if !holdsStatus(peer, candidate, slated) {
+			continue
+		}
+		out = append(out, peer.ID)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // seatOf names the seat a claimant is in flight on, for a hold reason, and
