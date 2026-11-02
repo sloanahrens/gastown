@@ -5,11 +5,8 @@ import (
 	"testing"
 )
 
-// bd prints a bead's metadata as an object when it was written as one (the
-// dispatcher's spec_dispatch_timeout_attempts is), and show prints every
-// dependency with that metadata. Decoded straight into a string the whole
-// answer failed to parse, taking every dependency of the bead with it and, in
-// the dispatcher, the tick's design/notes fetch (gt-l40eg).
+// Dependency metadata may be a JSON object, string, null or absent; none of
+// those shapes may fail the whole show (gt-l40eg).
 func TestShowParsesDependencyMetadataOfAnyJSONShape(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
