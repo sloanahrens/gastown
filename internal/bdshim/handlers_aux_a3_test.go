@@ -75,6 +75,45 @@ func TestHandlersDepRefusesTheCommandsItDoesNotAnswer(t *testing.T) {
 	}
 }
 
+// TestHandlersDepRefusesACrossRigTargetBeforeTheTrackerIsCalled: the refusal
+// comes before the store is opened, so no read or write reaches the tracker.
+// The tracker is unreachable here: a handler that opened it first would report
+// TRACKER_URL, so the cross-rig message shows the ordering rather than
+// claiming it.
+func TestHandlersDepRefusesACrossRigTargetBeforeTheTrackerIsCalled(t *testing.T) {
+	t.Parallel()
+	fixture, _ := readFixture(t)
+	town := newTown(t, routeFixture)
+	tests := []struct {
+		name string
+		argv []string
+		want string
+	}{
+		{name: "a cross-rig target", argv: []string{"dep", "add", "fx-1", "gt-1"}, want: "dep add of a cross-rig target gt-1"},
+		{name: "an external target", argv: []string{"dep", "add", "fx-1", "external:gt:gt-1"}, want: "dep add of a cross-rig target external:gt:gt-1"},
+		{name: "a target with no prefix", argv: []string{"dep", "add", "fx-1", "loose"}, want: "dep add of a cross-rig target loose"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env, stdout, stderr := fixtureEnv(t, town, fixture, tc.argv)
+			env.Getenv = func(string) string { return "" }
+			if code := Main(env); code != 1 {
+				t.Errorf("%v: exit code is %d, want 1", tc.argv, code)
+			}
+			if !strings.Contains(stderr.String(), tc.want) {
+				t.Errorf("%v: stderr = %q, want it to contain %q", tc.argv, stderr.String(), tc.want)
+			}
+			if strings.Contains(stderr.String(), "TRACKER_URL") {
+				t.Errorf("%v: stderr = %q, want the refusal before the store is opened", tc.argv, stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Errorf("%v: wrote %q, want nothing", tc.argv, stdout.String())
+			}
+		})
+	}
+}
+
 // TestHandlersDepRefusesAStoreItCannotOpen: a rig with no tracker endpoint
 // cannot answer either subcommand, and the refusal names what is missing rather
 // than printing an empty answer or a link it did not write.
@@ -208,11 +247,14 @@ func TestHandlersDepAddReportsAWriteThatFailed(t *testing.T) {
 }
 
 // TestHandlersDepAddReportsAnAnswerItCannotWrite: a stream that refuses bd's
-// line fails the verb rather than passing as a write that was reported.
+// line fails the verb rather than passing as a write that was reported, and
+// the failure says the link is already in the store, so a caller does not read
+// a durable link as an add to retry.
 func TestHandlersDepAddReportsAnAnswerItCannotWrite(t *testing.T) {
 	t.Parallel()
 	stderr := &bytes.Buffer{}
 	env := Env{Stdout: failingWriter{}, Stderr: stderr}
+	var written [2]string
 	st := stubAuxDepStore{
 		showMany: func([]string) (map[string]*beads.Issue, error) {
 			return map[string]*beads.Issue{
@@ -220,13 +262,19 @@ func TestHandlersDepAddReportsAnAnswerItCannotWrite(t *testing.T) {
 				"fx-2": {ID: "fx-2", Title: "fixture bead two"},
 			}, nil
 		},
-		add: func(string, string) error { return nil },
+		add: func(issue, dependsOn string) error {
+			written = [2]string{issue, dependsOn}
+			return nil
+		},
 	}
 	if code := addDep(env, st, "fx-1", "fx-2"); code != 1 {
 		t.Errorf("exit code is %d, want 1 for an answer that was not written", code)
 	}
-	if !strings.Contains(stderr.String(), "writing bd's answer") {
-		t.Errorf("stderr = %q, want the write failure named", stderr.String())
+	if written != [2]string{"fx-1", "fx-2"} {
+		t.Errorf("wrote the link %v, want fx-1 depends on fx-2", written)
+	}
+	if !strings.Contains(stderr.String(), "the link was written") {
+		t.Errorf("stderr = %q, want it to say the link is already written", stderr.String())
 	}
 }
 

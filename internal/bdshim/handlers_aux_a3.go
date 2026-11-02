@@ -132,7 +132,10 @@ func addDep(env Env, st auxDepStore, issue, target string) int {
 	answer := fmt.Sprintf("✓ Added dependency: %s (%s) depends on %s (%s) (%s)\n",
 		issue, found[issue].Title, target, found[target].Title, depBlocks)
 	if _, err := fmt.Fprint(env.Stdout, answer); err != nil {
-		return shimError(env, fmt.Errorf("writing bd's answer: %w", err))
+		// The link is already in the store: the answer is printed only after
+		// the write, so this failure must say the write landed rather than
+		// read as a dep add a caller should retry.
+		return shimError(env, fmt.Errorf("dep add %s %s: the link was written but bd's answer could not be printed: %w", issue, target, err))
 	}
 	return 0
 }
