@@ -273,7 +273,7 @@ func TestDoltStatusShowsArchiveWatermark(t *testing.T) {
 			t.Errorf("status line = %q, want it to hold %q", line, want)
 		}
 	}
-	if want := "archived through 2026-11-01, 0 commits behind; events archived through 2026-11-01 22:00:00, 0 events behind"; notes["hq"] != want {
+	if want := "archived through 2026-11-01, 0 commits behind; events archived through 2026-11-01 22:00:00, 0 events behind since 2026-10-31 22:00:00"; notes["hq"] != want {
 		t.Errorf("hq note = %q, want %q", notes["hq"], want)
 	}
 	if want := "archived through 2026-10-30, 1 commit behind; events not archived yet, 4 events behind"; notes["om"] != want {

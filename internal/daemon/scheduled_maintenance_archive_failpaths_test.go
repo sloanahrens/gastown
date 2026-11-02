@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -264,46 +263,49 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 		}
 	})
 
-	t.Run("an events export refuses a table without the cursor columns", func(t *testing.T) {
+	t.Run("an events export refuses a table without the watermark columns", func(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
-		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, eventsArchiveRead, int) (archiveEvents, error) {
+		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, string) (archiveEvents, error) {
 			return archiveEvents{Columns: []string{"payload"}, Rows: [][]string{{"x"}}}, nil
 		}
 		err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", zero)
 		if err == nil || !strings.Contains(err.Error(), "no created_at and id columns") {
-			t.Errorf("export of a table without the cursor columns = %v, want it refused", err)
+			t.Errorf("export of a table without the watermark columns = %v, want it refused", err)
 		}
 	})
 
-	t.Run("an events export refuses columns that change between batches", func(t *testing.T) {
+	t.Run("an events export refuses a row with no id value", func(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
-		calls := 0
-		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, eventsArchiveRead, int) (archiveEvents, error) {
-			calls++
-			if calls == 1 {
-				rows := make([][]string, maintenanceArchiveEventsBatch)
-				for i := range rows {
-					rows[i] = []string{strconv.Itoa(i + 1), "2026-10-01 00:00:00"}
-				}
-				return archiveEvents{Columns: []string{"id", "created_at"}, Rows: rows}, nil
-			}
+		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, string) (archiveEvents, error) {
+			return archiveEvents{Columns: []string{"id", "created_at"}, Rows: [][]string{{}}}, nil
+		}
+		err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", zero)
+		if err == nil || !strings.Contains(err.Error(), "missing column") {
+			t.Errorf("export of a row with no id value = %v, want it refused", err)
+		}
+	})
+
+	t.Run("an events export refuses a row narrower than its header", func(t *testing.T) {
+		t.Parallel()
+		d, _ := gcTestDaemon(t)
+		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, string) (archiveEvents, error) {
 			return archiveEvents{
-				Columns: []string{"id", "created_at", "payload"},
-				Rows:    [][]string{{"1", "2026-10-01 00:00:00", "x"}},
+				Columns: []string{"id", "created_at"},
+				Rows:    [][]string{{"1"}},
 			}, nil
 		}
 		err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", zero)
-		if err == nil || !strings.Contains(err.Error(), "columns changed") {
-			t.Errorf("export across changing columns = %v, want it refused", err)
+		if err == nil || !strings.Contains(err.Error(), "1 values") {
+			t.Errorf("export of a short row = %v, want it refused", err)
 		}
 	})
 
-	t.Run("an events export refuses a row it cannot turn into a cursor", func(t *testing.T) {
+	t.Run("an events export refuses a row it cannot place in the window", func(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
-		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, eventsArchiveRead, int) (archiveEvents, error) {
+		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, string) (archiveEvents, error) {
 			return archiveEvents{
 				Columns: []string{"id", "created_at"},
 				Rows:    [][]string{{"1", "yesterday"}},
@@ -311,14 +313,14 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 		}
 		err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", zero)
 		if err == nil || !strings.Contains(err.Error(), "not a timestamp") {
-			t.Errorf("export of a row with an unusable cursor = %v, want it refused", err)
+			t.Errorf("export of a row with an unusable created_at = %v, want it refused", err)
 		}
 	})
 
 	t.Run("an events export reports a watermark it cannot record", func(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
-		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, eventsArchiveRead, int) (archiveEvents, error) {
+		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, string) (archiveEvents, error) {
 			return archiveEvents{
 				Columns: []string{"id", "created_at"},
 				Rows:    [][]string{{"1", "2026-10-01 00:00:00"}},
@@ -584,8 +586,37 @@ func TestDoltArchiveLogReadsPastItsCursor(t *testing.T) {
 	if !slices.Equal(hashes, []string{"same-second", "after"}) {
 		t.Errorf("commits read = %v, want the boundary commit already archived dropped and both new commits kept", hashes)
 	}
-	if len(server.args) != 1 || !server.args[0].Value.(time.Time).Equal(boundary) {
-		t.Errorf("read bound = %v, want the watermark's date %v", server.args, boundary)
+	for _, want := range []string{"date > ?", "date = ?", "commit_hash NOT IN (?)", "ORDER BY date ASC, commit_hash ASC",
+		fmt.Sprintf("LIMIT %d", maintenanceArchiveCommitLimit)} {
+		if !strings.Contains(server.query, want) {
+			t.Errorf("read query = %q, want it to hold %q", server.query, want)
+		}
+	}
+	if len(server.args) != 3 ||
+		!server.args[0].Value.(time.Time).Equal(boundary) ||
+		!server.args[1].Value.(time.Time).Equal(boundary) ||
+		server.args[2].Value.(string) != "archived" {
+		t.Errorf("read args = %v, want the date twice and the archived boundary hash: a full limit of archived rows must not stall the read", server.args)
+	}
+}
+
+// TestDoltArchiveLogQueryIsBoundedWithNoWatermark: a first read of the whole
+// history still carries the limit, so a large log is read in bounded runs
+// rather than all at once (gt-98eug).
+func TestDoltArchiveLogQueryIsBoundedWithNoWatermark(t *testing.T) {
+	t.Parallel()
+	query, args, err := doltArchiveLogQuery(ArchiveWatermark{})
+	if err != nil {
+		t.Fatalf("building the query: %v", err)
+	}
+	if strings.Contains(query, "WHERE") {
+		t.Errorf("query = %q, want no date bound for an empty watermark", query)
+	}
+	if !strings.HasSuffix(query, fmt.Sprintf("LIMIT %d", maintenanceArchiveCommitLimit)) {
+		t.Errorf("query = %q, want it bounded by the commit limit", query)
+	}
+	if len(args) != 0 {
+		t.Errorf("args = %v, want none", args)
 	}
 }
 
@@ -635,13 +666,13 @@ func TestDoltArchiveLogKeepsNullMessageDistinctFromEmpty(t *testing.T) {
 func TestDoltArchiveEventsFailures(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	zero := eventsArchiveRead{}
+	const since = ""
 
 	t.Run("a pool that cannot be opened", func(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
 		d.maint.archiveOpenDB = func(string) (*sql.DB, error) { return nil, errors.New("no pool") }
-		if _, err := d.doltArchiveEvents(ctx, "gt", zero, 10); err == nil || !strings.Contains(err.Error(), "no pool") {
+		if _, err := d.doltArchiveEvents(ctx, "gt", since); err == nil || !strings.Contains(err.Error(), "no pool") {
 			t.Errorf("read with an unopenable pool = %v, want the open error", err)
 		}
 	})
@@ -650,7 +681,7 @@ func TestDoltArchiveEventsFailures(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
 		// "gt;" passes the maintenance name check but not beadsql's identifier.
-		if _, err := d.doltArchiveEvents(ctx, "gt;", zero, 10); err == nil {
+		if _, err := d.doltArchiveEvents(ctx, "gt;", since); err == nil {
 			t.Error("a database name beadsql refuses was queried")
 		}
 	})
@@ -661,7 +692,7 @@ func TestDoltArchiveEventsFailures(t *testing.T) {
 		d.maint.archiveOpenDB = archiveFakeOpener(t, &archiveFakeServer{queryErr: errors.New("i/o timeout")})
 		expired, cancel := context.WithDeadline(ctx, time.Now().Add(-time.Second))
 		defer cancel()
-		if _, err := d.doltArchiveEvents(expired, "gt", zero, 10); err == nil || !strings.Contains(err.Error(), "timeout") {
+		if _, err := d.doltArchiveEvents(expired, "gt", since); err == nil || !strings.Contains(err.Error(), "timeout") {
 			t.Errorf("read after its deadline = %v, want it reported as a timeout", err)
 		}
 	})
@@ -670,7 +701,7 @@ func TestDoltArchiveEventsFailures(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
 		d.maint.archiveOpenDB = archiveFakeOpener(t, &archiveFakeServer{queryErr: errors.New("query failed")})
-		if _, err := d.doltArchiveEvents(ctx, "gt", zero, 10); err == nil || !strings.Contains(err.Error(), "query failed") {
+		if _, err := d.doltArchiveEvents(ctx, "gt", since); err == nil || !strings.Contains(err.Error(), "query failed") {
 			t.Errorf("failed read = %v, want the server error", err)
 		}
 	})
@@ -682,7 +713,7 @@ func TestDoltArchiveEventsFailures(t *testing.T) {
 			columns: []string{"id", "created_at"},
 			rows:    [][]driver.Value{{struct{}{}, "2026-10-01 00:00:00"}},
 		})
-		if _, err := d.doltArchiveEvents(ctx, "gt", zero, 10); err == nil {
+		if _, err := d.doltArchiveEvents(ctx, "gt", since); err == nil {
 			t.Error("a row whose value is not a string was read")
 		}
 	})
@@ -694,7 +725,7 @@ func TestDoltArchiveEventsFailures(t *testing.T) {
 			columns: []string{"id", "created_at"},
 			nextErr: errors.New("row read failed"),
 		})
-		if _, err := d.doltArchiveEvents(ctx, "gt", zero, 10); err == nil || !strings.Contains(err.Error(), "row read failed") {
+		if _, err := d.doltArchiveEvents(ctx, "gt", since); err == nil || !strings.Contains(err.Error(), "row read failed") {
 			t.Errorf("failed row read = %v, want the row error", err)
 		}
 	})
@@ -706,7 +737,7 @@ func TestDoltArchiveEventsFailures(t *testing.T) {
 			columns: []string{"id", "created_at"},
 			rows:    [][]driver.Value{{"1", "2026-10-01 00:00:00"}},
 		})
-		got, err := d.doltArchiveEvents(ctx, "gt", zero, 10)
+		got, err := d.doltArchiveEvents(ctx, "gt", since)
 		if err != nil {
 			t.Fatalf("read: %v", err)
 		}

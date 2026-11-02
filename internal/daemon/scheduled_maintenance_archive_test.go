@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/csv"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -16,6 +17,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	sqle "github.com/dolthub/go-mysql-server"
+	"github.com/dolthub/go-mysql-server/memory"
+	gmssql "github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/types"
 )
 
 // The archive step runs through the gc fakes plus one seam per read (dolt_log
@@ -78,9 +84,10 @@ func withArchiveFakes(d *Daemon, f *gcFakes, commits map[string][]archiveCommit,
 }
 
 // eventsFake is the events read seam: columns, the rows a database holds (in
-// created_at, id order) and a per-database read error. It pages like the
-// production query: rows at or after the lookback window's start, after the
-// paging cursor, at most limit of them.
+// created_at, id order) and a per-database read error. It returns the rows at
+// or after the read's window start, the bound the production query applies;
+// TestEventsArchiveQueryReadsTheLookbackWindow runs that query itself against
+// an in-process MySQL engine, so this fake only has to drive the export.
 type eventsFake struct {
 	columns []string
 	rows    map[string][][]string
@@ -92,7 +99,7 @@ type eventsFake struct {
 // which serves no rows.
 func withEventsFake(d *Daemon, columns []string, rows map[string][][]string, errs map[string]error) *eventsFake {
 	f := &eventsFake{columns: columns, rows: rows, errs: errs}
-	d.maint.archiveEventsRead = func(_ context.Context, _ *Daemon, db string, read eventsArchiveRead, limit int) (archiveEvents, error) {
+	d.maint.archiveEventsRead = func(_ context.Context, _ *Daemon, db, since string) (archiveEvents, error) {
 		f.reads++
 		if err := f.errs[db]; err != nil {
 			return archiveEvents{}, err
@@ -100,16 +107,13 @@ func withEventsFake(d *Daemon, columns []string, rows map[string][][]string, err
 		if len(f.columns) == 0 {
 			return archiveEvents{}, nil // nothing installed: the database has no new rows
 		}
-		createdAt, id, err := eventsWatermarkColumns(f.columns)
+		createdAt, _, err := eventsWatermarkColumns(f.columns)
 		if err != nil {
 			return archiveEvents{}, err
 		}
 		batch := archiveEvents{Columns: f.columns}
 		for _, row := range f.rows[db] {
-			if len(batch.Rows) == limit {
-				break
-			}
-			if !eventsRowInRead(row[createdAt], row[id], read) {
+			if since != "" && row[createdAt] < since {
 				continue
 			}
 			batch.Rows = append(batch.Rows, row)
@@ -117,21 +121,6 @@ func withEventsFake(d *Daemon, columns []string, rows map[string][][]string, err
 		return batch, nil
 	}
 	return f
-}
-
-// eventsRowInRead reports whether a row is inside the read's window and past
-// its cursor, the comparison the production WHERE clause makes.
-func eventsRowInRead(createdAt, id string, read eventsArchiveRead) bool {
-	if read.Since != "" && createdAt < read.Since {
-		return false
-	}
-	if read.After.CreatedAt == "" && read.After.ID == "" {
-		return true
-	}
-	if createdAt != read.After.CreatedAt {
-		return createdAt > read.After.CreatedAt
-	}
-	return id > read.After.ID
 }
 
 // readArchiveCSV reads one archive file back as CSV rows.
@@ -553,7 +542,7 @@ func TestMaintenanceArchiveOffWithoutArchiveDir(t *testing.T) {
 		t.Error("the dolt_log read ran with archive_dir unset")
 		return nil, nil
 	}
-	d.maint.archiveEventsRead = func(context.Context, *Daemon, string, eventsArchiveRead, int) (archiveEvents, error) {
+	d.maint.archiveEventsRead = func(context.Context, *Daemon, string, string) (archiveEvents, error) {
 		t.Error("the events read ran with archive_dir unset")
 		return archiveEvents{}, nil
 	}
@@ -595,6 +584,9 @@ func TestMaintenanceArchiveRefusesUnusableDirectory(t *testing.T) {
 		if !strings.Contains(logs.String(), "want an absolute path") {
 			t.Errorf("log does not say the directory was refused:\n%s", logs.String())
 		}
+		if len(f.gcCalls) != 0 {
+			t.Errorf("gc calls = %v, want none while no database was archived", f.gcCalls)
+		}
 	})
 
 	t.Run("uncreatable directory", func(t *testing.T) {
@@ -616,6 +608,9 @@ func TestMaintenanceArchiveRefusesUnusableDirectory(t *testing.T) {
 
 		if len(f.escalations) != 1 || !strings.Contains(f.escalations[0], "cannot create") {
 			t.Errorf("escalations = %v, want one saying the directory cannot be created", f.escalations)
+		}
+		if len(f.gcCalls) != 0 {
+			t.Errorf("gc calls = %v, want none while no database was archived", f.gcCalls)
 		}
 	})
 
@@ -644,6 +639,9 @@ func TestMaintenanceArchiveRefusesUnusableDirectory(t *testing.T) {
 		}
 		if !strings.Contains(logs.String(), "no history archived this run") {
 			t.Errorf("log does not say nothing was archived:\n%s", logs.String())
+		}
+		if len(f.gcCalls) != 0 {
+			t.Errorf("gc calls = %v, want none while no database was archived", f.gcCalls)
 		}
 	})
 }
@@ -675,7 +673,7 @@ func TestMaintenanceArchiveRollsBackWhenTheWatermarkCannotBeRecorded(t *testing.
 	// This test drives the commit export. The events read is injected too: a
 	// run that reached its default would open a real connection, and the
 	// failure it reported would be the connection's, not the watermark's.
-	d.maint.archiveEventsRead = func(context.Context, *Daemon, string, eventsArchiveRead, int) (archiveEvents, error) {
+	d.maint.archiveEventsRead = func(context.Context, *Daemon, string, string) (archiveEvents, error) {
 		return archiveEvents{}, nil
 	}
 	d.maint.archiveOpenDB = func(string) (*sql.DB, error) {
@@ -808,16 +806,42 @@ func TestLoadArchivedCommitHashes(t *testing.T) {
 		}
 	})
 
-	t.Run("a name shaped like an archive file without a date is refused", func(t *testing.T) {
+	t.Run("a sibling database whose name extends this one is not read as this one", func(t *testing.T) {
 		t.Parallel()
-		bad := t.TempDir()
-		if err := appendArchiveTable(filepath.Join(bad, "dolt-log-gt-today.csv.gz"), archiveCSVHeader, [][]string{
+		// dolt-log-gt-extra-20261102.csv.gz ends in a UTC date, but the
+		// database before it is gt-extra: gt must not fail on, or read, it.
+		sibling := t.TempDir()
+		if err := appendArchiveTable(filepath.Join(sibling, "dolt-log-gt-extra-20261102.csv.gz"), archiveCSVHeader, [][]string{
 			{"h1", "c", "2026-11-01T00:00:00Z", "one"},
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := LoadArchivedCommitHashes(bad, "gt"); err == nil {
-			t.Error("a file named without a date was skipped")
+		got, err := LoadArchivedCommitHashes(sibling, "gt")
+		if err != nil {
+			t.Fatalf("a sibling database's file failed gt's check: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("gt's archived hashes = %v, want none (the file belongs to gt-extra)", got)
+		}
+		if got, err := LoadArchivedCommitHashes(sibling, "gt-extra"); err != nil || len(got) != 1 {
+			t.Errorf("gt-extra's archived hashes = %v, %v; want its own h1", got, err)
+		}
+	})
+
+	t.Run("a name without a UTC date at the end is not attributed to a database", func(t *testing.T) {
+		t.Parallel()
+		unattributable := t.TempDir()
+		if err := appendArchiveTable(filepath.Join(unattributable, "dolt-log-gt-today.csv.gz"), archiveCSVHeader, [][]string{
+			{"h1", "c", "2026-11-01T00:00:00Z", "one"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := LoadArchivedCommitHashes(unattributable, "gt")
+		if err != nil {
+			t.Fatalf("an unattributable neighbour failed gt's check: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("gt's archived hashes = %v, want none", got)
 		}
 	})
 
@@ -922,7 +946,7 @@ func TestLoadArchivedCommitHashes(t *testing.T) {
 // in events-<db>-<date>.csv.gz with every column, in created_at then id order;
 // the watermark moves only once the file is closed; a failed events export
 // keeps its watermark while the commit-log export still runs; and a first
-// export larger than one batch pages to the end.
+// export writes every row one window read returns.
 func TestMaintenanceArchivesNewEventsRows(t *testing.T) {
 	t.Parallel()
 	columns := []string{"id", "issue_id", "event_type", "actor", "old_value", "new_value", "created_at"}
@@ -1036,7 +1060,7 @@ func TestMaintenanceArchivesNewEventsRows(t *testing.T) {
 		}
 	})
 
-	t.Run("a first export longer than one batch pages to the end", func(t *testing.T) {
+	t.Run("a first export writes every row one read returns", func(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
 		f := withGCFakes(t, d)
@@ -1046,7 +1070,7 @@ func TestMaintenanceArchivesNewEventsRows(t *testing.T) {
 		withArchiveFakes(d, f, nil, nil)
 
 		base := time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)
-		many := make([][]string, maintenanceArchiveEventsBatch+1)
+		many := make([][]string, 200)
 		for i := range many {
 			many[i] = []string{strconv.Itoa(i + 1), "gt-a", "x", "c", "", "",
 				base.Add(time.Duration(i) * time.Minute).Format("2006-01-02 15:04:05")}
@@ -1055,8 +1079,8 @@ func TestMaintenanceArchivesNewEventsRows(t *testing.T) {
 
 		d.runScheduledMaintenance()
 
-		if fake.reads < 2 {
-			t.Errorf("events read ran %d time(s), want at least two batches", fake.reads)
+		if fake.reads != 1 {
+			t.Errorf("events read ran %d time(s), want one window read", fake.reads)
 		}
 		if got := readArchiveCSV(t, eventsArchiveFile(dir, "gt")); len(got) != len(many)+1 {
 			t.Errorf("events archive holds %d row(s), want %d rows and one header", len(got)-1, len(many))
@@ -1068,38 +1092,6 @@ func TestMaintenanceArchivesNewEventsRows(t *testing.T) {
 		last := many[len(many)-1]
 		if got := st.ArchiveEventsWatermarks["gt"]; got.CreatedAt != last[6] || !got.ArchivedIDs()[last[0]] {
 			t.Errorf("events watermark = %+v, want %s and id %s in the window", got, last[6], last[0])
-		}
-	})
-
-	t.Run("a read that never advances stops the export", func(t *testing.T) {
-		t.Parallel()
-		d, logs := gcTestDaemon(t)
-		f := withGCFakes(t, d)
-		f.sizes = map[string]gcMeasure{"gt": {633 * mib, 0}}
-		d.patrolConfig = archiveConfig(t.TempDir())
-		withArchiveFakes(d, f, nil, nil)
-
-		// A full batch repeated whatever cursor it is given: the loop must stop
-		// rather than page for ever.
-		stuck := make([][]string, maintenanceArchiveEventsBatch)
-		for i := range stuck {
-			stuck[i] = []string{strconv.Itoa(i + 1), "gt-a", "x", "c", "", "", "2026-09-30 10:00:00"}
-		}
-		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, eventsArchiveRead, int) (archiveEvents, error) {
-			return archiveEvents{Columns: columns, Rows: stuck}, nil
-		}
-
-		d.runScheduledMaintenance()
-
-		st, err := loadMaintenanceGCState(d.config.TownRoot)
-		if err != nil {
-			t.Fatalf("loading state: %v", err)
-		}
-		if _, ok := st.ArchiveEventsWatermarks["gt"]; ok {
-			t.Errorf("a read that never advanced still moved the watermark: %+v", st.ArchiveEventsWatermarks["gt"])
-		}
-		if !strings.Contains(logs.String(), "made no progress") {
-			t.Errorf("log does not report the stalled read:\n%s", logs.String())
 		}
 	})
 }
@@ -1211,9 +1203,9 @@ func TestEventsArchiveWatermarkValidate(t *testing.T) {
 	}
 }
 
-// TestEventsArchiveColumns: the cursor is built from the created_at and id
-// columns, and an events table without them, or a row too short to hold them,
-// is refused rather than archived with a cursor it cannot advance.
+// TestEventsArchiveColumns: the watermark is built from the created_at and id
+// columns, and an events table without them is refused rather than archived
+// with a watermark it cannot advance.
 func TestEventsArchiveColumns(t *testing.T) {
 	t.Parallel()
 	if _, _, err := eventsWatermarkColumns([]string{"id", "issue_id", "created_at"}); err != nil {
@@ -1224,18 +1216,6 @@ func TestEventsArchiveColumns(t *testing.T) {
 	}
 	if _, _, err := eventsWatermarkColumns([]string{"created_at", "issue_id"}); err == nil {
 		t.Error("columns without id accepted")
-	}
-	if _, err := eventsCursorFrom([]string{"id", "created_at"}, []string{"1"}); err == nil {
-		t.Error("a short row was turned into a cursor")
-	}
-	if _, err := eventsCursorFrom([]string{"id"}, []string{"1"}); err == nil {
-		t.Error("a cursor was built from columns without created_at")
-	}
-	if _, err := eventsCursorFrom([]string{"created_at", "id"}, []string{"yesterday", "1"}); err == nil {
-		t.Error("a cursor was built from text Dolt cannot compare")
-	}
-	if _, err := eventsCursorFrom([]string{"created_at", "id"}, []string{"2026-11-02 09:15:00", ""}); err == nil {
-		t.Error("a cursor was built with an empty id")
 	}
 }
 
@@ -1297,22 +1277,16 @@ func TestArchiveMemberRefusesRowWidthMismatch(t *testing.T) {
 	}
 }
 
-// TestDoltArchiveEventsRefusesBadBounds: an unusable limit or window start is
-// refused before a connection is opened, so it cannot read as "nothing new".
+// TestDoltArchiveEventsRefusesBadBounds: an unusable window start is refused
+// before a connection is opened, so it cannot read as "nothing new".
 func TestDoltArchiveEventsRefusesBadBounds(t *testing.T) {
 	t.Parallel()
 	d, _ := gcTestDaemon(t)
 	ctx := context.Background()
-	if _, err := d.doltArchiveEvents(ctx, "gt", eventsArchiveRead{Since: "2026-11-02 09:15:00"}, 0); err == nil {
-		t.Error("a zero limit was accepted")
-	}
-	if _, err := d.doltArchiveEvents(ctx, "gt", eventsArchiveRead{Since: "yesterday"}, 10); err == nil {
+	if _, err := d.doltArchiveEvents(ctx, "gt", "yesterday"); err == nil {
 		t.Error("an uncomparable window start was accepted")
 	}
-	if _, err := d.doltArchiveEvents(ctx, "gt", eventsArchiveRead{After: eventsCursor{CreatedAt: "yesterday", ID: "1"}}, 10); err == nil {
-		t.Error("an uncomparable paging cursor was accepted")
-	}
-	if _, err := d.doltArchiveEvents(ctx, "../gt", eventsArchiveRead{Since: "2026-11-02 09:15:00"}, 10); err == nil {
+	if _, err := d.doltArchiveEvents(ctx, "../gt", "2026-11-02 09:15:00"); err == nil {
 		t.Error("a path-escaping database name was accepted")
 	}
 }
@@ -1377,9 +1351,9 @@ func TestAppendArchiveTableRefusesAnUnreadablePath(t *testing.T) {
 	}
 }
 
-// TestMaintenanceArchiveEventsRollsBackAFailedExport: a batch written before a
-// later read fails is rolled back, so the file does not hold rows ahead of the
-// unadvanced watermark the next run would read again (gt-7nxj4).
+// TestMaintenanceArchiveEventsRollsBackAFailedExport: rows written before the
+// watermark record fails are rolled back, so the file does not hold rows ahead
+// of the unadvanced watermark the next run would read again (gt-7nxj4).
 func TestMaintenanceArchiveEventsRollsBackAFailedExport(t *testing.T) {
 	t.Parallel()
 	d, logs := gcTestDaemon(t)
@@ -1389,18 +1363,19 @@ func TestMaintenanceArchiveEventsRollsBackAFailedExport(t *testing.T) {
 	d.patrolConfig = archiveConfig(dir)
 	withArchiveFakes(d, f, nil, nil) // the commit read returns nothing
 
+	statePath := maintenanceGCStatePath(d.config.TownRoot)
 	columns := []string{"id", "created_at"}
-	first := make([][]string, maintenanceArchiveEventsBatch) // a full batch keeps the loop reading
-	for i := range first {
-		first[i] = []string{strconv.Itoa(i + 1), "2026-10-01 00:00:00"}
-	}
-	reads := 0
-	d.maint.archiveEventsRead = func(context.Context, *Daemon, string, eventsArchiveRead, int) (archiveEvents, error) {
-		reads++
-		if reads == 1 {
-			return archiveEvents{Columns: columns, Rows: first}, nil
+	rows := [][]string{{"1", "2026-10-01 00:00:00"}}
+	d.maint.archiveEventsRead = func(context.Context, *Daemon, string, string) (archiveEvents, error) {
+		// The state file becomes a directory after the run's load, so the
+		// watermark write fails while the archive file itself can be written.
+		if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+			t.Errorf("creating the daemon dir: %v", err)
 		}
-		return archiveEvents{}, errors.New("connection reset")
+		if err := os.Mkdir(statePath, 0o755); err != nil {
+			t.Errorf("making the state path unwritable: %v", err)
+		}
+		return archiveEvents{Columns: columns, Rows: rows}, nil
 	}
 
 	d.runScheduledMaintenance()
@@ -1408,14 +1383,14 @@ func TestMaintenanceArchiveEventsRollsBackAFailedExport(t *testing.T) {
 	if _, err := os.Stat(eventsArchiveFile(dir, "gt")); !os.IsNotExist(err) {
 		t.Errorf("the failed export left %s behind (stat err %v)", eventsArchiveFile(dir, "gt"), err)
 	}
-	st, err := loadMaintenanceGCState(d.config.TownRoot)
-	if err != nil {
-		t.Fatalf("loading state: %v", err)
+	// The state path is a directory now, so a readable state can only be one
+	// that never recorded the failed export.
+	if st, err := loadMaintenanceGCState(d.config.TownRoot); err == nil {
+		if _, ok := st.ArchiveEventsWatermarks["gt"]; ok {
+			t.Errorf("a failed export advanced the events watermark: %+v", st.ArchiveEventsWatermarks["gt"])
+		}
 	}
-	if _, ok := st.ArchiveEventsWatermarks["gt"]; ok {
-		t.Errorf("a failed export advanced the events watermark: %+v", st.ArchiveEventsWatermarks["gt"])
-	}
-	if !strings.Contains(logs.String(), "archive gt events: FAILED") || !strings.Contains(logs.String(), "connection reset") {
+	if !strings.Contains(logs.String(), "archive gt events: FAILED") || !strings.Contains(logs.String(), "cannot be recorded") {
 		t.Errorf("log does not name the failed export and why:\n%s", logs.String())
 	}
 }
@@ -1435,7 +1410,7 @@ func TestMaintenanceArchiveDefersWhileTheTownIsBusy(t *testing.T) {
 		t.Error("the commit read ran while the town was busy")
 		return nil, nil
 	}
-	d.maint.archiveEventsRead = func(context.Context, *Daemon, string, eventsArchiveRead, int) (archiveEvents, error) {
+	d.maint.archiveEventsRead = func(context.Context, *Daemon, string, string) (archiveEvents, error) {
 		t.Error("the events read ran while the town was busy")
 		return archiveEvents{}, nil
 	}
@@ -1466,20 +1441,29 @@ func TestMaintenanceArchiveBoundsTheWholeStep(t *testing.T) {
 	f := withGCFakes(t, d)
 	f.sizes = map[string]gcMeasure{"gt": {633 * mib, 0}}
 	d.patrolConfig = archiveConfig(t.TempDir())
-	var deadline time.Time
+	var deadline, atRead time.Time
 	d.maint.archiveRead = func(ctx context.Context, _ *Daemon, _ string, _ ArchiveWatermark) ([]archiveCommit, error) {
 		deadline, _ = ctx.Deadline()
+		atRead = time.Now()
 		return nil, nil
 	}
 	withEventsFake(d, nil, nil, nil)
 
+	// The baseline is read before the run, and the remaining budget is
+	// measured where the read uses it: the deadline was set at the step's
+	// start, so comparing it to a clock read after the run would widen the
+	// window by however long the run took.
+	base := time.Now()
 	d.runScheduledMaintenance()
 
 	if deadline.IsZero() {
 		t.Fatal("the archive read ran with no deadline")
 	}
-	if now := time.Now(); !deadline.After(now) || deadline.After(now.Add(maintenanceArchiveTimeout)) {
-		t.Errorf("archive read deadline = %v, want it within %v of now", deadline, maintenanceArchiveTimeout)
+	if !deadline.After(base) {
+		t.Errorf("archive read deadline = %v, want it set after the run began at %v", deadline, base)
+	}
+	if remaining := deadline.Sub(atRead); remaining <= 0 || remaining > maintenanceArchiveTimeout {
+		t.Errorf("archive read had %v left, want (0, %v]", remaining, maintenanceArchiveTimeout)
 	}
 }
 
@@ -1496,16 +1480,15 @@ func TestMaintenanceArchiveReportsAFailedRollback(t *testing.T) {
 	withArchiveFakes(d, f, nil, nil)
 
 	columns := []string{"id", "created_at"}
-	full := make([][]string, maintenanceArchiveEventsBatch) // a full batch keeps the loop reading
-	for i := range full {
-		full[i] = []string{strconv.Itoa(i + 1), "2026-10-01 00:00:00"}
-	}
+	rows := [][]string{{"1", "2026-10-01 00:00:00"}}
 	path := eventsArchiveFile(dir, "gt")
-	reads := 0
-	d.maint.archiveEventsRead = func(context.Context, *Daemon, string, eventsArchiveRead, int) (archiveEvents, error) {
-		reads++
-		if reads == 1 {
-			return archiveEvents{Columns: columns, Rows: full}, nil
+	statePath := maintenanceGCStatePath(d.config.TownRoot)
+	d.maint.archiveEventsRead = func(context.Context, *Daemon, string, string) (archiveEvents, error) {
+		return archiveEvents{Columns: columns, Rows: rows}, nil
+	}
+	d.maint.archiveAppend = func(p string, c []string, r [][]string) error {
+		if err := appendArchiveTable(p, c, r); err != nil {
+			return err
 		}
 		// Replace the written file with a non-empty directory: the export's
 		// rollback (remove, because it created the file) must fail and say so.
@@ -1518,7 +1501,14 @@ func TestMaintenanceArchiveReportsAFailedRollback(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(path, "keep"), []byte("x"), 0o644); err != nil {
 			t.Errorf("filling the replacement directory: %v", err)
 		}
-		return archiveEvents{}, errors.New("read failed")
+		// Make the watermark record fail, which is what starts the rollback.
+		if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+			t.Errorf("creating the daemon dir: %v", err)
+		}
+		if err := os.Mkdir(statePath, 0o755); err != nil {
+			t.Errorf("making the state path unwritable: %v", err)
+		}
+		return nil
 	}
 
 	d.runScheduledMaintenance()
@@ -1526,4 +1516,94 @@ func TestMaintenanceArchiveReportsAFailedRollback(t *testing.T) {
 	if !strings.Contains(logs.String(), "could not be rolled back") {
 		t.Errorf("log does not report the failed rollback:\n%s", logs.String())
 	}
+}
+
+// TestEventsArchiveQueryReadsTheLookbackWindow runs the production query text
+// (eventsArchiveQuery) against an in-process MySQL engine, not a Go fake that
+// would only repeat its WHERE clause: the window's lower bound is inclusive,
+// a row before it is not read, rows come back in created_at then id order, and
+// an empty window start reads the whole table (gt-7nxj4, gt-98eug rework).
+func TestEventsArchiveQueryReadsTheLookbackWindow(t *testing.T) {
+	t.Parallel()
+	ctx, engine := newEventsArchiveEngine(t)
+	insert := func(id, createdAt string) {
+		archiveEngineExec(t, ctx, engine, fmt.Sprintf(
+			"INSERT INTO events (id, created_at) VALUES ('%s', '%s')", id, createdAt))
+	}
+	insert("before", "2026-09-30 23:59:59")
+	insert("at-start", "2026-10-01 00:00:00")
+	insert("inside-b", "2026-10-01 12:00:00")
+	insert("inside-a", "2026-10-01 12:00:00")
+
+	query, err := eventsArchiveQuery("gt", "2026-10-01 00:00:00")
+	if err != nil {
+		t.Fatalf("building the query: %v", err)
+	}
+	if got, want := archiveEngineIDs(t, ctx, engine, query), []string{"at-start", "inside-a", "inside-b"}; !slices.Equal(got, want) {
+		t.Errorf("lookback window rows = %v, want %v (the inclusive bound, ordered by created_at then id)", got, want)
+	}
+
+	query, err = eventsArchiveQuery("gt", "")
+	if err != nil {
+		t.Fatalf("building the unbounded query: %v", err)
+	}
+	if got, want := archiveEngineIDs(t, ctx, engine, query), []string{"before", "at-start", "inside-a", "inside-b"}; !slices.Equal(got, want) {
+		t.Errorf("unbounded rows = %v, want the whole table %v", got, want)
+	}
+}
+
+// newEventsArchiveEngine builds an in-memory go-mysql-server engine with a gt
+// database and the events table the archive query reads.
+func newEventsArchiveEngine(t *testing.T) (*gmssql.Context, *sqle.Engine) {
+	t.Helper()
+	db := memory.NewDatabase("gt")
+	pro := memory.NewDBProvider(db)
+	session := memory.NewSession(gmssql.NewBaseSession(), pro)
+	ctx := gmssql.NewContext(context.Background(), gmssql.WithSession(session))
+	ctx.SetCurrentDatabase("gt")
+	db.AddTable("events", memory.NewTable(ctx, db, "events", gmssql.NewPrimaryKeySchema(gmssql.Schema{
+		{Name: "id", Type: types.Text, Nullable: false, Source: "events"},
+		{Name: "created_at", Type: types.Datetime, Nullable: false, Source: "events"},
+	}), db.GetForeignKeyCollection()))
+	engine := sqle.NewDefault(pro)
+	t.Cleanup(func() {
+		if err := engine.Close(); err != nil {
+			t.Errorf("closing the test engine: %v", err)
+		}
+	})
+	return ctx, engine
+}
+
+// archiveEngineExec runs one statement against the in-process engine.
+func archiveEngineExec(t *testing.T, ctx *gmssql.Context, engine *sqle.Engine, query string) {
+	t.Helper()
+	_, iter, _, err := engine.Query(ctx, query)
+	if err != nil {
+		t.Fatalf("exec %q: %v", query, err)
+	}
+	if _, err := gmssql.RowIterToRows(ctx, iter); err != nil {
+		t.Fatalf("draining %q: %v", query, err)
+	}
+}
+
+// archiveEngineIDs runs query and returns its first column as strings.
+func archiveEngineIDs(t *testing.T, ctx *gmssql.Context, engine *sqle.Engine, query string) []string {
+	t.Helper()
+	_, iter, _, err := engine.Query(ctx, query)
+	if err != nil {
+		t.Fatalf("query %q: %v", query, err)
+	}
+	rows, err := gmssql.RowIterToRows(ctx, iter)
+	if err != nil {
+		t.Fatalf("reading rows for %q: %v", query, err)
+	}
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		id, ok := row[0].(string)
+		if !ok {
+			t.Fatalf("row id is %T, want string: %v", row[0], row[0])
+		}
+		ids = append(ids, id)
+	}
+	return ids
 }

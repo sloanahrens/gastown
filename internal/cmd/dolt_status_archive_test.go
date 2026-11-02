@@ -11,11 +11,16 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	sqle "github.com/dolthub/go-mysql-server"
+	"github.com/dolthub/go-mysql-server/memory"
+	gmssql "github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/types"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/doltserver"
 )
@@ -29,8 +34,12 @@ import (
 type archiveCountServer struct {
 	queryErr error
 	null     bool
-	// hashes, when set, is served as one text column: the commit hashes a
-	// dolt_log read returns. Otherwise the query serves the count 3.
+	// columns and rows, when set, are served as the result set: the events
+	// window's rows. hashes, when set, is served as one text column: the
+	// commit hashes a dolt_log read returns. Otherwise the query serves the
+	// count 3.
+	columns []string
+	rows    [][]driver.Value
 	hashes  []string
 	nextErr error
 	query   string
@@ -72,7 +81,13 @@ func (c archiveCountConn) QueryContext(_ context.Context, query string, args []d
 	if c.server.queryErr != nil {
 		return nil, c.server.queryErr
 	}
-	return &archiveCountRows{null: c.server.null, hashes: c.server.hashes, nextErr: c.server.nextErr}, nil
+	return &archiveCountRows{
+		null:    c.server.null,
+		columns: c.server.columns,
+		rows:    c.server.rows,
+		hashes:  c.server.hashes,
+		nextErr: c.server.nextErr,
+	}, nil
 }
 
 // archivedSet is the archived-hash loader a test injects: it returns exactly
@@ -87,18 +102,33 @@ func archivedSet(hashes ...string) func(db string) (map[string]struct{}, error) 
 
 type archiveCountRows struct {
 	null    bool
+	columns []string
+	rows    [][]driver.Value
 	hashes  []string
 	nextErr error
 	next    int
 }
 
-func (*archiveCountRows) Columns() []string { return []string{"value"} }
+func (r *archiveCountRows) Columns() []string {
+	if len(r.columns) > 0 {
+		return r.columns
+	}
+	return []string{"value"}
+}
 
 func (*archiveCountRows) Close() error { return nil }
 
 func (r *archiveCountRows) Next(dest []driver.Value) error {
 	if r.nextErr != nil {
 		return r.nextErr
+	}
+	if r.rows != nil {
+		if r.next >= len(r.rows) {
+			return io.EOF
+		}
+		copy(dest, r.rows[r.next])
+		r.next++
+		return nil
 	}
 	if r.hashes != nil {
 		if r.next >= len(r.hashes) {
@@ -360,7 +390,10 @@ func TestDoltArchiveReaderFailures(t *testing.T) {
 
 	t.Run("an events count subtracts the ids in the lookback window", func(t *testing.T) {
 		t.Parallel()
-		server := &archiveCountServer{hashes: []string{"archived", "late"}}
+		server := &archiveCountServer{
+			columns: []string{"id"},
+			rows:    [][]driver.Value{{"archived"}, {"late"}},
+		}
 		reader := doltArchiveReader{config: config, openDB: archiveCountOpener(t, server)}
 		wm := daemon.EventsArchiveWatermark{
 			CreatedAt: "2026-11-02 09:15:00",
@@ -373,11 +406,9 @@ func TestDoltArchiveReaderFailures(t *testing.T) {
 		if got != 1 {
 			t.Errorf("events behind = %d, want the one id outside the set", got)
 		}
-		// The window starts 24h before the watermark's newest row, the same
-		// re-read the archive makes.
-		if !strings.Contains(server.query, "created_at >= '2026-11-01 09:15:00'") {
-			t.Errorf("events count did not start at the lookback window: %s", server.query)
-		}
+		// The window itself is exercised against a real engine by
+		// TestArchiveEventsBehindQueryReadsTheLookbackWindow; here the fake only has
+		// to prove the count subtracts the archived ids.
 	})
 
 	windowed := daemon.EventsArchiveWatermark{
@@ -406,14 +437,17 @@ func TestDoltArchiveReaderFailures(t *testing.T) {
 		}
 	})
 
-	t.Run("a windowed events count reports an id it cannot scan", func(t *testing.T) {
+	t.Run("a windowed events count refuses a result set without an id column", func(t *testing.T) {
 		t.Parallel()
 		reader := doltArchiveReader{
 			config: config,
-			openDB: archiveCountOpener(t, &archiveCountServer{null: true}),
+			openDB: archiveCountOpener(t, &archiveCountServer{
+				columns: []string{"payload"},
+				rows:    [][]driver.Value{{"x"}},
+			}),
 		}
-		if _, err := reader.eventsBehind(ctx, "gt", windowed); err == nil {
-			t.Error("a NULL id was read as an unarchived row")
+		if _, err := reader.eventsBehind(ctx, "gt", windowed); err == nil || !strings.Contains(err.Error(), "no id column") {
+			t.Errorf("count of a result set without id = %v, want it refused", err)
 		}
 	})
 
@@ -421,7 +455,10 @@ func TestDoltArchiveReaderFailures(t *testing.T) {
 		t.Parallel()
 		reader := doltArchiveReader{
 			config: config,
-			openDB: archiveCountOpener(t, &archiveCountServer{nextErr: errors.New("row read failed")}),
+			openDB: archiveCountOpener(t, &archiveCountServer{
+				columns: []string{"id"},
+				nextErr: errors.New("row read failed"),
+			}),
 		}
 		if _, err := reader.eventsBehind(ctx, "gt", windowed); err == nil || !strings.Contains(err.Error(), "row read failed") {
 			t.Errorf("failed row read = %v, want the row error", err)
@@ -599,4 +636,125 @@ func TestPreFlattenCheckCountsLogHashesNotInTheArchive(t *testing.T) {
 			t.Errorf("check with an unreadable set = %v, want the read error", err)
 		}
 	})
+}
+
+// TestArchiveEventsBehindQueryReadsTheLookbackWindow runs the production query text
+// (eventsBehindQuery) against an in-process MySQL engine, not a fake that
+// repeats its WHERE clause: the count with no watermark covers the whole
+// table, and the windowed read returns only rows at or after the lookback
+// start, ordered by created_at then id (gt-98eug rework).
+func TestArchiveEventsBehindQueryReadsTheLookbackWindow(t *testing.T) {
+	t.Parallel()
+	ctx, engine := newStatusArchiveEngine(t)
+	for _, row := range [][2]string{
+		{"old", "2026-09-30 23:59:59"},
+		{"at-start", "2026-10-01 00:00:00"},
+		{"inside-b", "2026-10-01 12:00:00"},
+		{"inside-a", "2026-10-01 12:00:00"},
+	} {
+		statusEngineExec(t, ctx, engine, fmt.Sprintf(
+			"INSERT INTO events (id, created_at) VALUES ('%s', '%s')", row[0], row[1]))
+	}
+
+	// No watermark: the whole table is behind, counted by the index.
+	countQuery, err := eventsBehindQuery("gt", daemon.EventsArchiveWatermark{})
+	if err != nil {
+		t.Fatalf("building the count query: %v", err)
+	}
+	if got := statusEngineCount(t, ctx, engine, countQuery); got != 4 {
+		t.Errorf("events behind with no watermark = %d, want the whole table (4)", got)
+	}
+
+	// The archive's window: rows at or after the newest row minus 24h, which
+	// is 2026-10-01 00:00:00 for a watermark of 2026-10-02 00:00:00.
+	wm := daemon.EventsArchiveWatermark{
+		CreatedAt: "2026-10-02 00:00:00",
+		Archived:  []daemon.ArchivedEventsRow{{CreatedAt: "2026-10-02 00:00:00", ID: "archived"}},
+	}
+	windowQuery, err := eventsBehindQuery("gt", wm)
+	if err != nil {
+		t.Fatalf("building the window query: %v", err)
+	}
+	got := statusEngineIDs(t, ctx, engine, windowQuery)
+	want := []string{"at-start", "inside-a", "inside-b"}
+	if !slices.Equal(got, want) {
+		t.Errorf("window rows = %v, want %v (the inclusive 24h lookback, created_at then id)", got, want)
+	}
+}
+
+// newStatusArchiveEngine builds an in-memory go-mysql-server engine with a gt
+// database and the events table the status count reads.
+func newStatusArchiveEngine(t *testing.T) (*gmssql.Context, *sqle.Engine) {
+	t.Helper()
+	db := memory.NewDatabase("gt")
+	pro := memory.NewDBProvider(db)
+	session := memory.NewSession(gmssql.NewBaseSession(), pro)
+	ctx := gmssql.NewContext(context.Background(), gmssql.WithSession(session))
+	ctx.SetCurrentDatabase("gt")
+	db.AddTable("events", memory.NewTable(ctx, db, "events", gmssql.NewPrimaryKeySchema(gmssql.Schema{
+		{Name: "id", Type: types.Text, Nullable: false, Source: "events"},
+		{Name: "created_at", Type: types.Datetime, Nullable: false, Source: "events"},
+	}), db.GetForeignKeyCollection()))
+	engine := sqle.NewDefault(pro)
+	t.Cleanup(func() {
+		if err := engine.Close(); err != nil {
+			t.Errorf("closing the test engine: %v", err)
+		}
+	})
+	return ctx, engine
+}
+
+// statusEngineExec runs one statement against the in-process engine.
+func statusEngineExec(t *testing.T, ctx *gmssql.Context, engine *sqle.Engine, query string) {
+	t.Helper()
+	_, iter, _, err := engine.Query(ctx, query)
+	if err != nil {
+		t.Fatalf("exec %q: %v", query, err)
+	}
+	if _, err := gmssql.RowIterToRows(ctx, iter); err != nil {
+		t.Fatalf("draining %q: %v", query, err)
+	}
+}
+
+// statusEngineIDs runs query and returns its first column as strings.
+func statusEngineIDs(t *testing.T, ctx *gmssql.Context, engine *sqle.Engine, query string) []string {
+	t.Helper()
+	_, iter, _, err := engine.Query(ctx, query)
+	if err != nil {
+		t.Fatalf("query %q: %v", query, err)
+	}
+	rows, err := gmssql.RowIterToRows(ctx, iter)
+	if err != nil {
+		t.Fatalf("reading rows for %q: %v", query, err)
+	}
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		id, ok := row[0].(string)
+		if !ok {
+			t.Fatalf("row id is %T, want string: %v", row[0], row[0])
+		}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// statusEngineCount runs a one-row COUNT query against the in-process engine.
+func statusEngineCount(t *testing.T, ctx *gmssql.Context, engine *sqle.Engine, query string) int64 {
+	t.Helper()
+	_, iter, _, err := engine.Query(ctx, query)
+	if err != nil {
+		t.Fatalf("query %q: %v", query, err)
+	}
+	rows, err := gmssql.RowIterToRows(ctx, iter)
+	if err != nil {
+		t.Fatalf("reading rows for %q: %v", query, err)
+	}
+	if len(rows) != 1 || len(rows[0]) != 1 {
+		t.Fatalf("count query returned %v, want one row and one value", rows)
+	}
+	count, ok := rows[0][0].(int64)
+	if !ok {
+		t.Fatalf("count is %T, want int64: %v", rows[0][0], rows[0][0])
+	}
+	return count
 }

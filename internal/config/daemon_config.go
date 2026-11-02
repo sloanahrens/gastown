@@ -845,10 +845,10 @@ type ScheduledMaintenanceConfig struct {
 	GCGrowthRatio *float64 `json:"gc_growth_ratio,omitempty"`
 }
 
-// MaintenanceArchiveDirKey is the operator-facing name of the history
-// archive's setting: the maintenance.* namespace `gt config set` documents and
-// the daemon's logs and escalations use (gt-7nxj4).
-const MaintenanceArchiveDirKey = "maintenance.archive_dir"
+// MaintenanceArchiveDirKey is the history archive's setting as it appears in
+// daemon.json, the path the daemon's logs and escalations tell an operator to
+// fix (gt-7nxj4). It is not yet a `gt config set maintenance.*` key.
+const MaintenanceArchiveDirKey = "patrols.scheduled_maintenance.archive_dir"
 
 // ParseArchiveDir returns the history archive's directory: empty (with no
 // error) means archiving is off. A set entry that is not an absolute path is

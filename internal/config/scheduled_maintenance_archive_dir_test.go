@@ -11,8 +11,8 @@ import (
 // working directory, which is not the operator's (gt-7nxj4).
 func TestScheduledMaintenanceArchiveDir(t *testing.T) {
 	t.Parallel()
-	if MaintenanceArchiveDirKey != "maintenance.archive_dir" {
-		t.Fatalf("setting key = %q, want the work item's maintenance.archive_dir", MaintenanceArchiveDirKey)
+	if MaintenanceArchiveDirKey != "patrols.scheduled_maintenance.archive_dir" {
+		t.Fatalf("setting key = %q, want the daemon.json path the field decodes from", MaintenanceArchiveDirKey)
 	}
 	body := `{"patrols":{"scheduled_maintenance":{"enabled":true,"window":"03:00","archive_dir":"/home/op/gt-archive"}}}`
 	var cfg DaemonPatrolConfig

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -889,7 +890,10 @@ func commitArchiveNote(ctx context.Context, reader archiveBehindReader, db strin
 	return fmt.Sprintf("archived through %s, %s", wm.Date.UTC().Format("2006-01-02"), commitsBehindText(behind))
 }
 
-// eventsArchiveNote renders one database's events archive note.
+// eventsArchiveNote renders one database's events archive note. The count
+// covers the archive's lookback window and no more, so the note names the
+// window's start: a row older than it is the archive's accepted limit, and the
+// line must not read as if the whole table were archived.
 func eventsArchiveNote(ctx context.Context, reader archiveBehindReader, db string, wm daemon.EventsArchiveWatermark) string {
 	behind, err := reader.eventsBehind(ctx, db, wm)
 	if err != nil {
@@ -898,7 +902,11 @@ func eventsArchiveNote(ctx context.Context, reader archiveBehindReader, db strin
 	if wm.CreatedAt == "" {
 		return fmt.Sprintf("events not archived yet, %s", eventsBehindText(behind))
 	}
-	return fmt.Sprintf("events archived through %s, %s", wm.CreatedAt, eventsBehindText(behind))
+	since, err := wm.Since()
+	if err != nil {
+		return fmt.Sprintf("events behind count unavailable: %v", err)
+	}
+	return fmt.Sprintf("events archived through %s, %s since %s", wm.CreatedAt, eventsBehindText(behind), since)
 }
 
 // commitsBehindText renders how many commits an archive has not written out.
@@ -999,6 +1007,11 @@ func (r doltArchiveReader) commitsBehind(ctx context.Context, db string, wm daem
 // already holds. A watermark the query cannot compare is refused rather than
 // matched against no row. With no watermark every row is behind, and the
 // index's count answers that without reading the table's rows.
+//
+// The count is the archive's own window, not the whole table: a row older
+// than the window is the archive's documented accepted limit (eventsArchiveLookback),
+// so the status says the count is windowed rather than calling the table
+// complete.
 func (r doltArchiveReader) eventsBehind(ctx context.Context, db string, wm daemon.EventsArchiveWatermark) (int64, error) {
 	if err := wm.Validate(); err != nil {
 		return 0, err
@@ -1029,19 +1042,31 @@ func (r doltArchiveReader) eventsBehind(ctx context.Context, db string, wm daemo
 		return count, nil
 	}
 
-	archived := wm.ArchivedIDs()
 	rows, err := conn.QueryContext(ctx, query)
 	if err != nil {
 		return 0, err
 	}
 	defer rows.Close()
+	columns, err := rows.Columns()
+	if err != nil {
+		return 0, err
+	}
+	idColumn := slices.Index(columns, "id")
+	if idColumn < 0 {
+		return 0, fmt.Errorf("database %q: the events read has no id column: %v", db, columns)
+	}
+	archived := wm.ArchivedIDs()
 	var behind int64
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		values := make([]sql.NullString, len(columns))
+		dest := make([]any, len(columns))
+		for i := range values {
+			dest[i] = &values[i]
+		}
+		if err := rows.Scan(dest...); err != nil {
 			return 0, err
 		}
-		if !archived[id] {
+		if values[idColumn].Valid && !archived[values[idColumn].String] {
 			behind++
 		}
 	}
@@ -1052,16 +1077,18 @@ func (r doltArchiveReader) eventsBehind(ctx context.Context, db string, wm daemo
 }
 
 // eventsBehindQuery renders the count's SELECT: the whole table with no
-// watermark, or the lookback window's ids when there is one.
+// watermark, or the lookback window's rows when there is one. Both statements
+// are declared in beadsql and named here so an engine test can run the exact
+// text the status sends.
 func eventsBehindQuery(db string, wm daemon.EventsArchiveWatermark) (string, error) {
 	if wm.CreatedAt == "" {
-		return beadsql.CountEvents(db).Inline()
+		return beadsql.TableRowCount(db, "events").Inline()
 	}
 	since, err := wm.Since()
 	if err != nil {
 		return "", err
 	}
-	return beadsql.EventsSinceIDs(db, since).Inline()
+	return beadsql.BackupEvents(db, since).Inline()
 }
 
 func currentBeadsRuntimeConfig() (doltserver.BeadsRuntimeConfig, bool) {
