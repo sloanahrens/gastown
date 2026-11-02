@@ -8,8 +8,9 @@ import (
 const (
 	// cacheMount is where the helper container mounts the volume it trims.
 	cacheMount = "/cache"
-	// cacheVolumePrefix names the per-rig cache volumes, one per rig, mounted at
-	// /sandbox/.cache in every sandbox of that rig.
+	// cacheVolumePrefix names the per-rig cache volumes that a rig's docker
+	// sandboxes mount at /sandbox/.cache. A kubernetes sandbox mounts a shared
+	// claim at /tmp/gt-cache instead and has none of these volumes (gt-kih5p).
 	cacheVolumePrefix = "gt-cache-"
 	// helperPath is this program inside the polecat image: a cache volume has no
 	// host path, so the trim runs in a container of the image, and the image's
