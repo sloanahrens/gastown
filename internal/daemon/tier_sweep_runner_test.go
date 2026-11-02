@@ -1145,6 +1145,44 @@ func TestSyncPodIsCreatedAtomicallyAndTeardownCountIsExact(t *testing.T) {
 	}
 }
 
+// TestTierSweepRunnerGuardsRefuseAMalformedGuard holds the guard loop to deny:
+// a guard with no command, or one with no refusal to apply to its listing, is
+// not a check that passed.
+func TestTierSweepRunnerGuardsRefuseAMalformedGuard(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		guard sweeprunner.Guard
+		want  string
+	}{
+		{
+			name:  "a guard with no command",
+			guard: sweeprunner.Guard{Refuse: func([]byte) error { return nil }},
+			want:  "no command",
+		},
+		{
+			name:  "a guard with no refusal",
+			guard: sweeprunner.Guard{Step: sweeprunner.Step{Argv: []string{"kubectl", "get", "jobs"}}},
+			want:  "no refusal",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := &Daemon{}
+			out, code, err := d.tierSweepRunnerGuards(context.Background(), []sweeprunner.Guard{tc.guard})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("guards error = %v, want one naming %q", err, tc.want)
+			}
+			if code == 0 {
+				t.Errorf("exit code = %d for a guard the daemon cannot run, want a refusal", code)
+			}
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("output does not carry %q:\n%s", tc.want, out)
+			}
+		})
+	}
+}
+
 // TestSyncRefusesWhileASweepJobReadsTheClaim drives the guard through a fake
 // kubectl: a rig sweep Job still active refuses the run, naming it, and nothing
 // is applied; a listing that cannot be read refuses too. A Job whose listing

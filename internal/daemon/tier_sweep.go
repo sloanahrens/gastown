@@ -2356,8 +2356,17 @@ func (d *Daemon) tierSweepRunnerGuards(ctx context.Context, guards []sweeprunner
 	var b strings.Builder
 	for _, guard := range guards {
 		step := guard.Step
+		// A guard that was not rendered has not passed: an unset command or
+		// refusal is a plan the daemon cannot trust, not one it may skip.
 		if len(step.Argv) == 0 {
-			continue
+			err := errors.New("the run's guard has no command to run")
+			fmt.Fprintf(&b, "sweep-run: %v\n", err)
+			return b.String(), -1, err
+		}
+		if guard.Refuse == nil {
+			err := errors.New("the run's guard has no refusal to run")
+			fmt.Fprintf(&b, "sweep-run: %v\n", err)
+			return b.String(), -1, err
 		}
 		cmd := exec.CommandContext(ctx, step.Argv[0], step.Argv[1:]...) //nolint:gosec // G204: the argv a Backend rendered from a validated Spec, run directly and never through a shell
 		if step.Stdin != nil {
