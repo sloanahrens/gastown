@@ -29,6 +29,7 @@ func dayFile(lines ...string) *fstest.MapFile {
 }
 
 func TestSamplesReadsBothKinds(t *testing.T) {
+	t.Parallel()
 	fsys := fstest.MapFS{
 		"tracker-sizes/2026-11-01.jsonl": dayFile(trackerLine),
 		"forgejo-sizes/2026-11-01.jsonl": dayFile(forgejoLine),
@@ -54,6 +55,7 @@ func TestSamplesReadsBothKinds(t *testing.T) {
 }
 
 func TestSamplesSkipsAndCounts(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		path string
@@ -122,6 +124,7 @@ func TestSamplesSkipsAndCounts(t *testing.T) {
 }
 
 func TestSamplesMissingDirIsReported(t *testing.T) {
+	t.Parallel()
 	t.Run("missing directory is reported", func(t *testing.T) {
 		fsys := fstest.MapFS{
 			"tracker-sizes/2026-11-01.jsonl": dayFile(trackerLine),
@@ -145,7 +148,7 @@ func TestSamplesMissingDirIsReported(t *testing.T) {
 	// A directory that exists but cannot be read must fail the run rather than
 	// be reported as absent and bill a month with no Forgejo storage.
 	t.Run("unreadable directory is an error", func(t *testing.T) {
-		fsys := denyDirFS{
+		fsys := denyFS{
 			inner: fstest.MapFS{
 				"tracker-sizes/2026-11-01.jsonl": dayFile(trackerLine),
 				"forgejo-sizes/2026-11-01.jsonl": dayFile(forgejoLine),
@@ -159,9 +162,28 @@ func TestSamplesMissingDirIsReported(t *testing.T) {
 	})
 }
 
+// TestSamplesUnreadableDayFileIsAnError drives a day file that exists but
+// cannot be read: a directory with an unreadable file must fail the run, not
+// silently drop that file's samples.
+func TestSamplesUnreadableDayFileIsAnError(t *testing.T) {
+	t.Parallel()
+	fsys := denyFS{
+		inner: fstest.MapFS{
+			"tracker-sizes/2026-11-01.jsonl": dayFile(trackerLine),
+			"forgejo-sizes/2026-11-01.jsonl": dayFile(forgejoLine),
+		},
+		deny: "tracker-sizes/2026-11-01.jsonl",
+	}
+
+	if _, err := Samples(fsys); !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("Samples error = %v, want fs.ErrPermission", err)
+	}
+}
+
 // TestSamplesReadsDayFilesInNameOrder pins the determinism the day files'
 // dates depend on, and that a .partial file a run is still writing is not read.
 func TestSamplesReadsDayFilesInNameOrder(t *testing.T) {
+	t.Parallel()
 	fsys := fstest.MapFS{
 		"tracker-sizes/2026-11-02.jsonl":         dayFile(`{"ts":"2026-11-02T02:00:00Z","workspace":"acme","prefix":"gt","rows":1,"bytes":2}`),
 		"tracker-sizes/2026-11-01.jsonl":         dayFile(`{"ts":"2026-11-01T02:00:00Z","workspace":"acme","prefix":"gt","rows":1,"bytes":1}`),
@@ -180,14 +202,14 @@ func TestSamplesReadsDayFilesInNameOrder(t *testing.T) {
 	}
 }
 
-// denyDirFS is a file system whose directory deny cannot be opened. It
-// implements only fs.FS, so fs.ReadDir falls back to Open and sees the error.
-type denyDirFS struct {
+// denyFS is a file system whose path deny cannot be opened. It implements only
+// fs.FS, so fs.ReadDir and fs.ReadFile fall back to Open and see the error.
+type denyFS struct {
 	inner fstest.MapFS
 	deny  string
 }
 
-func (f denyDirFS) Open(name string) (fs.File, error) {
+func (f denyFS) Open(name string) (fs.File, error) {
 	if name == f.deny {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrPermission}
 	}
