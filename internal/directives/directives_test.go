@@ -116,13 +116,13 @@ var ruleCountWords = []string{"", "One", "Two", "Three", "Four", "Five", "Six",
 	"Seven", "Eight", "Nine", "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen",
 	"Fifteen", "Sixteen", "Seventeen", "Eighteen", "Nineteen", "Twenty"}
 
-// polecat.md carries the fifteen "What om rejects" rules, numbered 1 to 15 in
-// order and each once, an intro stating that count, the rework rule's and rule
-// 9's quoted findings, and no probe line (gt-dabdh, gt-o87rv; eleven merged into
-// rule 1 under gt-u3hr0; the rework rule added under gt-wfohy; the cloud rules left for the devops layer and three rules added under gt-pccx7).
-func TestPolecatDirectiveHasFifteenRules(t *testing.T) {
+// polecat.md carries the "What om rejects" rules, numbered from 1 in order and
+// each once, an intro stating their count, the rework rule's and rule 9's quoted
+// findings, and no probe line. The changelog in polecat.md records how the set
+// grew (gt-o87rv, gt-pccx7, gt-2iro9).
+func TestPolecatDirectiveRuleHeadings(t *testing.T) {
 	t.Parallel()
-	const rules = 15
+	const rules = 16
 	text := readDirective(t, "polecat.md")
 	var got []string
 	for _, line := range strings.Split(text, "\n") {
