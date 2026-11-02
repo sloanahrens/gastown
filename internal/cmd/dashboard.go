@@ -446,7 +446,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		WithChecks(dashboard.NewCloudChecksReader(dashboardCloudChecksPath(townRoot))).
 		WithApps(dashboard.NewAppPowerReader(config.CloudOffDir(), config.CloudReleasesDir()))
 	reports := dashboard.NewReportsReader(dashboardReportsDir(townRoot))
-	birds := dashboard.NewBirdReportsReader(dashboardRuntimeDir(townRoot))
+	birds := dashboard.NewBirdReportsReader(dashboardRuntimeDir(townRoot)).WithHeadline(dashboardHeadlineBird(townRoot))
 	questions := newDashQuestionsReader(townRoot)
 	overseerPane := newDashOverseerReader(townRoot, func() (int, error) {
 		open, err := questions.list()

@@ -163,6 +163,46 @@ func TestBirdReportsReadsFreshAndStale(t *testing.T) {
 	}
 }
 
+// The reader marks the reporter WithHeadline names, so the page can draw the
+// town's headline report first without carrying a reporter's name of its own
+// (gt-5c4df). The other rows are not marked, and a reader given no name — or a
+// name no bird directory carries — marks none.
+func TestBirdReportsMarksTheHeadlineReporter(t *testing.T) {
+	t.Parallel()
+
+	now := birdReportsNow
+	root := t.TempDir()
+	for _, name := range []string{"curlew", "dunlin", "heron"} {
+		writeBird(t, root, name, birdWrites{
+			json: birdSidecarJSON(t, birdSidecarFor(name, now.Add(-time.Hour), "title", "summary")),
+		})
+	}
+
+	for _, c := range []struct {
+		name     string
+		headline string
+		want     string
+	}{
+		{name: "the named reporter is the marked one", headline: "heron", want: "heron"},
+		{name: "no headline marks none", headline: "", want: ""},
+		{name: "a name no bird directory carries marks none", headline: "osprey", want: ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+
+			rows := NewBirdReportsReader(root).WithHeadline(c.headline).Read(now)
+			if len(rows) != 3 {
+				t.Fatalf("the reader returned %d rows, want the three birds: %+v", len(rows), rows)
+			}
+			for _, r := range rows {
+				if want := r.Bird == c.want; r.Headline != want {
+					t.Errorf("%s: headline %v, want %v", r.Bird, r.Headline, want)
+				}
+			}
+		})
+	}
+}
+
 // Only a real directory, named like a bird, whose reports directory holds a
 // regular daily.json or daily.html is a row: every other entry under the
 // runtime directory — the 70-odd that are not birds, a symlinked bird, a

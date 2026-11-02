@@ -701,10 +701,11 @@ func TestBirdsStaleLast(t *testing.T) {
 	}
 }
 
-// The overseer's report is the day's headline, so its row leads the panel even
-// when it is stale; the other reporters keep the fresh-before-stale order
-// (gt-gm9lq).
-func TestBirdsOverseerFirst(t *testing.T) {
+// The report the reader marks as the town's headline leads the panel even when
+// it is stale, and the other reporters keep the fresh-before-stale order. A
+// reporter's name earns no place of its own: the row named overseer below is
+// not the marked one and sorts with the rest (gt-gm9lq, gt-5c4df).
+func TestBirdsHeadlineFirst(t *testing.T) {
 	t.Parallel()
 
 	stamp := time.Now().UTC().Format(time.RFC3339)
@@ -712,8 +713,8 @@ func TestBirdsOverseerFirst(t *testing.T) {
 	dom.call(t, "renderBirds", map[string]any{
 		"birds": []any{
 			map[string]any{"bird": "heron", "state": "fresh", "written": stamp},
-			map[string]any{"bird": "overseer", "state": "stale", "written": stamp, "stale": true},
-			map[string]any{"bird": "dunlin", "state": "fresh", "written": stamp},
+			map[string]any{"bird": "overseer", "state": "fresh", "written": stamp},
+			map[string]any{"bird": "dunlin", "state": "stale", "written": stamp, "stale": true, "headline": true},
 			map[string]any{"bird": "curlew", "state": "stale", "written": stamp, "stale": true},
 		},
 		"reads": map[string]any{"birds": map[string]any{"at": stamp, "every_sec": 60}},
@@ -727,11 +728,11 @@ func TestBirdsOverseerFirst(t *testing.T) {
 	for _, r := range rows {
 		names = append(names, r.Head[0].Text)
 	}
-	if want := []string{"overseer", "heron", "dunlin", "curlew"}; !slices.Equal(names, want) {
-		t.Errorf("the rows read %v, want the overseer first and the others fresh before stale: %v", names, want)
+	if want := []string{"dunlin", "heron", "overseer", "curlew"}; !slices.Equal(names, want) {
+		t.Errorf("the rows read %v, want the marked headline first and the others fresh before stale: %v", names, want)
 	}
 	if rows[0].Class != "brow warnc" {
-		t.Errorf("the stale overseer's row wears %q, want its amber mark kept", rows[0].Class)
+		t.Errorf("the stale headline's row wears %q, want its amber mark kept", rows[0].Class)
 	}
 }
 

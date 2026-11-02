@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"path/filepath"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -48,6 +49,15 @@ func newDashOverseerReader(townRoot string, openQuestions func() (int, error)) *
 		},
 		openQuestions: openQuestions,
 	}
+}
+
+// dashboardHeadlineBird is the reporter whose daily report is the town's
+// headline: the overseer's own report, under the directory internal/overseer
+// names for the overseer's files. The name comes from that package rather than
+// the Birds panel, which draws whatever reporter the town marks and names none
+// itself (gt-5c4df).
+func dashboardHeadlineBird(townRoot string) string {
+	return filepath.Base(overseer.Dir(townRoot))
 }
 
 // read is the pane's whole reading at now.
