@@ -176,9 +176,10 @@ type rigDockedRead struct {
 // rigDockedEntry is one rig's memoized docked-label read: the verdict, and the
 // dock stamp observed just before the read that produced it.
 type rigDockedEntry struct {
-	// mu is held across this rig's identity-bead read, so concurrent checks of
-	// one rig share its one read. Another rig takes its own entry, so one
-	// rig's slow bd call does not hold up the others (gt-ze7z5).
+	// mu is held across this rig's identity-bead read and its verdict file, so
+	// concurrent checks of one rig share its one read. Another rig takes its
+	// own entry, so one rig's slow bd call does not hold up the others
+	// (gt-ze7z5).
 	mu sync.Mutex
 	// known is set once a read answered; without it there is no verdict to
 	// serve and the next check reads again.
@@ -190,25 +191,37 @@ type rigDockedEntry struct {
 	stamp time.Time
 }
 
-// rigDockedMemo remembers one tick's docked-label reads per rig: the identity
-// bead is read at most once per rig per tick (gt-ze7z5), though the tick made
-// the same check for the board scan and again behind every candidate it slung.
+// rigDockedMemo remembers docked-label reads per rig: the identity bead is
+// read at most once per rig per tick (gt-ze7z5), though the tick made the same
+// check for the board scan and again behind every candidate it slung.
+//
+// A later tick is served from a per-rig verdict file under the town runtime
+// directory (rigDockedFileTTL), so a quiet tick reads no identity beads at all
+// (gt-ejxjh). The file holds the verdict, the dock stamp observed before the
+// read, and the read time; it answers only while that stamp is not newer than
+// the check's and the read is younger than five minutes.
 //
 // The memo is not frozen for the tick. `gt rig dock` and `gt rig undock` stamp
 // the rig (internal/rig.DockStamp), the tick compares the stamp with the one
 // its entry recorded, and a newer stamp drops the entry: a dock that lands
 // mid-tick stops the tick's later slings. A hand-edited label writes no stamp
-// and is seen at the next tick instead, the same bound the daemon's memo keeps.
+// and is seen within five minutes instead, when the verdict file has aged out,
+// the same bound the daemon's memo keeps.
 //
 // The tick makes it and passes it down, never a package variable
 // (internal/testpolicy's no-global-swap), so an operator's gt sling, a polecat
 // spawn and the daemon keep asking bd every time. A read that failed is not
-// remembered, so the failure stays fail-closed and the next check asks bd
-// again.
+// remembered and leaves no file, so the failure stays fail-closed and the next
+// check asks bd again.
 type rigDockedMemo struct {
 	store beads.Client
 	// stamp reads a rig's dock stamp; rig.DockStamp unless a test replaces it.
 	stamp func(townRoot, rigName string) (time.Time, error)
+	// files is the filesystem the verdict files are read and written through;
+	// osRigDockedFiles unless a test replaces it.
+	files rigDockedFiles
+	// now is the clock the verdict files' age is measured against.
+	now   func() time.Time
 	mu    sync.Mutex
 	reads map[string]*rigDockedEntry
 }
@@ -216,7 +229,13 @@ type rigDockedMemo struct {
 // newRigDockedMemo returns the memo of one tick's docked-label reads, made
 // against store (nil: bd in each rig's own database).
 func newRigDockedMemo(store beads.Client) *rigDockedMemo {
-	return &rigDockedMemo{store: store, stamp: rig.DockStamp, reads: map[string]*rigDockedEntry{}}
+	return &rigDockedMemo{
+		store: store,
+		stamp: rig.DockStamp,
+		files: osRigDockedFiles(),
+		now:   time.Now,
+		reads: map[string]*rigDockedEntry{},
+	}
 }
 
 // parkedOrDocked is IsRigParkedOrDocked answered from the memo when this tick
@@ -249,16 +268,42 @@ func (m *rigDockedMemo) parkedOrDocked(townRoot, rigName string) (bool, string) 
 	if entry.known && !stamp.After(entry.stamp) {
 		return entry.read.blocked, entry.read.reason
 	}
+
+	now := m.now()
+	if rec, ok := m.files.load(townRoot, rigName); ok && rec.fresh(rigName, stamp, now) {
+		// A previous tick read this rig inside the window and no gt dock or
+		// undock has landed since, so its verdict answers this check. The
+		// file keeps its original read time: serving it does not extend its
+		// window.
+		entry.read = rigDockedRead{blocked: rec.Blocked, reason: rec.Reason}
+		entry.stamp = stamp
+		entry.known = true
+		return entry.read.blocked, entry.read.reason
+	}
+
 	blocked, reason := rigParkedOrDockedWith(townRoot, rigName, m.store)
 	if reason == sling.RigStatusUnverified {
 		// A failed read is not remembered, so it stays fail-closed and the
-		// next check asks bd again.
+		// next check asks bd again. It writes no file either: an unverified
+		// verdict is not an answer for a later tick.
 		entry.known = false
 		return blocked, reason
 	}
 	entry.read = rigDockedRead{blocked: blocked, reason: reason}
 	entry.stamp = stamp
 	entry.known = true
+	// The verdict is left for the next tick. A failed write is logged, never
+	// fatal: it costs the next tick one read.
+	rec := rigDockedRecord{
+		Rig:     rigName,
+		Blocked: blocked,
+		Reason:  reason,
+		Stamp:   stamp,
+		ReadAt:  now,
+	}
+	if err := m.files.save(townRoot, rigName, rec); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: docked verdict for %s not saved: %v\n", rigName, err)
+	}
 	return blocked, reason
 }
 

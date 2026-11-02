@@ -2849,7 +2849,9 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 	reverts := newSpecRevertBeads()
 	// Each rig's docked label, read once for the whole tick: the board scan and
 	// every sling behind it ask the same question of the same rig, and the
-	// answer cannot change before the tick ends (gt-ze7z5).
+	// answer cannot change before the tick ends (gt-ze7z5). The read is left in
+	// a per-rig verdict file so the next tick can serve it instead of reading
+	// the identity bead again (gt-ejxjh).
 	docked := newRigDockedMemo(nil)
 	// The pool's design and notes, kept across the daemon's ticks (gt-l0vlf).
 	details := specDetailCacheFor(townRoot, owner)

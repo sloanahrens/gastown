@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -285,4 +287,194 @@ func TestTickDockedMemoDoesNotHoldUpOtherRigs(t *testing.T) {
 	release()
 	<-testrigDone
 	<-otherrigDone
+}
+
+// writeRigDockedFileAt answers one not-blocked check for testrig at at, so the
+// verdict file a later tick reads exists.
+func writeRigDockedFileAt(t *testing.T, town string, at time.Time) {
+	t.Helper()
+	memo := newRigDockedMemo(newDockedBeads(false))
+	memo.now = func() time.Time { return at }
+	if blocked, reason := memo.parkedOrDocked(town, "testrig"); blocked || reason != "" {
+		t.Fatalf("seed check = %v, %q; want not blocked", blocked, reason)
+	}
+}
+
+// TestRigDockedFileServesAcrossTicks: a tick leaves its docked verdict in a
+// per-rig file under the runtime directory, and the next tick (a new process,
+// a new memo) serves it while the dock stamp is unchanged and the read is
+// younger than five minutes, with no identity-bead read at all (gt-ejxjh).
+// Mutation: drop the file load and the second tick's failing store is read.
+func TestRigDockedFileServesAcrossTicks(t *testing.T) {
+	t.Parallel()
+	town := tickDockedTown(t)
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	writeRigDockedFileAt(t, town, now)
+
+	// The store cannot answer, so a verdict that did not come from the file
+	// would be blocked as unverified.
+	store := newDockedBeads(true)
+	memo := newRigDockedMemo(store)
+	memo.now = func() time.Time { return now.Add(4 * time.Minute) }
+
+	blocked, reason := memo.parkedOrDocked(town, "testrig")
+	if blocked || reason != "" {
+		t.Errorf("second tick = %v, %q; want the file's not-blocked verdict", blocked, reason)
+	}
+	if n := store.shows["tr-rig-testrig"]; n != 0 {
+		t.Errorf("second tick read the identity bead %d time(s), want 0: the verdict file answers", n)
+	}
+}
+
+// TestRigDockedFileDropsOnStampOrAge: a record may not answer a check it cannot
+// vouch for. A newer dock stamp, a record older than five minutes, a corrupt
+// file, a file naming another rig and an unreadable file each send the check to
+// bd, which is what the store read count holds it to (gt-ejxjh).
+func TestRigDockedFileDropsOnStampOrAge(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name   string
+		break_ func(t *testing.T, town string, memo *rigDockedMemo)
+	}{
+		{
+			name: "a newer dock stamp",
+			break_: func(t *testing.T, town string, memo *rigDockedMemo) {
+				t.Helper()
+				if err := rig.TouchDockStamp(town, "testrig", now.Add(time.Minute)); err != nil {
+					t.Fatalf("touching the dock stamp: %v", err)
+				}
+			},
+		},
+		{
+			name: "a record older than five minutes",
+			break_: func(t *testing.T, town string, memo *rigDockedMemo) {
+				memo.now = func() time.Time { return now.Add(rigDockedFileTTL + time.Second) }
+			},
+		},
+		{
+			name: "a corrupt file",
+			break_: func(t *testing.T, town string, memo *rigDockedMemo) {
+				t.Helper()
+				path, err := rigDockedFilePath(town, "testrig")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "a file naming another rig",
+			break_: func(t *testing.T, town string, memo *rigDockedMemo) {
+				t.Helper()
+				path, err := rigDockedFilePath(town, "testrig")
+				if err != nil {
+					t.Fatal(err)
+				}
+				rec := rigDockedRecord{Rig: "otherrig", Stamp: now, ReadAt: now}
+				data, err := json.Marshal(rec)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, data, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "an unreadable file",
+			break_: func(t *testing.T, town string, memo *rigDockedMemo) {
+				memo.files.readFile = func(string) ([]byte, error) {
+					return nil, errors.New("permission denied")
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := tickDockedTown(t)
+			writeRigDockedFileAt(t, town, now)
+
+			store := newDockedBeads(true)
+			memo := newRigDockedMemo(store)
+			memo.now = func() time.Time { return now.Add(time.Minute) }
+			tc.break_(t, town, memo)
+
+			blocked, reason := memo.parkedOrDocked(town, "testrig")
+			if !blocked || reason != sling.RigStatusUnverified {
+				t.Errorf("check = %v, %q; want bd read and %q", blocked, reason, sling.RigStatusUnverified)
+			}
+			if n := store.shows["tr-rig-testrig"]; n != 1 {
+				t.Errorf("identity bead read %d time(s), want 1: the record cannot answer this check", n)
+			}
+		})
+	}
+}
+
+// TestRigDockedFileNeverStoresUnverified: a read that failed is not an answer,
+// so it leaves no verdict file, the next check in the tick reads the store
+// again, and a later tick finds nothing to serve (gt-ejxjh).
+func TestRigDockedFileNeverStoresUnverified(t *testing.T) {
+	t.Parallel()
+	town := tickDockedTown(t)
+	store := newDockedBeads(true)
+	memo := newRigDockedMemo(store)
+
+	for i := 1; i <= 2; i++ {
+		blocked, reason := memo.parkedOrDocked(town, "testrig")
+		if !blocked || reason != sling.RigStatusUnverified {
+			t.Fatalf("check %d = %v, %q; want blocked as %q", i, blocked, reason, sling.RigStatusUnverified)
+		}
+		if got := store.shows["tr-rig-testrig"]; got != i {
+			t.Errorf("after check %d the store was read %d time(s), want %d", i, got, i)
+		}
+	}
+
+	path, err := rigDockedFilePath(town, "testrig")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("an unverified read left a verdict file at %s", path)
+	}
+
+	next := newDockedBeads(false)
+	nextMemo := newRigDockedMemo(next)
+	if blocked, reason := nextMemo.parkedOrDocked(town, "testrig"); blocked || reason != "" {
+		t.Errorf("next tick = %v, %q; want its own read's not-blocked verdict", blocked, reason)
+	}
+	if n := next.shows["tr-rig-testrig"]; n != 1 {
+		t.Errorf("next tick read the identity bead %d time(s), want 1", n)
+	}
+}
+
+// TestRigDockedFileWriteFailureStillAnswers: a verdict file that cannot be
+// written is logged and the check still answers with its read; the next tick
+// simply reads bd again (gt-ejxjh).
+func TestRigDockedFileWriteFailureStillAnswers(t *testing.T) {
+	t.Parallel()
+	town := tickDockedTown(t)
+	store := newDockedBeads(false)
+	memo := newRigDockedMemo(store)
+	memo.files.writeFile = func(string, []byte, os.FileMode) error {
+		return errors.New("disk full")
+	}
+
+	blocked, reason := memo.parkedOrDocked(town, "testrig")
+	if blocked || reason != "" {
+		t.Errorf("check = %v, %q; want the read's not-blocked verdict", blocked, reason)
+	}
+	if n := store.shows["tr-rig-testrig"]; n != 1 {
+		t.Errorf("identity bead read %d time(s), want 1", n)
+	}
+
+	next := newDockedBeads(true)
+	nextMemo := newRigDockedMemo(next)
+	if blocked, _ := nextMemo.parkedOrDocked(town, "testrig"); !blocked {
+		t.Error("the next tick was served a verdict a failed write should not have left")
+	}
 }
