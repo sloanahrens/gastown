@@ -7,9 +7,10 @@
 // Dependencies and Dependents, as the real store does; ListIssues, ChildrenOf
 // and Comments answer the reads the bd shim's handlers make (gt-p85pw.94),
 // CommentCounts returns each issue's comment count in one read, UpdateIssue
-// answers the status the shim's update, close and reopen write (gt-p85pw.96)
-// and the text fields its delete and defer write (gt-p85pw.97), and DeleteIssues
-// deletes a batch with its links. Every other method returns
+// answers the status the shim's update, close and reopen write (gt-p85pw.96),
+// the text fields its delete and defer write (gt-p85pw.97) and the label patches
+// its label handler writes (gt-p85pw.98), and DeleteIssues deletes a batch with
+// its links. Every other method returns
 // store.ErrUnimplemented, so a unit test that reaches past them fails loudly
 // rather than reading a store that only looks modeled.
 package storetest
@@ -272,11 +273,13 @@ var builtinStatuses = []string{"open", "in_progress", "closed", "deferred", "hoo
 
 // UpdateIssue applies the fields of patch the fake models while g holds: the
 // status the bd shim's update, close and reopen handlers write (gt-p85pw.96),
-// and the title, description, acceptance criteria and appended notes its delete
-// and defer handlers write (gt-p85pw.97). A status of closed obeys the close
-// fences and a status that leaves closed clears the close, as the Postgres
-// store does; a guard that does not hold writes nothing. Any other patch field
-// is refused rather than applied in part. (contract: updateStatusOnly)
+// the title, description, acceptance criteria and appended notes its delete
+// and defer handlers write (gt-p85pw.97), and the labels its label handler
+// writes (gt-p85pw.98). A status of closed obeys the close fences and a status
+// that leaves closed clears the close, as the Postgres store does; the labels
+// are applied in the Postgres store's order (SetLabels, AddLabels,
+// RemoveLabels); a guard that does not hold writes nothing. Any other patch
+// field is refused rather than applied in part. (contract: updateStatusOnly)
 func (f *Fake) UpdateIssue(_ context.Context, id string, patch api.UpdatePatch, g api.Guard) error {
 	if err := fakePatch(patch); err != nil {
 		return err
@@ -310,6 +313,9 @@ func (f *Fake) UpdateIssue(_ context.Context, id string, patch api.UpdatePatch, 
 	if patch.AppendNotes != "" {
 		is.Notes, changed = appendNote(is.Notes, patch.AppendNotes), true
 	}
+	if applyLabels(&is, patch) {
+		changed = true
+	}
 	if patch.Status != nil && *patch.Status != is.Status {
 		status := *patch.Status
 		if !slices.Contains(builtinStatuses, status) {
@@ -337,6 +343,27 @@ func (f *Fake) UpdateIssue(_ context.Context, id string, patch api.UpdatePatch, 
 	return nil
 }
 
+// applyLabels applies SetLabels, then AddLabels, then RemoveLabels to is, in
+// the order the Postgres store's applyLabels writes them, and reports whether
+// the issue's labels changed. A label that survives from a different field is
+// kept once, so the labels a read answers are unique as a stored row is.
+func applyLabels(is *api.Issue, patch api.UpdatePatch) bool {
+	if patch.SetLabels == nil && len(patch.AddLabels) == 0 && len(patch.RemoveLabels) == 0 {
+		return false
+	}
+	target := slices.Clone(is.Labels)
+	if patch.SetLabels != nil {
+		target = uniqueLabels(patch.SetLabels)
+	}
+	target = uniqueLabels(append(target, patch.AddLabels...))
+	target = slices.DeleteFunc(target, func(l string) bool { return slices.Contains(patch.RemoveLabels, l) })
+	if slices.Equal(target, is.Labels) {
+		return false
+	}
+	is.Labels = target
+	return true
+}
+
 // appendNote joins line to notes with one newline between, as the Postgres
 // store's bd update --append-notes does.
 func appendNote(notes, line string) string {
@@ -351,14 +378,13 @@ func appendNote(notes, line string) string {
 
 // fakePatch refuses a patch carrying a field the fake does not model, so a
 // caller never reads a write that happened in part. Actor is the request's
-// identity, not a field; title, description, acceptance, notes and status are
-// the modeled ones.
+// identity, not a field; title, description, acceptance, notes, status and the
+// label fields are the modeled ones.
 func fakePatch(patch api.UpdatePatch) error {
 	switch {
 	case patch.Priority != nil, patch.Assignee != nil,
-		len(patch.AddLabels) > 0, len(patch.RemoveLabels) > 0, len(patch.SetLabels) > 0,
 		patch.Persistent, patch.DeferUntil != nil:
-		return unimplemented("UpdateIssue: a patch field other than title, description, acceptance, notes or status")
+		return unimplemented("UpdateIssue: a patch field other than title, description, acceptance, notes, status or labels")
 	}
 	return nil
 }
@@ -578,6 +604,23 @@ func (f *Fake) AddComment(_ context.Context, id, author, text string) error {
 	}
 	f.comments = append(f.comments, api.Comment{
 		ID: fmt.Sprintf("comment-%d", len(f.comments)+1), IssueID: id, Author: author, Text: text, CreatedAt: f.now(),
+	})
+	return nil
+}
+
+// SeedComment appends a comment carrying the id a fixture names, as bd's
+// import keeps the id of a comment it reads from a JSONL file. AddComment mints
+// its own id, so a test that replays an answer bd gave to a seeded database
+// seeds through here and reads back the ids the answer holds. A refused issue
+// writes nothing.
+func (f *Fake) SeedComment(id, issueID, author, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.issues[issueID]; !ok {
+		return api.NotFound(issueID)
+	}
+	f.comments = append(f.comments, api.Comment{
+		ID: id, IssueID: issueID, Author: author, Text: text, CreatedAt: f.now(),
 	})
 	return nil
 }

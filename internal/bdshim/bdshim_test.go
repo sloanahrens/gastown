@@ -979,7 +979,7 @@ func TestMainRefusesATrackerVerb(t *testing.T) {
 		want string
 	}{
 		{"a verb with no id takes its cwd's rig", []string{"stats", "--json"}, filepath.Join(town, "beta", "mayor", "rig"), "bdshim: verb stats is not implemented for tracker rig bt-\n"},
-		{"a verb with an id names the id's rig", []string{"comments", "--json", "bt-abc"}, town, "bdshim: verb comments is not implemented for tracker rig bt-\n"},
+		{"a verb with an id names the id's rig", []string{"events", "--json", "bt-abc"}, town, "bdshim: verb events is not implemented for tracker rig bt-\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

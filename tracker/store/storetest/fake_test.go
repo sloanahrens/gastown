@@ -250,3 +250,99 @@ func TestTheFakeWritesTheTextFieldsTheShimUpdates(t *testing.T) {
 		t.Errorf("the refused patch wrote its modeled field: %q", refused[is.ID].Description)
 	}
 }
+
+// The fake applies the label fields of a patch the bd shim's label add handler
+// writes, in the Postgres store's order, and a patch with no change leaves the
+// issue's labels as they were.
+func TestTheFakeAppliesTheLabelPatchesTheShimWrites(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := NewFake()
+	is, err := f.CreateIssue(ctx, api.CreateParams{Rig: "gt", Title: "t", Labels: []string{"a", "b"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := func() []string {
+		t.Helper()
+		got, err := f.GetIssues(ctx, []string{is.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got[is.ID].Labels
+	}
+	if err := f.UpdateIssue(ctx, is.ID, api.UpdatePatch{AddLabels: []string{"c", "a"}}, api.Guard{}); err != nil {
+		t.Fatalf("AddLabels: %v", err)
+	}
+	if got, want := labels(), []string{"a", "b", "c"}; !slices.Equal(got, want) {
+		t.Errorf("after AddLabels labels = %v, want %v", got, want)
+	}
+	if err := f.UpdateIssue(ctx, is.ID, api.UpdatePatch{RemoveLabels: []string{"a"}}, api.Guard{}); err != nil {
+		t.Fatalf("RemoveLabels: %v", err)
+	}
+	if got, want := labels(), []string{"b", "c"}; !slices.Equal(got, want) {
+		t.Errorf("after RemoveLabels labels = %v, want %v", got, want)
+	}
+	if err := f.UpdateIssue(ctx, is.ID, api.UpdatePatch{SetLabels: []string{"z", "z"}}, api.Guard{}); err != nil {
+		t.Fatalf("SetLabels: %v", err)
+	}
+	if got, want := labels(), []string{"z"}; !slices.Equal(got, want) {
+		t.Errorf("after SetLabels labels = %v, want %v", got, want)
+	}
+	// A patch that changes nothing writes nothing, as Postgres leaves the row
+	// alone; a refused field still refuses the whole patch.
+	before := mustFakeIssue(t, f, is.ID)
+	if err := f.UpdateIssue(ctx, is.ID, api.UpdatePatch{AddLabels: []string{"z"}}, api.Guard{}); err != nil {
+		t.Fatalf("adding a label the issue already carries: %v", err)
+	}
+	if after := mustFakeIssue(t, f, is.ID); !after.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Errorf("a label patch that changed nothing moved UpdatedAt from %v to %v", before.UpdatedAt, after.UpdatedAt)
+	}
+	priority := 1
+	if err := f.UpdateIssue(ctx, is.ID, api.UpdatePatch{Priority: &priority, AddLabels: []string{"y"}}, api.Guard{}); !errors.Is(err, store.ErrUnimplemented) {
+		t.Fatalf("a patch with an unmodeled field = %v, want store.ErrUnimplemented", err)
+	}
+	if got, want := labels(), []string{"z"}; !slices.Equal(got, want) {
+		t.Errorf("the refused patch wrote its labels: %v, want %v", got, want)
+	}
+}
+
+// SeedComment keeps the id the fixture names, so a replay reads the comment ids
+// bd's import held; AddComment still mints its own.
+func TestSeedCommentKeepsTheFixturesID(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := NewFake()
+	is, err := f.CreateIssue(ctx, api.CreateParams{Rig: "gt", Title: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.SeedComment("gt-a-comment", is.ID, "fixture", "seeded"); err != nil {
+		t.Fatalf("SeedComment: %v", err)
+	}
+	if err := f.AddComment(ctx, is.ID, "me", "minted"); err != nil {
+		t.Fatalf("AddComment: %v", err)
+	}
+	comments, err := f.Comments(ctx, is.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 2 || comments[0].ID != "gt-a-comment" || comments[0].Text != "seeded" {
+		t.Fatalf("comments = %+v, want the seeded id first", comments)
+	}
+	if comments[1].ID == "gt-a-comment" {
+		t.Errorf("AddComment reused the seeded id %q", comments[1].ID)
+	}
+	if err := f.SeedComment("gt-b-comment", "gt-missing", "fixture", "x"); !errors.Is(err, api.ErrNotFound) {
+		t.Errorf("SeedComment on a missing issue = %v, want api.ErrNotFound", err)
+	}
+}
+
+// mustFakeIssue reads one issue back from the fake.
+func mustFakeIssue(t *testing.T, f *Fake, id string) api.Issue {
+	t.Helper()
+	got, err := f.GetIssues(t.Context(), []string{id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got[id]
+}
