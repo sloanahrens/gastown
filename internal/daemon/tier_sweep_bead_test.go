@@ -66,6 +66,24 @@ func tierSweepWriteTemplate(t *testing.T, d *Daemon, sections ...string) string 
 	return path
 }
 
+// tierSweepWriteDockerList writes the container package list the failing run
+// used into the daemon's sweep worktree, the path production reads it from.
+func tierSweepWriteDockerList(t *testing.T, d *Daemon, pkgs ...string) {
+	t.Helper()
+	dir, err := d.tierSweepWorkDir("gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, tierSweepDockerListPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "# written by the test\n" + strings.Join(pkgs, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // The shape a sweep bead carries is the shape the dispatcher's configured
 // template asks for: an operator who adds a section gets a bead that carries
 // it, so the lint passes rather than holding the bead unshaped (gt-uzkic).
@@ -731,6 +749,126 @@ func TestTierSweepBead_UntaggedDockerUnitKeepsNoBuildTag(t *testing.T) {
 	}
 }
 
+// A package docker.txt lists is run by the sweep with containers, which a
+// polecat sandbox has none of: its acceptance box is the package's unit tier,
+// which runs here, and the Gate says the container-backed re-run is owed by
+// the overseer after landing (gt-rtwca).
+func TestTierSweepBeadForADockerPackageHasASandboxTickableAcceptance(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		log      func(t *testing.T) string
+		wantName string
+	}{
+		{
+			name: "the sweep captured a failing case",
+			log: func(t *testing.T) string {
+				return tierSweepWriteTestLog(t, ""+
+					"tier-sweep: integration-docker ./internal/beads ...\n"+
+					"    --- FAIL: TestIntegrationClientContract (30.00s)\n")
+			},
+			wantName: "TestIntegrationClientContract",
+		},
+		{
+			name: "the sweep named no failing case",
+			log:  func(t *testing.T) string { return filepath.Join(t.TempDir(), "gone.log") },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+			d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+			tierSweepWriteDockerList(t, d, "internal/beads", "internal/testutil")
+			logPath := tc.log(t)
+
+			red := map[string]tierSweepTierResult{
+				"integration": {Verdict: tierSweepRed, Passed: 74, Failed: 1, FailedNames: []string{"./internal/beads"}, Log: logPath},
+			}
+			d.tierSweepRecordBeads("gastown", "abc1234", red)
+
+			if len(bd.created) != 1 {
+				t.Fatalf("created = %+v, want one bead", bd.created)
+			}
+			opts := bd.created[0]
+			if v := lintTierSweepBead(opts); !v.Clean() {
+				t.Fatalf("the docker bead is unshaped: %s\ndescription:\n%s", v.ShapeNote(), opts.Description)
+			}
+			item := opts.Acceptance
+			for _, unwanted := range []string{"Read the tier log", logPath, "GT_TEST_DOCKER=1", "gt slot run"} {
+				if strings.Contains(item, unwanted) {
+					t.Errorf("acceptance = %q, want no check a polecat sandbox cannot run (%q)", item, unwanted)
+				}
+			}
+			if want := "The unit tier for `./internal/beads` passes: `GT_TEST_DOCKER=0 go test ./internal/beads` passes"; !strings.Contains(item, want) {
+				t.Errorf("acceptance = %q, want the package's unit tier asked for", item)
+			}
+			if got := strings.Contains(item, tc.wantName); tc.wantName != "" && !got {
+				t.Errorf("acceptance = %q, want the captured failing case %s", item, tc.wantName)
+			}
+			gate := tierSweepSectionText(opts.Description, "Gate")
+			for _, want := range []string{"owed by the overseer after landing", "next sweep closes this bead"} {
+				if !strings.Contains(gate, want) {
+					t.Errorf("Gate = %q, want %q", gate, want)
+				}
+			}
+		})
+	}
+}
+
+// The container list is repository text, and the name it matches is written
+// into a command in the bead: a name that is not a package path is refused,
+// the check every other unit name gets before it reaches a command (gt-rtwca).
+func TestTierSweepDockerNameRejectsWhatIsNotAPackagePath(t *testing.T) {
+	t.Parallel()
+	if _, ok := tierSweepDockerName("untagged:./internal/x;rm", []string{"./internal/x;rm"}); ok {
+		t.Error("tierSweepDockerName accepted a name that is not a package path")
+	}
+	if name, ok := tierSweepDockerName("untagged:./internal/beads", []string{"./internal/beads"}); !ok || name != "./internal/beads" {
+		t.Errorf("tierSweepDockerName = %q, %v, want ./internal/beads", name, ok)
+	}
+}
+
+// A package docker.txt does not list keeps the acceptance item it gets today,
+// byte for byte, whether or not the sweep captured a failing name (gt-rtwca).
+func TestTierSweepBeadForAPlainPackageIsUnchanged(t *testing.T) {
+	t.Parallel()
+	named := tierSweepWriteTestLog(t, ""+
+		"tier-sweep: integration ./internal/cmd ...\n"+
+		"    --- FAIL: TestAlpha (0.01s)\n")
+	missing := filepath.Join(t.TempDir(), "gone.log")
+	for _, tc := range []struct{ name, log, want string }{
+		{
+			name: "the sweep captured a failing case",
+			log:  named,
+			want: "- [ ] `gt slot run -- env GT_TEST_DOCKER=1 go test -tags integration -run '^(TestAlpha)$' -count=1 ./internal/cmd` passes on a worktree rebased onto main. Output that says `no tests to run` ran nothing: the name matched no test, so say so on this bead instead of ticking this box.",
+		},
+		{
+			name: "the sweep named no failing case",
+			log:  missing,
+			want: "- [ ] Read the tier log (" + missing + ") and re-run the failing test in ./internal/cmd with a narrow -run filter until it passes on a worktree rebased onto main.",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+			d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+			tierSweepWriteDockerList(t, d, "internal/beads")
+
+			red := map[string]tierSweepTierResult{
+				"integration": {Verdict: tierSweepRed, Passed: 32, Failed: 1, FailedNames: []string{"./internal/cmd"}, Log: tc.log},
+			}
+			d.tierSweepRecordBeads("gastown", "abc1234", red)
+
+			if len(bd.created) != 1 {
+				t.Fatalf("created = %+v, want one bead", bd.created)
+			}
+			if got := bd.created[0].Acceptance; got != tc.want {
+				t.Errorf("acceptance = %q, want today's bytes %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // A missing or unreadable log still files a shaped bead: the fallback item
 // asks the polecat to read the log and re-run the failing test, and the shape
 // is what the dispatcher needs. Filing must not depend on the log surviving.
@@ -829,7 +967,7 @@ func TestTierSweepBead_StandInUnitNamesTheTier(t *testing.T) {
 			t.Parallel()
 			description, acceptance := tierSweepBeadShape("integration", unit, "abc1234",
 				tierSweepTierResult{Verdict: tierSweepRed, Passed: 0, Failed: 1, Log: "/tmp/integration.log"},
-				specdispatch.Template{Sections: specdispatch.DefaultSections, Source: "built-in"})
+				specdispatch.Template{Sections: specdispatch.DefaultSections, Source: "built-in"}, nil)
 			opts := beads.CreateOptions{
 				Title:       "tier sweep (gastown): integration: " + unit,
 				Labels:      []string{tierSweepRedLabel},
@@ -989,7 +1127,7 @@ func TestTierSweepBead_LegacyRecordKeepsItsCheckCommand(t *testing.T) {
 				t.Fatalf("legacy record command = %q, want none", ts.Command)
 			}
 			_, acceptance := tierSweepBeadShape(tc.tier, tc.unit, "abc1234", ts,
-				specdispatch.Template{Sections: specdispatch.DefaultSections, Source: "built-in"})
+				specdispatch.Template{Sections: specdispatch.DefaultSections, Source: "built-in"}, nil)
 			if !strings.Contains(acceptance, tc.want) {
 				t.Errorf("acceptance = %q, want it to carry %q", acceptance, tc.want)
 			}

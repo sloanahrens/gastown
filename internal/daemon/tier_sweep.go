@@ -3013,7 +3013,7 @@ func tierSweepFileRed(d *Daemon, bd tierSweepBeadStore, rig, tier, name, sha str
 		}
 		return
 	}
-	description, acceptance := tierSweepBeadShape(tier, name, sha, ts, d.tierSweepTemplate())
+	description, acceptance := tierSweepBeadShape(tier, name, sha, ts, d.tierSweepTemplate(), d.tierSweepDockerList(rig))
 	if _, err := bd.Create(beads.CreateOptions{
 		Title:       tierSweepBeadPrefix(rig, tier) + name,
 		Labels:      []string{tierSweepRedLabel},
