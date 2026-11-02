@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -45,35 +47,71 @@ type Runner func(ctx context.Context, argv []string) ([]byte, error)
 // a truncated hit list.
 const maxOutputBytes = 1 << 20
 
+// maxStderrBytes bounds hm's stderr. An error message is diagnostics, not a
+// verdict, so a cut there loses nothing ExecRunner decides on.
+const maxStderrBytes = 64 << 10
+
 // execWaitDelay bounds how long Wait waits, after hm exits or ctx ends, for
-// hm's output pipe to close, so a child hm leaves holding that pipe cannot
-// block the caller past its context (gt-negzu).
+// hm's output pipes to close, so a child hm leaves holding one cannot block
+// the caller past its context (gt-negzu).
 const execWaitDelay = time.Second
 
 // errOutputTooLong reports an hm answer past maxOutputBytes.
 var errOutputTooLong = errors.New("hmhints: output over the limit")
 
 // ExecRunner runs argv[0] with the rest as arguments without a shell, reading
-// at most maxOutputBytes of stdout and waiting at most execWaitDelay past hm's
-// exit or ctx.
+// at most maxOutputBytes of stdout, and returns at most execWaitDelay after hm
+// exits or ctx ends.
 func ExecRunner(ctx context.Context, argv []string) ([]byte, error) {
 	if len(argv) == 0 {
 		return nil, errors.New("hmhints: ExecRunner called with an empty argv")
 	}
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	// Its own process group, so a deadline that kills hm also kills the
-	// children it started, one of which may be holding the output pipe.
-	util.SetProcessGroup(cmd)
+	// Its own process group, so a deadline that kills hm also reaches a child
+	// it started that holds the output pipe. The cancel is set here rather
+	// than by util.SetProcessGroup: that helper waits out
+	// util.ProcessGroupKillGrace before escalating, which would put a grace
+	// the caller never asked for past its context.
+	util.SetDetachedProcessGroup(cmd)
+	cmd.Cancel = func() error { return cancelGroup(cmd) }
 	cmd.WaitDelay = execWaitDelay
 	out := &cappedOutput{limit: maxOutputBytes}
+	errOut := &cappedOutput{limit: maxStderrBytes}
 	cmd.Stdout = out
-	return execOutcome(argv[0], out, cmd.Run())
+	cmd.Stderr = errOut
+	return execOutcome(argv[0], out, errOut, cmd.Run())
+}
+
+// cancelGroup ends cmd's whole process group at once when ctx ends. hm query
+// holds nothing a SIGTERM would flush, and waiting out a grace period is time
+// the caller spent before its context ended.
+func cancelGroup(cmd *exec.Cmd) error {
+	if cmd.Process == nil {
+		return nil
+	}
+	err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, syscall.ESRCH):
+		// The group was already empty, which exec.Cmd.Cancel documents as a
+		// finished command: returning it keeps a success from being reported
+		// as the context's error (gt-7npde).
+		return os.ErrProcessDone
+	case errors.Is(err, syscall.EPERM):
+		// An OpenShell sandbox refuses a group signal with EPERM while
+		// allowing a single pid; hm itself is what the caller waits on, so
+		// kill it and let WaitDelay cut off a child still holding the pipe.
+		return cmd.Process.Kill()
+	}
+	return err
 }
 
 // execOutcome turns what Run returned into ExecRunner's result: a cut answer
-// is the bound's error, and a child still holding the pipe after a successful
-// exit is not, because hm's answer was read in full.
-func execOutcome(name string, out *cappedOutput, err error) ([]byte, error) {
+// is the bound's error, a child still holding the pipe after a successful exit
+// is not, because hm's answer was read in full, and an exit error carries hm's
+// stderr the way exec.Cmd.Output records it.
+func execOutcome(name string, out, errOut *cappedOutput, err error) ([]byte, error) {
 	if out.truncated {
 		return nil, fmt.Errorf("%w: %s wrote more than %d bytes", errOutputTooLong, name, maxOutputBytes)
 	}
@@ -81,6 +119,10 @@ func execOutcome(name string, out *cappedOutput, err error) ([]byte, error) {
 		err = nil
 	}
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitErr.Stderr = errOut.buf.Bytes()
+		}
 		return nil, err
 	}
 	return out.buf.Bytes(), nil

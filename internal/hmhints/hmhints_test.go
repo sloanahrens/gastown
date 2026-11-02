@@ -187,25 +187,30 @@ func TestExecRunnerRejectsEmptyArgv(t *testing.T) {
 	}
 }
 
-// TestExecOutcomeMapsRunResults covers what ExecRunner does with Run's
-// result: a cut answer is an error, a child holding the pipe after a
-// successful exit is not, and another failure is returned. A real process
-// behind both paths is TestIntegrationExecRunner's.
-func TestExecOutcomeMapsRunResults(t *testing.T) {
+// TestExecOutcome covers execOutcome's mapping of Run's result to
+// ExecRunner's: a cut answer is an error, a child holding the pipe after a
+// successful exit is not, another failure is returned, and an exit error keeps
+// hm's stderr. The integration tests drive the same outcomes through a real
+// process.
+func TestExecOutcome(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("hm failed")
+	exitErr := &exec.ExitError{}
 	tests := []struct {
-		name    string
-		limit   int
-		written string
-		err     error
-		want    string
-		wantErr error
+		name       string
+		limit      int
+		written    string
+		stderr     string
+		err        error
+		want       string
+		wantErr    error
+		wantStderr string
 	}{
 		{name: "answer within the bound", limit: 8, written: `[]`, want: `[]`},
 		{name: "answer past the bound", limit: 4, written: "abcdefgh", wantErr: errOutputTooLong},
 		{name: "child holds the pipe after a successful exit", limit: 8, written: `[]`, err: exec.ErrWaitDelay, want: `[]`},
 		{name: "hm fails", limit: 8, err: boom, wantErr: boom},
+		{name: "hm exits non-zero keeps stderr", limit: 8, stderr: "hm: no such index", err: exitErr, wantErr: exitErr, wantStderr: "hm: no such index"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -214,12 +219,20 @@ func TestExecOutcomeMapsRunResults(t *testing.T) {
 			if _, err := out.Write([]byte(tt.written)); err != nil {
 				t.Fatalf("seeding output: %v", err)
 			}
-			got, err := execOutcome("hm", out, tt.err)
+			errOut := &cappedOutput{limit: maxStderrBytes}
+			if _, err := errOut.Write([]byte(tt.stderr)); err != nil {
+				t.Fatalf("seeding stderr: %v", err)
+			}
+			got, err := execOutcome("hm", out, errOut, tt.err)
 			if !errors.Is(err, tt.wantErr) || (err == nil) != (tt.wantErr == nil) {
 				t.Fatalf("execOutcome error = %v, want %v", err, tt.wantErr)
 			}
 			if string(got) != tt.want {
 				t.Fatalf("execOutcome = %q, want %q", got, tt.want)
+			}
+			var gotExit *exec.ExitError
+			if errors.As(err, &gotExit) && string(gotExit.Stderr) != tt.wantStderr {
+				t.Fatalf("ExitError.Stderr = %q, want %q", gotExit.Stderr, tt.wantStderr)
 			}
 		})
 	}
