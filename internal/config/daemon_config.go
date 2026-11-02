@@ -845,6 +845,11 @@ type ScheduledMaintenanceConfig struct {
 	GCGrowthRatio *float64 `json:"gc_growth_ratio,omitempty"`
 }
 
+// MaintenanceArchiveDirKey is the operator-facing name of the history
+// archive's setting: the maintenance.* namespace `gt config set` documents and
+// the daemon's logs and escalations use (gt-7nxj4).
+const MaintenanceArchiveDirKey = "maintenance.archive_dir"
+
 // ParseArchiveDir returns the history archive's directory: empty (with no
 // error) means archiving is off. A set entry that is not an absolute path is
 // refused rather than resolved against the daemon's working directory, which is
@@ -859,7 +864,7 @@ func (c *ScheduledMaintenanceConfig) ParseArchiveDir() (string, error) {
 		return "", nil
 	}
 	if !filepath.IsAbs(dir) {
-		return "", fmt.Errorf("patrols.scheduled_maintenance.archive_dir = %q: want an absolute path", dir)
+		return "", fmt.Errorf("%s = %q: want an absolute path", MaintenanceArchiveDirKey, dir)
 	}
 	return filepath.Clean(dir), nil
 }

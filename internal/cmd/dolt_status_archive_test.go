@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/doltserver"
@@ -21,10 +22,12 @@ import (
 // fake driver: every failure is shown to the operator rather than counted as
 // zero (gt-7nxj4).
 
-// archiveCountServer scripts the one count the reader asks for.
+// archiveCountServer scripts the one count the reader asks for, and records
+// the statement it sent.
 type archiveCountServer struct {
 	queryErr error
 	null     bool
+	query    string
 }
 
 // archiveCountDriverID keeps each registration's driver name its own, so the
@@ -56,7 +59,8 @@ func (archiveCountConn) Begin() (driver.Tx, error) {
 	return nil, errors.New("transactions are not used by the archive count")
 }
 
-func (c archiveCountConn) QueryContext(context.Context, string, []driver.NamedValue) (driver.Rows, error) {
+func (c archiveCountConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	c.server.query = query
 	if c.server.queryErr != nil {
 		return nil, c.server.queryErr
 	}
@@ -147,6 +151,37 @@ func TestDoltArchiveReaderFailures(t *testing.T) {
 		}
 		if got != 3 {
 			t.Errorf("commits behind = %d, want 3", got)
+		}
+	})
+
+	t.Run("a commit count with no watermark counts the whole log", func(t *testing.T) {
+		t.Parallel()
+		server := &archiveCountServer{}
+		reader := doltArchiveReader{config: config, openDB: archiveCountOpener(t, server)}
+		got, err := reader.commitsBehind(ctx, "gt", daemon.ArchiveWatermark{})
+		if err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		if got != 3 {
+			t.Errorf("commits behind = %d, want 3", got)
+		}
+		if strings.Contains(server.query, "WHERE") {
+			t.Errorf("never-archived count carried a cursor: %s", server.query)
+		}
+	})
+
+	t.Run("a commit count refuses a watermark without a commit_order", func(t *testing.T) {
+		t.Parallel()
+		reader := doltArchiveReader{
+			config: config,
+			openDB: func(string) (*sql.DB, error) {
+				t.Error("a connection was opened for a watermark without a commit_order")
+				return nil, errors.New("not reached")
+			},
+		}
+		wm := daemon.ArchiveWatermark{Hash: "h", Date: time.Now()}
+		if _, err := reader.commitsBehind(ctx, "gt", wm); err == nil || !strings.Contains(err.Error(), "no commit_order") {
+			t.Errorf("count with an orderless watermark = %v, want it refused", err)
 		}
 	})
 

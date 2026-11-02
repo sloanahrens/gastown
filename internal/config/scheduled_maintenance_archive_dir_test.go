@@ -1,7 +1,7 @@
 package config
 
 import (
-	"strings"
+	"fmt"
 	"testing"
 )
 
@@ -11,6 +11,9 @@ import (
 // working directory, which is not the operator's (gt-7nxj4).
 func TestScheduledMaintenanceArchiveDir(t *testing.T) {
 	t.Parallel()
+	if MaintenanceArchiveDirKey != "maintenance.archive_dir" {
+		t.Fatalf("setting key = %q, want the work item's maintenance.archive_dir", MaintenanceArchiveDirKey)
+	}
 	body := `{"patrols":{"scheduled_maintenance":{"enabled":true,"window":"03:00","archive_dir":"/home/op/gt-archive"}}}`
 	var cfg DaemonPatrolConfig
 	if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
@@ -57,8 +60,8 @@ func TestScheduledMaintenanceArchiveDir(t *testing.T) {
 				if err == nil {
 					t.Fatalf("ParseArchiveDir(%q) = %q, want an error", tt.dir, got)
 				}
-				if !strings.Contains(err.Error(), "patrols.scheduled_maintenance.archive_dir") {
-					t.Errorf("error %q does not name the field", err)
+				if want := fmt.Sprintf("%s = %q: want an absolute path", MaintenanceArchiveDirKey, tt.dir); err.Error() != want {
+					t.Errorf("error = %q, want %q", err, want)
 				}
 				return
 			}

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -63,48 +64,70 @@ func TestAppendArchiveTableRefusesARowWidthMismatch(t *testing.T) {
 	}
 }
 
-// statFailingTarget is an append target whose Stat fails, so the pre-append
-// size cannot be read.
-type statFailingTarget struct{}
-
-func (statFailingTarget) Write([]byte) (int, error)  { return 0, nil }
-func (statFailingTarget) Stat() (os.FileInfo, error) { return nil, errors.New("stat refused") }
-func (statFailingTarget) Truncate(int64) error       { return nil }
-func (statFailingTarget) Sync() error                { return nil }
-func (statFailingTarget) Close() error               { return nil }
-
 // truncateFailingTarget refuses both the write and the rollback.
 type truncateFailingTarget struct{ closed bool }
 
-func (*truncateFailingTarget) Write([]byte) (int, error)  { return 0, errors.New("write refused") }
-func (*truncateFailingTarget) Stat() (os.FileInfo, error) { return archiveFileInfo{7}, nil }
-func (*truncateFailingTarget) Truncate(int64) error       { return errors.New("truncate refused") }
-func (*truncateFailingTarget) Sync() error                { return nil }
-func (t *truncateFailingTarget) Close() error             { t.closed = true; return nil }
+func (*truncateFailingTarget) Write([]byte) (int, error) { return 0, errors.New("write refused") }
+func (*truncateFailingTarget) Truncate(int64) error      { return errors.New("truncate refused") }
+func (*truncateFailingTarget) Sync() error               { return nil }
+func (t *truncateFailingTarget) Close() error            { t.closed = true; return nil }
 
-// TestAppendArchiveMemberReportsTargetFailures: a target whose size cannot be
-// read, and one whose partial write cannot be rolled back, are errors that say
-// so; the target is closed either way.
+// syncFailingTarget accepts the member and refuses the sync, the way a full
+// disk's write-behind does; it records the rollback the sync failure must
+// trigger.
+type syncFailingTarget struct {
+	closed    bool
+	truncated int64
+}
+
+func (*syncFailingTarget) Write(p []byte) (int, error) { return len(p), nil }
+func (t *syncFailingTarget) Truncate(size int64) error {
+	t.truncated = size
+	return nil
+}
+func (*syncFailingTarget) Sync() error { return errors.New("sync refused") }
+func (t *syncFailingTarget) Close() error {
+	t.closed = true
+	return nil
+}
+
+// TestAppendArchiveMemberReportsTargetFailures: one target whose partial write
+// cannot be rolled back, and one whose sync fails, are errors that say so; the
+// target is closed either way.
 func TestAppendArchiveMemberReportsTargetFailures(t *testing.T) {
 	t.Parallel()
-	path := filepath.Join(t.TempDir(), "archive.csv.gz")
-
-	t.Run("the size cannot be read", func(t *testing.T) {
-		t.Parallel()
-		err := appendArchiveMember(path, []string{"a"}, [][]string{{"1"}},
-			func(string) (archiveAppendTarget, error) { return statFailingTarget{}, nil })
-		if err == nil || !strings.Contains(err.Error(), "stat refused") {
-			t.Errorf("append with a Stat failure = %v, want the stat error", err)
-		}
-	})
 
 	t.Run("the partial write cannot be rolled back", func(t *testing.T) {
 		t.Parallel()
+		path := filepath.Join(t.TempDir(), "archive.csv.gz")
+		if err := os.WriteFile(path, []byte("earlier"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 		target := &truncateFailingTarget{}
 		err := appendArchiveMember(path, []string{"a"}, [][]string{{"1"}},
 			func(string) (archiveAppendTarget, error) { return target, nil })
 		if err == nil || !strings.Contains(err.Error(), "could not be rolled back") {
 			t.Errorf("append with a failed rollback = %v, want it named", err)
+		}
+		if !target.closed {
+			t.Error("failed append left the target open")
+		}
+	})
+
+	t.Run("the sync fails", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "archive.csv.gz")
+		if err := os.WriteFile(path, []byte("earlier"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		target := &syncFailingTarget{}
+		err := appendArchiveMember(path, []string{"a"}, [][]string{{"1"}},
+			func(string) (archiveAppendTarget, error) { return target, nil })
+		if err == nil || !strings.Contains(err.Error(), "sync refused") {
+			t.Errorf("append with a failed sync = %v, want the sync error", err)
+		}
+		if target.truncated != 7 {
+			t.Errorf("sync failure rolled back to %d, want the pre-append size 7", target.truncated)
 		}
 		if !target.closed {
 			t.Error("failed append left the target open")
@@ -125,7 +148,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 	t.Run("a commit export refuses a path-like database name", func(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
-		if err := d.maintenanceArchiveCommits(dir, "../gt", ArchiveWatermark{}); err == nil {
+		if err := d.maintenanceArchiveCommits(context.Background(), dir, "../gt", ArchiveWatermark{}); err == nil {
 			t.Error("a path-escaping database name was exported")
 		}
 	})
@@ -133,7 +156,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 	t.Run("an events export refuses a path-like database name", func(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
-		if err := d.maintenanceArchiveEvents(dir, "../gt", zero); err == nil {
+		if err := d.maintenanceArchiveEvents(context.Background(), dir, "../gt", zero); err == nil {
 			t.Error("a path-escaping database name was exported")
 		}
 	})
@@ -142,7 +165,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
 		bad := EventsArchiveWatermark{CreatedAt: "yesterday", ID: "1"}
-		if err := d.maintenanceArchiveEvents(dir, "gt", bad); err == nil {
+		if err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", bad); err == nil {
 			t.Error("a watermark Dolt cannot compare was used")
 		}
 	})
@@ -153,7 +176,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, EventsArchiveWatermark, int) (archiveEvents, error) {
 			return archiveEvents{Columns: []string{"payload"}, Rows: [][]string{{"x"}}}, nil
 		}
-		err := d.maintenanceArchiveEvents(dir, "gt", zero)
+		err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", zero)
 		if err == nil || !strings.Contains(err.Error(), "no created_at and id columns") {
 			t.Errorf("export of a table without the cursor columns = %v, want it refused", err)
 		}
@@ -177,7 +200,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 				Rows:    [][]string{{"1", "2026-10-01 00:00:00", "x"}},
 			}, nil
 		}
-		err := d.maintenanceArchiveEvents(dir, "gt", zero)
+		err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", zero)
 		if err == nil || !strings.Contains(err.Error(), "columns changed") {
 			t.Errorf("export across changing columns = %v, want it refused", err)
 		}
@@ -192,7 +215,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 				Rows:    [][]string{{"1", "yesterday"}},
 			}, nil
 		}
-		err := d.maintenanceArchiveEvents(dir, "gt", zero)
+		err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", zero)
 		if err == nil || !strings.Contains(err.Error(), "not a timestamp") {
 			t.Errorf("export of a row with an unusable cursor = %v, want it refused", err)
 		}
@@ -216,20 +239,23 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 		if err := os.Mkdir(statePath, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		err := d.maintenanceArchiveEvents(dir, "gt", zero)
-		if err == nil || !strings.Contains(err.Error(), "watermark cannot be recorded") {
+		err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", zero)
+		if err == nil || !strings.Contains(err.Error(), "cannot be recorded") {
 			t.Errorf("export whose watermark cannot be recorded = %v, want it reported", err)
 		}
 	})
 }
 
-// archiveFakeServer scripts one archive read's result and failures.
+// archiveFakeServer scripts one archive read's result and failures. query and
+// args record what the read sent, for a test of the cursor it bound.
 type archiveFakeServer struct {
 	connectErr error
 	queryErr   error
 	columns    []string
 	rows       [][]driver.Value
 	nextErr    error
+	query      string
+	args       []driver.NamedValue
 }
 
 // archiveFakeDriverID keeps each registration's driver name its own, so tests
@@ -266,7 +292,9 @@ func (archiveFakeConn) Begin() (driver.Tx, error) {
 	return nil, errors.New("transactions are not used by the archive read")
 }
 
-func (c archiveFakeConn) QueryContext(context.Context, string, []driver.NamedValue) (driver.Rows, error) {
+func (c archiveFakeConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	c.server.query = query
+	c.server.args = args
 	if c.server.queryErr != nil {
 		return nil, c.server.queryErr
 	}
@@ -292,6 +320,35 @@ func (r *archiveFakeRows) Next(dest []driver.Value) error {
 		return r.server.nextErr
 	}
 	return io.EOF
+}
+
+// TestEventsArchiveRowsKeepsNullDistinctFromEmpty: a NULL cell and an empty
+// string archive as different fields, and a value that is literally the NULL
+// marker is escaped rather than read back as a NULL (gt-7nxj4).
+func TestEventsArchiveRowsKeepsNullDistinctFromEmpty(t *testing.T) {
+	t.Parallel()
+	open := archiveFakeOpener(t, &archiveFakeServer{
+		columns: []string{"a", "b", "c"},
+		rows:    [][]driver.Value{{nil, "", archiveNullCell}},
+	})
+	db, err := open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rows, err := db.QueryContext(context.Background(), "SELECT a, b, c FROM events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got, err := eventsArchiveRows(rows)
+	if err != nil {
+		t.Fatalf("reading rows: %v", err)
+	}
+	want := []string{archiveNullCell, "", `\` + archiveNullCell}
+	if len(got.Rows) != 1 || !slices.Equal(got.Rows[0], want) {
+		t.Errorf("row = %v, want %v (NULL, empty, and the escaped literal must differ)", got.Rows, want)
+	}
 }
 
 // TestEventsArchiveRowsReportsAClosedResultSet: a result set closed before it
@@ -364,8 +421,8 @@ func TestDoltArchiveLogFailures(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
 		d.maint.archiveOpenDB = archiveFakeOpener(t, &archiveFakeServer{
-			columns: []string{"commit_hash", "committer", "date", "message"},
-			rows:    [][]driver.Value{{"h1", "c", "not-a-time", nil}},
+			columns: []string{"commit_hash", "committer", "date", "message", "commit_order"},
+			rows:    [][]driver.Value{{"h1", "c", "not-a-time", nil, int64(1)}},
 		})
 		if _, err := d.doltArchiveLog(ctx, "gt", ArchiveWatermark{}); err == nil {
 			t.Error("a row whose date is not a time was read")
@@ -376,7 +433,7 @@ func TestDoltArchiveLogFailures(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
 		d.maint.archiveOpenDB = archiveFakeOpener(t, &archiveFakeServer{
-			columns: []string{"commit_hash", "committer", "date", "message"},
+			columns: []string{"commit_hash", "committer", "date", "message", "commit_order"},
 			nextErr: errors.New("row read failed"),
 		})
 		if _, err := d.doltArchiveLog(ctx, "gt", ArchiveWatermark{}); err == nil || !strings.Contains(err.Error(), "row read failed") {
@@ -389,17 +446,66 @@ func TestDoltArchiveLogFailures(t *testing.T) {
 		d, _ := gcTestDaemon(t)
 		when := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
 		d.maint.archiveOpenDB = archiveFakeOpener(t, &archiveFakeServer{
-			columns: []string{"commit_hash", "committer", "date", "message"},
-			rows:    [][]driver.Value{{"h1", "c", when, "first"}},
+			columns: []string{"commit_hash", "committer", "date", "message", "commit_order"},
+			rows:    [][]driver.Value{{"h1", "c", when, "first", int64(7)}},
 		})
 		got, err := d.doltArchiveLog(ctx, "gt", ArchiveWatermark{})
 		if err != nil {
 			t.Fatalf("read: %v", err)
 		}
-		if len(got) != 1 || got[0].Hash != "h1" || !got[0].Date.Equal(when) || got[0].Message != "first" {
+		if len(got) != 1 || got[0].Hash != "h1" || !got[0].Date.Equal(when) || got[0].Message != "first" || got[0].Order != 7 {
 			t.Errorf("commits = %+v, want the fake row", got)
 		}
 	})
+}
+
+// TestDoltArchiveLogUsesCommitOrder: the cursor is (commit_order, commit_hash),
+// not the commit date, so a commit whose date is older than the watermark's
+// but whose height is greater is still read (gt-7nxj4).
+func TestDoltArchiveLogUsesCommitOrder(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	server := &archiveFakeServer{
+		columns: []string{"commit_hash", "committer", "date", "message", "commit_order"},
+	}
+	d.maint.archiveOpenDB = archiveFakeOpener(t, server)
+	wm := ArchiveWatermark{
+		Hash:  "h9",
+		Date:  time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC),
+		Order: 42,
+	}
+
+	if _, err := d.doltArchiveLog(context.Background(), "gt", wm); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	if strings.Contains(server.query, "date >") {
+		t.Errorf("query still bounds by date: %s", server.query)
+	}
+	for _, want := range []string{"commit_order > ?", "ORDER BY commit_order ASC, commit_hash ASC"} {
+		if !strings.Contains(server.query, want) {
+			t.Errorf("query %q does not hold %q", server.query, want)
+		}
+	}
+	if len(server.args) != 3 || server.args[0].Value != int64(wm.Order) || server.args[1].Value != int64(wm.Order) || server.args[2].Value != wm.Hash {
+		t.Errorf("query args = %v, want the watermark's order twice and its hash", server.args)
+	}
+}
+
+// TestDoltArchiveLogRefusesAWatermarkWithoutOrder: a watermark from before
+// commit_order tracking cannot bound the read, so it is refused rather than
+// treated as the start of the log (which would export everything twice).
+func TestDoltArchiveLogRefusesAWatermarkWithoutOrder(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	d.maint.archiveOpenDB = func(string) (*sql.DB, error) {
+		t.Error("a connection was opened for a watermark without a commit_order")
+		return nil, errors.New("not reached")
+	}
+	wm := ArchiveWatermark{Hash: "h9", Date: time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)}
+	if _, err := d.doltArchiveLog(context.Background(), "gt", wm); err == nil || !strings.Contains(err.Error(), "no commit_order") {
+		t.Errorf("read with an orderless watermark = %v, want it refused", err)
+	}
 }
 
 // TestDoltArchiveEventsFailures: every failure of the events read is an error

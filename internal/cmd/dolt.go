@@ -814,43 +814,44 @@ type archiveBehindReader interface {
 	eventsBehind(ctx context.Context, db string, wm daemon.EventsArchiveWatermark) (int64, error)
 }
 
-// archiveBehindNotes renders the archive notes for each listed database that
-// has a watermark.
+// archiveBehindNotes renders the archive notes for every listed database. One
+// with no watermark still gets a line, saying it is not archived yet and how
+// far behind it is: omitting it would let the pre-flatten check ("every
+// database reads 0 commits behind") pass over a database the archive has never
+// covered (gt-7nxj4).
 func archiveBehindNotes(ctx context.Context, reader archiveBehindReader, wms daemon.ArchiveWatermarks, databases []string) map[string]string {
 	notes := make(map[string]string, len(databases))
 	for _, db := range databases {
-		var parts []string
-		if wm, ok := wms.Commits[db]; ok {
-			parts = append(parts, commitArchiveNote(ctx, reader, db, wm))
-		}
-		if wm, ok := wms.Events[db]; ok {
-			parts = append(parts, eventsArchiveNote(ctx, reader, db, wm))
-		}
-		if len(parts) > 0 {
-			notes[db] = strings.Join(parts, "; ")
-		}
+		notes[db] = strings.Join([]string{
+			commitArchiveNote(ctx, reader, db, wms.Commits[db]),
+			eventsArchiveNote(ctx, reader, db, wms.Events[db]),
+		}, "; ")
 	}
 	return notes
 }
 
 // commitArchiveNote renders one database's commit archive note.
 func commitArchiveNote(ctx context.Context, reader archiveBehindReader, db string, wm daemon.ArchiveWatermark) string {
-	through := wm.Date.UTC().Format("2006-01-02")
 	behind, err := reader.commitsBehind(ctx, db, wm)
 	if err != nil {
-		return fmt.Sprintf("archived through %s, behind count unavailable: %v", through, err)
+		return fmt.Sprintf("archive behind count unavailable: %v", err)
 	}
-	return fmt.Sprintf("archived through %s, %s", through, commitsBehindText(behind))
+	if wm.Hash == "" {
+		return fmt.Sprintf("not archived yet, %s", commitsBehindText(behind))
+	}
+	return fmt.Sprintf("archived through %s, %s", wm.Date.UTC().Format("2006-01-02"), commitsBehindText(behind))
 }
 
 // eventsArchiveNote renders one database's events archive note.
 func eventsArchiveNote(ctx context.Context, reader archiveBehindReader, db string, wm daemon.EventsArchiveWatermark) string {
-	through := wm.CreatedAt
 	behind, err := reader.eventsBehind(ctx, db, wm)
 	if err != nil {
-		return fmt.Sprintf("events archived through %s, behind count unavailable: %v", through, err)
+		return fmt.Sprintf("events behind count unavailable: %v", err)
 	}
-	return fmt.Sprintf("events archived through %s, %s", through, eventsBehindText(behind))
+	if wm.CreatedAt == "" && wm.ID == "" {
+		return fmt.Sprintf("events not archived yet, %s", eventsBehindText(behind))
+	}
+	return fmt.Sprintf("events archived through %s, %s", wm.CreatedAt, eventsBehindText(behind))
 }
 
 // commitsBehindText renders how many commits an archive has not written out.
@@ -887,13 +888,23 @@ func (r doltArchiveReader) open(dsn string) (*sql.DB, error) {
 }
 
 // commitsBehind counts db's dolt_log rows newer than the watermark, by the
-// same (date, commit_hash) order the archive writes them in.
+// same (commit_order, commit_hash) order the archive writes them in. An empty
+// watermark counts the whole log: a database never archived is entirely
+// behind, and a zero that read as caught up would be a lie.
 func (r doltArchiveReader) commitsBehind(ctx context.Context, db string, wm daemon.ArchiveWatermark) (int64, error) {
 	if !dbNameRe.MatchString(db) {
 		return 0, fmt.Errorf("database name %q is not a plain identifier — refusing to query it", db)
 	}
+	query := "SELECT COUNT(*) FROM dolt_log"
+	var args []any
+	if wm.Hash != "" {
+		if wm.Order == 0 {
+			return 0, fmt.Errorf("archive watermark %q has no commit_order — refusing to count it as caught up", wm.Hash)
+		}
+		query += " WHERE commit_order > ? OR (commit_order = ? AND commit_hash > ?)"
+		args = append(args, wm.Order, wm.Order, wm.Hash)
+	}
 	dsn := buildDoltDSNFromConfig(r.config, db, dsnOpts{
-		ParseTime:    true,
 		Timeout:      "5s",
 		ReadTimeout:  "10s",
 		WriteTimeout: "10s",
@@ -903,10 +914,8 @@ func (r doltArchiveReader) commitsBehind(ctx context.Context, db string, wm daem
 		return 0, fmt.Errorf("database %q not readable: %w", db, err)
 	}
 	defer conn.Close()
-
 	var count int64
-	query := "SELECT COUNT(*) FROM dolt_log WHERE date > ? OR (date = ? AND commit_hash > ?)"
-	if err := conn.QueryRowContext(ctx, query, wm.Date, wm.Date, wm.Hash).Scan(&count); err != nil {
+	if err := conn.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
 		return 0, err
 	}
 	return count, nil

@@ -731,8 +731,14 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time) {
 		defer d.maintenanceGCRunning.Store(false)
 		// Archive first (scheduled_maintenance_archive.go): dolt_log is copied to
 		// the history archive before the gc it has to survive. Its per-database
-		// failures are contained inside the step.
-		d.maintenanceArchive(databases)
+		// failures are contained inside the step; a busy window defers the whole
+		// cycle, as the gc's own quiet guard does, so the backup and gc wait for
+		// the retry rather than running ahead of an unarchived database.
+		if res := d.maintenanceArchive(databases); res.outcome == gcOutcomeDeferred {
+			d.logger.Printf("scheduled_maintenance: cycle %s", res.outcome)
+			d.recordGCDeferral(windowEnd, res.reason, res.pending)
+			return
+		}
 		// Backup next (maintenance_backup.go); the gc only runs once the
 		// night's backup is on disk.
 		res := d.maintenanceBackup(databases)

@@ -252,8 +252,8 @@ func TestDoltStatusShowsArchiveWatermark(t *testing.T) {
 		},
 	}
 	reader := stubArchiveBehindReader{
-		commits: map[string]int64{"gt": 3, "hq": 0, "om": 1},
-		events:  map[string]int64{"gt": 12, "hq": 0},
+		commits: map[string]int64{"gt": 3, "hq": 0, "om": 1, "new-db": 5},
+		events:  map[string]int64{"gt": 12, "hq": 0, "om": 4, "new-db": 9},
 		errs:    map[string]error{"be": errors.New("connection refused")},
 	}
 	notes := archiveBehindNotes(context.Background(), reader, wms, []string{"gt", "hq", "be", "om", "new-db"})
@@ -270,7 +270,7 @@ func TestDoltStatusShowsArchiveWatermark(t *testing.T) {
 	if want := "archived through 2026-11-01, 0 commits behind; events archived through 2026-11-01 22:00:00, 0 events behind"; notes["hq"] != want {
 		t.Errorf("hq note = %q, want %q", notes["hq"], want)
 	}
-	if want := "archived through 2026-10-30, 1 commit behind"; notes["om"] != want {
+	if want := "archived through 2026-10-30, 1 commit behind; events not archived yet, 4 events behind"; notes["om"] != want {
 		t.Errorf("om note = %q, want %q", notes["om"], want)
 	}
 
@@ -278,8 +278,10 @@ func TestDoltStatusShowsArchiveWatermark(t *testing.T) {
 	if strings.Contains(notes["be"], "0 commits behind") || !strings.Contains(notes["be"], "connection refused") {
 		t.Errorf("be note = %q, want the read error rather than a zero", notes["be"])
 	}
-	if _, ok := notes["new-db"]; ok {
-		t.Errorf("database with no watermark got note %q, want none", notes["new-db"])
+	// A database the archive has never covered is entirely behind: it must
+	// carry a line saying so, or the pre-flatten check skips it (gt-7nxj4).
+	if want := "not archived yet, 5 commits behind; events not archived yet, 9 events behind"; notes["new-db"] != want {
+		t.Errorf("never-archived note = %q, want %q", notes["new-db"], want)
 	}
 	if got := databaseStatusLine("hq", "", notes["hq"]); !strings.HasPrefix(got, "    - hq; archived through") {
 		t.Errorf("owner-less line = %q, want the note after the name", got)
