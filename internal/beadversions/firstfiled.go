@@ -17,9 +17,14 @@ func FiledText(row metrics.ArchiveIssueRow) string {
 	return row.Description + "\n\n" + row.AcceptanceCriteria
 }
 
-// ImportFirstFiled records each first-filed row as the bead's version at its
-// created_at under the archive actor, and returns how many it recorded and how
-// many the store already held.
+// ImportFirstFiled records each row as the bead's version at its created_at
+// under the archive actor, and returns how many it recorded and how many the
+// store already held.
+//
+// It records every row it is given, so the caller must not pass a row whose
+// text may not be the text as filed: metrics.FirstFiled.EditedSameDay marks a
+// row first carried by a commit on its own filed day, which may already hold
+// an edit, and the command leaves those out.
 func ImportFirstFiled(store Store, first []metrics.FirstFiled, text func(metrics.ArchiveIssueRow) string) (put, skipped int, err error) {
 	if store == nil {
 		return 0, 0, errors.New("beadversions: import with no store")

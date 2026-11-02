@@ -18,8 +18,19 @@ import (
 	"github.com/steveyegge/gastown/internal/metrics"
 )
 
-// importVersionsIssues is one archive issues.jsonl with a bead filed at 09:00.
-const importVersionsIssues = `{"id":"gt-a","description":"## Goal\ntext","acceptance_criteria":"- [ ] a","created_at":"2026-09-10T09:00:00Z"}` + "\n"
+// importVersionsIssues is one archive issues.jsonl with a bead filed the day
+// before the sampled commit, so its text is the text as filed.
+const importVersionsIssues = `{"id":"gt-a","description":"## Goal\ntext","acceptance_criteria":"- [ ] a","created_at":"2026-09-09T09:00:00Z"}` + "\n"
+
+// importVersionsTwoIssues holds two beads filed before the sampled commit, so
+// a test that stops midway has a first row already recorded.
+const importVersionsTwoIssues = importVersionsIssues +
+	`{"id":"gt-b","description":"## Goal\nother","acceptance_criteria":"- [ ] b","created_at":"2026-09-09T10:00:00Z"}` + "\n"
+
+// importVersionsSameDayIssues holds one bead filed before the sampled commit
+// and one filed on the commit's own day.
+const importVersionsSameDayIssues = importVersionsIssues +
+	`{"id":"gt-b","description":"## Goal\nedited","acceptance_criteria":"- [ ] b","created_at":"2026-09-10T09:00:00Z"}` + "\n"
 
 // importVersionsRunner is the archive's 15-minute export as the fake git
 // answers it: one commit holding issues, and the commit's issues.jsonl.
@@ -59,6 +70,37 @@ func importVersionsStore(t *testing.T, path string) beadversions.Version {
 	return v
 }
 
+// importVersionsFakeStore is a store the test drives. It answers versions from
+// a real MemoryStore, while Load and Put can be made to fail, so a store
+// failure is driven without the host's permissions.
+type importVersionsFakeStore struct {
+	beadversions.Store
+	loadErr error
+	// failPut is the 1-based Put call that returns an error; 0 fails none.
+	failPut int
+	puts    int
+}
+
+func (s *importVersionsFakeStore) Load() (int, error) { return 0, s.loadErr }
+
+func (s *importVersionsFakeStore) Skipped() int { return 0 }
+
+func (s *importVersionsFakeStore) Put(bead, text, actor string, at time.Time) (bool, error) {
+	s.puts++
+	if s.failPut != 0 && s.puts == s.failPut {
+		return false, errors.New("store refused the append")
+	}
+	return s.Store.Put(bead, text, actor, at)
+}
+
+// importVersionsRefusingWriter refuses every write, so the receipt's failure
+// path runs without a helper defined in another test file.
+type importVersionsRefusingWriter struct{}
+
+func (importVersionsRefusingWriter) Write([]byte) (int, error) {
+	return 0, errors.New("output refused")
+}
+
 func TestMetricsImportVersionsUsesTheInjectedRunner(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -90,7 +132,7 @@ func TestMetricsImportVersionsUsesTheInjectedRunner(t *testing.T) {
 	if v.Bead != "gt-a" || v.Text != "## Goal\ntext\n\n- [ ] a" || v.Actor != "archive" {
 		t.Errorf("stored version = %+v, want gt-a's filed text under archive", v)
 	}
-	if want := time.Date(2026, 9, 10, 9, 0, 0, 0, time.UTC); !v.At.Equal(want) {
+	if want := time.Date(2026, 9, 9, 9, 0, 0, 0, time.UTC); !v.At.Equal(want) {
 		t.Errorf("stored at = %s, want the row's created_at %s", v.At, want)
 	}
 	if got := out.String(); !strings.Contains(got, "put 1, skipped 0") {
@@ -124,6 +166,28 @@ func TestMetricsImportVersionsWritesTheGivenPath(t *testing.T) {
 	}
 }
 
+// TestMetricsImportVersionsLeavesOutABeadFromItsFiledDay drives the import's
+// same-day limit: a bead first carried by a commit on its own filed day may
+// already hold an edit, so it is not recorded and the receipt counts it.
+func TestMetricsImportVersionsLeavesOutABeadFromItsFiledDay(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	env := importVersionsEnv{Town: town, Rig: "gt", Run: importVersionsRunner(importVersionsSameDayIssues, "")}
+
+	var out bytes.Buffer
+	if err := runMetricsImportVersions(context.Background(), &out, env); err != nil {
+		t.Fatalf("runMetricsImportVersions: %v", err)
+	}
+
+	path := filepath.Join(town, ".runtime", "metrics", "bead-versions.jsonl")
+	if v := importVersionsStore(t, path); v.Bead != "gt-a" {
+		t.Errorf("stored bead = %q, want gt-a: gt-b was filed on the sampled day", v.Bead)
+	}
+	if got := out.String(); !strings.Contains(got, "1 edited_same_day (not imported)") || !strings.Contains(got, "put 1, skipped 0") {
+		t.Errorf("receipt = %q, want the same-day bead counted and only gt-a put", got)
+	}
+}
+
 func TestMetricsImportVersionsCountsADamagedStoreLine(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "store.jsonl")
@@ -143,14 +207,6 @@ func TestMetricsImportVersionsCountsADamagedStoreLine(t *testing.T) {
 
 func TestMetricsImportVersionsRefusesWhatItCannotRead(t *testing.T) {
 	t.Parallel()
-	unreadableStore := func(t *testing.T) string {
-		dir := t.TempDir()
-		file := filepath.Join(dir, "file")
-		if err := os.WriteFile(file, nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		return filepath.Join(file, "store.jsonl")
-	}
 	cases := []struct {
 		name string
 		env  func(t *testing.T) importVersionsEnv
@@ -202,7 +258,13 @@ func TestMetricsImportVersionsRefusesWhatItCannotRead(t *testing.T) {
 		{
 			name: "the store cannot be read",
 			env: func(t *testing.T) importVersionsEnv {
-				return importVersionsEnv{Town: t.TempDir(), Rig: "gt", Path: unreadableStore(t), Run: importVersionsRunner(importVersionsIssues, "")}
+				return importVersionsEnv{
+					Town: t.TempDir(), Rig: "gt",
+					Run: importVersionsRunner(importVersionsIssues, ""),
+					NewStore: func(string) versionStore {
+						return &importVersionsFakeStore{Store: beadversions.NewMemoryStore(), loadErr: errors.New("store refused to load")}
+					},
+				}
 			},
 			want: "reading the version store",
 		},
@@ -218,33 +280,33 @@ func TestMetricsImportVersionsRefusesWhatItCannotRead(t *testing.T) {
 	}
 }
 
+// TestMetricsImportVersionsStopsWhenTheStoreCannotBeAppended drives a refused
+// second Put: the run fails, and the receipt still reports the row it recorded
+// before the refusal.
 func TestMetricsImportVersionsStopsWhenTheStoreCannotBeAppended(t *testing.T) {
 	t.Parallel()
-	path := filepath.Join(t.TempDir(), "store.jsonl")
-	if err := os.WriteFile(path, nil, 0o600); err != nil {
-		t.Fatal(err)
+	env := importVersionsEnv{
+		Town: t.TempDir(), Rig: "gt",
+		Run: importVersionsRunner(importVersionsTwoIssues, ""),
+		NewStore: func(string) versionStore {
+			return &importVersionsFakeStore{Store: beadversions.NewMemoryStore(), failPut: 2}
+		},
 	}
-	// Readable, so the load passes, but no version can be appended.
-	if err := os.Chmod(path, 0o400); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chmod(path, 0o600); err != nil {
-			t.Errorf("restoring the store's mode: %v", err)
-		}
-	})
-	env := importVersionsEnv{Town: t.TempDir(), Rig: "gt", Path: path, Run: importVersionsRunner(importVersionsIssues, "")}
 
-	err := runMetricsImportVersions(context.Background(), io.Discard, env)
+	var out bytes.Buffer
+	err := runMetricsImportVersions(context.Background(), &out, env)
 	if err == nil || !strings.Contains(err.Error(), "import-versions: importing bead") {
 		t.Fatalf("error = %v, want the refused append named", err)
+	}
+	if got := out.String(); !strings.Contains(got, "put 1") || !strings.Contains(got, "stopped:") {
+		t.Errorf("receipt = %q, want it to report the one put and the stop", got)
 	}
 }
 
 func TestMetricsImportVersionsStopsWhenTheOutputFails(t *testing.T) {
 	t.Parallel()
 	env := importVersionsEnv{Town: t.TempDir(), Rig: "gt", Run: importVersionsRunner(importVersionsIssues, "")}
-	if err := runMetricsImportVersions(context.Background(), &acceptWriter{accept: 0}, env); err == nil {
+	if err := runMetricsImportVersions(context.Background(), importVersionsRefusingWriter{}, env); err == nil {
 		t.Fatal("a failed receipt write did not stop the run")
 	}
 }

@@ -30,14 +30,19 @@ var metricsImportVersionsCmd = &cobra.Command{
 	Use:   "import-versions",
 	Short: "Import the archive's first-filed bead texts into the version store",
 	Long: `Read the tracker's 15-minute git export at <town>/.dolt-archive/git and record
-each bead's first-filed text as its version at the bead's created_at, under the
+each bead's text as filed as its version at the bead's created_at, under the
 actor "archive".
 
 One export commit is sampled per local day, the day's last, and the first commit
 carrying a bead supplies its text, so the store starts with history from before
 it existed. The text is the description, a blank line, then the acceptance
-criteria. Running the command again records nothing: a bead whose store already
-ends with the text is skipped.
+criteria. A bead whose created_at falls on the sampled day of the commit that
+first carries it cannot be told apart from a bead edited later that day, so it
+is not imported: the store would hold a possibly edited text as the text as
+filed, and it cannot correct that text afterwards, because a later version
+must carry a later time than the created_at it would replace. The receipt
+counts those beads as edited_same_day. Running the command again records
+nothing: a bead whose store already ends with the text is skipped.
 
 The export is read only: git log and git show, never a write.`,
 	Args: cobra.NoArgs,
@@ -69,14 +74,26 @@ func runMetricsImportVersionsIn(ctx context.Context, out io.Writer, find func() 
 }
 
 // importVersionsEnv is what the command reads outside its own process: the
-// archive through a runner, the town, and the store's path. A test passes a
-// fake runner, so no git runs in the unit tier.
+// archive through a runner, the town, and the store's path and construction. A
+// test passes a fake runner and a fake store, so no git runs in the unit tier
+// and a store failure does not depend on the host's permissions.
 type importVersionsEnv struct {
 	Town string
 	Rig  string
 	// Path is the store file; empty means beadVersionsFile(Town).
 	Path string
 	Run  metrics.Runner
+	// NewStore builds the store at Path. nil means beadversions.NewFileStore.
+	NewStore func(path string) versionStore
+}
+
+// versionStore is what the import needs of the store: the Store interface
+// plus the file store's load (so an unreadable store fails the run) and its
+// count of lines the load left out.
+type versionStore interface {
+	beadversions.Store
+	Load() (skipped int, err error)
+	Skipped() int
 }
 
 func runMetricsImportVersions(ctx context.Context, out io.Writer, env importVersionsEnv) error {
@@ -109,21 +126,48 @@ func runMetricsImportVersions(ctx context.Context, out io.Writer, env importVers
 		return fmt.Errorf("import-versions: %w", err)
 	}
 
-	store := beadversions.NewFileStore(path)
+	newStore := env.NewStore
+	if newStore == nil {
+		newStore = func(path string) versionStore { return beadversions.NewFileStore(path) }
+	}
+	store := newStore(path)
 	// Load first, so an unreadable store fails the run here and a damaged line
 	// is counted whether or not the import has a row to add.
 	if _, err := store.Load(); err != nil {
 		return fmt.Errorf("import-versions: reading the version store: %w", err)
 	}
 	damaged := store.Skipped()
-	put, skipped, err := beadversions.ImportFirstFiled(store, first, beadversions.FiledText)
-	if err != nil {
-		return fmt.Errorf("import-versions: %w", err)
+
+	// A row first carried by a commit on its own filed day may already hold an
+	// edit made that day, and the store refuses a time that does not advance,
+	// so a wrong text recorded now could never be corrected. Leave those rows
+	// out and count them.
+	importable := make([]metrics.FirstFiled, 0, len(first))
+	sameDay := 0
+	for _, f := range first {
+		if f.EditedSameDay {
+			sameDay++
+			continue
+		}
+		importable = append(importable, f)
 	}
 
+	put, skipped, importErr := beadversions.ImportFirstFiled(store, importable, beadversions.FiledText)
+
 	window := commits[0].At.Format(time.DateOnly) + ".." + commits[len(commits)-1].At.Format(time.DateOnly)
-	_, err = fmt.Fprintf(out,
-		"import-versions %s: %d sampled day(s) %s, %d first-filed bead(s); put %d, skipped %d; %d row(s) dropped, %d damaged store line(s); store %s\n",
-		rig, len(commits), window, len(first), put, skipped, dropped.Count(), damaged, path)
-	return err
+	line := fmt.Sprintf(
+		"import-versions %s: %d sampled day(s) %s, %d first-filed bead(s), %d edited_same_day (not imported); put %d, skipped %d; %d row(s) dropped, %d damaged store line(s); store %s",
+		rig, len(commits), window, len(first), sameDay, put, skipped, dropped.Count(), damaged, path)
+	if importErr != nil {
+		// The receipt still reports what was recorded before the refusal, so a
+		// failed import says how far it got.
+		line += fmt.Sprintf("; stopped: %v", importErr)
+	}
+	if _, err := io.WriteString(out, line+"\n"); err != nil {
+		return err
+	}
+	if importErr != nil {
+		return fmt.Errorf("import-versions: %w", importErr)
+	}
+	return nil
 }
