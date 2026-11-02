@@ -92,10 +92,7 @@ func (r RetryBeads) Show(id string) (is *beads.Issue, err error) {
 }
 
 // ShowMultiple retries a batch read as Show does; an inner client without it
-// reports ErrNoShowMultiple unretried. RetryBeads has the method whatever its
-// inner client is, so a caller that asks "can this client batch" by type
-// assertion gets yes from it: the answer is the ErrNoShowMultiple, and the
-// caller falls back to single reads on it (Worker.showMultiple).
+// returns ErrNoShowMultiple, unretried.
 func (r RetryBeads) ShowMultiple(ids []string) (out map[string]*beads.Issue, err error) {
 	inner, ok := r.Inner.(interface {
 		ShowMultiple([]string) (map[string]*beads.Issue, error)
