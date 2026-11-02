@@ -1,4 +1,4 @@
-> Status: current (2026-11). Runbook for plan row S3; the live run is owed by the operator in a grant window and has not run. Debt: the verdict function below is shell inside a runbook and has no unit tests; it is to be ported to Go with tests (bead filed, cloud-later, held) before this page is first used.
+> Status: current (2026-11). Runbook for plan row S3; the live run is owed by the operator in a grant window and has not run. The verdict is computed by the tested command `cmd/isolation-verdict`; this page records no result of a real run.
 
 # Isolation probes on a GKE Standard Ubuntu node
 
@@ -38,7 +38,7 @@ kubectl get pods -n "$NS" -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.s
 openshell -g "$GATEWAY" logs isolation-probe -n 5000 > "$DIR/log.txt" 2>&1
 ```
 
-Nothing in this block is required to print: an empty file is read as a failure by the verdict below. The log window is 5000 lines; a log that fills the window may have lost its start, and the verdict fails closed on it.
+Nothing in this block is required to print: an empty file is read as a failure by the verdict command. The log window is 5000 lines; a log that fills the window may have lost its start, and the verdict fails closed on it.
 
 ## The verdict
 
@@ -53,40 +53,13 @@ The verdict is computed, not judged, and it claims less than a pass. No probe is
 Two fallback paths are `inconclusive`, never a pass: below Linux 5.19 seccomp falls back to the legacy read-only listener (log line naming the `legacy` or `read-only` listener), and the task-memory probe falls back to `/proc/<pid>/mem` instead of `process_vm_readv`. A fallback means the memory-isolation property was not exercised by the primary mechanism, and nothing here shows the fallback holds it, so a person decides. A failure pattern outranks a fallback: the probe is then `fail`.
 
 ```bash
-verdict() {  # verdict DIR NODE: prints one line per probe, then the VERDICT line
-  local d=$1 node=$2 ok=1 failed="" unsure=""
-  [ "$(cat "$d/create.status" 2>/dev/null)" = 0 ] || ok=0
-  awk '$1 == "isolation-probe" { for (i = 2; i <= NF; i++) if ($i == "Ready" && $(i-1) != "Not") f = 1 } END { exit !f }' "$d/list.txt" 2>/dev/null || ok=0
-  awk -v n="$node" '$2 == n { f = 1 } END { exit !f }' "$d/placement.txt" 2>/dev/null || ok=0
-  [ -s "$d/log.txt" ] && [ "$(wc -l < "$d/log.txt")" -lt 5000 ] || ok=0
-  local name pat
-  for name in landlock seccomp-user-notify task-memory; do
-    case $name in
-      landlock) pat='Landlock probe child exited with status 1|incompatible access-rights|ABI[ =:]*[0-2]([^0-9]|$)' ;;
-      seccomp-user-notify) pat='notification launcher disappeared|ControlSupervisorStartFailed' ;;
-      task-memory) pat='(task-memory|process_vm_readv).*(fail|denied)' ;;
-    esac
-    case $name in
-      seccomp-user-notify) fb='legacy|read-only listener' ;;
-      task-memory) fb='/proc/[^ ]*/mem' ;;
-      *) fb='' ;;
-    esac
-    if [ "$ok" != 1 ] || grep -qiE "$pat" "$d/log.txt"; then
-      echo "probe=$name result=fail"; failed="$failed${failed:+,}$name"
-    elif [ -n "$fb" ] && grep -qiE "$fb" "$d/log.txt"; then
-      echo "probe=$name result=inconclusive"; unsure="$unsure${unsure:+,}$name"
-    else
-      echo "probe=$name result=no-known-failure"
-    fi
-  done
-  if [ -n "$failed" ]; then echo "VERDICT FAIL probe=$failed"
-  elif [ -n "$unsure" ]; then echo "VERDICT INCONCLUSIVE probe=$unsure"
-  else echo "VERDICT NO-KNOWN-FAILURE"; fi
-}
-verdict "$DIR" "$NODE" | tee "$DIR/verdict.txt"
+go run ./cmd/isolation-verdict "$DIR" "$NODE" > "$DIR/verdict.txt"
+cat "$DIR/verdict.txt"
 ```
 
-`VERDICT NO-KNOWN-FAILURE` is never to be read as proven isolation. Only a person who reads `log.txt` and the node's kernel and image against the supervisor's documentation can say more, and the comment on claude-29a.13 says whether that was done. Before relying on `verdict()`, run it against sample directories: a clean one, one per failure pattern, one per fallback, a `Not Ready` list, another node's placement, a missing `create.status`, an empty log and a 5000-line log. This page records no result of such a run.
+The command prints one line per probe and then the VERDICT line on stdout, and names an unusable input on stderr. Under `go run` it exits 0 only for `VERDICT NO-KNOWN-FAILURE`; every other verdict exits 1, with `go run`'s own `exit status 1` line on stderr. The rules and patterns above are compiled in `internal/isolationprobe`.
+
+`VERDICT NO-KNOWN-FAILURE` is never to be read as proven isolation. Only a person who reads `log.txt` and the node's kernel and image against the supervisor's documentation can say more, and the comment on claude-29a.13 says whether that was done. The package's tests run the command against a sample directory per row of this page: a clean one, one per failure pattern, one per fallback, a `Not Ready` list, another node's placement, a missing `create.status`, an empty log and a 5000-line log. This page records no result of a real run.
 
 ## Where the result is recorded
 
