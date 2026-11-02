@@ -252,6 +252,9 @@ func TestDependencyMergeStatusesAreSortedAndDeduped(t *testing.T) {
 			{ID: "gt-zeta", Status: "closed", DependencyType: "blocks"},
 			{ID: "gt-alpha", Status: "closed", DependencyType: "blocks"},
 			{ID: "external:gt:gt-alpha", Status: "closed", DependencyType: "blocks"},
+			// The tracker lists a link to another rig id-only; an external
+			// target never blocks, so it has no merge state to report.
+			{ID: "external:om:om-7", DependencyType: "blocks"},
 		},
 	}
 

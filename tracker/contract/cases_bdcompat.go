@@ -101,11 +101,15 @@ func bdReadCarriesDependencies(t *testing.T, s store.Store) {
 	for _, d := range got.Dependencies {
 		byID[d.ID] = d
 	}
-	if len(got.Dependencies) != 3 {
-		t.Fatalf("Dependencies = %+v, want the three local targets and no external one", got.Dependencies)
+	if len(got.Dependencies) != 4 {
+		t.Fatalf("Dependencies = %+v, want the three local targets and the external one", got.Dependencies)
 	}
 	if d := byID[open.ID]; d.DependencyType != "blocks" || d.Title != "open blocker" || d.Status != "open" {
 		t.Errorf("open blocker dependency = %+v", d)
+	}
+	// The link to another rig has no target row here, so it is listed id-only.
+	if d := byID["external:hq:hq-abc"]; d.DependencyType != "tracks" || d.Title != "" || d.Status != "" || d.Type != "" || d.Priority != 0 {
+		t.Errorf("external dependency = %+v, want id-only with relation tracks", d)
 	}
 	if d := byID[done.ID]; d.DependencyType != "blocks" || d.Status != "closed" {
 		t.Errorf("closed blocker dependency = %+v, want status closed", d)

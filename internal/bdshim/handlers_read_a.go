@@ -126,12 +126,17 @@ func refuseUnknownFlags(fl parsedRead, spec readFlagSpec, prefix string) error {
 // openTrackerStore opens the store the route names, through the backend seam,
 // in the town the router found. The walk up to the town is Decide's, so this
 // reads no working directory of its own: a handler answers in the town the
-// command was routed in, whatever directory the process is in.
+// command was routed in, whatever directory the process is in. The store comes
+// back as bdView, so every handler renders bd's answer.
 func openTrackerStore(env Env, d Decision) (backend.Store, error) {
 	if d.TownRoot == "" {
 		return nil, fmt.Errorf("the command reached tracker rig %s with no town root, so its store cannot be opened", d.Route.Prefix)
 	}
-	return backend.Open(d.TownRoot, routeBeadsDir(d.TownRoot, d.Route), backend.FromEnv(env.Getenv))
+	st, err := backend.Open(d.TownRoot, routeBeadsDir(d.TownRoot, d.Route), backend.FromEnv(env.Getenv))
+	if err != nil {
+		return nil, err
+	}
+	return bdView{st}, nil
 }
 
 // shimError prints one of the shim's own messages and returns its exit code.

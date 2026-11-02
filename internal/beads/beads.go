@@ -751,7 +751,7 @@ func unresolvedBlockingDeps(deps []IssueDep) ([]string, int) {
 	ids := make([]string, 0, len(deps))
 	count := 0
 	for _, dep := range deps {
-		if !IsBlockingDependencyType(dep.DependencyType) || isResolvedDependency(dep) {
+		if !IsBlockingDependencyType(dep.DependencyType) || isResolvedDependency(dep) || isIdOnlyExternal(dep) {
 			continue
 		}
 		count++
@@ -803,6 +803,17 @@ func normalizedIssueIDs(ids []string) []string {
 // its older output leaves behind, does not block.
 func IsBlockingDependencyType(depType string) bool {
 	return blockingDependencyTypes[strings.ToLower(strings.TrimSpace(depType))]
+}
+
+// isIdOnlyExternal reports whether dep is an id-only entry for a target
+// outside this database: a store that keeps the whole dependency set lists
+// such a link as external:<rig>:<id>, with the target's fields empty. An
+// external target never blocks — the tracker's link contract says so, and its
+// close fence and ready board agree — so a blocker derived from a dependency
+// list skips it. A dep that carries a status keeps the fail-closed rule, and
+// an external ID with one (a hand-built list, or a resolved link) still counts.
+func isIdOnlyExternal(dep IssueDep) bool {
+	return dep.Status == "" && strings.HasPrefix(dep.ID, "external:")
 }
 
 func isResolvedDependency(dep IssueDep) bool {

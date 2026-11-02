@@ -239,13 +239,14 @@ func (p *Postgres) GetIssues(ctx context.Context, ids []string) (map[string]api.
 
 // fillDependencies sets Dependencies and BlockedBy on the issues in out named
 // by ids: what each depends on, with the target's title and status, and which
-// of the blocking targets are still open. Targets that are not issues here
-// (external references) are left out.
+// of the blocking targets are still open. A target that is not an issue here
+// (an external:<rig>:<id> reference) is listed id-only: the link's target id,
+// relation and record, with the target's fields empty, and it never blocks.
 func fillDependencies(ctx context.Context, q querier, ids []string, out map[string]api.Issue) error {
-	rows, err := q.Query(ctx, `SELECT d.issue_id, t.id, t.title, t.status, t.priority, t.issue_type, d.type, t.close_reason,
-  (d.type IN `+blocking+` AND `+unresolved+`) AS blocks_now, d.created_at, d.created_by, d.metadata
-FROM tracker.dependencies d JOIN tracker.issues t ON t.id = d.depends_on
-WHERE d.issue_id = ANY($1) ORDER BY d.issue_id, d.created_at, t.id`, ids)
+	rows, err := q.Query(ctx, `SELECT d.issue_id, d.depends_on, coalesce(t.title, ''), coalesce(t.status, ''), coalesce(t.priority, 0::smallint), coalesce(t.issue_type, ''), d.type, coalesce(t.close_reason, ''),
+  (t.status IS NOT NULL AND d.type IN `+blocking+` AND `+unresolved+`) AS blocks_now, d.created_at, d.created_by, d.metadata
+FROM tracker.dependencies d LEFT JOIN tracker.issues t ON t.id = d.depends_on
+WHERE d.issue_id = ANY($1) ORDER BY d.issue_id, d.created_at, d.depends_on`, ids)
 	if err != nil {
 		return fmt.Errorf("store: get dependencies: %w", err)
 	}

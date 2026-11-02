@@ -145,8 +145,9 @@ func (f *Fake) GetIssues(_ context.Context, ids []string) (map[string]api.Issue,
 
 // fillDependenciesLocked sets Dependencies on the issues in out from the
 // links, in the order Postgres lists them (link creation, then the target's
-// id). Targets that are not issues here (external references) are left out,
-// as the real store does. f.mu is held.
+// id). Targets that are not issues here (external references) are left out:
+// this fake keeps bd's answer, and the contract case that pins the real
+// store's id-only listing (depsExternal) is not flagged Fake. f.mu is held.
 func (f *Fake) fillDependenciesLocked(out map[string]api.Issue) {
 	type link struct {
 		dep api.IssueDep

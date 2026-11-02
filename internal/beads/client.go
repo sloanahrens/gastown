@@ -110,13 +110,15 @@ type Client interface {
 	// external:<rig>:<id> target need not exist in this database.
 	AddTypedDependency(issue, dependsOn, depType string) error
 	// DepList returns the issues id depends on with relation depType (""
-	// for any), each carrying its relation in DependencyType. Targets
-	// outside this database (external:<rig>:<id>) are left out.
+	// for any), each carrying its relation in DependencyType. A target
+	// outside this database (external:<rig>:<id>) has no row to read: a
+	// store that keeps the whole dependency set lists it id-only, with the
+	// target's fields empty, where bd leaves it out.
 	DepList(id, depType string) ([]IssueDep, error)
 	// DepListUp returns the issues that depend on id with relation depType
 	// ("" for any), each carrying its relation in DependencyType, wisps
 	// included. Every dependent is an issue in this database, so unlike
-	// DepList there is no external target to leave out.
+	// DepList there is no id-only target here.
 	DepListUp(id, depType string) ([]IssueDep, error)
 	// RemoveDependency removes that dependency, whatever its type.
 	RemoveDependency(issue, dependsOn string) error

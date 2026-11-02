@@ -81,6 +81,11 @@ func comments(in []api.Comment) []beads.Comment {
 	return out
 }
 
+// deps converts the wire links to the seam's, keeping every one. A link to a
+// target outside this database (external:<rig>:<id>) arrives id-only — the
+// reference, the relation and the link's own record, with the target's fields
+// empty — so Show and DepList answer the whole dependency set. bd's own reads
+// leave such a link out; a consumer must not read the empty fields as a target.
 func deps(in []api.IssueDep) []beads.IssueDep {
 	out := make([]beads.IssueDep, len(in))
 	for i, d := range in {

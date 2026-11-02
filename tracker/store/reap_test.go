@@ -80,6 +80,8 @@ func TestClassifyWisp(t *testing.T) {
 		{"a closed task parent does not close the wisp", WispFacts{Wisp: wispAt("w", "open", young),
 			Parents: []api.IssueDep{{ID: "p", Type: "task", Status: "closed"}}}, Keep, ""},
 		{"stale wisp whose only parent is external is kept", WispFacts{Wisp: withParent(wispAt("w", "open", stale), "external:om:om-7")}, Keep, ""},
+		{"stale wisp whose external parent is listed id-only is kept", WispFacts{Wisp: withParent(wispAt("w", "open", stale), "external:om:om-7"),
+			Parents: []api.IssueDep{{ID: "external:om:om-7", DependencyType: "parent-child"}}}, Keep, ""},
 		{"young step whose external parent is unread is kept though its molecule is closed", WispFacts{Wisp: withParent(wispAt("w", "open", young), "external:om:om-7"),
 			Parents: []api.IssueDep{{ID: "m", Type: "molecule", Status: "closed"}}}, Keep, ""},
 		{"merge request in flight is kept at any age", WispFacts{Wisp: wispAt("w", "open", ago(100*time.Hour), "gt:merge-request")}, Keep, ""},
@@ -190,13 +192,15 @@ func TestReapPassClosesStaleAndPurgesExpiredButKeepsProtectedWisps(t *testing.T)
 	}
 }
 
-// The external parent is not in Dependencies (memStore has no row for it), so
-// only the wisp's parent_id tells the pass the wisp has one.
+// The store lists the external parent id-only, with no status to read, so the
+// pass keeps the wisp; the wisp's parent_id names the same target.
 func TestReapPassKeepsAStaleWispWhoseParentIsExternal(t *testing.T) {
 	ago := func(d time.Duration) time.Time { return reapNow.Add(-d) }
 	s := &memStore{now: reapNow, issues: []api.Issue{
 		withParent(wispAt("w-ext", "open", ago(30*time.Hour)), "external:om:om-7"),
 		wispAt("w-plain", "open", ago(30*time.Hour)),
+	}, parents: map[string][]api.IssueDep{
+		"w-ext": {{ID: "external:om:om-7", DependencyType: "parent-child"}},
 	}}
 
 	res, err := ReapPass(context.Background(), s, reapNow, ReapPolicy{})

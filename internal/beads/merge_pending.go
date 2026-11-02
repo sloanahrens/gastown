@@ -98,14 +98,16 @@ func OpenMRsBySourceIssue(c Client) (map[string]*Issue, error) {
 
 // BlockingDependencies returns the blocking dependencies of issue, in the order
 // bd reported them. A dependency counts as blocking when its relation type is
-// one of blocks, conditional-blocks, waits-for, or merge-blocks.
+// one of blocks, conditional-blocks, waits-for, or merge-blocks, and its
+// target is not an id-only external link: an external target never blocks, so
+// it has no merge state to report either.
 func BlockingDependencies(issue *Issue) []IssueDep {
 	if issue == nil {
 		return nil
 	}
 	var deps []IssueDep
 	for _, dep := range issue.Dependencies {
-		if !IsBlockingDependencyType(dep.DependencyType) {
+		if !IsBlockingDependencyType(dep.DependencyType) || isIdOnlyExternal(dep) {
 			continue
 		}
 		deps = append(deps, dep)
