@@ -24,6 +24,9 @@ const ringTestKey = "literal-ring-signing-key-value"
 // ringTestNow is the instant the verbs in these tests run at.
 var ringTestNow = time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
 
+// ringTestClock is the clock the verbs in these tests run on.
+func ringTestClock() time.Time { return ringTestNow }
+
 // ringTestEnv is the daemon environment of a town whose key is set.
 func ringTestEnv(name string) string {
 	if name == "GT_RING_KEY" {
@@ -142,7 +145,7 @@ func TestRingRenewRefusesAnAbsentRing(t *testing.T) {
 
 // TestRingRenewPrintsItsNewExpiryThroughTheCommand: gt ring renew, run as the
 // cobra command gt registers, reports the lease it stored, a lease of 36 hours
-// from the wall clock the command reads.
+// from the clock the command reads.
 func TestRingRenewPrintsItsNewExpiryThroughTheCommand(t *testing.T) {
 	t.Parallel()
 	root := ringTestTown(t)
@@ -150,25 +153,13 @@ func TestRingRenewPrintsItsNewExpiryThroughTheCommand(t *testing.T) {
 		t.Fatalf("forge: %v", err)
 	}
 	find := func() (string, error) { return root, nil }
-	before := time.Now()
-	out, err := ringRunVerb(find, ringTestEnv, "renew")
-	after := time.Now()
+	out, err := ringRunVerb(find, ringTestEnv, ringTestClock, "renew")
 	if err != nil {
 		t.Fatalf("renew through the command: %v", err)
 	}
-	const prefix = "renewed: the Ring is valid until "
-	if !strings.HasPrefix(out, prefix) {
-		t.Fatalf("renew printed %q, want it to start %q", out, prefix)
-	}
-	expiry, err := time.Parse(time.RFC3339, strings.TrimSpace(strings.TrimPrefix(out, prefix)))
-	if err != nil {
-		t.Fatalf("renew printed an expiry that is not RFC 3339: %v", err)
-	}
-	// RFC 3339 has whole seconds, so the printed expiry sits between the
-	// lease from the start of the call (floored to the second) and the lease
-	// from its end.
-	if expiry.Before(before.Add(ring.Lease).Truncate(time.Second)) || expiry.After(after.Add(ring.Lease)) {
-		t.Fatalf("renew printed expiry %s, want a lease of %s from now", expiry, ring.Lease)
+	want := "renewed: the Ring is valid until " + ringTestNow.Add(ring.Lease).Format(time.RFC3339) + "\n"
+	if out != want {
+		t.Fatalf("renew printed %q, want %q", out, want)
 	}
 }
 
@@ -245,10 +236,10 @@ func TestRingForgeWithoutAKeyExitsOneAndWritesNothing(t *testing.T) {
 // gt's own registration uses, under a parent command as cobra runs it: cobra
 // prints a returned error to stderr. It returns what stdout and stderr got
 // together, and the error.
-func ringRunVerb(find func() (string, error), getenv func(string) string, verb string) (string, error) {
+func ringRunVerb(find func() (string, error), getenv func(string) string, now func() time.Time, verb string) (string, error) {
 	var out bytes.Buffer
 	parent := &cobra.Command{Use: "ring", SilenceUsage: true}
-	parent.AddCommand(newRingVerbs(find, getenv)...)
+	parent.AddCommand(newRingVerbs(find, getenv, now)...)
 	parent.SetOut(&out)
 	parent.SetErr(&out)
 	parent.SetArgs([]string{verb})
@@ -276,7 +267,7 @@ func TestRingVerbsNeverPrintTheKey(t *testing.T) {
 	}
 	var all strings.Builder
 	for _, step := range steps {
-		out, _ := ringRunVerb(find, ringTestEnv, step.verb)
+		out, _ := ringRunVerb(find, ringTestEnv, ringTestClock, step.verb)
 		if !strings.Contains(out, step.want) {
 			t.Errorf("gt ring %s printed %q, want it to contain %q", step.verb, out, step.want)
 		}
@@ -291,7 +282,7 @@ func TestRingVerbsNeverPrintTheKey(t *testing.T) {
 	if err := ring.Write(waned, rec); err != nil {
 		t.Fatalf("writing the waned Ring: %v", err)
 	}
-	wanedOut, _ := ringRunVerb(func() (string, error) { return waned, nil }, ringTestEnv, "status")
+	wanedOut, _ := ringRunVerb(func() (string, error) { return waned, nil }, ringTestEnv, ringTestClock, "status")
 	if !strings.Contains(wanedOut, "waned") || !strings.Contains(wanedOut, "ago") {
 		t.Errorf("gt ring status of a waned Ring printed %q, want it to say it waned and how long ago", wanedOut)
 	}
@@ -300,7 +291,7 @@ func TestRingVerbsNeverPrintTheKey(t *testing.T) {
 	// without echoing the literal.
 	literal := ringTestTown(t)
 	ringTestSettings(t, literal, ringTestKey)
-	out, err := ringRunVerb(func() (string, error) { return literal, nil }, ringTestEnv, "forge")
+	out, err := ringRunVerb(func() (string, error) { return literal, nil }, ringTestEnv, ringTestClock, "forge")
 	if err == nil || !strings.Contains(out, "Error:") {
 		t.Errorf("forge with a literal ring.key = %q, %v; want a refusal on stderr", out, err)
 	}
@@ -315,7 +306,7 @@ func TestRingVerbsNeverPrintTheKey(t *testing.T) {
 func TestRingVerbRefusesOutsideATown(t *testing.T) {
 	t.Parallel()
 	noTown := func() (string, error) { return "", errors.New("no mayor/town.json above the cwd") }
-	err := ringVerb(noTown, ringTestEnv, runRingForge)(&cobra.Command{}, nil)
+	err := ringVerb(noTown, ringTestEnv, ringTestClock, runRingForge)(&cobra.Command{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "not in a Gas Town workspace") {
 		t.Fatalf("a verb outside a town = %v, want a refusal", err)
 	}
@@ -409,7 +400,7 @@ func TestRingHelpListsEveryVerb(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
 	parent := &cobra.Command{Use: "ring", Short: ringCmd.Short, Long: ringCmd.Long}
-	verbs := newRingVerbs(func() (string, error) { return "", nil }, ringTestEnv)
+	verbs := newRingVerbs(func() (string, error) { return "", nil }, ringTestEnv, ringTestClock)
 	parent.AddCommand(verbs...)
 	parent.SetOut(&out)
 	parent.SetErr(&out)
