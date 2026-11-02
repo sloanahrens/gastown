@@ -239,7 +239,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 		}
 	})
 
-	t.Run("a commit export reports an archive path it cannot stat", func(t *testing.T) {
+	t.Run("a commit export refuses an archive directory it cannot read", func(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
 		d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {
@@ -251,6 +251,28 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 		}
 		if err := d.maintenanceArchiveCommits(context.Background(), parent, "gt", ArchiveWatermark{}); err == nil {
 			t.Error("a commit export used an archive path under a regular file")
+		}
+	})
+
+	t.Run("a commit export reports an archive file it cannot stat", func(t *testing.T) {
+		t.Parallel()
+		d, _ := gcTestDaemon(t)
+		d.maint.now = func() time.Time { return gcTestNow }
+		d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {
+			return []archiveCommit{{Hash: "h1", Committer: "c", Date: gcTestNow, Message: "first"}}, nil
+		}
+		// The directory can be listed, so the archived set loads, but it has no
+		// execute bit, so the day file cannot be stat'd.
+		dir := filepath.Join(t.TempDir(), "archive")
+		if err := os.Mkdir(dir, 0o400); err != nil {
+			t.Fatal(err)
+		}
+		err := d.maintenanceArchiveCommits(context.Background(), dir, "gt", ArchiveWatermark{})
+		if err == nil {
+			t.Error("a commit export read an unstatable archive file as absent")
+		}
+		if strings.Contains(err.Error(), "reading the archived commit hashes") {
+			t.Errorf("the export failed at the archived set, not at the day file: %v", err)
 		}
 	})
 
