@@ -1,13 +1,16 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	gtconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
@@ -213,5 +216,80 @@ func TestStatusDatabases_FallsBackToCachedOnQueryError(t *testing.T) {
 	}
 	if !strings.Contains(label, "cached") {
 		t.Fatalf("label %q should annotate the list as cached", label)
+	}
+}
+
+// stubArchiveBehindReader supplies the archive lag without a Dolt server.
+type stubArchiveBehindReader struct {
+	commits map[string]int64
+	events  map[string]int64
+	errs    map[string]error
+}
+
+func (s stubArchiveBehindReader) commitsBehind(_ context.Context, db string, _ daemon.ArchiveWatermark) (int64, error) {
+	return s.commits[db], s.errs[db]
+}
+
+func (s stubArchiveBehindReader) eventsBehind(_ context.Context, db string, _ daemon.EventsArchiveWatermark) (int64, error) {
+	return s.events[db], s.errs[db]
+}
+
+// TestDoltStatusShowsArchiveWatermark: each database's status line carries both
+// archive watermarks and how many rows it is behind each; a count that cannot
+// be read is shown as such rather than as caught up.
+func TestDoltStatusShowsArchiveWatermark(t *testing.T) {
+	t.Parallel()
+	wms := daemon.ArchiveWatermarks{
+		Commits: map[string]daemon.ArchiveWatermark{
+			"gt": {Date: time.Date(2026, 11, 2, 9, 30, 0, 0, time.UTC), Hashes: []string{"abc"}},
+			"hq": {Date: time.Date(2026, 11, 1, 23, 0, 0, 0, time.UTC), Hashes: []string{"def"}},
+			"be": {Date: time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC), Hashes: []string{"ghi"}},
+			"om": {Date: time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC), Hashes: []string{"jkl"}},
+		},
+		Events: map[string]daemon.EventsArchiveWatermark{
+			"gt": {
+				CreatedAt: "2026-11-02 09:15:00",
+				Archived:  []daemon.ArchivedEventsRow{{CreatedAt: "2026-11-02 09:15:00", ID: "99"}},
+			},
+			"hq": {
+				CreatedAt: "2026-11-01 22:00:00",
+				Archived:  []daemon.ArchivedEventsRow{{CreatedAt: "2026-11-01 22:00:00", ID: "7"}},
+			},
+		},
+	}
+	reader := stubArchiveBehindReader{
+		commits: map[string]int64{"gt": 3, "hq": 0, "om": 1, "new-db": 5},
+		events:  map[string]int64{"gt": 12, "hq": 0, "om": 4, "new-db": 9},
+		errs:    map[string]error{"be": errors.New("connection refused")},
+	}
+	notes := archiveBehindNotes(context.Background(), reader, wms, []string{"gt", "hq", "be", "om", "new-db"})
+
+	line := databaseStatusLine("gt", "gastown", notes["gt"])
+	for _, want := range []string{
+		"archived through 2026-11-02, 3 commits behind",
+		"events archived through 2026-11-02 09:15:00, 12 events behind",
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("status line = %q, want it to hold %q", line, want)
+		}
+	}
+	if want := "archived through 2026-11-01, 0 commits behind; events archived through 2026-11-01 22:00:00, 0 events behind since 2026-10-31 22:00:00"; notes["hq"] != want {
+		t.Errorf("hq note = %q, want %q", notes["hq"], want)
+	}
+	if want := "archived through 2026-10-30, 1 commit behind; events not archived yet, 4 events behind"; notes["om"] != want {
+		t.Errorf("om note = %q, want %q", notes["om"], want)
+	}
+
+	// A failed count is not "0 commits behind": that would read as caught up.
+	if strings.Contains(notes["be"], "0 commits behind") || !strings.Contains(notes["be"], "connection refused") {
+		t.Errorf("be note = %q, want the read error rather than a zero", notes["be"])
+	}
+	// A database the archive has never covered is entirely behind: it must
+	// carry a line saying so, or the pre-flatten check skips it (gt-7nxj4).
+	if want := "not archived yet, 5 commits behind; events not archived yet, 9 events behind"; notes["new-db"] != want {
+		t.Errorf("never-archived note = %q, want %q", notes["new-db"], want)
+	}
+	if got := databaseStatusLine("hq", "", notes["hq"]); !strings.HasPrefix(got, "    - hq; archived through") {
+		t.Errorf("owner-less line = %q, want the note after the name", got)
 	}
 }

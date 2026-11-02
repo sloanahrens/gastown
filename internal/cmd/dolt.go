@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"io"
 	"net"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	gtconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/doltpause"
@@ -604,13 +607,13 @@ func runDoltStatus(cmd *cobra.Command, args []string) error {
 			databases, dbLabel := statusDatabases(served, verifyErr, state.Databases)
 			if len(databases) > 0 {
 				owners := doltserver.CollectDatabaseOwners(townRoot)
+				notes, noteErr := archiveNotes(townRoot, config, databases)
+				if noteErr != nil {
+					fmt.Print(archiveUnreadableLine(noteErr))
+				}
 				fmt.Printf("  %s\n", dbLabel)
 				for _, db := range databases {
-					if owner, ok := owners[db]; ok {
-						fmt.Printf("    - %-20s (%s)\n", db, owner)
-					} else {
-						fmt.Printf("    - %s\n", db)
-					}
+					fmt.Println(databaseStatusLine(db, owners[db], notes[db]))
 				}
 			}
 			fmt.Printf("  Connection: %s\n", doltserver.GetConnectionString(townRoot))
@@ -774,6 +777,291 @@ func statusDatabases(served []string, verifyErr error, cached []string) ([]strin
 		return cached, "Databases (cached at server start; live query failed):"
 	}
 	return served, "Databases (live):"
+}
+
+// databaseStatusLine renders one database's line in `gt dolt status`, with the
+// history archive note when it has one.
+func databaseStatusLine(db, owner, note string) string {
+	if note != "" {
+		note = "; " + note
+	}
+	if owner != "" {
+		return fmt.Sprintf("    - %-20s (%s)%s", db, owner, note)
+	}
+	return fmt.Sprintf("    - %s%s", db, note)
+}
+
+// archiveNotes returns the history archive notes for every listed database that
+// has a watermark: "archived through <date>, N commits behind" for its commits
+// and "events archived through <created_at>, N events behind" for its events.
+// An unreadable watermark file is an error so the caller can say so; a
+// database whose count cannot be read carries the error instead of a zero that
+// reads as caught up.
+func archiveNotes(townRoot string, config *doltserver.Config, databases []string) (map[string]string, error) {
+	wms, err := daemon.LoadArchiveWatermarks(townRoot)
+	if err != nil {
+		// No database can be read as caught up when the watermarks are
+		// unreadable, and a line that simply went missing would let the
+		// pre-flatten check pass over it: give every database the state itself
+		// as its note, and hand the error back for the header line.
+		notes := make(map[string]string, len(databases))
+		for _, db := range databases {
+			notes[db] = fmt.Sprintf("archive state unreadable: %v", err)
+		}
+		return notes, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	reader := doltArchiveReader{config: config, archivedHashes: archivedHashesLoader(townRoot)}
+	return archiveBehindNotes(ctx, reader, wms, databases), nil
+}
+
+// archivedHashesLoader returns the loader the pre-flatten check reads a
+// database's archived commit hashes through. The directory is the daemon
+// config's maintenance.archive_dir; a config that cannot be read, or a setting
+// left unset, is an error rather than an empty set, because a check that
+// cannot see the archive cannot call any commit safe (gt-7nxj4).
+func archivedHashesLoader(townRoot string) func(db string) (map[string]struct{}, error) {
+	dir, dirErr := archiveDirForStatus(townRoot)
+	return func(db string) (map[string]struct{}, error) {
+		if dirErr != nil {
+			return nil, dirErr
+		}
+		if dir == "" {
+			return nil, fmt.Errorf("%s is unset: the archive cannot say which commits it holds", gtconfig.MaintenanceArchiveDirKey)
+		}
+		return daemon.LoadArchivedCommitHashes(dir, db)
+	}
+}
+
+// archiveDirForStatus reads maintenance.archive_dir from the daemon config
+// once, for every database's check in one status call.
+func archiveDirForStatus(townRoot string) (string, error) {
+	patrol, err := daemon.ReadPatrolConfig(townRoot)
+	if err != nil {
+		return "", fmt.Errorf("reading the daemon config: %w", err)
+	}
+	if patrol == nil || patrol.Patrols == nil {
+		return "", nil
+	}
+	return patrol.Patrols.ScheduledMaintenance.ParseArchiveDir()
+}
+
+// archiveUnreadableLine is the header `gt dolt status` prints when the
+// watermarks cannot be read. Each database's own line then carries the same
+// error, so no database reads as if the archive covered it.
+func archiveUnreadableLine(err error) string {
+	return fmt.Sprintf("  %s Archive watermarks unreadable: %v\n", style.Bold.Render("!"), err)
+}
+
+// archiveBehindReader counts the rows newer than a database's archive
+// watermarks.
+type archiveBehindReader interface {
+	commitsBehind(ctx context.Context, db string, wm daemon.ArchiveWatermark) (int64, error)
+	eventsBehind(ctx context.Context, db string, wm daemon.EventsArchiveWatermark) (int64, error)
+}
+
+// archiveBehindNotes renders the archive notes for every listed database. One
+// with no watermark still gets a line, saying it is not archived yet and how
+// far behind it is: omitting it would let the pre-flatten check ("every
+// database reads 0 commits behind") pass over a database the archive has never
+// covered (gt-7nxj4).
+func archiveBehindNotes(ctx context.Context, reader archiveBehindReader, wms daemon.ArchiveWatermarks, databases []string) map[string]string {
+	notes := make(map[string]string, len(databases))
+	for _, db := range databases {
+		notes[db] = strings.Join([]string{
+			commitArchiveNote(ctx, reader, db, wms.Commits[db]),
+			eventsArchiveNote(ctx, reader, db, wms.Events[db]),
+		}, "; ")
+	}
+	return notes
+}
+
+// commitArchiveNote renders one database's commit archive note.
+func commitArchiveNote(ctx context.Context, reader archiveBehindReader, db string, wm daemon.ArchiveWatermark) string {
+	behind, err := reader.commitsBehind(ctx, db, wm)
+	if err != nil {
+		return fmt.Sprintf("archive behind count unavailable: %v", err)
+	}
+	if wm.Date.IsZero() {
+		return fmt.Sprintf("not archived yet, %s", commitsBehindText(behind))
+	}
+	return fmt.Sprintf("archived through %s, %s", wm.Date.UTC().Format("2006-01-02"), commitsBehindText(behind))
+}
+
+// eventsArchiveNote renders one database's events archive note. The count
+// covers the archive's lookback window and no more, so the note names the
+// window's start: a row older than it is the archive's accepted limit, and the
+// line must not read as if the whole table were archived.
+func eventsArchiveNote(ctx context.Context, reader archiveBehindReader, db string, wm daemon.EventsArchiveWatermark) string {
+	behind, err := reader.eventsBehind(ctx, db, wm)
+	if err != nil {
+		return fmt.Sprintf("events behind count unavailable: %v", err)
+	}
+	if wm.CreatedAt == "" {
+		return fmt.Sprintf("events not archived yet, %s", eventsBehindText(behind))
+	}
+	since, err := wm.Since()
+	if err != nil {
+		return fmt.Sprintf("events behind count unavailable: %v", err)
+	}
+	return fmt.Sprintf("events archived through %s, %s since %s", wm.CreatedAt, eventsBehindText(behind), since)
+}
+
+// commitsBehindText renders how many commits an archive has not written out.
+func commitsBehindText(n int64) string {
+	if n == 1 {
+		return "1 commit behind"
+	}
+	return fmt.Sprintf("%d commits behind", n)
+}
+
+// eventsBehindText renders how many events rows an archive has not written out.
+func eventsBehindText(n int64) string {
+	if n == 1 {
+		return "1 event behind"
+	}
+	return fmt.Sprintf("%d events behind", n)
+}
+
+// doltArchiveReader counts archive lag against the live server.
+type doltArchiveReader struct {
+	config *doltserver.Config
+	// openDB opens the pool a count runs on; nil opens with the MySQL driver.
+	// A test injects a fake driver so the failure paths are reachable without
+	// a server.
+	openDB func(dsn string) (*sql.DB, error)
+	// archivedHashes returns the commit hashes db's archive files hold. A nil
+	// loader cannot prove any commit is archived, so every commit counts as
+	// behind rather than a zero that reads as safe.
+	archivedHashes func(db string) (map[string]struct{}, error)
+}
+
+// open opens the read-only pool one count runs on.
+func (r doltArchiveReader) open(dsn string) (*sql.DB, error) {
+	if r.openDB != nil {
+		return r.openDB(dsn)
+	}
+	return sql.Open("mysql", dsn)
+}
+
+// commitsBehind counts the hashes in db's dolt_log that no archive file holds:
+// the pre-flatten check. It compares every log hash with the set the archive
+// keeps for the database, so a commit dated before the watermark's cursor is
+// counted too — a date cursor cannot see a backdated or out-of-order commit,
+// and reading one as caught up before a flatten loses it (gt-7nxj4). Zero
+// means every commit in the log is archived; an unreadable set is an error,
+// never a zero.
+func (r doltArchiveReader) commitsBehind(ctx context.Context, db string, wm daemon.ArchiveWatermark) (int64, error) {
+	if !dbNameRe.MatchString(db) {
+		return 0, fmt.Errorf("database name %q is not a plain identifier — refusing to query it", db)
+	}
+	if err := wm.Validate(); err != nil {
+		// A watermark the archive itself would refuse cannot read as safe
+		// either; counting it as caught up would be the lie this guards.
+		return 0, err
+	}
+	if r.archivedHashes == nil {
+		return 0, fmt.Errorf("database %q has no archive to check its commits against", db)
+	}
+	archived, err := r.archivedHashes(db)
+	if err != nil {
+		return 0, fmt.Errorf("database %q: reading its archived commit hashes: %w", db, err)
+	}
+	dsn := buildDoltDSNFromConfig(r.config, db, dsnOpts{
+		Timeout:      "5s",
+		ReadTimeout:  "10s",
+		WriteTimeout: "10s",
+	})
+	conn, err := r.open(dsn)
+	if err != nil {
+		return 0, fmt.Errorf("database %q not readable: %w", db, err)
+	}
+	defer conn.Close()
+
+	rows, err := conn.QueryContext(ctx, "SELECT commit_hash FROM dolt_log")
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var missing int64
+	for rows.Next() {
+		var hash string
+		if err := rows.Scan(&hash); err != nil {
+			return 0, err
+		}
+		if _, ok := archived[hash]; !ok {
+			missing++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	return missing, nil
+}
+
+// eventsBehind counts db's events rows the archive has not written out, over
+// the same lookback window the archive reads: rows with created_at at or
+// after the watermark's date minus the window, minus the ids the watermark
+// already holds. A watermark the query cannot compare is refused rather than
+// matched against no row. With no watermark every row is behind, and the
+// index's count answers that without reading the table's rows.
+//
+// The count is the archive's own window, not the whole table: a row older
+// than the window is the archive's documented accepted limit (eventsArchiveLookback),
+// so the status says the count is windowed rather than calling the table
+// complete.
+func (r doltArchiveReader) eventsBehind(ctx context.Context, db string, wm daemon.EventsArchiveWatermark) (int64, error) {
+	if err := wm.Validate(); err != nil {
+		return 0, err
+	}
+	query, err := eventsBehindQuery(db, wm)
+	if err != nil {
+		return 0, err
+	}
+	if !dbNameRe.MatchString(db) {
+		return 0, fmt.Errorf("database name %q is not a plain identifier — refusing to query it", db)
+	}
+	dsn := buildDoltDSNFromConfig(r.config, db, dsnOpts{
+		Timeout:      "5s",
+		ReadTimeout:  "10s",
+		WriteTimeout: "10s",
+	})
+	conn, err := r.open(dsn)
+	if err != nil {
+		return 0, fmt.Errorf("database %q not readable: %w", db, err)
+	}
+	defer conn.Close()
+
+	if wm.CreatedAt == "" {
+		var count int64
+		if err := conn.QueryRowContext(ctx, query).Scan(&count); err != nil {
+			return 0, err
+		}
+		return count, nil
+	}
+
+	rows, err := conn.QueryContext(ctx, query)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	return daemon.UnarchivedEvents(rows, wm.ArchivedIDs())
+}
+
+// eventsBehindQuery renders the count's SELECT: the whole table with no
+// watermark, or the lookback window's rows when there is one. Both statements
+// are declared in beadsql and named here so an engine test can run the exact
+// text the status sends.
+func eventsBehindQuery(db string, wm daemon.EventsArchiveWatermark) (string, error) {
+	if wm.CreatedAt == "" {
+		return beadsql.TableRowCount(db, "events").Inline()
+	}
+	since, err := wm.Since()
+	if err != nil {
+		return "", err
+	}
+	return beadsql.BackupEvents(db, since).Inline()
 }
 
 func currentBeadsRuntimeConfig() (doltserver.BeadsRuntimeConfig, bool) {

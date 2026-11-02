@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/doltbackup"
@@ -35,6 +36,20 @@ type maintenanceSeams struct {
 	backupRoot func() (string, error)
 	// backupExec copies one database into the backup directory dest.
 	backupExec func(ctx context.Context, d *Daemon, db, dest string) error
+	// archiveRead reads a database's dolt_log rows whose hashes no archive file
+	// holds, oldest first (a read-only SELECT).
+	archiveRead func(ctx context.Context, d *Daemon, db string, archived map[string]struct{}) ([]archiveCommit, error)
+	// archiveEventsRead reads a database's events rows at or after the lookback
+	// window's start, oldest first (a read-only SELECT).
+	archiveEventsRead func(ctx context.Context, d *Daemon, db, since string) (archiveEvents, error)
+	// archiveOpenDB opens the pool an archive read runs on. A test injects a
+	// fake driver so a read's failure paths are reachable without a server.
+	archiveOpenDB func(dsn string) (*sql.DB, error)
+	// archiveAppend appends one gzip CSV member to an archive file and returns
+	// only once the file is closed. A test injects one that observes the state
+	// file while the member is written, proving the watermark moves after the
+	// close and not before.
+	archiveAppend func(path string, columns []string, rows [][]string) error
 	// quiet is the quiet-window guard, re-checked before each database.
 	quiet func(d *Daemon) (bool, string)
 	// slotHolders lists the roles holding a container-gate slot.
@@ -87,6 +102,22 @@ func (d *Daemon) maintenance() maintenanceSeams {
 		s.backupExec = func(ctx context.Context, d *Daemon, db, dest string) error {
 			return d.doltBackupSyncURL(ctx, db, dest)
 		}
+	}
+	if s.archiveRead == nil {
+		s.archiveRead = func(ctx context.Context, d *Daemon, db string, archived map[string]struct{}) ([]archiveCommit, error) {
+			return d.doltArchiveLog(ctx, db, archived)
+		}
+	}
+	if s.archiveEventsRead == nil {
+		s.archiveEventsRead = func(ctx context.Context, d *Daemon, db, since string) (archiveEvents, error) {
+			return d.doltArchiveEvents(ctx, db, since)
+		}
+	}
+	if s.archiveOpenDB == nil {
+		s.archiveOpenDB = func(dsn string) (*sql.DB, error) { return sql.Open("mysql", dsn) }
+	}
+	if s.archiveAppend == nil {
+		s.archiveAppend = appendArchiveTable
 	}
 	if s.quiet == nil {
 		s.quiet = (*Daemon).maintenanceQuiet

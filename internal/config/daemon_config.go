@@ -828,6 +828,12 @@ type ScheduledMaintenanceConfig struct {
 	// Uses 24-hour format HH:MM in local time.
 	Window string `json:"window,omitempty"`
 
+	// ArchiveDir is where the history archive writes each database's new
+	// dolt_log commits and events rows as gzip CSV, one file per database per
+	// UTC day (gt-7nxj4). Empty turns archiving off. Read it through
+	// ParseArchiveDir, which refuses a relative path.
+	ArchiveDir string `json:"archive_dir,omitempty"`
+
 	// Deprecated: have no effect. They configured the retired monitor,
 	// flatten and size-triggered gc modes. They are still parsed so a live
 	// daemon.json that carries them decodes strictly, and the daemon logs
@@ -837,6 +843,30 @@ type ScheduledMaintenanceConfig struct {
 	Mode          string   `json:"mode,omitempty"`
 	GCMinBytes    *int64   `json:"gc_min_bytes,omitempty"`
 	GCGrowthRatio *float64 `json:"gc_growth_ratio,omitempty"`
+}
+
+// MaintenanceArchiveDirKey is the history archive's setting as it appears in
+// daemon.json, the path the daemon's logs and escalations tell an operator to
+// fix (gt-7nxj4). It is not yet a `gt config set maintenance.*` key.
+const MaintenanceArchiveDirKey = "patrols.scheduled_maintenance.archive_dir"
+
+// ParseArchiveDir returns the history archive's directory: empty (with no
+// error) means archiving is off. A set entry that is not an absolute path is
+// refused rather than resolved against the daemon's working directory, which is
+// not the operator's, so the history would land in a tree nobody meant
+// (gt-7nxj4).
+func (c *ScheduledMaintenanceConfig) ParseArchiveDir() (string, error) {
+	if c == nil {
+		return "", nil
+	}
+	dir := strings.TrimSpace(c.ArchiveDir)
+	if dir == "" {
+		return "", nil
+	}
+	if !filepath.IsAbs(dir) {
+		return "", fmt.Errorf("%s = %q: want an absolute path", MaintenanceArchiveDirKey, dir)
+	}
+	return filepath.Clean(dir), nil
 }
 
 // DiskMaintenanceConfig configures the disk_maintenance patrol: the daily

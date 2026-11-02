@@ -66,7 +66,9 @@ one, pause first (`gt dolt pause --reason "manual gc" --until 30m`) and
    concurrent writes because Dolt merges the in-flight transaction.
 2. Take a backup (copy the database directory while the server is stopped;
    the nightly backups under `~/gt-backups/dolt` are the other copy, see
-   `docs/dolt-restore.md`).
+   `docs/dolt-restore.md`). Check that every database's archive line in
+   `gt dolt status` reads `0 commits behind` before you continue: the archive
+   is the copy of `dolt_log` that outlives a flatten.
 3. Record row counts for every table so you can verify afterwards:
 
    ```sql
