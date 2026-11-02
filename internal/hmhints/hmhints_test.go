@@ -186,3 +186,52 @@ func TestExecRunnerRejectsEmptyArgv(t *testing.T) {
 		t.Fatal("ExecRunner with an empty argv = nil error, want one")
 	}
 }
+
+// TestExecOutcomeMapsRunResults covers what ExecRunner does with Run's
+// result: a cut answer is an error, a child holding the pipe after a
+// successful exit is not, and another failure is returned. A real process
+// behind both paths is TestIntegrationExecRunner's.
+func TestExecOutcomeMapsRunResults(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("hm failed")
+	tests := []struct {
+		name    string
+		limit   int
+		written string
+		err     error
+		want    string
+		wantErr error
+	}{
+		{name: "answer within the bound", limit: 8, written: `[]`, want: `[]`},
+		{name: "answer past the bound", limit: 4, written: "abcdefgh", wantErr: errOutputTooLong},
+		{name: "child holds the pipe after a successful exit", limit: 8, written: `[]`, err: exec.ErrWaitDelay, want: `[]`},
+		{name: "hm fails", limit: 8, err: boom, wantErr: boom},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			out := &cappedOutput{limit: tt.limit}
+			if _, err := out.Write([]byte(tt.written)); err != nil {
+				t.Fatalf("seeding output: %v", err)
+			}
+			got, err := execOutcome("hm", out, tt.err)
+			if !errors.Is(err, tt.wantErr) || (err == nil) != (tt.wantErr == nil) {
+				t.Fatalf("execOutcome error = %v, want %v", err, tt.wantErr)
+			}
+			if string(got) != tt.want {
+				t.Fatalf("execOutcome = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestExecRunnerReportsAMissingBinary: a bare name goes through exec's PATH
+// lookup, which fails before any process starts, so the unit tier stays
+// hermetic. The name is one no PATH entry holds.
+func TestExecRunnerReportsAMissingBinary(t *testing.T) {
+	t.Parallel()
+	_, err := ExecRunner(context.Background(), []string{"gt-hmhints-no-such-binary", "query"})
+	if !errors.Is(err, exec.ErrNotFound) {
+		t.Fatalf("ExecRunner error = %v, want exec.ErrNotFound in its chain", err)
+	}
+}

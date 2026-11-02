@@ -11,7 +11,10 @@ import (
 	"fmt"
 	"os/exec"
 	"sort"
+	"time"
 	"unicode/utf8"
+
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 // ErrUnavailable reports that hm is not installed. A caller that finds it in
@@ -37,12 +40,72 @@ type Hit struct {
 // no process starts.
 type Runner func(ctx context.Context, argv []string) ([]byte, error)
 
-// ExecRunner runs argv[0] with the rest as arguments, never through a shell.
+// maxOutputBytes bounds what ExecRunner reads from hm. A runaway hm must not
+// grow the caller's memory, so an answer past the bound is an error and never
+// a truncated hit list.
+const maxOutputBytes = 1 << 20
+
+// execWaitDelay bounds how long Wait waits, after hm exits or ctx ends, for
+// hm's output pipe to close, so a child hm leaves holding that pipe cannot
+// block the caller past its context (gt-negzu).
+const execWaitDelay = time.Second
+
+// errOutputTooLong reports an hm answer past maxOutputBytes.
+var errOutputTooLong = errors.New("hmhints: output over the limit")
+
+// ExecRunner runs argv[0] with the rest as arguments without a shell, reading
+// at most maxOutputBytes of stdout and waiting at most execWaitDelay past hm's
+// exit or ctx.
 func ExecRunner(ctx context.Context, argv []string) ([]byte, error) {
 	if len(argv) == 0 {
 		return nil, errors.New("hmhints: ExecRunner called with an empty argv")
 	}
-	return exec.CommandContext(ctx, argv[0], argv[1:]...).Output()
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	// Its own process group, so a deadline that kills hm also kills the
+	// children it started, one of which may be holding the output pipe.
+	util.SetProcessGroup(cmd)
+	cmd.WaitDelay = execWaitDelay
+	out := &cappedOutput{limit: maxOutputBytes}
+	cmd.Stdout = out
+	return execOutcome(argv[0], out, cmd.Run())
+}
+
+// execOutcome turns what Run returned into ExecRunner's result: a cut answer
+// is the bound's error, and a child still holding the pipe after a successful
+// exit is not, because hm's answer was read in full.
+func execOutcome(name string, out *cappedOutput, err error) ([]byte, error) {
+	if out.truncated {
+		return nil, fmt.Errorf("%w: %s wrote more than %d bytes", errOutputTooLong, name, maxOutputBytes)
+	}
+	if errors.Is(err, exec.ErrWaitDelay) {
+		err = nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return out.buf.Bytes(), nil
+}
+
+// cappedOutput keeps the first limit bytes written to it and drops the rest,
+// so a command that writes past the bound cannot grow the caller's memory; it
+// records the cut so the caller reports an error instead of the cut answer.
+type cappedOutput struct {
+	buf       bytes.Buffer
+	limit     int
+	truncated bool
+}
+
+func (o *cappedOutput) Write(p []byte) (int, error) {
+	room := o.limit - o.buf.Len()
+	if room >= len(p) {
+		o.buf.Write(p)
+		return len(p), nil
+	}
+	o.truncated = true
+	if room > 0 {
+		o.buf.Write(p[:room])
+	}
+	return len(p), nil
 }
 
 // Query returns at most limit records hm ranked for text, best rank first. run
