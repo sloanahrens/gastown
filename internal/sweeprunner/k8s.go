@@ -50,6 +50,16 @@ const (
 	dindCPU    = "2"
 	dindMemory = "4Gi"
 
+	// dindProbePort is dindPort as the integer a tcpSocket probe takes; the two
+	// are held equal by TestRenderJobDindIsANativeSidecar.
+	dindProbePort int32 = 2375
+
+	// dindProbePeriodSeconds and dindProbeFailureThreshold bound a sidecar whose
+	// engine never starts listening: the kubelet restarts it within about a
+	// minute instead of holding the pod, and its share, until the Job's deadline.
+	dindProbePeriodSeconds    int32 = 2
+	dindProbeFailureThreshold int32 = 30
+
 	// jobDeadlineSeconds stops a run that hangs on one package, so the share it
 	// holds returns to the cluster and the daemon reads the missing result.json
 	// as RED. It is a ceiling no healthy sweep approaches, far above the plan's
@@ -117,13 +127,15 @@ type PodTemplate struct {
 	Spec PodSpec `json:"spec"`
 }
 
-// PodSpec is the pod's priority, its restart policy, its deadline, its
-// containers and the volumes they mount.
+// PodSpec is the pod's priority, its restart policy, its deadline, the init
+// containers and sidecars that start first, the containers that run the work and
+// the volumes they mount.
 type PodSpec struct {
 	PriorityClassName     string      `json:"priorityClassName,omitempty"`
 	RestartPolicy         string      `json:"restartPolicy"`
 	ShareProcessNamespace *bool       `json:"shareProcessNamespace,omitempty"`
 	ActiveDeadlineSeconds *int64      `json:"activeDeadlineSeconds,omitempty"`
+	InitContainers        []Container `json:"initContainers,omitempty"`
 	Containers            []Container `json:"containers"`
 	Volumes               []Volume    `json:"volumes"`
 }
@@ -162,10 +174,27 @@ type Container struct {
 	Image           string           `json:"image"`
 	Command         []string         `json:"command,omitempty"`
 	Args            []string         `json:"args,omitempty"`
+	RestartPolicy   string           `json:"restartPolicy,omitempty"`
 	Env             []EnvVar         `json:"env,omitempty"`
+	StartupProbe    *Probe           `json:"startupProbe,omitempty"`
 	Resources       *Resources       `json:"resources,omitempty"`
 	SecurityContext *SecurityContext `json:"securityContext,omitempty"`
 	VolumeMounts    []VolumeMount    `json:"volumeMounts,omitempty"`
+}
+
+// Probe is a container's health check: the action that reports it healthy and
+// the cadence the kubelet runs it at.
+type Probe struct {
+	TCPSocket        *TCPSocketAction `json:"tcpSocket,omitempty"`
+	PeriodSeconds    int32            `json:"periodSeconds,omitempty"`
+	FailureThreshold int32            `json:"failureThreshold,omitempty"`
+}
+
+// TCPSocketAction is a probe that succeeds when the address accepts a TCP
+// connection. An empty host is the pod's IP, not the pod's loopback.
+type TCPSocketAction struct {
+	Host string `json:"host,omitempty"`
+	Port int32  `json:"port"`
 }
 
 // EnvVar is one environment variable.
@@ -357,8 +386,13 @@ func renderJob(spec Spec) *Job {
 		// them from the same claim after the Job ends.
 		{Name: outVolume, PersistentVolumeClaim: &ClaimRef{ClaimName: OutClaimName(spec)}},
 	}
+	var initContainers []Container
 	if spec.Dind {
-		containers = append(containers, dindContainer())
+		// The engine is a native sidecar, not a second regular container: the
+		// Job ends when the runner exits, and the kubelet then stops the sidecar
+		// too, so the run gives its share back instead of running to the
+		// deadline (gt-etbor).
+		initContainers = append(initContainers, dindContainer())
 		volumes = append(volumes, Volume{Name: dindVolume, EmptyDir: &EmptyDirVolumeSource{}})
 	}
 	return &Job{
@@ -379,6 +413,7 @@ func renderJob(spec Spec) *Job {
 				// reaps the orphans the tests kill; without it a killed
 				// grandchild stays a zombie and still answers kill(pid, 0).
 				ShareProcessNamespace: boolPtr(true),
+				InitContainers:        initContainers,
 				Containers:            containers,
 				Volumes:               volumes,
 			}},
@@ -428,6 +463,10 @@ func runnerContainer(spec Spec) Container {
 // sits on an internal network with no route out and so starts from a seed volume,
 // this one has the pod's network and pulls the images the tests start itself, so
 // the Job renders no seed step (gt-aw5jn).
+//
+// It is rendered as a native sidecar: restartPolicy Always on an init container
+// makes the kubelet start it before the runner and stop it when the runner
+// exits, so the Job completes and the pod releases its share (gt-etbor).
 func dindContainer() Container {
 	share := ResourceList{CPU: dindCPU, Memory: dindMemory}
 	return Container{
@@ -442,7 +481,16 @@ func dindContainer() Container {
 			"--host=tcp://" + dindAddress + ":" + dindPort,
 			"--tls=false",
 		},
-		Env:             []EnvVar{{Name: "DOCKER_TLS_CERTDIR", Value: ""}},
+		RestartPolicy: "Always",
+		Env:           []EnvVar{{Name: "DOCKER_TLS_CERTDIR", Value: ""}},
+		// The runner starts only after the engine accepts connections on the
+		// port it is handed; the host is the sidecar's own loopback, since an
+		// empty host would probe the pod IP where nothing listens.
+		StartupProbe: &Probe{
+			TCPSocket:        &TCPSocketAction{Host: dindAddress, Port: dindProbePort},
+			PeriodSeconds:    dindProbePeriodSeconds,
+			FailureThreshold: dindProbeFailureThreshold,
+		},
 		Resources:       &Resources{Requests: share, Limits: share},
 		SecurityContext: &SecurityContext{Privileged: true},
 		VolumeMounts:    []VolumeMount{{Name: dindVolume, MountPath: dindDataPath}},

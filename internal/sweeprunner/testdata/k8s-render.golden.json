@@ -13,6 +13,51 @@
         "priorityClassName": "gt-ci",
         "restartPolicy": "Never",
         "shareProcessNamespace": true,
+        "initContainers": [
+          {
+            "name": "dind",
+            "image": "data.forgejo.org/oci/docker@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977",
+            "args": [
+              "dockerd",
+              "--host=tcp://127.0.0.1:2375",
+              "--tls=false"
+            ],
+            "restartPolicy": "Always",
+            "env": [
+              {
+                "name": "DOCKER_TLS_CERTDIR",
+                "value": ""
+              }
+            ],
+            "startupProbe": {
+              "tcpSocket": {
+                "host": "127.0.0.1",
+                "port": 2375
+              },
+              "periodSeconds": 2,
+              "failureThreshold": 30
+            },
+            "resources": {
+              "requests": {
+                "cpu": "2",
+                "memory": "4Gi"
+              },
+              "limits": {
+                "cpu": "2",
+                "memory": "4Gi"
+              }
+            },
+            "securityContext": {
+              "privileged": true
+            },
+            "volumeMounts": [
+              {
+                "name": "dind-data",
+                "mountPath": "/var/lib/docker"
+              }
+            ]
+          }
+        ],
         "containers": [
           {
             "name": "runner",
@@ -72,40 +117,6 @@
               {
                 "name": "out",
                 "mountPath": "/out"
-              }
-            ]
-          },
-          {
-            "name": "dind",
-            "image": "data.forgejo.org/oci/docker@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977",
-            "args": [
-              "dockerd",
-              "--host=tcp://127.0.0.1:2375",
-              "--tls=false"
-            ],
-            "env": [
-              {
-                "name": "DOCKER_TLS_CERTDIR",
-                "value": ""
-              }
-            ],
-            "resources": {
-              "requests": {
-                "cpu": "2",
-                "memory": "4Gi"
-              },
-              "limits": {
-                "cpu": "2",
-                "memory": "4Gi"
-              }
-            },
-            "securityContext": {
-              "privileged": true
-            },
-            "volumeMounts": [
-              {
-                "name": "dind-data",
-                "mountPath": "/var/lib/docker"
               }
             ]
           }
