@@ -23,6 +23,9 @@ h1{font-size:15px;margin:0;letter-spacing:.08em;text-transform:uppercase;color:v
 #hold.warn{color:var(--amber)}
 #hold.quiet{color:var(--dim)}
 #healthline{color:var(--dim);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* Below 640 px the health line wraps instead of ending in an ellipsis: its tick
+   age and landed count sit at the end of the text, where the cut hid them (gt-ec79s). */
+@media (max-width:640px){#healthline{white-space:normal;text-overflow:clip}}
 #healthmark{white-space:nowrap}
 #strip{color:var(--dim);min-width:0}
 #strip b{font-weight:700}
@@ -108,6 +111,10 @@ tr.live{background:#101a13}
    every track may shrink to nothing, so a long bead title cannot carry a row
    past its panel. */
 .wtable{display:grid;grid-template-columns:[polecat] minmax(0,max-content) [agent] minmax(0,max-content) [bead] minmax(0,1fr) [state] minmax(0,max-content) [age] minmax(0,8ch);gap:2px 8px;align-items:baseline}
+/* Below 640 px the age track keeps the width its text needs rather than shrinking
+   to nothing, so the Age column is never cut off at 470 px. The polecat, agent,
+   bead and state tracks still shrink first to make room (gt-ec79s). */
+@media (max-width:640px){.wtable{grid-template-columns:[polecat] minmax(0,max-content) [agent] minmax(0,max-content) [bead] minmax(0,1fr) [state] minmax(0,max-content) [age] max-content}}
 .workrow{grid-column:1 / -1;display:grid;grid-template-columns:subgrid;align-items:baseline;padding:4px 0;border-top:1px solid var(--line)}
 /* A fold's summary spans the table, and its rows are a subgrid of it, so a
    collapsed group hides rows that would still line up with the live ones. */
