@@ -117,6 +117,9 @@ func Run(ctx context.Context, opts *Options, env RunEnv) int {
 		opts.Rig, printedURL(opts.ForgejoURL), printedURL(opts.GitHubURL), printedURL(opts.PromoteTarget))
 
 	log := func(line string) { c.logf("%s", line) }
+	// restart is what step 7 did: the summary line reads it, so a restart that
+	// was skipped for a landing in flight does not read as one that ran.
+	restart := RestartNone
 	steps := []runStep{
 		{"step 1 (refusing a landing in flight)", func() error {
 			return RefuseIfLandingInFlight(env.Runner, opts, log)
@@ -138,7 +141,11 @@ func Run(ctx context.Context, opts *Options, env RunEnv) int {
 		{"step 5 (repointing the remotes)", func() error { return c.RepointRemotes() }},
 		{"step 5 (the town's git_url)", func() error { return c.SetTownGitURL() }},
 		{"step 6 (the settings)", func() error { return c.WriteSettings() }},
-		{"step 7 (the daemon restart)", func() error { return c.RestartDaemonIfQuiet() }},
+		{"step 7 (the daemon restart)", func() error {
+			outcome, err := c.RestartDaemonIfQuiet()
+			restart = outcome
+			return err
+		}},
 		{"step 8 (the operator steps)", func() error {
 			fmt.Fprintln(stdout)
 			for _, line := range c.OperatorSteps() {
@@ -157,7 +164,7 @@ func Run(ctx context.Context, opts *Options, env RunEnv) int {
 			return ExitFailure
 		}
 	}
-	c.logf("cutover of %s complete", opts.Rig)
+	c.logf("cutover of %s complete; %s", opts.Rig, restart)
 	return ExitOK
 }
 

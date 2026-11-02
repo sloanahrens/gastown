@@ -54,33 +54,34 @@ var restartWanted = []string{"env", "GT_TOWN_ROOT=" + townRoot, "GT_ROOT=" + tow
 
 // The restart runs only on an empty landing queue: a queued landing and an
 // unreadable queue both skip it and say why. Restarting regardless turns the two
-// skip rows red.
+// skip rows red. Each row also reads the outcome back: a skip that returned a
+// ran outcome, or one that could not be told from a restart, turns it red.
 func TestRestartOnlyWhenNoLanding(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name        string
-		count       string
-		countErr    error
-		wantRestart bool
-		wantInLog   []string
+		name      string
+		count     string
+		countErr  error
+		want      RestartOutcome
+		wantInLog []string
 	}{
 		{
-			name: "empty queue restarts", count: "0\n", wantRestart: true,
+			name: "empty queue restarts", count: "0\n", want: RestartRan,
 			wantInLog: []string{"+ env GT_TOWN_ROOT=/town GT_ROOT=/town gt daemon restart"},
 		},
 		{
-			name: "a queued landing skips", count: "1\n",
+			name: "a queued landing skips", count: "1\n", want: RestartSkippedQueue,
 			wantInLog: []string{
 				"gastown has 1 open gt:ready-to-land bead(s); NOT restarting the daemon",
 				"When the queue is empty run: gt daemon restart",
 			},
 		},
 		{
-			name: "several queued landings skip", count: "3\n",
+			name: "several queued landings skip", count: "3\n", want: RestartSkippedQueue,
 			wantInLog: []string{"gastown has 3 open gt:ready-to-land bead(s)"},
 		},
 		{
-			name: "an unreadable queue skips", countErr: errExit,
+			name: "an unreadable queue skips", countErr: errExit, want: RestartSkippedUnreadable,
 			wantInLog: []string{
 				"could not read gastown's landing queue",
 				"NOT restarting the daemon",
@@ -88,7 +89,7 @@ func TestRestartOnlyWhenNoLanding(t *testing.T) {
 			},
 		},
 		{
-			name: "a count that is not a number skips", count: "many\n",
+			name: "a count that is not a number skips", count: "many\n", want: RestartSkippedUnreadable,
 			wantInLog: []string{"could not read gastown's landing queue"},
 		},
 	}
@@ -99,14 +100,18 @@ func TestRestartOnlyWhenNoLanding(t *testing.T) {
 			c, log := restartCutover(false)
 			c.Runner = run
 
-			if err := c.RestartDaemonIfQuiet(); err != nil {
+			outcome, err := c.RestartDaemonIfQuiet()
+			if err != nil {
 				t.Fatalf("RestartDaemonIfQuiet: %v", err)
+			}
+			if outcome != tt.want {
+				t.Errorf("RestartDaemonIfQuiet outcome = %v, want %v", outcome, tt.want)
 			}
 
 			if len(run.counts) != 1 || !slices.Equal(run.counts[0], queueArgv) {
 				t.Fatalf("the landing queue reads = %q, want one call of %q", run.counts, queueArgv)
 			}
-			if tt.wantRestart {
+			if tt.want == RestartRan {
 				if len(run.runs) != 1 || !slices.Equal(run.runs[0], restartWanted) {
 					t.Fatalf("restart calls = %q, want one call of %q", run.runs, restartWanted)
 				}
@@ -123,6 +128,36 @@ func TestRestartOnlyWhenNoLanding(t *testing.T) {
 	}
 }
 
+// Every outcome the code sets has its own phrase, so the run's summary line
+// tells the operator which one happened; a value the code never sets — the zero
+// value included — says no restart happened rather than reading as one.
+func TestRestartOutcomeText(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		outcome RestartOutcome
+		want    string
+	}{
+		{RestartNone, "the daemon was not restarted"},
+		{RestartRan, "the daemon was restarted"},
+		{RestartSkippedQueue, "the daemon was not restarted: a landing is queued"},
+		{RestartSkippedUnreadable, "the daemon was not restarted: the landing queue could not be read"},
+		{RestartSkippedDryRun, "the daemon was not restarted: dry run"},
+	}
+	seen := map[string]bool{}
+	for _, tt := range tests {
+		if got := tt.outcome.String(); got != tt.want {
+			t.Errorf("RestartOutcome(%d).String() = %q, want %q", int(tt.outcome), got, tt.want)
+		}
+		if seen[tt.want] {
+			t.Errorf("RestartOutcome(%d) shares the phrase %q with another outcome", int(tt.outcome), tt.want)
+		}
+		seen[tt.want] = true
+	}
+	if got := RestartOutcome(99).String(); got != "the daemon was not restarted" {
+		t.Errorf("an unknown RestartOutcome reads as %q, want the no-restart phrase", got)
+	}
+}
+
 // A dry run prints the restart it would make and runs nothing; the queue is still
 // read, so the line says whether the queue is quiet.
 func TestRestartDryRunRunsNothing(t *testing.T) {
@@ -131,8 +166,12 @@ func TestRestartDryRunRunsNothing(t *testing.T) {
 	c, log := restartCutover(true)
 	c.Runner = run
 
-	if err := c.RestartDaemonIfQuiet(); err != nil {
+	outcome, err := c.RestartDaemonIfQuiet()
+	if err != nil {
 		t.Fatalf("RestartDaemonIfQuiet: %v", err)
+	}
+	if outcome != RestartSkippedDryRun {
+		t.Errorf("RestartDaemonIfQuiet dry-run outcome = %v, want %v", outcome, RestartSkippedDryRun)
 	}
 
 	if len(run.counts) != 1 || !slices.Equal(run.counts[0], queueArgv) {
@@ -158,8 +197,12 @@ func TestRestartUnwiredExecSeamRefuses(t *testing.T) {
 	t.Parallel()
 	c, _ := restartCutover(false)
 
-	if err := c.RestartDaemonIfQuiet(); !errors.Is(err, errRestartRunnerUnwired) {
+	outcome, err := c.RestartDaemonIfQuiet()
+	if !errors.Is(err, errRestartRunnerUnwired) {
 		t.Fatalf("RestartDaemonIfQuiet without a Runner = %v, want %v", err, errRestartRunnerUnwired)
+	}
+	if outcome != RestartNone {
+		t.Errorf("RestartDaemonIfQuiet without a Runner outcome = %v, want %v", outcome, RestartNone)
 	}
 }
 
@@ -171,12 +214,15 @@ func TestRestartFailureIsAnError(t *testing.T) {
 	c, _ := restartCutover(false)
 	c.Runner = run
 
-	err := c.RestartDaemonIfQuiet()
+	outcome, err := c.RestartDaemonIfQuiet()
 	if !errors.Is(err, errExit) {
 		t.Fatalf("RestartDaemonIfQuiet error = %v, want one wrapping %v", err, errExit)
 	}
 	if !strings.Contains(err.Error(), "the daemon restart of gastown failed") {
 		t.Fatalf("the error does not name the step: %v", err)
+	}
+	if outcome != RestartNone {
+		t.Errorf("a failed restart's outcome = %v, want %v", outcome, RestartNone)
 	}
 }
 

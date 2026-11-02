@@ -1168,6 +1168,37 @@ func TestRunRestartLeftToTheOperator(t *testing.T) {
 	}
 }
 
+// TestRunSummaryNamesTheRestart: the run's closing line reads step 7's outcome,
+// so a finished cutover says whether the daemon was restarted or left to the
+// operator. A summary that ignores the outcome — or step 7 that reports a skip
+// as a restart — turns the queued row red.
+func TestRunSummaryNamesTheRestart(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		count string
+		want  string
+	}{
+		{"an empty queue", "0", "the daemon was restarted"},
+		{"a queued landing", "1", "the daemon was not restarted: a landing is queued"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			w := newRunWorld(t, false)
+			w.exec.counts = []string{"0", tt.count}
+
+			if code := w.run(t, context.Background()); code != ExitOK {
+				t.Fatalf("Run = %d, want 0 (output: %s)", code, w.output())
+			}
+			want := "cutover of " + runRig + " complete; " + tt.want
+			if !strings.Contains(w.output(), want) {
+				t.Errorf("the summary line does not say %q:\n%s", want, w.output())
+			}
+		})
+	}
+}
+
 // TestRunBrokerToken: the token a broker's run act hands over in the environment,
 // and the stand-in's FORGEJO_ADMIN_TOKEN, are the two sources a run with no token
 // file reads. Either way every request carries it, no argv, output line or file
