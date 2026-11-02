@@ -1416,9 +1416,13 @@ type specDispatchEnv struct {
 	// rig: the test files and test identifiers their own text names, with the
 	// state that decides whether each holds the candidate
 	// (specdispatch.TargetClaimHold, gt-n6jbw). A read that fails holds the
-	// candidate, a peer whose own design and notes were not read holds as a
-	// claim on unknown files, and so does a nil seam — a checker that is not
-	// wired holds rather than dispatching what it never checked.
+	// candidate, and so does a nil seam — a checker that is not wired holds
+	// rather than dispatching what it never checked. A peer whose own design
+	// and notes were not read holds nothing: it names no path the rule can
+	// compare, and the conflict resolves at the merge (gt-dnp9c). Such a peer
+	// that is in flight or slated ahead is reported as a notice
+	// (specdispatch.UnreadClaimPeers), so an unknown claim cannot pass as an
+	// idle seat.
 	Claims func(beadID string) ([]specdispatch.Claimant, error)
 	// Reads is the ledger the tick's own reads go through, so the tick can
 	// name the phase each one was made under (gt-139dp). Nil counts no phase,
@@ -1581,6 +1585,10 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	// candidate's, so a rig with several red-main beads still logs it once
 	// (gt-wgyca).
 	staleNoted := map[string]bool{}
+	// One notice per unread peer per tick: several candidates can name the
+	// same test file, and the peer's claim is what is unknown, not any one
+	// candidate's (gt-dnp9c).
+	unreadNoted := map[string]bool{}
 	// The overrun box reads a rig's review threshold, once per rig, and its
 	// failure is reported once rather than once per candidate (gt-b9j3o.4).
 	thresholds := specOMThresholds{env: env, reads: map[string]specOMThresholdRead{}}
@@ -1824,6 +1832,17 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			if err != nil {
 				report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %scannot read the other beads' targets: %s", id, specdispatch.SkipHeld, firstErrLine(err))})
 				continue
+			}
+			// An unread peer that would otherwise hold names no path the rule
+			// can compare, so it holds nothing; say so rather than letting an
+			// unknown claim look like an idle seat (gt-dnp9c).
+			for _, peer := range specdispatch.UnreadClaimPeers(claim, peers, slated) {
+				if unreadNoted[peer] {
+					continue
+				}
+				unreadNoted[peer] = true
+				report.Notices = append(report.Notices, fmt.Sprintf(
+					"peer %s is in flight or slated ahead in dispatch order with a claim that could not be read; it holds no target, so a same-file conflict resolves at the merge", peer))
 			}
 			if why, held := specdispatch.TargetClaimHold(claim, peers, slated, env.Now()); held {
 				report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s%s", id, specdispatch.SkipHeld, why)})

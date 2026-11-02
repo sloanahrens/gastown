@@ -40,8 +40,9 @@ func claimOf(c duplicateCandidate) specdispatch.Claimant {
 		CreatedAt: c.CreatedAt,
 		ClosedAt:  c.ClosedAt,
 		Landed:    c.Landed,
-		// An unread claim is unknown, not empty: TargetClaimHold holds the
-		// candidate rather than dispatching past what it could not read.
+		// An unread claim names no full path TargetClaimHold can compare, so it
+		// holds nothing (gt-dnp9c); UnreadClaimPeers reads the flag so the
+		// tick can report the peer rather than treat it as idle.
 		ClaimUnread: c.ClaimsUnread,
 		Paths:       specHoldFiles(c.Refs.Files, c.Ready.Description, c.Refs.Text),
 		Tests:       c.Refs.Tests,

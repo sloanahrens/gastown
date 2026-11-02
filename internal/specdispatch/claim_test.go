@@ -8,7 +8,8 @@ import (
 
 const claimTestFile = "src/lib/__tests__/wanderHops.test.ts"
 
-// claimTestNow is the tick clock the landing-window rows run at.
+// claimTestNow is the tick clock the rule is called with. The rule reads no
+// time since gt-dnp9c removed the landing window, so the rows do not vary it.
 var claimTestNow = time.Date(2026, 10, 31, 18, 0, 0, 0, time.UTC)
 
 func TestIsTestFile(t *testing.T) {
@@ -33,9 +34,9 @@ func TestIsTestFile(t *testing.T) {
 	}
 }
 
-// TestTargetClaimHold is the rule gt-n6jbw added: a test file another bead
-// claims is one target, whatever spelling of the path the two use, and the
-// state of the claiming bead decides whether the claim holds.
+// TestTargetClaimHold is the rule gt-n6jbw added and gt-dnp9c narrowed: a test
+// file another bead claims by the same full path is one target, and the state
+// of the claiming bead decides whether the claim holds.
 func TestTargetClaimHold(t *testing.T) {
 	t.Parallel()
 	filed := Claimant{
@@ -59,12 +60,6 @@ func TestTargetClaimHold(t *testing.T) {
 			peer:    Claimant{ID: "fr-z64c", Status: "in_progress", Assignee: "fractals/polecats/cantor", Paths: []string{claimTestFile}},
 			want:    true,
 			wantTxt: "fr-z64c names the same test file, wanderHops.test.ts, and is in flight on it (fractals/polecats/cantor)",
-		},
-		{
-			name:    "a bare spelling of the same file is the same claim",
-			peer:    Claimant{ID: "fr-z64c", Status: "hooked", Assignee: "fractals/polecats/cantor", Paths: []string{"wanderHops.test.ts"}},
-			want:    true,
-			wantTxt: "fr-z64c",
 		},
 		{
 			name:    "an open peer the tick slates ahead of it holds it",
@@ -93,39 +88,8 @@ func TestTargetClaimHold(t *testing.T) {
 			candidate: Claimant{ID: "fr-zdzs", Paths: []string{"internal/cmd/claim_test.go"}},
 		},
 		{
-			name: "a bare name is the same file as any path spelling of it",
-			peer: Claimant{ID: "fr-z64c", Status: "hooked", Assignee: "fractals/polecats/cantor",
-				Paths: []string{"claim_test.go"}},
-			candidate: Claimant{ID: "fr-zdzs", Paths: []string{"internal/cmd/claim_test.go"}},
-			want:      true,
-			wantTxt:   "fr-z64c",
-		},
-		{
-			name:    "a landed peer the candidate was filed before holds it",
-			peer:    Claimant{ID: "fr-z64c", Status: "closed", Landed: true, ClosedAt: "2026-10-31T17:00:00Z", Paths: []string{claimTestFile}},
-			want:    true,
-			wantTxt: "landed after this bead was filed",
-		},
-		{
-			name: "a landed peer the candidate was filed after does not hold it",
-			// The author saw the landing; this is a follow-up, not a duplicate.
-			peer: Claimant{ID: "fr-z64c", Status: "closed", Landed: true, ClosedAt: "2026-10-31T14:00:00Z", Paths: []string{claimTestFile}},
-		},
-		{
-			name: "a landing older than the window does not hold it",
-			peer: Claimant{ID: "fr-z64c", Status: "closed", Landed: true, ClosedAt: "2026-10-29T17:00:00Z", Paths: []string{claimTestFile}},
-		},
-		{
 			name: "a closed bead that did not land does not hold it",
 			peer: Claimant{ID: "fr-z64c", Status: "closed", ClosedAt: "2026-10-31T17:00:00Z", Paths: []string{claimTestFile}},
-		},
-		{
-			name: "a filing time that cannot be read holds it, rather than passing a bead it cannot place",
-			peer: Claimant{ID: "fr-z64c", Status: "closed", Landed: true, ClosedAt: "2026-10-31T17:00:00Z", Paths: []string{claimTestFile}},
-			candidate: Claimant{ID: "fr-zdzs", Status: "open", Priority: 1,
-				Paths: []string{claimTestFile}},
-			want:    true,
-			wantTxt: "landed after this bead was filed",
 		},
 		{
 			name: "two different tests in one file do not hold each other",
@@ -149,25 +113,6 @@ func TestTargetClaimHold(t *testing.T) {
 		{
 			name: "a peer naming no file claims nothing",
 			peer: Claimant{ID: "fr-z64c", Status: "in_progress", Assignee: "fractals/polecats/cantor"},
-		},
-		{
-			// The peer's design and notes were never read, so its list row is
-			// all this side knows: it may name the file, and holding is the
-			// only answer that does not dispatch past an unknown claim.
-			name:    "a peer whose claim was not read holds the file",
-			peer:    Claimant{ID: "fr-z64c", Status: "in_progress", Assignee: "fractals/polecats/cantor", ClaimUnread: true},
-			want:    true,
-			wantTxt: "fr-z64c claim unread",
-		},
-		{
-			name:   "an unread peer the tick does not slate does not hold it",
-			peer:   Claimant{ID: "fr-z64c", Status: "open", Priority: 0, CreatedAt: "2026-10-31T09:00:00Z", ClaimUnread: true},
-			slated: slatedNobody,
-		},
-		{
-			name:      "an unread peer holds nothing when the candidate names no file",
-			peer:      Claimant{ID: "fr-z64c", Status: "in_progress", Assignee: "fractals/polecats/cantor", ClaimUnread: true},
-			candidate: Claimant{ID: "fr-zdzs"},
 		},
 		{
 			name: "the candidate does not hold itself",
@@ -194,6 +139,217 @@ func TestTargetClaimHold(t *testing.T) {
 			}
 			if !tc.want && why != "" {
 				t.Errorf("unheld candidate came back with a reason: %q", why)
+			}
+		})
+	}
+}
+
+// TestClaimLandedPeerDoesNotHold is gt-dnp9c's first acceptance row: a peer
+// that landed after the candidate was filed holds nothing, because a polecat
+// starts from main and already has that landing.
+func TestClaimLandedPeerDoesNotHold(t *testing.T) {
+	t.Parallel()
+	candidate := Claimant{
+		ID: "fr-zdzs", Status: "open", Priority: 1,
+		CreatedAt: "2026-10-31T12:00:00Z",
+		Paths:     []string{claimTestFile},
+	}
+	for _, tc := range []struct {
+		name string
+		peer Claimant
+	}{
+		{
+			name: "a landing after the candidate was filed",
+			peer: Claimant{ID: "fr-z64c", Status: "closed", Landed: true, ClosedAt: "2026-10-31T17:00:00Z", Paths: []string{claimTestFile}},
+		},
+		{
+			name: "a landing before the candidate was filed",
+			peer: Claimant{ID: "fr-z64c", Status: "closed", Landed: true, ClosedAt: "2026-10-31T09:00:00Z", Paths: []string{claimTestFile}},
+		},
+		{
+			name: "a landing whose times cannot be read",
+			peer: Claimant{ID: "fr-z64c", Status: "closed", Landed: true, ClosedAt: "not a time", Paths: []string{claimTestFile}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if why, held := TargetClaimHold(candidate, []Claimant{tc.peer}, map[string]bool{}, claimTestNow); held {
+				t.Fatalf("held = true (%q), want a landed peer to hold nothing", why)
+			}
+		})
+	}
+}
+
+// TestClaimBareNameAndUnreadClaimDoNotHold is gt-dnp9c's second acceptance row:
+// a peer that names the file only by a bare name, or whose claim could not be
+// read, names no full path the rule can compare, so it holds nothing.
+func TestClaimBareNameAndUnreadClaimDoNotHold(t *testing.T) {
+	t.Parallel()
+	const bareName = "wanderHops.test.ts"
+	const seat = "fractals/polecats/cantor"
+	fullPath := Claimant{ID: "fr-zdzs", Status: "open", Priority: 1, CreatedAt: "2026-10-31T15:00:00Z", Paths: []string{claimTestFile}}
+	bare := Claimant{ID: "fr-zdzs", Status: "open", Priority: 1, CreatedAt: "2026-10-31T15:00:00Z", Paths: []string{bareName}}
+
+	for _, tc := range []struct {
+		name      string
+		candidate Claimant
+		peer      Claimant
+		slated    map[string]bool
+	}{
+		{
+			name:      "a peer that spells the file bare",
+			candidate: fullPath,
+			peer:      Claimant{ID: "fr-z64c", Status: "in_progress", Assignee: seat, Paths: []string{bareName}},
+		},
+		{
+			name:      "a candidate that spells the file bare",
+			candidate: bare,
+			peer:      Claimant{ID: "fr-z64c", Status: "in_progress", Assignee: seat, Paths: []string{claimTestFile}},
+		},
+		{
+			name:      "both spelling the file bare",
+			candidate: bare,
+			peer:      Claimant{ID: "fr-z64c", Status: "in_progress", Assignee: seat, Paths: []string{bareName}},
+		},
+		{
+			name:      "a peer whose claim was not read",
+			candidate: fullPath,
+			peer:      Claimant{ID: "fr-z64c", Status: "in_progress", Assignee: seat, ClaimUnread: true},
+		},
+		{
+			// The list row can still carry the path while design and notes go
+			// unread. The rule must read the flag, not the leftover path: an
+			// unread claim is unknown, so it holds nothing (gt-dnp9c).
+			name:      "an unread peer whose row still spells the file",
+			candidate: fullPath,
+			peer:      Claimant{ID: "fr-z64c", Status: "in_progress", Assignee: seat, ClaimUnread: true, Paths: []string{claimTestFile}},
+		},
+		{
+			name:      "an unread peer slated ahead",
+			candidate: fullPath,
+			peer:      Claimant{ID: "fr-z64c", Status: "open", Priority: 1, CreatedAt: "2026-10-31T09:00:00Z", ClaimUnread: true},
+			slated:    map[string]bool{"fr-z64c": true},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if why, held := TargetClaimHold(tc.candidate, []Claimant{tc.peer}, tc.slated, claimTestNow); held {
+				t.Fatalf("held = true (%q), want no hold", why)
+			}
+		})
+	}
+}
+
+// TestUnreadClaimPeers names the peers whose unknown claim must be reported:
+// one in flight, or one the tick slates ahead, holds nothing in
+// TargetClaimHold, so the tick says which peer it could not read rather than
+// letting the unknown claim look idle (gt-dnp9c).
+func TestUnreadClaimPeers(t *testing.T) {
+	t.Parallel()
+	const seat = "fractals/polecats/cantor"
+	candidate := Claimant{
+		ID: "fr-zdzs", Status: "open", Priority: 1,
+		CreatedAt: "2026-10-31T15:00:00Z",
+		Paths:     []string{claimTestFile},
+	}
+	for _, tc := range []struct {
+		name   string
+		peers  []Claimant
+		slated map[string]bool
+		want   []string
+	}{
+		{
+			name:  "an unread peer in flight is named",
+			peers: []Claimant{{ID: "fr-z64c", Status: "in_progress", Assignee: seat, ClaimUnread: true}},
+			want:  []string{"fr-z64c"},
+		},
+		{
+			name:  "an unread hooked peer is named",
+			peers: []Claimant{{ID: "fr-z64c", Status: "hooked", Assignee: seat, ClaimUnread: true}},
+			want:  []string{"fr-z64c"},
+		},
+		{
+			name:   "an unread peer slated ahead is named",
+			peers:  []Claimant{{ID: "fr-z64c", Status: "open", Priority: 1, CreatedAt: "2026-10-31T09:00:00Z", ClaimUnread: true}},
+			slated: map[string]bool{"fr-z64c": true},
+			want:   []string{"fr-z64c"},
+		},
+		{
+			name:   "an unread peer the tick does not slate is not named",
+			peers:  []Claimant{{ID: "fr-z64c", Status: "open", Priority: 1, CreatedAt: "2026-10-31T09:00:00Z", ClaimUnread: true}},
+			slated: map[string]bool{"fr-other": true},
+		},
+		{
+			name:   "an unread peer behind in dispatch order is not named",
+			peers:  []Claimant{{ID: "fr-z64c", Status: "open", Priority: 1, CreatedAt: "2026-10-31T20:00:00Z", ClaimUnread: true}},
+			slated: map[string]bool{"fr-z64c": true},
+		},
+		{
+			name:  "a closed unread peer is not named",
+			peers: []Claimant{{ID: "fr-z64c", Status: "closed", ClaimUnread: true}},
+		},
+		{
+			name:  "a read peer is not named even in flight on the path",
+			peers: []Claimant{{ID: "fr-z64c", Status: "in_progress", Assignee: seat, Paths: []string{claimTestFile}}},
+		},
+		{
+			name:  "the candidate's own unread claim is not named",
+			peers: []Claimant{{ID: candidate.ID, Status: "in_progress", Assignee: seat, ClaimUnread: true}},
+		},
+		{
+			name:   "the names are sorted",
+			peers:  []Claimant{{ID: "fr-zzz", Status: "in_progress", Assignee: seat, ClaimUnread: true}, {ID: "fr-aaa", Status: "in_progress", Assignee: seat, ClaimUnread: true}},
+			want:   []string{"fr-aaa", "fr-zzz"},
+			slated: map[string]bool{},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := UnreadClaimPeers(candidate, tc.peers, tc.slated)
+			if strings.Join(got, " ") != strings.Join(tc.want, " ") {
+				t.Errorf("UnreadClaimPeers() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestClaimInFlightExactPathStillHolds is gt-dnp9c's third acceptance row: the
+// in-flight and slated-ahead rules survive for two beads that spell the same
+// full path, and the reason names the peer.
+func TestClaimInFlightExactPathStillHolds(t *testing.T) {
+	t.Parallel()
+	candidate := Claimant{
+		ID: "fr-zdzs", Status: "open", Priority: 1,
+		CreatedAt: "2026-10-31T15:00:00Z",
+		Paths:     []string{claimTestFile},
+	}
+	for _, tc := range []struct {
+		name   string
+		peer   Claimant
+		slated map[string]bool
+	}{
+		{
+			name: "a peer in flight on the path",
+			peer: Claimant{ID: "fr-z64c", Status: "in_progress", Assignee: "fractals/polecats/cantor", Paths: []string{claimTestFile}},
+		},
+		{
+			name: "a hooked peer on the path",
+			peer: Claimant{ID: "fr-z64c", Status: "hooked", Assignee: "fractals/polecats/cantor", Paths: []string{claimTestFile}},
+		},
+		{
+			name:   "a slated peer ahead in dispatch order",
+			peer:   Claimant{ID: "fr-z64c", Status: "open", Priority: 1, CreatedAt: "2026-10-31T09:00:00Z", Paths: []string{claimTestFile}},
+			slated: map[string]bool{"fr-z64c": true},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			why, held := TargetClaimHold(candidate, []Claimant{tc.peer}, tc.slated, claimTestNow)
+			if !held {
+				t.Fatalf("held = false, want a hold on the same full path")
+			}
+			if !strings.Contains(why, tc.peer.ID) {
+				t.Errorf("reason %q should name %q", why, tc.peer.ID)
 			}
 		})
 	}

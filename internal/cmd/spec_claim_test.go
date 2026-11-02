@@ -109,28 +109,31 @@ func frPeerClaims(t *testing.T) []specdispatch.Claimant {
 	)
 }
 
-// TestSpecDispatchHoldsTheSecondBeadOfATargetClaim is gt-n6jbw's acceptance
-// bar: the fr-z64c/fr-zdzs pair, in dispatch order, spends one seat, and the
-// second bead is held naming the first rather than slung onto the same
-// assertion. A third bead that names no file still dispatches.
+// TestSpecDispatchHoldsTheSecondBeadOfATargetClaim is gt-n6jbw's rule through
+// the production tick: two beads that name one test file by the same full path
+// spend one seat, and the second is held naming the first rather than slung
+// onto the same assertion. A third bead that names no file still dispatches.
 func TestSpecDispatchHoldsTheSecondBeadOfATargetClaim(t *testing.T) {
 	t.Parallel()
-	peers := frPeerClaims(t)
+	const claimFile = "src/lib/__tests__/wanderHops.test.ts"
+	desc := "- `" + claimFile + "` only."
+	peers := []specdispatch.Claimant{{
+		ID: "fr-z64c", Status: "open", Priority: 1, CreatedAt: "2026-10-31T09:00:00Z",
+		Paths: []string{claimFile},
+	}}
 	noFile := cleanSpec("fr-nofile", 1, "2026-10-31T08:00:00Z")
+	first := cleanSpec("fr-z64c", 1, "2026-10-31T09:00:00Z")
+	first.Description = desc
+	second := cleanSpec("fr-zdzs", 1, "2026-10-31T15:00:00Z")
+	second.Description = desc
 
-	f := newFakeSpecTown(
-		noFile,
-		frSpec("fr-z64c", frZ64cTitle, frZ64cDesc, "2026-10-31T09:00:00Z"),
-		frSpec("fr-zdzs", frZdssTitle, frZdssDesc, "2026-10-31T15:00:00Z"),
-	)
+	f := newFakeSpecTown(noFile, first, second)
 	f.claims = map[string][]specdispatch.Claimant{
 		"fr-nofile": peers,
 		"fr-z64c":   peers,
 		"fr-zdzs":   peers,
 	}
 	env := f.env()
-	// The real pair's acceptance lists predate the lint's three-item minimum,
-	// and this test is about the claim rule, not their shape.
 	env.ShapeGate = specdispatch.ShapeGateOff
 	env.PerTick = 3
 
@@ -155,6 +158,36 @@ func TestSpecDispatchHoldsTheSecondBeadOfATargetClaim(t *testing.T) {
 		if !strings.Contains(held, want) {
 			t.Errorf("hold line %q should name %q", held, want)
 		}
+	}
+}
+
+// TestSpecDispatchDoesNotHoldThePairOnABareSpelling is gt-dnp9c applied to the
+// pair the rule was written for: fr-zdzs names wanderHops.test.ts bare and
+// fr-z64c names its path, so the two share no full path, both dispatch, and the
+// conflict would be resolved by the merge.
+func TestSpecDispatchDoesNotHoldThePairOnABareSpelling(t *testing.T) {
+	t.Parallel()
+	peers := frPeerClaims(t)
+
+	f := newFakeSpecTown(
+		frSpec("fr-z64c", frZ64cTitle, frZ64cDesc, "2026-10-31T09:00:00Z"),
+		frSpec("fr-zdzs", frZdssTitle, frZdssDesc, "2026-10-31T15:00:00Z"),
+	)
+	f.claims = map[string][]specdispatch.Claimant{
+		"fr-z64c": peers,
+		"fr-zdzs": peers,
+	}
+	env := f.env()
+	env.ShapeGate = specdispatch.ShapeGateOff
+	env.PerTick = 2
+
+	r := runSpecDispatchCycle(env)
+
+	if got := strings.Join(f.slung, " "); got != "fr-z64c fr-zdzs" {
+		t.Fatalf("slung %q, want both beads: a bare spelling names no full path (skipped %+v)", got, r.Skipped)
+	}
+	if len(r.Skipped) != 0 {
+		t.Fatalf("skipped = %+v, want none", r.Skipped)
 	}
 }
 
@@ -203,15 +236,16 @@ func TestSpecDispatchDoesNotHoldForAPeerTheTickNeverSlings(t *testing.T) {
 	}
 }
 
-// TestSpecDispatchHoldsAFiledBeforeLandingCandidate drives the landed half of
-// the rule through the production pool: a bead written before a landing on its
-// test file is held, and one written after the landing dispatches.
-func TestSpecDispatchHoldsAFiledBeforeLandingCandidate(t *testing.T) {
+// TestSpecDispatchDoesNotHoldALandedPeer drives gt-dnp9c's landed row through
+// the production pool: a peer that landed naming the candidate's full test path
+// holds nothing, whether the candidate was filed before or after the landing,
+// because a polecat starts from main and already has that landing.
+func TestSpecDispatchDoesNotHoldALandedPeer(t *testing.T) {
 	t.Parallel()
 	landed := beads.Issue{
-		ID: "fr-landed", Title: "Tour tests hold for any number of fractals", Status: "closed",
+		ID: "fr-landed", Title: frZ64cTitle, Status: "closed",
 		Priority: 1, CreatedAt: "2026-10-31T09:00:00Z", ClosedAt: "2026-10-31T17:00:00Z",
-		Description: frZdssDesc, CloseReason: "Landed on main\ntarget_branch: main\ncommit_sha: 5be95dd",
+		Description: frZ64cDesc, CloseReason: "Landed on main\ntarget_branch: main\ncommit_sha: 5be95dd",
 	}
 	peers := peerClaims(t, landed)
 	if !peers[0].Landed {
@@ -221,10 +255,9 @@ func TestSpecDispatchHoldsAFiledBeforeLandingCandidate(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		created string
-		slung   bool
 	}{
-		{name: "a bead filed before the landing is held", created: "2026-10-31T12:00:00Z"},
-		{name: "a bead filed after the landing dispatches", created: "2026-10-31T18:00:00Z", slung: true},
+		{name: "a bead filed before the landing dispatches", created: "2026-10-31T12:00:00Z"},
+		{name: "a bead filed after the landing dispatches", created: "2026-10-31T18:00:00Z"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -235,13 +268,11 @@ func TestSpecDispatchHoldsAFiledBeforeLandingCandidate(t *testing.T) {
 
 			r := runSpecDispatchCycle(env)
 
-			if got := len(f.slung) == 1; got != tc.slung {
-				t.Fatalf("slung %v, want slung=%v (%+v)", f.slung, tc.slung, r)
+			if len(f.slung) != 1 {
+				t.Fatalf("slung %v, want the candidate to dispatch past a landed peer (%+v)", f.slung, r)
 			}
-			if !tc.slung {
-				if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, "landed after this bead was filed") {
-					t.Fatalf("skipped = %+v, want the landing hold", r.Skipped)
-				}
+			if len(r.Skipped) != 0 {
+				t.Fatalf("skipped = %+v, want none", r.Skipped)
 			}
 		})
 	}
@@ -315,31 +346,44 @@ func (s droppedShow) ShowMultiple(ids []string) (map[string]*beads.Issue, error)
 	return issues, nil
 }
 
-// TestSpecDispatchHoldsForAPeerWhoseClaimWasNotRead is the fail-closed half of
-// the partial-read finding: a pool that lists a peer but never read its design
-// and notes must hold the candidate that names a test file, not read the peer
-// as claiming nothing. The same pool read to completion, where the peer names
-// no file, dispatches (gt-n6jbw).
-func TestSpecDispatchHoldsForAPeerWhoseClaimWasNotRead(t *testing.T) {
+// TestSpecDispatchDoesNotHoldForAPeerWhoseClaimWasNotRead is gt-dnp9c's unread
+// row through the production pool: a peer whose design and notes were not read
+// names no full path the rule can compare, so it holds nothing and the
+// candidate dispatches. The list row may still spell the path while the claim
+// behind it is unread, so the rule must read the flag, and the tick notes the
+// peer rather than letting the unknown claim look idle. A claim set that cannot
+// be read at all still holds, which is
+// TestSpecDispatchHoldsWhenClaimsCannotBeRead's rule.
+func TestSpecDispatchDoesNotHoldForAPeerWhoseClaimWasNotRead(t *testing.T) {
 	t.Parallel()
-	peer := beads.Issue{ID: "fr-z64c", Title: "Pool the repeat rate over many seeds", Status: "in_progress",
-		Assignee: "fractals/polecats/cantor", Priority: 1, CreatedAt: "2026-10-31T09:00:00Z",
-		Description: "Pool the repeat rate of the walk over many seeds."}
+	// The file the candidate names, so a list-only peer row would match it.
+	const claimFile = "src/lib/__tests__/wanderHops.test.ts"
+	// A list row that names the candidate's file: the leftover path would
+	// match, which is exactly why the unread flag has to decide.
+	withFile := "Pool the repeat rate of " + claimFile + " over many seeds."
+	noFile := "Pool the repeat rate of the walk over many seeds."
 	candidate := beads.Issue{ID: "fr-zdzs", Title: frZ64cTitle, Status: "open", Priority: 1,
 		CreatedAt: "2026-10-31T15:00:00Z", Description: frZ64cDesc}
 
 	for _, tc := range []struct {
-		name      string
-		drop      map[string]bool
-		showErr   bool
-		wantSlung bool
+		name     string
+		drop     map[string]bool
+		showErr  bool
+		peerDesc string
+		wantNote bool
 	}{
-		{name: "a peer whose design and notes were not read holds the candidate", drop: map[string]bool{"fr-z64c": true}},
-		{name: "a pool whose batched show failed holds the candidate", showErr: true},
-		{name: "a peer read to completion that names no file does not hold it", wantSlung: true},
+		{name: "a peer whose design and notes were not read dispatches and is noted",
+			drop: map[string]bool{"fr-z64c": true}, peerDesc: withFile, wantNote: true},
+		{name: "a pool whose batched show failed dispatches and is noted",
+			showErr: true, peerDesc: withFile, wantNote: true},
+		{name: "a peer read to completion that names no file dispatches",
+			peerDesc: noFile},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			peer := beads.Issue{ID: "fr-z64c", Title: "Pool the repeat rate over many seeds", Status: "in_progress",
+				Assignee: "fractals/polecats/cantor", Priority: 1, CreatedAt: "2026-10-31T09:00:00Z",
+				Description: tc.peerDesc}
 			db := beadsfake.New()
 			db.Seed(peer, candidate)
 			dir := t.TempDir()
@@ -374,13 +418,20 @@ func TestSpecDispatchHoldsForAPeerWhoseClaimWasNotRead(t *testing.T) {
 
 			r := runSpecDispatchCycle(env)
 
-			if got := len(f.slung) == 1; got != tc.wantSlung {
-				t.Fatalf("slung %v, want slung=%v (%+v)", f.slung, tc.wantSlung, r)
+			if len(f.slung) != 1 {
+				t.Fatalf("slung %v, want the candidate to dispatch (%+v)", f.slung, r)
 			}
-			if !tc.wantSlung {
-				if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, "fr-z64c claim unread") {
-					t.Fatalf("skipped = %+v, want a hold naming the unread peer", r.Skipped)
+			if len(r.Skipped) != 0 {
+				t.Fatalf("skipped = %+v, want none", r.Skipped)
+			}
+			noted := false
+			for _, n := range r.Notices {
+				if strings.Contains(n, "fr-z64c") && strings.Contains(n, "claim that could not be read") {
+					noted = true
 				}
+			}
+			if noted != tc.wantNote {
+				t.Fatalf("notices = %+v, want an unread-peer notice = %v", r.Notices, tc.wantNote)
 			}
 		})
 	}
