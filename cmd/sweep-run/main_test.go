@@ -19,6 +19,9 @@ func TestDepsAreWired(t *testing.T) {
 	if d.Clone == nil || d.Sweep == nil || d.WriteResult == nil {
 		t.Errorf("a step seam is nil: clone %v, sweep %v, write %v", d.Clone != nil, d.Sweep != nil, d.WriteResult != nil)
 	}
+	if d.TreeHas == nil || d.RunScript == nil {
+		t.Errorf("a sweep-choice seam is nil: treeHas %v, runScript %v", d.TreeHas != nil, d.RunScript != nil)
+	}
 	if d.MkdirTemp == nil || d.MkdirAll == nil || d.RemoveAll == nil || d.Now == nil {
 		t.Errorf("a filesystem or clock seam is nil: mkdirTemp %v, mkdirAll %v, removeAll %v, now %v",
 			d.MkdirTemp != nil, d.MkdirAll != nil, d.RemoveAll != nil, d.Now != nil)

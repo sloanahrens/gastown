@@ -58,6 +58,13 @@ func newHarness(t *testing.T, clone func(repo, sha, work string) error, sweep fu
 			}
 			return sweep(args, overrides, stdout, stderr)
 		},
+		// The tree ships the Go sweep unless a case says otherwise, so the cases
+		// written before the choice existed keep taking the in-process path.
+		TreeHas: func(_ string, rel string) (bool, error) { return rel == goSweepDir, nil },
+		RunScript: func(string, []string, string, []string, io.Writer, io.Writer) int {
+			t.Error("the tier script ran in a case whose tree ships the Go sweep")
+			return sweepNoExit
+		},
 		WriteResult: sweeprunner.Write,
 		MkdirTemp:   func(string, string) (string, error) { return h.work, nil },
 		MkdirAll:    os.MkdirAll,
@@ -980,6 +987,248 @@ func TestRunKeepsTheEndOfTheSweepOutput(t *testing.T) {
 			t.Errorf("summary %q does not hold %q", summary, want)
 		}
 	})
+}
+
+// TestRunChoosesTheSweepTheTreeShips: the runner makes the same choice the
+// daemon's host sweep makes for a checked-out tree (resolveIn): the Go sweep in
+// process where the tree has cmd/tier-sweep, else the rig's tier script with the
+// tiers in order, in the work tree, with the run's log directory in its
+// environment. A tree with neither, a tree the run cannot read, and a tree check
+// that is not wired are RED with the reason: a tier that did not run is never
+// GREEN, and never skipped.
+func TestRunChoosesTheSweepTheTreeShips(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a tree with cmd/tier-sweep runs the Go sweep in process", func(t *testing.T) {
+		t.Parallel()
+		var asked []string
+		h := newHarness(t, nil, func(_ []string, overrides map[string]string, stdout, _ io.Writer) int {
+			fmt.Fprintf(stdout, "tier-sweep: integration GREEN passed=1 failed=0 skipped=0 (logs %s) in 1s\n", overrides[tiersweep.EnvLogDir])
+			return 0
+		})
+		h.deps.TreeHas = func(_ string, rel string) (bool, error) {
+			asked = append(asked, rel)
+			return rel == goSweepDir, nil
+		}
+		verdict, summary := runAndRead(t, h, "integration")
+		if verdict.Verdict != "GREEN" {
+			t.Errorf("integration = %+v (%q), want the in-process sweep's GREEN", verdict, summary)
+		}
+		if !equal(asked, []string{goSweepDir}) {
+			t.Errorf("the tree check asked for %q, want only %q: the Go command decides first", asked, goSweepDir)
+		}
+	})
+
+	t.Run("a tree with only the tier script runs it with the tiers in order", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t, nil, func([]string, map[string]string, io.Writer, io.Writer) int {
+			t.Error("the Go sweep ran in a tree that ships no cmd/tier-sweep")
+			return sweepNoExit
+		})
+		h.deps.Environ = []string{"PATH=/bin", "GT_FROM=the process"}
+		h.deps.TreeHas = func(_ string, rel string) (bool, error) { return rel == scriptPath, nil }
+		var program, dir string
+		var args, env []string
+		h.deps.RunScript = func(p string, a []string, d string, e []string, stdout, stderr io.Writer) int {
+			program, args, dir, env = p, a, d, e
+			logDir := envValue(env, tiersweep.EnvLogDir)
+			for _, tier := range args[1:] {
+				fmt.Fprintf(stdout, "tier-sweep: %s GREEN passed=1 failed=0 skipped=0 (logs %s) in 1s\n", tier, logDir)
+			}
+			fmt.Fprintln(stderr, "tier-sweep: integration: 1 package")
+			return 0
+		}
+		got := runAndReadAll(t, h, "integration", "race")
+		for _, tier := range []string{"integration", "race"} {
+			if got[tier].Result.Verdict != "GREEN" {
+				t.Errorf("%s = %+v, want GREEN from the script's summary line", tier, got[tier].Result)
+			}
+		}
+		if program != scriptProgram {
+			t.Errorf("the script ran through %q, want %q", program, scriptProgram)
+		}
+		if want := []string{scriptPath, "integration", "race"}; !equal(args, want) {
+			t.Errorf("the script ran with %q, want %q", args, want)
+		}
+		if dir != h.work {
+			t.Errorf("the script ran in %q, want the work tree %q", dir, h.work)
+		}
+		if logDir := envValue(env, tiersweep.EnvLogDir); logDir != filepath.Join(h.out, "logs") {
+			t.Errorf("the script read %s = %q, want the run's log directory %q",
+				tiersweep.EnvLogDir, logDir, filepath.Join(h.out, "logs"))
+		}
+		if v := envValue(env, "GT_FROM"); v != "the process" {
+			t.Errorf("the script environment holds GT_FROM = %q, want the process value %q", v, "the process")
+		}
+		// The container holds no town, so the script's own gt slot run calls are
+		// suppressed exactly as the in-process sweep's are.
+		if v := envValue(env, tiersweep.EnvNoSlot); v != "1" {
+			t.Errorf("the script environment holds %s = %q, want 1: the runner holds its own reservation",
+				tiersweep.EnvNoSlot, v)
+		}
+		// The script stage gets none of the Go sweep's timings or resume file.
+		for _, key := range []string{"TIER_SWEEP_TIMINGS", "TIER_SWEEP_TESTED", "TIER_SWEEP_RESUME"} {
+			if v := envValue(env, key); v != "" {
+				t.Errorf("the script environment holds %s = %q, want it unset", key, v)
+			}
+		}
+		// The script's output reaches the container log through the same writers
+		// the in-process sweep writes to.
+		if !strings.Contains(h.stdout.String(), "tier-sweep: integration GREEN") {
+			t.Errorf("stdout = %q, want the script's summary line echoed", h.stdout.String())
+		}
+	})
+
+	t.Run("a script whose tier fails is RED from its exit status", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t, nil, nil)
+		h.deps.TreeHas = func(_ string, rel string) (bool, error) { return rel == scriptPath, nil }
+		h.deps.RunScript = func(_ string, _ []string, _ string, env []string, stdout, _ io.Writer) int {
+			fmt.Fprintf(stdout, "tier-sweep: integration RED passed=2 failed=1 skipped=0 failed: ./pkg/a (logs %s) in 3s\n",
+				envValue(env, tiersweep.EnvLogDir))
+			return 1
+		}
+		verdict, summary := runAndRead(t, h, "integration")
+		if verdict.Verdict != "RED" || verdict.Failed != 1 || !equal(verdict.FailedNames, []string{"./pkg/a"}) {
+			t.Errorf("integration = %+v (%q), want RED with ./pkg/a failed", verdict, summary)
+		}
+	})
+
+	t.Run("a tree with no sweep command is RED with the reason", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t, nil, func([]string, map[string]string, io.Writer, io.Writer) int {
+			t.Error("the Go sweep ran in a tree with no sweep command")
+			return sweepNoExit
+		})
+		h.deps.TreeHas = func(string, string) (bool, error) { return false, nil }
+		got := runAndReadAll(t, h, "integration", "race")
+		for _, tier := range []string{"integration", "race"} {
+			if got[tier].Result.Verdict != "RED" {
+				t.Errorf("%s = %+v, want RED: nothing ran", tier, got[tier].Result)
+			}
+			if !strings.Contains(got[tier].Summary, noSweepReason) {
+				t.Errorf("%s summary %q does not name the reason %q", tier, got[tier].Summary, noSweepReason)
+			}
+		}
+	})
+
+	t.Run("a tree the run cannot read is RED with the error", func(t *testing.T) {
+		t.Parallel()
+		for _, fail := range []string{goSweepDir, scriptPath} {
+			t.Run(fail, func(t *testing.T) {
+				t.Parallel()
+				h := newHarness(t, nil, func([]string, map[string]string, io.Writer, io.Writer) int {
+					t.Error("a sweep ran in a tree the run could not read")
+					return sweepNoExit
+				})
+				h.deps.TreeHas = func(_ string, rel string) (bool, error) {
+					if rel == fail {
+						return false, errors.New("input/output error")
+					}
+					return false, nil
+				}
+				verdict, summary := runAndRead(t, h, "integration")
+				if verdict.Verdict != "RED" {
+					t.Errorf("integration = %+v, want RED for a tree it cannot read", verdict)
+				}
+				if !strings.Contains(summary, "input/output error") {
+					t.Errorf("summary %q does not hold the read error", summary)
+				}
+			})
+		}
+	})
+
+	t.Run("a tree check that is not wired is RED", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t, nil, nil)
+		h.deps.TreeHas = nil
+		verdict, summary := runAndRead(t, h, "integration")
+		if verdict.Verdict != "RED" {
+			t.Errorf("integration = %+v, want RED", verdict)
+		}
+		if !strings.Contains(summary, "not wired") {
+			t.Errorf("summary %q does not name the tree check that is not wired", summary)
+		}
+	})
+
+	t.Run("a script that cannot start is a run that cannot report a result", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t, nil, nil)
+		h.deps.TreeHas = func(_ string, rel string) (bool, error) { return rel == scriptPath, nil }
+		h.deps.RunScript = func(string, []string, string, []string, io.Writer, io.Writer) int { return sweepNoExit }
+		if code := h.run("--rig", "gastown", "--sha", testSHA, "--tiers", "integration", "--out", h.out, "--repo", "/repo.git"); code != FailureExit {
+			t.Fatalf("exit code = %d, want %d (stderr %q)", code, FailureExit, h.stderr.String())
+		}
+		if !strings.Contains(h.stderr.String(), "did not exit") {
+			t.Errorf("stderr = %q, want it to name the script that did not exit", h.stderr.String())
+		}
+		if h.resultFileExists(t) {
+			t.Error("a run whose script never started wrote a result")
+		}
+	})
+}
+
+// TestTreeHasReportsWhatTheTreeShips: the production tree check answers from the
+// work tree's own filesystem: a path that is there is true, a path that is not
+// is false, a path reached through a symbolic link is an error since the tree
+// does not ship it itself, and a tree it cannot read is an error rather than a
+// missing path.
+func TestTreeHasReportsWhatTheTreeShips(t *testing.T) {
+	t.Parallel()
+	work := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(work, goSweepDir), 0o755); err != nil {
+		t.Fatalf("make the fixture: %v", err)
+	}
+	// A regular file where the work tree should be: every path inside it reads
+	// ENOTDIR, which is a tree the check cannot read, not one without the sweep.
+	notATree := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(notATree, nil, 0o644); err != nil {
+		t.Fatalf("make the fixture: %v", err)
+	}
+	// A tree whose script is a link to a file outside it: the clone is content
+	// the run did not write, and following the link would start a file the tree
+	// does not hold.
+	linkedScript := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "elsewhere.sh")
+	if err := os.WriteFile(outside, nil, 0o644); err != nil {
+		t.Fatalf("make the fixture: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(linkedScript, "scripts"), 0o755); err != nil {
+		t.Fatalf("make the fixture: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(linkedScript, scriptPath)); err != nil {
+		t.Fatalf("make the fixture: %v", err)
+	}
+	// A tree whose directory on the way to the command is a link.
+	linkedDir := t.TempDir()
+	if err := os.Symlink(t.TempDir(), filepath.Join(linkedDir, "cmd")); err != nil {
+		t.Fatalf("make the fixture: %v", err)
+	}
+	cases := []struct {
+		name    string
+		root    string
+		rel     string
+		want    bool
+		wantErr bool
+	}{
+		{"a path the tree ships", work, goSweepDir, true, false},
+		{"a path the tree does not ship", work, scriptPath, false, false},
+		{"a tree that cannot be read", notATree, goSweepDir, false, true},
+		{"a path that is a link", linkedScript, scriptPath, false, true},
+		{"a path under a linked directory", linkedDir, goSweepDir, false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := treeHas(tc.root, tc.rel)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("treeHas(%q, %q) error = %v, want error %v", tc.root, tc.rel, err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("treeHas(%q, %q) = %v, want %v", tc.root, tc.rel, got, tc.want)
+			}
+		})
+	}
 }
 
 // TestProcessSweepHandsTheSweepItsOverrides: the overrides the entrypoint passes

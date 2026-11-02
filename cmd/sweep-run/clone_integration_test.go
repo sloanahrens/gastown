@@ -3,6 +3,8 @@
 package main
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -123,6 +125,42 @@ func TestIntegrationGitCloneReadsARepositoryWhoseQuotedPathNeedsTheShell(t *test
 	}
 	if got := strings.TrimSpace(runGitIn(t, work, "rev-parse", "HEAD")); got != want {
 		t.Errorf("checked out %s, want %s", got, want)
+	}
+}
+
+// TestIntegrationRunScriptRunsTheTierScriptInTheWorkTree drives the real exec
+// seam with a script fixture: the script runs in the work tree, with the
+// environment the run built, its output on the writers it was given, and its
+// exit status returned. A script that cannot be started has no status.
+func TestIntegrationRunScriptRunsTheTierScriptInTheWorkTree(t *testing.T) {
+	t.Parallel()
+	work := t.TempDir()
+	body := "#!/bin/sh\n" +
+		"echo \"tier-sweep: $1 GREEN passed=1 failed=0 skipped=0 (logs $TIER_SWEEP_LOGDIR) in 0s\"\n" +
+		"echo \"in $(pwd)\" >&2\n" +
+		"exit 3\n"
+	if err := os.WriteFile(filepath.Join(work, "tier.sh"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write the script fixture: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runScript("bash", []string{"tier.sh", "integration"}, work,
+		[]string{"TIER_SWEEP_LOGDIR=/out/logs"}, &stdout, &stderr)
+	if code != 3 {
+		t.Errorf("exit code = %d, want the script's own 3", code)
+	}
+	for _, want := range []string{"tier-sweep: integration GREEN", "logs /out/logs"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("stdout = %q, want it to hold %q", stdout.String(), want)
+		}
+	}
+	if want := "in " + work; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want it to hold %q: the script runs in the work tree", stderr.String(), want)
+	}
+
+	// A program that is not on PATH never starts, so it has no status to return.
+	code = runScript("sweep-run-no-such-program", nil, work, nil, io.Discard, io.Discard)
+	if code != sweepNoExit {
+		t.Errorf("code for a script that cannot start = %d, want %d", code, sweepNoExit)
 	}
 }
 
