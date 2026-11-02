@@ -24,7 +24,11 @@ type FileStore struct {
 	mu       sync.Mutex
 	versions map[string][]Version
 	skipped  int
-	loaded   bool
+	// needsNewline is set when the file's last byte is not '\n'; the next
+	// append then starts with one, so a record is never written onto a torn
+	// line, where it would be unparsable and lost on the next load (gt-bayuz).
+	needsNewline bool
+	loaded       bool
 }
 
 // NewFileStore returns a store backed by path, opening nothing until the first
@@ -108,6 +112,15 @@ func (s *FileStore) AsOf(bead string, t time.Time) (Version, error) {
 	return versions[i-1], nil
 }
 
+// Skipped reports how many lines the most recent load left out because they are
+// not a version this store wrote, including a load that Versions, AsOf or Put
+// triggered; before the first load it is 0.
+func (s *FileStore) Skipped() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.skipped
+}
+
 // ensureLoaded reads the file once; a failed read is not cached, so the next
 // call retries rather than serving an empty history.
 func (s *FileStore) ensureLoaded() error {
@@ -122,36 +135,49 @@ func (s *FileStore) ensureLoaded() error {
 // state is built aside and assigned only on success, so a failed read leaves
 // the previous state untouched.
 func (s *FileStore) loadLocked() (int, error) {
-	versions, skipped, err := s.readFile()
+	contents, err := s.readFile()
 	if err != nil {
 		return 0, err
 	}
-	s.versions = versions
-	s.skipped = skipped
+	s.versions = contents.versions
+	s.skipped = contents.skipped
+	s.needsNewline = contents.needsNewline
 	s.loaded = true
-	return skipped, nil
+	return contents.skipped, nil
+}
+
+// fileContents is what one read of the file yields: the versions it holds, the
+// lines it left out, and whether its last byte ends a line.
+type fileContents struct {
+	versions     map[string][]Version
+	skipped      int
+	needsNewline bool
 }
 
 // readFile reads every line of the file. A missing file is an empty history
 // rather than an error, so the first Put creates it.
-func (s *FileStore) readFile() (map[string][]Version, int, error) {
+func (s *FileStore) readFile() (fileContents, error) {
 	f, err := s.files.open(s.path, os.O_RDONLY, 0)
 	if errors.Is(err, fs.ErrNotExist) {
-		return make(map[string][]Version), 0, nil
+		return fileContents{versions: make(map[string][]Version)}, nil
 	}
 	if err != nil {
-		return nil, 0, fmt.Errorf("beadversions: opening %s: %w", s.path, err)
+		return fileContents{}, fmt.Errorf("beadversions: opening %s: %w", s.path, err)
 	}
 	data, rerr := io.ReadAll(f)
 	cerr := f.Close()
 	if rerr != nil {
-		return nil, 0, fmt.Errorf("beadversions: reading %s: %w", s.path, rerr)
+		return fileContents{}, fmt.Errorf("beadversions: reading %s: %w", s.path, rerr)
 	}
 	if cerr != nil {
-		return nil, 0, fmt.Errorf("beadversions: closing %s: %w", s.path, cerr)
+		return fileContents{}, fmt.Errorf("beadversions: closing %s: %w", s.path, cerr)
 	}
 	versions, skipped := parseVersions(data)
-	return versions, skipped, nil
+	return fileContents{
+		versions:     versions,
+		skipped:      skipped,
+		needsNewline: len(data) > 0 && data[len(data)-1] != '\n',
+	}, nil
 }
 
 // parseVersions reads one Version per line, each bead's history oldest first.
@@ -191,10 +217,15 @@ func parseVersions(data []byte) (map[string][]Version, int) {
 // file 0600 and its directory 0700 when they are missing. The caller adds v to
 // memory only after this returns nil.
 func (s *FileStore) appendVersion(v Version) error {
-	line, err := json.Marshal(v)
+	encoded, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("beadversions: encoding a version: %w", err)
 	}
+	line := make([]byte, 0, len(encoded)+2)
+	if s.needsNewline {
+		line = append(line, '\n')
+	}
+	line = append(line, encoded...)
 	line = append(line, '\n')
 	dir := filepath.Dir(s.path)
 	if err := s.files.mkdir(dir, 0o700); err != nil {
@@ -205,6 +236,11 @@ func (s *FileStore) appendVersion(v Version) error {
 		return fmt.Errorf("beadversions: opening %s: %w", s.path, err)
 	}
 	n, werr := f.Write(line)
+	if n < len(line) {
+		// The file may now end inside the line; the next append must not
+		// continue it, so it starts with a newline instead.
+		s.needsNewline = true
+	}
 	cerr := f.Close()
 	if werr != nil {
 		return fmt.Errorf("beadversions: appending to %s: %w", s.path, werr)
@@ -215,6 +251,7 @@ func (s *FileStore) appendVersion(v Version) error {
 	if cerr != nil {
 		return fmt.Errorf("beadversions: closing %s: %w", s.path, cerr)
 	}
+	s.needsNewline = false
 	return nil
 }
 

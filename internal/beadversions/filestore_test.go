@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -484,6 +485,157 @@ func TestFileStoreRecordsAfterAFailedWriteIsRetried(t *testing.T) {
 	}
 	if len(versions) != 1 || versions[0].Text != "text" {
 		t.Errorf("Versions after reopen = %+v; want one version with text", versions)
+	}
+}
+
+// shortWritingFile writes at most its first n bytes, standing in for a disk
+// that accepts part of a record and then stops.
+type shortWritingFile struct {
+	versionFile
+	n int
+}
+
+func (f *shortWritingFile) Write(p []byte) (int, error) {
+	if len(p) > f.n {
+		p = p[:f.n]
+	}
+	return f.versionFile.Write(p)
+}
+
+// shortWriteOps opens files as usual and cuts every append short.
+func shortWriteOps(n int) fileOps {
+	host := hostFileOps()
+	return fileOps{
+		mkdir: host.mkdir,
+		open: func(name string, flag int, perm os.FileMode) (versionFile, error) {
+			f, err := host.open(name, flag, perm)
+			if err != nil {
+				return nil, err
+			}
+			if flag&os.O_WRONLY != 0 {
+				return &shortWritingFile{versionFile: f, n: n}, nil
+			}
+			return f, nil
+		},
+	}
+}
+
+// TestFileStoreEndsAPartialLineBeforeTheNextAppend: a write the disk cut short
+// leaves bytes with no newline, and the next recorded Put starts on a line of
+// its own, so its record reloads instead of joining the fragment.
+func TestFileStoreEndsAPartialLineBeforeTheNextAppend(t *testing.T) {
+	t.Parallel()
+	path := storePath(t)
+	store := NewFileStore(path)
+	if _, err := store.Put("gt-1", "first", "furiosa", testStart); err != nil {
+		t.Fatalf("first Put error = %v; want nil", err)
+	}
+
+	store.files = shortWriteOps(5)
+	recorded, err := store.Put("gt-1", "second", "furiosa", testStart.Add(time.Minute))
+	if err == nil || recorded {
+		t.Fatalf("Put with a short write = %v, %v; want the short-write error", recorded, err)
+	}
+
+	store.files = hostFileOps()
+	recorded, err = store.Put("gt-1", "third", "furiosa", testStart.Add(2*time.Minute))
+	if err != nil || !recorded {
+		t.Fatalf("Put after the short write = %v, %v; want recorded", recorded, err)
+	}
+
+	reopened := NewFileStore(path)
+	skipped, err := reopened.Load()
+	if err != nil {
+		t.Fatalf("Load error = %v; want nil", err)
+	}
+	if skipped != 1 {
+		t.Errorf("Load skipped = %d; want 1 (the fragment)", skipped)
+	}
+	if text, err := versionsText(reopened, "gt-1"); err != nil || text != "first|third" {
+		t.Errorf("versions after reopen = %q, %v; want first|third", text, err)
+	}
+}
+
+// TestFileStoreEndsATornTailBeforeTheNextAppend: a torn line an earlier crash
+// left at the file's end is closed off before the next recorded Put, so that
+// Put is not lost on the reopen.
+func TestFileStoreEndsATornTailBeforeTheNextAppend(t *testing.T) {
+	t.Parallel()
+	path := storePath(t)
+	first := versionLine(t, Version{Bead: "gt-1", Text: "first", Actor: "furiosa", At: testStart})
+	data := append(append([]byte{}, first...), `{"bead":"gt-1","text":"sec`...)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("WriteFile error = %v; want nil", err)
+	}
+
+	store := NewFileStore(path)
+	recorded, err := store.Put("gt-1", "second", "furiosa", testStart.Add(time.Minute))
+	if err != nil || !recorded {
+		t.Fatalf("Put after a torn tail = %v, %v; want recorded", recorded, err)
+	}
+
+	reopened := NewFileStore(path)
+	skipped, err := reopened.Load()
+	if err != nil {
+		t.Fatalf("Load error = %v; want nil", err)
+	}
+	if skipped != 1 {
+		t.Errorf("Load skipped = %d; want 1 (the torn tail)", skipped)
+	}
+	if text, err := versionsText(reopened, "gt-1"); err != nil || text != "first|second" {
+		t.Errorf("versions after reopen = %q, %v; want first|second", text, err)
+	}
+}
+
+// TestFileStorePersistsTaggedFieldNames: a stored line names its fields as the
+// schema documents, so a Go field rename cannot change the file's format.
+func TestFileStorePersistsTaggedFieldNames(t *testing.T) {
+	t.Parallel()
+	path := storePath(t)
+	store := NewFileStore(path)
+	if _, err := store.Put("gt-1", "one", "furiosa", testStart); err != nil {
+		t.Fatalf("Put error = %v; want nil", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile error = %v; want nil", err)
+	}
+	line := strings.TrimSuffix(string(data), "\n")
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(line), &fields); err != nil {
+		t.Fatalf("the stored line is not a JSON object: %v", err)
+	}
+	names := make([]string, 0, len(fields))
+	for name := range fields {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if got := strings.Join(names, ","); got != "actor,at,bead,hash,text" {
+		t.Errorf("stored field names = %s; want actor,at,bead,hash,text", got)
+	}
+}
+
+// TestFileStoreKeepsTheSkippedCountOfAnImplicitLoad: a load a read triggers
+// keeps its skipped count, so a caller can report a damaged file without
+// loading it explicitly.
+func TestFileStoreKeepsTheSkippedCountOfAnImplicitLoad(t *testing.T) {
+	t.Parallel()
+	path := storePath(t)
+	good := versionLine(t, Version{Bead: "gt-1", Text: "one", Actor: "furiosa", At: testStart})
+	data := append(append([]byte{}, good...), "not a version\n"...)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("WriteFile error = %v; want nil", err)
+	}
+
+	store := NewFileStore(path)
+	if got := store.Skipped(); got != 0 {
+		t.Errorf("Skipped before a load = %d; want 0", got)
+	}
+	if _, err := store.Versions("gt-1"); err != nil {
+		t.Fatalf("Versions error = %v; want nil", err)
+	}
+	if got := store.Skipped(); got != 1 {
+		t.Errorf("Skipped after an implicit load = %d; want 1", got)
 	}
 }
 
