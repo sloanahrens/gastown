@@ -121,7 +121,9 @@ a canonical `mayor/rig` clone: the command refuses one.
 **Before any L3 window: the container-config rehearsal.** From `~/gt`, run
 `gt daemon rehearse --live-root ~/gt --image gt-daemon:<rev>`; `--help` says what it
 stages and checks, and the table `rehearsalChecks` in `internal/cmd/daemon_rehearse.go`
-is the list. It reads the live settings, writes only a scratch copy under
+is the list. The container's settings carry `daemon.container_off`, the plugins and
+patrols the container does not run (the table says which, and the rehearsal fails
+when one is missing). It reads the live settings, writes only a scratch copy under
 `.runtime/rehearsal` (removed when it exits), and prints one row per check. The
 window does not open until it exits zero.
 

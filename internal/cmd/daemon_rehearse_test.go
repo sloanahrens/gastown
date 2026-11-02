@@ -117,6 +117,9 @@ func (h *rehearseHost) deps(out *bytes.Buffer) rehearseDeps {
 			if err := h.readErr[p]; err != nil {
 				return nil, err
 			}
+			if p == rehearseLive {
+				return []os.DirEntry{fakeEntry{"plugins", fs.ModeDir}, fakeEntry{"settings", fs.ModeDir}}, nil
+			}
 			if p == rehearseLive+"/plugins" {
 				var es []os.DirEntry
 				for _, n := range h.plugins {
@@ -773,10 +776,10 @@ func TestContainerRehearsalPluginsCheckNamesAMissingProgram(t *testing.T) {
 // Jev patrols are in-process readers and need no row each.
 func TestContainerRehearsalClassifiesJevPatrols(t *testing.T) {
 	t.Parallel()
-	if !stepNamed("jev_landing") || slices.Contains(containerOffNames(), "jev_landing") {
+	if !stepNamed("jev_landing", kindPatrol) || slices.Contains(containerOffNames(), "jev_landing") {
 		t.Error("jev_landing must be known and run in the container")
 	}
-	if stepNamed("jevish") {
+	if stepNamed("jevish", kindPatrol) || stepNamed("jev_landing", kindPlugin) {
 		t.Error("a name that only resembles the prefix was classified")
 	}
 }
@@ -815,5 +818,39 @@ func TestContainerRehearsalPluginsCheckFailsForAnUnlistedDefaultOnPatrol(t *test
 	err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), d)
 	if err == nil || !strings.Contains(out.String(), "brand_new_default_on_patrol: a patrol the daemon knows") {
 		t.Fatalf("err=%v\n%s", err, out.String())
+	}
+}
+
+// The check that stops an unclassified plugin must not pass when it could not
+// look: an unlistable town, plugins directory, or an unreadable plugin.md fails
+// it, and a rig without a plugins directory does not.
+func TestContainerRehearsalPluginsCheckFailsWhenItCannotLook(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	for name, tc := range map[string]struct {
+		set  func(*rehearseHost)
+		want string
+	}{
+		"town unlistable":    {func(h *rehearseHost) { h.readErr = map[string]error{rehearseLive: boom} }, "cannot be listed, so its rigs' plugins are unknown"},
+		"plugins unlistable": {func(h *rehearseHost) { h.readErr = map[string]error{rehearseLive + "/plugins": boom} }, "plugins directory " + rehearseLive + "/plugins cannot be listed"},
+		"plugin.md unreadable": {func(h *rehearseHost) {
+			h.plugins = []string{"polecat-image"}
+			h.readErr = map[string]error{rehearseLive + "/plugins/polecat-image/plugin.md": boom}
+		}, "cannot be read"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newRehearseHost()
+			tc.set(h)
+			var out bytes.Buffer
+			err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
+			if err == nil || !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("err=%v, want %q:\n%s", err, tc.want, out.String())
+			}
+		})
+	}
+	h := newRehearseHost() // the default fixture has a town with no rig plugins directory
+	if err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&bytes.Buffer{})); err != nil {
+		t.Errorf("a town whose rigs have no plugins directory failed: %v", err)
 	}
 }
