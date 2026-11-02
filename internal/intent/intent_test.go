@@ -284,6 +284,78 @@ func TestMarkSubmittedIsNotAHold(t *testing.T) {
 	}
 }
 
+// A sling or a sandbox debt on a submitted seat moves UpdatedAt but is not a new
+// submission, so SubmittedAt keeps the submission's own time (gt-v5nb1).
+func TestSubmittedAtSurvivesOtherMutators(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	submitted := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	if err := MarkSubmitted(town, polecat, "gt-abc", "gt done", submitted); err != nil {
+		t.Fatal(err)
+	}
+	if err := MarkSlung(town, polecat, "claude", "gt sling", submitted.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := MarkSandboxOwed(town, polecat, true, "patrol", submitted.Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := Read(town, polecat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rec.SubmittedAt.Equal(submitted) || rec.UpdatedAt.Equal(submitted) {
+		t.Fatalf("record = %+v, want SubmittedAt %s kept while UpdatedAt moved on", rec, submitted)
+	}
+}
+
+// Each transition in this package that clears WorkBead clears SubmittedAt too, so
+// no later record reads the old submission's time (gt-v5nb1).
+func TestSubmittedAtIsClearedWithWorkBead(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name  string
+		clear func(town string) error
+	}{
+		{"ClearSubmitted", func(town string) error {
+			return ClearSubmitted(town, polecat, "gt sling", now)
+		}},
+		{"ClearLanded", func(town string) error {
+			_, err := ClearLanded(town, polecat, "gt-abc", "landing worker", now)
+			return err
+		}},
+		{"MarkIdle", func(town string) error {
+			// MarkIdle leaves a submitted seat alone, so the seat is run first.
+			if _, err := Update(town, polecat, func(r *Record) error {
+				r.Desired = DesiredRun
+				return nil
+			}); err != nil {
+				return err
+			}
+			_, err := MarkIdle(town, polecat, "witness", now)
+			return err
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			if err := MarkSubmitted(town, polecat, "gt-abc", "gt done", now); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.clear(town); err != nil {
+				t.Fatal(err)
+			}
+			rec, err := Read(town, polecat)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rec.WorkBead != "" || !rec.SubmittedAt.IsZero() {
+				t.Fatalf("record after %s = %+v, want no work bead and no submission time", c.name, rec)
+			}
+		})
+	}
+}
+
 // A park or freeze outranks a submission, and ClearSubmitted never lifts one.
 func TestSubmittedNeverOverridesAHold(t *testing.T) {
 	t.Parallel()
