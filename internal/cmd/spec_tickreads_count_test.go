@@ -409,6 +409,27 @@ func TestSpecDispatchAtReportsACensusItCouldNotWrite(t *testing.T) {
 	}
 }
 
+// A cache the tick cannot read is an error in its report: the daemon discards a
+// successful tick's stderr, so the report is the one path the operator learns a
+// lost cache is being re-read every tick by (gt-aaa5a).
+func TestSpecDispatchAtReportsACacheItCouldNotRead(t *testing.T) {
+	t.Parallel()
+	root := specTickTownWithHold(t)
+	// A regular file where the town's daemon directory goes stops the read as an
+	// unwritable directory does.
+	if err := os.WriteFile(filepath.Join(root, "daemon"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report, err := runSpecTickForTest(t, root, "123.456", false)
+	if err != nil {
+		t.Fatalf("runSpecDispatchAtWith: %v", err)
+	}
+	want := "design/notes cache at " + dispatch.SpecDetailCachePath(root) + " not read"
+	if !strings.Contains(strings.Join(report.Errors, "\n"), want) {
+		t.Errorf("report errors = %v, want one naming the cache it could not read", report.Errors)
+	}
+}
+
 // specTickTownWithHold is a town the tick runs on with the operator's hold in
 // place: the hold stops the tick before it reads the roster, so a test of the
 // tick's own wiring needs no tmux server.

@@ -35,7 +35,13 @@ func tickOver(t *testing.T, store beads.Client, path, owner string, limit int) c
 // read through store.
 func tickOverRig(t *testing.T, store beads.Client, path, owner, beadsDir string, limit int) cacheTick {
 	t.Helper()
-	cache := loadDuplicateDetailCache(path, owner, limit)
+	return tickOverCache(t, store, loadDuplicateDetailCache(path, owner, limit), beadsDir)
+}
+
+// tickOverCache is one tick's pool fetch for the rig at beadsDir through cache,
+// the value a `gt spec dispatch` process holds for the tick.
+func tickOverCache(t *testing.T, store beads.Client, cache *duplicateDetailCache, beadsDir string) cacheTick {
+	t.Helper()
 	var out cacheTick
 	pool, err := fetchDuplicatePoolWith(store, func(_ string, err error) {
 		out.warnings = append(out.warnings, err.Error())
@@ -166,27 +172,68 @@ func TestDuplicateDetailCacheBoundsMissesPerTick(t *testing.T) {
 	}
 }
 
-// The daemon's cache is the daemon's: a file another owner wrote, or one that
-// does not parse, holds nothing.
-func TestDuplicateDetailCacheDroppedOnRestart(t *testing.T) {
+// A restarted daemon continues the cache its predecessor filled: the file
+// another owner wrote is taken over, its entries answered, and the tick's first
+// save rewrites it under the daemon that found it (gt-aaa5a). A file that does
+// not parse holds nothing and is reported rather than read as cold.
+func TestDuplicateDetailCacheTakesOverADeadDaemonsFile(t *testing.T) {
 	t.Parallel()
 	db := duplicateGuardFixture(t)
 	path := filepath.Join(t.TempDir(), "cache.json")
-	tickOver(t, newCountingStore(listLikeBD{Client: db}), path, "daemon-1", 40)
+	wrote := time.Date(2026, 11, 1, 16, 16, 0, 0, time.UTC)
+	first := loadDuplicateDetailCacheAt(path, "daemon-1", 40, func() time.Time { return wrote })
+	tickOverCache(t, newCountingStore(listLikeBD{Client: db}), first, "rig")
 
 	restarted := newCountingStore(listLikeBD{Client: db})
-	tick := tickOver(t, restarted, path, "daemon-2", 40)
-	if len(shownIDs(restarted)) != 8 || tick.cached != 0 {
-		t.Errorf("a restarted daemon showed %d beads and answered %d from cache, want 8 and 0", len(shownIDs(restarted)), tick.cached)
+	next := time.Date(2026, 11, 1, 17, 10, 0, 0, time.UTC)
+	cache := loadDuplicateDetailCacheAt(path, "daemon-2", 40, func() time.Time { return next })
+	if got := cache.TakenOver(); !strings.Contains(got, "daemon-1") || !strings.Contains(got, "54m0s") {
+		t.Errorf("TakenOver = %q, want the dead daemon's owner and the file's age", got)
 	}
+	tick := tickOverCache(t, restarted, cache, "rig")
+	if shown := len(shownIDs(restarted)); shown != 0 {
+		t.Errorf("a restarted daemon showed %d beads, want the taken-over entries", shown)
+	}
+	if tick.cached != 8 {
+		t.Errorf("a restarted tick answered %d beads from the cache, want the predecessor's 8", tick.cached)
+	}
+	entries, owner, stamp, err := readDetailFile(path, nil)
+	if err != nil {
+		t.Fatalf("reading the taken-over file: %v", err)
+	}
+	if owner != "daemon-2" || !stamp.Equal(next) {
+		t.Errorf("the file = owner %q written %v, want the daemon that took it over and its tick's clock", owner, stamp)
+	}
+	if len(entries["rig"]) != 8 {
+		t.Errorf("the taken-over file holds %d of the rig's beads, want 8", len(entries["rig"]))
+	}
+}
 
-	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	broken := newCountingStore(listLikeBD{Client: db})
-	tickOver(t, broken, path, "daemon-2", 40)
-	if len(shownIDs(broken)) != 8 {
-		t.Errorf("an unreadable cache file left %d beads shown, want all 8", len(shownIDs(broken)))
+// A file the cache cannot read holds nothing and is reported, not read as a
+// cold cache: the tick says the file was lost and shows the pool again
+// (gt-aaa5a).
+func TestDuplicateDetailCacheReportsAFileItCannotRead(t *testing.T) {
+	t.Parallel()
+	db := duplicateGuardFixture(t)
+	for _, tc := range []struct{ name, body, want string }{
+		{"a file that does not parse", "{not json", "does not parse"},
+		{"a file with no rigs", `{"owner":"daemon-1"}`, "holds no rigs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "cache.json")
+			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cache := loadDuplicateDetailCache(path, "daemon-1", 40)
+			if errs := cache.Errors(); len(errs) != 1 || !strings.Contains(errs[0], tc.want) {
+				t.Errorf("cache errors = %v, want one saying the file %s", errs, tc.want)
+			}
+			store := newCountingStore(listLikeBD{Client: db})
+			tickOverCache(t, store, cache, "rig")
+			if shown := len(shownIDs(store)); shown != 8 {
+				t.Errorf("a cache built on a file it could not read showed %d beads, want all 8", shown)
+			}
+		})
 	}
 }
 
@@ -782,5 +829,93 @@ func TestFetchDuplicatePoolSurvivesACustomStatusListFailure(t *testing.T) {
 	}
 	if len(got.warnings) != 1 || !strings.Contains(got.warnings[0], "custom status refused") {
 		t.Fatalf("warnings = %q, want the custom-status list failure reported once", got.warnings)
+	}
+}
+
+// A daemon's first ticks start with no file: each spends its limit on the
+// pool's first unread beads, and the file it saves is what lets the next tick
+// continue past them. 633 beads at a limit of 40 are all read by the sixteenth
+// tick, and each tick's file holds every bead read so far (gt-aaa5a).
+func TestDuplicateDetailColdCacheDrainsAcrossTicks(t *testing.T) {
+	t.Parallel()
+	const poolSize = 633
+	db := beadsfake.New()
+	for i := range poolSize {
+		db.Seed(beads.Issue{
+			ID: fmt.Sprintf("gt-d%03d", i), Type: "task", Title: fmt.Sprintf("pool bead %d", i),
+			Status: "open", Design: fmt.Sprintf("TestDrain%d fails.", i),
+			CreatedAt: "2026-10-15T09:00:00Z", UpdatedAt: "2026-10-18T09:00:00Z",
+		})
+	}
+	path := filepath.Join(t.TempDir(), "spec_detail_cache.json")
+	ticks := (poolSize + duplicateDetailMissLimit - 1) / duplicateDetailMissLimit
+	var second cacheTick
+	for tick := 1; tick <= ticks; tick++ {
+		stamp := time.Date(2026, 11, 1, 17, 10, 0, 0, time.UTC).Add(time.Duration(tick) * time.Minute)
+		cache := loadDuplicateDetailCacheAt(path, "daemon-1", duplicateDetailMissLimit, func() time.Time { return stamp })
+		got := tickOverCache(t, newCountingStore(listLikeBD{Client: db}), cache, "rig")
+		if tick == 2 {
+			second = got
+			t.Logf("second tick: %d fetched, %d cached, %d unread", second.fetched, second.cached, second.unread)
+		}
+		want := min(tick*duplicateDetailMissLimit, poolSize)
+		entries, owner, writtenAt, err := readDetailFile(path, nil)
+		if err != nil {
+			t.Fatalf("tick %d: reading the cache it saved: %v", tick, err)
+		}
+		if got := len(entries["rig"]); got != want {
+			t.Fatalf("tick %d: the file holds %d beads, want the %d read so far", tick, got, want)
+		}
+		if owner != "daemon-1" || !writtenAt.Equal(stamp) {
+			t.Fatalf("tick %d: the file = owner %q written %v, want the tick's own", tick, owner, writtenAt)
+		}
+		if got.unread != poolSize-want {
+			t.Fatalf("tick %d: %d unread, want the %d beads not read yet", tick, got.unread, poolSize-want)
+		}
+	}
+	if second.cached == 0 {
+		t.Errorf("the second tick answered no bead from the cache, so the cache is not kept across ticks")
+	}
+	if last := second.unread + second.cached + second.fetched; last != poolSize {
+		t.Errorf("the second tick counted %d of the %d pool beads", last, poolSize)
+	}
+}
+
+// A write that fails is reported on the tick, naming the path and the cause:
+// the tick's stderr is dropped, so a silent failure leaves every later tick
+// cold with nothing in the log to say why (gt-aaa5a). The entries the failed
+// write could not keep still answer the tick, and the file on disk is the last
+// one that did land, not a partial one.
+func TestDuplicateDetailCacheReportsASaveItCouldNotWrite(t *testing.T) {
+	t.Parallel()
+	db := duplicateGuardFixture(t)
+	path := filepath.Join(t.TempDir(), "spec_detail_cache.json")
+	tickOver(t, newCountingStore(listLikeBD{Client: db}), path, "daemon-1", 40)
+
+	// The restart takes the dead daemon's file over, and its next write fails.
+	cache := loadDuplicateDetailCache(path, "daemon-2", 40)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the taken-over file: %v", err)
+	}
+	cache.write = func(string, any, os.FileMode) error { return errors.New("no space left on device") }
+	db.Seed(beads.Issue{ID: "gt-p1", Type: "task", Title: "Alpha flake", Status: "open", Priority: 1,
+		Description: "Unrelated prose.", Design: "Root cause is now TestOmega.",
+		CreatedAt: "2026-10-15T09:00:00Z", UpdatedAt: "2026-10-19T09:00:00Z"})
+
+	tick := tickOverCache(t, newCountingStore(listLikeBD{Client: db}), cache, "rig")
+	if tick.cached != 7 {
+		t.Errorf("the tick answered %d beads from the entries the failed write could not keep, want 7", tick.cached)
+	}
+	errs := cache.Errors()
+	if len(errs) != 1 || !strings.Contains(errs[0], path) || !strings.Contains(errs[0], "no space left on device") {
+		t.Errorf("cache errors = %q, want one naming the path and the failed write", errs)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the file after the failed write: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("a failed write changed the file on disk")
 	}
 }

@@ -2,12 +2,15 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -82,10 +85,11 @@ type cachedDep struct {
 }
 
 // duplicateDetailFile is the cache's file: each rig's pool details by bead id,
-// for the daemon named by Owner.
+// for the daemon named by Owner, which wrote it at WrittenAt.
 type duplicateDetailFile struct {
-	Owner string                             `json:"owner"`
-	Rigs  map[string]map[string]cachedDetail `json:"rigs"`
+	Owner     string                             `json:"owner"`
+	WrittenAt time.Time                          `json:"written_at,omitzero"`
+	Rigs      map[string]map[string]cachedDetail `json:"rigs"`
 }
 
 // duplicateDetailCache is the daemon's design/notes cache for the duplicate
@@ -94,6 +98,13 @@ type duplicateDetailCache struct {
 	limit int
 	path  string // "" keeps the cache in memory
 	owner string
+	// now stamps the file each save writes, so the daemon that takes a file
+	// over can say how old it was.
+	now func() time.Time
+	// write is atomicfile.WriteJSONWithPerm; a test replaces it with one that
+	// fails, which is what a full or unwritable daemon directory does on a
+	// host and a test cannot make the filesystem do (gt-aaa5a).
+	write func(string, any, os.FileMode) error
 
 	mu sync.Mutex
 	// rigs holds each rig's entries, keyed by the rig's beads directory, so one
@@ -104,6 +115,17 @@ type duplicateDetailCache struct {
 	fetched map[string]bool
 	cached  map[string]bool
 	unread  map[string]bool
+	// loadErr is why an existing file was not read; a missing file is a cache
+	// never written yet, not a failure.
+	loadErr error
+	// takenFrom is the owner of the file this cache took its entries from, ""
+	// when the file was this daemon's own or there was none, and takenAt the
+	// stamp that file carried.
+	takenFrom string
+	takenAt   time.Time
+	// saveErr is the error of the last failed write, cleared by one that
+	// landed.
+	saveErr error
 }
 
 // newDuplicateDetailCache is an empty cache holding at most limit shows a tick,
@@ -112,41 +134,72 @@ type duplicateDetailCache struct {
 func newDuplicateDetailCache(path, owner string, limit int) *duplicateDetailCache {
 	return &duplicateDetailCache{
 		limit: limit, path: path, owner: owner,
+		now:     time.Now,
+		write:   func(path string, v any, perm os.FileMode) error { return atomicfile.WriteJSONWithPerm(path, v, perm) },
 		rigs:    map[string]map[string]cachedDetail{},
 		fetched: map[string]bool{}, cached: map[string]bool{}, unread: map[string]bool{},
 	}
 }
 
 // loadDuplicateDetailCache is newDuplicateDetailCache holding what path kept
-// for owner. A file that is missing, unreadable, or written under another
-// owner holds nothing: the cache is the daemon's, dropped when it restarts.
+// for the daemon that wrote it, which is owner or the daemon before it: a
+// restart continues from the file it finds instead of starting cold, and a cold
+// cache spends every tick's limit on the same beads, leaving the target-claim
+// guard holding every candidate until it drains (gt-aaa5a). The entries are
+// checked against each bead's list row as they always are, so a stale one is
+// shown again rather than believed.
+//
+// A file written under another owner is rewritten under this one by the tick's
+// first save, so the daemon whose ticks keep it is the one that owns it.
 func loadDuplicateDetailCache(path, owner string, limit int) *duplicateDetailCache {
+	return loadDuplicateDetailCacheAt(path, owner, limit, time.Now)
+}
+
+// loadDuplicateDetailCacheAt is loadDuplicateDetailCache stamped by now, so a
+// test reads the file's written-at through a clock it controls.
+func loadDuplicateDetailCacheAt(path, owner string, limit int, now func() time.Time) *duplicateDetailCache {
 	c := newDuplicateDetailCache(path, owner, limit)
-	c.rigs = keptDetailEntries(path, owner, c.rigs)
+	c.now = now
+	entries, fileOwner, writtenAt, err := readDetailFile(path, c.rigs)
+	c.rigs, c.loadErr = entries, err
+	if fileOwner != "" && fileOwner != owner {
+		c.takenFrom, c.takenAt = fileOwner, writtenAt
+		c.dirty = true
+	}
 	return c
 }
 
 // readDuplicateDetailCache is loadDuplicateDetailCache for a reader that must
-// not write: the entries path kept for owner, held in memory with no file to
-// save to, so save does nothing.
+// not write: the entries the file holds, held in memory with no file to save
+// to, so save does nothing. It takes nothing over, since it has no file to
+// keep.
 func readDuplicateDetailCache(path, owner string, limit int) *duplicateDetailCache {
 	c := newDuplicateDetailCache("", owner, limit)
-	c.rigs = keptDetailEntries(path, owner, c.rigs)
+	entries, _, _, err := readDetailFile(path, c.rigs)
+	c.rigs, c.loadErr = entries, err
 	return c
 }
 
-// keptDetailEntries is what the file at path holds for owner, or empty when the
-// file is missing, unreadable, malformed or written under another owner.
-func keptDetailEntries(path, owner string, empty map[string]map[string]cachedDetail) map[string]map[string]cachedDetail {
+// readDetailFile is the file at path: the entries it holds, and the owner and
+// stamp it was written under. A missing file is empty and no error; one that
+// cannot be read or does not parse is empty with the error that stopped it, so
+// the tick can say the cache it could not read rather than look cold.
+func readDetailFile(path string, empty map[string]map[string]cachedDetail) (entries map[string]map[string]cachedDetail, owner string, writtenAt time.Time, err error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return empty
+		if errors.Is(err, fs.ErrNotExist) {
+			return empty, "", time.Time{}, nil
+		}
+		return empty, "", time.Time{}, err
 	}
 	var f duplicateDetailFile
-	if json.Unmarshal(data, &f) != nil || f.Owner != owner || f.Rigs == nil {
-		return empty
+	if err := json.Unmarshal(data, &f); err != nil {
+		return empty, "", time.Time{}, fmt.Errorf("the file does not parse: %w", err)
 	}
-	return f.Rigs
+	if f.Rigs == nil {
+		return empty, "", time.Time{}, errors.New("the file holds no rigs")
+	}
+	return f.Rigs, f.Owner, f.WrittenAt, nil
 }
 
 // specDetailCacheFor is the cache a tick of the daemon named by owner reads
@@ -267,7 +320,7 @@ func (c *duplicateDetailCache) read(beadsDir string, store beads.Client, rows []
 			c.dirty = true
 		}
 	}
-	c.save()
+	c.persist()
 	return details, deferred, err
 }
 
@@ -282,26 +335,72 @@ func (c *duplicateDetailCache) retain(beadsDir string, ids map[string]bool) {
 			c.dirty = true
 		}
 	}
-	c.save()
+	c.persist()
+}
+
+// persist writes the cache after a change and keeps a write that failed, which
+// the tick reports: a tick's stderr is discarded, so the report is the one path
+// a lost cache reaches the daemon log by (gt-aaa5a).
+func (c *duplicateDetailCache) persist() {
+	if err := c.save(); err != nil {
+		c.saveErr = err
+		return
+	}
+	c.saveErr = nil
 }
 
 // save writes the cache when it changed. It runs after every read, so what a
 // tick that is killed mid-way had already shown is not shown again. A write
-// that fails costs the next tick its reads and nothing else.
-func (c *duplicateDetailCache) save() {
+// that fails leaves dirty set, so the next change tries again.
+func (c *duplicateDetailCache) save() error {
 	if c.path == "" || !c.dirty {
-		return
+		return nil
 	}
 	// The file holds design and notes text, so only the daemon's user may read it.
-	err := os.MkdirAll(filepath.Dir(c.path), 0o700)
-	if err == nil {
-		err = atomicfile.WriteJSONWithPerm(c.path, duplicateDetailFile{Owner: c.owner, Rigs: c.rigs}, 0o600)
+	if err := os.MkdirAll(filepath.Dir(c.path), 0o700); err != nil {
+		return fmt.Errorf("creating %s: %w", filepath.Dir(c.path), err)
 	}
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: spec detail cache not saved: %v\n", err)
-		return
+	if err := c.write(c.path, duplicateDetailFile{Owner: c.owner, WrittenAt: c.now(), Rigs: c.rigs}, 0o600); err != nil {
+		return fmt.Errorf("writing %s: %w", c.path, err)
 	}
 	c.dirty = false
+	return nil
+}
+
+// Errors is what the tick must say about a cache it could not read or write,
+// naming the path and the cause; nil when the cache is whole.
+func (c *duplicateDetailCache) Errors() []string {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []string
+	if c.loadErr != nil {
+		out = append(out, fmt.Sprintf("design/notes cache at %s not read: %v; this tick shows the pool from bd", c.path, c.loadErr))
+	}
+	if c.saveErr != nil {
+		out = append(out, fmt.Sprintf("design/notes cache not saved: %v; the next tick re-reads what this one showed", c.saveErr))
+	}
+	return out
+}
+
+// TakenOver says which daemon's file this cache continued and how old that
+// file was, "" when the file was this daemon's own or there was none.
+func (c *duplicateDetailCache) TakenOver() string {
+	if c == nil {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.takenFrom == "" {
+		return ""
+	}
+	if c.takenAt.IsZero() {
+		return fmt.Sprintf("design/notes cache taken over from %s (gt-aaa5a)", c.takenFrom)
+	}
+	age := c.now().Sub(c.takenAt).Round(time.Second)
+	return fmt.Sprintf("design/notes cache taken over from %s, written %s before this tick (gt-aaa5a)", c.takenFrom, age)
 }
 
 // detail is the cached detail with its blockers read against status, the pool

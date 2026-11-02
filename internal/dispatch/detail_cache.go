@@ -6,9 +6,10 @@ import "path/filepath"
 // process it starts for a tick, naming itself. Each tick is a process of its
 // own, so what the tick learns about the pool's design and notes text survives
 // to the next one only in SpecDetailCachePath; the owner is what makes that
-// file the daemon's: a file written under another owner is another daemon's,
-// and is dropped, so the cache lasts as long as the daemon does (gt-l0vlf).
-// A tick run by hand sets none and keeps nothing between runs.
+// file the daemon's, and a file under another owner is taken over by the
+// daemon that finds it, so a restart keeps the cache its predecessor filled
+// (gt-l0vlf, gt-aaa5a). A tick run by hand sets none and keeps nothing between
+// runs.
 const SpecDetailOwnerEnv = "GT_SPEC_DETAIL_OWNER"
 
 // SpecDetailCachePath is where a daemon's ticks keep the design and notes text
