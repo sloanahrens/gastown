@@ -848,8 +848,12 @@ func TestK8sCollectCopiesTheLogsDirectory(t *testing.T) {
 	if at < resultCopy {
 		t.Errorf("the logs copy is step %d, before the result copy at %d; the result decides whether the run ended", at, resultCopy)
 	}
-	if !plan.Poll.Collect[at].MissingSourceOK {
+	logsCopy := plan.Poll.Collect[at]
+	if !logsCopy.MissingSource([]byte("error: tar: " + OutputDir + "/" + LogsDirName + ": Cannot stat: No such file or directory\n")) {
 		t.Error("the logs copy does not tolerate an absent /out/logs; a run that wrote no logs would be RED")
+	}
+	if logsCopy.MissingSource([]byte("error: open /root/.kube/config: no such file or directory\n")) {
+		t.Error("the logs copy tolerates another file's absence; that failure would not RED the run")
 	}
 }
 

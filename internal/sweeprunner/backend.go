@@ -106,12 +106,12 @@ type Step struct {
 	// Teardown marks a step that removes what an earlier step made; it runs
 	// even when an earlier step failed.
 	Teardown bool
-	// MissingSourceOK marks a step whose failure is the absent source it
-	// copies, not a failure: a run that wrote no logs leaves /out/logs
-	// absent, and the copy of it then fails. The caller tolerates only a
-	// failure whose output names the missing source; any other failure is
+	// MissingSourcePath names the source whose absence is not a failure: a
+	// run that wrote no logs leaves /out/logs absent, and the copy of it then
+	// fails. Empty for a step that tolerates no absence. The caller tolerates
+	// only a failure whose output names this source; any other failure is
 	// still the run's (gt-4lj2q).
-	MissingSourceOK bool
+	MissingSourcePath string
 }
 
 // missingSourceMarker is what a failed copy prints when its source is not
@@ -119,9 +119,44 @@ type Step struct {
 const missingSourceMarker = "no such file"
 
 // MissingSource reports whether a failed step is the absent source it
-// tolerates: the step is marked MissingSourceOK and its output says the source
-// is not there. A step that failed another way, or one that does not tolerate
-// the absence, reports false (gt-4lj2q).
+// tolerates: the step names a MissingSourcePath and a line of its output says
+// that path is not there. A step that failed another way, or one that names no
+// source, reports false (gt-4lj2q).
 func (s Step) MissingSource(output []byte) bool {
-	return s.MissingSourceOK && strings.Contains(strings.ToLower(string(output)), missingSourceMarker)
+	if s.MissingSourcePath == "" {
+		return false
+	}
+	source := strings.ToLower(s.MissingSourcePath)
+	for _, line := range strings.Split(strings.ToLower(string(output)), "\n") {
+		if strings.Contains(line, missingSourceMarker) && namesPath(line, source) {
+			return true
+		}
+	}
+	return false
+}
+
+// namesPath reports whether line names path as a whole path, rather than a
+// longer path that merely starts or ends with it: /out/logs-old and
+// /out/logs/integration do not name /out/logs.
+func namesPath(line, path string) bool {
+	for at := 0; at <= len(line)-len(path); {
+		i := strings.Index(line[at:], path)
+		if i < 0 {
+			return false
+		}
+		i += at
+		end := i + len(path)
+		if (i == 0 || !pathByte(line[i-1])) && (end == len(line) || !pathByte(line[end])) {
+			return true
+		}
+		at = i + 1
+	}
+	return false
+}
+
+// pathByte reports whether c is one a path is made of, so a name beside it is
+// part of a longer path.
+func pathByte(c byte) bool {
+	return c == '/' || c == '-' || c == '_' || c == '.' ||
+		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 }
