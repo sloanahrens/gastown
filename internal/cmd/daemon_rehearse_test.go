@@ -47,6 +47,7 @@ type rehearseHost struct {
 	files     map[string][]byte // what readFile serves: the live settings and the scratch state
 	failing   []string          // a command whose joined argv contains one of these fails
 	runs      [][]string
+	captures  [][]string // argv of every capture (docker logs), by the capture seam
 	writes    []string
 	mkdirs    []string
 	clock     time.Time
@@ -60,6 +61,8 @@ type rehearseHost struct {
 	links     map[string]string // evalSymlinks answers; other paths resolve to themselves
 	codes     map[string]int    // exit code of a failing command by substring; default 1
 	plugins   []string          // plugin directories under <live>/plugins
+	log       string            // what docker logs of the entrypoint container returns
+	logErr    error
 }
 
 func newRehearseHost() *rehearseHost {
@@ -69,7 +72,7 @@ func newRehearseHost() *rehearseHost {
 			rehearseLive + "/settings/config.json":         []byte(`{"landing":{"work_root":"/opt/missing","clones":"/h/landing/x","town":"/live/gt/.runtime/y"},"gate":"host.docker.internal:28443","forge":"https://example.test/api/v1","api_key":"sk-live-key","ref":"${KEEP_ME}","auth":{"token":"tok-123"},"daemon":{"container_off":` + offJSON() + `}}`),
 			rehearseLive + "/settings/secrets.env":         []byte("RAW=raw-secret-value\n"),
 			rehearseLive + "/settings/daemon.env":          []byte("# comment\nDEEPSEEK_KEY=sk-secret-value\nexport PATH=/usr/bin:/bin\n"),
-			rehearseLive + "/mayor/town.json":              []byte(`{"name":"gt"}`),
+			rehearseLive + "/mayor/town.json":              []byte(`{"name":"gt","dolt":{"host":"127.0.0.1","container_host":"host.docker.internal","port":3307}}`),
 			rehearseLive + "/daemon/container/compose.yml": []byte("services:\n  daemon:\n    volumes:\n      - type: bind\n        source: /live/gt\n        target: /live/gt\n      - type: bind\n        source: /h/landing\n        target: /h/landing\n      - type: volume\n        source: v\n        target: /vol\n"),
 		},
 		heartbeat: true,
@@ -152,6 +155,10 @@ func (h *rehearseHost) deps(out *bytes.Buffer) rehearseDeps {
 				return t, nil
 			}
 			return p, nil
+		},
+		capture: func(_ context.Context, _ string, _ []string, argv []string) ([]byte, error) {
+			h.captures = append(h.captures, argv)
+			return []byte(h.log), h.logErr
 		},
 		newID: func() string { return "t1" },
 		now:   func() time.Time { return h.clock },
@@ -853,4 +860,222 @@ func TestContainerRehearsalPluginsCheckFailsWhenItCannotLook(t *testing.T) {
 	if err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&bytes.Buffer{})); err != nil {
 		t.Errorf("a town whose rigs have no plugins directory failed: %v", err)
 	}
+}
+
+// The entrypoint container has no network, so its bd handshake fails for want of
+// Dolt and the daemon exits there: that line is the pass. A state.json heartbeat
+// still passes, and any other exit, or no line by the budget, fails with the log
+// tail printed.
+func TestContainerRehearsalHeartbeatPassesAtTheBdHandshake(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	var tail strings.Builder
+	for i := range 60 {
+		tail.WriteString("tail-" + strconv.Itoa(i) + "\n")
+	}
+	for name, tc := range map[string]struct {
+		heartbeat bool
+		exits     bool // the container exits before the budget; else it runs to it
+		log       string
+		logErr    error
+		pass      bool
+		want      []string // each must be in the output
+		notWant   []string // none may be in the output
+	}{
+		"handshake line, container exited":                {exits: true, log: "starting\n" + rehearseHandshakeLine + "\n", pass: true},
+		"handshake line, container running at the budget": {log: rehearseHandshakeLine + "\n", pass: true},
+		"state.json heartbeat":                            {heartbeat: true, pass: true},
+		"another error, container exited": {exits: true, log: "Error: time zone database missing\n",
+			want: []string{"exited before a heartbeat", "    Error: time zone database missing"}},
+		"empty log, container exited": {exits: true, want: []string{"the log is empty, so it holds no bd handshake line"}},
+		"no handshake line at the budget": {log: "Error: time zone database missing\n",
+			want: []string{"no heartbeat in 1m0s", "    Error: time zone database missing"}},
+		"log cannot be read": {exits: true, logErr: boom, want: []string{"its log could not be read"}},
+		"log tail is the last lines": {exits: true, log: tail.String(),
+			want: []string{"    tail-20\n", "    tail-59\n"}, notWant: []string{"    tail-19\n"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newRehearseHost()
+			h.heartbeat = tc.heartbeat
+			if tc.exits {
+				h.failing = []string{"exec gt-run-t1"}
+			}
+			h.log, h.logErr = tc.log, tc.logErr
+			var out bytes.Buffer
+			err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
+			got := out.String()
+			// The log is docker logs of this run's container, read only when no
+			// state.json heartbeat ends the wait first.
+			readLog := slices.ContainsFunc(h.captures, func(a []string) bool {
+				return slices.Contains(a, "logs") && slices.Contains(a, "gt-run-t1")
+			})
+			if readLog == tc.heartbeat {
+				t.Errorf("docker logs of the entrypoint read = %v, want %v", readLog, !tc.heartbeat)
+			}
+			if tc.pass {
+				if err != nil || !strings.Contains(got, "heartbeat        ok") {
+					t.Fatalf("err=%v\n%s", err, got)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(got, "heartbeat        FAIL") {
+				t.Fatalf("err=%v\n%s", err, got)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("the output lacks %q:\n%s", want, got)
+				}
+			}
+			for _, not := range tc.notWant {
+				if strings.Contains(got, not) {
+					t.Errorf("the output holds %q, outside the log tail:\n%s", not, got)
+				}
+			}
+		})
+	}
+}
+
+// A town.json address the probe cannot dial (a host with shell text in it, a port
+// past the range) fails the addresses row without a probe of that address: the
+// host is never spliced into the text the image's shell runs.
+func TestContainerRehearsalRefusesAnUndialableTownJsonAddress(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		dolt      string
+		probeText string // no probe may carry this text
+	}{
+		"shell text in the host": {`{"container_host":"host.docker.internal;touch pwned","port":3307}`, "touch"},
+		"port past the range":    {`{"container_host":"host.docker.internal","port":70000}`, "70000"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newRehearseHost()
+			h.files[rehearseLive+"/mayor/town.json"] = []byte(`{"dolt":` + tc.dolt + `}`)
+			var out bytes.Buffer
+			err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
+			if err == nil || !strings.Contains(out.String(), "addresses        FAIL") || !strings.Contains(out.String(), "is not a host:port the probe can dial") {
+				t.Fatalf("err=%v\n%s", err, out.String())
+			}
+			for _, argv := range h.runs {
+				if j := strings.Join(argv, " "); strings.Contains(j, "/dev/tcp/") && strings.Contains(j, tc.probeText) {
+					t.Errorf("the refused address reached a probe: %v", argv)
+				}
+			}
+		})
+	}
+}
+
+// The Dolt address the staged town.json names (container_host, else host, with
+// the port) is probed from the image over the bridge network, with the other
+// host.docker.internal addresses. A town.json that cannot be read or parsed, or
+// that names no host or no port, fails the addresses row.
+func TestContainerRehearsalProbesTheTownJsonDoltAddress(t *testing.T) {
+	t.Parallel()
+	const probe = "/dev/tcp/host.docker.internal/3307"
+	t.Run("container_host is probed over the bridge", func(t *testing.T) {
+		t.Parallel()
+		h := newRehearseHost()
+		var out bytes.Buffer
+		if err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out)); err != nil {
+			t.Fatalf("err=%v\n%s", err, out.String())
+		}
+		var bridged, elsewhere int
+		for _, argv := range h.runs {
+			if j := strings.Join(argv, " "); strings.Contains(j, probe) {
+				if slices.Contains(argv, "bridge") {
+					bridged++
+				} else {
+					elsewhere++
+				}
+			}
+		}
+		if bridged != 1 || elsewhere != 0 {
+			t.Errorf("the town.json address probed over the bridge %d time(s) and elsewhere %d time(s), want 1 and 0; runs %v", bridged, elsewhere, h.runs)
+		}
+	})
+	t.Run("a refused connect fails the row", func(t *testing.T) {
+		t.Parallel()
+		h := newRehearseHost()
+		h.failing = []string{probe}
+		var out bytes.Buffer
+		err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
+		if err == nil || !strings.Contains(out.String(), "host.docker.internal:3307: does not accept a TCP connect") {
+			t.Fatalf("err=%v\n%s", err, out.String())
+		}
+	})
+	boom := errors.New("boom")
+	for name, tc := range map[string]struct {
+		set  func(*rehearseHost)
+		want string
+	}{
+		"unreadable": {func(h *rehearseHost) { h.readErr = map[string]error{rehearseRoot + "/mayor/town.json": boom} }, "cannot be read"},
+		"unparseable": {func(h *rehearseHost) {
+			h.files[rehearseLive+"/mayor/town.json"] = []byte("{")
+		}, "does not parse"},
+		"no port": {func(h *rehearseHost) {
+			h.files[rehearseLive+"/mayor/town.json"] = []byte(`{"dolt":{"host":"host.docker.internal"}}`)
+		}, "names no dolt port"},
+		"no host": {func(h *rehearseHost) {
+			h.files[rehearseLive+"/mayor/town.json"] = []byte(`{"dolt":{"port":3307}}`)
+		}, "names no dolt host"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newRehearseHost()
+			tc.set(h)
+			var out bytes.Buffer
+			err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
+			if err == nil || !strings.Contains(out.String(), "addresses        FAIL") || !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("err=%v, want %q:\n%s", err, tc.want, out.String())
+			}
+		})
+	}
+}
+
+// The three accepted paths print as accepted with their reasons and are not
+// probed, so they do not fail the paths row. Any other absent path still fails:
+// the landing path the compose rewrite binds is not accepted.
+func TestContainerRehearsalListsAcceptedPaths(t *testing.T) {
+	t.Parallel()
+	const accepted = `{"gotmp":"/Users/Shared/gt-gotmp.noindex","imessage":"/Users/sloan/.claude/tools/imessage-push.sh","ntfy":"/Users/sloan/.config/gt/ntfy-push.sh"}`
+	t.Run("the three print as accepted and are not probed", func(t *testing.T) {
+		t.Parallel()
+		h := newRehearseHost()
+		h.files[rehearseLive+"/settings/config.json"] = []byte(`{"paths":` + accepted + `,"daemon":{"container_off":` + offJSON() + `}}`)
+		// A probe of any of the three would fail, so a probed accepted path fails the row.
+		h.failing = []string{"-e /Users/"}
+		var out bytes.Buffer
+		err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
+		got := out.String()
+		if err != nil {
+			t.Fatalf("accepted paths failed the rehearsal: %v\n%s", err, got)
+		}
+		for _, want := range []string{
+			"paths            ok",
+			"    accepted: /Users/Shared/gt-gotmp.noindex (GOTMPDIR is host-only and dropped from the container env)",
+			"    accepted: /Users/sloan/.claude/tools/imessage-push.sh (escalation notify, deferred by the operator)",
+			"    accepted: /Users/sloan/.config/gt/ntfy-push.sh (escalation notify, deferred by the operator)",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("the output lacks %q:\n%s", want, got)
+			}
+		}
+		for _, run := range h.runs {
+			if n := len(run); n >= 2 && run[n-2] == "-e" && strings.HasPrefix(run[n-1], "/Users/") {
+				t.Errorf("an accepted path was probed: %v", run)
+			}
+		}
+	})
+	t.Run("the landing path is not accepted", func(t *testing.T) {
+		t.Parallel()
+		h := newRehearseHost()
+		h.files[rehearseLive+"/settings/config.json"] = []byte(`{"landing":"/Users/sloan/gt-landing.noindex","daemon":{"container_off":` + offJSON() + `}}`)
+		h.failing = []string{"test -e /Users/sloan/gt-landing.noindex"}
+		var out bytes.Buffer
+		err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
+		if err == nil || !strings.Contains(out.String(), "paths            FAIL") || !strings.Contains(out.String(), "/Users/sloan/gt-landing.noindex: named by a setting") {
+			t.Fatalf("err=%v\n%s", err, out.String())
+		}
+	})
 }

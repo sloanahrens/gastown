@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,8 +28,8 @@ import (
 // first container-only failure (no time zone database) inside the window. The
 // rehearsal finds every such failure beforehand: it stages a scratch copy of the
 // live town's settings (daemon.env values blanked), checks the image against that
-// copy, starts the image's entrypoint on the copy to its first heartbeat, and
-// lists ALL failures, not the first.
+// copy, starts the image's entrypoint on the copy to its first heartbeat or its
+// bd handshake, and lists ALL failures, not the first.
 //
 // Read-only against the live town: the only reads of it are the settings files
 // and mayor/town.json, and every write, mount and container is the scratch
@@ -45,8 +47,15 @@ const (
 	rehearseAddrPattern = `host\.docker\.internal:[0-9]+`
 	// rehearseTailLines is how much of the entrypoint container's log a failed
 	// heartbeat prints.
-	rehearseTailLines = "40"
+	rehearseTailLines = 40
 )
+
+// rehearseHandshakeLine is the line the daemon logs when its bd handshake fails
+// for want of Dolt. The entrypoint container has no network, so the handshake
+// always fails there and the daemon exits on it. Reaching this line proves the
+// entrypoint, its exec, the time zone and the environment all worked up to that
+// step, so the heartbeat check counts it as the pass.
+const rehearseHandshakeLine = "Error: bd handshake failed: Dolt is not reachable"
 
 // rehearseBinaries are the programs the settings and the daemon exec; each must
 // be on the image's PATH.
@@ -56,6 +65,25 @@ var rehearseBinaries = []string{"docker", "kubectl", "openshell", "git", "tmux",
 var rehearseEnvRef = regexp.MustCompile(`\$\{[A-Za-z_][A-Za-z0-9_]*\}`)
 
 var rehearseAddr = regexp.MustCompile(rehearseAddrPattern)
+
+// rehearseProbeAddr is the only shape the address probe dials: a host name or an
+// IPv4 address, a colon and a port. The probe runs as shell text inside the image,
+// so an address of any other shape (a town.json host with a space or a semicolon)
+// is refused before it reaches that text.
+var rehearseProbeAddr = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9.-]*):([0-9]{1,5})$`)
+
+// probeTarget splits addr into the host and port the probe dials. ok is false for
+// any address outside rehearseProbeAddr's shape, or with a port outside 1-65535.
+func probeTarget(addr string) (host, port string, ok bool) {
+	m := rehearseProbeAddr.FindStringSubmatch(addr)
+	if m == nil {
+		return "", "", false
+	}
+	if n, err := strconv.Atoi(m[2]); err != nil || n < 1 || n > 65535 {
+		return "", "", false
+	}
+	return m[1], m[2], true
+}
 
 // rehearseFlags are the values `gt daemon rehearse` parsed.
 type rehearseFlags struct {
@@ -73,7 +101,10 @@ type rehearseFlags struct {
 // rehearseDeps is what the rehearsal takes from the host. A test supplies fakes,
 // so no unit test starts Docker, touches a town or waits on a real clock.
 type rehearseDeps struct {
-	run      daemonimage.Runner
+	run daemonimage.Runner
+	// capture runs a command and returns its output, for the one command whose
+	// text the rehearsal reads: docker logs of the entrypoint container.
+	capture  func(ctx context.Context, dir string, env, argv []string) ([]byte, error)
 	environ  []string
 	out      io.Writer
 	readFile func(path string) ([]byte, error)
@@ -96,12 +127,21 @@ type rehearseDeps struct {
 
 func realRehearseDeps(out io.Writer) rehearseDeps {
 	return rehearseDeps{
-		run: execImageRunner, environ: os.Environ(), out: out,
+		run: execImageRunner, capture: execImageCapture, environ: os.Environ(), out: out,
 		readFile: os.ReadFile, readDir: os.ReadDir, mkdirAll: os.MkdirAll, write: os.WriteFile,
 		removeAll: os.RemoveAll, evalSymlinks: filepath.EvalSymlinks,
 		newID: func() string { return fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()) },
 		now:   time.Now, sleep: time.Sleep,
 	}
+}
+
+// execImageCapture runs argv in dir with env as its whole environment and returns
+// its output, stdout and stderr together.
+func execImageCapture(ctx context.Context, dir string, env, argv []string) ([]byte, error) {
+	c := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // argv is built by this package from fixed names and the scratch town's container name
+	c.Dir = dir
+	c.Env = env
+	return c.CombinedOutput()
 }
 
 // rehearsalCheck is one row of the rehearsal's table: what it inspects, whether
@@ -121,11 +161,11 @@ type rehearsalCheck struct {
 var rehearsalChecks = []rehearsalCheck{
 	{"config-validate", "gt config validate loads the scratch settings inside the image", true, checkConfigValidates},
 	{"binaries", "every program the settings and the daemon exec is on the image's PATH", true, checkImageBinaries},
-	{"paths", "every absolute path a setting names exists in the image or lies under a bind of the live compose", true, checkSettingPaths},
-	{"addresses", "every host.docker.internal address a setting names accepts a TCP connect from the image", true, checkSettingAddresses},
+	{"paths", "every absolute path a setting names exists in the image, lies under a bind of the live compose, or is accepted", true, checkSettingPaths},
+	{"addresses", "every host.docker.internal address a setting names, and the Dolt address town.json names, accepts a TCP connect from the image", true, checkSettingAddresses},
 	{"plugins", "every plugin and patrol is classified, the ones that cannot run in the container are in daemon.container_off, and the image carries what the rest exec", true, checkDaemonSteps},
 	{"images", "every image the live compose pulls (the sweep engine's) is served by digest on the engine the daemon uses", true, checkComposeImagesPull},
-	{"heartbeat", "the entrypoint on the scratch town records a heartbeat within the budget", true, checkFirstHeartbeat},
+	{"heartbeat", "the entrypoint on the scratch town records a heartbeat, or reaches its bd handshake, within the budget", true, checkFirstHeartbeat},
 }
 
 // rehearsal is one run: the flags, the host seams and the staged settings text
@@ -135,6 +175,9 @@ type rehearsal struct {
 	d      rehearseDeps
 	config []byte   // the staged config.json, which the plugins check reads
 	values []string // the string values of the staged JSON settings; what the path and address checks scan
+	// notes are lines a check reports without failing it (an accepted path). The
+	// run prints them under the check's row, after its failures.
+	notes []string
 }
 
 func newDaemonRehearseCmd(run func(ctx context.Context, out io.Writer, f rehearseFlags) error) *cobra.Command {
@@ -145,7 +188,7 @@ func newDaemonRehearseCmd(run func(ctx context.Context, out io.Writer, f rehears
 		Long: `Stages a scratch copy of the live town's settings (JSON settings with secret-named
 values blanked, daemon.env with every value blanked, mayor/town.json; no other file),
 checks the daemon image against it, starts the image's
-entrypoint on the copy to its first heartbeat, and prints a table of every check
+entrypoint on the copy to its first heartbeat or its bd handshake failure, and prints a table of every check
 with its result. It lists all failures and exits non-zero if any required check
 failed.
 
@@ -156,8 +199,10 @@ directory and nothing a caller names; a run killed outright leaves its marked
 directory for you to delete). Settings are redacted by key name only: a secret
 under a key whose name does not look like one is copied as it stands into that
 mode-0700 directory. The entrypoint container has no network, so it
-cannot reach the live Dolt server; a heartbeat that fails for want of Dolt is
-named in the container log tail it prints.`,
+cannot reach the live Dolt server, so its bd handshake fails for want of Dolt.
+That handshake line passes the heartbeat check; any other end prints the
+container log tail. The Dolt address mayor/town.json names is probed from the
+image over the bridge network. The accepted paths are listed, not probed.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return run(cmd.Context(), cmd.OutOrStdout(), f)
@@ -198,6 +243,7 @@ func runDaemonRehearse(ctx context.Context, f rehearseFlags, d rehearseDeps) (er
 	}
 	failed := 0
 	for _, c := range rehearsalChecks {
+		r.notes = nil
 		fails := c.run(ctx, r)
 		status := "ok"
 		if len(fails) > 0 {
@@ -208,6 +254,9 @@ func runDaemonRehearse(ctx context.Context, f rehearseFlags, d rehearseDeps) (er
 		}
 		_, _ = fmt.Fprintf(d.out, "%-16s %-5s %s\n", c.name, status, c.inspects)
 		for _, line := range fails {
+			_, _ = fmt.Fprintf(d.out, "    %s\n", line)
+		}
+		for _, line := range r.notes {
 			_, _ = fmt.Fprintf(d.out, "    %s\n", line)
 		}
 	}
@@ -405,6 +454,20 @@ func (r *rehearsal) docker(ctx context.Context, args ...string) error {
 	return r.dockerWithin(ctx, budget, args...)
 }
 
+// dockerOutput is docker's output under the call budget, for a command whose text
+// the rehearsal reads (the entrypoint container's log).
+func (r *rehearsal) dockerOutput(ctx context.Context, args ...string) (string, error) {
+	budget := r.d.callBudget
+	if budget == 0 {
+		budget = rehearseCallBudget
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	argv := append([]string{"docker", "--context", daemonimage.DockerContext}, args...)
+	out, err := r.d.capture(ctx, r.f.root, daemonimage.DockerEnv(r.d.environ), argv)
+	return string(out), err
+}
+
 // dockerWithin is docker under a deadline of its own, so no call can outlast
 // its budget (a hung engine fails the check, it does not hang the rehearsal).
 func (r *rehearsal) dockerWithin(ctx context.Context, budget time.Duration, args ...string) error {
@@ -454,6 +517,15 @@ func checkImageBinaries(ctx context.Context, r *rehearsal) []string {
 		}
 	}
 	return fails
+}
+
+// rehearseAcceptedPaths are the absolute paths a setting may name that the
+// rehearsal does not probe, each with the reason it is accepted. An accepted path
+// prints as accepted in the paths row and does not fail it.
+var rehearseAcceptedPaths = map[string]string{
+	"/Users/Shared/gt-gotmp.noindex":              "GOTMPDIR is host-only and dropped from the container env",
+	"/Users/sloan/.claude/tools/imessage-push.sh": "escalation notify, deferred by the operator",
+	"/Users/sloan/.config/gt/ntfy-push.sh":        "escalation notify, deferred by the operator",
 }
 
 // settingPaths returns the distinct file paths the staged settings name, sorted,
@@ -527,6 +599,10 @@ func checkSettingPaths(ctx context.Context, r *rehearsal) []string {
 	}
 	var fails []string
 	for _, p := range r.settingPaths(binds) {
+		if reason, ok := rehearseAcceptedPaths[p]; ok {
+			r.notes = append(r.notes, "accepted: "+p+" ("+reason+")")
+			continue
+		}
 		err := r.inImage(ctx, "none", "test", "-e", p)
 		switch {
 		case err == nil:
@@ -539,15 +615,54 @@ func checkSettingPaths(ctx context.Context, r *rehearsal) []string {
 	return fails
 }
 
+// townDoltAddress is the Dolt host:port the staged mayor/town.json names, as the
+// container reaches it: dolt.container_host when set, else dolt.host, with
+// dolt.port. It reads the staged copy, not the live file. An empty host is
+// refused: inside the image an empty host is the container itself.
+func (r *rehearsal) townDoltAddress() (string, error) {
+	data, err := r.d.readFile(filepath.Join(r.f.root, "mayor", "town.json"))
+	if err != nil {
+		return "", fmt.Errorf("the staged mayor/town.json cannot be read, so the Dolt address is unknown: %w", err)
+	}
+	var town struct {
+		Dolt *config.DoltEndpoint `json:"dolt"`
+	}
+	if err := json.Unmarshal(data, &town); err != nil {
+		return "", fmt.Errorf("the staged mayor/town.json does not parse, so the Dolt address is unknown: %w", err)
+	}
+	if town.Dolt == nil || town.Dolt.Port == 0 {
+		return "", errors.New("the staged mayor/town.json names no dolt port, so the Dolt address is unknown")
+	}
+	host := strings.TrimSpace(town.Dolt.ContainerHost)
+	if host == "" {
+		host = strings.TrimSpace(town.Dolt.Host)
+	}
+	if host == "" {
+		return "", errors.New("the staged mayor/town.json names no dolt host (dolt.container_host or dolt.host), so the Dolt address is unknown")
+	}
+	return fmt.Sprintf("%s:%d", host, town.Dolt.Port), nil
+}
+
 func checkSettingAddresses(ctx context.Context, r *rehearsal) []string {
 	var fails []string
+	addrs := rehearseAddr.FindAllString(strings.Join(r.values, "\n"), -1)
+	dolt, doltErr := r.townDoltAddress()
+	if doltErr != nil {
+		fails = append(fails, doltErr.Error())
+	} else {
+		addrs = append(addrs, dolt)
+	}
 	seen := map[string]bool{}
-	for _, a := range rehearseAddr.FindAllString(strings.Join(r.values, "\n"), -1) {
+	for _, a := range addrs {
 		if seen[a] {
 			continue
 		}
 		seen[a] = true
-		host, port, _ := strings.Cut(a, ":")
+		host, port, ok := probeTarget(a)
+		if !ok {
+			fails = append(fails, a+": is not a host:port the probe can dial")
+			continue
+		}
 		probe := "exec 3<>/dev/tcp/" + host + "/" + port
 		err := r.inImage(ctx, "bridge", "timeout", "5", "bash", "-c", probe)
 		switch {
@@ -561,9 +676,6 @@ func checkSettingAddresses(ctx context.Context, r *rehearsal) []string {
 	return fails
 }
 
-// checkFirstHeartbeat starts the image's own entrypoint on the scratch town with
-// no network, waits at most the budget for state.json to record a heartbeat, and
-// removes the container. On failure it prints the tail of the container's log.
 // composeImages are the images the live compose pulls besides the daemon image
 // itself. A pin the registry no longer serves is found here, loudly, and not by
 // the cutover on an engine that has not cached it.
@@ -579,6 +691,11 @@ func checkComposeImagesPull(ctx context.Context, r *rehearsal) []string {
 	return fails
 }
 
+// checkFirstHeartbeat starts the image's own entrypoint on the scratch town with
+// no network and waits at most the budget for state.json to record a heartbeat.
+// The container's log can also pass it: the bd handshake line, read once the
+// container has exited or the budget is spent. Any other end fails the check with
+// the tail of the log. The container is removed on every path.
 func checkFirstHeartbeat(ctx context.Context, r *rehearsal) []string {
 	// One name per run, so a container of another run is never this run's to remove.
 	name := "gt-" + filepath.Base(r.f.runDir)
@@ -592,11 +709,31 @@ func checkFirstHeartbeat(ctx context.Context, r *rehearsal) []string {
 	case waitHeartbeat:
 		return nil
 	case waitExited:
-		_ = r.docker(ctx, "logs", "--tail", rehearseTailLines, name)
-		return []string{"the entrypoint container exited before a heartbeat; its log tail is printed above"}
+		return r.heartbeatFailure(ctx, name, "the entrypoint container exited before a heartbeat")
 	}
-	_ = r.docker(ctx, "logs", "--tail", rehearseTailLines, name)
-	return []string{fmt.Sprintf("no heartbeat in %s; the container log tail is printed above", r.f.budget)}
+	return r.heartbeatFailure(ctx, name, fmt.Sprintf("no heartbeat in %s", r.f.budget))
+}
+
+// heartbeatFailure reads the entrypoint container's log and returns no failure
+// when it holds the bd handshake line. Otherwise it returns why and names an
+// empty log as empty; a non-empty log adds its last rehearseTailLines lines, one
+// table line each.
+func (r *rehearsal) heartbeatFailure(ctx context.Context, name, why string) []string {
+	logText, err := r.dockerOutput(ctx, "logs", name)
+	if err != nil {
+		return []string{why + "; its log could not be read, so the bd handshake line is unknown: " + err.Error()}
+	}
+	if strings.Contains(logText, rehearseHandshakeLine) {
+		return nil
+	}
+	if strings.TrimSpace(logText) == "" {
+		return []string{why + "; the log is empty, so it holds no bd handshake line"}
+	}
+	lines := strings.Split(strings.TrimRight(logText, "\n"), "\n")
+	if len(lines) > rehearseTailLines {
+		lines = lines[len(lines)-rehearseTailLines:]
+	}
+	return append([]string{why + "; the log holds no bd handshake line; its last lines follow:"}, lines...)
 }
 
 // waitResult is how waitForHeartbeat ended.
