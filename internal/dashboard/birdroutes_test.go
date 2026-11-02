@@ -70,7 +70,7 @@ func TestBirdRoutesServeThePageInert(t *testing.T) {
 	}
 }
 
-// Everything that is not /birds/<bird>/ daily.html, daily.prev.html or a
+// Everything that is not /birds/<bird>/daily.html, daily.prev.html or a
 // topic page <slug>.html answers 404, and the guard still answers 405 to
 // a write and 403 to a Host that is not this machine.
 func TestBirdRoutesRefuseEverythingElse(t *testing.T) {

@@ -1052,3 +1052,37 @@ func TestBirdTopicPagesListed(t *testing.T) {
 		t.Errorf("a row with no topic pages encodes as %s, want no pages key", raw)
 	}
 }
+
+// Twelve topic pages are candidates, but only the newest ten are listed, so only
+// those ten are read for a title: the cut happens before any page is opened for
+// its <title> (gt-tmhpf).
+func TestBirdTopicPagesReadsTitlesOfKeptPagesOnly(t *testing.T) {
+	t.Parallel()
+
+	now := birdReportsNow
+	reports := t.TempDir()
+	for i := 0; i < 12; i++ {
+		path := filepath.Join(reports, fmt.Sprintf("topic-%02d.html", i))
+		if err := os.WriteFile(path, []byte("<title>Topic</title>"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		birdSetMtime(t, path, now.Add(-time.Duration(i+1)*time.Hour))
+	}
+
+	var titled []string
+	pages := birdTopicPages(reports, func(path, fallback string) string {
+		titled = append(titled, filepath.Base(path))
+		return fallback
+	})
+	if len(pages) != 10 {
+		t.Fatalf("lists %d pages, want the newest 10", len(pages))
+	}
+	if len(titled) != 10 {
+		t.Errorf("reads a title for %d pages, want the 10 listed: %v", len(titled), titled)
+	}
+	for _, p := range pages {
+		if !slices.Contains(titled, p.Name) {
+			t.Errorf("listed page %s was not read for its title", p.Name)
+		}
+	}
+}

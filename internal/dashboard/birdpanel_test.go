@@ -810,7 +810,8 @@ func TestBirdsReportAndYesterdayLabels(t *testing.T) {
 
 // A bird's topic pages are drawn as links under its row, newest first as the
 // reader listed them, to the sandboxed route; a row with none draws no list, and
-// a name outside the served shape is not drawn at all (gt-ylswr).
+// a name is encoded as one path segment, so it cannot climb out of the bird's
+// directory even when the reader did not list it (gt-ylswr).
 func TestBirdsPanelDrawsTopicLinks(t *testing.T) {
 	t.Parallel()
 
@@ -821,8 +822,7 @@ func TestBirdsPanelDrawsTopicLinks(t *testing.T) {
 			map[string]any{"bird": "heron", "state": "fresh", "written": stamp, "pages": []any{
 				map[string]any{"name": "pool-cutover.html", "title": "The pool <b>cutover</b>", "mtime": stamp},
 				map[string]any{"name": "older.html", "title": "", "mtime": stamp},
-				map[string]any{"name": "../daily.json", "title": "outside the shape", "mtime": stamp},
-				map[string]any{"name": "Upper.html", "title": "outside the shape", "mtime": stamp},
+				map[string]any{"name": "../daily.json", "title": "a name that climbs", "mtime": stamp},
 			}},
 			map[string]any{"bird": "quiet", "state": "fresh", "written": stamp},
 		},
@@ -855,8 +855,11 @@ func TestBirdsPanelDrawsTopicLinks(t *testing.T) {
 	}
 
 	links := got["heron"]
-	if len(links) != 2 {
-		t.Fatalf("heron drew %d topic links, want the two whose names the route serves: %+v", len(links), links)
+	if len(links) != 3 {
+		t.Fatalf("heron drew %d topic links, want the three the reader listed: %+v", len(links), links)
+	}
+	if links[2].Href != "/birds/heron/..%2Fdaily.json" {
+		t.Errorf("a name that climbs is drawn as %q, want one encoded path segment under the bird", links[2].Href)
 	}
 	if links[0].Tag != "A" || links[0].Href != "/birds/heron/pool-cutover.html" || links[0].Target != "_blank" || links[0].Rel != "noopener" {
 		t.Errorf("heron's first link is %+v, want an anchor to the route, in a new tab, noopener", links[0])
