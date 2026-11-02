@@ -478,9 +478,10 @@ func TestAQueuedRowWithNoHolderDrawsTheDash(t *testing.T) {
 
 // The Polecat column's dev time is one computation, polecatTimeCell, over the
 // reading a row carries: a running row's polecat_secs renders through polecatDur,
-// its floor keeping the + (gt-duuq1). A queued row takes the same cell; see
-// TestAQueuedRowWithNoDevTimeReadsTheDash for the reading it does have. Mutation:
-// hard-code the cell's dash and this row reads "–" where the reading says "13m+".
+// its floor keeping the + (gt-duuq1). A queued row takes the same cell, but its
+// queue reading carries no polecat time; see TestAQueuedRowWithNoDevTimeReadsTheDash.
+// Mutation: hard-code the cell's dash and this row reads "–" where the reading
+// says "13m+".
 func TestTheRunningRowsPolecatCellDrawsTheSharedDevTime(t *testing.T) {
 	t.Parallel()
 
@@ -512,7 +513,7 @@ func TestTheRunningRowsPolecatCellDrawsTheSharedDevTime(t *testing.T) {
 // So the Polecat cell reads the dash the shared cell draws for a row with no
 // reading, never a figure guessed from the wait (gt-duuq1). The payload's keys
 // are QueueBead's json tags, so the page reads the shape production sends.
-// Mutation: derive the cell from updated_at and this row reads "2m" where the
+// Mutation: derive the cell from updated_at and this row reads an age where the
 // dash belongs.
 func TestAQueuedRowWithNoDevTimeReadsTheDash(t *testing.T) {
 	t.Parallel()
