@@ -147,6 +147,11 @@ type Record struct {
 	LastAction *Action     `json:"last_action,omitempty"`
 	Progress   *Progress   `json:"progress,omitempty"`
 
+	// SubmittedAt is when MarkSubmitted recorded WorkBead. UpdatedAt moves on
+	// any change to the record, so it cannot tell one submission from a later
+	// one; this can. Each clear of WorkBead in this package clears it too.
+	SubmittedAt time.Time `json:"submitted_at,omitempty"`
+
 	// Agent is the agent this seat was slung on, recorded when a sling starts
 	// its session (MarkSlung). The session's GT_AGENT dies with the session, so
 	// this is the seat's only surviving statement of which agent it runs, and
@@ -215,6 +220,7 @@ func MarkSubmitted(townRoot string, s Seat, workBead, actor string, now time.Tim
 		}
 		r.Desired = DesiredSubmitted
 		r.WorkBead = workBead
+		r.SubmittedAt = now.UTC()
 		r.Progress = nil
 		r.Actor, r.UpdatedAt = actor, now.UTC()
 		return nil
@@ -235,6 +241,7 @@ func ClearSubmitted(townRoot string, s Seat, actor string, now time.Time) error 
 		}
 		r.Desired = DesiredRun
 		r.WorkBead = ""
+		r.SubmittedAt = time.Time{}
 		r.Actor, r.UpdatedAt = actor, now.UTC()
 		return nil
 	})
@@ -303,6 +310,7 @@ func MarkIdle(townRoot string, s Seat, actor string, now time.Time) (bool, error
 		}
 		r.Desired = DesiredStop
 		r.WorkBead = ""
+		r.SubmittedAt = time.Time{}
 		r.Progress = nil
 		r.Actor, r.UpdatedAt = actor, now.UTC()
 		changed = true
@@ -332,6 +340,7 @@ func ClearLanded(townRoot string, s Seat, workBead, actor string, now time.Time)
 		}
 		r.Desired = DesiredStop
 		r.WorkBead = ""
+		r.SubmittedAt = time.Time{}
 		r.Actor, r.UpdatedAt = actor, now.UTC()
 		changed = true
 		return nil

@@ -79,7 +79,9 @@ type sandboxSeatEndLine struct {
 // bead is unknown, and the removal reports it.
 // The intent is keyed by seat, not by session, so it can name a bead from
 // another assignment: only a submission made at or after the record was
-// created, and still standing, is this record's bead. Any other intent is "".
+// created, and still standing, is this record's bead. The submission's own
+// time is SubmittedAt; UpdatedAt moves on any change to the record, so it
+// cannot tell submissions apart. Any other intent is "".
 func sandboxSeatBead(townRoot string, rec SandboxRecord) (string, error) {
 	if !plainPathName(rec.Rig) || !plainPathName(rec.Polecat) {
 		return "", nil
@@ -89,7 +91,7 @@ func sandboxSeatBead(townRoot string, rec SandboxRecord) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("reading the intent of seat %s for its seat-end line: %w", seat, err)
 	}
-	if !r.Submitted() || r.UpdatedAt.Before(rec.CreatedAt) {
+	if !r.Submitted() || r.SubmittedAt.IsZero() || r.SubmittedAt.Before(rec.CreatedAt) {
 		return "", nil
 	}
 	return r.WorkBead, nil

@@ -365,10 +365,24 @@ func TestSeatLineCarriesTheSubmittedBead(t *testing.T) {
 func TestSeatLineNamesOnlyTheRecordsOwnSubmittedBead(t *testing.T) {
 	t.Parallel()
 	created := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
+	// A seat submitted with no submission time: the intent a record written
+	// before SubmittedAt existed leaves behind.
+	unsubmittedAt := func(t *testing.T, town string, seat intent.Seat) {
+		t.Helper()
+		if _, err := intent.Update(town, seat, func(r *intent.Record) error {
+			r.WorkBead = "gt-abc"
+			r.Desired = intent.DesiredSubmitted
+			r.UpdatedAt = created.Add(time.Minute)
+			return nil
+		}); err != nil {
+			t.Fatalf("writing the seat's intent: %v", err)
+		}
+	}
 	for _, c := range []struct {
-		name     string
-		write    func(t *testing.T, town string, seat intent.Seat)
-		wantBead string
+		name        string
+		write       func(t *testing.T, town string, seat intent.Seat)
+		wantBead    string
+		noCreatedAt bool
 	}{
 		{
 			name: "submitted after the record was created",
@@ -390,24 +404,61 @@ func TestSeatLineNamesOnlyTheRecordsOwnSubmittedBead(t *testing.T) {
 			},
 		},
 		{
+			name: "submitted before the record, then a slung session bumps the intent",
+			write: func(t *testing.T, town string, seat intent.Seat) {
+				t.Helper()
+				if err := intent.MarkSubmitted(town, seat, "gt-old", "furiosa", created.Add(-time.Hour)); err != nil {
+					t.Fatalf("marking the seat submitted: %v", err)
+				}
+				if err := intent.MarkSlung(town, seat, "claude", "gt sling", created.Add(time.Minute)); err != nil {
+					t.Fatalf("slinging the seat: %v", err)
+				}
+			},
+		},
+		{
+			name: "submitted before the record, then a sandbox debt bumps the intent",
+			write: func(t *testing.T, town string, seat intent.Seat) {
+				t.Helper()
+				if err := intent.MarkSubmitted(town, seat, "gt-old", "furiosa", created.Add(-time.Hour)); err != nil {
+					t.Fatalf("marking the seat submitted: %v", err)
+				}
+				if err := intent.MarkSandboxOwed(town, seat, true, "patrol", created.Add(time.Minute)); err != nil {
+					t.Fatalf("marking the sandbox owed: %v", err)
+				}
+			},
+		},
+		{
 			name: "names a bead but is no longer submitted",
 			write: func(t *testing.T, town string, seat intent.Seat) {
 				t.Helper()
+				if err := intent.MarkSubmitted(town, seat, "gt-abc", "furiosa", created.Add(time.Minute)); err != nil {
+					t.Fatalf("marking the seat submitted: %v", err)
+				}
 				if _, err := intent.Update(town, seat, func(r *intent.Record) error {
-					r.WorkBead = "gt-abc"
 					r.Desired = intent.DesiredRun
-					r.UpdatedAt = created.Add(time.Minute)
 					return nil
 				}); err != nil {
-					t.Fatalf("writing the seat's intent: %v", err)
+					t.Fatalf("returning the seat to run: %v", err)
 				}
 			},
+		},
+		{
+			name:  "names a bead with no submission time",
+			write: unsubmittedAt,
+		},
+		{
+			name:        "names a bead with no submission time, on a record with no creation time",
+			write:       unsubmittedAt,
+			noCreatedAt: true,
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			town := t.TempDir()
 			rec := SandboxRecord{Session: "gt-gastown-box", Rig: "gastown", Polecat: "box", CreatedAt: created}
+			if c.noCreatedAt {
+				rec.CreatedAt = time.Time{}
+			}
 			seat := intent.Seat{Rig: rec.Rig, Role: "polecats", Name: rec.Polecat}
 			if err := WriteSandboxRecord(town, rec); err != nil {
 				t.Fatalf("writing the record: %v", err)
