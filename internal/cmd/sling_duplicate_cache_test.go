@@ -957,9 +957,9 @@ func TestDuplicateDetailCacheReportsASaveItCouldNotWrite(t *testing.T) {
 	}
 }
 
-// bdRowJSON and bdDepJSON are the row shapes real bd prints, the dependency
-// carrying the target's own metadata: an object when the bead's metadata was
-// written as one (the dispatcher's spec_dispatch_timeout_attempts is).
+// bdRowJSON and bdDepJSON are the row shapes bd prints for a bead and its
+// dependency, with the dependency's metadata an object, so the cache is parsed
+// through the shapes a real tick reads.
 type bdDepJSON struct {
 	ID             string            `json:"id"`
 	Title          string            `json:"title"`
@@ -1042,11 +1042,9 @@ func bdJSONStore(t *testing.T, ids []string) *beads.Beads {
 }
 
 // A tick's fetched beads are answered from the cache by the next tick, over
-// bd's own JSON: with the pool at 90 beads and the limit at 40, the second
-// tick answers the first tick's 40 from the cache, the file holds the two
-// ticks' 80, and unread falls by the limit until it reaches zero. Before
-// gt-l40eg a dependency whose metadata is an object failed the whole show, so
-// nothing was ever cached and every tick showed the same 40 beads.
+// bd's own JSON (gt-l40eg): with the pool at 90 beads and the limit at 40, the
+// second tick answers the first tick's 40 from the cache, the file holds the
+// two ticks' 80, and unread falls by the limit until it reaches zero.
 func TestDuplicateDetailCacheDrainsOverBdJSONWithObjectMetadata(t *testing.T) {
 	t.Parallel()
 	const poolSize = 90
