@@ -574,10 +574,8 @@ func (w *Worker) showMultiple(ids []string) (issues map[string]*beads.Issue, ok 
 	}
 	issues, err := batch.ShowMultiple(ids)
 	if err != nil {
-		// RetryBeads, the production client, always has the method and answers
-		// ErrNoShowMultiple when its inner client cannot batch, so that is the
-		// path a store without batching takes. It says so once; only a real
-		// failure is worth a line on every pass.
+		// A store without batching answers ErrNoShowMultiple: say so once, and
+		// log only a real failure on every pass.
 		if errors.Is(err, ErrNoShowMultiple) {
 			w.saySlowReads()
 		} else {
