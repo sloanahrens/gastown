@@ -15,17 +15,17 @@ const SpecDispatchActor = "daemon/spec-dispatch"
 // sling event for the bead at or after its last run-end event. The clock
 // belongs to the bead, not to one seat, so a bead handed from one seat to
 // another keeps the dispatch it first went out on and cannot restart its clock
-// by moving. A run-end event closes the run, so a bead dispatched again after
-// one starts over: TypeDone, when the seat submitted the work (and so also a
-// landed bead, whose landing follows its gt done), TypeBeadClosed, when the
-// bead was closed by hand, and TypeOverrunStop, when the overrun guard stopped
-// the seat and handed the bead back (a stop ends that run; the dispatch after
-// it is policed afresh). A sling by the spec dispatcher to a DIFFERENT
-// seat than the bead's last sling ends the run before it too, though no event
-// recorded that end: the bead moved, so the run its earlier sling began has no
-// seat and its time is not the new seat's to answer for (gt-3ga5l). A repeat
-// sling to the seat that already holds the bead is the same run and keeps its
-// first dispatch, so repeating a sling cannot restart the clock.
+// by moving.
+//
+// A run-end event closes the run, so a bead dispatched again after one starts
+// over. Every TypeDone ends the run, whatever exit its payload's status names;
+// so do TypeBeadClosed and TypeOverrunStop. A sling by the spec dispatcher to a
+// different seat than the bead's last sling ends the run before it too, though
+// no event recorded that end: the bead moved, so the run its earlier sling
+// began has no seat and its time is not the new seat's to answer for
+// (gt-3ga5l). A repeat sling to the seat that already holds the bead is the
+// same run and keeps its first dispatch, so repeating a sling cannot restart
+// the clock.
 //
 // The second return is false when the log holds no such sling.
 func DispatchStart(evs []Event, bead string) (time.Time, bool) {
@@ -105,6 +105,10 @@ func (c *DispatchClock) add(ev Event) {
 		}
 		c.addStart(bead, ts, target)
 	case TypeDone, TypeBeadClosed, TypeOverrunStop:
+		// A done ends the run whatever exit its payload records, so the status
+		// is never a condition on the end. A run left open is handed to the
+		// next seat, which the overrun guard then stops on the old clock
+		// (gt-ntvac).
 		at, err := runEndTime(ev)
 		if err != nil {
 			return

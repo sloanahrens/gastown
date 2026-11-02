@@ -82,6 +82,12 @@ type overrunSeat struct {
 	// the first dispatch (gt-chd44). It comes from the bead read the seat
 	// already costs, so the guard reads no bead twice for one clock.
 	SubmittedAt time.Time
+	// EscalatedEnd is the time on the bead's last ESCALATED RUN END block, zero
+	// when it carries none. A seat that exits ESCALATED ends its run without
+	// submitting anything, so this block is the end a sandbox seat's lost done
+	// event would otherwise take with it; the next dispatch of the bead is
+	// dated from it (gt-ntvac). It comes from the same bead read as SubmittedAt.
+	EscalatedEnd time.Time
 	// RestartedAt is the latest supervised restart of the seat's session, from
 	// the intent record's restart stamps; zero when it never was restarted. A
 	// restarted seat gets a fresh clock (overrunState.withRestart), because the
@@ -654,6 +660,7 @@ func (d *Daemon) overrunSeatFor(polecatsDir, rigName, name string) (overrunSeat,
 	seat.Bead = bead
 	seat.Submitted = st.submitted
 	seat.SubmittedAt = st.submittedAt
+	seat.EscalatedEnd = st.escalatedAt
 	seat.Scheduled = hasScheduledSlingLabel(st.labels)
 
 	if workDir := resolvePolecatWorktree(polecatsDir, name, rigName); workDir != "" {
@@ -713,10 +720,12 @@ type overrunSlungReader struct {
 // sling event for the bead that its last run-end event does not end
 // (events.DispatchStart), so a bead handed from one seat to another keeps the
 // dispatch it first went out on, and a bead whose work was finished, closed or
-// whose seat the guard stopped starts over. The seat's SubmittedAt ends a run
-// too, for a submission whose done event the log never got (gt-chd44). With no
-// sling in the log at all it falls back to the seat's agent bead update time,
-// which can only read short, so the fallback errs toward not stopping anyone.
+// whose seat the guard stopped starts over. The bead's notes end a run too, for
+// an end whose done event the log never got: SubmittedAt for a submission
+// (gt-chd44) and EscalatedEnd for an escalation that submits nothing for the
+// host to repair from (gt-ntvac). With no sling in the log at all it falls back
+// to the seat's agent bead update time, which can only read short, so the
+// fallback errs toward not stopping anyone.
 func (r *overrunSlungReader) slungAt(seat overrunSeat) (time.Time, bool) {
 	if !r.loaded {
 		r.loaded = true
@@ -727,7 +736,15 @@ func (r *overrunSlungReader) slungAt(seat overrunSeat) (time.Time, bool) {
 		}
 		r.clock.Add(evs)
 	}
-	if start, ok := r.clock.StartSince(seat.Bead, seat.SubmittedAt); ok {
+	// The later end wins: a bead submitted after an escalation was dated from
+	// the submission, and one escalated after a submission from the escalation.
+	// StartSince never moves the boundary backwards, so passing the later of the
+	// two is what makes both ends available to the clock.
+	end := seat.SubmittedAt
+	if seat.EscalatedEnd.After(end) {
+		end = seat.EscalatedEnd
+	}
+	if start, ok := r.clock.StartSince(seat.Bead, end); ok {
 		return start, true
 	}
 

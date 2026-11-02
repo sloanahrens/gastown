@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/done"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // escalatedTown lays out a town whose routes send gt- beads to the gastown
@@ -82,6 +83,31 @@ func assertEscalatedBeadHeld(t *testing.T, db *beadsfake.Fake) {
 	if !escalated {
 		t.Errorf("bead carries no ESCALATED note; comments = %v", comments)
 	}
+	// The escalation submits nothing, so the bead's notes are the only run end
+	// the host sees when a sandbox seat's done event dies with its town
+	// (gt-1m9gr). Without it the bead's next seat is dated from this one's
+	// dispatch and the overrun guard stops it at once (gt-ntvac).
+	if at := land.EscalatedEndTime(got.Notes); at.IsZero() {
+		t.Errorf("notes carry no ESCALATED RUN END block; notes = %q", got.Notes)
+	} else if seat := escalatedEndSeat(got.Notes); seat != "gastown/polecats/nux" {
+		t.Errorf("run end names seat %q, want gastown/polecats/nux; notes = %q", seat, got.Notes)
+	}
+}
+
+// escalatedEndSeat returns the seat line of the note's last ESCALATED RUN END
+// block, "" when it has none.
+func escalatedEndSeat(notes string) string {
+	blocks := strings.Split(notes, land.EscalatedEndMarker+"\n")
+	last := blocks[len(blocks)-1]
+	for _, line := range strings.Split(last, "\n") {
+		if seat, ok := strings.CutPrefix(line, "Seat: "); ok {
+			return strings.TrimSpace(seat)
+		}
+		if !strings.Contains(line, ":") {
+			break
+		}
+	}
+	return ""
 }
 
 func seedEscalatedBead(db *beadsfake.Fake) {

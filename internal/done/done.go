@@ -921,6 +921,9 @@ type doneRun struct {
 	// recordAgentState is the CLI layer's agent-bead state write; nil when the
 	// caller has no agent bead to write.
 	recordAgentState func(cwd, townRoot, exitType, issueID string, pending beads.AgentFieldUpdates) (bool, error)
+	// logEvent writes the run's feed events; nil means events.LogFeed. It is a
+	// seam so a test can read what gt done records without a town log.
+	logEvent func(eventType, actor string, payload map[string]interface{}) error
 	// findings are the --finding texts this run records on the source bead.
 	findings []string
 	// recordFindings writes findings; nil skips the write.
@@ -1752,6 +1755,22 @@ func markReadyToLand(bd beads.Client, w land.Work) error {
 	return nil
 }
 
+// recordDoneEvent logs the end of the seat's turn, naming its exit type in the
+// payload's status. gt done writes it for every exit, including ESCALATED,
+// which submits nothing, and DEFERRED. The dispatch clock ends the bead's run
+// on any done event; for a sandboxed escalation, whose event dies with its
+// town (gt-1m9gr), the run end that reaches the host is the bead's ESCALATED
+// RUN END note (RecordEscalatedRunEnd, gt-ntvac).
+func (r *doneRun) recordDoneEvent(exitType string) {
+	logEvent := r.logEvent
+	if logEvent == nil {
+		logEvent = events.LogFeed
+	}
+	if err := logEvent(events.TypeDone, r.sender, events.DonePayloadWithStatus(r.issueID, r.branch, exitType)); err != nil {
+		style.PrintWarning("could not log done event: %v", err)
+	}
+}
+
 // reportDone records on the agent bead how the run ended, then retires the
 // session. Only runs that succeeded reach it.
 func reportDone(r *doneRun, exitType string) error {
@@ -1791,9 +1810,7 @@ func reportDone(r *doneRun, exitType string) error {
 		consumed = true
 	}
 
-	if err := events.LogFeed(events.TypeDone, r.sender, events.DonePayload(r.issueID, r.branch)); err != nil {
-		style.PrintWarning("could not log done event: %v", err)
-	}
+	r.recordDoneEvent(exitType)
 
 	// Update agent bead state (ZFC: self-report completion). The write lives
 	// in the CLI layer (it closes the hooked bead against the close
@@ -1911,6 +1928,30 @@ func NotifyDoneEscalated(bd beads.Client, issueID string) {
 		return
 	}
 	fmt.Printf("%s Recorded escalation on %s\n", style.Bold.Render("✓"), issueID)
+}
+
+// RunEndAppender is the write RecordEscalatedRunEnd needs from a bead store;
+// beads.Client satisfies it. A caller's narrower fake can satisfy it too.
+type RunEndAppender interface {
+	AppendNotes(id, note string) error
+}
+
+// RecordEscalatedRunEnd appends the block that ends the bead's run to the work
+// bead's notes (land.FormatEscalatedEndNote). The done event says the same, but
+// a sandboxed seat writes its events into the skeleton town deleted with it
+// (gt-1m9gr), and an escalation submits nothing for the host to repair a lost
+// event from, so the bead's own notes are the copy that reaches the host. The
+// overrun guard dates the next seat's clock from it; without it the next seat
+// is stopped at once on the escalated seat's clock (gt-ntvac). A failed write
+// warns on warn, naming that consequence: the seat must not be left silently
+// to be stopped on the old clock.
+func RecordEscalatedRunEnd(bd RunEndAppender, issueID, seat string, at time.Time, warn io.Writer) {
+	if bd == nil || issueID == "" {
+		return
+	}
+	if err := bd.AppendNotes(issueID, land.FormatEscalatedEndNote(seat, at)); err != nil {
+		style.FprintWarning(warn, "could not record the run end on %s: %v — the next seat may be stopped on this run's clock", issueID, err)
+	}
 }
 
 // noteVerifiedPushFailure records a push or landing check that could not be

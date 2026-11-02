@@ -274,6 +274,11 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 			fmt.Fprintf(os.Stderr, "Note: hooked bead %s is a rig identity bead (gt:rig) — not recording the escalation on it\n", hookedBeadID)
 		default:
 			done.NotifyDoneEscalated(hookBd, hookedBeadID)
+			// The escalation submits nothing, so the bead's own notes are the
+			// only run end the host sees when the seat's done event is lost with
+			// a sandbox town (gt-1m9gr). It is written to the same open bead the
+			// note above is (gt-ntvac).
+			done.RecordEscalatedRunEnd(hookBd, hookedBeadID, roleInfo.ActorString(), time.Now().UTC(), os.Stderr)
 		}
 		// The attempt is ended below, with every other exit: the seat stopped
 		// on a blocker and holds nothing more (gt-dz78b).

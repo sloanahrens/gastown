@@ -53,6 +53,59 @@ func TestReadyBlockTimeReadsTheBlockAndNothingElse(t *testing.T) {
 	}
 }
 
+// EscalatedEndTime is the run end gt done records on a work bead for an
+// ESCALATED exit (gt-ntvac). It reads the last block and nothing else: no
+// block, a block without a readable time, and a note that merely mentions the
+// marker are all zero, so nothing but a seat's own write moves the guard's
+// clock.
+func TestEscalatedEndTimeReadsTheLastBlockAndNothingElse(t *testing.T) {
+	t.Parallel()
+	first := time.Date(2026, 11, 2, 1, 34, 12, 0, time.UTC)
+	second := time.Date(2026, 11, 2, 8, 48, 0, 0, time.UTC)
+	for _, tt := range []struct {
+		name  string
+		notes string
+		want  time.Time
+	}{
+		{
+			name:  "the block's end",
+			notes: "notes\n" + FormatEscalatedEndNote("gastown/polecats/dementus", first),
+			want:  first,
+		},
+		{
+			name: "the last block is the end of the current run",
+			notes: FormatEscalatedEndNote("gastown/polecats/dementus", first) + "\n" +
+				FormatEscalatedEndNote("gastown/polecats/nux", second),
+			want: second,
+		},
+		{
+			name:  "a block followed by a submission",
+			notes: FormatEscalatedEndNote("gastown/polecats/dementus", first) + "\n" + FormatReadyNote(sampleWork()),
+			want:  first,
+		},
+		{name: "no block", notes: "just notes\n"},
+		{name: "a mention of the marker is not a block", notes: "the ESCALATED RUN END was lost\n"},
+		{name: "an unreadable end", notes: "ESCALATED RUN END\nSeat: gastown/polecats/dementus\nEnded: yesterday\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := EscalatedEndTime(tt.notes); !got.Equal(tt.want) {
+				t.Errorf("EscalatedEndTime = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// A seat's name cannot inject a line the parser reads as the end time.
+func TestFormatEscalatedEndNoteCollapsesTheSeat(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 2, 1, 34, 12, 0, time.UTC)
+	note := FormatEscalatedEndNote("gastown/polecats/dementus\nEnded: 2027-01-01T00:00:00Z", at)
+	if got := EscalatedEndTime(note); !got.Equal(at) {
+		t.Errorf("EscalatedEndTime = %v, want the real end %v", got, at)
+	}
+}
+
 func TestReadyNoteLastBlockWins(t *testing.T) {
 	t.Parallel()
 	old := sampleWork()

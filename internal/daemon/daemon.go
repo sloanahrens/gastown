@@ -3990,6 +3990,11 @@ type workBeadState struct {
 	// it carries none. It is the end of the run that made the submission, which
 	// the overrun guard dates a rework from (gt-chd44).
 	submittedAt time.Time
+	// escalatedAt is the time on the bead's last ESCALATED RUN END block, zero
+	// when it carries none. gt done writes it when a seat exits ESCALATED, the
+	// exit that submits nothing for a lost done event to be repaired from; the
+	// overrun guard dates the next dispatch from it (gt-ntvac).
+	escalatedAt time.Time
 }
 
 // workBeadState reads beadID once through the town's routing environment.
@@ -4002,6 +4007,7 @@ func (d *Daemon) workBeadState(beadID string) (workBeadState, error) {
 	st.updated, _ = time.Parse(time.RFC3339, issue.UpdatedAt)
 	st.labels = issue.Labels
 	st.submittedAt = land.ReadyBlockTime(issue.Notes)
+	st.escalatedAt = land.EscalatedEndTime(issue.Notes)
 	if issue.Status == "closed" {
 		st.closed = true
 		return st, nil

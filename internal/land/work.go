@@ -68,6 +68,14 @@ const (
 
 	// ReadyNoteMarker opens the notes block gt done writes to say what to land.
 	ReadyNoteMarker = "READY TO LAND"
+
+	// EscalatedEndMarker opens the notes block gt done appends to the work bead
+	// when a seat exits ESCALATED (gt-ntvac). It is the durable run end for that
+	// exit: the seat's done event can be lost with a sandbox seat's town
+	// (gt-1m9gr), and an escalation submits nothing, so no READY TO LAND block
+	// repairs it the way a lost submission is repaired (gt-chd44). The overrun
+	// guard dates the next dispatch from it (EscalatedEndTime).
+	EscalatedEndMarker = "ESCALATED RUN END"
 )
 
 // needsPersonLabels are every label that leaves a work bead for a person. The
@@ -253,6 +261,42 @@ func SubmittedAt(issue *beads.Issue) time.Time {
 func ReadyBlockTime(notes string) time.Time {
 	if w, ok := ParseReadyNote(notes); ok {
 		return w.Submitted
+	}
+	return time.Time{}
+}
+
+// FormatEscalatedEndNote renders the block gt done appends to a work bead whose
+// seat exited ESCALATED. seat is the seat that ended, collapsed onto one line
+// like every other note field, and at is the end of its run.
+func FormatEscalatedEndNote(seat string, at time.Time) string {
+	return fmt.Sprintf("%s\nSeat: %s\nEnded: %s",
+		EscalatedEndMarker, NoteField(seat), at.UTC().Format(time.RFC3339))
+}
+
+// EscalatedEndTime returns the time on the bead's last ESCALATED RUN END block,
+// zero when the notes hold no such block or its time does not parse. A bead
+// escalated more than once carries a block per exit, and the last one is the
+// end of the run that was current. The block is the seat's own record, the same
+// trust ReadyBlockTime gives the submission it writes; a block whose time this
+// code cannot read dates nothing at all.
+func EscalatedEndTime(notes string) time.Time {
+	idx := strings.LastIndex(notes, EscalatedEndMarker+"\n")
+	if idx < 0 {
+		return time.Time{}
+	}
+	for _, line := range strings.Split(notes[idx+len(EscalatedEndMarker)+1:], "\n") {
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			break
+		}
+		if !strings.EqualFold(strings.TrimSpace(key), "ended") {
+			continue
+		}
+		at, err := time.Parse(time.RFC3339, strings.TrimSpace(value))
+		if err != nil {
+			return time.Time{}
+		}
+		return at
 	}
 	return time.Time{}
 }
