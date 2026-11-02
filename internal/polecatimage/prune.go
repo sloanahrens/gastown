@@ -5,11 +5,15 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // imagesFormat lists every tag of a repository, one per line: the per-commit
 // tags a prune keeps or drops, and the moving :dev tag beside them.
 const imagesFormat = "{{.Tag}}"
+
+// containersFormat names the image of each container, running or stopped.
+const containersFormat = "{{.Image}}"
 
 // DropRegistryAlias untags the registry reference of a per-commit tag that is
 // about to go: left behind it keeps the image on disk.
@@ -52,22 +56,61 @@ func KeepCount(v string) (int, bool) {
 // logs docker's own reason, so a running sandbox and a real error read
 // differently (gt-mexpf).
 //
+// When POLECAT_IMAGE_TRIM_CONTEXT names a Docker context, the newest-N trim
+// runs there too, and a tag a container on that engine uses is kept: the tier
+// sweep fills that engine, which nothing else trims (gt-bxp17).
+//
 // A listing it cannot read prunes nothing and says so, so a broken docker never
 // reads as "no old tags" (gt-tpg0p.7).
 func (r *Run) PruneOldImages() {
-	if r.call(r.Cfg.Docker, "info").failed() {
+	r.pruneImages("", false)
+	trimContext := r.Cfg.TrimContext
+	if trimContext == "" {
+		return
+	}
+	if !contextName(trimContext) {
+		r.Logf("images on context %s: not trimmed: not one Docker context name", trimContext)
+		return
+	}
+	r.pruneImages(trimContext, true)
+}
+
+// pruneImages is PruneOldImages on one engine: "" is the default engine, and
+// checkInUse skips a tag a container there uses, running or stopped.
+func (r *Run) pruneImages(context string, checkInUse bool) {
+	label, on := "images", ""
+	if context != "" {
+		label, on = "images on context "+context, " on context "+context
+	}
+	if res := r.dockerCall(context, "info"); res.failed() {
+		if context != "" {
+			r.Logf("%s: engine unreachable (%s); nothing pruned", label, lastLine(res.combined()))
+		}
 		return
 	}
 	keep, ok := KeepCount(r.Cfg.Keep)
 	if !ok {
-		r.Logf("images: kept every tag: POLECAT_IMAGE_KEEP=%s is not a whole number", r.Cfg.Keep)
+		r.Logf("%s: kept every tag: POLECAT_IMAGE_KEEP=%s is not a whole number", label, r.Cfg.Keep)
 		return
 	}
+	used := map[string]struct{}{}
+	if checkInUse {
+		res := r.dockerCall(context, "ps", "-a", "--format", containersFormat)
+		if res.failed() {
+			r.Logf("%s: cannot list the containers (%s); nothing pruned", label, lastLine(res.combined()))
+			return
+		}
+		for _, line := range strings.Split(res.output(), "\n") {
+			if ref := strings.TrimSpace(line); ref != "" {
+				used[ref] = struct{}{}
+			}
+		}
+	}
 	repo, _, _ := strings.Cut(r.Cfg.Image, ":")
-	devID := r.ImageID()
-	listed := r.call(r.Cfg.Docker, "images", "--format", imagesFormat, repo)
+	devID := r.imageIDOn(context, r.Cfg.Image)
+	listed := r.dockerCall(context, "images", "--format", imagesFormat, repo)
 	if listed.failed() {
-		r.Logf("images: cannot list the tags of %s (%s); nothing pruned", repo, lastLine(listed.combined()))
+		r.Logf("%s: cannot list the tags of %s (%s); nothing pruned", label, repo, lastLine(listed.combined()))
 		return
 	}
 	n := 0
@@ -80,18 +123,76 @@ func (r *Run) PruneOldImages() {
 			continue
 		}
 		ref := repo + ":" + tag
-		if id := strings.TrimSpace(r.call(r.Cfg.Docker, "image", "inspect", "--format", imageIDFormat, ref).output()); id == "" || id == devID {
+		inspected := r.dockerCall(context, "image", "inspect", "--format", imageIDFormat, ref)
+		id := strings.TrimSpace(inspected.output())
+		if id == "" {
+			if context != "" {
+				r.Logf("kept %s%s (cannot read its image id: %s)", ref, on, lastLine(inspected.combined()))
+			}
 			continue
 		}
-		if err := r.DropRegistryAlias(ref); err != nil {
+		if id == devID {
 			continue
 		}
-		if res := r.call(r.Cfg.Docker, "rmi", ref); res.failed() {
-			r.Logf("kept %s (rmi failed: %s)", ref, lastLine(res.combined()))
+		if checkInUse {
+			if _, ok := used[ref]; ok || imageInUse(used, id) {
+				r.Logf("kept %s%s (in use by a container)", ref, on)
+				continue
+			}
+		}
+		if context == "" {
+			if err := r.DropRegistryAlias(ref); err != nil {
+				continue
+			}
+		}
+		if res := r.dockerCall(context, "rmi", ref); res.failed() {
+			r.Logf("kept %s%s (rmi failed: %s)", ref, on, lastLine(res.combined()))
 			continue
 		}
-		r.Logf("removed %s", ref)
+		r.Logf("removed %s%s", ref, on)
 	}
+}
+
+// dockerCall runs docker, naming the context the call targets when one is set.
+func (r *Run) dockerCall(context string, args ...string) result {
+	if context != "" {
+		args = append([]string{"--context", context}, args...)
+	}
+	return r.call(r.Cfg.Docker, args...)
+}
+
+// imageIDOn is the image's id on the engine, "" when docker cannot read it.
+func (r *Run) imageIDOn(context, ref string) string {
+	return strings.TrimSpace(r.dockerCall(context, "image", "inspect", "--format", imageIDFormat, ref).output())
+}
+
+// contextName reports whether name can stand after docker's --context: the
+// shape the sweep runner accepts, so a typo or a leading dash keeps every tag
+// rather than reaching docker as another option.
+func contextName(name string) bool {
+	if name == "" || name == "." || name == ".." || strings.HasPrefix(name, "-") {
+		return false
+	}
+	return !strings.ContainsFunc(name, func(r rune) bool {
+		return r == '/' || r == '\\' || r == ':' || unicode.IsSpace(r) || unicode.IsControl(r)
+	})
+}
+
+// imageInUse reports whether a container on the engine uses the image: docker
+// ps names either the reference it was created with or the image id, often the
+// 12-character one.
+func imageInUse(used map[string]struct{}, id string) bool {
+	if _, ok := used[id]; ok {
+		return true
+	}
+	short := strings.TrimPrefix(id, "sha256:")
+	for ref := range used {
+		ref = strings.TrimPrefix(ref, "sha256:")
+		if len(ref) >= 12 && strings.HasPrefix(short, ref) {
+			return true
+		}
+	}
+	return false
 }
 
 // PruneBuildCache brings Docker's build cache back under Cfg.BuilderKeep by

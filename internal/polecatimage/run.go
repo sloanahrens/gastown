@@ -59,6 +59,10 @@ type Config struct {
 	// the operator wrote it: a value that is not a count stops that prune alone,
 	// never a build or a publish (POLECAT_IMAGE_KEEP, gt-tpg0p.7).
 	Keep string
+	// TrimContext names the Docker context the tag prune runs on beside the
+	// default engine; empty trims the default engine alone
+	// (POLECAT_IMAGE_TRIM_CONTEXT, gt-bxp17).
+	TrimContext string
 	// BuilderKeep is how much of the build cache the trim leaves, as docker's
 	// --keep-storage value (POLECAT_IMAGE_BUILDER_KEEP).
 	BuilderKeep string

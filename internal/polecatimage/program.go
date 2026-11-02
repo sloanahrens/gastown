@@ -83,6 +83,7 @@ func ConfigFromEnv(get func(string) string) (Config, error) {
 		// a run (gt-efupr).
 		FailClosed:         get("POLECAT_IMAGE_FAIL_CLOSED") == "1",
 		Keep:               envOr(get, "POLECAT_IMAGE_KEEP", "3"),
+		TrimContext:        get("POLECAT_IMAGE_TRIM_CONTEXT"),
 		BuilderKeep:        envOr(get, "POLECAT_IMAGE_BUILDER_KEEP", "8GB"),
 		CacheCap:           envOr(get, "POLECAT_CACHE_CAP", "10GB"),
 		RegistryKeep:       envOr(get, "POLECAT_IMAGE_REGISTRY_KEEP", registryKeepDefault),

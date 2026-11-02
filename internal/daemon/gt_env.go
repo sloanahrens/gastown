@@ -35,3 +35,29 @@ func PublishIdentity() {
 	}
 	processEnv{}.Setenv("BD_ACTOR", daemonActor)
 }
+
+// polecatImageTrimContextEnv names the engine the polecat-image plugin trims
+// beside the default one (gt-bxp17).
+const polecatImageTrimContextEnv = "POLECAT_IMAGE_TRIM_CONTEXT"
+
+// applyDaemonEnv publishes the patrol config's env to this process and, with
+// it, the engine the polecat-image plugin trims beside the default one: the
+// plugin runs as a child of the daemon and reads the context from there
+// (gt-bxp17). A secret's value is redacted in the log line, never printed.
+func applyDaemonEnv(cfg *DaemonPatrolConfig, source string, setenv func(string, string), logf func(string, ...any)) {
+	if cfg == nil {
+		return
+	}
+	for k, v := range cfg.Env {
+		setenv(k, v)
+		if agentconfig.LooksLikeSecret(k, v) {
+			logf("Set env %s=<redacted> from %s", k, source)
+		} else {
+			logf("Set env %s=%s from %s", k, v, source)
+		}
+	}
+	if trimContext := polecatImageTrimContext(cfg); trimContext != "" {
+		setenv(polecatImageTrimContextEnv, trimContext)
+		logf("Set env %s=%s from %s (the tier sweep runner's context)", polecatImageTrimContextEnv, trimContext, source)
+	}
+}

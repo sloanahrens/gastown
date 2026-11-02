@@ -1723,6 +1723,22 @@ func tierSweepRunnerConfig(patrols *DaemonPatrolConfig) *config.TierSweepRunnerC
 	return patrols.Patrols.TierSweep.Runner
 }
 
+// polecatImageTrimContext is the Docker context the polecat-image plugin trims
+// beside the default engine: the sweep runner's context when the sweep runs on
+// an engine of its own, so the images the sweep loads are trimmed where they
+// land (gt-bxp17). Empty when the tiers run on the host.
+func polecatImageTrimContext(patrols *DaemonPatrolConfig) string {
+	runner := tierSweepRunnerConfig(patrols)
+	if runner == nil {
+		return ""
+	}
+	switch runner.Backend {
+	case config.TierSweepRunnerDocker, config.TierSweepRunnerKubernetes:
+		return runner.Context
+	}
+	return ""
+}
+
 // tierSweepRunnerImage is the image a run's containers use: the pin the config
 // names, or, when it names none or asks for the installed build, the polecat
 // image make polecat-image publishes at the installed gt's build revision. An
