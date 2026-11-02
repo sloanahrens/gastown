@@ -143,10 +143,14 @@ decides and reports without slinging, labeling or commenting.
    — and neither does a peer whose own design and notes could not be read: an
    unread claim names no full path, so the tick slings past it and notes the
    peer rather than letting the unknown claim look idle, and any conflict
-   resolves at the merge (gt-dnp9c). Two beads naming different tests
-   of one file (`TestFoo` against `TestBar`) target different assertions and do
-   not hold each other, and a bead naming no test file claims nothing. Before
-   changing what holds, read `specdispatch.TargetClaimHold`. A claim set the
+   resolves at the merge (gt-dnp9c). A peer in flight is a polecat seat's bead
+   that is not a handoff note: a handoff bead and a crew session's bead wear an
+   in-flight status for as long as that session runs, though nothing is being
+   built on the file, so neither claims a target (gt-d5f5q). Two beads naming
+   different tests of one file (`TestFoo` against `TestBar`) target different
+   assertions and do not hold each other, and a bead naming no test file
+   claims nothing. Before changing what holds, read
+   `specdispatch.TargetClaimHold`. A claim set the
    tick cannot read holds too: only a positive answer that nothing claims the
    target dispatches. The sling-time guard still runs for a dispatch, and the
    overlap it would refuse is dropped from the report rather than refusing the

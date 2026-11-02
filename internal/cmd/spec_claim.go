@@ -33,9 +33,12 @@ func specCandidateClaim(spec specdispatch.Spec) specdispatch.Claimant {
 // the two sides of the comparison cannot disagree about what a bead names.
 func claimOf(c duplicateCandidate) specdispatch.Claimant {
 	return specdispatch.Claimant{
-		ID:        c.ID,
-		Status:    c.Status,
-		Assignee:  c.Ready.Assignee,
+		ID:       c.ID,
+		Status:   c.Status,
+		Assignee: c.Ready.Assignee,
+		// Labels come from the list row, so a handoff note is recognised as
+		// one even when its design and notes went unread (gt-d5f5q).
+		Labels:    c.Ready.Labels,
 		Priority:  c.Priority,
 		CreatedAt: c.CreatedAt,
 		ClosedAt:  c.ClosedAt,

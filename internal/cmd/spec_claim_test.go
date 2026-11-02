@@ -278,6 +278,53 @@ func TestSpecDispatchDoesNotHoldALandedPeer(t *testing.T) {
 	}
 }
 
+// TestSpecDispatchDoesNotHoldForACrewOrHandoffPeer drives gt-d5f5q through the
+// production pool: a handoff note and a crew session's bead carry an in-flight
+// status while nothing is being built on the candidate's test file, so neither
+// is a peer it waits behind. The list row is what carries the label and the
+// assignee, so this also pins claimOf's wiring of them.
+func TestSpecDispatchDoesNotHoldForACrewOrHandoffPeer(t *testing.T) {
+	t.Parallel()
+	const claimFile = "internal/bdshim/differential_helpers_test.go"
+	body := "- `" + claimFile + "` only."
+	for _, tc := range []struct {
+		name     string
+		labels   []string
+		assignee string
+	}{
+		// The label is the only thing that tells this bead from work: its
+		// assignee is a polecat seat.
+		{name: "a handoff note on a seat", labels: []string{"handoff"}, assignee: "gastown/polecats/dipper"},
+		{name: "a crew session's bead", assignee: "town/crew/overseer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			peer := beads.Issue{
+				ID: "gt-peer", Title: "Session notes", Status: "in_progress",
+				Assignee: tc.assignee, Labels: tc.labels, Priority: 2,
+				CreatedAt: "2026-11-01T09:00:00Z", Description: body,
+			}
+			peers := peerClaims(t, peer)
+			candidate := cleanSpec("gt-new", 2, "2026-11-02T12:00:00Z")
+			candidate.Description = specConstraints(&body)
+
+			f := newFakeSpecTown(candidate)
+			f.claims = map[string][]specdispatch.Claimant{"gt-new": peers}
+			env := f.env()
+			env.ShapeGate = specdispatch.ShapeGateOff
+
+			r := runSpecDispatchCycle(env)
+
+			if len(f.slung) != 1 {
+				t.Fatalf("slung %v, want the candidate to dispatch past %s (%+v)", f.slung, tc.assignee, r.Skipped)
+			}
+			if len(r.Skipped) != 0 {
+				t.Fatalf("skipped = %+v, want none", r.Skipped)
+			}
+		})
+	}
+}
+
 // TestSpecTargetClaimsFailsOnAnUnreadableRig is the production half of the
 // no-fail-open rule: the claim set the tick reads is an error when the rig's
 // beads directory cannot be resolved or its pool will not load, which the tick
