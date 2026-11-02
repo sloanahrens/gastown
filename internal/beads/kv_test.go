@@ -3,6 +3,7 @@ package beads
 import (
 	"errors"
 	"maps"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -105,6 +106,59 @@ func TestKVGetFailureWithoutAFoundFalseAnswerIsNotNotFound(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A failed kv set names bd's reason instead of leaving only an exit status:
+// bd writes the reason to stderr, or in machine mode only to the error
+// envelope on stdout (gt-gjuvg). A reason the error already carries is not
+// repeated, and nothing is added when bd gave no reason to add.
+func TestKVSetErrorCarriesBdStderr(t *testing.T) {
+	t.Parallel()
+	const reason = "invalid key: key cannot start with 'kv.' (would create nested prefix)"
+	envelope := `{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":{"kind":"internal","message":"` + reason + `"}}`
+	for name, tt := range map[string]struct {
+		stdout, stderr string
+		wantReason     bool
+	}{
+		"stderr":                 {stderr: "Error: " + reason, wantReason: true},
+		"machine envelope":       {stdout: envelope, wantReason: true},
+		"reason already carried": {stdout: envelope, stderr: "Error: " + reason, wantReason: true},
+		"no envelope":            {},
+		"unreadable envelope":    {stdout: "not json"},
+		"empty reason":           {stdout: `{"error":{"kind":"internal","message":""}}`},
+		"non-string error value": {stdout: `{"error":42}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			rec := newRecorder(func([]string) reply {
+				return reply{stdout: tt.stdout, stderr: tt.stderr, err: errors.New("exit status 1")}
+			})
+			err := newRecordedBeads(t.TempDir(), rec).KVSet("custom.contract_probe", "first")
+			if err == nil {
+				t.Fatal("KVSet = nil, want the run error")
+			}
+			got := strings.Count(err.Error(), reason)
+			if tt.wantReason && got != 1 {
+				t.Errorf("KVSet failure = %q, want bd's reason once, got it %d times", err, got)
+			}
+			if !tt.wantReason && got != 0 {
+				t.Errorf("KVSet failure = %q, want no reason bd did not give, got it %d times", err, got)
+			}
+			if !errors.Is(err, ErrUnavailable) {
+				t.Errorf("KVSet failure = %v, want the run error kept", err)
+			}
+		})
+	}
+	t.Run("bd not installed", func(t *testing.T) {
+		t.Parallel()
+		rec := newRecorder(func([]string) reply {
+			return reply{err: &exec.Error{Name: "bd", Err: exec.ErrNotFound}}
+		})
+		err := newRecordedBeads(t.TempDir(), rec).KVSet("custom.contract_probe", "first")
+		if !errors.Is(err, ErrNotInstalled) {
+			t.Errorf("KVSet with no bd = %v, want ErrNotInstalled", err)
+		}
+	})
 }
 
 // A set key still reads as its value on a clean exit.
