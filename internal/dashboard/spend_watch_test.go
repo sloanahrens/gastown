@@ -100,6 +100,25 @@ func TestSpendFileWriteIsAtomic(t *testing.T) {
 		assert.Empty(t, spendTemps(t, dir), "a temporary file was left beside the reading")
 	})
 
+	t.Run("another hub's in-flight temporary file is left alone", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		// A second hub writing the same town holds its own temporary file. The
+		// name seeded here is the fixed one a writer would otherwise truncate and
+		// rename over, which is the collision gt-h7vex fixes.
+		other := filepath.Join(dir, spendWatchName+".tmp")
+		require.NoError(t, os.WriteFile(other, []byte("the other hub's reading in flight"), 0o644))
+
+		require.NoError(t, writeSpendWatch(dir, spendReport(t, 74.55, 1.25, 2.5), spendWatchNow))
+
+		data, err := os.ReadFile(other)
+		require.NoError(t, err, "the writer took the other hub's temporary file")
+		assert.Equal(t, "the other hub's reading in flight", string(data), "the writer overwrote the other hub's temporary file")
+		doc, _ := readSpendWatch(t, dir)
+		require.NotNil(t, doc.Balance)
+		assert.InDelta(t, 74.55, *doc.Balance, 1e-9)
+	})
+
 	t.Run("a report with no balance writes nothing", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
@@ -129,6 +148,11 @@ func TestSpendFileWriteIsAtomic(t *testing.T) {
 
 	t.Run("a failed write leaves the old file intact", func(t *testing.T) {
 		t.Parallel()
+		// Root writes into a directory whatever its mode, so the 0500 fixture
+		// below cannot refuse the write for it; the subtest needs a non-root run.
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses the directory's write bit, so the 0500 fixture cannot refuse the write")
+		}
 		dir := t.TempDir()
 		path := filepath.Join(dir, spendWatchName)
 		require.NoError(t, os.WriteFile(path, []byte(oldDoc), 0o644))

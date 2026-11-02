@@ -51,13 +51,28 @@ func writeSpendWatch(dir string, report json.RawMessage, now time.Time) error {
 		return fmt.Errorf("spend watch: creating %s: %w", dir, err)
 	}
 	path := filepath.Join(dir, spendWatchName)
-	// The temporary name is fixed and its write truncates, so a run that died
-	// mid-write leaves a file the next one overwrites rather than a directory
-	// that fills with them.
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	// The temporary file takes a unique name beside the target, so two hubs
+	// writing the same town each rename their own reading and neither renames
+	// over a temporary file the other is still writing. A run that died mid-write
+	// leaves its own *.tmp behind, where the fixed name used to be overwritten by
+	// the next run.
+	f, err := os.CreateTemp(dir, spendWatchName+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("spend watch: writing %s: %w", dir, err)
+	}
+	tmp := f.Name()
+	_, werr := f.Write(data)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	// CreateTemp makes the file 0600; set it to the 0644 the watch file has
+	// always had.
+	if werr == nil {
+		werr = os.Chmod(tmp, 0o644)
+	}
+	if werr != nil {
 		removeSpendTemp(tmp)
-		return fmt.Errorf("spend watch: writing %s: %w", tmp, err)
+		return fmt.Errorf("spend watch: writing %s: %w", tmp, werr)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		removeSpendTemp(tmp)
