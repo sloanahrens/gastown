@@ -1,0 +1,73 @@
+package config
+
+import (
+	"strings"
+	"testing"
+)
+
+// TestScheduledMaintenanceArchiveDir: archive_dir survives strict decoding into
+// the field the daemon reads, parses to a clean absolute path, and is empty when
+// unset. A relative path is refused rather than resolved against the daemon's
+// working directory, which is not the operator's (gt-7nxj4).
+func TestScheduledMaintenanceArchiveDir(t *testing.T) {
+	t.Parallel()
+	body := `{"patrols":{"scheduled_maintenance":{"enabled":true,"window":"03:00","archive_dir":"/home/op/gt-archive"}}}`
+	var cfg DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if cfg.Patrols.ScheduledMaintenance == nil {
+		t.Fatal("scheduled_maintenance decoded as absent")
+	}
+	got, err := cfg.Patrols.ScheduledMaintenance.ParseArchiveDir()
+	if err != nil {
+		t.Fatalf("ParseArchiveDir: %v", err)
+	}
+	if want := "/home/op/gt-archive"; got != want {
+		t.Errorf("archive_dir = %q, want %q", got, want)
+	}
+
+	// Unset means archiving is off, and an absent section reads the same way.
+	if got, err := (&ScheduledMaintenanceConfig{}).ParseArchiveDir(); got != "" || err != nil {
+		t.Errorf("unset archive_dir = %q, %v; want empty, nil", got, err)
+	}
+	var absent *ScheduledMaintenanceConfig
+	if got, err := absent.ParseArchiveDir(); got != "" || err != nil {
+		t.Errorf("absent scheduled_maintenance section = %q, %v; want empty, nil", got, err)
+	}
+
+	tests := []struct {
+		name    string
+		dir     string
+		want    string
+		wantErr bool
+	}{
+		{name: "absolute", dir: "/srv/gt-archive", want: "/srv/gt-archive"},
+		{name: "cleaned", dir: "/home/op/../op/gt-archive", want: "/home/op/gt-archive"},
+		{name: "trimmed", dir: "  /srv/gt-archive  ", want: "/srv/gt-archive"},
+		{name: "relative", dir: "archive/dolt", wantErr: true},
+		{name: "tilde is not absolute", dir: "~/gt-archive", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c := &ScheduledMaintenanceConfig{ArchiveDir: tt.dir}
+			got, err := c.ParseArchiveDir()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ParseArchiveDir(%q) = %q, want an error", tt.dir, got)
+				}
+				if !strings.Contains(err.Error(), "patrols.scheduled_maintenance.archive_dir") {
+					t.Errorf("error %q does not name the field", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseArchiveDir(%q): %v", tt.dir, err)
+			}
+			if got != tt.want {
+				t.Errorf("ParseArchiveDir(%q) = %q, want %q", tt.dir, got, tt.want)
+			}
+		})
+	}
+}

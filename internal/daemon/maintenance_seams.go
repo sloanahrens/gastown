@@ -35,6 +35,12 @@ type maintenanceSeams struct {
 	backupRoot func() (string, error)
 	// backupExec copies one database into the backup directory dest.
 	backupExec func(ctx context.Context, d *Daemon, db, dest string) error
+	// archiveRead reads a database's dolt_log rows after the history archive's
+	// watermark, oldest first (a read-only SELECT).
+	archiveRead func(ctx context.Context, d *Daemon, db string, after ArchiveWatermark) ([]archiveCommit, error)
+	// archiveEventsRead reads up to limit of a database's events rows after the
+	// events archive's watermark, oldest first (a read-only SELECT).
+	archiveEventsRead func(ctx context.Context, d *Daemon, db string, after EventsArchiveWatermark, limit int) (archiveEvents, error)
 	// quiet is the quiet-window guard, re-checked before each database.
 	quiet func(d *Daemon) (bool, string)
 	// slotHolders lists the roles holding a container-gate slot.
@@ -86,6 +92,16 @@ func (d *Daemon) maintenance() maintenanceSeams {
 	if s.backupExec == nil {
 		s.backupExec = func(ctx context.Context, d *Daemon, db, dest string) error {
 			return d.doltBackupSyncURL(ctx, db, dest)
+		}
+	}
+	if s.archiveRead == nil {
+		s.archiveRead = func(ctx context.Context, d *Daemon, db string, after ArchiveWatermark) ([]archiveCommit, error) {
+			return d.doltArchiveLog(ctx, db, after)
+		}
+	}
+	if s.archiveEventsRead == nil {
+		s.archiveEventsRead = func(ctx context.Context, d *Daemon, db string, after EventsArchiveWatermark, limit int) (archiveEvents, error) {
+			return d.doltArchiveEvents(ctx, db, after, limit)
 		}
 	}
 	if s.quiet == nil {

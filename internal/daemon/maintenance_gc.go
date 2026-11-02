@@ -144,6 +144,17 @@ type maintenanceGCState struct {
 	// every few hours and an alert whose condition ended while it was down
 	// still has to be cleared (gt-g49yk).
 	StaleGCAlerts map[string]bool `json:"stale_gc_alerts,omitempty"`
+
+	// ArchiveWatermarks is, per database, the commit the history archive last
+	// wrote out (scheduled_maintenance_archive.go, gt-7nxj4). The next run
+	// reads commits after it.
+	ArchiveWatermarks map[string]ArchiveWatermark `json:"archive_watermarks,omitempty"`
+
+	// ArchiveEventsWatermarks is, per database, the newest events row the
+	// history archive last wrote out. The events table is in Dolt's
+	// dolt_ignore list, so it is in no commit and no backup: this cursor is
+	// the live server's only durable position (gt-7nxj4).
+	ArchiveEventsWatermarks map[string]EventsArchiveWatermark `json:"archive_events_watermarks,omitempty"`
 }
 
 // gcDeferral records one window's deferral: when the window closes, why the
@@ -172,11 +183,13 @@ func maintenanceGCStatePath(townRoot string) string {
 // non-destructive, so "no baseline" is a safe reading).
 func loadMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
 	st := maintenanceGCState{
-		PostGCBytes:       map[string]int64{},
-		PostGCOldGenBytes: map[string]int64{},
-		ReclaimedBytes:    map[string]int64{},
-		LastGC:            map[string]time.Time{},
-		StaleGCAlerts:     map[string]bool{},
+		PostGCBytes:             map[string]int64{},
+		PostGCOldGenBytes:       map[string]int64{},
+		ReclaimedBytes:          map[string]int64{},
+		LastGC:                  map[string]time.Time{},
+		StaleGCAlerts:           map[string]bool{},
+		ArchiveWatermarks:       map[string]ArchiveWatermark{},
+		ArchiveEventsWatermarks: map[string]EventsArchiveWatermark{},
 	}
 	data, err := os.ReadFile(maintenanceGCStatePath(townRoot))
 	if err != nil {
@@ -207,6 +220,12 @@ func loadMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
 	st.DeferralReasons = parsed.DeferralReasons
 	for k, v := range parsed.StaleGCAlerts {
 		st.StaleGCAlerts[k] = v
+	}
+	for k, v := range parsed.ArchiveWatermarks {
+		st.ArchiveWatermarks[k] = v
+	}
+	for k, v := range parsed.ArchiveEventsWatermarks {
+		st.ArchiveEventsWatermarks[k] = v
 	}
 	return st, nil
 }
@@ -710,7 +729,11 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time) {
 
 	d.maintenance().dispatch(func() {
 		defer d.maintenanceGCRunning.Store(false)
-		// Backup first (maintenance_backup.go); the gc only runs once the
+		// Archive first (scheduled_maintenance_archive.go): dolt_log is copied to
+		// the history archive before the gc it has to survive. Its per-database
+		// failures are contained inside the step.
+		d.maintenanceArchive(databases)
+		// Backup next (maintenance_backup.go); the gc only runs once the
 		// night's backup is on disk.
 		res := d.maintenanceBackup(databases)
 		if res.outcome == gcOutcomeCompleted {

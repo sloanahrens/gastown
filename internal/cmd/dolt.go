@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	gtconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/doltpause"
@@ -604,13 +606,13 @@ func runDoltStatus(cmd *cobra.Command, args []string) error {
 			databases, dbLabel := statusDatabases(served, verifyErr, state.Databases)
 			if len(databases) > 0 {
 				owners := doltserver.CollectDatabaseOwners(townRoot)
+				notes, noteErr := archiveNotes(townRoot, config, databases)
+				if noteErr != nil {
+					fmt.Printf("  %s Archive watermarks unreadable: %v\n", style.Bold.Render("!"), noteErr)
+				}
 				fmt.Printf("  %s\n", dbLabel)
 				for _, db := range databases {
-					if owner, ok := owners[db]; ok {
-						fmt.Printf("    - %-20s (%s)\n", db, owner)
-					} else {
-						fmt.Printf("    - %s\n", db)
-					}
+					fmt.Println(databaseStatusLine(db, owners[db], notes[db]))
 				}
 			}
 			fmt.Printf("  Connection: %s\n", doltserver.GetConnectionString(townRoot))
@@ -774,6 +776,159 @@ func statusDatabases(served []string, verifyErr error, cached []string) ([]strin
 		return cached, "Databases (cached at server start; live query failed):"
 	}
 	return served, "Databases (live):"
+}
+
+// databaseStatusLine renders one database's line in `gt dolt status`, with the
+// history archive note when it has one.
+func databaseStatusLine(db, owner, note string) string {
+	if note != "" {
+		note = "; " + note
+	}
+	if owner != "" {
+		return fmt.Sprintf("    - %-20s (%s)%s", db, owner, note)
+	}
+	return fmt.Sprintf("    - %s%s", db, note)
+}
+
+// archiveNotes returns the history archive notes for every listed database that
+// has a watermark: "archived through <date>, N commits behind" for its commits
+// and "events archived through <created_at>, N events behind" for its events.
+// An unreadable watermark file is an error so the caller can say so; a
+// database whose count cannot be read carries the error instead of a zero that
+// reads as caught up.
+func archiveNotes(townRoot string, config *doltserver.Config, databases []string) (map[string]string, error) {
+	wms, err := daemon.LoadArchiveWatermarks(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return archiveBehindNotes(ctx, doltArchiveReader{config: config}, wms, databases), nil
+}
+
+// archiveBehindReader counts the rows newer than a database's archive
+// watermarks.
+type archiveBehindReader interface {
+	commitsBehind(ctx context.Context, db string, wm daemon.ArchiveWatermark) (int64, error)
+	eventsBehind(ctx context.Context, db string, wm daemon.EventsArchiveWatermark) (int64, error)
+}
+
+// archiveBehindNotes renders the archive notes for each listed database that
+// has a watermark.
+func archiveBehindNotes(ctx context.Context, reader archiveBehindReader, wms daemon.ArchiveWatermarks, databases []string) map[string]string {
+	notes := make(map[string]string, len(databases))
+	for _, db := range databases {
+		var parts []string
+		if wm, ok := wms.Commits[db]; ok {
+			parts = append(parts, commitArchiveNote(ctx, reader, db, wm))
+		}
+		if wm, ok := wms.Events[db]; ok {
+			parts = append(parts, eventsArchiveNote(ctx, reader, db, wm))
+		}
+		if len(parts) > 0 {
+			notes[db] = strings.Join(parts, "; ")
+		}
+	}
+	return notes
+}
+
+// commitArchiveNote renders one database's commit archive note.
+func commitArchiveNote(ctx context.Context, reader archiveBehindReader, db string, wm daemon.ArchiveWatermark) string {
+	through := wm.Date.UTC().Format("2006-01-02")
+	behind, err := reader.commitsBehind(ctx, db, wm)
+	if err != nil {
+		return fmt.Sprintf("archived through %s, behind count unavailable: %v", through, err)
+	}
+	return fmt.Sprintf("archived through %s, %s", through, commitsBehindText(behind))
+}
+
+// eventsArchiveNote renders one database's events archive note.
+func eventsArchiveNote(ctx context.Context, reader archiveBehindReader, db string, wm daemon.EventsArchiveWatermark) string {
+	through := wm.CreatedAt
+	behind, err := reader.eventsBehind(ctx, db, wm)
+	if err != nil {
+		return fmt.Sprintf("events archived through %s, behind count unavailable: %v", through, err)
+	}
+	return fmt.Sprintf("events archived through %s, %s", through, eventsBehindText(behind))
+}
+
+// commitsBehindText renders how many commits an archive has not written out.
+func commitsBehindText(n int64) string {
+	if n == 1 {
+		return "1 commit behind"
+	}
+	return fmt.Sprintf("%d commits behind", n)
+}
+
+// eventsBehindText renders how many events rows an archive has not written out.
+func eventsBehindText(n int64) string {
+	if n == 1 {
+		return "1 event behind"
+	}
+	return fmt.Sprintf("%d events behind", n)
+}
+
+// doltArchiveReader counts archive lag against the live server.
+type doltArchiveReader struct {
+	config *doltserver.Config
+}
+
+// commitsBehind counts db's dolt_log rows newer than the watermark, by the
+// same (date, commit_hash) order the archive writes them in.
+func (r doltArchiveReader) commitsBehind(ctx context.Context, db string, wm daemon.ArchiveWatermark) (int64, error) {
+	if !dbNameRe.MatchString(db) {
+		return 0, fmt.Errorf("database name %q is not a plain identifier — refusing to query it", db)
+	}
+	dsn := buildDoltDSNFromConfig(r.config, db, dsnOpts{
+		ParseTime:    true,
+		Timeout:      "5s",
+		ReadTimeout:  "10s",
+		WriteTimeout: "10s",
+	})
+	conn, err := beadsql.Open(ctx, dsn, db)
+	if err != nil {
+		return 0, fmt.Errorf("database %q not readable: %w", db, err)
+	}
+	defer conn.Close()
+
+	var count int64
+	query := "SELECT COUNT(*) FROM dolt_log WHERE date > ? OR (date = ? AND commit_hash > ?)"
+	if err := conn.QueryRowContext(ctx, query, wm.Date, wm.Date, wm.Hash).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// eventsBehind counts db's events rows newer than the watermark, by the same
+// (created_at, id) order the archive writes them in. A watermark the query
+// cannot compare is refused rather than matched against no row.
+func (r doltArchiveReader) eventsBehind(ctx context.Context, db string, wm daemon.EventsArchiveWatermark) (int64, error) {
+	if !dbNameRe.MatchString(db) {
+		return 0, fmt.Errorf("database name %q is not a plain identifier — refusing to query it", db)
+	}
+	if err := wm.Validate(); err != nil {
+		return 0, err
+	}
+	dsn := buildDoltDSNFromConfig(r.config, db, dsnOpts{
+		Timeout:      "5s",
+		ReadTimeout:  "10s",
+		WriteTimeout: "10s",
+	})
+	conn, err := beadsql.Open(ctx, dsn, db)
+	if err != nil {
+		return 0, fmt.Errorf("database %q not readable: %w", db, err)
+	}
+	defer conn.Close()
+
+	query, err := beadsql.CountEventsAfter(db, wm.CreatedAt, wm.ID).Inline()
+	if err != nil {
+		return 0, err
+	}
+	var count int64
+	if err := conn.QueryRowContext(ctx, query).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func currentBeadsRuntimeConfig() (doltserver.BeadsRuntimeConfig, bool) {

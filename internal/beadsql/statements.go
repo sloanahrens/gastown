@@ -539,3 +539,52 @@ func BackupEvents(database, since string) Query {
 	}
 	return declared(text + " ORDER BY created_at, id")
 }
+
+// eventsAfter is the WHERE clause selecting the rows after the (created_at, id)
+// cursor. An empty cursor is the start of the table; one Dolt cannot compare is
+// refused rather than spliced in, because a literal it cannot compare matches
+// no row and reads as "nothing new" (gt-7nxj4).
+func eventsAfter(afterCreatedAt, afterID string) (string, error) {
+	if afterCreatedAt == "" && afterID == "" {
+		return "", nil
+	}
+	if !TimestampLiteral(afterCreatedAt) {
+		return "", fmt.Errorf("beadsql: invalid events cursor %q", afterCreatedAt)
+	}
+	if _, err := strconv.ParseInt(afterID, 10, 64); err != nil {
+		return "", fmt.Errorf("beadsql: invalid events cursor id %q", afterID)
+	}
+	return " WHERE created_at > " + quote(afterCreatedAt) +
+		" OR (created_at = " + quote(afterCreatedAt) + " AND id > " + afterID + ")", nil
+}
+
+// ArchiveEvents reads every column of database's events rows after the
+// (created_at, id) cursor, oldest first, at most limit rows: one batch of the
+// history archive's events export (gt-7nxj4).
+func ArchiveEvents(database, afterCreatedAt, afterID string, limit int) Query {
+	if err := ident(database); err != nil {
+		return Query{err: err}
+	}
+	if limit <= 0 {
+		return Query{err: fmt.Errorf("beadsql: events limit %d is not positive", limit)}
+	}
+	where, err := eventsAfter(afterCreatedAt, afterID)
+	if err != nil {
+		return Query{err: err}
+	}
+	return declared("SELECT * FROM `" + database + "`.events" + where +
+		" ORDER BY created_at, id LIMIT " + strconv.Itoa(limit))
+}
+
+// CountEventsAfter counts database's events rows after the (created_at, id)
+// cursor: the rows the history archive has not written out (gt-7nxj4).
+func CountEventsAfter(database, afterCreatedAt, afterID string) Query {
+	if err := ident(database); err != nil {
+		return Query{err: err}
+	}
+	where, err := eventsAfter(afterCreatedAt, afterID)
+	if err != nil {
+		return Query{err: err}
+	}
+	return declared("SELECT COUNT(*) AS cnt FROM `" + database + "`.events" + where)
+}

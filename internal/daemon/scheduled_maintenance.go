@@ -14,9 +14,11 @@ import (
 // nothing rewrites history: flatten is an offline operator procedure
 // (docs/dolt-history-offline.md). Dolt's own auto-GC stays on.
 //
-// Before the gc, the same window takes the nightly backup of every database
-// to ~/gt-backups/dolt (maintenance_backup.go, gt-8z769.5); the gc runs only
-// once that night's backup is on disk.
+// Before the gc, the same window appends each database's new dolt_log commits
+// and events rows to the history archive (scheduled_maintenance_archive.go,
+// gt-7nxj4) and takes the nightly backup of every database to
+// ~/gt-backups/dolt (maintenance_backup.go, gt-8z769.5); the gc runs only once
+// that night's backup is on disk.
 
 const (
 	// defaultMaintenanceCheckInterval is how often the daemon checks if it's
