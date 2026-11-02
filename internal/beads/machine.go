@@ -45,6 +45,21 @@ type machineError struct {
 // malformed, and reading its fields as the data would answer a store bd never
 // reported (gt-ij4fl).
 func decodeMachineEnvelope(out []byte, what string) (env machineEnvelope, ok bool, err error) {
+	env, ok, err = readMachineEnvelope(out, what)
+	if err != nil || !ok {
+		return env, ok, err
+	}
+	if env.Error != nil && env.Error.Kind != "" {
+		return env, true, fmt.Errorf("%s: bd reported %s: %s", what, env.Error.Kind, env.Error.Message)
+	}
+	return env, true, nil
+}
+
+// readMachineEnvelope is decodeMachineEnvelope without the error-kind refusal:
+// it returns an envelope's data even when the envelope also carries an error
+// object. Only a caller that reads a failed call's answer uses it (gt-kxny5);
+// every other caller takes decodeMachineEnvelope.
+func readMachineEnvelope(out []byte, what string) (env machineEnvelope, ok bool, err error) {
 	if err := RequireJSON(out, what); err != nil {
 		return env, false, err
 	}
@@ -64,9 +79,6 @@ func decodeMachineEnvelope(out []byte, what string) (env machineEnvelope, ok boo
 	}
 	if err := json.Unmarshal(trimmed, &env); err != nil {
 		return env, false, fmt.Errorf("%s: parsing bd machine envelope: %w", what, err)
-	}
-	if env.Error != nil && env.Error.Kind != "" {
-		return env, true, fmt.Errorf("%s: bd reported %s: %s", what, env.Error.Kind, env.Error.Message)
 	}
 	return env, true, nil
 }

@@ -48,12 +48,14 @@ func TestKVGetOfAnUnsetKeyIsNotFound(t *testing.T) {
 
 // bd answers an unset key with the found=false payload and then exits 1. The
 // answer is still an absence, whether bd printed the envelope or the bare
-// object, and never the run error (gt-wy9tn).
+// object, and never the run error (gt-wy9tn). In machine mode the envelope
+// carries the answer and an error object for the failed exit (gt-kxny5).
 func TestKVGetOfAnUnsetKeyThatExitsOneIsNotFound(t *testing.T) {
 	t.Parallel()
 	for name, stdout := range map[string]string{
-		"bare object": `{"found":false,"key":"custom.probe","schema_version":1,"value":""}`,
-		"envelope":    `{"schema_version":1,"contract_version":1,"data":{"found":false,"key":"custom.probe","value":""},"pagination":null,"error":null}`,
+		"bare object":                `{"found":false,"key":"custom.probe","schema_version":1,"value":""}`,
+		"envelope":                   `{"schema_version":1,"contract_version":1,"data":{"found":false,"key":"custom.probe","value":""},"pagination":null,"error":null}`,
+		"envelope with error object": `{"schema_version":1,"contract_version":1,"data":{"found":false,"key":"kv.contract_probe","value":""},"pagination":null,"error":{"kind":"internal","message":"command failed with exit status 1; details are on stderr"}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -73,18 +75,24 @@ func TestKVGetOfAnUnsetKeyThatExitsOneIsNotFound(t *testing.T) {
 
 // A failing exit with no found=false answer behind it stays the run error:
 // nothing, garbage, found=true and any JSON that is not an explicit found=false
-// are none of them an absence.
+// are none of them an absence. That holds for an envelope with an error object
+// too: only data.found=false makes an absence (gt-kxny5).
 func TestKVGetFailureWithoutAFoundFalseAnswerIsNotNotFound(t *testing.T) {
 	t.Parallel()
 	for name, stdout := range map[string]string{
-		"nothing":             "",
-		"garbage":             "panic: nil pointer dereference",
-		"found under a fail":  `{"found":true,"key":"custom.probe","value":"x","schema_version":1}`,
-		"empty object":        `{}`,
-		"error object":        `{"error":"store unavailable"}`,
-		"null":                `null`,
-		"envelope, no found":  `{"schema_version":1,"contract_version":1,"data":{"key":"custom.probe"},"pagination":null,"error":null}`,
-		"envelope, null data": `{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":null}`,
+		"nothing":                                 "",
+		"garbage":                                 "panic: nil pointer dereference",
+		"found under a fail":                      `{"found":true,"key":"custom.probe","value":"x","schema_version":1}`,
+		"empty object":                            `{}`,
+		"error object":                            `{"error":"store unavailable"}`,
+		"null":                                    `null`,
+		"envelope, no found":                      `{"schema_version":1,"contract_version":1,"data":{"key":"custom.probe"},"pagination":null,"error":null}`,
+		"envelope, null data":                     `{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":null}`,
+		"envelope with error, found":              `{"schema_version":1,"contract_version":1,"data":{"found":true,"key":"custom.probe","value":"x"},"pagination":null,"error":{"kind":"internal","message":"command failed"}}`,
+		"envelope with error, no found":           `{"schema_version":1,"contract_version":1,"data":{"key":"custom.probe"},"pagination":null,"error":{"kind":"internal","message":"command failed"}}`,
+		"envelope with error, null data":          `{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":{"kind":"internal","message":"command failed"}}`,
+		"envelope with error, no data":            `{"schema_version":1,"contract_version":1,"error":{"kind":"internal","message":"command failed"}}`,
+		"envelope with error, data not an object": `{"schema_version":1,"contract_version":1,"data":"found","pagination":null,"error":{"kind":"internal","message":"command failed"}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

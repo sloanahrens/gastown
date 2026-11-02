@@ -2186,11 +2186,18 @@ func ParseKVGetJSON(out []byte) (string, error) {
 // kvStdoutSaysAbsent reports whether a failed kv get printed an explicit
 // found=false. ParseKVGetJSON reads a missing found key as false, which is right
 // for a clean exit and wrong here: a failing exit with {}, {"error":...} or a
-// null payload is a failure and must not be read as an unset key.
+// null payload is a failure and must not be read as an unset key. In machine
+// mode bd prints the found=false answer and an error object for the failed exit
+// in one envelope, so the envelope's data is read even when it carries an error
+// (gt-kxny5).
 func kvStdoutSaysAbsent(out []byte) bool {
-	payload, err := kvPayload(out)
+	env, isEnvelope, err := readMachineEnvelope(out, "bd")
 	if err != nil {
 		return false
+	}
+	payload := out
+	if isEnvelope {
+		payload = env.Data
 	}
 	var kv struct {
 		Found *bool `json:"found"`
