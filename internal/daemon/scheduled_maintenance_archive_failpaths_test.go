@@ -67,11 +67,11 @@ func TestAppendArchiveTableRefusesARowWidthMismatch(t *testing.T) {
 // size cannot be read.
 type statFailingTarget struct{}
 
-func (statFailingTarget) Write([]byte) (int, error)     { return 0, nil }
-func (statFailingTarget) Stat() (os.FileInfo, error)    { return nil, errors.New("stat refused") }
-func (statFailingTarget) Truncate(int64) error          { return nil }
-func (statFailingTarget) Sync() error                   { return nil }
-func (statFailingTarget) Close() error                  { return nil }
+func (statFailingTarget) Write([]byte) (int, error)  { return 0, nil }
+func (statFailingTarget) Stat() (os.FileInfo, error) { return nil, errors.New("stat refused") }
+func (statFailingTarget) Truncate(int64) error       { return nil }
+func (statFailingTarget) Sync() error                { return nil }
+func (statFailingTarget) Close() error               { return nil }
 
 // truncateFailingTarget refuses both the write and the rollback.
 type truncateFailingTarget struct{ closed bool }
