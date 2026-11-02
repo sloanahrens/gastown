@@ -15,11 +15,12 @@ import (
 // itself. Every verb here exits 1 with Refusal's message and never reaches
 // bd.real.
 //
-// The table is the per-verb decision record, not a second copy of the bd
-// command list: TestRefusesEveryUnimplementedVerb drives one subtest per row,
+// The table is the per-verb decision record, and it does repeat the bd command
+// list by hand: TestRefusesEveryUnimplementedVerb drives one subtest per row,
 // and coverageError reads the row against every command testdata/bd-flags.txt
 // records, so the next command bd gains fails the suite until this table, the
-// handler registry or passThroughVerbs classifies it.
+// handler registry or passThroughVerbs classifies it. The hand copy is what the
+// coverage check keeps honest, not a claim that no copy exists.
 var refusedVerbs = []string{
 	"admin",
 	"assign",
@@ -109,10 +110,11 @@ type classification struct {
 }
 
 // pinnedRefusal is the refusal message a bead fixes word for word, or "" when
-// the verb is checked against the shape every refusal shares. The shape is
-// written out here rather than built by Refusal, so a change to Refusal cannot
-// move both sides of the comparison together; prefix is the tracker rig the
-// fixture routes to.
+// the verb is checked against the shape every refusal shares. The pinned message
+// for sql is written out here rather than built by Refusal, so a change to
+// Refusal cannot move both sides of that comparison together; the shared shape
+// the other verbs are checked against is Refusal's own (classifyCommand compares
+// against it). prefix is the tracker rig the fixture routes to.
 func pinnedRefusal(verb, prefix string) string {
 	if verb == "sql" {
 		// R9 section 0 keeps bd sql refused for good: the direct-Dolt consumers
