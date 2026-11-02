@@ -8,8 +8,8 @@ import (
 
 // cannedPS is `ps -axo pid=,command=` for the processes the table test
 // attributes: one crew session's shell and build, two landing gates' builds,
-// Dolt, a Docker VM, the installer, the daemon, the dashboard, a qemu VM, an
-// unclassified process and a second crew session.
+// Dolt, a Docker VM, the installer, the daemon, the dashboard, a qemu VM, a
+// polecat session's claude and a second crew session.
 const cannedPS = `    1 /sbin/launchd
   100 -zsh
   101 go test ./internal/hostload
@@ -93,11 +93,35 @@ func TestHostLoadClassifyOwners(t *testing.T) {
 		{Owner: OwnerInstaller, CPU: 5, Procs: 1},
 		{Owner: OwnerDaemon, CPU: 4, Procs: 1},
 		{Owner: OwnerDashboard, CPU: 3, Procs: 1},
-		{Owner: OwnerOther, CPU: 2, Procs: 1},
+		{Owner: "polecat/capable", CPU: 2, Procs: 1},
 		{Owner: "crew/egret", CPU: 1, Procs: 1},
 	}
 	if !reflect.DeepEqual(rows, want) {
 		t.Errorf("Table:\n got %+v\nwant %+v", rows, want)
+	}
+}
+
+// TestClassifyOwners checks a working directory names its owner: a polecat's
+// worktree is polecat/<name>, a polecats directory with no name under it falls
+// through to the command rules, and a directory naming no owner is other.
+func TestClassifyOwners(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		cwd     string
+		command string
+		want    string
+	}{
+		{"polecat worktree", "/Users/op/gt/gastown/polecats/capable/gastown", "claude", "polecat/capable"},
+		{"polecat worktree with a build", "/Users/op/gt/gastown/polecats/capable/gastown", "go build ./...", "polecat/capable"},
+		{"polecats directory with no name", "/Users/op/gt/gastown/polecats", "claude", OwnerOther},
+		{"crew worktree", "/Users/op/gt/gastown/crew/dunlin/gastown", "claude", "crew/dunlin"},
+		{"unclassified directory", "/Users/op/gt/gastown/mayor", "claude", OwnerOther},
+	}
+	for _, tc := range cases {
+		if got := Classify(tc.cwd, tc.command); got != tc.want {
+			t.Errorf("%s: Classify(%q, %q) = %q, want %q", tc.name, tc.cwd, tc.command, got, tc.want)
+		}
 	}
 }
 
