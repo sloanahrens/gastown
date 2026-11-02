@@ -596,6 +596,11 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// so one entry cannot preserve two kinds (gt-hkldq).
 		{kind: attention.KindTierSweepStarved, collect: s.collectTierSweepStarved},
 		{kind: attention.KindOverrunStopped, collect: s.collectOverrunStopped},
+		// A second entry of the same kind: a stop that handed its bead back
+		// and one that never released its seat are the guard's two outcomes,
+		// and the queue needs both. Reconcile drops a duplicate key a failed
+		// collector's kept items could repeat.
+		{kind: attention.KindOverrunStopped, collect: s.collectOverrunParkedSeats},
 		{kind: attention.KindScheduledGate, collect: s.collectScheduledGate},
 		{kind: attention.KindHostDisk, collect: s.collectHostDisk},
 		{kind: attention.KindHostMem, collect: s.collectHostMem},
