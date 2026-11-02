@@ -641,11 +641,8 @@ type IssueDep struct {
 	// A dependency read fills them; a read that only lists what an issue
 	// depends on leaves them empty.
 	//
-	// Metadata is the value a JSON string carries, and the raw text of any
-	// other JSON value: bd prints a bead's metadata as an object when it was
-	// written as one (spec_dispatch_timeout_attempts is), and decoding that
-	// straight into a string lost every dependency of the bead, and with them
-	// the whole bd show (gt-l40eg).
+	// Metadata is the value of a JSON string, or the raw text of any other JSON
+	// value (bd prints object metadata as an object; gt-l40eg).
 	CreatedAt string `json:"created_at,omitempty"`
 	CreatedBy string `json:"created_by,omitempty"`
 	Metadata  string `json:"metadata,omitempty"`
@@ -688,13 +685,10 @@ func (d *IssueDep) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// dependencyMetadataText is a dependency row's metadata as IssueDep.Metadata
-// holds it: "" for an absent or null value, the value of a JSON string, and
-// the raw JSON text of any other value (bd prints metadata as an object).
-//
-// The raw text was taken from a document json.Unmarshal already accepted, so a
-// string value always decodes; one that somehow did not keeps its raw text
-// rather than costing the issue every dependency it has.
+// dependencyMetadataText returns the text IssueDep.Metadata holds for raw: ""
+// for an absent or null value, the unquoted value of a JSON string, and the
+// raw JSON text of any other value. A string that does not unquote keeps its
+// raw text, so no row's metadata fails the whole read.
 func dependencyMetadataText(raw json.RawMessage) string {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
