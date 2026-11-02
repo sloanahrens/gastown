@@ -3,6 +3,7 @@ package tiersweep
 import (
 	"bytes"
 	"io"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -194,27 +195,66 @@ func TestIntegrationAndRaceUnsetNiceKeepsTheDefaultArgv(t *testing.T) {
 	}
 }
 
+// packageCommands returns the commands a tier run started that run a package:
+// the ones carrying the container-test environment, whichever wrapper precedes
+// it. There are four when the fixture's repository is swept: root, docker,
+// module and race.
+func packageCommands(t *testing.T, commands [][]string) [][]string {
+	t.Helper()
+	var packages [][]string
+	for _, argv := range commands {
+		if slices.Contains(argv, "GT_TEST_DOCKER=1") {
+			packages = append(packages, argv)
+		}
+	}
+	if len(packages) != 4 {
+		t.Fatalf("package commands = %d, want 4 (root, docker, module, race): %q", len(packages), packages)
+	}
+	return packages
+}
+
 // TestNoSlotDropsTheSlotWrapperFromEveryPackage: with TIER_SWEEP_NOSLOT=1 the
-// four package commands (root, docker, module, race) start with the container
-// environment and no gt slot run, and none of the sweep's commands is gt at all.
-// The runner container has no town for gt slot run to find.
+// four package commands start with exactly the container-test environment and no
+// gt slot run: no argument is the gt binary, which is what the wrapper would
+// have contributed. The runner container has no town for gt slot run to find.
 func TestNoSlotDropsTheSlotWrapperFromEveryPackage(t *testing.T) {
 	t.Parallel()
 	want := []string{"env", "GT_TEST_DOCKER=1"}
-	packages := 0
-	for _, argv := range tierRuns(t, map[string]string{EnvNoSlot: "1"}) {
-		if slices.Contains(argv, "slot") {
-			t.Errorf("command %q still runs gt slot run", argv)
+	for _, argv := range packageCommands(t, tierRuns(t, map[string]string{EnvNoSlot: "1"})) {
+		if len(argv) < len(want) || !reflect.DeepEqual(argv[:len(want)], want) {
+			t.Errorf("package command %q does not begin with %q", argv, want)
 		}
-		if argv[0] == "env" {
-			packages++
-			if !reflect.DeepEqual(argv[:len(want)], want) {
-				t.Errorf("package command %q does not begin with %q", argv, want)
+		for _, arg := range argv {
+			if filepath.Base(arg) == "gt" {
+				t.Errorf("package command %q runs the gt binary as %q", argv, arg)
 			}
 		}
 	}
-	if packages != 4 {
-		t.Errorf("package commands = %d, want 4 (root, docker, module, race)", packages)
+}
+
+// TestNoSlotStillAppliesTheNiceOption: with TIER_SWEEP_NOSLOT=1 and
+// TIER_SWEEP_NICE set, every package command applies the niceness through nice(1)
+// ahead of the container environment, so dropping the wrapper does not drop the
+// value without a word.
+func TestNoSlotStillAppliesTheNiceOption(t *testing.T) {
+	t.Parallel()
+	want := []string{"nice", "-n", "10", "env", "GT_TEST_DOCKER=1"}
+	for _, argv := range packageCommands(t, tierRuns(t, map[string]string{EnvNoSlot: "1", EnvNice: "10"})) {
+		if len(argv) < len(want) || !reflect.DeepEqual(argv[:len(want)], want) {
+			t.Errorf("package command %q does not begin with %q", argv, want)
+		}
+	}
+}
+
+// TestNoSlotNiceZeroAddsNoWrapper: TIER_SWEEP_NICE=0 asks for no niceness, as
+// --nice 0 does for gt slot run, so no-slot mode starts exactly as it does unset.
+func TestNoSlotNiceZeroAddsNoWrapper(t *testing.T) {
+	t.Parallel()
+	want := []string{"env", "GT_TEST_DOCKER=1"}
+	for _, argv := range packageCommands(t, tierRuns(t, map[string]string{EnvNoSlot: "1", EnvNice: "0"})) {
+		if len(argv) < len(want) || !reflect.DeepEqual(argv[:len(want)], want) {
+			t.Errorf("package command %q does not begin with %q", argv, want)
+		}
 	}
 }
 
