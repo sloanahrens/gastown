@@ -172,6 +172,92 @@ func TestExternalContainerStatusUsesTheListenerNotThePid(t *testing.T) {
 	noHostProcess(t, f)
 }
 
+// TestExternalContainerStateReadsDockerInspect: ContainerRunning asks docker
+// for the container's running state. A read that says true or false answers;
+// a failed or uninterpretable read is an error (the state is unknown, never
+// stopped); and a town that names no container is refused (gt-0v0bg).
+func TestExternalContainerStateReadsDockerInspect(t *testing.T) {
+	t.Parallel()
+	const name = "gt-dolt"
+	inspect := "docker inspect -f {{.State.Running}} " + name
+
+	tests := []struct {
+		name        string
+		town        func(t *testing.T) string
+		script      *fakeReply
+		want        bool
+		wantErr     bool
+		wantDocker  int
+	}{
+		{
+			name:       "running",
+			town:       func(t *testing.T) string { return externalContainerTown(t, 3307, name) },
+			script:     &fakeReply{stdout: "true\n"},
+			want:       true,
+			wantDocker: 1,
+		},
+		{
+			name:       "stopped",
+			town:       func(t *testing.T) string { return externalContainerTown(t, 3307, name) },
+			script:     &fakeReply{stdout: "false\n"},
+			want:       false,
+			wantDocker: 1,
+		},
+		{
+			name:       "a failed read is unknown, not stopped",
+			town:       func(t *testing.T) string { return externalContainerTown(t, 3307, name) },
+			script:     &fakeReply{stderr: "Error response from daemon: context deadline exceeded", code: 1},
+			wantErr:    true,
+			wantDocker: 1,
+		},
+		{
+			name:       "an uninterpretable read is unknown, not stopped",
+			town:       func(t *testing.T) string { return externalContainerTown(t, 3307, name) },
+			script:     &fakeReply{stdout: "yes\n"},
+			wantErr:    true,
+			wantDocker: 1,
+		},
+		{
+			name:    "a town that names no container is refused",
+			town:    func(t *testing.T) string { return testTown(t) },
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := tt.town(t)
+			f := newFakeHost()
+			h := f.host()
+			if tt.script != nil {
+				f.on(inspect, *tt.script)
+			}
+
+			running, err := h.ContainerRunning(townRoot)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ContainerRunning = (%v, nil), want an error for an unknown state", running)
+				}
+				if running {
+					t.Errorf("ContainerRunning = (true, %v), want false: an unknown state is never running", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("ContainerRunning: %v", err)
+				}
+				if running != tt.want {
+					t.Errorf("ContainerRunning = %v, want %v", running, tt.want)
+				}
+			}
+			if got := f.ranMatching("docker"); len(got) != tt.wantDocker {
+				t.Errorf("docker commands = %q, want %d", got, tt.wantDocker)
+			}
+			noHostProcess(t, f)
+		})
+	}
+}
+
 // TestExternalContainerStartAndStopCallDocker: Start runs docker start and
 // waits, bounded, for the SQL ping; a missing container is an error naming it;
 // Stop runs docker stop with the host path's stop timeout; Restart does both in
@@ -242,14 +328,9 @@ func TestExternalContainerStartAndStopCallDocker(t *testing.T) {
 		if err == nil {
 			t.Fatal("Start with a docker start that exited non-zero succeeded, want an error")
 		}
-		if strings.Contains(err.Error(), "must exist") {
-			t.Errorf("error %q attributes a port clash to a missing container", err)
-		}
-		if !strings.Contains(err.Error(), "docker start "+name) {
-			t.Errorf("error %q does not name the failed command", err)
-		}
-		if !strings.Contains(err.Error(), "exists") || !strings.Contains(err.Error(), "Docker can start") {
-			t.Errorf("error %q does not name both checks a non-zero docker start leaves open", err)
+		want := "docker start " + name + " exited with status 1: check that dolt.external_container names a container that exists and that Docker can start it"
+		if got := err.Error(); got != want {
+			t.Errorf("error = %q, want %q", got, want)
 		}
 		noHostProcess(t, f)
 	})

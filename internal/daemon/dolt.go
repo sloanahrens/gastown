@@ -180,11 +180,14 @@ type DoltServerManager struct {
 
 // doltContainerLifecycle is the lifecycle of a town whose Dolt runs in a
 // Docker container (dolt.external_container): internal/doltserver's Start,
-// Stop and IsRunning, which ask docker and a SQL ping and never spawn or
-// signal a host process.
+// Stop, ContainerRunning and IsRunning, which ask docker and a SQL ping and
+// never spawn or signal a host process.
 type doltContainerLifecycle interface {
 	Start(townRoot string) error
 	Stop(townRoot string) error
+	// ContainerRunning reports the container's state as docker inspect reports
+	// it; a failed read is an error, the state unknown.
+	ContainerRunning(townRoot string) (bool, error)
 	IsRunning(townRoot string) (bool, int, error)
 }
 
@@ -210,6 +213,25 @@ func (m *DoltServerManager) containerStop(townRoot string) error {
 		return m.containerLifecycle.Stop(townRoot)
 	}
 	return doltserver.Stop(townRoot)
+}
+
+// containerStateUnknownError marks isRunningWithError's answer when the
+// container's docker state could not be read: the daemon knows neither that
+// the container is up nor that it is stopped, so no stop or start is safe
+// (gt-0v0bg).
+type containerStateUnknownError struct{ err error }
+
+func (e *containerStateUnknownError) Error() string { return e.err.Error() }
+func (e *containerStateUnknownError) Unwrap() error { return e.err }
+
+// containerRunning reports whether the town's Dolt container is up, as docker
+// reports its state. A failed read is an error: the state is unknown, and a
+// caller must not act on it (gt-0v0bg).
+func (m *DoltServerManager) containerRunning(townRoot string) (bool, error) {
+	if m.containerLifecycle != nil {
+		return m.containerLifecycle.ContainerRunning(townRoot)
+	}
+	return doltserver.ContainerRunning(townRoot)
 }
 
 // containerIsRunning reports whether the town's Dolt container answers.
@@ -474,19 +496,21 @@ func (m *DoltServerManager) Status() *DoltServerStatus {
 // isRunning reports whether the Dolt server process is running, and on the
 // false path what it observed gone: the tracked process's pid, or the pid the
 // pid file names, or 0 when the only pid in hand is alive but not answering.
-// A container-mode ping failure reads as not running here; EnsureRunning is
-// the one caller that also needs the failure, through isRunningWithError.
-// Must be called with m.mu held.
+// A container-mode failure (state unknown or ping failed) reads as not running
+// here; EnsureRunning is the one caller that also needs the failure, through
+// isRunningWithError. Must be called with m.mu held.
 func (m *DoltServerManager) isRunning() (int, bool) {
 	pid, running, _ := m.isRunningWithError()
 	return pid, running
 }
 
-// isRunningWithError is isRunning with the container-mode ping's failure: a
-// container whose Dolt does not answer is (0, false, err). The health tick
-// reports that failure as an incident instead of reading it as a stopped
-// container, which is what the bare false names (gt-0v0bg). Must be called
-// with m.mu held.
+// isRunningWithError is isRunning with the container-mode failures: a
+// container that is stopped is (0, false, nil); one whose docker state cannot
+// be read, or that is up but does not answer its SQL ping, is (0, false, err).
+// The error's type is the answer: a *containerStateUnknownError means the
+// state is unknown and no action is safe, every other error is a ping failure
+// the health tick reports as an incident (gt-0v0bg). Must be called with
+// m.mu held.
 func (m *DoltServerManager) isRunningWithError() (int, bool, error) {
 	if m.runningFn != nil {
 		pid, running := m.runningFn()
@@ -500,9 +524,20 @@ func (m *DoltServerManager) isRunningWithError() (int, bool, error) {
 		m.logger("Cannot tell whether Dolt container is running: %v", err)
 		return 0, false, err
 	} else if name != "" {
+		// Read docker's state before the ping: a stopped container has no
+		// listener to ping, and a state that cannot be read must not be
+		// healed as an unanswering one (gt-0v0bg).
+		up, err := m.containerRunning(m.townRoot)
+		if err != nil {
+			m.logger("Cannot read the state of Dolt container %q: %v", name, err)
+			return 0, false, &containerStateUnknownError{err: err}
+		}
+		if !up {
+			return 0, false, nil
+		}
 		running, err := m.containerIsRunning(m.townRoot)
 		if err != nil {
-			m.logger("Cannot tell whether Dolt container %q is running: %v", name, err)
+			m.logger("Dolt container %q is up but did not answer its SQL ping: %v", name, err)
 			return 0, false, err
 		}
 		return 0, running, nil
@@ -749,9 +784,20 @@ func (m *DoltServerManager) EnsureRunning() error {
 
 	// Not running, start it
 	if pingErr != nil {
-		// The container's Dolt does not answer the SQL ping: the failure is an
-		// incident of its own, not the stopped container to start below.
-		// Report it, then heal it with docker stop and start (gt-0v0bg).
+		var stateErr *containerStateUnknownError
+		if errors.As(pingErr, &stateErr) {
+			// The container's docker state could not be read: whether it is up
+			// or down is unknown, so this tick takes no action — no docker
+			// stop, no docker start, no restart counted — and the next tick
+			// reads the state again. Healing an unknown state could stop a
+			// healthy container (gt-0v0bg).
+			m.logger("Dolt container state is unknown; taking no action this tick")
+			return nil
+		}
+		// The state read succeeded and says running, but the Dolt does not
+		// answer the SQL ping: the failure is an incident of its own, not the
+		// stopped container to start below. Report it, then heal it with
+		// docker stop and start (gt-0v0bg).
 		m.clearHealthyClock()
 		if m.restartHeldLocked("not answering its SQL ping", pingErr) {
 			return nil
