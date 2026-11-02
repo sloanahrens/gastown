@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"time"
@@ -51,30 +54,67 @@ func writeSpendWatch(dir string, report json.RawMessage, now time.Time) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("spend watch: creating %s: %w", dir, err)
 	}
+	return writeSpendWatchVia(dir, data, createSpendTemp)
+}
+
+// spendTempFile is the temporary file a reading is written to. An *os.File is
+// one; a test substitutes a file whose write or close it scripts to fail.
+type spendTempFile interface {
+	io.Writer
+	io.Closer
+	Name() string
+}
+
+// writeSpendWatchVia writes the encoded reading to a temporary file made by
+// create, then renames it over the watch file. create is injected so a test can
+// script the refusals a directory the writer cannot write gives, which a root
+// run does not produce.
+func writeSpendWatchVia(dir string, data []byte, create func(dir string) (spendTempFile, error)) error {
 	path := filepath.Join(dir, spendWatchName)
-	// The temporary file takes a unique name beside the target, so two hubs
-	// writing the same town each rename their own reading and neither renames
-	// over a temporary file the other is still writing. A run that died mid-write
-	// leaves its own *.tmp behind, where the fixed name used to be overwritten by
-	// the next run.
-	f, err := os.CreateTemp(dir, spendWatchName+".*.tmp")
+	f, err := create(dir)
 	if err != nil {
 		return fmt.Errorf("spend watch: writing %s: %w", dir, err)
 	}
 	tmp := f.Name()
-	// CreateTemp makes the file 0600; set it to the 0644 the watch file has
-	// always had. A failed write, close or chmod and a refused rename all leave
-	// the same way: the temporary file goes and the reading is reported.
+	// A failed write or close leaves the same way as a refused rename: the
+	// temporary file goes and the reading is reported. Close runs even when the
+	// write failed, so the descriptor is never leaked.
 	_, werr := f.Write(data)
-	err = errors.Join(werr, f.Close(), os.Chmod(tmp, 0o644))
-	if err == nil {
-		err = os.Rename(tmp, path)
-	}
-	if err != nil {
+	if err := errors.Join(werr, f.Close()); err != nil {
 		removeSpendTemp(tmp)
-		return fmt.Errorf("spend watch: writing %s: %w", path, err)
+		return fmt.Errorf("spend watch: writing %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		removeSpendTemp(tmp)
+		return fmt.Errorf("spend watch: replacing %s: %w", path, err)
 	}
 	return nil
+}
+
+// spendTempAttempts bounds how many names createSpendTemp tries before it gives
+// up on a directory where every name it draws is already taken.
+const spendTempAttempts = 100
+
+// createSpendTemp creates a temporary file beside the watch file under a random
+// name no other writer holds, so two hubs writing the same town each rename
+// their own reading and neither renames over a file the other is still writing.
+// It is created 0644 as os.WriteFile creates it, so the umask applies as it
+// always has. O_EXCL makes a taken name an error, which the loop retries. A run
+// that died mid-write leaves its own *.tmp behind, where the fixed name used to
+// be overwritten by the next run.
+func createSpendTemp(dir string) (spendTempFile, error) {
+	for range spendTempAttempts {
+		name := filepath.Join(dir, fmt.Sprintf("%s.%016x.tmp", spendWatchName, rand.Uint64()))
+		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if errors.Is(err, fs.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		return f, nil
+	}
+	return nil, fmt.Errorf("no unused temporary name in %s after %d tries", dir, spendTempAttempts)
 }
 
 // removeSpendTemp drops the temporary file after a failed write, so nothing is
