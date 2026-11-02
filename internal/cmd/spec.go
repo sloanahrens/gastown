@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/hmhints"
 	"github.com/steveyegge/gastown/internal/imagedrift"
 	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/land"
@@ -130,9 +132,15 @@ is accepted and ignored. Epics, agent beads (gt:agent) and wisps are refused
 as "not a work bead" without reading a shape.
 
 Prints one line naming the bead and the first missing field. --json prints
-{id, ok, needs_planning, refusals[]} instead, listing every failure. A human-form
+{id, ok, needs_planning, refusals[], hints[]} instead, listing every failure;
+hints is present only when there are prior records to show. A human-form
 run that does not exit 0 also writes the required skeleton to stderr — every
 section with a one-phrase hint and the command that re-lints the bead.
+
+A bead whose text mentions a slow or timed-out test also gets the town's top
+three prior records (from hm) on stderr, under a "hint:" heading. The hint is
+advice: it never changes the verdict line or the exit code, and an hm that is
+missing or slow prints nothing.
 
 Exit codes:
   0  clean: the dispatcher would slot it
@@ -225,7 +233,7 @@ the seat the bad block dropped. The operator hold file and ESTOP stop the tick.`
 
 func init() {
 	specLintCmd.Flags().StringVar(&specLintTemplate, "template", "", "Spec template path (default daemon.patrols.spec_dispatch.template in settings/config.json, else ~/.claude/docs/agents/spec-template.md)")
-	specLintCmd.Flags().BoolVar(&specLintJSON, "json", false, "Print {id, ok, needs_planning, refusals[]} instead of one line")
+	specLintCmd.Flags().BoolVar(&specLintJSON, "json", false, "Print {id, ok, needs_planning, refusals[], hints[]} instead of one line")
 	specDispatchCmd.Flags().BoolVar(&specDispatchJSON, "json", false, "Output the tick report as JSON")
 	specDispatchCmd.Flags().BoolVar(&specDispatchDryRun, "dry-run", false, "Decide and report without slinging, labeling or commenting")
 	specCmd.AddCommand(specLintCmd, specDispatchCmd)
@@ -1017,7 +1025,7 @@ func runSpecLint(cmd *cobra.Command, args []string) error {
 		path = specTemplatePath(loadSpecDispatchConfig(townRoot))
 	}
 	spec, err := specForLint(townRoot, args[0], func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) }, openRigTree)
-	return specLint(cmd.OutOrStdout(), cmd.ErrOrStderr(), args[0], spec, err, path, specLintJSON)
+	return specLint(cmd.OutOrStdout(), cmd.ErrOrStderr(), args[0], spec, err, path, hmHintSource, specLintJSON)
 }
 
 // specForLint reads beadID for gt spec lint with the target inventory the
@@ -1147,6 +1155,60 @@ type specLintReport struct {
 	OK            bool                   `json:"ok"`
 	NeedsPlanning bool                   `json:"needs_planning"`
 	Refusals      []specdispatch.Refusal `json:"refusals"`
+	// Hints are the town's prior records on slow tests, shown when the bead's
+	// text mentions one. The array is omitted when there are none, and it
+	// never changes the verdict (gt-p07bw).
+	Hints []hmhints.Hit `json:"hints,omitempty"`
+}
+
+// specHintLimit is how many prior records a hint shows, and specHintWords are
+// the words added to the bead's title for the hm query: a bead that mentions a
+// timeout names few of the words its prior records do (gt-p07bw).
+const (
+	specHintLimit = 3
+	specHintWords = "slow tests timeout"
+	// specHintTimeout bounds the hm query. The hint is advice, so it must
+	// never hold the lint's verdict.
+	specHintTimeout = 5 * time.Second
+)
+
+// specHintSource answers the prior-record hint for a bead's text. The
+// production source queries hm; tests pass a fake so no process starts.
+type specHintSource func(ctx context.Context, text string, limit int) ([]hmhints.Hit, error)
+
+// hmHintSource is the production specHintSource: hmhints.Query with the real
+// hm, under a 5 second context.
+func hmHintSource(ctx context.Context, text string, limit int) ([]hmhints.Hit, error) {
+	ctx, cancel := context.WithTimeout(ctx, specHintTimeout)
+	defer cancel()
+	return hmhints.Query(ctx, nil, text, limit)
+}
+
+// specSlowHints asks hint for the top prior records on slow tests when the
+// bead's text mentions one, and returns nothing otherwise. A nil source, and
+// any hm failure (unavailable, timeout, bad output), is a bead without hints:
+// the hint is advice and never changes the verdict (gt-p07bw).
+func specSlowHints(spec specdispatch.Spec, hint specHintSource) []hmhints.Hit {
+	if hint == nil || !specdispatch.SlowTextHint(spec.Title+"\n"+spec.Description) {
+		return nil
+	}
+	hits, err := hint(context.Background(), strings.TrimSpace(spec.Title+" "+specHintWords), specHintLimit)
+	if err != nil {
+		return nil
+	}
+	return hits
+}
+
+// writeSpecHints prints the prior records a hint found, one line each, under a
+// heading that says why they are shown. No hits prints nothing.
+func writeSpecHints(w io.Writer, hits []hmhints.Hit) {
+	if len(hits) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "hint: this bead mentions slow or timed-out tests; prior records:")
+	for _, h := range hits {
+		fmt.Fprintf(w, "hint: hm #%d %s %s: %s\n", h.Rank, h.Kind, h.ID, h.Title)
+	}
 }
 
 // specLint prints the lint verdict for beadID's spec (or for showErr, the
@@ -1156,8 +1218,11 @@ type specLintReport struct {
 // the one line; the exit code is the same either way. A human-form run that
 // does not exit 0 also writes the required skeleton to errOut, after the
 // one-line verdict on out, so a refusal shows what a right bead looks like
-// (gt-ngtev).
-func specLint(out, errOut io.Writer, beadID string, spec specdispatch.Spec, showErr error, templatePath string, asJSON bool) error {
+// (gt-ngtev). After the verdict is decided, a bead whose text mentions slow or
+// timed-out tests also gets the town's top prior records on stderr (or in the
+// report's hints with --json); the hint is advice and changes neither the
+// verdict line nor the exit code (gt-p07bw).
+func specLint(out, errOut io.Writer, beadID string, spec specdispatch.Spec, showErr error, templatePath string, hint specHintSource, asJSON bool) error {
 	tmpl := specdispatch.LoadTemplate(templatePath)
 	report := specLintReport{ID: beadID, Refusals: []specdispatch.Refusal{}}
 	if showErr != nil {
@@ -1174,6 +1239,12 @@ func specLint(out, errOut io.Writer, beadID string, spec specdispatch.Spec, show
 		code = 0
 	case specdispatch.RoutePlanning:
 		code = specLintExitNeedsPlan
+	}
+	// The hint is asked for only after the code is decided, and it is written
+	// to errOut alone, so a hint can never move the verdict line or the exit.
+	report.Hints = specSlowHints(spec, hint)
+	if !asJSON {
+		writeSpecHints(errOut, report.Hints)
 	}
 	return emitSpecLint(out, errOut, tmpl, report, verdict.Line(beadID), code, asJSON)
 }

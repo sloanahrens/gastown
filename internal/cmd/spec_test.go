@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/hmhints"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/session"
@@ -1989,7 +1990,7 @@ func TestSpecLintCommandExitCodes(t *testing.T) {
 				spec = specFromIssue(&issues[0])
 			}
 			var out, errOut bytes.Buffer
-			err := specLint(&out, &errOut, beadID, spec, showErr, tmpl, false)
+			err := specLint(&out, &errOut, beadID, spec, showErr, tmpl, nil, false)
 			code, _ := IsSilentExit(err)
 			if err != nil && code == 0 {
 				t.Fatalf("unexpected error %v", err)
@@ -2098,7 +2099,7 @@ func TestSpecLintJSONReport(t *testing.T) {
 				showErr = fmt.Errorf("bead %s not found", beadID)
 			}
 			var out, errOut bytes.Buffer
-			err := specLint(&out, &errOut, beadID, spec, showErr, tmpl, true)
+			err := specLint(&out, &errOut, beadID, spec, showErr, tmpl, nil, true)
 			code, _ := IsSilentExit(err)
 			if code != tc.wantExit {
 				t.Fatalf("exit code = %d, want %d (%v)", code, tc.wantExit, err)
@@ -2128,6 +2129,205 @@ func TestSpecLintJSONReport(t *testing.T) {
 			}
 		})
 	}
+}
+
+// specHintFake is a specHintSource that records every query and answers with
+// hits or err, so no hm process starts.
+type specHintFake struct {
+	hits  []hmhints.Hit
+	err   error
+	calls []string
+}
+
+func (f *specHintFake) source(_ context.Context, text string, limit int) ([]hmhints.Hit, error) {
+	f.calls = append(f.calls, fmt.Sprintf("%q limit %d", text, limit))
+	return f.hits, f.err
+}
+
+// specHintTemplate is the minimal spec template the hint tests load.
+func specHintTemplate(t *testing.T) string {
+	t.Helper()
+	tmpl := filepath.Join(t.TempDir(), "spec-template.md")
+	if err := os.WriteFile(tmpl, []byte("--description=\"## Goal\n## Constraints\n## Out of scope\n## Gate\n## Size\n\""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return tmpl
+}
+
+// threeHintHits is a hint source's answer: three prior records in rank order.
+var threeHintHits = []hmhints.Hit{
+	{Rank: 1, Kind: "doc", ID: "doc-a", Title: "first"},
+	{Rank: 2, Kind: "bead", ID: "gt-b", Title: "second"},
+	{Rank: 3, Kind: "bead", ID: "gt-c", Title: "third"},
+}
+
+// A bead whose text mentions a timeout gets up to three prior records on
+// stderr, and the verdict line and exit code are exactly what they are without
+// the hint (gt-p07bw).
+func TestSpecLintHintsDoNotChangeTheVerdict(t *testing.T) {
+	t.Parallel()
+	tmpl := specHintTemplate(t)
+	rows := []struct {
+		name string
+		spec specdispatch.Spec
+		code int
+	}{
+		{"clean", cleanSpec("gt-ok", 2, "2026-01-01"), 0},
+		{"refused", func() specdispatch.Spec {
+			s := cleanSpec("gt-no", 2, "2026-01-01")
+			s.Description = "## Goal\nx"
+			return s
+		}(), 1},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			slow := row.spec
+			slow.Title += ": a test timed out at 600s"
+			fake := &specHintFake{hits: threeHintHits}
+			var withOut, withErr bytes.Buffer
+			err := specLint(&withOut, &withErr, slow.ID, slow, nil, tmpl, fake.source, false)
+			code, _ := IsSilentExit(err)
+			if code != row.code {
+				t.Fatalf("exit code with hints = %d, want %d", code, row.code)
+			}
+			var plainOut, plainErr bytes.Buffer
+			err = specLint(&plainOut, &plainErr, slow.ID, slow, nil, tmpl, nil, false)
+			plainCode, _ := IsSilentExit(err)
+			if plainCode != code || plainOut.String() != withOut.String() {
+				t.Fatalf("a hint changed the verdict: with %q/%d, without %q/%d",
+					withOut.String(), code, plainOut.String(), plainCode)
+			}
+			want := "hint: this bead mentions slow or timed-out tests; prior records:\n" +
+				"hint: hm #1 doc doc-a: first\n" +
+				"hint: hm #2 bead gt-b: second\n" +
+				"hint: hm #3 bead gt-c: third\n"
+			if !strings.HasPrefix(withErr.String(), want) {
+				t.Errorf("stderr = %q, want it to start with %q", withErr.String(), want)
+			}
+			if len(fake.calls) != 1 {
+				t.Fatalf("source called %d times, want 1", len(fake.calls))
+			}
+			// The query is the title plus the slow-test words, three hits.
+			if !strings.Contains(fake.calls[0], slow.Title+" slow tests timeout") {
+				t.Errorf("query = %q, want the title plus %q", fake.calls[0], "slow tests timeout")
+			}
+			if !strings.Contains(fake.calls[0], "limit 3") {
+				t.Errorf("query = %q, want limit 3", fake.calls[0])
+			}
+		})
+	}
+}
+
+// A bead whose text does not mention a slow or timed-out test never asks the
+// hint source (gt-p07bw).
+func TestSpecLintHintsOnlyForSlowText(t *testing.T) {
+	t.Parallel()
+	tmpl := specHintTemplate(t)
+	fake := &specHintFake{hits: threeHintHits}
+	var out, errOut bytes.Buffer
+	err := specLint(&out, &errOut, "gt-ok", cleanSpec("gt-ok", 2, "2026-01-01"), nil, tmpl, fake.source, false)
+	if code, _ := IsSilentExit(err); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("a bead with no slow-test words asked the source %d times: %q", len(fake.calls), fake.calls)
+	}
+	if errOut.Len() != 0 {
+		t.Errorf("stderr = %q, want empty", errOut.String())
+	}
+}
+
+// A hint source that fails (unavailable, timed out, bad output) prints nothing
+// and leaves the verdict and exit code alone (gt-p07bw).
+func TestSpecLintHintSourceFailureIsSilent(t *testing.T) {
+	t.Parallel()
+	tmpl := specHintTemplate(t)
+	rows := []struct {
+		name string
+		err  error
+	}{
+		{"error", errors.New("hm query: exit status 1")},
+		{"unavailable", fmt.Errorf("wrapped: %w", hmhints.ErrUnavailable)},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			slow := cleanSpec("gt-ok", 2, "2026-01-01")
+			slow.Title = "slow test timed out"
+			// Hits with an error are a source contract violation; they must
+			// still print nothing.
+			fake := &specHintFake{hits: threeHintHits, err: row.err}
+			var out, errOut bytes.Buffer
+			err := specLint(&out, &errOut, slow.ID, slow, nil, tmpl, fake.source, false)
+			if code, _ := IsSilentExit(err); code != 0 {
+				t.Fatalf("exit code = %d, want 0", code)
+			}
+			if got := strings.TrimSpace(out.String()); got != "gt-ok: spec lint ok" {
+				t.Errorf("verdict = %q, want unchanged", got)
+			}
+			if errOut.Len() != 0 {
+				t.Errorf("a failed hint wrote to stderr: %q", errOut.String())
+			}
+			if len(fake.calls) != 1 {
+				t.Errorf("source called %d times, want 1", len(fake.calls))
+			}
+		})
+	}
+}
+
+// A source that answers with no hits prints nothing, not even the heading.
+func TestSpecLintEmptyHintsPrintNothing(t *testing.T) {
+	t.Parallel()
+	tmpl := specHintTemplate(t)
+	slow := cleanSpec("gt-ok", 2, "2026-01-01")
+	slow.Title = "slow test timed out"
+	fake := &specHintFake{}
+	var out, errOut bytes.Buffer
+	if err := specLint(&out, &errOut, slow.ID, slow, nil, tmpl, fake.source, false); err != nil {
+		t.Fatalf("specLint: %v", err)
+	}
+	if errOut.Len() != 0 {
+		t.Errorf("an empty hint wrote to stderr: %q", errOut.String())
+	}
+}
+
+// --json carries the hints in the report and prints none of them to stderr; a
+// source with no hits leaves the array out (gt-p07bw).
+func TestSpecLintJSONCarriesHints(t *testing.T) {
+	t.Parallel()
+	tmpl := specHintTemplate(t)
+	t.Run("hits", func(t *testing.T) {
+		slow := cleanSpec("gt-ok", 2, "2026-01-01")
+		slow.Title = "slow test timed out"
+		fake := &specHintFake{hits: threeHintHits}
+		var out, errOut bytes.Buffer
+		err := specLint(&out, &errOut, slow.ID, slow, nil, tmpl, fake.source, true)
+		if code, _ := IsSilentExit(err); code != 0 {
+			t.Fatalf("exit code = %d, want 0", code)
+		}
+		if errOut.Len() != 0 {
+			t.Errorf("--json wrote hints to stderr: %q", errOut.String())
+		}
+		var got specLintReport
+		if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+			t.Fatalf("output is not JSON: %v\n%s", err, out.String())
+		}
+		if !reflect.DeepEqual(got.Hints, threeHintHits) {
+			t.Errorf("hints = %+v, want %+v", got.Hints, threeHintHits)
+		}
+	})
+	t.Run("no hits omits the array", func(t *testing.T) {
+		slow := cleanSpec("gt-ok", 2, "2026-01-01")
+		slow.Title = "slow test timed out"
+		fake := &specHintFake{}
+		var out, errOut bytes.Buffer
+		err := specLint(&out, &errOut, slow.ID, slow, nil, tmpl, fake.source, true)
+		if code, _ := IsSilentExit(err); code != 0 {
+			t.Fatalf("exit code = %d, want 0", code)
+		}
+		if strings.Contains(out.String(), `"hints"`) {
+			t.Errorf("a source with no hits still wrote a hints array: %s", out.String())
+		}
+	})
 }
 
 // specTown is a temp town with one operational rig whose .beads looks like a
