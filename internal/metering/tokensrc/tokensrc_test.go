@@ -42,6 +42,7 @@ func record(workspace, end string, input, output, cacheCreation, cacheRead int64
 }
 
 func TestTokensSumsPerWorkspaceInMonth(t *testing.T) {
+	t.Parallel()
 	tree := usageTree(map[string]string{
 		"a-one.work.json":    record("ws-a", "2026-10-02T09:00:00Z", 100, 200, 3, 4),
 		"a-two.work.json":    record("ws-a", "2026-10-31T23:59:59Z", 5, 6, 7, 8),
@@ -66,6 +67,7 @@ func TestTokensSumsPerWorkspaceInMonth(t *testing.T) {
 }
 
 func TestTokensExcludesAndCounts(t *testing.T) {
+	t.Parallel()
 	tree := usageTree(map[string]string{
 		"in-month.json":     record("ws-a", "2026-10-15T12:00:00Z", 1, 2, 3, 4),
 		"september.json":    record("ws-a", "2026-09-30T23:59:59Z", 1000, 0, 0, 0),
@@ -93,6 +95,7 @@ func TestTokensExcludesAndCounts(t *testing.T) {
 }
 
 func TestTokensUnreadableFileIsCountedNotFatal(t *testing.T) {
+	t.Parallel()
 	tree := usageTree(map[string]string{
 		"broken.json": "this is not json",
 		"good.json":   record("ws-a", "2026-10-15T12:00:00Z", 1, 2, 3, 4),
@@ -126,6 +129,7 @@ func (f failingReadFS) ReadFile(name string) ([]byte, error) {
 }
 
 func TestTokensReadFailureIsUnreadable(t *testing.T) {
+	t.Parallel()
 	tree := failingReadFS{
 		MapFS: usageTree(map[string]string{
 			"denied.json": record("ws-a", "2026-10-15T12:00:00Z", 1, 2, 3, 4),
@@ -149,6 +153,7 @@ func TestTokensReadFailureIsUnreadable(t *testing.T) {
 }
 
 func TestTokensRefusesUnreadableRecordsDir(t *testing.T) {
+	t.Parallel()
 	_, err := Tokens(fstest.MapFS{}, october)
 	if err == nil {
 		t.Fatal("Tokens accepted a tree with no beads directory")
@@ -162,6 +167,7 @@ func TestTokensRefusesUnreadableRecordsDir(t *testing.T) {
 }
 
 func TestTokensRefusesOverflow(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name  string
 		tree  fstest.MapFS
@@ -186,6 +192,7 @@ func TestTokensRefusesOverflow(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := Tokens(tc.tree, october)
 			if err == nil {
 				t.Fatal("Tokens accepted a token sum that overflows int64")
