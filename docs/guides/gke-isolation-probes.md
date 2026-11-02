@@ -1,4 +1,4 @@
-> Status: current (2026-11). Runbook for plan row S3; the live run is owed by the operator in a grant window and has not run.
+> Status: current (2026-11). Runbook for plan row S3; the live run is owed by the operator in a grant window and has not run. Debt: the verdict function below is shell inside a runbook and has no unit tests; it is to be ported to Go with tests (bead filed, cloud-later, held) before this page is first used.
 
 # Isolation probes on a GKE Standard Ubuntu node
 
@@ -42,7 +42,7 @@ Nothing in this block is required to print: an empty file is read as a failure b
 
 ## The verdict
 
-The verdict is computed, not judged, and it claims less than a pass. No probe is known to print a positive success line, so none can be shown to have run and passed: the result for a probe is `no-known-failure` (the sandbox was admitted and `Ready`, on the node checked, and the log holds none of that probe's known failure messages) or `fail`. This holds for all three probes; the Landlock probe alone sometimes logs its ABI, and that is an extra reading, not a required one. A missing, empty, unreadable or window-filling input makes every probe `fail`. The conditions are that `create` exited 0, the list shows `isolation-probe` as exactly `Ready` (not `Not Ready` or `NotReady`), the pod's node is `$NODE`, and the log is non-empty and shorter than the 5000-line window. The failure patterns are the supervisor's own messages, one set per probe:
+The verdict is computed, not judged, and it claims less than a pass. No probe is known to print a positive success line, so none can be shown to have run and passed: the result for a probe is `no-known-failure` (the sandbox was admitted and `Ready`, on the node checked, and the log holds none of that probe's known failure messages), `inconclusive` (a fallback path ran, below) or `fail`. This holds for all three probes; the Landlock probe alone sometimes logs its ABI, and that is an extra reading, not a required one. A missing, empty, unreadable or window-filling input makes every probe `fail`. The conditions are that `create` exited 0, the list shows `isolation-probe` as exactly `Ready` (not `Not Ready` or `NotReady`), the pod's node is `$NODE`, and the log is non-empty and shorter than the 5000-line window. The failure patterns are the supervisor's own messages, one set per probe:
 
 | Probe | Failure pattern (extended regex) |
 |---|---|
@@ -50,11 +50,11 @@ The verdict is computed, not judged, and it claims less than a pass. No probe is
 | seccomp user-notify | `notification launcher disappeared`, `ControlSupervisorStartFailed` |
 | task-memory (`process_vm_readv`) | `task-memory` or `process_vm_readv` on a line with `fail` or `denied` |
 
-Below Linux 5.19 seccomp falls back to the legacy read-only listener; that is still a pass, with mediated memory writes failing closed. `process_vm_readv` or the `/proc/<pid>/mem` fallback satisfies the task-memory probe.
+Two fallback paths are `inconclusive`, never a pass: below Linux 5.19 seccomp falls back to the legacy read-only listener (log line naming the `legacy` or `read-only` listener), and the task-memory probe falls back to `/proc/<pid>/mem` instead of `process_vm_readv`. A fallback means the memory-isolation property was not exercised by the primary mechanism, and nothing here shows the fallback holds it, so a person decides. A failure pattern outranks a fallback: the probe is then `fail`.
 
 ```bash
 verdict() {  # verdict DIR NODE: prints one line per probe, then the VERDICT line
-  local d=$1 node=$2 ok=1 failed=""
+  local d=$1 node=$2 ok=1 failed="" unsure=""
   [ "$(cat "$d/create.status" 2>/dev/null)" = 0 ] || ok=0
   awk '$1 == "isolation-probe" { for (i = 2; i <= NF; i++) if ($i == "Ready" && $(i-1) != "Not") f = 1 } END { exit !f }' "$d/list.txt" 2>/dev/null || ok=0
   awk -v n="$node" '$2 == n { f = 1 } END { exit !f }' "$d/placement.txt" 2>/dev/null || ok=0
@@ -66,24 +66,33 @@ verdict() {  # verdict DIR NODE: prints one line per probe, then the VERDICT lin
       seccomp-user-notify) pat='notification launcher disappeared|ControlSupervisorStartFailed' ;;
       task-memory) pat='(task-memory|process_vm_readv).*(fail|denied)' ;;
     esac
-    if [ "$ok" = 1 ] && ! grep -qiE "$pat" "$d/log.txt"; then
-      echo "probe=$name result=no-known-failure"
-    else
+    case $name in
+      seccomp-user-notify) fb='legacy|read-only listener' ;;
+      task-memory) fb='/proc/[^ ]*/mem' ;;
+      *) fb='' ;;
+    esac
+    if [ "$ok" != 1 ] || grep -qiE "$pat" "$d/log.txt"; then
       echo "probe=$name result=fail"; failed="$failed${failed:+,}$name"
+    elif [ -n "$fb" ] && grep -qiE "$fb" "$d/log.txt"; then
+      echo "probe=$name result=inconclusive"; unsure="$unsure${unsure:+,}$name"
+    else
+      echo "probe=$name result=no-known-failure"
     fi
   done
-  if [ -z "$failed" ]; then echo "VERDICT NO-KNOWN-FAILURE"; else echo "VERDICT FAIL probe=$failed"; fi
+  if [ -n "$failed" ]; then echo "VERDICT FAIL probe=$failed"
+  elif [ -n "$unsure" ]; then echo "VERDICT INCONCLUSIVE probe=$unsure"
+  else echo "VERDICT NO-KNOWN-FAILURE"; fi
 }
 verdict "$DIR" "$NODE" | tee "$DIR/verdict.txt"
 ```
 
-`VERDICT NO-KNOWN-FAILURE` is never to be read as proven isolation. Only a person who reads `log.txt` and the node's kernel and image against the supervisor's documentation can say more, and the comment on claude-29a.13 says whether that was done. Before relying on `verdict()`, run it against sample directories: a clean one, one per failure pattern, a `Not Ready` list, another node's placement, a missing `create.status`, an empty log and a 5000-line log. This page records no result of such a run.
+`VERDICT NO-KNOWN-FAILURE` is never to be read as proven isolation. Only a person who reads `log.txt` and the node's kernel and image against the supervisor's documentation can say more, and the comment on claude-29a.13 says whether that was done. Before relying on `verdict()`, run it against sample directories: a clean one, one per failure pattern, one per fallback, a `Not Ready` list, another node's placement, a missing `create.status`, an empty log and a 5000-line log. This page records no result of such a run.
 
 ## Where the result is recorded
 
 1. `$DIR` keeps the create output, the list, the placement, the supervisor log and `verdict.txt`, so an agent can read the run back.
 2. Paste `verdict.txt` (the three probe lines and the verdict line) into a comment on the map ticket claude-29a.13, with `$DIR`'s path and the node image and kernel the run used. That comment is the record; the row reads no other place.
-3. A `VERDICT FAIL` keeps co-tenancy off until a later run gives `NO-KNOWN-FAILURE`. No outside customer is onboarded, and no two workspaces share a node, until claude-29a.13 carries that line, a statement of whether the log was read by a person, and the node image and kernel.
+3. `VERDICT FAIL` and `VERDICT INCONCLUSIVE` keep co-tenancy off until a later run gives `NO-KNOWN-FAILURE`, or a person records on claude-29a.13 why the fallback is acceptable. No outside customer is onboarded, and no two workspaces share a node, until claude-29a.13 carries that line, a statement of whether the log was read by a person, and the node image and kernel.
 
 ## Teardown
 
