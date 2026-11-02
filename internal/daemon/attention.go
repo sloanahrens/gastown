@@ -199,11 +199,14 @@ type reworkNote struct {
 // read that returns every item of that kind holding now.
 //
 // A collector that returns an error contributes nothing this tick and keeps
-// the previous tick's items of its kind (see collectAttention); a collector
-// that returns no items clears its kind.
+// the previous items it raised (see collectAttention); a collector that
+// returns no items clears them.
 type attentionCollector struct {
 	kind    attention.Kind
 	collect func(ctx context.Context) ([]attention.Item, error)
+	// owns picks the previous items a failed collect keeps, for a kind two
+	// collectors raise. Nil means every item of kind.
+	owns func(attention.Item) bool
 }
 
 // attentionSources are the outside reads the collectors make. A nil func is
@@ -544,7 +547,7 @@ func attentionWord(s attention.EventState) string {
 
 // collectAttention runs every collector and returns the items holding now. A
 // collector that fails contributes no items of its own, and the previous
-// tick's items of its kind instead: an unanswered query must not clear a real
+// tick's items it owns instead: an unanswered query must not clear a real
 // alarm (townhealth's UNKNOWN rule, gt-s3rec.1). The failure is logged once,
 // in the collector's name.
 func collectAttention(ctx context.Context, prev attention.State, collectors []attentionCollector, logf func(string, ...any)) []attention.Item {
@@ -553,7 +556,7 @@ func collectAttention(ctx context.Context, prev attention.State, collectors []at
 		items, err := c.collect(ctx)
 		if err != nil {
 			logf("attention: collector %s: %v", c.kind, err)
-			observed = append(observed, prevOfKind(prev, c.kind)...)
+			observed = append(observed, c.kept(prev)...)
 			continue
 		}
 		observed = append(observed, items...)
@@ -561,7 +564,23 @@ func collectAttention(ctx context.Context, prev attention.State, collectors []at
 	return observed
 }
 
-// prevOfKind is what a failed collector keeps: the items of its kind.
+// kept is what a failed collector keeps: the previous items it owns, by its
+// kind or by the predicate that splits a shared kind.
+func (c attentionCollector) kept(prev attention.State) []attention.Item {
+	if c.owns == nil {
+		return prevOfKind(prev, c.kind)
+	}
+	var out []attention.Item
+	for _, it := range prev.Items {
+		if c.owns(it) {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
+// prevOfKind is the items of one kind, what a collector whose kind it alone
+// raises keeps when it fails.
 func prevOfKind(prev attention.State, kind attention.Kind) []attention.Item {
 	var out []attention.Item
 	for _, it := range prev.Items {
@@ -570,6 +589,17 @@ func prevOfKind(prev attention.State, kind attention.Kind) []attention.Item {
 		}
 	}
 	return out
+}
+
+// overrunStoppedItem and overrunParkedSeatItem split one kind between the two
+// overrun collectors by the key each raises, so a failed collector keeps only
+// its own items (gt-r6vjf).
+func overrunStoppedItem(it attention.Item) bool {
+	return it.Kind == attention.KindOverrunStopped && strings.HasPrefix(it.Key, "overrun:")
+}
+
+func overrunParkedSeatItem(it attention.Item) bool {
+	return it.Kind == attention.KindOverrunStopped && strings.HasPrefix(it.Key, "overrun-parked:")
 }
 
 // collectors is the queue's collector set, in the order they run. Each later
@@ -595,12 +625,12 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// a failed collector keeps the previous tick's items of its own kind,
 		// so one entry cannot preserve two kinds (gt-hkldq).
 		{kind: attention.KindTierSweepStarved, collect: s.collectTierSweepStarved},
-		{kind: attention.KindOverrunStopped, collect: s.collectOverrunStopped},
+		{kind: attention.KindOverrunStopped, collect: s.collectOverrunStopped, owns: overrunStoppedItem},
 		// A second entry of the same kind: a stop that handed its bead back
 		// and one that never released its seat are the guard's two outcomes,
-		// and the queue needs both. Reconcile drops a duplicate key a failed
-		// collector's kept items could repeat.
-		{kind: attention.KindOverrunStopped, collect: s.collectOverrunParkedSeats},
+		// and the queue needs both. Each keeps only its own items on failure
+		// (gt-r6vjf).
+		{kind: attention.KindOverrunStopped, collect: s.collectOverrunParkedSeats, owns: overrunParkedSeatItem},
 		{kind: attention.KindScheduledGate, collect: s.collectScheduledGate},
 		{kind: attention.KindHostDisk, collect: s.collectHostDisk},
 		{kind: attention.KindHostMem, collect: s.collectHostMem},
