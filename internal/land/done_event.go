@@ -246,12 +246,12 @@ func (l *doneEventLog) refresh(path string) error {
 	return nil
 }
 
-// alreadyDone reports whether the log holds a done event for bead dated at or
-// after cutoff, and refuses to judge the bead when one of its done events has
-// no readable time.
+// alreadyDone reports whether the log holds a submitted done event for bead
+// dated at or after cutoff, and refuses to judge the bead when one of its
+// submitted done events has no readable time.
 func (l *doneEventLog) alreadyDone(bead string, cutoff time.Time) (bool, error) {
 	if l.unjudged[bead] {
-		return false, fmt.Errorf("done event for %s: the log holds a done event for it with no readable time, so a duplicate cannot be ruled out", bead)
+		return false, fmt.Errorf("done event for %s: the log holds a submitted done event for it with no readable time, so a duplicate cannot be ruled out", bead)
 	}
 	if at, ok := l.latest[bead]; ok && !at.Before(cutoff) {
 		return true, nil
@@ -259,26 +259,27 @@ func (l *doneEventLog) alreadyDone(bead string, cutoff time.Time) (bool, error) 
 	return false, nil
 }
 
-// fold reads every line of b, keeping each done event's bead and the latest
-// time the bead's events carry.
+// fold reads every line of b, keeping each submitted done event's bead and the
+// latest time the bead's submissions carry.
 func (l *doneEventLog) fold(b []byte) {
 	for _, line := range bytes.Split(b, []byte("\n")) {
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
-		var ev struct {
-			Type    string         `json:"type"`
-			TS      string         `json:"ts"`
-			Payload map[string]any `json:"payload"`
-		}
+		var ev events.Event
 		if err := json.Unmarshal(line, &ev); err != nil || ev.Type != events.TypeDone {
+			continue
+		}
+		// An escalated or deferred exit writes a done event but submits
+		// nothing, so it cannot stand in for the seat's submission (gt-qqmae).
+		if !events.DoneEventIsSubmission(ev) {
 			continue
 		}
 		bead, _ := ev.Payload["bead"].(string)
 		if bead == "" {
 			continue
 		}
-		at, ok := doneEventTime(ev.Payload, ev.TS)
+		at, ok := doneEventTime(ev.Payload, ev.Timestamp)
 		if !ok {
 			l.unjudged[bead] = true
 			continue

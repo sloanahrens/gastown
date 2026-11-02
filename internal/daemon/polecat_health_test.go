@@ -108,6 +108,13 @@ func seatEventLine(ts time.Time, typ, actor, bead string) string {
 		ts.UTC().Format(time.RFC3339), typ, actor, bead)
 }
 
+// seatStatusEventLine is seatEventLine with the done event's exit status in
+// the payload.
+func seatStatusEventLine(ts time.Time, typ, actor, bead, status string) string {
+	return fmt.Sprintf(`{"ts":%q,"source":"gt","type":%q,"actor":%q,"payload":{"bead":%q,"status":%q},"visibility":"feed"}`,
+		ts.UTC().Format(time.RFC3339), typ, actor, bead, status)
+}
+
 // TestCheckPolecatHealth_DoneEventIsAFinishedTurn covers gt-0p9pv: a seat
 // whose own last event is a `done` for the bead it still holds ended its turn,
 // and the bead's close is what has not caught up. Within the grace the dead
@@ -202,6 +209,46 @@ func TestSeatLastDoneAge_UnreadableLogIsNoEvidence(t *testing.T) {
 
 	if age, ok := d.seatLastDoneAge("myr", "mycat", "gt-xyz", testEpoch); ok {
 		t.Errorf("dated a done from an empty log: age %s", age)
+	}
+}
+
+// TestSeatLastDoneAge_SkipsANonSubmissionDone: a seat that deferred its turn
+// wrote a done event but submitted nothing, so it is not a finished turn the
+// crash detector can trust; a submitted done is still read as one (gt-qqmae).
+func TestSeatLastDoneAge_SkipsANonSubmissionDone(t *testing.T) {
+	t.Parallel()
+	const seat = "myr/polecats/mycat"
+	tests := []struct {
+		name   string
+		status string
+		wantOK bool
+	}{
+		{"the deferred exit", events.DoneStatusDeferred, false},
+		{"the escalated exit", events.DoneStatusEscalated, false},
+		{"the completed exit", events.DoneStatusCompleted, true},
+		{"no status: an older event", "", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			line := seatEventLine(testEpoch.Add(-time.Minute), events.TypeDone, seat, "gt-xyz")
+			if tc.status != "" {
+				line = seatStatusEventLine(testEpoch.Add(-time.Minute), events.TypeDone, seat, "gt-xyz", tc.status)
+			}
+			if err := os.WriteFile(filepath.Join(townRoot, events.EventsFile), []byte(line+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			d := &Daemon{config: &Config{TownRoot: townRoot}, logger: discardLogger}
+
+			age, ok := d.seatLastDoneAge("myr", "mycat", "gt-xyz", testEpoch)
+			if ok != tc.wantOK {
+				t.Fatalf("seatLastDoneAge ok = %v (age %s), want %v", ok, age, tc.wantOK)
+			}
+			if ok && age != time.Minute {
+				t.Errorf("seatLastDoneAge = %s, want one minute", age)
+			}
+		})
 	}
 }
 

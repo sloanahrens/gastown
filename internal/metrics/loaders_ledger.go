@@ -92,8 +92,10 @@ type StageStamps struct {
 	// Dispatched is each bead's run dispatch in RFC3339: when the run that
 	// produced its landing went out (events.DispatchedBy).
 	Dispatched map[string]string
-	// Submitted is each bead's latest done event in RFC3339, the fallback for a
-	// bead whose notes carry no submission stamp.
+	// Submitted is each bead's latest done event that submitted work, in
+	// RFC3339, the fallback for a bead whose notes carry no submission stamp.
+	// An escalated or deferred exit writes a done event too, and stamps
+	// nothing here (gt-qqmae).
 	Submitted map[string]string
 	// Seats is who the usage records say ran each bead and on what model.
 	Seats UsageSeats
@@ -143,8 +145,10 @@ func LoadStageStamps(lines []string, landedAt map[string]string, dropped *Droppe
 		if err != nil {
 			continue
 		}
+		// Every done event ends the bead's run, so done feeds the landing
+		// clock; only a submission stamps Submitted (gt-qqmae).
 		done[bead] = append(done[bead], at)
-		if at.After(submitted[bead]) {
+		if events.DoneEventIsSubmission(ev) && at.After(submitted[bead]) {
 			submitted[bead] = at
 		}
 	}

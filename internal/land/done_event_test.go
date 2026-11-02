@@ -46,6 +46,23 @@ func appendEventFor(t *testing.T, path, actor, bead, branch string, at time.Time
 	appendRawLine(t, path, string(line))
 }
 
+// appendStatusEventFor writes a done event whose payload carries the exit
+// status gt done recorded for it.
+func appendStatusEventFor(t *testing.T, path, actor, bead, status string, at time.Time) {
+	t.Helper()
+	line, err := json.Marshal(map[string]any{
+		"ts":      at.UTC().Format(time.RFC3339),
+		"source":  "gt",
+		"type":    events.TypeDone,
+		"actor":   actor,
+		"payload": map[string]any{"bead": bead, "status": status},
+	})
+	if err != nil {
+		t.Fatalf("encoding event: %v", err)
+	}
+	appendRawLine(t, path, string(line))
+}
+
 // doneWork is a sandbox seat's submission: everything the seat writes into the
 // bead's notes, as the landing worker reads it.
 func doneWork() Work {
@@ -178,6 +195,29 @@ func TestDoneEventRecorderWritesOnceAndSkipsAHostSeatsOwnEvent(t *testing.T) {
 			t.Fatalf("events = %d lines, want only the seat's own", len(lines))
 		}
 	})
+}
+
+// TestDoneEventRecorderWritesOverAnEscalatedDone: an escalated done event in
+// the log is not a submission, so it does not suppress the host's record of
+// the seat's submission (gt-qqmae).
+func TestDoneEventRecorderWritesOverAnEscalatedDone(t *testing.T) {
+	t.Parallel()
+	w := doneWork()
+	rec, path := newDoneRecorder(t, w)
+	// The seat escalated earlier in the run, inside the dedupe window.
+	appendStatusEventFor(t, path, w.Rig+"/polecats/"+w.Worker, w.BeadID,
+		events.DoneStatusEscalated, recordAt.Add(-2*time.Minute))
+
+	wrote, err := rec.Record(w)
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if !wrote {
+		t.Fatal("Record = false for a bead whose only done event was an escalation; want the submission recorded")
+	}
+	if lines := readEventLines(t, path); len(lines) != 2 {
+		t.Fatalf("events = %d lines, want the escalation and the submission", len(lines))
+	}
 }
 
 // The seat's stamp may pull the end no later than the host's first sight, and

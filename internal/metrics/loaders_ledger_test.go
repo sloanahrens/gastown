@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/events"
 )
 
 // These fixtures are the Python loader tests' fixtures, line for line
@@ -161,6 +163,74 @@ func TestLoadStageStampsDropsAnUnparseableLine(t *testing.T) {
 	}
 	if got, want := stamps.Dispatched["gt-a"], "2026-10-11T00:00:00Z"; got != want {
 		t.Errorf("gt-a dispatched_at = %q, want %q", got, want)
+	}
+}
+
+// TestLedgerSubmittedIgnoresEscalatedDone: gt done writes a done event for
+// every exit type, so an escalated or deferred exit must not stamp the bead's
+// Submitted time; a later submitted done does (gt-qqmae).
+func TestLedgerSubmittedIgnoresEscalatedDone(t *testing.T) {
+	t.Parallel()
+	lines := []string{
+		stageEventLine(t, "2026-10-13T00:00:00Z", "done",
+			map[string]string{"bead": "gt-a", "status": events.DoneStatusEscalated}),
+		stageEventLine(t, "2026-10-13T01:00:00Z", "done",
+			map[string]string{"bead": "gt-b", "status": events.DoneStatusDeferred}),
+		stageEventLine(t, "2026-10-14T00:00:00Z", "done",
+			map[string]string{"bead": "gt-a", "status": events.DoneStatusCompleted}),
+	}
+	stamps := LoadStageStamps(lines, map[string]string{}, &Dropped{})
+	if got, want := stamps.Submitted["gt-a"], "2026-10-14T00:00:00Z"; got != want {
+		t.Errorf("gt-a submitted_at = %q, want the submitted done %q", got, want)
+	}
+	if got, ok := stamps.Submitted["gt-b"]; ok {
+		t.Errorf("gt-b submitted_at = %q, want no stamp for a deferred exit", got)
+	}
+}
+
+// TestLedgerSubmittedKeepsStatuslessDone: a done event written before gt done
+// recorded the exit type carries no status and is still a submission (gt-qqmae).
+func TestLedgerSubmittedKeepsStatuslessDone(t *testing.T) {
+	t.Parallel()
+	lines := []string{
+		stageEventLine(t, "2026-10-13T00:00:00Z", "done", map[string]string{"bead": "gt-a"}),
+	}
+	stamps := LoadStageStamps(lines, map[string]string{}, &Dropped{})
+	if got, want := stamps.Submitted["gt-a"], "2026-10-13T00:00:00Z"; got != want {
+		t.Errorf("gt-a submitted_at = %q, want the statusless done %q", got, want)
+	}
+}
+
+// TestLedgerSubmittedIgnoresAnUnknownDoneStatus: a status the reader does not
+// know is not evidence of a submission, so it stamps nothing (gt-qqmae).
+func TestLedgerSubmittedIgnoresAnUnknownDoneStatus(t *testing.T) {
+	t.Parallel()
+	lines := []string{
+		stageEventLine(t, "2026-10-13T00:00:00Z", "done",
+			map[string]string{"bead": "gt-a", "status": "WAITING"}),
+	}
+	stamps := LoadStageStamps(lines, map[string]string{}, &Dropped{})
+	if got, ok := stamps.Submitted["gt-a"]; ok {
+		t.Errorf("gt-a submitted_at = %q, want no stamp for an unknown status", got)
+	}
+}
+
+// TestLoadStageStampsAnEscalatedDoneEndsTheRun: the landing clock still reads
+// a done of any status as the run end; only the Submitted stamp filters
+// (gt-qqmae).
+func TestLoadStageStampsAnEscalatedDoneEndsTheRun(t *testing.T) {
+	t.Parallel()
+	lines := []string{
+		stageEventLine(t, "2026-10-10T00:00:00Z", "sling",
+			map[string]string{"bead": "gt-a", "target": "gastown/polecats/alfa"}),
+		stageEventLine(t, "2026-10-11T00:00:00Z", "done",
+			map[string]string{"bead": "gt-a", "status": events.DoneStatusEscalated}),
+		stageEventLine(t, "2026-10-12T00:00:00Z", "sling",
+			map[string]string{"bead": "gt-a", "target": "gastown/polecats/bravo"}),
+	}
+	stamps := LoadStageStamps(lines, map[string]string{"gt-a": "2026-10-14T00:00:00Z"}, &Dropped{})
+	if got, want := stamps.Dispatched["gt-a"], "2026-10-10T00:00:00Z"; got != want {
+		t.Errorf("gt-a dispatched_at = %q, want the sling before the escalated run end %q", got, want)
 	}
 }
 
