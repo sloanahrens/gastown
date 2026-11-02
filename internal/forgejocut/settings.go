@@ -45,18 +45,10 @@ func (c *Cutover) forgejoBlock() json.RawMessage {
 	return buf.Bytes()
 }
 
-// WriteSettings is step 6: the rig's settings/config.json gets merge_queue.forgejo
-// set to the block above, and every other key stays where it was. A file that does
-// not exist yet is created with its type and version. A block that already means
-// the same thing (the comparison is on the parsed block, so key order and layout
-// never force a rewrite) leaves the file untouched and makes no backup; otherwise
-// the file is copied to a dated .bak- sibling first, and the undo is copying that
-// backup back over config.json. A dry run logs the backup and the write it would
-// make and changes nothing.
-//
-// This changes the file the daemon reads for the landing path, and the daemon
-// reads a rig's block at start: the live run is a deliberate step after the
-// promote key exists and the first L3 checks have passed, never from a landing.
+// WriteSettings sets merge_queue.forgejo in the rig's settings/config.json,
+// creating the file when absent and backing the existing one up to a dated .bak-
+// sibling whenever it changes it (the undo), and refuses a file it cannot read
+// or that is not a JSON object.
 func (c *Cutover) WriteSettings() error {
 	o := c.Opts
 	path := filepath.Join(o.RigRoot, "settings", "config.json")
@@ -114,6 +106,38 @@ func withForgejoBlock(doc []byte, block json.RawMessage) (edited []byte, had jso
 		return nil, nil, false, err
 	}
 	return edited, had, found, nil
+}
+
+// ensureKeys returns the object doc with each default added at its end when the
+// object has no such key. A key that is present is not touched, whatever it holds.
+func ensureKeys(doc []byte, defaults []member) ([]byte, error) {
+	members, err := parseObject(doc)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range defaults {
+		if lastMember(members, d.key) < 0 {
+			members = append(members, d)
+		}
+	}
+	return renderMembers(members), nil
+}
+
+// renderMembers is members as one compact JSON object, in the order given, each
+// value's text untouched.
+func renderMembers(members []member) []byte {
+	var buf bytes.Buffer
+	buf.WriteByte('{')
+	for n, m := range members {
+		if n > 0 {
+			buf.WriteByte(',')
+		}
+		buf.Write(jsonString(m.key))
+		buf.WriteByte(':')
+		buf.Write(m.val)
+	}
+	buf.WriteByte('}')
+	return buf.Bytes()
 }
 
 // sameJSON reports whether two JSON values parse to the same data, whatever their
