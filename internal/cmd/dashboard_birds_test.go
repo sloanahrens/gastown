@@ -99,3 +99,51 @@ func TestDashboardHubServesTheBirdsRuntimeDir(t *testing.T) {
 		t.Errorf("/birds/dunlin/daily.html: status %d body %q, want the bird's page", rec.Code, rec.Body.String())
 	}
 }
+
+// The hub marks the overseer's own report as the town's headline and no other
+// reporter's, so the page can draw the headline first without carrying a
+// reporter's name of its own (gt-5c4df). The name is the directory
+// internal/overseer keeps the overseer's files in, which is the one the
+// overseer writes its daily report under.
+func TestDashboardHubMarksTheOverseerHeadline(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	written := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	for _, bird := range []string{"heron", "overseer"} {
+		reports := filepath.Join(root, ".runtime", bird, "reports")
+		if err := os.MkdirAll(reports, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		sidecar := fmt.Sprintf(`{"bird":%q,"written_at":%q,"title":"t","summary":"s"}`, bird, written)
+		if err := os.WriteFile(filepath.Join(reports, "daily.json"), []byte(sidecar), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	hub, closeSources, err := newDashboardHub(root, birdsNow, time.UTC, "", nil, nil, 0, 0, "", io.Discard)
+	if err != nil {
+		t.Fatalf("building the dashboard's hub: %v", err)
+	}
+	defer closeSources()
+
+	rec := httptest.NewRecorder()
+	hub.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/birds", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/api/birds: status %d (%s), want 200", rec.Code, rec.Body.String())
+	}
+	var rows []dashboard.BirdReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decoding /api/birds: %v (body %q)", err, rec.Body.String())
+	}
+	headline := map[string]bool{}
+	for _, r := range rows {
+		headline[r.Bird] = r.Headline
+	}
+	if len(headline) != 2 || !headline["overseer"] {
+		t.Errorf("the rows mark the headline as %+v, want the overseer's row and only it", headline)
+	}
+	if headline["heron"] {
+		t.Errorf("the rows mark the headline as %+v, want the overseer's row and only it", headline)
+	}
+}

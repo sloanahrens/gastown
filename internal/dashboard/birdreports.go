@@ -172,6 +172,10 @@ type BirdReport struct {
 	// Stale marks a summary older than birdStaleAfter. The page sorts these
 	// after the rows that need the operator.
 	Stale bool `json:"stale,omitempty"`
+	// Headline marks the report the town treats as its headline: the page
+	// draws it first, stale or not. The reader marks the reporter WithHeadline
+	// names, so the page carries no reporter's name of its own.
+	Headline bool `json:"headline,omitempty"`
 	// Title and Summary are the sidecar's. Both have every control character
 	// but a newline and a tab stripped, and the summary is cut to
 	// birdSummaryRunes. Both are empty on a row withheld or in error.
@@ -214,8 +218,22 @@ type birdSidecar struct {
 	DecisionItems json.RawMessage `json:"decision_items,omitempty"`
 }
 
-// BirdReportsReader reads the birds of one runtime directory.
-type BirdReportsReader struct{ runtimeDir string }
+// BirdReportsReader reads the birds of one runtime directory, marking the
+// headline reporter's row when it is given one.
+type BirdReportsReader struct {
+	runtimeDir string
+	headline   string
+}
+
+// WithHeadline names the reporter whose daily report is the town's headline:
+// its row carries Headline, and the page draws it first. The name is compared
+// against the directory names the reader already accepted and is never used to
+// build a path, so an empty name, or one no bird directory carries, marks no
+// row.
+func (r *BirdReportsReader) WithHeadline(name string) *BirdReportsReader {
+	r.headline = name
+	return r
+}
 
 // NewBirdReportsReader returns a reader of the birds under runtimeDir, the
 // town's runtime directory, which names one directory per bird. The command
@@ -308,10 +326,11 @@ func (r *BirdReportsReader) readBird(now time.Time, name string) (BirdReport, bo
 	prevIsFile := prevErr == nil && prevFi.Mode().IsRegular()
 
 	row := BirdReport{
-		Bird:    name,
-		HasPage: pageIsFile && pageFi.Size() < birdPageMaxBytes,
-		HasPrev: prevIsFile && prevFi.Size() < birdPageMaxBytes,
-		Pages:   birdTopicPages(reports),
+		Bird:     name,
+		Headline: name == r.headline,
+		HasPage:  pageIsFile && pageFi.Size() < birdPageMaxBytes,
+		HasPrev:  prevIsFile && prevFi.Size() < birdPageMaxBytes,
+		Pages:    birdTopicPages(reports),
 	}
 
 	raw, err := readReportsFile(filepath.Join(reports, birdSidecarName), birdSidecarMaxBytes)

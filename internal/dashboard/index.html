@@ -1944,8 +1944,6 @@ function renderCloud(s) {
   if (c.more) box.append(el("div", "empty", "and " + c.more + " more"));
 }
 
-// OVERSEER_BIRD is the reporter whose own daily report is the day's headline.
-const OVERSEER_BIRD = "overseer";
 // The Birds panel draws the birds' daily reports, one row each: the bird's name
 // and the pages it wrote, the age of the summary it left, the summary itself,
 // and the bird's own ask for the operator as a badge. What a row shows is the
@@ -1962,8 +1960,8 @@ const OVERSEER_BIRD = "overseer";
 //
 // The rows keep the reader's order within each group, with the stale reporters
 // moved after the fresh ones: a reporter a day behind is still worth reading,
-// but never in place of one that wrote today. The overseer's row leads them all,
-// stale or not, because its report is the day's headline (gt-gm9lq). The panel
+// but never in place of one that wrote today. The row the reader marks as the
+// town's headline leads them all, stale or not (gt-gm9lq, gt-5c4df). The panel
 // is a section of its own and the first one, and it starts closed, so its
 // heading note carries the bird count and the need-you count for the operator
 // who does not open it (gt-0g6z9, gt-gm9lq).
@@ -1971,8 +1969,9 @@ function drawBirds(box, s) {
   const r = readOf(s, "birds"), note = $("birdsnote");
   paintsRead(box, note, r);
   const all = s.birds || [];
-  const rest = all.filter(b => b.bird !== OVERSEER_BIRD);
-  const rows = all.filter(b => b.bird === OVERSEER_BIRD)
+  // The reader marks the town's headline report, so the page names no reporter.
+  const rest = all.filter(b => !b.headline);
+  const rows = all.filter(b => b.headline)
     .concat(rest.filter(b => !b.stale), rest.filter(b => b.stale));
   // The counts sit in the note, which the closed panel's header shows as its
   // summary line, so a closed panel still says whether anything waits.
