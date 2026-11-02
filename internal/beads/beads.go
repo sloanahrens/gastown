@@ -640,6 +640,12 @@ type IssueDep struct {
 	// target's: when the relation was written, by whom, and its stored JSON.
 	// A dependency read fills them; a read that only lists what an issue
 	// depends on leaves them empty.
+	//
+	// Metadata is the value a JSON string carries, and the raw text of any
+	// other JSON value: bd prints a bead's metadata as an object when it was
+	// written as one (spec_dispatch_timeout_attempts is), and decoding that
+	// straight into a string lost every dependency of the bead, and with them
+	// the whole bd show (gt-l40eg).
 	CreatedAt string `json:"created_at,omitempty"`
 	CreatedBy string `json:"created_by,omitempty"`
 	Metadata  string `json:"metadata,omitempty"`
@@ -650,17 +656,17 @@ type IssueDep struct {
 // an issue_type field that must remain distinct.
 func (d *IssueDep) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		ID             string `json:"id"`
-		Title          string `json:"title"`
-		Status         string `json:"status"`
-		Priority       int    `json:"priority"`
-		Type           string `json:"issue_type"`
-		DependencyType string `json:"dependency_type,omitempty"`
-		RelationType   string `json:"type"`
-		CloseReason    string `json:"close_reason,omitempty"`
-		CreatedAt      string `json:"created_at,omitempty"`
-		CreatedBy      string `json:"created_by,omitempty"`
-		Metadata       string `json:"metadata,omitempty"`
+		ID             string          `json:"id"`
+		Title          string          `json:"title"`
+		Status         string          `json:"status"`
+		Priority       int             `json:"priority"`
+		Type           string          `json:"issue_type"`
+		DependencyType string          `json:"dependency_type,omitempty"`
+		RelationType   string          `json:"type"`
+		CloseReason    string          `json:"close_reason,omitempty"`
+		CreatedAt      string          `json:"created_at,omitempty"`
+		CreatedBy      string          `json:"created_by,omitempty"`
+		Metadata       json.RawMessage `json:"metadata,omitempty"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -675,11 +681,32 @@ func (d *IssueDep) UnmarshalJSON(data []byte) error {
 	d.CloseReason = raw.CloseReason
 	d.CreatedAt = raw.CreatedAt
 	d.CreatedBy = raw.CreatedBy
-	d.Metadata = raw.Metadata
+	d.Metadata = dependencyMetadataText(raw.Metadata)
 	if strings.TrimSpace(d.DependencyType) == "" {
 		d.DependencyType = knownDependencyRelation(raw.RelationType)
 	}
 	return nil
+}
+
+// dependencyMetadataText is a dependency row's metadata as IssueDep.Metadata
+// holds it: "" for an absent or null value, the value of a JSON string, and
+// the raw JSON text of any other value (bd prints metadata as an object).
+//
+// The raw text was taken from a document json.Unmarshal already accepted, so a
+// string value always decodes; one that somehow did not keeps its raw text
+// rather than costing the issue every dependency it has.
+func dependencyMetadataText(raw json.RawMessage) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return ""
+	}
+	if trimmed[0] == '"' {
+		var s string
+		if err := json.Unmarshal(trimmed, &s); err == nil {
+			return s
+		}
+	}
+	return string(trimmed)
 }
 
 var blockingDependencyTypes = map[string]bool{
