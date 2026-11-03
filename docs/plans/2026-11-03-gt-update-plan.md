@@ -1,6 +1,8 @@
-> Status: plan, 2026-11-03. Implements docs/plans/2026-11-03-gt-update-design.md (approved by the operator). Beads are filed from this plan one chain at a time; nothing here is built yet.
+> Status: historical (2026-11). Merged in: gt-o4sk8 (the epic; the live status of each bead is on the bead). Not maintained.
 
 # gt update Implementation Plan
+
+Written 2026-11-03 for the design in docs/plans/2026-11-03-gt-update-design.md, approved by the operator. The beads are filed from this plan one chain at a time under the epic gt-o4sk8; nothing in the plan is built when it lands.
 
 > **For agentic workers:** every task below is one Gas Town bead (twenty minutes of one polecat's work). The overseer files them in the order under "Dispatch order", reviews the risk-path landings, and runs the steps marked "overseer-run" with the operator. A polecat reads only its own bead; the Interfaces block of each task gives the names it shares with its neighbours.
 
@@ -189,10 +191,10 @@ func WithHold(ctx context.Context, h *Hold, note string, fn func(HoldRecord) err
 type Seat struct{ Name string; Working bool; LastActive time.Time }
 type SeatProbe interface{ Seats(ctx context.Context) ([]Seat, error) }
 type DrainOptions struct{ Timeout, IdleAfter, Poll time.Duration }
-type DrainResult struct{ Drained bool; Blocking []string; Waited time.Duration }
+type DrainResult struct{ Drained bool; Blocking []string; Waited time.Duration; Err error }
 func Drain(ctx context.Context, clock Clock, sleep func(context.Context, time.Duration) error, p SeatProbe, o DrainOptions) (DrainResult, error)
 ```
-**Goal.** Poll until no seat is blocking or Timeout passes. A seat blocks when Working and `now - LastActive < IdleAfter`. A working seat silent for IdleAfter or more does not block (it is left alone, never killed). On timeout return Drained false with the blocking seat names.
+**Goal.** Poll until no seat is blocking or Timeout passes. A seat blocks when Working and `now - LastActive < IdleAfter`. A working seat silent for IdleAfter or more does not block (it is left alone, never killed). On timeout return Drained false with the blocking seat names. Fail closed: when `SeatProbe.Seats` returns an error, the drain does not count that poll as "no seat blocking"; it retries on the next poll until the timeout, and if the probe still errors at the timeout it returns Drained false with the probe's error in the result's `Err` field (never Drained true).
 **Constraints.** Defaults 30m, 5m, 15s are applied by the caller; Drain uses the given values. No side effects on seats.
 **Out of scope.** Setting or lifting the hold; the real SeatProbe (B10 builds it from the polecat heartbeats).
 **Gate.** `go test ./internal/update -count=1`.
@@ -201,6 +203,7 @@ func Drain(ctx context.Context, clock Clock, sleep func(context.Context, time.Du
 - [ ] TestDrainTreatsASilentSeatAsDrained: Working with LastActive 6m old (IdleAfter 5m) does not block
 - [ ] TestDrainTimesOutNamingTheBlockers: a seat working and active past the timeout gives Drained false and its name
 - [ ] TestDrainNeverActsOnSeats: the fake probe exposes no mutating method; the test asserts only Seats was called
+- [ ] TestDrainProbeErrorIsNotDrained: a probe that always errors ends at the timeout with Drained false and Err set; a probe that errors once then reports a finished seat ends Drained true after the retry
 - [ ] TestDrainStopsOnContextCancel
 
 ### B6: installer wrapper
@@ -214,7 +217,7 @@ type Installer interface{ Install(ctx context.Context, sha string) (InstallResul
 type RunFunc func(ctx context.Context, dir string, env []string, name string, args ...string) (output string, exit int, err error)
 type ExecInstaller struct{ RepoRoot string; Run RunFunc }
 ```
-**Goal.** `ExecInstaller.Install` does what `rebuild_gt` does: run `make gt-installer` in RepoRoot, then `<RepoRoot>/gt-installer --sha <sha> --source gt-update` with env `INSTALL_GT_LOCK_WAIT=120` and `INSTALL_GT_RIG_DIR=<RepoRoot>`, and parse the RESULT line. First read internal/installer/installer.go (the RESULT format is documented near line 37) and list its event names in a table in installer.go; map each to ok, deferred or failed. Find how `rebuild_gt` chooses its repo root (internal/daemon/rebuild_gt.go, `triggerRebuildGT`) and use the same rule for the default in the command (B10), not here.
+**Goal.** `ExecInstaller.Install` does what `rebuild_gt` does: run `make gt-installer` in RepoRoot, then `<RepoRoot>/gt-installer --sha <sha> --source gt-update` with env `INSTALL_GT_LOCK_WAIT=120` and `INSTALL_GT_RIG_DIR=<RepoRoot>`, and parse the RESULT line. First read internal/installer/installer.go (read only; the RESULT format is documented near line 37) and list its event names in a table in internal/update/installer.go (the file this bead creates); map each to ok, deferred or failed. Find how `rebuild_gt` chooses its repo root (internal/daemon/rebuild_gt.go, `triggerRebuildGT`) and use the same rule for the default in the command (B10), not here.
 **Constraints.** A missing RESULT line is an error that includes the last 20 output lines. Exit code nonzero with a RESULT line still returns the parsed result and an error.
 **Out of scope.** Verifying the install (B7); changing the installer.
 **Gate.** `go test ./internal/update -count=1`.
@@ -298,6 +301,7 @@ func Run(ctx context.Context, d Deps, o Options) (State, error)
 - [ ] TestRunMaintenanceFailureIsPartial: install still runs; outcome partial
 - [ ] TestRunInstallFailureAbortsAndReleasesTheHold
 - [ ] TestRunBlockedDrainAborts: names the seat, no install attempted
+- [ ] TestRunDrainProbeErrorAborts: a seat probe that keeps erroring gives outcome aborted with the error in Detail, no install attempted, the hold released
 - [ ] TestRunCancelledIsInterruptedAndReleasesTheHold
 
 ### B10: the gt update command
