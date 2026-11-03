@@ -441,7 +441,9 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	tierSweeps := newTierSweepReader(townRoot)
 	// The gt update job's own record, for the feed's update section: the page
 	// draws it beside the dispatch hold so the operator sees why nothing runs.
-	updateStatus := newUpdateStatusReader(townRoot)
+	// A record that cannot be read is logged, because otherwise it looks the
+	// same as a town where no run has happened.
+	updateStatus := newUpdateStatusReader(townRoot).withLogf(dashboardLogf(out))
 	escalations := newDashEscalationReader(townRoot)
 	backoff := newDashBackoff(townRoot)
 	queue := newDashQueueReader(townRoot)

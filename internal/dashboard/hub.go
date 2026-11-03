@@ -789,11 +789,11 @@ func (h *Hub) pollTierSweep() {
 	h.publishLocked()
 }
 
-// pollUpdate reads the gt update job's run. Unlike the tier sweep's poll a nil
-// read clears the section rather than keeping the last one: nil is the
-// reader's answer for no run, for an unreadable record and for a run that
-// ended more than a day ago, and a run the reader has stopped reporting must
-// not stay in the feed as if it were current.
+// pollUpdate reads the gt update job's run into the feed. A nil read clears the
+// section instead of keeping the last one: nil is the reader's answer for no
+// run, for an unreadable record, for a run whose heartbeat went stale and for
+// a run that ended more than a day ago, and a run the reader has stopped
+// reporting must not stay in the feed as if it were current.
 func (h *Hub) pollUpdate() {
 	u := h.cfg.Update()
 	h.mu.Lock()

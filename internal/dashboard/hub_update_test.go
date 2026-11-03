@@ -36,7 +36,8 @@ func stateWithUpdate(t *testing.T, next func() *UpdateStatus) (map[string]json.R
 }
 
 // The page draws the update job from the feed: /api/state carries the run the
-// provider read, and a provider with nothing to report leaves the key out.
+// provider read, its ended_at only once it ended, and a provider with nothing
+// to report leaves the section out.
 func TestStateFeedCarriesTheUpdateSection(t *testing.T) {
 	t.Parallel()
 
@@ -55,7 +56,7 @@ func TestStateFeedCarriesTheUpdateSection(t *testing.T) {
 			{Name: "drain", WillRun: true, Result: "running"},
 		},
 	}
-	_, got := stateWithUpdate(t, func() *UpdateStatus { return u })
+	body, got := stateWithUpdate(t, func() *UpdateStatus { return u })
 	if got == nil {
 		t.Fatal("/api/state carries no update section")
 	}
@@ -68,6 +69,21 @@ func TestStateFeedCarriesTheUpdateSection(t *testing.T) {
 	}
 	if len(got.Steps) != 2 || got.Steps[0] != (UpdateStep{Name: "plan", WillRun: true, Result: "ok", Detail: "six steps"}) {
 		t.Errorf("/api/state update steps = %+v", got.Steps)
+	}
+	var section map[string]json.RawMessage
+	if err := json.Unmarshal(body["update"], &section); err != nil {
+		t.Fatalf("/api/state update section is not an object: %v", err)
+	}
+	if _, ok := section["ended_at"]; ok {
+		t.Error("/api/state carries ended_at for a running run")
+	}
+
+	ended := started.Add(5 * time.Minute)
+	_, finished := stateWithUpdate(t, func() *UpdateStatus {
+		return &UpdateStatus{RunID: "run-2", Outcome: "ok", StartedAt: started, EndedAt: &ended, ElapsedSec: 300}
+	})
+	if finished == nil || finished.EndedAt == nil || !finished.EndedAt.Equal(ended) {
+		t.Errorf("/api/state finished update = %+v, want EndedAt %v", finished, ended)
 	}
 
 	body, none := stateWithUpdate(t, func() *UpdateStatus { return nil })

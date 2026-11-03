@@ -671,7 +671,8 @@ type UpdateStep struct {
 // outcome is still running; ElapsedSec is its wall time so far, or the whole
 // run's once it ended; HeartbeatAgeSec is how stale a running run's last
 // heartbeat is, so a job that died is visible as one, and is 0 for a run that
-// ended. Steps is every step of the plan in run order.
+// ended. EndedAt is nil while the run is in flight and the time it finished
+// once it ended. Steps is every step of the plan in run order.
 type UpdateStatus struct {
 	Running         bool         `json:"running"`
 	RunID           string       `json:"run_id"`
@@ -679,7 +680,7 @@ type UpdateStatus struct {
 	Current         string       `json:"current,omitempty"`
 	Outcome         string       `json:"outcome"`
 	StartedAt       time.Time    `json:"started_at"`
-	EndedAt         time.Time    `json:"ended_at,omitempty"`
+	EndedAt         *time.Time   `json:"ended_at,omitempty"`
 	ElapsedSec      int          `json:"elapsed_sec"`
 	HeartbeatAgeSec int          `json:"heartbeat_age_sec"`
 	Steps           []UpdateStep `json:"steps"`
@@ -794,8 +795,9 @@ type State struct {
 	TierSweep    *TierSweep    `json:"tiersweep,omitempty"`
 	// Update is the gt update job's run while it is in flight or for a day
 	// after it ended, which is why nothing is being dispatched. It is nil when
-	// no run has recorded state, when the record cannot be read, and for a run
-	// that ended more than a day ago.
+	// no run has recorded state, when the record cannot be read, when a running
+	// run's heartbeat has gone stale, and for a run that ended more than a day
+	// ago.
 	Update *UpdateStatus `json:"update,omitempty"`
 	// Models is the header strip: the polecat model, the pool's seats against
 	// its cap, and the reviewer's model. It is nil until the reader reports.

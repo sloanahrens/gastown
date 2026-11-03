@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -38,8 +39,8 @@ func writeUpdateStateFile(t *testing.T, body string) *updateStatusReader {
 }
 
 // A run in flight gives the feed its live elapsed time, its heartbeat age, the
-// step it is on and every step of the plan.
-func TestUpdateStatusFromARunningState(t *testing.T) {
+// step it is on and every step of the plan, and no end time.
+func TestDashboardUpdateStatusFromARunningState(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
@@ -75,6 +76,9 @@ func TestUpdateStatusFromARunningState(t *testing.T) {
 	if got.HeartbeatAgeSec != 20 {
 		t.Errorf("HeartbeatAgeSec = %d, want 20", got.HeartbeatAgeSec)
 	}
+	if got.EndedAt != nil {
+		t.Errorf("EndedAt = %v for a running run, want nil", got.EndedAt)
+	}
 	if len(got.Steps) != 3 {
 		t.Fatalf("Steps = %+v", got.Steps)
 	}
@@ -91,7 +95,7 @@ func TestUpdateStatusFromARunningState(t *testing.T) {
 
 // A run that ended is drawn from its own end, not from now, and one that ended
 // more than a day ago is no longer the feed's business.
-func TestUpdateStatusFromAFinishedState(t *testing.T) {
+func TestDashboardUpdateStatusFromAFinishedState(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
@@ -121,7 +125,7 @@ func TestUpdateStatusFromAFinishedState(t *testing.T) {
 	if got.HeartbeatAgeSec != 0 {
 		t.Errorf("HeartbeatAgeSec = %d for a finished run, want 0", got.HeartbeatAgeSec)
 	}
-	if !got.EndedAt.Equal(ended) {
+	if got.EndedAt == nil || !got.EndedAt.Equal(ended) {
 		t.Errorf("EndedAt = %v, want %v", got.EndedAt, ended)
 	}
 
@@ -136,9 +140,34 @@ func TestUpdateStatusFromAFinishedState(t *testing.T) {
 	}
 }
 
+// A record that still says running but has not beaten for longer than the
+// stale bound is a dead job, not a run in flight, and the feed drops it.
+func TestDashboardUpdateStatusStaleRunningIsNil(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	state := func(beat time.Time) update.State {
+		return update.State{
+			RunID:       "run-1",
+			StartedAt:   now.Add(-8 * time.Minute),
+			HeartbeatAt: beat,
+			Current:     update.StepInstall,
+			Outcome:     update.OutcomeRunning,
+		}
+	}
+	fresh := updateStatusTestReader(t, state(now.Add(-updateStatusStaleAfter)))
+	if got := fresh.read(now); got == nil {
+		t.Errorf("a heartbeat exactly at the stale bound read as no run, want the run")
+	}
+	stale := updateStatusTestReader(t, state(now.Add(-updateStatusStaleAfter-time.Second)))
+	if got := stale.read(now); got != nil {
+		t.Errorf("a heartbeat past the stale bound read as %+v, want nil", got)
+	}
+}
+
 // A town with no run, a record that is not JSON and a record of a version this
 // build does not know are all no section, and none of them panics.
-func TestUpdateStatusAbsentOrUnreadableIsNil(t *testing.T) {
+func TestDashboardUpdateStatusAbsentOrUnreadableIsNil(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
@@ -153,5 +182,35 @@ func TestUpdateStatusAbsentOrUnreadableIsNil(t *testing.T) {
 	future := writeUpdateStateFile(t, `{"v":2,"run_id":"run-4","outcome":"running"}`)
 	if got := future.read(now); got != nil {
 		t.Errorf("a version 2 record read as %+v, want nil", got)
+	}
+}
+
+// A record that cannot be read is reported, once per failure, and a town with
+// no record is not: absence is a normal state, an unreadable record is not.
+func TestDashboardUpdateStatusUnreadableLogsOneLine(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	var logs []string
+	logf := func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+
+	absent := newUpdateStatusReader(t.TempDir()).withLogf(logf)
+	if got := absent.read(now); got != nil {
+		t.Fatalf("a town with no record read as %+v, want nil", got)
+	}
+	if len(logs) != 0 {
+		t.Errorf("logs for a town with no record = %q, want none", logs)
+	}
+
+	malformed := writeUpdateStateFile(t, "this is not json").withLogf(logf)
+	for i := 0; i < 2; i++ {
+		if got := malformed.read(now); got != nil {
+			t.Fatalf("read %d: a malformed record read as %+v, want nil", i+1, got)
+		}
+	}
+	if len(logs) != 1 {
+		t.Errorf("logs for an unreadable record read twice = %q, want one line", logs)
 	}
 }
