@@ -47,10 +47,16 @@ func updateDue(now time.Time, s config.UpdateSettings, f UpdateFacts) (due bool,
 	}
 
 	// The nightly rule: one run per day, and only inside the hour that opens
-	// at the window start. LastStarted before today's start means no run has
-	// started since this window opened, so a zero LastStarted qualifies too.
+	// at the window start. A start late in the day opens a window that runs
+	// past midnight, so when now is before today's start the open one is the
+	// window yesterday's start left behind. LastStarted before that start
+	// means no run has started since it opened, so a zero LastStarted
+	// qualifies too.
 	windowStart := time.Date(now.Year(), now.Month(), now.Day(), s.WindowHour, s.WindowMinute, 0, 0, now.Location())
-	if !now.Before(windowStart) && now.Before(windowStart.Add(updateWindowLength)) && f.LastStarted.Before(windowStart) {
+	if now.Before(windowStart) {
+		windowStart = windowStart.AddDate(0, 0, -1)
+	}
+	if now.Before(windowStart.Add(updateWindowLength)) && f.LastStarted.Before(windowStart) {
 		return true, "nightly window is open and no run has started since it opened"
 	}
 

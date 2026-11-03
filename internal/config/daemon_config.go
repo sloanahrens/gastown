@@ -542,50 +542,52 @@ type UpdateSettings struct {
 // or a duration that does not parse or falls outside its bounds, is refused
 // rather than clamped, and the error names the daemon.json key.
 func (c *UpdateConfig) Settings() (UpdateSettings, error) {
-	s := UpdateSettings{
-		WindowHour:  3,
-		MinInterval: DefaultUpdateMinInterval,
-		MaxRuntime:  DefaultUpdateMaxRuntime,
+	cfg := UpdateConfig{}
+	if c != nil {
+		cfg = *c
 	}
-	if c == nil {
-		return s, nil
-	}
-	s.Enabled = c.Enabled
+	s := UpdateSettings{Enabled: cfg.Enabled}
 
-	if window := strings.TrimSpace(c.Window); window != "" {
-		hour, minute, err := parseUpdateWindow(window)
-		if err != nil {
-			return UpdateSettings{}, fmt.Errorf("%s = %q: %w", UpdateWindowKey, c.Window, err)
-		}
-		s.WindowHour, s.WindowMinute = hour, minute
+	window := DefaultUpdateWindow
+	if set := strings.TrimSpace(cfg.Window); set != "" {
+		window = set
 	}
+	hour, minute, err := parseUpdateWindow(window)
+	if err != nil {
+		return UpdateSettings{}, fmt.Errorf("%s = %q: %w", UpdateWindowKey, window, err)
+	}
+	s.WindowHour, s.WindowMinute = hour, minute
 
-	var err error
-	if s.MinInterval, err = parseUpdateDuration(UpdateMinIntervalKey, c.MinInterval, DefaultUpdateMinInterval, MinUpdateMinInterval, MaxUpdateMinInterval); err != nil {
+	if s.MinInterval, err = parseUpdateDuration(UpdateMinIntervalKey, cfg.MinInterval, DefaultUpdateMinInterval, MinUpdateMinInterval, MaxUpdateMinInterval); err != nil {
 		return UpdateSettings{}, err
 	}
-	if s.MaxRuntime, err = parseUpdateDuration(UpdateMaxRuntimeKey, c.MaxRuntime, DefaultUpdateMaxRuntime, MinUpdateMaxRuntime, MaxUpdateMaxRuntime); err != nil {
+	if s.MaxRuntime, err = parseUpdateDuration(UpdateMaxRuntimeKey, cfg.MaxRuntime, DefaultUpdateMaxRuntime, MinUpdateMaxRuntime, MaxUpdateMaxRuntime); err != nil {
 		return UpdateSettings{}, err
 	}
 	return s, nil
 }
 
-// parseUpdateWindow parses HH:MM, with both parts two digits so "3pm" and
-// "3:00" are refused rather than guessed at.
+// parseUpdateWindow parses HH:MM, with both parts exactly two digits so "3pm",
+// "3:00" and "+3:00" are refused rather than guessed at.
 func parseUpdateWindow(window string) (hour, minute int, err error) {
 	parts := strings.SplitN(window, ":", 2)
-	if len(parts) != 2 || len(parts[0]) != 2 || len(parts[1]) != 2 {
+	if len(parts) != 2 || !twoDigits(parts[0]) || !twoDigits(parts[1]) {
 		return 0, 0, errors.New("want HH:MM")
 	}
-	hour, err = strconv.Atoi(parts[0])
-	if err != nil || hour < 0 || hour > 23 {
+	hour, _ = strconv.Atoi(parts[0])
+	if hour > 23 {
 		return 0, 0, errors.New("want an hour from 00 to 23")
 	}
-	minute, err = strconv.Atoi(parts[1])
-	if err != nil || minute < 0 || minute > 59 {
+	minute, _ = strconv.Atoi(parts[1])
+	if minute > 59 {
 		return 0, 0, errors.New("want a minute from 00 to 59")
 	}
 	return hour, minute, nil
+}
+
+// twoDigits reports whether s is exactly two ASCII digits.
+func twoDigits(s string) bool {
+	return len(s) == 2 && s[0] >= '0' && s[0] <= '9' && s[1] >= '0' && s[1] <= '9'
 }
 
 // parseUpdateDuration reads one duration setting, keeping def when it is

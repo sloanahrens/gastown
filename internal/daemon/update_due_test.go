@@ -51,6 +51,38 @@ func TestUpdateDueNightlyWindowOncePerDay(t *testing.T) {
 	}
 }
 
+// A window that opens late in the day stays open into the next morning, and
+// still holds one run per window.
+func TestUpdateDueNightlyWindowCarriesPastMidnight(t *testing.T) {
+	t.Parallel()
+
+	settings := testUpdateSettings
+	settings.WindowHour, settings.WindowMinute = 23, 30
+	opened := time.Date(2026, 3, 10, 23, 30, 0, 0, time.UTC)
+	tests := []struct {
+		name        string
+		now         time.Time
+		lastStarted time.Time
+		wantDue     bool
+	}{
+		{"before midnight, no run since it opened", opened.Add(20 * time.Minute), opened.Add(-time.Hour), true},
+		{"after midnight, no run since it opened", opened.Add(45 * time.Minute), opened.Add(-time.Hour), true},
+		{"after midnight, run started inside the window", opened.Add(45 * time.Minute), opened.Add(10 * time.Minute), false},
+		{"after the window closed", opened.Add(updateWindowLength), opened.Add(-time.Hour), false},
+		{"the next evening before it opens", opened.Add(20 * time.Hour), opened.Add(-time.Hour), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			due, reason := updateDue(tt.now, settings, UpdateFacts{LastStarted: tt.lastStarted})
+			if due != tt.wantDue {
+				t.Fatalf("updateDue() due = %v, want %v (reason %q)", due, tt.wantDue, reason)
+			}
+		})
+	}
+}
+
 func TestUpdateDueWhenMainMovedAfterMinInterval(t *testing.T) {
 	t.Parallel()
 

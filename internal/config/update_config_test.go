@@ -48,6 +48,7 @@ func TestUpdateConfigRefusals(t *testing.T) {
 	}{
 		{"window hour out of range", &UpdateConfig{Window: "25:00"}, UpdateWindowKey},
 		{"window not HH:MM", &UpdateConfig{Window: "3pm"}, UpdateWindowKey},
+		{"window signed hour", &UpdateConfig{Window: "+3:00"}, UpdateWindowKey},
 		{"window late minute", &UpdateConfig{Window: "03:60"}, UpdateWindowKey},
 		{"min_interval below floor", &UpdateConfig{MinInterval: "10m"}, UpdateMinIntervalKey},
 		{"min_interval above ceiling", &UpdateConfig{MinInterval: "48h"}, UpdateMinIntervalKey},
