@@ -814,7 +814,12 @@ func (d *Daemon) maintenanceArchiveEvents(parent context.Context, dir, db string
 				return 0, wm, exp.fail(err)
 			}
 			if !newestAt.After(sinceAt) {
-				return len(batch.Rows), wm, nil
+				// Every row of a full page shares the timestamp the read
+				// started at, so reading past it would repeat the same page and
+				// the rows beyond it would never be archived. Ending quietly
+				// would leave the database behind on every cycle with nothing
+				// in the log, so this is a failure the escalation can name.
+				return 0, wm, exp.fail(fmt.Errorf("events at created_at %s fill more than one page of %d rows and the archive cannot read past them; raise archive_events_limit", newestText, limit))
 			}
 			since, sinceAt = newestText, newestAt
 			continue

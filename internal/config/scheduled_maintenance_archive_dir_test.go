@@ -160,6 +160,12 @@ func TestScheduledMaintenanceArchiveBudget(t *testing.T) {
 		}
 	}
 
+	for _, setting := range []string{"1m", "30m"} {
+		if got, err := (&ScheduledMaintenanceConfig{ArchiveBudget: setting}).ParseArchiveBudget(); err != nil {
+			t.Errorf("ParseArchiveBudget(%q) = %v, %v; the bound itself is allowed", setting, got, err)
+		}
+	}
+
 	for _, setting := range []string{"30s", "45m", "abc"} {
 		got, err := (&ScheduledMaintenanceConfig{ArchiveBudget: setting}).ParseArchiveBudget()
 		if err == nil {

@@ -2643,6 +2643,60 @@ func TestArchiveEventsFullPageOfArchivedRowsAdvances(t *testing.T) {
 	}
 }
 
+// TestArchiveEventsOneTimestampFillingAPageFailsVisibly: when more rows than
+// one page share a created_at and the first page is already archived, the read
+// cannot move past them. Ending the loop quietly would leave the database
+// behind on every cycle with nothing in the log, so the export fails, keeps the
+// watermark and names the cause (gt-o4sk8.1).
+func TestArchiveEventsOneTimestampFillingAPageFailsVisibly(t *testing.T) {
+	t.Parallel()
+	d, logs := gcTestDaemon(t)
+	withGCFakes(t, d)
+	dir := t.TempDir()
+	d.patrolConfig = archiveConfig(dir)
+	limit := 5
+	d.patrolConfig.Patrols.ScheduledMaintenance.ArchiveEventsLimit = &limit
+	d.maint.now = func() time.Time { return gcTestNow }
+	d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {
+		return nil, nil
+	}
+	columns := []string{"id", "created_at"}
+	at := gcTestNow.Add(-2 * time.Hour).Format("2006-01-02 15:04:05")
+	rows := make([][]string, 0, 8)
+	for i := 1; i <= 8; i++ {
+		rows = append(rows, []string{fmt.Sprintf("s%05d", i), at})
+	}
+	if err := appendArchiveTable(eventsArchiveFile(dir, "gt"), columns, rows[:5]); err != nil {
+		t.Fatalf("seeding the events file: %v", err)
+	}
+	seeded := EventsArchiveWatermark{CreatedAt: at}
+	for _, row := range rows[:5] {
+		seeded.Archived = append(seeded.Archived, ArchivedEventsRow{CreatedAt: row[1], ID: row[0]})
+	}
+	if err := recordEventsArchiveWatermark(d.config.TownRoot, "gt", seeded); err != nil {
+		t.Fatalf("seeding the events watermark: %v", err)
+	}
+	d.maint.archiveEventsRead = func(context.Context, *Daemon, string, string) (archiveEvents, error) {
+		return archiveEvents{Columns: columns, Rows: rows[:limit]}, nil // the same full page every time
+	}
+
+	_, unarchived := d.maintenanceArchive([]string{"gt"})
+
+	if !strings.Contains(logs.String(), "fill more than one page") || !strings.Contains(logs.String(), "archive_events_limit") {
+		t.Errorf("log does not name the same-timestamp page and the setting to raise:\n%s", logs.String())
+	}
+	if len(unarchived) == 0 {
+		t.Errorf("unarchived = %v, want gt listed", unarchived)
+	}
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	if got := len(st.ArchiveEventsWatermarks["gt"].Archived); got != 5 {
+		t.Errorf("watermark holds %d id(s), want the 5 seeded ones kept", got)
+	}
+}
+
 // TestArchiveEventsRefusesAnUndateableArchivedPage: moving the read past a
 // full page of archived rows needs the page's newest created_at. A row the
 // export cannot date fails the batch and keeps the watermark, rather than
