@@ -253,6 +253,47 @@ func TestNewRigLandingWorker_WiresTheDoneEventRecorder(t *testing.T) {
 	}
 }
 
+// TestNewRigLandingWorker_WiresTheWritersTownRoot: every writer of the
+// ready-to-land label - gt done, gt land requeue and the red-main revert queue
+// - touches the rig's ready stamp under the town root it resolves, and the
+// worker skips its ready list only while no stamp is newer than its last list.
+// Construction must therefore hand both the worker and the red-main owner the
+// daemon's town root: wired to any other root, the idle skip reads no stamp and
+// every submission waits out the three-minute ceiling (gt-ortgn).
+func TestNewRigLandingWorker_WiresTheWritersTownRoot(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	keyFile := filepath.Join(t.TempDir(), "promote-gastown.key")
+	promoteRigConfig(t, townRoot, "gastown", keyFile)
+	writeRigsJSON(t, townRoot, []string{"gastown"})
+	d := newForgejoPromoteDaemon(t, townRoot, "")
+
+	w, err := d.newRigLandingWorker("gastown")
+	if err != nil {
+		t.Fatalf("newRigLandingWorker: %v", err)
+	}
+	if w.TownRoot != townRoot {
+		t.Errorf("worker TownRoot = %q, want the daemon's town root %q", w.TownRoot, townRoot)
+	}
+	if rm := redMainOf(t, w); rm.TownRoot != townRoot {
+		t.Errorf("red-main TownRoot = %q, want the daemon's town root %q", rm.TownRoot, townRoot)
+	}
+	// The writers touch the stamp under the town root they resolve; reading it
+	// back through the worker's own field is what proves the two roots name the
+	// same directory rather than merely holding equal strings.
+	now := time.Now()
+	if err := land.TouchReadyStamp(townRoot, w.Rig, now); err != nil {
+		t.Fatalf("TouchReadyStamp: %v", err)
+	}
+	stamp, err := land.ReadyStamp(w.TownRoot, w.Rig)
+	if err != nil {
+		t.Fatalf("ReadyStamp under the worker's TownRoot: %v", err)
+	}
+	if stamp.IsZero() {
+		t.Fatal("the worker reads no stamp where the ready-label writers wrote one; its TownRoot is not the writers' town root")
+	}
+}
+
 func TestLandingWorkerConfigDefaults(t *testing.T) {
 	t.Parallel()
 	if IsPatrolEnabled(nil, "landing_worker") {
