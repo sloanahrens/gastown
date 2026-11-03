@@ -498,9 +498,15 @@ type LandingRow struct {
 	Title   string    `json:"title,omitempty"`
 	Polecat string    `json:"polecat,omitempty"`
 	// Crew marks a row built on a crew session's branch, landed or still
-	// running: no polecat built it, so the Polecat cell reads crew rather than
-	// a dash, which would look like missing time (gt-kmp7c).
+	// running: no polecat built it, so the Polecat cell says there is no
+	// polecat time rather than drawing a dash, which would look like missing
+	// time (gt-kmp7c).
 	Crew bool `json:"crew,omitempty"`
+	// CrewAgent is the agent segment of a crew branch, "crew/<agent>/<bead>":
+	// the Polecat cell and the By cell name it, because a crew landing's
+	// assignee is not its builder — the overseer keeps a slingable agent on
+	// the bead while it lands the crew member's branch (gt-830fd).
+	CrewAgent string `json:"crew_agent,omitempty"`
 	// Outcome is "landed", "rejected", "running" for a landing the worker
 	// holds right now, or "backoff" for one that keeps failing and is waiting
 	// for a retry. A running row's At is the merge, and it carries no verdict,

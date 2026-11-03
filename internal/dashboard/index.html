@@ -1670,16 +1670,17 @@ function holderCell(names, rig, who, fallback) {
 // each seat's share of it, "2 attempts: 14m + 9m". An attempt whose span never
 // closed adds no time to the record and reads "open", and an attempt that is
 // itself a floor keeps its +, which is why the total may be a lower bound
-// (gt-90wi1). A bird or crew branch's landing has no polecat, so its cell says
-// bird rather than reading as a dash, which would look like missing data
-// (gt-kmp7c); the tooltip says why there is no polecat time (gt-rxs7w). A row
-// that carries no reading — a queued bead, whose queue reading (QueueBead) has
-// no polecat time — reads the dash, never a figure guessed from its wait
+// (gt-90wi1). A bird or crew branch's landing has no polecat, so its cell
+// names the branch's agent ("crew/<agent>/...") or, when the branch names none,
+// says bird — never a dash, which would look like missing data (gt-kmp7c); the
+// tooltip says why there is no polecat time (gt-rxs7w, gt-830fd). A row that
+// carries no reading — a queued bead, whose queue reading (QueueBead) has no
+// polecat time — reads the dash, never a figure guessed from its wait
 // (gt-duuq1).
 function polecatTimeCell(row) {
-  const pc = el("td", "n", row.crew ? "bird" : polecatDur(row.polecat_secs, row.polecat_lower_bound, row.polecat_upper_bound));
+  const pc = el("td", "n", row.crew ? (row.crew_agent || "bird") : polecatDur(row.polecat_secs, row.polecat_lower_bound, row.polecat_upper_bound));
   const attempts = row.polecat_attempts || [];
-  if (row.crew) pc.title = "bird or crew branch: no polecat time exists";
+  if (row.crew) pc.title = row.crew_agent ? "crew branch: no polecat time exists" : "bird or crew branch: no polecat time exists";
   else if (attempts.length) pc.title = attempts.length + (attempts.length === 1 ? " attempt: " : " attempts: ") + attempts.map(a => a.secs > 0 ? polecatDur(a.secs, a.lower_bound, a.upper_bound) : "open").join(" + ");
   return pc;
 }
@@ -1763,8 +1764,10 @@ function landingTable(s, names, rows, waiting) {
     // By names the holder the way the Work panel's seat rows do: the short name, and
     // its rig only where two rigs in view use that name. The row's own rig
     // is the holder's for a live run; for a finished one it is read back from
-    // the polecat roster, so a shared short name still gets its rig.
-    const who = r.polecat || (r.route ? r.route.replace(/^overseer-/, "") : "");
+    // the polecat roster, so a shared short name still gets its rig. A crew
+    // row names the branch's agent: its assignee is whoever the bead stays
+    // slingable for, not the crew member who built it (gt-830fd).
+    const who = (r.crew && r.crew_agent) || r.polecat || (r.route ? r.route.replace(/^overseer-/, "") : "");
     const rig = r.rig || names.rigOf(who);
     tr.append(holderCell(names, rig, who, r.outcome === "running" ? r.rig : ""), polecatTimeCell(r));
     tr.append(el("td", "n" + (r.score != null && thr != null && r.score < thr ? " badc" : ""), r.score != null ? r.score.toFixed(2) : "–"));

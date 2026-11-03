@@ -465,11 +465,79 @@ func TestTheLandingsPaneDrawsThePolecatTimeColumn(t *testing.T) {
 	}
 }
 
-// A landing built on a bird or crew branch has no polecat, so its Polecat cell
-// reads bird rather than a dash, which would read as missing data, and its
-// tooltip says there is no polecat time (gt-kmp7c, gt-rxs7w). A polecat's
-// landing with no reading keeps the dash.
-func TestTheLandingsPaneReadsBirdInThePolecatCellOfACrewBranchRow(t *testing.T) {
+// A landing built on a crew branch has no polecat, so its Polecat cell names
+// the branch's agent ("crew/<agent>/...") instead of a dash, which would read
+// as missing data, and its tooltip says there is no polecat time. The By cell
+// names that agent too: the bead's assignee is only who keeps the bead
+// slingable while a crew member's branch lands, not who built it (gt-kmp7c,
+// gt-rxs7w, gt-830fd).
+func TestLandingsCrewRowNamesTheBranchAgent(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 29, 14, 0, 0, 0, time.Local)
+	dom := newPageDOM(t)
+	dom.call(t, "renderTrend", map[string]any{"trend": map[string]any{
+		"hours": []map[string]any{{"hour": now.Format(time.RFC3339), "landed": 1}},
+		"recent": []map[string]any{
+			{
+				"at": now.Add(-time.Minute).Format(time.RFC3339), "bead": "gt-xyz", "outcome": "landed",
+				"crew": true, "crew_agent": "overseer", "polecat": "ace",
+			},
+		},
+	}})
+
+	cells := drawnPolecatColumn(t, dom)
+	if len(cells) != 1 {
+		t.Fatalf("the table drew %d Polecat cells, want one", len(cells))
+	}
+	if got := cells[0].Text; got != "overseer" {
+		t.Errorf("crew branch row's Polecat cell reads %q, want the branch's agent overseer", got)
+	}
+	if title := cells[0].Title; !strings.Contains(title, "no polecat time exists") {
+		t.Errorf("crew branch row's Polecat cell tooltip reads %q, want it to say no polecat time exists", title)
+	}
+	if got := drawnByColumn(t, dom)["gt-xyz"]; got != "overseer" {
+		t.Errorf("crew branch row's By cell reads %q, want the branch's agent overseer, not the bead's assignee ace", got)
+	}
+}
+
+// A crew row whose branch does not name an agent ("crew//<bead>", "crew/")
+// keeps the wording the page drew before the branch's agent was carried into
+// the row: the Polecat cell says bird, with its no-polecat-time tooltip, and
+// the By cell names whoever the row carries (gt-kmp7c, gt-rxs7w, gt-830fd).
+func TestLandingsCrewBranchWithoutAnAgentKeepsToday(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 29, 14, 0, 0, 0, time.Local)
+	dom := newPageDOM(t)
+	dom.call(t, "renderTrend", map[string]any{"trend": map[string]any{
+		"hours": []map[string]any{{"hour": now.Format(time.RFC3339), "landed": 1}},
+		"recent": []map[string]any{
+			{
+				"at": now.Add(-time.Minute).Format(time.RFC3339), "bead": "gt-crew", "outcome": "landed",
+				"crew": true, "polecat": "ace",
+			},
+		},
+	}})
+
+	cells := drawnPolecatColumn(t, dom)
+	if len(cells) != 1 {
+		t.Fatalf("the table drew %d Polecat cells, want one", len(cells))
+	}
+	if got := cells[0].Text; got != "bird" {
+		t.Errorf("crew branch row with no agent reads %q in its Polecat cell, want bird", got)
+	}
+	if got := cells[0].Title; got != "bird or crew branch: no polecat time exists" {
+		t.Errorf("crew branch row with no agent has tooltip %q, want today's wording", got)
+	}
+	if got := drawnByColumn(t, dom)["gt-crew"]; got != "ace" {
+		t.Errorf("crew branch row with no agent reads %q in its By cell, want the name the row carries, ace", got)
+	}
+}
+
+// A polecat-built row is untouched: the Polecat cell draws its reading, or the
+// dash when it carries none, and the By cell names the polecat (gt-830fd).
+func TestLandingsPolecatRowIsUnchanged(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 10, 29, 14, 0, 0, 0, time.Local)
@@ -477,26 +545,57 @@ func TestTheLandingsPaneReadsBirdInThePolecatCellOfACrewBranchRow(t *testing.T) 
 	dom.call(t, "renderTrend", map[string]any{"trend": map[string]any{
 		"hours": []map[string]any{{"hour": now.Format(time.RFC3339), "landed": 2}},
 		"recent": []map[string]any{
-			{"at": now.Add(-time.Minute).Format(time.RFC3339), "bead": "gt-crew", "outcome": "landed", "crew": true},
-			{"at": now.Add(-2 * time.Minute).Format(time.RFC3339), "bead": "gt-polecat", "outcome": "landed"},
+			{"at": now.Add(-time.Minute).Format(time.RFC3339), "bead": "gt-timed", "outcome": "landed", "polecat": "opal", "polecat_secs": 1380},
+			{"at": now.Add(-2 * time.Minute).Format(time.RFC3339), "bead": "gt-unread", "outcome": "landed", "polecat": "opal"},
 		},
 	}})
 
-	got := map[string]string{}
-	titles := map[string]string{}
+	cells := map[string]polecatCell{}
 	for _, c := range drawnPolecatColumn(t, dom) {
-		got[c.Bead] = c.Text
-		titles[c.Bead] = c.Title
+		cells[c.Bead] = c
 	}
-	if got["gt-crew"] != "bird" {
-		t.Errorf("crew branch row's Polecat cell reads %q, want bird", got["gt-crew"])
+	if got := cells["gt-timed"].Text; got != "23m" {
+		t.Errorf("polecat row with a reading draws %q in its Polecat cell, want 23m", got)
 	}
-	if titles["gt-crew"] != "bird or crew branch: no polecat time exists" {
-		t.Errorf("crew branch row's Polecat cell tooltip reads %q, want the no-polecat-time reason", titles["gt-crew"])
+	if got := cells["gt-unread"].Text; got != "–" {
+		t.Errorf("polecat row with no reading draws %q in its Polecat cell, want the dash", got)
 	}
-	if got["gt-polecat"] != "–" {
-		t.Errorf("polecat row with no reading reads %q, want the dash", got["gt-polecat"])
+	by := drawnByColumn(t, dom)
+	if by["gt-timed"] != "opal" || by["gt-unread"] != "opal" {
+		t.Errorf("polecat rows read %q and %q in their By cells, want opal for both", by["gt-timed"], by["gt-unread"])
 	}
+}
+
+// drawnByColumn returns the By cell the Landings table drew for each row, keyed
+// by the bead its Landing cell names.
+func drawnByColumn(t *testing.T, dom *pageDOM) map[string]string {
+	t.Helper()
+
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
+  let tbl = null;
+  (function walk(n) {
+    if (tbl) return;
+    if (n.className === "ltable") { tbl = n; return; }
+    for (const c of (n.children || [])) walk(c);
+  })(document.getElementById("trend"));
+  if (!tbl) return [];
+  const col = name => tbl.children[0].children.__arr.findIndex(th => th.textContent === name);
+  const beadCol = col("Landing"), byCol = col("By");
+  if (beadCol < 0 || byCol < 0) throw new Error("the table has no Landing and By headings");
+  return tbl.children.__arr.slice(1).map(tr => [tr.children[beadCol].textContent, tr.children[byCol].textContent]);
+})())`)
+	if err != nil {
+		t.Fatalf("reading the drawn landings table: %v", err)
+	}
+	var rows [][2]string
+	if err := json.Unmarshal([]byte(v.String()), &rows); err != nil {
+		t.Fatalf("decoding the drawn table: %v", err)
+	}
+	by := make(map[string]string, len(rows))
+	for _, row := range rows {
+		by[row[0]] = row[1]
+	}
+	return by
 }
 
 // A reading of a minute or more is still drawn in seconds while it stays under

@@ -309,7 +309,10 @@ func landingName(who func(rig, bead string) string, rig, bead string) string {
 // name comes from the first-sight submission log instead (gt-gclus). crew is
 // that same log's branch: a rejected or running row built on a crew session's
 // branch is marked crew, which the page draws in place of a dash, and a landed
-// row is marked from the branch its own record carries. polecat reads a bead's
+// row is marked from the branch its own record carries. A crew row also carries
+// the branch's agent segment in CrewAgent — from who for a rejected or running
+// row, from the branch for a landed one — so its By cell names the builder
+// rather than the bead's assignee (gt-830fd). polecat reads a bead's
 // polecat time from the spans log: a rejected row takes the reading a landed
 // record would carry (asOf zero), and a running row takes the time so far (asOf
 // now). Both lookups are asked only for the rows the table keeps — the
@@ -336,6 +339,12 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 			At: rec.LandedAt, Bead: rec.Bead, Rig: rec.Rig, Polecat: polecatOfBranch(rec.Branch),
 			Outcome: "landed", Verdict: omOutcome(rec.OMVerdict), Commit: shortSHA(rec.LandedCommit),
 			Route: rec.Route, Risk: len(rec.RiskPaths) > 0, Crew: isCrewLandingBranch(rec.Branch),
+		}
+		if row.Crew {
+			// Polecat already names a crew branch's agent segment; carry it
+			// so the By cell names the branch's agent rather than the bead's
+			// assignee (gt-830fd).
+			row.CrewAgent = row.Polecat
 		}
 		if rec.OMScore > 0 {
 			sc := rec.OMScore
@@ -393,7 +402,12 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 			continue
 		}
 		if crew != nil && crew(rows[i].Rig, rows[i].Bead) {
+			// The row's own record carries no branch, so the crew agent is
+			// the name the submission log reads off the newest crew branch,
+			// the same name the Polecat cell must show instead of the bead's
+			// assignee (gt-830fd).
 			rows[i].Crew = true
+			rows[i].CrewAgent = landingName(who, rows[i].Rig, rows[i].Bead)
 		}
 		if polecat != nil {
 			secs, attempts, lower := polecat(rows[i].Bead, asOf)
