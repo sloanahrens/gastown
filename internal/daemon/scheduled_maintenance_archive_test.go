@@ -2643,6 +2643,52 @@ func TestArchiveEventsFullPageOfArchivedRowsAdvances(t *testing.T) {
 	}
 }
 
+// TestArchiveEventsRefusesAnUndateableArchivedPage: moving the read past a
+// full page of archived rows needs the page's newest created_at. A row the
+// export cannot date fails the batch and keeps the watermark, rather than
+// leaving the read where it was (gt-o4sk8.1).
+func TestArchiveEventsRefusesAnUndateableArchivedPage(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	withGCFakes(t, d)
+	dir := t.TempDir()
+	d.patrolConfig = archiveConfig(dir)
+	limit := 1
+	d.patrolConfig.Patrols.ScheduledMaintenance.ArchiveEventsLimit = &limit
+	d.maint.now = func() time.Time { return gcTestNow }
+	seeded := EventsArchiveWatermark{
+		CreatedAt: "2026-10-01 02:00:00",
+		Archived:  []ArchivedEventsRow{{CreatedAt: "2026-10-01 02:00:00", ID: "h1"}},
+	}
+	if err := recordEventsArchiveWatermark(d.config.TownRoot, "gt", seeded); err != nil {
+		t.Fatalf("seeding the events watermark: %v", err)
+	}
+	// The only row the read returns is already archived, and it is the whole
+	// page, so the export tries to date it to find where to read next.
+	d.maint.archiveEventsRead = func(context.Context, *Daemon, string, string) (archiveEvents, error) {
+		return archiveEvents{
+			Columns: []string{"id", "created_at"},
+			Rows:    [][]string{{"h1", "not a timestamp"}},
+		}, nil
+	}
+
+	_, _, err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", seeded)
+
+	if err == nil || !strings.Contains(err.Error(), "cannot be parsed") {
+		t.Errorf("maintenanceArchiveEvents = %v, want an error naming the undateable created_at", err)
+	}
+	if _, statErr := os.Stat(eventsArchiveFile(dir, "gt")); !os.IsNotExist(statErr) {
+		t.Errorf("a refused page wrote %s (stat err %v)", eventsArchiveFile(dir, "gt"), statErr)
+	}
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	if got := st.ArchiveEventsWatermarks["gt"]; !sameEventsWatermark(got, seeded) {
+		t.Errorf("watermark = %+v, want the seeded one kept", got)
+	}
+}
+
 // TestArchiveLoopStopsAtTheBudgetButEveryDatabaseGetsABatch: one deadline
 // bounds every database's extra batches. Once the first database's second
 // batch ends past the budget it takes no third one, and the next database still
@@ -2959,6 +3005,23 @@ func TestArchiveLimitsRefuseABadSettingAtTheRead(t *testing.T) {
 		_, err := d.doltArchiveEvents(context.Background(), "gt", "")
 		if err == nil || !strings.Contains(err.Error(), config.MaintenanceArchiveEventsLimitKey) {
 			t.Errorf("events read = %v, want an error naming %s", err, config.MaintenanceArchiveEventsLimitKey)
+		}
+	})
+
+	t.Run("events export", func(t *testing.T) {
+		t.Parallel()
+		d, _ := gcTestDaemon(t)
+		withGCFakes(t, d)
+		d.patrolConfig = archiveConfig(t.TempDir())
+		d.patrolConfig.Patrols.ScheduledMaintenance.ArchiveEventsLimit = &bad
+		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, string) (archiveEvents, error) {
+			t.Error("the events export read with an invalid archive_events_limit")
+			return archiveEvents{}, errors.New("not reached")
+		}
+
+		_, _, err := d.maintenanceArchiveEvents(context.Background(), t.TempDir(), "gt", EventsArchiveWatermark{})
+		if err == nil || !strings.Contains(err.Error(), config.MaintenanceArchiveEventsLimitKey) {
+			t.Errorf("events export = %v, want an error naming %s", err, config.MaintenanceArchiveEventsLimitKey)
 		}
 	})
 }

@@ -845,16 +845,14 @@ func (d *Daemon) maintenanceArchiveEvents(parent context.Context, dir, db string
 }
 
 // newestEventsTimestamp returns the newest created_at in a page of events rows,
-// as text for the next read's lower bound, and refuses a row it cannot date: a
-// bound the read cannot compare would leave the next read starting where this
-// one did.
+// as text for the next read's lower bound. The caller has already refused a row
+// narrower than createdAtColumn, and a page that reaches it is never empty. A
+// row it cannot date is an error: a bound the read cannot compare would leave
+// the next read starting where this one did.
 func newestEventsTimestamp(createdAtColumn int, rows [][]string) (time.Time, string, error) {
 	var newest time.Time
 	newestText := ""
 	for _, row := range rows {
-		if createdAtColumn >= len(row) {
-			return time.Time{}, "", fmt.Errorf("events row of %d values is missing column %d", len(row), createdAtColumn)
-		}
 		at, err := parseEventsTimestamp(row[createdAtColumn])
 		if err != nil {
 			return time.Time{}, "", err
@@ -862,9 +860,6 @@ func newestEventsTimestamp(createdAtColumn int, rows [][]string) (time.Time, str
 		if at.After(newest) {
 			newest, newestText = at, row[createdAtColumn]
 		}
-	}
-	if newestText == "" {
-		return time.Time{}, "", fmt.Errorf("events page holds no row to date")
 	}
 	return newest, newestText, nil
 }
