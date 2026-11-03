@@ -404,6 +404,13 @@ type PatrolsConfig struct {
 	// staleness it exists for (gt-oqbw).
 	RebuildGT *PatrolConfig `json:"rebuild_gt,omitempty"`
 
+	// Update lets the daemon decide when `gt update` (install, image and
+	// maintenance as one job) is due (internal/daemon/update_due.go). Off when
+	// absent: the job swaps the running binary and holds dispatch, so a town
+	// that has not asked for it must not get it from a default. Read through
+	// UpdateConfig.Settings, which also parses the window and the durations.
+	Update *UpdateConfig `json:"update,omitempty"`
+
 	// RebuildOM keeps the installed om at the om origin's main
 	// (internal/daemon/rebuild_om.go). Opt-in: it builds and swaps a binary
 	// the landing worker execs, so the operator turns it on.
@@ -481,6 +488,123 @@ type PatrolsConfig struct {
 	Witness        json.RawMessage `json:"witness,omitempty"`
 	Deacon         json.RawMessage `json:"deacon,omitempty"`
 	PatrolWatchdog json.RawMessage `json:"patrol_watchdog,omitempty"`
+}
+
+// Daemon config keys for the update block, so every refusal names the key the
+// operator has to edit.
+const (
+	UpdateWindowKey      = "patrols.update.window"
+	UpdateMinIntervalKey = "patrols.update.min_interval"
+	UpdateMaxRuntimeKey  = "patrols.update.max_runtime"
+)
+
+// The update block's defaults and bounds (docs/plans/2026-11-03-gt-update-design.md).
+const (
+	DefaultUpdateWindow      = "03:00"
+	DefaultUpdateMinInterval = 3 * time.Hour
+	DefaultUpdateMaxRuntime  = 2 * time.Hour
+
+	MinUpdateMinInterval = 30 * time.Minute
+	MaxUpdateMinInterval = 24 * time.Hour
+	MinUpdateMaxRuntime  = 10 * time.Minute
+	MaxUpdateMaxRuntime  = 12 * time.Hour
+)
+
+// UpdateConfig is the daemon.patrols.update block: whether the daemon decides
+// that `gt update` is due, and the window and limits it decides with.
+type UpdateConfig struct {
+	// Enabled turns the trigger on. Absent means off.
+	Enabled bool `json:"enabled"`
+
+	// Window is the daily start of the update window, HH:MM local time.
+	// Empty means DefaultUpdateWindow.
+	Window string `json:"window,omitempty"`
+
+	// MinInterval is how long after a run ends before main moving with
+	// landings waiting makes the next one due, as a Go duration. Empty means
+	// DefaultUpdateMinInterval.
+	MinInterval string `json:"min_interval,omitempty"`
+
+	// MaxRuntime is how long a run may last before the daemon alerts on it,
+	// as a Go duration. Empty means DefaultUpdateMaxRuntime.
+	MaxRuntime string `json:"max_runtime,omitempty"`
+}
+
+// UpdateSettings is UpdateConfig parsed into the values the due check uses.
+type UpdateSettings struct {
+	Enabled                  bool
+	WindowHour, WindowMinute int
+	MinInterval, MaxRuntime  time.Duration
+}
+
+// Settings returns the update settings with the defaults applied. A nil
+// receiver gives the defaults with Enabled false. A window that is not HH:MM,
+// or a duration that does not parse or falls outside its bounds, is refused
+// rather than clamped, and the error names the daemon.json key.
+func (c *UpdateConfig) Settings() (UpdateSettings, error) {
+	cfg := UpdateConfig{}
+	if c != nil {
+		cfg = *c
+	}
+	s := UpdateSettings{Enabled: cfg.Enabled}
+
+	window := DefaultUpdateWindow
+	if set := strings.TrimSpace(cfg.Window); set != "" {
+		window = set
+	}
+	hour, minute, err := parseUpdateWindow(window)
+	if err != nil {
+		return UpdateSettings{}, fmt.Errorf("%s = %q: %w", UpdateWindowKey, window, err)
+	}
+	s.WindowHour, s.WindowMinute = hour, minute
+
+	if s.MinInterval, err = parseUpdateDuration(UpdateMinIntervalKey, cfg.MinInterval, DefaultUpdateMinInterval, MinUpdateMinInterval, MaxUpdateMinInterval); err != nil {
+		return UpdateSettings{}, err
+	}
+	if s.MaxRuntime, err = parseUpdateDuration(UpdateMaxRuntimeKey, cfg.MaxRuntime, DefaultUpdateMaxRuntime, MinUpdateMaxRuntime, MaxUpdateMaxRuntime); err != nil {
+		return UpdateSettings{}, err
+	}
+	return s, nil
+}
+
+// parseUpdateWindow parses HH:MM, with both parts exactly two digits so "3pm",
+// "3:00" and "+3:00" are refused rather than guessed at.
+func parseUpdateWindow(window string) (hour, minute int, err error) {
+	parts := strings.SplitN(window, ":", 2)
+	if len(parts) != 2 || !twoDigits(parts[0]) || !twoDigits(parts[1]) {
+		return 0, 0, errors.New("want HH:MM")
+	}
+	hour, _ = strconv.Atoi(parts[0])
+	if hour > 23 {
+		return 0, 0, errors.New("want an hour from 00 to 23")
+	}
+	minute, _ = strconv.Atoi(parts[1])
+	if minute > 59 {
+		return 0, 0, errors.New("want a minute from 00 to 59")
+	}
+	return hour, minute, nil
+}
+
+// twoDigits reports whether s is exactly two ASCII digits.
+func twoDigits(s string) bool {
+	return len(s) == 2 && s[0] >= '0' && s[0] <= '9' && s[1] >= '0' && s[1] <= '9'
+}
+
+// parseUpdateDuration reads one duration setting, keeping def when it is
+// empty, and refusing one outside lo to hi rather than clamping it.
+func parseUpdateDuration(key, setting string, def, lo, hi time.Duration) (time.Duration, error) {
+	setting = strings.TrimSpace(setting)
+	if setting == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(setting)
+	if err != nil {
+		return 0, fmt.Errorf("%s = %q: want a Go duration such as 3h: %w", key, setting, err)
+	}
+	if d < lo || d > hi {
+		return 0, fmt.Errorf("%s = %q: want a duration from %s to %s", key, setting, lo, hi)
+	}
+	return d, nil
 }
 
 // DoltServerConfig holds configuration for the Dolt SQL server.

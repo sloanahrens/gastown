@@ -72,6 +72,7 @@ var daemonSteps = []daemonStep{
 
 	{"landing_worker", kindPatrol, stepHost, nil, "gates with make gate: go, make and golangci-lint"},
 	{"rebuild_gt", kindPatrol, stepHost, nil, "make install and launchctl"},
+	{"update", kindPatrol, stepHost, nil, "make install and launchctl install the binary on the host and reload the host's daemon"},
 	{"rebuild_om", kindPatrol, stepHost, nil, "go build"},
 	{"rebuild_hm", kindPatrol, stepHost, nil, "go build"},
 	{"disk_maintenance", kindPatrol, stepHost, nil, "every target is the Mac, Colima or Docker Desktop"},
