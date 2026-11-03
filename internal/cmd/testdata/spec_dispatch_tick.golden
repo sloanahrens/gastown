@@ -5,8 +5,8 @@ dispatched: gt-fmt: slung to gastown/p on claude-sonnet (seat claude-sonnet 2/2)
 dispatched: gt-c2: slung to gastown/p on deepseek-flash (seat deepseek-flash 1/2)
 skipped: gt-flip: the ready board read is stale: status hooked
 skipped: gt-box: held: container: open child gt-box.1
-skipped: gt-bad1: unshaped: ## Gate
-skipped: gt-bad2: unshaped: ## Gate
+skipped: gt-bad1: unshaped: ## Gate (1d)
+skipped: gt-bad2: unshaped: ## Gate (1d)
 skipped: gt-nofm: unknown formula: mol-gone
 skipped: gt-box2: clean, per-tick limit 3 reached
 skipped: gt-c3: clean, per-tick limit 3 reached
