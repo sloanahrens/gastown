@@ -420,6 +420,45 @@ func TestPlanEmptyShaIsAnError(t *testing.T) {
 	}
 }
 
+func TestPlanShasAreTrimmed(t *testing.T) {
+	t.Parallel()
+	const sha = "abc1234def"
+
+	t.Run("equal shas with whitespace plan no install", func(t *testing.T) {
+		t.Parallel()
+		p := &fakeProbes{installed: "  " + sha + "\n", main: sha, published: true, backup: true}
+
+		install := stepNamed(t, planFor(t, p, PlanOptions{}), StepInstall)
+		if install.WillRun {
+			t.Errorf("install WillRun = true, want false: whitespace does not make the builds differ (reason %q)", install.Reason)
+		}
+	})
+
+	t.Run("install reason and target carry trimmed shas", func(t *testing.T) {
+		t.Parallel()
+		const installed = " 111111111111 \n"
+		const mainSHA = "\n222222222222 "
+		p := &fakeProbes{installed: installed, main: mainSHA, published: true, backup: true}
+
+		steps, target, err := BuildPlan(context.Background(), p, PlanOptions{})
+		if err != nil {
+			t.Fatalf("BuildPlan: %v", err)
+		}
+		if target.SHA != "222222222222" || target.InstalledSHA != "111111111111" {
+			t.Errorf("target = %+v, want the shas without whitespace", target)
+		}
+		if p.queriedSHA != "222222222222" {
+			t.Errorf("ImagePublished asked about %q, want the trimmed main sha", p.queriedSHA)
+		}
+		reason := stepNamed(t, steps, StepInstall).Reason
+		for _, want := range []string{"11111111", "22222222"} {
+			if !strings.Contains(reason, want) {
+				t.Errorf("install reason %q does not name %q", reason, want)
+			}
+		}
+	})
+}
+
 func TestPlanProbeErrorNamesTheProbe(t *testing.T) {
 	t.Parallel()
 	cause := errors.New("probe unavailable")

@@ -31,8 +31,9 @@ type PlanOptions struct {
 
 // BuildPlan decides which update steps have work and returns them in run order
 // with a reason for each, alongside the build the run targets. It does no I/O:
-// every fact comes from p. A probe that fails, or that reports a blank sha,
-// fails the plan with that probe named.
+// every fact comes from p. Both shas are trimmed of surrounding whitespace
+// before they are compared, queried and recorded. A probe that fails, or that
+// reports a blank sha, fails the plan with that probe named.
 func BuildPlan(ctx context.Context, p Probes, o PlanOptions) ([]StepRecord, Target, error) {
 	var target Target
 
@@ -40,14 +41,16 @@ func BuildPlan(ctx context.Context, p Probes, o PlanOptions) ([]StepRecord, Targ
 	if err != nil {
 		return nil, target, fmt.Errorf("InstalledSHA: %w", err)
 	}
-	if strings.TrimSpace(installed) == "" {
+	installed = strings.TrimSpace(installed)
+	if installed == "" {
 		return nil, target, errors.New("InstalledSHA: the probe returned an empty sha")
 	}
 	mainSHA, err := p.MainSHA(ctx)
 	if err != nil {
 		return nil, target, fmt.Errorf("MainSHA: %w", err)
 	}
-	if strings.TrimSpace(mainSHA) == "" {
+	mainSHA = strings.TrimSpace(mainSHA)
+	if mainSHA == "" {
 		return nil, target, errors.New("MainSHA: the probe returned an empty sha")
 	}
 	target = Target{SHA: mainSHA, InstalledSHA: installed}
