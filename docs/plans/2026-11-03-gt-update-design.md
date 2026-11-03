@@ -1,6 +1,6 @@
-# gt update: one job for install, image and maintenance
+> Status: design, agreed with the operator on 2026-11-03 (super-plan, six sections approved one by one). Nothing here is built except the archive limits (gt-s6srv). Written by the overseer.
 
-Status: design, agreed with the operator on 2026-11-03 (super-plan, six sections approved one by one). Nothing here is built except the archive limits (gt-s6srv). Written by the overseer.
+# gt update: one job for install, image and maintenance
 
 ## Goal
 
