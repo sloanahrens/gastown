@@ -48,7 +48,7 @@ func captureWrites(t *testing.T, store *Store) <-chan State {
 		}
 		select {
 		case written <- st:
-		case <-time.After(waitBound):
+		case <-time.After(waitBound): //testpolicy:allow no-sleep — a hang guard only: the write is the event waited for, and a test that never reads it fails here rather than hanging the heartbeat loop
 			t.Errorf("the test never read the write for run %s within %v", st.RunID, waitBound)
 		}
 		return atomicfile.WriteFile(path, data, perm)
@@ -67,7 +67,7 @@ func receiveWithin[T any](t *testing.T, ch <-chan T, what string) T {
 	select {
 	case v := <-ch:
 		return v
-	case <-time.After(waitBound):
+	case <-time.After(waitBound): //testpolicy:allow no-sleep — a hang guard only: the event is what the test waits for, and a regression that stops it fails here rather than hanging the test
 		t.Fatalf("nothing arrived within %v: %s", waitBound, what)
 	}
 	var zero T
@@ -80,7 +80,7 @@ func sendWithin[T any](t *testing.T, ch chan<- T, v T, what string) {
 	t.Helper()
 	select {
 	case ch <- v:
-	case <-time.After(waitBound):
+	case <-time.After(waitBound): //testpolicy:allow no-sleep — a hang guard only: a loop that stops taking ticks fails here rather than hanging the test
 		t.Fatalf("nothing took %s within %v", what, waitBound)
 	}
 }
@@ -92,7 +92,7 @@ func reportError(t *testing.T, errs chan<- error, err error) {
 	t.Helper()
 	select {
 	case errs <- err:
-	case <-time.After(waitBound):
+	case <-time.After(waitBound): //testpolicy:allow no-sleep — a hang guard only: an unread error fails here rather than hanging the heartbeat loop
 		t.Errorf("the test never read the reported error %v within %v", err, waitBound)
 	}
 }
@@ -112,7 +112,7 @@ func startHeartbeat(t *testing.T, store *Store, ticks <-chan time.Time, clock Cl
 		cancel()
 		select {
 		case <-finished:
-		case <-time.After(waitBound):
+		case <-time.After(waitBound): //testpolicy:allow no-sleep — a hang guard only: waits for RunHeartbeat to return after cancellation, failing rather than hanging the test
 			t.Errorf("RunHeartbeat did not return within %v after cancellation", waitBound)
 		}
 	})
