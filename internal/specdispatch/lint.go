@@ -476,22 +476,36 @@ func acceptanceText(s Spec, sections map[string]string) string {
 	return body
 }
 
+// acceptanceItemText returns an item's criterion with its list marker and any
+// checkbox removed, so "- one", "* one", "1. one" and "- [ ] one" all read
+// "one". The matcher admits exactly one marker followed by whitespace, so the
+// text follows the first run of space; a bullet or number left in would make
+// two spellings of one criterion a disagreement (gt-hgt9j.2).
+func acceptanceItemText(item beads.AcceptanceItem) string {
+	line := item.Line
+	if i := strings.IndexAny(line, " \t"); i >= 0 {
+		line = line[i+1:]
+	}
+	line = strings.TrimSpace(line)
+	if item.Boxed {
+		if end := strings.IndexByte(line, ']'); end >= 0 {
+			line = line[end+1:]
+		}
+	}
+	return strings.TrimSpace(line)
+}
+
 // acceptanceItemTexts returns the text of an acceptance text's top-level
-// items, the checkbox removed and the remainder trimmed, in order. It reads
-// items through beads.AcceptanceItems, the matcher CountAcceptance counts, so
-// the two cannot disagree on what a criterion is. Text with no list item is
-// one item, as CountAcceptance reads it.
+// items, in order. It reads items through beads.AcceptanceItems, the matcher
+// CountAcceptance counts, so the two cannot disagree on what a criterion is.
+// Text with no list item is one item, as CountAcceptance reads it.
 func acceptanceItemTexts(text string) []string {
 	var out []string
 	for _, item := range beads.AcceptanceItems(text) {
 		if item.Nested {
 			continue
 		}
-		line := item.Line
-		if item.Boxed {
-			line = line[strings.IndexByte(line, ']')+1:]
-		}
-		out = append(out, strings.TrimSpace(line))
+		out = append(out, acceptanceItemText(item))
 	}
 	if len(out) == 0 {
 		if trimmed := strings.TrimSpace(text); trimmed != "" {

@@ -412,6 +412,29 @@ func TestAcceptanceAgreeNeedsBoth(t *testing.T) {
 	}
 }
 
+// The list marker is not part of a criterion: the same text written with a
+// bullet, an asterisk, a number or a checkbox agrees with any other spelling
+// (gt-hgt9j.2).
+func TestAcceptanceAgreeIgnoresBulletStyle(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		section string
+	}{
+		{"bullet", "- one\n- two\n- three"},
+		{"asterisk", "* one\n* two\n* three"},
+		{"number", "1. one\n2. two\n3. three"},
+		{"mixed", "- one\n* two\n1. three"},
+	}
+	for _, tc := range cases {
+		s := goodSpec()
+		s.Description += "\n\n## Acceptance\n" + tc.section
+		if v := Lint(s, defaultTemplate()); !v.Clean() {
+			t.Errorf("%s section refused against checkbox field: %s", tc.name, v.Line(s.ID))
+		}
+	}
+}
+
 func TestCountAcceptance(t *testing.T) {
 	t.Parallel()
 	cases := map[string]int{
