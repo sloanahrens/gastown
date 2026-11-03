@@ -106,6 +106,16 @@ type Daemon struct {
 	// isPatrolActive alongside patrolConfig.
 	disabledPatrols map[string]bool
 
+	// updateLaunch starts the update job from the heartbeat's update block.
+	// New wires it to (*Daemon).launchUpdate, the detached
+	// `gt update --from-daemon` child (update_trigger.go); a test replaces it
+	// to watch the decision without starting a process. Nil (a Daemon built
+	// without New) refuses to launch rather than start one implicitly.
+	updateLaunch func(ctx context.Context, reason string) error
+	// updateTrigger is the block's own memory: the launch suppression clock
+	// and the last settings error logged.
+	updateTrigger updateTriggerState
+
 	// Mass death detection: track recent session deaths
 	deathsMu     sync.Mutex
 	recentDeaths []sessionDeath
@@ -1352,6 +1362,8 @@ func New(config *Config) (*Daemon, error) {
 	d.rigStatusAlert = d.escalateAlert
 	d.rigStatusClear = d.clearAlerts
 	d.checkpointRevertAlert = d.escalateAlert
+	// Bound rather than the method expression, whose type carries the receiver.
+	d.updateLaunch = d.launchUpdate
 
 	// A health-driven Dolt restart waits for an in-flight scheduled gc.
 	if doltServer != nil {
@@ -2220,6 +2232,12 @@ var heartbeatSteps = []heartbeatStep{
 	// (was the rebuild-gt plugin, gt-4k3fj.8.6). lifecycle: the install makes
 	// the daemon restart, which the town E-stop holds.
 	{name: "rebuild-gt", lifecycle: true, run: (*Daemon).triggerRebuildGT},
+
+	// Decide whether `gt update` is due and launch it detached when it is
+	// (gt-o4sk8.14). Off until daemon.patrols.update.enabled is set, so this
+	// changes nothing by default. lifecycle: the job it launches installs a
+	// binary and restarts the daemon, which the town E-stop holds.
+	{name: "update", lifecycle: true, run: (*Daemon).triggerUpdate},
 
 	// Keep the installed om at the om origin's main (gt-0f228). lifecycle: an
 	// install changes a binary on the machine, which the town E-stop holds.
