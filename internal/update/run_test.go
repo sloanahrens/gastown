@@ -244,6 +244,40 @@ func TestRunStoreWriteFailureIsReturned(t *testing.T) {
 	assertEveryPublishIsChecked(t, total, newRunFixture)
 }
 
+func TestRunStoreWriteFailureDuringMaintenanceIsReturned(t *testing.T) {
+	t.Parallel()
+	maintaining := func(t *testing.T) *runFixture {
+		f := newRunFixture(t)
+		f.probes.commits = 5
+		f.maintDaemon(t, MaintenanceResult{RunID: runTestID, Outcome: "completed", Detail: "the archive is current"})
+		return f
+	}
+	total := publishCount(t, maintaining(t))
+	assertEveryPublishIsChecked(t, total, maintaining)
+}
+
+func TestRunStoreWriteFailureWhenTheRestartTimesOutIsReturned(t *testing.T) {
+	t.Parallel()
+	pending := func(t *testing.T) *runFixture {
+		f := newRunFixture(t)
+		f.verify.daemon = []verifyAnswer{{version: verifyTestOld}}
+		return f
+	}
+	total := publishCount(t, pending(t))
+	assertEveryPublishIsChecked(t, total, pending)
+}
+
+func TestRunStoreWriteFailureWhenVerifyFailsIsReturned(t *testing.T) {
+	t.Parallel()
+	failing := func(t *testing.T) *runFixture {
+		f := newRunFixture(t)
+		f.verify.gt = verifyTestOld
+		return f
+	}
+	total := publishCount(t, failing(t))
+	assertEveryPublishIsChecked(t, total, failing)
+}
+
 func TestRunStoreWriteFailureDuringDrainAbortIsReturned(t *testing.T) {
 	t.Parallel()
 	blocked := func(t *testing.T) *runFixture {
