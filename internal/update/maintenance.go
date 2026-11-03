@@ -80,8 +80,8 @@ func (m *MaintenanceRequest) Request(runID string) error {
 	}
 	data, err := json.Marshal(RequestFile{RunID: runID, At: m.Clock.Now()})
 	if err != nil {
-		// RequestFile holds only a string and a time, so this cannot fail; the
-		// check keeps a future field from turning the error away silently.
+		// A clock time outside the year range JSON can carry is the one way
+		// this fails; refuse rather than write a request the daemon cannot parse.
 		return fmt.Errorf("encode maintenance request: %w", err)
 	}
 	reqPath := m.requestPath()
@@ -118,7 +118,7 @@ func (m *MaintenanceRequest) settleExistingRequest(path, runID string) error {
 // A missing request means the daemon finished; a result for another run id, or
 // no result at all, is reported as Outcome "failed" rather than passed on. At
 // timeout the result is Outcome "deferred" with the request left in place for
-// the daemon's next tick. A cancelled context returns its error.
+// the daemon's next tick. A canceled context returns its error.
 func (m *MaintenanceRequest) Wait(ctx context.Context, sleep func(context.Context, time.Duration) error, runID string, timeout, poll time.Duration) (MaintenanceResult, error) {
 	if runID == "" {
 		return MaintenanceResult{}, errors.New("wait for maintenance result: empty run id")

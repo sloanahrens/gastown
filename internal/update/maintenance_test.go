@@ -251,6 +251,25 @@ func TestRequestRefusesAnEmptyRunID(t *testing.T) {
 	}
 }
 
+func TestRequestRefusesATimeThatCannotBeEncoded(t *testing.T) {
+	t.Parallel()
+	files := newFakeMaintFiles()
+	// time.Time cannot encode a year outside [0,9999], which is the one way
+	// encoding the request can fail.
+	clock := newFakeMaintClock(time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC))
+
+	err := newTestMaintenance(files, clock).Request(maintTestRunID)
+	if err == nil {
+		t.Fatal("Request with an unencodable time returned nil")
+	}
+	if !strings.Contains(err.Error(), "encode maintenance request") {
+		t.Errorf("error %q does not name the encode", err)
+	}
+	if _, ok := files.entry(maintRequestFile); ok {
+		t.Errorf("Request wrote a request file for a time it could not encode")
+	}
+}
+
 func TestRequestFailureBranches(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
