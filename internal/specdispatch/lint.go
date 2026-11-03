@@ -222,6 +222,7 @@ type Spec struct {
 	Assignee    string
 	Priority    int
 	CreatedAt   string
+	CreatedBy   string
 	Labels      []string
 	Description string
 	Design      string

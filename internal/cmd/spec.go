@@ -311,6 +311,7 @@ func specFromIssue(issue *beads.Issue) specdispatch.Spec {
 		Assignee:     issue.Assignee,
 		Priority:     issue.Priority,
 		CreatedAt:    issue.CreatedAt,
+		CreatedBy:    issue.CreatedBy,
 		Labels:       issue.Labels,
 		Description:  issue.Description,
 		Design:       issue.Design,
@@ -1437,7 +1438,60 @@ type specDispatchEntry struct {
 	Rig     string `json:"rig,omitempty"`
 	Agent   string `json:"agent,omitempty"`
 	Polecat string `json:"polecat,omitempty"`
+	// AgeDays and Filer are set on a skipped entry the shape gate holds
+	// unshaped: how many whole days the bead has waited on the tick's clock,
+	// and the actor that filed it. They let the dashboard and the 30-minute
+	// check name the pile instead of reading a bare "unshaped" as a status.
+	// Both are omitted when zero or empty, which is what an unknown value and
+	// every other skip reason leave.
+	AgeDays int    `json:"age_days,omitempty"`
+	Filer   string `json:"filer,omitempty"`
 	Line    string `json:"line"`
+}
+
+// specUnshapedEntry is the skipped entry for a bead the shape gate holds
+// unshaped. Its line carries the age and filer as well as the entry's own
+// fields: the daemon renders its tick line from Line, so a field alone would
+// not reach it.
+func specUnshapedEntry(id, rig, reason string, s specdispatch.Spec, now time.Time) specDispatchEntry {
+	days, dated := specWaitDays(s.CreatedAt, now)
+	e := specDispatchEntry{Bead: id, Rig: rig, Filer: s.CreatedBy}
+	if dated {
+		e.AgeDays = days
+	}
+	e.Line = fmt.Sprintf("%s: %s%s", id, reason, specWaitSuffix(days, dated, e.Filer))
+	return e
+}
+
+// specWaitDays is the whole days between a bead's created_at and the tick's
+// clock. dated is false when the stamp cannot be read: an unreadable date is
+// not an age of zero, so the entry then carries no age at all. A stamp ahead
+// of the clock is no wait at all.
+func specWaitDays(createdAt string, now time.Time) (days int, dated bool) {
+	created, err := time.Parse(time.RFC3339, strings.TrimSpace(createdAt))
+	if err != nil {
+		return 0, false
+	}
+	if d := int(now.Sub(created).Hours() / 24); d > 0 {
+		return d, true
+	}
+	return 0, true
+}
+
+// specWaitSuffix renders the unshaped entry's wait as " (6d, filer <name>)",
+// naming only the parts that are known.
+func specWaitSuffix(days int, dated bool, filer string) string {
+	parts := make([]string, 0, 2)
+	if dated {
+		parts = append(parts, fmt.Sprintf("%dd", days))
+	}
+	if filer != "" {
+		parts = append(parts, "filer "+filer)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(parts, ", ") + ")"
 }
 
 // specCandidate is a ready bead with the rig it lives in.
@@ -1918,7 +1972,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 					continue
 				}
 				if reason := verdict.UnshapedReason(); reason != "" {
-					report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s", id, reason)})
+					report.Skipped = append(report.Skipped, specUnshapedEntry(id, c.Rig, reason, full, env.Now()))
 					if !env.DryRun {
 						if note := verdict.ShapeNote(); note != "" {
 							if err := env.Annotate(id, note, note); err != nil {

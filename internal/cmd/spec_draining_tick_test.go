@@ -303,7 +303,7 @@ func TestSpecTickCountsAnInFlightSlingAndADrainingSessionOnce(t *testing.T) {
 		}
 	}
 	if len(total) == 0 {
-		t.Fatalf("no candidate was skipped on the town total; skipped = %q", r.Skipped)
+		t.Fatalf("no candidate was skipped on the town total; skipped = %v", r.Skipped)
 	}
 	for _, line := range total {
 		if !strings.Contains(line, ": no seat: over the town total: 4/4 live polecats across every seat") {

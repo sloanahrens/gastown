@@ -400,7 +400,7 @@ func TestSpecDispatchShapeGate(t *testing.T) {
 		if len(f.slung) != 0 || len(r.Dispatched) != 0 {
 			t.Fatalf("warn slung a refused bead: slung %v report %+v", f.slung, r)
 		}
-		if len(r.Skipped) != 1 || r.Skipped[0].Line != "gt-bad: unshaped: ## Gate" {
+		if len(r.Skipped) != 1 || r.Skipped[0].Line != "gt-bad: unshaped: ## Gate (1d)" {
 			t.Fatalf("skipped = %+v, want one unshaped hold", r.Skipped)
 		}
 		if len(f.labels["gt-bad"]) != 0 {
@@ -491,6 +491,151 @@ func TestSpecDispatchUnshapedHoldSpendsNoSeat(t *testing.T) {
 	}
 	if len(r.Dispatched) != 1 || r.Dispatched[0].Bead != "gt-good" {
 		t.Fatalf("dispatched = %+v, want the shaped bead behind the hold", r.Dispatched)
+	}
+}
+
+// specFromIssue copies the actor that filed the bead: the unshaped hold shows
+// it as the pile's filer (gt-hgt9j.8).
+func TestSpecCreatedByFilledFromIssue(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		issue *beads.Issue
+		want  string
+	}{
+		{"an agent filed it", &beads.Issue{ID: "gt-x", CreatedBy: "town/crew/overseer"}, "town/crew/overseer"},
+		{"no filer recorded", &beads.Issue{ID: "gt-y"}, ""},
+		{"nil issue", nil, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := specFromIssue(tc.issue).CreatedBy; got != tc.want {
+				t.Errorf("CreatedBy = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// specUnshapedBead is an unshaped bead created days before the tick clock and
+// filed by an agent, as the board read reduces it.
+func specUnshapedBead(id string, created time.Time) specdispatch.Spec {
+	s := cleanSpec(id, 1, created.Format(time.RFC3339))
+	s.Description = strings.Replace(s.Description, "## Gate\nmake gate", "", 1)
+	issue := issueOfSpec(s)
+	issue.CreatedBy = "town/crew/overseer"
+	return specFromIssue(&issue)
+}
+
+// An unshaped bead's skipped entry says how many whole days it has waited, on
+// the tick's clock (gt-hgt9j.8).
+func TestSpecUnshapedAgeDays(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(specUnshapedBead("gt-bad", specTestNow.Add(-6*24*time.Hour)))
+	env := f.env()
+	env.ShapeGate = specdispatch.ShapeGateWarn
+	r := runSpecDispatchCycle(env)
+	if len(r.Skipped) != 1 || r.Skipped[0].Bead != "gt-bad" {
+		t.Fatalf("skipped = %+v, want the unshaped hold", r.Skipped)
+	}
+	e := r.Skipped[0]
+	if e.AgeDays != 6 {
+		t.Errorf("AgeDays = %d, want 6", e.AgeDays)
+	}
+	raw, err := json.Marshal(e)
+	if err != nil {
+		t.Fatalf("marshal entry: %v", err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("unmarshal entry: %v", err)
+	}
+	if got := fields["age_days"]; got != float64(6) {
+		t.Errorf("age_days = %v in %s, want 6", got, raw)
+	}
+}
+
+// An unshaped bead's skipped entry names who filed it, and its line ends with
+// the age and filer, which is what the daemon tick line renders (gt-hgt9j.8).
+func TestSpecUnshapedFilerShown(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(specUnshapedBead("gt-bad", specTestNow.Add(-6*24*time.Hour)))
+	env := f.env()
+	env.ShapeGate = specdispatch.ShapeGateWarn
+	r := runSpecDispatchCycle(env)
+	if len(r.Skipped) != 1 || r.Skipped[0].Bead != "gt-bad" {
+		t.Fatalf("skipped = %+v, want the unshaped hold", r.Skipped)
+	}
+	e := r.Skipped[0]
+	if e.Filer != "town/crew/overseer" {
+		t.Errorf("Filer = %q, want the town filer", e.Filer)
+	}
+	const want = " (6d, filer town/crew/overseer)"
+	if !strings.HasSuffix(e.Line, want) {
+		t.Errorf("line = %q, want it to end with %q", e.Line, want)
+	}
+}
+
+// A skip that is not a shape hold carries neither the age nor the filer: the
+// fields name the unshaped pile alone (gt-hgt9j.8).
+func TestSpecUnshapedAgeOmittedForOtherReasons(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(
+		cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"),
+		cleanSpec("gt-b", 2, "2026-09-29T11:00:00Z"),
+	)
+	env := f.env()
+	env.PerTick = 1 // one bead slings; the other is skipped for the limit
+	r := runSpecDispatchCycle(env)
+	if len(r.Skipped) != 1 || r.Skipped[0].Bead != "gt-b" {
+		t.Fatalf("skipped = %+v, want the bead over the limit", r.Skipped)
+	}
+	raw, err := json.Marshal(r.Skipped[0])
+	if err != nil {
+		t.Fatalf("marshal entry: %v", err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("unmarshal entry: %v", err)
+	}
+	for _, key := range []string{"age_days", "filer"} {
+		if _, ok := fields[key]; ok {
+			t.Errorf("%s is set on a non-shape skip: %s", key, raw)
+		}
+	}
+}
+
+// An unreadable created_at is not shown as an age of zero, and a stamp ahead
+// of the tick's clock is no wait at all (gt-hgt9j.8).
+func TestSpecUnshapedAgeUnreadable(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		created string
+		want    string
+	}{
+		{"unreadable stamp is no age", "not-a-date", "gt-bad: unshaped: ## Gate (filer town/crew/overseer)"},
+		{"a future stamp is no wait", specTestNow.Add(48 * time.Hour).Format(time.RFC3339), "gt-bad: unshaped: ## Gate (0d, filer town/crew/overseer)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := cleanSpec("gt-bad", 1, tc.created)
+			s.Description = strings.Replace(s.Description, "## Gate\nmake gate", "", 1)
+			issue := issueOfSpec(s)
+			issue.CreatedBy = "town/crew/overseer"
+			f := newFakeSpecTown(specFromIssue(&issue))
+			env := f.env()
+			env.ShapeGate = specdispatch.ShapeGateWarn
+			r := runSpecDispatchCycle(env)
+			if len(r.Skipped) != 1 || r.Skipped[0].Bead != "gt-bad" {
+				t.Fatalf("skipped = %+v, want the unshaped hold", r.Skipped)
+			}
+			if got := r.Skipped[0].Line; got != tc.want {
+				t.Errorf("line = %q, want %q", got, tc.want)
+			}
+			if got := r.Skipped[0].AgeDays; got != 0 {
+				t.Errorf("AgeDays = %d, want none", got)
+			}
+		})
 	}
 }
 
@@ -728,7 +873,7 @@ func TestSpecDispatchDryRunHoldsUnshaped(t *testing.T) {
 	env.ShapeGate = specdispatch.ShapeGateWarn
 	env.DryRun = true
 	r := runSpecDispatchCycle(env)
-	if len(r.Skipped) != 1 || r.Skipped[0].Line != "gt-bad: unshaped: ## Gate" {
+	if len(r.Skipped) != 1 || r.Skipped[0].Line != "gt-bad: unshaped: ## Gate (1d)" {
 		t.Fatalf("skipped = %+v, want the unshaped hold", r.Skipped)
 	}
 	if len(f.slung) != 0 || len(f.notes) != 0 || len(f.labels) != 0 {
