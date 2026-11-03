@@ -132,10 +132,17 @@ is accepted and ignored. Epics, agent beads (gt:agent) and wisps are refused
 as "not a work bead" without reading a shape.
 
 Prints one line naming the bead and the first missing field. --json prints
-{id, ok, needs_planning, refusals[], hints[]} instead, listing every failure;
-hints is present only when there are prior records to show. A human-form
-run that does not exit 0 also writes the required skeleton to stderr — every
-section with a one-phrase hint and the command that re-lints the bead.
+{id, ok, needs_planning, refusals[], advice[], hints[]} instead, listing every
+failure; advice and hints are present only when there are lines to show. A
+human-form run that does not exit 0 also writes the required skeleton to
+stderr — every section with a one-phrase hint and the command that re-lints
+the bead.
+
+A bead whose Goal or Constraints names a probe, guard, hold, drain, install,
+lock, lease, gc step or heartbeat, and whose acceptance list says nothing about
+what happens when it fails, also gets one "advice:" line on stderr. Advice is
+printed after the verdict and changes neither the verdict line nor the exit
+code.
 
 A bead whose text mentions a slow or timed-out test also gets the town's top
 three prior records (from hm) on stderr, under a "hint:" heading. The hint is
@@ -233,7 +240,7 @@ the seat the bad block dropped. The operator hold file and ESTOP stop the tick.`
 
 func init() {
 	specLintCmd.Flags().StringVar(&specLintTemplate, "template", "", "Spec template path (default daemon.patrols.spec_dispatch.template in settings/config.json, else ~/.claude/docs/agents/spec-template.md)")
-	specLintCmd.Flags().BoolVar(&specLintJSON, "json", false, "Print {id, ok, needs_planning, refusals[], hints[]} instead of one line")
+	specLintCmd.Flags().BoolVar(&specLintJSON, "json", false, "Print {id, ok, needs_planning, refusals[], advice[], hints[]} instead of one line")
 	specDispatchCmd.Flags().BoolVar(&specDispatchJSON, "json", false, "Output the tick report as JSON")
 	specDispatchCmd.Flags().BoolVar(&specDispatchDryRun, "dry-run", false, "Decide and report without slinging, labeling or commenting")
 	specCmd.AddCommand(specLintCmd, specDispatchCmd)
@@ -1155,6 +1162,10 @@ type specLintReport struct {
 	OK            bool                   `json:"ok"`
 	NeedsPlanning bool                   `json:"needs_planning"`
 	Refusals      []specdispatch.Refusal `json:"refusals"`
+	// Advice names the gaps that are worth closing but are not refusals, so
+	// they change neither ok nor the exit code. The array is omitted when
+	// there is none.
+	Advice []string `json:"advice,omitempty"`
 	// Hints are the town's prior records on slow tests, shown when the bead's
 	// text mentions one. The array is omitted when there are none (gt-p07bw).
 	Hints []hmhints.Hit `json:"hints,omitempty"`
@@ -1240,7 +1251,10 @@ func writeSpecHints(w io.Writer, hits []hmhints.Hit) {
 // (gt-ngtev). After the verdict is decided, a bead whose text mentions slow or
 // timed-out tests also gets the town's top prior records on stderr (or in the
 // report's hints with --json); the hint is advice and changes neither the
-// verdict line nor the exit code (gt-p07bw).
+// verdict line nor the exit code (gt-p07bw). The report's advice lines
+// (specdispatch.Advice) are printed on errOut after the verdict line in human
+// form and carried in the report's advice array with --json; like the hint,
+// they change neither the verdict nor the exit code.
 func specLint(out, errOut io.Writer, beadID string, spec specdispatch.Spec, showErr error, templatePath string, hint specHintSource, asJSON bool) error {
 	tmpl := specdispatch.LoadTemplate(templatePath)
 	report := specLintReport{ID: beadID, Refusals: []specdispatch.Refusal{}}
@@ -1259,13 +1273,23 @@ func specLint(out, errOut io.Writer, beadID string, spec specdispatch.Spec, show
 	case specdispatch.RoutePlanning:
 		code = specLintExitNeedsPlan
 	}
-	// The hint is asked for only after the code is decided, and it is written
-	// to errOut alone.
+	// Advice and the hint are asked for only after the code is decided: both
+	// are advice, so neither changes the verdict line nor the exit code.
+	report.Advice = specdispatch.Advice(spec)
 	report.Hints = specSlowHints(spec, hint)
 	if !asJSON {
 		writeSpecHints(errOut, report.Hints)
 	}
 	return emitSpecLint(out, errOut, tmpl, report, verdict.Line(beadID), code, asJSON)
+}
+
+// writeSpecAdvice prints each lint advisory on its own "advice:" line in w.
+// Advice never changes the verdict or the exit code, so a caller that cannot
+// write here loses only the note.
+func writeSpecAdvice(w io.Writer, advice []string) {
+	for _, line := range advice {
+		fmt.Fprintf(w, "advice: %s\n", line)
+	}
 }
 
 func emitSpecLint(out, errOut io.Writer, tmpl specdispatch.Template, report specLintReport, line string, code int, asJSON bool) error {
@@ -1277,6 +1301,7 @@ func emitSpecLint(out, errOut io.Writer, tmpl specdispatch.Template, report spec
 		fmt.Fprintln(out, string(data))
 	} else {
 		fmt.Fprintln(out, line)
+		writeSpecAdvice(errOut, report.Advice)
 		if code != 0 {
 			// Best effort: the exit code carries the verdict, not this write.
 			fmt.Fprintf(errOut, "%s", tmpl.Skeleton(report.ID))
