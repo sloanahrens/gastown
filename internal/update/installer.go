@@ -30,6 +30,18 @@ const (
 	// carries. A build log is unbounded and unread; what a failure is read
 	// back from is its end.
 	installerOutputTail = 20
+
+	// installerDetailTailLines is how many of the installer's last output
+	// lines a failed install step keeps in its detail, so the state file,
+	// `gt update status` and the escalation say why the install failed
+	// without the operator re-running it.
+	installerDetailTailLines = 5
+
+	// installerTailLineLimit is the most characters kept from one output
+	// line, and installerTailLimit from the whole tail: one long compiler
+	// line must not crowd out the rest.
+	installerTailLineLimit = 200
+	installerTailLimit     = 1000
 )
 
 // installerEvents is every event the installer names in internal/installer,
@@ -109,10 +121,10 @@ func (e *ExecInstaller) Install(ctx context.Context, sha string) (InstallResult,
 	// the daemon lets it inherit.
 	out, exit, err := run(ctx, e.RepoRoot, nil, "make", "gt-installer")
 	if err != nil {
-		return InstallResult{}, fmt.Errorf("run make gt-installer in %s: %w%s", e.RepoRoot, err, outputTail(out))
+		return InstallResult{}, fmt.Errorf("run make gt-installer in %s: %w%s", e.RepoRoot, err, outputTail(out, installerOutputTail))
 	}
 	if exit != 0 {
-		return InstallResult{}, fmt.Errorf("make gt-installer in %s exited %d%s", e.RepoRoot, exit, outputTail(out))
+		return InstallResult{}, fmt.Errorf("make gt-installer in %s exited %d%s", e.RepoRoot, exit, outputTail(out, installerOutputTail))
 	}
 
 	program := filepath.Join(e.RepoRoot, "gt-installer")
@@ -129,11 +141,17 @@ func (e *ExecInstaller) Install(ctx context.Context, sha string) (InstallResult,
 	res, ok := ParseInstallerResult(out)
 	if !ok {
 		if err != nil {
-			return InstallResult{}, fmt.Errorf("run %s: %w%s", program, err, outputTail(out))
+			return InstallResult{}, fmt.Errorf("run %s: %w%s", program, err, outputTail(out, installerDetailTailLines))
 		}
-		return InstallResult{}, fmt.Errorf("%s named no result line (exit %d)%s", program, exit, outputTail(out))
+		return InstallResult{}, fmt.Errorf("%s named no result line (exit %d)%s", program, exit, outputTail(out, installerDetailTailLines))
 	}
 	res.Exit = exit
+	if ClassifyInstall(res) == ResultFailed {
+		// run.go's installDetail writes Reason into the step's detail, so a
+		// failed verdict keeps the installer's last lines where the operator
+		// reads them. A busy run is deferred and keeps its reason alone.
+		res.Reason = withOutputTail(res.Reason, out)
+	}
 	return res, nil
 }
 
@@ -195,15 +213,51 @@ func emptyIfDash(s string) string {
 	return s
 }
 
-// outputTail renders the last installerOutputTail lines of a command's output
-// for an error, or "" when the command printed nothing.
-func outputTail(out string) string {
-	if strings.TrimSpace(out) == "" {
+// withOutputTail appends a command's last lines to a failed install's detail,
+// or returns the detail alone when the command printed nothing.
+func withOutputTail(detail, out string) string {
+	tail := outputTail(out, installerDetailTailLines)
+	if tail == "" {
+		return detail
+	}
+	if detail == "" {
+		return strings.TrimPrefix(tail, "\n")
+	}
+	return detail + tail
+}
+
+// outputTail renders the last maxLines non-empty lines of a command's output
+// for an error or a detail, or "" when the command printed nothing. Each line
+// is cut at installerTailLineLimit characters and the joined tail at
+// installerTailLimit, so one long line cannot crowd out the rest.
+func outputTail(out string, maxLines int) string {
+	var lines []string
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+	if len(lines) == 0 {
 		return ""
 	}
-	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
-	if len(lines) > installerOutputTail {
-		lines = lines[len(lines)-installerOutputTail:]
+	for i, line := range lines {
+		lines[i] = truncateChars(line, installerTailLineLimit)
 	}
-	return fmt.Sprintf("\nlast %d lines of output:\n%s", len(lines), strings.Join(lines, "\n"))
+	tail := truncateChars(strings.Join(lines, "\n"), installerTailLimit)
+	return fmt.Sprintf("\nlast %d lines of output:\n%s", len(lines), tail)
+}
+
+// truncateChars cuts s to at most max characters, counting runes so a
+// multi-byte line is not cut mid-character.
+func truncateChars(s string, max int) string {
+	chars := []rune(s)
+	if len(chars) <= max {
+		return s
+	}
+	return string(chars[:max])
 }

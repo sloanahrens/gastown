@@ -440,3 +440,139 @@ func TestExecInstallerEnvironmentKeepsPathAndHome(t *testing.T) {
 		}
 	}
 }
+
+// TestInstallDetailTailKeepsTheInstallersLastLines drives a failed run through
+// the verdict and the detail installDetail writes: the installer's own error
+// line must survive into the step's detail, or the operator has to re-run the
+// installer by hand to see it.
+func TestInstallDetailTailKeepsTheInstallersLastLines(t *testing.T) {
+	t.Parallel()
+	fake := &fakeRun{answer: func(call runCall) (string, int, error) {
+		if call.name == "make" {
+			return "", 0, nil
+		}
+		return "installing abc123\n" +
+			"swap: permission denied\n" +
+			"install-gt: RESULT refused abc123 def456 dirty\n", 2, nil
+	}}
+	ex := &ExecInstaller{RepoRoot: t.TempDir(), Run: fake.run}
+
+	res, err := ex.Install(context.Background(), "abc123")
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	result := ClassifyInstall(res)
+	if result != ResultFailed {
+		t.Fatalf("ClassifyInstall(%+v) = %q, want %q", res, result, ResultFailed)
+	}
+	detail := installDetail(res, result, nil)
+	if !strings.Contains(detail, "swap: permission denied") {
+		t.Errorf("install Detail = %q, want it to carry the installer's error line", detail)
+	}
+	if !strings.Contains(detail, "dirty") {
+		t.Errorf("install Detail = %q, want it to keep the installer's reason", detail)
+	}
+}
+
+// TestInstallDetailTailBoundsLinesAndTotal keeps the tail readable: five lines
+// at most, each cut at 200 characters, and the whole tail at 1000.
+func TestInstallDetailTailBoundsLinesAndTotal(t *testing.T) {
+	t.Parallel()
+	output := make([]string, 0, 51)
+	for i := 0; i < 50; i++ {
+		output = append(output, fmt.Sprintf("line-%02d %s", i, strings.Repeat("x", 300)))
+	}
+	output = append(output, "install-gt: RESULT failed abc123 def456 build-failed")
+	fake := &fakeRun{answer: func(call runCall) (string, int, error) {
+		if call.name == "make" {
+			return "", 0, nil
+		}
+		return strings.Join(output, "\n") + "\n", 1, nil
+	}}
+	ex := &ExecInstaller{RepoRoot: t.TempDir(), Run: fake.run}
+
+	res, err := ex.Install(context.Background(), "abc123")
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	result := ClassifyInstall(res)
+	if result != ResultFailed {
+		t.Fatalf("ClassifyInstall(%+v) = %q, want %q", res, result, ResultFailed)
+	}
+	detail := installDetail(res, result, nil)
+	_, tail, found := strings.Cut(detail, "lines of output:\n")
+	if !found {
+		t.Fatalf("install Detail = %q, want an output tail", detail)
+	}
+
+	lines := strings.Split(tail, "\n")
+	if len(lines) > 5 {
+		t.Errorf("tail has %d lines, want at most 5: %q", len(lines), tail)
+	}
+	for _, line := range lines {
+		if n := len([]rune(line)); n > 200 {
+			t.Errorf("tail line is %d characters, want at most 200: %q", n, line)
+		}
+	}
+	if n := len([]rune(tail)); n > 1000 {
+		t.Errorf("tail is %d characters, want at most 1000", n)
+	}
+	if !strings.Contains(tail, "line-49 ") {
+		t.Errorf("tail = %q, want the installer's last line", tail)
+	}
+	if strings.Contains(tail, "line-45 ") {
+		t.Errorf("tail = %q, want no line older than the last 5", tail)
+	}
+}
+
+// TestInstallDetailTailSuccessUnchanged leaves a successful install's detail
+// as it was: no tail, so the state file does not grow on every good run.
+func TestInstallDetailTailSuccessUnchanged(t *testing.T) {
+	t.Parallel()
+	fake := &fakeRun{answer: func(call runCall) (string, int, error) {
+		if call.name == "make" {
+			return "", 0, nil
+		}
+		return "building abc123\n" +
+			"install-gt: RESULT installed abc123 def456 -\n", 0, nil
+	}}
+	ex := &ExecInstaller{RepoRoot: t.TempDir(), Run: fake.run}
+
+	res, err := ex.Install(context.Background(), "abc123")
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	result := ClassifyInstall(res)
+	if result != ResultOK {
+		t.Fatalf("ClassifyInstall(%+v) = %q, want %q", res, result, ResultOK)
+	}
+	if detail := installDetail(res, result, nil); detail != "" {
+		t.Errorf("install Detail = %q, want empty: a successful install's detail is unchanged", detail)
+	}
+}
+
+// TestInstallDetailTailBusyUnchanged leaves a busy result's detail as the
+// installer's reason: a deferred run is retried, so its detail names the wait.
+func TestInstallDetailTailBusyUnchanged(t *testing.T) {
+	t.Parallel()
+	fake := &fakeRun{answer: func(call runCall) (string, int, error) {
+		if call.name == "make" {
+			return "", 0, nil
+		}
+		return "waiting for the install lock\n" +
+			"install-gt: RESULT refused abc123 - lock-busy\n", 3, nil
+	}}
+	ex := &ExecInstaller{RepoRoot: t.TempDir(), Run: fake.run}
+
+	res, err := ex.Install(context.Background(), "abc123")
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	result := ClassifyInstall(res)
+	if result != ResultDeferred {
+		t.Fatalf("ClassifyInstall(%+v) = %q, want %q", res, result, ResultDeferred)
+	}
+	if detail := installDetail(res, result, nil); detail != "lock-busy" {
+		t.Errorf("install Detail = %q, want %q: a busy result gets no tail", detail, "lock-busy")
+	}
+}
