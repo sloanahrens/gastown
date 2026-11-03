@@ -21,6 +21,25 @@ type updateTestClock struct{ now time.Time }
 
 func (c updateTestClock) Now() time.Time { return c.now }
 
+// updateTestWait bounds every wait a test does on another goroutine, so a
+// regression fails with a message instead of hanging the suite.
+const updateTestWait = 5 * time.Second
+
+// awaitUpdateError waits for a reported error, failing rather than hanging when
+// none arrives.
+func awaitUpdateError(t *testing.T, got <-chan error, what string) error {
+	t.Helper()
+	timer := time.NewTimer(updateTestWait)
+	defer timer.Stop()
+	select {
+	case err := <-got:
+		return err
+	case <-timer.C:
+		t.Fatalf("timed out after %s waiting for %s", updateTestWait, what)
+		return nil
+	}
+}
+
 // updateTestSeams is the command over a fake town, fake effects and the given
 // orchestrator.
 func updateTestSeams(townRoot string, deps update.Deps, run func(context.Context, update.Deps, update.Options) (update.State, error)) updateSeams {
@@ -78,10 +97,7 @@ type recordingUpdateRun struct {
 func (r *recordingUpdateRun) call(_ context.Context, _ update.Deps, o update.Options) (update.State, error) {
 	r.calls++
 	r.opts = o
-	if r.err != nil {
-		return update.State{}, r.err
-	}
-	return r.state, nil
+	return r.state, r.err
 }
 
 // TestUpdateFlagsValidateStepNames proves repeated --skip and --only values
@@ -192,6 +208,21 @@ func TestUpdateExitCodesFollowTheOutcome(t *testing.T) {
 			t.Errorf("a failed run printed a report:\n%s", stdout)
 		}
 	})
+
+	t.Run("no outcome and no error", func(t *testing.T) {
+		rec := &recordingUpdateRun{state: update.State{V: 1, RunID: "run-none"}}
+		seams := updateTestSeams(t.TempDir(), updateTestDeps(t), rec.call)
+		code, stdout, stderr := runUpdateCommand(t, context.Background(), seams)
+		if code != 1 {
+			t.Fatalf("exit = %d for a run with no outcome, want 1", code)
+		}
+		if !strings.Contains(stderr, "without a terminal outcome") {
+			t.Errorf("stderr does not say the outcome was missing:\n%s", stderr)
+		}
+		if strings.Contains(stdout, "outcome:") {
+			t.Errorf("a run with no outcome printed a report:\n%s", stdout)
+		}
+	})
 }
 
 // TestUpdateSetupErrorsExitFailed proves a town that cannot be found and a
@@ -275,31 +306,68 @@ func TestUpdateLockedExitsFiveNamingTheRun(t *testing.T) {
 	}
 }
 
-// TestUpdateLockedWithoutStateStillExitsFive proves a holder whose state
-// cannot be read is named as unreadable, not mistaken for no run.
-func TestUpdateLockedWithoutStateStillExitsFive(t *testing.T) {
+// TestUpdateLockedNoStateSaysNoStateYet proves the locked message tells a
+// holder that has not written its state yet from one whose record cannot be
+// read, and exits 5 for both.
+func TestUpdateLockedNoStateSaysNoStateYet(t *testing.T) {
 	t.Parallel()
-	townRoot := t.TempDir()
-	dir := update.Dir(townRoot)
-	release, err := update.AcquireLock(dir)
-	if err != nil {
-		t.Fatalf("holding the lock: %v", err)
-	}
-	defer release()
+	t.Run("no state yet", func(t *testing.T) {
+		t.Parallel()
+		townRoot := t.TempDir()
+		dir := update.Dir(townRoot)
+		release, err := update.AcquireLock(dir)
+		if err != nil {
+			t.Fatalf("holding the lock: %v", err)
+		}
+		defer release()
 
-	deps := update.Deps{Clock: updateTestClock{}, Store: &update.Store{Dir: dir}}
-	code, _, stderr := runUpdateCommand(t, context.Background(), updateTestSeams(townRoot, deps, nil))
-	if code != 5 {
-		t.Fatalf("exit = %d with the lock held, want 5", code)
-	}
-	if !strings.Contains(stderr, "state could not be read") {
-		t.Errorf("stderr does not say the state was unreadable:\n%s", stderr)
-	}
+		deps := update.Deps{Clock: updateTestClock{}, Store: &update.Store{Dir: dir}}
+		code, _, stderr := runUpdateCommand(t, context.Background(), updateTestSeams(townRoot, deps, nil))
+		if code != 5 {
+			t.Fatalf("exit = %d with the lock held, want 5", code)
+		}
+		if !strings.Contains(stderr, "has not written its state yet") {
+			t.Errorf("stderr does not say the holder has no state yet:\n%s", stderr)
+		}
+		if strings.Contains(stderr, "could not be read") {
+			t.Errorf("a holder with no state was reported as unreadable:\n%s", stderr)
+		}
+	})
+
+	t.Run("unreadable state", func(t *testing.T) {
+		t.Parallel()
+		townRoot := t.TempDir()
+		dir := update.Dir(townRoot)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("creating the update directory: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte("{not json"), 0o600); err != nil {
+			t.Fatalf("writing the malformed state: %v", err)
+		}
+		release, err := update.AcquireLock(dir)
+		if err != nil {
+			t.Fatalf("holding the lock: %v", err)
+		}
+		defer release()
+
+		deps := update.Deps{Clock: updateTestClock{}, Store: &update.Store{Dir: dir}}
+		code, _, stderr := runUpdateCommand(t, context.Background(), updateTestSeams(townRoot, deps, nil))
+		if code != 5 {
+			t.Fatalf("exit = %d with the lock held, want 5", code)
+		}
+		if !strings.Contains(stderr, "could not be read") {
+			t.Errorf("stderr does not say the state was unreadable:\n%s", stderr)
+		}
+		if strings.Contains(stderr, "has not written its state yet") {
+			t.Errorf("an unreadable state was reported as absent:\n%s", stderr)
+		}
+	})
 }
 
 // TestUpdateCancelledContextIsInterrupted proves cancelling the command's
 // context while the run waits ends it with outcome interrupted, status 130,
-// and the lock released.
+// and the lock released. The fake answers with only the context's error, so
+// the outcome comes from the command's own mapping.
 func TestUpdateCancelledContextIsInterrupted(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
@@ -308,31 +376,88 @@ func TestUpdateCancelledContextIsInterrupted(t *testing.T) {
 	finished := make(chan struct{})
 	run := func(runCtx context.Context, _ update.Deps, _ update.Options) (update.State, error) {
 		close(started)
-		<-runCtx.Done()
-		return update.State{V: 1, RunID: "run-cancel", Outcome: update.OutcomeInterrupted}, nil
+		timer := time.NewTimer(updateTestWait)
+		defer timer.Stop()
+		select {
+		case <-runCtx.Done():
+			return update.State{}, runCtx.Err()
+		case <-timer.C:
+			return update.State{}, errors.New("the command never cancelled the run")
+		}
 	}
 	go func() {
+		timer := time.NewTimer(updateTestWait)
+		defer timer.Stop()
 		select {
 		case <-started:
 			cancel()
 		case <-finished:
+		case <-timer.C:
 		}
 	}()
 	seams := updateTestSeams(townRoot, updateTestDeps(t), run)
 
-	code, stdout, stderr := runUpdateCommand(t, ctx, seams)
+	code, stdout, stderr := runUpdateCommand(t, ctx, seams, "--json")
 	close(finished)
 	if code != 130 {
 		t.Fatalf("exit = %d after cancellation, want 130; stderr:\n%s", code, stderr)
 	}
-	if !strings.Contains(stdout, "outcome: interrupted") {
-		t.Errorf("report does not print the interrupted outcome:\n%s", stdout)
+	var st update.State
+	if err := json.Unmarshal([]byte(stdout), &st); err != nil {
+		t.Fatalf("stdout is not the final state JSON: %v\n%s", err, stdout)
+	}
+	if st.Outcome != update.OutcomeInterrupted {
+		t.Errorf("outcome = %q, want %q\n%s", st.Outcome, update.OutcomeInterrupted, stdout)
 	}
 	release, err := update.AcquireLock(update.Dir(townRoot))
 	if err != nil {
 		t.Fatalf("lock still held after the interrupted run: %v", err)
 	}
 	release()
+}
+
+// TestUpdateCancelledContextReportsInterrupted proves the text report names an
+// interrupted run, and the status is 130, when the orchestrator returns only
+// the context's error.
+func TestUpdateCancelledContextReportsInterrupted(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	run := func(runCtx context.Context, _ update.Deps, _ update.Options) (update.State, error) {
+		return update.State{}, runCtx.Err()
+	}
+	seams := updateTestSeams(t.TempDir(), updateTestDeps(t), run)
+
+	code, stdout, stderr := runUpdateCommand(t, ctx, seams)
+	if code != 130 {
+		t.Fatalf("exit = %d for an interrupted run, want 130; stderr:\n%s", code, stderr)
+	}
+	if !strings.Contains(stdout, "outcome: interrupted") {
+		t.Errorf("report does not print the interrupted outcome:\n%s", stdout)
+	}
+}
+
+// TestUpdateRunErrorWithOutcomeUsesTheOutcome proves an error returned beside a
+// terminal outcome does not override it: the status follows the outcome and
+// the error is printed after the report.
+func TestUpdateRunErrorWithOutcomeUsesTheOutcome(t *testing.T) {
+	t.Parallel()
+	rec := &recordingUpdateRun{
+		state: update.State{V: 1, RunID: "run-partial", Outcome: update.OutcomePartial},
+		err:   errors.New("append history: disk full"),
+	}
+	seams := updateTestSeams(t.TempDir(), updateTestDeps(t), rec.call)
+
+	code, stdout, stderr := runUpdateCommand(t, context.Background(), seams)
+	if code != 3 {
+		t.Fatalf("exit = %d for a partial run with an error, want 3; stderr:\n%s", code, stderr)
+	}
+	if !strings.Contains(stdout, "outcome: partial") {
+		t.Errorf("report does not print the partial outcome:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "append history: disk full") {
+		t.Errorf("stderr does not print the run's error:\n%s", stderr)
+	}
 }
 
 // TestUpdateFromDaemonSetsSource proves the source flag reaches the run:
@@ -399,9 +524,9 @@ func TestUpdateHeartbeatIgnoresNoCurrentAndLogsOtherWrites(t *testing.T) {
 			updateHeartbeatError(&buf)(err)
 			got <- err
 		})
+		defer stop()
 		ticks <- time.Now()
-		err := <-got
-		stop()
+		err := awaitUpdateError(t, got, "the heartbeat's missing-state error")
 		if !errors.Is(err, update.ErrNoCurrent) {
 			t.Fatalf("heartbeat error = %v, want ErrNoCurrent", err)
 		}
@@ -432,9 +557,9 @@ func TestUpdateHeartbeatIgnoresNoCurrentAndLogsOtherWrites(t *testing.T) {
 			updateHeartbeatError(&buf)(err)
 			got <- err
 		})
+		defer stop()
 		ticks <- time.Now()
-		err := <-got
-		stop()
+		err := awaitUpdateError(t, got, "the heartbeat's write failure")
 		if err == nil || errors.Is(err, update.ErrNoCurrent) {
 			t.Fatalf("heartbeat error = %v, want a write failure", err)
 		}

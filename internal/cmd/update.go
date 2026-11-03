@@ -74,9 +74,6 @@ var updateSelectableSteps = []update.StepName{
 	update.StepLift,
 }
 
-// updateDepsFactory builds the real effects one update run reaches.
-var updateDepsFactory = realUpdateDeps
-
 // updateSeams are the command's dependencies: the town lookup, the effects
 // builder and the orchestrator. Production passes the real ones; a test passes
 // fakes, so no test swaps a package variable.
@@ -90,7 +87,7 @@ type updateSeams struct {
 func productionUpdateSeams() updateSeams {
 	return updateSeams{
 		FindTownRoot: workspace.FindFromCwdOrError,
-		DepsFactory:  updateDepsFactory,
+		DepsFactory:  realUpdateDeps,
 		Run:          update.Run,
 	}
 }
@@ -182,23 +179,59 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 	defer ticker.Stop()
 	stopHeartbeat := startUpdateHeartbeat(ctx, deps.Store, ticker.C, deps.Clock, updateHeartbeatError(errOut))
 
-	st, err := seams.Run(ctx, deps, updateOptions(req, skip, only))
+	st, runErr := seams.Run(ctx, deps, updateOptions(req, skip, only))
 	stopHeartbeat()
 	release()
 
-	if err != nil {
-		fmt.Fprintf(errOut, "gt update: %v\n", err)
-		return NewSilentExit(1)
+	// A run that stopped without recording how it ended was either interrupted
+	// or failed before it could publish an outcome. Cancellation is the
+	// command's to name: Run may return only the context's error, and the
+	// process must still report "interrupted" and exit 130.
+	if !updateOutcomeTerminal(st.Outcome) {
+		switch {
+		case updateCancelled(ctx, runErr):
+			st.Outcome = update.OutcomeInterrupted
+		case runErr != nil:
+			fmt.Fprintf(errOut, "gt update: %v\n", runErr)
+			return NewSilentExit(1)
+		default:
+			fmt.Fprintln(errOut, "gt update: the run ended without a terminal outcome")
+			return NewSilentExit(1)
+		}
 	}
 	if err := writeUpdateResult(out, st, req.JSON); err != nil {
 		fmt.Fprintf(errOut, "gt update: %v\n", err)
 		return NewSilentExit(1)
+	}
+	// A run can end with a terminal outcome and still report a failure to
+	// record it, such as a state write after the last step. The outcome decides
+	// the exit status; the error is printed after the report rather than
+	// replacing it.
+	if runErr != nil {
+		fmt.Fprintf(errOut, "gt update: %v\n", runErr)
 	}
 	code := updateOutcomeExitCode(st.Outcome)
 	if code == 0 {
 		return nil
 	}
 	return NewSilentExit(code)
+}
+
+// updateOutcomeTerminal reports whether the outcome says how the run ended,
+// rather than leaving it running or unset.
+func updateOutcomeTerminal(outcome update.Outcome) bool {
+	switch outcome {
+	case update.OutcomeOK, update.OutcomeFailed, update.OutcomePartial, update.OutcomeAborted, update.OutcomeInterrupted:
+		return true
+	default:
+		return false
+	}
+}
+
+// updateCancelled reports whether the run was interrupted: the command's
+// context ended, or the orchestrator returned that error itself.
+func updateCancelled(ctx context.Context, err error) bool {
+	return ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // parseUpdateSelection turns repeated --skip or --only names into the plan
@@ -330,12 +363,16 @@ func writeUpdateReport(w io.Writer, st update.State) {
 	fmt.Fprintf(w, "outcome: %s\n", st.Outcome)
 }
 
-// reportUpdateLocked prints which run holds the lock. An unreadable state is
-// named rather than read as no run, so the operator knows the holder exists
-// even when its record cannot be shown.
+// reportUpdateLocked prints which run holds the lock. A holder that has not
+// written its state yet is distinguished from one whose record cannot be read,
+// so the operator never sees an unreadable record reported as no run.
 func reportUpdateLocked(w io.Writer, store *update.Store) error {
 	fmt.Fprintln(w, "another update run holds the lock")
 	st, err := store.Read()
+	if errors.Is(err, update.ErrNoState) {
+		fmt.Fprintln(w, "it has not written its state yet")
+		return NewSilentExit(5)
+	}
 	if err != nil {
 		fmt.Fprintf(w, "the running run's state could not be read: %v\n", err)
 		return NewSilentExit(5)
