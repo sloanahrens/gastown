@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/specdispatch"
 	"github.com/steveyegge/gastown/internal/testutil"
 )
 
@@ -3012,5 +3013,19 @@ func TestSplitHereStringsWordSplitBody(t *testing.T) {
 				t.Errorf("splitHereStrings(%q) = rest %q, texts %q; want rest %q, texts %q", tt.args, rest, texts, tt.rest, tt.texts)
 			}
 		})
+	}
+}
+
+// The guard judges against specdispatch.ContainerSuitePackages, the list the
+// spec lint's Gate check reads. Pin the assignment so a later hard-coded copy
+// cannot drift from the source (gt-hgt9j.4).
+func TestTapGuardContainerSuitePackagesMatchSpecdispatch(t *testing.T) {
+	t.Parallel()
+	want := specdispatch.ContainerSuitePackages()
+	if !reflect.DeepEqual(containerSuitePackages, want) {
+		t.Fatalf("containerSuitePackages = %v, want specdispatch.ContainerSuitePackages() = %v", containerSuitePackages, want)
+	}
+	if len(want) == 0 {
+		t.Fatal("specdispatch.ContainerSuitePackages() is empty")
 	}
 }

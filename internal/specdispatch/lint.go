@@ -546,17 +546,20 @@ func acceptanceDisagreement(field, section string) string {
 //  1. not a work bead: an epic, an agent bead, a wisp and the other runtime
 //     families are refused before any shape is read
 //  2. every template section present and non-empty
-//  3. at least one acceptance item, and no item naming a step only the
+//  3. no Gate line runs a container-suite package without a -run filter: the
+//     suite spins containers, and a polecat running it wedges its session
+//     (gt-hgt9j.4)
+//  4. at least one acceptance item, and no item naming a step only the
 //     overseer can run: the whole gate, a container suite, a cluster or the
 //     live town (gt-hgt9j.3)
-//  4. a bead carrying both an acceptance field and a description acceptance
+//  5. a bead carrying both an acceptance field and a description acceptance
 //     section lists the same criteria in both: gt done reads the field while
 //     filers edit the description, so the two drift and hold a polecat to
 //     criteria nobody can see (gt-hgt9j.2)
-//  5. every repo file the Constraints names as a file it changes exists on the
+//  6. every repo file the Constraints names as a file it changes exists on the
 //     target branch; a path the spec introduces, reads only, or that is not a
 //     literal repo file, is passed (gt-7t1im)
-//  6. size: needs-planning label, a Size that says planning, or more than
+//  7. size: needs-planning label, a Size that says planning, or more than
 //     MaxAcceptance items route to the planner; a Size that does not say one
 //     worker is refused
 //
@@ -590,6 +593,13 @@ func lint(s Spec, t Template, paths bool) LintVerdict {
 		case body == "":
 			failures = append(failures, Refusal{Field: "## " + name, Reason: "section empty"})
 		}
+	}
+	// A Gate line running a whole container-suite package wedges the polecat
+	// at the gate itself, so it is refused when the bead is shaped rather than
+	// at run time (gt-hgt9j.4). A description without a Gate section has
+	// nothing to read here.
+	if r, blocked := containerSuiteGateRefusal(sections["gate"]); blocked {
+		failures = append(failures, r)
 	}
 	items := CountAcceptance(acceptanceText(s, sections))
 	if items < MinAcceptance {
