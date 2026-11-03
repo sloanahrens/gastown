@@ -34,6 +34,7 @@ import (
 type archiveCountServer struct {
 	queryErr error
 	null     bool
+	empty    bool
 	// columns and rows, when set, are served as the result set: the events
 	// window's rows. hashes, when set, is served as one text column: the
 	// commit hashes a dolt_log read returns. Otherwise the query serves the
@@ -83,6 +84,7 @@ func (c archiveCountConn) QueryContext(_ context.Context, query string, args []d
 	}
 	return &archiveCountRows{
 		null:    c.server.null,
+		empty:   c.server.empty,
 		columns: c.server.columns,
 		rows:    c.server.rows,
 		hashes:  c.server.hashes,
@@ -102,6 +104,7 @@ func archivedSet(hashes ...string) func(db string) (map[string]struct{}, error) 
 
 type archiveCountRows struct {
 	null    bool
+	empty   bool
 	columns []string
 	rows    [][]driver.Value
 	hashes  []string
@@ -121,6 +124,9 @@ func (*archiveCountRows) Close() error { return nil }
 func (r *archiveCountRows) Next(dest []driver.Value) error {
 	if r.nextErr != nil {
 		return r.nextErr
+	}
+	if r.empty {
+		return io.EOF
 	}
 	if r.rows != nil {
 		if r.next >= len(r.rows) {
@@ -376,15 +382,34 @@ func TestDoltArchiveReaderFailures(t *testing.T) {
 		}
 	})
 
-	t.Run("an events count reads the rows behind the archive", func(t *testing.T) {
+	t.Run("a no-watermark events count is an existence check, not a COUNT", func(t *testing.T) {
 		t.Parallel()
-		reader := doltArchiveReader{config: config, openDB: archiveCountOpener(t, &archiveCountServer{})}
+		server := &archiveCountServer{}
+		reader := doltArchiveReader{config: config, openDB: archiveCountOpener(t, server)}
 		got, err := reader.eventsBehind(ctx, "gt", eventsWM)
 		if err != nil {
 			t.Fatalf("count: %v", err)
 		}
-		if got != 3 {
-			t.Errorf("events behind = %d, want 3", got)
+		if got != eventsBehindUncounted {
+			t.Errorf("events behind = %d, want %d (rows exist, not counted)", got, eventsBehindUncounted)
+		}
+		if strings.Contains(strings.ToUpper(server.query), "COUNT") {
+			t.Errorf("no-watermark count ran a full count: %s", server.query)
+		}
+		if !strings.Contains(server.query, "LIMIT 1") {
+			t.Errorf("no-watermark count is not an existence check: %s", server.query)
+		}
+	})
+
+	t.Run("a no-watermark events count of an empty table is zero", func(t *testing.T) {
+		t.Parallel()
+		reader := doltArchiveReader{config: config, openDB: archiveCountOpener(t, &archiveCountServer{empty: true})}
+		got, err := reader.eventsBehind(ctx, "gt", eventsWM)
+		if err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		if got != 0 {
+			t.Errorf("events behind = %d, want 0 for an empty table", got)
 		}
 	})
 
@@ -542,7 +567,7 @@ func TestArchivedHashesLoaderReadsTheConfiguredArchive(t *testing.T) {
 			dir))
 		writeCommitArchive(t, filepath.Join(dir, "dolt-log-gt-20261102.csv.gz"), []string{"h1", "h2"})
 
-		got, err := archivedHashesLoader(townRoot)("gt")
+		got, err := archivedHashesLoader(townRoot, []string{"gt"})("gt")
 		if err != nil {
 			t.Fatalf("loading: %v", err)
 		}
@@ -556,14 +581,14 @@ func TestArchivedHashesLoaderReadsTheConfiguredArchive(t *testing.T) {
 		townRoot := t.TempDir()
 		writeDaemonConfig(t, townRoot,
 			`{"type":"daemon-patrol-config","version":1,"patrols":{"scheduled_maintenance":{"enabled":true,"window":"03:00"}}}`)
-		if _, err := archivedHashesLoader(townRoot)("gt"); err == nil || !strings.Contains(err.Error(), "maintenance.archive_dir") {
+		if _, err := archivedHashesLoader(townRoot, []string{"gt"})("gt"); err == nil || !strings.Contains(err.Error(), "maintenance.archive_dir") {
 			t.Errorf("loading with the setting unset = %v, want the setting named", err)
 		}
 	})
 
 	t.Run("a missing config is an error, not an empty set", func(t *testing.T) {
 		t.Parallel()
-		if _, err := archivedHashesLoader(t.TempDir())("gt"); err == nil {
+		if _, err := archivedHashesLoader(t.TempDir(), []string{"gt"})("gt"); err == nil {
 			t.Error("loading with no daemon config reported an empty set")
 		}
 	})
@@ -572,8 +597,32 @@ func TestArchivedHashesLoaderReadsTheConfiguredArchive(t *testing.T) {
 		t.Parallel()
 		townRoot := t.TempDir()
 		writeDaemonConfig(t, townRoot, "{not json")
-		if _, err := archivedHashesLoader(townRoot)("gt"); err == nil {
+		if _, err := archivedHashesLoader(townRoot, []string{"gt"})("gt"); err == nil {
 			t.Error("loading with a corrupt daemon config reported an empty set")
+		}
+	})
+
+	t.Run("an archive directory that cannot be read is an error", func(t *testing.T) {
+		t.Parallel()
+		townRoot := t.TempDir()
+		dir := filepath.Join(t.TempDir(), "absent")
+		writeDaemonConfig(t, townRoot, fmt.Sprintf(
+			`{"type":"daemon-patrol-config","version":1,"patrols":{"scheduled_maintenance":{"enabled":true,"window":"03:00","archive_dir":%q}}}`,
+			dir))
+		if _, err := archivedHashesLoader(townRoot, []string{"gt"})("gt"); err == nil {
+			t.Error("an unreadable archive directory loaded as an empty set")
+		}
+	})
+
+	t.Run("a database outside the call's list is refused", func(t *testing.T) {
+		t.Parallel()
+		townRoot := t.TempDir()
+		dir := t.TempDir()
+		writeDaemonConfig(t, townRoot, fmt.Sprintf(
+			`{"type":"daemon-patrol-config","version":1,"patrols":{"scheduled_maintenance":{"enabled":true,"window":"03:00","archive_dir":%q}}}`,
+			dir))
+		if _, err := archivedHashesLoader(townRoot, []string{"gt"})("hq"); err == nil || !strings.Contains(err.Error(), "not listed") {
+			t.Errorf("a database outside the call's list = %v, want it refused", err)
 		}
 	})
 
@@ -582,7 +631,7 @@ func TestArchivedHashesLoaderReadsTheConfiguredArchive(t *testing.T) {
 		townRoot := t.TempDir()
 		writeDaemonConfig(t, townRoot,
 			`{"type":"daemon-patrol-config","version":1,"patrols":{"scheduled_maintenance":{"enabled":true,"window":"03:00","archive_dir":"archive"}}}`)
-		if _, err := archivedHashesLoader(townRoot)("gt"); err == nil {
+		if _, err := archivedHashesLoader(townRoot, []string{"gt"})("gt"); err == nil {
 			t.Error("a relative archive_dir was resolved")
 		}
 	})
@@ -673,13 +722,17 @@ func TestArchiveEventsBehindQueryReadsTheLookbackWindow(t *testing.T) {
 			"INSERT INTO events (id, created_at) VALUES ('%s', '%s')", row[0], row[1]))
 	}
 
-	// No watermark: the whole table is behind, counted by the index.
-	countQuery, err := eventsBehindQuery("gt", daemon.EventsArchiveWatermark{})
+	// No watermark: the count is an existence check, not a COUNT(*), and it
+	// answers whether the table holds any row.
+	probeQuery, err := eventsBehindQuery("gt", daemon.EventsArchiveWatermark{})
 	if err != nil {
-		t.Fatalf("building the count query: %v", err)
+		t.Fatalf("building the no-watermark query: %v", err)
 	}
-	if got := statusEngineCount(t, ctx, engine, countQuery); got != 4 {
-		t.Errorf("events behind with no watermark = %d, want the whole table (4)", got)
+	if strings.Contains(strings.ToUpper(probeQuery), "COUNT") {
+		t.Errorf("no-watermark query counts the table: %s", probeQuery)
+	}
+	if got := statusEngineRowCount(t, ctx, engine, probeQuery); got != 1 {
+		t.Errorf("no-watermark probe returned %d row(s), want one while the table holds rows", got)
 	}
 
 	// The archive's window: rows at or after the newest row minus 24h, which
@@ -697,6 +750,76 @@ func TestArchiveEventsBehindQueryReadsTheLookbackWindow(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Errorf("window rows = %v, want %v (the inclusive 24h lookback, created_at then id)", got, want)
 	}
+}
+
+// TestStatusReadsArchivedHashesOncePerDatabaseAndBoundsTheEventsCount: one
+// status call reads each database's archive files once, and the no-watermark
+// events count is an existence check rather than a full COUNT(*) (gt-3w3hk).
+func TestStatusReadsArchivedHashesOncePerDatabaseAndBoundsTheEventsCount(t *testing.T) {
+	t.Parallel()
+
+	t.Run("one status call reads each database's archive files once", func(t *testing.T) {
+		t.Parallel()
+		townRoot := t.TempDir()
+		dir := t.TempDir()
+		writeDaemonConfig(t, townRoot, fmt.Sprintf(
+			`{"type":"daemon-patrol-config","version":1,"patrols":{"scheduled_maintenance":{"enabled":true,"window":"03:00","archive_dir":%q}}}`,
+			dir))
+		gtPath := filepath.Join(dir, "dolt-log-gt-20261102.csv.gz")
+		hqPath := filepath.Join(dir, "dolt-log-hq-20261102.csv.gz")
+		writeCommitArchive(t, gtPath, []string{"gt-1"})
+		writeCommitArchive(t, hqPath, []string{"hq-1"})
+
+		load := archivedHashesLoader(townRoot, []string{"gt", "hq"})
+		if got, err := load("gt"); err != nil || len(got) != 1 {
+			t.Fatalf("gt's archived hashes = %v, %v; want its own one hash", got, err)
+		}
+		// Rewrite both files: a status call that read the archive once must not
+		// see the rewrite, for either database.
+		writeCommitArchive(t, gtPath, []string{"gt-2"})
+		writeCommitArchive(t, hqPath, []string{"hq-2"})
+		if got, err := load("gt"); err != nil || len(got) != 1 {
+			t.Fatalf("gt's second read = %v, %v; want its first reading", got, err)
+		} else if _, ok := got["gt-1"]; !ok {
+			t.Errorf("gt's archived hashes = %v, want gt-1 from the call's one reading", got)
+		}
+		got, err := load("hq")
+		if err != nil || len(got) != 1 {
+			t.Fatalf("hq's archived hashes = %v, %v; want its own one hash", got, err)
+		}
+		if _, ok := got["hq-1"]; !ok {
+			t.Errorf("hq's archived hashes = %v, want hq-1, not the rewritten file", got)
+		}
+		// A new status call is a new reading.
+		fresh := archivedHashesLoader(townRoot, []string{"gt"})
+		if got, err := fresh("gt"); err != nil || len(got) != 1 {
+			t.Fatalf("next status call's read = %v, %v", got, err)
+		} else if _, ok := got["gt-2"]; !ok {
+			t.Errorf("next status call's archived hashes = %v, want the rewritten gt-2", got)
+		}
+	})
+
+	t.Run("the no-watermark events count issues no full COUNT", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+		server := &archiveCountServer{}
+		reader := doltArchiveReader{config: &doltserver.Config{}, openDB: archiveCountOpener(t, server)}
+		wm := daemon.EventsArchiveWatermark{}
+		got, err := reader.eventsBehind(ctx, "gt", wm)
+		if err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		if got != eventsBehindUncounted {
+			t.Errorf("events behind = %d, want %d (rows exist, not counted)", got, eventsBehindUncounted)
+		}
+		if strings.Contains(strings.ToUpper(server.query), "COUNT") {
+			t.Errorf("no-watermark count ran a full count: %s", server.query)
+		}
+		note := eventsArchiveNote(ctx, reader, "gt", wm)
+		if !strings.Contains(note, "at least one event behind") || !strings.Contains(note, "existence check") {
+			t.Errorf("note = %q, want the bounded count labelled as an existence check", note)
+		}
+	})
 }
 
 // newStatusArchiveEngine builds an in-memory go-mysql-server engine with a gt
@@ -755,8 +878,9 @@ func statusEngineIDs(t *testing.T, ctx *gmssql.Context, engine *sqle.Engine, que
 	return ids
 }
 
-// statusEngineCount runs a one-row COUNT query against the in-process engine.
-func statusEngineCount(t *testing.T, ctx *gmssql.Context, engine *sqle.Engine, query string) int64 {
+// statusEngineRowCount runs query against the in-process engine and returns how
+// many rows it answered with.
+func statusEngineRowCount(t *testing.T, ctx *gmssql.Context, engine *sqle.Engine, query string) int {
 	t.Helper()
 	_, iter, _, err := engine.Query(ctx, query)
 	if err != nil {
@@ -766,12 +890,5 @@ func statusEngineCount(t *testing.T, ctx *gmssql.Context, engine *sqle.Engine, q
 	if err != nil {
 		t.Fatalf("reading rows for %q: %v", query, err)
 	}
-	if len(rows) != 1 || len(rows[0]) != 1 {
-		t.Fatalf("count query returned %v, want one row and one value", rows)
-	}
-	count, ok := rows[0][0].(int64)
-	if !ok {
-		t.Fatalf("count is %T, want int64: %v", rows[0][0], rows[0][0])
-	}
-	return count
+	return len(rows)
 }
