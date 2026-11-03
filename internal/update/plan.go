@@ -2,6 +2,7 @@ package update
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -17,9 +18,11 @@ type Probes interface {
 	ImagePublished(ctx context.Context, sha string) (bool, error)
 }
 
-// PlanOptions narrows the plan: Only keeps the named steps, Skip drops the
-// named step and the steps that follow it, and Force plans an install even when
-// nothing changed.
+// PlanOptions narrows the plan. Only, when it has at least one true-valued
+// entry, keeps just the named steps. Skip drops each named step along with the
+// steps that depend on it: skipping install also drops drain, restart, verify
+// and lift, and skipping drain also drops lift. Force plans an install even
+// when the installed build equals main and that image is published.
 type PlanOptions struct {
 	Skip  map[StepName]bool
 	Only  map[StepName]bool
@@ -28,7 +31,8 @@ type PlanOptions struct {
 
 // BuildPlan decides which update steps have work and returns them in run order
 // with a reason for each, alongside the build the run targets. It does no I/O:
-// every fact comes from p.
+// every fact comes from p. A probe that fails, or that reports a blank sha,
+// fails the plan with that probe named.
 func BuildPlan(ctx context.Context, p Probes, o PlanOptions) ([]StepRecord, Target, error) {
 	var target Target
 
@@ -36,9 +40,15 @@ func BuildPlan(ctx context.Context, p Probes, o PlanOptions) ([]StepRecord, Targ
 	if err != nil {
 		return nil, target, fmt.Errorf("InstalledSHA: %w", err)
 	}
+	if strings.TrimSpace(installed) == "" {
+		return nil, target, errors.New("InstalledSHA: the probe returned an empty sha")
+	}
 	mainSHA, err := p.MainSHA(ctx)
 	if err != nil {
 		return nil, target, fmt.Errorf("MainSHA: %w", err)
+	}
+	if strings.TrimSpace(mainSHA) == "" {
+		return nil, target, errors.New("MainSHA: the probe returned an empty sha")
 	}
 	target = Target{SHA: mainSHA, InstalledSHA: installed}
 
@@ -116,16 +126,16 @@ func planMaintenance(commits, events int, backup, gcDue bool, gcReason string) (
 	return true, strings.Join(reasons, "; ")
 }
 
-// applySelection applies Only and Skip after the probe decisions. A step that
-// follows a skipped step is skipped too, so the plan keeps drain, restart,
-// verify and lift mirroring install and lift mirroring drain.
+// applySelection applies Only and Skip after the probe decisions. Both maps
+// count only true-valued entries. Skip drops each step that depends on a
+// skipped one: install brings drain, restart, verify and lift with it, and
+// drain brings lift, so skipping install drops all five and skipping drain
+// drops lift while install stays planned. A step turned off by a selection
+// reason names the flag that turned it off.
 func applySelection(steps []StepRecord, o PlanOptions) {
-	skip := make(map[StepName]bool, len(o.Skip))
-	for name, on := range o.Skip {
-		if on {
-			skip[name] = true
-		}
-	}
+	skip := trueValued(o.Skip)
+	only := trueValued(o.Only)
+
 	if skip[StepInstall] {
 		skip[StepDrain] = true
 		skip[StepRestart] = true
@@ -137,7 +147,7 @@ func applySelection(steps []StepRecord, o PlanOptions) {
 
 	for i := range steps {
 		switch {
-		case len(o.Only) > 0 && !o.Only[steps[i].Name]:
+		case len(only) > 0 && !only[steps[i].Name]:
 			steps[i].WillRun = false
 			steps[i].Reason = "not selected by --only"
 		case skip[steps[i].Name]:
@@ -145,6 +155,17 @@ func applySelection(steps []StepRecord, o PlanOptions) {
 			steps[i].Reason = "skipped by --skip"
 		}
 	}
+}
+
+// trueValued returns the entries of m that are set to true.
+func trueValued(m map[StepName]bool) map[StepName]bool {
+	set := make(map[StepName]bool, len(m))
+	for name, on := range m {
+		if on {
+			set[name] = true
+		}
+	}
+	return set
 }
 
 // shortSHA is the first eight characters of a sha, or the whole sha when it is

@@ -204,6 +204,7 @@ func TestPlanMaintenanceReasons(t *testing.T) {
 		name         string
 		configure    func(*fakeProbes)
 		wantContains string
+		wantExact    string
 		wantNot      []string
 	}{
 		{
@@ -230,6 +231,13 @@ func TestPlanMaintenanceReasons(t *testing.T) {
 			wantContains: "gc",
 			wantNot:      []string{"archive", "backup"},
 		},
+		{
+			name:         "gc due without a reason",
+			configure:    func(p *fakeProbes) { p.gcDue = true },
+			wantContains: "a gc is due",
+			wantExact:    "a gc is due",
+			wantNot:      []string{"archive", "backup"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -243,6 +251,9 @@ func TestPlanMaintenanceReasons(t *testing.T) {
 			}
 			if !strings.Contains(maintenance.Reason, tc.wantContains) {
 				t.Errorf("maintenance reason %q does not name %q", maintenance.Reason, tc.wantContains)
+			}
+			if tc.wantExact != "" && maintenance.Reason != tc.wantExact {
+				t.Errorf("maintenance reason = %q, want %q", maintenance.Reason, tc.wantExact)
 			}
 			for _, other := range tc.wantNot {
 				if strings.Contains(maintenance.Reason, other) {
@@ -265,6 +276,24 @@ func TestPlanOnlyAndSkip(t *testing.T) {
 		t.Parallel()
 		steps := planFor(t, moved(), PlanOptions{Only: map[StepName]bool{StepMaintenance: true}})
 		for _, name := range []StepName{StepDrain, StepInstall, StepRestart, StepVerify, StepLift} {
+			s := stepNamed(t, steps, name)
+			if s.WillRun {
+				t.Errorf("%s WillRun = true, want false", name)
+			}
+			if s.Reason != "not selected by --only" {
+				t.Errorf("%s reason = %q, want %q", name, s.Reason, "not selected by --only")
+			}
+		}
+	})
+
+	t.Run("only install", func(t *testing.T) {
+		t.Parallel()
+		steps := planFor(t, moved(), PlanOptions{Only: map[StepName]bool{StepInstall: true}})
+		// Only keeps exactly the named steps; the install chain is not implied.
+		if install := stepNamed(t, steps, StepInstall); !install.WillRun {
+			t.Errorf("install WillRun = false, want true")
+		}
+		for _, name := range []StepName{StepDrain, StepMaintenance, StepRestart, StepVerify, StepLift} {
 			s := stepNamed(t, steps, name)
 			if s.WillRun {
 				t.Errorf("%s WillRun = true, want false", name)
@@ -303,10 +332,79 @@ func TestPlanOnlyAndSkip(t *testing.T) {
 		if install := stepNamed(t, steps, StepInstall); !install.WillRun {
 			t.Errorf("install WillRun = false, want true")
 		}
-		if lift := stepNamed(t, steps, StepLift); lift.WillRun {
+		lift := stepNamed(t, steps, StepLift)
+		if lift.WillRun {
 			t.Errorf("lift WillRun = true, want false when its drain is skipped")
 		}
+		if lift.Reason != "skipped by --skip" {
+			t.Errorf("lift reason = %q, want %q", lift.Reason, "skipped by --skip")
+		}
 	})
+}
+
+func TestPlanOnlyFalseValueIgnored(t *testing.T) {
+	t.Parallel()
+	// A false entry selects nothing, so it must not turn on the Only filter.
+	p := &fakeProbes{installed: "11111111aaaa", main: "22222222bbbb", published: true, backup: true}
+
+	steps := planFor(t, p, PlanOptions{Only: map[StepName]bool{StepInstall: false}})
+	for _, name := range []StepName{StepDrain, StepInstall, StepRestart, StepVerify, StepLift} {
+		if s := stepNamed(t, steps, name); !s.WillRun {
+			t.Errorf("%s WillRun = false, want true: a false Only entry selects nothing", name)
+		}
+	}
+	maintenance := stepNamed(t, steps, StepMaintenance)
+	if maintenance.WillRun {
+		t.Errorf("maintenance WillRun = true, want false (nothing is due)")
+	}
+	if maintenance.Reason != "nothing is due" {
+		t.Errorf("maintenance reason = %q, want %q", maintenance.Reason, "nothing is due")
+	}
+}
+
+func TestPlanEmptyShaIsAnError(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		probes *fakeProbes
+		want   string
+	}{
+		{
+			name:   "installed empty",
+			probes: &fakeProbes{installed: "", main: "abc123", published: true, backup: true},
+			want:   "InstalledSHA",
+		},
+		{
+			name:   "installed blank",
+			probes: &fakeProbes{installed: "   ", main: "abc123", published: true, backup: true},
+			want:   "InstalledSHA",
+		},
+		{
+			name:   "main empty",
+			probes: &fakeProbes{installed: "abc123", main: "", published: true, backup: true},
+			want:   "MainSHA",
+		},
+		{
+			name:   "both empty",
+			probes: &fakeProbes{installed: "", main: "", published: true, backup: true},
+			want:   "empty sha",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			steps, _, err := BuildPlan(context.Background(), tc.probes, PlanOptions{})
+			if err == nil {
+				t.Fatalf("BuildPlan error = nil, want an error naming %q", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to name %q", err, tc.want)
+			}
+			if steps != nil {
+				t.Errorf("steps = %v, want nil on error", steps)
+			}
+		})
+	}
 }
 
 func TestPlanProbeErrorNamesTheProbe(t *testing.T) {
