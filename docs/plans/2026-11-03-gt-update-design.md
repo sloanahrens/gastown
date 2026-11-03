@@ -1,4 +1,4 @@
-> Status: design, agreed with the operator on 2026-11-03 (super-plan, six sections approved one by one). Nothing here is built except the archive limits (gt-s6srv). Written by the overseer.
+> Status: historical (2026-11). Merged in: gt-2tgau (design only; the six sections were approved by the operator on 2026-11-03, and nothing is built except the archive limits, gt-s6srv). Not maintained.
 
 # gt update: one job for install, image and maintenance
 
@@ -35,21 +35,21 @@ The daemon keeps one small job, the update trigger: decide when an update is due
 
 Files under `.runtime/update/`: `state.json` (rewritten atomically at every step), `run-<id>.log`, `history.jsonl` (one line per run), `maintenance-request` (version 1 only), `lock`.
 
-The job sets `~/gt/seat-refill.hold` with a note ("gt update <run id>: draining") and removes it only if it created it. A hold set by hand is never cleared by the job.
+The job owns the hold only if it created the file: it sets `~/gt/seat-refill.hold` with a note ("gt update <run id>: draining") when none exists, and releases that file on every exit path. A hold already present when the job starts is never released by it.
 
 ### 2. The steps
 
 Each step decides for itself whether it has work. The plan, with a reason per step, is printed first; `--dry-run` stops there.
 
 1. Plan: take the lock; compare the installed build with main; check whether the archive is behind, whether today's backup exists, whether a gc is due by the existing rules.
-2. Drain, only if an install is planned: set the hold with a note; wait up to 30 minutes for working polecats to finish; a polecat silent and idle for 5 minutes counts as drained; a working polecat is never killed; if a seat is still working at the end, abort, lift the hold and name the seat.
-3. Maintenance (archive, backup, gc) runs beside work with no drain. Version 1 requests one daemon maintenance cycle through `maintenance-request`, logs the cycle's stage lines and waits for completion; if nothing is due it skips the request.
+2. Drain, only if an install is planned: set the hold with a note if none exists; wait up to 30 minutes for working polecats to finish; a polecat silent and idle for 5 minutes counts as drained; a working polecat is never killed; if a seat is still working at the end, abort, release the hold if the job owns it, and name the seat.
+3. Maintenance (archive, backup, gc) runs beside work with no drain. When an install is planned, the hold step 2 leaves in place is present here, so this step depends on the hold decoupling track (§5, gt-5cl4i): until the sweep and the maintenance gc stop reading the hold file, the hold cancels the cycle the job requests. Version 1 requests one daemon maintenance cycle through `maintenance-request`, logs the cycle's stage lines and waits for completion; if nothing is due it skips the request.
 4. Build, image, install: delegate to `cmd/gt-installer`; skip when the installed build equals main and the image is present and published.
-5. Wait up to 15 minutes for the daemon's self-restart. On timeout the new binary is still installed: lift the hold, record "installed, restart pending", escalate.
+5. Wait up to 15 minutes for the daemon's self-restart. On timeout the new binary is still installed: release the hold if the job owns it, record "installed, restart pending", escalate.
 6. Verify: `gt version`, the daemon's reported version, the image tag, town health.
-7. Lift the hold, only if the job set it.
+7. Release the hold if the job owns it.
 
-Failure rules: a failed maintenance stage does not block the install (the run ends "partial" with an escalation); a failed install aborts and the town keeps running on the old binary; the hold is always lifted on exit, including Ctrl-C and SIGTERM; a job killed outright is caught by the stale heartbeat and the hold's note names the run. Re-running after a crash replans, because finished steps skip themselves; the state file is a record, not a resume script. Flags for debugging only: `--dry-run`, `--skip <step>`, `--only <step>`.
+Failure rules: a failed maintenance stage does not block the install (the run ends "partial" with an escalation); a failed install aborts and the town keeps running on the old binary; the hold-release rule in §1 covers Ctrl-C and SIGTERM; a job killed outright is caught by the stale heartbeat and the hold's note names the run. Re-running after a crash replans, because finished steps skip themselves; the state file is a record, not a resume script. Flags for debugging only: `--dry-run`, `--skip <step>`, `--only <step>`.
 
 ### 3. State, dashboard, stuck-job detection
 
@@ -88,7 +88,7 @@ Tests: `gt update` lives in its own package with the clock, files, commands, the
 
 Rollout: ships disabled; two clean hand runs; then `enabled: true`. Rollback: `enabled: false`.
 
-Risks: in version 1 the maintenance still lives in the daemon. The daemon's idle restart waits on hard holds, so the 15-minute wait can time out under heavy landings (handled as "installed, restart pending"). A hold that already exists when the job starts is respected and never lifted by it. The archive loop and squash timings are unmeasured. "Image published" depends on the registry setting being present.
+Risks: in version 1 the maintenance still lives in the daemon. The daemon's idle restart waits on hard holds, so the 15-minute wait can time out under heavy landings (handled as "installed, restart pending"). A hold that already exists when the job starts is governed by the ownership rule in §1. The archive loop and squash timings are unmeasured. "Image published" depends on the registry setting being present.
 
 Out of scope: the Ring, Dolt in Kubernetes, the cluster-runner backends, the gate-runner and Forgejo moves, the tracker flip.
 
