@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -368,12 +369,10 @@ func TestCheckUpdateAlertsMissingOrUnreadableState(t *testing.T) {
 	})
 }
 
-func TestCheckUpdateAlertsRetriesRefusedRaiseAndClear(t *testing.T) {
-	t.Parallel()
-
-	now := updateAlertTestNow
-	d, rec, logs := newUpdateAlertTestDaemon(t)
-	stale := update.State{
+// staleUpdateAlertState is a running record whose heartbeat is four minutes
+// old: the condition update:stale announces.
+func staleUpdateAlertState(now time.Time) update.State {
+	return update.State{
 		RunID:       "20260310T115000Z-abcd",
 		Source:      update.SourceManual,
 		Outcome:     update.OutcomeRunning,
@@ -381,42 +380,78 @@ func TestCheckUpdateAlertsRetriesRefusedRaiseAndClear(t *testing.T) {
 		HeartbeatAt: now.Add(-4 * time.Minute),
 		Current:     update.StepDrain,
 	}
-	writeUpdateAlertState(t, d, stale)
+}
+
+// A raise the notifier refuses is unlatched but not retried on every
+// heartbeat: one key waits updateAlertRetryInterval before its next attempt, so
+// a notifier that is down cannot spend its retry wait on each heartbeat.
+func TestUpdateAlertsRetryBacksOffPerKey(t *testing.T) {
+	t.Parallel()
+
+	now := updateAlertTestNow
+	d, rec, logs := newUpdateAlertTestDaemon(t)
+	writeUpdateAlertState(t, d, staleUpdateAlertState(now))
 
 	// The escalation helper backs off on the daemon's clock, so a refused
 	// raise is driven rather than waited out.
 	clk := newFixedClock()
 	d.clock = clk
 
-	// A raise the notifier refuses is not latched: the next heartbeat has to
-	// try again, or the alert is lost.
 	rec.Fail(notifyfake.KindEscalate, errors.New("escalate refused"))
 	runOnClock(t, clk, time.Second, func() { d.checkUpdateAlerts(now) })
-	runOnClock(t, clk, time.Second, func() { d.checkUpdateAlerts(now) })
+	firstAttempts := len(escalationsUnder(rec, updateAlertKeyStale))
+	if firstAttempts == 0 {
+		t.Fatal("no escalation was attempted for a stale run")
+	}
 	for _, call := range escalationsUnder(rec, updateAlertKeyStale) {
 		if call.Err == nil {
 			t.Fatalf("an escalation was delivered while the notifier refused every send")
 		}
 	}
-	if got := len(escalationsUnder(rec, updateAlertKeyStale)); got != 2*maxEscalationRetries {
-		t.Fatalf("escalation attempts = %d, want two heartbeats of retries (%d)", got, 2*maxEscalationRetries)
+	if d.updateAlerts.isRaised(updateAlertKeyStale) {
+		t.Error("the key was latched by a raise the notifier refused")
+	}
+
+	// Inside the window the heartbeat does not spend another attempt. Driven
+	// on the fake clock like the other passes, so a regression that retries
+	// here completes and the count below fails it rather than hanging.
+	runOnClock(t, clk, time.Second, func() {
+		d.checkUpdateAlerts(now.Add(updateAlertRetryInterval - time.Second))
+	})
+	if got := len(escalationsUnder(rec, updateAlertKeyStale)); got != firstAttempts {
+		t.Errorf("escalation attempts = %d inside the backoff window, want still %d", got, firstAttempts)
+	}
+
+	// At the window's end the key is tried again, and a second refusal still
+	// does not latch it.
+	runOnClock(t, clk, time.Second, func() {
+		d.checkUpdateAlerts(now.Add(updateAlertRetryInterval))
+	})
+	if got := len(escalationsUnder(rec, updateAlertKeyStale)); got <= firstAttempts {
+		t.Errorf("escalation attempts = %d after the backoff window, want a retry past %d", got, firstAttempts)
+	}
+	if d.updateAlerts.isRaised(updateAlertKeyStale) {
+		t.Error("the key was latched by the retried raise the notifier refused")
 	}
 	if !strings.Contains(logs.String(), "cannot raise update:stale") {
 		t.Errorf("log = %q, want the refused raise recorded", logs.String())
 	}
+}
 
-	rec.Fail(notifyfake.KindEscalate, nil)
+// A clear the notifier refuses leaves the key latched, so the next heartbeat
+// tries again instead of reporting a closed alert as done.
+func TestUpdateAlertsRefusedClearStaysLatched(t *testing.T) {
+	t.Parallel()
+
+	now := updateAlertTestNow
+	d, rec, _ := newUpdateAlertTestDaemon(t)
+	stale := staleUpdateAlertState(now)
+	writeUpdateAlertState(t, d, stale)
 	d.checkUpdateAlerts(now)
-	if got := delivered(escalationsUnder(rec, updateAlertKeyStale)); got != 1 {
-		t.Fatalf("delivered escalations = %d, want exactly one once the notifier recovers", got)
-	}
-	d.checkUpdateAlerts(now)
-	if got := delivered(escalationsUnder(rec, updateAlertKeyStale)); got != 1 {
-		t.Errorf("delivered escalations = %d after recovery, want the raise latched", got)
+	if !d.updateAlerts.isRaised(updateAlertKeyStale) {
+		t.Fatal("the stale raise was not latched before the clear")
 	}
 
-	// A clear the notifier refuses leaves the key latched, so the next
-	// heartbeat tries again instead of reporting a closed alert as done.
 	stale.HeartbeatAt = now
 	writeUpdateAlertState(t, d, stale)
 	rec.Fail(notifyfake.KindClear, errors.New("clear refused"))
@@ -424,11 +459,119 @@ func TestCheckUpdateAlertsRetriesRefusedRaiseAndClear(t *testing.T) {
 	if got := delivered(clearsOf(rec, updateAlertKeyStale)); got != 0 {
 		t.Fatalf("clears delivered = %d while the notifier refused them", got)
 	}
+	if !d.updateAlerts.isRaised(updateAlertKeyStale) {
+		t.Error("the key was unlatched by a clear the notifier refused")
+	}
+
 	rec.Fail(notifyfake.KindClear, nil)
 	d.checkUpdateAlerts(now)
 	if got := delivered(clearsOf(rec, updateAlertKeyStale)); got != 1 {
 		t.Errorf("clears delivered = %d, want exactly one once the notifier recovers", got)
 	}
+	if d.updateAlerts.isRaised(updateAlertKeyStale) {
+		t.Error("the key stayed latched after the clear was delivered")
+	}
+}
+
+// A running record that is missing the timestamp its rule measures is still
+// judged by that rule: no heartbeat proves no liveness, and no start time
+// leaves the run unbounded.
+func TestUpdateAlertsMalformedRecord(t *testing.T) {
+	t.Parallel()
+
+	now := updateAlertTestNow
+	tests := []struct {
+		name string
+		st   update.State
+		key  string
+	}{
+		{
+			"a running record with no heartbeat is stale",
+			update.State{
+				RunID:     "20260310T115000Z-abcd",
+				Source:    update.SourceManual,
+				Outcome:   update.OutcomeRunning,
+				StartedAt: now.Add(-time.Minute),
+				Current:   update.StepDrain,
+			},
+			updateAlertKeyStale,
+		},
+		{
+			"a running record with no start time is an overrun",
+			update.State{
+				RunID:       "20260310T115000Z-abcd",
+				Source:      update.SourceManual,
+				Outcome:     update.OutcomeRunning,
+				HeartbeatAt: now,
+				Current:     update.StepDrain,
+			},
+			updateAlertKeyOverrun,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if findUpdateAlert(updateAlertsFor(now, tt.st, 2*time.Hour), tt.key) == nil {
+				t.Fatalf("updateAlertsFor(%+v) did not raise %s for a malformed record", tt.st, tt.key)
+			}
+		})
+	}
+}
+
+// The check is its own non-lifecycle heartbeat step, so a dead or runaway job
+// still raises while the town is E-stopped or Ringed. Making it a lifecycle
+// step would let the trigger's step membership silence it exactly then.
+func TestUpdateAlertsRunUnderEstopAndTheRing(t *testing.T) {
+	t.Parallel()
+
+	now := updateAlertTestNow
+	for _, cond := range standbyConditions {
+		t.Run(cond.name, func(t *testing.T) {
+			t.Parallel()
+			d, rec, _ := newUpdateAlertTestDaemon(t)
+			d.clock = clockwork.NewFakeClockAt(now)
+			writeUpdateAlertState(t, d, staleUpdateAlertState(now))
+			cond.set(t, d, now)
+
+			var ran []string
+			d.seams.heartbeatStep = func(d *Daemon, step heartbeatStep) {
+				ran = append(ran, step.name)
+				if step.name == "update-alerts" {
+					step.run(d)
+				}
+			}
+			d.heartbeat(&State{})
+
+			if !slices.Contains(ran, "update-alerts") {
+				t.Fatalf("steps run under %s = %v, want update-alerts among them", cond.name, ran)
+			}
+			if slices.Contains(ran, "update") {
+				t.Errorf("the update trigger ran under %s, want it held as a lifecycle step", cond.name)
+			}
+			if got := escalationsUnder(rec, updateAlertKeyStale); len(got) != 1 {
+				t.Fatalf("update:stale escalations = %d under %s, want the alert raised", len(got), cond.name)
+			}
+		})
+	}
+
+	t.Run("the alerts are upkeep and the trigger stays lifecycle", func(t *testing.T) {
+		t.Parallel()
+		var alerts, trigger *heartbeatStep
+		for i := range heartbeatSteps {
+			switch heartbeatSteps[i].name {
+			case "update-alerts":
+				alerts = &heartbeatSteps[i]
+			case "update":
+				trigger = &heartbeatSteps[i]
+			}
+		}
+		if alerts == nil || alerts.lifecycle {
+			t.Fatalf("update-alerts step = %+v, want a non-lifecycle step", alerts)
+		}
+		if trigger == nil || !trigger.lifecycle {
+			t.Fatalf("update step = %+v, want a lifecycle step", trigger)
+		}
+	})
 }
 
 // delivered counts the calls whose send succeeded.

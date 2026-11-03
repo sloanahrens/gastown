@@ -374,9 +374,9 @@ type UpdateFacts struct{ Standby string; Running bool; InstallPending bool; Main
 
 ### B14: stale and overrun alerts, attention item
 
-**Depends on:** B13. **Risk path:** yes. **Size:** S. **Files:** internal/daemon/update_alerts.go, tests.
-**Goal.** Each heartbeat the daemon reads state.json, even when the trigger is off: outcome "running" with a heartbeat older than 3 minutes raises one escalation `update:stale` naming the run id, its source, the current step, the heartbeat age and the hold note, and saying to remove the hold and read the run log; a run older than `max_runtime` raises `update:overrun`; both clear (reason "update job heartbeat resumed or run ended") when the state ends or the heartbeat resumes. A run that ended failed, partial or aborted within the last two hours raises `update:last-run-failed` naming each failed or deferred step and its detail; an ok or interrupted run raises nothing, and an older failure is not re-announced after a daemon restart. A missing state file is not an alert; another read error is logged once and raises nothing. An in-memory latch per key raises an unchanged condition once per daemon run. Use the same alert helper pattern as `rebuildGTAlert` in internal/daemon/rebuild_gt.go.
-**Constraints.** The daemon never writes state.json. The trigger calls the check before its enabled check, so alerts run with the feature off.
+**Depends on:** B13. **Risk path:** yes. **Size:** S. **Files:** internal/daemon/update_alerts.go, daemon.go (one step in heartbeatSteps), tests.
+**Goal.** Each heartbeat the daemon reads state.json, even when the trigger is off: outcome "running" with a heartbeat older than 3 minutes raises one escalation `update:stale` naming the run id, its source, the current step, the heartbeat age and the hold note, and saying to remove the hold and read the run log; a run older than `max_runtime` raises `update:overrun`; both clear (reason "update job heartbeat resumed or run ended") when the state ends or the heartbeat resumes. A run that ended failed, partial or aborted within the last two hours raises `update:last-run-failed` naming each failed or deferred step and its detail; an ok or interrupted run raises nothing, and an older failure is not re-announced after a daemon restart. A missing state file is not an alert; another read error is logged once and raises nothing. An in-memory latch per key raises an unchanged condition once per daemon run, and a refused raise waits 5 minutes per key before its next attempt so a down notifier cannot spend its retry wait on every heartbeat. Use the same alert helper pattern as `rebuildGTAlert` in internal/daemon/rebuild_gt.go.
+**Constraints.** The daemon never writes state.json. The check is its own non-lifecycle heartbeat step (`{name: "update-alerts"}`), so a dead job alerts under the town ESTOP and a waned Ring, exactly when dispatch is held; the trigger stays a lifecycle step gated on `enabled`.
 **Out of scope.** The dashboard.
 **Gate.** `go test ./internal/daemon -run 'UpdateAlert' -count=1`.
 **Acceptance.**
@@ -385,6 +385,9 @@ type UpdateFacts struct{ Standby string; Running bool; InstallPending bool; Main
 - [ ] TestUpdateAlertsEndedRun
 - [ ] TestCheckUpdateAlertsRaisesOnceClearsAndRunsWithTheFeatureOff
 - [ ] TestCheckUpdateAlertsMissingOrUnreadableState
+- [ ] TestUpdateAlertsMalformedRecord
+- [ ] TestUpdateAlertsRetryBacksOffPerKey
+- [ ] TestUpdateAlertsRunUnderEstopAndTheRing
 
 ### B15: dashboard feed section
 

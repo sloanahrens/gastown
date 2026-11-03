@@ -2245,6 +2245,14 @@ var heartbeatSteps = []heartbeatStep{
 	// the daemon restart, which the town E-stop holds.
 	{name: "rebuild-gt", lifecycle: true, run: (*Daemon).triggerRebuildGT},
 
+	// Read the update job's state and raise or clear its stale, overrun and
+	// last-run-failed alerts (gt-o4sk8.15). Non-lifecycle: it only reads and
+	// alerts, never dispatches or restarts, and a job that died is exactly
+	// what the operator needs to see while the town is E-stopped or Ringed.
+	{name: "update-alerts", run: func(d *Daemon) {
+		d.checkUpdateAlerts(d.clk().Now())
+	}},
+
 	// Decide whether `gt update` is due and launch it detached when it is
 	// (gt-o4sk8.14). Off until daemon.patrols.update.enabled is set, so this
 	// changes nothing by default. lifecycle: the job it launches installs a

@@ -34,6 +34,13 @@ const (
 	// the daemon to announce it. A daemon restarted the next day must not
 	// re-announce a failure the operator already saw.
 	updateEndedAlertWindow = 2 * time.Hour
+
+	// updateAlertRetryInterval is how long one key waits after a refused raise
+	// before the daemon tries it again. A raise can spend minutes retrying a
+	// notifier that is down, so a per-heartbeat retry would put that wait on
+	// every heartbeat; one attempt every five minutes is fast enough for the
+	// operator and cheap for the heartbeat.
+	updateAlertRetryInterval = 5 * time.Minute
 )
 
 // updateAlert is one condition the update job's state calls for: the key that
@@ -190,19 +197,21 @@ func formatUpdateAge(d time.Duration) string {
 
 // checkUpdateAlerts runs on every heartbeat, whether or not the update trigger
 // is enabled: a hand-started run can die too, and nothing else would say so.
-// The daemon only reads the job's state; it never writes it.
+// It is its own non-lifecycle heartbeat step, so the town ESTOP and a waned
+// Ring do not silence it. The daemon only reads the job's state; it never
+// writes it.
 func (d *Daemon) checkUpdateAlerts(now time.Time) {
 	store := update.Store{Dir: update.Dir(d.config.TownRoot)}
 	st, err := store.Read()
 	switch {
 	case err == nil:
 		d.updateAlerts.forgetReadError()
-		d.applyUpdateAlerts(updateAlertsFor(now, st, d.updateAlertMaxRuntime()))
+		d.applyUpdateAlerts(updateAlertsFor(now, st, d.updateAlertMaxRuntime()), now)
 	case errors.Is(err, update.ErrNoState):
 		// No run has written state, so there is no running job to watch:
 		// whatever was open has ended.
 		d.updateAlerts.forgetReadError()
-		d.applyUpdateAlerts(nil)
+		d.applyUpdateAlerts(nil, now)
 	default:
 		// An unreadable state is unknown, not ended: keep whatever is open
 		// and raise nothing this heartbeat. Log it once per distinct message.
@@ -213,18 +222,21 @@ func (d *Daemon) checkUpdateAlerts(now time.Time) {
 }
 
 // applyUpdateAlerts raises the wanted alerts this daemon run has not raised
-// yet and clears the latched keys no longer wanted. A raise or clear the
-// notifier refused is left unrecorded, so the next heartbeat tries again
-// rather than treating a silence as an open alert.
-func (d *Daemon) applyUpdateAlerts(wanted []updateAlert) {
+// yet and clears the latched keys no longer wanted. A raise the notifier
+// refused is left unrecorded and is retried only after updateAlertRetryInterval
+// for that key, so a notifier that is down cannot spend its retry wait on every
+// heartbeat. A refused clear stays latched, so the next heartbeat tries it
+// again rather than reporting a closed alert as done.
+func (d *Daemon) applyUpdateAlerts(wanted []updateAlert, now time.Time) {
 	want := make(map[string]bool, len(wanted))
 	for _, alert := range wanted {
 		want[alert.Key] = true
-		if d.updateAlerts.isRaised(alert.Key) {
+		if d.updateAlerts.isRaised(alert.Key) || !d.updateAlerts.retryAllowed(alert.Key, now) {
 			continue
 		}
 		if err := d.escalateAlertSeverity("MEDIUM", alert.Key, updateAlertSource, alert.Message); err != nil {
-			d.logger.Printf("update: cannot raise %s: %v", alert.Key, err)
+			d.updateAlerts.markRaiseFailed(alert.Key, now)
+			d.logger.Printf("update: cannot raise %s: %v; retrying in %s", alert.Key, err, updateAlertRetryInterval)
 			continue
 		}
 		d.updateAlerts.markRaised(alert.Key)
@@ -263,12 +275,16 @@ func (d *Daemon) updateAlertMaxRuntime() time.Duration {
 }
 
 // updateAlertLatch is this daemon run's memory of the update alerts: the keys
-// it has raised and not yet cleared, and the last state-read error it logged.
-// Without it a stale job would file an escalation every heartbeat.
+// it has raised and not yet cleared, when each refused raise last ran, and the
+// last state-read error it logged. Without it a stale job would file an
+// escalation every heartbeat.
 type updateAlertLatch struct {
 	mu sync.Mutex
 	// raised holds the keys raised and not yet cleared.
 	raised map[string]bool
+	// failedAt holds, per key, when its last raise was refused. It is not a
+	// latch: only the wait until the next attempt is recorded.
+	failedAt map[string]time.Time
 	// readErr is the last state-read error logged; an unchanged error logs
 	// once, not once per heartbeat.
 	readErr string
@@ -289,6 +305,28 @@ func (l *updateAlertLatch) markRaised(key string) {
 		l.raised = map[string]bool{}
 	}
 	l.raised[key] = true
+	delete(l.failedAt, key)
+}
+
+// markRaiseFailed records that key's raise was refused at now, so the next
+// attempt waits updateAlertRetryInterval. The key stays unlatched: a refusal is
+// not a delivery.
+func (l *updateAlertLatch) markRaiseFailed(key string, now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.failedAt == nil {
+		l.failedAt = map[string]time.Time{}
+	}
+	l.failedAt[key] = now
+}
+
+// retryAllowed reports whether key's last refused raise has waited out
+// updateAlertRetryInterval. A key never refused is always allowed.
+func (l *updateAlertLatch) retryAllowed(key string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	last, ok := l.failedAt[key]
+	return !ok || now.Sub(last) >= updateAlertRetryInterval
 }
 
 // markCleared records that key's escalation was cleared.
@@ -296,6 +334,7 @@ func (l *updateAlertLatch) markCleared(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.raised, key)
+	delete(l.failedAt, key)
 }
 
 // openKeys returns the raised keys in sorted order, so a pass that clears
