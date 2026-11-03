@@ -309,6 +309,12 @@ func encodeArchiveCell(v sql.NullString) string {
 // to the archive. One export failing keeps its watermark and is named in the
 // log; the database's other export and the other databases still export.
 //
+// Each database's two exports keep taking limit-sized batches until a batch
+// comes back short (nothing more is behind), a batch records no progress, a
+// batch fails, or the archive_budget deadline passes (gt-o4sk8.1). Every
+// database still gets one batch of each export, however late the deadline; the
+// deadline only stops extra batches.
+//
 // It returns the databases whose history was not archived this run, and the
 // cycle skips their gc: history is not collected for a database whose archive
 // step did not finish. A configuration or state failure the step cannot
@@ -319,8 +325,8 @@ func encodeArchiveCell(v sql.NullString) string {
 // The step reads beside a live town, but it still asks the gc's quiet-window
 // guard: a busy window is a deferral (the next tick retries, as the gc's own
 // deferrals do), not a failure, and the backup and gc behind it wait with it.
-// A misconfigured directory or batch bound is a failure: it does not stop the
-// backup, and it skips the gc of every database.
+// A misconfigured directory, batch bound or budget is a failure: it does not
+// stop the backup, and it skips the gc of every database.
 func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, map[string]bool) {
 	dir, err := d.maintenanceArchiveDir()
 	if err != nil {
@@ -342,12 +348,25 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 	// A bound the step cannot read is refused before any database is touched,
 	// like a bad directory: the reads would otherwise each fail with the same
 	// error, one per database per export.
-	if _, _, err := d.maintenanceArchiveLimits(); err != nil {
+	commitLimit, eventsLimit, err := d.maintenanceArchiveLimits()
+	if err != nil {
 		d.logger.Printf("scheduled_maintenance: archive: %v — no history archived this run", err)
 		d.maintenance().escalate(d, maintenanceArchiveSource, fmt.Sprintf(
 			"scheduled_maintenance: history archive: %v\nNo database's dolt_log or events was archived this run. "+
 				"Fix the history archive's batch bound in the daemon config; until then a flatten discards history it has not written out.",
 			err))
+		return maintenanceGCResult{outcome: gcOutcomeCompleted}, allUnarchived(databases)
+	}
+	// The budget is refused the same way and in the same place: an unreadable
+	// value would otherwise end every database's loop at once, one error per
+	// database.
+	budget, err := d.maintenanceArchiveBudget()
+	if err != nil {
+		d.logger.Printf("scheduled_maintenance: archive: %v — no history archived this run", err)
+		d.maintenance().escalate(d, maintenanceArchiveSource, fmt.Sprintf(
+			"scheduled_maintenance: history archive: %v\nNo database's dolt_log or events was archived this run. "+
+				"Fix %s in the daemon config; until then a flatten discards history it has not written out.",
+			err, config.MaintenanceArchiveBudgetKey))
 		return maintenanceGCResult{outcome: gcOutcomeCompleted}, allUnarchived(databases)
 	}
 	if quiet, why := d.maintenance().quiet(d); !quiet {
@@ -386,18 +405,32 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 	ctx, cancel := context.WithTimeout(parent, maintenanceArchiveTimeout)
 	defer cancel()
 
+	// One deadline for the whole step: every database's extra batches share the
+	// budget, so one database far behind cannot spend it all before the others
+	// get their first batch.
+	s := d.maintenance()
+	deadline := s.now().Add(budget)
+
 	var failed []string
 	unarchived := map[string]bool{}
 	for _, db := range databases {
-		if err := d.maintenanceArchiveCommits(ctx, dir, db, st.ArchiveWatermarks[db]); err != nil {
-			failed = append(failed, db+" dolt_log: "+err.Error())
+		commitErr := archiveUntilCaughtUp(st.ArchiveWatermarks[db], commitLimit, deadline, s.now, sameCommitWatermark,
+			func(wm ArchiveWatermark) (int, ArchiveWatermark, error) {
+				return d.maintenanceArchiveCommits(ctx, dir, db, wm)
+			})
+		if commitErr != nil {
+			failed = append(failed, db+" dolt_log: "+commitErr.Error())
 			unarchived[db] = true
-			d.logger.Printf("scheduled_maintenance: archive %s dolt_log: FAILED: %v — watermark kept", db, err)
+			d.logger.Printf("scheduled_maintenance: archive %s dolt_log: FAILED: %v — watermark kept", db, commitErr)
 		}
-		if err := d.maintenanceArchiveEvents(ctx, dir, db, st.ArchiveEventsWatermarks[db]); err != nil {
-			failed = append(failed, db+" events: "+err.Error())
+		eventsErr := archiveUntilCaughtUp(st.ArchiveEventsWatermarks[db], eventsLimit, deadline, s.now, sameEventsArchiveWatermark,
+			func(wm EventsArchiveWatermark) (int, EventsArchiveWatermark, error) {
+				return d.maintenanceArchiveEvents(ctx, dir, db, wm)
+			})
+		if eventsErr != nil {
+			failed = append(failed, db+" events: "+eventsErr.Error())
 			unarchived[db] = true
-			d.logger.Printf("scheduled_maintenance: archive %s events: FAILED: %v — watermark kept", db, err)
+			d.logger.Printf("scheduled_maintenance: archive %s events: FAILED: %v — watermark kept", db, eventsErr)
 		}
 	}
 	if len(failed) > 0 {
@@ -478,6 +511,59 @@ func (d *Daemon) maintenanceArchiveLimits() (commit, events int, err error) {
 	return commit, events, nil
 }
 
+// maintenanceArchiveBudget returns the configured time budget for one archive
+// step. An absent config section reads the default, like the batch bounds.
+func (d *Daemon) maintenanceArchiveBudget() (time.Duration, error) {
+	if d.patrolConfig == nil || d.patrolConfig.Patrols == nil {
+		return config.DefaultArchiveBudget, nil
+	}
+	return d.patrolConfig.Patrols.ScheduledMaintenance.ParseArchiveBudget()
+}
+
+// archiveUntilCaughtUp takes batches of one database's export, each starting at
+// the watermark the previous one recorded, until nothing more is behind or the
+// budget ends. It stops when a batch writes fewer rows than the bound (the read
+// had nothing more to give), when a batch records the same watermark it started
+// with (no progress, so another batch would repeat it), when a batch fails, or
+// when now() is at or past deadline. The first batch always runs, even past the
+// deadline, so every database gets its one batch in a cycle; the deadline only
+// stops the extra ones (gt-o4sk8.1). It returns the failing batch's error; the
+// batch itself has already kept the watermark unchanged (gt-7nxj4).
+func archiveUntilCaughtUp[W any](
+	wm W,
+	limit int,
+	deadline time.Time,
+	now func() time.Time,
+	same func(W, W) bool,
+	batch func(W) (int, W, error),
+) error {
+	for {
+		wrote, next, err := batch(wm)
+		if err != nil {
+			return err
+		}
+		if wrote < limit || same(next, wm) {
+			return nil
+		}
+		if !now().Before(deadline) {
+			return nil
+		}
+		wm = next
+	}
+}
+
+// sameCommitWatermark reports whether two commit watermarks record the same
+// position: the same date with the same hashes at it.
+func sameCommitWatermark(a, b ArchiveWatermark) bool {
+	return a.Date.Equal(b.Date) && slices.Equal(a.Hashes, b.Hashes)
+}
+
+// sameEventsArchiveWatermark reports whether two events watermarks record the
+// same position: the same created_at with the same archived ids.
+func sameEventsArchiveWatermark(a, b EventsArchiveWatermark) bool {
+	return a.CreatedAt == b.CreatedAt && slices.Equal(a.Archived, b.Archived)
+}
+
 // maintenanceArchiveCommits exports one database's unarchived commits and then
 // advances the commit watermark. The commits selected are the dolt_log hashes
 // no archive file holds — the same set the pre-flatten check compares against —
@@ -485,51 +571,55 @@ func (d *Daemon) maintenanceArchiveLimits() (commit, events int, err error) {
 // than counted as behind forever. The file and the watermark move as one unit:
 // a failure after the file is written rolls the appended members back, so the
 // next run re-exports them instead of appending them twice.
-func (d *Daemon) maintenanceArchiveCommits(ctx context.Context, dir, db string, wm ArchiveWatermark) error {
+//
+// It returns how many fresh commits it wrote and the watermark it recorded, or
+// wm unchanged when there was nothing new; the caller loops on both. On a
+// failure it returns wm, because the rollback leaves the archive where it was.
+func (d *Daemon) maintenanceArchiveCommits(ctx context.Context, dir, db string, wm ArchiveWatermark) (wrote int, next ArchiveWatermark, err error) {
 	if err := validMaintenanceDBName(db); err != nil {
-		return err
+		return 0, wm, err
 	}
 	if err := wm.Validate(); err != nil {
-		return err
+		return 0, wm, err
 	}
 	archived, err := LoadArchivedCommitHashes(dir, db)
 	if err != nil {
 		// Without the set the export cannot tell an archived commit from a new
 		// one; reading it as empty would write the whole log out again.
-		return fmt.Errorf("reading the archived commit hashes: %w", err)
+		return 0, wm, fmt.Errorf("reading the archived commit hashes: %w", err)
 	}
 	s := d.maintenance()
 	commits, err := s.archiveRead(ctx, d, db, archived)
 	if err != nil {
-		return fmt.Errorf("reading dolt_log: %w", err)
+		return 0, wm, fmt.Errorf("reading dolt_log: %w", err)
 	}
 	if len(commits) == 0 {
-		return nil // nothing new: no file, and the watermark stays put
+		return 0, wm, nil // nothing new: no file, and the watermark stays put
 	}
-	next, err := archiveWatermarkAfter(wm, commits)
+	next, err = archiveWatermarkAfter(wm, commits)
 	if err != nil {
-		return err
+		return 0, wm, err
 	}
 
 	path := filepath.Join(dir, archiveFileName("dolt-log", db, s.now()))
 	exp, err := beginArchiveExport(path)
 	if err != nil {
-		return err
+		return 0, wm, err
 	}
 	rows := make([][]string, 0, len(commits))
 	for _, c := range commits {
 		rows = append(rows, []string{c.Hash, c.Committer, c.Date.UTC().Format(time.RFC3339), c.Message})
 	}
 	if err := exp.append(s, archiveCSVHeader, rows); err != nil {
-		return exp.fail(fmt.Errorf("writing %s: %w", path, err))
+		return 0, wm, exp.fail(fmt.Errorf("writing %s: %w", path, err))
 	}
 
 	if err := recordArchiveWatermark(d.config.TownRoot, db, next); err != nil {
-		return exp.fail(fmt.Errorf("the watermark for %s cannot be recorded: %w", path, err))
+		return 0, wm, exp.fail(fmt.Errorf("the watermark for %s cannot be recorded: %w", path, err))
 	}
 	d.logger.Printf("scheduled_maintenance: archive %s: %d commit(s) to %s, through %s (%d hash(es) at that date)",
 		db, len(commits), path, next.Date.UTC().Format(time.RFC3339), len(next.Hashes))
-	return nil
+	return len(commits), next, nil
 }
 
 // archiveWatermarkAfter is the record the commits just written leave behind:
@@ -579,12 +669,16 @@ func archiveWatermarkAfter(prev ArchiveWatermark, commits []archiveCommit) (Arch
 // twice. A failure after the file is written rolls the appended member back, so
 // a half-exported table is never left ahead of the watermark for the next run
 // to append again.
-func (d *Daemon) maintenanceArchiveEvents(parent context.Context, dir, db string, wm EventsArchiveWatermark) error {
+//
+// It returns how many fresh rows it wrote and the watermark it recorded, or wm
+// unchanged when there was nothing new; the caller loops on both. On a failure
+// it returns wm, because the rollback leaves the archive where it was.
+func (d *Daemon) maintenanceArchiveEvents(parent context.Context, dir, db string, wm EventsArchiveWatermark) (wrote int, next EventsArchiveWatermark, err error) {
 	if err := validMaintenanceDBName(db); err != nil {
-		return err
+		return 0, wm, err
 	}
 	if err := wm.Validate(); err != nil {
-		return err
+		return 0, wm, err
 	}
 	s := d.maintenance()
 	ctx, cancel := context.WithTimeout(parent, maintenanceArchiveExportTimeout)
@@ -593,28 +687,28 @@ func (d *Daemon) maintenanceArchiveEvents(parent context.Context, dir, db string
 	path := filepath.Join(dir, archiveFileName("events", db, s.now()))
 	exp, err := beginArchiveExport(path)
 	if err != nil {
-		return err
+		return 0, wm, err
 	}
 	since, err := wm.Since()
 	if err != nil {
-		return err
+		return 0, wm, err
 	}
 	batch, err := s.archiveEventsRead(ctx, d, db, since)
 	if err != nil {
-		return exp.fail(fmt.Errorf("reading events: %w", err))
+		return 0, wm, exp.fail(fmt.Errorf("reading events: %w", err))
 	}
 	if len(batch.Rows) == 0 {
-		return nil // nothing new: no file, and the watermark stays put
+		return 0, wm, nil // nothing new: no file, and the watermark stays put
 	}
 	_, idColumn, err := eventsWatermarkColumns(batch.Columns)
 	if err != nil {
-		return exp.fail(err)
+		return 0, wm, exp.fail(err)
 	}
 	archived := wm.ArchivedIDs()
 	fresh := make([][]string, 0, len(batch.Rows))
 	for _, row := range batch.Rows {
 		if idColumn >= len(row) {
-			return exp.fail(fmt.Errorf("events row of %d values is missing column %d", len(row), idColumn))
+			return 0, wm, exp.fail(fmt.Errorf("events row of %d values is missing column %d", len(row), idColumn))
 		}
 		if archived[row[idColumn]] {
 			continue
@@ -622,7 +716,7 @@ func (d *Daemon) maintenanceArchiveEvents(parent context.Context, dir, db string
 		fresh = append(fresh, row)
 	}
 	if len(fresh) == 0 {
-		return nil // the whole window is already archived: nothing new
+		return 0, wm, nil // the whole window is already archived: nothing new
 	}
 	if exp.existed && exp.start > 0 {
 		// The file already carries a header. Appending a member under a
@@ -630,22 +724,22 @@ func (d *Daemon) maintenanceArchiveEvents(parent context.Context, dir, db string
 		// database whose table no longer matches its file fails its export and
 		// keeps its watermark.
 		if err := checkEventsArchiveHeader(path, batch.Columns); err != nil {
-			return exp.fail(err)
+			return 0, wm, exp.fail(err)
 		}
 	}
 	if err := exp.append(s, batch.Columns, fresh); err != nil {
-		return exp.fail(fmt.Errorf("writing %s: %w", path, err))
+		return 0, wm, exp.fail(fmt.Errorf("writing %s: %w", path, err))
 	}
-	next, err := wm.written(batch.Columns, fresh)
+	next, err = wm.written(batch.Columns, fresh)
 	if err != nil {
-		return exp.fail(err)
+		return 0, wm, exp.fail(err)
 	}
 	if err := recordEventsArchiveWatermark(d.config.TownRoot, db, next); err != nil {
-		return exp.fail(fmt.Errorf("the watermark for %s cannot be recorded: %w", path, err))
+		return 0, wm, exp.fail(fmt.Errorf("the watermark for %s cannot be recorded: %w", path, err))
 	}
 	d.logger.Printf("scheduled_maintenance: archive %s events: %d row(s) to %s, through %s (%d id(s) in the window)",
 		db, len(fresh), path, next.CreatedAt, len(next.Archived))
-	return nil
+	return len(fresh), next, nil
 }
 
 // archiveExport is one database's export into one archive file. Until the

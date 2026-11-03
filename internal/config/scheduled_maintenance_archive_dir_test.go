@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestScheduledMaintenanceArchiveDir: archive_dir survives strict decoding into
@@ -119,6 +120,54 @@ func TestScheduledMaintenanceArchiveLimitsDecodeAndDefault(t *testing.T) {
 				t.Errorf("events limit = %d, %v; want the %d default", got, err, DefaultArchiveEventsLimit)
 			}
 		})
+	}
+}
+
+// TestScheduledMaintenanceArchiveBudget: archive_budget survives strict
+// decoding into the field the daemon reads; an empty setting or an absent
+// section reads the 10-minute default; and a value below a minute, above the
+// step's 30-minute timeout, or one that does not parse is refused with the key
+// named (gt-o4sk8.1).
+func TestScheduledMaintenanceArchiveBudget(t *testing.T) {
+	t.Parallel()
+	if MaintenanceArchiveBudgetKey != "patrols.scheduled_maintenance.archive_budget" {
+		t.Fatalf("setting key = %q, want the daemon.json path the field decodes from", MaintenanceArchiveBudgetKey)
+	}
+	if DefaultArchiveBudget != 10*time.Minute {
+		t.Fatalf("default budget = %v, want 10m", DefaultArchiveBudget)
+	}
+	body := `{"patrols":{"scheduled_maintenance":{"enabled":true,"archive_budget":"12m"}}}`
+	var cfg DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if cfg.Patrols.ScheduledMaintenance == nil {
+		t.Fatal("scheduled_maintenance decoded as absent")
+	}
+	if got, err := cfg.Patrols.ScheduledMaintenance.ParseArchiveBudget(); err != nil || got != 12*time.Minute {
+		t.Errorf("decoded archive_budget = %v, %v; want 12m", got, err)
+	}
+
+	for _, tt := range []struct {
+		name string
+		cfg  *ScheduledMaintenanceConfig
+	}{
+		{name: "absent section", cfg: nil},
+		{name: "empty setting", cfg: &ScheduledMaintenanceConfig{}},
+	} {
+		if got, err := tt.cfg.ParseArchiveBudget(); err != nil || got != DefaultArchiveBudget {
+			t.Errorf("%s budget = %v, %v; want the %v default", tt.name, got, err, DefaultArchiveBudget)
+		}
+	}
+
+	for _, setting := range []string{"30s", "45m", "abc"} {
+		got, err := (&ScheduledMaintenanceConfig{ArchiveBudget: setting}).ParseArchiveBudget()
+		if err == nil {
+			t.Fatalf("ParseArchiveBudget(%q) = %v, want an error", setting, got)
+		}
+		if !strings.Contains(err.Error(), MaintenanceArchiveBudgetKey) {
+			t.Errorf("error %q does not name %s", err, MaintenanceArchiveBudgetKey)
+		}
 	}
 }
 
