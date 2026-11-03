@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,14 +32,20 @@ func maintenanceWindowAt(window string) *DaemonPatrolConfig {
 // hours before now against an empty old-gen baseline, so a cycle that runs
 // finds it due.
 func requestDaemon(t *testing.T, now time.Time) (*Daemon, *gcFakes) {
+	d, f, _ := requestDaemonWithLogs(t, now)
+	return d, f
+}
+
+// requestDaemonWithLogs is requestDaemon plus the daemon's log buffer.
+func requestDaemonWithLogs(t *testing.T, now time.Time) (*Daemon, *gcFakes, *bytes.Buffer) {
 	t.Helper()
-	d, _ := gcTestDaemon(t)
+	d, logs := gcTestDaemon(t)
 	f := withGCFakes(t, d)
 	f.sizes = map[string]gcMeasure{"hq": {631 * mib, 500 * mib}}
 	d.patrolConfig = maintenanceWindowAt("03:00")
 	d.maint.now = func() time.Time { return now }
 	recordCatchUpGC(t, d, "hq", now.Add(-2*time.Hour))
-	return d, f
+	return d, f, logs
 }
 
 // writeRequestFile puts a request for runID in d's update directory.
@@ -304,6 +311,14 @@ func TestFinishMaintenanceRequestWritesResultThenRemovesIt(t *testing.T) {
 		}
 	})
 
+	t.Run("a request already gone counts as answered", func(t *testing.T) {
+		t.Parallel()
+		f := &recordingRequestFiles{removeErr: os.ErrNotExist}
+		if err := finishMaintenanceRequest(f, "/update", at, "run-7", gcOutcomeCompleted, ""); err != nil {
+			t.Errorf("finish: %v, want nil when the request is already gone", err)
+		}
+	})
+
 	t.Run("a remove error is returned after the result", func(t *testing.T) {
 		t.Parallel()
 		boom := errors.New("read-only directory")
@@ -345,13 +360,19 @@ func TestReadMaintenanceRequest(t *testing.T) {
 		files     *recordingRequestFiles
 		ok        bool
 		malformed bool
+		invalid   bool
 		wantErr   bool
 		wantRunID string
 	}{
 		{name: "no file", files: &recordingRequestFiles{}},
 		{name: "valid", files: &recordingRequestFiles{read: valid}, ok: true, wantRunID: "run-1"},
+		{name: "allowed punctuation", files: &recordingRequestFiles{read: []byte(`{"run_id":"run.1-a_b"}`)}, ok: true, wantRunID: "run.1-a_b"},
+		{name: "64 characters", files: &recordingRequestFiles{read: []byte(`{"run_id":"` + strings.Repeat("a", 64) + `"}`)}, ok: true, wantRunID: strings.Repeat("a", 64)},
 		{name: "unparseable", files: &recordingRequestFiles{read: []byte("{")}, malformed: true, wantErr: true},
 		{name: "no run id", files: &recordingRequestFiles{read: []byte(`{"at":"2026-10-01T14:00:00Z"}`)}, malformed: true, wantErr: true},
+		{name: "run id too long", files: &recordingRequestFiles{read: []byte(`{"run_id":"` + strings.Repeat("a", 65) + `"}`)}, invalid: true, wantErr: true},
+		{name: "run id with a slash", files: &recordingRequestFiles{read: []byte(`{"run_id":"run/1"}`)}, invalid: true, wantErr: true},
+		{name: "run id with a newline", files: &recordingRequestFiles{read: []byte(`{"run_id":"run\n1"}`)}, invalid: true, wantErr: true},
 		{name: "unreadable", files: &recordingRequestFiles{readErr: errors.New("permission denied")}, wantErr: true},
 	}
 	for _, tc := range cases {
@@ -367,6 +388,9 @@ func TestReadMaintenanceRequest(t *testing.T) {
 			}
 			if got := errors.Is(err, errMalformedRequest); got != tc.malformed {
 				t.Errorf("malformed = %v, want %v (err=%v)", got, tc.malformed, err)
+			}
+			if got := errors.Is(err, errInvalidRunID); got != tc.invalid {
+				t.Errorf("invalid run id = %v, want %v (err=%v)", got, tc.invalid, err)
 			}
 			if tc.ok && req.RunID != tc.wantRunID {
 				t.Errorf("run id = %q, want %q", req.RunID, tc.wantRunID)
@@ -450,4 +474,206 @@ func TestMaintenanceRequestMalformedOrPatrolInactive(t *testing.T) {
 			t.Errorf("request still there after the patrol answered it: %v", err)
 		}
 	})
+}
+
+// A request with no configured window still runs its cycle; a deferral then
+// records nothing against a window that does not exist.
+func TestMaintenanceRequestWithNoWindowRuns(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the requested cycle runs", func(t *testing.T) {
+		t.Parallel()
+		d, f := requestDaemon(t, outsideRequestNow)
+		d.patrolConfig = maintenanceWindowAt("")
+		path := writeRequestFile(t, d, "run-nowindow", outsideRequestNow)
+
+		d.runScheduledMaintenance()
+
+		if got := strings.Join(f.gcCalls, ","); got != "hq" {
+			t.Fatalf("gc calls = %q, want hq with no window configured", got)
+		}
+		res := readRequestResult(t, d)
+		if res.RunID != "run-nowindow" || res.Outcome != "completed" {
+			t.Errorf("result = %+v, want run-nowindow completed", res)
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("request still there after a completed cycle: %v", err)
+		}
+		st, err := loadMaintenanceGCState(d.config.TownRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.PendingDeferral != nil || st.ConsecutiveDeferredWindows != 0 {
+			t.Errorf("a no-window request recorded a deferral streak: %+v", st.PendingDeferral)
+		}
+	})
+
+	t.Run("a deferral records nothing", func(t *testing.T) {
+		t.Parallel()
+		d, f := requestDaemon(t, outsideRequestNow)
+		d.patrolConfig = maintenanceWindowAt("")
+		f.quietUntil = 0
+		path := writeRequestFile(t, d, "run-nowindow-busy", outsideRequestNow)
+
+		d.runScheduledMaintenance()
+
+		if len(f.gcCalls) != 0 {
+			t.Fatalf("gc ran while the town was busy: %v", f.gcCalls)
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("request gone after a deferral: %v", err)
+		}
+		if _, err := os.Stat(resultPath(update.Dir(d.config.TownRoot))); !os.IsNotExist(err) {
+			t.Errorf("a deferred cycle wrote a result")
+		}
+		st, err := loadMaintenanceGCState(d.config.TownRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.PendingDeferral != nil || st.ConsecutiveDeferredWindows != 0 || len(st.DeferralReasons) != 0 {
+			t.Errorf("a deferral was recorded against a window that does not exist: %+v", st)
+		}
+	})
+}
+
+// A completed cycle whose result write fails is re-answered from the state on
+// a later tick; the cycle itself is not run again.
+func TestMaintenanceRequestResultWriteFailureDoesNotRerun(t *testing.T) {
+	t.Parallel()
+	d, f := requestDaemon(t, outsideRequestNow)
+	dir := update.Dir(d.config.TownRoot)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A directory where the result belongs makes the first write fail.
+	blocked := resultPath(dir)
+	if err := os.Mkdir(blocked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := writeRequestFile(t, d, "run-retry", outsideRequestNow)
+
+	d.runScheduledMaintenance()
+
+	if got := strings.Join(f.gcCalls, ","); got != "hq" {
+		t.Fatalf("first tick gc calls = %q, want hq", got)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("request removed although the result write failed: %v", err)
+	}
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.LastRequestAnswer == nil || st.LastRequestAnswer.RunID != "run-retry" || st.LastRequestAnswer.Outcome != "completed" {
+		t.Fatalf("remembered answer = %+v, want run-retry completed", st.LastRequestAnswer)
+	}
+
+	// Clear the obstruction; the next tick must answer, not gc.
+	if err := os.Remove(blocked); err != nil {
+		t.Fatal(err)
+	}
+	// Move the clock on, so a rerun would answer with this tick's time.
+	later := outsideRequestNow.Add(30 * time.Hour)
+	d.maint.now = func() time.Time { return later }
+	d.runScheduledMaintenance()
+
+	if len(f.gcCalls) != 1 {
+		t.Fatalf("gc calls = %v after the re-answer, want only the first tick's cycle", f.gcCalls)
+	}
+	res := readRequestResult(t, d)
+	if res.RunID != "run-retry" || res.Outcome != "completed" {
+		t.Errorf("result = %+v, want run-retry completed", res)
+	}
+	// A rerun would answer with the second tick's clock; the remembered answer
+	// carries the first cycle's.
+	if !res.At.Equal(outsideRequestNow) {
+		t.Errorf("result at = %v, want the remembered cycle's %v — the cycle reran", res.At, outsideRequestNow)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("request still there after the re-answer: %v", err)
+	}
+}
+
+// A cycle the daemon cannot run at all is answered failed with the reason and
+// removed, so the job never waits out its timeout for a request.
+func TestMaintenanceRequestUnanswerablePathsWriteFailed(t *testing.T) {
+	t.Parallel()
+
+	t.Run("no databases", func(t *testing.T) {
+		t.Parallel()
+		d, f := requestDaemon(t, outsideRequestNow)
+		f.sizes = map[string]gcMeasure{}
+		path := writeRequestFile(t, d, "run-nodb", outsideRequestNow)
+
+		d.runScheduledMaintenance()
+
+		if len(f.gcCalls) != 0 {
+			t.Errorf("gc calls = %v with no databases", f.gcCalls)
+		}
+		res := readRequestResult(t, d)
+		if res.RunID != "run-nodb" || res.Outcome != "failed" || !strings.Contains(res.Detail, "no databases") {
+			t.Errorf("result = %+v, want run-nodb failed naming the missing databases", res)
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("request still there: %v", err)
+		}
+	})
+
+	t.Run("no local server", func(t *testing.T) {
+		t.Parallel()
+		d, f := requestDaemon(t, outsideRequestNow)
+		d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
+		path := writeRequestFile(t, d, "run-remote", outsideRequestNow)
+
+		d.runScheduledMaintenance()
+
+		if len(f.gcCalls) != 0 {
+			t.Errorf("gc calls = %v against a remote server", f.gcCalls)
+		}
+		res := readRequestResult(t, d)
+		if res.RunID != "run-remote" || res.Outcome != "failed" || !strings.Contains(res.Detail, "local server") {
+			t.Errorf("result = %+v, want run-remote failed naming the local-server requirement", res)
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("request still there: %v", err)
+		}
+	})
+}
+
+// The untrusted run id is never echoed: an id over the bound or outside
+// [A-Za-z0-9._-] is answered with an id-less failed result and removed.
+func TestMaintenanceRequestRunIDIsBounded(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ name, runID string }{
+		{"too long", strings.Repeat("a", 65)},
+		{"a slash", "run/1"},
+		{"a newline", "run-1\nscheduled_maintenance: WARNING: forged"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, f, logs := requestDaemonWithLogs(t, outsideRequestNow)
+			path := writeRequestFile(t, d, tc.runID, outsideRequestNow)
+
+			d.runScheduledMaintenance()
+
+			if len(f.gcCalls) != 0 {
+				t.Errorf("gc calls = %v for an invalid run id", f.gcCalls)
+			}
+			res := readRequestResult(t, d)
+			if res.Outcome != "failed" || !strings.Contains(res.Detail, "invalid run id") {
+				t.Errorf("result = %+v, want a failed result naming the invalid run id", res)
+			}
+			if res.RunID != "" {
+				t.Errorf("the untrusted run id was echoed into the result: %q", res.RunID)
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Errorf("request still there: %v", err)
+			}
+			if strings.Contains(logs.String(), tc.runID) {
+				t.Errorf("the untrusted run id reached the log:\n%s", logs.String())
+			}
+		})
+	}
 }

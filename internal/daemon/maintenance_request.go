@@ -23,6 +23,15 @@ import (
 // five minutes.
 var errMalformedRequest = errors.New("malformed maintenance request")
 
+// errInvalidRunID marks a request whose run id is not bounded to
+// [A-Za-z0-9._-] and maxRequestRunIDLen characters. The tick answers it failed
+// and removes it, but never logs or echoes the value.
+var errInvalidRunID = errors.New("invalid maintenance run id")
+
+// maxRequestRunIDLen bounds the untrusted run id so it cannot bloat the result
+// file or a log line.
+const maxRequestRunIDLen = 64
+
 // requestFiles is the three file operations the protocol needs, so a test can
 // prove the result-then-remove order against a recording fake.
 type requestFiles interface {
@@ -67,7 +76,31 @@ func readMaintenanceRequest(files requestFiles, dir string) (update.RequestFile,
 		// result the job reads back.
 		return update.RequestFile{}, false, fmt.Errorf("%w: %s has no run id", errMalformedRequest, path)
 	}
+	if !validRequestRunID(req.RunID) {
+		// Never echo the value: the id is untrusted and could forge a log line
+		// or bloat the result file.
+		return update.RequestFile{}, false, fmt.Errorf("%w: %s", errInvalidRunID, path)
+	}
 	return req, true, nil
+}
+
+// validRequestRunID reports whether runID is bounded to letters, digits, dot,
+// dash and underscore, and at most maxRequestRunIDLen characters. An empty id
+// is rejected earlier, as malformed.
+func validRequestRunID(runID string) bool {
+	if len(runID) > maxRequestRunIDLen {
+		return false
+	}
+	for i := 0; i < len(runID); i++ {
+		c := runID[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '.', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // writeMaintenanceResult writes dir's result file for runID.
@@ -91,7 +124,9 @@ func answerMaintenanceRequest(files requestFiles, dir, runID string, at time.Tim
 		return err
 	}
 	path := requestPath(dir)
-	if err := files.Remove(path); err != nil {
+	// A request already gone is answered: the job only needs the result, and
+	// the file's absence is the signal it waited for.
+	if err := files.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("remove maintenance request %s: %w", path, err)
 	}
 	return nil
@@ -137,4 +172,65 @@ func (d *Daemon) dropMalformedRequest(files requestFiles, dir string, cause erro
 		return
 	}
 	d.logger.Printf("scheduled_maintenance: WARNING: %v — dropped", cause)
+}
+
+// answerInvalidRequest answers a request whose run id is untrusted with an
+// id-less failed result, then removes it. The id itself is never written or
+// logged: the job fails its own run-id match, which is the outcome its run
+// deserves.
+func (d *Daemon) answerInvalidRequest(files requestFiles, dir string, cause error) {
+	if err := answerMaintenanceRequest(files, dir, "", d.maintenance().now(), "failed", "the maintenance request has an invalid run id"); err != nil {
+		d.logger.Printf("scheduled_maintenance: WARNING: %v; cannot answer the request: %v — the request stays", cause, err)
+		return
+	}
+	d.logger.Printf("scheduled_maintenance: WARNING: %v — answered failed and dropped", cause)
+}
+
+// gcRequestAnswer is the outcome of the last request-driven cycle, persisted in
+// the maintenance state file so a request whose result write failed is
+// re-answered on a later tick instead of running the cycle again.
+type gcRequestAnswer struct {
+	RunID   string    `json:"run_id"`
+	Outcome string    `json:"outcome"` // "completed" or "failed"
+	At      time.Time `json:"at"`
+	Detail  string    `json:"detail"`
+}
+
+// rememberRequestAnswer records a completed or failed request-driven cycle
+// before its result is written. A write failure is logged: the next tick then
+// reruns the cycle, which is safe but costs a cycle.
+func (d *Daemon) rememberRequestAnswer(runID string, outcome maintenanceGCOutcome, detail string, at time.Time) {
+	if outcome != gcOutcomeCompleted && outcome != gcOutcomeFailed {
+		return
+	}
+	_, err := updateMaintenanceGCState(d.config.TownRoot, func(st *maintenanceGCState) {
+		st.LastRequestAnswer = &gcRequestAnswer{RunID: runID, Outcome: outcome.String(), At: at, Detail: detail}
+	})
+	if err != nil {
+		d.logger.Printf("scheduled_maintenance: WARNING: cannot remember the answer for run %s: %v — a later tick may rerun the cycle", runID, err)
+	}
+}
+
+// reanswerRememberedRequest delivers the remembered outcome when req is the
+// cycle that already ran for its run id. It reports true whenever the request
+// belongs to a remembered cycle, whether or not the result write succeeds: a
+// failed write leaves the request for the next tick's re-answer and must never
+// run the cycle again.
+func (d *Daemon) reanswerRememberedRequest(files requestFiles, dir string, req update.RequestFile) bool {
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		d.logger.Printf("scheduled_maintenance: WARNING: %v — cannot tell whether run %s was already answered", err, req.RunID)
+		return false
+	}
+	ans := st.LastRequestAnswer
+	if ans == nil || ans.RunID != req.RunID || !validRequestRunID(ans.RunID) {
+		return false
+	}
+	if ans.Outcome != "completed" && ans.Outcome != "failed" {
+		return false
+	}
+	if err := answerMaintenanceRequest(files, dir, ans.RunID, ans.At, ans.Outcome, ans.Detail); err != nil {
+		d.logger.Printf("scheduled_maintenance: WARNING: cannot answer request for run %s: %v — the request stays", ans.RunID, err)
+	}
+	return true
 }

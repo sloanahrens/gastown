@@ -154,10 +154,19 @@ func (d *Daemon) runScheduledMaintenance() {
 	case errors.Is(err, errMalformedRequest):
 		d.dropMalformedRequest(files, dir, err)
 		requested = false
+	case errors.Is(err, errInvalidRunID):
+		d.answerInvalidRequest(files, dir, err)
+		requested = false
 	case err != nil:
 		// A request that cannot be read is not a missing one: leave it for the
 		// next tick, and let this tick do only its scheduled work.
 		d.logger.Printf("scheduled_maintenance: WARNING: %v — leaving the request for the next tick", err)
+		requested = false
+	}
+
+	// A request whose cycle already ran but whose result write failed is
+	// answered from the remembered outcome, never rerun.
+	if requested && d.reanswerRememberedRequest(files, dir, request) {
 		requested = false
 	}
 
@@ -183,8 +192,9 @@ func (d *Daemon) runScheduledMaintenance() {
 	}
 
 	// Count a window that closed with gc still deferred (and escalate a
-	// streak) before anything else, including outside the window.
-	if !d.maintenanceGCRunning.Load() {
+	// streak) before anything else, including outside the window. A requested
+	// cycle with no window configured touches no window bookkeeping at all.
+	if window != "" && !d.maintenanceGCRunning.Load() {
 		d.closeDeferredGCWindow(now)
 	}
 
@@ -247,7 +257,7 @@ func (d *Daemon) runScheduledMaintenance() {
 		d.logger.Printf("scheduled_maintenance: skipped: %s — gc needs a local server", why)
 		d.lastMaintenanceRun = now
 		if requested {
-			d.logger.Printf("scheduled_maintenance: request for run %s stays: no local server can run the cycle", request.RunID)
+			d.answerRequest(request, gcOutcomeFailed, "no local server can run the cycle: "+why)
 		}
 		return
 	}
@@ -255,11 +265,23 @@ func (d *Daemon) runScheduledMaintenance() {
 	databases, err := d.maintenance().gcDatabases(dataDir)
 	if err != nil || len(databases) == 0 {
 		d.logger.Printf("scheduled_maintenance: no databases discovered in %s (err=%v)", dataDir, err)
+		if requested {
+			detail := fmt.Sprintf("no databases discovered in %s", dataDir)
+			if err != nil {
+				detail = fmt.Sprintf("%s: %v", detail, err)
+			}
+			d.answerRequest(request, gcOutcomeFailed, detail)
+		}
 		return
 	}
 	where := fmt.Sprintf("in window %s", window)
-	if requested && !isInMaintenanceWindow(now, window) {
-		where = fmt.Sprintf("outside the window on the request for run %s", request.RunID)
+	if requested {
+		switch {
+		case window == "":
+			where = fmt.Sprintf("on the request for run %s (no window configured)", request.RunID)
+		case !isInMaintenanceWindow(now, window):
+			where = fmt.Sprintf("outside the window on the request for run %s", request.RunID)
+		}
 	}
 	d.logger.Printf("scheduled_maintenance: %s, %d database(s) discovered", where, len(databases))
 	if keys := deprecatedMaintenanceKeys(d.patrolConfig); len(keys) > 0 {
@@ -270,7 +292,13 @@ func (d *Daemon) runScheduledMaintenance() {
 	if requested {
 		requestedCycle = &request
 	}
-	d.startMaintenanceGC(databases, maintenanceWindowEnd(now, window), requestedCycle)
+	// No window means no window end to record a deferral against; the cycle
+	// still runs on the request.
+	var windowEnd time.Time
+	if window != "" {
+		windowEnd = maintenanceWindowEnd(now, window)
+	}
+	d.startMaintenanceGC(databases, windowEnd, requestedCycle)
 	if finished := d.maintenanceGCFinishedAt.Swap(0); finished != 0 {
 		d.lastMaintenanceRun = time.Unix(0, finished)
 	}

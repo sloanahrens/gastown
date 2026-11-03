@@ -158,6 +158,11 @@ type maintenanceGCState struct {
 	// no backup: this cursor is the live server's only durable position
 	// (gt-7nxj4).
 	ArchiveEventsWatermarks map[string]EventsArchiveWatermark `json:"archive_events_watermarks,omitempty"`
+
+	// LastRequestAnswer is the outcome of the last request-driven cycle
+	// (maintenance_request.go). It lets a request whose result write failed be
+	// re-answered on the next tick instead of rerunning the cycle.
+	LastRequestAnswer *gcRequestAnswer `json:"last_request_answer,omitempty"`
 }
 
 // gcDeferral records one window's deferral: when the window closes, why the
@@ -230,6 +235,7 @@ func loadMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
 	for k, v := range parsed.ArchiveEventsWatermarks {
 		st.ArchiveEventsWatermarks[k] = v
 	}
+	st.LastRequestAnswer = parsed.LastRequestAnswer
 	return st, nil
 }
 
@@ -720,7 +726,9 @@ func (d *Daemon) maintenanceDataDir() string {
 //
 // windowEnd is when the current maintenance window closes; a deferral is
 // recorded against it and counted toward the skipped-window streak once it
-// has passed.
+// has passed. A zero windowEnd means no window is configured (a requested
+// cycle at any hour): the cycle runs, but no deferral is recorded, because
+// there is no window for the streak to count it against.
 //
 // request is the update job's request this cycle answers, or nil for a
 // scheduled one. It is answered only once the cycle will not be retried: a
@@ -737,6 +745,15 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time, req
 
 	d.maintenance().dispatch(func() {
 		defer d.maintenanceGCRunning.Store(false)
+		// A deferral has no window to be counted against when none is
+		// configured: recording one would leave a pending entry the streak
+		// counts against a window that never existed.
+		recordDeferral := func(reason string, pending []gcCandidate) {
+			if windowEnd.IsZero() {
+				return
+			}
+			d.recordGCDeferral(windowEnd, reason, pending)
+		}
 		// Archive first (scheduled_maintenance_archive.go): dolt_log is copied to
 		// the history archive before the gc it has to survive. A busy window
 		// defers the whole cycle, as the gc's own quiet guard does, so the backup
@@ -745,7 +762,7 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time, req
 		archiveRes, unarchived := d.maintenanceArchive(databases)
 		if archiveRes.outcome == gcOutcomeDeferred {
 			d.logger.Printf("scheduled_maintenance: cycle %s", archiveRes.outcome)
-			d.recordGCDeferral(windowEnd, archiveRes.reason, archiveRes.pending)
+			recordDeferral(archiveRes.reason, archiveRes.pending)
 			return
 		}
 		// Backup next (maintenance_backup.go); the gc only runs once the
@@ -756,7 +773,7 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time, req
 		}
 		d.logger.Printf("scheduled_maintenance: cycle %s", res.outcome)
 		if res.outcome == gcOutcomeDeferred {
-			d.recordGCDeferral(windowEnd, res.reason, res.pending)
+			recordDeferral(res.reason, res.pending)
 			return
 		}
 		if res.outcome == gcOutcomeInterrupted {
@@ -765,6 +782,10 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time, req
 		d.resetGCDeferralStreak()
 		d.maintenanceGCFinishedAt.Store(d.maintenance().now().UnixNano())
 		if request != nil {
+			// Remember the answer before writing it: a write that fails leaves
+			// the request behind, and the next tick re-answers from here rather
+			// than running the cycle again.
+			d.rememberRequestAnswer(request.RunID, res.outcome, res.reason, d.maintenance().now())
 			d.answerRequest(*request, res.outcome, res.reason)
 		}
 	})
