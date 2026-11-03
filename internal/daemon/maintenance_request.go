@@ -237,17 +237,17 @@ func requestReplaced(files requestFiles, dir string) bool {
 }
 
 // answerBusyRequest answers a request that arrives while a cycle is already
-// running, which this tick cannot serve, with a "deferred" result so its job
-// does not wait out a cycle that can hold one database's gc for minutes. The
-// request the running cycle is serving also has its file removed; that cycle's
-// own result then replaces the deferral. Any other request keeps its file, so
-// a later tick runs its cycle.
+// running, which this tick cannot serve. Only the request the running cycle is
+// serving gets a "deferred" result, and its file is removed, so its job does
+// not wait out a cycle that can hold one database's gc for minutes; that
+// cycle's own result then replaces the deferral. Any other waiting request
+// gets no result and keeps its file: the result file is one file shared by
+// every job and may hold the running cycle's answer, and the request's own
+// cycle runs on the next tick and writes a real result.
 //
-// The result file is one file shared by every job, so a deferral must never
-// replace an answer a job has not read yet. The request mutex makes the check
-// and the write one step against the cycle's own answer, and the deferral is
-// skipped when the file already holds a non-deferred answer for the running
-// cycle's run id (its job reads that) or for this request's own.
+// The request mutex makes the check and the write one step against the cycle's
+// own answer: a deferral is never written over a non-deferred answer for the
+// same run id.
 func (d *Daemon) answerBusyRequest(req update.RequestFile) {
 	d.maintenanceRequestMu.Lock()
 	defer d.maintenanceRequestMu.Unlock()
@@ -255,6 +255,12 @@ func (d *Daemon) answerBusyRequest(req update.RequestFile) {
 		return
 	}
 	running := d.runningRequestRunID()
+	if running != req.RunID {
+		// The result file is shared and holds one answer, so a request the
+		// running cycle is not serving gets none now: it keeps its file and its
+		// own cycle writes a real result on a later tick.
+		return
+	}
 	files := osRequestFiles{}
 	dir := update.Dir(d.config.TownRoot)
 	existing, found, err := readMaintenanceResult(files, dir)
@@ -262,14 +268,11 @@ func (d *Daemon) answerBusyRequest(req update.RequestFile) {
 		d.logger.Printf("scheduled_maintenance: WARNING: cannot answer request for run %s: reading the result: %v — the request stays", req.RunID, err)
 		return
 	}
-	if found && existing.Outcome != "deferred" && (existing.RunID == req.RunID || existing.RunID == running) {
+	if found && existing.Outcome != "deferred" && existing.RunID == req.RunID {
 		return
 	}
 	if err := writeMaintenanceResult(files, dir, req.RunID, d.maintenance().now(), "deferred", "a maintenance cycle is already running"); err != nil {
 		d.logger.Printf("scheduled_maintenance: WARNING: cannot answer request for run %s: %v — the request stays", req.RunID, err)
-		return
-	}
-	if running != req.RunID {
 		return
 	}
 	if err := removeAnsweredRequest(files, dir, req.RunID); err != nil {
