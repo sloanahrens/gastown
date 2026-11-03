@@ -120,6 +120,9 @@ type Daemon struct {
 	// updateTrigger is the block's own memory: the launch suppression clock
 	// and the last settings error logged.
 	updateTrigger updateTriggerState
+	// updateAlerts is the update job's alert latch (update_alerts.go): the
+	// keys this daemon run has raised and not yet cleared.
+	updateAlerts updateAlertLatch
 
 	// Mass death detection: track recent session deaths
 	deathsMu     sync.Mutex
@@ -2241,6 +2244,14 @@ var heartbeatSteps = []heartbeatStep{
 	// (was the rebuild-gt plugin, gt-4k3fj.8.6). lifecycle: the install makes
 	// the daemon restart, which the town E-stop holds.
 	{name: "rebuild-gt", lifecycle: true, run: (*Daemon).triggerRebuildGT},
+
+	// Read the update job's state and raise or clear its stale, overrun and
+	// last-run-failed alerts (gt-o4sk8.15). Non-lifecycle: it only reads and
+	// alerts, never dispatches or restarts, and a job that died is exactly
+	// what the operator needs to see while the town is E-stopped or Ringed.
+	{name: "update-alerts", run: func(d *Daemon) {
+		d.checkUpdateAlerts(d.clk().Now())
+	}},
 
 	// Decide whether `gt update` is due and launch it detached when it is
 	// (gt-o4sk8.14). Off until daemon.patrols.update.enabled is set, so this
