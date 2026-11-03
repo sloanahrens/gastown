@@ -1132,8 +1132,16 @@ func TestBuildRecentLandingsMarksACrewBranchRow(t *testing.T) {
 	if !byBead["gt-crew"].Crew {
 		t.Errorf("crew branch row is not marked crew: %+v", byBead["gt-crew"])
 	}
+	// The crew branch names its agent, so the row carries it for the By cell;
+	// a polecat branch carries none.
+	if got := byBead["gt-crew"].CrewAgent; got != "sloan" {
+		t.Errorf("crew branch row CrewAgent = %q, want the branch's agent sloan", got)
+	}
 	if byBead["gt-pc"].Crew {
 		t.Errorf("polecat branch row is marked crew: %+v", byBead["gt-pc"])
+	}
+	if got := byBead["gt-pc"].CrewAgent; got != "" {
+		t.Errorf("polecat branch row CrewAgent = %q, want none", got)
 	}
 }
 
@@ -1279,8 +1287,16 @@ func TestBuildRecentLandingsMarksARejectedOrRunningCrewRow(t *testing.T) {
 	crew := func(rig, bead string) bool {
 		return rig == "gastown" && (bead == "gt-running" || bead == "gt-rejected")
 	}
+	// The submission log names who built the newest branch: the crew agent on a
+	// crew branch, the polecat on a polecat's.
+	who := func(rig, bead string) string {
+		if bead == "gt-running-pc" {
+			return "opal"
+		}
+		return "overseer"
+	}
 
-	rows := buildRecentLandings(now, nil, nil, rejs, live, nil, nil, nil, crew, nil, 30)
+	rows := buildRecentLandings(now, nil, nil, rejs, live, nil, nil, who, crew, nil, 30)
 	byBead := map[string]dashboard.LandingRow{}
 	for _, r := range rows {
 		byBead[r.Bead] = r
@@ -1288,6 +1304,14 @@ func TestBuildRecentLandingsMarksARejectedOrRunningCrewRow(t *testing.T) {
 	for bead, want := range map[string]bool{"gt-running": true, "gt-rejected": true, "gt-running-pc": false} {
 		if got := byBead[bead].Crew; got != want {
 			t.Errorf("%s Crew = %v, want %v", bead, got, want)
+		}
+	}
+	// A crew row without a branch of its own takes the branch's agent from the
+	// submission log, so the By cell names the crew member and not the bead's
+	// assignee; a polecat row takes none (gt-830fd).
+	for bead, want := range map[string]string{"gt-running": "overseer", "gt-rejected": "overseer", "gt-running-pc": ""} {
+		if got := byBead[bead].CrewAgent; got != want {
+			t.Errorf("%s CrewAgent = %q, want %q", bead, got, want)
 		}
 	}
 }
