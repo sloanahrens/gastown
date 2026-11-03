@@ -368,6 +368,133 @@ func TestFindStaleBeadsTestTempDirs(t *testing.T) {
 	}
 }
 
+// goTestTempConfig is the --config path a Go test suite's dolt server leaves
+// behind: testing.T.TempDir's MkdirTemp root — the test's name plus the
+// random numeric suffix os.MkdirTemp appends — then the per-test "001"
+// directory, then the town the test installed.
+func goTestTempConfig(tempRoot string) string {
+	return filepath.Join(tempRoot, "TestSomething123", "001", "town", ".dolt-data", "config.yaml")
+}
+
+// scanOrphans runs FindOrphanDoltServers' scan over a scripted process table,
+// so the temp-root selection the daemon takes is the one under test.
+func scanOrphans(t *testing.T, townRoot string, entries ...doltProcEntry) []DoltOrphanServer {
+	t.Helper()
+	got, err := findOrphanDoltServersWith(townRoot, func() ([]doltProcEntry, error) {
+		return entries, nil
+	})
+	if err != nil {
+		t.Fatalf("findOrphanDoltServersWith() error = %v", err)
+	}
+	return got
+}
+
+// TestClassifyDoltOrphanReapsAnOldGoTestServer reproduces gt-sokar: a test
+// Dolt server reparented to init and still running from its Go test temp dir
+// hours later is an orphan the sweep reaps instead of reporting it
+// unexpected every five minutes.
+func TestClassifyDoltOrphanReapsAnOldGoTestServer(t *testing.T) {
+	t.Parallel()
+	cfg := goTestTempConfig(os.TempDir())
+
+	orphans := scanOrphans(t, t.TempDir(), doltProcEntry{
+		PID: 50176, PPID: 1, Etime: "02:00:00",
+		Args: "dolt sql-server --config " + cfg,
+	})
+
+	if len(orphans) != 1 {
+		t.Fatalf("findOrphanDoltServersWith() = %+v, want exactly the Go test server", orphans)
+	}
+	if orphans[0].ConfigPath != cfg {
+		t.Errorf("ConfigPath = %q, want %q", orphans[0].ConfigPath, cfg)
+	}
+	if orphans[0].Reason != "orphan" {
+		t.Errorf("Reason = %q, want orphan", orphans[0].Reason)
+	}
+}
+
+// TestClassifyDoltOrphanKeepsYoungOrParentedOrTownServersUnreaped covers the
+// three conditions the Go test rule needs besides the path shape: age over
+// the threshold, no live parent, and a config outside the town root.
+func TestClassifyDoltOrphanKeepsYoungOrParentedOrTownServersUnreaped(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	cfg := goTestTempConfig(os.TempDir())
+
+	tests := []struct {
+		name  string
+		entry doltProcEntry
+	}{
+		{
+			name:  "younger than the Go test threshold",
+			entry: doltProcEntry{PID: 50177, PPID: 1, Etime: "00:30:00", Args: "dolt sql-server --config " + cfg},
+		},
+		{
+			name:  "live parent",
+			entry: doltProcEntry{PID: 50178, PPID: 4242, Etime: "02:00:00", Args: "dolt sql-server --config " + cfg},
+		},
+		{
+			// A town root the harness makes under the temp root itself has the
+			// Go test dir shape; the town-root guard, not the path shape,
+			// keeps its servers out of SIGTERM range.
+			name: "config under the town root",
+			entry: doltProcEntry{
+				PID: 50179, PPID: 1, Etime: "02:00:00",
+				Args: "dolt sql-server --config " + filepath.Join(townRoot, "TestSomething123", "001", "town", ".dolt-data", "config.yaml"),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orphans := scanOrphans(t, townRoot, tt.entry)
+			if len(orphans) != 1 {
+				t.Fatalf("findOrphanDoltServersWith() = %+v, want the server reported once", orphans)
+			}
+			if orphans[0].Reason != "unexpected" {
+				t.Errorf("Reason = %q, want unexpected", orphans[0].Reason)
+			}
+		})
+	}
+}
+
+// TestClassifyDoltOrphanIsBoundedToATempRoot pins the Go test rule to the
+// roots a Go test's temp dirs can live under: the system temp root or the
+// town's GOTMPDIR. A Test-shaped dir anywhere else, or one without the
+// MkdirTemp suffix, stays unexpected so it is never signaled.
+func TestClassifyDoltOrphanIsBoundedToATempRoot(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+
+	tests := []struct {
+		name string
+		cfg  string
+		want string
+	}{
+		{"under the system temp root", goTestTempConfig(os.TempDir()), "orphan"},
+		{"under the town Go test temp root", goTestTempConfig(townGoTestTempRoot), "orphan"},
+		{"Test-shaped path outside every temp root", goTestTempConfig("/opt/other"), "unexpected"},
+		{"Test component without the MkdirTemp digit suffix", filepath.Join(os.TempDir(), "TestSomething", "001", ".dolt-data", "config.yaml"), "unexpected"},
+		{"Test component followed by a lowercase letter", filepath.Join(os.TempDir(), "Testdata123", "001", ".dolt-data", "config.yaml"), "unexpected"},
+		{"relative config path", filepath.Join("TestSomething123", "001", ".dolt-data", "config.yaml"), "unexpected"},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orphans := scanOrphans(t, townRoot, doltProcEntry{
+				PID: 51000 + i, PPID: 1, Etime: "02:00:00",
+				Args: "dolt sql-server --config " + tt.cfg,
+			})
+			if len(orphans) != 1 {
+				t.Fatalf("findOrphanDoltServersWith() = %+v, want the server reported once", orphans)
+			}
+			if orphans[0].Reason != tt.want {
+				t.Errorf("Reason = %q, want %q for %q", orphans[0].Reason, tt.want, tt.cfg)
+			}
+		})
+	}
+}
+
 func TestRemoveStaleBeadsTestTempDirs(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
