@@ -96,6 +96,7 @@ func TestContainerSuiteGateStripsWrapping(t *testing.T) {
 		{"run on a later ; command", "go test ./internal/cmd -count=1; go test ./internal/specdispatch -run TestX", "internal/cmd"},
 		{"run on a later | command", "go test ./internal/daemon -count=1 | tee out -run TestX", "internal/daemon"},
 		{"bare command after a narrowed one", "go test ./internal/specdispatch -run TestX && go test ./internal/cmd -count=1", "internal/cmd"},
+		{"unbalanced quote before a later chain", "go test ./internal/cmd -count=1 ' && go test ./internal/specdispatch -run TestX", "internal/cmd"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -111,6 +112,39 @@ func TestContainerSuiteGateStripsWrapping(t *testing.T) {
 				t.Errorf("Reason = %q, want it to name %s", v.Reason, tt.pkg)
 			}
 		})
+	}
+}
+
+// A whole Gate line wrapped in backticks is one quoted region to a shell
+// parser, but the lint deletes the wrapping and still splits the chain: the
+// first command has no -run, so it is refused (gt-hgt9j.4).
+func TestContainerSuiteGateWholeLineWrappedChain(t *testing.T) {
+	t.Parallel()
+	v := Lint(specWithGate("`go test ./internal/cmd -count=1 && go test ./internal/specdispatch -run TestX`"), defaultTemplate())
+	if v.Route != RouteRefuse {
+		t.Fatalf("verdict = %s, want a refusal", v.Line("gt-good"))
+	}
+	if v.Field != "## Gate" {
+		t.Errorf("Field = %q, want %q", v.Field, "## Gate")
+	}
+	if !strings.Contains(v.Reason, "internal/cmd") {
+		t.Errorf("Reason = %q, want it to name internal/cmd", v.Reason)
+	}
+}
+
+// -tags run carries the word run as a flag value, not a test filter, so the
+// bare package is still refused (gt-hgt9j.4).
+func TestContainerSuiteGateTagsValueRunIsNotAFilter(t *testing.T) {
+	t.Parallel()
+	v := Lint(specWithGate("go test ./internal/cmd -tags run"), defaultTemplate())
+	if v.Route != RouteRefuse {
+		t.Fatalf("verdict = %s, want a refusal", v.Line("gt-good"))
+	}
+	if v.Field != "## Gate" {
+		t.Errorf("Field = %q, want %q", v.Field, "## Gate")
+	}
+	if !strings.Contains(v.Reason, "internal/cmd") {
+		t.Errorf("Reason = %q, want it to name internal/cmd", v.Reason)
 	}
 }
 

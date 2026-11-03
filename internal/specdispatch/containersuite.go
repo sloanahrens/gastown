@@ -5,19 +5,8 @@ import (
 	"strings"
 )
 
-// ContainerSuitePackages returns the repo-relative Go package paths whose
-// tests spin real Dolt/testcontainers containers (or a shell script that
-// launches them). The runtime guard in internal/cmd/tap_guard_container_suite.go
-// and the Gate lint both judge this one list, so the two cannot drift.
-//
-// A package belongs when its test binary links internal/testutil, the only
-// route into container-spinning code: run
-// `go list -test -f '{{.ImportPath}} {{join .Deps "\n"}}' ./internal/...`
-// and keep every package that imports the testutil path. An entry that never
-// starts a container costs one needless `gt slot run`; a missing one is
-// invisible to the guard entirely (gt-e2rs).
-//
-// Every call returns a fresh slice, so a caller cannot mutate another's list.
+// ContainerSuitePackages returns the repo-relative Go package paths whose test
+// binaries link internal/testutil, a fresh slice per call (gt-e2rs).
 func ContainerSuitePackages() []string {
 	return []string{
 		"internal/beads",
@@ -62,25 +51,16 @@ func containerSuiteGateRefusal(gate string) (Refusal, bool) {
 	return Refusal{}, false
 }
 
-// shellSegments splits one Gate line at its unquoted shell operators (&&,
-// ||, ;, |), so each command is judged on its own flags: a -run on a later
-// command does not narrow an earlier one. A quoted operator, such as the bar
-// in -run 'TestA|TestB', stays inside its segment.
+// shellSegments splits one Gate line at its shell operators (&&, ||, ;, |), so
+// each command is judged on its own flags: a -run on a later command does not
+// narrow an earlier one. Quotes and backticks are deleted rather than parsed,
+// so wrapping or an unbalanced quote cannot hide an operator (gt-hgt9j.4).
 func shellSegments(line string) []string {
+	line = stripQuotes(line)
 	var segments []string
 	start := 0
-	var quote byte
 	for i := 0; i < len(line); i++ {
-		c := line[i]
-		if quote != 0 {
-			if c == quote {
-				quote = 0
-			}
-			continue
-		}
-		switch c {
-		case '\'', '"', '`':
-			quote = c
+		switch line[i] {
 		case ';':
 			segments = append(segments, line[start:i])
 			start = i + 1
@@ -101,28 +81,29 @@ func shellSegments(line string) []string {
 	return append(segments, line[start:])
 }
 
-// goTestArgs returns the unquoted arguments after "go test" in one command
-// segment, and false when the segment does not invoke go test. The binary is
-// matched by its base name, so an absolute path to the toolchain counts too.
-func goTestArgs(fields []string) ([]string, bool) {
-	for i := 0; i+1 < len(fields); i++ {
-		if !isGoBinaryArg(unquoteToken(fields[i])) || unquoteToken(fields[i+1]) != "test" {
-			continue
+// stripQuotes removes every backtick, single quote and double quote from a
+// Gate line, so a quoted or backtick-wrapped command reads like the bare form.
+func stripQuotes(line string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '`', '\'', '"':
+			return -1
 		}
-		args := make([]string, 0, len(fields)-i-2)
-		for _, field := range fields[i+2:] {
-			args = append(args, unquoteToken(field))
-		}
-		return args, true
-	}
-	return nil, false
+		return r
+	}, line)
 }
 
-// unquoteToken strips the wrapping quotes a Gate line may put around a command
-// or one of its arguments, so `go test ./internal/cmd` and
-// "go test ./internal/cmd" are judged like the bare form.
-func unquoteToken(token string) string {
-	return strings.Trim(token, "`\"'")
+// goTestArgs returns the arguments after "go test" in one command segment, and
+// false when the segment does not invoke go test. The binary is matched by its
+// base name, so an absolute path to the toolchain counts too.
+func goTestArgs(fields []string) ([]string, bool) {
+	for i := 0; i+1 < len(fields); i++ {
+		if !isGoBinaryArg(fields[i]) || fields[i+1] != "test" {
+			continue
+		}
+		return fields[i+2:], true
+	}
+	return nil, false
 }
 
 // isGoBinaryArg reports whether field names the go command, either bare or as
@@ -135,20 +116,21 @@ func isGoBinaryArg(field string) bool {
 	return name == "go"
 }
 
-// hasRunFilter reports whether the arguments narrow the test run with -run,
-// in either the "-run value" or the "-run=value" spelling.
+// hasRunFilter reports whether the arguments narrow the test run with -run, in
+// either the "-run value" or the "-run=value" spelling. The leading dash is
+// required, so a flag value spelled run (such as -tags run) is not a filter
+// (gt-hgt9j.4).
 func hasRunFilter(args []string) bool {
 	for _, arg := range args {
-		flag := strings.TrimLeft(arg, "-")
-		if flag == "run" || strings.HasPrefix(flag, "run=") {
+		if arg == "-run" || strings.HasPrefix(arg, "-run=") {
 			return true
 		}
 	}
 	return false
 }
 
-// containerSuitePackageArg returns the listed package arg targets, and "" when
-// it targets none. Only the two spellings count: ./<package> and
+// containerSuitePackageArg returns the listed package the argument targets,
+// and "" when it targets none. Only the two spellings count: ./<package> and
 // ./<package>/.... The match is exact, so ./internal/cmdfoo is not
 // ./internal/cmd.
 func containerSuitePackageArg(packages []string, arg string) string {
