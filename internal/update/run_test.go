@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +19,10 @@ import (
 
 // runTestID is the run id the fixture's NewRunID returns.
 const runTestID = "20261103T102200Z-capable"
+
+// runTestSHA is main's build in the fixture, and so the build a run installs
+// and verifies against.
+const runTestSHA = "bbbb2222"
 
 // runInstaller is an Installer a test answers for; it records whether it was
 // called and with which build.
@@ -41,32 +46,39 @@ func (i *runInstaller) Install(ctx context.Context, sha string) (InstallResult, 
 // runFixture is one test's town: a store in a temp dir, a fake clock, and the
 // fakes every Deps field takes.
 type runFixture struct {
-	store  *Store
-	clock  *fakeDrainClock
-	probes *fakeProbes
-	seats  *fakeDrainProbe
-	files  *fakeFiles
-	hold   *Hold
-	inst   *runInstaller
-	log    *bytes.Buffer
-	deps   Deps
-	opts   Options
+	store      *Store
+	clock      *fakeDrainClock
+	probes     *fakeProbes
+	seats      *fakeDrainProbe
+	files      *fakeFiles
+	hold       *Hold
+	inst       *runInstaller
+	maint      *MaintenanceRequest
+	maintFiles *fakeMaintFiles
+	verify     *fakeVerifyProbes
+	log        *bytes.Buffer
+	deps       Deps
+	opts       Options
 }
 
 // newRunFixture builds a town where main is ahead of the installed build, no
-// seat is working, nothing is due for maintenance and the installer succeeds.
+// seat is working, nothing is due for maintenance, the installer succeeds and
+// every verify probe reports the build it installed.
 func newRunFixture(t *testing.T) *runFixture {
 	t.Helper()
 	f := &runFixture{
-		store:  &Store{Dir: filepath.Join(t.TempDir(), "update")},
-		clock:  &fakeDrainClock{now: drainTestStart()},
-		probes: &fakeProbes{installed: "aaaa1111", main: "bbbb2222", backup: true, published: true},
-		seats:  &fakeDrainProbe{answer: func(int) ([]Seat, error) { return nil, nil }},
-		files:  newFakeFiles(),
-		inst:   &runInstaller{result: InstallResult{Event: "installed", Commit: "bbbb2222", Prev: "aaaa1111"}},
-		log:    &bytes.Buffer{},
+		store:      &Store{Dir: filepath.Join(t.TempDir(), "update")},
+		clock:      &fakeDrainClock{now: drainTestStart()},
+		probes:     &fakeProbes{installed: "aaaa1111", main: runTestSHA, backup: true, published: true},
+		seats:      &fakeDrainProbe{answer: func(int) ([]Seat, error) { return nil, nil }},
+		files:      newFakeFiles(),
+		inst:       &runInstaller{result: InstallResult{Event: "installed", Commit: runTestSHA, Prev: "aaaa1111"}},
+		maintFiles: newFakeMaintFiles(),
+		verify:     runVerifyProbes(runTestSHA),
+		log:        &bytes.Buffer{},
 	}
 	f.hold = NewHold(testTownRoot, f.files)
+	f.maint = &MaintenanceRequest{Dir: maintTestDir, Files: f.maintFiles, Clock: f.clock}
 	f.deps = Deps{
 		Clock:     f.clock,
 		Sleep:     f.clock.sleep,
@@ -75,6 +87,8 @@ func newRunFixture(t *testing.T) *runFixture {
 		Seats:     f.seats,
 		Hold:      f.hold,
 		Installer: f.inst,
+		Maint:     f.maint,
+		Verify:    f.verify,
 		NewRunID:  func() string { return runTestID },
 		Log:       f.log,
 	}
@@ -110,6 +124,40 @@ func step(t *testing.T, st State, name StepName) StepRecord {
 func (f *runFixture) holdExists() bool {
 	_, ok := f.files.entry(f.hold.Path)
 	return ok
+}
+
+// runVerifyProbes reports sha from every probe, so verify passes against the
+// build a run installed.
+func runVerifyProbes(sha string) *fakeVerifyProbes {
+	return &fakeVerifyProbes{
+		gt:     sha,
+		image:  sha,
+		health: verifyTestGreen,
+		daemon: []verifyAnswer{{version: sha}},
+	}
+}
+
+// maintDaemon makes the fake daemon answer the run's maintenance request on its
+// next wait, as the daemon does between two polls: it writes res as the result
+// and removes the request.
+func (f *runFixture) maintDaemon(t *testing.T, res MaintenanceResult) {
+	t.Helper()
+	f.clock.onSleep = func() {
+		if _, ok := f.maintFiles.entry(f.maint.requestPath()); !ok {
+			return
+		}
+		f.clock.onSleep = nil
+		f.answerMaint(t, res)
+	}
+}
+
+// answerMaint completes the request the run wrote.
+func (f *runFixture) answerMaint(t *testing.T, res MaintenanceResult) {
+	t.Helper()
+	putMaintJSON(t, f.maintFiles, f.maint.resultPath(), res)
+	if err := f.maintFiles.Remove(f.maint.requestPath()); err != nil {
+		t.Fatalf("remove maintenance request: %v", err)
+	}
 }
 
 // watchPublishes makes the store record every record it publishes, so a test
@@ -330,21 +378,16 @@ func TestRunInstallPathRecordsEveryStep(t *testing.T) {
 	if final.Target.SHA != "bbbb2222" {
 		t.Errorf("Target.SHA = %q, want the main build", final.Target.SHA)
 	}
-	if f.inst.sha != "bbbb2222" {
-		t.Errorf("installer asked for %q, want %q", f.inst.sha, "bbbb2222")
+	if f.inst.sha != runTestSHA {
+		t.Errorf("installer asked for %q, want %q", f.inst.sha, runTestSHA)
 	}
-	for _, name := range []StepName{StepDrain, StepInstall, StepLift} {
+	for _, name := range []StepName{StepDrain, StepInstall, StepRestart, StepVerify, StepLift} {
 		if got := step(t, final, name).Result; got != ResultOK {
 			t.Errorf("%s Result = %q, want %q", name, got, ResultOK)
 		}
 	}
 	if got := step(t, final, StepMaintenance); got.Result != ResultSkipped || got.Reason != "nothing is due" {
 		t.Errorf("maintenance = (%q, %q), want skipped with its reason", got.Result, got.Reason)
-	}
-	for _, name := range []StepName{StepRestart, StepVerify} {
-		if got := step(t, final, name); got.Result != ResultSkipped || got.Detail != notImplementedDetail {
-			t.Errorf("%s = (%q, %q), want skipped with %q", name, got.Result, got.Detail, notImplementedDetail)
-		}
 	}
 	if f.holdExists() {
 		t.Error("the run owns the hold, so it must have released it")
@@ -591,8 +634,9 @@ func TestRunNoInstallTakesNoHold(t *testing.T) {
 	f := newRunFixture(t)
 	// Nothing to install, but the archive is behind, so only maintenance is
 	// planned: with no drain there is no hold, and the lift step says so.
-	f.probes.installed = "bbbb2222"
+	f.probes.installed = runTestSHA
 	f.probes.commits = 5
+	f.maintDaemon(t, MaintenanceResult{RunID: runTestID, Outcome: "completed", Detail: "the archive is current"})
 
 	final, err := f.run(context.Background())
 	if err != nil {
@@ -708,6 +752,416 @@ func TestRunHoldReleaseFailureIsRecorded(t *testing.T) {
 		}
 		if !f.holdExists() {
 			t.Error("the test expected the hold to remain when its removal fails")
+		}
+	})
+}
+
+func TestRunMaintenanceRunsBetweenDrainAndInstall(t *testing.T) {
+	t.Parallel()
+	f := newRunFixture(t)
+	f.probes.commits = 5 // the archive is behind, so maintenance is planned
+
+	var events []string
+	f.seats.answer = func(int) ([]Seat, error) {
+		if f.holdExists() {
+			events = append(events, "hold")
+		}
+		events = append(events, "drain")
+		return nil, nil
+	}
+	f.inst.onCall = func(context.Context) { events = append(events, "install") }
+	// The daemon takes the request while the run waits for it, so the wait's
+	// first sleep is where it answers.
+	f.clock.onSleep = func() {
+		if _, ok := f.maintFiles.entry(f.maint.requestPath()); !ok {
+			return
+		}
+		f.clock.onSleep = nil
+		events = append(events, "maintenance")
+		f.answerMaint(t, MaintenanceResult{RunID: runTestID, Outcome: "completed", Detail: "the archive is current"})
+	}
+
+	final, err := f.run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if want := []string{"hold", "drain", "maintenance", "install"}; !slices.Equal(events, want) {
+		t.Errorf("events = %v, want %v", events, want)
+	}
+	if final.Outcome != OutcomeOK {
+		t.Errorf("Outcome = %q, want %q", final.Outcome, OutcomeOK)
+	}
+	maint := step(t, final, StepMaintenance)
+	if maint.Result != ResultOK {
+		t.Errorf("maintenance Result = %q, want %q", maint.Result, ResultOK)
+	}
+	if maint.Detail != "the archive is current" {
+		t.Errorf("maintenance Detail = %q, want the cycle's detail", maint.Detail)
+	}
+	if !strings.Contains(f.log.String(), "the archive is current") {
+		t.Errorf("log is missing the maintenance detail:\n%s", f.log.String())
+	}
+	for _, name := range []StepName{StepDrain, StepMaintenance, StepInstall, StepRestart, StepVerify, StepLift} {
+		if got := step(t, final, name).Result; got != ResultOK {
+			t.Errorf("%s Result = %q, want %q", name, got, ResultOK)
+		}
+	}
+	if f.holdExists() {
+		t.Error("the run owns the hold, so it must have released it")
+	}
+}
+
+func TestRunMaintenanceFailureOrDeferralIsPartialAndInstallStillRuns(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		outcome    string
+		detail     string
+		requestErr error
+		wantStep   StepResult
+		wantDetail string
+	}{
+		{
+			name:       "a failed cycle",
+			outcome:    maintenanceFailed,
+			detail:     "the archive is locked",
+			wantStep:   ResultFailed,
+			wantDetail: "the archive is locked",
+		},
+		{
+			name:       "a deferred cycle",
+			outcome:    maintenanceDeferred,
+			detail:     "the quiet guard held the gc",
+			wantStep:   ResultDeferred,
+			wantDetail: "the quiet guard held the gc",
+		},
+		{
+			name:       "an outcome the protocol does not define",
+			outcome:    "half-done",
+			detail:     "the daemon wrote its own word",
+			wantStep:   ResultFailed,
+			wantDetail: "the daemon wrote its own word",
+		},
+		{
+			name:       "a request the daemon cannot take",
+			requestErr: errors.New("permission denied"),
+			wantStep:   ResultFailed,
+			wantDetail: "permission denied",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newRunFixture(t)
+			f.probes.commits = 5
+			if tt.requestErr != nil {
+				f.maintFiles.createErr[f.maint.requestPath()] = tt.requestErr
+			} else {
+				f.maintDaemon(t, MaintenanceResult{RunID: runTestID, Outcome: tt.outcome, Detail: tt.detail})
+			}
+
+			final, err := f.run(context.Background())
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if final.Outcome != OutcomePartial {
+				t.Errorf("Outcome = %q, want %q", final.Outcome, OutcomePartial)
+			}
+			if f.inst.calls != 1 {
+				t.Errorf("installer called %d times, want 1: maintenance must not stop the install", f.inst.calls)
+			}
+			if got := step(t, final, StepInstall).Result; got != ResultOK {
+				t.Errorf("install Result = %q, want %q", got, ResultOK)
+			}
+			maint := step(t, final, StepMaintenance)
+			if maint.Result != tt.wantStep {
+				t.Errorf("maintenance Result = %q, want %q", maint.Result, tt.wantStep)
+			}
+			if !strings.Contains(maint.Detail, tt.wantDetail) {
+				t.Errorf("maintenance Detail = %q, want it to carry %q", maint.Detail, tt.wantDetail)
+			}
+			if !strings.Contains(f.log.String(), tt.wantDetail) {
+				t.Errorf("log is missing %q:\n%s", tt.wantDetail, f.log.String())
+			}
+			if f.holdExists() {
+				t.Error("the run owns the hold, so it must have released it")
+			}
+		})
+	}
+}
+
+func TestRunRestartTimeoutIsPartialInstalledRestartPending(t *testing.T) {
+	t.Parallel()
+	f := newRunFixture(t)
+	// The daemon never comes up on the new build, so every poll reports the
+	// build that was installed before this run.
+	f.verify.daemon = []verifyAnswer{{version: verifyTestOld}}
+
+	final, err := f.run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if final.Outcome != OutcomePartial {
+		t.Errorf("Outcome = %q, want %q", final.Outcome, OutcomePartial)
+	}
+	if got := step(t, final, StepInstall).Result; got != ResultOK {
+		t.Errorf("install Result = %q, want %q", got, ResultOK)
+	}
+	restart := step(t, final, StepRestart)
+	if restart.Result != ResultDeferred || restart.Detail != restartPendingDetail {
+		t.Errorf("restart = (%q, %q), want deferred with %q", restart.Result, restart.Detail, restartPendingDetail)
+	}
+	verify := step(t, final, StepVerify)
+	if verify.Result != ResultSkipped || verify.Detail != verifyRestartPendingDetail {
+		t.Errorf("verify = (%q, %q), want skipped with %q", verify.Result, verify.Detail, verifyRestartPendingDetail)
+	}
+	if f.verify.daemonCalls < 2 {
+		t.Errorf("the daemon was polled %d times, want the wait to keep polling until its timeout", f.verify.daemonCalls)
+	}
+	if f.verify.gtCalls+f.verify.imageCalls+f.verify.healthCalls != 0 {
+		t.Errorf("verify ran (%d gt, %d image, %d health calls), want none after a restart that timed out",
+			f.verify.gtCalls, f.verify.imageCalls, f.verify.healthCalls)
+	}
+	if got := step(t, final, StepLift).Result; got != ResultOK {
+		t.Errorf("lift Result = %q, want %q", got, ResultOK)
+	}
+	if f.holdExists() {
+		t.Error("the run owns the hold, so it must have released it")
+	}
+}
+
+func TestRunVerifyFailureIsPartialNamingTheChecks(t *testing.T) {
+	t.Parallel()
+	f := newRunFixture(t)
+	f.verify.gt = verifyTestOld
+
+	final, err := f.run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if final.Outcome != OutcomePartial {
+		t.Errorf("Outcome = %q, want %q", final.Outcome, OutcomePartial)
+	}
+	if got := step(t, final, StepInstall).Result; got != ResultOK {
+		t.Errorf("install Result = %q, want %q", got, ResultOK)
+	}
+	if got := step(t, final, StepRestart).Result; got != ResultOK {
+		t.Errorf("restart Result = %q, want %q", got, ResultOK)
+	}
+	verify := step(t, final, StepVerify)
+	if verify.Result != ResultFailed {
+		t.Errorf("verify Result = %q, want %q", verify.Result, ResultFailed)
+	}
+	if !strings.Contains(verify.Detail, checkGTVersion) {
+		t.Errorf("verify Detail = %q, want the failed check's name %q", verify.Detail, checkGTVersion)
+	}
+	if !strings.Contains(verify.Detail, verifyTestOld) {
+		t.Errorf("verify Detail = %q, want what the check reported %q", verify.Detail, verifyTestOld)
+	}
+	if strings.Contains(verify.Detail, checkHealth) {
+		t.Errorf("verify Detail = %q, want only the checks that failed", verify.Detail)
+	}
+	if f.holdExists() {
+		t.Error("the run owns the hold, so it must have released it")
+	}
+}
+
+func TestRunMaintenanceOnlyTakesNoHold(t *testing.T) {
+	t.Parallel()
+	f := newRunFixture(t)
+	f.probes.installed = runTestSHA // nothing to install
+	f.probes.commits = 5            // but the archive is behind
+	f.maintDaemon(t, MaintenanceResult{RunID: runTestID, Outcome: "completed", Detail: "the archive is current"})
+
+	final, err := f.run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if final.Outcome != OutcomeOK {
+		t.Errorf("Outcome = %q, want %q", final.Outcome, OutcomeOK)
+	}
+	if got := step(t, final, StepMaintenance).Result; got != ResultOK {
+		t.Errorf("maintenance Result = %q, want %q", got, ResultOK)
+	}
+	if f.inst.calls != 0 {
+		t.Errorf("installer called %d times, want 0", f.inst.calls)
+	}
+	if f.holdExists() {
+		t.Error("a run with nothing to install took the dispatch hold")
+	}
+	for _, name := range []StepName{StepDrain, StepInstall} {
+		if got := step(t, final, name).Result; got != ResultSkipped {
+			t.Errorf("%s Result = %q, want %q", name, got, ResultSkipped)
+		}
+	}
+	lift := step(t, final, StepLift)
+	if lift.Result != ResultSkipped || lift.Detail != noHoldDetail {
+		t.Errorf("lift = (%q, %q), want skipped with %q", lift.Result, lift.Detail, noHoldDetail)
+	}
+	if f.verify.gtCalls+f.verify.daemonCalls+f.verify.imageCalls+f.verify.healthCalls != 0 {
+		t.Error("verify ran on a run that installed nothing")
+	}
+}
+
+func TestRunCancelledDuringTheWaitsIsInterrupted(t *testing.T) {
+	t.Parallel()
+
+	t.Run("during maintenance", func(t *testing.T) {
+		t.Parallel()
+		f := newRunFixture(t)
+		f.probes.commits = 5
+		ctx, cancel := context.WithCancel(context.Background())
+		f.clock.onSleep = func() { cancel() }
+
+		final, err := f.run(ctx)
+		if err != nil {
+			t.Fatalf("Run returned %v, want no error for a canceled run", err)
+		}
+		if final.Outcome != OutcomeInterrupted {
+			t.Errorf("Outcome = %q, want %q", final.Outcome, OutcomeInterrupted)
+		}
+		maint := step(t, final, StepMaintenance)
+		if maint.Result != ResultFailed || maint.Detail != "canceled" {
+			t.Errorf("maintenance = (%q, %q), want failed with %q", maint.Result, maint.Detail, "canceled")
+		}
+		if f.inst.calls != 0 {
+			t.Errorf("installer called %d times, want 0 after the cancel", f.inst.calls)
+		}
+		if f.holdExists() {
+			t.Error("the canceled run left the hold it owns in place")
+		}
+	})
+
+	t.Run("during the restart", func(t *testing.T) {
+		t.Parallel()
+		f := newRunFixture(t)
+		f.verify.daemon = []verifyAnswer{{version: verifyTestOld}}
+		ctx, cancel := context.WithCancel(context.Background())
+		f.clock.onSleep = func() { cancel() }
+
+		final, err := f.run(ctx)
+		if err != nil {
+			t.Fatalf("Run returned %v, want no error for a canceled run", err)
+		}
+		if final.Outcome != OutcomeInterrupted {
+			t.Errorf("Outcome = %q, want %q", final.Outcome, OutcomeInterrupted)
+		}
+		restart := step(t, final, StepRestart)
+		if restart.Result != ResultFailed || restart.Detail != "canceled" {
+			t.Errorf("restart = (%q, %q), want failed with %q", restart.Result, restart.Detail, "canceled")
+		}
+		if got := step(t, final, StepVerify).Result; got != ResultPending {
+			t.Errorf("verify Result = %q, want %q: the run never reached it", got, ResultPending)
+		}
+		if f.inst.calls != 1 {
+			t.Errorf("installer called %d times, want 1", f.inst.calls)
+		}
+		if f.holdExists() {
+			t.Error("the canceled run left the hold it owns in place")
+		}
+	})
+}
+
+func TestRunAppendsHistoryOnEveryEnding(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		want   Outcome
+		dryRun bool
+		setup  func(t *testing.T, f *runFixture) context.Context
+	}{
+		{name: "ok", want: OutcomeOK},
+		{
+			name: "partial",
+			want: OutcomePartial,
+			setup: func(t *testing.T, f *runFixture) context.Context {
+				f.verify.gt = verifyTestOld
+				return context.Background()
+			},
+		},
+		{
+			name: "failed",
+			want: OutcomeFailed,
+			setup: func(t *testing.T, f *runFixture) context.Context {
+				f.inst.result = InstallResult{Event: "failed", Exit: 1, Reason: "the build did not compile"}
+				return context.Background()
+			},
+		},
+		{
+			name: "aborted",
+			want: OutcomeAborted,
+			setup: func(t *testing.T, f *runFixture) context.Context {
+				f.seats.answer = func(int) ([]Seat, error) {
+					return []Seat{{Name: "furiosa", Working: true, LastActive: drainTestStart()}}, nil
+				}
+				return context.Background()
+			},
+		},
+		{
+			name: "interrupted",
+			want: OutcomeInterrupted,
+			setup: func(t *testing.T, f *runFixture) context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				f.inst.onCall = func(context.Context) { cancel() }
+				f.inst.err = context.Canceled
+				return ctx
+			},
+		},
+		{name: "a dry run", want: OutcomeOK, dryRun: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newRunFixture(t)
+			f.opts.DryRun = tt.dryRun
+			ctx := context.Background()
+			if tt.setup != nil {
+				ctx = tt.setup(t, f)
+			}
+
+			final, err := f.run(ctx)
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if final.Outcome != tt.want {
+				t.Errorf("Outcome = %q, want %q", final.Outcome, tt.want)
+			}
+			path := filepath.Join(f.store.Dir, historyFileName)
+			if tt.dryRun {
+				if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("stat history.jsonl after a dry run: %v, want ErrNotExist", err)
+				}
+				return
+			}
+			lines := readHistoryLines(t, path)
+			if len(lines) != 1 {
+				t.Fatalf("history has %d lines, want 1", len(lines))
+			}
+			if lines[0].Outcome != tt.want {
+				t.Errorf("history outcome = %q, want %q", lines[0].Outcome, tt.want)
+			}
+			if lines[0].RunID != runTestID {
+				t.Errorf("history run id = %q, want %q", lines[0].RunID, runTestID)
+			}
+		})
+	}
+
+	t.Run("an append error is logged and the run still ends", func(t *testing.T) {
+		t.Parallel()
+		f := newRunFixture(t)
+		f.store.openHistory = func(string) (historyWriter, error) {
+			return nil, errors.New("the disk is full")
+		}
+
+		final, err := f.run(context.Background())
+		if err != nil {
+			t.Fatalf("Run returned %v, want the history failure in the log", err)
+		}
+		if final.Outcome != OutcomeOK {
+			t.Errorf("Outcome = %q, want %q", final.Outcome, OutcomeOK)
+		}
+		if !strings.Contains(f.log.String(), "the disk is full") {
+			t.Errorf("log is missing the history failure:\n%s", f.log.String())
 		}
 	})
 }
