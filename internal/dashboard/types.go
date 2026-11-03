@@ -656,6 +656,35 @@ type TierSweep struct {
 	TrendsUnavailable bool `json:"trends_unavailable,omitempty"`
 }
 
+// UpdateStep is one step of a gt update run as the feed draws it: whether the
+// run planned to take it and, once it ran, how it went. Detail is the step's
+// own note, empty for a step that has not run.
+type UpdateStep struct {
+	Name    string `json:"name"`
+	WillRun bool   `json:"will_run"`
+	Result  string `json:"result"`
+	Detail  string `json:"detail,omitempty"`
+}
+
+// UpdateStatus is the gt update job's current or last run, read from the record
+// the run rewrites at every step (internal/update). Running says the record's
+// outcome is still running; ElapsedSec is its wall time so far, or the whole
+// run's once it ended; HeartbeatAgeSec is how stale a running run's last
+// heartbeat is, so a job that died is visible as one, and is 0 for a run that
+// ended. Steps is every step of the plan in run order.
+type UpdateStatus struct {
+	Running         bool         `json:"running"`
+	RunID           string       `json:"run_id"`
+	Source          string       `json:"source"`
+	Current         string       `json:"current,omitempty"`
+	Outcome         string       `json:"outcome"`
+	StartedAt       time.Time    `json:"started_at"`
+	EndedAt         time.Time    `json:"ended_at,omitempty"`
+	ElapsedSec      int          `json:"elapsed_sec"`
+	HeartbeatAgeSec int          `json:"heartbeat_age_sec"`
+	Steps           []UpdateStep `json:"steps"`
+}
+
 // EscalationRow is one open escalation as the pane draws it. At is when it was
 // raised, off the bead's own escalated_at (its creation time when that line is
 // missing); AgeSec is that time read against the reader's clock, and is nil
@@ -763,6 +792,11 @@ type State struct {
 	JevScorecard *JevScorecard `json:"jev_scorecard,omitempty"`
 	OM           *OM           `json:"om,omitempty"`
 	TierSweep    *TierSweep    `json:"tiersweep,omitempty"`
+	// Update is the gt update job's run while it is in flight or for a day
+	// after it ended, which is why nothing is being dispatched. It is nil when
+	// no run has recorded state, when the record cannot be read, and for a run
+	// that ended more than a day ago.
+	Update *UpdateStatus `json:"update,omitempty"`
 	// Models is the header strip: the polecat model, the pool's seats against
 	// its cap, and the reviewer's model. It is nil until the reader reports.
 	Models *Models `json:"models,omitempty"`
@@ -832,6 +866,9 @@ type Config struct {
 	OM func() *OM
 	// TierSweep reads the daemon's tier sweeps from the daemon log.
 	TierSweep func() *TierSweep
+	// Update reads the gt update job's run from the record it writes. Nil, or
+	// a nil return, leaves the feed without an update section.
+	Update func() *UpdateStatus
 	// Forgejo reads the viewer's Forgejo recent-activity feed.
 	Forgejo func() *ForgejoFeed
 	// News reads the top Hacker News stories for the News pane.
@@ -923,6 +960,7 @@ type Config struct {
 	JevScorecardEvery time.Duration
 	OMEvery           time.Duration
 	TierSweepEvery    time.Duration
+	UpdateEvery       time.Duration
 	ForgejoEvery      time.Duration
 	NewsEvery         time.Duration
 	DeploysEvery      time.Duration
@@ -969,6 +1007,10 @@ func (c *Config) defaults() {
 	def(&c.JevScorecardEvery, 15*time.Minute)
 	def(&c.OMEvery, 60*time.Second)
 	def(&c.TierSweepEvery, 60*time.Second)
+	// The update job rewrites its record at every step, and a step that
+	// changes is what the page's banner is for, so it is read on the page's
+	// own clock rather than a minute's.
+	def(&c.UpdateEvery, 10*time.Second)
 	def(&c.ForgejoEvery, 3*time.Minute)
 	// The front page turns over in hours and the reader holds what it read for
 	// five minutes, so the poll is a fraction of that: it only publishes a
