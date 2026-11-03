@@ -196,10 +196,10 @@ func (d *Daemon) runScheduledMaintenance() {
 		return // Already ran this window
 	}
 
-	// A standby (the hold file, the town ESTOP or a Waned Ring) starts no gc,
-	// but the night's backup still runs (startStandbyBackup). The window is
-	// consumed only once that backup ends, so the gc waits for the catch-up.
-	reason := d.standbyReason(now, true)
+	// A standby (the town ESTOP or a Waned Ring) starts no gc, but the
+	// night's backup still runs (startStandbyBackup). The window is consumed
+	// only once that backup ends, so the gc waits for the catch-up.
+	reason := d.standbyReason(now)
 	d.logStandby(&d.standbyMaintenance, "scheduled_maintenance", reason)
 	if reason != "" {
 		d.startStandbyBackup(window)
