@@ -143,6 +143,19 @@ func TestDoltContainerPlanCommand(t *testing.T) {
 		}
 	})
 
+	t.Run("a refused plan is an error", func(t *testing.T) {
+		t.Parallel()
+		args := planTestArgs()
+		args[1] = "-bad"
+		_, err := executeDoltContainerPlan(t, planTestDeps(t), args...)
+		if err == nil {
+			t.Fatal("the command printed a plan for a name docker reads as a flag")
+		}
+		if !strings.Contains(err.Error(), "container name") {
+			t.Fatalf("error %q does not name the container name", err)
+		}
+	})
+
 	t.Run("no positional arguments", func(t *testing.T) {
 		t.Parallel()
 		_, err := executeDoltContainerPlan(t, planTestDeps(t), append(planTestArgs(), "extra")...)
