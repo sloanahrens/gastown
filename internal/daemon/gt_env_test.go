@@ -129,6 +129,77 @@ func TestWithPolecatImageTrimContextRefusesADisabledSweep(t *testing.T) {
 	}
 }
 
+// trimEnvRunner builds a patrol config whose tier sweep runs on backend with
+// context, enabled or not.
+func trimEnvRunner(enabled bool, backend, context string) *DaemonPatrolConfig {
+	return &DaemonPatrolConfig{Patrols: &PatrolsConfig{TierSweep: &TierSweepConfig{
+		Enabled: enabled,
+		Runner:  &agentconfig.TierSweepRunnerConfig{Backend: backend, Context: context},
+	}}}
+}
+
+// TestPolecatImageTrimEnvActiveReturnsOneEntry pins the entry gt update hands
+// the installer: the sweep's own engine, as a single KEY=context element
+// (gt-o4sk8.22).
+func TestPolecatImageTrimEnvActiveReturnsOneEntry(t *testing.T) {
+	t.Parallel()
+	env, err := PolecatImageTrimEnv(trimEnvRunner(true, agentconfig.TierSweepRunnerDocker, "colima-gt-control"))
+	if err != nil {
+		t.Fatalf("PolecatImageTrimEnv() error = %v, want nil", err)
+	}
+	want := []string{polecatImageTrimContextEnv + "=colima-gt-control"}
+	if !slices.Equal(env, want) {
+		t.Errorf("PolecatImageTrimEnv() = %q, want %q", env, want)
+	}
+}
+
+// TestPolecatImageTrimEnvNoEntryWhenInactiveOrEmpty pins that a sweep that is
+// off, has no engine of its own or names no context contributes nothing
+// (gt-o4sk8.22).
+func TestPolecatImageTrimEnvNoEntryWhenInactiveOrEmpty(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		cfg  *DaemonPatrolConfig
+	}{
+		{name: "no patrol config"},
+		{name: "no patrols", cfg: &DaemonPatrolConfig{}},
+		{name: "no tier sweep", cfg: &DaemonPatrolConfig{Patrols: &PatrolsConfig{}}},
+		{name: "a disabled sweep", cfg: trimEnvRunner(false, agentconfig.TierSweepRunnerDocker, "colima-gt-control")},
+		{name: "no runner", cfg: &DaemonPatrolConfig{Patrols: &PatrolsConfig{TierSweep: &TierSweepConfig{Enabled: true}}}},
+		{name: "an unknown backend", cfg: trimEnvRunner(true, "podman", "colima-gt-control")},
+		{name: "an empty context", cfg: trimEnvRunner(true, agentconfig.TierSweepRunnerDocker, "")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env, err := PolecatImageTrimEnv(tc.cfg)
+			if err != nil {
+				t.Errorf("PolecatImageTrimEnv() error = %v, want nil", err)
+			}
+			if env != nil {
+				t.Errorf("PolecatImageTrimEnv() = %q, want nil", env)
+			}
+		})
+	}
+}
+
+// TestPolecatImageTrimEnvRejectsAnInvalidContext pins the input guard: a
+// context that is not one Docker context name is refused, and the error names
+// it so the typo is findable (gt-o4sk8.22).
+func TestPolecatImageTrimEnvRejectsAnInvalidContext(t *testing.T) {
+	t.Parallel()
+	env, err := PolecatImageTrimEnv(trimEnvRunner(true, agentconfig.TierSweepRunnerDocker, "-rf"))
+	if err == nil {
+		t.Fatal("PolecatImageTrimEnv() error = nil, want a refusal")
+	}
+	if env != nil {
+		t.Errorf("PolecatImageTrimEnv() = %q, want nil", env)
+	}
+	if !strings.Contains(err.Error(), `"-rf"`) {
+		t.Errorf("error = %q, want it to name the refused context", err)
+	}
+}
+
 // TestUnsafeTrimContextIsRefusedAndLogged is the alarm for the input guard: a
 // town whose runner context is not one Docker context name publishes nothing to
 // the plugin, and the log names the value it refused so the typo is findable

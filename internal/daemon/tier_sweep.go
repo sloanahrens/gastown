@@ -1746,29 +1746,52 @@ func polecatImageTrimContext(patrols *DaemonPatrolConfig) string {
 	return ""
 }
 
+// PolecatImageTrimEnv is the environment entry that makes the installer's
+// image trim cover the tier sweep's Docker context: one "KEY=context" element,
+// or nil when no entry applies (the tier_sweep patrol is not active, or its
+// context is empty). A context that is not a valid Docker context name is an
+// error naming it and returns a nil slice.
+//
+// The patrol counts as active here from cfg alone (its block present and
+// enabled); a caller holding the daemon's disabled list or container mode
+// applies that rule before calling.
+func PolecatImageTrimEnv(cfg *DaemonPatrolConfig) ([]string, error) {
+	if !IsPatrolEnabled(cfg, "tier_sweep") {
+		return nil, nil
+	}
+	name := polecatImageTrimContext(cfg)
+	if name == "" {
+		return nil, nil
+	}
+	if !polecatimage.ContextName(name) {
+		return nil, fmt.Errorf("tier_sweep runner context %q is not one Docker context name; the polecat-image plugin will not trim it", name)
+	}
+	return []string{polecatImageTrimContextEnv + "=" + name}, nil
+}
+
 // withPolecatImageTrimContext names the engine the polecat-image plugin trims
 // beside the default engine in the installer's environment, and nowhere else:
 // the installer passes its environment to the plugin, so the value reaches
 // that run without every session the daemon spawns inheriting it (gt-bxp17).
-// A context that is not one Docker context name keeps every tag rather than
-// reaching docker's argv, and is named in the log.
+// A refused context keeps every tag rather than reaching docker's argv, and is
+// named in the log.
 func (d *Daemon) withPolecatImageTrimContext(env []string) []string {
 	if !d.isPatrolActive("tier_sweep") {
 		return env
 	}
-	context := polecatImageTrimContext(d.patrolConfig)
-	if context == "" {
+	entry, err := PolecatImageTrimEnv(d.patrolConfig)
+	if err != nil {
+		d.logger.Printf("%v", err)
 		return env
 	}
-	if !polecatimage.ContextName(context) {
-		d.logger.Printf("tier_sweep runner context %q is not one Docker context name; the polecat-image plugin will not trim it", context)
+	if entry == nil {
 		return env
 	}
 	env = slices.DeleteFunc(env, func(kv string) bool {
 		k, _, _ := strings.Cut(kv, "=")
 		return k == polecatImageTrimContextEnv
 	})
-	return append(env, polecatImageTrimContextEnv+"="+context)
+	return append(env, entry...)
 }
 
 // tierSweepRunnerImage is the image a run's containers use: the pin the config
