@@ -1032,7 +1032,8 @@ func runSpecLint(cmd *cobra.Command, args []string) error {
 	if path == "" {
 		path = specTemplatePath(loadSpecDispatchConfig(townRoot))
 	}
-	spec, err := specForLint(townRoot, args[0], func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) }, openRigTree)
+	read := specBlockerRead(nil, func(id string) (*beads.Issue, error) { return showBead(townRoot, id) })
+	spec, err := specForLint(townRoot, args[0], func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) }, read, openRigTree)
 	return runSpecLintAt(cmd.OutOrStdout(), cmd.ErrOrStderr(), townRoot, args[0], spec, err, path, hmHintSource(nil), specLintJSON, time.Now())
 }
 
@@ -1042,15 +1043,19 @@ func runSpecLint(cmd *cobra.Command, args []string) error {
 //
 // A bead with a Files section also gets the paths its open transitive blockers
 // create, so a Files "modify:" path an open blocker adds passes the check
-// (gt-hgt9j.12). A blocker the walk cannot read returns its error here, and the
-// lint refuses the bead on it: a graph read as empty would refuse the path.
-func specForLint(townRoot, beadID string, show func(string) (specdispatch.Spec, error), open treeOpener) (specdispatch.Spec, error) {
+// (gt-hgt9j.12). read is that walk's read: specBlockerRead over bd in
+// runSpecLint, a seeded graph in a test. A blocker the walk cannot read returns
+// its error here, and the lint refuses the bead on it: a graph read as empty
+// would refuse the path. A blocker whose Files section does not parse holds the
+// dependent bead the same way, and that is intended — a section that does not
+// parse is not a blocker that creates no path, so the walk cannot answer and
+// the bead is refused rather than passed on a graph it could not read.
+func specForLint(townRoot, beadID string, show func(string) (specdispatch.Spec, error), read func(string) (specdispatch.Spec, []string, error), open treeOpener) (specdispatch.Spec, error) {
 	spec, err := show(beadID)
 	if err != nil {
 		return spec, err
 	}
 	spec.Target = specLintTarget(townRoot, beadID, open)
-	read := specBlockerRead(nil, func(id string) (*beads.Issue, error) { return showBead(townRoot, id) })
 	return specWithBlockerCreates(spec, read, beadID)
 }
 

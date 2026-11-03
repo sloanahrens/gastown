@@ -212,7 +212,7 @@ func TestSpecForLintCarriesTheBeadsTargetInventory(t *testing.T) {
 		{bead: "zz-nowhere", want: "no rig holds"},
 	}
 	for _, tc := range tests {
-		spec, err := specForLint(townRoot, tc.bead, show, openRigTree)
+		spec, err := specForLint(townRoot, tc.bead, show, unexpectedBlockerRead(t), openRigTree)
 		if err != nil {
 			t.Fatalf("specForLint(%s): %v", tc.bead, err)
 		}
@@ -225,7 +225,7 @@ func TestSpecForLintCarriesTheBeadsTargetInventory(t *testing.T) {
 	}
 	// A bead that did not read is linted on that failure alone.
 	readErr := errors.New("bead gt-gone not found")
-	failed, err := specForLint(townRoot, "gt-gone", func(string) (specdispatch.Spec, error) { return specdispatch.Spec{}, readErr }, openRigTree)
+	failed, err := specForLint(townRoot, "gt-gone", func(string) (specdispatch.Spec, error) { return specdispatch.Spec{}, readErr }, unexpectedBlockerRead(t), openRigTree)
 	if !errors.Is(err, readErr) || failed.Target != nil {
 		t.Errorf("specForLint of an unreadable bead = %+v, %v; want the read error and no inventory", failed, err)
 	}

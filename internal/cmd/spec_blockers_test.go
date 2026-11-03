@@ -1,11 +1,13 @@
 package cmd
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
@@ -475,6 +477,17 @@ func TestBlockerCreatesRootWithoutFilesSkipsTheWalk(t *testing.T) {
 	}
 }
 
+// unexpectedBlockerRead is specForLint's read for a bead with no Files section:
+// the walk asks the graph nothing, so a blocker read reaching it is a call the
+// fixture did not expect.
+func unexpectedBlockerRead(t *testing.T) func(string) (specdispatch.Spec, []string, error) {
+	t.Helper()
+	return func(id string) (specdispatch.Spec, []string, error) {
+		t.Errorf("blocker read of %s, want none for a bead with no Files section", id)
+		return specdispatch.Spec{}, nil, nil
+	}
+}
+
 // specFilesBead is a dispatchable bead whose Files section names path with verb,
 // so the lint asks the blocker graph whether an open blocker creates it
 // (gt-hgt9j.12).
@@ -482,6 +495,56 @@ func specFilesBead(id, verb, path string) specdispatch.Spec {
 	s := cleanSpec(id, 2, "2026-09-29T12:00:00Z")
 	s.Description = specTestDescription + "\n\n## Files\n" + verb + ": " + path
 	return s
+}
+
+// The lint path holds a bead whose blocker graph it cannot read: specForLint
+// returns the walk's error naming the blocker, and runSpecLintAt reports that
+// as a refusal rather than a clean lint. A blocker whose Files section does not
+// parse holds the dependent bead the same way (intended: fail closed), since a
+// section that does not parse cannot answer what it creates (gt-hgt9j.12).
+func TestSpecForLintRefusesAnUnreadableBlocker(t *testing.T) {
+	t.Parallel()
+	bead := specFilesBead("gt-files", "modify", "internal/cmd/new.go")
+	cases := []struct {
+		name string
+		// blockers holds the descriptions the read answers; gt-blocker absent
+		// from it is a blocker whose read fails.
+		blockers map[string]string
+		want     string // the blocker the refusal must name
+	}{
+		{name: "unreadable blocker", want: "gt-blocker"},
+		{
+			name:     "blocker files do not parse",
+			blockers: map[string]string{"gt-blocker": "## Files\nrename: x.go\n"},
+			want:     "gt-blocker",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			descriptions := map[string]string{"gt-files": bead.Description}
+			for id, description := range tc.blockers {
+				descriptions[id] = description
+			}
+			read := blockerGraph(descriptions, map[string][]string{"gt-files": {"gt-blocker"}})
+
+			spec, err := specForLint(t.TempDir(), "gt-files",
+				func(string) (specdispatch.Spec, error) { return bead, nil }, read, openRigTree)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("specForLint = %v, %v; want an error naming %s", spec, err, tc.want)
+			}
+
+			var out, errOut bytes.Buffer
+			lintErr := runSpecLintAt(&out, &errOut, "", "gt-files", spec, err, "", nil, false, time.Now())
+			code, silent := IsSilentExit(lintErr)
+			if !silent || code != specLintExitRefused {
+				t.Fatalf("runSpecLintAt = %v, want a silent exit %d", lintErr, specLintExitRefused)
+			}
+			if line := out.String(); !strings.Contains(line, "spec lint refused") || !strings.Contains(line, tc.want) {
+				t.Errorf("lint line %q, want a refusal naming %s", line, tc.want)
+			}
+		})
+	}
 }
 
 // The tick refuses a bead whose blocker graph cannot be read, with the read's
