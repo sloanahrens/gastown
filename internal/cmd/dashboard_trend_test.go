@@ -1145,6 +1145,43 @@ func TestBuildRecentLandingsMarksACrewBranchRow(t *testing.T) {
 	}
 }
 
+// A crew branch that names no agent ("crew//<bead>", "crew/") is still a crew
+// row, and the row carries no agent: the page reads an empty crew_agent as
+// "bird", so a builder that named the branch's first path element would draw a
+// crew called "crew" instead. A running row keeps the polecat holding the
+// bead in Polecat, but its agent still comes from the branch, which names
+// none (gt-830fd, gt-3m5pj).
+func TestBuildRecentLandingsMarksANoAgentCrewBranchRow(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 26, 14, 0, 0, 0, time.UTC)
+	recs := []omRecord{
+		{Record: landings.Record{Bead: "gt-empty-agent", Rig: "gastown", Branch: "crew//gt-empty-agent", OMVerdict: "approve", LandedAt: now.Add(-time.Minute)}},
+		{Record: landings.Record{Bead: "gt-bare", Rig: "gastown", Branch: "crew/", OMVerdict: "approve", LandedAt: now.Add(-2 * time.Minute)}},
+	}
+	live := []dashboard.LandingRow{
+		{At: now.Add(-3 * time.Minute), Bead: "gt-running", Rig: "gastown", Polecat: "ace", Outcome: "running"},
+	}
+	subs := []land.SubmissionRecord{{Rig: "gastown", Bead: "gt-running", Branch: "crew//gt-running"}}
+
+	rows := buildRecentLandings(now, recs, nil, nil, live, nil, nil, landingNameLookup(subs), crewLandingLookup(subs), nil, 30)
+	byBead := map[string]dashboard.LandingRow{}
+	for _, r := range rows {
+		byBead[r.Bead] = r
+	}
+	for bead, wantPolecat := range map[string]string{"gt-empty-agent": "", "gt-bare": "", "gt-running": "ace"} {
+		r := byBead[bead]
+		if !r.Crew {
+			t.Errorf("%s is not marked crew: %+v", bead, r)
+		}
+		if r.CrewAgent != "" {
+			t.Errorf("%s CrewAgent = %q, want none: the branch names no agent", bead, r.CrewAgent)
+		}
+		if r.Polecat != wantPolecat {
+			t.Errorf("%s Polecat = %q, want %q", bead, r.Polecat, wantPolecat)
+		}
+	}
+}
+
 // spanTestClock is the spans store's clock, pinned so that the logs these tests
 // write carry the times they name rather than the wall clock.
 type spanTestClock struct{ at time.Time }

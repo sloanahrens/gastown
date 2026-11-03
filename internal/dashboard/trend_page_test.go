@@ -579,10 +579,18 @@ func drawnByColumn(t *testing.T, dom *pageDOM) map[string]string {
     for (const c of (n.children || [])) walk(c);
   })(document.getElementById("trend"));
   if (!tbl) return [];
-  const col = name => tbl.children[0].children.__arr.findIndex(th => th.textContent === name);
-  const beadCol = col("Landing"), byCol = col("By");
+  const heads = tbl.children[0].children;
+  let beadCol = -1, byCol = -1;
+  for (let i = 0; i < heads.length; i++) {
+    if (heads[i].textContent === "Landing") beadCol = i;
+    if (heads[i].textContent === "By") byCol = i;
+  }
   if (beadCol < 0 || byCol < 0) throw new Error("the table has no Landing and By headings");
-  return tbl.children.__arr.slice(1).map(tr => [tr.children[beadCol].textContent, tr.children[byCol].textContent]);
+  const rows = [];
+  for (let i = 1; i < tbl.children.length; i++) {
+    rows.push([tbl.children[i].children[beadCol].textContent, tbl.children[i].children[byCol].textContent]);
+  }
+  return rows;
 })())`)
 	if err != nil {
 		t.Fatalf("reading the drawn landings table: %v", err)
