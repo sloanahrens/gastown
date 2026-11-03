@@ -1,6 +1,8 @@
-> Status: design, agreed with the operator on 2026-11-03 (super-plan, six sections approved one by one). Nothing here is built except the archive limits (gt-s6srv). Written by the overseer.
+> Status: historical (2026-11). Merged in: gt-o4sk8 (the epic; the live status of each piece is on its bead). Not maintained.
 
 # gt update: one job for install, image and maintenance
+
+Design agreed with the operator on 2026-11-03 (super-plan, six sections approved one by one). When it landed nothing was built except the archive limits (gt-s6srv). Written by the overseer. The implementation plan is docs/plans/2026-11-03-gt-update-plan.md.
 
 ## Goal
 
@@ -42,7 +44,7 @@ The job sets `~/gt/seat-refill.hold` with a note ("gt update <run id>: draining"
 Each step decides for itself whether it has work. The plan, with a reason per step, is printed first; `--dry-run` stops there.
 
 1. Plan: take the lock; compare the installed build with main; check whether the archive is behind, whether today's backup exists, whether a gc is due by the existing rules.
-2. Drain, only if an install is planned: set the hold with a note; wait up to 30 minutes for working polecats to finish; a polecat silent and idle for 5 minutes counts as drained; a working polecat is never killed; if a seat is still working at the end, abort, lift the hold and name the seat.
+2. Drain, only if an install is planned: set the hold with a note; wait up to 30 minutes for working polecats to finish; a polecat silent and idle for 5 minutes counts as drained; a working polecat is never killed; if a seat is still working at the end, abort, lift the hold and name the seat. The drain fails closed: if the seat list cannot be read, that poll never counts as "no seat blocking"; it retries until the timeout and then aborts with the error named.
 3. Maintenance (archive, backup, gc) runs beside work with no drain. Version 1 requests one daemon maintenance cycle through `maintenance-request`, logs the cycle's stage lines and waits for completion; if nothing is due it skips the request.
 4. Build, image, install: delegate to `cmd/gt-installer`; skip when the installed build equals main and the image is present and published.
 5. Wait up to 15 minutes for the daemon's self-restart. On timeout the new binary is still installed: lift the hold, record "installed, restart pending", escalate.
