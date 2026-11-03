@@ -827,7 +827,7 @@ func TestMaintenanceRequestAnswerKeepsANewerRequest(t *testing.T) {
 func TestMaintenanceRequestBusyCycleAnswersDeferred(t *testing.T) {
 	t.Parallel()
 
-	t.Run("a request the running cycle is not serving is deferred and kept", func(t *testing.T) {
+	t.Run("a request the running cycle is not serving is left alone", func(t *testing.T) {
 		t.Parallel()
 		d, f := requestDaemon(t, outsideRequestNow)
 		d.maintenanceGCRunning.Store(true)
@@ -839,9 +839,8 @@ func TestMaintenanceRequestBusyCycleAnswersDeferred(t *testing.T) {
 		if len(f.gcCalls) != 0 {
 			t.Errorf("gc calls = %v while a cycle is already running", f.gcCalls)
 		}
-		res := readRequestResult(t, d)
-		if res.RunID != "run-waiting" || res.Outcome != "deferred" || res.Detail == "" {
-			t.Errorf("result = %+v, want run-waiting deferred naming the running cycle", res)
+		if _, err := os.Stat(resultPath(update.Dir(d.config.TownRoot))); !os.IsNotExist(err) {
+			t.Errorf("a result was written for a request the running cycle is not serving (the shared file may hold the running cycle's answer): %v", err)
 		}
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("the request the running cycle is not serving was removed: %v", err)
@@ -880,8 +879,8 @@ func TestMaintenanceRequestBusyCycleAnswersDeferred(t *testing.T) {
 		if len(f.gcCalls) != 0 {
 			t.Errorf("gc calls = %v while a cycle is already running", f.gcCalls)
 		}
-		if res := readRequestResult(t, d); res.RunID != "run-scheduled" || res.Outcome != "deferred" {
-			t.Errorf("result = %+v, want run-scheduled deferred", res)
+		if _, err := os.Stat(resultPath(update.Dir(d.config.TownRoot))); !os.IsNotExist(err) {
+			t.Errorf("a result was written for a request a scheduled cycle is not serving: %v", err)
 		}
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("the request a scheduled cycle is not serving was removed: %v", err)
@@ -943,6 +942,7 @@ func TestMaintenanceRequestAnswerFailuresAreLogged(t *testing.T) {
 		t.Parallel()
 		d, _, logs := requestDaemonWithLogs(t, outsideRequestNow)
 		d.maintenanceGCRunning.Store(true)
+		d.maintenanceGCRequestRunID.Store("run-busy")
 		blockResultPath(t, d)
 		path := writeRequestFile(t, d, "run-busy", outsideRequestNow)
 
@@ -1010,6 +1010,79 @@ func TestMaintenanceRequestAnswerFailuresAreLogged(t *testing.T) {
 		}
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("the unanswerable request was removed: %v", err)
+		}
+	})
+}
+
+// The shared result file may already hold the running cycle's own answer for
+// its job. A busy tick must not write a deferral over it, and a request the
+// cycle serves whose answer is already there is left for the cycle's removal.
+func TestMaintenanceRequestBusyTickKeepsTheCyclesCompletedResult(t *testing.T) {
+	t.Parallel()
+	d, f := requestDaemon(t, outsideRequestNow)
+	d.maintenanceGCRunning.Store(true)
+	d.maintenanceGCRequestRunID.Store("run-own")
+	path := writeRequestFile(t, d, "run-own", outsideRequestNow)
+	done := outsideRequestNow.Add(time.Minute)
+	if err := writeMaintenanceResult(osRequestFiles{}, update.Dir(d.config.TownRoot), "run-own", done, "completed", "gc done"); err != nil {
+		t.Fatal(err)
+	}
+
+	d.runScheduledMaintenance()
+
+	if len(f.gcCalls) != 0 {
+		t.Errorf("gc calls = %v while a cycle is already running", f.gcCalls)
+	}
+	res := readRequestResult(t, d)
+	if res.RunID != "run-own" || res.Outcome != "completed" || !res.At.Equal(done) {
+		t.Errorf("result = %+v, want the cycle's completed answer untouched", res)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("the request was removed by the busy tick, not the cycle that answered it: %v", err)
+	}
+}
+
+// replacingRequestFiles reads a malformed request the first time and a valid
+// request from another job every time after: the file was replaced between
+// the tick's read and its removal. It records what was removed.
+type replacingRequestFiles struct {
+	reads   int
+	removed []string
+}
+
+func (f *replacingRequestFiles) ReadFile(path string) ([]byte, error) {
+	f.reads++
+	if f.reads == 1 {
+		return []byte("{not json"), nil
+	}
+	return json.Marshal(update.RequestFile{RunID: "run-newer", At: outsideRequestNow})
+}
+func (f *replacingRequestFiles) WriteFile(string, []byte, os.FileMode) error { return nil }
+func (f *replacingRequestFiles) Remove(path string) error {
+	f.removed = append(f.removed, path)
+	return nil
+}
+
+// Dropping a malformed or invalid-id request re-reads the file first: a valid
+// request another job wrote meanwhile is that job's work and is kept.
+func TestMaintenanceRequestDropKeepsAReplacementRequest(t *testing.T) {
+	t.Parallel()
+	t.Run("malformed", func(t *testing.T) {
+		t.Parallel()
+		d, _ := gcTestDaemon(t)
+		files := &replacingRequestFiles{reads: 1} // the tick already made its read
+		d.dropMalformedRequest(files, t.TempDir(), errMalformedRequest)
+		if len(files.removed) != 0 {
+			t.Errorf("removed %v: a valid request had replaced the malformed one", files.removed)
+		}
+	})
+	t.Run("invalid run id", func(t *testing.T) {
+		t.Parallel()
+		d, _ := gcTestDaemon(t)
+		files := &replacingRequestFiles{reads: 1} // the tick already made its read
+		d.answerInvalidRequest(files, t.TempDir(), errInvalidRunID)
+		if len(files.removed) != 0 {
+			t.Errorf("removed %v: a valid request had replaced the invalid one", files.removed)
 		}
 	})
 }

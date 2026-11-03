@@ -486,6 +486,11 @@ type Daemon struct {
 	// that finds a cycle running uses it to tell a request already being served
 	// from a newer one (maintenance_request.go).
 	maintenanceGCRequestRunID atomic.Value // string
+	// maintenanceRequestMu serialises every write of the shared result file
+	// with the removal of the request it answers (maintenance_request.go): a
+	// busy tick's deferral can then never land between a cycle's result and
+	// the removal that tells its job to read it.
+	maintenanceRequestMu sync.Mutex
 	// catchUpAttemptAt is the UnixNano time of the last out-of-window
 	// catch-up backup attempt (or unreadable-backup-root report); it bounds
 	// retries to one per maintenanceCatchUpRetry (gt-wne04).
