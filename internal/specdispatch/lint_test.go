@@ -55,6 +55,77 @@ func TestLintCleanSpec(t *testing.T) {
 	}
 }
 
+// sizedSpec is goodSpec with its Size body replaced, so one test drives the
+// Size rule without disturbing the rest of the shape.
+func sizedSpec(size string, labels ...string) Spec {
+	s := goodSpec()
+	s.Description = strings.Replace(s.Description, "one worker, one MR", size, 1)
+	s.Labels = labels
+	return s
+}
+
+// A bead for the overseer is not polecat work, so its Size may say one
+// overseer session instead of one worker (gt-hgt9j.13).
+func TestOwnerSessionAcceptsOverseerOnlyBead(t *testing.T) {
+	t.Parallel()
+	s := sizedSpec("One overseer session of about an hour.", "overseer-only")
+	if v := Lint(s, defaultTemplate()); !v.Clean() {
+		t.Fatalf("overseer-only bead refused: %s", v.Line(s.ID))
+	}
+}
+
+// The operator wording is accepted the same way (gt-hgt9j.13).
+func TestOwnerSessionAcceptsOperatorOnlyBead(t *testing.T) {
+	t.Parallel()
+	s := sizedSpec("one operator session", "operator-only")
+	if v := Lint(s, defaultTemplate()); !v.Clean() {
+		t.Fatalf("operator-only bead refused: %s", v.Line(s.ID))
+	}
+}
+
+// The wording alone buys nothing: an ordinary bead keeps the one-worker rule
+// and is refused on size (gt-hgt9j.13).
+func TestOwnerSessionRefusesOrdinaryBead(t *testing.T) {
+	t.Parallel()
+	s := sizedSpec("One overseer session of about an hour.")
+	v := Lint(s, defaultTemplate())
+	if v.Route != RouteRefuse || v.Field != "size" {
+		t.Fatalf("Lint = %+v, want route %s field %q", v, RouteRefuse, "size")
+	}
+}
+
+// Spec.HasLabel trims and folds, so a label written with padding and capitals
+// counts (gt-hgt9j.13).
+func TestOwnerSessionLabelMatchIgnoresCaseAndSpace(t *testing.T) {
+	t.Parallel()
+	s := sizedSpec("One overseer session of about an hour.", " Overseer-Only ")
+	if v := Lint(s, defaultTemplate()); !v.Clean() {
+		t.Fatalf("padded label refused: %s", v.Line(s.ID))
+	}
+}
+
+// The owner wording relaxes the Size rule alone: an overseer-only bead missing
+// its Gate section is still refused (gt-hgt9j.13).
+func TestOwnerSessionStillChecksSections(t *testing.T) {
+	t.Parallel()
+	s := sizedSpec("One overseer session of about an hour.", "overseer-only")
+	var kept []string
+	skip := false
+	for _, line := range strings.Split(s.Description, "\n") {
+		if strings.HasPrefix(line, "## ") {
+			skip = strings.EqualFold(strings.TrimPrefix(line, "## "), "Gate")
+		}
+		if !skip {
+			kept = append(kept, line)
+		}
+	}
+	s.Description = strings.Join(kept, "\n")
+	v := Lint(s, defaultTemplate())
+	if v.Route != RouteRefuse || v.Field != "## Gate" {
+		t.Fatalf("Lint = %+v, want route %s field %q", v, RouteRefuse, "## Gate")
+	}
+}
+
 // Every required field, removed one at a time, must refuse and name that field.
 func TestLintNamesEveryMissingField(t *testing.T) {
 	t.Parallel()
