@@ -791,8 +791,8 @@ func (h *Hub) pollTierSweep() {
 
 // pollUpdate reads the gt update job's run into the feed. A nil read clears the
 // section instead of keeping the last one: nil is the reader's answer for no
-// run, for an unreadable record, for a run whose heartbeat went stale and for
-// a run that ended more than a day ago, and a run the reader has stopped
+// run, for an unreadable record, and for a run more than a day old (from its
+// end or, while running, its last heartbeat), and a run the reader has stopped
 // reporting must not stay in the feed as if it were current.
 func (h *Hub) pollUpdate() {
 	u := h.cfg.Update()

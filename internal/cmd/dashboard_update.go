@@ -10,17 +10,11 @@ import (
 )
 
 const (
-	// updateStatusKeep is how long a finished run stays in the feed. A run that
-	// ended longer ago is history the status command shows, not something the
-	// page should keep drawing as the reason nothing is being dispatched.
+	// updateStatusKeep is how long a run stays in the feed: a finished run
+	// counts from its end, a running one from its last heartbeat. Either way,
+	// a run older than this is history the status command shows, not something
+	// the page should keep drawing as the reason nothing is being dispatched.
 	updateStatusKeep = 24 * time.Hour
-
-	// updateStatusStaleAfter is how old a running run's heartbeat may be before
-	// the run is taken for dead. The job beats every 15 seconds while it works,
-	// and the design's stale alert fires at three minutes without a beat
-	// (docs/plans/2026-11-03-gt-update-design.md), so a record older than that
-	// is not a run in flight to draw as one.
-	updateStatusStaleAfter = 3 * time.Minute
 )
 
 // updateStatusReader reads the record one gt update run writes (internal/update)
@@ -57,9 +51,11 @@ func (r *updateStatusReader) withLogf(f func(format string, args ...any)) *updat
 }
 
 // read is the feed's update section, or nil when there is none to draw: no run
-// has written a record, the record cannot be read or is not this version, a
-// running run's heartbeat is more than updateStatusStaleAfter old, or the run
-// ended more than updateStatusKeep ago. ElapsedSec and HeartbeatAgeSec are
+// has written a record, the record cannot be read or is not this version, or
+// the run is more than updateStatusKeep old (from its end time once finished,
+// from its last heartbeat while running). A running record is never dropped for
+// a stale heartbeat alone: it reaches the feed with its real HeartbeatAgeSec so
+// the page can draw a job that died. ElapsedSec and HeartbeatAgeSec are
 // measured against now, so a caller passes the clock it reads the section with.
 func (r *updateStatusReader) read(now time.Time) *dashboard.UpdateStatus {
 	r.mu.Lock()
@@ -74,7 +70,7 @@ func (r *updateStatusReader) read(now time.Time) *dashboard.UpdateStatus {
 	}
 	r.failed = ""
 	running := st.Outcome == update.OutcomeRunning
-	if running && now.Sub(st.HeartbeatAt) > updateStatusStaleAfter {
+	if running && now.Sub(st.HeartbeatAt) > updateStatusKeep {
 		return nil
 	}
 	if !running && now.Sub(st.EndedAt) > updateStatusKeep {

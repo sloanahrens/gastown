@@ -38,7 +38,7 @@ func stateWithUpdate(t *testing.T, next func() *UpdateStatus) (map[string]json.R
 // The page draws the update job from the feed: /api/state carries the run the
 // provider read, its ended_at only once it ended, and a provider with nothing
 // to report leaves the section out.
-func TestStateFeedCarriesTheUpdateSection(t *testing.T) {
+func TestDashboardUpdateStateFeedCarriesTheUpdateSection(t *testing.T) {
 	t.Parallel()
 
 	started := time.Date(2026, 11, 3, 11, 52, 0, 0, time.UTC)

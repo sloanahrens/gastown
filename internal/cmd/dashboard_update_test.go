@@ -140,28 +140,41 @@ func TestDashboardUpdateStatusFromAFinishedState(t *testing.T) {
 	}
 }
 
-// A record that still says running but has not beaten for longer than the
-// stale bound is a dead job, not a run in flight, and the feed drops it.
-func TestDashboardUpdateStatusStaleRunningIsNil(t *testing.T) {
+// A record that still says running but has not beaten for ten minutes is a
+// dead job, and the feed reports it as one rather than dropping it: Running
+// stays true and HeartbeatAgeSec carries the age so the page can draw the dead
+// state. Only a heartbeat more than a day old is history and reads as no run.
+func TestDashboardUpdateStatusKeepsADeadRunningRun(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 	state := func(beat time.Time) update.State {
 		return update.State{
 			RunID:       "run-1",
-			StartedAt:   now.Add(-8 * time.Minute),
+			StartedAt:   now.Add(-20 * time.Minute),
 			HeartbeatAt: beat,
 			Current:     update.StepInstall,
 			Outcome:     update.OutcomeRunning,
 		}
 	}
-	fresh := updateStatusTestReader(t, state(now.Add(-updateStatusStaleAfter)))
-	if got := fresh.read(now); got == nil {
-		t.Errorf("a heartbeat exactly at the stale bound read as no run, want the run")
+	dead := updateStatusTestReader(t, state(now.Add(-10*time.Minute)))
+	got := dead.read(now)
+	if got == nil {
+		t.Fatal("a running record with a ten-minute-old heartbeat read as no run")
 	}
-	stale := updateStatusTestReader(t, state(now.Add(-updateStatusStaleAfter-time.Second)))
-	if got := stale.read(now); got != nil {
-		t.Errorf("a heartbeat past the stale bound read as %+v, want nil", got)
+	if !got.Running {
+		t.Error("Running = false for a dead running run, want true")
+	}
+	if got.HeartbeatAgeSec != 10*60 {
+		t.Errorf("HeartbeatAgeSec = %d, want %d", got.HeartbeatAgeSec, 10*60)
+	}
+	if got.EndedAt != nil {
+		t.Errorf("EndedAt = %v for a dead running run, want nil", got.EndedAt)
+	}
+
+	ancient := updateStatusTestReader(t, state(now.Add(-25*time.Hour)))
+	if got := ancient.read(now); got != nil {
+		t.Errorf("a running record whose heartbeat is 25 hours old read as %+v, want nil", got)
 	}
 }
 

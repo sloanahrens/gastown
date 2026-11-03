@@ -670,8 +670,10 @@ type UpdateStep struct {
 // the run rewrites at every step (internal/update). Running says the record's
 // outcome is still running; ElapsedSec is its wall time so far, or the whole
 // run's once it ended; HeartbeatAgeSec is how stale a running run's last
-// heartbeat is, so a job that died is visible as one, and is 0 for a run that
-// ended. EndedAt is nil while the run is in flight and the time it finished
+// heartbeat is, and is 0 for a run that ended. A large HeartbeatAgeSec with
+// Running still true means the job died without writing its end: the reader
+// reports it that way rather than dropping it, so the page can draw the dead
+// state. EndedAt is nil while the run is in flight and the time it finished
 // once it ended. Steps is every step of the plan in run order.
 type UpdateStatus struct {
 	Running         bool         `json:"running"`
