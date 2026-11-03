@@ -165,8 +165,8 @@ func TestWorkTownStoreChip(t *testing.T) {
 	if got := chipNamed(t, chips, "all stores"); got.Count != "1" || !got.On {
 		t.Errorf("the all stores chip reads %+v, want count 1 (the rig's bead) and open on a fresh page", got)
 	}
-	if got := workSummary(t, dom)["dispatchable"]; got != "1" {
-		t.Errorf("the dispatchable tile counts %q, want 1 (the rig's bead alone)", got)
+	if got := workSummary(t, dom)["start now"]; got != "1" {
+		t.Errorf("the start now tile counts %q, want 1 (the rig's bead alone)", got)
 	}
 	if got := queueRowIDs(t, dom); !slices.Equal(got, []string{"gt-rig1"}) {
 		t.Fatalf("the dispatchable view lists %q, want the rig's bead alone", got)
@@ -212,9 +212,10 @@ func TestWorkReadyCountRigsOnly(t *testing.T) {
 	if got := chipNamed(t, queueChips(t, dom), "ready to dispatch"); got.Count != "2" {
 		t.Errorf("the ready to dispatch chip counts %q, want 2: the rig's shaped bead and the one its tick passed over", got.Count)
 	}
-	// The tile counts the shaped beads of the rig stores, as it did before.
-	if got := workSummary(t, dom)["dispatchable"]; got != "1" {
-		t.Errorf("the dispatchable tile counts %q, want 1 (the rig's shaped bead)", got)
+	// The start-now piece counts the shaped beads of the rig stores, as the
+	// dispatchable tile it replaced did.
+	if got := workSummary(t, dom)["start now"]; got != "1" {
+		t.Errorf("the start now tile counts %q, want 1 (the rig's shaped bead)", got)
 	}
 	// The rows are the two rig beads and nothing else: the town store's bead is
 	// under its own chip, and the one the tick passed over is still here

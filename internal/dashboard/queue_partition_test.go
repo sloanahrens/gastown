@@ -228,54 +228,80 @@ func TestQueueChipsSumToTheReadyTotal(t *testing.T) {
 }
 
 // TestQueueHeaderNamesWhatItCounts draws the partition and reads the header
-// back: the pieces appear in the partition's order, each piece's tooltip names
-// the rule it counts, and a piece counting nothing is left out rather than
-// drawn as a zero (gt-xwul0).
+// back as a whole: the tiles are exactly the six pieces in the partition's
+// order and then the ready and landing totals, each piece's tooltip names the
+// rule it counts, and a piece counting nothing is left out rather than drawn
+// as a zero (gt-xwul0). Reading the whole row, not one label at a time, is what
+// catches a second tile counting a piece the header already names.
 func TestQueueHeaderNamesWhatItCounts(t *testing.T) {
 	t.Parallel()
 
 	dom := drawQueuePage(t, partitionQueue())
 	tiles := queueHeader(t, dom)
 
-	rules := []struct{ piece, rule string }{
-		{"start now", "slot"},
-		{"waiting for a seat", "seat"},
-		{"skipped by a guard", "passed over"},
-		{"need shaping", "shaping"},
-		{"held", "assignee"},
-		{"town store", "town's own store"},
+	want := []struct{ count, piece, rule string }{
+		{"1", "start now", "slot"},
+		{"1", "waiting for a seat", "seat"},
+		{"1", "skipped by a guard", "passed over"},
+		{"1", "need shaping", "shaping"},
+		{"1", "held", "assignee"},
+		{"1", "town store", "town's own store"},
+		{"6", "ready", "nothing blocking"},
+		{"0", "landing", "landing worker"},
 	}
-	last := -1
-	for _, w := range rules {
-		idx := -1
-		for i, x := range tiles {
-			if x.Label == w.piece {
-				idx = i
-				break
-			}
+	if len(tiles) != len(want) {
+		t.Fatalf("the header draws %d tiles %+v, want exactly the six pieces and the two totals %+v", len(tiles), tiles, want)
+	}
+	for i, w := range want {
+		got := tiles[i]
+		if got.Label != w.piece || got.Count != w.count {
+			t.Errorf("header tile %d reads %s %q, want %s %q", i, got.Count, got.Label, w.count, w.piece)
 		}
-		if idx < 0 {
-			t.Fatalf("the header names no %q piece: %+v", w.piece, tiles)
-		}
-		if idx <= last {
-			t.Errorf("the header draws %q out of order: %+v", w.piece, tiles)
-		}
-		last = idx
-		if !strings.Contains(strings.ToLower(tiles[idx].Title), w.rule) {
-			t.Errorf("the %q piece's tooltip reads %q, want it to name its rule (%q)", w.piece, tiles[idx].Title, w.rule)
+		if !strings.Contains(strings.ToLower(got.Title), w.rule) {
+			t.Errorf("the %q tile's tooltip reads %q, want it to name its rule (%q)", w.piece, got.Title, w.rule)
 		}
 	}
 
 	// A piece counting nothing is left out, not drawn as a zero: a ready list
-	// with one dispatchable bead names that piece alone.
+	// with one start-now bead names that piece alone, then the totals.
 	dom = drawQueuePage(t, queueRead(readyRow("gt-now", "ok")))
 	tiles = queueHeader(t, dom)
-	if _, ok := headerTile(tiles, "start now"); !ok {
-		t.Fatalf("the header drops the one piece that counts a bead: %+v", tiles)
+	want = []struct{ count, piece, rule string }{
+		{"1", "start now", "slot"},
+		{"1", "ready", "nothing blocking"},
+		{"0", "landing", "landing worker"},
 	}
-	for _, gone := range []string{"waiting for a seat", "skipped by a guard", "need shaping", "held", "town store"} {
-		if _, ok := headerTile(tiles, gone); ok {
-			t.Errorf("the header draws the empty %q piece: %+v", gone, tiles)
+	if len(tiles) != len(want) {
+		t.Fatalf("a one-piece header draws %+v, want the non-empty piece and the two totals", tiles)
+	}
+	for i, w := range want {
+		if got := tiles[i]; got.Label != w.piece || got.Count != w.count {
+			t.Errorf("header tile %d reads %s %q, want %s %q", i, got.Count, got.Label, w.count, w.piece)
+		}
+	}
+}
+
+// TestQueueTownPieceClearsWithTheRig draws the partition, opens the town store's
+// piece chip and then picks a single rig: the all-stores view's town piece is
+// the one filter a single rig cannot satisfy and whose chip that view no longer
+// draws, so picking a rig clears it rather than leaving the list empty with no
+// chip to clear (gt-xwul0).
+func TestQueueTownPieceClearsWithTheRig(t *testing.T) {
+	t.Parallel()
+
+	dom := drawQueuePage(t, partitionQueue())
+	clickQueueChipExact(t, dom, "town store")
+	if got := queueRowIDs(t, dom); !slices.Equal(got, []string{"hq-town"}) {
+		t.Fatalf("the town store piece chip lists %q, want the town's bead", got)
+	}
+
+	clickQueueChip(t, dom, "gastown")
+	if got, want := queueRowIDs(t, dom), []string{"gt-now", "gt-seat", "gt-guard", "gt-fix", "gt-held"}; !slices.Equal(got, want) {
+		t.Errorf("after picking a rig the list reads %q, want every ready bead in it %q", got, want)
+	}
+	for _, c := range queueChips(t, dom) {
+		if c.Label == "town store" {
+			t.Errorf("the single-rig view still draws the town store's piece chip %+v", c)
 		}
 	}
 }

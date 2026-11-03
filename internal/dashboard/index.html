@@ -1296,8 +1296,8 @@ function blockedLine(q, r) {
 
 // dispatchableCount is the queue's dispatchable figure: the shaped, unassigned
 // ready beads outside the town store, which is the ready list's "start now"
-// piece. workQueue's summary row draws it and the Beads fold header repeats it
-// (gt-lpo20, gt-xwul0).
+// piece. The Beads fold header names it "dispatchable"; the panel's own header
+// counts it as the partition's "start now" tile (gt-lpo20, gt-xwul0).
 function dispatchableCount(q) {
   return ((q && q.ready) || []).filter(b => readyPiece(b) === "now").length;
 }
@@ -1309,15 +1309,13 @@ function workQueue(box, s, q, r) {
     box.append(el("div", "empty", r ? "unavailable — the work queue could not be read" : "reading the work queue…"));
     return;
   }
-  const ok = dispatchableCount(q);
   const sum = el("div", "kv wsum");
   const add = (v, k, tip) => { const x = el("div"); x.title = tip; x.append(el("b", "", String(v)), el("span", "", k)); sum.append(x); };
   // The header names what the ready list is made of (gt-xwul0): the same six
   // pieces the chips filter by, in the same order, each tile saying the rule it
-  // counts, and a piece counting nothing left out. "dispatchable" is the
-  // start-now piece under the name the fold header repeats, so the tile stays,
-  // and the pieces beside it are where the ready total goes.
-  add(ok, "dispatchable", "ready beads the spec dispatcher would slot: shaped, unassigned and in a rig that is not parked");
+  // counts, and a piece counting nothing left out. The pieces are the header's
+  // only count of ready beads; the ready total follows them, and the fold
+  // summary keeps "dispatchable" for the start-now piece it has always named.
   const pieces = {};
   ((q && q.ready) || []).forEach(b => { const k = readyPiece(b); pieces[k] = (pieces[k] || 0) + 1; });
   READY_PIECES.forEach(p => { if (pieces[p.key]) add(pieces[p.key], p.label, p.tip); });
@@ -4652,13 +4650,13 @@ function readyPiece(b) {
 }
 
 // readyShown is whether a ready row passes the shape filter the chips set:
-// "all" is no filter, "ok" is the dispatcher's union (shaped and skipped), and
-// every other value is a chip's own qShape — a piece key, or a shape for the
-// chips that predate the partition.
+// "all" is no filter, "ok" is the dispatcher's union (shaped and skipped) that
+// the "ready to dispatch" chip sets, and every other value is one READY_PIECES
+// key — the piece chip that set it.
 function readyShown(b, shape) {
   if (shape === "all") return true;
   if (shape === "ok") return isReadyToDispatch(b);
-  return readyPiece(b) === shape || b.shape === shape;
+  return readyPiece(b) === shape;
 }
 
 // seatPlaces maps each bead waiting for a seat to its place "N of M" in the
@@ -4738,6 +4736,11 @@ function drawQueueList(box, s) {
   if (!Object.keys(rigs).length) all.forEach(b => rigs[b.rig] = (rigs[b.rig] || 0) + 1);
   const rigNames = Object.keys(rigs).sort((a, b) => rigs[b] - rigs[a]);
   if (qRig !== "all" && !rigs[qRig]) qRig = "all";
+  // The town store's piece chip is drawn in the all-stores view alone, since a
+  // single rig's view cannot hold it. A rig switch leaves its filter behind,
+  // and it passes no row there, so the list would strand empty with no chip to
+  // clear it: clear the filter with the view that drew it (gt-xwul0).
+  if (qRig !== "all" && qShape === "town") qShape = "all";
   // The ready tab's all-stores view is the dispatcher's own set, and the town's
   // store is not in it: its beads are listed under their own chip instead. The
   // landing and blocked views list it like any store (gt-50dkq).

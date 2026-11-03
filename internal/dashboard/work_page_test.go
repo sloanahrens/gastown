@@ -659,7 +659,7 @@ func TestTheWorkPanelSummarisesTheQueueAndSplitsTheBlockedList(t *testing.T) {
 	}, workQueueReading(57, 1, 3, 118)))
 
 	sum := workChild(t, dom, "wsum")
-	for _, want := range []string{"1", "dispatchable", "57", "ready", "1", "landing"} {
+	for _, want := range []string{"1", "start now", "57", "ready", "1", "landing"} {
 		if !strings.Contains(sum.Text, want) {
 			t.Errorf("the queue summary reads %q, want %q in it", sum.Text, want)
 		}
