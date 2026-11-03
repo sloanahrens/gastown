@@ -92,7 +92,7 @@ func productionUpdateSeams() updateSeams {
 	}
 }
 
-// updateCmd is the `gt update` job. `gt update status` lands separately.
+// updateCmd is the `gt update` job and its status reader.
 var updateCmd = newUpdateCmd()
 
 func init() {
@@ -133,6 +133,9 @@ Exit status: 0 for an ok run or a dry run, 1 failed, 3 partial, 4 aborted,
 	c.Flags().BoolVar(&req.Force, "force", false, "Plan an install even when the installed build is main")
 	c.Flags().BoolVar(&req.JSON, "json", false, "Print the final state as JSON instead of the text report")
 	c.Flags().BoolVar(&req.FromDaemon, "from-daemon", false, "Record the run's source as daemon instead of manual")
+	// The status reader shares the parent's town lookup, so both commands read
+	// the same town root, and it reads the wall clock for a heartbeat's age.
+	c.AddCommand(newUpdateStatusCmd(updateStatusSeams{FindTownRoot: seams.FindTownRoot, Now: time.Now}))
 	return c
 }
 
