@@ -8,10 +8,12 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -498,5 +500,70 @@ func TestUpdateLauncherBuildsADetachedCommand(t *testing.T) {
 	}
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Errorf("launch log mode = %o, want 600", perm)
+	}
+}
+
+// startUpdateProcessReportsAStartFailure drives the default starter's refusal:
+// a command that cannot start yields the error and no wait to run.
+func TestStartUpdateProcessReportsAStartFailure(t *testing.T) {
+	t.Parallel()
+
+	// A command whose program does not exist: Start fails without a process.
+	cmd := &exec.Cmd{Path: filepath.Join(t.TempDir(), "no-such-update-job")}
+	wait, err := startUpdateProcess(cmd)
+	if err == nil {
+		t.Fatal("startUpdateProcess started a missing executable; want the Start error")
+	}
+	if wait != nil {
+		t.Error("startUpdateProcess returned a wait for a command that never started")
+	}
+}
+
+// TestLaunchUpdateReapsTheChild: the launched job exits on its own, so the
+// daemon waits for it from a goroutine of its own — an unreaped child stays a
+// zombie until the daemon restarts — and the wait never holds the launch.
+func TestLaunchUpdateReapsTheChild(t *testing.T) {
+	t.Parallel()
+
+	d := &Daemon{config: DefaultConfig(t.TempDir()), logger: log.New(io.Discard, "", 0)}
+	waitStarted := make(chan struct{})
+	release := make(chan struct{})
+	waitDone := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseWait := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseWait)
+	// The starter never touches cmd: it hands back a wait that parks until the
+	// test releases it, so a wait run inline would keep the launch from
+	// returning.
+	d.updateStarter = func(*exec.Cmd) (func(), error) {
+		return func() {
+			close(waitStarted)
+			<-release
+			close(waitDone)
+		}, nil
+	}
+
+	launched := make(chan error, 1)
+	go func() { launched <- d.launchUpdate(context.Background(), "test") }()
+
+	if err := within(t, time.Second, "launchUpdate", launched); err != nil {
+		t.Fatalf("launchUpdate: %v", err)
+	}
+	within(t, time.Second, "the reap to start", waitStarted)
+	releaseWait()
+	within(t, time.Second, "the reap to finish", waitDone)
+}
+
+// TestLaunchUpdateReportsAStarterFailure: a starter that cannot start the job
+// fails the launch, and no wait is run for a child that does not exist.
+func TestLaunchUpdateReportsAStarterFailure(t *testing.T) {
+	t.Parallel()
+
+	d := &Daemon{config: DefaultConfig(t.TempDir()), logger: log.New(io.Discard, "", 0)}
+	want := errors.New("start refused")
+	d.updateStarter = func(*exec.Cmd) (func(), error) { return nil, want }
+
+	if err := d.launchUpdate(context.Background(), "test"); !errors.Is(err, want) {
+		t.Fatalf("launchUpdate = %v, want the starter error", err)
 	}
 }

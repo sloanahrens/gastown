@@ -1,8 +1,11 @@
 package daemon
 
 import (
+	"strings"
 	"testing"
 	"time"
+
+	agentconfig "github.com/steveyegge/gastown/internal/config"
 )
 
 func TestParseWindowTime(t *testing.T) {
@@ -237,5 +240,82 @@ func TestIsPatrolEnabledScheduledMaintenance(t *testing.T) {
 	config.Patrols.ScheduledMaintenance.Enabled = true
 	if !IsPatrolEnabled(config, "scheduled_maintenance") {
 		t.Error("expected scheduled_maintenance enabled when Enabled=true")
+	}
+}
+
+// updateOnWindow is a 03:00 maintenance window with the update trigger on: the
+// update job owns the nightly cycle.
+func updateOnWindow(window string) *DaemonPatrolConfig {
+	cfg := maintenanceWindowAt(window)
+	cfg.Patrols.Update = &agentconfig.UpdateConfig{Enabled: true}
+	return cfg
+}
+
+// TestMaintenanceWindowTickDefersWhenUpdateEnabled: the window tick starts no
+// cycle of its own once the update trigger is on; a B11 request still runs one,
+// and the feature off leaves the tick starting the cycle as before.
+func TestMaintenanceWindowTickDefersWhenUpdateEnabled(t *testing.T) {
+	t.Parallel()
+
+	t.Run("no request starts no cycle", func(t *testing.T) {
+		t.Parallel()
+		d, f := requestDaemon(t, gcTestNow)
+		d.patrolConfig = updateOnWindow("03:00")
+
+		d.runScheduledMaintenance()
+
+		if len(f.gcCalls) != 0 {
+			t.Errorf("gc calls = %v with the update trigger on and no request, want none", f.gcCalls)
+		}
+		if d.maintenanceGCRunning.Load() {
+			t.Error("the tick left a cycle running")
+		}
+	})
+
+	t.Run("a request still runs the cycle", func(t *testing.T) {
+		t.Parallel()
+		d, f := requestDaemon(t, gcTestNow)
+		d.patrolConfig = updateOnWindow("03:00")
+		writeRequestFile(t, d, "run-update", gcTestNow)
+
+		requestTickAndCycle(t, d)
+
+		if got := strings.Join(f.gcCalls, ","); got != "hq" {
+			t.Errorf("gc calls = %q, want hq for the request", got)
+		}
+		if res := readRequestResult(t, d); res.RunID != "run-update" || res.Outcome != "completed" {
+			t.Errorf("result = %+v, want run-update completed", res)
+		}
+	})
+
+	t.Run("the feature off starts the cycle as before", func(t *testing.T) {
+		t.Parallel()
+		d, f := requestDaemon(t, gcTestNow)
+		d.patrolConfig = maintenanceWindowAt("03:00")
+		d.patrolConfig.Patrols.Update = &agentconfig.UpdateConfig{Enabled: false}
+
+		requestTickAndCycle(t, d)
+
+		if got := strings.Join(f.gcCalls, ","); got != "hq" {
+			t.Errorf("gc calls = %q with the update trigger off, want hq", got)
+		}
+	})
+}
+
+// TestCatchUpPathsIgnoreTheFeatureSwitch: a missed night is still caught up
+// outside the window with the update trigger on. The catch-ups are the safety
+// net for a missed window, not a scheduled cycle the update job owns.
+func TestCatchUpPathsIgnoreTheFeatureSwitch(t *testing.T) {
+	t.Parallel()
+	d, f := catchUpDaemon(t)
+	d.patrolConfig = updateOnWindow("03:00")
+
+	d.runScheduledMaintenance()
+
+	if len(f.backupCalls) != 2 {
+		t.Fatalf("backup calls = %v with the update trigger on, want gt and hq", f.backupCalls)
+	}
+	if len(f.gcCalls) != 2 {
+		t.Fatalf("gc calls = %v, want the catch-up gc for gt and hq", f.gcCalls)
 	}
 }

@@ -1153,3 +1153,76 @@ func TestRebuildGTDrift_CountsNoCommitOutsideTheBuildPaths(t *testing.T) {
 		t.Errorf("a backlog outside the build paths escalated: %+v", esc)
 	}
 }
+
+// updatePatrolConfig is a patrol config carrying only the update block: every
+// other patrol keeps its default.
+func updatePatrolConfig(cfg *agentconfig.UpdateConfig) *DaemonPatrolConfig {
+	return &DaemonPatrolConfig{Patrols: &PatrolsConfig{Update: cfg}}
+}
+
+// TestUpdateTriggerEnabledHelper pins the one switch rebuild_gt and the
+// maintenance tick both read: only a configured, parsable, enabled block turns
+// the update job on. A broken block reads as off, never as on.
+func TestUpdateTriggerEnabledHelper(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		patrol *DaemonPatrolConfig
+		want   bool
+	}{
+		{"unconfigured", nil, false},
+		{"disabled", updatePatrolConfig(&agentconfig.UpdateConfig{Enabled: false}), false},
+		{"enabled", updatePatrolConfig(&agentconfig.UpdateConfig{Enabled: true}), true},
+		{"enabled with an invalid config", updatePatrolConfig(&agentconfig.UpdateConfig{Enabled: true, Window: "3am"}), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := &Daemon{config: DefaultConfig(t.TempDir()), logger: discardLogger, patrolConfig: tc.patrol}
+			if got := d.updateTriggerEnabled(); got != tc.want {
+				t.Errorf("updateTriggerEnabled = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRebuildGTDefersWhenUpdateEnabled: with the update trigger on, rebuild_gt
+// makes no install decision, starts no cycle, and logs the deferral once
+// across two heartbeats rather than once per heartbeat.
+func TestRebuildGTDefersWhenUpdateEnabled(t *testing.T) {
+	t.Parallel()
+	d, cli := rebuildGTWindowTown(t)
+	var logs lockedBuffer
+	d.logger = log.New(&logs, "", 0)
+	d.patrolConfig = updatePatrolConfig(&agentconfig.UpdateConfig{Enabled: true})
+
+	end := watchRebuildGTCycle(d)
+	d.triggerRebuildGT()
+	awaitRebuildGTIdle(t, d, end)
+	d.triggerRebuildGT()
+	awaitRebuildGTIdle(t, d, end)
+
+	if installs := gtInstallerCalls(cli); len(installs) != 0 {
+		t.Fatalf("install calls = %v with the update trigger on, want none", installs)
+	}
+	line := "rebuild_gt: install decisions are deferred to the update job"
+	if n := strings.Count(logs.String(), line); n != 1 {
+		t.Errorf("deferral lines = %d, want 1 across two heartbeats:\n%s", n, logs.String())
+	}
+}
+
+// TestRebuildGTUnchangedWhenUpdateDisabled: the same state with the feature
+// off installs exactly as it did before the update trigger existed.
+func TestRebuildGTUnchangedWhenUpdateDisabled(t *testing.T) {
+	t.Parallel()
+	d, cli := rebuildGTWindowTown(t)
+	d.patrolConfig = updatePatrolConfig(&agentconfig.UpdateConfig{Enabled: false})
+
+	end := watchRebuildGTCycle(d)
+	d.triggerRebuildGT()
+	awaitRebuildGTIdle(t, d, end)
+
+	if got := len(gtInstallerCalls(cli)); got != 1 {
+		t.Fatalf("install calls = %d with the update trigger off, want 1", got)
+	}
+}

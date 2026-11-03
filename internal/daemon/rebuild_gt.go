@@ -241,11 +241,29 @@ func (d *Daemon) rebuildGTInstallAge(now time.Time) (time.Duration, bool) {
 	return now.Sub(at), true
 }
 
+// updateTriggerEnabled reports whether the update job owns the install and
+// maintenance decisions: patrols.update parses and is enabled. rebuild_gt and
+// the maintenance window tick read this one helper, so they step aside
+// together, and switching the feature off restores both old triggers.
+func (d *Daemon) updateTriggerEnabled() bool {
+	settings, ok := d.updateSettings()
+	return ok && settings.Enabled
+}
+
 // triggerRebuildGT runs one rebuild_gt cycle on its own goroutine when the
 // job is due: an install builds the whole binary and can wait minutes for a
 // container-gate slot, so inline it would stall the heartbeat.
 func (d *Daemon) triggerRebuildGT() {
 	if !d.isPatrolActive("rebuild_gt") {
+		return
+	}
+	// When the update job owns the install decision this job makes none: two
+	// deciders would race the same binary. The feature is on for the whole
+	// daemon run, so the line is logged once, not once per heartbeat.
+	if d.updateTriggerEnabled() {
+		if d.rebuildGTDeferredLogged.CompareAndSwap(false, true) {
+			d.logger.Printf("rebuild_gt: install decisions are deferred to the update job")
+		}
 		return
 	}
 	now := d.clk().Now()
