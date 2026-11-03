@@ -29,12 +29,10 @@ const updateTestWait = 5 * time.Second
 // none arrives.
 func awaitUpdateError(t *testing.T, got <-chan error, what string) error {
 	t.Helper()
-	timer := time.NewTimer(updateTestWait)
-	defer timer.Stop()
 	select {
 	case err := <-got:
 		return err
-	case <-timer.C:
+	case <-time.After(updateTestWait): //testpolicy:allow no-sleep — a hang guard only: the error is what the test waits for, so a regression that never reports it fails here rather than hanging the suite
 		t.Fatalf("timed out after %s waiting for %s", updateTestWait, what)
 		return nil
 	}
@@ -376,23 +374,19 @@ func TestUpdateCancelledContextIsInterrupted(t *testing.T) {
 	finished := make(chan struct{})
 	run := func(runCtx context.Context, _ update.Deps, _ update.Options) (update.State, error) {
 		close(started)
-		timer := time.NewTimer(updateTestWait)
-		defer timer.Stop()
 		select {
 		case <-runCtx.Done():
 			return update.State{}, runCtx.Err()
-		case <-timer.C:
+		case <-time.After(updateTestWait): //testpolicy:allow no-sleep — a hang guard only: the command's cancellation is the event waited for, so a command that never cancels fails the test with this error rather than hanging it
 			return update.State{}, errors.New("the command never cancelled the run")
 		}
 	}
 	go func() {
-		timer := time.NewTimer(updateTestWait)
-		defer timer.Stop()
 		select {
 		case <-started:
 			cancel()
 		case <-finished:
-		case <-timer.C:
+		case <-time.After(updateTestWait): //testpolicy:allow no-sleep — a hang guard only: the test closes finished when it returns, so this fires only if the run never starts
 		}
 	}()
 	seams := updateTestSeams(townRoot, updateTestDeps(t), run)
