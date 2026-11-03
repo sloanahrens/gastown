@@ -834,6 +834,21 @@ type ScheduledMaintenanceConfig struct {
 	// ParseArchiveDir, which refuses a relative path.
 	ArchiveDir string `json:"archive_dir,omitempty"`
 
+	// ArchiveCommitLimit bounds one maintenance run's dolt_log read per
+	// database, so a first export against a whole history writes a bounded
+	// batch and the next run reads the rest (gt-s6srv). Nil or zero means
+	// DefaultArchiveCommitLimit; read it through ParseArchiveCommitLimit,
+	// which refuses a negative value and one above MaxArchiveLimit.
+	ArchiveCommitLimit *int `json:"archive_commit_limit,omitempty"`
+
+	// ArchiveEventsLimit bounds one maintenance run's events read per
+	// database, the same way ArchiveCommitLimit bounds dolt_log; the read
+	// already skips the ids the watermark holds, so the bound counts fresh
+	// rows (gt-s6srv). Nil or zero means DefaultArchiveEventsLimit; read it
+	// through ParseArchiveEventsLimit, which refuses a negative value and one
+	// above MaxArchiveLimit.
+	ArchiveEventsLimit *int `json:"archive_events_limit,omitempty"`
+
 	// Deprecated: have no effect. They configured the retired monitor,
 	// flatten and size-triggered gc modes. They are still parsed so a live
 	// daemon.json that carries them decodes strictly, and the daemon logs
@@ -849,6 +864,25 @@ type ScheduledMaintenanceConfig struct {
 // daemon.json, the path the daemon's logs and escalations tell an operator to
 // fix (gt-7nxj4). It is not yet a `gt config set maintenance.*` key.
 const MaintenanceArchiveDirKey = "patrols.scheduled_maintenance.archive_dir"
+
+// The history archive's per-run batch bounds as they appear in daemon.json, the
+// paths the daemon's logs and escalations tell an operator to fix (gt-s6srv).
+const (
+	MaintenanceArchiveCommitLimitKey = "patrols.scheduled_maintenance.archive_commit_limit"
+	MaintenanceArchiveEventsLimitKey = "patrols.scheduled_maintenance.archive_events_limit"
+)
+
+// The unset and zero reading of each batch bound: one run reads at most this
+// many rows per database, which is the behavior before the settings existed
+// (gt-s6srv).
+const (
+	DefaultArchiveCommitLimit = 5000
+	DefaultArchiveEventsLimit = 5000
+)
+
+// MaxArchiveLimit caps either batch bound so a mis-typed value cannot make one
+// maintenance run hold a whole table in memory (gt-s6srv).
+const MaxArchiveLimit = 1_000_000
 
 // ParseArchiveDir returns the history archive's directory: empty (with no
 // error) means archiving is off. A set entry that is not an absolute path is
@@ -867,6 +901,38 @@ func (c *ScheduledMaintenanceConfig) ParseArchiveDir() (string, error) {
 		return "", fmt.Errorf("%s = %q: want an absolute path", MaintenanceArchiveDirKey, dir)
 	}
 	return filepath.Clean(dir), nil
+}
+
+// ParseArchiveCommitLimit returns the configured per-run dolt_log bound. An
+// absent section, nil receiver, or zero setting reads DefaultArchiveCommitLimit.
+func (c *ScheduledMaintenanceConfig) ParseArchiveCommitLimit() (int, error) {
+	if c == nil {
+		return DefaultArchiveCommitLimit, nil
+	}
+	return parseArchiveLimit(MaintenanceArchiveCommitLimitKey, c.ArchiveCommitLimit, DefaultArchiveCommitLimit)
+}
+
+// ParseArchiveEventsLimit returns the configured per-run events bound. An
+// absent section, nil receiver, or zero setting reads DefaultArchiveEventsLimit.
+func (c *ScheduledMaintenanceConfig) ParseArchiveEventsLimit() (int, error) {
+	if c == nil {
+		return DefaultArchiveEventsLimit, nil
+	}
+	return parseArchiveLimit(MaintenanceArchiveEventsLimitKey, c.ArchiveEventsLimit, DefaultArchiveEventsLimit)
+}
+
+// parseArchiveLimit reads one batch bound. Nil and zero keep def; a negative
+// value or one above MaxArchiveLimit is refused rather than clamped, and the
+// error names the daemon.json key so the operator can fix the entry it came
+// from (gt-s6srv).
+func parseArchiveLimit(key string, v *int, def int) (int, error) {
+	if v == nil || *v == 0 {
+		return def, nil
+	}
+	if *v < 0 || *v > MaxArchiveLimit {
+		return 0, fmt.Errorf("%s = %d: want 0 (the default) or a value from 1 to %d", key, *v, MaxArchiveLimit)
+	}
+	return *v, nil
 }
 
 // DiskMaintenanceConfig configures the disk_maintenance patrol: the daily

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -70,6 +71,84 @@ func TestScheduledMaintenanceArchiveDir(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Errorf("ParseArchiveDir(%q) = %q, want %q", tt.dir, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestScheduledMaintenanceArchiveLimitsDecodeAndDefault: both batch bounds
+// survive strict decoding into the fields the daemon reads, and an absent
+// section or zero setting reads the 5000-row default (gt-s6srv).
+func TestScheduledMaintenanceArchiveLimitsDecodeAndDefault(t *testing.T) {
+	t.Parallel()
+	if DefaultArchiveCommitLimit != 5000 || DefaultArchiveEventsLimit != 5000 {
+		t.Fatalf("defaults = %d/%d, want 5000/5000 (an unset config must behave as before the settings existed)",
+			DefaultArchiveCommitLimit, DefaultArchiveEventsLimit)
+	}
+	body := `{"patrols":{"scheduled_maintenance":{"enabled":true,"archive_commit_limit":3,"archive_events_limit":4}}}`
+	var cfg DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	sm := cfg.Patrols.ScheduledMaintenance
+	if sm == nil {
+		t.Fatal("scheduled_maintenance decoded as absent")
+	}
+	if got, err := sm.ParseArchiveCommitLimit(); err != nil || got != 3 {
+		t.Errorf("ParseArchiveCommitLimit = %d, %v; want 3, nil (the decoded setting)", got, err)
+	}
+	if got, err := sm.ParseArchiveEventsLimit(); err != nil || got != 4 {
+		t.Errorf("ParseArchiveEventsLimit = %d, %v; want 4, nil (the decoded setting)", got, err)
+	}
+
+	zero := 0
+	for _, tt := range []struct {
+		name string
+		cfg  *ScheduledMaintenanceConfig
+	}{
+		{name: "absent section", cfg: nil},
+		{name: "neither setting", cfg: &ScheduledMaintenanceConfig{}},
+		{name: "zero", cfg: &ScheduledMaintenanceConfig{ArchiveCommitLimit: &zero, ArchiveEventsLimit: &zero}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got, err := tt.cfg.ParseArchiveCommitLimit(); err != nil || got != DefaultArchiveCommitLimit {
+				t.Errorf("commit limit = %d, %v; want the %d default", got, err, DefaultArchiveCommitLimit)
+			}
+			if got, err := tt.cfg.ParseArchiveEventsLimit(); err != nil || got != DefaultArchiveEventsLimit {
+				t.Errorf("events limit = %d, %v; want the %d default", got, err, DefaultArchiveEventsLimit)
+			}
+		})
+	}
+}
+
+// TestArchiveLimitSettingsRejectBadValues: a negative bound and one above the
+// maximum are refused for both settings, and the error names the daemon.json
+// key to fix (gt-s6srv).
+func TestArchiveLimitSettingsRejectBadValues(t *testing.T) {
+	t.Parallel()
+	for _, n := range []int{-1, MaxArchiveLimit + 1} {
+		n := n
+		t.Run(fmt.Sprintf("commit=%d", n), func(t *testing.T) {
+			t.Parallel()
+			c := &ScheduledMaintenanceConfig{ArchiveCommitLimit: &n}
+			got, err := c.ParseArchiveCommitLimit()
+			if err == nil {
+				t.Fatalf("ParseArchiveCommitLimit(%d) = %d, want an error", n, got)
+			}
+			if !strings.Contains(err.Error(), MaintenanceArchiveCommitLimitKey) {
+				t.Errorf("error %q does not name %s", err, MaintenanceArchiveCommitLimitKey)
+			}
+		})
+		t.Run(fmt.Sprintf("events=%d", n), func(t *testing.T) {
+			t.Parallel()
+			c := &ScheduledMaintenanceConfig{ArchiveEventsLimit: &n}
+			got, err := c.ParseArchiveEventsLimit()
+			if err == nil {
+				t.Fatalf("ParseArchiveEventsLimit(%d) = %d, want an error", n, got)
+			}
+			if !strings.Contains(err.Error(), MaintenanceArchiveEventsLimitKey) {
+				t.Errorf("error %q does not name %s", err, MaintenanceArchiveEventsLimitKey)
 			}
 		})
 	}
