@@ -241,6 +241,7 @@ the seat the bad block dropped. The operator hold file and ESTOP stop the tick.`
 func init() {
 	specLintCmd.Flags().StringVar(&specLintTemplate, "template", "", "Spec template path (default daemon.patrols.spec_dispatch.template in settings/config.json, else ~/.claude/docs/agents/spec-template.md)")
 	specLintCmd.Flags().BoolVar(&specLintJSON, "json", false, "Print {id, ok, needs_planning, refusals[], advice[], hints[]} instead of one line")
+	specLintCmd.Flags().BoolVar(&specLintGraph, "graph", false, "Treat <bead-id> as an epic: print one line per cross-bead finding in its children and exit 1 on any finding but a duplicate test name (--json prints {epic, findings[]})")
 	specDispatchCmd.Flags().BoolVar(&specDispatchJSON, "json", false, "Output the tick report as JSON")
 	specDispatchCmd.Flags().BoolVar(&specDispatchDryRun, "dry-run", false, "Decide and report without slinging, labeling or commenting")
 	specCmd.AddCommand(specLintCmd, specDispatchCmd)
@@ -1028,6 +1029,9 @@ func specPeerHeldPinnedTo(warn io.Writer, townRoot, beadsDir string, peer sling.
 
 func runSpecLint(cmd *cobra.Command, args []string) error {
 	townRoot, _ := workspace.FindFromCwd()
+	if specLintGraph {
+		return runSpecGraph(cmd.OutOrStdout(), cmd.ErrOrStderr(), townRoot, args[0], specLintJSON)
+	}
 	path := specLintTemplate
 	if path == "" {
 		path = specTemplatePath(loadSpecDispatchConfig(townRoot))
