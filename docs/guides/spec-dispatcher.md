@@ -21,6 +21,10 @@ and prints one line naming the first failure. `--json` prints
 `{id, ok, needs_planning, refusals[]}` instead, listing **every** shape failure
 in check order, so a shell caller can act on all of them at once.
 
+Before writing or shaping a bead, read [Writing a bead](writing-a-bead.md): the
+five required sections, the `## Files` and `## Interfaces` syntax, and the six
+lessons the lint cannot check.
+
 | Check | Refusal names |
 |---|---|
 | the bead is work, not an epic, an agent bead, a wisp or another runtime family | `not a work bead` |
