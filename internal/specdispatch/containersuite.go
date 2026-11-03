@@ -6,7 +6,11 @@ import (
 )
 
 // ContainerSuitePackages returns the repo-relative Go package paths whose test
-// binaries link internal/testutil, a fresh slice per call (gt-e2rs).
+// binaries link internal/testutil, a fresh slice per call (gt-e2rs). To extend
+// it, list the packages whose test binaries import internal/testutil (go list
+// -test -deps over ./internal/...). A false entry costs one extra -run wrap; a
+// missing entry makes both the runtime guard and the Gate lint blind to that
+// package, so add a new package here when it first links testutil.
 func ContainerSuitePackages() []string {
 	return []string{
 		"internal/beads",
@@ -51,34 +55,19 @@ func containerSuiteGateRefusal(gate string) (Refusal, bool) {
 	return Refusal{}, false
 }
 
-// shellSegments splits one Gate line at its shell operators (&&, ||, ;, |), so
-// each command is judged on its own flags: a -run on a later command does not
-// narrow an earlier one. Quotes and backticks are deleted rather than parsed,
-// so wrapping or an unbalanced quote cannot hide an operator (gt-hgt9j.4).
+// shellSegments splits one Gate line at every shell separator character (&, |,
+// ;, parentheses and braces), so each command is judged on its own flags: a
+// -run on a later command does not narrow an earlier one, whatever separator
+// joins them. Quotes and backticks are deleted rather than parsed, so wrapping
+// or an unbalanced quote cannot hide a separator (gt-hgt9j.4).
 func shellSegments(line string) []string {
-	line = stripQuotes(line)
-	var segments []string
-	start := 0
-	for i := 0; i < len(line); i++ {
-		switch line[i] {
-		case ';':
-			segments = append(segments, line[start:i])
-			start = i + 1
-		case '|':
-			segments = append(segments, line[start:i])
-			if i+1 < len(line) && line[i+1] == '|' {
-				i++
-			}
-			start = i + 1
-		case '&':
-			if i+1 < len(line) && line[i+1] == '&' {
-				segments = append(segments, line[start:i])
-				i++
-				start = i + 1
-			}
+	return strings.FieldsFunc(stripQuotes(line), func(r rune) bool {
+		switch r {
+		case '&', '|', ';', '(', ')', '{', '}':
+			return true
 		}
-	}
-	return append(segments, line[start:])
+		return false
+	})
 }
 
 // stripQuotes removes every backtick, single quote and double quote from a
@@ -122,7 +111,7 @@ func isGoBinaryArg(field string) bool {
 // (gt-hgt9j.4).
 func hasRunFilter(args []string) bool {
 	for _, arg := range args {
-		if arg == "-run" || strings.HasPrefix(arg, "-run=") {
+		if arg == "-run" || arg == "--run" || strings.HasPrefix(arg, "-run=") || strings.HasPrefix(arg, "--run=") {
 			return true
 		}
 	}
@@ -130,12 +119,13 @@ func hasRunFilter(args []string) bool {
 }
 
 // containerSuitePackageArg returns the listed package the argument targets,
-// and "" when it targets none. Only the two spellings count: ./<package> and
-// ./<package>/.... The match is exact, so ./internal/cmdfoo is not
+// and "" when it targets none. Only the relative spellings count: ./<package>,
+// ./<package>/ and ./<package>/.... An import path spelled out in full is not
+// matched (a known gap). The match is exact, so ./internal/cmdfoo is not
 // ./internal/cmd.
 func containerSuitePackageArg(packages []string, arg string) string {
 	for _, pkg := range packages {
-		if arg == "./"+pkg || arg == "./"+pkg+"/..." {
+		if arg == "./"+pkg || arg == "./"+pkg+"/" || arg == "./"+pkg+"/..." {
 			return pkg
 		}
 	}

@@ -181,3 +181,32 @@ func TestContainerSuiteGateIgnoresOtherPackages(t *testing.T) {
 		})
 	}
 }
+
+// Every shell separator ends a command, so a -run on a later command never
+// narrows an earlier one, and a narrowed command is not refused for its own
+// spelling of the flag (gt-hgt9j.4).
+func TestContainerSuiteGateSeparatorsAndSpellings(t *testing.T) {
+	t.Parallel()
+	refused := []string{
+		"go test ./internal/cmd -count=1 & go test ./internal/specdispatch -run TestX",
+		"(go test ./internal/cmd -count=1) && go test ./internal/specdispatch -run TestX",
+		"{ go test ./internal/daemon; } ; go test ./internal/specdispatch -run TestX",
+		"go test ./internal/cmd/ -count=1",
+	}
+	for _, gate := range refused {
+		v := Lint(specWithGate(gate), defaultTemplate())
+		if v.Route != RouteRefuse || v.Field != "## Gate" {
+			t.Errorf("gate %q: verdict = %s, want a ## Gate refusal", gate, v.Line("gt-good"))
+		}
+	}
+	passed := []string{
+		"go test ./internal/cmd --run TestX",
+		"go test ./internal/cmd --run=TestX",
+		"go test ./internal/specdispatch -count=1 & go test ./internal/cmd -run TestY",
+	}
+	for _, gate := range passed {
+		if v := Lint(specWithGate(gate), defaultTemplate()); v.Route != RouteDispatch {
+			t.Errorf("gate %q: verdict = %s, want it clean", gate, v.Line("gt-good"))
+		}
+	}
+}
