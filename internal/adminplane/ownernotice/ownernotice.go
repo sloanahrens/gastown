@@ -115,25 +115,25 @@ func Compose(ev Event) (Notice, error) {
 	switch ev.Cause {
 	case CauseKeyRefused:
 		subject = fmt.Sprintf("Your workspace %s is paused: its key was refused", ev.Workspace)
-		body = fmt.Sprintf("The model provider refused the key for %s, so the workspace is paused and no new seats start. Work and history are kept while the workspace is paused. Replace the key in the workspace settings to resume it.", ev.Workspace)
+		body = fmt.Sprintf("The model provider refused the key for %s, so the workspace is paused. Work and history are kept while the workspace is paused. Replace the key to resume the workspace.", ev.Workspace)
 	case CauseSpendCap:
 		if !validSpend(ev.Spent, ev.Cap) {
 			return Notice{}, ErrSpend
 		}
 		subject = fmt.Sprintf("Your workspace %s has reached its daily spend cap", ev.Workspace)
-		body = fmt.Sprintf("%s spent $%.2f of its $%.2f daily spend cap on %s (UTC), so new work stops for the rest of the day. Work and history are kept. Wait for the next UTC day, when the cap resets, to start new work.", ev.Workspace, ev.Spent, ev.Cap, ev.At.UTC().Format(dayFormat))
+		body = fmt.Sprintf("%s spent $%.2f of its $%.2f daily spend cap on %s (UTC). Work and history are kept. Wait for the next UTC day before starting new work.", ev.Workspace, ev.Spent, ev.Cap, ev.At.UTC().Format(dayFormat))
 	case CauseRotationFailed:
 		subject = fmt.Sprintf("Your workspace %s is still using its previous key", ev.Workspace)
-		body = fmt.Sprintf("The replacement key for %s did not pass its check, so the workspace keeps using its previous key and keeps running. Nothing else changed. Replace the key with one the model provider accepts; the previous key stays in use until a replacement passes.", ev.Workspace)
+		body = fmt.Sprintf("The replacement key for %s did not pass its check, so the workspace keeps using its previous key. Replace the key with one the model provider accepts; the previous key stays in use until a replacement passes.", ev.Workspace)
 	case CauseSuspended:
 		subject = fmt.Sprintf("Your workspace %s has been suspended", ev.Workspace)
-		body = fmt.Sprintf("%s has been suspended and no longer runs seats. Work and history are kept. Ask the operator to restore the workspace.", ev.Workspace)
+		body = fmt.Sprintf("%s has been suspended. Work and history are kept. Ask the operator to restore the workspace.", ev.Workspace)
 	case CauseClosed:
 		if ev.Days < 1 {
 			return Notice{}, ErrExportWindow
 		}
 		subject = fmt.Sprintf("Your workspace %s has been closed", ev.Workspace)
-		body = fmt.Sprintf("%s has been closed and will not run again. Work and history are kept for %d days so you can export them. Request an export of the workspace before the window closes.", ev.Workspace, ev.Days)
+		body = fmt.Sprintf("%s has been closed. Work and history are kept for %d days so you can export them. Request an export of the workspace before the window closes.", ev.Workspace, ev.Days)
 	default:
 		return Notice{}, ErrUnknownCause
 	}

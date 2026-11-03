@@ -93,13 +93,69 @@ func TestComposeEachCause(t *testing.T) {
 	})
 }
 
+// TestComposeStatesNoUnspecifiedBehaviour holds each notice to the work item's
+// scope: what happened, that work and history are kept, and the one action, and
+// no platform behaviour the work item did not specify (gt-dcbph).
+func TestComposeStatesNoUnspecifiedBehaviour(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		ev          Event
+		unspecified []string
+	}{
+		{
+			name:        "key refused",
+			ev:          Event{Workspace: "acme", Cause: CauseKeyRefused, At: utcTime(2, 9, 30)},
+			unspecified: []string{"no new seats start", "workspace settings"},
+		},
+		{
+			name:        "daily spend cap",
+			ev:          Event{Workspace: "acme", Cause: CauseSpendCap, At: utcTime(2, 9, 30), Spent: 42.75, Cap: 40},
+			unspecified: []string{"new work stops", "cap resets"},
+		},
+		{
+			name:        "rotation failed",
+			ev:          Event{Workspace: "acme", Cause: CauseRotationFailed, At: utcTime(2, 9, 30)},
+			unspecified: []string{"keeps running", "nothing else changed"},
+		},
+		{
+			name:        "suspended",
+			ev:          Event{Workspace: "acme", Cause: CauseSuspended, At: utcTime(2, 9, 30)},
+			unspecified: []string{"runs seats"},
+		},
+		{
+			name:        "closed",
+			ev:          Event{Workspace: "acme", Cause: CauseClosed, At: utcTime(2, 9, 30), Days: 30},
+			unspecified: []string{"will not run again"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			n, err := Compose(tc.ev)
+			if err != nil {
+				t.Fatalf("Compose(%s): %v", tc.name, err)
+			}
+			text := strings.ToLower(n.Subject + "\n" + n.Body)
+			for _, clause := range tc.unspecified {
+				if strings.Contains(text, clause) {
+					t.Errorf("notice states platform behaviour the work item did not specify (%q): %q", clause, text)
+				}
+			}
+		})
+	}
+}
+
 // TestComposeLeaksNothing is the acceptance test for the package's text
-// boundary: numbers an event carries for one cause never reach another cause's
-// notice, the workspace id (the one string field a notice may print) is the
-// only sentinel that appears, and no notice carries a key-shaped string.
+// boundary: sentinels an event carries for one field never reach a notice that
+// field does not feed, the workspace id (the one id field a notice may print)
+// is the only sentinel that appears, and no notice carries a key-shaped string.
 func TestComposeLeaksNothing(t *testing.T) {
 	t.Parallel()
-	const workspace = "ws-4f8c2a1e"
+	// workspaceSentinel is a deliberate sentinel, not a plausible id: the id
+	// field is the one an event may print, so the test proves it reaches a
+	// notice and that no other field's sentinel does.
+	const workspaceSentinel = "ws-4f8c2a1e-SENTINEL"
 	const (
 		spentSentinel = 81726354.42
 		capSentinel   = 71625344.31
@@ -110,11 +166,11 @@ func TestComposeLeaksNothing(t *testing.T) {
 	daysText := strconv.Itoa(daysSentinel)
 
 	events := []Event{
-		{Workspace: workspace, Cause: CauseKeyRefused, At: utcTime(2, 9, 30), Spent: spentSentinel, Cap: capSentinel, Days: daysSentinel},
-		{Workspace: workspace, Cause: CauseSpendCap, At: utcTime(2, 9, 30), Spent: spentSentinel, Cap: capSentinel, Days: daysSentinel},
-		{Workspace: workspace, Cause: CauseRotationFailed, At: utcTime(2, 9, 30), Spent: spentSentinel, Cap: capSentinel, Days: daysSentinel},
-		{Workspace: workspace, Cause: CauseSuspended, At: utcTime(2, 9, 30), Spent: spentSentinel, Cap: capSentinel, Days: daysSentinel},
-		{Workspace: workspace, Cause: CauseClosed, At: utcTime(2, 9, 30), Spent: spentSentinel, Cap: capSentinel, Days: daysSentinel},
+		{Workspace: workspaceSentinel, Cause: CauseKeyRefused, At: utcTime(2, 9, 30), Spent: spentSentinel, Cap: capSentinel, Days: daysSentinel},
+		{Workspace: workspaceSentinel, Cause: CauseSpendCap, At: utcTime(2, 9, 30), Spent: spentSentinel, Cap: capSentinel, Days: daysSentinel},
+		{Workspace: workspaceSentinel, Cause: CauseRotationFailed, At: utcTime(2, 9, 30), Spent: spentSentinel, Cap: capSentinel, Days: daysSentinel},
+		{Workspace: workspaceSentinel, Cause: CauseSuspended, At: utcTime(2, 9, 30), Spent: spentSentinel, Cap: capSentinel, Days: daysSentinel},
+		{Workspace: workspaceSentinel, Cause: CauseClosed, At: utcTime(2, 9, 30), Spent: spentSentinel, Cap: capSentinel, Days: daysSentinel},
 	}
 	for _, ev := range events {
 		t.Run(string(ev.Cause), func(t *testing.T) {
@@ -124,8 +180,11 @@ func TestComposeLeaksNothing(t *testing.T) {
 				t.Fatalf("Compose(%s): %v", ev.Cause, err)
 			}
 			text := n.Subject + "\n" + n.Body
-			if !strings.Contains(text, workspace) {
-				t.Errorf("notice does not name the workspace: %q", text)
+			if !strings.Contains(n.Subject, workspaceSentinel) {
+				t.Errorf("subject does not name the workspace: %q", n.Subject)
+			}
+			if !strings.Contains(n.Body, workspaceSentinel) {
+				t.Errorf("body does not name the workspace: %q", n.Body)
 			}
 
 			switch ev.Cause {
@@ -165,12 +224,17 @@ func TestComposeLeaksNothing(t *testing.T) {
 
 	t.Run("unknown cause text is not echoed", func(t *testing.T) {
 		t.Parallel()
-		const sentinel = "sk-ant-provider-text-SENTINEL"
-		_, err := Compose(Event{Workspace: workspace, Cause: Cause(sentinel), At: utcTime(2, 9, 30)})
+		// A sentinel placed in the Cause field must reach neither the error nor
+		// a notice.
+		const causeSentinel = "sk-ant-provider-text-SENTINEL"
+		n, err := Compose(Event{Workspace: workspaceSentinel, Cause: Cause(causeSentinel), At: utcTime(2, 9, 30)})
 		if err == nil {
 			t.Fatal("Compose(unknown cause) = nil error, want one")
 		}
-		if strings.Contains(err.Error(), sentinel) {
+		if n != (Notice{}) {
+			t.Errorf("Compose(unknown cause) = %+v, want no notice", n)
+		}
+		if strings.Contains(err.Error(), causeSentinel) {
 			t.Errorf("error %q echoes the caller's cause text", err)
 		}
 	})
