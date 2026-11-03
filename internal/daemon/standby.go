@@ -10,15 +10,11 @@ import (
 
 // standbyReason is the one standby check the daemon's background work reads: why
 // the town stands by, or "" when it runs. The town ESTOP and a Waned Ring stand
-// every caller by. The operator's hold file stands by only the callers that ask
-// for it (holdFile): the tier sweep and the maintenance gc. The heartbeat's
-// lifecycle steps leave it out, because the drain runs on the hold file alone
-// (gt-6mlik.6). The Ring's key resolves through the daemon's environment seam.
-func (d *Daemon) standbyReason(now time.Time, holdFile bool) string {
+// every caller by. The operator's dispatch hold file parks dispatch only and is
+// not read here, so the tier sweep and the maintenance gc keep running under it
+// (gt-5cl4i). The Ring's key resolves through the daemon's environment seam.
+func (d *Daemon) standbyReason(now time.Time) string {
 	key := ring.TownKey(d.env)
-	if holdFile {
-		return dispatch.OperatorHoldWithKey(d.config.TownRoot, key, now)
-	}
 	if estop.IsActive(d.config.TownRoot) {
 		return "town ESTOP active (" + estop.FilePath(d.config.TownRoot) + ")"
 	}

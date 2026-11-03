@@ -196,9 +196,9 @@ func (d *Daemon) maybeCatchUpGC(now time.Time) {
 	if last := d.catchUpGCAttemptAt.Load(); last != 0 && now.Sub(time.Unix(0, last)) < maintenanceCatchUpRetry {
 		return
 	}
-	// A standby (the hold file, the town ESTOP or a Waned Ring) starts no
-	// catch-up gc. The catch-up backup above is not held by it.
-	reason := d.standbyReason(now, true)
+	// A standby (the town ESTOP or a Waned Ring) starts no catch-up gc. The
+	// catch-up backup above is not held by it.
+	reason := d.standbyReason(now)
 	d.logStandby(&d.standbyMaintenance, "scheduled_maintenance", reason)
 	if reason != "" {
 		return

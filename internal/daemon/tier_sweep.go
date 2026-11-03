@@ -648,9 +648,9 @@ func (d *Daemon) triggerTierSweep() {
 		d.tierSweepStaleLogged.Store(false)
 	}
 	now := d.clk().Now()
-	// The standby (the operator's hold file, the town ESTOP or a Waned Ring)
-	// starts no cycle and creates no bead; a cycle already running finishes.
-	reason := d.standbyReason(now, true)
+	// A standby (the town ESTOP or a Waned Ring) starts no cycle and creates
+	// no bead; a cycle already running finishes.
+	reason := d.standbyReason(now)
 	d.logStandby(&d.standbyTierSweep, "tier_sweep", reason)
 	if reason != "" {
 		return

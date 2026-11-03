@@ -2096,8 +2096,9 @@ func (d *Daemon) heartbeat(state *State) {
 	// The standby (the town E-stop or a Waned Ring) holds dispatch and
 	// restarts, not upkeep: Dolt stays supervised and the logs keep rotating
 	// (gt-4k3fj.8). It holds the lifecycle steps in heartbeatSteps; the
-	// operator's hold file does not, since the drain runs on that alone.
-	reason := d.standbyReason(d.clk().Now(), false)
+	// operator's dispatch hold file is not a standby, so the drain runs under
+	// that alone.
+	reason := d.standbyReason(d.clk().Now())
 	d.logStandby(&d.standbyHeartbeat, "heartbeat", reason)
 	if reason != "" {
 		d.seams.runHeartbeatWork(d, state, false)
