@@ -252,6 +252,61 @@ func TestSandboxSeatGitStateGoneSandboxJudgesTheHostWorktree(t *testing.T) {
 			t.Errorf("state = %+v, want unknown naming the comparison", st)
 		}
 	})
+
+	t.Run("a recorded branch that is not a ref name is unknown", func(t *testing.T) {
+		t.Parallel()
+		w, dir, _ := sandboxHostRepo(t)
+		for _, recorded := range []string{"--upload-pack=evil", "HEAD", "bad..name", "-x"} {
+			st := judgeGone(w, dir, recorded)
+			if st.Source != GitStateSourceUnknown || !strings.Contains(st.FailedReason, "not a valid ref name") {
+				t.Errorf("recorded branch %q judged %+v, want unknown naming the record", recorded, st)
+			}
+		}
+	})
+
+	t.Run("a shared repo branch holding a commit the worktree lacks is counted", func(t *testing.T) {
+		t.Parallel()
+		w, dir, branch := sandboxHostRepo(t)
+		rigRoot := t.TempDir()
+		buildRigIn(t, w, rigRoot, map[string]string{"README.md": "# Test\n"})
+		shared := filepath.Join(rigRoot, "mayor", "rig")
+		// The shared repository kept the seat's branch at a commit the worktree
+		// never reached.
+		w.SetRef(t, shared, "refs/heads/"+branch, w.rev(t, shared, "refs/heads/main"))
+		w.Commit(t, shared, branch, "only the shared ref has this", map[string]string{"shared.txt": "s\n"})
+		st := judgeGoneIn(w, dir, rigRoot, branch)
+		if st.Source != GitStateSourceLive || st.UnpushedCommits != 1 {
+			t.Errorf("state = %+v, want the shared ref's one unique commit counted", st)
+		}
+	})
+
+	t.Run("an unreadable shared repo comparison in a live worktree is unknown", func(t *testing.T) {
+		t.Parallel()
+		w, dir, branch := sandboxHostRepo(t)
+		rigRoot := t.TempDir()
+		buildRigIn(t, w, rigRoot, map[string]string{"README.md": "# Test\n"})
+		shared := filepath.Join(rigRoot, "mayor", "rig")
+		w.SetRef(t, shared, "refs/heads/"+branch, w.rev(t, shared, "refs/heads/main"))
+		w.DeleteRef(t, shared, "refs/remotes/origin/main")
+		st := judgeGoneIn(w, dir, rigRoot, branch)
+		if st.Source != GitStateSourceUnknown || !strings.Contains(st.FailedReason, "judging refs/heads/") {
+			t.Errorf("state = %+v, want unknown naming the shared ref comparison", st)
+		}
+	})
+
+	t.Run("an unreadable shared repo ref in a live worktree is unknown", func(t *testing.T) {
+		t.Parallel()
+		w, dir, branch := sandboxHostRepo(t)
+		rigRoot := t.TempDir()
+		// A rig root whose mayor/rig is not a repository the seam can read.
+		if err := os.MkdirAll(filepath.Join(rigRoot, "mayor", "rig"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		st := judgeGoneIn(w, dir, rigRoot, branch)
+		if st.Source != GitStateSourceUnknown || !strings.Contains(st.FailedReason, "reading refs/heads/"+branch+" in the shared repository") {
+			t.Errorf("state = %+v, want unknown naming the shared ref read", st)
+		}
+	})
 }
 
 const sharedRepoBranch = "polecat/toast/gt-a+x"
@@ -271,10 +326,12 @@ func sharedRepoRig(t *testing.T) (*world, string, string) {
 }
 
 // A gone sandbox seat whose host worktree directory is missing is judged from
-// the branch ref that worktree left in the rig's shared repository: a commit
-// only that ref holds blocks and is counted, a ref whose work is on the pushed
+// the branch refs that worktree left in the rig's shared repository: a commit
+// only a ref holds blocks and is counted, a ref whose work is on the pushed
 // branch — or no ref at all — reads clean, and a comparison that cannot run is
-// unknown. Without this, unpushed commits outlive the worktree that held them
+// unknown. A seat that recorded no branch is judged by every generated branch
+// the repository holds under its name, so its unpushed work cannot go unlooked
+// for; without this, unpushed commits outlive the worktree that held them
 // (gt-zgoo3).
 func TestSandboxSeatGoneSeatMissingWorktreeJudgesTheSharedRepo(t *testing.T) {
 	t.Parallel()
@@ -329,12 +386,68 @@ func TestSandboxSeatGoneSeatMissingWorktreeJudgesTheSharedRepo(t *testing.T) {
 		}
 	})
 
-	t.Run("no recorded branch names no ref to compare", func(t *testing.T) {
+	t.Run("a recorded branch that is not a ref name is unknown", func(t *testing.T) {
+		t.Parallel()
+		w, rigRoot, gone := sharedRepoRig(t)
+		st := judgeGoneIn(w, gone, rigRoot, "--all")
+		if st.Source != GitStateSourceUnknown || !strings.Contains(st.FailedReason, "not a valid ref name") {
+			t.Errorf("state = %+v, want unknown naming the record", st)
+		}
+	})
+
+	t.Run("no recorded branch judges the seat's branches in the shared repo", func(t *testing.T) {
 		t.Parallel()
 		w, rigRoot, gone := sharedRepoRig(t)
 		st := judgeGoneIn(w, gone, rigRoot, "")
+		if st.Source != GitStateSourceLive {
+			t.Fatalf("Source = %q, want live (reason %q)", st.Source, st.FailedReason)
+		}
+		if st.UnpushedCommits != 1 {
+			t.Errorf("UnpushedCommits = %d, want the seat's one local commit", st.UnpushedCommits)
+		}
+	})
+
+	t.Run("no recorded branch and no local branch for the seat reads clean", func(t *testing.T) {
+		t.Parallel()
+		w, rigRoot, gone := sharedRepoRig(t)
+		shared := filepath.Join(rigRoot, "mayor", "rig")
+		w.DeleteRef(t, shared, "refs/heads/"+sharedRepoBranch)
+		// Another seat's branch in the repository is not this seat's work.
+		w.SetRef(t, shared, "refs/heads/polecat/other/gt-b+x", w.rev(t, shared, "refs/heads/main"))
+		st := judgeGoneIn(w, gone, rigRoot, "")
 		if st.Source != GitStateSourceLive || st.UnpushedCommits != 0 {
-			t.Errorf("state = %+v, want live with nothing named to compare", st)
+			t.Errorf("state = %+v, want live clean for a seat with no local branch", st)
+		}
+	})
+
+	t.Run("no recorded branch with no seat named by the path is unknown", func(t *testing.T) {
+		t.Parallel()
+		w, rigRoot, _ := sharedRepoRig(t)
+		st := judgeGoneIn(w, filepath.Join(t.TempDir(), "elsewhere"), rigRoot, "")
+		if st.Source != GitStateSourceUnknown || !strings.Contains(st.FailedReason, "names no polecat under polecats/") {
+			t.Errorf("state = %+v, want unknown naming the unnamed seat", st)
+		}
+	})
+
+	t.Run("no recorded branch with an unreadable branch list is unknown", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, "mayor", "rig"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		st := judgeGoneIn(newWorld(), filepath.Join(root, "polecats", "toast", "gastown"), root, "")
+		if st.Source != GitStateSourceUnknown || !strings.Contains(st.FailedReason, "listing the shared repository's branches") {
+			t.Errorf("state = %+v, want unknown naming the branch list", st)
+		}
+	})
+
+	t.Run("no recorded branch with an unreadable comparison is unknown", func(t *testing.T) {
+		t.Parallel()
+		w, rigRoot, gone := sharedRepoRig(t)
+		w.DeleteRef(t, filepath.Join(rigRoot, "mayor", "rig"), "refs/remotes/origin/main")
+		st := judgeGoneIn(w, gone, rigRoot, "")
+		if st.Source != GitStateSourceUnknown || !strings.Contains(st.FailedReason, "judging refs/heads/") {
+			t.Errorf("state = %+v, want unknown naming the comparison", st)
 		}
 	})
 }

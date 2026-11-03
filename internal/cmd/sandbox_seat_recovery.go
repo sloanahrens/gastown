@@ -16,10 +16,13 @@ import (
 type sandboxSeatEnv struct {
 	probe sandboxSeatProbe
 	// hostGitState judges a gone sandbox seat from its host worktree and the
-	// rig's shared repository; nil means polecat.SandboxSeatHostGitState.
-	// Tests supply a modeled measurement so the recovery path runs with no
-	// repository.
+	// rig's shared repository; nil means the measurement is run for real.
+	// Tests that model no repository supply a whole answer here.
 	hostGitState func(gone polecat.LiveGitState, worktreePath, rigRoot, pushedBranch string) polecat.LiveGitState
+	// gits opens the repositories the real measurement reads; its zero value is
+	// the git binary, and a test supplies a repository model so
+	// polecat.SandboxSeatHostGitStateWith runs the production measurement.
+	gits polecat.SandboxSeatGitOpener
 	// remoteBranch reports whether branch exists on origin, asked of the rig's
 	// shared bare repo; nil means ls-remote there.
 	remoteBranch func(rigPath, branch string) (bool, error)
@@ -46,14 +49,14 @@ func (e sandboxSeatEnv) branchesForIssue(rigPath, issueID string) ([]string, err
 }
 
 // judgeGoneSeat measures a gone sandbox seat from what survives on the host:
-// its worktree, or the branch ref the shared repository still holds once the
-// worktree directory is gone (gt-zgoo3). A test's measurement runs instead of
-// the repository read.
+// its worktree, or the branch refs the shared repository still holds once the
+// worktree directory is gone (gt-zgoo3). A test's modeled answer runs instead
+// of the measurement, or its git opener runs the measurement itself.
 func (e sandboxSeatEnv) judgeGoneSeat(gone polecat.LiveGitState, worktreePath, rigRoot, pushedBranch string) polecat.LiveGitState {
 	if e.hostGitState != nil {
 		return e.hostGitState(gone, worktreePath, rigRoot, pushedBranch)
 	}
-	return polecat.SandboxSeatHostGitState(gone, worktreePath, rigRoot, pushedBranch)
+	return polecat.SandboxSeatHostGitStateWith(e.gits, gone, worktreePath, rigRoot, pushedBranch)
 }
 
 // applySandboxLostWorkFacts gives the verdict what it needs to tell lost work
