@@ -112,6 +112,11 @@ type Daemon struct {
 	// to watch the decision without starting a process. Nil (a Daemon built
 	// without New) refuses to launch rather than start one implicitly.
 	updateLaunch func(ctx context.Context, reason string) error
+	// updateStarter starts the prepared update command and returns the wait
+	// that reaps it; nil starts the command and waits with exec's own Start
+	// and Wait. A test injects one to prove the reap runs on its own goroutine
+	// (update_trigger.go).
+	updateStarter updateProcessStarter
 	// updateTrigger is the block's own memory: the launch suppression clock
 	// and the last settings error logged.
 	updateTrigger updateTriggerState
@@ -866,6 +871,10 @@ type Daemon struct {
 	// line, so one held request logs once rather than once per heartbeat; a
 	// cycle that runs resets it.
 	rebuildGTWindowLogged atomic.Bool
+	// rebuildGTDeferredLogged is the latch on the "install decisions are
+	// deferred to the update job" line: the update trigger is on for the whole
+	// daemon run, so the line is logged once, not once per heartbeat.
+	rebuildGTDeferredLogged atomic.Bool
 
 	// rebuildGTCycleDoneFn, when non-nil, is called on the cycle's own
 	// goroutine as it ends, after rebuildGTRunning clears. Test seam

@@ -186,6 +186,13 @@ func (d *Daemon) runScheduledMaintenance() {
 	// not the window, so it runs before the window is parsed.
 	d.checkStaleMaintenanceGC(now)
 
+	// The update job owns the nightly cycle when its trigger is on: this tick
+	// starts none of its own. A B11 request is an instruction rather than this
+	// tick's decision, so it still runs the cycle; the stale-gc check above
+	// and the catch-up paths outside the window are the safety net and still
+	// run too.
+	cycleDeferred := !requested && d.updateTriggerEnabled()
+
 	window := maintenanceWindow(d.patrolConfig)
 	if window == "" && !requested {
 		d.logger.Printf("scheduled_maintenance: no window configured, skipping")
@@ -229,6 +236,12 @@ func (d *Daemon) runScheduledMaintenance() {
 
 	if !requested && !shouldRunMaintenanceCycle(now, d.lastMaintenanceRun) {
 		return // Already ran this window
+	}
+
+	// The update job asks for the nightly cycle through the maintenance
+	// request, so a tick with no request starts nothing here.
+	if cycleDeferred {
+		return
 	}
 
 	// A standby (the town ESTOP or a Waned Ring) starts no gc, but the

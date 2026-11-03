@@ -248,10 +248,27 @@ func (d *Daemon) updateSourceRig(repoRoot string) string {
 	return rel
 }
 
+// updateProcessStarter starts a prepared update command and hands back the
+// wait that reaps it. Production is startUpdateProcess; a test injects its own
+// so it can prove the wait runs off the heartbeat without a child process.
+type updateProcessStarter func(cmd *exec.Cmd) (wait func(), err error)
+
+// startUpdateProcess starts cmd and returns the wait that reaps it. The exit
+// status is the job's own record (its state file and history), so the wait
+// only reaps.
+func startUpdateProcess(cmd *exec.Cmd) (func(), error) {
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return func() { _ = cmd.Wait() }, nil
+}
+
 // launchUpdate starts `gt update --from-daemon` as a detached child and
 // returns at once. The child's output goes to a launch log under the update
-// directory; the child is never waited on, so it survives this daemon being
-// restarted by the install it performs.
+// directory. The child is waited on from a goroutine of its own, so an exited
+// job is reaped rather than left a zombie, and the wait never holds the
+// heartbeat; Setsid already detached it, so an install restarting this daemon
+// does not take the job down with the daemon's session.
 func (d *Daemon) launchUpdate(ctx context.Context, _ string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -261,7 +278,16 @@ func (d *Daemon) launchUpdate(ctx context.Context, _ string) error {
 		return err
 	}
 	defer func() { _ = logFile.Close() }()
-	return cmd.Start()
+	starter := d.updateStarter
+	if starter == nil {
+		starter = startUpdateProcess
+	}
+	wait, err := starter(cmd)
+	if err != nil {
+		return err
+	}
+	go wait()
+	return nil
 }
 
 // buildUpdateLaunch builds, but does not start, the detached update command:
