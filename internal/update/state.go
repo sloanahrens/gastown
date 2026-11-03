@@ -135,6 +135,9 @@ type Store struct {
 	// Rename publishes a new record; nil means os.Rename. A test replaces it
 	// to make the publish fail.
 	Rename func(oldpath, newpath string) error
+	// openHistory opens history.jsonl for appending; nil means os.OpenFile.
+	// A test replaces it to make the open, the write or the close fail.
+	openHistory func(path string) (historyWriter, error)
 
 	mu      sync.Mutex
 	current *State
