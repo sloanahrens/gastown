@@ -19,6 +19,7 @@ modify: internal/c.go
 `
 
 func TestFilesParseVerbs(t *testing.T) {
+	t.Parallel()
 	block, present, err := ParseFiles(filesDescription)
 	if err != nil {
 		t.Fatalf("ParseFiles: %v", err)
@@ -39,6 +40,7 @@ func TestFilesParseVerbs(t *testing.T) {
 }
 
 func TestFilesParseRefusesBadLine(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		files string
@@ -84,6 +86,7 @@ func TestFilesParseRefusesBadLine(t *testing.T) {
 }
 
 func TestFilesParseAbsentSection(t *testing.T) {
+	t.Parallel()
 	block, present, err := ParseFiles("## Goal\nA thing exists.\n")
 	if err != nil {
 		t.Fatalf("ParseFiles: %v", err)
@@ -97,6 +100,7 @@ func TestFilesParseAbsentSection(t *testing.T) {
 }
 
 func TestFilesParseStripsBulletAndBackticks(t *testing.T) {
+	t.Parallel()
 	block, present, err := ParseFiles("## Files\n- create: `internal/x.go`\n")
 	if err != nil {
 		t.Fatalf("ParseFiles: %v", err)
@@ -111,6 +115,7 @@ func TestFilesParseStripsBulletAndBackticks(t *testing.T) {
 }
 
 func TestFilesPathsDedupesInOrder(t *testing.T) {
+	t.Parallel()
 	block, _, err := ParseFiles("## Files\ncreate: a.go\nmodify: m.go\ncreate: b.go\ncreate: a.go\n")
 	if err != nil {
 		t.Fatalf("ParseFiles: %v", err)
@@ -124,6 +129,7 @@ func TestFilesPathsDedupesInOrder(t *testing.T) {
 }
 
 func TestFilesParseIgnoresBlankLines(t *testing.T) {
+	t.Parallel()
 	block, present, err := ParseFiles("## Goal\nx\n\n## Files\n\ncreate: a.go\n\nmodify: b.go\n\n## Out of scope\n")
 	if err != nil {
 		t.Fatalf("ParseFiles: %v", err)
@@ -141,6 +147,7 @@ func TestFilesParseIgnoresBlankLines(t *testing.T) {
 }
 
 func TestFilesParseIgnoresHeadings(t *testing.T) {
+	t.Parallel()
 	block, _, err := ParseFiles("## Files\ncreate: a.go\n### Example\nmodify: b.go\n")
 	if err != nil {
 		t.Fatalf("ParseFiles: %v", err)
@@ -155,6 +162,7 @@ func TestFilesParseIgnoresHeadings(t *testing.T) {
 }
 
 func TestFilesParseEmptySection(t *testing.T) {
+	t.Parallel()
 	block, present, err := ParseFiles("## Files\n\n## Goal\nx\n")
 	if err != nil {
 		t.Fatalf("ParseFiles: %v", err)
