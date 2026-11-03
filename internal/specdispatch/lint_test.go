@@ -417,20 +417,26 @@ func TestAcceptanceAgreeNeedsBoth(t *testing.T) {
 // (gt-hgt9j.2).
 func TestAcceptanceAgreeIgnoresBulletStyle(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name    string
-		section string
+	spellings := []struct {
+		name string
+		text string
 	}{
+		{"checkbox", "- [ ] one\n- [ ] two\n- [ ] three"},
 		{"bullet", "- one\n- two\n- three"},
 		{"asterisk", "* one\n* two\n* three"},
 		{"number", "1. one\n2. two\n3. three"},
 		{"mixed", "- one\n* two\n1. three"},
 	}
-	for _, tc := range cases {
-		s := goodSpec()
-		s.Description += "\n\n## Acceptance\n" + tc.section
-		if v := Lint(s, defaultTemplate()); !v.Clean() {
-			t.Errorf("%s section refused against checkbox field: %s", tc.name, v.Line(s.ID))
+	// Both sides vary: a marker stripped from the section alone would pass
+	// while the same spelling in the field still disagreed.
+	for _, section := range spellings {
+		for _, field := range spellings {
+			s := goodSpec()
+			s.Acceptance = field.text
+			s.Description += "\n\n## Acceptance\n" + section.text
+			if v := Lint(s, defaultTemplate()); !v.Clean() {
+				t.Errorf("%s section against %s field refused: %s", section.name, field.name, v.Line(s.ID))
+			}
 		}
 	}
 }
