@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/daemon"
 )
 
 // verifyProbeCall is one command a fake verify RunFunc received.
@@ -152,6 +154,58 @@ func TestUpdateVerifyDaemonCommit(t *testing.T) {
 	})
 }
 
+// TestUpdateVerifyDaemonStateCommit: the daemon state is read only through a
+// resolved town root, and a failure at either step is an error.
+func TestUpdateVerifyDaemonStateCommit(t *testing.T) {
+	t.Parallel()
+
+	t.Run("reads the commit from the state", func(t *testing.T) {
+		t.Parallel()
+		commit, err := daemonCommitFrom(
+			func() (string, error) { return "/town", nil },
+			func(root string) (*daemon.State, error) {
+				if root != "/town" {
+					t.Errorf("loaded the state for %q, want the resolved town root", root)
+				}
+				return &daemon.State{Commit: "d43dd6953"}, nil
+			},
+		)
+		if err != nil {
+			t.Fatalf("daemon commit: %v", err)
+		}
+		if commit != "d43dd6953" {
+			t.Errorf("commit = %q, want the state's commit", commit)
+		}
+	})
+
+	t.Run("an unresolved town root is an error", func(t *testing.T) {
+		t.Parallel()
+		boom := errors.New("no town")
+		_, err := daemonCommitFrom(
+			func() (string, error) { return "", boom },
+			func(string) (*daemon.State, error) {
+				t.Fatal("loaded the state without a town root")
+				return nil, nil
+			},
+		)
+		if !errors.Is(err, boom) {
+			t.Errorf("error = %v, want the town root error", err)
+		}
+	})
+
+	t.Run("an unreadable state is an error", func(t *testing.T) {
+		t.Parallel()
+		boom := errors.New("state unreadable")
+		_, err := daemonCommitFrom(
+			func() (string, error) { return "/town", nil },
+			func(string) (*daemon.State, error) { return nil, boom },
+		)
+		if !errors.Is(err, boom) {
+			t.Errorf("error = %v, want the loader error", err)
+		}
+	})
+}
+
 // TestUpdateVerifyImageLabel: the label is read from gastown-polecat:dev with
 // the org.gastown.gt-commit key, trimmed, and a failed inspect is an error.
 func TestUpdateVerifyImageLabel(t *testing.T) {
@@ -258,6 +312,16 @@ func TestUpdateVerifyHealthTakesTheFirstLineIgnoringTheExitCode(t *testing.T) {
 
 		if _, err := probes.Health(ctx); !errors.Is(err, boom) {
 			t.Errorf("error = %v, want the run error", err)
+		}
+	})
+
+	t.Run("an unresolved executable is an error", func(t *testing.T) {
+		t.Parallel()
+		boom := errors.New("no executable")
+		probes := newVerifyProbes(verifyProbeEnv{Exe: func() (string, error) { return "", boom }})
+
+		if _, err := probes.Health(ctx); !errors.Is(err, boom) {
+			t.Errorf("error = %v, want the exe error", err)
 		}
 	})
 }

@@ -58,11 +58,17 @@ func newVerifyProbes(env verifyProbeEnv) update.VerifyProbes {
 // state. An unreadable state is an error: it says nothing about which build
 // the daemon runs.
 func daemonStateCommit() (string, error) {
-	townRoot, err := workspace.FindFromCwdOrError()
+	return daemonCommitFrom(workspace.FindFromCwdOrError, daemon.LoadState)
+}
+
+// daemonCommitFrom reads the daemon's commit through the town root and state
+// loader it is given.
+func daemonCommitFrom(findTownRoot func() (string, error), loadState func(string) (*daemon.State, error)) (string, error) {
+	townRoot, err := findTownRoot()
 	if err != nil {
 		return "", err
 	}
-	state, err := daemon.LoadState(townRoot)
+	state, err := loadState(townRoot)
 	if err != nil {
 		return "", err
 	}
