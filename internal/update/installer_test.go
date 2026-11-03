@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -364,6 +365,20 @@ func TestExecInstallerKeepsTheVerdictWhenTheRunErrors(t *testing.T) {
 	}
 	if res.Event != "installed" || res.Commit != "abc123" || res.Exit != 0 {
 		t.Errorf("Install = %+v, want installed abc123 exit 0", res)
+	}
+}
+
+// TestExecRunNamesACommandThatCannotStart drives the production RunFunc's
+// error return. A bare name goes through exec's PATH lookup, which fails
+// before any process starts, so the unit tier stays hermetic.
+func TestExecRunNamesACommandThatCannotStart(t *testing.T) {
+	t.Parallel()
+	_, exit, err := ExecRun(context.Background(), t.TempDir(), nil, "gt-update-no-such-command")
+	if !errors.Is(err, exec.ErrNotFound) {
+		t.Fatalf("ExecRun error = %v, want exec.ErrNotFound in its chain", err)
+	}
+	if exit != -1 {
+		t.Errorf("ExecRun exit = %d, want -1", exit)
 	}
 }
 

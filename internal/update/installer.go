@@ -88,11 +88,9 @@ var ExecRun RunFunc = func(ctx context.Context, dir string, env []string, name s
 		return string(out), 0, nil
 	}
 	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		// A run killed with its context never reached a status of its own.
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return string(out), -1, ctxErr
-		}
+	// A nonzero exit is a status; a run killed with its context, or one that
+	// could not start, reached none and is an error.
+	if errors.As(err, &exitErr) && ctx.Err() == nil {
 		return string(out), exitErr.ExitCode(), nil
 	}
 	return string(out), -1, err
