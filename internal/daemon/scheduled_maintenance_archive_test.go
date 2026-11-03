@@ -2209,56 +2209,27 @@ func archiveEventRows(total int, base time.Time) [][]driver.Value {
 	return rows
 }
 
-// TestArchiveLimitsDefaultTo5000: with neither setting present the production
-// dolt_log read and events read stop at the 5000-row default, so an archive with
-// no batch settings behaves as it did before they existed (gt-s6srv).
+// TestArchiveLimitsDefaultTo5000: with neither setting present the archive step
+// reads the 5000-row default for each batch, the behavior before the settings
+// existed (gt-s6srv). The bounded reads at the default are driven by
+// TestEventsArchiveFirstReadIsBounded and TestFirstUnarchivedCommitsStopsReadingAtTheBound,
+// so this test only pins the unset section to the defaults and builds no
+// fixture as large as them.
 func TestArchiveLimitsDefaultTo5000(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	d, _ := gcTestDaemon(t)
+	d.patrolConfig = archiveConfig(t.TempDir())
 
-	t.Run("commits", func(t *testing.T) {
-		t.Parallel()
-		d, _ := gcTestDaemon(t)
-		withGCFakes(t, d)
-		d.patrolConfig = archiveConfig(t.TempDir())
-		d.maint.archiveOpenDB = archiveFakeOpener(t, &archiveFakeServer{
-			columns: []string{"commit_hash", "committer", "date", "message"},
-			rows:    archiveCommitRows(config.DefaultArchiveCommitLimit+2, gcTestNow),
-		})
-
-		got, err := d.doltArchiveLog(ctx, "gt", nil)
-		if err != nil {
-			t.Fatalf("dolt_log read: %v", err)
-		}
-		if len(got) != config.DefaultArchiveCommitLimit {
-			t.Fatalf("read %d commit(s), want the %d default bound", len(got), config.DefaultArchiveCommitLimit)
-		}
-		if last := fmt.Sprintf("h%05d", config.DefaultArchiveCommitLimit); got[0].Hash != "h00001" || got[len(got)-1].Hash != last {
-			t.Errorf("read = %s..%s, want the oldest %d", got[0].Hash, got[len(got)-1].Hash, config.DefaultArchiveCommitLimit)
-		}
-	})
-
-	t.Run("events", func(t *testing.T) {
-		t.Parallel()
-		d, _ := gcTestDaemon(t)
-		withGCFakes(t, d)
-		d.patrolConfig = archiveConfig(t.TempDir())
-		d.maint.archiveOpenDB = archiveFakeOpener(t, &archiveFakeServer{
-			columns: []string{"id", "created_at"},
-			rows:    archiveEventRows(config.DefaultArchiveEventsLimit+2, gcTestNow.Add(-3*time.Hour)),
-		})
-
-		got, err := d.doltArchiveEvents(ctx, "gt", "")
-		if err != nil {
-			t.Fatalf("events read: %v", err)
-		}
-		if len(got.Rows) != config.DefaultArchiveEventsLimit {
-			t.Fatalf("read %d events row(s), want the %d default bound", len(got.Rows), config.DefaultArchiveEventsLimit)
-		}
-		if last := fmt.Sprintf("h%05d", config.DefaultArchiveEventsLimit); got.Rows[len(got.Rows)-1][0] != last {
-			t.Errorf("read through %s, want the oldest %d ending at %s", got.Rows[len(got.Rows)-1][0], config.DefaultArchiveEventsLimit, last)
-		}
-	})
+	commit, events, err := d.maintenanceArchiveLimits()
+	if err != nil {
+		t.Fatalf("reading the unset archive bounds: %v", err)
+	}
+	if commit != config.DefaultArchiveCommitLimit {
+		t.Errorf("archive commit bound = %d, want the %d default", commit, config.DefaultArchiveCommitLimit)
+	}
+	if events != config.DefaultArchiveEventsLimit {
+		t.Errorf("archive events bound = %d, want the %d default", events, config.DefaultArchiveEventsLimit)
+	}
 }
 
 // TestArchiveLimitsComeFromConfig: small archive_commit_limit and
@@ -2398,8 +2369,8 @@ func TestMaintenanceArchiveRefusesABadLimitSetting(t *testing.T) {
 			if len(f.gcCalls) != 0 {
 				t.Errorf("gc calls = %v, want none while no database was archived", f.gcCalls)
 			}
-			if !strings.Contains(logs.String(), "want 0 (the default)") {
-				t.Errorf("log does not say the bound was refused:\n%s", logs.String())
+			if !strings.Contains(logs.String(), tt.wantKey) {
+				t.Errorf("log does not name the refused setting %s:\n%s", tt.wantKey, logs.String())
 			}
 		})
 	}
