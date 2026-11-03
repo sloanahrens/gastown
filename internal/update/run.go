@@ -8,11 +8,16 @@ import (
 	"time"
 )
 
-// Step details this version gives when it records a step without running it.
+// Step details for a step that ends with less than the run set out to do.
 const (
-	// notImplementedDetail marks the maintenance, restart and verify steps
-	// recorded without running; gt-o4sk8.21 replaces them with the real steps.
-	notImplementedDetail = "not implemented in this version"
+	// restartPendingDetail is the restart step's note when the daemon never
+	// reported the new build inside the wait: the new binary is installed and
+	// the town keeps running on the old one until the daemon restarts.
+	restartPendingDetail = "installed, restart pending"
+	// verifyRestartPendingDetail is why verify is skipped after that timeout:
+	// the daemon still answers from the old build, which is the failure the
+	// restart step already reported.
+	verifyRestartPendingDetail = "restart pending"
 	// noHoldDetail marks a lift step with no hold the run created.
 	noHoldDetail = "hold not set by this run"
 )
@@ -34,11 +39,13 @@ type Deps struct {
 	Hold *Hold
 	// Installer puts the target build in force.
 	Installer Installer
-	// Maint asks the daemon for a maintenance cycle; gt-o4sk8.21 runs it.
+	// Maint asks the daemon for a maintenance cycle and waits for its result.
 	Maint *MaintenanceRequest
+	// Verify reports what the town is running once the restart is done.
+	Verify VerifyProbes
 	// NewRunID names the run.
 	NewRunID func() string
-	// Log receives the plan; a nil Log discards it.
+	// Log receives the plan and each step's own note; a nil Log discards it.
 	Log io.Writer
 }
 
@@ -56,7 +63,7 @@ type Options struct {
 	// Drain bounds the wait for working seats.
 	Drain DrainOptions
 	// RestartWait, RestartPoll, MaintWait and MaintPoll bound the restart and
-	// maintenance waits gt-o4sk8.21 adds.
+	// maintenance waits.
 	RestartWait, RestartPoll, MaintWait, MaintPoll time.Duration
 }
 
@@ -89,6 +96,12 @@ func Run(ctx context.Context, d Deps, o Options) (State, error) {
 	final, err := r.finish(outcome)
 	if err != nil {
 		return r.st, err
+	}
+	// History is how a later run and the daemon see how this one ended; a write
+	// that fails is reported in the log, because the run itself is finished and
+	// its state.json is the record of it.
+	if err := d.Store.AppendHistory(final); err != nil {
+		logf(d.Log, "append update history: %v\n", err)
 	}
 	return final, nil
 }
@@ -131,6 +144,15 @@ func writePlan(w io.Writer, steps []StepRecord) {
 	}
 }
 
+// logf writes one line for a person reading the run's log; a nil writer
+// discards it.
+func logf(w io.Writer, format string, args ...any) {
+	if w == nil {
+		return
+	}
+	fmt.Fprintf(w, format, args...)
+}
+
 // runner carries one run's state through its steps. It never changes the state
 // itself: every change is a Store.Mutate, so the file on disk is current after
 // the first write and nothing the heartbeat writes is lost.
@@ -140,10 +162,18 @@ type runner struct {
 	o    Options
 	st   State
 	owns bool // the hold this run created, and so may release
+	// partial records that a step fell short without ending the run. The run
+	// ends partial unless a later step ends it worse.
+	partial bool
+	// restartPending records that the restart timed out, so the walk leaves the
+	// verify record the restart step wrote in place.
+	restartPending bool
 }
 
 // walk runs the steps from index start in plan order and reports how the run
-// ended. A returned error is a record that could not be written.
+// ended. A step that ends the run decides its outcome here; a step that falls
+// short without ending it marks the run partial and the walk goes on. A
+// returned error is a record that could not be written.
 func (r *runner) walk(start int) (Outcome, error) {
 	for i := start; i < len(r.st.Steps); i++ {
 		if r.ctx.Err() != nil {
@@ -168,11 +198,16 @@ func (r *runner) walk(start int) (Outcome, error) {
 		switch step.Name {
 		case StepDrain:
 			return r.drainHeld(i)
-		case StepMaintenance, StepRestart, StepVerify:
-			_, err = r.mutate(func(st *State) {
-				st.Steps[i].Result = ResultSkipped
-				st.Steps[i].Detail = notImplementedDetail
-			})
+		case StepMaintenance:
+			outcome, err = r.maintenance(i)
+		case StepRestart:
+			outcome, err = r.restart(i)
+		case StepVerify:
+			if r.restartPending {
+				// The restart step recorded this one as skipped.
+				continue
+			}
+			outcome, err = r.verify(i)
 		case StepInstall:
 			outcome, err = r.install(i)
 		case StepLift:
@@ -183,9 +218,16 @@ func (r *runner) walk(start int) (Outcome, error) {
 		if err != nil {
 			return "", err
 		}
+		if outcome == OutcomePartial {
+			r.partial = true
+			continue
+		}
 		if outcome != "" {
 			return outcome, nil
 		}
+	}
+	if r.partial {
+		return OutcomePartial, nil
 	}
 	return OutcomeOK, nil
 }
@@ -344,6 +386,148 @@ func installDetail(res InstallResult, result StepResult, err error) string {
 		return "the installer failed"
 	}
 	return ""
+}
+
+// maintenance asks the daemon for one maintenance cycle and waits for it. A
+// deferred or failed cycle does not stop the run: the install goes ahead and
+// the run ends partial, because the town is not in the state the run set out
+// to leave it in.
+func (r *runner) maintenance(i int) (Outcome, error) {
+	if err := r.beginStep(i); err != nil {
+		return "", err
+	}
+	res, err := r.maintenanceCycle()
+	if r.ctx.Err() != nil {
+		return r.failStep(i, "canceled", OutcomeInterrupted)
+	}
+	result := maintenanceStepResult(res, err)
+	detail := maintenanceDetail(res, err)
+	if detail != "" {
+		logf(r.d.Log, "maintenance: %s: %s\n", result, detail)
+	}
+	if err := r.endStep(i, result, detail); err != nil {
+		return "", err
+	}
+	if result != ResultOK {
+		return OutcomePartial, nil
+	}
+	return "", nil
+}
+
+// maintenanceCycle writes the run's request and waits for the daemon's answer.
+func (r *runner) maintenanceCycle() (MaintenanceResult, error) {
+	if err := r.d.Maint.Request(r.st.RunID); err != nil {
+		return MaintenanceResult{}, err
+	}
+	return r.d.Maint.Wait(r.ctx, r.d.Sleep, r.st.RunID, r.o.MaintWait, r.o.MaintPoll)
+}
+
+// maintenanceStepResult maps the cycle onto the step's result. An outcome the
+// request protocol does not define is a failure, never a success.
+func maintenanceStepResult(res MaintenanceResult, err error) StepResult {
+	switch {
+	case err != nil:
+		return ResultFailed
+	case res.Outcome == "completed":
+		return ResultOK
+	case res.Outcome == maintenanceDeferred:
+		return ResultDeferred
+	default:
+		return ResultFailed
+	}
+}
+
+// maintenanceDetail is the cycle's own note, or the error that ended it.
+func maintenanceDetail(res MaintenanceResult, err error) string {
+	if err != nil {
+		return err.Error()
+	}
+	return res.Detail
+}
+
+// restart waits for the daemon to come up on the new build. A timeout leaves
+// the install in place and makes the run partial: the town keeps working on the
+// old binary until the daemon restarts, so verify cannot pass and is recorded
+// as skipped here.
+func (r *runner) restart(i int) (Outcome, error) {
+	if err := r.beginStep(i); err != nil {
+		return "", err
+	}
+	restarted, err := WaitForRestart(r.ctx, r.d.Clock, r.d.Sleep, r.d.Verify, r.st.Target.SHA, r.o.RestartWait, r.o.RestartPoll)
+	if r.ctx.Err() != nil {
+		return r.failStep(i, "canceled", OutcomeInterrupted)
+	}
+	if err != nil {
+		// WaitForRestart reports the sleep's error, which is the context's, so
+		// the wait could not be completed and the run is cut short.
+		return r.failStep(i, err.Error(), OutcomeInterrupted)
+	}
+	if restarted {
+		if err := r.endStep(i, ResultOK, ""); err != nil {
+			return "", err
+		}
+		return "", nil
+	}
+	if err := r.endStep(i, ResultDeferred, restartPendingDetail); err != nil {
+		return "", err
+	}
+	if _, err := r.mutate(func(st *State) {
+		for j := range st.Steps {
+			if st.Steps[j].Name == StepVerify {
+				st.Steps[j].Result = ResultSkipped
+				st.Steps[j].Detail = verifyRestartPendingDetail
+			}
+		}
+	}); err != nil {
+		return "", err
+	}
+	r.restartPending = true
+	return OutcomePartial, nil
+}
+
+// verify checks every probe against the target build. A check that fails makes
+// the run partial: the install happened, so the town is not untouched, but it
+// is not on the build the run installed.
+func (r *runner) verify(i int) (Outcome, error) {
+	if err := r.beginStep(i); err != nil {
+		return "", err
+	}
+	checks := Verify(r.ctx, r.d.Verify, r.st.Target.SHA)
+	if r.ctx.Err() != nil {
+		return r.failStep(i, "canceled", OutcomeInterrupted)
+	}
+	failed := failedChecks(checks)
+	if len(failed) == 0 {
+		if err := r.endStep(i, ResultOK, ""); err != nil {
+			return "", err
+		}
+		return "", nil
+	}
+	if err := r.endStep(i, ResultFailed, checksDetail(failed)); err != nil {
+		return "", err
+	}
+	return OutcomePartial, nil
+}
+
+// failedChecks returns the checks that did not match the target build.
+func failedChecks(checks []Check) []Check {
+	var failed []Check
+	for _, c := range checks {
+		if !c.OK {
+			failed = append(failed, c)
+		}
+	}
+	return failed
+}
+
+// checksDetail names each failed check and what it reported, so the record says
+// which part of the town is not on the new build.
+func checksDetail(checks []Check) string {
+	parts := make([]string, len(checks))
+	for i, c := range checks {
+		parts[i] = c.Name + ": " + c.Detail
+	}
+	return strings.Join(parts, "; ")
 }
 
 // lift releases the hold when this run owns it and records the release. A hold
