@@ -22,6 +22,9 @@ import (
 
 // The fixed keys of Result.Skipped, one per reason a ledger line is not used.
 const (
+	// SkipInvalidJSON counts a line the JSON decoder rejected, including a line
+	// whose created_at or ended_at is not RFC 3339: the decoder rejects that
+	// line before the zero-time check reads it.
 	SkipInvalidJSON    = "invalid JSON"
 	SkipEmptyWorkspace = "empty workspace"
 	SkipEmptyProfile   = "empty profile"
