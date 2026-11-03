@@ -120,6 +120,9 @@ type Daemon struct {
 	// updateTrigger is the block's own memory: the launch suppression clock
 	// and the last settings error logged.
 	updateTrigger updateTriggerState
+	// updateAlerts is the update job's alert latch (update_alerts.go): the
+	// keys this daemon run has raised and not yet cleared.
+	updateAlerts updateAlertLatch
 
 	// Mass death detection: track recent session deaths
 	deathsMu     sync.Mutex

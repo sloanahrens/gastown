@@ -55,7 +55,7 @@ Failure rules: a failed maintenance stage does not block the install (the run en
 
 `state.json` is versioned (`v: 1`) and holds the run id, start time, target build, the plan (per step "will run" or "skipped" with a reason), the current step, each step's start, end, result and detail, whether the job owns the hold and its note, a heartbeat time and the outcome (running, ok, partial, aborted, failed, interrupted). A separate timer refreshes the heartbeat every 15 seconds, so a hung job looks different from a slow step. `history.jsonl` gets one line per run with every step's duration.
 
-The daemon raises one escalation `update:stale` when the outcome is "running" and the heartbeat is more than 3 minutes old, and one when a run exceeds 2 hours. A failed or partial outcome becomes an attention item. The daemon never edits the file.
+The daemon raises one escalation `update:stale` when the outcome is "running" and the heartbeat is more than 3 minutes old, and `update:overrun` when a run exceeds `max_runtime` (2 hours by default). A run that ended failed, partial or aborted within the last two hours raises `update:last-run-failed`, naming each failed or deferred step; an ok or interrupted run raises nothing. Each key clears when its condition ends, and the check runs even with the trigger switched off. The daemon never edits the file.
 
 The dashboard state feed gains an `update` section read from `state.json`: running or not, run id, elapsed, current step, compact step list, last outcome and time, and the hold note. The banner reads like "gt update: install, draining, 8 min, 2 polecats left. Dispatch held". When only a hand-set hold exists, the banner shows that hold's note and age. `gt update status` prints the same record, human-readable or `--json`.
 

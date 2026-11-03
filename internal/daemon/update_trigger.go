@@ -49,14 +49,16 @@ type updateTriggerState struct {
 // triggerUpdate is the heartbeat's update block: decide whether an update is
 // due and, when it is, launch `gt update --from-daemon` without waiting for
 // it. The daemon never runs the update itself; the job outlives the daemon
-// because an install makes the daemon restart.
+// because an install makes the daemon restart. The job's alerts run first,
+// before the enabled check: a hand-started run can die with the feature off.
 func (d *Daemon) triggerUpdate() {
+	now := d.clk().Now()
+	d.checkUpdateAlerts(now)
 	settings, ok := d.updateSettings()
 	if !ok || !settings.Enabled {
 		return
 	}
 
-	now := d.clk().Now()
 	facts, err := d.updateFacts(now)
 	if err != nil {
 		// An unreadable fact is unknown, not absent: a launch would be a
