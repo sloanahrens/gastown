@@ -733,18 +733,30 @@ func (d *Daemon) maintenanceDataDir() string {
 // request is the update job's request this cycle answers, or nil for a
 // scheduled one. It is answered only once the cycle will not be retried: a
 // deferred or interrupted cycle leaves the request for the next tick
-// (maintenance_request.go).
+// (maintenance_request.go). The run id is published while the cycle runs so a
+// tick that finds it in flight can tell a request it is serving from a newer
+// one (answerBusyRequest).
 func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time, request *update.RequestFile) {
 	if !d.maintenanceGCRunning.CompareAndSwap(false, true) {
 		d.logger.Printf("scheduled_maintenance: previous gc cycle still running — skipping this tick")
 		return
+	}
+	d.maintenanceGCRequestRunID.Store("")
+	if request != nil {
+		d.maintenanceGCRequestRunID.Store(request.RunID)
 	}
 	dataDir := d.maintenanceDataDir()
 	d.logger.Printf("scheduled_maintenance: gc cycle — weekly, or old-gen >%.0f%% since last gc; data_dir=%s",
 		(maintenanceOldGenGrowth-1)*100, dataDir)
 
 	d.maintenance().dispatch(func() {
-		defer d.maintenanceGCRunning.Store(false)
+		defer func() {
+			// Clear the id before clearing the flag: a tick that starts a new
+			// cycle once the flag is clear must not have its id erased by this
+			// cycle's cleanup.
+			d.maintenanceGCRequestRunID.Store("")
+			d.maintenanceGCRunning.Store(false)
+		}()
 		// A deferral has no window to be counted against when none is
 		// configured: recording one would leave a pending entry the streak
 		// counts against a window that never existed.

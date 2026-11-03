@@ -117,15 +117,35 @@ func writeMaintenanceResult(files requestFiles, dir, runID string, at time.Time,
 }
 
 // answerMaintenanceRequest writes the result and only then removes the
-// request. A write failure leaves the request in place, so the next tick
-// retries instead of the job reading a missing result.
+// request it served. A write failure leaves the request in place, so the next
+// tick retries instead of the job reading a missing result.
 func answerMaintenanceRequest(files requestFiles, dir, runID string, at time.Time, outcome, detail string) error {
 	if err := writeMaintenanceResult(files, dir, runID, at, outcome, detail); err != nil {
 		return err
 	}
+	return removeAnsweredRequest(files, dir, runID)
+}
+
+// removeAnsweredRequest removes dir's request only while it still holds
+// runID. A cycle answers the request it started with, and a request written
+// meanwhile is another job's: removing it by name would answer that job with
+// the wrong result and drop work it is waiting for. A request already gone is
+// answered; the job only needs the result, and the file's absence is the
+// signal it waited for. A file that no longer parses cannot be the served
+// request either, so it is left for the next tick to drop.
+func removeAnsweredRequest(files requestFiles, dir, runID string) error {
+	req, ok, err := readMaintenanceRequest(files, dir)
+	switch {
+	case errors.Is(err, errMalformedRequest), errors.Is(err, errInvalidRunID):
+		return nil
+	case err != nil:
+		// The file cannot be read, so it cannot be shown to be the one this
+		// answer belongs to: leaving it beats deleting another job's request.
+		return err
+	case !ok, req.RunID != runID:
+		return nil
+	}
 	path := requestPath(dir)
-	// A request already gone is answered: the job only needs the result, and
-	// the file's absence is the signal it waited for.
 	if err := files.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("remove maintenance request %s: %w", path, err)
 	}
@@ -178,12 +198,51 @@ func (d *Daemon) dropMalformedRequest(files requestFiles, dir string, cause erro
 // id-less failed result, then removes it. The id itself is never written or
 // logged: the job fails its own run-id match, which is the outcome its run
 // deserves.
+//
+// It removes the file directly rather than through answerMaintenanceRequest:
+// that removal is guarded by the served run id, and this request's id is the
+// untrusted one that must not be echoed anywhere, including into the guard.
 func (d *Daemon) answerInvalidRequest(files requestFiles, dir string, cause error) {
-	if err := answerMaintenanceRequest(files, dir, "", d.maintenance().now(), "failed", "the maintenance request has an invalid run id"); err != nil {
+	if err := writeMaintenanceResult(files, dir, "", d.maintenance().now(), "failed", "the maintenance request has an invalid run id"); err != nil {
 		d.logger.Printf("scheduled_maintenance: WARNING: %v; cannot answer the request: %v — the request stays", cause, err)
 		return
 	}
+	path := requestPath(dir)
+	if err := files.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		d.logger.Printf("scheduled_maintenance: WARNING: %v; cannot remove %s: %v", cause, path, err)
+		return
+	}
 	d.logger.Printf("scheduled_maintenance: WARNING: %v — answered failed and dropped", cause)
+}
+
+// answerBusyRequest answers a request that arrives while a cycle is already
+// running, which this tick cannot serve. A request that cycle is serving gets
+// a "deferred" result and its file removed, so the job does not wait out a
+// cycle that can hold one database's gc for minutes; that cycle's own result
+// then replaces the deferral. A request the running cycle is not serving
+// keeps its file, so a later tick runs its cycle.
+func (d *Daemon) answerBusyRequest(req update.RequestFile) {
+	files := osRequestFiles{}
+	dir := update.Dir(d.config.TownRoot)
+	if err := writeMaintenanceResult(files, dir, req.RunID, d.maintenance().now(), "deferred", "a maintenance cycle is already running"); err != nil {
+		d.logger.Printf("scheduled_maintenance: WARNING: cannot answer request for run %s: %v — the request stays", req.RunID, err)
+		return
+	}
+	if d.runningRequestRunID() != req.RunID {
+		return
+	}
+	if err := removeAnsweredRequest(files, dir, req.RunID); err != nil {
+		d.logger.Printf("scheduled_maintenance: WARNING: cannot remove the answered request for run %s: %v", req.RunID, err)
+	}
+}
+
+// runningRequestRunID is the run id of the request the in-flight cycle is
+// answering, empty when that cycle is a scheduled one (or none is running).
+func (d *Daemon) runningRequestRunID() string {
+	if v := d.maintenanceGCRequestRunID.Load(); v != nil {
+		return v.(string)
+	}
+	return ""
 }
 
 // gcRequestAnswer is the outcome of the last request-driven cycle, persisted in
@@ -216,11 +275,16 @@ func (d *Daemon) rememberRequestAnswer(runID string, outcome maintenanceGCOutcom
 // belongs to a remembered cycle, whether or not the result write succeeds: a
 // failed write leaves the request for the next tick's re-answer and must never
 // run the cycle again.
+//
+// It also reports true when the state cannot be read: an unreadable state
+// cannot show that this request was not already answered, and running the
+// cycle again is the one outcome it must never produce. The request is
+// answered failed with the reason instead.
 func (d *Daemon) reanswerRememberedRequest(files requestFiles, dir string, req update.RequestFile) bool {
 	st, err := loadMaintenanceGCState(d.config.TownRoot)
 	if err != nil {
-		d.logger.Printf("scheduled_maintenance: WARNING: %v — cannot tell whether run %s was already answered", err, req.RunID)
-		return false
+		d.answerRequest(req, gcOutcomeFailed, fmt.Sprintf("cannot read the maintenance state: %v", err))
+		return true
 	}
 	ans := st.LastRequestAnswer
 	if ans == nil || ans.RunID != req.RunID || !validRequestRunID(ans.RunID) {

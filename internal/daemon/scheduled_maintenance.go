@@ -165,9 +165,10 @@ func (d *Daemon) runScheduledMaintenance() {
 	}
 
 	// A request whose cycle already ran but whose result write failed is
-	// answered from the remembered outcome, never rerun.
+	// answered from the remembered outcome, never rerun. An unreadable state
+	// is answered failed for the same reason: neither may start a cycle.
 	if requested && d.reanswerRememberedRequest(files, dir, request) {
-		requested = false
+		return
 	}
 
 	if !d.isPatrolActive("scheduled_maintenance") {
@@ -247,17 +248,26 @@ func (d *Daemon) runScheduledMaintenance() {
 	}
 
 	// A cycle that defers (town busy) leaves lastMaintenanceRun alone, so
-	// the next 5-minute tick in the window retries.
+	// the next 5-minute tick in the window retries. A request this tick cannot
+	// serve because a cycle is already running is answered (maintenance_request.go)
+	// rather than left to the job's timeout.
 	if d.maintenanceGCRunning.Load() {
+		if requested {
+			d.answerBusyRequest(request)
+		}
 		return
 	}
 	if external, why := d.maintenance().gcExternal(d); external {
 		// The old-gen trigger reads the server's data dir from this host's
-		// disk; against a remote server it would read the wrong one.
+		// disk; against a remote server it would read the wrong one. The skip
+		// is the scheduled window's, so only a scheduled tick consumes it: a
+		// request that fails here changed nothing a later request must wait
+		// on.
 		d.logger.Printf("scheduled_maintenance: skipped: %s — gc needs a local server", why)
-		d.lastMaintenanceRun = now
 		if requested {
 			d.answerRequest(request, gcOutcomeFailed, "no local server can run the cycle: "+why)
+		} else {
+			d.lastMaintenanceRun = now
 		}
 		return
 	}

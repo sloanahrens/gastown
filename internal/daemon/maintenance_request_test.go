@@ -48,6 +48,38 @@ func requestDaemonWithLogs(t *testing.T, now time.Time) (*Daemon, *gcFakes, *byt
 	return d, f, logs
 }
 
+// requestTickAndCycle runs one poll tick and then the gc cycle it dispatched,
+// if any. Production dispatches a cycle off the heartbeat loop; holding it
+// here and running it after the tick returns means a test's assertions never
+// depend on how fast the dispatch seam runs it. A test asserting that no cycle
+// was dispatched uses runScheduledMaintenance directly with the inline fake.
+func requestTickAndCycle(t *testing.T, d *Daemon) {
+	t.Helper()
+	var cycle func()
+	prev := d.maint.dispatch
+	d.maint.dispatch = func(fn func()) { cycle = fn }
+	defer func() { d.maint.dispatch = prev }()
+	d.runScheduledMaintenance()
+	if cycle != nil {
+		cycle()
+	}
+}
+
+// blockResultPath puts a directory where the result belongs, so the answer's
+// write fails.
+func blockResultPath(t *testing.T, d *Daemon) string {
+	t.Helper()
+	dir := update.Dir(d.config.TownRoot)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := resultPath(dir)
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 // writeRequestFile puts a request for runID in d's update directory.
 func writeRequestFile(t *testing.T, d *Daemon, runID string, at time.Time) string {
 	t.Helper()
@@ -90,7 +122,7 @@ func TestMaintenanceRequestRunsOutsideTheWindow(t *testing.T) {
 		d, f := requestDaemon(t, outsideRequestNow)
 		path := writeRequestFile(t, d, "run-1", outsideRequestNow)
 
-		d.runScheduledMaintenance()
+		requestTickAndCycle(t, d)
 
 		if got := strings.Join(f.gcCalls, ","); got != "hq" {
 			t.Fatalf("gc calls = %q, want hq: a request must run the cycle outside the window", got)
@@ -128,7 +160,7 @@ func TestMaintenanceRequestRunsOutsideTheWindow(t *testing.T) {
 		d.lastMaintenanceRun = gcTestNow.Add(-2 * time.Hour)
 		writeRequestFile(t, d, "run-2", gcTestNow)
 
-		d.runScheduledMaintenance()
+		requestTickAndCycle(t, d)
 
 		if got := strings.Join(f.gcCalls, ","); got != "hq" {
 			t.Fatalf("gc calls = %q, want hq — a request ignores the 20-hour gap", got)
@@ -194,7 +226,7 @@ func TestMaintenanceRequestDeferredByTheQuietGuardKeepsTheFile(t *testing.T) {
 	f.quietUntil = 0 // the next quiet probe finds the town busy
 	path := writeRequestFile(t, d, "run-busy", outsideRequestNow)
 
-	d.runScheduledMaintenance()
+	requestTickAndCycle(t, d)
 
 	if len(f.gcCalls) != 0 {
 		t.Fatalf("gc ran while the town was busy: %v", f.gcCalls)
@@ -244,6 +276,16 @@ func (f *recordingRequestFiles) Remove(path string) error {
 	return f.removeErr
 }
 
+// requestBytes is the JSON of a request for runID.
+func requestBytes(t *testing.T, runID string) []byte {
+	t.Helper()
+	data, err := json.Marshal(update.RequestFile{RunID: runID, At: outsideRequestNow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
 // The result is on disk before the request goes: a job polling for the
 // request's disappearance never finds it gone with no answer.
 func TestFinishMaintenanceRequestWritesResultThenRemovesIt(t *testing.T) {
@@ -261,11 +303,11 @@ func TestFinishMaintenanceRequestWritesResultThenRemovesIt(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			f := &recordingRequestFiles{}
+			f := &recordingRequestFiles{read: requestBytes(t, "run-7")}
 			if err := finishMaintenanceRequest(f, "/update", at, "run-7", tc.outcome, "the reason"); err != nil {
 				t.Fatalf("finish: %v", err)
 			}
-			want := []string{"write " + update.ResultFileName + " 0600", "remove " + update.RequestFileName}
+			want := []string{"write " + update.ResultFileName + " 0600", "read " + update.RequestFileName, "remove " + update.RequestFileName}
 			if got := strings.Join(f.events, ","); got != strings.Join(want, ",") {
 				t.Errorf("events = %v, want %v — the result before the request", f.events, want)
 			}
@@ -313,21 +355,67 @@ func TestFinishMaintenanceRequestWritesResultThenRemovesIt(t *testing.T) {
 
 	t.Run("a request already gone counts as answered", func(t *testing.T) {
 		t.Parallel()
-		f := &recordingRequestFiles{removeErr: os.ErrNotExist}
+		f := &recordingRequestFiles{}
 		if err := finishMaintenanceRequest(f, "/update", at, "run-7", gcOutcomeCompleted, ""); err != nil {
 			t.Errorf("finish: %v, want nil when the request is already gone", err)
+		}
+		for _, e := range f.events {
+			if strings.HasPrefix(e, "remove") {
+				t.Errorf("removal was attempted for a request already gone: %v", f.events)
+			}
+		}
+	})
+
+	t.Run("a newer request for another run survives", func(t *testing.T) {
+		t.Parallel()
+		f := &recordingRequestFiles{read: requestBytes(t, "run-8")}
+		if err := finishMaintenanceRequest(f, "/update", at, "run-7", gcOutcomeCompleted, ""); err != nil {
+			t.Errorf("finish: %v, want nil — the answer to run-7 is still written", err)
+		}
+		for _, e := range f.events {
+			if strings.HasPrefix(e, "remove") {
+				t.Errorf("answering run-7 removed run-8's request: %v", f.events)
+			}
+		}
+	})
+
+	t.Run("a file that no longer parses is left for the tick", func(t *testing.T) {
+		t.Parallel()
+		f := &recordingRequestFiles{read: []byte("{not json")}
+		if err := finishMaintenanceRequest(f, "/update", at, "run-7", gcOutcomeCompleted, ""); err != nil {
+			t.Errorf("finish: %v, want nil — the answer to run-7 is still written", err)
+		}
+		for _, e := range f.events {
+			if strings.HasPrefix(e, "remove") {
+				t.Errorf("a malformed file was removed by the answer: %v", f.events)
+			}
+		}
+	})
+
+	t.Run("an unreadable request is left in place", func(t *testing.T) {
+		t.Parallel()
+		readErr := errors.New("permission denied")
+		f := &recordingRequestFiles{readErr: readErr}
+		err := finishMaintenanceRequest(f, "/update", at, "run-7", gcOutcomeCompleted, "")
+		if !errors.Is(err, readErr) {
+			t.Fatalf("error = %v, want the read error", err)
+		}
+		for _, e := range f.events {
+			if strings.HasPrefix(e, "remove") {
+				t.Errorf("an unreadable request was removed: %v", f.events)
+			}
 		}
 	})
 
 	t.Run("a remove error is returned after the result", func(t *testing.T) {
 		t.Parallel()
 		boom := errors.New("read-only directory")
-		f := &recordingRequestFiles{removeErr: boom}
+		f := &recordingRequestFiles{read: requestBytes(t, "run-7"), removeErr: boom}
 		err := finishMaintenanceRequest(f, "/update", at, "run-7", gcOutcomeCompleted, "")
 		if !errors.Is(err, boom) {
 			t.Fatalf("error = %v, want the remove error", err)
 		}
-		want := []string{"write " + update.ResultFileName + " 0600", "remove " + update.RequestFileName}
+		want := []string{"write " + update.ResultFileName + " 0600", "read " + update.RequestFileName, "remove " + update.RequestFileName}
 		if got := strings.Join(f.events, ","); got != strings.Join(want, ",") {
 			t.Errorf("events = %v, want %v", f.events, want)
 		}
@@ -416,7 +504,7 @@ func TestMaintenanceRequestMalformedOrPatrolInactive(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		d.runScheduledMaintenance()
+		requestTickAndCycle(t, d)
 
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("malformed request still there: %v", err)
@@ -487,7 +575,7 @@ func TestMaintenanceRequestWithNoWindowRuns(t *testing.T) {
 		d.patrolConfig = maintenanceWindowAt("")
 		path := writeRequestFile(t, d, "run-nowindow", outsideRequestNow)
 
-		d.runScheduledMaintenance()
+		requestTickAndCycle(t, d)
 
 		if got := strings.Join(f.gcCalls, ","); got != "hq" {
 			t.Fatalf("gc calls = %q, want hq with no window configured", got)
@@ -515,7 +603,7 @@ func TestMaintenanceRequestWithNoWindowRuns(t *testing.T) {
 		f.quietUntil = 0
 		path := writeRequestFile(t, d, "run-nowindow-busy", outsideRequestNow)
 
-		d.runScheduledMaintenance()
+		requestTickAndCycle(t, d)
 
 		if len(f.gcCalls) != 0 {
 			t.Fatalf("gc ran while the town was busy: %v", f.gcCalls)
@@ -552,7 +640,7 @@ func TestMaintenanceRequestResultWriteFailureDoesNotRerun(t *testing.T) {
 	}
 	path := writeRequestFile(t, d, "run-retry", outsideRequestNow)
 
-	d.runScheduledMaintenance()
+	requestTickAndCycle(t, d)
 
 	if got := strings.Join(f.gcCalls, ","); got != "hq" {
 		t.Fatalf("first tick gc calls = %q, want hq", got)
@@ -623,6 +711,10 @@ func TestMaintenanceRequestUnanswerablePathsWriteFailed(t *testing.T) {
 		t.Parallel()
 		d, f := requestDaemon(t, outsideRequestNow)
 		d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
+		// A failed request is not the scheduled window: it must not consume the
+		// gap a later cycle would have to wait out.
+		lastRun := outsideRequestNow.Add(-48 * time.Hour)
+		d.lastMaintenanceRun = lastRun
 		path := writeRequestFile(t, d, "run-remote", outsideRequestNow)
 
 		d.runScheduledMaintenance()
@@ -636,6 +728,9 @@ func TestMaintenanceRequestUnanswerablePathsWriteFailed(t *testing.T) {
 		}
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Errorf("request still there: %v", err)
+		}
+		if !d.lastMaintenanceRun.Equal(lastRun) {
+			t.Errorf("lastMaintenanceRun = %v, want %v — a failed request must not count as a cycle", d.lastMaintenanceRun, lastRun)
 		}
 	})
 }
@@ -676,4 +771,245 @@ func TestMaintenanceRequestRunIDIsBounded(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A cycle answers the request it started with. A request written while it runs
+// belongs to another job and must survive, then be answered by its own cycle.
+func TestMaintenanceRequestAnswerKeepsANewerRequest(t *testing.T) {
+	t.Parallel()
+	d, f := requestDaemon(t, outsideRequestNow)
+	var cycle func()
+	d.maint.dispatch = func(fn func()) { cycle = fn }
+	path := writeRequestFile(t, d, "run-a", outsideRequestNow)
+
+	d.runScheduledMaintenance() // starts A's cycle; it has not run yet
+
+	if cycle == nil {
+		t.Fatal("the tick dispatched no cycle for the request")
+	}
+	// Request B replaces A's while A's cycle is still in flight.
+	if err := os.WriteFile(path, requestBytes(t, "run-b"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cycle()
+
+	if got := strings.Join(f.gcCalls, ","); got != "hq" {
+		t.Fatalf("gc calls = %q, want hq", got)
+	}
+	if res := readRequestResult(t, d); res.RunID != "run-a" || res.Outcome != "completed" {
+		t.Errorf("result = %+v, want run-a completed", res)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("answering run-a removed run-b's request: %v", err)
+	}
+
+	// B's own cycle runs on a later tick and answers it.
+	d.maint.dispatch = func(fn func()) { fn() }
+	later := outsideRequestNow.Add(7 * 24 * time.Hour)
+	d.maint.now = func() time.Time { return later }
+	requestTickAndCycle(t, d)
+
+	if got := strings.Join(f.gcCalls, ","); got != "hq,hq" {
+		t.Errorf("gc calls = %q, want a second cycle for run-b", got)
+	}
+	res := readRequestResult(t, d)
+	if res.RunID != "run-b" || res.Outcome != "completed" || !res.At.Equal(later) {
+		t.Errorf("result = %+v, want run-b completed by its own cycle at %v", res, later)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("run-b's request is still there after its cycle answered it: %v", err)
+	}
+}
+
+// A request that arrives while a cycle is already running cannot always be
+// served by this tick: the tick answers it rather than leaving it to the job's
+// timeout.
+func TestMaintenanceRequestBusyCycleAnswersDeferred(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a request the running cycle is not serving is deferred and kept", func(t *testing.T) {
+		t.Parallel()
+		d, f := requestDaemon(t, outsideRequestNow)
+		d.maintenanceGCRunning.Store(true)
+		d.maintenanceGCRequestRunID.Store("run-running")
+		path := writeRequestFile(t, d, "run-waiting", outsideRequestNow)
+
+		d.runScheduledMaintenance()
+
+		if len(f.gcCalls) != 0 {
+			t.Errorf("gc calls = %v while a cycle is already running", f.gcCalls)
+		}
+		res := readRequestResult(t, d)
+		if res.RunID != "run-waiting" || res.Outcome != "deferred" || res.Detail == "" {
+			t.Errorf("result = %+v, want run-waiting deferred naming the running cycle", res)
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("the request the running cycle is not serving was removed: %v", err)
+		}
+	})
+
+	t.Run("the running cycle's own request is answered and released", func(t *testing.T) {
+		t.Parallel()
+		d, f := requestDaemon(t, outsideRequestNow)
+		d.maintenanceGCRunning.Store(true)
+		d.maintenanceGCRequestRunID.Store("run-own")
+		path := writeRequestFile(t, d, "run-own", outsideRequestNow)
+
+		d.runScheduledMaintenance()
+
+		if len(f.gcCalls) != 0 {
+			t.Errorf("gc calls = %v while a cycle is already running", f.gcCalls)
+		}
+		res := readRequestResult(t, d)
+		if res.RunID != "run-own" || res.Outcome != "deferred" {
+			t.Errorf("result = %+v, want run-own deferred", res)
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("the request the running cycle is serving was kept: %v", err)
+		}
+	})
+
+	t.Run("a scheduled cycle serves no request", func(t *testing.T) {
+		t.Parallel()
+		d, f := requestDaemon(t, outsideRequestNow)
+		d.maintenanceGCRunning.Store(true) // no request run id recorded
+		path := writeRequestFile(t, d, "run-scheduled", outsideRequestNow)
+
+		d.runScheduledMaintenance()
+
+		if len(f.gcCalls) != 0 {
+			t.Errorf("gc calls = %v while a cycle is already running", f.gcCalls)
+		}
+		if res := readRequestResult(t, d); res.RunID != "run-scheduled" || res.Outcome != "deferred" {
+			t.Errorf("result = %+v, want run-scheduled deferred", res)
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("the request a scheduled cycle is not serving was removed: %v", err)
+		}
+	})
+}
+
+// An unreadable maintenance state could hide an answer already given. The tick
+// answers the request failed instead of running the cycle again.
+func TestMaintenanceRequestUnreadableStateDefers(t *testing.T) {
+	t.Parallel()
+	// Inside the window with a week-old gc, a tick that went on as if it were
+	// scheduled would find work and run it: the early return is what makes an
+	// unreadable state stop the whole tick.
+	d, f := requestDaemon(t, gcTestNow)
+	recordCatchUpGC(t, d, "hq", gcTestNow.Add(-8*24*time.Hour))
+	d.lastMaintenanceRun = gcTestNow.Add(-48 * time.Hour)
+	if err := os.WriteFile(maintenanceGCStatePath(d.config.TownRoot), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := writeRequestFile(t, d, "run-state", gcTestNow)
+
+	d.runScheduledMaintenance()
+
+	if len(f.gcCalls) != 0 {
+		t.Fatalf("gc calls = %v with an unreadable state: a rerun is the one thing it must not do", f.gcCalls)
+	}
+	res := readRequestResult(t, d)
+	if res.RunID != "run-state" || res.Outcome != "failed" || !strings.Contains(res.Detail, "maintenance state") {
+		t.Errorf("result = %+v, want run-state failed naming the unreadable state", res)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("the request is still there after the tick answered it: %v", err)
+	}
+}
+
+// Every way an answer can fail leaves an alarm in the log; a silent failure
+// would read exactly like an answered request.
+func TestMaintenanceRequestAnswerFailuresAreLogged(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the cycle's result write", func(t *testing.T) {
+		t.Parallel()
+		d, _, logs := requestDaemonWithLogs(t, outsideRequestNow)
+		blockResultPath(t, d)
+		path := writeRequestFile(t, d, "run-unwritten", outsideRequestNow)
+
+		requestTickAndCycle(t, d)
+
+		if !strings.Contains(logs.String(), "cannot answer request for run run-unwritten") {
+			t.Errorf("the failed result write was not logged:\n%s", logs.String())
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("the request was removed although no result was written: %v", err)
+		}
+	})
+
+	t.Run("the busy-cycle answer", func(t *testing.T) {
+		t.Parallel()
+		d, _, logs := requestDaemonWithLogs(t, outsideRequestNow)
+		d.maintenanceGCRunning.Store(true)
+		blockResultPath(t, d)
+		path := writeRequestFile(t, d, "run-busy", outsideRequestNow)
+
+		d.runScheduledMaintenance()
+
+		if !strings.Contains(logs.String(), "cannot answer request for run run-busy") {
+			t.Errorf("the failed busy-cycle answer was not logged:\n%s", logs.String())
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("the request was removed although no result was written: %v", err)
+		}
+	})
+
+	t.Run("the standby answer", func(t *testing.T) {
+		t.Parallel()
+		d, _, logs := requestDaemonWithLogs(t, outsideRequestNow)
+		standbyConditions[1].set(t, d, outsideRequestNow) // town ESTOP
+		blockResultPath(t, d)
+		path := writeRequestFile(t, d, "run-estop", outsideRequestNow)
+
+		d.runScheduledMaintenance()
+
+		if !strings.Contains(logs.String(), "cannot answer request for run run-estop") {
+			t.Errorf("the failed standby answer was not logged:\n%s", logs.String())
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("the request was removed although no result was written: %v", err)
+		}
+	})
+
+	t.Run("the remembered answer", func(t *testing.T) {
+		t.Parallel()
+		d, _, logs := requestDaemonWithLogs(t, outsideRequestNow)
+		// The state is readable when the tick starts and unwritable once the
+		// cycle runs: a directory takes the state file's place.
+		statePath := maintenanceGCStatePath(d.config.TownRoot)
+		d.maint.dispatch = func(fn func()) {
+			if err := os.Remove(statePath); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(statePath, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			fn()
+		}
+		writeRequestFile(t, d, "run-remember", outsideRequestNow)
+
+		d.runScheduledMaintenance()
+
+		if !strings.Contains(logs.String(), "cannot remember the answer for run run-remember") {
+			t.Errorf("the failed state write was not logged:\n%s", logs.String())
+		}
+	})
+
+	t.Run("the invalid run id answer", func(t *testing.T) {
+		t.Parallel()
+		d, _, logs := requestDaemonWithLogs(t, outsideRequestNow)
+		blockResultPath(t, d)
+		path := writeRequestFile(t, d, "run/1", outsideRequestNow)
+
+		d.runScheduledMaintenance()
+
+		if !strings.Contains(logs.String(), "cannot answer the request") {
+			t.Errorf("the failed invalid-id answer was not logged:\n%s", logs.String())
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("the unanswerable request was removed: %v", err)
+		}
+	})
 }

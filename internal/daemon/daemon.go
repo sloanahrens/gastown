@@ -481,6 +481,11 @@ type Daemon struct {
 	// maintenanceGCRunning is set while a scheduled_maintenance gc cycle runs
 	// on its own goroutine; it blocks a second cycle and an upgrade-restart.
 	maintenanceGCRunning atomic.Bool
+	// maintenanceGCRequestRunID is the run id of the update job's maintenance
+	// request the in-flight cycle answers, empty for a scheduled cycle. A tick
+	// that finds a cycle running uses it to tell a request already being served
+	// from a newer one (maintenance_request.go).
+	maintenanceGCRequestRunID atomic.Value // string
 	// catchUpAttemptAt is the UnixNano time of the last out-of-window
 	// catch-up backup attempt (or unreadable-backup-root report); it bounds
 	// retries to one per maintenanceCatchUpRetry (gt-wne04).
