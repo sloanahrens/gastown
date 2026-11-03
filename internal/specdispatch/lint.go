@@ -546,7 +546,9 @@ func acceptanceDisagreement(field, section string) string {
 //  1. not a work bead: an epic, an agent bead, a wisp and the other runtime
 //     families are refused before any shape is read
 //  2. every template section present and non-empty
-//  3. at least one acceptance item
+//  3. at least one acceptance item, and no item naming a step only the
+//     overseer can run: the whole gate, a container suite, a cluster or the
+//     live town (gt-hgt9j.3)
 //  4. a bead carrying both an acceptance field and a description acceptance
 //     section lists the same criteria in both: gt done reads the field while
 //     filers edit the description, so the two drift and hold a polecat to
@@ -592,6 +594,12 @@ func lint(s Spec, t Template, paths bool) LintVerdict {
 	items := CountAcceptance(acceptanceText(s, sections))
 	if items < MinAcceptance {
 		failures = append(failures, Refusal{Field: "acceptance", Reason: "no acceptance criteria"})
+	}
+	// A criterion a polecat cannot tick alone — a whole gate, a container
+	// suite, a cluster, the live town — is refused here rather than at the
+	// landing gate, where the polecat is already blocked (gt-hgt9j.3).
+	if r, blocked := acceptanceBoxRefusal(acceptanceText(s, sections)); blocked {
+		failures = append(failures, r)
 	}
 	// Both sides present is the only case where drift is visible: one alone is
 	// the bead's whole acceptance list, not a second copy to disagree with.
