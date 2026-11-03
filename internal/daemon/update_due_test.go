@@ -1,0 +1,131 @@
+package daemon
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/config"
+)
+
+var testUpdateSettings = config.UpdateSettings{
+	Enabled:     true,
+	WindowHour:  3,
+	MinInterval: 3 * time.Hour,
+	MaxRuntime:  2 * time.Hour,
+}
+
+func TestUpdateDueNightlyWindowOncePerDay(t *testing.T) {
+	t.Parallel()
+
+	windowStart := time.Date(2026, 3, 10, 3, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name        string
+		now         time.Time
+		lastStarted time.Time
+		wantDue     bool
+		wantReason  string
+	}{
+		{"inside window, never run", windowStart.Add(30 * time.Minute), time.Time{}, true, "nightly"},
+		{"inside window, last run yesterday", windowStart.Add(30 * time.Minute), windowStart.AddDate(0, 0, -1).Add(10 * time.Minute), true, "nightly"},
+		{"inside window, run started just after it opened", windowStart.Add(30 * time.Minute), windowStart.Add(5 * time.Minute), false, "nothing due"},
+		{"inside window, run started exactly as it opened", windowStart.Add(30 * time.Minute), windowStart, false, "nothing due"},
+		{"at window start, run yesterday", windowStart, windowStart.AddDate(0, 0, -1), true, "nightly"},
+		{"at window end, never run", windowStart.Add(updateWindowLength), time.Time{}, false, "nothing due"},
+		{"before window, never run", windowStart.Add(-30 * time.Minute), time.Time{}, false, "nothing due"},
+		{"after window, never run", windowStart.Add(2 * time.Hour), time.Time{}, false, "nothing due"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			facts := UpdateFacts{LastStarted: tt.lastStarted}
+			due, reason := updateDue(tt.now, testUpdateSettings, facts)
+			if due != tt.wantDue {
+				t.Fatalf("updateDue() due = %v, want %v (reason %q)", due, tt.wantDue, reason)
+			}
+			if !strings.Contains(reason, tt.wantReason) {
+				t.Errorf("updateDue() reason = %q, want it to contain %q", reason, tt.wantReason)
+			}
+		})
+	}
+}
+
+func TestUpdateDueWhenMainMovedAfterMinInterval(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name       string
+		mainMoved  bool
+		waiting    int
+		lastEnded  time.Time
+		wantDue    bool
+		wantReason string
+	}{
+		{"moved, waiting, ended 4h ago", true, 2, now.Add(-4 * time.Hour), true, "main moved"},
+		{"moved, waiting, ended exactly min interval ago", true, 1, now.Add(-testUpdateSettings.MinInterval), true, "main moved"},
+		{"moved, waiting, ended 1h ago", true, 2, now.Add(-1 * time.Hour), false, "nothing due"},
+		{"moved, nothing waiting", true, 0, now.Add(-4 * time.Hour), false, "nothing due"},
+		{"moved, waiting, never run before", true, 1, time.Time{}, true, "main moved"},
+		{"main unmoved, waiting, never run before", false, 2, time.Time{}, false, "nothing due"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			facts := UpdateFacts{MainMoved: tt.mainMoved, Waiting: tt.waiting, LastEnded: tt.lastEnded}
+			due, reason := updateDue(now, testUpdateSettings, facts)
+			if due != tt.wantDue {
+				t.Fatalf("updateDue() due = %v, want %v (reason %q)", due, tt.wantDue, reason)
+			}
+			if !strings.Contains(reason, tt.wantReason) {
+				t.Errorf("updateDue() reason = %q, want it to contain %q", reason, tt.wantReason)
+			}
+		})
+	}
+}
+
+func TestUpdateNeverDueUnderStandbyRunningPendingOrDisabled(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 3, 10, 3, 30, 0, 0, time.UTC)
+	dueFacts := UpdateFacts{
+		Standby:        "",
+		Running:        false,
+		InstallPending: false,
+		MainMoved:      false,
+		Waiting:        0,
+		LastStarted:    time.Time{},
+		LastEnded:      time.Time{},
+	}
+
+	if due, reason := updateDue(now, testUpdateSettings, dueFacts); !due {
+		t.Fatalf("baseline updateDue() = false (%q), want the nightly rule to fire", reason)
+	}
+
+	tests := []struct {
+		name       string
+		settings   config.UpdateSettings
+		facts      UpdateFacts
+		wantReason string
+	}{
+		{"disabled", config.UpdateSettings{WindowHour: 3, MinInterval: 3 * time.Hour, MaxRuntime: 2 * time.Hour}, dueFacts, "disabled"},
+		{"standby", testUpdateSettings, UpdateFacts{Standby: "operator hold", LastStarted: time.Time{}}, "operator hold"},
+		{"running", testUpdateSettings, UpdateFacts{Running: true, LastStarted: time.Time{}}, "in progress"},
+		{"install pending", testUpdateSettings, UpdateFacts{InstallPending: true, LastStarted: time.Time{}}, "install"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			due, reason := updateDue(now, tt.settings, tt.facts)
+			if due {
+				t.Fatalf("updateDue() = true, want false under %s", tt.name)
+			}
+			if !strings.Contains(reason, tt.wantReason) {
+				t.Errorf("updateDue() reason = %q, want it to name %q", reason, tt.wantReason)
+			}
+		})
+	}
+}
