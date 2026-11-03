@@ -827,7 +827,7 @@ func TestMaintenanceRequestAnswerKeepsANewerRequest(t *testing.T) {
 func TestMaintenanceRequestBusyCycleAnswersDeferred(t *testing.T) {
 	t.Parallel()
 
-	t.Run("a request the running cycle is not serving is left alone", func(t *testing.T) {
+	t.Run("a request the running cycle is not serving is deferred and kept", func(t *testing.T) {
 		t.Parallel()
 		d, f := requestDaemon(t, outsideRequestNow)
 		d.maintenanceGCRunning.Store(true)
@@ -839,8 +839,8 @@ func TestMaintenanceRequestBusyCycleAnswersDeferred(t *testing.T) {
 		if len(f.gcCalls) != 0 {
 			t.Errorf("gc calls = %v while a cycle is already running", f.gcCalls)
 		}
-		if _, err := os.Stat(resultPath(update.Dir(d.config.TownRoot))); !os.IsNotExist(err) {
-			t.Errorf("a result was written for a request the running cycle is not serving (the shared file may hold the running cycle's answer): %v", err)
+		if res := readRequestResult(t, d); res.RunID != "run-waiting" || res.Outcome != "deferred" || res.Detail == "" {
+			t.Errorf("result = %+v, want run-waiting deferred naming the running cycle", res)
 		}
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("the request the running cycle is not serving was removed: %v", err)
@@ -879,8 +879,8 @@ func TestMaintenanceRequestBusyCycleAnswersDeferred(t *testing.T) {
 		if len(f.gcCalls) != 0 {
 			t.Errorf("gc calls = %v while a cycle is already running", f.gcCalls)
 		}
-		if _, err := os.Stat(resultPath(update.Dir(d.config.TownRoot))); !os.IsNotExist(err) {
-			t.Errorf("a result was written for a request a scheduled cycle is not serving: %v", err)
+		if res := readRequestResult(t, d); res.RunID != "run-scheduled" || res.Outcome != "deferred" {
+			t.Errorf("result = %+v, want run-scheduled deferred", res)
 		}
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("the request a scheduled cycle is not serving was removed: %v", err)
@@ -1110,5 +1110,28 @@ func TestMaintenanceRequestBusyTickLeavesAnUnparseableResult(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("the request was removed although the result could not be read: %v", err)
+	}
+}
+
+// A deferral for a request the running cycle is not serving must not replace
+// the running cycle's completed answer that its job has not read yet.
+func TestMaintenanceRequestBusyTickKeepsTheRunningCyclesResultForAnotherRequest(t *testing.T) {
+	t.Parallel()
+	d, _ := requestDaemon(t, outsideRequestNow)
+	d.maintenanceGCRunning.Store(true)
+	d.maintenanceGCRequestRunID.Store("run-own")
+	path := writeRequestFile(t, d, "run-waiting", outsideRequestNow)
+	done := outsideRequestNow.Add(time.Minute)
+	if err := writeMaintenanceResult(osRequestFiles{}, update.Dir(d.config.TownRoot), "run-own", done, "completed", "gc done"); err != nil {
+		t.Fatal(err)
+	}
+
+	d.runScheduledMaintenance()
+
+	if res := readRequestResult(t, d); res.RunID != "run-own" || res.Outcome != "completed" || !res.At.Equal(done) {
+		t.Errorf("result = %+v, want the running cycle's completed answer untouched", res)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("the waiting request was removed: %v", err)
 	}
 }

@@ -237,33 +237,39 @@ func requestReplaced(files requestFiles, dir string) bool {
 }
 
 // answerBusyRequest answers a request that arrives while a cycle is already
-// running, which this tick cannot serve. Only the request the running cycle is
-// serving gets a "deferred" result and its file removed, so its job does not
-// wait out a cycle that can hold one database's gc for minutes; that cycle's
-// own result then replaces the deferral. A request the running cycle is not
-// serving is left untouched, with no result written: the shared result file
-// may still hold the running cycle's answer for its own job, and the request
-// stays until a later tick runs its cycle.
+// running, which this tick cannot serve, with a "deferred" result so its job
+// does not wait out a cycle that can hold one database's gc for minutes. The
+// request the running cycle is serving also has its file removed; that cycle's
+// own result then replaces the deferral. Any other request keeps its file, so
+// a later tick runs its cycle.
 //
-// The request mutex makes the check and the write one step against the cycle's
-// own answer: a cycle that already answered (its result names this run id, or
-// it is no longer running) is never overwritten by a deferral.
+// The result file is one file shared by every job, so a deferral must never
+// replace an answer a job has not read yet. The request mutex makes the check
+// and the write one step against the cycle's own answer, and the deferral is
+// skipped when the file already holds a non-deferred answer for the running
+// cycle's run id (its job reads that) or for this request's own.
 func (d *Daemon) answerBusyRequest(req update.RequestFile) {
 	d.maintenanceRequestMu.Lock()
 	defer d.maintenanceRequestMu.Unlock()
-	if !d.maintenanceGCRunning.Load() || d.runningRequestRunID() != req.RunID {
+	if !d.maintenanceGCRunning.Load() {
 		return
 	}
+	running := d.runningRequestRunID()
 	files := osRequestFiles{}
 	dir := update.Dir(d.config.TownRoot)
-	if answered, err := resultNamesRun(files, dir, req.RunID); err != nil {
+	existing, found, err := readMaintenanceResult(files, dir)
+	if err != nil {
 		d.logger.Printf("scheduled_maintenance: WARNING: cannot answer request for run %s: reading the result: %v — the request stays", req.RunID, err)
 		return
-	} else if answered {
+	}
+	if found && existing.Outcome != "deferred" && (existing.RunID == req.RunID || existing.RunID == running) {
 		return
 	}
 	if err := writeMaintenanceResult(files, dir, req.RunID, d.maintenance().now(), "deferred", "a maintenance cycle is already running"); err != nil {
 		d.logger.Printf("scheduled_maintenance: WARNING: cannot answer request for run %s: %v — the request stays", req.RunID, err)
+		return
+	}
+	if running != req.RunID {
 		return
 	}
 	if err := removeAnsweredRequest(files, dir, req.RunID); err != nil {
@@ -271,22 +277,22 @@ func (d *Daemon) answerBusyRequest(req update.RequestFile) {
 	}
 }
 
-// resultNamesRun reports whether dir's result file already answers runID. A
-// missing file is no answer; an unreadable or unparseable one is an error, so
-// the caller does not write over a result it could not see.
-func resultNamesRun(files requestFiles, dir, runID string) (bool, error) {
+// readMaintenanceResult reads dir's result file. A missing file is (zero,
+// false, nil); an unreadable or unparseable one is an error, so the caller does
+// not write over a result it could not see.
+func readMaintenanceResult(files requestFiles, dir string) (update.MaintenanceResult, bool, error) {
 	data, err := files.ReadFile(resultPath(dir))
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return false, nil
+		return update.MaintenanceResult{}, false, nil
 	case err != nil:
-		return false, err
+		return update.MaintenanceResult{}, false, err
 	}
 	var res update.MaintenanceResult
 	if err := json.Unmarshal(data, &res); err != nil {
-		return false, fmt.Errorf("parse %s: %w", resultPath(dir), err)
+		return update.MaintenanceResult{}, false, fmt.Errorf("parse %s: %w", resultPath(dir), err)
 	}
-	return res.RunID == runID && res.Outcome != "deferred", nil
+	return res, true, nil
 }
 
 // runningRequestRunID is the run id of the request the in-flight cycle is
