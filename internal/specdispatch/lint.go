@@ -447,19 +447,82 @@ func CountAcceptance(text string) int {
 	return n
 }
 
-// acceptanceText is the bead's acceptance field, else the description's
-// acceptance section. beads.AcceptanceSectionKey chooses the heading the same
-// way for the submission refusal and the landing policy, so a heading the lint
-// counts is a heading gt done counts (gt-2czgm, gt-a4ay1).
-func acceptanceText(s Spec, sections map[string]string) string {
-	if strings.TrimSpace(s.Acceptance) != "" {
-		return s.Acceptance
-	}
+// acceptanceSection is the description's acceptance section body and whether
+// the description has one. beads.AcceptanceSectionKey chooses the heading the
+// same way for the submission refusal and the landing policy, so a heading the
+// lint reads is a heading gt done counts (gt-2czgm, gt-a4ay1).
+func acceptanceSection(sections map[string]string) (string, bool) {
 	keys := make([]string, 0, len(sections))
 	for key := range sections {
 		keys = append(keys, key)
 	}
-	return sections[beads.AcceptanceSectionKey(keys)]
+	key := beads.AcceptanceSectionKey(keys)
+	if key == "" {
+		return "", false
+	}
+	return sections[key], true
+}
+
+// acceptanceText is the bead's acceptance field, else the description's
+// acceptance section.
+func acceptanceText(s Spec, sections map[string]string) string {
+	if strings.TrimSpace(s.Acceptance) != "" {
+		return s.Acceptance
+	}
+	body, ok := acceptanceSection(sections)
+	if !ok {
+		return ""
+	}
+	return body
+}
+
+// acceptanceItemTexts returns the text of an acceptance text's top-level
+// items, the checkbox removed and the remainder trimmed, in order. It reads
+// items through beads.AcceptanceItems, the matcher CountAcceptance counts, so
+// the two cannot disagree on what a criterion is. Text with no list item is
+// one item, as CountAcceptance reads it.
+func acceptanceItemTexts(text string) []string {
+	var out []string
+	for _, item := range beads.AcceptanceItems(text) {
+		if item.Nested {
+			continue
+		}
+		line := item.Line
+		if item.Boxed {
+			line = line[strings.IndexByte(line, ']')+1:]
+		}
+		out = append(out, strings.TrimSpace(line))
+	}
+	if len(out) == 0 {
+		if trimmed := strings.TrimSpace(text); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+// acceptanceDisagreement names the first criterion the acceptance section and
+// the acceptance field do not share: a different text at the same position, or
+// the first item with no counterpart when the counts differ. Empty means the
+// two agree. Box state is not compared: "[x]" and "[ ]" are one criterion at
+// different times.
+func acceptanceDisagreement(field, section string) string {
+	sectionItems := acceptanceItemTexts(section)
+	fieldItems := acceptanceItemTexts(field)
+	for i := 0; i < len(sectionItems) && i < len(fieldItems); i++ {
+		if sectionItems[i] != fieldItems[i] {
+			return fmt.Sprintf("section item %q, field item %q", firstLine(sectionItems[i]), firstLine(fieldItems[i]))
+		}
+	}
+	if len(sectionItems) == len(fieldItems) {
+		return ""
+	}
+	longer, side, short := sectionItems, "section", len(fieldItems)
+	if len(fieldItems) > len(sectionItems) {
+		longer, side, short = fieldItems, "field", len(sectionItems)
+	}
+	return fmt.Sprintf("%d items in the section, %d in the field; first extra in the %s: %q",
+		len(sectionItems), len(fieldItems), side, firstLine(longer[short]))
 }
 
 // Lint validates the shape of a work bead against the template. Every failure
@@ -470,10 +533,14 @@ func acceptanceText(s Spec, sections map[string]string) string {
 //     families are refused before any shape is read
 //  2. every template section present and non-empty
 //  3. at least one acceptance item
-//  4. every repo file the Constraints names as a file it changes exists on the
+//  4. a bead carrying both an acceptance field and a description acceptance
+//     section lists the same criteria in both: gt done reads the field while
+//     filers edit the description, so the two drift and hold a polecat to
+//     criteria nobody can see (gt-hgt9j.2)
+//  5. every repo file the Constraints names as a file it changes exists on the
 //     target branch; a path the spec introduces, reads only, or that is not a
 //     literal repo file, is passed (gt-7t1im)
-//  5. size: needs-planning label, a Size that says planning, or more than
+//  6. size: needs-planning label, a Size that says planning, or more than
 //     MaxAcceptance items route to the planner; a Size that does not say one
 //     worker is refused
 //
@@ -511,6 +578,15 @@ func lint(s Spec, t Template, paths bool) LintVerdict {
 	items := CountAcceptance(acceptanceText(s, sections))
 	if items < MinAcceptance {
 		failures = append(failures, Refusal{Field: "acceptance", Reason: "no acceptance criteria"})
+	}
+	// Both sides present is the only case where drift is visible: one alone is
+	// the bead's whole acceptance list, not a second copy to disagree with.
+	if strings.TrimSpace(s.Acceptance) != "" {
+		if body, ok := acceptanceSection(sections); ok {
+			if diff := acceptanceDisagreement(s.Acceptance, body); diff != "" {
+				failures = append(failures, Refusal{Field: "acceptance", Reason: "section and field differ: " + diff})
+			}
+		}
 	}
 	if paths {
 		if r, failed := targetRefusal(sections, s.Target); failed {

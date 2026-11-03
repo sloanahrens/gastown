@@ -343,6 +343,75 @@ func TestLintAcceptanceFallsBackToDescriptionSection(t *testing.T) {
 	}
 }
 
+// A bead carrying both an acceptance field and a description acceptance
+// section lints clean when the two list the same criteria (gt-hgt9j.2).
+func TestAcceptanceAgreeIdenticalPasses(t *testing.T) {
+	t.Parallel()
+	s := goodSpec()
+	s.Description += "\n\n## Acceptance\n- [ ] one\n- [ ] two\n- [ ] three"
+	if v := Lint(s, defaultTemplate()); !v.Clean() {
+		t.Fatalf("agreeing section and field refused: %s", v.Line(s.ID))
+	}
+}
+
+// The box state is not part of a criterion: a section whose item is checked
+// agrees with a field whose same item is not (gt-hgt9j.2).
+func TestAcceptanceAgreeIgnoresBoxState(t *testing.T) {
+	t.Parallel()
+	s := goodSpec()
+	s.Description += "\n\n## Acceptance\n- [x] one\n- [X] two\n- [x] three"
+	if v := Lint(s, defaultTemplate()); !v.Clean() {
+		t.Fatalf("box state alone refused: %s", v.Line(s.ID))
+	}
+}
+
+// One reworded criterion is a refusal that names acceptance and the item, so
+// the filer can fix the side the polecat is not held to (gt-hgt9j.2).
+func TestAcceptanceAgreeRefusesDifferentText(t *testing.T) {
+	t.Parallel()
+	s := goodSpec()
+	s.Description += "\n\n## Acceptance\n- [ ] one\n- [ ] two reworded\n- [ ] three"
+	v := Lint(s, defaultTemplate())
+	if v.Route != RouteRefuse || v.Field != "acceptance" {
+		t.Fatalf("Lint = %+v, want a refusal on acceptance", v)
+	}
+	if !strings.Contains(v.Reason, "two reworded") {
+		t.Errorf("reason %q does not name the differing item", v.Reason)
+	}
+}
+
+// A field with one item more than the section is a refusal naming the extra
+// item, not a silent count mismatch (gt-hgt9j.2).
+func TestAcceptanceAgreeRefusesDifferentCount(t *testing.T) {
+	t.Parallel()
+	s := goodSpec()
+	s.Acceptance = "- [ ] one\n- [ ] two\n- [ ] three\n- [ ] four"
+	s.Description += "\n\n## Acceptance\n- [ ] one\n- [ ] two\n- [ ] three"
+	v := Lint(s, defaultTemplate())
+	if v.Route != RouteRefuse || v.Field != "acceptance" {
+		t.Fatalf("Lint = %+v, want a refusal on acceptance", v)
+	}
+	if !strings.Contains(v.Reason, "four") {
+		t.Errorf("reason %q does not name the extra item", v.Reason)
+	}
+}
+
+// One side alone is the bead's whole acceptance list, not a second copy: the
+// check needs both to have anything to compare (gt-hgt9j.2).
+func TestAcceptanceAgreeNeedsBoth(t *testing.T) {
+	t.Parallel()
+	fieldOnly := goodSpec()
+	if v := Lint(fieldOnly, defaultTemplate()); !v.Clean() {
+		t.Errorf("field-only bead refused: %s", v.Line(fieldOnly.ID))
+	}
+	sectionOnly := goodSpec()
+	sectionOnly.Acceptance = ""
+	sectionOnly.Description += "\n\n## Acceptance\n- [ ] one\n- [ ] two\n- [ ] three"
+	if v := Lint(sectionOnly, defaultTemplate()); !v.Clean() {
+		t.Errorf("section-only bead refused: %s", v.Line(sectionOnly.ID))
+	}
+}
+
 func TestCountAcceptance(t *testing.T) {
 	t.Parallel()
 	cases := map[string]int{
