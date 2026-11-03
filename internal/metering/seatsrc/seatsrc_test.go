@@ -128,7 +128,8 @@ func TestSeatsReadsALongLine(t *testing.T) {
 }
 
 // TestSeatsReturnsReaderError covers a failing reader: the error comes back and
-// no partial result is handed to the caller.
+// no partial result is handed to the caller, even though one valid line was
+// read before the failure.
 func TestSeatsReturnsReaderError(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("boom")
@@ -137,8 +138,38 @@ func TestSeatsReturnsReaderError(t *testing.T) {
 		iotest.ErrReader(boom),
 	)
 
-	_, err := Seats(src)
+	res, err := Seats(src)
 	if !errors.Is(err, boom) {
 		t.Fatalf("Seats error = %v, want a wrapped %v", err, boom)
+	}
+	if len(res.Seats) != 0 || len(res.Skipped) != 0 {
+		t.Errorf("Seats returned %d intervals and skipped %v with the error, want the zero Result", len(res.Seats), res.Skipped)
+	}
+}
+
+// TestSeatsCountsAnUnparseableTimestampAsInvalidJSON covers a line the JSON
+// decoder rejects for its time rather than its syntax: a well-formed line whose
+// created_at or ended_at is not RFC 3339 is counted under invalid JSON, never
+// guessed into an interval.
+func TestSeatsCountsAnUnparseableTimestampAsInvalidJSON(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"created_at": `{"workspace":"acme","profile":"opus","created_at":"yesterday","ended_at":"2026-10-01T01:00:00Z"}`,
+		"ended_at":   `{"workspace":"acme","profile":"opus","created_at":"2026-10-01T00:00:00Z","ended_at":"tomorrow"}`,
+	}
+	for field, line := range cases {
+		t.Run(field, func(t *testing.T) {
+			t.Parallel()
+			res, err := Seats(strings.NewReader(line + "\n"))
+			if err != nil {
+				t.Fatalf("Seats: %v", err)
+			}
+			if want := map[string]int{SkipInvalidJSON: 1}; !reflect.DeepEqual(res.Skipped, want) {
+				t.Errorf("Skipped = %v, want %v", res.Skipped, want)
+			}
+			if len(res.Seats) != 0 {
+				t.Errorf("Seats returned %d intervals, want none from an unparseable timestamp", len(res.Seats))
+			}
+		})
 	}
 }
