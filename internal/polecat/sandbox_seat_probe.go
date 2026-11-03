@@ -21,9 +21,9 @@ const sandboxSeatTimeout = 15 * time.Second
 // SandboxSeatProbe answers the git state of a sandbox seat: agent is the agent
 // the polecat's agent bead recorded and sessionName its session, which is also
 // its sandbox's name. ok is false for a host seat, whose worktree the caller
-// measures as before. A sandbox seat's host worktree is a stale leftover (its
-// commits were pushed from inside the sandbox), so it is never measured: the
-// gateway's answer decides (SandboxSeatGitState, gt-qq6rg).
+// measures as before. The gateway's answer decides (SandboxSeatGitState,
+// gt-qq6rg); a caller that holds a gone seat's host worktree passes it to
+// SandboxSeatHostGitState (gt-zgoo3).
 type SandboxSeatProbe func(agent, sessionName string) (state LiveGitState, ok bool)
 
 // NewSandboxSeatProbe reads the seat map of the town at townRoot once, on the

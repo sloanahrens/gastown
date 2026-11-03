@@ -3405,14 +3405,18 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	// CleanupStatus again, so a missing/unknown status must not permanently
 	// veto reclaiming this slot. See ResolveIgnoreCleanupStatus.
 	facts.WorktreeStructurallyMissing = IsStructuralWorktreeError(verifyWorktreeExists(m.gits, clonePath))
-	// A sandbox seat's host worktree is a stale leftover whose commits read as
-	// unpushed: its git facts are the gateway's answer, and nothing on the host
-	// clone is measured (gt-qq6rg.1).
+	// A running sandbox seat's host worktree is a stale leftover whose commits
+	// read as unpushed, so its git facts are the gateway's answer and nothing
+	// on the host clone is measured (gt-qq6rg.1). The gateway's Live answer
+	// means the sandbox is gone: the host worktree is then what survives, and
+	// it is judged in place (gt-zgoo3).
 	sandboxLive, sandboxed := m.sandboxSeatState(fields, name)
 	var targetRefs []string
 	if sandboxed {
+		gone := sandboxLive.Source == GitStateSourceLive
+		sandboxLive = sandboxSeatHostGitState(m.gits, sandboxLive, clonePath, m.rig.Path, strings.TrimSpace(fields.Branch))
 		applySandboxSeatFacts(&facts, sandboxLive, fields)
-		if sandboxLive.Source == GitStateSourceLive {
+		if gone {
 			m.applySandboxLostWorkFacts(&facts, fields, sourceHint, name)
 		}
 	} else {

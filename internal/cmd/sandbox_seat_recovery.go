@@ -15,6 +15,14 @@ import (
 // of its (possibly gone) sandbox and whether its branch is on the remote.
 type sandboxSeatEnv struct {
 	probe sandboxSeatProbe
+	// hostGitState judges a gone sandbox seat from its host worktree and the
+	// rig's shared repository; nil means the measurement is run for real.
+	// Tests that model no repository supply a whole answer here.
+	hostGitState func(gone polecat.LiveGitState, worktreePath, rigRoot, pushedBranch string) polecat.LiveGitState
+	// gits opens the repositories the real measurement reads; its zero value is
+	// the git binary, and a test supplies a repository model so
+	// polecat.SandboxSeatHostGitStateWith runs the production measurement.
+	gits polecat.SandboxSeatGitOpener
 	// remoteBranch reports whether branch exists on origin, asked of the rig's
 	// shared bare repo; nil means ls-remote there.
 	remoteBranch func(rigPath, branch string) (bool, error)
@@ -38,6 +46,17 @@ func (e sandboxSeatEnv) branchesForIssue(rigPath, issueID string) ([]string, err
 		return e.survivingBranches(rigPath, issueID)
 	}
 	return polecat.FindSurvivingBranchesForIssue(rigPath, issueID)
+}
+
+// judgeGoneSeat measures a gone sandbox seat from what survives on the host:
+// its worktree, or the branch refs the shared repository still holds once the
+// worktree directory is gone (gt-zgoo3). A test's modeled answer runs instead
+// of the measurement, or its git opener runs the measurement itself.
+func (e sandboxSeatEnv) judgeGoneSeat(gone polecat.LiveGitState, worktreePath, rigRoot, pushedBranch string) polecat.LiveGitState {
+	if e.hostGitState != nil {
+		return e.hostGitState(gone, worktreePath, rigRoot, pushedBranch)
+	}
+	return polecat.SandboxSeatHostGitStateWith(e.gits, gone, worktreePath, rigRoot, pushedBranch)
 }
 
 // applySandboxLostWorkFacts gives the verdict what it needs to tell lost work
@@ -105,12 +124,12 @@ func applySandboxLostWorkFacts(facts *polecat.WorkstateFacts, env sandboxSeatEnv
 	facts.SandboxBranchPreserved = preserved
 }
 
-// sandboxSeatGitState turns a sandbox seat's gateway-derived git state into the
-// GitState the recovery and nuke checks read. A seat whose sandbox the gateway
-// says is gone has nothing left on the host to lose: what was pushed is what
-// survived, so it reads clean. A running sandbox, or a gateway that could not be
-// asked, is an error, which every caller already treats as "cannot check" and
-// fails closed on (gt-qq6rg.2).
+// sandboxSeatGitState turns a sandbox seat's git state into the GitState the
+// recovery and nuke checks read. Once the sandbox is gone the state may carry
+// the host worktree's dirt, stashes and unique commits, which keep the seat
+// blocked; a gone sandbox with nothing left on the host reads clean. A running
+// sandbox, or a gateway that could not be asked, is an error, which every
+// caller already treats as "cannot check" and fails closed on (gt-qq6rg.2).
 func sandboxSeatGitState(live polecat.LiveGitState) (*GitState, error) {
 	if live.Source != polecat.GitStateSourceLive {
 		reason := live.FailedReason
@@ -119,7 +138,12 @@ func sandboxSeatGitState(live polecat.LiveGitState) (*GitState, error) {
 		}
 		return nil, errors.New(reason)
 	}
-	return &GitState{Clean: true, UncommittedFiles: []string{}}, nil
+	return &GitState{
+		Clean:            !live.Dirty && live.StashCount == 0 && live.UnpushedCommits == 0,
+		UncommittedFiles: []string{},
+		UnpushedCommits:  live.UnpushedCommits,
+		StashCount:       live.StashCount,
+	}, nil
 }
 
 // sandboxSeatGitSafe is the active-MR "git safe" answer for a sandbox seat: only

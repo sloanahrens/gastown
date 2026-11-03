@@ -2,12 +2,14 @@ package cmd
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
 )
@@ -17,11 +19,20 @@ type mrlessBeads struct{ *beadsfake.Fake }
 
 func (mrlessBeads) FindMRForBranchAny(string) (*beads.Issue, error) { return nil, nil }
 
-// A sandbox seat's host worktree is a stale leftover, so check-recovery takes
-// its git facts from the sandbox probe and never measures the host clone: a
-// gone sandbox with nothing hooked reads clean, a running one or a gateway that
-// cannot be asked reads unknown and keeps the seat out of reuse and nuke. A host
-// seat is measured as before, here against a clone that does not exist (gt-qq6rg.2).
+// gatewayOnlySeat passes a seat's gateway answer through as its host
+// measurement, so a test that models no repository still drives the gateway
+// and lost-work wiring (gt-zgoo3).
+func gatewayOnlySeat(gone polecat.LiveGitState, _, _, _ string) polecat.LiveGitState {
+	return gone
+}
+
+// A running sandbox's host worktree is a stale leftover, so check-recovery
+// takes its git facts from the sandbox probe and never measures the host clone:
+// a running sandbox or a gateway that cannot be asked reads unknown and keeps
+// the seat out of reuse and nuke. A gone sandbox with nothing hooked reads
+// clean, and the lost-work rule decides whether its work survived (gt-qq6rg.2);
+// what survives in its host worktree is judged there (gt-zgoo3). A host seat is
+// measured as before, here against a clone that does not exist.
 func TestCheckRecoveryOfASandboxSeat(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -68,7 +79,7 @@ func TestCheckRecoveryOfASandboxSeat(t *testing.T) {
 				ClonePath: filepath.Join(town, "gastown", "polecats", "ember", "gastown"),
 			}
 
-			status := checkRecoveryForPolecatWith(sandboxSeatEnv{probe: tt.probe}, db, nil, r, "gastown", "ember", p, false)
+			status := checkRecoveryForPolecatWith(sandboxSeatEnv{probe: tt.probe, hostGitState: gatewayOnlySeat}, db, nil, r, "gastown", "ember", p, false)
 
 			if live := status.GitStateSource == polecat.GitStateSourceLive; live != tt.wantLive {
 				t.Errorf("git state source = %q, want live=%v (verdict %s, blockers %v)", status.GitStateSource, tt.wantLive, status.Verdict, status.Blockers)
@@ -184,6 +195,7 @@ func TestCheckRecoveryOfAGoneSandboxSeatTellsLostWork(t *testing.T) {
 				probe: func(string, string) (polecat.LiveGitState, bool) {
 					return polecat.SandboxSeatGitState("", false, nil, "gt-ember"), true
 				},
+				hostGitState: gatewayOnlySeat,
 				remoteBranch: func(_, b string) (bool, error) {
 					if b != branch {
 						t.Errorf("origin asked about %q, want the branch the agent bead recorded", b)
@@ -246,6 +258,7 @@ func TestSandboxLostWorkFactsAgreeWithManagerWhenAgentBeadRecordsNoBranch(t *tes
 		probe: func(string, string) (polecat.LiveGitState, bool) {
 			return polecat.SandboxSeatGitState("", false, nil, "gt-ember"), true
 		},
+		hostGitState: gatewayOnlySeat,
 		remoteBranch: func(_, branch string) (bool, error) {
 			askedOrigin = branch
 			return true, nil
@@ -377,6 +390,7 @@ func TestCheckPolecatSafetyOfAGoneSandboxSeat(t *testing.T) {
 					}
 					return polecat.SandboxSeatGitState("", false, nil, "gt-ember"), true
 				},
+				hostGitState: gatewayOnlySeat,
 				remoteBranch: func(_, b string) (bool, error) {
 					if tt.noBranch {
 						t.Errorf("origin was asked about %q; an agent bead that records no branch names none to ask", b)
@@ -447,6 +461,7 @@ func TestCheckPolecatSafetyOfADeadSandboxSeat(t *testing.T) {
 			}
 			env := sandboxSeatEnv{
 				probe:        func(string, string) (polecat.LiveGitState, bool) { return tt.live, true },
+				hostGitState: gatewayOnlySeat,
 				remoteBranch: func(_, _ string) (bool, error) { return false, nil },
 			}
 			get := func(string) (*polecat.Polecat, error) {
@@ -489,6 +504,7 @@ func TestNukeOfAnIdleCleanSandboxSeatNeedsNoForce(t *testing.T) {
 		probe: func(string, string) (polecat.LiveGitState, bool) {
 			return polecat.SandboxSeatGitState("", false, nil, "gt-gastown-p-ember"), true
 		},
+		hostGitState: gatewayOnlySeat,
 		remoteBranch: func(_, _ string) (bool, error) { return true, nil },
 	}
 	get := func(string) (*polecat.Polecat, error) {
@@ -598,6 +614,7 @@ func TestCheckRecoveryOfASandboxSeatWithNoRecordedBranchTellsItsLanding(t *testi
 				probe: func(string, string) (polecat.LiveGitState, bool) {
 					return polecat.SandboxSeatGitState("", false, nil, "gt-ember"), true
 				},
+				hostGitState: gatewayOnlySeat,
 				survivingBranches: func(_, issueID string) ([]string, error) {
 					asked = issueID
 					if tt.originErr != nil {
@@ -696,6 +713,7 @@ func TestCheckPolecatSafetyOfASandboxSeatWithNoRecordedBranchTellsItsLanding(t *
 				probe: func(string, string) (polecat.LiveGitState, bool) {
 					return polecat.SandboxSeatGitState("", false, nil, "gt-ember"), true
 				},
+				hostGitState: gatewayOnlySeat,
 				survivingBranches: func(_, _ string) ([]string, error) {
 					if tt.originErr != nil {
 						return nil, tt.originErr
@@ -766,6 +784,7 @@ func TestCheckRecoveryReconcilesCleanupOfALandedSandboxSeatWithNoBranch(t *testi
 				probe: func(string, string) (polecat.LiveGitState, bool) {
 					return polecat.SandboxSeatGitState("", false, nil, "gt-ember"), true
 				},
+				hostGitState:      gatewayOnlySeat,
 				survivingBranches: func(string, string) ([]string, error) { return nil, nil },
 			}
 			p := &polecat.Polecat{Name: "ember", State: polecat.StateIdle, ClonePath: filepath.Join(town, "gastown", "polecats", "ember", "gastown")}
@@ -787,5 +806,156 @@ func TestCheckRecoveryReconcilesCleanupOfALandedSandboxSeatWithNoBranch(t *testi
 				t.Errorf("recorded cleanup_status = %q, want %q", fields.CleanupStatus, want)
 			}
 		})
+	}
+}
+
+// check-recovery judges a gone sandbox seat from its host worktree through the
+// injected git seam: the recovery path runs the production measurement over a
+// repository model and takes its answer from that measurement. A commit the
+// pushed branch lacks reports NEEDS_RECOVERY naming its count, and a seat whose
+// commits are all on the pushed branch reports safe (gt-zgoo3).
+func TestCheckRecoveryGoneSandboxWithHostWorktreeThroughTheSeam(t *testing.T) {
+	t.Parallel()
+	const branch = "polecat/ember/gt-a+x"
+	tests := []struct {
+		name     string
+		push     bool // the seat's commit is on the pushed branch
+		wantSafe bool
+		want     string // blocker substring
+	}{
+		{
+			name: "a host worktree holding a unique commit blocks and names it",
+			want: "unpushed_commits=1",
+		},
+		{
+			name:     "every commit on the pushed branch reads safe",
+			push:     true,
+			wantSafe: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			r := &rig.Rig{Name: "gastown", Path: filepath.Join(town, "gastown")}
+			clonePath := filepath.Join(r.Path, "polecats", "ember", "gastown")
+
+			// The seat's host worktree is a checkout of a modeled repository:
+			// one commit on its polecat branch, pushed or not as the case says.
+			fakeGit := gitfake.New()
+			origin := filepath.Join(town, "origin.git")
+			fakeGit.InitBare(t, origin)
+			base := fakeGit.Commit(t, origin, "main", "initial", map[string]string{"README.md": "# Test\n"})
+			fakeGit.SetRef(t, origin, "refs/heads/"+branch, base)
+			fakeGit.Clone(t, origin, clonePath)
+			if err := fakeGit.OpenBranchRepo(clonePath).CheckoutNewBranch(branch, "HEAD"); err != nil {
+				t.Fatalf("check out %s: %v", branch, err)
+			}
+			if err := os.WriteFile(filepath.Join(clonePath, "fix.txt"), []byte("x\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			fakeGit.CommitWorktree(t, clonePath, "the seat's fix")
+			if tt.push {
+				if err := fakeGit.OpenBranchRepo(clonePath).Push("origin", branch, false); err != nil {
+					t.Fatalf("push %s: %v", branch, err)
+				}
+			}
+
+			db := mrlessBeads{beadsfake.New()}
+			agentID := polecatBeadIDForRig(r, "gastown", "ember")
+			if _, err := db.Create(beads.CreateOptions{
+				ID: agentID, Title: agentID, Labels: []string{"gt:agent"}, Priority: -1,
+				Description: beads.FormatAgentDescription(agentID, &beads.AgentFields{
+					RoleType: "polecat", Rig: "gastown", AgentState: string(beads.AgentStateDone),
+					CleanupStatus: string(polecat.CleanupClean), Agent: sandboxSeatAgent, Branch: branch,
+				}),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			p := &polecat.Polecat{Name: "ember", State: polecat.StateDone, Branch: branch, ClonePath: clonePath}
+
+			var opened []string
+			env := sandboxSeatEnv{
+				probe: func(string, string) (polecat.LiveGitState, bool) {
+					return polecat.SandboxSeatGitState("", false, nil, "gt-ember"), true
+				},
+				// The pushed branch is on origin, so the lost-work rule holds.
+				remoteBranch: func(_, _ string) (bool, error) { return true, nil },
+				gits: polecat.SandboxSeatGitOpener{
+					Open: func(dir string) polecat.SandboxSeatGitRepo {
+						opened = append(opened, dir)
+						return fakeGit.OpenBranchRepo(dir)
+					},
+				},
+			}
+
+			status := checkRecoveryForPolecatWith(env, db, nil, r, "gastown", "ember", p, false)
+
+			if len(opened) == 0 {
+				t.Fatal("the seat's host worktree was never measured")
+			}
+			for _, dir := range opened {
+				if dir != clonePath {
+					t.Fatalf("repositories opened %v, want only the seat's host worktree %q", opened, clonePath)
+				}
+			}
+			if tt.wantSafe {
+				if !status.SafeToNuke || status.NeedsRecovery {
+					t.Fatalf("seat with every commit on the pushed branch verdict=%s reason=%s blockers=%v, want safe to nuke",
+						status.Verdict, status.Reason, status.Blockers)
+				}
+				return
+			}
+			if !status.NeedsRecovery || status.SafeToNuke || status.Reusable {
+				t.Fatalf("seat holding a unique commit verdict=%s safe=%v reusable=%v, want NEEDS_RECOVERY",
+					status.Verdict, status.SafeToNuke, status.Reusable)
+			}
+			if blockers := strings.Join(status.Blockers, "\n"); !strings.Contains(blockers, tt.want) {
+				t.Fatalf("blockers = %v, want one containing %q", status.Blockers, tt.want)
+			}
+		})
+	}
+}
+
+// A gone sandbox seat's host facts reach the recovery verdict instead of
+// reading as a blind clean, and a state the probe could name no dirty files
+// for still blocks (gt-zgoo3).
+func TestSandboxSeatHostGitStateCarriesHostFacts(t *testing.T) {
+	t.Parallel()
+	const pushed = "polecat/ember/gt-a+x"
+
+	gone := polecat.SandboxSeatGitState("", false, nil, "gt-ember")
+	// A missing worktree is judged from the shared repository, so a rig that
+	// cannot be located is unknown rather than a blind clean: the local branch
+	// ref may still hold commits nothing pushed.
+	if st := polecat.SandboxSeatHostGitState(gone, filepath.Join(t.TempDir(), "gone"), "", pushed); st.Source != polecat.GitStateSourceUnknown || !strings.Contains(st.FailedReason, "no rig root") {
+		t.Errorf("a gone sandbox with no shared repository = %+v, want unknown naming the rig root", st)
+	}
+	running := polecat.SandboxSeatGitState("", true, nil, "gt-ember")
+	if st := polecat.SandboxSeatHostGitState(running, t.TempDir(), "", pushed); st.Source != polecat.GitStateSourceUnknown || !strings.Contains(st.FailedReason, "running sandbox") {
+		t.Errorf("a running sandbox = %+v, want the running-sandbox unknown", st)
+	}
+
+	host := polecat.LiveGitState{Source: polecat.GitStateSourceLive, UnpushedCommits: 2, StashCount: 1}
+	st, err := sandboxSeatGitState(host)
+	if err != nil || st.Clean || st.UnpushedCommits != 2 || st.StashCount != 1 {
+		t.Fatalf("host facts = %+v, %v; want a not-clean state carrying the unique commits and stash", st, err)
+	}
+	facts := polecat.WorkstateFacts{State: polecat.StateIdle, CleanupStatus: polecat.CleanupClean, HookBeadSafe: true}
+	applyGitStateToWorkstateFacts(&facts, "", st, nil)
+	if d := polecat.DecideWorkstate(polecat.NewWorkstateInput(facts)); d.SafeToNuke || d.Reusable {
+		t.Errorf("a host-only commit decided %+v, want a blocker", d)
+	}
+
+	// Dirt the probe could name no files for still blocks: LiveGitState carries
+	// no paths, and a not-clean state must never read as clean.
+	dirty, err := sandboxSeatGitState(polecat.LiveGitState{Source: polecat.GitStateSourceLive, Dirty: true})
+	if err != nil || dirty.Clean {
+		t.Fatalf("dirty host = %+v, %v; want a not-clean state", dirty, err)
+	}
+	facts = polecat.WorkstateFacts{State: polecat.StateIdle, CleanupStatus: polecat.CleanupClean, HookBeadSafe: true}
+	applyGitStateToWorkstateFacts(&facts, "", dirty, nil)
+	if !facts.GitDirty {
+		t.Error("a dirty host worktree with no named files did not set GitDirty")
 	}
 }
