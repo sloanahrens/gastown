@@ -486,7 +486,7 @@ type Daemon struct {
 	// that finds a cycle running uses it to tell a request already being served
 	// from a newer one (maintenance_request.go).
 	maintenanceGCRequestRunID atomic.Value // string
-	// maintenanceRequestMu serialises every write of the shared result file
+	// maintenanceRequestMu serializes every write of the shared result file
 	// with the removal of the request it answers (maintenance_request.go): a
 	// busy tick's deferral can then never land between a cycle's result and
 	// the removal that tells its job to read it.
