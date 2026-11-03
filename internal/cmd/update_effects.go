@@ -1,0 +1,246 @@
+package cmd
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/update"
+	"github.com/steveyegge/gastown/internal/version"
+)
+
+// seatProbeEnv is where the seat probe reads the town: the rigs, each rig's
+// polecats, the prefix that names a polecat's session, and that session's
+// heartbeat. The update command supplies the real readings and tests supply
+// fakes.
+type seatProbeEnv struct {
+	// Rigs lists the town's rig names, the way `gt polecat list --all` finds
+	// them.
+	Rigs func() ([]string, error)
+	// Polecats lists the directory names under <town>/<rig>/polecats.
+	Polecats func(rig string) ([]string, error)
+	// Prefix is townRegistry().PrefixForRig.
+	Prefix func(rig string) string
+	// Heartbeat reads a session's heartbeat: (nil, nil) when the session wrote
+	// none, and an error when one exists but cannot be read or parsed.
+	// polecat.ReadSessionHeartbeat answers nil for both, so it cannot be this
+	// reading: a drain that took an unreadable file for no file would install
+	// over a working polecat.
+	Heartbeat func(session string) (*polecat.SessionHeartbeat, error)
+}
+
+// newSeatProbe returns the probe update.Drain watches. It reads each polecat's
+// heartbeat from the files the daemon's workingPolecats reads: Working is the
+// agent-reported state, and LastActive is when the heartbeat was last
+// written, so the drain applies its own freshness bound to the same reading.
+// A rig whose polecats directory is absent has no polecats; every other read
+// error is returned, so the drain never reads a town it could not list as
+// drained.
+func newSeatProbe(env seatProbeEnv) update.SeatProbe {
+	return seatProbeFunc(func(ctx context.Context) ([]update.Seat, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		rigs, err := env.Rigs()
+		if err != nil {
+			return nil, fmt.Errorf("listing the town's rigs: %w", err)
+		}
+		var seats []update.Seat
+		for _, rig := range rigs {
+			names, err := env.Polecats(rig)
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return nil, fmt.Errorf("listing rig %s's polecats: %w", rig, err)
+			}
+			for _, name := range names {
+				seat, err := seatOf(env, rig, name)
+				if err != nil {
+					return nil, fmt.Errorf("reading %s/%s's heartbeat: %w", rig, name, err)
+				}
+				seats = append(seats, seat)
+			}
+		}
+		return seats, nil
+	})
+}
+
+// seatOf reads one polecat's seat. A session that wrote no heartbeat is not
+// working with a zero LastActive; the drain's freshness bound then decides.
+// A heartbeat that exists but cannot be read is an error — never "idle".
+func seatOf(env seatProbeEnv, rig, name string) (update.Seat, error) {
+	seat := update.Seat{Name: rig + "/" + name}
+	hb, err := env.Heartbeat(session.PolecatSessionName(env.Prefix(rig), name))
+	if err != nil {
+		return update.Seat{}, err
+	}
+	if hb == nil {
+		return seat, nil
+	}
+	seat.Working = hb.EffectiveState() == polecat.HeartbeatWorking
+	seat.LastActive = hb.Timestamp
+	return seat, nil
+}
+
+// polecatDirs lists the polecat worktree directory names under dir, skipping
+// files and dot entries as `gt polecat list` does. A symlinked worktree is a
+// worktree and is followed, so a town that links a polecat's directory in is
+// still counted. A symlink that leads nowhere cannot be a seat, and an error
+// reading it (unlike a plain file, which is not a seat either) is returned: a
+// drain may not read a directory it could not check as empty. A missing dir
+// keeps its fs.ErrNotExist, which newSeatProbe reads as a rig with no
+// polecats.
+func polecatDirs(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		isDir := entry.IsDir()
+		if !isDir && entry.Type()&fs.ModeSymlink != 0 {
+			info, err := os.Stat(filepath.Join(dir, entry.Name()))
+			if err != nil {
+				// The stat error is not wrapped: fs.ErrNotExist here would
+				// be read by newSeatProbe as "this rig has no polecats",
+				// and a link to a missing worktree is a seat the probe
+				// could not check, not an empty rig.
+				return nil, fmt.Errorf("following %s: %v", filepath.Join(dir, entry.Name()), err)
+			}
+			isDir = info.IsDir()
+		}
+		if !isDir {
+			continue
+		}
+		names = append(names, entry.Name())
+	}
+	return names, nil
+}
+
+// heartbeatReader returns the heartbeat reading for townRoot. A session that
+// wrote no heartbeat is (nil, nil); a file that exists but cannot be read or
+// parsed is an error. The path is polecat.HeartbeatPath, the one
+// TouchSessionHeartbeat writes, so the two readings cannot drift apart.
+func heartbeatReader(townRoot string) func(string) (*polecat.SessionHeartbeat, error) {
+	return func(sessionName string) (*polecat.SessionHeartbeat, error) {
+		path := polecat.HeartbeatPath(townRoot, sessionName)
+		data, err := os.ReadFile(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading %s: %w", path, err)
+		}
+		var hb polecat.SessionHeartbeat
+		if err := json.Unmarshal(data, &hb); err != nil {
+			return nil, fmt.Errorf("parsing %s: %w", path, err)
+		}
+		return &hb, nil
+	}
+}
+
+// seatProbeFunc adapts a function to update.SeatProbe.
+type seatProbeFunc func(ctx context.Context) ([]update.Seat, error)
+
+func (f seatProbeFunc) Seats(ctx context.Context) ([]update.Seat, error) {
+	return f(ctx)
+}
+
+// commandOutput runs cmd and returns its combined output. It is the process
+// seam realRunFunc runs on, so a test answers a command without starting one.
+type commandOutput func(cmd *exec.Cmd) ([]byte, error)
+
+// realRunFunc is the production update.RunFunc the installer wrapper uses. It
+// appends env to the process environment, so the wrapper's own entries reach
+// the command without the caller repeating os.Environ(). A nonzero exit is a
+// status reported with no error; a process that could not start, and one its
+// canceled context stopped, are errors.
+func realRunFunc() update.RunFunc {
+	return newRunFunc(combinedOutput)
+}
+
+// combinedOutput runs cmd and returns everything it wrote, stdout and stderr
+// interleaved.
+func combinedOutput(cmd *exec.Cmd) ([]byte, error) {
+	return cmd.CombinedOutput()
+}
+
+// commandWaitDelay is how long a command is given, after it exits or its
+// context is canceled, to release an output pipe a child still holds. Without
+// it, Wait blocks on the pipe after the command's own process is gone: a
+// canceled install whose build left a compiler or container client running
+// would never return the context's error, so the update would hang instead of
+// stopping. Ten seconds, as the land gate gives a step for the same reason.
+const commandWaitDelay = 10 * time.Second
+
+// buildCommand is the exec.Cmd newRunFunc runs: the caller's directory, the
+// process environment with env appended, and a WaitDelay so a canceled
+// command returns even when a child holds the output pipe.
+func buildCommand(ctx context.Context, dir string, env []string, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), env...)
+	cmd.WaitDelay = commandWaitDelay
+	return cmd
+}
+
+// newRunFunc returns a RunFunc over output. A command that ran is read by what
+// it exited with: zero is success, nonzero is a status carrying the output,
+// each even when its context was canceled after it exited. Only a command that
+// reached no status is an error — it could not start, or its context stopped
+// it. A canceled context returns the context's error, never a -1 exit with a
+// nil error.
+func newRunFunc(output commandOutput) update.RunFunc {
+	return func(ctx context.Context, dir string, env []string, name string, args ...string) (string, int, error) {
+		if err := ctx.Err(); err != nil {
+			return "", -1, err
+		}
+		out, err := output(buildCommand(ctx, dir, env, name, args...))
+		if err == nil {
+			return string(out), 0, nil
+		}
+		// A process that exited with a real status is read by it: the cancel
+		// landing just after the exit did not change what the command did. A
+		// process killed by its context carries no status (-1), so it falls
+		// through to the context's error.
+		var exitCoder interface{ ExitCode() int }
+		if errors.As(err, &exitCoder) && exitCoder.ExitCode() >= 0 {
+			return string(out), exitCoder.ExitCode(), nil
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return string(out), -1, ctxErr
+		}
+		return string(out), -1, err
+	}
+}
+
+// newExecInstaller returns the real installer the update job runs. It builds
+// and runs in the town's own gt source checkout, the root the daemon's rebuild
+// job uses, and hands the installer the polecat-image trim context the daemon
+// passes when the tier sweep runs off-host. An unreadable root or an invalid
+// sweep context is an error, never an installer that trims the wrong engine.
+func newExecInstaller(townRoot string, run update.RunFunc, cfg *daemon.DaemonPatrolConfig) (update.Installer, error) {
+	repoRoot, err := version.GetRepoRootForTown(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	extraEnv, err := daemon.PolecatImageTrimEnv(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &update.ExecInstaller{RepoRoot: repoRoot, Run: run, ExtraEnv: extraEnv}, nil
+}

@@ -68,6 +68,14 @@ func heartbeatFile(townRoot, sessionName string) string {
 	return filepath.Join(heartbeatsDir(townRoot), sessionName+".json")
 }
 
+// HeartbeatPath returns the path of sessionName's heartbeat file under
+// townRoot: the file TouchSessionHeartbeat writes and ReadSessionHeartbeat
+// reads. A caller that must tell a missing heartbeat from one it cannot read
+// uses it, because ReadSessionHeartbeat answers nil for both.
+func HeartbeatPath(townRoot, sessionName string) string {
+	return heartbeatFile(townRoot, sessionName)
+}
+
 // HeartbeatKeepAliveInterval is how often a long-running gt done stage renews
 // the session heartbeat (gt-azmw).
 //
