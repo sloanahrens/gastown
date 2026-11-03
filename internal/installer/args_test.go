@@ -52,13 +52,13 @@ func TestParse(t *testing.T) {
 			name:    "a bad source is refused after every argument is read",
 			args:    []string{"--source", "bogus", "--sha", "abc123"},
 			want:    Config{SHA: "abc123", Source: "bogus", SlotTimeout: "600", ImageFirst: true},
-			wantErr: "install-gt: --source must be manual, rebuild-gt or post-land",
+			wantErr: "install-gt: --source must be manual, rebuild-gt, post-land or gt-update",
 		},
 		{
 			name:    "a retired source is a bad source",
 			args:    []string{"--source", "post-merge"},
 			want:    Config{SHA: "origin/main", Source: "post-merge", SlotTimeout: "600", ImageFirst: true},
-			wantErr: "install-gt: --source must be manual, rebuild-gt or post-land",
+			wantErr: "install-gt: --source must be manual, rebuild-gt, post-land or gt-update",
 		},
 		{
 			name:    "an empty --sha names no commit",
@@ -116,6 +116,60 @@ func TestParse(t *testing.T) {
 			}
 			if gotErr != tc.wantErr {
 				t.Errorf("Parse(%q) error = %q, want %q", tc.args, gotErr, tc.wantErr)
+			}
+		})
+	}
+}
+
+// The gt update wrapper passes --source gt-update (internal/update's
+// installerSource), so the installer must accept the fourth source.
+func TestParseArgsAcceptsGtUpdateSource(t *testing.T) {
+	t.Parallel()
+	cfg, err := Parse([]string{"--source", "gt-update"})
+	if err != nil {
+		t.Fatalf("Parse(--source gt-update) error = %v, want no error", err)
+	}
+	if cfg.Source != "gt-update" {
+		t.Errorf("Parse(--source gt-update).Source = %q, want %q", cfg.Source, "gt-update")
+	}
+}
+
+// A caller that names an unknown source is told every one it may use, so the
+// gt update wrapper's value is visible in the refusal as well as in the accept
+// list.
+func TestParseArgsRefusalListsAllFourSources(t *testing.T) {
+	t.Parallel()
+	_, err := Parse([]string{"--source", "post-merge"})
+	if err == nil {
+		t.Fatal("Parse(--source post-merge) returned no error")
+	}
+	for _, want := range []string{"manual", "rebuild-gt", "post-land", "gt-update"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Parse(--source post-merge) error = %q, want it to name %q", err, want)
+		}
+	}
+}
+
+// The installer has no source-dependent branch: Source is only logged and
+// recorded (build.go, noop.go, receipt.go), and the rebuild-gt starvation and
+// post-land distinctions are caller-set --slot-role values, not branches on
+// Source. So "gt-update behaves like manual" is decided by Parse alone: every
+// accepted source yields the manual defaults apart from Source, and gt-update
+// is no exception.
+func TestGtUpdateSourceBehavesLikeManual(t *testing.T) {
+	t.Parallel()
+	manual := Config{SHA: "origin/main", Source: "manual", SlotTimeout: "600", ImageFirst: true}
+	for _, source := range []string{"manual", "rebuild-gt", "post-land", "gt-update"} {
+		t.Run(source, func(t *testing.T) {
+			t.Parallel()
+			got, err := Parse([]string{"--source", source})
+			if err != nil {
+				t.Fatalf("Parse(--source %s) error = %v, want no error", source, err)
+			}
+			want := manual
+			want.Source = source
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("Parse(--source %s) = %+v, want the manual defaults %+v", source, got, want)
 			}
 		})
 	}

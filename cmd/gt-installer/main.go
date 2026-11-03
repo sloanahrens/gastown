@@ -2,7 +2,7 @@
 // program and runs it, and the daemon's rebuild_gt job builds it with the same
 // Makefile target and runs it with --source rebuild-gt.
 //
-//	gt-installer [--sha REF] [--source manual|rebuild-gt|post-land]
+//	gt-installer [--sha REF] [--source manual|rebuild-gt|post-land|gt-update]
 //	             [--slot-role ROLE] [--slot-timeout SECONDS] [--dry-run]
 //	             [--no-image-first]
 //
