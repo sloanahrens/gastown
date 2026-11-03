@@ -849,13 +849,13 @@ type ScheduledMaintenanceConfig struct {
 	// above MaxArchiveLimit.
 	ArchiveEventsLimit *int `json:"archive_events_limit,omitempty"`
 
-	// ArchiveBudget is how long one maintenance cycle may keep taking batches
-	// of a database's commits and events after a limit-sized batch, so a
-	// database that is many batches behind catches up within one cycle
-	// (gt-o4sk8.1). A Go duration string, e.g. "10m". Empty means
-	// DefaultArchiveBudget; read it through ParseArchiveBudget, which refuses
-	// a value below MinArchiveBudget, one above MaxArchiveBudget, and one it
-	// cannot parse.
+	// ArchiveBudget bounds how long one maintenance cycle keeps taking archive
+	// batches: each database's commits and events keep going in limit-sized
+	// batches until nothing more is behind or this budget ends, so a database
+	// that is many batches behind catches up within one cycle (gt-o4sk8.1). A
+	// Go duration string, e.g. "10m". Empty means DefaultArchiveBudget; read it
+	// through ParseArchiveBudget, which refuses a value below MinArchiveBudget,
+	// one above MaxArchiveBudget, and one it cannot parse.
 	ArchiveBudget string `json:"archive_budget,omitempty"`
 
 	// Deprecated: have no effect. They configured the retired monitor,
@@ -892,9 +892,10 @@ const MaintenanceArchiveBudgetKey = "patrols.scheduled_maintenance.archive_budge
 // in the step's 30-minute timeout (gt-o4sk8.1).
 const DefaultArchiveBudget = 10 * time.Minute
 
-// MinArchiveBudget and MaxArchiveBudget bound archive_budget: a shorter budget
-// ends the step before a second batch can finish, and the archive step's own
-// timeout is 30 minutes, so a longer one could never be spent (gt-o4sk8.1).
+// MinArchiveBudget and MaxArchiveBudget bound archive_budget: a budget shorter
+// than one limit-sized batch can take would rarely allow a second one, and the
+// archive step's own timeout is 30 minutes, so a longer one could never be
+// spent (gt-o4sk8.1).
 const (
 	MinArchiveBudget = time.Minute
 	MaxArchiveBudget = 30 * time.Minute
