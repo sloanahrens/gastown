@@ -41,6 +41,47 @@ func record(workspace, end string, input, output, cacheCreation, cacheRead int64
 		`,"cache_read":` + strconv.FormatInt(cacheRead, 10) + `}}`
 }
 
+// countsWith is counts with one named token field at v and the rest zero.
+func countsWith(field string, v int64) export.Tokens {
+	var counts export.Tokens
+	switch field {
+	case "input":
+		counts.Input = v
+	case "output":
+		counts.Output = v
+	case "cache creation":
+		counts.CacheCreation = v
+	case "cache read":
+		counts.CacheRead = v
+	}
+	return counts
+}
+
+// recordOf is record with the four counter arguments taken from counts.
+func recordOf(workspace, end string, counts export.Tokens) string {
+	return record(workspace, end, counts.Input, counts.Output, counts.CacheCreation, counts.CacheRead)
+}
+
+// twoRecords builds a tree of two in-month records for workspace, read in the
+// order given. An empty workspace leaves both unattributed.
+func twoRecords(workspace string, first, second export.Tokens) fstest.MapFS {
+	return usageTree(map[string]string{
+		"a.json": recordOf(workspace, "2026-10-01T00:00:00Z", first),
+		"b.json": recordOf(workspace, "2026-10-01T00:00:00Z", second),
+	})
+}
+
+// paddedRecord is a valid in-month record of exactly size bytes: JSON permits
+// trailing whitespace, so the padding leaves it decodable.
+func paddedRecord(t *testing.T, workspace string, size int) string {
+	t.Helper()
+	base := record(workspace, "2026-10-15T12:00:00Z", 1, 2, 3, 4)
+	if len(base) > size {
+		t.Fatalf("record is %d bytes, larger than the %d it is padded to", len(base), size)
+	}
+	return base + strings.Repeat(" ", size-len(base))
+}
+
 func TestTokensSumsPerWorkspaceInMonth(t *testing.T) {
 	t.Parallel()
 	tree := usageTree(map[string]string{
@@ -115,22 +156,22 @@ func TestTokensUnreadableFileIsCountedNotFatal(t *testing.T) {
 	}
 }
 
-// failingReadFS fails ReadFile for one name and serves the rest.
-type failingReadFS struct {
+// failingOpenFS fails Open for one name and serves the rest.
+type failingOpenFS struct {
 	fstest.MapFS
 	bad string
 }
 
-func (f failingReadFS) ReadFile(name string) ([]byte, error) {
+func (f failingOpenFS) Open(name string) (fs.File, error) {
 	if name == f.bad {
 		return nil, errors.New("permission denied")
 	}
-	return f.MapFS.ReadFile(name)
+	return f.MapFS.Open(name)
 }
 
 func TestTokensReadFailureIsUnreadable(t *testing.T) {
 	t.Parallel()
-	tree := failingReadFS{
+	tree := failingOpenFS{
 		MapFS: usageTree(map[string]string{
 			"denied.json": record("ws-a", "2026-10-15T12:00:00Z", 1, 2, 3, 4),
 			"good.json":   record("ws-a", "2026-10-15T12:00:00Z", 5, 6, 7, 8),
@@ -152,7 +193,66 @@ func TestTokensReadFailureIsUnreadable(t *testing.T) {
 	}
 }
 
-func TestTokensRefusesUnreadableRecordsDir(t *testing.T) {
+// unreadableFile serves body and then fails Read, so a caller that ignored the
+// error would decode and count the record anyway.
+type unreadableFile struct {
+	body []byte
+}
+
+func (f *unreadableFile) Stat() (fs.FileInfo, error) { return nil, errors.New("no stat") }
+func (f *unreadableFile) Read(p []byte) (int, error) {
+	if len(f.body) == 0 {
+		return 0, errors.New("read failed")
+	}
+	n := copy(p, f.body)
+	f.body = f.body[n:]
+	return n, nil
+}
+func (f *unreadableFile) Close() error { return nil }
+
+// failingReadFS opens one name as a file that serves body and then fails Read,
+// and serves the rest from the tree, so a read error after a successful open
+// is driven.
+type failingReadFS struct {
+	fstest.MapFS
+	bad  string
+	body string
+}
+
+func (f failingReadFS) Open(name string) (fs.File, error) {
+	if name == f.bad {
+		return &unreadableFile{body: []byte(f.body)}, nil
+	}
+	return f.MapFS.Open(name)
+}
+
+func TestTokensReadErrorIsUnreadable(t *testing.T) {
+	t.Parallel()
+	broken := record("ws-a", "2026-10-15T12:00:00Z", 1, 2, 3, 4)
+	tree := failingReadFS{
+		MapFS: usageTree(map[string]string{
+			"broken-read.json": broken,
+			"good.json":        record("ws-a", "2026-10-15T12:00:00Z", 5, 6, 7, 8),
+		}),
+		bad:  path.Join(usageDir, "broken-read.json"),
+		body: broken,
+	}
+	got, err := Tokens(tree, october)
+	if err != nil {
+		t.Fatalf("Tokens: %v", err)
+	}
+	if !reflect.DeepEqual(got.Unreadable, []string{"broken-read.json"}) {
+		t.Fatalf("unreadable = %v, want [broken-read.json]", got.Unreadable)
+	}
+	want := []export.TokenCount{
+		{Workspace: "ws-a", Input: 5, Output: 6, CacheCreation: 7, CacheRead: 8},
+	}
+	if !reflect.DeepEqual(got.Workspaces, want) {
+		t.Fatalf("workspaces = %+v, want %+v", got.Workspaces, want)
+	}
+}
+
+func TestTokensRefusesMissingRecordsDir(t *testing.T) {
 	t.Parallel()
 	_, err := Tokens(fstest.MapFS{}, october)
 	if err == nil {
@@ -168,38 +268,79 @@ func TestTokensRefusesUnreadableRecordsDir(t *testing.T) {
 
 func TestTokensRefusesOverflow(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name  string
-		tree  fstest.MapFS
-		where string
+	destinations := []struct {
+		label     string
+		workspace string
+		where     string
 	}{
-		{
-			name: "one workspace",
-			tree: usageTree(map[string]string{
-				"a.json": record("ws-a", "2026-10-01T00:00:00Z", math.MaxInt64, 0, 0, 0),
-				"b.json": record("ws-a", "2026-10-01T00:00:00Z", 1, 0, 0, 0),
-			}),
-			where: `workspace "ws-a"`,
-		},
-		{
-			name: "unattributed",
-			tree: usageTree(map[string]string{
-				"a.json": record("", "2026-10-01T00:00:00Z", math.MaxInt64, 0, 0, 0),
-				"b.json": record("", "2026-10-01T00:00:00Z", 1, 0, 0, 0),
-			}),
-			where: "unattributed",
-		},
+		{label: "workspace", workspace: "ws-a", where: `workspace "ws-a"`},
+		{label: "unattributed", workspace: "", where: "unattributed"},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			_, err := Tokens(tc.tree, october)
-			if err == nil {
-				t.Fatal("Tokens accepted a token sum that overflows int64")
-			}
-			if !strings.Contains(err.Error(), tc.where) || !strings.Contains(err.Error(), "overflow") {
-				t.Fatalf("error = %q, want it to name %q and the overflow", err, tc.where)
-			}
-		})
+	fields := []string{"input", "output", "cache creation", "cache read"}
+	for _, dest := range destinations {
+		for _, field := range fields {
+			t.Run(dest.label+"/"+field, func(t *testing.T) {
+				t.Parallel()
+				tree := twoRecords(dest.workspace, countsWith(field, math.MaxInt64), countsWith(field, 1))
+				_, err := Tokens(tree, october)
+				if err == nil {
+					t.Fatalf("Tokens accepted a %s sum that overflows int64", field)
+				}
+				if !strings.Contains(err.Error(), field) || !strings.Contains(err.Error(), dest.where) || !strings.Contains(err.Error(), "overflow") {
+					t.Fatalf("error = %q, want it to name %q, %q and the overflow", err, field, dest.where)
+				}
+			})
+		}
+	}
+}
+
+func TestTokensRefusesNegativeCounts(t *testing.T) {
+	t.Parallel()
+	destinations := []struct {
+		label     string
+		workspace string
+		where     string
+	}{
+		{label: "workspace", workspace: "ws-a", where: `workspace "ws-a"`},
+		{label: "unattributed", workspace: "", where: "unattributed"},
+	}
+	fields := []string{"input", "output", "cache creation", "cache read"}
+	for _, dest := range destinations {
+		for _, field := range fields {
+			t.Run(dest.label+"/"+field, func(t *testing.T) {
+				t.Parallel()
+				tree := usageTree(map[string]string{
+					"a.json": recordOf(dest.workspace, "2026-10-15T12:00:00Z", countsWith(field, -1)),
+				})
+				_, err := Tokens(tree, october)
+				if err == nil {
+					t.Fatalf("Tokens accepted a negative %s count", field)
+				}
+				if !strings.Contains(err.Error(), field) || !strings.Contains(err.Error(), dest.where) || !strings.Contains(err.Error(), "negative") {
+					t.Fatalf("error = %q, want it to name %q, %q and the negative count", err, field, dest.where)
+				}
+			})
+		}
+	}
+}
+
+func TestTokensBoundsRecordSize(t *testing.T) {
+	t.Parallel()
+	tree := usageTree(map[string]string{
+		"at-bound.json":   paddedRecord(t, "ws-a", maxRecordSize),
+		"over-bound.json": paddedRecord(t, "ws-a", maxRecordSize+1),
+	})
+	got, err := Tokens(tree, october)
+	if err != nil {
+		t.Fatalf("Tokens: %v", err)
+	}
+	if !reflect.DeepEqual(got.Unreadable, []string{"over-bound.json"}) {
+		t.Fatalf("unreadable = %v, want [over-bound.json]", got.Unreadable)
+	}
+	want := []export.TokenCount{
+		{Workspace: "ws-a", Input: 1, Output: 2, CacheCreation: 3, CacheRead: 4},
+	}
+	if !reflect.DeepEqual(got.Workspaces, want) {
+		t.Fatalf("workspaces = %+v, want %+v", got.Workspaces, want)
 	}
 }
