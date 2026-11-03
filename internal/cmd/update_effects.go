@@ -147,7 +147,7 @@ type commandOutput func(cmd *exec.Cmd) ([]byte, error)
 // appends env to the process environment, so the wrapper's own entries reach
 // the command without the caller repeating os.Environ(). A nonzero exit is a
 // status reported with no error; a process that could not start, and one its
-// cancelled context stopped, are errors.
+// canceled context stopped, are errors.
 func realRunFunc() update.RunFunc {
 	return newRunFunc(combinedOutput)
 }
@@ -160,7 +160,7 @@ func combinedOutput(cmd *exec.Cmd) ([]byte, error) {
 
 // newRunFunc returns a RunFunc over output. A nonzero exit is a status
 // carrying the output. An error means the command reached no status: it could
-// not start, or the context stopped it. A cancelled context returns the
+// not start, or the context stopped it. A canceled context returns the
 // context's error, never a -1 exit with a nil error.
 func newRunFunc(output commandOutput) update.RunFunc {
 	return func(ctx context.Context, dir string, env []string, name string, args ...string) (string, int, error) {

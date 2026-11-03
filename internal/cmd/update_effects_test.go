@@ -183,7 +183,7 @@ func TestUpdateSeatProbeErrorsFailClosed(t *testing.T) {
 		}
 	})
 
-	t.Run("a cancelled context is returned", func(t *testing.T) {
+	t.Run("a canceled context is returned", func(t *testing.T) {
 		t.Parallel()
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
@@ -192,7 +192,7 @@ func TestUpdateSeatProbeErrorsFailClosed(t *testing.T) {
 			t.Errorf("Seats() error = %v, want context.Canceled", err)
 		}
 		if seats != nil {
-			t.Errorf("Seats() = %+v with a cancelled context, want no seats", seats)
+			t.Errorf("Seats() = %+v with a canceled context, want no seats", seats)
 		}
 	})
 }
@@ -392,13 +392,13 @@ func TestRealRunFuncExitCodes(t *testing.T) {
 	})
 }
 
-// TestRealRunFuncReportsCancellation pins what a cancelled context yields: the
+// TestRealRunFuncReportsCancellation pins what a canceled context yields: the
 // context's error, never a -1 exit code that reads as a finished command.
 func TestRealRunFuncReportsCancellation(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
-	t.Run("an already cancelled context starts nothing", func(t *testing.T) {
+	t.Run("an already canceled context starts nothing", func(t *testing.T) {
 		t.Parallel()
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
@@ -410,10 +410,10 @@ func TestRealRunFuncReportsCancellation(t *testing.T) {
 
 		_, _, err := run(ctx, dir, nil, "installer")
 		if !errors.Is(err, context.Canceled) {
-			t.Errorf("run(cancelled context) error = %v, want context.Canceled", err)
+			t.Errorf("run(canceled context) error = %v, want context.Canceled", err)
 		}
 		if started {
-			t.Error("run(cancelled context) started a command, want none")
+			t.Error("run(canceled context) started a command, want none")
 		}
 	})
 
