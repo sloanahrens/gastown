@@ -1039,13 +1039,19 @@ func runSpecLint(cmd *cobra.Command, args []string) error {
 // specForLint reads beadID for gt spec lint with the target inventory the
 // lint's path check reads (gt-7t1im). A bead that did not read is linted on its
 // read failure alone, so no inventory is asked for it.
+//
+// A bead with a Files section also gets the paths its open transitive blockers
+// create, so a Files "modify:" path an open blocker adds passes the check
+// (gt-hgt9j.12). A blocker the walk cannot read returns its error here, and the
+// lint refuses the bead on it: a graph read as empty would refuse the path.
 func specForLint(townRoot, beadID string, show func(string) (specdispatch.Spec, error), open treeOpener) (specdispatch.Spec, error) {
 	spec, err := show(beadID)
 	if err != nil {
 		return spec, err
 	}
 	spec.Target = specLintTarget(townRoot, beadID, open)
-	return spec, nil
+	read := specBlockerRead(nil, func(id string) (*beads.Issue, error) { return showBead(townRoot, id) })
+	return specWithBlockerCreates(spec, read, beadID)
 }
 
 // specLintTarget is the target-branch inventory gt spec lint checks beadID's
@@ -1648,6 +1654,13 @@ type specDispatchEnv struct {
 	// lint's path check (gt-7t1im). Nil asks nothing, which is what a test of
 	// some other hold wants; the tick itself always wires it.
 	Target func(rig string) *specdispatch.TargetTree
+	// BlockerRead reads a bead's spec and the ids of its open blockers, the
+	// walk specdispatch.Spec.BlockerCreates is filled from: the paths an open
+	// transitive blocker creates pass the lint's Files check (gt-hgt9j.12).
+	// Nil asks nothing; the lint then refuses a Files path no blocker is known
+	// to create, which holds the bead rather than passing it on a graph that
+	// was never read.
+	BlockerRead func(beadID string) (specdispatch.Spec, []string, error)
 	// Claims returns the target claims of the other beads in a candidate's
 	// rig: the test files and test identifiers their own text names, with the
 	// state that decides whether each holds the candidate
@@ -1708,6 +1721,17 @@ func (e specDispatchEnv) target(rig string) *specdispatch.TargetTree {
 		return nil
 	}
 	return e.Target(rig)
+}
+
+// withBlockerCreates fills full.BlockerCreates from the bead's open transitive
+// blockers (gt-hgt9j.12). A tick built without the reader leaves the set
+// unread, so a Files path no blocker is known to create is refused rather than
+// passed on a graph that was never walked.
+func (e specDispatchEnv) withBlockerCreates(full specdispatch.Spec) (specdispatch.Spec, error) {
+	if e.BlockerRead == nil {
+		return full, nil
+	}
+	return specWithBlockerCreates(full, e.BlockerRead, full.ID)
 }
 
 // overrunThreshold asks the env for rig's review threshold. A tick built with no
@@ -1944,6 +1968,17 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			verdict = remembered.Shape
 		} else {
 			full.Target = env.target(c.Rig)
+			// A Files path an open blocker creates passes the path check
+			// (gt-hgt9j.12). A blocker the walk could not read leaves the
+			// check unanswered, so the bead is held for a later tick with the
+			// error on its line, and no verdict is recorded: the read failure
+			// is the tick's, not the bead's shape.
+			walked, err := env.withBlockerCreates(full)
+			if err != nil {
+				report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %v", id, err)})
+				continue
+			}
+			full = walked
 			verdict = specdispatch.Lint(full, env.Template)
 			env.Verdicts.record(c, specCandidateVerdict{Eligible: true, Shaped: true, Shape: verdict})
 		}
@@ -3144,6 +3179,9 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 			return land.OMThreshold(filepath.Join(townRoot, rig))
 		},
 		Target: targetOf,
+		// A blocker the walk reads is served from this tick's ledger when the
+		// candidate's own row already read it (gt-hgt9j.12).
+		BlockerRead: specBlockerRead(reads, func(id string) (*beads.Issue, error) { return showBead(townRoot, id) }),
 	}
 	report := runSpecDispatchCycle(env)
 	report.Notices = append(report.Notices, slingTraces.notices()...)
