@@ -3,13 +3,21 @@ package specdispatch
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 )
 
-// constraintsField is the section the path check reads and the field its
-// refusal names. A path the Goal introduces is a file the spec adds, so the
-// check takes the files it checks from Constraints alone (gt-7t1im).
-const constraintsField = "## Constraints"
+const (
+	// constraintsField is the section the path check reads when a bead has no
+	// Files section, and the field its refusal names. A path the Goal
+	// introduces is a file the spec adds, so the check takes the files it
+	// checks from Constraints alone (gt-7t1im).
+	constraintsField = "## Constraints"
+	// filesField is the optional section a bead may use to declare what it does
+	// with each repo file. When it is present it is the path check's only
+	// source, and a refusal it earns names it (gt-hgt9j.10).
+	filesField = "## Files"
+)
 
 // TargetTree is the file inventory of the branch a spec's work lands on, read
 // by the caller like Children: the lint checks the repo files a bead's
@@ -170,13 +178,22 @@ func targetFixHint(path string, several bool) string {
 	return "To fix, " + fix
 }
 
-// targetRefusal is the shape failure a Constraints body earns against the
-// target branch: every file the spec changes and the branch does not hold is
-// named with the rewrite that passes, or the error that stopped the inventory
-// being read is. A bead naming no file the branch must already hold passes. A
-// caller that supplied no inventory is refused rather than passed: a check
-// that did not run is not a check that passed (gt-7t1im, gt-hgt9j.1).
-func targetRefusal(sections map[string]string, target *TargetTree) (Refusal, bool) {
+// targetRefusal is the shape failure a bead earns against the target branch.
+// A bead with a Files section is checked from that section alone, whatever its
+// Constraints say: every modify or read path must exist on the branch, a
+// create path need not, and a section that does not parse is refused with the
+// parse error (gt-hgt9j.10). A bead without the section keeps the cue grammar
+// its Constraints body is read with (gt-7t1im). A caller that supplied no
+// inventory is refused rather than passed: a check that did not run is not a
+// check that passed (gt-7t1im, gt-hgt9j.1).
+func targetRefusal(description string, sections map[string]string, target *TargetTree) (Refusal, bool) {
+	block, present, err := ParseFiles(description)
+	if present {
+		if err != nil {
+			return Refusal{Field: filesField, Reason: err.Error()}, true
+		}
+		return filesTargetRefusal(block, target)
+	}
 	paths := constraintFilePaths(sections["constraints"])
 	if len(paths) == 0 {
 		return Refusal{}, false
@@ -211,4 +228,49 @@ func targetRefusal(sections map[string]string, target *TargetTree) (Refusal, boo
 		branch = "the target branch"
 	}
 	return Refusal{Field: constraintsField, Reason: fmt.Sprintf("names %s, absent from %s. %s", strings.Join(missing, ", "), branch, targetFixHint(missing[0], len(missing) > 1))}, true
+}
+
+// filesTargetRefusal checks a bead's Files entries against the target branch:
+// a modify or read path the branch does not hold is refused with its verb and
+// path named, and an inventory that could not be read refuses them too. A
+// create path is the bead's own addition and needs nothing on the branch.
+func filesTargetRefusal(block FilesBlock, target *TargetTree) (Refusal, bool) {
+	var checked []string
+	for _, e := range block.Entries {
+		if e.Verb != FileModify && e.Verb != FileRead {
+			continue
+		}
+		if named := string(e.Verb) + ": " + e.Path; !slices.Contains(checked, named) {
+			checked = append(checked, named)
+		}
+	}
+	if len(checked) == 0 {
+		return Refusal{}, false
+	}
+	if target == nil {
+		return Refusal{Field: filesField, Reason: fmt.Sprintf("cannot check %s: no target inventory", strings.Join(checked, ", "))}, true
+	}
+	if target.Err != "" {
+		return Refusal{Field: filesField, Reason: fmt.Sprintf("cannot check %s: %s", strings.Join(checked, ", "), target.Err)}, true
+	}
+	var missing []string
+	for _, e := range block.Entries {
+		if e.Verb != FileModify && e.Verb != FileRead {
+			continue
+		}
+		if _, ok := target.Files[e.Path]; ok {
+			continue
+		}
+		if named := string(e.Verb) + ": " + e.Path; !slices.Contains(missing, named) {
+			missing = append(missing, named)
+		}
+	}
+	if len(missing) == 0 {
+		return Refusal{}, false
+	}
+	branch := target.Branch
+	if branch == "" {
+		branch = "the target branch"
+	}
+	return Refusal{Field: filesField, Reason: fmt.Sprintf("names %s, absent from %s", strings.Join(missing, ", "), branch)}, true
 }

@@ -22,6 +22,14 @@ func specNaming(goal, body string) Spec {
 	return s
 }
 
+// specWithFiles is specNaming with a Files section carrying files, placed
+// before "## Out of scope".
+func specWithFiles(goal, body, files string) Spec {
+	s := specNaming(goal, body)
+	s.Description = strings.Replace(s.Description, "## Out of scope", "## Files\n"+files+"\n\n## Out of scope", 1)
+	return s
+}
+
 // The check reads the files it checks from the Constraints section, and passes
 // any token it cannot read as a repo file: a directory, a symbol, a glob and a
 // URL are not files to change. It also passes a path the spec's own words
@@ -403,5 +411,160 @@ func TestLintShapeAsksNoPathQuestion(t *testing.T) {
 	}
 	if got := Lint(s, defaultTemplate()); got.Clean() {
 		t.Errorf("Lint passed a bead it had no inventory to check: %s", got.Line(s.ID))
+	}
+}
+
+// A bead with a Files section is checked from that section alone: a path its
+// Constraints names, with no cue and absent from the branch, is not refused
+// when the Files section does not list it (gt-hgt9j.10).
+func TestPathCheckUsesFilesWhenPresent(t *testing.T) {
+	t.Parallel()
+	s := specWithFiles("A thing exists.", "Change internal/cmd/bird.go.", "create: internal/cli/foo.go")
+	s.Target = targetOf("internal/cmd/spec.go")
+	if v := Lint(s, defaultTemplate()); !v.Clean() {
+		t.Fatalf("a bead with a Files section was refused for a Constraints path it does not list: %s", v.Line(s.ID))
+	}
+}
+
+// A read path a bead declares must exist on the branch it lands on; a refusal
+// names the section, the verb and the path (gt-hgt9j.10).
+func TestPathCheckFilesReadMustExist(t *testing.T) {
+	t.Parallel()
+	s := specWithFiles("A thing exists.", "Go only.", "read: internal/cmd/bird.go")
+	s.Target = targetOf("internal/cmd/spec.go")
+	v := Lint(s, defaultTemplate())
+	if v.Route != RouteRefuse || v.Field != "## Files" {
+		t.Fatalf("Lint = %s (%s), want a refusal naming ## Files: %s", v.Route, v.Field, v.Line(s.ID))
+	}
+	for _, want := range []string{"read: internal/cmd/bird.go", "absent from main"} {
+		if !strings.Contains(v.Reason, want) {
+			t.Errorf("Reason = %q, want %q", v.Reason, want)
+		}
+	}
+	held := specWithFiles("A thing exists.", "Go only.", "read: internal/cmd/spec.go")
+	held.Target = targetOf("internal/cmd/spec.go")
+	if got := Lint(held, defaultTemplate()); !got.Clean() {
+		t.Errorf("a read path the branch holds was refused: %s", got.Line(held.ID))
+	}
+}
+
+// A modify path a bead declares must exist on the branch it lands on; a
+// refusal names the section, the verb and the path (gt-hgt9j.10).
+func TestPathCheckFilesModifyMustExist(t *testing.T) {
+	t.Parallel()
+	s := specWithFiles("A thing exists.", "Go only.", "modify: internal/cmd/bird.go")
+	s.Target = targetOf("internal/cmd/spec.go")
+	v := Lint(s, defaultTemplate())
+	if v.Route != RouteRefuse || v.Field != "## Files" {
+		t.Fatalf("Lint = %s (%s), want a refusal naming ## Files: %s", v.Route, v.Field, v.Line(s.ID))
+	}
+	for _, want := range []string{"modify: internal/cmd/bird.go", "absent from main"} {
+		if !strings.Contains(v.Reason, want) {
+			t.Errorf("Reason = %q, want %q", v.Reason, want)
+		}
+	}
+	held := specWithFiles("A thing exists.", "Go only.", "modify: internal/cmd/spec.go")
+	held.Target = targetOf("internal/cmd/spec.go")
+	if got := Lint(held, defaultTemplate()); !got.Clean() {
+		t.Errorf("a modify path the branch holds was refused: %s", got.Line(held.ID))
+	}
+}
+
+// A create path is the bead's own addition, so the branch need not hold it
+// (gt-hgt9j.10).
+func TestPathCheckFilesCreateNeedsNothing(t *testing.T) {
+	t.Parallel()
+	s := specWithFiles("A thing exists.", "Go only.", "create: internal/cli/foo.go")
+	s.Target = targetOf("internal/cmd/spec.go")
+	if v := Lint(s, defaultTemplate()); !v.Clean() {
+		t.Fatalf("a create path absent from the branch was refused: %s", v.Line(s.ID))
+	}
+}
+
+// A bead without a Files section keeps the cue grammar unchanged: an
+// uncued path absent from the branch is still refused against ## Constraints,
+// and the introduce and reference cues still pass (gt-hgt9j.10).
+func TestPathCheckWithoutFilesUnchanged(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		body    string
+		missing string // "" is a clean lint
+	}{
+		{name: "an uncued change is refused", body: "Change internal/cmd/bird.go.", missing: "internal/cmd/bird.go"},
+		{name: "an introduced file passes", body: "Add internal/cli/foo.go.", missing: ""},
+		{name: "a reference passes", body: "Keep it as in docs/guides/spec-dispatcher.md.", missing: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := specNaming("A thing exists.", tc.body)
+			s.Target = targetOf("internal/cmd/spec.go")
+			v := Lint(s, defaultTemplate())
+			if tc.missing == "" {
+				if !v.Clean() {
+					t.Fatalf("Lint = %s, want dispatch: %s", v.Route, v.Line(s.ID))
+				}
+				return
+			}
+			if v.Route != RouteRefuse || v.Field != "## Constraints" {
+				t.Fatalf("Lint = %s (%s), want a refusal naming ## Constraints: %s", v.Route, v.Field, v.Line(s.ID))
+			}
+			if !strings.Contains(v.Reason, tc.missing) {
+				t.Errorf("Reason = %q, want the path %q named", v.Reason, tc.missing)
+			}
+		})
+	}
+}
+
+// A Files section that does not parse is refused with the parse error, which
+// names the line and its text (gt-hgt9j.10).
+func TestPathCheckFilesMalformedRefused(t *testing.T) {
+	t.Parallel()
+	s := specWithFiles("A thing exists.", "Go only.", "create: internal/cli/foo.go\nnot a verb line")
+	s.Target = targetOf("internal/cmd/spec.go")
+	v := Lint(s, defaultTemplate())
+	if v.Route != RouteRefuse || v.Field != "## Files" {
+		t.Fatalf("Lint = %s (%s), want a refusal naming ## Files: %s", v.Route, v.Field, v.Line(s.ID))
+	}
+	for _, want := range []string{"line 2", "not a verb line"} {
+		if !strings.Contains(v.Reason, want) {
+			t.Errorf("Reason = %q, want %q", v.Reason, want)
+		}
+	}
+}
+
+// A modify or read path with no inventory behind it stays refused: a check
+// that did not run is not a check that passed. A bead whose Files section only
+// creates paths has nothing to check, so a missing inventory does not hold it
+// (gt-hgt9j.10).
+func TestPathCheckFilesNeedAnInventory(t *testing.T) {
+	t.Parallel()
+	named := specWithFiles("A thing exists.", "Go only.", "modify: internal/cmd/spec.go")
+	v := Lint(named, defaultTemplate())
+	if v.Route != RouteRefuse || v.Field != "## Files" {
+		t.Fatalf("Lint = %s (%s), want a refusal naming ## Files: %s", v.Route, v.Field, v.Line(named.ID))
+	}
+	for _, want := range []string{"modify: internal/cmd/spec.go", "no target inventory"} {
+		if !strings.Contains(v.Reason, want) {
+			t.Errorf("Reason = %q, want %q", v.Reason, want)
+		}
+	}
+
+	failed := specWithFiles("A thing exists.", "Go only.", "read: internal/cmd/spec.go")
+	failed.Target = &TargetTree{Branch: "main", Err: "no git repo under /town/gastown"}
+	v = Lint(failed, defaultTemplate())
+	if v.Route != RouteRefuse || v.Field != "## Files" {
+		t.Fatalf("Lint = %s (%s), want a refusal naming ## Files: %s", v.Route, v.Field, v.Line(failed.ID))
+	}
+	for _, want := range []string{"read: internal/cmd/spec.go", "no git repo under /town/gastown"} {
+		if !strings.Contains(v.Reason, want) {
+			t.Errorf("Reason = %q, want %q", v.Reason, want)
+		}
+	}
+
+	created := specWithFiles("A thing exists.", "Go only.", "create: internal/cli/foo.go")
+	if got := Lint(created, defaultTemplate()); !got.Clean() {
+		t.Errorf("a create-only bead was held for a missing inventory: %s", got.Line(created.ID))
 	}
 }
