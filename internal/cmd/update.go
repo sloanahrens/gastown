@@ -286,15 +286,22 @@ func updateOutcomeExitCode(outcome update.Outcome) int {
 // the outcome, or the whole state as JSON when asked.
 func writeUpdateResult(w io.Writer, st update.State, asJSON bool) error {
 	if asJSON {
-		data, err := json.MarshalIndent(st, "", "  ")
-		if err != nil {
-			return fmt.Errorf("encoding the update state: %w", err)
-		}
-		_, err = fmt.Fprintln(w, string(data))
-		return err
+		return writeUpdateJSON(w, st)
 	}
 	writeUpdateReport(w, st)
 	return nil
+}
+
+// writeUpdateJSON writes v as indented JSON. A value the JSON package cannot
+// marshal fails it; a run's State never does, but the error is returned rather
+// than dropped.
+func writeUpdateJSON(w io.Writer, v any) error {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encoding the update state: %w", err)
+	}
+	_, err = fmt.Fprintln(w, string(data))
+	return err
 }
 
 // writeUpdateReport is the text form: the plan the run started with, one line
@@ -378,11 +385,7 @@ func realUpdateDeps(townRoot string) (update.Deps, error) {
 	if err != nil {
 		return update.Deps{}, err
 	}
-	patrol, err := loadUpdatePatrolConfig(townRoot)
-	if err != nil {
-		return update.Deps{}, err
-	}
-	installer, err := newExecInstaller(townRoot, realRunFunc(), patrol)
+	installer, err := realUpdateInstaller(townRoot)
 	if err != nil {
 		return update.Deps{}, err
 	}
@@ -407,6 +410,17 @@ func realUpdateDeps(townRoot string) (update.Deps, error) {
 		NewRunID: newUpdateRunID,
 		Log:      os.Stderr,
 	}, nil
+}
+
+// realUpdateInstaller builds the installer over the town's daemon settings. A
+// settings file that does not parse is returned rather than ignored, so the
+// trim environment never silently covers the wrong engine.
+func realUpdateInstaller(townRoot string) (update.Installer, error) {
+	patrol, err := loadUpdatePatrolConfig(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	return newExecInstaller(townRoot, realRunFunc(), patrol)
 }
 
 // loadUpdatePatrolConfig reads the daemon settings the installer's image-trim
@@ -504,16 +518,40 @@ func (updateMaintFiles) CreateExclusive(path string, data []byte, mode os.FileMo
 
 func (updateMaintFiles) Remove(path string) error { return os.Remove(path) }
 
+// exclusiveFile is the handle an exclusive create writes and closes. A test
+// supplies a fake so each write and close failure is driven without a broken
+// file system.
+type exclusiveFile interface {
+	Write([]byte) (int, error)
+	Close() error
+}
+
+// exclusiveOpener opens path exclusively for writing.
+type exclusiveOpener func(path string, flag int, mode os.FileMode) (exclusiveFile, error)
+
 // createExclusiveFile creates path with data, refusing an existing file so two
-// racing runs cannot both own it. A write or close failure is returned with
-// the close's error kept, since a failed close can hide a failed write.
+// racing runs cannot both own it.
 func createExclusiveFile(path string, data []byte, mode os.FileMode) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	return writeExclusive(osOpenExclusive, path, data, mode)
+}
+
+// osOpenExclusive is the real opener; O_EXCL makes the file system decide
+// which of two racing runs owns the path.
+func osOpenExclusive(path string, flag int, mode os.FileMode) (exclusiveFile, error) {
+	return os.OpenFile(path, flag, mode)
+}
+
+// writeExclusive creates path through open and writes data to it. A write or
+// close failure is returned with the close's error kept, since a failed close
+// can hide a failed write.
+func writeExclusive(open exclusiveOpener, path string, data []byte, mode os.FileMode) error {
+	f, err := open(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
 		return err
 	}
 	if _, err := f.Write(data); err != nil {
-		if closeErr := f.Close(); closeErr != nil {
+		closeErr := f.Close()
+		if closeErr != nil {
 			return fmt.Errorf("write %s: %w (close file: %v)", path, err, closeErr)
 		}
 		return fmt.Errorf("write %s: %w", path, err)

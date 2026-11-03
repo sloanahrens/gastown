@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/update"
 )
 
@@ -125,6 +127,18 @@ func TestUpdateFlagsValidateStepNames(t *testing.T) {
 		if !strings.Contains(stderr, string(step)) {
 			t.Errorf("stderr does not list the valid step %q:\n%s", step, stderr)
 		}
+	}
+
+	rec.calls = 0
+	code, _, stderr = runUpdateCommand(t, context.Background(), seams, "--skip", "frobnicate")
+	if code != 1 {
+		t.Fatalf("exit = %d for an unknown skipped step, want 1", code)
+	}
+	if rec.calls != 0 {
+		t.Errorf("Run called %d times for a refused --skip, want 0", rec.calls)
+	}
+	if !strings.Contains(stderr, `unknown update step "frobnicate"`) {
+		t.Errorf("stderr does not name the unknown skipped step:\n%s", stderr)
 	}
 }
 
@@ -428,4 +442,181 @@ func TestUpdateHeartbeatIgnoresNoCurrentAndLogsOtherWrites(t *testing.T) {
 			t.Errorf("heartbeat failure not printed:\n%s", buf.String())
 		}
 	})
+}
+
+// TestUpdateLockErrorExitsFailed proves a lock that cannot be taken at all
+// (rather than one another run holds) ends as a failed run before the
+// orchestrator starts.
+func TestUpdateLockErrorExitsFailed(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	// A regular file where the runtime directory belongs makes creating the
+	// update directory fail.
+	if err := os.WriteFile(filepath.Join(townRoot, ".runtime"), nil, 0o600); err != nil {
+		t.Fatalf("blocking the runtime directory: %v", err)
+	}
+	rec := &recordingUpdateRun{state: update.State{Outcome: update.OutcomeOK}}
+	seams := updateTestSeams(townRoot, updateTestDeps(t), rec.call)
+
+	code, _, stderr := runUpdateCommand(t, context.Background(), seams)
+	if code != 1 {
+		t.Fatalf("exit = %d when the lock cannot be taken, want 1; stderr:\n%s", code, stderr)
+	}
+	if rec.calls != 0 {
+		t.Errorf("Run called %d times, want 0", rec.calls)
+	}
+	if !strings.Contains(stderr, "taking the update lock") {
+		t.Errorf("stderr does not name the lock failure:\n%s", stderr)
+	}
+}
+
+// failingUpdateWriter is the writer that reports the JSON report's write
+// failure.
+type failingUpdateWriter struct{}
+
+func (failingUpdateWriter) Write([]byte) (int, error) { return 0, errors.New("disk full") }
+
+// TestUpdateWriteJSONReportsItsFailures proves the JSON report returns the
+// encoding and the write failure rather than printing a partial record.
+func TestUpdateWriteJSONReportsItsFailures(t *testing.T) {
+	t.Parallel()
+	t.Run("encoding", func(t *testing.T) {
+		err := writeUpdateJSON(&bytes.Buffer{}, func() {})
+		if err == nil || !strings.Contains(err.Error(), "encoding the update state") {
+			t.Fatalf("writeUpdateJSON(func) = %v, want the encoding error", err)
+		}
+	})
+	t.Run("write", func(t *testing.T) {
+		err := writeUpdateJSON(failingUpdateWriter{}, update.State{V: 1})
+		if err == nil || !strings.Contains(err.Error(), "disk full") {
+			t.Fatalf("writeUpdateJSON(failing writer) = %v, want the write error", err)
+		}
+	})
+}
+
+// TestUpdateRealDepsBuildsTheTown proves the production factory refuses a town
+// with no source checkout or an unparseable daemon config, and wires the real
+// effects for a town that has its checkout.
+func TestUpdateRealDepsBuildsTheTown(t *testing.T) {
+	t.Parallel()
+	t.Run("no source checkout", func(t *testing.T) {
+		if _, err := realUpdateDeps(t.TempDir()); err == nil {
+			t.Fatal("realUpdateDeps(town with no source) = nil error, want a refusal")
+		}
+	})
+
+	t.Run("unparseable daemon config", func(t *testing.T) {
+		townRoot := townWithGtSource(t)
+		path := config.DaemonPatrolConfigPath(townRoot)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("creating the config directory: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+			t.Fatalf("writing the malformed config: %v", err)
+		}
+		if _, err := realUpdateDeps(townRoot); err == nil {
+			t.Fatal("realUpdateDeps(unparseable config) = nil error, want a refusal")
+		}
+	})
+
+	t.Run("wired", func(t *testing.T) {
+		townRoot := townWithGtSource(t)
+		deps, err := realUpdateDeps(townRoot)
+		if err != nil {
+			t.Fatalf("realUpdateDeps() error = %v", err)
+		}
+		if deps.Store == nil || deps.Store.Dir != update.Dir(townRoot) {
+			t.Errorf("Store = %+v, want Dir %q", deps.Store, update.Dir(townRoot))
+		}
+		if deps.Probes == nil || deps.Seats == nil || deps.Hold == nil || deps.Installer == nil ||
+			deps.Maint == nil || deps.Verify == nil || deps.Clock == nil || deps.Sleep == nil || deps.NewRunID == nil {
+			t.Fatalf("realUpdateDeps() left a nil effect: %+v", deps)
+		}
+		if deps.Log == nil {
+			t.Error("Log is nil; the run's plan and notes would be discarded")
+		}
+		if id := deps.NewRunID(); id == "" {
+			t.Error("NewRunID() = \"\", want a run id")
+		}
+		if deps.Clock.Now().IsZero() {
+			t.Error("Clock.Now() is zero, want the real time")
+		}
+	})
+}
+
+// TestUpdateExclusiveFileRefusesAnExistingPath proves the os-backed exclusive
+// create leaves an existing file alone, and the os-backed Stat reports a
+// missing path as such.
+func TestUpdateExclusiveFileRefusesAnExistingPath(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hold")
+	if err := createExclusiveFile(path, []byte("first"), 0o600); err != nil {
+		t.Fatalf("createExclusiveFile() error = %v", err)
+	}
+	if err := createExclusiveFile(path, []byte("second"), 0o600); !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("createExclusiveFile(existing) = %v, want fs.ErrExist", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the file: %v", err)
+	}
+	if string(data) != "first" {
+		t.Errorf("file = %q, want the first write kept", data)
+	}
+
+	if err := (updateFiles{}).Stat(path); err != nil {
+		t.Errorf("Stat(existing) = %v, want nil", err)
+	}
+	if err := (updateFiles{}).Stat(filepath.Join(dir, "absent")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Stat(missing) = %v, want fs.ErrNotExist", err)
+	}
+}
+
+// fakeExclusiveFile is exclusiveFile with chosen write and close results.
+type fakeExclusiveFile struct {
+	writeErr, closeErr error
+	closed             int
+}
+
+func (f *fakeExclusiveFile) Write([]byte) (int, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
+	return 0, nil
+}
+
+func (f *fakeExclusiveFile) Close() error {
+	f.closed++
+	return f.closeErr
+}
+
+// TestUpdateWriteExclusiveReportsWriteAndCloseFailures proves each failure of
+// the exclusive write is returned, and that the handle is closed even when
+// the write failed.
+func TestUpdateWriteExclusiveReportsWriteAndCloseFailures(t *testing.T) {
+	t.Parallel()
+	writeErr := errors.New("write refused")
+	closeErr := errors.New("close refused")
+	cases := []struct {
+		name string
+		f    *fakeExclusiveFile
+		want string
+	}{
+		{"write", &fakeExclusiveFile{writeErr: writeErr}, writeErr.Error()},
+		{"write and close", &fakeExclusiveFile{writeErr: writeErr, closeErr: closeErr}, "close file: close refused"},
+		{"close", &fakeExclusiveFile{closeErr: closeErr}, closeErr.Error()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			open := func(string, int, os.FileMode) (exclusiveFile, error) { return tc.f, nil }
+			err := writeExclusive(open, "path", []byte("data"), 0o600)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("writeExclusive() = %v, want %q", err, tc.want)
+			}
+			if tc.f.closed != 1 {
+				t.Errorf("handle closed %d times, want 1", tc.f.closed)
+			}
+		})
+	}
 }
