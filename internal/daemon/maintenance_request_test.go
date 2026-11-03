@@ -1086,3 +1086,29 @@ func TestMaintenanceRequestDropKeepsAReplacementRequest(t *testing.T) {
 		}
 	})
 }
+
+// A result file the busy tick cannot read or parse could hold the running
+// cycle's answer, so nothing is written over it and the failure is logged.
+func TestMaintenanceRequestBusyTickLeavesAnUnparseableResult(t *testing.T) {
+	t.Parallel()
+	d, _, logs := requestDaemonWithLogs(t, outsideRequestNow)
+	d.maintenanceGCRunning.Store(true)
+	d.maintenanceGCRequestRunID.Store("run-own")
+	path := writeRequestFile(t, d, "run-own", outsideRequestNow)
+	resultFile := resultPath(update.Dir(d.config.TownRoot))
+	if err := os.WriteFile(resultFile, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	d.runScheduledMaintenance()
+
+	if got, err := os.ReadFile(resultFile); err != nil || string(got) != "{not json" {
+		t.Errorf("result file = %q, %v; want it left exactly as it was", got, err)
+	}
+	if !strings.Contains(logs.String(), "cannot answer request for run run-own: reading the result") {
+		t.Errorf("the unreadable result was not logged:\n%s", logs.String())
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("the request was removed although the result could not be read: %v", err)
+	}
+}
