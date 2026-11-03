@@ -1032,7 +1032,7 @@ func runSpecLint(cmd *cobra.Command, args []string) error {
 		path = specTemplatePath(loadSpecDispatchConfig(townRoot))
 	}
 	spec, err := specForLint(townRoot, args[0], func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) }, openRigTree)
-	return specLint(cmd.OutOrStdout(), cmd.ErrOrStderr(), args[0], spec, err, path, hmHintSource(nil), specLintJSON)
+	return runSpecLintAt(cmd.OutOrStdout(), cmd.ErrOrStderr(), townRoot, args[0], spec, err, path, hmHintSource(nil), specLintJSON, time.Now())
 }
 
 // specForLint reads beadID for gt spec lint with the target inventory the
@@ -1256,11 +1256,26 @@ func writeSpecHints(w io.Writer, hits []hmhints.Hit) {
 // form and carried in the report's advice array with --json; like the hint,
 // they change neither the verdict nor the exit code.
 func specLint(out, errOut io.Writer, beadID string, spec specdispatch.Spec, showErr error, templatePath string, hint specHintSource, asJSON bool) error {
+	_, err := specLintVerdict(out, errOut, beadID, spec, showErr, templatePath, hint, asJSON)
+	return err
+}
+
+// specLintVerdict is specLint, also returning the verdict it printed (a
+// refusal naming "bead" when the bead did not read) so a caller can record it
+// (gt-hgt9j.7).
+func specLintVerdict(out, errOut io.Writer, beadID string, spec specdispatch.Spec, showErr error, templatePath string, hint specHintSource, asJSON bool) (specdispatch.LintVerdict, error) {
 	tmpl := specdispatch.LoadTemplate(templatePath)
 	report := specLintReport{ID: beadID, Refusals: []specdispatch.Refusal{}}
 	if showErr != nil {
-		report.Refusals = append(report.Refusals, specdispatch.Refusal{Field: "bead", Reason: showErr.Error()})
-		return emitSpecLint(out, errOut, tmpl, report, fmt.Sprintf("%s: spec lint refused: bead: %v", beadID, showErr), specLintExitRefused, asJSON)
+		reason := showErr.Error()
+		verdict := specdispatch.LintVerdict{
+			Route:    specdispatch.RouteRefuse,
+			Field:    "bead",
+			Reason:   reason,
+			Refusals: []specdispatch.Refusal{{Field: "bead", Reason: reason}},
+		}
+		report.Refusals = append(report.Refusals, verdict.Refusals...)
+		return verdict, emitSpecLint(out, errOut, tmpl, report, fmt.Sprintf("%s: spec lint refused: bead: %v", beadID, showErr), specLintExitRefused, asJSON)
 	}
 	verdict := specdispatch.Lint(spec, tmpl)
 	report.OK = verdict.Clean()
@@ -1280,7 +1295,59 @@ func specLint(out, errOut io.Writer, beadID string, spec specdispatch.Spec, show
 	if !asJSON {
 		writeSpecHints(errOut, report.Hints)
 	}
-	return emitSpecLint(out, errOut, tmpl, report, verdict.Line(beadID), code, asJSON)
+	return verdict, emitSpecLint(out, errOut, tmpl, report, verdict.Line(beadID), code, asJSON)
+}
+
+// runSpecLintAt is the gt spec lint run with the town root and clock given, so
+// a test can run the command against a temp town. It prints the verdict and,
+// when townRoot is known, appends the run's outcome to the town's ledger; a
+// recording failure is one warning on errOut and leaves the exit code to the
+// verdict (gt-hgt9j.7).
+func runSpecLintAt(out, errOut io.Writer, townRoot, beadID string, spec specdispatch.Spec, showErr error, templatePath string, hint specHintSource, asJSON bool, now time.Time) error {
+	verdict, lintErr := specLintVerdict(out, errOut, beadID, spec, showErr, templatePath, hint, asJSON)
+	if townRoot != "" {
+		if err := recordSpecLintOutcome(townRoot, beadID, verdict, now); err != nil {
+			fmt.Fprintf(errOut, "gt spec lint: lint outcome not recorded: %v\n", err)
+		}
+	}
+	return lintErr
+}
+
+// recordSpecLintOutcome writes the line the lint ledger keeps for one manual
+// run; the path and rendering stay in specdispatch so a later reader decodes
+// what this wrote.
+func recordSpecLintOutcome(townRoot, beadID string, verdict specdispatch.LintVerdict, now time.Time) error {
+	return specdispatch.AppendOutcome(specdispatch.OutcomePath(townRoot), specdispatch.OutcomeLine(now, beadID, verdict), appendOutcomeFile)
+}
+
+// appendOutcomeFile appends p to path, creating the file and the directory
+// that holds it. It is the os-level write specdispatch.AppendOutcome takes, so
+// the appender needs no filesystem of its own.
+func appendOutcomeFile(path string, p []byte) (int, error) {
+	return appendOutcomeFileWith(openOutcomeFile, path, p)
+}
+
+// appendOutcomeFileWith is appendOutcomeFile through open, so a test can drive
+// the open and write failures a healthy host does not offer.
+func appendOutcomeFileWith(open func(path string) (io.WriteCloser, error), path string, p []byte) (int, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return 0, err
+	}
+	fh, err := open(path)
+	if err != nil {
+		return 0, err
+	}
+	n, writeErr := fh.Write(p)
+	closeErr := fh.Close()
+	if writeErr != nil {
+		return n, writeErr
+	}
+	return n, closeErr
+}
+
+// openOutcomeFile opens path for appending, creating the file.
+func openOutcomeFile(path string) (io.WriteCloser, error) {
+	return os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 }
 
 // writeSpecAdvice prints each lint advisory on its own "advice:" line in w.
