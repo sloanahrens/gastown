@@ -40,24 +40,44 @@ type sqlToken struct {
 func tenancyViolations(ms []Migration, exempt map[string]string) []string {
 	var out []string
 	present := make(map[string]bool)
+	// created is every table the migrations create, with the columns a later
+	// ALTER TABLE ... ADD COLUMN adds to it recorded as the migrations run, so
+	// a column added after the CREATE still counts for that table.
+	type createdTable struct {
+		file     string
+		name     string
+		columns  []string
+		parseErr string
+	}
+	var created []createdTable
+	at := make(map[string]int) // table name -> index in created
 	for _, m := range ms {
 		file := fmt.Sprintf("%04d_%s.sql", m.Version, m.Name)
 		for _, t := range scanCreateTables(m.SQL) {
 			if t.Name != "" {
 				present[t.Name] = true
+				at[t.Name] = len(created)
 			}
-			if t.ParseErr != "" {
-				out = append(out, fmt.Sprintf("%s: %s", file, t.ParseErr))
-				continue
-			}
-			if slices.Contains(t.Columns, "workspace_id") {
-				continue
-			}
-			if _, ok := exempt[t.Name]; ok {
-				continue
-			}
-			out = append(out, fmt.Sprintf("%s: table %q has no workspace_id column and no written exemption (add the column, or name the table in tenancyExempt with the reason)", file, t.Name))
+			created = append(created, createdTable{file: file, name: t.Name, columns: t.Columns, parseErr: t.ParseErr})
 		}
+		for name, cols := range scanAlterAddColumns(m.SQL) {
+			if i, ok := at[name]; ok {
+				created[i].columns = append(created[i].columns, cols...)
+			}
+		}
+	}
+	for _, t := range created {
+		if t.parseErr != "" {
+			out = append(out, fmt.Sprintf("%s: %s", t.file, t.parseErr))
+			continue
+		}
+		if slices.Contains(t.columns, "workspace_id") {
+			continue
+		}
+		if _, ok := exempt[t.name]; ok {
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s: table %q has no workspace_id column and no written exemption (add the column, or name the table in tenancyExempt with the reason)", t.file, t.name))
 	}
 	for name, reason := range exempt {
 		if !present[name] {
@@ -117,6 +137,73 @@ func scanCreateTables(sql string) []createTable {
 		i = next - 1
 	}
 	return out
+}
+
+// scanAlterAddColumns returns, for each table sql alters, the columns its
+// ALTER TABLE ... ADD [COLUMN] actions add. It reads only what it can check: an
+// ADD action it cannot read adds no column, so the table it names stays flagged
+// unless its CREATE lists the column. An ALTER of a table no migration creates
+// is not reported here; the guard checks only the tables the migrations create.
+func scanAlterAddColumns(sql string) map[string][]string {
+	added := make(map[string][]string)
+	toks := sqlTokens(sql)
+	for i := 0; i < len(toks); i++ {
+		if !isWord(toks[i], "alter") {
+			continue
+		}
+		j := i + 1
+		if j >= len(toks) || !isWord(toks[j], "table") {
+			continue
+		}
+		j++
+		if isWordSeq(toks, j, "if", "exists") {
+			j += 2
+		}
+		if j < len(toks) && isWord(toks[j], "only") {
+			j++
+		}
+		name, at, ok := qualifiedName(toks, j)
+		if !ok {
+			continue
+		}
+		// The actions run to the end of the statement. A comma at the top level
+		// starts the next action; a comma inside parentheses (numeric(10,2))
+		// belongs to the action it sits in.
+		depth := 0
+		actionStart := true
+		for ; at < len(toks); at++ {
+			t := toks[at]
+			switch {
+			case t.punct == '(':
+				depth++
+			case t.punct == ')':
+				depth--
+			case depth == 0 && t.punct == ';':
+				at = len(toks)
+			case depth == 0 && t.punct == ',':
+				actionStart = true
+				continue
+			}
+			if depth == 0 && actionStart && isWord(t, "add") {
+				actionStart = false
+				k := at + 1
+				if k < len(toks) && isWord(toks[k], "column") {
+					k++
+				}
+				if isWordSeq(toks, k, "if", "not", "exists") {
+					k += 3
+				}
+				if col, ok := identName(toks, k); ok {
+					added[name] = append(added[name], col)
+				}
+				continue
+			}
+			if depth == 0 {
+				actionStart = false
+			}
+		}
+	}
+	return added
 }
 
 // columnList reads the column names in the table body beginning at toks[open],
@@ -182,12 +269,19 @@ func identName(toks []sqlToken, i int) (string, bool) {
 }
 
 // sqlTokens splits sql into the identifiers and punctuation the scanner reads.
-// Comments and string literals are dropped so a statement written inside one
-// is not read as a table, and a '--' inside a string is not read as a comment.
+// Comments, string literals and dollar-quoted bodies are dropped so a statement
+// written inside one is not read as a table, and a '--' inside a string is not
+// read as a comment.
 func sqlTokens(sql string) []sqlToken {
 	var toks []sqlToken
 	for i := 0; i < len(sql); {
 		c := sql[i]
+		if c == '$' {
+			if end, ok := dollarQuotedEnd(sql, i); ok {
+				i = end
+				continue
+			}
+		}
 		switch {
 		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
 			i++
@@ -249,6 +343,36 @@ func sqlTokens(sql string) []sqlToken {
 		}
 	}
 	return toks
+}
+
+// dollarQuotedEnd reads the dollar-quoted string that begins at sql[i], a '$',
+// and returns the index after it. A dollar-quoted body is data, so it is
+// skipped whole: otherwise a CREATE TABLE inside a function body would be read
+// as a table. The tag is empty or follows identifier rules (a letter or
+// underscore first), so a '$1' placeholder does not open a quote; an
+// unterminated quote swallows the rest of the file, as an unterminated string
+// literal does.
+func dollarQuotedEnd(sql string, i int) (int, bool) {
+	j := i + 1
+	for j < len(sql) && isWordByte(sql[j]) && sql[j] != '$' {
+		j++
+	}
+	if j >= len(sql) || sql[j] != '$' {
+		return 0, false
+	}
+	if j > i+1 && !isTagStart(sql[i+1]) {
+		return 0, false
+	}
+	delim := sql[i : j+1]
+	body := j + 1
+	if k := strings.Index(sql[body:], delim); k >= 0 {
+		return body + k + len(delim), true
+	}
+	return len(sql), true
+}
+
+func isTagStart(c byte) bool {
+	return c == '_' || ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z')
 }
 
 func isWord(t sqlToken, word string) bool {
@@ -328,6 +452,26 @@ func TestTenancyGuardScanner(t *testing.T) {
 		"table constraint": {
 			sql:  `CREATE TABLE events (id text, PRIMARY KEY (id));`,
 			want: map[string][]string{"events": {"id"}},
+		},
+		"dollar quoted body names no table": {
+			sql:  `CREATE FUNCTION f() RETURNS void AS $$ BEGIN CREATE TABLE ghost (id text); END $$ LANGUAGE plpgsql;`,
+			want: map[string][]string{},
+		},
+		"tagged dollar quoted body": {
+			sql:  `DO $body$ BEGIN CREATE TABLE ghost (id text); END $body$; CREATE TABLE events (workspace_id text);`,
+			want: map[string][]string{"events": {"workspace_id"}},
+		},
+		"unterminated dollar quote swallows the rest": {
+			sql:  `$$ CREATE TABLE ghost (id text);`,
+			want: map[string][]string{},
+		},
+		"a dollar placeholder is not a quoted body": {
+			sql:  `CREATE TABLE events (workspace_id text, note text DEFAULT $1);`,
+			want: map[string][]string{"events": {"workspace_id", "note"}},
+		},
+		"a digit tag does not open a quoted body": {
+			sql:  `SELECT $1$ CREATE TABLE ghost (id text); $1$;`,
+			want: map[string][]string{"ghost": {"id"}},
 		},
 		"create as select is unreadable": {
 			sql:     `CREATE TABLE events AS SELECT 1;`,
@@ -419,6 +563,63 @@ func TestTenancyGuardFlagsMissingColumn(t *testing.T) {
 				if !strings.Contains(joined, w) {
 					t.Errorf("tenancyViolations reported:\n%s\nwant a line naming %q", joined, w)
 				}
+			}
+		})
+	}
+}
+
+// TestTenancyGuardConsidersAlterAddColumn drives the guard on canned migrations
+// whose table gets the column from ALTER TABLE ... ADD COLUMN rather than its
+// CREATE: a later migration adds it, the creating file adds it after the CREATE,
+// and an alter that names another column, another table, or runs before the
+// create leaves the table flagged.
+func TestTenancyGuardConsidersAlterAddColumn(t *testing.T) {
+	t.Parallel()
+	create := Migration{Version: 1, Name: "events", SQL: `CREATE TABLE adminplane.events (id text);`}
+	for name, tc := range map[string]struct {
+		ms      []Migration
+		wantErr bool
+	}{
+		"a later migration adds the column": {
+			ms: []Migration{create, {Version: 2, Name: "events_workspace", SQL: `ALTER TABLE adminplane.events ADD COLUMN workspace_id text NOT NULL;`}},
+		},
+		"the creating file adds the column after the create": {
+			ms: []Migration{{Version: 1, Name: "events", SQL: `CREATE TABLE adminplane.events (id text); ALTER TABLE adminplane.events ADD workspace_id text;`}},
+		},
+		"if not exists and a qualified name": {
+			ms: []Migration{create, {Version: 2, Name: "events_workspace", SQL: `ALTER TABLE IF EXISTS "adminplane"."events" ADD COLUMN IF NOT EXISTS workspace_id text;`}},
+		},
+		"one of several actions adds the column": {
+			ms: []Migration{create, {Version: 2, Name: "events_workspace", SQL: `ALTER TABLE events ADD COLUMN owner_id text, ADD COLUMN workspace_id text;`}},
+		},
+		"a different column does not satisfy the guard": {
+			ms:      []Migration{create, {Version: 2, Name: "events_owner", SQL: `ALTER TABLE events ADD COLUMN owner_id text;`}},
+			wantErr: true,
+		},
+		"a constraint named workspace_id does not satisfy the guard": {
+			ms:      []Migration{create, {Version: 2, Name: "events_check", SQL: `ALTER TABLE events ADD CONSTRAINT workspace_id CHECK (id <> '');`}},
+			wantErr: true,
+		},
+		"another table's column does not satisfy the guard": {
+			ms:      []Migration{create, {Version: 2, Name: "other", SQL: `CREATE TABLE other (id text); ALTER TABLE other ADD COLUMN workspace_id text;`}},
+			wantErr: true,
+		},
+		"an alter before the create does not count": {
+			ms:      []Migration{{Version: 1, Name: "pre", SQL: `ALTER TABLE events ADD COLUMN workspace_id text;`}, {Version: 2, Name: "events", SQL: `CREATE TABLE events (id text);`}},
+			wantErr: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got := tenancyViolations(tc.ms, nil)
+			if tc.wantErr {
+				if len(got) == 0 {
+					t.Fatalf("tenancyViolations reported nothing; want the table with no workspace_id flagged")
+				}
+				return
+			}
+			if len(got) != 0 {
+				t.Fatalf("tenancyViolations = %v; want no violation", got)
 			}
 		})
 	}
