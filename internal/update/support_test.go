@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -45,10 +46,77 @@ func captureWrites(t *testing.T, store *Store) <-chan State {
 		if err := json.Unmarshal(data, &st); err != nil {
 			return err
 		}
-		written <- st
+		select {
+		case written <- st:
+		case <-time.After(waitBound):
+			t.Errorf("the test never read the write for run %s within %v", st.RunID, waitBound)
+		}
 		return atomicfile.WriteFile(path, data, perm)
 	}
 	return written
+}
+
+// waitBound bounds every channel wait a heartbeat test makes, so a regression
+// that stops a write or an error callback fails the test instead of hanging it.
+const waitBound = 2 * time.Second
+
+// receiveWithin takes one value from ch, failing the test with what it was
+// waiting for when nothing arrives within waitBound.
+func receiveWithin[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(waitBound):
+		t.Fatalf("nothing arrived within %v: %s", waitBound, what)
+	}
+	var zero T
+	return zero
+}
+
+// sendWithin sends v on ch, failing the test when nothing takes it within
+// waitBound and naming what never arrived.
+func sendWithin[T any](t *testing.T, ch chan<- T, v T, what string) {
+	t.Helper()
+	select {
+	case ch <- v:
+	case <-time.After(waitBound):
+		t.Fatalf("nothing took %s within %v", what, waitBound)
+	}
+}
+
+// reportError hands err to the test goroutine from inside RunHeartbeat without
+// blocking the heartbeat loop; a full channel fails the test instead of
+// hanging the loop.
+func reportError(t *testing.T, errs chan<- error, err error) {
+	t.Helper()
+	select {
+	case errs <- err:
+	case <-time.After(waitBound):
+		t.Errorf("the test never read the reported error %v within %v", err, waitBound)
+	}
+}
+
+// startHeartbeat runs RunHeartbeat in a goroutine and registers a cleanup that
+// cancels it and waits for it, so a failure midway cannot leave the loop
+// running past the test. The returned channel closes when RunHeartbeat returns.
+func startHeartbeat(t *testing.T, store *Store, ticks <-chan time.Time, clock Clock, onError func(error)) (context.CancelFunc, <-chan struct{}) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		RunHeartbeat(ctx, store, ticks, clock, onError)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-finished:
+		case <-time.After(waitBound):
+			t.Errorf("RunHeartbeat did not return within %v after cancellation", waitBound)
+		}
+	})
+	return cancel, finished
 }
 
 func TestHeartbeatRewritesOnEveryTick(t *testing.T) {
@@ -66,17 +134,12 @@ func TestHeartbeatRewritesOnEveryTick(t *testing.T) {
 	}
 	clock := &fakeClock{times: ticks}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
 	tickCh := make(chan time.Time)
-	go func() {
-		defer close(done)
-		RunHeartbeat(ctx, store, tickCh, clock, nil)
-	}()
+	cancel, done := startHeartbeat(t, store, tickCh, clock, nil)
 
 	for i, want := range ticks {
-		tickCh <- time.Now()
-		got := <-written
+		sendWithin(t, tickCh, time.Now(), "a heartbeat tick")
+		got := receiveWithin(t, written, fmt.Sprintf("heartbeat write %d", i))
 		if !got.HeartbeatAt.Equal(want) {
 			t.Errorf("write %d HeartbeatAt = %v, want %v", i, got.HeartbeatAt, want)
 		}
@@ -86,7 +149,7 @@ func TestHeartbeatRewritesOnEveryTick(t *testing.T) {
 	}
 
 	cancel()
-	<-done
+	receiveWithin(t, done, "RunHeartbeat to return after ctx cancellation")
 	select {
 	case st := <-written:
 		t.Errorf("heartbeat wrote after ctx ended: %+v", st)
@@ -121,18 +184,15 @@ func TestHeartbeatStopsWithContextAndReportsErrors(t *testing.T) {
 		}
 
 		errs := make(chan error, 2)
-		ctx, cancel := context.WithCancel(context.Background())
-		done := make(chan struct{})
 		ticks := make(chan time.Time)
-		go func() {
-			defer close(done)
-			RunHeartbeat(ctx, store, ticks, &fakeClock{times: []time.Time{time.Now(), time.Now()}},
-				func(err error) { errs <- err })
-		}()
+		cancel, done := startHeartbeat(t, store, ticks,
+			&fakeClock{times: []time.Time{time.Now(), time.Now()}},
+			func(err error) { reportError(t, errs, err) })
 
 		for i := 0; i < 2; i++ {
-			ticks <- time.Now()
-			if err := <-errs; err == nil {
+			sendWithin(t, ticks, time.Now(), "a heartbeat tick")
+			err := receiveWithin(t, errs, fmt.Sprintf("the publish error for tick %d", i))
+			if err == nil {
 				t.Fatal("onError got nil for a failed publish")
 			} else if !strings.Contains(err.Error(), "publish update state") {
 				t.Errorf("reported error %q does not name the publish", err)
@@ -140,7 +200,7 @@ func TestHeartbeatStopsWithContextAndReportsErrors(t *testing.T) {
 		}
 
 		cancel()
-		<-done
+		receiveWithin(t, done, "RunHeartbeat to return after ctx cancellation")
 		if got := writes.Load(); got != 2 {
 			t.Errorf("staged %d writes, want 2: the loop stopped on the first error", got)
 		}
@@ -150,26 +210,21 @@ func TestHeartbeatStopsWithContextAndReportsErrors(t *testing.T) {
 		t.Parallel()
 		store := &Store{Dir: filepath.Join(t.TempDir(), "update")}
 		errs := make(chan error, 2)
-
-		ctx, cancel := context.WithCancel(context.Background())
-		done := make(chan struct{})
 		ticks := make(chan time.Time)
-		go func() {
-			defer close(done)
-			RunHeartbeat(ctx, store, ticks, &fakeClock{times: []time.Time{time.Now(), time.Now()}},
-				func(err error) { errs <- err })
-		}()
+		cancel, done := startHeartbeat(t, store, ticks,
+			&fakeClock{times: []time.Time{time.Now(), time.Now()}},
+			func(err error) { reportError(t, errs, err) })
 
 		for i := 0; i < 2; i++ {
-			ticks <- time.Now()
-			err := <-errs
+			sendWithin(t, ticks, time.Now(), "a heartbeat tick")
+			err := receiveWithin(t, errs, fmt.Sprintf("the ErrNoCurrent report for tick %d", i))
 			if !errors.Is(err, ErrNoCurrent) {
 				t.Fatalf("onError got %v, want ErrNoCurrent", err)
 			}
 		}
 
 		cancel()
-		<-done
+		receiveWithin(t, done, "RunHeartbeat to return after ctx cancellation")
 	})
 
 	t.Run("closed ticks end the loop", func(t *testing.T) {
@@ -177,12 +232,8 @@ func TestHeartbeatStopsWithContextAndReportsErrors(t *testing.T) {
 		store := &Store{Dir: filepath.Join(t.TempDir(), "update")}
 		ticks := make(chan time.Time)
 		close(ticks)
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			RunHeartbeat(context.Background(), store, ticks, &fakeClock{}, func(error) {})
-		}()
-		<-done
+		_, done := startHeartbeat(t, store, ticks, &fakeClock{}, func(error) {})
+		receiveWithin(t, done, "RunHeartbeat to return when ticks is closed")
 	})
 }
 
@@ -282,18 +333,24 @@ func TestAppendHistoryRecordsDurations(t *testing.T) {
 		t.Fatalf("a running run wrote history: stat = %v", err)
 	}
 
+	// The step times, and therefore the expected durations below, are written
+	// here rather than taken from another file's fixture.
+	start := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	steps := []StepRecord{
+		{Name: StepPlan, Result: ResultOK, StartedAt: start, EndedAt: start.Add(1500 * time.Millisecond)},
+		{Name: StepDrain, Result: ResultOK, StartedAt: start.Add(time.Second), EndedAt: start.Add(4 * time.Second)},
+		// maintenance has no times, so it is absent from durations_ms.
+		{Name: StepMaintenance, Result: ResultDeferred},
+	}
 	finished := fullState()
-	// Only a step with both a start and an end has a duration.
-	finished.Steps = append(finished.Steps,
-		StepRecord{Name: StepInstall, Result: ResultRunning, StartedAt: finished.StartedAt},
-		StepRecord{Name: StepVerify, Result: ResultRunning, EndedAt: finished.StartedAt.Add(time.Minute)},
-	)
+	finished.Steps = steps
 	if err := store.AppendHistory(finished); err != nil {
 		t.Fatalf("AppendHistory: %v", err)
 	}
 	second := fullState()
 	second.RunID = "20261103T110000Z-furiosa"
 	second.Outcome = OutcomeOK
+	second.Steps = steps
 	if err := store.AppendHistory(second); err != nil {
 		t.Fatalf("second AppendHistory: %v", err)
 	}
@@ -303,15 +360,70 @@ func TestAppendHistoryRecordsDurations(t *testing.T) {
 		t.Fatalf("history has %d lines, want 2", len(lines))
 	}
 	wantDurations := map[string]int64{
-		string(StepPlan):  1000,
-		string(StepDrain): 1000,
-		// maintenance has no times, so it is absent.
+		string(StepPlan):  1500,
+		string(StepDrain): 3000,
 	}
 	for i, want := range []State{finished, second} {
 		if !reflect.DeepEqual(lines[i].DurationsMS, wantDurations) {
 			t.Errorf("line %d durations_ms = %v, want %v", i, lines[i].DurationsMS, wantDurations)
 		}
 		assertSameState(t, lines[i].State, want)
+	}
+}
+
+// TestHistoryDurationsBuildExpectedFromOwnSteps checks the durations_ms
+// arithmetic against step times this test writes itself.
+func TestHistoryDurationsBuildExpectedFromOwnSteps(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		steps []StepRecord
+		want  map[string]int64
+	}{
+		{
+			name: "a step with both times has the gap in milliseconds",
+			steps: []StepRecord{
+				{Name: StepPlan, StartedAt: start, EndedAt: start.Add(2500 * time.Millisecond)},
+				{Name: StepDrain, StartedAt: start.Add(time.Second), EndedAt: start.Add(9 * time.Second)},
+			},
+			want: map[string]int64{string(StepPlan): 2500, string(StepDrain): 8000},
+		},
+		{
+			name:  "a step with only a start has no duration",
+			steps: []StepRecord{{Name: StepInstall, StartedAt: start}},
+			want:  map[string]int64{},
+		},
+		{
+			name:  "a step with only an end has no duration",
+			steps: []StepRecord{{Name: StepVerify, EndedAt: start.Add(time.Minute)}},
+			want:  map[string]int64{},
+		},
+		{
+			name:  "a sub-millisecond gap is zero milliseconds",
+			steps: []StepRecord{{Name: StepRestart, StartedAt: start, EndedAt: start.Add(500 * time.Microsecond)}},
+			want:  map[string]int64{string(StepRestart): 0},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			store := &Store{Dir: filepath.Join(t.TempDir(), "update")}
+			st := fullState()
+			st.Outcome = OutcomeOK
+			st.Steps = tt.steps
+			if err := store.AppendHistory(st); err != nil {
+				t.Fatalf("AppendHistory: %v", err)
+			}
+
+			lines := readHistoryLines(t, filepath.Join(store.Dir, historyFileName))
+			if len(lines) != 1 {
+				t.Fatalf("history has %d lines, want 1", len(lines))
+			}
+			if !reflect.DeepEqual(lines[0].DurationsMS, tt.want) {
+				t.Errorf("durations_ms = %v, want %v", lines[0].DurationsMS, tt.want)
+			}
+		})
 	}
 }
 
