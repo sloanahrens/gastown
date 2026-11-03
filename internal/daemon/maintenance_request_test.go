@@ -207,6 +207,7 @@ type recordingRequestFiles struct {
 	read        []byte
 	readErr     error
 	writeErr    error
+	removeErr   error
 	written     []byte
 	writtenPath string
 }
@@ -233,7 +234,7 @@ func (f *recordingRequestFiles) WriteFile(path string, data []byte, mode os.File
 
 func (f *recordingRequestFiles) Remove(path string) error {
 	f.events = append(f.events, "remove "+filepath.Base(path))
-	return nil
+	return f.removeErr
 }
 
 // The result is on disk before the request goes: a job polling for the
@@ -300,6 +301,34 @@ func TestFinishMaintenanceRequestWritesResultThenRemovesIt(t *testing.T) {
 			if strings.HasPrefix(e, "remove") {
 				t.Errorf("the request was removed after a failed result write: %v", f.events)
 			}
+		}
+	})
+
+	t.Run("a remove error is returned after the result", func(t *testing.T) {
+		t.Parallel()
+		boom := errors.New("read-only directory")
+		f := &recordingRequestFiles{removeErr: boom}
+		err := finishMaintenanceRequest(f, "/update", at, "run-7", gcOutcomeCompleted, "")
+		if !errors.Is(err, boom) {
+			t.Fatalf("error = %v, want the remove error", err)
+		}
+		want := []string{"write " + update.ResultFileName + " 0600", "remove " + update.RequestFileName}
+		if got := strings.Join(f.events, ","); got != strings.Join(want, ",") {
+			t.Errorf("events = %v, want %v", f.events, want)
+		}
+	})
+
+	t.Run("an unencodable time fails before writing", func(t *testing.T) {
+		t.Parallel()
+		f := &recordingRequestFiles{}
+		// JSON cannot carry a year outside [0, 9999]; the job could not parse
+		// such a result, so the write is skipped.
+		far := time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+		if err := finishMaintenanceRequest(f, "/update", far, "run-7", gcOutcomeCompleted, ""); err == nil {
+			t.Fatal("an unencodable result time returned no error")
+		}
+		if len(f.events) != 0 {
+			t.Errorf("files were touched before the encode failed: %v", f.events)
 		}
 	})
 }
