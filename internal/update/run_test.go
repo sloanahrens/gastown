@@ -153,6 +153,73 @@ func publishedWith(published []State, name StepName, want StepResult) bool {
 	return false
 }
 
+// failNthPublish makes the store fail its nth publish and publish every other
+// record, so a test can take each write's failure path in turn.
+func (f *runFixture) failNthPublish(n int) {
+	calls := 0
+	f.store.Rename = func(oldpath, newpath string) error {
+		calls++
+		if calls == n {
+			return errors.New("disk full")
+		}
+		return os.Rename(oldpath, newpath)
+	}
+}
+
+// publishCount runs f to completion and reports how many records it published.
+func publishCount(t *testing.T, f *runFixture) int {
+	t.Helper()
+	published := f.watchPublishes()
+	if _, err := f.run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	return len(published())
+}
+
+// assertEveryPublishIsChecked fails the test unless failing each of total
+// publishes in turn makes Run return the write error: a state write that fails
+// must never end the run as if it had been recorded.
+func assertEveryPublishIsChecked(t *testing.T, total int, fresh func(*testing.T) *runFixture) {
+	t.Helper()
+	for n := 1; n <= total; n++ {
+		f := fresh(t)
+		f.failNthPublish(n)
+		if _, err := f.run(context.Background()); err == nil || !strings.Contains(err.Error(), "disk full") {
+			t.Errorf("publish %d of %d: Run error = %v, want the failed write named", n, total, err)
+		}
+	}
+}
+
+func TestRunStoreWriteFailureIsReturned(t *testing.T) {
+	t.Parallel()
+	total := publishCount(t, newRunFixture(t))
+	assertEveryPublishIsChecked(t, total, newRunFixture)
+}
+
+func TestRunStoreWriteFailureDuringDrainAbortIsReturned(t *testing.T) {
+	t.Parallel()
+	blocked := func(t *testing.T) *runFixture {
+		f := newRunFixture(t)
+		f.seats.answer = func(int) ([]Seat, error) {
+			return []Seat{{Name: "furiosa", Working: true, LastActive: drainTestStart()}}, nil
+		}
+		return f
+	}
+	total := publishCount(t, blocked(t))
+	assertEveryPublishIsChecked(t, total, blocked)
+}
+
+func TestRunStoreWriteFailureOnLiftIsReturned(t *testing.T) {
+	t.Parallel()
+	liftOnly := func(t *testing.T) *runFixture {
+		f := newRunFixture(t)
+		f.opts.Only = map[StepName]bool{StepLift: true}
+		return f
+	}
+	total := publishCount(t, liftOnly(t))
+	assertEveryPublishIsChecked(t, total, liftOnly)
+}
+
 func TestRunDryRunPrintsThePlanAndWritesNothing(t *testing.T) {
 	t.Parallel()
 
