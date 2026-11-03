@@ -95,16 +95,13 @@ func TestAdmitRefusesNonActiveStates(t *testing.T) {
 		{"closed", registry.Closed, ReasonStateClosed},
 		{"unknown", registry.State("archived"), ReasonStateUnknown},
 	}
+	// seen records the reason Admit returned for each state, not the table's
+	// expected reason, so a state refused under another state's reason is
+	// caught even when both expected values name the same constant. The
+	// subtests below are not parallel, so seen needs no lock.
 	seen := make(map[string]registry.State, len(cases))
 	for _, c := range cases {
-		if other, ok := seen[c.reason]; ok {
-			t.Fatalf("%q and %q refuse with the same reason %q", other, c.state, c.reason)
-		}
-		seen[c.reason] = c.state
-	}
-	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			t.Parallel()
 			d, prov := newDeps(t)
 			d.State = fakeState{state: c.state}
 
@@ -118,6 +115,10 @@ func TestAdmitRefusesNonActiveStates(t *testing.T) {
 			if got.Reason != c.reason {
 				t.Errorf("Reason = %q, want %q", got.Reason, c.reason)
 			}
+			if other, ok := seen[got.Reason]; ok {
+				t.Errorf("Admit refuses %q and %q with the same reason %q", other, c.state, got.Reason)
+			}
+			seen[got.Reason] = c.state
 			if got.State != "" {
 				t.Errorf("State = %q, want no state move", got.State)
 			}
