@@ -403,14 +403,21 @@ func TestExecInstallerEnvironmentKeepsPathAndHome(t *testing.T) {
 			t.Errorf("environment dropped %s from the process environment", key)
 		}
 	}
-	for _, key := range []string{"PATH", "HOME"} {
-		value, ok := os.LookupEnv(key)
-		if !ok {
-			t.Fatalf("%s is unset in this test process, so the test cannot show it is kept", key)
-		}
-		if !present[key+"="+value] {
-			t.Errorf("environment has no %s=%s", key, value)
-		}
+	//testpolicy:allow no-host-env — the process environment is the value under test
+	path, ok := os.LookupEnv("PATH")
+	if !ok {
+		t.Fatal("PATH is unset in this test process, so the test cannot show it is kept")
+	}
+	if !present["PATH="+path] {
+		t.Errorf("environment has no PATH=%s", path)
+	}
+	//testpolicy:allow no-host-env — the process environment is the value under test
+	home, ok := os.LookupEnv("HOME")
+	if !ok {
+		t.Fatal("HOME is unset in this test process, so the test cannot show it is kept")
+	}
+	if !present["HOME="+home] {
+		t.Errorf("environment has no HOME=%s", home)
 	}
 	for _, kv := range []string{"INSTALL_GT_LOCK_WAIT=60", "INSTALL_GT_RIG_DIR=" + root, "EXTRA=1"} {
 		if !present[kv] {
