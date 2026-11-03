@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -812,7 +813,7 @@ func archiveNotes(townRoot string, config *doltserver.Config, databases []string
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	reader := doltArchiveReader{config: config, archivedHashes: archivedHashesLoader(townRoot)}
+	reader := doltArchiveReader{config: config, archivedHashes: archivedHashesLoader(townRoot, databases)}
 	return archiveBehindNotes(ctx, reader, wms, databases), nil
 }
 
@@ -821,8 +822,18 @@ func archiveNotes(townRoot string, config *doltserver.Config, databases []string
 // config's maintenance.archive_dir; a config that cannot be read, or a setting
 // left unset, is an error rather than an empty set, because a check that
 // cannot see the archive cannot call any commit safe (gt-7nxj4).
-func archivedHashesLoader(townRoot string) func(db string) (map[string]struct{}, error) {
+//
+// A status call builds one loader, and the archive is read once: the first ask
+// lists the directory and opens each listed database's files, and every later
+// ask is served from that reading. One status call therefore reads each
+// database's archived-hash set once, however many notes consult it (gt-3w3hk).
+func archivedHashesLoader(townRoot string, databases []string) func(db string) (map[string]struct{}, error) {
 	dir, dirErr := archiveDirForStatus(townRoot)
+	var (
+		loaded  bool
+		sets    map[string]map[string]struct{}
+		loadErr error
+	)
 	return func(db string) (map[string]struct{}, error) {
 		if dirErr != nil {
 			return nil, dirErr
@@ -830,7 +841,18 @@ func archivedHashesLoader(townRoot string) func(db string) (map[string]struct{},
 		if dir == "" {
 			return nil, fmt.Errorf("%s is unset: the archive cannot say which commits it holds", gtconfig.MaintenanceArchiveDirKey)
 		}
-		return daemon.LoadArchivedCommitHashes(dir, db)
+		if !loaded {
+			sets, loadErr = daemon.LoadArchivedCommitHashesFor(dir, databases)
+			loaded = true
+		}
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		set, ok := sets[db]
+		if !ok {
+			return nil, fmt.Errorf("database %q was not listed for the archive check", db)
+		}
+		return set, nil
 	}
 }
 
@@ -899,6 +921,9 @@ func eventsArchiveNote(ctx context.Context, reader archiveBehindReader, db strin
 		return fmt.Sprintf("events behind count unavailable: %v", err)
 	}
 	if wm.CreatedAt == "" {
+		if behind < 0 {
+			return "events not archived yet, at least one event behind (count bounded: existence check)"
+		}
 		return fmt.Sprintf("events not archived yet, %s", eventsBehindText(behind))
 	}
 	since, err := wm.Since()
@@ -907,6 +932,12 @@ func eventsArchiveNote(ctx context.Context, reader archiveBehindReader, db strin
 	}
 	return fmt.Sprintf("events archived through %s, %s since %s", wm.CreatedAt, eventsBehindText(behind), since)
 }
+
+// eventsBehindUncounted is eventsBehind's answer when there is no watermark:
+// the table holds at least one row, but the reader did not count them. A full
+// COUNT(*) over an events table the archive has never covered is what the
+// status must not run, so that path is an existence check and the note says so.
+const eventsBehindUncounted int64 = -1
 
 // commitsBehindText renders how many commits an archive has not written out.
 func commitsBehindText(n int64) string {
@@ -1004,8 +1035,12 @@ func (r doltArchiveReader) commitsBehind(ctx context.Context, db string, wm daem
 // the same lookback window the archive reads: rows with created_at at or
 // after the watermark's date minus the window, minus the ids the watermark
 // already holds. A watermark the query cannot compare is refused rather than
-// matched against no row. With no watermark every row is behind, and the
-// index's count answers that without reading the table's rows.
+// matched against no row.
+//
+// With no watermark the reader does not count the table: it asks whether the
+// table holds any row and returns eventsBehindUncounted when it does, because a
+// full COUNT(*) over an events table the archive has never covered is exactly
+// the read the status must not run. An empty table is zero.
 //
 // The count is the archive's own window, not the whole table: a row older
 // than the window is the archive's documented accepted limit (eventsArchiveLookback),
@@ -1034,11 +1069,15 @@ func (r doltArchiveReader) eventsBehind(ctx context.Context, db string, wm daemo
 	defer conn.Close()
 
 	if wm.CreatedAt == "" {
-		var count int64
-		if err := conn.QueryRowContext(ctx, query).Scan(&count); err != nil {
+		var probe int
+		err := conn.QueryRowContext(ctx, query).Scan(&probe)
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, nil // no row at all: nothing is behind
+		}
+		if err != nil {
 			return 0, err
 		}
-		return count, nil
+		return eventsBehindUncounted, nil
 	}
 
 	rows, err := conn.QueryContext(ctx, query)
@@ -1049,13 +1088,13 @@ func (r doltArchiveReader) eventsBehind(ctx context.Context, db string, wm daemo
 	return daemon.UnarchivedEvents(rows, wm.ArchivedIDs())
 }
 
-// eventsBehindQuery renders the count's SELECT: the whole table with no
-// watermark, or the lookback window's rows when there is one. Both statements
-// are declared in beadsql and named here so an engine test can run the exact
-// text the status sends.
+// eventsBehindQuery renders the count's SELECT: an existence check with no
+// watermark (whether the table holds any row, never a COUNT(*)), or the lookback
+// window's rows when there is one. Both statements are declared in beadsql and
+// named here so an engine test can run the exact text the status sends.
 func eventsBehindQuery(db string, wm daemon.EventsArchiveWatermark) (string, error) {
 	if wm.CreatedAt == "" {
-		return beadsql.TableRowCount(db, "events").Inline()
+		return beadsql.TableProbe("events").Inline()
 	}
 	since, err := wm.Since()
 	if err != nil {

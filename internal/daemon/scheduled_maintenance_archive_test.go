@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/csv"
 	"errors"
 	"fmt"
@@ -1822,6 +1823,308 @@ func TestFirstUnarchivedCommitsStopsReadingAtTheBound(t *testing.T) {
 	if want := maintenanceArchiveCommitLimit + len(archived); reads != want {
 		t.Errorf("read %d rows, want exactly %d (the bound plus the skipped archived rows)", reads, want)
 	}
+}
+
+// TestEventsArchiveFirstReadIsBounded: a table with more rows than the per-run
+// bound is exported in bounded runs, oldest first; the next run reads the rest
+// from the advanced watermark, and no row is lost or written twice (gt-3w3hk).
+func TestEventsArchiveFirstReadIsBounded(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	withGCFakes(t, d)
+	dir := t.TempDir()
+
+	columns := []string{"id", "created_at"}
+	total := maintenanceArchiveEventsLimit + 2
+	base := gcTestNow.Add(-3 * time.Hour)
+	rows := make([][]driver.Value, 0, total)
+	createdAt := func(i int) string {
+		return base.Add(time.Duration(i) * time.Second).Format("2006-01-02 15:04:05")
+	}
+	for i := 1; i <= total; i++ {
+		rows = append(rows, []driver.Value{fmt.Sprintf("h%05d", i), createdAt(i)})
+	}
+	// The fake serves the whole table on every read, whatever the window, so
+	// the read has to stop at the bound and skip the ids the watermark holds:
+	// a bound counting rows rather than fresh rows would re-read the first run's
+	// rows and never reach the rest.
+	d.maint.archiveOpenDB = archiveFakeOpener(t, &archiveFakeServer{columns: columns, rows: rows})
+
+	ctx := context.Background()
+	if err := d.maintenanceArchiveEvents(ctx, dir, "gt", EventsArchiveWatermark{}); err != nil {
+		t.Fatalf("first export: %v", err)
+	}
+	wantRows := func(n int) [][]string {
+		out := make([][]string, 0, n)
+		for i := 1; i <= n; i++ {
+			out = append(out, []string{fmt.Sprintf("h%05d", i), createdAt(i)})
+		}
+		return out
+	}
+	got := readArchiveCSV(t, eventsArchiveFile(dir, "gt"))
+	if len(got) != maintenanceArchiveEventsLimit+1 {
+		t.Fatalf("first export wrote %d row(s), want the %d bound and one header", len(got)-1, maintenanceArchiveEventsLimit)
+	}
+	if want := wantRows(maintenanceArchiveEventsLimit); !csvRowsEqual(got[1:], want) {
+		t.Errorf("first export = %s..%s, want the oldest %d rows h00001..h%05d",
+			got[1][0], got[len(got)-1][0], maintenanceArchiveEventsLimit, maintenanceArchiveEventsLimit)
+	}
+
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	if err := d.maintenanceArchiveEvents(ctx, dir, "gt", st.ArchiveEventsWatermarks["gt"]); err != nil {
+		t.Fatalf("second export: %v", err)
+	}
+	got = readArchiveCSV(t, eventsArchiveFile(dir, "gt"))
+	want := append([][]string{columns}, wantRows(total)...)
+	if !csvRowsEqual(got, want) {
+		t.Errorf("after two runs the archive holds %d data row(s), want all %d once, oldest first", len(got)-1, total)
+	}
+}
+
+// TestEventsArchiveRefusesAnIncompatibleHeader: appending to a file whose
+// header differs from the events table's current columns fails that database's
+// export, keeps its watermark, and names the database in the log (gt-3w3hk).
+func TestEventsArchiveRefusesAnIncompatibleHeader(t *testing.T) {
+	t.Parallel()
+	d, logs := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"gt": {633 * mib, 0}}
+	dir := t.TempDir()
+	d.patrolConfig = archiveConfig(dir)
+	withArchiveFakes(d, f, nil, nil)
+
+	path := eventsArchiveFile(dir, "gt")
+	old := []string{"id", "created_at", "payload"}
+	oldRow := []string{"1", "2026-10-01 00:00:00", "x"}
+	if err := appendArchiveTable(path, old, [][]string{oldRow}); err != nil {
+		t.Fatalf("seeding the older file: %v", err)
+	}
+	withEventsFake(d, []string{"id", "created_at"}, map[string][][]string{
+		"gt": {{"2", "2026-10-01 01:00:00"}},
+	}, nil)
+
+	d.runScheduledMaintenance()
+
+	if got := readArchiveCSV(t, path); !csvRowsEqual(got, [][]string{old, oldRow}) {
+		t.Errorf("archive file = %v, want the older member untouched", got)
+	}
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	if _, ok := st.ArchiveEventsWatermarks["gt"]; ok {
+		t.Errorf("events watermark advanced although the header was refused: %+v", st.ArchiveEventsWatermarks["gt"])
+	}
+	if !strings.Contains(logs.String(), "archive gt events: FAILED") || !strings.Contains(logs.String(), "columns") {
+		t.Errorf("log does not name gt's refused events export and why:\n%s", logs.String())
+	}
+}
+
+// TestEventsArchiveRefusesAnUnreadableHeader: a file that cannot be read as a
+// gzip CSV has no header the export can check, so the export is refused rather
+// than appended to blind (gt-3w3hk).
+func TestEventsArchiveRefusesAnUnreadableHeader(t *testing.T) {
+	t.Parallel()
+	d, logs := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"gt": {633 * mib, 0}}
+	dir := t.TempDir()
+	d.patrolConfig = archiveConfig(dir)
+	withArchiveFakes(d, f, nil, nil)
+
+	path := eventsArchiveFile(dir, "gt")
+	if err := os.WriteFile(path, []byte("not a gzip member"), 0o600); err != nil {
+		t.Fatalf("seeding an unreadable file: %v", err)
+	}
+	withEventsFake(d, []string{"id", "created_at"}, map[string][][]string{
+		"gt": {{"2", "2026-10-01 01:00:00"}},
+	}, nil)
+
+	d.runScheduledMaintenance()
+
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	if _, ok := st.ArchiveEventsWatermarks["gt"]; ok {
+		t.Errorf("events watermark advanced although the file's header could not be read: %+v", st.ArchiveEventsWatermarks["gt"])
+	}
+	if !strings.Contains(logs.String(), "archive gt events: FAILED") || !strings.Contains(logs.String(), "header") {
+		t.Errorf("log does not name gt's refused events export and why:\n%s", logs.String())
+	}
+}
+
+// TestCheckEventsArchiveHeaderRefusals: a file the checker cannot open, or one
+// whose first record is not a CSV header, is refused, so no export appends
+// under a header it could not compare (gt-3w3hk).
+func TestCheckEventsArchiveHeaderRefusals(t *testing.T) {
+	t.Parallel()
+	columns := []string{"id", "created_at"}
+
+	t.Run("a file that cannot be opened", func(t *testing.T) {
+		t.Parallel()
+		if err := checkEventsArchiveHeader(filepath.Join(t.TempDir(), "absent.csv.gz"), columns); err == nil {
+			t.Error("a missing file passed the header check")
+		}
+	})
+
+	t.Run("a first record that is not valid CSV", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "events-gt-20261001.csv.gz")
+		f, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gz := gzip.NewWriter(f)
+		if _, err := gz.Write([]byte("id\"created_at\n")); err != nil {
+			t.Fatal(err)
+		}
+		if err := gz.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := checkEventsArchiveHeader(path, columns); err == nil {
+			t.Error("a malformed CSV header passed the check")
+		}
+	})
+}
+
+// TestEventsArchiveBatchRefusals: an events result set the archive cannot read,
+// or one without the watermark's columns, is an error rather than an empty
+// batch the watermark would walk past (gt-3w3hk).
+func TestEventsArchiveBatchRefusals(t *testing.T) {
+	t.Parallel()
+	openRows := func(t *testing.T, server *archiveFakeServer) (*sql.DB, *sql.Rows) {
+		t.Helper()
+		db, err := archiveFakeOpener(t, server)("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows, err := db.QueryContext(context.Background(), "SELECT * FROM events")
+		if err != nil {
+			t.Fatalf("query: %v", err)
+		}
+		return db, rows
+	}
+
+	t.Run("a result set closed before it was read", func(t *testing.T) {
+		t.Parallel()
+		db, rows := openRows(t, &archiveFakeServer{columns: []string{"id", "created_at"}})
+		defer db.Close()
+		if err := rows.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := eventsArchiveBatch(rows, nil); err == nil {
+			t.Error("a closed result set was read as an empty batch")
+		}
+	})
+
+	t.Run("a result set without the watermark columns", func(t *testing.T) {
+		t.Parallel()
+		db, rows := openRows(t, &archiveFakeServer{columns: []string{"payload"}})
+		defer db.Close()
+		defer rows.Close()
+		if _, err := eventsArchiveBatch(rows, nil); err == nil || !strings.Contains(err.Error(), "no created_at and id columns") {
+			t.Errorf("result set without the watermark columns = %v, want it refused", err)
+		}
+	})
+}
+
+// TestDoltArchiveEventsRefusesAnUnreadableWatermark: the read's bound counts
+// only rows the watermark does not hold, so an unreadable watermark refuses the
+// read before it opens a connection instead of counting archived rows against
+// the bound (gt-3w3hk).
+func TestDoltArchiveEventsRefusesAnUnreadableWatermark(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	path := maintenanceGCStatePath(d.config.TownRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d.maint.archiveOpenDB = func(string) (*sql.DB, error) {
+		t.Error("the events read opened a connection with an unreadable watermark")
+		return nil, errors.New("not reached")
+	}
+	if _, err := d.doltArchiveEvents(context.Background(), "gt", ""); err == nil || !strings.Contains(err.Error(), "watermark") {
+		t.Errorf("read with an unreadable watermark = %v, want it refused", err)
+	}
+}
+
+// TestArchiveTightensAnExistingLooseDirectory: the step sets an archive
+// directory that already exists to 0700, and a mode it cannot set is logged
+// once without failing the run (gt-3w3hk).
+func TestArchiveTightensAnExistingLooseDirectory(t *testing.T) {
+	t.Parallel()
+
+	t.Run("an existing loose directory is tightened", func(t *testing.T) {
+		t.Parallel()
+		d, logs := gcTestDaemon(t)
+		f := withGCFakes(t, d)
+		f.sizes = map[string]gcMeasure{"gt": {633 * mib, 0}}
+		dir := filepath.Join(t.TempDir(), "archive")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// The creating umask can narrow the mode; set the loose one explicitly.
+		//testpolicy:allow no-exec-files — a directory needs its search bit to be entered, and 0755 is the loose state the step must tighten
+		if err := os.Chmod(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		d.patrolConfig = archiveConfig(dir)
+		withArchiveFakes(d, f, nil, nil)
+
+		d.runScheduledMaintenance()
+
+		info, err := os.Stat(dir)
+		if err != nil {
+			t.Fatalf("stat archive directory: %v", err)
+		}
+		if got := info.Mode().Perm(); got != 0o700 {
+			t.Errorf("archive directory mode = %04o, want 0700", got)
+		}
+		if strings.Contains(logs.String(), "cannot set") {
+			t.Errorf("tightening a writable directory was logged as a failure:\n%s", logs.String())
+		}
+	})
+
+	t.Run("a mode that cannot be set is logged once and does not fail", func(t *testing.T) {
+		t.Parallel()
+		d, logs := gcTestDaemon(t)
+		dir := t.TempDir()
+		before, err := os.Stat(dir)
+		if err != nil {
+			t.Fatalf("stat archive directory: %v", err)
+		}
+		// An owned temporary directory cannot be made unchmodable on every
+		// host, so the refusal is driven through the same call the step makes,
+		// with a chmod that refuses.
+		d.tightenArchiveDir(dir, func(string, fs.FileMode) error {
+			return errors.New("operation not permitted")
+		})
+
+		if got := strings.Count(logs.String(), "cannot set"); got != 1 {
+			t.Errorf("log holds %d 'cannot set' line(s), want one:\n%s", got, logs.String())
+		}
+		if !strings.Contains(logs.String(), "operation not permitted") || !strings.Contains(logs.String(), "continuing") {
+			t.Errorf("log does not say why the mode was left alone:\n%s", logs.String())
+		}
+		after, err := os.Stat(dir)
+		if err != nil {
+			t.Fatalf("stat archive directory: %v", err)
+		}
+		if after.Mode().Perm() != before.Mode().Perm() {
+			t.Errorf("archive directory mode = %04o, want the refused %04o left alone",
+				after.Mode().Perm(), before.Mode().Perm())
+		}
+	})
 }
 
 // newEventsArchiveEngine builds an in-memory go-mysql-server engine with a gt

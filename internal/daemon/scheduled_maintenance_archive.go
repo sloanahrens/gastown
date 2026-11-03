@@ -60,6 +60,18 @@ const (
 	// already-archived ones.
 	maintenanceArchiveCommitLimit = 5000
 
+	// maintenanceArchiveEventsLimit bounds one database's events read: a first
+	// export can face a whole table, so the read writes at most this many of
+	// the oldest rows the watermark does not hold, and the next run reads the
+	// rest. The lookback window and the bound work together: the watermark
+	// after a run is the newest row written, so the next window starts at that
+	// row minus eventsArchiveLookback, and every row the bound left unread has
+	// a created_at no earlier than the newest written row, so it is inside that
+	// window. Ids
+	// already archived are skipped as the rows stream past, so the bound counts
+	// fresh rows and a window full of already-archived ones cannot stall it.
+	maintenanceArchiveEventsLimit = 5000
+
 	// maintenanceArchiveDirKey names the setting in log and error text.
 	maintenanceArchiveDirKey = config.MaintenanceArchiveDirKey
 
@@ -371,6 +383,10 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 			dir, err))
 		return maintenanceGCResult{outcome: gcOutcomeCompleted}, allUnarchived(databases)
 	}
+	// MkdirAll leaves an existing directory's mode alone, so a directory this
+	// step did not create (or one made under a looser umask) can stay
+	// world-readable. Tighten it every run.
+	d.tightenArchiveDir(dir, os.Chmod)
 
 	parent := d.ctx
 	if parent == nil {
@@ -402,6 +418,17 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 			len(failed), strings.Join(failed, "\n"), dir))
 	}
 	return maintenanceGCResult{outcome: gcOutcomeCompleted}, unarchived
+}
+
+// tightenArchiveDir sets the archive directory to owner-only through chmod. The
+// archive holds the town's commit messages and event rows, so it must not be
+// world-readable. A mode the step cannot set is logged and the run continues:
+// an archive the daemon cannot tighten still holds history a flatten discards,
+// and failing the export would leave that history unarchived.
+func (d *Daemon) tightenArchiveDir(dir string, chmod func(string, fs.FileMode) error) {
+	if err := chmod(dir, 0o700); err != nil {
+		d.logger.Printf("scheduled_maintenance: archive: cannot set %s to 0700: %v — continuing", dir, err)
+	}
 }
 
 // allUnarchived marks every database as not archived, for a failure that
@@ -589,6 +616,15 @@ func (d *Daemon) maintenanceArchiveEvents(parent context.Context, dir, db string
 	if len(fresh) == 0 {
 		return nil // the whole window is already archived: nothing new
 	}
+	if exp.existed && exp.start > 0 {
+		// The file already carries a header. Appending a member under a
+		// different one would leave a file no reader can interpret, so a
+		// database whose table no longer matches its file fails its export and
+		// keeps its watermark.
+		if err := checkEventsArchiveHeader(path, batch.Columns); err != nil {
+			return exp.fail(err)
+		}
+	}
 	if err := exp.append(s, batch.Columns, fresh); err != nil {
 		return exp.fail(fmt.Errorf("writing %s: %w", path, err))
 	}
@@ -678,6 +714,38 @@ func eventsWatermarkColumns(columns []string) (createdAt, id int, err error) {
 		return 0, 0, fmt.Errorf("events table has no created_at and id columns: %v", columns)
 	}
 	return createdAt, id, nil
+}
+
+// checkEventsArchiveHeader reads the header of an existing events archive file
+// and reports an error when it does not name the events table's current
+// columns. Such a file was written when the table had other columns, and a
+// member appended under today's header would be unreadable in it; a header that
+// cannot be read at all is no better. The caller refuses that database's export
+// rather than write a file it cannot read back.
+func checkEventsArchiveHeader(path string, columns []string) (err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("reading %s's header: %w", path, err)
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("reading %s's header: %w", path, err)
+	}
+	defer func() {
+		if cerr := gz.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("reading %s's header: %w", path, cerr)
+		}
+	}()
+	header, err := csv.NewReader(gz).Read()
+	if err != nil {
+		return fmt.Errorf("reading %s's header: %w", path, err)
+	}
+	if !slices.Equal(header, columns) {
+		return fmt.Errorf("%s holds the columns %v, but the events table now has %v: refusing to append a member the file cannot read back",
+			path, header, columns)
+	}
+	return nil
 }
 
 // archiveFileName is <kind>-<db>-<UTC date>.csv.gz: one file per database per
@@ -843,17 +911,43 @@ var archiveDatePart = regexp.MustCompile(`^\d{8}$`)
 // call an unarchived commit safe. A directory with no file for db is an empty
 // set, not an error: that database has archived nothing yet.
 func LoadArchivedCommitHashes(dir, db string) (map[string]struct{}, error) {
-	if err := validMaintenanceDBName(db); err != nil {
+	sets, err := LoadArchivedCommitHashesFor(dir, []string{db})
+	if err != nil {
 		return nil, err
+	}
+	return sets[db], nil
+}
+
+// LoadArchivedCommitHashesFor returns the archived commit hashes of every listed
+// database from one reading of the archive directory: the directory is listed
+// once and each listed database's files are opened once, however many databases
+// the call covers. `gt dolt status` reads every database's set through one call,
+// so a status call does not walk the directory again for each database.
+//
+// A file belonging to a database that was not listed is skipped without being
+// read. A file that cannot be read, or one that is a directory, is an error: a
+// partial set would let the pre-flatten check assert an unarchived commit is
+// safe.
+func LoadArchivedCommitHashesFor(dir string, databases []string) (map[string]map[string]struct{}, error) {
+	wanted := make(map[string]bool, len(databases))
+	for _, db := range databases {
+		if err := validMaintenanceDBName(db); err != nil {
+			return nil, err
+		}
+		wanted[db] = true
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("reading the history archive %s: %w", dir, err)
 	}
-	out := map[string]struct{}{}
+	sets := make(map[string]map[string]struct{}, len(databases))
+	for _, db := range databases {
+		sets[db] = map[string]struct{}{}
+	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if !archiveCommitFileFor(name, db) {
+		db, ok := archiveCommitFileDB(name)
+		if !ok || !wanted[db] {
 			continue
 		}
 		if entry.IsDir() {
@@ -864,27 +958,27 @@ func LoadArchivedCommitHashes(dir, db string) (map[string]struct{}, error) {
 			return nil, err
 		}
 		for _, hash := range hashes {
-			out[hash] = struct{}{}
+			sets[db][hash] = struct{}{}
 		}
 	}
-	return out, nil
+	return sets, nil
 }
 
-// archiveCommitFileFor reports whether name is db's commit archive file:
-// dolt-log-<db>-<8-digit UTC date>.csv.gz. The name is parsed from the right,
-// so a database name that extends a shorter one is never mistaken for it:
-// dolt-log-foo-bar-20261102.csv.gz is foo-bar's file, not foo's.
-func archiveCommitFileFor(name, db string) bool {
+// archiveCommitFileDB returns the database a commit archive file name belongs
+// to: dolt-log-<db>-<8-digit UTC date>.csv.gz. The name is parsed from the
+// right, so a database name that extends a shorter one is never mistaken for
+// it: dolt-log-foo-bar-20261102.csv.gz is foo-bar's file, not foo's.
+func archiveCommitFileDB(name string) (string, bool) {
 	const prefix = "dolt-log-"
 	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".csv.gz") {
-		return false
+		return "", false
 	}
 	stem := strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".csv.gz")
 	i := strings.LastIndex(stem, "-")
-	if i < 0 || !archiveDatePart.MatchString(stem[i+1:]) {
-		return false
+	if i <= 0 || !archiveDatePart.MatchString(stem[i+1:]) {
+		return "", false
 	}
-	return stem[:i] == db
+	return stem[:i], true
 }
 
 // archivedCommitHashesFromFile reads one commit archive file's commit_hash
@@ -1013,9 +1107,16 @@ func (d *Daemon) doltArchiveLog(ctx context.Context, db string, archived map[str
 }
 
 // doltArchiveEvents reads db's events rows at or after the lookback window's
-// start, oldest first. It is the events archive's only SQL, a read-only SELECT
-// through the running server, and every column is read in the table's own
-// order.
+// start, oldest first, and stops once it holds maintenanceArchiveEventsLimit
+// rows the recorded watermark does not already hold. It is the events archive's
+// only SQL, a read-only SELECT through the running server, and every column is
+// read in the table's own order.
+//
+// It reads the archived ids from the recorded watermark itself, because the
+// read's bound has to count only rows this run would write: a window whose
+// first rows are already archived would otherwise fill any row bound and stall
+// the cursor. The caller keeps filtering the ids too, so an injected read (the
+// export's seam) still never writes a row twice.
 func (d *Daemon) doltArchiveEvents(ctx context.Context, db, since string) (archiveEvents, error) {
 	if err := validMaintenanceDBName(db); err != nil {
 		return archiveEvents{}, err
@@ -1023,6 +1124,10 @@ func (d *Daemon) doltArchiveEvents(ctx context.Context, db, since string) (archi
 	query, err := eventsArchiveQuery(db, since)
 	if err != nil {
 		return archiveEvents{}, err
+	}
+	archived, err := d.eventsArchiveIDs(db)
+	if err != nil {
+		return archiveEvents{}, fmt.Errorf("events read: %w", err)
 	}
 	// No parseTime: the row is archived as the text Dolt renders it, and every
 	// column is scanned as text.
@@ -1042,7 +1147,77 @@ func (d *Daemon) doltArchiveEvents(ctx context.Context, db, since string) (archi
 	}
 	defer rows.Close()
 
-	return eventsArchiveRows(rows)
+	return eventsArchiveBatch(rows, archived)
+}
+
+// eventsArchiveBatch reads the columns of an open events result set and the
+// first maintenanceArchiveEventsLimit rows whose id is not in archived, oldest
+// first. A set it cannot read, or one without the watermark's columns, is an
+// error rather than an empty batch the watermark would walk past.
+func eventsArchiveBatch(rows *sql.Rows, archived map[string]bool) (archiveEvents, error) {
+	columns, err := rows.Columns()
+	if err != nil {
+		return archiveEvents{}, fmt.Errorf("events read: %w", err)
+	}
+	_, idColumn, err := eventsWatermarkColumns(columns)
+	if err != nil {
+		return archiveEvents{}, fmt.Errorf("events read: %w", err)
+	}
+	selected, err := firstUnarchivedEvents(func() ([]string, bool, error) {
+		if !rows.Next() {
+			if err := rows.Err(); err != nil {
+				return nil, false, fmt.Errorf("events read: %w", err)
+			}
+			return nil, false, nil
+		}
+		row, err := scanEventsRow(rows, len(columns))
+		if err != nil {
+			return nil, false, fmt.Errorf("events read: %w", err)
+		}
+		return row, true, nil
+	}, archived, idColumn)
+	if err != nil {
+		return archiveEvents{}, err
+	}
+	return archiveEvents{Columns: columns, Rows: selected}, nil
+}
+
+// eventsArchiveIDs returns the ids db's recorded events watermark holds: the
+// rows the archive already wrote inside its lookback window. The events read
+// skips them while it streams, so its bound counts only rows that would be
+// written. The record is the same daemon/maintenance_state.json entry the
+// export advances; a file that cannot be read is an error, never an empty set
+// that would make the read count already-archived rows against the bound.
+func (d *Daemon) eventsArchiveIDs(db string) (map[string]bool, error) {
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		return nil, fmt.Errorf("reading the events watermark: %w", err)
+	}
+	return st.ArchiveEventsWatermarks[db].ArchivedIDs(), nil
+}
+
+// firstUnarchivedEvents reads rows from next, oldest first, and returns the
+// first maintenanceArchiveEventsLimit whose id is not in archived. next reports
+// ok false at the end of the set. Each row is as wide as the columns idColumn
+// indexes, because the reader scans exactly that many values into it. It stops
+// as soon as it holds the bound, so a run never holds more rows than it writes
+// and the rest is read by the next run from the advanced watermark.
+func firstUnarchivedEvents(next func() ([]string, bool, error), archived map[string]bool, idColumn int) ([][]string, error) {
+	var out [][]string
+	for len(out) < maintenanceArchiveEventsLimit {
+		row, ok, err := next()
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			break
+		}
+		if archived[row[idColumn]] {
+			continue
+		}
+		out = append(out, row)
+	}
+	return out, nil
 }
 
 // eventsArchiveQuery renders the events read's SELECT: every column of db's
@@ -1085,17 +1260,9 @@ func eventsArchiveRows(rows *sql.Rows) (archiveEvents, error) {
 	}
 	out := archiveEvents{Columns: columns}
 	for rows.Next() {
-		values := make([]sql.NullString, len(columns))
-		dest := make([]any, len(columns))
-		for i := range values {
-			dest[i] = &values[i]
-		}
-		if err := rows.Scan(dest...); err != nil {
+		row, err := scanEventsRow(rows, len(columns))
+		if err != nil {
 			return archiveEvents{}, fmt.Errorf("events read: %w", err)
-		}
-		row := make([]string, len(columns))
-		for i, v := range values {
-			row[i] = encodeArchiveCell(v)
 		}
 		out.Rows = append(out.Rows, row)
 	}
@@ -1103,4 +1270,22 @@ func eventsArchiveRows(rows *sql.Rows) (archiveEvents, error) {
 		return archiveEvents{}, fmt.Errorf("events read: %w", err)
 	}
 	return out, nil
+}
+
+// scanEventsRow reads one result-set row's values as the archive's CSV cells:
+// every column as text, a NULL as the archiveNullCell marker.
+func scanEventsRow(rows *sql.Rows, width int) ([]string, error) {
+	values := make([]sql.NullString, width)
+	dest := make([]any, width)
+	for i := range values {
+		dest[i] = &values[i]
+	}
+	if err := rows.Scan(dest...); err != nil {
+		return nil, err
+	}
+	row := make([]string, width)
+	for i, v := range values {
+		row[i] = encodeArchiveCell(v)
+	}
+	return row, nil
 }
