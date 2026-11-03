@@ -10,7 +10,7 @@ type Config struct {
 	// SHA is --sha: the commit to install, "origin/main" (resolved after the
 	// fetch) when the caller names none.
 	SHA string
-	// Source is --source: manual, rebuild-gt or post-land.
+	// Source is --source: manual, rebuild-gt, post-land or gt-update.
 	Source string
 	// SlotRole is --slot-role: the gate slot role the build runs under; empty
 	// runs the build without one.
@@ -74,9 +74,9 @@ func Parse(args []string) (Config, error) {
 		*target = args[i]
 	}
 	switch cfg.Source {
-	case "manual", "rebuild-gt", "post-land":
+	case "manual", "rebuild-gt", "post-land", "gt-update":
 	default:
-		return cfg, errors.New("install-gt: --source must be manual, rebuild-gt or post-land")
+		return cfg, errors.New("install-gt: --source must be manual, rebuild-gt, post-land or gt-update")
 	}
 	if cfg.SHA == "" {
 		return cfg, errors.New("install-gt: --sha needs a commit")

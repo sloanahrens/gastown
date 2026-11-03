@@ -201,7 +201,7 @@ func TestRunWithABadArgument(t *testing.T) {
 			name:       "a bad source still ends in a result line",
 			args:       []string{"--sha", "abc123", "--source", "bogus"},
 			wantLast:   "install-gt: RESULT failed abc123 - unexpected",
-			wantStderr: "install-gt: --source must be manual, rebuild-gt or post-land",
+			wantStderr: "install-gt: --source must be manual, rebuild-gt, post-land or gt-update",
 		},
 		{
 			name:       "an unknown argument stops parsing where it stands",
