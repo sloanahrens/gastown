@@ -18,6 +18,12 @@ import (
 	"github.com/steveyegge/gastown/internal/atomicfile"
 )
 
+// tickTime is the value sent on a heartbeat's ticks channel, and the value a
+// test clock returns where the time does not matter. RunHeartbeat ignores the
+// tick value and reads the heartbeat from Clock, so one fixed time keeps the
+// test deterministic.
+var tickTime = time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+
 // fakeClock reports the times it was given in order, one per Now call, so a
 // test knows exactly which heartbeat each tick should hold.
 type fakeClock struct {
@@ -138,7 +144,7 @@ func TestHeartbeatRewritesOnEveryTick(t *testing.T) {
 	cancel, done := startHeartbeat(t, store, tickCh, clock, nil)
 
 	for i, want := range ticks {
-		sendWithin(t, tickCh, time.Now(), "a heartbeat tick")
+		sendWithin(t, tickCh, tickTime, "a heartbeat tick")
 		got := receiveWithin(t, written, fmt.Sprintf("heartbeat write %d", i))
 		if !got.HeartbeatAt.Equal(want) {
 			t.Errorf("write %d HeartbeatAt = %v, want %v", i, got.HeartbeatAt, want)
@@ -186,11 +192,11 @@ func TestHeartbeatStopsWithContextAndReportsErrors(t *testing.T) {
 		errs := make(chan error, 2)
 		ticks := make(chan time.Time)
 		cancel, done := startHeartbeat(t, store, ticks,
-			&fakeClock{times: []time.Time{time.Now(), time.Now()}},
+			&fakeClock{times: []time.Time{tickTime, tickTime}},
 			func(err error) { reportError(t, errs, err) })
 
 		for i := 0; i < 2; i++ {
-			sendWithin(t, ticks, time.Now(), "a heartbeat tick")
+			sendWithin(t, ticks, tickTime, "a heartbeat tick")
 			err := receiveWithin(t, errs, fmt.Sprintf("the publish error for tick %d", i))
 			if err == nil {
 				t.Fatal("onError got nil for a failed publish")
@@ -212,11 +218,11 @@ func TestHeartbeatStopsWithContextAndReportsErrors(t *testing.T) {
 		errs := make(chan error, 2)
 		ticks := make(chan time.Time)
 		cancel, done := startHeartbeat(t, store, ticks,
-			&fakeClock{times: []time.Time{time.Now(), time.Now()}},
+			&fakeClock{times: []time.Time{tickTime, tickTime}},
 			func(err error) { reportError(t, errs, err) })
 
 		for i := 0; i < 2; i++ {
-			sendWithin(t, ticks, time.Now(), "a heartbeat tick")
+			sendWithin(t, ticks, tickTime, "a heartbeat tick")
 			err := receiveWithin(t, errs, fmt.Sprintf("the ErrNoCurrent report for tick %d", i))
 			if !errors.Is(err, ErrNoCurrent) {
 				t.Fatalf("onError got %v, want ErrNoCurrent", err)
@@ -234,6 +240,31 @@ func TestHeartbeatStopsWithContextAndReportsErrors(t *testing.T) {
 		close(ticks)
 		_, done := startHeartbeat(t, store, ticks, &fakeClock{}, func(error) {})
 		receiveWithin(t, done, "RunHeartbeat to return when ticks is closed")
+	})
+
+	t.Run("a nil onError is allowed and the loop continues", func(t *testing.T) {
+		t.Parallel()
+		store := &Store{Dir: filepath.Join(t.TempDir(), "update")}
+		if err := store.Write(fullState()); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		written := captureWrites(t, store)
+		store.Rename = func(_, _ string) error { return errors.New("rename refused") }
+
+		ticks := make(chan time.Time)
+		cancel, done := startHeartbeat(t, store, ticks,
+			&fakeClock{times: []time.Time{tickTime, tickTime}}, nil)
+
+		for i := 0; i < 2; i++ {
+			sendWithin(t, ticks, tickTime, "a heartbeat tick")
+			// The staged write reaches the channel before the rename fails, so
+			// receiving it proves this tick was processed despite the previous
+			// error and the nil onError.
+			receiveWithin(t, written, fmt.Sprintf("the staged write for tick %d", i))
+		}
+
+		cancel()
+		receiveWithin(t, done, "RunHeartbeat to return after ctx cancellation")
 	})
 }
 
