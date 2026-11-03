@@ -253,6 +253,14 @@ type Spec struct {
 	// naming a file is refused for it: a check that could not run must not
 	// pass as one that did.
 	Target *TargetTree
+	// BlockerCreates are the repo paths the bead's open transitive blockers
+	// declare they will create, filled by the caller like Children from those
+	// beads' Files "create:" paths (gt-hgt9j.11). A Files "modify:" or "read:"
+	// path absent from the target branch passes when it is in this set: a chain
+	// of beads where the second edits what the first adds is normal. Nil is a
+	// set the caller did not fill, and no path passes on it. Only a bead with a
+	// Files section reads the set; the cue grammar is unchanged.
+	BlockerCreates []string
 }
 
 // HasLabel reports whether the spec carries label, ignoring case and space.
@@ -625,7 +633,7 @@ func lint(s Spec, t Template, paths bool) LintVerdict {
 		}
 	}
 	if paths {
-		if r, failed := targetRefusal(s.Description, sections, s.Target); failed {
+		if r, failed := targetRefusal(s.Description, sections, s.Target, s.BlockerCreates); failed {
 			failures = append(failures, r)
 		}
 	}

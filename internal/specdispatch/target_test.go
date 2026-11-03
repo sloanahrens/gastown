@@ -568,3 +568,79 @@ func TestPathCheckFilesNeedAnInventory(t *testing.T) {
 		t.Errorf("a create-only bead was held for a missing inventory: %s", got.Line(created.ID))
 	}
 }
+
+// A modify path absent from the branch passes when an open blocker bead
+// declares it creates that path: a chain of beads where the second edits what
+// the first adds is normal (gt-hgt9j.11).
+func TestBlockerCreatesModifyPasses(t *testing.T) {
+	t.Parallel()
+	s := specWithFiles("A thing exists.", "Go only.", "modify: internal/cli/foo.go")
+	s.Target = targetOf("internal/cmd/spec.go")
+	s.BlockerCreates = []string{"internal/cli/foo.go"}
+	if v := Lint(s, defaultTemplate()); !v.Clean() {
+		t.Fatalf("a modify path an open blocker creates was refused: %s", v.Line(s.ID))
+	}
+}
+
+// A read path absent from the branch passes on a blocker's create path too
+// (gt-hgt9j.11).
+func TestBlockerCreatesReadPasses(t *testing.T) {
+	t.Parallel()
+	s := specWithFiles("A thing exists.", "Go only.", "read: internal/cli/foo.go")
+	s.Target = targetOf("internal/cmd/spec.go")
+	s.BlockerCreates = []string{"internal/cli/foo.go"}
+	if v := Lint(s, defaultTemplate()); !v.Clean() {
+		t.Fatalf("a read path an open blocker creates was refused: %s", v.Line(s.ID))
+	}
+}
+
+// A path neither the branch holds nor an open blocker creates is still
+// refused, and the reason says why the blocker set did not rescue it
+// (gt-hgt9j.11).
+func TestBlockerCreatesRefusalNamesTheGap(t *testing.T) {
+	t.Parallel()
+	s := specWithFiles("A thing exists.", "Go only.", "modify: internal/cli/foo.go")
+	s.Target = targetOf("internal/cmd/spec.go")
+	s.BlockerCreates = []string{"internal/cli/bar.go"}
+	v := Lint(s, defaultTemplate())
+	if v.Route != RouteRefuse || v.Field != "## Files" {
+		t.Fatalf("Lint = %s (%s), want a refusal naming ## Files: %s", v.Route, v.Field, v.Line(s.ID))
+	}
+	for _, want := range []string{"modify: internal/cli/foo.go", "absent from main", "no open blocker creates it"} {
+		if !strings.Contains(v.Reason, want) {
+			t.Errorf("Reason = %q, want %q", v.Reason, want)
+		}
+	}
+}
+
+// The blocker set is read only for a bead with a Files section: a cue-grammar
+// bead naming an absent path is refused exactly as before, even when the set
+// holds that path (gt-hgt9j.11).
+func TestBlockerCreatesIgnoredWithoutFiles(t *testing.T) {
+	t.Parallel()
+	s := specNaming("A thing exists.", "Change internal/cmd/bird.go.")
+	s.Target = targetOf("internal/cmd/spec.go")
+	s.BlockerCreates = []string{"internal/cmd/bird.go"}
+	v := Lint(s, defaultTemplate())
+	if v.Route != RouteRefuse || v.Field != "## Constraints" {
+		t.Fatalf("Lint = %s (%s), want a refusal naming ## Constraints: %s", v.Route, v.Field, v.Line(s.ID))
+	}
+	for _, want := range []string{"internal/cmd/bird.go", "absent from main"} {
+		if !strings.Contains(v.Reason, want) {
+			t.Errorf("Reason = %q, want %q", v.Reason, want)
+		}
+	}
+}
+
+// Paths are compared exactly after path.Clean: a relative spelling in the
+// blocker set names the same file as the Files entry's clean path
+// (gt-hgt9j.11).
+func TestBlockerCreatesCleansPaths(t *testing.T) {
+	t.Parallel()
+	s := specWithFiles("A thing exists.", "Go only.", "modify: b.go")
+	s.Target = targetOf("internal/cmd/spec.go")
+	s.BlockerCreates = []string{"./a/../b.go"}
+	if v := Lint(s, defaultTemplate()); !v.Clean() {
+		t.Fatalf("a clean path was refused against a relative blocker path: %s", v.Line(s.ID))
+	}
+}
