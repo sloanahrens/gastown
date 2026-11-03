@@ -2486,6 +2486,75 @@ func TestArchiveEventsLoopTakesSeveralBatchesInOneCycle(t *testing.T) {
 	}
 }
 
+// TestArchiveEventsLoopKeepsGoingPastTheLookbackReRead: the events read
+// re-reads its lookback window, so a page it returns can carry rows the
+// watermark already holds. A full page the export filters down to a few fresh
+// rows must not end the loop while more rows are still behind (gt-o4sk8.1).
+func TestArchiveEventsLoopKeepsGoingPastTheLookbackReRead(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	withGCFakes(t, d)
+	dir := t.TempDir()
+	d.patrolConfig = archiveConfig(dir)
+	limit := 5
+	d.patrolConfig.Patrols.ScheduledMaintenance.ArchiveEventsLimit = &limit
+	d.maint.now = func() time.Time { return gcTestNow }
+	d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {
+		return nil, nil // no commits: this test drives the events export
+	}
+	columns := []string{"id", "created_at"}
+	rows := make([][]string, 0, 12)
+	// Ten hours apart, so the window's start moves past the archived prefix as
+	// the watermark advances.
+	for i := 1; i <= 12; i++ {
+		rows = append(rows, []string{
+			fmt.Sprintf("h%05d", i),
+			gcTestNow.Add(-200*time.Hour + time.Duration(i)*10*time.Hour).Format("2006-01-02 15:04:05"),
+		})
+	}
+	// The lookback re-read: a page bounded by rows, archived ones included.
+	reads := 0
+	d.maint.archiveEventsRead = func(_ context.Context, _ *Daemon, _ string, since string) (archiveEvents, error) {
+		reads++
+		page := archiveEvents{Columns: columns}
+		for _, row := range rows {
+			if since != "" && row[1] < since {
+				continue
+			}
+			page.Rows = append(page.Rows, row)
+			if len(page.Rows) == limit {
+				break
+			}
+		}
+		return page, nil
+	}
+
+	out, unarchived := d.maintenanceArchive([]string{"gt"})
+
+	if out.outcome != gcOutcomeCompleted || len(unarchived) != 0 {
+		t.Fatalf("maintenanceArchive = %v, unarchived %v; want completed with none", out, unarchived)
+	}
+	if reads != 5 {
+		t.Errorf("events read %d time(s), want 5: a full page of mostly archived rows keeps the loop going", reads)
+	}
+	got := readArchiveCSV(t, eventsArchiveFile(dir, "gt"))
+	if len(got) != 13 {
+		t.Fatalf("archive holds %d row(s) and a header, want all 12 rows once", len(got)-1)
+	}
+	for i, row := range got[1:] {
+		if want := fmt.Sprintf("h%05d", i+1); row[0] != want {
+			t.Errorf("row %d = %s, want %s", i, row[0], want)
+		}
+	}
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	if want := rows[len(rows)-1][1]; st.ArchiveEventsWatermarks["gt"].CreatedAt != want {
+		t.Errorf("watermark created_at = %s, want %s (the last row)", st.ArchiveEventsWatermarks["gt"].CreatedAt, want)
+	}
+}
+
 // TestArchiveLoopStopsAtTheBudgetButEveryDatabaseGetsABatch: one deadline
 // bounds every database's extra batches. Once the first database's second
 // batch ends past the budget it takes no third one, and the next database still
@@ -2599,6 +2668,97 @@ func TestArchiveLoopStopsWhenNothingIsBehindOrThereIsNoProgress(t *testing.T) {
 			t.Errorf("dolt_log read %d time(s), want 1: a batch that records no progress ends the loop", reads)
 		}
 	})
+}
+
+// TestArchiveLoopStopsWhenABatchFailsMidLoop: a failure after a full batch ends
+// the loop, keeps the watermark that batch recorded, and names the export in one
+// escalation (gt-o4sk8.1).
+func TestArchiveLoopStopsWhenABatchFailsMidLoop(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	dir := t.TempDir()
+	d.patrolConfig = archiveConfig(dir)
+	limit := 5
+	d.patrolConfig.Patrols.ScheduledMaintenance.ArchiveCommitLimit = &limit
+	d.maint.now = func() time.Time { return gcTestNow }
+	withEventsFake(d, nil, nil, nil)
+	commits := make([]archiveCommit, 0, 20)
+	for i := 1; i <= 20; i++ {
+		commits = append(commits, archiveCommit{
+			Hash: fmt.Sprintf("h%05d", i), Committer: "c", Date: gcTestNow.Add(time.Duration(i) * time.Second), Message: "m",
+		})
+	}
+	reads := 0
+	d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {
+		reads++
+		if reads == 1 {
+			return commits[:limit], nil
+		}
+		return nil, errors.New("the server went away")
+	}
+
+	out, unarchived := d.maintenanceArchive([]string{"gt"})
+
+	if out.outcome != gcOutcomeCompleted {
+		t.Fatalf("maintenanceArchive = %v, want completed", out)
+	}
+	if reads != 2 {
+		t.Errorf("dolt_log read %d time(s), want 2: the failing batch ends the loop", reads)
+	}
+	if !unarchived["gt"] || len(unarchived) != 1 {
+		t.Errorf("unarchived = %v, want gt marked: its archive did not finish", unarchived)
+	}
+	if len(f.escalations) != 1 || !strings.Contains(f.escalations[0], "gt dolt_log") || !strings.Contains(f.escalations[0], "the server went away") {
+		t.Errorf("escalations = %v, want one naming the failed dolt_log export", f.escalations)
+	}
+	if got := readArchiveCSV(t, archiveFile(dir, "gt")); len(got) != limit+1 {
+		t.Errorf("archive holds %d row(s), want the first batch's %d once", len(got)-1, limit)
+	}
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	if want := gcTestNow.Add(time.Duration(limit) * time.Second); !st.ArchiveWatermarks["gt"].Date.Equal(want) {
+		t.Errorf("watermark date = %s, want %s (the first batch kept after the failure)", st.ArchiveWatermarks["gt"].Date, want)
+	}
+}
+
+// TestArchiveLoopHasAnIterationBound: a read that never runs dry ends at the
+// per-cycle batch bound even when the injected clock never reaches the
+// deadline, and says so (gt-o4sk8.1).
+func TestArchiveLoopHasAnIterationBound(t *testing.T) {
+	t.Parallel()
+	d, logs := gcTestDaemon(t)
+	withGCFakes(t, d)
+	dir := t.TempDir()
+	d.patrolConfig = archiveConfig(dir)
+	limit := 1
+	d.patrolConfig.Patrols.ScheduledMaintenance.ArchiveCommitLimit = &limit
+	d.maint.now = func() time.Time { return gcTestNow } // never reaches the deadline
+	withEventsFake(d, nil, nil, nil)
+	// A no-op append keeps the batches on the loop rather than on writing and
+	// re-reading a growing archive.
+	d.maint.archiveAppend = func(string, []string, [][]string) error { return nil }
+	reads := 0
+	d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {
+		reads++
+		return []archiveCommit{{
+			Hash: fmt.Sprintf("h%06d", reads), Committer: "c", Date: gcTestNow.Add(time.Duration(reads) * time.Second), Message: "m",
+		}}, nil
+	}
+
+	out, unarchived := d.maintenanceArchive([]string{"gt"})
+
+	if out.outcome != gcOutcomeCompleted || len(unarchived) != 0 {
+		t.Fatalf("maintenanceArchive = %v, unarchived %v; want completed with none", out, unarchived)
+	}
+	if reads != maintenanceArchiveMaxBatchesPerExport {
+		t.Errorf("dolt_log read %d time(s), want the %d-batch per-cycle bound", reads, maintenanceArchiveMaxBatchesPerExport)
+	}
+	if !strings.Contains(logs.String(), "per-cycle bound") {
+		t.Errorf("log does not report the per-cycle bound:\n%s", logs.String())
+	}
 }
 
 // TestArchiveBudgetSetting: archive_budget unset reads ten minutes and "10m"

@@ -309,11 +309,14 @@ func encodeArchiveCell(v sql.NullString) string {
 // to the archive. One export failing keeps its watermark and is named in the
 // log; the database's other export and the other databases still export.
 //
-// Each database's two exports keep taking limit-sized batches until a batch
-// comes back short (nothing more is behind), a batch records no progress, a
-// batch fails, or the archive_budget deadline passes (gt-o4sk8.1). Every
-// database still gets one batch of each export, however late the deadline; the
-// deadline only stops extra batches.
+// Each database's two exports keep taking limit-sized batches until a batch's
+// read comes back short (fewer rows than the bound, so nothing more is behind),
+// a batch records no progress, a batch fails, the archive_budget deadline
+// passes, or the per-cycle batch bound is reached (gt-o4sk8.1). A short batch
+// is measured on the rows the read returned, not on the rows written, so an
+// events read that re-returns the lookback window's archived rows cannot end
+// the loop early. Every database still gets one batch of each export, however
+// late the deadline; the deadline only stops extra batches.
 //
 // It returns the databases whose history was not archived this run, and the
 // cycle skips their gc: history is not collected for a database whose archive
@@ -414,7 +417,7 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 	var failed []string
 	unarchived := map[string]bool{}
 	for _, db := range databases {
-		commitErr := archiveUntilCaughtUp(st.ArchiveWatermarks[db], commitLimit, deadline, s.now, sameCommitWatermark,
+		commitCapped, commitErr := archiveUntilCaughtUp(st.ArchiveWatermarks[db], commitLimit, deadline, s.now, sameCommitWatermark,
 			func(wm ArchiveWatermark) (int, ArchiveWatermark, error) {
 				return d.maintenanceArchiveCommits(ctx, dir, db, wm)
 			})
@@ -422,8 +425,11 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 			failed = append(failed, db+" dolt_log: "+commitErr.Error())
 			unarchived[db] = true
 			d.logger.Printf("scheduled_maintenance: archive %s dolt_log: FAILED: %v — watermark kept", db, commitErr)
+		} else if commitCapped {
+			d.logger.Printf("scheduled_maintenance: archive %s dolt_log: stopped at the %d-batch per-cycle bound, still behind — the next cycle continues from the watermark",
+				db, maintenanceArchiveMaxBatchesPerExport)
 		}
-		eventsErr := archiveUntilCaughtUp(st.ArchiveEventsWatermarks[db], eventsLimit, deadline, s.now, sameEventsArchiveWatermark,
+		eventsCapped, eventsErr := archiveUntilCaughtUp(st.ArchiveEventsWatermarks[db], eventsLimit, deadline, s.now, sameEventsArchiveWatermark,
 			func(wm EventsArchiveWatermark) (int, EventsArchiveWatermark, error) {
 				return d.maintenanceArchiveEvents(ctx, dir, db, wm)
 			})
@@ -431,6 +437,9 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 			failed = append(failed, db+" events: "+eventsErr.Error())
 			unarchived[db] = true
 			d.logger.Printf("scheduled_maintenance: archive %s events: FAILED: %v — watermark kept", db, eventsErr)
+		} else if eventsCapped {
+			d.logger.Printf("scheduled_maintenance: archive %s events: stopped at the %d-batch per-cycle bound, still behind — the next cycle continues from the watermark",
+				db, maintenanceArchiveMaxBatchesPerExport)
 		}
 	}
 	if len(failed) > 0 {
@@ -520,15 +529,26 @@ func (d *Daemon) maintenanceArchiveBudget() (time.Duration, error) {
 	return d.patrolConfig.Patrols.ScheduledMaintenance.ParseArchiveBudget()
 }
 
+// maintenanceArchiveMaxBatchesPerExport bounds one export's batches in a cycle
+// so a clock the caller injects, one that never reaches the deadline, cannot
+// hold the step forever. A database still behind at the bound keeps its
+// watermark and the next cycle continues from it (gt-o4sk8.1).
+const maintenanceArchiveMaxBatchesPerExport = 1000
+
 // archiveUntilCaughtUp takes batches of one database's export, each starting at
 // the watermark the previous one recorded, until nothing more is behind or the
-// budget ends. It stops when a batch writes fewer rows than the bound (the read
-// had nothing more to give), when a batch records the same watermark it started
-// with (no progress, so another batch would repeat it), when a batch fails, or
-// when now() is at or past deadline. The first batch always runs, even past the
-// deadline, so every database gets its one batch in a cycle; the deadline only
-// stops the extra ones (gt-o4sk8.1). It returns the failing batch's error; the
-// batch itself has already kept the watermark unchanged (gt-7nxj4).
+// budget ends. It stops when a batch's read returned fewer rows than the bound
+// (nothing more was there to read), when a batch records the same watermark it
+// started with (no progress, so another batch would repeat it), when a batch
+// fails, when now() is at or past deadline, or at
+// maintenanceArchiveMaxBatchesPerExport. The stop counts rows the read
+// returned, not rows written: the events read re-reads its lookback window, so
+// a full page can carry rows the watermark already holds and a page short only
+// after filtering would end the loop with rows still behind (gt-o4sk8.1). The
+// first batch always runs, even past the deadline, so every database gets its
+// one batch in a cycle; the deadline only stops the extra ones. It reports
+// whether the batch bound ended the loop and returns the failing batch's
+// error; the batch itself has already kept the watermark unchanged (gt-7nxj4).
 func archiveUntilCaughtUp[W any](
 	wm W,
 	limit int,
@@ -536,20 +556,21 @@ func archiveUntilCaughtUp[W any](
 	now func() time.Time,
 	same func(W, W) bool,
 	batch func(W) (int, W, error),
-) error {
-	for {
-		wrote, next, err := batch(wm)
+) (capped bool, err error) {
+	for batches := 0; batches < maintenanceArchiveMaxBatchesPerExport; batches++ {
+		read, next, err := batch(wm)
 		if err != nil {
-			return err
+			return false, err
 		}
-		if wrote < limit || same(next, wm) {
-			return nil
+		if read < limit || same(next, wm) {
+			return false, nil
 		}
 		if !now().Before(deadline) {
-			return nil
+			return false, nil
 		}
 		wm = next
 	}
+	return true, nil
 }
 
 // sameCommitWatermark reports whether two commit watermarks record the same
@@ -573,8 +594,10 @@ func sameEventsArchiveWatermark(a, b EventsArchiveWatermark) bool {
 // next run re-exports them instead of appending them twice.
 //
 // It returns how many fresh commits it wrote and the watermark it recorded, or
-// wm unchanged when there was nothing new; the caller loops on both. On a
-// failure it returns wm, because the rollback leaves the archive where it was.
+// wm unchanged when there was nothing new; the caller loops on both. The read
+// caps at unarchived commits and every one is written, so the count is also the
+// rows the batch read, which is what the caller's short-batch stop measures. On
+// a failure it returns wm, because the rollback leaves the archive where it was.
 func (d *Daemon) maintenanceArchiveCommits(ctx context.Context, dir, db string, wm ArchiveWatermark) (wrote int, next ArchiveWatermark, err error) {
 	if err := validMaintenanceDBName(db); err != nil {
 		return 0, wm, err
@@ -670,10 +693,14 @@ func archiveWatermarkAfter(prev ArchiveWatermark, commits []archiveCommit) (Arch
 // a half-exported table is never left ahead of the watermark for the next run
 // to append again.
 //
-// It returns how many fresh rows it wrote and the watermark it recorded, or wm
-// unchanged when there was nothing new; the caller loops on both. On a failure
-// it returns wm, because the rollback leaves the archive where it was.
-func (d *Daemon) maintenanceArchiveEvents(parent context.Context, dir, db string, wm EventsArchiveWatermark) (wrote int, next EventsArchiveWatermark, err error) {
+// It returns how many rows its read returned and the watermark it recorded, or
+// wm unchanged when there was nothing new; the caller loops on both. The count
+// is the rows read, not only the fresh ones written: a read that re-returns the
+// lookback window's archived rows hands back a full page the export filters
+// down, and the caller must not read that short batch as "nothing more is
+// behind". On a failure it returns wm, because the rollback leaves the archive
+// where it was.
+func (d *Daemon) maintenanceArchiveEvents(parent context.Context, dir, db string, wm EventsArchiveWatermark) (read int, next EventsArchiveWatermark, err error) {
 	if err := validMaintenanceDBName(db); err != nil {
 		return 0, wm, err
 	}
@@ -716,7 +743,7 @@ func (d *Daemon) maintenanceArchiveEvents(parent context.Context, dir, db string
 		fresh = append(fresh, row)
 	}
 	if len(fresh) == 0 {
-		return 0, wm, nil // the whole window is already archived: nothing new
+		return len(batch.Rows), wm, nil // the whole window is already archived: nothing new
 	}
 	if exp.existed && exp.start > 0 {
 		// The file already carries a header. Appending a member under a
@@ -739,7 +766,7 @@ func (d *Daemon) maintenanceArchiveEvents(parent context.Context, dir, db string
 	}
 	d.logger.Printf("scheduled_maintenance: archive %s events: %d row(s) to %s, through %s (%d id(s) in the window)",
 		db, len(fresh), path, next.CreatedAt, len(next.Archived))
-	return len(fresh), next, nil
+	return len(batch.Rows), next, nil
 }
 
 // archiveExport is one database's export into one archive file. Until the
