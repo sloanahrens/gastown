@@ -617,7 +617,7 @@ func TestPolecatsAndBeadsHeadersCarryASummary(t *testing.T) {
 		t.Errorf("the opened beads header hides its summary (hidden=%v) or its note (hidden=%v)", f.SummaryHidden, f.NoteHidden)
 	}
 	queue := dom.element(t, "beads").Text
-	for _, want := range []string{"4", "dispatchable", "61", "ready", "29 beads blocked"} {
+	for _, want := range []string{"4", "start now", "61", "ready", "29 beads blocked"} {
 		if !strings.Contains(queue, want) {
 			t.Errorf("the beads panel does not carry %q: %.200q", want, queue)
 		}
