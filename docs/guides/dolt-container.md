@@ -2,185 +2,364 @@
 
 # Moving the town's Dolt server into a Docker container
 
-The container runs the same `dolt sql-server` on the same `.dolt-data`, under a memory cap, with its port published on `127.0.0.1` only. This page rehearses it on a restored copy, cuts over under the dispatch hold, and rolls back.
+The container runs the same `dolt sql-server` on the same `.dolt-data`, under a
+memory cap, with its port published on `127.0.0.1` only. This page rehearses it
+on two restored copies of one nightly backup, cuts over under the dispatch
+hold, and rolls back.
 
-gt never creates the container. `gt dolt container plan` prints one `docker create` command, and a person reads it, reviews it and runs it. Once `dolt.external_container` names the container in `~/gt/mayor/town.json`, `gt dolt start`, `gt dolt stop` and `gt dolt restart` manage it with `docker start` and `docker stop`; the entry is described under "A Dolt server in a Docker container" in [Dolt storage](../design/dolt-storage.md).
+gt never creates the container. `gt dolt container plan` prints one `docker
+create` command, and the operator reads, reviews and runs it. Once
+`dolt.external_container` names the container in `~/gt/mayor/town.json`, `gt
+dolt start`, `gt dolt stop` and `gt dolt restart` run `docker start` and
+`docker stop` on it; the entry is described under "A Dolt server in a Docker
+container" in [Dolt storage](../design/dolt-storage.md).
 
-Run every step from the town root (`cd ~/gt`). The shell variables set in step 1.2 are used by the later steps, so run the page in one shell or re-set them.
+Run every step from the town root (`cd ~/gt`), in one shell: later steps use the
+shell variables set earlier.
 
-Before restoring a copy, read [Restoring a Dolt database from the nightly backup](../dolt-restore.md): it defines a night, a `.partial` directory and what `dolt backup restore` does. Before parking the town, read "Before any rewrite" in [Dolt history rewrites: offline procedures](../dolt-history-offline.md): it is the parking and counting procedure this page borrows.
+Before parking the town, read "Before any rewrite" in [Dolt history rewrites:
+offline procedures](../dolt-history-offline.md). Before setting the hold, read
+"The drain" in [Power runbook](../power-runbook.md): it defines the readings
+that must reach zero. Before restoring a copy, read [Restoring a Dolt database
+from the nightly backup](../dolt-restore.md): it defines a night, a `.partial`
+directory and what `dolt backup restore` does.
 
 ## 1. Rehearsal on a restored copy
 
-Run this in the quiet window right after a nightly backup, with the hold on before the backup runs and the town drained. The copy and the live server must hold the same content, or the comparison in step 1.5 cannot match; a difference is an investigation, not a rerun.
+The rehearsal compares two servers that serve two restores of the same
+nightly backup: the host `dolt` serves one copy, the container serves the
+other. Neither endpoint is the running town server, so no write made after the
+backup can enter the comparison. The running server is read once, in step 1.6,
+as the latency baseline.
 
 ### 1.1 Park the town
 
-Write the dispatch hold with a note, wait for the drain, and pause the Dolt server so the daemon neither probes, starts nor restarts it, and gt reports the deliberate outage. This is the parking procedure under "Before any rewrite" in [Dolt history rewrites](../dolt-history-offline.md).
+Write the dispatch hold with a note that names this rehearsal, wait for the
+drain ([Power runbook](../power-runbook.md), "The drain"), then pause the Dolt
+writers. The pause writes the marker `~/gt/daemon/dolt.pause`. The daemon
+honours it: it neither probes, starts nor restarts the server, and `gt dolt
+start` refuses. A `gt` client honours it too: a Dolt call that fails while the
+marker holds reports the pause rather than the connection error, and bd stops
+retrying. The pause does not stop the server, which keeps serving through the
+whole rehearsal, and it keeps the daemon's maintenance gc off the live server
+while step 1.6 times it. The marker lapses at `--until` on its own.
 
 ```bash
 printf '%s\n' 'overseer: Dolt container rehearsal; drain and hold' > ~/gt/seat-refill.hold
-gt power status
+gt power status        # re-run until the drain reads zero; only then run the next two lines
 gt dolt pause --reason 'Dolt container rehearsal' --until 90m
+gt dolt status         # names this pause, its reason and its deadline
 ```
 
-In `gt power status`, `landings pending`, `polecats working` and `dolt gc running` must all read 0, and only then go on.
+Go on only when the drain has read zero and `gt dolt status` names this pause.
+If either check fails, lift the hold and stop.
 
-### 1.2 Restore last night's backup into the rehearsal directory
+### 1.2 Pick the newest complete night and restore it twice
 
-The night's directory holds one backup per database and a `backup.json`; the glob selects the databases.
+A `.partial` directory is a night that failed or is still being written; it is
+never restored. Take the newest dated directory that is not one, and read its
+`backup.json` for the databases it holds.
 
 ```bash
-ls ~/gt-backups/dolt/
-NIGHT=2026-10-01    # the newest complete night
-ls ~/gt-backups/dolt/"$NIGHT"
+NIGHT=$(find "$HOME/gt-backups/dolt" -maxdepth 1 -type d -name '20??-??-??' ! -name '*.partial' -exec basename {} \; | sort | tail -1)
+echo "$NIGHT"
+cat "$HOME/gt-backups/dolt/$NIGHT/backup.json"
+```
+
+Restore that night twice, one scratch directory per side, the way
+[docs/dolt-restore.md](../dolt-restore.md) restores a copy: a fresh directory
+and one `dolt backup restore` per database. A directory left by an earlier
+rehearsal holds a stale copy, so remove it first.
+
+```bash
 REHEARSAL=$HOME/gt/.runtime/dolt-rehearsal
-mkdir -p "$REHEARSAL/data" "$REHEARSAL/backups"
-for BACKUP in "$HOME/gt-backups/dolt/$NIGHT"/*/; do
-  DB=$(basename "$BACKUP")
-  dolt backup restore "file://$BACKUP" "$REHEARSAL/data/$DB"
+rm -rf "$REHEARSAL"
+mkdir -p "$REHEARSAL/host/data" "$REHEARSAL/container/data" "$REHEARSAL/container/backups"
+for SIDE in host container; do
+  for BACKUP in "$HOME/gt-backups/dolt/$NIGHT"/*/; do
+    DB=$(basename "$BACKUP")
+    dolt backup restore "file://${BACKUP%/}" "$REHEARSAL/$SIDE/data/$DB"
+  done
 done
+ls "$REHEARSAL"/*/data
 ```
 
-### 1.3 Write the rehearsal config and print the plan
+Each data directory must list the same databases as `backup.json`.
 
-The config listens on the container's port and points its `data_dir` at the restored copies. The image must be the same Dolt version as the host server: `DoltServerImage` in `internal/templates/images.go` is the town's pin, and `dolt version` must print its tag; if they differ, stop.
+### 1.3 Write the two configs and print the plan
+
+The container's config must bind `0.0.0.0`: a published port arrives on the
+container's interface, and Dolt's default (`localhost`) binds the container's
+own loopback, where the forward never arrives. The host copy listens on
+`127.0.0.1:3316`, a port that is not the town's 3307.
 
 ```bash
-cat > "$REHEARSAL/config.yaml" <<YAML
+cat > "$REHEARSAL/container/config.yaml" <<YAML
 log_level: warning
 
 listener:
+  host: 0.0.0.0
   port: 3307
 
-data_dir: "$REHEARSAL/data"
+data_dir: "$REHEARSAL/container/data"
 
 behavior:
   dolt_transaction_commit: false
 YAML
 
-dolt version
-IMAGE='dolthub/dolt-sql-server:2.3.2@sha256:38d5e900583267f35e36ad738e13f202e62860b351aa4c088dceaf7dbaed7ab6'
-docker pull "$IMAGE"
-docker image inspect --format '{{json .Config.Entrypoint}} {{json .Config.Cmd}}' "$IMAGE"
+cat > "$REHEARSAL/host/config.yaml" <<YAML
+listener:
+  host: 127.0.0.1
+  port: 3316
 
-gt dolt container plan --name gt-dolt-rehearsal --image "$IMAGE" \
-  --config "$REHEARSAL/config.yaml" --data-dir "$REHEARSAL/data" \
-  --backup-dir "$REHEARSAL/backups" --host-port 3317
+data_dir: "$REHEARSAL/host/data"
+YAML
 ```
 
-The rehearsed container mounts its own empty backup directory, so the live backup root is out of a throwaway container.
-
-The entrypoint decides what to pass after the image. If it already ends in `dolt`, the printed line's leading `dolt` repeats it: keep the entrypoint and pass only `sql-server --config "$REHEARSAL/config.yaml"`. If it ends in `dolt sql-server`, pass only `--config "$REHEARSAL/config.yaml"`. A script entrypoint that execs its arguments takes the printed line unchanged. Record which form worked.
-
-### 1.4 Run the edited command and start the container
+The image is the town's pinned Dolt server: `DoltServerImage` in
+`internal/templates/images.go` joins `DoltVersion` to the image digest. The
+host's `dolt version` must print that tag; a container of another Dolt version
+serves another program and proves nothing about the town's.
 
 ```bash
-# run the docker create line printed in step 1.3, edited as the entrypoint needs
+TAG=$(sed -n 's/.*DoltVersion = "\([^"]*\)".*/\1/p' internal/templates/images.go)
+DIGEST=$(grep 'DoltServerImage =' internal/templates/images.go | sed -n 's/.*\(sha256:[0-9a-f]\{64\}\).*/\1/p')
+IMAGE="dolthub/dolt-sql-server:$TAG@$DIGEST"
+echo "$IMAGE"
+dolt version
+docker pull "$IMAGE"
+dolt version | grep -q " $TAG" || { echo "host dolt is not $TAG; stop the rehearsal" >&2; exit 1; }
+```
+
+Print the plan. The rehearsal container mounts its own empty backup directory,
+so the live backup root never enters a throwaway container, and it keeps the
+plan's default 12 GiB cap, the same cap the cutover starts with.
+
+```bash
+gt dolt container plan --name gt-dolt-rehearsal --image "$IMAGE" \
+  --config "$REHEARSAL/container/config.yaml" \
+  --data-dir "$REHEARSAL/container/data" \
+  --backup-dir "$REHEARSAL/container/backups" \
+  --host-port 3317
+```
+
+The printed line ends in `dolt sql-server --config <path>`. Check what the
+image's entrypoint already runs, because the two are concatenated:
+
+```bash
+docker image inspect --format '{{json .Config.Entrypoint}} {{json .Config.Cmd}}' "$IMAGE"
+```
+
+If the entrypoint is `dolt` alone, drop the leading `dolt` from the printed
+line and keep `sql-server --config <path>`. If it is `dolt sql-server`, pass
+only `--config <path>`. If it is a script that execs its arguments, run the
+printed line unchanged. Record which form started the server.
+
+### 1.4 Run the printed command and start both servers
+
+```bash
+# run the docker create line printed in step 1.3, edited for the entrypoint
 docker start gt-dolt-rehearsal
-docker exec gt-dolt-rehearsal dolt version
-for i in {1..30}; do
-  dolt --host 127.0.0.1 --port 3317 --user root --password "" --no-tls sql -q 'SELECT 1' && break
+
+dolt sql-server --config "$REHEARSAL/host/config.yaml" >"$REHEARSAL/host/server.log" 2>&1 &
+HOST_PID=$!
+```
+
+Wait for both to answer, and stop the rehearsal when either never does.
+
+```bash
+CONTAINER_READY=0
+for i in {1..60}; do
+  if dolt --host 127.0.0.1 --port 3317 --user root --password "" --no-tls sql -q 'SELECT 1' >/dev/null 2>&1; then
+    CONTAINER_READY=1
+    break
+  fi
   sleep 2
 done
+HOST_READY=0
+for i in {1..30}; do
+  if dolt --host 127.0.0.1 --port 3316 --user root --password "" --no-tls sql -q 'SELECT 1' >/dev/null 2>&1; then
+    HOST_READY=1
+    break
+  fi
+  sleep 2
+done
+if [ "$CONTAINER_READY" != 1 ] || [ "$HOST_READY" != 1 ]; then
+  docker logs --tail 40 gt-dolt-rehearsal
+  tail -20 "$REHEARSAL/host/server.log"
+  echo "a rehearsal server never answered (container 3317=$CONTAINER_READY, host 3316=$HOST_READY); stop the rehearsal" >&2
+  exit 1
+fi
 ```
 
-`docker exec ... dolt version` must equal the host's `dolt version`.
+`docker exec gt-dolt-rehearsal dolt version` must print the same version as the
+host's `dolt version`.
 
-### 1.5 Compare the live server against the rehearsal server
+### 1.5 Compare the two restored servers
 
 ```bash
-gt dolt compare 127.0.0.1:3307 127.0.0.1:3317
+gt dolt compare 127.0.0.1:3316 127.0.0.1:3317 | tee "$REHEARSAL/compare.txt"
 ```
 
-The command reads every database on either server; it exits 0 only when both serve the same databases with equal row counts and content hashes, and non-zero names each database that differs. Record the table.
+Both sides serve the same night and take no writes, so this comparison is a
+proof: every row must read `equal` and the command must exit 0. A non-zero exit
+names each database that differs; stop and restore the copies again. The live
+server is not an endpoint here: any write since the night would make it differ
+by design.
 
-### 1.6 Measure latency against both servers
+### 1.6 Measure latency on the live server and on both copies
 
 ```bash
-gt dolt latency --host 127.0.0.1 --port 3307 --database hq --rounds 50
-gt dolt latency --host 127.0.0.1 --port 3317 --database hq --rounds 50
+gt dolt latency --host 127.0.0.1 --port 3307 --database hq --rounds 50   # live baseline, read only
+gt dolt latency --host 127.0.0.1 --port 3316 --database hq --rounds 50   # host copy
+gt dolt latency --host 127.0.0.1 --port 3317 --database hq --rounds 50   # container
 ```
 
-Record p50, p95 and max for each. The container's numbers include the published port's forward.
+Record p50, p95 and max for each. The host copy and the container hold the same
+data, so their pair is the like-for-like comparison; the live baseline is the
+town's own server under the quiet window, read and not written.
 
-### 1.7 Measure container memory under a read burst and a full gc
+### 1.7 Measure the container's memory under a read burst and a gc
+
+The gc runs against the throwaway container copy, not the town's server, and
+the daemon's own gc is paused by step 1.1, so nothing else is collecting at
+the same time.
 
 ```bash
+BURST=""
 for i in 1 2 3 4; do
   gt dolt latency --host 127.0.0.1 --port 3317 --database hq --rounds 300 >/dev/null &
+  BURST="$BURST $!"
 done
 for BACKUP in "$HOME/gt-backups/dolt/$NIGHT"/*/; do
   DB=$(basename "$BACKUP")
   dolt --host 127.0.0.1 --port 3317 --user root --password "" --no-tls \
     --use-db "$DB" sql -q "CALL dolt_gc('--full')" &
+  BURST="$BURST $!"
 done
-for i in 1 2 3 4 5 6; do
-  docker stats --no-stream --format '{{.MemUsage}}' gt-dolt-rehearsal
+: > "$REHEARSAL/memory.txt"
+for i in {1..12}; do
+  docker stats --no-stream --format '{{.MemUsage}}' gt-dolt-rehearsal | tee -a "$REHEARSAL/memory.txt"
   sleep 10
 done
-wait
+wait $BURST
+dolt --host 127.0.0.1 --port 3317 --user root --password "" --no-tls sql -q 'SELECT 1' \
+  || { echo "the container never answered after the burst; stop the rehearsal" >&2; exit 1; }
 ```
 
-Record the highest `MEM USAGE` against the 12 GiB limit. The limit stands only if that number leaves headroom; otherwise the cutover plan takes a higher `--memory-gib`.
+`wait $BURST` waits for the burst's jobs only: a bare `wait` would also wait on
+the host copy's server, which never exits.
+
+Record the highest memory reading against the 12 GiB cap. The cap stands only
+if that reading leaves headroom; otherwise the cutover plan takes a higher
+`--memory-gib` and this rehearsal repeats with the same value. A container
+killed at its cap fails the last check, which stops the procedure.
 
 ### 1.8 Remove the rehearsal and return the town to service
 
+Record the numbers on the C2 bead (`gt-o4sk8.20`) before the directory goes:
+the compare table, the latency runs, the memory readings, the night and the
+image are all in files this step deletes.
+
 ```bash
 docker rm -f gt-dolt-rehearsal
+kill "$HOST_PID"
 rm -rf "$REHEARSAL"
 gt dolt unpause
-rm ~/gt/seat-refill.hold
+rm -f ~/gt/seat-refill.hold
+gt dolt status
 ```
 
-Record every number on the C2 bead (`gt-o4sk8.20`) before removing the directory.
+`gt dolt status` shows the town's host server again and no pause.
 
 ## 2. Cutover, with the dispatch hold on
 
 ### 2.1 Record each database's row counts
 
-Both endpoints are the live server, so every row reads equal; the `SOURCE ROWS` column is the baseline, and a difference between the two reads is a write that slipped in while you looked.
-
 ```bash
 gt dolt compare 127.0.0.1:3307 127.0.0.1:3307 | tee ~/gt/.runtime/cutover-before.txt
 ```
+
+Both endpoints are the live server: the `SOURCE ROWS` column is the town's
+count per database. This is an informational before-table; a write landing
+between the two reads shows as a difference between the columns, not a fault.
 
 ### 2.2 Put the hold on with a note, drain, and pause Dolt
 
 ```bash
 printf '%s\n' 'overseer: Dolt container cutover; drain and hold' > ~/gt/seat-refill.hold
-gt power status
+gt power status        # re-run until the drain reads zero; only then pause
 gt dolt pause --reason 'Dolt container cutover' --until 2h
 ```
 
-Wait until `landings pending`, `polecats working` and `dolt gc running` all read 0. The pause marker keeps the daemon from starting the host server again while you cut over.
+Wait for the drain ([Power runbook](../power-runbook.md), "The drain") before
+the pause. The pause marker keeps the daemon from starting a host server while
+the container holds port 3307, and it lapses on its own if this procedure
+stops part-way.
 
-### 2.3 Stop the host server
+### 2.3 Take the quiesced counts and stop the host server
 
 ```bash
+gt dolt compare 127.0.0.1:3307 127.0.0.1:3307 | tee ~/gt/.runtime/cutover-quiesced.txt
 gt dolt stop
 ```
 
-### 2.4 Print the real plan, run it, and start the container
+The drain leaves no work in flight, and the daemon cannot start or restart the
+server while the pause marker holds, so the two reads see one town. This count
+is the one step 2.6 compares against; a write that slips in is a line `diff`
+prints there. The container in 2.4 serves the same data directory, so nothing
+is copied.
 
-The defaults are the town's `.dolt-data`, the daemon's backup root, 12 GiB (raise it with `--memory-gib` if the rehearsal said so) and port 3307.
+### 2.4 Write the container's config and start the container
+
+The container mounts a copy of the town's managed config: the copy must differ
+in exactly one line, because a server inside a container has to bind `0.0.0.0`
+for the published port to reach it (step 1.3). The town's own file stays what
+gt wrote.
 
 ```bash
-gt dolt container plan --name gt-dolt --image "$IMAGE" \
-  --config "$HOME/gt/.dolt-data/config.yaml"
-# run the printed line, with the entrypoint form the rehearsal proved
-docker start gt-dolt
-for i in {1..60}; do
-  dolt --host 127.0.0.1 --port 3307 --user root --password "" --no-tls sql -q 'SELECT 1' && break
-  sleep 2
-done
+CONTAINER_CFG=$HOME/gt/.runtime/dolt-container/config.yaml
+mkdir -p "$(dirname "$CONTAINER_CFG")"
+cp "$HOME/gt/.dolt-data/config.yaml" "$CONTAINER_CFG"
+grep -A6 '^listener:' "$CONTAINER_CFG"
 ```
 
-The managed `~/gt/.dolt-data/config.yaml` already names the town's port and data directory; the plan mounts it read-only at the same path inside and outside.
+Edit the `listener:` block to read `host: 0.0.0.0`, adding the line if the block
+has none, then check it:
+
+```bash
+grep -qx '  host: 0\.0\.0\.0' "$CONTAINER_CFG" \
+  || { echo "the container config's listener host is not 0.0.0.0; stop the cutover" >&2; exit 1; }
+gt dolt container plan --name gt-dolt --image "$IMAGE" --config "$CONTAINER_CFG"
+# run the printed line, with the entrypoint form the rehearsal proved
+docker start gt-dolt
+```
+
+The defaults are the town's `~/gt/.dolt-data`, the daemon's backup root, 12 GiB
+and port 3307. Raise the memory only to the value step 1.7 chose, with
+`--memory-gib`.
+
+```bash
+CUTOVER_READY=0
+for i in {1..90}; do
+  if dolt --host 127.0.0.1 --port 3307 --user root --password "" --no-tls sql -q 'SELECT 1' >/dev/null 2>&1; then
+    CUTOVER_READY=1
+    break
+  fi
+  sleep 2
+done
+if [ "$CUTOVER_READY" != 1 ]; then
+  docker logs --tail 40 gt-dolt
+  echo "the container never answered on 3307; roll back with section 3" >&2
+  exit 1
+fi
+```
 
 ### 2.5 Point the town at the container
 
-Add one member to the `dolt` object in `~/gt/mayor/town.json` and leave its other keys alone. The file is machine-owned and not a repository file, and `gt config set` has no key for the member.
+Add one member to the `dolt` object in `~/gt/mayor/town.json` and leave the
+other keys alone. The file is machine-owned and not a repository file, and
+`gt config set` has no key for the member.
 
 ```json
 "external_container": "gt-dolt"
@@ -191,35 +370,48 @@ Add one member to the `dolt` object in `~/gt/mayor/town.json` and leave its othe
 ```bash
 gt dolt status
 gt dolt compare 127.0.0.1:3307 127.0.0.1:3307 | tee ~/gt/.runtime/cutover-after.txt
-diff <(awk '{print $1, $2}' ~/gt/.runtime/cutover-before.txt) \
+diff <(awk '{print $1, $2}' ~/gt/.runtime/cutover-quiesced.txt) \
      <(awk '{print $1, $2}' ~/gt/.runtime/cutover-after.txt)
+```
 
+`gt dolt status` names the container. The `DATABASE` and `SOURCE ROWS` columns
+must match the quiesced recording, and `diff` prints nothing when they do. A
+line it prints is a database whose rows changed with no work running: stop and
+investigate before the write test.
+
+```bash
 SCRATCH=$(bd create --silent 'Dolt container cutover write test')
 bd close "$SCRATCH" --reason 'Dolt container cutover write test'
 ```
 
-`gt dolt status` names the container. The counts must match the baseline; `diff` prints nothing when they do. The create and close is the write test. Then lift the pause:
+The create and close is the write test: a client write reached the container's
+server and closed again. Then lift the pause.
 
 ```bash
 gt dolt unpause
 ```
 
+If the counts, the write test or the unpause fails, roll back with section 3.
+
 ### 2.7 Lift the hold and watch the town move again
 
 ```bash
-rm ~/gt/seat-refill.hold
+rm -f ~/gt/seat-refill.hold
 gt tail
 ```
 
-Watch until one dispatcher tick and one landing appear, then stop it.
+Watch until one dispatcher tick and one landing appear, then stop it. Record
+the times on the C2 bead.
 
 ## 3. Rollback
 
-The data directory is the same one the host server used, so nothing is copied back.
+The data directory is the same one the host server used, so nothing is copied
+back. Run this whenever step 2.6 fails, or to take the town off the container.
 
 ### 3.1 Pause Dolt
 
-The daemon must not start a host server while the container still holds the port.
+The daemon must not start a host server while the container still holds the
+port.
 
 ```bash
 gt dolt pause --reason 'Dolt container rollback' --until 1h
@@ -227,43 +419,58 @@ gt dolt pause --reason 'Dolt container rollback' --until 1h
 
 ### 3.2 Remove `external_container` from `~/gt/mayor/town.json`
 
-Delete the member added in step 2.5 and leave the rest of the `dolt` object alone.
+Delete the member added in step 2.5 and leave the rest of the `dolt` object
+alone.
 
 ### 3.3 Stop the container by name
-
-With the key removed, gt no longer manages it.
 
 ```bash
 docker stop gt-dolt
 ```
 
-### 3.4 Start the host server again
+With the key removed, gt no longer manages the container.
+
+### 3.4 Lift the pause and start the host server
+
+`gt dolt start` refuses while a pause marker holds, so lift it first.
 
 ```bash
-gt dolt start
 gt dolt unpause
+gt dolt start
 gt dolt status
 ```
 
-`gt dolt status` shows a host PID again. Lift the hold if one is still on.
+`gt dolt status` shows a host server again and no pause. Lift the hold if one is
+still on.
 
 ## Measured and unproven
 
-The rehearsal measures these; none is proven for the town's real load.
+The rehearsal measures these on a restored copy in a quiet window; none is
+proven for the town's real load.
 
-- **Latency through the container's published port.** The rehearsal times last night's copy on a quiet town, not the town under its working load.
-- **Bind-mount speed for a database of about 2 GB.** The rehearsal proves correctness on the restored copy, not write and fsync speed through the bind mount on the operator's Docker disk.
-- **The right memory limit.** 12 GiB is a starting cap, not a measured one: the host server has shown 14.6 GB resident and a 10.2 GB peak footprint. The `docker stats` reading under the burst and the gc decides whether 12 GiB stands or the cutover needs a higher `--memory-gib`.
+- **Latency through the container's published port.** Step 1.6 times a copy
+  with no work in flight, not the town under its working load.
+- **Bind-mount speed for a database of about 2 GB.** The rehearsal proves
+  correctness on the restored copy, not write and fsync speed through the bind
+  mount on the operator's Docker disk.
+- **The right memory limit.** 12 GiB is a starting cap, not a measured one: the
+  host server has shown 14.6 GB resident and a 10.2 GB peak footprint. Step
+  1.7's reading under the burst and the gc decides whether 12 GiB stands or the
+  cutover needs a higher `--memory-gib`.
 
 ## Numbers to record
 
 Record each on the C2 bead, with the command that produced it.
 
-- The night restored and each database's row count.
-- The `gt dolt compare` table for the live server against the rehearsal server.
-- p50, p95 and max from each `gt dolt latency` run: host and container.
-- The highest container `MEM USAGE` under the read burst and the gc, and the limit chosen.
+- The night restored and its `backup.json`.
+- The compare table for the host copy against the container copy, with each
+  database's row count and status, and the command's exit status.
+- p50, p95 and max from each `gt dolt latency` run: live baseline, host copy,
+  container.
+- The highest container memory reading under the read burst and the gc, and
+  the cap chosen.
 - The image reference and the entrypoint form that started the server.
-- The cutover's per-database row counts before and after, and whether `diff` was empty.
+- The cutover's per-database row counts before, quiesced and after, and whether
+  `diff` was empty.
 - The scratch bead's id and its close.
 - The times the hold went on, the last write landed, and dispatch resumed.
