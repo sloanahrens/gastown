@@ -449,7 +449,7 @@ func ContainerPlan(s ContainerSpec) ([]string, error) // the docker create argv
 ### C2: the Dolt container runbook
 
 **Depends on:** C1. **Risk path:** no. **Size:** S. **Files:** docs/guides/dolt-container.md.
-**Goal.** First line `> Status: current ...`. It holds the checklists R1 and R2 below verbatim, the rollback, and the verification commands.
+**Goal.** First line `> Status: current ...`. It carries R1 and R2 as numbered procedures that link the hold, drain and pause rules to their pages, the rollback, the verification commands, and the numbers to record.
 **Gate.** `make docs-lint`.
 **Acceptance.**
 - [ ] One `> Status:` line, first

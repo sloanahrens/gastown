@@ -1,4 +1,4 @@
-> Status: current (2026-11). Runbook for moving the town's Dolt server from a host process into a Docker container, and for rolling back; the overseer runs it with the operator, and neither the rehearsal nor the cutover has run yet.
+> Status: current (2026-11). Runbook for moving the town's Dolt server from a host process into a Docker container, and for rolling back; the overseer runs it with the operator.
 
 # Moving the town's Dolt server into a Docker container
 
@@ -62,9 +62,15 @@ never restored. Take the newest dated directory that is not one, and read its
 
 ```bash
 NIGHT=$(find "$HOME/gt-backups/dolt" -maxdepth 1 -type d -name '20??-??-??' ! -name '*.partial' -exec basename {} \; | sort | tail -1)
-echo "$NIGHT"
-cat "$HOME/gt-backups/dolt/$NIGHT/backup.json"
+[ -n "$NIGHT" ] || { echo "no complete night under ~/gt-backups/dolt; stop the rehearsal" >&2; exit 1; }
+NIGHT_DIR="$HOME/gt-backups/dolt/$NIGHT"
+[ -f "$NIGHT_DIR/backup.json" ] || { echo "night $NIGHT has no backup.json; stop the rehearsal" >&2; exit 1; }
+cat "$NIGHT_DIR/backup.json"
 ```
+
+The two guards run before any restore: an empty `NIGHT` stops here rather
+than letting the glob below match the whole backup root, `.partial` nights
+included.
 
 Restore that night twice, one scratch directory per side, the way
 [docs/dolt-restore.md](../dolt-restore.md) restores a copy: a fresh directory
@@ -76,8 +82,10 @@ REHEARSAL=$HOME/gt/.runtime/dolt-rehearsal
 rm -rf "$REHEARSAL"
 mkdir -p "$REHEARSAL/host/data" "$REHEARSAL/container/data" "$REHEARSAL/container/backups"
 for SIDE in host container; do
-  for BACKUP in "$HOME/gt-backups/dolt/$NIGHT"/*/; do
+  for BACKUP in "$NIGHT_DIR"/*/; do
+    [ -d "$BACKUP" ] || { echo "$NIGHT_DIR holds no database backups; stop the rehearsal" >&2; exit 1; }
     DB=$(basename "$BACKUP")
+    echo "restoring $BACKUP into $REHEARSAL/$SIDE/data/$DB"
     dolt backup restore "file://${BACKUP%/}" "$REHEARSAL/$SIDE/data/$DB"
   done
 done
@@ -231,7 +239,7 @@ for i in 1 2 3 4; do
   gt dolt latency --host 127.0.0.1 --port 3317 --database hq --rounds 300 >/dev/null &
   BURST="$BURST $!"
 done
-for BACKUP in "$HOME/gt-backups/dolt/$NIGHT"/*/; do
+for BACKUP in "$NIGHT_DIR"/*/; do
   DB=$(basename "$BACKUP")
   dolt --host 127.0.0.1 --port 3317 --user root --password "" --no-tls \
     --use-db "$DB" sql -q "CALL dolt_gc('--full')" &
@@ -251,8 +259,9 @@ dolt --host 127.0.0.1 --port 3317 --user root --password "" --no-tls sql -q 'SEL
 the host copy's server, which never exits.
 
 Record the highest memory reading against the 12 GiB cap. The cap stands only
-if that reading leaves headroom; otherwise the cutover plan takes a higher
-`--memory-gib` and this rehearsal repeats with the same value. A container
+if that reading stays under 80 percent of it, 9.6 GiB; otherwise the cutover
+plan takes a higher `--memory-gib` and this rehearsal repeats with the same
+value. A container
 killed at its cap fails the last check, which stops the procedure.
 
 ### 1.8 Remove the rehearsal and return the town to service
@@ -312,10 +321,11 @@ is copied.
 
 ### 2.4 Write the container's config and start the container
 
-The container mounts a copy of the town's managed config: the copy must differ
-in exactly one line, because a server inside a container has to bind `0.0.0.0`
-for the published port to reach it (step 1.3). The town's own file stays what
-gt wrote.
+The container mounts a copy of the town's managed config, and that copy differs
+from the town's file only in the listener's `host:` value: set it to `0.0.0.0`,
+adding the line when the block has none, because a server inside a container
+must bind `0.0.0.0` for the published port to reach it (step 1.3). Every other
+line stays as gt wrote it, and the town's own file stays what gt wrote.
 
 ```bash
 CONTAINER_CFG=$HOME/gt/.runtime/dolt-container/config.yaml
@@ -324,8 +334,7 @@ cp "$HOME/gt/.dolt-data/config.yaml" "$CONTAINER_CFG"
 grep -A6 '^listener:' "$CONTAINER_CFG"
 ```
 
-Edit the `listener:` block to read `host: 0.0.0.0`, adding the line if the block
-has none, then check it:
+Edit the copy by that rule, then check it:
 
 ```bash
 grep -qx '  host: 0\.0\.0\.0' "$CONTAINER_CFG" \
@@ -440,8 +449,11 @@ gt dolt start
 gt dolt status
 ```
 
-`gt dolt status` shows a host server again and no pause. Lift the hold if one is
-still on.
+`gt dolt status` shows a host server again and no pause. Then lift the hold:
+
+```bash
+rm -f ~/gt/seat-refill.hold
+```
 
 ## Measured and unproven
 
