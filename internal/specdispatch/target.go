@@ -2,6 +2,7 @@ package specdispatch
 
 import (
 	"fmt"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -180,19 +181,20 @@ func targetFixHint(path string, several bool) string {
 
 // targetRefusal is the shape failure a bead earns against the target branch.
 // A bead with a Files section is checked from that section alone, whatever its
-// Constraints say: every modify or read path must exist on the branch, a
-// create path need not, and a section that does not parse is refused with the
-// parse error (gt-hgt9j.10). A bead without the section keeps the cue grammar
-// its Constraints body is read with (gt-7t1im). A caller that supplied no
+// Constraints say: every modify or read path must exist on the branch or be
+// created by an open blocker, a create path need not, and a section that does
+// not parse is refused with the parse error (gt-hgt9j.10, gt-hgt9j.11). A bead
+// without the section keeps the cue grammar its Constraints body is read with
+// (gt-7t1im); the blocker set is not read for it. A caller that supplied no
 // inventory is refused rather than passed: a check that did not run is not a
 // check that passed (gt-7t1im, gt-hgt9j.1).
-func targetRefusal(description string, sections map[string]string, target *TargetTree) (Refusal, bool) {
+func targetRefusal(description string, sections map[string]string, target *TargetTree, blockerCreates []string) (Refusal, bool) {
 	block, present, err := ParseFiles(description)
 	if present {
 		if err != nil {
 			return Refusal{Field: filesField, Reason: err.Error()}, true
 		}
-		return filesTargetRefusal(block, target)
+		return filesTargetRefusal(block, target, blockerCreates)
 	}
 	paths := constraintFilePaths(sections["constraints"])
 	if len(paths) == 0 {
@@ -232,15 +234,25 @@ func targetRefusal(description string, sections map[string]string, target *Targe
 
 // filesTargetRefusal checks a bead's Files entries against the target branch:
 // a modify or read path the branch does not hold is refused with its verb and
-// path named, and an inventory that could not be read refuses them too. A
+// path named, unless an open blocker declares it creates that path; an
+// inventory that could not be read refuses the paths no blocker resolves. A
 // create path is the bead's own addition and needs nothing on the branch.
-func filesTargetRefusal(block FilesBlock, target *TargetTree) (Refusal, bool) {
+// Paths are compared after path.Clean on both the entry and the blocker set,
+// so "./a/../b.go" and "b.go" are one path (gt-hgt9j.11).
+func filesTargetRefusal(block FilesBlock, target *TargetTree, blockerCreates []string) (Refusal, bool) {
+	creates := cleanedPaths(blockerCreates)
 	var checked []string
+	var residual []FileEntry
 	for _, e := range block.Entries {
 		if e.Verb != FileModify && e.Verb != FileRead {
 			continue
 		}
-		if named := string(e.Verb) + ": " + e.Path; !slices.Contains(checked, named) {
+		p := path.Clean(e.Path)
+		if _, ok := creates[p]; ok {
+			continue
+		}
+		residual = append(residual, FileEntry{Verb: e.Verb, Path: p, Line: e.Line})
+		if named := string(e.Verb) + ": " + p; !slices.Contains(checked, named) {
 			checked = append(checked, named)
 		}
 	}
@@ -254,10 +266,7 @@ func filesTargetRefusal(block FilesBlock, target *TargetTree) (Refusal, bool) {
 		return Refusal{Field: filesField, Reason: fmt.Sprintf("cannot check %s: %s", strings.Join(checked, ", "), target.Err)}, true
 	}
 	var missing []string
-	for _, e := range block.Entries {
-		if e.Verb != FileModify && e.Verb != FileRead {
-			continue
-		}
+	for _, e := range residual {
 		if _, ok := target.Files[e.Path]; ok {
 			continue
 		}
@@ -272,5 +281,21 @@ func filesTargetRefusal(block FilesBlock, target *TargetTree) (Refusal, bool) {
 	if branch == "" {
 		branch = "the target branch"
 	}
-	return Refusal{Field: filesField, Reason: fmt.Sprintf("names %s, absent from %s", strings.Join(missing, ", "), branch)}, true
+	return Refusal{Field: filesField, Reason: fmt.Sprintf("names %s, absent from %s and no open blocker creates it", strings.Join(missing, ", "), branch)}, true
+}
+
+// cleanedPaths is a lookup set of repo paths, each path.Clean'ed so a relative
+// spelling and its clean form are one path. An entry naming no file (empty, or
+// something that cleans to ".") is dropped.
+func cleanedPaths(paths []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(paths))
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		if c := path.Clean(p); c != "." {
+			set[c] = struct{}{}
+		}
+	}
+	return set
 }
