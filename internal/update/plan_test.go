@@ -362,6 +362,19 @@ func TestPlanOnlyFalseValueIgnored(t *testing.T) {
 	}
 }
 
+func TestPlanSkipFalseValueIgnored(t *testing.T) {
+	t.Parallel()
+	// A false Skip entry skips nothing, so the install chain still runs.
+	p := &fakeProbes{installed: "11111111aaaa", main: "22222222bbbb", published: true, backup: true}
+
+	steps := planFor(t, p, PlanOptions{Skip: map[StepName]bool{StepInstall: false}})
+	for _, name := range []StepName{StepDrain, StepInstall, StepRestart, StepVerify, StepLift} {
+		if s := stepNamed(t, steps, name); !s.WillRun {
+			t.Errorf("%s WillRun = false, want true: a false Skip entry skips nothing (reason %q)", name, s.Reason)
+		}
+	}
+}
+
 func TestPlanEmptyShaIsAnError(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
