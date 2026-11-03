@@ -849,6 +849,15 @@ type ScheduledMaintenanceConfig struct {
 	// above MaxArchiveLimit.
 	ArchiveEventsLimit *int `json:"archive_events_limit,omitempty"`
 
+	// ArchiveBudget bounds how long one maintenance cycle keeps taking archive
+	// batches: each database's commits and events keep going in limit-sized
+	// batches until nothing more is behind or this budget ends, so a database
+	// that is many batches behind catches up within one cycle (gt-o4sk8.1). A
+	// Go duration string, e.g. "10m". Empty means DefaultArchiveBudget; read it
+	// through ParseArchiveBudget, which refuses a value below MinArchiveBudget,
+	// one above MaxArchiveBudget, and one it cannot parse.
+	ArchiveBudget string `json:"archive_budget,omitempty"`
+
 	// Deprecated: have no effect. They configured the retired monitor,
 	// flatten and size-triggered gc modes. They are still parsed so a live
 	// daemon.json that carries them decodes strictly, and the daemon logs
@@ -870,6 +879,26 @@ const MaintenanceArchiveDirKey = "patrols.scheduled_maintenance.archive_dir"
 const (
 	MaintenanceArchiveCommitLimitKey = "patrols.scheduled_maintenance.archive_commit_limit"
 	MaintenanceArchiveEventsLimitKey = "patrols.scheduled_maintenance.archive_events_limit"
+)
+
+// MaintenanceArchiveBudgetKey is the history archive's time budget as it
+// appears in daemon.json, the path the daemon's logs and escalations tell an
+// operator to fix (gt-o4sk8.1).
+const MaintenanceArchiveBudgetKey = "patrols.scheduled_maintenance.archive_budget"
+
+// DefaultArchiveBudget is how long one archive step keeps taking batches when
+// archive_budget is unset: long enough for a database a few batches behind to
+// catch up in one nightly cycle, short enough to leave the backup and gc room
+// in the step's 30-minute timeout (gt-o4sk8.1).
+const DefaultArchiveBudget = 10 * time.Minute
+
+// MinArchiveBudget and MaxArchiveBudget bound archive_budget: a budget shorter
+// than one limit-sized batch can take would rarely allow a second one, and the
+// archive step's own timeout is 30 minutes, so a longer one could never be
+// spent (gt-o4sk8.1).
+const (
+	MinArchiveBudget = time.Minute
+	MaxArchiveBudget = 30 * time.Minute
 )
 
 // The unset and zero reading of each batch bound: one run reads at most this
@@ -919,6 +948,31 @@ func (c *ScheduledMaintenanceConfig) ParseArchiveEventsLimit() (int, error) {
 		return DefaultArchiveEventsLimit, nil
 	}
 	return parseArchiveLimit(MaintenanceArchiveEventsLimitKey, c.ArchiveEventsLimit, DefaultArchiveEventsLimit)
+}
+
+// ParseArchiveBudget returns how long one archive step may keep taking batches
+// after a limit-sized one. An absent section, nil receiver, or empty setting
+// reads DefaultArchiveBudget. A duration that does not parse, or one outside
+// MinArchiveBudget to MaxArchiveBudget, is refused rather than clamped, and the
+// error names the daemon.json key so the operator can fix the entry it came
+// from (gt-o4sk8.1).
+func (c *ScheduledMaintenanceConfig) ParseArchiveBudget() (time.Duration, error) {
+	if c == nil {
+		return DefaultArchiveBudget, nil
+	}
+	setting := strings.TrimSpace(c.ArchiveBudget)
+	if setting == "" {
+		return DefaultArchiveBudget, nil
+	}
+	budget, err := time.ParseDuration(setting)
+	if err != nil {
+		return 0, fmt.Errorf("%s = %q: want a Go duration such as 10m: %w", MaintenanceArchiveBudgetKey, setting, err)
+	}
+	if budget < MinArchiveBudget || budget > MaxArchiveBudget {
+		return 0, fmt.Errorf("%s = %q: want a duration from %s to %s",
+			MaintenanceArchiveBudgetKey, setting, MinArchiveBudget, MaxArchiveBudget)
+	}
+	return budget, nil
 }
 
 // parseArchiveLimit reads one batch bound. Nil and zero keep def; a negative

@@ -147,7 +147,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 	t.Run("a commit export refuses a path-like database name", func(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
-		if err := d.maintenanceArchiveCommits(context.Background(), dir, "../gt", ArchiveWatermark{}); err == nil {
+		if _, _, err := d.maintenanceArchiveCommits(context.Background(), dir, "../gt", ArchiveWatermark{}); err == nil {
 			t.Error("a path-escaping database name was exported")
 		}
 	})
@@ -155,7 +155,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 	t.Run("an events export refuses a path-like database name", func(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
-		if err := d.maintenanceArchiveEvents(context.Background(), dir, "../gt", zero); err == nil {
+		if _, _, err := d.maintenanceArchiveEvents(context.Background(), dir, "../gt", zero); err == nil {
 			t.Error("a path-escaping database name was exported")
 		}
 	})
@@ -166,7 +166,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 		d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {
 			return []archiveCommit{{Hash: "h1", Committer: "c", Message: "first"}}, nil // zero Date
 		}
-		err := d.maintenanceArchiveCommits(context.Background(), t.TempDir(), "gt", ArchiveWatermark{})
+		_, _, err := d.maintenanceArchiveCommits(context.Background(), t.TempDir(), "gt", ArchiveWatermark{})
 		if err == nil || !strings.Contains(err.Error(), "with no date") {
 			t.Errorf("commit without a date = %v, want it refused", err)
 		}
@@ -178,7 +178,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 		d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {
 			return []archiveCommit{{Committer: "c", Date: gcTestNow, Message: "first"}}, nil
 		}
-		err := d.maintenanceArchiveCommits(context.Background(), t.TempDir(), "gt", ArchiveWatermark{})
+		_, _, err := d.maintenanceArchiveCommits(context.Background(), t.TempDir(), "gt", ArchiveWatermark{})
 		if err == nil || !strings.Contains(err.Error(), "with no hash") {
 			t.Errorf("commit without a hash = %v, want it refused", err)
 		}
@@ -194,7 +194,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 			return []archiveCommit{{Hash: "h1", Committer: "c", Date: backdated, Message: "stale"}}, nil
 		}
 		wm := ArchiveWatermark{Date: gcTestNow.Add(-24 * time.Hour), Hashes: []string{"old"}}
-		if err := d.maintenanceArchiveCommits(context.Background(), dir, "gt", wm); err != nil {
+		if _, _, err := d.maintenanceArchiveCommits(context.Background(), dir, "gt", wm); err != nil {
 			t.Fatalf("export of a backdated commit: %v", err)
 		}
 		rows := readArchiveCSV(t, archiveFile(dir, "gt"))
@@ -221,7 +221,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 			t.Error("dolt_log was read after the archived set could not be loaded")
 			return nil, nil
 		}
-		if err := d.maintenanceArchiveCommits(context.Background(), dir, "gt", ArchiveWatermark{}); err == nil {
+		if _, _, err := d.maintenanceArchiveCommits(context.Background(), dir, "gt", ArchiveWatermark{}); err == nil {
 			t.Error("an export ran without knowing which commits were already archived")
 		}
 	})
@@ -233,7 +233,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 			t.Error("a read ran with a watermark the cursor cannot use")
 			return nil, nil
 		}
-		err := d.maintenanceArchiveCommits(context.Background(), t.TempDir(), "gt", ArchiveWatermark{Date: gcTestNow})
+		_, _, err := d.maintenanceArchiveCommits(context.Background(), t.TempDir(), "gt", ArchiveWatermark{Date: gcTestNow})
 		if err == nil || !strings.Contains(err.Error(), "lists no hashes") {
 			t.Errorf("export with a hashless watermark = %v, want it refused", err)
 		}
@@ -249,7 +249,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 		if err := os.WriteFile(parent, []byte("x"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if err := d.maintenanceArchiveCommits(context.Background(), parent, "gt", ArchiveWatermark{}); err == nil {
+		if _, _, err := d.maintenanceArchiveCommits(context.Background(), parent, "gt", ArchiveWatermark{}); err == nil {
 			t.Error("a commit export used an archive path under a regular file")
 		}
 	})
@@ -267,7 +267,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 		if err := os.Mkdir(dir, 0o400); err != nil {
 			t.Fatal(err)
 		}
-		err := d.maintenanceArchiveCommits(context.Background(), dir, "gt", ArchiveWatermark{})
+		_, _, err := d.maintenanceArchiveCommits(context.Background(), dir, "gt", ArchiveWatermark{})
 		if err == nil {
 			t.Error("a commit export read an unstatable archive file as absent")
 		}
@@ -283,7 +283,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 		if err := os.WriteFile(parent, []byte("x"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if err := d.maintenanceArchiveEvents(context.Background(), parent, "gt", zero); err == nil {
+		if _, _, err := d.maintenanceArchiveEvents(context.Background(), parent, "gt", zero); err == nil {
 			t.Error("an events export used an archive path under a regular file")
 		}
 	})
@@ -295,7 +295,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 			CreatedAt: "yesterday",
 			Archived:  []ArchivedEventsRow{{CreatedAt: "2026-11-02 09:15:00", ID: "1"}},
 		}
-		if err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", bad); err == nil {
+		if _, _, err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", bad); err == nil {
 			t.Error("a watermark Dolt cannot compare was used")
 		}
 	})
@@ -309,7 +309,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 			CreatedAt: "2026-13-45 99:99:99",
 			Archived:  []ArchivedEventsRow{{CreatedAt: "2026-11-02 09:15:00", ID: "1"}},
 		}
-		if err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", bad); err == nil {
+		if _, _, err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", bad); err == nil {
 			t.Error("a watermark with an impossible date was used")
 		}
 	})
@@ -320,7 +320,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, string) (archiveEvents, error) {
 			return archiveEvents{Columns: []string{"payload"}, Rows: [][]string{{"x"}}}, nil
 		}
-		err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", zero)
+		_, _, err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", zero)
 		if err == nil || !strings.Contains(err.Error(), "no created_at and id columns") {
 			t.Errorf("export of a table without the watermark columns = %v, want it refused", err)
 		}
@@ -332,7 +332,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 		d.maint.archiveEventsRead = func(context.Context, *Daemon, string, string) (archiveEvents, error) {
 			return archiveEvents{Columns: []string{"id", "created_at"}, Rows: [][]string{{}}}, nil
 		}
-		err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", zero)
+		_, _, err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", zero)
 		if err == nil || !strings.Contains(err.Error(), "missing column") {
 			t.Errorf("export of a row with no id value = %v, want it refused", err)
 		}
@@ -347,7 +347,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 				Rows:    [][]string{{"1"}},
 			}, nil
 		}
-		err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", zero)
+		_, _, err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", zero)
 		if err == nil || !strings.Contains(err.Error(), "1 values") {
 			t.Errorf("export of a short row = %v, want it refused", err)
 		}
@@ -362,7 +362,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 				Rows:    [][]string{{"1", "yesterday"}},
 			}, nil
 		}
-		err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", zero)
+		_, _, err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", zero)
 		if err == nil || !strings.Contains(err.Error(), "not a timestamp") {
 			t.Errorf("export of a row with an unusable created_at = %v, want it refused", err)
 		}
@@ -386,7 +386,7 @@ func TestMaintenanceArchiveExportRefusals(t *testing.T) {
 		if err := os.Mkdir(statePath, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", zero)
+		_, _, err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", zero)
 		if err == nil || !strings.Contains(err.Error(), "cannot be recorded") {
 			t.Errorf("export whose watermark cannot be recorded = %v, want it reported", err)
 		}
