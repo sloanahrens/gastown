@@ -157,12 +157,25 @@ func referenceOnly(constraints, path string) bool {
 	return total > 0 && cued == total
 }
 
+// targetFixHint is the sentence a missing-path refusal appends: the cues that
+// pass a path the target branch need not hold, written with the first missing
+// path so the filer can copy the rewrite, and where the cue must sit. With
+// several paths missing the hint is an example, since the same two rewrites
+// fix each of them (gt-hgt9j.1).
+func targetFixHint(path string, several bool) string {
+	fix := fmt.Sprintf("write `create %s` or `%s is created by bead <id>` when the bead adds the file, or `see %s` when it only reads it; the cue must sit directly beside the path.", path, path, path)
+	if several {
+		return "To fix each, for example, " + fix
+	}
+	return "To fix, " + fix
+}
+
 // targetRefusal is the shape failure a Constraints body earns against the
 // target branch: every file the spec changes and the branch does not hold is
-// named, or the error that stopped the inventory being read is. A bead naming
-// no file the branch must already hold passes. A caller that supplied no
-// inventory is refused rather than passed: a check that did not run is not a
-// check that passed (gt-7t1im).
+// named with the rewrite that passes, or the error that stopped the inventory
+// being read is. A bead naming no file the branch must already hold passes. A
+// caller that supplied no inventory is refused rather than passed: a check
+// that did not run is not a check that passed (gt-7t1im, gt-hgt9j.1).
 func targetRefusal(sections map[string]string, target *TargetTree) (Refusal, bool) {
 	paths := constraintFilePaths(sections["constraints"])
 	if len(paths) == 0 {
@@ -197,5 +210,5 @@ func targetRefusal(sections map[string]string, target *TargetTree) (Refusal, boo
 	if branch == "" {
 		branch = "the target branch"
 	}
-	return Refusal{Field: constraintsField, Reason: fmt.Sprintf("names %s, absent from %s", strings.Join(missing, ", "), branch)}, true
+	return Refusal{Field: constraintsField, Reason: fmt.Sprintf("names %s, absent from %s. %s", strings.Join(missing, ", "), branch, targetFixHint(missing[0], len(missing) > 1))}, true
 }

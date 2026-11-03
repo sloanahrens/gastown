@@ -191,6 +191,100 @@ func TestLintNamesTheTargetBranchInTheRefusal(t *testing.T) {
 	}
 }
 
+// A missing-path refusal ends with the rewrite that passes: both cues the lint
+// reads, written with the refused path, and where the cue must sit (gt-hgt9j.1).
+func TestTargetRefusalHintNamesBothFixes(t *testing.T) {
+	t.Parallel()
+	s := specNaming("A thing exists.", "Change internal/cmd/bird.go.")
+	s.Target = targetOf("internal/cmd/spec.go")
+	v := Lint(s, defaultTemplate())
+	if v.Route != RouteRefuse || v.Field != "## Constraints" {
+		t.Fatalf("Lint = %s, want a refusal naming ## Constraints: %s", v.Route, v.Line(s.ID))
+	}
+	for _, want := range []string{
+		"create internal/cmd/bird.go",
+		"internal/cmd/bird.go is created by bead <id>",
+		"see internal/cmd/bird.go",
+		"the cue must sit directly beside the path",
+	} {
+		if !strings.Contains(v.Reason, want) {
+			t.Errorf("Reason = %q, want %q", v.Reason, want)
+		}
+	}
+}
+
+// The hint is appended to the sentence the dispatcher and the existing target
+// tests read, never a replacement for it (gt-hgt9j.1).
+func TestTargetRefusalHintKeepsFirstSentence(t *testing.T) {
+	t.Parallel()
+	s := specNaming("A thing exists.", "Change internal/cmd/bird.go.")
+	s.Target = targetOf("internal/cmd/spec.go")
+	reason := Lint(s, defaultTemplate()).Reason
+	const first = "names internal/cmd/bird.go, absent from main"
+	if !strings.HasPrefix(reason, first) {
+		t.Fatalf("Reason = %q, want it to start with %q", reason, first)
+	}
+	if !strings.Contains(reason, "create internal/cmd/bird.go") {
+		t.Errorf("Reason = %q, want the fix hint appended", reason)
+	}
+}
+
+// The appended hint keeps the one-line report one line, for one absent path and
+// for several; with several, the hint is an example written with the first of
+// them (gt-hgt9j.1).
+func TestTargetRefusalHintStaysOneLine(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		body string
+		hint string
+	}{
+		{
+			name: "one path",
+			body: "Change internal/cmd/bird.go.",
+			hint: "To fix, write `create internal/cmd/bird.go`",
+		},
+		{
+			name: "three paths",
+			body: "Change internal/cmd/bird.go, internal/cmd/owl.go and internal/cmd/hawk.go.",
+			hint: "To fix each, for example, write `create internal/cmd/bird.go`",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := specNaming("A thing exists.", tc.body)
+			s.Target = targetOf("internal/cmd/spec.go")
+			line := Lint(s, defaultTemplate()).Line(s.ID)
+			if strings.Contains(line, "\n") {
+				t.Errorf("Line = %q, want one line", line)
+			}
+			if !strings.Contains(line, tc.hint) {
+				t.Errorf("Line = %q, want %q", line, tc.hint)
+			}
+		})
+	}
+}
+
+// The rewrite the refusal prints is the rewrite that passes: a Constraints body
+// carrying the refusal text lints clean against the same target, so a filer can
+// copy it and the next run clears (gt-hgt9j.1).
+func TestTargetRefusalHintIsTheRewriteThatPasses(t *testing.T) {
+	t.Parallel()
+	target := targetOf("internal/cmd/spec.go")
+	s := specNaming("A thing exists.", "Change internal/cmd/bird.go.")
+	s.Target = target
+	v := Lint(s, defaultTemplate())
+	if v.Route != RouteRefuse {
+		t.Fatalf("Lint = %s, want the refusal to copy the hint from: %s", v.Route, v.Line(s.ID))
+	}
+	fixed := specNaming("A thing exists.", "Change internal/cmd/bird.go. "+v.Reason)
+	fixed.Target = target
+	if got := Lint(fixed, defaultTemplate()); !got.Clean() {
+		t.Errorf("a bead carrying the printed refusal was refused: %s", got.Line(fixed.ID))
+	}
+}
+
 // An inventory that could not be read is held with its error named, never read
 // as one holding no files; a bead naming no repo file has nothing to check, so
 // the failed read does not hold it (gt-7t1im).
