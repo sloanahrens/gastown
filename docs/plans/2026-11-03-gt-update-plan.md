@@ -321,17 +321,17 @@ func Run(ctx context.Context, d Deps, o Options) (State, error)
 
 ### B11: the daemon consumes the maintenance request
 
-**Depends on:** A0, A1. **Risk path:** yes. **Size:** S to M. **Files:** internal/daemon/scheduled_maintenance.go, maintenance_catchup.go only if needed, tests.
-**Goal.** At the 5-minute tick, if `.runtime/update/maintenance-request` exists, the daemon runs its maintenance cycle regardless of the window and the 20 hour gap. It still honors the ESTOP and the Ring (standby), the gc's quiet guard and the archive's own conditions. If the quiet guard defers, the request file stays and the next tick retries. When the cycle completes, whatever its result, the daemon writes `.runtime/update/maintenance-result.json` (`outcome` completed, deferred or failed; `at`; `detail`) and then removes the request file.
+**Depends on:** A0, A1. **Risk path:** yes. **Size:** S to M. **Files:** internal/daemon/maintenance_request.go (new), internal/daemon/maintenance_request_test.go (new), internal/daemon/scheduled_maintenance.go (runScheduledMaintenance), internal/daemon/maintenance_gc.go (startMaintenanceGC).
+**Goal.** At the 5-minute tick, if `.runtime/update/maintenance-request` exists, the daemon runs its maintenance cycle regardless of the window and the 20 hour gap. It still honors the ESTOP and the Ring (standby), the gc's quiet guard and the archive's own conditions. If the quiet guard defers, the request file stays and the next tick retries; under a standby the daemon answers "deferred" at once, naming the standby, and removes the file rather than leaving the job to time out. When the cycle finishes completed or failed, the daemon writes `.runtime/update/maintenance-result.json` (`outcome`, `at`, `detail`) and then removes the request file.
 **Constraints.** Change only what the tick needs. A malformed request file is removed and logged, not retried forever. Write the result before removing the request (so the job never sees "gone" without a result).
 **Out of scope.** The trigger, config, alerts.
 **Gate.** `go test ./internal/daemon -run 'MaintenanceRequest|ScheduledMaintenance' -count=1`.
 **Acceptance.**
-- [ ] TestMaintenanceRequestRunsOutsideTheWindow: a request at 14:00 starts a cycle although the window is 03:00 and the last cycle was 2 hours ago
-- [ ] TestMaintenanceRequestHonorsEstopAndRing: each of ESTOP and a waned Ring starts no gc and keeps the request
-- [ ] TestMaintenanceRequestDeferredByQuietGuardKeepsTheFile
-- [ ] TestMaintenanceRequestWritesResultThenRemovesTheRequest: order proven with a recording file fake
-- [ ] TestMaintenanceRequestMalformedIsDropped
+- [ ] TestMaintenanceRequestRunsOutsideTheWindow: a request at 14:00 starts a cycle although the window is 03:00 and the last cycle was 2 hours ago; without the request the same tick starts none
+- [ ] TestMaintenanceRequestUnderStandbyAnswersDeferred: ESTOP and a waned Ring each start no cycle, write a "deferred" result naming the standby, and remove the request
+- [ ] TestMaintenanceRequestDeferredByTheQuietGuardKeepsTheFile
+- [ ] TestFinishMaintenanceRequestWritesResultThenRemovesIt: order proven with a recording file fake; a write error leaves the request; deferred and interrupted do nothing
+- [ ] TestMaintenanceRequestMalformedOrPatrolInactive: a malformed file is removed and the tick runs as before; an inactive patrol is answered "failed" and the request removed
 
 ### B12: update config and the due rules
 

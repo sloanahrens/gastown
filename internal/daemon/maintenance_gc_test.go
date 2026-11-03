@@ -992,7 +992,7 @@ func TestMaintenanceGCCycleShutdownNoEscalation(t *testing.T) {
 	}
 
 	// The window's dispatch: backup, then the cycle, then the finished mark.
-	d.startMaintenanceGC([]string{"hq", "gt"}, gcTestNow.Add(time.Hour))
+	d.startMaintenanceGC([]string{"hq", "gt"}, gcTestNow.Add(time.Hour), nil)
 
 	if got := strings.Join(f.gcCalls, ","); got != "gt" {
 		t.Errorf("gc calls = %s, want gt only — the run must stop at the shutdown", got)

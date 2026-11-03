@@ -22,6 +22,7 @@ import (
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/slot"
+	"github.com/steveyegge/gastown/internal/update"
 )
 
 // scheduled_maintenance's gc: history-preserving garbage collection, the
@@ -720,7 +721,12 @@ func (d *Daemon) maintenanceDataDir() string {
 // windowEnd is when the current maintenance window closes; a deferral is
 // recorded against it and counted toward the skipped-window streak once it
 // has passed.
-func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time) {
+//
+// request is the update job's request this cycle answers, or nil for a
+// scheduled one. It is answered only once the cycle will not be retried: a
+// deferred or interrupted cycle leaves the request for the next tick
+// (maintenance_request.go).
+func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time, request *update.RequestFile) {
 	if !d.maintenanceGCRunning.CompareAndSwap(false, true) {
 		d.logger.Printf("scheduled_maintenance: previous gc cycle still running — skipping this tick")
 		return
@@ -758,6 +764,9 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time) {
 		}
 		d.resetGCDeferralStreak()
 		d.maintenanceGCFinishedAt.Store(d.maintenance().now().UnixNano())
+		if request != nil {
+			d.answerRequest(*request, res.outcome, res.reason)
+		}
 	})
 }
 

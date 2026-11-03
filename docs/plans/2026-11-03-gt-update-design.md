@@ -65,7 +65,7 @@ The trigger is configured under `daemon.patrols.update`: `enabled`, `window` (03
 
 The trigger ships disabled. When `update.enabled` is true, `rebuild_gt` stops making install decisions and the maintenance window tick stops starting cycles by itself; the cycle code still runs inside the daemon in version 1. One key switches it on; switching it off is the rollback. The old triggers are deleted only after version 2.
 
-The run-now request: at its 5-minute tick, if `maintenance-request` exists, the daemon runs the cycle regardless of the window and the 20-hour gap. It still honors the ESTOP, the Ring and the gc's quiet guard. If the guard defers, the file stays and the next tick retries; the job waits up to 30 minutes, then moves on and marks maintenance "deferred" (it never blocks the install). When the cycle finishes, even with failures, the daemon deletes the file and records the result.
+The run-now request: at its 5-minute tick, if `maintenance-request` exists, the daemon runs the cycle regardless of the window and the 20-hour gap. It still honors the ESTOP, the Ring and the gc's quiet guard. If the guard defers, the file stays and the next tick retries; the job waits up to 30 minutes, then moves on and marks maintenance "deferred" (it never blocks the install). Under the ESTOP or a waned Ring the daemon answers at once with a "deferred" result naming the standby and deletes the file, so the job does not sit out that wait. When the cycle finishes, even with failures, the daemon deletes the file and records the result.
 
 ### 5. Other tracks, in dependency order
 
