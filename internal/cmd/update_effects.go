@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -93,8 +94,13 @@ func seatOf(env seatProbeEnv, rig, name string) (update.Seat, error) {
 }
 
 // polecatDirs lists the polecat worktree directory names under dir, skipping
-// files and dot entries as `gt polecat list` does. A missing dir keeps its
-// fs.ErrNotExist, which newSeatProbe reads as a rig with no polecats.
+// files and dot entries as `gt polecat list` does. A symlinked worktree is a
+// worktree and is followed, so a town that links a polecat's directory in is
+// still counted. A symlink that leads nowhere cannot be a seat, and an error
+// reading it (unlike a plain file, which is not a seat either) is returned: a
+// drain may not read a directory it could not check as empty. A missing dir
+// keeps its fs.ErrNotExist, which newSeatProbe reads as a rig with no
+// polecats.
 func polecatDirs(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -102,7 +108,22 @@ func polecatDirs(dir string) ([]string, error) {
 	}
 	var names []string
 	for _, entry := range entries {
-		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		isDir := entry.IsDir()
+		if !isDir && entry.Type()&fs.ModeSymlink != 0 {
+			info, err := os.Stat(filepath.Join(dir, entry.Name()))
+			if err != nil {
+				// The stat error is not wrapped: fs.ErrNotExist here would
+				// be read by newSeatProbe as "this rig has no polecats",
+				// and a link to a missing worktree is a seat the probe
+				// could not check, not an empty rig.
+				return nil, fmt.Errorf("following %s: %v", filepath.Join(dir, entry.Name()), err)
+			}
+			isDir = info.IsDir()
+		}
+		if !isDir {
 			continue
 		}
 		names = append(names, entry.Name())
@@ -112,11 +133,11 @@ func polecatDirs(dir string) ([]string, error) {
 
 // heartbeatReader returns the heartbeat reading for townRoot. A session that
 // wrote no heartbeat is (nil, nil); a file that exists but cannot be read or
-// parsed is an error. The path is the one polecat.TouchSessionHeartbeat
-// writes.
+// parsed is an error. The path is polecat.HeartbeatPath, the one
+// TouchSessionHeartbeat writes, so the two readings cannot drift apart.
 func heartbeatReader(townRoot string) func(string) (*polecat.SessionHeartbeat, error) {
 	return func(sessionName string) (*polecat.SessionHeartbeat, error) {
-		path := filepath.Join(townRoot, ".runtime", "heartbeats", sessionName+".json")
+		path := polecat.HeartbeatPath(townRoot, sessionName)
 		data, err := os.ReadFile(path)
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
@@ -158,28 +179,50 @@ func combinedOutput(cmd *exec.Cmd) ([]byte, error) {
 	return cmd.CombinedOutput()
 }
 
-// newRunFunc returns a RunFunc over output. A nonzero exit is a status
-// carrying the output. An error means the command reached no status: it could
-// not start, or the context stopped it. A canceled context returns the
-// context's error, never a -1 exit with a nil error.
+// commandWaitDelay is how long a command is given, after it exits or its
+// context is canceled, to release an output pipe a child still holds. Without
+// it, Wait blocks on the pipe after the command's own process is gone: a
+// canceled install whose build left a compiler or container client running
+// would never return the context's error, so the update would hang instead of
+// stopping. Ten seconds, as the land gate gives a step for the same reason.
+const commandWaitDelay = 10 * time.Second
+
+// buildCommand is the exec.Cmd newRunFunc runs: the caller's directory, the
+// process environment with env appended, and a WaitDelay so a canceled
+// command returns even when a child holds the output pipe.
+func buildCommand(ctx context.Context, dir string, env []string, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), env...)
+	cmd.WaitDelay = commandWaitDelay
+	return cmd
+}
+
+// newRunFunc returns a RunFunc over output. A command that ran is read by what
+// it exited with: zero is success, nonzero is a status carrying the output,
+// each even when its context was canceled after it exited. Only a command that
+// reached no status is an error — it could not start, or its context stopped
+// it. A canceled context returns the context's error, never a -1 exit with a
+// nil error.
 func newRunFunc(output commandOutput) update.RunFunc {
 	return func(ctx context.Context, dir string, env []string, name string, args ...string) (string, int, error) {
 		if err := ctx.Err(); err != nil {
 			return "", -1, err
 		}
-		cmd := exec.CommandContext(ctx, name, args...)
-		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), env...)
-		out, err := output(cmd)
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return string(out), -1, ctxErr
-		}
+		out, err := output(buildCommand(ctx, dir, env, name, args...))
 		if err == nil {
 			return string(out), 0, nil
 		}
+		// A process that exited with a real status is read by it: the cancel
+		// landing just after the exit did not change what the command did. A
+		// process killed by its context carries no status (-1), so it falls
+		// through to the context's error.
 		var exitCoder interface{ ExitCode() int }
-		if errors.As(err, &exitCoder) {
+		if errors.As(err, &exitCoder) && exitCoder.ExitCode() >= 0 {
 			return string(out), exitCoder.ExitCode(), nil
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return string(out), -1, ctxErr
 		}
 		return string(out), -1, err
 	}

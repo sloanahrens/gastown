@@ -306,7 +306,7 @@ func townSeatProbeEnv(townRoot string) seatProbeEnv {
 // production reader looks for.
 func writeHeartbeatFile(t *testing.T, townRoot, session, body string) {
 	t.Helper()
-	path := filepath.Join(townRoot, ".runtime", "heartbeats", session+".json")
+	path := polecat.HeartbeatPath(townRoot, session)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("creating the heartbeat directory: %v", err)
 	}
@@ -392,6 +392,75 @@ func TestRealRunFuncExitCodes(t *testing.T) {
 	})
 }
 
+// TestPolecatDirsFollowsSymlinks pins that a linked worktree is a seat: a
+// listing that kept only real directories would silently drop a polecat, and
+// the drain would install over it. A link that leads nowhere is an error
+// naming it, because the probe may not read a directory it could not check as
+// empty.
+func TestPolecatDirsFollowsSymlinks(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a symlinked worktree is a seat", func(t *testing.T) {
+		t.Parallel()
+		townRoot := t.TempDir()
+		worktree := filepath.Join(t.TempDir(), "nux-worktree")
+		if err := os.MkdirAll(worktree, 0o755); err != nil {
+			t.Fatalf("creating the polecat worktree: %v", err)
+		}
+		polecatsDir := filepath.Join(townRoot, "gastown", "polecats")
+		if err := os.MkdirAll(polecatsDir, 0o755); err != nil {
+			t.Fatalf("creating the polecats directory: %v", err)
+		}
+		if err := os.Symlink(worktree, filepath.Join(polecatsDir, "nux")); err != nil {
+			t.Fatalf("linking the polecat worktree: %v", err)
+		}
+
+		seats, err := newSeatProbe(townSeatProbeEnv(townRoot)).Seats(context.Background())
+		if err != nil {
+			t.Fatalf("Seats() error = %v, want the linked polecat listed", err)
+		}
+		want := []update.Seat{{Name: "gastown/nux"}}
+		if !slices.Equal(seats, want) {
+			t.Errorf("Seats() = %+v, want %+v", seats, want)
+		}
+	})
+
+	t.Run("a dangling symlink is an error", func(t *testing.T) {
+		t.Parallel()
+		townRoot := t.TempDir()
+		polecatsDir := filepath.Join(townRoot, "gastown", "polecats")
+		if err := os.MkdirAll(polecatsDir, 0o755); err != nil {
+			t.Fatalf("creating the polecats directory: %v", err)
+		}
+		if err := os.Symlink(filepath.Join(t.TempDir(), "gone"), filepath.Join(polecatsDir, "nux")); err != nil {
+			t.Fatalf("linking a missing polecat worktree: %v", err)
+		}
+
+		seats, err := newSeatProbe(townSeatProbeEnv(townRoot)).Seats(context.Background())
+		if err == nil {
+			t.Fatalf("Seats() error = nil, want the dangling link's error")
+		}
+		if !strings.Contains(err.Error(), "nux") {
+			t.Errorf("Seats() error = %v, want it to name the seat", err)
+		}
+		if seats != nil {
+			t.Errorf("Seats() = %+v with an error, want no seats", seats)
+		}
+	})
+}
+
+// TestNewRunFuncSetsWaitDelay pins the bound that keeps a canceled install
+// from hanging: the command is built with a WaitDelay, so a child that
+// inherited the output pipe cannot keep Wait blocked past the command's exit
+// or cancellation. The builder is checked without starting anything.
+func TestNewRunFuncSetsWaitDelay(t *testing.T) {
+	t.Parallel()
+	cmd := buildCommand(context.Background(), t.TempDir(), []string{"UPDATE_EFFECTS_RESULT=appended"}, "installer", "--sha", "abc")
+	if cmd.WaitDelay <= 0 {
+		t.Errorf("cmd.WaitDelay = %v, want a positive bound", cmd.WaitDelay)
+	}
+}
+
 // TestRealRunFuncReportsCancellation pins what a canceled context yields: the
 // context's error, never a -1 exit code that reads as a finished command.
 func TestRealRunFuncReportsCancellation(t *testing.T) {
@@ -437,6 +506,49 @@ func TestRealRunFuncReportsCancellation(t *testing.T) {
 		}
 		if out != "killed" {
 			t.Errorf("run(stopped process) output = %q, want the output written before it stopped", out)
+		}
+	})
+
+	t.Run("a command that exited zero before the cancel is a success", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		run := newRunFunc(func(*exec.Cmd) ([]byte, error) {
+			// The cancel lands after the process exited 0.
+			cancel()
+			return []byte("done"), nil
+		})
+
+		out, exit, err := run(ctx, dir, nil, "installer")
+		if err != nil {
+			t.Errorf("run(finished command) error = %v, want nil: the cancel came after the exit", err)
+		}
+		if exit != 0 {
+			t.Errorf("run(finished command) exit = %d, want 0", exit)
+		}
+		if out != "done" {
+			t.Errorf("run(finished command) output = %q, want the command's output", out)
+		}
+	})
+
+	t.Run("a command that exited nonzero before the cancel keeps its status", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		run := newRunFunc(func(*exec.Cmd) ([]byte, error) {
+			cancel()
+			return []byte("failed"), fakeExitCode(3)
+		})
+
+		out, exit, err := run(ctx, dir, nil, "installer")
+		if err != nil {
+			t.Errorf("run(finished command) error = %v, want nil: the process reached its own status", err)
+		}
+		if exit != 3 {
+			t.Errorf("run(finished command) exit = %d, want 3", exit)
+		}
+		if out != "failed" {
+			t.Errorf("run(finished command) output = %q, want the command's output", out)
 		}
 	})
 }
