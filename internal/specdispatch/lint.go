@@ -32,6 +32,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/dispatch"
 )
 
 // Labels and types the lint and the dispatcher key on.
@@ -390,6 +391,10 @@ var (
 	headingRe   = regexp.MustCompile(`^#{2}\s+(.+?)\s*#*\s*$`)
 	oneWorkerRe = regexp.MustCompile(`(?i)\bone\s+worker\b`)
 	planningRe  = regexp.MustCompile(`(?i)needs?[\s-]+planning|decompos|multiple\s+workers`)
+	// ownerSessionRe is the Size a bead for the overseer or the operator may
+	// say instead of one worker (gt-hgt9j.13). It is read only for a bead
+	// wearing an owner label: ownerSessionSize gates it.
+	ownerSessionRe = regexp.MustCompile(`(?i)\bone\s+(overseer|operator)\s+session\b`)
 )
 
 // Sections splits markdown into "## " sections keyed by lower-case heading.
@@ -573,7 +578,8 @@ func acceptanceDisagreement(field, section string) string {
 //     (gt-7t1im, gt-hgt9j.10)
 //  7. size: needs-planning label, a Size that says planning, or more than
 //     MaxAcceptance items route to the planner; a Size that does not say one
-//     worker is refused
+//     worker is refused. A bead labeled overseer-only or operator-only may
+//     say one session of its owner instead (gt-hgt9j.13)
 //
 // The bead's type and labels are not a gate: a task or bug with the five
 // sections is as lintable as a feature (gt-mmsr2).
@@ -650,10 +656,22 @@ func lint(s Spec, t Template, paths bool) LintVerdict {
 		return LintVerdict{Route: RoutePlanning, Field: "size", Reason: fmt.Sprintf("%d acceptance items (max %d for one worker)", items, MaxAcceptance)}
 	}
 	// A template without a Size section has nothing to read here.
-	if hasSection(t, "size") && !oneWorkerRe.MatchString(size) {
+	if hasSection(t, "size") && !oneWorkerRe.MatchString(size) && !ownerSessionSize(s, size) {
 		return refusal(Refusal{Field: "size", Reason: fmt.Sprintf("size %q is not one worker, one MR", firstLine(size))})
 	}
 	return LintVerdict{Route: RouteDispatch}
+}
+
+// ownerSessionSize reports whether size may say one session of the bead's
+// owner instead of one worker. Only a bead labeled for the overseer or the
+// operator gets that wording; an ordinary bead saying "one overseer session"
+// is refused by the one-worker rule (gt-hgt9j.13). Spec.HasLabel ignores case
+// and surrounding space, so a label written " Overseer-Only " counts.
+func ownerSessionSize(s Spec, size string) bool {
+	if !ownerSessionRe.MatchString(size) {
+		return false
+	}
+	return s.HasLabel(dispatch.OverseerOnlyLabel) || s.HasLabel(dispatch.OperatorOnlyLabel)
 }
 
 func hasSection(t Template, name string) bool {
