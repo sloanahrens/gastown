@@ -164,6 +164,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.TierSweep != nil {
 		start(h.cfg.TierSweepEvery, h.pollTierSweep)
 	}
+	if h.cfg.Update != nil {
+		start(h.cfg.UpdateEvery, h.pollUpdate)
+	}
 	if h.cfg.Forgejo != nil {
 		start(h.cfg.ForgejoEvery, h.pollForgejo)
 	}
@@ -783,6 +786,19 @@ func (h *Hub) pollTierSweep() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.TierSweep = ts
+	h.publishLocked()
+}
+
+// pollUpdate reads the gt update job's run into the feed. A nil read clears the
+// section instead of keeping the last one: nil is the reader's answer for no
+// run, for an unreadable record, and for a run more than a day old (from its
+// end or, while running, its last heartbeat), and a run the reader has stopped
+// reporting must not stay in the feed as if it were current.
+func (h *Hub) pollUpdate() {
+	u := h.cfg.Update()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.state.Update = u
 	h.publishLocked()
 }
 

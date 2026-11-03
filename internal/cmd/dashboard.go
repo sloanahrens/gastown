@@ -439,6 +439,11 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	// readers use.
 	hold := dashboard.NewHoldReader(townRoot)
 	tierSweeps := newTierSweepReader(townRoot)
+	// The gt update job's own record, for the feed's update section: the page
+	// draws it beside the dispatch hold so the operator sees why nothing runs.
+	// A record that cannot be read is logged, because otherwise it looks the
+	// same as a town where no run has happened.
+	updateStatus := newUpdateStatusReader(townRoot).withLogf(dashboardLogf(out))
 	escalations := newDashEscalationReader(townRoot)
 	backoff := newDashBackoff(townRoot)
 	queue := newDashQueueReader(townRoot)
@@ -478,6 +483,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		JevScorecard:   dashboardJevScorecard(jevScorecardArgv),
 		OM:             func() *dashboard.OM { return om.read(time.Now()) },
 		TierSweep:      func() *dashboard.TierSweep { return tierSweeps.read(time.Now()) },
+		Update:         func() *dashboard.UpdateStatus { return updateStatus.read(time.Now()) },
 		Forgejo:        forgejoFeed,
 		News:           news,
 		Deploys:        forgejoDeploys,
