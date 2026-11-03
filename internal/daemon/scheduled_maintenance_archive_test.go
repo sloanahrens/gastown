@@ -2555,13 +2555,101 @@ func TestArchiveEventsLoopKeepsGoingPastTheLookbackReRead(t *testing.T) {
 	}
 }
 
+// TestArchiveEventsFullPageOfArchivedRowsAdvances: the events read re-reads its
+// lookback window, so a page it returns can be full of rows the watermark
+// already holds while rows after them are still behind. The export must read
+// past that page, not end the batch there: with five archived rows warm and a
+// five-row page over twelve hourly rows, one maintenance call still archives
+// all twelve (gt-o4sk8.1).
+func TestArchiveEventsFullPageOfArchivedRowsAdvances(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	withGCFakes(t, d)
+	dir := t.TempDir()
+	d.patrolConfig = archiveConfig(dir)
+	limit := 5
+	d.patrolConfig.Patrols.ScheduledMaintenance.ArchiveEventsLimit = &limit
+	d.maint.now = func() time.Time { return gcTestNow }
+	d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {
+		return nil, nil // no commits: this test drives the events export
+	}
+	columns := []string{"id", "created_at"}
+	base := gcTestNow.Add(-100 * time.Hour)
+	rows := make([][]string, 0, 12)
+	for i := 1; i <= 12; i++ {
+		rows = append(rows, []string{
+			fmt.Sprintf("h%05d", i),
+			base.Add(time.Duration(i) * time.Hour).Format("2006-01-02 15:04:05"),
+		})
+	}
+	// A previous cycle wrote the first five rows and recorded them; all are
+	// inside the lookback window, so the next read returns them again as a full
+	// page.
+	if err := appendArchiveTable(eventsArchiveFile(dir, "gt"), columns, rows[:5]); err != nil {
+		t.Fatalf("seeding the events file: %v", err)
+	}
+	seeded := EventsArchiveWatermark{CreatedAt: rows[4][1]}
+	for _, row := range rows[:5] {
+		seeded.Archived = append(seeded.Archived, ArchivedEventsRow{CreatedAt: row[1], ID: row[0]})
+	}
+	if err := recordEventsArchiveWatermark(d.config.TownRoot, "gt", seeded); err != nil {
+		t.Fatalf("seeding the events watermark: %v", err)
+	}
+	// A page bounded by rows, archived ones included: what a read over the
+	// lookback window returns when it is bounded before the id filter.
+	reads := 0
+	d.maint.archiveEventsRead = func(_ context.Context, _ *Daemon, _ string, since string) (archiveEvents, error) {
+		reads++
+		page := archiveEvents{Columns: columns}
+		for _, row := range rows {
+			if since != "" && row[1] < since {
+				continue
+			}
+			page.Rows = append(page.Rows, row)
+			if len(page.Rows) == limit {
+				break
+			}
+		}
+		return page, nil
+	}
+
+	out, unarchived := d.maintenanceArchive([]string{"gt"})
+
+	if out.outcome != gcOutcomeCompleted || len(unarchived) != 0 {
+		t.Fatalf("maintenanceArchive = %v, unarchived %v; want completed with none", out, unarchived)
+	}
+	if reads < 4 {
+		t.Errorf("events read %d time(s), want at least 4: the archived pages must be read past", reads)
+	}
+	got := readArchiveCSV(t, eventsArchiveFile(dir, "gt"))
+	if len(got) != 13 {
+		t.Fatalf("archive holds %d row(s) and a header, want all 12 rows once", len(got)-1)
+	}
+	for i, row := range got[1:] {
+		if want := fmt.Sprintf("h%05d", i+1); row[0] != want {
+			t.Errorf("row %d = %s, want %s", i, row[0], want)
+		}
+	}
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	wm := st.ArchiveEventsWatermarks["gt"]
+	if want := rows[len(rows)-1][1]; wm.CreatedAt != want {
+		t.Errorf("watermark created_at = %s, want %s (the last row)", wm.CreatedAt, want)
+	}
+	if len(wm.Archived) != 12 {
+		t.Errorf("watermark holds %d id(s), want all 12 written rows", len(wm.Archived))
+	}
+}
+
 // TestArchiveLoopStopsAtTheBudgetButEveryDatabaseGetsABatch: one deadline
 // bounds every database's extra batches. Once the first database's second
 // batch ends past the budget it takes no third one, and the next database still
 // takes its first (gt-o4sk8.1).
 func TestArchiveLoopStopsAtTheBudgetButEveryDatabaseGetsABatch(t *testing.T) {
 	t.Parallel()
-	d, _ := gcTestDaemon(t)
+	d, logs := gcTestDaemon(t)
 	withGCFakes(t, d)
 	dir := t.TempDir()
 	d.patrolConfig = archiveConfig(dir)
@@ -2607,6 +2695,13 @@ func TestArchiveLoopStopsAtTheBudgetButEveryDatabaseGetsABatch(t *testing.T) {
 	}
 	if got := readArchiveCSV(t, archiveFile(dir, "hq")); len(got) != limit+1 {
 		t.Errorf("hq archive holds %d row(s), want its one batch's %d", len(got)-1, limit)
+	}
+	// A budget stop leaves the database possibly behind, so the log names the
+	// export and says so rather than reading as a finished step.
+	for _, want := range []string{"gt dolt_log: stopped at the cycle's 10m0s archive_budget, still behind", "hq dolt_log: stopped at the cycle's 10m0s archive_budget, still behind"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("log does not report the budget stop %q:\n%s", want, logs.String())
+		}
 	}
 }
 

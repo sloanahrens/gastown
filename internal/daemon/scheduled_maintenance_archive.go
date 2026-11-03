@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -417,7 +418,7 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 	var failed []string
 	unarchived := map[string]bool{}
 	for _, db := range databases {
-		commitCapped, commitErr := archiveUntilCaughtUp(st.ArchiveWatermarks[db], commitLimit, deadline, s.now, sameCommitWatermark,
+		commitStop, commitErr := archiveUntilCaughtUp(st.ArchiveWatermarks[db], commitLimit, deadline, s.now, sameCommitWatermark,
 			func(wm ArchiveWatermark) (int, ArchiveWatermark, error) {
 				return d.maintenanceArchiveCommits(ctx, dir, db, wm)
 			})
@@ -425,11 +426,10 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 			failed = append(failed, db+" dolt_log: "+commitErr.Error())
 			unarchived[db] = true
 			d.logger.Printf("scheduled_maintenance: archive %s dolt_log: FAILED: %v — watermark kept", db, commitErr)
-		} else if commitCapped {
-			d.logger.Printf("scheduled_maintenance: archive %s dolt_log: stopped at the %d-batch per-cycle bound, still behind — the next cycle continues from the watermark",
-				db, maintenanceArchiveMaxBatchesPerExport)
+		} else {
+			logArchiveStop(d.logger, db, "dolt_log", commitStop, budget)
 		}
-		eventsCapped, eventsErr := archiveUntilCaughtUp(st.ArchiveEventsWatermarks[db], eventsLimit, deadline, s.now, sameEventsArchiveWatermark,
+		eventsStop, eventsErr := archiveUntilCaughtUp(st.ArchiveEventsWatermarks[db], eventsLimit, deadline, s.now, sameEventsArchiveWatermark,
 			func(wm EventsArchiveWatermark) (int, EventsArchiveWatermark, error) {
 				return d.maintenanceArchiveEvents(ctx, dir, db, wm)
 			})
@@ -437,9 +437,8 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 			failed = append(failed, db+" events: "+eventsErr.Error())
 			unarchived[db] = true
 			d.logger.Printf("scheduled_maintenance: archive %s events: FAILED: %v — watermark kept", db, eventsErr)
-		} else if eventsCapped {
-			d.logger.Printf("scheduled_maintenance: archive %s events: stopped at the %d-batch per-cycle bound, still behind — the next cycle continues from the watermark",
-				db, maintenanceArchiveMaxBatchesPerExport)
+		} else {
+			logArchiveStop(d.logger, db, "events", eventsStop, budget)
 		}
 	}
 	if len(failed) > 0 {
@@ -451,6 +450,22 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 			len(failed), strings.Join(failed, "\n"), dir))
 	}
 	return maintenanceGCResult{outcome: gcOutcomeCompleted}, unarchived
+}
+
+// logArchiveStop reports the per-cycle stops that can leave a database behind,
+// naming the export and saying so. Without it a database that is still behind
+// reads as a step that finished, and the operator has no sign that the next
+// cycle is expected to continue. A short batch or one that could not advance
+// needs no line: nothing is known to be behind.
+func logArchiveStop(logger *log.Logger, db, export string, stop archiveStop, budget time.Duration) {
+	switch stop {
+	case archiveStopBudget:
+		logger.Printf("scheduled_maintenance: archive %s %s: stopped at the cycle's %v archive_budget, still behind — the next cycle continues from the watermark",
+			db, export, budget)
+	case archiveStopCapped:
+		logger.Printf("scheduled_maintenance: archive %s %s: stopped at the %d-batch per-cycle bound, still behind — the next cycle continues from the watermark",
+			db, export, maintenanceArchiveMaxBatchesPerExport)
+	}
 }
 
 // tightenArchiveDir sets the archive directory to owner-only through chmod. The
@@ -535,20 +550,43 @@ func (d *Daemon) maintenanceArchiveBudget() (time.Duration, error) {
 // watermark and the next cycle continues from it (gt-o4sk8.1).
 const maintenanceArchiveMaxBatchesPerExport = 1000
 
+// archiveStop is why archiveUntilCaughtUp stopped.
+type archiveStop int
+
+const (
+	// archiveStopShort: a batch's read returned fewer rows than the bound, so
+	// nothing more was there to read.
+	archiveStopShort archiveStop = iota
+	// archiveStopNoProgress: a full batch recorded the watermark it started
+	// with, so another batch would repeat it.
+	archiveStopNoProgress
+	// archiveStopBudget: the whole step's deadline passed, so a database may
+	// still be behind.
+	archiveStopBudget
+	// archiveStopCapped: the per-cycle batch bound ended the loop, so a
+	// database may still be behind.
+	archiveStopCapped
+	// archiveStopFailed: a batch returned an error.
+	archiveStopFailed
+)
+
 // archiveUntilCaughtUp takes batches of one database's export, each starting at
 // the watermark the previous one recorded, until nothing more is behind or the
 // budget ends. It stops when a batch's read returned fewer rows than the bound
-// (nothing more was there to read), when a batch records the same watermark it
-// started with (no progress, so another batch would repeat it), when a batch
-// fails, when now() is at or past deadline, or at
-// maintenanceArchiveMaxBatchesPerExport. The stop counts rows the read
-// returned, not rows written: the events read re-reads its lookback window, so
-// a full page can carry rows the watermark already holds and a page short only
-// after filtering would end the loop with rows still behind (gt-o4sk8.1). The
-// first batch always runs, even past the deadline, so every database gets its
-// one batch in a cycle; the deadline only stops the extra ones. It reports
-// whether the batch bound ended the loop and returns the failing batch's
-// error; the batch itself has already kept the watermark unchanged (gt-7nxj4).
+// (archiveStopShort), when a batch records the same watermark it started with
+// (archiveStopNoProgress, so another batch would repeat it), when a batch
+// fails (archiveStopFailed), when now() is at or past deadline
+// (archiveStopBudget), or at maintenanceArchiveMaxBatchesPerExport
+// (archiveStopCapped). The stop counts rows the read returned, not rows
+// written: the events read re-reads its lookback window, so a full page can
+// carry rows the watermark already holds. The events export moves such a page
+// out of the way itself (maintenanceArchiveEvents), so a page short only after
+// filtering never ends the loop with rows still behind (gt-o4sk8.1). The first
+// batch always runs, even past the deadline, so every database gets its one
+// batch in a cycle; the deadline only stops the extra ones. The caller logs
+// archiveStopBudget and archiveStopCapped, so an operator can tell the database
+// is still behind. The batch itself has already kept the watermark unchanged on
+// a failure (gt-7nxj4).
 func archiveUntilCaughtUp[W any](
 	wm W,
 	limit int,
@@ -556,21 +594,26 @@ func archiveUntilCaughtUp[W any](
 	now func() time.Time,
 	same func(W, W) bool,
 	batch func(W) (int, W, error),
-) (capped bool, err error) {
-	for batches := 0; batches < maintenanceArchiveMaxBatchesPerExport; batches++ {
+) (stop archiveStop, err error) {
+	for batches := 0; ; batches++ {
 		read, next, err := batch(wm)
 		if err != nil {
-			return false, err
+			return archiveStopFailed, err
 		}
-		if read < limit || same(next, wm) {
-			return false, nil
+		if read < limit {
+			return archiveStopShort, nil
+		}
+		if same(next, wm) {
+			return archiveStopNoProgress, nil
 		}
 		if !now().Before(deadline) {
-			return false, nil
+			return archiveStopBudget, nil
+		}
+		if batches+1 >= maintenanceArchiveMaxBatchesPerExport {
+			return archiveStopCapped, nil
 		}
 		wm = next
 	}
-	return true, nil
 }
 
 // sameCommitWatermark reports whether two commit watermarks record the same
@@ -693,18 +736,26 @@ func archiveWatermarkAfter(prev ArchiveWatermark, commits []archiveCommit) (Arch
 // a half-exported table is never left ahead of the watermark for the next run
 // to append again.
 //
-// It returns how many rows its read returned and the watermark it recorded, or
-// wm unchanged when there was nothing new; the caller loops on both. The count
-// is the rows read, not only the fresh ones written: a read that re-returns the
-// lookback window's archived rows hands back a full page the export filters
-// down, and the caller must not read that short batch as "nothing more is
-// behind". On a failure it returns wm, because the rollback leaves the archive
-// where it was.
+// It returns how many rows the page it acted on returned and the watermark it
+// recorded, or wm unchanged when there was nothing new; the caller loops on
+// both. The count is the rows the read returned, not only the fresh ones
+// written: the caller reads a full page as "more may be behind" and a short
+// page as "nothing more is behind". A full page whose rows are all already
+// archived (the lookback window re-read) therefore cannot end the caller's
+// loop; this function reads past it, starting at the page's newest created_at,
+// until it finds fresh rows or the read runs dry. Every row before that point
+// was in the page and archived, so no unarchived row is skipped, and the ids
+// the watermark holds still keep a re-read row from being appended twice. On a
+// failure it returns wm, because the rollback leaves the archive where it was.
 func (d *Daemon) maintenanceArchiveEvents(parent context.Context, dir, db string, wm EventsArchiveWatermark) (read int, next EventsArchiveWatermark, err error) {
 	if err := validMaintenanceDBName(db); err != nil {
 		return 0, wm, err
 	}
 	if err := wm.Validate(); err != nil {
+		return 0, wm, err
+	}
+	_, limit, err := d.maintenanceArchiveLimits()
+	if err != nil {
 		return 0, wm, err
 	}
 	s := d.maintenance()
@@ -720,53 +771,102 @@ func (d *Daemon) maintenanceArchiveEvents(parent context.Context, dir, db string
 	if err != nil {
 		return 0, wm, err
 	}
-	batch, err := s.archiveEventsRead(ctx, d, db, since)
-	if err != nil {
-		return 0, wm, exp.fail(fmt.Errorf("reading events: %w", err))
-	}
-	if len(batch.Rows) == 0 {
-		return 0, wm, nil // nothing new: no file, and the watermark stays put
-	}
-	_, idColumn, err := eventsWatermarkColumns(batch.Columns)
-	if err != nil {
-		return 0, wm, exp.fail(err)
-	}
-	archived := wm.ArchivedIDs()
-	fresh := make([][]string, 0, len(batch.Rows))
-	for _, row := range batch.Rows {
-		if idColumn >= len(row) {
-			return 0, wm, exp.fail(fmt.Errorf("events row of %d values is missing column %d", len(row), idColumn))
-		}
-		if archived[row[idColumn]] {
-			continue
-		}
-		fresh = append(fresh, row)
-	}
-	if len(fresh) == 0 {
-		return len(batch.Rows), wm, nil // the whole window is already archived: nothing new
-	}
-	if exp.existed && exp.start > 0 {
-		// The file already carries a header. Appending a member under a
-		// different one would leave a file no reader can interpret, so a
-		// database whose table no longer matches its file fails its export and
-		// keeps its watermark.
-		if err := checkEventsArchiveHeader(path, batch.Columns); err != nil {
+	var sinceAt time.Time
+	if since != "" {
+		if sinceAt, err = parseEventsTimestamp(since); err != nil {
 			return 0, wm, exp.fail(err)
 		}
 	}
-	if err := exp.append(s, batch.Columns, fresh); err != nil {
-		return 0, wm, exp.fail(fmt.Errorf("writing %s: %w", path, err))
+	archived := wm.ArchivedIDs()
+	for {
+		batch, err := s.archiveEventsRead(ctx, d, db, since)
+		if err != nil {
+			return 0, wm, exp.fail(fmt.Errorf("reading events: %w", err))
+		}
+		if len(batch.Rows) == 0 {
+			return 0, wm, nil // nothing new: no file, and the watermark stays put
+		}
+		createdAtColumn, idColumn, err := eventsWatermarkColumns(batch.Columns)
+		if err != nil {
+			return 0, wm, exp.fail(err)
+		}
+		fresh := make([][]string, 0, len(batch.Rows))
+		for _, row := range batch.Rows {
+			if createdAtColumn >= len(row) || idColumn >= len(row) {
+				return 0, wm, exp.fail(fmt.Errorf("events row of %d values is missing column %d or %d", len(row), createdAtColumn, idColumn))
+			}
+			if archived[row[idColumn]] {
+				continue
+			}
+			fresh = append(fresh, row)
+		}
+		if len(fresh) == 0 {
+			// The whole page is already archived: the lookback window re-read.
+			// A page under the read's bound is the end of the window, so
+			// nothing more is behind. A full page is read past, starting at its
+			// newest created_at; the page cannot move the read when every row
+			// shares that timestamp, so that is the end of the loop too.
+			if len(batch.Rows) < limit {
+				return len(batch.Rows), wm, nil
+			}
+			newestAt, newestText, err := newestEventsTimestamp(createdAtColumn, batch.Rows)
+			if err != nil {
+				return 0, wm, exp.fail(err)
+			}
+			if !newestAt.After(sinceAt) {
+				return len(batch.Rows), wm, nil
+			}
+			since, sinceAt = newestText, newestAt
+			continue
+		}
+		if exp.existed && exp.start > 0 {
+			// The file already carries a header. Appending a member under a
+			// different one would leave a file no reader can interpret, so a
+			// database whose table no longer matches its file fails its export
+			// and keeps its watermark.
+			if err := checkEventsArchiveHeader(path, batch.Columns); err != nil {
+				return 0, wm, exp.fail(err)
+			}
+		}
+		if err := exp.append(s, batch.Columns, fresh); err != nil {
+			return 0, wm, exp.fail(fmt.Errorf("writing %s: %w", path, err))
+		}
+		next, err = wm.written(batch.Columns, fresh)
+		if err != nil {
+			return 0, wm, exp.fail(err)
+		}
+		if err := recordEventsArchiveWatermark(d.config.TownRoot, db, next); err != nil {
+			return 0, wm, exp.fail(fmt.Errorf("the watermark for %s cannot be recorded: %w", path, err))
+		}
+		d.logger.Printf("scheduled_maintenance: archive %s events: %d row(s) to %s, through %s (%d id(s) in the window)",
+			db, len(fresh), path, next.CreatedAt, len(next.Archived))
+		return len(batch.Rows), next, nil
 	}
-	next, err = wm.written(batch.Columns, fresh)
-	if err != nil {
-		return 0, wm, exp.fail(err)
+}
+
+// newestEventsTimestamp returns the newest created_at in a page of events rows,
+// as text for the next read's lower bound, and refuses a row it cannot date: a
+// bound the read cannot compare would leave the next read starting where this
+// one did.
+func newestEventsTimestamp(createdAtColumn int, rows [][]string) (time.Time, string, error) {
+	var newest time.Time
+	newestText := ""
+	for _, row := range rows {
+		if createdAtColumn >= len(row) {
+			return time.Time{}, "", fmt.Errorf("events row of %d values is missing column %d", len(row), createdAtColumn)
+		}
+		at, err := parseEventsTimestamp(row[createdAtColumn])
+		if err != nil {
+			return time.Time{}, "", err
+		}
+		if at.After(newest) {
+			newest, newestText = at, row[createdAtColumn]
+		}
 	}
-	if err := recordEventsArchiveWatermark(d.config.TownRoot, db, next); err != nil {
-		return 0, wm, exp.fail(fmt.Errorf("the watermark for %s cannot be recorded: %w", path, err))
+	if newestText == "" {
+		return time.Time{}, "", fmt.Errorf("events page holds no row to date")
 	}
-	d.logger.Printf("scheduled_maintenance: archive %s events: %d row(s) to %s, through %s (%d id(s) in the window)",
-		db, len(fresh), path, next.CreatedAt, len(next.Archived))
-	return len(batch.Rows), next, nil
+	return newest, newestText, nil
 }
 
 // archiveExport is one database's export into one archive file. Until the
