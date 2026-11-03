@@ -342,8 +342,7 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 		}
 		if row.Crew {
 			// Polecat already names a crew branch's agent segment; carry it
-			// so the By cell names the branch's agent rather than the bead's
-			// assignee (gt-830fd).
+			// for the By cell.
 			row.CrewAgent = row.Polecat
 		}
 		if rec.OMScore > 0 {
@@ -404,8 +403,7 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 		if crew != nil && crew(rows[i].Rig, rows[i].Bead) {
 			// The row's own record carries no branch, so the crew agent is
 			// the name the submission log reads off the newest crew branch,
-			// the same name the Polecat cell must show instead of the bead's
-			// assignee (gt-830fd).
+			// the same name the Polecat cell shows.
 			rows[i].Crew = true
 			rows[i].CrewAgent = landingName(who, rows[i].Rig, rows[i].Bead)
 		}
