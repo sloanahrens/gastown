@@ -11,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -26,6 +28,18 @@ const doltOrphanMinAge = 60
 // (beads-bd-tests-N/.../dolt-server-config.yaml) and the shared-server shape
 // (beads-bd-tests-N/.../shared-server/dolt-server-config.yaml).
 const beadsTestTempDirPrefix = "beads-bd-tests-"
+
+// doltGoTestOrphanMinAge is the minimum age (in seconds) a reparented dolt
+// sql-server whose config lives in a Go test's temp dir must reach before the
+// sweep treats it as a leftover: well past the gate's 20 minute Go test
+// timeout (docs/testing.md), so the suite that started it is over.
+const doltGoTestOrphanMinAge = 3600
+
+// townGoTestTempRoot is the root the gate's Go tests run in on the town host
+// (GOTMPDIR; internal/cmd/daemon_rehearse.go accepts it as a host-only path).
+// The daemon does not inherit GOTMPDIR, so the root is a constant here rather
+// than an environment read.
+const townGoTestTempRoot = "/Users/Shared/gt-gotmp.noindex"
 
 // DoltOrphanServer is a `dolt sql-server` process that is not the town's own
 // server (daemon/dolt.pid) and matches the shape a killed or timed-out
@@ -173,6 +187,74 @@ func isBeadsTestConfigPath(configPath string) bool {
 	return strings.Contains(configPath, beadsTestTempDirPrefix)
 }
 
+// goTestTempRoots returns the roots a Go test's own temp directories can live
+// under: the system temp root, and the host-wide GOTMPDIR the gate uses.
+func goTestTempRoots() []string {
+	return []string{os.TempDir(), townGoTestTempRoot}
+}
+
+// isGoTestConfigPath reports whether cfg is an absolute path inside a Go
+// test's own temp directory under one of tempRoots, i.e. some component below
+// the root names a directory testing.T.TempDir creates.
+func isGoTestConfigPath(cfg string, tempRoots []string) bool {
+	cfg = filepath.Clean(cfg)
+	for _, root := range tempRoots {
+		rel, ok := relWithin(root, cfg)
+		if !ok {
+			continue
+		}
+		for _, part := range strings.Split(rel, string(filepath.Separator)) {
+			if isGoTestTempDirName(part) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isGoTestTempDirName reports whether name is the shape testing.T.TempDir
+// gives its directory: the test's name — which testing requires to start with
+// "Test" and continue with a non-lowercase rune — with the random numeric
+// suffix os.MkdirTemp appends. The suffix is what separates a test temp dir
+// from an ordinary directory that merely starts with "Test".
+func isGoTestTempDirName(name string) bool {
+	rest, ok := strings.CutPrefix(name, "Test")
+	if !ok || rest == "" {
+		return false
+	}
+	if r, _ := utf8.DecodeRuneInString(rest); unicode.IsLower(r) {
+		return false
+	}
+	last := rest[len(rest)-1]
+	return last >= '0' && last <= '9'
+}
+
+// pathWithin reports whether p is root itself or lies under root. Either path
+// being absent or relative, or lying outside root, reports false.
+func pathWithin(root, p string) bool {
+	_, ok := relWithin(root, p)
+	return ok
+}
+
+// relWithin returns p relative to root and true when p is root or lies under
+// it; otherwise it returns "", false.
+func relWithin(root, p string) (string, bool) {
+	if root == "" || p == "" || !filepath.IsAbs(root) || !filepath.IsAbs(p) {
+		return "", false
+	}
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(p))
+	if err != nil {
+		return "", false
+	}
+	if rel == "." {
+		return rel, true
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return rel, true
+}
+
 // townDoltServerPID reads the town's own dolt sql-server PID from
 // daemon/dolt.pid (see internal/doltserver.DefaultConfig). Returns 0 if the
 // file is missing or unreadable, in which case callers cannot confirm any
@@ -191,8 +273,17 @@ func townDoltServerPID(townRoot string) int {
 
 // classifyDoltOrphan builds a DoltOrphanServer from a process-table entry
 // already known to be a non-town `dolt sql-server`, or returns ok=false if
-// it doesn't meet the minimum-age floor.
+// it doesn't meet the minimum-age floor. It is the no-town-root form of
+// classifyDoltOrphanIn, for callers that have no town to exclude.
 func classifyDoltOrphan(e doltProcEntry) (DoltOrphanServer, bool) {
+	return classifyDoltOrphanIn("", e)
+}
+
+// classifyDoltOrphanIn builds a DoltOrphanServer from a process-table entry
+// already known to be a non-town `dolt sql-server`, or returns ok=false if it
+// doesn't meet the minimum-age floor. A server whose config names a path
+// under townRoot is never an orphan.
+func classifyDoltOrphanIn(townRoot string, e doltProcEntry) (DoltOrphanServer, bool) {
 	age, err := parseEtime(e.Etime)
 	if err != nil || age < doltOrphanMinAge {
 		return DoltOrphanServer{}, false
@@ -207,7 +298,19 @@ func classifyDoltOrphan(e doltProcEntry) (DoltOrphanServer, bool) {
 	// daemonized server "orphan" — the shape Fix() SIGTERMs (gt-l7za1).
 	reason := "unexpected"
 	switch {
+	case pathWithin(townRoot, cfg):
+		// A config under the town root is the town's own or a rig's managed
+		// server, never a leftover — whatever else its process shape says.
+		// First, because a hermetic town root itself sits under a temp root
+		// inside a Test* directory (gt-sokar).
 	case isBeadsTestConfigPath(cfg):
+		reason = "orphan"
+	case e.PPID <= 1 && age >= doltGoTestOrphanMinAge && isGoTestConfigPath(cfg, goTestTempRoots()):
+		// A Go test's dolt sql-server left behind when the suite was killed:
+		// reparented to init, still up long after the suite's timeout, and
+		// running from the test's own temp dir. Bounded to the temp roots so
+		// a server daemonized elsewhere with a Test-shaped path is never
+		// signaled (gt-sokar).
 		reason = "orphan"
 	case cfg == "" && e.PPID <= 1:
 		reason = "orphan"
@@ -252,15 +355,22 @@ func townServerPIDsWith(townRoot, forbidden string) map[int]bool {
 
 // FindOrphanDoltServers scans the process table for `dolt sql-server`
 // processes other than the town's own server(s) (see townServerPIDs) whose
-// shape matches an orphaned embedded-dolt test server: reparented to
-// init/launchd (PPID <= 1) or running from a beads-bd-tests-* scratch config
-// (either the per-test or shared-server layout). Any other non-town dolt
-// sql-server is also returned, tagged Reason "unexpected", so it is surfaced
-// without being auto-signaled — it may be a developer's own manual server.
+// shape matches an orphaned test server: reparented to init/launchd (PPID <=
+// 1) or running from a beads-bd-tests-* scratch config (either the per-test
+// or shared-server layout), or reparented and older than an hour while
+// running from a Go test's own temp dir. Any other non-town dolt sql-server
+// is also returned, tagged Reason "unexpected", so it is surfaced without
+// being auto-signaled — it may be a developer's own manual server.
 func FindOrphanDoltServers(townRoot string) ([]DoltOrphanServer, error) {
+	return findOrphanDoltServersWith(townRoot, doltPSSnapshot)
+}
+
+// findOrphanDoltServersWith is FindOrphanDoltServers with the process table
+// read by snapshot.
+func findOrphanDoltServersWith(townRoot string, snapshot func() ([]doltProcEntry, error)) ([]DoltOrphanServer, error) {
 	expected := townServerPIDs(townRoot)
 
-	entries, err := doltPSSnapshot()
+	entries, err := snapshot()
 	if err != nil {
 		return nil, err
 	}
@@ -273,7 +383,7 @@ func FindOrphanDoltServers(townRoot string) ([]DoltOrphanServer, error) {
 		if expected[e.PID] {
 			continue // the town's own server
 		}
-		if o, ok := classifyDoltOrphan(e); ok {
+		if o, ok := classifyDoltOrphanIn(townRoot, e); ok {
 			orphans = append(orphans, o)
 		}
 	}
