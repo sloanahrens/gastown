@@ -204,14 +204,10 @@ func (d *Daemon) updateFacts(now time.Time) (UpdateFacts, error) {
 // first landing the build contains, because every older one is in the build
 // too.
 func (d *Daemon) updateLandingsWaiting(repoRoot, binaryCommit string) (int, error) {
-	rig := d.updateSourceRig(repoRoot)
-	if rig == "" {
-		return 0, fmt.Errorf("cannot name the rig holding %s", repoRoot)
-	}
 	if strings.TrimSpace(binaryCommit) == "" {
 		return 0, errors.New("the installed build's commit is unknown, so no landing can be shown to be deployed")
 	}
-	file, err := land.RigLandingsFile(d.config.TownRoot, rig)
+	file, err := land.RigLandingsFile(d.config.TownRoot, d.updateSourceRig(repoRoot))
 	if err != nil {
 		return 0, err
 	}
@@ -260,7 +256,7 @@ func (d *Daemon) launchUpdate(ctx context.Context, _ string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	cmd, logFile, err := buildUpdateLaunch(d.config.TownRoot, d.clk().Now())
+	cmd, logFile, err := buildUpdateLaunch(d.config.TownRoot, d.clk().Now(), os.Executable)
 	if err != nil {
 		return err
 	}
@@ -269,16 +265,17 @@ func (d *Daemon) launchUpdate(ctx context.Context, _ string) error {
 }
 
 // buildUpdateLaunch builds, but does not start, the detached update command:
-// this process's own executable with `update --from-daemon`, its output going
-// to a new launch log under the update directory. The caller closes the log
-// file after Start; the child holds its own copy of the descriptor.
+// executable's binary with `update --from-daemon`, its output going to a new
+// launch log under the update directory. The caller closes the log file after
+// Start; the child holds its own copy of the descriptor. Production passes
+// os.Executable; a test passes its own to drive the failure path.
 //
 // Setsid puts the child in a session of its own, so an install restarting the
 // daemon does not take the job down with the daemon's session and process
 // group. No daemon helper sets it (util.SetDetachedProcessGroup sets Setpgid);
 // the job needs the stronger detachment.
-func buildUpdateLaunch(townRoot string, now time.Time) (*exec.Cmd, *os.File, error) {
-	exe, err := os.Executable()
+func buildUpdateLaunch(townRoot string, now time.Time, executable func() (string, error)) (*exec.Cmd, *os.File, error) {
+	exe, err := executable()
 	if err != nil {
 		return nil, nil, fmt.Errorf("locate the daemon executable: %w", err)
 	}

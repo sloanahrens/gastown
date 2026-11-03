@@ -3,6 +3,8 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"os"
@@ -17,7 +19,9 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/installpending"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/update"
+	"github.com/steveyegge/gastown/internal/version"
 )
 
 // updateTriggerTestTime is inside a 03:00 window, so the nightly rule alone
@@ -42,6 +46,11 @@ func newUpdateTriggerTestDaemon(t *testing.T, cfg *config.UpdateConfig) (*Daemon
 			reason = r
 			return nil
 		},
+	}
+	// The marker is read from the test town, never from the host environment's
+	// INSTALL_GT_DAEMON_DIR.
+	d.rebuildGTPendingFn = func() installpending.Store {
+		return installpending.StoreIn(filepath.Join(town, "daemon", installpending.FileName))
 	}
 	if cfg != nil {
 		d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{Update: cfg}}
@@ -180,6 +189,9 @@ func TestUpdateFactsReadTheState(t *testing.T) {
 		config: DefaultConfig(town),
 		logger: log.New(io.Discard, "", 0),
 		clock:  clockwork.NewFakeClockAt(updateTriggerTestTime),
+		rebuildGTPendingFn: func() installpending.Store {
+			return installpending.StoreIn(filepath.Join(town, "daemon", installpending.FileName))
+		},
 	}
 	store := update.Store{Dir: update.Dir(town)}
 	started := updateTriggerTestTime.Add(-10 * time.Minute)
@@ -249,11 +261,208 @@ func TestUpdateIsRegisteredAsALifecycleStep(t *testing.T) {
 	t.Fatal("heartbeatSteps has no step named \"update\"")
 }
 
+// createUpdateSource makes town/gastown look like a gt source checkout, which
+// is what makes updateFacts reach the staleness and landing-record reads.
+func createUpdateSource(t *testing.T, town string) string {
+	t.Helper()
+	source := filepath.Join(town, "gastown")
+	dir := filepath.Join(source, "cmd", "gt")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create source tree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("write source main: %v", err)
+	}
+	return source
+}
+
+func TestUpdateFactsRefusesUnreadableInputs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, d *Daemon, town string)
+	}{
+		{
+			name: "state cannot be parsed",
+			setup: func(t *testing.T, d *Daemon, town string) {
+				path := filepath.Join(update.Dir(town), "state.json")
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatalf("create update dir: %v", err)
+				}
+				if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+					t.Fatalf("write broken state: %v", err)
+				}
+			},
+		},
+		{
+			name: "install marker cannot be parsed",
+			setup: func(t *testing.T, d *Daemon, town string) {
+				path := filepath.Join(town, "daemon", installpending.FileName)
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatalf("create daemon dir: %v", err)
+				}
+				if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
+					t.Fatalf("write broken marker: %v", err)
+				}
+			},
+		},
+		{
+			name: "staleness cannot be read",
+			setup: func(t *testing.T, d *Daemon, town string) {
+				createUpdateSource(t, town)
+				d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return nil }
+			},
+		},
+		{
+			name: "the installed build commit is unknown",
+			setup: func(t *testing.T, d *Daemon, town string) {
+				createUpdateSource(t, town)
+				d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo {
+					return &version.StaleBinaryInfo{IsStale: true}
+				}
+			},
+		},
+		{
+			name: "the landings file cannot be read",
+			setup: func(t *testing.T, d *Daemon, town string) {
+				createUpdateSource(t, town)
+				d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo {
+					return &version.StaleBinaryInfo{IsStale: true, BinaryCommit: strings.Repeat("a", 40)}
+				}
+				// A directory where the landings file belongs: opening it
+				// succeeds, reading it does not.
+				if err := os.MkdirAll(filepath.Join(town, ".runtime", "landings", "gastown.jsonl"), 0o700); err != nil {
+					t.Fatalf("create landings directory: %v", err)
+				}
+			},
+		},
+		{
+			name: "a landing commit cannot be checked",
+			setup: func(t *testing.T, d *Daemon, town string) {
+				createUpdateSource(t, town)
+				d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo {
+					return &version.StaleBinaryInfo{IsStale: true, BinaryCommit: strings.Repeat("a", 40)}
+				}
+				dir := filepath.Join(town, ".runtime", "landings")
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatalf("create landings dir: %v", err)
+				}
+				rec := land.LandingRecord{BeadID: "gt-1", Rig: "gastown", LandedCommit: strings.Repeat("b", 40)}
+				line, err := json.Marshal(rec)
+				if err != nil {
+					t.Fatalf("marshal landing record: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "gastown.jsonl"), append(line, '\n'), 0o600); err != nil {
+					t.Fatalf("write landings file: %v", err)
+				}
+				useGitfake(t, d)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			d := &Daemon{
+				config: DefaultConfig(town),
+				logger: log.New(io.Discard, "", 0),
+				clock:  clockwork.NewFakeClockAt(updateTriggerTestTime),
+				rebuildGTPendingFn: func() installpending.Store {
+					return installpending.StoreIn(filepath.Join(town, "daemon", installpending.FileName))
+				},
+			}
+			tt.setup(t, d, town)
+
+			if _, err := d.updateFacts(updateTriggerTestTime); err == nil {
+				t.Fatal("updateFacts read an unreadable input as an answer; want the error")
+			}
+		})
+	}
+}
+
+// A source checkout outside a rig directory has no landings file to count:
+// the read fails rather than reporting nothing waiting.
+func TestUpdateLandingsWaitingRefusesAnUnknownRig(t *testing.T) {
+	t.Parallel()
+
+	d := &Daemon{config: DefaultConfig(t.TempDir()), logger: log.New(io.Discard, "", 0)}
+	_, err := d.updateLandingsWaiting(filepath.Join(d.config.TownRoot, "reviews"), strings.Repeat("a", 40))
+	if err == nil {
+		t.Fatal("updateLandingsWaiting accepted a checkout with no rig; want the error")
+	}
+}
+
+func TestUpdateLauncherRefusesAnUnknownExecutable(t *testing.T) {
+	t.Parallel()
+
+	_, _, err := buildUpdateLaunch(t.TempDir(), updateTriggerTestTime, func() (string, error) {
+		return "", errors.New("no executable")
+	})
+	if err == nil {
+		t.Fatal("buildUpdateLaunch succeeded with no executable; want the error")
+	}
+}
+
+func TestUpdateLauncherRefusesAnUnusableUpdateDirectory(t *testing.T) {
+	t.Parallel()
+
+	// A town path that is a regular file cannot hold .runtime/update.
+	file := filepath.Join(t.TempDir(), "town")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	_, _, err := buildUpdateLaunch(file, updateTriggerTestTime, os.Executable)
+	if err == nil {
+		t.Fatal("buildUpdateLaunch succeeded under a file town root; want the mkdir error")
+	}
+}
+
+func TestUpdateLauncherRefusesASecondLogInTheSameSecond(t *testing.T) {
+	t.Parallel()
+
+	town := t.TempDir()
+	_, firstLog, err := buildUpdateLaunch(town, updateTriggerTestTime, os.Executable)
+	if err != nil {
+		t.Fatalf("first buildUpdateLaunch: %v", err)
+	}
+	defer func() { _ = firstLog.Close() }()
+
+	if _, _, err := buildUpdateLaunch(town, updateTriggerTestTime, os.Executable); err == nil {
+		t.Fatal("a second launch log for the same second opened; want the exclusive-create error")
+	}
+}
+
+func TestUpdateLauncherRefusesACanceledContext(t *testing.T) {
+	t.Parallel()
+
+	d := &Daemon{config: DefaultConfig(t.TempDir()), logger: log.New(io.Discard, "", 0)}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := d.launchUpdate(ctx, "test"); err == nil {
+		t.Fatal("launchUpdate started under a canceled context; want the context error")
+	}
+}
+
+func TestUpdateLauncherReportsAnUnusableUpdateDirectory(t *testing.T) {
+	t.Parallel()
+
+	file := filepath.Join(t.TempDir(), "town")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	d := &Daemon{config: DefaultConfig(file), logger: log.New(io.Discard, "", 0)}
+	if err := d.launchUpdate(context.Background(), "test"); err == nil {
+		t.Fatal("launchUpdate succeeded with an unusable update directory; want the build error")
+	}
+}
+
 func TestUpdateLauncherBuildsADetachedCommand(t *testing.T) {
 	t.Parallel()
 
 	town := t.TempDir()
-	cmd, logFile, err := buildUpdateLaunch(town, updateTriggerTestTime)
+	cmd, logFile, err := buildUpdateLaunch(town, updateTriggerTestTime, os.Executable)
 	if err != nil {
 		t.Fatalf("buildUpdateLaunch: %v", err)
 	}
