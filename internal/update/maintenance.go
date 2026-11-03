@@ -40,10 +40,9 @@ type MaintenanceResult struct {
 	Detail  string    `json:"detail"`
 }
 
-// MaintFiles is the file system the request and result files are read and
-// written through, so a test drives every branch against a fake. It is a
-// smaller interface than the hold's FileOps on purpose: the two protocols do
-// not share a file.
+// MaintFiles is the three file operations the request protocol needs, so a
+// test drives every branch against a fake and the protocol borrows no other
+// step's interface.
 type MaintFiles interface {
 	ReadFile(path string) ([]byte, error)
 	// CreateExclusive creates path and fails with an error satisfying
@@ -66,17 +65,14 @@ type MaintenanceRequest struct {
 
 // Request asks the daemon for a maintenance cycle for runID.
 //
-// It clears a result file left by an earlier run first, so Wait can never read
-// one that predates this request. A request file already holding runID makes
-// the call a no-op; one holding another run id is an error, because that job
-// is still waiting for it.
+// A request file already holding runID makes the call a no-op; one holding
+// another run id is an error, because that job is still waiting for it. Only
+// once this call owns the request does it clear a result file left by an
+// earlier run, so a result another job is still waiting to read is never
+// destroyed.
 func (m *MaintenanceRequest) Request(runID string) error {
 	if runID == "" {
 		return errors.New("write maintenance request: empty run id")
-	}
-	resultPath := m.resultPath()
-	if err := m.Files.Remove(resultPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("clear stale maintenance result %s: %w", resultPath, err)
 	}
 	data, err := json.Marshal(RequestFile{RunID: runID, At: m.Clock.Now()})
 	if err != nil {
@@ -91,6 +87,16 @@ func (m *MaintenanceRequest) Request(runID string) error {
 		}
 		return m.settleExistingRequest(reqPath, runID)
 	}
+	resultPath := m.resultPath()
+	if err := m.Files.Remove(resultPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		// Release the request this call just created: a retry must retry the
+		// removal, not return nil as if the stale result were gone.
+		releaseErr := m.Files.Remove(reqPath)
+		if releaseErr != nil && !errors.Is(releaseErr, fs.ErrNotExist) {
+			return fmt.Errorf("clear stale maintenance result %s: %w; release request %s: %v", resultPath, err, reqPath, releaseErr)
+		}
+		return fmt.Errorf("clear stale maintenance result %s: %w", resultPath, err)
+	}
 	return nil
 }
 
@@ -104,7 +110,7 @@ func (m *MaintenanceRequest) settleExistingRequest(path, runID string) error {
 	}
 	var req RequestFile
 	if err := json.Unmarshal(data, &req); err != nil {
-		return fmt.Errorf("parse existing maintenance request %s: %w", path, err)
+		return fmt.Errorf("parse existing maintenance request %s: %w; remove %s to recover", path, err, path)
 	}
 	if req.RunID == runID {
 		return nil

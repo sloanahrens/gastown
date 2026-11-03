@@ -239,6 +239,58 @@ func TestRequestSameRunIsIdempotentAndAForeignRunIsRefused(t *testing.T) {
 	})
 }
 
+func TestRequestKeepsAnotherRunsResult(t *testing.T) {
+	t.Parallel()
+	files := newFakeMaintFiles()
+	start := maintTestStart()
+	putMaintJSON(t, files, maintRequestFile, RequestFile{RunID: "other-run", At: start})
+	putMaintJSON(t, files, maintResultFile, MaintenanceResult{
+		RunID:   "other-run",
+		Outcome: "completed",
+		At:      start,
+		Detail:  "the other run's cycle",
+	})
+	before, ok := files.entry(maintResultFile)
+	if !ok {
+		t.Fatalf("seed did not write %s", maintResultFile)
+	}
+
+	err := newTestMaintenance(files, newFakeMaintClock(start)).Request(maintTestRunID)
+	if err == nil {
+		t.Fatal("Request over another run's request returned nil")
+	}
+	if !strings.Contains(err.Error(), "other-run") {
+		t.Errorf("error %q does not name the run that holds the request", err)
+	}
+	after, ok := files.entry(maintResultFile)
+	if !ok {
+		t.Fatalf("Request removed the other run's result file %s", maintResultFile)
+	}
+	if !bytes.Equal(after.data, before.data) || after.mode != before.mode {
+		t.Errorf("Request changed the other run's result file: got %q mode %o, want %q mode %o", after.data, after.mode, before.data, before.mode)
+	}
+}
+
+func TestRequestCorruptRequestFileNamesTheFileToRemove(t *testing.T) {
+	t.Parallel()
+	files := newFakeMaintFiles()
+	files.put(maintRequestFile, []byte("{"), 0o600)
+
+	err := newTestMaintenance(files, newFakeMaintClock(maintTestStart())).Request(maintTestRunID)
+	if err == nil {
+		t.Fatal("Request over a malformed request file returned nil")
+	}
+	if !strings.Contains(err.Error(), maintRequestFile) {
+		t.Errorf("error %q does not name %s", err, maintRequestFile)
+	}
+	if !strings.Contains(err.Error(), "remove") {
+		t.Errorf("error %q does not say to remove the file", err)
+	}
+	if entry, ok := files.entry(maintRequestFile); !ok || !bytes.Equal(entry.data, []byte("{")) {
+		t.Errorf("Request changed the malformed request file instead of reporting it")
+	}
+}
+
 func TestRequestRefusesAnEmptyRunID(t *testing.T) {
 	t.Parallel()
 	files := newFakeMaintFiles()
@@ -290,6 +342,14 @@ func TestRequestFailureBranches(t *testing.T) {
 				files.createErr[maintRequestFile] = errors.New("disk full")
 			},
 			want: "create maintenance request",
+		},
+		{
+			name: "stale result and the request cannot be removed",
+			seed: func(_ *testing.T, files *fakeMaintFiles) {
+				files.removeErr[maintResultFile] = errors.New("permission denied")
+				files.removeErr[maintRequestFile] = errors.New("permission denied")
+			},
+			want: "release request",
 		},
 		{
 			name: "existing request cannot be read",
