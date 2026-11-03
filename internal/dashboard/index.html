@@ -16,12 +16,14 @@ header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:14px 0;bo
 h1{font-size:15px;margin:0;letter-spacing:.08em;text-transform:uppercase;color:var(--teal)}
 .pill{padding:3px 10px;border-radius:999px;font-weight:700;font-size:12px;border:1px solid currentColor}
 .pill.green{color:var(--green)}.pill.degraded{color:var(--amber)}.pill.red{color:var(--red)}.pill.unknown{color:var(--dim)}
-/* The header's dispatch-hold chip: one compact mark beside the verdict pill.
-   Amber while the operator's hold file is present, quiet while the town is
-   dispatching, and amber "hold?" when the file could not be read (gt-zzkhh). */
-#hold{padding:2px 9px;border-radius:999px;font-size:12px;border:1px solid currentColor;white-space:nowrap}
-#hold.warn{color:var(--amber)}
-#hold.quiet{color:var(--dim)}
+/* The header's dispatch-hold chip and the gt update chip beside it: one compact
+   mark each. The hold chip is amber while the operator's hold file is present,
+   quiet while the town is dispatching, and amber "hold?" when the file could
+   not be read (gt-zzkhh); the update chip is amber while a run is in flight or
+   ended badly, and quiet for a run the operator stopped. */
+#hold,#update{padding:2px 9px;border-radius:999px;font-size:12px;border:1px solid currentColor;white-space:nowrap}
+#hold.warn,#update.warn{color:var(--amber)}
+#hold.quiet,#update.quiet{color:var(--dim)}
 #healthline{color:var(--dim);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 /* Below 640 px the health line wraps instead of ending in an ellipsis: its tick
    age and landed count sit at the end of the text, where the cut hid them (gt-ec79s). */
@@ -461,6 +463,7 @@ a.hrow:hover{background:#19212b}
   <h1>Gas Town</h1>
   <span id="verdict" class="pill unknown">UNKNOWN</span>
   <span id="hold" class="quiet" hidden></span>
+  <span id="update" class="quiet" hidden></span>
   <span id="healthline">waiting for the town…</span>
   <span id="healthmark" class="pill red" hidden></span>
   <span id="strip"></span>
@@ -680,6 +683,45 @@ function renderHold(s) {
   }
   box.className = "warn"; box.textContent = "hold?";
   box.title = "the hold file's state is unknown: the reader reported neither a hold nor none";
+}
+
+// renderUpdate draws the header's gt update chip beside the hold chip: amber
+// while a run is in flight, amber for a run that ended badly, a quiet word for
+// one the operator stopped, and nothing at all for a run that ended ok or a
+// feed with no update section. A running run whose heartbeat has gone past
+// three minutes is drawn stalled rather than current, because its record is the
+// last thing it wrote, not what it is doing now. The tooltip carries the run's
+// id and source and one line per step, so the header stays one short chip while
+// the detail is a hover away.
+function renderUpdate(s) {
+  if (pushSkip("update", s)) return;
+  const box = $("update"), u = (s && s.update) || null;
+  box.hidden = true; box.className = "quiet"; box.textContent = ""; box.title = "";
+  if (!u) return;
+  const steps = (u.steps || []).map(st => st.name + ": " + st.result + (st.detail ? " - " + st.detail : ""));
+  const run = [u.run_id, u.source].filter(Boolean).join(" · ");
+  const tip = lead => [lead].concat(steps).filter(Boolean).join("\n");
+  if (u.running) {
+    box.hidden = false; box.className = "warn";
+    if (u.heartbeat_age_sec > 180) {
+      box.textContent = "update stalled";
+      box.title = tip("no heartbeat for " + fmtDur(u.heartbeat_age_sec));
+      return;
+    }
+    box.textContent = "update: " + (u.current || "starting") + " " + fmtDur(u.elapsed_sec);
+    box.title = tip(run);
+    return;
+  }
+  if (u.outcome === "ok") return;
+  box.hidden = false;
+  if (u.outcome === "interrupted") {
+    box.className = "quiet"; box.textContent = "update: interrupted";
+  } else {
+    // A failed, partial or aborted run, and an outcome this page does not know,
+    // which is not an ok run either: an unknown state must not read as clean.
+    box.className = "warn"; box.textContent = "update: " + (u.outcome || "unknown");
+  }
+  box.title = tip(run);
 }
 
 // renderHealth shows the verdict and, when it is not green, the worst cause
@@ -4938,6 +4980,7 @@ const PANES = {
   strip: {read: s => [s.summary, s.strip, s.trend, s.models, s.polecats, s.attention, s.machine, s.overseer, s.dispatch, readInput(s, "ready")], draw: s => renderStrip(s)},
   models: {read: s => s.models, draw: s => renderModelsPanel(s)},
   hold: {read: s => s.hold, draw: s => renderHold(s)},
+  update: {read: s => s.update, draw: s => renderUpdate(s)},
   healthmark: {read: s => s.deploys, draw: s => renderHealthMark(s)},
   attention: {sec: "attention", body: ["attention"], read: s => s.attention, draw: s => renderAttention(s)},
   birds: {sec: "birds", body: ["birds"], read: s => [s.birds, readInput(s, "birds")], draw: s => renderBirds(s)},
@@ -5022,7 +5065,7 @@ function openSection(key) {
 function renderAll() {
   if (!state) return;
   pushBegin(state);
-  try { renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderHold(state); renderAttention(state); renderBirds(state); renderCost(state); renderRigs(state); renderPolecats(state); renderBeads(state); renderTrend(state); renderNews(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderJev(state); renderMango(state); renderOM(state); renderEvents(state); pushCommit(); }
+  try { renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderHold(state); renderUpdate(state); renderAttention(state); renderBirds(state); renderCost(state); renderRigs(state); renderPolecats(state); renderBeads(state); renderTrend(state); renderNews(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderJev(state); renderMango(state); renderOM(state); renderEvents(state); pushCommit(); }
   finally { pushEnd(); }
   paintFolds(state);
 }
@@ -5393,7 +5436,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) last
 // pane's reading, so the tick redraws the panes whose drawing carries one from
 // the reading the page already holds — forced past the push's skip, and still
 // leaving a closed section's body alone (gt-quuq5).
-setInterval(() => { if (state) { pushBegin(state, true); try { renderStrip(state); renderPolecats(state); renderBeads(state); renderTierSweep(state); renderForgejo(state); renderNews(state); renderHold(state); renderRigs(state); renderMachine(state); renderCost(state); renderOM(state); renderJev(state); renderBirds(state); renderAttention(state); renderCloud(state); renderDeploys(state); renderTrend(state); renderMango(state); renderEvents(state); pushCommit(); } finally { pushEnd(); } paintFolds(state); } }, 15000);
+setInterval(() => { if (state) { pushBegin(state, true); try { renderStrip(state); renderPolecats(state); renderBeads(state); renderTierSweep(state); renderForgejo(state); renderNews(state); renderHold(state); renderUpdate(state); renderRigs(state); renderMachine(state); renderCost(state); renderOM(state); renderJev(state); renderBirds(state); renderAttention(state); renderCloud(state); renderDeploys(state); renderTrend(state); renderMango(state); renderEvents(state); pushCommit(); } finally { pushEnd(); } paintFolds(state); } }, 15000);
 </script>
 </body>
 </html>
