@@ -92,6 +92,15 @@ func TestUpdateProbeInstalledAndMainSHA(t *testing.T) {
 			t.Error("empty ls-remote output reported no error")
 		}
 	})
+
+	t.Run("main refuses a run error", func(t *testing.T) {
+		t.Parallel()
+		run := &updateProbeRun{err: errors.New("git is not installed")}
+		probes := newUpdateProbes(updateProbeEnv{RepoRoot: "/town/repo", Run: run.run})
+		if _, err := probes.MainSHA(ctx); err == nil {
+			t.Error("a git run error reported no error")
+		}
+	})
 }
 
 // TestUpdateProbeBackupToday: a dated directory holding one subdirectory per
@@ -177,6 +186,17 @@ func TestUpdateProbeBackupToday(t *testing.T) {
 		}
 	})
 
+	t.Run("an unreadable backup root is an error", func(t *testing.T) {
+		t.Parallel()
+		probes := probesFor("/unused", []string{"gt"})
+		probes.env.BackupRoot = func() (string, error) {
+			return "", errors.New("no home directory")
+		}
+		if _, err := probes.BackupToday(ctx); err == nil {
+			t.Error("an unreadable backup root reported missing with no error")
+		}
+	})
+
 	t.Run("a stat failure is an error", func(t *testing.T) {
 		t.Parallel()
 		probes := probesFor("/unused", []string{"gt"})
@@ -185,6 +205,25 @@ func TestUpdateProbeBackupToday(t *testing.T) {
 		}
 		if _, err := probes.BackupToday(ctx); err == nil {
 			t.Error("an unreadable backup directory reported missing with no error")
+		}
+	})
+
+	t.Run("a database stat failure is an error", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		datedDir := dated(root)
+		if err := os.MkdirAll(datedDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		probes := probesFor(root, []string{"gt"})
+		probes.env.Stat = func(path string) (os.FileInfo, error) {
+			if path == datedDir {
+				return os.Stat(path)
+			}
+			return nil, errors.New("permission denied")
+		}
+		if _, err := probes.BackupToday(ctx); err == nil {
+			t.Error("an unreadable database directory reported missing with no error")
 		}
 	})
 
