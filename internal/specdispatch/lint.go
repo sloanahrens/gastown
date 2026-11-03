@@ -559,7 +559,10 @@ func acceptanceDisagreement(field, section string) string {
 //     criteria nobody can see (gt-hgt9j.2)
 //  6. every repo file the Constraints names as a file it changes exists on the
 //     target branch; a path the spec introduces, reads only, or that is not a
-//     literal repo file, is passed (gt-7t1im)
+//     literal repo file, is passed. A bead with a Files section is checked from
+//     that section alone: every modify or read path must exist, a create path
+//     need not, and a section that does not parse is refused
+//     (gt-7t1im, gt-hgt9j.10)
 //  7. size: needs-planning label, a Size that says planning, or more than
 //     MaxAcceptance items route to the planner; a Size that does not say one
 //     worker is refused
@@ -622,7 +625,7 @@ func lint(s Spec, t Template, paths bool) LintVerdict {
 		}
 	}
 	if paths {
-		if r, failed := targetRefusal(sections, s.Target); failed {
+		if r, failed := targetRefusal(s.Description, sections, s.Target); failed {
 			failures = append(failures, r)
 		}
 	}
