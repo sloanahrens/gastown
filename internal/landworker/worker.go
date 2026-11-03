@@ -269,6 +269,10 @@ type Worker struct {
 	lastListAt    time.Time
 	lastListEmpty bool
 	lastListCount int
+	// stampUnreadable is true while the last ready-stamp read failed, so the
+	// fallback to listing the board is logged once for the run of failures,
+	// not once per idle pass (gt-5obd1).
+	stampUnreadable bool
 }
 
 // RevertHooks is the red-main owner's side of an automatic revert.
@@ -536,7 +540,8 @@ func (w *Worker) landReady(ctx context.Context) Report {
 // Only an empty list is skippable: a non-empty one must be listed again to see
 // the beads land and the column fall to zero. A stamp that cannot be read lists
 // (fail open), because it is not evidence that nothing was submitted
-// (gt-flo7a).
+// (gt-flo7a); the read failure is logged once for the run of failures, since
+// the pass falls back to listing for as long as it persists (gt-5obd1).
 func (w *Worker) skipReadyList() (int, bool) {
 	if w.TownRoot == "" || w.lastListAt.IsZero() || !w.lastListEmpty {
 		return 0, false
@@ -547,9 +552,13 @@ func (w *Worker) skipReadyList() (int, bool) {
 	}
 	stamp, err := land.ReadyStamp(w.TownRoot, w.Rig)
 	if err != nil {
-		w.logf("reading the ready stamp; listing the board instead: %v", err)
+		if !w.stampUnreadable {
+			w.logf("reading the ready stamp; listing the board instead: %v", err)
+		}
+		w.stampUnreadable = true
 		return 0, false
 	}
+	w.stampUnreadable = false
 	if stamp.After(w.lastListAt) {
 		return 0, false
 	}

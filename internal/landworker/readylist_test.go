@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,6 +60,85 @@ func TestLandReadySkipsListWhileIdle(t *testing.T) {
 	}
 	if got := view.Counts(h.now); got["gastown"] != 0 {
 		t.Errorf("published %v; want gastown 0 from the skipped pass", got)
+	}
+}
+
+// blockReadyStamp makes the rig's ready stamp unreadable with an error that is
+// not "no stamp": a regular file stands where the rig's runtime directory
+// belongs, so the stat below it fails with ENOTDIR. It returns the path of the
+// file, which removing restores the "no stamp" state.
+func blockReadyStamp(t *testing.T, townRoot string) string {
+	t.Helper()
+	stampPath, err := land.ReadyStampPath(townRoot, "gastown")
+	if err != nil {
+		t.Fatalf("ReadyStampPath: %v", err)
+	}
+	rigDir := filepath.Dir(stampPath)
+	if err := os.MkdirAll(filepath.Dir(rigDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rigDir, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return rigDir
+}
+
+// TestLandReadyLogsAnUnreadableStampOnce: a stamp that cannot be read still
+// fails open — every pass lists the board — but the log says so once for the
+// run of failures, not once per idle pass. A pass that reads the stamp again
+// ends the run, so the next failure logs once more (gt-5obd1).
+func TestLandReadyLogsAnUnreadableStampOnce(t *testing.T) {
+	t.Parallel()
+	h, bd := readyListHarness(t)
+	logs := captureLogs(h.w)
+	stampLogs := func() int {
+		n := 0
+		for _, l := range *logs {
+			if strings.Contains(l, "reading the ready stamp; listing the board instead") {
+				n++
+			}
+		}
+		return n
+	}
+	// Each pass is 30s on, well inside readyListCeiling, and every one is idle:
+	// the list stays empty, so every pass reaches the stamp read.
+	pass := func(wantLists int) {
+		t.Helper()
+		h.now = h.now.Add(30 * time.Second)
+		if rep := h.w.Pass(context.Background()); rep.Failed != 0 {
+			t.Fatalf("pass %v; want a clean pass", rep)
+		}
+		if bd.lists != wantLists {
+			t.Fatalf("pass listed the board %d times in total, want %d", bd.lists, wantLists)
+		}
+	}
+
+	if rep := h.w.Pass(context.Background()); rep.Failed != 0 || bd.lists != 1 {
+		t.Fatalf("first pass listed %d times with report %v; want one clean list", bd.lists, rep)
+	}
+	if got := stampLogs(); got != 0 {
+		t.Fatalf("logged the stamp failure %d times before the stamp broke, want 0", got)
+	}
+
+	blocked := blockReadyStamp(t, h.w.TownRoot)
+	pass(2)
+	pass(3)
+	if got := stampLogs(); got != 1 {
+		t.Errorf("logged the stamp failure %d times across one unbroken run, want once", got)
+	}
+
+	if err := os.Remove(blocked); err != nil {
+		t.Fatal(err)
+	}
+	pass(3) // the stamp reads again: this pass skips the list and ends the run.
+	if got := stampLogs(); got != 1 {
+		t.Fatalf("logged the stamp failure %d times after the stamp read again, want no new line", got)
+	}
+
+	blockReadyStamp(t, h.w.TownRoot)
+	pass(4)
+	if got := stampLogs(); got != 2 {
+		t.Errorf("logged the stamp failure %d times across two separate runs, want once for each", got)
 	}
 }
 
