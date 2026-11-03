@@ -578,7 +578,7 @@ func acceptanceDisagreement(field, section string) string {
 //     (gt-7t1im, gt-hgt9j.10)
 //  7. size: needs-planning label, a Size that says planning, or more than
 //     MaxAcceptance items route to the planner; a Size that does not say one
-//     worker is refused. A bead labelled overseer-only or operator-only may
+//     worker is refused. A bead labeled overseer-only or operator-only may
 //     say one session of its owner instead (gt-hgt9j.13)
 //
 // The bead's type and labels are not a gate: a task or bug with the five
@@ -663,7 +663,7 @@ func lint(s Spec, t Template, paths bool) LintVerdict {
 }
 
 // ownerSessionSize reports whether size may say one session of the bead's
-// owner instead of one worker. Only a bead labelled for the overseer or the
+// owner instead of one worker. Only a bead labeled for the overseer or the
 // operator gets that wording; an ordinary bead saying "one overseer session"
 // is refused by the one-worker rule (gt-hgt9j.13). Spec.HasLabel ignores case
 // and surrounding space, so a label written " Overseer-Only " counts.
