@@ -12,20 +12,8 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 )
 
-// The ready stamp is how a writer of the ready-to-land label tells the rig's
-// landing worker that the board changed.
-//
-// An idle rig's worker otherwise lists the ready label every pass to find the
-// first submission. Instead it remembers when it last listed the board and
-// whether that list was empty, and skips the list while it was empty and no
-// stamp is newer than it. Each writer - gt done, gt land requeue and the
-// red-main owner's revert queue - touches this stamp after its label write. A
-// label written by hand with bd writes no stamp, so the worker's three-minute
-// ceiling bounds that delay.
-//
-// The file is read and written only by this package's helpers, so a stamp that
-// exists but cannot be read is not evidence that nothing was submitted: the
-// worker lists (fail open).
+// ReadyStampFile names the per-rig file that records when the ready-to-land
+// list last changed.
 const ReadyStampFile = "ready-to-land-stamp"
 
 // readyStampDirs is the per-rig runtime directory the stamp shares with the
