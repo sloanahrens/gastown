@@ -23,6 +23,8 @@ import (
 	"github.com/dolthub/go-mysql-server/memory"
 	gmssql "github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/types"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // The archive step runs through the gc fakes plus one seam per read (dolt_log
@@ -1692,13 +1694,13 @@ func TestCommitArchiveQuerySelectsByArchivedHashSet(t *testing.T) {
 }
 
 // TestCommitArchiveQueryLeavesTheRestForTheNextRun: the export reads at most
-// maintenanceArchiveCommitLimit commits per run; the rest are read by the next
-// run from the widened archived set, so the pre-flatten check's remainder
-// shrinks to zero (gt-98eug).
+// the default commit bound per run; the rest are read by the next run from the
+// widened archived set, so the pre-flatten check's remainder shrinks to zero
+// (gt-98eug).
 func TestCommitArchiveQueryLeavesTheRestForTheNextRun(t *testing.T) {
 	t.Parallel()
 	ctx, engine := newCommitArchiveEngine(t)
-	const total = maintenanceArchiveCommitLimit + 2
+	const total = config.DefaultArchiveCommitLimit + 2
 	values := make([]string, 0, total)
 	for i := 1; i <= total; i++ {
 		values = append(values, fmt.Sprintf("('h%05d', 'c', '2026-10-01 09:00:00', 'm')", i))
@@ -1707,11 +1709,11 @@ func TestCommitArchiveQueryLeavesTheRestForTheNextRun(t *testing.T) {
 		"INSERT INTO dolt_log (commit_hash, committer, date, message) VALUES "+strings.Join(values, ","))
 
 	first := archiveEngineCommitHashes(t, ctx, engine, nil)
-	if len(first) != maintenanceArchiveCommitLimit {
-		t.Fatalf("first read returned %d commits, want the %d bound", len(first), maintenanceArchiveCommitLimit)
+	if len(first) != config.DefaultArchiveCommitLimit {
+		t.Fatalf("first read returned %d commits, want the %d bound", len(first), config.DefaultArchiveCommitLimit)
 	}
-	if first[0] != "h00001" || first[len(first)-1] != fmt.Sprintf("h%05d", maintenanceArchiveCommitLimit) {
-		t.Errorf("first read = %s..%s, want the oldest %d", first[0], first[len(first)-1], maintenanceArchiveCommitLimit)
+	if first[0] != "h00001" || first[len(first)-1] != fmt.Sprintf("h%05d", config.DefaultArchiveCommitLimit) {
+		t.Errorf("first read = %s..%s, want the oldest %d", first[0], first[len(first)-1], config.DefaultArchiveCommitLimit)
 	}
 
 	archived := make(map[string]struct{}, len(first))
@@ -1719,7 +1721,7 @@ func TestCommitArchiveQueryLeavesTheRestForTheNextRun(t *testing.T) {
 		archived[hash] = struct{}{}
 	}
 	want := []string{
-		fmt.Sprintf("h%05d", maintenanceArchiveCommitLimit+1),
+		fmt.Sprintf("h%05d", config.DefaultArchiveCommitLimit+1),
 		fmt.Sprintf("h%05d", total),
 	}
 	if got := archiveEngineCommitHashes(t, ctx, engine, archived); !slices.Equal(got, want) {
@@ -1778,7 +1780,7 @@ func archiveEngineCommitHashes(t *testing.T, ctx *gmssql.Context, engine *sqle.E
 			return archiveCommit{}, false, fmt.Errorf("row hash is %T, want string", row[0])
 		}
 		return archiveCommit{Hash: hash}, true, nil
-	}, archived)
+	}, archived, config.DefaultArchiveCommitLimit)
 	if err != nil {
 		t.Fatalf("selecting the unarchived commits: %v", err)
 	}
@@ -1790,7 +1792,7 @@ func archiveEngineCommitHashes(t *testing.T, ctx *gmssql.Context, engine *sqle.E
 }
 
 // TestFirstUnarchivedCommitsStopsReadingAtTheBound: the selection stops asking
-// for rows once it holds maintenanceArchiveCommitLimit fresh commits, so a run
+// for rows once it holds the default commit bound's fresh commits, so a run
 // never reads past the bound, and archived rows before the bound do not count
 // toward it.
 func TestFirstUnarchivedCommitsStopsReadingAtTheBound(t *testing.T) {
@@ -1808,19 +1810,19 @@ func TestFirstUnarchivedCommitsStopsReadingAtTheBound(t *testing.T) {
 		// A finite source: if the bound were missing the selection would run on
 		// to the end and return more than the bound, which the assertion below
 		// reports, instead of looping on an endless stream until memory is gone.
-		if reads > maintenanceArchiveCommitLimit+len(archived)+100 {
+		if reads > config.DefaultArchiveCommitLimit+len(archived)+100 {
 			return archiveCommit{}, false, nil
 		}
 		return archiveCommit{Hash: fmt.Sprintf("n%05d", reads)}, true, nil
 	}
-	got, err := firstUnarchivedCommits(next, archived)
+	got, err := firstUnarchivedCommits(next, archived, config.DefaultArchiveCommitLimit)
 	if err != nil {
 		t.Fatalf("selection failed: %v", err)
 	}
-	if len(got) != maintenanceArchiveCommitLimit {
-		t.Fatalf("selected %d commits, want the %d bound", len(got), maintenanceArchiveCommitLimit)
+	if len(got) != config.DefaultArchiveCommitLimit {
+		t.Fatalf("selected %d commits, want the %d bound", len(got), config.DefaultArchiveCommitLimit)
 	}
-	if want := maintenanceArchiveCommitLimit + len(archived); reads != want {
+	if want := config.DefaultArchiveCommitLimit + len(archived); reads != want {
 		t.Errorf("read %d rows, want exactly %d (the bound plus the skipped archived rows)", reads, want)
 	}
 }
@@ -1835,7 +1837,7 @@ func TestEventsArchiveFirstReadIsBounded(t *testing.T) {
 	dir := t.TempDir()
 
 	columns := []string{"id", "created_at"}
-	total := maintenanceArchiveEventsLimit + 2
+	total := config.DefaultArchiveEventsLimit + 2
 	base := gcTestNow.Add(-3 * time.Hour)
 	rows := make([][]driver.Value, 0, total)
 	createdAt := func(i int) string {
@@ -1862,12 +1864,12 @@ func TestEventsArchiveFirstReadIsBounded(t *testing.T) {
 		return out
 	}
 	got := readArchiveCSV(t, eventsArchiveFile(dir, "gt"))
-	if len(got) != maintenanceArchiveEventsLimit+1 {
-		t.Fatalf("first export wrote %d row(s), want the %d bound and one header", len(got)-1, maintenanceArchiveEventsLimit)
+	if len(got) != config.DefaultArchiveEventsLimit+1 {
+		t.Fatalf("first export wrote %d row(s), want the %d bound and one header", len(got)-1, config.DefaultArchiveEventsLimit)
 	}
-	if want := wantRows(maintenanceArchiveEventsLimit); !csvRowsEqual(got[1:], want) {
+	if want := wantRows(config.DefaultArchiveEventsLimit); !csvRowsEqual(got[1:], want) {
 		t.Errorf("first export = %s..%s, want the oldest %d rows h00001..h%05d",
-			got[1][0], got[len(got)-1][0], maintenanceArchiveEventsLimit, maintenanceArchiveEventsLimit)
+			got[1][0], got[len(got)-1][0], config.DefaultArchiveEventsLimit, config.DefaultArchiveEventsLimit)
 	}
 
 	st, err := loadMaintenanceGCState(d.config.TownRoot)
@@ -2019,7 +2021,7 @@ func TestEventsArchiveBatchRefusals(t *testing.T) {
 		if err := rows.Close(); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := eventsArchiveBatch(rows, nil); err == nil {
+		if _, err := eventsArchiveBatch(rows, nil, config.DefaultArchiveEventsLimit); err == nil {
 			t.Error("a closed result set was read as an empty batch")
 		}
 	})
@@ -2029,7 +2031,7 @@ func TestEventsArchiveBatchRefusals(t *testing.T) {
 		db, rows := openRows(t, &archiveFakeServer{columns: []string{"payload"}})
 		defer db.Close()
 		defer rows.Close()
-		if _, err := eventsArchiveBatch(rows, nil); err == nil || !strings.Contains(err.Error(), "no created_at and id columns") {
+		if _, err := eventsArchiveBatch(rows, nil, config.DefaultArchiveEventsLimit); err == nil || !strings.Contains(err.Error(), "no created_at and id columns") {
 			t.Errorf("result set without the watermark columns = %v, want it refused", err)
 		}
 	})
@@ -2181,4 +2183,266 @@ func archiveEngineIDs(t *testing.T, ctx *gmssql.Context, engine *sqle.Engine, qu
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// archiveCommitRows serves total synthetic dolt_log rows, one second apart from
+// base, to the archive read's fake driver.
+func archiveCommitRows(total int, base time.Time) [][]driver.Value {
+	rows := make([][]driver.Value, 0, total)
+	for i := 1; i <= total; i++ {
+		rows = append(rows, []driver.Value{
+			fmt.Sprintf("h%05d", i), "committer", base.Add(time.Duration(i) * time.Second), "message",
+		})
+	}
+	return rows
+}
+
+// archiveEventRows serves total synthetic events rows, one second apart from
+// base, to the archive read's fake driver.
+func archiveEventRows(total int, base time.Time) [][]driver.Value {
+	rows := make([][]driver.Value, 0, total)
+	for i := 1; i <= total; i++ {
+		rows = append(rows, []driver.Value{
+			fmt.Sprintf("h%05d", i), base.Add(time.Duration(i) * time.Second).Format("2006-01-02 15:04:05"),
+		})
+	}
+	return rows
+}
+
+// TestArchiveLimitsDefaultTo5000: with neither setting present the production
+// dolt_log read and events read stop at the 5000-row default, so an archive with
+// no batch settings behaves as it did before they existed (gt-s6srv).
+func TestArchiveLimitsDefaultTo5000(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	t.Run("commits", func(t *testing.T) {
+		t.Parallel()
+		d, _ := gcTestDaemon(t)
+		withGCFakes(t, d)
+		d.patrolConfig = archiveConfig(t.TempDir())
+		d.maint.archiveOpenDB = archiveFakeOpener(t, &archiveFakeServer{
+			columns: []string{"commit_hash", "committer", "date", "message"},
+			rows:    archiveCommitRows(config.DefaultArchiveCommitLimit+2, gcTestNow),
+		})
+
+		got, err := d.doltArchiveLog(ctx, "gt", nil)
+		if err != nil {
+			t.Fatalf("dolt_log read: %v", err)
+		}
+		if len(got) != config.DefaultArchiveCommitLimit {
+			t.Fatalf("read %d commit(s), want the %d default bound", len(got), config.DefaultArchiveCommitLimit)
+		}
+		if last := fmt.Sprintf("h%05d", config.DefaultArchiveCommitLimit); got[0].Hash != "h00001" || got[len(got)-1].Hash != last {
+			t.Errorf("read = %s..%s, want the oldest %d", got[0].Hash, got[len(got)-1].Hash, config.DefaultArchiveCommitLimit)
+		}
+	})
+
+	t.Run("events", func(t *testing.T) {
+		t.Parallel()
+		d, _ := gcTestDaemon(t)
+		withGCFakes(t, d)
+		d.patrolConfig = archiveConfig(t.TempDir())
+		d.maint.archiveOpenDB = archiveFakeOpener(t, &archiveFakeServer{
+			columns: []string{"id", "created_at"},
+			rows:    archiveEventRows(config.DefaultArchiveEventsLimit+2, gcTestNow.Add(-3*time.Hour)),
+		})
+
+		got, err := d.doltArchiveEvents(ctx, "gt", "")
+		if err != nil {
+			t.Fatalf("events read: %v", err)
+		}
+		if len(got.Rows) != config.DefaultArchiveEventsLimit {
+			t.Fatalf("read %d events row(s), want the %d default bound", len(got.Rows), config.DefaultArchiveEventsLimit)
+		}
+		if last := fmt.Sprintf("h%05d", config.DefaultArchiveEventsLimit); got.Rows[len(got.Rows)-1][0] != last {
+			t.Errorf("read through %s, want the oldest %d ending at %s", got.Rows[len(got.Rows)-1][0], config.DefaultArchiveEventsLimit, last)
+		}
+	})
+}
+
+// TestArchiveLimitsComeFromConfig: small archive_commit_limit and
+// archive_events_limit settings bound the production reads, and each run's
+// watermark advances past exactly the rows it wrote (gt-s6srv).
+func TestArchiveLimitsComeFromConfig(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	t.Run("commits", func(t *testing.T) {
+		t.Parallel()
+		d, _ := gcTestDaemon(t)
+		withGCFakes(t, d)
+		dir := t.TempDir()
+		d.patrolConfig = archiveConfig(dir)
+		limit := 3
+		d.patrolConfig.Patrols.ScheduledMaintenance.ArchiveCommitLimit = &limit
+		d.maint.archiveOpenDB = archiveFakeOpener(t, &archiveFakeServer{
+			columns: []string{"commit_hash", "committer", "date", "message"},
+			rows:    archiveCommitRows(10, gcTestNow),
+		})
+
+		if err := d.maintenanceArchiveCommits(ctx, dir, "gt", ArchiveWatermark{}); err != nil {
+			t.Fatalf("export: %v", err)
+		}
+		got := readArchiveCSV(t, archiveFile(dir, "gt"))
+		if len(got) != limit+1 {
+			t.Fatalf("export wrote %d row(s), want %d and one header", len(got)-1, limit)
+		}
+		for i, row := range got[1:] {
+			if want := fmt.Sprintf("h%05d", i+1); row[0] != want {
+				t.Errorf("row %d = %s, want %s", i, row[0], want)
+			}
+		}
+		st, err := loadMaintenanceGCState(d.config.TownRoot)
+		if err != nil {
+			t.Fatalf("loading state: %v", err)
+		}
+		wm := st.ArchiveWatermarks["gt"]
+		if want := gcTestNow.Add(time.Duration(limit) * time.Second); !wm.Date.Equal(want) {
+			t.Errorf("watermark date = %s, want %s (the newest row written)", wm.Date, want)
+		}
+		if want := []string{fmt.Sprintf("h%05d", limit)}; !slices.Equal(wm.Hashes, want) {
+			t.Errorf("watermark hashes = %v, want %v", wm.Hashes, want)
+		}
+	})
+
+	t.Run("events", func(t *testing.T) {
+		t.Parallel()
+		d, _ := gcTestDaemon(t)
+		withGCFakes(t, d)
+		dir := t.TempDir()
+		d.patrolConfig = archiveConfig(dir)
+		limit := 4
+		d.patrolConfig.Patrols.ScheduledMaintenance.ArchiveEventsLimit = &limit
+		base := gcTestNow.Add(-time.Hour)
+		d.maint.archiveOpenDB = archiveFakeOpener(t, &archiveFakeServer{
+			columns: []string{"id", "created_at"},
+			rows:    archiveEventRows(10, base),
+		})
+
+		if err := d.maintenanceArchiveEvents(ctx, dir, "gt", EventsArchiveWatermark{}); err != nil {
+			t.Fatalf("export: %v", err)
+		}
+		got := readArchiveCSV(t, eventsArchiveFile(dir, "gt"))
+		if len(got) != limit+1 {
+			t.Fatalf("export wrote %d row(s), want %d and one header", len(got)-1, limit)
+		}
+		for i, row := range got[1:] {
+			if want := fmt.Sprintf("h%05d", i+1); row[0] != want {
+				t.Errorf("row %d = %s, want %s", i, row[0], want)
+			}
+		}
+		st, err := loadMaintenanceGCState(d.config.TownRoot)
+		if err != nil {
+			t.Fatalf("loading state: %v", err)
+		}
+		wm := st.ArchiveEventsWatermarks["gt"]
+		if want := base.Add(time.Duration(limit) * time.Second).Format("2006-01-02 15:04:05"); wm.CreatedAt != want {
+			t.Errorf("watermark created_at = %s, want %s (the newest row written)", wm.CreatedAt, want)
+		}
+		ids := make([]string, 0, len(wm.Archived))
+		for _, row := range wm.Archived {
+			ids = append(ids, row.ID)
+		}
+		sort.Strings(ids)
+		want := make([]string, 0, limit)
+		for i := 1; i <= limit; i++ {
+			want = append(want, fmt.Sprintf("h%05d", i))
+		}
+		if !slices.Equal(ids, want) {
+			t.Errorf("watermark ids = %v, want %v", ids, want)
+		}
+	})
+}
+
+// TestMaintenanceArchiveRefusesABadLimitSetting: a negative batch bound is a
+// configuration error: the step archives nothing, escalates once naming the
+// key, and skips every database's gc (gt-s6srv).
+func TestMaintenanceArchiveRefusesABadLimitSetting(t *testing.T) {
+	t.Parallel()
+	bad := -1
+	for _, tt := range []struct {
+		name    string
+		set     func(*ScheduledMaintenanceConfig)
+		wantKey string
+	}{
+		{
+			name:    "commit bound",
+			set:     func(c *ScheduledMaintenanceConfig) { c.ArchiveCommitLimit = &bad },
+			wantKey: config.MaintenanceArchiveCommitLimitKey,
+		},
+		{
+			name:    "events bound",
+			set:     func(c *ScheduledMaintenanceConfig) { c.ArchiveEventsLimit = &bad },
+			wantKey: config.MaintenanceArchiveEventsLimitKey,
+		},
+	} {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, logs := gcTestDaemon(t)
+			f := withGCFakes(t, d)
+			f.sizes = map[string]gcMeasure{"gt": {633 * mib, 0}}
+			d.patrolConfig = archiveConfig(t.TempDir())
+			tt.set(d.patrolConfig.Patrols.ScheduledMaintenance)
+			d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {
+				t.Error("the dolt_log read ran with an invalid batch bound")
+				return nil, nil
+			}
+
+			d.runScheduledMaintenance()
+
+			if len(f.escalations) != 1 || !strings.Contains(f.escalations[0], tt.wantKey) {
+				t.Errorf("escalations = %v, want one naming %s", f.escalations, tt.wantKey)
+			}
+			if len(f.gcCalls) != 0 {
+				t.Errorf("gc calls = %v, want none while no database was archived", f.gcCalls)
+			}
+			if !strings.Contains(logs.String(), "want 0 (the default)") {
+				t.Errorf("log does not say the bound was refused:\n%s", logs.String())
+			}
+		})
+	}
+}
+
+// TestArchiveLimitsRefuseABadSettingAtTheRead: each production read refuses a
+// bound it cannot parse before opening a connection, so a caller that bypasses
+// the step's own check still fails closed and names the key (gt-s6srv).
+func TestArchiveLimitsRefuseABadSettingAtTheRead(t *testing.T) {
+	t.Parallel()
+	bad := -1
+
+	t.Run("commits", func(t *testing.T) {
+		t.Parallel()
+		d, _ := gcTestDaemon(t)
+		withGCFakes(t, d)
+		d.patrolConfig = archiveConfig(t.TempDir())
+		d.patrolConfig.Patrols.ScheduledMaintenance.ArchiveCommitLimit = &bad
+		d.maint.archiveOpenDB = func(string) (*sql.DB, error) {
+			t.Error("the dolt_log read opened a connection with an invalid archive_commit_limit")
+			return nil, errors.New("not reached")
+		}
+
+		_, err := d.doltArchiveLog(context.Background(), "gt", nil)
+		if err == nil || !strings.Contains(err.Error(), config.MaintenanceArchiveCommitLimitKey) {
+			t.Errorf("dolt_log read = %v, want an error naming %s", err, config.MaintenanceArchiveCommitLimitKey)
+		}
+	})
+
+	t.Run("events", func(t *testing.T) {
+		t.Parallel()
+		d, _ := gcTestDaemon(t)
+		withGCFakes(t, d)
+		d.patrolConfig = archiveConfig(t.TempDir())
+		d.patrolConfig.Patrols.ScheduledMaintenance.ArchiveEventsLimit = &bad
+		d.maint.archiveOpenDB = func(string) (*sql.DB, error) {
+			t.Error("the events read opened a connection with an invalid archive_events_limit")
+			return nil, errors.New("not reached")
+		}
+
+		_, err := d.doltArchiveEvents(context.Background(), "gt", "")
+		if err == nil || !strings.Contains(err.Error(), config.MaintenanceArchiveEventsLimitKey) {
+			t.Errorf("events read = %v, want an error naming %s", err, config.MaintenanceArchiveEventsLimitKey)
+		}
+	})
 }

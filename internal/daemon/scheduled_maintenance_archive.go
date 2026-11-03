@@ -52,26 +52,6 @@ const (
 	// (and the backup and gc behind it) indefinitely.
 	maintenanceArchiveTimeout = 30 * time.Minute
 
-	// maintenanceArchiveCommitLimit bounds one database's dolt_log read. A
-	// first export can face a whole history, so the read holds at most this
-	// many commits; the watermark advances past them and the next run reads
-	// the rest. Archived hashes are skipped as the rows stream past, so the
-	// bound counts fresh commits and a run cannot stall on a full limit of
-	// already-archived ones.
-	maintenanceArchiveCommitLimit = 5000
-
-	// maintenanceArchiveEventsLimit bounds one database's events read: a first
-	// export can face a whole table, so the read writes at most this many of
-	// the oldest rows the watermark does not hold, and the next run reads the
-	// rest. The lookback window and the bound work together: the watermark
-	// after a run is the newest row written, so the next window starts at that
-	// row minus eventsArchiveLookback, and every row the bound left unread has
-	// a created_at no earlier than the newest written row, so it is inside that
-	// window. Ids
-	// already archived are skipped as the rows stream past, so the bound counts
-	// fresh rows and a window full of already-archived ones cannot stall it.
-	maintenanceArchiveEventsLimit = 5000
-
 	// maintenanceArchiveDirKey names the setting in log and error text.
 	maintenanceArchiveDirKey = config.MaintenanceArchiveDirKey
 
@@ -339,8 +319,8 @@ func encodeArchiveCell(v sql.NullString) string {
 // The step reads beside a live town, but it still asks the gc's quiet-window
 // guard: a busy window is a deferral (the next tick retries, as the gc's own
 // deferrals do), not a failure, and the backup and gc behind it wait with it.
-// A misconfigured directory is a failure: it does not stop the backup, and it
-// skips the gc of every database.
+// A misconfigured directory or batch bound is a failure: it does not stop the
+// backup, and it skips the gc of every database.
 func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, map[string]bool) {
 	dir, err := d.maintenanceArchiveDir()
 	if err != nil {
@@ -358,6 +338,17 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 		// Once per run, not once per database: the step is off, not broken.
 		d.logger.Printf("scheduled_maintenance: archive: %s unset — history archiving is off", maintenanceArchiveDirKey)
 		return maintenanceGCResult{outcome: gcOutcomeCompleted}, nil
+	}
+	// A bound the step cannot read is refused before any database is touched,
+	// like a bad directory: the reads would otherwise each fail with the same
+	// error, one per database per export.
+	if _, _, err := d.maintenanceArchiveLimits(); err != nil {
+		d.logger.Printf("scheduled_maintenance: archive: %v — no history archived this run", err)
+		d.maintenance().escalate(d, maintenanceArchiveSource, fmt.Sprintf(
+			"scheduled_maintenance: history archive: %v\nNo database's dolt_log or events was archived this run. "+
+				"Fix the history archive's batch bound in the daemon config; until then a flatten discards history it has not written out.",
+			err))
+		return maintenanceGCResult{outcome: gcOutcomeCompleted}, allUnarchived(databases)
 	}
 	if quiet, why := d.maintenance().quiet(d); !quiet {
 		d.logger.Printf("scheduled_maintenance: archive held: %s", why)
@@ -468,6 +459,23 @@ func (d *Daemon) maintenanceArchiveDir() (string, error) {
 		return "", nil
 	}
 	return d.patrolConfig.Patrols.ScheduledMaintenance.ParseArchiveDir()
+}
+
+// maintenanceArchiveLimits returns the configured per-run bounds for the
+// dolt_log and events reads. An absent config section reads the defaults, so an
+// unset setting behaves as before the settings existed (gt-s6srv).
+func (d *Daemon) maintenanceArchiveLimits() (commit, events int, err error) {
+	if d.patrolConfig == nil || d.patrolConfig.Patrols == nil {
+		return config.DefaultArchiveCommitLimit, config.DefaultArchiveEventsLimit, nil
+	}
+	c := d.patrolConfig.Patrols.ScheduledMaintenance
+	if commit, err = c.ParseArchiveCommitLimit(); err != nil {
+		return 0, 0, err
+	}
+	if events, err = c.ParseArchiveEventsLimit(); err != nil {
+		return 0, 0, err
+	}
+	return commit, events, nil
 }
 
 // maintenanceArchiveCommits exports one database's unarchived commits and then
@@ -1038,13 +1046,13 @@ func doltArchiveLogQuery() string {
 }
 
 // firstUnarchivedCommits reads commits from next, oldest first, and returns the
-// first maintenanceArchiveCommitLimit whose hash is not in archived. next
-// reports ok false at the end of the log. It stops reading as soon as it has
-// the limit, so a run never holds more than the bound and the rest is read by
-// the next run from the widened archived set.
-func firstUnarchivedCommits(next func() (c archiveCommit, ok bool, err error), archived map[string]struct{}) ([]archiveCommit, error) {
+// first limit whose hash is not in archived. next reports ok false at the end of
+// the log. It stops reading as soon as it has the limit, so a run never holds
+// more than the bound and the rest is read by the next run from the widened
+// archived set.
+func firstUnarchivedCommits(next func() (c archiveCommit, ok bool, err error), archived map[string]struct{}, limit int) ([]archiveCommit, error) {
 	var out []archiveCommit
-	for len(out) < maintenanceArchiveCommitLimit {
+	for len(out) < limit {
 		c, ok, err := next()
 		if err != nil {
 			return nil, err
@@ -1067,6 +1075,10 @@ func firstUnarchivedCommits(next func() (c archiveCommit, ok bool, err error), a
 // commits and a commit whose date is behind every other is still read.
 func (d *Daemon) doltArchiveLog(ctx context.Context, db string, archived map[string]struct{}) ([]archiveCommit, error) {
 	if err := validMaintenanceDBName(db); err != nil {
+		return nil, err
+	}
+	limit, _, err := d.maintenanceArchiveLimits()
+	if err != nil {
 		return nil, err
 	}
 	query := doltArchiveLogQuery()
@@ -1103,14 +1115,14 @@ func (d *Daemon) doltArchiveLog(ctx context.Context, db string, archived map[str
 		}
 		c.Message = encodeArchiveCell(message)
 		return c, true, nil
-	}, archived)
+	}, archived, limit)
 }
 
 // doltArchiveEvents reads db's events rows at or after the lookback window's
-// start, oldest first, and stops once it holds maintenanceArchiveEventsLimit
-// rows the recorded watermark does not already hold. It is the events archive's
-// only SQL, a read-only SELECT through the running server, and every column is
-// read in the table's own order.
+// start, oldest first, and stops at the configured per-run bound's fresh rows
+// (the ones the recorded watermark does not already hold). It is the events
+// archive's only SQL, a read-only SELECT through the running server, and every
+// column is read in the table's own order.
 //
 // It reads the archived ids from the recorded watermark itself, because the
 // read's bound has to count only rows this run would write: a window whose
@@ -1119,6 +1131,10 @@ func (d *Daemon) doltArchiveLog(ctx context.Context, db string, archived map[str
 // export's seam) still never writes a row twice.
 func (d *Daemon) doltArchiveEvents(ctx context.Context, db, since string) (archiveEvents, error) {
 	if err := validMaintenanceDBName(db); err != nil {
+		return archiveEvents{}, err
+	}
+	_, limit, err := d.maintenanceArchiveLimits()
+	if err != nil {
 		return archiveEvents{}, err
 	}
 	query, err := eventsArchiveQuery(db, since)
@@ -1147,14 +1163,14 @@ func (d *Daemon) doltArchiveEvents(ctx context.Context, db, since string) (archi
 	}
 	defer rows.Close()
 
-	return eventsArchiveBatch(rows, archived)
+	return eventsArchiveBatch(rows, archived, limit)
 }
 
 // eventsArchiveBatch reads the columns of an open events result set and the
-// first maintenanceArchiveEventsLimit rows whose id is not in archived, oldest
-// first. A set it cannot read, or one without the watermark's columns, is an
-// error rather than an empty batch the watermark would walk past.
-func eventsArchiveBatch(rows *sql.Rows, archived map[string]bool) (archiveEvents, error) {
+// first limit rows whose id is not in archived, oldest first. A set it cannot
+// read, or one without the watermark's columns, is an error rather than an
+// empty batch the watermark would walk past.
+func eventsArchiveBatch(rows *sql.Rows, archived map[string]bool, limit int) (archiveEvents, error) {
 	columns, err := rows.Columns()
 	if err != nil {
 		return archiveEvents{}, fmt.Errorf("events read: %w", err)
@@ -1175,7 +1191,7 @@ func eventsArchiveBatch(rows *sql.Rows, archived map[string]bool) (archiveEvents
 			return nil, false, fmt.Errorf("events read: %w", err)
 		}
 		return row, true, nil
-	}, archived, idColumn)
+	}, archived, idColumn, limit)
 	if err != nil {
 		return archiveEvents{}, err
 	}
@@ -1197,14 +1213,14 @@ func (d *Daemon) eventsArchiveIDs(db string) (map[string]bool, error) {
 }
 
 // firstUnarchivedEvents reads rows from next, oldest first, and returns the
-// first maintenanceArchiveEventsLimit whose id is not in archived. next reports
-// ok false at the end of the set. Each row is as wide as the columns idColumn
-// indexes, because the reader scans exactly that many values into it. It stops
-// as soon as it holds the bound, so a run never holds more rows than it writes
-// and the rest is read by the next run from the advanced watermark.
-func firstUnarchivedEvents(next func() ([]string, bool, error), archived map[string]bool, idColumn int) ([][]string, error) {
+// first limit whose id is not in archived. next reports ok false at the end of
+// the set. Each row is as wide as the columns idColumn indexes, because the
+// reader scans exactly that many values into it. It stops as soon as it holds
+// the bound, so a run never holds more rows than it writes and the rest is read
+// by the next run from the advanced watermark.
+func firstUnarchivedEvents(next func() ([]string, bool, error), archived map[string]bool, idColumn, limit int) ([][]string, error) {
 	var out [][]string
-	for len(out) < maintenanceArchiveEventsLimit {
+	for len(out) < limit {
 		row, ok, err := next()
 		if err != nil {
 			return nil, err
