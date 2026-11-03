@@ -116,7 +116,10 @@ func Plan(closedAt time.Time, inv Inventory) ([]Step, error) {
 		}
 		steps = append(steps, Step{Action: DeleteData, Kind: kind, Due: ends})
 	}
-	sort.Slice(steps, func(i, j int) bool {
+	// SliceStable keeps steps that compare equal in the order they were appended,
+	// so the plan stays deterministic if a later step ever shares a due time and
+	// kind rather than depending on the sort key never tying (gt-cswgv).
+	sort.SliceStable(steps, func(i, j int) bool {
 		if !steps[i].Due.Equal(steps[j].Due) {
 			return steps[i].Due.Before(steps[j].Due)
 		}

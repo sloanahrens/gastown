@@ -123,6 +123,21 @@ func TestPlanOffersTrackerExportWithoutRepos(t *testing.T) {
 	}
 }
 
+// TestPlanWithoutExportKind: the export names the repos or the tracker, so a
+// workspace holding neither gets no offer, and its keys and data are scheduled
+// like every other kind (gt-cswgv).
+func TestPlanWithoutExportKind(t *testing.T) {
+	t.Parallel()
+	plan := mustPlan(t, Inventory{Kinds: []Kind{Keys, Caches}})
+	want := []Step{
+		{Action: DeleteKeys, Kind: Keys, Due: closedAt},
+		{Action: DeleteData, Kind: Caches, Due: closedAt.Add(wantRetention)},
+	}
+	if !slices.EqualFunc(plan, want, sameStep) {
+		t.Errorf("Plan() = %+v, want %+v", plan, want)
+	}
+}
+
 // TestPlanListsEachKindOnce: a kind listed twice yields one step per action, so
 // no resource is deleted twice.
 func TestPlanListsEachKindOnce(t *testing.T) {
