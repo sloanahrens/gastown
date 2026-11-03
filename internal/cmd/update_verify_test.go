@@ -1,0 +1,263 @@
+package cmd
+
+import (
+	"context"
+	"errors"
+	"slices"
+	"strings"
+	"testing"
+)
+
+// verifyProbeCall is one command a fake verify RunFunc received.
+type verifyProbeCall struct {
+	name string
+	args []string
+}
+
+// verifyProbeRun records each command a verify probe runs and answers with one
+// fixed result.
+type verifyProbeRun struct {
+	calls  []verifyProbeCall
+	output string
+	exit   int
+	err    error
+}
+
+func (f *verifyProbeRun) run(_ context.Context, _ string, _ []string, name string, args ...string) (string, int, error) {
+	f.calls = append(f.calls, verifyProbeCall{name: name, args: append([]string(nil), args...)})
+	return f.output, f.exit, f.err
+}
+
+// verifyProbeExe is the executable path the probes read the installed build
+// from.
+func verifyProbeExe() (string, error) { return "/opt/gt/bin/gt", nil }
+
+// TestUpdateVerifyGTVersionParsesTheVersionLine: the installed build is read
+// from the file at the executable path, and only a version line answers a
+// commit.
+func TestUpdateVerifyGTVersionParsesTheVersionLine(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	t.Run("parses the commit from the version line", func(t *testing.T) {
+		t.Parallel()
+		run := &verifyProbeRun{output: "gt version d43dd6953 (dev: main@d43dd6953)\n"}
+		probes := newVerifyProbes(verifyProbeEnv{Exe: verifyProbeExe, Run: run.run})
+
+		version, err := probes.GTVersion(ctx)
+		if err != nil {
+			t.Fatalf("gt version: %v", err)
+		}
+		if version != "d43dd6953" {
+			t.Errorf("version = %q, want the field after gt version", version)
+		}
+		want := verifyProbeCall{name: "/opt/gt/bin/gt", args: []string{"version"}}
+		if len(run.calls) != 1 || run.calls[0].name != want.name || !slices.Equal(run.calls[0].args, want.args) {
+			t.Errorf("ran %+v, want [%+v]", run.calls, want)
+		}
+	})
+
+	t.Run("output that is not a version line is an error carrying it", func(t *testing.T) {
+		t.Parallel()
+		run := &verifyProbeRun{output: "boom: not a version line\n"}
+		probes := newVerifyProbes(verifyProbeEnv{Exe: verifyProbeExe, Run: run.run})
+
+		_, err := probes.GTVersion(ctx)
+		if err == nil {
+			t.Fatal("non-version output reported no error")
+		}
+		if !strings.Contains(err.Error(), "boom: not a version line") {
+			t.Errorf("error %q does not carry the output", err)
+		}
+	})
+
+	t.Run("a nonzero exit is an error carrying the output", func(t *testing.T) {
+		t.Parallel()
+		run := &verifyProbeRun{output: "gt: not built", exit: 2}
+		probes := newVerifyProbes(verifyProbeEnv{Exe: verifyProbeExe, Run: run.run})
+
+		_, err := probes.GTVersion(ctx)
+		if err == nil {
+			t.Fatal("a nonzero exit reported no error")
+		}
+		if !strings.Contains(err.Error(), "gt: not built") {
+			t.Errorf("error %q does not carry the output", err)
+		}
+	})
+
+	t.Run("a command that cannot start is an error", func(t *testing.T) {
+		t.Parallel()
+		boom := errors.New("exec: no such file")
+		run := &verifyProbeRun{err: boom}
+		probes := newVerifyProbes(verifyProbeEnv{Exe: verifyProbeExe, Run: run.run})
+
+		if _, err := probes.GTVersion(ctx); !errors.Is(err, boom) {
+			t.Errorf("error = %v, want the run error", err)
+		}
+	})
+
+	t.Run("an unresolved executable is an error", func(t *testing.T) {
+		t.Parallel()
+		boom := errors.New("no executable")
+		probes := newVerifyProbes(verifyProbeEnv{Exe: func() (string, error) { return "", boom }})
+
+		if _, err := probes.GTVersion(ctx); !errors.Is(err, boom) {
+			t.Errorf("error = %v, want the exe error", err)
+		}
+	})
+}
+
+// TestUpdateVerifyDaemonCommit: the daemon's commit is answered as recorded,
+// and a state that names none never passes as a build.
+func TestUpdateVerifyDaemonCommit(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	t.Run("returns the commit as is", func(t *testing.T) {
+		t.Parallel()
+		probes := newVerifyProbes(verifyProbeEnv{
+			DaemonCommit: func() (string, error) { return "d43dd6953", nil },
+		})
+
+		commit, err := probes.DaemonVersion(ctx)
+		if err != nil {
+			t.Fatalf("daemon version: %v", err)
+		}
+		if commit != "d43dd6953" {
+			t.Errorf("commit = %q, want the recorded commit", commit)
+		}
+	})
+
+	t.Run("an empty commit is an error", func(t *testing.T) {
+		t.Parallel()
+		probes := newVerifyProbes(verifyProbeEnv{
+			DaemonCommit: func() (string, error) { return "", nil },
+		})
+
+		if _, err := probes.DaemonVersion(ctx); err == nil {
+			t.Error("an empty commit reported no error")
+		}
+	})
+
+	t.Run("a loader error is an error", func(t *testing.T) {
+		t.Parallel()
+		boom := errors.New("state unreadable")
+		probes := newVerifyProbes(verifyProbeEnv{
+			DaemonCommit: func() (string, error) { return "", boom },
+		})
+
+		if _, err := probes.DaemonVersion(ctx); !errors.Is(err, boom) {
+			t.Errorf("error = %v, want the loader error", err)
+		}
+	})
+}
+
+// TestUpdateVerifyImageLabel: the label is read from gastown-polecat:dev with
+// the org.gastown.gt-commit key, trimmed, and a failed inspect is an error.
+func TestUpdateVerifyImageLabel(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	t.Run("returns the trimmed label", func(t *testing.T) {
+		t.Parallel()
+		run := &verifyProbeRun{output: "  d43dd6953\n"}
+		probes := newVerifyProbes(verifyProbeEnv{Run: run.run})
+
+		label, err := probes.ImageLabel(ctx)
+		if err != nil {
+			t.Fatalf("image label: %v", err)
+		}
+		if label != "d43dd6953" {
+			t.Errorf("label = %q, want the trimmed label", label)
+		}
+		want := verifyProbeCall{
+			name: "docker",
+			args: []string{"image", "inspect", "gastown-polecat:dev", "--format", `{{index .Config.Labels "org.gastown.gt-commit"}}`},
+		}
+		if len(run.calls) != 1 || run.calls[0].name != want.name || !slices.Equal(run.calls[0].args, want.args) {
+			t.Errorf("ran %+v, want [%+v]", run.calls, want)
+		}
+	})
+
+	t.Run("a nonzero exit is an error carrying the output", func(t *testing.T) {
+		t.Parallel()
+		run := &verifyProbeRun{output: "Error: No such image", exit: 1}
+		probes := newVerifyProbes(verifyProbeEnv{Run: run.run})
+
+		_, err := probes.ImageLabel(ctx)
+		if err == nil {
+			t.Fatal("a nonzero exit reported no error")
+		}
+		if !strings.Contains(err.Error(), "Error: No such image") {
+			t.Errorf("error %q does not carry the output", err)
+		}
+	})
+
+	t.Run("a command that cannot start is an error", func(t *testing.T) {
+		t.Parallel()
+		boom := errors.New("exec: docker not found")
+		run := &verifyProbeRun{err: boom}
+		probes := newVerifyProbes(verifyProbeEnv{Run: run.run})
+
+		if _, err := probes.ImageLabel(ctx); !errors.Is(err, boom) {
+			t.Errorf("error = %v, want the run error", err)
+		}
+	})
+}
+
+// TestUpdateVerifyHealthTakesTheFirstLineIgnoringTheExitCode: the line still
+// describes a degraded town, so the exit status does not hide it.
+func TestUpdateVerifyHealthTakesTheFirstLineIgnoringTheExitCode(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tests := []struct {
+		name   string
+		output string
+		exit   int
+		want   string
+	}{
+		{
+			name:   "green",
+			output: "GREEN tick 1m ago\nmore",
+			exit:   0,
+			want:   "GREEN tick 1m ago",
+		},
+		{
+			name:   "degraded exits nonzero",
+			output: "DEGRADED tick 2m ago: promote=27_behind",
+			exit:   3,
+			want:   "DEGRADED tick 2m ago: promote=27_behind",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			run := &verifyProbeRun{output: tt.output, exit: tt.exit}
+			probes := newVerifyProbes(verifyProbeEnv{Exe: verifyProbeExe, Run: run.run})
+
+			line, err := probes.Health(ctx)
+			if err != nil {
+				t.Fatalf("health: %v", err)
+			}
+			if line != tt.want {
+				t.Errorf("line = %q, want %q", line, tt.want)
+			}
+			want := verifyProbeCall{name: "/opt/gt/bin/gt", args: []string{"status", "--line"}}
+			if len(run.calls) != 1 || run.calls[0].name != want.name || !slices.Equal(run.calls[0].args, want.args) {
+				t.Errorf("ran %+v, want [%+v]", run.calls, want)
+			}
+		})
+	}
+
+	t.Run("a command that cannot start is an error", func(t *testing.T) {
+		t.Parallel()
+		boom := errors.New("exec: no such file")
+		run := &verifyProbeRun{err: boom}
+		probes := newVerifyProbes(verifyProbeEnv{Exe: verifyProbeExe, Run: run.run})
+
+		if _, err := probes.Health(ctx); !errors.Is(err, boom) {
+			t.Errorf("error = %v, want the run error", err)
+		}
+	})
+}
