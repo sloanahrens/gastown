@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
@@ -242,9 +243,14 @@ func TestSpecDispatchDoesNotHoldForAPeerTheTickNeverSlings(t *testing.T) {
 // because a polecat starts from main and already has that landing.
 func TestSpecDispatchDoesNotHoldALandedPeer(t *testing.T) {
 	t.Parallel()
+	// The pool lists closed beads from time.Now() minus duplicateLookback, so
+	// the fixture dates are taken from the clock too: an absolute date expires
+	// the day it falls out of the window and fails every gate after it.
+	closed := time.Now().UTC().Add(-6 * time.Hour)
+	stamp := func(d time.Duration) string { return closed.Add(d).Format(time.RFC3339) }
 	landed := beads.Issue{
 		ID: "fr-landed", Title: frZ64cTitle, Status: "closed",
-		Priority: 1, CreatedAt: "2026-10-31T09:00:00Z", ClosedAt: "2026-10-31T17:00:00Z",
+		Priority: 1, CreatedAt: stamp(-8 * time.Hour), ClosedAt: stamp(0),
 		Description: frZ64cDesc, CloseReason: "Landed on main\ntarget_branch: main\ncommit_sha: 5be95dd",
 	}
 	peers := peerClaims(t, landed)
@@ -256,8 +262,8 @@ func TestSpecDispatchDoesNotHoldALandedPeer(t *testing.T) {
 		name    string
 		created string
 	}{
-		{name: "a bead filed before the landing dispatches", created: "2026-10-31T12:00:00Z"},
-		{name: "a bead filed after the landing dispatches", created: "2026-10-31T18:00:00Z"},
+		{name: "a bead filed before the landing dispatches", created: stamp(-5 * time.Hour)},
+		{name: "a bead filed after the landing dispatches", created: stamp(time.Hour)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
