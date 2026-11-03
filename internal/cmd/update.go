@@ -74,16 +74,26 @@ var updateSelectableSteps = []update.StepName{
 	update.StepLift,
 }
 
-// Dispatched seams. Production wires the real town; a test replaces each with
-// a fake so no unit test finds a town, builds the effects or runs a step.
-var (
-	// updateFindTownRoot locates the town the command works on.
-	updateFindTownRoot = workspace.FindFromCwdOrError
-	// updateDepsFactory builds the real effects one update run reaches.
-	updateDepsFactory = realUpdateDeps
-	// updateRun is the orchestrator the command runs.
-	updateRun = update.Run
-)
+// updateDepsFactory builds the real effects one update run reaches.
+var updateDepsFactory = realUpdateDeps
+
+// updateSeams are the command's dependencies: the town lookup, the effects
+// builder and the orchestrator. Production passes the real ones; a test passes
+// fakes, so no test swaps a package variable.
+type updateSeams struct {
+	FindTownRoot func() (string, error)
+	DepsFactory  func(townRoot string) (update.Deps, error)
+	Run          func(context.Context, update.Deps, update.Options) (update.State, error)
+}
+
+// productionUpdateSeams wires the real town, effects and orchestrator.
+func productionUpdateSeams() updateSeams {
+	return updateSeams{
+		FindTownRoot: workspace.FindFromCwdOrError,
+		DepsFactory:  updateDepsFactory,
+		Run:          update.Run,
+	}
+}
 
 // updateCmd is the `gt update` job. `gt update status` lands separately.
 var updateCmd = newUpdateCmd()
@@ -92,8 +102,14 @@ func init() {
 	rootCmd.AddCommand(updateCmd)
 }
 
-// newUpdateCmd builds the command so a test gets fresh flag state.
+// newUpdateCmd builds the production command; a test calls newUpdateCmdWith
+// for fresh flag state over its own seams.
 func newUpdateCmd() *cobra.Command {
+	return newUpdateCmdWith(productionUpdateSeams())
+}
+
+// newUpdateCmdWith builds the command over seams.
+func newUpdateCmdWith(seams updateSeams) *cobra.Command {
 	var req updateRequest
 	c := &cobra.Command{
 		Use:     "update",
@@ -111,7 +127,7 @@ Exit status: 0 for an ok run or a dry run, 1 failed, 3 partial, 4 aborted,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runUpdate(cmd, req)
+			return runUpdate(cmd, req, seams)
 		},
 	}
 	c.Flags().BoolVar(&req.DryRun, "dry-run", false, "Print the plan and change nothing")
@@ -123,8 +139,9 @@ Exit status: 0 for an ok run or a dry run, 1 failed, 3 partial, 4 aborted,
 	return c
 }
 
-// runUpdate runs one update job and turns its outcome into an exit status.
-func runUpdate(cmd *cobra.Command, req updateRequest) error {
+// runUpdate runs one update job over seams and turns its outcome into an exit
+// status.
+func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 	out := cmd.OutOrStdout()
 	errOut := cmd.ErrOrStderr()
 
@@ -137,11 +154,11 @@ func runUpdate(cmd *cobra.Command, req updateRequest) error {
 		return err
 	}
 
-	townRoot, err := updateFindTownRoot()
+	townRoot, err := seams.FindTownRoot()
 	if err != nil {
 		return fmt.Errorf("finding the town root: %w", err)
 	}
-	deps, err := updateDepsFactory(townRoot)
+	deps, err := seams.DepsFactory(townRoot)
 	if err != nil {
 		return fmt.Errorf("preparing the update: %w", err)
 	}
@@ -165,7 +182,7 @@ func runUpdate(cmd *cobra.Command, req updateRequest) error {
 	defer ticker.Stop()
 	stopHeartbeat := startUpdateHeartbeat(ctx, deps.Store, ticker.C, deps.Clock, updateHeartbeatError(errOut))
 
-	st, err := updateRun(ctx, deps, updateOptions(req, skip, only))
+	st, err := seams.Run(ctx, deps, updateOptions(req, skip, only))
 	stopHeartbeat()
 	release()
 

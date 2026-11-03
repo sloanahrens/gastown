@@ -19,38 +19,22 @@ type updateTestClock struct{ now time.Time }
 
 func (c updateTestClock) Now() time.Time { return c.now }
 
-// updateTestSeams is the set of fakes one command run works against.
-type updateTestSeams struct {
-	TownRoot    string
-	TownRootErr error
-	Deps        update.Deps
-	DepsErr     error
-	Run         func(context.Context, update.Deps, update.Options) (update.State, error)
+// updateTestSeams is the command over a fake town, fake effects and the given
+// orchestrator.
+func updateTestSeams(townRoot string, deps update.Deps, run func(context.Context, update.Deps, update.Options) (update.State, error)) updateSeams {
+	if run == nil {
+		run = okUpdateRun
+	}
+	return updateSeams{
+		FindTownRoot: func() (string, error) { return townRoot, nil },
+		DepsFactory:  func(string) (update.Deps, error) { return deps, nil },
+		Run:          run,
+	}
 }
 
-// installUpdateSeams replaces the command's seams for the test and restores
-// them afterwards. The command tests do not run in parallel, so the package
-// variables are never contended.
-func installUpdateSeams(t *testing.T, s updateTestSeams) {
-	t.Helper()
-	prevRoot, prevDeps, prevRun := updateFindTownRoot, updateDepsFactory, updateRun
-	updateFindTownRoot = func() (string, error) { return s.TownRoot, s.TownRootErr }
-	updateDepsFactory = func(string) (update.Deps, error) {
-		if s.DepsErr != nil {
-			return update.Deps{}, s.DepsErr
-		}
-		return s.Deps, nil
-	}
-	if s.Run != nil {
-		updateRun = s.Run
-	} else {
-		updateRun = func(context.Context, update.Deps, update.Options) (update.State, error) {
-			return update.State{Outcome: update.OutcomeOK}, nil
-		}
-	}
-	t.Cleanup(func() {
-		updateFindTownRoot, updateDepsFactory, updateRun = prevRoot, prevDeps, prevRun
-	})
+// okUpdateRun answers an ok run without doing anything.
+func okUpdateRun(context.Context, update.Deps, update.Options) (update.State, error) {
+	return update.State{Outcome: update.OutcomeOK}, nil
 }
 
 // updateTestDeps is a Deps with only the fields the command itself reaches: a
@@ -63,11 +47,11 @@ func updateTestDeps(t *testing.T) update.Deps {
 	}
 }
 
-// runUpdateCommand executes a fresh gt update and returns the status the
-// production mapping gives its error, plus both output streams.
-func runUpdateCommand(t *testing.T, ctx context.Context, args ...string) (code int, stdout, stderr string) {
+// runUpdateCommand executes a fresh gt update over seams and returns the
+// status the production mapping gives its error, plus both output streams.
+func runUpdateCommand(t *testing.T, ctx context.Context, seams updateSeams, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
-	c := newUpdateCmd()
+	c := newUpdateCmdWith(seams)
 	var out, errOut bytes.Buffer
 	c.SetOut(&out)
 	c.SetErr(&errOut)
@@ -102,10 +86,11 @@ func (r *recordingUpdateRun) call(_ context.Context, _ update.Deps, o update.Opt
 // reach the run's Options and that an unknown name is refused with the valid
 // names listed, before anything is run.
 func TestUpdateFlagsValidateStepNames(t *testing.T) {
+	t.Parallel()
 	rec := &recordingUpdateRun{state: update.State{Outcome: update.OutcomeOK}}
-	installUpdateSeams(t, updateTestSeams{TownRoot: t.TempDir(), Deps: updateTestDeps(t), Run: rec.call})
+	seams := updateTestSeams(t.TempDir(), updateTestDeps(t), rec.call)
 
-	code, _, stderr := runUpdateCommand(t, context.Background(),
+	code, _, stderr := runUpdateCommand(t, context.Background(), seams,
 		"--skip", "drain", "--skip", "maintenance", "--only", "verify")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr:\n%s", code, stderr)
@@ -126,7 +111,7 @@ func TestUpdateFlagsValidateStepNames(t *testing.T) {
 	}
 
 	rec.calls = 0
-	code, _, stderr = runUpdateCommand(t, context.Background(), "--skip", "install", "--only", "frobnicate")
+	code, _, stderr = runUpdateCommand(t, context.Background(), seams, "--skip", "install", "--only", "frobnicate")
 	if code != 1 {
 		t.Fatalf("exit = %d for an unknown step, want 1", code)
 	}
@@ -147,6 +132,7 @@ func TestUpdateFlagsValidateStepNames(t *testing.T) {
 // that a dry run exits 0, and that a failed run of the orchestrator exits 1
 // with its error shown.
 func TestUpdateExitCodesFollowTheOutcome(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		outcome update.Outcome
@@ -163,8 +149,8 @@ func TestUpdateExitCodesFollowTheOutcome(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := &recordingUpdateRun{state: update.State{V: 1, RunID: "run-x", Outcome: tc.outcome}}
-			installUpdateSeams(t, updateTestSeams{TownRoot: t.TempDir(), Deps: updateTestDeps(t), Run: rec.call})
-			code, stdout, stderr := runUpdateCommand(t, context.Background(), tc.args...)
+			seams := updateTestSeams(t.TempDir(), updateTestDeps(t), rec.call)
+			code, stdout, stderr := runUpdateCommand(t, context.Background(), seams, tc.args...)
 			if code != tc.want {
 				t.Fatalf("exit = %d for outcome %q, want %d; stderr:\n%s", code, tc.outcome, tc.want, stderr)
 			}
@@ -180,8 +166,8 @@ func TestUpdateExitCodesFollowTheOutcome(t *testing.T) {
 
 	t.Run("orchestrator error", func(t *testing.T) {
 		rec := &recordingUpdateRun{err: errors.New("MainSHA: no such remote")}
-		installUpdateSeams(t, updateTestSeams{TownRoot: t.TempDir(), Deps: updateTestDeps(t), Run: rec.call})
-		code, stdout, stderr := runUpdateCommand(t, context.Background())
+		seams := updateTestSeams(t.TempDir(), updateTestDeps(t), rec.call)
+		code, stdout, stderr := runUpdateCommand(t, context.Background(), seams)
 		if code != 1 {
 			t.Fatalf("exit = %d for a failed run, want 1", code)
 		}
@@ -198,9 +184,17 @@ func TestUpdateExitCodesFollowTheOutcome(t *testing.T) {
 // dependency set that cannot be built both end as a failed run rather than a
 // success or a panic.
 func TestUpdateSetupErrorsExitFailed(t *testing.T) {
+	t.Parallel()
 	t.Run("town root", func(t *testing.T) {
-		installUpdateSeams(t, updateTestSeams{TownRootErr: errors.New("not in a town")})
-		code, _, stderr := runUpdateCommand(t, context.Background())
+		seams := updateSeams{
+			FindTownRoot: func() (string, error) { return "", errors.New("not in a town") },
+			DepsFactory: func(string) (update.Deps, error) {
+				t.Fatal("DepsFactory called for a town that could not be found")
+				return update.Deps{}, nil
+			},
+			Run: okUpdateRun,
+		}
+		code, _, stderr := runUpdateCommand(t, context.Background(), seams)
 		if code != 1 {
 			t.Fatalf("exit = %d, want 1", code)
 		}
@@ -210,8 +204,14 @@ func TestUpdateSetupErrorsExitFailed(t *testing.T) {
 	})
 
 	t.Run("deps", func(t *testing.T) {
-		installUpdateSeams(t, updateTestSeams{TownRoot: t.TempDir(), DepsErr: errors.New("no gt source checkout")})
-		code, _, stderr := runUpdateCommand(t, context.Background())
+		seams := updateSeams{
+			FindTownRoot: func() (string, error) { return t.TempDir(), nil },
+			DepsFactory: func(string) (update.Deps, error) {
+				return update.Deps{}, errors.New("no gt source checkout")
+			},
+			Run: okUpdateRun,
+		}
+		code, _, stderr := runUpdateCommand(t, context.Background(), seams)
 		if code != 1 {
 			t.Fatalf("exit = %d, want 1", code)
 		}
@@ -224,6 +224,7 @@ func TestUpdateSetupErrorsExitFailed(t *testing.T) {
 // TestUpdateLockedExitsFiveNamingTheRun proves a held lock ends the command at
 // once with status 5 and the name, step and start time of the run holding it.
 func TestUpdateLockedExitsFiveNamingTheRun(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	dir := update.Dir(townRoot)
 	started := time.Date(2026, 11, 3, 12, 30, 0, 0, time.UTC)
@@ -244,9 +245,9 @@ func TestUpdateLockedExitsFiveNamingTheRun(t *testing.T) {
 
 	rec := &recordingUpdateRun{state: update.State{Outcome: update.OutcomeOK}}
 	deps := update.Deps{Clock: updateTestClock{}, Store: &update.Store{Dir: dir}}
-	installUpdateSeams(t, updateTestSeams{TownRoot: townRoot, Deps: deps, Run: rec.call})
+	seams := updateTestSeams(townRoot, deps, rec.call)
 
-	code, _, stderr := runUpdateCommand(t, context.Background())
+	code, _, stderr := runUpdateCommand(t, context.Background(), seams)
 	if code != 5 {
 		t.Fatalf("exit = %d with the lock held, want 5", code)
 	}
@@ -263,6 +264,7 @@ func TestUpdateLockedExitsFiveNamingTheRun(t *testing.T) {
 // TestUpdateLockedWithoutStateStillExitsFive proves a holder whose state
 // cannot be read is named as unreadable, not mistaken for no run.
 func TestUpdateLockedWithoutStateStillExitsFive(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	dir := update.Dir(townRoot)
 	release, err := update.AcquireLock(dir)
@@ -272,9 +274,7 @@ func TestUpdateLockedWithoutStateStillExitsFive(t *testing.T) {
 	defer release()
 
 	deps := update.Deps{Clock: updateTestClock{}, Store: &update.Store{Dir: dir}}
-	installUpdateSeams(t, updateTestSeams{TownRoot: townRoot, Deps: deps})
-
-	code, _, stderr := runUpdateCommand(t, context.Background())
+	code, _, stderr := runUpdateCommand(t, context.Background(), updateTestSeams(townRoot, deps, nil))
 	if code != 5 {
 		t.Fatalf("exit = %d with the lock held, want 5", code)
 	}
@@ -287,6 +287,7 @@ func TestUpdateLockedWithoutStateStillExitsFive(t *testing.T) {
 // context while the run waits ends it with outcome interrupted, status 130,
 // and the lock released.
 func TestUpdateCancelledContextIsInterrupted(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
 	started := make(chan struct{})
@@ -303,9 +304,9 @@ func TestUpdateCancelledContextIsInterrupted(t *testing.T) {
 		case <-finished:
 		}
 	}()
-	installUpdateSeams(t, updateTestSeams{TownRoot: townRoot, Deps: updateTestDeps(t), Run: run})
+	seams := updateTestSeams(townRoot, updateTestDeps(t), run)
 
-	code, stdout, stderr := runUpdateCommand(t, ctx)
+	code, stdout, stderr := runUpdateCommand(t, ctx, seams)
 	close(finished)
 	if code != 130 {
 		t.Fatalf("exit = %d after cancellation, want 130; stderr:\n%s", code, stderr)
@@ -323,6 +324,7 @@ func TestUpdateCancelledContextIsInterrupted(t *testing.T) {
 // TestUpdateFromDaemonSetsSource proves the source flag reaches the run:
 // manual by default, daemon with --from-daemon.
 func TestUpdateFromDaemonSetsSource(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		args []string
@@ -334,8 +336,8 @@ func TestUpdateFromDaemonSetsSource(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := &recordingUpdateRun{state: update.State{Outcome: update.OutcomeOK}}
-			installUpdateSeams(t, updateTestSeams{TownRoot: t.TempDir(), Deps: updateTestDeps(t), Run: rec.call})
-			code, _, stderr := runUpdateCommand(t, context.Background(), tc.args...)
+			seams := updateTestSeams(t.TempDir(), updateTestDeps(t), rec.call)
+			code, _, stderr := runUpdateCommand(t, context.Background(), seams, tc.args...)
 			if code != 0 {
 				t.Fatalf("exit = %d, want 0; stderr:\n%s", code, stderr)
 			}
@@ -349,10 +351,11 @@ func TestUpdateFromDaemonSetsSource(t *testing.T) {
 // TestUpdateJSONPrintsTheState proves --json replaces the text report with the
 // final state.
 func TestUpdateJSONPrintsTheState(t *testing.T) {
+	t.Parallel()
 	rec := &recordingUpdateRun{state: update.State{V: 1, RunID: "run-json", Outcome: update.OutcomeOK}}
-	installUpdateSeams(t, updateTestSeams{TownRoot: t.TempDir(), Deps: updateTestDeps(t), Run: rec.call})
+	seams := updateTestSeams(t.TempDir(), updateTestDeps(t), rec.call)
 
-	code, stdout, stderr := runUpdateCommand(t, context.Background(), "--json")
+	code, stdout, stderr := runUpdateCommand(t, context.Background(), seams, "--json")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr:\n%s", code, stderr)
 	}
@@ -372,6 +375,7 @@ func TestUpdateJSONPrintsTheState(t *testing.T) {
 // error feed: a missing current state is silent, and any other write failure
 // is printed.
 func TestUpdateHeartbeatIgnoresNoCurrentAndLogsOtherWrites(t *testing.T) {
+	t.Parallel()
 	t.Run("no current state is silent", func(t *testing.T) {
 		store := &update.Store{Dir: t.TempDir()}
 		var buf bytes.Buffer
