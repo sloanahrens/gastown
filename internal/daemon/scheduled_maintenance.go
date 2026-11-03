@@ -1,10 +1,13 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/update"
 )
 
 // scheduled_maintenance is the town's one Dolt GC actor (gt-8z769.3): in the
@@ -141,9 +144,37 @@ func shouldRunMaintenanceCycle(now, lastRun time.Time) bool {
 // runScheduledMaintenance checks if we're in the maintenance window and, once
 // per window, dispatches a backup-then-gc cycle over every database in the
 // data dir. Every tick also settles the stale-gc alerts, in the window or not
-// (maintenance_gc_stale.go).
+// (maintenance_gc_stale.go). A request file from the update job runs a cycle
+// at any hour and is answered through its result file (maintenance_request.go).
 func (d *Daemon) runScheduledMaintenance() {
+	files := osRequestFiles{}
+	dir := update.Dir(d.config.TownRoot)
+	request, requested, err := readMaintenanceRequest(files, dir)
+	switch {
+	case errors.Is(err, errMalformedRequest):
+		d.dropMalformedRequest(files, dir, err)
+		requested = false
+	case errors.Is(err, errInvalidRunID):
+		d.answerInvalidRequest(files, dir, err)
+		requested = false
+	case err != nil:
+		// A request that cannot be read is not a missing one: leave it for the
+		// next tick, and let this tick do only its scheduled work.
+		d.logger.Printf("scheduled_maintenance: WARNING: %v — leaving the request for the next tick", err)
+		requested = false
+	}
+
+	// A request whose cycle already ran but whose result write failed is
+	// answered from the remembered outcome, never rerun. An unreadable state
+	// is answered failed for the same reason: neither may start a cycle.
+	if requested && d.reanswerRememberedRequest(files, dir, request) {
+		return
+	}
+
 	if !d.isPatrolActive("scheduled_maintenance") {
+		if requested {
+			d.answerRequest(request, gcOutcomeFailed, "the scheduled_maintenance patrol is not active")
+		}
 		return
 	}
 
@@ -156,18 +187,22 @@ func (d *Daemon) runScheduledMaintenance() {
 	d.checkStaleMaintenanceGC(now)
 
 	window := maintenanceWindow(d.patrolConfig)
-	if window == "" {
+	if window == "" && !requested {
 		d.logger.Printf("scheduled_maintenance: no window configured, skipping")
 		return
 	}
 
 	// Count a window that closed with gc still deferred (and escalate a
-	// streak) before anything else, including outside the window.
-	if !d.maintenanceGCRunning.Load() {
+	// streak) before anything else, including outside the window. A requested
+	// cycle with no window configured touches no window bookkeeping at all.
+	if window != "" && !d.maintenanceGCRunning.Load() {
 		d.closeDeferredGCWindow(now)
 	}
 
-	if !isInMaintenanceWindow(now, window) {
+	// A request runs the cycle at any time of day, so it skips the window and
+	// the gap since the last cycle; the catch-up work is for a tick without
+	// one, and a requested cycle replaces it.
+	if !requested && !isInMaintenanceWindow(now, window) {
 		// Outside the window the work is a missed backup (gt-wne04) and, for a
 		// database whose windows kept deferring, the gc that never ran
 		// (gt-uux5b). A database with nothing else to do is a silent skip (this
@@ -192,44 +227,88 @@ func (d *Daemon) runScheduledMaintenance() {
 		}
 	}
 
-	if !shouldRunMaintenanceCycle(now, d.lastMaintenanceRun) {
+	if !requested && !shouldRunMaintenanceCycle(now, d.lastMaintenanceRun) {
 		return // Already ran this window
 	}
 
 	// A standby (the town ESTOP or a Waned Ring) starts no gc, but the
 	// night's backup still runs (startStandbyBackup). The window is consumed
-	// only once that backup ends, so the gc waits for the catch-up.
+	// only once that backup ends, so the gc waits for the catch-up. A request
+	// is answered at once instead of being left to the job's timeout.
 	reason := d.standbyReason(now)
 	d.logStandby(&d.standbyMaintenance, "scheduled_maintenance", reason)
 	if reason != "" {
-		d.startStandbyBackup(window)
+		if requested {
+			d.deferRequest(request, reason)
+		}
+		if window != "" {
+			d.startStandbyBackup(window)
+		}
 		return
 	}
 
 	// A cycle that defers (town busy) leaves lastMaintenanceRun alone, so
-	// the next 5-minute tick in the window retries.
+	// the next 5-minute tick in the window retries. A request this tick cannot
+	// serve because a cycle is already running is answered (maintenance_request.go)
+	// rather than left to the job's timeout.
 	if d.maintenanceGCRunning.Load() {
+		if requested {
+			d.answerBusyRequest(request)
+		}
 		return
 	}
 	if external, why := d.maintenance().gcExternal(d); external {
 		// The old-gen trigger reads the server's data dir from this host's
-		// disk; against a remote server it would read the wrong one.
+		// disk; against a remote server it would read the wrong one. The skip
+		// is the scheduled window's, so only a scheduled tick consumes it: a
+		// request that fails here changed nothing a later request must wait
+		// on.
 		d.logger.Printf("scheduled_maintenance: skipped: %s — gc needs a local server", why)
-		d.lastMaintenanceRun = now
+		if requested {
+			d.answerRequest(request, gcOutcomeFailed, "no local server can run the cycle: "+why)
+		} else {
+			d.lastMaintenanceRun = now
+		}
 		return
 	}
 	dataDir := d.maintenanceDataDir()
 	databases, err := d.maintenance().gcDatabases(dataDir)
 	if err != nil || len(databases) == 0 {
 		d.logger.Printf("scheduled_maintenance: no databases discovered in %s (err=%v)", dataDir, err)
+		if requested {
+			detail := fmt.Sprintf("no databases discovered in %s", dataDir)
+			if err != nil {
+				detail = fmt.Sprintf("%s: %v", detail, err)
+			}
+			d.answerRequest(request, gcOutcomeFailed, detail)
+		}
 		return
 	}
-	d.logger.Printf("scheduled_maintenance: in window %s, %d database(s) discovered", window, len(databases))
+	where := fmt.Sprintf("in window %s", window)
+	if requested {
+		switch {
+		case window == "":
+			where = fmt.Sprintf("on the request for run %s (no window configured)", request.RunID)
+		case !isInMaintenanceWindow(now, window):
+			where = fmt.Sprintf("outside the window on the request for run %s", request.RunID)
+		}
+	}
+	d.logger.Printf("scheduled_maintenance: %s, %d database(s) discovered", where, len(databases))
 	if keys := deprecatedMaintenanceKeys(d.patrolConfig); len(keys) > 0 {
 		d.logger.Printf("scheduled_maintenance: WARNING: deprecated config ignored — patrols.scheduled_maintenance.{%s} "+
 			"have no effect; the schedule is weekly gc plus the old-gen trigger (gt-8z769.3)", strings.Join(keys, ","))
 	}
-	d.startMaintenanceGC(databases, maintenanceWindowEnd(now, window))
+	var requestedCycle *update.RequestFile
+	if requested {
+		requestedCycle = &request
+	}
+	// No window means no window end to record a deferral against; the cycle
+	// still runs on the request.
+	var windowEnd time.Time
+	if window != "" {
+		windowEnd = maintenanceWindowEnd(now, window)
+	}
+	d.startMaintenanceGC(databases, windowEnd, requestedCycle)
 	if finished := d.maintenanceGCFinishedAt.Swap(0); finished != 0 {
 		d.lastMaintenanceRun = time.Unix(0, finished)
 	}
