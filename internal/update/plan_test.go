@@ -132,7 +132,7 @@ func TestPlanInstallWhenMainMoved(t *testing.T) {
 
 func TestPlanNothingToDo(t *testing.T) {
 	t.Parallel()
-	p := &fakeProbes{installed: "abc123", main: "abc123", published: true, backup: true}
+	p := &fakeProbes{installed: "abc1234", main: "abc1234", published: true, backup: true}
 
 	steps := planFor(t, p, PlanOptions{})
 	if len(steps) != 6 {
@@ -161,7 +161,7 @@ func TestPlanNothingToDo(t *testing.T) {
 
 func TestPlanInstallForcedOrImageUnpublished(t *testing.T) {
 	t.Parallel()
-	const sha = "abc123"
+	const sha = "abc1234"
 	cases := []struct {
 		name         string
 		options      PlanOptions
@@ -489,6 +489,93 @@ func TestPlanProbeErrorNamesTheProbe(t *testing.T) {
 			}
 			if !errors.Is(err, cause) {
 				t.Errorf("error does not wrap the probe cause: %v", err)
+			}
+		})
+	}
+}
+
+func TestPlanSameCommitShortInstalledMatchesFullMain(t *testing.T) {
+	t.Parallel()
+	const installed = "4a731df23"
+	const mainSHA = "4a731df23db607104ea1cd2e1300a117f2e2e364"
+	p := &fakeProbes{installed: installed, main: mainSHA, published: true, backup: true}
+
+	install := stepNamed(t, planFor(t, p, PlanOptions{}), StepInstall)
+	if install.WillRun {
+		t.Errorf("install WillRun = true, want false: the installed short sha names the same commit as main (reason %q)", install.Reason)
+	}
+	if install.Reason != "installed build equals main" {
+		t.Errorf("install reason = %q, want %q", install.Reason, "installed build equals main")
+	}
+}
+
+func TestPlanSameCommitDifferentCommitsStillInstall(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name            string
+		installed, main string
+	}{
+		{"short installed, full main", "4a731df23", "8d36cf44db607104ea1cd2e1300a117f2e2e364"},
+		{"full installed, short main", "8d36cf44db607104ea1cd2e1300a117f2e2e364", "4a731df23"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := &fakeProbes{installed: tc.installed, main: tc.main, published: true, backup: true}
+
+			install := stepNamed(t, planFor(t, p, PlanOptions{}), StepInstall)
+			if !install.WillRun {
+				t.Fatalf("install WillRun = false, want true: the shas name different commits (reason %q)", install.Reason)
+			}
+			if !strings.Contains(install.Reason, "differs from main") {
+				t.Errorf("install reason %q does not say the builds differ", install.Reason)
+			}
+		})
+	}
+}
+
+func TestSameCommitRefusesShortOrEmpty(t *testing.T) {
+	t.Parallel()
+	const full = "4a731df23db607104ea1cd2e1300a117f2e2e364"
+	cases := []struct {
+		name string
+		a, b string
+	}{
+		{"both empty", "", ""},
+		{"six characters equal to themselves", "abc123", "abc123"},
+		{"six-character prefix of a full sha", "abc123", full},
+		{"one side empty", "", full},
+		{"only whitespace", "       ", "       "},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if sameCommit(tc.a, tc.b) {
+				t.Errorf("sameCommit(%q, %q) = true, want false", tc.a, tc.b)
+			}
+		})
+	}
+}
+
+func TestSameCommitTrimsAndPrefixesBothWays(t *testing.T) {
+	t.Parallel()
+	const short = "4a731df23"
+	const full = "4a731df23db607104ea1cd2e1300a117f2e2e364"
+	cases := []struct {
+		name string
+		a, b string
+	}{
+		{"short first", short, full},
+		{"short second", full, short},
+		{"whitespace around both", "  " + short + "\n", "\t" + full + " "},
+		{"identical full shas", full, full},
+		{"seven-character prefix", "4a731df", full},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if !sameCommit(tc.a, tc.b) {
+				t.Errorf("sameCommit(%q, %q) = false, want true", tc.a, tc.b)
 			}
 		})
 	}
