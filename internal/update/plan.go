@@ -92,10 +92,13 @@ func BuildPlan(ctx context.Context, p Probes, o PlanOptions) ([]StepRecord, Targ
 	return steps, target, nil
 }
 
-// planInstall decides whether the installed build needs replacing.
+// planInstall decides whether the installed build needs replacing. The
+// installed build is current when its sha names the same commit as main, so a
+// short installed sha matches main's full one; sameCommit holds that rule, and
+// values under seven characters never match, so an unknown build is replaced.
 func planInstall(installed, mainSHA string, published, force bool) (bool, string) {
 	switch {
-	case installed != mainSHA:
+	case !sameCommit(installed, mainSHA):
 		return true, fmt.Sprintf("installed build %s differs from main %s", shortSHA(installed), shortSHA(mainSHA))
 	case !published:
 		return true, fmt.Sprintf("the image for main %s is not published", shortSHA(mainSHA))
