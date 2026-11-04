@@ -5,7 +5,6 @@
 // table can join on a bead id only when that bead's lint outcome exists. This
 // file renders one record per run and appends it; reading the file and joining
 // it belong to the mango dataset, not the command.
-
 package specdispatch
 
 import (
