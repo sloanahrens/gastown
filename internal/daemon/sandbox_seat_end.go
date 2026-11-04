@@ -55,6 +55,9 @@ type sandboxSeatEnd struct {
 	// other fact lets the seat go, that sandbox is deleted before the host
 	// directories are removed (gt-jhoi1).
 	SandboxErrored bool
+	// Gateway is the gateway the town's seat config names for the seat's sandbox:
+	// the one an errored sandbox is deleted through when its record is gone.
+	Gateway string
 	// Landed is the landing record's proof that the seat's work is on the
 	// target.
 	Landed bool
@@ -208,7 +211,7 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 		// the landing does not already have. It is deleted before the host
 		// directories, so the seat name is free once they are gone (gt-jhoi1).
 		if end.SandboxErrored {
-			if why := h.removeErroredSeatSandbox(rig, name); why != "" {
+			if why := h.removeErroredSeatSandbox(rig, name, end.Gateway); why != "" {
 				kept = why
 				h.clearPendingSeatEnd(rig, name)
 				return nil
@@ -341,6 +344,7 @@ func (h *patrolScanHost) measureSandboxSeatEnd(rig, name string, landing sandbox
 			return sandboxSeatEnd{}, fmt.Sprintf("cannot ask gateway %q whether the sandbox is gone: %v", seat.gateway, err)
 		}
 		end.SandboxGone = !exists
+		end.Gateway = seat.gateway
 		if exists {
 			failed, err := h.sandboxFailed(seat.gateway, h.sessionName(rig, name))
 			if err != nil {
@@ -471,9 +475,13 @@ func (h *patrolScanHost) sandboxFailed(gateway, name string) (bool, error) {
 // removeErroredSeatSandbox deletes the errored sandbox of a seat that may go,
 // with its record, so the seat name is free. It returns the reason the seat is
 // kept, or "" when that sandbox and its record were removed. The gateway is
-// asked again through session.CleanupErroredSandbox, so a sandbox that stopped
-// failing in between keeps the seat for a later pass (gt-jhoi1).
-func (h *patrolScanHost) removeErroredSeatSandbox(rig, name string) string {
+// asked again through session.CleanupErroredSandboxWithRecord, so a sandbox that
+// stopped failing in between keeps the seat for a later pass (gt-jhoi1).
+//
+// A seat with no record still has its sandbox at the gateway the town's seat
+// config names, so the delete is keyed by that gateway and the seat's own name
+// rather than kept forever (gt-jhoi1).
+func (h *patrolScanHost) removeErroredSeatSandbox(rig, name, gateway string) string {
 	status := h.sandboxStatus
 	if status == nil {
 		status = session.GatewaySandboxPhase
@@ -482,12 +490,20 @@ func (h *patrolScanHost) removeErroredSeatSandbox(rig, name string) string {
 	if deleter == nil {
 		deleter = session.SandboxDeleter
 	}
-	removed, err := session.CleanupErroredSandbox(status, deleter, h.town(), h.sessionName(rig, name))
+	sessionName := h.sessionName(rig, name)
+	rec, recorded, err := session.ReadSandboxRecord(h.town(), sessionName)
+	if err != nil {
+		return "its errored sandbox is not removed: " + err.Error()
+	}
+	if !recorded {
+		rec = session.SandboxRecord{Session: sessionName, Rig: rig, Polecat: name, Gateway: gateway}
+	}
+	removed, err := session.CleanupErroredSandboxWithRecord(status, deleter, h.town(), sessionName, rec)
 	if err != nil {
 		return "its errored sandbox is not removed: " + err.Error()
 	}
 	if !removed {
-		return "its sandbox has no record here, or is no longer in a failure phase"
+		return "its sandbox is no longer in a failure phase"
 	}
 	return ""
 }

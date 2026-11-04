@@ -80,9 +80,17 @@ func CleanupErroredSandbox(status func(gateway, name string) (sandbox.Status, er
 	if !ok {
 		return false, nil
 	}
+	return CleanupErroredSandboxWithRecord(status, deleter, townRoot, session, rec)
+}
+
+// CleanupErroredSandboxWithRecord is CleanupErroredSandbox over a record the
+// caller already read, or built for a seat whose record is gone: the sandbox the
+// gateway names rec.Gateway holds under session. It is deleted only in a
+// terminal failure phase, as CleanupErroredSandbox does (gt-jhoi1).
+func CleanupErroredSandboxWithRecord(status func(gateway, name string) (sandbox.Status, error), deleter func(townRoot string, rec SandboxRecord) error, townRoot, session string, rec SandboxRecord) (bool, error) {
 	st, err := status(rec.Gateway, session)
 	if isSandboxNotFound(err) {
-		return false, fmt.Errorf("gateway %q has no sandbox %s: its record is left for the patrol to drop", rec.Gateway, session)
+		return false, fmt.Errorf("gateway %q has no sandbox %s: any record of it is left for the patrol to drop", rec.Gateway, session)
 	}
 	if err != nil {
 		return false, fmt.Errorf("asking gateway %q for sandbox %s: %w", rec.Gateway, session, err)

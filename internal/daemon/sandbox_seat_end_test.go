@@ -237,6 +237,8 @@ func TestEndFinishedSandboxSeat(t *testing.T) {
 		phaseErr    error
 		deleteErr   error
 		wantDeleted bool
+		// noRecord leaves the sandbox at the gateway with no registry record.
+		noRecord bool
 	}{
 		{
 			name: "a finished seat goes", landing: finished, desired: intent.DesiredStop,
@@ -245,6 +247,11 @@ func TestEndFinishedSandboxSeat(t *testing.T) {
 		{
 			name: "an errored sandbox of a finished seat is deleted and the seat goes", exists: true, phase: "Error",
 			landing: finished, desired: intent.DesiredStop,
+			wantRemoved: true, wantAsked: true, wantDeleted: true,
+		},
+		{
+			name: "an errored sandbox with no record is deleted by its seat's gateway and the seat goes", exists: true, phase: "Error",
+			noRecord: true, landing: finished, desired: intent.DesiredStop,
 			wantRemoved: true, wantAsked: true, wantDeleted: true,
 		},
 		{
@@ -341,7 +348,7 @@ func TestEndFinishedSandboxSeat(t *testing.T) {
 				f.deleted = append(f.deleted, rec.Session)
 				return tt.deleteErr
 			}
-			if tt.exists {
+			if tt.exists && !tt.noRecord {
 				if err := session.WriteSandboxRecord(f.town, session.SandboxRecord{
 					Session: f.host.sessionName(endRig, endPolecat), Rig: endRig, Polecat: endPolecat, Gateway: "k8s",
 				}); err != nil {
@@ -372,6 +379,11 @@ func TestEndFinishedSandboxSeat(t *testing.T) {
 			}
 			if deleted := len(f.deleted) > 0; deleted != tt.wantDeleted {
 				t.Errorf("sandbox deleted = %v, want %v (%v)", deleted, tt.wantDeleted, f.deleted)
+			}
+			if tt.wantDeleted {
+				if want := f.host.sessionName(endRig, endPolecat); len(f.deleted) != 1 || f.deleted[0] != want {
+					t.Errorf("deleted %v, want exactly the seat's sandbox %s", f.deleted, want)
+				}
 			}
 		})
 	}
