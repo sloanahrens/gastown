@@ -5228,8 +5228,8 @@ func TestWriteServerConfig_Defaults(t *testing.T) {
 	if !parsed.Behavior.AutoGCBehavior.Enable {
 		t.Error("behavior.auto_gc_behavior.enable = false, want true (non-blocking auto_gc re-enabled, hq-excy9g)")
 	}
-	if parsed.Behavior.AutoGCBehavior.ArchiveLevel != doltAutoGCArchiveLevel {
-		t.Errorf("behavior.auto_gc_behavior.archive_level = %d, want %d", parsed.Behavior.AutoGCBehavior.ArchiveLevel, doltAutoGCArchiveLevel)
+	if parsed.Behavior.AutoGCBehavior.ArchiveLevel != 0 {
+		t.Errorf("behavior.auto_gc_behavior.archive_level = %d, want 0 (gt-hs4j3)", parsed.Behavior.AutoGCBehavior.ArchiveLevel)
 	}
 	if parsed.SystemVariables.DoltStatsEnabled == nil || *parsed.SystemVariables.DoltStatsEnabled != 0 {
 		t.Fatalf("system_variables.dolt_stats_enabled = %v, want 0", parsed.SystemVariables.DoltStatsEnabled)
@@ -5297,7 +5297,7 @@ func writeAutoGCConfig(t *testing.T, autoGC string) (enable bool, archiveLevel i
 	return parsed.Behavior.AutoGCBehavior.Enable, parsed.Behavior.AutoGCBehavior.ArchiveLevel
 }
 
-// TestWriteServerConfig_AutoGCDisabled verifies the operational.dolt.auto_gc
+// TestAutoGCDisabledStillWritesLevelZero verifies the operational.dolt.auto_gc
 // kill-switch: AutoGC="off" emits auto_gc_behavior {enable:false,
 // archive_level:0} so auto_gc can be disabled at runtime without a source
 // revert+rebuild (hq-excy9g escape hatch).
@@ -5327,6 +5327,8 @@ func TestAutoGCBlockArchiveLevelZero(t *testing.T) {
 
 // TestAutoGCArchiveLevelIsOneNamedConstant checks that both branches take their
 // archive_level from doltAutoGCArchiveLevel, so changing the constant moves both.
+// While the constant is 0 a branch that hardcodes 0 passes too; it is caught
+// once the constant is set to any other value.
 func TestAutoGCArchiveLevelIsOneNamedConstant(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
