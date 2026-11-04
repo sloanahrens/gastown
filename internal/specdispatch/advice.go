@@ -34,7 +34,8 @@ var adviceReadStepRe = regexp.MustCompile(`(?i)\b(read|reads|reading|unreadable|
 const adviceFailureText = "the Goal or Constraints mentions %q but no acceptance box says what happens when the read or step fails: add a box naming the failure behavior"
 
 // adviceExcludedLabelText is the sentence Advice returns for a bead an excluded
-// label keeps off the dispatcher; the caller prints it as one "advice:" line.
+// label keeps off the dispatcher. Callers outside this package get it only
+// through Advice, so they never read this constant.
 const adviceExcludedLabelText = "the dispatcher will not take this bead: it wears label %s"
 
 // Advice returns the lint's advisories for s: one-line notes that name a gap
