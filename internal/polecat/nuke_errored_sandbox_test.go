@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/sandbox"
 	"github.com/steveyegge/gastown/internal/session"
@@ -30,6 +31,10 @@ type nukeStopCase struct {
 	phase     string
 	statusErr error
 	deleteErr error
+	// fields is the seat's agent bead; nil with fieldsErr nil is a seat whose
+	// gt done recorded a clean cleanup status, the usual finished seat.
+	fields    *beads.AgentFields
+	fieldsErr error
 }
 
 // nukeStopResult is what one nuke-style Stop did: its error, the sandboxes the
@@ -74,6 +79,13 @@ func runNukeStop(t *testing.T, c nukeStopCase) nukeStopResult {
 		return c.deleteErr
 	}
 	m.sandboxPusher = func(string, session.SandboxRecord) error { return nil }
+	fields := c.fields
+	if fields == nil && c.fieldsErr == nil {
+		fields = &beads.AgentFields{CleanupStatus: string(CleanupClean)}
+	}
+	m.agentFields = func(string) (*beads.AgentFields, error) {
+		return fields, c.fieldsErr
+	}
 	m.warn = func(format string, args ...any) {
 		res.warnings = append(res.warnings, fmt.Sprintf(format, args...))
 	}
@@ -183,6 +195,47 @@ func TestNukeErroredSandboxKeepsRecordOnUnansweredGateway(t *testing.T) {
 	}
 	if !anyContains(res.warnings, "gateway timed out") {
 		t.Errorf("warnings %q do not name the unanswered gateway", res.warnings)
+	}
+}
+
+// TestNukeErroredSandboxKeepsUnprovenWork: an errored sandbox may hold commits
+// that never reached origin, and with no pod nothing can push them. A stop
+// deletes it only when the agent bead proves the work landed on origin, so every
+// other recorded state keeps the sandbox and its record, and the stop still
+// answers ErrSessionNotFound, as nuke expects.
+func TestNukeErroredSandboxKeepsUnprovenWork(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		fields *beads.AgentFields
+		err    error
+		reason string
+	}{
+		{name: "unpushed_commits", fields: &beads.AgentFields{CleanupStatus: string(CleanupUnpushed)}, reason: "cleanup_status=has_unpushed"},
+		{name: "uncommitted_work", fields: &beads.AgentFields{CleanupStatus: string(CleanupUncommitted)}, reason: "cleanup_status=has_uncommitted"},
+		{name: "status_unknown", fields: &beads.AgentFields{CleanupStatus: string(CleanupUnknown)}, reason: "cleanup_status=unknown"},
+		{name: "status_never_recorded", fields: &beads.AgentFields{}, reason: "cleanup_status=<missing>"},
+		{name: "push_refused", fields: &beads.AgentFields{CleanupStatus: string(CleanupClean), PushFailed: true}, reason: "push_failed=true"},
+		{name: "agent_bead_unreadable", err: errors.New("bd show: timeout"), reason: "bd show: timeout"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			res := runNukeStop(t, nukeStopCase{phase: "Error", fields: tt.fields, fieldsErr: tt.err})
+
+			if len(res.deleted) != 0 {
+				t.Errorf("deleted %v while its work is not proven on origin, want nothing deleted", res.deleted)
+			}
+			if !res.recorded {
+				t.Errorf("record was removed while its work is not proven on origin, want it kept")
+			}
+			if !errors.Is(res.err, ErrSessionNotFound) {
+				t.Errorf("Stop = %v, want ErrSessionNotFound: a kept sandbox must not fail the stop", res.err)
+			}
+			if !anyContains(res.warnings, tt.reason) {
+				t.Errorf("warnings %q do not name why the sandbox is kept (%s)", res.warnings, tt.reason)
+			}
+		})
 	}
 }
 
