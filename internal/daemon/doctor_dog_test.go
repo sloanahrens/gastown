@@ -446,19 +446,21 @@ func TestDoctorDogReapProtectsNothingWithoutSetting(t *testing.T) {
 }
 
 // A dolt.external_container that does not parse must not read as "no
-// container": the probe returns the parse error, so the cycle reaps nothing
-// and the slot reap skipped note names the setting.
+// container", and must not pass a clean cycle: the cycle reaps nothing and
+// files a finding naming the setting, so the pour gate sees it.
 func TestDoctorDogReapProtectUnparsableSettingSkipsReap(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	writeExternalContainerTown(t, townRoot, 3307, "-v")
 
-	p := doctorDogProbes(townRoot, func(string, slot.ReapOptions) (slot.ReapReport, error) {
+	p := healthyDoctorProbes()
+	p.reap = doctorDogProbes(townRoot, func(string, slot.ReapOptions) (slot.ReapReport, error) {
 		t.Error("reap ran on an unparsable dolt.external_container")
 		return slot.ReapReport{}, nil
-	})
-	_, err := p.reap()
-	if err == nil || !strings.Contains(err.Error(), "dolt.external_container") {
-		t.Fatalf("reap probe error = %v, want one naming dolt.external_container", err)
+	}).reap
+	r := doctorDogFindings(p, defaultDoctorLimits())
+	if len(r.findings) != 1 || !strings.Contains(r.findings[0], "slot reap skipped") ||
+		!strings.Contains(r.findings[0], "dolt.external_container") {
+		t.Fatalf("findings = %v, want one slot reap skipped finding naming dolt.external_container", r.findings)
 	}
 }

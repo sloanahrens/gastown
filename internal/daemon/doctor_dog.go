@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -176,12 +177,26 @@ func doctorDogFindings(p doctorProbes, lim doctorLimits) doctorReport {
 	return r
 }
 
-// reapNotes runs the debris reap. A removal that failed is a finding; a
-// docker that cannot be listed is a note, since nothing here can start it.
+// doctorSettingError is a dolt.external_container that does not parse. It is a
+// finding, not a note: only an edit to the town config fixes it, and a note
+// on a clean cycle is logged and nothing more.
+type doctorSettingError struct{ err error }
+
+func (e doctorSettingError) Error() string { return e.err.Error() }
+
+func (e doctorSettingError) Unwrap() error { return e.err }
+
+// reapNotes runs the debris reap. A removal that failed, or an unusable
+// dolt.external_container, is a finding; a docker that cannot be listed is a
+// note, since nothing here can start it.
 func reapNotes(p doctorProbes, r *doctorReport) []string {
 	var notes []string
 	rep, err := p.reap()
-	if err != nil {
+	var setting doctorSettingError
+	switch {
+	case errors.As(err, &setting):
+		r.findings = append(r.findings, fmt.Sprintf("slot reap skipped: %v", err))
+	case err != nil:
 		notes = append(notes, fmt.Sprintf("slot reap skipped: %v", err))
 	}
 	if len(rep.Removed) > 0 {
@@ -232,7 +247,7 @@ func doctorDogProbes(townRoot string, reap func(townRoot string, opts slot.ReapO
 			// not parse skips the reap rather than protecting nothing.
 			name, err := doltserver.DefaultConfig(townRoot).ExternalContainerSetting()
 			if err != nil {
-				return slot.ReapReport{}, err
+				return slot.ReapReport{}, doctorSettingError{err}
 			}
 			var opts slot.ReapOptions
 			if name != "" {
