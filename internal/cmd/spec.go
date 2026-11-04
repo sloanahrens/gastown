@@ -1494,14 +1494,15 @@ func specWaitDays(createdAt string, now time.Time) (days int, dated bool) {
 }
 
 // specWaitSuffix renders the unshaped entry's wait as " (6d, filer <name>)",
-// naming only the parts that are known.
+// naming only the parts that are known. The filer is written escaped, so a
+// control character in a bead's created_by cannot reach the tick line.
 func specWaitSuffix(days int, dated bool, filer string) string {
 	parts := make([]string, 0, 2)
 	if dated {
 		parts = append(parts, fmt.Sprintf("%dd", days))
 	}
 	if filer != "" {
-		parts = append(parts, "filer "+filer)
+		parts = append(parts, "filer "+printableUpdateStatusText(filer))
 	}
 	if len(parts) == 0 {
 		return ""
