@@ -462,9 +462,10 @@ func TestUpdateAlertsNewRunAnnouncesAgain(t *testing.T) {
 	}
 }
 
-// A failed run with no run id is announced even though an empty run id is
-// persisted: an empty id names no run, so it must not suppress the alert.
-func TestUpdateAlertsOncePerRunNoRunIDAnnounces(t *testing.T) {
+// A failed run with no run id is announced once across a daemon restart too:
+// the run is identified by its outcome and end time instead, so the restarted
+// daemon finds it persisted and does not repeat it.
+func TestUpdateAlertsOncePerRunNoRunIDAnnouncesOnceAfterRestart(t *testing.T) {
 	t.Parallel()
 
 	now := updateAlertTestNow
@@ -473,7 +474,46 @@ func TestUpdateAlertsOncePerRunNoRunIDAnnounces(t *testing.T) {
 
 	d.checkUpdateAlerts(now)
 	if got := len(escalationsUnder(rec, updateAlertKeyLastRunFailed)); got != 1 {
-		t.Errorf("update:last-run-failed escalations = %d, want 1 for a run with no id", got)
+		t.Fatalf("first daemon raised update:last-run-failed %d times for a run with no id, want 1", got)
+	}
+
+	restarted, restartedRec := restartedUpdateAlertDaemon(t, d)
+	restarted.checkUpdateAlerts(now.Add(26 * time.Minute))
+	if got := len(escalationsUnder(restartedRec, updateAlertKeyLastRunFailed)); got != 0 {
+		t.Errorf("restarted daemon raised update:last-run-failed %d times for an announced run with no id, want 0", got)
+	}
+}
+
+// Recording an announced run never replaces an unreadable maintenance state: the
+// file is left as it was, and the failed write is logged for the operator.
+func TestUpdateAlertsAnnounceKeepsUnreadableMaintenanceState(t *testing.T) {
+	t.Parallel()
+
+	now := updateAlertTestNow
+	d, rec, logs := newUpdateAlertTestDaemon(t)
+	path := maintenanceGCStatePath(d.config.TownRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("create daemon dir: %v", err)
+	}
+	const corrupt = "{not json"
+	if err := os.WriteFile(path, []byte(corrupt), 0o600); err != nil {
+		t.Fatalf("write unreadable maintenance state: %v", err)
+	}
+	writeUpdateAlertState(t, d, endedUpdateAlertState(now, "20260310T110000Z-abcd"))
+
+	d.checkUpdateAlerts(now)
+	if got := len(escalationsUnder(rec, updateAlertKeyLastRunFailed)); got != 1 {
+		t.Fatalf("update:last-run-failed escalations = %d, want 1", got)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read maintenance state: %v", err)
+	}
+	if string(data) != corrupt {
+		t.Errorf("maintenance state = %q after the announcement, want the unreadable file kept as %q", data, corrupt)
+	}
+	if !strings.Contains(logs.String(), "cannot record run") {
+		t.Errorf("log = %q, want the refused record logged", logs.String())
 	}
 }
 

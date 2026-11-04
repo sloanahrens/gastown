@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/update"
 )
@@ -110,8 +111,18 @@ func updateEndedAlert(now time.Time, st update.State) (updateAlert, bool) {
 	return updateAlert{
 		Key:     updateAlertKeyLastRunFailed,
 		Message: updateEndedMessage(st, age),
-		RunID:   st.RunID,
+		RunID:   updateEndedRunKey(st),
 	}, true
+}
+
+// updateEndedRunKey names the ended run for the once-per-run record. A run with
+// no id is named by its outcome and end time, which keeps the record non-empty:
+// an empty record would match nothing after a restart and the alert would repeat.
+func updateEndedRunKey(st update.State) string {
+	if st.RunID != "" {
+		return st.RunID
+	}
+	return "ended:" + string(st.Outcome) + "@" + st.EndedAt.UTC().Format(time.RFC3339Nano)
 }
 
 // updateStaleMessage says what stopped and the one way out of it: a dead run
@@ -241,7 +252,7 @@ func (d *Daemon) applyUpdateAlerts(wanted []updateAlert, now time.Time) {
 		if d.updateAlerts.isRaised(alert.Key) || !d.updateAlerts.retryAllowed(alert.Key, now) {
 			continue
 		}
-		if alert.Key == updateAlertKeyLastRunFailed && alert.RunID != "" && d.updateEndedRunAnnounced(alert.RunID) {
+		if alert.Key == updateAlertKeyLastRunFailed && d.updateEndedRunAnnounced(alert.RunID) {
 			// An earlier daemon announced this run. Latch the key without raising,
 			// so this daemon still sends the clear when the window ends.
 			d.updateAlerts.markRaised(alert.Key)
@@ -288,11 +299,24 @@ func (d *Daemon) updateEndedRunAnnounced(runID string) bool {
 // a restarted daemon does not announce it again. The alert is already raised, so
 // a failed write is logged, not retried.
 func (d *Daemon) persistUpdateEndedRun(runID string) {
-	if _, err := updateMaintenanceGCState(d.config.TownRoot, func(st *maintenanceGCState) {
-		st.LastUpdateAlertRunID = runID
-	}); err != nil {
+	if err := recordUpdateEndedRun(d.config.TownRoot, runID); err != nil {
 		d.logger.Printf("update: cannot record run %s as announced: %v; a daemon restart may announce it again", runID, err)
 	}
+}
+
+// recordUpdateEndedRun writes runID into the maintenance state under its write
+// lock. It loads first and refuses on a read error, so an unreadable state file
+// is left as it is rather than replaced by a state holding only this record.
+func recordUpdateEndedRun(townRoot, runID string) error {
+	maintenanceGCStateMu.Lock()
+	defer maintenanceGCStateMu.Unlock()
+
+	st, err := loadMaintenanceGCState(townRoot)
+	if err != nil {
+		return err
+	}
+	st.LastUpdateAlertRunID = runID
+	return atomicfile.EnsureDirAndWriteJSON(maintenanceGCStatePath(townRoot), st)
 }
 
 // updateClearReason says why an update alert closed.
