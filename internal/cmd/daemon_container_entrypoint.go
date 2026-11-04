@@ -110,7 +110,7 @@ empty host or one beginning with a dash is refused: the live project's command
 line stays empty. Only an install writes the host into the town, so a start
 that runs none refuses a host the installed town does not already name.
 
-With --om-token-file, the file's contents (every whitespace character removed)
+With --om-token-file, the file's contents (spaces, tabs and line breaks removed)
 become CLAUDE_CODE_OAUTH_TOKEN in the daemon's environment; a file unreadable or
 empty after that refuses. A container that sets ANTHROPIC_API_KEY or
 ANTHROPIC_AUTH_TOKEN is refused, since either outranks the token and bills API
@@ -473,12 +473,12 @@ func (e containerEntrypoint) refuseAPICredentials() error {
 
 // omTokenEnv returns the environment the daemon is exec'd with beyond this
 // process's own: the subscription token from the file --om-token-file names, or
-// nothing when it is unset. A token is one run of printable characters, so every
-// ASCII whitespace character (space, tab, CR, LF) is removed from the file's
-// contents, not only the ones at the ends: a file saved hard-wrapped holds a
-// line break inside the token, which the claude CLI rejects. The token is never
-// put into an error, a message or an argv; a file unreadable or empty after the
-// strip is refused naming the path alone. The file's mode is not checked: a bind
+// nothing when it is unset. A token is one run of printable characters, so the
+// space, tab, CR and LF characters are removed from the file's contents, not
+// only the ones at the ends: a file saved hard-wrapped holds a line break inside
+// the token, which the claude CLI rejects. The token is never put into an error,
+// a message or an argv; a file unreadable or empty after the strip is refused
+// naming the path alone. The file's mode is not checked: a bind
 // mount through Docker Desktop reports ownership and modes unreliably.
 func (e containerEntrypoint) omTokenEnv() ([]string, error) {
 	path := e.omTokenFile
