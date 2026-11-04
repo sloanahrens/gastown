@@ -1257,22 +1257,37 @@ file and image in place; they cost nothing and the next window uses them.
 Record the rollback on the program bead whether it was rehearsed or used, with
 the time and the output.
 
-### What L3 has not observed
+### What the L3 cutover on 2026-11-04 showed
 
-Everything above is derived from reading the code on `main`; none of it has been
-seen in a live window. When L3 is run, correct this page with what was printed.
-The points most likely to differ:
+The cutover ran on 2026-11-04. These are what it showed and what fixed each
+point; the bead holds the output.
 
-- The exact text the cutover prints at each step, and the `launchctl print`
-  output of a booted-out job.
-- That `gt daemon cutover --to launchd` works on a town the container has just
-  owned: the reverse direction is built from the same code and tested on fakes,
-  not run.
-- The format of the `Supervised:` line for launchd after the rollback.
-- That the `compose down` step removes `sweep-dind` as well as the daemon on the
-  live project, and that its printed line matches the one above.
-- Whether a freshly restarted live daemon writes the `owner` the first
-  precondition needs: the field is written by the code on `main`, and the
-  installed `gt` may be older.
-- That the live compose file written by gt-kqhhi's command, once it lands, is
-  what the cutover's start argv expects at `daemon/container/compose.yml`.
+- The startup guard asked `launchctl` whether the old launchd owner still ran.
+  A Linux container has no `launchctl`, so the guard read unknown and refused.
+  The host agent now publishes the launchd job state in `probes.json`
+  (schema 2), and the guard falls back to a fresh reading (gt-4r9wf).
+- The container daemon wrote its own Dolt address, `host.docker.internal`, into
+  the beads `metadata.json` files in the shared town directory and broke every
+  host `bd`. `EnsureMetadata` now persists `dolt.host` (gt-fimtw).
+- The landing worker found no bot token: `XDG_CONFIG_HOME` is `/run/gt/xdg` in
+  the container, so `~/.config/gt/...` resolved to an unmounted path.
+  `gt daemon compose write --config-dir` mounts the directory at both paths
+  (gt-gg9hv.3).
+- Rig git remotes name `forgejo:3000`, which a container cannot resolve;
+  `--extra-host forgejo:host-gateway` fixes it (gt-gg9hv.2).
+- om withholds `CLAUDE_CODE_OAUTH_TOKEN` from its reviewer by design, and the
+  container had no om config; `gt daemon claude-exec` and the derived om config
+  fix it (gt-gg9hv.12, gt-gg9hv.13). The om token file must be a single line;
+  the entrypoint now strips whitespace (gt-gg9hv.8).
+- Every rig's `post_land_command` needs a toolchain (go, make) the image lacks,
+  so post-land exited 127 and the daemon read it as a red main and queued a
+  revert of a good landing. The commands are set to `true` until gt-gg9hv.7.
+- The backup root is `$HOME/gt-backups`, which is `/root` in the container, so
+  backups went to throwaway filesystems; `--backup-dir` sets
+  `GT_DOLT_BACKUP_ROOT` and mounts the shared directory (gt-gg9hv.16,
+  gt-gg9hv.17).
+- The `update` and `rebuild_*` patrols cannot install in a container and are
+  disabled in the town settings.
+- The plugin binaries were macOS builds; the image carries Linux builds
+  installed under `bin/<goos>-<goarch>/` (gt-gg9hv.6, .9, .10, .14). Plugins
+  that wrap Mac-installed tools still fail (gt-gg9hv.15).
