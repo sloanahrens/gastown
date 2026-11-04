@@ -1354,30 +1354,89 @@ func TestLastPromotedWithoutARecord(t *testing.T) {
 	}
 }
 
-// TestPluginDirectory holds the executable's directory reading to the layouts a
-// run starts from: the binary inside the plugin's bin/, the path plugin.md's
-// [execution] block names, and a binary built anywhere else, which keeps its own
-// directory. Exactly one bin/ component is the plugin's.
+// pluginDirectoryCase is one executable path read against the OS and arch the
+// test names, so no case depends on the host the test runs on.
+type pluginDirectoryCase struct {
+	name         string
+	exe          string
+	err          error
+	goos, goarch string
+	want         string
+}
+
+func checkPluginDirectory(t *testing.T, tc pluginDirectoryCase) {
+	t.Helper()
+	if got := pluginDirectory(tc.exe, tc.err, tc.goos, tc.goarch); got != tc.want {
+		t.Errorf("pluginDirectory(%q, %v, %q, %q) = %q, want %q",
+			tc.exe, tc.err, tc.goos, tc.goarch, got, tc.want)
+	}
+}
+
+// TestPluginDirectoryPerOSLayout holds a per-OS build to the plugin it sits in:
+// the daemon runs bin/<goos>-<goarch>/app-promote, and the directory is the
+// plugin's, two steps up.
+func TestPluginDirectoryPerOSLayout(t *testing.T) {
+	t.Parallel()
+	checkPluginDirectory(t, pluginDirectoryCase{
+		name: "the per-OS binary in the plugin's bin",
+		exe:  "/town/plugins/app-promote/bin/linux-arm64/app-promote",
+		goos: "linux", goarch: "arm64",
+		want: "/town/plugins/app-promote",
+	})
+}
+
+// TestPluginDirectoryPlainBinLayoutUnchanged holds the binary directly in the
+// plugin's bin/ to the layout it had before per-OS builds.
+func TestPluginDirectoryPlainBinLayoutUnchanged(t *testing.T) {
+	t.Parallel()
+	checkPluginDirectory(t, pluginDirectoryCase{
+		name: "the binary in the plugin's bin",
+		exe:  "/town/plugins/app-promote/bin/app-promote",
+		goos: "linux", goarch: "arm64",
+		want: "/town/plugins/app-promote",
+	})
+}
+
+// TestPluginDirectoryOtherOSDirIsNotStrippedAsPerOS holds a directory named for
+// a different OS and arch to the old reading: it is the binary's own directory,
+// not a per-OS build of this host.
+func TestPluginDirectoryOtherOSDirIsNotStrippedAsPerOS(t *testing.T) {
+	t.Parallel()
+	checkPluginDirectory(t, pluginDirectoryCase{
+		name: "a darwin-arm64 directory on a linux-arm64 host",
+		exe:  "/town/plugins/app-promote/bin/darwin-arm64/app-promote",
+		goos: "linux", goarch: "arm64",
+		want: "/town/plugins/app-promote/bin/darwin-arm64",
+	})
+}
+
+// TestPluginDirectoryUnreadableExecutableStillFallsBack holds an executable path
+// that cannot be read to the working directory.
+func TestPluginDirectoryUnreadableExecutableStillFallsBack(t *testing.T) {
+	t.Parallel()
+	checkPluginDirectory(t, pluginDirectoryCase{
+		name: "no executable path",
+		exe:  "",
+		err:  errors.New("executable path unavailable"),
+		goos: "linux", goarch: "arm64",
+		want: ".",
+	})
+}
+
+// TestPluginDirectory holds the remaining layouts: a binary built anywhere else
+// keeps its own directory, and exactly one bin/ component is the plugin's.
 func TestPluginDirectory(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name string
-		exe  string
-		err  error
-		want string
-	}{
-		{"the binary in the plugin's bin", "/town/plugins/app-promote/bin/app-promote", nil, "/town/plugins/app-promote"},
-		{"a binary built outside the plugin", "/tmp/build/app-promote", nil, "/tmp/build"},
-		{"a bin inside a bin", "/a/bin/bin/app-promote", nil, "/a/bin"},
-		{"no executable path", "", errors.New("executable path unavailable"), "."},
+	cases := []pluginDirectoryCase{
+		{name: "a binary built outside the plugin", exe: "/tmp/build/app-promote", goos: "linux", goarch: "arm64", want: "/tmp/build"},
+		{name: "a bin inside a bin", exe: "/a/bin/bin/app-promote", goos: "linux", goarch: "arm64", want: "/a/bin"},
+		{name: "a per-OS dir outside bin", exe: "/x/linux-arm64/app-promote", goos: "linux", goarch: "arm64", want: "/x/linux-arm64"},
 	}
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := pluginDirectory(tc.exe, tc.err); got != tc.want {
-				t.Errorf("pluginDirectory(%q, %v) = %q, want %q", tc.exe, tc.err, got, tc.want)
-			}
+			checkPluginDirectory(t, tc)
 		})
 	}
 }

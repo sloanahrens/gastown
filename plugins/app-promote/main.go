@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -114,8 +115,9 @@ func main() {
 // directory this executable sits in, the process's streams and environment, a
 // bounded HTTP client, and `gt promote`.
 func realEnv() env {
+	exe, err := os.Executable()
 	return env{
-		pluginDir: pluginDirectory(os.Executable()),
+		pluginDir: pluginDirectory(exe, err, runtime.GOOS, runtime.GOARCH),
 		out:       os.Stdout,
 		errOut:    os.Stderr,
 		getenv:    os.Getenv,
@@ -754,15 +756,19 @@ func bodyExcerpt(body []byte) string {
 }
 
 // pluginDirectory is the directory holding plugin.md and rigs.conf, given the
-// path this process was started from: the binary lives in bin/ inside it, the
-// path plugin.md's [execution] block names, and a hand run starts from any
-// directory, so the path comes from the executable. An executable path that
-// cannot be read names no directory, and the working one is the best answer.
-func pluginDirectory(exe string, err error) string {
+// path this process was started from: the binary lives in bin/ inside it, or in
+// bin/<goos>-<goarch>/ for a build made per OS, the path plugin.md's [execution]
+// block names, and a hand run starts from any directory, so the path comes from
+// the executable. An executable path that cannot be read names no directory, and
+// the working one is the best answer.
+func pluginDirectory(exe string, err error, goos, goarch string) string {
 	if err != nil {
 		return "."
 	}
 	dir := filepath.Dir(exe)
+	if filepath.Base(dir) == goos+"-"+goarch && filepath.Base(filepath.Dir(dir)) == "bin" {
+		return filepath.Dir(filepath.Dir(dir))
+	}
 	if filepath.Base(dir) == "bin" {
 		return filepath.Dir(dir)
 	}
