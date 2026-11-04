@@ -61,35 +61,70 @@ func readControlRunbook(t *testing.T) string {
 	return string(raw)
 }
 
-// The VM name gt-control is misleading, so the runbook says in its first lines
-// which VM hosts the control cluster and what gt-control really is.
-func TestControlRunbookNamesGtKindNotGtControl(t *testing.T) {
+// The control cluster runs kind on gt-control's Docker engine; there is no
+// separate gt-kind VM, so the runbook must not send anyone to one.
+func TestControlRunbookNamesGtControlAsTheVM(t *testing.T) {
 	t.Parallel()
 	lines := strings.Split(readControlRunbook(t), "\n")
-	if len(lines) < 3 || !strings.Contains(lines[0], "gt-kind") {
-		t.Fatalf("the runbook's first line must name gt-kind as the VM: %q", lines[:min(len(lines), 1)])
+	if len(lines) < 1 || !strings.Contains(lines[0], "gt-control") {
+		t.Fatalf("the runbook's first line must name gt-control as the VM: %q", lines[:min(len(lines), 1)])
 	}
-	if !strings.Contains(lines[2], "gt-control") || !strings.Contains(lines[2], "sweep runner") {
-		t.Errorf("the first paragraph must say gt-control is the sweep runner's engine: %q", lines[2])
+	for i, line := range lines {
+		if strings.Contains(line, "gt-kind") {
+			t.Errorf("line %d still names the gt-kind VM: %q", i+1, line)
+		}
 	}
 }
 
 func TestControlRunbookStatesCoreBudget(t *testing.T) {
 	t.Parallel()
 	text := readControlRunbook(t)
-	for _, want := range []string{"24 cores", "Docker Desktop 8, gt-sbx 12, gt-control 8, gt-kind 6", "34 against 24"} {
+	for _, want := range []string{"24 cores", "Docker Desktop 8, gt-sbx 8, gt-control 12", "28 against 24", "cloud VM is separate"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("the runbook lacks the budget figure %q", want)
 		}
 	}
-	// The four VM figures are attached to their names and add up to the total
-	// the runbook states.
+	// The VM figures are attached to their names and add up to the total the
+	// runbook states.
 	sum := 0
-	for _, m := range regexp.MustCompile(`(?:Docker Desktop|gt-sbx|gt-control|gt-kind) (\d+)[,.]? ?`).FindAllStringSubmatch(text, -1) {
+	for _, m := range regexp.MustCompile(`(?:Docker Desktop|gt-sbx|gt-control) (\d+)`).FindAllStringSubmatch(text, -1) {
 		n, _ := strconv.Atoi(m[1])
 		sum += n
 	}
 	if !strings.Contains(text, fmt.Sprintf("%d against 24", sum)) {
 		t.Errorf("the VM figures sum to %d, which the runbook's total does not state", sum)
+	}
+}
+
+// A kind rebuild drops the node containers, so the local-path provisioner's
+// storage is mounted from the gt-control VM's filesystem, which outlives it.
+func TestControlKindConfigMountsDurableVolumes(t *testing.T) {
+	t.Parallel()
+	cfg := decodeDocs(t, "control/kind-config.yaml")[0]
+	nodes, _ := cfg["nodes"].([]any)
+	mountsByNode := map[string][][2]string{}
+	for _, n := range nodes {
+		m, _ := n.(map[string]any)
+		labels, _ := m["labels"].(map[string]any)
+		name, _ := labels["gt.dev/pool"].(string)
+		if name == "" {
+			name, _ = m["role"].(string)
+		}
+		mounts, _ := m["extraMounts"].([]any)
+		for _, raw := range mounts {
+			mm, _ := raw.(map[string]any)
+			host, _ := mm["hostPath"].(string)
+			container, _ := mm["containerPath"].(string)
+			mountsByNode[name] = append(mountsByNode[name], [2]string{host, container})
+		}
+	}
+	want := [2]string{"/var/lib/gt-control/volumes", "/var/local-path-provisioner"}
+	if got := mountsByNode["core"]; len(got) != 1 || got[0] != want {
+		t.Errorf("core worker mounts = %v, want %v", got, want)
+	}
+	for _, name := range []string{"control-plane", "privileged"} {
+		if got := mountsByNode[name]; len(got) != 0 {
+			t.Errorf("%s node mounts = %v, want none: only the core node carries the durable volume", name, got)
+		}
 	}
 }
