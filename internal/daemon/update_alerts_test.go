@@ -369,6 +369,204 @@ func TestCheckUpdateAlertsMissingOrUnreadableState(t *testing.T) {
 	})
 }
 
+// endedUpdateAlertState is a failed run that ended ten minutes ago: the
+// condition update:last-run-failed announces.
+func endedUpdateAlertState(now time.Time, runID string) update.State {
+	return update.State{
+		RunID:   runID,
+		Source:  update.SourceManual,
+		Outcome: update.OutcomeFailed,
+		EndedAt: now.Add(-10 * time.Minute),
+		Steps: []update.StepRecord{{
+			Name:   update.StepInstall,
+			Result: update.ResultFailed,
+			Detail: "make gt-installer failed",
+		}},
+	}
+}
+
+// restartedUpdateAlertDaemon is a daemon on the same town as d with a fresh
+// latch: what a daemon restart leaves in memory.
+func restartedUpdateAlertDaemon(t *testing.T, d *Daemon) (*Daemon, *notifyfake.Recorder) {
+	t.Helper()
+	rec := notifyfake.New()
+	return &Daemon{
+		config:   d.config,
+		logger:   log.New(&bytes.Buffer{}, "", 0),
+		notifier: rec,
+	}, rec
+}
+
+// persistAnnouncedRun records runID as the run whose failure was announced, the
+// way a daemon that raised it leaves the maintenance state.
+func persistAnnouncedRun(t *testing.T, townRoot, runID string) {
+	t.Helper()
+	if _, err := updateMaintenanceGCState(townRoot, func(st *maintenanceGCState) {
+		st.LastUpdateAlertRunID = runID
+	}); err != nil {
+		t.Fatalf("persist announced run: %v", err)
+	}
+}
+
+// A failed run is announced once across a daemon restart. The restarted daemon
+// has a fresh latch, so only the run id the first daemon persisted stops the
+// repeat (gt-8xjnw).
+func TestUpdateAlertsOncePerRunAfterRestart(t *testing.T) {
+	t.Parallel()
+
+	now := updateAlertTestNow
+	const runID = "20260310T110000Z-abcd"
+	d, rec, _ := newUpdateAlertTestDaemon(t)
+	writeUpdateAlertState(t, d, endedUpdateAlertState(now, runID))
+
+	d.checkUpdateAlerts(now)
+	if got := len(escalationsUnder(rec, updateAlertKeyLastRunFailed)); got != 1 {
+		t.Fatalf("first daemon raised update:last-run-failed %d times, want 1", got)
+	}
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("load maintenance state: %v", err)
+	}
+	if st.LastUpdateAlertRunID != runID {
+		t.Fatalf("persisted run id = %q, want %q", st.LastUpdateAlertRunID, runID)
+	}
+
+	// The restart comes 26 minutes later, still inside the announcement window.
+	restarted, restartedRec := restartedUpdateAlertDaemon(t, d)
+	restarted.checkUpdateAlerts(now.Add(26 * time.Minute))
+	if got := len(escalationsUnder(restartedRec, updateAlertKeyLastRunFailed)); got != 0 {
+		t.Errorf("restarted daemon raised update:last-run-failed %d times for an announced run, want 0", got)
+	}
+}
+
+// A later failed run with another id alerts, even though an earlier run's id
+// is persisted.
+func TestUpdateAlertsNewRunAnnouncesAgain(t *testing.T) {
+	t.Parallel()
+
+	now := updateAlertTestNow
+	const announced = "20260310T110000Z-abcd"
+	const later = "20260310T120000Z-efgh"
+	d, _, _ := newUpdateAlertTestDaemon(t)
+	persistAnnouncedRun(t, d.config.TownRoot, announced)
+	writeUpdateAlertState(t, d, endedUpdateAlertState(now, later))
+
+	restarted, restartedRec := restartedUpdateAlertDaemon(t, d)
+	restarted.checkUpdateAlerts(now)
+	calls := escalationsUnder(restartedRec, updateAlertKeyLastRunFailed)
+	if len(calls) != 1 {
+		t.Fatalf("update:last-run-failed escalations = %d, want 1 for the later run", len(calls))
+	}
+	if !strings.Contains(calls[0].Escalation.Reason, later) {
+		t.Errorf("escalation reason = %q, want it to name the later run %s", calls[0].Escalation.Reason, later)
+	}
+}
+
+// A failed run with no run id is announced even though an empty run id is
+// persisted: an empty id names no run, so it must not suppress the alert.
+func TestUpdateAlertsOncePerRunNoRunIDAnnounces(t *testing.T) {
+	t.Parallel()
+
+	now := updateAlertTestNow
+	d, rec, _ := newUpdateAlertTestDaemon(t)
+	writeUpdateAlertState(t, d, endedUpdateAlertState(now, ""))
+
+	d.checkUpdateAlerts(now)
+	if got := len(escalationsUnder(rec, updateAlertKeyLastRunFailed)); got != 1 {
+		t.Errorf("update:last-run-failed escalations = %d, want 1 for a run with no id", got)
+	}
+}
+
+// The stale and overrun alerts fire for a running record whatever run id is
+// persisted: the once-per-run rule covers only the ended-badly alert.
+func TestUpdateAlertsOncePerRunKeepsStaleAndOverrun(t *testing.T) {
+	t.Parallel()
+
+	now := updateAlertTestNow
+	const runID = "20260310T115000Z-abcd"
+	tests := []struct {
+		name string
+		st   update.State
+		key  string
+	}{
+		{"stale", staleUpdateAlertState(now), updateAlertKeyStale},
+		{
+			"overrun",
+			update.State{
+				RunID:       runID,
+				Source:      update.SourceDaemon,
+				Outcome:     update.OutcomeRunning,
+				StartedAt:   now.Add(-(config.DefaultUpdateMaxRuntime + time.Minute)),
+				HeartbeatAt: now,
+				Current:     update.StepInstall,
+			},
+			updateAlertKeyOverrun,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, rec, _ := newUpdateAlertTestDaemon(t)
+			persistAnnouncedRun(t, d.config.TownRoot, runID)
+			writeUpdateAlertState(t, d, tt.st)
+
+			d.checkUpdateAlerts(now)
+			if got := len(escalationsUnder(rec, tt.key)); got != 1 {
+				t.Errorf("%s escalations = %d, want 1 with run %s persisted", tt.key, got, runID)
+			}
+		})
+	}
+}
+
+// An unreadable announcement state reads as not announced for the ended alert
+// only, logs once, and never blocks the stale alert.
+func TestUpdateAlertsOncePerRunStateReadFailure(t *testing.T) {
+	t.Parallel()
+
+	now := updateAlertTestNow
+	const readFailure = "cannot read which run was already announced"
+	writeUnreadable := func(t *testing.T, d *Daemon) {
+		t.Helper()
+		path := maintenanceGCStatePath(d.config.TownRoot)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("create daemon dir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+			t.Fatalf("write unreadable maintenance state: %v", err)
+		}
+	}
+
+	t.Run("the ended alert is raised once and the read error logs once", func(t *testing.T) {
+		t.Parallel()
+		d, rec, logs := newUpdateAlertTestDaemon(t)
+		writeUnreadable(t, d)
+		writeUpdateAlertState(t, d, endedUpdateAlertState(now, "20260310T110000Z-abcd"))
+
+		for i := 0; i < 3; i++ {
+			d.checkUpdateAlerts(now)
+		}
+		if got := len(escalationsUnder(rec, updateAlertKeyLastRunFailed)); got != 1 {
+			t.Errorf("update:last-run-failed escalations = %d, want exactly one", got)
+		}
+		if got := strings.Count(logs.String(), readFailure); got != 1 {
+			t.Errorf("announcement read error log lines = %d, want exactly one", got)
+		}
+	})
+
+	t.Run("a stale running record still raises with the announcement state unreadable", func(t *testing.T) {
+		t.Parallel()
+		d, rec, _ := newUpdateAlertTestDaemon(t)
+		writeUnreadable(t, d)
+		writeUpdateAlertState(t, d, staleUpdateAlertState(now))
+
+		d.checkUpdateAlerts(now)
+		if got := len(escalationsUnder(rec, updateAlertKeyStale)); got != 1 {
+			t.Errorf("update:stale escalations = %d, want 1 with the announcement state unreadable", got)
+		}
+	})
+}
+
 // staleUpdateAlertState is a running record whose heartbeat is four minutes
 // old: the condition update:stale announces.
 func staleUpdateAlertState(now time.Time) update.State {

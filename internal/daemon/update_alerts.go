@@ -47,6 +47,9 @@ const (
 // identifies it to the escalation store, and the message that says what to do.
 type updateAlert struct {
 	Key, Message string
+	// RunID is the run an ended-badly alert is about. It is empty for the
+	// other alerts.
+	RunID string
 }
 
 // updateAlertsFor decides, from the job's state alone, which alerts should be
@@ -107,6 +110,7 @@ func updateEndedAlert(now time.Time, st update.State) (updateAlert, bool) {
 	return updateAlert{
 		Key:     updateAlertKeyLastRunFailed,
 		Message: updateEndedMessage(st, age),
+		RunID:   st.RunID,
 	}, true
 }
 
@@ -227,11 +231,20 @@ func (d *Daemon) checkUpdateAlerts(now time.Time) {
 // for that key, so a notifier that is down cannot spend its retry wait on every
 // heartbeat. A refused clear stays latched, so the next heartbeat tries it
 // again rather than reporting a closed alert as done.
+//
+// An ended-badly alert is raised once per run: after a restart the persisted run
+// id stops the repeat (updateEndedRunAnnounced).
 func (d *Daemon) applyUpdateAlerts(wanted []updateAlert, now time.Time) {
 	want := make(map[string]bool, len(wanted))
 	for _, alert := range wanted {
 		want[alert.Key] = true
 		if d.updateAlerts.isRaised(alert.Key) || !d.updateAlerts.retryAllowed(alert.Key, now) {
+			continue
+		}
+		if alert.Key == updateAlertKeyLastRunFailed && alert.RunID != "" && d.updateEndedRunAnnounced(alert.RunID) {
+			// An earlier daemon announced this run. Latch the key without raising,
+			// so this daemon still sends the clear when the window ends.
+			d.updateAlerts.markRaised(alert.Key)
 			continue
 		}
 		if err := d.escalateAlertSeverity("MEDIUM", alert.Key, updateAlertSource, alert.Message); err != nil {
@@ -240,6 +253,9 @@ func (d *Daemon) applyUpdateAlerts(wanted []updateAlert, now time.Time) {
 			continue
 		}
 		d.updateAlerts.markRaised(alert.Key)
+		if alert.Key == updateAlertKeyLastRunFailed {
+			d.persistUpdateEndedRun(alert.RunID)
+		}
 	}
 	for _, key := range d.updateAlerts.openKeys() {
 		if want[key] {
@@ -249,6 +265,33 @@ func (d *Daemon) applyUpdateAlerts(wanted []updateAlert, now time.Time) {
 			continue
 		}
 		d.updateAlerts.markCleared(key)
+	}
+}
+
+// updateEndedRunAnnounced reports whether runID's ended-badly alert was already
+// announced, by this daemon or an earlier one. An unreadable maintenance state
+// reads as not announced, so the alert is raised rather than lost; the read
+// error is logged once.
+func (d *Daemon) updateEndedRunAnnounced(runID string) bool {
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		if d.updateAlerts.noteAnnounceError(err.Error()) {
+			d.logger.Printf("update: cannot read which run was already announced: %v; announcing it", err)
+		}
+		return false
+	}
+	d.updateAlerts.forgetAnnounceError()
+	return st.LastUpdateAlertRunID == runID
+}
+
+// persistUpdateEndedRun records runID as announced in the maintenance state, so
+// a restarted daemon does not announce it again. The alert is already raised, so
+// a failed write is logged, not retried.
+func (d *Daemon) persistUpdateEndedRun(runID string) {
+	if _, err := updateMaintenanceGCState(d.config.TownRoot, func(st *maintenanceGCState) {
+		st.LastUpdateAlertRunID = runID
+	}); err != nil {
+		d.logger.Printf("update: cannot record run %s as announced: %v; a daemon restart may announce it again", runID, err)
 	}
 }
 
@@ -288,6 +331,9 @@ type updateAlertLatch struct {
 	// readErr is the last state-read error logged; an unchanged error logs
 	// once, not once per heartbeat.
 	readErr string
+	// announceErr is the last error reading the announced run id, logged once
+	// like readErr.
+	announceErr string
 }
 
 // isRaised reports whether key was raised and not yet cleared.
@@ -366,4 +412,22 @@ func (l *updateAlertLatch) forgetReadError() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.readErr = ""
+}
+
+// noteAnnounceError records an announced-run read error and reports whether it
+// differs from the last one logged.
+func (l *updateAlertLatch) noteAnnounceError(msg string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	fresh := l.announceErr != msg
+	l.announceErr = msg
+	return fresh
+}
+
+// forgetAnnounceError drops the last announced-run read error, so a later
+// recurrence is logged again.
+func (l *updateAlertLatch) forgetAnnounceError() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.announceErr = ""
 }
