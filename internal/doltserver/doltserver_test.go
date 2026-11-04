@@ -6557,12 +6557,20 @@ func TestEnsureMetadataNamesTheHostEveryProcessUses(t *testing.T) {
 		localHost     = "127.0.0.1"
 		containerHost = "host.docker.internal"
 	)
-	for _, inContainer := range []bool{true, false} {
-		name := "outside the container"
-		if inContainer {
-			name = "inside the container"
-		}
-		t.Run(name, func(t *testing.T) {
+	// hostField is town.json's dolt.host: present, or omitted as the live town's
+	// is (it names only a port, a container_host and the external container).
+	for _, tc := range []struct {
+		name        string
+		inContainer bool
+		hostField   string
+	}{
+		{"outside the container", false, `"host":"` + localHost + `",`},
+		{"inside the container", true, `"host":"` + localHost + `",`},
+		{"inside the container, town.json names no dolt.host", true, ``},
+		{"outside the container, town.json names no dolt.host", false, ``},
+	} {
+		inContainer := tc.inContainer
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			townRoot := t.TempDir()
 			mayorDir := filepath.Join(townRoot, "mayor")
@@ -6570,7 +6578,7 @@ func TestEnsureMetadataNamesTheHostEveryProcessUses(t *testing.T) {
 				t.Fatal(err)
 			}
 			townJSON := `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z",` +
-				`"dolt":{"host":"` + localHost + `","container_host":"` + containerHost + `","port":3307}}`
+				`"dolt":{` + tc.hostField + `"container_host":"` + containerHost + `","port":3307}}`
 			if err := os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte(townJSON), 0o600); err != nil {
 				t.Fatal(err)
 			}

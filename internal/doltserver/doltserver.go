@@ -4667,11 +4667,15 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 // bind-mounted into the daemon's container, so a file the container writes is
 // read by the Mac too: it must name the endpoint every non-container process
 // uses (dolt.host), never dolt.container_host, which only resolves from inside
-// the container (gt-qpeei.17). A town that names no dolt.host falls back to the
-// server config's own host.
+// the container (gt-qpeei.17). A town that names an endpoint but no dolt.host
+// is reached on the loopback, the default every other process takes; only a
+// town that names no endpoint at all falls back to the server config's host.
 func persistedMetadataHost(townRoot string, cfg *Config) string {
-	if ep, ok := configpkg.ResolveDoltEndpointFor(townRoot, false); ok && ep.Host != "" {
-		return ep.Host
+	if ep, ok := configpkg.ResolveDoltEndpointFor(townRoot, false); ok {
+		if ep.Host != "" {
+			return ep.Host
+		}
+		return "127.0.0.1"
 	}
 	return cfg.EffectiveHost()
 }
