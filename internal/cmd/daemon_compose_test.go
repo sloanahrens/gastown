@@ -490,6 +490,42 @@ func TestDaemonComposeBlankTokenFlagIsRefusedThroughFlag(t *testing.T) {
 	}
 }
 
+// --config-dir reaches the spec through the real command and the render writes
+// the town's config directory at its host path and at the container's XDG path,
+// with XDG_CONFIG_HOME naming the parent (gt-gg9hv.3).
+func TestComposeWriteConfigDirFlagReachesSpec(t *testing.T) {
+	t.Parallel()
+	r := newComposeRig(t)
+	configDir := "/host/home/.config/gt"
+	var got daemonComposeFlags
+	c := newDaemonComposeCmd(func(out io.Writer, f daemonComposeFlags) error {
+		got = f
+		return runDaemonCompose(f, r.deps)
+	})
+	c.SetArgs([]string{"write", "--image", daemonimage.ImageTag(composeTestRev), "--config-dir", configDir})
+	c.SilenceUsage, c.SilenceErrors = true, true
+
+	if err := c.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if got.configDir != configDir {
+		t.Errorf("the flag reached the spec as %q, want %q", got.configDir, configDir)
+	}
+	file, ok := r.disk[r.composePath()]
+	if !ok {
+		t.Fatalf("no compose file written at %s", r.composePath())
+	}
+	for _, want := range []string{
+		fmt.Sprintf("source: %q\n        target: %q\n        read_only: true\n", configDir, configDir),
+		fmt.Sprintf("source: %q\n        target: %q\n        read_only: true\n", configDir, templates.LiveConfigDirPath),
+		`XDG_CONFIG_HOME: "` + templates.LiveOpenShellConfigHome + `"`,
+	} {
+		if !strings.Contains(string(file), want) {
+			t.Errorf("compose file does not carry %q:\n%s", want, file)
+		}
+	}
+}
+
 // --extra-host repeats: each flag adds one alias, the flags reach the spec in
 // the order they were given, and both entries reach the daemon service's
 // extra_hosts. The render sorts them, so the file shows sorted lines while the

@@ -46,6 +46,10 @@ type daemonComposeFlags struct {
 	// each, in the order given. The render sorts them into the daemon service's
 	// extra_hosts and refuses a malformed entry by name (gt-gg9hv.2).
 	extraHosts []string
+	// configDir is --config-dir: the town's config directory on the host, an
+	// absolute path. The render mounts it read-only at that path and at the
+	// container's XDG path (gt-gg9hv.3).
+	configDir string
 }
 
 // daemonComposeDeps is what the command takes from the host: where the town is
@@ -185,6 +189,11 @@ extra_hosts list carries them sorted, directly after init, and a malformed entry
 is refused by name before any file is written. Without the flag the render is
 unchanged.
 
+--config-dir names the town's config directory on the host, an absolute path
+(usually ~/.config/gt). The render mounts it read-only at that same path and at
+the container's XDG_CONFIG_HOME path, because the town's settings name the
+directory both ways; without the flag the render is unchanged.
+
 --print prints the render and writes no file.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -206,6 +215,8 @@ unchanged.
 		"The host path of the landing bot's token file, mounted read-only into the container; accepted only with --"+config.ForgeHostFlag)
 	write.Flags().StringArrayVar(&f.extraHosts, "extra-host", nil,
 		"A host alias the container resolves, as <hostname>:<ipv4 or host-gateway>; repeat for more, and a malformed entry is refused by name")
+	write.Flags().StringVar(&f.configDir, "config-dir", "",
+		"the town's config directory on the host (an absolute path), mounted read-only at that path and at the container's XDG path; unset renders neither mount")
 	parent.AddCommand(write)
 	return parent
 }
@@ -285,6 +296,7 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 		LandingWorkRoot:    landingWorkRoot(cfg),
 		KubeconfigFiles:    kubeconfigFiles,
 		OpenShellConfigDir: strings.TrimSpace(f.openShellConfigDir),
+		ConfigDir:          strings.TrimSpace(f.configDir),
 		Project:            project,
 		ContainerName:      cfg.ContainerName(),
 		Image:              image,

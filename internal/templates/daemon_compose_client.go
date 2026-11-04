@@ -13,10 +13,13 @@ import (
 // runs with, and LiveOpenShellConfigPath is where the host's openshell config
 // directory (gateway metadata and the mTLS client certificates) is mounted
 // read-only beneath it, so the container's openshell finds the gateways the way
-// the host's does (gt-yj0vh).
+// the host's does (gt-yj0vh). LiveConfigDirPath is where the town's config
+// directory is mounted beneath it, so ~/.config/gt resolves inside the
+// container (gt-gg9hv.3).
 const (
 	LiveOpenShellConfigHome = "/run/gt/xdg"
 	LiveOpenShellConfigPath = LiveOpenShellConfigHome + "/openshell"
+	LiveConfigDirPath       = LiveOpenShellConfigHome + "/gt"
 )
 
 // composeOwnedEnv are the environment names the render sets itself; a spec's Env
@@ -31,12 +34,12 @@ var composeZoneName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+
 
 var composeEnvName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-// validateClient refuses Env, KubeconfigFiles and OpenShellConfigDir values the
-// render cannot carry, and any of them on a scratch spec.
+// validateClient refuses Env, KubeconfigFiles, OpenShellConfigDir and ConfigDir
+// values the render cannot carry, and any of them on a scratch spec.
 func (s ComposeSpec) validateClient() error {
-	if s.Scratch && (len(s.Env) > 0 || len(s.KubeconfigFiles) > 0 || s.OpenShellConfigDir != "" ||
+	if s.Scratch && (len(s.Env) > 0 || len(s.KubeconfigFiles) > 0 || s.OpenShellConfigDir != "" || s.ConfigDir != "" ||
 		s.OMTokenMetaFile != "" || s.LandingWorkRoot != "" || s.TimeZone != "") {
-		return fmt.Errorf("compose spec: Env, KubeconfigFiles, OpenShellConfigDir, OMTokenMetaFile, LandingWorkRoot or TimeZone is set on a scratch spec; only the live render carries the client configuration")
+		return fmt.Errorf("compose spec: Env, KubeconfigFiles, OpenShellConfigDir, ConfigDir, OMTokenMetaFile, LandingWorkRoot or TimeZone is set on a scratch spec; only the live render carries the client configuration")
 	}
 	if s.TimeZone != "" && !composeZoneName.MatchString(s.TimeZone) {
 		return fmt.Errorf("compose spec: TimeZone %q is not an IANA zone name such as America/Chicago", s.TimeZone)
@@ -63,7 +66,7 @@ func (s ComposeSpec) validateClient() error {
 			return fmt.Errorf("compose spec: LandingWorkRoot %q and OMTokenMetaFile %q overlap, so two mounts would share a target", s.LandingWorkRoot, s.OMTokenMetaFile)
 		}
 	}
-	for _, p := range append([]string{s.OpenShellConfigDir, s.OMTokenMetaFile, s.LandingWorkRoot}, s.KubeconfigFiles...) {
+	for _, p := range append([]string{s.OpenShellConfigDir, s.ConfigDir, s.OMTokenMetaFile, s.LandingWorkRoot}, s.KubeconfigFiles...) {
 		if p == "" {
 			continue
 		}
@@ -94,7 +97,7 @@ func liveClientEnv(s ComposeSpec) string {
 	if len(s.KubeconfigFiles) > 0 {
 		line("KUBECONFIG", strings.Join(s.KubeconfigFiles, ":"))
 	}
-	if s.OpenShellConfigDir != "" {
+	if s.OpenShellConfigDir != "" || s.ConfigDir != "" {
 		line("XDG_CONFIG_HOME", LiveOpenShellConfigHome)
 	}
 	if s.TimeZone != "" {
@@ -111,13 +114,19 @@ func liveClientEnv(s ComposeSpec) string {
 	return b.String()
 }
 
-// liveClientMounts is the read-only mount of the openshell config directory.
-// The directory holds client certificates; the render carries its path, never
-// a file's contents.
+// liveClientMounts is the read-only mount of the openshell config directory and
+// the town's config directory. Each holds client material; the render carries
+// the paths, never a file's contents. The config directory is mounted at its
+// own path as well as under XDG_CONFIG_HOME, because settings in the town name
+// it both ways (gt-gg9hv.3).
 func liveClientMounts(s ComposeSpec) string {
 	var b strings.Builder
 	if s.OpenShellConfigDir != "" {
 		b.WriteString(liveTokenMount(s.OpenShellConfigDir, LiveOpenShellConfigPath))
+	}
+	if s.ConfigDir != "" {
+		b.WriteString(liveTokenMount(s.ConfigDir, s.ConfigDir))
+		b.WriteString(liveTokenMount(s.ConfigDir, LiveConfigDirPath))
 	}
 	if s.OMTokenMetaFile != "" {
 		b.WriteString(liveTokenMount(s.OMTokenMetaFile, s.OMTokenMetaFile))

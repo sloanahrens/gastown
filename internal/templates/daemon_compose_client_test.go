@@ -44,6 +44,54 @@ func TestComposeBindsTheGatewayMTLSDirReadOnly(t *testing.T) {
 	}
 }
 
+// The town's config directory is bound read-only at its own host path and at
+// the container's XDG path, and XDG_CONFIG_HOME is set even with no openshell
+// directory, so a setting naming ~/.config/gt finds its file both ways
+// (gt-gg9hv.3).
+func TestLiveComposeMountsConfigDirAtBothPaths(t *testing.T) {
+	t.Parallel()
+	s := liveSpec()
+	s.ConfigDir = "/host/home/.config/gt"
+	out, f := render(t, s)
+
+	for _, want := range []composeVolume{
+		{Type: "bind", Source: s.ConfigDir, Target: s.ConfigDir, ReadOnly: true},
+		{Type: "bind", Source: s.ConfigDir, Target: templates.LiveConfigDirPath, ReadOnly: true},
+	} {
+		if !slices.Contains(f.Services["daemon"].Volumes, want) {
+			t.Errorf("daemon volumes = %v, want the read-only mount %+v", f.Services["daemon"].Volumes, want)
+		}
+	}
+	if !strings.Contains(out, `XDG_CONFIG_HOME: "/run/gt/xdg"`) {
+		t.Errorf("the compose lacks XDG_CONFIG_HOME:\n%s", out)
+	}
+}
+
+// A relative config directory names no host directory to mount, so the render
+// refuses it rather than resolving it against docker's working directory.
+func TestLiveComposeConfigDirMustBeAbsolute(t *testing.T) {
+	t.Parallel()
+	s := liveSpec()
+	s.ConfigDir = "config/gt"
+	if _, err := templates.RenderDaemonCompose(s); err == nil || !strings.Contains(err.Error(), "not an absolute path") {
+		t.Fatalf("error = %v, want the relative path refused as not absolute", err)
+	}
+}
+
+// With no config directory the file is the one every earlier town rendered.
+func TestLiveComposeWithoutConfigDirIsUnchanged(t *testing.T) {
+	t.Parallel()
+	out, _ := render(t, liveSpec())
+
+	golden, err := os.ReadFile(filepath.Join("testdata", "daemon-compose.golden.yml"))
+	if err != nil {
+		t.Fatalf("reading golden file: %v", err)
+	}
+	if out != string(golden) {
+		t.Errorf("the live render without a config directory differs from the golden\ngot:\n%s\nwant:\n%s", out, golden)
+	}
+}
+
 func TestRenderDaemonComposeRefusesWhatTheClientConfigCannotCarry(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
@@ -56,6 +104,10 @@ func TestRenderDaemonComposeRefusesWhatTheClientConfigCannotCarry(t *testing.T) 
 		"a relative config": {func(s *templates.ComposeSpec) { s.OpenShellConfigDir = "rel" }, "not an absolute path"},
 		"a colon in a path": {func(s *templates.ComposeSpec) { s.KubeconfigFiles = []string{"/a:b"} }, "colon"},
 		"on a scratch spec": {func(s *templates.ComposeSpec) { *s = scratchClientBase(); s.Env = map[string]string{"A": "x"} }, "scratch spec"},
+		"a config dir on a scratch spec": {func(s *templates.ComposeSpec) {
+			*s = scratchClientBase()
+			s.ConfigDir = "/host/home/.config/gt"
+		}, "scratch spec"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
