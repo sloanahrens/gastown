@@ -177,10 +177,8 @@ The daemon reads the block at start, so a change needs a daemon restart. Restart
 it between landing passes:
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/com.gastown.daemon
+gt daemon restart
 ```
-
-The `/gastown` guide gives this command under "Installing and the daemon".
 
 Switching `enabled` to false hands the decision back: `rebuild_gt` makes install
 decisions again, and the maintenance window tick starts the nightly cycle in its
@@ -200,17 +198,20 @@ Ring do not silence them.
 | `update:overrun` | A running run has lasted longer than `max_runtime`. | The run may still be alive — check the heartbeat. A long install or maintenance step trips it. The message names the step, the elapsed time, the limit and the log. It clears when the run ends. |
 | `update:last-run-failed` | The current record ended failed, partial or aborted within the last two hours. | Names the run, its outcome and every failed or deferred step with the detail. It clears when a later run replaces the record, or when the two hours pass. An ok or interrupted run never raises it. |
 
-The stale and overrun messages name `.runtime/update/run-<run-id>.log`. The log
-a daemon-launched run actually writes is `launch-<timestamp>.log` in the same
-directory; a hand run writes to its terminal.
+The stale and overrun messages name `.runtime/update/run-<run-id>.log`, a file no
+run writes. A daemon-launched run writes its output to `launch-<timestamp>.log`
+in the same directory, stamped at launch: the latest one before the run's start
+time in `gt update status` is the run's log. A hand run writes to its terminal.
 
 ### A dead job or a slow step
 
-`gt update status` shows the heartbeat age while a run is in flight. A heartbeat
-no more than three minutes old means the job is alive and working on a slow
-step; the `update:overrun` escalation covers a run that is merely long. A
-heartbeat older than three minutes means the job is dead, since no step goes
-that long without refreshing it. To see whether a process is still there:
+`gt update status` shows the heartbeat age while a run is in flight. The
+heartbeat comes from a 15-second timer that runs for the whole run, not from the
+steps, so a heartbeat that stops advancing means the process is gone or wedged.
+A heartbeat no more than three minutes old means the job is alive, possibly on a
+slow step; the `update:overrun` escalation covers a run that is merely long. A
+heartbeat older than three minutes has missed twelve ticks: the job is dead or
+wedged. To see whether a process is still there:
 
 ```bash
 pgrep -fl 'gt update'
@@ -245,12 +246,14 @@ Lift your own hold when its work is done.
 When the daemon does not report the new build within 15 minutes of the install,
 the restart step records `installed, restart pending`, verify is recorded
 skipped, and the run ends partial. The new binary is installed; the daemon
-still runs the old build until it restarts, because the daemon waits for an
-idle moment to restart. The hold is released, and the partial run raises
+still runs the old build until it restarts. The install leaves a restart marker
+for the daemon, and the daemon restarts itself once it is idle. The hold is
+released, and the partial run raises
 `update:last-run-failed` naming the deferred restart step.
 
-Restart the daemon at a quiet moment, then confirm the town is on the target
-build:
+Nothing needs doing while the marker stands. If the marker has waited 30 minutes
+for an idle daemon, the daemon escalates the wait and keeps waiting. Then restart
+it by hand at a quiet moment, and confirm the town is on the target build:
 
 ```bash
 gt daemon restart
