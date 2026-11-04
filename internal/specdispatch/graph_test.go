@@ -100,6 +100,37 @@ func TestInterfacesParseRejectsNonIdentifier(t *testing.T) {
 	})
 }
 
+func TestInterfacesParseRefusesEmptyItem(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		lines string
+		line  int
+	}{
+		{name: "bare key", lines: "Defines:\n", line: 1},
+		{name: "trailing comma", lines: "Defines: Store,\n", line: 1},
+		{name: "doubled comma", lines: "Uses: Clock,,Store\n", line: 1},
+		{name: "empty item on a later line", lines: "Defines: Store\nUses: \n", line: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, present, err := ParseInterfaces("## Interfaces\n" + tt.lines)
+			if err == nil {
+				t.Fatal("ParseInterfaces succeeded, want an error for the empty item")
+			}
+			if !present {
+				t.Error("present = false, want true")
+			}
+			if want := fmt.Sprintf("line %d", tt.line); !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not name line %d", err, tt.line)
+			}
+			if !strings.Contains(err.Error(), `"" is not an identifier`) {
+				t.Errorf("error %q does not refuse the empty item", err)
+			}
+		})
+	}
+}
+
 func TestInterfacesParseAbsentSection(t *testing.T) {
 	t.Parallel()
 	block, present, err := ParseInterfaces("## Goal\nA thing exists.\n")

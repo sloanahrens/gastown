@@ -61,7 +61,7 @@ func ParseInterfaces(description string) (InterfacesBlock, bool, error) {
 			return InterfacesBlock{}, true, fmt.Errorf("interfaces: line %d: %q is not a Defines: or Uses: line", i+1, line)
 		}
 		for _, item := range strings.Split(list, ",") {
-			name := unquotePath(strings.TrimSpace(item))
+			name := unquoteName(strings.TrimSpace(item))
 			if !interfacesIdentifierRe.MatchString(name) {
 				return InterfacesBlock{}, true, fmt.Errorf("interfaces: line %d: %q is not an identifier (letters, digits, underscore and dot, starting with a letter or underscore)", i+1, name)
 			}
@@ -71,6 +71,15 @@ func ParseInterfaces(description string) (InterfacesBlock, bool, error) {
 		}
 	}
 	return block, true, nil
+}
+
+// unquoteName strips one pair of backticks around an identifier, as in
+// `Store.Mutate`. A value without the pair is returned unchanged.
+func unquoteName(name string) string {
+	if len(name) > 1 && name[0] == '`' && name[len(name)-1] == '`' {
+		return strings.TrimSpace(name[1 : len(name)-1])
+	}
+	return name
 }
 
 // GraphBead is what CheckGraph needs to know about one bead of an epic: its
