@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -155,6 +156,53 @@ func TestRunPluginScript_ExecutesNamedBinaryWithoutAShell(t *testing.T) {
 		if got := calls[0].getenv(key); got != want {
 			t.Errorf("%s = %q, want %q", key, got, want)
 		}
+	}
+}
+
+// The daemon runs the path BinaryPath resolves: when a build for this
+// platform sits beside the plain binary, that build is the one exec'd.
+func TestPluginScriptUsesBinaryPath(t *testing.T) {
+	t.Parallel()
+	p := binaryPlugin(t, "go-bin", "bin/work")
+	want := filepath.Join(p.Path, "bin", runtime.GOOS+"-"+runtime.GOARCH, "work")
+	if err := os.MkdirAll(filepath.Dir(want), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(want, []byte("platform build\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fake := newFakeCLI(nil)
+	res := runPluginScript(context.Background(), fake.run, scriptEnv{}, p, "/town", 5*time.Second)
+	if !res.ok() {
+		t.Fatalf("expected success, got %+v", res)
+	}
+	calls := fake.recorded()
+	if len(calls) != 1 || calls[0].path != want {
+		t.Fatalf("ran %+v, want %q", calls, want)
+	}
+}
+
+// pluginTarget names the binary the runner chose, so a failure escalation
+// points at the per-OS build and not at the plain path the plugin.md names.
+// A name BinaryPath refuses is shown as the plugin wrote it, since no path was
+// run.
+func TestPluginTargetUsesBinaryPath(t *testing.T) {
+	t.Parallel()
+	p := binaryPlugin(t, "go-bin", "bin/work")
+	want := filepath.Join(p.Path, "bin", runtime.GOOS+"-"+runtime.GOARCH, "work")
+	if err := os.MkdirAll(filepath.Dir(want), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(want, []byte("platform build\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := pluginTarget(p); got != want {
+		t.Errorf("pluginTarget() = %q, want the per-OS build %q", got, want)
+	}
+
+	escape := binaryPlugin(t, "escape", "../evil")
+	if got, want := pluginTarget(escape), filepath.Join(escape.Path, "..", "evil"); got != want {
+		t.Errorf("pluginTarget() on a refused name = %q, want the requested path %q", got, want)
 	}
 }
 

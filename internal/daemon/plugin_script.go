@@ -479,9 +479,14 @@ func pluginFailureAlertKey(name string) string {
 }
 
 // pluginTarget names the file the runner executed, for escalations: the
-// binary the plugin names, else its run.sh.
+// binary BinaryPath resolved (the per-OS build when one is present), else its
+// run.sh. A binary name BinaryPath refuses is shown as the plugin wrote it,
+// since the failed run never execed a path.
 func pluginTarget(p *plugin.Plugin) string {
 	if p.Execution != nil && p.Execution.Binary != "" {
+		if bin, err := p.BinaryPath(); err == nil {
+			return bin
+		}
 		return filepath.Join(p.Path, p.Execution.Binary)
 	}
 	return filepath.Join(p.Path, "run.sh")

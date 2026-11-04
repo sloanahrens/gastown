@@ -3,6 +3,7 @@ package plugin
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -98,6 +99,68 @@ func TestPluginBinaryPath(t *testing.T) {
 	p.Execution.Binary = "bin/work"
 	if got, want := mustBinaryPath(t, p), filepath.Join(p.Path, "bin", "work"); got != want {
 		t.Errorf("BinaryPath() = %q, want %q", got, want)
+	}
+}
+
+// The container daemon and the Mac host share a town directory, so this
+// platform's build beside the plain one wins: the Mac build would be an exec
+// format error in the container.
+func TestBinaryPathPrefersPerOSBinary(t *testing.T) {
+	t.Parallel()
+	p := &Plugin{Path: t.TempDir(), Execution: &Execution{Binary: "bin/work"}}
+	plain := filepath.Join(p.Path, "bin", "work")
+	if err := os.MkdirAll(filepath.Dir(plain), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(plain, []byte("mac build\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(p.Path, "bin", runtime.GOOS+"-"+runtime.GOARCH, "work")
+	if err := os.MkdirAll(filepath.Dir(want), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(want, []byte("platform build\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustBinaryPath(t, p); got != want {
+		t.Errorf("BinaryPath() = %q, want the per-OS build %q", got, want)
+	}
+}
+
+// Without a build for this platform the plugin.md path is returned as before.
+func TestBinaryPathFallsBackToPlainBinary(t *testing.T) {
+	t.Parallel()
+	p := &Plugin{Path: t.TempDir(), Execution: &Execution{Binary: "bin/work"}}
+	plain := filepath.Join(p.Path, "bin", "work")
+	if err := os.MkdirAll(filepath.Dir(plain), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(plain, []byte("work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustBinaryPath(t, p); got != plain {
+		t.Errorf("BinaryPath() = %q, want the plain binary %q", got, plain)
+	}
+}
+
+// The per-OS build is run the same way, so a symlink there is a way out too:
+// a candidate that resolves outside the plugin directory is refused.
+func TestBinaryPathPerOSCandidateIsEscapeChecked(t *testing.T) {
+	t.Parallel()
+	p := &Plugin{Path: t.TempDir(), Execution: &Execution{Binary: "bin/work"}}
+	outside := filepath.Join(t.TempDir(), "evil")
+	if err := os.WriteFile(outside, []byte("evil\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	perOS := filepath.Join(p.Path, "bin", runtime.GOOS+"-"+runtime.GOARCH, "work")
+	if err := os.MkdirAll(filepath.Dir(perOS), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, perOS); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := p.BinaryPath(); err == nil {
+		t.Fatalf("BinaryPath() = %q, want the per-OS symlink refused", got)
 	}
 }
 
