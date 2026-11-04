@@ -54,11 +54,12 @@ func guardStartup(townRoot string, self Owner, takeover bool, probe OwnerProbe, 
 // become the daemon, asked from the command that is about to start it. self is
 // the owner the started daemon will name (the CLI is not it); takeover is the
 // operator's --takeover; probe nil reads docker, launchd and systemd for real.
-// daemon.log existing is the prior-run evidence Run takes from New, since the
-// CLI has written nothing to it.
+// now is the clock the decision reads, including the age of the host agent's
+// launchd reading. daemon.log existing is the prior-run evidence Run takes from
+// New, since the CLI has written nothing to it.
 func GuardStart(townRoot string, self Owner, takeover bool, probe OwnerProbe, now time.Time) error {
 	if probe == nil {
-		probe = startupOwnerProbeForTown(townRoot, templates.RunDockerInspect, os.Hostname)
+		probe = startupOwnerProbeForTown(townRoot, templates.RunDockerInspect, os.Hostname, templates.SupervisorJobState, func() time.Time { return now })
 	}
 	_, err := os.Stat(DefaultConfig(townRoot).LogFile)
 	return guardStartup(townRoot, self, takeover, probe, now, !errors.Is(err, fs.ErrNotExist))
@@ -143,9 +144,11 @@ func hostLaunchdFallback(townRoot string, now func() time.Time, inner templates.
 
 // startupOwnerProbeForTown is the probe the guard's production callers use: the
 // real readers, with the launchd job read from the host agent's probe file when
-// launchctl is unavailable.
-func startupOwnerProbeForTown(townRoot string, run templates.ContainerDocker, hostname func() (string, error)) OwnerProbe {
-	return startupOwnerProbe(run, hostname, hostLaunchdFallback(townRoot, time.Now, templates.SupervisorJobState))
+// launchctl is unavailable. now is the clock the file's age is judged against;
+// callers pass the clock they give the guard, so one clock decides the start.
+// read reads the launchd job here, templates.SupervisorJobState in production.
+func startupOwnerProbeForTown(townRoot string, run templates.ContainerDocker, hostname func() (string, error), read templates.SupervisorReader, now func() time.Time) OwnerProbe {
+	return startupOwnerProbe(run, hostname, hostLaunchdFallback(townRoot, now, read))
 }
 
 // startupOwnerProbe builds the probe the guard asks about a recorded owner from

@@ -116,3 +116,20 @@ func TestStartupOwnerProbeLaunchdFromHostFile(t *testing.T) {
 		t.Errorf("with a fresh not-loaded reading got running=%v known=%v, want stopped and known", running, known)
 	}
 }
+
+// TestStartupOwnerProbeForTownUsesTheGuardClock pins the production probe to the
+// clock the guard reads: a host-agent reading stamped 2000-01-01 is fresh to a
+// guard clock ten seconds later and long stale to the wall clock, so the age
+// must be judged by the clock the guard was given.
+func TestStartupOwnerProbeForTownUsesTheGuardClock(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	stamped := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	writeHostProbe(t, town, stamped, &hostprobe.Field[hostprobe.Launchd]{Value: hostprobe.Launchd{Loaded: false}})
+	now := stamped.Add(10 * time.Second)
+	unreadable := jobAnswers(templates.SupervisorState{Kind: "launchd", LastExit: -1, Err: errors.New("no launchctl")})
+	probe := startupOwnerProbeForTown(town, nil, fixtureHostname("fixture-host"), unreadable, func() time.Time { return now })
+	if running, known := probe(guardLaunchd); running || !known {
+		t.Errorf("probe(launchd) = running %v known %v, want stopped and known from the reading the guard's clock judges fresh", running, known)
+	}
+}
