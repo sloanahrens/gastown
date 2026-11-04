@@ -97,7 +97,7 @@ func liveClientEnv(s ComposeSpec) string {
 	if len(s.KubeconfigFiles) > 0 {
 		line("KUBECONFIG", strings.Join(s.KubeconfigFiles, ":"))
 	}
-	if s.OpenShellConfigDir != "" || s.ConfigDir != "" {
+	if s.OpenShellConfigDir != "" || s.ConfigDir != "" || s.OMConfigFile != "" {
 		line("XDG_CONFIG_HOME", LiveOpenShellConfigHome)
 	}
 	if s.TimeZone != "" {

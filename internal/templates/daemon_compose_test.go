@@ -1,6 +1,7 @@
 package templates_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -266,14 +267,15 @@ func TestRenderDaemonCompose_LiveOMToken(t *testing.T) {
 	t.Parallel()
 	spec := liveSpec()
 	spec.OMTokenFile = "/ops/om/token"
+	spec.OMConfigFile = "/towns/live/.runtime/container/om-config.json"
 	out, f := render(t, spec)
 
 	daemon := f.Services["daemon"]
 	if got, want := daemon.Command, []string{"--" + config.OMTokenFileFlag, templates.LiveOMTokenPath}; !slices.Equal(got, want) {
 		t.Errorf("live daemon command = %q, want %q: the entrypoint reads the file the mount puts at that path", got, want)
 	}
-	if got := len(daemon.Volumes); got != 2 {
-		t.Fatalf("volumes = %+v, want the town root and the token file", daemon.Volumes)
+	if got := len(daemon.Volumes); got != 3 {
+		t.Fatalf("volumes = %+v, want the town root, the token file and the om config", daemon.Volumes)
 	}
 	v, ok := tokenVolume(daemon.Volumes)
 	if !ok {
@@ -305,6 +307,7 @@ func TestRenderDaemonCompose_LiveOMTokenEscapesADollarInTheHostPath(t *testing.T
 	t.Parallel()
 	spec := liveSpec()
 	spec.OMTokenFile = "/ops/$HOME/om-token"
+	spec.OMConfigFile = "/towns/live/.runtime/container/om-config.json"
 	_, f := render(t, spec)
 
 	v, ok := tokenVolume(f.Services["daemon"].Volumes)
@@ -313,6 +316,160 @@ func TestRenderDaemonCompose_LiveOMTokenEscapesADollarInTheHostPath(t *testing.T
 	}
 	if want := "/ops/$$HOME/om-token"; v.Source != want {
 		t.Errorf("token mount source = %q, want %q: compose would otherwise substitute $HOME", v.Source, want)
+	}
+}
+
+// A live spec with an om token file and its derived config mounts the config
+// read-only at the XDG path om reads, and sets XDG_CONFIG_HOME to that path's
+// home, so om's backend is the one the config names (gt-gg9hv.13).
+func TestLiveComposeMountsTheDerivedOMConfig(t *testing.T) {
+	t.Parallel()
+	spec := liveSpec()
+	spec.OMTokenFile = "/ops/om/token"
+	spec.OMConfigFile = "/towns/live/.runtime/container/om-config.json"
+	_, f := render(t, spec)
+
+	daemon := f.Services["daemon"]
+	want := composeVolume{Type: "bind", Source: spec.OMConfigFile, Target: templates.LiveOMConfigPath, ReadOnly: true}
+	if !slices.Contains(daemon.Volumes, want) {
+		t.Errorf("daemon volumes = %+v, want the derived config read-only at %s", daemon.Volumes, templates.LiveOMConfigPath)
+	}
+	if got := daemon.Environment["XDG_CONFIG_HOME"]; got != templates.LiveOpenShellConfigHome {
+		t.Errorf("XDG_CONFIG_HOME = %q, want %s, the home om reads its config under", got, templates.LiveOpenShellConfigHome)
+	}
+}
+
+// omConfigOnDisk is the derived om config's keys, as om reads them.
+type omConfigOnDisk struct {
+	Backend   []string `json:"backend"`
+	Threshold float64  `json:"threshold"`
+	Depth     string   `json:"depth"`
+	Timeout   int      `json:"timeout"`
+}
+
+func decodeOMConfig(t *testing.T, content []byte) omConfigOnDisk {
+	t.Helper()
+	var got omConfigOnDisk
+	if err := json.Unmarshal(content, &got); err != nil {
+		t.Fatalf("the derived om config does not parse: %v\n%s", err, content)
+	}
+	return got
+}
+
+// The derived backend runs the container's claude-exec with the token at the
+// mount's path, the reviewer model the settings name, and the threshold, depth
+// and timeout the settings carry. No host path reaches the file.
+func TestDerivedOMConfigBackendUsesClaudeExec(t *testing.T) {
+	t.Parallel()
+	content, err := templates.RenderOMConfig(templates.DefaultOMConfigSettings())
+	if err != nil {
+		t.Fatalf("RenderOMConfig: %v", err)
+	}
+	got := decodeOMConfig(t, content)
+
+	want := []string{"gt", "daemon", "claude-exec", "--" + config.OMTokenFileFlag, templates.LiveOMTokenPath, "--", "-p", "--model", "haiku"}
+	if !slices.Equal(got.Backend, want) {
+		t.Errorf("backend = %q, want %q", got.Backend, want)
+	}
+	if got.Threshold != 0.75 || got.Depth != "standard" || got.Timeout != 300 {
+		t.Errorf("threshold, depth, timeout = %v, %q, %d, want 0.75, standard, 300", got.Threshold, got.Depth, got.Timeout)
+	}
+}
+
+// The model is the spec's field, not a literal in the render: changing it
+// changes the backend the file writes, and the defaults stay as they were.
+func TestDerivedOMConfigDefaultsComeFromTheSpec(t *testing.T) {
+	t.Parallel()
+	settings := templates.DefaultOMConfigSettings()
+	settings.Model = "sonnet"
+	content, err := templates.RenderOMConfig(settings)
+	if err != nil {
+		t.Fatalf("RenderOMConfig: %v", err)
+	}
+	if got := decodeOMConfig(t, content).Backend; got[len(got)-1] != "sonnet" {
+		t.Errorf("backend = %q, want the model the spec names, sonnet", got)
+	}
+
+	defaults, err := templates.RenderOMConfig(templates.DefaultOMConfigSettings())
+	if err != nil {
+		t.Fatalf("RenderOMConfig: %v", err)
+	}
+	if got := decodeOMConfig(t, defaults).Backend; got[len(got)-1] != "haiku" {
+		t.Errorf("default backend = %q, want haiku", got)
+	}
+}
+
+// A setting om cannot run with is refused by name, not written for om to fail
+// on later.
+func TestRenderOMConfigRefusesUnusableSettings(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		mutate func(*templates.OMConfigSettings)
+		want   string
+	}{
+		{"empty model", func(o *templates.OMConfigSettings) { o.Model = "" }, "Model is empty"},
+		{"empty depth", func(o *templates.OMConfigSettings) { o.Depth = "" }, "Depth is empty"},
+		{"model with a quote", func(o *templates.OMConfigSettings) { o.Model = `sonnet"x` }, "is not a plain name"},
+		{"depth with a space", func(o *templates.OMConfigSettings) { o.Depth = "very deep" }, "is not a plain name"},
+		{"zero timeout", func(o *templates.OMConfigSettings) { o.Timeout = 0 }, "Timeout 0"},
+		{"zero threshold", func(o *templates.OMConfigSettings) { o.Threshold = 0 }, "Threshold 0"},
+		{"threshold above one", func(o *templates.OMConfigSettings) { o.Threshold = 1.5 }, "Threshold 1.5"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			settings := templates.DefaultOMConfigSettings()
+			tc.mutate(&settings)
+			_, err := templates.RenderOMConfig(settings)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want one naming %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// An om token file and its derived config are given together, and the config is
+// live only: a token file with no config would run om with no credential, and a
+// config with no token file names a mount the render does not make.
+func TestLiveComposeRefusesOMConfigMismatch(t *testing.T) {
+	t.Parallel()
+	const omConfigPath = "/towns/live/.runtime/container/om-config.json"
+	cases := []struct {
+		name string
+		spec func() templates.ComposeSpec
+		want string
+	}{
+		{"live token without config", func() templates.ComposeSpec {
+			s := liveSpec()
+			s.OMTokenFile = "/ops/om/token"
+			return s
+		}, "without OMConfigFile"},
+		{"config without token", func() templates.ComposeSpec {
+			s := liveSpec()
+			s.OMConfigFile = omConfigPath
+			return s
+		}, "without a live OMTokenFile"},
+		{"config on a scratch spec", func() templates.ComposeSpec {
+			s := scratchSpec()
+			s.OMConfigFile = omConfigPath
+			return s
+		}, "OMConfigFile"},
+		{"relative config", func() templates.ComposeSpec {
+			s := liveSpec()
+			s.OMTokenFile = "/ops/om/token"
+			s.OMConfigFile = "runtime/om-config.json"
+			return s
+		}, "is not an absolute path"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := templates.RenderDaemonCompose(tc.spec())
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want one naming %q", err, tc.want)
+			}
+		})
 	}
 }
 
