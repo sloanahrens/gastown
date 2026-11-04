@@ -409,6 +409,11 @@ type Daemon struct {
 	// been given, the shared supplemental bound included.
 	jsonlTableExportFn jsonlTableExporter
 
+	// jsonlExportRunFn replaces runJSONLExport in tests, so an export's command
+	// — the target it chose and the environment it carries — can be inspected
+	// without running dolt; nil is runJSONLExport.
+	jsonlExportRunFn func(ctx context.Context, cmd *exec.Cmd, table string, timeout time.Duration) ([]byte, error)
+
 	// jsonlTrackerExportFn replaces the tracker client behind the JSONL
 	// backup's tracker branch in tests, so a tracker rig's export is driven
 	// with records a test wrote; nil is the client built from the environment
