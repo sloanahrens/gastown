@@ -51,18 +51,18 @@ func NewHold(townRoot string, files FileOps) *Hold {
 // Acquire sets the hold with note when no hold exists, and reports whether this
 // Hold owns it.
 //
-// When the file already exists, or another run creates it between the stat and
-// the exclusive create, Acquire leaves it untouched and returns the file's
-// content as the note with Owned false. Any other error is returned and nothing
-// is assumed: an unreadable hold is never read as "no hold" (fail closed),
-// because dispatching through a hold is the outcome it exists to prevent.
+// When the file already exists, Acquire leaves it untouched and returns the
+// file's content as the note; Owned stays true only when this Hold created the
+// file on an earlier Acquire, so Release still removes it. When another run
+// creates the file between the stat and the exclusive create, Acquire returns
+// the content with Owned false. Any other error is returned and nothing is
+// assumed: an unreadable hold is never read as "no hold" (fail closed), because
+// dispatching through a hold is the outcome it exists to prevent.
 func (h *Hold) Acquire(note string) (HoldRecord, error) {
 	err := h.Files.Stat(h.Path)
 	switch {
 	case err == nil:
-		rec, err := h.readExisting()
-		h.owned = false
-		return rec, err
+		return h.readExisting()
 	case !errors.Is(err, fs.ErrNotExist):
 		return HoldRecord{}, fmt.Errorf("stat dispatch hold %s: %w", h.Path, err)
 	}
@@ -72,22 +72,22 @@ func (h *Hold) Acquire(note string) (HoldRecord, error) {
 		}
 		// The file existed when the create ran: a person or another run set it
 		// between the stat and the create, and it is theirs, not ours.
-		rec, err := h.readExisting()
 		h.owned = false
-		return rec, err
+		return h.readExisting()
 	}
 	h.owned = true
 	return HoldRecord{Owned: true, Note: note}, nil
 }
 
-// readExisting reports the current hold as foreign, carrying its content as
-// the note.
+// readExisting reports the current hold with its content as the note. Owned is
+// whatever this Hold already holds, so a read failure leaves ownership in place
+// for a later Release to act on.
 func (h *Hold) readExisting() (HoldRecord, error) {
 	data, err := h.Files.ReadFile(h.Path)
 	if err != nil {
 		return HoldRecord{}, fmt.Errorf("read dispatch hold %s: %w", h.Path, err)
 	}
-	return HoldRecord{Owned: false, Note: string(data)}, nil
+	return HoldRecord{Owned: h.owned, Note: string(data)}, nil
 }
 
 // SetNote rewrites the note of a hold this Hold owns; on a foreign hold it does
