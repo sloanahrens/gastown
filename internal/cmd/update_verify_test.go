@@ -3,11 +3,14 @@ package cmd
 import (
 	"context"
 	"errors"
+	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/update"
 )
 
 // verifyProbeCall is one command a fake verify RunFunc received.
@@ -324,4 +327,39 @@ func TestUpdateVerifyHealthTakesTheFirstLineIgnoringTheExitCode(t *testing.T) {
 			t.Errorf("error = %v, want the exe error", err)
 		}
 	})
+
+	t.Run("output with no line is an error", func(t *testing.T) {
+		t.Parallel()
+		for _, output := range []string{"", "  \n", "\n"} {
+			run := &verifyProbeRun{output: output}
+			probes := newVerifyProbes(verifyProbeEnv{Exe: verifyProbeExe, Run: run.run})
+
+			if line, err := probes.Health(ctx); err == nil {
+				t.Errorf("output %q: health = %q with no error, want an error", output, line)
+			}
+		}
+	})
+}
+
+// TestUpdateVerifyDefaultSeams: a probe built with no seams holds the
+// production executable lookup, RunFunc and daemon state read. Each nil seam
+// must take its production function, so deleting a default in
+// newVerifyProbes turns this red. Nothing is called: the defaults would run
+// the installed gt or read the live town.
+func TestUpdateVerifyDefaultSeams(t *testing.T) {
+	t.Parallel()
+	p, ok := newVerifyProbes(verifyProbeEnv{}).(*verifyProbes)
+	if !ok {
+		t.Fatal("newVerifyProbes did not return the verify probes")
+	}
+
+	if got, want := reflect.ValueOf(p.env.Exe).Pointer(), reflect.ValueOf(os.Executable).Pointer(); got != want {
+		t.Errorf("Exe seam = %#x, want os.Executable (%#x)", got, want)
+	}
+	if got, want := reflect.ValueOf(p.env.Run).Pointer(), reflect.ValueOf(update.ExecRun).Pointer(); got != want {
+		t.Errorf("Run seam = %#x, want update.ExecRun (%#x)", got, want)
+	}
+	if got, want := reflect.ValueOf(p.env.DaemonCommit).Pointer(), reflect.ValueOf(daemonStateCommit).Pointer(); got != want {
+		t.Errorf("DaemonCommit seam = %#x, want daemonStateCommit (%#x)", got, want)
+	}
 }
