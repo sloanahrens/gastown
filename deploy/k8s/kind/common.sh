@@ -3,7 +3,7 @@
 # Shared settings and helpers for up.sh and down.sh. Sourced, not run.
 #
 # The kind environment lives in its own Colima profile so it cannot disturb the
-# town's Docker Desktop or the gt-kind profile. Everything here is per command:
+# town's Docker Desktop or the gt-control VM. Everything here is per command:
 # the kind VM's docker is reached with DOCKER_HOST, never by switching the
 # global docker context (colima start does that on its own; restore_context
 # puts it back).
