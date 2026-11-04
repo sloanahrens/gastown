@@ -71,5 +71,5 @@ internal/patrolstate/cycle.go:readVersioned
 internal/doctor/dolt_remote_leftovers_check.go:readSyncRemote
 # deliberate ErrNotFound narrowing: a conditional reset of an agent bead that does not exist has nothing to reset; every other read error is returned
 internal/beads/client_helpers.go:resetAgentBeadIf
-# deliberate os.IsNotExist narrowing: an absent backup directory or database means the backup is not there (false, nil); every other stat error is returned
+# deliberate errors.Is(err, fs.ErrNotExist) narrowing: an absent backup directory or database means the backup is not there (false, nil); every other stat error is returned
 internal/cmd/update_probes.go:*updateProbes.isDirectory
