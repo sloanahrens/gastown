@@ -656,6 +656,36 @@ func TestComposeWriteExtraHostFlagRepeats(t *testing.T) {
 	}
 }
 
+// A malformed --extra-host is refused by the render, so the command writes no
+// file and keeps the one the town had (gt-jzeg6).
+func TestComposeWriteExtraHostMalformedIsRefused(t *testing.T) {
+	t.Parallel()
+	for _, entry := range []string{"git.example", "forgejo:"} {
+		t.Run(fmt.Sprintf("entry %q", entry), func(t *testing.T) {
+			t.Parallel()
+			r := newComposeRig(t)
+			old := []byte("old render")
+			r.disk[r.composePath()] = old
+			c := newDaemonComposeCmd(func(_ io.Writer, f daemonComposeFlags) error {
+				return runDaemonCompose(f, r.deps)
+			})
+			c.SetArgs([]string{"write", "--image", daemonimage.ImageTag(composeTestRev), "--extra-host", entry})
+			c.SilenceUsage, c.SilenceErrors = true, true
+
+			err := c.Execute()
+			if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("%q", entry)) {
+				t.Fatalf("error = %v, want a refusal naming the malformed entry %q", err, entry)
+			}
+			if len(r.wrote) != 0 {
+				t.Errorf("a refusal wrote %v", r.wrote)
+			}
+			if got := r.disk[r.composePath()]; !bytes.Equal(got, old) {
+				t.Errorf("compose file = %q, want the old render %q kept", got, old)
+			}
+		})
+	}
+}
+
 // --backup-dir reaches the spec through the real command, and the render mounts
 // the directory read-write at its own path and names it in GT_DOLT_BACKUP_ROOT
 // (gt-gg9hv.17).

@@ -211,11 +211,8 @@ referenced as $NAME or ${NAME} by any file under the town's settings directory (
 that stay under the town are followed; one that leaves it refuses the render; other
 bound directories are not scanned) go into the container's environment.
 
---extra-host adds a host alias the container resolves, as
-<hostname>:<ipv4 or host-gateway>; repeat it for each alias. The daemon service's
-extra_hosts list carries them sorted, directly after init, and a malformed entry
-is refused by name before any file is written. Without the flag the render is
-unchanged.
+--extra-host's aliases reach the daemon service's extra_hosts list sorted,
+directly after init. Without the flag the render is unchanged.
 
 --config-dir names the town's config directory on the host, an absolute path
 (usually ~/.config/gt). The render mounts it read-only at that same path and at
