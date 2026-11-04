@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
@@ -448,6 +449,34 @@ func TestSpecGraphProductionReads(t *testing.T) {
 		err := runSpecGraph(&out, &errOut, stores, t.TempDir(), epic.ID, false)
 		if code, silent := IsSilentExit(err); !silent || code != specLintExitRefused {
 			t.Fatalf("runSpecGraph = %v, want a silent exit %d\nstderr: %s", err, specLintExitRefused, errOut.String())
+		}
+		findGraphFinding(t, specGraphLines(out.String()), "duplicate-define")
+	})
+
+	t.Run("the lint branch runs the graph through its stores", func(t *testing.T) {
+		t.Parallel()
+		db := beadsfake.New()
+		epic := mustBead(t, db, beads.CreateOptions{ID: "gt-epic", Title: "epic"})
+		mustBead(t, db, beads.CreateOptions{
+			ID: "gt-epic.1", Title: "one", Parent: epic.ID,
+			Description: "## Interfaces\nDefines: Alpha",
+		})
+		mustBead(t, db, beads.CreateOptions{
+			ID: "gt-epic.2", Title: "two", Parent: epic.ID,
+			Description: "## Interfaces\nDefines: Alpha",
+		})
+		stores := slingStores{
+			pinned: func(string) slingStore { return db },
+			routed: func(string) slingStore { return beadsfake.New() },
+		}
+		cmd := &cobra.Command{}
+		var out, errOut bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errOut)
+
+		err := runSpecLintOn(cmd, []string{epic.ID}, t.TempDir(), true, stores)
+		if code, silent := IsSilentExit(err); !silent || code != specLintExitRefused {
+			t.Fatalf("runSpecLintOn(graph) = %v, want a silent exit %d\nstderr: %s", err, specLintExitRefused, errOut.String())
 		}
 		findGraphFinding(t, specGraphLines(out.String()), "duplicate-define")
 	})
