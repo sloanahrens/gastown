@@ -139,6 +139,32 @@ func TestWaitForRestartDoesNotTrustAVersionWithAnError(t *testing.T) {
 	}
 }
 
+func TestWaitForRestartPollsOnceWhenTimeoutPassesDuringSleep(t *testing.T) {
+	t.Parallel()
+	// The daemon answers the target only on the poll that lands exactly when
+	// the timeout passes, the one a sleep ends on.
+	probes := &fakeVerifyProbes{daemon: []verifyAnswer{
+		{version: verifyTestOld},
+		{version: verifyTestOld},
+		{version: verifyTestOld},
+		{version: verifyTestOld},
+		{version: verifyTestShort},
+	}}
+	clock := &fakeVerifyClock{now: parseVerifyTime(t)}
+	sleep, _ := verifySleeps(clock)
+
+	restarted, err := WaitForRestart(context.Background(), clock, sleep, probes, verifyTestWant, verifyTestTimeout, verifyTestPoll)
+	if err != nil {
+		t.Fatalf("WaitForRestart: %v", err)
+	}
+	if !restarted {
+		t.Fatal("WaitForRestart missed the daemon answering the target on the poll at the timeout")
+	}
+	if probes.daemonCalls != 5 {
+		t.Fatalf("polled the daemon %d times, want 5: the poll that ends the timeout must run", probes.daemonCalls)
+	}
+}
+
 func TestWaitForRestartTimesOutAndStopsOnCancel(t *testing.T) {
 	t.Parallel()
 	t.Run("timeout", func(t *testing.T) {

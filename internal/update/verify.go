@@ -51,8 +51,9 @@ func Verify(ctx context.Context, p VerifyProbes, want string) []Check {
 }
 
 // WaitForRestart polls the daemon until it reports want or timeout passes,
-// which is measured from the first poll; a canceled context or a failing
-// sleep returns that error.
+// which is measured from the first poll. The poll that finds the timeout passed
+// is the last one, so a sleep that ends on the timeout still gets its poll; a
+// canceled context or a failing sleep returns that error.
 func WaitForRestart(ctx context.Context, clock Clock, sleep func(context.Context, time.Duration) error, p VerifyProbes, want string, timeout, poll time.Duration) (bool, error) {
 	start := clock.Now()
 	for {
@@ -64,11 +65,11 @@ func WaitForRestart(ctx context.Context, clock Clock, sleep func(context.Context
 		if version, err := p.DaemonVersion(ctx); err == nil && sameCommit(version, want) {
 			return true, nil
 		}
-		if err := sleep(ctx, poll); err != nil {
-			return false, err
-		}
 		if clock.Now().Sub(start) >= timeout {
 			return false, nil
+		}
+		if err := sleep(ctx, poll); err != nil {
+			return false, err
 		}
 	}
 }
