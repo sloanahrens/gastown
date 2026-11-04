@@ -272,7 +272,11 @@ func TestBuildBinariesStartsFromTheHermeticEnvironment(t *testing.T) {
 	}
 }
 
-func TestBuildBinariesStampsGTWithTheResolvedRev(t *testing.T) {
+// TestBuildBinariesStampsGTWithTheNineCharacterCommit: gt records the short
+// commit the polecat image is tagged with, not the full sha the checkout
+// resolves the build to, or the tier sweep refuses the container's build
+// (gt-c3sue).
+func TestBuildBinariesStampsGTWithTheNineCharacterCommit(t *testing.T) {
 	t.Parallel()
 	const short = "0123456"
 	b, run := builderFor(t)
@@ -280,16 +284,32 @@ func TestBuildBinariesStampsGTWithTheResolvedRev(t *testing.T) {
 	if _, err := b.BuildBinaries(context.Background(), short); err != nil {
 		t.Fatalf("BuildBinaries: %v", err)
 	}
-	if got := ldflagsOf(run.calls[0].argv); !reflect.DeepEqual(got, []string{gtCommitFlag + testRev}) {
-		t.Errorf("gt build ldflags = %q, want the full sha the gt checkout resolves %s to", got, short)
+	want := []string{gtCommitFlag + testRev[:9]}
+	if got := ldflagsOf(run.calls[0].argv); !reflect.DeepEqual(got, want) {
+		t.Errorf("gt build ldflags = %q, want the first nine characters of the resolved %s: %q", got, testRev, want)
 	}
 }
 
-// TestBuildBinariesStampsBDWithItsBuildIDAndCommit: the image's bd carries both
-// halves of the build id `bd version` prints, main.Build before main.Commit, the
-// way bdbuild stamps the polecat image's bd (gt-glsx8). gt's and om's stamps are
-// unchanged: gt keeps the resolved rev alone, om none.
-func TestBuildBinariesStampsBDWithItsBuildIDAndCommit(t *testing.T) {
+// TestBuildBinariesStillChecksOutTheFullCommit: the short stamp names the build
+// the image runs, and the worktree is cut at the full commit that stamp
+// abbreviates, so the build reads the commit it names.
+func TestBuildBinariesStillChecksOutTheFullCommit(t *testing.T) {
+	t.Parallel()
+	const short = "0123456"
+	b, run := builderFor(t)
+	b.Git = run.git(map[string]string{short: testRev, testBDCommit: testBDCommit, "HEAD": testOMCommit})
+	if _, err := b.BuildBinaries(context.Background(), short); err != nil {
+		t.Fatalf("BuildBinaries: %v", err)
+	}
+	if got := run.adds[0].commit; got != testRev {
+		t.Errorf("gt worktree is at %s, want the full commit %s", got, testRev)
+	}
+}
+
+// TestBuildBinariesBdAndOmStampsUnchanged: the image's bd carries both halves of
+// the build id `bd version` prints, main.Build before main.Commit, the way
+// bdbuild stamps the polecat image's bd (gt-glsx8), and om carries none.
+func TestBuildBinariesBdAndOmStampsUnchanged(t *testing.T) {
 	t.Parallel()
 	b, run := builderFor(t)
 	if _, err := b.BuildBinaries(context.Background(), testRev); err != nil {
@@ -298,9 +318,6 @@ func TestBuildBinariesStampsBDWithItsBuildIDAndCommit(t *testing.T) {
 	want := bdBuildFlag + testBDShort + " " + bdCommitFlag + testBDCommit
 	if got := ldflagsOf(run.calls[1].argv); !reflect.DeepEqual(got, []string{want}) {
 		t.Errorf("bd build ldflags = %q, want [%q]", got, want)
-	}
-	if got := ldflagsOf(run.calls[0].argv); !reflect.DeepEqual(got, []string{gtCommitFlag + testRev}) {
-		t.Errorf("gt build ldflags = %q, want [%q]", got, gtCommitFlag+testRev)
 	}
 	if got := ldflagsOf(run.calls[2].argv); len(got) != 0 {
 		t.Errorf("om build ldflags = %q, want none", got)
