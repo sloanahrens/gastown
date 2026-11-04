@@ -33,10 +33,11 @@ type daemonImageFlags struct {
 	apply    bool
 }
 
-// imageBuilder is the three steps of a build, in the order they run. A
+// imageBuilder is the build's steps, in the order they run. A
 // daemonimage.Builder is one; a test stands in a recording fake.
 type imageBuilder interface {
 	BuildBinaries(ctx context.Context, rev string) ([]string, error)
+	BuildPlugins(ctx context.Context, rev string) ([]string, error)
 	FetchClaudeCLI(ctx context.Context) (string, error)
 	FetchClientTools(ctx context.Context) ([]string, error)
 	BuildImage(ctx context.Context, rev string, bins []string) (string, error)
@@ -117,6 +118,7 @@ func newDaemonImageCmd(run func(ctx context.Context, out io.Writer, f daemonImag
 		Long: `Build gt-daemon:<rev>, the image the town's daemon runs in.
 
 It builds gt, bd and om for linux/arm64 in clean worktrees of the commits named,
+the plugins the container daemon runs (app-promote and town-metrics),
 downloads the pinned claude CLI, and builds the image with docker --context
 desktop-linux. The Dockerfile is read from --gt-src's working tree.
 
@@ -149,8 +151,8 @@ func init() {
 }
 
 // runDaemonImage validates the flags, prints the plan, and with --apply runs the
-// build: the binaries, the claude CLI, the image, in that order, stopping at the
-// first failure.
+// build: the binaries, the plugins, the claude CLI, the image, in that order,
+// stopping at the first failure.
 func runDaemonImage(ctx context.Context, f daemonImageFlags, d daemonImageDeps) error {
 	if err := validateDaemonImageFlags(f, d.evalSymlinks); err != nil {
 		return err
@@ -175,6 +177,11 @@ func runDaemonImage(ctx context.Context, f daemonImageFlags, d daemonImageDeps) 
 	if err != nil {
 		return err
 	}
+	plugins, err := build.BuildPlugins(ctx, f.rev)
+	if err != nil {
+		return err
+	}
+	bins = append(bins, plugins...)
 	claude, err := build.FetchClaudeCLI(ctx)
 	if err != nil {
 		return err

@@ -77,6 +77,8 @@ func TestPlanNamesEachStepAndRunsNothing(t *testing.T) {
 		{"build gt: ", "go build -trimpath -ldflags " + gtCommitFlag + testRev + " -o " + filepath.Join(b.Out, "gt") + " " + GTPackage + "   (clean worktree of /src/gt at " + testRev + ")"},
 		{"build bd: ", "go build -trimpath -ldflags " + bdBuildFlag + planBuildID + " " + bdCommitFlag + testBDCommit + " -o " + filepath.Join(b.Out, "bd") + " " + BDPackage + "   (clean worktree of /src/beads at " + testBDCommit + ")"},
 		{"build om: ", "go build -trimpath -o " + filepath.Join(b.Out, "om") + " " + OMPackage + "   (clean worktree of /src/om at HEAD)"},
+		{"build app-promote: ", "go build -trimpath -o " + filepath.Join(b.Out, "plugins", "app-promote", "app-promote") + " ./plugins/app-promote   (clean worktree of /src/gt at " + testRev + ")"},
+		{"build town-metrics: ", "go build -trimpath -o " + filepath.Join(b.Out, "plugins", "town-metrics", "town-metrics") + " ./plugins/town-metrics   (clean worktree of /src/gt at " + testRev + ")"},
 		{"fetch claude: ", "GET " + fetched + " -> " + filepath.Join(b.Out, claudeCLIName) + "   (sha256 " + templates.ClaudeCLISHA256 + ")"},
 		{"fetch openshell: ", "GET " + templates.DaemonClientTools[0].URL + " -> " + filepath.Join(b.Out, "openshell") + "   (sha256 " + templates.DaemonClientTools[0].SHA256 + ")"},
 		{"fetch docker: ", "GET " + templates.DaemonClientTools[1].URL + " -> " + filepath.Join(b.Out, "docker") + "   (sha256 " + templates.DaemonClientTools[1].SHA256 + ")"},
@@ -94,6 +96,49 @@ func TestPlanNamesEachStepAndRunsNothing(t *testing.T) {
 	entries, err := os.ReadDir(b.Out)
 	if err != nil || len(entries) != 0 {
 		t.Errorf("Out holds %d entries after Plan (err %v), want none", len(entries), err)
+	}
+}
+
+// TestPlanListsThePluginBuilds: the plan names the build of each plugin the
+// container daemon runs, after the three binaries and before the fetches, with
+// the package and the output path under the plugin's directory.
+func TestPlanListsThePluginBuilds(t *testing.T) {
+	t.Parallel()
+	b := planBuilder(t)
+	lines, err := b.Plan(testRev)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	om := -1
+	for i, line := range lines {
+		if strings.HasPrefix(line, "build om: ") {
+			om = i
+		}
+	}
+	if om < 0 {
+		t.Fatalf("plan has no build om: line:\n%s", strings.Join(lines, "\n"))
+	}
+	for _, p := range []struct{ name, pkg string }{
+		{name: "app-promote", pkg: "./plugins/app-promote"},
+		{name: "town-metrics", pkg: "./plugins/town-metrics"},
+	} {
+		want := "build " + p.name + ": go build -trimpath -o " + filepath.Join(b.Out, "plugins", p.name, p.name) + " " + p.pkg
+		at := -1
+		for i, line := range lines {
+			if strings.HasPrefix(line, "build "+p.name+": ") {
+				at = i
+			}
+		}
+		if at < 0 {
+			t.Errorf("plan has no build %s: line:\n%s", p.name, strings.Join(lines, "\n"))
+			continue
+		}
+		if at <= om {
+			t.Errorf("the build %s: line is at %d, want it after the three binaries (build om: is at %d)", p.name, at, om)
+		}
+		if !strings.HasPrefix(lines[at], want) {
+			t.Errorf("the build %s: line = %q, want it to start %q", p.name, lines[at], want)
+		}
 	}
 }
 

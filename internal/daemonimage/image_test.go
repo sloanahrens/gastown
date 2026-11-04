@@ -15,7 +15,8 @@ import (
 )
 
 // imageBuilder is a Builder ready to build the image: the repo's Dockerfile, a
-// fresh directory holding the four binaries as the build context, and run.
+// fresh directory holding the binaries and the plugin binaries as the build
+// context, and run.
 func imageBuilder(t *testing.T) (Builder, *fakeRunner) {
 	t.Helper()
 	run := &fakeRunner{}
@@ -26,20 +27,50 @@ func imageBuilder(t *testing.T) (Builder, *fakeRunner) {
 			t.Fatalf("writing the %s binary: %v", name, err)
 		}
 	}
+	for _, p := range imagePlugins {
+		dir := filepath.Join(b.Out, "plugins", p.name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("making the %s plugin directory: %v", p.name, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, p.name), []byte("binary"), 0o600); err != nil {
+			t.Fatalf("writing the %s plugin binary: %v", p.name, err)
+		}
+	}
 	return b, run
 }
 
-// imageBinaryNames is the binaries the image copies from its build context.
+// imageBinaryNames is the binaries the image copies from the root of its build
+// context.
 var imageBinaryNames = []string{"gt", "bd", "om", "claude", "openshell", "docker", "kubectl"}
 
-// imageBinaries is the list of the image's binaries in b.Out, in the order
-// imageBinaryNames names them.
+// imageBinaries is the list of the image's binaries and plugin binaries in
+// b.Out, in the order the Dockerfile copies them from its context.
 func imageBinaries(b Builder) []string {
-	out := make([]string, 0, len(imageBinaryNames))
+	out := make([]string, 0, len(imageBinaryNames)+len(imagePlugins))
 	for _, name := range imageBinaryNames {
 		out = append(out, filepath.Join(b.Out, name))
 	}
+	for _, p := range imagePlugins {
+		out = append(out, filepath.Join(b.Out, "plugins", p.name, p.name))
+	}
 	return out
+}
+
+// pluginCopy is one plugin binary's COPY operands: the path in the build
+// context and the path in the image, written the way the Dockerfile writes them.
+type pluginCopy struct{ src, dst string }
+
+// pluginCopies is the COPY operands the Dockerfile must carry for imagePlugins,
+// in the order BuildPlugins writes them.
+func pluginCopies() []pluginCopy {
+	copies := make([]pluginCopy, 0, len(imagePlugins))
+	for _, p := range imagePlugins {
+		copies = append(copies, pluginCopy{
+			src: "plugins/" + p.name + "/" + p.name,
+			dst: "/usr/local/lib/gt/plugins/" + p.name + "/" + p.name,
+		})
+	}
+	return copies
 }
 
 // repoFile returns the absolute path of a file of the repo this package lives
@@ -309,24 +340,38 @@ func gitConfigGlobal(in dockerfileInstruction) (key, value string, ok bool) {
 	return in.args[3], in.args[4], true
 }
 
-// TestDaemonDockerfileCopiesOnlyTheBinariesAndDolt: every COPY is one of two
+// TestDaemonDockerfileCopiesOnlyTheBinariesAndDolt: every COPY is one of three
 // kinds. The Dolt client is copied from the dolt stage, and nothing else is.
-// Each of the image binaries (imageBinaryNames) is copied from the build context by its bare
-// name, once each, and no other file is. A COPY from any other source, or a
-// second copy of a name, fails, so the image cannot ship a binary the deployer
-// did not build or fetch, or miss one it did.
+// Each of the image binaries (imageBinaryNames) is copied from the build context
+// by its bare name to /usr/local/bin, once each; each plugin binary is copied
+// from its plugin directory to the image's plugin directory, once each. A COPY
+// from any other source, or a second copy of a name, fails, so the image cannot
+// ship a binary the deployer did not build or fetch, or miss one it did.
 func TestDaemonDockerfileCopiesOnlyTheBinariesAndDolt(t *testing.T) {
 	t.Parallel()
+	wantPlugin := map[string]string{}
+	for _, p := range pluginCopies() {
+		wantPlugin[p.src] = p.dst
+	}
 	doltCopies := 0
 	contextCopies := map[string]int{}
+	pluginCopied := map[string]int{}
 	for _, in := range dockerfileInstructions(t, readDockerfile(t)) {
 		if in.cmd != "COPY" {
 			continue
 		}
 		from, src, dst := copyOperands(in.args)
 		if from == "" {
-			if !slices.Contains(imageBinaryNames, src) || dst != "/usr/local/bin/"+src {
-				t.Errorf("%s COPY %q reads %q from the build context; want one of gt, bd, om or claude, by its bare name, to /usr/local/bin", DockerfilePath, in.args, src)
+			if !slices.Contains(imageBinaryNames, src) {
+				if want, ok := wantPlugin[src]; ok && dst == want {
+					pluginCopied[src]++
+					continue
+				}
+				t.Errorf("%s COPY %q reads %q from the build context; want one of gt, bd, om or claude by its bare name to /usr/local/bin, or a plugin's binary to the image's plugin directory", DockerfilePath, in.args, src)
+				continue
+			}
+			if dst != "/usr/local/bin/"+src {
+				t.Errorf("%s COPY %q reads %s to %q; want it to /usr/local/bin/%s", DockerfilePath, in.args, src, dst, src)
 				continue
 			}
 			contextCopies[src]++
@@ -345,6 +390,37 @@ func TestDaemonDockerfileCopiesOnlyTheBinariesAndDolt(t *testing.T) {
 		if contextCopies[name] != 1 {
 			t.Errorf("%s COPYs %s from the build context %d times, want once", DockerfilePath, name, contextCopies[name])
 		}
+	}
+	for _, p := range pluginCopies() {
+		if pluginCopied[p.src] != 1 {
+			t.Errorf("%s COPYs %s from the build context %d times, want once", DockerfilePath, p.src, pluginCopied[p.src])
+		}
+	}
+}
+
+// TestDaemonDockerfileCopiesThePluginBinaries: the image ships each plugin
+// binary at /usr/local/lib/gt/plugins/<name>/<name>, by one COPY of mode 0755
+// from the plugin's build in the build context.
+func TestDaemonDockerfileCopiesThePluginBinaries(t *testing.T) {
+	t.Parallel()
+	var got []string
+	for _, in := range dockerfileInstructions(t, readDockerfile(t)) {
+		if in.cmd != "COPY" {
+			continue
+		}
+		_, src, _ := copyOperands(in.args)
+		for _, p := range pluginCopies() {
+			if src == p.src {
+				got = append(got, in.cmd+" "+strings.Join(in.args, " "))
+			}
+		}
+	}
+	var want []string
+	for _, p := range pluginCopies() {
+		want = append(want, "COPY --chmod=0755 "+p.src+" "+p.dst)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("%s copies the plugin binaries as %q, want %q", DockerfilePath, got, want)
 	}
 }
 
