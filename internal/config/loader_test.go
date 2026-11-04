@@ -1535,6 +1535,40 @@ func TestBuildAgentStartupCommand(t *testing.T) {
 	}
 }
 
+// TestBuildAgentStartupCommand_TownFromCwd covers the cwd fallback: with no
+// town root passed, the town is the nearest mayor/town.json above cwd, and its
+// default agent answers. The temp town is the cwd's nearest marker, so the walk
+// stops there whatever sits above TMPDIR.
+func TestBuildAgentStartupCommand_TownFromCwd(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeRoutingAgents(t, townRoot)
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte("{}"), 0600); err != nil {
+		t.Fatalf("WriteFile town.json: %v", err)
+	}
+	townSettings := NewTownSettings()
+	townSettings.DefaultAgent = "gemini"
+	if err := SaveTownSettings(TownSettingsPath(townRoot), townSettings); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+	cwd := filepath.Join(townRoot, "rigs", "testrig")
+	if err := os.MkdirAll(cwd, 0755); err != nil {
+		t.Fatalf("MkdirAll cwd: %v", err)
+	}
+
+	fh := agentHost(nil).inDir(cwd)
+	cmd, err := buildAgentStartupCommand(fh, constants.RoleCrew, "testrig", "", "", "")
+	if err != nil {
+		t.Fatalf("buildAgentStartupCommand: %v", err)
+	}
+	if !strings.Contains(cmd, "gemini --approval-mode yolo") {
+		t.Errorf("expected the town's default agent (gemini) found from cwd, got: %q", cmd)
+	}
+}
+
 func TestExtractSimpleRole(t *testing.T) {
 	t.Parallel()
 	cases := map[string]string{
