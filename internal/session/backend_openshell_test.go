@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 	"github.com/steveyegge/gastown/internal/sandbox"
 )
 
@@ -1731,6 +1733,122 @@ func TestKubernetesDriverConfigMountsTheCacheClaimOutsideSandbox(t *testing.T) {
 	want := `{"kubernetes":{"containers":{"agent":{"volume_mounts":[{"name":"gt-cache","mount_path":"/tmp/gt-cache","read_only":false}]}},"volumes":[{"name":"gt-cache","persistent_volume_claim":{"claim_name":"gt-shared-cache","read_only":false}}]}}`
 	if cs.DriverConfigJSON != want {
 		t.Fatalf("DriverConfigJSON = %s, want %s", cs.DriverConfigJSON, want)
+	}
+}
+
+// A kubernetes profile that names the shared cache claim points Go's build and
+// module caches into the two directories the seed Job fills, so a sandbox
+// compiles against the entries the seed wrote rather than whatever the image's
+// own defaults point at (gt-nposw).
+func TestContractGoCacheSetWhenClaimNamed(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	p := Profile{
+		Name:                 "polecat-default",
+		Image:                "img",
+		Policy:               openshellTestProfile.Policy,
+		Driver:               DriverKubernetes,
+		KubernetesCacheClaim: "gt-shared-cache",
+	}
+	b, _ := openshellTestBackend(town, p, &sandbox.Fake{})
+
+	cs, err := b.createSpec(openshellSpawn(town, work), sandboxTracker{})
+	if err != nil {
+		t.Fatalf("createSpec: %v", err)
+	}
+	for k, want := range map[string]string{
+		"GOCACHE":    "/tmp/gt-cache/gocache",
+		"GOMODCACHE": "/tmp/gt-cache/gomodcache",
+	} {
+		if got := cs.Env[k]; got != want {
+			t.Errorf("Env[%s] = %q, want %q", k, got, want)
+		}
+	}
+}
+
+// A kubernetes profile with no cache claim mounts nothing at sandboxCacheDir,
+// so the contract names neither cache and Go keeps the image's defaults
+// (gt-nposw).
+func TestContractGoCacheAbsentWithoutClaim(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	p := Profile{
+		Name:   "polecat-default",
+		Image:  "img",
+		Policy: openshellTestProfile.Policy,
+		Driver: DriverKubernetes,
+	}
+	b, _ := openshellTestBackend(town, p, &sandbox.Fake{})
+
+	cs, err := b.createSpec(openshellSpawn(town, work), sandboxTracker{})
+	if err != nil {
+		t.Fatalf("createSpec: %v", err)
+	}
+	for _, k := range []string{"GOCACHE", "GOMODCACHE"} {
+		if got, ok := cs.Env[k]; ok {
+			t.Errorf("Env[%s] = %q, want no key: only a kubernetes profile with a cache claim has a directory to point at", k, got)
+		}
+	}
+}
+
+// A profile that is not the kubernetes driver has no claim mount, even when it
+// carries a claim name: an unset driver is docker, so both get neither key
+// (gt-nposw).
+func TestContractGoCacheAbsentOnOtherDriver(t *testing.T) {
+	t.Parallel()
+	for _, driver := range []string{"", DriverDocker} {
+		t.Run("driver="+driver, func(t *testing.T) {
+			t.Parallel()
+			town, work := openshellTown(t)
+			p := Profile{
+				Name:                 "polecat-default",
+				Image:                "img",
+				Policy:               openshellTestProfile.Policy,
+				Driver:               driver,
+				KubernetesCacheClaim: "gt-shared-cache",
+			}
+			b, _ := openshellTestBackend(town, p, &sandbox.Fake{})
+
+			cs, err := b.createSpec(openshellSpawn(town, work), sandboxTracker{})
+			if err != nil {
+				t.Fatalf("createSpec: %v", err)
+			}
+			for _, k := range []string{"GOCACHE", "GOMODCACHE"} {
+				if got, ok := cs.Env[k]; ok {
+					t.Errorf("Env[%s] = %q, want no key: a %q driver mounts no claim", k, got, driver)
+				}
+			}
+		})
+	}
+}
+
+// The two values are the claim mount joined to the directories the seed Job
+// writes, so a seed that renames a directory moves the contract with it and
+// the sandbox never compiles against a directory the seed does not fill
+// (gt-nposw).
+func TestContractGoCacheUsesSeedDirConstants(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	p := Profile{
+		Name:                 "polecat-default",
+		Image:                "img",
+		Policy:               openshellTestProfile.Policy,
+		Driver:               DriverKubernetes,
+		KubernetesCacheClaim: "gt-shared-cache",
+	}
+	b, _ := openshellTestBackend(town, p, &sandbox.Fake{})
+
+	cs, err := b.createSpec(openshellSpawn(town, work), sandboxTracker{})
+	if err != nil {
+		t.Fatalf("createSpec: %v", err)
+	}
+	for k, dir := range map[string]string{
+		"GOCACHE":    cachevol.SeedBuildCacheDir,
+		"GOMODCACHE": cachevol.SeedModuleCacheDir,
+	} {
+		if want := path.Join(sandboxCacheDir, dir); cs.Env[k] != want {
+			t.Errorf("Env[%s] = %q, want %q (the cache mount joined to the seed's %q)", k, cs.Env[k], want, dir)
+		}
 	}
 }
 
