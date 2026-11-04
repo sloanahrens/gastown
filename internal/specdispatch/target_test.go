@@ -542,7 +542,7 @@ func TestPathCheckFilesMalformedRefused(t *testing.T) {
 	if v.Route != RouteRefuse || v.Field != "## Files" {
 		t.Fatalf("Lint = %s (%s), want a refusal naming ## Files: %s", v.Route, v.Field, v.Line(s.ID))
 	}
-	for _, want := range []string{"line 2", "not a verb line"} {
+	for _, want := range []string{"line 9", "not a verb line"} {
 		if !strings.Contains(v.Reason, want) {
 			t.Errorf("Reason = %q, want %q", v.Reason, want)
 		}
