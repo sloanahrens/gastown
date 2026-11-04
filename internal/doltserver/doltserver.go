@@ -4634,7 +4634,7 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 	// previous bd init) cause "connection refused" errors.
 	// A town without an endpoint leaves them as they are (gt-y3pgh.3).
 	if config.Port > 0 {
-		wantHost := config.EffectiveHost()
+		wantHost := persistedMetadataHost(townRoot, config)
 		wantPort := float64(config.Port) // JSON numbers are float64
 		if existing["dolt_server_host"] != wantHost {
 			existing["dolt_server_host"] = wantHost
@@ -4661,6 +4661,19 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 	}
 
 	return nil
+}
+
+// persistedMetadataHost is the host metadata.json names. The town root is
+// bind-mounted into the daemon's container, so a file the container writes is
+// read by the Mac too: it must name the endpoint every non-container process
+// uses (dolt.host), never dolt.container_host, which only resolves from inside
+// the container (gt-qpeei.17). A town that names no dolt.host falls back to the
+// server config's own host.
+func persistedMetadataHost(townRoot string, cfg *Config) string {
+	if ep, ok := configpkg.ResolveDoltEndpointFor(townRoot, false); ok && ep.Host != "" {
+		return ep.Host
+	}
+	return cfg.EffectiveHost()
 }
 
 // EnsureMetadataForBeadsDir is (*host).EnsureMetadataForBeadsDir on the real machine.
