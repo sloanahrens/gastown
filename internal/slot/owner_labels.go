@@ -135,10 +135,14 @@ func (p ownerProbe) ownerVerdict(c GateContainer, now time.Time, window time.Dur
 // up would keep an ownerless container on the shared Docker VM (gt-ehlga).
 // Anything else — an unlabeled or age-only debris container — is never
 // removed here.
+// A container carrying KeepLabel is left up here too, as it is by a reap (gt-awq73).
 func orphanRemover(rt ContainerRuntime, w io.Writer) func(ContainerVerdict) {
 	tried := map[string]bool{}
 	return func(verdict ContainerVerdict) {
 		if !verdict.OwnerGone || verdict.Container.ID == "" || tried[verdict.Container.ID] {
+			return
+		}
+		if verdict.Container.HasKeepLabel() {
 			return
 		}
 		tried[verdict.Container.ID] = true
