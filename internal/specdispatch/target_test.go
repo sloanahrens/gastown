@@ -740,3 +740,71 @@ func TestBlockerCreatesCleansPaths(t *testing.T) {
 		t.Fatalf("a clean path was refused against a relative blocker path: %s", v.Line(s.ID))
 	}
 }
+
+// A Files section mixing a path an open blocker creates with one it does not is
+// refused for the uncovered path alone: the covered path and the path the branch
+// holds are not named in the refusal (gt-hgt9j.11, gt-cwkeh).
+func TestBlockerCreatesMixedSetRefusesOnlyTheUncovered(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		files   string
+		missing string
+	}{
+		{
+			name:    "a covered modify beside an uncovered read",
+			files:   "modify: internal/cli/foo.go\nread: internal/cli/bar.go\nmodify: internal/cmd/spec.go",
+			missing: "read: internal/cli/bar.go",
+		},
+		{
+			name:    "a covered read beside an uncovered modify",
+			files:   "read: internal/cli/foo.go\nmodify: internal/cli/bar.go\nmodify: internal/cmd/spec.go",
+			missing: "modify: internal/cli/bar.go",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := specWithFiles(t, "A thing exists.", "Go only.", tc.files)
+			s.Target = targetOf("internal/cmd/spec.go")
+			s.BlockerCreates = []string{"internal/cli/foo.go"}
+			v := Lint(s, defaultTemplate())
+			if v.Route != RouteRefuse || v.Field != "## Files" {
+				t.Fatalf("Lint = %s (%s), want a refusal naming ## Files: %s", v.Route, v.Field, v.Line(s.ID))
+			}
+			if !strings.Contains(v.Reason, tc.missing) {
+				t.Errorf("Reason = %q, want %q named", v.Reason, tc.missing)
+			}
+			for _, clean := range []string{"internal/cli/foo.go", "internal/cmd/spec.go"} {
+				if strings.Contains(v.Reason, clean) {
+					t.Errorf("Reason = %q, names %q, which a blocker creates or the branch holds", v.Reason, clean)
+				}
+			}
+		})
+	}
+}
+
+// When every path a Files section names is created by an open blocker, nothing is
+// left to check, so an absent or unreadable inventory does not hold the bead: the
+// nil tree and the errored tree both lint clean (gt-hgt9j.11, gt-cwkeh).
+func TestBlockerCreatesAllCoveredPassesWithoutInventory(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		target *TargetTree
+	}{
+		{name: "no inventory", target: nil},
+		{name: "an unreadable inventory", target: &TargetTree{Branch: "main", Err: "no git repo under /town/gastown"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := specWithFiles(t, "A thing exists.", "Go only.", "modify: internal/cli/foo.go\nread: internal/cli/bar.go")
+			s.Target = tc.target
+			s.BlockerCreates = []string{"internal/cli/foo.go", "internal/cli/bar.go"}
+			if v := Lint(s, defaultTemplate()); !v.Clean() {
+				t.Fatalf("a Files section every path of which an open blocker creates was held: %s", v.Line(s.ID))
+			}
+		})
+	}
+}
