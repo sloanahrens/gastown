@@ -53,6 +53,16 @@ func (c GateContainer) IsReaper() bool {
 	return strings.Contains(strings.ToLower(c.Image+" "+c.Name), "ryuk")
 }
 
+// KeepLabel is the container label that exempts a container from a reap; only
+// the value "true" counts.
+const KeepLabel = "org.gastown.keep"
+
+// HasKeepLabel reports whether the container carries the keep label that
+// exempts it from a reap.
+func (c GateContainer) HasKeepLabel() bool {
+	return c.Labels[KeepLabel] == "true"
+}
+
 // ScratchIdentity is the documented scratch project's identity
 // (internal/scratchtown): the directory its compose file must live under. The
 // project's name, container names and images are that package's constants, so

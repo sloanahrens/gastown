@@ -19,6 +19,9 @@ type ReapOptions struct {
 	OlderThan time.Duration
 	// DryRun reports what would be removed and removes nothing.
 	DryRun bool
+	// Protected names containers no reap may remove, matched exactly against
+	// docker's container name. A nil or empty list protects nothing.
+	Protected []string
 }
 
 // StaleOwnerFile is an owner metadata file whose slot nobody holds: the file a
@@ -56,7 +59,9 @@ type ReapReport struct {
 
 // Reap removes the gate's debris: gate containers past the staleness window
 // with no live ryuk reaper for their session, and owner metadata files whose
-// slot nobody holds.
+// slot nobody holds. A container named in ReapOptions.Protected or carrying
+// KeepLabel is left out of the report as well as the removal, because it is
+// the operator's to keep whatever its age (gt-awq73).
 //
 // While any slot is held, age-only debris is left in Kept rather than removed
 // (gt-c115n): past the staleness window this side of the gate cannot tell a
@@ -93,6 +98,7 @@ func (g *Gate) Reap(townRoot string, opts ReapOptions) (ReapReport, error) {
 	if err != nil {
 		return report, fmt.Errorf("listing gate containers: %w", err)
 	}
+	containers = exemptFromReap(containers, opts.Protected)
 
 	for _, verdict := range g.scratchVerdicts(g.owner.classify(containers, g.clock.Now(), report.OlderThan)) {
 		// The scratch project's containers are the documented L1/L2 town's,
@@ -130,6 +136,25 @@ func (g *Gate) Reap(townRoot string, opts ReapOptions) (ReapReport, error) {
 		report.Removed = append(report.Removed, verdict.Container.Display())
 	}
 	return report, nil
+}
+
+// exemptFromReap drops the containers a reap must never touch: one whose name
+// the caller listed in Protected, and one carrying KeepLabel. They leave
+// before classification, so a reap holds no verdict on them at all: a
+// protected container is in neither Debris nor Kept, and Remove never sees it.
+func exemptFromReap(containers []GateContainer, protected []string) []GateContainer {
+	names := make(map[string]struct{}, len(protected))
+	for _, name := range protected {
+		names[name] = struct{}{}
+	}
+	kept := containers[:0]
+	for _, c := range containers {
+		if _, ok := names[c.Name]; ok || c.HasKeepLabel() {
+			continue
+		}
+		kept = append(kept, c)
+	}
+	return kept
 }
 
 // reapStaleOwnerFiles removes the owner file of every slot that is not held.
