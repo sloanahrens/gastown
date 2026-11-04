@@ -35,12 +35,23 @@ const (
 	updateLandingRecords = 50
 )
 
-// updateTriggerState is the trigger's memory between heartbeats: when this
-// daemon last launched the job, and the settings error it last logged.
+// updateTriggerState is the trigger's state between heartbeats: the launch
+// seam, when this daemon last launched the job, when a launch was last
+// refused, and the settings error it last logged.
 type updateTriggerState struct {
 	mu sync.Mutex
+	// launch starts the update job from the heartbeat's update block. New
+	// wires it to (*Daemon).launchUpdate, the detached `gt update --from-daemon`
+	// child; a test replaces it to watch the decision without starting a
+	// process. Nil (a Daemon built without New) refuses to launch rather than
+	// start one implicitly. Set before the heartbeat runs, never after.
+	launch func(ctx context.Context, reason string) error
 	// launchedAt is the clock reading of the last launch this daemon started.
 	launchedAt time.Time
+	// refusedAt is the clock reading of the last launch the launcher refused.
+	// A refused launch waits out updateLaunchSuppression, as a launched one
+	// does, so a broken launcher is not retried on every heartbeat.
+	refusedAt time.Time
 	// configErr is the last settings error printed, so an unchanged broken
 	// config logs once rather than once per heartbeat.
 	configErr string
@@ -71,9 +82,12 @@ func (d *Daemon) triggerUpdate() {
 	if !due {
 		return
 	}
+	if d.updateRefusedRecently(now) {
+		return
+	}
 	d.logger.Printf("update: due (%s); launching gt update", reason)
 
-	launch := d.updateLaunch
+	launch := d.updateTrigger.launch
 	if launch == nil {
 		d.logger.Printf("update: no launcher is wired into this daemon; not launching")
 		return
@@ -81,7 +95,8 @@ func (d *Daemon) triggerUpdate() {
 	// A context of its own: the child must outlive the daemon's cancellation
 	// when the install restarts it.
 	if err := launch(context.Background(), reason); err != nil {
-		d.logger.Printf("update: launch failed: %v", err)
+		d.logger.Printf("update: launch failed: %v; not retrying for %s", err, updateLaunchSuppression)
+		d.noteUpdateRefusal(now)
 		return
 	}
 	d.noteUpdateLaunch(now)
@@ -132,6 +147,23 @@ func (d *Daemon) noteUpdateLaunch(now time.Time) {
 	d.updateTrigger.mu.Lock()
 	d.updateTrigger.launchedAt = now
 	d.updateTrigger.mu.Unlock()
+}
+
+// noteUpdateRefusal records a launch the launcher refused, so the next
+// heartbeats wait out updateLaunchSuppression before trying again.
+func (d *Daemon) noteUpdateRefusal(now time.Time) {
+	d.updateTrigger.mu.Lock()
+	d.updateTrigger.refusedAt = now
+	d.updateTrigger.mu.Unlock()
+}
+
+// updateRefusedRecently reports whether the launcher refused a launch within
+// updateLaunchSuppression of now.
+func (d *Daemon) updateRefusedRecently(now time.Time) bool {
+	d.updateTrigger.mu.Lock()
+	defer d.updateTrigger.mu.Unlock()
+	refused := d.updateTrigger.refusedAt
+	return !refused.IsZero() && now.Sub(refused) < updateLaunchSuppression
 }
 
 // lastUpdateLaunch is when this daemon last started the job, zero when it has

@@ -106,19 +106,14 @@ type Daemon struct {
 	// isPatrolActive alongside patrolConfig.
 	disabledPatrols map[string]bool
 
-	// updateLaunch starts the update job from the heartbeat's update block.
-	// New wires it to (*Daemon).launchUpdate, the detached
-	// `gt update --from-daemon` child (update_trigger.go); a test replaces it
-	// to watch the decision without starting a process. Nil (a Daemon built
-	// without New) refuses to launch rather than start one implicitly.
-	updateLaunch func(ctx context.Context, reason string) error
 	// updateStarter starts the prepared update command and returns the wait
 	// that reaps it; nil starts the command and waits with exec's own Start
 	// and Wait. A test injects one to prove the reap runs on its own goroutine
 	// (update_trigger.go).
 	updateStarter updateProcessStarter
-	// updateTrigger is the block's own memory: the launch suppression clock
-	// and the last settings error logged.
+	// updateTrigger is the update block's own state: the launch seam (New wires
+	// it to (*Daemon).launchUpdate; a test replaces it), the launch and refusal
+	// clocks, and the last settings error logged.
 	updateTrigger updateTriggerState
 	// updateAlerts is the update job's alert latch (update_alerts.go): the
 	// keys this daemon run has raised and not yet cleared.
@@ -1375,7 +1370,7 @@ func New(config *Config) (*Daemon, error) {
 	d.rigStatusClear = d.clearAlerts
 	d.checkpointRevertAlert = d.escalateAlert
 	// Bound rather than the method expression, whose type carries the receiver.
-	d.updateLaunch = d.launchUpdate
+	d.updateTrigger.launch = d.launchUpdate
 
 	// A health-driven Dolt restart waits for an in-flight scheduled gc.
 	if doltServer != nil {
