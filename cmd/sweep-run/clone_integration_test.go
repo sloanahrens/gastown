@@ -169,6 +169,40 @@ func TestIntegrationRunScriptRunsTheTierScriptInTheWorkTree(t *testing.T) {
 	}
 }
 
+// TestIntegrationRunScriptRunsInASymlinkedWorkTree starts the tier script in a
+// work tree reached through a symlink, the shape a symlinked temp root gives
+// (macOS's /var is one). The script must run, and its pwd is the physical path
+// bash resolves, not the link it was started in.
+func TestIntegrationRunScriptRunsInASymlinkedWorkTree(t *testing.T) {
+	t.Parallel()
+	target := t.TempDir()
+	link := filepath.Join(t.TempDir(), "work")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("make the symlinked work tree: %v", err)
+	}
+	physical, err := filepath.EvalSymlinks(link)
+	if err != nil {
+		t.Fatalf("resolve the symlinked work tree: %v", err)
+	}
+	if physical == link {
+		t.Fatalf("%s resolves to itself: the symlinked shape is not exercised", link)
+	}
+	body := "#!/bin/sh\necho \"in $(pwd)\"\n"
+	if err := os.WriteFile(filepath.Join(target, "tier.sh"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write the script fixture: %v", err)
+	}
+	// The env carries no PWD, as the run's does: a PWD inherited from the host
+	// would name the link, and bash would keep it instead of the physical path.
+	var stdout bytes.Buffer
+	code := runScript("bash", []string{"tier.sh"}, link, []string{"TIER_SWEEP_LOGDIR=/out/logs"}, &stdout, io.Discard)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if got, want := strings.TrimSpace(stdout.String()), "in "+physical; got != want {
+		t.Errorf("stdout = %q, want %q: the script reports the physical work tree", got, want)
+	}
+}
+
 // runGitIn runs one git command in dir and returns its output, failing the test
 // if git refuses.
 func runGitIn(t *testing.T, dir string, args ...string) string {
