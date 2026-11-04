@@ -81,6 +81,14 @@ func (s ComposeSpec) validateClient() error {
 			return fmt.Errorf("compose spec: %q is not an absolute path without a colon or control character; the render mounts it and KUBECONFIG joins paths with a colon", p)
 		}
 	}
+	if s.BackupDir != "" {
+		// The backup directory is bound read-write beside the town, as the work root
+		// is, so it may not be the filesystem root or overlap the town (gt-gsb1i).
+		clean := filepath.Clean(s.BackupDir)
+		if clean == "/" || pathContains(s.TownRoot, clean) || pathContains(clean, s.TownRoot) {
+			return fmt.Errorf("compose spec: BackupDir %q is the filesystem root or overlaps the town root %q; it is bound read-write beside the town, not over it", s.BackupDir, s.TownRoot)
+		}
+	}
 	if s.ConfigDir != "" {
 		// The config directory is mounted read-only with everything under it, so a
 		// read-write mount inside it would be writable behind a read-only mount. The
