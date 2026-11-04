@@ -213,8 +213,8 @@ func TestDrainProbeErrorIsNotDrained(t *testing.T) {
 		if res.Waited < drainTestTimeout {
 			t.Errorf("Waited = %v, want at least %v", res.Waited, drainTestTimeout)
 		}
-		if probe.calls != 3 {
-			t.Errorf("Seats calls = %d, want 3 (a retry on each poll)", probe.calls)
+		if probe.calls != 2 {
+			t.Errorf("Seats calls = %d, want 2 (a retry on each poll before Timeout)", probe.calls)
 		}
 	})
 
@@ -307,6 +307,36 @@ func TestDrainBoundsEachProbeByTheTimeout(t *testing.T) {
 	}
 }
 
+func TestDrainReturnsWhenAProbeBlocksPastTimeout(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	clock := &fakeDrainClock{now: drainTestStart()}
+	// The probe ignores its context and returns only when the test ends, so
+	// only the Timeout's own deadline can end the drain. The Timeout is a
+	// millisecond so that deadline is the one that fires.
+	probe := ctxProbe(func(context.Context) ([]Seat, error) {
+		<-release
+		return nil, nil
+	})
+
+	res, err := Drain(context.Background(), clock, clock.sleep, probe, DrainOptions{
+		Timeout: time.Millisecond, IdleAfter: drainTestIdle, Poll: drainTestPoll,
+	})
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if res.Drained {
+		t.Errorf("Drained = true with a blocked probe, want false: %+v", res)
+	}
+	if !errors.Is(res.Err, context.DeadlineExceeded) {
+		t.Errorf("Err = %v, want context.DeadlineExceeded", res.Err)
+	}
+	if len(res.Blocking) != 0 {
+		t.Errorf("Blocking = %v beside a probe error, want none", res.Blocking)
+	}
+}
+
 func TestDrainRefusesANonPositivePoll(t *testing.T) {
 	t.Parallel()
 	for _, poll := range []time.Duration{0, -time.Second} {
@@ -379,8 +409,8 @@ func TestDrainNeverActsOnSeats(t *testing.T) {
 		if res.Drained {
 			t.Errorf("Drained = true, want false: %+v", res)
 		}
-		if probe.calls != 3 {
-			t.Errorf("Seats calls = %d, want 3 and no other call", probe.calls)
+		if probe.calls != 2 {
+			t.Errorf("Seats calls = %d, want 2 (no poll starts at Timeout) and no other call", probe.calls)
 		}
 		if got := seats[0]; !got.Working || got.Name != "furiosa" {
 			t.Errorf("the drain changed the seat: %+v", got)
