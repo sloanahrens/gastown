@@ -108,3 +108,57 @@ func TestBoxCheckReadsFieldBeforeSection(t *testing.T) {
 		t.Errorf("reason %q names the section's item, not the field's", v.Reason)
 	}
 }
+
+// The live town and the live daemon are steps only the overseer runs, so each
+// phrase the list holds has a row that names it in the refusal (gt-hgt9j.3).
+func TestBoxCheckRefusesLiveTown(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		item string
+	}{
+		{"live town", "live town runs the daemon"},
+		{"the live", "the live daemon restarts the polecat"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v := lintAcceptance("- [ ] " + tc.item)
+			if v.Route != RouteRefuse || v.Field != acceptanceBoxField {
+				t.Fatalf("Lint = %+v, want a refusal on %s", v, acceptanceBoxField)
+			}
+			if !strings.Contains(v.Reason, tc.item) {
+				t.Errorf("reason %q does not name the offending item", v.Reason)
+			}
+			if !strings.Contains(v.Reason, `"`+tc.name+`"`) {
+				t.Errorf("reason %q does not name the phrase %q", v.Reason, tc.name)
+			}
+		})
+	}
+}
+
+// A nested acceptance item is a step under a criterion the polecat still runs,
+// so an offending nested item is refused as a top-level one is (gt-hgt9j.3).
+func TestBoxCheckRefusesNestedItem(t *testing.T) {
+	t.Parallel()
+	v := lintAcceptance("- [ ] a named test passes\n  - [ ] kubectl get pods is empty")
+	if v.Route != RouteRefuse || v.Field != acceptanceBoxField {
+		t.Fatalf("Lint = %+v, want a refusal on %s", v, acceptanceBoxField)
+	}
+	if !strings.Contains(v.Reason, "kubectl get pods is empty") {
+		t.Errorf("reason %q does not name the nested item", v.Reason)
+	}
+	if !strings.Contains(v.Reason, `"kubectl"`) {
+		t.Errorf("reason %q does not name the phrase matched", v.Reason)
+	}
+}
+
+// A nested item naming no phrase passes, and a phrase inside a fenced example
+// is not an item at all, so neither is refused (gt-hgt9j.3).
+func TestBoxCheckPassesNestedItemsAndFencedExamples(t *testing.T) {
+	t.Parallel()
+	v := lintAcceptance("- [ ] a named test passes\n  - [ ] the sub check passes\n```\n  - [ ] kubectl get pods\n```")
+	if !v.Clean() {
+		t.Fatalf("nested or fenced item refused: %s", v.Line("gt-good"))
+	}
+}

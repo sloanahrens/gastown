@@ -629,6 +629,11 @@ func lint(s Spec, t Template, paths bool) LintVerdict {
 	if r, blocked := acceptanceBoxRefusal(acceptanceText(s, sections)); blocked {
 		failures = append(failures, r)
 	}
+	// A nested item is a sub-step under a criterion the polecat runs, so the same
+	// refusal holds for it (gt-hgt9j.3).
+	if r, blocked := nestedAcceptanceBoxRefusal(acceptanceText(s, sections)); blocked {
+		failures = append(failures, r)
+	}
 	// Both sides present is the only case where drift is visible: one alone is
 	// the bead's whole acceptance list, not a second copy to disagree with.
 	if strings.TrimSpace(s.Acceptance) != "" {
