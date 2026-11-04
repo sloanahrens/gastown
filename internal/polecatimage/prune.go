@@ -222,8 +222,9 @@ func lastPathSegment(ref string) string {
 }
 
 // PruneBuildCache brings Docker's build cache back under Cfg.BuilderKeep by
-// running the one prune this plugin may: builder prune by storage, never a
-// system, image, volume or --all prune (gt-atxdz).
+// running one of the two prunes this plugin may: builder prune by storage here,
+// and image prune of dangling images only in PruneDanglingImages. Never a
+// system, volume or --all prune (gt-atxdz, gt-n0tfr).
 //
 // It runs under the plugin's lock, so a trim never overlaps a build, and a
 // failed prune is logged with docker's reason rather than failing the run.
@@ -240,12 +241,108 @@ func (r *Run) PruneBuildCache() {
 		r.Logf("build cache: skipped, %s", why)
 		return
 	}
+	before := r.readSizeReport()
 	res := r.call(r.Cfg.Docker, "builder", "prune", "--keep-storage", r.Cfg.BuilderKeep, "-f")
+	r.logSizes("Build Cache", before, r.readSizeReport())
 	if res.failed() {
 		r.Logf("build cache not trimmed: %s", lastLine(res.combined()))
 		return
 	}
 	r.Logf("build cache trimmed to the newest %s: %s", r.Cfg.BuilderKeep, lastLine(res.combined()))
+}
+
+// PruneDanglingImages removes the dangling images, the untagged builds a moving
+// tag and the per-commit tags leave behind, by running image prune -f: the one
+// image prune this plugin may run, dangling images only, never -a, --all, a
+// system prune or a volume prune (gt-n0tfr).
+//
+// It runs under the plugin's lock like PruneBuildCache, and a failed prune is
+// logged with docker's reason rather than failing the run.
+func (r *Run) PruneDanglingImages() {
+	if r.call(r.Cfg.Docker, "info").failed() {
+		return
+	}
+	why, err := r.OwnLock()
+	if err != nil {
+		r.Logf("dangling images: not pruned: %v", err)
+		return
+	}
+	if why != "" {
+		r.Logf("dangling images: skipped, %s", why)
+		return
+	}
+	before := r.readSizeReport()
+	res := r.call(r.Cfg.Docker, "image", "prune", "-f")
+	r.logSizes("Images", before, r.readSizeReport())
+	if res.failed() {
+		r.Logf("dangling images not pruned: %s", lastLine(res.combined()))
+		return
+	}
+	r.Logf("dangling images pruned: %s", lastLine(res.combined()))
+}
+
+// sizeReportFormat is the template a prune reads its sizes with: one line per
+// kind of storage, its size and what a prune could reclaim.
+const sizeReportFormat = "{{.Type}} {{.Size}} {{.Reclaimable}}"
+
+// sizeKinds are the docker Types the size log reads. "Build Cache" has a space
+// in it, so a line is matched by its whole kind rather than by its first field.
+var sizeKinds = []string{"Images", "Build Cache"}
+
+// sizeReport is one read of docker's size report: the size of each kind it
+// named, and why the report could not be read whole.
+type sizeReport struct {
+	sizes map[string]string // docker's Type -> Size
+	why   string            // "" when every kind in sizeKinds was read
+}
+
+// of is the kind's size, "unknown" when the report did not name it.
+func (s sizeReport) of(kind string) string {
+	if size, ok := s.sizes[kind]; ok {
+		return size
+	}
+	return "unknown"
+}
+
+// readSizeReport reads the sizes docker's size report gives. A report that
+// cannot be read, or that lacks a kind, is returned with its reason: the caller
+// logs it and carries on, since a size is never a reason to skip a prune.
+func (r *Run) readSizeReport() sizeReport {
+	res := r.call(r.Cfg.Docker, "system", "df", "--format", sizeReportFormat)
+	if res.failed() {
+		return sizeReport{why: "docker system df failed: " + lastLine(res.combined())}
+	}
+	sizes := map[string]string{}
+	for _, line := range strings.Split(res.output(), "\n") {
+		for _, kind := range sizeKinds {
+			if rest, ok := strings.CutPrefix(line, kind+" "); ok {
+				if fields := strings.Fields(rest); len(fields) > 0 {
+					sizes[kind] = fields[0]
+				}
+			}
+		}
+	}
+	for _, kind := range sizeKinds {
+		if _, ok := sizes[kind]; !ok {
+			return sizeReport{sizes: sizes, why: "the report has no " + kind + " line"}
+		}
+	}
+	return sizeReport{sizes: sizes}
+}
+
+// logSizes logs the kind's size before and after a prune on one line. A size
+// that could not be read is logged as unknown, with the reason, and the prune
+// that follows still runs (gt-n0tfr).
+func (r *Run) logSizes(kind string, before, after sizeReport) {
+	reason := before.why
+	if reason == "" {
+		reason = after.why
+	}
+	note := ""
+	if reason != "" {
+		note = " (size report unreadable: " + reason + ")"
+	}
+	r.Logf("%s size: %s before, %s after%s", kind, before.of(kind), after.of(kind), note)
 }
 
 // sizeUnits are the units Human divides a byte count by, smallest first.

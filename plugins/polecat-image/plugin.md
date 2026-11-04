@@ -131,15 +131,15 @@ the context in each line.
 
 Each rebuild also leaves its layers in Docker's build cache (apt, the Go
 toolchain, golangci-lint, the gt and bd compiles), which grew to 20 GB unused
-(gt-atxdz). After the image prune the plugin runs
+(gt-atxdz). After the old-image trim it runs
 `docker builder prune --keep-storage 8GB -f` (`POLECAT_IMAGE_BUILDER_KEEP`):
-LRU, so the most recently used layers stay and the next rebuild is warm. It runs
-that command and no wider prune (never a system, image, volume or `--all`
-prune), and it runs under the plugin's lock: a run that built already owns it,
-any other takes it, and a run that finds another's lock, or whose lock was taken
-during the build, skips with a logged line, so a trim never overlaps a build. A
-down docker, a failed build or a failing prune trims nothing and does not fail
-the run.
+LRU, so recently used layers stay and the next rebuild is warm. Then it runs
+`docker image prune -f` (dangling images only, gt-n0tfr). No other prune runs:
+never a system, volume, `--all` or `-a` prune. Both run under the plugin's lock:
+a run that built already owns it, any other takes it, and a run that finds
+another's lock, or whose lock was taken mid-build, skips with a logged line, so
+no trim overlaps a build. A down docker, a failed build or a failing prune trims
+nothing and does not fail the run.
 
 ## Per-rig cache volumes
 
