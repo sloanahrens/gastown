@@ -38,7 +38,7 @@ type maintenanceSeams struct {
 	mountInfoPath string
 	// measure reads a database's on-disk size and old-gen size.
 	measure func(dataDir, db string) (gcMeasure, error)
-	// gcExec runs CALL dolt_gc('--full') on one database.
+	// gcExec runs doltGCFullSQL on one database.
 	gcExec func(ctx context.Context, d *Daemon, db string) error
 	// gcOpenDB opens the pool one gc call runs on. A test injects a fake
 	// driver to observe the statement doltGCFull executes, without a server.

@@ -7,14 +7,12 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1064,23 +1062,36 @@ func TestMaintenanceGCCycleShutdownDoesNotMaskARealFailure(t *testing.T) {
 
 // --- the gc statement ----------------------------------------------------------------
 
-// gcFakeDriverID keeps each registration's driver name its own, so parallel
-// tests cannot see each other's fake.
-var gcFakeDriverID uint64
-
 // gcFakeRecorder collects the statements a fake gc connection executes.
 type gcFakeRecorder struct {
 	queries []string
 }
 
-// gcFakeOpener registers a fake driver for one test whose statements fail with
-// execErr (nil: they succeed), and returns the pool opener the daemon should use.
+// gcFakeOpener returns a fake connection for one test whose statements fail
+// with execErr (nil: they succeed), and the pool opener the daemon should use.
+// The fake is a driver.Connector, so the test's own pool owns it and nothing is
+// registered process-wide.
 func gcFakeOpener(t *testing.T, execErr error) (*gcFakeRecorder, func(string) (*sql.DB, error)) {
 	t.Helper()
 	rec := &gcFakeRecorder{}
-	name := fmt.Sprintf("gt_gc_fake_%d", atomic.AddUint64(&gcFakeDriverID, 1))
-	sql.Register(name, gcFakeDriver{rec: rec, execErr: execErr})
-	return rec, func(string) (*sql.DB, error) { return sql.Open(name, "") }
+	return rec, func(string) (*sql.DB, error) {
+		return sql.OpenDB(gcFakeConnector{rec: rec, execErr: execErr}), nil
+	}
+}
+
+// gcFakeConnector opens the fake connection for the one pool sql.OpenDB builds.
+type gcFakeConnector struct {
+	rec     *gcFakeRecorder
+	execErr error
+}
+
+func (c gcFakeConnector) Connect(context.Context) (driver.Conn, error) {
+	return gcFakeConn{rec: c.rec, execErr: c.execErr}, nil
+}
+
+// Driver satisfies driver.Connector; connections arrive through Connect.
+func (c gcFakeConnector) Driver() driver.Driver {
+	return gcFakeDriver{rec: c.rec, execErr: c.execErr}
 }
 
 type gcFakeDriver struct {
@@ -1091,6 +1102,17 @@ type gcFakeDriver struct {
 func (d gcFakeDriver) Open(string) (driver.Conn, error) {
 	return gcFakeConn{rec: d.rec, execErr: d.execErr}, nil
 }
+
+// deadlinePassedContext reports an expired deadline while its Done channel
+// stays open. database/sql refuses a call on an already-done context before it
+// reaches the driver, so driving a driver error under an expired deadline needs
+// Err to answer for the deadline while Done never fires.
+type deadlinePassedContext struct{}
+
+func (deadlinePassedContext) Deadline() (time.Time, bool) { return time.Unix(0, 0), true }
+func (deadlinePassedContext) Done() <-chan struct{}       { return nil }
+func (deadlinePassedContext) Err() error                  { return context.DeadlineExceeded }
+func (deadlinePassedContext) Value(any) any               { return nil }
 
 type gcFakeConn struct {
 	rec     *gcFakeRecorder
@@ -1136,19 +1158,16 @@ func TestGCArchiveLevelTimeoutAndErrorWrappingUnchanged(t *testing.T) {
 	t.Run("timeout", func(t *testing.T) {
 		t.Parallel()
 		d, _ := gcTestDaemon(t)
-		_, open := gcFakeOpener(t, errors.New("gc fake: cut off"))
+		driverErr := errors.New("gc fake: cut off")
+		_, open := gcFakeOpener(t, driverErr)
 		d.maint.gcOpenDB = open
-		// A deadline already past makes the call's context expire before the
-		// statement runs, so the timeout branch is taken without a wait.
-		ctx, cancel := context.WithDeadline(context.Background(), time.Unix(0, 0))
-		t.Cleanup(cancel)
 
-		err := d.doltGCFull(ctx, "hq")
+		err := d.doltGCFull(deadlinePassedContext{}, "hq")
 		if err == nil || !strings.Contains(err.Error(), "dolt_gc --full: timeout:") {
 			t.Fatalf("doltGCFull() = %v, want a dolt_gc --full: timeout error", err)
 		}
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Errorf("doltGCFull() = %v, want it to wrap context.DeadlineExceeded", err)
+		if !errors.Is(err, driverErr) {
+			t.Errorf("doltGCFull() = %v, want it to wrap the driver error", err)
 		}
 	})
 
