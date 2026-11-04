@@ -58,6 +58,8 @@ spec:
               readOnly: true
         - name: dind
           image: data.forgejo.org/oci/docker:dind
+          args:
+            - --insecure-registry=forgejo:3000
           env:
             - name: DOCKER_TLS_CERTDIR
               value: /certs

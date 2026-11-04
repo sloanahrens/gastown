@@ -60,9 +60,18 @@ func compareGolden(t *testing.T, file string, got []byte) {
 	if err != nil {
 		t.Fatalf("reading %s: %v", path, err)
 	}
-	if !bytes.Equal(got, want) {
-		t.Errorf("%s does not match the renderer; re-run with -update if the change is intended\n--- %s\n%s--- renderer\n%s", path, path, want, got)
+	if msg := goldenMismatch(path, got, want); msg != "" {
+		t.Error(msg)
 	}
+}
+
+// goldenMismatch returns the message a golden comparison reports, or "" when got
+// is exactly want.
+func goldenMismatch(path string, got, want []byte) string {
+	if bytes.Equal(got, want) {
+		return ""
+	}
+	return fmt.Sprintf("%s does not match the renderer; re-run with -update if the change is intended\n--- %s\n%s--- renderer\n%s", path, path, want, got)
 }
 
 func containerNamed(t *testing.T, pod PodSpec, name string) Container {
@@ -87,14 +96,39 @@ func volumeNamed(t *testing.T, volumes []Volume, name string) Volume {
 	return Volume{}
 }
 
+// optionMounts returns the bind mounts a container.options string carries, keyed
+// by source. It reads the string the runner hands to the engine, so a mount
+// built with the wrong target is reported rather than matched as a prefix.
+func optionMounts(t *testing.T, options string) map[string]string {
+	t.Helper()
+	fields := strings.Fields(options)
+	mounts := make(map[string]string)
+	for i, field := range fields {
+		if field != "-v" {
+			continue
+		}
+		if i+1 >= len(fields) {
+			t.Fatalf("container.options %q ends with a -v and no mount", options)
+		}
+		src, dst, ok := strings.Cut(fields[i+1], ":")
+		if !ok {
+			t.Fatalf("container.options %q carries %q, which has no destination", options, fields[i+1])
+		}
+		mounts[src] = dst
+	}
+	return mounts
+}
+
 // configDoc is config.yml as the test reads it back: a shape separate from the
 // renderer's, so a renamed or dropped setting fails the read.
 type configDoc struct {
 	Runner struct {
-		File     string   `yaml:"file"`
-		Capacity int      `yaml:"capacity"`
-		Timeout  string   `yaml:"timeout"`
-		Labels   []string `yaml:"labels"`
+		File            string            `yaml:"file"`
+		Capacity        int               `yaml:"capacity"`
+		Envs            map[string]string `yaml:"envs"`
+		Timeout         string            `yaml:"timeout"`
+		ShutdownTimeout string            `yaml:"shutdown_timeout"`
+		Labels          []string          `yaml:"labels"`
 	} `yaml:"runner"`
 	Container struct {
 		Network      string   `yaml:"network"`
@@ -200,6 +234,9 @@ func TestRenderConfigMapGolden(t *testing.T) {
 	if doc.Runner.Timeout != RunnerTimeout {
 		t.Errorf("timeout = %q, want %q", doc.Runner.Timeout, RunnerTimeout)
 	}
+	if doc.Runner.ShutdownTimeout != ShutdownTimeout {
+		t.Errorf("shutdown_timeout = %q, want %q", doc.Runner.ShutdownTimeout, ShutdownTimeout)
+	}
 	if doc.Container.Network != containerNetwork {
 		t.Errorf("container.network = %q, want %q", doc.Container.Network, containerNetwork)
 	}
@@ -229,10 +266,104 @@ func TestRenderConfigMapGolden(t *testing.T) {
 		if want := "--add-host=" + ForgejoHostname + ":" + v.ForgejoHostIP; !strings.Contains(doc.Container.Options, want) {
 			t.Errorf("container.options %q does not carry %q", doc.Container.Options, want)
 		}
-		if want := []string{gomodCacheVolume, gocacheVolume, npmCacheVolume}; !slices.Equal(doc.Container.ValidVolumes, want) {
+		if want := []string{gomodCacheVolume, gocacheVolume, npmCacheVolume, certsClientDir}; !slices.Equal(doc.Container.ValidVolumes, want) {
 			t.Errorf("valid_volumes = %q, want %q", doc.Container.ValidVolumes, want)
 		}
 	})
+}
+
+// TestDindArgsInsecureRegistry drives the engine argument: a job's image comes
+// from Forgejo's package registry, which speaks plain HTTP, so dockerd must be
+// told that registry is insecure.
+func TestDindArgsInsecureRegistry(t *testing.T) {
+	t.Parallel()
+	pod := mustBuild(t, goldenValues()).Deployment.Spec.Template.Spec
+	dind := containerNamed(t, pod, dindContainerName)
+	if want := "--insecure-registry=forgejo:3000"; !slices.Contains(dind.Args, want) {
+		t.Errorf("the engine args = %q, want them to carry %q", dind.Args, want)
+	}
+	// The runner's entrypoint is forgejo-runner, which has no such flag: the
+	// argument belongs to the engine alone.
+	if args := containerNamed(t, pod, runnerContainerName).Args; len(args) != 0 {
+		t.Errorf("the runner args = %q, want none", args)
+	}
+}
+
+// TestGomodMountsAtGoPath drives the module cache mount: the volume mounts the
+// Go path the image owns, not a directory inside it, so the job user can write
+// its module cache.
+func TestGomodMountsAtGoPath(t *testing.T) {
+	t.Parallel()
+	doc := decodeConfig(t, mustBuild(t, goldenValues()))
+	mounts := optionMounts(t, doc.Container.Options)
+	if got, want := mounts[gomodCacheVolume], "/home/ci/go"; got != want {
+		t.Errorf("container.options mounts %s at %q, want %q", gomodCacheVolume, got, want)
+	}
+	for src, dst := range mounts {
+		if dst == "/home/ci/go/pkg/mod" || strings.HasPrefix(dst, "/home/ci/go/") {
+			t.Errorf("container.options mounts %s at %q, inside the Go path", src, dst)
+		}
+	}
+}
+
+// TestRunnerEnvsReachEngine drives runner.envs: they are how a job step learns
+// where the engine listens and which client certificate to present.
+func TestRunnerEnvsReachEngine(t *testing.T) {
+	t.Parallel()
+	doc := decodeConfig(t, mustBuild(t, goldenValues()))
+	want := map[string]string{
+		"DOCKER_HOST":       "tcp://localhost:2376",
+		"DOCKER_TLS_VERIFY": "1",
+		"DOCKER_CERT_PATH":  "/certs/client",
+	}
+	for name, value := range want {
+		if got := doc.Runner.Envs[name]; got != value {
+			t.Errorf("runner.envs %s = %q, want %q", name, got, value)
+		}
+	}
+	if len(doc.Runner.Envs) != len(want) {
+		t.Errorf("runner.envs = %q, want exactly %d entries", doc.Runner.Envs, len(want))
+	}
+}
+
+// TestJobOptionsInitAndCerts drives the job container's own settings: an init
+// process, the engine's client certificates mounted where DOCKER_CERT_PATH
+// points, and that path allowed as a volume.
+func TestJobOptionsInitAndCerts(t *testing.T) {
+	t.Parallel()
+	doc := decodeConfig(t, mustBuild(t, goldenValues()))
+	if !slices.Contains(strings.Fields(doc.Container.Options), "--init") {
+		t.Errorf("container.options %q does not carry --init", doc.Container.Options)
+	}
+	if got := optionMounts(t, doc.Container.Options)["/certs/client"]; got != "/certs/client" {
+		t.Errorf("container.options mounts /certs/client at %q, want %q", got, "/certs/client")
+	}
+	if !slices.Contains(doc.Container.ValidVolumes, "/certs/client") {
+		t.Errorf("valid_volumes = %q, want it to allow %q", doc.Container.ValidVolumes, "/certs/client")
+	}
+}
+
+// TestGoldenMismatchIsReported drives the exact comparison the golden tests use:
+// a document that differs from the golden by one line must be reported, so a
+// hand-edited golden cannot pass.
+func TestGoldenMismatchIsReported(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	if err := YAML(&buf, mustBuild(t, goldenValues()).Deployment); err != nil {
+		t.Fatalf("YAML: %v", err)
+	}
+	want := buf.Bytes()
+	path := filepath.Join("testdata", "deployment.yaml")
+	if msg := goldenMismatch(path, want, want); msg != "" {
+		t.Fatalf("the comparison reported %q for identical documents", msg)
+	}
+	changed := bytes.Replace(want, []byte("replicas: 1"), []byte("replicas: 2"), 1)
+	if bytes.Equal(changed, want) {
+		t.Fatalf("the deployment carries none of the line this test changes")
+	}
+	if msg := goldenMismatch(path, changed, want); !strings.Contains(msg, path) {
+		t.Errorf("a changed golden produced %q, want a mismatch naming %s", msg, path)
+	}
 }
 
 func TestRenderClaimsAndLimits(t *testing.T) {
