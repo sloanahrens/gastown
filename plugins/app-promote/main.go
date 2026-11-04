@@ -108,14 +108,16 @@ type env struct {
 }
 
 func main() {
-	os.Exit(run(realEnv()))
+	os.Exit(run(realEnv(os.Executable)))
 }
 
 // realEnv is everything a run from the daemon or by hand reads: the plugin
 // directory this executable sits in, the process's streams and environment, a
-// bounded HTTP client, and `gt promote`.
-func realEnv() env {
-	exe, err := os.Executable()
+// bounded HTTP client, and `gt promote`. executable is os.Executable in a run;
+// a test names the path so the layout a per-OS build keeps is driven through
+// this call rather than through pluginDirectory alone.
+func realEnv(executable func() (string, error)) env {
+	exe, err := executable()
 	return env{
 		pluginDir: pluginDirectory(exe, err, runtime.GOOS, runtime.GOARCH),
 		out:       os.Stdout,
