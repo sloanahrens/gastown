@@ -1011,6 +1011,7 @@ func TestLiveComposeRefusesMalformedExtraHost(t *testing.T) {
 		{"hostname with a space", "for gejo:10.0.0.2"},
 		{"address is neither IPv4 nor host-gateway", "forgejo:localhost"},
 		{"bare IPv6 address", "forgejo:::1"},
+		{"IPv4-mapped IPv6 address", "forgejo:::ffff:10.0.0.2"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1024,6 +1025,40 @@ func TestLiveComposeRefusesMalformedExtraHost(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), strconv.Quote(tc.entry)) {
 				t.Errorf("error = %q, want it to name the entry %q", err, tc.entry)
+			}
+		})
+	}
+}
+
+// A hostname names one address: the render writes one /etc/hosts line per
+// entry, so a repeat would leave the name's address to their order. Each
+// refusal names the repeated entry and the one it repeats (gt-gh4n5).
+func TestLiveComposeRefusesDuplicateExtraHost(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		first string
+		entry string
+	}{
+		{"same entry twice", "forgejo:10.0.0.2", "forgejo:10.0.0.2"},
+		{"same hostname, another address", "forgejo:10.0.0.2", "forgejo:10.0.0.3"},
+		{"same hostname in another case", "forgejo:10.0.0.2", "Forgejo:10.0.0.2"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec := liveSpec()
+			spec.ExtraHosts = []string{tc.first, "git.example:host-gateway", tc.entry}
+
+			out, err := templates.RenderDaemonCompose(spec)
+			if err == nil {
+				t.Fatalf("RenderDaemonCompose with %q after %q = a render, want a refusal:\n%s", tc.entry, tc.first, out)
+			}
+			if !strings.Contains(err.Error(), strconv.Quote(tc.entry)) {
+				t.Errorf("error = %q, want it to name the repeated entry %q", err, tc.entry)
+			}
+			if !strings.Contains(err.Error(), strconv.Quote(tc.first)) {
+				t.Errorf("error = %q, want it to name the first entry %q", err, tc.first)
 			}
 		})
 	}
