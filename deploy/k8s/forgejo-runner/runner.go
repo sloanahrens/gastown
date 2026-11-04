@@ -54,6 +54,9 @@ const (
 	ForgejoHostname = "forgejo"
 	// RunnerTimeout is the longest a job may run.
 	RunnerTimeout = "3h"
+	// ShutdownTimeout is how long the runner lets a running job finish before it
+	// exits: as long as the job timeout, so a shutdown never cuts a gate off.
+	ShutdownTimeout = "3h"
 	// Recreate is the Deployment's update strategy: a rollout stops the old pod
 	// before it starts the new one, so two engines never mount one dind data
 	// claim and two runners never open one registration file.
@@ -92,6 +95,11 @@ const (
 	configKey        = "config.yml"
 	containerNetwork = "host"
 
+	// dindInsecureRegistry is the engine argument that lets a job pull from
+	// Forgejo's package registry: it listens on the HTTP port 3000, which no
+	// certificate covers.
+	dindInsecureRegistry = "--insecure-registry=" + ForgejoHostname + ":3000"
+
 	// runnerFileName is where the operator's register step leaves the
 	// registration result: under the runner data mount, so the claim keeps it and
 	// no manifest carries it.
@@ -109,8 +117,11 @@ const (
 
 	// cacheMountRoot is the ci user's home in the job image: the account the live
 	// runner image gives jobs, whose home holds the Go and npm caches.
-	cacheMountRoot   = "/home/ci"
-	gomodMountPath   = cacheMountRoot + "/go/pkg/mod"
+	cacheMountRoot = "/home/ci"
+	// gomodMountPath is the Go path the image creates for the ci user, not the
+	// module cache inside it: a named volume first mounted at a path the image
+	// lacks is created root-owned, and the job user cannot write it (gt-9ui7q).
+	gomodMountPath   = cacheMountRoot + "/go"
 	gocacheMountPath = cacheMountRoot + "/.cache/go-build"
 	npmMountPath     = cacheMountRoot + "/.npm"
 
@@ -147,6 +158,15 @@ var cacheMounts = []struct {
 	{gomodCacheVolume, gomodMountPath},
 	{gocacheVolume, gocacheMountPath},
 	{npmCacheVolume, npmMountPath},
+}
+
+// jobEnvs reach every job step through runner.envs. The engine shares the pod's
+// network namespace, so the step reaches it on loopback, and the client
+// certificates the engine writes are mounted into the job at certsClientDir.
+var jobEnvs = []EnvVar{
+	{Name: "DOCKER_HOST", Value: "tcp://localhost:" + strconv.Itoa(dindPort)},
+	{Name: "DOCKER_TLS_VERIFY", Value: "1"},
+	{Name: "DOCKER_CERT_PATH", Value: certsClientDir},
 }
 
 // Share is a container's whole resource share. Requests equal limits, so the
@@ -290,7 +310,10 @@ func dindContainer(v Values) Container {
 		Name:  dindContainerName,
 		Image: DindImage,
 		// The image's entrypoint generates the CA and a client certificate into
-		// the shared directory and starts dockerd with TLS verification.
+		// the shared directory and starts dockerd with TLS verification. The
+		// arguments are dockerd's: the entrypoint passes everything starting
+		// with a dash through to it.
+		Args:            []string{dindInsecureRegistry},
 		Env:             []EnvVar{{Name: "DOCKER_TLS_CERTDIR", Value: certsDir}},
 		Resources:       containerResources(v.DindResources),
 		SecurityContext: &SecurityContext{Privileged: true},
@@ -447,7 +470,12 @@ func configYAML(v Values) string {
 	b.WriteString("runner:\n")
 	fmt.Fprintf(&b, "  file: %s\n", yamlScalar(runnerFileName))
 	fmt.Fprintf(&b, "  capacity: %d\n", v.Capacity)
+	b.WriteString("  envs:\n")
+	for _, env := range jobEnvs {
+		fmt.Fprintf(&b, "    %s: %s\n", env.Name, yamlScalar(env.Value))
+	}
 	fmt.Fprintf(&b, "  timeout: %s\n", yamlScalar(RunnerTimeout))
+	fmt.Fprintf(&b, "  shutdown_timeout: %s\n", yamlScalar(ShutdownTimeout))
 	b.WriteString("  labels:\n")
 	for _, label := range v.Labels {
 		fmt.Fprintf(&b, "    - %s\n", yamlScalar(label))
@@ -459,18 +487,21 @@ func configYAML(v Values) string {
 	for _, mount := range cacheMounts {
 		fmt.Fprintf(&b, "    - %s\n", yamlScalar(mount.volume))
 	}
+	fmt.Fprintf(&b, "    - %s\n", yamlScalar(certsClientDir))
 	return b.String()
 }
 
 // containerOptions is what every job container is started with: the forgejo
-// alias its own /etc/hosts does not inherit from the pod, and the three cache
-// volumes.
+// alias its own /etc/hosts does not inherit from the pod, an init process that
+// reaps the job's orphans, the three cache volumes, and the engine's client
+// certificates the job steps read through DOCKER_CERT_PATH.
 func containerOptions(v Values) string {
-	parts := make([]string, 0, 1+2*len(cacheMounts))
-	parts = append(parts, "--add-host="+ForgejoHostname+":"+v.ForgejoHostIP)
+	parts := make([]string, 0, 3+2*len(cacheMounts))
+	parts = append(parts, "--add-host="+ForgejoHostname+":"+v.ForgejoHostIP, "--init")
 	for _, mount := range cacheMounts {
 		parts = append(parts, "-v", mount.volume+":"+mount.path)
 	}
+	parts = append(parts, "-v", certsClientDir+":"+certsClientDir)
 	return strings.Join(parts, " ")
 }
 
@@ -582,6 +613,7 @@ type Container struct {
 	Name            string             `yaml:"name"`
 	Image           string             `yaml:"image"`
 	Command         []string           `yaml:"command,omitempty"`
+	Args            []string           `yaml:"args,omitempty"`
 	WorkingDir      string             `yaml:"workingDir,omitempty"`
 	Env             []EnvVar           `yaml:"env,omitempty"`
 	Resources       ContainerResources `yaml:"resources"`
