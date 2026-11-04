@@ -166,13 +166,31 @@ func referenceOnly(constraints, path string) bool {
 	return total > 0 && cued == total
 }
 
+// addsRewrites and readsRewrites are the rewrites a missing-path refusal prints,
+// as format strings with the path: the forms the cue grammar above reads for a
+// path the bead adds, and for one it only reads. The rewrite test lints each
+// form, so a form the grammar stops reading fails a test.
+var (
+	addsRewrites  = []string{"create %s", "%s is created by bead <id>"}
+	readsRewrites = []string{"see %s"}
+)
+
+// rewriteList renders each form with path, in backticks, joined by "or".
+func rewriteList(forms []string, path string) string {
+	quoted := make([]string, len(forms))
+	for i, form := range forms {
+		quoted[i] = "`" + fmt.Sprintf(form, path) + "`"
+	}
+	return strings.Join(quoted, " or ")
+}
+
 // targetFixHint is the sentence a missing-path refusal appends: the cues that
 // pass a path the target branch need not hold, written with the first missing
 // path so the filer can copy the rewrite, and where the cue must sit. With
 // several paths missing the hint is an example, since the same two rewrites
 // fix each of them (gt-hgt9j.1).
 func targetFixHint(path string, several bool) string {
-	fix := fmt.Sprintf("write `create %s` or `%s is created by bead <id>` when the bead adds the file, or `see %s` when it only reads it; the cue must sit directly beside the path.", path, path, path)
+	fix := fmt.Sprintf("write %s when the bead adds the file, or %s when it only reads it; the cue must sit directly beside the path.", rewriteList(addsRewrites, path), rewriteList(readsRewrites, path))
 	if several {
 		return "To fix each, for example, " + fix
 	}

@@ -1,6 +1,7 @@
 package specdispatch
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -274,22 +275,36 @@ func TestTargetRefusalHintStaysOneLine(t *testing.T) {
 	}
 }
 
-// The rewrite the refusal prints is the rewrite that passes: a Constraints body
-// carrying the refusal text lints clean against the same target, so a filer can
-// copy it and the next run clears (gt-hgt9j.1).
+// The rewrite the refusal prints is the rewrite that passes: each form the hint
+// prints is printed, and a Constraints body holding only that form lints clean
+// against the same target, so a filer can copy it and the next run clears. The
+// body names no other form of the path, so each cue is read on its own: a body
+// carrying the bare path next to the cue would pass through any one cue
+// (gt-hgt9j.1).
 func TestTargetRefusalHintIsTheRewriteThatPasses(t *testing.T) {
 	t.Parallel()
+	const path = "internal/cmd/bird.go"
 	target := targetOf("internal/cmd/spec.go")
-	s := specNaming("A thing exists.", "Change internal/cmd/bird.go.")
+	s := specNaming("A thing exists.", "Change "+path+".")
 	s.Target = target
 	v := Lint(s, defaultTemplate())
 	if v.Route != RouteRefuse {
 		t.Fatalf("Lint = %s, want the refusal to copy the hint from: %s", v.Route, v.Line(s.ID))
 	}
-	fixed := specNaming("A thing exists.", "Change internal/cmd/bird.go. "+v.Reason)
-	fixed.Target = target
-	if got := Lint(fixed, defaultTemplate()); !got.Clean() {
-		t.Errorf("a bead carrying the printed refusal was refused: %s", got.Line(fixed.ID))
+	forms := append(append([]string{}, addsRewrites...), readsRewrites...)
+	for _, form := range forms {
+		rewrite := fmt.Sprintf(form, path)
+		t.Run(rewrite, func(t *testing.T) {
+			t.Parallel()
+			if !strings.Contains(v.Reason, "`"+rewrite+"`") {
+				t.Errorf("Reason = %q, want the rewrite %q printed", v.Reason, rewrite)
+			}
+			fixed := specNaming("A thing exists.", "Do the work: "+rewrite+".")
+			fixed.Target = target
+			if got := Lint(fixed, defaultTemplate()); !got.Clean() {
+				t.Errorf("a bead carrying only %q was refused: %s", rewrite, got.Line(fixed.ID))
+			}
+		})
 	}
 }
 
