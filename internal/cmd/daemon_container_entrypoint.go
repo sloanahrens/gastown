@@ -102,10 +102,11 @@ empty host or one beginning with a dash is refused: the live project's command
 line stays empty. Only an install writes the host into the town, so a start
 that runs none refuses a host the installed town does not already name.
 
-With --om-token-file, the file's contents (trimmed) become
-CLAUDE_CODE_OAUTH_TOKEN in the daemon's environment; an unreadable or empty file
-refuses. A container that sets ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN is
-refused, since either outranks the token and bills API rates.
+With --om-token-file, the file's contents (every whitespace character removed)
+become CLAUDE_CODE_OAUTH_TOKEN in the daemon's environment; a file unreadable or
+empty after that refuses. A container that sets ANTHROPIC_API_KEY or
+ANTHROPIC_AUTH_TOKEN is refused, since either outranks the token and bills API
+rates.
 
 With --forge-host and --forge-token-file, the container's git is told to ask
 'gt git-credential-forgejo' for that Forgejo's credentials, so the daemon's
@@ -448,10 +449,13 @@ func (e containerEntrypoint) refuseAPICredentials() error {
 
 // omTokenEnv returns the environment the daemon is exec'd with beyond this
 // process's own: the subscription token from the file --om-token-file names, or
-// nothing when it is unset. The token is trimmed of surrounding whitespace and
-// is never put into an error, a message or an argv; an unreadable or empty file
-// is refused naming the path alone. The file's mode is not checked: a bind mount
-// through Docker Desktop reports ownership and modes unreliably.
+// nothing when it is unset. A token is one run of printable characters, so every
+// ASCII whitespace character (space, tab, CR, LF) is removed from the file's
+// contents, not only the ones at the ends: a file saved hard-wrapped holds a
+// line break inside the token, which the claude CLI rejects. The token is never
+// put into an error, a message or an argv; a file unreadable or empty after the
+// strip is refused naming the path alone. The file's mode is not checked: a bind
+// mount through Docker Desktop reports ownership and modes unreliably.
 func (e containerEntrypoint) omTokenEnv() ([]string, error) {
 	path := e.omTokenFile
 	if path == "" {
@@ -461,11 +465,22 @@ func (e containerEntrypoint) omTokenEnv() ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read the om token file %s: it could not be read; nothing was started", path)
 	}
-	token := strings.TrimSpace(text)
+	token := strings.Map(dropASCIIWhitespace, text)
 	if token == "" {
 		return nil, fmt.Errorf("the om token file %s is empty; nothing was started", path)
 	}
 	return []string{omTokenEnv + "=" + token}, nil
+}
+
+// dropASCIIWhitespace returns r unless it is an ASCII whitespace character a
+// hard-wrapped file can put inside a token: space, tab, CR or LF, which is
+// dropped.
+func dropASCIIWhitespace(r rune) rune {
+	switch r {
+	case ' ', '\t', '\r', '\n':
+		return -1
+	}
+	return r
 }
 
 // mergeEnv returns base with every variable add names replaced by add's value,
