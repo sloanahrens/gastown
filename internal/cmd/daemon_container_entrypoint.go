@@ -8,10 +8,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
 )
@@ -37,6 +39,12 @@ const (
 	containerOMTokenFileFlag = config.OMTokenFileFlag
 	// omTokenEnv is the variable the claude CLI reads a subscription token from.
 	omTokenEnv = "CLAUDE_CODE_OAUTH_TOKEN" //nolint:gosec // an environment variable name, not a credential
+
+	// containerImagePluginsDir is where the image carries the Linux plugin
+	// binaries, one directory per plugin holding the binary of the same name.
+	// The town's plugin directories live on the shared town volume, so the
+	// entrypoint copies each binary into the town at start (gt-gg9hv.10).
+	containerImagePluginsDir = "/usr/local/lib/gt/plugins"
 )
 
 // entrypointFlags are the values the command's flags parsed.
@@ -160,7 +168,11 @@ type containerEntrypoint struct {
 	exists    func(path string) (bool, error)
 	create    func(path string) error // creates an empty file, failing if the path exists (O_EXCL)
 	remove    func(path string) error // removes an entry and what it holds
-	scratch   bool                    // --scratch-town: the scratch project asked for a scratch town
+	// installPlugins puts the image's plugin binaries into the town's plugin
+	// directories; it runs after a scratch install has made them and before the
+	// daemon is exec'd.
+	installPlugins func(townRoot string) error
+	scratch        bool // --scratch-town: the scratch project asked for a scratch town
 	// omTokenFile is --om-token-file: the file the om subscription token is read
 	// from; "" loads no token.
 	omTokenFile string
@@ -194,17 +206,22 @@ const (
 // runDaemonContainerEntrypoint runs the entrypoint with the real seams.
 func runDaemonContainerEntrypoint(flags entrypointFlags) error {
 	return runContainerEntrypoint(containerEntrypoint{
-		self:        os.Executable,
-		getenv:      os.Getenv,
-		run:         runEntrypointCommand,
-		exec:        execEntrypointArgv,
-		readFile:    readTextFile,
-		mountinfo:   func() (string, error) { return readTextFile(containerMountinfo) },
-		dirNames:    listDirNames,
-		lstat:       entrypointLstat,
-		exists:      entrypointPathExists,
-		create:      entrypointCreateExclusive,
-		remove:      os.RemoveAll,
+		self:      os.Executable,
+		getenv:    os.Getenv,
+		run:       runEntrypointCommand,
+		exec:      execEntrypointArgv,
+		readFile:  readTextFile,
+		mountinfo: func() (string, error) { return readTextFile(containerMountinfo) },
+		dirNames:  listDirNames,
+		lstat:     entrypointLstat,
+		exists:    entrypointPathExists,
+		create:    entrypointCreateExclusive,
+		remove:    os.RemoveAll,
+		installPlugins: func(townRoot string) error {
+			return installPluginBinaries(containerImagePluginsDir, townRoot, func(format string, args ...any) {
+				fmt.Fprintf(os.Stderr, format+"\n", args...)
+			})
+		},
 		scratch:     flags.scratch,
 		omTokenFile: flags.omTokenFile,
 		doltHost:    flags.doltHost,
@@ -338,6 +355,13 @@ func runContainerEntrypoint(e containerEntrypoint) error {
 		if err := e.installScratchTown(self, townRoot); err != nil {
 			return err
 		}
+	}
+	// The daemon runs the town's plugin binaries itself, so the image's Linux
+	// builds are in place before it starts; a scratch install has made the
+	// plugin directories by now. A copy that fails refuses rather than let the
+	// daemon run the Mac binaries the town volume also holds (gt-gg9hv.10).
+	if err := e.installPlugins(townRoot); err != nil {
+		return fmt.Errorf("install the image's plugin binaries under %s: %w; the daemon was not started", townRoot, err)
 	}
 	if err := e.exec([]string{self, "daemon", "run"}, daemonEnv); err != nil {
 		return fmt.Errorf("exec gt daemon run: %w", err)
@@ -747,6 +771,77 @@ func (e containerEntrypoint) setForgeCredentialHelper(self string) error {
 	helper := "!" + self + " " + config.GitCredentialForgejoCommand + " --host " + host + " --token-file " + e.forgeTokenFile
 	if err := e.run([]string{"git", "config", "--global", "credential.http://" + host + ".helper", helper}); err != nil {
 		return fmt.Errorf("set the git credential helper for %s: %w", host, err)
+	}
+	return nil
+}
+
+// installPluginBinaries copies each plugin binary the image carries into the
+// town's plugin directory for this platform, where the plugin runner looks for
+// it: bin/<goos>-<goarch>/<name> (gt-gg9hv.6). The town's plugin set comes from
+// the shared volume, so a plugin the town carries no plugin.md for is skipped
+// and logged once, and an image directory that does not exist is not an error.
+// The roots are parameters, so a test uses temporary directories.
+func installPluginBinaries(imageDir, townRoot string, logf func(format string, args ...any)) error {
+	entries, err := os.ReadDir(imageDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read the image's plugin directory %s: %w", imageDir, err)
+	}
+	platform := runtime.GOOS + "-" + runtime.GOARCH
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		townPluginDir := filepath.Join(townRoot, "plugins", name)
+		hasDefinition, err := townPluginHasDefinition(townPluginDir)
+		if err != nil {
+			return fmt.Errorf("read the town's plugin.md under %s: %w", townPluginDir, err)
+		}
+		if !hasDefinition {
+			logf("plugin %q is not in the town's plugin directory, so the image's binary for it was not installed", name)
+			continue
+		}
+		source := filepath.Join(imageDir, name, name)
+		dest := filepath.Join(townPluginDir, "bin", platform, name)
+		if err := installPluginBinary(source, dest); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// townPluginHasDefinition reports whether pluginDir holds the plugin.md the
+// scanner loads. A plugin.md that is not a regular file is not one: the scanner
+// cannot read it and skips the plugin.
+func townPluginHasDefinition(pluginDir string) (bool, error) {
+	info, err := os.Stat(filepath.Join(pluginDir, "plugin.md"))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return info.Mode().IsRegular(), nil
+}
+
+// installPluginBinary copies source to dest with mode 0755. atomicfile.WriteFile
+// writes a temporary file in dest's own directory and renames it over dest, so
+// a reader sees the old binary or the new one and never a partial file, and an
+// existing binary is replaced.
+func installPluginBinary(source, dest string) error {
+	data, err := os.ReadFile(source)
+	if err != nil {
+		return fmt.Errorf("read the image's plugin binary %s: %w", source, err)
+	}
+	dir := filepath.Dir(dest)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create the plugin binary directory %s: %w", dir, err)
+	}
+	if err := atomicfile.WriteFile(dest, data, 0o755); err != nil {
+		return fmt.Errorf("install the plugin binary %s: %w", dest, err)
 	}
 	return nil
 }

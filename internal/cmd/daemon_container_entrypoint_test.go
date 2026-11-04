@@ -2,9 +2,11 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -61,7 +63,14 @@ type entrypointRig struct {
 	forgeHostSet      bool
 	forgeTokenFile    string
 	forgeTokenFileSet bool
-	calls             [][]string
+	// pluginTownRoots is the town root each plugin install was given, pluginRanAt
+	// is len(calls) when the last one ran (so a test sees its place in the
+	// command sequence without adding to the recorded commands), and pluginErr
+	// fails it.
+	pluginTownRoots []string
+	pluginRanAt     int
+	pluginErr       error
+	calls           [][]string
 }
 
 // scratchRig is a container whose town root is the scratch town: every
@@ -138,6 +147,11 @@ func (r *entrypointRig) entrypoint() containerEntrypoint {
 		remove: func(path string) error {
 			r.removed = append(r.removed, path)
 			return r.removeErr
+		},
+		installPlugins: func(townRoot string) error {
+			r.pluginTownRoots = append(r.pluginTownRoots, townRoot)
+			r.pluginRanAt = len(r.calls)
+			return r.pluginErr
 		},
 		scratch:     r.scratch,
 		omTokenFile: r.omTokenFile,
@@ -1806,5 +1820,293 @@ func TestContainerEntrypointRefusesAGtPathAShellWouldRead(t *testing.T) {
 		if strings.Contains(strings.Join(c, " "), "credential") {
 			t.Errorf("a credential helper was set despite the refusal: %v", c)
 		}
+	}
+}
+
+// writeEntrypointFile writes one file under a fresh parent directory.
+func writeEntrypointFile(t *testing.T, path string, data []byte, perm os.FileMode) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, data, perm); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// pluginTownDir makes the town's plugin directory for name with the plugin.md
+// the scanner loads, and returns the destination the image's binary takes.
+func pluginTownDir(t *testing.T, townRoot, name string) string {
+	t.Helper()
+	writeEntrypointFile(t, filepath.Join(townRoot, "plugins", name, "plugin.md"),
+		[]byte("+++\nname = \""+name+"\"\n+++\n"), 0o644)
+	return filepath.Join(townRoot, "plugins", name, "bin", runtime.GOOS+"-"+runtime.GOARCH, name)
+}
+
+// The image's binary for a plugin the town carries lands in this platform's
+// directory, executable, with the image's bytes.
+func TestEntrypointPluginsInstallsIntoPerOSDir(t *testing.T) {
+	t.Parallel()
+	imageDir := t.TempDir()
+	townRoot := t.TempDir()
+	writeEntrypointFile(t, filepath.Join(imageDir, "app-promote", "app-promote"), []byte("linux binary"), 0o644)
+	dest := pluginTownDir(t, townRoot, "app-promote")
+
+	if err := installPluginBinaries(imageDir, townRoot, func(string, ...any) {}); err != nil {
+		t.Fatalf("installPluginBinaries: %v", err)
+	}
+
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("read installed binary: %v", err)
+	}
+	if string(got) != "linux binary" {
+		t.Errorf("installed binary = %q, want the image's bytes", got)
+	}
+	info, err := os.Stat(dest)
+	if err != nil {
+		t.Fatalf("stat installed binary: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o755 {
+		t.Errorf("installed binary mode = %o, want 0755", perm)
+	}
+}
+
+// An older per-platform binary is replaced in place, and the atomic write
+// leaves no temporary file behind.
+func TestEntrypointPluginsReplacesAnExistingBinary(t *testing.T) {
+	t.Parallel()
+	imageDir := t.TempDir()
+	townRoot := t.TempDir()
+	writeEntrypointFile(t, filepath.Join(imageDir, "tool-updater", "tool-updater"), []byte("new"), 0o644)
+	dest := pluginTownDir(t, townRoot, "tool-updater")
+	writeEntrypointFile(t, dest, []byte("old"), 0o755)
+
+	if err := installPluginBinaries(imageDir, townRoot, func(string, ...any) {}); err != nil {
+		t.Fatalf("installPluginBinaries: %v", err)
+	}
+
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("read replaced binary: %v", err)
+	}
+	if string(got) != "new" {
+		t.Errorf("replaced binary = %q, want the image's bytes", got)
+	}
+	entries, err := os.ReadDir(filepath.Dir(dest))
+	if err != nil {
+		t.Fatalf("read the platform directory: %v", err)
+	}
+	var names []string
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	if !slices.Equal(names, []string{"tool-updater"}) {
+		t.Errorf("the platform directory holds %v, want only the installed binary", names)
+	}
+}
+
+// The town's plugin set comes from the shared volume: a plugin the town carries
+// no plugin.md for is skipped, logged once, and nothing is written for it.
+func TestEntrypointPluginsSkipsAPluginTheTownLacks(t *testing.T) {
+	t.Parallel()
+	imageDir := t.TempDir()
+	townRoot := t.TempDir()
+	writeEntrypointFile(t, filepath.Join(imageDir, "intruder", "intruder"), []byte("linux binary"), 0o755)
+	pluginTownDir(t, townRoot, "known")
+	var logged []string
+	logf := func(format string, args ...any) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+
+	if err := installPluginBinaries(imageDir, townRoot, logf); err != nil {
+		t.Fatalf("installPluginBinaries: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(townRoot, "plugins", "intruder")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the plugin the town lacks was written: stat error = %v", err)
+	}
+	if len(logged) != 1 {
+		t.Fatalf("logged %d lines, want exactly one: %v", len(logged), logged)
+	}
+	if !strings.Contains(logged[0], "intruder") {
+		t.Errorf("log line %q does not name the skipped plugin", logged[0])
+	}
+}
+
+// The image may carry no plugins at all, and so may have no plugin directory.
+func TestEntrypointPluginsMissingSourceIsNotAnError(t *testing.T) {
+	t.Parallel()
+	if err := installPluginBinaries(filepath.Join(t.TempDir(), "absent"), t.TempDir(), func(string, ...any) {}); err != nil {
+		t.Fatalf("installPluginBinaries with an absent source root: %v, want nil", err)
+	}
+}
+
+// An image plugin directory with no regular binary of its own name is a broken
+// image: the start refuses rather than leave the daemon to run the Mac binary
+// the town volume also holds.
+func TestEntrypointPluginsRefusesAnImagePluginWithoutABinary(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		write func(t *testing.T, pluginDir string)
+	}{
+		{"no binary", func(*testing.T, string) {}},
+		{"a directory named as the binary", func(t *testing.T, pluginDir string) {
+			if err := os.MkdirAll(filepath.Join(pluginDir, "broken"), 0o755); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			imageDir := t.TempDir()
+			townRoot := t.TempDir()
+			pluginDir := filepath.Join(imageDir, "broken")
+			if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+				t.Fatalf("mkdir the image's plugin dir: %v", err)
+			}
+			tc.write(t, pluginDir)
+			pluginTownDir(t, townRoot, "broken")
+
+			err := installPluginBinaries(imageDir, townRoot, func(string, ...any) {})
+			if err == nil || !strings.Contains(err.Error(), "broken") {
+				t.Fatalf("error = %v, want a refusal naming the plugin", err)
+			}
+		})
+	}
+}
+
+// The source root and each plugin directory are read as the directories they
+// must be: a file in their place is a refusal, not an empty plugin set.
+func TestEntrypointPluginsRefusesAnUnusableSource(t *testing.T) {
+	t.Parallel()
+	t.Run("the source root is a file", func(t *testing.T) {
+		t.Parallel()
+		imageDir := filepath.Join(t.TempDir(), "plugins")
+		writeEntrypointFile(t, imageDir, []byte("not a directory"), 0o644)
+
+		err := installPluginBinaries(imageDir, t.TempDir(), func(string, ...any) {})
+		if err == nil || !strings.Contains(err.Error(), imageDir) {
+			t.Fatalf("error = %v, want a refusal naming %s", err, imageDir)
+		}
+	})
+	t.Run("the town's plugin path is a file", func(t *testing.T) {
+		t.Parallel()
+		imageDir := t.TempDir()
+		writeEntrypointFile(t, filepath.Join(imageDir, "broken", "broken"), []byte("binary"), 0o755)
+		townRoot := t.TempDir()
+		writeEntrypointFile(t, filepath.Join(townRoot, "plugins", "broken"), []byte("not a directory"), 0o644)
+
+		err := installPluginBinaries(imageDir, townRoot, func(string, ...any) {})
+		if err == nil || !strings.Contains(err.Error(), "plugin.md") {
+			t.Fatalf("error = %v, want a refusal naming the town's plugin.md", err)
+		}
+	})
+}
+
+// A town plugin directory whose bin path cannot be a directory, or whose
+// binary path is an existing directory, refuses the start.
+func TestEntrypointPluginsRefusesADestinationItCannotWrite(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		write func(t *testing.T, townRoot string)
+	}{
+		{"a file where the platform directory belongs", func(t *testing.T, townRoot string) {
+			writeEntrypointFile(t, filepath.Join(townRoot, "plugins", "broken", "bin"), []byte("not a directory"), 0o644)
+		}},
+		{"a directory where the binary belongs", func(t *testing.T, townRoot string) {
+			if err := os.MkdirAll(pluginTownDir(t, townRoot, "broken"), 0o755); err != nil {
+				t.Fatalf("mkdir the binary path: %v", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			imageDir := t.TempDir()
+			writeEntrypointFile(t, filepath.Join(imageDir, "broken", "broken"), []byte("binary"), 0o755)
+			townRoot := t.TempDir()
+			pluginTownDir(t, townRoot, "broken")
+			tc.write(t, townRoot)
+
+			if err := installPluginBinaries(imageDir, townRoot, func(string, ...any) {}); err == nil {
+				t.Fatal("installPluginBinaries wrote a binary it cannot place, want a refusal")
+			}
+		})
+	}
+}
+
+// A file in the image's plugin root is not a plugin directory, even when the
+// town has a plugin of that name: it is skipped rather than read as a binary.
+func TestEntrypointPluginsIgnoresAFileInTheSourceRoot(t *testing.T) {
+	t.Parallel()
+	imageDir := t.TempDir()
+	townRoot := t.TempDir()
+	writeEntrypointFile(t, filepath.Join(imageDir, "app-promote"), []byte("not a directory"), 0o644)
+	pluginTownDir(t, townRoot, "app-promote")
+
+	if err := installPluginBinaries(imageDir, townRoot, func(string, ...any) {}); err != nil {
+		t.Fatalf("installPluginBinaries: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(townRoot, "plugins", "app-promote", "bin")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a binary was installed from a file: stat error = %v", err)
+	}
+}
+
+// A plugin.md that is not a regular file is not one the scanner loads, so the
+// image's binary is skipped and logged exactly once.
+func TestEntrypointPluginsSkipsAPluginWhoseDefinitionIsNotAFile(t *testing.T) {
+	t.Parallel()
+	imageDir := t.TempDir()
+	townRoot := t.TempDir()
+	writeEntrypointFile(t, filepath.Join(imageDir, "broken", "broken"), []byte("linux binary"), 0o755)
+	if err := os.MkdirAll(filepath.Join(townRoot, "plugins", "broken", "plugin.md"), 0o755); err != nil {
+		t.Fatalf("mkdir the plugin.md directory: %v", err)
+	}
+	var logged []string
+	logf := func(format string, args ...any) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+
+	if err := installPluginBinaries(imageDir, townRoot, logf); err != nil {
+		t.Fatalf("installPluginBinaries: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(townRoot, "plugins", "broken", "bin")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a binary was installed for a plugin the scanner skips: stat error = %v", err)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "broken") {
+		t.Errorf("logged %v, want one line naming the skipped plugin", logged)
+	}
+}
+
+// The plugin binaries are in place before the daemon starts: the install runs
+// for the town root, immediately before the exec.
+func TestContainerEntrypointInstallsPluginsBeforeTheDaemonExec(t *testing.T) {
+	t.Parallel()
+	r := townRig()
+	if err := runContainerEntrypoint(r.entrypoint()); err != nil {
+		t.Fatalf("runContainerEntrypoint: %v", err)
+	}
+	if !slices.Equal(r.pluginTownRoots, []string{entrypointTown}) {
+		t.Errorf("plugin installs ran for %v, want the town root once", r.pluginTownRoots)
+	}
+	if want := len(r.calls) - 1; r.pluginRanAt != want {
+		t.Errorf("the plugin install ran after %d commands, want %d (just before the daemon exec)", r.pluginRanAt, want)
+	}
+}
+
+// A failed plugin copy refuses and the daemon is never exec'd.
+func TestContainerEntrypointAPluginInstallFailureStopsBeforeTheDaemonExec(t *testing.T) {
+	t.Parallel()
+	r := townRig()
+	r.pluginErr = errors.New("copy failed")
+	err := runContainerEntrypoint(r.entrypoint())
+	if err == nil || !strings.Contains(err.Error(), "plugin") {
+		t.Fatalf("error = %v, want a refusal naming the plugin install", err)
+	}
+	if n := r.execCalls(); n != 0 {
+		t.Errorf("the daemon was exec'd %d times after a failed plugin install, want none", n)
 	}
 }
