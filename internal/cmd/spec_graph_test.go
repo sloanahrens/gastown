@@ -251,11 +251,13 @@ func TestSpecGraphJSON(t *testing.T) {
 }
 
 // TestSpecGraphJSONWriteFailure: a stdout that refuses the report fails the
-// run rather than reporting a graph whose answer was never delivered.
+// run rather than reporting a graph whose answer was never delivered. The epic
+// has one child, since an epic with none is refused before any report is made.
 func TestSpecGraphJSONWriteFailure(t *testing.T) {
 	t.Parallel()
 	db := beadsfake.New()
 	epic := mustBead(t, db, beads.CreateOptions{ID: "gt-epic", Title: "epic"})
+	mustBead(t, db, beads.CreateOptions{ID: "gt-epic.1", Title: "one", Parent: epic.ID})
 	writeErr := errors.New("stdout refused")
 
 	var errOut bytes.Buffer
@@ -275,13 +277,17 @@ func TestSpecGraphUnreadableChildFailsClosed(t *testing.T) {
 		name         string
 		description  string
 		unknownEpic  bool
+		epicNil      bool
 		childrenErr  bool
 		childShowErr bool
+		childNil     bool
 		wantNamed    string
 	}{
 		{name: "unknown epic", unknownEpic: true, wantNamed: "gt-missing"},
+		{name: "epic read returns no bead", epicNil: true, wantNamed: "gt-epic"},
 		{name: "children read fails", childrenErr: true, wantNamed: "gt-epic"},
 		{name: "child cannot be read", childShowErr: true, wantNamed: "gt-epic.2"},
+		{name: "child read returns no bead", childNil: true, wantNamed: "gt-epic.2"},
 		{name: "files section does not parse", description: "## Files\ncreate no colon", wantNamed: "gt-epic.2"},
 		{name: "interfaces section does not parse", description: "## Interfaces\nDefines: Alpha\nleftover text", wantNamed: "gt-epic.2"},
 	}
@@ -300,10 +306,16 @@ func TestSpecGraphUnreadableChildFailsClosed(t *testing.T) {
 					return nil, errors.New("children read refused")
 				}
 			}
-			if tc.childShowErr {
+			if tc.childShowErr || tc.childNil || tc.epicNil {
 				reads.show = func(id string) (*beads.Issue, error) {
-					if id == "gt-epic.2" {
+					if id == "gt-epic.2" && tc.childShowErr {
 						return nil, errors.New("show refused")
+					}
+					if id == "gt-epic.2" && tc.childNil {
+						return nil, nil
+					}
+					if id == "gt-epic" && tc.epicNil {
+						return nil, nil
 					}
 					return db.Show(id)
 				}
@@ -326,6 +338,136 @@ func TestSpecGraphUnreadableChildFailsClosed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSpecGraphEmptyEpicFailsClosed: an epic with no children is refused and
+// named, never printed as a clean graph.
+func TestSpecGraphEmptyEpicFailsClosed(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	epic := mustBead(t, db, beads.CreateOptions{ID: "gt-epic", Title: "epic"})
+
+	var out, errOut bytes.Buffer
+	err := runSpecGraphAt(&out, &errOut, specGraphFixture(db), epic.ID, false)
+	if code, silent := IsSilentExit(err); !silent || code != specLintExitRefused {
+		t.Fatalf("runSpecGraphAt = %v, want a silent exit %d\nstderr: %s", err, specLintExitRefused, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "gt-epic has no children") {
+		t.Errorf("stderr = %q, want it naming the childless epic", errOut.String())
+	}
+	if out.Len() != 0 {
+		t.Errorf("stdout = %q, want no findings for an epic with no children", out.String())
+	}
+}
+
+// TestSpecGraphCreateCollisionRefuses: two unordered beads that create the same
+// file exit 1 naming both beads and the path, and the same pair with an edge
+// between them is not a collision.
+func TestSpecGraphCreateCollisionRefuses(t *testing.T) {
+	t.Parallel()
+
+	t.Run("unordered pair exits 1", func(t *testing.T) {
+		t.Parallel()
+		db := beadsfake.New()
+		epic := mustBead(t, db, beads.CreateOptions{ID: "gt-epic", Title: "epic"})
+		mustBead(t, db, beads.CreateOptions{
+			ID: "gt-epic.1", Title: "one", Parent: epic.ID,
+			Description: "## Files\ncreate: shared.go",
+		})
+		mustBead(t, db, beads.CreateOptions{
+			ID: "gt-epic.2", Title: "two", Parent: epic.ID,
+			Description: "## Files\ncreate: shared.go",
+		})
+
+		var out, errOut bytes.Buffer
+		err := runSpecGraphAt(&out, &errOut, specGraphFixture(db), epic.ID, false)
+		if code, silent := IsSilentExit(err); !silent || code != specLintExitRefused {
+			t.Fatalf("runSpecGraphAt = %v, want a silent exit %d", err, specLintExitRefused)
+		}
+		line := findGraphFinding(t, specGraphLines(out.String()), "shared-create")
+		for _, want := range []string{"gt-epic.1", "gt-epic.2", "shared.go"} {
+			if !strings.Contains(line, want) {
+				t.Errorf("finding = %q, want it naming %q", line, want)
+			}
+		}
+	})
+
+	t.Run("ordered pair exits 0", func(t *testing.T) {
+		t.Parallel()
+		db := beadsfake.New()
+		epic := mustBead(t, db, beads.CreateOptions{ID: "gt-epic", Title: "epic"})
+		mustBead(t, db, beads.CreateOptions{
+			ID: "gt-epic.1", Title: "one", Parent: epic.ID,
+			Description: "## Files\ncreate: shared.go",
+		})
+		mustBead(t, db, beads.CreateOptions{
+			ID: "gt-epic.2", Title: "two", Parent: epic.ID,
+			Description: "## Files\ncreate: shared.go",
+		})
+		if err := db.AddDependency("gt-epic.2", "gt-epic.1"); err != nil {
+			t.Fatal(err)
+		}
+
+		var out, errOut bytes.Buffer
+		if err := runSpecGraphAt(&out, &errOut, specGraphFixture(db), epic.ID, false); err != nil {
+			t.Fatalf("runSpecGraphAt = %v, want exit 0 for an ordered pair\nstderr: %s", err, errOut.String())
+		}
+		if out.Len() != 0 {
+			t.Errorf("ordered pair printed %q, want no findings", out.String())
+		}
+	})
+}
+
+// TestSpecGraphProductionReads: runSpecGraph reads the epic and its children
+// through the stores it is given, which is the path a bd-backed run takes. The
+// fake stores answer from one database, so the findings a run prints are the
+// ones the production reads produced.
+func TestSpecGraphProductionReads(t *testing.T) {
+	t.Parallel()
+
+	t.Run("epic and children come through the stores", func(t *testing.T) {
+		t.Parallel()
+		db := beadsfake.New()
+		epic := mustBead(t, db, beads.CreateOptions{ID: "gt-epic", Title: "epic"})
+		mustBead(t, db, beads.CreateOptions{
+			ID: "gt-epic.1", Title: "one", Parent: epic.ID,
+			Description: "## Interfaces\nDefines: Alpha",
+		})
+		mustBead(t, db, beads.CreateOptions{
+			ID: "gt-epic.2", Title: "two", Parent: epic.ID,
+			Description: "## Interfaces\nDefines: Alpha",
+		})
+		// routed is an empty database: a read that falls through to it fails
+		// the run, so a finding here means the pinned store answered.
+		stores := slingStores{
+			pinned: func(string) slingStore { return db },
+			routed: func(string) slingStore { return beadsfake.New() },
+		}
+
+		var out, errOut bytes.Buffer
+		err := runSpecGraph(&out, &errOut, stores, t.TempDir(), epic.ID, false)
+		if code, silent := IsSilentExit(err); !silent || code != specLintExitRefused {
+			t.Fatalf("runSpecGraph = %v, want a silent exit %d\nstderr: %s", err, specLintExitRefused, errOut.String())
+		}
+		findGraphFinding(t, specGraphLines(out.String()), "duplicate-define")
+	})
+
+	t.Run("an epic no store has is refused and named", func(t *testing.T) {
+		t.Parallel()
+		stores := slingStores{
+			pinned: func(string) slingStore { return beadsfake.New() },
+			routed: func(string) slingStore { return beadsfake.New() },
+		}
+
+		var out, errOut bytes.Buffer
+		err := runSpecGraph(&out, &errOut, stores, t.TempDir(), "gt-missing", false)
+		if code, silent := IsSilentExit(err); !silent || code != specLintExitRefused {
+			t.Fatalf("runSpecGraph = %v, want a silent exit %d", err, specLintExitRefused)
+		}
+		if !strings.Contains(errOut.String(), "gt-missing") {
+			t.Errorf("stderr = %q, want it naming gt-missing", errOut.String())
+		}
+	})
 }
 
 // TestSpecGraphDoesNotChangePerBeadLint: the flag defaults to off, so a run

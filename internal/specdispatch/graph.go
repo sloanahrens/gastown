@@ -95,7 +95,7 @@ type GraphBead struct {
 	TestNames      []string // the leading TestX identifier of each acceptance box
 }
 
-// The kinds of finding CheckGraph reports. The first three refuse the epic;
+// The kinds of finding CheckGraph reports. The first four refuse the epic;
 // KindDuplicateTest is only an advisory (design decision 3,
 // docs/plans/2026-11-03-bead-lint-v2-design.md), so the Kind itself is what
 // tells a caller not to fail the epic over it.
@@ -103,16 +103,19 @@ const (
 	KindDuplicateDefine = "duplicate-define"
 	KindUnmetUse        = "unmet-use"
 	KindSharedModify    = "shared-modify"
+	KindSharedCreate    = "shared-create"
 	KindDuplicateTest   = "duplicate-test"
 )
 
-// graphKindRank is the order findings are sorted in: the design lists the
-// kinds with the three refusals first and the duplicate-test advisory last.
+// graphKindRank is the order findings are sorted in: the refusals first, in
+// the order the design lists them with shared-create after shared-modify, and
+// the duplicate-test advisory last.
 var graphKindRank = map[string]int{
 	KindDuplicateDefine: 0,
 	KindUnmetUse:        1,
 	KindSharedModify:    2,
-	KindDuplicateTest:   3,
+	KindSharedCreate:    3,
+	KindDuplicateTest:   4,
 }
 
 // GraphFinding is one mistake that only shows across the beads of an epic.
@@ -126,8 +129,9 @@ type GraphFinding struct {
 // CheckGraph reports the mistakes that only show across the beads of an epic:
 // a name two beads define, a name a bead uses that no bead it depends on,
 // directly or transitively, defines, two beads that both modify a file
-// although neither depends on the other, directly or transitively, and a test
-// name two beads list. A bead's own Defines do not satisfy its Uses; only the
+// although neither depends on the other, directly or transitively, a file one
+// of two unordered beads creates while the other creates or modifies it, and a
+// test name two beads list. A bead's own Defines do not satisfy its Uses; only the
 // beads it depends on do. A dependency id that is not among beads is ignored,
 // and a dependency cycle terminates because each bead is visited once.
 // Findings are sorted by kind (the order of graphKindRank), then bead, then
@@ -169,6 +173,28 @@ func CheckGraph(beads []GraphBead) []GraphFinding {
 			}
 			if reach[a.ID][b.ID] || reach[b.ID][a.ID] {
 				continue
+			}
+			// A create is a file the bead brings into being, so an unordered
+			// pair that both touch the path, with one creating it, conflicts.
+			// Each pair of paths is reported once: a.Create against b's list,
+			// then b.Create against a.Modify.
+			for _, path := range uniqueNames(a.Create) {
+				if slices.Contains(b.Create, path) || slices.Contains(b.Modify, path) {
+					findings = append(findings, GraphFinding{
+						Kind:   KindSharedCreate,
+						Bead:   a.ID,
+						Detail: fmt.Sprintf("%s and %s both touch %s, and one creates it", a.ID, b.ID, path),
+					})
+				}
+			}
+			for _, path := range uniqueNames(b.Create) {
+				if slices.Contains(a.Modify, path) {
+					findings = append(findings, GraphFinding{
+						Kind:   KindSharedCreate,
+						Bead:   a.ID,
+						Detail: fmt.Sprintf("%s and %s both touch %s, and one creates it", a.ID, b.ID, path),
+					})
+				}
 			}
 			for _, path := range uniqueNames(a.Modify) {
 				if slices.Contains(b.Modify, path) {

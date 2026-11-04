@@ -1030,7 +1030,7 @@ func specPeerHeldPinnedTo(warn io.Writer, townRoot, beadsDir string, peer sling.
 func runSpecLint(cmd *cobra.Command, args []string) error {
 	townRoot, _ := workspace.FindFromCwd()
 	if specLintGraph {
-		return runSpecGraph(cmd.OutOrStdout(), cmd.ErrOrStderr(), townRoot, args[0], specLintJSON)
+		return runSpecGraph(cmd.OutOrStdout(), cmd.ErrOrStderr(), slingStores{}, townRoot, args[0], specLintJSON)
 	}
 	path := specLintTemplate
 	if path == "" {
