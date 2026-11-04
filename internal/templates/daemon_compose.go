@@ -110,18 +110,21 @@ type ComposeSpec struct {
 	// sets none: its project reaches nothing outside itself (gt-gg9hv.2).
 	ExtraHosts []string
 
-	// Env, KubeconfigFiles and OpenShellConfigDir are the live container's
-	// client configuration (gt-yj0vh), the counterpart of what the launchd plist
-	// and the operator's home give the host daemon. Env is rendered into the
-	// daemon's environment, sorted; it is the caller's already filtered
+	// Env, KubeconfigFiles, OpenShellConfigDir and ConfigDir are the live
+	// container's client configuration (gt-yj0vh), the counterpart of what the
+	// launchd plist and the operator's home give the host daemon. Env is rendered
+	// into the daemon's environment, sorted; it is the caller's already filtered
 	// daemon.env, and the render refuses a name it sets itself. KubeconfigFiles
 	// are absolute paths joined into KUBECONFIG, first file first; the render checks
 	// they are absolute, and the caller sees to it that they lie under the town bind. OpenShellConfigDir is the host's openshell config directory,
 	// mounted read-only at LiveOpenShellConfigPath, with XDG_CONFIG_HOME set to
-	// its parent. A scratch spec sets none of them.
+	// its parent. ConfigDir is the town's config directory (~/.config/gt), mounted
+	// read-only both at its own path and at LiveConfigDirPath, so a setting that
+	// names either path finds its file. A scratch spec sets none of them.
 	Env                map[string]string
 	KubeconfigFiles    []string
 	OpenShellConfigDir string
+	ConfigDir          string
 
 	// OMTokenMetaFile is the host path of the om token's expiry sidecar
 	// (daemon.om_token_meta); the render mounts it read-only at the same path, so
