@@ -675,7 +675,7 @@ func forbiddenPrune(args []string) bool {
 	return false
 }
 
-// TestPruneDanglingRunsOnlyTheDanglingForm pins the one image prune this step
+// TestPruneDanglingRunsOnlyTheDanglingForm pins the one image prune the plugin
 // runs: image prune -f, once, with no flag that reaches past dangling images
 // (gt-n0tfr).
 func TestPruneDanglingRunsOnlyTheDanglingForm(t *testing.T) {
