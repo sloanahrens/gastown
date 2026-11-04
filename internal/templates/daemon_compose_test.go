@@ -1041,3 +1041,140 @@ func TestRenderDaemonCompose_RefusesExtraHostsOnAScratchSpec(t *testing.T) {
 		t.Fatalf("RenderDaemonCompose of a scratch spec with an extra host = %v, want it refused as a scratch spec", err)
 	}
 }
+
+// backupDirFixture is an absolute host path for the Dolt backup directory the
+// tests below mount and name.
+const backupDirFixture = "/host/home/gt-backups/dolt"
+
+// The Dolt server container writes each night's backup at the host's path, so
+// the daemon mounts that directory read-write at the same path. A read-only
+// mount would stop the daemon's backup steps writing where the server writes.
+func TestLiveComposeMountsTheBackupDirReadWrite(t *testing.T) {
+	t.Parallel()
+	spec := liveSpec()
+	spec.BackupDir = backupDirFixture
+
+	_, f := render(t, spec)
+
+	daemon, ok := f.Services["daemon"]
+	if !ok {
+		t.Fatalf("services = %v, want a daemon service", f.Services)
+	}
+	var mount *composeVolume
+	for i := range daemon.Volumes {
+		if daemon.Volumes[i].Target == backupDirFixture {
+			mount = &daemon.Volumes[i]
+		}
+	}
+	if mount == nil {
+		t.Fatalf("daemon volumes = %+v, want a bind mount at %s", daemon.Volumes, backupDirFixture)
+	}
+	if mount.Type != "bind" || mount.Source != backupDirFixture {
+		t.Errorf("backup mount = %+v, want a bind of %s at its own path", *mount, backupDirFixture)
+	}
+	if mount.ReadOnly {
+		t.Errorf("backup mount = %+v, want it read-write", *mount)
+	}
+}
+
+// GT_DOLT_BACKUP_ROOT is the backup directory the daemon is pointed at, so
+// it must equal the mounted path.
+func TestLiveComposeBackupDirSetsTheBackupRootEnv(t *testing.T) {
+	t.Parallel()
+	spec := liveSpec()
+	spec.BackupDir = backupDirFixture
+
+	_, f := render(t, spec)
+
+	if got := f.Services["daemon"].Environment["GT_DOLT_BACKUP_ROOT"]; got != backupDirFixture {
+		t.Errorf("GT_DOLT_BACKUP_ROOT = %q, want %q", got, backupDirFixture)
+	}
+}
+
+// A backup directory must be an absolute path: a relative one would resolve
+// against docker's working directory and bind the wrong place. Each refusal
+// names the value, so the flag that carried it is found from the error alone.
+func TestLiveComposeRefusesARelativeBackupDir(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		value string
+	}{
+		{"bare relative path", "gt-backups/dolt"},
+		{"dot relative path", "./dolt"},
+		{"colon in the path", "/host/a:b"},
+		{"control character", "/host/\x01dolt"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec := liveSpec()
+			spec.BackupDir = tc.value
+
+			out, err := templates.RenderDaemonCompose(spec)
+			if err == nil {
+				t.Fatalf("RenderDaemonCompose with backup dir %q = a render, want a refusal:\n%s", tc.value, out)
+			}
+			if !strings.Contains(err.Error(), strconv.Quote(tc.value)) {
+				t.Errorf("error = %q, want it to name the value %q", err, tc.value)
+			}
+		})
+	}
+}
+
+// Only the live render mounts the Dolt backup directory; a scratch spec that set
+// one would have it dropped in silence, so the render refuses it.
+func TestLiveComposeRefusesABackupDirOnAScratchSpec(t *testing.T) {
+	t.Parallel()
+	spec := scratchSpec()
+	spec.BackupDir = backupDirFixture
+
+	_, err := templates.RenderDaemonCompose(spec)
+	if err == nil || !strings.Contains(err.Error(), "scratch spec") {
+		t.Fatalf("RenderDaemonCompose of a scratch spec with a backup dir = %v, want it refused as a scratch spec", err)
+	}
+}
+
+// daemon.env may not name GT_DOLT_BACKUP_ROOT once BackupDir sets it: the
+// daemon service would then carry the key twice, and the render refuses that
+// rather than writing a file docker reads one of two ways.
+func TestLiveComposeRefusesABackupRootEnvThatRepeatsBackupDir(t *testing.T) {
+	t.Parallel()
+	spec := liveSpec()
+	spec.BackupDir = backupDirFixture
+	spec.Env = map[string]string{"GT_DOLT_BACKUP_ROOT": "/elsewhere"}
+
+	_, err := templates.RenderDaemonCompose(spec)
+	if err == nil || !strings.Contains(err.Error(), "GT_DOLT_BACKUP_ROOT") {
+		t.Fatalf("RenderDaemonCompose with BackupDir and a daemon.env GT_DOLT_BACKUP_ROOT = %v, want it refused by name", err)
+	}
+}
+
+// A daemon.env GT_DOLT_BACKUP_ROOT with no BackupDir is not the render's to
+// refuse: the render then sets nothing itself, and the entry passes as it did.
+func TestLiveComposeKeepsABackupRootEnvWithoutBackupDir(t *testing.T) {
+	t.Parallel()
+	spec := liveSpec()
+	spec.Env = map[string]string{"GT_DOLT_BACKUP_ROOT": "/elsewhere"}
+
+	_, f := render(t, spec)
+
+	if got := f.Services["daemon"].Environment["GT_DOLT_BACKUP_ROOT"]; got != "/elsewhere" {
+		t.Errorf("GT_DOLT_BACKUP_ROOT = %q, want the daemon.env entry %q", got, "/elsewhere")
+	}
+}
+
+// A spec that names no backup directory writes neither the mount nor the
+// variable, so every render that existed before the flag is byte-identical.
+func TestLiveComposeWithoutBackupDirIsUnchanged(t *testing.T) {
+	t.Parallel()
+	out, _ := render(t, liveSpec())
+
+	golden, err := os.ReadFile(filepath.Join("testdata", "daemon-compose.golden.yml"))
+	if err != nil {
+		t.Fatalf("reading golden file: %v", err)
+	}
+	if out != string(golden) {
+		t.Errorf("the live render without a backup dir differs from the golden\ngot:\n%s\nwant:\n%s", out, golden)
+	}
+}

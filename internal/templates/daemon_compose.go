@@ -135,6 +135,13 @@ type ComposeSpec struct {
 	OpenShellConfigDir string
 	ConfigDir          string
 
+	// BackupDir is the host's Dolt backup directory, an absolute path. The Dolt
+	// server container writes each night's backup there at the same path, so the
+	// live daemon mounts it read-write at that path too, and GT_DOLT_BACKUP_ROOT
+	// is the variable that points the daemon at it (gt-gg9hv.17).
+	// Unset, the render carries neither the mount nor the variable.
+	BackupDir string
+
 	// OMTokenMetaFile is the host path of the om token's expiry sidecar
 	// (daemon.om_token_meta); the render mounts it read-only at the same path, so
 	// the setting reads it unchanged. LandingWorkRoot is the landing worker's work

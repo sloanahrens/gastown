@@ -50,6 +50,11 @@ type daemonComposeFlags struct {
 	// absolute path. The render mounts it read-only at that path and at the
 	// container's XDG path (gt-gg9hv.3).
 	configDir string
+	// backupDir is --backup-dir: the host's Dolt backup directory, an absolute
+	// path. The render mounts it read-write at that path and sets
+	// GT_DOLT_BACKUP_ROOT to it; a relative path is refused by the render
+	// (gt-gg9hv.17).
+	backupDir string
 }
 
 // daemonComposeDeps is what the command takes from the host: where the town is
@@ -217,6 +222,11 @@ unchanged.
 the container's XDG_CONFIG_HOME path, because the town's settings name the
 directory both ways; without the flag the render is unchanged.
 
+--backup-dir names the host's Dolt backup directory, an absolute path. The Dolt
+server container writes each night's backup there at the same path, so the render
+mounts it read-write at that same path on the daemon and sets GT_DOLT_BACKUP_ROOT
+to it; a relative path is refused. Without the flag the render is unchanged.
+
 --print prints the render and writes no file.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -240,6 +250,8 @@ directory both ways; without the flag the render is unchanged.
 		"A host alias the container resolves, as <hostname>:<ipv4 or host-gateway>; repeat for more, and a malformed entry is refused by name")
 	write.Flags().StringVar(&f.configDir, "config-dir", "",
 		"the town's config directory on the host (an absolute path), mounted read-only at that path and at the container's XDG path; unset renders neither mount")
+	write.Flags().StringVar(&f.backupDir, "backup-dir", "",
+		"the host's Dolt backup directory (an absolute path), mounted read-write at that path and named by GT_DOLT_BACKUP_ROOT; unset renders neither")
 	parent.AddCommand(write)
 	return parent
 }
@@ -331,6 +343,7 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 		KubeconfigFiles:    kubeconfigFiles,
 		OpenShellConfigDir: strings.TrimSpace(f.openShellConfigDir),
 		ConfigDir:          strings.TrimSpace(f.configDir),
+		BackupDir:          strings.TrimSpace(f.backupDir),
 		Project:            project,
 		ContainerName:      cfg.ContainerName(),
 		Image:              image,

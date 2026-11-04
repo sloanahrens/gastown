@@ -655,3 +655,63 @@ func TestComposeWriteExtraHostFlagRepeats(t *testing.T) {
 		t.Errorf("compose file does not carry %q:\n%s", want, file)
 	}
 }
+
+// --backup-dir reaches the spec through the real command, and the render mounts
+// the directory read-write at its own path and names it in GT_DOLT_BACKUP_ROOT
+// (gt-gg9hv.17).
+func TestComposeWriteBackupDirFlagReachesSpec(t *testing.T) {
+	t.Parallel()
+	r := newComposeRig(t)
+	backupDir := "/host/home/gt-backups/dolt"
+	var got daemonComposeFlags
+	c := newDaemonComposeCmd(func(out io.Writer, f daemonComposeFlags) error {
+		got = f
+		return runDaemonCompose(f, r.deps)
+	})
+	c.SetArgs([]string{"write", "--image", daemonimage.ImageTag(composeTestRev), "--backup-dir", backupDir})
+	c.SilenceUsage, c.SilenceErrors = true, true
+
+	if err := c.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if got.backupDir != backupDir {
+		t.Errorf("the flag reached the spec as %q, want %q", got.backupDir, backupDir)
+	}
+	file, ok := r.disk[r.composePath()]
+	if !ok {
+		t.Fatalf("no compose file written at %s", r.composePath())
+	}
+	for _, want := range []string{
+		fmt.Sprintf("source: %q\n        target: %q\n    networks:\n", backupDir, backupDir),
+		fmt.Sprintf("GT_DOLT_BACKUP_ROOT: %q\n", backupDir),
+	} {
+		if !strings.Contains(string(file), want) {
+			t.Errorf("compose file does not carry %q:\n%s", want, file)
+		}
+	}
+}
+
+// A relative --backup-dir is refused by the render, so the command writes no
+// file and the old one is kept.
+func TestComposeWriteBackupDirRelativeIsRefused(t *testing.T) {
+	t.Parallel()
+	r := newComposeRig(t)
+	old := []byte("old render")
+	r.disk[r.composePath()] = old
+	c := newDaemonComposeCmd(func(_ io.Writer, f daemonComposeFlags) error {
+		return runDaemonCompose(f, r.deps)
+	})
+	c.SetArgs([]string{"write", "--image", daemonimage.ImageTag(composeTestRev), "--backup-dir", "gt-backups/dolt"})
+	c.SilenceUsage, c.SilenceErrors = true, true
+
+	err := c.Execute()
+	if err == nil || !strings.Contains(err.Error(), `"gt-backups/dolt"`) {
+		t.Fatalf("error = %v, want a refusal naming the relative backup dir", err)
+	}
+	if len(r.wrote) != 0 {
+		t.Errorf("a refusal wrote %v", r.wrote)
+	}
+	if got := r.disk[r.composePath()]; !bytes.Equal(got, old) {
+		t.Errorf("compose file = %q, want the old render %q kept", got, old)
+	}
+}
