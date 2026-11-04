@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -117,6 +118,31 @@ type Builder struct {
 	// Fetch downloads the claude CLI FetchClaudeCLI places in Out; nil refuses
 	// that fetch.
 	Fetch Fetcher
+
+	// The fields below are test seams for the filesystem calls the plugin move
+	// and its rollback make; nil means the os function of the same shape.
+	rename func(oldpath, newpath string) error
+	remove func(path string) error
+}
+
+// fileOps is the filesystem the plugin move publishes and rolls back with:
+// os.Rename and os.Remove, or the test seams standing in for them.
+type fileOps struct {
+	rename func(oldpath, newpath string) error
+	remove func(path string) error
+}
+
+// fileOps returns b's filesystem, with the os functions filling any seam b
+// leaves nil.
+func (b Builder) fileOps() fileOps {
+	ops := fileOps{rename: os.Rename, remove: os.Remove}
+	if b.rename != nil {
+		ops.rename = b.rename
+	}
+	if b.remove != nil {
+		ops.remove = b.remove
+	}
+	return ops
 }
 
 // ImageTag is the tag the daemon image for rev is built with: gt-daemon:<rev>.
@@ -272,7 +298,10 @@ func (b Builder) checkOutAndRev(rev, what string) (string, error) {
 // worktree of b.GTSrc at rev, so it runs the code the image's gt does. The
 // staging and cleanup rules are BuildBinaries': every refusal comes before the
 // first build, a failed build returns its error and no paths, and nothing is
-// moved into b.Out until all of them have built.
+// moved into b.Out until all of them have built. The move is all or nothing too:
+// a plugin that cannot be placed takes every plugin this call already placed
+// back out of b.Out and puts back each file it replaced, so a failed call leaves
+// no partial plugin set behind.
 func (b Builder) BuildPlugins(ctx context.Context, rev string) ([]string, error) {
 	if b.Run == nil {
 		return nil, errors.New("daemonimage: no runner to build the plugins with")
@@ -303,19 +332,113 @@ func (b Builder) BuildPlugins(ctx context.Context, rev string) ([]string, error)
 			return nil, err
 		}
 	}
-	paths := make([]string, 0, len(builds))
+	return b.movePlugins(builds, stage)
+}
+
+// pluginPlacement is one plugin binary's move: where it goes under b.Out, where
+// the file that was already there was moved aside (empty when nothing was), and
+// whether the staged binary reached the path.
+type pluginPlacement struct {
+	path, replaced string
+	moved          bool
+}
+
+// pluginPlacements is what the move phase has put into b.Out so far: one entry
+// per plugin it started, including the one that failed, and the directories it
+// made. It exists so a move that fails part way can put b.Out back as it found
+// it.
+type pluginPlacements struct {
+	items []pluginPlacement
+	dirs  []string
+}
+
+// movePlugins moves each built plugin binary from stage to the directory under
+// b.Out the image copies it from and returns their paths in builds order. A
+// placement that fails takes back every placement before it, so a failed call
+// leaves no partial plugin set in b.Out.
+func (b Builder) movePlugins(builds []binary, stage string) ([]string, error) {
+	ops := b.fileOps()
+	var placed pluginPlacements
 	for _, build := range builds {
-		dir := filepath.Join(b.Out, "plugins", build.name)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, fmt.Errorf("daemonimage: cannot make the plugin directory %s: %w", dir, err)
+		if err := b.placePlugin(build, stage, ops, &placed); err != nil {
+			if undoErr := placed.undo(ops); undoErr != nil {
+				return nil, fmt.Errorf("%w; %w", err, undoErr)
+			}
+			return nil, err
 		}
-		path := filepath.Join(dir, build.name)
-		if err := os.Rename(filepath.Join(stage, build.name), path); err != nil {
-			return nil, fmt.Errorf("daemonimage: cannot move %s into %s: %w", build.name, dir, err)
-		}
-		paths = append(paths, path)
+	}
+	paths := make([]string, 0, len(placed.items))
+	for _, item := range placed.items {
+		paths = append(paths, item.path)
 	}
 	return paths, nil
+}
+
+// placePlugin moves build's staged binary to b.Out/plugins/<name>/<name> and
+// records the placement in placed. A regular file already at the path, a
+// previous build's binary, is moved aside into stage first so undo can put it
+// back; anything else at the path makes the binary's rename itself fail. The
+// placement is recorded before either rename, so undo knows the path even when
+// the move stops half way.
+func (b Builder) placePlugin(build binary, stage string, ops fileOps, placed *pluginPlacements) error {
+	dir := filepath.Join(b.Out, "plugins", build.name)
+	for _, d := range []string{filepath.Join(b.Out, "plugins"), dir} {
+		if _, err := os.Lstat(d); errors.Is(err, fs.ErrNotExist) {
+			placed.dirs = append(placed.dirs, d)
+		}
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("daemonimage: cannot make the plugin directory %s: %w", dir, err)
+	}
+	idx := len(placed.items)
+	path := filepath.Join(dir, build.name)
+	placed.items = append(placed.items, pluginPlacement{path: path})
+	if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
+		replaced := filepath.Join(stage, fmt.Sprintf("%d-replaced-%s", idx, build.name))
+		if err := ops.rename(path, replaced); err != nil {
+			return fmt.Errorf("daemonimage: cannot move the %s already in %s aside: %w", build.name, dir, err)
+		}
+		placed.items[idx].replaced = replaced
+	}
+	if err := ops.rename(filepath.Join(stage, build.name), path); err != nil {
+		return fmt.Errorf("daemonimage: cannot move %s into %s: %w", build.name, dir, err)
+	}
+	placed.items[idx].moved = true
+	return nil
+}
+
+// undo takes every plugin binary movePlugins placed back out of b.Out, puts
+// back each file it replaced, and removes the directories it made: a directory
+// that is not empty by then holds something this call did not put there, so it
+// stays and is reported. It returns an error naming what it could not undo: a
+// caller must never report a clean refusal over a build context this call left
+// changed.
+func (p *pluginPlacements) undo(ops fileOps) error {
+	var failed []string
+	for i := len(p.items) - 1; i >= 0; i-- {
+		item := p.items[i]
+		if item.moved {
+			if err := ops.remove(item.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				failed = append(failed, err.Error())
+				continue
+			}
+		}
+		if item.replaced == "" {
+			continue
+		}
+		if err := ops.rename(item.replaced, item.path); err != nil {
+			failed = append(failed, err.Error())
+		}
+	}
+	for i := len(p.dirs) - 1; i >= 0; i-- {
+		if err := ops.remove(p.dirs[i]); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			failed = append(failed, err.Error())
+		}
+	}
+	if len(failed) != 0 {
+		return fmt.Errorf("daemonimage: cannot undo the plugin move: %s", strings.Join(failed, "; "))
+	}
+	return nil
 }
 
 // IsCanonicalClone reports whether path is a rig's canonical clone,
