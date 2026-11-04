@@ -213,8 +213,8 @@ func TestDrainProbeErrorIsNotDrained(t *testing.T) {
 		if res.Waited < drainTestTimeout {
 			t.Errorf("Waited = %v, want at least %v", res.Waited, drainTestTimeout)
 		}
-		if probe.calls != 3 {
-			t.Errorf("Seats calls = %d, want 3 (a retry on each poll)", probe.calls)
+		if probe.calls != 2 {
+			t.Errorf("Seats calls = %d, want 2 (a retry on each poll before Timeout)", probe.calls)
 		}
 	})
 
@@ -247,6 +247,185 @@ func TestDrainProbeErrorIsNotDrained(t *testing.T) {
 	})
 }
 
+func TestDrainReportsNoBlockerWithAProbeError(t *testing.T) {
+	t.Parallel()
+	probeErr := errors.New("heartbeat store unreadable")
+	clock := &fakeDrainClock{now: drainTestStart()}
+	probe := &fakeDrainProbe{answer: func(n int) ([]Seat, error) {
+		if n == 1 {
+			return []Seat{{Name: "furiosa", Working: true, LastActive: clock.Now()}}, nil
+		}
+		return nil, probeErr
+	}}
+
+	res, err := Drain(context.Background(), clock, clock.sleep, probe, drainTestOptions())
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if res.Drained {
+		t.Errorf("Drained = true with an unreadable seat list, want false: %+v", res)
+	}
+	if !errors.Is(res.Err, probeErr) {
+		t.Errorf("Err = %v, want %v", res.Err, probeErr)
+	}
+	if len(res.Blocking) != 0 {
+		t.Errorf("Blocking = %v beside a probe error, want none", res.Blocking)
+	}
+}
+
+// ctxProbe is a SeatProbe whose Seats is a function, so a test can see the
+// context each probe call receives.
+type ctxProbe func(ctx context.Context) ([]Seat, error)
+
+func (f ctxProbe) Seats(ctx context.Context) ([]Seat, error) { return f(ctx) }
+
+func TestDrainBoundsEachProbeByTheTimeout(t *testing.T) {
+	t.Parallel()
+	probeErr := errors.New("seat probe still running")
+	clock := &fakeDrainClock{now: drainTestStart()}
+	var calls int
+	probe := ctxProbe(func(ctx context.Context) ([]Seat, error) {
+		calls++
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Errorf("probe call %d has no deadline, so it can outlast Timeout", calls)
+		} else if left := time.Until(deadline); left > drainTestTimeout {
+			t.Errorf("probe call %d may run %v, longer than Timeout %v", calls, left, drainTestTimeout)
+		}
+		return nil, probeErr
+	})
+
+	res, err := Drain(context.Background(), clock, clock.sleep, probe, drainTestOptions())
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if res.Drained {
+		t.Errorf("Drained = true with every probe failing, want false: %+v", res)
+	}
+	if !errors.Is(res.Err, probeErr) {
+		t.Errorf("Err = %v, want %v", res.Err, probeErr)
+	}
+}
+
+func TestDrainReturnsWhenAProbeBlocksPastTimeout(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	clock := &fakeDrainClock{now: drainTestStart()}
+	// The probe ignores its context and returns only when the test ends, so
+	// only the Timeout's own deadline can end the drain. The Timeout is a
+	// millisecond so that deadline is the one that fires.
+	probe := ctxProbe(func(context.Context) ([]Seat, error) {
+		<-release
+		return nil, nil
+	})
+
+	type outcome struct {
+		res DrainResult
+		err error
+	}
+	// Drain runs in its own goroutine, so a regression that lets the probe hold
+	// it fails this test rather than hanging the suite.
+	done := make(chan outcome, 1)
+	go func() {
+		res, err := Drain(context.Background(), clock, clock.sleep, probe, DrainOptions{
+			Timeout: time.Millisecond, IdleAfter: drainTestIdle, Poll: drainTestPoll,
+		})
+		done <- outcome{res, err}
+	}()
+	var got outcome
+	select {
+	case got = <-done:
+	case <-time.After(waitBound): //testpolicy:allow no-sleep — a hang guard only: Drain returns at its 1ms Timeout, so a regression that holds it past the Timeout fails here rather than hanging the suite
+		t.Fatalf("Drain did not return within %v of a 1ms Timeout: the probe held it", waitBound)
+	}
+	if got.err != nil {
+		t.Fatalf("Drain: %v", got.err)
+	}
+	if got.res.Drained {
+		t.Errorf("Drained = true with a blocked probe, want false: %+v", got.res)
+	}
+	if !errors.Is(got.res.Err, context.DeadlineExceeded) {
+		t.Errorf("Err = %v, want context.DeadlineExceeded", got.res.Err)
+	}
+	if len(got.res.Blocking) != 0 {
+		t.Errorf("Blocking = %v beside a probe error, want none", got.res.Blocking)
+	}
+}
+
+func TestDrainNeverWaitsPastTimeout(t *testing.T) {
+	t.Parallel()
+	const timeout = 20 * time.Second
+	clock := &fakeDrainClock{now: drainTestStart()}
+	probe := &fakeDrainProbe{answer: func(int) ([]Seat, error) {
+		return []Seat{{Name: "furiosa", Working: true, LastActive: clock.Now()}}, nil
+	}}
+
+	res, err := Drain(context.Background(), clock, clock.sleep, probe, DrainOptions{
+		Timeout: timeout, IdleAfter: drainTestIdle, Poll: drainTestPoll,
+	})
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if res.Drained {
+		t.Errorf("Drained = true at the timeout, want false: %+v", res)
+	}
+	// The second wait is cut to the 5s left after the first 15s wait, so the
+	// drain ends at Timeout rather than a full Poll past it.
+	if want := []time.Duration{drainTestPoll, timeout - drainTestPoll}; !reflect.DeepEqual(clock.sleeps, want) {
+		t.Errorf("sleeps = %v, want %v", clock.sleeps, want)
+	}
+	if res.Waited != timeout {
+		t.Errorf("Waited = %v, want %v", res.Waited, timeout)
+	}
+}
+
+func TestDrainRefusesANonPositivePoll(t *testing.T) {
+	t.Parallel()
+	for _, poll := range []time.Duration{0, -time.Second} {
+		t.Run(poll.String(), func(t *testing.T) {
+			t.Parallel()
+			clock := &fakeDrainClock{now: drainTestStart()}
+			probe := &fakeDrainProbe{answer: func(int) ([]Seat, error) { return nil, nil }}
+
+			_, err := Drain(context.Background(), clock, clock.sleep, probe, DrainOptions{
+				Timeout: drainTestTimeout, IdleAfter: drainTestIdle, Poll: poll,
+			})
+			if err == nil {
+				t.Fatalf("Drain with Poll %v returned no error", poll)
+			}
+			if probe.calls != 0 {
+				t.Errorf("Seats calls = %d, want 0 when Poll is %v", probe.calls, poll)
+			}
+		})
+	}
+}
+
+func TestDrainWaitsOnePollBetweenChecks(t *testing.T) {
+	t.Parallel()
+	const poll = 7 * time.Second
+	clock := &fakeDrainClock{now: drainTestStart()}
+	probe := &fakeDrainProbe{answer: func(n int) ([]Seat, error) {
+		if n < 3 {
+			return []Seat{{Name: "furiosa", Working: true, LastActive: clock.Now()}}, nil
+		}
+		return nil, nil
+	}}
+
+	res, err := Drain(context.Background(), clock, clock.sleep, probe, DrainOptions{
+		Timeout: time.Minute, IdleAfter: drainTestIdle, Poll: poll,
+	})
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if !res.Drained {
+		t.Errorf("Drained = false, want true: %+v", res)
+	}
+	if want := []time.Duration{poll, poll}; !reflect.DeepEqual(clock.sleeps, want) {
+		t.Errorf("sleeps = %v, want %v", clock.sleeps, want)
+	}
+}
+
 func TestDrainNeverActsOnSeats(t *testing.T) {
 	t.Parallel()
 
@@ -259,9 +438,11 @@ func TestDrainNeverActsOnSeats(t *testing.T) {
 			return seats, nil
 		}}
 
-		typ := reflect.TypeOf(probe)
-		if typ.NumMethod() != 1 || typ.Method(0).Name != "Seats" {
-			t.Fatalf("the probe exposes %d methods; a drain must have no seat action to call", typ.NumMethod())
+		// The contract is the SeatProbe interface, not the fake: a method added
+		// to the interface is a seat action the drain could call.
+		contract := reflect.TypeOf((*SeatProbe)(nil)).Elem()
+		if contract.NumMethod() != 1 || contract.Method(0).Name != "Seats" {
+			t.Fatalf("SeatProbe exposes %d methods; a drain must have no seat action to call", contract.NumMethod())
 		}
 
 		res, err := Drain(context.Background(), clock, clock.sleep, probe, drainTestOptions())
@@ -271,8 +452,8 @@ func TestDrainNeverActsOnSeats(t *testing.T) {
 		if res.Drained {
 			t.Errorf("Drained = true, want false: %+v", res)
 		}
-		if probe.calls != 3 {
-			t.Errorf("Seats calls = %d, want 3 and no other call", probe.calls)
+		if probe.calls != 2 {
+			t.Errorf("Seats calls = %d, want 2 (no poll starts at Timeout) and no other call", probe.calls)
 		}
 		if got := seats[0]; !got.Working || got.Name != "furiosa" {
 			t.Errorf("the drain changed the seat: %+v", got)
