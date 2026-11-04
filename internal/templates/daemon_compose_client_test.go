@@ -239,3 +239,24 @@ func TestRenderDaemonComposeRefusesALandingWorkRootThatOverlaps(t *testing.T) {
 		})
 	}
 }
+
+// A backup directory that is the filesystem root or overlaps the town is refused
+// at render time, as a LandingWorkRoot is: it is bound read-write beside the town.
+func TestRenderDaemonComposeRefusesABackupDirThatOverlaps(t *testing.T) {
+	t.Parallel()
+	for name, backup := range map[string]string{
+		"the filesystem root": "/",
+		"the town root":       "/towns/live",
+		"inside the town":     "/towns/live/backups",
+		"around the town":     "/towns",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			s := liveSpec()
+			s.BackupDir = backup
+			if _, err := templates.RenderDaemonCompose(s); err == nil || !strings.Contains(err.Error(), "BackupDir") {
+				t.Fatalf("RenderDaemonCompose with BackupDir %q = %v, want the overlap refusal", backup, err)
+			}
+		})
+	}
+}
