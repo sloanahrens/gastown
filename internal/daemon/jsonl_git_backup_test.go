@@ -910,6 +910,7 @@ func TestJSONLDoltTargetUsesManagerWhenEnabled(t *testing.T) {
 // data files under a server whose locks the process can see fails there.
 func TestJSONLDoltTargetUsesTownEndpointWithoutManager(t *testing.T) {
 	t.Parallel()
+	const townPort = 3307
 	tests := []struct {
 		name                           string
 		host, user, password           string
@@ -923,16 +924,16 @@ func TestJSONLDoltTargetUsesTownEndpointWithoutManager(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			town := &doltserver.Config{Host: tt.host, Port: 3307, User: tt.user, Password: tt.password}
+			town := &doltserver.Config{Host: tt.host, Port: townPort, User: tt.user, Password: tt.password}
 
 			useServer, host, port, user, password := jsonlDoltTarget(nil, town)
 
 			if !useServer {
 				t.Fatal("jsonlDoltTarget with a town endpoint = embedded mode, want the town's server")
 			}
-			if host != tt.wantHost || port != 3307 || user != tt.wantUser || password != tt.wantPasswd {
+			if host != tt.wantHost || port != townPort || user != tt.wantUser || password != tt.wantPasswd {
 				t.Errorf("jsonlDoltTarget = (%q, %d, %q, %q), want (%q, %d, %q, %q)",
-					host, port, user, password, tt.wantHost, 3307, tt.wantUser, tt.wantPasswd)
+					host, port, user, password, tt.wantHost, townPort, tt.wantUser, tt.wantPasswd)
 			}
 		})
 	}
@@ -1006,6 +1007,97 @@ func TestJSONLExportCommandNeverPutsThePasswordInArgv(t *testing.T) {
 				t.Errorf("DOLT_CLI_PASSWORD = %q, want %q from the chosen target", got, tt.secret)
 			}
 		})
+	}
+}
+
+// jsonlExportTestDaemon is a daemon whose town config the test writes, with the
+// export's process run replaced by run.
+func jsonlExportTestDaemon(t *testing.T, doltJSON string, run func(context.Context, *exec.Cmd, string, time.Duration) ([]byte, error)) *Daemon {
+	t.Helper()
+	d := &Daemon{logger: log.New(io.Discard, "", 0), config: &Config{TownRoot: t.TempDir()}}
+	if err := os.MkdirAll(filepath.Join(d.config.TownRoot, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTownJSON(t, d, doltJSON)
+	d.jsonlExportRunFn = run
+	return d
+}
+
+// The export reads the town's own endpoint per export: a town with no daemon
+// manager still names the Dolt the backup must read in mayor/town.json, and
+// deleting that read takes the export back to the data files.
+func TestExportTableToJsonlUsesTheTownEndpoint(t *testing.T) {
+	t.Parallel()
+	const (
+		host = "dolt.backup.internal"
+		port = 5507
+	)
+	var got *exec.Cmd
+	d := jsonlExportTestDaemon(t, `{"host":"`+host+`","port":`+strconv.Itoa(port)+`}`,
+		func(_ context.Context, cmd *exec.Cmd, _ string, _ time.Duration) ([]byte, error) {
+			got = cmd
+			return []byte(`{"rows":[]}`), nil
+		})
+
+	if _, err := d.exportTableToJsonl("issues", beadsql.BackupTable("testdb", "issues"), t.TempDir(), t.TempDir(), time.Minute); err != nil {
+		t.Fatalf("exportTableToJsonl: %v", err)
+	}
+	if got == nil {
+		t.Fatal("the export ran no command")
+	}
+	for _, want := range [][]string{{"--host", host}, {"--port", strconv.Itoa(port)}} {
+		i := slices.Index(got.Args, want[0])
+		if i < 0 || i+1 >= len(got.Args) || got.Args[i+1] != want[1] {
+			t.Fatalf("argv = %v, want %s %s from the town's config", got.Args, want[0], want[1])
+		}
+	}
+	if !slices.Contains(got.Env, "DOLT_CLI_PASSWORD=") {
+		t.Errorf("export environment carries no DOLT_CLI_PASSWORD: %v", got.Env)
+	}
+}
+
+// A town whose dolt.external_container is set but unusable must refuse the
+// export: doltserver says a caller never reads it as unset and picks a target
+// of its own.
+func TestExportTableToJsonlRefusesUnusableTownDoltConfig(t *testing.T) {
+	t.Parallel()
+	d := jsonlExportTestDaemon(t, `{"port":5507,"external_container":"gt dolt"}`,
+		func(context.Context, *exec.Cmd, string, time.Duration) ([]byte, error) {
+			t.Error("the export ran a command for a town whose dolt config it cannot read")
+			return nil, nil
+		})
+
+	_, err := d.exportTableToJsonl("issues", beadsql.BackupTable("testdb", "issues"), t.TempDir(), t.TempDir(), time.Minute)
+
+	if err == nil {
+		t.Fatal("exportTableToJsonl accepted an unusable dolt.external_container")
+	}
+	if !strings.Contains(err.Error(), "dolt.external_container") {
+		t.Errorf("error %q does not name the unusable field", err)
+	}
+}
+
+// A server-backed export that fails is not retried against the data files:
+// reading Dolt's on-disk state can lag its commits, which is the export the
+// town's endpoint exists to avoid. The cycle keeps the stale file and reports
+// the failure.
+func TestExportTableToJsonlFailsWithoutEmbeddedFallback(t *testing.T) {
+	t.Parallel()
+	serverErr := errors.New("dolt server unreachable")
+	calls := 0
+	d := jsonlExportTestDaemon(t, `{"host":"dolt.backup.internal","port":5507}`,
+		func(context.Context, *exec.Cmd, string, time.Duration) ([]byte, error) {
+			calls++
+			return nil, serverErr
+		})
+
+	_, err := d.exportTableToJsonl("issues", beadsql.BackupTable("testdb", "issues"), t.TempDir(), t.TempDir(), time.Minute)
+
+	if !errors.Is(err, serverErr) {
+		t.Fatalf("exportTableToJsonl error = %v, want the server's %v", err, serverErr)
+	}
+	if calls != 1 {
+		t.Errorf("the export ran %d commands, want one attempt and no embedded fallback", calls)
 	}
 }
 

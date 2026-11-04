@@ -613,8 +613,10 @@ func (d *Daemon) exportDatabaseToJsonlFor(db, gitRepo, dataDir string, scrub boo
 // (gt-gg9hv.4). Only a town naming no port at all has no server to read
 // through, so only then does the export stay embedded.
 //
-// The caller resolves the town's config with doltserver.DefaultConfig(townRoot);
-// this function is a pure decision over what it is handed.
+// The caller resolves the town's config with doltserver.DefaultConfig(townRoot)
+// and refuses one whose dolt.external_container would not parse
+// (ExternalContainerSetting) before calling this; this function is a pure
+// decision over what it is handed.
 func jsonlDoltTarget(manager *DoltServerManager, town *doltserver.Config) (useServer bool, host string, port int, user, password string) {
 	if manager != nil && manager.IsEnabled() {
 		host, user = "127.0.0.1", doltserver.DefaultUser
@@ -729,11 +731,23 @@ func (d *Daemon) exportTableToJsonl(table string, q beadsql.Query, dir, dataDir 
 	// mode (reads on-disk state which may lag behind server commits). The town's
 	// config is read per export: the endpoint it names can change under a running
 	// daemon.
-	useServer, host, port, user, password := jsonlDoltTarget(d.doltServer, doltserver.DefaultConfig(d.config.TownRoot))
+	town := doltserver.DefaultConfig(d.config.TownRoot)
+	// A dolt.external_container set but not a container name is a config error.
+	// doltserver requires every caller to refuse it rather than read it as
+	// unset (ExternalContainerSetting), so this export fails for the database
+	// instead of choosing a target the town did not name.
+	if _, err := town.ExternalContainerSetting(); err != nil {
+		return 0, fmt.Errorf("%s: town dolt config: %w", table, err)
+	}
+	useServer, host, port, user, password := jsonlDoltTarget(d.doltServer, town)
 
 	cmd := jsonlExportCommand(ctx, useServer, host, port, user, password, query, dataDir)
 
-	out, err := runJSONLExport(ctx, cmd, table, budget)
+	run := d.jsonlExportRunFn
+	if run == nil {
+		run = runJSONLExport
+	}
+	out, err := run(ctx, cmd, table, budget)
 	if err != nil {
 		return 0, err
 	}
