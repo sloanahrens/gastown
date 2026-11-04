@@ -89,6 +89,15 @@ type ComposeSpec struct {
 	// Unset, neither render carries the flag or the mount.
 	OMTokenFile string
 
+	// OMConfigFile is the host path of the om config RenderOMConfig derives for
+	// the live container, which the command writes beside the compose file. The
+	// render mounts it read-only at LiveOMConfigPath and sets XDG_CONFIG_HOME, so
+	// om's backend is the container's claude-exec and carries the token mount.
+	// A live spec with an om token file must carry it, since a token file with no
+	// config leaves om a bare claude with no credential; a config without a token
+	// file, or on a scratch spec, is refused (gt-gg9hv.13).
+	OMConfigFile string
+
 	// ForgeHost and ForgeTokenFile give the live container's git the Forgejo
 	// credential helper: ForgeHost is the forge's bare host:port, and
 	// ForgeTokenFile is the host path of the landing bot's token file. A live
@@ -218,6 +227,11 @@ const ScratchDoltPort = 3306
 // mount never shadows a file the image ships, and the token is on the container's
 // filesystem only for as long as the read-only mount exists.
 const LiveOMTokenPath = "/run/secrets/om-token" //nolint:gosec // a mount path, not a credential
+
+// LiveOMConfigPath is where om reads the derived config beneath the container's
+// XDG home, so its backend is the container's claude-exec and not a bare claude
+// with no credential (gt-gg9hv.13).
+const LiveOMConfigPath = LiveOpenShellConfigHome + "/om/config.json"
 
 // LiveForgeTokenPath is the same fixed path for the forge token file the live
 // render mounts read-only, and the path its command line passes to the
@@ -493,10 +507,82 @@ func liveTokenMounts(s ComposeSpec) string {
 	if s.OMTokenFile != "" {
 		b.WriteString(liveTokenMount(s.OMTokenFile, LiveOMTokenPath))
 	}
+	if s.OMConfigFile != "" {
+		b.WriteString(liveTokenMount(s.OMConfigFile, LiveOMConfigPath))
+	}
 	if s.ForgeTokenFile != "" {
 		b.WriteString(liveTokenMount(s.ForgeTokenFile, LiveForgeTokenPath))
 	}
 	return b.String()
+}
+
+// OMConfigSettings are the reviewer settings the live container's derived om
+// config carries: the model its claude-exec backend runs, and the threshold,
+// depth and timeout om applies beside the backend. RenderOMConfig takes them as
+// its input, so the file's values come from here and not from literals in the
+// render.
+type OMConfigSettings struct {
+	Model     string
+	Threshold float64
+	Depth     string
+	Timeout   int
+}
+
+// DefaultOMConfigSettings is the reviewer settings the container runs with
+// unless a caller changes them.
+func DefaultOMConfigSettings() OMConfigSettings {
+	return OMConfigSettings{Model: "haiku", Threshold: 0.75, Depth: "standard", Timeout: 300}
+}
+
+// omSettingName is a model or depth name om and the reviewer read as one plain
+// word, so it needs no JSON escaping.
+var omSettingName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// RenderOMConfig is the om config the live container reads at LiveOMConfigPath.
+// Its backend is the container's claude-exec, which reads the token from
+// LiveOMTokenPath, so the file names the mount's path and never the host's, and
+// it carries no credential. A setting om cannot run with is refused here,
+// rather than written for om to fail on later.
+func RenderOMConfig(o OMConfigSettings) ([]byte, error) {
+	switch {
+	case o.Model == "":
+		return nil, errors.New("om config: Model is empty; the claude-exec backend needs a model")
+	case !omSettingName.MatchString(o.Model):
+		return nil, fmt.Errorf("om config: Model %q is not a plain name such as claude-haiku-5-5", o.Model)
+	case o.Depth == "":
+		return nil, errors.New("om config: Depth is empty")
+	case !omSettingName.MatchString(o.Depth):
+		return nil, fmt.Errorf("om config: Depth %q is not a plain name such as standard", o.Depth)
+	case o.Timeout <= 0:
+		return nil, fmt.Errorf("om config: Timeout %d is not a positive number of seconds", o.Timeout)
+	case !(o.Threshold > 0 && o.Threshold <= 1):
+		return nil, fmt.Errorf("om config: Threshold %v is not in (0, 1]", o.Threshold)
+	}
+	// Written by hand, not marshaled, so the render has no encoder error to
+	// refuse: each value is a checked plain name or a finite number.
+	argv := []string{"gt", "daemon", "claude-exec", "--" + config.OMTokenFileFlag, LiveOMTokenPath, "--", "-p", "--model", o.Model}
+	quoted := make([]string, len(argv))
+	for i, arg := range argv {
+		quoted[i] = strconv.Quote(arg)
+	}
+	return []byte(fmt.Sprintf("{\n  \"backend\": [%s],\n  \"threshold\": %s,\n  \"depth\": %s,\n  \"timeout\": %d\n}\n",
+		strings.Join(quoted, ", "), strconv.FormatFloat(o.Threshold, 'f', -1, 64), strconv.Quote(o.Depth), o.Timeout)), nil
+}
+
+// validateOMConfig pairs the derived om config with the token it reads. A live
+// token file without its config leaves om running a bare claude with no
+// credential, the failure gt-gg9hv.13 exists to end, so the pair is given
+// together, and a config is refused on a scratch spec, which runs no om.
+func (s ComposeSpec) validateOMConfig() error {
+	switch {
+	case s.OMConfigFile == "" && s.OMTokenFile != "" && !s.Scratch:
+		return fmt.Errorf("compose spec: OMTokenFile %q is set on a live spec without OMConfigFile; om would run with no config and no credential", s.OMTokenFile)
+	case s.OMConfigFile != "" && (s.Scratch || s.OMTokenFile == ""):
+		return fmt.Errorf("compose spec: OMConfigFile %q is set without a live OMTokenFile; the derived config names the token mount, and only a live token file has one", s.OMConfigFile)
+	case s.OMConfigFile != "" && !filepath.IsAbs(s.OMConfigFile):
+		return fmt.Errorf("compose spec: OMConfigFile %q is not an absolute path; the live render mounts it on the host", s.OMConfigFile)
+	}
+	return nil
 }
 
 // liveTokenMount is one credential file mounted read-only at one path inside the
@@ -806,6 +892,9 @@ func (s ComposeSpec) validate() error {
 		return err
 	}
 	if err := s.validateForge(); err != nil {
+		return err
+	}
+	if err := s.validateOMConfig(); err != nil {
 		return err
 	}
 	if err := s.validateExtraHosts(); err != nil {

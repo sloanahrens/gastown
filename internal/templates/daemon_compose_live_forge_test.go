@@ -103,6 +103,7 @@ func TestRenderDaemonCompose_LiveCredentialsTogether(t *testing.T) {
 	t.Parallel()
 	spec := liveForgeSpec()
 	spec.OMTokenFile = "/ops/om/token"
+	spec.OMConfigFile = "/towns/live/.runtime/container/om-config.json"
 	out, f := render(t, spec)
 
 	svc := f.Services["daemon"]
@@ -116,6 +117,7 @@ func TestRenderDaemonCompose_LiveCredentialsTogether(t *testing.T) {
 	}
 	for _, mount := range []composeVolume{
 		{Type: "bind", Source: spec.OMTokenFile, Target: templates.LiveOMTokenPath, ReadOnly: true},
+		{Type: "bind", Source: spec.OMConfigFile, Target: templates.LiveOMConfigPath, ReadOnly: true},
 		{Type: "bind", Source: liveForgeTestToken, Target: templates.LiveForgeTokenPath, ReadOnly: true},
 	} {
 		if !slices.Contains(svc.Volumes, mount) {

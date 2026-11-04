@@ -48,6 +48,7 @@ func TestComposeSpecValidateLiveOMToken(t *testing.T) {
 	}
 	withToken := liveSpec()
 	withToken.OMTokenFile = "/ops/om/token"
+	withToken.OMConfigFile = "/towns/live/.runtime/container/om-config.json"
 	if err := withToken.validate(); err != nil {
 		t.Fatalf("a live spec with an absolute token path = %v, want no error: the live render mounts it", err)
 	}

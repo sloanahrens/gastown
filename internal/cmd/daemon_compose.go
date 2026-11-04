@@ -71,6 +71,9 @@ type daemonComposeDeps struct {
 	evalSymlinks func(path string) (string, error)
 	// townZone is the IANA zone name for the container's TZ ("" for none).
 	townZone func(townRoot string) (string, error)
+	// omConfig derives the om config the container reads from the default
+	// settings, which the render takes; a test stands in a failure for it.
+	omConfig func() ([]byte, error)
 	files    composeFiles
 	out      io.Writer
 }
@@ -114,12 +117,25 @@ func realDaemonComposeDeps(out io.Writer) daemonComposeDeps {
 		townZone: func(townRoot string) (string, error) {
 			return containerZone(townRoot, config.LoadTownSettings, os.Readlink, "/etc/localtime")
 		},
+		omConfig: func() ([]byte, error) {
+			return templates.RenderOMConfig(templates.DefaultOMConfigSettings())
+		},
 		files: composeFiles{
 			mkdirAll: func(dir string) error { return os.MkdirAll(dir, 0o755) },
 			write:    daemonimage.WriteComposeFile,
 		},
 		out: out,
 	}
+}
+
+// containerOMConfigRP is where the derived om config is written: under the town's
+// .runtime beside the derived kubeconfig, which the town bind carries into the
+// container for the read-only mount to name (gt-gg9hv.13).
+const containerOMConfigRP = ".runtime/container/om-config.json"
+
+// containerOMConfigPath is the host path of the derived om config.
+func containerOMConfigPath(townRoot string) string {
+	return filepath.Join(townRoot, filepath.FromSlash(containerOMConfigRP))
 }
 
 // writeDaemonComposeFile writes content to path, making the compose file's
@@ -165,6 +181,13 @@ the entrypoint, which loads the token into the daemon's environment; the file is
 never read here, so its contents appear in no output, and without the flag the
 render carries neither the mount nor the flag. A flag given with a blank value
 is refused, since it names no file and would otherwise render as if unset.
+
+The same flag also writes the om config derived for the container, at
+<town>/.runtime/container/om-config.json. The render mounts it read-only at the
+XDG path om reads, so the reviewer runs its backend through the container's
+claude-exec with the token mount, and never a bare claude with no credential.
+The config names the token's container path, not the host's, and carries no
+credential.
 
 --forge-host and --forge-token-file give the container's git the Forgejo
 credential helper, so the landing worker's pushes carry the landing bot's token.
@@ -273,6 +296,17 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 	if err != nil {
 		return err
 	}
+	// The om config is derived from the default settings and names the token
+	// mount, never the token: it is written only when the token file is named,
+	// so a render without the flag writes no om config (gt-gg9hv.13).
+	var omConfig []byte
+	var omConfigFile string
+	if omTokenFile != "" {
+		omConfigFile = containerOMConfigPath(townRoot)
+		if omConfig, err = d.omConfig(); err != nil {
+			return fmt.Errorf("deriving the om config, and no compose file was written: %w", err)
+		}
+	}
 	kubeconfig := strings.TrimSpace(f.kubeconfig)
 	var overlay []byte
 	var kubeconfigFiles []string
@@ -304,6 +338,7 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 		StopGrace:          templates.MinimumStopGrace,
 		DoltHost:           host,
 		OMTokenFile:        omTokenFile,
+		OMConfigFile:       omConfigFile,
 		ForgeHost:          forgeHost,
 		ForgeTokenFile:     forgeTokenFile,
 		ExtraHosts:         f.extraHosts,
@@ -319,6 +354,11 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 	if overlay != nil {
 		if err := writeDaemonComposeFile(d.files, containerKubeconfigPath(townRoot), overlay); err != nil {
 			return fmt.Errorf("cannot write the container kubeconfig, and no compose file was written: %w", err)
+		}
+	}
+	if omConfigFile != "" {
+		if err := writeDaemonComposeFile(d.files, omConfigFile, omConfig); err != nil {
+			return fmt.Errorf("cannot write the om config, and no compose file was written: %w", err)
 		}
 	}
 	path := config.ContainerComposeFile(townRoot)

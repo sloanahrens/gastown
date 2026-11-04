@@ -64,6 +64,9 @@ func newComposeRig(t *testing.T) *composeRig {
 		readFile:     func(string) ([]byte, error) { return nil, fs.ErrNotExist },
 		evalSymlinks: func(p string) (string, error) { return p, nil },
 		townZone:     func(string) (string, error) { return "", nil },
+		omConfig: func() ([]byte, error) {
+			return templates.RenderOMConfig(templates.DefaultOMConfigSettings())
+		},
 		files: composeFiles{
 			mkdirAll: func(dir string) error {
 				if r.mkdirErr != nil {
@@ -201,6 +204,98 @@ func TestDaemonComposeWriteOMToken(t *testing.T) {
 	}
 	if len(refused.wrote) != 0 {
 		t.Errorf("a relative token path wrote %v", refused.wrote)
+	}
+}
+
+// --om-token-file also writes the om config the container reads, beside the
+// derived kubeconfig, and mounts it read-only at the XDG path om reads. The
+// config names the token's container path, never the host's (gt-gg9hv.13).
+func TestComposeWriteWithOMTokenWritesTheDerivedOMConfig(t *testing.T) {
+	t.Parallel()
+	tokenFile := filepath.Join(t.TempDir(), "om-token")
+	if err := os.WriteFile(tokenFile, []byte("x\n"), 0o600); err != nil {
+		t.Fatalf("writing the token file: %v", err)
+	}
+
+	r := newComposeRig(t)
+	r.flags.omTokenFile = tokenFile
+	if err := runDaemonCompose(r.flags, r.deps); err != nil {
+		t.Fatalf("runDaemonCompose: %v", err)
+	}
+
+	omPath := containerOMConfigPath(r.town)
+	content, ok := r.disk[omPath]
+	if !ok {
+		t.Fatalf("no om config written at %s; wrote %v", omPath, r.wrote)
+	}
+	if !strings.Contains(string(content), `"`+templates.LiveOMTokenPath+`"`) {
+		t.Errorf("om config = %s, want the backend to name the token at %s", content, templates.LiveOMTokenPath)
+	}
+	if strings.Contains(string(content), tokenFile) {
+		t.Errorf("om config names the host's token path %s:\n%s", tokenFile, content)
+	}
+	mount := fmt.Sprintf("      - type: bind\n        source: %q\n        target: %q\n        read_only: true\n",
+		omPath, templates.LiveOMConfigPath)
+	if got := string(r.disk[r.composePath()]); !strings.Contains(got, mount) {
+		t.Errorf("compose file does not carry %q:\n%s", mount, got)
+	}
+}
+
+// Without --om-token-file the command writes no om config and mounts none: the
+// compose file is the only file written, as it was before the flag had one.
+func TestComposeWriteWithoutOMTokenWritesNoOMConfig(t *testing.T) {
+	t.Parallel()
+	r := newComposeRig(t)
+	if err := runDaemonCompose(r.flags, r.deps); err != nil {
+		t.Fatalf("runDaemonCompose: %v", err)
+	}
+	if want := []string{r.composePath()}; !slices.Equal(r.wrote, want) {
+		t.Errorf("wrote %v, want only the compose file %v", r.wrote, want)
+	}
+	if got := string(r.disk[r.composePath()]); strings.Contains(got, templates.LiveOMConfigPath) {
+		t.Errorf("compose file mounts an om config without a token file:\n%s", got)
+	}
+}
+
+// A derivation that fails stops the command before any file is written, and
+// names the step, so the town keeps the compose file it had (gt-gg9hv.13).
+func TestComposeWriteRefusesWhenTheOMConfigCannotBeDerived(t *testing.T) {
+	t.Parallel()
+	tokenFile := filepath.Join(t.TempDir(), "om-token")
+	if err := os.WriteFile(tokenFile, []byte("x\n"), 0o600); err != nil {
+		t.Fatalf("writing the token file: %v", err)
+	}
+
+	r := newComposeRig(t)
+	r.flags.omTokenFile = tokenFile
+	r.deps.omConfig = func() ([]byte, error) { return nil, errors.New("bad settings") }
+	err := runDaemonCompose(r.flags, r.deps)
+	if err == nil || !strings.Contains(err.Error(), "deriving the om config") {
+		t.Fatalf("error = %v, want the derivation named", err)
+	}
+	if len(r.wrote) != 0 {
+		t.Errorf("a failed derivation wrote %v", r.wrote)
+	}
+}
+
+// A failed om config write stops the command before the compose file is
+// written, so the old compose file stays as it was.
+func TestComposeWriteStopsWhenTheOMConfigCannotBeWritten(t *testing.T) {
+	t.Parallel()
+	tokenFile := filepath.Join(t.TempDir(), "om-token")
+	if err := os.WriteFile(tokenFile, []byte("x\n"), 0o600); err != nil {
+		t.Fatalf("writing the token file: %v", err)
+	}
+
+	r := newComposeRig(t)
+	r.flags.omTokenFile = tokenFile
+	r.writeErr = errors.New("disk full")
+	err := runDaemonCompose(r.flags, r.deps)
+	if err == nil || !strings.Contains(err.Error(), "cannot write the om config") {
+		t.Fatalf("error = %v, want the om config write named", err)
+	}
+	if want := []string{containerOMConfigPath(r.town)}; !slices.Equal(r.wrote, want) {
+		t.Errorf("wrote %v, want the om config alone before the compose file was refused", r.wrote)
 	}
 }
 
