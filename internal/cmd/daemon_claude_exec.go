@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
-	"unicode"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
@@ -20,6 +18,7 @@ type claudeExecSeams struct {
 	environ  func() []string
 	readFile func(path string) (string, error)
 	run      func(argv, env []string) (int, error)
+	exit     func(code int) // ends the process with claude's status; os.Exit in production
 }
 
 // claudeExec starts claude with args and the om token read from tokenFile in
@@ -31,32 +30,35 @@ func claudeExec(s claudeExecSeams, tokenFile string, args []string) (int, error)
 	if tokenFile == "" {
 		return 0, fmt.Errorf("--%s is required; claude was not started", config.OMTokenFileFlag)
 	}
-	for _, name := range apiCredentialEnvs {
-		if s.getenv(name) != "" {
-			return 0, fmt.Errorf("%s is set in the environment; it outranks the subscription token and bills API rates, so claude was not started", name)
-		}
+	// The token file and the API-credential refusal are the container
+	// entrypoint's own (gt-qpeei.36), so the two commands read one token the
+	// same way instead of holding copies that can drift.
+	e := containerEntrypoint{getenv: s.getenv, readFile: s.readFile, omTokenFile: tokenFile}
+	if err := e.refuseAPICredentials(); err != nil {
+		return 0, err
 	}
-	text, err := s.readFile(tokenFile)
+	env, err := e.omTokenEnv()
 	if err != nil {
-		return 0, fmt.Errorf("read the om token file %s: it could not be read; claude was not started", tokenFile)
-	}
-	// Every whitespace character goes, not only the ends: a token split across
-	// lines is one token, and a stray newline inside it would break the login.
-	token := strings.Map(func(r rune) rune {
-		if unicode.IsSpace(r) {
-			return -1
-		}
-		return r
-	}, text)
-	if token == "" {
-		return 0, fmt.Errorf("the om token file %s is empty; claude was not started", tokenFile)
+		return 0, err
 	}
 	argv := append([]string{"claude"}, args...)
-	code, err := s.run(argv, mergeEnv(s.environ(), []string{omTokenEnv + "=" + token}))
+	code, err := s.run(argv, mergeEnv(s.environ(), env))
 	if err != nil {
 		return 0, fmt.Errorf("start claude: %w", err)
 	}
 	return code, nil
+}
+
+// claudeChildStatus is the answer for the error a child's Run returned: a child
+// that ran and exited non-zero gives its status and no error, and any other
+// failure gives no status and the error. A test passes an error, so no process
+// starts.
+func claudeChildStatus(runErr error) (int, error) {
+	var exited interface{ ExitCode() int } // exec.ExitError, and a test's stand-in
+	if errors.As(runErr, &exited) {
+		return exited.ExitCode(), nil
+	}
+	return 0, runErr
 }
 
 // runClaudeChild runs argv with env and the process's standard streams, and
@@ -66,12 +68,7 @@ func runClaudeChild(argv, env []string) (int, error) {
 	c := exec.Command(argv[0], argv[1:]...) //nolint:gosec // argv[0] is the fixed name claude; the rest are the arguments the operator wrote after --
 	c.Env = env
 	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
-	err := c.Run()
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return exitErr.ExitCode(), nil
-	}
-	return 0, err
+	return claudeChildStatus(c.Run())
 }
 
 // newDaemonClaudeExecCmd builds the command over seams, so a test drives the
@@ -84,10 +81,11 @@ func newDaemonClaudeExecCmd(seams claudeExecSeams) *cobra.Command {
 		Long: `Run claude with the om subscription token loaded from a file.
 
 The om reviewer backend runs this command in place of claude. It reads the
-file, removes every whitespace character from its contents, and starts claude
-with the result as CLAUDE_CODE_OAUTH_TOKEN in claude's environment only. The
-arguments after -- go to claude unchanged; claude's stdin, stdout and stderr
-are this process's, and its exit status is this command's.
+file, removes its space, tab, carriage return and line feed characters, and
+starts claude with the result as CLAUDE_CODE_OAUTH_TOKEN in claude's
+environment only. The arguments after -- go to claude unchanged; claude's
+stdin, stdout and stderr are this process's, and its exit status is this
+command's.
 
 It refuses when the file is unreadable or empty, and when ANTHROPIC_API_KEY or
 ANTHROPIC_AUTH_TOKEN is set, since either outranks the token and bills API
@@ -101,7 +99,7 @@ rates. Every check runs before claude starts.`,
 				return err
 			}
 			if code != 0 {
-				os.Exit(code)
+				seams.exit(code)
 			}
 			return nil
 		},
@@ -118,6 +116,7 @@ var daemonClaudeExecCmd = newDaemonClaudeExecCmd(claudeExecSeams{
 	environ:  os.Environ,
 	readFile: readTextFile,
 	run:      runClaudeChild,
+	exit:     os.Exit,
 })
 
 func init() {

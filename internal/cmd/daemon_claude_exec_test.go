@@ -2,8 +2,7 @@ package cmd
 
 import (
 	"errors"
-	"os/exec"
-	"path/filepath"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -29,6 +28,9 @@ type claudeExecFake struct {
 	runs     int
 	argv     []string
 	childEnv []string
+
+	exited   bool
+	exitCode int
 }
 
 func (f *claudeExecFake) seams() claudeExecSeams {
@@ -50,8 +52,18 @@ func (f *claudeExecFake) seams() claudeExecSeams {
 			f.argv, f.childEnv = argv, env
 			return f.code, f.runErr
 		},
+		exit: func(code int) {
+			f.exited, f.exitCode = true, code
+		},
 	}
 }
+
+// claudeChildExitError stands in for the *exec.ExitError a child that ran
+// returns, so the status mapping is tested without starting a process.
+type claudeChildExitError struct{ code int }
+
+func (e claudeChildExitError) Error() string { return fmt.Sprintf("exit status %d", e.code) }
+func (e claudeChildExitError) ExitCode() int { return e.code }
 
 // claudeExecLeaks reports whether msg carries any 8-character run of token.
 func claudeExecLeaks(msg, token string) bool {
@@ -106,7 +118,8 @@ func TestClaudeExecSetsTheTokenInTheChildEnvOnly(t *testing.T) {
 	}
 }
 
-// Every whitespace character goes: a token split over two lines is one token.
+// The four characters the entrypoint strips go wherever they sit, not only at
+// the ends: a token split over two lines is one token.
 func TestClaudeExecStripsWhitespaceInsideTheToken(t *testing.T) {
 	t.Parallel()
 	f := &claudeExecFake{
@@ -118,6 +131,23 @@ func TestClaudeExecStripsWhitespaceInsideTheToken(t *testing.T) {
 	}
 	if want := omTokenEnv + "=" + claudeExecFixtureToken; !slices.Contains(f.childEnv, want) {
 		t.Errorf("child environment does not carry the token as one line (values not printed)")
+	}
+}
+
+// The strip is the container entrypoint's, not every character Unicode calls
+// whitespace: a no-break space stays, as it does in the entrypoint's token.
+func TestClaudeExecKeepsWhitespaceTheEntrypointKeeps(t *testing.T) {
+	t.Parallel()
+	const noBreakSpace = "\u00a0"
+	f := &claudeExecFake{
+		files: map[string]string{claudeExecFixturePath: " \t" + claudeExecFixtureToken + noBreakSpace},
+	}
+
+	if _, err := claudeExec(f.seams(), claudeExecFixturePath, nil); err != nil {
+		t.Fatalf("claudeExec: %v", err)
+	}
+	if want := omTokenEnv + "=" + claudeExecFixtureToken + noBreakSpace; !slices.Contains(f.childEnv, want) {
+		t.Errorf("child environment does not carry the token with its no-break space (values not printed)")
 	}
 }
 
@@ -203,6 +233,40 @@ func TestClaudeExecPassesArgsAndExitStatusThrough(t *testing.T) {
 	})
 }
 
+// The command ends with claude's non-zero status, and returns no error of its
+// own; a zero status is left to the process that called the command.
+func TestClaudeExecEndsTheCommandWithClaudesStatus(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		code     int
+		wantExit bool
+		wantCode int
+	}{
+		{"a non-zero status ends the command", 7, true, 7},
+		{"a zero status does not end it", 0, false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := &claudeExecFake{
+				files: map[string]string{claudeExecFixturePath: claudeExecFixtureToken},
+				code:  tc.code,
+			}
+			c := newDaemonClaudeExecCmd(f.seams())
+			c.SetArgs([]string{"--om-token-file", claudeExecFixturePath, "--", "-p", "hi"})
+			c.SilenceUsage, c.SilenceErrors = true, true
+
+			if err := c.Execute(); err != nil {
+				t.Fatalf("execute claude-exec: %v", err)
+			}
+			if f.exited != tc.wantExit || f.exitCode != tc.wantCode {
+				t.Errorf("command exit = (exited %t, code %d), want (exited %t, code %d)",
+					f.exited, f.exitCode, tc.wantExit, tc.wantCode)
+			}
+		})
+	}
+}
+
 // Each refusal names the path or the variable, never the token, and starts
 // nothing. A start failure comes back as an error too.
 func TestClaudeExecErrorsNeverContainTheToken(t *testing.T) {
@@ -279,18 +343,31 @@ func TestClaudeExecRefusalThroughTheCommandStartsNothing(t *testing.T) {
 	}
 }
 
-// A child that cannot start is an error, not an exit status. The binary is absent
-// from a fresh temporary directory, so nothing runs.
-func TestClaudeExecReportsAChildThatCannotStart(t *testing.T) {
+// A child that cannot start is an error, not an exit status. Both answers are
+// read from the error the child's Run returned, so no process starts.
+func TestClaudeExecTellsAStartFailureFromAnExitStatus(t *testing.T) {
 	t.Parallel()
-	missing := filepath.Join(t.TempDir(), "no-such-claude")
 
-	code, err := runClaudeChild([]string{missing, "-p", "hi"}, []string{"PATH=/usr/bin"})
+	t.Run("a start failure is an error", func(t *testing.T) {
+		t.Parallel()
+		startErr := errors.New(`exec: "claude": executable file not found in $PATH`)
 
-	var exitErr *exec.ExitError
-	if err == nil || errors.As(err, &exitErr) {
-		t.Fatalf("runClaudeChild = (%d, %v), want a start error that is not an exit status", code, err)
-	}
+		code, err := claudeChildStatus(startErr)
+
+		if code != 0 || !errors.Is(err, startErr) {
+			t.Fatalf("claudeChildStatus(start failure) = (%d, %v), want no status and the error", code, err)
+		}
+	})
+
+	t.Run("a non-zero exit is the status", func(t *testing.T) {
+		t.Parallel()
+
+		code, err := claudeChildStatus(claudeChildExitError{code: 7})
+
+		if err != nil || code != 7 {
+			t.Fatalf("claudeChildStatus(exit status) = (%d, %v), want claude's 7 and no error", code, err)
+		}
+	})
 }
 
 // A missing --om-token-file is named as the missing flag, not reported as a file
