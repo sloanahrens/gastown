@@ -109,7 +109,7 @@ erroring ends the run `aborted`, puts the probe error in the drain step's
 the run id, so the next tick answers again instead of rerunning gc. Leaving the
 error path unstated has a cost: B2's heartbeat and lock edge cases had to be
 guessed by the polecat, and an unreadable seat list read as "no seats" was a
-gap om found in the drain plan.
+gap the reviewer found in the drain plan.
 
 ### Check the dependency edges by listing the names each bead uses
 
@@ -122,12 +122,12 @@ defines.
 
 ### Split a bead at about six behaviours
 
-Count the distinct behaviours rather than the files: a bead with seven is more
-than one worker lands in one small MR. B9 carried seven, so it was cut into B9a
-(gt-o4sk8.10) — plan, dry run, drain, install and lift — and B9b (gt-o4sk8.21)
-— maintenance, restart, verify and the partial outcome. B10 was cut too, into
-B10a to B10e. The lint routes more than six acceptance items to the planner, so
-the boxes make the count visible.
+Count the distinct behaviours rather than the files: a bead with seven
+behaviours is more than one worker can land in one small MR. B9 carried seven,
+so it was cut into B9a (gt-o4sk8.10) — plan, dry run, drain, install and lift —
+and B9b (gt-o4sk8.21) — maintenance, restart, verify and the partial outcome.
+B10 was cut too, into B10a to B10e. The lint routes more than six acceptance
+items to the planner, so the boxes make the count visible.
 
 ### Write the Gate as a command that selects the tests the boxes name
 
