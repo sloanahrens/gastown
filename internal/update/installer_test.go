@@ -687,11 +687,93 @@ func TestInstallDetailTailStripsControlCharacters(t *testing.T) {
 	if result != ResultFailed {
 		t.Fatalf("ClassifyInstall(%+v) = %q, want %q", res, result, ResultFailed)
 	}
+	// Each control character is dropped; the printable text around it stays.
 	detail := installDetail(res, result, nil)
-	if strings.ContainsAny(detail, "\x1b\a") {
-		t.Errorf("install Detail = %q, want no control characters", detail)
+	want := "build[0m-failed\n" +
+		"last 2 lines of output:\n" +
+		"[31mswap: permission denied[0m\n" +
+		"install-gt: RESULT failed abc123 def456 build[0m-failed"
+	if detail != want {
+		t.Errorf("install Detail = %q, want %q", detail, want)
 	}
-	if !strings.Contains(detail, "swap: permission denied") {
-		t.Errorf("install Detail = %q, want the installer's error text", detail)
+}
+
+// TestInstallDetailStripsControlCharactersOnEveryVerdict keeps a control
+// character out of the step's detail whatever the verdict: the reason is
+// installer output on the OK and busy paths as well as the failed one.
+func TestInstallDetailStripsControlCharactersOnEveryVerdict(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		exit   int
+		output string
+		want   string
+	}{
+		{
+			name:   "a failed verdict keeps its tail",
+			exit:   1,
+			output: "install-gt: RESULT failed abc123 def456 build\x1b[0m-failed\n",
+			want:   "build[0m-failed\nlast 1 lines of output:\ninstall-gt: RESULT failed abc123 def456 build[0m-failed",
+		},
+		{
+			name:   "a busy verdict keeps its reason alone",
+			exit:   3,
+			output: "install-gt: RESULT refused abc123 - lock-busy\x1b\n",
+			want:   "lock-busy",
+		},
+		{
+			name:   "an OK verdict keeps its reason alone",
+			exit:   0,
+			output: "install-gt: RESULT installed abc123 def456 done\a\n",
+			want:   "done",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fake := &fakeRun{answer: func(call runCall) (string, int, error) {
+				if call.name == "make" {
+					return "", 0, nil
+				}
+				return tt.output, tt.exit, nil
+			}}
+			ex := &ExecInstaller{RepoRoot: t.TempDir(), Run: fake.run}
+
+			res, err := ex.Install(context.Background(), "abc123")
+			if err != nil {
+				t.Fatalf("Install: %v", err)
+			}
+			result := ClassifyInstall(res)
+			if detail := installDetail(res, result, nil); detail != tt.want {
+				t.Errorf("install Detail = %q, want %q", detail, tt.want)
+			}
+		})
+	}
+}
+
+// TestInstallDetailTailSkipsControlOnlyLines keeps a line that is only control
+// characters out of a failed tail, so it is not counted as a line of output.
+func TestInstallDetailTailSkipsControlOnlyLines(t *testing.T) {
+	t.Parallel()
+	fake := &fakeRun{answer: func(call runCall) (string, int, error) {
+		if call.name == "make" {
+			return "", 0, nil
+		}
+		return "first line\n\x1b\a\x01\n" +
+			"install-gt: RESULT failed abc123 def456 build-failed\n", 1, nil
+	}}
+	ex := &ExecInstaller{RepoRoot: t.TempDir(), Run: fake.run}
+
+	res, err := ex.Install(context.Background(), "abc123")
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	result := ClassifyInstall(res)
+	want := "build-failed\n" +
+		"last 2 lines of output:\n" +
+		"first line\n" +
+		"install-gt: RESULT failed abc123 def456 build-failed"
+	if detail := installDetail(res, result, nil); detail != want {
+		t.Errorf("install Detail = %q, want %q", detail, want)
 	}
 }

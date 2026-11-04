@@ -147,6 +147,9 @@ func (e *ExecInstaller) Install(ctx context.Context, sha string) (InstallResult,
 		return InstallResult{}, fmt.Errorf("%s named no result line (exit %d)%s", program, exit, outputTail(out, installerDetailTailLines))
 	}
 	res.Exit = exit
+	// The reason is installer output too, and installDetail writes it into the
+	// step's detail on every verdict, so it is cleaned on all of them.
+	res.Reason = printable(res.Reason)
 	if ClassifyInstall(res) == ResultFailed {
 		// run.go's installDetail writes Reason into the step's detail, so a
 		// failed verdict keeps the installer's last lines where the operator
@@ -217,8 +220,6 @@ func emptyIfDash(s string) string {
 // withOutputTail appends a command's last lines to a failed install's detail,
 // or returns the detail alone when the command printed nothing.
 func withOutputTail(detail, out string) string {
-	// The detail's reason is a RESULT line field, which is installer output too.
-	detail = printable(detail)
 	tail := outputTail(out, installerDetailTailLines)
 	if tail == "" {
 		return detail
@@ -237,7 +238,6 @@ func outputTail(out string, maxLines int) string {
 	var lines []string
 	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
 		line = strings.TrimSuffix(line, "\r")
-		// Control characters other than tab are shown as U+FFFD, so the tail is text.
 		line = printable(line)
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -267,13 +267,14 @@ func truncateChars(s string, max int) string {
 	return string(chars[:max])
 }
 
-// printable replaces each control character in s, except a tab, with U+FFFD.
-// The installer's output can carry an escape sequence or a bell, and those are
-// kept out of the state file, `gt update status` and an escalation as text.
+// printable drops each control character in s, except a tab. The installer's
+// output can carry an escape sequence or a bell, and those are kept out of the
+// state file, `gt update status` and an escalation. oneLine, which cleans
+// maintenance notes, drops such characters too.
 func printable(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r != '\t' && unicode.IsControl(r) {
-			return '�'
+			return -1
 		}
 		return r
 	}, s)
