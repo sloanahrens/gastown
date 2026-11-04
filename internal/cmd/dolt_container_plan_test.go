@@ -134,11 +134,6 @@ func TestDoltContainerPlanCommand(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ContainerPlan: %v", err)
 		}
-		imageAt := slices.Index(want, "dolt:test")
-		if imageAt < 0 {
-			t.Fatalf("ContainerPlan argv %#v holds no image reference", want)
-		}
-		want = slices.Insert(want, imageAt, "--label", "org.gastown.keep=true")
 		if !slices.Equal(got, want) {
 			t.Fatalf("argv = %#v\nwant %#v", got, want)
 		}
@@ -229,20 +224,26 @@ func TestDoltContainerPlanKeepsExistingFlags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ContainerPlan: %v", err)
 	}
-	// Dropping the one keep-label pair must leave the plan's every other
+	// Dropping the one keep-label pair from each side must leave every other
 	// element, so the memory, restart, publish and mount flags keep their
 	// values and their order.
-	stripped := make([]string, 0, len(got))
-	for i := 0; i < len(got); i++ {
-		if got[i] == "--label" && i+1 < len(got) {
+	stripped := dropKeepLabelPair(got)
+	if !slices.Equal(stripped, dropKeepLabelPair(want)) {
+		t.Fatalf("plan without the label = %#v\nwant %#v", stripped, dropKeepLabelPair(want))
+	}
+}
+
+// dropKeepLabelPair returns argv without its --label pair.
+func dropKeepLabelPair(argv []string) []string {
+	stripped := make([]string, 0, len(argv))
+	for i := 0; i < len(argv); i++ {
+		if argv[i] == "--label" && i+1 < len(argv) {
 			i++
 			continue
 		}
-		stripped = append(stripped, got[i])
+		stripped = append(stripped, argv[i])
 	}
-	if !slices.Equal(stripped, want) {
-		t.Fatalf("plan without the label = %#v\nwant %#v", stripped, want)
-	}
+	return stripped
 }
 
 func TestDoltContainerPlanDefaults(t *testing.T) {

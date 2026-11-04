@@ -38,11 +38,54 @@ func TestContainerPlanArgv(t *testing.T) {
 		"-v", "/town/.dolt-data:/town/.dolt-data",
 		"-v", "/home/u/gt-backups/dolt:/home/u/gt-backups/dolt",
 		"-v", "/town/.dolt-data/config.yaml:/town/.dolt-data/config.yaml:ro",
+		"--label", "org.gastown.keep=true",
 		"dolt:test",
 		"dolt", "sql-server", "--config", "/town/.dolt-data/config.yaml",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("argv = %#v\nwant %#v", got, want)
+	}
+}
+
+func TestContainerPlanKeepLabelBeforeImage(t *testing.T) {
+	t.Parallel()
+
+	// The label's place is found from the image reference, not from how many
+	// elements follow it, so each spec below puts the image at a different
+	// index and the label must sit directly before it in every case.
+	specs := map[string]func(*ContainerSpec){
+		"default":          func(*ContainerSpec) {},
+		"longer data path": func(s *ContainerSpec) { s.DataDir = "/a/b/c/d/e/.dolt-data"; s.ConfigPath = s.DataDir + "/config.yaml" },
+		"other image":      func(s *ContainerSpec) { s.Image = "registry.example/dolt:1.2.3" },
+	}
+	for name, set := range specs {
+		set := set
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			s := validContainerSpec()
+			set(&s)
+			argv, err := ContainerPlan(s)
+			if err != nil {
+				t.Fatalf("ContainerPlan: %v", err)
+			}
+			imageAt := slices.Index(argv, s.Image)
+			if imageAt < 2 {
+				t.Fatalf("argv %#v holds no image reference %q after a flag pair", argv, s.Image)
+			}
+			if argv[imageAt-2] != "--label" || argv[imageAt-1] != "org.gastown.keep=true" {
+				t.Fatalf("the two elements before the image are %q %q, want --label org.gastown.keep=true\n%#v",
+					argv[imageAt-2], argv[imageAt-1], argv)
+			}
+			labels := 0
+			for _, a := range argv {
+				if a == "org.gastown.keep=true" {
+					labels++
+				}
+			}
+			if labels != 1 {
+				t.Fatalf("the keep label appears %d times, want once", labels)
+			}
+		})
 	}
 }
 
