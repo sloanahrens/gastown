@@ -1001,6 +1001,90 @@ func TestRunMaintenanceFailureOrDeferralIsPartialAndInstallStillRuns(t *testing.
 	}
 }
 
+func TestRunMaintenanceWithoutARequestFailsThePartialStep(t *testing.T) {
+	t.Parallel()
+	f := newRunFixture(t)
+	f.probes.commits = 5
+	f.deps.Maint = nil
+
+	final, err := f.run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if final.Outcome != OutcomePartial {
+		t.Errorf("Outcome = %q, want %q", final.Outcome, OutcomePartial)
+	}
+	if f.inst.calls != 1 {
+		t.Errorf("installer called %d times, want 1: a missing request must not stop the install", f.inst.calls)
+	}
+	maint := step(t, final, StepMaintenance)
+	if maint.Result != ResultFailed {
+		t.Errorf("maintenance Result = %q, want %q", maint.Result, ResultFailed)
+	}
+	if maint.Detail == "" {
+		t.Error("maintenance Detail is empty, want the reason the cycle could not run")
+	}
+}
+
+func TestRunMaintenanceNoteIsOneLine(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		detail string
+		want   string
+	}{
+		{
+			name:   "a newline and a tab become spaces",
+			detail: "the archive\nis\tlocked",
+			want:   "the archive is locked",
+		},
+		{
+			name:   "an escape sequence cannot reach the log",
+			detail: "the archive is locked\x1b[2J\r\nrun again",
+			want:   "the archive is locked[2J run again",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newRunFixture(t)
+			f.probes.commits = 5
+			f.maintDaemon(t, MaintenanceResult{RunID: runTestID, Outcome: maintenanceFailed, Detail: tt.detail})
+
+			final, err := f.run(context.Background())
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if got := step(t, final, StepMaintenance).Detail; got != tt.want {
+				t.Errorf("maintenance Detail = %q, want %q", got, tt.want)
+			}
+			wantLog := "maintenance: " + string(ResultFailed) + ": " + tt.want + "\n"
+			if !strings.Contains(f.log.String(), wantLog) {
+				t.Errorf("log is missing the one-line note %q:\n%s", wantLog, f.log.String())
+			}
+		})
+	}
+}
+
+func TestRunMaintenanceNoteIsBounded(t *testing.T) {
+	t.Parallel()
+	f := newRunFixture(t)
+	f.probes.commits = 5
+	f.maintDaemon(t, MaintenanceResult{RunID: runTestID, Outcome: maintenanceFailed, Detail: strings.Repeat("a", 5000)})
+
+	final, err := f.run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	got := step(t, final, StepMaintenance).Detail
+	if n := len([]rune(got)); n > 200 {
+		t.Errorf("maintenance Detail is %d runes, want at most 200", n)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Errorf("maintenance Detail does not end with %q, so the cut is not marked", "...")
+	}
+}
+
 func TestRunRestartTimeoutIsPartialInstalledRestartPending(t *testing.T) {
 	t.Parallel()
 	f := newRunFixture(t)

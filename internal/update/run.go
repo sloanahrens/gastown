@@ -2,10 +2,12 @@ package update
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Step details for a step that ends with less than the run set out to do.
@@ -414,6 +416,7 @@ func (r *runner) maintenance(i int) (Outcome, error) {
 	}
 	result := maintenanceStepResult(res, err)
 	detail := maintenanceDetail(res, err)
+	detail = oneLine(detail)
 	if detail != "" {
 		logf(r.d.Log, "maintenance: %s: %s\n", result, detail)
 	}
@@ -428,6 +431,9 @@ func (r *runner) maintenance(i int) (Outcome, error) {
 
 // maintenanceCycle writes the run's request and waits for the daemon's answer.
 func (r *runner) maintenanceCycle() (MaintenanceResult, error) {
+	if r.d.Maint == nil {
+		return MaintenanceResult{}, errors.New("no maintenance request is wired into the run")
+	}
 	if err := r.d.Maint.Request(r.st.RunID); err != nil {
 		return MaintenanceResult{}, err
 	}
@@ -455,6 +461,30 @@ func maintenanceDetail(res MaintenanceResult, err error) string {
 		return err.Error()
 	}
 	return res.Detail
+}
+
+// maxNoteLen bounds a maintenance note in runes, the cut mark included.
+const maxNoteLen = 200
+
+// oneLine makes a maintenance note one bounded line for the log and the state
+// file. Runs of white space become one space, characters that are not printable
+// are dropped, and a note longer than maxNoteLen is cut and ends in "...". The
+// daemon writes the note, so it is not trusted to be one short line of text.
+func oneLine(note string) string {
+	note = strings.Map(func(r rune) rune {
+		switch {
+		case unicode.IsSpace(r):
+			return ' '
+		case unicode.IsPrint(r):
+			return r
+		}
+		return -1
+	}, note)
+	note = strings.Join(strings.Fields(note), " ")
+	if runes := []rune(note); len(runes) > maxNoteLen {
+		return string(runes[:maxNoteLen-len("...")]) + "..."
+	}
+	return note
 }
 
 // restart waits for the daemon to come up on the new build. A timeout leaves
