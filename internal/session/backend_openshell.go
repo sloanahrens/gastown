@@ -28,6 +28,7 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/liveness"
+	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 	"github.com/steveyegge/gastown/internal/sandbox"
 	"github.com/steveyegge/gastown/internal/seattoken"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -1048,7 +1049,8 @@ func (b *openshellBackend) usesDockerVolumes() bool {
 // contract is the environment the sandbox carries for the gt and bd it runs:
 // the in-sandbox town root, the identity and Dolt endpoint of this polecat,
 // and, for a rig the town routes to the tracker, that tracker's endpoint. A
-// Dolt rig's contract is unchanged.
+// kubernetes profile that names the shared cache claim also points Go's two
+// caches into it. A Dolt rig's contract is otherwise unchanged.
 func (b *openshellBackend) contract(spec SpawnSpec, tracker sandboxTracker) map[string]string {
 	identity := spec.Rig + "/polecats/" + spec.Polecat
 	env := map[string]string{
@@ -1071,6 +1073,15 @@ func (b *openshellBackend) contract(spec SpawnSpec, tracker sandboxTracker) map[
 		"DO_NOT_TRACK":                             "1",
 		"DISABLE_AUTOUPDATER":                      "1",
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+	}
+	if b.profile.Driver == DriverKubernetes && b.profile.KubernetesCacheClaim != "" {
+		// The same claim the driver config mounts at sandboxCacheDir. Go's
+		// caches go in the two directories the seed Job writes, so a sandbox
+		// compiles against the entries the seed put there (gt-nposw). Without
+		// the claim there is nothing to point at, and Go keeps the image's
+		// defaults.
+		env["GOCACHE"] = path.Join(sandboxCacheDir, cachevol.SeedBuildCacheDir)
+		env["GOMODCACHE"] = path.Join(sandboxCacheDir, cachevol.SeedModuleCacheDir)
 	}
 	if tracker.on() {
 		// The token itself is a file the runtime archive stages, never a value
