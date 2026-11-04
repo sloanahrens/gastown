@@ -310,6 +310,31 @@ func TestAcquire_OrphanRemovalFailureDoesNotBlock(t *testing.T) {
 	}
 }
 
+// TestAcquire_KeepLabelOrphanIsNeverRemoved: the keep label exempts a container
+// from every removal, not only from 'gt slot reap'. An owner-gone orphan that
+// carries it is left up by Acquire; a plain owner-gone orphan beside it is
+// still removed, so the exemption is narrow.
+func TestAcquire_KeepLabelOrphanIsNeverRemoved(t *testing.T) {
+	t.Parallel()
+	tg := newTestGate(t)
+	const deadPID = 4242
+	tg.gone[deadPID] = true
+	kept := ownerLabels(deadPID, testHost, "s")
+	kept[KeepLabel] = "true"
+	tg.rt.setLines(
+		dockerPSLine("keep-orphan", "dolthub/dolt-sql-server:2.0.7", "kept", tg.clk.Now().Add(-time.Minute), kept),
+		dockerPSLine("plain-orphan", "dolthub/dolt-sql-server:2.0.7", "plain", tg.clk.Now().Add(-time.Minute), ownerLabels(deadPID, testHost, "s")),
+	)
+	h, err, _ := tg.run(t, func() (*Handle, error) { return tg.Acquire(t.TempDir(), "waiter", 30*time.Second) })
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	defer release(t, h)
+	if got := strings.Join(tg.rt.removedIDs(), ","); got != "plain-orphan" {
+		t.Errorf("removed = %q, want only the orphan without the keep label", got)
+	}
+}
+
 // Status reports an owner-gone container as debris, not as an unwrapped
 // suite, and removes nothing: it is a read.
 func TestStatus_OwnerGoneIsDebrisAndNotRemoved(t *testing.T) {
