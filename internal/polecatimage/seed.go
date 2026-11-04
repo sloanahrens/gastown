@@ -142,8 +142,8 @@ func (p *SeedPass) Seed() error {
 			case step.Required:
 				return fmt.Errorf("the seed step %q in %s failed: %w: %s", line, dir, err, reason(out))
 			default:
-				// The Dockerfile seed RUN skips a step that needs something the image lacks, and
-				// logs it; a required step failing is the only one that stops the seed.
+				// A step that needs something the image lacks is skipped and logged; a required
+				// step failing is the only one that stops the seed.
 				p.Logf("seed: %s: %s failed, skipped: %s", dir, line, reason(out))
 			}
 		}
