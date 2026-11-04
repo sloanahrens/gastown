@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
@@ -23,6 +24,10 @@ const stateVersion = 1
 
 // stateFileName is the record's name inside the state directory.
 const stateFileName = "state.json"
+
+// stagingSeq numbers the staging files this process has published, so two
+// stores in one process never share a staging name.
+var stagingSeq atomic.Uint64
 
 const (
 	dirMode  os.FileMode = 0o700
@@ -147,7 +152,9 @@ type Store struct {
 }
 
 // Write records st as the current state and publishes it atomically to
-// state.json.
+// state.json. On failure state.json keeps the record it held before the call,
+// the store's current record is left as it was, and the staging file is
+// removed, or named in the error if it cannot be.
 func (s *Store) Write(st State) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -202,25 +209,25 @@ func (s *Store) publish(st State) error {
 	if err != nil {
 		return fmt.Errorf("encode update state: %w", err)
 	}
+	// The staging name is unique to this publish: a second process writing
+	// the record at the same time stages its own file, so its rename cannot
+	// take this publish's staging file away.
+	staging := filepath.Join(s.Dir, fmt.Sprintf("%s.next.%d.%d", stateFileName, os.Getpid(), stagingSeq.Add(1)))
 	// The staging write is atomic, and the rename publishes it whole: a reader
 	// sees the previous record or the complete new one, never a partial file.
-	staging := filepath.Join(s.Dir, stateFileName+".next")
 	write := s.write
 	if write == nil {
 		write = atomicfile.WriteFile
 	}
 	if err := write(staging, data, fileMode); err != nil {
-		return fmt.Errorf("write update state: %w", err)
+		return discardStaging(staging, fmt.Errorf("write update state: %w", err))
 	}
 	rename := s.Rename
 	if rename == nil {
 		rename = os.Rename
 	}
 	if err := rename(staging, s.path()); err != nil {
-		if rmErr := os.Remove(staging); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
-			return fmt.Errorf("publish update state: %w (remove staging file: %v)", err, rmErr)
-		}
-		return fmt.Errorf("publish update state: %w", err)
+		return discardStaging(staging, fmt.Errorf("publish update state: %w", err))
 	}
 	// Adopt only what reached the disk, so a failed publish leaves the
 	// previous record current.
@@ -232,6 +239,15 @@ func (s *Store) publish(st State) error {
 // path is state.json inside Dir.
 func (s *Store) path() string {
 	return filepath.Join(s.Dir, stateFileName)
+}
+
+// discardStaging removes the staging file a failed publish left behind and
+// returns err, naming the removal failure too when the file cannot be removed.
+func discardStaging(staging string, err error) error {
+	if rmErr := os.Remove(staging); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
+		return fmt.Errorf("%w (remove staging file: %v)", err, rmErr)
+	}
+	return err
 }
 
 // cloneState copies st so the caller cannot alias the steps slice the store

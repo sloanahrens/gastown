@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // fullState is a record with every field set, so a round trip that drops a
@@ -431,5 +433,95 @@ func TestStoreWriteReportsAStagingFileItCannotRemove(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "remove staging file") {
 		t.Errorf("error %q does not report the staging file it kept", err)
+	}
+}
+
+func TestDirIsTheUpdateDirectoryUnderTheTownRuntime(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	want := filepath.Join(town, constants.DirRuntime, "update")
+	if got := Dir(town); got != want {
+		t.Errorf("Dir(%q) = %q, want %q", town, got, want)
+	}
+}
+
+func TestStoreWriteSurvivesAnotherWriterPublishingMidWrite(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	mine := &Store{Dir: dir}
+	other := &Store{Dir: dir}
+
+	theirs := fullState()
+	theirs.RunID = "other-run"
+	mine.Rename = func(oldpath, newpath string) error {
+		// The other writer publishes between this writer's staging write and
+		// its rename.
+		if err := other.Write(theirs); err != nil {
+			t.Errorf("other Write: %v", err)
+		}
+		return os.Rename(oldpath, newpath)
+	}
+
+	mineState := fullState()
+	mineState.RunID = "this-run"
+	if err := mine.Write(mineState); err != nil {
+		t.Fatalf("Write with another writer publishing mid-write: %v", err)
+	}
+	got, err := mine.Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got.RunID != "this-run" {
+		t.Errorf("RunID = %q, want the last publish %q", got.RunID, "this-run")
+	}
+}
+
+func TestStoreFailedWriteLeavesTheCurrentRecord(t *testing.T) {
+	t.Parallel()
+	store := &Store{Dir: t.TempDir()}
+	if err := store.Write(fullState()); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	store.Rename = func(oldpath, newpath string) error {
+		return errors.New("rename refused")
+	}
+	failed := fullState()
+	failed.RunID = "failed-run"
+	if err := store.Write(failed); err == nil {
+		t.Fatal("Write succeeded with a failing rename")
+	}
+
+	// Mutate builds on the current record, so the failed write must not have
+	// replaced it.
+	store.Rename = nil
+	got, err := store.Mutate(func(st *State) { st.Outcome = OutcomeOK })
+	if err != nil {
+		t.Fatalf("Mutate: %v", err)
+	}
+	if got.RunID != fullState().RunID {
+		t.Errorf("RunID = %q, want the record before the failed write %q", got.RunID, fullState().RunID)
+	}
+}
+
+func TestStoreWriteRemovesTheStagingFileAFailedWriteLeft(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	store := &Store{Dir: dir}
+	store.write = func(path string, data []byte, perm os.FileMode) error {
+		if err := os.WriteFile(path, data[:1], perm); err != nil {
+			t.Fatalf("leave a partial staging file: %v", err)
+		}
+		return errors.New("write refused")
+	}
+
+	if err := store.Write(fullState()); err == nil {
+		t.Fatal("Write succeeded with a failing staging write")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read state dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("failed staging write left %d file(s) in the state directory, want none", len(entries))
 	}
 }
