@@ -66,8 +66,8 @@ ARG PG_VERSION=17.11-1.pgdg24.04+2
 ARG PGDG_KEYFILE_DIGEST=0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e8e76
 ARG CLAUDE_CODE_VERSION=2.1.309
 ARG GOLANGCI_LINT_VERSION=v2.13.2
-# libicu-dev supplies the ICU headers dolthub/go-icu-regex's cgo build needs, so
-# the seed's vet and test compile steps cache instead of failing (gt-gu1b7).
+# libicu-dev supplies the ICU headers dolthub/go-icu-regex's cgo build needs; a
+# sandbox that builds that package fails without them (gt-gu1b7).
 # Version read with `apt-cache policy libicu-dev` in ubuntu:24.04 on 2026-10-26;
 # re-read it if the base image tag moves or noble supersedes the candidate, since
 # the exact pin fails the build once superseded.
@@ -179,72 +179,7 @@ RUN userdel -r ubuntu 2>/dev/null || true \
 RUN groupadd -g 10001 polecat \
     && useradd -M -u 10001 -g 10001 -d /sandbox -s /bin/bash polecat
 
-# Seeded Go caches (gt-ieuvf): a cold sandbox otherwise compiles every dependency
-# of the rigs' modules before a presubmit can run. Both sit in /tmp, which
-# deploy/polecat/policy.yaml grants read_write, so a sandbox can also fill them.
-#
-# Both live outside /sandbox, which the workspace-init container copies into every
-# sandbox's volume: outside it, one image layer is shared and a write falls to the
-# sandbox's own layer. /tmp gets no mount of its own (a live sandbox's
-# /proc/mounts), so the seeded caches are there at runtime. A branch that moved
-# its go.mod ahead of the image needs a module the seed lacks, and the writable
-# path is what fetches it: the new files land in the sandbox's layer, the seeded
-# ones stay as built and shared (gt-pvudz).
-#
-# The sources are the checkouts `make polecat-seed-stage` writes into
-# deploy/polecat/seed: gastown at the commit the image is built at, every other
-# rig at its deploy/polecat/seed-pins commit. The directory is bind-mounted for
-# this one RUN so none of it lands in the image. Each module gets the commands
-# the rigs' presubmits run, with their default flags (no -trimpath, default CGO)
-# so the cache keys match. `go mod download` runs first because a linux build
-# fetches only the modules linux imports. There is no darwin build here: the
-# one presubmit test that cross-built for darwin/arm64 (devops'
-# TestCloudqueryBinPinsAreARebuildOfTheCommit, gt-mukre) moved to the host tier
-# in dv-0qre, so the sandbox's unit tier never needs the darwin cache. Macos
-# builds stay off the Linux image.
-#
-# A failing linux `go build` or `go mod download` fails the image: the seed
-# would otherwise publish a hole that the read-only cache cannot fill at
-# runtime. A failing vet or test compile is logged and skipped: a module may
-# need system headers the image lacks. The chmod for uid 10001 is in this same
-# RUN, as one in a later layer would copy every file again.
-#
-# A rig's example modules are skipped and named in the install log: they belong
-# to no rig's presubmit build, and a stale go.sum in one fails the whole image
-# (gt-9yqcc). Only the examples directory directly under a rig is skipped; a
-# module inside the rig's own tree is built like any other. A failure shows the
-# first 40 lines of its log, where `go` writes the error that
-# caused it. Past 40 lines it adds the last 10, where a failed download or
-# toolchain error sits, so a log of 51 lines or more drops lines 41 up to its
-# last 10; the heading gives the log's total length (gt-vvu6d).
-ENV GOCACHE=/tmp/gocache \
-    GOMODCACHE=/tmp/gomodcache
-RUN --mount=type=bind,source=seed,target=/seed \
-    export PATH="/usr/local/go/bin:$PATH" GOFLAGS="-p=4 -modcacherw" \
-    && mkdir -p "$GOCACHE" "$GOMODCACHE" \
-    && for gomod in $(find /seed -name go.mod -not -path '*/testdata/*' | sort); do \
-         rel=${gomod#/seed/}; rig=${rel%%/*}; \
-         case "$rel" in "$rig"/examples/*) \
-           echo "seed: skip $gomod: a rig's example module is in no presubmit build"; continue ;; \
-         esac; \
-         dir=$(dirname "$gomod"); echo "seed: $dir"; \
-         for step in "go mod download" "go build ./..." "go vet ./..." \
-                     "go test -count=1 -run ^\$ ./..."; do \
-           if ! (cd "$dir" && $step >/tmp/seed.log 2>&1); then \
-             n=$(wc -l < /tmp/seed.log); \
-             echo "seed: '$step' failed in $dir ($n lines):"; head -n 40 /tmp/seed.log; \
-             if [ "$n" -gt 40 ]; then echo "seed: last 10 of $n lines:"; tail -n 10 /tmp/seed.log; fi; \
-             case "$step" in "go build ./..."|"go mod download") exit 1 ;; esac; \
-           fi; \
-         done; \
-       done \
-    && rm -f /tmp/seed.log \
-    && chmod -R a+rwX "$GOCACHE" "$GOMODCACHE"
-
 # Town binaries, cross-compiled by `make polecat-image` (CGO_ENABLED=0 linux/arm64).
-# After the seed RUN, not before it: bin/gt and bin/bd change every commit, and a
-# layer above the seed would invalidate the seed's cache on every build (measured
-# 2026-10-26). The seed does not use gt or bd.
 COPY bin/gt /usr/local/bin/gt
 COPY bin/bd /usr/local/bin/bd
 # The trim helper a cache-volume container runs; plugin.md, "Per-rig cache
