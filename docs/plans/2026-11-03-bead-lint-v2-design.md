@@ -1,4 +1,4 @@
-> Status: plan (2026-11). Design for the bead-lint grammar changes; approved by the operator on 2026-11-03. Tracked by epic gt-hgt9j and decision bead gt-62yz9.
+> Status: historical (2026-11). Superseded by: gt-hgt9j (epic). Not maintained.
 
 # Bead lint v2: the grammar group
 
