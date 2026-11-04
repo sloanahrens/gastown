@@ -28,11 +28,11 @@ func TestFilesParseVerbs(t *testing.T) {
 		t.Fatal("present = false, want true")
 	}
 	want := []FileEntry{
-		{Verb: FileCreate, Path: "internal/a.go", Line: 1},
-		{Verb: FileCreate, Path: "internal/b.go", Line: 2},
-		{Verb: FileModify, Path: "internal/specdispatch/lint.go", Line: 3},
-		{Verb: FileRead, Path: "docs/guides/spec-dispatcher.md", Line: 4},
-		{Verb: FileModify, Path: "internal/c.go", Line: 5},
+		{Verb: FileCreate, Path: "internal/a.go", Line: 5},
+		{Verb: FileCreate, Path: "internal/b.go", Line: 6},
+		{Verb: FileModify, Path: "internal/specdispatch/lint.go", Line: 7},
+		{Verb: FileRead, Path: "docs/guides/spec-dispatcher.md", Line: 8},
+		{Verb: FileModify, Path: "internal/c.go", Line: 9},
 	}
 	if !slices.Equal(block.Entries, want) {
 		t.Errorf("entries = %+v, want %+v", block.Entries, want)
@@ -50,19 +50,19 @@ func TestFilesParseRefusesBadLine(t *testing.T) {
 		{
 			name:  "upper-case verb",
 			files: "create: ok.go\nCreate: x.go\n",
-			line:  2,
+			line:  3,
 			text:  "Create: x.go",
 		},
 		{
 			name:  "no verb or colon",
 			files: "create: ok.go\njust text\n",
-			line:  2,
+			line:  3,
 			text:  "just text",
 		},
 		{
 			name:  "empty path",
 			files: "create: ok.go\nmodify:\n",
-			line:  2,
+			line:  3,
 			text:  "modify:",
 		},
 	}
@@ -108,7 +108,7 @@ func TestFilesParseStripsBulletAndBackticks(t *testing.T) {
 	if !present {
 		t.Fatal("present = false, want true")
 	}
-	want := []FileEntry{{Verb: FileCreate, Path: "internal/x.go", Line: 1}}
+	want := []FileEntry{{Verb: FileCreate, Path: "internal/x.go", Line: 2}}
 	if !slices.Equal(block.Entries, want) {
 		t.Errorf("entries = %+v, want %+v", block.Entries, want)
 	}
@@ -138,11 +138,52 @@ func TestFilesParseIgnoresBlankLines(t *testing.T) {
 		t.Fatal("present = false, want true")
 	}
 	want := []FileEntry{
-		{Verb: FileCreate, Path: "a.go", Line: 1},
-		{Verb: FileModify, Path: "b.go", Line: 3},
+		{Verb: FileCreate, Path: "a.go", Line: 6},
+		{Verb: FileModify, Path: "b.go", Line: 8},
 	}
 	if !slices.Equal(block.Entries, want) {
 		t.Errorf("entries = %+v, want %+v: blank lines are ignored but still count as lines", block.Entries, want)
+	}
+}
+
+func TestFilesParseLinesCountFromDescription(t *testing.T) {
+	t.Parallel()
+	block, _, err := ParseFiles("## Goal\nx\n\n## Files\n\ncreate: a.go\n")
+	if err != nil {
+		t.Fatalf("ParseFiles: %v", err)
+	}
+	want := []FileEntry{{Verb: FileCreate, Path: "a.go", Line: 6}}
+	if !slices.Equal(block.Entries, want) {
+		t.Errorf("entries = %+v, want %+v: Line is the line in the description, not in the trimmed body", block.Entries, want)
+	}
+}
+
+func TestFilesParseLineSkipsFencedHeading(t *testing.T) {
+	t.Parallel()
+	block, _, err := ParseFiles("```\n## Files\n```\n## Files\ncreate: a.go\n")
+	if err != nil {
+		t.Fatalf("ParseFiles: %v", err)
+	}
+	want := []FileEntry{{Verb: FileCreate, Path: "a.go", Line: 5}}
+	if !slices.Equal(block.Entries, want) {
+		t.Errorf("entries = %+v, want %+v: a fenced heading is not the section, so the body is the one after the real heading", block.Entries, want)
+	}
+}
+
+func TestFilesParseRefusalNamesDescriptionLine(t *testing.T) {
+	t.Parallel()
+	_, present, err := ParseFiles("## Goal\nx\n\n## Files\n\ncreate: ok.go\nmodify:\n")
+	if err == nil {
+		t.Fatal("ParseFiles succeeded, want an error")
+	}
+	if !present {
+		t.Error("present = false, want true: the section exists even when a line is refused")
+	}
+	if !strings.Contains(err.Error(), "line 7") {
+		t.Errorf("error %q does not name description line 7", err)
+	}
+	if !strings.Contains(err.Error(), "modify:") {
+		t.Errorf("error %q does not name the line text %q", err, "modify:")
 	}
 }
 
@@ -153,8 +194,8 @@ func TestFilesParseIgnoresHeadings(t *testing.T) {
 		t.Fatalf("ParseFiles: %v", err)
 	}
 	want := []FileEntry{
-		{Verb: FileCreate, Path: "a.go", Line: 1},
-		{Verb: FileModify, Path: "b.go", Line: 3},
+		{Verb: FileCreate, Path: "a.go", Line: 2},
+		{Verb: FileModify, Path: "b.go", Line: 4},
 	}
 	if !slices.Equal(block.Entries, want) {
 		t.Errorf("entries = %+v, want %+v: a deeper heading is structure, not a path line", block.Entries, want)
