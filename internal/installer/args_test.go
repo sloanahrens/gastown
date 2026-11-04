@@ -150,13 +150,12 @@ func TestParseArgsRefusalListsAllFourSources(t *testing.T) {
 	}
 }
 
-// The installer has no source-dependent branch: Source is only logged and
-// recorded (build.go, noop.go, receipt.go), and the rebuild-gt starvation and
-// post-land distinctions are caller-set --slot-role values, not branches on
-// Source. So "gt-update behaves like manual" is decided by Parse alone: every
-// accepted source yields the manual defaults apart from Source, and gt-update
-// is no exception.
-func TestGtUpdateSourceBehavesLikeManual(t *testing.T) {
+// Past Parse, Source only labels the install's log, receipt and restart
+// marker; the rebuild-gt and post-land distinctions are caller-set --slot-role
+// values, not Source checks. So gt-update behaves like manual because Parse
+// alone decides it: every accepted source yields the manual defaults apart
+// from Source.
+func TestParseArgsGtUpdateSourceBehavesLikeManual(t *testing.T) {
 	t.Parallel()
 	manual := Config{SHA: "origin/main", Source: "manual", SlotTimeout: "600", ImageFirst: true}
 	for _, source := range []string{"manual", "rebuild-gt", "post-land", "gt-update"} {
