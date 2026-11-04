@@ -257,6 +257,17 @@ func (d *Daemon) updateLandingsWaiting(repoRoot, binaryCommit string) (int, erro
 		if sha == "" {
 			continue
 		}
+		// Only an install fetches the checkout, so a landing made after the last
+		// fetch is a commit it does not know. The installed build is built from
+		// the checkout, so that landing cannot be in it: it is waiting to deploy.
+		known, err := repo.HasObject(sha)
+		if err != nil {
+			return 0, fmt.Errorf("read whether landing %s is known to the checkout: %w", sha, err)
+		}
+		if !known {
+			waiting++
+			continue
+		}
 		deployed, err := repo.IsAncestor(sha, binaryCommit)
 		if err != nil {
 			return 0, fmt.Errorf("read whether landing %s is in the installed build: %w", sha, err)

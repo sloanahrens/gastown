@@ -181,6 +181,20 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 		}
 	})
 
+	t.Run("HasObject holds the commits and reports a missing one as false", func(t *testing.T) {
+		t.Parallel()
+		fx := newFixture(t, newEnv(t))
+		g := fx.env.Open(fx.clone)
+		for _, id := range []string{fx.base, fx.head} {
+			if ok, err := g.HasObject(id); err != nil || !ok {
+				t.Errorf("HasObject(%s) = %v, %v; want true, nil", id, ok, err)
+			}
+		}
+		if ok, err := g.HasObject(strings.Repeat("1", 40)); err != nil || ok {
+			t.Errorf("HasObject of an unknown object = %v, %v; want false, nil", ok, err)
+		}
+	})
+
 	t.Run("PushRemoteBranchTip reads the remote, empty for a missing branch", func(t *testing.T) {
 		t.Parallel()
 		fx := newFixture(t, newEnv(t))

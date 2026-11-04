@@ -3282,6 +3282,20 @@ func (g *Git) IsAncestor(ancestor, descendant string) (bool, error) {
 	return true, nil
 }
 
+// HasObject reports whether the repository holds the object sha names. cat-file
+// -e exits 1 for an object it does not hold, so that is false with no error;
+// any other failure (an unreadable repository, a malformed name) is an error.
+func (g *Git) HasObject(sha string) (bool, error) {
+	_, err := g.run("cat-file", "-e", sha)
+	if err == nil {
+		return true, nil
+	}
+	if exitCode(err) == 1 {
+		return false, nil
+	}
+	return false, err
+}
+
 // CommitLandedOnTarget reports whether commit was already pushed to
 // remote/target by an earlier merge: its exact tip, an ancestor of a later
 // commit, or (a rebase-based queue can rewrite a commit's SHA while
