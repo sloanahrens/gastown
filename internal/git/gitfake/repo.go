@@ -20,6 +20,7 @@ type Repo interface {
 	Rev(ref string) (string, error)
 	UpdateRef(ref, commit string) error
 	IsAncestor(ancestor, descendant string) (bool, error)
+	HasObject(sha string) (bool, error)
 	MergeBase(a, b string) (string, error)
 	CommitTime(rev string) (time.Time, error)
 	CommitLandedOnTarget(remote, target, commit string) bool
@@ -237,6 +238,19 @@ func (h *handle) IsAncestor(ancestor, descendant string) (bool, error) {
 		return false, gitErr(128, "fatal: Not a valid commit name "+descendant, args...)
 	}
 	return h.f.isAncestor(a, d), nil
+}
+
+// HasObject is git cat-file -e: an object the repository does not hold is false
+// with no error, and only a repository that cannot be read is an error.
+func (h *handle) HasObject(sha string) (bool, error) {
+	h.f.mu.Lock()
+	defer h.f.mu.Unlock()
+	r, wt, err := h.locate("cat-file", "-e", sha)
+	if err != nil {
+		return false, err
+	}
+	_, ok := h.resolve(r, wt, sha)
+	return ok, nil
 }
 
 func (h *handle) TreesIdentical(a, b string) (bool, error) {

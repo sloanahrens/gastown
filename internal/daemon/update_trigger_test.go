@@ -20,6 +20,7 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/estop"
+	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/update"
@@ -428,6 +429,106 @@ func TestUpdateLandingsWaitingRefusesAnUnknownRig(t *testing.T) {
 	_, err := d.updateLandingsWaiting(filepath.Join(d.config.TownRoot, "reviews"), strings.Repeat("a", 40))
 	if err == nil {
 		t.Fatal("updateLandingsWaiting accepted a checkout with no rig; want the error")
+	}
+}
+
+// unknownCommit names no commit of any checkout: a landing the rig checkout has
+// never fetched.
+var unknownCommit = strings.Repeat("1", 40)
+
+// updateWaitingFixture is a rig checkout whose installed build is its main tip
+// after a landing, and the rig's landings file. The checkout is a gitfake world,
+// so nothing runs git.
+type updateWaitingFixture struct {
+	d        *Daemon
+	git      *gitfake.Fake
+	repo     string
+	build    string
+	deployed string
+	landings *land.LandingsFile
+}
+
+func newUpdateWaitingFixture(t *testing.T) *updateWaitingFixture {
+	t.Helper()
+	town := t.TempDir()
+	d := &Daemon{config: DefaultConfig(town), logger: log.New(io.Discard, "", 0)}
+	f := useGitfake(t, d)
+	repo := filepath.Join(town, "gastown", "mayor", "rig")
+	f.InitRepo(t, repo)
+	deployed := f.Commit(t, repo, "main", "landed", map[string]string{"a.txt": "a\n"})
+	build := f.Commit(t, repo, "main", "installed build", map[string]string{"b.txt": "b\n"})
+	lf, err := land.RigLandingsFile(town, "gastown")
+	if err != nil {
+		t.Fatalf("RigLandingsFile: %v", err)
+	}
+	return &updateWaitingFixture{d: d, git: f, repo: repo, build: build, deployed: deployed, landings: lf}
+}
+
+// commitAfterBuild makes a commit on main past the installed build: a landing
+// the build does not contain.
+func (fx *updateWaitingFixture) commitAfterBuild(t *testing.T) string {
+	t.Helper()
+	return fx.git.Commit(t, fx.repo, "main", "landed after the build", map[string]string{"c.txt": "c\n"})
+}
+
+// appendLandings records shas on the rig's landings file, oldest first.
+func (fx *updateWaitingFixture) appendLandings(t *testing.T, shas ...string) {
+	t.Helper()
+	for _, sha := range shas {
+		if err := fx.landings.Append(land.LandingRecord{BeadID: sha, LandedCommit: sha, LandedAt: updateTriggerTestTime}); err != nil {
+			t.Fatalf("appending a landing record: %v", err)
+		}
+	}
+}
+
+// A landing the checkout has never fetched is not in the installed build, so it
+// is waiting to deploy: the walk counts it and keeps going to the older landings.
+func TestUpdateLandingsWaitingUnknownCommitCountsAsWaiting(t *testing.T) {
+	t.Parallel()
+
+	fx := newUpdateWaitingFixture(t)
+	later := fx.commitAfterBuild(t)
+	fx.appendLandings(t, fx.deployed, later, unknownCommit)
+
+	got, err := fx.d.updateLandingsWaiting(fx.repo, fx.build)
+	if err != nil {
+		t.Fatalf("updateLandingsWaiting: %v; want the unknown landing counted as waiting", err)
+	}
+	if got != 2 {
+		t.Errorf("waiting = %d, want 2 (the unknown landing and the one after the build)", got)
+	}
+}
+
+// Any git error other than an unknown commit still fails the read: here the
+// repository cannot be read, so nothing is counted as waiting.
+func TestUpdateLandingsWaitingOtherGitErrorStillFails(t *testing.T) {
+	t.Parallel()
+
+	fx := newUpdateWaitingFixture(t)
+	fx.appendLandings(t, fx.deployed, unknownCommit)
+	fx.git.RemoveRepo(t, fx.repo)
+
+	got, err := fx.d.updateLandingsWaiting(fx.repo, fx.build)
+	if err == nil {
+		t.Fatalf("updateLandingsWaiting = %d, nil; want an error for an unreadable repository", got)
+	}
+}
+
+// Every landing older than the first one the build contains is in the build
+// too, so the walk stops there and an unknown landing below it is never read.
+func TestUpdateLandingsWaitingStopsAtFirstDeployed(t *testing.T) {
+	t.Parallel()
+
+	fx := newUpdateWaitingFixture(t)
+	later := fx.commitAfterBuild(t)
+	fx.appendLandings(t, unknownCommit, fx.deployed, later)
+
+	got, err := fx.d.updateLandingsWaiting(fx.repo, fx.build)
+	if err != nil {
+		t.Fatalf("updateLandingsWaiting: %v", err)
+	}
+	if got != 1 {
+		t.Errorf("waiting = %d, want 1 (only the landing after the build)", got)
 	}
 }
 

@@ -13,6 +13,9 @@ import (
 type daemonGit interface {
 	Rev(ref string) (string, error)
 	IsAncestor(ancestor, descendant string) (bool, error)
+	// HasObject reports whether the repository holds an object, so a commit it
+	// has never fetched is told apart from a repository it cannot read.
+	HasObject(sha string) (bool, error)
 	CommitTime(rev string) (time.Time, error)
 	FetchRefspecWithTimeout(remote, refspec string, timeout time.Duration) error
 	WorktreeAddDetached(path, ref string) error
