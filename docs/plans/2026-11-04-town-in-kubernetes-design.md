@@ -1,4 +1,4 @@
-> Status: current (2026-11). The design the operator approved on 2026-11-04 for running the whole town in the control cluster; epic gt-gg9hv; the plan is 2026-11-04-town-in-kubernetes-plan.md.
+> Status: historical (2026-11). Merged in: gt-gg9hv.1 (the operator approved this design on 2026-11-04; the work is the beads under gt-gg9hv). Not maintained.
 
 # The town in Kubernetes: design
 

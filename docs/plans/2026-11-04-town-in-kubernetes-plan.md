@@ -1,4 +1,4 @@
-> Status: current (2026-11). The plan for 2026-11-04-town-in-kubernetes-design.md; epic gt-gg9hv. Each row is one bead of at most twenty minutes of one worker; rows marked "overseer" are done by the overseer in a crew worktree.
+> Status: historical (2026-11). Merged in: gt-gg9hv.1 (the plan for the design of the same date; its tasks are the beads under gt-gg9hv). Not maintained.
 
 # The town in Kubernetes: plan
 
