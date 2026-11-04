@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,7 +26,8 @@ func (p *Plugin) BinaryPath() (string, error) {
 // plugin's name and the operator's permissions, so a path that leaves the
 // directory would run a program the plugin never shipped. A path that does not
 // exist yet is checked lexically; symlinks are checked once it resolves, and
-// the run fails on the missing file either way.
+// the run fails on the missing file either way. A per-OS path that cannot be
+// stat'ed, or that runs through a dangling symlink, is an error, not a fallback.
 func resolveBinary(dir, rel string) (string, error) {
 	if filepath.IsAbs(rel) {
 		return "", fmt.Errorf("binary %q must be relative to the plugin directory", rel)
@@ -37,15 +39,46 @@ func resolveBinary(dir, rel string) (string, error) {
 
 	platformRel := filepath.Join(filepath.Dir(rel), runtime.GOOS+"-"+runtime.GOARCH, filepath.Base(rel))
 	platformPath := filepath.Join(dir, platformRel)
-	if fi, err := os.Stat(platformPath); err == nil && fi.Mode().IsRegular() {
+	fi, err := os.Stat(platformPath)
+	switch {
+	case err == nil && fi.Mode().IsRegular():
 		// The daemon execs this path too, so a candidate whose symlink resolves
 		// outside the plugin directory is refused here as well.
 		if err := checkBinary(dir, platformPath, platformRel); err != nil {
 			return "", err
 		}
 		return platformPath, nil
+	case errors.Is(err, os.ErrNotExist):
+		// Absent is the only reason to fall back: a link that does not resolve
+		// is not absent, and the plain binary would run in its place.
+		if err := danglingLink(dir, platformRel); err != nil {
+			return "", err
+		}
+	case err != nil:
+		return "", fmt.Errorf("binary %q: per-OS build cannot be checked: %w", platformRel, err)
 	}
 	return full, nil
+}
+
+// danglingLink refuses rel, a path under dir, when a symlink on it does not
+// resolve. Stat reports that as absent, so the caller cannot tell it from a
+// build that was never shipped.
+func danglingLink(dir, rel string) error {
+	cur := dir
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		cur = filepath.Join(cur, part)
+		fi, err := os.Lstat(cur)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			_, err = filepath.EvalSymlinks(cur)
+		}
+		if err != nil {
+			return fmt.Errorf("binary %q cannot be checked for a dangling link: %w", rel, err)
+		}
+	}
+	return nil
 }
 
 // checkBinary refuses a path that is dir itself or outside it, lexically or

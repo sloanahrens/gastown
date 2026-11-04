@@ -164,6 +164,71 @@ func TestBinaryPathPerOSCandidateIsEscapeChecked(t *testing.T) {
 	}
 }
 
+// A per-OS build that cannot be checked is not replaced by the plain binary:
+// a dangling link on the candidate's path, and a candidate that fails to stat
+// for any reason but absence, are refused. A platform directory that links to
+// a real directory with no build inside still falls back.
+func TestBinaryPathRefusesUncheckableBuild(t *testing.T) {
+	t.Parallel()
+	perOS := runtime.GOOS + "-" + runtime.GOARCH
+	for _, tc := range []struct {
+		name    string
+		setup   func(dir string) error
+		wantErr bool
+	}{
+		{"dangling per-OS symlink", func(dir string) error {
+			if err := os.MkdirAll(filepath.Join(dir, "bin", perOS), 0o755); err != nil {
+				return err
+			}
+			return os.Symlink(filepath.Join(dir, "bin", "later"), filepath.Join(dir, "bin", perOS, "work"))
+		}, true},
+		{"dangling per-OS directory symlink", func(dir string) error {
+			if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
+				return err
+			}
+			return os.Symlink(filepath.Join(dir, "gone"), filepath.Join(dir, "bin", perOS))
+		}, true},
+		{"per-OS path under a regular file", func(dir string) error {
+			if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(dir, "bin", perOS), []byte("x\n"), 0o644)
+		}, true},
+		{"per-OS directory links to an empty directory", func(dir string) error {
+			if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
+				return err
+			}
+			target := filepath.Join(dir, "target")
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return err
+			}
+			return os.Symlink(target, filepath.Join(dir, "bin", perOS))
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			if err := tc.setup(dir); err != nil {
+				t.Fatal(err)
+			}
+			p := &Plugin{Path: dir, Execution: &Execution{Binary: "bin/work"}}
+			got, err := p.BinaryPath()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("BinaryPath() = %q, want an error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("BinaryPath() failed: %v", err)
+			}
+			if want := filepath.Join(dir, "bin", "work"); got != want {
+				t.Errorf("BinaryPath() = %q, want the plain binary %q", got, want)
+			}
+		})
+	}
+}
+
 func mustBinaryPath(t *testing.T, p *Plugin) string {
 	t.Helper()
 	got, err := p.BinaryPath()
