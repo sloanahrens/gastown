@@ -162,6 +162,27 @@ func TestUpdateChipShowsAStalledHeartbeat(t *testing.T) {
 			update: updateRunning("install", 300, 180),
 			text:   "update: install 5m",
 		},
+		{
+			name: "a running update that reports no heartbeat is not current",
+			update: map[string]any{
+				"running": true, "run_id": "run-7", "source": "daemon",
+				"current": "install", "outcome": "running", "elapsed_sec": 300,
+				"steps": []any{updateStep("install", "running", "")},
+			},
+			text:      "update stalled",
+			titleLead: "no heartbeat reported",
+		},
+		{
+			name: "a running update whose heartbeat is null is not current",
+			update: map[string]any{
+				"running": true, "run_id": "run-7", "source": "daemon",
+				"current": "install", "outcome": "running", "elapsed_sec": 300,
+				"heartbeat_age_sec": nil,
+				"steps":             []any{updateStep("install", "running", "")},
+			},
+			text:      "update stalled",
+			titleLead: "no heartbeat reported",
+		},
 	}
 
 	for _, tc := range cases {
@@ -273,7 +294,11 @@ func TestUpdateChipIsRegisteredAndPlacedBesideTheHoldChip(t *testing.T) {
 	if n := strings.Count(page, `id="update"`); n != 1 {
 		t.Errorf("the page has %d update chips, want 1", n)
 	}
-	header := page[strings.Index(page, "<header>"):strings.Index(page, "</header>")]
+	headerStart, headerEnd := strings.Index(page, "<header>"), strings.Index(page, "</header>")
+	if headerStart < 0 || headerEnd < headerStart {
+		t.Fatal("index.html has no <header> block to place the update chip in")
+	}
+	header := page[headerStart:headerEnd]
 	hold, chip := strings.Index(header, `id="hold"`), strings.Index(header, `id="update"`)
 	if hold < 0 || chip < 0 {
 		t.Fatal("the header carries no hold chip or no update chip")

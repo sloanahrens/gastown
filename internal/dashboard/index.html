@@ -689,10 +689,10 @@ function renderHold(s) {
 // while a run is in flight, amber for a run that ended badly, a quiet word for
 // one the operator stopped, and nothing at all for a run that ended ok or a
 // feed with no update section. A running run whose heartbeat has gone past
-// three minutes is drawn stalled rather than current, because its record is the
-// last thing it wrote, not what it is doing now. The tooltip carries the run's
-// id and source and one line per step, so the header stays one short chip while
-// the detail is a hover away.
+// three minutes, or that reports no heartbeat at all, is drawn stalled rather
+// than current, because its record is the last thing it wrote, not what it is
+// doing now. The tooltip carries the run's id and source and one line per step,
+// so the header stays one short chip while the detail is a hover away.
 function renderUpdate(s) {
   if (pushSkip("update", s)) return;
   const box = $("update"), u = (s && s.update) || null;
@@ -703,9 +703,13 @@ function renderUpdate(s) {
   const tip = lead => [lead].concat(steps).filter(Boolean).join("\n");
   if (u.running) {
     box.hidden = false; box.className = "warn";
-    if (u.heartbeat_age_sec > 180) {
+    // A heartbeat that is missing or not a number is unknown, and unknown must
+    // not read as current: undefined > 180 is false, so the bound alone would.
+    if (!Number.isFinite(u.heartbeat_age_sec) || u.heartbeat_age_sec > 180) {
       box.textContent = "update stalled";
-      box.title = tip("no heartbeat for " + fmtDur(u.heartbeat_age_sec));
+      box.title = tip(Number.isFinite(u.heartbeat_age_sec)
+        ? "no heartbeat for " + fmtDur(u.heartbeat_age_sec)
+        : "no heartbeat reported");
       return;
     }
     box.textContent = "update: " + (u.current || "starting") + " " + fmtDur(u.elapsed_sec);
