@@ -1,62 +1,60 @@
-> Status: design (2026-11-03, overseer). Track D2 of `2026-11-03-gt-update-plan.md`. Bead gt-sfveb. Not yet planned into beads.
+> Status: design (2026-11-03, overseer), revised after measurement. Track D2 of `2026-11-03-gt-update-plan.md`. Bead gt-sfveb. Recommendation: do not build the cluster builder now; build the consumer-side image check, which is worth having either way.
 
 # gt update: build and image publish in the control cluster
 
 ## Goal
 
-Move the two heavy steps of `gt update`, building `gt` and building and publishing the sandbox image, off the host and into the control cluster (`colima-gt-control`, 16 GiB), the way the tier sweeps already run. The host keeps the binary swap, the daemon restart, the maintenance request and the dispatch hold, because only the host can do them. The sandbox image build currently takes 8 to 20 minutes of host CPU and disk beside the polecats (gt-jmd9n).
+The first draft of this design moved the two heavy steps of `gt update`, building `gt` and building and publishing the sandbox image, off the host into the control cluster (`colima-gt-control`), the way the tier sweeps already run. The reason was cost: the image build took 8 to 20 minutes of host CPU and disk beside the polecats (gt-jmd9n). This revision measures that cost again after the seed was removed from the image (gt-nposw, gt-yvnsa) and decides what is still worth building.
 
-## What the record says
+## What was measured (2026-11-03)
 
-- The image publish already avoids Docker Desktop's insecure-registry setting: it tags the image with the registry reference, writes a `docker save` tarball and pushes it with `crane push --insecure`; extra tags are made with `crane tag --insecure`, which copies no layer (gt-mm7q6, gt-vbv3s; `internal/polecatimage/publish.go`).
-- The registry `gt-registry` runs in the gt-sbx VM's Docker, bound to its loopback on 5001, and Colima forwards the port to the Mac's `127.0.0.1:5001`.
-- The sweep runner already renders a pod with a privileged docker-in-docker sidecar (2 CPU, 4 GiB) at priority class `gt-ci` (`internal/sweeprunner/k8s.go`).
-- `make polecat-image` builds from a detached worktree of the rig repo at the installed commit and checks the label it ends up with (`internal/polecatimage/build.go`).
-- Measured 2026-11-03: a pod in the control cluster gets HTTP 200 from `http://host.lima.internal:5001/v2/` and from `host.docker.internal:5001`. A push has not been measured.
+| Measurement | Result |
+|---|---|
+| Cold build of the old image (seed RUN) in a dind sidecar at 4 GiB and 2 CPU | failed with ResourceExhausted after 19m22s; 14 minutes of that in the devops rig's `go build ./...` (Pulumi SDKs); peak 4.09 GiB |
+| Cold build of the new image (no seed RUN) in the same sidecar | 119 s, exit 0, peak 2.9 GiB; image 2.05 GB (was 8.86 GB) |
+| Push of that image to the registry through the Colima forward, `docker push` with `--insecure-registry` | 31 s |
+| `crane copy --insecure` of the golang image from a pod to `host.lima.internal:5001` | 100 s including the pull from Docker Hub; `crane digest` read it back |
+| Registry reachable from a control-cluster pod | HTTP 200 on `host.lima.internal:5001/v2/` and on `host.docker.internal:5001/v2/` |
+| `gt` cross-compile darwin/arm64 in a `golang:1.26` pod, `CGO_ENABLED=0` | 33 s cold, 1.9 CPU and 1.7 GiB at the sample, 56 MB binary |
+| The real `gt update` on the host (run 20261104T013211Z-05bf9a4d) | 3m11s in all: maintenance 15 s, install 1m41s (builds `gt`, builds the image in 18 s at that commit, pushes it in about a minute), daemon restart wait 1m15s |
+| Control node while a sweep runs | the sweep requests 6.2 of 8 CPUs; a 2-CPU pod stayed Pending until the sweep ended |
 
-## Approaches
+## What changed
 
-1. **Builder Job modelled on the sweep runner (recommended).** A `batch/v1` Job in the control cluster with a runner container and a dind sidecar. It clones the rig repo at the target commit, runs `make gt-installer`-free steps only (`make build` for `gt`, `make polecat-image` for the image), then pushes with `crane --insecure` to `host.lima.internal:5001`. Reuses the sweep runner's renderer, teardown, priority class and memory accounting. Cost: a new renderer for a build spec and an artifact hand-back for the `gt` binary.
-2. **Run the existing host build inside a long-lived builder VM.** Less new code, but a second always-on VM and its disk, which the memory work this week just removed.
-3. **Keep the host build, add a nice level.** Cheapest, and does not remove the contention; gt-dwlbj showed nice alone does not change sweep time much.
+1. **The cost the cluster builder was meant to remove is gone.** The host image build is 18 s, not 8 to 20 minutes, because the image no longer compiles every rig. A cluster builder would save about 18 s of host CPU and a minute of push per update.
+2. **The two `gt` binaries are not the same artifact.** `make build` builds `gt` with the host toolchain and cgo on (the installed binary reports `CGO_ENABLED=1` in `go version -m`), and the cluster cross-compile above had to turn cgo off. Shipping the cluster's binary would install a different build of `gt` than the one every test and sweep covers. That alone rules out building `gt` in the cluster.
+3. **A builder Job and a sweep cannot share the control node** at its present size (8 CPUs, sweeps ask for 6.2). The builder would queue behind sweeps, which run for 15 minutes an hour.
 
-## Design (approach 1)
+## Decision
 
-**Backend interface.** `internal/update` gets a `Builder` interface with `Build(ctx, Target) (Result, error)`. `HostBuilder` wraps today's code; `ClusterBuilder` renders and runs the Job. Selection by `daemon.patrols.update.builder` (`host` default, `cluster`). A pure renderer, like `sweeprunner`, so the Job spec is unit tested with no cluster.
+Do not build the cluster-runner backend now. Keep `Builder` as a recorded option with these triggers, and revisit when one fires:
+- the host image build exceeds 5 minutes again (for example a seed returns),
+- the update must run on a machine with no Docker, such as a move of the town off this Mac,
+- the control cluster grows enough to hold a sweep and a builder together.
 
-**Two outputs, one Job.**
-- The `gt` binary: built for darwin/arm64 in the runner (Go cross-compile, no cgo needed for `gt`), written to the Job's output claim, then copied to the host by the update job (`kubectl cp`) and checksummed against the sha the Job reports. The installer still runs on the host from that file.
-- The sandbox image: built in the dind sidecar, pushed to the registry. The host never loads it.
+## What is still worth building: consumer-side verification of the published image
 
-**Published-image check by digest.** After the push the update job asks the registry for the manifest digest of the new tag (`crane digest --insecure`) and compares it with the digest the Job logged. The label check `BuildAt` does today (the image carries the commit) moves into the Job as its last step. The update state records tag, digest and commit.
+The first draft verified the image by comparing the registry digest with "the digest the Job logged". The om review (finding 18e7fccc0c3d) was right that this checks the producer against its own report. The same weakness exists today on the host path: `BuildAt` checks the label on the local image, then pushes, and nothing reads the registry afterwards. After the push, `gt update` should read back from the registry what a sandbox will pull:
 
-**Failure behaviour.** Any Job failure leaves the host unchanged and the installed binary and image as they were; the update job marks the step failed and lifts the hold, exactly as for a host build failure. A Job that does not finish within the step budget (30 minutes) is deleted. A registry that does not answer `/v2/` at the start fails the step before the build starts.
+1. `crane digest --insecure <registry>/gastown-polecat:<short-commit>` and `crane digest` of the `:dev` tag must be equal. A sandbox pulls `:dev`; this proves the tag it pulls is the one just published.
+2. `crane config --insecure` on that digest must carry the label `org.gastown.gt-commit` equal to the full target commit, and `org.gastown.bd-commit` equal to the commit recorded at build. This is the check `BuildAt` does on the local image, made on the object the registry serves.
+3. A mismatch fails the install step before the daemon restart, and the update state records the digest and the two labels it read.
 
-**Resources.** The Job asks for 4 CPU and 6 GiB (runner 2 and 2, dind 2 and 4), class `gt-ci`. A tier sweep peaks near 5.4 GiB of 16 GiB; the two fit together, and `gt-ci` is shed first under pressure. The scheduler already serialises sweeps, so the update job waits for a running sweep rather than racing it.
+This needs no cluster, uses `crane` as the publisher already does (`internal/polecatimage/publish.go`), and covers the host path today and any later cluster builder. It is one bead.
 
-**Dependencies, stated as risks.** The registry lives in the gt-sbx VM: if that VM is down the cluster build cannot publish, and the step fails with a message naming the VM. This is the same dependency the host build has today. The Forgejo and gate-runner moves change where the repo is cloned from; this design clones from the Forgejo remote the sweep runner already uses, so those moves do not block it.
+## Security posture, stated
+
+The sidecar of a sweep Job is privileged; a builder would be the same, in the same single-user local VM with no inbound exposure (the posture the sweep runner already has, gt-7zy61). The registry is plain HTTP and unauthenticated, bound to the gt-sbx VM's loopback and forwarded by Colima to the Mac's loopback. Anything that can reach the Mac's loopback can read or write it. The consumer-side check above is the mitigation that matters: a sandbox only ever pulls a tag whose labels the update job has just read back.
 
 ## Out of scope
 
-Moving the install, the restart or the hold into the cluster; a second registry; building the other rigs' images; Dolt or Postgres.
+Moving the install, the restart or the hold into a cluster; a second registry; Dolt or Postgres; any change to how `gt` itself is built.
 
-## Measure before building
-
-1. A push of the current sandbox image tarball from a pod in the control cluster to `host.lima.internal:5001`: wall time and whether `crane --insecure` is enough (no daemon setting needed).
-2. A cross-compile of `gt` for darwin/arm64 in a runner pod: wall time and peak memory.
-3. A dind build of `make polecat-image` in the sidecar with the 4 GiB limit: does it fit, and how long.
-
-If 1 or 3 fails, the design falls back to building the image on the host and moving only the `gt` build, which is the smaller win.
-
-## Beads (sketch)
-
-Each is one polecat-sized bead with a narrow `-run` gate; the daemon-touching ones are a chain.
+## Beads
 
 | # | Title | Depends on | Risk path |
 |---|---|---|---|
-| 1 | `internal/update` `Builder` interface and `HostBuilder` wrapper (no behaviour change) | none | no |
-| 2 | Pure Job renderer for a build spec, golden-file tested | 1 | no |
-| 3 | Digest check helper (`crane digest` wrapper with an injected runner) | none | no |
-| 4 | `ClusterBuilder`: apply, wait, fetch the binary, delete the Job, with fakes | 1, 2, 3 | yes |
-| 5 | Config `daemon.patrols.update.builder` and the step wiring | 4 | yes |
-| 6 | Runbook and the first overseer-run rehearsal | 5 | overseer-run |
+| 1 | `internal/polecatimage`: read the published image back from the registry (digest of both tags equal, label commits equal to the target), with an injected `crane` runner and unit tests | none | no |
+| 2 | `gt update` install step: call it after the push, fail before the restart on a mismatch, record digest and labels in the state | 1 | yes (daemon-adjacent install path) |
+
+The cluster-runner beads from the first draft (Job renderer, `ClusterBuilder`, the `builder` setting) are not filed; the first draft's table is in this file's history (commit 9e120aba) if a trigger fires.
