@@ -468,13 +468,11 @@ proven for the town's real load.
   correctness on the restored copy, not write and fsync speed through the bind
   mount on the operator's Docker disk.
 - **The right memory limit.** The live gt-dolt container runs with an 8 GiB cap,
-  measured on 2026-11-04 on a restore of the gt backup: with archive level 0, a
+  measured on a restore of the gt backup (gt-ftn07): with archive level 0, a
   default gc and a `--full` gc both finish inside 8 GiB; with archive level 1,
   both are OOM-killed at 8 GiB. The host server has shown 14.6 GB resident and a
-  10.2 GB peak footprint. `gt dolt container plan` defaults to 12 GiB, so a
-  cutover that passes no `--memory-gib` starts above the live cap. Step 1.7's
-  reading under the burst and the gc decides whether the cutover's cap stands or
-  needs a different `--memory-gib`.
+  10.2 GB peak footprint. Step 1.7's reading under the burst and the gc decides
+  whether the cutover's cap stands or needs a different `--memory-gib`.
 
 ## Numbers to record
 
