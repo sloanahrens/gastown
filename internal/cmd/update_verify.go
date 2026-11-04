@@ -130,6 +130,8 @@ func (p *verifyProbes) ImageLabel(ctx context.Context) (string, error) {
 // Health is the town's first health line. gt status --line exits nonzero for a
 // degraded town and its line still describes it, so the exit status is
 // ignored.
+//
+// A command that prints no line says nothing about the town, so it is an error.
 func (p *verifyProbes) Health(ctx context.Context) (string, error) {
 	exe, err := p.env.Exe()
 	if err != nil {
@@ -140,5 +142,8 @@ func (p *verifyProbes) Health(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("running %s status --line: %w", exe, err)
 	}
 	line, _, _ := strings.Cut(out, "\n")
+	if strings.TrimSpace(line) == "" {
+		return "", fmt.Errorf("%s status --line printed no health line", exe)
+	}
 	return strings.TrimSpace(line), nil
 }
