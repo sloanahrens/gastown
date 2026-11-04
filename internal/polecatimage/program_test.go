@@ -387,6 +387,38 @@ func TestProgramTrimsAfterAFinishedRun(t *testing.T) {
 	tr.wantCall(t, "docker", "volume", "ls", "--format", "{{.Name}}", "--filter", "name=^gt-cache-")
 }
 
+// TestProgramPrunesDanglingImagesAfterTheBuildCache pins where the dangling-image
+// prune sits in the trims: after the build-cache trim, before the cache volumes
+// (gt-n0tfr).
+func TestProgramPrunesDanglingImagesAfterTheBuildCache(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	tr.Cfg.Registry = ""
+	reply := newRunReply("abc1234")
+	reply.label = "abc1234"
+	tr.reply = programAnswer(t, tr, reply)
+	t.Cleanup(tr.Cleanup)
+	if err := tr.Program(); err != nil {
+		t.Fatalf("Program() failed: %v", err)
+	}
+	at := func(want string) int {
+		t.Helper()
+		for i, c := range tr.calls {
+			if callKey(c.name, c.args...) == want {
+				return i
+			}
+		}
+		t.Fatalf("no call %q in %v", want, callLines(tr, "docker"))
+		return -1
+	}
+	builder := at("docker builder prune --keep-storage 8GB -f")
+	images := at("docker image prune -f")
+	volumes := at("docker volume ls --format {{.Name}} --filter name=^gt-cache-")
+	if !(builder < images && images < volumes) {
+		t.Errorf("trims ran builder=%d image=%d volume=%d, want builder < image < volume: %v", builder, images, volumes, callLines(tr, "docker"))
+	}
+}
+
 // TestProgramTrimsAfterADeferral pins the other completed run: a deferral is
 // not a failure, so the trims still run.
 func TestProgramTrimsAfterADeferral(t *testing.T) {

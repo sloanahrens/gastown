@@ -1,6 +1,8 @@
 package polecatimage
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -623,6 +625,22 @@ func TestPruneBuildCacheSkipsAnotherRunsLock(t *testing.T) {
 	}
 }
 
+// TestPruneBuildCacheDoesNothingWhenDockerIsDown pins the same first guard as
+// the dangling-image prune: a failed docker info stops the trim before the lock
+// or any size read, so a stopped daemon is never read as an empty cache (gt-n0tfr).
+func TestPruneBuildCacheDoesNothingWhenDockerIsDown(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	t.Cleanup(tr.Cleanup)
+	pr := newPruneReply()
+	pr.fail[callKey("docker", "info")] = result{exit: 1, stderr: "daemon down"}
+	tr.reply = pr.answer
+	tr.PruneBuildCache()
+	if got := len(tr.callsTo("docker")); got != 1 {
+		t.Errorf("docker was called %d times, want the info probe alone: %v", got, callLines(tr, "docker"))
+	}
+}
+
 // TestPruneBuildCacheLogsAFailedPrune is the failure branch: docker's reason is
 // logged and the run carries on.
 func TestPruneBuildCacheLogsAFailedPrune(t *testing.T) {
@@ -708,6 +726,30 @@ func TestPruneDanglingSkipsWithoutTheLock(t *testing.T) {
 	tr.wantLogged(t, "dangling images: skipped, another run holds the lock")
 	if anyCallNamed(tr.callsTo("docker"), "image", "prune") {
 		t.Error("a run that could not take the lock pruned dangling images")
+	}
+}
+
+// TestPruneDanglingLogsAnUnreadableLock is the lock's error branch: a lock
+// directory that cannot be created is logged with its reason, and no image
+// prune runs under a lock this run does not hold (gt-n0tfr). The runtime
+// directory is replaced by a file, so the lock's parent cannot be made.
+func TestPruneDanglingLogsAnUnreadableLock(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	t.Cleanup(tr.Cleanup)
+	runtime := filepath.Dir(tr.Cfg.LockDir)
+	if err := os.RemoveAll(runtime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(runtime, []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tr.reply = newPruneReply().answer
+	tr.PruneDanglingImages()
+	tr.wantLogged(t, "dangling images: not pruned: ")
+	tr.wantLogged(t, "not a directory")
+	if anyCallNamed(tr.callsTo("docker"), "image", "prune") {
+		t.Error("a run that could not read its lock pruned dangling images")
 	}
 }
 
