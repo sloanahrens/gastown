@@ -43,16 +43,17 @@ func NewSlotDebrisCheck() *SlotDebrisCheck {
 	}
 }
 
-// Run lists the debris without removing anything. An unreadable container
-// listing is StatusSkipped, never a clean pass: the check could not see the
-// containers, which is not the same as there being none.
+// Run lists the debris without removing anything. An unreadable input (the
+// town's config or the container listing) is StatusSkipped, never a clean pass:
+// the check could not classify the debris, which is not the same as there being
+// none. The details name which read failed.
 func (c *SlotDebrisCheck) Run(ctx *CheckContext) *CheckResult {
 	report, err := c.reap(ctx.TownRoot, slot.ReapOptions{DryRun: true})
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusSkipped,
-			Message: "unknown: could not list the gate's containers",
+			Message: "unknown: could not classify the gate's debris",
 			Details: []string{err.Error()},
 		}
 	}
