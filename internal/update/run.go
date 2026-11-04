@@ -20,6 +20,9 @@ const (
 	verifyRestartPendingDetail = "restart pending"
 	// noHoldDetail marks a lift step with no hold the run created.
 	noHoldDetail = "hold not set by this run"
+	// liftReleasedOnRetryDetail is added to a lift step whose release failed
+	// when the run's cleanup then released the hold on its retry.
+	liftReleasedOnRetryDetail = "the run's cleanup released the hold on retry"
 )
 
 // Deps is the effects one update run reaches.
@@ -271,10 +274,19 @@ func (r *runner) drainHeld(i int) (Outcome, error) {
 		return r.releaseFailed(err)
 	}
 	if r.owns {
-		// The walk ended before the lift step; WithHold released the hold it
-		// owns, so the record must no longer say the run holds it.
+		// The walk ended before the lift step, or the lift step's release failed
+		// and WithHold's cleanup released the hold on its retry. WithHold released
+		// the hold it owns, so the record must no longer say the run holds it, and
+		// a failed lift step must say the hold is gone now.
 		r.owns = false
-		if _, err := r.mutate(func(st *State) { st.Hold.Owned = false }); err != nil {
+		if _, err := r.mutate(func(st *State) {
+			st.Hold.Owned = false
+			for i := range st.Steps {
+				if st.Steps[i].Name == StepLift && st.Steps[i].Result == ResultFailed {
+					st.Steps[i].Detail += "; " + liftReleasedOnRetryDetail
+				}
+			}
+		}); err != nil {
 			return "", err
 		}
 	}

@@ -43,6 +43,22 @@ func (i *runInstaller) Install(ctx context.Context, sha string) (InstallResult, 
 	return i.result, i.err
 }
 
+// removeOnce is a FileOps whose first Remove fails with err and whose later
+// removes reach the fake, so a release that fails once is retried and succeeds.
+type removeOnce struct {
+	*fakeFiles
+	err    error
+	failed bool
+}
+
+func (r *removeOnce) Remove(path string) error {
+	if !r.failed {
+		r.failed = true
+		return r.err
+	}
+	return r.fakeFiles.Remove(path)
+}
+
 // runFixture is one test's town: a store in a temp dir, a fake clock, and the
 // fakes every Deps field takes.
 type runFixture struct {
@@ -293,13 +309,47 @@ func TestRunStoreWriteFailureDuringDrainAbortIsReturned(t *testing.T) {
 
 func TestRunStoreWriteFailureOnLiftIsReturned(t *testing.T) {
 	t.Parallel()
-	liftOnly := func(t *testing.T) *runFixture {
+
+	t.Run("a hold this run did not take", func(t *testing.T) {
+		t.Parallel()
+		liftOnly := func(t *testing.T) *runFixture {
+			f := newRunFixture(t)
+			f.opts.Only = map[StepName]bool{StepLift: true}
+			return f
+		}
+		total := publishCount(t, liftOnly(t))
+		assertEveryPublishIsChecked(t, total, liftOnly)
+	})
+
+	t.Run("the release of a hold this run took", func(t *testing.T) {
+		t.Parallel()
+		// The drain takes the hold and the lift releases it, so the record that
+		// shows the release is the owned-hold lift write.
 		f := newRunFixture(t)
-		f.opts.Only = map[StepName]bool{StepLift: true}
-		return f
-	}
-	total := publishCount(t, liftOnly(t))
-	assertEveryPublishIsChecked(t, total, liftOnly)
+		published := f.watchPublishes()
+		final, err := f.run(context.Background())
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if got := step(t, final, StepLift).Result; got != ResultOK {
+			t.Fatalf("lift Result = %q, want %q: the run did not release its own hold", got, ResultOK)
+		}
+		n := 0
+		for i, st := range published() {
+			if step(t, st, StepLift).Result == ResultOK {
+				n = i + 1
+				break
+			}
+		}
+		if n == 0 {
+			t.Fatal("no published record shows the lift released; the owned-hold write is not exercised")
+		}
+		fresh := newRunFixture(t)
+		fresh.failNthPublish(n)
+		if _, err := fresh.run(context.Background()); err == nil || !strings.Contains(err.Error(), "disk full") {
+			t.Errorf("publish %d (the lift release) failed: Run error = %v, want the failed write named", n, err)
+		}
+	})
 }
 
 func TestRunDryRunPrintsThePlanAndWritesNothing(t *testing.T) {
@@ -786,6 +836,33 @@ func TestRunHoldReleaseFailureIsRecorded(t *testing.T) {
 		}
 		if !f.holdExists() {
 			t.Error("the test expected the hold to remain when its removal fails")
+		}
+	})
+
+	t.Run("at the lift step, released by the cleanup's retry", func(t *testing.T) {
+		t.Parallel()
+		f := newRunFixture(t)
+		f.hold.Files = &removeOnce{fakeFiles: f.files, err: errors.New("permission denied")}
+
+		final, err := f.run(context.Background())
+		if err != nil {
+			t.Fatalf("Run returned %v, want the failure in the record", err)
+		}
+		if final.Outcome != OutcomeFailed {
+			t.Errorf("Outcome = %q, want %q: the lift step failed", final.Outcome, OutcomeFailed)
+		}
+		if f.holdExists() {
+			t.Error("the cleanup's retry did not remove the hold")
+		}
+		if final.Hold.Owned {
+			t.Error("the record says the run still holds the hold after the retry released it")
+		}
+		lift := step(t, final, StepLift)
+		if lift.Result != ResultFailed || !strings.Contains(lift.Detail, "permission denied") {
+			t.Errorf("lift = (%q, %q), want failed naming the first release error", lift.Result, lift.Detail)
+		}
+		if !strings.Contains(lift.Detail, liftReleasedOnRetryDetail) {
+			t.Errorf("lift Detail = %q, want it to say %q", lift.Detail, liftReleasedOnRetryDetail)
 		}
 	})
 }
