@@ -1,4 +1,4 @@
-> Status: design (2026-11-03, overseer), revised after measurement. Track D2 of `2026-11-03-gt-update-plan.md`. Bead gt-sfveb. Recommendation: do not build the cluster builder now; build the consumer-side image check, which is worth having either way.
+> Status: historical (2026-11). Merged in: gt-sfveb. Not maintained.
 
 # gt update: build and image publish in the control cluster
 
@@ -36,15 +36,17 @@ Do not build the cluster-runner backend now. Keep `Builder` as a recorded option
 
 The first draft verified the image by comparing the registry digest with "the digest the Job logged". The om review (finding 18e7fccc0c3d) was right that this checks the producer against its own report. The same weakness exists today on the host path: `BuildAt` checks the label on the local image, then pushes, and nothing reads the registry afterwards. After the push, `gt update` should read back from the registry what a sandbox will pull:
 
-1. `crane digest --insecure <registry>/gastown-polecat:<short-commit>` and `crane digest` of the `:dev` tag must be equal. A sandbox pulls `:dev`; this proves the tag it pulls is the one just published.
-2. `crane config --insecure` on that digest must carry the label `org.gastown.gt-commit` equal to the full target commit, and `org.gastown.bd-commit` equal to the commit recorded at build. This is the check `BuildAt` does on the local image, made on the object the registry serves.
+1. `crane digest --insecure <registry>/gastown-polecat:<short-commit>` and `crane digest` of the `:dev` tag must be equal. Both Kubernetes sandbox profiles pull `localhost:5001/gastown-polecat:dev` (`settings/config.json`, `sandboxes.polecat-k8s.image` and `sandboxes.sbx-haiku.image`), so this proves the tag they pull is the one just published.
+2. `crane config --insecure` on that digest must carry the label `org.gastown.gt-commit` equal to the full target commit, and `org.gastown.bd-commit` equal to the value on the local image the build just made, which the install step reads with the same `docker inspect` label call `BuildAt` uses for the gt commit (`internal/polecatimage/build.go`) and records in the update state before the push. This is the check `BuildAt` does on the local image, made on the object the registry serves.
 3. A mismatch fails the install step before the daemon restart, and the update state records the digest and the two labels it read.
 
 This needs no cluster, uses `crane` as the publisher already does (`internal/polecatimage/publish.go`), and covers the host path today and any later cluster builder. It is one bead.
 
 ## Security posture, stated
 
-The sidecar of a sweep Job is privileged; a builder would be the same, in the same single-user local VM with no inbound exposure (the posture the sweep runner already has, gt-7zy61). The registry is plain HTTP and unauthenticated, bound to the gt-sbx VM's loopback and forwarded by Colima to the Mac's loopback. Anything that can reach the Mac's loopback can read or write it. The consumer-side check above is the mitigation that matters: a sandbox only ever pulls a tag whose labels the update job has just read back.
+The sidecar of a sweep Job is privileged; a builder would be the same, in the same single-user local VM with no inbound exposure (the posture the sweep runner already has, gt-7zy61). The registry is plain HTTP and unauthenticated, bound to the gt-sbx VM's loopback and forwarded by Colima to the Mac's loopback, so any process that can reach the Mac's loopback can read or write it.
+
+What the read-back check does and does not do. It catches a publish that went wrong: a push that failed half way, a tag that points at an older build, an image built from a different commit than the install. It does not defend against a writer to the registry: the two labels are self-asserted metadata a writer can set to match, and `:dev` is a mutable tag, so a write between the read-back and a sandbox's pull is not caught. A process on this Mac that can write the loopback registry can already run code as the same user, so the registry is not a separate trust boundary here and this design does not add one. If the registry ever leaves the loopback (the GKE move), pin the profiles to the digest the update job records (`image@sha256:...`) and sign it; that is a separate design and is not claimed here.
 
 ## Out of scope
 
