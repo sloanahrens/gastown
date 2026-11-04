@@ -5228,18 +5228,14 @@ func TestWriteServerConfig_Defaults(t *testing.T) {
 	if !parsed.Behavior.AutoGCBehavior.Enable {
 		t.Error("behavior.auto_gc_behavior.enable = false, want true (non-blocking auto_gc re-enabled, hq-excy9g)")
 	}
-	if parsed.Behavior.AutoGCBehavior.ArchiveLevel != 1 {
-		t.Errorf("behavior.auto_gc_behavior.archive_level = %d, want 1", parsed.Behavior.AutoGCBehavior.ArchiveLevel)
+	if parsed.Behavior.AutoGCBehavior.ArchiveLevel != 0 {
+		t.Errorf("behavior.auto_gc_behavior.archive_level = %d, want 0 (gt-hs4j3)", parsed.Behavior.AutoGCBehavior.ArchiveLevel)
 	}
 	if parsed.SystemVariables.DoltStatsEnabled == nil || *parsed.SystemVariables.DoltStatsEnabled != 0 {
 		t.Fatalf("system_variables.dolt_stats_enabled = %v, want 0", parsed.SystemVariables.DoltStatsEnabled)
 	}
 }
 
-// TestWriteServerConfig_AutoGCDisabled verifies the operational.dolt.auto_gc
-// kill-switch: AutoGC="off" emits auto_gc_behavior {enable:false,
-// archive_level:0} so auto_gc can be disabled at runtime without a source
-// revert+rebuild (hq-excy9g escape hatch).
 // Dolt interpolates environment references across the whole config file,
 // comments included, and exits at startup on an unset one.
 func TestWriteServerConfig_NoEnvReferences(t *testing.T) {
@@ -5262,8 +5258,10 @@ func TestWriteServerConfig_NoEnvReferences(t *testing.T) {
 	}
 }
 
-func TestWriteServerConfig_AutoGCDisabled(t *testing.T) {
-	t.Parallel()
+// writeAutoGCConfig writes the managed server config with the given AutoGC
+// setting and returns the parsed auto_gc_behavior block.
+func writeAutoGCConfig(t *testing.T, autoGC string) (enable bool, archiveLevel int) {
+	t.Helper()
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
 
@@ -5274,7 +5272,7 @@ func TestWriteServerConfig_AutoGCDisabled(t *testing.T) {
 		ReadTimeoutMs:  DefaultReadTimeoutMs,
 		WriteTimeoutMs: DefaultWriteTimeoutMs,
 		LogLevel:       "warning",
-		AutoGC:         "off",
+		AutoGC:         autoGC,
 	}
 
 	if err := writeServerConfig(config, configPath); err != nil {
@@ -5296,11 +5294,57 @@ func TestWriteServerConfig_AutoGCDisabled(t *testing.T) {
 	if err := yaml.Unmarshal(data, &parsed); err != nil {
 		t.Fatalf("generated config is invalid YAML: %v\n%s", err, data)
 	}
-	if parsed.Behavior.AutoGCBehavior.Enable {
+	return parsed.Behavior.AutoGCBehavior.Enable, parsed.Behavior.AutoGCBehavior.ArchiveLevel
+}
+
+// TestAutoGCDisabledStillWritesLevelZero verifies the operational.dolt.auto_gc
+// kill-switch: AutoGC="off" emits auto_gc_behavior {enable:false,
+// archive_level:0} so auto_gc can be disabled at runtime without a source
+// revert+rebuild (hq-excy9g escape hatch).
+func TestAutoGCDisabledStillWritesLevelZero(t *testing.T) {
+	t.Parallel()
+	enable, archiveLevel := writeAutoGCConfig(t, "off")
+	if enable {
 		t.Error("AutoGC=off: auto_gc_behavior.enable = true, want false")
 	}
-	if parsed.Behavior.AutoGCBehavior.ArchiveLevel != 0 {
-		t.Errorf("AutoGC=off: archive_level = %d, want 0", parsed.Behavior.AutoGCBehavior.ArchiveLevel)
+	if archiveLevel != 0 {
+		t.Errorf("AutoGC=off: archive_level = %d, want 0", archiveLevel)
+	}
+}
+
+// TestAutoGCBlockArchiveLevelZero pins the enabled block to archive_level 0,
+// the level measured to cut the auto gc peak (gt-hs4j3).
+func TestAutoGCBlockArchiveLevelZero(t *testing.T) {
+	t.Parallel()
+	enable, archiveLevel := writeAutoGCConfig(t, "on")
+	if !enable {
+		t.Error("AutoGC=on: auto_gc_behavior.enable = false, want true")
+	}
+	if archiveLevel != 0 {
+		t.Errorf("AutoGC=on: archive_level = %d, want 0", archiveLevel)
+	}
+}
+
+// TestAutoGCArchiveLevelIsOneNamedConstant checks that both branches take their
+// archive_level from doltAutoGCArchiveLevel, so changing the constant moves both.
+// While the constant is 0 a branch that hardcodes 0 passes too; it is caught
+// once the constant is set to any other value.
+func TestAutoGCArchiveLevelIsOneNamedConstant(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		autoGC string
+	}{
+		{name: "enabled", autoGC: "on"},
+		{name: "disabled", autoGC: "off"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, archiveLevel := writeAutoGCConfig(t, tc.autoGC)
+			if archiveLevel != doltAutoGCArchiveLevel {
+				t.Errorf("AutoGC=%s: archive_level = %d, want doltAutoGCArchiveLevel (%d)", tc.autoGC, archiveLevel, doltAutoGCArchiveLevel)
+			}
+		})
 	}
 }
 
