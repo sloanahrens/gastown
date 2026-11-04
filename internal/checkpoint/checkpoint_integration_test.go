@@ -24,6 +24,10 @@ func newRealRepo(t *testing.T) string {
 	realGitRun(t, dir, "config", "user.email", "test@test.com")
 	realGitRun(t, dir, "config", "user.name", "Test")
 	realGitRun(t, dir, "config", "commit.gpgsign", "false")
+	// A local hooksPath shadows the host's global one. The squash commit runs
+	// through realGit, which inherits the host config, so a global pre-commit
+	// hook would otherwise block it.
+	realGitRun(t, dir, "config", "core.hooksPath", t.TempDir())
 	realGitCommit(t, dir, "README.md", "# Test\n", "initial commit")
 	return dir
 }
