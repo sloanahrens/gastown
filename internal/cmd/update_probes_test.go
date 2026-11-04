@@ -281,8 +281,9 @@ func TestUpdateProbeGCDue(t *testing.T) {
 		if !due {
 			t.Error("an eight-day-old gc reported not due")
 		}
-		if !strings.Contains(reason, "gt") || !strings.Contains(reason, "192h") {
-			t.Errorf("reason = %q, want the database and its age", reason)
+		wantAge := (8 * 24 * time.Hour).String()
+		if !strings.Contains(reason, "gt") || !strings.Contains(reason, wantAge) {
+			t.Errorf("reason = %q, want the database and its age %s", reason, wantAge)
 		}
 	})
 
