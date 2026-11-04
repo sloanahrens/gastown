@@ -12,7 +12,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -1822,10 +1821,11 @@ func TestContractGoCacheAbsentOnOtherDriver(t *testing.T) {
 	}
 }
 
-// The two values are the claim mount joined to the directories the seed Job
-// writes, so a seed that renames a directory moves the contract with it and
-// the sandbox never compiles against a directory the seed does not fill
-// (gt-nposw).
+// Each cache is the claim mount followed by exactly the seed Job's directory
+// name, so a seed that renames a directory moves the contract with it and the
+// sandbox never compiles against a directory the seed does not fill (gt-nposw).
+// The check reads the relation back from the value rather than rebuilding it,
+// so a wrong join in production cannot pass as its own expectation.
 func TestContractGoCacheUsesSeedDirConstants(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
@@ -1846,8 +1846,9 @@ func TestContractGoCacheUsesSeedDirConstants(t *testing.T) {
 		"GOCACHE":    cachevol.SeedBuildCacheDir,
 		"GOMODCACHE": cachevol.SeedModuleCacheDir,
 	} {
-		if want := path.Join(sandboxCacheDir, dir); cs.Env[k] != want {
-			t.Errorf("Env[%s] = %q, want %q (the cache mount joined to the seed's %q)", k, cs.Env[k], want, dir)
+		rel, ok := strings.CutPrefix(cs.Env[k], sandboxCacheDir+"/")
+		if !ok || rel != dir {
+			t.Errorf("Env[%s] = %q, want %s/%s (the cache mount, then the seed's %q)", k, cs.Env[k], sandboxCacheDir, dir, dir)
 		}
 	}
 }
