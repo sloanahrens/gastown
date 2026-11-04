@@ -538,8 +538,8 @@ func TestUpdateLauncherBuildsADetachedCommand(t *testing.T) {
 	}
 }
 
-// startUpdateProcessReportsAStartFailure drives the default starter's refusal:
-// a command that cannot start yields the error and no wait to run.
+// TestStartUpdateProcessReportsAStartFailure drives the default starter's
+// refusal: a command that cannot start yields the error and no wait to run.
 func TestStartUpdateProcessReportsAStartFailure(t *testing.T) {
 	t.Parallel()
 

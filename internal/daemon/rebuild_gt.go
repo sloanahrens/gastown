@@ -258,8 +258,8 @@ func (d *Daemon) triggerRebuildGT() {
 		return
 	}
 	// When the update job owns the install decision this job makes none: two
-	// deciders would race the same binary. The feature is on for the whole
-	// daemon run, so the line is logged once, not once per heartbeat.
+	// deciders would race the same binary. The latch below logs the line once
+	// per daemon process, not once per heartbeat, whatever the setting does.
 	if d.updateTriggerEnabled() {
 		if d.rebuildGTDeferredLogged.CompareAndSwap(false, true) {
 			d.logger.Printf("rebuild_gt: install decisions are deferred to the update job")
