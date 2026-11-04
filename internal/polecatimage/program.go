@@ -14,7 +14,7 @@ import (
 )
 
 // Program runs one plugin run and then the trims that follow it: the old image
-// tags, the build cache and the per-rig cache volumes.
+// tags, the build cache, the dangling images and the per-rig cache volumes.
 //
 // The trims follow a run that finished, a deferral included, and never follow a
 // failure, whose answer Program returns (gt-tpg0p.7).
@@ -24,6 +24,7 @@ func (r *Run) Program() error {
 	}
 	r.PruneOldImages()
 	r.PruneBuildCache()
+	r.PruneDanglingImages()
 	r.TrimCacheVolumes()
 	r.PruneRegistry()
 	return nil

@@ -5,15 +5,17 @@ import (
 	"testing"
 )
 
-// pruneReply answers the docker calls a tag prune and a build-cache prune make:
-// the id of the image :dev names, the id each per-commit tag reports, the tags
-// the repo lists, whether the registry holds an alias for a tag, and one failed
-// call per key the case names.
+// pruneReply answers the docker calls a tag prune, a build-cache prune and a
+// dangling-image prune make: the id of the image :dev names, the id each
+// per-commit tag reports, the tags the repo lists, whether the registry holds an
+// alias for a tag, the size report, and one failed call per key the case names.
 type pruneReply struct {
 	devID string
 	ids   map[string]string // reference -> image id
 	tags  result            // docker images
 	prune result            // docker builder prune
+	image result            // docker image prune
+	df    result            // docker system df
 	alias bool              // the registry holds an alias for a per-commit tag
 	fail  map[string]result
 }
@@ -30,6 +32,10 @@ func (pr *pruneReply) answer(c command) result {
 		return pr.tags
 	case c.args[0] == "builder":
 		return pr.prune
+	case c.args[0] == "system":
+		return pr.df
+	case c.args[0] == "image" && len(c.args) > 1 && c.args[1] == "prune":
+		return pr.image
 	case c.args[0] == "image" && len(c.args) > 2 && c.args[1] == "inspect":
 		ref := c.args[len(c.args)-1]
 		if ref == "gastown-polecat:dev" {
@@ -49,9 +55,14 @@ func (pr *pruneReply) answer(c command) result {
 	return result{}
 }
 
-// newPruneReply is a repo whose :dev image is dev, with one id per tag.
+// testSizeReport is a docker system df answer with an Images and a Build Cache
+// line, in the template sizeReportFormat reads.
+const testSizeReport = "Images 11.4GB 9.9GB (86%)\nBuild Cache 46.2GB 40GB (87%)\n"
+
+// newPruneReply is a repo whose :dev image is dev, with one id per tag, and a
+// readable size report.
 func newPruneReply(tags ...string) *pruneReply {
-	pr := &pruneReply{devID: "sha256:dev", ids: map[string]string{}, fail: map[string]result{}}
+	pr := &pruneReply{devID: "sha256:dev", ids: map[string]string{}, fail: map[string]result{}, df: result{stdout: testSizeReport}}
 	for _, tag := range tags {
 		pr.ids["gastown-polecat:"+tag] = "sha256:" + tag
 	}
@@ -626,4 +637,195 @@ func TestPruneBuildCacheLogsAFailedPrune(t *testing.T) {
 	if strings.Contains(tr.output(), "trimmed to the newest") {
 		t.Error("a failed prune was logged as a trim")
 	}
+}
+
+// forbiddenPrune reports whether a docker call is a prune this plugin may never
+// run: a system or volume prune, or any prune with --all or a short -a flag,
+// which reach past dangling images (gt-atxdz, gt-n0tfr).
+func forbiddenPrune(args []string) bool {
+	if !hasArg(args, "prune") {
+		return false
+	}
+	for _, a := range args {
+		switch {
+		case a == "system", a == "volume", a == "--all":
+			return true
+		case strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") && strings.ContainsRune(a, 'a'):
+			return true
+		}
+	}
+	return false
+}
+
+// TestPruneDanglingRunsOnlyTheDanglingForm pins the one image prune this step
+// runs: image prune -f, once, with no flag that reaches past dangling images
+// (gt-n0tfr).
+func TestPruneDanglingRunsOnlyTheDanglingForm(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	t.Cleanup(tr.Cleanup)
+	tr.reply = newPruneReply().answer
+	tr.PruneDanglingImages()
+	imagePrunes := 0
+	for _, c := range tr.callsTo("docker") {
+		if len(c.args) > 0 && c.args[0] == "image" && hasArg(c.args, "prune") {
+			imagePrunes++
+		}
+		if forbiddenPrune(c.args) {
+			t.Errorf("a forbidden prune ran: %v", callLines(tr, "docker"))
+		}
+	}
+	if imagePrunes != 1 {
+		t.Errorf("image prune ran %d times, want once: %v", imagePrunes, callLines(tr, "docker"))
+	}
+	tr.wantCall(t, "docker", "image", "prune", "-f")
+}
+
+// TestPruneDanglingDoesNothingWhenDockerIsDown pins the first guard: no image
+// prune or size read follows a failed docker info, so a stopped daemon is never
+// read as an empty image list (gt-n0tfr).
+func TestPruneDanglingDoesNothingWhenDockerIsDown(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	t.Cleanup(tr.Cleanup)
+	pr := newPruneReply()
+	pr.fail[callKey("docker", "info")] = result{exit: 1, stderr: "daemon down"}
+	tr.reply = pr.answer
+	tr.PruneDanglingImages()
+	if got := len(tr.callsTo("docker")); got != 1 {
+		t.Errorf("docker was called %d times, want the info probe alone: %v", got, callLines(tr, "docker"))
+	}
+}
+
+// TestPruneDanglingSkipsWithoutTheLock is the trim's lock: a dangling-image
+// prune under another run's lock never overlaps a build (gt-n0tfr).
+func TestPruneDanglingSkipsWithoutTheLock(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	makeLock(t, tr.Cfg.LockDir, "9999", testNow)
+	tr.reply = newPruneReply().answer
+	tr.PruneDanglingImages()
+	tr.wantLogged(t, "dangling images: skipped, another run holds the lock")
+	if anyCallNamed(tr.callsTo("docker"), "image", "prune") {
+		t.Error("a run that could not take the lock pruned dangling images")
+	}
+}
+
+// TestPruneDanglingFailureIsLoggedNotFatal is the failure branch: docker's
+// reason is logged, and the run carries on to the build-cache trim after it
+// (gt-n0tfr).
+func TestPruneDanglingFailureIsLoggedNotFatal(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	t.Cleanup(tr.Cleanup)
+	pr := newPruneReply()
+	pr.image = result{exit: 1, stderr: "permission denied\n"}
+	tr.reply = pr.answer
+	tr.PruneDanglingImages()
+	tr.wantLogged(t, "dangling images not pruned: permission denied")
+	if strings.Contains(tr.output(), "dangling images pruned:") {
+		t.Error("a failed prune was logged as pruned")
+	}
+	tr.PruneBuildCache()
+	tr.wantCall(t, "docker", "builder", "prune", "--keep-storage", "8GB", "-f")
+}
+
+// TestPrunesLogSizesBeforeAndAfter pins the size line each prune logs: the kind
+// it trims, read from docker's size report before and after the prune. A report
+// that cannot be read is logged with its reason, and the prune still runs
+// (gt-n0tfr).
+func TestPrunesLogSizesBeforeAndAfter(t *testing.T) {
+	t.Parallel()
+	const after = "Images 1.5GB 0B (0%)\nBuild Cache 8.0GB 0B (0%)\n"
+	const unreadable = "cannot reach the engine\n"
+	for _, tc := range []struct {
+		name  string
+		prune func(*testRun)
+		argv  []string
+		reads []result // the size report answers, in call order: before, then after
+		want  string
+	}{
+		{
+			name:  "build cache readable",
+			prune: func(tr *testRun) { tr.PruneBuildCache() },
+			argv:  []string{"builder", "prune", "--keep-storage", "8GB", "-f"},
+			reads: []result{{stdout: testSizeReport}, {stdout: after}},
+			want:  "Build Cache size: 46.2GB before, 8.0GB after",
+		},
+		{
+			name:  "dangling images readable",
+			prune: func(tr *testRun) { tr.PruneDanglingImages() },
+			argv:  []string{"image", "prune", "-f"},
+			reads: []result{{stdout: testSizeReport}, {stdout: after}},
+			want:  "Images size: 11.4GB before, 1.5GB after",
+		},
+		{
+			name:  "build cache unreadable",
+			prune: func(tr *testRun) { tr.PruneBuildCache() },
+			argv:  []string{"builder", "prune", "--keep-storage", "8GB", "-f"},
+			reads: []result{{exit: 1, stderr: unreadable}, {exit: 1, stderr: unreadable}},
+			want:  "Build Cache size: unknown before, unknown after (size report unreadable: docker system df failed: cannot reach the engine)",
+		},
+		{
+			name:  "dangling images unreadable",
+			prune: func(tr *testRun) { tr.PruneDanglingImages() },
+			argv:  []string{"image", "prune", "-f"},
+			reads: []result{{exit: 1, stderr: unreadable}, {exit: 1, stderr: unreadable}},
+			want:  "Images size: unknown before, unknown after (size report unreadable: docker system df failed: cannot reach the engine)",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := newTestRun(t)
+			t.Cleanup(tr.Cleanup)
+			pr := newPruneReply()
+			reads := tc.reads
+			tr.reply = func(c command) result {
+				if c.name == "docker" && len(c.args) > 0 && c.args[0] == "system" && len(reads) > 0 {
+					next := reads[0]
+					reads = reads[1:]
+					return next
+				}
+				return pr.answer(c)
+			}
+			tc.prune(tr)
+			tr.wantLogged(t, tc.want)
+			tr.wantCall(t, "docker", tc.argv...)
+		})
+	}
+}
+
+// TestNoOtherPruneFormIsAllowed runs each step of a trim run and checks every
+// docker call it makes: the two prunes it may run are the only prune forms, and
+// the forms it may never run are refused by the same check (gt-atxdz, gt-n0tfr).
+func TestNoOtherPruneFormIsAllowed(t *testing.T) {
+	t.Parallel()
+	for _, form := range [][]string{
+		{"system", "prune"},
+		{"system", "prune", "-a"},
+		{"volume", "prune"},
+		{"image", "prune", "-a"},
+		{"image", "prune", "--all"},
+		{"image", "prune", "-af"},
+		{"builder", "prune", "--all"},
+	} {
+		if !forbiddenPrune(form) {
+			t.Errorf("the check lets %v through", form)
+		}
+	}
+	tr := newTestRun(t)
+	t.Cleanup(tr.Cleanup)
+	tr.Cfg.Keep = "1"
+	pr := newPruneReply("aaa1111", "bbb2222")
+	pr.tags = result{stdout: "aaa1111\nbbb2222\n"}
+	tr.reply = pr.answer
+	tr.PruneOldImages()
+	tr.PruneBuildCache()
+	tr.PruneDanglingImages()
+	for _, c := range tr.callsTo("docker") {
+		if forbiddenPrune(c.args) {
+			t.Errorf("a trim run made a forbidden prune: %v", callLines(tr, "docker"))
+		}
+	}
+	tr.wantCall(t, "docker", "builder", "prune", "--keep-storage", "8GB", "-f")
+	tr.wantCall(t, "docker", "image", "prune", "-f")
 }

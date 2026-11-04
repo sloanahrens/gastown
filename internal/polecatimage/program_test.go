@@ -383,6 +383,7 @@ func TestProgramTrimsAfterAFinishedRun(t *testing.T) {
 	tr.wantLogged(t, "current at abc1234")
 	tr.wantCall(t, "docker", "images", "--format", imagesFormat, "gastown-polecat")
 	tr.wantCall(t, "docker", "builder", "prune", "--keep-storage", "8GB", "-f")
+	tr.wantCall(t, "docker", "image", "prune", "-f")
 	tr.wantCall(t, "docker", "volume", "ls", "--format", "{{.Name}}", "--filter", "name=^gt-cache-")
 }
 
