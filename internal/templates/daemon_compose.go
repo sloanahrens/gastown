@@ -111,12 +111,13 @@ type ComposeSpec struct {
 	ForgeTokenFile string
 
 	// ExtraHosts are host aliases the live container resolves through its own
-	// /etc/hosts, each "<hostname>:<ipv4 or host-gateway>". The rigs' git
-	// remotes name forgejo:3000, which a container cannot resolve, so the render
-	// writes them under the daemon service's extra_hosts, sorted, and writes no
-	// line at all when the list is empty. A malformed entry is refused, named in
-	// the error, rather than written for docker to reject later. A scratch spec
-	// sets none: its project reaches nothing outside itself (gt-gg9hv.2).
+	// /etc/hosts, each "<hostname>:<ipv4 or host-gateway>", each hostname named
+	// once. The rigs' git remotes name forgejo:3000, which a container cannot
+	// resolve, so the render writes them under the daemon service's extra_hosts,
+	// sorted, and writes no line at all when the list is empty. A malformed or
+	// repeated entry is refused, named in the error, rather than written for
+	// docker to reject later. A scratch spec sets none: its project reaches
+	// nothing outside itself (gt-gg9hv.2).
 	ExtraHosts []string
 
 	// Env, KubeconfigFiles, OpenShellConfigDir and ConfigDir are the live
@@ -970,13 +971,17 @@ var extraHostName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 // render carries aliases; a scratch spec that set one would drop it in silence.
 //
 // An entry is "<hostname>:<address>", and the render quotes it into one YAML
-// list item. The address must be an IPv4 address or host-gateway: a bare IPv6
-// address carries colons of its own, so this one-colon form cannot hold it and
-// the entry is refused rather than left for docker to parse another way.
+// list item. The address must be a four-part IPv4 address or host-gateway: a
+// bare IPv6 address carries colons of its own, so this one-colon form cannot
+// hold it and the entry is refused rather than left for docker to parse another
+// way. Each hostname is named once, because a repeat renders two /etc/hosts
+// lines and leaves the name's address to their order.
 func (s ComposeSpec) validateExtraHosts() error {
 	if s.Scratch && len(s.ExtraHosts) > 0 {
 		return fmt.Errorf("compose spec: ExtraHosts %q is set on a scratch spec; only the live render carries host aliases, so it would drop them", s.ExtraHosts)
 	}
+	// /etc/hosts matching ignores case, so "Forgejo" and "forgejo" are one alias.
+	seen := make(map[string]string, len(s.ExtraHosts))
 	for _, entry := range s.ExtraHosts {
 		name, address, ok := strings.Cut(entry, ":")
 		switch {
@@ -991,14 +996,25 @@ func (s ComposeSpec) validateExtraHosts() error {
 		case !extraHostAddress(address):
 			return fmt.Errorf("compose spec: ExtraHost %q has address %q, which is neither an IPv4 address nor %s; a bare IPv6 address carries colons of its own and cannot be written in this <hostname>:<address> form", entry, address, extraHostGateway)
 		}
+		key := strings.ToLower(name)
+		if first, repeated := seen[key]; repeated {
+			return fmt.Errorf("compose spec: ExtraHost %q repeats hostname %q from %q; the render writes one line per name, so the second line would leave its address to /etc/hosts order", entry, name, first)
+		}
+		seen[key] = entry
 	}
 	return nil
 }
 
 // extraHostAddress reports whether address is one docker accepts in extra_hosts.
+// net.ParseIP reads an IPv4-mapped IPv6 address such as ::ffff:10.0.0.2 as
+// IPv4, but its colons would make this entry mean something other than the
+// <hostname>:<address> form the render writes, so only the dotted form passes.
 func extraHostAddress(address string) bool {
 	if address == extraHostGateway {
 		return true
+	}
+	if strings.Contains(address, ":") {
+		return false
 	}
 	ip := net.ParseIP(address)
 	return ip != nil && ip.To4() != nil
