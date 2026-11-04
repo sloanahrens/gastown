@@ -45,11 +45,22 @@ func mustBuild(t *testing.T, v Values) Manifests {
 	return m
 }
 
-// compareGolden compares got with testdata's file, or rewrites the file when
-// -update is set.
-func compareGolden(t *testing.T, file string, got []byte) {
+// goldenReporter is the part of testing.T compareGolden reports through, so a
+// test can drive the function the golden tests use and observe the failure it
+// produces (gt-4zt32).
+type goldenReporter interface {
+	Helper()
+	Error(args ...any)
+	Errorf(format string, args ...any)
+	Fatalf(format string, args ...any)
+}
+
+// compareGolden compares got with the golden file dir/file, or rewrites it when
+// -update is set. The directory is a parameter so a test can drive this function
+// against a file it owns instead of rewriting testdata (gt-4zt32).
+func compareGolden(t goldenReporter, dir, file string, got []byte) {
 	t.Helper()
-	path := filepath.Join("testdata", file)
+	path := filepath.Join(dir, file)
 	if updatingGoldens() {
 		if err := os.WriteFile(path, got, 0o644); err != nil {
 			t.Fatalf("writing %s: %v", path, err)
@@ -155,7 +166,7 @@ func TestRenderDeploymentGolden(t *testing.T) {
 	if err := YAML(&buf, m.Deployment); err != nil {
 		t.Fatalf("YAML: %v", err)
 	}
-	compareGolden(t, "deployment.yaml", buf.Bytes())
+	compareGolden(t, "testdata", "deployment.yaml", buf.Bytes())
 
 	pod := m.Deployment.Spec.Template.Spec
 	if pod.PriorityClassName != PriorityClassName {
@@ -219,7 +230,7 @@ func TestRenderConfigMapGolden(t *testing.T) {
 	t.Parallel()
 	v := goldenValues()
 	m := mustBuild(t, v)
-	compareGolden(t, "config.yaml", []byte(m.ConfigMap.Data[configKey]))
+	compareGolden(t, "testdata", "config.yaml", []byte(m.ConfigMap.Data[configKey]))
 
 	if want := Name + "-config"; m.ConfigMap.Metadata.Name != want {
 		t.Errorf("ConfigMap name = %q, want %q", m.ConfigMap.Metadata.Name, want)
@@ -343,26 +354,55 @@ func TestJobOptionsInitAndCerts(t *testing.T) {
 	}
 }
 
-// TestGoldenMismatchIsReported drives the exact comparison the golden tests use:
-// a document that differs from the golden by one line must be reported, so a
-// hand-edited golden cannot pass.
+// goldenRecorder collects the failures compareGolden reports, so a test can
+// drive it without failing on the failures it asserts.
+type goldenRecorder struct {
+	messages []string
+}
+
+func (r *goldenRecorder) Helper() {}
+
+func (r *goldenRecorder) Error(args ...any) {
+	r.messages = append(r.messages, fmt.Sprint(args...))
+}
+
+func (r *goldenRecorder) Errorf(format string, args ...any) {
+	r.messages = append(r.messages, fmt.Sprintf(format, args...))
+}
+
+func (r *goldenRecorder) Fatalf(format string, args ...any) {
+	r.messages = append(r.messages, fmt.Sprintf(format, args...))
+}
+
+// TestGoldenMismatchIsReported drives compareGolden, the comparison the golden
+// tests use: a document that matches its golden must pass, and one that differs
+// must be reported, so a hand-edited golden or a comparison that stopped
+// comparing cannot pass.
 func TestGoldenMismatchIsReported(t *testing.T) {
 	t.Parallel()
-	var buf bytes.Buffer
-	if err := YAML(&buf, mustBuild(t, goldenValues()).Deployment); err != nil {
-		t.Fatalf("YAML: %v", err)
+	if updatingGoldens() {
+		// -update rewrites the file and returns before comparing, so this mode
+		// has no mismatch to report; the golden tests exercise the rewrite.
+		return
 	}
-	want := buf.Bytes()
-	path := filepath.Join("testdata", "deployment.yaml")
-	if msg := goldenMismatch(path, want, want); msg != "" {
-		t.Fatalf("the comparison reported %q for identical documents", msg)
+	dir := t.TempDir()
+	const file = "deployment.yaml"
+	want := []byte("replicas: 1\n")
+	if err := os.WriteFile(filepath.Join(dir, file), want, 0o644); err != nil {
+		t.Fatalf("writing the golden: %v", err)
 	}
-	changed := bytes.Replace(want, []byte("replicas: 1"), []byte("replicas: 2"), 1)
-	if bytes.Equal(changed, want) {
-		t.Fatalf("the deployment carries none of the line this test changes")
+
+	matched := &goldenRecorder{}
+	compareGolden(matched, dir, file, want)
+	if len(matched.messages) != 0 {
+		t.Fatalf("comparing a document with its own golden reported %q, want no failure", matched.messages)
 	}
-	if msg := goldenMismatch(path, changed, want); !strings.Contains(msg, path) {
-		t.Errorf("a changed golden produced %q, want a mismatch naming %s", msg, path)
+
+	path := filepath.Join(dir, file)
+	mismatched := &goldenRecorder{}
+	compareGolden(mismatched, dir, file, []byte("replicas: 2\n"))
+	if len(mismatched.messages) != 1 || !strings.Contains(mismatched.messages[0], path) {
+		t.Errorf("a changed document produced %q, want one mismatch naming %s", mismatched.messages, path)
 	}
 }
 
@@ -469,7 +509,7 @@ func checkClaimGolden(t *testing.T, claim PersistentVolumeClaim, file string) {
 	if err := YAML(&buf, claim); err != nil {
 		t.Fatalf("YAML(%s): %v", file, err)
 	}
-	compareGolden(t, file, buf.Bytes())
+	compareGolden(t, "testdata", file, buf.Bytes())
 }
 
 // secretWords are names a credential-bearing field is given in a manifest.
