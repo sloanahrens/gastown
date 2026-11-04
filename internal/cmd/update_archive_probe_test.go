@@ -241,3 +241,58 @@ func TestArchiveGapSwitchedOffIsZero(t *testing.T) {
 		}
 	})
 }
+
+// writeDoltDatabase lays out a database directory the local listing accepts: a
+// .dolt/noms/manifest under the town's Dolt data dir.
+func writeDoltDatabase(t *testing.T, townRoot, name string) {
+	t.Helper()
+	dir := filepath.Join(townRoot, ".dolt-data", name, ".dolt", "noms")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "manifest"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestArchiveGapMissingDataDirIsAnError: with the archive on, a town whose
+// Dolt data directory does not exist is an error. Listing it would give no
+// databases, and an empty sum reads as caught up.
+func TestArchiveGapMissingDataDirIsAnError(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeDaemonConfig(t, townRoot, archiveGapConfigWith(t.TempDir()))
+
+	commits, events, err := newArchiveGapFunc(townRoot)(context.Background())
+	if err == nil {
+		t.Fatalf("a missing data directory reported (%d, %d) with no error", commits, events)
+	}
+	if !strings.Contains(err.Error(), ".dolt-data") {
+		t.Errorf("error = %q, want the data directory named", err)
+	}
+}
+
+// TestArchiveGapSuccessPathCountsEveryDatabase: the probe's success path, run
+// through the production closure with a fake pool. Each database contributes
+// its commit count and its events count, so two databases give 2 and 2.
+func TestArchiveGapSuccessPathCountsEveryDatabase(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeDaemonConfig(t, townRoot, archiveGapConfigWith(t.TempDir()))
+	writeDoltDatabase(t, townRoot, "gt")
+	writeDoltDatabase(t, townRoot, "rig_a")
+
+	// The fake answers each count with one unarchived commit and an
+	// uncounted events table, which the probe reads as one event behind.
+	probe := newArchiveGapFuncWith(townRoot, archiveCountOpener(t, &archiveCountServer{}))
+	commits, events, err := probe(context.Background())
+	if err != nil {
+		t.Fatalf("archive gap: %v", err)
+	}
+	if commits != 2 {
+		t.Errorf("commits behind = %d, want 2 (one per database)", commits)
+	}
+	if events != 2 {
+		t.Errorf("events behind = %d, want 2 (one per database)", events)
+	}
+}
