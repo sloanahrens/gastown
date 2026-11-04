@@ -88,6 +88,10 @@ func fullProbeReading() Probes {
 		CPUIdlePct:   Field[float64]{Value: 70},
 		TopConsumers: Field[[]Consumer]{Value: []Consumer{{Name: "dolt", CPU: 120.5}, {Name: "gt", CPU: 40}}},
 		ExecTaxMS:    Field[float64]{Value: 25},
+		// Collect never reads the launchd job (the host agent fills it): the
+		// field must carry the not-collected error, never a zero value that
+		// would read as a job that is not running.
+		Launchd: &Field[Launchd]{Err: LaunchdNotCollected},
 	}
 }
 

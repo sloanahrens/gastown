@@ -6546,3 +6546,69 @@ func TestListDatabasesLocalKeepsUnreadableEntries(t *testing.T) {
 		t.Errorf("listDatabasesLocal = %v, want %v", got, want)
 	}
 }
+
+// TestEnsureMetadataNamesTheHostEveryProcessUses pins that the daemon in the
+// container, whose own Dolt endpoint is dolt.container_host, still writes the
+// loopback host into metadata.json: the file sits in the bind-mounted town, and
+// the Mac reads it, where the container's name does not resolve (gt-4r9wf).
+func TestEnsureMetadataNamesTheHostEveryProcessUses(t *testing.T) {
+	t.Parallel()
+	const (
+		localHost     = "127.0.0.1"
+		containerHost = "host.docker.internal"
+	)
+	// hostField is town.json's dolt.host: present, or omitted as the live town's
+	// is (it names only a port, a container_host and the external container).
+	for _, tc := range []struct {
+		name        string
+		inContainer bool
+		hostField   string
+	}{
+		{"outside the container", false, `"host":"` + localHost + `",`},
+		{"inside the container", true, `"host":"` + localHost + `",`},
+		{"inside the container, town.json names no dolt.host", true, ``},
+		{"outside the container, town.json names no dolt.host", false, ``},
+	} {
+		inContainer := tc.inContainer
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			mayorDir := filepath.Join(townRoot, "mayor")
+			if err := os.MkdirAll(mayorDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			townJSON := `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z",` +
+				`"dolt":{` + tc.hostField + `"container_host":"` + containerHost + `","port":3307}}`
+			if err := os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte(townJSON), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			beadsDir := filepath.Join(townRoot, ".beads")
+			if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			h := &host{
+				doltEndpoint: func(townRoot string) (configpkg.DoltEndpoint, bool) {
+					return configpkg.ResolveDoltEndpointFor(townRoot, inContainer)
+				},
+				persistedEndpoint: func(townRoot string) (configpkg.DoltEndpoint, bool) {
+					return configpkg.ResolveDoltEndpointFor(townRoot, false)
+				},
+				lookupHost: func(string) ([]string, error) { return []string{"192.168.65.2"}, nil },
+			}
+			if err := h.EnsureMetadata(townRoot, "hq"); err != nil {
+				t.Fatalf("EnsureMetadata: %v", err)
+			}
+			data, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var meta map[string]interface{}
+			if err := json.Unmarshal(data, &meta); err != nil {
+				t.Fatalf("metadata.json does not parse: %v\n%s", err, data)
+			}
+			if got := meta["dolt_server_host"]; got != localHost {
+				t.Errorf("dolt_server_host = %v, want %q (the host the Mac uses), whatever process wrote it\n%s", got, localHost, data)
+			}
+		})
+	}
+}

@@ -94,7 +94,7 @@ func TestReadRefusesUnusableFile(t *testing.T) {
 	}{
 		{name: "a missing file", wantErr: fs.ErrNotExist, want: "read probe file"},
 		{name: "not JSON", body: "{", want: "decode probe file"},
-		{name: "a later schema version", body: fmt.Sprintf(`{"v":2,"at":%q}`, now.Format(time.RFC3339)), want: "schema version 2"},
+		{name: "a later schema version", body: fmt.Sprintf(`{"v":3,"at":%q}`, now.Format(time.RFC3339)), want: "schema version 3"},
 		{name: "a zero schema version", body: fmt.Sprintf(`{"at":%q}`, now.Format(time.RFC3339)), want: "schema version 0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -12,7 +12,12 @@ import (
 // A file stamped with another version is refused rather than half-read: a
 // field added in a later schema would decode as its zero value, and a zero
 // reads as a host with nothing running and no disk left.
-const SchemaVersion = 1
+const SchemaVersion = 2
+
+// Rollout note for version 2 (the launchd field): a reader refuses a file of
+// another version, so install the new gt, then restart the host agent; until the
+// agent rewrites the file (within its 60 s interval) readers report the probe
+// unavailable, which the guard and the attention rules treat as unknown.
 
 // futureTolerance is how far ahead of the reader's clock a probe's stamp may
 // sit. The agent and the daemon read one host's clock, so a stamp beyond this
@@ -42,6 +47,19 @@ type Consumer struct {
 	CPU float64 `json:"cpu"`
 }
 
+// Launchd is the state of the town's launchd daemon job, read where launchctl
+// exists: a container daemon cannot run launchctl, so the startup guard asks
+// this reading whether the old launchd owner is still running. Loaded is
+// whether launchd knows the job; PID is the process it runs, 0 when it has none.
+type Launchd struct {
+	Loaded bool `json:"loaded"`
+	PID    int  `json:"pid"`
+}
+
+// LaunchdNotCollected is the error a reading carries in its Launchd field until
+// the host agent fills it from launchctl.
+const LaunchdNotCollected = "launchd job not collected by this reader"
+
 // Probes is one reading of the host: what the host agent writes to
 // .runtime/host/probes.json and what the container daemon reads, since a
 // container cannot run memory_pressure or ps against the host.
@@ -56,6 +74,9 @@ type Probes struct {
 	CPUIdlePct   Field[float64]    `json:"cpu_idle_pct"`
 	TopConsumers Field[[]Consumer] `json:"top_consumers"`
 	ExecTaxMS    Field[float64]    `json:"exec_tax_ms"`
+	// Launchd is a pointer so a file with no launchd key decodes to nil, which a
+	// reader takes as unknown; a zero Field would read as a job that is not running.
+	Launchd *Field[Launchd] `json:"launchd"`
 }
 
 // Path is the probe file under townRoot: the host agent writes it there and a
