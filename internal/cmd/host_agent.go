@@ -209,7 +209,7 @@ func runHostAgent(ctx context.Context, townRoot string) error {
 		interval: hostAgentInterval,
 		path:     hostprobe.Path(townRoot),
 		collect: func(ctx context.Context, now time.Time) hostprobe.Probes {
-			return hostprobe.Collect(ctx, hostAgentRunner, townRoot, now)
+			return hostAgentWithLaunchd(hostprobe.Collect(ctx, hostAgentRunner, townRoot, now), templates.SupervisorJobState)
 		},
 		write: hostAgentWrite,
 		logf: func(format string, args ...any) {
@@ -227,6 +227,20 @@ func hostAgentWrite(path string, p hostprobe.Probes) error {
 		return fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
 	}
 	return hostprobe.Write(path, p)
+}
+
+// hostAgentWithLaunchd fills the reading's launchd field from the supervisor
+// reader. A container daemon cannot run launchctl, so this reading is how its
+// startup guard learns whether the old launchd owner still runs. A job that
+// cannot be read sets the field's Err and never reads as not running.
+func hostAgentWithLaunchd(p hostprobe.Probes, read templates.SupervisorReader) hostprobe.Probes {
+	st := read("launchd")
+	if st.Err != nil {
+		p.Launchd = hostprobe.Field[hostprobe.Launchd]{Err: fmt.Sprintf("launchd job read: %v", st.Err)}
+		return p
+	}
+	p.Launchd = hostprobe.Field[hostprobe.Launchd]{Value: hostprobe.Launchd{Loaded: st.Loaded, PID: st.PID}}
+	return p
 }
 
 // hostAgentRunner is hostprobe.Runner over the real host: it runs the argv and

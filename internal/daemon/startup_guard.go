@@ -13,6 +13,7 @@ import (
 	"time"
 
 	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/hostprobe"
 	"github.com/steveyegge/gastown/internal/procid"
 	"github.com/steveyegge/gastown/internal/templates"
 )
@@ -57,7 +58,7 @@ func guardStartup(townRoot string, self Owner, takeover bool, probe OwnerProbe, 
 // CLI has written nothing to it.
 func GuardStart(townRoot string, self Owner, takeover bool, probe OwnerProbe, now time.Time) error {
 	if probe == nil {
-		probe = startupOwnerProbe(templates.RunDockerInspect, os.Hostname, nil)
+		probe = startupOwnerProbeForTown(townRoot, templates.RunDockerInspect, os.Hostname)
 	}
 	_, err := os.Stat(DefaultConfig(townRoot).LogFile)
 	return guardStartup(townRoot, self, takeover, probe, now, !errors.Is(err, fs.ErrNotExist))
@@ -107,6 +108,44 @@ func startupCandidates(townRoot string) ([]Owner, error) {
 		candidates = append(candidates, Owner{Kind: agentconfig.SupervisorContainer, ID: cfg.ContainerName()})
 	}
 	return candidates, nil
+}
+
+// hostLaunchdMaxAge is how old the host agent's reading of the launchd job may
+// be when the guard relies on it. The agent writes every 60 seconds, so two
+// intervals leave one write of slack; an older file reads as unknown and the
+// guard refuses.
+const hostLaunchdMaxAge = 2 * time.Minute
+
+// hostLaunchdFallback answers a launchd job read from the host agent's probe
+// file when the job cannot be read here: a container has no launchctl, so the
+// direct read fails and the guard could never show the old launchd owner
+// stopped. Only an unreadable launchd job is replaced, and only by a fresh
+// reading that itself succeeded; a missing, stale, or failed reading leaves the
+// original unknown, which refuses.
+func hostLaunchdFallback(townRoot string, now func() time.Time, inner templates.SupervisorReader) templates.SupervisorReader {
+	return func(kind string) templates.SupervisorState {
+		st := inner(kind)
+		if kind != agentconfig.SupervisorLaunchd || st.Err == nil {
+			return st
+		}
+		p, err := hostprobe.Read(hostprobe.Path(townRoot), now(), hostLaunchdMaxAge)
+		if err != nil || p.Launchd.Err != "" {
+			return st
+		}
+		return templates.SupervisorState{
+			Kind:     kind,
+			Loaded:   p.Launchd.Value.Loaded,
+			PID:      p.Launchd.Value.PID,
+			LastExit: -1,
+		}
+	}
+}
+
+// startupOwnerProbeForTown is the probe the guard's production callers use: the
+// real readers, with the launchd job read from the host agent's probe file when
+// launchctl is unavailable.
+func startupOwnerProbeForTown(townRoot string, run templates.ContainerDocker, hostname func() (string, error)) OwnerProbe {
+	return startupOwnerProbe(run, hostname, hostLaunchdFallback(townRoot, time.Now, templates.SupervisorJobState))
 }
 
 // startupOwnerProbe builds the probe the guard asks about a recorded owner from

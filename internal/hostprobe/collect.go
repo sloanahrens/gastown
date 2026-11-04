@@ -86,6 +86,11 @@ func collect(ctx context.Context, c collectors, townRoot string, now time.Time) 
 		ExecTaxMS: read(ctx, c.timeout, func(ctx context.Context) (float64, error) {
 			return execTaxMS(ctx, c.execTax)
 		}),
+		// The launchd job is not read here: the reader lives in internal/templates,
+		// which imports this package. The host agent fills the field after Collect;
+		// until it does the field carries an error, so an unfilled reading is
+		// unknown to the guard and never a job that is not running.
+		Launchd: Field[Launchd]{Err: LaunchdNotCollected},
 	}
 }
 
