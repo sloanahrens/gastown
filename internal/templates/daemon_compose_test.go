@@ -376,26 +376,65 @@ func TestDerivedOMConfigBackendUsesClaudeExec(t *testing.T) {
 	}
 }
 
-// The model is the spec's field, not a literal in the render: changing it
-// changes the backend the file writes, and the defaults stay as they were.
-func TestDerivedOMConfigDefaultsComeFromTheSpec(t *testing.T) {
+// Every setting is the spec's field, not a literal in the render: changing one
+// in the spec changes that value in the written file. TestDerivedOMConfigBackendUsesClaudeExec
+// already pins the defaults themselves (gt-spndp).
+func TestDerivedOMConfigTakesEachSettingFromTheSpec(t *testing.T) {
 	t.Parallel()
-	settings := templates.DefaultOMConfigSettings()
-	settings.Model = "sonnet"
-	content, err := templates.RenderOMConfig(settings)
-	if err != nil {
-		t.Fatalf("RenderOMConfig: %v", err)
+	tests := []struct {
+		name   string
+		mutate func(*templates.OMConfigSettings)
+		check  func(*testing.T, omConfigOnDisk)
+	}{
+		{
+			name:   "model",
+			mutate: func(o *templates.OMConfigSettings) { o.Model = "sonnet" },
+			check: func(t *testing.T, got omConfigOnDisk) {
+				want := []string{"gt", "daemon", "claude-exec", "--" + config.OMTokenFileFlag, templates.LiveOMTokenPath, "--", "-p", "--model", "sonnet"}
+				if !slices.Equal(got.Backend, want) {
+					t.Errorf("backend = %q, want %q", got.Backend, want)
+				}
+			},
+		},
+		{
+			name:   "threshold",
+			mutate: func(o *templates.OMConfigSettings) { o.Threshold = 0.5 },
+			check: func(t *testing.T, got omConfigOnDisk) {
+				if got.Threshold != 0.5 {
+					t.Errorf("threshold = %v, want the spec's 0.5", got.Threshold)
+				}
+			},
+		},
+		{
+			name:   "depth",
+			mutate: func(o *templates.OMConfigSettings) { o.Depth = "deep" },
+			check: func(t *testing.T, got omConfigOnDisk) {
+				if got.Depth != "deep" {
+					t.Errorf("depth = %q, want the spec's deep", got.Depth)
+				}
+			},
+		},
+		{
+			name:   "timeout",
+			mutate: func(o *templates.OMConfigSettings) { o.Timeout = 120 },
+			check: func(t *testing.T, got omConfigOnDisk) {
+				if got.Timeout != 120 {
+					t.Errorf("timeout = %d, want the spec's 120", got.Timeout)
+				}
+			},
+		},
 	}
-	if got := decodeOMConfig(t, content).Backend; got[len(got)-1] != "sonnet" {
-		t.Errorf("backend = %q, want the model the spec names, sonnet", got)
-	}
-
-	defaults, err := templates.RenderOMConfig(templates.DefaultOMConfigSettings())
-	if err != nil {
-		t.Fatalf("RenderOMConfig: %v", err)
-	}
-	if got := decodeOMConfig(t, defaults).Backend; got[len(got)-1] != "haiku" {
-		t.Errorf("default backend = %q, want haiku", got)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			settings := templates.DefaultOMConfigSettings()
+			tc.mutate(&settings)
+			content, err := templates.RenderOMConfig(settings)
+			if err != nil {
+				t.Fatalf("RenderOMConfig: %v", err)
+			}
+			tc.check(t, decodeOMConfig(t, content))
+		})
 	}
 }
 
