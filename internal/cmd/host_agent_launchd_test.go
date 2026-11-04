@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -31,9 +32,12 @@ func TestHostAgentWithLaunchd(t *testing.T) {
 			t.Parallel()
 			var askedKind string
 			read := func(kind string) templates.SupervisorState { askedKind = kind; return tc.state }
-			got := hostAgentWithLaunchd(hostprobe.Probes{V: hostprobe.SchemaVersion}, read)
+			got := hostAgentWithLaunchd(context.Background(), hostprobe.Probes{V: hostprobe.SchemaVersion}, read)
 			if askedKind != "launchd" {
 				t.Errorf("read the %q job, want launchd", askedKind)
+			}
+			if got.Launchd == nil {
+				t.Fatal("the agent left the launchd field nil, which a reader takes as unknown")
 			}
 			if tc.wantErr {
 				if got.Launchd.Err == "" {
@@ -45,5 +49,24 @@ func TestHostAgentWithLaunchd(t *testing.T) {
 				t.Errorf("published %+v, want %+v with no error", got.Launchd, tc.want)
 			}
 		})
+	}
+}
+
+// TestHostAgentWithLaunchdBoundsTheRead pins that a launchctl that never
+// answers fails the field when the context ends, and never reads as a job that
+// is not running.
+func TestHostAgentWithLaunchdBoundsTheRead(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	defer close(release)
+	read := func(string) templates.SupervisorState {
+		<-release
+		return templates.SupervisorState{Kind: "launchd", LastExit: -1}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got := hostAgentWithLaunchd(ctx, hostprobe.Probes{V: hostprobe.SchemaVersion}, read)
+	if got.Launchd == nil || got.Launchd.Err == "" {
+		t.Fatalf("a read that outlived its context published %+v, want an error in the field", got.Launchd)
 	}
 }

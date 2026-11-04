@@ -1,13 +1,12 @@
 package daemon
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
-
-	"encoding/json"
 
 	"github.com/steveyegge/gastown/internal/hostprobe"
 	"github.com/steveyegge/gastown/internal/templates"
@@ -15,7 +14,7 @@ import (
 
 // writeHostProbe publishes a probe file under townRoot the way the host agent
 // does, stamped at, with the given launchd reading.
-func writeHostProbe(t *testing.T, townRoot string, at time.Time, launchd hostprobe.Field[hostprobe.Launchd]) {
+func writeHostProbe(t *testing.T, townRoot string, at time.Time, launchd *hostprobe.Field[hostprobe.Launchd]) {
 	t.Helper()
 	path := hostprobe.Path(townRoot)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -41,7 +40,8 @@ func TestHostLaunchdFallback(t *testing.T) {
 		name       string
 		inner      templates.SupervisorState
 		kind       string
-		probe      *hostprobe.Field[hostprobe.Launchd] // nil: no probe file
+		probe      *hostprobe.Field[hostprobe.Launchd] // nil: no probe file, or a file with no launchd key (see noKey)
+		noKey      bool                                // write a probe file whose launchd key is absent
 		probeAge   time.Duration
 		wantUnread bool // the answer still carries the inner read's error
 		wantLoaded bool
@@ -49,7 +49,10 @@ func TestHostLaunchdFallback(t *testing.T) {
 	}{
 		{name: "a readable job is returned as read and the file is not consulted",
 			inner: templates.SupervisorState{Kind: "launchd", Loaded: true, PID: 77, LastExit: -1}, kind: "launchd",
+			probe: &hostprobe.Field[hostprobe.Launchd]{Value: hostprobe.Launchd{Loaded: false}}, probeAge: 10 * time.Second,
 			wantLoaded: true, wantPID: 77},
+		{name: "unreadable job and a probe file with no launchd key stays unknown",
+			inner: unreadable, kind: "launchd", noKey: true, probeAge: 10 * time.Second, wantUnread: true},
 		{name: "unreadable job and a fresh reading of a job that is not loaded",
 			inner: unreadable, kind: "launchd",
 			probe: &hostprobe.Field[hostprobe.Launchd]{Value: hostprobe.Launchd{Loaded: false}}, probeAge: 30 * time.Second},
@@ -77,8 +80,8 @@ func TestHostLaunchdFallback(t *testing.T) {
 			t.Parallel()
 			town := t.TempDir()
 			now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
-			if tc.probe != nil {
-				writeHostProbe(t, town, now.Add(-tc.probeAge), *tc.probe)
+			if tc.probe != nil || tc.noKey {
+				writeHostProbe(t, town, now.Add(-tc.probeAge), tc.probe)
 			}
 			read := hostLaunchdFallback(town, func() time.Time { return now }, jobAnswers(tc.inner))
 			got := read(tc.kind)
@@ -108,7 +111,7 @@ func TestStartupOwnerProbeLaunchdFromHostFile(t *testing.T) {
 	if running, known := probe(guardLaunchd); known {
 		t.Fatalf("with no probe file got running=%v known=%v, want unknown", running, known)
 	}
-	writeHostProbe(t, town, now.Add(-20*time.Second), hostprobe.Field[hostprobe.Launchd]{Value: hostprobe.Launchd{Loaded: false}})
+	writeHostProbe(t, town, now.Add(-20*time.Second), &hostprobe.Field[hostprobe.Launchd]{Value: hostprobe.Launchd{Loaded: false}})
 	if running, known := probe(guardLaunchd); running || !known {
 		t.Errorf("with a fresh not-loaded reading got running=%v known=%v, want stopped and known", running, known)
 	}

@@ -4634,7 +4634,7 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 	// previous bd init) cause "connection refused" errors.
 	// A town without an endpoint leaves them as they are (gt-y3pgh.3).
 	if config.Port > 0 {
-		wantHost := persistedMetadataHost(townRoot, config)
+		wantHost := h.persistedMetadataHost(townRoot, config)
 		wantPort := float64(config.Port) // JSON numbers are float64
 		if existing["dolt_server_host"] != wantHost {
 			existing["dolt_server_host"] = wantHost
@@ -4670,8 +4670,8 @@ func (h *host) EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName string, dol
 // the container (gt-qpeei.17). A town that names an endpoint but no dolt.host
 // is reached on the loopback, the default every other process takes; only a
 // town that names no endpoint at all falls back to the server config's host.
-func persistedMetadataHost(townRoot string, cfg *Config) string {
-	if ep, ok := configpkg.ResolveDoltEndpointFor(townRoot, false); ok {
+func (h *host) persistedMetadataHost(townRoot string, cfg *Config) string {
+	if ep, ok := h.resolvePersistedEndpoint(townRoot); ok {
 		if ep.Host != "" {
 			return ep.Host
 		}

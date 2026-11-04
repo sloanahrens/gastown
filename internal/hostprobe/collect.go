@@ -90,7 +90,7 @@ func collect(ctx context.Context, c collectors, townRoot string, now time.Time) 
 		// which imports this package. The host agent fills the field after Collect;
 		// until it does the field carries an error, so an unfilled reading is
 		// unknown to the guard and never a job that is not running.
-		Launchd: Field[Launchd]{Err: LaunchdNotCollected},
+		Launchd: &Field[Launchd]{Err: LaunchdNotCollected},
 	}
 }
 

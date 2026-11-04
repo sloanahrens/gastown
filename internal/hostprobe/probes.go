@@ -14,6 +14,11 @@ import (
 // reads as a host with nothing running and no disk left.
 const SchemaVersion = 2
 
+// Rollout note for version 2 (the launchd field): a reader refuses a file of
+// another version, so install the new gt, then restart the host agent; until the
+// agent rewrites the file (within its 60 s interval) readers report the probe
+// unavailable, which the guard and the attention rules treat as unknown.
+
 // futureTolerance is how far ahead of the reader's clock a probe's stamp may
 // sit. The agent and the daemon read one host's clock, so a stamp beyond this
 // is a clock that jumped, and a future stamp must not read as fresh however
@@ -69,7 +74,9 @@ type Probes struct {
 	CPUIdlePct   Field[float64]    `json:"cpu_idle_pct"`
 	TopConsumers Field[[]Consumer] `json:"top_consumers"`
 	ExecTaxMS    Field[float64]    `json:"exec_tax_ms"`
-	Launchd      Field[Launchd]    `json:"launchd"`
+	// Launchd is a pointer so a file with no launchd key decodes to nil, which a
+	// reader takes as unknown; a zero Field would read as a job that is not running.
+	Launchd *Field[Launchd] `json:"launchd"`
 }
 
 // Path is the probe file under townRoot: the host agent writes it there and a

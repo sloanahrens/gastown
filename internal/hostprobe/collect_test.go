@@ -91,7 +91,7 @@ func fullProbeReading() Probes {
 		// Collect never reads the launchd job (the host agent fills it): the
 		// field must carry the not-collected error, never a zero value that
 		// would read as a job that is not running.
-		Launchd: Field[Launchd]{Err: LaunchdNotCollected},
+		Launchd: &Field[Launchd]{Err: LaunchdNotCollected},
 	}
 }
 

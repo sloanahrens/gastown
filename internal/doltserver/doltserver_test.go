@@ -6590,6 +6590,9 @@ func TestEnsureMetadataNamesTheHostEveryProcessUses(t *testing.T) {
 				doltEndpoint: func(townRoot string) (configpkg.DoltEndpoint, bool) {
 					return configpkg.ResolveDoltEndpointFor(townRoot, inContainer)
 				},
+				persistedEndpoint: func(townRoot string) (configpkg.DoltEndpoint, bool) {
+					return configpkg.ResolveDoltEndpointFor(townRoot, false)
+				},
 				lookupHost: func(string) ([]string, error) { return []string{"192.168.65.2"}, nil },
 			}
 			if err := h.EnsureMetadata(townRoot, "hq"); err != nil {

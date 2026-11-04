@@ -69,6 +69,10 @@ type host struct {
 	writeIssuePrefix func(townRoot, beadsDir, database, prefix string) error
 	// doltEndpoint is the town's Dolt endpoint (config.ResolveDoltEndpoint).
 	doltEndpoint func(townRoot string) (configpkg.DoltEndpoint, bool)
+	// persistedEndpoint is the endpoint every non-container process uses, the one
+	// a file shared with the Mac must name (config.ResolveDoltEndpointFor with
+	// inContainer false).
+	persistedEndpoint func(townRoot string) (configpkg.DoltEndpoint, bool)
 }
 
 // std is the real machine.
@@ -88,6 +92,13 @@ func (h *host) resolveDoltEndpoint(townRoot string) (configpkg.DoltEndpoint, boo
 		return h.doltEndpoint(townRoot)
 	}
 	return configpkg.ResolveDoltEndpoint(townRoot)
+}
+
+func (h *host) resolvePersistedEndpoint(townRoot string) (configpkg.DoltEndpoint, bool) {
+	if h.persistedEndpoint != nil {
+		return h.persistedEndpoint(townRoot)
+	}
+	return configpkg.ResolveDoltEndpointFor(townRoot, false)
 }
 
 func (h *host) lookupEnvVar(key string) (string, bool) {

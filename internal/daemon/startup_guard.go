@@ -120,8 +120,8 @@ const hostLaunchdMaxAge = 2 * time.Minute
 // file when the job cannot be read here: a container has no launchctl, so the
 // direct read fails and the guard could never show the old launchd owner
 // stopped. Only an unreadable launchd job is replaced, and only by a fresh
-// reading that itself succeeded; a missing, stale, or failed reading leaves the
-// original unknown, which refuses.
+// reading that itself succeeded; a missing, stale, failed or absent (no launchd
+// key) reading leaves the original unknown, which refuses.
 func hostLaunchdFallback(townRoot string, now func() time.Time, inner templates.SupervisorReader) templates.SupervisorReader {
 	return func(kind string) templates.SupervisorState {
 		st := inner(kind)
@@ -129,7 +129,7 @@ func hostLaunchdFallback(townRoot string, now func() time.Time, inner templates.
 			return st
 		}
 		p, err := hostprobe.Read(hostprobe.Path(townRoot), now(), hostLaunchdMaxAge)
-		if err != nil || p.Launchd.Err != "" {
+		if err != nil || p.Launchd == nil || p.Launchd.Err != "" {
 			return st
 		}
 		return templates.SupervisorState{

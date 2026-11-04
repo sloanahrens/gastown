@@ -209,7 +209,7 @@ func runHostAgent(ctx context.Context, townRoot string) error {
 		interval: hostAgentInterval,
 		path:     hostprobe.Path(townRoot),
 		collect: func(ctx context.Context, now time.Time) hostprobe.Probes {
-			return hostAgentWithLaunchd(hostprobe.Collect(ctx, hostAgentRunner, townRoot, now), templates.SupervisorJobState)
+			return hostAgentWithLaunchd(ctx, hostprobe.Collect(ctx, hostAgentRunner, townRoot, now), templates.SupervisorJobState)
 		},
 		write: hostAgentWrite,
 		logf: func(format string, args ...any) {
@@ -229,17 +229,30 @@ func hostAgentWrite(path string, p hostprobe.Probes) error {
 	return hostprobe.Write(path, p)
 }
 
+// hostAgentLaunchdTimeout bounds the launchd read, as hostprobe bounds each of
+// its own field reads: a launchctl that hangs must not hold the whole reading.
+const hostAgentLaunchdTimeout = 30 * time.Second
+
 // hostAgentWithLaunchd fills the reading's launchd field from the supervisor
-// reader. A container daemon cannot run launchctl, so this reading is how its
-// startup guard learns whether the old launchd owner still runs. A job that
-// cannot be read sets the field's Err and never reads as not running.
-func hostAgentWithLaunchd(p hostprobe.Probes, read templates.SupervisorReader) hostprobe.Probes {
-	st := read("launchd")
-	if st.Err != nil {
-		p.Launchd = hostprobe.Field[hostprobe.Launchd]{Err: fmt.Sprintf("launchd job read: %v", st.Err)}
-		return p
+// reader, within hostAgentLaunchdTimeout. A container daemon cannot run
+// launchctl, so this reading is how its startup guard learns whether the old
+// launchd owner still runs. A job that cannot be read, or a read that outlives
+// ctx, sets the field's Err and never reads as not running.
+func hostAgentWithLaunchd(ctx context.Context, p hostprobe.Probes, read templates.SupervisorReader) hostprobe.Probes {
+	ctx, cancel := context.WithTimeout(ctx, hostAgentLaunchdTimeout)
+	defer cancel()
+	done := make(chan templates.SupervisorState, 1)
+	go func() { done <- read("launchd") }()
+	select {
+	case st := <-done:
+		if st.Err != nil {
+			p.Launchd = &hostprobe.Field[hostprobe.Launchd]{Err: fmt.Sprintf("launchd job read: %v", st.Err)}
+			return p
+		}
+		p.Launchd = &hostprobe.Field[hostprobe.Launchd]{Value: hostprobe.Launchd{Loaded: st.Loaded, PID: st.PID}}
+	case <-ctx.Done():
+		p.Launchd = &hostprobe.Field[hostprobe.Launchd]{Err: "launchd job read: " + ctx.Err().Error()}
 	}
-	p.Launchd = hostprobe.Field[hostprobe.Launchd]{Value: hostprobe.Launchd{Loaded: st.Loaded, PID: st.PID}}
 	return p
 }
 
