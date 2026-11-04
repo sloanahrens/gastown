@@ -45,6 +45,26 @@ reviews it and runs it.`,
 	return cmd
 }
 
+// keepLabel marks the printed container as one the town keeps: the slot
+// reaper matches it before it classifies a container (gt-awq73), so the
+// production Dolt container is not reaped on age when the town configures no
+// container name.
+const keepLabel = "org.gastown.keep=true"
+
+// containerEntrypointLen is how many elements ContainerPlan places after the
+// image reference: "dolt", "sql-server", "--config" and the config path.
+const containerEntrypointLen = 4
+
+// withKeepLabel returns the plan with the keep label on the container,
+// directly before the image reference.
+func withKeepLabel(argv []string) []string {
+	imageAt := len(argv) - containerEntrypointLen - 1
+	labeled := make([]string, 0, len(argv)+2)
+	labeled = append(labeled, argv[:imageAt]...)
+	labeled = append(labeled, "--label", keepLabel)
+	return append(labeled, argv[imageAt:]...)
+}
+
 // newDoltContainerPlanCmd builds `gt dolt container plan`, which prints the
 // docker create command and runs nothing.
 func newDoltContainerPlanCmd(deps doltContainerPlanDeps) *cobra.Command {
@@ -98,6 +118,7 @@ records.`,
 			if err != nil {
 				return err
 			}
+			argv = withKeepLabel(argv)
 			out := cmd.OutOrStdout()
 			if asJSON {
 				if err := json.NewEncoder(out).Encode(argv); err != nil {
