@@ -144,8 +144,8 @@ func newDifferentialCase(t *testing.T) differentialCase {
 		diverge:  knownSeatDivergences,
 		awaiting: awaitingRecording,
 		keep:     keep,
-		run: func(argv []string) ([]byte, int, error) {
-			return runFixtureRow(t, town, fixture, argv)
+		run: func(argv []string) ([]byte, []byte, int, error) {
+			return runFixtureRowWithStderr(t, town, fixture, argv)
 		},
 	}
 }
@@ -268,19 +268,27 @@ func seedFixture(t *testing.T, fixture []fixtureBead) *storetest.Fake {
 // seeded afresh, so a mutating row cannot change another row's answer.
 func runFixtureRow(t *testing.T, town string, fixture []fixtureBead, argv []string) ([]byte, int, error) {
 	t.Helper()
-	env, stdout, _ := fixtureEnv(t, town, fixture, argv)
+	stdout, _, exit, err := runFixtureRowWithStderr(t, town, fixture, argv)
+	return stdout, exit, err
+}
+
+// runFixtureRowWithStderr is runFixtureRow with what the shim wrote to stderr,
+// for a caller that prints it beside a differing answer (gt-wt5pg).
+func runFixtureRowWithStderr(t *testing.T, town string, fixture []fixtureBead, argv []string) (stdout, stderr []byte, exit int, err error) {
+	t.Helper()
+	env, stdoutBuf, stderrBuf := fixtureEnv(t, town, fixture, argv)
 	// A row the router sends anywhere but the tracker rig cannot be compared
 	// with a handler's answer, so it fails as a fixture the test cannot answer
 	// rather than being diffed against bd.real.
 	d, err := Decide(env.Getenv, env.Getwd, argv)
 	if err != nil {
-		return nil, 0, fmt.Errorf("routing %v: %w", argv, err)
+		return nil, stderrBuf.Bytes(), 0, fmt.Errorf("routing %v: %w", argv, err)
 	}
 	if !d.Tracker {
-		return nil, 0, fmt.Errorf("the fixture town routes %v to bd.real, not to its tracker rig", argv)
+		return nil, stderrBuf.Bytes(), 0, fmt.Errorf("the fixture town routes %v to bd.real, not to its tracker rig", argv)
 	}
 	code := Main(env)
-	return stdout.Bytes(), code, nil
+	return stdoutBuf.Bytes(), stderrBuf.Bytes(), code, nil
 }
 
 // fixtureEnv is the environment one row reaches the shim's handlers with: a
@@ -387,14 +395,14 @@ func differentialEnv(argv []string, getenv func(string) string, town string) (En
 }
 
 // runInShim is a run that answers argv through Main against town, with the
-// handlers the test registered and the answer captured.
-func runInShim(t *testing.T, town string, handlers map[string]Handler) func([]string) ([]byte, int, error) {
+// handlers the test registered and the answer and the shim's stderr captured.
+func runInShim(t *testing.T, town string, handlers map[string]Handler) func([]string) ([]byte, []byte, int, error) {
 	t.Helper()
-	return func(argv []string) ([]byte, int, error) {
-		env, stdout, _ := differentialEnv(argv, func(string) string { return "" }, town)
+	return func(argv []string) ([]byte, []byte, int, error) {
+		env, stdout, stderr := differentialEnv(argv, func(string) string { return "" }, town)
 		env.Handlers = handlers
 		code := Main(env)
-		return stdout.Bytes(), code, nil
+		return stdout.Bytes(), stderr.Bytes(), code, nil
 	}
 }
 

@@ -55,8 +55,10 @@ type differentialCase struct {
 	// as recorded.
 	keep map[string]bool
 	// run answers one row's argv through the shim and returns what it wrote as
-	// bd's stdout and its exit code.
-	run func(argv []string) (stdout []byte, exit int, err error)
+	// bd's stdout, what it wrote to stderr, and its exit code. The stderr is
+	// reported beside a differing answer, so the failure says why the shim
+	// answered as it did (gt-wt5pg).
+	run func(argv []string) (stdout, stderr []byte, exit int, err error)
 }
 
 // differentialReport is what one run found.
@@ -73,7 +75,8 @@ type differentialReport struct {
 
 // runDifferential walks every golden, runs it through the handler for its verb
 // and compares the answer. It reports every failure it finds rather than the
-// first, so one red run names every row that drifted.
+// first, so one red run names every row that drifted, and a row's failure
+// carries the shim's stderr so a cause its stdout does not show is in the log.
 func runDifferential(c differentialCase) (differentialReport, error) {
 	var report differentialReport
 	var failures []string
@@ -115,9 +118,9 @@ func runDifferential(c differentialCase) (differentialReport, error) {
 			}
 			continue
 		}
-		got, exit, err := c.run(row.argv)
+		got, shimStderr, exit, err := c.run(row.argv)
 		if err != nil {
-			failures = append(failures, fmt.Sprintf("golden %s: %v", stem, err))
+			failures = append(failures, fmt.Sprintf("golden %s: %v%s", stem, err, stderrBlock(shimStderr)))
 			continue
 		}
 		if div, ok := c.diverge[stem]; ok {
@@ -126,7 +129,7 @@ func runDifferential(c differentialCase) (differentialReport, error) {
 			report.diverged++
 			got = golden.Normalize(got, c.keep)
 			if string(got) != div.stdout || exit != div.exit {
-				failures = append(failures, fmt.Sprintf("golden %s: the shim answered exit %d stdout %q, the listed difference is exit %d stdout %q", stem, exit, got, div.exit, div.stdout))
+				failures = append(failures, fmt.Sprintf("golden %s: the shim answered exit %d stdout %q, the listed difference is exit %d stdout %q%s", stem, exit, got, div.exit, div.stdout, stderrBlock(shimStderr)))
 			}
 			if bytes.Equal(got, want) && exit == wantExit {
 				failures = append(failures, fmt.Sprintf("golden %s: knownSeatDivergences lists the row but the shim now answers as bd does; remove the entry", stem))
@@ -134,6 +137,7 @@ func runDifferential(c differentialCase) (differentialReport, error) {
 			continue
 		}
 		report.compared++
+		first := len(failures)
 		// The shim's answer carries the ids and times of this run, and the
 		// golden holds the recorder's; normalizing both the same way is what
 		// makes the two answers comparable (golden.Normalize).
@@ -143,6 +147,10 @@ func runDifferential(c differentialCase) (differentialReport, error) {
 		}
 		if exit != wantExit {
 			failures = append(failures, fmt.Sprintf("golden %s: exit code is %d, want bd's %d", stem, exit, wantExit))
+		}
+		// One row reports its stderr once, beside the first thing that differs.
+		if len(failures) > first {
+			failures[first] += stderrBlock(shimStderr)
 		}
 	}
 
@@ -159,13 +167,13 @@ func runDifferential(c differentialCase) (differentialReport, error) {
 			failures = append(failures, fmt.Sprintf("awaitingRecording lists %q, which is not in knownSeatDivergences and differentialRows", stem))
 			continue
 		}
-		got, exit, err := c.run(row.argv)
+		got, shimStderr, exit, err := c.run(row.argv)
 		if err != nil {
-			failures = append(failures, fmt.Sprintf("awaiting %s: %v", stem, err))
+			failures = append(failures, fmt.Sprintf("awaiting %s: %v%s", stem, err, stderrBlock(shimStderr)))
 			continue
 		}
 		if got = golden.Normalize(got, c.keep); string(got) != div.stdout || exit != div.exit {
-			failures = append(failures, fmt.Sprintf("awaiting %s: the shim answered exit %d stdout %q, the listed difference is exit %d stdout %q", stem, exit, got, div.exit, div.stdout))
+			failures = append(failures, fmt.Sprintf("awaiting %s: the shim answered exit %d stdout %q, the listed difference is exit %d stdout %q%s", stem, exit, got, div.exit, div.stdout, stderrBlock(shimStderr)))
 		}
 	}
 
@@ -261,6 +269,17 @@ func lineDiff(want, got []byte) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// stderrBlock returns what the shim wrote to stderr, for the failure message of
+// a row whose answer differs. A shim that wrote nothing adds nothing, so the
+// message of a quiet row reads as it did before (gt-wt5pg).
+func stderrBlock(stderr []byte) string {
+	text := strings.TrimRight(string(stderr), "\n")
+	if text == "" {
+		return ""
+	}
+	return "\nthe shim wrote to stderr:\n" + text
+}
+
 // TestDifferentialGoldens replays every committed golden through the shim's
 // tracker handlers. It is the test the other differential tests are models of:
 // it reads the real golden directory, the real fixture and the real registry.
@@ -290,9 +309,9 @@ func TestDifferentialRefusesAnUnlistedVerb(t *testing.T) {
 		rows:     []differentialRow{{stem: "show-json", argv: []string{"show", "--json", "fx-1"}}},
 		handlers: map[string]Handler{},
 		known:    map[string]bool{},
-		run: func([]string) ([]byte, int, error) {
+		run: func([]string) ([]byte, []byte, int, error) {
 			t.Fatal("an unhandled verb was run")
-			return nil, 0, nil
+			return nil, nil, 0, nil
 		},
 	}
 	_, err := runDifferential(c)
@@ -380,8 +399,8 @@ func TestDifferentialRefusesAListedVerbWithAHandler(t *testing.T) {
 		rows:     []differentialRow{{stem: "show-json", argv: []string{"show", "--json", "fx-1"}}},
 		handlers: map[string]Handler{"show": func(Env, Decision) int { return 0 }},
 		known:    map[string]bool{"show": true},
-		run: func([]string) ([]byte, int, error) {
-			return []byte(`{"id":"fx-1"}`), 0, nil
+		run: func([]string) ([]byte, []byte, int, error) {
+			return []byte(`{"id":"fx-1"}`), nil, 0, nil
 		},
 	}
 	_, err := runDifferential(c)
@@ -445,8 +464,8 @@ func TestDifferentialNamesADifferingExit(t *testing.T) {
 		rows:     []differentialRow{{stem: "show-json", argv: []string{"show", "--json", "fx-1"}}},
 		handlers: map[string]Handler{"show": func(Env, Decision) int { return 0 }},
 		known:    map[string]bool{},
-		run: func([]string) ([]byte, int, error) {
-			return []byte(`{"id":"fx-1"}`), 0, nil
+		run: func([]string) ([]byte, []byte, int, error) {
+			return []byte(`{"id":"fx-1"}`), nil, 0, nil
 		},
 	}
 	_, err := runDifferential(c)
@@ -455,6 +474,87 @@ func TestDifferentialNamesADifferingExit(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "show-json") || !strings.Contains(err.Error(), "exit code") {
 		t.Errorf("error = %q, want it to name the row and its exit code", err)
+	}
+}
+
+// TestDifferentialMismatchPrintsTheShimStderr: a row whose answer differs fails
+// with the shim's stderr, and a run that returned an error fails with that too,
+// so a cause the answer does not show is in the log (gt-wt5pg).
+func TestDifferentialMismatchPrintsTheShimStderr(t *testing.T) {
+	t.Parallel()
+	const (
+		goldenLine = "✓ Comment added to fx-1 — fixture bead one\n"
+		shimStderr = "bdshim: tracker answered 403 for comment on fx-1"
+		shimError  = "comment: the tracker refused the request"
+	)
+	tests := []struct {
+		name  string
+		run   func([]string) ([]byte, []byte, int, error)
+		wants []string
+	}{
+		{
+			name: "the exit code differs",
+			run: func([]string) ([]byte, []byte, int, error) {
+				return []byte(goldenLine), []byte(shimStderr + "\n"), 1, nil
+			},
+			wants: []string{shimStderr},
+		},
+		{
+			name: "the run returned an error",
+			run: func([]string) ([]byte, []byte, int, error) {
+				return nil, []byte(shimStderr + "\n"), 0, errors.New(shimError)
+			},
+			wants: []string{shimStderr, shimError},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			writeGolden(t, dir, "comment", goldenLine, 0)
+			c := differentialCase{
+				dir:      dir,
+				rows:     []differentialRow{{stem: "comment", argv: []string{"comment", "fx-1", "fixture note"}}},
+				handlers: map[string]Handler{"comment": func(Env, Decision) int { return 1 }},
+				known:    map[string]bool{},
+				run:      tc.run,
+			}
+			_, err := runDifferential(c)
+			if err == nil {
+				t.Fatal("runDifferential passed a row whose shim answer differs")
+			}
+			for _, want := range tc.wants {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %q, want it to hold %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// TestDifferentialMatchPrintsNoStderrNoise: a shim that writes to stderr but
+// answers as bd did passes with no failure text; the stderr belongs only to a
+// differing row's failure (gt-wt5pg).
+func TestDifferentialMatchPrintsNoStderrNoise(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeGolden(t, dir, "show-json", `{"id":"fx-1"}`+"\n", 0)
+	c := differentialCase{
+		dir:      dir,
+		rows:     []differentialRow{{stem: "show-json", argv: []string{"show", "--json", "fx-1"}}},
+		handlers: map[string]Handler{"show": func(Env, Decision) int { return 0 }},
+		known:    map[string]bool{},
+		keep:     map[string]bool{"fx-1": true},
+		run: func([]string) ([]byte, []byte, int, error) {
+			return []byte(`{"id":"fx-1"}` + "\n"), []byte("warning: the shim noted something harmless\n"), 0, nil
+		},
+	}
+	report, err := runDifferential(c)
+	if err != nil {
+		t.Fatalf("a matching row that wrote to stderr failed: %v", err)
+	}
+	if report.compared != 1 {
+		t.Fatalf("report compared %d rows, want 1", report.compared)
 	}
 }
 
