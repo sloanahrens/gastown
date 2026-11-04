@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -508,17 +509,62 @@ func TestHubListEventRowsCarryEveryFieldOfTheirStateRows(t *testing.T) {
 	}
 }
 
-// serveAPIState asks the hub's handler for /api/state and decodes the answer.
-func serveAPIState(t *testing.T, h *Hub, ctx context.Context) State {
+// testGuard bounds every wait in the tests below. The hub's fakes drive what
+// happens; a signal that does not arrive inside the guard fails the test with
+// what did not happen, so a missed event is never a hang.
+const testGuard = 10 * time.Second
+
+// wantSignal receives one value from c, or fails the test with what when none
+// arrives inside testGuard.
+func wantSignal[T any](t *testing.T, c <-chan T, what string) T {
 	t.Helper()
+	//testpolicy:allow no-sleep — failure-only watchdog: a passing run never reaches it
+	timer := time.NewTimer(testGuard)
+	defer timer.Stop()
+	select {
+	case v := <-c:
+		return v
+	case <-timer.C:
+		t.Fatalf("%s", what)
+		var zero T
+		return zero
+	}
+}
+
+// fetchAPIState asks the hub's handler for /api/state and decodes the answer. It
+// calls no testing method, so a test may run it in a goroutine and bound the wait.
+func fetchAPIState(h *Hub, ctx context.Context) (State, error) {
 	req := httptest.NewRequest("GET", "/api/state", nil).WithContext(ctx)
 	req.Host = "127.0.0.1:8787"
 	rec := httptest.NewRecorder()
 	h.Handler().ServeHTTP(rec, req)
-	require.Equal(t, http.StatusOK, rec.Code)
+	if rec.Code != http.StatusOK {
+		return State{}, fmt.Errorf("/api/state answered %d", rec.Code)
+	}
 	var st State
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &st))
-	return st
+	if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil {
+		return State{}, fmt.Errorf("/api/state answer: %w", err)
+	}
+	return st, nil
+}
+
+// askAPIState asks /api/state in a goroutine and waits for the answer under
+// testGuard, so a request the hub never answers fails the test with a message
+// instead of hanging it.
+func askAPIState(t *testing.T, h *Hub, ctx context.Context, what string) State {
+	t.Helper()
+	type answer struct {
+		st  State
+		err error
+	}
+	answers := make(chan answer, 1)
+	go func() {
+		st, err := fetchAPIState(h, ctx)
+		answers <- answer{st, err}
+	}()
+	a := wantSignal(t, answers, what)
+	require.NoError(t, a.err)
+	return a.st
 }
 
 // fakeBound is the hub's bound timer as a test drives it. It records each bound
@@ -550,14 +596,26 @@ func TestWorkerRunsAgainForAPageThatConnectsDuringItsRun(t *testing.T) {
 	t.Parallel()
 
 	t0 := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
+	var clockMu sync.Mutex
 	clock := t0
-	h := NewHub(Config{Now: func() time.Time { return clock }})
+	h := NewHub(Config{Now: func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return clock
+	}})
+	setClock := func(at time.Time) {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		clock = at
+	}
 	wake := h.wakeChan()
 	first, _ := h.Subscribe()
 	defer h.Unsubscribe(first)
 
 	started := make(chan struct{}, 2)
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseRun := func() { releaseOnce.Do(func() { close(release) }) }
 	runs := 0 // read and written by the worker only
 	fn := func() {
 		runs++
@@ -570,28 +628,30 @@ func TestWorkerRunsAgainForAPageThatConnectsDuringItsRun(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		h.workFrom(ctx, make(chan time.Time), wake, time.Minute, fn)
+		h.workFrom(ctx, nil, wake, time.Minute, fn)
 	}()
-	defer func() {
+	t.Cleanup(func() {
 		stop()
-		<-done
-	}()
+		releaseRun()
+		wantSignal(t, done, "the worker did not stop")
+	})
 
-	<-started
+	wantSignal(t, started, "the worker's first run did not start")
 	second, _ := h.Subscribe()
 	defer h.Unsubscribe(second)
-	clock = t0.Add(2 * time.Minute)
-	close(release)
+	setClock(t0.Add(2 * time.Minute))
+	releaseRun()
 
-	<-started
+	wantSignal(t, started, "the worker's second run did not start")
 	assert.Equal(t, 2, runs, "the connect during the first run is served by a second run")
 }
 
 // With no page open, a request wakes the workers, and the health worker's read is
 // what answers it. The worker is started as Run starts it, parked on a wake taken
 // before the request, with a tick that never fires, so the wake is what drives the
-// read. The bound is the fake that never fires, so a missed wake shows as a hang
-// rather than a timeout answer.
+// read. The bound is the fake that never fires, so the answer can only come from
+// the read, and the request is asked in a goroutine so a wake that never arrives
+// fails the test with a message.
 func TestAPIStateWithNoViewerWakesPollersAndAnswersLive(t *testing.T) {
 	t.Parallel()
 
@@ -613,16 +673,16 @@ func TestAPIStateWithNoViewerWakesPollersAndAnswersLive(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		h.workFrom(ctx, make(chan time.Time), wake, time.Hour, h.pollHealth)
+		h.workFrom(ctx, nil, wake, time.Hour, h.pollHealth)
 	}()
-	defer func() {
+	t.Cleanup(func() {
 		stop()
-		<-done
-	}()
+		wantSignal(t, done, "the health worker did not stop")
+	})
 
-	st := serveAPIState(t, h, context.Background())
+	st := askAPIState(t, h, context.Background(), "the /api/state request was not answered by the health read it woke")
 
-	<-polled
+	wantSignal(t, polled, "the health poll the request woke did not run")
 	assert.Equal(t, now, st.Health.ReadAt, "the answer carries the health read the request woke")
 	assert.Equal(t, "green", st.Health.Verdict)
 	assert.Equal(t, []time.Duration{apiStateBound}, bound.asked)
@@ -640,7 +700,7 @@ func TestAPIStateReleasesItsSubscription(t *testing.T) {
 	})
 	boundTimer(h, true)
 
-	st := serveAPIState(t, h, context.Background())
+	st := askAPIState(t, h, context.Background(), "the /api/state request did not answer")
 
 	assert.Equal(t, 1, st.Viewers, "the answer is taken while the request is its page")
 	assert.Equal(t, 0, h.viewers(), "the request's subscription is gone once it has answered")
@@ -659,7 +719,7 @@ func TestAPIStateReleasesItsSubscriptionWhenTheClientLeaves(t *testing.T) {
 	ctx, leave := context.WithCancel(context.Background())
 	leave()
 
-	st := serveAPIState(t, h, ctx)
+	st := askAPIState(t, h, ctx, "the /api/state request did not answer a client that had left")
 
 	assert.True(t, st.Health.ReadAt.IsZero(), "no read landed before the client left")
 	assert.Equal(t, 1, bound.stopped, "a client that leaves mid-wait stops the bound timer")
@@ -667,36 +727,46 @@ func TestAPIStateReleasesItsSubscriptionWhenTheClientLeaves(t *testing.T) {
 }
 
 // Each way a wait ends stops the bound timer: a read, a client that disconnects,
-// and a page the hub drops, which ends the wait at once.
+// and a page the hub drops, which the request replaces before it answers.
 func TestAPIStateStopsItsBoundTimer(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
 	cases := []struct {
 		name  string
-		setup func(h *Hub, bound *fakeBound) context.Context
+		setup func(h *Hub, bound *fakeBound, ctx context.Context) context.Context
 	}{
-		{"a read", func(h *Hub, _ *fakeBound) context.Context {
+		{"a read", func(h *Hub, _ *fakeBound, ctx context.Context) context.Context {
 			h.pollHealth()
-			return context.Background()
+			return ctx
 		}},
-		{"a client that disconnects", func(h *Hub, _ *fakeBound) context.Context {
+		{"a client that disconnects", func(_ *Hub, _ *fakeBound, _ context.Context) context.Context {
 			ctx, leave := context.WithCancel(context.Background())
 			leave()
 			return ctx
 		}},
-		{"a page the hub drops", func(h *Hub, bound *fakeBound) context.Context {
-			// The fake drops the page inside the wait, after the subscription is taken.
+		{"a page the hub drops", func(h *Hub, bound *fakeBound, ctx context.Context) context.Context {
+			// The fake drops the request's page inside the wait, after its
+			// subscription is taken. The request replaces the page, and the
+			// read it then waits for lands on the replacement.
 			h.after = func(d time.Duration) (<-chan time.Time, func()) {
 				bound.asked = append(bound.asked, d)
+				wake := h.wakeChan() // closed when the request replaces its page
 				h.mu.Lock()
 				for s := range h.subs {
 					h.dropLocked(s)
 				}
 				h.mu.Unlock()
-				return make(chan time.Time), func() { bound.stopped++ }
+				go func() {
+					select {
+					case <-wake:
+						h.pollHealth()
+					case <-ctx.Done():
+					}
+				}()
+				return nil, func() { bound.stopped++ }
 			}
-			return context.Background()
+			return ctx
 		}},
 	}
 	for _, c := range cases {
@@ -706,14 +776,61 @@ func TestAPIStateStopsItsBoundTimer(t *testing.T) {
 				Now:    func() time.Time { return now },
 			})
 			bound := boundTimer(h, false)
-			ctx := c.setup(h, bound)
+			ctx, stop := context.WithCancel(context.Background())
+			t.Cleanup(stop)
+			ctx = c.setup(h, bound, ctx)
 
-			serveAPIState(t, h, ctx)
+			askAPIState(t, h, ctx, "the /api/state request did not answer")
 
 			assert.Equal(t, 1, bound.stopped, "the bound timer is stopped once the wait ends")
 			assert.Equal(t, 0, h.viewers(), "the request released its own page")
 		})
 	}
+}
+
+// A page the hub drops while the request waits is replaced once: the request is a
+// viewer again and keeps waiting for the read, and answers with the read taken
+// after the replacement.
+func TestAPIStateResubscribesAfterTheHubDropsItsPage(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
+	h := NewHub(Config{
+		Health: func() Health { return Health{Line: "after the drop", Verdict: "green", ReadAt: now} },
+		Now:    func() time.Time { return now },
+	})
+	ctx, stop := context.WithCancel(context.Background())
+	t.Cleanup(stop)
+	bound := &fakeBound{}
+	replaced := make(chan struct{})
+	h.after = func(d time.Duration) (<-chan time.Time, func()) {
+		bound.asked = append(bound.asked, d)
+		wake := h.wakeChan() // closed when the request replaces its page
+		h.mu.Lock()
+		for s := range h.subs {
+			h.dropLocked(s)
+		}
+		h.mu.Unlock()
+		go func() {
+			select {
+			case <-wake:
+				close(replaced)
+				h.pollHealth() // the read that a page again allows to happen
+			case <-ctx.Done():
+			}
+		}()
+		return nil, func() { bound.stopped++ }
+	}
+
+	st := askAPIState(t, h, ctx, "the /api/state request was not answered after replacing its dropped page")
+
+	wantSignal(t, replaced, "the request did not replace the page the hub dropped")
+
+	assert.Equal(t, "after the drop", st.Health.Line, "the answer carries the read taken after the replacement")
+	assert.Equal(t, now, st.Health.ReadAt)
+	assert.Equal(t, 1, st.Viewers, "the request is a viewer again when it answers")
+	assert.Equal(t, 1, bound.stopped, "the bound timer is stopped once the request answers")
+	assert.Equal(t, 0, h.viewers(), "the request released its replacement page")
 }
 
 func TestAPIStateTimesOutAndAnswers(t *testing.T) {
@@ -729,7 +846,7 @@ func TestAPIStateTimesOutAndAnswers(t *testing.T) {
 	clock = t0.Add(time.Hour)
 	bound := boundTimer(h, true)
 
-	st := serveAPIState(t, h, context.Background())
+	st := askAPIState(t, h, context.Background(), "the /api/state request did not answer on its bound")
 
 	assert.Equal(t, []time.Duration{apiStateBound}, bound.asked, "the wait is bounded by the constant")
 	assert.Equal(t, 1, bound.stopped, "the bound timer is stopped once the request answers")
@@ -750,7 +867,7 @@ func TestAPIStateWithAnOpenPageAnswersAtOnce(t *testing.T) {
 	defer h.Unsubscribe(page)
 	bound := boundTimer(h, false)
 
-	st := serveAPIState(t, h, context.Background())
+	st := askAPIState(t, h, context.Background(), "the /api/state request did not answer at once")
 
 	assert.Empty(t, bound.asked, "a page is open and the state is read, so the request does not wait")
 	assert.Equal(t, 1, st.Viewers)
@@ -763,7 +880,7 @@ func TestAPIStateWithoutAHealthReaderAnswersAtOnce(t *testing.T) {
 	h := NewHub(Config{Now: func() time.Time { return time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC) }})
 	bound := boundTimer(h, false)
 
-	st := serveAPIState(t, h, context.Background())
+	st := askAPIState(t, h, context.Background(), "the /api/state request did not answer without a health reader")
 
 	assert.Empty(t, bound.asked, "no health reader means no read to wait for")
 	assert.Equal(t, 1, st.Viewers, "the request counts as the page it was")

@@ -398,9 +398,14 @@ func (h *Hub) State() State {
 // workers, and the request waits, for at most apiStateBound, for a health read
 // from this request onward. The subscription and the bound timer are released
 // before it returns, whichever way the wait ends, including a client that
-// disconnects. A page the hub drops while the request waits ends the wait at once
-// with the current state, by design: a dropped subscriber will not receive a read.
-// A hub with no health reader has no read to wait for, so it answers at once.
+// disconnects.
+//
+// A page the hub drops while the request waits (its buffer filled, so it would
+// never receive the read) does not end the wait: the request takes one more
+// subscription and keeps waiting, so a dropped page does not turn a live request
+// into a blank answer. If that page is dropped too, the request waits out the
+// bound with no page. A hub with no health reader has no read to wait for, so it
+// answers at once.
 func (h *Hub) answerState(ctx context.Context) State {
 	h.mu.Lock()
 	watched := len(h.subs) > 0 && !h.state.Health.ReadAt.IsZero()
@@ -410,22 +415,32 @@ func (h *Hub) answerState(ctx context.Context) State {
 	}
 	start := h.cfg.Now()
 	sub, _ := h.Subscribe()
-	defer h.Unsubscribe(sub)
+	defer func() { h.Unsubscribe(sub) }()
 	if h.cfg.Health == nil {
 		return h.State()
 	}
 	timeout, stop := h.after(apiStateBound)
 	defer stop()
+	frames := sub.C
+	replaced := false
 	for !h.healthReadSince(start) {
 		select {
 		case <-ctx.Done():
 			return h.State()
 		case <-timeout:
 			return h.State()
-		case _, ok := <-sub.C:
-			if !ok { // the hub dropped this page
-				return h.State()
+		case _, ok := <-frames:
+			if ok {
+				continue
 			}
+			if replaced {
+				// The replacement was dropped too: wait out the bound alone.
+				frames = nil
+				continue
+			}
+			replaced = true
+			sub, _ = h.Subscribe()
+			frames = sub.C
 		}
 	}
 	return h.State()
