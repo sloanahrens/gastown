@@ -15,20 +15,72 @@ func targetOf(files ...string) *TargetTree {
 	return &TargetTree{Branch: "main", Files: set}
 }
 
+// spliceAt replaces the first anchor in s with repl. An anchor s does not hold
+// is an error: a helper that spliced nothing would hand the check a spec
+// without the section the test names, and the test would pass for the wrong
+// reason.
+func spliceAt(s, anchor, repl string) (string, error) {
+	if !strings.Contains(s, anchor) {
+		return "", fmt.Errorf("anchor %q is absent from the fixture description", anchor)
+	}
+	return strings.Replace(s, anchor, repl, 1), nil
+}
+
 // specNaming is goodSpec with body as its Constraints and goal as its Goal.
-func specNaming(goal, body string) Spec {
+func specNaming(t *testing.T, goal, body string) Spec {
+	t.Helper()
 	s := goodSpec()
-	s.Description = strings.Replace(goodDescription, "A thing exists.", goal, 1)
-	s.Description = strings.Replace(s.Description, "## Constraints\nGo only.", "## Constraints\n"+body, 1)
+	desc, err := spliceAt(goodDescription, "A thing exists.", goal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desc, err = spliceAt(desc, "## Constraints\nGo only.", "## Constraints\n"+body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Description = desc
 	return s
 }
 
 // specWithFiles is specNaming with a Files section carrying files, placed
 // before "## Out of scope".
-func specWithFiles(goal, body, files string) Spec {
-	s := specNaming(goal, body)
-	s.Description = strings.Replace(s.Description, "## Out of scope", "## Files\n"+files+"\n\n## Out of scope", 1)
+func specWithFiles(t *testing.T, goal, body, files string) Spec {
+	t.Helper()
+	s := specNaming(t, goal, body)
+	desc, err := spliceAt(s.Description, "## Out of scope", "## Files\n"+files+"\n\n## Out of scope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Description = desc
 	return s
+}
+
+// A fixture splice refuses an anchor the description does not hold, and
+// replaces the first anchor it does hold, once (gt-yp3a4).
+func TestSpliceAtRefusesAnAbsentAnchor(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		desc    string
+		anchor  string
+		want    string
+		wantErr bool
+	}{
+		{name: "anchor present", desc: "a ## Files b ## Files", anchor: "## Files", want: "a X b ## Files"},
+		{name: "anchor absent", desc: "a b", anchor: "## Files", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := spliceAt(tc.desc, tc.anchor, "X")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("spliceAt(%q, %q) error = %v, want error %v", tc.desc, tc.anchor, err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("spliceAt(%q, %q) = %q, want %q", tc.desc, tc.anchor, got, tc.want)
+			}
+		})
+	}
 }
 
 // The check reads the files it checks from the Constraints section, and passes
@@ -158,7 +210,7 @@ func TestLintChecksTheConstraintsPathsAgainstTheTargetBranch(t *testing.T) {
 			if tc.goal != "" {
 				goal = tc.goal
 			}
-			s := specNaming(goal, tc.body)
+			s := specNaming(t, goal, tc.body)
 			s.Target = tc.target
 			v := Lint(s, defaultTemplate())
 			if tc.missing == "" {
@@ -189,7 +241,7 @@ func TestLintChecksTheConstraintsPathsAgainstTheTargetBranch(t *testing.T) {
 // from.
 func TestLintNamesTheTargetBranchInTheRefusal(t *testing.T) {
 	t.Parallel()
-	s := specNaming("A thing exists.", "Change internal/cmd/bird.go.")
+	s := specNaming(t, "A thing exists.", "Change internal/cmd/bird.go.")
 	s.Target = targetOf()
 	if got := Lint(s, defaultTemplate()).Reason; !strings.Contains(got, "absent from main") {
 		t.Errorf("Reason = %q, want the branch named", got)
@@ -204,7 +256,7 @@ func TestLintNamesTheTargetBranchInTheRefusal(t *testing.T) {
 // reads, written with the refused path, and where the cue must sit (gt-hgt9j.1).
 func TestTargetRefusalHintNamesBothFixes(t *testing.T) {
 	t.Parallel()
-	s := specNaming("A thing exists.", "Change internal/cmd/bird.go.")
+	s := specNaming(t, "A thing exists.", "Change internal/cmd/bird.go.")
 	s.Target = targetOf("internal/cmd/spec.go")
 	v := Lint(s, defaultTemplate())
 	if v.Route != RouteRefuse || v.Field != "## Constraints" {
@@ -226,7 +278,7 @@ func TestTargetRefusalHintNamesBothFixes(t *testing.T) {
 // tests read, never a replacement for it (gt-hgt9j.1).
 func TestTargetRefusalHintKeepsFirstSentence(t *testing.T) {
 	t.Parallel()
-	s := specNaming("A thing exists.", "Change internal/cmd/bird.go.")
+	s := specNaming(t, "A thing exists.", "Change internal/cmd/bird.go.")
 	s.Target = targetOf("internal/cmd/spec.go")
 	reason := Lint(s, defaultTemplate()).Reason
 	const first = "names internal/cmd/bird.go, absent from main"
@@ -262,7 +314,7 @@ func TestTargetRefusalHintStaysOneLine(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := specNaming("A thing exists.", tc.body)
+			s := specNaming(t, "A thing exists.", tc.body)
 			s.Target = targetOf("internal/cmd/spec.go")
 			line := Lint(s, defaultTemplate()).Line(s.ID)
 			if strings.Contains(line, "\n") {
@@ -285,7 +337,7 @@ func TestTargetRefusalHintIsTheRewriteThatPasses(t *testing.T) {
 	t.Parallel()
 	const path = "internal/cmd/bird.go"
 	target := targetOf("internal/cmd/spec.go")
-	s := specNaming("A thing exists.", "Change "+path+".")
+	s := specNaming(t, "A thing exists.", "Change "+path+".")
 	s.Target = target
 	v := Lint(s, defaultTemplate())
 	if v.Route != RouteRefuse {
@@ -299,7 +351,7 @@ func TestTargetRefusalHintIsTheRewriteThatPasses(t *testing.T) {
 			if !strings.Contains(v.Reason, "`"+rewrite+"`") {
 				t.Errorf("Reason = %q, want the rewrite %q printed", v.Reason, rewrite)
 			}
-			fixed := specNaming("A thing exists.", "Do the work: "+rewrite+".")
+			fixed := specNaming(t, "A thing exists.", "Do the work: "+rewrite+".")
 			fixed.Target = target
 			if got := Lint(fixed, defaultTemplate()); !got.Clean() {
 				t.Errorf("a bead carrying only %q was refused: %s", rewrite, got.Line(fixed.ID))
@@ -315,7 +367,7 @@ func TestLintHoldsABeadWhenTheTargetTreeCouldNotBeRead(t *testing.T) {
 	t.Parallel()
 	failed := &TargetTree{Branch: "main", Err: "no git repo under /town/gastown"}
 
-	named := specNaming("A thing exists.", "Change internal/cmd/spec.go.")
+	named := specNaming(t, "A thing exists.", "Change internal/cmd/spec.go.")
 	named.Target = failed
 	v := Lint(named, defaultTemplate())
 	if v.Route != RouteRefuse || v.Field != "## Constraints" {
@@ -325,7 +377,7 @@ func TestLintHoldsABeadWhenTheTargetTreeCouldNotBeRead(t *testing.T) {
 		t.Errorf("Reason = %q, want the path and the read's error named", v.Reason)
 	}
 
-	plain := specNaming("A thing exists.", "Go only.")
+	plain := specNaming(t, "A thing exists.", "Go only.")
 	plain.Target = failed
 	if got := Lint(plain, defaultTemplate()); !got.Clean() {
 		t.Errorf("a bead naming no file was held: %s", got.Line(plain.ID))
@@ -338,7 +390,7 @@ func TestLintHoldsABeadWhenTheTargetTreeCouldNotBeRead(t *testing.T) {
 // the missing inventory does not hold it (gt-7t1im).
 func TestLintRefusesANamedFileWithoutATargetTree(t *testing.T) {
 	t.Parallel()
-	named := specNaming("A thing exists.", "Change internal/cmd/bird.go.")
+	named := specNaming(t, "A thing exists.", "Change internal/cmd/bird.go.")
 	v := Lint(named, defaultTemplate())
 	if v.Route != RouteRefuse || v.Field != "## Constraints" {
 		t.Fatalf("Lint = %s, want a refusal naming ## Constraints: %s", v.Route, v.Line(named.ID))
@@ -347,7 +399,7 @@ func TestLintRefusesANamedFileWithoutATargetTree(t *testing.T) {
 		t.Errorf("Reason = %q, want the path and the missing inventory named", v.Reason)
 	}
 
-	plain := specNaming("A thing exists.", "Go only.")
+	plain := specNaming(t, "A thing exists.", "Go only.")
 	if got := Lint(plain, defaultTemplate()); !got.Clean() {
 		t.Errorf("a bead naming no file was held: %s", got.Line(plain.ID))
 	}
@@ -420,7 +472,7 @@ func TestConstraintFilePaths(t *testing.T) {
 // shape-clean, which is why the dispatcher asks Lint instead (gt-7t1im).
 func TestLintShapeAsksNoPathQuestion(t *testing.T) {
 	t.Parallel()
-	s := specNaming("A thing exists.", "Change internal/cmd/bird.go.")
+	s := specNaming(t, "A thing exists.", "Change internal/cmd/bird.go.")
 	if got := LintShape(s, defaultTemplate()); !got.Clean() {
 		t.Errorf("LintShape = %s, want the shape verdict alone: %s", got.Route, got.Line(s.ID))
 	}
@@ -434,10 +486,39 @@ func TestLintShapeAsksNoPathQuestion(t *testing.T) {
 // when the Files section does not list it (gt-hgt9j.10).
 func TestPathCheckUsesFilesWhenPresent(t *testing.T) {
 	t.Parallel()
-	s := specWithFiles("A thing exists.", "Change internal/cmd/bird.go.", "create: internal/cli/foo.go")
+	s := specWithFiles(t, "A thing exists.", "Change internal/cmd/bird.go.", "create: internal/cli/foo.go")
 	s.Target = targetOf("internal/cmd/spec.go")
 	if v := Lint(s, defaultTemplate()); !v.Clean() {
 		t.Fatalf("a bead with a Files section was refused for a Constraints path it does not list: %s", v.Line(s.ID))
+	}
+}
+
+// A modify path the Files section lists is checked from that section, not from
+// the Constraints body that also names it: the Constraints check would refuse
+// bird.go as absent from main, and an open blocker that creates it is what
+// makes the Files check pass it (gt-yp3a4).
+func TestFilesSuppressesConstraintsCheckForModifyPath(t *testing.T) {
+	t.Parallel()
+	s := specWithFiles(t, "A thing exists.", "Change internal/cmd/bird.go.", "modify: internal/cmd/bird.go")
+	s.Target = targetOf("internal/cmd/spec.go")
+	s.BlockerCreates = []string{"internal/cmd/bird.go"}
+	if v := Lint(s, defaultTemplate()); !v.Clean() {
+		t.Fatalf("a modify path the Files section lists was refused by the Constraints check: %s", v.Line(s.ID))
+	}
+}
+
+// Without the blocker, the same modify path is refused once, on the Files
+// entry: the refusal names ## Files, not ## Constraints (gt-yp3a4).
+func TestFilesRefusesModifyPathNamedInConstraints(t *testing.T) {
+	t.Parallel()
+	s := specWithFiles(t, "A thing exists.", "Change internal/cmd/bird.go.", "modify: internal/cmd/bird.go")
+	s.Target = targetOf("internal/cmd/spec.go")
+	v := Lint(s, defaultTemplate())
+	if v.Route != RouteRefuse || v.Field != "## Files" {
+		t.Fatalf("Lint = %s (%s), want a refusal naming ## Files: %s", v.Route, v.Field, v.Line(s.ID))
+	}
+	if !strings.Contains(v.Reason, "modify: internal/cmd/bird.go") {
+		t.Errorf("Reason = %q, want the modify entry named", v.Reason)
 	}
 }
 
@@ -445,7 +526,7 @@ func TestPathCheckUsesFilesWhenPresent(t *testing.T) {
 // names the section, the verb and the path (gt-hgt9j.10).
 func TestPathCheckFilesReadMustExist(t *testing.T) {
 	t.Parallel()
-	s := specWithFiles("A thing exists.", "Go only.", "read: internal/cmd/bird.go")
+	s := specWithFiles(t, "A thing exists.", "Go only.", "read: internal/cmd/bird.go")
 	s.Target = targetOf("internal/cmd/spec.go")
 	v := Lint(s, defaultTemplate())
 	if v.Route != RouteRefuse || v.Field != "## Files" {
@@ -456,7 +537,7 @@ func TestPathCheckFilesReadMustExist(t *testing.T) {
 			t.Errorf("Reason = %q, want %q", v.Reason, want)
 		}
 	}
-	held := specWithFiles("A thing exists.", "Go only.", "read: internal/cmd/spec.go")
+	held := specWithFiles(t, "A thing exists.", "Go only.", "read: internal/cmd/spec.go")
 	held.Target = targetOf("internal/cmd/spec.go")
 	if got := Lint(held, defaultTemplate()); !got.Clean() {
 		t.Errorf("a read path the branch holds was refused: %s", got.Line(held.ID))
@@ -467,7 +548,7 @@ func TestPathCheckFilesReadMustExist(t *testing.T) {
 // refusal names the section, the verb and the path (gt-hgt9j.10).
 func TestPathCheckFilesModifyMustExist(t *testing.T) {
 	t.Parallel()
-	s := specWithFiles("A thing exists.", "Go only.", "modify: internal/cmd/bird.go")
+	s := specWithFiles(t, "A thing exists.", "Go only.", "modify: internal/cmd/bird.go")
 	s.Target = targetOf("internal/cmd/spec.go")
 	v := Lint(s, defaultTemplate())
 	if v.Route != RouteRefuse || v.Field != "## Files" {
@@ -478,7 +559,7 @@ func TestPathCheckFilesModifyMustExist(t *testing.T) {
 			t.Errorf("Reason = %q, want %q", v.Reason, want)
 		}
 	}
-	held := specWithFiles("A thing exists.", "Go only.", "modify: internal/cmd/spec.go")
+	held := specWithFiles(t, "A thing exists.", "Go only.", "modify: internal/cmd/spec.go")
 	held.Target = targetOf("internal/cmd/spec.go")
 	if got := Lint(held, defaultTemplate()); !got.Clean() {
 		t.Errorf("a modify path the branch holds was refused: %s", got.Line(held.ID))
@@ -489,7 +570,7 @@ func TestPathCheckFilesModifyMustExist(t *testing.T) {
 // (gt-hgt9j.10).
 func TestPathCheckFilesCreateNeedsNothing(t *testing.T) {
 	t.Parallel()
-	s := specWithFiles("A thing exists.", "Go only.", "create: internal/cli/foo.go")
+	s := specWithFiles(t, "A thing exists.", "Go only.", "create: internal/cli/foo.go")
 	s.Target = targetOf("internal/cmd/spec.go")
 	if v := Lint(s, defaultTemplate()); !v.Clean() {
 		t.Fatalf("a create path absent from the branch was refused: %s", v.Line(s.ID))
@@ -513,7 +594,7 @@ func TestPathCheckWithoutFilesUnchanged(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := specNaming("A thing exists.", tc.body)
+			s := specNaming(t, "A thing exists.", tc.body)
 			s.Target = targetOf("internal/cmd/spec.go")
 			v := Lint(s, defaultTemplate())
 			if tc.missing == "" {
@@ -536,7 +617,7 @@ func TestPathCheckWithoutFilesUnchanged(t *testing.T) {
 // names the line and its text (gt-hgt9j.10).
 func TestPathCheckFilesMalformedRefused(t *testing.T) {
 	t.Parallel()
-	s := specWithFiles("A thing exists.", "Go only.", "create: internal/cli/foo.go\nnot a verb line")
+	s := specWithFiles(t, "A thing exists.", "Go only.", "create: internal/cli/foo.go\nnot a verb line")
 	s.Target = targetOf("internal/cmd/spec.go")
 	v := Lint(s, defaultTemplate())
 	if v.Route != RouteRefuse || v.Field != "## Files" {
@@ -555,7 +636,7 @@ func TestPathCheckFilesMalformedRefused(t *testing.T) {
 // (gt-hgt9j.10).
 func TestPathCheckFilesNeedAnInventory(t *testing.T) {
 	t.Parallel()
-	named := specWithFiles("A thing exists.", "Go only.", "modify: internal/cmd/spec.go")
+	named := specWithFiles(t, "A thing exists.", "Go only.", "modify: internal/cmd/spec.go")
 	v := Lint(named, defaultTemplate())
 	if v.Route != RouteRefuse || v.Field != "## Files" {
 		t.Fatalf("Lint = %s (%s), want a refusal naming ## Files: %s", v.Route, v.Field, v.Line(named.ID))
@@ -566,7 +647,7 @@ func TestPathCheckFilesNeedAnInventory(t *testing.T) {
 		}
 	}
 
-	failed := specWithFiles("A thing exists.", "Go only.", "read: internal/cmd/spec.go")
+	failed := specWithFiles(t, "A thing exists.", "Go only.", "read: internal/cmd/spec.go")
 	failed.Target = &TargetTree{Branch: "main", Err: "no git repo under /town/gastown"}
 	v = Lint(failed, defaultTemplate())
 	if v.Route != RouteRefuse || v.Field != "## Files" {
@@ -578,7 +659,7 @@ func TestPathCheckFilesNeedAnInventory(t *testing.T) {
 		}
 	}
 
-	created := specWithFiles("A thing exists.", "Go only.", "create: internal/cli/foo.go")
+	created := specWithFiles(t, "A thing exists.", "Go only.", "create: internal/cli/foo.go")
 	if got := Lint(created, defaultTemplate()); !got.Clean() {
 		t.Errorf("a create-only bead was held for a missing inventory: %s", got.Line(created.ID))
 	}
@@ -589,7 +670,7 @@ func TestPathCheckFilesNeedAnInventory(t *testing.T) {
 // the first adds is normal (gt-hgt9j.11).
 func TestBlockerCreatesModifyPasses(t *testing.T) {
 	t.Parallel()
-	s := specWithFiles("A thing exists.", "Go only.", "modify: internal/cli/foo.go")
+	s := specWithFiles(t, "A thing exists.", "Go only.", "modify: internal/cli/foo.go")
 	s.Target = targetOf("internal/cmd/spec.go")
 	s.BlockerCreates = []string{"internal/cli/foo.go"}
 	if v := Lint(s, defaultTemplate()); !v.Clean() {
@@ -601,7 +682,7 @@ func TestBlockerCreatesModifyPasses(t *testing.T) {
 // (gt-hgt9j.11).
 func TestBlockerCreatesReadPasses(t *testing.T) {
 	t.Parallel()
-	s := specWithFiles("A thing exists.", "Go only.", "read: internal/cli/foo.go")
+	s := specWithFiles(t, "A thing exists.", "Go only.", "read: internal/cli/foo.go")
 	s.Target = targetOf("internal/cmd/spec.go")
 	s.BlockerCreates = []string{"internal/cli/foo.go"}
 	if v := Lint(s, defaultTemplate()); !v.Clean() {
@@ -614,7 +695,7 @@ func TestBlockerCreatesReadPasses(t *testing.T) {
 // (gt-hgt9j.11).
 func TestBlockerCreatesRefusalNamesTheGap(t *testing.T) {
 	t.Parallel()
-	s := specWithFiles("A thing exists.", "Go only.", "modify: internal/cli/foo.go")
+	s := specWithFiles(t, "A thing exists.", "Go only.", "modify: internal/cli/foo.go")
 	s.Target = targetOf("internal/cmd/spec.go")
 	s.BlockerCreates = []string{"internal/cli/bar.go"}
 	v := Lint(s, defaultTemplate())
@@ -633,7 +714,7 @@ func TestBlockerCreatesRefusalNamesTheGap(t *testing.T) {
 // holds that path (gt-hgt9j.11).
 func TestBlockerCreatesIgnoredWithoutFiles(t *testing.T) {
 	t.Parallel()
-	s := specNaming("A thing exists.", "Change internal/cmd/bird.go.")
+	s := specNaming(t, "A thing exists.", "Change internal/cmd/bird.go.")
 	s.Target = targetOf("internal/cmd/spec.go")
 	s.BlockerCreates = []string{"internal/cmd/bird.go"}
 	v := Lint(s, defaultTemplate())
@@ -652,7 +733,7 @@ func TestBlockerCreatesIgnoredWithoutFiles(t *testing.T) {
 // (gt-hgt9j.11).
 func TestBlockerCreatesCleansPaths(t *testing.T) {
 	t.Parallel()
-	s := specWithFiles("A thing exists.", "Go only.", "modify: b.go")
+	s := specWithFiles(t, "A thing exists.", "Go only.", "modify: b.go")
 	s.Target = targetOf("internal/cmd/spec.go")
 	s.BlockerCreates = []string{"./a/../b.go"}
 	if v := Lint(s, defaultTemplate()); !v.Clean() {
