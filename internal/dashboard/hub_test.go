@@ -550,9 +550,14 @@ func fetchAPIState(h *Hub, ctx context.Context) (State, error) {
 
 // askAPIState asks /api/state in a goroutine and waits for the answer under
 // testGuard, so a request the hub never answers fails the test with a message
-// instead of hanging it.
+// instead of hanging it. The request runs under a context this helper cancels on
+// every exit, a failed wait included (Fatalf runs the deferred cancel), so a
+// request the hub never answered ends as a client disconnect and releases its
+// subscription instead of outliving the test.
 func askAPIState(t *testing.T, h *Hub, ctx context.Context, what string) State {
 	t.Helper()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	type answer struct {
 		st  State
 		err error
