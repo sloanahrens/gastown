@@ -83,7 +83,16 @@ type Hub struct {
 	// is out of date, so State() does not rebuild them on every call.
 	costRows []CostProvider
 	costKey  costRowsKey
+
+	// after starts the bound on a /api/state wait and returns its channel and a
+	// stop. NewHub sets a time.Timer; a test replaces it with a timer it controls.
+	after func(time.Duration) (fire <-chan time.Time, stop func())
 }
+
+// apiStateBound is how long /api/state waits for a health read when no page is
+// watching. At the default HealthEvery (5s), the next health poll falls inside it
+// even when the wake is lost.
+const apiStateBound = 6 * time.Second
 
 // Sub is one open page.
 type Sub struct {
@@ -102,6 +111,10 @@ func NewHub(cfg Config) *Hub {
 		listSent: map[string][]byte{},
 		wake:     make(chan struct{}),
 		alerts:   NewAlerter(cfg.Now),
+		after: func(d time.Duration) (<-chan time.Time, func()) {
+			t := time.NewTimer(d)
+			return t.C, func() { t.Stop() }
+		},
 	}
 }
 
@@ -123,12 +136,13 @@ func (h *Hub) Run(ctx context.Context) {
 		if fn == nil {
 			return
 		}
+		wake := h.wakeChan()
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			t := time.NewTicker(every)
 			defer t.Stop()
-			h.work(ctx, t.C, every, fn)
+			h.workFrom(ctx, t.C, wake, every, fn)
 		}()
 	}
 	if h.cfg.Feed != nil {
@@ -236,6 +250,16 @@ func (h *Hub) Run(ctx context.Context) {
 // of a whole interval and was thrown away, halving every reader's real rate
 // (gt-faml5, measured live on the 10s machine worker).
 func (h *Hub) work(ctx context.Context, ticks <-chan time.Time, every time.Duration, fn func()) {
+	h.workFrom(ctx, ticks, h.wakeChan(), every, fn)
+}
+
+// workFrom is work, parked first on wake. Run takes wake before it starts the
+// worker's goroutine: a connect that follows closes it, so the wake is kept even
+// when the goroutine has not reached its select yet. A wake taken inside the
+// goroutine can be the channel a connect swapped out, and is lost. The next wake
+// is taken as the current one is consumed, before the run, so a connect during a
+// run closes the channel the next wait parks on.
+func (h *Hub) workFrom(ctx context.Context, ticks <-chan time.Time, wake <-chan struct{}, every time.Duration, fn func()) {
 	var last time.Time
 	for {
 		select {
@@ -250,7 +274,8 @@ func (h *Hub) work(ctx context.Context, ticks <-chan time.Time, every time.Durat
 			}
 			last = h.cfg.Now()
 			fn()
-		case <-h.wakeChan():
+		case <-wake:
+			wake = h.wakeChan()
 			if ctx.Err() != nil {
 				return
 			}
@@ -295,7 +320,8 @@ func (h *Hub) wakeAll() {
 // wakeChan is the wake channel a worker parks on. Reading it under the same
 // lock as the swap is what keeps a worker from parking on a channel that was
 // already closed: the closed one is released at once, and a worker that reaches
-// this after the swap has just finished an iteration, so it is already current.
+// this after the swap has just finished an iteration, so it is already current. A
+// worker that is starting takes its wake in Run, before its goroutine (see workFrom).
 func (h *Hub) wakeChan() <-chan struct{} {
 	h.wakeMu.Lock()
 	defer h.wakeMu.Unlock()
@@ -364,6 +390,69 @@ func (h *Hub) State() State {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.stateLocked()
+}
+
+// answerState is the state /api/state answers with. The pollers run only while
+// a page watches, so a request that finds no page open, or a state never read,
+// subscribes like a page for its own duration: the subscription wakes the
+// workers, and the request waits, for at most apiStateBound, for a health read
+// from this request onward. The subscription and the bound timer are released
+// before it returns, whichever way the wait ends, including a client that
+// disconnects.
+//
+// A page the hub drops while the request waits (its buffer filled, so it would
+// never receive the read) does not end the wait: the request takes one more
+// subscription and keeps waiting, so a dropped page does not turn a live request
+// into a blank answer. If that page is dropped too, the request waits out the
+// bound with no page. A hub with no health reader has no read to wait for, so it
+// answers at once.
+func (h *Hub) answerState(ctx context.Context) State {
+	h.mu.Lock()
+	watched := len(h.subs) > 0 && !h.state.Health.ReadAt.IsZero()
+	h.mu.Unlock()
+	if watched {
+		return h.State()
+	}
+	start := h.cfg.Now()
+	sub, _ := h.Subscribe()
+	defer func() { h.Unsubscribe(sub) }()
+	if h.cfg.Health == nil {
+		return h.State()
+	}
+	timeout, stop := h.after(apiStateBound)
+	defer stop()
+	frames := sub.C
+	replaced := false
+	for !h.healthReadSince(start) {
+		select {
+		case <-ctx.Done():
+			return h.State()
+		case <-timeout:
+			return h.State()
+		case _, ok := <-frames:
+			if ok {
+				continue
+			}
+			if replaced {
+				// The replacement was dropped too: wait out the bound alone.
+				frames = nil
+				continue
+			}
+			replaced = true
+			sub, _ = h.Subscribe()
+			frames = sub.C
+		}
+	}
+	return h.State()
+}
+
+// healthReadSince reports whether the state carries a health read taken at or
+// after start. A zero read time never counts.
+func (h *Hub) healthReadSince(start time.Time) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	at := h.state.Health.ReadAt
+	return !at.IsZero() && !at.Before(start)
 }
 
 func (h *Hub) stateLocked() State {

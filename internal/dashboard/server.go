@@ -29,9 +29,11 @@ func (h *Hub) Handler() http.Handler {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(indexHTML)
 	})
+	// Any loopback GET starts the pollers, not only an open page, so a script that
+	// polls this often costs the same poll work as a page left open.
 	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(h.State())
+		_ = json.NewEncoder(w).Encode(h.answerState(r.Context()))
 	})
 	mux.HandleFunc("/api/bead", h.serveBead)
 	mux.HandleFunc("/api/report", h.serveReport)
