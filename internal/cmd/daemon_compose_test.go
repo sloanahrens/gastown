@@ -16,6 +16,8 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemonimage"
 	"github.com/steveyegge/gastown/internal/templates"
+
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -610,14 +612,44 @@ func TestComposeWriteConfigDirFlagReachesSpec(t *testing.T) {
 	if !ok {
 		t.Fatalf("no compose file written at %s", r.composePath())
 	}
-	for _, want := range []string{
-		fmt.Sprintf("source: %q\n        target: %q\n        read_only: true\n", configDir, configDir),
-		fmt.Sprintf("source: %q\n        target: %q\n        read_only: true\n", configDir, templates.LiveConfigDirPath),
-		`XDG_CONFIG_HOME: "` + templates.LiveOpenShellConfigHome + `"`,
-	} {
-		if !strings.Contains(string(file), want) {
-			t.Errorf("compose file does not carry %q:\n%s", want, file)
+	// Read the file as compose does: the assertion turns on the mounts and the
+	// environment, not on indentation or quoting.
+	var composed struct {
+		Services map[string]struct {
+			Environment map[string]string `yaml:"environment"`
+			Volumes     []struct {
+				Type     string `yaml:"type"`
+				Source   string `yaml:"source"`
+				Target   string `yaml:"target"`
+				ReadOnly bool   `yaml:"read_only"`
+			} `yaml:"volumes"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(file, &composed); err != nil {
+		t.Fatalf("the compose file does not parse as YAML: %v\n%s", err, file)
+	}
+	service, ok := composed.Services["daemon"]
+	if !ok {
+		t.Fatalf("the compose file has no daemon service:\n%s", file)
+	}
+	mounted := map[string]bool{}
+	for _, mount := range service.Volumes {
+		if mount.Type == "bind" && mount.Source == configDir {
+			mounted[mount.Target] = mount.ReadOnly
 		}
+	}
+	for _, target := range []string{configDir, templates.LiveConfigDirPath} {
+		readOnly, ok := mounted[target]
+		if !ok {
+			t.Errorf("no bind mount of %s at %s; volumes = %+v", configDir, target, service.Volumes)
+			continue
+		}
+		if !readOnly {
+			t.Errorf("the bind mount of %s at %s is not read-only", configDir, target)
+		}
+	}
+	if got := service.Environment["XDG_CONFIG_HOME"]; got != templates.LiveOpenShellConfigHome {
+		t.Errorf("XDG_CONFIG_HOME = %q, want %q", got, templates.LiveOpenShellConfigHome)
 	}
 }
 
