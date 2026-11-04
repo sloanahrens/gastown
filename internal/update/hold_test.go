@@ -168,6 +168,56 @@ func TestAcquireWritesNoteAndOwns(t *testing.T) {
 	}
 }
 
+func TestAcquireAgainKeepsOwnershipSoReleaseRemovesTheHold(t *testing.T) {
+	t.Parallel()
+	const note = "gt update 20261103T102200Z-furiosa: draining"
+	files := newFakeFiles()
+	hold := NewHold(testTownRoot, files)
+	if _, err := hold.Acquire(note); err != nil {
+		t.Fatalf("first Acquire: %v", err)
+	}
+
+	rec, err := hold.Acquire(note)
+	if err != nil {
+		t.Fatalf("second Acquire: %v", err)
+	}
+	if !rec.Owned {
+		t.Error("second Acquire Owned = false, want true for a hold this Hold created")
+	}
+	if rec.Note != note {
+		t.Errorf("second Acquire Note = %q, want %q", rec.Note, note)
+	}
+	if err := hold.Release(); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if _, ok := files.entry(hold.Path); ok {
+		t.Errorf("Release left the owned hold %s behind after a re-acquire", hold.Path)
+	}
+}
+
+func TestAcquireAgainReadFailureKeepsOwnership(t *testing.T) {
+	t.Parallel()
+	const note = "gt update 20261103T102200Z-furiosa: draining"
+	files := newFakeFiles()
+	hold := NewHold(testTownRoot, files)
+	if _, err := hold.Acquire(note); err != nil {
+		t.Fatalf("first Acquire: %v", err)
+	}
+	sentinel := errors.New("read denied")
+	files.readErr[hold.Path] = sentinel
+
+	if _, err := hold.Acquire(note); !errors.Is(err, sentinel) {
+		t.Fatalf("second Acquire error = %v, want it to wrap %v", err, sentinel)
+	}
+	delete(files.readErr, hold.Path)
+	if err := hold.Release(); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if _, ok := files.entry(hold.Path); ok {
+		t.Errorf("Release left the owned hold %s behind after a failed re-acquire", hold.Path)
+	}
+}
+
 func TestAcquireRespectsAForeignHold(t *testing.T) {
 	t.Parallel()
 	const foreign = "operator hold: maintenance window"
