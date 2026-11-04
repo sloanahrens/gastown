@@ -247,10 +247,10 @@ func TestDaemonDockerfileHasNoBuildStep(t *testing.T) {
 
 // TestDaemonDockerfileFetchesNothingAndInstallsOnlyThePackages: the image is
 // config, so no instruction downloads anything over the network and the only RUN
-// that is not a git identity command installs exactly ca-certificates, git and
-// tmux. The Dolt client arrives by COPY from the official Dolt image, whose
-// registry layers the daemon verifies by digest, rather than by a download inside
-// a RUN that no checksum would guard.
+// that is not a git identity command installs exactly ca-certificates, git,
+// openssh-client and tmux. The Dolt client arrives by COPY from the official Dolt
+// image, whose registry layers the daemon verifies by digest, rather than by a
+// download inside a RUN that no checksum would guard.
 func TestDaemonDockerfileFetchesNothingAndInstallsOnlyThePackages(t *testing.T) {
 	t.Parallel()
 	var installs []string
@@ -258,7 +258,7 @@ func TestDaemonDockerfileFetchesNothingAndInstallsOnlyThePackages(t *testing.T) 
 		line := in.cmd + " " + strings.Join(in.args, " ")
 		for _, banned := range []string{"curl", "wget", "http://", "https://", "git clone", "tar -", "install -m"} {
 			if strings.Contains(line, banned) {
-				t.Errorf("%s has %q in %q; the image fetches and installs nothing but the three packages", DockerfilePath, banned, line)
+				t.Errorf("%s has %q in %q; the image fetches and installs nothing but the four packages", DockerfilePath, banned, line)
 			}
 		}
 		if in.cmd != "RUN" {
@@ -276,9 +276,62 @@ func TestDaemonDockerfileFetchesNothingAndInstallsOnlyThePackages(t *testing.T) 
 	if problem != "" {
 		t.Fatalf("%s: %s", DockerfilePath, problem)
 	}
-	if want := []string{"ca-certificates", "git", "tmux"}; !reflect.DeepEqual(got, want) {
+	if want := []string{"ca-certificates", "git", "openssh-client", "tmux"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("%s installs %q, want %q", DockerfilePath, got, want)
 	}
+}
+
+// TestDaemonDockerfileInstallsOpenSSHClient: the image carries an SSH client, so
+// a git push over SSH — app-promote's to GitHub with the promote keys — runs
+// from the container instead of failing on a missing ssh. openssh-client is
+// installed on the same line as the three packages the image already had.
+func TestDaemonDockerfileInstallsOpenSSHClient(t *testing.T) {
+	t.Parallel()
+	args := daemonInstallRun(t).args
+	for _, pkg := range []string{"ca-certificates", "git", "openssh-client", "tmux"} {
+		if !slices.Contains(args, pkg) {
+			t.Errorf("%s install line %q does not list %s", DockerfilePath, strings.Join(args, " "), pkg)
+		}
+	}
+}
+
+// TestDaemonDockerfileKeepsNoInstallRecommends: the install keeps the two things
+// that keep the image small: --no-install-recommends, so apt adds no extras, and
+// the package-list cleanup in the same RUN, so no stale index ships. Adding a
+// package must not drop either.
+func TestDaemonDockerfileKeepsNoInstallRecommends(t *testing.T) {
+	t.Parallel()
+	args := daemonInstallRun(t).args
+	line := strings.Join(args, " ")
+	if !slices.Contains(args, "--no-install-recommends") {
+		t.Errorf("%s install line %q drops --no-install-recommends, so apt pulls the recommended extras", DockerfilePath, line)
+	}
+	if !strings.Contains(line, "rm -rf /var/lib/apt/lists/*") {
+		t.Errorf("%s install line %q leaves the apt package lists in the image", DockerfilePath, line)
+	}
+}
+
+// daemonInstallRun returns the image's one package-install RUN, the instruction
+// that carries apt-get install. The file carries exactly one, so a second, or
+// none, fails the test rather than letting a check read an arbitrary RUN.
+func daemonInstallRun(t *testing.T) dockerfileInstruction {
+	t.Helper()
+	var runs []dockerfileInstruction
+	for _, in := range dockerfileInstructions(t, readDockerfile(t)) {
+		if in.cmd != "RUN" {
+			continue
+		}
+		for i := 0; i+1 < len(in.args); i++ {
+			if in.args[i] == "apt-get" && in.args[i+1] == "install" {
+				runs = append(runs, in)
+				break
+			}
+		}
+	}
+	if len(runs) != 1 {
+		t.Fatalf("%s has %d apt-get install RUNs, want the one package install", DockerfilePath, len(runs))
+	}
+	return runs[0]
 }
 
 // TestDaemonDockerfileSetsTheGenericGitIdentity: the image carries the git
