@@ -49,6 +49,7 @@ type composeService struct {
 	DependsOn     map[string]composeDependency `yaml:"depends_on"`
 	Healthcheck   *composeHealthcheck          `yaml:"healthcheck"`
 	Environment   map[string]string            `yaml:"environment"`
+	ExtraHosts    []string                     `yaml:"extra_hosts"`
 	Volumes       []composeVolume              `yaml:"volumes"`
 	Networks      composeServiceNetworks       `yaml:"networks"`
 	Ports         []string                     `yaml:"ports"`
@@ -791,5 +792,95 @@ func TestMinimumStopGrace_CoversShutdownBudget(t *testing.T) {
 	t.Parallel()
 	if templates.MinimumStopGrace < daemon.ShutdownBudget {
 		t.Fatalf("MinimumStopGrace = %v, want at least daemon.ShutdownBudget %v", templates.MinimumStopGrace, daemon.ShutdownBudget)
+	}
+}
+
+// The live container resolves the rigs' git remotes' host aliases through its
+// own /etc/hosts: the daemon service carries them as extra_hosts, sorted so the
+// same flags in any order render the same file, directly after the init line
+// that opens the service. The sweep engine and the forge stack alias nothing
+// (gt-gg9hv.2).
+func TestLiveComposeRendersExtraHosts(t *testing.T) {
+	t.Parallel()
+	spec := liveSpec()
+	spec.ExtraHosts = []string{"git.example:host-gateway", "forgejo:10.0.0.2"}
+
+	out, f := render(t, spec)
+
+	daemon, ok := f.Services["daemon"]
+	if !ok {
+		t.Fatalf("services = %v, want a daemon service", f.Services)
+	}
+	want := []string{"forgejo:10.0.0.2", "git.example:host-gateway"}
+	if !slices.Equal(daemon.ExtraHosts, want) {
+		t.Errorf("daemon extra_hosts = %q, want the entries sorted: %q", daemon.ExtraHosts, want)
+	}
+	if block := "    init: true\n    extra_hosts:\n      - \"forgejo:10.0.0.2\"\n      - \"git.example:host-gateway\"\n    stop_grace_period: \"30s\"\n"; !strings.Contains(out, block) {
+		t.Errorf("rendered file does not carry the extra_hosts block directly after init:\n%s", out)
+	}
+	for name, svc := range f.Services {
+		if name != "daemon" && len(svc.ExtraHosts) != 0 {
+			t.Errorf("service %q carries extra_hosts %q, want the daemon's alone", name, svc.ExtraHosts)
+		}
+	}
+}
+
+// A spec that names no alias writes no extra_hosts key, so every render that
+// existed before the flag is byte-identical.
+func TestLiveComposeWithoutExtraHostsIsUnchanged(t *testing.T) {
+	t.Parallel()
+	out, _ := render(t, liveSpec())
+
+	golden, err := os.ReadFile(filepath.Join("testdata", "daemon-compose.golden.yml"))
+	if err != nil {
+		t.Fatalf("reading golden file: %v", err)
+	}
+	if out != string(golden) {
+		t.Errorf("the live render without extra hosts differs from the golden\ngot:\n%s\nwant:\n%s", out, golden)
+	}
+}
+
+// An extra host entry is "<hostname>:<ipv4 or host-gateway>". Each refusal
+// names the entry, so the flag that carried it is found from the error alone.
+func TestLiveComposeRefusesMalformedExtraHost(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		entry string
+	}{
+		{"no colon", "forgejo"},
+		{"empty hostname", ":10.0.0.2"},
+		{"empty address", "forgejo:"},
+		{"hostname with a space", "for gejo:10.0.0.2"},
+		{"address is neither IPv4 nor host-gateway", "forgejo:localhost"},
+		{"bare IPv6 address", "forgejo:::1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec := liveSpec()
+			spec.ExtraHosts = []string{"git.example:host-gateway", tc.entry}
+
+			out, err := templates.RenderDaemonCompose(spec)
+			if err == nil {
+				t.Fatalf("RenderDaemonCompose with extra host %q = a render, want a refusal:\n%s", tc.entry, out)
+			}
+			if !strings.Contains(err.Error(), strconv.Quote(tc.entry)) {
+				t.Errorf("error = %q, want it to name the entry %q", err, tc.entry)
+			}
+		})
+	}
+}
+
+// Only the live render carries host aliases; a scratch spec that set one would
+// have it dropped in silence, so the render refuses it.
+func TestRenderDaemonCompose_RefusesExtraHostsOnAScratchSpec(t *testing.T) {
+	t.Parallel()
+	spec := scratchSpec()
+	spec.ExtraHosts = []string{"forgejo:10.0.0.2"}
+
+	_, err := templates.RenderDaemonCompose(spec)
+	if err == nil || !strings.Contains(err.Error(), "scratch spec") {
+		t.Fatalf("RenderDaemonCompose of a scratch spec with an extra host = %v, want it refused as a scratch spec", err)
 	}
 }
