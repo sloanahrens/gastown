@@ -2,6 +2,7 @@ package update
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -27,7 +28,7 @@ type DrainOptions struct {
 	// IdleAfter is how long a working seat may be silent before it counts as
 	// drained.
 	IdleAfter time.Duration
-	// Poll is the wait between checks.
+	// Poll is the wait between checks. It must be positive.
 	Poll time.Duration
 }
 
@@ -42,8 +43,12 @@ type DrainResult struct {
 
 // Drain polls the seats until none is working and recently active, or Timeout
 // passes, and reports the seats that held it back, never acting on one and
-// never reading an unreadable seat list as drained.
+// never reading an unreadable seat list as drained. Each probe call runs under
+// the time left in Timeout.
 func Drain(ctx context.Context, clock Clock, sleep func(context.Context, time.Duration) error, p SeatProbe, o DrainOptions) (DrainResult, error) {
+	if o.Poll <= 0 {
+		return DrainResult{}, fmt.Errorf("drain poll interval must be positive, got %v", o.Poll)
+	}
 	start := clock.Now()
 	var lastErr error
 	var blocking []string
@@ -52,11 +57,14 @@ func Drain(ctx context.Context, clock Clock, sleep func(context.Context, time.Du
 			return DrainResult{}, err
 		}
 		now := clock.Now()
-		seats, err := p.Seats(ctx)
+		seats, err := probeSeats(ctx, p, o.Timeout-now.Sub(start))
 		if err != nil {
 			// An unreadable seat list must never pass as an empty one, so this
-			// poll cannot end the drain; the next poll retries the read.
+			// poll cannot end the drain; the next poll retries the read. The
+			// seats named by an earlier poll are no longer known, so they are
+			// not reported beside the error.
 			lastErr = err
+			blocking = nil
 		} else {
 			lastErr = nil
 			blocking = blockingSeats(seats, now, o.IdleAfter)
@@ -73,6 +81,14 @@ func Drain(ctx context.Context, clock Clock, sleep func(context.Context, time.Du
 			return DrainResult{}, err
 		}
 	}
+}
+
+// probeSeats reads the seats under a context that ends when the remaining
+// Timeout budget does, so a probe call that blocks cannot outlast the drain.
+func probeSeats(ctx context.Context, p SeatProbe, remaining time.Duration) ([]Seat, error) {
+	ctx, cancel := context.WithTimeout(ctx, remaining)
+	defer cancel()
+	return p.Seats(ctx)
 }
 
 // blockingSeats names the seats that are working and whose last activity is

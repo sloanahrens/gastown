@@ -247,6 +247,112 @@ func TestDrainProbeErrorIsNotDrained(t *testing.T) {
 	})
 }
 
+func TestDrainReportsNoBlockerWithAProbeError(t *testing.T) {
+	t.Parallel()
+	probeErr := errors.New("heartbeat store unreadable")
+	clock := &fakeDrainClock{now: drainTestStart()}
+	probe := &fakeDrainProbe{answer: func(n int) ([]Seat, error) {
+		if n == 1 {
+			return []Seat{{Name: "furiosa", Working: true, LastActive: clock.Now()}}, nil
+		}
+		return nil, probeErr
+	}}
+
+	res, err := Drain(context.Background(), clock, clock.sleep, probe, drainTestOptions())
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if res.Drained {
+		t.Errorf("Drained = true with an unreadable seat list, want false: %+v", res)
+	}
+	if !errors.Is(res.Err, probeErr) {
+		t.Errorf("Err = %v, want %v", res.Err, probeErr)
+	}
+	if len(res.Blocking) != 0 {
+		t.Errorf("Blocking = %v beside a probe error, want none", res.Blocking)
+	}
+}
+
+// ctxProbe is a SeatProbe whose Seats is a function, so a test can see the
+// context each probe call receives.
+type ctxProbe func(ctx context.Context) ([]Seat, error)
+
+func (f ctxProbe) Seats(ctx context.Context) ([]Seat, error) { return f(ctx) }
+
+func TestDrainBoundsEachProbeByTheTimeout(t *testing.T) {
+	t.Parallel()
+	probeErr := errors.New("seat probe still running")
+	clock := &fakeDrainClock{now: drainTestStart()}
+	var calls int
+	probe := ctxProbe(func(ctx context.Context) ([]Seat, error) {
+		calls++
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Errorf("probe call %d has no deadline, so it can outlast Timeout", calls)
+		} else if left := time.Until(deadline); left > drainTestTimeout {
+			t.Errorf("probe call %d may run %v, longer than Timeout %v", calls, left, drainTestTimeout)
+		}
+		return nil, probeErr
+	})
+
+	res, err := Drain(context.Background(), clock, clock.sleep, probe, drainTestOptions())
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if res.Drained {
+		t.Errorf("Drained = true with every probe failing, want false: %+v", res)
+	}
+	if !errors.Is(res.Err, probeErr) {
+		t.Errorf("Err = %v, want %v", res.Err, probeErr)
+	}
+}
+
+func TestDrainRefusesANonPositivePoll(t *testing.T) {
+	t.Parallel()
+	for _, poll := range []time.Duration{0, -time.Second} {
+		t.Run(poll.String(), func(t *testing.T) {
+			t.Parallel()
+			clock := &fakeDrainClock{now: drainTestStart()}
+			probe := &fakeDrainProbe{answer: func(int) ([]Seat, error) { return nil, nil }}
+
+			_, err := Drain(context.Background(), clock, clock.sleep, probe, DrainOptions{
+				Timeout: drainTestTimeout, IdleAfter: drainTestIdle, Poll: poll,
+			})
+			if err == nil {
+				t.Fatalf("Drain with Poll %v returned no error", poll)
+			}
+			if probe.calls != 0 {
+				t.Errorf("Seats calls = %d, want 0 when Poll is %v", probe.calls, poll)
+			}
+		})
+	}
+}
+
+func TestDrainWaitsOnePollBetweenChecks(t *testing.T) {
+	t.Parallel()
+	const poll = 7 * time.Second
+	clock := &fakeDrainClock{now: drainTestStart()}
+	probe := &fakeDrainProbe{answer: func(n int) ([]Seat, error) {
+		if n < 3 {
+			return []Seat{{Name: "furiosa", Working: true, LastActive: clock.Now()}}, nil
+		}
+		return nil, nil
+	}}
+
+	res, err := Drain(context.Background(), clock, clock.sleep, probe, DrainOptions{
+		Timeout: time.Minute, IdleAfter: drainTestIdle, Poll: poll,
+	})
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if !res.Drained {
+		t.Errorf("Drained = false, want true: %+v", res)
+	}
+	if want := []time.Duration{poll, poll}; !reflect.DeepEqual(clock.sleeps, want) {
+		t.Errorf("sleeps = %v, want %v", clock.sleeps, want)
+	}
+}
+
 func TestDrainNeverActsOnSeats(t *testing.T) {
 	t.Parallel()
 
@@ -259,9 +365,11 @@ func TestDrainNeverActsOnSeats(t *testing.T) {
 			return seats, nil
 		}}
 
-		typ := reflect.TypeOf(probe)
-		if typ.NumMethod() != 1 || typ.Method(0).Name != "Seats" {
-			t.Fatalf("the probe exposes %d methods; a drain must have no seat action to call", typ.NumMethod())
+		// The contract is the SeatProbe interface, not the fake: a method added
+		// to the interface is a seat action the drain could call.
+		contract := reflect.TypeOf((*SeatProbe)(nil)).Elem()
+		if contract.NumMethod() != 1 || contract.Method(0).Name != "Seats" {
+			t.Fatalf("SeatProbe exposes %d methods; a drain must have no seat action to call", contract.NumMethod())
 		}
 
 		res, err := Drain(context.Background(), clock, clock.sleep, probe, drainTestOptions())
