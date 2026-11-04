@@ -3,16 +3,37 @@ package polecat
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/sandbox"
 	"github.com/steveyegge/gastown/internal/session"
 )
+
+// nukeSandboxSettings is a town whose seat "polecat-sandbox" runs in the openshell
+// sandbox profile "polecat-default", which names the gateway k8s.
+const nukeSandboxSettings = `{"type":"town-settings","version":1,
+"agents":{"polecat-sandbox":{"command":"claude"}},
+"sandboxes":{"polecat-default":{"gateway":"k8s","image":"gastown-polecat:dev","policy":"deploy/polecat/policy.yaml"}},
+"polecat_pool":{"seats":{"polecat-sandbox":{"cap":1,"backend":"openshell","sandbox":"polecat-default"}}}}`
+
+// nukeHostSettings is a town whose only seat is a host seat, with no sandbox.
+const nukeHostSettings = `{"type":"town-settings","version":1,
+"agents":{"claude-host":{"command":"claude"}},
+"polecat_pool":{"seats":{"claude-host":{"cap":1}}}}`
+
+// sandboxSeatDesc is the agent bead description of a seat in nukeSandboxSettings,
+// followed by rest.
+func sandboxSeatDesc(rest string) *string {
+	s := "agent: polecat-sandbox\n" + rest
+	return &s
+}
 
 // erroringProbe is a fake tmux whose routed probe fails, as it does when a
 // sandbox has no pod: the exec into the sandbox errors instead of answering no
@@ -38,6 +59,12 @@ type nukeStopCase struct {
 	agent        *string
 	agentMissing bool
 	agentErr     error
+	// noRecord leaves the seat's registry record out, as a record that is gone
+	// looks; settings, when set, is the town settings file the seat config reads.
+	noRecord bool
+	settings string
+	// polecat is the seat nuke stops; "" is Toast.
+	polecat string
 }
 
 // finishedSeat is the agent bead description of a seat whose work reached origin.
@@ -64,10 +91,25 @@ func runNukeStop(t *testing.T, c nukeStopCase) nukeStopResult {
 	if c.probeErr != nil {
 		tm = erroringProbe{fakeSessionTmux: base, err: c.probeErr}
 	}
-	m := &SessionManager{tmux: tm, rig: &rig.Rig{Name: "test-rig", Path: filepath.Join(town, "test-rig"), Polecats: []string{"Toast"}}, gits: newWorld().opener()}
-	sess := m.SessionName("Toast")
-	if err := session.WriteSandboxRecord(town, session.SandboxRecord{Session: sess, Rig: "test-rig", Polecat: "Toast", Gateway: "k8s"}); err != nil {
-		t.Fatal(err)
+	polecat := "Toast"
+	if c.polecat != "" {
+		polecat = c.polecat
+	}
+	m := &SessionManager{tmux: tm, rig: &rig.Rig{Name: "test-rig", Path: filepath.Join(town, "test-rig"), Polecats: []string{polecat}}, gits: newWorld().opener()}
+	sess := m.SessionName(polecat)
+	if !c.noRecord {
+		if err := session.WriteSandboxRecord(town, session.SandboxRecord{Session: sess, Rig: "test-rig", Polecat: polecat, Gateway: "k8s"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c.settings != "" {
+		path := config.TownSettingsPath(town)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(c.settings), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	var res nukeStopResult
@@ -87,7 +129,7 @@ func runNukeStop(t *testing.T, c nukeStopCase) nukeStopResult {
 	m.sandboxPusher = func(string, session.SandboxRecord) error { return nil }
 	// The agent bead is read through beadsAt, so the production read runs.
 	agents := beadsfake.New()
-	agentID := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(town, "test-rig"), "test-rig", "Toast")
+	agentID := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(town, "test-rig"), "test-rig", polecat)
 	if !c.agentMissing {
 		desc := finishedSeat
 		if c.agent != nil {
@@ -103,7 +145,7 @@ func runNukeStop(t *testing.T, c nukeStopCase) nukeStopResult {
 		res.warnings = append(res.warnings, fmt.Sprintf(format, args...))
 	}
 
-	res.err = m.Stop("Toast", true)
+	res.err = m.Stop(polecat, true)
 	_, recorded, err := session.ReadSandboxRecord(town, sess)
 	if err != nil {
 		t.Fatalf("reading the record after Stop: %v", err)
@@ -252,6 +294,136 @@ func TestNukeErroredSandboxKeepsUnprovenWork(t *testing.T) {
 				t.Errorf("warnings %q do not name why the sandbox is kept (%s)", res.warnings, tt.reason)
 			}
 		})
+	}
+}
+
+// TestNukeErroredSandboxNoRecordDeletesByGateway: nuking a seat whose errored
+// sandbox has no registry record deletes it through the gateway the seat config
+// names for its agent, by the seat's own sandbox name, so the seat name is free
+// (gt-gqiew). The gateway status closure asserts the gateway and the name.
+func TestNukeErroredSandboxNoRecordDeletesByGateway(t *testing.T) {
+	t.Parallel()
+	res := runNukeStop(t, nukeStopCase{
+		phase:    "Error",
+		agent:    sandboxSeatDesc(finishedSeat),
+		noRecord: true,
+		settings: nukeSandboxSettings,
+	})
+
+	if len(res.deleted) != 1 {
+		t.Fatalf("deleted %v, want the errored sandbox deleted once through gateway k8s", res.deleted)
+	}
+	if !errors.Is(res.err, ErrSessionNotFound) {
+		t.Errorf("Stop = %v, want ErrSessionNotFound", res.err)
+	}
+}
+
+// TestNukeErroredSandboxNoRecordKeepsUnprovenWork: with no record, an errored
+// sandbox whose agent bead does not prove its work reached origin is still kept
+// by the same gate as a recorded one: nothing is deleted and the reason is logged.
+func TestNukeErroredSandboxNoRecordKeepsUnprovenWork(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		agent  *string
+		reason string
+	}{
+		{name: "unpushed_commits", agent: sandboxSeatDesc("cleanup_status: has_unpushed"), reason: "cleanup_status=has_unpushed"},
+		{name: "status_never_recorded", agent: sandboxSeatDesc("agent_state: idle"), reason: "cleanup_status=<missing>"},
+		{name: "push_refused", agent: sandboxSeatDesc("cleanup_status: clean\npush_failed: true"), reason: "push_failed=true"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			res := runNukeStop(t, nukeStopCase{phase: "Error", agent: tt.agent, noRecord: true, settings: nukeSandboxSettings})
+
+			if len(res.deleted) != 0 {
+				t.Errorf("deleted %v while its work is not proven on origin, want nothing deleted", res.deleted)
+			}
+			if !errors.Is(res.err, ErrSessionNotFound) {
+				t.Errorf("Stop = %v, want ErrSessionNotFound: a kept sandbox must not fail the stop", res.err)
+			}
+			if !anyContains(res.warnings, tt.reason) {
+				t.Errorf("warnings %q do not name why the sandbox is kept (%s)", res.warnings, tt.reason)
+			}
+		})
+	}
+}
+
+// TestNukeErroredSandboxNoRecordNoGatewayLogsAndKeeps: with no record and no
+// gateway the nuke can name, nothing is deleted and the reason is logged. The
+// agent bead that names the seat's agent is gone, or the seat config cannot be
+// read, so no gateway is named and no gateway is asked.
+func TestNukeErroredSandboxNoRecordNoGatewayLogsAndKeeps(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		agentMissing bool
+		settings     string
+		reason       string
+	}{
+		{name: "agent_bead_gone", agentMissing: true, settings: nukeSandboxSettings, reason: "no gateway is named, its agent bead is gone"},
+		{name: "settings_unreadable", settings: "{", reason: "no gateway is named, the town settings cannot be read"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			res := runNukeStop(t, nukeStopCase{phase: "Error", agentMissing: tt.agentMissing, noRecord: true, settings: tt.settings})
+
+			if len(res.deleted) != 0 {
+				t.Errorf("deleted %v with no gateway named, want nothing deleted", res.deleted)
+			}
+			if !errors.Is(res.err, ErrSessionNotFound) {
+				t.Errorf("Stop = %v, want ErrSessionNotFound", res.err)
+			}
+			if !anyContains(res.warnings, tt.reason) {
+				t.Errorf("warnings %q do not name why no gateway was named (%s)", res.warnings, tt.reason)
+			}
+		})
+	}
+}
+
+// TestNukeErroredSandboxNoRecordRefusesUnsafeName: a seat whose session name is
+// not a sandbox name is refused before any gateway is named or asked, so a value
+// that is not a sandbox name never reaches the deleter, even in a town with a
+// sandbox seat.
+func TestNukeErroredSandboxNoRecordRefusesUnsafeName(t *testing.T) {
+	t.Parallel()
+	res := runNukeStop(t, nukeStopCase{
+		phase:    "Error",
+		polecat:  "To ast",
+		noRecord: true,
+		settings: nukeSandboxSettings,
+	})
+
+	if len(res.deleted) != 0 {
+		t.Errorf("deleted %v for an unsafe sandbox name, want nothing deleted", res.deleted)
+	}
+	if !errors.Is(res.err, ErrSessionNotFound) {
+		t.Errorf("Stop = %v, want ErrSessionNotFound", res.err)
+	}
+	if !anyContains(res.warnings, "is not a sandbox name") {
+		t.Errorf("warnings %q do not name the unsafe sandbox name", res.warnings)
+	}
+}
+
+// TestNukeErroredSandboxNoRecordHostSeatIsSilent: a host seat with no record has
+// no sandbox, so a stop deletes nothing and logs nothing, as before.
+func TestNukeErroredSandboxNoRecordHostSeatIsSilent(t *testing.T) {
+	t.Parallel()
+	host := "agent: claude-host\ncleanup_status: clean"
+	res := runNukeStop(t, nukeStopCase{
+		phase:    "Error",
+		agent:    &host,
+		noRecord: true,
+		settings: nukeHostSettings,
+	})
+
+	if len(res.deleted) != 0 {
+		t.Errorf("deleted %v for a host seat, want nothing deleted", res.deleted)
+	}
+	if len(res.warnings) != 0 {
+		t.Errorf("warnings %q for a host seat, want none", res.warnings)
 	}
 }
 
