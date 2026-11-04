@@ -1,4 +1,4 @@
-> Status: plan (2026-11). Implementation plan for docs/plans/2026-11-03-bead-lint-v2-design.md; the beads under epic gt-hgt9j are authoritative once filed.
+> Status: historical (2026-11). Superseded by: gt-hgt9j (epic). Not maintained.
 
 # Bead lint v2 plan
 
