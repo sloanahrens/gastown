@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/sandbox"
 	"github.com/steveyegge/gastown/internal/session"
@@ -31,11 +32,16 @@ type nukeStopCase struct {
 	phase     string
 	statusErr error
 	deleteErr error
-	// fields is the seat's agent bead; nil with fieldsErr nil is a seat whose
-	// gt done recorded a clean cleanup status, the usual finished seat.
-	fields    *beads.AgentFields
-	fieldsErr error
+	// agent is the seat's agent bead description; nil is a finished seat whose
+	// gt done recorded a clean cleanup status. agentMissing leaves the bead out,
+	// and agentErr fails reading it.
+	agent        *string
+	agentMissing bool
+	agentErr     error
 }
+
+// finishedSeat is the agent bead description of a seat whose work reached origin.
+const finishedSeat = "cleanup_status: clean"
 
 // nukeStopResult is what one nuke-style Stop did: its error, the sandboxes the
 // deleter was asked to remove, whether the record survived, and the warnings
@@ -79,13 +85,20 @@ func runNukeStop(t *testing.T, c nukeStopCase) nukeStopResult {
 		return c.deleteErr
 	}
 	m.sandboxPusher = func(string, session.SandboxRecord) error { return nil }
-	fields := c.fields
-	if fields == nil && c.fieldsErr == nil {
-		fields = &beads.AgentFields{CleanupStatus: string(CleanupClean)}
+	// The agent bead is read through beadsAt, so the production read runs.
+	agents := beadsfake.New()
+	agentID := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(town, "test-rig"), "test-rig", "Toast")
+	if !c.agentMissing {
+		desc := finishedSeat
+		if c.agent != nil {
+			desc = *c.agent
+		}
+		agents.Seed(beads.Issue{ID: agentID, Type: "agent", Description: desc})
 	}
-	m.agentFields = func(string) (*beads.AgentFields, error) {
-		return fields, c.fieldsErr
+	if c.agentErr != nil {
+		agents.FailWith("show", c.agentErr)
 	}
+	m.beadsAt = func(string) beads.Client { return agents }
 	m.warn = func(format string, args ...any) {
 		res.warnings = append(res.warnings, fmt.Sprintf(format, args...))
 	}
@@ -205,23 +218,26 @@ func TestNukeErroredSandboxKeepsRecordOnUnansweredGateway(t *testing.T) {
 // answers ErrSessionNotFound, as nuke expects.
 func TestNukeErroredSandboxKeepsUnprovenWork(t *testing.T) {
 	t.Parallel()
+	desc := func(s string) *string { return &s }
 	tests := []struct {
-		name   string
-		fields *beads.AgentFields
-		err    error
-		reason string
+		name         string
+		agent        *string
+		agentMissing bool
+		agentErr     error
+		reason       string
 	}{
-		{name: "unpushed_commits", fields: &beads.AgentFields{CleanupStatus: string(CleanupUnpushed)}, reason: "cleanup_status=has_unpushed"},
-		{name: "uncommitted_work", fields: &beads.AgentFields{CleanupStatus: string(CleanupUncommitted)}, reason: "cleanup_status=has_uncommitted"},
-		{name: "status_unknown", fields: &beads.AgentFields{CleanupStatus: string(CleanupUnknown)}, reason: "cleanup_status=unknown"},
-		{name: "status_never_recorded", fields: &beads.AgentFields{}, reason: "cleanup_status=<missing>"},
-		{name: "push_refused", fields: &beads.AgentFields{CleanupStatus: string(CleanupClean), PushFailed: true}, reason: "push_failed=true"},
-		{name: "agent_bead_unreadable", err: errors.New("bd show: timeout"), reason: "bd show: timeout"},
+		{name: "unpushed_commits", agent: desc("cleanup_status: has_unpushed"), reason: "cleanup_status=has_unpushed"},
+		{name: "uncommitted_work", agent: desc("cleanup_status: has_uncommitted"), reason: "cleanup_status=has_uncommitted"},
+		{name: "status_unknown", agent: desc("cleanup_status: unknown"), reason: "cleanup_status=unknown"},
+		{name: "status_never_recorded", agent: desc("agent_state: idle"), reason: "cleanup_status=<missing>"},
+		{name: "push_refused", agent: desc("cleanup_status: clean\npush_failed: true"), reason: "push_failed=true"},
+		{name: "agent_bead_missing", agentMissing: true, reason: "its agent bead is gone"},
+		{name: "agent_bead_unreadable", agentErr: errors.New("bd show: timeout"), reason: "bd show: timeout"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			res := runNukeStop(t, nukeStopCase{phase: "Error", fields: tt.fields, fieldsErr: tt.err})
+			res := runNukeStop(t, nukeStopCase{phase: "Error", agent: tt.agent, agentMissing: tt.agentMissing, agentErr: tt.agentErr})
 
 			if len(res.deleted) != 0 {
 				t.Errorf("deleted %v while its work is not proven on origin, want nothing deleted", res.deleted)

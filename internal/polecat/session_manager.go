@@ -97,10 +97,6 @@ type SessionManager struct {
 	// the unit tier, which has no gateway. A stop reads it to find a seat whose
 	// sandbox has failed (gt-jhoi1).
 	sandboxStatus func(gateway, name string) (sandbox.Status, error)
-	// agentFields reads a polecat's agent bead when nil: beads.GetAgentBead over
-	// the rig's beads. A stop deletes an errored sandbox only when the bead proves
-	// its work reached origin (gt-jhoi1).
-	agentFields func(polecat string) (*beads.AgentFields, error)
 	// launchFn replaces launch when set: a seam so a test can see what Start
 	// has done by the time it launches.
 	launchFn func(polecat, sessionID string, opts SessionStartOptions) error
@@ -1273,12 +1269,10 @@ func (m *SessionManager) erroredSandboxKeep(polecat string) string {
 	return ""
 }
 
-// polecatAgentFields reads polecat's agent bead from the rig's beads: the seam
-// when set, else beads.GetAgentBead, routed as the polecat manager routes it.
+// polecatAgentFields reads polecat's agent bead from the rig's beads through
+// beadsFor (the beadsAt seam in tests), routed by the rig's prefix as the polecat
+// manager routes it. A missing bead is nil fields, not an error.
 func (m *SessionManager) polecatAgentFields(polecat string) (*beads.AgentFields, error) {
-	if m.agentFields != nil {
-		return m.agentFields(polecat)
-	}
 	townRoot := filepath.Dir(m.rig.Path)
 	id := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(townRoot, m.rig.Name), m.rig.Name, polecat)
 	_, fields, err := beads.GetAgentBead(m.beadsFor(id, m.rig.Path), id)
