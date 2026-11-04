@@ -70,6 +70,35 @@ func planTestArgs() []string {
 	}
 }
 
+// planTestSpec is the ContainerSpec the command builds from planTestArgs.
+func planTestSpec() doltserver.ContainerSpec {
+	return doltserver.ContainerSpec{
+		Name:          "gt-dolt",
+		Image:         "dolt:test",
+		DataDir:       planTestData,
+		BackupDir:     planTestBackup,
+		ConfigPath:    planTestConfig,
+		MemoryGiB:     12,
+		HostPort:      3307,
+		ContainerPort: 3307,
+		Restart:       "unless-stopped",
+	}
+}
+
+// planTestJSON runs the command with --json and returns the argv it printed.
+func planTestJSON(t *testing.T, args ...string) []string {
+	t.Helper()
+	out, err := executeDoltContainerPlan(t, planTestDeps(t), append(args, "--json")...)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	var argv []string
+	if err := json.Unmarshal([]byte(out), &argv); err != nil {
+		t.Fatalf("output is not a JSON array: %v\n%s", err, out)
+	}
+	return argv
+}
+
 func TestDoltContainerPlanCommand(t *testing.T) {
 	t.Parallel()
 
@@ -84,6 +113,7 @@ func TestDoltContainerPlanCommand(t *testing.T) {
 			"-v '" + planTestData + ":" + planTestData + "' " +
 			"-v '" + planTestBackup + ":" + planTestBackup + "' " +
 			"-v '" + planTestConfig + ":" + planTestConfig + ":ro' " +
+			"--label org.gastown.keep=true " +
 			"dolt:test dolt sql-server --config '" + planTestConfig + "'\n"
 		if out != want {
 			t.Fatalf("output =\n%s\nwant\n%s", out, want)
@@ -100,20 +130,15 @@ func TestDoltContainerPlanCommand(t *testing.T) {
 		if err := json.Unmarshal([]byte(out), &got); err != nil {
 			t.Fatalf("output is not a JSON array: %v\n%s", err, out)
 		}
-		want, err := doltserver.ContainerPlan(doltserver.ContainerSpec{
-			Name:          "gt-dolt",
-			Image:         "dolt:test",
-			DataDir:       planTestData,
-			BackupDir:     planTestBackup,
-			ConfigPath:    planTestConfig,
-			MemoryGiB:     12,
-			HostPort:      3307,
-			ContainerPort: 3307,
-			Restart:       "unless-stopped",
-		})
+		want, err := doltserver.ContainerPlan(planTestSpec())
 		if err != nil {
 			t.Fatalf("ContainerPlan: %v", err)
 		}
+		imageAt := slices.Index(want, "dolt:test")
+		if imageAt < 0 {
+			t.Fatalf("ContainerPlan argv %#v holds no image reference", want)
+		}
+		want = slices.Insert(want, imageAt, "--label", "org.gastown.keep=true")
 		if !slices.Equal(got, want) {
 			t.Fatalf("argv = %#v\nwant %#v", got, want)
 		}
@@ -174,6 +199,50 @@ func TestDoltContainerPlanCommand(t *testing.T) {
 			t.Fatal("the JSON form ignored a failed write")
 		}
 	})
+}
+
+func TestDoltContainerPlanHasKeepLabel(t *testing.T) {
+	t.Parallel()
+
+	argv := planTestJSON(t, planTestArgs()...)
+	labelAt := slices.Index(argv, "--label")
+	if labelAt < 0 || labelAt+1 >= len(argv) {
+		t.Fatalf("argv %#v holds no --label pair", argv)
+	}
+	if got := argv[labelAt+1]; got != "org.gastown.keep=true" {
+		t.Fatalf("label = %q, want org.gastown.keep=true", got)
+	}
+	imageAt := slices.Index(argv, "dolt:test")
+	if imageAt < 0 {
+		t.Fatalf("argv %#v holds no image reference", argv)
+	}
+	if labelAt > imageAt {
+		t.Fatalf("the label at %d follows the image reference at %d", labelAt, imageAt)
+	}
+}
+
+func TestDoltContainerPlanKeepsExistingFlags(t *testing.T) {
+	t.Parallel()
+
+	got := planTestJSON(t, planTestArgs()...)
+	want, err := doltserver.ContainerPlan(planTestSpec())
+	if err != nil {
+		t.Fatalf("ContainerPlan: %v", err)
+	}
+	// Dropping the one keep-label pair must leave the plan's every other
+	// element, so the memory, restart, publish and mount flags keep their
+	// values and their order.
+	stripped := make([]string, 0, len(got))
+	for i := 0; i < len(got); i++ {
+		if got[i] == "--label" && i+1 < len(got) {
+			i++
+			continue
+		}
+		stripped = append(stripped, got[i])
+	}
+	if !slices.Equal(stripped, want) {
+		t.Fatalf("plan without the label = %#v\nwant %#v", stripped, want)
+	}
 }
 
 func TestDoltContainerPlanDefaults(t *testing.T) {
