@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -102,6 +103,33 @@ func TestSlotDebrisCheck_UnlistableContainersIsSkippedNotOK(t *testing.T) {
 	}
 	if !strings.HasPrefix(result.Message, "unknown:") {
 		t.Errorf("Message = %q, want it to start with %q", result.Message, "unknown:")
+	}
+}
+
+// TestSlotDebrisCheck_UnreadableTownConfigIsNotBlamedOnListing pins that a
+// malformed mayor/town.json, which Reap refuses before it lists any container,
+// is not reported as a container-listing failure. The docker listing is never
+// reached here, so the message must name what actually failed.
+func TestSlotDebrisCheck_UnreadableTownConfigIsNotBlamedOnListing(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rt := &fakeContainers{}
+
+	result := debrisCheck(rt).Run(&CheckContext{TownRoot: townRoot})
+	if result.Status != StatusSkipped {
+		t.Fatalf("Status = %v, want StatusSkipped when town.json cannot be read: %s", result.Status, result.Message)
+	}
+	if strings.Contains(result.Message, "list") {
+		t.Errorf("Message = %q, want it not to blame the container listing for a town.json failure", result.Message)
+	}
+	if len(result.Details) == 0 || !strings.Contains(result.Details[0], "dolt.external_container") {
+		t.Errorf("Details = %v, want the town.json failure named", result.Details)
 	}
 }
 
