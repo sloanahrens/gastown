@@ -22,6 +22,10 @@ const (
 	LiveConfigDirPath       = LiveOpenShellConfigHome + "/gt"
 )
 
+// liveBackupRootEnv names the Dolt backup directory the daemon is pointed at, set from
+// BackupDir (gt-gg9hv.17).
+const liveBackupRootEnv = "GT_DOLT_BACKUP_ROOT"
+
 // composeOwnedEnv are the environment names the render sets itself; a spec's Env
 // may not name one, so a daemon.env entry can never override the container's
 // identity, its Docker engine or its client configuration.
@@ -38,8 +42,11 @@ var composeEnvName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // values the render cannot carry, and any of them on a scratch spec.
 func (s ComposeSpec) validateClient() error {
 	if s.Scratch && (len(s.Env) > 0 || len(s.KubeconfigFiles) > 0 || s.OpenShellConfigDir != "" || s.ConfigDir != "" ||
-		s.OMTokenMetaFile != "" || s.LandingWorkRoot != "" || s.TimeZone != "") {
-		return fmt.Errorf("compose spec: Env, KubeconfigFiles, OpenShellConfigDir, ConfigDir, OMTokenMetaFile, LandingWorkRoot or TimeZone is set on a scratch spec; only the live render carries the client configuration")
+		s.OMTokenMetaFile != "" || s.LandingWorkRoot != "" || s.TimeZone != "" || s.BackupDir != "") {
+		return fmt.Errorf("compose spec: Env, KubeconfigFiles, OpenShellConfigDir, ConfigDir, OMTokenMetaFile, LandingWorkRoot, TimeZone or BackupDir is set on a scratch spec; only the live render carries the client configuration")
+	}
+	if _, set := s.Env[liveBackupRootEnv]; set && s.BackupDir != "" {
+		return fmt.Errorf("compose spec: Env names %s, which the render sets from BackupDir; a daemon.env entry would repeat the key", liveBackupRootEnv)
 	}
 	if s.TimeZone != "" && !composeZoneName.MatchString(s.TimeZone) {
 		return fmt.Errorf("compose spec: TimeZone %q is not an IANA zone name such as America/Chicago", s.TimeZone)
@@ -66,7 +73,7 @@ func (s ComposeSpec) validateClient() error {
 			return fmt.Errorf("compose spec: LandingWorkRoot %q and OMTokenMetaFile %q overlap, so two mounts would share a target", s.LandingWorkRoot, s.OMTokenMetaFile)
 		}
 	}
-	for _, p := range append([]string{s.OpenShellConfigDir, s.ConfigDir, s.OMTokenMetaFile, s.LandingWorkRoot}, s.KubeconfigFiles...) {
+	for _, p := range append([]string{s.OpenShellConfigDir, s.ConfigDir, s.BackupDir, s.OMTokenMetaFile, s.LandingWorkRoot}, s.KubeconfigFiles...) {
 		if p == "" {
 			continue
 		}
@@ -86,9 +93,9 @@ func isOwnedEnv(name string) bool {
 	return false
 }
 
-// liveClientEnv is the extra environment lines of the daemon service: KUBECONFIG
-// and XDG_CONFIG_HOME when set, then Env sorted by name. Each is a line of six
-// spaces, in the form the fixed lines have.
+// liveClientEnv is the extra environment lines of the daemon service: KUBECONFIG,
+// XDG_CONFIG_HOME, TZ and GT_DOLT_BACKUP_ROOT when set, then Env sorted by name.
+// Each is a line of six spaces, in the form the fixed lines have.
 func liveClientEnv(s ComposeSpec) string {
 	var b strings.Builder
 	line := func(k, v string) {
@@ -103,6 +110,9 @@ func liveClientEnv(s ComposeSpec) string {
 	if s.TimeZone != "" {
 		line("TZ", s.TimeZone)
 	}
+	if s.BackupDir != "" {
+		line(liveBackupRootEnv, s.BackupDir)
+	}
 	names := make([]string, 0, len(s.Env))
 	for n := range s.Env {
 		names = append(names, n)
@@ -115,10 +125,11 @@ func liveClientEnv(s ComposeSpec) string {
 }
 
 // liveClientMounts is the read-only mount of the openshell config directory and
-// the town's config directory. Each holds client material; the render carries
-// the paths, never a file's contents. The config directory is mounted at its
-// own path as well as under XDG_CONFIG_HOME, because settings in the town name
-// it both ways (gt-gg9hv.3).
+// the town's config directory, and the read-write mount of the Dolt backup
+// directory. Each holds client material or backups; the render carries the
+// paths, never a file's contents. The config directory is mounted at its own
+// path as well as under XDG_CONFIG_HOME, because settings in the town name it
+// both ways (gt-gg9hv.3).
 func liveClientMounts(s ComposeSpec) string {
 	var b strings.Builder
 	if s.OpenShellConfigDir != "" {
@@ -127,6 +138,13 @@ func liveClientMounts(s ComposeSpec) string {
 	if s.ConfigDir != "" {
 		b.WriteString(liveTokenMount(s.ConfigDir, s.ConfigDir))
 		b.WriteString(liveTokenMount(s.ConfigDir, LiveConfigDirPath))
+	}
+	if s.BackupDir != "" {
+		// Read-write, unlike the mounts above: the Dolt server writes each night's
+		// backup here, and the daemon's backup steps must see those same files
+		// (gt-gg9hv.17).
+		q := strconv.Quote(composeLiteral(s.BackupDir))
+		fmt.Fprintf(&b, "      - type: bind\n        source: %s\n        target: %s\n", q, q)
 	}
 	if s.OMTokenMetaFile != "" {
 		b.WriteString(liveTokenMount(s.OMTokenMetaFile, s.OMTokenMetaFile))
