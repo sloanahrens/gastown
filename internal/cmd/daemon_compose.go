@@ -42,6 +42,10 @@ type daemonComposeFlags struct {
 	// openShellConfigDir is the host's openshell config directory (the gateway's
 	// mTLS client certificates), mounted read-only.
 	openShellConfigDir string
+	// extraHosts are --extra-host values, one "<hostname>:<ipv4 or host-gateway>"
+	// each, in the order given. The render sorts them into the daemon service's
+	// extra_hosts and refuses a malformed entry by name (gt-gg9hv.2).
+	extraHosts []string
 }
 
 // daemonComposeDeps is what the command takes from the host: where the town is
@@ -175,6 +179,12 @@ referenced as $NAME or ${NAME} by any file under the town's settings directory (
 that stay under the town are followed; one that leaves it refuses the render; other
 bound directories are not scanned) go into the container's environment.
 
+--extra-host adds a host alias the container resolves, as
+<hostname>:<ipv4 or host-gateway>; repeat it for each alias. The daemon service's
+extra_hosts list carries them sorted, directly after init, and a malformed entry
+is refused by name before any file is written. Without the flag the render is
+unchanged.
+
 --print prints the render and writes no file.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -194,6 +204,8 @@ bound directories are not scanned) go into the container's environment.
 		"Give the container's git this Forgejo host:port; accepted only with --"+config.ForgeTokenFileFlag)
 	write.Flags().StringVar(&f.forgeTokenFile, config.ForgeTokenFileFlag, "",
 		"The host path of the landing bot's token file, mounted read-only into the container; accepted only with --"+config.ForgeHostFlag)
+	write.Flags().StringArrayVar(&f.extraHosts, "extra-host", nil,
+		"A host alias the container resolves, as <hostname>:<ipv4 or host-gateway>; repeat for more, and a malformed entry is refused by name")
 	parent.AddCommand(write)
 	return parent
 }
@@ -282,6 +294,7 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 		OMTokenFile:        omTokenFile,
 		ForgeHost:          forgeHost,
 		ForgeTokenFile:     forgeTokenFile,
+		ExtraHosts:         f.extraHosts,
 	}
 	content, err := templates.RenderDaemonCompose(spec)
 	if err != nil {

@@ -8,6 +8,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -443,7 +445,7 @@ func TestDaemonComposeCommandIsWired(t *testing.T) {
 	if err := c.Execute(); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	if want := (daemonComposeFlags{image: daemonimage.ImageTag(composeTestRev), omTokenFile: "/ops/om/token", omTokenFileSet: true, print: true}); !ran || got != want {
+	if want := (daemonComposeFlags{image: daemonimage.ImageTag(composeTestRev), omTokenFile: "/ops/om/token", omTokenFileSet: true, print: true}); !ran || !reflect.DeepEqual(got, want) {
 		t.Errorf("ran %v flags %+v, want write with the image, the token file and --print (%+v)", ran, got, want)
 	}
 
@@ -485,5 +487,40 @@ func TestDaemonComposeBlankTokenFlagIsRefusedThroughFlag(t *testing.T) {
 				t.Errorf("compose file = %q, want the old render %q kept", got, old)
 			}
 		})
+	}
+}
+
+// --extra-host repeats: each flag adds one alias, the flags reach the spec in
+// the order they were given, and both entries reach the daemon service's
+// extra_hosts. The render sorts them, so the file shows sorted lines while the
+// flags keep their order here (gt-gg9hv.2).
+func TestComposeWriteExtraHostFlagRepeats(t *testing.T) {
+	t.Parallel()
+	r := newComposeRig(t)
+	var got daemonComposeFlags
+	c := newDaemonComposeCmd(func(out io.Writer, f daemonComposeFlags) error {
+		got = f
+		return runDaemonCompose(f, r.deps)
+	})
+	c.SetArgs([]string{
+		"write", "--image", daemonimage.ImageTag(composeTestRev),
+		"--extra-host", "git.example:host-gateway",
+		"--extra-host", "forgejo:10.0.0.2",
+	})
+	c.SilenceUsage, c.SilenceErrors = true, true
+
+	if err := c.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if want := []string{"git.example:host-gateway", "forgejo:10.0.0.2"}; !slices.Equal(got.extraHosts, want) {
+		t.Errorf("flags reached the spec as %q, want them in the order given: %q", got.extraHosts, want)
+	}
+
+	file, ok := r.disk[r.composePath()]
+	if !ok {
+		t.Fatalf("no compose file written at %s", r.composePath())
+	}
+	if want := "    extra_hosts:\n      - \"forgejo:10.0.0.2\"\n      - \"git.example:host-gateway\"\n"; !strings.Contains(string(file), want) {
+		t.Errorf("compose file does not carry %q:\n%s", want, file)
 	}
 }
