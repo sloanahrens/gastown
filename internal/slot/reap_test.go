@@ -434,3 +434,118 @@ func TestReap_UnlabelledLookalikeIsRemovedWithoutVolumes(t *testing.T) {
 			got, want)
 	}
 }
+
+// TestReapProtectedNameIsNeverRemoved is gt-awq73's contract: a container the
+// caller names is left in place whatever its age, and the report says nothing
+// about it — protected is not the same as kept.
+func TestReapProtectedNameIsNeverRemoved(t *testing.T) {
+	t.Parallel()
+	tg := newTestGate(t)
+	townRoot := t.TempDir()
+	tg.rt.setLines(
+		dockerPSLine("dolt-id", "dolthub/dolt-sql-server:2.3.2", "gt-dolt", tg.clk.Now().Add(-5*time.Hour), nil),
+	)
+
+	report, err := tg.Reap(townRoot, ReapOptions{Protected: []string{"gt-dolt"}})
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if removed := tg.rt.removedIDs(); len(removed) != 0 {
+		t.Fatalf("removed = %v, want a protected container left in place", removed)
+	}
+	if verdicts := slices.Concat(report.Debris, report.Kept); len(verdicts) != 0 {
+		t.Fatalf("verdicts = %v, want a protected container in neither Debris nor Kept", verdictNames(verdicts))
+	}
+	if len(report.Removed) != 0 || len(report.Failed) != 0 {
+		t.Fatalf("Removed = %v, Failed = %v, want the protected container in neither", report.Removed, report.Failed)
+	}
+}
+
+// TestReapKeepLabelIsNeverRemoved is the other exemption: the label travels
+// with the container, so it protects one the caller could not name in advance.
+// Only the value "true" counts, so presence alone is not a keep.
+func TestReapKeepLabelIsNeverRemoved(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		labels  map[string]string
+		removed bool
+	}{
+		{name: "keep=true", labels: map[string]string{KeepLabel: "true"}},
+		{name: "keep=false", labels: map[string]string{KeepLabel: "false"}, removed: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tg := newTestGate(t)
+			townRoot := t.TempDir()
+			tg.rt.setLines(
+				dockerPSLine("dolt-id", "dolthub/dolt-sql-server:2.3.2", "gt-dolt", tg.clk.Now().Add(-5*time.Hour), tc.labels),
+			)
+
+			report, err := tg.Reap(townRoot, ReapOptions{})
+			if err != nil {
+				t.Fatalf("Reap: %v", err)
+			}
+			if got := len(tg.rt.removedIDs()) == 1; got != tc.removed {
+				t.Fatalf("removed = %v, want removed=%v for %s", tg.rt.removedIDs(), tc.removed, tc.name)
+			}
+			if tc.removed {
+				return
+			}
+			if verdicts := slices.Concat(report.Debris, report.Kept); len(verdicts) != 0 {
+				t.Fatalf("verdicts = %v, want a kept container in neither Debris nor Kept", verdictNames(verdicts))
+			}
+		})
+	}
+}
+
+// TestReapProtectUsesExactNames pins that protection is not a substring match:
+// protecting gt-dolt must not shield its dev twin.
+func TestReapProtectUsesExactNames(t *testing.T) {
+	t.Parallel()
+	tg := newTestGate(t)
+	townRoot := t.TempDir()
+	tg.rt.setLines(
+		dockerPSLine("prod-id", "dolthub/dolt-sql-server:2.3.2", "gt-dolt", tg.clk.Now().Add(-5*time.Hour), nil),
+		dockerPSLine("dev-id", "dolthub/dolt-sql-server:2.3.2", "gt-dolt-dev", tg.clk.Now().Add(-5*time.Hour), nil),
+	)
+
+	report, err := tg.Reap(townRoot, ReapOptions{Protected: []string{"gt-dolt"}})
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if removed := tg.rt.removedIDs(); !slices.Equal(removed, []string{"dev-id"}) {
+		t.Fatalf("removed = %v, want only gt-dolt-dev: exact names, not substrings", removed)
+	}
+	if len(report.Debris) != 1 || report.Debris[0].Container.Name != "gt-dolt-dev" {
+		t.Fatalf("Debris = %+v, want only the unprotected twin", report.Debris)
+	}
+}
+
+// TestReapEmptyProtectedUnchanged is the compatibility half: no Protected list
+// and no label reaps a stale container exactly as it did before gt-awq73.
+func TestReapEmptyProtectedUnchanged(t *testing.T) {
+	t.Parallel()
+	tg := newTestGate(t)
+	townRoot := t.TempDir()
+	now := tg.clk.Now()
+	tg.rt.setLines(
+		dockerPSLine("orphan-id", "dolthub/dolt-sql-server:2.3.2", "gt-dolt", now.Add(-5*time.Hour), nil),
+	)
+
+	report, err := tg.Reap(townRoot, ReapOptions{})
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if removed := tg.rt.removedIDs(); !slices.Equal(removed, []string{"orphan-id"}) {
+		t.Fatalf("removed = %v, want the stale container removed as before", removed)
+	}
+	if len(report.Debris) != 1 || report.Debris[0].Container.Name != "gt-dolt" {
+		t.Fatalf("Debris = %+v, want the stale container classified as debris", report.Debris)
+	}
+	if len(report.Kept) != 0 {
+		t.Fatalf("Kept = %+v, want nothing kept with no exemption", verdictNames(report.Kept))
+	}
+}
