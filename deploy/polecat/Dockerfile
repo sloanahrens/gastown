@@ -164,6 +164,10 @@ RUN ln -sf /usr/local/bin/make /usr/bin/make \
 RUN GOBIN=/usr/local/bin GOFLAGS= /usr/local/go/bin/go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}" \
     && rm -rf /root/go /root/.cache
 
+# Unseeded, writable Go cache defaults for pods with no cache claim (the sweep
+# runner); a sandbox with a claim overrides them through the contract (gt-nposw).
+ENV GOCACHE=/tmp/gocache GOMODCACHE=/tmp/gomodcache
+
 # Non-root sandbox user; OpenShell runs the workload as the image USER and
 # uses /sandbox as the workspace.
 RUN userdel -r ubuntu 2>/dev/null || true \
