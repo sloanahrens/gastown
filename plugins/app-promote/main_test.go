@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -1446,7 +1447,7 @@ func TestPluginDirectory(t *testing.T) {
 // than as a nil call in a live run.
 func TestRealEnv(t *testing.T) {
 	t.Parallel()
-	e := realEnv()
+	e := realEnv(os.Executable)
 	if e.getenv == nil || e.do == nil || e.promote == nil {
 		t.Errorf("realEnv seams = getenv %v, do %v, promote %v; want each one wired",
 			e.getenv == nil, e.do == nil, e.promote == nil)
@@ -1456,6 +1457,39 @@ func TestRealEnv(t *testing.T) {
 	}
 	if e.pluginDir == "" {
 		t.Error("realEnv names no plugin directory; the rig list would be looked up in the working directory")
+	}
+}
+
+// TestRealEnvPluginDirectory drives the production call path main takes: the
+// executable path a per-OS build has, resolved through realEnv with this host's
+// OS and arch.
+func TestRealEnvPluginDirectory(t *testing.T) {
+	t.Parallel()
+	perOS := filepath.Join("/town/plugins/app-promote/bin", runtime.GOOS+"-"+runtime.GOARCH, "app-promote")
+	cases := []struct {
+		name       string
+		executable func() (string, error)
+		want       string
+	}{
+		{
+			name:       "the per-OS build a daemon run execs",
+			executable: func() (string, error) { return perOS, nil },
+			want:       "/town/plugins/app-promote",
+		},
+		{
+			name:       "an executable path it cannot read",
+			executable: func() (string, error) { return "", errors.New("executable path unavailable") },
+			want:       ".",
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := realEnv(tc.executable).pluginDir; got != tc.want {
+				t.Errorf("realEnv pluginDir = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
