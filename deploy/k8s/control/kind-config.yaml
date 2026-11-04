@@ -1,7 +1,7 @@
 # The CONTROL kind cluster: the services the town needs to stay up (the first
-# workload is hm, later Forgejo and its runner). It runs on the gt-kind Colima
-# VM, never on gt-control (that VM is the sweep runner's engine) and never in
-# the gt-sbx work cluster. See README.md in this directory.
+# workload is hm, later Forgejo and its runner). It runs kind on the Docker
+# engine of the gt-control Colima VM (whose sweep runner shares it) and never
+# in the gt-sbx work cluster. See README.md in this directory.
 # Every node runs the same pinned node image: the one the gt-sbx cluster's nodes ran
 # when this was written (docker inspect, kind v0.33.0, 2026-11-01).
 # The control-plane node carries no pool label on purpose: kind taints it NoSchedule
@@ -20,6 +20,13 @@ nodes:
   image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
   labels:
     gt.dev/pool: core
+  # A kind cluster loses its node containers and their volumes when it is
+  # rebuilt, so the provisioner's storage lives on the gt-control VM's
+  # filesystem, which outlives the cluster. Create the directory there before
+  # the cluster starts (see README.md, "Durable volumes").
+  extraMounts:
+  - hostPath: /var/lib/gt-control/volumes
+    containerPath: /var/local-path-provisioner
 # The privileged pool is for the Forgejo runner (docker-in-docker needs
 # privilege), kept off the core node by a taint so nothing else lands there.
 - role: worker

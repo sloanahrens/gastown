@@ -1,25 +1,30 @@
-# Control cluster on the gt-kind VM (gt-9v1np)
+# Control cluster on the gt-control VM (gt-9v1np)
 
-The VM is `gt-kind`. The Colima VM named `gt-control` is NOT the control plane: it is the sweep runner's dedicated engine and stays isolated from everything here. The work cluster (sandboxes, the cache, sweep jobs) stays `gt-sbx`.
+The cluster `gt-ctl` runs kind on the Docker engine of the existing Colima VM `gt-control`; there is no separate control VM. The work cluster (sandboxes, the cache, sweep jobs) stays `gt-sbx`.
 
 ## What this directory holds
 
 `kind-config.yaml` is the cluster `gt-ctl`, every node on one pinned node image, the one the gt-sbx nodes ran on 2026-11-01: one control-plane node, a `core` worker (`gt.dev/pool=core`) and a `privileged` worker (`gt.dev/pool=privileged`, tainted `NoSchedule`) for the Forgejo runner later. Nothing here starts a VM or a cluster.
 
+## Durable volumes
+
+A kind cluster loses its node containers, and the volumes they hold, when it is rebuilt. The core worker therefore mounts the VM path `/var/lib/gt-control/volumes` at `/var/local-path-provisioner` in the node, so what the local-path provisioner writes survives `kind delete cluster` and a recreate. Create the directory on the `gt-control` VM before the cluster starts:
+
+```
+colima ssh -p gt-control -- sudo mkdir -p /var/lib/gt-control/volumes
+```
+
 ## Host core budget
 
-The host has 24 cores. The Colima VMs are allocated as follows (allocation, not use): Docker Desktop 8, gt-sbx 12, gt-control 8, gt-kind 6, which is 34 against 24. Starting gt-kind adds 6. The total comes down only when the Forgejo compose stack and its docker-in-docker runner leave Docker Desktop for this cluster (later beads); only then is Docker Desktop's allocation lowered. `hm-postgres` stays a Docker container under the standing rule (a central source, not a pod).
-
-Start size is 6 CPU / 12 GB, enough for hm. Grow to 8 CPU / 16 GB before Forgejo and its runner move in: `colima stop gt-kind`, then `colima start gt-kind --activate=false --cpu 8 --memory 16 --disk 40 --vm-type vz --runtime docker` (the start script for the work cluster, `deploy/k8s/kind/common.sh`, notes that a running VM keeps its size until it is stopped and started again).
+The host has 24 cores. The Colima VMs are allocated as follows (allocation, not use): Docker Desktop 8, gt-sbx 8, gt-control 12, which is 28 against 24. The local total comes down only when the Forgejo compose stack and its docker-in-docker runner leave Docker Desktop for this cluster (later beads); only then is Docker Desktop's allocation lowered. The cloud VM is separate and is not part of this count. `hm-postgres` stays a Docker container under the standing rule (a central source, not a pod).
 
 ## Start (the overseer, after the L3 window's first checks are green)
 
-The commands set the docker endpoint per command and never switch the global docker or kubectl context.
+The commands set the docker endpoint per command and never switch the global docker or kubectl context. The `gt-control` VM is already running for the sweep runner; this cluster shares its engine.
 
 ```
-colima start gt-kind --activate=false --cpu 6 --memory 12 --disk 40 --vm-type vz --runtime docker
 mkdir -p ~/gt/.runtime/ctl-k8s
-DOCKER_HOST=unix://$HOME/.colima/gt-kind/docker.sock kind create cluster --config deploy/k8s/control/kind-config.yaml --kubeconfig ~/gt/.runtime/ctl-k8s/kubeconfig --wait 180s
+DOCKER_HOST=unix://$HOME/.colima/gt-control/docker.sock kind create cluster --config deploy/k8s/control/kind-config.yaml --kubeconfig ~/gt/.runtime/ctl-k8s/kubeconfig --wait 180s
 kubectl --kubeconfig ~/gt/.runtime/ctl-k8s/kubeconfig get nodes -L gt.dev/pool
 ```
 
@@ -28,11 +33,10 @@ Expected: three nodes Ready, pools `core` and `privileged` on the two workers. S
 ## Stop and rollback
 
 ```
-DOCKER_HOST=unix://$HOME/.colima/gt-kind/docker.sock kind delete cluster --name gt-ctl
-colima stop gt-kind
+DOCKER_HOST=unix://$HOME/.colima/gt-control/docker.sock kind delete cluster --name gt-ctl
 ```
 
-Nothing else depends on this cluster until a workload is moved into it, so stopping it changes nothing live.
+The VM keeps running for the sweep runner. Nothing else depends on this cluster until a workload is moved into it, so deleting it changes nothing live; the durable volume path stays on the VM and is picked up again when the cluster is recreated.
 
 ## Environments
 
