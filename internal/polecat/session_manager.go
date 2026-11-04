@@ -1219,28 +1219,107 @@ func (m *SessionManager) clock() clockwork.Clock {
 
 // removeErroredSandbox deletes the sandbox of a seat whose session is gone, when
 // the gateway reports that sandbox in a terminal failure phase (see
-// session.CleanupErroredSandbox). The deletion is refused unless the seat's agent
-// bead proves its work reached origin (erroredSandboxKeep). A failure is logged
-// and never returned, so a stop answers the same whether or not the record was
-// removed. A host session has no record and nothing happens.
+// session.CleanupErroredSandboxWithRecord). The deletion is refused unless the
+// seat's agent bead proves its work reached origin (erroredSandboxKeep). A
+// record that is gone is rebuilt from the seat config's gateway for the agent, so
+// the seat name is still freed (gt-gqiew). A failure is logged and never
+// returned, so a stop answers the same whether or not the record was removed. A
+// host session has no record and no sandbox seat, and nothing happens.
 func (m *SessionManager) removeErroredSandbox(polecat, sessionID string) {
 	if m.rig == nil || m.rig.Path == "" {
 		return
 	}
+	townRoot := filepath.Dir(m.rig.Path)
 	status := m.sandboxStatus
 	if status == nil {
 		status = session.GatewaySandboxPhase
 	}
 	deleter := sandboxDeleterOrLinked(m.sandboxDeleter)
-	gated := func(townRoot string, rec session.SandboxRecord) error {
+	gated := func(townDir string, rec session.SandboxRecord) error {
 		if why := m.erroredSandboxKeep(polecat); why != "" {
 			return fmt.Errorf("keeping it, %s", why)
 		}
-		return deleter(townRoot, rec)
+		return deleter(townDir, rec)
 	}
-	if _, err := session.CleanupErroredSandbox(status, gated, filepath.Dir(m.rig.Path), sessionID); err != nil {
+	rec, recorded, err := session.ReadSandboxRecord(townRoot, sessionID)
+	if err != nil {
+		m.warnSandbox("stopping %s: its errored sandbox is not removed: %v", sessionID, err)
+		return
+	}
+	if !recorded {
+		var sandboxed bool
+		var why string
+		rec, sandboxed, why = m.seatSandboxRecord(polecat, sessionID)
+		if why != "" {
+			m.warnSandbox("stopping %s: its errored sandbox is not removed: %s", sessionID, why)
+			return
+		}
+		if !sandboxed {
+			return
+		}
+	}
+	if _, err := session.CleanupErroredSandboxWithRecord(status, gated, townRoot, sessionID, rec); err != nil {
 		m.warnSandbox("stopping %s: its errored sandbox is not removed: %v", sessionID, err)
 	}
+}
+
+// seatSandboxRecord is the registry record of a seat whose record is gone,
+// keyed by the gateway the town's seat config names for the seat's agent, so
+// its errored sandbox can be found and deleted by the seat's own name (gt-gqiew).
+// It mirrors the daemon's seat end, which asks the seat config the same way.
+//
+// sandboxed is false for a host seat, which has no sandbox to remove. why names
+// the reason no gateway could be named, and is "" when the seat is a host seat
+// or a sandbox seat was named. The agent bead is read only when the town has an
+// openshell seat, so a host stop in a host-only town reads no bead and does not
+// wait on Dolt for a sandbox that cannot exist.
+func (m *SessionManager) seatSandboxRecord(polecat, sessionID string) (rec session.SandboxRecord, sandboxed bool, why string) {
+	// The name goes to the gateway as the sandbox's name, so it is checked as a
+	// registry record's name would be, before any gateway is named for it.
+	if !session.ValidSandboxSessionName(sessionID) {
+		return rec, false, fmt.Sprintf("no gateway is named, %q is not a sandbox name", sessionID)
+	}
+	townRoot := filepath.Dir(m.rig.Path)
+	ts, err := config.LoadTownSettings(config.TownSettingsPath(townRoot))
+	if err != nil {
+		return rec, false, "no gateway is named, the town settings cannot be read: " + err.Error()
+	}
+	if ts == nil {
+		return rec, false, ""
+	}
+	seats, err := config.Seats(ts, nil)
+	if err != nil {
+		return rec, false, "no gateway is named, the seat map cannot be read: " + err.Error()
+	}
+	if !hasOpenShellSeat(seats) {
+		return rec, false, ""
+	}
+	fields, err := m.polecatAgentFields(polecat)
+	if err != nil {
+		return rec, false, "no gateway is named, its agent bead cannot be read: " + err.Error()
+	}
+	if fields == nil {
+		return rec, false, "no gateway is named, its agent bead is gone"
+	}
+	for _, seat := range seats {
+		if seat.Agent != fields.Agent || seat.Backend != config.BackendOpenShell {
+			continue
+		}
+		gateway := ts.Sandboxes[seat.Sandbox].WithDefaults().Gateway
+		rec = session.SandboxRecord{Session: sessionID, Rig: m.rig.Name, Polecat: polecat, Gateway: gateway}
+		return rec, true, ""
+	}
+	return rec, false, ""
+}
+
+// hasOpenShellSeat reports whether any seat in seats runs in a sandbox.
+func hasOpenShellSeat(seats []config.Seat) bool {
+	for _, seat := range seats {
+		if seat.Backend == config.BackendOpenShell {
+			return true
+		}
+	}
+	return false
 }
 
 // erroredSandboxKeep names why an errored sandbox of polecat must stay, or ""
