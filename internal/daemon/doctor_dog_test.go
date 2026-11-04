@@ -401,3 +401,64 @@ func TestDoctorDogFindings_DistinctBackupErrorsStaySeparate(t *testing.T) {
 		}
 	}
 }
+
+// A town whose Dolt runs in a container must never have that container reaped
+// by name: the doctor's probe protects it (gt-90ph2).
+func TestDoctorDogReapProtectsExternalContainer(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeExternalContainerTown(t, townRoot, 3307, "gt-dolt")
+
+	var calls []slot.ReapOptions
+	p := doctorDogProbes(townRoot, func(_ string, opts slot.ReapOptions) (slot.ReapReport, error) {
+		calls = append(calls, opts)
+		return slot.ReapReport{}, nil
+	})
+	if _, err := p.reap(); err != nil {
+		t.Fatalf("reap probe: %v", err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("reap called %d times, want 1", len(calls))
+	}
+	if got := calls[0].Protected; len(got) != 1 || got[0] != "gt-dolt" {
+		t.Errorf("reap Protected = %q, want [gt-dolt]", got)
+	}
+}
+
+// A town with no dolt.external_container protects nothing, and its reap still
+// runs: the host-process server has no container for the reaper to remove.
+func TestDoctorDogReapProtectsNothingWithoutSetting(t *testing.T) {
+	t.Parallel()
+	var calls []slot.ReapOptions
+	p := doctorDogProbes(t.TempDir(), func(_ string, opts slot.ReapOptions) (slot.ReapReport, error) {
+		calls = append(calls, opts)
+		return slot.ReapReport{}, nil
+	})
+	if _, err := p.reap(); err != nil {
+		t.Fatalf("reap probe: %v", err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("reap called %d times, want 1", len(calls))
+	}
+	if got := calls[0].Protected; len(got) != 0 {
+		t.Errorf("reap Protected = %q, want empty", got)
+	}
+}
+
+// A dolt.external_container that does not parse must not read as "no
+// container": the probe returns the parse error, so the cycle reaps nothing
+// and the slot reap skipped note names the setting.
+func TestDoctorDogReapProtectUnparsableSettingSkipsReap(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeExternalContainerTown(t, townRoot, 3307, "-v")
+
+	p := doctorDogProbes(townRoot, func(string, slot.ReapOptions) (slot.ReapReport, error) {
+		t.Error("reap ran on an unparsable dolt.external_container")
+		return slot.ReapReport{}, nil
+	})
+	_, err := p.reap()
+	if err == nil || !strings.Contains(err.Error(), "dolt.external_container") {
+		t.Fatalf("reap probe error = %v, want one naming dolt.external_container", err)
+	}
+}

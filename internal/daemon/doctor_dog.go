@@ -193,8 +193,10 @@ func reapNotes(p doctorProbes, r *doctorReport) []string {
 	return notes
 }
 
-// doctorDogProbes wires doctorProbes to the live town.
-func doctorDogProbes(townRoot string) doctorProbes {
+// doctorDogProbes wires doctorProbes to the live town. reap is slot.Reap in
+// production; taking it as a parameter lets a test record the options the
+// doctor's reap probe passes without running docker.
+func doctorDogProbes(townRoot string, reap func(townRoot string, opts slot.ReapOptions) (slot.ReapReport, error)) doctorProbes {
 	return doctorProbes{
 		latency: func() (time.Duration, error) { return doltserver.MeasureQueryLatency(townRoot) },
 		conns: func() (int, int, error) {
@@ -223,7 +225,21 @@ func doctorDogProbes(townRoot string) doctorProbes {
 			}
 			return b.Age(time.Now()), true, nil
 		},
-		reap: func() (slot.ReapReport, error) { return slot.Reap(townRoot, slot.ReapOptions{}) },
+		reap: func() (slot.ReapReport, error) {
+			// The container running this town's Dolt is not debris however
+			// still it looks: name it Protected so the stale window cannot
+			// remove the production server (gt-90ph2). A setting that does
+			// not parse skips the reap rather than protecting nothing.
+			name, err := doltserver.DefaultConfig(townRoot).ExternalContainerSetting()
+			if err != nil {
+				return slot.ReapReport{}, err
+			}
+			var opts slot.ReapOptions
+			if name != "" {
+				opts.Protected = []string{name}
+			}
+			return reap(townRoot, opts)
+		},
 	}
 }
 
@@ -242,7 +258,7 @@ func (d *Daemon) runDoctorDog() {
 	defer release()
 
 	latencyMs, orphanCount, backupStaleSec := doctorDogThresholds(d.patrolConfig)
-	r := doctorDogFindings(doctorDogProbes(d.config.TownRoot), doctorLimits{
+	r := doctorDogFindings(doctorDogProbes(d.config.TownRoot, slot.Reap), doctorLimits{
 		latency:     time.Duration(latencyMs) * time.Millisecond,
 		orphans:     orphanCount,
 		backupStale: time.Duration(backupStaleSec) * time.Second,
