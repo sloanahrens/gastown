@@ -1755,6 +1755,10 @@ func polecatImageTrimContext(patrols *DaemonPatrolConfig) string {
 // The patrol counts as active here from cfg alone (its block present and
 // enabled); a caller holding the daemon's disabled list or container mode
 // applies that rule before calling.
+//
+// The function applies no activity rule itself: disabledPatrols and
+// container_off are not read here. TestWithPolecatImageTrimContextHonoursContainerOff
+// pins that the caller applies them.
 func PolecatImageTrimEnv(cfg *DaemonPatrolConfig) ([]string, error) {
 	if !IsPatrolEnabled(cfg, "tier_sweep") {
 		return nil, nil
