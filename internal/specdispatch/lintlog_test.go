@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"go/parser"
+	"go/token"
 	"slices"
 	"strings"
 	"testing"
@@ -152,5 +154,21 @@ func TestLintLogOutcomePath(t *testing.T) {
 	want := "/town/.runtime/spec-lint/outcomes.jsonl"
 	if got := OutcomePath("/town"); got != want {
 		t.Errorf("OutcomePath = %q, want %q", got, want)
+	}
+}
+
+// The file's header comment must be the package doc: a blank line between it
+// and the package clause leaves it detached, so godoc shows no package doc.
+func TestLintLogPackageCommentIsPackageDoc(t *testing.T) {
+	t.Parallel()
+	f, err := parser.ParseFile(token.NewFileSet(), "lintlog.go", nil, parser.ParseComments|parser.PackageClauseOnly)
+	if err != nil {
+		t.Fatalf("parse lintlog.go: %v", err)
+	}
+	if f.Doc == nil {
+		t.Fatal("package clause has no doc comment; the header is detached from it")
+	}
+	if got := f.Doc.Text(); !strings.HasPrefix(got, "Package specdispatch ") {
+		t.Errorf("package doc starts %q, want %q", got, "Package specdispatch ")
 	}
 }
