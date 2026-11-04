@@ -22,6 +22,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/beadsql"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/events"
 	gtgit "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/notify"
@@ -601,6 +602,40 @@ func (d *Daemon) exportDatabaseToJsonlFor(db, gitRepo, dataDir string, scrub boo
 	return total, nil
 }
 
+// jsonlDoltTarget decides which Dolt one JSONL export reads: the daemon's
+// managed server, the town's own endpoint, or neither (embedded mode).
+//
+// A town that sets no daemon.patrols.dolt_server still names its Dolt endpoint
+// in mayor/town.json — dolt.host, or dolt.container_host for a process in the
+// container — and embedded mode reads the files under that server instead. The
+// Mac gets away with that because the server's locks do not reach the host, but
+// where they are visible every database fails with "database locked"
+// (gt-gg9hv.4). Only a town naming no port at all has no server to read
+// through, so only then does the export stay embedded.
+//
+// The caller resolves the town's config with doltserver.DefaultConfig(townRoot);
+// this function is a pure decision over what it is handed.
+func jsonlDoltTarget(manager *DoltServerManager, town *doltserver.Config) (useServer bool, host string, port int, user, password string) {
+	if manager != nil && manager.IsEnabled() {
+		host, user = "127.0.0.1", doltserver.DefaultUser
+		if manager.config.Host != "" {
+			host = manager.config.Host
+		}
+		if manager.config.User != "" {
+			user = manager.config.User
+		}
+		return true, host, manager.config.Port, user, manager.config.Password
+	}
+	if town != nil && town.Port > 0 {
+		user = town.User
+		if user == "" {
+			user = doltserver.DefaultUser
+		}
+		return true, town.EffectiveHost(), town.Port, user, town.Password
+	}
+	return false, "", 0, "", ""
+}
+
 // jsonlExportCommand builds the `dolt sql` command for one JSONL export.
 //
 // The password travels in DOLT_CLI_PASSWORD, never in argv: argv is world
@@ -691,25 +726,10 @@ func (d *Daemon) exportTableToJsonl(table string, q beadsql.Query, dir, dataDir 
 	start := time.Now()
 
 	// Prefer querying the running server (accurate, up-to-date data) over embedded
-	// mode (reads on-disk state which may lag behind server commits).
-	// A managed server always has the town's endpoint (New drops a manager
-	// for a town that names none).
-	host := "127.0.0.1"
-	port := 0
-	user := "root"
-	password := ""
-	useServer := false
-	if d.doltServer != nil && d.doltServer.IsEnabled() {
-		if d.doltServer.config.Host != "" {
-			host = d.doltServer.config.Host
-		}
-		port = d.doltServer.config.Port
-		if d.doltServer.config.User != "" {
-			user = d.doltServer.config.User
-		}
-		password = d.doltServer.config.Password
-		useServer = true
-	}
+	// mode (reads on-disk state which may lag behind server commits). The town's
+	// config is read per export: the endpoint it names can change under a running
+	// daemon.
+	useServer, host, port, user, password := jsonlDoltTarget(d.doltServer, doltserver.DefaultConfig(d.config.TownRoot))
 
 	cmd := jsonlExportCommand(ctx, useServer, host, port, user, password, query, dataDir)
 

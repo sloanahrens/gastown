@@ -24,6 +24,7 @@ import (
 	"github.com/jonboulle/clockwork"
 
 	"github.com/steveyegge/gastown/internal/beadsql"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/events"
 	gtgit "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
@@ -879,6 +880,132 @@ func TestJSONLExportCommand_PasswordIsNotInArgv(t *testing.T) {
 	}
 	if entries != 1 {
 		t.Errorf("DOLT_CLI_PASSWORD appears %d times in the child env, want exactly 1", entries)
+	}
+}
+
+// An enabled manager names the server the export reads, whatever the town says.
+func TestJSONLDoltTargetUsesManagerWhenEnabled(t *testing.T) {
+	t.Parallel()
+	manager := &DoltServerManager{config: &DoltServerConfig{
+		Enabled:  true,
+		Host:     "manager.dolt.internal",
+		Port:     4406,
+		User:     "daemon",
+		Password: "manager-secret",
+	}}
+	town := &doltserver.Config{Host: "town.dolt.internal", Port: 3307, User: "town", Password: "town-secret"}
+
+	useServer, host, port, user, password := jsonlDoltTarget(manager, town)
+
+	if !useServer {
+		t.Fatal("jsonlDoltTarget with an enabled manager = embedded mode, want the manager's server")
+	}
+	if host != "manager.dolt.internal" || port != 4406 || user != "daemon" || password != "manager-secret" {
+		t.Errorf("jsonlDoltTarget = (%q, %d, %q, %q), want the manager's (host, port, user, password)",
+			host, port, user, password)
+	}
+}
+
+// With no manager, a town endpoint is the server the export reads: reading the
+// data files under a server whose locks the process can see fails there.
+func TestJSONLDoltTargetUsesTownEndpointWithoutManager(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                           string
+		host, user, password           string
+		wantHost, wantUser, wantPasswd string
+	}{
+		{"the town names a container host", "dolt.container.internal", "backup", "town-secret",
+			"dolt.container.internal", "backup", "town-secret"},
+		{"the town names a port and no host or user", "", "", "",
+			"127.0.0.1", "root", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := &doltserver.Config{Host: tt.host, Port: 3307, User: tt.user, Password: tt.password}
+
+			useServer, host, port, user, password := jsonlDoltTarget(nil, town)
+
+			if !useServer {
+				t.Fatal("jsonlDoltTarget with a town endpoint = embedded mode, want the town's server")
+			}
+			if host != tt.wantHost || port != 3307 || user != tt.wantUser || password != tt.wantPasswd {
+				t.Errorf("jsonlDoltTarget = (%q, %d, %q, %q), want (%q, %d, %q, %q)",
+					host, port, user, password, tt.wantHost, 3307, tt.wantUser, tt.wantPasswd)
+			}
+		})
+	}
+}
+
+// With neither a manager nor a town endpoint there is no server to read
+// through, so the export keeps its embedded fallback.
+func TestJSONLDoltTargetEmbeddedWhenTownNamesNoEndpoint(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		town *doltserver.Config
+	}{
+		{"no town config", nil},
+		{"a town that names a host but no port", &doltserver.Config{Host: "dolt.container.internal"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			useServer, host, port, user, password := jsonlDoltTarget(nil, tt.town)
+
+			if useServer {
+				t.Errorf("jsonlDoltTarget = server %q:%d (user %q), want embedded mode", host, port, user)
+			}
+			if port != 0 || user != "" || password != "" {
+				t.Errorf("jsonlDoltTarget in embedded mode = (%q, %d, %q, %q), want no target values",
+					host, port, user, password)
+			}
+		})
+	}
+}
+
+// Whichever target jsonlDoltTarget chooses, the command it builds keeps the
+// password out of argv.
+func TestJSONLExportCommandNeverPutsThePasswordInArgv(t *testing.T) {
+	t.Parallel()
+	const managerSecret = "m4nager-password"
+	const townSecret = "t0wn-password"
+	tests := []struct {
+		name   string
+		target func() (bool, string, int, string, string)
+		secret string
+	}{
+		{"the manager's target", func() (bool, string, int, string, string) {
+			return jsonlDoltTarget(&DoltServerManager{config: &DoltServerConfig{
+				Enabled: true, Port: 4406, Password: managerSecret,
+			}}, nil)
+		}, managerSecret},
+		{"the town's target", func() (bool, string, int, string, string) {
+			return jsonlDoltTarget(nil, &doltserver.Config{Port: 3307, Password: townSecret})
+		}, townSecret},
+		{"no endpoint", func() (bool, string, int, string, string) {
+			return jsonlDoltTarget(nil, nil)
+		}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			useServer, host, port, user, password := tt.target()
+			cmd := jsonlExportCommand(context.Background(), useServer, host, port, user, password, "SELECT 1", t.TempDir())
+
+			for _, arg := range cmd.Args {
+				if tt.secret != "" && strings.Contains(arg, tt.secret) {
+					t.Fatalf("password appears in argv: %v", cmd.Args)
+				}
+			}
+			if slices.Contains(cmd.Args, "-p") {
+				t.Errorf("argv still passes -p: %v", cmd.Args)
+			}
+			if got := envValue(cmd.Env, "DOLT_CLI_PASSWORD"); got != tt.secret {
+				t.Errorf("DOLT_CLI_PASSWORD = %q, want %q from the chosen target", got, tt.secret)
+			}
+		})
 	}
 }
 
