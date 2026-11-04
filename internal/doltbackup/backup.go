@@ -46,13 +46,31 @@ func Root(home string) string {
 	return filepath.Join(home, "gt-backups", "dolt")
 }
 
-// DefaultRoot is Root for the current user's home directory.
+// RootEnv names the environment variable that overrides DefaultRoot. A
+// container daemon sets it to the directory the Dolt server shares with it.
+const RootEnv = "GT_DOLT_BACKUP_ROOT"
+
+// DefaultRoot is the backup root for the current user: RootEnv when it is set,
+// otherwise Root for the user's home directory.
 func DefaultRoot() (string, error) {
-	home, err := os.UserHomeDir()
+	return defaultRoot(os.LookupEnv, os.UserHomeDir)
+}
+
+// defaultRoot takes the environment and the home directory as parameters so
+// tests inject both. A set RootEnv must be an absolute path; an empty or
+// relative value is an error, never a fallback to the home directory.
+func defaultRoot(lookup func(string) (string, bool), home func() (string, error)) (string, error) {
+	if v, ok := lookup(RootEnv); ok {
+		if !filepath.IsAbs(v) {
+			return "", fmt.Errorf("%s must be an absolute path, got %q", RootEnv, v)
+		}
+		return filepath.Clean(v), nil
+	}
+	h, err := home()
 	if err != nil {
 		return "", err
 	}
-	return Root(home), nil
+	return Root(h), nil
 }
 
 // Dir is the final directory of the night that contains t (in t's location).
