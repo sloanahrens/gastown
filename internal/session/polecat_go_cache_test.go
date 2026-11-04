@@ -1,18 +1,37 @@
 package session
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
-// The image sets no Go cache paths. The shared cache claim carries the caches
-// the seed built, and the openshell contract points GOCACHE and GOMODCACHE into
-// it when the kubernetes profile names the claim (gt-nposw, gt-yvnsa). An ENV
-// here would apply wherever the contract does not reach, and a sandbox with no
-// claim would compile into a /tmp cache that dies with its container.
-func TestDockerfileHasNoGoCacheEnv(t *testing.T) {
+// The image sets both Go cache paths to writable defaults under /tmp. A pod with
+// no cache claim, such as the tier-sweep runner, gets neither variable from the
+// sandbox contract, so an unset GOCACHE sends Go to $HOME/go under /sandbox,
+// which is not writable there (gt-84ylj). A sandbox with a claim overrides both
+// through the contract (gt-nposw).
+func TestDockerfileSetsWritableGoCacheDefaults(t *testing.T) {
 	t.Parallel()
 	env := dockerfileEnv(t)
 	for _, key := range []string{"GOCACHE", "GOMODCACHE"} {
-		if v, ok := env[key]; ok {
-			t.Errorf("the Dockerfile sets %s=%q: the sandbox contract points the cache into the claim, so the image must leave it unset", key, v)
+		v, ok := env[key]
+		if !ok {
+			t.Errorf("the Dockerfile leaves %s unset: a pod with no cache claim would build under /sandbox", key)
+			continue
+		}
+		if !strings.HasPrefix(v, "/tmp/") {
+			t.Errorf("the Dockerfile sets %s=%q: the unseeded default must be a path under /tmp", key, v)
+		}
+	}
+	for _, in := range dockerfileInstructions(t) {
+		if !strings.HasPrefix(in, "ENV ") {
+			continue
+		}
+		for _, kv := range strings.Fields(in)[1:] {
+			k, v, _ := strings.Cut(kv, "=")
+			if (k == "GOCACHE" || k == "GOMODCACHE") && strings.HasPrefix(v, "/sandbox/") {
+				t.Errorf("%q sets %s under /sandbox, which a pod with no cache claim cannot write", in, k)
+			}
 		}
 	}
 }
