@@ -284,10 +284,35 @@ func TestBuildBinariesStampsGTWithTheNineCharacterCommit(t *testing.T) {
 	if _, err := b.BuildBinaries(context.Background(), short); err != nil {
 		t.Fatalf("BuildBinaries: %v", err)
 	}
-	want := []string{gtCommitFlag + testRev[:9]}
+	want := []string{gtCommitFlag + testRev[:gtCommitStampLen]}
 	if got := ldflagsOf(run.calls[0].argv); !reflect.DeepEqual(got, want) {
-		t.Errorf("gt build ldflags = %q, want the first nine characters of the resolved %s: %q", got, testRev, want)
+		t.Errorf("gt build ldflags = %q, want the first %d characters of the resolved %s: %q", got, gtCommitStampLen, testRev, want)
 	}
+}
+
+// TestPlanStampsACommitShorterThanTheStampWhole: Plan stamps the commit the
+// caller named, and it accepts one as short as seven hex characters, so a
+// commit shorter than gtCommitStampLen is stamped whole: the plan names the
+// commit it was given (gt-gg9hv.20).
+func TestPlanStampsACommitShorterThanTheStampWhole(t *testing.T) {
+	t.Parallel()
+	const short = "0123456"
+	b := planBuilder(t)
+	lines, err := b.Plan(short)
+	if err != nil {
+		t.Fatalf("Plan(%q): %v", short, err)
+	}
+	want := gtCommitFlag + short + " "
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "build gt: ") {
+			continue
+		}
+		if !strings.Contains(line, want) {
+			t.Errorf("gt plan line = %q, want it to stamp %q", line, gtCommitFlag+short)
+		}
+		return
+	}
+	t.Fatalf("plan has no build gt: line:\n%s", strings.Join(lines, "\n"))
 }
 
 // TestBuildBinariesStillChecksOutTheFullCommit: the short stamp names the build
