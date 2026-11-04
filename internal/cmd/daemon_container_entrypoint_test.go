@@ -2081,9 +2081,51 @@ func TestEntrypointPluginsSkipsAPluginWhoseDefinitionIsNotAFile(t *testing.T) {
 	}
 }
 
+// A plugin directory the image links in is installed like a real one: the
+// directory entry is a symlink, so the check must follow it.
+func TestEntrypointPluginsFollowsASymlinkedPluginDirectory(t *testing.T) {
+	t.Parallel()
+	imageDir := t.TempDir()
+	townRoot := t.TempDir()
+	target := t.TempDir()
+	writeEntrypointFile(t, filepath.Join(target, "app-promote", "app-promote"), []byte("linux binary"), 0o755)
+	if err := os.Symlink(filepath.Join(target, "app-promote"), filepath.Join(imageDir, "app-promote")); err != nil {
+		t.Fatalf("symlink the plugin directory: %v", err)
+	}
+	dest := pluginTownDir(t, townRoot, "app-promote")
+
+	if err := installPluginBinaries(imageDir, townRoot, func(string, ...any) {}); err != nil {
+		t.Fatalf("installPluginBinaries: %v", err)
+	}
+
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("read installed binary: %v", err)
+	}
+	if string(got) != "linux binary" {
+		t.Errorf("installed binary = %q, want the linked plugin's bytes", got)
+	}
+}
+
+// A dangling link in the image is a broken image, not a plugin to skip: the
+// start refuses and names the entry.
+func TestEntrypointPluginsRefusesADanglingSymlink(t *testing.T) {
+	t.Parallel()
+	imageDir := t.TempDir()
+	townRoot := t.TempDir()
+	if err := os.Symlink(filepath.Join(t.TempDir(), "gone"), filepath.Join(imageDir, "app-promote")); err != nil {
+		t.Fatalf("symlink the missing target: %v", err)
+	}
+
+	err := installPluginBinaries(imageDir, townRoot, func(string, ...any) {})
+	if err == nil || !strings.Contains(err.Error(), "app-promote") {
+		t.Fatalf("error = %v, want a refusal naming the dangling entry", err)
+	}
+}
+
 // The plugin binaries are in place before the daemon starts: the install runs
 // for the town root, immediately before the exec.
-func TestContainerEntrypointInstallsPluginsBeforeTheDaemonExec(t *testing.T) {
+func TestEntrypointPluginsInstallBeforeTheDaemonExec(t *testing.T) {
 	t.Parallel()
 	r := townRig()
 	if err := runContainerEntrypoint(r.entrypoint()); err != nil {
@@ -2098,7 +2140,7 @@ func TestContainerEntrypointInstallsPluginsBeforeTheDaemonExec(t *testing.T) {
 }
 
 // A failed plugin copy refuses and the daemon is never exec'd.
-func TestContainerEntrypointAPluginInstallFailureStopsBeforeTheDaemonExec(t *testing.T) {
+func TestEntrypointPluginsFailureStopsBeforeTheDaemonExec(t *testing.T) {
 	t.Parallel()
 	r := townRig()
 	r.pluginErr = errors.New("copy failed")
