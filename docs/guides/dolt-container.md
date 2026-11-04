@@ -141,7 +141,8 @@ dolt version | grep -q " $TAG" || { echo "host dolt is not $TAG; stop the rehear
 
 Print the plan. The rehearsal container mounts its own empty backup directory,
 so the live backup root never enters a throwaway container, and it keeps the
-plan's default 12 GiB cap, the same cap the cutover starts with.
+plan's default 12 GiB cap. The cutover starts with that same default unless it
+passes `--memory-gib`; the live gt-dolt container runs 8 GiB.
 
 ```bash
 gt dolt container plan --name gt-dolt-rehearsal --image "$IMAGE" \
@@ -258,11 +259,12 @@ dolt --host 127.0.0.1 --port 3317 --user root --password "" --no-tls sql -q 'SEL
 `wait $BURST` waits for the burst's jobs only: a bare `wait` would also wait on
 the host copy's server, which never exits.
 
-Record the highest memory reading against the 12 GiB cap. The cap stands only
-if that reading stays under 80 percent of it, 9.6 GiB; otherwise the cutover
+Record the highest memory reading against the plan's default 12 GiB cap, which
+this container keeps; the live gt-dolt container runs 8 GiB. The cap stands only
+if that reading stays under 80 percent of 12 GiB, 9.6 GiB; otherwise the cutover
 plan takes a higher `--memory-gib` and this rehearsal repeats with the same
-value. A container
-killed at its cap fails the last check, which stops the procedure.
+value. A container killed at its cap fails the last check, which stops the
+procedure.
 
 ### 1.8 Remove the rehearsal and return the town to service
 
@@ -344,9 +346,9 @@ gt dolt container plan --name gt-dolt --image "$IMAGE" --config "$CONTAINER_CFG"
 docker start gt-dolt
 ```
 
-The defaults are the town's `~/gt/.dolt-data`, the daemon's backup root, 12 GiB
-and port 3307. Raise the memory only to the value step 1.7 chose, with
-`--memory-gib`.
+The defaults are the town's `~/gt/.dolt-data`, the daemon's backup root, the
+plan's 12 GiB memory cap and port 3307; the live gt-dolt container runs 8 GiB.
+Raise the memory only to the value step 1.7 chose, with `--memory-gib`.
 
 ```bash
 CUTOVER_READY=0
@@ -465,13 +467,14 @@ proven for the town's real load.
 - **Bind-mount speed for a database of about 2 GB.** The rehearsal proves
   correctness on the restored copy, not write and fsync speed through the bind
   mount on the operator's Docker disk.
-- **The right memory limit.** The live gt-dolt container was raised to 24 GiB on
-  2026-11-04, after the host showed 14.6 GB resident; the host server has also
-  shown a 10.2 GB peak footprint. 24 GiB is a starting cap, not a measured one.
-  `gt dolt container plan` still defaults to 12 GiB, so a cutover that passes no
-  `--memory-gib` starts below the live cap. Step 1.7's reading under the burst
-  and the gc decides whether the cutover's cap stands or needs a higher
-  `--memory-gib`.
+- **The right memory limit.** The live gt-dolt container runs with an 8 GiB cap,
+  measured on 2026-11-04 on a restore of the gt backup: with archive level 0, a
+  default gc and a `--full` gc both finish inside 8 GiB; with archive level 1,
+  both are OOM-killed at 8 GiB. The host server has shown 14.6 GB resident and a
+  10.2 GB peak footprint. `gt dolt container plan` defaults to 12 GiB, so a
+  cutover that passes no `--memory-gib` starts above the live cap. Step 1.7's
+  reading under the burst and the gc decides whether the cutover's cap stands or
+  needs a different `--memory-gib`.
 
 ## Numbers to record
 
