@@ -2,6 +2,8 @@ package daemonimage
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -90,6 +92,192 @@ func TestBuildPluginsLeavesNothingOnFailure(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestBuildPluginsMoveRollsBack: when a plugin cannot be placed after another
+// was, the call puts the build context back as it found it instead of leaving a
+// partial plugin set there.
+func TestBuildPluginsMoveRollsBack(t *testing.T) {
+	t.Parallel()
+	first, second := imagePlugins[0], imagePlugins[1]
+	// blockSecond puts a directory where the second plugin's binary goes, so its
+	// rename into the build context fails after the first plugin's has succeeded.
+	blockSecond := func(t *testing.T, b Builder) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(b.Out, "plugins", second.name, second.name), 0o755); err != nil {
+			t.Fatalf("blocking the %s plugin: %v", second.name, err)
+		}
+	}
+	refuse := func(t *testing.T, b Builder) {
+		t.Helper()
+		paths, err := b.BuildPlugins(context.Background(), testRev)
+		if err == nil || !strings.Contains(err.Error(), "cannot move "+second.name) {
+			t.Fatalf("BuildPlugins = %q, %v; want an error naming the %s move", paths, err, second.name)
+		}
+		if len(paths) != 0 {
+			t.Errorf("a failed move listed %q, want no paths", paths)
+		}
+	}
+
+	t.Run("the plugin placed before the failure is taken back out", func(t *testing.T) {
+		t.Parallel()
+		b, _ := builderFor(t)
+		blockSecond(t, b)
+		refuse(t, b)
+		dir := filepath.Join(b.Out, "plugins", first.name)
+		if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("the failed move left %s in the build context (stat: %v), want it taken back out", dir, err)
+		}
+	})
+
+	t.Run("a previous build's binary is put back", func(t *testing.T) {
+		t.Parallel()
+		b, _ := builderFor(t)
+		binary := filepath.Join(b.Out, "plugins", first.name, first.name)
+		if err := os.MkdirAll(filepath.Dir(binary), 0o755); err != nil {
+			t.Fatalf("making the %s plugin directory: %v", first.name, err)
+		}
+		if err := os.WriteFile(binary, []byte("an earlier build"), 0o600); err != nil {
+			t.Fatalf("writing the earlier %s binary: %v", first.name, err)
+		}
+		blockSecond(t, b)
+		refuse(t, b)
+		body, err := os.ReadFile(binary)
+		if err != nil {
+			t.Fatalf("reading the %s binary back: %v", first.name, err)
+		}
+		if got := string(body); got != "an earlier build" {
+			t.Errorf("the %s binary reads %q after the failed move, want the earlier build's binary", first.name, got)
+		}
+	})
+}
+
+// TestBuildPluginsFailsWhenTheMoveCannotBeUndone drives every failure of the
+// move and of its rollback through the filesystem seams: the call returns its
+// error and no paths, and what it could not undo it names rather than dropping.
+func TestBuildPluginsFailsWhenTheMoveCannotBeUndone(t *testing.T) {
+	t.Parallel()
+	first, second := imagePlugins[0], imagePlugins[1]
+	firstPath := func(b Builder) string { return filepath.Join(b.Out, "plugins", first.name, first.name) }
+	// blockSecond puts a directory where the second plugin's binary goes, so its
+	// rename into the build context fails after the first plugin's succeeded.
+	blockSecond := func(t *testing.T, b Builder) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(b.Out, "plugins", second.name, second.name), 0o755); err != nil {
+			t.Fatalf("blocking the %s plugin: %v", second.name, err)
+		}
+	}
+	// earlierBuild writes the first plugin's binary as a previous build left it,
+	// the file a failed move has to put back.
+	earlierBuild := func(t *testing.T, b Builder) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(firstPath(b)), 0o755); err != nil {
+			t.Fatalf("making the %s plugin directory: %v", first.name, err)
+		}
+		if err := os.WriteFile(firstPath(b), []byte("an earlier build"), 0o600); err != nil {
+			t.Fatalf("writing the earlier %s binary: %v", first.name, err)
+		}
+	}
+	// renamesRefusedAt refuses the renames whose call numbers it is given and
+	// performs the others, so a test can stop the move and its rollback at the
+	// steps it names.
+	renamesRefusedAt := func(ns ...int) func(string, string) error {
+		refuse := make(map[int]bool, len(ns))
+		for _, n := range ns {
+			refuse[n] = true
+		}
+		calls := 0
+		return func(oldpath, newpath string) error {
+			calls++
+			if refuse[calls] {
+				return errors.New("rename refused")
+			}
+			return os.Rename(oldpath, newpath)
+		}
+	}
+	wantEarlier := func(t *testing.T, b Builder) {
+		t.Helper()
+		body, err := os.ReadFile(firstPath(b))
+		if err != nil {
+			t.Fatalf("reading the %s binary back: %v", first.name, err)
+		}
+		if got := string(body); got != "an earlier build" {
+			t.Errorf("the %s binary reads %q, want the earlier build's binary put back", first.name, got)
+		}
+	}
+	refuse := func(t *testing.T, b Builder, want ...string) {
+		t.Helper()
+		paths, err := b.BuildPlugins(context.Background(), testRev)
+		if err == nil {
+			t.Fatalf("BuildPlugins = %q, nil; want an error", paths)
+		}
+		for _, w := range want {
+			if !strings.Contains(err.Error(), w) {
+				t.Errorf("the error %q does not name %q", err, w)
+			}
+		}
+		if len(paths) != 0 {
+			t.Errorf("a failed move listed %q, want no paths", paths)
+		}
+	}
+
+	t.Run("the file already at the path cannot be moved aside", func(t *testing.T) {
+		t.Parallel()
+		b, _ := builderFor(t)
+		earlierBuild(t, b)
+		b.rename = func(oldpath, newpath string) error {
+			if strings.Contains(newpath, "replaced") {
+				return errors.New("rename refused")
+			}
+			return os.Rename(oldpath, newpath)
+		}
+		refuse(t, b, "cannot move the "+first.name+" already in", "rename refused")
+		wantEarlier(t, b)
+	})
+
+	t.Run("the binary cannot be renamed into place after the file it replaces was set aside", func(t *testing.T) {
+		t.Parallel()
+		b, _ := builderFor(t)
+		earlierBuild(t, b)
+		b.rename = renamesRefusedAt(2)
+		refuse(t, b, "cannot move "+first.name+" into")
+		wantEarlier(t, b)
+	})
+
+	t.Run("the file replaced cannot be put back", func(t *testing.T) {
+		t.Parallel()
+		b, _ := builderFor(t)
+		earlierBuild(t, b)
+		b.rename = renamesRefusedAt(2, 3)
+		refuse(t, b, "cannot move "+first.name+" into", "cannot undo the plugin move", "rename refused")
+	})
+
+	t.Run("a placed binary cannot be taken back out", func(t *testing.T) {
+		t.Parallel()
+		b, _ := builderFor(t)
+		blockSecond(t, b)
+		b.remove = func(path string) error {
+			if path == firstPath(b) {
+				return errors.New("remove refused")
+			}
+			return os.Remove(path)
+		}
+		refuse(t, b, "cannot move "+second.name, "cannot undo the plugin move", "remove refused")
+	})
+
+	t.Run("a directory the move made cannot be removed", func(t *testing.T) {
+		t.Parallel()
+		b, _ := builderFor(t)
+		blockSecond(t, b)
+		firstDir := filepath.Dir(firstPath(b))
+		b.remove = func(path string) error {
+			if path == firstDir {
+				return errors.New("remove refused")
+			}
+			return os.Remove(path)
+		}
+		refuse(t, b, "cannot move "+second.name, "cannot undo the plugin move", "remove refused")
+	})
 }
 
 // TestBuildPluginsRefusesBeforeAnyBuild covers every refusal: each one comes
