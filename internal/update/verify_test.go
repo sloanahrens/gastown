@@ -305,6 +305,11 @@ func TestSameCommit(t *testing.T) {
 		{"empty", "", "", false},
 		{"full against a short build it does not start with", verifyTestWant, "fedcba987", false},
 		{"trailing newline from a command", verifyTestWant + "\n", verifyTestShort, true},
+		{"six characters equal to themselves", "abc123", "abc123", false},
+		{"one side empty", "", verifyTestWant, false},
+		{"only whitespace", "       ", "       ", false},
+		{"seven-character prefix", "0123456", verifyTestWant, true},
+		{"whitespace around both", "  " + verifyTestShort + "\n", "\t" + verifyTestWant + " ", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
