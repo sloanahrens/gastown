@@ -26,8 +26,13 @@ func newRealRepo(t *testing.T) string {
 	realGitRun(t, dir, "config", "commit.gpgsign", "false")
 	// A local hooksPath shadows the host's global one. The squash commit runs
 	// through realGit, which inherits the host config, so a global pre-commit
-	// hook would otherwise block it.
-	realGitRun(t, dir, "config", "core.hooksPath", t.TempDir())
+	// hook would otherwise block it. Git must resolve hooks to that override,
+	// or the shadowing is not in effect.
+	hooksDir := t.TempDir()
+	realGitRun(t, dir, "config", "core.hooksPath", hooksDir)
+	if got := realGitRun(t, dir, "rev-parse", "--git-path", "hooks"); got != hooksDir {
+		t.Fatalf("hooks resolve to %q, want the core.hooksPath override %q", got, hooksDir)
+	}
 	realGitCommit(t, dir, "README.md", "# Test\n", "initial commit")
 	return dir
 }
