@@ -1229,9 +1229,10 @@ func TestContainerEntrypointRefusesAPICredentials(t *testing.T) {
 	})
 }
 
-// The token file's trimmed contents become CLAUDE_CODE_OAUTH_TOKEN in the exec'd
-// daemon's environment and nowhere else: not in an argv, not in the environment
-// of the install or git commands, which run through the argv seam.
+// The token file's contents, whitespace removed, become CLAUDE_CODE_OAUTH_TOKEN
+// in the exec'd daemon's environment and nowhere else: not in an argv, not in
+// the environment of the install or git commands, which run through the argv
+// seam.
 func TestContainerEntrypointLoadsTheOMToken(t *testing.T) {
 	t.Parallel()
 	for _, rigOf := range []struct {
@@ -1311,6 +1312,140 @@ func TestContainerEntrypointRefusesAnUnusableTokenFile(t *testing.T) {
 			}
 			if len(r.calls) != 0 {
 				t.Errorf("a refusal ran %d commands, want none", len(r.calls))
+			}
+		})
+	}
+}
+
+// A token saved hard-wrapped has a line break inside it, which the claude CLI
+// rejects, so the loader joins the token's parts rather than trimming only the
+// ends.
+func TestEntrypointOMTokenStripsEmbeddedLineBreaks(t *testing.T) {
+	t.Parallel()
+	const path = "/run/secrets/om-token"
+	const token = "hardwrapped-om-token-0123456789"
+	for _, tc := range []struct {
+		name    string
+		content string
+	}{
+		{"split by a newline", token[:8] + "\n" + token[8:]},
+		{"split by a CRLF", token[:8] + "\r\n" + token[8:]},
+		{"split twice", token[:5] + "\n" + token[5:12] + "\r\n" + token[12:]},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := townRig()
+			r.omTokenFile = path
+			r.files = map[string]string{path: tc.content}
+
+			if err := runContainerEntrypoint(r.entrypoint()); err != nil {
+				t.Fatalf("runContainerEntrypoint: %v", err)
+			}
+			if len(r.execEnv) != 1 || r.execEnv[0] != "CLAUDE_CODE_OAUTH_TOKEN="+token {
+				t.Errorf("daemon environment additions = %d entries, want one value equal to the token with its line breaks removed", len(r.execEnv))
+			}
+		})
+	}
+}
+
+// Whitespace around the token, including a trailing newline or CRLF, is not
+// part of it and never reaches the environment.
+func TestEntrypointOMTokenStripsTrailingNewlineAndSpaces(t *testing.T) {
+	t.Parallel()
+	const path = "/run/secrets/om-token"
+	const token = "trimmed-om-token-0123456789"
+	for _, tc := range []struct {
+		name    string
+		content string
+	}{
+		{"a trailing newline", token + "\n"},
+		{"a trailing CRLF", token + "\r\n"},
+		{"surrounding spaces", "  " + token + "  "},
+		{"leading and trailing tabs", "\t" + token + "\t\n"},
+		{"trailing spaces then a CRLF", token + "  \r\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := townRig()
+			r.omTokenFile = path
+			r.files = map[string]string{path: tc.content}
+
+			if err := runContainerEntrypoint(r.entrypoint()); err != nil {
+				t.Fatalf("runContainerEntrypoint: %v", err)
+			}
+			if len(r.execEnv) != 1 || r.execEnv[0] != "CLAUDE_CODE_OAUTH_TOKEN="+token {
+				t.Errorf("daemon environment additions = %d entries, want one value equal to the token", len(r.execEnv))
+			}
+		})
+	}
+}
+
+// A file holding only whitespace is empty once the whitespace is removed: it
+// refuses with the empty-file message and runs nothing.
+func TestEntrypointOMTokenEmptyAfterStripIsRefused(t *testing.T) {
+	t.Parallel()
+	const path = "/run/secrets/om-token"
+	for _, tc := range []struct {
+		name    string
+		content string
+	}{
+		{"a newline", "\n"},
+		{"a CRLF", "\r\n"},
+		{"spaces and tabs", " \t "},
+		{"every whitespace character", " \t\r\n \t\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := scratchRig()
+			r.omTokenFile = path
+			r.files = map[string]string{path: tc.content}
+
+			err := runContainerEntrypoint(r.entrypoint())
+
+			if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "is empty") {
+				t.Fatalf("error = %v, want a refusal naming the path and saying the file is empty", err)
+			}
+			if len(r.calls) != 0 {
+				t.Errorf("a refusal ran %d commands, want none", len(r.calls))
+			}
+		})
+	}
+}
+
+// No returned error carries the token or any 8-character run of it: not when
+// the underlying read error's text holds it, and not when a later refusal
+// happens after the token was loaded.
+func TestEntrypointOMTokenErrorsNeverContainTheToken(t *testing.T) {
+	t.Parallel()
+	const path = "/run/secrets/om-token"
+	const token = "leakchecked-xyzzy-0123456789"
+	for _, tc := range []struct {
+		name  string
+		setup func(*entrypointRig)
+	}{
+		{"the read error embeds the token", func(r *entrypointRig) {
+			r.readErr = errors.New("open " + path + ": boom " + token)
+		}},
+		{"a later refusal after the token loaded", func(r *entrypointRig) {
+			r.files = map[string]string{path: "  " + token + "\n"}
+			r.kind[filepath.Join(entrypointTown, config.ScratchInstallIncompleteMarker)] = entryRegular
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := townRig()
+			r.omTokenFile = path
+			tc.setup(r)
+
+			err := runContainerEntrypoint(r.entrypoint())
+
+			if err == nil {
+				t.Fatal("runContainerEntrypoint: want a refusal, got none")
+			}
+			for i := 0; i+8 <= len(token); i++ {
+				if strings.Contains(err.Error(), token[i:i+8]) {
+					t.Errorf("the refusal carries an 8-character run of the token at offset %d", i)
+				}
 			}
 		})
 	}
