@@ -15,6 +15,9 @@ import (
 // argv after it, and the directory and environment the daemon built it with.
 type cliCall struct {
 	name string
+	// path is the executable the call ran, for a test that pins which of a
+	// plugin's builds the daemon chose.
+	path string
 	args []string
 	dir  string
 	env  []string
@@ -73,7 +76,7 @@ func newFakeCLIFor(answer func(c cliCall) cliReply) *fakeCLI {
 // run is the cmdRunFunc. Output the caller wired to its own writers is
 // written there too, as a real run would.
 func (f *fakeCLI) run(cmd *exec.Cmd) ([]byte, []byte, error) {
-	c := cliCall{name: filepath.Base(cmd.Path), dir: cmd.Dir, env: slices.Clone(cmd.Env)}
+	c := cliCall{name: filepath.Base(cmd.Path), path: cmd.Path, dir: cmd.Dir, env: slices.Clone(cmd.Env)}
 	if len(cmd.Args) > 1 {
 		c.args = slices.Clone(cmd.Args[1:])
 	}
