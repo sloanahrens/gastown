@@ -30,19 +30,22 @@ lessons the lint cannot check.
 | the bead is work, not an epic, an agent bead, a wisp or another runtime family | `not a work bead` |
 | every `## ` section in the template, present and non-empty (Goal, Constraints, Out of scope, Gate, Size) | `## <section>` |
 | 1-6 acceptance items (3-6 preferred) | `acceptance` |
-| every repo file the Constraints names as a file it changes exists on the target branch | `## Constraints` |
+| every repo file the `## Files` section names, or without one the Constraints names, as a file it changes exists on the target branch | `## Files`, or `## Constraints` without one |
 | Size says one worker, one MR | `size` |
 
 A non-work bead is refused before any shape is read: no sections are required
 of an epic, and the reason names what the bead is (`type epic`, `label
 gt:agent`, `type wisp`).
 
-The path check reads its paths from the Constraints section (gt-7t1im), and
-checks only the tokens that read as repo files — a slash-separated path whose
-last segment carries an extension — so a directory, a package, a command, a
-symbol, a glob and a URL are passed rather than guessed at. Two cues pass a
-path the branch need not hold, and each reads the words directly beside the
-path, on its own line, never a cue elsewhere on the line:
+The path check reads its paths from the `## Files` section when the bead has
+one, and that section is its only source (gt-hgt9j.10). A bead without one
+reads its paths from the Constraints section (gt-7t1im), and checks only the
+tokens that read as repo files — a slash-separated path whose last segment
+carries an extension — so a directory, a package, a command, a symbol, a glob
+and a URL are passed rather than guessed at. On a bead without a `## Files`
+section, two cues pass a path the branch need not hold, and each reads the
+words directly beside the path, on its own line, never a cue elsewhere on the
+line:
 
 - a path the spec adds: "new file X", "adds X", "add X", "create X", or
   "X does not exist yet" / "X will be created" in the Goal or the Constraints;
