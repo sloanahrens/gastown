@@ -42,6 +42,13 @@ COPY --chmod=0755 gt /usr/local/bin/gt
 COPY --chmod=0755 bd /usr/local/bin/bd
 COPY --chmod=0755 om /usr/local/bin/om
 
+# The plugins the container daemon runs itself, cross-compiled for linux/arm64
+# from the same rev as the binaries above: the town's plugin directories hold
+# macOS builds the container cannot exec. polecat-image, tool-updater and hm-sync
+# run only on the host, so they are not shipped here.
+COPY --chmod=0755 plugins/app-promote/app-promote /usr/local/lib/gt/plugins/app-promote/app-promote
+COPY --chmod=0755 plugins/town-metrics/town-metrics /usr/local/lib/gt/plugins/town-metrics/town-metrics
+
 # The claude CLI om's reviewer runs, at the version templates.ClaudeCLIVersion
 # names. The deployer's FetchClaudeCLI downloads it, verifies its sha256 against
 # templates.ClaudeCLISHA256, and places it in the build context; nothing here

@@ -17,7 +17,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
@@ -118,6 +117,20 @@ type binary struct {
 	stampsBuildID bool
 }
 
+// plugin is one plugin the image carries: its directory name in the town's
+// plugins/ and the package under the gt checkout it is built from.
+type plugin struct{ name, pkg string }
+
+// imagePlugins are the plugins the container daemon runs itself, in the order
+// BuildPlugins builds them. The town's plugin directories hold macOS builds the
+// container cannot exec, so the image carries its own linux/arm64 builds.
+// polecat-image, tool-updater and hm-sync run only on the host and are not
+// built here (gt-gg9hv.9).
+var imagePlugins = []plugin{
+	{name: "app-promote", pkg: "./plugins/app-promote"},
+	{name: "town-metrics", pkg: "./plugins/town-metrics"},
+}
+
 // BuildBinaries writes gt, bd and om to b.Out and returns their paths in that
 // order. Every refusal comes before the first build runs, so a refused call
 // writes nothing. Each binary is built in a clean worktree of its commit and is
@@ -177,17 +190,9 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 // anything runs, and returns rev and the bd commit trimmed. It reads nothing
 // from the host, which is what lets Plan refuse exactly what a build would.
 func (b Builder) checkBuildInputs(rev string) (string, string, error) {
-	if b.Out == "" {
-		return "", "", errors.New("daemonimage: no output directory for the binaries")
-	}
-	if !filepath.IsAbs(b.Out) {
-		return "", "", fmt.Errorf("daemonimage: output directory %q is not absolute; a build runs in a worktree, not in the caller's directory", b.Out)
-	}
-	if rev = strings.TrimSpace(rev); rev == "" {
-		return "", "", errors.New("daemonimage: no rev to stamp gt with")
-	}
-	if !isCommit(rev) {
-		return "", "", fmt.Errorf("daemonimage: rev %q is not a 7+ character hex commit", rev)
+	rev, err := b.checkOutAndRev(rev, "the binaries")
+	if err != nil {
+		return "", "", err
 	}
 	for _, src := range []struct{ name, dir string }{{"gt", b.GTSrc}, {"bd", b.BDSrc}, {"om", b.OMSrc}} {
 		if src.dir == "" {
@@ -207,6 +212,94 @@ func (b Builder) checkBuildInputs(rev string) (string, string, error) {
 		return "", "", fmt.Errorf("daemonimage: bd commit %q is not a 7+ character hex commit", bdCommit)
 	}
 	return rev, bdCommit, nil
+}
+
+// checkPluginInputs refuses the inputs BuildPlugins cannot build from, before
+// anything runs, and returns rev trimmed. It reads nothing from the host.
+func (b Builder) checkPluginInputs(rev string) (string, error) {
+	rev, err := b.checkOutAndRev(rev, "the plugins")
+	if err != nil {
+		return "", err
+	}
+	if b.GTSrc == "" {
+		return "", errors.New("daemonimage: no gt source checkout named")
+	}
+	for _, p := range []struct{ name, dir string }{{"output directory", b.Out}, {"gt source", b.GTSrc}} {
+		if err := refuseCanonicalClone(p.name, p.dir); err != nil {
+			return "", err
+		}
+	}
+	return rev, nil
+}
+
+// checkOutAndRev refuses the output directory and rev both BuildBinaries and
+// BuildPlugins build from, and returns rev trimmed. what names the build in the
+// refusal: the binaries or the plugins.
+func (b Builder) checkOutAndRev(rev, what string) (string, error) {
+	if b.Out == "" {
+		return "", fmt.Errorf("daemonimage: no output directory for %s", what)
+	}
+	if !filepath.IsAbs(b.Out) {
+		return "", fmt.Errorf("daemonimage: output directory %q is not absolute; a build runs in a worktree, not in the caller's directory", b.Out)
+	}
+	if rev = strings.TrimSpace(rev); rev == "" {
+		return "", errors.New("daemonimage: no rev to build from")
+	}
+	if !isCommit(rev) {
+		return "", fmt.Errorf("daemonimage: rev %q is not a 7+ character hex commit", rev)
+	}
+	return rev, nil
+}
+
+// BuildPlugins writes the image's plugin binaries to b.Out/plugins/<name>/<name>
+// and returns their paths in imagePlugins order. Each is built from a clean
+// worktree of b.GTSrc at rev, so it runs the code the image's gt does. The
+// staging and cleanup rules are BuildBinaries': every refusal comes before the
+// first build, a failed build returns its error and no paths, and nothing is
+// moved into b.Out until all of them have built.
+func (b Builder) BuildPlugins(ctx context.Context, rev string) ([]string, error) {
+	if b.Run == nil {
+		return nil, errors.New("daemonimage: no runner to build the plugins with")
+	}
+	if b.Git == nil {
+		return nil, errors.New("daemonimage: no git to resolve the commits with")
+	}
+	rev, err := b.checkPluginInputs(rev)
+	if err != nil {
+		return nil, err
+	}
+	gtCommit, err := b.resolve(b.GTSrc, rev)
+	if err != nil {
+		return nil, err
+	}
+	stage, err := os.MkdirTemp(b.Out, ".daemonimage-plugins-")
+	if err != nil {
+		return nil, fmt.Errorf("daemonimage: cannot stage the plugins in %s: %w", b.Out, err)
+	}
+	defer os.RemoveAll(stage)
+	env := bdbuild.Env(b.Environ)
+	builds := make([]binary, 0, len(imagePlugins))
+	for _, p := range imagePlugins {
+		builds = append(builds, binary{name: p.name, src: b.GTSrc, commit: gtCommit, pkg: p.pkg})
+	}
+	for _, build := range builds {
+		if err := b.build(ctx, build, stage, env); err != nil {
+			return nil, err
+		}
+	}
+	paths := make([]string, 0, len(builds))
+	for _, build := range builds {
+		dir := filepath.Join(b.Out, "plugins", build.name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("daemonimage: cannot make the plugin directory %s: %w", dir, err)
+		}
+		path := filepath.Join(dir, build.name)
+		if err := os.Rename(filepath.Join(stage, build.name), path); err != nil {
+			return nil, fmt.Errorf("daemonimage: cannot move %s into %s: %w", build.name, dir, err)
+		}
+		paths = append(paths, path)
+	}
+	return paths, nil
 }
 
 // IsCanonicalClone reports whether path is a rig's canonical clone,
@@ -352,8 +445,13 @@ func (b Builder) Plan(rev string) ([]string, error) {
 		fmt.Sprintf("build gt: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "gt"), GTPackage, gtCommitFlag+rev), " "), b.GTSrc, rev),
 		fmt.Sprintf("build bd: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "bd"), BDPackage, bdBuildFlag+planBuildID+" "+bdCommitFlag+bdCommit), " "), b.BDSrc, bdCommit),
 		fmt.Sprintf("build om: %s   (clean worktree of %s at HEAD)", strings.Join(goBuildArgv(filepath.Join(b.Out, "om"), OMPackage, ""), " "), b.OMSrc),
-		fmt.Sprintf("fetch claude: GET %s -> %s   (sha256 %s)", fmt.Sprintf(templates.ClaudeCLIURLFormat, templates.ClaudeCLIVersion), filepath.Join(b.Out, claudeCLIName), templates.ClaudeCLISHA256),
 	}
+	for _, p := range imagePlugins {
+		lines = append(lines, fmt.Sprintf("build %s: %s   (clean worktree of %s at %s)", p.name, strings.Join(goBuildArgv(filepath.Join(b.Out, "plugins", p.name, p.name), p.pkg, ""), " "), b.GTSrc, rev))
+	}
+	lines = append(lines,
+		fmt.Sprintf("fetch claude: GET %s -> %s   (sha256 %s)", fmt.Sprintf(templates.ClaudeCLIURLFormat, templates.ClaudeCLIVersion), filepath.Join(b.Out, claudeCLIName), templates.ClaudeCLISHA256),
+	)
 	for _, t := range templates.DaemonClientTools {
 		lines = append(lines, fmt.Sprintf("fetch %s: GET %s -> %s   (sha256 %s)", t.Name, t.URL, filepath.Join(b.Out, t.Name), t.SHA256))
 	}
@@ -588,19 +686,31 @@ func (b Builder) BuildImage(ctx context.Context, rev string, bins []string) (str
 
 // checkImageBinaries refuses a set of binaries the Dockerfile's COPY lines could
 // not read: each of the image's binaries (gt, bd, om, claude and ClientToolNames)
-// once, as files in the build context. Docker would report a missing or
-// misplaced one only after the package install ran, so it is caught here first,
-// against what the caller passed.
+// and each of imagePlugins once, at the path under b.Out its COPY reads. Docker
+// would report a missing or misplaced one only after the package install ran, so
+// it is caught here first, against what the caller passed.
 func (b Builder) checkImageBinaries(bins []string) error {
-	want := append([]string{"gt", "bd", "om", claudeCLIName}, ClientToolNames()...)
+	// rels is each binary's COPY source relative to the build context; want holds
+	// the same names in the order the refusal messages use.
+	rels := make(map[string]string)
+	var want []string
+	for _, name := range append([]string{"gt", "bd", "om", claudeCLIName}, ClientToolNames()...) {
+		rels[name] = name
+		want = append(want, name)
+	}
+	for _, p := range imagePlugins {
+		rels[p.name] = filepath.Join("plugins", p.name, p.name)
+		want = append(want, p.name)
+	}
 	seen := make(map[string]bool, len(want))
 	for _, p := range bins {
 		name := filepath.Base(p)
-		if !slices.Contains(want, name) {
+		rel, ok := rels[name]
+		if !ok {
 			return fmt.Errorf("daemonimage: %q is not one of the image's binaries %s", p, strings.Join(want, ", "))
 		}
-		if filepath.Dir(filepath.Clean(p)) != filepath.Clean(b.Out) {
-			return fmt.Errorf("daemonimage: %q is outside the build context %s, so the Dockerfile's COPY %s reads nothing", p, b.Out, name)
+		if filepath.Clean(p) != filepath.Join(filepath.Clean(b.Out), rel) {
+			return fmt.Errorf("daemonimage: %q is outside the build context %s, so the Dockerfile's COPY of %s reads nothing", p, b.Out, rel)
 		}
 		if seen[name] {
 			return fmt.Errorf("daemonimage: %s is listed twice among the binaries", name)

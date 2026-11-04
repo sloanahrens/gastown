@@ -71,7 +71,7 @@ func newImageRig(t *testing.T) *imageRig {
 	return r
 }
 
-// fakeImageBuilder records the three steps in order and fails the one named.
+// fakeImageBuilder records the steps in order and fails the one named.
 type fakeImageBuilder struct {
 	calls  *[]string
 	failAt string
@@ -91,6 +91,13 @@ func (f fakeImageBuilder) BuildBinaries(_ context.Context, rev string) ([]string
 		return nil, err
 	}
 	return []string{"/out/gt", "/out/bd", "/out/om"}, nil
+}
+
+func (f fakeImageBuilder) BuildPlugins(_ context.Context, rev string) ([]string, error) {
+	if err := f.step("plugins " + rev); err != nil {
+		return nil, err
+	}
+	return []string{"/out/plugins/app-promote/app-promote", "/out/plugins/town-metrics/town-metrics"}, nil
 }
 
 func (f fakeImageBuilder) FetchClaudeCLI(context.Context) (string, error) {
@@ -145,10 +152,13 @@ func TestDaemonImageDryRunPrintsThePlanAndRunsNothing(t *testing.T) {
 	}
 }
 
-// With --apply the steps run in order, the claude CLI joins the binaries the
-// image is built from, a failing step stops the rest, and the tag is printed.
+// With --apply the steps run in order, the plugins and the claude CLI join the
+// binaries the image is built from, a failing step stops the rest, and the tag
+// is printed.
 func TestDaemonImageApplyRunsTheStepsInOrder(t *testing.T) {
 	t.Parallel()
+	const plugins = "/out/plugins/app-promote/app-promote,/out/plugins/town-metrics/town-metrics"
+	const image = "image " + imageTestRev + " /out/gt,/out/bd,/out/om," + plugins + ",/out/claude,/out/openshell,/out/docker,/out/kubectl"
 	for _, tc := range []struct {
 		name      string
 		failAt    string
@@ -156,11 +166,12 @@ func TestDaemonImageApplyRunsTheStepsInOrder(t *testing.T) {
 		wantTag   bool
 		wantError string
 	}{
-		{"all succeed", "", []string{"binaries " + imageTestRev, "claude", "tools", "image " + imageTestRev + " /out/gt,/out/bd,/out/om,/out/claude,/out/openshell,/out/docker,/out/kubectl"}, true, ""},
+		{"all succeed", "", []string{"binaries " + imageTestRev, "plugins " + imageTestRev, "claude", "tools", image}, true, ""},
 		{"the binaries fail", "binaries " + imageTestRev, []string{"binaries " + imageTestRev}, false, "failed"},
-		{"the claude CLI fails", "claude", []string{"binaries " + imageTestRev, "claude"}, false, "claude failed"},
-		{"the client tools fail", "tools", []string{"binaries " + imageTestRev, "claude", "tools"}, false, "tools failed"},
-		{"the image build fails", "image " + imageTestRev + " /out/gt,/out/bd,/out/om,/out/claude,/out/openshell,/out/docker,/out/kubectl", []string{"binaries " + imageTestRev, "claude", "tools", "image " + imageTestRev + " /out/gt,/out/bd,/out/om,/out/claude,/out/openshell,/out/docker,/out/kubectl"}, false, "image " + imageTestRev + " /out/gt,/out/bd,/out/om,/out/claude,/out/openshell,/out/docker,/out/kubectl failed"},
+		{"the plugins fail", "plugins " + imageTestRev, []string{"binaries " + imageTestRev, "plugins " + imageTestRev}, false, "plugins " + imageTestRev + " failed"},
+		{"the claude CLI fails", "claude", []string{"binaries " + imageTestRev, "plugins " + imageTestRev, "claude"}, false, "claude failed"},
+		{"the client tools fail", "tools", []string{"binaries " + imageTestRev, "plugins " + imageTestRev, "claude", "tools"}, false, "tools failed"},
+		{"the image build fails", image, []string{"binaries " + imageTestRev, "plugins " + imageTestRev, "claude", "tools", image}, false, image + " failed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -279,6 +290,17 @@ func TestDaemonImageDockerBuildIgnoresTheShellsDockerEnvironment(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	pluginBinary := func(name string) string {
+		dir := filepath.Join(r.flags.out, "plugins", name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
 	var gotArgv, gotEnv []string
 	r.deps.run = func(_ context.Context, _ string, env, argv []string) error {
 		gotArgv, gotEnv = argv, env
@@ -291,6 +313,7 @@ func TestDaemonImageDockerBuildIgnoresTheShellsDockerEnvironment(t *testing.T) {
 		filepath.Join(r.flags.out, "gt"), filepath.Join(r.flags.out, "bd"),
 		filepath.Join(r.flags.out, "om"), filepath.Join(r.flags.out, "claude"),
 		filepath.Join(r.flags.out, "openshell"), filepath.Join(r.flags.out, "docker"), filepath.Join(r.flags.out, "kubectl"),
+		pluginBinary("app-promote"), pluginBinary("town-metrics"),
 	})
 	if err != nil {
 		t.Fatalf("BuildImage: %v", err)
