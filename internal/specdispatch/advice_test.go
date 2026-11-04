@@ -161,3 +161,64 @@ func TestAdviceReadsTheConstraints(t *testing.T) {
 		t.Errorf("advice does not name the triggering word: %q", got[0])
 	}
 }
+
+// TestAdviceTriggerIsWholeWord pins that a trigger must be a whole word, not
+// the start of a longer token: "lockfile" is not a lock, "installer" is not an
+// install, "gcloud" is not a gc step.
+func TestAdviceTriggerIsWholeWord(t *testing.T) {
+	t.Parallel()
+	for _, goal := range []string{
+		"Write the lockfile.",
+		"Route the installer.",
+		"Run gcloud for the board.",
+		"Keep the holdout set.",
+	} {
+		t.Run(goal, func(t *testing.T) {
+			t.Parallel()
+			s := adviceSpec(goal, "Go.", "- [ ] the column renders")
+			if got := Advice(s); len(got) != 0 {
+				t.Fatalf("Advice() = %q, want none", got)
+			}
+		})
+	}
+}
+
+// TestAdviceTriggerFormsCount pins that the inflections a bead writes trigger:
+// "probing", "leasing", "holding", "installs", "installation".
+func TestAdviceTriggerFormsCount(t *testing.T) {
+	t.Parallel()
+	for _, goal := range []string{
+		"Keep the probing loop running.",
+		"Take a lease while leasing.",
+		"Keep the lock while holding.",
+		"Record each install.",
+		"Record the installation.",
+	} {
+		t.Run(goal, func(t *testing.T) {
+			t.Parallel()
+			s := adviceSpec(goal, "Go.", "- [ ] the column renders")
+			if got := Advice(s); len(got) != 1 {
+				t.Fatalf("Advice() = %q, want one line", got)
+			}
+		})
+	}
+}
+
+// TestAdviceFailureWordNeedsReadOrStep pins that a failure word alone does not
+// silence the advisory: a box must name a failure of a read or a step. The
+// error count on a probe and the refusal of a label name neither.
+func TestAdviceFailureWordNeedsReadOrStep(t *testing.T) {
+	t.Parallel()
+	for _, box := range []string{
+		"- [ ] the column shows the error count",
+		"- [ ] the spec lint refuses a label",
+	} {
+		t.Run(box, func(t *testing.T) {
+			t.Parallel()
+			s := adviceSpec("Add a probe that checks the seat list.", "Go.", "- [ ] the probe runs on a tick\n"+box)
+			if got := Advice(s); len(got) != 1 {
+				t.Fatalf("Advice() = %q, want one line", got)
+			}
+		})
+	}
+}
