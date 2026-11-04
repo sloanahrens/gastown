@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/steveyegge/gastown/internal/installer"
 )
@@ -216,6 +217,8 @@ func emptyIfDash(s string) string {
 // withOutputTail appends a command's last lines to a failed install's detail,
 // or returns the detail alone when the command printed nothing.
 func withOutputTail(detail, out string) string {
+	// The detail's reason is a RESULT line field, which is installer output too.
+	detail = printable(detail)
 	tail := outputTail(out, installerDetailTailLines)
 	if tail == "" {
 		return detail
@@ -234,6 +237,8 @@ func outputTail(out string, maxLines int) string {
 	var lines []string
 	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
 		line = strings.TrimSuffix(line, "\r")
+		// Control characters other than tab are shown as U+FFFD, so the tail is text.
+		line = printable(line)
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
@@ -260,4 +265,16 @@ func truncateChars(s string, max int) string {
 		return s
 	}
 	return string(chars[:max])
+}
+
+// printable replaces each control character in s, except a tab, with U+FFFD.
+// The installer's output can carry an escape sequence or a bell, and those are
+// kept out of the state file, `gt update status` and an escalation as text.
+func printable(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r != '\t' && unicode.IsControl(r) {
+			return '�'
+		}
+		return r
+	}, s)
 }
