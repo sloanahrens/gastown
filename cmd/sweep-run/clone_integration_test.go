@@ -134,7 +134,12 @@ func TestIntegrationGitCloneReadsARepositoryWhoseQuotedPathNeedsTheShell(t *test
 // exit status returned. A script that cannot be started has no status.
 func TestIntegrationRunScriptRunsTheTierScriptInTheWorkTree(t *testing.T) {
 	t.Parallel()
-	work := t.TempDir()
+	// The script's pwd is the physical path: the run's env has no PWD, so bash
+	// resolves a symlinked temp root (macOS's /var is one).
+	work, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve the work tree: %v", err)
+	}
 	body := "#!/bin/sh\n" +
 		"echo \"tier-sweep: $1 GREEN passed=1 failed=0 skipped=0 (logs $TIER_SWEEP_LOGDIR) in 0s\"\n" +
 		"echo \"in $(pwd)\" >&2\n" +
