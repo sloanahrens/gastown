@@ -791,7 +791,14 @@ func installPluginBinaries(imageDir, townRoot string, logf func(format string, a
 	}
 	platform := runtime.GOOS + "-" + runtime.GOARCH
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		// os.Stat follows a symlink, so a plugin directory the image links in is
+		// installed like a real one. A dangling link is a broken image: refuse.
+		entryPath := filepath.Join(imageDir, entry.Name())
+		info, err := os.Stat(entryPath)
+		if err != nil {
+			return fmt.Errorf("stat the image's plugin entry %s: %w", entryPath, err)
+		}
+		if !info.IsDir() {
 			continue
 		}
 		name := entry.Name()
