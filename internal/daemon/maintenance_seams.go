@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"database/sql"
+	"os"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/doltbackup"
@@ -28,6 +29,13 @@ type maintenanceSeams struct {
 	// gcExternal reports whether the Dolt server is not one this daemon can
 	// measure on local disk.
 	gcExternal func(d *Daemon) (bool, string)
+	// mountInfo reads the process's mount table, which gcExternal parses to
+	// prove the town root is the container's bind mount. A test supplies its
+	// own table.
+	mountInfo func() (string, error)
+	// mountInfoPath is where the default mountInfo reads from; empty is
+	// procSelfMountinfo. A test points it at a file it controls.
+	mountInfoPath string
 	// measure reads a database's on-disk size and old-gen size.
 	measure func(dataDir, db string) (gcMeasure, error)
 	// gcExec runs CALL dolt_gc('--full') on one database.
@@ -91,6 +99,16 @@ func (d *Daemon) maintenance() maintenanceSeams {
 	}
 	if s.gcExternal == nil {
 		s.gcExternal = (*Daemon).maintenanceGCExternal
+	}
+	if s.mountInfo == nil {
+		path := s.mountInfoPath
+		if path == "" {
+			path = procSelfMountinfo
+		}
+		s.mountInfo = func() (string, error) {
+			b, err := os.ReadFile(path)
+			return string(b), err
+		}
 	}
 	if s.measure == nil {
 		s.measure = maintenanceMeasure

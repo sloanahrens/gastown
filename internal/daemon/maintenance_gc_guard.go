@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -102,16 +103,109 @@ func discoverMaintenanceDatabases(dataDir string) ([]string, error) {
 
 // maintenanceGCExternal is true when the Dolt server is externally managed or
 // not on a loopback host: its data dir is not this host's, so the size
-// old-gen trigger would be reading the wrong disk.
+// old-gen trigger would be reading the wrong disk. maintenanceGCExternalFor
+// holds the decision; this gathers its inputs, reading the container mode
+// through the daemon's environment seam (containerMode).
 func (d *Daemon) maintenanceGCExternal() (bool, string) {
-	if d.doltServer != nil && d.doltServer.IsEnabled() && d.doltServer.IsExternal() {
+	managerExternal := d.doltServer != nil && d.doltServer.IsEnabled() && d.doltServer.IsExternal()
+	host := d.doltServerHost()
+	inContainer := containerMode(d.env)
+	// Outside container mode the data dir's mount says nothing about a remote
+	// server, so the mount table is not read there.
+	dataDirOnTownBind := inContainer && d.dataDirOnTownBindMount()
+	return maintenanceGCExternalFor(managerExternal, inContainer, dataDirOnTownBind, isLoopbackHost(host), host)
+}
+
+// maintenanceGCExternalFor is the whole external-server decision, so a test
+// drives every mode without a Daemon. An externally managed manager is always
+// external. A loopback host is always local. A non-loopback host is local only
+// in the container daemon when the Dolt data dir is on the town root's bind
+// mount: the town root is the only directory the rendered compose file mounts,
+// and it mounts it at its own absolute path, so host.docker.internal still
+// reads this container's disk. A data dir outside that mount leaves the
+// server external.
+func maintenanceGCExternalFor(managerExternal, inContainer, dataDirOnTownBind, hostIsLoopback bool, host string) (bool, string) {
+	if managerExternal {
 		return true, "Dolt server is externally managed"
 	}
-	host := d.doltServerHost()
-	if !isLoopbackHost(host) {
-		return true, fmt.Sprintf("Dolt server host %q is not local", host)
+	if hostIsLoopback || (inContainer && dataDirOnTownBind) {
+		return false, ""
 	}
-	return false, ""
+	return true, fmt.Sprintf("Dolt server host %q is not local", host)
+}
+
+// procSelfMountinfo is the kernel's mount table. It is how a process sees the
+// mounts its own namespace carries, so the daemon can read it at any time.
+const procSelfMountinfo = "/proc/self/mountinfo"
+
+// dataDirOnTownBindMount reports whether the gc data dir is a directory inside
+// the town root and the town root is a mount point in the process's mount
+// table. The compose render bind-mounts the town root at its own absolute path,
+// and it is the only directory the daemon's own mounts cover, so those two
+// facts together say the data dir moved with the host's directory and was not
+// left in the container image. A data dir outside the town root, a town root
+// that is not a mount point, a stat that fails, and an unreadable mount table
+// all report false: the server then stays external and maintenance is skipped,
+// rather than run against a disk this process cannot see.
+func (d *Daemon) dataDirOnTownBindMount() bool {
+	townRoot := filepath.Clean(d.config.TownRoot)
+	// "/" is the container's own root filesystem, which is always a mount
+	// point; reading it as the town bind would exempt every path in the image.
+	if townRoot == string(filepath.Separator) {
+		return false
+	}
+	dataDir := filepath.Clean(d.maintenanceDataDir())
+	if !pathWithin(dataDir, townRoot) {
+		return false
+	}
+	info, err := os.Stat(dataDir)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	mountInfo, err := d.maintenance().mountInfo()
+	if err != nil {
+		return false
+	}
+	return isMountPoint(mountInfo, townRoot)
+}
+
+// isMountPoint reports whether path is a mount point in the text of
+// /proc/self/mountinfo. The mount point is the fifth field of a line, with
+// space, tab, newline and backslash written as octal escapes. A parent of a
+// mount point is a mount point only if the table lists it; a relative path is
+// never one.
+func isMountPoint(mountInfo, path string) bool {
+	if !filepath.IsAbs(path) {
+		return false
+	}
+	want := filepath.Clean(path)
+	for _, line := range strings.Split(mountInfo, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		if unescapeMountField(fields[4]) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// unescapeMountField decodes the \ooo octal escapes mountinfo writes into a
+// path field. A backslash that starts no valid escape is kept as it is.
+func unescapeMountField(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+4 <= len(s) {
+			if v, err := strconv.ParseUint(s[i+1:i+4], 8, 8); err == nil {
+				b.WriteByte(byte(v))
+				i += 3
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 // isLoopbackHostLookupTimeout bounds the name lookup in isLoopbackHost. The
