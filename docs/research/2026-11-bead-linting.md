@@ -1,4 +1,4 @@
-> Status: historical (2026-11). Merged in: gt-62yz9 (the decision bead; none of the ideas below is filed until the operator has read this and chosen). Not maintained.
+> Status: historical (2026-11). Merged in: gt-62yz9. Not maintained.
 
 # Bead linting: how it works, what it did to the gt update specs, and how it could work better
 
