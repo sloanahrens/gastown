@@ -1,10 +1,11 @@
 // Package doltbackup owns the layout of the nightly Dolt backups
-// (gt-8z769.5): one dated directory per night under ~/gt-backups/dolt, outside
-// the town root, holding one Dolt backup per database:
+// (gt-8z769.5): one dated directory per night under the backup root
+// (DefaultRoot: ~/gt-backups/dolt unless RootEnv is set), outside the town
+// root, holding one Dolt backup per database:
 //
-//	~/gt-backups/dolt/2026-10-01/backup.json   manifest, written last
-//	~/gt-backups/dolt/2026-10-01/hq/           CALL dolt_backup('sync-url', ...)
-//	~/gt-backups/dolt/2026-10-01/gt/
+//	<root>/2026-10-01/backup.json              manifest, written last
+//	<root>/2026-10-01/hq/                      CALL dolt_backup('sync-url', ...)
+//	<root>/2026-10-01/gt/
 //
 // The daemon's scheduled_maintenance window writes a night into
 // <date>.partial and renames it to <date> once every database is in, so a
@@ -48,6 +49,7 @@ func Root(home string) string {
 
 // RootEnv names the environment variable that overrides DefaultRoot. A
 // container daemon sets it to the directory the Dolt server shares with it.
+// Unset, the root is Root for the home directory.
 const RootEnv = "GT_DOLT_BACKUP_ROOT"
 
 // DefaultRoot is the backup root for the current user: RootEnv when it is set,
