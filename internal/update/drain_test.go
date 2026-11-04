@@ -320,20 +320,63 @@ func TestDrainReturnsWhenAProbeBlocksPastTimeout(t *testing.T) {
 		return nil, nil
 	})
 
+	type outcome struct {
+		res DrainResult
+		err error
+	}
+	// Drain runs in its own goroutine, so a regression that lets the probe hold
+	// it fails this test rather than hanging the suite.
+	done := make(chan outcome, 1)
+	go func() {
+		res, err := Drain(context.Background(), clock, clock.sleep, probe, DrainOptions{
+			Timeout: time.Millisecond, IdleAfter: drainTestIdle, Poll: drainTestPoll,
+		})
+		done <- outcome{res, err}
+	}()
+	var got outcome
+	select {
+	case got = <-done:
+	case <-time.After(waitBound): //testpolicy:allow no-sleep — a hang guard only: Drain returns at its 1ms Timeout, so a regression that holds it past the Timeout fails here rather than hanging the suite
+		t.Fatalf("Drain did not return within %v of a 1ms Timeout: the probe held it", waitBound)
+	}
+	if got.err != nil {
+		t.Fatalf("Drain: %v", got.err)
+	}
+	if got.res.Drained {
+		t.Errorf("Drained = true with a blocked probe, want false: %+v", got.res)
+	}
+	if !errors.Is(got.res.Err, context.DeadlineExceeded) {
+		t.Errorf("Err = %v, want context.DeadlineExceeded", got.res.Err)
+	}
+	if len(got.res.Blocking) != 0 {
+		t.Errorf("Blocking = %v beside a probe error, want none", got.res.Blocking)
+	}
+}
+
+func TestDrainNeverWaitsPastTimeout(t *testing.T) {
+	t.Parallel()
+	const timeout = 20 * time.Second
+	clock := &fakeDrainClock{now: drainTestStart()}
+	probe := &fakeDrainProbe{answer: func(int) ([]Seat, error) {
+		return []Seat{{Name: "furiosa", Working: true, LastActive: clock.Now()}}, nil
+	}}
+
 	res, err := Drain(context.Background(), clock, clock.sleep, probe, DrainOptions{
-		Timeout: time.Millisecond, IdleAfter: drainTestIdle, Poll: drainTestPoll,
+		Timeout: timeout, IdleAfter: drainTestIdle, Poll: drainTestPoll,
 	})
 	if err != nil {
 		t.Fatalf("Drain: %v", err)
 	}
 	if res.Drained {
-		t.Errorf("Drained = true with a blocked probe, want false: %+v", res)
+		t.Errorf("Drained = true at the timeout, want false: %+v", res)
 	}
-	if !errors.Is(res.Err, context.DeadlineExceeded) {
-		t.Errorf("Err = %v, want context.DeadlineExceeded", res.Err)
+	// The second wait is cut to the 5s left after the first 15s wait, so the
+	// drain ends at Timeout rather than a full Poll past it.
+	if want := []time.Duration{drainTestPoll, timeout - drainTestPoll}; !reflect.DeepEqual(clock.sleeps, want) {
+		t.Errorf("sleeps = %v, want %v", clock.sleeps, want)
 	}
-	if len(res.Blocking) != 0 {
-		t.Errorf("Blocking = %v beside a probe error, want none", res.Blocking)
+	if res.Waited != timeout {
+		t.Errorf("Waited = %v, want %v", res.Waited, timeout)
 	}
 }
 

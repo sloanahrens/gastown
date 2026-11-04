@@ -45,7 +45,9 @@ type DrainResult struct {
 // passes, and reports the seats that held it back, never acting on one and
 // never reading an unreadable seat list as drained. Each probe call runs under
 // the time left in Timeout, except the single first poll of a Timeout of zero
-// or less, which runs unbounded.
+// or less, which runs unbounded. No poll starts at or after Timeout, since a
+// poll there would have no budget, and the wait between polls is cut to the
+// time left, so the drain never sleeps past Timeout.
 func Drain(ctx context.Context, clock Clock, sleep func(context.Context, time.Duration) error, p SeatProbe, o DrainOptions) (DrainResult, error) {
 	if o.Poll <= 0 {
 		return DrainResult{}, fmt.Errorf("drain poll interval must be positive, got %v", o.Poll)
@@ -79,9 +81,15 @@ func Drain(ctx context.Context, clock Clock, sleep func(context.Context, time.Du
 				return DrainResult{Drained: true, Waited: elapsed}, nil
 			}
 		}
-		// The sleep seam waits out the interval and reports the context's error,
-		// which ends the drain.
-		if err := sleep(ctx, o.Poll); err != nil {
+		// The wait is cut to the time left in Timeout, so a probe that ran long
+		// does not leave the drain sleeping past it. With no time left the loop
+		// ends at the check above. The sleep seam waits out the interval and
+		// reports the context's error, which ends the drain.
+		wait := min(o.Poll, o.Timeout-clock.Now().Sub(start))
+		if wait <= 0 {
+			continue
+		}
+		if err := sleep(ctx, wait); err != nil {
 			return DrainResult{}, err
 		}
 	}
