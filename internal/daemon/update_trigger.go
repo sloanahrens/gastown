@@ -236,7 +236,8 @@ func (d *Daemon) updateFacts(now time.Time) (UpdateFacts, error) {
 // the binary is built from that the installed build does not contain: the ones
 // waiting to deploy. The walk starts at the newest record and stops at the
 // first landing the build contains, because every older one is in the build
-// too.
+// too. A landing the checkout has not fetched yet is waiting as well: the build
+// is made from the checkout, so it cannot contain a commit the checkout lacks.
 func (d *Daemon) updateLandingsWaiting(repoRoot, binaryCommit string) (int, error) {
 	if strings.TrimSpace(binaryCommit) == "" {
 		return 0, errors.New("the installed build's commit is unknown, so no landing can be shown to be deployed")
