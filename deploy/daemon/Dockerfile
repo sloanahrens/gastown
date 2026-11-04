@@ -25,9 +25,11 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # git and tmux are what the daemon's patrols run; ca-certificates is what its
-# HTTPS calls verify against. These three are the only things installed.
+# HTTPS calls verify against; openssh-client is the ssh git runs for a push over
+# SSH, which app-promote does to GitHub with the promote keys. These four are the
+# only things installed.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates git tmux \
+    && apt-get install -y --no-install-recommends ca-certificates git openssh-client tmux \
     && rm -rf /var/lib/apt/lists/*
 
 # The Dolt client, from the image above. It is a client only: the town's data
