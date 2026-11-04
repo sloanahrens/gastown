@@ -129,6 +129,42 @@ func TestWithPolecatImageTrimContextRefusesADisabledSweep(t *testing.T) {
 	}
 }
 
+// TestWithPolecatImageTrimContextHonoursContainerOff pins the container rule the
+// caller applies: container_off skips the sweep only in the container daemon,
+// so the launchd daemon still hands the installer its context (gt-h3ujp).
+func TestWithPolecatImageTrimContextHonoursContainerOff(t *testing.T) {
+	t.Parallel()
+	const trim = polecatImageTrimContextEnv + "=colima-gt-control"
+	for _, tc := range []struct {
+		name         string
+		containerOff []string
+		container    bool
+		want         []string
+	}{
+		{name: "container daemon skips a listed sweep", containerOff: []string{"tier_sweep"}, container: true, want: []string{"PATH=/usr/bin"}},
+		{name: "launchd daemon runs a listed sweep", containerOff: []string{"tier_sweep"}, want: []string{"PATH=/usr/bin", trim}},
+		{name: "container daemon runs an unlisted sweep", containerOff: []string{"other_patrol"}, container: true, want: []string{"PATH=/usr/bin", trim}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := &Daemon{
+				patrolConfig: &DaemonPatrolConfig{
+					Patrols: &PatrolsConfig{TierSweep: &TierSweepConfig{
+						Enabled: true,
+						Runner:  &agentconfig.TierSweepRunnerConfig{Backend: agentconfig.TierSweepRunnerDocker, Context: "colima-gt-control"},
+					}},
+					ContainerOffSetting: tc.containerOff,
+				},
+				containerMode: tc.container,
+				logger:        log.New(io.Discard, "", 0),
+			}
+			if got := d.withPolecatImageTrimContext([]string{"PATH=/usr/bin"}); !slices.Equal(got, tc.want) {
+				t.Errorf("env = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // trimEnvRunner builds a patrol config whose tier sweep runs on backend with
 // context, enabled or not.
 func trimEnvRunner(enabled bool, backend, context string) *DaemonPatrolConfig {
