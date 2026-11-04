@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/daemon"
@@ -49,6 +51,12 @@ func archiveGap(ctx context.Context, reader archiveBehindReader, wms daemon.Arch
 // an error, so the plan never reads an archive it could not inspect as caught
 // up.
 func newArchiveGapFunc(townRoot string) func(ctx context.Context) (commits, events int64, err error) {
+	return newArchiveGapFuncWith(townRoot, nil)
+}
+
+// newArchiveGapFuncWith is newArchiveGapFunc with the pool opener the reader
+// counts through. A nil openDB opens the MySQL driver; a test injects a fake.
+func newArchiveGapFuncWith(townRoot string, openDB func(dsn string) (*sql.DB, error)) func(ctx context.Context) (commits, events int64, err error) {
 	return func(ctx context.Context) (int64, int64, error) {
 		dir, err := archiveDirForStatus(townRoot)
 		if err != nil {
@@ -62,11 +70,19 @@ func newArchiveGapFunc(townRoot string) func(ctx context.Context) (commits, even
 			return 0, 0, fmt.Errorf("reading the archive watermarks: %w", err)
 		}
 		config := doltserver.DefaultConfig(townRoot)
+		if !config.IsRemote() {
+			// A local server's databases are the directories under its data
+			// dir, and a missing data dir lists as none: that would read the
+			// archive as caught up, so the missing directory is the error.
+			if _, err := os.Stat(config.DataDir); err != nil {
+				return 0, 0, fmt.Errorf("reading the Dolt data directory: %w", err)
+			}
+		}
 		databases, err := doltserver.ListDatabases(townRoot)
 		if err != nil {
 			return 0, 0, fmt.Errorf("listing the Dolt databases: %w", err)
 		}
-		reader := doltArchiveReader{config: config, archivedHashes: archivedHashesLoader(townRoot, databases)}
+		reader := doltArchiveReader{config: config, openDB: openDB, archivedHashes: archivedHashesLoader(townRoot, databases)}
 		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		return archiveGap(ctx, reader, wms, databases)
