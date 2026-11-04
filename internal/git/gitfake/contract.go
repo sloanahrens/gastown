@@ -193,6 +193,9 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 		if ok, err := g.HasObject(strings.Repeat("1", 40)); err != nil || ok {
 			t.Errorf("HasObject of an unknown object = %v, %v; want false, nil", ok, err)
 		}
+		if _, err := fx.env.Open(t.TempDir()).HasObject(fx.base); err == nil {
+			t.Error("HasObject in a directory that is not a repository succeeded; want an error")
+		}
 	})
 
 	t.Run("PushRemoteBranchTip reads the remote, empty for a missing branch", func(t *testing.T) {
