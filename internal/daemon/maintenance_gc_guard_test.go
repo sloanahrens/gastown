@@ -379,6 +379,7 @@ func TestMaintenanceGCExternal(t *testing.T) {
 			config:     &Config{TownRoot: t.TempDir()},
 			logger:     log.New(io.Discard, "", 0),
 			doltServer: &DoltServerManager{config: cfg},
+			getenv:     ownerEnv(nil), // outside container mode: host behavior
 		}
 	}
 	if ext, _ := mk(&DoltServerConfig{Enabled: true, Host: "127.0.0.1"}).maintenanceGCExternal(); ext {
@@ -397,6 +398,243 @@ func TestMaintenanceGCExternal(t *testing.T) {
 		if !isLoopbackHost(h) {
 			t.Errorf("isLoopbackHost(%q) = false", h)
 		}
+	}
+}
+
+// The container daemon reaches Dolt at a name that is not loopback, but the
+// compose render bind-mounts the town root at its own path, the data dir under
+// it included: the size trigger reads this container's disk, so the server is
+// not external (gt-gg9hv.5).
+func TestMaintenanceGCExternalContainerWithDataDirIsLocal(t *testing.T) {
+	t.Parallel()
+	ext, why := maintenanceGCExternalFor(false, true, true, false, "host.docker.internal")
+	if ext {
+		t.Fatalf("container with the data dir on the town bind reported external: %q", why)
+	}
+	if why != "" {
+		t.Errorf("why = %q, want empty for a local server", why)
+	}
+}
+
+// The same container without the data dir on the town bind reads a disk it
+// cannot see: the old verdict stands and the reason names the host
+// (gt-gg9hv.5).
+func TestMaintenanceGCExternalContainerWithoutDataDirStaysExternal(t *testing.T) {
+	t.Parallel()
+	ext, why := maintenanceGCExternalFor(false, true, false, false, "host.docker.internal")
+	if !ext {
+		t.Fatal("container without the data dir on the town bind reported local")
+	}
+	if !strings.Contains(why, "host.docker.internal") {
+		t.Errorf("why = %q, want the host named", why)
+	}
+}
+
+// Outside container mode a data dir on this host proves nothing about a
+// non-loopback server's disk, so the verdict is unchanged (gt-gg9hv.5).
+func TestMaintenanceGCExternalOutsideContainerUnchanged(t *testing.T) {
+	t.Parallel()
+	ext, why := maintenanceGCExternalFor(false, false, true, false, "10.0.0.5")
+	if !ext {
+		t.Fatal("non-loopback host outside container mode reported local")
+	}
+	if !strings.Contains(why, "10.0.0.5") {
+		t.Errorf("why = %q, want the host named", why)
+	}
+}
+
+// An externally managed manager is external in every mode and with any data
+// dir, because its disk is not this host's at all (gt-gg9hv.5).
+func TestMaintenanceGCExternalManagedExternalAlwaysExternal(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name              string
+		inContainer       bool
+		dataDirOnTownBind bool
+		hostIsLoopback    bool
+	}{
+		{"container with data dir", true, true, false},
+		{"container without data dir", true, false, false},
+		{"outside container with data dir", false, true, false},
+		{"container with loopback host", true, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ext, why := maintenanceGCExternalFor(true, tc.inContainer, tc.dataDirOnTownBind, tc.hostIsLoopback, "10.0.0.5")
+			if !ext {
+				t.Fatal("externally managed server reported local")
+			}
+			if !strings.Contains(why, "externally managed") {
+				t.Errorf("why = %q, want the managed reason", why)
+			}
+		})
+	}
+}
+
+// bindMountTable is the text of /proc/self/mountinfo inside the daemon's
+// container: the town root is a bind mount at its own absolute path, which is
+// the only mount the rendered compose file gives the daemon.
+func bindMountTable(townRoot string) string {
+	return "36 35 98:0 /srv/host-town " + townRoot + " rw,noatime - ext4 /dev/root rw\n"
+}
+
+// containerWiringDaemon builds the daemon the compose file starts: the town
+// root is bound at its own path, the Dolt data dir sits inside it, the town
+// names the Mac's Dolt endpoint, and the environment places the process in the
+// container. The mount table is the production shape until a test replaces
+// d.maint.mountInfo.
+func containerWiringDaemon(t *testing.T) *Daemon {
+	t.Helper()
+	town := t.TempDir()
+	writeManagedDoltConfig(t, town, "listener:\n  host: 10.0.0.5\n  port: 3307\n")
+	d := &Daemon{
+		config:     &Config{TownRoot: town},
+		logger:     log.New(io.Discard, "", 0),
+		doltServer: &DoltServerManager{config: &DoltServerConfig{Enabled: true, DataDir: filepath.Join(town, ".dolt-data")}},
+		getenv:     ownerEnv(map[string]string{"GT_DAEMON_SUPERVISOR": "container"}),
+	}
+	d.maint.mountInfo = func() (string, error) { return bindMountTable(town), nil }
+	return d
+}
+
+// The wrapper drives the production shape: the town root is the bind mount and
+// the data dir lies inside it, so a remote host is local (gt-gg9hv.5).
+func TestMaintenanceGCExternalContainerModeSeesDataDir(t *testing.T) {
+	t.Parallel()
+	if ext, why := containerWiringDaemon(t).maintenanceGCExternal(); ext {
+		t.Errorf("container daemon with the town bind mount reported external: %q", why)
+	}
+}
+
+// A data dir that exists in the container image is not proof of a bind mount:
+// with the town root absent from the mount table the remote server stays
+// external and the reason names the host (the rework's major finding,
+// gt-gg9hv.5).
+func TestMaintenanceGCExternalContainerModeWithoutMountIsExternal(t *testing.T) {
+	t.Parallel()
+	d := containerWiringDaemon(t)
+	// The container's own root filesystem is the only mount; the town path is
+	// an image-layer directory the host did not bind here.
+	d.maint.mountInfo = func() (string, error) {
+		return "36 35 98:0 / / rw,noatime - overlay overlay rw\n", nil
+	}
+	ext, why := d.maintenanceGCExternal()
+	if !ext {
+		t.Fatal("a data dir with no bind mount was reported local")
+	}
+	if !strings.Contains(why, "10.0.0.5") {
+		t.Errorf("why = %q, want the host named", why)
+	}
+}
+
+// Every way the mount shape can fail to prove the bind reports the remote
+// server external, so maintenance is skipped instead of reading a disk this
+// process cannot see (gt-gg9hv.5).
+func TestMaintenanceGCExternalContainerModeWithoutTheBindIsExternal(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		mutate func(t *testing.T, d *Daemon)
+	}{
+		{"mount table unreadable", func(t *testing.T, d *Daemon) {
+			// A partial read that still holds the line: the error decides.
+			d.maint.mountInfo = func() (string, error) {
+				return bindMountTable(d.config.TownRoot), errors.New("read failed")
+			}
+		}},
+		{"data dir outside the town root", func(t *testing.T, d *Daemon) {
+			d.doltServer.config.DataDir = t.TempDir()
+		}},
+		{"data dir missing", func(t *testing.T, d *Daemon) {
+			d.doltServer.config.DataDir = filepath.Join(d.config.TownRoot, "absent")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := containerWiringDaemon(t)
+			tc.mutate(t, d)
+			ext, why := d.maintenanceGCExternal()
+			if !ext {
+				t.Fatalf("reported local: %q", why)
+			}
+			if !strings.Contains(why, "10.0.0.5") {
+				t.Errorf("why = %q, want the host named", why)
+			}
+		})
+	}
+}
+
+// isMountPoint decides from the mount table, not from the directory's
+// existence; a child of a mount point is not itself one.
+func TestIsMountPoint(t *testing.T) {
+	t.Parallel()
+	const table = "36 35 98:0 /srv/host /gt rw,noatime - ext4 /dev/root rw\n" +
+		"37 36 98:0 /a\\040b /space\\040town rw - ext4 /dev/root rw\n"
+	for _, tc := range []struct {
+		name string
+		path string
+		want bool
+	}{
+		{"exact mount point", "/gt", true},
+		{"child of a mount point", "/gt/rig", false},
+		{"parent of a mount point", "/", false},
+		{"decoded octal escape", "/space town", true},
+		{"relative path", "gt", false},
+		{"empty path", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isMountPoint(table, tc.path); got != tc.want {
+				t.Errorf("isMountPoint(%q) = %v, want %v", tc.path, got, tc.want)
+			}
+		})
+	}
+	if isMountPoint("", "/gt") {
+		t.Error("an empty mount table reported a mount point")
+	}
+}
+
+// The container's own root filesystem is a mount point, but treating it as the
+// town bind would exempt every path in the image; "/" is refused outright.
+func TestDataDirOnTownBindMountRefusesTheContainerRoot(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{
+		config: &Config{TownRoot: "/"},
+		logger: log.New(io.Discard, "", 0),
+		// A real directory under "/", so only the root refusal can decide it.
+		doltServer: &DoltServerManager{config: &DoltServerConfig{Enabled: true, DataDir: t.TempDir()}},
+		maint: maintenanceSeams{mountInfo: func() (string, error) {
+			return "36 35 98:0 / / rw,noatime - overlay overlay rw\n", nil
+		}},
+	}
+	if d.dataDirOnTownBindMount() {
+		t.Error("the container root was read as the town bind mount")
+	}
+}
+
+// The default mount table read is the seam production uses when no test
+// replaces it: it reads the page it is pointed at and reports a failed read
+// rather than an empty table (gt-gg9hv.5).
+func TestMaintenanceMountInfoDefaultReadsItsPath(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	table := bindMountTable("/gt")
+	path := filepath.Join(dir, "mountinfo")
+	if err := os.WriteFile(path, []byte(table), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{config: &Config{TownRoot: "/gt"}, maint: maintenanceSeams{mountInfoPath: path}}
+	got, err := d.maintenance().mountInfo()
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	if got != table {
+		t.Errorf("read %q, want the file's table", got)
+	}
+
+	d.maint = maintenanceSeams{mountInfoPath: filepath.Join(dir, "absent")}
+	if _, err := d.maintenance().mountInfo(); err == nil {
+		t.Error("a missing mount table was reported as read")
 	}
 }
 
@@ -492,6 +730,7 @@ func TestMaintenanceGCLoopbackAliasIsNotExternal(t *testing.T) {
 			config:     &Config{TownRoot: t.TempDir()},
 			logger:     log.New(io.Discard, "", 0),
 			doltServer: &DoltServerManager{config: &DoltServerConfig{Enabled: true}},
+			getenv:     ownerEnv(nil), // the loopback verdict must not need a mount table
 		}
 		writeManagedDoltConfig(t, d.config.TownRoot, fmt.Sprintf("listener:\n  host: %q\n  port: 3307\n", host))
 		if ext, why := d.maintenanceGCExternal(); ext {
