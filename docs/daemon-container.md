@@ -1259,8 +1259,8 @@ the time and the output.
 
 ### What the L3 cutover on 2026-11-04 showed
 
-The cutover ran on 2026-11-04. These are what it showed and what fixed each
-point; the bead holds the output.
+Each bullet gives what the cutover showed and the bead that tracks it; the
+program bead holds the output.
 
 - The startup guard asked `launchctl` whether the old launchd owner still ran.
   A Linux container has no `launchctl`, so the guard read unknown and refused.
@@ -1287,7 +1287,7 @@ point; the bead holds the output.
   `GT_DOLT_BACKUP_ROOT` and mounts the shared directory (gt-gg9hv.16,
   gt-gg9hv.17).
 - The `update` and `rebuild_*` patrols cannot install in a container and are
-  disabled in the town settings.
+  disabled in the town settings (gt-1oz0t).
 - The plugin binaries were macOS builds; the image carries Linux builds
   installed under `bin/<goos>-<goarch>/` (gt-gg9hv.6, .9, .10, .14). Plugins
   that wrap Mac-installed tools still fail (gt-gg9hv.15).
