@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/steveyegge/gastown/internal/installer"
 )
@@ -146,6 +147,9 @@ func (e *ExecInstaller) Install(ctx context.Context, sha string) (InstallResult,
 		return InstallResult{}, fmt.Errorf("%s named no result line (exit %d)%s", program, exit, outputTail(out, installerDetailTailLines))
 	}
 	res.Exit = exit
+	// The reason is installer output too, and installDetail writes it into the
+	// step's detail on every verdict, so it is cleaned on all of them.
+	res.Reason = printable(res.Reason)
 	if ClassifyInstall(res) == ResultFailed {
 		// run.go's installDetail writes Reason into the step's detail, so a
 		// failed verdict keeps the installer's last lines where the operator
@@ -234,6 +238,7 @@ func outputTail(out string, maxLines int) string {
 	var lines []string
 	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
 		line = strings.TrimSuffix(line, "\r")
+		line = printable(line)
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
@@ -260,4 +265,17 @@ func truncateChars(s string, max int) string {
 		return s
 	}
 	return string(chars[:max])
+}
+
+// printable drops each control character in s, except a tab. The installer's
+// output can carry an escape sequence or a bell, and those are kept out of the
+// state file, `gt update status` and an escalation. oneLine, which cleans
+// maintenance notes, drops such characters too.
+func printable(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r != '\t' && unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
 }
