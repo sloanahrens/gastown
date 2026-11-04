@@ -556,7 +556,7 @@ func TestSpecUnshapedAgeDays(t *testing.T) {
 
 // An unshaped bead's skipped entry names who filed it, and its line ends with
 // the age and filer, which is what the daemon tick line renders (gt-hgt9j.8).
-func TestSpecUnshapedFilerShown(t *testing.T) {
+func TestSpecUnshapedAgeFilerShown(t *testing.T) {
 	t.Parallel()
 	f := newFakeSpecTown(specUnshapedBead("gt-bad", specTestNow.Add(-6*24*time.Hour)))
 	env := f.env()
@@ -636,6 +636,59 @@ func TestSpecUnshapedAgeUnreadable(t *testing.T) {
 				t.Errorf("AgeDays = %d, want none", got)
 			}
 		})
+	}
+}
+
+// specUnshapedWithStamp is an unshaped spec whose created_at and created_by are
+// given as written, so a test controls the stamp the age reads and the filer
+// the line names (gt-hgt9j.8).
+func specUnshapedWithStamp(created, filer string) specdispatch.Spec {
+	s := cleanSpec("gt-bad", 1, created)
+	s.Description = strings.Replace(s.Description, "## Gate\nmake gate", "", 1)
+	issue := issueOfSpec(s)
+	issue.CreatedBy = filer
+	return specFromIssue(&issue)
+}
+
+// The age is read from the stamp bd stores: RFC3339 with fractional seconds and
+// a zone offset, not the whole-second UTC stamp the other fixtures write
+// (gt-hgt9j.8).
+func TestSpecUnshapedAgeReadsStoredStamp(t *testing.T) {
+	t.Parallel()
+	zone := time.FixedZone("CDT", -5*60*60)
+	created := specTestNow.Add(-6*24*time.Hour - 654321*time.Microsecond).In(zone).Format(time.RFC3339Nano)
+	f := newFakeSpecTown(specUnshapedWithStamp(created, "town/crew/overseer"))
+	env := f.env()
+	env.ShapeGate = specdispatch.ShapeGateWarn
+	r := runSpecDispatchCycle(env)
+	if len(r.Skipped) != 1 || r.Skipped[0].Bead != "gt-bad" {
+		t.Fatalf("skipped = %+v, want the unshaped hold", r.Skipped)
+	}
+	e := r.Skipped[0]
+	if e.AgeDays != 6 {
+		t.Errorf("AgeDays = %d for created_at %q, want 6", e.AgeDays, created)
+	}
+	const want = "gt-bad: unshaped: ## Gate (6d, filer town/crew/overseer)"
+	if e.Line != want {
+		t.Errorf("line = %q, want %q", e.Line, want)
+	}
+}
+
+// A filer name that carries a control character is written escaped in the tick
+// line, so it cannot drive the terminal or start a line of its own (gt-hgt9j.8).
+func TestSpecUnshapedAgeFilerEscaped(t *testing.T) {
+	t.Parallel()
+	const filer = "town/crew/over\x1b[31mseer\nforged: ok"
+	f := newFakeSpecTown(specUnshapedWithStamp(specTestNow.Add(-6*24*time.Hour).Format(time.RFC3339), filer))
+	env := f.env()
+	env.ShapeGate = specdispatch.ShapeGateWarn
+	r := runSpecDispatchCycle(env)
+	if len(r.Skipped) != 1 || r.Skipped[0].Bead != "gt-bad" {
+		t.Fatalf("skipped = %+v, want the unshaped hold", r.Skipped)
+	}
+	const want = `gt-bad: unshaped: ## Gate (6d, filer town/crew/over\x1b[31mseer\nforged: ok)`
+	if got := r.Skipped[0].Line; got != want {
+		t.Errorf("line = %q, want %q", got, want)
 	}
 }
 
