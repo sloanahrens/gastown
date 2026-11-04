@@ -31,7 +31,7 @@ func (h *Hub) Handler() http.Handler {
 	})
 	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(h.State())
+		_ = json.NewEncoder(w).Encode(h.answerState(r.Context()))
 	})
 	mux.HandleFunc("/api/bead", h.serveBead)
 	mux.HandleFunc("/api/report", h.serveReport)

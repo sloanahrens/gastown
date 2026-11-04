@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -504,5 +505,197 @@ func TestHubListEventRowsCarryEveryFieldOfTheirStateRows(t *testing.T) {
 		require.NotEmpty(t, listed, "%s carries no rows", c.event)
 
 		assert.Equal(t, want, fieldNames(listed[0]), "a %s row lost a field /api/state's %s.%s row has", c.event, c.section, c.list)
+	}
+}
+
+// serveAPIState asks the hub's handler for /api/state and decodes the answer.
+func serveAPIState(t *testing.T, h *Hub, ctx context.Context) State {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/api/state", nil).WithContext(ctx)
+	req.Host = "127.0.0.1:8787"
+	rec := httptest.NewRecorder()
+	h.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var st State
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &st))
+	return st
+}
+
+// boundTimer replaces the hub's bound timer. It records each bound asked for;
+// the timer fires at once when fire is set and never otherwise.
+func boundTimer(h *Hub, fire bool) *[]time.Duration {
+	var asked []time.Duration
+	h.after = func(d time.Duration) <-chan time.Time {
+		asked = append(asked, d)
+		c := make(chan time.Time, 1)
+		if fire {
+			c <- time.Time{}
+		}
+		return c
+	}
+	return &asked
+}
+
+// With no page open, a request starts the health poll, which runs on a short
+// ticker here so the answer does not depend on when the wake lands.
+func TestAPIStateWithNoViewerWakesPollersAndAnswersLive(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
+	h := NewHub(Config{
+		Health:      func() Health { return Health{Line: "all green", Verdict: "green", ReadAt: now} },
+		HealthEvery: time.Millisecond,
+		Now:         func() time.Time { return now },
+	})
+	ctx, stop := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.Run(ctx)
+	}()
+	defer func() {
+		stop()
+		<-done
+	}()
+
+	st := serveAPIState(t, h, context.Background())
+
+	assert.Equal(t, now, st.Health.ReadAt, "the answer carries the health read the request woke")
+	assert.Equal(t, "green", st.Health.Verdict)
+	assert.Equal(t, 0, h.viewers(), "the request released its own page")
+}
+
+func TestAPIStateReleasesItsSubscription(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
+	h := NewHub(Config{
+		Health: func() Health { return Health{Verdict: "green", ReadAt: now} },
+		Now:    func() time.Time { return now },
+	})
+	boundTimer(h, true)
+
+	st := serveAPIState(t, h, context.Background())
+
+	assert.Equal(t, 1, st.Viewers, "the answer is taken while the request is its page")
+	assert.Equal(t, 0, h.viewers(), "the request's subscription is gone once it has answered")
+}
+
+// The client is already gone, and the bound never fires, so the wait can end
+// only through the request's context.
+func TestAPIStateReleasesItsSubscriptionWhenTheClientLeaves(t *testing.T) {
+	t.Parallel()
+
+	h := NewHub(Config{
+		Health: func() Health { return Health{Verdict: "unknown"} },
+		Now:    func() time.Time { return time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC) },
+	})
+	boundTimer(h, false)
+	ctx, leave := context.WithCancel(context.Background())
+	leave()
+
+	st := serveAPIState(t, h, ctx)
+
+	assert.True(t, st.Health.ReadAt.IsZero(), "no read landed before the client left")
+	assert.Equal(t, 0, h.viewers(), "a client that leaves mid-wait leaves no subscription behind")
+}
+
+// A page the hub drops while the request waits ends the wait. The bound timer is
+// made after the subscription is taken and while the request is waiting, so the
+// fake drops the page there.
+func TestAPIStateEndsWhenThePageIsDropped(t *testing.T) {
+	t.Parallel()
+
+	h := NewHub(Config{
+		Health: func() Health { return Health{Verdict: "unknown"} },
+		Now:    func() time.Time { return time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC) },
+	})
+	h.after = func(time.Duration) <-chan time.Time {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		for s := range h.subs {
+			h.dropLocked(s)
+		}
+		return make(chan time.Time)
+	}
+
+	serveAPIState(t, h, context.Background())
+
+	assert.Equal(t, 0, h.viewers())
+}
+
+func TestAPIStateTimesOutAndAnswers(t *testing.T) {
+	t.Parallel()
+
+	t0 := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
+	clock := t0
+	h := NewHub(Config{
+		Health: func() Health { return Health{Line: "last read", Verdict: "green", ReadAt: t0} },
+		Now:    func() time.Time { return clock },
+	})
+	h.pollHealth()
+	clock = t0.Add(time.Hour)
+	asked := boundTimer(h, true)
+
+	st := serveAPIState(t, h, context.Background())
+
+	assert.Equal(t, []time.Duration{apiStateBound}, *asked, "the wait is bounded by the constant")
+	assert.Equal(t, "last read", st.Health.Line, "on timeout the answer is what the state holds")
+	assert.Equal(t, t0, st.Health.ReadAt)
+}
+
+func TestAPIStateWithAnOpenPageAnswersAtOnce(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
+	h := NewHub(Config{
+		Health: func() Health { return Health{Verdict: "green", ReadAt: now} },
+		Now:    func() time.Time { return now },
+	})
+	h.pollHealth()
+	page, _ := h.Subscribe()
+	defer h.Unsubscribe(page)
+	asked := boundTimer(h, false)
+
+	st := serveAPIState(t, h, context.Background())
+
+	assert.Empty(t, *asked, "a page is open and the state is read, so the request does not wait")
+	assert.Equal(t, 1, st.Viewers)
+	assert.Equal(t, now, st.Health.ReadAt)
+}
+
+func TestAPIStateWithoutAHealthReaderAnswersAtOnce(t *testing.T) {
+	t.Parallel()
+
+	h := NewHub(Config{Now: func() time.Time { return time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC) }})
+	asked := boundTimer(h, false)
+
+	st := serveAPIState(t, h, context.Background())
+
+	assert.Empty(t, *asked, "no health reader means no read to wait for")
+	assert.Equal(t, 1, st.Viewers, "the request counts as the page it was")
+	assert.Equal(t, 0, h.viewers())
+}
+
+// A read counts for a request only when it was taken at or after the request
+// started: a read from before the request, or none, leaves the request waiting.
+func TestAPIStateCountsOnlyAReadTakenSinceTheRequest(t *testing.T) {
+	t.Parallel()
+
+	start := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		at   time.Time
+		want bool
+	}{
+		{"never read", time.Time{}, false},
+		{"read before the request", start.Add(-time.Second), false},
+		{"read as the request started", start, true},
+		{"read after the request started", start.Add(time.Second), true},
+	}
+	for _, c := range cases {
+		h := NewHub(Config{})
+		h.state.Health.ReadAt = c.at
+		assert.Equal(t, c.want, h.healthReadSince(start), c.name)
 	}
 }

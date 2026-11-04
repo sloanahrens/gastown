@@ -83,7 +83,15 @@ type Hub struct {
 	// is out of date, so State() does not rebuild them on every call.
 	costRows []CostProvider
 	costKey  costRowsKey
+
+	// after starts the bound on a /api/state wait. NewHub sets time.After; a
+	// test replaces it with a timer it controls.
+	after func(time.Duration) <-chan time.Time
 }
+
+// apiStateBound is how long /api/state waits for a health read when no page is
+// watching. At the default HealthEvery (5s), a woken health poll lands inside it.
+const apiStateBound = 6 * time.Second
 
 // Sub is one open page.
 type Sub struct {
@@ -102,6 +110,7 @@ func NewHub(cfg Config) *Hub {
 		listSent: map[string][]byte{},
 		wake:     make(chan struct{}),
 		alerts:   NewAlerter(cfg.Now),
+		after:    time.After,
 	}
 }
 
@@ -364,6 +373,51 @@ func (h *Hub) State() State {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.stateLocked()
+}
+
+// answerState is the state /api/state answers with. The pollers run only while
+// a page watches, so a request that finds no page open, or a state never read,
+// subscribes like a page for its own duration: the subscription wakes the
+// workers, and the request waits, for at most apiStateBound, for a health read
+// from this request onward. The subscription is released before it returns,
+// whichever way the wait ends, including a client that disconnects. A hub with
+// no health reader has no read to wait for, so it answers at once.
+func (h *Hub) answerState(ctx context.Context) State {
+	h.mu.Lock()
+	watched := len(h.subs) > 0 && !h.state.Health.ReadAt.IsZero()
+	h.mu.Unlock()
+	if watched {
+		return h.State()
+	}
+	start := h.cfg.Now()
+	sub, _ := h.Subscribe()
+	defer h.Unsubscribe(sub)
+	if h.cfg.Health == nil {
+		return h.State()
+	}
+	timeout := h.after(apiStateBound)
+	for !h.healthReadSince(start) {
+		select {
+		case <-ctx.Done():
+			return h.State()
+		case <-timeout:
+			return h.State()
+		case _, ok := <-sub.C:
+			if !ok { // the hub dropped this page; nothing more will arrive
+				return h.State()
+			}
+		}
+	}
+	return h.State()
+}
+
+// healthReadSince reports whether the state carries a health read taken at or
+// after start. A zero read time never counts.
+func (h *Hub) healthReadSince(start time.Time) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	at := h.state.Health.ReadAt
+	return !at.IsZero() && !at.Before(start)
 }
 
 func (h *Hub) stateLocked() State {
