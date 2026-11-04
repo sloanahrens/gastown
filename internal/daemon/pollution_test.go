@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -24,6 +26,164 @@ func newPollutionDaemon(t *testing.T, buf *bytes.Buffer) *Daemon {
 	d.seams.orphanReap = func() {}
 	d.seams.testSocketSweep = func() (tmuxsweep.Report, error) { return tmuxsweep.Report{}, nil }
 	return d
+}
+
+// newImposterDaemon is a daemon whose sweep reads a scratch town's Dolt
+// config and takes its port probe and kill through the seams, so nothing on
+// the machine is looked at or signalled. The scratch town has no town.json;
+// writeTownJSON adds one.
+func newImposterDaemon(t *testing.T, buf *bytes.Buffer) *Daemon {
+	t.Helper()
+	d := newPollutionDaemon(t, buf)
+	d.seams.imposterSweep = nil
+	if err := os.MkdirAll(filepath.Join(d.config.TownRoot, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+// writeTownJSON writes a valid town.json whose "dolt" section is doltJSON.
+func writeTownJSON(t *testing.T, d *Daemon, doltJSON string) {
+	t.Helper()
+	writeRawTownJSON(t, d, `{"type":"town","version":2,"name":"t","dolt":`+doltJSON+`}`)
+}
+
+// writeRawTownJSON writes body verbatim as the town's mayor/town.json.
+func writeRawTownJSON(t *testing.T, d *Daemon, body string) {
+	t.Helper()
+	path := filepath.Join(d.config.TownRoot, "mayor", "town.json")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// probeAndKillCounts wraps the two process seams so a test can assert that a
+// path that skips the sweep's work calls neither.
+type probeAndKillCounts struct {
+	probes, kills int
+}
+
+func (c *probeAndKillCounts) install(d *Daemon) {
+	d.seams.doltPortConflict = func(string) (int, string) {
+		c.probes++
+		return 4242, "/foreign/data"
+	}
+	d.seams.killImposters = func(string) error {
+		c.kills++
+		return nil
+	}
+}
+
+func TestSweepImposterDoltSkipsContainerMode(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	d := newImposterDaemon(t, &buf)
+	writeTownJSON(t, d, `{"port":3307,"external_container":"gt-dolt"}`)
+	var calls probeAndKillCounts
+	calls.install(d)
+
+	d.sweepImposterDolt()
+
+	if calls.probes != 0 || calls.kills != 0 {
+		t.Errorf("container town probed %d time(s) and killed %d time(s), want neither", calls.probes, calls.kills)
+	}
+	if got := buf.String(); got != "" {
+		t.Errorf("log = %q, want no line for a container town", got)
+	}
+}
+
+func TestSweepImposterDoltUnparsableSettingSkips(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	d := newImposterDaemon(t, &buf)
+	writeTownJSON(t, d, `{"port":3307,"external_container":"-v"}`)
+	var calls probeAndKillCounts
+	calls.install(d)
+
+	d.sweepImposterDolt()
+
+	if calls.probes != 0 || calls.kills != 0 {
+		t.Errorf("unreadable setting probed %d time(s) and killed %d time(s), want neither", calls.probes, calls.kills)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "dolt.external_container") {
+		t.Errorf("log = %q, want the setting named", got)
+	}
+	if lines := strings.Count(got, "\n"); lines != 1 {
+		t.Errorf("logged %d line(s), want 1: %q", lines, got)
+	}
+}
+
+func TestSweepImposterDoltMalformedTownJSONSkips(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	d := newImposterDaemon(t, &buf)
+	writeRawTownJSON(t, d, `{"type":"town","version":2,"name":"t","dolt":`)
+	var calls probeAndKillCounts
+	calls.install(d)
+
+	d.sweepImposterDolt()
+
+	if calls.probes != 0 || calls.kills != 0 {
+		t.Errorf("malformed town.json probed %d time(s) and killed %d time(s), want neither", calls.probes, calls.kills)
+	}
+	got := buf.String()
+	if !strings.Contains(got, filepath.Join(d.config.TownRoot, "mayor", "town.json")) {
+		t.Errorf("log = %q, want the town.json path named", got)
+	}
+	if lines := strings.Count(got, "\n"); lines != 1 {
+		t.Errorf("logged %d line(s), want 1: %q", lines, got)
+	}
+}
+
+func TestSweepImposterDoltHostModeUnchanged(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		townJSON string // the whole file body; "" leaves the town without one
+		killErr  error
+		wantLog  string
+	}{
+		{
+			name:     "conflict logged and killed",
+			townJSON: `{"type":"town","version":2,"name":"t","dolt":{"port":3307}}`,
+			wantLog:  `test_pollution: Dolt port conflict: PID 4242 holds the port serving "/foreign/data"`,
+		},
+		{
+			name:     "kill refused",
+			townJSON: `{"type":"town","version":2,"name":"t","dolt":{"port":3307}}`,
+			killErr:  errors.New("holder is not a dolt sql-server"),
+			wantLog:  "test_pollution: killing imposter Dolt server (PID 4242): holder is not a dolt sql-server",
+		},
+		{
+			name:    "no town.json at all",
+			wantLog: `test_pollution: Dolt port conflict: PID 4242 holds the port serving "/foreign/data"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			d := newImposterDaemon(t, &buf)
+			if tt.townJSON != "" {
+				writeRawTownJSON(t, d, tt.townJSON)
+			}
+			var calls probeAndKillCounts
+			calls.install(d)
+			d.seams.killImposters = func(string) error {
+				calls.kills++
+				return tt.killErr
+			}
+
+			d.sweepImposterDolt()
+
+			if calls.probes != 1 || calls.kills != 1 {
+				t.Errorf("host town probed %d time(s) and killed %d time(s), want one each", calls.probes, calls.kills)
+			}
+			if got := buf.String(); !strings.Contains(got, tt.wantLog) {
+				t.Errorf("log = %q, want %q", got, tt.wantLog)
+			}
+		})
+	}
 }
 
 func TestSweepTestTmuxServersLogsWhatItReaped(t *testing.T) {

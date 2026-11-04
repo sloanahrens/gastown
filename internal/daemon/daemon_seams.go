@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmuxsweep"
 )
@@ -23,6 +24,8 @@ type daemonSeams struct {
 	cleanupLegacySockets func(townRoot string) (defaultCleaned, baseCleaned int)
 	testSocketSweep      func() (tmuxsweep.Report, error)
 	imposterSweep        func(townRoot string)
+	doltPortConflict     func(townRoot string) (int, string)
+	killImposters        func(townRoot string) error
 	orphanReap           func()
 	censusTicker         func(interval time.Duration) (ticks <-chan time.Time, stop func())
 	censusLog            func(ctx context.Context, every <-chan time.Time, logf func(string, ...any))
@@ -115,6 +118,24 @@ func (s daemonSeams) cleanupLegacySocketsFor(reg *session.PrefixRegistry, townRo
 		return s.cleanupLegacySockets(townRoot)
 	}
 	return cleanupLegacySockets(reg, townRoot)
+}
+
+// checkDoltPortConflict reports a foreign process holding the town's Dolt
+// port. Unit tests replace it: no test may probe a real port.
+func (s daemonSeams) checkDoltPortConflict(townRoot string) (int, string) {
+	if s.doltPortConflict != nil {
+		return s.doltPortConflict(townRoot)
+	}
+	return doltserver.CheckPortConflict(townRoot)
+}
+
+// killDoltImposters reaps a verified imposter Dolt holding the town's port.
+// Unit tests replace it: no test may signal a real process.
+func (s daemonSeams) killDoltImposters(townRoot string) error {
+	if s.killImposters != nil {
+		return s.killImposters(townRoot)
+	}
+	return doltserver.KillImposters(townRoot)
 }
 
 // sweepTestSockets scans the machine's tmux socket directory for abandoned

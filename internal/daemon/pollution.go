@@ -1,6 +1,10 @@
 package daemon
 
 import (
+	"errors"
+	"path/filepath"
+
+	configpkg "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/procid"
@@ -93,12 +97,38 @@ func (d *Daemon) reapOrphanDoltTestServers() {
 // decision `gt dolt kill-imposters` makes, on the sweep's cadence. The
 // daemon's identity check already covers this while it manages the server
 // (dolt.go); a town running an external Dolt has no such path.
+//
+// The sweep stands down for a container town, and for a town it cannot
+// establish as host-managed: a town.json it cannot read or parse, or a
+// dolt.external_container set but unusable. A town with no town.json at all is
+// host-managed and swept as before (gt-8ibrs).
 func (d *Daemon) sweepImposterDolt() {
 	if d.seams.imposterSweep != nil {
 		d.seams.imposterSweep(d.config.TownRoot)
 		return
 	}
-	pid, dataDir := doltserver.CheckPortConflict(d.config.TownRoot)
+	// DefaultConfig reaches dolt.external_container through
+	// ResolveDoltEndpointFor, which drops a town.json read error and falls
+	// back to .dolt-data/config.yaml. A malformed town.json then reads as "no
+	// container", so the sweep would probe and kill on a container town. Read
+	// the file here first, where its error is still visible (gt-8ibrs).
+	townJSON := filepath.Join(d.config.TownRoot, "mayor", "town.json")
+	town, err := configpkg.LoadTownConfig(townJSON)
+	switch {
+	case err != nil && !errors.Is(err, configpkg.ErrNotFound):
+		d.logger.Printf("test_pollution: cannot read %s: %v", townJSON, err)
+		return
+	case err == nil && town.Dolt != nil && town.Dolt.ExternalContainer != "":
+		// A town whose Dolt runs in a container holds its port through
+		// Docker's own forward, so there is no host imposter to find and no
+		// process gt may signal. A name that is set but unusable refuses the
+		// sweep rather than reading the town as host-managed (gt-xeb1x).
+		if _, err := doltserver.DefaultConfig(d.config.TownRoot).ExternalContainerSetting(); err != nil {
+			d.logger.Printf("test_pollution: cannot read dolt.external_container: %v", err)
+		}
+		return
+	}
+	pid, dataDir := d.seams.checkDoltPortConflict(d.config.TownRoot)
 	if pid == 0 {
 		return
 	}
@@ -107,7 +137,7 @@ func (d *Daemon) sweepImposterDolt() {
 	// signaling it: a port holder that is not provably Dolt — Docker Desktop
 	// fronts every published container port — is skipped, never killed
 	// (gt-p7zy0).
-	if err := doltserver.KillImposters(d.config.TownRoot); err != nil {
+	if err := d.seams.killDoltImposters(d.config.TownRoot); err != nil {
 		d.logger.Printf("test_pollution: killing imposter Dolt server (PID %d): %v", pid, err)
 	}
 }
