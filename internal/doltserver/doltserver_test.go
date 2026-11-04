@@ -6594,7 +6594,7 @@ func TestListDatabasesLocalKeepsUnreadableEntries(t *testing.T) {
 // TestEnsureMetadataNamesTheHostEveryProcessUses pins that the daemon in the
 // container, whose own Dolt endpoint is dolt.container_host, still writes the
 // loopback host into metadata.json: the file sits in the bind-mounted town, and
-// the Mac reads it, where the container's name does not resolve (gt-4r9wf).
+// the Mac reads it, where the container's name does not resolve (gt-fimtw).
 func TestEnsureMetadataNamesTheHostEveryProcessUses(t *testing.T) {
 	t.Parallel()
 	const (
