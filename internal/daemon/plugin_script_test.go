@@ -186,7 +186,7 @@ func TestPluginScriptUsesBinaryPath(t *testing.T) {
 // points at the per-OS build and not at the plain path the plugin.md names.
 // A name BinaryPath refuses is shown as the plugin wrote it, since no path was
 // run.
-func TestPluginTargetUsesBinaryPath(t *testing.T) {
+func TestPluginScriptTargetUsesBinaryPath(t *testing.T) {
 	t.Parallel()
 	p := binaryPlugin(t, "go-bin", "bin/work")
 	want := filepath.Join(p.Path, "bin", runtime.GOOS+"-"+runtime.GOARCH, "work")
