@@ -40,9 +40,10 @@ type specGraphReport struct {
 	Findings []specGraphFinding `json:"findings"`
 }
 
-// runSpecGraph is gt spec lint --graph over bd.
-func runSpecGraph(out, errOut io.Writer, townRoot, epicID string, asJSON bool) error {
-	stores := slingStores{}
+// runSpecGraph is gt spec lint --graph over stores: the production call passes
+// slingStores{} (bd), and a test passes fake stores so the reads it makes are
+// the ones under test.
+func runSpecGraph(out, errOut io.Writer, stores slingStores, townRoot, epicID string, asJSON bool) error {
 	return runSpecGraphAt(out, errOut, specGraphReads{
 		show:     func(id string) (*beads.Issue, error) { return stores.show(townRoot, id) },
 		children: func(parentID string) ([]*beads.Issue, error) { return stores.children(townRoot, parentID) },
@@ -52,8 +53,9 @@ func runSpecGraph(out, errOut io.Writer, townRoot, epicID string, asJSON bool) e
 // runSpecGraphAt is runSpecGraph with its reads given, so a test can seed a
 // graph. It prints one line per finding, or the report with asJSON, and exits
 // 1 when any finding but the duplicate-test advisory exists. A read or parse
-// failure prints to errOut naming the bead and exits 1 as well: a graph that
-// could not be read is never reported clean.
+// failure, or an epic with no children, prints to errOut naming the bead and
+// exits 1 as well: a graph that could not be read, or an epic with nothing to
+// check, is never reported clean.
 func runSpecGraphAt(out, errOut io.Writer, reads specGraphReads, epicID string, asJSON bool) error {
 	graph, err := specGraphBeads(reads, epicID)
 	if err != nil {
@@ -92,13 +94,24 @@ func runSpecGraphAt(out, errOut io.Writer, reads specGraphReads, epicID string, 
 // to what CheckGraph reads. The epic itself is read first, so an id that does
 // not exist is refused rather than answered by a child read that could come
 // back empty and pass as a clean graph.
+//
+// An epic with no children is refused rather than checked: an empty graph has
+// no finding and would pass as clean, and a wrong id or a child set the read
+// did not see is the likelier cause.
 func specGraphBeads(reads specGraphReads, epicID string) ([]specdispatch.GraphBead, error) {
-	if _, err := reads.show(epicID); err != nil {
+	epic, err := reads.show(epicID)
+	if err != nil {
 		return nil, fmt.Errorf("cannot read epic %s: %w", epicID, err)
+	}
+	if epic == nil {
+		return nil, fmt.Errorf("cannot read epic %s: the read returned no bead", epicID)
 	}
 	kids, err := reads.children(epicID)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read the children of %s: %w", epicID, err)
+	}
+	if len(kids) == 0 {
+		return nil, fmt.Errorf("epic %s has no children to check", epicID)
 	}
 	graph := make([]specdispatch.GraphBead, 0, len(kids))
 	for _, kid := range kids {
@@ -107,6 +120,9 @@ func specGraphBeads(reads specGraphReads, epicID string) ([]specdispatch.GraphBe
 		issue, err := reads.show(kid.ID)
 		if err != nil {
 			return nil, fmt.Errorf("cannot read child %s: %w", kid.ID, err)
+		}
+		if issue == nil {
+			return nil, fmt.Errorf("cannot read child %s: the read returned no bead", kid.ID)
 		}
 		bead, err := graphBead(issue)
 		if err != nil {

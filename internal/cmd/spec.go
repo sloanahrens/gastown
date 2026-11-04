@@ -1029,8 +1029,14 @@ func specPeerHeldPinnedTo(warn io.Writer, townRoot, beadsDir string, peer sling.
 
 func runSpecLint(cmd *cobra.Command, args []string) error {
 	townRoot, _ := workspace.FindFromCwd()
-	if specLintGraph {
-		return runSpecGraph(cmd.OutOrStdout(), cmd.ErrOrStderr(), townRoot, args[0], specLintJSON)
+	return runSpecLintOn(cmd, args, townRoot, specLintGraph, slingStores{})
+}
+
+// runSpecLintOn is runSpecLint with the town root, the --graph flag and the
+// stores given, so a test can drive the graph branch through fake stores.
+func runSpecLintOn(cmd *cobra.Command, args []string, townRoot string, graph bool, stores slingStores) error {
+	if graph {
+		return runSpecGraph(cmd.OutOrStdout(), cmd.ErrOrStderr(), stores, townRoot, args[0], specLintJSON)
 	}
 	path := specLintTemplate
 	if path == "" {

@@ -333,6 +333,80 @@ func TestCheckGraphSharedModify(t *testing.T) {
 	}
 }
 
+func TestCheckGraphSharedCreate(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		beads []GraphBead
+		want  bool
+	}{
+		{
+			name: "independent beads create one file",
+			beads: []GraphBead{
+				{ID: "gt-a", Create: []string{"internal/x.go"}},
+				{ID: "gt-b", Create: []string{"internal/x.go"}},
+			},
+			want: true,
+		},
+		{
+			name: "independent bead creates a file another modifies",
+			beads: []GraphBead{
+				{ID: "gt-a", Create: []string{"internal/x.go"}},
+				{ID: "gt-b", Modify: []string{"internal/x.go"}},
+			},
+			want: true,
+		},
+		{
+			name: "independent bead modifies a file another creates",
+			beads: []GraphBead{
+				{ID: "gt-a", Modify: []string{"internal/x.go"}},
+				{ID: "gt-b", Create: []string{"internal/x.go"}},
+			},
+			want: true,
+		},
+		{
+			name: "one bead creates and the other depends on it",
+			beads: []GraphBead{
+				{ID: "gt-a", Create: []string{"internal/x.go"}},
+				{ID: "gt-b", DependsOn: []string{"gt-a"}, Create: []string{"internal/x.go"}},
+			},
+			want: false,
+		},
+		{
+			name: "one bead creates and a dependent modifies it",
+			beads: []GraphBead{
+				{ID: "gt-a", Create: []string{"internal/x.go"}},
+				{ID: "gt-b", DependsOn: []string{"gt-a"}, Modify: []string{"internal/x.go"}},
+			},
+			want: false,
+		},
+		{
+			name: "different files",
+			beads: []GraphBead{
+				{ID: "gt-a", Create: []string{"internal/x.go"}},
+				{ID: "gt-b", Create: []string{"internal/y.go"}},
+			},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := CheckGraph(tt.beads)
+			if !tt.want {
+				if len(got) != 0 {
+					t.Fatalf("findings = %+v, want none", got)
+				}
+				return
+			}
+			if len(got) != 1 {
+				t.Fatalf("findings = %+v, want exactly one shared-create", got)
+			}
+			wantFinding(t, got[0], KindSharedCreate, "gt-a", "gt-a", "gt-b", "internal/x.go")
+		})
+	}
+}
+
 func TestCheckGraphDuplicateTestIsAdvisory(t *testing.T) {
 	t.Parallel()
 	got := CheckGraph([]GraphBead{
