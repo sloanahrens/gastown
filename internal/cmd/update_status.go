@@ -4,7 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -70,6 +74,7 @@ func runUpdateStatus(cmd *cobra.Command, seams updateStatusSeams, asJSON bool) e
 // outcome, when it started with a live heartbeat age or when it ended, the
 // build it set out to install, the hold it owns, and every step.
 func writeUpdateStatusText(w io.Writer, st update.State, now time.Time) {
+	st = printableUpdateStatus(st)
 	fmt.Fprintf(w, "run %s (%s): %s\n", st.RunID, st.Source, st.Outcome)
 	if st.Outcome == update.OutcomeRunning {
 		fmt.Fprintf(w, "started %s, last heartbeat %s ago\n",
@@ -115,4 +120,44 @@ func shortUpdateStatusSHA(sha string) string {
 		return sha
 	}
 	return string(runes[:updateStatusSHALength])
+}
+
+// printableUpdateStatus returns a copy of st with every recorded string made
+// printable, so a control character in the record cannot reach the terminal or
+// start a new report line. The steps are copied, so the caller's record is left
+// as it was.
+func printableUpdateStatus(st update.State) update.State {
+	st.RunID = printableUpdateStatusText(st.RunID)
+	st.Source = printableUpdateStatusText(st.Source)
+	st.Outcome = update.Outcome(printableUpdateStatusText(string(st.Outcome)))
+	st.Target.SHA = printableUpdateStatusText(st.Target.SHA)
+	st.Target.InstalledSHA = printableUpdateStatusText(st.Target.InstalledSHA)
+	st.Hold.Note = printableUpdateStatusText(st.Hold.Note)
+	steps := make([]update.StepRecord, len(st.Steps))
+	for i, step := range st.Steps {
+		step.Name = update.StepName(printableUpdateStatusText(string(step.Name)))
+		step.Result = update.StepResult(printableUpdateStatusText(string(step.Result)))
+		step.Detail = printableUpdateStatusText(step.Detail)
+		steps[i] = step
+	}
+	st.Steps = steps
+	return st
+}
+
+// printableUpdateStatusText writes each control character in s as the Go escape
+// that names it (\x1b, \n, \r), and every other byte unchanged, so the text
+// stays on its own line and carries no terminal sequence.
+func printableUpdateStatusText(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if unicode.IsControl(r) {
+			q := strconv.QuoteRune(r)
+			b.WriteString(q[1 : len(q)-1])
+		} else {
+			b.WriteString(s[i : i+size])
+		}
+		i += size
+	}
+	return b.String()
 }

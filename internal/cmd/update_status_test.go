@@ -272,3 +272,31 @@ func TestUpdateStatusIsAttachedToUpdate(t *testing.T) {
 		t.Errorf("subcommand name = %q, want status", child.Name())
 	}
 }
+
+// TestUpdateStatusTextEscapesControlCharacters proves recorded text with an
+// escape, a carriage return or a newline prints as visible escapes on the line
+// it belongs to, so a value cannot drive the terminal or forge a report line.
+func TestUpdateStatusTextEscapesControlCharacters(t *testing.T) {
+	t.Parallel()
+	st := runningUpdateStatusState()
+	st.RunID = "20261103T195300Z-1a2b3c4d"
+	st.Source = "manual\x1b[31m"
+	st.Hold = update.HoldRecord{Owned: true, Note: "hold\rover"}
+	st.Steps[0].Detail = "3 seats\x1b[2J drained\nforged: ok"
+	townRoot := writeUpdateStatusState(t, st)
+
+	code, stdout, stderr := runUpdateStatusCommand(t, updateStatusSeamsFor(townRoot, nil))
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr:\n%s", code, stderr)
+	}
+	want := `run 20261103T195300Z-1a2b3c4d (manual\x1b[31m): running
+started 2026-11-03T19:53:00Z, last heartbeat 1m30s ago
+target 01234567 (installed fedcba98)
+hold: hold\rover
+  drain: ok - 3 seats\x1b[2J drained\nforged: ok
+  install: running - make gt-installer
+`
+	if stdout != want {
+		t.Errorf("status report:\n%s\nwant:\n%s", stdout, want)
+	}
+}
