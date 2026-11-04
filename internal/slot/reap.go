@@ -1,10 +1,14 @@
 package slot
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"slices"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/lock"
 )
 
@@ -59,9 +63,14 @@ type ReapReport struct {
 
 // Reap removes the gate's debris: gate containers past the staleness window
 // with no live ryuk reaper for their session, and owner metadata files whose
-// slot nobody holds. A container named in ReapOptions.Protected or carrying
-// KeepLabel is left out of the report as well as the removal, because it is
-// the operator's to keep whatever its age (gt-awq73).
+// slot nobody holds. A container named in ReapOptions.Protected, the one
+// mayor/town.json dolt.external_container names, or carrying KeepLabel is left
+// out of the report as well as the removal, because it is the operator's to
+// keep whatever its age (gt-awq73, gt-1j7zv).
+//
+// Protection of the town's Dolt container lives here rather than in each
+// caller, so no caller can forget it. A town.json that exists but cannot be
+// read or parsed makes Reap return an error before anything is removed.
 //
 // While any slot is held, age-only debris is left in Kept rather than removed
 // (gt-c115n): past the staleness window this side of the gate cannot tell a
@@ -91,6 +100,17 @@ func (g *Gate) Reap(townRoot string, opts ReapOptions) (ReapReport, error) {
 		report.OlderThan = StaleContainerWindow
 	}
 
+	// The town's Dolt container is read before anything is removed, owner
+	// files included: an unreadable town.json refuses the whole reap.
+	townDolt, err := townDoltContainer(townRoot)
+	if err != nil {
+		return report, fmt.Errorf("reading the town's dolt.external_container: %w", err)
+	}
+	protected := opts.Protected
+	if townDolt != "" {
+		protected = append(slices.Clip(protected), townDolt)
+	}
+
 	report.OwnerFiles = reapStaleOwnerFiles(townRoot, opts.DryRun)
 	report.HeldSlots = heldSlots(townRoot)
 
@@ -98,7 +118,7 @@ func (g *Gate) Reap(townRoot string, opts ReapOptions) (ReapReport, error) {
 	if err != nil {
 		return report, fmt.Errorf("listing gate containers: %w", err)
 	}
-	containers = exemptFromReap(containers, opts.Protected)
+	containers = exemptFromReap(containers, protected)
 
 	for _, verdict := range g.scratchVerdicts(g.owner.classify(containers, g.clock.Now(), report.OlderThan)) {
 		// The scratch project's containers are the documented L1/L2 town's,
@@ -155,6 +175,27 @@ func exemptFromReap(containers []GateContainer, protected []string) []GateContai
 		kept = append(kept, c)
 	}
 	return kept
+}
+
+// townDoltContainer returns the Docker container the town's Dolt server runs in
+// (mayor/town.json dolt.external_container), "" when the town names none. A
+// missing town.json is a host-managed town and names nothing. Any other read or
+// parse failure is an error, and so is a set name that is not a Docker
+// container name: reading either as "no container" would leave the town's
+// server open to a reap.
+//
+// It reads the file with config.LoadTownConfig rather than doltserver's
+// DefaultConfig, which drops the read error and falls back to the managed
+// config, so a malformed town.json would read as no container (gt-8ibrs).
+func townDoltContainer(townRoot string) (string, error) {
+	town, err := config.LoadTownConfig(filepath.Join(townRoot, "mayor", "town.json"))
+	if errors.Is(err, config.ErrNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return town.Dolt.ParseExternalContainer()
 }
 
 // reapStaleOwnerFiles removes the owner file of every slot that is not held.
