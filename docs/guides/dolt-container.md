@@ -465,10 +465,13 @@ proven for the town's real load.
 - **Bind-mount speed for a database of about 2 GB.** The rehearsal proves
   correctness on the restored copy, not write and fsync speed through the bind
   mount on the operator's Docker disk.
-- **The right memory limit.** 12 GiB is a starting cap, not a measured one: the
-  host server has shown 14.6 GB resident and a 10.2 GB peak footprint. Step
-  1.7's reading under the burst and the gc decides whether 12 GiB stands or the
-  cutover needs a higher `--memory-gib`.
+- **The right memory limit.** The live gt-dolt container was raised to 24 GiB on
+  2026-11-04, after the host showed 14.6 GB resident; the host server has also
+  shown a 10.2 GB peak footprint. 24 GiB is a starting cap, not a measured one.
+  `gt dolt container plan` still defaults to 12 GiB, so a cutover that passes no
+  `--memory-gib` starts below the live cap. Step 1.7's reading under the burst
+  and the gc decides whether the cutover's cap stands or needs a higher
+  `--memory-gib`.
 
 ## Numbers to record
 
