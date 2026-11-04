@@ -191,6 +191,15 @@ const (
 	// See hq-57jr8.
 	// Override with operational.dolt.time_zone; set to empty to skip the override.
 	DefaultTimeZone = "+00:00"
+
+	// doltAutoGCArchiveLevel is the auto_gc_behavior archive_level written in both
+	// branches of the managed config. 0 is Dolt's legacy chunk format; archive level
+	// 1 applies zStandard dictionary compression during gc. Measured on a restored
+	// gt backup (1.65 GB, 29,957 commits) with Dolt 2.3.2 (gt-hs4j3): a gc at
+	// level 1 peaked at 19.0 GiB (22.6 GiB with --full), the same gc at level 0
+	// peaked at 7.7 GiB (7.1 GiB with --full), both in 22 to 25 seconds, and the
+	// old generation at level 0 is about 30% larger (1.18 GB against 0.90 GB).
+	doltAutoGCArchiveLevel = 0
 )
 
 // metadataMu provides per-path mutexes for EnsureMetadata goroutine synchronization.
@@ -2024,9 +2033,9 @@ func writeServerConfig(config *Config, configPath string) error {
 	// off at runtime (next Dolt restart) without a source revert+rebuild — the escape
 	// hatch given the old blocking-GC lockup history. Dolt's non-blocking auto-GC is
 	// default-on since 1.75.
-	autoGcBlock := "  auto_gc_behavior:\n    enable: true\n    archive_level: 1\n"
+	autoGcBlock := fmt.Sprintf("  auto_gc_behavior:\n    enable: true\n    archive_level: %d\n", doltAutoGCArchiveLevel)
 	if v := strings.ToLower(strings.TrimSpace(config.AutoGC)); v == "off" || v == "false" || v == "0" || v == "disabled" {
-		autoGcBlock = "  auto_gc_behavior:\n    enable: false\n    archive_level: 0\n"
+		autoGcBlock = fmt.Sprintf("  auto_gc_behavior:\n    enable: false\n    archive_level: %d\n", doltAutoGCArchiveLevel)
 	}
 
 	// Dolt expands environment references anywhere in this file, comments

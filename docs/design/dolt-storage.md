@@ -578,9 +578,11 @@ triggers when the journal file (`.dolt/noms/vvvv...`) reaches 50MB. No
 manual gc or server stop is required — the server handles it.
 
 Gas Town managed Dolt configs should keep `auto_gc_behavior` enabled with
-`archive_level: 1` so the sql-server does not retain every old chunk index
-and grow RSS indefinitely. The config is regenerated only when the managed
-Dolt server starts; a deployed change takes effect on the next Dolt restart.
+`archive_level: 0` (the legacy chunk format): on the gt backup, a default gc at
+archive level 1 peaks at about 19 GiB against 7.7 GiB at level 0, and the old
+generation at level 0 is about 30% larger on disk (gt-hs4j3). The config is
+regenerated only when the managed Dolt server starts; a deployed change takes
+effect on the next Dolt restart.
 Set `operational.dolt.auto_gc` to `off` in `settings/config.json` before that
 restart to emit `enable: false` and `archive_level: 0` as an operational
 rollback switch.
