@@ -175,6 +175,10 @@ func CheckGraph(beads []GraphBead) []GraphFinding {
 	for _, b := range beads {
 		defined := map[string]bool{}
 		for id := range reach[b.ID] {
+			// A cycle makes b reach itself; its own Defines do not satisfy its Uses.
+			if id == b.ID {
+				continue
+			}
 			for _, name := range byID[id].Defines {
 				defined[name] = true
 			}

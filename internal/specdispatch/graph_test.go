@@ -206,6 +206,16 @@ func TestCheckGraphUnmetUse(t *testing.T) {
 			used: "Store",
 		},
 		{
+			name: "a bead's own define does not satisfy its use through a cycle",
+			beads: []GraphBead{
+				{ID: "gt-a", DependsOn: []string{"gt-b"}, Defines: []string{"Store"}, Uses: []string{"Store"}},
+				{ID: "gt-b", DependsOn: []string{"gt-a"}},
+			},
+			want: true,
+			bead: "gt-a",
+			used: "Store",
+		},
+		{
 			name: "unknown dependency id is ignored",
 			beads: []GraphBead{
 				{ID: "gt-a", DependsOn: []string{"gt-gone"}, Uses: []string{"Clock"}},
