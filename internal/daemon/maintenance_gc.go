@@ -163,6 +163,12 @@ type maintenanceGCState struct {
 	// (maintenance_request.go). It lets a request whose result write failed be
 	// re-answered on the next tick instead of rerunning the cycle.
 	LastRequestAnswer *gcRequestAnswer `json:"last_request_answer,omitempty"`
+
+	// LastUpdateAlertRunID is the run id of the last failed, partial or
+	// aborted update run whose ended-badly alert was announced
+	// (update_alerts.go). A daemon restart reads it, so the same run is not
+	// announced twice (gt-8xjnw).
+	LastUpdateAlertRunID string `json:"last_update_alert_run_id,omitempty"`
 }
 
 // gcDeferral records one window's deferral: when the window closes, why the
@@ -236,6 +242,7 @@ func loadMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
 		st.ArchiveEventsWatermarks[k] = v
 	}
 	st.LastRequestAnswer = parsed.LastRequestAnswer
+	st.LastUpdateAlertRunID = parsed.LastUpdateAlertRunID
 	return st, nil
 }
 
