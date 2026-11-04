@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,8 +27,9 @@ import (
 // scheduled_maintenance's gc: history-preserving garbage collection, the
 // town's one GC actor (gt-8z769.3).
 //
-// Per database, in the maintenance window, run CALL dolt_gc('--full') over the
-// daemon's SQL connection to the running server when either holds:
+// Per database, in the maintenance window, run CALL dolt_gc('--full',
+// '--archive-level=0') over the daemon's SQL connection to the running server
+// when either holds:
 //   - weekly: its last patrol gc is at least maintenanceGCWeekly old, or it
 //     has none recorded;
 //   - old-gen growth: its old generation (.dolt/noms/oldgen) is more than
@@ -51,9 +51,9 @@ const (
 	// triggers an early gc: more than 20%.
 	maintenanceOldGenGrowth = 1.20
 
-	// maintenanceGCTimeout bounds one CALL dolt_gc('--full'). A prod --full
-	// gc takes seconds per database (design doc, Problem); ten minutes is a
-	// hang, not a slow gc.
+	// maintenanceGCTimeout bounds one CALL dolt_gc('--full', '--archive-level=0').
+	// A prod --full gc takes seconds per database (design doc, Problem); ten
+	// minutes is a hang, not a slow gc.
 	maintenanceGCTimeout = 10 * time.Minute
 
 	// maintenancePauseSlack is how long the pause marker outlives the gc
@@ -495,14 +495,24 @@ func (d *Daemon) workingPolecats() ([]string, error) {
 
 // --- the gc call -------------------------------------------------------------------
 
-// doltGCFull runs CALL dolt_gc('--full') on db through the running server. The
+// doltGCArchiveLevelArg is the argument every gc call passes, so the gc writes
+// no archive files. Measured under gt-k3u2e on restored backups: the gc with
+// archive compression on peaks at 22.6 GiB, and with this argument at 7.1 GiB
+// in the same time, for an old generation about 30% larger. A manual call
+// writes archive files unless it passes this, whatever the server config says.
+const doltGCArchiveLevelArg = "--archive-level=0"
+
+// doltGCFullSQL is the statement doltGCFull runs.
+const doltGCFullSQL = "CALL dolt_gc('--full', '" + doltGCArchiveLevelArg + "')"
+
+// doltGCFull runs doltGCFullSQL on db through the running server. The
 // connection's read timeout matches the gc bound; compactorOpenDB's 30s would
 // cut a slow gc off mid-flight.
 func (d *Daemon) doltGCFull(ctx context.Context, db string) error {
 	if err := validMaintenanceDBName(db); err != nil {
 		return err
 	}
-	conn, err := sql.Open("mysql", d.maintenanceDSN(db, maintenanceGCTimeout))
+	conn, err := d.maintenance().gcOpenDB(d.maintenanceDSN(db, maintenanceGCTimeout))
 	if err != nil {
 		return err
 	}
@@ -512,7 +522,7 @@ func (d *Daemon) doltGCFull(ctx context.Context, db string) error {
 	// ExecContext: the procedure reports failure as a SQL error, and its
 	// status row carries nothing more. TestIntegrationDoltGCFullAgainstRealServer
 	// runs this on a server.
-	if _, err := conn.ExecContext(ctx, "CALL dolt_gc('--full')"); err != nil {
+	if _, err := conn.ExecContext(ctx, doltGCFullSQL); err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return fmt.Errorf("dolt_gc --full: timeout: %w", err)
 		}
