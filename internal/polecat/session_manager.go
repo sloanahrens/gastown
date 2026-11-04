@@ -93,6 +93,10 @@ type SessionManager struct {
 	// sandboxExists asks a gateway whether it has a sandbox of that name when
 	// nil: a seam for the unit tier, which has no gateway.
 	sandboxExists func(gateway, name string) (bool, error)
+	// sandboxStatus asks a gateway for a sandbox's phase when nil: a seam for
+	// the unit tier, which has no gateway. A stop reads it to find a seat whose
+	// sandbox has failed (gt-jhoi1).
+	sandboxStatus func(gateway, name string) (sandbox.Status, error)
 	// launchFn replaces launch when set: a seam so a test can see what Start
 	// has done by the time it launches.
 	launchFn func(polecat, sessionID string, opts SessionStartOptions) error
@@ -1128,6 +1132,14 @@ func (m *SessionManager) Stop(polecat string, force bool) error {
 	sessionID := m.SessionName(polecat)
 
 	running, err := m.tmux.HasSession(sessionID)
+	if err != nil || !running {
+		// A seat whose sandbox has failed has no pod, so the probe finds no
+		// session or cannot reach one, and the sandbox would stay behind with its
+		// record. Its errored sandbox is removed here, once its agent bead proves
+		// the work reached origin, so the seat name is free again (gt-jhoi1). A
+		// failure is logged, and the stop answers as it did before.
+		m.removeErroredSandbox(polecat, sessionID)
+	}
 	if err != nil {
 		return fmt.Errorf("checking session: %w", err)
 	}
@@ -1203,6 +1215,77 @@ func (m *SessionManager) clock() clockwork.Clock {
 		return m.clk
 	}
 	return clockwork.NewRealClock()
+}
+
+// removeErroredSandbox deletes the sandbox of a seat whose session is gone, when
+// the gateway reports that sandbox in a terminal failure phase (see
+// session.CleanupErroredSandbox). The deletion is refused unless the seat's agent
+// bead proves its work reached origin (erroredSandboxKeep). A failure is logged
+// and never returned, so a stop answers the same whether or not the record was
+// removed. A host session has no record and nothing happens.
+func (m *SessionManager) removeErroredSandbox(polecat, sessionID string) {
+	if m.rig == nil || m.rig.Path == "" {
+		return
+	}
+	status := m.sandboxStatus
+	if status == nil {
+		status = session.GatewaySandboxPhase
+	}
+	deleter := sandboxDeleterOrLinked(m.sandboxDeleter)
+	gated := func(townRoot string, rec session.SandboxRecord) error {
+		if why := m.erroredSandboxKeep(polecat); why != "" {
+			return fmt.Errorf("keeping it, %s", why)
+		}
+		return deleter(townRoot, rec)
+	}
+	if _, err := session.CleanupErroredSandbox(status, gated, filepath.Dir(m.rig.Path), sessionID); err != nil {
+		m.warnSandbox("stopping %s: its errored sandbox is not removed: %v", sessionID, err)
+	}
+}
+
+// erroredSandboxKeep names why an errored sandbox of polecat must stay, or ""
+// when its agent bead proves the seat's work reached origin. gt done records
+// cleanup_status, and push_failed when the seat's branch never reached origin. A
+// status other than clean, or no status, means commits may exist only in the
+// sandbox, and the sandbox is the only copy. The sandbox cannot be pushed from
+// here: an errored one has no pod to run the push in (gt-jhoi1).
+func (m *SessionManager) erroredSandboxKeep(polecat string) string {
+	fields, err := m.polecatAgentFields(polecat)
+	if err != nil {
+		return "its agent bead cannot be read: " + err.Error()
+	}
+	if fields == nil {
+		return "its agent bead is gone"
+	}
+	if status := CleanupStatus(fields.CleanupStatus); !status.IsSafe() {
+		if status == "" {
+			return "cleanup_status=<missing>: its work is not proven on origin"
+		}
+		return "cleanup_status=" + string(status) + ": its work is not proven on origin"
+	}
+	if fields.PushFailed {
+		return "push_failed=true: its branch never reached origin"
+	}
+	return ""
+}
+
+// polecatAgentFields reads polecat's agent bead from the rig's beads through
+// beadsFor (the beadsAt seam in tests), routed by the rig's prefix as the polecat
+// manager routes it. A missing bead is nil fields, not an error.
+func (m *SessionManager) polecatAgentFields(polecat string) (*beads.AgentFields, error) {
+	townRoot := filepath.Dir(m.rig.Path)
+	id := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(townRoot, m.rig.Name), m.rig.Name, polecat)
+	_, fields, err := beads.GetAgentBead(m.beadsFor(id, m.rig.Path), id)
+	return fields, err
+}
+
+// warnSandbox reports a sandbox a stop could not remove; nil is style.PrintWarning.
+func (m *SessionManager) warnSandbox(format string, args ...any) {
+	if m.warn != nil {
+		m.warn(format, args...)
+		return
+	}
+	style.PrintWarning(format, args...)
 }
 
 // removeSandbox pushes the work a stopped sandboxed session committed, then

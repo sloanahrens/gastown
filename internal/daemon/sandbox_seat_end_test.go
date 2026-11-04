@@ -21,6 +21,8 @@ import (
 	jevrules "github.com/steveyegge/gastown/internal/jev/rules"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/sandbox"
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 const (
@@ -55,7 +57,9 @@ type seatEndFake struct {
 	// is a removal that failed halfway and left the seat partly gone.
 	removeDeleted bool
 	gwAsked       []string
-	seatFields    beads.AgentFields
+	// deleted is the sandbox the seat-end deleter removed, by session name.
+	deleted    []string
+	seatFields beads.AgentFields
 	// cursorAt and cursorErr answer the daemon's jev_rules cursor seam: a zero
 	// cursorAt with no err is a town that has not written a cursor yet.
 	cursorAt  time.Time
@@ -92,6 +96,13 @@ func newSeatEndFake(t *testing.T) *seatEndFake {
 		sandboxExists: func(gateway, name string) (bool, error) {
 			f.gwAsked = append(f.gwAsked, gateway+"|"+name)
 			return false, nil
+		},
+		sandboxStatus: func(gateway, name string) (sandbox.Status, error) {
+			return sandbox.Status{Name: name, Phase: "Ready"}, nil
+		},
+		sandboxDeleter: func(_ string, rec session.SandboxRecord) error {
+			f.deleted = append(f.deleted, rec.Session)
+			return nil
 		},
 		removeSandboxSeatDirs: func(rigPath, rig, name string) (bool, error) {
 			if f.removeErr != nil {
@@ -219,10 +230,47 @@ func TestEndFinishedSandboxSeat(t *testing.T) {
 		removeErr   error
 		wantRemoved bool
 		wantAsked   bool
+		// phase is the sandbox's gateway phase when it exists; phaseErr is the
+		// gateway's failure to say. deleteErr fails the delete of an errored
+		// sandbox, and wantDeleted is whether one was attempted.
+		phase       string
+		phaseErr    error
+		deleteErr   error
+		wantDeleted bool
+		// noRecord leaves the sandbox at the gateway with no registry record.
+		noRecord bool
 	}{
 		{
 			name: "a finished seat goes", landing: finished, desired: intent.DesiredStop,
 			wantRemoved: true, wantAsked: true,
+		},
+		{
+			name: "an errored sandbox of a finished seat is deleted and the seat goes", exists: true, phase: "Error",
+			landing: finished, desired: intent.DesiredStop,
+			wantRemoved: true, wantAsked: true, wantDeleted: true,
+		},
+		{
+			name: "an errored sandbox with no record is deleted by its seat's gateway and the seat goes", exists: true, phase: "Error",
+			noRecord: true, landing: finished, desired: intent.DesiredStop,
+			wantRemoved: true, wantAsked: true, wantDeleted: true,
+		},
+		{
+			name: "an errored sandbox of an unlanded seat is kept and not deleted", exists: true, phase: "Error",
+			landing: sandboxSeatLanding{BeadID: endBead, Branch: endBranch}, desired: intent.DesiredStop,
+			wantAsked: true,
+		},
+		{
+			name: "a failed delete of an errored sandbox keeps the seat", exists: true, phase: "Failed",
+			deleteErr: errors.New("gateway unreachable"),
+			landing:   finished, desired: intent.DesiredStop, wantAsked: true, wantDeleted: true,
+		},
+		{
+			name: "a stopped sandbox is not an errored one and keeps the seat", exists: true, phase: "Stopped",
+			landing: finished, desired: intent.DesiredStop, wantAsked: true,
+		},
+		{
+			name: "a gateway that cannot give the sandbox's phase keeps it", exists: true, phaseErr: errors.New("gateway down"),
+			landing: finished, desired: intent.DesiredStop, wantAsked: true,
 		},
 		{
 			name:    "unlanded work keeps it",
@@ -293,6 +341,20 @@ func TestEndFinishedSandboxSeat(t *testing.T) {
 				f.gwAsked = append(f.gwAsked, gateway+"|"+name)
 				return tt.exists, tt.existsErr
 			}
+			f.host.sandboxStatus = func(gateway, name string) (sandbox.Status, error) {
+				return sandbox.Status{Name: name, Phase: tt.phase}, tt.phaseErr
+			}
+			f.host.sandboxDeleter = func(_ string, rec session.SandboxRecord) error {
+				f.deleted = append(f.deleted, rec.Session)
+				return tt.deleteErr
+			}
+			if tt.exists && !tt.noRecord {
+				if err := session.WriteSandboxRecord(f.town, session.SandboxRecord{
+					Session: f.host.sessionName(endRig, endPolecat), Rig: endRig, Polecat: endPolecat, Gateway: "k8s",
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if tt.parked {
 				f.park()
 			} else if tt.desired != "" {
@@ -314,6 +376,14 @@ func TestEndFinishedSandboxSeat(t *testing.T) {
 			}
 			if asked := len(f.gwAsked) > 0; asked != tt.wantAsked {
 				t.Errorf("gateway asked = %v, want %v (%v)", asked, tt.wantAsked, f.gwAsked)
+			}
+			if deleted := len(f.deleted) > 0; deleted != tt.wantDeleted {
+				t.Errorf("sandbox deleted = %v, want %v (%v)", deleted, tt.wantDeleted, f.deleted)
+			}
+			if tt.wantDeleted {
+				if want := f.host.sessionName(endRig, endPolecat); len(f.deleted) != 1 || f.deleted[0] != want {
+					t.Errorf("deleted %v, want exactly the seat's sandbox %s", f.deleted, want)
+				}
 			}
 		})
 	}
