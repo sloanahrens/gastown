@@ -81,6 +81,18 @@ func (s ComposeSpec) validateClient() error {
 			return fmt.Errorf("compose spec: %q is not an absolute path without a colon or control character; the render mounts it and KUBECONFIG joins paths with a colon", p)
 		}
 	}
+	if s.ConfigDir != "" {
+		// The config directory is mounted read-only with everything under it, so a
+		// read-write mount inside it would be writable behind a read-only mount. The
+		// town root is absolute (validate checks it first), so a ConfigDir of "/"
+		// holds it and is refused here too (gt-i7c1b).
+		dir := filepath.Clean(s.ConfigDir)
+		for _, rw := range []struct{ name, path string }{{"TownRoot", s.TownRoot}, {"LandingWorkRoot", s.LandingWorkRoot}, {"BackupDir", s.BackupDir}} {
+			if rw.path != "" && pathContains(dir, rw.path) {
+				return fmt.Errorf("compose spec: ConfigDir %q holds %s %q, which is mounted read-write; the config directory is bound read-only with everything under it", s.ConfigDir, rw.name, rw.path)
+			}
+		}
+	}
 	return nil
 }
 

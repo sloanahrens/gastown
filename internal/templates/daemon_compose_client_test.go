@@ -78,6 +78,44 @@ func TestLiveComposeConfigDirMustBeAbsolute(t *testing.T) {
 	}
 }
 
+// The config directory is mounted read-only with everything under it, so a
+// directory that holds a read-write mount would leave a writable tree behind a
+// read-only mount. The render refuses one, including an unclean path that
+// cleans to a parent of the town (gt-i7c1b).
+func TestLiveComposeRefusesAConfigDirThatHoldsAWritableMount(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		configDir, landing, backup string
+	}{
+		"the filesystem root":    {configDir: "/"},
+		"the town root":          {configDir: "/towns/live"},
+		"above the town":         {configDir: "/towns"},
+		"unclean above the town": {configDir: "/towns/live/sub/../.."},
+		"holds the landing root": {configDir: "/host", landing: "/host/landing"},
+		"holds the backup dir":   {configDir: "/host", backup: "/host/backups/dolt"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			s := liveSpec()
+			s.ConfigDir, s.LandingWorkRoot, s.BackupDir = tc.configDir, tc.landing, tc.backup
+			if _, err := templates.RenderDaemonCompose(s); err == nil || !strings.Contains(err.Error(), "ConfigDir") {
+				t.Fatalf("error = %v, want the ConfigDir breadth refusal", err)
+			}
+		})
+	}
+}
+
+// A sibling that shares a string prefix with the town is not inside it, so the
+// render accepts it: the check is path containment, not a string prefix (gt-i7c1b).
+func TestLiveComposeAcceptsAConfigDirBesideTheTown(t *testing.T) {
+	t.Parallel()
+	s := liveSpec()
+	s.ConfigDir = "/towns/live-config"
+	if _, err := templates.RenderDaemonCompose(s); err != nil {
+		t.Fatalf("a config dir beside the town was refused: %v", err)
+	}
+}
+
 // With no config directory the file is the one every earlier town rendered.
 func TestLiveComposeWithoutConfigDirIsUnchanged(t *testing.T) {
 	t.Parallel()
