@@ -1249,7 +1249,7 @@ func (m *SessionManager) removeErroredSandbox(polecat, sessionID string) {
 
 // erroredSandboxKeep names why an errored sandbox of polecat must stay, or ""
 // when its agent bead proves the seat's work reached origin. gt done records
-// cleanup_status after its push, and push_failed when the push was refused; a
+// cleanup_status, and push_failed when the seat's branch never reached origin. A
 // status other than clean, or no status, means commits may exist only in the
 // sandbox, and the sandbox is the only copy. The sandbox cannot be pushed from
 // here: an errored one has no pod to run the push in (gt-jhoi1).

@@ -84,9 +84,9 @@ func CleanupErroredSandbox(status func(gateway, name string) (sandbox.Status, er
 }
 
 // CleanupErroredSandboxWithRecord is CleanupErroredSandbox over a record the
-// caller already read, or built for a seat whose record is gone: the sandbox the
-// gateway names rec.Gateway holds under session. It is deleted only in a
-// terminal failure phase, as CleanupErroredSandbox does (gt-jhoi1).
+// caller already read, or built for a seat whose record is gone. It asks
+// rec.Gateway for session's sandbox and deletes it only in a terminal failure
+// phase, as CleanupErroredSandbox does (gt-jhoi1).
 func CleanupErroredSandboxWithRecord(status func(gateway, name string) (sandbox.Status, error), deleter func(townRoot string, rec SandboxRecord) error, townRoot, session string, rec SandboxRecord) (bool, error) {
 	st, err := status(rec.Gateway, session)
 	if isSandboxNotFound(err) {

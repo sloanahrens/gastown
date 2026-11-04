@@ -478,9 +478,9 @@ func (h *patrolScanHost) sandboxFailed(gateway, name string) (bool, error) {
 // asked again through session.CleanupErroredSandboxWithRecord, so a sandbox that
 // stopped failing in between keeps the seat for a later pass (gt-jhoi1).
 //
-// A seat with no record still has its sandbox at the gateway the town's seat
-// config names, so the delete is keyed by that gateway and the seat's own name
-// rather than kept forever (gt-jhoi1).
+// A seat with no record has its sandbox at the gateway the town's seat config
+// names, so the delete is keyed by that gateway and the seat's own name rather
+// than keeping the seat forever (gt-jhoi1).
 func (h *patrolScanHost) removeErroredSeatSandbox(rig, name, gateway string) string {
 	status := h.sandboxStatus
 	if status == nil {
