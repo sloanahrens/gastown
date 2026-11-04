@@ -43,10 +43,12 @@ func newUpdateTriggerTestDaemon(t *testing.T, cfg *config.UpdateConfig) (*Daemon
 		config: DefaultConfig(town),
 		logger: log.New(&logs, "", 0),
 		clock:  clockwork.NewFakeClockAt(updateTriggerTestTime),
-		updateLaunch: func(_ context.Context, r string) error {
-			launches++
-			reason = r
-			return nil
+		updateTrigger: updateTriggerState{
+			launch: func(_ context.Context, r string) error {
+				launches++
+				reason = r
+				return nil
+			},
 		},
 	}
 	// The marker is read from the test town, never from the host environment's
@@ -278,7 +280,7 @@ func createUpdateSource(t *testing.T, town string) string {
 	return source
 }
 
-func TestUpdateFactsRefusesUnreadableInputs(t *testing.T) {
+func TestUpdateTriggerRefusesUnreadableInputs(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -363,24 +365,57 @@ func TestUpdateFactsRefusesUnreadableInputs(t *testing.T) {
 		},
 	}
 
+	// Each row is driven through the heartbeat's update block: an unreadable
+	// input must refuse the launch the enabled, due trigger would otherwise make.
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			town := t.TempDir()
-			d := &Daemon{
-				config: DefaultConfig(town),
-				logger: log.New(io.Discard, "", 0),
-				clock:  clockwork.NewFakeClockAt(updateTriggerTestTime),
-				rebuildGTPendingFn: func() installpending.Store {
-					return installpending.StoreIn(filepath.Join(town, "daemon", installpending.FileName))
-				},
-			}
-			tt.setup(t, d, town)
+			d, logs, launches, _ := newUpdateTriggerTestDaemon(t, &config.UpdateConfig{
+				Enabled: true,
+				Window:  "03:00",
+			})
+			tt.setup(t, d, d.config.TownRoot)
 
-			if _, err := d.updateFacts(updateTriggerTestTime); err == nil {
-				t.Fatal("updateFacts read an unreadable input as an answer; want the error")
+			d.triggerUpdate()
+
+			if *launches != 0 {
+				t.Fatalf("launches = %d, want none: an unreadable input is unknown, not a reason to launch", *launches)
+			}
+			if got := logs.String(); !strings.Contains(got, "not launching") {
+				t.Errorf("log = %q, want the refusal logged", got)
 			}
 		})
+	}
+}
+
+// A refused launch waits out updateLaunchSuppression before the trigger tries
+// again, so a launcher that keeps refusing is not retried on every heartbeat.
+func TestUpdateTriggerBacksOffARefusedLaunch(t *testing.T) {
+	t.Parallel()
+
+	d, _, _, _ := newUpdateTriggerTestDaemon(t, &config.UpdateConfig{
+		Enabled: true,
+		Window:  "03:00",
+	})
+	attempts := 0
+	d.updateTrigger.launch = func(context.Context, string) error {
+		attempts++
+		return errors.New("refused")
+	}
+
+	d.triggerUpdate()
+	// The next heartbeat is seconds later, with the launcher still refusing.
+	d.clock = clockwork.NewFakeClockAt(updateTriggerTestTime.Add(time.Minute))
+	d.triggerUpdate()
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want one: the second heartbeat is inside the backoff", attempts)
+	}
+
+	// Once the window has passed, the trigger tries the launcher again.
+	d.clock = clockwork.NewFakeClockAt(updateTriggerTestTime.Add(updateLaunchSuppression))
+	d.triggerUpdate()
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want two once the backoff has passed", attempts)
 	}
 }
 
