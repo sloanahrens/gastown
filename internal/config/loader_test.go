@@ -1506,13 +1506,15 @@ func TestRuntimeConfigBuildCommandWithPrompt(t *testing.T) {
 
 func TestBuildAgentStartupCommand(t *testing.T) {
 	t.Parallel()
-	// BuildAgentStartupCommand auto-detects town root from cwd when rigPath is empty.
-	// Use a temp directory to ensure we exercise the fallback default config path.
-	fh := agentHost(nil).inDir(t.TempDir())
+	// Pass the town root explicitly. A cwd lookup would walk up from the temp
+	// dir looking for mayor/town.json, and when TMPDIR sits under a live town
+	// that town's agent config would answer instead of the defaults checked here.
+	townRoot := t.TempDir()
+	fh := agentHost(nil).inDir(townRoot)
 
 	// Test without rig config (uses defaults)
 	// New signature: (role, rig, townRoot, rigPath, prompt)
-	cmd, err := buildAgentStartupCommand(fh, constants.RoleCrew, "testrig", "", "", "")
+	cmd, err := buildAgentStartupCommand(fh, constants.RoleCrew, "testrig", townRoot, "", "")
 	if err != nil {
 		t.Fatalf("BuildStartupCommand returned an error: %v", err)
 	}
