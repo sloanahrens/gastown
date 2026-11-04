@@ -46,8 +46,10 @@ func TestSpecLintOutcomeAppends(t *testing.T) {
 	}
 	for i, line := range lines {
 		var rec struct {
-			Bead  string `json:"bead"`
-			Clean bool   `json:"clean"`
+			Bead   string   `json:"bead"`
+			Route  string   `json:"route"`
+			Clean  bool     `json:"clean"`
+			Fields []string `json:"fields"`
 		}
 		if err := json.Unmarshal([]byte(line), &rec); err != nil {
 			t.Errorf("line %d is not JSON: %v", i+1, err)
@@ -55,6 +57,13 @@ func TestSpecLintOutcomeAppends(t *testing.T) {
 		}
 		if rec.Bead != "gt-ok" || !rec.Clean {
 			t.Errorf("line %d = %+v, want gt-ok and clean", i+1, rec)
+		}
+		if rec.Route != "dispatch" {
+			t.Errorf("line %d route = %q, want dispatch", i+1, rec.Route)
+		}
+		// A clean run writes an empty array, not null, so a JSON reader can range it.
+		if rec.Fields == nil || len(rec.Fields) != 0 {
+			t.Errorf("line %d fields = %#v, want an empty array", i+1, rec.Fields)
 		}
 	}
 }
