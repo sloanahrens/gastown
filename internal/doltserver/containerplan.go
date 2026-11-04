@@ -17,6 +17,11 @@ type ContainerSpec struct {
 	Restart                                     string // no, on-failure, always or unless-stopped
 }
 
+// keepLabel marks the container as one the town keeps: the slot reaper matches
+// it before it classifies a container (gt-awq73), so the production Dolt
+// container is not reaped on age when the town configures no container name.
+const keepLabel = "org.gastown.keep=true"
+
 // containerRestartPolicies are the four values docker create accepts for
 // --restart. A policy outside them is refused rather than handed to docker.
 var containerRestartPolicies = map[string]bool{
@@ -32,7 +37,8 @@ var containerRestartPolicies = map[string]bool{
 //
 // The data and backup directories are mounted at the same absolute path inside
 // and outside the container, so host tools that read .dolt-data and the
-// backups the server writes keep working.
+// backups the server writes keep working. The keep label sits directly before
+// the image reference.
 func ContainerPlan(s ContainerSpec) ([]string, error) {
 	if s.Name == "" {
 		return nil, errors.New("container name is required")
@@ -86,6 +92,7 @@ func ContainerPlan(s ContainerSpec) ([]string, error) {
 		"-v", dataMount,
 		"-v", backupMount,
 		"-v", configMount,
+		"--label", keepLabel,
 		s.Image,
 		"dolt", "sql-server", "--config", s.ConfigPath,
 	}, nil
