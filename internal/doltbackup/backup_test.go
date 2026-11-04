@@ -1,6 +1,7 @@
 package doltbackup
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -50,6 +51,71 @@ func TestRootIsOutsideTheTown(t *testing.T) {
 	}
 	if got := PartialDir("/r", night); got != "/r/2026-10-01.partial" {
 		t.Errorf("PartialDir = %s", got)
+	}
+}
+
+// env is an injected environment: the test never sets the process environment.
+func env(vars map[string]string) func(string) (string, bool) {
+	return func(k string) (string, bool) {
+		v, ok := vars[k]
+		return v, ok
+	}
+}
+
+func homeAt(dir string) func() (string, error) {
+	return func() (string, error) { return dir, nil }
+}
+
+func TestDefaultRootUsesTheEnvironmentOverride(t *testing.T) {
+	t.Parallel()
+	got, err := defaultRoot(env(map[string]string{RootEnv: "/a/b"}), homeAt("/Users/x"))
+	if err != nil {
+		t.Fatalf("defaultRoot: %v", err)
+	}
+	if got != "/a/b" {
+		t.Errorf("defaultRoot = %s, want /a/b", got)
+	}
+}
+
+func TestDefaultRootWithoutOverrideIsUnchanged(t *testing.T) {
+	t.Parallel()
+	got, err := defaultRoot(env(nil), homeAt("/Users/x"))
+	if err != nil {
+		t.Fatalf("defaultRoot: %v", err)
+	}
+	if got != "/Users/x/gt-backups/dolt" {
+		t.Errorf("defaultRoot = %s, want /Users/x/gt-backups/dolt", got)
+	}
+}
+
+func TestDefaultRootRefusesARelativeOverride(t *testing.T) {
+	t.Parallel()
+	_, err := defaultRoot(env(map[string]string{RootEnv: "backups/dolt"}), homeAt("/Users/x"))
+	if err == nil {
+		t.Fatal("defaultRoot accepted a relative override")
+	}
+	if !strings.Contains(err.Error(), RootEnv) {
+		t.Errorf("error %q does not name %s", err, RootEnv)
+	}
+}
+
+func TestDefaultRootRefusesAnEmptyButSetOverride(t *testing.T) {
+	t.Parallel()
+	_, err := defaultRoot(env(map[string]string{RootEnv: ""}), homeAt("/Users/x"))
+	if err == nil {
+		t.Fatal("defaultRoot fell back on an empty override")
+	}
+	if !strings.Contains(err.Error(), RootEnv) {
+		t.Errorf("error %q does not name %s", err, RootEnv)
+	}
+}
+
+func TestDefaultRootPropagatesAHomeError(t *testing.T) {
+	t.Parallel()
+	want := errors.New("no home")
+	_, err := defaultRoot(env(nil), func() (string, error) { return "", want })
+	if !errors.Is(err, want) {
+		t.Errorf("defaultRoot error = %v, want %v", err, want)
 	}
 }
 
