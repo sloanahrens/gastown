@@ -43,17 +43,33 @@ const (
 	OMPackage = "./cmd/om"
 )
 
-// The -X stamps the gt and bd binaries are built with. gt reports rev, the commit
-// its image tag names: it falls back to the VCS stamp of the tree it was built
-// in (internal/cmd.resolveCommitHash), so the stamp names rev outright. bd reports
-// the two halves of its build id the way bdbuild stamps them: main.Build, git's
-// abbreviation of the commit in the worktree, then main.Commit, the full sha, so
-// both images' bd report one build id (gt-glsx8).
+// The -X stamps the gt and bd binaries are built with. gt reports the short form
+// of the commit it was built from, the form make install stamps and make
+// polecat-image tags the image with: the tier sweep refuses an installed gt that
+// records the full sha (gt-c3sue). It falls back to the VCS stamp of the tree it
+// was built in (internal/cmd.resolveCommitHash), so the stamp names the short
+// commit outright. bd reports the two halves of its build id the way bdbuild
+// stamps them: main.Build, git's abbreviation of the commit in the worktree, then
+// main.Commit, the full sha, so both images' bd report one build id (gt-glsx8).
 const (
 	gtCommitFlag = "-X github.com/steveyegge/gastown/internal/cmd.Commit="
 	bdBuildFlag  = "-X main.Build="
 	bdCommitFlag = "-X main.Commit="
 )
+
+// gtCommitStampLen is the length of the commit gt records, the short form make
+// install stamps and make polecat-image tags the image with (gt-c3sue).
+const gtCommitStampLen = 9
+
+// gtCommitStamp cuts commit to the short form gt records. BuildBinaries passes
+// the full resolved sha; Plan passes the commit the caller named, which may be
+// shorter already and is then stamped whole rather than padded.
+func gtCommitStamp(commit string) string {
+	if len(commit) <= gtCommitStampLen {
+		return commit
+	}
+	return commit[:gtCommitStampLen]
+}
 
 // Runner runs one argv in dir with env as the whole environment it runs with; it
 // is the package's only way to run anything.
@@ -160,7 +176,7 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 		return nil, err
 	}
 	builds := []binary{
-		{name: "gt", src: b.GTSrc, commit: gtCommit, pkg: GTPackage, ldflags: gtCommitFlag + gtCommit},
+		{name: "gt", src: b.GTSrc, commit: gtCommit, pkg: GTPackage, ldflags: gtCommitFlag + gtCommitStamp(gtCommit)},
 		{name: "bd", src: b.BDSrc, commit: bdCommit, pkg: BDPackage, ldflags: bdCommitFlag + bdCommit, stampsBuildID: true},
 		{name: "om", src: b.OMSrc, commit: omCommit, pkg: OMPackage},
 	}
@@ -423,9 +439,10 @@ func isCommit(s string) bool {
 // absolute regular file). It does
 // not check the claude CLI pin, and it does not check that a commit exists in its
 // checkout: a build checks both when it runs, so a plan that prints can still
-// fail there. The commits in it are the ones named, not resolved, and the bd
-// line's main.Build is planBuildID: the build id is git's abbreviation of the
-// commit in the worktree a build makes, and Plan makes none.
+// fail there. The commits in it are the ones named, not resolved: the gt line
+// stamps the first gtCommitStampLen characters of the named commit, and the bd
+// line's main.Build is planBuildID, since the build id is git's abbreviation of
+// the commit in the worktree a build makes and Plan makes none.
 func (b Builder) Plan(rev string) ([]string, error) {
 	rev, bdCommit, err := b.checkBuildInputs(rev)
 	if err != nil {
@@ -442,7 +459,7 @@ func (b Builder) Plan(rev string) ([]string, error) {
 	}
 	tag := ImageTag(rev)
 	lines := []string{
-		fmt.Sprintf("build gt: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "gt"), GTPackage, gtCommitFlag+rev), " "), b.GTSrc, rev),
+		fmt.Sprintf("build gt: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "gt"), GTPackage, gtCommitFlag+gtCommitStamp(rev)), " "), b.GTSrc, rev),
 		fmt.Sprintf("build bd: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "bd"), BDPackage, bdBuildFlag+planBuildID+" "+bdCommitFlag+bdCommit), " "), b.BDSrc, bdCommit),
 		fmt.Sprintf("build om: %s   (clean worktree of %s at HEAD)", strings.Join(goBuildArgv(filepath.Join(b.Out, "om"), OMPackage, ""), " "), b.OMSrc),
 	}

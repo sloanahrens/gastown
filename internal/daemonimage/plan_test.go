@@ -49,10 +49,11 @@ func planBuilder(t *testing.T) Builder {
 
 // Plan names each step a full build runs, in order, with the argv the build runs,
 // and runs, writes and fetches nothing. The claude step names the URL that
-// FetchClaudeCLI requests, taken from the fetch itself. The bd line prints
-// planBuildID for main.Build, the argv value only the worktree a build makes can
-// answer: Plan makes none, and the Git seam above fails the test if it reads one
-// from anywhere.
+// FetchClaudeCLI requests, taken from the fetch itself. The gt line stamps the
+// first nine characters of the named commit, the cut the build stamps. The bd
+// line prints planBuildID for main.Build, the argv value only the worktree a
+// build makes can answer: Plan makes none, and the Git seam above fails the test
+// if it reads one from anywhere.
 func TestPlanNamesEachStepAndRunsNothing(t *testing.T) {
 	t.Parallel()
 	b := planBuilder(t)
@@ -74,7 +75,7 @@ func TestPlanNamesEachStepAndRunsNothing(t *testing.T) {
 	}
 
 	steps := []struct{ label, names string }{
-		{"build gt: ", "go build -trimpath -ldflags " + gtCommitFlag + testRev + " -o " + filepath.Join(b.Out, "gt") + " " + GTPackage + "   (clean worktree of /src/gt at " + testRev + ")"},
+		{"build gt: ", "go build -trimpath -ldflags " + gtCommitFlag + testRev[:9] + " -o " + filepath.Join(b.Out, "gt") + " " + GTPackage + "   (clean worktree of /src/gt at " + testRev + ")"},
 		{"build bd: ", "go build -trimpath -ldflags " + bdBuildFlag + planBuildID + " " + bdCommitFlag + testBDCommit + " -o " + filepath.Join(b.Out, "bd") + " " + BDPackage + "   (clean worktree of /src/beads at " + testBDCommit + ")"},
 		{"build om: ", "go build -trimpath -o " + filepath.Join(b.Out, "om") + " " + OMPackage + "   (clean worktree of /src/om at HEAD)"},
 		{"build app-promote: ", "go build -trimpath -o " + filepath.Join(b.Out, "plugins", "app-promote", "app-promote") + " ./plugins/app-promote   (clean worktree of /src/gt at " + testRev + ")"},
@@ -97,6 +98,29 @@ func TestPlanNamesEachStepAndRunsNothing(t *testing.T) {
 	if err != nil || len(entries) != 0 {
 		t.Errorf("Out holds %d entries after Plan (err %v), want none", len(entries), err)
 	}
+}
+
+// TestPlanShowsTheShortCommitStamp: a plan prints the stamp a build would give
+// gt, so an operator reading it sees the short commit the tier sweep accepts
+// (gt-c3sue).
+func TestPlanShowsTheShortCommitStamp(t *testing.T) {
+	t.Parallel()
+	b := planBuilder(t)
+	lines, err := b.Plan(testRev)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	want := gtCommitFlag + testRev[:9] + " -o "
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "build gt: ") {
+			continue
+		}
+		if !strings.Contains(line, want) {
+			t.Errorf("gt plan line = %q, want it to carry %q", line, want)
+		}
+		return
+	}
+	t.Fatalf("plan has no build gt: line:\n%s", strings.Join(lines, "\n"))
 }
 
 // TestPlanListsThePluginBuilds: the plan names the build of each plugin the
