@@ -281,10 +281,9 @@ func TestDaemonDockerfileFetchesNothingAndInstallsOnlyThePackages(t *testing.T) 
 	}
 }
 
-// TestDaemonDockerfileInstallsOpenSSHClient: the image carries an SSH client, so
-// a git push over SSH — app-promote's to GitHub with the promote keys — runs
-// from the container instead of failing on a missing ssh. openssh-client is
-// installed on the same line as the three packages the image already had.
+// TestDaemonDockerfileInstallsOpenSSHClient: the image's one package-install
+// RUN lists openssh-client, so a git push over SSH — app-promote's to GitHub
+// with the promote keys — runs from the container.
 func TestDaemonDockerfileInstallsOpenSSHClient(t *testing.T) {
 	t.Parallel()
 	args := daemonInstallRun(t).args
