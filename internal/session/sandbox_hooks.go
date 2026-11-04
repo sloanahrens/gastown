@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/steveyegge/gastown/internal/liveness"
+	"github.com/steveyegge/gastown/internal/sandbox"
 )
 
 // ErrNothingToPush is what a SandboxPusher returns when the sandbox is already
@@ -59,6 +60,42 @@ func CleanupSandboxWithRecord(deleter func(townRoot string, rec SandboxRecord) e
 	}
 	routing.forget(session)
 	return RemoveSandboxRecord(townRoot, session)
+}
+
+// CleanupErroredSandbox is CleanupSandboxWith for a seat whose session is already
+// gone, when its sandbox may have failed under it (gt-jhoi1). The record's sandbox
+// is deleted, and its record dropped, only when the gateway reports that sandbox
+// in a terminal failure phase, so the seat name is free for the next dispatch.
+// Any other phase, a sandbox the gateway no longer has, and a session with no
+// record leave the record alone. A gateway that cannot answer is an error, never
+// a phase. The bool reports whether the record was removed.
+func CleanupErroredSandbox(status func(gateway, name string) (sandbox.Status, error), deleter func(townRoot string, rec SandboxRecord) error, townRoot, session string) (bool, error) {
+	rec, ok, err := ReadSandboxRecord(townRoot, session)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
+	st, err := status(rec.Gateway, session)
+	if isSandboxNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("asking gateway %q for sandbox %s: %w", rec.Gateway, session, err)
+	}
+	if !sandboxPhaseTerminal(st.Phase) {
+		return false, nil
+	}
+	// A nil deleter would drop the record and leave the failed sandbox behind, so
+	// it is a refusal rather than a cleanup.
+	if deleter == nil {
+		return false, fmt.Errorf("sandbox %s is in phase %s, but no sandbox deleter is linked", session, st.Phase)
+	}
+	if err := CleanupSandboxWithRecord(deleter, townRoot, session, rec); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // IsSandboxed reports whether session's record exists; a registry that

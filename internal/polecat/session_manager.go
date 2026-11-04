@@ -93,6 +93,10 @@ type SessionManager struct {
 	// sandboxExists asks a gateway whether it has a sandbox of that name when
 	// nil: a seam for the unit tier, which has no gateway.
 	sandboxExists func(gateway, name string) (bool, error)
+	// sandboxStatus asks a gateway for a sandbox's phase when nil: a seam for
+	// the unit tier, which has no gateway. A stop reads it to find a seat whose
+	// sandbox has failed (gt-jhoi1).
+	sandboxStatus func(gateway, name string) (sandbox.Status, error)
 	// launchFn replaces launch when set: a seam so a test can see what Start
 	// has done by the time it launches.
 	launchFn func(polecat, sessionID string, opts SessionStartOptions) error
@@ -684,6 +688,14 @@ func gatewayHasSandbox(gateway, name string) (bool, error) {
 	return (&sandbox.CLI{Gateway: gateway}).Exists(ctx, name)
 }
 
+// gatewaySandboxStatus asks gateway ("" is the default gateway) for the sandbox
+// called name's phase, bounded so a hung gateway cannot hold a stop.
+func gatewaySandboxStatus(gateway, name string) (sandbox.Status, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return (&sandbox.CLI{Gateway: gateway}).Get(ctx, name)
+}
+
 // launch creates the polecat's session and starts its agent. A launch that
 // fails after Prepare removes the sandbox that Prepare made; see the deferred
 // cleanup below.
@@ -1128,6 +1140,13 @@ func (m *SessionManager) Stop(polecat string, force bool) error {
 	sessionID := m.SessionName(polecat)
 
 	running, err := m.tmux.HasSession(sessionID)
+	if err != nil || !running {
+		// A seat whose sandbox has failed has no pod, so the probe finds no
+		// session or cannot reach one, and the sandbox would stay behind with its
+		// record. Its errored sandbox goes here, so the seat name is free again
+		// (gt-jhoi1). A failure is logged, and the stop answers as it did before.
+		m.removeErroredSandbox(sessionID)
+	}
 	if err != nil {
 		return fmt.Errorf("checking session: %w", err)
 	}
@@ -1203,6 +1222,33 @@ func (m *SessionManager) clock() clockwork.Clock {
 		return m.clk
 	}
 	return clockwork.NewRealClock()
+}
+
+// removeErroredSandbox deletes the sandbox of a seat whose session is gone, when
+// the gateway reports that sandbox in a terminal failure phase (see
+// session.CleanupErroredSandbox). A failure is logged and never returned, so a
+// stop answers the same whether or not the record was removed. A host session has
+// no record and nothing happens.
+func (m *SessionManager) removeErroredSandbox(sessionID string) {
+	if m.rig == nil || m.rig.Path == "" {
+		return
+	}
+	status := m.sandboxStatus
+	if status == nil {
+		status = gatewaySandboxStatus
+	}
+	if _, err := session.CleanupErroredSandbox(status, sandboxDeleterOrLinked(m.sandboxDeleter), filepath.Dir(m.rig.Path), sessionID); err != nil {
+		m.warnSandbox("stopping %s: its errored sandbox is not removed: %v", sessionID, err)
+	}
+}
+
+// warnSandbox reports a sandbox a stop could not remove; nil is style.PrintWarning.
+func (m *SessionManager) warnSandbox(format string, args ...any) {
+	if m.warn != nil {
+		m.warn(format, args...)
+		return
+	}
+	style.PrintWarning(format, args...)
 }
 
 // removeSandbox pushes the work a stopped sandboxed session committed, then
