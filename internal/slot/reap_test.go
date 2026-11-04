@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -595,16 +596,19 @@ func TestReapTownDoltContainerNeverRemoved(t *testing.T) {
 // TestReapTownDoltMalformedTownJSONRemovesNothing pins the fail-closed side: a
 // town.json that cannot be read or parsed, or whose container name is not a
 // Docker name, refuses the whole reap. The stale container and the stale owner
-// file both stay, because the town's Dolt container cannot be identified.
+// file both stay, because the town's Dolt container cannot be identified. Each
+// row names the error it must return, so a refusal for another reason does not
+// pass as this one.
 func TestReapTownDoltMalformedTownJSONRemovesNothing(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
 		name     string
 		townJSON string
+		wantErr  string
 	}{
-		{name: "unparseable JSON", townJSON: `{"type":"town",`},
-		{name: "container name is not a Docker name", townJSON: townJSONWithDoltContainer("gt dolt!")},
+		{name: "unparseable JSON", townJSON: `{"type":"town",`, wantErr: "reading the town's dolt.external_container"},
+		{name: "container name is not a Docker name", townJSON: townJSONWithDoltContainer("gt dolt!"), wantErr: "dolt.external_container = \"gt dolt!\""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -625,8 +629,12 @@ func TestReapTownDoltMalformedTownJSONRemovesNothing(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if _, err := tg.Reap(townRoot, ReapOptions{}); err == nil {
+			_, err := tg.Reap(townRoot, ReapOptions{})
+			if err == nil {
 				t.Fatal("Reap: nil error, want a refusal for an unusable town.json")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Reap error = %q, want it to contain %q", err, tc.wantErr)
 			}
 			if removed := tg.rt.removedIDs(); len(removed) != 0 {
 				t.Fatalf("removed = %v, want no container removed", removed)
