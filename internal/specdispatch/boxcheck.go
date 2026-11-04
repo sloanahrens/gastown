@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // acceptanceBoxField is the field an acceptance-box refusal names: the failure
@@ -71,4 +73,19 @@ func acceptanceBoxRefusal(text string) (Refusal, bool) {
 		}, true
 	}
 	return Refusal{}, false
+}
+
+// nestedAcceptanceBoxRefusal is acceptanceBoxRefusal for the nested items the
+// top-level scan skips. A sub-step under a criterion is a step the polecat runs
+// too, so an offending one is refused the same way. The nested lines are
+// rejoined unindented, so the one scan reads them and words the refusal
+// (gt-hgt9j.3).
+func nestedAcceptanceBoxRefusal(text string) (Refusal, bool) {
+	var nested []string
+	for _, item := range beads.AcceptanceItems(text) {
+		if item.Nested {
+			nested = append(nested, item.Line)
+		}
+	}
+	return acceptanceBoxRefusal(strings.Join(nested, "\n"))
 }
