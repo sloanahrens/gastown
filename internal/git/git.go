@@ -3282,12 +3282,20 @@ func (g *Git) IsAncestor(ancestor, descendant string) (bool, error) {
 	return true, nil
 }
 
-// HasObject reports whether the repository holds the object sha names. cat-file
+// HasObject reports whether the repository holds the commit sha names. cat-file
 // -e exits 1 for an object it does not hold, so that is false with no error;
-// any other failure (an unreadable repository, a malformed name) is an error.
+// any other failure (an unreadable repository, a malformed name) is an error,
+// and so is an object that is not a commit (a tree or blob named as a landing).
 func (g *Git) HasObject(sha string) (bool, error) {
 	_, err := g.run("cat-file", "-e", sha)
 	if err == nil {
+		kind, typeErr := g.run("cat-file", "-t", sha)
+		if typeErr != nil {
+			return false, typeErr
+		}
+		if strings.TrimSpace(kind) != "commit" {
+			return false, fmt.Errorf("object %s is not a commit", sha)
+		}
 		return true, nil
 	}
 	if exitCode(err) == 1 {
