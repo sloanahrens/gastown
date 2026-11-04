@@ -99,8 +99,8 @@ func TestWriteDaemonDoltConfigAutoGC(t *testing.T) {
 		if !got.Enable {
 			t.Fatalf("auto_gc_behavior.enable = false, want true")
 		}
-		if got.ArchiveLevel != 1 {
-			t.Fatalf("auto_gc_behavior.archive_level = %d, want 1", got.ArchiveLevel)
+		if got.ArchiveLevel != 0 {
+			t.Fatalf("auto_gc_behavior.archive_level = %d, want 0", got.ArchiveLevel)
 		}
 	})
 

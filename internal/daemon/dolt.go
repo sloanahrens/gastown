@@ -1172,8 +1172,9 @@ func writeDaemonDoltConfig(cfg *DoltServerConfig, configPath string, knobs *dolt
 	// Non-blocking storage GC bounds the sql-server's RSS (hq-excy9g); on by
 	// default. operational.dolt.auto_gc=off (or false/0/disabled) disables it at
 	// the next Dolt restart without a source revert+rebuild — the runtime
-	// escape hatch.
-	autoGcBlock := "  auto_gc_behavior:\n    enable: true\n    archive_level: 1\n"
+	// escape hatch. archive_level 0 matches the maintenance gc's
+	// --archive-level=0 (gt-k3u2e).
+	autoGcBlock := "  auto_gc_behavior:\n    enable: true\n    archive_level: 0\n"
 	if vv := strings.ToLower(strings.TrimSpace(knobs.AutoGC)); vv == "off" || vv == "false" || vv == "0" || vv == "disabled" {
 		autoGcBlock = "  auto_gc_behavior:\n    enable: false\n    archive_level: 0\n"
 	}

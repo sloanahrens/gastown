@@ -32,6 +32,9 @@ type maintenanceSeams struct {
 	measure func(dataDir, db string) (gcMeasure, error)
 	// gcExec runs CALL dolt_gc('--full') on one database.
 	gcExec func(ctx context.Context, d *Daemon, db string) error
+	// gcOpenDB opens the pool one gc call runs on. A test injects a fake
+	// driver to observe the statement doltGCFull executes, without a server.
+	gcOpenDB func(dsn string) (*sql.DB, error)
 	// backupRoot is where the nightly backups live (~/gt-backups/dolt).
 	backupRoot func() (string, error)
 	// backupExec copies one database into the backup directory dest.
@@ -94,6 +97,9 @@ func (d *Daemon) maintenance() maintenanceSeams {
 	}
 	if s.gcExec == nil {
 		s.gcExec = func(ctx context.Context, d *Daemon, db string) error { return d.doltGCFull(ctx, db) }
+	}
+	if s.gcOpenDB == nil {
+		s.gcOpenDB = func(dsn string) (*sql.DB, error) { return sql.Open("mysql", dsn) }
 	}
 	if s.backupRoot == nil {
 		s.backupRoot = doltbackup.DefaultRoot
