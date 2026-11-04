@@ -688,14 +688,6 @@ func gatewayHasSandbox(gateway, name string) (bool, error) {
 	return (&sandbox.CLI{Gateway: gateway}).Exists(ctx, name)
 }
 
-// gatewaySandboxStatus asks gateway ("" is the default gateway) for the sandbox
-// called name's phase, bounded so a hung gateway cannot hold a stop.
-func gatewaySandboxStatus(gateway, name string) (sandbox.Status, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	return (&sandbox.CLI{Gateway: gateway}).Get(ctx, name)
-}
-
 // launch creates the polecat's session and starts its agent. A launch that
 // fails after Prepare removes the sandbox that Prepare made; see the deferred
 // cleanup below.
@@ -1235,7 +1227,7 @@ func (m *SessionManager) removeErroredSandbox(sessionID string) {
 	}
 	status := m.sandboxStatus
 	if status == nil {
-		status = gatewaySandboxStatus
+		status = session.GatewaySandboxPhase
 	}
 	if _, err := session.CleanupErroredSandbox(status, sandboxDeleterOrLinked(m.sandboxDeleter), filepath.Dir(m.rig.Path), sessionID); err != nil {
 		m.warnSandbox("stopping %s: its errored sandbox is not removed: %v", sessionID, err)

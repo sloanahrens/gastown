@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/polecat/spans"
+	"github.com/steveyegge/gastown/internal/sandbox"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
 )
@@ -379,6 +380,13 @@ type patrolScanHost struct {
 	// cannot start git (gt-sefzt). It reports whether any directory was
 	// deleted, so a removal that fails halfway is logged as one.
 	removeSandboxSeatDirs func(rigPath, rigName, name string) (bool, error)
+	// sandboxStatus asks a gateway for a sandbox's phase when nil:
+	// session.GatewaySandboxPhase. A seat end reads an errored sandbox through it
+	// (gt-jhoi1).
+	sandboxStatus func(gateway, name string) (sandbox.Status, error)
+	// sandboxDeleter deletes a sandbox and its record when nil:
+	// session.SandboxDeleter. A seat end removes an errored sandbox through it.
+	sandboxDeleter func(townRoot string, rec session.SandboxRecord) error
 	// writePendingSeatEnd is writePendingSandboxSeatEnd when nil: it records a
 	// seat kept for the jev_rules ask so a later pass offers its end again
 	// (gt-381oj). A seam for the write that fails, which a town's filesystem

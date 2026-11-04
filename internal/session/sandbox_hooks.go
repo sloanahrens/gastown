@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -66,9 +67,11 @@ func CleanupSandboxWithRecord(deleter func(townRoot string, rec SandboxRecord) e
 // gone, when its sandbox may have failed under it (gt-jhoi1). The record's sandbox
 // is deleted, and its record dropped, only when the gateway reports that sandbox
 // in a terminal failure phase, so the seat name is free for the next dispatch.
-// Any other phase, a sandbox the gateway no longer has, and a session with no
-// record leave the record alone. A gateway that cannot answer is an error, never
-// a phase. The bool reports whether the record was removed.
+// Any other phase and a session with no record leave the record alone. A sandbox
+// the gateway no longer has, and a gateway that cannot answer, are errors, never
+// a phase: a stale record is named, so the caller can report it, and the record
+// itself stays for the patrol to drop. The bool reports whether the record was
+// removed.
 func CleanupErroredSandbox(status func(gateway, name string) (sandbox.Status, error), deleter func(townRoot string, rec SandboxRecord) error, townRoot, session string) (bool, error) {
 	rec, ok, err := ReadSandboxRecord(townRoot, session)
 	if err != nil {
@@ -79,7 +82,7 @@ func CleanupErroredSandbox(status func(gateway, name string) (sandbox.Status, er
 	}
 	st, err := status(rec.Gateway, session)
 	if isSandboxNotFound(err) {
-		return false, nil
+		return false, fmt.Errorf("gateway %q has no sandbox %s: its record is left for the patrol to drop", rec.Gateway, session)
 	}
 	if err != nil {
 		return false, fmt.Errorf("asking gateway %q for sandbox %s: %w", rec.Gateway, session, err)
@@ -96,6 +99,21 @@ func CleanupErroredSandbox(status func(gateway, name string) (sandbox.Status, er
 		return false, err
 	}
 	return true, nil
+}
+
+// GatewaySandboxPhase asks gateway ("" is the default gateway) for the sandbox
+// called name, bounded by sandboxPhaseTimeout so a hung gateway cannot hold a
+// stop or a seat end. Callers pass it as CleanupErroredSandbox's status.
+func GatewaySandboxPhase(gateway, name string) (sandbox.Status, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), sandboxPhaseTimeout)
+	defer cancel()
+	return (&sandbox.CLI{Gateway: gateway}).Get(ctx, name)
+}
+
+// SandboxPhaseFailed reports whether a gateway phase is a terminal failure that
+// the sandbox does not leave on its own (see sandboxPhaseTerminal).
+func SandboxPhaseFailed(phase string) bool {
+	return sandboxPhaseTerminal(phase)
 }
 
 // IsSandboxed reports whether session's record exists; a registry that

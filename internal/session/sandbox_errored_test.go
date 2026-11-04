@@ -31,7 +31,7 @@ func TestNukeErroredSandboxRefusals(t *testing.T) {
 		{name: "failed_phase_is_removed", phase: "Failed", wantDeleted: true, wantRemove: true},
 		{name: "unreadable_record_is_an_error", badRecord: true, wantErr: true, wantRecord: true},
 		{name: "no_record_is_nothing_to_do", noRecord: true},
-		{name: "gateway_says_sandbox_not_found_keeps_the_record", statusErr: errors.New("sandbox not found: " + sess), wantRecord: true},
+		{name: "gateway_says_sandbox_not_found_is_a_named_error_and_keeps_the_record", statusErr: errors.New("sandbox not found: " + sess), wantErr: true, wantRecord: true},
 		{name: "gateway_that_cannot_answer_is_an_error", statusErr: errors.New("gateway timed out"), wantErr: true, wantRecord: true},
 		{name: "failed_delete_is_an_error_and_keeps_the_record", phase: "Error", deleteErr: errors.New("gateway unreachable"), wantDeleted: true, wantErr: true, wantRecord: true},
 		{name: "nil_deleter_refuses_and_keeps_the_record", phase: "Error", nilDeleter: true, wantErr: true, wantRecord: true},
