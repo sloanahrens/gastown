@@ -4,6 +4,7 @@ import (
 	"errors"
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"testing"
@@ -547,5 +548,137 @@ func TestReapEmptyProtectedUnchanged(t *testing.T) {
 	}
 	if len(report.Kept) != 0 {
 		t.Fatalf("Kept = %+v, want nothing kept with no exemption", verdictNames(report.Kept))
+	}
+}
+
+// writeTownJSON writes mayor/town.json under townRoot with body.
+func writeTownJSON(t *testing.T, townRoot, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// townJSONWithDoltContainer is a valid town.json whose dolt block names container.
+func townJSONWithDoltContainer(container string) string {
+	return `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z",` +
+		`"dolt":{"port":3307,"external_container":"` + container + `"}}`
+}
+
+// TestReapTownDoltContainerNeverRemoved is gt-1j7zv's contract: the container
+// mayor/town.json names is protected inside Reap, so a caller that passes no
+// Protected list still cannot remove it, however old it is.
+func TestReapTownDoltContainerNeverRemoved(t *testing.T) {
+	t.Parallel()
+	tg := newTestGate(t)
+	townRoot := t.TempDir()
+	writeTownJSON(t, townRoot, townJSONWithDoltContainer("gt-dolt"))
+	tg.rt.setLines(
+		dockerPSLine("dolt-id", "dolthub/dolt-sql-server:2.3.2", "gt-dolt", tg.clk.Now().Add(-5*time.Hour), nil),
+	)
+
+	report, err := tg.Reap(townRoot, ReapOptions{})
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if removed := tg.rt.removedIDs(); len(removed) != 0 {
+		t.Fatalf("removed = %v, want the town's Dolt container left in place", removed)
+	}
+	if verdicts := slices.Concat(report.Debris, report.Kept); len(verdicts) != 0 {
+		t.Fatalf("verdicts = %v, want the town's container in neither Debris nor Kept", verdictNames(verdicts))
+	}
+}
+
+// TestReapTownDoltMalformedTownJSONRemovesNothing pins the fail-closed side: a
+// town.json that cannot be read or parsed, or whose container name is not a
+// Docker name, refuses the whole reap. The stale container and the stale owner
+// file both stay, because the town's Dolt container cannot be identified.
+func TestReapTownDoltMalformedTownJSONRemovesNothing(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		townJSON string
+	}{
+		{name: "unparseable JSON", townJSON: `{"type":"town",`},
+		{name: "container name is not a Docker name", townJSON: townJSONWithDoltContainer("gt dolt!")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tg := newTestGate(t)
+			townRoot := t.TempDir()
+			writeTownJSON(t, townRoot, tc.townJSON)
+			tg.rt.setLines(
+				dockerPSLine("stale-id", "dolthub/dolt-sql-server:2.3.2", "gt-dolt", tg.clk.Now().Add(-5*time.Hour), nil),
+			)
+			if err := os.MkdirAll(LockDir(townRoot), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(SlotLockPath(townRoot, 0), nil, 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(SlotOwnerPath(townRoot, 0), []byte(`{"role":"dead","pid":999999,"acquired_at":"2026-09-21T10:41:00Z"}`), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := tg.Reap(townRoot, ReapOptions{}); err == nil {
+				t.Fatal("Reap: nil error, want a refusal for an unusable town.json")
+			}
+			if removed := tg.rt.removedIDs(); len(removed) != 0 {
+				t.Fatalf("removed = %v, want no container removed", removed)
+			}
+			if _, err := os.Stat(SlotOwnerPath(townRoot, 0)); err != nil {
+				t.Fatalf("owner file gone after a refused reap: %v", err)
+			}
+		})
+	}
+}
+
+// TestReapTownDoltMissingTownJSONUnchanged is the host-managed half: a town with
+// no town.json names no container, so a stale container is reaped as before.
+func TestReapTownDoltMissingTownJSONUnchanged(t *testing.T) {
+	t.Parallel()
+	tg := newTestGate(t)
+	townRoot := t.TempDir()
+	tg.rt.setLines(
+		dockerPSLine("orphan-id", "dolthub/dolt-sql-server:2.3.2", "gt-dolt", tg.clk.Now().Add(-5*time.Hour), nil),
+	)
+
+	report, err := tg.Reap(townRoot, ReapOptions{})
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if removed := tg.rt.removedIDs(); !slices.Equal(removed, []string{"orphan-id"}) {
+		t.Fatalf("removed = %v, want the stale container removed as before", removed)
+	}
+	if len(report.Debris) != 1 || report.Debris[0].Container.Name != "gt-dolt" {
+		t.Fatalf("Debris = %+v, want the stale container classified as debris", report.Debris)
+	}
+}
+
+// TestReapTownDoltExplicitProtectedStillWorks pins that the town's container
+// and the caller's Protected names are exempt together: neither replaces the
+// other, and an unprotected stale container is still removed.
+func TestReapTownDoltExplicitProtectedStillWorks(t *testing.T) {
+	t.Parallel()
+	tg := newTestGate(t)
+	townRoot := t.TempDir()
+	writeTownJSON(t, townRoot, townJSONWithDoltContainer("gt-dolt"))
+	now := tg.clk.Now()
+	tg.rt.setLines(
+		dockerPSLine("town-id", "dolthub/dolt-sql-server:2.3.2", "gt-dolt", now.Add(-5*time.Hour), nil),
+		dockerPSLine("explicit-id", "dolthub/dolt-sql-server:2.3.2", "gt-explicit", now.Add(-5*time.Hour), nil),
+		dockerPSLine("stale-id", "dolthub/dolt-sql-server:2.3.2", "gt-stale", now.Add(-5*time.Hour), nil),
+	)
+
+	if _, err := tg.Reap(townRoot, ReapOptions{Protected: []string{"gt-explicit"}}); err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if removed := tg.rt.removedIDs(); !slices.Equal(removed, []string{"stale-id"}) {
+		t.Fatalf("removed = %v, want only the unprotected container: the town's and the explicit name are both exempt", removed)
 	}
 }
