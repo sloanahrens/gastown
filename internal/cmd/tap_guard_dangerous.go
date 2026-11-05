@@ -51,12 +51,12 @@ This guard blocks operations that could cause irreversible damage:
   - the same walkers rooted at the town tree: the town root, any rig root,
     any path directly under the town root, a rig's worktree directories
     (polecats, crew, and the mayor/ clone), or any .repo.git — see gt-6e2l,
-    where a dog's 'grep -R ... /Users/sloan/gt' ran unblocked and walked
-    every rig and every worktree on the host. A path inside a single repo or
-    worktree (e.g. ~/gt/<rig>/polecats/<name>/<repo>) is still allowed, as is
-    a search pattern that shares a name with a directory there: 'grep -rn
-    polecats ./docs' searches ./docs, not the polecats/ directory at cwd
-    (gt-yts7).
+    where a dog's 'grep -R ...' of the operator's home ran unblocked and
+    walked every rig and every worktree on the host. A path inside a single
+    repo or worktree (e.g. ~/gt/<rig>/polecats/<name>/<repo>) is still
+    allowed, as is a search pattern that shares a name with a directory
+    there: 'grep -rn polecats ./docs' searches ./docs, not the polecats/
+    directory at cwd (gt-yts7).
   - go clean -cache/-testcache/-modcache/-fuzzcache (wipes the Go build
     cache SHARED by every agent on the host — see gt-nqcy follow-up).
   - 'go test -count=1 ./...' (with or without -json, any flag order) from a

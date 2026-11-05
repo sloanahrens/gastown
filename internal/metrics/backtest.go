@@ -266,7 +266,7 @@ func BacktestSection(weekly []WeeklyRow, events []RegimeEvent, replicated, sloan
 		}
 	}
 	lines := []string{eventsLine(events), ""}
-	header := []string{"Metric", "moved at event", "chance of coincidence", "mango box replicates", "Sloan would act", "verdict"}
+	header := []string{"Metric", "moved at event", "chance of coincidence", "mango box replicates", "operator would act", "verdict"}
 	table := []string{
 		"| " + strings.Join(header, " | ") + " |",
 		"|" + strings.Repeat("---|", len(header)),
