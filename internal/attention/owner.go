@@ -40,12 +40,15 @@ var ruleOwners = map[string]Owner{
 	RuleQuestionNew:      OwnerOperator,
 	RuleQuestionStale:    OwnerOperator,
 	RuleQuestionAnswered: OwnerOverseer,
-	// The physical machine: no agent frees disk or memory.
-	RuleHostDiskWarn:   OwnerOperator,
-	RuleHostDiskCrit:   OwnerOperator,
-	RuleHostMemLow:     OwnerOperator,
-	RuleHostDockerDown: OwnerOperator,
-	RuleHostProbe:      OwnerOperator,
+	// The physical machine, and the services outside the town that run on it:
+	// no agent frees disk or memory, or restarts the stack containers or the
+	// Forgejo instance every landing waits on.
+	RuleHostDiskWarn:    OwnerOperator,
+	RuleHostDiskCrit:    OwnerOperator,
+	RuleHostMemLow:      OwnerOperator,
+	RuleHostDockerDown:  OwnerOperator,
+	RuleHostForgejoDown: OwnerOperator,
+	RuleHostProbe:       OwnerOperator,
 	// A silent overseer cannot wake itself; the daemon pushes to the human
 	// instead (gt-3a6h6).
 	RuleOverseerSilent: OwnerOperator,

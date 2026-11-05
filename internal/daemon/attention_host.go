@@ -4,13 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/hostprobe"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/townconfig"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -30,33 +34,38 @@ const (
 	// docker daemon costs one tick's probe and not the whole tick.
 	attentionHostProbeTimeout = 20 * time.Second
 	// attentionDockerProbeDownBeats is how many consecutive ticks docker ps
-	// must fail before the stack is reported down. One failed tick stays an
-	// info line: a probe that times out once is not an outage.
+	// must fail, or the Forgejo health endpoint must not answer, before the
+	// stack or the instance is reported down. One failed tick stays an info
+	// line: a probe that times out once is not an outage.
 	attentionDockerProbeDownBeats = 3
+	// attentionForgejoHealthTimeout bounds the health request. Forgejo answers
+	// its health endpoint at once, so five seconds of silence is the instance
+	// not answering rather than a slow one.
+	attentionForgejoHealthTimeout = 5 * time.Second
 )
 
 // The host rules' stable ids. They are the item keys, so an ack and a reader
 // find a rule by the same name.
 const (
-	hostRuleDiskWarn   = attention.RuleHostDiskWarn
-	hostRuleDiskCrit   = attention.RuleHostDiskCrit
-	hostRuleMemLow     = attention.RuleHostMemLow
-	hostRuleDockerDown = attention.RuleHostDockerDown
+	hostRuleDiskWarn    = attention.RuleHostDiskWarn
+	hostRuleDiskCrit    = attention.RuleHostDiskCrit
+	hostRuleMemLow      = attention.RuleHostMemLow
+	hostRuleDockerDown  = attention.RuleHostDockerDown
+	hostRuleForgejoDown = attention.RuleHostForgejoDown
 	// hostProbeFailedPrefix keys the item a failed probe raises; the probe's
 	// name follows.
 	hostProbeFailedPrefix = "host.probe_failed:"
 )
 
-// hostStackContainers are the containers that must always be running: the
-// Forgejo stack the landing pipeline depends on. Dolt is listed through
-// hostprobe.DockerDiskContainer, the container the disk patrol measures too:
-// the runner container this list used to name was retired with the Docker
-// Forgejo stack (gt-gg9hv.35; the rest of the list's rewrite is gt-gg9hv.36).
+// hostStackContainers are the Docker Desktop containers the town cannot run
+// without (gt-gg9hv.36): Forgejo's database, and Dolt, which every rig's beads
+// live in. Forgejo and its CI runner run in the gt-control cluster now:
+// Forgejo is watched by its health endpoint (ForgejoHealthy) and the runner by
+// the landing_infra patrol's run-queue probe, so neither is a container name
+// here.
 var hostStackContainers = []string{
-	"forgejo-forgejo-1",
 	"forgejo-db-1",
-	hostprobe.DockerDiskContainer,
-	"forgejo-docker-in-docker-1",
+	"gt-dolt",
 }
 
 // The history-man database is required only while its rig is live: the operator
@@ -66,8 +75,8 @@ const (
 	hostHMContainer = "hm-postgres"
 )
 
-// requiredStackContainers is the containers in force this tick: the Forgejo
-// four, plus hm-postgres unless the hm rig is parked. A park state that cannot
+// requiredStackContainers is the containers in force this tick: hostStackContainers,
+// plus hm-postgres unless the hm rig is parked. A park state that cannot
 // be read counts as parked, because a false alarm for a container whose rig may
 // be parked costs more than a missed one.
 func (s *attentionSources) requiredStackContainers() []string {
@@ -81,9 +90,10 @@ func (s *attentionSources) requiredStackContainers() []string {
 // The names a failed probe is reported under, as the operator would type the
 // command.
 const (
-	hostProbeDisk   = "disk usage"
-	hostProbeMem    = "memory_pressure"
-	hostProbeDocker = "docker ps"
+	hostProbeDisk    = "disk usage"
+	hostProbeMem     = "memory_pressure"
+	hostProbeDocker  = "docker ps"
+	hostProbeForgejo = "forgejo /api/healthz"
 )
 
 // hostDisk is one volume's usage as the rules read it.
@@ -105,22 +115,37 @@ type hostProbes interface {
 	// RigParked reports whether the rig is parked. An error means the state
 	// could not be read.
 	RigParked(rig string) (bool, error)
+	// ForgejoHealthy asks the town's Forgejo its health endpoint. A nil error
+	// is a healthy answer; errForgejoNotConfigured says the town runs no
+	// Forgejo to watch, and any other error is the instance not answering.
+	ForgejoHealthy(ctx context.Context) error
 }
 
 // attentionHostProbes picks the host reads: in container mode the probe file a
 // host agent publishes, because the container cannot measure the host; in
 // every other mode the machine the daemon runs on. getenv is a seam so a test
-// sets the mode without touching the process environment.
-func attentionHostProbes(townRoot string, getenv func(string) string) hostProbes {
+// sets the mode without touching the process environment. forgejoBaseURL is
+// the town's Forgejo origin (townForgejoBaseURL), which both modes ask over
+// the network rather than read from the host.
+func attentionHostProbes(townRoot string, getenv func(string) string, forgejoBaseURL func() (string, error)) hostProbes {
 	if getenv(config.ContainerModeEnv) == config.SupervisorContainer {
-		return newFileHostProbes(townRoot)
+		return newFileHostProbes(townRoot, forgejoBaseURL)
 	}
-	return systemHostProbes{townRoot: townRoot}
+	return systemHostProbes{townRoot: townRoot, forgejoBaseURL: forgejoBaseURL}
 }
 
 // systemHostProbes reads the machine the daemon runs on.
 type systemHostProbes struct {
 	townRoot string
+	// forgejoBaseURL is the origin of the town's Forgejo, resolved when the
+	// health probe runs so a setting change is read on the next tick. Nil
+	// means the probe was built without one, which is a wiring error and not
+	// a healthy answer.
+	forgejoBaseURL func() (string, error)
+	// forgejoHTTP makes the health request. Nil means a client whose timeout
+	// is attentionForgejoHealthTimeout; tests inject one with a fake
+	// transport.
+	forgejoHTTP *http.Client
 }
 
 func (p systemHostProbes) Disk() (hostDisk, error) {
@@ -174,6 +199,89 @@ func parseContainerNames(out string) []string {
 		}
 	}
 	return names
+}
+
+// forgejoHealthPath is the endpoint the town's Forgejo answers when it is up.
+const forgejoHealthPath = "/api/healthz"
+
+// errForgejoNotConfigured says the town runs no Forgejo, so there is no health
+// to watch. It is not a probe failure: a town whose rigs land through GitHub
+// is not an outage, which is how the landing_infra probe reads the same
+// absence.
+var errForgejoNotConfigured = errors.New("no rig the landing worker serves names a Forgejo remote URL, so the town has no Forgejo to watch")
+
+// ForgejoHealthy asks the town's Forgejo its health endpoint, the one read that
+// says the instance every landing gate waits on is up (gt-gg9hv.36). The
+// request carries no credential: the health endpoint needs none, and the URL is
+// the origin from the landing worker's setting, so no user info can reach it.
+func (p systemHostProbes) ForgejoHealthy(ctx context.Context) error {
+	if p.forgejoBaseURL == nil {
+		return errors.New("the host probes were built with no Forgejo URL source")
+	}
+	base, err := p.forgejoBaseURL()
+	if err != nil {
+		return fmt.Errorf("resolving the town's Forgejo URL: %w", err)
+	}
+	if base == "" {
+		return errForgejoNotConfigured
+	}
+	healthURL := strings.TrimSuffix(base, "/") + forgejoHealthPath
+	ctx, cancel := context.WithTimeout(ctx, attentionForgejoHealthTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
+	if err != nil {
+		return fmt.Errorf("forgejo health %s: %w", healthURL, err)
+	}
+	client := p.forgejoHTTP
+	if client == nil {
+		client = &http.Client{Timeout: attentionForgejoHealthTimeout}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("forgejo health %s: %w", healthURL, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("forgejo health %s answered %s", healthURL, resp.Status)
+	}
+	return nil
+}
+
+// forgejoOriginFromRemoteURL is the origin of the instance a Forgejo remote
+// URL names: scheme and host, with no path, query or user info, so the URL a
+// summary carries holds no credential.
+func forgejoOriginFromRemoteURL(raw string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("forgejo remote %q is not a URL with a scheme and host, so the instance it names cannot be asked for its health", raw)
+	}
+	return u.Scheme + "://" + u.Host, nil
+}
+
+// townForgejoBaseURL is the origin of the town's Forgejo, read from the
+// landing worker's own setting: the merge_queue.forgejo.remote_url of the rigs
+// the landing worker serves, resolved by the reader its landing path uses
+// (rig.ResolveForgejoConfigIn). The first rig in name order that names one
+// answers for the town, because a town's rigs land through one instance; the
+// order is sorted rather than the worker's, so a town whose rigs disagree does
+// not watch a different instance from tick to tick. A town where no such rig
+// names a remote URL returns "" and no error, because it has no Forgejo to
+// watch. A rig that names a remote URL that is not a URL is an error, never a
+// skip to the next rig: an instance the town believes it lands through and
+// cannot name is a setting to fix, not an absence.
+func (d *Daemon) townForgejoBaseURL() (string, error) {
+	// The worker's own list when it has no allowlist is the daemon's cached
+	// one, so sort a copy.
+	rigs := append([]string(nil), landingWorkerRigs(d.patrolConfig, d.getKnownRigs())...)
+	sort.Strings(rigs)
+	for _, name := range rigs {
+		fj := rig.ResolveForgejoConfigIn(d.repoFileOpener(), d.config.TownRoot, name)
+		if fj == nil || strings.TrimSpace(fj.RemoteURL) == "" {
+			continue
+		}
+		return forgejoOriginFromRemoteURL(fj.RemoteURL)
+	}
+	return "", nil
 }
 
 // collectHostDisk raises host.disk_crit or host.disk_warn, whichever the town
@@ -279,6 +387,46 @@ func (s *attentionSources) collectHostDocker(ctx context.Context) ([]attention.I
 		Severity: attention.SeverityHigh,
 		Summary:  fmt.Sprintf("%d of %d stack containers not running: %s", len(missing), len(required), strings.Join(missing, ", ")),
 	}}, nil
+}
+
+// collectHostForgejo raises host.forgejo_down when the town's Forgejo has not
+// answered its health endpoint for attentionDockerProbeDownBeats ticks in a
+// row. It reads the health answer the same way collectHostDocker reads docker
+// ps: one unanswered tick is an info probe line, because a single timeout is
+// not an outage, and a run of them is the instance down, which wakes because
+// the info line never does. A healthy answer, or a town that runs no Forgejo,
+// returns nothing, so an item either condition cleared is dropped.
+func (s *attentionSources) collectHostForgejo(ctx context.Context) ([]attention.Item, error) {
+	err := s.host.ForgejoHealthy(ctx)
+	if err == nil || errors.Is(err, errForgejoNotConfigured) {
+		s.forgejoProbeFails = 0
+		return nil, nil
+	}
+	// A probe that died with the tick's own context (the heartbeat ran out of
+	// time) says nothing about the instance, so it is not a beat toward it
+	// being down.
+	if ctx.Err() == nil {
+		s.forgejoProbeFails++
+	}
+	items := s.hostProbeFailed(hostProbeForgejo, err, attention.KindHostForgejo)
+	if s.forgejoProbeFails < attentionDockerProbeDownBeats {
+		return items, nil
+	}
+	// The instance-down item the probe kept from an earlier tick is replaced,
+	// not joined: one key, one item.
+	kept := items[:0]
+	for _, it := range items {
+		if it.Key != hostRuleForgejoDown {
+			kept = append(kept, it)
+		}
+	}
+	return append(kept, attention.Item{
+		Key:      hostRuleForgejoDown,
+		Kind:     attention.KindHostForgejo,
+		Severity: attention.SeverityHigh,
+		Summary: fmt.Sprintf("forgejo health has failed %d heartbeats in a row, so every landing gate is waiting: %s",
+			s.forgejoProbeFails, oneLine(err.Error())),
+	}), nil
 }
 
 // hostProbeFailed is what a collector returns when its probe failed: one
