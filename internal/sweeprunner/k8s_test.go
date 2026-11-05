@@ -151,10 +151,15 @@ func TestK8sRenderPriorityAndSafety(t *testing.T) {
 	if requests, limits := runner.Resources.Requests, runner.Resources.Limits; requests != limits {
 		t.Errorf("the runner's requests %+v differ from its limits %+v: the share must be promised, not burst", requests, limits)
 	}
+	// The Spec's cpus and memory are the pod's total; the dind sidecar's fixed
+	// share comes out of it, and the runner gets the rest.
 	spec := goldenSpec()
-	share := ResourceList{CPU: strconv.Itoa(spec.CPUs), Memory: strconv.Itoa(spec.MemoryGB) + "Gi"}
-	if got := runner.Resources.Requests; got != share {
-		t.Errorf("the runner's requests are %+v, want the Spec's share %+v", got, share)
+	total, err := PodRequestTotal(pod)
+	if err != nil {
+		t.Fatalf("the Job's pod request: %v", err)
+	}
+	if want := (Amount{CPU: int64(spec.CPUs) * 1000, Memory: int64(spec.MemoryGB) << 30}); total != want {
+		t.Errorf("the pod asks for %s, want the Spec's pod total %s", total, want)
 	}
 	if document := string(plan.Job.JSON()); strings.Contains(document, "hostPath") {
 		t.Errorf("the Job mounts a host path, which ties the run to one node:\n%s", document)

@@ -31,16 +31,21 @@ type Backend interface {
 // Plan is one rendered run: the objects it applies, the steps a caller runs in
 // the order it runs them, and how a caller learns the run has ended.
 //
-// A caller runs Guards first and applies nothing while one refuses, then Apply
-// in order, then the steps whose Teardown is false in order, and stops at the
-// first failure, then runs Teardown whether or not a step before it failed. A
-// run that fails at its own start step has still made the network, the volume,
-// the claim and the sidecar, so a teardown that waited for success would leak
-// them.
+// A caller runs Preflight and then Guards first and applies nothing while one
+// refuses, then Apply in order, then the steps whose Teardown is false in order,
+// and stops at the first failure, then runs Teardown whether or not a step
+// before it failed. A run that fails at its own start step has still made the
+// network, the volume, the claim and the sidecar, so a teardown that waited for
+// success would leak them.
 type Plan struct {
 	// Job is the batch/v1 Job a Kubernetes backend applies, and nil for a
 	// backend that renders argv alone. Apply carries the document it applies.
 	Job *Job
+	// Preflight is the capacity check a caller runs before it applies anything,
+	// for a backend whose engine is a node other workloads share: the run's
+	// share must fit beside them. Nil for a backend whose engine is the run's
+	// own.
+	Preflight *Preflight
 	// Guards are the checks a caller runs before it applies anything: each
 	// lists objects that must not share the engine with this run, and its
 	// Refuse reads the listing and reports the objects that refuse the run.
