@@ -1295,6 +1295,11 @@ program bead holds the output.
   backups went to throwaway filesystems; `--backup-dir` sets
   `GT_DOLT_BACKUP_ROOT` and mounts the shared directory (gt-gg9hv.16,
   gt-gg9hv.17).
+- The devops reporters read `/Users/Shared/gt-cloud/reports` and
+  `/Users/Shared/gt-cloud/releases`, and hm-sync syncs `~/.claude` with its
+  `.beads`; none of those host paths was mounted in the container, so
+  `gt daemon compose write --bind-ro` mounts a host directory read-only at its
+  own path, repeatable for more (gt-vqexg).
 - The `update` and `rebuild_*` patrols cannot install in a container and are
   disabled in the town settings (gt-1oz0t).
 - The plugin binaries were macOS builds; the image carries Linux builds
