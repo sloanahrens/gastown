@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/update"
 )
 
 var testUpdateSettings = config.UpdateSettings{
@@ -108,6 +109,131 @@ func TestUpdateDueWhenMainMovedAfterMinInterval(t *testing.T) {
 			t.Parallel()
 			facts := UpdateFacts{MainMoved: tt.mainMoved, Waiting: tt.waiting, LastEnded: tt.lastEnded}
 			due, reason := updateDue(now, testUpdateSettings, facts)
+			if due != tt.wantDue {
+				t.Fatalf("updateDue() due = %v, want %v (reason %q)", due, tt.wantDue, reason)
+			}
+			if !strings.Contains(reason, tt.wantReason) {
+				t.Errorf("updateDue() reason = %q, want it to contain %q", reason, tt.wantReason)
+			}
+		})
+	}
+}
+
+// A run that failed or aborted on main's current target is not due under
+// either rule until main moves; a run on an older target, or one that did not
+// fail, keeps today's answer.
+func TestUpdateDueHoldsAFailedRunOnMainsTarget(t *testing.T) {
+	t.Parallel()
+
+	const target, older = "a1b2c3", "0f0f0f"
+	noon := time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC)
+	nightly := time.Date(2026, 3, 10, 3, 30, 0, 0, time.UTC)
+	lastNight := time.Date(2026, 3, 9, 3, 10, 0, 0, time.UTC)
+	tests := []struct {
+		name       string
+		now        time.Time
+		facts      UpdateFacts
+		wantDue    bool
+		wantReason string
+	}{
+		{
+			name: "failed on main's target, min interval elapsed, main moved and waiting",
+			now:  noon,
+			facts: UpdateFacts{
+				MainMoved: true, Waiting: 2,
+				LastStarted: noon.Add(-5 * time.Hour), LastEnded: noon.Add(-4 * time.Hour),
+				LastOutcome: update.OutcomeFailed, LastTarget: target, MainSHA: target,
+			},
+			wantDue:    false,
+			wantReason: "gt update by hand",
+		},
+		{
+			name: "aborted on main's target, nightly window open",
+			now:  nightly,
+			facts: UpdateFacts{
+				LastStarted: lastNight, LastEnded: lastNight.Add(time.Minute),
+				LastOutcome: update.OutcomeAborted, LastTarget: target, MainSHA: target,
+			},
+			wantDue:    false,
+			wantReason: "gt update by hand",
+		},
+		{
+			name: "failed on main's target, nightly window open, main unmoved",
+			now:  nightly,
+			facts: UpdateFacts{
+				LastStarted: lastNight, LastEnded: lastNight.Add(time.Minute),
+				LastOutcome: update.OutcomeFailed, LastTarget: target, MainSHA: target,
+			},
+			wantDue:    false,
+			wantReason: "gt update by hand",
+		},
+		{
+			name: "failed on main's target, main sha unknown",
+			now:  nightly,
+			facts: UpdateFacts{
+				LastStarted: lastNight, LastEnded: lastNight.Add(time.Minute),
+				LastOutcome: update.OutcomeFailed, LastTarget: target,
+			},
+			wantDue:    false,
+			wantReason: "main's sha is unknown",
+		},
+		{
+			name: "failed on an older target, main moved and waiting",
+			now:  noon,
+			facts: UpdateFacts{
+				MainMoved: true, Waiting: 1,
+				LastStarted: noon.Add(-5 * time.Hour), LastEnded: noon.Add(-4 * time.Hour),
+				LastOutcome: update.OutcomeFailed, LastTarget: older, MainSHA: target,
+			},
+			wantDue:    true,
+			wantReason: "main moved",
+		},
+		{
+			name: "failed on an older target, nightly window open",
+			now:  nightly,
+			facts: UpdateFacts{
+				LastStarted: lastNight, LastEnded: lastNight.Add(time.Minute),
+				LastOutcome: update.OutcomeFailed, LastTarget: older, MainSHA: target,
+			},
+			wantDue:    true,
+			wantReason: "nightly",
+		},
+		{
+			name: "partial on main's target, nightly window open",
+			now:  nightly,
+			facts: UpdateFacts{
+				LastStarted: lastNight, LastEnded: lastNight.Add(time.Minute),
+				LastOutcome: update.OutcomePartial, LastTarget: target, MainSHA: target,
+			},
+			wantDue:    true,
+			wantReason: "nightly",
+		},
+		{
+			name: "interrupted on main's target, nightly window open",
+			now:  nightly,
+			facts: UpdateFacts{
+				LastStarted: lastNight, LastEnded: lastNight.Add(time.Minute),
+				LastOutcome: update.OutcomeInterrupted, LastTarget: target, MainSHA: target,
+			},
+			wantDue:    true,
+			wantReason: "nightly",
+		},
+		{
+			name: "ok on main's target, nightly window open",
+			now:  nightly,
+			facts: UpdateFacts{
+				LastStarted: lastNight, LastEnded: lastNight.Add(time.Minute),
+				LastOutcome: update.OutcomeOK, LastTarget: target, MainSHA: target,
+			},
+			wantDue:    true,
+			wantReason: "nightly",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			due, reason := updateDue(tt.now, testUpdateSettings, tt.facts)
 			if due != tt.wantDue {
 				t.Fatalf("updateDue() due = %v, want %v (reason %q)", due, tt.wantDue, reason)
 			}

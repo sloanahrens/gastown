@@ -247,6 +247,86 @@ func TestUpdateFactsReadTheState(t *testing.T) {
 	}
 }
 
+// A state file whose outcome names no run outcome is an unreadable fact: the
+// facts are refused, so no run is launched on a value it cannot read.
+func TestUpdateFactsRefusesAnUnknownOutcome(t *testing.T) {
+	t.Parallel()
+
+	town := t.TempDir()
+	d := &Daemon{
+		config: DefaultConfig(town),
+		logger: log.New(io.Discard, "", 0),
+		clock:  clockwork.NewFakeClockAt(updateTriggerTestTime),
+		rebuildGTPendingFn: func() installpending.Store {
+			return installpending.StoreIn(filepath.Join(town, "daemon", installpending.FileName))
+		},
+	}
+	store := update.Store{Dir: update.Dir(town)}
+	if err := store.Write(update.State{
+		RunID:     "run-1",
+		StartedAt: updateTriggerTestTime.Add(-time.Hour),
+		EndedAt:   updateTriggerTestTime.Add(-30 * time.Minute),
+		Outcome:   update.Outcome("bogus"),
+	}); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+
+	if _, err := d.updateFacts(updateTriggerTestTime); err == nil {
+		t.Fatal("updateFacts() error = nil, want an error for an outcome no run writes")
+	}
+}
+
+// A failed or aborted run on main's current target holds the heartbeat's
+// launch until main moves or a run succeeds, for the nightly rule as well.
+func TestUpdateTriggerHoldsAFailedRunOnMainsTarget(t *testing.T) {
+	t.Parallel()
+
+	const main = "1111111111111111111111111111111111111111"
+	const older = "2222222222222222222222222222222222222222"
+	tests := []struct {
+		name         string
+		outcome      update.Outcome
+		target       string
+		wantLaunches int
+	}{
+		{"failed on main's target", update.OutcomeFailed, main, 0},
+		{"aborted on main's target", update.OutcomeAborted, main, 0},
+		{"failed on an older target", update.OutcomeFailed, older, 1},
+		{"succeeded on main's target", update.OutcomeOK, main, 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, launches, _ := newUpdateTriggerTestDaemon(t, &config.UpdateConfig{
+				Enabled: true,
+				Window:  "03:00",
+			})
+			createUpdateSource(t, d.config.TownRoot)
+			d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo {
+				return &version.StaleBinaryInfo{RepoCommit: main}
+			}
+			store := update.Store{Dir: update.Dir(d.config.TownRoot)}
+			ended := updateTriggerTestTime.Add(-24 * time.Hour)
+			if err := store.Write(update.State{
+				RunID:     "run-1",
+				StartedAt: ended.Add(-time.Minute),
+				EndedAt:   ended,
+				Outcome:   tt.outcome,
+				Target:    update.Target{SHA: tt.target},
+			}); err != nil {
+				t.Fatalf("write state: %v", err)
+			}
+
+			d.triggerUpdate()
+
+			if *launches != tt.wantLaunches {
+				t.Fatalf("launches = %d, want %d", *launches, tt.wantLaunches)
+			}
+		})
+	}
+}
+
 func TestUpdateIsRegisteredAsALifecycleStep(t *testing.T) {
 	t.Parallel()
 
@@ -297,6 +377,20 @@ func TestUpdateTriggerRefusesUnreadableInputs(t *testing.T) {
 				}
 				if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
 					t.Fatalf("write broken state: %v", err)
+				}
+			},
+		},
+		{
+			name: "state outcome is not a run outcome",
+			setup: func(t *testing.T, d *Daemon, town string) {
+				store := update.Store{Dir: update.Dir(town)}
+				if err := store.Write(update.State{
+					RunID:     "run-1",
+					StartedAt: updateTriggerTestTime.Add(-time.Hour),
+					EndedAt:   updateTriggerTestTime.Add(-30 * time.Minute),
+					Outcome:   update.Outcome("bogus"),
+				}); err != nil {
+					t.Fatalf("write state: %v", err)
 				}
 			},
 		},
