@@ -151,6 +151,18 @@ func TestPriorityTableChecksTheLivePods(t *testing.T) {
 			listing: []byte("Error from server (Forbidden)\n"),
 			refused: "reading the pods' priorities",
 		},
+		"a listing that is not an object": {
+			listing: []byte("[1,2,3]"),
+			refused: "reading the pods' priorities",
+		},
+		"a listed item that is not an object": {
+			listing: []byte(`{"kind":"List","items":[42]}`),
+			refused: "reading the pods' priorities",
+		},
+		"a single listed pod in no namespace": {
+			listing: []byte(`{"kind":"Pod","metadata":{"name":"forgejo-abc"},"spec":{"priority":0}}`),
+			refused: "reading the pods' priorities",
+		},
 		"a pod the listing places in no namespace": {
 			listing: priorityListingJSON(100, `{"kind":"Pod","metadata":{"name":"forgejo-abc"},"spec":{"priority":0}}`),
 			refused: "no namespace or name",
