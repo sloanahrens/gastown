@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/sweeprunner"
 )
@@ -939,8 +940,22 @@ type runnerCluster struct {
 	applies        int
 }
 
+// runnerPriorityListing is what the priority preflight's kubectl call answers:
+// the sweep's own class, the control plane's, and the three control-plane pods
+// the table records at their classes, so a run with nothing to shed passes.
+const runnerPriorityListing = `{"kind":"List","items":[
+{"kind":"PriorityClass","metadata":{"name":"gt-ci"},"value":100},
+{"kind":"PriorityClass","metadata":{"name":"gt-ci-gate"},"value":200},
+{"kind":"PriorityClass","metadata":{"name":"gt-control-plane"},"value":1000000},
+{"kind":"Pod","metadata":{"name":"forgejo-57658978cf-5nzvk","namespace":"forgejo"},"spec":{"priority":1000000,"ownerReferences":[{"kind":"ReplicaSet","name":"forgejo-57658978cf"}]}},
+{"kind":"Pod","metadata":{"name":"forgejo-runner-df77dd979-g25pq","namespace":"forgejo"},"spec":{"priority":200,"ownerReferences":[{"kind":"ReplicaSet","name":"forgejo-runner-df77dd979"}]}},
+{"kind":"Pod","metadata":{"name":"forgejo-6884fd5d78-6mqpl","namespace":"forgejo-trial"},"spec":{"priority":1000000,"ownerReferences":[{"kind":"ReplicaSet","name":"forgejo-6884fd5d78"}]}}
+]}`
+
 func (c *runnerCluster) answer(argv []string) ([]byte, []byte, error) {
 	switch {
+	case slices.Contains(argv, "get") && slices.Contains(argv, "pods,priorityclasses"):
+		return []byte(runnerPriorityListing), nil, nil
 	case slices.Contains(argv, "get") && slices.Contains(argv, "jobs"):
 		if c.jobsErr {
 			return nil, []byte("Error from server (Forbidden): jobs.batch is forbidden\n"), errors.New("exit status 1")
@@ -1647,5 +1662,65 @@ func TestTierSweepRunnerKubernetesCycleEndsDuringCollect(t *testing.T) {
 		if slices.Contains(fields, "job") || slices.Contains(fields, sweeprunner.OutClaimName(spec)) {
 			t.Errorf("the run's objects were removed on a cycle that only ended the wait: %q", argv)
 		}
+	}
+}
+
+// A preflight decline is not a failed run: nothing was attempted and nothing
+// was learned about the tree, so the stage reports that it did not run and the
+// cycle defers. The line naming the pod is logged at most once an hour while
+// the reason stands (gt-gg9hv.39).
+func TestTierSweepRunnerPriorityDeclineDefers(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, _, _, logs := newTierSweepDaemon(t, now, "gastown")
+	cfg := runnerTestConfig(t)
+	cfg.Backend = config.TierSweepRunnerKubernetes
+	d.patrolConfig.Patrols.TierSweep.Runner = cfg
+	st := tierSweepStage{tiers: []string{"integration"}, slot: true, rig: "gastown", tested: runnerTestSHA, budget: time.Minute}
+	spec, ok, err := d.tierSweepRunnerSpec(st)
+	if err != nil || !ok {
+		t.Fatalf("spec = %+v, ok = %v, err = %v; want the runner to take the stage", spec, ok, err)
+	}
+	// The guard's own refusal, from a listing whose Forgejo pod runs at
+	// priority 0 with the sweep's class at 100.
+	const listing = `{"kind":"List","items":[
+{"kind":"PriorityClass","metadata":{"name":"gt-ci"},"value":100},
+{"kind":"PriorityClass","metadata":{"name":"gt-ci-gate"},"value":200},
+{"kind":"PriorityClass","metadata":{"name":"gt-control-plane"},"value":1000000},
+{"kind":"Pod","metadata":{"name":"forgejo-abc","namespace":"forgejo"},"spec":{"priority":0}}]}`
+	declined := sweeprunner.PriorityGuard(spec, spec.ProtectedNamespaces).Refuse([]byte(listing))
+	if declined == nil {
+		t.Fatal("the guard passed a listing whose Forgejo pod runs below the sweep")
+	}
+	d.tierSweepSeams.launch = func(context.Context, tierSweepStage, sweeprunner.Spec) tierSweepLaunch {
+		return tierSweepLaunch{exitCode: -1, err: declined}
+	}
+	const line = "tier_sweep: not launching: pod forgejo/forgejo-abc"
+
+	stage := d.tierSweepRunRunner(context.Background(), st, spec)
+	if stage.ran {
+		t.Fatalf("stage = %+v, want ran=false so the cycle defers rather than going red", stage)
+	}
+	if stage.err == nil {
+		t.Error("the declined stage reports no error for the cycle's deferral line")
+	}
+	if got := strings.Count(logs.String(), line); got != 1 {
+		t.Fatalf("the decline line appears %d times after the first cycle, want once:\n%s", got, logs.String())
+	}
+
+	// A second cycle inside the hour retries the launch and says nothing new.
+	d.tierSweepRunRunner(context.Background(), st, spec)
+	if got := strings.Count(logs.String(), line); got != 1 {
+		t.Errorf("the decline line appears %d times inside the hour, want it once:\n%s", got, logs.String())
+	}
+
+	clk, ok := d.clock.(*clockwork.FakeClock)
+	if !ok {
+		t.Fatalf("test clock = %T, want a fake clock to advance", d.clock)
+	}
+	clk.Advance(61 * time.Minute)
+	d.tierSweepRunRunner(context.Background(), st, spec)
+	if got := strings.Count(logs.String(), line); got != 2 {
+		t.Errorf("the decline line appears %d times after the hour, want the standing decline reported again:\n%s", got, logs.String())
 	}
 }

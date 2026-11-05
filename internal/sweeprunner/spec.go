@@ -55,6 +55,12 @@ type Spec struct {
 	// It is a field so a render names its engine instead of taking whichever one
 	// the environment happens to select.
 	Context string
+	// ProtectedNamespaces are the namespaces the Kubernetes preflight checks
+	// before it launches: a pod there at or below the sweep's priority would be
+	// what the scheduler sheds for the run. Empty refuses the launch (an
+	// unwired guard checks nothing), so a caller fills it from
+	// tier_sweep.runner.protected_namespaces.
+	ProtectedNamespaces []string
 }
 
 // FieldError is a Spec field whose value a render cannot use, named so the

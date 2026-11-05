@@ -333,16 +333,22 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 	sync := renderSyncPod(spec)
 	return Plan{
 		Job: job,
-		Guards: []Guard{{
-			// The repo claim is shared by every run of the rig, and a run's Job
-			// mounts it read-only while the sweep runs: rewriting it under an
-			// active run replaces the repository that run is still reading. The
-			// listing takes every Job, because an unlabelled run still reads the
-			// claim; the names decide which Jobs are this rig's, by the structure
-			// the Job renderer gives them.
-			Step:   Step{Argv: kubectlArgv(spec, "get", "jobs", "-o", syncJobsJSONPath)},
-			Refuse: refuseActiveSweepJobs(spec),
-		}},
+		Guards: []Guard{
+			{
+				// The repo claim is shared by every run of the rig, and a run's Job
+				// mounts it read-only while the sweep runs: rewriting it under an
+				// active run replaces the repository that run is still reading. The
+				// listing takes every Job, because an unlabelled run still reads the
+				// claim; the names decide which Jobs are this rig's, by the structure
+				// the Job renderer gives them.
+				Step:   Step{Argv: kubectlArgv(spec, "get", "jobs", "-o", syncJobsJSONPath)},
+				Refuse: refuseActiveSweepJobs(spec),
+			},
+			// The run outranks a pod at or below its priority, so the scheduler
+			// may shed that pod to make room: on a node with no room it must shed
+			// the sweep instead (gt-gg9hv.39).
+			PriorityGuard(spec, spec.ProtectedNamespaces),
+		},
 		Apply: []Step{
 			// The repo claim is created before the sync pod mounts it, and stays
 			// for the next run: only its contents change per run.
