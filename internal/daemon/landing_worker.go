@@ -1184,6 +1184,16 @@ func (d *Daemon) newPostLandRunner(rigName, rigPath string, w postLandWiring) *l
 		OnUnknown: func(_ context.Context, u landworker.PostLandUnknown) {
 			d.postLandUnknowns.record(u, postLandUnknownWindow)
 		},
+		// The store failure is the same silence the timeout item reports: no
+		// verdict is being reached. It is keyed by rig, and the pass that
+		// reads the store again clears it.
+		OnStoreFailure: func(_ context.Context, f *landworker.PostLandStoreFailure) {
+			if f == nil {
+				d.postLandStoreFailures.forget(landworker.PostLandStoreFailure{Rig: rigName}.Key())
+				return
+			}
+			d.postLandStoreFailures.record(*f)
+		},
 		Clock:   d.clk(),
 		Timeout: w.Timeout,
 		Run:     w.Run,

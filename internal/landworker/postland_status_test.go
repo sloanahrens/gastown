@@ -90,13 +90,15 @@ func combinedFor(name string, states ...forgejo.CommitState) *forgejo.CombinedSt
 // statusVerdicts records what a runner's callbacks, log and bead comments
 // received.
 type statusVerdicts struct {
-	mu       sync.Mutex
-	greens   int
-	reds     int
-	redTails []string
-	unknowns []PostLandUnknown
-	logs     []string
-	comments []string
+	mu           sync.Mutex
+	greens       int
+	reds         int
+	redTails     []string
+	unknowns     []PostLandUnknown
+	storeFails   []*PostLandStoreFailure
+	storeCleared int
+	logs         []string
+	comments     []string
 }
 
 // runner builds a status-mode runner over status and the pending verdicts in
@@ -131,7 +133,30 @@ func (v *statusVerdicts) runner(status func(context.Context, PostLand) (*forgejo
 			v.unknowns = append(v.unknowns, u)
 			v.mu.Unlock()
 		},
+		OnStoreFailure: func(_ context.Context, f *PostLandStoreFailure) {
+			v.mu.Lock()
+			if f == nil {
+				v.storeCleared++
+			} else {
+				v.storeFails = append(v.storeFails, f)
+			}
+			v.mu.Unlock()
+		},
 	}
+}
+
+// storeFailureRaises is how many store-failure items the runner raised, and
+// storeClears how many times it said the store is readable again.
+func (v *statusVerdicts) storeFailureRaises() int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return len(v.storeFails)
+}
+
+func (v *statusVerdicts) storeClears() int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.storeCleared
 }
 
 // AddComment records a bead comment the runner wrote.
@@ -177,6 +202,45 @@ type failingMainState struct {
 
 func (f failingMainState) Load() (MainState, error) { return MainState{}, f.loadErr }
 func (f failingMainState) Save(MainState) error     { return f.saveErr }
+
+// flakyMainState is a working store a test can make fail at reads or writes.
+// A failed read still holds what the last good write stored, so a test can
+// assert the entries survived it.
+type flakyMainState struct {
+	inner   MemoryMainState
+	mu      sync.Mutex
+	loadErr error
+	saveErr error
+}
+
+func (f *flakyMainState) Load() (MainState, error) {
+	f.mu.Lock()
+	err := f.loadErr
+	f.mu.Unlock()
+	if err != nil {
+		return MainState{}, err
+	}
+	return f.inner.Load()
+}
+
+func (f *flakyMainState) Save(st MainState) error {
+	f.mu.Lock()
+	err := f.saveErr
+	f.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	return f.inner.Save(st)
+}
+
+func (f *flakyMainState) failLoad(err error) { f.mu.Lock(); f.loadErr = err; f.mu.Unlock() }
+func (f *flakyMainState) failSave(err error) { f.mu.Lock(); f.saveErr = err; f.mu.Unlock() }
+
+// stored is the pending verdicts the store holds, as a good read sees them.
+func (f *flakyMainState) stored(t *testing.T) []PendingPostLand {
+	t.Helper()
+	return pendingOf(t, &f.inner)
+}
 
 func assertNoControl(t *testing.T, what, s string) {
 	t.Helper()
@@ -528,6 +592,116 @@ func TestPostLandStatusPendingListIsBounded(t *testing.T) {
 	}
 }
 
+// TestPostLandStatusStoreFailures is the store's failure half: a read that
+// fails keeps every pending entry for the next pass instead of reading the
+// failure as no verdicts, and after PostLandStatusStoreFailureAfter passes
+// running it raises one attention item that the next good pass clears; a write
+// that fails keeps the entry and fires its verdict once.
+func TestPostLandStatusStoreFailures(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	t.Run("a failed load keeps every entry and raises one item after three passes", func(t *testing.T) {
+		t.Parallel()
+		v := &statusVerdicts{}
+		store := &flakyMainState{}
+		clk := &manualClock{now: statusT0}
+		if err := store.inner.Save(MainState{PostLandPending: []PendingPostLand{
+			{Land: PostLand{Commit: "aaaa111", Target: "main"}, Context: statusContext, Since: statusT0},
+			{Land: PostLand{Commit: "bbbb222", Target: "main"}, Context: statusContext, Since: statusT0},
+		}}); err != nil {
+			t.Fatalf("seeding the store: %v", err)
+		}
+		store.failLoad(errors.New("permission denied"))
+		reads := &fakeStatusReads{responses: []fakeStatusRead{{status: combinedFor(statusContext, forgejo.StatePending)}}}
+		r := v.runner(reads.read, store, clk, time.Hour)
+
+		for pass := 1; pass < PostLandStatusStoreFailureAfter; pass++ {
+			r.PollPending(ctx)
+			if n := v.storeFailureRaises(); n != 0 {
+				t.Fatalf("item raised on failed pass %d, want none before %d", pass, PostLandStatusStoreFailureAfter)
+			}
+		}
+		r.PollPending(ctx)
+		if n := v.storeFailureRaises(); n != 1 {
+			t.Fatalf("items raised after %d failed passes = %d, want one", PostLandStatusStoreFailureAfter, n)
+		}
+		f := v.storeFails[0]
+		if f.Rig != "gastown" || f.Key() != "post-land-store-failure:gastown" {
+			t.Fatalf("record = %+v key %q, want one keyed by the rig", f, f.Key())
+		}
+		if !strings.Contains(f.Error, "permission denied") {
+			t.Fatalf("record error %q does not name the failure", f.Error)
+		}
+		if !strings.Contains(f.Summary(), "gastown") || !strings.Contains(f.Summary(), "permission denied") {
+			t.Fatalf("summary %q does not name the rig and the failure", f.Summary())
+		}
+		if n := len(store.stored(t)); n != 2 {
+			t.Fatalf("%d pending entries after the failed passes, want both kept", n)
+		}
+		if logs := v.logText(); !strings.Contains(logs, "gastown") || !strings.Contains(logs, "passes running") {
+			t.Fatalf("logs do not name the rig and the failed passes:\n%s", logs)
+		}
+
+		// A fourth failed pass does not raise a second item.
+		r.PollPending(ctx)
+		if n := v.storeFailureRaises(); n != 1 {
+			t.Fatalf("items raised on a later failed pass = %d, want still one", n)
+		}
+
+		// The next good pass keeps the entries and clears the item.
+		store.failLoad(nil)
+		r.PollPending(ctx)
+		if n := v.storeClears(); n != 1 {
+			t.Fatalf("clears = %d, want the good pass to clear the item", n)
+		}
+		if n := len(store.stored(t)); n != 2 {
+			t.Fatalf("%d pending entries after the good pass, want both kept", n)
+		}
+	})
+
+	t.Run("a failed save keeps the entry and fires the verdict once", func(t *testing.T) {
+		t.Parallel()
+		pl := PostLand{BeadID: "gt-abc", Commit: "abc1234567890", Target: "main"}
+		v := &statusVerdicts{}
+		store := &flakyMainState{}
+		clk := &manualClock{now: statusT0}
+		reads := &fakeStatusReads{responses: []fakeStatusRead{{status: combinedFor(statusContext, forgejo.StateSuccess)}}}
+		r := v.runner(reads.read, store, clk, time.Hour)
+		r.Trigger(ctx, pl)
+		store.failSave(errors.New("disk full"))
+
+		r.PollPending(ctx)
+		if greens, _, _ := v.counts(); greens != 1 {
+			t.Fatalf("green = %d after the read, want one", greens)
+		}
+		if n := len(store.stored(t)); n != 1 {
+			t.Fatalf("%d pending entries after the failed save, want the entry kept", n)
+		}
+
+		clk.Advance(time.Minute)
+		r.PollPending(ctx)
+		if greens, _, _ := v.counts(); greens != 1 {
+			t.Fatalf("green = %d across the retry, want the callback fired once", greens)
+		}
+		if n := len(store.stored(t)); n != 1 {
+			t.Fatalf("%d pending entries after the retry, want the entry kept", n)
+		}
+		if n := v.storeFailureRaises(); n != 0 {
+			t.Fatalf("items raised after two failed passes = %d, want none before %d", n, PostLandStatusStoreFailureAfter)
+		}
+
+		store.failSave(nil)
+		r.PollPending(ctx)
+		if greens, _, _ := v.counts(); greens != 1 {
+			t.Fatalf("green = %d after the removal, want still one", greens)
+		}
+		if n := len(store.stored(t)); n != 0 {
+			t.Fatalf("%d pending entries after the removal saved, want none", n)
+		}
+	})
+}
+
 // pollCounter is a trigger that counts the passes that polled it.
 type pollCounter struct{ polls int }
 
@@ -611,6 +785,98 @@ func TestPostLandStatusDescriptionIsSanitized(t *testing.T) {
 	assertNoControl(t, "bead comment", v.comments[0])
 	for _, line := range v.logs {
 		assertNoControl(t, "log line", line)
+	}
+}
+
+// TestPostLandStatusPrunesTheStore: a store holding more pending verdicts than
+// the rig keeps has its oldest dropped from the store itself, with a log line,
+// so the bound holds even for a list written by an older daemon.
+func TestPostLandStatusPrunesTheStore(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	entries := make([]PendingPostLand, 0, postLandPendingLimit+1)
+	for i := 0; i <= postLandPendingLimit; i++ {
+		entries = append(entries, PendingPostLand{
+			Land:    PostLand{Commit: fmt.Sprintf("commit%02d", i), Target: "main"},
+			Context: statusContext,
+			Since:   statusT0,
+		})
+	}
+	store := &MemoryMainState{}
+	if err := store.Save(MainState{PostLandPending: entries}); err != nil {
+		t.Fatalf("seeding the store: %v", err)
+	}
+	v := &statusVerdicts{}
+	reads := &fakeStatusReads{responses: []fakeStatusRead{{status: combinedFor(statusContext, forgejo.StatePending)}}}
+	r := v.runner(reads.read, store, &manualClock{now: statusT0}, time.Hour)
+	r.PollPending(ctx)
+
+	left := pendingOf(t, store)
+	if len(left) != postLandPendingLimit {
+		t.Fatalf("the store holds %d pending verdicts, want the newest %d", len(left), postLandPendingLimit)
+	}
+	if left[0].Land.Commit != "commit01" || left[len(left)-1].Land.Commit != fmt.Sprintf("commit%02d", postLandPendingLimit) {
+		t.Fatalf("the store runs %s..%s, want commit01..the newest", left[0].Land.Commit, left[len(left)-1].Land.Commit)
+	}
+	for _, e := range left {
+		if e.Land.Commit == "commit00" {
+			t.Fatalf("the oldest entry is still in the store after the prune")
+		}
+	}
+	if logs := v.logText(); !strings.Contains(logs, "dropping the pending verdict") || !strings.Contains(logs, "commit00") {
+		t.Fatalf("logs do not name the dropped entry:\n%s", logs)
+	}
+}
+
+// TestPostLandStatusReadHasATimeout: each status read runs under a deadline, so
+// a Forgejo that never answers is cut off at the named read timeout and the
+// pass completes with an UNKNOWN, keeping the entry for a later pass.
+func TestPostLandStatusReadHasATimeout(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	pl := PostLand{BeadID: "gt-abc", Commit: "abc1234567890", Target: "main"}
+	clk := &manualClock{now: statusT0}
+
+	// The read answers green when it was given no deadline, so a run without
+	// the bound reads a verdict this test refuses.
+	stalled := func(got context.Context, _ PostLand) (*forgejo.CombinedStatus, error) {
+		if _, ok := got.Deadline(); !ok {
+			return combinedFor(statusContext, forgejo.StateSuccess), nil
+		}
+		<-got.Done()
+		return nil, got.Err()
+	}
+	v := &statusVerdicts{}
+	store := &MemoryMainState{}
+	r := v.runner(stalled, store, clk, time.Hour)
+	r.readTimeoutOverride = time.Nanosecond
+	r.Trigger(ctx, pl)
+	r.PollPending(ctx)
+
+	if greens, reds, unknowns := v.counts(); greens != 0 || reds != 0 || unknowns != 0 {
+		t.Fatalf("green %d red %d unknown %d, want no verdict from a stalled read", greens, reds, unknowns)
+	}
+	if n := len(pendingOf(t, store)); n != 1 {
+		t.Fatalf("%d pending entries, want the stalled read kept for a later pass", n)
+	}
+	if logs := v.logText(); !strings.Contains(logs, "is now unreadable") {
+		t.Fatalf("logs do not say the read was cut off:\n%s", logs)
+	}
+
+	// With no override the bound is the named constant.
+	var bound time.Duration
+	var sawDeadline bool
+	reads := func(got context.Context, _ PostLand) (*forgejo.CombinedStatus, error) {
+		if deadline, ok := got.Deadline(); ok {
+			sawDeadline, bound = true, time.Until(deadline)
+		}
+		return combinedFor(statusContext, forgejo.StatePending), nil
+	}
+	r2 := v.runner(reads, &MemoryMainState{}, clk, time.Hour)
+	r2.Trigger(ctx, pl)
+	r2.PollPending(ctx)
+	if !sawDeadline || bound <= 0 || bound > PostLandStatusReadTimeout {
+		t.Fatalf("read deadline %v (set %v), want one at most %v away", bound, sawDeadline, PostLandStatusReadTimeout)
 	}
 }
 

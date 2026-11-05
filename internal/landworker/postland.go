@@ -68,6 +68,18 @@ const postLandTailLines = 10
 // arrives mid-run; RedMain is the production pair
 // (gt-v4ssj.4). An UNKNOWN status verdict calls neither and raises one
 // attention item per landed commit.
+//
+// In status mode a verdict fires before its pending entry is removed and
+// saved, so a daemon that stops between the two calls it again for the same
+// landing. Each callback is idempotent per rig and landed commit, which is
+// what makes that repeat harmless: OnUnknown's record is keyed by rig and
+// commit and the attention store replaces one with the same key, so the item
+// keeps its first_seen and is raised once; OnGreen and OnRed are
+// RedMain.Green and RedMain.Red, which records the same main state at the same
+// commit and key their artifacts by rig and package and by culprit bead, so an
+// open red-main bead is commented rather than filed a second time and an open
+// revert is found rather than built again. A repeat re-runs the red reruns, and
+// adds no duplicate bead, revert or attention item.
 type PostLandRunner struct {
 	Rig string
 	// Command returns the command to run; "" leaves the command mode off.
@@ -89,6 +101,16 @@ type PostLandRunner struct {
 	// status context never reached a verdict before Timeout. It is called
 	// once per landed commit.
 	OnUnknown func(ctx context.Context, u PostLandUnknown)
+	// OnStoreFailure, when set, receives the rig's pending-verdict store
+	// failure once PostLandStatusStoreFailureAfter passes running have failed
+	// to read or write it, and nil on the pass that reaches the store again,
+	// which clears the attention item. A failure nobody is told about is the
+	// safety net going blind.
+	OnStoreFailure func(ctx context.Context, f *PostLandStoreFailure)
+	// readTimeoutOverride bounds one status read in place of
+	// PostLandStatusReadTimeout, which production uses. A test shortens it so
+	// a stalled read is cut off without waiting out the real bound.
+	readTimeoutOverride time.Duration
 	// Clock is the time source status mode reads its deadlines by; nil means
 	// the real clock.
 	Clock PostLandClock
@@ -112,6 +134,20 @@ type PostLandRunner struct {
 	running bool
 	pending *PostLand
 	wg      sync.WaitGroup
+
+	// statusMu serializes the read-modify-write of the pending verdicts: a
+	// landing's Trigger records one while a worker pass polls them, and an
+	// unsynchronized pair of loads and saves would drop one.
+	statusMu sync.Mutex
+	// done holds the landed commits whose verdict or timeout already fired,
+	// so a store write that fails does not fire it again on the next pass.
+	// An entry leaves when its removal is saved.
+	done map[string]bool
+	// storeFailures counts the passes running that could not read or write
+	// the pending verdicts, and storeFailureRaised says the attention item is
+	// up; the next pass that reaches the store clears it.
+	storeFailures      int
+	storeFailureRaised bool
 }
 
 var _ PostLandTrigger = (*PostLandRunner)(nil)

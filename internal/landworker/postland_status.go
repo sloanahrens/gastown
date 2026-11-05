@@ -19,6 +19,17 @@ const PostLandStatusPollInterval = 30 * time.Second
 // timeout. Production passes merge_queue.post_land_timeout instead.
 const PostLandStatusDefaultTimeout = 60 * time.Minute
 
+// PostLandStatusReadTimeout bounds one status read on a worker pass, so a
+// stalled Forgejo cannot hold the pass: the read becomes an UNKNOWN and the
+// commit is read again on a later pass.
+const PostLandStatusReadTimeout = 10 * time.Second
+
+// PostLandStatusStoreFailureAfter is how many passes running may fail to read
+// or write the pending verdicts before the rig raises one attention item. Below
+// it a transient write error is retried silently; at it, the post-land safety
+// net is blind and nothing else would say so.
+const PostLandStatusStoreFailureAfter = 3
+
 // postLandPendingLimit is how many pending verdicts a rig keeps. The newest are
 // read; an older one is dropped with a log line.
 const postLandPendingLimit = 20
@@ -198,6 +209,28 @@ func (u PostLandUnknown) Summary() string {
 		short(u.SHA), u.Rig, u.Context, u.State)
 }
 
+// PostLandStoreFailure says the rig's pending-verdict store could not be read
+// or written for PostLandStatusStoreFailureAfter passes running: no verdict is
+// being reached, and the post-land safety net is blind until a pass reaches the
+// store again.
+type PostLandStoreFailure struct {
+	Rig string
+	// Error is the last failure, made safe for one line.
+	Error string
+}
+
+// Key is the attention queue's stable identity: one per rig, so a failure
+// raised again keeps the item it already has.
+func (f PostLandStoreFailure) Key() string {
+	return "post-land-store-failure:" + f.Rig
+}
+
+// Summary is the attention item's one line, naming the failure.
+func (f PostLandStoreFailure) Summary() string {
+	return fmt.Sprintf("the pending post-land verdicts for %s cannot be read or written, so no verdict is reached: %s",
+		f.Rig, f.Error)
+}
+
 // statusContext is the configured status-mode context, "" when status mode is
 // off.
 func (p *PostLandRunner) statusContext() string {
@@ -238,6 +271,8 @@ func (realPostLandClock) Now() time.Time { return time.Now() }
 // reads the status on a later pass. A verdict that cannot be recorded is
 // raised as UNKNOWN at once, so the silence is an attention item.
 func (p *PostLandRunner) recordPending(ctx context.Context, pl PostLand, name string) {
+	p.statusMu.Lock()
+	defer p.statusMu.Unlock()
 	now := p.statusClock().Now()
 	st, err := p.State.Load()
 	if err != nil {
@@ -276,31 +311,59 @@ func (p *PostLandRunner) unrecorded(ctx context.Context, pl PostLand, name strin
 // PollPending is one pass over the pending verdicts. It never waits: a pending
 // commit is read at most once per PostLandStatusPollInterval; a green or red
 // read fires its callback once and drops the entry; a commit still open at its
-// timeout raises one UNKNOWN and is dropped. The entries are saved before any
-// callback runs, so a verdict fires at most once, even across a restart.
+// timeout raises one UNKNOWN and is dropped. The callbacks fire before the
+// entries are removed and saved, so a daemon that stops between the two calls
+// them again for the same landing on the next pass, and each is idempotent per
+// rig and landed commit (see PostLandRunner).
+//
+// A store that cannot be read keeps every entry for the next pass instead of
+// reading the failure as no verdicts; after PostLandStatusStoreFailureAfter
+// passes running it raises one attention item keyed by rig, and the pass that
+// reaches the store again clears it. A store that cannot be written keeps the
+// entries and does not fire a verdict a second time.
 func (p *PostLandRunner) PollPending(ctx context.Context) {
 	if p.State == nil || ctx.Err() != nil {
 		return
 	}
+	p.statusMu.Lock()
+	defer p.statusMu.Unlock()
 	st, err := p.State.Load()
 	if err != nil {
-		p.logf("reading the pending post-land verdicts: %v", err)
-		return
-	}
-	if len(st.PostLandPending) == 0 {
+		p.storeFailure(ctx, fmt.Errorf("reading the main state: %w", err))
 		return
 	}
 	now := p.statusClock().Now()
 	timeout := p.statusTimeout()
+	entries := st.PostLandPending
+
+	// The list is bounded: an entry past the newest postLandPendingLimit is
+	// dropped with a log line, never silently.
+	changed := false
+	var decided []string
+	if over := len(entries) - postLandPendingLimit; over > 0 {
+		for _, e := range entries[:over] {
+			p.logf("dropping the pending verdict for %s (%s): the rig keeps the newest %d", short(e.Land.Commit), e.Land.by(), postLandPendingLimit)
+			// A dropped entry needs no done marker any more: its removal is
+			// what this save records.
+			decided = append(decided, e.Land.Commit)
+		}
+		entries = entries[over:]
+		changed = true
+	}
+
 	var keep []PendingPostLand
 	var fires []func()
-	changed := false
-	for _, e := range st.PostLandPending {
+	for _, e := range entries {
 		if ctx.Err() != nil {
 			keep = append(keep, e)
 			continue
 		}
 		pl, name := e.Land, e.Context
+		if p.done[pl.Commit] {
+			// Its verdict already fired; this pass only finishes the removal.
+			changed = true
+			continue
+		}
 		if p.Status != nil && (e.LastRead.IsZero() || now.Sub(e.LastRead) >= PostLandStatusPollInterval) {
 			res := p.readStatus(ctx, pl, name)
 			if ctx.Err() != nil {
@@ -309,6 +372,8 @@ func (p *PostLandRunner) PollPending(ctx context.Context) {
 			}
 			changed = true
 			if res.Verdict != PostLandStatusUnknown {
+				p.markDone(pl.Commit)
+				decided = append(decided, pl.Commit)
 				fires = append(fires, func() { p.fire(ctx, pl, name, res) })
 				continue
 			}
@@ -318,39 +383,113 @@ func (p *PostLandRunner) PollPending(ctx context.Context) {
 			e.LastRead, e.LastState, e.LastDescription = now, res.State, res.Description
 		}
 		if !now.Before(e.Since.Add(timeout)) {
+			p.markDone(pl.Commit)
+			decided = append(decided, pl.Commit)
 			last := PostLandStatusResult{State: e.LastState, Description: e.LastDescription}
 			if last.State == "" {
 				last.State = "unread"
 			}
-			changed = true
 			fires = append(fires, func() { p.raiseUnknown(ctx, pl, name, last) })
+			changed = true
 			continue
 		}
 		keep = append(keep, e)
 	}
 	if !changed {
-		return
-	}
-	st.PostLandPending = keep
-	if err := p.State.Save(st); err != nil {
-		// Nothing fires without its record, so the entries are read again on
-		// the next pass.
-		p.logf("saving the pending post-land verdicts: %v", err)
+		p.storeOK(ctx)
 		return
 	}
 	for _, fire := range fires {
 		fire()
 	}
+	if ctx.Err() != nil {
+		// The daemon is stopping mid-pass. The entries stay in the store for
+		// the restarted runner, and done keeps this process from deciding one
+		// of them again.
+		return
+	}
+	// Re-read before writing: the callbacks save this same main state (a green
+	// verdict records LastGreen there, for one), and this save must carry
+	// that through rather than write the state read before they ran.
+	fresh, err := p.State.Load()
+	if err != nil {
+		p.storeFailure(ctx, fmt.Errorf("reading the main state back: %w", err))
+		return
+	}
+	fresh.PostLandPending = keep
+	if err := p.State.Save(fresh); err != nil {
+		p.storeFailure(ctx, fmt.Errorf("saving the main state: %w", err))
+		return
+	}
+	for _, sha := range decided {
+		delete(p.done, sha)
+	}
+	p.storeOK(ctx)
 }
 
-// readStatus reads the landed commit's combined status once, with its text
-// made safe for a bead comment, an attention summary and a log line.
+// markDone records that commit's verdict or timeout already fired, so a store
+// write that fails does not fire it again on the next pass.
+func (p *PostLandRunner) markDone(commit string) {
+	if p.done == nil {
+		p.done = map[string]bool{}
+	}
+	p.done[commit] = true
+}
+
+// storeFailure counts a pass that could not read or write the pending verdicts,
+// keeping them for the next pass, and raises one attention item once
+// PostLandStatusStoreFailureAfter passes running have failed.
+func (p *PostLandRunner) storeFailure(ctx context.Context, err error) {
+	p.storeFailures++
+	p.logf("WARNING %s cannot reach the pending post-land verdicts (%d passes running); every entry is kept for the next pass: %v",
+		p.Rig, p.storeFailures, err)
+	if p.storeFailureRaised || p.storeFailures < PostLandStatusStoreFailureAfter {
+		return
+	}
+	p.storeFailureRaised = true
+	p.logf("the post-land safety net for %s is blind: its verdicts have not been stored for %d passes", p.Rig, p.storeFailures)
+	if p.OnStoreFailure != nil {
+		p.OnStoreFailure(ctx, &PostLandStoreFailure{
+			Rig:   p.Rig,
+			Error: sanitizeStatusText(err.Error()),
+		})
+	}
+}
+
+// storeOK records a pass that reached the store, and with it clears the
+// attention item a raised store failure left.
+func (p *PostLandRunner) storeOK(ctx context.Context) {
+	raised := p.storeFailureRaised
+	p.storeFailures, p.storeFailureRaised = 0, false
+	if !raised {
+		return
+	}
+	p.logf("%s reaches its pending post-land verdicts again; the store failure is cleared", p.Rig)
+	if p.OnStoreFailure != nil {
+		p.OnStoreFailure(ctx, nil)
+	}
+}
+
+// readStatus reads the landed commit's combined status once, bounded by
+// PostLandStatusReadTimeout, with its text made safe for a bead comment, an
+// attention summary and a log line.
 func (p *PostLandRunner) readStatus(ctx context.Context, pl PostLand, name string) PostLandStatusResult {
-	cs, err := p.Status(ctx, pl)
+	readCtx, cancel := context.WithTimeout(ctx, p.readTimeout())
+	defer cancel()
+	cs, err := p.Status(readCtx, pl)
 	res := postLandStatusRead(cs, err, name, pl.Commit)
 	res.State = sanitizeStatusText(res.State)
 	res.Description = sanitizeStatusText(res.Description)
 	return res
+}
+
+// readTimeout bounds one status read: a test's override, else
+// PostLandStatusReadTimeout.
+func (p *PostLandRunner) readTimeout() time.Duration {
+	if p.readTimeoutOverride > 0 {
+		return p.readTimeoutOverride
+	}
+	return PostLandStatusReadTimeout
 }
 
 // fire hands a decided read to the runner's callback: OnGreen for green, and

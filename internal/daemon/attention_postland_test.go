@@ -28,6 +28,14 @@ func TestCollectPostLandUnknown(t *testing.T) {
 	recorded.State, recorded.At = "missing", now.Add(-30*time.Minute)
 	f.d.postLandUnknowns.record(recorded, postLandUnknownWindow)
 
+	// The old record is gone from the store itself: the collector would filter
+	// an 8 day old record by its own window anyway, so only reading the store
+	// proves the pruning.
+	stored := f.d.postLandUnknowns.snapshot(time.Time{})
+	if len(stored) != 1 || stored[0].Key() != recorded.Key() {
+		t.Fatalf("store holds %+v, want only the newest record", stored)
+	}
+
 	items, err := f.src.collectPostLandUnknown(context.Background())
 	if err != nil {
 		t.Fatalf("collect: %v", err)

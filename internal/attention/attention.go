@@ -93,8 +93,9 @@ const (
 	// older than the patrol's maximum age (gt-cbsat).
 	KindBirdReportStale Kind = "bird-report-stale"
 	// KindPostLandUnknown: a landed commit's post-land status context never
-	// reached a verdict before its timeout, so CI stopped reporting and the
-	// post-land safety net is silent (gt-gg9hv.7.1).
+	// reached a verdict before its timeout, or the store that keeps those
+	// pending verdicts cannot be read or written, so the post-land safety net
+	// is silent (gt-gg9hv.7.1).
 	KindPostLandUnknown Kind = "post-land-unknown"
 )
 

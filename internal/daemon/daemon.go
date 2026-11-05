@@ -830,8 +830,11 @@ type Daemon struct {
 	postLandRuns atomic.Int32
 
 	// postLandUnknowns holds the landed commits whose post-land status context
-	// never reached a verdict, for the attention queue (gt-gg9hv.7.1).
-	postLandUnknowns postLandUnknownStore
+	// never reached a verdict, and postLandStoreFailures the rigs whose
+	// pending-verdict store could not be read or written, for the attention
+	// queue (gt-gg9hv.7.1).
+	postLandUnknowns      postLandUnknownStore
+	postLandStoreFailures postLandStoreFailureStore
 
 	// jsonlGitBackupRunning, wispReaperRunning, and checkpointDogRunning are
 	// the single-flight guards for their patrols, on their own goroutines —
