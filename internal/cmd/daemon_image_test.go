@@ -46,6 +46,9 @@ func newImageRig(t *testing.T) *imageRig {
 	if err := os.WriteFile(filepath.Join(gtSrc, daemonimage.DockerfilePath), []byte("FROM scratch\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(gtSrc, "deploy", "daemon", daemonimage.KnownHostsName), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	r := &imageRig{out: &bytes.Buffer{}}
 	r.flags = daemonImageFlags{
 		rev: imageTestRev, out: mk("out"), gtSrc: gtSrc, bdSrc: mk("beads"),
