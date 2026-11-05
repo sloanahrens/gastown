@@ -36,7 +36,7 @@ const hostAgentInterval = 60 * time.Second
 type hostAgentDeps struct {
 	findTownRoot func() (string, error)
 	run          func(ctx context.Context, townRoot string) error
-	install      func(townRoot string) (string, error)
+	install      func(townRoot string) ([]string, error)
 	out          io.Writer
 }
 
@@ -45,7 +45,7 @@ func realHostAgentDeps() hostAgentDeps {
 	return hostAgentDeps{
 		findTownRoot: workspace.FindFromCwdOrError,
 		run:          runHostAgent,
-		install: func(townRoot string) (string, error) {
+		install: func(townRoot string) ([]string, error) {
 			return installHostAgent(townRoot, realHostAgentInstallDeps())
 		},
 		out: os.Stdout,
@@ -98,16 +98,18 @@ stopped, and a non-zero exit would be read as a crash.`,
 func newHostAgentInstallCmd(d hostAgentDeps) *cobra.Command {
 	return &cobra.Command{
 		Use:   "install",
-		Short: "Render the host agent's launchd plist",
+		Short: "Render the host agent's launchd plists",
 		Long: `Render the host agent's launchd plist (label com.gastown.host-agent) and
-write it to ~/Library/LaunchAgents/com.gastown.host-agent.plist.
+one daily job for each Mac-only maintenance target, and write them to
+~/Library/LaunchAgents.
 
-It writes the file and stops there; loading the job is the operator's step,
-since a job loaded here would need a live run to prove.
+It writes the files and stops there; loading a job is the operator's step,
+since a job loaded here would need a live run to prove. A file whose content
+is unchanged is left untouched, so a second install rewrites nothing.
 
-It refuses a plist that already runs the agent for a different town: the
-label names one job on the host, and rewriting it would repoint the town it
-serves.`,
+It refuses a gt binary that go run leaves in the temp directory, and a plist
+that already serves a different town: a label names one job on the host, and
+rewriting it would repoint the town it serves.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runHostAgentInstallCommand(cmd.Context(), d)
@@ -148,12 +150,17 @@ func runHostAgentInstallCommand(_ context.Context, d hostAgentDeps) error {
 	if err != nil {
 		return err
 	}
-	path, err := d.install(townRoot)
+	paths, err := d.install(townRoot)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(d.out, "wrote %s\n\nThe job is written, not loaded. Load it with:\n  launchctl bootstrap gui/%d %s\n",
-		path, os.Getuid(), path)
+	for _, path := range paths {
+		fmt.Fprintf(d.out, "wrote %s\n", path)
+	}
+	fmt.Fprintf(d.out, "\nThe jobs are written, not loaded. Load them with:\n")
+	for _, path := range paths {
+		fmt.Fprintf(d.out, "  launchctl bootstrap gui/%d %s\n", os.Getuid(), path)
+	}
 	return nil
 }
 
@@ -287,23 +294,27 @@ func runHostAgentArgv(ctx context.Context, argv []string, command hostAgentComma
 // ones; a test points plistPath at a temporary directory and supplies the
 // write, so no test can write to the operator's LaunchAgents.
 type hostAgentInstallDeps struct {
-	goos      string
-	gtPath    func() (string, error)
-	tempDir   func() string
-	plistPath func() (string, error)
-	render    func(gtPath, townRoot string) (string, error)
-	writeFile func(path string, data []byte, perm os.FileMode) error
+	goos        string
+	gtPath      func() (string, error)
+	tempDir     func() string
+	plistPath   func() (string, error)
+	render      func(gtPath, townRoot string) (string, error)
+	renderMaint func(gtPath, townRoot string, job templates.MacMaintJob) (string, error)
+	readFile    func(path string) ([]byte, error)
+	writeFile   func(path string, data []byte, perm os.FileMode) error
 }
 
 // realHostAgentInstallDeps is the host's own: this OS, this binary, the
-// LaunchAgents path under the operator's home, and the embedded template.
+// LaunchAgents path under the operator's home, and the embedded templates.
 func realHostAgentInstallDeps() hostAgentInstallDeps {
 	return hostAgentInstallDeps{
-		goos:      runtime.GOOS,
-		gtPath:    os.Executable,
-		tempDir:   os.TempDir,
-		plistPath: templates.HostAgentPlistPath,
-		render:    templates.HostAgentPlist,
+		goos:        runtime.GOOS,
+		gtPath:      os.Executable,
+		tempDir:     os.TempDir,
+		plistPath:   templates.HostAgentPlistPath,
+		render:      templates.HostAgentPlist,
+		renderMaint: templates.MacMaintJobPlist,
+		readFile:    os.ReadFile,
 		// The plist is published by a rename, never written in place: launchd
 		// reads a job the moment its file appears, and a half-written one is a
 		// plist it cannot parse.
@@ -311,57 +322,113 @@ func realHostAgentInstallDeps() hostAgentInstallDeps {
 	}
 }
 
-// installHostAgent renders the host agent's plist for townRoot, writes it to
-// the LaunchAgents path and returns that path. It does not load the job.
+// installHostAgent renders the host agent's plist and one daily plist for each
+// Mac-only maint target, writes them to the LaunchAgents directory and returns
+// their paths, the agent's first. It does not load the jobs.
 //
-// It refuses four things. A host that is not macOS: the job is a launchd job,
+// It refuses four things. A host that is not macOS: the jobs are launchd jobs,
 // and a plist under ~/Library/LaunchAgents on another OS is a file nothing
-// reads. An empty town root, which would render a job that writes nowhere. A
-// gt binary in the temp directory, which is what `go run` leaves behind and
-// deletes, so the job would fail at every start once it is gone. And a plist
-// already installed for another town: the label names one job on the host, so
-// writing it for a second town would silently repoint the first town's agent,
-// whose daemon would then read a probe file nobody refreshes. Removing or
-// replacing that job is the operator's decision, not this command's.
-func installHostAgent(townRoot string, d hostAgentInstallDeps) (string, error) {
+// reads. An empty town root, which would render jobs that write nowhere. A gt
+// binary in the temp directory, which is what `go run` leaves behind and
+// deletes, so every job would fail at its start once it is gone. And a plist
+// already installed for another town: a label names one job on the host, so
+// writing it for a second town would silently repoint the first town's job.
+// Removing or replacing that job is the operator's decision, not this
+// command's.
+func installHostAgent(townRoot string, d hostAgentInstallDeps) ([]string, error) {
 	if townRoot == "" {
-		return "", errors.New("host agent install: no town root")
+		return nil, errors.New("host agent install: no town root")
 	}
 	if d.goos != "darwin" {
-		return "", fmt.Errorf("host agent install: the host agent is a launchd job and this host is %s", d.goos)
+		return nil, fmt.Errorf("host agent install: the host agent is a launchd job and this host is %s", d.goos)
 	}
-	path, err := d.plistPath()
+	agentPath, err := d.plistPath()
 	if err != nil {
-		return "", fmt.Errorf("host agent install: %w", err)
+		return nil, fmt.Errorf("host agent install: %w", err)
 	}
-	if err := hostAgentPlistFreeFor(path, townRoot); err != nil {
-		return "", err
+	if err := hostAgentPlistFreeFor(agentPath, townRoot); err != nil {
+		return nil, err
 	}
 	gtPath, err := d.gtPath()
 	if err != nil {
-		return "", fmt.Errorf("host agent install: finding the gt binary: %w", err)
+		return nil, fmt.Errorf("host agent install: finding the gt binary: %w", err)
 	}
 	if err := hostAgentRefuseATemporaryBinary(gtPath, d.tempDir()); err != nil {
-		return "", err
+		return nil, err
 	}
-	content, err := d.render(gtPath, townRoot)
+	agentContent, err := d.render(gtPath, townRoot)
 	if err != nil {
-		return "", fmt.Errorf("host agent install: %w", err)
+		return nil, fmt.Errorf("host agent install: %w", err)
 	}
 
-	// launchd opens the plist's StandardOutPath and StandardErrorPath before
+	// Every job this install writes: the agent's plist first, then one file
+	// per Mac-only maint target beside it. Each one is rendered and checked
+	// before any is written, so a plist that serves another town refuses the
+	// whole install rather than leaving half of it repointed.
+	type jobFile struct {
+		path    string
+		content string
+	}
+	// The maint plists live in the agent plist's own directory, so install
+	// needs no second host path to find them.
+	launchAgentsDir := filepath.Dir(agentPath)
+	jobs := []jobFile{{path: agentPath, content: agentContent}}
+	for _, job := range templates.MacMaintJobs() {
+		path := filepath.Join(launchAgentsDir, job.PlistName())
+		if err := hostAgentPlistFreeFor(path, townRoot); err != nil {
+			return nil, err
+		}
+		content, err := d.renderMaint(gtPath, townRoot, job)
+		if err != nil {
+			return nil, fmt.Errorf("host agent install: %w", err)
+		}
+		jobs = append(jobs, jobFile{path: path, content: content})
+	}
+
+	// launchd opens each plist's StandardOutPath and StandardErrorPath before
 	// the program runs, and a missing directory fails the job with EX_CONFIG
-	// (78), which launchctl cannot clear. Those paths are the probe file's
-	// directory, so creating both here also gives the agent's first write a
-	// directory to land in.
-	if err := hostAgentPrepareDirs(hostprobe.Path(townRoot), path); err != nil {
-		return "", fmt.Errorf("host agent install: %w", err)
+	// (78), which launchctl cannot clear. The agent and the maint jobs log
+	// under the probe file's directory, so creating it also gives the agent's
+	// first write a directory to land in.
+	dirs := []string{filepath.Dir(hostprobe.Path(townRoot))}
+	for _, job := range jobs {
+		dirs = append(dirs, filepath.Dir(job.path))
 	}
-	// 0644: launchd reads the file as the user, and a plist is not a secret.
-	if err := d.writeFile(path, []byte(content), 0o644); err != nil {
-		return "", fmt.Errorf("host agent install: writing %s: %w", path, err)
+	if err := hostAgentPrepareDirs(dirs...); err != nil {
+		return nil, fmt.Errorf("host agent install: %w", err)
 	}
-	return path, nil
+
+	paths := make([]string, len(jobs))
+	for i, job := range jobs {
+		// 0644: launchd reads the file as the user, and a plist is not a secret.
+		if err := hostAgentWriteIfChanged(d.readFile, d.writeFile, job.path, job.content); err != nil {
+			return nil, fmt.Errorf("host agent install: %w", err)
+		}
+		paths[i] = job.path
+	}
+	return paths, nil
+}
+
+// hostAgentWriteIfChanged writes content to path unless the file already holds
+// exactly it. launchd reads a job the moment its file changes, so a reinstall
+// that would write the same plist leaves the file alone instead of replacing
+// it under a running job.
+//
+// An existing file that cannot be read is reported rather than overwritten:
+// install cannot tell what it holds, and the free-for check that runs before
+// this one has already read it, so a failure here is a real one.
+func hostAgentWriteIfChanged(read func(string) ([]byte, error), write func(string, []byte, os.FileMode) error, path, content string) error {
+	existing, err := read(path)
+	switch {
+	case err == nil && string(existing) == content:
+		return nil
+	case err != nil && !os.IsNotExist(err):
+		return fmt.Errorf("reading %s: %w", path, err)
+	}
+	if err := write(path, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	return nil
 }
 
 // hostAgentRefuseATemporaryBinary refuses a gt path under tempDir. `go run`
@@ -396,10 +463,10 @@ func hostAgentCanonPath(p string) string {
 	return filepath.Clean(p)
 }
 
-// hostAgentPrepareDirs creates the directories install writes into: the probe
-// file's, where launchd opens the job's log, and the plist's.
-func hostAgentPrepareDirs(probePath, plistPath string) error {
-	for _, dir := range []string{filepath.Dir(probePath), filepath.Dir(plistPath)} {
+// hostAgentPrepareDirs creates every directory install writes into: the probe
+// file's, where launchd opens the agent's log, and each plist's.
+func hostAgentPrepareDirs(dirs ...string) error {
+	for _, dir := range dirs {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("creating %s: %w", dir, err)
 		}
@@ -407,10 +474,10 @@ func hostAgentPrepareDirs(probePath, plistPath string) error {
 	return nil
 }
 
-// hostAgentPlistFreeFor refuses a host agent plist at path that serves a
-// different town. A missing file is free. A file that exists but cannot be
-// read or names no town is refused too: not knowing which town a job serves
-// is not the same as knowing it serves this one.
+// hostAgentPlistFreeFor refuses a plist at path that serves a different town.
+// A missing file is free. A file that exists but cannot be read or names no
+// town is refused too: not knowing which town a job serves is not the same as
+// knowing it serves this one.
 func hostAgentPlistFreeFor(path, townRoot string) error {
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
@@ -423,7 +490,7 @@ func hostAgentPlistFreeFor(path, townRoot string) error {
 		return fmt.Errorf("host agent install: %w", err)
 	}
 	if !isFor {
-		return fmt.Errorf("host agent install: %s already runs the host agent for another town; boot the job out and remove it first: launchctl bootout gui/%d %s",
+		return fmt.Errorf("host agent install: %s already serves another town; boot the job out and remove it first: launchctl bootout gui/%d %s",
 			path, os.Getuid(), path)
 	}
 	return nil

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{{xml .Label}}</string>
+
+    <!-- One maintenance target the container daemon cannot run: this job
+         applies it from the Mac, where the docker context it needs exists.
+         No shell: the job runs the gt subcommand directly. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{xml .GTPath}}</string>
+        <string>maint</string>
+        <string>apply</string>
+        <string>{{xml .Target}}</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>{{xml .TownRoot}}</string>
+
+    <!-- Once a day at the table's local time, after the daemon patrol's own
+         04:30 window. A run missed while the Mac sleeps starts on wake. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>{{.Hour}}</integer>
+        <key>Minute</key>
+        <integer>{{.Minute}}</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>{{xml .LogPath}}</string>
+
+    <key>StandardErrorPath</key>
+    <string>{{xml .LogPath}}</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>GT_TOWN_ROOT</key>
+        <string>{{xml .TownRoot}}</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

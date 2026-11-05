@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -282,19 +283,20 @@ func TestRunHostAgentArgv_ReportsAFailedCommand(t *testing.T) {
 	}
 }
 
-// TestInstallHostAgent_WritesThePlist checks the file install leaves behind:
-// the render for the town it was given, at the path it was given, with the
-// probe directory launchd's log file needs.
+// TestInstallHostAgent_WritesThePlist checks the files install leaves behind:
+// the renders for the town it was given, at the paths it returned, with the
+// probe directory launchd's log files need.
 func TestInstallHostAgent_WritesThePlist(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	path := filepath.Join(t.TempDir(), "com.gastown.host-agent.plist")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "com.gastown.host-agent.plist")
 	got, err := installHostAgent(town, hostAgentInstallDepsFor(path, "darwin", templates.HostAgentPlist))
 	if err != nil {
 		t.Fatalf("installHostAgent: %v", err)
 	}
-	if got != path {
-		t.Errorf("installHostAgent = %q, want %q", got, path)
+	if len(got) == 0 || got[0] != path {
+		t.Fatalf("installHostAgent = %v, want %q first", got, path)
 	}
 
 	data, err := os.ReadFile(path)
@@ -308,16 +310,119 @@ func TestInstallHostAgent_WritesThePlist(t *testing.T) {
 	if string(data) != want {
 		t.Errorf("installed plist:\n%s\nwant:\n%s", data, want)
 	}
+	for i, job := range templates.MacMaintJobs() {
+		maintPath := filepath.Join(dir, job.PlistName())
+		if i+1 >= len(got) || got[i+1] != maintPath {
+			t.Errorf("installHostAgent = %v, want %q at index %d", got, maintPath, i+1)
+		}
+		if _, err := os.Stat(maintPath); err != nil {
+			t.Errorf("maint job plist %s after install: %v", maintPath, err)
+		}
+	}
 
-	// launchd opens the plist's StandardOutPath before the program runs and
+	// launchd opens the plists' StandardOutPath before the program runs and
 	// fails the job with EX_CONFIG if its directory is missing.
 	if _, err := os.Stat(filepath.Dir(hostprobe.Path(town))); err != nil {
 		t.Errorf("probe/log directory after install: %v", err)
 	}
 }
 
+// TestHostAgentInstallWritesBothJobs is the install's contract after the
+// daily maint job was added: beside the agent's plist, one plist is written
+// for every row of the job table, and install names every file it wrote.
+func TestHostAgentInstallWritesBothJobs(t *testing.T) {
+	t.Parallel()
+	town, dir := t.TempDir(), t.TempDir()
+	agentPath := filepath.Join(dir, templates.HostAgentLabel+".plist")
+	paths, err := installHostAgent(town, hostAgentInstallDepsFor(agentPath, "darwin", templates.HostAgentPlist))
+	if err != nil {
+		t.Fatalf("installHostAgent: %v", err)
+	}
+	jobs := templates.MacMaintJobs()
+	if len(jobs) == 0 {
+		t.Fatal("the maint job table has no rows")
+	}
+	if len(paths) != 1+len(jobs) {
+		t.Fatalf("installHostAgent reported %v, want the agent plist and %d maint job plists", paths, len(jobs))
+	}
+	if paths[0] != agentPath {
+		t.Errorf("installHostAgent reported %q first, want the agent plist %q", paths[0], agentPath)
+	}
+	for i, job := range jobs {
+		path := filepath.Join(dir, job.PlistName())
+		if paths[i+1] != path {
+			t.Errorf("installHostAgent reported %q at index %d, want %q", paths[i+1], i+1, path)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading the maint job plist %s: %v", path, err)
+		}
+		want, err := templates.MacMaintJobPlist(hostAgentTestGTPath, town, job)
+		if err != nil {
+			t.Fatalf("rendering the expected maint job plist: %v", err)
+		}
+		if string(data) != want {
+			t.Errorf("installed maint job plist:\n%s\nwant:\n%s", data, want)
+		}
+	}
+}
+
+// TestHostAgentInstallIsIdempotentForBothJobs checks the two install rules the
+// daily job shares with the agent's: an unchanged file is left alone on a
+// second run, and the temporary-binary refusal stops the whole install, so no
+// job is written from a binary that will vanish.
+func TestHostAgentInstallIsIdempotentForBothJobs(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a second install with unchanged content writes nothing", func(t *testing.T) {
+		t.Parallel()
+		town, dir := t.TempDir(), t.TempDir()
+		agentPath := filepath.Join(dir, templates.HostAgentLabel+".plist")
+		d := hostAgentInstallDepsFor(agentPath, "darwin", templates.HostAgentPlist)
+		realWrite := d.writeFile
+		writes := 0
+		d.writeFile = func(p string, data []byte, perm os.FileMode) error {
+			writes++
+			return realWrite(p, data, perm)
+		}
+		first, err := installHostAgent(town, d)
+		if err != nil {
+			t.Fatalf("the first installHostAgent: %v", err)
+		}
+		wantFirst := 1 + len(templates.MacMaintJobs())
+		if writes != wantFirst {
+			t.Fatalf("the first install wrote %d files, want %d", writes, wantFirst)
+		}
+		writes = 0
+		second, err := installHostAgent(town, d)
+		if err != nil {
+			t.Fatalf("the second installHostAgent: %v", err)
+		}
+		if writes != 0 {
+			t.Errorf("the second install wrote %d files, want none with unchanged content", writes)
+		}
+		if strings.Join(first, "\n") != strings.Join(second, "\n") {
+			t.Errorf("the two installs reported different files: %v then %v", first, second)
+		}
+	})
+
+	t.Run("a temporary binary is refused for both", func(t *testing.T) {
+		t.Parallel()
+		town, dir := t.TempDir(), t.TempDir()
+		agentPath := filepath.Join(dir, templates.HostAgentLabel+".plist")
+		d := hostAgentInstallDepsFor(agentPath, "darwin", templates.HostAgentPlist)
+		d.gtPath = func() (string, error) { return hostAgentTestTempDir + "/go-build1/b001/exe/gt", nil }
+		if _, err := installHostAgent(town, d); err == nil {
+			t.Fatal("installHostAgent with a temporary gt = nil, want a refusal")
+		}
+		if names := hostAgentDirNames(t, dir); len(names) != 0 {
+			t.Errorf("a refused install wrote %v, want no job at all", names)
+		}
+	})
+}
+
 // TestInstallHostAgent_ReplacesItsOwnTownsPlist is the reinstall: a file that
-// already serves this town is rewritten, not refused.
+// already serves this town is accepted, not refused.
 func TestInstallHostAgent_ReplacesItsOwnTownsPlist(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -335,30 +440,65 @@ func TestInstallHostAgent_ReplacesItsOwnTownsPlist(t *testing.T) {
 	}
 }
 
-// TestInstallHostAgent_RefusesAPlistForAnotherTown covers the mismatch: the
-// label names one job on the host, so a plist serving another town is refused
-// and left untouched rather than silently repointed.
+// TestInstallHostAgent_RefusesAPlistForAnotherTown covers the mismatch: a
+// label names one job on the host, so an agent or maint plist serving another
+// town is refused and left untouched rather than silently repointed.
 func TestInstallHostAgent_RefusesAPlistForAnotherTown(t *testing.T) {
 	t.Parallel()
 	live, scratch := t.TempDir(), t.TempDir()
-	path := filepath.Join(t.TempDir(), "com.gastown.host-agent.plist")
-	existing, err := templates.HostAgentPlist(hostAgentTestGTPath, live)
-	if err != nil {
-		t.Fatalf("rendering the existing plist: %v", err)
-	}
-	if err := os.WriteFile(path, []byte(existing), 0o644); err != nil {
-		t.Fatalf("writing the existing plist: %v", err)
-	}
+	for _, tc := range []struct {
+		name string
+		file func(t *testing.T, dir string) (string, string)
+	}{
+		{
+			name: "the agent plist",
+			file: func(t *testing.T, dir string) (string, string) {
+				t.Helper()
+				content, err := templates.HostAgentPlist(hostAgentTestGTPath, live)
+				if err != nil {
+					t.Fatalf("rendering the existing plist: %v", err)
+				}
+				return filepath.Join(dir, templates.HostAgentLabel+".plist"), content
+			},
+		},
+		{
+			name: "a maint job plist",
+			file: func(t *testing.T, dir string) (string, string) {
+				t.Helper()
+				job := templates.MacMaintJobs()[0]
+				content, err := templates.MacMaintJobPlist(hostAgentTestGTPath, live, job)
+				if err != nil {
+					t.Fatalf("rendering the existing maint plist: %v", err)
+				}
+				return filepath.Join(dir, job.PlistName()), content
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			agentPath := filepath.Join(dir, templates.HostAgentLabel+".plist")
+			foreignPath, existing := tc.file(t, dir)
+			if err := os.WriteFile(foreignPath, []byte(existing), 0o644); err != nil {
+				t.Fatalf("writing the existing plist: %v", err)
+			}
 
-	if _, err := installHostAgent(scratch, hostAgentInstallDepsFor(path, "darwin", templates.HostAgentPlist)); err == nil {
-		t.Fatal("installHostAgent over another town's plist = nil, want a refusal")
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading the untouched plist: %v", err)
-	}
-	if string(data) != existing {
-		t.Errorf("the refused install rewrote another town's plist:\n%s", data)
+			if _, err := installHostAgent(scratch, hostAgentInstallDepsFor(agentPath, "darwin", templates.HostAgentPlist)); err == nil {
+				t.Fatal("installHostAgent over another town's plist = nil, want a refusal")
+			}
+			data, err := os.ReadFile(foreignPath)
+			if err != nil {
+				t.Fatalf("reading the untouched plist: %v", err)
+			}
+			if string(data) != existing {
+				t.Errorf("the refused install rewrote another town's plist:\n%s", data)
+			}
+			// In the agent-plist case agentPath is the foreign file the check
+			// above already compared; otherwise a refused install writes nothing.
+			if _, err := os.Stat(agentPath); err == nil && agentPath != foreignPath {
+				t.Errorf("a refused install wrote the agent plist %s", agentPath)
+			}
+		})
 	}
 }
 
@@ -441,9 +581,23 @@ func TestInstallHostAgent_RefusesWhenItCannotFindItsParts(t *testing.T) {
 			broken:   func(d *hostAgentInstallDeps) { d.gtPath = func() (string, error) { return "", boom } },
 		},
 		{
-			name:     "render fails",
+			name:     "agent render fails",
 			townRoot: func(t *testing.T) string { return t.TempDir() },
 			broken:   func(d *hostAgentInstallDeps) { d.render = func(string, string) (string, error) { return "", boom } },
+		},
+		{
+			name:     "maint render fails",
+			townRoot: func(t *testing.T) string { return t.TempDir() },
+			broken: func(d *hostAgentInstallDeps) {
+				d.renderMaint = func(string, string, templates.MacMaintJob) (string, error) { return "", boom }
+			},
+		},
+		{
+			// install cannot tell what an unreadable file holds, so it reports
+			// the read instead of overwriting a job it cannot inspect.
+			name:     "an existing plist cannot be read",
+			townRoot: func(t *testing.T) string { return t.TempDir() },
+			broken:   func(d *hostAgentInstallDeps) { d.readFile = func(string) ([]byte, error) { return nil, boom } },
 		},
 		{
 			name:     "town root under a file",
@@ -474,17 +628,37 @@ func TestInstallHostAgent_RefusesWhenItCannotFindItsParts(t *testing.T) {
 }
 
 // TestInstallHostAgent_ReportsAPlistItCannotWrite: a write that fails is
-// reported, not swallowed into a success. The write is the dep, so the failure
-// is the test's own rather than one that depends on the mode of a file and
-// whether the test runs as root.
+// reported, not swallowed into a success, whether it fails on the agent's
+// plist or on a maint job's. The write is the dep, so the failure is the
+// test's own rather than one that depends on the mode of a file and whether
+// the test runs as root.
 func TestInstallHostAgent_ReportsAPlistItCannotWrite(t *testing.T) {
 	t.Parallel()
-	town := t.TempDir()
-	path := filepath.Join(t.TempDir(), "com.gastown.host-agent.plist")
-	d := hostAgentInstallDepsFor(path, "darwin", templates.HostAgentPlist)
-	d.writeFile = func(string, []byte, os.FileMode) error { return errors.New("read-only file system") }
-	if _, err := installHostAgent(town, d); err == nil {
-		t.Fatal("installHostAgent with a failing write = nil, want the error")
+	for _, tc := range []struct {
+		name   string
+		failOn int
+	}{
+		{name: "the agent plist", failOn: 0},
+		{name: "a maint job plist", failOn: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			path := filepath.Join(t.TempDir(), "com.gastown.host-agent.plist")
+			d := hostAgentInstallDepsFor(path, "darwin", templates.HostAgentPlist)
+			realWrite := d.writeFile
+			calls := 0
+			d.writeFile = func(p string, data []byte, perm os.FileMode) error {
+				if calls == tc.failOn {
+					return errors.New("read-only file system")
+				}
+				calls++
+				return realWrite(p, data, perm)
+			}
+			if _, err := installHostAgent(town, d); err == nil {
+				t.Fatal("installHostAgent with a failing write = nil, want the error")
+			}
+		})
 	}
 }
 
@@ -522,36 +696,44 @@ func TestInstallHostAgent_RefusesATemporaryBinary(t *testing.T) {
 	}
 }
 
-// TestInstallHostAgent_PublishesThePlistByReplacement: a reinstall reaches the
-// plist as a new file rather than a rewrite of the one launchd may be reading,
-// and it leaves no temporary beside it. The write is production's own, so this
-// is also the test that goes red if install is wired back to a plain write.
+// TestInstallHostAgent_PublishesThePlistByReplacement: a reinstall whose
+// content changed reaches the plist as a new file rather than a rewrite of the
+// one launchd may be reading, and it leaves no temporary beside it. The write
+// is production's own, so this is also the test that goes red if install is
+// wired back to a plain write.
 func TestInstallHostAgent_PublishesThePlistByReplacement(t *testing.T) {
 	t.Parallel()
 	town, dir := t.TempDir(), t.TempDir()
 	path := filepath.Join(dir, "com.gastown.host-agent.plist")
-	var first os.FileInfo
-	for i := range 2 {
-		if _, err := installHostAgent(town, hostAgentInstallDepsFor(path, "darwin", templates.HostAgentPlist)); err != nil {
+	var first, second os.FileInfo
+	for i, gtPath := range []string{"/usr/local/bin/gt", "/opt/gt/bin/gt"} {
+		// A different binary changes every job's content without changing the
+		// town, so the reinstall is not the refused case.
+		d := hostAgentInstallDepsFor(path, "darwin", templates.HostAgentPlist)
+		d.gtPath = func() (string, error) { return gtPath, nil }
+		if _, err := installHostAgent(town, d); err != nil {
 			t.Fatalf("install %d: %v", i+1, err)
 		}
-		if i == 0 {
-			info, err := os.Stat(path)
-			if err != nil {
-				t.Fatalf("stat after the first install: %v", err)
-			}
-			first = info
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat after install %d: %v", i+1, err)
 		}
-	}
-	second, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat after the second install: %v", err)
+		if i == 0 {
+			first = info
+		} else {
+			second = info
+		}
 	}
 	if os.SameFile(first, second) {
 		t.Error("the second install rewrote the plist in place, so a reader during it could have seen a partial job")
 	}
-	if names := hostAgentDirNames(t, dir); len(names) != 1 || names[0] != filepath.Base(path) {
-		t.Errorf("directory after two installs holds %v, want only the plist", names)
+	want := []string{filepath.Base(path)}
+	for _, job := range templates.MacMaintJobs() {
+		want = append(want, job.PlistName())
+	}
+	sort.Strings(want)
+	if names := hostAgentDirNames(t, dir); strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Errorf("directory after two installs holds %v, want only the jobs %v", names, want)
 	}
 }
 
@@ -608,9 +790,9 @@ func TestRunHostAgentCommand_RunsTheLoopForTheResolvedTown(t *testing.T) {
 			ranTown = townRoot
 			return nil
 		},
-		install: func(string) (string, error) {
+		install: func(string) ([]string, error) {
 			t.Error("install ran for a run command")
-			return "", nil
+			return nil, nil
 		},
 		out: io.Discard,
 	}
@@ -632,7 +814,7 @@ func TestRunHostAgentCommand_RefusesOutsideATown(t *testing.T) {
 			t.Error("the loop ran with no town root")
 			return nil
 		},
-		install: func(string) (string, error) { return "", nil },
+		install: func(string) ([]string, error) { return nil, nil },
 		out:     io.Discard,
 	}
 	if err := runHostAgentCommand(context.Background(), d); err == nil {
@@ -641,25 +823,30 @@ func TestRunHostAgentCommand_RefusesOutsideATown(t *testing.T) {
 }
 
 // TestRunHostAgentInstallCommand_ReportsTheWrittenPlist checks what the
-// operator sees: the path install returned and the command that loads it.
+// operator sees: every path install returned and the command that loads each
+// of them.
 func TestRunHostAgentInstallCommand_ReportsTheWrittenPlist(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
 	const path = "/home/toast/Library/LaunchAgents/com.gastown.host-agent.plist"
+	const maintPath = "/home/toast/Library/LaunchAgents/com.gastown.host-maint-nodes.plist"
 	d := hostAgentDeps{
 		findTownRoot: func() (string, error) { return "/towns/live", nil },
 		run:          func(context.Context, string) error { return nil },
-		install:      func(townRoot string) (string, error) { return path, nil },
+		install:      func(townRoot string) ([]string, error) { return []string{path, maintPath}, nil },
 		out:          &out,
 	}
 	if err := runHostAgentInstallCommand(context.Background(), d); err != nil {
 		t.Fatalf("runHostAgentInstallCommand: %v", err)
 	}
-	if !strings.Contains(out.String(), path) {
-		t.Errorf("install output does not name %s:\n%s", path, out.String())
-	}
-	if !strings.Contains(out.String(), "launchctl bootstrap") {
-		t.Errorf("install output does not tell the operator how to load the job:\n%s", out.String())
+	for _, want := range []string{path, maintPath} {
+		if !strings.Contains(out.String(), "wrote "+want+"\n") {
+			t.Errorf("install output does not report writing %s:\n%s", want, out.String())
+		}
+		bootstrap := fmt.Sprintf("launchctl bootstrap gui/%d %s", os.Getuid(), want)
+		if !strings.Contains(out.String(), bootstrap) {
+			t.Errorf("install output does not tell the operator to run %q:\n%s", bootstrap, out.String())
+		}
 	}
 }
 
@@ -670,9 +857,9 @@ func TestRunHostAgentInstallCommand_RefusesOutsideATown(t *testing.T) {
 	d := hostAgentDeps{
 		findTownRoot: func() (string, error) { return "", errors.New("no town here") },
 		run:          func(context.Context, string) error { return nil },
-		install: func(string) (string, error) {
+		install: func(string) ([]string, error) {
 			t.Error("install ran with no town root")
-			return "", nil
+			return nil, nil
 		},
 		out: io.Discard,
 	}
@@ -689,7 +876,7 @@ func TestRunHostAgentInstallCommand_ReportsAnInstallFailure(t *testing.T) {
 	d := hostAgentDeps{
 		findTownRoot: func() (string, error) { return "/towns/live", nil },
 		run:          func(context.Context, string) error { return nil },
-		install:      func(string) (string, error) { return "", errors.New("refused") },
+		install:      func(string) ([]string, error) { return nil, errors.New("refused") },
 		out:          &out,
 	}
 	if err := runHostAgentInstallCommand(context.Background(), d); err == nil {
