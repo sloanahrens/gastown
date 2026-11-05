@@ -504,7 +504,7 @@ func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDu
 	// raised before anything that can refuse the plan: a disk too full to keep
 	// pruning, or a keep the patrol cannot decide, must not silence them.
 	readings := s.readDisks(ctx)
-	d.applyDiskAlerts(readings)
+	d.applyDiskAlerts(readings, now)
 
 	// The cache trim is independent of the targets: it trims the claim the
 	// sandbox profiles mount, so it runs when its interval is due whether or not

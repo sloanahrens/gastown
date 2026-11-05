@@ -48,11 +48,14 @@ const (
 )
 
 // hostStackContainers are the containers that must always be running: the
-// Forgejo stack the landing pipeline depends on.
+// Forgejo stack the landing pipeline depends on. Dolt is listed through
+// hostprobe.DockerDiskContainer, the container the disk patrol measures too:
+// the runner container this list used to name was retired with the Docker
+// Forgejo stack (gt-gg9hv.35; the rest of the list's rewrite is gt-gg9hv.36).
 var hostStackContainers = []string{
 	"forgejo-forgejo-1",
 	"forgejo-db-1",
-	"forgejo-runner-daemon-1",
+	hostprobe.DockerDiskContainer,
 	"forgejo-docker-in-docker-1",
 }
 

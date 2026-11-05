@@ -266,33 +266,27 @@ func hostAgentWithLaunchd(ctx context.Context, p hostprobe.Probes, read template
 	return p
 }
 
-// hostAgentDoltContainer is the Docker Desktop container whose disk the agent
-// measures. gt-dolt is the container the town cannot run without, so it is
-// present whenever the town is; the runner container the patrol used to name is
-// removed between jobs (gt-gg9hv.24).
-const hostAgentDoltContainer = "gt-dolt"
-
 // hostAgentDockerDiskTimeout bounds the docker exec, as hostprobe bounds each of
 // its own field reads: a docker that hangs must not hold the whole reading.
 const hostAgentDockerDiskTimeout = 30 * time.Second
 
 // hostAgentWithDockerDisk fills the reading's Docker Desktop disk from the df of
-// hostAgentDoltContainer, through the agent's runner. A container daemon cannot
-// run docker against the host, so this field is how it learns the use of the
-// disk a container it depends on lives on. A failed read or output that names no
-// capacity sets the field's Err and leaves Value zero, so the daemon omits the
-// disk rather than reading it as empty.
+// hostprobe.DockerDiskContainer, through the agent's runner. A container daemon
+// cannot run docker against the host, so this field is how it learns the use of
+// the disk a container it depends on lives on. A failed read or output that
+// names no capacity sets the field's Err and leaves Value zero, so the daemon
+// omits the disk rather than reading it as empty.
 func hostAgentWithDockerDisk(ctx context.Context, p hostprobe.Probes, run hostprobe.Runner) hostprobe.Probes {
 	ctx, cancel := context.WithTimeout(ctx, hostAgentDockerDiskTimeout)
 	defer cancel()
-	out, err := run(ctx, []string{"docker", "exec", hostAgentDoltContainer, "df", "-P", "/"})
+	out, err := run(ctx, []string{"docker", "exec", hostprobe.DockerDiskContainer, "df", "-P", "/"})
 	if err != nil {
-		p.DockerDisk = hostprobe.Field[hostprobe.Disk]{Err: fmt.Sprintf("docker exec %s df: %v", hostAgentDoltContainer, err)}
+		p.DockerDisk = hostprobe.Field[hostprobe.Disk]{Err: fmt.Sprintf("docker exec %s df: %v", hostprobe.DockerDiskContainer, err)}
 		return p
 	}
 	pct, err := disks.ParseDF(string(out))
 	if err != nil {
-		p.DockerDisk = hostprobe.Field[hostprobe.Disk]{Err: fmt.Sprintf("docker exec %s df: %v", hostAgentDoltContainer, err)}
+		p.DockerDisk = hostprobe.Field[hostprobe.Disk]{Err: fmt.Sprintf("docker exec %s df: %v", hostprobe.DockerDiskContainer, err)}
 		return p
 	}
 	p.DockerDisk = hostprobe.Field[hostprobe.Disk]{Value: hostprobe.Disk{UsedPct: pct}}

@@ -10,15 +10,19 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/diskmaint"
+	"github.com/steveyegge/gastown/internal/hostprobe"
 )
 
 // Compile-time check that the civol target satisfies the diskmaint contract.
 var _ diskmaint.Target = (*Target)(nil)
 
-// Defaults for the containers and image the CI runner runs under.
+// Defaults for the containers and image the CI runner runs under. The runner
+// container was retired with the Docker Forgejo stack, so the default is the
+// Docker Desktop container the town cannot run without: it lives on the same
+// disk, and it is the one hostprobe names for that disk (gt-gg9hv.35).
 const (
 	defaultDind   = "forgejo-docker-in-docker-1"
-	defaultRunner = "forgejo-runner-daemon-1"
+	defaultRunner = hostprobe.DockerDiskContainer
 	defaultImage  = "ci-base:latest"
 )
 
@@ -82,8 +86,10 @@ var (
 
 // Config is what the civol target needs to read the CI volumes and plan a trim.
 type Config struct {
-	// Dind and Runner are the docker-in-docker and runner container names; a
-	// blank field takes the default the CI runner uses.
+	// Dind and Runner are the docker-in-docker container name and the
+	// container whose df measures the Docker Desktop disk; a blank Runner
+	// takes hostprobe.DockerDiskContainer, the container the host agent's
+	// probe measures.
 	Dind, Runner string
 	// Image is the container image that reads and trims the volumes; a blank
 	// field takes ci-base:latest.
@@ -123,8 +129,8 @@ func NewTarget(cfg Config) *Target {
 // Name is the target's name in plans and ledger entries.
 func (t *Target) Name() string { return planTarget }
 
-// Measure reports the runner container's disk as df -P reads it. An unreadable
-// df is an error, never a zero measurement.
+// Measure reports the Docker Desktop disk as df -P reads it in the runner
+// container. An unreadable df is an error, never a zero measurement.
 func (t *Target) Measure(ctx context.Context) (diskmaint.Measurement, error) {
 	if t.cfg.Run == nil {
 		return diskmaint.Measurement{}, errNoRunner

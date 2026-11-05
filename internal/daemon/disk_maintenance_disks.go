@@ -40,9 +40,11 @@ const (
 	diskMaintDiskColima        = "colima"
 	diskMaintDiskDockerDesktop = "docker-desktop"
 
-	// diskMaintRunnerContainer is the container whose root filesystem is the
-	// Docker Desktop disk the CI runner fills; deploy creates it.
-	diskMaintRunnerContainer = "forgejo-runner-daemon-1"
+	// diskMaintStillUnreadableInterval is how often the patrol logs that an
+	// open unreadable alert's disk still cannot be read. The alert itself
+	// fires once per outage, so this line is what tells an operator reading the
+	// daemon log that the outage has not ended.
+	diskMaintStillUnreadableInterval = time.Hour
 )
 
 // DFReader runs one disk's read and returns the output its parser reads. A
@@ -89,8 +91,10 @@ func (d *Daemon) diskMaintDisks(kubeconfig string) []diskMaintDisk {
 	return []diskMaintDisk{
 		{name: diskMaintDiskMac, df: d.diskMaintDF("df", "-P", "/")},
 		colima,
+		// The container is the host agent's: both readings measure one disk, so
+		// they must name the same container (hostprobe.DockerDiskContainer).
 		{name: diskMaintDiskDockerDesktop, df: d.diskMaintDF("docker", "exec",
-			diskMaintRunnerContainer, "df", "-P", "/")},
+			hostprobe.DockerDiskContainer, "df", "-P", "/")},
 	}
 }
 
@@ -273,12 +277,17 @@ func (d *Daemon) diskMaintHostReadings(watched []diskMaintDisk, injected map[str
 	return readings, nil
 }
 
-// diskMaintAlerts is the patrol's memory of the disk alert keys it has open.
+// diskMaintAlerts is the patrol's memory of the disk alert keys it has open,
+// and of when it last logged that each open unreadable key is still unreadable.
 // A pass writes it and the next pass reads it, one pass at a time, but the
 // mutex keeps the read off a pass that has not settled yet.
 type diskMaintAlerts struct {
 	mu     sync.Mutex
 	active map[string]bool
+	// stillLogged is the pass time of the last "still unreadable" line for a
+	// key, or of the pass that first saw its disk unreadable. The clear forgets
+	// it, so a new outage starts its own hour.
+	stillLogged map[string]time.Time
 }
 
 // snapshot returns a copy of the open keys, which is what disks.Evaluate
@@ -299,6 +308,7 @@ func (a *diskMaintAlerts) mark(key string, open bool) {
 	defer a.mu.Unlock()
 	if !open {
 		delete(a.active, key)
+		delete(a.stillLogged, key)
 		return
 	}
 	if a.active == nil {
@@ -307,26 +317,73 @@ func (a *diskMaintAlerts) mark(key string, open bool) {
 	a.active[key] = true
 }
 
+// stillUnreadableDue reports whether the patrol may log that key is still
+// unreadable at now, recording now when it may. The raise itself is the first
+// notice, so an ongoing outage is repeated only after
+// diskMaintStillUnreadableInterval.
+func (a *diskMaintAlerts) stillUnreadableDue(key string, now time.Time) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if last, ok := a.stillLogged[key]; ok && now.Sub(last) < diskMaintStillUnreadableInterval {
+		return false
+	}
+	if a.stillLogged == nil {
+		a.stillLogged = map[string]time.Time{}
+	}
+	a.stillLogged[key] = now
+	return true
+}
+
+// recordUnreadableRaised starts the repeat clock at the pass that tried to
+// raise the alert, so the first reminder comes one interval later. It reports
+// whether it replaced an earlier clock: a raise the notifier refused is retried
+// on the next pass, and that retry is a reset the operator must be told about,
+// because it means the hour starts again.
+func (a *diskMaintAlerts) recordUnreadableRaised(key string, now time.Time) (again bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.stillLogged == nil {
+		a.stillLogged = map[string]time.Time{}
+	}
+	_, again = a.stillLogged[key]
+	a.stillLogged[key] = now
+	return again
+}
+
 // applyDiskAlerts raises and clears the alerts the readings call for, and
 // records only the ones that landed. A raise the notifier refused stays
 // unrecorded, so the next pass raises it again rather than treating a silence
 // as an open alert; a clear that failed leaves its key open for the same
 // reason.
-func (d *Daemon) applyDiskAlerts(readings []disks.Reading) {
+//
+// An unreadable disk raises its alert once per outage. While that alert stays
+// open the pass logs the still-unreadable line at most once an hour, so an
+// outage that lasts is visible without a repeat alert. A raise the notifier
+// refused is retried on the next pass, and each retry restarts the hour; the
+// retry gets its own line so those restarts are not silent.
+func (d *Daemon) applyDiskAlerts(readings []disks.Reading, now time.Time) {
 	for _, alert := range disks.Evaluate(readings, d.diskMaintAlerts.snapshot()) {
 		switch {
 		case alert.Raise:
-			if err := d.escalateAlertErr(alert.Key, diskMaintAlertSource, alert.Detail); err != nil {
+			err := d.escalateAlertErr(alert.Key, diskMaintAlertSource, alert.Detail)
+			if err != nil {
 				d.logger.Printf("disk_maintenance: alert %s was not delivered: %v", alert.Key, err)
-				continue
+			} else {
+				d.diskMaintAlerts.mark(alert.Key, true)
 			}
-			d.diskMaintAlerts.mark(alert.Key, true)
+			if alert.Unreadable && d.diskMaintAlerts.recordUnreadableRaised(alert.Key, now) {
+				d.logger.Printf("disk_maintenance: disk %s still unreadable, alert raised again", alert.Name)
+			}
 		case alert.Clear:
 			if err := d.clearAlertsErr(alert.Detail, alert.Key); err != nil {
 				d.logger.Printf("disk_maintenance: alert %s was not cleared: %v", alert.Key, err)
 				continue // still open, and the next pass clears it again
 			}
 			d.diskMaintAlerts.mark(alert.Key, false)
+		case alert.Still:
+			if d.diskMaintAlerts.stillUnreadableDue(alert.Key, now) {
+				d.logger.Printf("disk_maintenance: %s", alert.Detail)
+			}
 		}
 	}
 }
