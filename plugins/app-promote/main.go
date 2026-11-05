@@ -6,8 +6,8 @@
 //
 // It is the entry point plugin.md's [execution] block names, and the daemon
 // execs it directly. A run exits 0 with or without a promotion, and exits 1
-// naming each rig gt promote failed on, one line each, which is what the plugin
-// contract records and escalates (internal/daemon/plugin_script.go).
+// naming each failed rig, one line each, which is what the plugin contract
+// records and escalates (internal/daemon/plugin_script.go).
 package main
 
 import (
@@ -172,7 +172,7 @@ func promoteAll(e env) error {
 	f := forgejo{apiURL: apiURL(e.getenv), token: token, do: e.do}
 
 	checked, promoted := 0, 0
-	var failed []*promoteFailure
+	var failed []error
 	for _, line := range rigLines(string(list)) {
 		rig, repo, job := splitRig(line)
 		if rig == "" || repo == "" {
@@ -183,16 +183,12 @@ func promoteAll(e env) error {
 		}
 		checked++
 		didPromote, err := promoteRig(e, f, townRoot, rig, repo, job)
-		// A rig gt promote failed on does not stop the others: the failures are
-		// reported together after the last rig. A read that failed stops the run,
-		// because the rigs after it would be gated on the same broken source.
-		var refusal *promoteFailure
-		if errors.As(err, &refusal) {
-			failed = append(failed, refusal)
-			continue
-		}
+		// A rig that fails does not stop the others, whatever failed it: a gt promote
+		// refusal or a Forgejo read. The failures are reported together after the
+		// last rig, so an earlier failure is never dropped (gt-lym1z).
 		if err != nil {
-			return err
+			failed = append(failed, fmt.Errorf("rig %s: %w", rig, err))
+			continue
 		}
 		if didPromote {
 			promoted++
@@ -221,10 +217,10 @@ func promoteAll(e env) error {
 }
 
 // promoteRig advances one rig's GitHub main when the gate allows it, and reports
-// whether it promoted. A gate that finds nothing, and a refusal gt promote
-// documents as retryable, are logged and are this run's nothing-to-do; any other
-// failure of gt promote is returned as a *promoteFailure naming the rig, so the
-// run exits non-zero.
+// whether it promoted. A gate that finds nothing, and a routine refusal of gt
+// promote (routineSkip), are logged and are this run's nothing-to-do. Every other
+// outcome is returned as an error, a *promoteFailure for a gt promote refusal,
+// which promoteAll names against the rig so the run exits non-zero.
 func promoteRig(e env, f forgejo, townRoot, rig, repo, job string) (bool, error) {
 	rel, found, err := f.findRelease(repo)
 	if err != nil {
@@ -291,21 +287,20 @@ func promoteRig(e env, f forgejo, townRoot, rig, repo, job string) (bool, error)
 		e.log("%s", cause)
 		return false, nil
 	}
-	return false, &promoteFailure{rig: rig, sha: rel.sha, code: code, cause: cause}
+	return false, &promoteFailure{sha: rel.sha, code: code, cause: cause}
 }
 
-// promoteFailure is one rig's hard failure of gt promote: the rig, its exit code
-// and the cause line, so promoteAll can name every failed rig in one error, one
-// line each (gt-lym1z).
+// promoteFailure is one hard failure of gt promote: the sha it refused, its exit
+// code and the cause line. promoteAll names the rig it belongs to, so the run
+// reports every failed rig in one error, one line each (gt-lym1z).
 type promoteFailure struct {
-	rig   string
 	sha   string
 	code  int
 	cause string
 }
 
 func (f *promoteFailure) Error() string {
-	return fmt.Sprintf("rig %s: gt promote --sha %s exited %d: %s", f.rig, f.sha, f.code, f.cause)
+	return fmt.Sprintf("gt promote --sha %s exited %d: %s", f.sha, f.code, f.cause)
 }
 
 // log prints one run line under the plugin's name, on stdout, which is where the
@@ -691,11 +686,11 @@ func lastPromoted(townRoot, rig string) (string, error) {
 		if errors.Is(err, fs.ErrNotExist) {
 			return "", nil
 		}
-		return "", fmt.Errorf("rig %s: cannot read the red-main record %s", rig, state)
+		return "", fmt.Errorf("cannot read the red-main record %s", state)
 	}
 	last, err := recordLastPromoted(data)
 	if err != nil {
-		return "", fmt.Errorf("rig %s: cannot read the red-main record %s: %w", rig, state, err)
+		return "", fmt.Errorf("cannot read the red-main record %s: %w", state, err)
 	}
 	return last, nil
 }
@@ -765,21 +760,30 @@ func firstN(s string, n int) string {
 	return s[:n]
 }
 
+// The phrases of gt promote's routine refusals, its own wording
+// (internal/cmd/promote.go). routineSkip matches them, and plugin.md names each
+// one, so the doc and the code cannot drift apart.
+const (
+	notOnRigPhrase  = "is not on rig"
+	tierSweepPhrase = "is owned by the tier sweep"
+	lockPhrase      = "another promotion holds"
+	divergedPhrase  = "the divergence is escalated"
+)
+
 // routineSkip reports whether gt promote's non-zero exit is a state the next run
-// resolves on its own, so this run is not failed for it (gt-lym1z). The match is
-// gt promote's own wording (internal/cmd/promote.go): the commit is not on the
-// rig's Forgejo main yet, the tier sweep owns the promotion and has no green
-// cycle yet, another promotion holds the lock, or the target diverged and gt
-// promote has already raised its own escalation. Anything else is a refusal the
-// plugin does not know, and a skip would hide it.
+// resolves on its own, so this run is not failed for it (gt-lym1z). The commit is
+// not on the rig's Forgejo main yet, the tier sweep owns the promotion and has no
+// green cycle yet, another promotion holds the lock, or the target diverged and
+// gt promote has already raised its own escalation. Anything else is a refusal
+// the plugin does not know, and a skip would hide it.
 func routineSkip(code int, cause string) bool {
 	switch code {
 	case 1:
-		return strings.Contains(cause, "is not on rig") ||
-			strings.Contains(cause, "is owned by the tier sweep") ||
-			strings.Contains(cause, "another promotion holds")
+		return strings.Contains(cause, notOnRigPhrase) ||
+			strings.Contains(cause, tierSweepPhrase) ||
+			strings.Contains(cause, lockPhrase)
 	case 2:
-		return strings.Contains(cause, "the divergence is escalated")
+		return strings.Contains(cause, divergedPhrase)
 	}
 	return false
 }

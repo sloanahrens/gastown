@@ -362,7 +362,7 @@ func TestGate(t *testing.T) {
 				h.setReply("/repos/"+repo+"/actions/runs/9/jobs", `{"message":"not a list"}`)
 			},
 			code: 1,
-			want: []string{"app-promote: cannot read the jobs of run 9 in " + repo},
+			want: []string{"rig fractals: cannot read the jobs of run 9 in " + repo},
 		},
 		{
 			name: "a green staging run and its jobs with no release run: nothing",
@@ -524,7 +524,7 @@ func TestGate(t *testing.T) {
 			},
 			code: 1,
 			want: []string{
-				"app-promote: rig fractals: cannot read the red-main record",
+				"rig fractals: cannot read the red-main record",
 				"last_promoted is not a commit id",
 			},
 			avoid: []string{"/compare/"},
@@ -571,7 +571,7 @@ func TestGate(t *testing.T) {
 				h.setCompare(mainBranch, green, "")
 			},
 			code: 1,
-			want: []string{"app-promote: compare main...aaaa111122223333444455556666777788889999 in " + repo + ": no commit count in the reply"},
+			want: []string{"rig fractals: compare main...aaaa111122223333444455556666777788889999 in " + repo + ": no commit count in the reply"},
 		},
 		{
 			name: "a compare against main answering no json fails closed",
@@ -634,13 +634,13 @@ func TestGate(t *testing.T) {
 				h.setCompare(older, green, "{}")
 			},
 			code: 1,
-			want: []string{"app-promote: compare " + older + "...aaaa111122223333444455556666777788889999 in " + repo + ": no commit count in the reply"},
+			want: []string{"rig fractals: compare " + older + "...aaaa111122223333444455556666777788889999 in " + repo + ": no commit count in the reply"},
 		},
 		{
 			name:  "a Forgejo that cannot be reached fails the run",
 			setup: func(h *harness) { h.down = true },
 			code:  1,
-			want:  []string{"app-promote: GET " + apiRoot + runsPath(1) + ": could not reach Forgejo"},
+			want:  []string{"rig fractals: GET " + apiRoot + runsPath(1) + ": could not reach Forgejo"},
 		},
 		{
 			name:  "a reply whose body cannot be read fails the run",
@@ -813,7 +813,7 @@ func TestGate(t *testing.T) {
 			},
 			code: 1,
 			wantf: func(h *harness) []string {
-				return []string{"app-promote: rig fractals: cannot read the red-main record " + h.in("town", ".runtime", "red-main", rigName+".json")}
+				return []string{"rig fractals: cannot read the red-main record " + h.in("town", ".runtime", "red-main", rigName+".json")}
 			},
 		},
 		{
@@ -840,7 +840,7 @@ func TestGate(t *testing.T) {
 				h.setReply(runsPath(1), "not json")
 			},
 			code: 1,
-			want: []string{"app-promote: cannot read the run list of " + repo},
+			want: []string{"rig fractals: cannot read the run list of " + repo},
 		},
 		{
 			name: "a run list of null fails the run",
@@ -873,7 +873,7 @@ func TestGate(t *testing.T) {
 				h.setStatus("/repos/"+repo+"/tags/v0.2.0", http.StatusInternalServerError)
 			},
 			code: 1,
-			want: []string{"app-promote: GET " + apiRoot + "/repos/" + repo + "/tags/v0.2.0 returned 500"},
+			want: []string{"rig fractals: GET " + apiRoot + "/repos/" + repo + "/tags/v0.2.0 returned 500"},
 		},
 		{
 			name: "a jobs read answering 500 fails the run",
@@ -882,7 +882,7 @@ func TestGate(t *testing.T) {
 				h.setStatus("/repos/"+repo+"/actions/runs/9/jobs", http.StatusInternalServerError)
 			},
 			code: 1,
-			want: []string{"app-promote: GET " + apiRoot + "/repos/" + repo + "/actions/runs/9/jobs returned 500"},
+			want: []string{"rig fractals: GET " + apiRoot + "/repos/" + repo + "/actions/runs/9/jobs returned 500"},
 		},
 		{
 			name: "a compare read answering 500 fails the run",
@@ -891,7 +891,7 @@ func TestGate(t *testing.T) {
 				h.setStatus(comparePath(mainBranch, green), http.StatusInternalServerError)
 			},
 			code: 1,
-			want: []string{"app-promote: GET " + apiRoot + comparePath(mainBranch, green) + " returned 500"},
+			want: []string{"rig fractals: GET " + apiRoot + comparePath(mainBranch, green) + " returned 500"},
 		},
 		{
 			name: "an API root that is not a URL fails the run",
@@ -900,7 +900,7 @@ func TestGate(t *testing.T) {
 				h.env["FORGEJO_API_URL"] = "http://forgejo.invalid/%zz"
 			},
 			code: 1,
-			want: []string{"app-promote: GET http://forgejo.invalid/%zz/repos/"},
+			want: []string{"rig fractals: GET http://forgejo.invalid/%zz/repos/"},
 		},
 		{
 			name: "a tag reply that cannot be read fails the run",
@@ -909,7 +909,7 @@ func TestGate(t *testing.T) {
 				h.setReply("/repos/"+repo+"/tags/v0.2.0", "[1]")
 			},
 			code: 1,
-			want: []string{"app-promote: cannot read tag v0.2.0 of " + repo},
+			want: []string{"rig fractals: cannot read tag v0.2.0 of " + repo},
 		},
 		{
 			name: "the third column names the integration job",
@@ -1226,6 +1226,140 @@ func TestPromoteAllNoSkipMarkerOnFailure(t *testing.T) {
 	if lines := strings.Count(h.output(), "rig second: gt promote --sha"); lines != 1 {
 		t.Errorf("the second rig appears on %d lines, want 1; output:\n%s", lines, h.output())
 	}
+}
+
+// TestPromoteAllCollectsReadErrors holds a Forgejo read failure to the rule a gt
+// promote refusal follows: it fails its rig, the loop checks the rigs after it,
+// and the run names every failed rig, one line each, in rigs.conf order, never
+// as skipped (gt-lym1z).
+func TestPromoteAllCollectsReadErrors(t *testing.T) {
+	t.Parallel()
+	const (
+		firstRepo  = "sloan/first-repo"
+		secondRepo = "sloan/second-repo"
+	)
+	runsOf := func(repo string) string {
+		return fmt.Sprintf("/repos/%s/actions/runs?workflow_id=%s&limit=%d&page=1", repo, deployWorkflow, runsLimit)
+	}
+	readFailure := func(repo string) string {
+		return "GET " + apiRoot + runsOf(repo) + ` returned 500: {"message":"stub says 500"}`
+	}
+
+	t.Run("a read error after an earlier hard failure names both rigs", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.write(h.in("plugin", "rigs.conf"), "first "+firstRepo+"\nsecond "+secondRepo+"\n")
+		h.promotesGreen(firstRepo, "first")
+		h.setStatus(runsOf(secondRepo), http.StatusInternalServerError)
+		h.gtByRig = map[string]promoteReply{
+			"first": {out: "Error: rig first: the promotion failed: pushing aaaa failed\n", code: 2},
+		}
+
+		if code := h.run(); code != 1 {
+			t.Fatalf("exit = %d, want 1; output:\n%s", code, h.output())
+		}
+		if len(h.promotes) != 1 {
+			t.Fatalf("gt promote ran %d time(s), want once for the first rig: %v", len(h.promotes), h.promotes)
+		}
+		want := "app-promote: 2 rig(s) failed:\n" +
+			"rig first: gt promote --sha " + green + " exited 2: rig first: the promotion failed: pushing aaaa failed\n" +
+			"rig second: " + readFailure(secondRepo)
+		if !strings.Contains(h.output(), want) {
+			t.Errorf("output does not name both failed rigs, one line each; want %q; output:\n%s", want, h.output())
+		}
+		if strings.Contains(h.output(), skippedMarker) {
+			t.Errorf("the failed run says skipped; output:\n%s", h.output())
+		}
+	})
+
+	t.Run("a read error in the first rig does not stop the rigs after it", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.write(h.in("plugin", "rigs.conf"), "first "+firstRepo+"\nsecond "+secondRepo+"\n")
+		h.setStatus(runsOf(firstRepo), http.StatusInternalServerError)
+		h.promotesGreen(secondRepo, "second")
+
+		if code := h.run(); code != 1 {
+			t.Fatalf("exit = %d, want 1; output:\n%s", code, h.output())
+		}
+		if len(h.promotes) != 1 || !strings.Contains(h.promotes[0], "--rig second") {
+			t.Fatalf("gt promote ran %v, want once for the second rig", h.promotes)
+		}
+		if !strings.Contains(h.output(), "[app-promote] rig second: promoted aaaa1111 (v0.2.0)") {
+			t.Errorf("the log does not hold the second rig's promotion; output:\n%s", h.output())
+		}
+		want := "app-promote: 1 rig(s) failed:\nrig first: " + readFailure(firstRepo)
+		if !strings.Contains(h.output(), want) {
+			t.Errorf("output does not name the first rig's read failure; want %q; output:\n%s", want, h.output())
+		}
+	})
+
+	t.Run("two read errors name both rigs, one line each, in rigs.conf order", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.write(h.in("plugin", "rigs.conf"), "first "+firstRepo+"\nsecond "+secondRepo+"\n")
+		h.setStatus(runsOf(firstRepo), http.StatusInternalServerError)
+		h.setStatus(runsOf(secondRepo), http.StatusInternalServerError)
+
+		if code := h.run(); code != 1 {
+			t.Fatalf("exit = %d, want 1; output:\n%s", code, h.output())
+		}
+		if len(h.promotes) != 0 {
+			t.Errorf("gt promote ran for a run with no readable rig: %v", h.promotes)
+		}
+		want := "app-promote: 2 rig(s) failed:\n" +
+			"rig first: " + readFailure(firstRepo) + "\n" +
+			"rig second: " + readFailure(secondRepo)
+		if !strings.Contains(h.output(), want) {
+			t.Errorf("output does not name both rigs, one line each; want %q; output:\n%s", want, h.output())
+		}
+		if strings.Contains(h.output(), skippedMarker) {
+			t.Errorf("the failed run says skipped; output:\n%s", h.output())
+		}
+	})
+}
+
+// TestPluginDocStatesContract holds plugin.md and README.md to the contract the
+// code keeps: each routine skip is named, a missing promote_target is a hard
+// failure, the loop continues past a failing rig, and the run ends with one error
+// naming every failed rig. A stale statement of the old contract fails it
+// (gt-lym1z).
+func TestPluginDocStatesContract(t *testing.T) {
+	t.Parallel()
+	plugin := readDoc(t, "plugin.md")
+	readme := readDoc(t, "README.md")
+
+	for _, phrase := range []string{notOnRigPhrase, tierSweepPhrase, lockPhrase, divergedPhrase} {
+		if !strings.Contains(plugin, phrase) {
+			t.Errorf("plugin.md does not name the routine skip %q", phrase)
+		}
+	}
+	for _, want := range []string{
+		"promote_target` is a hard failure",
+		"continues past a failing rig",
+		"one error naming every failed rig",
+		"plugin:app-promote:failed",
+	} {
+		if !strings.Contains(plugin, want) {
+			t.Errorf("plugin.md does not state %q", want)
+		}
+	}
+	if strings.Contains(plugin, "exits non-zero with one line of cause") {
+		t.Errorf("plugin.md still states the old failure contract")
+	}
+	if strings.Contains(readme, "logs `not promotable` each run") {
+		t.Errorf("README.md still states that a refusal is logged as not promotable each run")
+	}
+}
+
+// readDoc reads one of the plugin's documents from the package directory.
+func readDoc(t *testing.T, name string) string {
+	t.Helper()
+	data, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }
 
 func TestSplitRig(t *testing.T) {

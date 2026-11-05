@@ -60,15 +60,30 @@ reports the target already holds the commit.
 
 ## When it fails, and when it does not
 
-A run that cannot read the viewer token, the rig list or Forgejo, or that
-`gt promote` refused, exits non-zero with one line of cause; the daemon records
-it and escalates once under `plugin:app-promote:failed`, which the next clean
-run closes.
+A run that cannot read the viewer token, the rig list or the town root stops at
+once and exits non-zero.
 
-A diverged promotion target is not one of those: `gt promote` raises
-`landing-promote-diverged:<rig>` for it, and this plugin prints the line and
-leaves the escalation to that one, so a human reconciles once. A rig whose
-`gt promote` refuses as not promotable — most often because its
-`merge_queue.forgejo` block names no `promote_target`, or another promotion
-holds the rig — is reported and skipped that run, because the cooldown retries
-and an escalation should name a plugin that cannot do its job.
+Otherwise every rig in `rigs.conf` is checked, and each rig's `gt promote`
+refusal is either a routine skip or a hard failure. A routine skip is logged
+with `gt promote`'s own line, and the rig counts as checked and is not a failure:
+
+- exit 1, the commit is not on the rig's Forgejo `main` yet (`is not on rig`);
+- exit 1, the tier sweep owns the promotion and has no fully green cycle yet, or
+  only its last green commit is promotable (`is owned by the tier sweep`);
+- exit 1, another promotion holds the rig's lock: retry later (`another promotion holds`);
+- exit 2, the promotion target diverged and `gt promote` has raised
+  `landing-promote-diverged:<rig>` for it (`the divergence is escalated`), so
+  this plugin leaves the escalation to that one and a human reconciles once.
+
+Every other non-zero exit is a hard failure of that rig. A rig that names no
+`promote_target` is a hard failure, and so is one that names no `promote_key_file`:
+a rig listed in `rigs.conf` that cannot promote is a misconfiguration, not a state
+the next run resolves. So are a rejected push, a `gt promote` that cannot start,
+and any message this list does not name, until someone classifies it.
+
+The loop continues past a failing rig, whatever failed it: a `gt promote` hard
+failure or a Forgejo read error. When every rig is checked, the run ends with
+one error naming every failed rig, with its exit code or read error and its
+cause line, one line each, in `rigs.conf` order. The daemon escalates that once
+under `plugin:app-promote:failed`, which the next clean run closes. A run with
+any failure never prints `[plugin-result skipped]`, even when no rig promoted.
