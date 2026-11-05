@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
+	"github.com/steveyegge/gastown/internal/buildstamp"
 	"github.com/steveyegge/gastown/internal/polecat/bdbuild"
 	"github.com/steveyegge/gastown/internal/templates"
 )
@@ -58,18 +59,22 @@ const (
 	bdCommitFlag = "-X main.Commit="
 )
 
-// gtCommitStampLen is the length of the commit gt records, the short form make
-// install stamps and make polecat-image tags the image with (gt-c3sue).
-const gtCommitStampLen = 9
+// gtCommitStamp returns the stamp buildstamp records for the full sha
+// BuildBinaries resolved (gt-x5kgt).
+func gtCommitStamp(commit string) (string, error) {
+	return buildstamp.Short(commit)
+}
 
-// gtCommitStamp cuts commit to the short form gt records. BuildBinaries passes
-// the full resolved sha; Plan passes the commit the caller named, which may be
-// shorter already and is then stamped whole rather than padded.
-func gtCommitStamp(commit string) string {
-	if len(commit) <= gtCommitStampLen {
+// planCommitStamp returns the stamp Plan prints for the commit the caller
+// named. That name may be abbreviated already; checkBuildInputs has refused
+// anything that is not 7-40 lowercase hex, so a name shorter than the stamp is
+// recorded whole rather than padded (gt-gg9hv.20) and a longer one is cut to
+// the width buildstamp records.
+func planCommitStamp(commit string) string {
+	if len(commit) <= buildstamp.Len {
 		return commit
 	}
-	return commit[:gtCommitStampLen]
+	return commit[:buildstamp.Len]
 }
 
 // Runner runs one argv in dir with env as the whole environment it runs with; it
@@ -201,8 +206,12 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 	if err != nil {
 		return nil, err
 	}
+	gtStamp, err := gtCommitStamp(gtCommit)
+	if err != nil {
+		return nil, fmt.Errorf("daemonimage: cannot stamp gt with the commit resolved in %s: %w", b.GTSrc, err)
+	}
 	builds := []binary{
-		{name: "gt", src: b.GTSrc, commit: gtCommit, pkg: GTPackage, ldflags: gtCommitFlag + gtCommitStamp(gtCommit)},
+		{name: "gt", src: b.GTSrc, commit: gtCommit, pkg: GTPackage, ldflags: gtCommitFlag + gtStamp},
 		{name: "bd", src: b.BDSrc, commit: bdCommit, pkg: BDPackage, ldflags: bdCommitFlag + bdCommit, stampsBuildID: true},
 		{name: "om", src: b.OMSrc, commit: omCommit, pkg: OMPackage},
 	}
@@ -563,7 +572,7 @@ func isCommit(s string) bool {
 // not check the claude CLI pin, and it does not check that a commit exists in its
 // checkout: a build checks both when it runs, so a plan that prints can still
 // fail there. The commits in it are the ones named, not resolved: the gt line
-// stamps the first gtCommitStampLen characters of the named commit, and the bd
+// stamps buildstamp.Len characters of the named commit, and the bd
 // line's main.Build is planBuildID, since the build id is git's abbreviation of
 // the commit in the worktree a build makes and Plan makes none.
 func (b Builder) Plan(rev string) ([]string, error) {
@@ -580,9 +589,10 @@ func (b Builder) Plan(rev string) ([]string, error) {
 	if info, err := os.Stat(b.Dockerfile); err != nil || !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("daemonimage: Dockerfile %s is not a file", b.Dockerfile)
 	}
+	stamp := planCommitStamp(rev)
 	tag := ImageTag(rev)
 	lines := []string{
-		fmt.Sprintf("build gt: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "gt"), GTPackage, gtCommitFlag+gtCommitStamp(rev)), " "), b.GTSrc, rev),
+		fmt.Sprintf("build gt: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "gt"), GTPackage, gtCommitFlag+stamp), " "), b.GTSrc, rev),
 		fmt.Sprintf("build bd: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "bd"), BDPackage, bdBuildFlag+planBuildID+" "+bdCommitFlag+bdCommit), " "), b.BDSrc, bdCommit),
 		fmt.Sprintf("build om: %s   (clean worktree of %s at HEAD)", strings.Join(goBuildArgv(filepath.Join(b.Out, "om"), OMPackage, ""), " "), b.OMSrc),
 	}

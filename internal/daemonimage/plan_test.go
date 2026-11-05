@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/buildstamp"
 	"github.com/steveyegge/gastown/internal/templates"
 )
 
@@ -75,7 +76,7 @@ func TestPlanNamesEachStepAndRunsNothing(t *testing.T) {
 	}
 
 	steps := []struct{ label, names string }{
-		{"build gt: ", "go build -trimpath -ldflags " + gtCommitFlag + testRev[:9] + " -o " + filepath.Join(b.Out, "gt") + " " + GTPackage + "   (clean worktree of /src/gt at " + testRev + ")"},
+		{"build gt: ", "go build -trimpath -ldflags " + gtCommitFlag + testRev[:buildstamp.Len] + " -o " + filepath.Join(b.Out, "gt") + " " + GTPackage + "   (clean worktree of /src/gt at " + testRev + ")"},
 		{"build bd: ", "go build -trimpath -ldflags " + bdBuildFlag + planBuildID + " " + bdCommitFlag + testBDCommit + " -o " + filepath.Join(b.Out, "bd") + " " + BDPackage + "   (clean worktree of /src/beads at " + testBDCommit + ")"},
 		{"build om: ", "go build -trimpath -o " + filepath.Join(b.Out, "om") + " " + OMPackage + "   (clean worktree of /src/om at HEAD)"},
 		{"build app-promote: ", "go build -trimpath -o " + filepath.Join(b.Out, "plugins", "app-promote", "app-promote") + " ./plugins/app-promote   (clean worktree of /src/gt at " + testRev + ")"},
@@ -110,7 +111,7 @@ func TestPlanShowsTheShortCommitStamp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
-	want := gtCommitFlag + testRev[:9] + " -o "
+	want := gtCommitFlag + testRev[:buildstamp.Len] + " -o "
 	for _, line := range lines {
 		if !strings.HasPrefix(line, "build gt: ") {
 			continue

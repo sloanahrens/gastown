@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/buildstamp"
 	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
 
@@ -447,9 +448,10 @@ func TestExecGitAnswersAndFailures(t *testing.T) {
 		{name: "fetch exits 0", run: scripting("", 0), call: func(g ExecGit) (any, error) { return nil, g.Fetch("origin", "main") }},
 		{name: "fetch names a failed exit", run: scripting("", 128), call: func(g ExecGit) (any, error) { return nil, g.Fetch("origin", "main") }, wantErr: "git fetch origin main --quiet: exit status 128"},
 		{name: "fetch names a command that could not run", run: scripting("", -1), call: func(g ExecGit) (any, error) { return nil, g.Fetch("origin", "main") }, wantErr: "git fetch origin main --quiet"},
-		{name: "HEAD is trimmed", run: scripting("abc1234\n", 0), call: func(g ExecGit) (any, error) { return g.ShortHead() }, want: "abc1234"},
-		{name: "HEAD names a failed exit", run: scripting("", 128), call: func(g ExecGit) (any, error) { return g.ShortHead() }, wantErr: "git rev-parse --short HEAD: exit status 128"},
-		{name: "HEAD names a command that could not run", run: scripting("", -1), call: func(g ExecGit) (any, error) { return g.ShortHead() }, wantErr: "git rev-parse --short HEAD"},
+		{name: "HEAD is cut to the stamp", run: scripting("0123456789abcdef0123456789abcdef01234567\n", 0), call: func(g ExecGit) (any, error) { return g.ShortHead() }, want: "012345678"},
+		{name: "HEAD that is not a full sha is an error", run: scripting("abc1234\n", 0), call: func(g ExecGit) (any, error) { return g.ShortHead() }, wantErr: "git rev-parse HEAD: buildstamp"},
+		{name: "HEAD names a failed exit", run: scripting("", 128), call: func(g ExecGit) (any, error) { return g.ShortHead() }, wantErr: "git rev-parse HEAD: exit status 128"},
+		{name: "HEAD names a command that could not run", run: scripting("", -1), call: func(g ExecGit) (any, error) { return g.ShortHead() }, wantErr: "git rev-parse HEAD"},
 		{name: "a ref that resolves", run: scripting("", 0), call: func(g ExecGit) (any, error) { return g.Resolve("origin/main") }, want: true},
 		{name: "exit 1 is an unknown ref", run: scripting("", 1), call: func(g ExecGit) (any, error) { return g.Resolve("origin/main") }, want: false},
 		{name: "another exit is an error", run: scripting("", 128), call: func(g ExecGit) (any, error) { return g.Resolve("origin/main") }, want: false, wantErr: "exit status 128"},
@@ -488,6 +490,32 @@ func TestExecGitAnswersAndFailures(t *testing.T) {
 				t.Errorf("call = %#v, want %#v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestShortHeadIsNineWide: ShortHead reads the full sha and cuts the stamp
+// itself, so a git whose own abbreviation has grown to ten characters still
+// yields the nine make install records and make polecat-image tags (gt-x5kgt).
+// The runner answers --short with ten characters, so a ShortHead that asked
+// git to abbreviate would fail.
+func TestShortHeadIsNineWide(t *testing.T) {
+	t.Parallel()
+	const full = "0123456789abcdef0123456789abcdef01234567"
+	run := func(_ string, args ...string) (string, int) {
+		switch strings.Join(args, " ") {
+		case "rev-parse HEAD":
+			return full + "\n", 0
+		case "rev-parse --short HEAD":
+			return full[:10] + "\n", 0
+		}
+		return "", CodeCannotStart
+	}
+	got, err := ExecGit{Dir: "repo", Run: run}.ShortHead()
+	if err != nil {
+		t.Fatalf("ShortHead: %v", err)
+	}
+	if want := full[:buildstamp.Len]; got != want {
+		t.Errorf("ShortHead = %q, want %q", got, want)
 	}
 }
 
