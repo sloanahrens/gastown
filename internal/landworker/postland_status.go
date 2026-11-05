@@ -2,6 +2,7 @@ package landworker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -559,6 +560,11 @@ func (p *PostLandRunner) fire(ctx context.Context, pl PostLand, name string, res
 	}
 }
 
+// errNoUnknownSink is what raiseUnknown answers when no OnUnknown is wired: a
+// timed-out entry stays in the store, with a WARNING each pass, and is never
+// dropped without an alarm.
+var errNoUnknownSink = errors.New("no alarm sink is wired for the post-land UNKNOWN")
+
 // raiseUnknown hands a landed commit's timed-out record to OnUnknown and
 // returns its error: the caller removes the pending entry only when the alarm
 // is confirmed stored, so an entry still in the store is an alarm not yet
@@ -574,7 +580,9 @@ func (p *PostLandRunner) raiseUnknown(ctx context.Context, pl PostLand, name str
 	p.logf("UNKNOWN: no verdict for status %q on %s (%s) (last state %s: %s); the post-land check is silent and nothing is reverted",
 		name, short(pl.Commit), pl.by(), last.State, last.Description)
 	if p.OnUnknown == nil {
-		return nil
+		// No sink means no alarm: the caller keeps the pending entry rather than
+		// dropping a timed-out verdict nobody was told about.
+		return errNoUnknownSink
 	}
 	return p.OnUnknown(ctx, u)
 }

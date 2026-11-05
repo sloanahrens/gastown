@@ -145,3 +145,56 @@ func TestPostLandUnknownStoreSaveFailuresAreErrors(t *testing.T) {
 		}
 	})
 }
+
+// TestPostLandUnknownStoreNeverTreatsAnUnreadableFileAsEmpty: a store file that
+// cannot be read or decoded makes record answer an error and leaves the file
+// exactly as it was, so the runner keeps its pending entries and the problem
+// shows in the log; once the file is fixed the next record succeeds without a
+// restart (gt-gg9hv.7.1).
+func TestPostLandUnknownStoreNeverTreatsAnUnreadableFileAsEmpty(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	u := landworker.PostLandUnknown{Rig: attentionRig, SHA: "abc1234567890", Context: "ci / post-land (push)", State: "pending", At: now}
+
+	t.Run("a file that does not decode", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), postLandUnknownFile)
+		const corrupt = "{not json"
+		if err := os.WriteFile(path, []byte(corrupt), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		s := postLandUnknownStore{path: path}
+		err := s.record(u, postLandUnknownWindow)
+		if err == nil || !strings.Contains(err.Error(), "decoding the post-land alarm store") {
+			t.Fatalf("record over a corrupt file = %v, want the decoding error", err)
+		}
+		if got, _ := os.ReadFile(path); string(got) != corrupt {
+			t.Fatalf("the corrupt file was rewritten to %q, want it left as it was", got)
+		}
+		// The file is fixed: the same store picks it up on the next record.
+		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.record(u, postLandUnknownWindow); err != nil {
+			t.Fatalf("record after the file was fixed: %v", err)
+		}
+		if n := len(s.snapshot(time.Time{})); n != 1 {
+			t.Fatalf("records after the fix = %d, want one", n)
+		}
+	})
+
+	t.Run("a file that cannot be read", func(t *testing.T) {
+		t.Parallel()
+		// A directory where the file belongs makes the read fail with an error
+		// that is not "does not exist".
+		path := filepath.Join(t.TempDir(), postLandUnknownFile)
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		s := postLandUnknownStore{path: path}
+		err := s.record(u, postLandUnknownWindow)
+		if err == nil || !strings.Contains(err.Error(), "reading the post-land alarm store") {
+			t.Fatalf("record over an unreadable path = %v, want the reading error", err)
+		}
+	})
+}

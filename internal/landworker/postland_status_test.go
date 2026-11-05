@@ -1022,3 +1022,40 @@ func TestPostLandStatusContextWithoutAReaderSaysSoOnce(t *testing.T) {
 		t.Fatalf("fallback line logged %d times over three triggers, want once:\n%s", n, strings.Join(lines, "\n"))
 	}
 }
+
+// TestPostLandStatusNilAlarmSinkKeepsTheTimedOutEntry: a runner with no
+// OnUnknown wired cannot tell anyone a verdict timed out, so the timed-out
+// entry stays in the store, marked, with a WARNING each pass, and is not
+// dropped without an alarm (gt-gg9hv.7.1).
+func TestPostLandStatusNilAlarmSinkKeepsTheTimedOutEntry(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	pl := PostLand{BeadID: "gt-abc", Commit: "abc1234567890", Target: "main"}
+	const timeout = 10 * time.Minute
+	store := &MemoryMainState{}
+	clk := &manualClock{now: statusT0}
+	reads := &fakeStatusReads{responses: []fakeStatusRead{{status: combinedFor(statusContext, forgejo.StatePending)}}}
+
+	v := &statusVerdicts{}
+	r := v.runner(reads.read, store, clk, timeout)
+	r.OnUnknown = nil
+	r.Trigger(ctx, pl)
+	r.PollPending(ctx)
+	clk.Advance(timeout)
+	r.PollPending(ctx)
+	r.PollPending(ctx)
+
+	st, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.PostLandPending) != 1 || !st.PostLandPending[0].TimedOut {
+		t.Fatalf("store with no alarm sink = %+v, want the one entry kept, marked timed out", st.PostLandPending)
+	}
+	if !strings.Contains(v.logText(), "no alarm sink is wired") {
+		t.Fatalf("the log does not say why the alarm is not stored:\n%s", v.logText())
+	}
+	if greens, reds, _ := v.counts(); greens != 0 || reds != 0 {
+		t.Fatalf("a timed-out verdict fired a callback: green %d red %d", greens, reds)
+	}
+}

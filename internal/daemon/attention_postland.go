@@ -3,6 +3,9 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -34,16 +37,24 @@ type postLandUnknownStore struct {
 	path   string
 	mu     sync.Mutex
 	loaded bool
-	recs   map[string]landworker.PostLandUnknown
+	// loadErr is set while the file exists but cannot be read or decoded: the
+	// store then answers record with this error and never writes, so the file
+	// is not overwritten, the runner keeps its pending entries and the problem
+	// shows in the log every pass until the file is fixed or removed.
+	loadErr error
+	recs    map[string]landworker.PostLandUnknown
 }
 
-// load reads the file once; a missing or unreadable file starts empty, and the
-// pending entries still in the rig's store raise their records again.
+// load reads the file once; a missing file starts empty, and the pending
+// entries still in the rig's store raise their records again. A file that
+// exists but cannot be read or decoded sets loadErr and is read again on the
+// next call, so a fixed file is picked up without a restart.
 func (s *postLandUnknownStore) load() {
-	if s.loaded {
+	if s.loaded && s.loadErr == nil {
 		return
 	}
 	s.loaded = true
+	s.loadErr = nil
 	if s.recs == nil {
 		s.recs = map[string]landworker.PostLandUnknown{}
 	}
@@ -52,12 +63,17 @@ func (s *postLandUnknownStore) load() {
 	}
 	data, err := os.ReadFile(s.path)
 	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			s.loadErr = fmt.Errorf("reading the post-land alarm store %s: %w", s.path, err)
+		}
 		return
 	}
 	var stored map[string]landworker.PostLandUnknown
-	if json.Unmarshal(data, &stored) == nil {
-		maps.Copy(s.recs, stored)
+	if err := json.Unmarshal(data, &stored); err != nil {
+		s.loadErr = fmt.Errorf("decoding the post-land alarm store %s: %w", s.path, err)
+		return
 	}
+	maps.Copy(s.recs, stored)
 }
 
 // save writes the records through a temporary file and a rename, so a crash
@@ -87,6 +103,9 @@ func (s *postLandUnknownStore) record(u landworker.PostLandUnknown, window time.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.load()
+	if s.loadErr != nil {
+		return s.loadErr
+	}
 	cutoff := u.At.Add(-window)
 	for key, r := range s.recs {
 		if r.At.Before(cutoff) {
