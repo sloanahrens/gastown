@@ -55,6 +55,10 @@ type daemonComposeFlags struct {
 	// GT_DOLT_BACKUP_ROOT to it; a relative path is refused by the render
 	// (gt-gg9hv.17).
 	backupDir string
+	// bindRO are --bind-ro values: host directories the render mounts read-only at
+	// the same path, in the order given. Each is checked to be a directory here;
+	// the render checks the rest (gt-vqexg).
+	bindRO []string
 }
 
 // daemonComposeDeps is what the command takes from the host: where the town is
@@ -74,6 +78,9 @@ type daemonComposeDeps struct {
 	// evalSymlinks resolves the kubeconfig and the town for the under-the-town
 	// check.
 	evalSymlinks func(path string) (string, error)
+	// isDir reports whether path is a directory; an error is a path it cannot
+	// stat. A --bind-ro path must be one (gt-vqexg).
+	isDir func(path string) (bool, error)
 	// townZone is the IANA zone name for the container's TZ ("" for none).
 	townZone func(townRoot string) (string, error)
 	// omConfig derives the om config the container reads from the default
@@ -119,6 +126,13 @@ func realDaemonComposeDeps(out io.Writer) daemonComposeDeps {
 		},
 		readFile:     os.ReadFile,
 		evalSymlinks: filepath.EvalSymlinks,
+		isDir: func(path string) (bool, error) {
+			info, err := os.Stat(path)
+			if err != nil {
+				return false, err
+			}
+			return info.IsDir(), nil
+		},
 		townZone: func(townRoot string) (string, error) {
 			return containerZone(townRoot, config.LoadTownSettings, os.Readlink, "/etc/localtime")
 		},
@@ -224,6 +238,12 @@ server container writes each night's backup there at the same path, so the rende
 mounts it read-write at that same path on the daemon and sets GT_DOLT_BACKUP_ROOT
 to it; a relative path is refused. Without the flag the render is unchanged.
 
+--bind-ro names a host directory, an absolute path, that the daemon mounts read-only
+at that same path; repeat it for more. A path that is not a directory is refused,
+and so is one the render cannot mount read-only (relative, not cleaned, under ..,
+inside or containing the town, already mounted, or given twice). The mounts are sorted by path. Without
+the flag the render is unchanged.
+
 --print prints the render and writes no file.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -249,6 +269,8 @@ to it; a relative path is refused. Without the flag the render is unchanged.
 		"the town's config directory on the host (an absolute path), mounted read-only at that path and at the container's XDG path; unset renders neither mount")
 	write.Flags().StringVar(&f.backupDir, "backup-dir", "",
 		"the host's Dolt backup directory (an absolute path), mounted read-write at that path and named by GT_DOLT_BACKUP_ROOT; unset renders neither")
+	write.Flags().StringArrayVar(&f.bindRO, "bind-ro", nil,
+		"a host directory (an absolute path) mounted read-only at that same path in the daemon; repeat for more, and a path that is not a directory is refused")
 	parent.AddCommand(write)
 	return parent
 }
@@ -281,6 +303,24 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 	// command opens neither.
 	forgeHost := strings.TrimSpace(f.forgeHost)
 	forgeTokenFile := strings.TrimSpace(f.forgeTokenFile)
+	// Each --bind-ro must name a directory the command can stat. A blank value
+	// names nothing, so it is refused rather than rendered as unset. The render
+	// refuses the rest of what a read-only mount cannot carry (gt-vqexg).
+	bindRO := make([]string, 0, len(f.bindRO))
+	for _, p := range f.bindRO {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return fmt.Errorf("--bind-ro was given blank; name the host directory's absolute path, or leave the flag out")
+		}
+		dir, err := d.isDir(p)
+		if err != nil {
+			return fmt.Errorf("--bind-ro %s cannot be read, and no compose file was written: %w", p, err)
+		}
+		if !dir {
+			return fmt.Errorf("--bind-ro %s is not a directory, and no compose file was written", p)
+		}
+		bindRO = append(bindRO, p)
+	}
 	townRoot, err := d.findTown()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
@@ -341,6 +381,7 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 		OpenShellConfigDir: strings.TrimSpace(f.openShellConfigDir),
 		ConfigDir:          strings.TrimSpace(f.configDir),
 		BackupDir:          strings.TrimSpace(f.backupDir),
+		BindRO:             bindRO,
 		Project:            project,
 		ContainerName:      cfg.ContainerName(),
 		Image:              image,
