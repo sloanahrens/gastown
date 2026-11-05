@@ -120,13 +120,13 @@ func (d *Daemon) diskMaintenanceSeams() diskMaintSeams {
 			return d.diskMaintenanceTargets(mode, s.getenv, s.homeDir)
 		}
 	}
-	if s.readDisks == nil {
-		s.readDisks = func(ctx context.Context) []disks.Reading {
-			return d.diskMaintenanceReadings(ctx, s.dfReaders)
-		}
-	}
 	if s.getenv == nil {
 		s.getenv = os.Getenv
+	}
+	if s.readDisks == nil {
+		s.readDisks = func(ctx context.Context) []disks.Reading {
+			return d.diskMaintenanceReadings(ctx, s.dfReaders, diskMaintKubeconfig(d.config.TownRoot, s.getenv))
+		}
 	}
 	if s.environ == nil {
 		s.environ = os.Environ
