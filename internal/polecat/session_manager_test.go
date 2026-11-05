@@ -750,8 +750,11 @@ func TestLaunchSizesTheSeatFromThePool(t *testing.T) {
 // session's GOFLAGS and logs the one seat line; a spawn for another seat keeps
 // today's value (gt-gg9hv.42).
 //
-//testpolicy:allow no-env — the spawning GOFLAGS is part of the value under test: AgentEnv reads it from the process environment when no agent value is set, and the seat's flags must be the only difference
+//testpolicy:allow parallel — sets the spawning environment through t.Setenv, which a parallel test must not do
 func TestSeatGoFlagsReachTheSpawnEnv(t *testing.T) {
+	// The spawning environment names no flags, so the seat's are the only
+	// difference between the two spawns below.
+	//testpolicy:allow no-env — the spawning GOFLAGS is part of the value under test: AgentEnv reads it from the process environment, and a host value would change the expected result
 	t.Setenv("GOFLAGS", "")
 
 	town, rigPath, workDir, w := launchTown(t)
