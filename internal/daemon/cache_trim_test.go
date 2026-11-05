@@ -25,6 +25,7 @@ import (
 	"github.com/steveyegge/gastown/internal/diskmaint"
 	"github.com/steveyegge/gastown/internal/diskmaint/disks"
 	"github.com/steveyegge/gastown/internal/polecat/cachevol"
+	"github.com/steveyegge/gastown/internal/polecatimage"
 )
 
 const (
@@ -1176,16 +1177,31 @@ func (f *cacheTrimFixture) listReads() int {
 // one path per shard, every shard over the limit a client-side apply's
 // last-applied annotation would break (gt-gg9hv.40).
 func cacheTrimLargeListingJSON(shards int) string {
-	return cacheTrimLargeListingPadded(shards, 0)
-}
-
-// cacheTrimLargeListingPadded is cacheTrimLargeListingJSON with pad extra
-// characters on the first path, so a test can put the encoded removal list on
-// the whole-KiB grid df -Pk reports its room by.
-func cacheTrimLargeListingPadded(shards, pad int) string {
 	// One byte past the shard bound in the path text, so the encoded entry
 	// takes a shard of its own and its ConfigMap carries the file list past
 	// the metadata limit.
+	pathText := strings.Repeat("a", cachevol.TrimShardBytes+1)
+	var b strings.Builder
+	b.WriteByte('[')
+	for i := 0; i < shards; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b,
+			`{"path":"gocache/%03d%s","cache":"build","size":%d,"atime":"2026-10-29T01:%02d:00Z","mtime":"2026-10-29T01:%02d:00Z"}`,
+			i, pathText, cachevol.TrimShardBytes, i, i)
+	}
+	b.WriteByte(']')
+	return b.String()
+}
+
+// cacheTrimClaimRouteListing is this bead's own listing, apart from the shared
+// one above (whose minute field holds only the sixty entries the other tests
+// use): shards entries past the shard ceiling, the minute wrapping so a listing
+// of more than 59 entries still names a time the decoder reads, and pad extra
+// characters on the first path so a test can put the writer's room on the
+// whole-KiB grid df -Pk reports by.
+func cacheTrimClaimRouteListing(shards, pad int) string {
 	pathText := strings.Repeat("a", cachevol.TrimShardBytes+1)
 	var b strings.Builder
 	b.WriteByte('[')
@@ -1197,8 +1213,6 @@ func cacheTrimLargeListingPadded(shards, pad int) string {
 		if i == 0 {
 			extra = strings.Repeat("a", pad)
 		}
-		// The minute wraps, so a listing of more than 59 entries still names a
-		// time the decoder reads.
 		fmt.Fprintf(&b,
 			`{"path":"gocache/%03d%s%s","cache":"build","size":%d,"atime":"2026-10-29T01:%02d:00Z","mtime":"2026-10-29T01:%02d:00Z"}`,
 			i, pathText, extra, cachevol.TrimShardBytes, i%60, i%60)
@@ -1428,21 +1442,23 @@ func cacheTrimRemovalListBytes(t *testing.T, listing string) int {
 }
 
 // cacheTrimListingAcrossTheCeilingOnAKiBGrid is a listing whose removal list
-// packs past the shard ceiling and whose encoding is a whole number of KiB, so
-// a df -Pk reply can name exactly the room it takes and the fit, equal and
-// no-fit cases are each one KiB apart.
+// packs past the shard ceiling and whose WRITER ROOM (polecatimage.TrimListRoom
+// of the encoded list: the list and its digest, each on disk twice) is a whole
+// number of KiB, so a df -Pk reply can name exactly the room the writer needs
+// and the fit, equal and no-fit cases are each one KiB apart. It returns the
+// listing and that room.
 func cacheTrimListingAcrossTheCeilingOnAKiBGrid(t *testing.T) (string, int64) {
 	t.Helper()
-	listing := cacheTrimLargeListingJSON(cachevol.TrimMaxShards + 1)
-	need := cacheTrimRemovalListBytes(t, listing)
-	if pad := (1024 - need%1024) % 1024; pad > 0 {
-		listing = cacheTrimLargeListingPadded(cachevol.TrimMaxShards+1, pad)
-		need = cacheTrimRemovalListBytes(t, listing)
+	listing := cacheTrimClaimRouteListing(cachevol.TrimMaxShards+1, 0)
+	room := polecatimage.TrimListRoom(cacheTrimRemovalListBytes(t, listing))
+	for pad := 0; room%1024 != 0 && pad < 1024; pad++ {
+		listing = cacheTrimClaimRouteListing(cachevol.TrimMaxShards+1, pad)
+		room = polecatimage.TrimListRoom(cacheTrimRemovalListBytes(t, listing))
 	}
-	if need%1024 != 0 {
-		t.Fatalf("the removal list is %d bytes, which a df -Pk reply cannot name", need)
+	if room%1024 != 0 {
+		t.Fatalf("the writer's room is %d bytes, which a df -Pk reply cannot name", room)
 	}
-	return listing, int64(need)
+	return listing, room
 }
 
 // TestCacheTrimCrossesTheShardCeilingByTheClaimRoute is the bead's gate: a
@@ -1621,8 +1637,8 @@ func cacheTrimCheckFitCase(t *testing.T, listing string, need int64, tc cacheTri
 	if applies != 0 {
 		t.Errorf("the pass applied %d documents for a list the claim cannot hold", applies)
 	}
-	want := fmt.Sprintf("cache trim %s in %s: the removal list (%d) does not fit the claim's free space (%d); nothing trimmed",
-		cacheTrimClaimName, cacheTrimNamespace, need, tc.free)
+	want := fmt.Sprintf("cache trim %s in %s: the removal list (%d bytes) needs %d bytes of room to be written with its digest and does not fit the claim's free space (%d); nothing trimmed",
+		cacheTrimClaimName, cacheTrimNamespace, cacheTrimRemovalListBytes(t, listing), need, tc.free)
 	if logged := f.log.String(); !strings.Contains(logged, want) {
 		t.Errorf("the log does not carry the refusal %q: %s", want, logged)
 	}
@@ -2119,4 +2135,70 @@ func (w *cacheTrimWalker) Visit(n ast.Node) ast.Visitor {
 	w.visit(n, w.path)
 	w.path = append(w.path, n)
 	return w
+}
+
+// cacheTrimWriterFiles is the claim as the list writer sees it: it takes every
+// write and answers the room it was given.
+type cacheTrimWriterFiles struct{ free int64 }
+
+func (cacheTrimWriterFiles) MkdirAll(string, os.FileMode) error          { return nil }
+func (cacheTrimWriterFiles) Remove(string) error                         { return nil }
+func (cacheTrimWriterFiles) WriteFile(string, []byte, os.FileMode) error { return nil }
+func (cacheTrimWriterFiles) Rename(string, string) error                 { return nil }
+func (f cacheTrimWriterFiles) Free() (int64, error)                      { return f.free, nil }
+
+// TestCacheTrimFitCheckAgreesWithTheWriter: the early fit check refuses exactly
+// the rooms the list writer refuses. For the same removal list, every room from
+// one KiB under the writer's requirement to one KiB over is judged by both, and
+// they give the same answer: the equal case is one the WRITER accepts, and the
+// case below it is one the writer refuses (gt-gg9hv.41).
+func TestCacheTrimFitCheckAgreesWithTheWriter(t *testing.T) {
+	t.Parallel()
+	listing, room := cacheTrimListingAcrossTheCeilingOnAKiBGrid(t)
+	entries, err := cacheTrimParseListing([]byte(listing))
+	if err != nil {
+		t.Fatalf("parsing the listing: %v", err)
+	}
+	plan := cachevol.PlanTrim(entries, 0, false)
+	paths := make([]string, 0, len(plan.Removals))
+	for _, removal := range plan.Removals {
+		paths = append(paths, removal.Path)
+	}
+	for _, free := range []int64{room - 1024, room, room + 1024} {
+		_, writeErr := polecatimage.WriteTrimList(paths, cacheTrimWriterFiles{free: free})
+		fitErr := cacheTrimClaimFits(entries, 0, 0, free)
+		if (writeErr == nil) != (fitErr == nil) {
+			t.Errorf("room %d: the writer says %v, the fit check says %v; they must agree", free, writeErr, fitErr)
+		}
+		if free >= room && fitErr != nil {
+			t.Errorf("room %d is what the writer needs, and the fit check refused it: %v", free, fitErr)
+		}
+		if free < room && fitErr == nil {
+			t.Errorf("room %d is under what the writer needs, and the fit check accepted it", free)
+		}
+	}
+}
+
+// TestCacheTrimRefusalAndUnknownLinesHaveTheirOwnGate: the fit refusal and the
+// free-space-unknown line are each held to one an hour under a key of their own,
+// so a repeat of one is silent while the other is still said.
+func TestCacheTrimRefusalAndUnknownLinesHaveTheirOwnGate(t *testing.T) {
+	t.Parallel()
+	listing, room := cacheTrimListingAcrossTheCeilingOnAKiBGrid(t)
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+		cacheTrimListVerb: {stdout: listing},
+		cacheTrimFreeVerb: {stdout: cacheTrimDfReply(t, room-1024)},
+	})
+	f.d.runDiskMaintenance() // the refusal is said
+	if n := strings.Count(f.log.String(), "nothing trimmed"); n != 1 {
+		t.Fatalf("refusal lines after the first pass = %d, want 1:\n%s", n, f.log.String())
+	}
+	f.d.cacheTrimLogKeyed("cache_trim_free_unknown:"+cacheTrimNamespace+"/"+cacheTrimClaimName, "unknown line said")
+	if !strings.Contains(f.log.String(), "unknown line said") {
+		t.Errorf("the unknown line was held back by the refusal's gate:\n%s", f.log.String())
+	}
+	f.d.cacheTrimLogKeyed("cache_trim_no_fit:"+cacheTrimNamespace+"/"+cacheTrimClaimName, "refusal said again")
+	if strings.Contains(f.log.String(), "refusal said again") {
+		t.Errorf("a second refusal inside the hour was logged:\n%s", f.log.String())
+	}
 }

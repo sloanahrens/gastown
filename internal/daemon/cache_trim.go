@@ -343,6 +343,16 @@ func (d *Daemon) cacheTrimLogf(format string, args ...any) {
 	}
 }
 
+// cacheTrimLogKeyed logs one cache trim line at most once an hour for its own
+// key. The fit refusal and the free-space-unknown line each have a key of their
+// own (claim and namespace included), so one being held back never hides the
+// other, and a changed figure in the text does not slip past the hold.
+func (d *Daemon) cacheTrimLogKeyed(key, format string, args ...any) {
+	if d.diskMaintSchedule.allowLog(key, d.diskMaintenanceSeams().now(), cacheTrimRefusalLogInterval) {
+		d.logger.Printf(format, args...)
+	}
+}
+
 // cacheTrimClaim trims one claim in one namespace: it reads the listing through
 // a pod that mounts the claim there, builds the trim, and in apply mode applies
 // it. trimmed is the namespace each claim this pass already trims in, which the
@@ -406,9 +416,11 @@ func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim ca
 	if m.Route() == cachevol.TrimRouteClaim {
 		free, err := d.cacheTrimFree(ctx, kubeconfig, sources[0])
 		if err != nil {
-			d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: free space unknown: %v; trimming the claim route without the fit check", claim.ClaimName, namespace, err)
+			d.cacheTrimLogKeyed("cache_trim_free_unknown:"+namespace+"/"+claim.ClaimName,
+				"disk_maintenance: cache trim %s in %s: free space unknown: %v; trimming the claim route without the fit check", claim.ClaimName, namespace, err)
 		} else if err := cacheTrimClaimFits(listing, capBytes, sandboxes, free); err != nil {
-			d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: %v; nothing trimmed", claim.ClaimName, namespace, err)
+			d.cacheTrimLogKeyed("cache_trim_no_fit:"+namespace+"/"+claim.ClaimName,
+				"disk_maintenance: cache trim %s in %s: %v; nothing trimmed", claim.ClaimName, namespace, err)
 			return false
 		}
 	}
@@ -426,13 +438,18 @@ func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim ca
 
 // cacheTrimClaimFits refuses a claim-carried trim whose removal list the claim
 // has no room for: the Job's init container writes the list into the claim, so a
-// list larger than the free space df reported would fail the writer.
+// claim with less room than the WRITER needs would fail it. The writer needs
+// polecatimage.TrimListRoom of the encoded list (the list and its digest, each on
+// disk twice while the second is renamed), and that same function is compared
+// here, not the list's length alone.
 //
 // The list's size is PlanTrim's removals encoded as the writer encodes them --
 // json.Marshal of the path slice, internal/polecatimage/trimlist.go WriteTrimList
 // -- measured from the listing this pass already has; the writer plans the same
 // list again when the Job runs, so a claim that changed in between can still end
-// under its cap.
+// under its cap. The writer's rule has no further margin: the filesystem's block
+// rounding is the writer's own measurement to make, and it refuses again if the
+// room shrank.
 func cacheTrimClaimFits(listing []cachevol.Entry, capBytes int64, sandboxes int, free int64) error {
 	plan := cachevol.PlanTrim(listing, capBytes, sandboxes > 0)
 	paths := make([]string, 0, len(plan.Removals))
@@ -441,8 +458,8 @@ func cacheTrimClaimFits(listing []cachevol.Entry, capBytes int64, sandboxes int,
 	}
 	// A string slice's JSON encoding cannot fail, so the error is dropped.
 	data, _ := json.Marshal(paths)
-	if int64(len(data)) > free {
-		return fmt.Errorf("the removal list (%d) does not fit the claim's free space (%d)", len(data), free)
+	if need := polecatimage.TrimListRoom(len(data)); need > free {
+		return fmt.Errorf("the removal list (%d bytes) needs %d bytes of room to be written with its digest and does not fit the claim's free space (%d)", len(data), need, free)
 	}
 	return nil
 }
