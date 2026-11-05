@@ -9,12 +9,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/update"
 )
 
-// archiveRequestConfig is a patrol config whose history archive writes to dir.
-// Its window is gcModeConfig's 03:00, which archiveRequestDaemon's clock is
-// outside: an archive request runs at any hour.
+// archiveRequestDaemon is a daemon on archiveConfig(t.TempDir()), whose window
+// comes from gcModeConfig and is outside the fake clock: an archive request
+// runs at any hour. The gc and archive seams are faked, with one database per
+// name.
 func archiveRequestDaemon(t *testing.T, now time.Time, databases ...string) (*Daemon, *gcFakes, *commitFake) {
 	t.Helper()
 	d, _ := gcTestDaemon(t)
@@ -270,6 +272,49 @@ func TestArchiveRequestDoesNotConsumeTheWindow(t *testing.T) {
 	if len(f.gcCalls)+len(f.backupCalls) != 0 {
 		t.Errorf("gc/backup calls = %v/%v: an archive request runs neither", f.gcCalls, f.backupCalls)
 	}
+}
+
+// A tick that serves an archive request settles the stale-gc alerts before the
+// pass, raising the same alert a tick with no request raises: the check is on
+// the tick's path, not one the request branches around. Removing the call from
+// that path leaves the stale database silent and turns the first case red.
+func TestArchiveRequestTickStillSettlesStaleGCAlerts(t *testing.T) {
+	t.Parallel()
+
+	t.Run("serving an archive request", func(t *testing.T) {
+		t.Parallel()
+		d, _, cf := archiveRequestDaemon(t, outsideRequestNow, "hq")
+		cf.commits = map[string][]archiveCommit{
+			"hq": {{Hash: "bbb222", Committer: "operator", Date: outsideRequestNow.Add(-time.Hour), Message: "hq: one"}},
+		}
+		recordRun(t, d, "hq", 12, 100*mib)
+		writeArchiveRequestFile(t, d, "run-archive", outsideRequestNow)
+
+		d.runScheduledMaintenance()
+
+		rec := d.notifier.(*notifyfake.Recorder)
+		esc := rec.Escalations()
+		if len(esc) != 1 || esc[0].Escalation.Fingerprint != doltGCStaleAlertKey("hq") {
+			t.Fatalf("escalations on the archive tick = %+v, want one for hq", esc)
+		}
+		if res := readArchiveAnswer(t, d); res.Outcome != "completed" {
+			t.Errorf("archive result = %+v, want completed", res)
+		}
+	})
+
+	t.Run("a tick with no request", func(t *testing.T) {
+		t.Parallel()
+		d, _, _ := archiveRequestDaemon(t, outsideRequestNow, "hq")
+		recordRun(t, d, "hq", 12, 100*mib)
+
+		d.runScheduledMaintenance()
+
+		rec := d.notifier.(*notifyfake.Recorder)
+		esc := rec.Escalations()
+		if len(esc) != 1 || esc[0].Escalation.Fingerprint != doltGCStaleAlertKey("hq") {
+			t.Fatalf("escalations on a tick with no request = %+v, want one for hq", esc)
+		}
+	})
 }
 
 // The archive request and result names differ from the maintenance pair's, and

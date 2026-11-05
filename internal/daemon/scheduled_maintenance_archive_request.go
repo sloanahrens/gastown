@@ -86,7 +86,8 @@ func archiveRequestDetail(databases []string, unarchived map[string]bool) (strin
 }
 
 // serveArchiveRequest runs the history archive pass for req and answers it,
-// without doing any of the cycle's other work.
+// without doing any of the cycle's other work. The tick calls it only after
+// its patrol-activity gate, so the patrol has been checked by then.
 //
 // A cycle already running holds the single-flight slot, so the request stays
 // for the next tick. A standby answers deferred at once rather than leaving the
@@ -106,10 +107,6 @@ func (d *Daemon) serveArchiveRequest(req update.RequestFile) {
 			d.maintenanceGCRunning.Store(false)
 		}
 	}()
-	if !d.isPatrolActive("scheduled_maintenance") {
-		d.answerArchive(req, gcOutcomeFailed, "the scheduled_maintenance patrol is not active")
-		return
-	}
 	if reason := d.standbyReason(d.maintenance().now()); reason != "" {
 		d.answerArchive(req, gcOutcomeDeferred, reason)
 		return
