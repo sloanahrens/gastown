@@ -59,6 +59,23 @@ Never run a manual `dolt gc` or `CALL dolt_gc()` alongside it. If you need
 one, pause first (`gt dolt pause --reason "manual gc" --until 30m`) and
 `gt dolt unpause` after, so clients and the daemon know.
 
+## Plan the flatten for the morning after a window
+
+Plan a flatten for the morning after a maintenance window. That window's
+archive pass archives what was committed before it and `gt dolt archive-now`
+archives the rest, so the pair is what brings every database's archive to 0
+behind before the flatten.
+
+The window hour is the daemon's clock, not the reader's: read it from the
+`scheduled_maintenance: in window HH:MM` line in `~/gt/daemon/daemon.log`,
+which is stamped in the daemon container's own timezone. A container with no
+timezone database runs the window in UTC, which was the case from the
+2026-11-04 cutover until gt-gg9hv.34, so confirm the clock with `date` in the
+daemon container (`docker exec <daemon container> date`) and with that log
+line before choosing the morning. Wait until the window has logged
+`cycle completed` — the line comes after that window's archive, backup and
+gc — before parking the town.
+
 ## Before any rewrite
 
 1. Park the town, or at least every rig that writes to the database. A
@@ -66,7 +83,24 @@ one, pause first (`gt dolt pause --reason "manual gc" --until 30m`) and
    concurrent writes because Dolt merges the in-flight transaction.
 2. Take a backup (copy the database directory while the server is stopped;
    the nightly backups under `~/gt-backups/dolt` are the other copy, see
-   `docs/dolt-restore.md`). Check that every database's archive line in
+   `docs/dolt-restore.md`).
+
+   Then bring the archive up to date. The overseer creates the dispatch hold
+   `~/gt/seat-refill.hold`; no bird and no operator session creates or lifts
+   it. With the hold set and the town parked, run:
+
+   ```bash
+   gt dolt archive-now
+   ```
+
+   Stop if it exits 1, 2 or 3, and read the exit code as what happened to the
+   pass: 1 is a failed pass; 2 is still pending, so run `gt dolt archive-now`
+   again; 3 is a refusal, either for want of the dispatch hold or because an
+   archive request is already pending. Then read `gt dolt status` again until
+   every database's commit line and events line read `0 commits behind` and
+   `0 events behind`.
+
+   Check that every database's archive line in
    `gt dolt status` reads `0 commits behind` before you continue: the archive
    is the copy of `dolt_log` that outlives a flatten. Stop if the status
    prints any `ARCHIVE CHECK UNAVAILABLE` line: it could not check the
