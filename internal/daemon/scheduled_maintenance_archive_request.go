@@ -9,12 +9,12 @@ import (
 	"github.com/steveyegge/gastown/internal/update"
 )
 
-// The archive-now request (gt-xr2byt): the operator's command writes
-// archive-request in the town's update directory, and the next
-// scheduled_maintenance tick runs the history archive pass alone and answers in
-// archive-result.json. The pass is maintenanceArchive, the same function the
-// 03:00 window calls, in the gc cycle's single-flight slot; nothing here backs
-// up, gc's or consumes the maintenance window.
+// The archive-now request (gt-xr2byt): the command writes the archive-request
+// file in the town's update directory, and the next scheduled_maintenance tick
+// runs the history archive pass alone and answers in archive-result.json. The
+// pass is maintenanceArchive, the same function the 03:00 window calls, run in
+// the gc cycle's single-flight slot. Nothing here backs up, starts a gc, or
+// consumes the maintenance window.
 
 func archiveRequestPath(dir string) string {
 	return filepath.Join(dir, update.ArchiveRequestFileName)

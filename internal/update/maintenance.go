@@ -180,13 +180,13 @@ func settleExistingRequest(files MaintFiles, p requestPair, path, runID string) 
 // timeout the result is Outcome "deferred" with the request left in place for
 // the daemon's next tick. A canceled context returns its error.
 func (m *MaintenanceRequest) Wait(ctx context.Context, sleep func(context.Context, time.Duration) error, runID string, timeout, poll time.Duration) (MaintenanceResult, error) {
-	return waitForCycle(m.Dir, maintenancePair(), m.Files, m.Clock, ctx, sleep, runID, timeout, poll)
+	return waitForCycle(ctx, m.Dir, maintenancePair(), m.Files, m.Clock, sleep, runID, timeout, poll)
 }
 
 // Wait polls the archive request file exactly as MaintenanceRequest.Wait polls
 // the maintenance one and returns the daemon's answer.
 func (a *ArchiveRequest) Wait(ctx context.Context, sleep func(context.Context, time.Duration) error, runID string, timeout, poll time.Duration) (MaintenanceResult, error) {
-	return waitForCycle(a.Dir, archivePair(), a.Files, a.Clock, ctx, sleep, runID, timeout, poll)
+	return waitForCycle(ctx, a.Dir, archivePair(), a.Files, a.Clock, sleep, runID, timeout, poll)
 }
 
 // requestPath is the maintenance request file inside Dir.
@@ -196,7 +196,7 @@ func (m *MaintenanceRequest) requestPath() string { return maintenancePair().req
 func (m *MaintenanceRequest) resultPath() string { return maintenancePair().resultPath(m.Dir) }
 
 // waitForCycle is Wait over one file pair.
-func waitForCycle(dir string, p requestPair, files MaintFiles, clock Clock, ctx context.Context, sleep func(context.Context, time.Duration) error, runID string, timeout, poll time.Duration) (MaintenanceResult, error) {
+func waitForCycle(ctx context.Context, dir string, p requestPair, files MaintFiles, clock Clock, sleep func(context.Context, time.Duration) error, runID string, timeout, poll time.Duration) (MaintenanceResult, error) {
 	if runID == "" {
 		return MaintenanceResult{}, fmt.Errorf("wait for %s result: empty run id", p.kind)
 	}
