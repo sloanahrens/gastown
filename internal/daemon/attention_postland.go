@@ -2,6 +2,10 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
+	"maps"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -16,25 +20,73 @@ import (
 // not stay in the queue forever.
 const postLandUnknownWindow = 7 * 24 * time.Hour
 
+// postLandUnknownFile is the durable copy of the store, under the town's
+// daemon directory.
+const postLandUnknownFile = "post_land_unknowns.json"
+
 // postLandUnknownStore holds the landed commits whose post-land status context
-// never reached a verdict, keyed by landworker.PostLandUnknown.Key. It is in
-// memory, and the runner calls OnUnknown before it removes the timed-out
-// pending entry, so a restart between the two reads the entry again and raises
-// the same key: the attention state keeps its first_seen instead of losing the
-// item (gt-gg9hv.7.1).
+// never reached a verdict, keyed by landworker.PostLandUnknown.Key. With a path
+// it is durable: record writes the file before it returns nil, and the runner
+// removes the timed-out pending entry only after that nil, so a restart finds
+// either the entry (and raises the same key again) or the record (gt-gg9hv.7.1).
+// A store with no path lives in memory, as the tests build it.
 type postLandUnknownStore struct {
-	mu   sync.Mutex
-	recs map[string]landworker.PostLandUnknown
+	path   string
+	mu     sync.Mutex
+	loaded bool
+	recs   map[string]landworker.PostLandUnknown
 }
 
-// record stores u, replacing a record with the same key so a rerun at the same
-// commit keeps one, and drops records older than window before u.At.
-func (s *postLandUnknownStore) record(u landworker.PostLandUnknown, window time.Duration) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// load reads the file once; a missing or unreadable file starts empty, and the
+// pending entries still in the rig's store raise their records again.
+func (s *postLandUnknownStore) load() {
+	if s.loaded {
+		return
+	}
+	s.loaded = true
 	if s.recs == nil {
 		s.recs = map[string]landworker.PostLandUnknown{}
 	}
+	if s.path == "" {
+		return
+	}
+	data, err := os.ReadFile(s.path)
+	if err != nil {
+		return
+	}
+	var stored map[string]landworker.PostLandUnknown
+	if json.Unmarshal(data, &stored) == nil {
+		maps.Copy(s.recs, stored)
+	}
+}
+
+// save writes the records through a temporary file and a rename, so a crash
+// mid-write leaves the previous file rather than a torn one.
+func (s *postLandUnknownStore) save() error {
+	if s.path == "" {
+		return nil
+	}
+	data, err := json.Marshal(s.recs)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
+		return err
+	}
+	tmp := s.path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, s.path)
+}
+
+// record stores u, replacing a record with the same key so a rerun at the same
+// commit keeps one, and drops records older than window before u.At. It returns
+// nil only when the record is stored durably.
+func (s *postLandUnknownStore) record(u landworker.PostLandUnknown, window time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.load()
 	cutoff := u.At.Add(-window)
 	for key, r := range s.recs {
 		if r.At.Before(cutoff) {
@@ -42,6 +94,7 @@ func (s *postLandUnknownStore) record(u landworker.PostLandUnknown, window time.
 		}
 	}
 	s.recs[u.Key()] = u
+	return s.save()
 }
 
 // snapshot returns the records at or after since, ordered by key so the queue
@@ -49,6 +102,7 @@ func (s *postLandUnknownStore) record(u landworker.PostLandUnknown, window time.
 func (s *postLandUnknownStore) snapshot(since time.Time) []landworker.PostLandUnknown {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.load()
 	out := make([]landworker.PostLandUnknown, 0, len(s.recs))
 	for _, r := range s.recs {
 		if r.At.Before(since) {

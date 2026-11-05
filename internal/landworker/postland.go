@@ -82,6 +82,9 @@ const postLandTailLines = 10
 // adds no duplicate bead, revert or attention item.
 type PostLandRunner struct {
 	Rig string
+	// statusUnwiredLogged is true once the runner has said a configured status
+	// context fell back to command mode for want of a reader or a store.
+	statusUnwiredLogged bool
 	// Command returns the command to run; "" leaves the command mode off.
 	// It is read at every trigger and every run, so a settings change applies
 	// to the next landing.
@@ -98,9 +101,11 @@ type PostLandRunner struct {
 	// resumes them; nil disables status mode.
 	State MainStateStore
 	// OnUnknown, when set, receives the record for a landed commit whose
-	// status context never reached a verdict before Timeout. It is called
-	// once per landed commit.
-	OnUnknown func(ctx context.Context, u PostLandUnknown)
+	// status context never reached a verdict before Timeout, and returns nil
+	// once the alarm is stored durably. The pending entry stays in the store,
+	// marked timed out, until it returns nil; an error keeps the entry and the
+	// next pass calls it again with the same keyed record.
+	OnUnknown func(ctx context.Context, u PostLandUnknown) error
 	// OnStoreFailure, when set, receives the rig's pending-verdict store
 	// failure once PostLandStatusStoreFailureAfter passes running have failed
 	// to read or write it, and nil on the pass that reaches the store again,
@@ -173,6 +178,15 @@ func (p *PostLandRunner) enabled() bool {
 // Trigger schedules the verdict for pl and returns at once. In status mode it
 // only records the pending verdict; the command mode starts a run.
 func (p *PostLandRunner) Trigger(ctx context.Context, pl PostLand) {
+	if p.statusContext() != "" && !p.statusEnabled() {
+		p.mu.Lock()
+		warn := !p.statusUnwiredLogged
+		p.statusUnwiredLogged = true
+		p.mu.Unlock()
+		if warn {
+			p.logf("merge_queue.post_land_status_context %q is set but this runner has no status reader or state store, so the post_land_command (if any) decides the verdict", p.statusContext())
+		}
+	}
 	if !p.enabled() {
 		return
 	}

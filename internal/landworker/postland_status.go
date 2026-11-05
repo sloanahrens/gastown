@@ -183,6 +183,11 @@ type PendingPostLand struct {
 	// LastState and LastDescription are what that read found.
 	LastState       string `json:"last_state,omitempty"`
 	LastDescription string `json:"last_description,omitempty"`
+	// TimedOut marks an entry whose timeout passed. It stays in the store,
+	// with the context and the last state above, until OnUnknown has
+	// confirmed the alarm stored; a daemon that stops in between finds it
+	// marked and raises the same keyed alarm again.
+	TimedOut bool `json:"timed_out,omitempty"`
 }
 
 // PostLandUnknown is a landed commit whose post-land status context never
@@ -353,6 +358,15 @@ func (p *PostLandRunner) PollPending(ctx context.Context) {
 
 	var keep []PendingPostLand
 	var fires []func()
+	// raises are the timed-out entries whose alarm is raised after the loop;
+	// each stays in keep, marked, until OnUnknown confirms it.
+	type unknownRaise struct {
+		at   int
+		pl   PostLand
+		name string
+		last PostLandStatusResult
+	}
+	var raises []unknownRaise
 	for _, e := range entries {
 		if ctx.Err() != nil {
 			keep = append(keep, e)
@@ -364,7 +378,7 @@ func (p *PostLandRunner) PollPending(ctx context.Context) {
 			changed = true
 			continue
 		}
-		if p.Status != nil && (e.LastRead.IsZero() || now.Sub(e.LastRead) >= PostLandStatusPollInterval) {
+		if p.Status != nil && !e.TimedOut && (e.LastRead.IsZero() || now.Sub(e.LastRead) >= PostLandStatusPollInterval) {
 			res := p.readStatus(ctx, pl, name)
 			if ctx.Err() != nil {
 				keep = append(keep, e)
@@ -383,14 +397,16 @@ func (p *PostLandRunner) PollPending(ctx context.Context) {
 			e.LastRead, e.LastState, e.LastDescription = now, res.State, res.Description
 		}
 		if !now.Before(e.Since.Add(timeout)) {
-			p.markDone(pl.Commit)
-			decided = append(decided, pl.Commit)
 			last := PostLandStatusResult{State: e.LastState, Description: e.LastDescription}
 			if last.State == "" {
 				last.State = "unread"
 			}
-			fires = append(fires, func() { p.raiseUnknown(ctx, pl, name, last) })
+			// The entry is marked and kept: it is removed only after
+			// OnUnknown confirms the alarm stored.
 			changed = true
+			e.TimedOut = true
+			raises = append(raises, unknownRaise{at: len(keep), pl: pl, name: name, last: last})
+			keep = append(keep, e)
 			continue
 		}
 		keep = append(keep, e)
@@ -401,6 +417,32 @@ func (p *PostLandRunner) PollPending(ctx context.Context) {
 	}
 	for _, fire := range fires {
 		fire()
+	}
+	if len(raises) > 0 {
+		drop := map[int]bool{}
+		for _, r := range raises {
+			if ctx.Err() != nil {
+				break
+			}
+			if err := p.raiseUnknown(ctx, r.pl, r.name, r.last); err != nil {
+				p.logf("WARNING the post-land alarm for %s (%s) is not stored yet; its entry is kept and the alarm raised again next pass: %s",
+					short(r.pl.Commit), r.pl.by(), sanitizeStatusText(err.Error()))
+				continue
+			}
+			p.markDone(r.pl.Commit)
+			decided = append(decided, r.pl.Commit)
+			drop[r.at] = true
+		}
+		if len(drop) > 0 {
+			kept := keep[:0:0]
+			for i, e := range keep {
+				if !drop[i] {
+					kept = append(kept, e)
+				}
+			}
+			keep = kept
+		}
+		changed = true
 	}
 	if ctx.Err() != nil {
 		// The daemon is stopping mid-pass. The entries stay in the store for
@@ -441,8 +483,8 @@ func (p *PostLandRunner) markDone(commit string) {
 // PostLandStatusStoreFailureAfter passes running have failed.
 func (p *PostLandRunner) storeFailure(ctx context.Context, err error) {
 	p.storeFailures++
-	p.logf("WARNING %s cannot reach the pending post-land verdicts (%d passes running); every entry is kept for the next pass: %v",
-		p.Rig, p.storeFailures, err)
+	p.logf("WARNING %s cannot reach the pending post-land verdicts (%d passes running); every entry is kept for the next pass: %s",
+		p.Rig, p.storeFailures, sanitizeStatusText(err.Error()))
 	if p.storeFailureRaised || p.storeFailures < PostLandStatusStoreFailureAfter {
 		return
 	}
@@ -515,10 +557,11 @@ func (p *PostLandRunner) fire(ctx context.Context, pl PostLand, name string, res
 	}
 }
 
-// raiseUnknown records that a landed commit's status context gave no verdict
-// before its timeout, and hands the record on for the attention queue. Its
-// pending entry is already gone, so each commit raises once.
-func (p *PostLandRunner) raiseUnknown(ctx context.Context, pl PostLand, name string, last PostLandStatusResult) {
+// raiseUnknown hands a landed commit's timed-out record to OnUnknown and
+// returns its error: the caller removes the pending entry only when the alarm
+// is confirmed stored, so an entry still in the store is an alarm not yet
+// durable, and the next pass raises the same keyed record again.
+func (p *PostLandRunner) raiseUnknown(ctx context.Context, pl PostLand, name string, last PostLandStatusResult) error {
 	u := PostLandUnknown{
 		Rig:     p.Rig,
 		SHA:     pl.Commit,
@@ -528,7 +571,8 @@ func (p *PostLandRunner) raiseUnknown(ctx context.Context, pl PostLand, name str
 	}
 	p.logf("UNKNOWN: no verdict for status %q on %s (%s) (last state %s: %s); the post-land check is silent and nothing is reverted",
 		name, short(pl.Commit), pl.by(), last.State, last.Description)
-	if p.OnUnknown != nil {
-		p.OnUnknown(ctx, u)
+	if p.OnUnknown == nil {
+		return nil
 	}
+	return p.OnUnknown(ctx, u)
 }

@@ -1181,8 +1181,8 @@ func (d *Daemon) newPostLandRunner(rigName, rigPath string, w postLandWiring) *l
 		StatusContext: func() string { return rigPostLandStatusContext(rigPath) },
 		Status:        w.Status,
 		State:         w.State,
-		OnUnknown: func(_ context.Context, u landworker.PostLandUnknown) {
-			d.postLandUnknowns.record(u, postLandUnknownWindow)
+		OnUnknown: func(_ context.Context, u landworker.PostLandUnknown) error {
+			return d.postLandUnknowns.record(u, postLandUnknownWindow)
 		},
 		// The store failure is the same silence the timeout item reports: no
 		// verdict is being reached. It is keyed by rig, and the pass that

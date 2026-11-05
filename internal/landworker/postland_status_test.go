@@ -95,6 +95,7 @@ type statusVerdicts struct {
 	reds         int
 	redTails     []string
 	unknowns     []PostLandUnknown
+	unknownErr   error // what OnUnknown answers; nil confirms the alarm stored
 	storeFails   []*PostLandStoreFailure
 	storeCleared int
 	logs         []string
@@ -128,10 +129,11 @@ func (v *statusVerdicts) runner(status func(context.Context, PostLand) (*forgejo
 			v.redTails = append(v.redTails, res.Tail)
 			v.mu.Unlock()
 		},
-		OnUnknown: func(_ context.Context, u PostLandUnknown) {
+		OnUnknown: func(_ context.Context, u PostLandUnknown) error {
 			v.mu.Lock()
 			v.unknowns = append(v.unknowns, u)
 			v.mu.Unlock()
+			return v.unknownErr
 		},
 		OnStoreFailure: func(_ context.Context, f *PostLandStoreFailure) {
 			v.mu.Lock()
@@ -940,4 +942,83 @@ func TestPostLandStatusContextWinsOverCommand(t *testing.T) {
 			t.Fatalf("the command ran %d times with no context, want once", ran)
 		}
 	})
+}
+
+// TestPostLandStatusTimeoutEntryOutlivesAnUnconfirmedAlarm: a timed-out entry is
+// marked and kept in the store until OnUnknown confirms the alarm stored. A
+// daemon that stops between the mark and the confirmation (or an OnUnknown that
+// fails) loses nothing: the restarted runner finds the entry and raises the same
+// keyed record again, and once confirmed the entry goes and no second alarm
+// follows.
+func TestPostLandStatusTimeoutEntryOutlivesAnUnconfirmedAlarm(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	pl := PostLand{BeadID: "gt-abc", Commit: "abc1234567890", Target: "main"}
+	const timeout = 10 * time.Minute
+	store := &MemoryMainState{}
+	clk := &manualClock{now: statusT0}
+	reads := &fakeStatusReads{responses: []fakeStatusRead{{status: combinedFor(statusContext, forgejo.StatePending)}}}
+
+	// First daemon: the alarm cannot be stored, as when it stops right after
+	// the timeout fires.
+	first := &statusVerdicts{unknownErr: errors.New("attention store unavailable")}
+	r := first.runner(reads.read, store, clk, timeout)
+	r.Trigger(ctx, pl)
+	r.PollPending(ctx)
+	clk.Advance(timeout)
+	r.PollPending(ctx)
+	if n := first.unknownCount(); n != 1 {
+		t.Fatalf("first daemon raised %d alarms at the timeout, want one attempt", n)
+	}
+	st, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.PostLandPending) != 1 || !st.PostLandPending[0].TimedOut {
+		t.Fatalf("store after an unconfirmed alarm = %+v, want the one entry, marked timed out", st.PostLandPending)
+	}
+
+	// Restarted daemon over the same store: the alarm is confirmed this time.
+	second := &statusVerdicts{}
+	r2 := second.runner(reads.read, store, clk, timeout)
+	r2.PollPending(ctx)
+	if n := second.unknownCount(); n != 1 {
+		t.Fatalf("restarted daemon raised %d alarms, want exactly one", n)
+	}
+	if got, want := second.unknowns[0].Key(), first.unknowns[0].Key(); got != want {
+		t.Fatalf("restarted key %q differs from the first %q: the repeat would not be idempotent", got, want)
+	}
+	if st, _ := store.Load(); len(st.PostLandPending) != 0 {
+		t.Fatalf("store after a confirmed alarm = %+v, want the entry removed", st.PostLandPending)
+	}
+	r2.PollPending(ctx)
+	if n := second.unknownCount(); n != 1 {
+		t.Fatalf("alarms after confirmation = %d, want still one", n)
+	}
+}
+
+// TestPostLandStatusContextWithoutAReaderSaysSoOnce: a configured status context
+// on a runner that has no status reader falls back to the command, and the
+// runner says so once instead of switching modes silently.
+func TestPostLandStatusContextWithoutAReaderSaysSoOnce(t *testing.T) {
+	t.Parallel()
+	var lines []string
+	r := &PostLandRunner{
+		Rig:           "gastown",
+		StatusContext: func() string { return statusContext },
+		Command:       func() string { return "" },
+		Logf:          func(format string, a ...any) { lines = append(lines, fmt.Sprintf(format, a...)) },
+	}
+	for i := 0; i < 3; i++ {
+		r.Trigger(context.Background(), PostLand{Commit: "abc1234567890", Target: "main"})
+	}
+	n := 0
+	for _, l := range lines {
+		if strings.Contains(l, "no status reader or state store") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("fallback line logged %d times over three triggers, want once:\n%s", n, strings.Join(lines, "\n"))
+	}
 }

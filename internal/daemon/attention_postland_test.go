@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -70,5 +72,42 @@ func TestCollectPostLandUnknownSkipsRecordsPastTheWindow(t *testing.T) {
 	}
 	if len(items) != 0 {
 		t.Fatalf("items = %+v, want none past the window", items)
+	}
+}
+
+// TestPostLandUnknownStoreSurvivesARestart: record answers nil only once the
+// file is written, a store built over the same path after a restart still holds
+// the record, and a path that cannot be written answers an error so the runner
+// keeps the pending entry (gt-gg9hv.7.1).
+func TestPostLandUnknownStoreSurvivesARestart(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	u := landworker.PostLandUnknown{Rig: attentionRig, SHA: "abc1234567890", Context: "ci / post-land (push)", State: "pending", At: now}
+	path := filepath.Join(t.TempDir(), "daemon", postLandUnknownFile)
+
+	first := postLandUnknownStore{path: path}
+	if err := first.record(u, postLandUnknownWindow); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	restarted := postLandUnknownStore{path: path}
+	got := restarted.snapshot(time.Time{})
+	if len(got) != 1 || got[0].Key() != u.Key() || got[0].State != "pending" {
+		t.Fatalf("restarted store = %+v, want the one record", got)
+	}
+	// The same key raised again after the restart replaces it: still one item.
+	if err := restarted.record(u, postLandUnknownWindow); err != nil {
+		t.Fatalf("second record: %v", err)
+	}
+	if n := len(restarted.snapshot(time.Time{})); n != 1 {
+		t.Fatalf("records after a repeat = %d, want one", n)
+	}
+
+	blocked := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	broken := postLandUnknownStore{path: filepath.Join(blocked, "sub", postLandUnknownFile)}
+	if err := broken.record(u, postLandUnknownWindow); err == nil {
+		t.Fatal("record under an unwritable path answered nil, want the error that keeps the pending entry")
 	}
 }
