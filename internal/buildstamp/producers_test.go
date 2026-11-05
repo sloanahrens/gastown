@@ -179,8 +179,9 @@ func makefileStampLenErr(mk string) error {
 // TestProducersUseOneStampRule: each producer the test lists takes the first Len
 // characters of the full sha, so an installed gt, a polecat image tag and a
 // daemon image stamp can never differ. The Makefile's stamp variables all take
-// their characters from HEAD_STAMP, which cuts to STAMP_LEN, the same Len, and no listed producer asks git for an
-// abbreviation, whose length git sizes by the object count (gt-ian66).
+// their characters from HEAD_STAMP, which cuts to STAMP_LEN (the same Len), and
+// no listed producer asks git for an abbreviation, whose length git sizes by the
+// object count (gt-ian66).
 func TestProducersUseOneStampRule(t *testing.T) {
 	t.Parallel()
 	mk, err := readRepoFile(makefilePath)
