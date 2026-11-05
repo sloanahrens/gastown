@@ -276,7 +276,7 @@ func TestDaemonDockerfileFetchesNothingAndInstallsOnlyThePackages(t *testing.T) 
 		line := in.cmd + " " + strings.Join(in.args, " ")
 		for _, banned := range []string{"wget", "http://", "https://", "git clone", "tar -", "install -m"} {
 			if strings.Contains(line, banned) {
-				t.Errorf("%s has %q in %q; the image fetches and installs nothing but the four packages", DockerfilePath, banned, line)
+				t.Errorf("%s has %q in %q; the image fetches and installs nothing but the listed packages", DockerfilePath, banned, line)
 			}
 		}
 		if in.cmd != "RUN" {
