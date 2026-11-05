@@ -157,61 +157,47 @@ func TestRunnerOSRunnerExecsWithTheAllowlistedEnvironment(t *testing.T) {
 	}
 }
 
-// runChildEnv runs `env` through the OSRunnerDir seam, with parent as the
-// parent's environment, and returns the child's environment by name.
-func runChildEnv(t *testing.T, parent map[string]string) map[string]string {
-	t.Helper()
-	lookup := func(name string) (string, bool) {
+// fakeParentEnv is a parent environment for childEnv: only the names in parent
+// are set, so a test never reads or changes the process environment.
+func fakeParentEnv(parent map[string]string) func(string) (string, bool) {
+	return func(name string) (string, bool) {
 		v, ok := parent[name]
 		return v, ok
 	}
-	out, err := osRunnerDirLookup(DefaultAllowEnv, lookup)(context.Background(), t.TempDir(), []string{"/bin/sh", "-c", "env"})
-	if err != nil {
-		t.Fatalf("OSRunnerDir: %v", err)
-	}
-	env := map[string]string{}
-	for _, line := range strings.Split(string(out), "\n") {
-		if name, value, ok := strings.Cut(line, "="); ok {
-			env[name] = value
-		}
-	}
-	return env
 }
 
 func TestDefaultAllowEnvPassesTheDoltEndpoint(t *testing.T) {
 	t.Parallel()
-	env := runChildEnv(t, map[string]string{
+	got := childEnv(DefaultAllowEnv, nil, fakeParentEnv(map[string]string{
 		"BEADS_DOLT_SERVER_HOST": "host.docker.internal",
 		"BEADS_DOLT_SERVER_PORT": "3307",
-	})
-	if got := env["BEADS_DOLT_SERVER_HOST"]; got != "host.docker.internal" {
-		t.Errorf("child BEADS_DOLT_SERVER_HOST = %q, want %q", got, "host.docker.internal")
-	}
-	if got := env["BEADS_DOLT_SERVER_PORT"]; got != "3307" {
-		t.Errorf("child BEADS_DOLT_SERVER_PORT = %q, want %q", got, "3307")
+	}))
+	want := []string{"BEADS_DOLT_SERVER_HOST=host.docker.internal", "BEADS_DOLT_SERVER_PORT=3307"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("childEnv(DefaultAllowEnv) = %v, want %v (the Dolt endpoint must reach a child bd)", got, want)
 	}
 }
 
 func TestDefaultAllowEnvStillDropsOtherVariables(t *testing.T) {
 	t.Parallel()
-	env := runChildEnv(t, map[string]string{
-		"TOWN_METRICS_TEST_TOKEN": "parent-only",
+	got := childEnv(DefaultAllowEnv, nil, fakeParentEnv(map[string]string{
+		"BEADS_DOLT_SERVER_HOST":  "host.docker.internal",
+		"BEADS_DOLT_SERVER_PORT":  "3307",
 		"BEADS_DOLT_PASSWORD":     "parent-only",
-	})
-	for _, name := range []string{"TOWN_METRICS_TEST_TOKEN", "BEADS_DOLT_PASSWORD"} {
-		if _, ok := env[name]; ok {
-			t.Errorf("child sees %s, which the allowlist does not name", name)
-		}
+		"TOWN_METRICS_TEST_TOKEN": "parent-only",
+	}))
+	want := []string{"BEADS_DOLT_SERVER_HOST=host.docker.internal", "BEADS_DOLT_SERVER_PORT=3307"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("childEnv(DefaultAllowEnv) = %v, want only the endpoint %v (a credential the allowlist omits must not reach a child)", got, want)
 	}
 }
 
 func TestDefaultAllowEnvUnsetEndpointStaysAbsent(t *testing.T) {
 	t.Parallel()
-	env := runChildEnv(t, map[string]string{})
-	for _, name := range []string{"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT"} {
-		if _, ok := env[name]; ok {
-			t.Errorf("child sees %s although the parent does not set it", name)
-		}
+	got := childEnv(DefaultAllowEnv, nil, fakeParentEnv(map[string]string{"PATH": "/usr/bin"}))
+	want := []string{"PATH=/usr/bin"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("childEnv(DefaultAllowEnv) = %v, want %v (an unset endpoint variable must stay absent)", got, want)
 	}
 }
 
