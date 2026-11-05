@@ -168,7 +168,7 @@ func TestArchiveNotesReportsUnreadableWatermarks(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	notes, err := archiveNotes(townRoot, &doltserver.Config{}, []string{"gt", "hq"})
+	notes, err := archiveNotes(townRoot, stubArchiveBehindReader{}, []string{"gt", "hq"})
 	if err == nil {
 		t.Fatal("an unreadable watermark file was read as no watermarks")
 	}

@@ -507,8 +507,45 @@ func runDoltRestart(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// doltStatusReads is where `gt dolt status` reads the town and the server: the
+// town root, whether the server answers, its metrics, the databases it serves,
+// the archive reader the database lines count through, the beads client config,
+// and the stray-server warning. Production passes the real calls; a test passes
+// fakes, so the report runs with no live Dolt, no Docker container, no host
+// process scan and no beads config on disk (gt-w1ekf).
+type doltStatusReads struct {
+	townRoot           func() (string, error)
+	isRunning          func(townRoot string) (bool, int, error)
+	healthMetrics      func(townRoot string) *doltserver.HealthMetrics
+	verifyDatabases    func(townRoot string) (served, missing []string, err error)
+	servedDatabases    func(config *doltserver.Config) ([]string, error)
+	archiveReader      func(townRoot string, config *doltserver.Config, databases []string) archiveBehindReader
+	beadsRuntimeConfig func(w io.Writer, townRoot string)
+	strayWarning       func(townRoot string)
+}
+
+// liveDoltStatusReads is the status command's production reads.
+func liveDoltStatusReads() doltStatusReads {
+	return doltStatusReads{
+		townRoot:           workspace.FindFromCwdOrError,
+		isRunning:          doltserver.IsRunning,
+		healthMetrics:      doltserver.GetHealthMetrics,
+		verifyDatabases:    doltserver.VerifyDatabases,
+		servedDatabases:    servedDatabasesOverSQL,
+		archiveReader:      newStatusArchiveReader,
+		beadsRuntimeConfig: printBeadsRuntimeConfig,
+		strayWarning:       printStrayWorkspaceServerWarning,
+	}
+}
+
 func runDoltStatus(cmd *cobra.Command, args []string) error {
-	townRoot, err := workspace.FindFromCwdOrError()
+	return runDoltStatusWith(os.Stdout, liveDoltStatusReads())
+}
+
+// runDoltStatusWith runs the status report, writing it to w. A test passes a
+// bytes.Buffer and stub reads, so it never swaps the process stdout (gt-w1ekf).
+func runDoltStatusWith(w io.Writer, reads doltStatusReads) error {
+	townRoot, err := reads.townRoot()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
@@ -522,22 +559,23 @@ func runDoltStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	running, pid, err := doltserver.IsRunning(townRoot)
+	running, pid, err := reads.isRunning(townRoot)
 	if err != nil {
 		// dolt.external_container was resolved above and host and remote modes
 		// report no error, so this is the container's failed SQL ping: report
 		// it as the status it is, with the failure named, rather than failing
 		// the command (gt-0v0bg).
-		fmt.Printf("%s Dolt server is %s (container %s)\n",
+		fmt.Fprintf(w, "%s Dolt server is %s (container %s)\n",
 			style.Dim.Render("○"), "not running", container)
-		fmt.Printf("  Ping: %s\n", style.Dim.Render(err.Error()))
-		fmt.Printf("  Connection: %s\n", doltserver.GetConnectionString(townRoot))
-		printBeadsRuntimeConfig(townRoot)
+		fmt.Fprintf(w, "  Ping: %s\n", style.Dim.Render(err.Error()))
+		fmt.Fprintf(w, "  Connection: %s\n", doltserver.GetConnectionString(townRoot))
+		reads.beadsRuntimeConfig(w, townRoot)
+		printArchiveCheckUnavailable(w, archiveUnavailableContainerPing)
 		return nil
 	}
 
 	if p := doltpause.Current(townRoot, time.Now()); p != nil {
-		fmt.Printf("%s %s\n", style.Bold.Render("⏸"), p.Message())
+		fmt.Fprintf(w, "%s %s\n", style.Bold.Render("⏸"), p.Message())
 	}
 
 	// A container's Dolt has no pid here and no state file to read: the SQL
@@ -545,50 +583,65 @@ func runDoltStatus(cmd *cobra.Command, args []string) error {
 	// over SQL (gt-xeb1x).
 	if container != "" {
 		if running {
-			fmt.Printf("%s Dolt server is %s (container %s)\n",
+			fmt.Fprintf(w, "%s Dolt server is %s (container %s)\n",
 				style.Bold.Render("●"), style.Bold.Render("running"), container)
-			printResourceMetrics(os.Stdout, doltserver.GetHealthMetrics(townRoot))
+			printResourceMetrics(w, reads.healthMetrics(townRoot))
+
+			// The host branch reads the served databases through
+			// doltserver.VerifyDatabases, which runs the dolt CLI on the host;
+			// in container mode the container owns that CLI, so the list is
+			// read over the same SQL connection the ping used (gt-w1ekf).
+			databases, listErr := reads.servedDatabases(config)
+			if listErr != nil {
+				fmt.Fprintf(w, "  %s Listing the databases the container serves failed: %v\n",
+					style.Bold.Render("!"), listErr)
+			}
+			printDatabaseArchiveBlock(w, townRoot,
+				reads.archiveReader(townRoot, config, databases), databases,
+				"Databases (served by the container):")
 		} else {
-			fmt.Printf("%s Dolt server is %s (container %s)\n",
+			fmt.Fprintf(w, "%s Dolt server is %s (container %s)\n",
 				style.Dim.Render("○"), "not running", container)
+			printArchiveCheckUnavailable(w, archiveUnavailableContainerStopped)
 		}
-		fmt.Printf("  Connection: %s\n", doltserver.GetConnectionString(townRoot))
-		printBeadsRuntimeConfig(townRoot)
+		fmt.Fprintf(w, "  Connection: %s\n", doltserver.GetConnectionString(townRoot))
+		reads.beadsRuntimeConfig(w, townRoot)
 		return nil
 	}
 
 	if config.IsRemote() {
 		if running {
-			fmt.Printf("%s Dolt server is %s (remote: %s)\n",
+			fmt.Fprintf(w, "%s Dolt server is %s (remote: %s)\n",
 				style.Bold.Render("●"),
 				style.Bold.Render("reachable"),
 				config.HostPort())
 		} else {
-			fmt.Printf("%s Dolt server is %s (remote: %s)\n",
+			fmt.Fprintf(w, "%s Dolt server is %s (remote: %s)\n",
 				style.Dim.Render("○"),
 				"not reachable",
 				config.HostPort())
 		}
-		fmt.Printf("  Connection: %s\n", doltserver.GetConnectionString(townRoot))
-		printBeadsRuntimeConfig(townRoot)
+		fmt.Fprintf(w, "  Connection: %s\n", doltserver.GetConnectionString(townRoot))
+		reads.beadsRuntimeConfig(w, townRoot)
 		if running {
-			metrics := doltserver.GetHealthMetrics(townRoot)
-			fmt.Printf("\n  %s\n", style.Bold.Render("Resource Metrics:"))
-			fmt.Printf("    Query latency: %v\n", metrics.QueryLatency.Round(time.Millisecond))
-			fmt.Printf("    Connections:   %d / %d (%.0f%%)\n",
+			metrics := reads.healthMetrics(townRoot)
+			fmt.Fprintf(w, "\n  %s\n", style.Bold.Render("Resource Metrics:"))
+			fmt.Fprintf(w, "    Query latency: %v\n", metrics.QueryLatency.Round(time.Millisecond))
+			fmt.Fprintf(w, "    Connections:   %d / %d (%.0f%%)\n",
 				metrics.Connections, metrics.MaxConnections, metrics.ConnectionPct)
 			if metrics.ReadOnly {
-				fmt.Printf("\n  %s %s\n",
+				fmt.Fprintf(w, "\n  %s %s\n",
 					style.Bold.Render("!!!"),
 					style.Bold.Render("SERVER IS READ-ONLY — contact the remote server admin"))
 			}
 		}
-		printStrayWorkspaceServerWarning(townRoot)
+		printArchiveCheckUnavailable(w, archiveUnavailableNoDatabases)
+		reads.strayWarning(townRoot)
 		return nil
 	}
 
 	if running {
-		fmt.Printf("%s Dolt server is %s (PID %d)\n",
+		fmt.Fprintf(w, "%s Dolt server is %s (PID %d)\n",
 			style.Bold.Render("●"),
 			style.Bold.Render("running"),
 			pid)
@@ -597,90 +650,86 @@ func runDoltStatus(cmd *cobra.Command, args []string) error {
 		// state file's databases[] is a snapshot taken at server start and
 		// never updated, so DBs created/dropped since then would render
 		// stale (gt-cs6).
-		served, missing, verifyErr := doltserver.VerifyDatabases(townRoot)
+		served, missing, verifyErr := reads.verifyDatabases(townRoot)
 
 		// Load state for more details
 		state, err := doltserver.LoadState(townRoot)
 		if err == nil && !state.StartedAt.IsZero() {
-			fmt.Printf("  Started: %s\n", state.StartedAt.Format("2006-01-02 15:04:05"))
-			fmt.Printf("  Port: %d\n", state.Port)
-			fmt.Printf("  Data dir: %s\n", state.DataDir)
+			fmt.Fprintf(w, "  Started: %s\n", state.StartedAt.Format("2006-01-02 15:04:05"))
+			fmt.Fprintf(w, "  Port: %d\n", state.Port)
+			fmt.Fprintf(w, "  Data dir: %s\n", state.DataDir)
 			databases, dbLabel := statusDatabases(served, verifyErr, state.Databases)
-			if len(databases) > 0 {
-				owners := doltserver.CollectDatabaseOwners(townRoot)
-				notes, noteErr := archiveNotes(townRoot, config, databases)
-				if noteErr != nil {
-					fmt.Print(archiveUnreadableLine(noteErr))
-				}
-				fmt.Printf("  %s\n", dbLabel)
-				for _, db := range databases {
-					fmt.Println(databaseStatusLine(db, owners[db], notes[db]))
-				}
-			}
-			fmt.Printf("  Connection: %s\n", doltserver.GetConnectionString(townRoot))
-			printBeadsRuntimeConfig(townRoot)
+			printDatabaseArchiveBlock(w, townRoot,
+				reads.archiveReader(townRoot, config, databases), databases, dbLabel)
+			fmt.Fprintf(w, "  Connection: %s\n", doltserver.GetConnectionString(townRoot))
+			reads.beadsRuntimeConfig(w, townRoot)
+		} else {
+			// No state, so no database line can be built: the flatten
+			// runbook's archive check must not read that as clean (gt-w1ekf).
+			printArchiveCheckUnavailable(w, archiveUnavailableNoDatabases)
 		}
 
 		// Resource metrics
-		metrics := doltserver.GetHealthMetrics(townRoot)
-		printResourceMetrics(os.Stdout, metrics)
+		metrics := reads.healthMetrics(townRoot)
+		printResourceMetrics(w, metrics)
 
 		// Verify all filesystem databases are actually served.
 		if verifyErr != nil {
-			fmt.Printf("\n  %s Database verification failed: %v\n", style.Bold.Render("!"), verifyErr)
+			fmt.Fprintf(w, "\n  %s Database verification failed: %v\n", style.Bold.Render("!"), verifyErr)
 		} else if len(missing) > 0 {
-			fmt.Printf("\n  %s %s\n", style.Bold.Render("!!!"),
+			fmt.Fprintf(w, "\n  %s %s\n", style.Bold.Render("!!!"),
 				style.Bold.Render("MISSING DATABASES — exist on disk but not served:"))
 			for _, db := range missing {
-				fmt.Printf("    - %s\n", db)
+				fmt.Fprintf(w, "    - %s\n", db)
 			}
-			fmt.Printf("  Try: cd ~/gt/.dolt-data/<db> && dolt fsck --repair\n")
+			fmt.Fprintf(w, "  Try: cd ~/gt/.dolt-data/<db> && dolt fsck --repair\n")
 		}
 
 		// Check for orphaned databases
 		orphans, orphanErr := doltserver.FindOrphanedDatabases(townRoot)
 		if orphanErr == nil && len(orphans) > 0 {
-			fmt.Printf("\n  %s %d orphaned database(s) (not referenced by any rig):\n",
+			fmt.Fprintf(w, "\n  %s %d orphaned database(s) (not referenced by any rig):\n",
 				style.Bold.Render("!"), len(orphans))
 			for _, o := range orphans {
-				fmt.Printf("    - %s (%s)\n", o.Name, formatBytes(o.SizeBytes))
+				fmt.Fprintf(w, "    - %s (%s)\n", o.Name, formatBytes(o.SizeBytes))
 			}
-			fmt.Printf("  Clean up with: %s\n", style.Dim.Render("gt dolt cleanup"))
+			fmt.Fprintf(w, "  Clean up with: %s\n", style.Dim.Render("gt dolt cleanup"))
 		}
 
 		if len(metrics.Warnings) > 0 {
-			fmt.Printf("\n  %s\n", style.Bold.Render("Warnings:"))
-			for _, w := range metrics.Warnings {
-				fmt.Printf("    %s %s\n", style.Bold.Render("!"), w)
+			fmt.Fprintf(w, "\n  %s\n", style.Bold.Render("Warnings:"))
+			for _, warning := range metrics.Warnings {
+				fmt.Fprintf(w, "    %s %s\n", style.Bold.Render("!"), warning)
 			}
 		}
 	} else {
-		fmt.Printf("%s Dolt server is %s\n",
+		fmt.Fprintf(w, "%s Dolt server is %s\n",
 			style.Dim.Render("○"),
 			"not running")
 
 		// List available databases
 		databases, _ := doltserver.ListDatabases(townRoot)
 		if len(databases) == 0 {
-			fmt.Printf("\n%s No rig databases found in %s\n",
+			fmt.Fprintf(w, "\n%s No rig databases found in %s\n",
 				style.Bold.Render("!"),
 				config.DataDir)
-			fmt.Printf("  Initialize with: %s\n", style.Dim.Render("gt dolt init-rig <name>"))
+			fmt.Fprintf(w, "  Initialize with: %s\n", style.Dim.Render("gt dolt init-rig <name>"))
 		} else {
-			fmt.Printf("\nAvailable databases in %s:\n", config.DataDir)
+			fmt.Fprintf(w, "\nAvailable databases in %s:\n", config.DataDir)
 			owners := doltserver.CollectDatabaseOwners(townRoot)
 			for _, db := range databases {
 				if owner, ok := owners[db]; ok {
-					fmt.Printf("  - %-20s (%s)\n", db, owner)
+					fmt.Fprintf(w, "  - %-20s (%s)\n", db, owner)
 				} else {
-					fmt.Printf("  - %s\n", db)
+					fmt.Fprintf(w, "  - %s\n", db)
 				}
 			}
-			fmt.Printf("\nStart with: %s\n", style.Dim.Render("gt dolt start"))
+			fmt.Fprintf(w, "\nStart with: %s\n", style.Dim.Render("gt dolt start"))
 		}
+		printArchiveCheckUnavailable(w, archiveUnavailableHostStopped)
 	}
 
-	printStrayWorkspaceServerWarning(townRoot)
+	reads.strayWarning(townRoot)
 	return nil
 }
 
@@ -792,13 +841,113 @@ func databaseStatusLine(db, owner, note string) string {
 	return fmt.Sprintf("    - %s%s", db, note)
 }
 
+// The reasons `gt dolt status` names when it can produce no database line at
+// all. Step 2 of the flatten runbook stops on that line, so an empty result has
+// to say why it is empty: silence would pass the pre-flatten check without
+// checking anything (gt-w1ekf).
+const (
+	archiveUnavailableContainerPing    = "container ping failed"
+	archiveUnavailableContainerStopped = "container not running"
+	archiveUnavailableHostStopped      = "host server not running"
+	archiveUnavailableNoDatabases      = "no databases listed"
+)
+
+// archiveCheckUnavailableLine is the status line that tells the flatten
+// runbook this status proved nothing about the archive.
+func archiveCheckUnavailableLine(reason string) string {
+	return "ARCHIVE CHECK UNAVAILABLE: " + reason
+}
+
+// printArchiveCheckUnavailable writes the line naming why the status could not
+// list any database.
+func printArchiveCheckUnavailable(w io.Writer, reason string) {
+	fmt.Fprintln(w, archiveCheckUnavailableLine(reason))
+}
+
+// printDatabaseArchiveBlock writes the status's database lines: the list's
+// source label, then one databaseStatusLine per database carrying its archive
+// note. A list with no database prints the unavailable line instead, so a
+// status that listed none can never read as a clean pre-flatten check
+// (gt-w1ekf).
+func printDatabaseArchiveBlock(w io.Writer, townRoot string, reader archiveBehindReader, databases []string, dbLabel string) {
+	if len(databases) == 0 {
+		printArchiveCheckUnavailable(w, archiveUnavailableNoDatabases)
+		return
+	}
+	owners := doltserver.CollectDatabaseOwners(townRoot)
+	notes, noteErr := archiveNotes(townRoot, reader, databases)
+	if noteErr != nil {
+		fmt.Fprintf(w, "%s", archiveUnreadableLine(noteErr))
+	}
+	fmt.Fprintf(w, "  %s\n", dbLabel)
+	for _, db := range databases {
+		fmt.Fprintln(w, databaseStatusLine(db, owners[db], notes[db]))
+	}
+}
+
+// servedDatabasesOverSQL lists the databases the Dolt server serves, reading
+// SHOW DATABASES over the MySQL driver. The container branch of `gt dolt
+// status` uses it because the host branch's doltserver.VerifyDatabases runs the
+// dolt CLI on the host, and a container town's Dolt CLI lives in the container.
+// It reuses readDatabaseNames, the same SQL listing `gt dolt compare` uses, so
+// the Dolt/MySQL internal catalogs stay out of the list.
+func servedDatabasesOverSQL(config *doltserver.Config) ([]string, error) {
+	return servedDatabasesOverSQLWith(config, nil)
+}
+
+// servedDatabasesOverSQLWith is servedDatabasesOverSQL with the pool opener a
+// test injects; a nil opener opens the MySQL driver.
+func servedDatabasesOverSQLWith(config *doltserver.Config, openDB func(dsn string) (*sql.DB, error)) ([]string, error) {
+	// TCP only: a container answers on the town's published port, and a unix
+	// socket on the host at that port belongs to another server (gt-w1ekf).
+	dsn := formatDoltDSN(config.UserDSN(), "tcp", config.HostPort(), "", dsnOpts{
+		Timeout:     "5s",
+		ReadTimeout: "10s",
+	})
+	open := openDB
+	if open == nil {
+		open = func(dsn string) (*sql.DB, error) { return sql.Open("mysql", dsn) }
+	}
+	db, err := open(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("opening the SQL connection: %w", err)
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("connecting to the Dolt server: %w", err)
+	}
+	defer conn.Close()
+
+	names, err := readDatabaseNames(ctx, conn)
+	if err != nil {
+		return nil, fmt.Errorf("listing the served databases: %w", err)
+	}
+	return names, nil
+}
+
+// newStatusArchiveReader builds the reader the status's archive notes count
+// through. A container's Dolt answers on its published TCP port, so the reader
+// is told not to fall back to a unix socket on the host, where another server
+// may hold the same port (gt-w1ekf).
+func newStatusArchiveReader(townRoot string, config *doltserver.Config, databases []string) archiveBehindReader {
+	return doltArchiveReader{
+		config:         config,
+		tcpOnly:        config.ExternalContainer != "",
+		archivedHashes: archivedHashesLoader(townRoot, databases),
+	}
+}
+
 // archiveNotes returns the history archive notes for every listed database that
 // has a watermark: "archived through <date>, N commits behind" for its commits
 // and "events archived through <created_at>, N events behind" for its events.
-// An unreadable watermark file is an error so the caller can say so; a
-// database whose count cannot be read carries the error instead of a zero that
-// reads as caught up.
-func archiveNotes(townRoot string, config *doltserver.Config, databases []string) (map[string]string, error) {
+// Counts are read through reader. An unreadable watermark file is an error so
+// the caller can say so; a database whose count cannot be read carries the
+// error instead of a zero that reads as caught up.
+func archiveNotes(townRoot string, reader archiveBehindReader, databases []string) (map[string]string, error) {
 	wms, err := daemon.LoadArchiveWatermarks(townRoot)
 	if err != nil {
 		// No database can be read as caught up when the watermarks are
@@ -813,7 +962,6 @@ func archiveNotes(townRoot string, config *doltserver.Config, databases []string
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	reader := doltArchiveReader{config: config, archivedHashes: archivedHashesLoader(townRoot, databases)}
 	return archiveBehindNotes(ctx, reader, wms, databases), nil
 }
 
@@ -958,6 +1106,10 @@ func eventsBehindText(n int64) string {
 // doltArchiveReader counts archive lag against the live server.
 type doltArchiveReader struct {
 	config *doltserver.Config
+	// tcpOnly makes every count connect over TCP rather than a unix socket.
+	// Container mode sets it: the container answers on the town's published
+	// port, and a host socket at that port belongs to another server (gt-w1ekf).
+	tcpOnly bool
 	// openDB opens the pool a count runs on; nil opens with the MySQL driver.
 	// A test injects a fake driver so the failure paths are reachable without
 	// a server.
@@ -974,6 +1126,21 @@ func (r doltArchiveReader) open(dsn string) (*sql.DB, error) {
 		return r.openDB(dsn)
 	}
 	return sql.Open("mysql", dsn)
+}
+
+// dsn renders the connection string one count runs on. tcpOnly selects the
+// town's published TCP port without probing a host unix socket, which in
+// container mode would be a different server's (gt-w1ekf).
+func (r doltArchiveReader) dsn(db string) string {
+	opts := dsnOpts{
+		Timeout:      "5s",
+		ReadTimeout:  "10s",
+		WriteTimeout: "10s",
+	}
+	if r.tcpOnly {
+		return formatDoltDSN(r.config.UserDSN(), "tcp", r.config.HostPort(), db, opts)
+	}
+	return buildDoltDSNFromConfig(r.config, db, opts)
 }
 
 // commitsBehind counts the hashes in db's dolt_log that no archive file holds:
@@ -999,11 +1166,7 @@ func (r doltArchiveReader) commitsBehind(ctx context.Context, db string, wm daem
 	if err != nil {
 		return 0, fmt.Errorf("database %q: reading its archived commit hashes: %w", db, err)
 	}
-	dsn := buildDoltDSNFromConfig(r.config, db, dsnOpts{
-		Timeout:      "5s",
-		ReadTimeout:  "10s",
-		WriteTimeout: "10s",
-	})
+	dsn := r.dsn(db)
 	conn, err := r.open(dsn)
 	if err != nil {
 		return 0, fmt.Errorf("database %q not readable: %w", db, err)
@@ -1057,11 +1220,7 @@ func (r doltArchiveReader) eventsBehind(ctx context.Context, db string, wm daemo
 	if !dbNameRe.MatchString(db) {
 		return 0, fmt.Errorf("database name %q is not a plain identifier — refusing to query it", db)
 	}
-	dsn := buildDoltDSNFromConfig(r.config, db, dsnOpts{
-		Timeout:      "5s",
-		ReadTimeout:  "10s",
-		WriteTimeout: "10s",
-	})
+	dsn := r.dsn(db)
 	conn, err := r.open(dsn)
 	if err != nil {
 		return 0, fmt.Errorf("database %q not readable: %w", db, err)
@@ -1111,14 +1270,14 @@ func currentBeadsRuntimeConfig() (doltserver.BeadsRuntimeConfig, bool) {
 	return doltserver.ReadBeadsRuntimeConfig(beads.ResolveBeadsDir(cwd))
 }
 
-func printBeadsRuntimeConfig(townRoot string) {
+func printBeadsRuntimeConfig(w io.Writer, townRoot string) {
 	cfg, ok := currentBeadsRuntimeConfig()
 	if !ok {
 		return
 	}
-	fmt.Printf("  Beads client: %s\n", beadsClientSummary(cfg))
+	fmt.Fprintf(w, "  Beads client: %s\n", beadsClientSummary(cfg))
 	if hint := beadsScopeHint(cfg.Database, townRoot); hint != "" {
-		fmt.Print(hint)
+		fmt.Fprintf(w, "%s", hint)
 	}
 }
 
