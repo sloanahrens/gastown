@@ -72,7 +72,7 @@ func TestPermissionRequestDeniesForAutonomousSession(t *testing.T) {
 		},
 		{
 			name:         "glob removal, the second live park",
-			command:      `rm -rf /Users/sloan/gt/gastown/polecats/obsidian/gastown/*`,
+			command:      `rm -rf /Users/user/gt/gastown/polecats/obsidian/gastown/*`,
 			wantGuidance: "paths named explicitly",
 		},
 		{
@@ -113,7 +113,7 @@ func TestPermissionRequestKeepsPromptForInteractiveSession(t *testing.T) {
 				t.Errorf("attended role %q is treated as unattended — its prompt would be denied", role)
 			}
 			hook := payloadInput(t, bashPermissionPayload("mkdir -p /tmp/x && cd /tmp/x && touch f"))
-			hook.Cwd = "/Users/sloan/gt/gastown/crew"
+			hook.Cwd = "/Users/user/gt/gastown/crew"
 			if unattendedPromptSession(hook.Cwd, envGetter(map[string]string{"GT_ROLE": role})) {
 				t.Errorf("attended role %q treated as unattended — its prompt would be denied", role)
 			}
@@ -134,7 +134,7 @@ func TestUnattendedPromptSessionPrefersRole(t *testing.T) {
 	if !unattendedPromptSession("/home/u/gt/rig/polecats/worker/rig", markerOnly) {
 		t.Error("a polecat worktree cwd is unattended when no role says otherwise")
 	}
-	if unattendedPromptSession("/Users/sloan/gt/gastown/crew", envGetter(nil)) {
+	if unattendedPromptSession("/Users/user/gt/gastown/crew", envGetter(nil)) {
 		t.Error("a crew directory with no polecat signal is unattended")
 	}
 }
@@ -303,8 +303,8 @@ func TestPermissionRequestEscalationBodyRedactsSecrets(t *testing.T) {
 func TestPermissionRequestEscalationMarkerSessionFallback(t *testing.T) {
 	t.Parallel()
 	shape := "bash cd-compound-write"
-	a := permissionRequestInput{SessionID: "", Cwd: "/Users/sloan/gt/gastown/polecats/alpha/gastown", ToolName: "Bash"}
-	b := permissionRequestInput{SessionID: "", Cwd: "/Users/sloan/gt/gastown/polecats/beta/gastown", ToolName: "Bash"}
+	a := permissionRequestInput{SessionID: "", Cwd: "/Users/user/gt/gastown/polecats/alpha/gastown", ToolName: "Bash"}
+	b := permissionRequestInput{SessionID: "", Cwd: "/Users/user/gt/gastown/polecats/beta/gastown", ToolName: "Bash"}
 	if promptEscalationMarker(a, shape, "/tmp") == promptEscalationMarker(b, shape, "/tmp") {
 		t.Error("two sessions with no session_id but different cwds collapsed onto one marker")
 	}

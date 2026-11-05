@@ -82,7 +82,7 @@ func TestQuestionToolGuardKeepsQuestionForInteractiveSession(t *testing.T) {
 	roles := []string{"gastown/crew/sloan", "gastown/witness", "gastown/refinery", "mayor", "deacon", ""}
 	for _, role := range roles {
 		t.Run(role, func(t *testing.T) {
-			err := runQuestionToolGuard(t, questionToolPayload("/Users/sloan/gt/gastown/crew"), map[string]string{"GT_ROLE": role})
+			err := runQuestionToolGuard(t, questionToolPayload("/Users/user/gt/gastown/crew"), map[string]string{"GT_ROLE": role})
 			if err != nil {
 				t.Errorf("attended role %q had its question denied: %v", role, err)
 			}

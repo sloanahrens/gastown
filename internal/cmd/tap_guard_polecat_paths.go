@@ -1439,7 +1439,7 @@ func (s polecatPathScope) isProtectedBinPath(target string) bool {
 // comparing whole path components (so /worktree-evil never matches /worktree).
 //
 // Comparison is case-insensitive on purpose: the operator's host is macOS,
-// whose default filesystem folds case, so /Users/sloan/GT and /Users/sloan/gt
+// whose default filesystem folds case, so /Users/user/GT and /Users/user/gt
 // name the same tree. On a case-sensitive filesystem the only effect is a
 // redundant block for a path differing from a real one in case alone, which is
 // the safe direction — and matches how the scan guards already fold case.

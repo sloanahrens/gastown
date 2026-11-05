@@ -18,9 +18,9 @@ func TestStripInterimHook(t *testing.T) {
 	t.Parallel()
 
 	const (
-		interim    = `{"type": "command", "command": "/Users/sloan/.claude/hooks/no-root-scan.sh"}`
-		dangerous  = `{"type": "command", "command": "/Users/sloan/.local/bin/gt tap guard dangerous-command"}`
-		prWorkflow = `{"type": "command", "command": "/Users/sloan/.local/bin/gt tap guard pr-workflow", "if": "Bash(gh pr create*)"}`
+		interim    = `{"type": "command", "command": "/Users/user/.claude/hooks/no-root-scan.sh"}`
+		dangerous  = `{"type": "command", "command": "/Users/user/.local/bin/gt tap guard dangerous-command"}`
+		prWorkflow = `{"type": "command", "command": "/Users/user/.local/bin/gt tap guard pr-workflow", "if": "Bash(gh pr create*)"}`
 	)
 	entry := func(matcher string, hookJSON ...string) json.RawMessage {
 		return json.RawMessage(`{"matcher": "` + matcher + `", "hooks": [` + strings.Join(hookJSON, ",") + `]}`)
@@ -167,8 +167,8 @@ func TestReconcileTarget(t *testing.T) {
       {
         "matcher": "Bash",
         "hooks": [
-          {"type": "command", "command": "/Users/sloan/.local/bin/gt tap guard dangerous-command"},
-          {"type": "command", "command": "/Users/sloan/.claude/hooks/no-root-scan.sh"}
+          {"type": "command", "command": "/Users/user/.local/bin/gt tap guard dangerous-command"},
+          {"type": "command", "command": "/Users/user/.claude/hooks/no-root-scan.sh"}
         ]
       }
     ]
@@ -197,7 +197,7 @@ func TestReconcileTarget(t *testing.T) {
 		if len(entries) != 1 || len(entries[0].Hooks) != 1 {
 			t.Fatalf("PreToolUse after reconcile = %+v, want one entry with one hook", entries)
 		}
-		if entries[0].Hooks[0].Command != "/Users/sloan/.local/bin/gt tap guard dangerous-command" {
+		if entries[0].Hooks[0].Command != "/Users/user/.local/bin/gt tap guard dangerous-command" {
 			t.Fatalf("surviving hook = %q, want the dangerous-command guard", entries[0].Hooks[0].Command)
 		}
 
@@ -222,13 +222,13 @@ func TestReconcileTarget(t *testing.T) {
       {
         "matcher": "Bash",
         "hooks": [
-          {"type": "command", "command": "/Users/sloan/.local/bin/gt tap guard dangerous-command", "timeout": 30},
-          {"type": "command", "command": "/Users/sloan/.claude/hooks/no-root-scan.sh"}
+          {"type": "command", "command": "/Users/user/.local/bin/gt tap guard dangerous-command", "timeout": 30},
+          {"type": "command", "command": "/Users/user/.claude/hooks/no-root-scan.sh"}
         ]
       }
     ],
     "Notification": [
-      {"matcher": "", "hooks": [{"type": "command", "command": "/Users/sloan/.local/bin/notify"}]}
+      {"matcher": "", "hooks": [{"type": "command", "command": "/Users/user/.local/bin/notify"}]}
     ]
   }
 }`
@@ -303,7 +303,7 @@ func TestReconcileTarget(t *testing.T) {
 		const clean = `{
   "hooks": {
     "PreToolUse": [
-      {"matcher": "Bash", "hooks": [{"type": "command", "command": "/Users/sloan/.local/bin/gt tap guard dangerous-command"}]}
+      {"matcher": "Bash", "hooks": [{"type": "command", "command": "/Users/user/.local/bin/gt tap guard dangerous-command"}]}
     ]
   }
 }`
@@ -343,7 +343,7 @@ func TestReconcileTarget(t *testing.T) {
 		t.Parallel()
 		bodies := map[string]string{
 			"no hooks key":  `{"theme": "dark"}`,
-			"no PreToolUse": `{"hooks": {"Notification": [{"matcher": "", "hooks": [{"type": "command", "command": "/Users/sloan/.local/bin/notify"}]}]}}`,
+			"no PreToolUse": `{"hooks": {"Notification": [{"matcher": "", "hooks": [{"type": "command", "command": "/Users/user/.local/bin/notify"}]}]}}`,
 		}
 		for name, body := range bodies {
 			t.Run(name, func(t *testing.T) {
@@ -421,8 +421,8 @@ func TestReconcileTarget(t *testing.T) {
       {
         "matcher": "Bash",
         "hooks": [
-          {"type": "command", "command": "/Users/sloan/.local/bin/gt tap guard dangerous-command"},
-          {"type": "command", "command": "/Users/sloan/.claude/hooks/no-root-scan.sh"}
+          {"type": "command", "command": "/Users/user/.local/bin/gt tap guard dangerous-command"},
+          {"type": "command", "command": "/Users/user/.claude/hooks/no-root-scan.sh"}
         ]
       }
     ]

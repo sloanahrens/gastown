@@ -1925,7 +1925,7 @@ func isGastownModule(goModPath string) bool {
 // moduleRootFromCwd walks up from dir to the nearest go.mod and returns its
 // directory when that go.mod declares this module, "" otherwise. It reads
 // the module declaration rather than the checkout's directory name: the
-// refinery runs from /Users/sloan/gt/gastown/refinery/rig and a polecat
+// refinery runs from /Users/user/gt/gastown/refinery/rig and a polecat
 // worktree may be named "rig", so matching the name "gastown" makes the
 // lookup miss in the very layouts the guards run in and lets "go test ."
 // through (gt-1lko). A nearer go.mod that is a different module — a module

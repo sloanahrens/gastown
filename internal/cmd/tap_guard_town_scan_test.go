@@ -261,7 +261,7 @@ func TestTownScanHazardHomeOverride(t *testing.T) {
 
 // TestMatchesUnboundedScanTownTree is the end-to-end check of the town rule
 // on the guard's real entry point: the shapes that must block — gt-6e2l's
-// `grep -R ... /Users/sloan/gt` above all — and, just as important, the
+// `grep -R ... /Users/user/gt` above all — and, just as important, the
 // shapes that must keep working. A fix that blocks the first set by blocking
 // scans generally would be a worse bug than the one being fixed.
 func TestMatchesUnboundedScanTownTree(t *testing.T) {
