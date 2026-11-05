@@ -167,33 +167,29 @@ func listSweepCache(root string) ([]cachevol.Entry, error) {
 // distinguish one from the file a build wrote.
 func listCacheTree(root, dir string, cache cachevol.Cache) ([]cachevol.Entry, error) {
 	var out []cachevol.Entry
-	err := filepath.WalkDir(filepath.Join(root, dir), func(p string, d fs.DirEntry, err error) error {
+	treeRoot := filepath.Join(root, dir)
+	err := filepath.Walk(treeRoot, func(p string, info fs.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
+		if info.IsDir() {
 			return nil
 		}
-		if d.Type()&fs.ModeSymlink != 0 {
+		if info.Mode()&fs.ModeSymlink != 0 {
 			return fmt.Errorf("%s in the cache is a symbolic link, not a cache file", p)
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
 		}
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		rel, err := filepath.Rel(root, p)
-		if err != nil {
-			return err
-		}
+		// Every child the walk visits lies under treeRoot, so its own prefix is
+		// trimmed rather than filepath.Rel, whose error no such path takes.
+		rel := strings.TrimPrefix(p, treeRoot+string(filepath.Separator))
 		// Go touches an entry's mtime when it reuses it, so that is the walk's
 		// last-use figure for both times: a noatime or relatime mount leaves
 		// atime stale, and PlanTrim orders by the later of the two.
 		used := info.ModTime()
 		out = append(out, cachevol.Entry{
-			Path:  filepath.ToSlash(rel),
+			Path:  path.Join(dir, filepath.ToSlash(rel)),
 			Cache: cache,
 			Size:  info.Size(),
 			Atime: used,
