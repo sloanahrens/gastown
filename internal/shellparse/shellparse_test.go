@@ -224,6 +224,82 @@ func TestParseConstructs(t *testing.T) {
 	}
 }
 
+// TestParseHeredocBodies checks each body against what bash passes for the same
+// fixture. An unquoted delimiter decodes only an escaped backslash, dollar or
+// backtick and a line continuation; a quoted delimiter decodes nothing; <<-
+// strips the leading tabs from the raw source before either rule runs.
+func TestParseHeredocBodies(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{
+			name:    "unquoted keeps backslash quote",
+			command: "cat <<EOF\nsay \\\"hi\\\" and \\'bye\\'\nEOF\n",
+			want:    "say \\\"hi\\\" and \\'bye\\'\n",
+		},
+		{
+			name:    "unquoted decodes escaped backslash",
+			command: "cat <<EOF\na\\\\b\nEOF\n",
+			want:    "a\\b\n",
+		},
+		{
+			name:    "unquoted decodes escaped dollar",
+			command: "cat <<EOF\n\\$HOME\nEOF\n",
+			want:    "$HOME\n",
+		},
+		{
+			name:    "unquoted decodes escaped backtick",
+			command: "cat <<EOF\n\\`x\\`\nEOF\n",
+			want:    "`x`\n",
+		},
+		{
+			name:    "unquoted line continuation",
+			command: "cat <<EOF\nab\\\ncd\nEOF\n",
+			want:    "abcd\n",
+		},
+		{
+			name:    "quoted delimiter decodes nothing",
+			command: "cat <<'EOF'\n\\$HOME \\\"hi\\\"\nEOF\n",
+			want:    "\\$HOME \\\"hi\\\"\n",
+		},
+		{
+			name:    "dash strips tabs before decoding",
+			command: "cat <<-EOF\n\t\tx\\\\y\n\tEOF\n",
+			want:    "x\\y\n",
+		},
+		{
+			name:    "dash quoted delimiter strips tabs and decodes nothing",
+			command: "cat <<-'EOF'\n\t\tx\\\\y\n\tEOF\n",
+			want:    "x\\\\y\n",
+		},
+		{
+			// bash strips the first line's tabs, joins the continuation, and
+			// keeps the tabs the second line starts with.
+			name:    "dash keeps tabs after a line continuation",
+			command: "cat <<-EOF\nab\\\n\tcd\nEOF\n",
+			want:    "ab\tcd\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			script, err := shellparse.Parse(tt.command)
+			if err != nil {
+				t.Fatalf("Parse(%q): %v", tt.command, err)
+			}
+			if len(script.Segments) != 1 || len(script.Segments[0].Heredocs) != 1 {
+				t.Fatalf("Parse(%q) has no here-document", tt.command)
+			}
+			if got := script.Segments[0].Heredocs[0].Body; got != tt.want {
+				t.Errorf("Parse(%q) body = %q, want %q", tt.command, got, tt.want)
+			}
+		})
+	}
+}
+
 // redirView is the test's view of one redirection on a segment.
 type redirView struct {
 	Op        string
@@ -331,6 +407,23 @@ func TestParseWordText(t *testing.T) {
 		{name: "double quoted plain", command: `echo "plain"`, word: 1, text: "plain", literal: true},
 		{name: "invalid ansi-c escape", command: `echo $'bad\q'`, word: 1, text: `bad\q`, literal: false},
 		{name: "invalid unicode escape", command: `echo $'\uD800'`, word: 1, text: `\uD800`, literal: false},
+		{name: "tilde", command: `echo ~`, word: 1, text: "~", literal: false},
+		{name: "tilde path", command: `echo ~/x`, word: 1, text: "~/x", literal: false},
+		{name: "tilde user", command: `echo ~user`, word: 1, text: "~user", literal: false},
+		{name: "tilde inside a word", command: `echo a~b`, word: 1, text: "a~b", literal: true},
+		{name: "single quoted tilde", command: `echo '~'`, word: 1, text: "~", literal: true},
+		{name: "escaped tilde", command: `echo \~`, word: 1, text: "~", literal: true},
+		{name: "glob star", command: `echo *.go`, word: 1, text: "*.go", literal: false},
+		{name: "glob question", command: `echo a?b`, word: 1, text: "a?b", literal: false},
+		{name: "glob bracket", command: `echo [ab]c`, word: 1, text: "[ab]c", literal: false},
+		{name: "unmatched bracket", command: `echo [ab`, word: 1, text: "[ab", literal: true},
+		{name: "single quoted glob", command: `echo '*'`, word: 1, text: "*", literal: true},
+		{name: "double quoted glob", command: `echo "*"`, word: 1, text: "*", literal: true},
+		{name: "escaped glob", command: `echo \*`, word: 1, text: "*", literal: true},
+		{name: "brace list", command: `echo {a,b}`, word: 1, text: "{a,b}", literal: false},
+		{name: "brace sequence", command: `echo {1..3}`, word: 1, text: "{1..3}", literal: false},
+		{name: "brace without expansion", command: `echo {a}`, word: 1, text: "{a}", literal: true},
+		{name: "quoted brace", command: `echo '{a,b}'`, word: 1, text: "{a,b}", literal: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -393,6 +486,11 @@ func TestParseUnparseableNamesConstruct(t *testing.T) {
 		name    string
 		command string
 		want    string
+		// anyPhrase holds the contract for a command whose parser message this
+		// package does not classify by name: a typed error with a phrase of ours
+		// and no partial script. Pinning the phrase there would pin the parser's
+		// wording instead; TestConstructOfUnknownError pins the fallback phrase.
+		anyPhrase bool
 	}{
 		{name: "unterminated here document", command: "cat <<EOF\nbody\n", want: "unterminated here-document"},
 		{name: "unbalanced parenthesis", command: "(echo x", want: "unbalanced parenthesis"},
@@ -408,7 +506,7 @@ func TestParseUnparseableNamesConstruct(t *testing.T) {
 		{name: "unterminated loop", command: "for i in 1; do echo x", want: "unterminated loop"},
 		{name: "incomplete command", command: "echo a |", want: "incomplete command"},
 		{name: "syntax outside bash", command: "echo ${(f)x}", want: "shell syntax outside bash"},
-		{name: "unrecognized syntax", command: "coproc", want: "unrecognized shell syntax"},
+		{name: "unrecognized syntax", command: "coproc", anyPhrase: true},
 		{name: "ansi-c escape decoding to nul", command: `echo $'a\0b'`, want: "ANSI-C escape that decodes to a NUL byte"},
 	}
 	for _, tt := range tests {
@@ -422,10 +520,14 @@ func TestParseUnparseableNamesConstruct(t *testing.T) {
 			if !errors.As(err, &unparseable) {
 				t.Fatalf("Parse(%q) error = %T %v, want *UnparseableError", tt.command, err, err)
 			}
-			if unparseable.Construct != tt.want {
+			if tt.anyPhrase {
+				if unparseable.Construct == "" {
+					t.Errorf("Parse(%q) Construct is empty, want a phrase of ours", tt.command)
+				}
+			} else if unparseable.Construct != tt.want {
 				t.Errorf("Parse(%q) Construct = %q, want %q", tt.command, unparseable.Construct, tt.want)
 			}
-			if !strings.Contains(err.Error(), tt.want) {
+			if tt.want != "" && !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("Parse(%q) error %q does not name %q", tt.command, err.Error(), tt.want)
 			}
 			if len(script.Segments) != 0 || len(script.Subs) != 0 {

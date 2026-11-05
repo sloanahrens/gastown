@@ -8,10 +8,11 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// TestFlattenReportsSourcePositionOutOfRange covers nodeRaw's position guard.
-// The parser never hands a node outside its source, so the test pairs a parsed
-// file with source truncated after the first word.
-func TestFlattenReportsSourcePositionOutOfRange(t *testing.T) {
+// TestParseUnparseableNamesConstructSourcePositionOutOfRange covers nodeRaw's
+// position guard. The parser never hands a node outside its source, so the test
+// pairs a parsed file with source truncated after the first word. The name
+// shares the public table's prefix so one -run filter runs both.
+func TestParseUnparseableNamesConstructSourcePositionOutOfRange(t *testing.T) {
 	t.Parallel()
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader("echo hello"), "")
 	if err != nil {
@@ -21,12 +22,14 @@ func TestFlattenReportsSourcePositionOutOfRange(t *testing.T) {
 	wantUnparseable(t, err, "source position out of range")
 }
 
-// TestFailClosedBranches covers the walk's remaining refusal branches. The bash
+// TestParseUnparseableNamesConstructFailClosed covers the walk's refusal
+// branches that Parse cannot reach from source. The name shares the prefix of
+// the public table so one -run TestParseUnparseableNamesConstruct runs both. The bash
 // parser cannot produce the node each row hands the walk, so the row calls the
 // walk's entry point for that node directly: they are forward-compatibility
 // guards against a syntax node this package does not read, and a fail-closed
 // answer is what keeps such a node from passing as an empty command.
-func TestFailClosedBranches(t *testing.T) {
+func TestParseUnparseableNamesConstructFailClosed(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
@@ -92,9 +95,16 @@ func TestFailClosedBranches(t *testing.T) {
 		{
 			name: "quoted here-document with an expansion",
 			run: func(f *flattener) {
-				f.heredocBody(&syntax.Word{Parts: []syntax.WordPart{&syntax.ParamExp{}}}, true)
+				f.heredocBody(&syntax.Word{Parts: []syntax.WordPart{&syntax.ParamExp{}}}, true, false)
 			},
 			want: "quoted here-document with an expansion",
+		},
+		{
+			name: "zero position for a node with content",
+			run: func(f *flattener) {
+				f.word(&syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: "x"}}})
+			},
+			want: "source position out of range",
 		},
 	}
 	for _, tt := range tests {

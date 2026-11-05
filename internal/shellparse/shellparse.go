@@ -12,10 +12,14 @@
 // starts at the command name.
 //
 // Word.Text is the word with quoting resolved: quotes are removed, backslash
-// escapes applied and ANSI-C $'...' escapes decoded; an expansion, a brace
-// expansion and a glob stay as their source text. Word.Literal is true only
-// when the word holds no expansion and every part was decoded, so a caller can
-// compare Text without expanding anything.
+// escapes applied and ANSI-C $'...' escapes decoded; an expansion stays as its
+// source text. Word.Literal is true only when the shell would pass Text
+// unchanged, which needs every part decoded and no expansion, tilde, glob or
+// brace expansion in the word.
+//
+// The parser is mvdan.cc/sh/v3 v3.14.1 (released 2026-09-06, BSD-3-Clause);
+// its go.mod is what raises golang.org/x/sys, golang.org/x/term and
+// github.com/rogpeppe/go-internal to the versions go.mod lists.
 package shellparse
 
 import (
@@ -56,8 +60,7 @@ type Segment struct {
 }
 
 // Word is one shell word: Text has quoting resolved, Raw is the source text,
-// and Literal is true only when the word holds no expansion and every part was
-// decoded.
+// and Literal reports that Text is the string the shell passes unchanged.
 type Word struct {
 	Text    string
 	Raw     string
@@ -456,16 +459,14 @@ func (f *flattener) redirect(r *syntax.Redirect, redirs *[]Redirection, heredocs
 		if f.err != nil {
 			return
 		}
-		quoted := delimiter != f.raw(r.Word)
+		raw := f.raw(r.Word)
 		if f.err != nil {
 			return
 		}
-		body := f.heredocBody(r.Hdoc, quoted)
+		quoted := delimiter != raw
+		body := f.heredocBody(r.Hdoc, quoted, r.Op == syntax.DashHdoc)
 		if f.err != nil {
 			return
-		}
-		if r.Op == syntax.DashHdoc {
-			body = stripLeadingTabs(body)
 		}
 		*heredocs = append(*heredocs, Heredoc{Delimiter: delimiter, Quoted: quoted, Body: body})
 		f.wordSubs(r.Hdoc, subs)
@@ -484,33 +485,76 @@ func (f *flattener) redirect(r *syntax.Redirect, redirs *[]Redirection, heredocs
 }
 
 // heredocBody is the text of a here-document body. A quoted delimiter makes
-// bash read the body literally; an unquoted one expands it and applies the same
-// backslash escapes double quotes do.
-func (f *flattener) heredocBody(w *syntax.Word, quoted bool) string {
-	if !quoted {
-		text, _ := f.wordText(w, quoteHeredoc)
-		return text
-	}
+// bash read the body literally; an unquoted one decodes the backslash escapes
+// bash keeps in a here-document. A <<- body has the leading tabs of every line
+// stripped from the raw source before either rule runs, which is where bash's
+// reader applies the dash. The parser leaves the leading tabs of the delimiter
+// line at the body's end, and they are stripped the same way.
+func (f *flattener) heredocBody(w *syntax.Word, quoted, dash bool) string {
+	stripper := dashStripper{dash: dash, atLineStart: true}
 	var b strings.Builder
 	for _, part := range w.Parts {
 		lit, ok := part.(*syntax.Lit)
 		if !ok {
-			f.fail("quoted here-document with an expansion")
-			return ""
+			if quoted {
+				f.fail("quoted here-document with an expansion")
+				return ""
+			}
+			// An expansion stays as its source text, with the dash applied to
+			// the lines it spans.
+			b.WriteString(stripper.strip(f.raw(part)))
+			if f.err != nil {
+				return ""
+			}
+			continue
 		}
-		b.WriteString(lit.Value)
+		raw := stripper.strip(lit.Value)
+		if quoted {
+			b.WriteString(raw)
+			continue
+		}
+		b.WriteString(decodeHeredoc(raw))
 	}
 	return b.String()
 }
 
-// stripLeadingTabs applies <<- to a body: bash strips every leading tab of each
-// body line, and of the delimiter line the parser leaves at the body's end.
-func stripLeadingTabs(body string) string {
-	lines := strings.Split(body, "\n")
-	for i, line := range lines {
-		lines[i] = strings.TrimLeft(line, "\t")
+// dashStripper applies <<- to a body's raw source. bash strips the leading tabs
+// of a line before it decodes anything, and a line joined to the previous one
+// by a backslash-newline starts no new line: the tab run after a continuation
+// stays. The delimiter line the parser leaves at the body end has its tabs
+// stripped as the final line.
+type dashStripper struct {
+	dash        bool
+	atLineStart bool
+	backslashes int
+}
+
+// strip removes the leading tabs of every line in raw and carries the line
+// state into the next part.
+func (d *dashStripper) strip(raw string) string {
+	if !d.dash {
+		return raw
 	}
-	return strings.Join(lines, "\n")
+	var b strings.Builder
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if c == '\t' && d.atLineStart {
+			continue
+		}
+		if c == '\n' {
+			d.atLineStart = d.backslashes%2 == 0
+			d.backslashes = 0
+		} else {
+			d.atLineStart = false
+			if c == '\\' {
+				d.backslashes++
+			} else {
+				d.backslashes = 0
+			}
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }
 
 // word builds the Word for w.
@@ -522,8 +566,99 @@ func (f *flattener) word(w *syntax.Word) Word {
 	return Word{
 		Text:    text,
 		Raw:     f.raw(w),
-		Literal: decoded && !partsExpand(w.Parts),
+		Literal: literalWord(w.Parts, decoded),
 	}
+}
+
+// literalWord reports whether the shell passes the word's text unchanged: every
+// part decoded, no expansion, and no unquoted tilde, glob or brace expansion.
+// An ANSI-C escape decoded from a table is quoted output, so it counts as
+// literal.
+func literalWord(parts []syntax.WordPart, decoded bool) bool {
+	if !decoded {
+		return false
+	}
+	for i, part := range parts {
+		switch x := part.(type) {
+		case *syntax.Lit:
+			if expandsUnquoted(x.Value) {
+				return false
+			}
+			// A ~ expands only at the start of a word, and an escaped ~ never
+			// reaches here as the first byte.
+			if i == 0 && len(x.Value) > 0 && x.Value[0] == '~' {
+				return false
+			}
+		case *syntax.SglQuoted:
+			// Quoted text is passed as written after ANSI-C decoding.
+		case *syntax.DblQuoted:
+			if partsExpand(x.Parts) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// expandsUnquoted reports whether an unquoted literal holds a character the
+// shell expands: a glob metacharacter (*, ?, a bracket expression) or a brace
+// expansion. A backslash quotes the byte after it.
+func expandsUnquoted(s string) bool {
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			i++
+		case '*', '?':
+			return true
+		case '[':
+			// bash expands a bracket expression only when a closing ] follows.
+			if strings.IndexByte(s[i+1:], ']') >= 0 {
+				return true
+			}
+		case '{':
+			if braceExpands(s[i:]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// braceExpands reports whether s, which starts at an unquoted {, is a brace
+// expansion: a matching } with a top-level , or .. between them.
+func braceExpands(s string) bool {
+	depth := 0
+	comma, dotdot := false, false
+	prev := byte(0)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '\\' {
+			i++
+			prev = 0
+			continue
+		}
+		switch c {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return comma || dotdot
+			}
+		case ',':
+			if depth == 1 {
+				comma = true
+			}
+		case '.':
+			if depth == 1 && prev == '.' {
+				dotdot = true
+			}
+		}
+		prev = c
+	}
+	return false
 }
 
 // quoteContext is the quoting a Lit part is read in, which decides which
@@ -537,10 +672,6 @@ const (
 	// quoteDouble is inside double quotes: a backslash escapes only $, `, " and
 	// \, and a backslash-newline is a line continuation.
 	quoteDouble
-
-	// quoteHeredoc is the body of a here-document with an unquoted delimiter,
-	// where the shell applies double-quote escapes.
-	quoteHeredoc
 )
 
 // wordText is the word's text with quoting resolved, and reports whether every
@@ -726,16 +857,21 @@ func (f *flattener) raw(n syntax.Node) string {
 	return text
 }
 
-// nodeRaw is the source text n spans in src.
+// nodeRaw is the source text n spans in src. A node without a position has no
+// text to return, so it is refused rather than read as an empty one.
 func (f *flattener) nodeRaw(n syntax.Node) (string, error) {
 	if n == nil {
 		return "", &UnparseableError{Construct: "source position out of range"}
 	}
-	start, end := int(n.Pos().Offset()), int(n.End().Offset())
-	if start < 0 || end < start || end > len(f.src) {
+	start, end := n.Pos(), n.End()
+	if !start.IsValid() || !end.IsValid() {
 		return "", &UnparseableError{Construct: "source position out of range"}
 	}
-	return f.src[start:end], nil
+	s, e := int(start.Offset()), int(end.Offset())
+	if s < 0 || e < s || e > len(f.src) {
+		return "", &UnparseableError{Construct: "source position out of range"}
+	}
+	return f.src[s:e], nil
 }
 
 // partsExpand reports whether any part is an expansion, so a word built from
@@ -771,9 +907,35 @@ func decodeUnquoted(s string) string {
 	return b.String()
 }
 
-// decodeQuoted resolves the backslash escapes a double-quoted string or an
-// unquoted here-document body applies: a backslash escapes $, `, " and \, and
-// backslash-newline is removed. Any other backslash stays as written.
+// decodeHeredoc resolves the backslash escapes of an unquoted here-document
+// body: a backslash escapes $, `, \ and a newline, and any other backslash is
+// kept as written, including one before " or '.
+func decodeHeredoc(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' || i+1 >= len(s) {
+			b.WriteByte(s[i])
+			continue
+		}
+		switch s[i+1] {
+		case '$', '`', '\\':
+			b.WriteByte(s[i+1])
+			i++
+		case '\n':
+			i++
+		default:
+			b.WriteByte('\\')
+		}
+	}
+	return b.String()
+}
+
+// decodeQuoted resolves the backslash escapes a double-quoted string applies: a
+// backslash escapes $, `, " and \, and backslash-newline is removed. Any other
+// backslash stays as written.
 func decodeQuoted(s string) string {
 	if !strings.Contains(s, `\`) {
 		return s
