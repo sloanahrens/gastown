@@ -101,6 +101,14 @@
               {
                 "name": "GT_SWEEP_JOBS",
                 "value": "4"
+              },
+              {
+                "name": "GOCACHE",
+                "value": "/var/cache/gt-sweep/gocache"
+              },
+              {
+                "name": "GOMODCACHE",
+                "value": "/var/cache/gt-sweep/gomodcache"
               }
             ],
             "resources": {
@@ -125,6 +133,10 @@
               {
                 "name": "out",
                 "mountPath": "/out"
+              },
+              {
+                "name": "cache",
+                "mountPath": "/var/cache/gt-sweep"
               }
             ]
           }
@@ -141,6 +153,12 @@
             "name": "out",
             "persistentVolumeClaim": {
               "claimName": "gt-sweep-out-gastown-4f2a9c1e-mvv8asko"
+            }
+          },
+          {
+            "name": "cache",
+            "persistentVolumeClaim": {
+              "claimName": "gt-sweep-cache-gastown"
             }
           },
           {

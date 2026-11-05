@@ -43,10 +43,19 @@ const (
 	// syncContainerName names the sync pod's one container.
 	syncContainerName = "sync"
 
-	// repoVolume, outVolume and dindVolume name the pod's volumes.
-	repoVolume = "repo"
-	outVolume  = "out"
-	dindVolume = "dind-data"
+	// repoVolume, outVolume, cacheVolume and dindVolume name the pod's volumes.
+	repoVolume  = "repo"
+	outVolume   = "out"
+	cacheVolume = "cache"
+	dindVolume  = "dind-data"
+
+	// cacheMount is where the rig's cache claim is mounted read-write in the
+	// runner, and the Go build and module caches live under it.
+	cacheMount = "/var/cache/gt-sweep"
+
+	// cacheClaimStorage is the cache claim's requested size: room for one rig's
+	// build cache and module cache, with headroom for the next sweep to add to them.
+	cacheClaimStorage = "5Gi"
 
 	// dindCPU and dindMemory are the sidecar's share, requested and limited like
 	// the runner's: an unbounded nested engine competes with the run it serves
@@ -306,17 +315,19 @@ type EmptyDirVolumeSource struct{}
 // rig is still active, because every run of the rig reads the one repo claim.
 // Apply then creates the repo claim, fills it through a short-lived root sync pod
 // (cleared, copied into, chowned to the runner, removed), and only then creates
-// the output claim and the Job. The teardown removes the sync pod, the Job, the
-// reader pod and the output claim, in that order, and never the repo claim,
-// which every run reuses. Poll reports when the run has ended and copies its
-// result and its per-unit logs out of the output claim onto the host; the
-// caller reads the host copy, and runs the teardown after that read.
+// the output claim, the cache claim and the Job. The teardown removes the sync
+// pod, the Job, the reader pod and the output claim, in that order, and never the
+// repo claim or the cache claim, which every run reuses. Poll reports when the
+// run has ended and copies its result and its per-unit logs out of the output
+// claim onto the host; the caller reads the host copy, and runs the teardown
+// after that read.
 func (Kubernetes) Render(spec Spec) (Plan, error) {
 	if err := spec.Validate(); err != nil {
 		return Plan{}, err
 	}
 	job := renderJob(spec)
 	repoClaim := renderClaim(RepoClaimName(spec.Rig), repoClaimStorage)
+	cacheClaim := renderClaim(CacheClaimName(spec.Rig), cacheClaimStorage)
 	claim := renderClaim(OutClaimName(spec), outClaimStorage)
 	reader := renderReader(spec)
 	sync := renderSyncPod(spec)
@@ -352,6 +363,9 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 			// The claim the Job writes its result to goes before the Job, which
 			// has nothing to write to otherwise.
 			{Argv: kubectlArgv(spec, "apply", "-f", "-"), Stdin: claim.JSON()},
+			// The cache claim goes before the Job, which mounts it. It is applied
+			// and never removed: a run leaves the caches warm for the next one.
+			{Argv: kubectlArgv(spec, "apply", "-f", "-"), Stdin: cacheClaim.JSON()},
 			{Argv: kubectlArgv(spec, "apply", "-f", "-"), Stdin: job.JSON()},
 		},
 		Steps: []Step{
@@ -535,6 +549,8 @@ func renderJob(spec Spec) *Job {
 		// The runner leaves result.json and its logs here, and the caller reads
 		// them from the same claim after the Job ends.
 		{Name: outVolume, PersistentVolumeClaim: &ClaimRef{ClaimName: OutClaimName(spec)}},
+		// The Go caches the runner writes, kept across runs so a sweep starts warm.
+		{Name: cacheVolume, PersistentVolumeClaim: &ClaimRef{ClaimName: CacheClaimName(spec.Rig)}},
 	}
 	var initContainers []Container
 	if spec.Dind {
@@ -585,6 +601,9 @@ func runnerContainer(spec Spec) Container {
 		EnvVar{Name: EnvSHA, Value: spec.SHA},
 		EnvVar{Name: EnvTiers, Value: strings.Join(spec.TiersOrDefault(), ",")},
 		EnvVar{Name: EnvJobs, Value: strconv.Itoa(spec.Jobs)},
+		// The caches sit on the cache claim, not under HOME, so the next run reuses them.
+		EnvVar{Name: "GOCACHE", Value: cacheMount + "/gocache"},
+		EnvVar{Name: "GOMODCACHE", Value: cacheMount + "/gomodcache"},
 	)
 	// Requests equal limits, so the scheduler promises the run its whole share
 	// instead of letting it burst into a neighbour's (design 2026-10-30).
@@ -603,6 +622,7 @@ func runnerContainer(spec Spec) Container {
 		VolumeMounts: []VolumeMount{
 			{Name: repoVolume, MountPath: RepoMount, ReadOnly: true},
 			{Name: outVolume, MountPath: OutputDir},
+			{Name: cacheVolume, MountPath: cacheMount},
 		},
 	}
 }
@@ -656,6 +676,11 @@ func JobName(spec Spec) string {
 // RepoClaimName is the claim holding the rig's bare repository, which its runs
 // mount read-only.
 func RepoClaimName(rig string) string { return k8sName("gt-sweep-repo", rig) }
+
+// CacheClaimName is the claim holding the rig's Go build and module caches, which
+// every run of the rig mounts read-write. Teardown never removes it: keeping it
+// between runs is the point.
+func CacheClaimName(rig string) string { return k8sName("gt-sweep-cache", rig) }
 
 // jobLabels mark a sweep Job with the backend and rig that made it.
 func jobLabels(spec Spec) map[string]string {
