@@ -429,8 +429,8 @@ func TestRenderPlanSyncsTheRepoClaimFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rendering the golden spec: %v", err)
 	}
-	if len(plan.Apply) != 8 {
-		t.Fatalf("the plan applies %d steps, want the repo claim, the sync pod, its Ready wait, the copy, the chown, its removal, the output claim and the Job: %v", len(plan.Apply), plan.Apply)
+	if len(plan.Apply) != 9 {
+		t.Fatalf("the plan applies %d steps, want the repo claim, the sync pod, its Ready wait, the copy, the chown, its removal, the output claim, the cache claim and the Job: %v", len(plan.Apply), plan.Apply)
 	}
 
 	var repoClaim Claim
@@ -487,7 +487,7 @@ func TestRenderPlanSyncsTheRepoClaimFirst(t *testing.T) {
 	if outClaim.Metadata.Name != OutClaimName(spec) {
 		t.Errorf("the seventh apply is the claim %q, want the output claim %q", outClaim.Metadata.Name, OutClaimName(spec))
 	}
-	if string(plan.Apply[7].Stdin) != string(plan.Job.JSON()) {
+	if string(plan.Apply[8].Stdin) != string(plan.Job.JSON()) {
 		t.Errorf("the last apply does not carry the rendered Job document")
 	}
 }
@@ -983,4 +983,141 @@ func TestK8sJobRendersNoSeedStep(t *testing.T) {
 	if strings.Contains(string(plan.Job.JSON()), SeedVolume) {
 		t.Error("the Job mentions the seed volume: the Kubernetes sidecar pulls its images and needs none")
 	}
+}
+
+// TestK8sCacheClaimIsAppliedBeforeTheJobAndNeverTornDown holds the cache claim to
+// its life: it is applied, as a ReadWriteOnce claim, before the Job that mounts
+// it, and no step of the run removes it, so the caches stay warm for the next sweep.
+func TestK8sCacheClaimIsAppliedBeforeTheJobAndNeverTornDown(t *testing.T) {
+	t.Parallel()
+	spec := goldenSpec()
+	plan, err := Kubernetes{}.Render(spec)
+	if err != nil {
+		t.Fatalf("rendering the golden spec: %v", err)
+	}
+	claimAt := applyDocumentIndex(plan, "PersistentVolumeClaim", CacheClaimName(spec.Rig))
+	jobAt := applyDocumentIndex(plan, "Job", plan.Job.Metadata.Name)
+	if claimAt < 0 {
+		t.Fatalf("the plan applies no claim named %q", CacheClaimName(spec.Rig))
+	}
+	if jobAt < 0 {
+		t.Fatalf("the plan applies no Job named %q", plan.Job.Metadata.Name)
+	}
+	if claimAt > jobAt {
+		t.Errorf("the cache claim is applied at step %d, after the Job at step %d", claimAt, jobAt)
+	}
+
+	var claim Claim
+	if err := json.Unmarshal(plan.Apply[claimAt].Stdin, &claim); err != nil {
+		t.Fatalf("the cache claim apply is not a document: %v", err)
+	}
+	if !slices.Equal(claim.Spec.AccessModes, []string{"ReadWriteOnce"}) {
+		t.Errorf("the cache claim's access modes are %v, want one read-write mount", claim.Spec.AccessModes)
+	}
+	if got := claim.Spec.Resources.Requests["storage"]; got != cacheClaimStorage {
+		t.Errorf("the cache claim requests storage %q, want %q", got, cacheClaimStorage)
+	}
+
+	// No step of the plan may name the cache claim in its argv, so no teardown,
+	// poll or guard removes it.
+	steps := append([]Step{plan.Poll.Status, plan.Guards[0].Step}, plan.Poll.Collect...)
+	steps = append(steps, plan.Steps...)
+	for _, step := range steps {
+		if slices.Contains(step.Argv, CacheClaimName(spec.Rig)) {
+			t.Errorf("step %v names the cache claim %q, which must never be removed", step.Argv, CacheClaimName(spec.Rig))
+		}
+	}
+}
+
+// TestK8sRunnerMountsTheCacheAndSetsTheGoCacheEnv holds the runner to the rig's
+// cache: the claim is mounted read-write at /var/cache/gt-sweep, and GOCACHE and
+// GOMODCACHE point under that mount, so the Go tools keep their caches on the claim
+// rather than in the pod's scratch HOME.
+func TestK8sRunnerMountsTheCacheAndSetsTheGoCacheEnv(t *testing.T) {
+	t.Parallel()
+	plan, err := Kubernetes{}.Render(goldenSpec())
+	if err != nil {
+		t.Fatalf("rendering: %v", err)
+	}
+	runner, ok := containerNamed(plan.Job, runnerContainerName)
+	if !ok {
+		t.Fatalf("the Job renders no %q container", runnerContainerName)
+	}
+	var mount VolumeMount
+	found := false
+	for _, m := range runner.VolumeMounts {
+		if m.MountPath == "/var/cache/gt-sweep" {
+			mount, found = m, true
+		}
+	}
+	if !found {
+		t.Fatalf("the runner mounts nothing at /var/cache/gt-sweep: %+v", runner.VolumeMounts)
+	}
+	if mount.ReadOnly {
+		t.Error("the runner mounts the cache read-only: the Go tools write their caches to it")
+	}
+	var claim string
+	for _, volume := range plan.Job.Spec.Template.Spec.Volumes {
+		if volume.Name == mount.Name && volume.PersistentVolumeClaim != nil {
+			claim = volume.PersistentVolumeClaim.ClaimName
+		}
+	}
+	if claim != CacheClaimName(goldenSpec().Rig) {
+		t.Errorf("the cache mount is backed by claim %q, want %q", claim, CacheClaimName(goldenSpec().Rig))
+	}
+	for _, want := range []EnvVar{
+		{Name: "GOCACHE", Value: "/var/cache/gt-sweep/gocache"},
+		{Name: "GOMODCACHE", Value: "/var/cache/gt-sweep/gomodcache"},
+	} {
+		if !slices.Contains(runner.Env, want) {
+			t.Errorf("runner env %v does not set %s=%s", runner.Env, want.Name, want.Value)
+		}
+	}
+}
+
+// TestK8sCacheClaimNameFitsTheObjectRules holds the cache claim to the object rules
+// a long rig name would break: its name is a DNS-1123 label of at most 63
+// characters and the plan applies the claim under that name, and two rigs a plain
+// cut would run together keep their own claims.
+func TestK8sCacheClaimNameFitsTheObjectRules(t *testing.T) {
+	t.Parallel()
+	spec := goldenSpec()
+	spec.Rig = strings.Repeat("Rig_", 20)
+	plan, err := Kubernetes{}.Render(spec)
+	if err != nil {
+		t.Fatalf("rendering a spec with a long rig name: %v", err)
+	}
+	name := CacheClaimName(spec.Rig)
+	if len(name) > 63 || !k8sNamePattern.MatchString(name) {
+		t.Errorf("the cache claim name %q is not a DNS-1123 label of at most 63 characters", name)
+	}
+	if applyDocumentIndex(plan, "PersistentVolumeClaim", name) < 0 {
+		t.Errorf("the plan applies no claim named %q", name)
+	}
+
+	for _, pair := range [][2]string{
+		{"a.b", "a-b"},
+		{strings.Repeat("rig", 30), strings.Repeat("rig", 30) + "x"},
+	} {
+		if left, right := CacheClaimName(pair[0]), CacheClaimName(pair[1]); left == right {
+			t.Errorf("rigs %q and %q share the cache claim %q", pair[0], pair[1], left)
+		}
+	}
+}
+
+// applyDocumentIndex returns the position of the apply step whose document is an
+// object of kind and name, or -1 when the plan applies no such object.
+func applyDocumentIndex(plan Plan, kind, name string) int {
+	for i, step := range plan.Apply {
+		var object struct {
+			Kind     string `json:"kind"`
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+		}
+		if json.Unmarshal(step.Stdin, &object) == nil && object.Kind == kind && object.Metadata.Name == name {
+			return i
+		}
+	}
+	return -1
 }
