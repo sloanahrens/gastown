@@ -78,6 +78,7 @@ type Divergence struct {
 // a test answers it with gitfake or a stub.
 type Repo interface {
 	ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error)
+	ListRemoteRefsWithHashesEnv(remote, prefix string, env []string) ([]git.RemoteRef, error)
 	FetchRefspecWithEnv(remote, refspec string, env []string) error
 	IsAncestor(ancestor, descendant string) (bool, error)
 	PushWithEnv(remote, refspec string, force bool, env []string) error
@@ -215,9 +216,12 @@ func (p *Promoter) diverged(st State, tip, commit string) State {
 }
 
 // remoteMain is the target's main tip, or "" when the target has no main yet
-// (a fresh repository, which the push below creates).
+// (a fresh repository, which the push below creates). It reads under the same
+// deploy key as the fetch and the push: a headless container has no account
+// key for ssh to fall back on, so a bare ls-remote is refused with
+// "Permission denied (publickey)".
 func (p *Promoter) remoteMain() (string, error) {
-	refs, err := p.Repo.ListRemoteRefsWithHashes(p.Target, "refs/heads/")
+	refs, err := p.Repo.ListRemoteRefsWithHashesEnv(p.Target, "refs/heads/", p.keyEnv())
 	if err != nil {
 		return "", err
 	}

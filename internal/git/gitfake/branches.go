@@ -335,6 +335,13 @@ func (h *handle) ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRe
 	return h.ListRemoteRefsWithHashesTimeout(remote, prefix, 0)
 }
 
+// ListRemoteRefsWithHashesEnv is ListRemoteRefsWithHashes; the fake models no
+// process environment, so the variables git would run with (a deploy key's
+// GIT_SSH_COMMAND) change nothing here, as in FetchRefspecWithEnv.
+func (h *handle) ListRemoteRefsWithHashesEnv(remote, prefix string, _ []string) ([]git.RemoteRef, error) {
+	return h.ListRemoteRefsWithHashesTimeout(remote, prefix, 0)
+}
+
 func (h *handle) ListRemoteRefsWithHashesTimeout(remote, prefix string, _ time.Duration) ([]git.RemoteRef, error) {
 	h.f.mu.Lock()
 	defer h.f.mu.Unlock()
