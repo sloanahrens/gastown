@@ -307,10 +307,12 @@ func (p *PostLandRunner) recordPending(ctx context.Context, pl PostLand, name st
 // not be written.
 func (p *PostLandRunner) unrecorded(ctx context.Context, pl PostLand, name string, err error) {
 	p.logf("WARNING could not record the pending verdict for %s (%s): %v", short(pl.Commit), pl.by(), err)
-	p.raiseUnknown(ctx, pl, name, PostLandStatusResult{
+	if rerr := p.raiseUnknown(ctx, pl, name, PostLandStatusResult{
 		State:       "unrecorded",
 		Description: sanitizeStatusText(err.Error()),
-	})
+	}); rerr != nil {
+		p.logf("WARNING the post-land alarm for the unrecorded verdict of %s (%s) is not stored: %s", short(pl.Commit), pl.by(), sanitizeStatusText(rerr.Error()))
+	}
 }
 
 // PollPending is one pass over the pending verdicts. It never waits: a pending
