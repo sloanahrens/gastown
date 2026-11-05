@@ -57,6 +57,7 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/supervisor"
+	"github.com/steveyegge/gastown/internal/sweeprunner"
 	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/townconfig"
@@ -1109,6 +1110,10 @@ type Daemon struct {
 	// tierSweepSeams replace the tier_sweep job's outside effects in tests;
 	// the zero value is production (see tier_sweep.go).
 	tierSweepSeams tierSweepSeams
+	// tierSweepPriorityLog reports the priority preflight's standing decline at
+	// most once an hour: a cycle runs every few minutes, and the same cause in
+	// every one of them would fill the log (gt-gg9hv.39).
+	tierSweepPriorityLog sweeprunner.DeclineLog
 
 	// goos is the platform the platform-gated patrols decide on (see
 	// platform); "" is runtime.GOOS. Tests set it to reach a gated path.

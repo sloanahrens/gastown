@@ -1,0 +1,20 @@
+# The priority class each control-plane workload runs at, read back after the
+# overseer patched both Forgejo Deployments on 2026-11-05. The tier sweep's
+# preflight refuses a launch while a live pod's priority differs from its row,
+# and while a protected pod runs at or below the sweep's
+# (internal/sweeprunner/priority.go, gt-gg9hv.39).
+#
+# This is not an applied manifest. The Forgejo Deployments live outside every
+# repo and were patched by hand; this file is the repo's record of what is live.
+# TestPriorityTableMatchesTheLiveDeployments holds it to
+# deploy/k8s/priority-classes.yaml and to the table the daemon carries.
+rows:
+  - namespace: forgejo
+    deployment: forgejo
+    class: gt-control-plane
+  - namespace: forgejo-trial
+    deployment: forgejo
+    class: gt-control-plane
+  - namespace: forgejo
+    deployment: forgejo-runner
+    class: gt-ci-gate

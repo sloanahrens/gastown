@@ -1717,6 +1717,9 @@ func (d *Daemon) tierSweepRunnerSpec(st tierSweepStage) (sweeprunner.Spec, bool,
 		Dind:     cfg.Dind,
 		RunID:    runID,
 		Context:  cfg.Context,
+		// The preflight checks these namespaces for a pod the run would outrank;
+		// the config's default applies when the setting names none.
+		ProtectedNamespaces: cfg.ProtectedNamespaceList(),
 	}
 	if err := spec.Validate(); err != nil {
 		return sweeprunner.Spec{}, false, err
@@ -2240,8 +2243,24 @@ func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec
 		}
 		if started.err != nil {
 			stop()
+			// A preflight that declined the launch learned nothing about the
+			// tree and attempted nothing: the cycle defers and retries, and the
+			// line naming the cause is logged at most once an hour while it
+			// stands (gt-gg9hv.39).
+			var decline *sweeprunner.PriorityDecline
+			if errors.As(started.err, &decline) {
+				if d.tierSweepPriorityLog.Report(d.clk().Now(), decline.Line()) {
+					d.logger.Printf("%s", decline.Line())
+				}
+				return tierSweepStageResult{exitCode: -1, err: decline}
+			}
+			// Anything else was refused after the preflight passed, so no
+			// decline stands: a decline that comes back logs at once.
+			d.tierSweepPriorityLog.Clear()
 			return tierSweepRunnerNoResultStage(started, started.err, false)
 		}
+		// The launch got past the preflight: the next decline is a new one.
+		d.tierSweepPriorityLog.Clear()
 		// The record is what the next cycle reads to adopt this run: the run id,
 		// and the start its budget is measured from.
 		if err := tierSweepWriteRunnerRecord(spec.OutDir, tierSweepRunnerRecord{RunID: spec.RunID, Started: d.clk().Now()}); err != nil {

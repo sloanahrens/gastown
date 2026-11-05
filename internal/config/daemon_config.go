@@ -2185,6 +2185,28 @@ type TierSweepRunnerConfig struct {
 	// stage runs on the host as before, and the operator turns it on after
 	// reading one container sweep (gt-b0mwr).
 	Shell bool `json:"shell,omitempty"`
+
+	// ProtectedNamespaces names the namespaces the Kubernetes preflight checks
+	// before it launches: a pod there at or below the sweep's priority is one
+	// the run could displace. Unset means DefaultSweepProtectedNamespaces; an
+	// explicit empty list is refused, because a preflight that checks no
+	// namespace is not a preflight (gt-gg9hv.39).
+	ProtectedNamespaces []string `json:"protected_namespaces,omitempty"`
+}
+
+// DefaultSweepProtectedNamespaces is what the sweep's priority preflight
+// protects when the setting names none: Forgejo's namespace, whose pods ran
+// below the sweep on 2026-11-05 (gt-gg9hv.39).
+var DefaultSweepProtectedNamespaces = []string{"forgejo"}
+
+// ProtectedNamespaceList is the namespaces the sweep's preflight checks: the
+// setting, or the default when it names none. It returns a copy, so a caller
+// cannot change the config through it.
+func (c *TierSweepRunnerConfig) ProtectedNamespaceList() []string {
+	if len(c.ProtectedNamespaces) > 0 {
+		return append([]string(nil), c.ProtectedNamespaces...)
+	}
+	return append([]string(nil), DefaultSweepProtectedNamespaces...)
 }
 
 // The ranges TierSweepRunnerConfig accepts, matching sweeprunner.Spec.Validate.
@@ -2264,6 +2286,16 @@ func (c *TierSweepRunnerConfig) validate() error {
 	if c.ImageRegistry != "" {
 		if err := validImageRegistry(c.ImageRegistry); err != nil {
 			return fmt.Errorf("image_registry = %q: %w", c.ImageRegistry, err)
+		}
+	}
+	// Nil is "unset" and takes the default; an explicit empty list is refused,
+	// because it would make the preflight check nothing and pass.
+	if c.ProtectedNamespaces != nil && len(c.ProtectedNamespaces) == 0 {
+		return errors.New("protected_namespaces: want at least one namespace the sweep protects, such as forgejo")
+	}
+	for _, ns := range c.ProtectedNamespaces {
+		if !validDNS1123Label(ns) {
+			return fmt.Errorf("protected_namespaces = %q: want a namespace name", ns)
 		}
 	}
 	return nil

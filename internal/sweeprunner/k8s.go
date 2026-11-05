@@ -342,7 +342,7 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 			// the Job renderer gives them.
 			Step:   Step{Argv: kubectlArgv(spec, "get", "jobs", "-o", syncJobsJSONPath)},
 			Refuse: refuseActiveSweepJobs(spec),
-		}},
+		}, PriorityGuard(spec, spec.ProtectedNamespaces)},
 		Apply: []Step{
 			// The repo claim is created before the sync pod mounts it, and stays
 			// for the next run: only its contents change per run.
