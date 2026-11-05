@@ -105,7 +105,7 @@ func TestDispatchHoldFields_Verdicts(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := DispatchHoldFields(tc.issue.Status, tc.issue.Labels, tc.issue.Assignee, tc.issue.Design, tc.issue.Notes)
+			got := DispatchHoldFields(tc.issue.Status, tc.issue.Labels, tc.issue.Assignee, tc.issue.Design, tc.issue.Notes, nil)
 			if got != tc.want {
 				t.Errorf("DispatchHoldFields(%+v) = %q, want %q", tc.issue, got, tc.want)
 			}
@@ -184,7 +184,7 @@ func TestSlingHoldFields_Verdicts(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := SlingHoldFields(tc.issue.Labels, tc.issue.Assignee, tc.issue.Design, tc.issue.Notes)
+			got := SlingHoldFields(tc.issue.Labels, tc.issue.Assignee, tc.issue.Design, tc.issue.Notes, nil)
 			if got != tc.want {
 				t.Errorf("SlingHoldFields(%+v) = %q, want %q", tc.issue, got, tc.want)
 			}
@@ -267,10 +267,10 @@ func TestOverseerFirstLabelsHold(t *testing.T) {
 		t.Run(label, func(t *testing.T) {
 			t.Parallel()
 			want := "label " + label
-			if got := DispatchHoldFields("open", []string{label}, "", "", ""); got != want {
+			if got := DispatchHoldFields("open", []string{label}, "", "", "", nil); got != want {
 				t.Errorf("DispatchHoldFields with %q = %q, want %q", label, got, want)
 			}
-			if got := SlingHoldFields([]string{label}, "", "", ""); got != want {
+			if got := SlingHoldFields([]string{label}, "", "", "", nil); got != want {
 				t.Errorf("SlingHoldFields with %q = %q, want %q", label, got, want)
 			}
 		})

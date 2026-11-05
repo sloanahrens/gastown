@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/authorkind"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/checkpoint"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/git"
@@ -131,6 +132,11 @@ type Lander struct {
 	WorkRoot string
 	// Route names who landed, for the record ("daemon" when empty).
 	Route string
+	// TownRoot is the town whose settings name the operator identities every
+	// review's decision and accepted-risk comments are entitled by
+	// (operator.names, gt-ywuip). Empty entitles no operator identity: a
+	// lander that was not told its town reads no name as the operator's.
+	TownRoot string
 
 	// Candidate is the Forgejo gate that runs on the merged tree: the tree is
 	// pushed as land/<bead> and its CI verdict decides. It is required —
@@ -1140,13 +1146,30 @@ func (l *Lander) now() time.Time {
 // (AcceptedRisksUsed, gt-tvhg8). A bead whose comments cannot be read is
 // reviewed without them, as one that records none: the review still judges the
 // diff.
-func (l *Lander) acceptedRisks(id string) (string, []AcceptedRisk) {
+func (l *Lander) acceptedRisks(id string, op *config.OperatorConfig) (string, []AcceptedRisk) {
 	comments, err := l.Beads.Comments(id)
 	if err != nil {
 		l.logf("%s: could not read the bead's comments (%v); om reviews without accepted risks", id, err)
 		return "", nil
 	}
-	return AcceptedRisksText(comments), AcceptedRisksUsed(comments)
+	return AcceptedRisksText(comments, op), AcceptedRisksUsed(comments, op)
+}
+
+// operatorConfig reads the operator identities the town settings name, the
+// entitlement every decision comment and accepted risk is judged by. No town
+// root, or settings that cannot be read, entitle no name: the review still
+// runs, and the failure is logged because a decision the operator recorded
+// must not silently become a decision nobody made (gt-ywuip).
+func (l *Lander) operatorConfig(bead string) *config.OperatorConfig {
+	if l.TownRoot == "" {
+		return nil
+	}
+	op, err := config.LoadOperatorConfig(l.TownRoot)
+	if err != nil {
+		l.logf("%s: could not read the operator identities from the town settings (%v); no operator decision or accepted risk is entitled", bead, err)
+		return nil
+	}
+	return op
 }
 
 // AcceptedRiskUsedMarker opens the landing note a review leaves when it was
@@ -1486,12 +1509,13 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		}
 		l.stage(w, StageOM)
 		omCtx, omDone := l.Slow.watch(ctx, l, w, dir, StageOM)
-		accepted, used := l.acceptedRisks(w.BeadID)
+		op := l.operatorConfig(w.BeadID)
+		accepted, used := l.acceptedRisks(w.BeadID, op)
 		comments = l.beadComments(issue)
 		in := ReviewInput{Dir: dir, Base: base, Head: merged, Repo: g, BeadID: w.BeadID,
 			CriteriaText: CriteriaText(issue), PriorFindings: priorReviewFindings(issue.Notes),
 			AcceptedRisksText: accepted,
-			BriefText:         BeadBrief(issue.Description, comments), PolicyText: policy.PolicyBlock(),
+			BriefText:         BeadBrief(issue.Description, comments, op), PolicyText: policy.PolicyBlock(),
 			Round: reviewAttempt(issue.Notes), RoundsText: l.roundsText(w.BeadID)}
 		verdict, reviewErr = l.review(omCtx, in)
 		// One flaky om run must not cost an escalation and a hand review

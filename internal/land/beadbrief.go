@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
@@ -13,10 +14,16 @@ import (
 // the start of the comment's trimmed text. An opener grants nothing by itself:
 // the author recorded on the comment is what entitles it (gt-0sztd).
 const (
-	sloanDecisionOpener = "SLOAN DECISION"
-	overseerOpener      = "OVERSEER"
-	rebuttalOpener      = "REBUTTAL:"
+	// operatorDecisionOpener records the operator's decision.
+	operatorDecisionOpener = "OPERATOR DECISION"
+	overseerOpener         = "OVERSEER"
+	rebuttalOpener         = "REBUTTAL:"
 )
+
+// legacyDecisionOpeners are the operator-decision openers an earlier release
+// wrote. They stay accepted so a bead comment that carries one still counts;
+// write operatorDecisionOpener in new comments (gt-ywuip).
+var legacyDecisionOpeners = []string{"SLOAN DECISION"}
 
 // beadBriefCap bounds BeadBrief in bytes, the room the work-item file gets
 // before om truncates it.
@@ -40,7 +47,7 @@ var beadBriefSections = []string{"Goal", "Constraints", "Out of scope", "Gate"}
 // entitled to write it.
 type decisionMarker struct {
 	opener   string
-	entitled func(author string) bool
+	entitled func(author string, op *config.OperatorConfig) bool
 }
 
 // decisionMarkers is every comment the brief carries. Entitlement comes from
@@ -49,12 +56,19 @@ type decisionMarker struct {
 // can type an opener (gt-0sztd). ACCEPTED-RISK: is acceptedRiskMarker, the
 // opener criteria.go defines, read here with the same allowlist the
 // accepted-risk context file uses.
-var decisionMarkers = []decisionMarker{
-	{sloanDecisionOpener, isSloanAuthor},
-	{acceptedRiskMarker, isAcceptedRiskAuthor},
-	{overseerOpener, isOverseerAuthor},
-	{rebuttalOpener, anyAuthor},
-}
+var decisionMarkers = func() []decisionMarker {
+	markers := []decisionMarker{
+		{operatorDecisionOpener, isOperatorAuthor},
+	}
+	for _, opener := range legacyDecisionOpeners {
+		markers = append(markers, decisionMarker{opener, isOperatorAuthor})
+	}
+	return append(markers,
+		decisionMarker{acceptedRiskMarker, isAcceptedRiskAuthor},
+		decisionMarker{overseerOpener, isOverseerAuthor},
+		decisionMarker{rebuttalOpener, anyAuthor},
+	)
+}()
 
 // BeadBrief renders the work-item file om reads at landing (gt-0sztd): the
 // bead's Goal, Constraints, Out of scope and Gate sections, then its decision
@@ -72,9 +86,12 @@ var decisionMarkers = []decisionMarker{
 // An attribution line is built only from the comment's Author and date fields.
 // A comment's text is quoted line by line under it (quoteBody), so no line a
 // commenter wrote can open a line that reads as an attribution of its own.
-func BeadBrief(description string, comments []beads.Comment) string {
+// op is the operator identities the town settings name: a comment is the
+// operator's decision only when its Author matches one of them, so a town
+// that has not set operator.names entitles no operator decision (gt-ywuip).
+func BeadBrief(description string, comments []beads.Comment, op *config.OperatorConfig) string {
 	head := beadBriefHead(description)
-	entries := beadBriefDecisionEntries(comments)
+	entries := beadBriefDecisionEntries(comments, op)
 	if len(entries) == 0 {
 		return cutToBytes(head, beadBriefCap)
 	}
@@ -100,8 +117,8 @@ func BeadBrief(description string, comments []beads.Comment) string {
 // review (gt-0sztd). The lander passes it to om as --bead-file (gt-3l5qy),
 // which is why nothing in this bead calls it: the wiring is gt-3l5qy's, and
 // deleting the writer would leave that bead to rebuild it.
-func WriteBeadBrief(dir, description string, comments []beads.Comment) (string, error) {
-	return writeTemp(dir, "om-brief-*.txt", []byte(BeadBrief(description, comments)))
+func WriteBeadBrief(dir, description string, comments []beads.Comment, op *config.OperatorConfig) (string, error) {
+	return writeTemp(dir, "om-brief-*.txt", []byte(BeadBrief(description, comments, op)))
 }
 
 // beadBriefHead renders the title and the sections the description carries, in
@@ -148,7 +165,7 @@ func opensSectionHeading(line string) bool {
 // rendered by beadBriefDecisionEntry. When any date does not parse the list's
 // own order stands, since no date can say where that comment belongs — the rule
 // acceptedRiskComments uses.
-func beadBriefDecisionEntries(comments []beads.Comment) []string {
+func beadBriefDecisionEntries(comments []beads.Comment, op *config.OperatorConfig) []string {
 	type decision struct {
 		text string
 		at   int64
@@ -157,7 +174,7 @@ func beadBriefDecisionEntries(comments []beads.Comment) []string {
 	dated := true
 	for _, c := range comments {
 		text := strings.TrimSpace(c.Text)
-		marker, ok := decisionMarkerFor(text, c.Author)
+		marker, ok := decisionMarkerFor(text, c.Author, op)
 		if !ok {
 			continue
 		}
@@ -177,9 +194,9 @@ func beadBriefDecisionEntries(comments []beads.Comment) []string {
 
 // decisionMarkerFor returns the opener text starts with when its author is
 // entitled to that opener.
-func decisionMarkerFor(text, author string) (string, bool) {
+func decisionMarkerFor(text, author string, op *config.OperatorConfig) (string, bool) {
 	for _, m := range decisionMarkers {
-		if strings.HasPrefix(text, m.opener) && m.entitled(author) {
+		if strings.HasPrefix(text, m.opener) && m.entitled(author, op) {
 			return m.opener, true
 		}
 	}
@@ -220,15 +237,17 @@ func quoteBody(text string) string {
 	return strings.Join(lines, "\n")
 }
 
-// isSloanAuthor reports whether author is the human who records SLOAN DECISION
-// comments.
-func isSloanAuthor(author string) bool {
-	return strings.TrimSpace(author) == "Sloan Ahrens"
+// isOperatorAuthor reports whether author is one of the operator identities the
+// town settings name (operator.names). With none configured no author matches,
+// which is deliberate: an install that has not set the setting entitles nobody
+// (gt-ywuip).
+func isOperatorAuthor(author string, op *config.OperatorConfig) bool {
+	return op.Matches(author)
 }
 
 // isOverseerAuthor reports whether author is the town's overseer, the identity
 // that writes OVERSEER comments.
-func isOverseerAuthor(author string) bool {
+func isOverseerAuthor(author string, _ *config.OperatorConfig) bool {
 	return strings.TrimSpace(author) == "town/crew/overseer"
 }
 
@@ -236,4 +255,4 @@ func isOverseerAuthor(author string) bool {
 // claims no authority a reviewer must accept: the brief carries it with its
 // author named so om checks the claim against the diff, which is why it is not
 // gated like the three decision openers.
-func anyAuthor(string) bool { return true }
+func anyAuthor(string, *config.OperatorConfig) bool { return true }

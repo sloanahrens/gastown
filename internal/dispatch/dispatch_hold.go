@@ -3,6 +3,8 @@ package dispatch
 import (
 	"strings"
 	"unicode"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // A dispatch hold is a decision recorded on a bead's own record that takes it
@@ -83,7 +85,7 @@ var dispatchHoldProse = []string{"do not redispatch"}
 // to decide whether a restart may raise it (gt-n38c6). Comments are not part of
 // the rule: bd show --json omits them. status is a plain string so that
 // JSON-reading caller needs no SDK type.
-func DispatchHoldFields(status string, labels []string, assignee, design, notes string) string {
+func DispatchHoldFields(status string, labels []string, assignee, design, notes string, op *config.OperatorConfig) string {
 	for _, held := range dispatchHoldStatuses {
 		if status == held {
 			return "status " + status
@@ -92,13 +94,13 @@ func DispatchHoldFields(status string, labels []string, assignee, design, notes 
 	// The operator reservation is checked before the routing labels: a bead the
 	// operator owns is not the town's to route anywhere, and its reason is the
 	// one an operator reading the log needs named (gt-21pl0).
-	return holdFieldReason(labels, assignee, design, notes)
+	return holdFieldReason(labels, assignee, design, notes, op)
 }
 
 // holdFieldReason is DispatchHoldFields' body past its status arm: the hold a
 // bead's labels, assignee and prose assert, whatever its status.
-func holdFieldReason(labels []string, assignee, design, notes string) string {
-	if reason := OperatorReservation(labels, assignee); reason != "" {
+func holdFieldReason(labels []string, assignee, design, notes string, op *config.OperatorConfig) string {
+	if reason := OperatorReservation(labels, assignee, op); reason != "" {
 		return reason
 	}
 	for _, label := range labels {
@@ -132,8 +134,8 @@ func holdFieldReason(labels []string, assignee, design, notes string) string {
 // start reads at all, so this is the read that keeps a hold written
 // mid-dispatch from being overwritten by the dispatch's own hook write
 // (gt-0k7kb).
-func SlingHoldFields(labels []string, assignee, design, notes string) string {
-	return holdFieldReason(withoutLabels(labels, routingHoldLabels), assignee, design, notes)
+func SlingHoldFields(labels []string, assignee, design, notes string, op *config.OperatorConfig) string {
+	return holdFieldReason(withoutLabels(labels, routingHoldLabels), assignee, design, notes, op)
 }
 
 // HasLabel reports whether labels carries want, matching as the hold rule does

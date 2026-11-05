@@ -205,7 +205,7 @@ func TestShippedOMRubricCarriesScriptsAreDebtCriterion(t *testing.T) {
 // every approve to nothing and no other test in the tree would say so. It also
 // catches the plainer one: the file still parses and the value moved.
 //
-// Sloan set gastown's bar to 0.75 on 2026-10-15 (gt-bnagt); a later deliberate
+// The operator set gastown's bar to 0.75 on 2026-10-15 (gt-bnagt); a later deliberate
 // change moves this pin with it.
 func TestShippedOMThresholdIsGastownBar(t *testing.T) {
 	t.Parallel()

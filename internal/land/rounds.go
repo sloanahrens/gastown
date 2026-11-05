@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // DefaultRoundsCap bounds Render's output in bytes when the caller names no
@@ -304,12 +305,13 @@ func (l *RoundsLedger) Render(maxBytes int) ([]byte, error) {
 // classification decides: resolved is fixed, regressed reopens what had been
 // fixed, and unresolved — including a round that does not mention the finding
 // — leaves the previous outcome standing, so a fixed finding stays fixed and
-// a finding nobody settled stays open.
-func FindingOutcome(prev Outcome, class Classification, comments []beads.Comment, key FindingKey) Outcome {
-	if acceptedFinding(comments, key) {
+// a finding nobody settled stays open. op is the operator identities the town
+// settings name, which the allowlist reads (gt-ywuip).
+func FindingOutcome(prev Outcome, class Classification, comments []beads.Comment, key FindingKey, op *config.OperatorConfig) Outcome {
+	if acceptedFinding(comments, key, op) {
 		return OutcomeAccepted
 	}
-	if rebuttedFinding(comments, key) {
+	if rebuttedFinding(comments, key, op) {
 		return OutcomeRebutted
 	}
 	switch class {
@@ -327,20 +329,20 @@ func FindingOutcome(prev Outcome, class Classification, comments []beads.Comment
 
 // acceptedFinding reports whether an allowlisted accepted-risk comment names
 // key.
-func acceptedFinding(comments []beads.Comment, key FindingKey) bool {
-	return anyCommentNames(comments, acceptedRiskMarker, key)
+func acceptedFinding(comments []beads.Comment, key FindingKey, op *config.OperatorConfig) bool {
+	return anyCommentNames(comments, acceptedRiskMarker, key, op)
 }
 
 // rebuttedFinding reports whether an allowlisted REBUTTAL: comment names key.
-func rebuttedFinding(comments []beads.Comment, key FindingKey) bool {
-	return anyCommentNames(comments, rebuttalMarker, key)
+func rebuttedFinding(comments []beads.Comment, key FindingKey, op *config.OperatorConfig) bool {
+	return anyCommentNames(comments, rebuttalMarker, key, op)
 }
 
 // anyCommentNames reports whether a comment that opens with marker and whose
 // author may write it names key.
-func anyCommentNames(comments []beads.Comment, marker string, key FindingKey) bool {
+func anyCommentNames(comments []beads.Comment, marker string, key FindingKey, op *config.OperatorConfig) bool {
 	for _, c := range comments {
-		if text, ok := decisionComment(c, marker); ok && commentNamesFinding(text, marker, key) {
+		if text, ok := decisionComment(c, marker, op); ok && commentNamesFinding(text, marker, key) {
 			return true
 		}
 	}

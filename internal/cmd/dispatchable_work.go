@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 	"github.com/steveyegge/gastown/internal/townconfig"
@@ -80,13 +81,14 @@ var patrolSuppressedTitlePrefixes = []string{
 // isActionableReadyBead reports whether a ready bead is work a dispatcher could
 // sling: at or above maxPriority's floor, and not one of the town's
 // bookkeeping families. rv is the rig's revert in flight, which holds that
-// rig's red-main beads.
+// rig's red-main beads. op is the operator identities the town settings name
+// (operator.names); nil applies none beyond the bare-address rule.
 //
 // Epics are containers, excluded by beads.IsNonDispatchableBead along with the
 // runtime families: `gt sling` accepts one, but a container's children are what
 // a polecat takes, and they appear in ready on their own — a nudge naming the
 // epic would point at the wrong row.
-func isActionableReadyBead(issue *beads.Issue, maxPriority int, rv *specdispatch.Revert) bool {
+func isActionableReadyBead(issue *beads.Issue, maxPriority int, rv *specdispatch.Revert, op *config.OperatorConfig) bool {
 	if issue == nil {
 		return false
 	}
@@ -98,8 +100,10 @@ func isActionableReadyBead(issue *beads.Issue, maxPriority int, rv *specdispatch
 	}
 	// Work the operator reserved is not the dispatcher's to sling: naming one
 	// here is what sends a sling that refuses (gt-21pl0). This predicate and
-	// the spec dispatcher's draw the same line the sling guard does.
-	if dispatch.OperatorReservation(issue.Labels, issue.Assignee) != "" {
+	// the spec dispatcher's draw the same line the sling guard does. op is the
+	// identities the town settings name as the operator's; nil applies only
+	// the bare-address rule.
+	if dispatch.OperatorReservation(issue.Labels, issue.Assignee, op) != "" {
 		return false
 	}
 	// A red-main bead is the fix forward for a breakage the rig's owner is

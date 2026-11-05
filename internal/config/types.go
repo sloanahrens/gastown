@@ -235,6 +235,12 @@ type TownSettings struct {
 	// panels' switches; gt dashboard reads them when it starts.
 	Dashboard *DashboardConfig `json:"dashboard,omitempty"`
 
+	// Operator names the human operator's identities: the author strings a
+	// decision comment may carry, and the handles a bead's assignee may hold
+	// (operator.names, gt-ywuip). Absent, no name is entitled: the setting
+	// fails closed, and the overseer sets it before the install that reads it.
+	Operator *OperatorConfig `json:"operator,omitempty"`
+
 	// ForgejoStack locates the Forgejo compose stack gt power starts and
 	// stops.
 	ForgejoStack *ForgejoStackConfig `json:"forgejo,omitempty"`
@@ -264,6 +270,35 @@ type DashboardNewsConfig struct {
 // settings/config.json turns it off.
 func (c *DashboardConfig) NewsEnabled() bool {
 	return c == nil || c.News == nil || c.News.Enabled == nil || *c.News.Enabled
+}
+
+// OperatorConfig is the human operator's identities (settings/config.json's
+// "operator" section, gt-ywuip).
+type OperatorConfig struct {
+	// Names are the author identities the operator writes a bead's comments
+	// under: a name listed here is entitled to record a decision, and an
+	// assignee equal to one is the operator's own handle rather than an agent
+	// address. Names are matched exactly after trimming, case-sensitively.
+	Names []string `json:"names,omitempty"`
+}
+
+// Matches reports whether author is one of the configured operator identities.
+// An empty author, an empty name and surrounding space never match; a nil
+// config matches nothing.
+func (c *OperatorConfig) Matches(author string) bool {
+	if c == nil {
+		return false
+	}
+	author = strings.TrimSpace(author)
+	if author == "" {
+		return false
+	}
+	for _, name := range c.Names {
+		if name = strings.TrimSpace(name); name != "" && name == author {
+			return true
+		}
+	}
+	return false
 }
 
 // NewTownSettings creates a new TownSettings with defaults.

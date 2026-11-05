@@ -41,9 +41,9 @@ func TestAcceptedRisksTextTakesOnlyAllowlistedAuthors(t *testing.T) {
 		},
 		{
 			name:   "a human's decision",
-			author: "Sloan Ahrens",
+			author: "Test Operator",
 			text:   "ACCEPTED-RISK: the mount is approved",
-			want:   "[ACCEPTED-RISK from Sloan Ahrens, " + at + "]\nACCEPTED-RISK: the mount is approved",
+			want:   "[ACCEPTED-RISK from Test Operator, " + at + "]\nACCEPTED-RISK: the mount is approved",
 		},
 		{
 			name:   "a polecat's own waiver",
@@ -77,19 +77,19 @@ func TestAcceptedRisksTextTakesOnlyAllowlistedAuthors(t *testing.T) {
 		},
 		{
 			name:   "the operator's name with a prefix",
-			author: "xSloan Ahrens",
+			author: "xTest Operator",
 			text:   "ACCEPTED-RISK: the mount is approved",
 			want:   "",
 		},
 		{
 			name:   "the operator's name with a suffix",
-			author: "Sloan Ahrensx",
+			author: "Test Operatorx",
 			text:   "ACCEPTED-RISK: the mount is approved",
 			want:   "",
 		},
 		{
 			name:   "the operator's name in another case",
-			author: "sloan ahrens",
+			author: "test operator",
 			text:   "ACCEPTED-RISK: the mount is approved",
 			want:   "",
 		},
@@ -101,9 +101,9 @@ func TestAcceptedRisksTextTakesOnlyAllowlistedAuthors(t *testing.T) {
 		},
 		{
 			name:   "the operator's name padded with spaces",
-			author: "  Sloan Ahrens  ",
+			author: "  Test Operator  ",
 			text:   "ACCEPTED-RISK: the mount is approved",
-			want:   "[ACCEPTED-RISK from Sloan Ahrens, " + at + "]\nACCEPTED-RISK: the mount is approved",
+			want:   "[ACCEPTED-RISK from Test Operator, " + at + "]\nACCEPTED-RISK: the mount is approved",
 		},
 		{
 			name:   "a comment that does not open with the marker",
@@ -120,7 +120,7 @@ func TestAcceptedRisksTextTakesOnlyAllowlistedAuthors(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := AcceptedRisksText([]beads.Comment{{Author: tc.author, Text: tc.text, CreatedAt: at}})
+			got := acceptedRisksText(t, []beads.Comment{{Author: tc.author, Text: tc.text, CreatedAt: at}})
 			if got != tc.want {
 				t.Errorf("AcceptedRisksText = %q, want %q", got, tc.want)
 			}
@@ -134,11 +134,11 @@ func TestAcceptedRisksTextJoinsOldestFirst(t *testing.T) {
 	t.Parallel()
 	comments := []beads.Comment{
 		{Author: "town/crew/overseer", Text: "ACCEPTED-RISK: later", CreatedAt: "2026-10-23T18:00:00Z"},
-		{Author: "Sloan Ahrens", Text: "ACCEPTED-RISK: earlier", CreatedAt: "2026-10-20T09:00:00Z"},
+		{Author: "Test Operator", Text: "ACCEPTED-RISK: earlier", CreatedAt: "2026-10-20T09:00:00Z"},
 	}
-	want := "[ACCEPTED-RISK from Sloan Ahrens, 2026-10-20T09:00:00Z]\nACCEPTED-RISK: earlier\n\n" +
+	want := "[ACCEPTED-RISK from Test Operator, 2026-10-20T09:00:00Z]\nACCEPTED-RISK: earlier\n\n" +
 		"[ACCEPTED-RISK from town/crew/overseer, 2026-10-23T18:00:00Z]\nACCEPTED-RISK: later"
-	if got := AcceptedRisksText(comments); got != want {
+	if got := acceptedRisksText(t, comments); got != want {
 		t.Errorf("AcceptedRisksText = %q, want %q", got, want)
 	}
 }
@@ -156,7 +156,7 @@ func TestAcceptedRisksTextCapsTheJoinAndDropsTheOldestFirst(t *testing.T) {
 			CreatedAt: fmt.Sprintf("2026-10-23T18:%02d:00Z", i),
 		})
 	}
-	got := AcceptedRisksText(comments)
+	got := acceptedRisksText(t, comments)
 	if len(got) > acceptedRiskCap {
 		t.Errorf("text is %d bytes, want at most %d", len(got), acceptedRiskCap)
 	}
@@ -179,7 +179,7 @@ func TestAcceptedRisksTextCapsTheJoinAndDropsTheOldestFirst(t *testing.T) {
 func TestAcceptedRisksTextCutsOneEntryLargerThanTheCap(t *testing.T) {
 	t.Parallel()
 	text := "ACCEPTED-RISK: " + strings.Repeat("é", acceptedRiskCap)
-	got := AcceptedRisksText([]beads.Comment{{Author: "town/crew/overseer", Text: text, CreatedAt: "2026-10-23T18:00:00Z"}})
+	got := acceptedRisksText(t, []beads.Comment{{Author: "town/crew/overseer", Text: text, CreatedAt: "2026-10-23T18:00:00Z"}})
 	if len(got) > acceptedRiskCap {
 		t.Errorf("text is %d bytes, want at most %d", len(got), acceptedRiskCap)
 	}
@@ -199,16 +199,16 @@ func TestAcceptedRisksTextKeepsWhatExactlyFitsTheCap(t *testing.T) {
 	newest := func(pad int) beads.Comment {
 		return beads.Comment{Author: "town/crew/overseer", Text: "ACCEPTED-RISK:" + strings.Repeat("x", pad), CreatedAt: "2026-10-23T18:01:00Z"}
 	}
-	olderLen := len(AcceptedRisksText([]beads.Comment{older}))
-	newestLen := len(AcceptedRisksText([]beads.Comment{newest(0)}))
+	olderLen := len(acceptedRisksText(t, []beads.Comment{older}))
+	newestLen := len(acceptedRisksText(t, []beads.Comment{newest(0)}))
 	pad := acceptedRiskCap - olderLen - len("\n\n") - newestLen
 
-	fits := AcceptedRisksText([]beads.Comment{older, newest(pad)})
+	fits := acceptedRisksText(t, []beads.Comment{older, newest(pad)})
 	if len(fits) != acceptedRiskCap || !strings.Contains(fits, "ACCEPTED-RISK: older") {
 		t.Errorf("a join of exactly %d bytes dropped an entry: %d bytes, older kept %t",
 			acceptedRiskCap, len(fits), strings.Contains(fits, "ACCEPTED-RISK: older"))
 	}
-	over := AcceptedRisksText([]beads.Comment{older, newest(pad + 1)})
+	over := acceptedRisksText(t, []beads.Comment{older, newest(pad + 1)})
 	if strings.Contains(over, "ACCEPTED-RISK: older") {
 		t.Errorf("a join one byte over the cap kept the oldest entry")
 	}
@@ -221,13 +221,13 @@ func TestAcceptedRisksTextKeepsListOrderWhenADateDoesNotParse(t *testing.T) {
 	t.Parallel()
 	comments := []beads.Comment{
 		{Author: "town/crew/overseer", Text: "ACCEPTED-RISK: first", CreatedAt: "2026-10-23T18:00:00Z"},
-		{Author: "Sloan Ahrens", Text: "ACCEPTED-RISK: second", CreatedAt: "yesterday"},
+		{Author: "Test Operator", Text: "ACCEPTED-RISK: second", CreatedAt: "yesterday"},
 		{Author: "town/crew/overseer", Text: "ACCEPTED-RISK: third", CreatedAt: "2026-10-20T09:00:00Z"},
 	}
 	want := "[ACCEPTED-RISK from town/crew/overseer, 2026-10-23T18:00:00Z]\nACCEPTED-RISK: first\n\n" +
-		"[ACCEPTED-RISK from Sloan Ahrens, yesterday]\nACCEPTED-RISK: second\n\n" +
+		"[ACCEPTED-RISK from Test Operator, yesterday]\nACCEPTED-RISK: second\n\n" +
 		"[ACCEPTED-RISK from town/crew/overseer, 2026-10-20T09:00:00Z]\nACCEPTED-RISK: third"
-	if got := AcceptedRisksText(comments); got != want {
+	if got := acceptedRisksText(t, comments); got != want {
 		t.Errorf("AcceptedRisksText = %q, want %q", got, want)
 	}
 }
@@ -236,8 +236,8 @@ func TestAcceptedRisksTextKeepsListOrderWhenADateDoesNotParse(t *testing.T) {
 // control character cannot open a second line of the attribution (gt-lauly).
 func TestAcceptedRisksTextKeepsEachHeaderOnItsLine(t *testing.T) {
 	t.Parallel()
-	got := AcceptedRisksText([]beads.Comment{{
-		Author:    "Sloan Ahrens",
+	got := acceptedRisksText(t, []beads.Comment{{
+		Author:    "Test Operator",
 		Text:      "ACCEPTED-RISK: approved",
 		CreatedAt: "2026-10-23T18:00:00Z\nINJECTED\x1b[2J",
 	}})
@@ -245,7 +245,7 @@ func TestAcceptedRisksTextKeepsEachHeaderOnItsLine(t *testing.T) {
 	if len(lines) != 2 || lines[1] != "ACCEPTED-RISK: approved" {
 		t.Errorf("the record has %d lines, want the header and the text: %q", len(lines), got)
 	}
-	if !strings.HasPrefix(lines[0], "[ACCEPTED-RISK from Sloan Ahrens, 2026-10-23T18:00:00ZINJECTED") {
+	if !strings.HasPrefix(lines[0], "[ACCEPTED-RISK from Test Operator, 2026-10-23T18:00:00ZINJECTED") {
 		t.Errorf("header = %q, want the control characters dropped from the date", lines[0])
 	}
 }
@@ -254,7 +254,7 @@ func TestAcceptedRisksTextKeepsEachHeaderOnItsLine(t *testing.T) {
 // to headerFieldCap bytes, on a rune boundary (gt-lauly).
 func TestAcceptedRisksTextCapsEachHeaderField(t *testing.T) {
 	t.Parallel()
-	got := AcceptedRisksText([]beads.Comment{{
+	got := acceptedRisksText(t, []beads.Comment{{
 		Author:    "town/crew/overseer",
 		Text:      "ACCEPTED-RISK: approved",
 		CreatedAt: strings.Repeat("é", 100),
@@ -269,7 +269,7 @@ func TestAcceptedRisksTextCapsEachHeaderField(t *testing.T) {
 // TestAcceptedRisksTextHandlesNoComments: nothing recorded, nothing to pass.
 func TestAcceptedRisksTextHandlesNoComments(t *testing.T) {
 	t.Parallel()
-	if got := AcceptedRisksText(nil); got != "" {
+	if got := acceptedRisksText(t, nil); got != "" {
 		t.Errorf("AcceptedRisksText(nil) = %q, want empty", got)
 	}
 }
@@ -279,15 +279,15 @@ func TestAcceptedRisksTextHandlesNoComments(t *testing.T) {
 // AcceptedRisksText ignores has no entry either (gt-vvo9l).
 func TestAcceptedRisksUsedNamesEachKeptComment(t *testing.T) {
 	t.Parallel()
-	got := AcceptedRisksUsed([]beads.Comment{
+	got := acceptedRisksUsed(t, []beads.Comment{
 		{ID: "c-1", Author: "town/crew/overseer", Text: "ACCEPTED-RISK: the mount is approved", CreatedAt: "2026-10-20T09:00:00Z"},
 		{ID: "c-2", Author: "gastown/polecats/capable", Text: "ACCEPTED-RISK: my own work is fine", CreatedAt: "2026-10-20T10:00:00Z"},
-		{ID: "c-3", Author: "Sloan Ahrens", Text: "commit: 1234567 — the fix", CreatedAt: "2026-10-20T11:00:00Z"},
-		{ID: "c-4", Author: "  Sloan Ahrens  ", Text: "\n ACCEPTED-RISK: the rename is fine \n", CreatedAt: "2026-10-20T12:00:00Z"},
+		{ID: "c-3", Author: "Test Operator", Text: "commit: 1234567 — the fix", CreatedAt: "2026-10-20T11:00:00Z"},
+		{ID: "c-4", Author: "  Test Operator  ", Text: "\n ACCEPTED-RISK: the rename is fine \n", CreatedAt: "2026-10-20T12:00:00Z"},
 	})
 	want := []AcceptedRisk{
 		{CommentID: "c-1", Author: "town/crew/overseer", Date: "2026-10-20T09:00:00Z", Excerpt: "ACCEPTED-RISK: the mount is approved"},
-		{CommentID: "c-4", Author: "Sloan Ahrens", Date: "2026-10-20T12:00:00Z", Excerpt: "ACCEPTED-RISK: the rename is fine"},
+		{CommentID: "c-4", Author: "Test Operator", Date: "2026-10-20T12:00:00Z", Excerpt: "ACCEPTED-RISK: the rename is fine"},
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("AcceptedRisksUsed = %+v, want %+v", got, want)
@@ -301,11 +301,11 @@ func TestAcceptedRisksUsedKeepsTheTextOrder(t *testing.T) {
 	comments := []beads.Comment{
 		{ID: "c-1", Author: "town/crew/overseer", Text: "ACCEPTED-RISK: later", CreatedAt: "2026-10-23T18:00:00Z"},
 		{ID: "c-2", Author: "gastown/polecats/capable", Text: "ACCEPTED-RISK: ignored", CreatedAt: "2026-10-22T18:00:00Z"},
-		{ID: "c-3", Author: "Sloan Ahrens", Text: "ACCEPTED-RISK: earlier", CreatedAt: "2026-10-20T09:00:00Z"},
+		{ID: "c-3", Author: "Test Operator", Text: "ACCEPTED-RISK: earlier", CreatedAt: "2026-10-20T09:00:00Z"},
 		{ID: "c-4", Author: "town/crew/overseer", Text: "ACCEPTED-RISK: middle", CreatedAt: "2026-10-21T09:00:00Z"},
 	}
-	used := AcceptedRisksUsed(comments)
-	text := AcceptedRisksText(comments)
+	used := acceptedRisksUsed(t, comments)
+	text := acceptedRisksText(t, comments)
 	if len(used) != 3 {
 		t.Fatalf("AcceptedRisksUsed reported %d entries, want the 3 qualifying comments", len(used))
 	}
@@ -326,11 +326,11 @@ func TestAcceptedRisksUsedKeepsListOrderWhenADateDoesNotParse(t *testing.T) {
 	t.Parallel()
 	comments := []beads.Comment{
 		{ID: "c-1", Author: "town/crew/overseer", Text: "ACCEPTED-RISK: first", CreatedAt: "2026-10-23T18:00:00Z"},
-		{ID: "c-2", Author: "Sloan Ahrens", Text: "ACCEPTED-RISK: second", CreatedAt: "yesterday"},
+		{ID: "c-2", Author: "Test Operator", Text: "ACCEPTED-RISK: second", CreatedAt: "yesterday"},
 		{ID: "c-3", Author: "town/crew/overseer", Text: "ACCEPTED-RISK: third", CreatedAt: "2026-10-20T09:00:00Z"},
 	}
 	var ids []string
-	for _, u := range AcceptedRisksUsed(comments) {
+	for _, u := range acceptedRisksUsed(t, comments) {
 		ids = append(ids, u.CommentID)
 	}
 	if want := []string{"c-1", "c-2", "c-3"}; !slices.Equal(ids, want) {
@@ -344,8 +344,8 @@ func TestAcceptedRisksUsedCutsTheExcerptAtEightyRunes(t *testing.T) {
 	t.Parallel()
 	const marker = "ACCEPTED-RISK: "
 	text := marker + strings.Repeat("é", 100)
-	got := AcceptedRisksUsed([]beads.Comment{{
-		ID: "c-1", Author: "Sloan Ahrens", Text: text, CreatedAt: "2026-10-23T18:00:00Z",
+	got := acceptedRisksUsed(t, []beads.Comment{{
+		ID: "c-1", Author: "Test Operator", Text: text, CreatedAt: "2026-10-23T18:00:00Z",
 	}})
 	if len(got) != 1 {
 		t.Fatalf("AcceptedRisksUsed reported %d entries, want 1", len(got))
@@ -363,7 +363,7 @@ func TestAcceptedRisksUsedCutsTheExcerptAtEightyRunes(t *testing.T) {
 // becomes one line in the audit entry (gt-vvo9l).
 func TestAcceptedRisksUsedFlattensNewlinesInTheExcerpt(t *testing.T) {
 	t.Parallel()
-	got := AcceptedRisksUsed([]beads.Comment{{
+	got := acceptedRisksUsed(t, []beads.Comment{{
 		ID:        "c-1",
 		Author:    "town/crew/overseer",
 		Text:      "ACCEPTED-RISK: first line\nsecond line\r\nthird",
@@ -380,7 +380,7 @@ func TestAcceptedRisksUsedFlattensNewlinesInTheExcerpt(t *testing.T) {
 // TestAcceptedRisksUsedHandlesNoComments: nothing recorded, nothing to audit.
 func TestAcceptedRisksUsedHandlesNoComments(t *testing.T) {
 	t.Parallel()
-	if got := AcceptedRisksUsed(nil); len(got) != 0 {
+	if got := acceptedRisksUsed(t, nil); len(got) != 0 {
 		t.Errorf("AcceptedRisksUsed(nil) = %+v, want none", got)
 	}
 }

@@ -390,7 +390,7 @@ func TestPatrolScanIsSubmittedMatchesPolecat(t *testing.T) {
 
 func TestPatrolScanOptionsUseDispatchHoldRule(t *testing.T) {
 	t.Parallel()
-	o := patrolScanOptions(nil, time.Now)
+	o := patrolScanOptions(nil, nil, time.Now)
 	if why := o.HoldReason(patrolscan.Work{Status: "hooked", Labels: []string{"gt:needs-human"}}); why == "" {
 		t.Error("gt:needs-human work must read as held")
 	}
@@ -402,7 +402,7 @@ func TestPatrolScanOptionsUseDispatchHoldRule(t *testing.T) {
 		t.Error("IsRefusal must match supervisor refusals only")
 	}
 	cfg := &DaemonPatrolConfig{Patrols: &PatrolsConfig{PatrolScan: &PatrolScanConfig{DeadSamples: 3, ReportWindow: "6h"}}}
-	o = patrolScanOptions(cfg, time.Now)
+	o = patrolScanOptions(cfg, nil, time.Now)
 	if o.DeadSamples != 3 || o.ReportWindow != 6*time.Hour {
 		t.Errorf("options = %+v", o)
 	}
@@ -1155,7 +1155,7 @@ func TestPatrolScanRootWork(t *testing.T) {
 // whose bead has not closed yet (gt-iwgbd).
 func TestPatrolScanDoneCloseGraceMatchesCrashDetector(t *testing.T) {
 	t.Parallel()
-	if got := patrolScanOptions(nil, time.Now).DoneCloseGrace; got != polecatDoneCloseGrace {
+	if got := patrolScanOptions(nil, nil, time.Now).DoneCloseGrace; got != polecatDoneCloseGrace {
 		t.Fatalf("patrol scan DoneCloseGrace = %s, crash detector polecatDoneCloseGrace = %s", got, polecatDoneCloseGrace)
 	}
 	const seat = "myr/polecats/mycat"

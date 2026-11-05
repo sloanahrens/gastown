@@ -73,11 +73,13 @@ func PatrolScanDeadSamples(config *DaemonPatrolConfig) int {
 	return patrolscan.DefaultDeadSamples
 }
 
-// patrolScanOptions builds the scanner options from config.
-func patrolScanOptions(config *DaemonPatrolConfig, now func() time.Time) patrolscan.Options {
+// patrolScanOptions builds the scanner options from config. op is the operator
+// identities the town settings name, so the hold rule reserves a bead assigned
+// to one of them (gt-ywuip).
+func patrolScanOptions(config *DaemonPatrolConfig, op *agentconfig.OperatorConfig, now func() time.Time) patrolscan.Options {
 	o := patrolscan.Options{
 		HoldReason: func(w patrolscan.Work) string {
-			return dispatch.DispatchHoldFields(w.Status, w.Labels, w.Assignee, w.Design, w.Notes)
+			return dispatch.DispatchHoldFields(w.Status, w.Labels, w.Assignee, w.Design, w.Notes, op)
 		},
 		IsRefusal: func(err error) bool {
 			return errors.Is(err, supervisor.ErrRefused) || errors.Is(err, errReapRefused)
@@ -105,7 +107,7 @@ func patrolScanOptions(config *DaemonPatrolConfig, now func() time.Time) patrols
 // patrolScanRunOptions is the tick's options: the config-derived ones plus
 // the readings that need the host.
 func (d *Daemon) patrolScanRunOptions(env *patrolScanHost) patrolscan.Options {
-	opts := patrolScanOptions(d.patrolConfig, d.clk().Now)
+	opts := patrolScanOptions(d.patrolConfig, env.operatorIdentities(), d.clk().Now)
 	// The pool's cap, read here rather than in patrolScanOptions: it needs the
 	// host's tmux reading, and it is the same cap a sling answers to
 	// (gt-02tcp).
@@ -411,6 +413,21 @@ var _ patrolscan.Env = (*patrolScanHost)(nil)
 var _ patrolscan.TrimEnv = (*patrolScanHost)(nil)
 
 func (h *patrolScanHost) town() string { return h.d.config.TownRoot }
+
+// operatorIdentities reads the operator identities the town settings name, so
+// the hold rule reserves a bead assigned to one (gt-ywuip). Settings that
+// cannot be read leave no configured identity: the bare-handle rule still
+// holds those beads, the read is logged, and the tick does not stop for it.
+func (h *patrolScanHost) operatorIdentities() *agentconfig.OperatorConfig {
+	op, err := agentconfig.LoadOperatorConfig(h.town())
+	if err != nil {
+		if h.d.logger != nil {
+			h.d.logger.Printf("patrol_scan: could not read operator.names from the town settings (%v); no configured operator identity is held", err)
+		}
+		return nil
+	}
+	return op
+}
 
 func (h *patrolScanHost) seat(rig, name string) supervisor.Seat {
 	return supervisor.SeatIn(h.d.prefixRegistry(), rig, constants.RolePolecat, name)
