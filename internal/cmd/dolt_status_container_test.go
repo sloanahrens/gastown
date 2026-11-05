@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"database/sql/driver"
@@ -16,21 +17,30 @@ import (
 )
 
 // stubStatusReads is `gt dolt status`'s reads with every server call faked: the
-// server answers, serves no database, and the archive reader counts nothing. A
-// test replaces the field it exercises, so no status test reaches a live Dolt,
-// a Docker container or a host process scan (gt-w1ekf).
+// server answers, serves no database, the archive reader counts nothing and the
+// beads config read prints nothing. A test replaces the field it exercises, so
+// no status test reaches a live Dolt, a Docker container, a host process scan
+// or the beads config on disk (gt-w1ekf).
 func stubStatusReads(townRoot string) doltStatusReads {
 	return doltStatusReads{
-		townRoot:        func() (string, error) { return townRoot, nil },
-		isRunning:       func(string) (bool, int, error) { return true, 0, nil },
-		healthMetrics:   func(string) *doltserver.HealthMetrics { return &doltserver.HealthMetrics{} },
-		verifyDatabases: func(string) ([]string, []string, error) { return nil, nil, nil },
-		servedDatabases: func(*doltserver.Config) ([]string, error) { return nil, nil },
-		archiveReader: func(string, *doltserver.Config, []string) archiveBehindReader {
-			return stubArchiveBehindReader{}
-		},
-		strayWarning: func(string) {},
+		townRoot:           func() (string, error) { return townRoot, nil },
+		isRunning:          func(string) (bool, int, error) { return true, 0, nil },
+		healthMetrics:      func(string) *doltserver.HealthMetrics { return &doltserver.HealthMetrics{} },
+		verifyDatabases:    func(string) ([]string, []string, error) { return nil, nil, nil },
+		servedDatabases:    func(*doltserver.Config) ([]string, error) { return nil, nil },
+		archiveReader:      func(string, *doltserver.Config, []string) archiveBehindReader { return stubArchiveBehindReader{} },
+		beadsRuntimeConfig: func(io.Writer, string) {},
+		strayWarning:       func(string) {},
 	}
+}
+
+// runStatusIntoBuffer runs the status report into a buffer, the writer the command takes
+// instead of the process stdout, and returns what it printed.
+func runStatusIntoBuffer(t *testing.T, reads doltStatusReads) (string, error) {
+	t.Helper()
+	var buf bytes.Buffer
+	err := runDoltStatusWith(&buf, reads)
+	return buf.String(), err
 }
 
 // writeStatusFile writes one file under the town's daemon directory, where the
@@ -84,39 +94,28 @@ func plainTownRoot(t *testing.T, startedAt string, databases ...string) string {
 	return townRoot
 }
 
-// captureStatusOutput runs the status command with the process stdout replaced
-// by a pipe and returns what it printed. The command writes to os.Stdout, which
-// has no writer seam.
-func captureStatusOutput(t *testing.T, run func() error) (string, error) {
+// remoteTownRoot writes a town root whose Dolt is a remote server, which the
+// status reports but never lists databases for.
+func remoteTownRoot(t *testing.T) string {
 	t.Helper()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
+	townRoot := t.TempDir()
+	mayor := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayor, 0o755); err != nil {
+		t.Fatalf("mkdir mayor dir: %v", err)
 	}
-	stdout := os.Stdout
-	//testpolicy:allow no-global-swap — the status report is written to the process stdout; the pipe reads it
-	os.Stdout = w
-	defer func() {
-		//testpolicy:allow no-global-swap — restores the os.Stdout swapped above
-		os.Stdout = stdout
-	}()
-
-	runErr := run()
-	w.Close()
-	out, readErr := io.ReadAll(r)
-	r.Close()
-	if readErr != nil {
-		t.Fatalf("reading status output: %v", readErr)
+	// TEST-NET-3, so IsRemote resolves an address literal and never the
+	// network.
+	town := `{"type":"town","version":2,"name":"t","dolt":{"host":"203.0.113.5","port":3307}}`
+	if err := os.WriteFile(filepath.Join(mayor, "town.json"), []byte(town), 0o600); err != nil {
+		t.Fatalf("write town.json: %v", err)
 	}
-	return string(out), runErr
+	return townRoot
 }
 
 // TestDoltStatusContainerPrintsArchiveLines: a container town's status lists
 // the databases the container serves and each one's archive note, so the
 // flatten runbook's "0 commits behind" check can be read in the town's own mode
 // (gt-w1ekf).
-//
-//testpolicy:allow parallel — the status report goes to the process stdout, which the test replaces with a pipe
 func TestDoltStatusContainerPrintsArchiveLines(t *testing.T) {
 	townRoot := externalContainerTownRoot(t, "gt-dolt")
 	writeStatusFile(t, townRoot, "maintenance_state.json", `{
@@ -147,7 +146,7 @@ func TestDoltStatusContainerPrintsArchiveLines(t *testing.T) {
 		}
 	}
 
-	out, err := captureStatusOutput(t, func() error { return runDoltStatusWith(reads) })
+	out, err := runStatusIntoBuffer(t, reads)
 	if err != nil {
 		t.Fatalf("gt dolt status in container mode: %v", err)
 	}
@@ -168,7 +167,7 @@ func TestDoltStatusContainerPrintsArchiveLines(t *testing.T) {
 	if got := served.query; got != "SHOW DATABASES" {
 		t.Errorf("the served list asked the server %q, want SHOW DATABASES", got)
 	}
-	if strings.Contains(out, archiveCheckUnavailableLine) {
+	if strings.Contains(out, "ARCHIVE CHECK UNAVAILABLE") {
 		t.Errorf("status output says the archive check is unavailable although it listed two databases:\n%s", out)
 	}
 }
@@ -176,8 +175,6 @@ func TestDoltStatusContainerPrintsArchiveLines(t *testing.T) {
 // TestDoltStatusContainerUnreadableWatermarks: a watermark file the status
 // cannot read still prints the header and gives every database line the
 // unreadable state, so no database reads as caught up (gt-w1ekf).
-//
-//testpolicy:allow parallel — the status report goes to the process stdout, which the test replaces with a pipe
 func TestDoltStatusContainerUnreadableWatermarks(t *testing.T) {
 	townRoot := externalContainerTownRoot(t, "gt-dolt")
 	writeStatusFile(t, townRoot, "maintenance_state.json", "{not json")
@@ -187,7 +184,7 @@ func TestDoltStatusContainerUnreadableWatermarks(t *testing.T) {
 		return []string{"gt", "hq"}, nil
 	}
 
-	out, err := captureStatusOutput(t, func() error { return runDoltStatusWith(reads) })
+	out, err := runStatusIntoBuffer(t, reads)
 	if err != nil {
 		t.Fatalf("gt dolt status in container mode: %v", err)
 	}
@@ -205,17 +202,71 @@ func TestDoltStatusContainerUnreadableWatermarks(t *testing.T) {
 	}
 }
 
-// TestDoltStatusNoArchiveLinesIsLoud: a status that can produce no database
-// line says ARCHIVE CHECK UNAVAILABLE, in container mode and on the host,
-// rather than printing nothing a flatten's pre-check would pass over
-// (gt-w1ekf).
-//
-//testpolicy:allow parallel — each subtest replaces the process stdout with its own pipe
-func TestDoltStatusNoArchiveLinesIsLoud(t *testing.T) {
+// TestDoltStatusUnavailableOnContainerPingFailure: a container whose SQL ping
+// fails prints the exact unavailable line naming the ping, so a flatten's
+// pre-check cannot pass over the failure (gt-w1ekf).
+func TestDoltStatusUnavailableOnContainerPingFailure(t *testing.T) {
+	townRoot := externalContainerTownRoot(t, "gt-dolt")
+	reads := stubStatusReads(townRoot)
+	reads.isRunning = func(string) (bool, int, error) {
+		return false, 0, errors.New("dial tcp 127.0.0.1:3307: connect: connection refused")
+	}
+
+	out, err := runStatusIntoBuffer(t, reads)
+	if err != nil {
+		t.Fatalf("gt dolt status in container mode: %v", err)
+	}
+	want := "ARCHIVE CHECK UNAVAILABLE: container ping failed"
+	if !strings.Contains(out, want) {
+		t.Errorf("status output does not carry %q when the container ping fails:\n%s", want, out)
+	}
+	if !strings.Contains(out, "Ping: ") {
+		t.Errorf("status output dropped the existing ping alarm:\n%s", out)
+	}
+}
+
+// TestDoltStatusUnavailableOnContainerNotRunning: a stopped container prints
+// the exact unavailable line naming it (gt-w1ekf).
+func TestDoltStatusUnavailableOnContainerNotRunning(t *testing.T) {
+	townRoot := externalContainerTownRoot(t, "gt-dolt")
+	reads := stubStatusReads(townRoot)
+	reads.isRunning = func(string) (bool, int, error) { return false, 0, nil }
+
+	out, err := runStatusIntoBuffer(t, reads)
+	if err != nil {
+		t.Fatalf("gt dolt status in container mode: %v", err)
+	}
+	want := "ARCHIVE CHECK UNAVAILABLE: container not running"
+	if !strings.Contains(out, want) {
+		t.Errorf("status output does not carry %q when the container is stopped:\n%s", want, out)
+	}
+}
+
+// TestDoltStatusUnavailableOnHostNotRunning: a stopped host server prints the
+// exact unavailable line naming it (gt-w1ekf).
+func TestDoltStatusUnavailableOnHostNotRunning(t *testing.T) {
+	townRoot := plainTownRoot(t, "2026-11-02T09:30:00Z")
+	reads := stubStatusReads(townRoot)
+	reads.isRunning = func(string) (bool, int, error) { return false, 0, nil }
+
+	out, err := runStatusIntoBuffer(t, reads)
+	if err != nil {
+		t.Fatalf("gt dolt status on the host: %v", err)
+	}
+	want := "ARCHIVE CHECK UNAVAILABLE: host server not running"
+	if !strings.Contains(out, want) {
+		t.Errorf("status output does not carry %q when the host server is stopped:\n%s", want, out)
+	}
+}
+
+// TestDoltStatusUnavailableOnEmptyDatabaseList: every path that lists no
+// database, in container and host modes, prints the exact no-databases line
+// rather than nothing (gt-w1ekf).
+func TestDoltStatusUnavailableOnEmptyDatabaseList(t *testing.T) {
 	tests := []struct {
 		name string
-		// wantErr is the failure the status must show beside the unavailable
-		// line when it could not read the served list at all.
+		// wantErr is the failure the status must name beside the unavailable
+		// line when it could not read the list at all.
 		wantErr string
 		reads   func(t *testing.T) doltStatusReads
 	}{
@@ -287,17 +338,33 @@ func TestDoltStatusNoArchiveLinesIsLoud(t *testing.T) {
 				return reads
 			},
 		},
+		{
+			name: "host's state file is unreadable",
+			reads: func(t *testing.T) doltStatusReads {
+				townRoot := plainTownRoot(t, "2026-11-02T09:30:00Z", "gt")
+				if err := os.Remove(filepath.Join(townRoot, "daemon", "dolt-state.json")); err != nil {
+					t.Fatalf("remove state file: %v", err)
+				}
+				return stubStatusReads(townRoot)
+			},
+		},
+		{
+			name: "remote server lists no database",
+			reads: func(t *testing.T) doltStatusReads {
+				return stubStatusReads(remoteTownRoot(t))
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reads := tt.reads(t)
-			out, err := captureStatusOutput(t, func() error { return runDoltStatusWith(reads) })
+			out, err := runStatusIntoBuffer(t, reads)
 			if err != nil {
 				t.Fatalf("gt dolt status: %v", err)
 			}
-			if !strings.Contains(out, archiveCheckUnavailableLine) {
-				t.Errorf("status output does not carry %q when it lists no database:\n%s",
-					archiveCheckUnavailableLine, out)
+			want := "ARCHIVE CHECK UNAVAILABLE: no databases listed"
+			if !strings.Contains(out, want) {
+				t.Errorf("status output does not carry %q when it lists no database:\n%s", want, out)
 			}
 			if strings.Contains(out, "commits behind") {
 				t.Errorf("status output carries an archive line although it listed no database:\n%s", out)
@@ -310,7 +377,7 @@ func TestDoltStatusNoArchiveLinesIsLoud(t *testing.T) {
 }
 
 // TestDoltHistoryDocStep2RefusesWithoutArchiveLines: the flatten runbook's
-// step 2 stops on the status's unavailable line and on a status that shows no
+// step 2 stops on any unavailable line and on a status that shows no
 // database's archive line, so the procedure cannot be read as satisfied by an
 // output it did not check (gt-w1ekf).
 func TestDoltHistoryDocStep2RefusesWithoutArchiveLines(t *testing.T) {
@@ -337,8 +404,9 @@ func TestDoltHistoryDocStep2RefusesWithoutArchiveLines(t *testing.T) {
 	step2 := section[start:stop]
 
 	for _, want := range []string{
-		archiveCheckUnavailableLine,
+		"ARCHIVE CHECK UNAVAILABLE",
 		"no database line shows an archive line",
+		"archive state unreadable",
 	} {
 		if !strings.Contains(step2, want) {
 			t.Errorf("step 2 of \"Before any rewrite\" does not carry %q:\n%s", want, step2)
