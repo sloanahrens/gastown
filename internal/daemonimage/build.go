@@ -820,12 +820,35 @@ func (b Builder) BuildImage(ctx context.Context, rev string, bins []string) (str
 	if err := b.checkImageBinaries(bins); err != nil {
 		return "", err
 	}
+	if err := b.stageKnownHosts(); err != nil {
+		return "", err
+	}
 	tag := ImageTag(rev)
 	argv := imageArgv(b.Dockerfile, tag, b.Out)
 	if err := b.Run(ctx, b.Out, dockerEnv(b.Environ), argv); err != nil {
 		return "", fmt.Errorf("daemonimage: building image %s failed: %w", tag, err)
 	}
 	return tag, nil
+}
+
+// KnownHostsName is the file the image's known_hosts COPY reads from the build
+// context. It sits beside the Dockerfile in the gt checkout.
+const KnownHostsName = "ssh_known_hosts"
+
+// stageKnownHosts copies the known_hosts file beside b.Dockerfile into the build
+// context, so the Dockerfile's COPY of it reads the same bytes the repo holds. A
+// missing or unreadable file is a refusal: docker would report it only after the
+// base image pulled.
+func (b Builder) stageKnownHosts() error {
+	src := filepath.Join(filepath.Dir(b.Dockerfile), KnownHostsName)
+	body, err := os.ReadFile(src)
+	if err != nil {
+		return fmt.Errorf("daemonimage: %s is not readable; the image's COPY of it reads only the build context: %w", src, err)
+	}
+	if err := os.WriteFile(filepath.Join(b.Out, KnownHostsName), body, 0o644); err != nil {
+		return fmt.Errorf("daemonimage: staging %s in the build context %s: %w", KnownHostsName, b.Out, err)
+	}
+	return nil
 }
 
 // checkImageBinaries refuses a set of binaries the Dockerfile's COPY lines could
