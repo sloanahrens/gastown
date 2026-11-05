@@ -88,7 +88,7 @@ func assertFindings(t *testing.T, got []Finding, want ...Finding) {
 func TestShapeRulesFirePerRule(t *testing.T) {
 	t.Parallel()
 	billing := planted("0A1B2C", "-", "3D4E5F", "-", "6A7B8C")
-	home := planted("/Users/", "alice", "/project/file.go")
+	home := planted("/Users/", "zephyr", "/project/file.go")
 	privateTemp := planted("/private/", "tmp", "/note.txt")
 	sessionID := planted("session", "_id: ", "1234abcd", "-", "5678")
 	claudeProject := planted(".claude/", "projects/abc/transcript.txt")
@@ -116,6 +116,132 @@ func TestShapeRulesFirePerRule(t *testing.T) {
 			})
 			if strings.Contains(findings[0].String(), tc.matched) {
 				t.Errorf("finding %q echoes the matched text", findings[0].String())
+			}
+		})
+	}
+}
+
+func TestHomePathNameMustStartWithLetterOrDigit(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		path string
+		want int
+	}{
+		{"dot config is not an account", planted("/home/", ".config", "/x"), 0},
+		{"local directory is not an account", planted("/Users/", ".local", "/x"), 0},
+		{"account starting with a letter", planted("/home/", "real", "/x"), 1},
+		{"account starting with a digit", planted("/home/", "7even", "/x"), 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := "opened " + tc.path
+			findings := scanFS(t, singleFile("docs/note.md", line+"\n"), nil)
+			if len(findings) != tc.want {
+				t.Fatalf("got %d findings %v, want %d", len(findings), findings, tc.want)
+			}
+			if tc.want == 1 && findings[0].Rule != RuleHomePath {
+				t.Errorf("rule = %q, want %q", findings[0].Rule, RuleHomePath)
+			}
+		})
+	}
+}
+
+func TestNonPersonalHomeNamesAreExemptByWholeName(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the list holds exactly the documented names", func(t *testing.T) {
+		want := []string{
+			"user", "username", "me", "you", "u", "x", "op", "operator",
+			"someone", "other", "name", "NAME", "example", "test", "tester",
+			"fixture", "dev", "ci", "ops", "agent", "builder", "coder", "go",
+			"bin", "alice", "bob", "ann", "gt", "Shared",
+		}
+		if len(nonPersonalHomeNames) != len(want) {
+			t.Fatalf("got %d exempt names, want %d", len(nonPersonalHomeNames), len(want))
+		}
+		for _, name := range want {
+			if _, ok := nonPersonalHomeNames[name]; !ok {
+				t.Errorf("%q is not exempt", name)
+			}
+		}
+	})
+
+	t.Run("every documented name is exempt in both roots", func(t *testing.T) {
+		for name := range nonPersonalHomeNames {
+			for _, base := range []string{"/Users/", "/home/"} {
+				line := "opened " + planted(base, name, "/project/file.go")
+				if findings := scanFS(t, singleFile("docs/note.md", line+"\n"), nil); len(findings) != 0 {
+					t.Errorf("%q: got %d findings %v, want none", line, len(findings), findings)
+				}
+			}
+		}
+	})
+
+	t.Run("a lookalike is still an account", func(t *testing.T) {
+		cases := []struct{ base, name string }{
+			{"/Users/", "sloanx"},
+			{"/home/", "usera"},
+			{"/home/", "user2"},
+			{"/home/", "xop"},
+			{"/Users/", "user.evil"},
+		}
+		for _, tc := range cases {
+			line := "opened " + planted(tc.base, tc.name, "/project/file.go")
+			findings := scanFS(t, singleFile("docs/note.md", line+"\n"), nil)
+			if len(findings) != 1 || findings[0].Rule != RuleHomePath {
+				t.Errorf("%q: got %v, want one %q finding", line, findings, RuleHomePath)
+			}
+		}
+	})
+
+	t.Run("a second path sharing a separator is still examined", func(t *testing.T) {
+		line := "opened " + planted("/home/", "user", "/home/", "real", "/x")
+		findings := scanFS(t, singleFile("docs/note.md", line+"\n"), nil)
+		if len(findings) != 1 || findings[0].Rule != RuleHomePath {
+			t.Errorf("%q: got %v, want one %q finding", line, findings, RuleHomePath)
+		}
+	})
+
+	t.Run("the blocked word still fires on its own name", func(t *testing.T) {
+		name := planted("slo", "an")
+		line := "opened " + planted("/Users/", name, "/project/file.go")
+		findings := scanFS(t, singleFile("docs/note.md", line+"\n"), nil)
+		var blocked bool
+		for _, finding := range findings {
+			if finding.Rule == RuleBlockedWord {
+				blocked = true
+			}
+		}
+		if !blocked {
+			t.Errorf("got %v, want a %q finding", findings, RuleBlockedWord)
+		}
+	})
+}
+
+func TestIdentifierShapedDomainIsNotAnEmail(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		addr string
+		want int
+	}{
+		{"metric column", planted("x@", "metrics.queueLandingColumn"), 0},
+		{"method chain", planted("show@", "landworker.RetryBeads.List"), 0},
+		{"short identifier", planted("a@", "pkg.Func"), 0},
+		{"upper-case top label is a host", planted("a@", "host.COM"), 1},
+		{"lower-case top label is a host", planted("a@", "host.com"), 1},
+		{"mixed-case host with a lower-case top label", planted("a@", "Host.com"), 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := "contact " + tc.addr + " please"
+			findings := scanFS(t, singleFile("docs/note.md", line+"\n"), nil)
+			if len(findings) != tc.want {
+				t.Fatalf("got %d findings %v, want %d", len(findings), findings, tc.want)
+			}
+			if tc.want == 1 && findings[0].Rule != RuleEmail {
+				t.Errorf("rule = %q, want %q", findings[0].Rule, RuleEmail)
 			}
 		})
 	}

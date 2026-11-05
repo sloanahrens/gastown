@@ -48,8 +48,10 @@ var ForbiddenDirs = []string{
 var blockedData string
 
 var (
-	billingIDPattern   = regexp.MustCompile(`\b[0-9A-F]{6}-[0-9A-F]{6}-[0-9A-F]{6}\b`)
-	homePathPattern    = regexp.MustCompile(`/(Users|home)/[A-Za-z0-9._-]+/`)
+	billingIDPattern = regexp.MustCompile(`\b[0-9A-F]{6}-[0-9A-F]{6}-[0-9A-F]{6}\b`)
+	// The account name starts with a letter or digit so a path such as
+	// /home/.config/ is not read as somebody's home.
+	homePathPattern    = regexp.MustCompile(`/(Users|home)/([A-Za-z0-9][A-Za-z0-9._-]*)/`)
 	privateTempPattern = regexp.MustCompile(`/private/(tmp|var)/`)
 	// The pattern is assembled from pieces so this source line does not match
 	// the rule it defines.
@@ -92,15 +94,47 @@ type Allow struct {
 	Reason string `json:"reason"`
 }
 
+// nonPersonalHomeNames are account names that documentation, fixtures and CI
+// paths use for a placeholder. A home path whose account name is exactly one
+// of these is not a finding; the whole name must match, so names such as
+// "user2" or "operatorX" still count as somebody's.
+var nonPersonalHomeNames = map[string]struct{}{
+	"user": {}, "username": {}, "me": {}, "you": {}, "u": {}, "x": {},
+	"op": {}, "operator": {}, "someone": {}, "other": {}, "name": {},
+	"NAME": {}, "example": {}, "test": {}, "tester": {}, "fixture": {},
+	"dev": {}, "ci": {}, "ops": {}, "agent": {}, "builder": {}, "coder": {},
+	"go": {}, "bin": {}, "alice": {}, "bob": {}, "ann": {},
+	// The town's service account and the macOS shared directory.
+	"gt": {}, "Shared": {},
+}
+
 // DefaultRules returns the shape rules, in reporting order.
 func DefaultRules() []Rule {
 	return []Rule{
 		{Name: RuleBillingID, Match: billingIDPattern.MatchString},
-		{Name: RuleHomePath, Match: homePathPattern.MatchString},
+		{Name: RuleHomePath, Match: homePathFinding},
 		{Name: RulePrivateTemp, Match: privateTempPattern.MatchString},
 		{Name: RuleAgentSession, Match: agentSessionPattern.MatchString},
 		{Name: RuleEmail, Match: emailFinding},
 	}
+}
+
+// homePathFinding reports whether the line holds a home path whose account
+// name is not a documented placeholder.
+func homePathFinding(line string) bool {
+	for start := 0; start < len(line); {
+		loc := homePathPattern.FindStringSubmatchIndex(line[start:])
+		if loc == nil {
+			return false
+		}
+		if _, ok := nonPersonalHomeNames[line[start+loc[4]:start+loc[5]]]; !ok {
+			return true
+		}
+		// Keep the trailing separator so a second path that shares it is
+		// still examined.
+		start += loc[1] - 1
+	}
+	return false
 }
 
 // HashWord returns the hex SHA-256 of word lower-cased.
@@ -385,12 +419,33 @@ func emailFinding(line string) bool {
 	return false
 }
 
-// lastLabelIsName reports whether the domain's last label starts with a letter;
-// 127.0.0.1 and other address-shaped hosts are not email domains.
+// lastLabelIsName reports whether the domain's last label is a host label: it
+// starts with a letter and does not mix lower and upper case. A case-mixing
+// label is a Go identifier such as queueLandingColumn, while 127.0.0.1 and
+// other all-digit hosts are not names at all.
 func lastLabelIsName(domain string) bool {
 	labels := strings.Split(domain, ".")
 	last := labels[len(labels)-1]
-	return last != "" && isASCIILetter(last[0])
+	if last == "" || !isASCIILetter(last[0]) {
+		return false
+	}
+	return !mixedCase(last)
+}
+
+func mixedCase(s string) bool {
+	var upper, lower bool
+	for _, r := range s {
+		if unicode.IsUpper(r) {
+			upper = true
+		}
+		if unicode.IsLower(r) {
+			lower = true
+		}
+		if upper && lower {
+			return true
+		}
+	}
+	return false
 }
 
 func emailIsFinding(local, domain, rest string) bool {
