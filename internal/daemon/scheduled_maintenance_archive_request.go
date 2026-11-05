@@ -52,10 +52,10 @@ func (d *Daemon) answerInvalidArchiveRequest(files requestFiles, dir string, cau
 // five minutes for as long as the write keeps failing. The command then finds
 // the request gone with no result and reports that the daemon removed it
 // without answering, which is what happened.
-func (d *Daemon) answerArchive(req update.RequestFile, outcome maintenanceGCOutcome, detail string) {
+func (d *Daemon) answerArchive(req update.RequestFile, outcome, detail string) {
 	files := osRequestFiles{}
 	dir := update.Dir(d.config.TownRoot)
-	if err := answerArchiveRequest(files, dir, req.RunID, d.maintenance().now(), outcome.String(), detail); err != nil {
+	if err := answerArchiveRequest(files, dir, req.RunID, d.maintenance().now(), outcome, detail); err != nil {
 		d.logger.Printf("scheduled_maintenance: WARNING: cannot answer the archive request for run %s: %v", req.RunID, err)
 		if err := removeAnsweredRequestAt(files, archiveRequestPath(dir), "archive", req.RunID); err != nil {
 			d.logger.Printf("scheduled_maintenance: WARNING: cannot drop the unanswered archive request for run %s: %v — the next tick serves it again", req.RunID, err)
@@ -81,21 +81,49 @@ func (d *Daemon) archiveRequestReady() error {
 }
 
 // archiveRequestDetail renders one line per database and the outcome they add
-// up to: a database the pass did not archive (its export failed, or a
-// configuration failure marked every database) makes the request failed, while
-// the others are reported archived.
-func archiveRequestDetail(databases []string, unarchived map[string]bool) (string, maintenanceGCOutcome) {
+// up to: completed only when every export of every database is caught up,
+// partial when nothing failed but an export stopped at the budget or the
+// per-cycle batch bound with history still behind, and failed when any export
+// failed. A stop is never reported as caught up.
+func archiveRequestDetail(databases []string, outcomes map[string]archiveDatabaseOutcome) (string, string) {
 	lines := make([]string, 0, len(databases))
-	outcome := gcOutcomeCompleted
+	outcome := "completed"
 	for _, db := range databases {
-		if unarchived[db] {
-			outcome = gcOutcomeFailed
-			lines = append(lines, db+": not archived; the daemon log names the failed export and the next run retries from the watermark")
-			continue
+		o := outcomes[db]
+		lines = append(lines, fmt.Sprintf("%s: commits archived %d (%s); events archived %d (%s)",
+			db, o.commits.archived, archiveExportState(o.commits), o.events.archived, archiveExportState(o.events)))
+		switch {
+		case o.commits.err != nil || o.events.err != nil:
+			outcome = "failed"
+		case !archiveExportCaughtUp(o.commits) || !archiveExportCaughtUp(o.events):
+			if outcome == "completed" {
+				outcome = "partial"
+			}
 		}
-		lines = append(lines, db+": archived")
 	}
 	return strings.Join(lines, "\n"), outcome
+}
+
+// archiveExportCaughtUp reports whether an export is known to have nothing more
+// behind: it read a short batch, or a full batch it could not advance past
+// (nothing is known to be behind, as the cycle's log says).
+func archiveExportCaughtUp(o archiveExportOutcome) bool {
+	return o.err == nil && (o.stop == archiveStopShort || o.stop == archiveStopNoProgress)
+}
+
+// archiveExportState is one export's word in a detail line: caught up, a stop
+// that leaves history behind, or the failed export's error text.
+func archiveExportState(o archiveExportOutcome) string {
+	switch {
+	case o.err != nil:
+		return "failed: " + o.err.Error()
+	case o.stop == archiveStopBudget:
+		return "stopped at the archive_budget, still behind"
+	case o.stop == archiveStopCapped:
+		return "stopped at the per-cycle batch bound, still behind"
+	default:
+		return "caught up"
+	}
 }
 
 // serveArchiveRequest runs the history archive pass for req and answers it,
@@ -121,15 +149,15 @@ func (d *Daemon) serveArchiveRequest(req update.RequestFile) {
 		}
 	}()
 	if reason := d.standbyReason(d.maintenance().now()); reason != "" {
-		d.answerArchive(req, gcOutcomeDeferred, reason)
+		d.answerArchive(req, "deferred", reason)
 		return
 	}
 	if err := d.archiveRequestReady(); err != nil {
-		d.answerArchive(req, gcOutcomeFailed, err.Error())
+		d.answerArchive(req, "failed", err.Error())
 		return
 	}
 	if external, why := d.maintenance().gcExternal(d); external {
-		d.answerArchive(req, gcOutcomeFailed, "no local server can run the archive: "+why)
+		d.answerArchive(req, "failed", "no local server can run the archive: "+why)
 		return
 	}
 	dataDir := d.maintenanceDataDir()
@@ -139,18 +167,18 @@ func (d *Daemon) serveArchiveRequest(req update.RequestFile) {
 		if err != nil {
 			detail = fmt.Sprintf("%s: %v", detail, err)
 		}
-		d.answerArchive(req, gcOutcomeFailed, detail)
+		d.answerArchive(req, "failed", detail)
 		return
 	}
 	d.logger.Printf("scheduled_maintenance: archive request for run %s: %d database(s) discovered", req.RunID, len(databases))
 	d.maintenance().dispatch(func() {
 		defer d.maintenanceGCRunning.Store(false)
-		res, unarchived := d.maintenanceArchive(databases)
+		res, _, outcomes := d.maintenanceArchive(databases)
 		if res.outcome == gcOutcomeDeferred {
 			d.logger.Printf("scheduled_maintenance: archive request for run %s deferred: %s — the request stays", req.RunID, res.reason)
 			return
 		}
-		detail, outcome := archiveRequestDetail(databases, unarchived)
+		detail, outcome := archiveRequestDetail(databases, outcomes)
 		d.logger.Printf("scheduled_maintenance: archive request for run %s %s", req.RunID, outcome)
 		d.answerArchive(req, outcome, detail)
 	})

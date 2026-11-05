@@ -788,7 +788,9 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time, req
 		// defers the whole cycle, as the gc's own quiet guard does, so the backup
 		// and gc wait for the retry rather than running ahead of an unarchived
 		// database.
-		archiveRes, unarchived := d.maintenanceArchive(databases)
+		// The per-database outcomes are the archive request path's; the cycle's
+		// gc decisions need only the unarchived set.
+		archiveRes, unarchived, _ := d.maintenanceArchive(databases)
 		if archiveRes.outcome == gcOutcomeDeferred {
 			d.logger.Printf("scheduled_maintenance: cycle %s", archiveRes.outcome)
 			recordDeferral(archiveRes.reason, archiveRes.pending)

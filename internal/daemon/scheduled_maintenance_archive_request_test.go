@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -121,7 +123,10 @@ func TestArchiveRequestRunsArchiveOnlyAndAnswers(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("detail = %q, want one line per database", res.Detail)
 	}
-	for _, want := range []string{"gt: archived", "hq: archived"} {
+	for _, want := range []string{
+		"gt: commits archived 1 (caught up); events archived 0 (caught up)",
+		"hq: commits archived 1 (caught up); events archived 0 (caught up)",
+	} {
 		if !strings.Contains(res.Detail, want) {
 			t.Errorf("detail = %q, want it to hold %q", res.Detail, want)
 		}
@@ -194,16 +199,38 @@ func TestArchiveRequestLeavesBusyAndAnswersStandby(t *testing.T) {
 	}
 }
 
-// One database whose export fails is named in a failed result; the others are
-// archived, and the request is removed only after the result is written.
-func TestArchiveRequestFailureNamesTheDatabase(t *testing.T) {
+// One database whose export fails is named in a failed result, with the counts
+// written before the error and the error text; the others are archived and
+// listed, and the request is removed only after the result is written.
+func TestArchiveRequestFailureCarriesCountsAndErrorText(t *testing.T) {
 	t.Parallel()
 	d, _, cf := archiveRequestDaemon(t, outsideRequestNow, "gt", "hq")
+	limit := 2
+	d.patrolConfig.Patrols.ScheduledMaintenance.ArchiveCommitLimit = &limit
 	cf.commits = map[string][]archiveCommit{
-		"gt": {{Hash: "aaa111", Committer: "operator", Date: outsideRequestNow.Add(-time.Hour), Message: "gt: one"}},
+		"gt": requestArchiveCommits(10, outsideRequestNow),
 		"hq": {{Hash: "bbb222", Committer: "operator", Date: outsideRequestNow.Add(-2 * time.Hour), Message: "hq: one"}},
 	}
-	cf.errs = map[string]error{"gt": errors.New("dolt_log read: connection reset")}
+	// gt's first batch writes two commits; its second read fails, so the line
+	// carries the rows written before the error as well as its text.
+	inner := d.maint.archiveRead
+	gtReads := 0
+	d.maint.archiveRead = func(ctx context.Context, dm *Daemon, db string, archived map[string]struct{}) ([]archiveCommit, error) {
+		if db == "gt" {
+			gtReads++
+			if gtReads > 1 {
+				return nil, errors.New("dolt_log read: connection reset")
+			}
+		}
+		commits, err := inner(ctx, dm, db, archived)
+		if err != nil {
+			return nil, err
+		}
+		if len(commits) > limit {
+			commits = commits[:limit]
+		}
+		return commits, nil
+	}
 	requestFile := writeArchiveRequestFile(t, d, "run-fail", outsideRequestNow)
 
 	d.runScheduledMaintenance()
@@ -212,10 +239,13 @@ func TestArchiveRequestFailureNamesTheDatabase(t *testing.T) {
 	if res.RunID != "run-fail" || res.Outcome != "failed" {
 		t.Fatalf("result = %+v, want run-fail failed", res)
 	}
-	if !strings.Contains(res.Detail, "gt: not archived") {
-		t.Errorf("detail = %q, want it to name gt as not archived", res.Detail)
+	if !strings.Contains(res.Detail, "gt: commits archived 2 (failed: ") {
+		t.Errorf("detail = %q, want it to name gt's commit export failure and the rows written before it", res.Detail)
 	}
-	if !strings.Contains(res.Detail, "hq: archived") {
+	if !strings.Contains(res.Detail, "connection reset") {
+		t.Errorf("detail = %q, want it to carry the export's error text", res.Detail)
+	}
+	if !strings.Contains(res.Detail, "hq: commits archived 1 (caught up)") {
 		t.Errorf("detail = %q, want hq still archived", res.Detail)
 	}
 	path := filepath.Join(archiveRequestDir(d), archiveFileName("dolt-log", "hq", outsideRequestNow))
@@ -226,6 +256,106 @@ func TestArchiveRequestFailureNamesTheDatabase(t *testing.T) {
 	if _, err := os.Stat(archiveResultPath(update.Dir(d.config.TownRoot))); err != nil {
 		t.Errorf("the result was not written: %v", err)
 	}
+}
+
+// requestArchiveCommits serves total commits, one second apart from base, to
+// the archive read's fake.
+func requestArchiveCommits(total int, base time.Time) []archiveCommit {
+	commits := make([]archiveCommit, 0, total)
+	for i := 1; i <= total; i++ {
+		commits = append(commits, archiveCommit{
+			Hash:      fmt.Sprintf("h%05d", i),
+			Committer: "committer",
+			Date:      base.Add(time.Duration(i) * time.Second),
+			Message:   "message",
+		})
+	}
+	return commits
+}
+
+// A pass that stops at the archive_budget is partial, with the rows written so
+// far and the stop, never caught up: the export is still behind. The second
+// batch's read moves the fake clock past the deadline, so the loop stops after
+// two full batches and only their rows are reported.
+func TestArchiveRequestBudgetStopIsPartialNotArchived(t *testing.T) {
+	t.Parallel()
+	d, _, cf := archiveRequestDaemon(t, outsideRequestNow, "hq")
+	limit := 5
+	d.patrolConfig.Patrols.ScheduledMaintenance.ArchiveCommitLimit = &limit
+	d.patrolConfig.Patrols.ScheduledMaintenance.ArchiveBudget = "10m"
+	clock := outsideRequestNow
+	d.maint.now = func() time.Time { return clock }
+	cf.commits = map[string][]archiveCommit{"hq": requestArchiveCommits(20, outsideRequestNow)}
+	// The commit fake serves every unarchived commit; production's read caps at
+	// the limit, so cap here too and let the clock pass the deadline on the
+	// second batch's read.
+	inner := d.maint.archiveRead
+	reads := 0
+	d.maint.archiveRead = func(ctx context.Context, dm *Daemon, db string, archived map[string]struct{}) ([]archiveCommit, error) {
+		reads++
+		if reads == 2 {
+			clock = outsideRequestNow.Add(11 * time.Minute)
+		}
+		commits, err := inner(ctx, dm, db, archived)
+		if err != nil {
+			return nil, err
+		}
+		if len(commits) > limit {
+			commits = commits[:limit]
+		}
+		return commits, nil
+	}
+	requestFile := writeArchiveRequestFile(t, d, "run-budget", outsideRequestNow)
+
+	d.runScheduledMaintenance()
+
+	res := readArchiveAnswer(t, d)
+	if res.Outcome != "partial" {
+		t.Errorf("outcome = %q, want partial: a budget stop nothing failed for is still behind", res.Outcome)
+	}
+	if want := "hq: commits archived 10 (stopped at the archive_budget, still behind)"; !strings.Contains(res.Detail, want) {
+		t.Errorf("detail = %q, want it to hold %q", res.Detail, want)
+	}
+	if strings.Contains(res.Detail, "commits archived 10 (caught up)") {
+		t.Errorf("detail = %q reports the stopped commit export as caught up", res.Detail)
+	}
+	mustNotExist(t, requestFile, "the answered archive request")
+}
+
+// A pass that stops at the per-cycle batch bound is partial too, with the rows
+// the bound allowed and the stop, never caught up.
+func TestArchiveRequestBatchCapIsPartialNotArchived(t *testing.T) {
+	t.Parallel()
+	d, _, _ := archiveRequestDaemon(t, outsideRequestNow, "hq")
+	limit := 1
+	d.patrolConfig.Patrols.ScheduledMaintenance.ArchiveCommitLimit = &limit
+	// A no-op append keeps every batch on the loop: the archive file never
+	// grows, so the read keeps serving a fresh commit, and the clock never
+	// reaches the deadline.
+	d.maint.archiveAppend = func(string, []string, [][]string) error { return nil }
+	reads := 0
+	d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {
+		reads++
+		return []archiveCommit{{
+			Hash:      fmt.Sprintf("h%06d", reads),
+			Committer: "c",
+			Date:      outsideRequestNow.Add(time.Duration(reads) * time.Second),
+			Message:   "m",
+		}}, nil
+	}
+	requestFile := writeArchiveRequestFile(t, d, "run-capped", outsideRequestNow)
+
+	d.runScheduledMaintenance()
+
+	res := readArchiveAnswer(t, d)
+	if res.Outcome != "partial" {
+		t.Errorf("outcome = %q, want partial: a branch-cap stop nothing failed for is still behind", res.Outcome)
+	}
+	want := fmt.Sprintf("hq: commits archived %d (stopped at the per-cycle batch bound, still behind)", maintenanceArchiveMaxBatchesPerExport)
+	if !strings.Contains(res.Detail, want) {
+		t.Errorf("detail = %q, want it to hold %q", res.Detail, want)
+	}
+	mustNotExist(t, requestFile, "the answered archive request")
 }
 
 // An archive request touches neither the window's last-run time nor the

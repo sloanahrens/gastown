@@ -196,7 +196,7 @@ func (d *Daemon) runScheduledMaintenance() {
 			d.answerRequest(request, gcOutcomeFailed, "the scheduled_maintenance patrol is not active")
 		}
 		if archiveRequested {
-			d.answerArchive(archiveRequest, gcOutcomeFailed, "the scheduled_maintenance patrol is not active")
+			d.answerArchive(archiveRequest, "failed", "the scheduled_maintenance patrol is not active")
 		}
 		return
 	}

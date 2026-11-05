@@ -26,7 +26,19 @@ var errMalformedRequest = errors.New("malformed request")
 // errInvalidRunID marks a request whose run id is not bounded to
 // [A-Za-z0-9._-] and maxRequestRunIDLen characters. The tick answers it failed
 // and removes it, but never logs or echoes the value.
-var errInvalidRunID = errors.New("invalid request run id")
+var errInvalidRunID = errors.New("invalid run id")
+
+// kindError is one of the sentinels above with a message naming the request
+// pair. errors.Is still matches the sentinel it wraps, while the maintenance
+// request's text stays exactly what it was before the archive pair existed and
+// an archive request's text says "archive".
+type kindError struct {
+	sentinel error
+	message  string
+}
+
+func (e *kindError) Error() string { return e.message }
+func (e *kindError) Unwrap() error { return e.sentinel }
 
 // maxRequestRunIDLen bounds the untrusted run id so it cannot bloat the result
 // file or a log line.
@@ -74,17 +86,17 @@ func readRequestAt(files requestFiles, path, kind string) (update.RequestFile, b
 	}
 	var req update.RequestFile
 	if err := json.Unmarshal(data, &req); err != nil {
-		return update.RequestFile{}, false, fmt.Errorf("%w: parse %s: %v", errMalformedRequest, path, err)
+		return update.RequestFile{}, false, &kindError{errMalformedRequest, fmt.Sprintf("malformed %s request: parse %s: %v", kind, path, err)}
 	}
 	if req.RunID == "" {
 		// The job never writes one, and an empty id could not be matched to the
 		// result the job reads back.
-		return update.RequestFile{}, false, fmt.Errorf("%w: %s has no run id", errMalformedRequest, path)
+		return update.RequestFile{}, false, &kindError{errMalformedRequest, fmt.Sprintf("malformed %s request: %s has no run id", kind, path)}
 	}
 	if !validRequestRunID(req.RunID) {
 		// Never echo the value: the id is untrusted and could forge a log line
 		// or bloat the result file.
-		return update.RequestFile{}, false, fmt.Errorf("%w: %s", errInvalidRunID, path)
+		return update.RequestFile{}, false, &kindError{errInvalidRunID, fmt.Sprintf("invalid %s run id: %s", kind, path)}
 	}
 	return req, true, nil
 }
