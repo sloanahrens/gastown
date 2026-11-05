@@ -68,7 +68,11 @@ one, pause first (`gt dolt pause --reason "manual gc" --until 30m`) and
    the nightly backups under `~/gt-backups/dolt` are the other copy, see
    `docs/dolt-restore.md`). Check that every database's archive line in
    `gt dolt status` reads `0 commits behind` before you continue: the archive
-   is the copy of `dolt_log` that outlives a flatten.
+   is the copy of `dolt_log` that outlives a flatten. Stop if the status
+   prints `ARCHIVE CHECK UNAVAILABLE: no databases listed`: it could not list
+   the databases, so it has checked nothing.
+   Stop too when no database line shows an archive line, and when any
+   database line says `archive state unreadable`.
 3. Record row counts for every table so you can verify afterwards:
 
    ```sql
