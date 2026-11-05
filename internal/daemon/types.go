@@ -608,15 +608,28 @@ func loadDisabledPatrolsFromTownSettingsTo(townRoot string, warn io.Writer) map[
 	return disabled
 }
 
+// patrolOffReason names the setting that holds a patrol off — disabled_patrols,
+// container_off or enabled=false — and "" when it is active. It is the one place
+// isPatrolActive's three checks live, so the line that names why a patrol
+// started nothing cannot drift from the check that held it (gt-gg9hv.37).
+func (d *Daemon) patrolOffReason(patrol string) string {
+	switch {
+	case d.disabledPatrols[patrol]:
+		return "disabled_patrols"
+	case d.offInContainer(patrol):
+		return "container_off"
+	case !IsPatrolEnabled(d.patrolConfig, patrol):
+		return "enabled=false"
+	}
+	return ""
+}
+
 // isPatrolActive checks whether a patrol should run, combining the
 // daemon patrol config (settings/config.json's "daemon" section) with the town-level
 // disabled_patrols list (settings/config.json). A patrol is active
 // only if it is enabled in daemon config AND not in the disabled list.
 func (d *Daemon) isPatrolActive(patrol string) bool {
-	if d.disabledPatrols[patrol] || d.offInContainer(patrol) {
-		return false
-	}
-	return IsPatrolEnabled(d.patrolConfig, patrol)
+	return d.patrolOffReason(patrol) == ""
 }
 
 // offInContainer reports whether name is a plugin or patrol this daemon skips:

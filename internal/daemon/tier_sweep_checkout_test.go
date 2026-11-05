@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -29,6 +30,18 @@ type checkoutGitFake struct {
 	removed   []string
 	added     []checkoutAdd
 	prunes    int
+	// cancel, when set, is called inside the one call cancelAt names ("move" or
+	// "remove"), so a test can spend the checkout's budget at a chosen step and
+	// drive the check behind it.
+	cancel   context.CancelFunc
+	cancelAt string
+}
+
+// spendBudget cancels the checkout's budget inside the call at names.
+func (f *checkoutGitFake) spendBudget(at string) {
+	if f.cancel != nil && f.cancelAt == at {
+		f.cancel()
+	}
 }
 
 type checkoutAdd struct{ repo, dir, sha string }
@@ -37,6 +50,7 @@ func (f *checkoutGitFake) ops() tierSweepGitOps {
 	return tierSweepGitOps{
 		moveTo: func(dir, sha string) error {
 			f.moved = append(f.moved, dir+" "+sha)
+			f.spendBudget("move")
 			return f.moveErr
 		},
 		clean: func(dir string) error {
@@ -60,6 +74,7 @@ func (f *checkoutGitFake) ops() tierSweepGitOps {
 		},
 		remove: func(_, dir string) error {
 			f.removed = append(f.removed, dir)
+			f.spendBudget("remove")
 			return f.removeErr
 		},
 		prune: func(string) error { f.prunes++; return nil },
@@ -106,7 +121,7 @@ func TestTierSweepCheckoutDropsADirectoryThatIsNotAWorktree(t *testing.T) {
 		removeErr: errors.New("not a working tree"),
 	}
 
-	if _, err := tierSweepCheckoutWith(f.ops(), repo, dir, checkoutTestSHA); err != nil {
+	if _, err := tierSweepCheckoutWith(t.Context(), f.ops(), repo, dir, checkoutTestSHA); err != nil {
 		t.Fatalf("tierSweepCheckoutWith: %v", err)
 	}
 	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
@@ -138,7 +153,7 @@ func TestTierSweepCheckoutReusesAWorktreeOnAnotherSHA(t *testing.T) {
 	}
 	f := &checkoutGitFake{}
 
-	if _, err := tierSweepCheckoutWith(f.ops(), repo, dir, checkoutTestSHA); err != nil {
+	if _, err := tierSweepCheckoutWith(t.Context(), f.ops(), repo, dir, checkoutTestSHA); err != nil {
 		t.Fatalf("tierSweepCheckoutWith: %v", err)
 	}
 	if len(f.moved) != 1 || f.moved[0] != dir+" "+checkoutTestSHA {
@@ -169,7 +184,7 @@ func TestTierSweepCheckoutFailsWhenTheReusedWorktreeCannotBeCleaned(t *testing.T
 	}
 	f := &checkoutGitFake{cleanErr: errors.New("clean failed")}
 
-	if _, err := tierSweepCheckoutWith(f.ops(), repo, dir, checkoutTestSHA); err == nil {
+	if _, err := tierSweepCheckoutWith(t.Context(), f.ops(), repo, dir, checkoutTestSHA); err == nil {
 		t.Fatal("a failed clean must fail the checkout, not sweep the tree anyway")
 	}
 	if len(f.added) != 0 {
@@ -197,10 +212,101 @@ func TestTierSweepCheckoutRemovesOnlyTheSweepPath(t *testing.T) {
 		removeErr: errors.New("not a working tree"),
 	}
 
-	if _, err := tierSweepCheckoutWith(f.ops(), repo, dir, checkoutTestSHA); err != nil {
+	if _, err := tierSweepCheckoutWith(t.Context(), f.ops(), repo, dir, checkoutTestSHA); err != nil {
 		t.Fatalf("tierSweepCheckoutWith: %v", err)
 	}
 	if _, err := os.Stat(sibling); err != nil {
 		t.Errorf("a sibling of the sweep path was removed: %v", err)
+	}
+}
+
+// A checkout whose cycle budget is spent runs no git call. Which calls honour
+// the context at all: none of the worktree ones (CheckoutDetachForce,
+// CleanForceIgnored, WorktreeAddDetached, WorktreeRemove, WorktreePrune run
+// through run, not runWithTimeout), and git.FetchBranch, which is why
+// tierSweepMainSHA calls FetchBranchWithTimeout instead. The check between them
+// is what the budget can enforce; a call already inside git can only be
+// followed, not ended (gt-gg9hv.37).
+func TestTierSweepCheckoutRefusesASpentBudget(t *testing.T) {
+	t.Parallel()
+	dir, repo := checkoutTestDir(t)
+	f := &checkoutGitFake{}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	if _, err := tierSweepCheckoutWith(ctx, f.ops(), repo, dir, checkoutTestSHA); !errors.Is(err, context.Canceled) {
+		t.Fatalf("checkout error = %v, want context.Canceled", err)
+	}
+	if len(f.moved)+len(f.cleaned)+len(f.removed)+len(f.added) != 0 || f.prunes != 0 {
+		t.Errorf("a spent budget still ran git: moves=%v cleans=%v removes=%v adds=%v prunes=%d",
+			f.moved, f.cleaned, f.removed, f.added, f.prunes)
+	}
+}
+
+// A budget spent mid-checkout stops the step the next check guards. Each row
+// cancels from inside a fake git call, so the budget is spent at the step the
+// row names and the call after it must not run (gt-gg9hv.37).
+func TestTierSweepCheckoutStopsAtASpentBudget(t *testing.T) {
+	t.Parallel()
+	notARepo := errors.New("not a git repository")
+	notAWorktree := errors.New("not a working tree")
+	for _, tc := range []struct {
+		name        string
+		moveErr     error
+		removeErr   error
+		cancelAt    string
+		wantRemoves int
+	}{
+		{
+			name:     "before the reused worktree is cleaned",
+			cancelAt: "move",
+		},
+		{
+			name:     "before a stale directory is removed",
+			moveErr:  notARepo,
+			cancelAt: "move",
+		},
+		{
+			name:        "before a failed removal is finished by hand",
+			moveErr:     notARepo,
+			removeErr:   notAWorktree,
+			cancelAt:    "remove",
+			wantRemoves: 1,
+		},
+		{
+			name:        "before the worktree is added",
+			moveErr:     notARepo,
+			cancelAt:    "remove",
+			wantRemoves: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, repo := checkoutTestDir(t)
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			f := &checkoutGitFake{
+				moveErr:   tc.moveErr,
+				removeErr: tc.removeErr,
+				cancel:    cancel,
+				cancelAt:  tc.cancelAt,
+			}
+
+			if _, err := tierSweepCheckoutWith(ctx, f.ops(), repo, dir, checkoutTestSHA); !errors.Is(err, context.Canceled) {
+				t.Fatalf("checkout error = %v, want context.Canceled", err)
+			}
+			if len(f.cleaned) != 0 {
+				t.Errorf("the reused worktree was cleaned after the budget was spent: %v", f.cleaned)
+			}
+			if len(f.removed) != tc.wantRemoves {
+				t.Errorf("removes = %v, want %d after the budget was spent", f.removed, tc.wantRemoves)
+			}
+			if len(f.added) != 0 {
+				t.Errorf("the worktree was added after the budget was spent: %+v", f.added)
+			}
+		})
 	}
 }
