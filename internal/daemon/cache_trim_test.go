@@ -4,12 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"log"
 	"maps"
+	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +38,19 @@ const (
 	// pass reads the listing through. It matches the kubernetes driver's mount,
 	// outside /sandbox so it does not replace the workspace.
 	cacheTrimMountPath = "/tmp/gt-cache"
+
+	// cacheTrimApplyVerb is the verb every document of a trim is applied with,
+	// the argv cacheTrimApplyArgs builds: server-side, under the trim's field
+	// manager, so no last-applied annotation is written (gt-gg9hv.40).
+	cacheTrimApplyVerb = "apply --server-side --field-manager=gt-cache-trim --force-conflicts -f - -n " + cacheTrimNamespace
+
+	// cacheTrimListVerb is the pass's listing read through the pod that mounts
+	// the claim.
+	cacheTrimListVerb = "exec -n " + cacheTrimNamespace + " sbx-a -c agent -- " + cachevol.HelperPath + " trim-list --root " + cacheTrimMountPath
+
+	// cacheTrimLastAppliedLimit is the metadata size the API server holds
+	// kubectl's last-applied-configuration annotation to, in bytes.
+	cacheTrimLastAppliedLimit = 262144
 )
 
 // cacheTrimClaimsJSON is the cluster's claim listing: the fixture's claim, in
@@ -76,6 +96,9 @@ func newCacheTrimFixture(t *testing.T, mode string, overrides map[string]cliRepl
 	var logs bytes.Buffer
 	var cli *fakeCLI
 	cli = newFakeCLIFor(func(c cliCall) cliReply {
+		if reply, refused := cacheTrimClientSideApplyRefusal(c); refused {
+			return reply
+		}
 		verb := cacheTrimVerb(c.args)
 		if reply, ok := overrides[verb]; ok {
 			return reply
@@ -137,6 +160,35 @@ func newCacheTrimFixture(t *testing.T, mode string, overrides map[string]cliRepl
 	return f
 }
 
+// cacheTrimClientSideApplyRefusal is the API server's answer to a client-side
+// apply whose kubectl.kubernetes.io/last-applied-configuration annotation would
+// hold more than the metadata limit: client-side apply writes the whole object
+// into that annotation, so an object over the limit is refused before it is
+// stored. A server-side apply writes no annotation and is never refused for the
+// object's size (gt-gg9hv.40).
+func cacheTrimClientSideApplyRefusal(c cliCall) (cliReply, bool) {
+	if !strings.HasPrefix(cacheTrimVerb(c.args), "apply ") ||
+		slices.Contains(c.args, "--server-side") ||
+		len(c.stdin) <= cacheTrimLastAppliedLimit {
+		return cliReply{}, false
+	}
+	var obj struct {
+		Kind     string `json:"kind"`
+		Metadata struct {
+			Name string `json:"name"`
+		} `json:"metadata"`
+	}
+	object := "Object"
+	if err := json.Unmarshal([]byte(c.stdin), &obj); err == nil && obj.Kind != "" {
+		object = obj.Kind + " " + obj.Metadata.Name
+	}
+	return cliReply{
+		stderr: fmt.Sprintf("The %s is invalid: metadata.annotations: Too long: may not be more than %d bytes",
+			object, cacheTrimLastAppliedLimit),
+		code: 1,
+	}, true
+}
+
 // setProfiles replaces the sandbox profiles the pass reads.
 func (f *cacheTrimFixture) setProfiles(profiles map[string]agentconfig.SandboxProfile) {
 	f.d.diskMaint.sandboxes = func() (map[string]agentconfig.SandboxProfile, error) { return profiles, nil }
@@ -183,7 +235,7 @@ func (f *cacheTrimFixture) applied(t *testing.T) []string {
 	t.Helper()
 	var applied []string
 	for _, call := range f.cli.recorded() {
-		if !strings.HasPrefix(cacheTrimVerb(call.args), "apply -f -") {
+		if !strings.HasPrefix(cacheTrimVerb(call.args), "apply ") {
 			continue
 		}
 		var doc struct {
@@ -205,7 +257,7 @@ func (f *cacheTrimFixture) applied(t *testing.T) []string {
 func (f *cacheTrimFixture) appliedTrimJob(t *testing.T) cachevol.SeedJob {
 	t.Helper()
 	for _, call := range f.cli.recorded() {
-		if !strings.HasPrefix(cacheTrimVerb(call.args), "apply -f -") {
+		if !strings.HasPrefix(cacheTrimVerb(call.args), "apply ") {
 			continue
 		}
 		var header struct {
@@ -252,7 +304,7 @@ func TestDiskMaintenanceAppliesTheShardsBeforeTheJob(t *testing.T) {
 	if !ok {
 		t.Fatalf("the pass did not delete the earlier run's Job in the foreground; calls: %v", f.verbs())
 	}
-	firstApply, _ := f.indexOf("apply -f - -n " + cacheTrimNamespace)
+	firstApply, _ := f.indexOf(cacheTrimApplyVerb)
 	if deleteJob > firstApply {
 		t.Errorf("the stale Job was deleted after the apply; calls: %v", f.verbs())
 	}
@@ -586,7 +638,7 @@ func TestDiskMaintenanceCacheTrimStopsAtTheReadItCannotMake(t *testing.T) {
 		execList   = "exec -n " + cacheTrimNamespace + " sbx-a -c agent -- " + cachevol.HelperPath + " trim-list --root " + cacheTrimMountPath
 		getObjects = "get job,configmap -n " + cacheTrimNamespace + " -l app.kubernetes.io/managed-by=gt,app.kubernetes.io/name=polecat-cache-trim -o json"
 		deleteJob  = "delete job " + cacheTrimJob + " -n " + cacheTrimNamespace + " --ignore-not-found --wait=true --timeout=60s"
-		apply      = "apply -f - -n " + cacheTrimNamespace
+		apply      = cacheTrimApplyVerb
 		deleteCM   = "delete configmap -n " + cacheTrimNamespace + " -l app.kubernetes.io/managed-by=gt,app.kubernetes.io/name=polecat-cache-trim"
 	)
 	tests := []struct {
@@ -920,7 +972,7 @@ func TestCacheTrimNamesTheContextOnEveryCall(t *testing.T) {
 		"get pods -n " + cacheTrimNamespace + " -o json",
 		"exec -n " + cacheTrimNamespace + " sbx-a -c agent -- " + cachevol.HelperPath + " trim-list --root " + cacheTrimMountPath,
 		"delete job " + cacheTrimJob + " -n " + cacheTrimNamespace + " --ignore-not-found --wait=true --timeout=60s",
-		"apply -f - -n " + cacheTrimNamespace,
+		cacheTrimApplyVerb,
 		"wait --for=condition=complete job/" + cacheTrimJob + " -n " + cacheTrimNamespace + " --timeout=120s",
 		"delete configmap -n " + cacheTrimNamespace + " -l app.kubernetes.io/managed-by=gt,app.kubernetes.io/name=polecat-cache-trim",
 	}
@@ -1080,4 +1132,412 @@ func TestCacheTrimRefusesAnUnreadableKubeconfig(t *testing.T) {
 			t.Errorf("the pass applied a trim from a kubeconfig it could not read: %q", cacheTrimVerb(call.args))
 		}
 	}
+}
+
+// applyCalls returns the pass's kubectl apply calls, in call order.
+func (f *cacheTrimFixture) applyCalls() []cliCall {
+	var out []cliCall
+	for _, call := range f.cli.recorded() {
+		if strings.HasPrefix(cacheTrimVerb(call.args), "apply ") {
+			out = append(out, call)
+		}
+	}
+	return out
+}
+
+// listReads is how many times the pass read the claim's listing, one read per
+// trim it started.
+func (f *cacheTrimFixture) listReads() int {
+	n := 0
+	for _, verb := range f.verbs() {
+		if verb == cacheTrimListVerb {
+			n++
+		}
+	}
+	return n
+}
+
+// cacheTrimLargeListingJSON is a listing of paths, each long enough that its
+// shard ConfigMap document exceeds the 262144-byte metadata limit on its own:
+// one path per shard, every shard over the limit a client-side apply's
+// last-applied annotation would break (gt-gg9hv.40).
+func cacheTrimLargeListingJSON(shards int) string {
+	// One byte past the shard bound in the path text, so the encoded entry
+	// takes a shard of its own and its ConfigMap carries the file list past
+	// the metadata limit.
+	pathText := strings.Repeat("a", cachevol.TrimShardBytes+1)
+	var b strings.Builder
+	b.WriteByte('[')
+	for i := 0; i < shards; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b,
+			`{"path":"gocache/%03d%s","cache":"build","size":%d,"atime":"2026-10-29T01:%02d:00Z","mtime":"2026-10-29T01:%02d:00Z"}`,
+			i, pathText, cachevol.TrimShardBytes, i, i)
+	}
+	b.WriteByte(']')
+	return b.String()
+}
+
+// cacheTrimManifestWithLargeShards is the manifest the pass builds from a
+// listing whose shard ConfigMaps each exceed the metadata limit.
+func cacheTrimManifestWithLargeShards(t *testing.T, shards int) *cachevol.TrimManifest {
+	t.Helper()
+	listing, err := cacheTrimParseListing([]byte(cacheTrimLargeListingJSON(shards)))
+	if err != nil {
+		t.Fatalf("the large listing does not parse: %v", err)
+	}
+	m, err := cachevol.BuildTrimManifest(cachevol.TrimJobInput{
+		Name:             cacheTrimJob,
+		Namespace:        cacheTrimNamespace,
+		Image:            "gastown-polecat:dev",
+		ClaimName:        cacheTrimClaimName,
+		Listing:          listing,
+		CapBytes:         1024,
+		SandboxesRunning: 1,
+	})
+	if err != nil {
+		t.Fatalf("the large listing builds no trim: %v", err)
+	}
+	return m
+}
+
+// TestCacheTrimAppliesLargeShardsServerSide is the bead's gate: a trim whose
+// shard ConfigMaps each exceed the 262144-byte metadata limit applies anyway,
+// because every document goes through server-side apply, which writes no
+// last-applied annotation. The fake kubectl refuses a client-side apply of an
+// object that large as the API server does, so a client-side apply fails the
+// pass instead of passing it (gt-gg9hv.40).
+func TestCacheTrimAppliesLargeShardsServerSide(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+		cacheTrimListVerb: {stdout: cacheTrimLargeListingJSON(60)},
+	})
+	f.d.runDiskMaintenance()
+
+	applies := f.applyCalls()
+	if len(applies) != 61 {
+		t.Fatalf("the pass made %d applies, want the 60 shards and the Job; log: %s", len(applies), f.log.String())
+	}
+	large := 0
+	for _, call := range applies {
+		if len(call.stdin) > cacheTrimLastAppliedLimit {
+			large++
+		}
+		if !slices.Contains(call.args, "--server-side") {
+			t.Errorf("the apply of %d bytes ran client-side: %v", len(call.stdin), call.args)
+		}
+		if !slices.Contains(call.args, "--field-manager=gt-cache-trim") {
+			t.Errorf("the apply of %d bytes names no trim field manager: %v", len(call.stdin), call.args)
+		}
+	}
+	if large != 60 {
+		t.Fatalf("%d of the applied documents exceed the %d-byte limit, want the 60 shards", large, cacheTrimLastAppliedLimit)
+	}
+	if logged := f.log.String(); !strings.Contains(logged, "cache trim "+cacheTrimClaimName+" in "+cacheTrimNamespace+" applied") {
+		t.Errorf("the large trim did not reach a verdict: %s", logged)
+	}
+}
+
+// TestCacheTrimApplyFailureNamesTheDocument pins the apply failure's line: it
+// names the document's place in the manifest, the object it holds, and only the
+// first line of kubectl's stderr, which for a shard can be followed by the file
+// list itself (gt-gg9hv.40).
+func TestCacheTrimApplyFailureNamesTheDocument(t *testing.T) {
+	t.Parallel()
+	const (
+		firstLine  = "The ConfigMap is invalid: metadata.annotations: Too long: may not be more than 262144 bytes"
+		secondLine = "See 'kubectl apply --help' for more information."
+	)
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, nil)
+	inner := f.cli.answer
+	applies := 0
+	f.cli.answer = func(c cliCall) cliReply {
+		if strings.HasPrefix(cacheTrimVerb(c.args), "apply ") {
+			applies++
+			if applies == 7 {
+				return cliReply{stderr: firstLine + "\n" + secondLine, code: 1}
+			}
+		}
+		return inner(c)
+	}
+
+	m := cacheTrimManifestWithLargeShards(t, 60)
+	if docs := m.Documents(); len(docs) != 61 {
+		t.Fatalf("the manifest holds %d documents, want the 60 shards and the Job", len(docs))
+	}
+	err := f.d.cacheTrimApply(context.Background(), "/kubeconfig", cacheTrimNamespace, cacheTrimJob, m)
+	if err == nil {
+		t.Fatal("the apply failed at document 7 and returned no error")
+	}
+	for _, want := range []string{"7 of 61", "ConfigMap", cacheTrimShardName(6), firstLine} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error %q does not name %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), secondLine) {
+		t.Errorf("the error carries stderr's second line: %q", err)
+	}
+	if applies != 7 {
+		t.Errorf("the pass made %d applies, want it to stop at the seventh", applies)
+	}
+}
+
+// TestCacheTrimApplyDocumentLabel pins the object an apply failure names: the
+// document's kind and name, and nothing when the document names no object. The
+// manifest builder renders every document as an object, so the empty form costs
+// a message detail, never the report of the failure itself (gt-gg9hv.40).
+func TestCacheTrimApplyDocumentLabel(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct {
+		doc  string
+		want string
+	}{
+		"a shard":  {doc: `{"kind":"ConfigMap","metadata":{"name":"` + cacheTrimShardName(0) + `"}}`, want: " (ConfigMap " + cacheTrimShardName(0) + ")"},
+		"not JSON": {doc: "not a document", want: ""},
+		"no kind":  {doc: `{"metadata":{"name":"` + cacheTrimShardName(0) + `"}}`, want: ""},
+		"no name":  {doc: `{"kind":"ConfigMap","metadata":{}}`, want: ""},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := cacheTrimDocumentLabel([]byte(tc.doc)); got != tc.want {
+				t.Errorf("cacheTrimDocumentLabel(%q) = %q, want %q", tc.doc, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCacheTrimApplyFailureRetriesSoon pins the retry rule at the apply: a run
+// that fails while applying records the short retry, so the next 5-minute tick
+// at or after fifteen minutes tries again rather than waiting out the full
+// interval; a run that reaches a verdict still spends the interval
+// (gt-gg9hv.40, gt-gg9hv.24.6).
+func TestCacheTrimApplyFailureRetriesSoon(t *testing.T) {
+	t.Parallel()
+	overrides := map[string]cliReply{
+		cacheTrimApplyVerb: {stderr: "The server is unavailable", code: 1},
+	}
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, overrides)
+	now := diskMaintNow
+	f.d.diskMaint.now = func() time.Time { return now }
+
+	f.d.runDiskMaintenance() // 04:45: the trim fails at its first apply
+	if got := f.listReads(); got != 1 {
+		t.Fatalf("trimmed %d times at the first tick, want 1", got)
+	}
+
+	now = now.Add(5 * time.Minute)
+	f.d.runDiskMaintenance() // 04:50: a failed run is due in fifteen minutes, not now
+	if got := f.listReads(); got != 1 {
+		t.Fatalf("trimmed %d times five minutes after a failed apply, want 1: a retry is due at fifteen", got)
+	}
+
+	now = now.Add(10 * time.Minute)
+	f.d.runDiskMaintenance() // 04:55: the short retry, not the two-hour interval
+	if got := f.listReads(); got != 2 {
+		t.Fatalf("trimmed %d times fifteen minutes after a failed apply, want 2", got)
+	}
+
+	// The cluster recovers: the run reaches a verdict, which spends the full
+	// interval rather than the retry.
+	delete(overrides, cacheTrimApplyVerb)
+	now = now.Add(15 * time.Minute)
+	f.d.runDiskMaintenance() // 05:10: the retry after the last failure
+	if got := f.listReads(); got != 3 {
+		t.Fatalf("trimmed %d times at the retry after the cluster recovered, want 3", got)
+	}
+
+	now = now.Add(15 * time.Minute)
+	f.d.runDiskMaintenance() // 05:25: fifteen minutes after the verdict, not due
+	if got := f.listReads(); got != 3 {
+		t.Fatalf("trimmed %d times fifteen minutes after a verdict, want 3: a verdict spends the interval", got)
+	}
+}
+
+// cacheTrimSmallApplies are the client-side kubectl applies in the daemon and
+// the sweep runner whose object cannot grow with a file list, named by the
+// package, the file and the expression whose document the call applies. The
+// trim's own applies carry --server-side and are not listed (gt-gg9hv.40).
+var cacheTrimSmallApplies = map[string]string{
+	"internal/sweeprunner/k8s.go: repoClaim.JSON()":  "a PersistentVolumeClaim: an access mode and a storage request",
+	"internal/sweeprunner/k8s.go: claim.JSON()":      "the run's output claim: the same fixed fields",
+	"internal/sweeprunner/k8s.go: cacheClaim.JSON()": "the rig's cache claim: the same fixed fields",
+	"internal/sweeprunner/k8s.go: job.JSON()":        "the sweep Job: its containers, mounts and command come from the Spec, which holds no file list",
+	"internal/sweeprunner/k8s.go: reader.JSON()":     "the result reader pod: one sleep container and one mounted claim",
+}
+
+// TestCacheTrimNoOtherLargeClientSideApply pins every kubectl apply in the
+// daemon and the sweep runner: each is server-side, or one of the reviewed
+// small objects, which hold no file list and so cannot grow past the
+// 262144-byte last-applied annotation limit. A new apply fails this test until
+// its object is reviewed and named in cacheTrimSmallApplies (gt-gg9hv.40).
+func TestCacheTrimNoOtherLargeClientSideApply(t *testing.T) {
+	t.Parallel()
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	root := filepath.Join(filepath.Dir(thisFile), "..", "..")
+
+	seen := map[string]bool{}
+	serverSide := 0
+	var problems []string
+	for _, pkg := range []string{"internal/daemon", "internal/sweeprunner"} {
+		dir := filepath.Join(root, filepath.FromSlash(pkg))
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("reading %s: %v", dir, err)
+		}
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			sites, err := cacheTrimApplySites(filepath.Join(dir, name))
+			if err != nil {
+				t.Fatalf("parsing %s: %v", name, err)
+			}
+			for _, site := range sites {
+				if site.serverSide {
+					serverSide++
+					continue
+				}
+				key := pkg + "/" + name + ": " + site.object
+				if _, reviewed := cacheTrimSmallApplies[key]; reviewed {
+					seen[key] = true
+					continue
+				}
+				problems = append(problems, key+" is a client-side apply that is not a reviewed small object")
+			}
+		}
+	}
+	for key := range cacheTrimSmallApplies {
+		if !seen[key] {
+			problems = append(problems, key+" is listed but no apply sends that document any more")
+		}
+	}
+	if serverSide == 0 {
+		problems = append(problems, "no apply in the daemon or the sweep runner is server-side")
+	}
+	if len(problems) > 0 {
+		t.Fatalf("kubectl applies: %s", strings.Join(problems, "; "))
+	}
+}
+
+// cacheTrimApplySite is one kubectl `apply` argv built in a file.
+type cacheTrimApplySite struct {
+	// object is the expression whose document the call applies, or
+	// "<no document>" when the argv builder names none.
+	object string
+	// serverSide is whether the argv names --server-side.
+	serverSide bool
+}
+
+// cacheTrimApplySites returns every kubectl apply argv in path, with the
+// document it sends.
+func cacheTrimApplySites(path string) ([]cacheTrimApplySite, error) {
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, src, 0)
+	if err != nil {
+		return nil, err
+	}
+	text := func(n ast.Node) string {
+		return string(src[fset.Position(n.Pos()).Offset:fset.Position(n.End()).Offset])
+	}
+	var sites []cacheTrimApplySite
+	w := &cacheTrimWalker{visit: func(n ast.Node, ancestors []ast.Node) {
+		lit, ok := n.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return
+		}
+		if value, err := strconv.Unquote(lit.Value); err != nil || value != "apply" {
+			return
+		}
+		sites = append(sites, cacheTrimApplySiteAt(ancestors, text))
+	}}
+	ast.Walk(w, file)
+	return sites, nil
+}
+
+// cacheTrimApplySiteAt describes the apply whose verb literal sits under
+// ancestors: the argv is the innermost call or composite literal holding it,
+// and a step beside that argv names the document it applies.
+func cacheTrimApplySiteAt(ancestors []ast.Node, text func(ast.Node) string) cacheTrimApplySite {
+	site := cacheTrimApplySite{object: "<no document>"}
+	for i := len(ancestors) - 1; i >= 0; i-- {
+		switch ancestors[i].(type) {
+		case *ast.CallExpr, *ast.CompositeLit:
+			site.serverSide = cacheTrimNamesServerSide(ancestors[i])
+		default:
+			continue
+		}
+		break
+	}
+	for i := len(ancestors) - 1; i >= 0; i-- {
+		kv, ok := ancestors[i].(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		if key, ok := kv.Key.(*ast.Ident); !ok || key.Name != "Argv" {
+			continue
+		}
+		if i == 0 {
+			break
+		}
+		step, ok := ancestors[i-1].(*ast.CompositeLit)
+		if !ok {
+			break
+		}
+		for _, elt := range step.Elts {
+			pair, ok := elt.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			if k, ok := pair.Key.(*ast.Ident); ok && k.Name == "Stdin" {
+				site.object = text(pair.Value)
+			}
+		}
+		break
+	}
+	return site
+}
+
+// cacheTrimNamesServerSide reports whether expr builds an argv holding the
+// --server-side flag.
+func cacheTrimNamesServerSide(expr ast.Node) bool {
+	found := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		lit, ok := n.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return true
+		}
+		if value, err := strconv.Unquote(lit.Value); err == nil && value == "--server-side" {
+			found = true
+		}
+		return true
+	})
+	return found
+}
+
+// cacheTrimWalker visits every node with the ancestors above it, so a string
+// literal can be read in the argv it builds.
+type cacheTrimWalker struct {
+	path  []ast.Node
+	visit func(n ast.Node, ancestors []ast.Node)
+}
+
+func (w *cacheTrimWalker) Visit(n ast.Node) ast.Visitor {
+	if n == nil {
+		w.path = w.path[:len(w.path)-1]
+		return w
+	}
+	w.visit(n, w.path)
+	w.path = append(w.path, n)
+	return w
 }

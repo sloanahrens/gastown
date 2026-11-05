@@ -313,7 +313,7 @@ func (d *Daemon) cacheTrim(ctx context.Context, mode string) bool {
 // The preflight is one call and the pass stops when it refuses: the caller logs
 // the refusal and returns without a second cluster call.
 func (d *Daemon) cacheTrimPreflight(ctx context.Context, kubeconfig string) error {
-	out, err := d.cacheTrimKubectl(ctx, kubeconfig, nil, "config", "get-contexts", diskMaintSandboxContext, "-o", "name")
+	out, err := d.cacheTrimKubectl(ctx, kubeconfig, "config", "get-contexts", diskMaintSandboxContext, "-o", "name")
 	if err != nil {
 		return err
 	}
@@ -437,7 +437,7 @@ func (d *Daemon) cacheTrimApply(ctx context.Context, kubeconfig, namespace, jobN
 			timeout := strconv.Itoa(int(cacheTrimDeleteTimeout.Seconds())) + "s"
 			args = append(args, "--wait=true", "--timeout="+timeout)
 		}
-		if _, err := d.cacheTrimKubectl(ctx, kubeconfig, nil, args...); err != nil {
+		if _, err := d.cacheTrimKubectl(ctx, kubeconfig, args...); err != nil {
 			return fmt.Errorf("deleting the stale %s %s: %w", object.Kind, object.Name, err)
 		}
 		d.cacheTrimLogf("disk_maintenance: cache trim %s: deleted the stale %s %s", jobName, object.Kind, object.Name)
@@ -448,11 +448,60 @@ func (d *Daemon) cacheTrimApply(ctx context.Context, kubeconfig, namespace, jobN
 		// -n names the namespace the document was built for; an apply that
 		// relied on the document alone would run in the caller's default
 		// namespace.
-		if _, err := d.cacheTrimKubectl(ctx, kubeconfig, doc, "apply", "-f", "-", "-n", namespace); err != nil {
-			return fmt.Errorf("applying document %d of %d: %w", i+1, len(docs), err)
+		if _, stderr, err := d.cacheTrimKubectlRun(ctx, kubeconfig, doc, cacheTrimApplyArgs(namespace)...); err != nil {
+			// The first line of stderr is the API server's reason; the lines
+			// after it can repeat the object, and a shard's object holds a
+			// file list.
+			return fmt.Errorf("applying document %d of %d%s: %w: %s",
+				i+1, len(docs), cacheTrimDocumentLabel(doc), err, cacheTrimFirstLine(string(stderr)))
 		}
 	}
 	return d.cacheTrimCleanShards(ctx, kubeconfig, namespace, jobName, m)
+}
+
+// cacheTrimFieldManager is the field manager every document of a trim is
+// applied under. A fixed name makes a rerun of the same trim an update of the
+// records the earlier run owns rather than a conflict with it.
+const cacheTrimFieldManager = "gt-cache-trim"
+
+// cacheTrimApplyArgs is the argv every document of a trim is applied with:
+// server-side apply, so kubectl writes no
+// kubectl.kubernetes.io/last-applied-configuration annotation. Client-side
+// apply writes the whole object into that annotation, and a shard ConfigMap's
+// file list on its own exceeds the 262144-byte metadata limit, so the API
+// server refused the object and the trim could not start (gt-gg9hv.40).
+// --force-conflicts takes back a field a manager that no longer applies still
+// owns, such as the client-side manager an earlier trim applied under.
+func cacheTrimApplyArgs(namespace string) []string {
+	return []string{
+		"apply", "--server-side", "--field-manager=" + cacheTrimFieldManager,
+		"--force-conflicts", "-f", "-", "-n", namespace,
+	}
+}
+
+// cacheTrimDocumentLabel is the kind and name an applied document carries, for
+// an apply failure: " (ConfigMap gt-cache-trim-0)", or "" when the document
+// names neither. The manifest builder renders every document as an object, so
+// the empty form only costs a message detail; the apply it accompanies has
+// already failed and is still reported.
+func cacheTrimDocumentLabel(doc []byte) string {
+	var obj struct {
+		Kind     string `json:"kind"`
+		Metadata struct {
+			Name string `json:"name"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(doc, &obj); err != nil || obj.Kind == "" || obj.Metadata.Name == "" {
+		return ""
+	}
+	return fmt.Sprintf(" (%s %s)", obj.Kind, obj.Metadata.Name)
+}
+
+// cacheTrimFirstLine returns the first line of kubectl's stderr, the reason a
+// command failed. The lines after it can repeat the object's text, which a
+// shard's file list makes long, so only the first line reaches an error.
+func cacheTrimFirstLine(stderr string) string {
+	return strings.TrimSpace(strings.Split(strings.TrimSpace(stderr), "\n")[0])
 }
 
 // cacheTrimCleanShards deletes the shard ConfigMaps a trim applied once its Job
@@ -474,7 +523,7 @@ func (d *Daemon) cacheTrimCleanShards(ctx context.Context, kubeconfig, namespace
 		d.cacheTrimLogf("disk_maintenance: cache trim %s: %s; its shards stay for the next run", jobName, d.cacheTrimWaitFailure(ctx, kubeconfig, namespace, jobName, stderr))
 		return nil
 	}
-	if _, err := d.cacheTrimKubectl(ctx, kubeconfig, nil, "delete", "configmap", "-n", namespace, "-l", cachevol.TrimSelector()); err != nil {
+	if _, err := d.cacheTrimKubectl(ctx, kubeconfig, "delete", "configmap", "-n", namespace, "-l", cachevol.TrimSelector()); err != nil {
 		return fmt.Errorf("deleting the trim's shards: %w", err)
 	}
 	return nil
@@ -499,7 +548,7 @@ func (d *Daemon) cacheTrimWaitFailure(ctx context.Context, kubeconfig, namespace
 // cacheTrimJobFailed reports whether the Job's own status says it failed: a
 // failed count, or a Failed condition set true.
 func (d *Daemon) cacheTrimJobFailed(ctx context.Context, kubeconfig, namespace, jobName string) bool {
-	out, err := d.cacheTrimKubectl(ctx, kubeconfig, nil, "get", "job", jobName, "-n", namespace, "-o", "json")
+	out, err := d.cacheTrimKubectl(ctx, kubeconfig, "get", "job", jobName, "-n", namespace, "-o", "json")
 	if err != nil {
 		return false
 	}
@@ -533,7 +582,7 @@ func (d *Daemon) cacheTrimJobFailed(ctx context.Context, kubeconfig, namespace, 
 // A reply without an item list refuses: an unreadable answer would read as "no
 // trim ran here", and the next apply's Job would be refused by the running one.
 func (d *Daemon) cacheTrimExisting(ctx context.Context, kubeconfig, namespace string) ([]cachevol.TrimObject, map[string]bool, error) {
-	out, err := d.cacheTrimKubectl(ctx, kubeconfig, nil, "get", "job,configmap", "-n", namespace, "-l", cachevol.TrimSelector(), "-o", "json")
+	out, err := d.cacheTrimKubectl(ctx, kubeconfig, "get", "job,configmap", "-n", namespace, "-l", cachevol.TrimSelector(), "-o", "json")
 	if err != nil {
 		return nil, nil, fmt.Errorf("listing the trim's objects: %w", err)
 	}
@@ -576,7 +625,7 @@ func (d *Daemon) cacheTrimExisting(ctx context.Context, kubeconfig, namespace st
 // refuses: an unreadable answer would read as "no such claim", and the trim
 // would never run.
 func (d *Daemon) cacheTrimClaimNamespaces(ctx context.Context, kubeconfig string) (map[string][]string, error) {
-	out, err := d.cacheTrimKubectl(ctx, kubeconfig, nil, "get", "persistentvolumeclaim", "-A", "-o", "json")
+	out, err := d.cacheTrimKubectl(ctx, kubeconfig, "get", "persistentvolumeclaim", "-A", "-o", "json")
 	if err != nil {
 		return nil, err
 	}
@@ -629,7 +678,7 @@ type cacheTrimSource struct {
 // namespace refuses: an unreadable reply would read as no sandbox running, which
 // is a claim of idle again.
 func (d *Daemon) cacheTrimPods(ctx context.Context, kubeconfig, namespace, claim string) (int, []cacheTrimSource, error) {
-	out, err := d.cacheTrimKubectl(ctx, kubeconfig, nil, "get", "pods", "-n", namespace, "-o", "json")
+	out, err := d.cacheTrimKubectl(ctx, kubeconfig, "get", "pods", "-n", namespace, "-o", "json")
 	if err != nil {
 		return 0, nil, err
 	}
@@ -749,7 +798,7 @@ func cacheTrimPodSource(pod cacheTrimPod, volume string) (cacheTrimSource, bool)
 // cacheTrimListing reads the claim's listing through a pod that mounts it, with
 // the image's trim-list helper, and decodes what PlanTrim decides on.
 func (d *Daemon) cacheTrimListing(ctx context.Context, kubeconfig string, source cacheTrimSource) ([]cachevol.Entry, error) {
-	out, err := d.cacheTrimKubectl(ctx, kubeconfig, nil, "exec", "-n", source.Namespace, source.Pod, "-c", source.Container,
+	out, err := d.cacheTrimKubectl(ctx, kubeconfig, "exec", "-n", source.Namespace, source.Pod, "-c", source.Container,
 		"--", cachevol.HelperPath, "trim-list", "--root", source.Root)
 	if err != nil {
 		return nil, err
@@ -832,14 +881,13 @@ func environValue(environ []string, key string) (string, bool) {
 	return "", false
 }
 
-// cacheTrimKubectl runs one kubectl command through the daemon's exec seam, so
-// the unit tier never launches kubectl. stdin, when it is not nil, is the
-// document an apply reads.
+// cacheTrimKubectl runs one kubectl command that sends no document, through the
+// daemon's exec seam, so the unit tier never launches kubectl.
 //
 // A failure names the command and its last stderr line, never its whole output,
 // which can hold a secret.
-func (d *Daemon) cacheTrimKubectl(ctx context.Context, kubeconfig string, stdin []byte, args ...string) ([]byte, error) {
-	stdout, stderr, err := d.cacheTrimKubectlRun(ctx, kubeconfig, stdin, args...)
+func (d *Daemon) cacheTrimKubectl(ctx context.Context, kubeconfig string, args ...string) ([]byte, error) {
+	stdout, stderr, err := d.cacheTrimKubectlRun(ctx, kubeconfig, nil, args...)
 	if err != nil {
 		return nil, fmt.Errorf("kubectl %s: %w: %s", strings.Join(args, " "), err, lastLine(string(stderr)))
 	}
@@ -847,9 +895,11 @@ func (d *Daemon) cacheTrimKubectl(ctx context.Context, kubeconfig string, stdin 
 }
 
 // cacheTrimKubectlRun runs one kubectl command and returns its streams too, for
-// the waiter that tells a timeout from a Job that failed. Every call starts
-// with the shared prefix, so each names the kubeconfig and the sandbox context
-// and none relies on the file's current-context.
+// the waiter that tells a timeout from a Job that failed and for the apply that
+// names the API server's first stderr line. stdin, when it is not nil, is the
+// document an apply reads. Every call starts with the shared prefix, so each
+// names the kubeconfig and the sandbox context and none relies on the file's
+// current-context.
 func (d *Daemon) cacheTrimKubectlRun(ctx context.Context, kubeconfig string, stdin []byte, args ...string) ([]byte, []byte, error) {
 	argv := append(diskmaint.KubectlArgs(kubeconfig, diskMaintSandboxContext), args...)
 	cmd := exec.CommandContext(ctx, "kubectl", argv...) //nolint:gosec // G204: a fixed program, fixed verbs, and names validated as DNS-1123 labels
