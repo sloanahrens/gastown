@@ -51,8 +51,21 @@ func OSRunnerDir(allowEnv []string) RunnerDir {
 	}
 }
 
+// exitError is a child's non-zero exit. Its message is the one a caller reads;
+// stderr is the child's whole stderr, so a caller that names the first line of
+// it reads that here and not by parsing the message.
+type exitError struct {
+	msg    string
+	stderr string
+	err    error
+}
+
+func (e *exitError) Error() string { return e.msg }
+
+func (e *exitError) Unwrap() error { return e.err }
+
 // osRun starts argv in dir (empty: the current directory) with env and returns
-// its stdout. A non-zero exit is an error carrying the tail of stderr.
+// its stdout. A non-zero exit is an *exitError carrying the tail of stderr.
 func osRun(ctx context.Context, dir string, argv, env []string) ([]byte, error) {
 	if len(argv) == 0 {
 		return nil, errors.New("run: empty command")
@@ -68,7 +81,11 @@ func osRun(ctx context.Context, dir string, argv, env []string) ([]byte, error) 
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, fmt.Errorf("%s: %w", argv[0], ctxErr)
 		}
-		return nil, fmt.Errorf("%s: %w: %s", argv[0], err, tailString(stderr.String(), 400))
+		return nil, &exitError{
+			msg:    fmt.Sprintf("%s: %v: %s", argv[0], err, tailString(stderr.String(), 400)),
+			stderr: stderr.String(),
+			err:    err,
+		}
 	}
 	return stdout.Bytes(), nil
 }

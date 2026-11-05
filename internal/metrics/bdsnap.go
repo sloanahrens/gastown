@@ -284,11 +284,10 @@ func bdDailyRecorded(readFile func(string) ([]byte, error), path, day string) (r
 
 // bdDailyRun is the bd seam over the snapshot's directory runner.
 func bdDailyRun(ctx context.Context, runDir RunnerDir) BdRun {
-	return func(dir string, args []string) ([]byte, bool) {
+	return func(dir string, args []string) ([]byte, error) {
 		callCtx, cancel := context.WithTimeout(ctx, bdDailyCallTimeout)
 		defer cancel()
-		out, err := runDir(callCtx, dir, append([]string{"bd"}, args...))
-		return out, err == nil
+		return runDir(callCtx, dir, append([]string{"bd"}, args...))
 	}
 }
 

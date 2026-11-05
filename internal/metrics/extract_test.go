@@ -52,12 +52,12 @@ const extractBdShow = `[{"notes": "handoff notes", "comments": []}]`
 // extractBd answers a list with the listing and any other call with the shown
 // bead, recording every call.
 func extractBd(calls *[]bdCall) BdRun {
-	return func(dir string, args []string) ([]byte, bool) {
+	return func(dir string, args []string) ([]byte, error) {
 		*calls = append(*calls, bdCall{dir, args})
 		if len(args) > 0 && args[0] == "list" {
-			return []byte(extractBdList), true
+			return []byte(extractBdList), nil
 		}
-		return []byte(extractBdShow), true
+		return []byte(extractBdShow), nil
 	}
 }
 
@@ -362,7 +362,7 @@ func TestExtractWritesItsFilesInOrder(t *testing.T) {
 		{
 			name: "every bd list failed",
 			runBd: func(*[]bdCall) BdRun {
-				return func(string, []string) ([]byte, bool) { return nil, false }
+				return func(string, []string) ([]byte, error) { return nil, errors.New("bd failed") }
 			},
 			want: []string{landingsName, sidecarName, weeklyName, footerName},
 		},
@@ -470,7 +470,7 @@ func extractWeek(rows []WeeklyMetrics, rig, week string) (WeeklyMetrics, bool) {
 func TestExtractWritesBeadsCSVForAnEmptyButSuccessfulList(t *testing.T) {
 	t.Parallel()
 	env, files := extractCase(t)
-	env.RunBd = func(string, []string) ([]byte, bool) { return []byte("[]"), true }
+	env.RunBd = func(string, []string) ([]byte, error) { return []byte("[]"), nil }
 	res := extractRun(t, env)
 	if !files.has(beadsName) {
 		t.Errorf("%s was not written; wrote %v", beadsName, files.names)
@@ -598,7 +598,7 @@ func TestExtractRefusesALedgerLoaderThatLosesARowSilently(t *testing.T) {
 func TestExtractFailingBdLeavesNoBeadsCSVAndNamesTheSource(t *testing.T) {
 	t.Parallel()
 	env, files := extractCase(t)
-	env.RunBd = func(string, []string) ([]byte, bool) { return nil, false }
+	env.RunBd = func(string, []string) ([]byte, error) { return nil, errors.New("bd failed") }
 	res := extractRun(t, env)
 	if files.has(beadsName) {
 		t.Errorf("%s was written, want it left out", beadsName)
@@ -612,7 +612,7 @@ func TestExtractFailingBdLeavesNoBeadsCSVAndNamesTheSource(t *testing.T) {
 	if len(res.Footer.RowsDropped) != 0 {
 		t.Errorf("rows_dropped = %v, want a failed listing recorded as a gap", res.Footer.RowsDropped)
 	}
-	if want := [][]string{{"bd:/g", "bd list failed in /g"}}; !reflect.DeepEqual(res.Footer.Gaps, want) {
+	if want := [][]string{{"bd:/g", "bd list failed in /g: bd failed"}}; !reflect.DeepEqual(res.Footer.Gaps, want) {
 		t.Errorf("gaps = %v, want %v", res.Footer.Gaps, want)
 	}
 	town, ok := extractWeek(res.Weekly, "ALL", "2026-10-12")
@@ -643,11 +643,11 @@ const extractBdListStamped = `[
 func TestExtractWritesTheStageStampsFromTheFeedAndNotes(t *testing.T) {
 	t.Parallel()
 	env, files := extractCase(t)
-	env.RunBd = func(_ string, args []string) ([]byte, bool) {
+	env.RunBd = func(_ string, args []string) ([]byte, error) {
 		if len(args) > 0 && args[0] == "list" {
-			return []byte(extractBdListStamped), true
+			return []byte(extractBdListStamped), nil
 		}
-		return []byte(extractBdShow), true
+		return []byte(extractBdShow), nil
 	}
 	env.EventLines = []string{
 		stageEventLine(t, "2026-10-12T06:00:00Z", "sling", map[string]string{"bead": "gt-a"}),
@@ -680,11 +680,11 @@ func TestExtractWritesTheStageStampsFromTheFeedAndNotes(t *testing.T) {
 func TestStageStampMissingCreatedAtIsCounted(t *testing.T) {
 	t.Parallel()
 	env, files := extractCase(t)
-	env.RunBd = func(_ string, args []string) ([]byte, bool) {
+	env.RunBd = func(_ string, args []string) ([]byte, error) {
 		if len(args) > 0 && args[0] == "list" {
-			return []byte(`[{"id": "gt-a", "created_at": "2026-10-12T00:00:00Z", "issue_type": "task"}]`), true
+			return []byte(`[{"id": "gt-a", "created_at": "2026-10-12T00:00:00Z", "issue_type": "task"}]`), nil
 		}
-		return []byte(extractBdShow), true
+		return []byte(extractBdShow), nil
 	}
 	res := extractRun(t, env)
 	_, by := extractLandings(t, files)
@@ -956,11 +956,11 @@ func TestExtractReturnsTheFailureThatStoppedIt(t *testing.T) {
 		{
 			name: "a bead's created_at does not parse",
 			mutate: func(env *ExtractEnv) {
-				env.RunBd = func(_ string, args []string) ([]byte, bool) {
+				env.RunBd = func(_ string, args []string) ([]byte, error) {
 					if len(args) > 0 && args[0] == "list" {
-						return []byte(`[{"id": "gt-c", "created_at": "not a time", "issue_type": "task"}]`), true
+						return []byte(`[{"id": "gt-c", "created_at": "not a time", "issue_type": "task"}]`), nil
 					}
-					return []byte(extractBdShow), true
+					return []byte(extractBdShow), nil
 				}
 			},
 			want: `bead "gt-c" created_at`,

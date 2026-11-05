@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -14,30 +15,87 @@ import (
 // The beads loaders read bd through an injected BdRun and record every bead
 // they refuse in the Dropped log.
 
-// BdRun runs bd with args in dir and returns its stdout. ok is false when the
-// call failed.
-type BdRun func(dir string, args []string) (out []byte, ok bool)
+// BdRun runs bd with args in dir and returns its stdout. A failed call returns
+// its error, which a caller that reports the failure reads for its cause.
+type BdRun func(dir string, args []string) (out []byte, err error)
 
 // beadRejectionRE captures the kind word of a landing worker's MERGE REJECTION
 // note.
 var beadRejectionRE = regexp.MustCompile(`MERGE REJECTION \(attempt \d+\): (\w+)`)
 
-// bdJSON runs bd and returns its JSON output, or nil when no JSON could be had.
-// A failed call is retried once. Output that is not JSON is not retried: the
-// same command would give the same answer. A bd envelope is unwrapped to its
-// data member, since that is where the rows are.
-func bdJSON(run BdRun, dir string, args []string) []byte {
+// bdCauseMax bounds the cause a failed bd listing names in its gap.
+const bdCauseMax = 200
+
+var (
+	// bdURLCredentialRE is the userinfo of a URL, the user:password before
+	// its host.
+	bdURLCredentialRE = regexp.MustCompile(`://[^\s/]*@`)
+	// bdAssignmentRE is one NAME=value pair. Every name is scrubbed, not only
+	// the token-looking ones: a name does not say whether its value is secret.
+	bdAssignmentRE = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*=\S+`)
+)
+
+// bdJSON runs bd and returns its JSON output. A failed call is retried once and
+// returns the last call's error. Output that is not JSON is an error and is not
+// retried: the same command would give the same answer. A bd envelope is
+// unwrapped to its data member, since that is where the rows are.
+func bdJSON(run BdRun, dir string, args []string) ([]byte, error) {
+	var err error
 	for i := 0; i < 2; i++ {
-		out, ok := run(dir, args)
-		if !ok {
+		var out []byte
+		if out, err = run(dir, args); err != nil {
 			continue
 		}
 		if !json.Valid(out) {
-			return nil
+			return nil, errors.New("output is not JSON")
 		}
-		return unwrapBdData(out)
+		return unwrapBdData(out), nil
 	}
-	return nil
+	return nil, err
+}
+
+// bdListGap is the reason a bd listing of dir failed: the prefix, then the
+// cause when the call gave one.
+func bdListGap(dir string, err error) string {
+	reason := "bd list failed in " + dir
+	if cause := bdFailureCause(err); cause != "" {
+		reason += ": " + cause
+	}
+	return reason
+}
+
+// bdFailureCause is the cause a failed bd call adds to its gap: bd's first
+// non-blank stderr line when the call exited with stderr, else the error's own
+// text. The cause is scrubbed of credentials and bounded to bdCauseMax
+// characters. A nil error has no cause.
+func bdFailureCause(err error) string {
+	if err == nil {
+		return ""
+	}
+	text := err.Error()
+	var exit *exitError
+	if errors.As(err, &exit) {
+		if line := firstStderrLine(exit.stderr); line != "" {
+			text = line
+		}
+	}
+	text = bdURLCredentialRE.ReplaceAllString(text, "://...@")
+	text = bdAssignmentRE.ReplaceAllString(text, "...")
+	runes := []rune(text)
+	if len(runes) > bdCauseMax {
+		runes = runes[:bdCauseMax]
+	}
+	return strings.TrimSpace(string(runes))
+}
+
+// firstStderrLine is the first line of stderr that is not blank, trimmed.
+func firstStderrLine(stderr string) string {
+	for _, line := range strings.Split(stderr, "\n") {
+		if t := strings.TrimSpace(line); t != "" {
+			return t
+		}
+	}
+	return ""
 }
 
 // unwrapBdData returns the data member of a bd JSON envelope: bd 1.2.2 prints
@@ -108,9 +166,13 @@ func LoadBeads(run BdRun, dirs []string, dropped *Dropped) []BeadRow {
 	var rows []BeadRow
 	seen := map[string]bool{}
 	for _, d := range dirs {
+		raw, err := bdJSON(run, d, []string{"list", "--all", "--limit", "0", "--json"})
 		var beads []bdListBead
-		if err := json.Unmarshal(bdJSON(run, d, []string{"list", "--all", "--limit", "0", "--json"}), &beads); err != nil || beads == nil {
-			dropped.Fail("bd:"+d, "bd list failed in "+d)
+		if err == nil {
+			err = json.Unmarshal(raw, &beads)
+		}
+		if err != nil || beads == nil {
+			dropped.Fail("bd:"+d, bdListGap(d, err))
 			continue
 		}
 		for _, b := range beads {
@@ -187,7 +249,11 @@ func HandoffBytes(run BdRun, dirsByBead map[string]string, dropped *Dropped, cal
 				Text string `json:"text"`
 			} `json:"comments"`
 		}
-		if err := json.Unmarshal(bdJSON(run, dirsByBead[bead], []string{"show", "--json", "--", bead}), &data); err != nil || len(data) == 0 {
+		raw, err := bdJSON(run, dirsByBead[bead], []string{"show", "--json", "--", bead})
+		if err == nil {
+			err = json.Unmarshal(raw, &data)
+		}
+		if err != nil || len(data) == 0 {
 			dropped.Add("bd:"+bead, "bd show failed")
 			continue
 		}

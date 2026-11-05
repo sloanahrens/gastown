@@ -239,17 +239,17 @@ func TestRealEnvRunsBdAtLowPriority(t *testing.T) {
 		}
 		return nil, errors.New("bd ran without the caller's subcommand")
 	}
-	out, ok := real.Extract.RunBd("/beads/dir", []string{"list", "--all", "--json"})
-	if !ok || string(out) != "[]" {
-		t.Fatalf("RunBd = %q, %v; want the runner's answer; bids = %+v", out, ok, bids)
+	out, err := real.Extract.RunBd("/beads/dir", []string{"list", "--all", "--json"})
+	if err != nil || string(out) != "[]" {
+		t.Fatalf("RunBd = %q, %v; want the runner's answer; bids = %+v", out, err, bids)
 	}
 	if len(bids) != 1 {
 		t.Errorf("RunBd made %d commands, want one", len(bids))
 	}
 
 	runner.answer = func(string, []string) ([]byte, error) { return nil, errors.New("bd failed") }
-	if _, ok := real.Extract.RunBd("/beads/dir", []string{"list"}); ok {
-		t.Error("RunBd reported ok for a failed bd")
+	if _, err := real.Extract.RunBd("/beads/dir", []string{"list"}); err == nil {
+		t.Error("RunBd reported no error for a failed bd")
 	}
 }
 
