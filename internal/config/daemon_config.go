@@ -2385,8 +2385,9 @@ type LandingWorkerConfig struct {
 	// $TMPDIR/gt-landing-<uid>.
 	WorkRoot string `json:"work_root,omitempty"`
 
-	// PostLandTimeoutStr bounds one run of the rig's
-	// merge_queue.post_land_command (e.g. "60m"). Default 60m.
+	// PostLandTimeoutStr bounds one post-land verdict (e.g. "60m"): the run
+	// of merge_queue.post_land_command, or the wait for the status named by
+	// merge_queue.post_land_status_context. Default 60m.
 	PostLandTimeoutStr string `json:"post_land_timeout,omitempty"`
 
 	// Forgejo holds the town-level Forgejo facts this patrol needs, the same

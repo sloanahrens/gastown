@@ -1356,10 +1356,23 @@ type MergeQueueConfig struct {
 	// in a throwaway worktree at the landed commit (e.g. "make test-slow":
 	// the gate, then the shell tests). The landing worker runs it asynchronously, one at a
 	// time per rig, coalescing landings that finish while one runs; a red
-	// run comments on the landed bead and never reverts the landing
-	// (gt-v4ssj.2). Empty disables it. Read only from the rig's own
-	// settings/config.json, so merged repo content cannot choose it.
+	// run comments on the landed bead and, when the landing is the sole
+	// change since the last green commit, reverts it through a revert bead
+	// (`RevertLanded`, gt-v4ssj.4.1; gt-0jgnd is one). Only a direct push with
+	// no work bead is never reverted. An UNKNOWN verdict reverts nothing.
+	// Empty disables it. Read only from the rig's own settings/config.json,
+	// so merged repo content cannot choose it.
 	PostLandCommand string `json:"post_land_command,omitempty"`
+
+	// PostLandStatusContext names the commit-status context a landing's
+	// verdict comes from instead of PostLandCommand (gt-gg9hv.7.1): the
+	// landing worker reads the landed commit's combined status on the rig's
+	// Forgejo remote and takes the status with this context. Success is
+	// green; failure or error is red; pending, warning, skipped, absent or
+	// unreadable is UNKNOWN, which neither callbacks and never reverts. It
+	// wins over PostLandCommand when both are set. Read only from the rig's
+	// own settings/config.json, so merged repo content cannot choose it.
+	PostLandStatusContext string `json:"post_land_status_context,omitempty"`
 
 	// Forgejo is the rig's Forgejo landing block (gt-fn9e6.3, slice 3 of
 	// docs/design/forgejo-primary-landing.md): where its remote is, which

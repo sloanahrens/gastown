@@ -92,6 +92,10 @@ const (
 	// KindBirdReportStale: an expected reporter's daily report is missing or
 	// older than the patrol's maximum age (gt-cbsat).
 	KindBirdReportStale Kind = "bird-report-stale"
+	// KindPostLandUnknown: a landed commit's post-land status context never
+	// reached a verdict before its timeout, so CI stopped reporting and the
+	// post-land safety net is silent (gt-gg9hv.7.1).
+	KindPostLandUnknown Kind = "post-land-unknown"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -106,7 +110,7 @@ func Kinds() []Kind {
 		KindHostDisk, KindHostMem, KindHostDocker, KindHostProbe,
 		KindQuestionNew, KindQuestionAnswered, KindQuestionStale,
 		KindOverseerSilent, KindDispatchIdle, KindDeployFailed, KindReviewBacklog,
-		KindBirdReportStale,
+		KindBirdReportStale, KindPostLandUnknown,
 	}
 }
 

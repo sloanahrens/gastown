@@ -639,6 +639,7 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindDispatchIdle, collect: s.collectDispatchIdle},
 		{kind: attention.KindDeployFailed, collect: s.collectDeployFailures},
 		{kind: attention.KindBirdReportStale, collect: s.collectBirdReports},
+		{kind: attention.KindPostLandUnknown, collect: s.collectPostLandUnknown},
 	}, s.questionCollectors()...)
 }
 

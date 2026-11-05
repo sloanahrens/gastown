@@ -87,6 +87,10 @@ var ruleOwners = map[string]Owner{
 	RuleReviewBacklog: OwnerOverseer,
 	// A late report is chased by the overseer, which the birds answer to.
 	RuleBirdReportStale: OwnerOverseer,
+	// A silent post-land check is a missing CI run or a mismatched context
+	// name: the overseer looks at the workflow before a person is woken
+	// (gt-gg9hv.7.1).
+	RulePostLandUnknown: OwnerOverseer,
 }
 
 // humanFamilies are the rule families the table gives the human as a whole:

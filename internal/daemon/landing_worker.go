@@ -660,7 +660,8 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	// stuckEnd ends the in-flight bead's watch; nil between beads. Only the
 	// Active callback below touches it.
 	var stuckEnd func()
-	run := postLandRun(repo, workRoot, d.landingLogRoot(rigName), townRoot, rigName, landingRemote, landingWorkerDuration(cfg.PostLandTimeoutStr, defaultPostLandTimeout))
+	postLandTimeout := landingWorkerDuration(cfg.PostLandTimeoutStr, defaultPostLandTimeout)
+	run := postLandRun(repo, workRoot, d.landingLogRoot(rigName), townRoot, rigName, landingRemote, postLandTimeout)
 	// Every rig that lands here does so through Forgejo, so the merge happens
 	// on the remote and the author seat's remote-tracking default branch is
 	// stale until something fetches it (gt-fn9e6.55).
@@ -704,8 +705,17 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		redMain.Promote = d.newPromoter(rigName, repo, forgejoCfg)
 	}
 	postLand := &landworker.PostLandRunner{
-		Rig:     rigName,
-		Command: func() string { return rigPostLandCommand(rigPath) },
+		Rig:           rigName,
+		Command:       func() string { return rigPostLandCommand(rigPath) },
+		StatusContext: func() string { return rigPostLandStatusContext(rigPath) },
+		Status: func(ctx context.Context, pl landworker.PostLand) (*forgejo.CombinedStatus, error) {
+			return merger.Client.CombinedStatus(ctx, merger.Owner, merger.RepoName, pl.Commit)
+		},
+		OnUnknown: func(_ context.Context, u landworker.PostLandUnknown) {
+			d.postLandUnknowns.record(u, postLandUnknownWindow)
+		},
+		Clock:   d.clk(),
+		Timeout: postLandTimeout,
 		Run:     run,
 		Beads:   bd,
 		Logf:    d.logger.Printf,
@@ -1145,6 +1155,18 @@ func rigPostLandCommand(rigPath string) string {
 		return ""
 	}
 	return strings.TrimSpace(settings.MergeQueue.PostLandCommand)
+}
+
+// rigPostLandStatusContext is merge_queue.post_land_status_context from the
+// rig's own settings/config.json only, for the reason rigPostLandCommand reads
+// its file: the setting decides what counts as red main, so merged repo
+// content must not choose it (gt-gg9hv.7.1).
+func rigPostLandStatusContext(rigPath string) string {
+	settings, err := config.LoadRigSettings(config.RigSettingsPath(rigPath))
+	if err != nil || settings == nil || settings.MergeQueue == nil {
+		return ""
+	}
+	return strings.TrimSpace(settings.MergeQueue.PostLandStatusContext)
 }
 
 // rigFollowupsEnabled is landing.followups from the rig's own

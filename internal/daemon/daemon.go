@@ -829,6 +829,10 @@ type Daemon struct {
 	// holds a restart for it separately, up to postLandRestartCap (gt-gb4ij).
 	postLandRuns atomic.Int32
 
+	// postLandUnknowns holds the landed commits whose post-land status context
+	// never reached a verdict, for the attention queue (gt-gg9hv.7.1).
+	postLandUnknowns postLandUnknownStore
+
 	// jsonlGitBackupRunning, wispReaperRunning, and checkpointDogRunning are
 	// the single-flight guards for their patrols, on their own goroutines —
 	// the same gt-ima2 shape as compactor_dog
