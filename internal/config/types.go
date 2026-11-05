@@ -1439,7 +1439,21 @@ type ForgejoConfig struct {
 	// mode 600. It is a path, never the key: the key's contents appear in no
 	// config, log or state, and the path itself reaches ssh alone.
 	PromoteKeyFile string `json:"promote_key_file,omitempty"`
+
+	// PromoteVia selects who advances GitHub main. Empty lets the green
+	// post-land verdict and the tier sweep promote alongside gt promote
+	// (gt-fn9e6.37). PromoteViaAppPromote opts the rig out of both, so only a
+	// gt promote call - the app-promote plugin's, with the newest prod-proven
+	// release commit - advances it and GitHub follows prod. A value this
+	// binary does not implement is an error naming the key, so a typo cannot
+	// pass as the empty default.
+	PromoteVia string `json:"promote_via,omitempty"`
 }
+
+// PromoteViaAppPromote is merge_queue.forgejo.promote_via's value for a rig
+// whose GitHub copy follows prod: the green verdict and the tier sweep skip
+// it, and gt promote alone advances its GitHub main.
+const PromoteViaAppPromote = "app-promote"
 
 // UnmarshalJSON decodes the block, ignoring a key it does not declare: the
 // block is operator-owned and gains keys across the Forgejo rollout, so config

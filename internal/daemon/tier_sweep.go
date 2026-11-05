@@ -407,7 +407,9 @@ func knownRigNames(townRoot string) []string {
 
 // tierSweepPromoterFor resolves rig's promotion owner: a test's seam when it
 // set one, else the daemon's own builder over the rig's repository and forgejo
-// block. Nil means the rig has no promote_target and does not promote.
+// block. Nil means the daemon does not promote the rig: it names no
+// promote_target, or its promote_via leaves GitHub main to gt promote
+// (gt-182zb).
 func (d *Daemon) tierSweepPromoterFor(rigName, repo string) *promote.Promoter {
 	build := d.tierSweepSeams.promote
 	if build == nil {
@@ -418,9 +420,10 @@ func (d *Daemon) tierSweepPromoterFor(rigName, repo string) *promote.Promoter {
 
 // tierSweepPromote advances rig's GitHub main to sha, the fully green sweep's
 // commit, through the same promotion owner the post-land verdict uses: one
-// push path, one lock, one record (gt-fn9e6.38). A rig with no promote_target
-// has no promoter and nothing happens; a failure is recorded in the rig's
-// main state, exactly as it is for a green post-land verdict.
+// push path, one lock, one record (gt-fn9e6.38). A rig with no promote_target,
+// or one whose promote_via leaves promotion to gt promote (gt-182zb), has no
+// promoter and nothing happens; a failure is recorded in the rig's main state,
+// exactly as it is for a green post-land verdict.
 func (d *Daemon) tierSweepPromote(rigName, repo, sha string) {
 	if p := d.tierSweepPromoterFor(rigName, repo); p != nil {
 		d.tierSweepPromoteWith(rigName, p, sha)
