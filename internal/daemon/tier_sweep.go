@@ -2731,17 +2731,11 @@ func (d *Daemon) tierSweepLaunchRunner(ctx context.Context, st tierSweepStage, s
 	launch := tierSweepLaunch{}
 	launch.stop = func() { d.tierSweepRunnerStop(ctx, spec) }
 	// The capacity preflight runs before anything is applied: a Job the node
-	// cannot hold beside the control plane's pods is never created, and a
-	// preflight that cannot answer declines (gt-gg9hv.38).
-	if plan.Preflight != nil {
-		report, preflightErr := d.tierSweepRunnerPreflight(ctx, plan.Preflight)
-		if preflightErr != nil {
-			d.tierSweepLogPreflightDecline(spec.Context, preflightErr)
-			return tierSweepLaunch{exitCode: -1, declined: true}
-		}
-		// The reason stopped standing, so the next decline is news again.
-		d.tierSweepDeclineKey, d.tierSweepDeclineAt = "", time.Time{}
-		d.logger.Printf("tier_sweep: preflight on %s: %s", spec.Context, report)
+	// cannot hold beside the control plane's pods is never created, a preflight
+	// that cannot answer declines, and a Kubernetes plan that carries no
+	// preflight at all is refused rather than launched blind (gt-gg9hv.38).
+	if d.tierSweepPreflightDeclines(ctx, cfg.Backend, spec.Context, plan) {
+		return tierSweepLaunch{exitCode: -1, declined: true}
 	}
 	// The guards run before anything is applied, and a refusal leaves nothing
 	// to apply: the run would share an engine object with a run still using it.
@@ -2767,6 +2761,50 @@ func (d *Daemon) tierSweepLaunchRunner(ctx context.Context, st tierSweepStage, s
 		launch.err = fmt.Errorf("the run did not start (exit %d)", code)
 	}
 	return launch
+}
+
+// errSweepPreflightUnwired is the reason a Kubernetes plan with no capacity
+// check declines: that backend's nodes are shared with the control plane, so a
+// launch whose capacity nobody read is not one the daemon may start
+// (gt-gg9hv.38).
+var errSweepPreflightUnwired = errors.New("no capacity preflight is wired for the kubernetes backend")
+
+// tierSweepPreflightDeclines runs the plan's capacity preflight and reports
+// whether the launch is declined, logging the reason. A Kubernetes plan always
+// carries a preflight: one without it is refused and logged, never skipped. A
+// backend whose engine is the run's own (Docker) renders no preflight, and its
+// launch is not declined for it (gt-gg9hv.38).
+func (d *Daemon) tierSweepPreflightDeclines(ctx context.Context, backend, engineContext string, plan sweeprunner.Plan) bool {
+	if plan.Preflight == nil {
+		if backend != (sweeprunner.Kubernetes{}).Name() {
+			return false
+		}
+		d.tierSweepLogUnwiredPreflight()
+		return true
+	}
+	report, err := d.tierSweepRunnerPreflight(ctx, plan.Preflight)
+	if err != nil {
+		d.tierSweepLogPreflightDecline(engineContext, err)
+		return true
+	}
+	// The reason stopped standing, so the next decline is news again.
+	d.tierSweepDeclineKey, d.tierSweepDeclineAt = "", time.Time{}
+	d.logger.Printf("tier_sweep: preflight on %s: %s", engineContext, report)
+	return false
+}
+
+// tierSweepLogUnwiredPreflight logs that a Kubernetes plan carried no capacity
+// preflight, at most once an hour while the plan stays broken: the cycle
+// retries every heartbeat, and a line per retry would bury every other
+// tier_sweep line.
+func (d *Daemon) tierSweepLogUnwiredPreflight() {
+	const key = "kubernetes: no capacity preflight"
+	now := d.clk().Now()
+	if key == d.tierSweepDeclineKey && now.Sub(d.tierSweepDeclineAt) < tierSweepPreflightDeclineInterval {
+		return
+	}
+	d.logger.Printf("tier_sweep: not launching: %v", errSweepPreflightUnwired)
+	d.tierSweepDeclineKey, d.tierSweepDeclineAt = key, now
 }
 
 // tierSweepRunnerPreflight runs a plan's capacity preflight and returns what it

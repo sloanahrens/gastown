@@ -26,9 +26,12 @@ type Spec struct {
 	// Image is the container the run's steps use: the polecat's image tag, or
 	// the same reference pinned by digest.
 	Image string
-	// CPUs is the runner's --cpus limit, 1 to 16.
+	// CPUs is the run's CPU share, 1 to 16: the Kubernetes backend renders it
+	// as the Job pod's total, the dind sidecar's share included, and the Docker
+	// backend as the runner container's --cpus limit.
 	CPUs int
-	// MemoryGB is the runner's memory limit in GB, 2 to 48.
+	// MemoryGB is the run's memory share in GB, 2 to 48, in the same units:
+	// the Kubernetes backend's Job pod total, the Docker backend's runner limit.
 	MemoryGB int
 	// Tiers are the tiers to run, in the order given. Empty runs the tiers a
 	// tier-sweep command line naming none runs (TiersOrDefault).

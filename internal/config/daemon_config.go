@@ -2151,10 +2151,12 @@ type TierSweepRunnerConfig struct {
 	// it is missing (gt-c3sue).
 	Image string `json:"image"`
 
-	// CPUs is the run's CPU share, 1 to 16.
+	// CPUs is the run's CPU share, 1 to 16. On the Kubernetes backend it is the
+	// whole Job pod's total: the dind sidecar's fixed share comes out of it.
 	CPUs int `json:"cpus"`
 
-	// Memory is the run's memory limit in GB, 2 to 48.
+	// Memory is the run's memory limit in GB, 2 to 48, and on the Kubernetes
+	// backend the whole Job pod's total, as CPUs is.
 	Memory int `json:"memory"`
 
 	// Jobs is how many packages the run tests at once, 1 to 16.

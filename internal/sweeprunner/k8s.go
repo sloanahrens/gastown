@@ -194,10 +194,21 @@ type PodSpec struct {
 	// AutomountServiceAccountToken is a pointer so an explicit false is
 	// rendered; an absent value leaves the cluster's default, which mounts the
 	// namespace's service-account token into every container.
-	AutomountServiceAccountToken *bool       `json:"automountServiceAccountToken,omitempty"`
-	InitContainers               []Container `json:"initContainers,omitempty"`
-	Containers                   []Container `json:"containers"`
-	Volumes                      []Volume    `json:"volumes"`
+	AutomountServiceAccountToken *bool        `json:"automountServiceAccountToken,omitempty"`
+	Tolerations                  []Toleration `json:"tolerations,omitempty"`
+	InitContainers               []Container  `json:"initContainers,omitempty"`
+	Containers                   []Container  `json:"containers"`
+	Volumes                      []Volume     `json:"volumes"`
+}
+
+// Toleration is the pod's tolerance of a node taint, as the API reads it. The
+// capacity preflight uses the Job pod's tolerations to rule out a node whose
+// NoSchedule taint the pod does not tolerate (gt-gg9hv.38).
+type Toleration struct {
+	Key      string `json:"key,omitempty"`
+	Operator string `json:"operator,omitempty"`
+	Value    string `json:"value,omitempty"`
+	Effect   string `json:"effect,omitempty"`
 }
 
 // Pod is a single pod the caller applies on its own, outside any Job.
@@ -328,7 +339,10 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 	if err := spec.Validate(); err != nil {
 		return Plan{}, err
 	}
-	job := renderJob(spec)
+	job, err := renderJob(spec)
+	if err != nil {
+		return Plan{}, err
+	}
 	repoClaim := renderClaim(RepoClaimName(spec.Rig), repoClaimStorage)
 	cacheClaim := renderClaim(CacheClaimName(spec.Rig), cacheClaimStorage)
 	claim := renderClaim(OutClaimName(spec), outClaimStorage)
@@ -337,10 +351,13 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 	return Plan{
 		Job: job,
 		// One kubectl call lists every node and pod: the preflight decides from
-		// the node's allocatable amounts and what its pods already request.
+		// each node's allocatable amounts, what its pods already request, and
+		// whether the cluster would place the Job on it at all. It sums the
+		// rendered objects' requests itself, so a request it cannot read
+		// declines the launch instead of sizing it from zero.
 		Preflight: &Preflight{
 			Step: Step{Argv: kubectlArgv(spec, "get", "nodes,pods", "-A", "-o", "json")},
-			Read: capacityRead(jobRequest(spec)),
+			Read: capacityRead(job, sync, reader, job.Spec.Template.Spec.Tolerations),
 		},
 		Guards: []Guard{{
 			// The repo claim is shared by every run of the rig, and a run's Job
@@ -548,37 +565,36 @@ func syncPodName(spec Spec) string {
 	return k8sName("gt-sweep-sync", spec.Rig)
 }
 
-// The amounts the run's sidecar pods ask for, the same figures readerCPU,
-// readerMemory, dindCPU and dindMemory write into the containers.
-var (
-	readerAmount = Amount{CPU: 100, Memory: 128 << 20}
-	dindAmount   = Amount{CPU: 2_000, Memory: 4 << 30}
-)
-
-// jobRequest is the amount the launch asks a node for: the runner's share from
-// the Spec, the dind sidecar's fixed share when the run starts one, and the sync
-// and reader pods the run creates on the same cluster.
-// TestK8sPreflightJobMatchesTheRenderedPods holds it to the sum over the
-// containers of the rendered pods, so a share the renderer changes fails there
-// rather than in a launch (gt-gg9hv.38).
-func jobRequest(spec Spec) Amount {
-	total := Amount{CPU: int64(spec.CPUs) * 1000, Memory: int64(spec.MemoryGB) << 30}
-	if spec.Dind {
-		total = total.Add(dindAmount)
+// jobRequest is the amount the launch asks a node for: the sum over every
+// container of the objects the run creates on the cluster, the Job's pod (the
+// dind sidecar included), the sync pod and the reader pod. It is read from the
+// rendered objects, so a figure the renderer changes moves the preflight's
+// figure with it. An unreadable request is an error: counting it as nothing
+// would launch on a node that cannot hold the run (gt-gg9hv.38).
+func jobRequest(job *Job, syncPod, reader *Pod) (Amount, error) {
+	total := Amount{}
+	for _, pod := range []PodSpec{job.Spec.Template.Spec, syncPod.Spec, reader.Spec} {
+		request, err := PodRequestTotal(pod)
+		if err != nil {
+			return Amount{}, err
+		}
+		total = total.Add(request)
 	}
-	return total.Add(readerAmount).Add(readerAmount)
+	return total, nil
 }
 
 // renderJob is the Job for a Spec that has passed Validate.
 //
-// Spec.CPUs and Spec.MemoryGB are the runner container's share, not the pod's:
-// the dind sidecar requests its own fixed share (dindCPU and dindMemory) beside
-// it, so a run with Dind asks the node for the Spec's share plus the sidecar's.
-// A pod total that had to hold both would leave a Spec at the bottom of its
-// range nothing for the runner once the sidecar's share came out of it
-// (gt-gg9hv.38).
-func renderJob(spec Spec) *Job {
-	containers := []Container{runnerContainer(spec)}
+// Spec.CPUs and Spec.MemoryGB are the pod's total share, not one container's:
+// the dind sidecar's fixed share (dindCPU and dindMemory) comes out of that
+// total, and the runner container gets the rest. A Spec whose total cannot hold
+// the sidecar and leave the runner a share is refused (gt-gg9hv.38).
+func renderJob(spec Spec) (*Job, error) {
+	runner, err := runnerContainer(spec)
+	if err != nil {
+		return nil, err
+	}
+	containers := []Container{runner}
 	volumes := []Volume{
 		// The run reads the rig's bare repository and never writes it, so the
 		// claim the deploy fills is mounted read-only.
@@ -621,11 +637,11 @@ func renderJob(spec Spec) *Job {
 				Volumes:               volumes,
 			}},
 		},
-	}
+	}, nil
 }
 
 // runnerContainer is the container the sweep runs in.
-func runnerContainer(spec Spec) Container {
+func runnerContainer(spec Spec) (Container, error) {
 	env := make([]EnvVar, 0, 5)
 	if spec.Dind {
 		env = append(env, EnvVar{Name: "DOCKER_HOST", Value: "tcp://" + dindAddress + ":" + dindPort})
@@ -644,7 +660,10 @@ func runnerContainer(spec Spec) Container {
 	)
 	// Requests equal limits, so the scheduler promises the run its whole share
 	// instead of letting it burst into a neighbour's (design 2026-10-30).
-	share := ResourceList{CPU: strconv.Itoa(spec.CPUs), Memory: strconv.Itoa(spec.MemoryGB) + "Gi"}
+	share, err := runnerShare(spec)
+	if err != nil {
+		return Container{}, err
+	}
 	return Container{
 		Name:    runnerContainerName,
 		Image:   spec.Image,
@@ -661,7 +680,64 @@ func runnerContainer(spec Spec) Container {
 			{Name: outVolume, MountPath: OutputDir},
 			{Name: cacheVolume, MountPath: cacheMount},
 		},
+	}, nil
+}
+
+// dindRequest is the dind sidecar's fixed share, read from the quantities its
+// container renders, so the figure the runner's share subtracts cannot drift
+// from the figure the pod asks for. The constants are this package's own, so an
+// unreadable one is a build mistake: the tests render it and see it fail.
+var dindRequest = mustAmount(dindCPU, dindMemory)
+
+// mustAmount is amountOf for a quantity the package defines. An unreadable
+// constant leaves no run to refuse, so it panics where every test sees it
+// rather than rendering a share nobody could compute.
+func mustAmount(cpu, memory string) Amount {
+	amount, err := amountOf(cpu, memory)
+	if err != nil {
+		panic(err)
 	}
+	return amount
+}
+
+// runnerShare is the runner container's share: the Spec's pod total, less the
+// dind sidecar's fixed share when the run starts one. A total that cannot hold
+// the sidecar and leave the runner a share is refused, naming the field and the
+// sidecar share that makes it impossible.
+func runnerShare(spec Spec) (ResourceList, error) {
+	cpu := int64(spec.CPUs) * 1000
+	memory := int64(spec.MemoryGB) << 30
+	if spec.Dind {
+		cpu -= dindRequest.CPU
+		memory -= dindRequest.Memory
+		if cpu <= 0 {
+			return ResourceList{}, &FieldError{Field: "cpus", Rule: fmt.Sprintf("%d is the whole pod's CPUs, and the dind sidecar's %s share leaves the runner nothing", spec.CPUs, dindCPU)}
+		}
+		if memory <= 0 {
+			return ResourceList{}, &FieldError{Field: "memoryGB", Rule: fmt.Sprintf("%d is the whole pod's GB of memory, and the dind sidecar's %s share leaves the runner nothing", spec.MemoryGB, dindMemory)}
+		}
+	}
+	return ResourceList{CPU: cpuQuantity(cpu), Memory: memoryQuantity(memory)}, nil
+}
+
+// cpuQuantity is milli-CPU as a container resource quantity: whole cores when
+// the amount is a whole number of them, so a rendered share reads as the
+// operator's setting does, and a fraction in milli-CPU otherwise.
+func cpuQuantity(milli int64) string {
+	if milli%1000 == 0 {
+		return strconv.FormatInt(milli/1000, 10)
+	}
+	return strconv.FormatInt(milli, 10) + "m"
+}
+
+// memoryQuantity is a byte amount as a container resource quantity: whole GiB
+// when the amount is a whole number of them, and plain bytes otherwise, so the
+// rendered share is never rounded down.
+func memoryQuantity(bytes int64) string {
+	if bytes%(1<<30) == 0 {
+		return strconv.FormatInt(bytes>>30, 10) + "Gi"
+	}
+	return strconv.FormatInt(bytes, 10)
 }
 
 // dindContainer is the sidecar the packages that need a Docker API reach: the

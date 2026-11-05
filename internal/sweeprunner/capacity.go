@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 )
 
 // The room a launch must leave on its node beside itself: a Forgejo pod
@@ -39,20 +40,34 @@ func (a Amount) String() string {
 	return fmt.Sprintf("%dm/%dMi", a.CPU, a.Memory>>20)
 }
 
-// NodeCapacity is one node of the listing: what it allocates, and the sum of
-// the requests of the pods placed on it.
+// Taint is a node taint with the NoSchedule effect: a pod the node does not
+// tolerate is kept off it (gt-gg9hv.38).
+type Taint struct {
+	Key   string
+	Value string
+}
+
+// NodeCapacity is one node of the listing: what it allocates, the sum of the
+// requests of the pods placed on it, and whether the cluster would place a new
+// pod on it at all.
 type NodeCapacity struct {
 	Node        string
 	Allocatable Amount
 	Requested   Amount
+	// Unschedulable is a node the cluster has cordoned: no new pod is placed
+	// on it.
+	Unschedulable bool
+	// NoSchedule are the node's NoSchedule taints. A pod may be placed on the
+	// node only when it tolerates every one of them.
+	NoSchedule []Taint
 }
 
 // Free is the node's allocatable amount less what its pods request.
 func (n NodeCapacity) Free() Amount { return n.Allocatable.Sub(n.Requested) }
 
 // CapacityReport is what a capacity preflight read for one launch: the node the
-// launch was judged against, its allocatable and requested amounts, and the
-// amount the run itself asks for.
+// launch was judged against or, on a decline, the best-fitting node; its
+// allocatable and requested amounts; and the amount the run itself asks for.
 type CapacityReport struct {
 	Node        string
 	Allocatable Amount
@@ -60,28 +75,30 @@ type CapacityReport struct {
 	Job         Amount
 }
 
-// Free is the chosen node's allocatable amount less what its pods request.
+// Free is the node's allocatable amount less what its pods request.
 func (r CapacityReport) Free() Amount { return r.Allocatable.Sub(r.Requested) }
 
-// String is the report as the daemon's launch line shows it: the node's
-// allocatable and requested amounts, and the run's own request.
+// String is the report as the daemon's launch line shows it: the node the
+// launch was judged against, its allocatable and requested amounts, and the
+// run's own request.
 func (r CapacityReport) String() string {
-	return fmt.Sprintf("allocatable %s, requested %s, job %s", r.Allocatable, r.Requested, r.Job)
+	return fmt.Sprintf("node %s: allocatable %s, requested %s, job %s", r.Node, r.Allocatable, r.Requested, r.Job)
 }
 
-// Decline is the report as the daemon's decline line shows it: the free room,
-// what the run needs, and the headroom the launch must leave beside it.
+// Decline is the report as the daemon's decline line shows it: the
+// best-fitting node, the free room there, what the run needs, and the headroom
+// the launch must leave beside it.
 func (r CapacityReport) Decline() string {
 	headroom := Amount{CPU: sweepHeadroomCPU, Memory: sweepHeadroomMemory}
-	return fmt.Sprintf("free %s, job needs %s, headroom %s", r.Free(), r.Job, headroom)
+	return fmt.Sprintf("node %s: free %s, job needs %s, headroom %s", r.Node, r.Free(), r.Job, headroom)
 }
 
-// NoRoomError is a preflight's refusal because the node has no room for the
-// run. A caller can tell it from a listing it could not read: this one is the
-// standing fact of a node that is short, and its figures may change from one
-// check to the next while it still says the same thing.
+// NoRoomError is a preflight's refusal because no node has room for the run. A
+// caller can tell it from a listing it could not read: this one is the standing
+// fact of a cluster that is short, and its figures may change from one check to
+// the next while it still says the same thing.
 type NoRoomError struct {
-	// Reason is the free amount, what the run needs and the headroom.
+	// Reason is the node and its figures, or why no node was eligible.
 	Reason string
 }
 
@@ -102,27 +119,35 @@ type Preflight struct {
 	Read func(stdout []byte) (CapacityReport, error)
 }
 
-// capacityRead is the Read for a run that asks the node for job: it reads
-// kubectl's node and pod listing, and decides whether the run fits beside what
-// the node already carries.
-func capacityRead(job Amount) func(stdout []byte) (CapacityReport, error) {
+// capacityRead is the Read for a launch that creates the given Job, sync pod
+// and reader pod and tolerates the given taints: it sums what those objects ask
+// for, reads kubectl's node and pod listing, and decides whether the run fits
+// on a node the cluster may place it on beside what that node already carries.
+// A request it cannot read is a decline, never a run sized from zero.
+func capacityRead(job *Job, syncPod, reader *Pod, tolerations []Toleration) func(stdout []byte) (CapacityReport, error) {
 	return func(stdout []byte) (CapacityReport, error) {
+		request, err := jobRequest(job, syncPod, reader)
+		if err != nil {
+			return CapacityReport{}, fmt.Errorf("cannot read the run's resource request: %w", err)
+		}
 		nodes, err := ParseCapacity(stdout)
 		if err != nil {
 			return CapacityReport{}, fmt.Errorf("cannot read the node's capacity: %w", err)
 		}
-		return decideCapacity(nodes, job)
+		return decideCapacity(nodes, request, tolerations)
 	}
 }
 
 // ParseCapacity reads the document `kubectl get nodes,pods -A -o json` prints:
 // one List whose items are every node and every pod of the cluster. Each node
-// reports its allocatable amounts and the sum of the requests of the pods
-// placed on it whose phase is not Succeeded or Failed. A pod's request is the
-// sum over its containers, its init containers included, and a container that
-// declares no request asks for nothing. A pod the scheduler has not placed asks
-// no node for anything and is not counted. Anything else that cannot be read is
-// an error: a request missed is a node that reads freer than it is.
+// reports its allocatable amounts, whether it is cordoned, and its NoSchedule
+// taints; it carries the sum of the requests of the pods placed on it whose
+// phase is not Succeeded or Failed. A pod's request is what the scheduler adds
+// to a node for it: the pod's overhead, plus, per resource, the larger of the
+// sum over its containers and the largest request of a single init container. A
+// pod the scheduler has not placed asks no node for anything and is not
+// counted. Anything else that cannot be read is an error: a request missed is a
+// node that reads freer than it is.
 func ParseCapacity(stdout []byte) ([]NodeCapacity, error) {
 	var listing clusterListing
 	if err := json.Unmarshal(stdout, &listing); err != nil {
@@ -141,7 +166,17 @@ func ParseCapacity(stdout []byte) ([]NodeCapacity, error) {
 			if _, seen := byName[item.Metadata.Name]; seen {
 				return nil, fmt.Errorf("the listing names node %q twice", item.Metadata.Name)
 			}
-			byName[item.Metadata.Name] = &NodeCapacity{Node: item.Metadata.Name, Allocatable: allocatable}
+			node := &NodeCapacity{
+				Node:          item.Metadata.Name,
+				Allocatable:   allocatable,
+				Unschedulable: item.Spec.Unschedulable,
+			}
+			for _, taint := range item.Spec.Taints {
+				if taint.Effect == "NoSchedule" {
+					node.NoSchedule = append(node.NoSchedule, Taint{Key: taint.Key, Value: taint.Value})
+				}
+			}
+			byName[item.Metadata.Name] = node
 			order = append(order, item.Metadata.Name)
 		case "Pod":
 			pods = append(pods, item)
@@ -174,16 +209,31 @@ func ParseCapacity(stdout []byte) ([]NodeCapacity, error) {
 }
 
 // decideCapacity picks the node the launch is judged against and reports
-// whether the run fits there with the headroom the control plane needs. The
-// chosen node is the one that fits with the most free CPU, or, when none fits,
-// the one with the most free CPU, so a decline names the roomiest node there is
-// and a launch names the node the scheduler will pick.
-func decideCapacity(nodes []NodeCapacity, job Amount) (CapacityReport, error) {
+// whether the run fits there with the headroom the control plane needs. Only a
+// node the cluster would place a new pod on is considered: not cordoned, and
+// carrying no NoSchedule taint the Job pod does not tolerate. Among those, a
+// node the run fits beside wins, then the most free CPU, then the most free
+// memory, so a decline names the best-fitting node there is and a launch names
+// the one the run fits on.
+//
+// The check judges placement; it does not pin the Job to the node it names. The
+// scheduler may still choose another node, but every node it may choose is one
+// this check found eligible and fitting when it read the listing (gt-gg9hv.38).
+func decideCapacity(nodes []NodeCapacity, job Amount, tolerations []Toleration) (CapacityReport, error) {
 	if len(nodes) == 0 {
 		return CapacityReport{}, errors.New("cannot read the node's capacity: the listing names no node")
 	}
-	chosen := nodes[0]
-	for _, node := range nodes[1:] {
+	eligible := make([]NodeCapacity, 0, len(nodes))
+	for _, node := range nodes {
+		if schedulable(node, tolerations) {
+			eligible = append(eligible, node)
+		}
+	}
+	if len(eligible) == 0 {
+		return CapacityReport{}, &NoRoomError{Reason: "no node the Job may be placed on: every node is cordoned or carries a NoSchedule taint the Job does not tolerate"}
+	}
+	chosen := eligible[0]
+	for _, node := range eligible[1:] {
 		if roomier(node, chosen, job) {
 			chosen = node
 		}
@@ -198,6 +248,42 @@ func decideCapacity(nodes []NodeCapacity, job Amount) (CapacityReport, error) {
 		return report, &NoRoomError{Reason: report.Decline()}
 	}
 	return report, nil
+}
+
+// schedulable reports whether the cluster would place a new pod on the node:
+// the node is not cordoned, and the pod tolerates every NoSchedule taint on it.
+func schedulable(node NodeCapacity, tolerations []Toleration) bool {
+	if node.Unschedulable {
+		return false
+	}
+	for _, taint := range node.NoSchedule {
+		if !tolerated(taint, tolerations) {
+			return false
+		}
+	}
+	return true
+}
+
+// tolerated reports whether one of the pod's tolerations matches the taint. A
+// toleration naming an effect tolerates only that effect; an "Exists" operator
+// matches any value of its key and, with no key, any taint at all. A taint the
+// pod does not tolerate is what keeps it off the node.
+func tolerated(taint Taint, tolerations []Toleration) bool {
+	for _, toleration := range tolerations {
+		if toleration.Effect != "" && toleration.Effect != "NoSchedule" {
+			continue
+		}
+		if toleration.Operator == "Exists" {
+			if toleration.Key == "" || toleration.Key == taint.Key {
+				return true
+			}
+			continue
+		}
+		if toleration.Key == taint.Key && toleration.Value == taint.Value {
+			return true
+		}
+	}
+	return false
 }
 
 // roomier reports whether a is the node the launch should be judged against
@@ -241,20 +327,41 @@ func allocatableAmount(item listingItem) (Amount, error) {
 	return amount, nil
 }
 
-// podsRequest is a pod's request: the sum over its init containers and its
-// containers.
+// podsRequest is the amount the scheduler adds to a node for one pod: the pod's
+// overhead plus, per resource, the larger of the sum over its containers and
+// the largest request of a single init container. Init containers run one at a
+// time, so their requests do not add up, and what the scheduler reserves is the
+// largest one beside the containers.
 func podsRequest(pod listingItem) (Amount, error) {
-	total := Amount{}
-	for _, containers := range [][]podContainer{pod.Spec.InitContainers, pod.Spec.Containers} {
-		for _, container := range containers {
-			amount, err := resourceAmount(container.Resources.Requests)
-			if err != nil {
-				return Amount{}, err
-			}
-			total = total.Add(amount)
+	overhead, err := resourceAmount(pod.Spec.Overhead)
+	if err != nil {
+		return Amount{}, fmt.Errorf("overhead: %w", err)
+	}
+	largestInit := Amount{}
+	for _, container := range pod.Spec.InitContainers {
+		amount, err := resourceAmount(container.Resources.Requests)
+		if err != nil {
+			return Amount{}, err
+		}
+		if amount.CPU > largestInit.CPU {
+			largestInit.CPU = amount.CPU
+		}
+		if amount.Memory > largestInit.Memory {
+			largestInit.Memory = amount.Memory
 		}
 	}
-	return total, nil
+	containers := Amount{}
+	for _, container := range pod.Spec.Containers {
+		amount, err := resourceAmount(container.Resources.Requests)
+		if err != nil {
+			return Amount{}, err
+		}
+		containers = containers.Add(amount)
+	}
+	return overhead.Add(Amount{
+		CPU:    max(largestInit.CPU, containers.CPU),
+		Memory: max(largestInit.Memory, containers.Memory),
+	}), nil
 }
 
 // podTerminated reports whether a pod's phase says it has ended. A pod whose
@@ -294,9 +401,11 @@ const (
 )
 
 // PodRequestTotal is the amount a rendered pod asks for: the sum over every one
-// of its containers, its init containers included, so a sidecar's share is part
-// of the pod's. Each container's request must be a readable quantity; an
-// unreadable one is an error rather than a zero.
+// of its containers, its init containers included. The dind sidecar is a native
+// sidecar, whose share the scheduler adds beside the containers' rather than
+// takes the largest of, so every rendered container's request adds up. Each
+// container's request must be a readable quantity; an unreadable one is an
+// error rather than a zero.
 func PodRequestTotal(pod PodSpec) (Amount, error) {
 	total := Amount{}
 	for _, containers := range [][]Container{pod.InitContainers, pod.Containers} {
@@ -317,27 +426,45 @@ func PodRequestTotal(pod PodSpec) (Amount, error) {
 	return total, nil
 }
 
-// parseQuantity reads a Kubernetes resource quantity in units of scale: the
-// base unit times scale, so CPU is read in milli-CPU and memory in bytes. The
-// suffixes are the API's own: the decimal ones (n, u, m, k, M, G, T, P, E), the
-// binary ones (Ki, Mi, Gi, Ti, Pi, Ei) and a plain or exponent number. A
-// quantity that is empty, negative, or not one of those is an error; a quantity
-// that is not a whole unit rounds up, so a request never reads lower than it is.
+// amountOf reads a rendered container's two request quantities into an Amount.
+// It is the same reader the preflight uses, so a figure the renderer writes and
+// the figure the preflight counts cannot take different forms (gt-gg9hv.38).
+func amountOf(cpu, memory string) (Amount, error) {
+	cpuMilliAmount, err := parseQuantity(cpu, cpuMilli)
+	if err != nil {
+		return Amount{}, fmt.Errorf("cpu: %w", err)
+	}
+	memoryBytesAmount, err := parseQuantity(memory, memoryBytes)
+	if err != nil {
+		return Amount{}, fmt.Errorf("memory: %w", err)
+	}
+	return Amount{CPU: cpuMilliAmount, Memory: memoryBytesAmount}, nil
+}
+
+// parseQuantity reads a Kubernetes resource quantity as the preflight accepts
+// it: a plain integer or decimal, or one of the suffixes m (milli), Mi and Gi.
+// The forms are the ones a node and pod listing uses; any other suffix, an
+// exponent, a sign, or anything else is refused with the input in the error,
+// because a request read wrong is a node read freer than it is. A quantity that
+// is not a whole unit rounds up, so a request never reads lower than it is.
 func parseQuantity(value string, scale int64) (int64, error) {
 	number, suffix := splitQuantity(value)
 	if number == "" {
 		return 0, fmt.Errorf("%q is not a quantity", value)
 	}
+	if strings.ContainsAny(number, "+-") {
+		return 0, fmt.Errorf("%q has a sign, which no quantity the preflight reads uses", value)
+	}
+	if strings.ContainsAny(number, "eE") {
+		return 0, fmt.Errorf("%q is an exponent, which the preflight does not read", value)
+	}
 	mantissa, ok := new(big.Rat).SetString(number)
 	if !ok {
 		return 0, fmt.Errorf("%q is not a quantity", value)
 	}
-	if mantissa.Sign() < 0 {
-		return 0, fmt.Errorf("%q is a negative quantity", value)
-	}
 	multiplier, ok := quantityMultiplier(suffix)
 	if !ok {
-		return 0, fmt.Errorf("%q has a suffix the API does not use", value)
+		return 0, fmt.Errorf("%q has a suffix the preflight does not read", value)
 	}
 	scaled := new(big.Rat).Mul(mantissa, multiplier)
 	scaled.Mul(scaled, new(big.Rat).SetInt64(scale))
@@ -352,8 +479,7 @@ func parseQuantity(value string, scale int64) (int64, error) {
 }
 
 // splitQuantity splits a quantity into its number and the run of letters that
-// ends it. An exponent keeps its "e" in the number because a digit follows it,
-// so "1e3" is a number and "1Ei" is a number with the "Ei" suffix.
+// ends it.
 func splitQuantity(value string) (number, suffix string) {
 	end := len(value)
 	for end > 0 {
@@ -367,42 +493,18 @@ func splitQuantity(value string) (number, suffix string) {
 	return value[:end], value[end:]
 }
 
-// quantityMultiplier is the factor a quantity suffix multiplies its number by,
-// as the API defines them.
+// quantityMultiplier is the factor an accepted quantity suffix multiplies its
+// number by.
 func quantityMultiplier(suffix string) (*big.Rat, bool) {
 	switch suffix {
 	case "":
 		return big.NewRat(1, 1), true
-	case "n":
-		return big.NewRat(1, 1_000_000_000), true
-	case "u":
-		return big.NewRat(1, 1_000_000), true
 	case "m":
 		return big.NewRat(1, 1_000), true
-	case "k":
-		return big.NewRat(1_000, 1), true
-	case "M":
-		return big.NewRat(1_000_000, 1), true
-	case "G":
-		return big.NewRat(1_000_000_000, 1), true
-	case "T":
-		return big.NewRat(1_000_000_000_000, 1), true
-	case "P":
-		return big.NewRat(1_000_000_000_000_000, 1), true
-	case "E":
-		return big.NewRat(1_000_000_000_000_000_000, 1), true
-	case "Ki":
-		return big.NewRat(1<<10, 1), true
 	case "Mi":
 		return big.NewRat(1<<20, 1), true
 	case "Gi":
 		return big.NewRat(1<<30, 1), true
-	case "Ti":
-		return big.NewRat(1<<40, 1), true
-	case "Pi":
-		return big.NewRat(1<<50, 1), true
-	case "Ei":
-		return big.NewRat(1<<60, 1), true
 	}
 	return nil, false
 }
@@ -413,22 +515,32 @@ type clusterListing struct {
 	Items []listingItem `json:"items"`
 }
 
-// listingItem is one item of the listing: a node's allocatable amounts, or a
-// pod's placement and the requests of its containers.
+// listingItem is one item of the listing: a node's allocatable amounts,
+// cordon and taints, or a pod's placement and the requests of its containers.
 type listingItem struct {
 	Kind     string `json:"kind"`
 	Metadata struct {
 		Name string `json:"name"`
 	} `json:"metadata"`
 	Spec struct {
-		NodeName       string         `json:"nodeName"`
-		InitContainers []podContainer `json:"initContainers"`
-		Containers     []podContainer `json:"containers"`
+		NodeName       string            `json:"nodeName"`
+		Unschedulable  bool              `json:"unschedulable"`
+		Taints         []nodeTaint       `json:"taints"`
+		Overhead       map[string]string `json:"overhead"`
+		InitContainers []podContainer    `json:"initContainers"`
+		Containers     []podContainer    `json:"containers"`
 	} `json:"spec"`
 	Status struct {
 		Phase       string            `json:"phase"`
 		Allocatable map[string]string `json:"allocatable"`
 	} `json:"status"`
+}
+
+// nodeTaint is one node taint as the API prints it.
+type nodeTaint struct {
+	Key    string `json:"key"`
+	Value  string `json:"value"`
+	Effect string `json:"effect"`
 }
 
 // podContainer is a container's resources in the listing.

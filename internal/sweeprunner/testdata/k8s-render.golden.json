@@ -113,12 +113,12 @@
             ],
             "resources": {
               "requests": {
-                "cpu": "8",
-                "memory": "24Gi"
+                "cpu": "6",
+                "memory": "20Gi"
               },
               "limits": {
-                "cpu": "8",
-                "memory": "24Gi"
+                "cpu": "6",
+                "memory": "20Gi"
               }
             },
             "securityContext": {

@@ -19,32 +19,32 @@ import (
 // records while the container stage is declined.
 const preflightShellSummary = "tier-sweep: shell GREEN passed=3 failed=0 skipped=0 (logs /tmp/tier-sweep.x)\n"
 
-// preflightTightListing is a control node with 8 CPU and 24 GiB allocatable and
+// preflightTightListing is a control node with 6 CPU and 24 GiB allocatable and
 // no pod on it. The incident's runner block (cpus 4, memory 5, dind) asks
-// 6200m/9472Mi with its sync and reader pods, so the free amount less the job
+// 4200m/5376Mi with its sync and reader pods, so the free amount less the job
 // is 1800m: 200m short of the 2000m headroom.
 const preflightTightListing = `{
   "kind": "List",
   "items": [
-    {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"allocatable": {"cpu": "8", "memory": "24Gi"}}}
+    {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"allocatable": {"cpu": "6", "memory": "24Gi"}}}
   ]
 }`
 
-// preflightShorterListing is the same node with 7 CPU: the reason stands, but
+// preflightShorterListing is the same node with 5 CPU: the reason stands, but
 // the figures have moved, as they do while the node's pods come and go.
 const preflightShorterListing = `{
   "kind": "List",
   "items": [
-    {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"allocatable": {"cpu": "7", "memory": "24Gi"}}}
+    {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"allocatable": {"cpu": "5", "memory": "24Gi"}}}
   ]
 }`
 
-// preflightRoomyListing is the same node with 9 CPU: the run fits with 2800m to
+// preflightRoomyListing is the same node with 7 CPU: the run fits with 2800m to
 // spare, which is over the headroom.
 const preflightRoomyListing = `{
   "kind": "List",
   "items": [
-    {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"allocatable": {"cpu": "9", "memory": "24Gi"}}}
+    {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"allocatable": {"cpu": "7", "memory": "24Gi"}}}
   ]
 }`
 
@@ -65,15 +65,15 @@ func preflightDaemon(t *testing.T, now time.Time, cmds *runnerFakeCmds) (*Daemon
 	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
 	d.tierSweepSeams.run = func(ctx context.Context, dir string, st tierSweepStage) tierSweepStageResult {
 		if st.slot {
-			// Short, so a launch this test expects to be declined goes RED in
+			// Short, so a launch this test expects to be declined defers in
 			// milliseconds instead of waiting out the real stage budget.
 			st.budget = 50 * time.Millisecond
 			return d.tierSweepRunStage(ctx, dir, st)
 		}
 		return tierSweepStageResult{output: preflightShellSummary, exitCode: 0, ran: true}
 	}
-	// The budget is short so a launch this test expects to be declined fails as
-	// a RED stage in milliseconds rather than waiting out a real run.
+	// The budget is short so a launch this test expects to be declined defers
+	// in milliseconds rather than waiting out a real run.
 	st := tierSweepStage{tiers: []string{"integration", "race"}, slot: true, rig: "gastown", tested: runnerTestSHA, budget: 50 * time.Millisecond}
 	spec, ok, err := d.tierSweepRunnerSpec(st)
 	if err != nil || !ok {
@@ -116,7 +116,7 @@ func TestTierSweepPreflightDeclinesWithoutHeadroom(t *testing.T) {
 	if _, found, _, err := latestPatrolLastRun(d.config.TownRoot, "tier_sweep", d.tierSweepRun.last()); err != nil || found {
 		t.Errorf("patrol clock found = %v, err = %v; want it not advanced", found, err)
 	}
-	wantDecline := "tier_sweep: not launching on gt-ctl: free 8000m/24576Mi, job needs 6200m/9472Mi, headroom 2000m/2048Mi"
+	wantDecline := "tier_sweep: not launching on gt-ctl: node gt-control: free 6000m/24576Mi, job needs 4200m/5376Mi, headroom 2000m/2048Mi"
 	if got := strings.Count(logs.String(), "tier_sweep: not launching on gt-ctl:"); got != 1 {
 		t.Fatalf("decline lines = %d after one cycle, want 1:\n%s", got, logs.String())
 	}
@@ -153,9 +153,14 @@ func TestTierSweepPreflightDeclinesWithoutHeadroom(t *testing.T) {
 	}
 
 	// A node with room launches the Job, and the three figures are logged first.
+	// The priority guard's listing answers a healthy cluster so this test is
+	// about the capacity preflight alone.
 	cmds.answer = func(argv []string) ([]byte, []byte, error) {
-		if slices.Contains(argv, "nodes,pods") {
+		switch {
+		case slices.Contains(argv, "nodes,pods"):
 			return []byte(preflightRoomyListing), nil, nil
+		case slices.Contains(argv, "pods,priorityclasses"):
+			return []byte(runnerPriorityListing), nil, nil
 		}
 		return nil, nil, nil
 	}
@@ -166,7 +171,7 @@ func TestTierSweepPreflightDeclinesWithoutHeadroom(t *testing.T) {
 	if !appliedJobDocument(cmds.stdin) {
 		t.Fatalf("the launch applied no Job document; steps run: %q", cmds.ran)
 	}
-	wantLaunch := "tier_sweep: preflight on gt-ctl: allocatable 9000m/24576Mi, requested 0m/0Mi, job 6200m/9472Mi"
+	wantLaunch := "tier_sweep: preflight on gt-ctl: node gt-control: allocatable 7000m/24576Mi, requested 0m/0Mi, job 4200m/5376Mi"
 	if !strings.Contains(logs.String(), wantLaunch) {
 		t.Errorf("the launch line is missing %q:\n%s", wantLaunch, logs.String())
 	}
@@ -174,7 +179,8 @@ func TestTierSweepPreflightDeclinesWithoutHeadroom(t *testing.T) {
 
 // A node that cannot be read is not a pass: a failing command and an answer
 // that is not the listing each decline the launch, with the error in the line,
-// and create nothing (gt-gg9hv.38).
+// and create nothing. A Kubernetes plan with no capacity check at all is
+// refused the same way, one line an hour while it stays broken (gt-gg9hv.38).
 func TestTierSweepPreflightRefusesWhenTheNodeCannotBeRead(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -222,6 +228,37 @@ func TestTierSweepPreflightRefusesWhenTheNodeCannotBeRead(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("a Kubernetes plan with no preflight is refused", func(t *testing.T) {
+		t.Parallel()
+		d, _, _, _, logs := preflightDaemon(t, atHour(time.Now(), 15), &runnerFakeCmds{})
+		const line = "tier_sweep: not launching: no capacity preflight is wired for the kubernetes backend"
+
+		if !d.tierSweepPreflightDeclines(context.Background(), config.TierSweepRunnerKubernetes, "gt-ctl", sweeprunner.Plan{}) {
+			t.Fatal("a Kubernetes plan with no preflight was not refused")
+		}
+		if got := strings.Count(logs.String(), line); got != 1 {
+			t.Fatalf("unwired-preflight lines = %d, want 1:\n%s", got, logs.String())
+		}
+		// Inside the hour the same broken plan is silent; past it the reason is
+		// news again.
+		d.tierSweepPreflightDeclines(context.Background(), config.TierSweepRunnerKubernetes, "gt-ctl", sweeprunner.Plan{})
+		if got := strings.Count(logs.String(), line); got != 1 {
+			t.Errorf("unwired-preflight lines = %d on the next retry, want still 1", got)
+		}
+		clk := d.clock.(*clockwork.FakeClock)
+		clk.Advance(61 * time.Minute)
+		d.tierSweepPreflightDeclines(context.Background(), config.TierSweepRunnerKubernetes, "gt-ctl", sweeprunner.Plan{})
+		if got := strings.Count(logs.String(), line); got != 2 {
+			t.Errorf("unwired-preflight lines = %d past the hour, want 2", got)
+		}
+
+		// A Docker plan's engine is the run's own, so it renders no preflight and
+		// is not refused for it.
+		if d.tierSweepPreflightDeclines(context.Background(), config.TierSweepRunnerDocker, "colima-gt-sbx", sweeprunner.Plan{}) {
+			t.Error("a Docker plan with no preflight was refused")
+		}
+	})
 }
 
 // A declined launch is not a stage result: the stage reports that it did not
