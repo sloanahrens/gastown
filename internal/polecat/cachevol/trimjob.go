@@ -489,6 +489,10 @@ func claimRelative(p string) bool {
 	return first != "." && first != ".."
 }
 
+// ClaimRelative is claimRelative exported, so the runner that removes a planned path applies the
+// same refusal rule the plan's path check does rather than a copy of it.
+func ClaimRelative(p string) bool { return claimRelative(p) }
+
 // trimShardCount is how many ConfigMaps trimShards would make of paths: the object count the route
 // is decided on, without building the shards a claim-carried trim never applies. The packing is
 // trimShards', step for step, so the count and the shards it counts agree; a test pins the two at the
