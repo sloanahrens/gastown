@@ -11,8 +11,8 @@ plugin refuses and how it reports a failure. This file covers installing it.
   panels read, `internal/forgejo/token.go` for the rule. The plugin only GETs.
 - **A promote target per rig.** The rig's `merge_queue.forgejo` block
   (`<rig>/settings/config.json`, the operator tier) must name `promote_target`
-  and `promote_key_file`, or `gt promote` refuses every sha and the plugin logs
-  `not promotable` each run. `bash scripts/forgejo-cutover.sh <rig>` writes both.
+  and `promote_key_file`, or `gt promote` refuses every sha and the plugin fails
+  its run naming the rig. `bash scripts/forgejo-cutover.sh <rig>` writes both.
 - **The app repo's `deploy.yml`** with the prod integration job `plugin.md`
   names. A repo whose `deploy.yml` lacks it is never promoted.
 

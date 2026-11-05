@@ -203,8 +203,9 @@ func promoteAll(e env) error {
 }
 
 // promoteRig advances one rig's GitHub main when the gate allows it, and reports
-// whether it promoted. Every other outcome is logged and is this run's
-// nothing-to-do.
+// whether it promoted. A gate that finds nothing, and the two retryable
+// refusals, are logged and are this run's nothing-to-do; any other failure of
+// gt promote is returned, so the run exits non-zero.
 func promoteRig(e env, f forgejo, townRoot, rig, repo, job string) (bool, error) {
 	rel, found, err := f.findRelease(repo)
 	if err != nil {
@@ -257,22 +258,19 @@ func promoteRig(e env, f forgejo, townRoot, rig, repo, job string) (bool, error)
 	}
 
 	out, code := e.promote(townRoot, rig, rel.sha)
-	cause := lastLine(out)
-	switch {
-	case code == 0:
+	cause := promoteCause(out)
+	if code == 0 {
 		e.log("rig %s: promoted %s (%s)", rig, short, rel.tag)
 		return true, nil
-	case strings.Contains(out, "divergence is escalated"):
-		// A diverged target is gt promote's own alert
-		// (landing-promote-diverged:<rig>, internal/cmd/promote.go); raising the
-		// plugin's on top of it would page a human twice for one condition.
+	}
+	// Only the lock and the divergence are retryable: the cooldown retries the
+	// lock, and a diverged target already raises its own alert
+	// (landing-promote-diverged:<rig>, internal/cmd/promote.go), so failing the
+	// plugin on top would page a human twice for one condition. Every other
+	// refusal (a rig that names no promote_target, say) is a plugin that cannot
+	// do its job, and a skip would hide it (gt-lym1z).
+	if retryableRefusal(out) {
 		e.log("rig %s: %s", rig, cause)
-		return false, nil
-	case code == 1:
-		// Exit 1 is gt promote refusing (the rig names no promote_target, the sha
-		// is not on the rig's main, another promotion holds it). The cooldown
-		// retries, so it is nothing-to-do rather than a plugin failure.
-		e.log("rig %s: not promotable: %s", rig, cause)
 		return false, nil
 	}
 	return false, fmt.Errorf("rig %s: gt promote --sha %s exited %d: %s", rig, rel.sha, code, cause)
@@ -735,16 +733,46 @@ func firstN(s string, n int) string {
 	return s[:n]
 }
 
-// lastLine returns the last line of a program's output that holds anything but
-// whitespace: the end of a failure's output is what explains it.
-func lastLine(out string) string {
+// retryableRefusal reports whether gt promote's output is one of the two
+// refusals it documents as retryable (internal/cmd/promote.go): the lock
+// another promotion holds, and the diverged target it escalates itself. The
+// match is on gt promote's own wording, so a refusal it does not document
+// fails the run instead of being mistaken for these (gt-lym1z).
+func retryableRefusal(out string) bool {
+	return strings.Contains(out, "another promotion holds") ||
+		strings.Contains(out, "divergence is escalated")
+}
+
+// promoteCause returns the line that explains a failed gt promote: cobra's own
+// "Error:" line, or the first line that is neither usage text nor flag help.
+// Never the last line, because cobra prints the usage block after the error and
+// its flag help names no cause (gt-lym1z).
+func promoteCause(out string) string {
 	lines := strings.Split(out, "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		if strings.TrimSpace(lines[i]) != "" {
-			return lines[i]
+	for _, line := range lines {
+		if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "Error:") {
+			return trimmed
 		}
 	}
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || usageLine(line) {
+			continue
+		}
+		return trimmed
+	}
 	return ""
+}
+
+// usageLine reports whether a line of gt promote's output belongs to cobra's
+// usage block: a section label, or the usage syntax and flag help it indents
+// below one.
+func usageLine(line string) bool {
+	switch strings.TrimSpace(line) {
+	case "Usage:", "Aliases:", "Examples:", "Flags:", "Global Flags:":
+		return true
+	}
+	return strings.HasPrefix(line, "  ") || strings.HasPrefix(line, "\t")
 }
 
 // bodyExcerpt cuts a failure's reply to the start of its cause line, newlines

@@ -739,18 +739,18 @@ func TestGate(t *testing.T) {
 			want: []string{"rigs.conf: 'fractals ' needs a rig and an owner/repo"},
 		},
 		{
-			name: "exit 1 from gt promote is logged and the run records skipped",
+			name: "an exit 1 refusal not documented as retryable fails the run",
 			setup: func(h *harness) {
 				h.state(rigName, older)
 				h.gtRC = 1
 				h.gtOut = "Error: rig fractals names no merge_queue.forgejo.promote_target, so it does not promote\n"
 			},
-			code: 0,
+			code: 1,
 			want: []string{
-				"[app-promote] rig fractals: not promotable: Error: rig fractals names no merge_queue.forgejo.promote_target, so it does not promote",
-				"[plugin-result skipped]",
+				"app-promote: rig fractals: gt promote --sha " + green + " exited 1: Error: rig fractals names no merge_queue.forgejo.promote_target, so it does not promote",
 			},
 			promotes: []string{"promote --rig fractals --sha " + green},
+			avoid:    []string{skippedMarker},
 		},
 		{
 			name: "exit 2 from gt promote: the plugin exits 1 with the cause",
@@ -988,6 +988,100 @@ func TestGate_ViewerTokenStaysOutOfOutput(t *testing.T) {
 	}
 }
 
+// TestPromoteCauseSkipsUsage holds the cause of a failed gt promote to its
+// Error: line: cobra prints usage and flag help after the error, and the help
+// names no cause (gt-lym1z).
+func TestPromoteCauseSkipsUsage(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.state(rigName, older)
+	h.gtRC = 1
+	h.gtOut = "Error: --sha is required\n" +
+		"Usage:\n" +
+		"  gt promote [flags]\n" +
+		"\n" +
+		"Flags:\n" +
+		"      --sha string   Commit on the rig's Forgejo main to promote\n"
+
+	if code := h.run(); code != 1 {
+		t.Fatalf("exit = %d, want 1; output:\n%s", code, h.output())
+	}
+	want := "app-promote: rig " + rigName + ": gt promote --sha " + green + " exited 1: Error: --sha is required"
+	if !strings.Contains(h.output(), want) {
+		t.Errorf("output does not hold %q; output:\n%s", want, h.output())
+	}
+	if strings.Contains(h.output(), "--sha string") || strings.Contains(h.output(), "Usage:") {
+		t.Errorf("the run printed gt promote's usage text as the cause; output:\n%s", h.output())
+	}
+}
+
+// TestPromoteNonRetryableExitFails holds an exit 1 refusal that gt promote does
+// not document as retryable to a failed run: a receipt that says skipped would
+// hide a rig that cannot promote (gt-lym1z).
+func TestPromoteNonRetryableExitFails(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.state(rigName, older)
+	h.gtRC = 1
+	h.gtOut = "Error: rig fractals names no merge_queue.forgejo.promote_target, so it does not promote\n"
+
+	if code := h.run(); code != 1 {
+		t.Fatalf("exit = %d, want 1; output:\n%s", code, h.output())
+	}
+	want := "app-promote: rig " + rigName + ": gt promote --sha " + green +
+		" exited 1: Error: rig fractals names no merge_queue.forgejo.promote_target, so it does not promote"
+	if !strings.Contains(h.output(), want) {
+		t.Errorf("output does not hold %q; output:\n%s", want, h.output())
+	}
+	if strings.Contains(h.output(), skippedMarker) {
+		t.Errorf("the failed run says skipped; output:\n%s", h.output())
+	}
+}
+
+// TestPromoteRetryableRefusalSkips holds the two refusals gt promote documents
+// as retryable to a skip that logs the real line: the lock, and the diverged
+// target gt promote escalates itself (gt-lym1z).
+func TestPromoteRetryableRefusalSkips(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		code int
+		line string
+	}{
+		{
+			name: "the lock another promotion holds",
+			code: 1,
+			line: "Error: rig fractals: not promoted: another promotion holds /town/.runtime/promote/fractals.lock; retry later",
+		},
+		{
+			name: "the diverged target gt promote escalates",
+			code: 2,
+			line: "Error: rig fractals: the promotion target's main is at 1234, which is not an ancestor of aaaa, so it was left alone and the divergence is escalated",
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			h.state(rigName, older)
+			h.gtRC = tc.code
+			h.gtOut = tc.line + "\n"
+
+			if code := h.run(); code != 0 {
+				t.Fatalf("exit = %d, want 0; output:\n%s", code, h.output())
+			}
+			want := "[app-promote] rig " + rigName + ": " + tc.line
+			if !strings.Contains(h.output(), want) {
+				t.Errorf("output does not hold %q; output:\n%s", want, h.output())
+			}
+			if !strings.Contains(h.output(), skippedMarker) {
+				t.Errorf("the run does not record skipped; output:\n%s", h.output())
+			}
+		})
+	}
+}
+
 func TestSplitRig(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -1178,17 +1272,36 @@ func TestReleaseCandidates(t *testing.T) {
 	}
 }
 
-func TestLastLine(t *testing.T) {
+// TestPromoteCause holds the cause of a failed gt promote to the Error: line,
+// and to the first line that is not usage when there is none: flag help names
+// no cause (gt-lym1z).
+func TestPromoteCause(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
 		out  string
 		want string
 	}{
-		{"the last line", "one\ntwo\n", "two"},
-		{"a trailing blank line", "one\ntwo\n\n", "two"},
-		{"a whitespace-only last line", "one\ntwo\n  \n", "two"},
-		{"one line", "only", "only"},
+		{
+			name: "the Error line before the usage block",
+			out:  "Error: --sha is required\nUsage:\n  gt promote [flags]\n\nFlags:\n      --sha string   Commit on the rig's Forgejo main to promote\n",
+			want: "Error: --sha is required",
+		},
+		{
+			name: "no Error line: the first line that is not usage",
+			out:  "gt: killed\nUsage:\n  gt promote [flags]\n",
+			want: "gt: killed",
+		},
+		{
+			name: "an Error line after a warning",
+			out:  "\nwarning: the sweep is idle\nError: boom\n",
+			want: "Error: boom",
+		},
+		{
+			name: "flag help alone names no cause",
+			out:  "Usage:\n  gt promote [flags]\n\nFlags:\n      --sha string   Commit\n",
+			want: "",
+		},
 		{"nothing", "", ""},
 		{"whitespace only", " \n\t\n", ""},
 	}
@@ -1196,8 +1309,8 @@ func TestLastLine(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := lastLine(tc.out); got != tc.want {
-				t.Errorf("lastLine(%q) = %q, want %q", tc.out, got, tc.want)
+			if got := promoteCause(tc.out); got != tc.want {
+				t.Errorf("promoteCause(%q) = %q, want %q", tc.out, got, tc.want)
 			}
 		})
 	}
