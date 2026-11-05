@@ -173,6 +173,25 @@ func TestPushWithEnvPassesEnvironment(t *testing.T) {
 	}
 }
 
+// ListRemoteRefsWithHashesEnv hands its environment to git, so a deploy key's
+// GIT_SSH_COMMAND reaches ls-remote; the read keeps the remote-query bound.
+func TestListRemoteRefsWithHashesEnvPassesEnvironment(t *testing.T) {
+	t.Parallel()
+	s := newScripted(nil).on("ls-remote --refs origin *", ok("aaaa1111\trefs/heads/main\n"))
+	env := []string{"GIT_SSH_COMMAND=ssh -i /keys/promote -o IdentitiesOnly=yes"}
+	refs, err := newTestGit(t, s).ListRemoteRefsWithHashesEnv("origin", "refs/heads/", env)
+	if err != nil {
+		t.Fatalf("ListRemoteRefsWithHashesEnv: %v", err)
+	}
+	if len(refs) != 1 || refs[0] != (RemoteRef{Hash: "aaaa1111", Name: "refs/heads/main"}) {
+		t.Errorf("refs = %+v, want the listed main", refs)
+	}
+	c, found := s.sentCall("ls-remote --refs origin refs/heads/*")
+	if !found || !reflect.DeepEqual(c.env, env) || c.timeout != remoteQueryTimeout {
+		t.Fatalf("ls-remote call = %+v (found %v), want env %v and timeout %v", c, found, env, remoteQueryTimeout)
+	}
+}
+
 // A call that runs out its timeout reports a timeout, not git's output.
 func TestTimedOutCallReportsTimeout(t *testing.T) {
 	t.Parallel()

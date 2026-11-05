@@ -18,9 +18,17 @@ type stubPromoteRepo struct {
 	tip      string
 	ancestor bool
 	pushes   []string
+	lsEnv    []string
 }
 
-func (s *stubPromoteRepo) ListRemoteRefsWithHashes(_, _ string) ([]git.RemoteRef, error) {
+func (s *stubPromoteRepo) ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error) {
+	return s.ListRemoteRefsWithHashesEnv(remote, prefix, nil)
+}
+
+// ListRemoteRefsWithHashesEnv records the env the read was given, as gitfake
+// does, and answers the target's tip.
+func (s *stubPromoteRepo) ListRemoteRefsWithHashesEnv(_, _ string, env []string) ([]git.RemoteRef, error) {
+	s.lsEnv = append([]string(nil), env...)
 	if s.tip == "" {
 		return nil, nil
 	}

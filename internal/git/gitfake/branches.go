@@ -332,7 +332,24 @@ func (h *handle) RefreshRemoteDefaultBranch(remote string) error {
 }
 
 func (h *handle) ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error) {
+	return h.ListRemoteRefsWithHashesEnv(remote, prefix, nil)
+}
+
+// ListRemoteRefsWithHashesEnv is ListRemoteRefsWithHashes, recording env for
+// ListRemoteEnv since the fake has no process to apply it to (gt-4tc05).
+func (h *handle) ListRemoteRefsWithHashesEnv(remote, prefix string, env []string) ([]git.RemoteRef, error) {
+	h.f.mu.Lock()
+	h.f.lsRemoteEnv = append([]string(nil), env...)
+	h.f.mu.Unlock()
 	return h.ListRemoteRefsWithHashesTimeout(remote, prefix, 0)
+}
+
+// ListRemoteEnv returns env from the most recent ListRemoteRefsWithHashesEnv
+// call on the world, or nil when none ran; a copy the caller may keep.
+func (f *Fake) ListRemoteEnv() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.lsRemoteEnv...)
 }
 
 func (h *handle) ListRemoteRefsWithHashesTimeout(remote, prefix string, _ time.Duration) ([]git.RemoteRef, error) {

@@ -2690,13 +2690,27 @@ type RemoteRef struct {
 // The prefix filters refs (e.g., "refs/heads/polecat/" for all polecat branches).
 // Returns full ref names like "refs/heads/polecat/furiosa-abc123".
 func (g *Git) ListRemoteRefsWithHashes(remote, prefix string) ([]RemoteRef, error) {
-	return g.ListRemoteRefsWithHashesTimeout(remote, prefix, remoteQueryTimeout)
+	return g.ListRemoteRefsWithHashesEnv(remote, prefix, nil)
+}
+
+// ListRemoteRefsWithHashesEnv is ListRemoteRefsWithHashes with env passed to
+// the git process, so a deploy key's GIT_SSH_COMMAND reaches ls-remote.
+func (g *Git) ListRemoteRefsWithHashesEnv(remote, prefix string, env []string) ([]RemoteRef, error) {
+	out, err := g.runWithEnvAndTimeout([]string{"ls-remote", "--refs", remote, prefix + "*"}, env, remoteQueryTimeout)
+	return parseRemoteRefs(out, err)
 }
 
 // ListRemoteRefsWithHashesTimeout is ListRemoteRefsWithHashes with an explicit
 // bound; the command (and any remote helper) is killed when it expires.
 func (g *Git) ListRemoteRefsWithHashesTimeout(remote, prefix string, timeout time.Duration) ([]RemoteRef, error) {
 	out, err := g.runWithTimeout(timeout, "ls-remote", "--refs", remote, prefix+"*")
+	return parseRemoteRefs(out, err)
+}
+
+// parseRemoteRefs reads ls-remote's output into refs. A failed command keeps
+// its error: a caller that judges state from the listing must read that as
+// unknown, never as no refs.
+func parseRemoteRefs(out string, err error) ([]RemoteRef, error) {
 	if err != nil {
 		return nil, err
 	}

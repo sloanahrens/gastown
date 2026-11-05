@@ -36,6 +36,7 @@ type Repo interface {
 	FetchRefspecWithEnv(remote, refspec string, env []string) error
 	PushRemoteBranchTip(remote, branch string) (string, error)
 	ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error)
+	ListRemoteRefsWithHashesEnv(remote, prefix string, env []string) ([]git.RemoteRef, error)
 	DeleteRemoteBranchIfAt(remote, branch, expectedHash string) error
 	Push(remote, refspec string, force bool) error
 	PushWithEnv(remote, refspec string, force bool, env []string) error

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -17,7 +18,7 @@ import (
 
 // recordingRepo is a Repo a test scripts and reads back: what the target's
 // main holds, whether it is an ancestor of the green commit, whether the push
-// fails, and every push's refspec, environment and force flag.
+// fails, and every read's and push's refspec, environment and force flag.
 type recordingRepo struct {
 	tip         string
 	tipErr      error
@@ -25,8 +26,14 @@ type recordingRepo struct {
 	ancestor    bool
 	ancestorErr error
 	pushErr     error
+	listRemotes []listRemoteCall
 	fetches     []fetchCall
 	pushes      []pushCall
+}
+
+type listRemoteCall struct {
+	remote, prefix string
+	env            []string
 }
 
 type fetchCall struct {
@@ -41,6 +48,11 @@ type pushCall struct {
 }
 
 func (r *recordingRepo) ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error) {
+	return r.ListRemoteRefsWithHashesEnv(remote, prefix, nil)
+}
+
+func (r *recordingRepo) ListRemoteRefsWithHashesEnv(remote, prefix string, env []string) ([]git.RemoteRef, error) {
+	r.listRemotes = append(r.listRemotes, listRemoteCall{remote: remote, prefix: prefix, env: env})
 	if r.tipErr != nil {
 		return nil, r.tipErr
 	}
@@ -339,6 +351,56 @@ func TestPromotePushesExactlyTheGreenCommitToMainWithTheDeployKey(t *testing.T) 
 	}
 	if strings.Join(fetch.env, " ") != env {
 		t.Errorf("fetch env = %v, want the push's env %v: one identity for the fetch and the push", fetch.env, got.env)
+	}
+}
+
+// The target's main is read under the deploy key, not ssh's default identity:
+// a headless container has no account key to fall back on, so a bare
+// ls-remote there fails with "Permission denied" (gt-4tc05).
+func TestRemoteMainUsesDeployKey(t *testing.T) {
+	t.Parallel()
+	fx := newPromoterFixture(t)
+	fx.repo.tip = "aaaa1111"
+
+	fx.p.Promote(State{}, "bbbb2222")
+	if len(fx.repo.listRemotes) != 1 {
+		t.Fatalf("ls-remote calls = %+v, want one read of the target's main", fx.repo.listRemotes)
+	}
+	got := fx.repo.listRemotes[0]
+	if got.remote != fx.p.Target {
+		t.Errorf("remote = %q, want the promote target", got.remote)
+	}
+	if got.prefix != "refs/heads/" {
+		t.Errorf("prefix = %q, want refs/heads/", got.prefix)
+	}
+	want := fx.p.keyEnv()
+	if !reflect.DeepEqual(got.env, want) {
+		t.Fatalf("env = %v, want the deploy key env %v", got.env, want)
+	}
+	env := strings.Join(got.env, " ")
+	for _, part := range []string{"-i ", fx.keyFile, "IdentitiesOnly=yes", "BatchMode=yes"} {
+		if !strings.Contains(env, part) {
+			t.Errorf("env = %v, want %q: the read uses the same key as the fetch and the push", got.env, part)
+		}
+	}
+}
+
+// A target that refuses the key is recorded, not read as having no main: the
+// record still names ssh's line, and nothing is pushed.
+func TestRemoteMainKeyErrorIsRecorded(t *testing.T) {
+	t.Parallel()
+	fx := newPromoterFixture(t)
+	fx.repo.tipErr = errors.New("git@github.com: Permission denied (publickey)")
+
+	st := fx.p.Promote(State{}, "bbbb2222")
+	if !strings.Contains(st.LastError, "Permission denied (publickey)") {
+		t.Errorf("LastError = %q, want ssh's own line recorded", st.LastError)
+	}
+	if !strings.Contains(st.LastError, "reading the target's main") {
+		t.Errorf("LastError = %q, want it to name the failed read", st.LastError)
+	}
+	if len(fx.repo.pushes) != 0 {
+		t.Errorf("pushes = %+v, want none when the target could not be read", fx.repo.pushes)
 	}
 }
 

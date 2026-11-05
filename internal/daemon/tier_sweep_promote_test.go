@@ -181,6 +181,10 @@ type tierSweepPromoteRepo struct {
 }
 
 func (r *tierSweepPromoteRepo) ListRemoteRefsWithHashes(_, _ string) ([]git.RemoteRef, error) {
+	return r.ListRemoteRefsWithHashesEnv("", "", nil)
+}
+
+func (r *tierSweepPromoteRepo) ListRemoteRefsWithHashesEnv(_, _ string, _ []string) ([]git.RemoteRef, error) {
 	if r.tip == "" {
 		return nil, nil
 	}
