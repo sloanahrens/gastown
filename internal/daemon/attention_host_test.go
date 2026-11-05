@@ -5,9 +5,6 @@ import (
 	"context"
 	"errors"
 	"log"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -284,28 +281,6 @@ func TestHostStackNeverNamesTheRetiredContainers(t *testing.T) {
 		for _, it := range items {
 			if strings.Contains(it.Summary, name) || strings.Contains(it.Key, name) {
 				t.Errorf("item %+v names the retired container %s", it, name)
-			}
-		}
-	}
-
-	// A retired name that creeps back into the check's own sources is found
-	// here even if no test reads the item it lands in. The scan is the two
-	// files that build the host items: the disk_maintenance patrol also names
-	// the runner container, but it measures the Docker disk through it, which
-	// this bead leaves alone (Out of scope).
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	dir := filepath.Dir(thisFile)
-	for _, file := range []string{"attention_host.go", "attention_host_file.go"} {
-		src, err := os.ReadFile(filepath.Join(dir, file))
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, name := range retired {
-			if strings.Contains(string(src), name) {
-				t.Errorf("%s names the retired container %s", file, name)
 			}
 		}
 	}

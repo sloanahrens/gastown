@@ -117,7 +117,9 @@ type hostProbes interface {
 	RigParked(rig string) (bool, error)
 	// ForgejoHealthy asks the town's Forgejo its health endpoint. A nil error
 	// is a healthy answer; errForgejoNotConfigured says the town runs no
-	// Forgejo to watch, and any other error is the instance not answering.
+	// Forgejo to watch; errForgejoSettingUnreadable says the origin could not
+	// be resolved, so the instance is unknown; any other error is the instance
+	// not answering.
 	ForgejoHealthy(ctx context.Context) error
 }
 
@@ -210,17 +212,27 @@ const forgejoHealthPath = "/api/healthz"
 // absence.
 var errForgejoNotConfigured = errors.New("no rig the landing worker serves names a Forgejo remote URL, so the town has no Forgejo to watch")
 
+// errForgejoSettingUnreadable says the town's Forgejo origin could not be
+// resolved: a settings tier that exists cannot be read or parsed, or names a
+// remote URL that is not a URL. It is neither an outage nor an absence: the
+// watch knows neither where Forgejo is nor that there is none, so the collector
+// keeps whatever it last held rather than raising or clearing (gt-gg9hv.36).
+var errForgejoSettingUnreadable = errors.New("the Forgejo setting could not be read")
+
 // ForgejoHealthy asks the town's Forgejo its health endpoint, the one read that
 // says the instance every landing gate waits on is up (gt-gg9hv.36). The
 // request carries no credential: the health endpoint needs none, and the URL is
 // the origin from the landing worker's setting, so no user info can reach it.
+// A URL source that fails is errForgejoSettingUnreadable: the origin is
+// unknown, which the collector keeps the last answer on rather than reading as
+// an absence.
 func (p systemHostProbes) ForgejoHealthy(ctx context.Context) error {
 	if p.forgejoBaseURL == nil {
 		return errors.New("the host probes were built with no Forgejo URL source")
 	}
 	base, err := p.forgejoBaseURL()
 	if err != nil {
-		return fmt.Errorf("resolving the town's Forgejo URL: %w", err)
+		return fmt.Errorf("%w: %w", errForgejoSettingUnreadable, err)
 	}
 	if base == "" {
 		return errForgejoNotConfigured
@@ -261,27 +273,36 @@ func forgejoOriginFromRemoteURL(raw string) (string, error) {
 // townForgejoBaseURL is the origin of the town's Forgejo, read from the
 // landing worker's own setting: the merge_queue.forgejo.remote_url of the rigs
 // the landing worker serves, resolved by the reader its landing path uses
-// (rig.ResolveForgejoConfigIn). The first rig in name order that names one
-// answers for the town, because a town's rigs land through one instance; the
-// order is sorted rather than the worker's, so a town whose rigs disagree does
-// not watch a different instance from tick to tick. A town where no such rig
-// names a remote URL returns "" and no error, because it has no Forgejo to
-// watch. A rig that names a remote URL that is not a URL is an error, never a
-// skip to the next rig: an instance the town believes it lands through and
-// cannot name is a setting to fix, not an absence.
+// (rig.ResolveForgejoConfigWithError). The first rig in name order that names
+// one answers for the town, because a town's rigs land through one instance;
+// the order is sorted rather than the worker's, so a town whose rigs disagree
+// does not watch a different instance from tick to tick. A town where no such
+// rig names a remote URL returns "" and no error, because it has no Forgejo to
+// watch. A setting the run cannot read, or a remote URL that is not a URL, is
+// an error, never a skip to the next rig or an absence: the instance the town
+// believes it lands through is unknown until the setting is fixed, and the
+// collector keeps its last answer rather than clearing an alarm.
 func (d *Daemon) townForgejoBaseURL() (string, error) {
 	// The worker's own list when it has no allowlist is the daemon's cached
 	// one, so sort a copy.
 	rigs := append([]string(nil), landingWorkerRigs(d.patrolConfig, d.getKnownRigs())...)
 	sort.Strings(rigs)
+	var base string
 	for _, name := range rigs {
-		fj := rig.ResolveForgejoConfigIn(d.repoFileOpener(), d.config.TownRoot, name)
-		if fj == nil || strings.TrimSpace(fj.RemoteURL) == "" {
+		fj, err := rig.ResolveForgejoConfigWithError(d.repoFileOpener(), d.config.TownRoot, name)
+		if err != nil {
+			return "", err
+		}
+		if base != "" || fj == nil || strings.TrimSpace(fj.RemoteURL) == "" {
 			continue
 		}
-		return forgejoOriginFromRemoteURL(fj.RemoteURL)
+		origin, err := forgejoOriginFromRemoteURL(fj.RemoteURL)
+		if err != nil {
+			return "", err
+		}
+		base = origin
 	}
-	return "", nil
+	return base, nil
 }
 
 // collectHostDisk raises host.disk_crit or host.disk_warn, whichever the town
@@ -396,11 +417,21 @@ func (s *attentionSources) collectHostDocker(ctx context.Context) ([]attention.I
 // not an outage, and a run of them is the instance down, which wakes because
 // the info line never does. A healthy answer, or a town that runs no Forgejo,
 // returns nothing, so an item either condition cleared is dropped.
+//
+// A setting the run could not read is neither: it is not a failure beat, so
+// the run of unread beats restarts and the setting never raises, and an item an
+// earlier tick raised stays open with the reason in its summary (gt-gg9hv.36).
 func (s *attentionSources) collectHostForgejo(ctx context.Context) ([]attention.Item, error) {
 	err := s.host.ForgejoHealthy(ctx)
 	if err == nil || errors.Is(err, errForgejoNotConfigured) {
 		s.forgejoProbeFails = 0
 		return nil, nil
+	}
+	if errors.Is(err, errForgejoSettingUnreadable) {
+		// The run of failures is broken by a tick that could not read the
+		// instance, so it restarts when readings resume.
+		s.forgejoProbeFails = 0
+		return s.forgejoSettingUnreadable(err), nil
 	}
 	// A probe that died with the tick's own context (the heartbeat ran out of
 	// time) says nothing about the instance, so it is not a beat toward it
@@ -427,6 +458,36 @@ func (s *attentionSources) collectHostForgejo(ctx context.Context) ([]attention.
 		Summary: fmt.Sprintf("forgejo health has failed %d heartbeats in a row, so every landing gate is waiting: %s",
 			s.forgejoProbeFails, oneLine(err.Error())),
 	}), nil
+}
+
+// forgejoUnreadableReason marks where a kept item's summary says why its rule
+// could not be judged, so a tick that keeps it again replaces the reason
+// instead of stacking one on each heartbeat.
+const forgejoUnreadableReason = "; the Forgejo setting could not be read: "
+
+// forgejoSettingUnreadable is what the collector returns when the origin could
+// not be read: the info probe line, and the instance-down item an earlier tick
+// raised kept open with this tick's reason in its summary. It never raises,
+// because a setting the run could not read says nothing about the instance.
+func (s *attentionSources) forgejoSettingUnreadable(err error) []attention.Item {
+	items := s.hostProbeFailed(hostProbeForgejo, err, attention.KindHostForgejo)
+	out := items[:0]
+	for _, it := range items {
+		if it.Key == hostRuleForgejoDown {
+			it.Summary = withForgejoUnreadableReason(it.Summary, oneLine(err.Error()))
+		}
+		out = append(out, it)
+	}
+	return out
+}
+
+// withForgejoUnreadableReason appends reason to a kept alarm's summary, after
+// dropping the reason a previous unreadable tick appended.
+func withForgejoUnreadableReason(summary, reason string) string {
+	if i := strings.Index(summary, forgejoUnreadableReason); i >= 0 {
+		summary = summary[:i]
+	}
+	return summary + forgejoUnreadableReason + reason
 }
 
 // hostProbeFailed is what a collector returns when its probe failed: one

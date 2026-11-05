@@ -667,7 +667,11 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 		host:        d.hostProbes,
 	}
 	if s.host == nil {
-		s.host = attentionHostProbes(d.config.TownRoot, os.Getenv, d.townForgejoBaseURL)
+		forgejoBaseURL := d.forgejoBaseURL
+		if forgejoBaseURL == nil {
+			forgejoBaseURL = d.townForgejoBaseURL
+		}
+		s.host = attentionHostProbes(d.config.TownRoot, os.Getenv, forgejoBaseURL)
 	}
 	s.landingRigs = d.attentionLandingRigs
 	overseerCfg := d.loadOperationalConfig().GetOverseerConfig()

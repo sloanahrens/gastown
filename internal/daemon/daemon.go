@@ -237,6 +237,10 @@ type Daemon struct {
 	// hostProbes replaces the production reads of the attention host
 	// collectors (attention_host.go); nil is production.
 	hostProbes hostProbes
+	// forgejoBaseURL replaces the production townForgejoBaseURL source of the
+	// attention host collectors; nil is production. Tests set it so an
+	// attentionSources built over a daemon never reads a rig's settings.
+	forgejoBaseURL func() (string, error)
 
 	// deployW is the deploy watch (deploy_watch.go), stored once it starts.
 	// Its collector runs on the heartbeat goroutine and the watch itself on
