@@ -146,9 +146,29 @@ func shouldRunMaintenanceCycle(now, lastRun time.Time) bool {
 // data dir. Every tick also settles the stale-gc alerts, in the window or not
 // (maintenance_gc_stale.go). A request file from the update job runs a cycle
 // at any hour and is answered through its result file (maintenance_request.go).
+// An archive-now request runs only the history archive pass and answers it
+// (scheduled_maintenance_archive_request.go).
 func (d *Daemon) runScheduledMaintenance() {
 	files := osRequestFiles{}
 	dir := update.Dir(d.config.TownRoot)
+
+	// The archive-now request runs the history archive pass and nothing else,
+	// so a tick serving one returns before any window work. A malformed or
+	// invalid-id archive request is settled and the tick carries on as if there
+	// were none; an unreadable one is left for the next tick.
+	archiveRequest, archiveRequested, err := readArchiveRequest(files, dir)
+	switch {
+	case errors.Is(err, errMalformedRequest):
+		d.dropUnanswerableRequest(files, archiveRequestPath(dir), "archive", err)
+	case errors.Is(err, errInvalidRunID):
+		d.answerInvalidArchiveRequest(files, dir, err)
+	case err != nil:
+		d.logger.Printf("scheduled_maintenance: WARNING: %v — leaving the archive request for the next tick", err)
+	case archiveRequested:
+		d.serveArchiveRequest(archiveRequest)
+		return
+	}
+
 	request, requested, err := readMaintenanceRequest(files, dir)
 	switch {
 	case errors.Is(err, errMalformedRequest):

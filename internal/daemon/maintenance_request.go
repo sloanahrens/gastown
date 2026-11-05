@@ -21,12 +21,12 @@ import (
 // errMalformedRequest marks a request file that exists but cannot be answered
 // (bad JSON or no run id). The tick removes it rather than retrying it every
 // five minutes.
-var errMalformedRequest = errors.New("malformed maintenance request")
+var errMalformedRequest = errors.New("malformed request")
 
 // errInvalidRunID marks a request whose run id is not bounded to
 // [A-Za-z0-9._-] and maxRequestRunIDLen characters. The tick answers it failed
 // and removes it, but never logs or echoes the value.
-var errInvalidRunID = errors.New("invalid maintenance run id")
+var errInvalidRunID = errors.New("invalid request run id")
 
 // maxRequestRunIDLen bounds the untrusted run id so it cannot bloat the result
 // file or a log line.
@@ -55,17 +55,22 @@ func requestPath(dir string) string { return filepath.Join(dir, update.RequestFi
 
 func resultPath(dir string) string { return filepath.Join(dir, update.ResultFileName) }
 
-// readMaintenanceRequest reads dir's request. ok is false when the file does
-// not exist; a file that exists but cannot be read or parsed returns an error,
-// which errors.Is(err, errMalformedRequest) separates from a read failure.
+// readMaintenanceRequest reads dir's maintenance request.
 func readMaintenanceRequest(files requestFiles, dir string) (update.RequestFile, bool, error) {
-	path := requestPath(dir)
+	return readRequestAt(files, requestPath(dir), "maintenance")
+}
+
+// readRequestAt reads the request file at path. ok is false when the file does
+// not exist; a file that exists but cannot be read or parsed returns an error,
+// which errors.Is(err, errMalformedRequest) separates from a read failure. kind
+// names the pair in the error text.
+func readRequestAt(files requestFiles, path, kind string) (update.RequestFile, bool, error) {
 	data, err := files.ReadFile(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return update.RequestFile{}, false, nil
 	case err != nil:
-		return update.RequestFile{}, false, fmt.Errorf("read maintenance request %s: %w", path, err)
+		return update.RequestFile{}, false, fmt.Errorf("read %s request %s: %w", kind, path, err)
 	}
 	var req update.RequestFile
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -103,38 +108,55 @@ func validRequestRunID(runID string) bool {
 	return true
 }
 
-// writeMaintenanceResult writes dir's result file for runID.
+// writeMaintenanceResult writes dir's maintenance result file for runID.
 func writeMaintenanceResult(files requestFiles, dir, runID string, at time.Time, outcome, detail string) error {
+	return writeResultAt(files, resultPath(dir), "maintenance", runID, at, outcome, detail)
+}
+
+// writeResultAt writes the result file at path for runID. kind names the pair
+// in the error text.
+func writeResultAt(files requestFiles, path, kind, runID string, at time.Time, outcome, detail string) error {
 	data, err := json.Marshal(update.MaintenanceResult{RunID: runID, Outcome: outcome, At: at, Detail: detail})
 	if err != nil {
-		return fmt.Errorf("encode maintenance result: %w", err)
+		return fmt.Errorf("encode %s result: %w", kind, err)
 	}
-	path := resultPath(dir)
 	if err := files.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write maintenance result %s: %w", path, err)
+		return fmt.Errorf("write %s result %s: %w", kind, path, err)
 	}
 	return nil
 }
 
-// answerMaintenanceRequest writes the result and only then removes the
-// request it served. A write failure leaves the request in place, so the next
-// tick retries instead of the job reading a missing result.
+// answerMaintenanceRequest writes the maintenance result and only then removes
+// the request it served.
 func answerMaintenanceRequest(files requestFiles, dir, runID string, at time.Time, outcome, detail string) error {
-	if err := writeMaintenanceResult(files, dir, runID, at, outcome, detail); err != nil {
-		return err
-	}
-	return removeAnsweredRequest(files, dir, runID)
+	return answerRequestAt(files, requestPath(dir), resultPath(dir), "maintenance", runID, at, outcome, detail)
 }
 
-// removeAnsweredRequest removes dir's request only while it still holds
+// answerRequestAt writes the result at resPath and only then removes the
+// request at reqPath it served. A write failure leaves the request in place, so
+// the next tick retries instead of the job reading a missing result.
+func answerRequestAt(files requestFiles, reqPath, resPath, kind, runID string, at time.Time, outcome, detail string) error {
+	if err := writeResultAt(files, resPath, kind, runID, at, outcome, detail); err != nil {
+		return err
+	}
+	return removeAnsweredRequestAt(files, reqPath, kind, runID)
+}
+
+// removeAnsweredRequest removes dir's maintenance request only while it still
+// holds runID.
+func removeAnsweredRequest(files requestFiles, dir, runID string) error {
+	return removeAnsweredRequestAt(files, requestPath(dir), "maintenance", runID)
+}
+
+// removeAnsweredRequestAt removes the request at path only while it still holds
 // runID. A cycle answers the request it started with, and a request written
 // meanwhile is another job's: removing it by name would answer that job with
 // the wrong result and drop work it is waiting for. A request already gone is
 // answered; the job only needs the result, and the file's absence is the
 // signal it waited for. A file that no longer parses cannot be the served
 // request either, so it is left for the next tick to drop.
-func removeAnsweredRequest(files requestFiles, dir, runID string) error {
-	req, ok, err := readMaintenanceRequest(files, dir)
+func removeAnsweredRequestAt(files requestFiles, path, kind, runID string) error {
+	req, ok, err := readRequestAt(files, path, kind)
 	switch {
 	case errors.Is(err, errMalformedRequest), errors.Is(err, errInvalidRunID):
 		return nil
@@ -145,9 +167,8 @@ func removeAnsweredRequest(files requestFiles, dir, runID string) error {
 	case !ok, req.RunID != runID:
 		return nil
 	}
-	path := requestPath(dir)
 	if err := files.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("remove maintenance request %s: %w", path, err)
+		return fmt.Errorf("remove %s request %s: %w", kind, path, err)
 	}
 	return nil
 }
@@ -188,13 +209,18 @@ func (d *Daemon) deferRequest(req update.RequestFile, reason string) {
 	}
 }
 
-// dropMalformedRequest removes a request the tick cannot answer and logs why.
+// dropMalformedRequest removes dir's maintenance request, which the tick cannot
+// answer, and logs why.
 func (d *Daemon) dropMalformedRequest(files requestFiles, dir string, cause error) {
-	if requestReplaced(files, dir) {
+	d.dropUnanswerableRequest(files, requestPath(dir), "maintenance", cause)
+}
+
+// dropUnanswerableRequest removes the request at path and logs why.
+func (d *Daemon) dropUnanswerableRequest(files requestFiles, path, kind string, cause error) {
+	if requestFileReplaced(files, path, kind) {
 		d.logger.Printf("scheduled_maintenance: %v — not dropped: a valid request replaced it", cause)
 		return
 	}
-	path := requestPath(dir)
 	if err := files.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		d.logger.Printf("scheduled_maintenance: WARNING: %v; cannot remove %s: %v", cause, path, err)
 		return
@@ -202,37 +228,42 @@ func (d *Daemon) dropMalformedRequest(files requestFiles, dir string, cause erro
 	d.logger.Printf("scheduled_maintenance: WARNING: %v — dropped", cause)
 }
 
-// answerInvalidRequest answers a request whose run id is untrusted with an
+// answerInvalidRequest answers dir's maintenance request whose run id is
+// untrusted with an id-less failed result, then removes it.
+func (d *Daemon) answerInvalidRequest(files requestFiles, dir string, cause error) {
+	d.answerInvalidRequestAt(files, requestPath(dir), resultPath(dir), "maintenance", d.maintenance().now(), cause)
+}
+
+// answerInvalidRequestAt answers a request whose run id is untrusted with an
 // id-less failed result, then removes it. The id itself is never written or
 // logged: the job fails its own run-id match, which is the outcome its run
 // deserves.
 //
-// It removes the file directly rather than through answerMaintenanceRequest:
-// that removal is guarded by the served run id, and this request's id is the
+// It removes the file directly rather than through answerRequestAt: that
+// removal is guarded by the served run id, and this request's id is the
 // untrusted one that must not be echoed anywhere, including into the guard.
-func (d *Daemon) answerInvalidRequest(files requestFiles, dir string, cause error) {
-	if err := writeMaintenanceResult(files, dir, "", d.maintenance().now(), "failed", "the maintenance request has an invalid run id"); err != nil {
+func (d *Daemon) answerInvalidRequestAt(files requestFiles, reqPath, resPath, kind string, at time.Time, cause error) {
+	if err := writeResultAt(files, resPath, kind, "", at, "failed", "the "+kind+" request has an invalid run id"); err != nil {
 		d.logger.Printf("scheduled_maintenance: WARNING: %v; cannot answer the request: %v — the request stays", cause, err)
 		return
 	}
-	if requestReplaced(files, dir) {
+	if requestFileReplaced(files, reqPath, kind) {
 		d.logger.Printf("scheduled_maintenance: %v — not dropped: a valid request replaced it", cause)
 		return
 	}
-	path := requestPath(dir)
-	if err := files.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		d.logger.Printf("scheduled_maintenance: WARNING: %v; cannot remove %s: %v", cause, path, err)
+	if err := files.Remove(reqPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		d.logger.Printf("scheduled_maintenance: WARNING: %v; cannot remove %s: %v", cause, reqPath, err)
 		return
 	}
 	d.logger.Printf("scheduled_maintenance: WARNING: %v — answered failed and dropped", cause)
 }
 
-// requestReplaced reports whether dir's request file now parses as a valid
-// request: the malformed or invalid-id file a tick read has been replaced by
-// another job's request since, and removing it by name would drop that job's
+// requestFileReplaced reports whether the request file at path now parses as a
+// valid request: the malformed or invalid-id file a tick read has been replaced
+// by another job's request since, and removing it by name would drop that job's
 // work.
-func requestReplaced(files requestFiles, dir string) bool {
-	_, ok, err := readMaintenanceRequest(files, dir)
+func requestFileReplaced(files requestFiles, path, kind string) bool {
+	_, ok, err := readRequestAt(files, path, kind)
 	return ok && err == nil
 }
 
