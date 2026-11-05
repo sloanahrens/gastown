@@ -131,8 +131,6 @@ func TestTrimSweepCacheRefusesAClaimItCannotRead(t *testing.T) {
 		// A path whose parent is a file cannot be measured, and that failure is
 		// not a claim that is simply not mounted.
 		{"a path through a file", filepath.Join(fileRoot, "claim"), "listing the cache claim"},
-		// A claim tree that cannot be read is a failure, never an empty tree.
-		{"a cache tree that cannot be read", unreadableCacheRoot(t, fixed), "listing the cache claim"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -144,6 +142,31 @@ func TestTrimSweepCacheRefusesAClaimItCannotRead(t *testing.T) {
 			}
 		})
 	}
+	// A claim tree that cannot be read is a failure, never an empty tree.
+	t.Run("a cache tree that cannot be read", func(t *testing.T) {
+		t.Parallel()
+		if os.Geteuid() == 0 {
+			//testpolicy:allow no-skip — a root-owned process reads a 0o000 directory, so the failure cannot be made
+			t.Skip("a root-owned process reads a 0o000 directory, so the failure cannot be made")
+		}
+		root := t.TempDir()
+		tree := filepath.Join(root, cachevol.SeedBuildCacheDir)
+		writeFile(t, filepath.Join(tree, "entry"), 10, fixed)
+		if err := os.Chmod(tree, 0o000); err != nil {
+			t.Fatalf("making the build cache unreadable: %v", err)
+		}
+		t.Cleanup(func() {
+			if err := os.Chmod(tree, 0o755); err != nil { //testpolicy:allow no-exec-files — restores the traverse bit so TempDir can remove the tree
+				t.Errorf("restoring the mode of %s: %v", tree, err)
+			}
+		})
+		trim := &CacheTrim{Root: root, CapBytes: 1, List: listSweepCache, Remove: removeSweepCacheFile}
+		// The walk cannot list the tree, so it must report rather than plan a
+		// trim of nothing.
+		if err := trimSweepCache(trim); err == nil {
+			t.Fatal("trimSweepCache read an unreadable cache tree as empty")
+		}
+	})
 }
 
 // TestTrimSweepCacheAcceptsAFileAnotherRunRemoved: a planned file that is
@@ -357,27 +380,6 @@ func failingTrimHarness(t *testing.T, removeErr error) *harness {
 		Remove: func(string, string) error { return removeErr },
 	}
 	return h
-}
-
-// unreadableCacheRoot is a claim whose build cache an unprivileged process
-// cannot read, with the mode restored when the test ends.
-func unreadableCacheRoot(t *testing.T, mtime time.Time) string {
-	t.Helper()
-	if os.Geteuid() == 0 {
-		t.Skip("a root-owned process reads a 0o000 directory, so the failure cannot be made")
-	}
-	root := t.TempDir()
-	tree := filepath.Join(root, cachevol.SeedBuildCacheDir)
-	writeFile(t, filepath.Join(tree, "entry"), 10, mtime)
-	if err := os.Chmod(tree, 0o000); err != nil {
-		t.Fatalf("making the build cache unreadable: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chmod(tree, 0o755); err != nil {
-			t.Errorf("restoring the mode of %s: %v", tree, err)
-		}
-	})
-	return root
 }
 
 // TestTrimSweepCacheRefusesAClaimItCannotOpen: a planned removal whose claim
