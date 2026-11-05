@@ -277,7 +277,7 @@ func TestRepoFromRemoteURL(t *testing.T) {
 	}{
 		{url: "https://forgejo.example/gastown/gastown", owner: "gastown", rep: "gastown"},
 		{url: "https://forgejo.example/gastown/gastown.git", owner: "gastown", rep: "gastown"},
-		{url: "http://127.0.0.1:3000/sloan/gastown.git/", owner: "sloan", rep: "gastown"},
+		{url: "http://127.0.0.1:3000/owner/gastown.git/", owner: "owner", rep: "gastown"},
 		{url: "git@forgejo.example:gastown/gastown.git", wantErr: true},
 		{url: "https://forgejo.example/gastown", wantErr: true},
 		{url: "", wantErr: true},

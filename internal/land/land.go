@@ -1162,6 +1162,7 @@ func (l *Lander) acceptedRisks(id string, op *config.OperatorConfig) (string, []
 // must not silently become a decision nobody made (gt-ywuip).
 func (l *Lander) operatorConfig(bead string) *config.OperatorConfig {
 	if l.TownRoot == "" {
+		l.logf("%s: no town root, so no operator.names is read; no operator decision or accepted risk is entitled", bead)
 		return nil
 	}
 	op, err := config.LoadOperatorConfig(l.TownRoot)

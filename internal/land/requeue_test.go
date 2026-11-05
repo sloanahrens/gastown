@@ -68,9 +68,9 @@ func TestNewestRequeueReadsTheNewestRequeue(t *testing.T) {
 	t.Parallel()
 	head := "1111111111111111111111111111111111111111"
 	comments := []beads.Comment{
-		{Text: FormatRequeueComment("sloan", "polecat/a/gt-x", head, 1, 1, "runner fault")},
+		{Text: FormatRequeueComment("daemon", "polecat/a/gt-x", head, 1, 1, "runner fault")},
 		{Text: "commit: abc — the fix"},
-		{Text: FormatRequeueComment("sloan", "polecat/a/gt-x", head, 2, 3, "runner fault again")},
+		{Text: FormatRequeueComment("daemon", "polecat/a/gt-x", head, 2, 3, "runner fault again")},
 	}
 	got, ok := NewestRequeue(comments)
 	if !ok || got.Attempt != 2 || got.Blocks != 3 {
@@ -84,7 +84,7 @@ func TestNewestRequeueWithoutARequeue(t *testing.T) {
 		"no comments":      nil,
 		"none are requeue": {{Text: "commit: abc — the fix"}, {Text: "Submitted for landing"}},
 		"marker quoted":    {{Text: "the REQUEUED: comment means it went back in the queue"}},
-		"no attempt line":  {{Text: "REQUEUED: sloan re-queued this rejected landing unchanged\nBranch: b\nHead: abc\nReason: x"}},
+		"no attempt line":  {{Text: "REQUEUED: daemon re-queued this rejected landing unchanged\nBranch: b\nHead: abc\nReason: x"}},
 	} {
 		if got, ok := NewestRequeue(comments); ok {
 			t.Errorf("%s: NewestRequeue = %+v, true; want ok=false", name, got)
@@ -118,7 +118,7 @@ func TestNewestRequeueKeepsTheFirstAttemptAndBlocks(t *testing.T) {
 // before the Blocks: line existed still names its attempt, with no count.
 func TestNewestRequeueWithoutABlockCount(t *testing.T) {
 	t.Parallel()
-	comments := []beads.Comment{{Text: "REQUEUED: sloan re-queued this rejected landing unchanged\nBranch: b\nHead: abc\nAttempt: 3\nReason: x"}}
+	comments := []beads.Comment{{Text: "REQUEUED: daemon re-queued this rejected landing unchanged\nBranch: b\nHead: abc\nAttempt: 3\nReason: x"}}
 	got, ok := NewestRequeue(comments)
 	if !ok || got.Attempt != 3 || got.Blocks != 0 {
 		t.Fatalf("NewestRequeue = %+v, %v; want attempt 3 and no block count", got, ok)

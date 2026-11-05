@@ -120,16 +120,20 @@ func TestDecisionAuthorsFromSettings(t *testing.T) {
 	}
 }
 
-// TestLandEntitlesNoOperatorWhenTheSettingsCannotBeRead: a landing whose town
+// TestOperatorNamesUnreadableSettingsFailsClosedAndLogs: a landing whose town
 // settings file does not parse still lands, but entitles no operator decision
-// or accepted risk, and the log names the read that failed (gt-ywuip).
-func TestLandEntitlesNoOperatorWhenTheSettingsCannotBeRead(t *testing.T) {
+// or accepted risk — the overseer's accepted risk still counts — and the log
+// names the file it could not read once (gt-ywuip).
+func TestOperatorNamesUnreadableSettingsFailsClosedAndLogs(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
 	if err := f.bd.AddCommentAs(f.work.BeadID, testOperator, "OPERATOR DECISION: keep the cap"); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.bd.AddCommentAs(f.work.BeadID, testOperator, "ACCEPTED-RISK: the mount is approved"); err != nil {
+	if err := f.bd.AddCommentAs(f.work.BeadID, testOperator, "ACCEPTED-RISK: the operator approved the mount"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.bd.AddCommentAs(f.work.BeadID, "town/crew/overseer", "ACCEPTED-RISK: the overseer approved the mount"); err != nil {
 		t.Fatal(err)
 	}
 	townRoot := t.TempDir()
@@ -151,14 +155,96 @@ func TestLandEntitlesNoOperatorWhenTheSettingsCannotBeRead(t *testing.T) {
 	if len(rev.inputs) != 1 {
 		t.Fatalf("reviewer calls = %d, want 1", len(rev.inputs))
 	}
+	brief := rev.inputs[0].BriefText
+	if strings.Contains(brief, "keep the cap") {
+		t.Errorf("an unreadable setting still entitled the operator decision:\n%s", brief)
+	}
+	risks := rev.inputs[0].AcceptedRisksText
+	if strings.Contains(risks, "the operator approved the mount") {
+		t.Errorf("an unreadable setting still entitled the operator's accepted risk: %q", risks)
+	}
+	if !strings.Contains(risks, "the overseer approved the mount") {
+		t.Errorf("the overseer's accepted risk was not carried: %q", risks)
+	}
+	log := out.String()
+	if got := strings.Count(log, "could not read the operator identities"); got != 1 {
+		t.Errorf("the failed setting read is logged %d times, want once:\n%s", got, log)
+	}
+	if !strings.Contains(log, "config.json") {
+		t.Errorf("the landing log does not name the settings file it could not read:\n%s", log)
+	}
+}
+
+// TestOperatorNamesAbsentKeyIsEmptyAndQuiet: a readable settings file with no
+// operator key is an empty list, not a failed read: no author is entitled and
+// the landing log carries no warning (gt-ywuip).
+func TestOperatorNamesAbsentKeyIsEmptyAndQuiet(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	if err := f.bd.AddCommentAs(f.work.BeadID, testOperator, "OPERATOR DECISION: keep the cap"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.bd.AddCommentAs(f.work.BeadID, testOperator, "ACCEPTED-RISK: the operator approved the mount"); err != nil {
+		t.Fatal(err)
+	}
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "settings"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "settings", "config.json"), []byte(`{"type":"town-settings","version":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rev := &recordBeadReviewer{verdict: Verdict{Verdict: VerdictApprove, Score: 0.9}}
+	l := f.lander()
+	l.Reviewer = rev
+	l.TownRoot = townRoot
+	var out strings.Builder
+	l.Out = &out
+	if _, err := l.Land(context.Background(), f.work); err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	if len(rev.inputs) != 1 {
+		t.Fatalf("reviewer calls = %d, want 1", len(rev.inputs))
+	}
+	brief := rev.inputs[0].BriefText
+	if strings.Contains(brief, "keep the cap") {
+		t.Errorf("an absent setting still entitled the operator decision:\n%s", brief)
+	}
+	if got := rev.inputs[0].AcceptedRisksText; strings.Contains(got, "the operator approved the mount") {
+		t.Errorf("an absent setting still entitled the operator's accepted risk: %q", got)
+	}
+	if log := out.String(); strings.Contains(log, "could not read the operator identities") {
+		t.Errorf("an absent key is not a failed read, but the log warns:\n%s", log)
+	}
+}
+
+// TestLanderWithoutTownRootEntitlesNothingAndLogsOnce: a lander that was not
+// told its town root entitles no operator identity and says why once, since
+// there is no settings file to name (gt-ywuip).
+func TestLanderWithoutTownRootEntitlesNothingAndLogsOnce(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	if err := f.bd.AddCommentAs(f.work.BeadID, testOperator, "OPERATOR DECISION: keep the cap"); err != nil {
+		t.Fatal(err)
+	}
+	rev := &recordBeadReviewer{verdict: Verdict{Verdict: VerdictApprove, Score: 0.9}}
+	l := f.lander()
+	l.Reviewer = rev
+	l.TownRoot = "" // the lander was not told its town
+	var out strings.Builder
+	l.Out = &out
+	if _, err := l.Land(context.Background(), f.work); err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	if len(rev.inputs) != 1 {
+		t.Fatalf("reviewer calls = %d, want 1", len(rev.inputs))
+	}
 	if strings.Contains(rev.inputs[0].BriefText, "keep the cap") {
-		t.Errorf("an unreadable setting still entitled the operator decision:\n%s", rev.inputs[0].BriefText)
+		t.Errorf("a lander with no town root still entitled the operator decision:\n%s", rev.inputs[0].BriefText)
 	}
-	if got := rev.inputs[0].AcceptedRisksText; got != "" {
-		t.Errorf("AcceptedRisksText = %q, want empty with no readable setting", got)
-	}
-	if s := out.String(); !strings.Contains(s, "could not read the operator identities") {
-		t.Errorf("the landing log does not name the failed setting read:\n%s", s)
+	log := out.String()
+	if got := strings.Count(log, "no town root"); got != 1 {
+		t.Errorf("the missing town root is logged %d times, want once:\n%s", got, log)
 	}
 }
 

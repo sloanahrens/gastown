@@ -94,8 +94,8 @@ func TestDispatchHoldFields_Verdicts(t *testing.T) {
 		},
 		{
 			name:  "human assignee",
-			issue: beads.Issue{Status: "open", Assignee: "sloan"},
-			want:  "assignee sloan is not an agent address",
+			issue: beads.Issue{Status: "open", Assignee: "ada"},
+			want:  "assignee ada is not an agent address",
 		},
 		{
 			name:  "agent assignee",
@@ -177,8 +177,8 @@ func TestSlingHoldFields_Verdicts(t *testing.T) {
 		},
 		{
 			name:  "operator reservation",
-			issue: beads.Issue{Status: "open", Assignee: "sloan"},
-			want:  "assignee sloan is not an agent address",
+			issue: beads.Issue{Status: "open", Assignee: "ada"},
+			want:  "assignee ada is not an agent address",
 		},
 	}
 

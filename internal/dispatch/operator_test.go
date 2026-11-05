@@ -23,7 +23,7 @@ func TestOperatorReservation(t *testing.T) {
 		{name: "label, however typed", labels: []string{"  Operator "}, want: "label operator"},
 		{name: "another label", labels: []string{"run-blocker"}, want: ""},
 
-		{name: "bare handle is a person", assignee: "sloan", want: "assignee sloan is not an agent address"},
+		{name: "bare handle is a person", assignee: "ada", want: "assignee ada is not an agent address"},
 		{name: "a name with a space is a person", assignee: "Test Operator", want: "assignee Test Operator is not an agent address"},
 		{name: "overseer is a person", assignee: "overseer", want: "assignee overseer is not an agent address"},
 
