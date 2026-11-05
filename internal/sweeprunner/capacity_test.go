@@ -100,6 +100,7 @@ func TestCapacityRefusesWhatItCannotRead(t *testing.T) {
 		{name: "no cpu allocatable", listing: `{"items": [{"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"allocatable": {"memory": "24Gi"}}}]}`, want: "no cpu allocatable"},
 		{name: "no memory allocatable", listing: `{"items": [{"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"allocatable": {"cpu": "12"}}}]}`, want: "no memory allocatable"},
 		{name: "an unreadable quantity", listing: `{"items": [` + node + `, {"kind": "Pod", "metadata": {"name": "p"}, "spec": {"nodeName": "gt-control", "containers": [{"resources": {"requests": {"cpu": "4x"}}}]}}]}`, want: "cpu"},
+		{name: "a node with an unreadable quantity", listing: `{"items": [{"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"allocatable": {"cpu": "4x", "memory": "24Gi"}}}]}`, want: `node "gt-control": cpu`},
 		{name: "a negative quantity", listing: `{"items": [` + node + `, {"kind": "Pod", "metadata": {"name": "p"}, "spec": {"nodeName": "gt-control", "containers": [{"resources": {"requests": {"memory": "-1Gi"}}}]}}]}`, want: "negative"},
 		{name: "a pod on a node the listing omits", listing: `{"items": [` + node + `, {"kind": "Pod", "metadata": {"name": "p"}, "spec": {"nodeName": "gt-gone", "containers": []}}]}`, want: "gt-gone"},
 		{name: "a node named twice", listing: `{"items": [` + node + `, ` + node + `]}`, want: "twice"},
@@ -143,6 +144,9 @@ func TestCapacityDecidesWithHeadroom(t *testing.T) {
 	}
 	if want := "free 7999m/11264Mi, job needs 6000m/9216Mi, headroom 2000m/2048Mi"; err.Error() != want {
 		t.Errorf("decline = %q, want %q", err, want)
+	}
+	if _, err := decideCapacity(nil, job); err == nil {
+		t.Error("a listing with no node decided; free capacity cannot be read from nothing")
 	}
 
 	// The roomiest node by CPU does not hold the job; another node does.
@@ -192,6 +196,35 @@ func TestPodRequestTotalForTheDefaultBlock(t *testing.T) {
 	}
 }
 
+// TestPodRequestTotalRefusesAnUnreadableContainer holds the pod total to
+// refusing a request it cannot read: counting it as zero would make the pod ask
+// less than it does.
+func TestPodRequestTotalRefusesAnUnreadableContainer(t *testing.T) {
+	t.Parallel()
+	pod := PodSpec{Containers: []Container{{
+		Name:      runnerContainerName,
+		Resources: &Resources{Requests: ResourceList{CPU: "four"}},
+	}}}
+	if got, err := PodRequestTotal(pod); err == nil {
+		t.Fatalf("PodRequestTotal = %+v, want the unreadable request refused", got)
+	} else if !strings.Contains(err.Error(), `container "runner"`) {
+		t.Errorf("error = %v, want it to name the container", err)
+	}
+}
+
+// TestCapacityReadDeclinesAListingItCannotRead holds the preflight's reader to
+// the decline: a listing kubectl could not print is never read as free capacity.
+func TestCapacityReadDeclinesAListingItCannotRead(t *testing.T) {
+	t.Parallel()
+	report, err := capacityRead(Amount{CPU: 1})([]byte("Error from server (Forbidden)"))
+	if err == nil {
+		t.Fatalf("capacityRead = %+v, want the unreadable listing refused", report)
+	}
+	if !strings.Contains(err.Error(), "cannot read the node's capacity") {
+		t.Errorf("error = %v, want it to name the node's capacity", err)
+	}
+}
+
 // TestK8sPreflightIsOneNodesPodsCall holds the plan's preflight to the one
 // kubectl call that reads the node, and to a decision that counts the Job's own
 // request with the sync and reader pods the run creates.
@@ -234,6 +267,42 @@ func TestK8sPreflightIsOneNodesPodsCall(t *testing.T) {
 	}
 }
 
+// TestK8sPreflightJobMatchesTheRenderedPods holds the figure the preflight
+// decides on to the containers the renderer actually writes, dind or not: a
+// share the renderer changes fails here rather than in a launch.
+func TestK8sPreflightJobMatchesTheRenderedPods(t *testing.T) {
+	t.Parallel()
+	listing := `{"items": [
+	  {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"allocatable": {"cpu": "64", "memory": "256Gi"}}}
+	]}`
+	for _, dind := range []bool{true, false} {
+		spec := goldenSpec()
+		spec.Dind = dind
+		plan, err := Kubernetes{}.Render(spec)
+		if err != nil {
+			t.Fatalf("rendering with dind %v: %v", dind, err)
+		}
+		want, err := PodRequestTotal(plan.Job.Spec.Template.Spec)
+		if err != nil {
+			t.Fatalf("the rendered Job's pod: %v", err)
+		}
+		for _, pod := range []*Pod{renderSyncPod(spec), renderReader(spec)} {
+			request, err := PodRequestTotal(pod.Spec)
+			if err != nil {
+				t.Fatalf("the rendered pod %q: %v", pod.Metadata.Name, err)
+			}
+			want = want.Add(request)
+		}
+		report, err := plan.Preflight.Read([]byte(listing))
+		if err != nil {
+			t.Fatalf("the preflight declined a node with room: %v", err)
+		}
+		if report.Job != want {
+			t.Errorf("dind %v: the preflight asks for %s, want the rendered pods' %s", dind, report.Job, want)
+		}
+	}
+}
+
 // TestParseCapacityReadsTheAPIsQuantityForms holds the parser to the forms a
 // quantity takes: a plain number, milli, binary and decimal suffixes, and an
 // exponent. A suffix the API does not use, or a value that is not a number, is
@@ -261,7 +330,7 @@ func TestParseCapacityReadsTheAPIsQuantityForms(t *testing.T) {
 			t.Errorf("parseQuantity(%q, %d) = %d, want %d", tc.value, tc.scale, got, tc.want)
 		}
 	}
-	for _, value := range []string{"", "abc", "4x", "-1", "1Ei2"} {
+	for _, value := range []string{"", "abc", "4x", "-1", "1Ei2", "10Ei"} {
 		if got, err := parseQuantity(value, cpuMilli); err == nil {
 			t.Errorf("parseQuantity(%q) = %d, want it refused", value, got)
 		}

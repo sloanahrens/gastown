@@ -334,17 +334,13 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 	claim := renderClaim(OutClaimName(spec), outClaimStorage)
 	reader := renderReader(spec)
 	sync := renderSyncPod(spec)
-	request, err := podRequestTotal(job, sync, reader)
-	if err != nil {
-		return Plan{}, err
-	}
 	return Plan{
 		Job: job,
 		// One kubectl call lists every node and pod: the preflight decides from
 		// the node's allocatable amounts and what its pods already request.
 		Preflight: &Preflight{
 			Step: Step{Argv: kubectlArgv(spec, "get", "nodes,pods", "-A", "-o", "json")},
-			Read: capacityRead(request),
+			Read: capacityRead(jobRequest(spec)),
 		},
 		Guards: []Guard{{
 			// The repo claim is shared by every run of the rig, and a run's Job
@@ -552,22 +548,25 @@ func syncPodName(spec Spec) string {
 	return k8sName("gt-sweep-sync", spec.Rig)
 }
 
-// podRequestTotal is the amount the launch asks a node for: every container of
-// the Job's pod, which is where a sidecar's share is counted beside the
-// runner's, and the sync and reader pods the run creates on the same cluster.
-func podRequestTotal(job *Job, sync, reader *Pod) (Amount, error) {
-	total, err := PodRequestTotal(job.Spec.Template.Spec)
-	if err != nil {
-		return Amount{}, fmt.Errorf("the Job's pod: %w", err)
+// The amounts the run's sidecar pods ask for, the same figures readerCPU,
+// readerMemory, dindCPU and dindMemory write into the containers.
+var (
+	readerAmount = Amount{CPU: 100, Memory: 128 << 20}
+	dindAmount   = Amount{CPU: 2_000, Memory: 4 << 30}
+)
+
+// jobRequest is the amount the launch asks a node for: the runner's share from
+// the Spec, the dind sidecar's fixed share when the run starts one, and the sync
+// and reader pods the run creates on the same cluster.
+// TestK8sPreflightJobMatchesTheRenderedPods holds it to the sum over the
+// containers of the rendered pods, so a share the renderer changes fails there
+// rather than in a launch (gt-gg9hv.38).
+func jobRequest(spec Spec) Amount {
+	total := Amount{CPU: int64(spec.CPUs) * 1000, Memory: int64(spec.MemoryGB) << 30}
+	if spec.Dind {
+		total = total.Add(dindAmount)
 	}
-	for _, pod := range []*Pod{sync, reader} {
-		request, err := PodRequestTotal(pod.Spec)
-		if err != nil {
-			return Amount{}, fmt.Errorf("pod %q: %w", pod.Metadata.Name, err)
-		}
-		total = total.Add(request)
-	}
-	return total, nil
+	return total.Add(readerAmount).Add(readerAmount)
 }
 
 // renderJob is the Job for a Spec that has passed Validate.
