@@ -12,7 +12,7 @@ which automatic path reads which marker.
 |--------------------|------------------------|
 | `deferred`, `pinned` | status |
 | `operator` | label |
-| a person's handle (`sloan`, `Sloan Ahrens`, `overseer`) | assignee |
+| a person's handle (`operator`, `Test Operator`, `overseer`) | assignee |
 | `needs-pro`, `overseer-only`, `operator-only`, `gt:needs-overseer`, `gt:needs-operator`, `needs-split` | label |
 | `do not redispatch` | design or notes |
 

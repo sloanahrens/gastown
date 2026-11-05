@@ -1,4 +1,4 @@
-> Status: proposed (2026-10), awaiting Sloan's approval (gt-hdj6n). Historical once the replay report is delivered; not maintained.
+> Status: proposed (2026-10), awaiting the operator's approval (gt-hdj6n). Historical once the replay report is delivered; not maintained.
 
 # Jev duplicate check for new findings (replay design)
 
@@ -8,7 +8,7 @@ Bead: gt-hdj6n.
 
 When a Found, review-deep or om-followup bead is filed, retrieve the closest existing beads and ask Jev one Choice question: which candidate, if any, does the finding duplicate. The answer is a suggestion. It never closes, edits or links a bead.
 
-Nothing reads the answer until an offline replay over history has been reported to Sloan. A live hook into filing is a separate design that waits on that report.
+Nothing reads the answer until an offline replay over history has been reported to the operator. A live hook into filing is a separate design that waits on that report.
 
 Before changing the spend cap, the 429 retry or the fail-safe rules, read `internal/attention/jevreplay/jevreplay.go`, the live implementation of the cap and the one retry that the replay reuses unchanged in meaning, and `internal/jev` for `Client.Choice` (design history: gt-sxg5u).
 
@@ -30,7 +30,7 @@ Two properties shape the replay:
 - **The positive set is small.** 16 positives gives wide intervals, so the replay is a go or no-go screen and its report carries Wilson 95% intervals beside every rate.
 - **Every original was still open when its duplicate was filed** (17 of 17, median gap 1.3 hours). Duplicates are filed while the first fix is in flight, so the pool must include open beads.
 
-The negatives are a lower bound on label noise: a finding closed as landed may still have duplicated something nobody noticed. The report lists every suggestion on a negative for Sloan to adjudicate, and reports precision before and after.
+The negatives are a lower bound on label noise: a finding closed as landed may still have duplicated something nobody noticed. The report lists every suggestion on a negative for the operator to adjudicate, and reports precision before and after.
 
 ## Dataset
 
@@ -82,11 +82,11 @@ Per finding the outcome is one of: **TP** (suggests an original of a positive), 
 - Forced-to-`none` counts by reason, and the same table split by source label.
 - Baselines that cost nothing: **B1** top-1 hm score against a threshold, swept and reported at its best (in-sample, so flattering); **B2** exact key, same om finding id or same `file:line`. Jev earns a live hook only where it finds positives B2 misses or beats B1 at equal recall.
 - Spend: real input and output tokens, priced, against the cap, and the stop reason when the cap ended the run.
-- Adjudication appendix: every FP and wrong suggestion with the finding, the candidate and Jev's confidence, for Sloan to mark confirmed duplicate or not.
+- Adjudication appendix: every FP and wrong suggestion with the finding, the candidate and Jev's confidence, for the operator to mark confirmed duplicate or not.
 
 The report says the labels are a proxy built from close reasons.
 
-Proposed bar for Sloan to confirm or change: retrieval recall at 5 of at least 0.8; adjudicated precision of at least 0.5 and recall of at least 0.5; ahead of B1 and finding at least one positive B2 misses.
+Proposed bar for the operator to confirm or change: retrieval recall at 5 of at least 0.8; adjudicated precision of at least 0.5 and recall of at least 0.5; ahead of B1 and finding at least one positive B2 misses.
 
 ## Spend
 
@@ -94,7 +94,7 @@ The replay requires `--max-spend-usd` (default 5) and `--usd-per-billion-tokens`
 
 ## Implementation beads, in order
 
-Filed after Sloan approves this design, each shaped for the spec dispatcher.
+Filed after the operator approves this design, each shaped for the spec dispatcher.
 
 | # | Task | Depends on |
 |---|---|---|
@@ -104,7 +104,7 @@ Filed after Sloan approves this design, each shaped for the spec dispatcher.
 | 4 | Shared spend cap and 429 retry: move them out of `jevreplay` so both replays use one copy | none |
 | 5 | Replay and report: hidden command, metrics, baselines, adjudication appendix, fixture test | 1, 2, 3, 4 |
 
-Operator step after 5, not polecat work: Sloan supplies the price, runs the replay, adjudicates, and decides whether a live-hook design starts.
+Operator step after 5, not polecat work: the operator supplies the price, runs the replay, adjudicates, and decides whether a live-hook design starts.
 
 ## Out of scope
 

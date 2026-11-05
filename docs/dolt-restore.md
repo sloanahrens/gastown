@@ -76,7 +76,7 @@ back through `bd`.
 ## 3. Replace a live database (operator only)
 
 Replacing a database under the live server loses every write since that
-night. Do it only with Sloan's approval, with the town down. Collect
+night. Do it only with the operator's approval, with the town down. Collect
 diagnostics first if Dolt is misbehaving (`gt dolt status`, `gt dolt dump`;
 see `~/gt/CLAUDE.md`).
 
