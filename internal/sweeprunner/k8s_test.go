@@ -1127,3 +1127,48 @@ func applyDocumentIndex(plan Plan, kind, name string) int {
 	}
 	return -1
 }
+
+// TestSweepJobPullPolicyFollowsTheImageReference holds the Job's containers to the pull policy the
+// runner image reference implies: a moving tag pulls, since the node's cached copy is whatever it
+// pulled last, and a commit tag leaves the cluster's default. The dind sidecar is pinned by digest,
+// so it renders no policy either way.
+func TestSweepJobPullPolicyFollowsTheImageReference(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		image string
+		want  string
+	}{
+		{"moving tag", "gastown-polecat:dev", "Always"},
+		{"commit tag", "gastown-polecat:0123456789abcdef", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec := goldenSpec()
+			spec.Image = tc.image
+			plan, err := Kubernetes{}.Render(spec)
+			if err != nil {
+				t.Fatalf("rendering the spec: %v", err)
+			}
+			runner, ok := containerNamed(plan.Job, runnerContainerName)
+			if !ok {
+				t.Fatalf("the Job renders no %q container", runnerContainerName)
+			}
+			if runner.ImagePullPolicy != tc.want {
+				t.Errorf("runner imagePullPolicy = %q, want %q for image %q", runner.ImagePullPolicy, tc.want, tc.image)
+			}
+			dind, ok := containerNamed(plan.Job, dindContainerName)
+			if !ok {
+				t.Fatalf("the Job renders no %q sidecar", dindContainerName)
+			}
+			if dind.ImagePullPolicy != "" {
+				t.Errorf("dind imagePullPolicy = %q, want none: %q is a digest", dind.ImagePullPolicy, dind.Image)
+			}
+			// The policy has to reach the document kubectl applies, not only the struct.
+			if got, want := strings.Contains(string(plan.Job.JSON()), `"imagePullPolicy"`), tc.want != ""; got != want {
+				t.Errorf("the Job document carries imagePullPolicy = %v, want %v for image %q", got, want, tc.image)
+			}
+		})
+	}
+}

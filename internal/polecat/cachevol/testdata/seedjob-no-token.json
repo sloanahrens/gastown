@@ -28,6 +28,7 @@
           {
             "name": "clone",
             "image": "gastown-polecat:dev",
+            "imagePullPolicy": "Always",
             "command": [
               "/usr/local/bin/polecat-image",
               "seed-clone"
@@ -63,6 +64,7 @@
           {
             "name": "seed",
             "image": "gastown-polecat:dev",
+            "imagePullPolicy": "Always",
             "command": [
               "/usr/local/bin/polecat-image",
               "seed-cache"

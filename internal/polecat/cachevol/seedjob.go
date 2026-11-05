@@ -129,12 +129,13 @@ type PodSecurityContext struct {
 
 // Container is one container of the pod.
 type Container struct {
-	Name         string        `json:"name"`
-	Image        string        `json:"image"`
-	Command      []string      `json:"command"`
-	Args         []string      `json:"args,omitempty"`
-	Env          []EnvVar      `json:"env,omitempty"`
-	VolumeMounts []VolumeMount `json:"volumeMounts,omitempty"`
+	Name            string        `json:"name"`
+	Image           string        `json:"image"`
+	ImagePullPolicy string        `json:"imagePullPolicy,omitempty"`
+	Command         []string      `json:"command"`
+	Args            []string      `json:"args,omitempty"`
+	Env             []EnvVar      `json:"env,omitempty"`
+	VolumeMounts    []VolumeMount `json:"volumeMounts,omitempty"`
 }
 
 // EnvVar is one environment variable.
@@ -381,10 +382,11 @@ func cloneContainer(image, pins, tokenSecret string) Container {
 		mounts = append(mounts, VolumeMount{Name: "seed-token", MountPath: SeedTokenDir, ReadOnly: true})
 	}
 	return Container{
-		Name:    "clone",
-		Image:   image,
-		Command: []string{HelperPath, "seed-clone"},
-		Args:    args,
+		Name:            "clone",
+		Image:           image,
+		ImagePullPolicy: PullPolicyFor(image),
+		Command:         []string{HelperPath, "seed-clone"},
+		Args:            args,
 		// A Forgejo that asks for credentials gets no prompt: the Job fails with the URL's reason
 		// instead of hanging until its deadline.
 		Env:          []EnvVar{{Name: "GIT_TERMINAL_PROMPT", Value: "0"}},
@@ -397,10 +399,11 @@ func cloneContainer(image, pins, tokenSecret string) Container {
 // entries a sandbox compiles against are the ones the image build used to write.
 func seedContainer(image, pins string) Container {
 	return Container{
-		Name:    "seed",
-		Image:   image,
-		Command: []string{HelperPath, "seed-cache"},
-		Args:    []string{"--pins", pins, "--root", SeedCacheRoot, "--source", SeedSourceRoot},
+		Name:            "seed",
+		Image:           image,
+		ImagePullPolicy: PullPolicyFor(image),
+		Command:         []string{HelperPath, "seed-cache"},
+		Args:            []string{"--pins", pins, "--root", SeedCacheRoot, "--source", SeedSourceRoot},
 		Env: []EnvVar{
 			{Name: "GOCACHE", Value: path.Join(SeedCacheRoot, SeedBuildCacheDir)},
 			{Name: "GOMODCACHE", Value: path.Join(SeedCacheRoot, SeedModuleCacheDir)},
