@@ -24,13 +24,17 @@ const imageFetchCeiling = 15 * time.Minute
 // required: nothing is inferred from the live town, so a build never reads a
 // checkout or writes a directory the operator did not name.
 type daemonImageFlags struct {
-	rev      string // the gt commit the image is built at and tagged with
-	out      string // the absolute directory the binaries and the build context live in
-	gtSrc    string
-	bdSrc    string
-	omSrc    string
-	bdCommit string
-	apply    bool
+	rev          string // the gt commit the image is built at and tagged with
+	out          string // the absolute directory the binaries and the build context live in
+	gtSrc        string
+	bdSrc        string
+	omSrc        string
+	bdCommit     string
+	hmSrc        string
+	hmCommit     string
+	devopsSrc    string
+	devopsCommit string
+	apply        bool
 }
 
 // imageBuilder is the build's steps, in the order they run. A
@@ -38,6 +42,7 @@ type daemonImageFlags struct {
 type imageBuilder interface {
 	BuildBinaries(ctx context.Context, rev string) ([]string, error)
 	BuildPlugins(ctx context.Context, rev string) ([]string, error)
+	BuildTools(ctx context.Context) ([]string, error)
 	FetchClaudeCLI(ctx context.Context) (string, error)
 	FetchClientTools(ctx context.Context) ([]string, error)
 	BuildImage(ctx context.Context, rev string, bins []string) (string, error)
@@ -50,6 +55,7 @@ type imageBuilder interface {
 type daemonImageDeps struct {
 	run          daemonimage.Runner
 	git          bdbuild.Git
+	goTool       bdbuild.Go
 	fetch        daemonimage.Fetcher
 	environ      []string
 	evalSymlinks func(path string) (string, error)
@@ -63,6 +69,7 @@ func realDaemonImageDeps(out io.Writer) daemonImageDeps {
 	return daemonImageDeps{
 		run:          execImageRunner,
 		git:          bdbuild.ExecGit,
+		goTool:       bdbuild.ExecGo,
 		fetch:        imageFetcher(&http.Client{Timeout: imageFetchCeiling}),
 		environ:      os.Environ(),
 		evalSymlinks: filepath.EvalSymlinks,
@@ -119,8 +126,10 @@ func newDaemonImageCmd(run func(ctx context.Context, out io.Writer, f daemonImag
 
 It builds gt, bd and om for linux/arm64 in clean worktrees of the commits named,
 the plugins the container daemon runs (app-promote and town-metrics),
-downloads the pinned claude CLI, and builds the image with docker --context
-desktop-linux. The Dockerfile is read from --gt-src's working tree.
+builds hm and the devops reporters (devops-reporter, release-reporter) from
+their pinned checkouts, downloads the pinned claude CLI, and builds the image
+with docker --context desktop-linux. The Dockerfile is read from --gt-src's
+working tree.
 
 Every flag is required and none has a default read from the live town. Without
 --apply it validates them, prints the commands it would run and runs none, writes
@@ -138,6 +147,10 @@ is refused for --out and every source: the build adds worktrees to its sources.`
 	fl.StringVar(&f.bdSrc, "bd-src", "", "absolute beads checkout")
 	fl.StringVar(&f.bdCommit, "bd-commit", "", "beads commit to build bd at (7+ hex characters)")
 	fl.StringVar(&f.omSrc, "om-src", "", "absolute om checkout (built from its HEAD)")
+	fl.StringVar(&f.hmSrc, "hm-src", "", "absolute hm checkout")
+	fl.StringVar(&f.hmCommit, "hm-commit", "", "hm commit to build hm at; the checkout must be at it and clean (7+ hex characters)")
+	fl.StringVar(&f.devopsSrc, "devops-src", "", "absolute devops checkout the two reporters are built from")
+	fl.StringVar(&f.devopsCommit, "devops-commit", "", "devops commit to build the reporters at; the checkout must be at it and clean (7+ hex characters)")
 	fl.BoolVar(&f.apply, "apply", false, "run the build; without it only print the plan")
 	return cmd
 }
@@ -182,6 +195,11 @@ func runDaemonImage(ctx context.Context, f daemonImageFlags, d daemonImageDeps) 
 		return err
 	}
 	bins = append(bins, plugins...)
+	hmTools, err := build.BuildTools(ctx)
+	if err != nil {
+		return err
+	}
+	bins = append(bins, hmTools...)
 	claude, err := build.FetchClaudeCLI(ctx)
 	if err != nil {
 		return err
@@ -201,16 +219,21 @@ func runDaemonImage(ctx context.Context, f daemonImageFlags, d daemonImageDeps) 
 // newDaemonImageBuilder is the Builder the flags describe, on the host's seams.
 func newDaemonImageBuilder(f daemonImageFlags, d daemonImageDeps) daemonimage.Builder {
 	return daemonimage.Builder{
-		Run:        d.run,
-		Git:        d.git,
-		Fetch:      d.fetch,
-		Environ:    d.environ,
-		Out:        f.out,
-		GTSrc:      f.gtSrc,
-		BDSrc:      f.bdSrc,
-		BDCommit:   f.bdCommit,
-		OMSrc:      f.omSrc,
-		Dockerfile: filepath.Join(f.gtSrc, daemonimage.DockerfilePath),
+		Run:          d.run,
+		Git:          d.git,
+		Go:           d.goTool,
+		Fetch:        d.fetch,
+		Environ:      d.environ,
+		Out:          f.out,
+		GTSrc:        f.gtSrc,
+		BDSrc:        f.bdSrc,
+		BDCommit:     f.bdCommit,
+		OMSrc:        f.omSrc,
+		HMSrc:        f.hmSrc,
+		HMCommit:     f.hmCommit,
+		DevopsSrc:    f.devopsSrc,
+		DevopsCommit: f.devopsCommit,
+		Dockerfile:   filepath.Join(f.gtSrc, daemonimage.DockerfilePath),
 	}
 }
 
@@ -222,6 +245,8 @@ func validateDaemonImageFlags(f daemonImageFlags, evalSymlinks func(string) (str
 	for _, req := range []struct{ flag, value string }{
 		{"--rev", f.rev}, {"--out", f.out}, {"--gt-src", f.gtSrc},
 		{"--bd-src", f.bdSrc}, {"--bd-commit", f.bdCommit}, {"--om-src", f.omSrc},
+		{"--hm-src", f.hmSrc}, {"--hm-commit", f.hmCommit},
+		{"--devops-src", f.devopsSrc}, {"--devops-commit", f.devopsCommit},
 	} {
 		if strings.TrimSpace(req.value) == "" {
 			return fmt.Errorf("%s is required: nothing is inferred from the live town", req.flag)
@@ -229,6 +254,7 @@ func validateDaemonImageFlags(f daemonImageFlags, evalSymlinks func(string) (str
 	}
 	for _, p := range []struct{ flag, value string }{
 		{"--out", f.out}, {"--gt-src", f.gtSrc}, {"--bd-src", f.bdSrc}, {"--om-src", f.omSrc},
+		{"--hm-src", f.hmSrc}, {"--devops-src", f.devopsSrc},
 	} {
 		if !filepath.IsAbs(p.value) {
 			return fmt.Errorf("%s %q is not absolute: a build runs in a worktree, not in this directory", p.flag, p.value)

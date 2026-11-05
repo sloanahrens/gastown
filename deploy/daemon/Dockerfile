@@ -50,6 +50,14 @@ COPY --chmod=0755 gt /usr/local/bin/gt
 COPY --chmod=0755 bd /usr/local/bin/bd
 COPY --chmod=0755 om /usr/local/bin/om
 
+# hm and the two devops reporters, cross-compiled for linux/arm64 by BuildTools
+# from the commits the deployer pins. They sit in /usr/local/bin, not under a home
+# directory: the container's HOME is /root, where a host's ~/go/bin and
+# ~/.local/bin are not.
+COPY --chmod=0755 hm /usr/local/bin/hm
+COPY --chmod=0755 devops-reporter /usr/local/bin/devops-reporter
+COPY --chmod=0755 release-reporter /usr/local/bin/release-reporter
+
 # The plugins the container daemon runs itself, cross-compiled for linux/arm64
 # from the same rev as the binaries above: the town's plugin directories hold
 # macOS builds the container cannot exec. polecat-image, tool-updater and hm-sync

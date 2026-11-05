@@ -86,11 +86,13 @@ put nothing else here.
 ```
 cd <scratch-parent>
 gt daemon image --rev <rev> --out <scratch-parent>/build --gt-src <gt checkout> \
-  --bd-src <beads checkout> --bd-commit <beads commit> --om-src <om checkout>
+  --bd-src <beads checkout> --bd-commit <beads commit> --om-src <om checkout> \
+  --hm-src <hm checkout> --hm-commit <hm commit> \
+  --devops-src <devops checkout> --devops-commit <devops commit>
 ```
 
 Run it with a `gt` built by `make build` in a checkout of `main`: a binary built
-with plain `go build` refuses to run ("use 'make build' instead"). The three
+with plain `go build` refuses to run ("use 'make build' instead"). The five
 source paths are checkouts, not the canonical `mayor/rig` clones, which the
 command refuses: make each with a local clone of the canonical repo's objects
 (`git clone --no-checkout <canonical> <new dir>`, which reads the canonical clone
@@ -105,18 +107,25 @@ the build used (the clone's `HEAD`) and treat it as unverified against the
 running `om`.
 
 Every flag is required. Each path must be absolute and an existing directory;
-`--rev` and `--bd-commit` are 7 or more hex characters. Without `--apply` it
+`--rev`, `--bd-commit`, `--hm-commit` and `--devops-commit` are 7 or more hex
+characters. `--hm-src` and `--devops-src` are pinned like `--bd-commit`: each
+checkout must be at its commit with no uncommitted changes, or the build is
+refused. Without `--apply` it
 validates the flags, prints the commands it would run, ends with
 `dry run: nothing was run. Pass --apply to build.`, and writes nothing. Read
 that output, then run the same command with `--apply`. With `--apply` it builds
-gt, bd and om for linux/arm64 in clean worktrees of the commits named, downloads
+gt, bd and om for linux/arm64 in clean worktrees of the commits named, builds hm
+and the two devops reporters (devops-reporter, release-reporter) the same way from
+their pinned checkouts. release-reporter's version is the one the go command stamps
+from that checkout (a pseudo-version past its last tag); the build reads it back with
+`go version -m` and refuses it unless it is vMAJOR.MINOR.PATCH[-pre]. It downloads
 the pinned claude CLI and the pinned client tools (`templates.DaemonClientTools`;
 each is checked against its sha256), and builds the image with the `desktop-linux`
 context. The Dockerfile is read from `--gt-src`'s working tree. Expected: the last line it
 prints is the tag `gt-daemon:<rev>`, and
 `docker --context desktop-linux image inspect gt-daemon:<rev> --format '{{.Id}}'`
-prints an image id. Never point `--gt-src`, `--bd-src`, `--om-src` or `--out` at
-a canonical `mayor/rig` clone: the command refuses one.
+prints an image id. Never point `--gt-src`, `--bd-src`, `--om-src`, `--hm-src`,
+`--devops-src` or `--out` at a canonical `mayor/rig` clone: the command refuses one.
 
 **Before any L3 window: the container-config rehearsal.** From `~/gt`, run
 `gt daemon rehearse --live-root ~/gt --image gt-daemon:<rev>`; `--help` says what it

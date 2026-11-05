@@ -39,12 +39,16 @@ func planBuilder(t *testing.T) Builder {
 			t.Error("Plan reached the network")
 			return nil, nil
 		},
-		Out:        out,
-		GTSrc:      "/src/gt",
-		BDSrc:      "/src/beads",
-		BDCommit:   testBDCommit,
-		OMSrc:      "/src/om",
-		Dockerfile: dockerfile,
+		Out:          out,
+		GTSrc:        "/src/gt",
+		BDSrc:        "/src/beads",
+		BDCommit:     testBDCommit,
+		OMSrc:        "/src/om",
+		HMSrc:        "/src/hm",
+		HMCommit:     testHMCommit,
+		DevopsSrc:    "/src/devops",
+		DevopsCommit: testDevopsCommit,
+		Dockerfile:   dockerfile,
 	}
 }
 
@@ -81,6 +85,10 @@ func TestPlanNamesEachStepAndRunsNothing(t *testing.T) {
 		{"build om: ", "go build -trimpath -o " + filepath.Join(b.Out, "om") + " " + OMPackage + "   (clean worktree of /src/om at HEAD)"},
 		{"build app-promote: ", "go build -trimpath -o " + filepath.Join(b.Out, "plugins", "app-promote", "app-promote") + " ./plugins/app-promote   (clean worktree of /src/gt at " + testRev + ")"},
 		{"build town-metrics: ", "go build -trimpath -o " + filepath.Join(b.Out, "plugins", "town-metrics", "town-metrics") + " ./plugins/town-metrics   (clean worktree of /src/gt at " + testRev + ")"},
+		{"build hm: ", "go build -trimpath -o " + filepath.Join(b.Out, "hm") + " " + HMPackage + "   (clean worktree of /src/hm at " + testHMCommit + ")"},
+		{"build devops-reporter: ", "go build -trimpath -o " + filepath.Join(b.Out, "devops-reporter") + " " + DevopsReporterPackage + "   (clean worktree of /src/devops at " + testDevopsCommit + ")"},
+		{"build release-reporter: ", "go build -trimpath -o " + filepath.Join(b.Out, "release-reporter") + " " + ReleaseReporterPackage + "   (clean worktree of /src/devops at " + testDevopsCommit + ")"},
+		{"check release-reporter: ", "go version -m " + filepath.Join(b.Out, "release-reporter") + "   (refused unless vMAJOR.MINOR.PATCH[-pre])"},
 		{"fetch claude: ", "GET " + fetched + " -> " + filepath.Join(b.Out, claudeCLIName) + "   (sha256 " + templates.ClaudeCLISHA256 + ")"},
 		{"fetch openshell: ", "GET " + templates.DaemonClientTools[0].URL + " -> " + filepath.Join(b.Out, "openshell") + "   (sha256 " + templates.DaemonClientTools[0].SHA256 + ")"},
 		{"fetch docker: ", "GET " + templates.DaemonClientTools[1].URL + " -> " + filepath.Join(b.Out, "docker") + "   (sha256 " + templates.DaemonClientTools[1].SHA256 + ")"},
@@ -221,6 +229,8 @@ func TestPlanRefusesWhatABuildRefuses(t *testing.T) {
 		{"no bd source", func(b *Builder) { b.BDSrc = "" }, testRev, "no bd source"},
 		{"no om source", func(b *Builder) { b.OMSrc = "" }, testRev, "no om source"},
 		{"no bd commit", func(b *Builder) { b.BDCommit = "" }, testRev, "no bd commit"},
+		{"no hm source", func(b *Builder) { b.HMSrc = "" }, testRev, "--hm-src is required"},
+		{"no devops commit", func(b *Builder) { b.DevopsCommit = "" }, testRev, "--devops-commit is required"},
 		{"a bd commit that is not hex", func(b *Builder) { b.BDCommit = "main" }, testRev, "is not a 7+ character hex commit"},
 		{"no Dockerfile", func(b *Builder) { b.Dockerfile = "" }, testRev, "no Dockerfile"},
 		{"a relative Dockerfile", func(b *Builder) { b.Dockerfile = "Dockerfile" }, testRev, "Dockerfile \"Dockerfile\" is not absolute"},
