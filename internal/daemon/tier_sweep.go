@@ -1815,10 +1815,10 @@ func (d *Daemon) tierSweepRunnerImage(cfg *config.TierSweepRunnerConfig) (string
 	case len(rev) >= tierSweepFullCommitLen:
 		return "", fmt.Errorf("runner.image follows the installed build, but the installed gt records a full-length build commit (%d characters) that make polecat-image never tagged; install gt with make install", len(rev))
 	}
-	// The recorded revision is the tag verbatim: make embeds
-	// `git rev-parse --short HEAD` in the installed gt (COMMIT) and names the
-	// image with the same expression (POLE_TAG), so git's abbreviation length,
-	// whatever it is for this repository, is already in both.
+	// The recorded revision is the tag verbatim: make embeds the stamp in the
+	// installed gt (COMMIT) and names the image with the same stamp (POLE_TAG),
+	// both the first buildstamp.Len characters of the full sha, so the length is
+	// already fixed in both and does not depend on git's object count (gt-ian66).
 	return tierSweepPolecatImage + ":" + rev, nil
 }
 

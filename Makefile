@@ -86,7 +86,14 @@ VERSION := $(GIT_DESCRIBE)
 else
 VERSION := $(GIT_DESCRIBE)-dirty
 endif
-COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+# STAMP_LEN is the length of the commit stamp gt records: the first STAMP_LEN
+# characters of the full sha, the rule internal/buildstamp.Len holds on the Go
+# side. Git's own abbreviation is not used: its length grows with the object
+# count, which would split the stamp between the installed gt and the image
+# (gt-ian66).
+STAMP_LEN := 9
+HEAD_STAMP := $(shell git rev-parse --verify --quiet HEAD 2>/dev/null | cut -c1-$(STAMP_LEN))
+COMMIT := $(or $(HEAD_STAMP),unknown)
 # Empty on a detached HEAD: symbolic-ref names no branch, where rev-parse --abbrev-ref prints "HEAD".
 BRANCH := $(shell git symbolic-ref --short -q HEAD 2>/dev/null)
 BUILD_TIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -137,7 +144,7 @@ lint-tools:
 # What the sandbox profiles name: gastown-polecat:dev is the moving tag a
 # profile points at, and the short sha is the rollback pin beside it.
 POLE_IMAGE ?= gastown-polecat
-POLE_TAG ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
+POLE_TAG ?= $(or $(HEAD_STAMP),dev)
 # The commit the image's gt is built from. Prepare refuses a sandbox whose label
 # differs from the installed gt's commit (gt-pmxo9), so the label is the full sha.
 # The build compiles the working tree, so the label is only true of a tree with no
@@ -300,7 +307,7 @@ ifndef SKIP_FORWARD_CHECK
 	@BINARY_COMMIT=$$($(INSTALL_DIR)/$(BINARY) version --verbose 2>/dev/null | grep -o '@[a-f0-9]*' | head -1 | tr -d '@'); \
 	if [ -n "$$BINARY_COMMIT" ] && [ "$$BINARY_COMMIT" != "unknown" ]; then \
 		HEAD_COMMIT=$$(git rev-parse HEAD 2>/dev/null); \
-		if [ "$$BINARY_COMMIT" = "$$HEAD_COMMIT" ] || [ "$$(git rev-parse --short HEAD)" = "$$BINARY_COMMIT" ]; then \
+		if [ "$$BINARY_COMMIT" = "$$HEAD_COMMIT" ] || [ "$(HEAD_STAMP)" = "$$BINARY_COMMIT" ]; then \
 			echo "Binary is already at HEAD, nothing to do"; \
 			exit 1; \
 		fi; \
@@ -315,12 +322,12 @@ ifndef SKIP_FORWARD_CHECK
 	@BINARY_COMMIT=$$($(INSTALL_DIR)/$(BINARY) version --verbose 2>/dev/null | grep -o '@[a-f0-9]*' | head -1 | tr -d '@'); \
 	if [ -n "$$BINARY_COMMIT" ] && [ "$$BINARY_COMMIT" != "unknown" ]; then \
 		if ! git merge-base --is-ancestor "$$BINARY_COMMIT" HEAD 2>/dev/null; then \
-			echo "ERROR: HEAD ($$(git rev-parse --short HEAD)) is NOT a descendant of installed binary ($$BINARY_COMMIT)"; \
+			echo "ERROR: HEAD ($(HEAD_STAMP)) is NOT a descendant of installed binary ($$BINARY_COMMIT)"; \
 			echo "This would be a DOWNGRADE. Refusing to rebuild."; \
 			echo "Use SKIP_FORWARD_CHECK=1 to override (dangerous)."; \
 			exit 1; \
 		fi; \
-		echo "Forward-only check passed: $$BINARY_COMMIT → $$(git rev-parse --short HEAD)"; \
+		echo "Forward-only check passed: $$BINARY_COMMIT → $(HEAD_STAMP)"; \
 	else \
 		echo "Warning: cannot determine installed binary commit, skipping forward check"; \
 	fi

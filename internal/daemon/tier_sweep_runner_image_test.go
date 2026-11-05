@@ -6,11 +6,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/buildstamp"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/sweeprunner"
@@ -206,23 +208,27 @@ func TestTierSweepRunnerImageDefaultsToInstalledBuild(t *testing.T) {
 	}
 }
 
-// TestTierSweepRunnerImageMatchesMakefile pins the two Makefile facts the
+// TestTierSweepRunnerImageMatchesMakefile pins the Makefile facts the
 // installed-image name rests on: POLE_IMAGE is the repository the daemon names,
-// and the revision make embeds in the installed gt (COMMIT) is the same
-// `git rev-parse --short HEAD` that names the image (POLE_TAG), so the revision
-// the daemon reads back from the binary is the tag make polecat-image wrote.
-// Mutation: change either default, or tag the image with a different
-// expression, and this names the mismatch (gt-c3sue).
+// STAMP_LEN is the length buildstamp.Len records, and the revision make embeds in
+// the installed gt (COMMIT) is the same stamp that names the image (POLE_TAG),
+// both taken from HEAD_STAMP, so the revision the daemon reads back from the
+// binary is the tag make polecat-image wrote (gt-ian66).
+// Mutation: change either default, change the stamp length, or tag the image
+// with a different expression, and this names the mismatch (gt-c3sue).
 func TestTierSweepRunnerImageMatchesMakefile(t *testing.T) {
 	t.Parallel()
 	vars := makefileVariables(t)
 	if got := vars["POLE_IMAGE"]; got != tierSweepPolecatImage {
 		t.Errorf("the Makefile's POLE_IMAGE is %q, want %q: the daemon names the image make polecat-image publishes", got, tierSweepPolecatImage)
 	}
-	const shortHEAD = "git rev-parse --short HEAD"
+	if got := vars["STAMP_LEN"]; got != strconv.Itoa(buildstamp.Len) {
+		t.Errorf("the Makefile's STAMP_LEN is %q, want %d: the installed gt records buildstamp.Len characters, and the image is tagged with the same stamp", got, buildstamp.Len)
+	}
+	const stamp = "$(HEAD_STAMP)"
 	for _, name := range []string{"COMMIT", "POLE_TAG"} {
-		if !strings.Contains(vars[name], shortHEAD) {
-			t.Errorf("the Makefile's %s is %q, want it to expand %q: the daemon names the image with the revision the binary records, so the two must be the same command", name, vars[name], shortHEAD)
+		if !strings.Contains(vars[name], stamp) {
+			t.Errorf("the Makefile's %s is %q, want it to take %s: the daemon names the image with the revision the binary records, so the two must be the same stamp", name, vars[name], stamp)
 		}
 	}
 }
