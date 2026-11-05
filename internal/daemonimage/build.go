@@ -110,6 +110,11 @@ type Builder struct {
 	// rebuild_om job keeps at <town>/.runtime/om-src. om is built from its HEAD,
 	// in a clean worktree of it.
 	OMSrc string
+	// HMSrc and HMCommit are the hm checkout BuildTools builds hm from, and the
+	// commit it must be at. DevopsSrc and DevopsCommit are the devops checkout the
+	// two reporters are built from, and its pinned commit.
+	HMSrc, HMCommit         string
+	DevopsSrc, DevopsCommit string
 	// Dockerfile is the file BuildImage builds the image from: DockerfilePath in
 	// the gt checkout, as an absolute path. It must be absolute for the same
 	// reason Out must: docker resolves -f against the directory it runs in.
@@ -561,12 +566,13 @@ func isCommit(s string) bool {
 // none of them: it makes no worktree, resolves no commit, writes no file and
 // reaches no network. It refuses the inputs a build refuses before it runs
 // anything (an empty or relative Out, a rev or bd commit that is not a commit,
-// an unnamed source, a canonical clone as any input, a Dockerfile that is not an
-// absolute regular file). It does
-// not check the claude CLI pin, and it does not check that a commit exists in its
-// checkout: a build checks both when it runs, so a plan that prints can still
-// fail there. The commits in it are the ones named, not resolved: the gt line
-// stamps buildstamp.Len characters of the named commit, and the bd
+// an unnamed source, an hm or devops commit that is missing or not a commit, a
+// canonical clone as any input, a Dockerfile that is not an absolute regular
+// file). It does not check the claude CLI pin, and it does not check that a
+// commit exists in its checkout or that a checkout is at its pin and clean: a
+// build checks those when it runs, so a plan that prints can still fail there.
+// The commits in it are the ones named, not resolved: the gt line stamps
+// buildstamp.Len characters of the named commit, and the bd
 // line's main.Build is planBuildID, since the build id is git's abbreviation of
 // the commit in the worktree a build makes and Plan makes none.
 func (b Builder) Plan(rev string) ([]string, error) {
@@ -583,6 +589,9 @@ func (b Builder) Plan(rev string) ([]string, error) {
 	if info, err := os.Stat(b.Dockerfile); err != nil || !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("daemonimage: Dockerfile %s is not a file", b.Dockerfile)
 	}
+	if err := b.checkToolInputs(); err != nil {
+		return nil, err
+	}
 	stamp := planCommitStamp(rev)
 	tag := ImageTag(rev)
 	lines := []string{
@@ -593,6 +602,7 @@ func (b Builder) Plan(rev string) ([]string, error) {
 	for _, p := range imagePlugins {
 		lines = append(lines, fmt.Sprintf("build %s: %s   (clean worktree of %s at %s)", p.name, strings.Join(goBuildArgv(filepath.Join(b.Out, "plugins", p.name, p.name), p.pkg, ""), " "), b.GTSrc, rev))
 	}
+	lines = append(lines, b.toolPlanLines()...)
 	lines = append(lines,
 		fmt.Sprintf("fetch claude: GET %s -> %s   (sha256 %s)", fmt.Sprintf(templates.ClaudeCLIURLFormat, templates.ClaudeCLIVersion), filepath.Join(b.Out, claudeCLIName), templates.ClaudeCLISHA256),
 	)
@@ -852,16 +862,16 @@ func (b Builder) stageKnownHosts() error {
 }
 
 // checkImageBinaries refuses a set of binaries the Dockerfile's COPY lines could
-// not read: each of the image's binaries (gt, bd, om, claude and ClientToolNames)
-// and each of imagePlugins once, at the path under b.Out its COPY reads. Docker
-// would report a missing or misplaced one only after the package install ran, so
-// it is caught here first, against what the caller passed.
+// not read: each of the image's binaries (gt, bd, om, claude, the toolNames and
+// ClientToolNames) and each of imagePlugins once, at the path under b.Out its COPY
+// reads. Docker would report a missing or misplaced one only after the package
+// install ran, so it is caught here first, against what the caller passed.
 func (b Builder) checkImageBinaries(bins []string) error {
 	// rels is each binary's COPY source relative to the build context; want holds
 	// the same names in the order the refusal messages use.
 	rels := make(map[string]string)
 	var want []string
-	for _, name := range append([]string{"gt", "bd", "om", claudeCLIName}, ClientToolNames()...) {
+	for _, name := range append(append([]string{"gt", "bd", "om", claudeCLIName}, toolNames...), ClientToolNames()...) {
 		rels[name] = name
 		want = append(want, name)
 	}
