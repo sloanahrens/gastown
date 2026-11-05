@@ -580,10 +580,22 @@ func (d *Daemon) diskMaintenanceTargets(mode string, getenv func(string) string,
 	if err != nil {
 		return nil, fmt.Errorf("cannot locate the colima docker socket: %w", err)
 	}
+	regCfg, err := d.diskMaintRegistryConfig(mode, cfg, home, getenv)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]diskmaint.Target{"registry": registry.NewTarget(regCfg)}, nil
+}
+
+// diskMaintRegistryConfig is the registry target's configuration. Its in-use
+// read names the cluster through the kubeconfig diskMaintKubeconfig picks, the
+// same file the cache trim reads, so the two agree on which cluster they see.
+func (d *Daemon) diskMaintRegistryConfig(mode string, cfg polecatimage.Config, home string, getenv func(string) string) (registry.Config, error) {
+	town := d.config.TownRoot
 	ledgerDir := filepath.Join(town, ".runtime", "diskmaint")
 	if mode == agentconfig.DiskMaintenanceModeApply {
 		if err := os.MkdirAll(ledgerDir, 0o755); err != nil {
-			return nil, fmt.Errorf("creating the maintenance ledger directory: %w", err)
+			return registry.Config{}, fmt.Errorf("creating the maintenance ledger directory: %w", err)
 		}
 	}
 	gate := &diskMaintPushGate{
@@ -591,21 +603,44 @@ func (d *Daemon) diskMaintenanceTargets(mode string, getenv func(string) string,
 		out: d.diskMaintenanceOut(),
 		now: func() time.Time { return d.clk().Now() },
 	}
-	return map[string]diskmaint.Target{
-		"registry": registry.NewTarget(registry.Config{
-			Base:         "http://" + cfg.Registry,
-			Kubeconfig:   filepath.Join(town, ".runtime", "sbx-k8s", "kubeconfig"),
-			RecordsDir:   cfg.SandboxRecords,
-			DockerHost:   "unix://" + filepath.Join(home, ".colima", "gt-sbx", "docker.sock"),
-			Container:    diskMaintRegistryContainer,
-			Keep:         diskMaintDefaultKeep,
-			Installed:    diskMaintInstalled(func() string { return (&polecatimage.Run{Cfg: cfg}).InstalledCommit() }),
-			PushInFlight: gate.pushInFlight,
-			Lock:         gate.withLock,
-			Run:          d.diskMaintRunner,
-			Ledger:       diskmaint.NewLedger(filepath.Join(ledgerDir, "ledger.jsonl"), diskMaintLedgerMaxBytes),
-		}),
+	return registry.Config{
+		Base:         "http://" + cfg.Registry,
+		Kubeconfig:   diskMaintKubeconfig(town, getenv),
+		RecordsDir:   cfg.SandboxRecords,
+		DockerHost:   "unix://" + filepath.Join(home, ".colima", "gt-sbx", "docker.sock"),
+		Container:    diskMaintRegistryContainer,
+		Keep:         diskMaintDefaultKeep,
+		Installed:    diskMaintInstalled(func() string { return (&polecatimage.Run{Cfg: cfg}).InstalledCommit() }),
+		PushInFlight: gate.pushInFlight,
+		Lock:         gate.withLock,
+		Run:          d.diskMaintRunner,
+		Ledger:       diskmaint.NewLedger(filepath.Join(ledgerDir, "ledger.jsonl"), diskMaintLedgerMaxBytes),
 	}, nil
+}
+
+const (
+	// diskMaintHostKubeconfig is the town's sandbox kubeconfig, relative to the
+	// town root: the file the host reads the sandbox cluster through.
+	diskMaintHostKubeconfig = ".runtime/sbx-k8s/kubeconfig"
+
+	// diskMaintContainerKubeconfig is the kubeconfig the container derives for
+	// the same cluster, relative to the town root. The host's file names
+	// 127.0.0.1, which inside the container is the container's own loopback, so
+	// kubectl is refused there. The writer is containerKubeconfigRP in
+	// internal/cmd; that package cannot be imported here, so the path is kept
+	// in step by hand.
+	diskMaintContainerKubeconfig = ".runtime/container/kubeconfig.yaml"
+)
+
+// diskMaintKubeconfig is the kubeconfig the patrol reads the sandbox cluster
+// through, under townRoot. In container mode (see containerMode) that is the
+// container's derived file; anywhere else it is the host's.
+func diskMaintKubeconfig(townRoot string, getenv func(string) string) string {
+	rel := diskMaintHostKubeconfig
+	if containerMode(getenv) {
+		rel = diskMaintContainerKubeconfig
+	}
+	return filepath.Join(townRoot, filepath.FromSlash(rel))
 }
 
 // diskMaintenanceOut is where the plugin lock's log lines go.

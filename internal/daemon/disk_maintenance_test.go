@@ -1029,3 +1029,83 @@ func TestDiskMaintenancePushGateFollowsTheLock(t *testing.T) {
 		t.Fatalf("the outer lock failed: %v", err)
 	}
 }
+
+// TestDiskMaintKubeconfigInContainerMode pins which kubeconfig the patrol reads
+// the sandbox cluster through: the container's derived file in container mode,
+// the host's file anywhere else. The host's file names 127.0.0.1, which the
+// container cannot reach.
+func TestDiskMaintKubeconfigInContainerMode(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	tests := []struct {
+		name       string
+		supervisor string
+		want       string
+	}{
+		{"container mode", agentconfig.SupervisorContainer, filepath.Join(town, ".runtime", "container", "kubeconfig.yaml")},
+		{"host, unset", "", filepath.Join(town, ".runtime", "sbx-k8s", "kubeconfig")},
+		{"launchd owner", agentconfig.SupervisorLaunchd, filepath.Join(town, ".runtime", "sbx-k8s", "kubeconfig")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			getenv := func(key string) string {
+				if key == agentconfig.ContainerModeEnv {
+					return tt.supervisor
+				}
+				return ""
+			}
+			if got := diskMaintKubeconfig(town, getenv); got != tt.want {
+				t.Errorf("diskMaintKubeconfig = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDiskMaintenanceRegistryTargetUsesTheHelpersKubeconfig pins that the
+// registry target's in-use read names the cluster through the same kubeconfig
+// the helper picks, so the registry and the cache trim agree on which cluster
+// they see.
+func TestDiskMaintenanceRegistryTargetUsesTheHelpersKubeconfig(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	tests := []struct {
+		name       string
+		supervisor string
+		want       string
+	}{
+		{"container mode", agentconfig.SupervisorContainer, filepath.Join(town, ".runtime", "container", "kubeconfig.yaml")},
+		{"host", "", filepath.Join(town, ".runtime", "sbx-k8s", "kubeconfig")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			getenv := func(key string) string {
+				switch key {
+				case agentconfig.ContainerModeEnv:
+					return tt.supervisor
+				case "POLECAT_IMAGE_REGISTRY":
+					return "127.0.0.1:1"
+				}
+				return ""
+			}
+			cfg, err := polecatimage.ConfigFromEnv(func(key string) string {
+				if key == "POLECAT_IMAGE_TOWN_ROOT" {
+					return town
+				}
+				return getenv(key)
+			})
+			if err != nil {
+				t.Fatalf("reading the plugin config: %v", err)
+			}
+			d := &Daemon{config: &Config{TownRoot: town}}
+			regCfg, err := d.diskMaintRegistryConfig(agentconfig.DiskMaintenanceModeDryRun, cfg, t.TempDir(), getenv)
+			if err != nil {
+				t.Fatalf("building the registry config: %v", err)
+			}
+			if regCfg.Kubeconfig != tt.want {
+				t.Errorf("registry target Kubeconfig = %q, want %q", regCfg.Kubeconfig, tt.want)
+			}
+		})
+	}
+}

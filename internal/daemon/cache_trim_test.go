@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log"
 	"maps"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"slices"
@@ -839,5 +840,48 @@ func TestCacheTrimParseListingRefusesACacheItDoesNotKnow(t *testing.T) {
 	listing := `[{"path":"gocache/aa/a","cache":"elsewhere","size":1,"atime":"2026-10-29T01:00:00Z","mtime":"2026-10-29T01:00:00Z"}]`
 	if _, err := cacheTrimParseListing([]byte(listing)); err == nil {
 		t.Fatal("cacheTrimParseListing read a cache name it does not know")
+	}
+}
+
+// TestCacheTrimUsesTheHelpersKubeconfig pins that every cluster call the trim
+// makes carries the kubeconfig the helper picks for the process: the container's
+// file in container mode and the host's file otherwise. kubectl reads the
+// cluster through the --kubeconfig flag, so that is what the test reads.
+func TestCacheTrimUsesTheHelpersKubeconfig(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		supervisor string
+		rel        string
+	}{
+		{"container mode", agentconfig.SupervisorContainer, ".runtime/container/kubeconfig.yaml"},
+		{"host", "", ".runtime/sbx-k8s/kubeconfig"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, nil)
+			f.d.diskMaint.getenv = func(key string) string {
+				switch key {
+				case cacheTrimCapEnv:
+					return "1KB"
+				case agentconfig.ContainerModeEnv:
+					return tt.supervisor
+				}
+				return ""
+			}
+			f.d.runDiskMaintenance()
+
+			want := filepath.Join(f.d.config.TownRoot, filepath.FromSlash(tt.rel))
+			calls := f.cli.recorded()
+			if len(calls) == 0 {
+				t.Fatal("the pass ran no cluster call")
+			}
+			for _, call := range calls {
+				if len(call.args) < 2 || call.args[0] != "--kubeconfig" || call.args[1] != want {
+					t.Errorf("cluster call %v does not name the kubeconfig %q", call.args, want)
+				}
+			}
+		})
 	}
 }

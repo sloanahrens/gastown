@@ -32,7 +32,6 @@ import (
 	"fmt"
 	"maps"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -64,10 +63,6 @@ const (
 	// Job. kubectl returns once the Job and its pods are gone, so the name the
 	// rerun applies next is not racing that delete.
 	cacheTrimDeleteTimeout = 60 * time.Second
-
-	// cacheTrimKubeconfig is the town's sandbox kubeconfig, relative to the
-	// town root, the file the registry target reads the in-use pods through too.
-	cacheTrimKubeconfig = ".runtime/sbx-k8s/kubeconfig"
 
 	// cacheTrimJobNameMax is the most a Kubernetes object name holds. A Job
 	// name of a longer claim would be refused at apply, so it is shortened in
@@ -254,7 +249,7 @@ func (d *Daemon) cacheTrim(ctx context.Context, mode string) {
 		d.logger.Printf("disk_maintenance: cache trim: not applied: %v", err)
 		return
 	}
-	kubeconfig := filepath.Join(d.config.TownRoot, filepath.FromSlash(cacheTrimKubeconfig))
+	kubeconfig := diskMaintKubeconfig(d.config.TownRoot, s.getenv)
 	namespaces, err := d.cacheTrimClaimNamespaces(ctx, kubeconfig)
 	if err != nil {
 		d.logger.Printf("disk_maintenance: cache trim: the cluster's claims could not be read: %v; nothing trimmed", err)
