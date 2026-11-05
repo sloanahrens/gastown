@@ -322,7 +322,7 @@ func TestSpecSlingHoldStopsAPlannedSlingIntoaHeldRig(t *testing.T) {
 	}
 	var out bytes.Buffer
 	if err := holdRigs(&out, town, []string{"testrig"}, config.RigDispatchHold{
-		Since: time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC), By: "sloan", Reason: "drain the landing backlog",
+		Since: time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC), By: "Test Operator", Reason: "drain the landing backlog",
 	}); err != nil {
 		t.Fatalf("holdRigs = %v\n%s", err, out.String())
 	}

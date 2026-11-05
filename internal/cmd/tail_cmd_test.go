@@ -46,7 +46,7 @@ func TestRunTailStream_GoldenMergedStream(t *testing.T) {
 		ev("2026-09-30T14:00:00Z", "gastown", "journal off in config (events-journal=false): nothing is journaled"),
 		ev("2026-09-30T13:50:00Z", "gastown", "update gt-1 status=in_progress actor=gastown/polecats/opal seq=2"),
 		ev("2026-09-30T13:50:30Z", "gastown", "update gt-1 status=open actor=gastown/polecats/opal seq=4"),
-		ev("2026-09-30T13:51:00Z", "gastown", "comment gt-1 actor=sloan seq=5"),
+		ev("2026-09-30T13:51:00Z", "gastown", "comment gt-1 actor=Test Operator seq=5"),
 		ev("2026-09-30T13:52:00Z", "gastown", "close gt-1 status=closed actor=gastown/polecats/opal seq=3"),
 	}}}
 	gastownLandings := &scriptedTailSource{batches: [][]tailLine{{
@@ -334,10 +334,10 @@ func TestRunTailStream_DefaultViewGolden(t *testing.T) {
 		{Seq: 1, TS: "2026-09-30T13:50:00Z", Op: "update", IssueID: "gt-1", Actor: "gastown/polecats/opal", Status: "in_progress"},
 		{Seq: 2, TS: "2026-09-30T13:50:05Z", Op: "update", IssueID: "gt-1", Actor: "gastown/polecats/opal", Status: "in_progress"},
 		{Seq: 3, TS: "2026-09-30T13:50:10Z", Op: "update", IssueID: "gt-1", Actor: "gastown/polecats/opal", Status: "open"},
-		{Seq: 4, TS: "2026-09-30T13:51:00Z", Op: "comment", IssueID: "gt-1", Actor: "sloan"},
+		{Seq: 4, TS: "2026-09-30T13:51:00Z", Op: "comment", IssueID: "gt-1", Actor: "Test Operator"},
 		{Seq: 5, TS: "2026-09-30T13:52:00Z", Op: "comment", IssueID: "gt-3", Actor: "witness"},
 		{Seq: 6, TS: "2026-09-30T13:53:00Z", Op: "update", IssueID: "gt-2", Actor: "gastown/polecats/quartz", Status: "open"},
-		{Seq: 7, TS: "2026-09-30T13:53:30Z", Op: "create", IssueID: "gt-4", Actor: "sloan", Status: "open"},
+		{Seq: 7, TS: "2026-09-30T13:53:30Z", Op: "create", IssueID: "gt-4", Actor: "Test Operator", Status: "open"},
 	}}
 	events := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: newTailBeads(store.show)}
 	const tickDispatched = "spec_dispatch: tick: 4 candidate(s), roster deepseek-flash 1/3, 1 dispatched, 0 refused, 0 planning, 3 skipped, 0 failed, 0 held by the failed label; skipped: gt-a (unshaped: ## Gate)"

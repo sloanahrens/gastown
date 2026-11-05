@@ -27,7 +27,7 @@
     "issue_type": "task",
     "owner": "owner@example.invalid",
     "created_at": "2026-10-02T17:29:58Z",
-    "created_by": "Sloan Ahrens",
+    "created_by": "Test Operator",
     "updated_at": "2026-10-02T17:29:58Z",
     "dependency_count": 0,
     "dependent_count": 0,

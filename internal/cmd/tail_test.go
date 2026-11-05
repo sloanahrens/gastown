@@ -148,12 +148,12 @@ func TestTailRenderLine_TitleVerdictAndWidth(t *testing.T) {
 			tailView{Loc: tailTestLoc, Layout: tailClockLayout},
 			"09:05:06 gastown update gt-1 status=open · OVERSEER REVIEW aaaa PASS: reads well"},
 		{"trimmed fields carry the title", tailLine{At: line.At, Rig: line.Rig, Kind: line.Kind,
-			Text: "close gt-1 status=closed actor=Sloan Ahrens seq=4", Title: "a title"},
-			tailView{Loc: tailTestLoc, Layout: tailClockLayout, Trim: true, GitUser: "Sloan Ahrens"},
+			Text: "close gt-1 status=closed actor=Test Operator seq=4", Title: "a title"},
+			tailView{Loc: tailTestLoc, Layout: tailClockLayout, Trim: true, GitUser: "Test Operator"},
 			"09:05:06 gastown close gt-1 status=closed · a title"},
-		{"verbose keeps the raw line", tailLine{At: line.At, Rig: line.Rig, Kind: line.Kind, Text: "close gt-1 status=closed actor=Sloan Ahrens seq=4"},
+		{"verbose keeps the raw line", tailLine{At: line.At, Rig: line.Rig, Kind: line.Kind, Text: "close gt-1 status=closed actor=Test Operator seq=4"},
 			tailView{Loc: tailTestLoc, Layout: tailClockLayout, FullSource: true},
-			"09:05:06 gastown events close gt-1 status=closed actor=Sloan Ahrens seq=4"},
+			"09:05:06 gastown events close gt-1 status=closed actor=Test Operator seq=4"},
 	}
 	for _, c := range cases {
 		if got := c.view.renderLine(c.line); got != c.want {
@@ -400,11 +400,11 @@ func TestTailSummaryTracker_KeepsTheLineInsideTheTerminal(t *testing.T) {
 func TestRenderLine_NewAnnotations(t *testing.T) {
 	t.Parallel()
 	comment := tailLine{At: at("2026-09-30T13:50:00Z"), Rig: "gastown", Kind: tailKindEvents,
-		Text: "comment gt-1 actor=sloan", Comment: "pushed: crew/x at 9f4171a4"}
+		Text: "comment gt-1 actor=Test Operator", Comment: "pushed: crew/x at 9f4171a4"}
 	submit := tailLine{At: at("2026-09-30T13:51:00Z"), Rig: "gastown", Kind: tailKindEvents,
 		Text: "update gt-2 status=open actor=opal", Submit: "submitted gt-2 @ abcdef1 for landing"}
 	plain := tailView{Loc: tailTestLoc, Layout: tailClockLayout, Trim: true, newAnnotations: true}
-	if got := plain.renderLine(comment); got != "08:50:00 gastown comment gt-1 actor=sloan · pushed: crew/x at 9f4171a4" {
+	if got := plain.renderLine(comment); got != "08:50:00 gastown comment gt-1 actor=Test Operator · pushed: crew/x at 9f4171a4" {
 		t.Errorf("comment line = %q", got)
 	}
 	if got := plain.renderLine(submit); got != "08:51:00 gastown update gt-2 status=open actor=opal · submitted gt-2 @ abcdef1 for landing" {
@@ -417,7 +417,7 @@ func TestRenderLine_NewAnnotations(t *testing.T) {
 	}
 	// --verbose keeps every raw line: the annotations are the plain view's.
 	raw := tailView{Loc: tailTestLoc, Layout: tailClockLayout, FullSource: true}
-	if got := raw.renderLine(comment); got != "08:50:00 gastown events comment gt-1 actor=sloan" {
+	if got := raw.renderLine(comment); got != "08:50:00 gastown events comment gt-1 actor=Test Operator" {
 		t.Errorf("--verbose comment = %q", got)
 	}
 	// --iso keeps today's line: it is not the plain view.

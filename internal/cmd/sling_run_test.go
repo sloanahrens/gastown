@@ -111,7 +111,7 @@ func TestSlingRefusesUnslingableBeads(t *testing.T) {
 		{name: "deferred in description", bead: beadInfo{Description: "Deferred to post-launch."}, want: "is deferred"},
 		{name: "deferred under force", bead: beadInfo{Status: "deferred"}, force: true},
 		{name: "operator label", bead: beadInfo{Labels: []string{dispatch.OperatorLabel}}, want: dispatch.SlingRefusalMarker},
-		{name: "person assignee", bead: beadInfo{Assignee: "sloan"}, want: "is the operator's work"},
+		{name: "person assignee", bead: beadInfo{Assignee: "Test Operator"}, want: "is the operator's work"},
 		{name: "operator label under force", bead: beadInfo{Labels: []string{dispatch.OperatorLabel}}, force: true},
 		{name: "submitted for landing", bead: beadInfo{Labels: []string{land.LabelReadyToLand}}, want: "submitted for landing"},
 		{name: "submitted for landing under force", bead: beadInfo{Labels: []string{land.LabelReadyToLand}}, force: true, want: "the landing worker owns it"},

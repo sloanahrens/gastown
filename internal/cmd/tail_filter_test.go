@@ -24,15 +24,15 @@ func TestTailVisible_HidesRoutineKeepsTheRest(t *testing.T) {
 	}{
 		{"wisp create", ev("create gt-wisp-c3w9 status=open actor=daemon seq=1"), false},
 		{"hq wisp close", ev("close hq-wisp-e0g8y7 status=closed seq=2"), false},
-		{"bead create", ev("create gt-pf2ml status=open actor=sloan seq=3"), true},
-		{"bead close", ev("close gt-pf2ml status=closed actor=sloan seq=4"), true},
+		{"bead create", ev("create gt-pf2ml status=open actor=Test Operator seq=3"), true},
+		{"bead close", ev("close gt-pf2ml status=closed actor=Test Operator seq=4"), true},
 		{"journal failure", ev("read failed: bd events tail: exit status 25"), true},
 		{"polecat bead open update", ev("update gt-gastown-polecat-garnet actor=gastown/polecats/garnet seq=69"), false},
 		{"polecat bead open update with status", ev("update gt-gastown-polecat-garnet status=open actor=daemon seq=70"), false},
 		{"polecat bead blocked update", ev("update gt-gastown-polecat-garnet status=blocked actor=daemon seq=71"), true},
 		{"polecat bead create", ev("create gt-gastown-polecat-garnet status=open actor=daemon seq=1"), true},
 		{"polecat bead close", ev("close gt-gastown-polecat-garnet status=closed actor=daemon seq=9"), true},
-		{"other bead update", ev("update gt-pf2ml status=open actor=sloan seq=5"), true},
+		{"other bead update", ev("update gt-pf2ml status=open actor=Test Operator seq=5"), true},
 		{"heartbeat start", dm("Heartbeat starting (recovery-focused)"), false},
 		{"heartbeat done", dm("Heartbeat complete (#53)"), false},
 		{"handler skip", dm("Handler: skipping plugin seat-refill (gate=manual, requires explicit trigger)"), false},
@@ -243,7 +243,7 @@ func TestNewTailView_FlagsSelectFilterColumnsAndClock(t *testing.T) {
 	at := time.Date(2026, 10, 1, 16, 34, 5, 0, tailTestLoc)
 	line := tailLine{At: at, Rig: "r", Kind: "k", Text: "t"}
 
-	def := newTailView(tailTestLoc, tailViewOptions{beads: newTailBeads(nil), gitUser: "Sloan Ahrens"})
+	def := newTailView(tailTestLoc, tailViewOptions{beads: newTailBeads(nil), gitUser: "Test Operator"})
 	if def.Show == nil {
 		t.Fatal("the default view must filter")
 	}
@@ -259,7 +259,7 @@ func TestNewTailView_FlagsSelectFilterColumnsAndClock(t *testing.T) {
 	if !def.Trim || def.Beads == nil {
 		t.Error("the default view trims the raw fields and names the bead")
 	}
-	all := newTailView(tailTestLoc, tailViewOptions{all: true, beads: newTailBeads(nil), gitUser: "Sloan Ahrens"})
+	all := newTailView(tailTestLoc, tailViewOptions{all: true, beads: newTailBeads(nil), gitUser: "Test Operator"})
 	if all.Show != nil {
 		t.Error("--all must show every line")
 	}
@@ -493,26 +493,26 @@ func TestTailTrimEventFields(t *testing.T) {
 	ev := func(text string) tailLine {
 		return tailLine{Rig: "gastown", Kind: tailKindEvents, Text: text}
 	}
-	if got := tailTrimEventFields(ev("update gt-1 status=open actor=Sloan Ahrens seq=7"), "Sloan Ahrens"); got.Text != "update gt-1 status=open" {
+	if got := tailTrimEventFields(ev("update gt-1 status=open actor=Test Operator seq=7"), "Test Operator"); got.Text != "update gt-1 status=open" {
 		t.Errorf("own actor: %q", got.Text)
 	}
-	if got := tailTrimEventFields(ev("update gt-1 status=open actor=daemon seq=7"), "Sloan Ahrens"); got.Text != "update gt-1 status=open actor=daemon" {
+	if got := tailTrimEventFields(ev("update gt-1 status=open actor=daemon seq=7"), "Test Operator"); got.Text != "update gt-1 status=open actor=daemon" {
 		t.Errorf("another actor: %q", got.Text)
 	}
 	if got := tailTrimEventFields(ev("update gt-1 actor=gastown/polecats/opal seq=7"), ""); got.Text != "update gt-1 actor=gastown/polecats/opal" {
 		t.Errorf("no git identity keeps every actor: %q", got.Text)
 	}
-	if got := tailTrimEventFields(ev("read failed: bd events tail: exit status 25"), "Sloan Ahrens"); got.Text != "read failed: bd events tail: exit status 25" {
+	if got := tailTrimEventFields(ev("read failed: bd events tail: exit status 25"), "Test Operator"); got.Text != "read failed: bd events tail: exit status 25" {
 		t.Errorf("a line with neither field: %q", got.Text)
 	}
-	dm := tailLine{Rig: "town", Kind: tailKindDaemon, Text: "Handler: script plugin x actor=Sloan Ahrens seq=1"}
-	if got := tailTrimEventFields(dm, "Sloan Ahrens"); got.Text != dm.Text {
+	dm := tailLine{Rig: "town", Kind: tailKindDaemon, Text: "Handler: script plugin x actor=Test Operator seq=1"}
+	if got := tailTrimEventFields(dm, "Test Operator"); got.Text != dm.Text {
 		t.Errorf("a daemon line is not an events record: %q", got.Text)
 	}
 	// The title is not part of the text the trim reads.
-	titled := ev("close gt-1 status=closed actor=Sloan Ahrens seq=9")
+	titled := ev("close gt-1 status=closed actor=Test Operator seq=9")
 	titled.Title = "a title with actor=in it seq=4"
-	if got := tailTrimEventFields(titled, "Sloan Ahrens"); got.Text != "close gt-1 status=closed" || got.Title != titled.Title {
+	if got := tailTrimEventFields(titled, "Test Operator"); got.Text != "close gt-1 status=closed" || got.Title != titled.Title {
 		t.Errorf("a titled line: %q / %q", got.Text, got.Title)
 	}
 }

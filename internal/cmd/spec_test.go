@@ -1501,7 +1501,7 @@ func TestSpecDispatchHeldRigSkipsOnlyItsCandidates(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := townconfig.Hold(townRoot, "gastown", config.RigDispatchHold{
-		Since: specTestNow, By: "sloan", Reason: "drain the landing backlog",
+		Since: specTestNow, By: "Test Operator", Reason: "drain the landing backlog",
 	}); err != nil {
 		t.Fatal(err)
 	}
