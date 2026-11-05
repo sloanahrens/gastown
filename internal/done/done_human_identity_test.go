@@ -15,7 +15,7 @@ import (
 
 const (
 	crewTestHumanName  = "Test Operator"
-	crewTestHumanEmail = "operator@example.test"
+	crewTestHumanEmail = "operator.example@example.test"
 )
 
 // writeTownHuman writes the town's overseer section: the one record gt done
@@ -62,9 +62,9 @@ func TestCrewSubmitRefusesBranchNamingTheHuman(t *testing.T) {
 	cases := []struct {
 		name, humanName, humanEmail, branch string
 	}{
-		{"the configured name, in any case", "sloan", "ops@example.com", "crew/Sloan/gt-1"},
-		{"the email local part, in any case", "Test Operator", "Sloan.Ahrens@example.com", "crew/sloan.ahrens/gt-1"},
-		{"a crew branch missing its bead still names its agent", "Test Operator", "sloan.ahrens@example.com", "crew/sloan.ahrens"},
+		{"the configured name, in any case", "Operator", "ops@example.com", "crew/OPERATOR/gt-1"},
+		{"the email local part, in any case", "Test Operator", "Operator.Example@example.test", "crew/operator.example/gt-1"},
+		{"a crew branch missing its bead still names its agent", "Test Operator", "operator.example@example.test", "crew/operator.example"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -107,10 +107,10 @@ func TestCrewSubmitRefusesHeadCommitNamingTheHuman(t *testing.T) {
 		{
 			name: "author email",
 			commit: git.CommitAuthorship{
-				AuthorName: "dunlin", AuthorEmail: "operator@example.test",
+				AuthorName: "dunlin", AuthorEmail: "Operator.Example@example.test",
 				CommitterName: "dunlin", CommitterEmail: "dunlin@example.com",
 			},
-			field: "author email", shownHuman: "operator@example.test",
+			field: "author email", shownHuman: "Operator.Example@example.test",
 		},
 		{
 			name: "committer name",
@@ -124,9 +124,9 @@ func TestCrewSubmitRefusesHeadCommitNamingTheHuman(t *testing.T) {
 			name: "committer email",
 			commit: git.CommitAuthorship{
 				AuthorName: "dunlin", AuthorEmail: "dunlin@example.com",
-				CommitterName: "dunlin", CommitterEmail: "operator@example.test",
+				CommitterName: "dunlin", CommitterEmail: "Operator.Example@example.test",
 			},
-			field: "committer email", shownHuman: "operator@example.test",
+			field: "committer email", shownHuman: "Operator.Example@example.test",
 		},
 	}
 	for _, tc := range cases {
@@ -172,7 +172,7 @@ func TestCrewSubmitPassesOverseerBranchAndAuthor(t *testing.T) {
 // checked.
 func TestCrewSubmitPassesBranchWithoutASeat(t *testing.T) {
 	t.Parallel()
-	const branch = "feature/sloan.ahrens-work"
+	const branch = "feature/test-operator-work"
 	h := newCrewSubmitHarness(t)
 	h.r.branch = branch
 	h.repo.origin[branch] = crewTestHead
