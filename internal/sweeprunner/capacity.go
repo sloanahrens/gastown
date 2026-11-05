@@ -40,11 +40,13 @@ func (a Amount) String() string {
 	return fmt.Sprintf("%dm/%dMi", a.CPU, a.Memory>>20)
 }
 
-// Taint is a node taint with the NoSchedule effect: a pod the node does not
-// tolerate is kept off it (gt-gg9hv.38).
+// Taint is a node taint with the NoSchedule or NoExecute effect: a pod the node
+// does not tolerate is kept off it (gt-gg9hv.38). PreferNoSchedule only
+// discourages placement and is not read.
 type Taint struct {
-	Key   string
-	Value string
+	Key    string
+	Value  string
+	Effect string
 }
 
 // NodeCapacity is one node of the listing: what it allocates, the sum of the
@@ -61,9 +63,9 @@ type NodeCapacity struct {
 	// Unschedulable is a node the cluster has cordoned: no new pod is placed
 	// on it.
 	Unschedulable bool
-	// NoSchedule are the node's NoSchedule taints. A pod may be placed on the
-	// node only when it tolerates every one of them.
-	NoSchedule []Taint
+	// Blocking are the node's NoSchedule and NoExecute taints. A new pod may
+	// be placed on the node only when it tolerates every one of them.
+	Blocking []Taint
 }
 
 // Free is the node's allocatable amount less what its pods request.
@@ -145,7 +147,7 @@ func capacityRead(job *Job, syncPod, reader *Pod, tolerations []Toleration) func
 // ParseCapacity reads the document `kubectl get nodes,pods -A -o json` prints:
 // one List whose items are every node and every pod of the cluster. Each node
 // reports its allocatable amounts, whether its Ready condition is True, whether
-// it is cordoned, and its NoSchedule taints; it carries the sum of the requests
+// it is cordoned, and its NoSchedule and NoExecute taints; it carries the sum of the requests
 // of the pods placed on it whose phase is not Succeeded or Failed. A pod's
 // request is what the scheduler adds to a node for it: the pod's overhead, plus,
 // per resource, the larger of the sum over its containers and the largest
@@ -177,8 +179,8 @@ func ParseCapacity(stdout []byte) ([]NodeCapacity, error) {
 				Unschedulable: item.Spec.Unschedulable,
 			}
 			for _, taint := range item.Spec.Taints {
-				if taint.Effect == "NoSchedule" {
-					node.NoSchedule = append(node.NoSchedule, Taint{Key: taint.Key, Value: taint.Value})
+				if taint.Effect == "NoSchedule" || taint.Effect == "NoExecute" {
+					node.Blocking = append(node.Blocking, Taint{Key: taint.Key, Value: taint.Value, Effect: taint.Effect})
 				}
 			}
 			byName[item.Metadata.Name] = node
@@ -216,7 +218,7 @@ func ParseCapacity(stdout []byte) ([]NodeCapacity, error) {
 // DecideCapacity picks the node the launch is judged against and reports
 // whether the launch may go ahead: it may when at least one eligible node fits
 // the run beside the headroom the control plane needs. A node is eligible when
-// it is Ready, not cordoned, and carries no NoSchedule taint the Job pod does
+// it is Ready, not cordoned, and carries no NoSchedule or NoExecute taint the Job pod does
 // not tolerate. An eligible node that does not fit stays in the judgment but
 // does not block a node that does: the launch goes ahead when the best of them
 // fits, and a decline names the best-fitting eligible node and its figures.
@@ -236,7 +238,7 @@ func DecideCapacity(nodes []NodeCapacity, job Amount, tolerations []Toleration) 
 		}
 	}
 	if len(eligible) == 0 {
-		return CapacityReport{}, &NoRoomError{Reason: "no node the Job may be placed on: every node is not Ready, cordoned, or carries a NoSchedule taint the Job does not tolerate"}
+		return CapacityReport{}, &NoRoomError{Reason: "no node the Job may be placed on: every node is not Ready, cordoned, or carries a NoSchedule or NoExecute taint the Job does not tolerate"}
 	}
 	chosen := eligible[0]
 	for _, node := range eligible[1:] {
@@ -257,14 +259,14 @@ func DecideCapacity(nodes []NodeCapacity, job Amount, tolerations []Toleration) 
 }
 
 // schedulable reports whether the cluster would place a new pod on the node:
-// the node is Ready, not cordoned, and the pod tolerates every NoSchedule taint
+// the node is Ready, not cordoned, and the pod tolerates every NoSchedule and NoExecute taint
 // on it. A NotReady node is not eligible even when it lists room: the cluster is
 // not placing new pods on it.
 func schedulable(node NodeCapacity, tolerations []Toleration) bool {
 	if !node.Ready || node.Unschedulable {
 		return false
 	}
-	for _, taint := range node.NoSchedule {
+	for _, taint := range node.Blocking {
 		if !tolerated(taint, tolerations) {
 			return false
 		}
@@ -290,7 +292,7 @@ func nodeReady(conditions []nodeCondition) bool {
 // pod does not tolerate is what keeps it off the node.
 func tolerated(taint Taint, tolerations []Toleration) bool {
 	for _, toleration := range tolerations {
-		if toleration.Effect != "" && toleration.Effect != "NoSchedule" {
+		if toleration.Effect != "" && toleration.Effect != taint.Effect {
 			continue
 		}
 		if toleration.Operator == "Exists" {
@@ -347,41 +349,71 @@ func allocatableAmount(item listingItem) (Amount, error) {
 	return amount, nil
 }
 
-// podsRequest is the amount the scheduler adds to a node for one pod: the pod's
-// overhead plus, per resource, the larger of the sum over its containers and
-// the largest request of a single init container. Init containers run one at a
-// time, so their requests do not add up, and what the scheduler reserves is the
-// largest one beside the containers.
+// podsRequest is the amount the scheduler adds to a node for one pod. It is
+// schedulerRequest over the listing's containers: see there for the rule.
 func podsRequest(pod listingItem) (Amount, error) {
 	overhead, err := resourceAmount(pod.Spec.Overhead)
 	if err != nil {
 		return Amount{}, fmt.Errorf("overhead: %w", err)
 	}
-	largestInit := Amount{}
+	var inits []requestedInit
 	for _, container := range pod.Spec.InitContainers {
 		amount, err := resourceAmount(container.Resources.Requests)
 		if err != nil {
 			return Amount{}, err
 		}
-		if amount.CPU > largestInit.CPU {
-			largestInit.CPU = amount.CPU
-		}
-		if amount.Memory > largestInit.Memory {
-			largestInit.Memory = amount.Memory
-		}
+		inits = append(inits, requestedInit{amount: amount, sidecar: container.RestartPolicy == "Always"})
 	}
-	containers := Amount{}
+	var containers []Amount
 	for _, container := range pod.Spec.Containers {
 		amount, err := resourceAmount(container.Resources.Requests)
 		if err != nil {
 			return Amount{}, err
 		}
-		containers = containers.Add(amount)
+		containers = append(containers, amount)
 	}
-	return overhead.Add(Amount{
-		CPU:    max(largestInit.CPU, containers.CPU),
-		Memory: max(largestInit.Memory, containers.Memory),
-	}), nil
+	return schedulerRequest(overhead, inits, containers), nil
+}
+
+// requestedInit is one init container's request and whether it is a native
+// sidecar (restartPolicy Always).
+type requestedInit struct {
+	amount  Amount
+	sidecar bool
+}
+
+// schedulerRequest is the pod request the scheduler reserves, per resource:
+//
+//	max(largest init-phase peak, sum(containers) + sum(native-sidecar inits)) + overhead
+//
+// where an ordinary init container's peak is its own request plus every native
+// sidecar started before it (the sidecars are already running), and a sidecar's
+// peak is the sidecars started so far including itself. Ordinary init
+// containers run one at a time, so they take the largest, never the sum. The
+// rule is the scheduler's own for any number of sidecars, in the order the
+// containers are listed; a native sidecar keeps its request for the pod's
+// whole life, so it also adds to the sum beside the containers.
+func schedulerRequest(overhead Amount, inits []requestedInit, containers []Amount) Amount {
+	sum := Amount{}
+	for _, c := range containers {
+		sum = sum.Add(c)
+	}
+	sidecars, peak := Amount{}, Amount{}
+	for _, init := range inits {
+		if init.sidecar {
+			sum = sum.Add(init.amount)
+			sidecars = sidecars.Add(init.amount)
+			peak = maxAmount(peak, sidecars)
+			continue
+		}
+		peak = maxAmount(peak, init.amount.Add(sidecars))
+	}
+	return overhead.Add(maxAmount(sum, peak))
+}
+
+// maxAmount is the larger of two amounts, per resource.
+func maxAmount(a, b Amount) Amount {
+	return Amount{CPU: max(a.CPU, b.CPU), Memory: max(a.Memory, b.Memory)}
 }
 
 // podTerminated reports whether a pod's phase says it has ended. A pod whose
@@ -420,30 +452,43 @@ const (
 	memoryBytes = int64(1)
 )
 
-// PodRequestTotal is the amount a rendered pod asks for: the sum over every one
-// of its containers, its init containers included. The dind sidecar is a native
-// sidecar, whose share the scheduler adds beside the containers' rather than
-// takes the largest of, so every rendered container's request adds up. Each
+// PodRequestTotal is the amount a rendered pod asks for, by the scheduler's
+// rule (schedulerRequest): the dind sidecar is a native sidecar init container,
+// so its share adds to the containers' for the pod's whole life, while an
+// ordinary init container would count only as the largest of its kind. Each
 // container's request must be a readable quantity; an unreadable one is an
 // error rather than a zero.
 func PodRequestTotal(pod PodSpec) (Amount, error) {
-	total := Amount{}
-	for _, containers := range [][]Container{pod.InitContainers, pod.Containers} {
-		for _, container := range containers {
-			if container.Resources == nil {
-				continue
-			}
-			amount, err := resourceAmount(map[string]string{
-				"cpu":    container.Resources.Requests.CPU,
-				"memory": container.Resources.Requests.Memory,
-			})
-			if err != nil {
-				return Amount{}, fmt.Errorf("container %q: %w", container.Name, err)
-			}
-			total = total.Add(amount)
+	read := func(container Container) (Amount, error) {
+		if container.Resources == nil {
+			return Amount{}, nil
 		}
+		amount, err := resourceAmount(map[string]string{
+			"cpu":    container.Resources.Requests.CPU,
+			"memory": container.Resources.Requests.Memory,
+		})
+		if err != nil {
+			return Amount{}, fmt.Errorf("container %q: %w", container.Name, err)
+		}
+		return amount, nil
 	}
-	return total, nil
+	var inits []requestedInit
+	for _, container := range pod.InitContainers {
+		amount, err := read(container)
+		if err != nil {
+			return Amount{}, err
+		}
+		inits = append(inits, requestedInit{amount: amount, sidecar: container.RestartPolicy == "Always"})
+	}
+	var containers []Amount
+	for _, container := range pod.Containers {
+		amount, err := read(container)
+		if err != nil {
+			return Amount{}, err
+		}
+		containers = append(containers, amount)
+	}
+	return schedulerRequest(Amount{}, inits, containers), nil
 }
 
 // amountOf reads a rendered container's two request quantities into an Amount.
@@ -482,6 +527,9 @@ func parseQuantity(value string, scale int64) (int64, error) {
 	if strings.ContainsAny(number, "eE") {
 		return 0, fmt.Errorf("%q is an exponent, which the preflight does not read", value)
 	}
+	if !plainDecimal(number) {
+		return 0, fmt.Errorf("%q is not a plain integer or decimal (base prefixes and underscores are refused)", value)
+	}
 	mantissa, ok := new(big.Rat).SetString(number)
 	if !ok {
 		return 0, fmt.Errorf("%q is not a quantity", value)
@@ -500,6 +548,25 @@ func parseQuantity(value string, scale int64) (int64, error) {
 		return 0, fmt.Errorf("%q is too large to read", value)
 	}
 	return whole.Int64(), nil
+}
+
+// plainDecimal reports whether number is digits with at most one decimal point
+// and at least one digit: the only mantissa forms the preflight reads. Go's
+// number syntax also takes 0x, 0b and 0o prefixes and underscores, which no
+// listing prints and which would read a request wrong.
+func plainDecimal(number string) bool {
+	dots, digits := 0, 0
+	for _, c := range number {
+		switch {
+		case c >= '0' && c <= '9':
+			digits++
+		case c == '.':
+			dots++
+		default:
+			return false
+		}
+	}
+	return digits > 0 && dots <= 1
 }
 
 // splitQuantity splits a quantity into its number and the run of letters that
@@ -577,7 +644,10 @@ type nodeTaint struct {
 
 // podContainer is a container's resources in the listing.
 type podContainer struct {
-	Resources struct {
+	// RestartPolicy is "Always" on a native-sidecar init container, which the
+	// scheduler counts as running for the pod's whole life.
+	RestartPolicy string `json:"restartPolicy"`
+	Resources     struct {
 		Requests map[string]string `json:"requests"`
 	} `json:"resources"`
 }

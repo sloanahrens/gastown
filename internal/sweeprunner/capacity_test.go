@@ -402,7 +402,7 @@ func TestParseQuantity(t *testing.T) {
 			t.Errorf("parseQuantity(%q, %d) = %d, want %d", tc.value, tc.scale, got, tc.want)
 		}
 	}
-	for _, value := range []string{"", "abc", "4x", "1/2", "1/2Gi", "-1", "+1", "1e3", "1Ei2", "10Ei", "14492Ki", "4 Mi", "4m ", "999999999999999999999999999999"} {
+	for _, value := range []string{"", "abc", "4x", "1/2", "1/2Gi", "-1", "+1", "1e3", "1Ei2", "10Ei", "14492Ki", "4 Mi", "4m ", "999999999999999999999999999999", "0x10", "0b101", "0o7", "1_000", "1.2.3", ".", "0x10Mi"} {
 		got, err := parseQuantity(value, cpuMilli)
 		if err == nil {
 			t.Errorf("parseQuantity(%q) = %d, want it refused", value, got)
@@ -694,5 +694,108 @@ func TestAmountOfRefusesAQuantityItCannotRead(t *testing.T) {
 				t.Errorf("error = %v, want it to name %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestPodRequestCountsNativeSidecarsLikeTheScheduler: another pod's native
+// sidecar (an init container with restartPolicy Always) keeps its request for the
+// pod's whole life, so it ADDS to the sum of the containers, while an ordinary
+// init container only competes as the largest of its kind, with every sidecar
+// started before it running beside it (the scheduler's rule).
+func TestPodRequestCountsNativeSidecarsLikeTheScheduler(t *testing.T) {
+	t.Parallel()
+	node := `{"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "64", "memory": "256Gi"}}}`
+	for _, tc := range []struct {
+		name string
+		pod  string
+		want Amount
+	}{
+		{
+			name: "a native sidecar adds to the containers",
+			pod: `{"kind": "Pod", "metadata": {"name": "p"}, "spec": {"nodeName": "gt-control",
+			  "initContainers": [{"restartPolicy": "Always", "resources": {"requests": {"cpu": "500m", "memory": "512Mi"}}}],
+			  "containers": [{"resources": {"requests": {"cpu": "1", "memory": "1Gi"}}}]}, "status": {"phase": "Running"}}`,
+			want: Amount{CPU: 1_500, Memory: 1<<30 + 512<<20},
+		},
+		{
+			name: "an ordinary init container larger than the sum wins",
+			pod: `{"kind": "Pod", "metadata": {"name": "p"}, "spec": {"nodeName": "gt-control",
+			  "initContainers": [{"resources": {"requests": {"cpu": "4", "memory": "8Gi"}}}],
+			  "containers": [{"resources": {"requests": {"cpu": "1", "memory": "1Gi"}}}, {"resources": {"requests": {"cpu": "1", "memory": "1Gi"}}}]}, "status": {"phase": "Running"}}`,
+			want: Amount{CPU: 4_000, Memory: 8 << 30},
+		},
+		{
+			name: "an ordinary init container after a sidecar runs beside it",
+			pod: `{"kind": "Pod", "metadata": {"name": "p"}, "spec": {"nodeName": "gt-control",
+			  "initContainers": [
+			    {"restartPolicy": "Always", "resources": {"requests": {"cpu": "1", "memory": "1Gi"}}},
+			    {"resources": {"requests": {"cpu": "3", "memory": "2Gi"}}}],
+			  "containers": [{"resources": {"requests": {"cpu": "1", "memory": "1Gi"}}}]}, "status": {"phase": "Running"}}`,
+			// containers 1/1Gi + sidecar 1/1Gi = 2/2Gi; the ordinary init peaks at
+			// 3/2Gi + the running sidecar's 1/1Gi = 4/3Gi.
+			want: Amount{CPU: 4_000, Memory: 3 << 30},
+		},
+		{
+			name: "an ordinary init container before the sidecar does not carry it",
+			pod: `{"kind": "Pod", "metadata": {"name": "p"}, "spec": {"nodeName": "gt-control",
+			  "initContainers": [
+			    {"resources": {"requests": {"cpu": "3", "memory": "2Gi"}}},
+			    {"restartPolicy": "Always", "resources": {"requests": {"cpu": "1", "memory": "1Gi"}}}],
+			  "containers": [{"resources": {"requests": {"cpu": "1", "memory": "1Gi"}}}]}, "status": {"phase": "Running"}}`,
+			// the init ran alone at 3/2Gi; the steady sum is 2/2Gi.
+			want: Amount{CPU: 3_000, Memory: 2 << 30},
+		},
+	} {
+		nodes, err := ParseCapacity([]byte(`{"items": [` + node + `,` + tc.pod + `]}`))
+		if err != nil {
+			t.Fatalf("%s: ParseCapacity: %v", tc.name, err)
+		}
+		if got := nodes[0].Requested; got != tc.want {
+			t.Errorf("%s: the pod requests %s, want %s", tc.name, got, tc.want)
+		}
+	}
+
+	// The rendered Job pod follows the same rule: the dind sidecar is a native
+	// sidecar, so an ordinary init container beside it counts as the largest of
+	// its kind and the sidecar adds to the runner's share.
+	pod := PodSpec{
+		InitContainers: []Container{
+			{Name: "dind", RestartPolicy: "Always", Resources: &Resources{Requests: ResourceList{CPU: "2", Memory: "4Gi"}}},
+			{Name: "prep", Resources: &Resources{Requests: ResourceList{CPU: "5", Memory: "1Gi"}}},
+		},
+		Containers: []Container{{Name: "runner", Resources: &Resources{Requests: ResourceList{CPU: "2", Memory: "1Gi"}}}},
+	}
+	got, err := PodRequestTotal(pod)
+	if err != nil {
+		t.Fatalf("PodRequestTotal: %v", err)
+	}
+	// sum 4/5Gi; prep peaks at 5+2 = 7 CPUs and 1+4 = 5Gi.
+	if want := (Amount{CPU: 7_000, Memory: 5 << 30}); got != want {
+		t.Errorf("the rendered pod asks for %s, want %s", got, want)
+	}
+}
+
+// TestCapacityNoExecuteTaintBlocksPlacement: a NoExecute taint the Job does not
+// tolerate keeps a new pod off the node as a NoSchedule one does, and a
+// toleration names the effect it covers.
+func TestCapacityNoExecuteTaintBlocksPlacement(t *testing.T) {
+	t.Parallel()
+	nodes, err := ParseCapacity([]byte(`{"items": [{"kind": "Node", "metadata": {"name": "gt-control"},
+	  "spec": {"taints": [{"key": "dedicated", "value": "ci", "effect": "NoExecute"}]},
+	  "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "16", "memory": "64Gi"}}}]}`))
+	if err != nil {
+		t.Fatalf("ParseCapacity: %v", err)
+	}
+	if schedulable(nodes[0], nil) {
+		t.Error("a node with a NoExecute taint the Job does not tolerate is schedulable")
+	}
+	if schedulable(nodes[0], []Toleration{{Key: "dedicated", Operator: "Equal", Value: "ci", Effect: "NoSchedule"}}) {
+		t.Error("a NoSchedule toleration tolerates a NoExecute taint")
+	}
+	if !schedulable(nodes[0], []Toleration{{Key: "dedicated", Operator: "Equal", Value: "ci", Effect: "NoExecute"}}) {
+		t.Error("a node whose NoExecute taint the Job tolerates is not schedulable")
+	}
+	if !schedulable(nodes[0], []Toleration{{Key: "dedicated", Operator: "Exists"}}) {
+		t.Error("an Exists toleration with no effect does not tolerate the NoExecute taint")
 	}
 }

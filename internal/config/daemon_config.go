@@ -2227,14 +2227,13 @@ const (
 	runnerJobsMax   = 16
 )
 
-// The dind sidecar's fixed share on the Kubernetes backend, as
-// internal/sweeprunner's dindCPU and dindMemory render it. The config package
-// cannot render a run, so it names the figures again to refuse a pod total that
-// cannot hold the sidecar and leave the runner its minimum; the spec's own
-// validation is the authority for the rendered share (gt-gg9hv.38).
+// SweepDindCPUs and SweepDindMemoryGB are the dind sidecar's fixed share on the
+// Kubernetes backend. internal/sweeprunner renders the sidecar from these two
+// constants and this package refuses a pod total that cannot hold them, so the
+// figure has one source (gt-gg9hv.38).
 const (
-	runnerDindCPUs     = 2
-	runnerDindMemoryGB = 4
+	SweepDindCPUs     = 2
+	SweepDindMemoryGB = 4
 )
 
 // The backends TierSweepRunnerConfig names, as sweeprunner's Backends spell
@@ -2293,11 +2292,11 @@ func (c *TierSweepRunnerConfig) validate() error {
 	// total at or below the sidecar's share renders a runner with nothing
 	// (gt-gg9hv.38).
 	if c.Backend == TierSweepRunnerKubernetes && c.Dind {
-		if min := runnerCPUsMin + runnerDindCPUs; c.CPUs < min {
-			return fmt.Errorf("cpus = %d: want at least %d with dind (the sidecar's %d CPUs plus the runner's %d)", c.CPUs, min, runnerDindCPUs, runnerCPUsMin)
+		if min := runnerCPUsMin + SweepDindCPUs; c.CPUs < min {
+			return fmt.Errorf("cpus = %d: want at least %d with dind (the sidecar's %d CPUs plus the runner's %d)", c.CPUs, min, SweepDindCPUs, runnerCPUsMin)
 		}
-		if min := runnerMemoryMin + runnerDindMemoryGB; c.Memory < min {
-			return fmt.Errorf("memory = %d: want at least %d GB with dind (the sidecar's %d GB plus the runner's %d)", c.Memory, min, runnerDindMemoryGB, runnerMemoryMin)
+		if min := runnerMemoryMin + SweepDindMemoryGB; c.Memory < min {
+			return fmt.Errorf("memory = %d: want at least %d GB with dind (the sidecar's %d GB plus the runner's %d)", c.Memory, min, SweepDindMemoryGB, runnerMemoryMin)
 		}
 	}
 	if c.Jobs < runnerJobsMin || c.Jobs > runnerJobsMax {

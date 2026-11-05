@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/templates"
 )
 
@@ -56,12 +57,6 @@ const (
 	// cacheClaimStorage is the cache claim's requested size: room for one rig's
 	// build cache and module cache, with headroom for the next sweep to add to them.
 	cacheClaimStorage = "5Gi"
-
-	// dindCPU and dindMemory are the sidecar's share, requested and limited like
-	// the runner's: an unbounded nested engine competes with the run it serves
-	// and with the node's other pods.
-	dindCPU    = "2"
-	dindMemory = "4Gi"
 
 	// probePeriodSeconds and probeFailureThreshold are the cadence a kubelet
 	// checks a container at: the dind sidecar's startup probe, and the sync
@@ -1035,3 +1030,12 @@ func int64Ptr(v int64) *int64 { return &v }
 // boolPtr returns a pointer to v, so a false value is rendered rather than
 // omitted.
 func boolPtr(v bool) *bool { return &v }
+
+// dindCPU and dindMemory are the sidecar's share, requested and limited like
+// the runner's: an unbounded nested engine competes with the run it serves and
+// with the node's other pods. They come from the config package's constants,
+// which the settings validation reads too, so the figure has one source.
+var (
+	dindCPU    = strconv.Itoa(config.SweepDindCPUs)
+	dindMemory = strconv.Itoa(config.SweepDindMemoryGB) + "Gi"
+)

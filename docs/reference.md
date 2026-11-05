@@ -459,8 +459,10 @@ whole share.
 
 Before a Kubernetes Job is created, the daemon reads every node and pod once
 (`kubectl get nodes,pods -A -o json`). A node is eligible when it is Ready, is
-not cordoned, and carries no NoSchedule taint the Job pod does not tolerate.
-The daemon launches only when the Job, with the sync and reader pods the run
+not cordoned, and carries no NoSchedule or NoExecute taint the Job pod does not
+tolerate. A pod already on a node counts as the scheduler counts it: a native
+sidecar adds to the pod's containers for its whole life, and ordinary init
+containers count as the largest one. The daemon launches only when the Job, with the sync and reader pods the run
 also creates, fits on at least one eligible node with 2 CPU and 2 GiB to spare;
 an eligible node the Job does not fit on stays in the judgment but does not
 block one it does. On a decline the cycle defers — no Job, no bead, the patrol

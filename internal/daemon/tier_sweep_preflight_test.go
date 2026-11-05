@@ -94,7 +94,7 @@ func TestTierSweepPreflightDeclinesWithoutHeadroom(t *testing.T) {
 		if slices.Contains(argv, "nodes,pods") {
 			return []byte(preflightTightListing), nil, nil
 		}
-		return nil, nil, nil
+		return preflightElse(argv)
 	}}
 	d, spec, st, bd, logs := preflightDaemon(t, now, cmds)
 
@@ -132,7 +132,7 @@ func TestTierSweepPreflightDeclinesWithoutHeadroom(t *testing.T) {
 		if slices.Contains(argv, "nodes,pods") {
 			return []byte(preflightShorterListing), nil, nil
 		}
-		return nil, nil, nil
+		return preflightElse(argv)
 	}
 	if started := d.tierSweepLaunchRunner(context.Background(), st, spec); !started.declined {
 		t.Fatalf("launch = %+v, want it declined again", started)
@@ -145,7 +145,7 @@ func TestTierSweepPreflightDeclinesWithoutHeadroom(t *testing.T) {
 		if slices.Contains(argv, "nodes,pods") {
 			return []byte(preflightTightListing), nil, nil
 		}
-		return nil, nil, nil
+		return preflightElse(argv)
 	}
 	d.tierSweepLaunchRunner(context.Background(), st, spec)
 	if got := strings.Count(logs.String(), "tier_sweep: not launching on gt-ctl:"); got != 2 {
@@ -162,7 +162,7 @@ func TestTierSweepPreflightDeclinesWithoutHeadroom(t *testing.T) {
 		case slices.Contains(argv, "pods,priorityclasses"):
 			return []byte(runnerPriorityListing), nil, nil
 		}
-		return nil, nil, nil
+		return preflightElse(argv)
 	}
 	started := d.tierSweepLaunchRunner(context.Background(), st, spec)
 	if started.declined || started.err != nil {
@@ -194,7 +194,7 @@ func TestTierSweepPreflightRefusesWhenTheNodeCannotBeRead(t *testing.T) {
 				if slices.Contains(argv, "nodes,pods") {
 					return nil, nil, errors.New("exit status 1")
 				}
-				return nil, nil, nil
+				return preflightElse(argv)
 			},
 			want: "tier_sweep: not launching on gt-ctl: cannot read the node's capacity: exit status 1",
 		},
@@ -204,7 +204,7 @@ func TestTierSweepPreflightRefusesWhenTheNodeCannotBeRead(t *testing.T) {
 				if slices.Contains(argv, "nodes,pods") {
 					return []byte("Error from server (Forbidden)"), nil, nil
 				}
-				return nil, nil, nil
+				return preflightElse(argv)
 			},
 			want: "tier_sweep: not launching on gt-ctl: cannot read the node's capacity: reading the node and pod listing",
 		},
@@ -269,7 +269,7 @@ func TestTierSweepPreflightDeclineDefersTheStage(t *testing.T) {
 		if slices.Contains(argv, "nodes,pods") {
 			return []byte(preflightTightListing), nil, nil
 		}
-		return nil, nil, nil
+		return preflightElse(argv)
 	}}
 	d, _, st, _, _ := preflightDaemon(t, atHour(time.Now(), 15), cmds)
 
@@ -309,4 +309,14 @@ func appliedJobDocument(stdins [][]byte) bool {
 		}
 	}
 	return false
+}
+
+// preflightElse answers the commands these tests do not script: the priority
+// guard's listing, which runs before the capacity preflight, gets the healthy
+// one, and anything else gets an empty answer.
+func preflightElse(argv []string) ([]byte, []byte, error) {
+	if slices.Contains(argv, "pods,priorityclasses") {
+		return []byte(runnerPriorityListing), nil, nil
+	}
+	return nil, nil, nil
 }

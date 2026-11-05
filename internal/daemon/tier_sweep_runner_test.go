@@ -1269,21 +1269,11 @@ func TestSyncRefusesWhileASweepJobReadsTheClaim(t *testing.T) {
 					t.Errorf("a step applied %q after the guard refused; nothing must be applied", argv)
 				}
 			}
-			// The capacity preflight reads the node first and writes nothing; the
-			// guard's listing of the Jobs follows and nothing is applied after it.
-			guardAt := slices.IndexFunc(cmds.ran, func(ran string) bool {
-				return slices.Contains(strings.Fields(ran), "jobs")
-			})
-			if guardAt < 0 {
-				t.Fatalf("commands = %q, want the guard's listing of the Jobs", cmds.ran)
+			if len(cmds.ran) == 0 || !slices.Contains(strings.Fields(cmds.ran[0]), "jobs") {
+				t.Errorf("commands = %q, want the first to be the guard's listing of the Jobs", cmds.ran)
 			}
-			for _, ran := range cmds.ran[:guardAt] {
-				if !slices.Contains(strings.Fields(ran), "nodes,pods") {
-					t.Errorf("step %q ran before the guard's listing; only the read-only capacity preflight may", ran)
-				}
-			}
-			if slices.Contains(strings.Fields(cmds.ran[guardAt]), "-l") {
-				t.Errorf("the guard runs %q, want an unlabelled listing: a Job that lost its labels still reads the claim", cmds.ran[guardAt])
+			if len(cmds.ran) > 0 && slices.Contains(strings.Fields(cmds.ran[0]), "-l") {
+				t.Errorf("the guard runs %q, want an unlabelled listing: a Job that lost its labels still reads the claim", cmds.ran[0])
 			}
 		})
 	}

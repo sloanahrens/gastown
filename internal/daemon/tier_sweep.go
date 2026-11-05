@@ -2730,18 +2730,19 @@ func (d *Daemon) tierSweepLaunchRunner(ctx context.Context, st tierSweepStage, s
 	}
 	launch := tierSweepLaunch{}
 	launch.stop = func() { d.tierSweepRunnerStop(ctx, spec) }
-	// The capacity preflight runs before anything is applied: a Job the node
-	// cannot hold beside the control plane's pods is never created, a preflight
-	// that cannot answer declines, and a Kubernetes plan that carries no
-	// preflight at all is refused rather than launched blind (gt-gg9hv.38).
-	if d.tierSweepPreflightDeclines(ctx, cfg.Backend, spec.Context, plan) {
-		return tierSweepLaunch{exitCode: -1, declined: true}
-	}
 	// The guards run before anything is applied, and a refusal leaves nothing
 	// to apply: the run would share an engine object with a run still using it.
 	if guardOut, code, guardErr := d.tierSweepRunnerGuards(ctx, plan.Guards); guardErr != nil {
 		launch.output, launch.exitCode, launch.err = guardOut, code, guardErr
 		return launch
+	}
+	// The capacity preflight runs after the guards and before anything is
+	// applied; both only read. A Job the node
+	// cannot hold beside the control plane's pods is never created, a preflight
+	// that cannot answer declines, and a Kubernetes plan that carries no
+	// preflight at all is refused rather than launched blind (gt-gg9hv.38).
+	if d.tierSweepPreflightDeclines(ctx, cfg.Backend, spec.Context, plan) {
+		return tierSweepLaunch{exitCode: -1, declined: true}
 	}
 	// The plan's apply steps create the run's objects (a Kubernetes repo claim,
 	// a sync pod that fills it, then the output claim and the Job) and run
