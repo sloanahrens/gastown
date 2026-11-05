@@ -487,6 +487,140 @@ func TestCacheTrimRunsOncePerDueTick(t *testing.T) {
 	}
 }
 
+// TestDiskMaintCacheTrimRunsWhileALandingPassIsInFlight: the trim applies
+// ConfigMaps and a Job on the sandbox cluster and reads neither the landing
+// worker nor Dolt, so the Dolt window's quiet guard does not hold it off. A busy
+// town with only the trim due reads the disks, raises their alerts, trims, and
+// logs no skipped line for it (gt-gg9hv.48).
+func TestDiskMaintCacheTrimRunsWhileALandingPassIsInFlight(t *testing.T) {
+	t.Parallel()
+	d, logs, f := diskMaintTestDaemon(t)
+	trims := countCacheTrims(d)
+	reads := 0
+	d.diskMaint.readDisks = func(context.Context) []disks.Reading {
+		reads++
+		return []disks.Reading{{Name: "colima", UsedPct: 88}}
+	}
+	// Half past noon: outside the default window, so the trim is the only work
+	// this tick found.
+	outside := diskMaintNow.Add(8 * time.Hour)
+	d.diskMaint.now = func() time.Time { return outside }
+	f.quiet, f.quietWhy = false, "daemon has work in flight (landing pass dv-x)"
+
+	d.runDiskMaintenance()
+
+	if reads != 1 {
+		t.Errorf("disk reads = %d, want 1: the trim pass reads the disks", reads)
+	}
+	if !diskMaintAlertIsOpen(f.notify, "diskmaint:colima") {
+		t.Error("no alert open for a disk at 88%: the trim pass must raise it")
+	}
+	if *trims != 1 {
+		t.Errorf("trimmed %d times while a landing pass was in flight, want 1", *trims)
+	}
+	if strings.Contains(logs.String(), "skipped") {
+		t.Errorf("log = %q, want no skipped line for a trim that ran", logs.String())
+	}
+}
+
+// TestDiskMaintTargetsStillWaitForAQuietTown: with the town busy and both the
+// daily targets and the trim due, the trim runs and the targets do not. They
+// are said to be skipped rather than silently dropped, and they stay due for
+// the next quiet tick (gt-gg9hv.48).
+func TestDiskMaintTargetsStillWaitForAQuietTown(t *testing.T) {
+	t.Parallel()
+	d, logs, f := diskMaintTestDaemon(t)
+	trims := countCacheTrims(d)
+	f.quiet, f.quietWhy = false, "daemon has work in flight (landing pass dv-x)"
+
+	d.runDiskMaintenance() // 04:45, in the window: the trim and the daily target are due
+
+	if *trims != 1 {
+		t.Fatalf("trimmed %d times while a landing pass was in flight, want 1", *trims)
+	}
+	if len(f.target.policies) != 0 {
+		t.Fatalf("planned the target %d times while the town was busy, want 0", len(f.target.policies))
+	}
+	if !strings.Contains(logs.String(), "targets skipped") ||
+		!strings.Contains(logs.String(), "landing pass dv-x") {
+		t.Errorf("log = %q, want the targets' skip named with the reason", logs.String())
+	}
+
+	// Five minutes on, the town is quiet: the target the busy tick left is due,
+	// and the trim that concluded keeps its interval.
+	quiet := diskMaintNow.Add(5 * time.Minute)
+	d.diskMaint.now = func() time.Time { return quiet }
+	f.quiet, f.quietWhy = true, ""
+	d.runDiskMaintenance()
+
+	if got := len(f.target.policies); got != 1 {
+		t.Errorf("planned the target %d times once the town went quiet, want 1: a skipped target stays due", got)
+	}
+	if *trims != 1 {
+		t.Errorf("trimmed %d times once the town went quiet, want 1: the trim keeps its interval", *trims)
+	}
+}
+
+// TestDiskMaintTrimPassIsSingleFlight: the trim has a guard of its own. A trim
+// pass in flight keeps the next tick from starting a second, and a target pass
+// in flight does not keep a due trim off (gt-gg9hv.48).
+func TestDiskMaintTrimPassIsSingleFlight(t *testing.T) {
+	t.Parallel()
+	d, _, f := diskMaintTestDaemon(t)
+	trims := countCacheTrims(d)
+	f.quiet, f.quietWhy = false, "daemon has work in flight (landing pass dv-x)"
+	now := diskMaintNow
+	d.diskMaint.now = func() time.Time { return now }
+	// Capture dispatched passes instead of running them, so a pass is still in
+	// flight when the next tick arrives.
+	var pending []func()
+	d.diskMaint.dispatch = func(fn func()) { pending = append(pending, fn) }
+
+	d.runDiskMaintenance() // 04:45, busy: the trim pass is dispatched and held
+	if len(pending) != 1 {
+		t.Fatalf("dispatched %d passes, want 1: the busy tick's trim pass", len(pending))
+	}
+	d.runDiskMaintenance() // the trim pass has not concluded
+	if len(pending) != 1 {
+		t.Fatalf("dispatched %d passes, want 1: a second trim pass started while one was in flight", len(pending))
+	}
+	if *trims != 0 {
+		t.Errorf("trimmed %d times before the dispatched pass ran, want 0", *trims)
+	}
+	pending[0]() // the trim pass concludes and releases its guard
+	if *trims != 1 {
+		t.Fatalf("trimmed %d times once the trim pass ran, want 1", *trims)
+	}
+
+	// A quiet tick now dispatches the combined pass for the day's target, and
+	// that pass stays in flight: its guard is the target pass's own.
+	f.quiet, f.quietWhy = true, ""
+	d.runDiskMaintenance()
+	if len(pending) != 2 {
+		t.Fatalf("dispatched %d passes, want 2: the quiet tick's combined pass", len(pending))
+	}
+
+	// Two hours on the trim is due again while the target pass still runs: the
+	// trim runs anyway, which it could not if it shared that pass's guard.
+	now = now.Add(2 * time.Hour)
+	f.quiet, f.quietWhy = false, "daemon has work in flight (landing pass dv-x)"
+	d.runDiskMaintenance()
+	if len(pending) != 3 {
+		t.Fatalf("dispatched %d passes, want 3: a target pass in flight must not hold the trim off", len(pending))
+	}
+	pending[2]()
+	if *trims != 2 {
+		t.Fatalf("trimmed %d times, want 2", *trims)
+	}
+
+	// The target pass's own snapshot predates the trim, so finishing it trims
+	// nothing a second time.
+	pending[1]()
+	if *trims != 2 {
+		t.Errorf("trimmed %d times after the combined pass finished, want 2", *trims)
+	}
+}
+
 // TestCacheTrimIntervalRefusesAnUnreadableSetting: a cache_trim_interval the
 // patrol cannot schedule runs no trim, even in the window, and is said once
 // rather than on every tick. It does not fall back to the 2h default.

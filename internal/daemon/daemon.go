@@ -312,6 +312,10 @@ type Daemon struct {
 	diskMaint diskMaintSeams
 	// diskMaintRunning is that patrol's single-flight guard.
 	diskMaintRunning atomic.Bool
+	// diskMaintTrimRunning is the single-flight guard of the cache trim's own
+	// pass, which runs on a tick whose targets are deferred to a quiet one
+	// (gt-gg9hv.48).
+	diskMaintTrimRunning atomic.Bool
 	// diskMaintSettled is when it last settled a window, as UnixNano: the
 	// pass runs off the loop goroutine, so the marker it writes is atomic and
 	// the loop only reads it.

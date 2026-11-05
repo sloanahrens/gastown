@@ -455,7 +455,7 @@ func (d *Daemon) runDiskMaintenance() {
 
 	quiet, why := d.maintenance().quiet(d)
 	if !quiet {
-		d.logger.Printf("disk_maintenance: skipped: %s", why)
+		d.runDiskMaintenanceTrim(mode, due, why)
 		return
 	}
 	if !d.diskMaintRunning.CompareAndSwap(false, true) {
@@ -465,6 +465,67 @@ func (d *Daemon) runDiskMaintenance() {
 		defer d.diskMaintRunning.Store(false)
 		d.diskMaintenancePass(now, mode, due)
 	})
+}
+
+// runDiskMaintenanceTrim is the tick's busy case: the cache trim may run, the
+// targets may not. The trim applies ConfigMaps and a Job on the sandbox cluster
+// and reads neither the landing worker nor Dolt, so the Dolt window's quiet
+// guard has no claim on it; with landing passes nearly continuous that guard
+// starved the trim while the sandbox disk grew (gt-gg9hv.48). Everything else
+// the tick found keeps the guard: it stays due, and the next quiet tick runs it.
+func (d *Daemon) runDiskMaintenanceTrim(mode string, due diskMaintDue, why string) {
+	if !due.cacheTrim {
+		d.logger.Printf("disk_maintenance: skipped: %s", why)
+		return
+	}
+	if due.daily || len(due.interval) > 0 {
+		// The trim runs on this tick; the targets it found are what this line
+		// is about, so their deferral is not read as the tick doing nothing.
+		d.logger.Printf("disk_maintenance: targets skipped: %s; the cache trim runs on its own pass", why)
+	}
+	if !d.diskMaintTrimRunning.CompareAndSwap(false, true) {
+		return // a trim pass is still running
+	}
+	d.diskMaintenanceSeams().dispatch(func() {
+		defer d.diskMaintTrimRunning.Store(false)
+		d.diskMaintenanceTrimPass(mode)
+	})
+}
+
+// diskMaintenanceTrimPass is the trim's own pass: the disk readings and their
+// alerts first, as the combined pass raises them, then the trim. Its caller
+// holds the trim's guard (see runDiskMaintenanceTrim), which is the trim's own
+// and not the target pass's, so a long target pass does not keep it waiting.
+func (d *Daemon) diskMaintenanceTrimPass(mode string) {
+	ctx, cancel := d.diskMaintenanceContext()
+	defer cancel()
+	s := d.diskMaintenanceSeams()
+	d.applyDiskAlerts(s.readDisks(ctx), s.now())
+	d.diskMaintenanceTrim(ctx, mode)
+}
+
+// diskMaintenanceTrimRun tries the trim's single-flight guard and, when it wins,
+// runs the trim under it. It reports whether this call ran the trim: one already
+// in flight is left to finish, and two trim passes never overlap.
+func (d *Daemon) diskMaintenanceTrimRun(ctx context.Context, mode string) bool {
+	if !d.diskMaintTrimRunning.CompareAndSwap(false, true) {
+		return false
+	}
+	defer d.diskMaintTrimRunning.Store(false)
+	d.diskMaintenanceTrim(ctx, mode)
+	return true
+}
+
+// diskMaintenanceTrim is the trim and its schedule record: the full interval
+// once it reached a verdict, the short retry when it could not start or
+// conclude. The caller holds the trim's guard.
+func (d *Daemon) diskMaintenanceTrim(ctx context.Context, mode string) {
+	s := d.diskMaintenanceSeams()
+	if d.cacheTrim(ctx, mode) {
+		d.diskMaintSchedule.record(diskMaintCacheTrimName, s.now())
+	} else {
+		d.diskMaintSchedule.recordRetry(diskMaintCacheTrimName, s.now().Add(cacheTrimRetryInterval))
+	}
 }
 
 // refuseDiskMaintenance says why a setting the patrol cannot schedule runs
@@ -508,17 +569,12 @@ func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDu
 
 	// The cache trim is independent of the targets: it trims the claim the
 	// sandbox profiles mount, so it runs when its interval is due whether or not
-	// a maintenance target publishes here (gt-rm4am, gt-gg9hv.24.2). A run that
-	// reached a verdict -- trimmed, or nothing to trim -- spends the full
-	// interval; a run that could not start or conclude records a retry instead,
-	// so a cluster that was briefly unreachable does not leave the disk growing
-	// for two hours (gt-gg9hv.24.6).
+	// a maintenance target publishes here (gt-rm4am, gt-gg9hv.24.2). It holds
+	// its own guard, so a trim pass already in flight is left to finish rather
+	// than trimmed twice, and this pass's targets do not keep the next trim
+	// waiting (gt-gg9hv.48).
 	if due.cacheTrim {
-		if d.cacheTrim(ctx, mode) {
-			d.diskMaintSchedule.record(diskMaintCacheTrimName, s.now())
-		} else {
-			d.diskMaintSchedule.recordRetry(diskMaintCacheTrimName, s.now().Add(cacheTrimRetryInterval))
-		}
+		d.diskMaintenanceTrimRun(ctx, mode)
 	}
 	if !due.daily && len(due.interval) == 0 {
 		return // only the cache trim was due, and it has run

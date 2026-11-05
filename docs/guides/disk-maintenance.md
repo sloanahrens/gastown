@@ -129,7 +129,11 @@ what to wait for.
 
 The patrol also trims the shared cache claim a kubernetes sandbox profile
 mounts, on its own interval (`cache_trim_interval`, `2h` by default) in any
-window, and behind the same mode:
+window, and behind the same mode. The trim runs on a pass of its own and does
+not wait for the town to be quiet: it applies ConfigMaps and a Job on the
+sandbox cluster and reads neither the landing worker nor Dolt, so a landing
+pass in flight cannot starve it while the sandbox disk fills. That pass raises
+the disk alerts first, and every other target still waits for a quiet tick.
 
 - A claim's namespace comes from the claim itself, and every pod read, listing
   exec and apply, delete or wait names it. A claim of the same name in another
