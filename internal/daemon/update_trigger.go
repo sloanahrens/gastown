@@ -35,8 +35,9 @@ const (
 	updateLandingRecords = 50
 
 	// updateRemoteTimeout bounds the ls-remote the failed-run hold makes for
-	// main's tip. The recovery heartbeat is minutes apart, so this stays well
-	// inside one heartbeat; a read that outlasts it is an unknown tip.
+	// main's tip. The recovery heartbeat defaults to 3 minutes and the
+	// recovery_heartbeat_interval setting can change it, so the bound sits well
+	// inside one beat at the default; a read that outlasts it is an unknown tip.
 	updateRemoteTimeout = 30 * time.Second
 )
 
@@ -63,6 +64,9 @@ type updateTriggerState struct {
 	// notDueReason is the last not-due reason printed, so a hold that stands
 	// logs once rather than once per heartbeat.
 	notDueReason string
+	// remoteErr is the last main-tip read error printed, so an origin that
+	// stays unreachable logs once rather than once per heartbeat.
+	remoteErr string
 }
 
 // triggerUpdate is the heartbeat's update block: decide whether an update is
@@ -286,8 +290,10 @@ func (d *Daemon) updateFacts(now time.Time) (UpdateFacts, error) {
 // updateRemoteMainSHA reads main's tip from origin the way the run does, bounded
 // by updateRemoteTimeout. A read that fails returns empty, which the hold reads
 // as an unknown main: it holds and names the by-hand command rather than
-// comparing against a ref it cannot trust. The error is logged so the operator
-// can see why the tip is unknown.
+// comparing against a ref it cannot trust. Each read runs on the heartbeat, so
+// an unreachable origin can hold a beat for up to updateRemoteTimeout. The error
+// is logged once per distinct message, so the operator sees why the tip is
+// unknown without a line on every beat.
 func (d *Daemon) updateRemoteMainSHA(repoRoot string) string {
 	run := d.updateRemoteRun
 	if run == nil {
@@ -297,10 +303,33 @@ func (d *Daemon) updateRemoteMainSHA(repoRoot string) string {
 	defer cancel()
 	sha, err := update.RemoteMainSHA(ctx, run, repoRoot)
 	if err != nil {
-		d.logger.Printf("update: cannot read main's tip from origin: %v; the failed-run hold reads main as unknown", err)
+		d.noteRemoteMainError(err)
 		return ""
 	}
+	d.clearRemoteMainError()
 	return sha
+}
+
+// noteRemoteMainError logs a main-tip read error once per distinct message.
+func (d *Daemon) noteRemoteMainError(err error) {
+	msg := err.Error()
+	d.updateTrigger.mu.Lock()
+	seen := d.updateTrigger.remoteErr == msg
+	if !seen {
+		d.updateTrigger.remoteErr = msg
+	}
+	d.updateTrigger.mu.Unlock()
+	if !seen {
+		d.logger.Printf("update: cannot read main's tip from origin: %s; the failed-run hold reads main as unknown", msg)
+	}
+}
+
+// clearRemoteMainError forgets the last main-tip read error once a read
+// succeeds, so a later outage is reported again.
+func (d *Daemon) clearRemoteMainError() {
+	d.updateTrigger.mu.Lock()
+	d.updateTrigger.remoteErr = ""
+	d.updateTrigger.mu.Unlock()
 }
 
 // knownUpdateOutcome reports whether o is one a run writes to its state file.

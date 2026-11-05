@@ -500,6 +500,62 @@ func TestUpdateFactsHoldsWhenTheRemoteTipIsUnreadable(t *testing.T) {
 	}
 }
 
+// An unreachable origin is read on every heartbeat while a failed run stands,
+// but its error is logged once, not once per heartbeat, and a recurrence after
+// the read recovers is logged again (gt-jhep9).
+func TestUpdateFactsLogsAnUnreachableOriginOnce(t *testing.T) {
+	t.Parallel()
+
+	const lagging = "1111111111111111111111111111111111111111"
+	d, logs, _, _ := newUpdateTriggerTestDaemon(t, &config.UpdateConfig{
+		Enabled: true,
+		Window:  "03:00",
+	})
+	createUpdateSource(t, d.config.TownRoot)
+	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo {
+		return &version.StaleBinaryInfo{RepoCommit: lagging}
+	}
+	remote := &updateRemoteFake{exit: 128}
+	d.updateRemoteRun = remote.run
+	store := update.Store{Dir: update.Dir(d.config.TownRoot)}
+	ended := updateTriggerTestTime.Add(-24 * time.Hour)
+	if err := store.Write(update.State{
+		RunID:     "run-1",
+		StartedAt: ended.Add(-time.Minute),
+		EndedAt:   ended,
+		Outcome:   update.OutcomeFailed,
+		Target:    update.Target{SHA: lagging},
+	}); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+
+	for range 3 {
+		if _, err := d.updateFacts(updateTriggerTestTime); err != nil {
+			t.Fatalf("updateFacts: %v", err)
+		}
+	}
+	if remote.calls != 3 {
+		t.Fatalf("ls-remote calls = %d, want one read per heartbeat", remote.calls)
+	}
+	if got := strings.Count(logs.String(), "cannot read main's tip"); got != 1 {
+		t.Fatalf("unreachable lines = %d, want one for an outage that stands; log = %q", got, logs.String())
+	}
+
+	// The origin answers again, so the next outage is reported again.
+	remote.exit = 0
+	remote.output = lagging + "\trefs/heads/main\n"
+	if _, err := d.updateFacts(updateTriggerTestTime); err != nil {
+		t.Fatalf("updateFacts: %v", err)
+	}
+	remote.exit = 128
+	if _, err := d.updateFacts(updateTriggerTestTime); err != nil {
+		t.Fatalf("updateFacts: %v", err)
+	}
+	if got := strings.Count(logs.String(), "cannot read main's tip"); got != 2 {
+		t.Errorf("unreachable lines = %d, want the outage reported again after a read recovered; log = %q", got, logs.String())
+	}
+}
+
 // A town with no gt source checkout has no main to read and no build to
 // install, so the trigger launches nothing even inside the nightly window: the
 // missing checkout is the reason, not a failed run holding an unknown main.
