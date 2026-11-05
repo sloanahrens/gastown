@@ -347,6 +347,12 @@ func archiveRunFailure(databases []string, err error) (map[string]bool, map[stri
 // the loop early. Every database still gets one batch of each export, however
 // late the deadline; the deadline only stops extra batches.
 //
+// A budget or batch-bound stop is not a failure, but the database may still be
+// behind: it is marked unarchived for this run, so its gc waits until a later
+// cycle catches the archive up, and the stop line says so. A short batch or a
+// batch that cannot advance marks nothing, because nothing is known to be
+// behind.
+//
 // It returns the databases whose history was not archived this run, and the
 // cycle skips their gc: history is not collected for a database whose archive
 // step did not finish. It also returns, per database, both exports' rows
@@ -467,6 +473,9 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 			unarchived[db] = true
 			d.logger.Printf("scheduled_maintenance: archive %s dolt_log: FAILED: %v — watermark kept", db, commitErr)
 		} else {
+			if archiveStopLeftBehind(commitStop) {
+				unarchived[db] = true
+			}
 			logArchiveStop(d.logger, db, "dolt_log", commitStop, budget)
 		}
 		eventsStop, eventsArchived, eventsErr := archiveUntilCaughtUp(st.ArchiveEventsWatermarks[db], eventsLimit, deadline, s.now, sameEventsArchiveWatermark,
@@ -481,6 +490,9 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 			unarchived[db] = true
 			d.logger.Printf("scheduled_maintenance: archive %s events: FAILED: %v — watermark kept", db, eventsErr)
 		} else {
+			if archiveStopLeftBehind(eventsStop) {
+				unarchived[db] = true
+			}
 			logArchiveStop(d.logger, db, "events", eventsStop, budget)
 		}
 	}
@@ -496,17 +508,18 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 }
 
 // logArchiveStop reports the per-cycle stops that can leave a database behind,
-// naming the export and saying so. Without it a database that is still behind
-// reads as a step that finished, and the operator has no sign that the next
-// cycle is expected to continue. A short batch or one that could not advance
-// needs no line: nothing is known to be behind.
+// naming the export and saying the database's gc is skipped this cycle and why.
+// Without it a database that is still behind reads as a step that finished, and
+// the operator has no sign that its gc was skipped and the next cycle is
+// expected to continue. A short batch or one that could not advance needs no
+// line: nothing is known to be behind and no gc is skipped.
 func logArchiveStop(logger *log.Logger, db, export string, stop archiveStop, budget time.Duration) {
 	switch stop {
 	case archiveStopBudget:
-		logger.Printf("scheduled_maintenance: archive %s %s: stopped at the cycle's %v archive_budget, still behind — the next cycle continues from the watermark",
+		logger.Printf("scheduled_maintenance: archive %s %s: stopped at the cycle's %v archive_budget, still behind — its gc is skipped this cycle because the archive did not finish; the next cycle continues from the watermark",
 			db, export, budget)
 	case archiveStopCapped:
-		logger.Printf("scheduled_maintenance: archive %s %s: stopped at the %d-batch per-cycle bound, still behind — the next cycle continues from the watermark",
+		logger.Printf("scheduled_maintenance: archive %s %s: stopped at the %d-batch per-cycle bound, still behind — its gc is skipped this cycle because the archive did not finish; the next cycle continues from the watermark",
 			db, export, maintenanceArchiveMaxBatchesPerExport)
 	}
 }
@@ -534,9 +547,9 @@ func allUnarchived(databases []string) map[string]bool {
 }
 
 // gcDatabasesAfterArchive is the databases a cycle may gc: every database whose
-// archive completed. A database whose export failed skips its gc, because
-// history is not collected where its archive step did not finish. Each skip is
-// logged by name.
+// archive completed. A database whose export failed or stopped still behind
+// skips its gc, because history is not collected where its archive step did not
+// finish. Each skip is logged by name.
 func (d *Daemon) gcDatabasesAfterArchive(databases []string, unarchived map[string]bool) []string {
 	if len(unarchived) == 0 {
 		return databases
@@ -544,7 +557,7 @@ func (d *Daemon) gcDatabasesAfterArchive(databases []string, unarchived map[stri
 	out := make([]string, 0, len(databases))
 	for _, db := range databases {
 		if unarchived[db] {
-			d.logger.Printf("scheduled_maintenance: gc %s: skipped — its history archive failed this run", db)
+			d.logger.Printf("scheduled_maintenance: gc %s: skipped — its history archive did not finish this run", db)
 			continue
 		}
 		out = append(out, db)
@@ -613,6 +626,15 @@ const (
 	archiveStopFailed
 )
 
+// archiveStopLeftBehind reports whether a stop leaves the database possibly
+// behind: the budget or the per-cycle batch bound ended the loop after a full
+// batch. Such a database is unarchived for the run and its gc is skipped. A
+// short batch or a batch that could not advance means nothing is known to be
+// behind, so the database is not marked.
+func archiveStopLeftBehind(stop archiveStop) bool {
+	return stop == archiveStopBudget || stop == archiveStopCapped
+}
+
 // archiveUntilCaughtUp takes batches of one database's export, each starting at
 // the watermark the previous one recorded, until nothing more is behind or the
 // budget ends. It stops when a batch's read returned fewer rows than the bound
@@ -626,10 +648,11 @@ const (
 // out of the way itself (maintenanceArchiveEvents), so a page short only after
 // filtering never ends the loop with rows still behind (gt-o4sk8.1). The first
 // batch always runs, even past the deadline, so every database gets its one
-// batch in a cycle; the deadline only stops the extra ones. The caller logs
-// archiveStopBudget and archiveStopCapped, so an operator can tell the database
-// is still behind. The batch itself has already kept the watermark unchanged on
-// a failure (gt-7nxj4).
+// batch in a cycle; the deadline only stops the extra ones. The caller marks
+// the database unarchived and logs the reason on archiveStopBudget and
+// archiveStopCapped, so the gc waits and an operator can tell the database is
+// still behind. The batch itself has already kept the watermark unchanged on a
+// failure (gt-7nxj4).
 //
 // archived sums the rows the batches wrote, which the request path reports and
 // the 03:00 cycle ignores. read is what a batch's read returned and decides the
