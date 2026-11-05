@@ -141,6 +141,7 @@ func (r *Run) registryTarget(ctx context.Context, keep int) *registry.Target {
 	return registry.NewTarget(registry.Config{
 		Base:         "http://" + r.Cfg.Registry,
 		Kubeconfig:   r.Cfg.RegistryKubeconfig,
+		Context:      diskmaint.SandboxContext,
 		RecordsDir:   r.Cfg.SandboxRecords,
 		Container:    registryContainer,
 		Keep:         keep,

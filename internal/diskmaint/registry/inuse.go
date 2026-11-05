@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -134,9 +135,17 @@ func registryHostPort(host string) bool {
 // unreadable input or a name failing validation returns an error, never an
 // empty set: a plan that reads "nothing is running" deletes what is
 // (docs/plans/2026-10-28-disk-maintenance-design.md, rule 4).
-func ReadInUse(ctx context.Context, run diskmaint.Runner, kubeconfig, recordsDir string) (InUse, error) {
+//
+// The pod read names kubeContext, so it never depends on the kubeconfig's
+// current-context. An empty context refuses the read rather than letting
+// kubectl pick the file's own context or fall back to localhost.
+func ReadInUse(ctx context.Context, run diskmaint.Runner, kubeconfig, kubeContext, recordsDir string) (InUse, error) {
+	if kubeContext == "" {
+		return InUse{}, errors.New("in use: no cluster context: registry.Config.Context names none")
+	}
 	inUse := InUse{Digests: map[string]bool{}, Tags: map[string]bool{}, Repos: map[string]bool{}}
-	out, err := run(ctx, nil, "kubectl", "--kubeconfig", kubeconfig, "get", "pods", "-A", "-o", "json")
+	args := append(diskmaint.KubectlArgs(kubeconfig, kubeContext), "get", "pods", "-A", "-o", "json")
+	out, err := run(ctx, nil, "kubectl", args...)
 	if err != nil {
 		return InUse{}, fmt.Errorf("in use: kubectl get pods: %w", err)
 	}

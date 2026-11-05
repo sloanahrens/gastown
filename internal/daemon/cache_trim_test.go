@@ -81,6 +81,8 @@ func newCacheTrimFixture(t *testing.T, mode string, overrides map[string]cliRepl
 			return reply
 		}
 		switch {
+		case verb == cacheTrimPreflightVerb:
+			return cliReply{stdout: diskMaintSandboxContext + "\n"}
 		case verb == cacheTrimClaimsVerb:
 			return cliReply{stdout: cacheTrimClaimsJSON}
 		case strings.HasPrefix(verb, "get pods "):
@@ -144,13 +146,14 @@ func (f *cacheTrimFixture) setProfiles(profiles map[string]agentconfig.SandboxPr
 // names the namespace every trim after it runs in.
 const cacheTrimClaimsVerb = "get persistentvolumeclaim -A -o json"
 
-// cacheTrimVerb is a kubectl call's verb and arguments, without the
-// kubeconfig the daemon puts first.
+// cacheTrimVerb is a kubectl call's verb and arguments, without the kubeconfig
+// and the context every trim call names first. A call carrying only one of the
+// two is no trim call and reads as "".
 func cacheTrimVerb(args []string) string {
-	if len(args) < 3 || args[0] != "--kubeconfig" {
+	if len(args) < 5 || args[0] != "--kubeconfig" || args[2] != "--context" {
 		return ""
 	}
-	return strings.Join(args[2:], " ")
+	return strings.Join(args[4:], " ")
 }
 
 // verbs returns the kubectl verbs the pass ran, in call order.
@@ -278,13 +281,16 @@ func TestDiskMaintenanceCacheTrimScopesEveryCallToTheClaimNamespace(t *testing.T
 	f.d.runDiskMaintenance()
 
 	calls := f.verbs()
-	if len(calls) == 0 {
-		t.Fatal("the pass ran no kubectl call")
+	if len(calls) < 2 {
+		t.Fatalf("the pass ran %d kubectl calls, want the preflight and then the claim listing", len(calls))
 	}
-	if calls[0] != cacheTrimClaimsVerb {
-		t.Fatalf("the first kubectl call is %q, want the claim listing %q", calls[0], cacheTrimClaimsVerb)
+	if calls[0] != cacheTrimPreflightVerb {
+		t.Fatalf("the first kubectl call is %q, want the context preflight %q", calls[0], cacheTrimPreflightVerb)
 	}
-	for _, verb := range calls[1:] {
+	if calls[1] != cacheTrimClaimsVerb {
+		t.Fatalf("the second kubectl call is %q, want the claim listing %q", calls[1], cacheTrimClaimsVerb)
+	}
+	for _, verb := range calls[2:] {
 		if !slices.Contains(strings.Fields(verb), "-n") || !strings.Contains(verb, "-n "+cacheTrimNamespace) {
 			t.Errorf("the call %q does not name the claim's namespace %s", verb, cacheTrimNamespace)
 		}
@@ -883,5 +889,195 @@ func TestCacheTrimUsesTheHelpersKubeconfig(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestCacheTrimNamesTheContextOnEveryCall pins the prefix every cluster call
+// carries: the kubeconfig the helper picks and the sandbox context, from the
+// one shared helper, so no call relies on the kubeconfig's current-context
+// (gt-gg9hv.24.6). It walks a full apply pass, so every verb the trim issues is
+// in the table.
+func TestCacheTrimNamesTheContextOnEveryCall(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, nil)
+	f.d.runDiskMaintenance()
+
+	kubeconfig := filepath.Join(f.d.config.TownRoot, filepath.FromSlash(diskMaintHostKubeconfig))
+	wantPrefix := diskmaint.KubectlArgs(kubeconfig, diskMaintSandboxContext)
+	calls := f.cli.recorded()
+	if len(calls) == 0 {
+		t.Fatal("the pass ran no cluster call")
+	}
+	for _, call := range calls {
+		if len(call.args) < len(wantPrefix) || !slices.Equal(call.args[:len(wantPrefix)], wantPrefix) {
+			t.Errorf("cluster call %v does not start with %v", call.args, wantPrefix)
+		}
+	}
+
+	wantVerbs := []string{
+		cacheTrimPreflightVerb,
+		cacheTrimClaimsVerb,
+		"get pods -n " + cacheTrimNamespace + " -o json",
+		"exec -n " + cacheTrimNamespace + " sbx-a -c agent -- " + cachevol.HelperPath + " trim-list --root " + cacheTrimMountPath,
+		"delete job " + cacheTrimJob + " -n " + cacheTrimNamespace + " --ignore-not-found --wait=true --timeout=60s",
+		"apply -f - -n " + cacheTrimNamespace,
+		"wait --for=condition=complete job/" + cacheTrimJob + " -n " + cacheTrimNamespace + " --timeout=120s",
+		"delete configmap -n " + cacheTrimNamespace + " -l app.kubernetes.io/managed-by=gt,app.kubernetes.io/name=polecat-cache-trim",
+	}
+	got := f.verbs()
+	for _, want := range wantVerbs {
+		if !slices.Contains(got, want) {
+			t.Errorf("the pass never ran %q; calls: %v", want, got)
+		}
+	}
+}
+
+// TestCacheTrimRefusesAKubeconfigWithNoContext pins the preflight: a kubeconfig
+// that names a cluster but no sandbox context stops the pass after that one
+// call, with the specific line, and trims nothing. kubectl would otherwise fall
+// back to the file's current-context or to localhost:8080.
+func TestCacheTrimRefusesAKubeconfigWithNoContext(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+		cacheTrimPreflightVerb: {stdout: ""},
+	})
+	f.d.runDiskMaintenance()
+
+	kubeconfig := filepath.Join(f.d.config.TownRoot, filepath.FromSlash(diskMaintHostKubeconfig))
+	want := `disk_maintenance: cache trim: kubeconfig ` + kubeconfig +
+		` names no context "` + diskMaintSandboxContext + `"; nothing trimmed`
+	if logged := f.log.String(); !strings.Contains(logged, want) {
+		t.Errorf("log = %q, want the line %q", logged, want)
+	}
+	if got := f.verbs(); len(got) != 1 || got[0] != cacheTrimPreflightVerb {
+		t.Errorf("the pass ran %v, want the context preflight alone", got)
+	}
+	for _, call := range f.cli.recorded() {
+		if strings.HasPrefix(cacheTrimVerb(call.args), "apply ") {
+			t.Errorf("the pass applied a trim from a kubeconfig with no context: %q", cacheTrimVerb(call.args))
+		}
+	}
+}
+
+// TestDiskMaintSandboxContextEndToEnd runs the complete pass behind a cluster
+// client that behaves like kubectl against a kubeconfig with no current-context:
+// any call that does not name the sandbox context is refused with the fallback
+// to localhost:8080, and a call that names it is answered. The pass must reach
+// the listing step and apply the trim.
+func TestDiskMaintSandboxContextEndToEnd(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, nil)
+	inner := f.cli.answer
+	f.cli.answer = func(c cliCall) cliReply {
+		for i := 0; i+1 < len(c.args); i++ {
+			if c.args[i] == "--context" && c.args[i+1] == diskMaintSandboxContext {
+				return inner(c)
+			}
+		}
+		return cliReply{
+			stderr: "The connection to the server localhost:8080 was refused - did you specify the right host or port?",
+			code:   1,
+		}
+	}
+	f.d.runDiskMaintenance()
+
+	exec := "exec -n " + cacheTrimNamespace + " sbx-a -c agent -- " + cachevol.HelperPath + " trim-list --root " + cacheTrimMountPath
+	if _, ok := f.indexOf(exec); !ok {
+		t.Fatalf("the pass never read the listing; calls: %v", f.verbs())
+	}
+	if applied := f.applied(t); len(applied) != 2 {
+		t.Errorf("the pass applied %v, want the shard and the Job", applied)
+	}
+}
+
+// TestCacheTrimFailureRetriesSoonAndLogsOnce pins the schedule: a run that
+// cannot start records a retry fifteen minutes later rather than the full two
+// hours, the same refusal is said once in the hour, and a run that reaches a
+// verdict spends the full interval.
+func TestCacheTrimFailureRetriesSoonAndLogsOnce(t *testing.T) {
+	t.Parallel()
+	overrides := map[string]cliReply{cacheTrimPreflightVerb: {stdout: ""}}
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, overrides)
+	now := diskMaintNow
+	f.d.diskMaint.now = func() time.Time { return now }
+	trims := 0
+	profiles := f.d.diskMaint.sandboxes
+	f.d.diskMaint.sandboxes = func() (map[string]agentconfig.SandboxProfile, error) {
+		trims++
+		return profiles()
+	}
+	const refusal = `names no context "` + diskMaintSandboxContext + `"`
+
+	f.d.runDiskMaintenance() // 04:45: the trim cannot start
+	if trims != 1 {
+		t.Fatalf("trimmed %d times at the first tick, want 1", trims)
+	}
+	if got := strings.Count(f.log.String(), refusal); got != 1 {
+		t.Fatalf("logged the refusal %d times, want 1: %s", got, f.log.String())
+	}
+
+	now = now.Add(5 * time.Minute)
+	f.d.runDiskMaintenance() // 04:50: a failed run is due in fifteen minutes, not now
+	if trims != 1 {
+		t.Fatalf("trimmed %d times five minutes after a failure, want 1: a retry is due at fifteen", trims)
+	}
+
+	now = now.Add(10 * time.Minute)
+	f.d.runDiskMaintenance() // 05:00: the retry
+	if trims != 2 {
+		t.Fatalf("trimmed %d times fifteen minutes after a failure, want 2", trims)
+	}
+
+	now = now.Add(30 * time.Minute)
+	f.d.runDiskMaintenance() // 05:30: the next retry, still inside the hour
+	if trims != 3 {
+		t.Fatalf("trimmed %d times at the second retry, want 3", trims)
+	}
+	if got := strings.Count(f.log.String(), refusal); got != 1 {
+		t.Errorf("logged the same refusal %d times within the hour, want once: %s", got, f.log.String())
+	}
+
+	// The cluster recovers: a verdict spends the full interval, so the next run
+	// is due two hours later.
+	delete(overrides, cacheTrimPreflightVerb)
+	now = now.Add(15 * time.Minute)
+	f.d.runDiskMaintenance() // 05:45: the retry after the last failure
+	if trims != 4 {
+		t.Fatalf("trimmed %d times at the retry after the cluster recovered, want 4", trims)
+	}
+
+	now = now.Add(time.Hour + 59*time.Minute)
+	f.d.runDiskMaintenance()
+	if trims != 4 {
+		t.Fatalf("trimmed %d times a minute short of the interval, want 4", trims)
+	}
+	now = now.Add(time.Minute)
+	f.d.runDiskMaintenance()
+	if trims != 5 {
+		t.Fatalf("trimmed %d times two hours after the verdict, want 5", trims)
+	}
+}
+
+// TestCacheTrimRefusesAnUnreadableKubeconfig pins the preflight's other
+// refusal: a kubeconfig kubectl cannot read stops the pass after that one call
+// with a line naming the read, and trims nothing. It is a failure, not a
+// verdict, so the patrol retries it soon.
+func TestCacheTrimRefusesAnUnreadableKubeconfig(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+		cacheTrimPreflightVerb: {stderr: "error: no configuration has been provided", code: 2},
+	})
+	f.d.runDiskMaintenance()
+
+	if logged := f.log.String(); !strings.Contains(logged, "the kubeconfig could not be read") {
+		t.Errorf("log = %q, want the preflight's read failure named", logged)
+	}
+	if got := f.verbs(); len(got) != 1 || got[0] != cacheTrimPreflightVerb {
+		t.Errorf("the pass ran %v, want the context preflight alone", got)
+	}
+	for _, call := range f.cli.recorded() {
+		if strings.HasPrefix(cacheTrimVerb(call.args), "apply ") {
+			t.Errorf("the pass applied a trim from a kubeconfig it could not read: %q", cacheTrimVerb(call.args))
+		}
 	}
 }
