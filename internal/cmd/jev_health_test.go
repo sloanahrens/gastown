@@ -42,11 +42,26 @@ func newJevHealthTown(t *testing.T, now time.Time, cursorAge time.Duration) stri
 	line := fmt.Sprintf(`{"ts":%q,"answers":{"q":"a"}}`, now.Add(-time.Minute).UTC().Format(time.RFC3339))
 	require.NoError(t, os.WriteFile(filepath.Join(jevDir, "dedupe.jsonl"), []byte(line+"\n"), 0o600))
 
+	// The daemon's last-run record: dedupe's patrol ran as often as the cursor
+	// was last written, so a stale cursor here is also a stale patrol.
+	writeJevPatrolRuns(t, town, map[string]time.Time{"jev_dedupe": now.Add(-cursorAge)})
+
 	writeJevSpendLedger(t, town,
 		jevSpendLine(now.Add(-30*time.Minute), "jev-dedupe", 100, 50),
 		jevSpendLine(now.Add(-20*time.Minute), "jev-thrash", 100, 50),
 	)
 	return town
+}
+
+// writeJevPatrolRuns writes the daemon's last-run record with each patrol's
+// last completion time.
+func writeJevPatrolRuns(t *testing.T, town string, runs map[string]time.Time) {
+	t.Helper()
+	dir := filepath.Join(town, "daemon")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	data, err := json.Marshal(map[string]any{"last_run": runs})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, patrolLastRunFile), data, 0o644))
 }
 
 // jevHealthFailingWriter refuses every write, for the report's write failures.
@@ -254,6 +269,107 @@ func TestJevHealthReportsAWriteFailure(t *testing.T) {
 			t.Parallel()
 			err := runJevHealthError(t, townFinder(town), jevHealthFailingWriter{}, args...)
 			require.Error(t, err)
+		})
+	}
+}
+
+// TestJevHealthJSON reads the --json rows for a quiet battery: its cursor is
+// nine hours old, but the daemon recorded its patrol's last run three minutes
+// ago. The row carries both times, names the quiet stretch, and reads ok.
+func TestJevHealthJSON(t *testing.T) {
+	t.Parallel()
+	now := jevHealthFixedNow()
+	town := newJevHealthTown(t, now, 9*time.Hour)
+	writeJevPatrolRuns(t, town, map[string]time.Time{"jev_dedupe": now.Add(-3 * time.Minute)})
+
+	out, err := runJevHealthCommand(t, town, now, true)
+	require.NoError(t, err)
+	assert.Contains(t, out, `"last_event"`)
+	assert.Contains(t, out, `"last_pass"`)
+
+	var doc jevHealthDoc
+	require.NoError(t, json.Unmarshal([]byte(out), &doc))
+	dedupe := jevHealthRow(t, doc.Batteries, "dedupe")
+	assert.Equal(t, health.OK, dedupe.Status, "reason %q", dedupe.Reason)
+	assert.Equal(t, "no events since 03:00Z; last pass 3m ago", dedupe.Reason)
+	require.NotNil(t, dedupe.LastEvent)
+	require.NotNil(t, dedupe.LastPass)
+	assert.WithinDuration(t, now.Add(-9*time.Hour), *dedupe.LastEvent, time.Second)
+	assert.WithinDuration(t, now.Add(-3*time.Minute), *dedupe.LastPass, time.Second)
+}
+
+// TestJevHealthMissingPatrolRecordIsNotOK removes the daemon's last-run record
+// from an otherwise healthy town: dedupe reads unknown, not ok, and the command
+// exits 1.
+func TestJevHealthMissingPatrolRecordIsNotOK(t *testing.T) {
+	t.Parallel()
+	now := jevHealthFixedNow()
+	town := newJevHealthTown(t, now, 5*time.Minute)
+	require.NoError(t, os.Remove(filepath.Join(town, "daemon", patrolLastRunFile)))
+
+	out, err := runJevHealthCommand(t, town, now, false)
+	code, ok := IsSilentExit(err)
+	require.True(t, ok, "want a silent coded exit, got %v", err)
+	assert.Equal(t, 1, code)
+	row := jevHealthTableRow(t, out, "dedupe")
+	assert.Contains(t, row, " unknown")
+	assert.Contains(t, row, "last-run file unreadable: patrol_last_run.json is missing")
+}
+
+// TestJevHealthPatrolRuns reads the daemon's last-run record: a valid record
+// gives each patrol's time, and a missing or corrupt one is an error that names
+// the file and not its contents.
+func TestJevHealthPatrolRuns(t *testing.T) {
+	t.Parallel()
+	now := jevHealthFixedNow()
+
+	cases := []struct {
+		name    string
+		write   func(t *testing.T, town string)
+		wantErr string
+	}{
+		{name: "missing", wantErr: "patrol_last_run.json is missing"},
+		{
+			name: "unreadable",
+			write: func(t *testing.T, town string) {
+				// A directory where the record should be: the read fails, and the file is not missing.
+				require.NoError(t, os.MkdirAll(filepath.Join(town, "daemon", patrolLastRunFile), 0o755))
+			},
+			wantErr: "reading patrol_last_run.json",
+		},
+		{
+			name: "corrupt",
+			write: func(t *testing.T, town string) {
+				dir := filepath.Join(town, "daemon")
+				require.NoError(t, os.MkdirAll(dir, 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(dir, patrolLastRunFile), []byte(`{"last_run": {not json`), 0o644))
+			},
+			wantErr: "patrol_last_run.json is not valid JSON",
+		},
+		{
+			name: "valid",
+			write: func(t *testing.T, town string) {
+				writeJevPatrolRuns(t, town, map[string]time.Time{"jev_dedupe": now.Add(-3 * time.Minute)})
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			if tc.write != nil {
+				tc.write(t, town)
+			}
+			runs := jevHealthPatrolRuns(town)
+			if tc.wantErr != "" {
+				require.Error(t, runs.err)
+				assert.Contains(t, runs.err.Error(), tc.wantErr)
+				assert.NotContains(t, runs.err.Error(), "not json", "the error must not quote the file")
+				return
+			}
+			require.NoError(t, runs.err)
+			assert.WithinDuration(t, now.Add(-3*time.Minute), runs.at["jev_dedupe"], time.Second)
 		})
 	}
 }

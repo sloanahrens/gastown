@@ -1,6 +1,7 @@
 package health_test
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -633,4 +634,180 @@ func TestFutureLinesNameNoPass(t *testing.T) {
 		assert.Equal(t, health.Late, notes.Status, "reason %q", notes.Reason)
 		assert.Equal(t, "last pass 9d ago", notes.Reason)
 	})
+}
+
+// patrolInput is a continuous battery whose cursor was written cursorAge ago
+// and whose daemon last-run record says its patrol last ran patrolAge ago.
+func patrolInput(now time.Time, cursorAge, patrolAge time.Duration) health.Input {
+	in := cursorInput(now, cursorAge)
+	in.PatrolRun, in.HasPatrolRun = now.Add(-patrolAge), true
+	return in
+}
+
+// withRecordErr sets the reason the daemon's last-run record could not be read.
+func withRecordErr(in health.Input, err error) health.Input {
+	in.PatrolRunErr = err
+	return in
+}
+
+// judgeRow judges one battery over its input and returns that battery's row.
+func judgeRow(t *testing.T, now time.Time, battery, key string, in health.Input) health.Row {
+	t.Helper()
+	rows := health.Report(health.Config{Enabled: enabled(key)}, map[string]health.Input{battery: in}, nil, now)
+	for _, r := range rows {
+		if r.Name == battery {
+			return r
+		}
+	}
+	t.Fatalf("no %s row", battery)
+	return health.Row{}
+}
+
+// TestJudgeLastRun judges a continuous battery by its patrol's recorded last
+// run: an idle pass moves no cursor, so a nine-hour-old cursor with a fresh
+// patrol run is ok, and a stale patrol run is stale whatever the cursor says.
+func TestJudgeLastRun(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name       string
+		in         health.Input
+		want       health.Status
+		reason     string
+		lastPassAt time.Time
+	}{
+		{
+			name:       "a quiet pass with an old cursor is ok, and the reason names both times",
+			in:         patrolInput(now, 9*time.Hour, 3*time.Minute),
+			want:       health.OK,
+			reason:     "no events since 03:00Z; last pass 3m ago",
+			lastPassAt: now.Add(-3 * time.Minute),
+		},
+		{
+			name:       "a patrol run two hours old is stale with a fresh cursor",
+			in:         patrolInput(now, 5*time.Minute, 2*time.Hour),
+			want:       health.Stale,
+			reason:     "no events since 11:55Z; last pass 2h ago",
+			lastPassAt: now.Add(-2 * time.Hour),
+		},
+		{
+			name:       "a patrol run two hours old is stale with an old cursor too",
+			in:         patrolInput(now, 9*time.Hour, 2*time.Hour),
+			want:       health.Stale,
+			reason:     "no events since 03:00Z; last pass 2h ago",
+			lastPassAt: now.Add(-2 * time.Hour),
+		},
+		{
+			name:       "a patrol run at the stale bound is ok",
+			in:         patrolInput(now, 9*time.Hour, health.StaleAfter),
+			want:       health.OK,
+			reason:     "no events since 03:00Z; last pass 45m ago",
+			lastPassAt: now.Add(-health.StaleAfter),
+		},
+		{
+			name:       "a patrol run just past the stale bound is stale",
+			in:         patrolInput(now, 5*time.Minute, health.StaleAfter+time.Second),
+			want:       health.Stale,
+			reason:     "no events since 11:55Z; last pass 45m ago",
+			lastPassAt: now.Add(-health.StaleAfter - time.Second),
+		},
+		{
+			name:       "no entry for the patrol falls back to a fresh cursor",
+			in:         cursorInput(now, 5*time.Minute),
+			want:       health.OK,
+			lastPassAt: now.Add(-5 * time.Minute),
+		},
+		{
+			name:       "no entry for the patrol falls back to an old cursor and is stale",
+			in:         cursorInput(now, 2*time.Hour),
+			want:       health.Stale,
+			reason:     "last pass 2h ago",
+			lastPassAt: now.Add(-2 * time.Hour),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			row := judgeRow(t, now, "dedupe", "jev_dedupe", tc.in)
+			assert.Equal(t, tc.want, row.Status, "reason %q", row.Reason)
+			if tc.reason != "" {
+				assert.Equal(t, tc.reason, row.Reason)
+			}
+			require.NotNil(t, row.LastPass)
+			assert.WithinDuration(t, tc.lastPassAt, *row.LastPass, time.Second, "the last pass the row shows")
+		})
+	}
+}
+
+// TestJudgeLastRunUnreadable covers a missing or corrupt last-run record: the
+// continuous battery falls back to its cursor, says the record was unreadable,
+// and never reads as ok. A battery whose rule does not read the record is
+// judged as before.
+func TestJudgeLastRunUnreadable(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	missing := errors.New("patrol_last_run.json is missing")
+	corrupt := errors.New("patrol_last_run.json is not valid JSON")
+
+	cases := []struct {
+		name       string
+		battery    string
+		key        string
+		in         health.Input
+		want       health.Status
+		reason     string
+		lastPassAt time.Time
+	}{
+		{
+			name:       "a missing record with a fresh cursor is unknown, not ok",
+			battery:    "dedupe",
+			key:        "jev_dedupe",
+			in:         withRecordErr(cursorInput(now, 5*time.Minute), missing),
+			want:       health.Unknown,
+			reason:     "last pass 5m ago; last-run file unreadable: patrol_last_run.json is missing",
+			lastPassAt: now.Add(-5 * time.Minute),
+		},
+		{
+			name:       "a corrupt record with a stale cursor is stale and names the record",
+			battery:    "dedupe",
+			key:        "jev_dedupe",
+			in:         withRecordErr(cursorInput(now, 2*time.Hour), corrupt),
+			want:       health.Stale,
+			reason:     "last pass 2h ago; last-run file unreadable: patrol_last_run.json is not valid JSON",
+			lastPassAt: now.Add(-2 * time.Hour),
+		},
+		{
+			name:    "a corrupt record with no cursor and no lines is stale",
+			battery: "dedupe",
+			key:     "jev_dedupe",
+			in:      withRecordErr(logInput(), corrupt),
+			want:    health.Stale,
+			reason:  "no pass recorded; last-run file unreadable: patrol_last_run.json is not valid JSON",
+		},
+		{
+			name:       "a weekly battery does not read the record, so a missing one changes nothing",
+			battery:    "notes",
+			key:        "jev_notes",
+			in:         withRecordErr(logInput(logLine(now.Add(-time.Hour), `{"q":"a"}`)), missing),
+			want:       health.OK,
+			lastPassAt: now.Add(-time.Hour),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			row := judgeRow(t, now, tc.battery, tc.key, tc.in)
+			assert.Equal(t, tc.want, row.Status, "reason %q", row.Reason)
+			if tc.reason != "" {
+				assert.Equal(t, tc.reason, row.Reason)
+			}
+			if !tc.lastPassAt.IsZero() {
+				require.NotNil(t, row.LastPass)
+				assert.WithinDuration(t, tc.lastPassAt, *row.LastPass, time.Second)
+			}
+		})
+	}
 }

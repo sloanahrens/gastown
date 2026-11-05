@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"text/tabwriter"
 	"time"
 
@@ -59,13 +60,15 @@ that carry no answers, and how many of its log lines did not parse.
 A battery is ok; disabled, when the town has not turned it on under
 patrols.<name>; idle by design, for the batteries only an event writes
 (progress, failcause, and targets while scheduled_slings is off), where a
-quiet log is expected; stale, for a continuous battery more than %s
-behind, or for a landing battery the town landed past without a line;
-late, for a weekly battery more than %s behind; low, when a battery with
-a median of %d or more lines a day wrote under %s of it; unanswered,
-when over %s of its last day's lines carry no answers; unparseable, when
-its log holds lines and none of them parses; or unknown, when a landing
-battery has no landing clock to be judged against.
+quiet log is expected; stale, for a continuous battery whose patrol has not
+run for more than %s, or for a landing battery the town landed past
+without a line; late, for a weekly battery more than %s behind; low, when a
+battery with a median of %d or more lines a day wrote under %s of it;
+unanswered, when over %s of its last day's lines carry no answers;
+unparseable, when its log holds lines and none of them parses; or unknown,
+when a landing battery has no landing clock to be judged against, or a
+continuous battery's patrol last-run record cannot be read and its cursor is
+not stale.
 
 The exit status is 1 when any enabled battery that is not idle by design is
 stale, late, low, unanswered, unparseable or unknown, and 0 otherwise, so one
@@ -159,13 +162,53 @@ func jevHealthConfig(cfg *daemon.DaemonPatrolConfig) health.Config {
 	return out
 }
 
-// jevHealthInputs reads every battery's files, keyed by battery name.
+// patrolLastRunFile is the daemon's record of each patrol's last completion, one
+// time per patrol under last_run, written after every pass.
+const patrolLastRunFile = "patrol_last_run.json"
+
+// patrolRuns is the daemon's last-run record: each patrol's last completion
+// time, or err when the record could not be read.
+type patrolRuns struct {
+	at  map[string]time.Time
+	err error
+}
+
+// jevHealthPatrolRuns reads the daemon's last-run record. A missing, corrupt or
+// unreadable record is an err on the result and not a failure of the command:
+// the batteries judged against it fall back to their cursors and say so.
+func jevHealthPatrolRuns(townRoot string) patrolRuns {
+	path := filepath.Join(townRoot, "daemon", patrolLastRunFile)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: the path is the town's daemon directory
+	if errors.Is(err, fs.ErrNotExist) {
+		return patrolRuns{err: fmt.Errorf("%s is missing", patrolLastRunFile)}
+	}
+	if err != nil {
+		return patrolRuns{err: fmt.Errorf("reading %s: %w", patrolLastRunFile, err)}
+	}
+	var doc struct {
+		LastRun map[string]time.Time `json:"last_run"`
+	}
+	// The decoder's message can quote the file, so the error names only the file.
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return patrolRuns{err: fmt.Errorf("%s is not valid JSON", patrolLastRunFile)}
+	}
+	return patrolRuns{at: doc.LastRun}
+}
+
+// jevHealthInputs reads every battery's files, keyed by battery name. The
+// daemon's last-run record is read once and each battery takes its own patrol's
+// entry, keyed by the battery's config key, which is the patrol's name.
 func jevHealthInputs(townRoot string) (map[string]health.Input, error) {
+	runs := jevHealthPatrolRuns(townRoot)
 	inputs := make(map[string]health.Input, len(health.Batteries))
 	for _, b := range health.Batteries {
 		in, err := jevHealthInput(townRoot, b)
 		if err != nil {
 			return nil, err
+		}
+		in.PatrolRunErr = runs.err
+		if t, ok := runs.at[b.ConfigKey]; runs.err == nil && ok && !t.IsZero() {
+			in.PatrolRun, in.HasPatrolRun = t, true
 		}
 		inputs[b.Name] = in
 	}

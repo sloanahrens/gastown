@@ -76,7 +76,9 @@ const (
 	// counting only the readable part would pass a half-broken log as ok.
 	Drifted Status = "drifted"
 	// Unknown means the evidence a rule needs cannot be read: a battery only a
-	// landing writes, judged against a landing clock the town has not recorded.
+	// landing writes, judged against a landing clock the town has not recorded,
+	// or a continuous battery whose patrol last-run record cannot be read while
+	// its cursor is fresh.
 	Unknown Status = "unknown"
 )
 
@@ -236,6 +238,14 @@ type Input struct {
 	// battery that has never written; a log that exists with no readable line
 	// is a schema change, and only this tells them apart.
 	LogPresent bool
+	// PatrolRun is when the daemon's last-run record says the battery's patrol
+	// last ran, and HasPatrolRun is false when the record holds no entry for it.
+	PatrolRun    time.Time
+	HasPatrolRun bool
+	// PatrolRunErr is why the daemon's last-run record could not be read: it is
+	// missing, corrupt or unreadable. Nil when it was read. A continuous battery
+	// judged with it set falls back to its cursor and never reads as ok.
+	PatrolRunErr error
 }
 
 // landingClockKnown is whether the landing battery's log can say when the town
@@ -262,7 +272,13 @@ type Row struct {
 	Name    string  `json:"name"`
 	Enabled bool    `json:"enabled"`
 	Cadence Cadence `json:"cadence"`
-	// LastPass is nil when no pass is recorded.
+	// LastEvent is when the battery last handled an event: its cursor's time, or
+	// its newest log line for a battery that keeps no cursor. Nil when neither
+	// exists.
+	LastEvent *time.Time `json:"last_event"`
+	// LastPass is nil when no pass is recorded. For a continuous battery it is
+	// the patrol's last run from the daemon's record, and for every other battery
+	// it is the last event.
 	LastPass      *time.Time `json:"last_pass"`
 	Lines24       int        `json:"lines_24h"`
 	Median7       int        `json:"median_7d"`
@@ -314,7 +330,10 @@ func judge(b Battery, cfg Config, in Input, ledger map[string]int, landingKnown 
 		NoAnswerShare: noAnswerShare(in.Log, now),
 		Unparsed:      in.Unparsed,
 	}
-	if t, ok := lastPass(in, now); ok {
+	if t, ok := lastEvent(in, now); ok {
+		row.LastEvent = &t
+	}
+	if t, ok := lastPass(b, in, now); ok {
 		row.LastPass = &t
 	}
 	row.judgeStatus(b, cfg, in, landingKnown, landings24, now)
@@ -338,8 +357,12 @@ func unparsedShare(in Input) float64 {
 }
 
 // reasonWith joins a verdict's reason with a note about the row, "; " between.
+// An empty note leaves the reason as it is.
 func reasonWith(reason, note string) string {
-	if reason == "" {
+	switch {
+	case note == "":
+		return reason
+	case reason == "":
 		return note
 	}
 	return reason + "; " + note
@@ -380,7 +403,7 @@ func (r *Row) judgeStatus(b Battery, cfg Config, in Input, landingKnown bool, la
 		} else {
 			r.Status = Stale
 		}
-		r.Reason = "no pass recorded"
+		r.Reason = reasonWith("no pass recorded", unreadableNote(b, in))
 		return
 	}
 	age := now.Sub(*r.LastPass)
@@ -393,11 +416,51 @@ func (r *Row) judgeStatus(b Battery, cfg Config, in Input, landingKnown bool, la
 			return
 		}
 	} else if age > StaleAfter {
-		r.Status, r.Reason = Stale, "last pass "+ageText(age)+" ago"
+		r.Status, r.Reason = Stale, reasonWith(r.passReason(b, in, age), unreadableNote(b, in))
+		return
+	}
+
+	// A continuous battery whose last-run record cannot be read has a pass time
+	// only from its cursor, which a quiet pass does not move. A fresh cursor is
+	// not proof the patrol ran, so the row is unknown and never ok.
+	if note := unreadableNote(b, in); note != "" {
+		r.Status, r.Reason = Unknown, reasonWith(r.passReason(b, in, age), note)
 		return
 	}
 
 	r.judgeCounts()
+	if r.Status == OK && patrolRecorded(b, in) {
+		r.Reason = r.passReason(b, in, age)
+	}
+}
+
+// patrolRecorded is whether a continuous battery's pass time comes from the
+// daemon's last-run record, which is readable and holds an entry for the patrol.
+func patrolRecorded(b Battery, in Input) bool {
+	return b.Cadence == QuarterHour && in.HasPatrolRun && in.PatrolRunErr == nil
+}
+
+// unreadableNote names a continuous battery's unreadable last-run record for
+// its reason, and is empty for every other battery.
+func unreadableNote(b Battery, in Input) string {
+	if b.Cadence != QuarterHour || in.PatrolRunErr == nil {
+		return ""
+	}
+	return fmt.Sprintf("last-run file unreadable: %v", in.PatrolRunErr)
+}
+
+// passReason says how long ago the battery last passed. When the pass comes
+// from the daemon's record it names the last event as well, so a quiet battery
+// reads as "no events since 04:14Z; last pass 3m ago" and not as a missed pass.
+func (r *Row) passReason(b Battery, in Input, age time.Duration) string {
+	last := "last pass " + ageText(age) + " ago"
+	if !patrolRecorded(b, in) {
+		return last
+	}
+	if r.LastEvent == nil {
+		return "no events recorded; " + last
+	}
+	return "no events since " + r.LastEvent.UTC().Format("15:04") + "Z; " + last
 }
 
 // judgeLanding judges a battery only a landing writes by whether the town kept
@@ -435,9 +498,20 @@ func (r *Row) judgeCounts() {
 	r.Status = OK
 }
 
-// lastPass is the time the battery last ran: its cursor file's modification
-// time, or the newest line of a battery that keeps no cursor or has none yet.
-func lastPass(in Input, now time.Time) (time.Time, bool) {
+// lastPass is the time the battery last ran. A continuous battery's pass is its
+// patrol's recorded last run whenever that record can be read; every other
+// battery, and a continuous one with no readable record, reads its last event.
+func lastPass(b Battery, in Input, now time.Time) (time.Time, bool) {
+	if patrolRecorded(b, in) {
+		return in.PatrolRun, true
+	}
+	return lastEvent(in, now)
+}
+
+// lastEvent is the time the battery last handled an event: its cursor file's
+// modification time, or the newest line of a battery that keeps no cursor or has
+// none yet.
+func lastEvent(in Input, now time.Time) (time.Time, bool) {
 	if in.HasCursor {
 		return in.Cursor, true
 	}
