@@ -88,15 +88,20 @@ func runJevSubmissionPass(out, errw io.Writer, townRoot string) error {
 	if err != nil {
 		return err
 	}
+	writeSubmissionSummary(out, sum)
+	return nil
+}
+
+// writeSubmissionSummary prints the one line a pass ends with.
+func writeSubmissionSummary(out io.Writer, sum submission.Summary) {
 	switch {
 	case sum.Started:
 		fmt.Fprintln(out, "jev submission: first pass; cursor set to now, no submissions asked")
 	case sum.CapReached:
-		fmt.Fprintf(out, "jev submission: asked %d submissions, repeated %d; the daily cap was reached, the rest wait for the next pass\n", sum.Asked, sum.Repeated)
+		fmt.Fprintf(out, "jev submission: asked %d submissions, repeated %d, other rig %d; the daily cap was reached, the rest wait for the next pass\n", sum.Asked, sum.Repeated, sum.OtherRig)
 	default:
-		fmt.Fprintf(out, "jev submission: asked %d submissions, skipped %d, repeated %d\n", sum.Asked, sum.Skipped, sum.Repeated)
+		fmt.Fprintf(out, "jev submission: asked %d submissions, skipped %d, repeated %d, other rig %d\n", sum.Asked, sum.Skipped, sum.Repeated, sum.OtherRig)
 	}
-	return nil
 }
 
 // jevSubmissionSettings reads patrols.jev_submission from the patrol config.

@@ -144,6 +144,10 @@ type Summary struct {
 	// before the landing worker has written its first-sight record, and the
 	// record is listed again by a later pass (gt-v419b).
 	Repeated int
+	// OtherRig is the number of entries of another rig with no stored subjects.
+	// The clone holds only this rig's commits, so the pass cannot read them: it
+	// neither asks about them nor warns, and they are not retried (gt-uy19f).
+	OtherRig int
 	// CapReached is true when the pass stopped because the day's cap was
 	// spent. The submissions it did not reach wait for the next pass.
 	CapReached bool
@@ -161,9 +165,11 @@ var ErrFetch = errors.New("the bare clone could not be fetched")
 // cursor advanced before the next, so a pass stopped partway never asks about
 // a submission twice. An entry the log already holds a line for at the current
 // question version is passed over instead of asked, and counted as Repeated: a
-// submission listed under two seen times is asked once (gt-v419b). An entry
-// whose Ask fails for any reason but an unusable response stops the pass with
-// that error and is asked again by the next one. Run returns ErrBusy when
+// submission listed under two seen times is asked once (gt-v419b). An entry of
+// another rig with no stored subjects is passed over and counted as OtherRig,
+// with no warning and no cap check. An entry whose Ask fails for any reason
+// but an unusable response stops the pass with that error and is asked again
+// by the next one. Run returns ErrBusy when
 // another pass holds the run lock.
 func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	var sum Summary
@@ -200,6 +206,7 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 		synced = true
 		return nil
 	}
+entries:
 	for _, e := range pending(all, cur) {
 		if err := ctx.Err(); err != nil {
 			return sum, err
@@ -214,16 +221,19 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 			}
 		}
 		key := land.SubmissionKey(e.Issue.ID, e.Work.Head)
-		if asked[key] {
+		switch {
+		case asked[key]:
 			sum.Repeated++
-		} else {
+		case otherRig(e):
+			sum.OtherRig++
+		default:
 			allowed, err := p.Allows()
 			if err != nil {
 				return sum, fmt.Errorf("reading today's spend: %w", err)
 			}
 			if !allowed {
 				sum.CapReached = true
-				break
+				break entries
 			}
 			line, err := p.ask(ctx, e, fetch)
 			switch {
@@ -247,6 +257,14 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 		}
 	}
 	return sum, nil
+}
+
+// otherRig reports whether an entry is another rig's submission with no stored
+// subjects. Its commits are on that rig's repository, not the clone this pass
+// reads, so git cannot read its range here. An entry that names no rig is not
+// another rig: it is read as before.
+func otherRig(e Entry) bool {
+	return e.Work.Rig != "" && e.Work.Rig != RigName && len(e.Subjects) == 0
 }
 
 // askedIn returns the bead-and-head keys the log at path holds a line for at
