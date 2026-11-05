@@ -45,18 +45,18 @@ const (
 	RuleBDSlow           = "bd.slow"
 	RuleTierSweepRed     = "sweep.tier_red"
 	RuleTierSweepStarved = "sweep.tier_starved"
+	RuleRevertRefused    = "landing.revert_refused"
+	RuleBlockedMail      = "polecat.blocked"
+	RuleOverrunStopped   = "polecat.overrun_stopped"
+	RuleScheduledGate    = "schedule.gate_failed"
+	RuleHostDiskWarn     = "host.disk_warn"
+	RuleHostDiskCrit     = "host.disk_crit"
+	RuleHostMemLow       = "host.mem_low"
+	RuleHostDockerDown   = "host.docker_stack_down"
+	RuleHostProbe        = "host.probe_failed"
 	// RuleTierSweepStuck is the tier sweep's own key: the guard's cycle, not a
 	// tier's verdict (gt-gg9hv.37).
 	RuleTierSweepStuck = "tier_sweep.stuck"
-	RuleRevertRefused  = "landing.revert_refused"
-	RuleBlockedMail    = "polecat.blocked"
-	RuleOverrunStopped = "polecat.overrun_stopped"
-	RuleScheduledGate  = "schedule.gate_failed"
-	RuleHostDiskWarn   = "host.disk_warn"
-	RuleHostDiskCrit   = "host.disk_crit"
-	RuleHostMemLow     = "host.mem_low"
-	RuleHostDockerDown = "host.docker_stack_down"
-	RuleHostProbe      = "host.probe_failed"
 
 	// The overseer-question rules (gt-47rea).
 	RuleQuestionNew      = "question.new"
@@ -106,14 +106,14 @@ var ruleFlags = map[string]RuleFlags{
 	// is where the overseer looks for it, and a tier that is actually red
 	// already raised a wake under sweep.tier_red.
 	RuleTierSweepStarved: flagsAsk,
+	RuleBlockedMail:      flagsWake,
+	RuleScheduledGate:    flagsWake,
+	RuleHostDiskCrit:     flagsWake,
+	RuleHostMemLow:       flagsWake,
+	RuleHostDockerDown:   flagsWake,
 	// A cycle the guard holds past its bound blocks every later cycle: the
 	// tiers the sweep alone gates go unmeasured until someone looks.
 	RuleTierSweepStuck: flagsWake,
-	RuleBlockedMail:    flagsWake,
-	RuleScheduledGate:  flagsWake,
-	RuleHostDiskCrit:   flagsWake,
-	RuleHostMemLow:     flagsWake,
-	RuleHostDockerDown: flagsWake,
 	// Free seats and dispatchable beads with nothing started is work that is
 	// not happening, which no rule over existing work can see.
 	RuleDispatchIdle: flagsWake,

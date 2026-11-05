@@ -667,7 +667,9 @@ func (d *Daemon) triggerTierSweep() {
 	// trigger would hide (gt-gg9hv.37).
 	d.logTierSweepStuck(now)
 	if reason := d.patrolOffReason("tier_sweep"); reason != "" {
-		d.logTierSweepNotStarting("inactive:"+reason, "patrol inactive ("+reason+")")
+		d.logTierSweepNotStarting("inactive:"+reason, func() string {
+			return "patrol inactive (" + reason + ")"
+		})
 		return
 	}
 	if !d.upgradeRestartDrains() {
@@ -680,6 +682,9 @@ func (d *Daemon) triggerTierSweep() {
 	reason := d.standbyReason(now)
 	d.logStandby(&d.standbyTierSweep, "tier_sweep", reason)
 	if reason != "" {
+		d.logTierSweepNotStarting("standby:"+reason, func() string {
+			return "standby (" + reason + ")"
+		})
 		return
 	}
 	interval := tierSweepInterval(d.patrolConfig)
@@ -691,21 +696,24 @@ func (d *Daemon) triggerTierSweep() {
 	if !dec.due {
 		early = d.tierSweepEarlyCandidates(now)
 		if len(early) == 0 {
-			d.logTierSweepNotStarting("not-due", "not due ("+
-				tierSweepDueDetail(d.config.TownRoot, d.tierSweepRun.last(), interval, dec.note)+
-				"); no early re-run candidate")
+			d.logTierSweepNotStarting("not-due", func() string {
+				return "not due (" +
+					tierSweepDueDetail(d.config.TownRoot, d.tierSweepRun.last(), interval, dec.note) +
+					"); no early re-run candidate"
+			})
 			return
 		}
 	}
 	if !d.tierSweepRunning.CompareAndSwap(false, true) {
 		started := time.Unix(0, d.tierSweepStartedAt.Load())
-		d.logTierSweepNotStarting("running:"+strconv.FormatInt(started.UnixNano(), 10),
-			fmt.Sprintf("a cycle is already running (started %s, %d minutes ago)",
-				started.Format(time.RFC3339), int(now.Sub(started)/time.Minute)))
+		d.logTierSweepNotStarting("running:"+strconv.FormatInt(started.UnixNano(), 10), func() string {
+			return fmt.Sprintf("a cycle is already running (started %s, %d minutes ago)",
+				started.Format(time.RFC3339), int(now.Sub(started)/time.Minute))
+		})
 		return
 	}
 	// The reason this trigger was held is over: the next one logs fresh.
-	d.logTierSweepNotStarting("", "")
+	d.logTierSweepNotStarting("", nil)
 	// The hold the restart reads starts here, with the cycle, not with the
 	// marker: a sweep that begins while the restart has already waited out
 	// tierSweepRestartCap gets that much of its own (gt-zvqn8).
@@ -739,12 +747,18 @@ func (d *Daemon) triggerTierSweep() {
 // reason: on the first heartbeat it holds, and again only when the reason
 // changes. The key is the reason's identity, so a message whose wording ages
 // (the minutes in "already running") does not re-log; an empty key lifts the
-// latch with no line, because the reason is over.
-func (d *Daemon) logTierSweepNotStarting(key, message string) {
-	if !d.tierSweepNotStarted.Changed(key) || key == "" {
+// latch with no line, because the reason is over. message is built only when
+// the line prints, so a detail that reads state (the last-run record) is read
+// on the heartbeat that logs, not on every heartbeat.
+func (d *Daemon) logTierSweepNotStarting(key string, message func() string) {
+	if key == "" {
+		d.tierSweepNotStarted.Changed("")
 		return
 	}
-	d.logger.Printf("tier_sweep: not starting: %s", message)
+	if !d.tierSweepNotStarted.Changed(key) {
+		return
+	}
+	d.logger.Printf("tier_sweep: not starting: %s", message())
 }
 
 // tierSweepDueDetail says when the sweep last ran and when it next falls due,
@@ -1781,7 +1795,7 @@ func tierSweepLocalMainSHA(repo string) (string, error) {
 // The fetch is bounded by what is left of the cycle's context:
 // git.FetchBranch takes no bound and ignores the context, so a remote that
 // accepts the connection and then goes silent would hold the cycle — and the
-// guard — for good (gt-gg9hv.37). TierSweepFetchBudget reads that bound.
+// guard — for good (gt-gg9hv.37). tierSweepFetchBudget reads that bound.
 func tierSweepMainSHA(ctx context.Context, repo string) (string, error) {
 	budget, err := tierSweepFetchBudget(ctx)
 	if err != nil {
