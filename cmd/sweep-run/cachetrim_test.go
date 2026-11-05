@@ -257,6 +257,11 @@ func TestTrimSweepCacheFailsClosedOnAPartialWalk(t *testing.T) {
 			claim: faultyClaim{MapFS: claimFiles(), stats: map[string]error{"gocache/old": fs.ErrPermission}},
 			want:  "listing gocache/old:",
 		},
+		{
+			name:  "an unreadable claim root",
+			claim: faultyClaim{MapFS: claimFiles(), dirs: map[string]error{".": fs.ErrPermission}},
+			want:  "listing the claim root:",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

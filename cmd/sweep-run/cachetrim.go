@@ -137,9 +137,8 @@ func recordTrimError(logDir string, err error, stderr io.Writer) {
 
 // diskClaim is the claim at root as a read-only filesystem. A claim that is not
 // mounted is nil, since a runner started outside the sweep Job has nothing to
-// trim. A root that is a symbolic link or not a directory is refused, and so is a
-// cache tree that is a symbolic link, because the walk would follow it out of the
-// claim.
+// trim. A root that is a symbolic link or not a directory is refused; a cache
+// tree that is a symbolic link is refused by listClaim.
 func diskClaim(root string) (fs.FS, error) {
 	info, err := os.Lstat(root) //nolint:gosec // G304: root is the claim mount this file names
 	if errors.Is(err, fs.ErrNotExist) {
@@ -154,26 +153,23 @@ func diskClaim(root string) (fs.FS, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("%s is not a directory", root)
 	}
-	for _, dir := range []string{cachevol.SeedBuildCacheDir, cachevol.SeedModuleCacheDir} {
-		tree := filepath.Join(root, dir)
-		info, err := os.Lstat(tree) //nolint:gosec // G304: tree is a cache directory under the claim mount
-		// A tree the claim lacks is reported by listClaim, which names it.
-		if errors.Is(err, fs.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		if info.Mode()&fs.ModeSymlink != 0 {
-			return nil, fmt.Errorf("%s is a symbolic link, not a cache tree", tree)
-		}
-	}
 	return os.DirFS(root), nil
 }
 
 // listClaim is the claim's cache files as PlanTrim's entries, named relative to
-// the claim root. Any failure makes the listing partial and is returned.
+// the claim root. Any failure makes the listing partial and is returned. The
+// claim root's own listing shows a cache tree that is a symbolic link as one,
+// without following it out of the claim, so that refusal is made there.
 func listClaim(claim fs.FS) ([]cachevol.Entry, error) {
+	top, err := fs.ReadDir(claim, ".")
+	if err != nil {
+		return nil, fmt.Errorf("listing the claim root: %w", err)
+	}
+	for _, e := range top {
+		if e.Type()&fs.ModeSymlink != 0 && (e.Name() == cachevol.SeedBuildCacheDir || e.Name() == cachevol.SeedModuleCacheDir) {
+			return nil, fmt.Errorf("%s is a symbolic link, not a cache tree", e.Name())
+		}
+	}
 	var listing []cachevol.Entry
 	for _, c := range []struct {
 		dir   string
