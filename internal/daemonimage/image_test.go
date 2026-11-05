@@ -162,6 +162,22 @@ func TestBuildImageRefusesBeforeDockerRuns(t *testing.T) {
 		{name: "a Dockerfile that is a directory", rev: testRev, breakIt: func(t *testing.T, b *Builder, _ *[]string) {
 			b.Dockerfile = t.TempDir()
 		}, want: "is not a file"},
+		{name: "a known_hosts file missing beside the Dockerfile", rev: testRev, breakIt: func(t *testing.T, b *Builder, _ *[]string) {
+			dir := t.TempDir()
+			body, err := os.ReadFile(b.Dockerfile)
+			if err != nil {
+				t.Fatalf("reading the Dockerfile: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), body, 0o644); err != nil {
+				t.Fatalf("writing the Dockerfile copy: %v", err)
+			}
+			b.Dockerfile = filepath.Join(dir, "Dockerfile")
+		}, want: "is not readable"},
+		{name: "a known_hosts path the build context cannot hold", rev: testRev, breakIt: func(t *testing.T, b *Builder, _ *[]string) {
+			if err := os.Mkdir(filepath.Join(b.Out, KnownHostsName), 0o755); err != nil {
+				t.Fatalf("making a directory where the staged file goes: %v", err)
+			}
+		}, want: "staging ssh_known_hosts"},
 		{name: "a binary the image does not copy", rev: testRev, breakIt: func(_ *testing.T, b *Builder, bins *[]string) {
 			(*bins)[2] = filepath.Join(b.Out, "om-extra")
 		}, want: "is not one of the image's binaries"},
@@ -248,17 +264,19 @@ func TestDaemonDockerfileHasNoBuildStep(t *testing.T) {
 // TestDaemonDockerfileFetchesNothingAndInstallsOnlyThePackages: the image is
 // config, so no instruction downloads anything over the network and the only RUN
 // that is not a git identity command installs exactly ca-certificates, git,
-// openssh-client and tmux. The Dolt client arrives by COPY from the official Dolt
-// image, whose registry layers the daemon verifies by digest, rather than by a
-// download inside a RUN that no checksum would guard.
+// openssh-client, tmux and curl. The Dolt client arrives by COPY from the official
+// Dolt image, whose registry layers the daemon verifies by digest, rather than by
+// a download inside a RUN that no checksum would guard. curl is named only as a
+// package: a RUN that fetched with it would be a second install RUN and fail the
+// count below.
 func TestDaemonDockerfileFetchesNothingAndInstallsOnlyThePackages(t *testing.T) {
 	t.Parallel()
 	var installs []string
 	for _, in := range dockerfileInstructions(t, readDockerfile(t)) {
 		line := in.cmd + " " + strings.Join(in.args, " ")
-		for _, banned := range []string{"curl", "wget", "http://", "https://", "git clone", "tar -", "install -m"} {
+		for _, banned := range []string{"wget", "http://", "https://", "git clone", "tar -", "install -m"} {
 			if strings.Contains(line, banned) {
-				t.Errorf("%s has %q in %q; the image fetches and installs nothing but the four packages", DockerfilePath, banned, line)
+				t.Errorf("%s has %q in %q; the image fetches and installs nothing but the listed packages", DockerfilePath, banned, line)
 			}
 		}
 		if in.cmd != "RUN" {
@@ -276,7 +294,7 @@ func TestDaemonDockerfileFetchesNothingAndInstallsOnlyThePackages(t *testing.T) 
 	if problem != "" {
 		t.Fatalf("%s: %s", DockerfilePath, problem)
 	}
-	if want := []string{"ca-certificates", "git", "openssh-client", "tmux"}; !reflect.DeepEqual(got, want) {
+	if want := []string{"ca-certificates", "curl", "git", "openssh-client", "tmux"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("%s installs %q, want %q", DockerfilePath, got, want)
 	}
 }
@@ -406,6 +424,7 @@ func TestDaemonDockerfileCopiesOnlyTheBinariesAndDolt(t *testing.T) {
 		wantPlugin[p.src] = p.dst
 	}
 	doltCopies := 0
+	knownHostsCopies := 0
 	contextCopies := map[string]int{}
 	pluginCopied := map[string]int{}
 	for _, in := range dockerfileInstructions(t, readDockerfile(t)) {
@@ -414,6 +433,10 @@ func TestDaemonDockerfileCopiesOnlyTheBinariesAndDolt(t *testing.T) {
 		}
 		from, src, dst := copyOperands(in.args)
 		if from == "" {
+			if src == KnownHostsName && dst == "/etc/ssh/ssh_known_hosts" {
+				knownHostsCopies++
+				continue
+			}
 			if !slices.Contains(imageBinaryNames, src) {
 				if want, ok := wantPlugin[src]; ok && dst == want {
 					pluginCopied[src]++
@@ -437,6 +460,9 @@ func TestDaemonDockerfileCopiesOnlyTheBinariesAndDolt(t *testing.T) {
 	}
 	if doltCopies != 1 {
 		t.Errorf("%s COPYs the Dolt client %d times from the dolt stage, want once", DockerfilePath, doltCopies)
+	}
+	if knownHostsCopies != 1 {
+		t.Errorf("%s COPYs %s to /etc/ssh/ssh_known_hosts %d times, want once", DockerfilePath, KnownHostsName, knownHostsCopies)
 	}
 	for _, name := range imageBinaryNames {
 		if contextCopies[name] != 1 {

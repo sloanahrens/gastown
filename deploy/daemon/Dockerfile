@@ -26,11 +26,17 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # git and tmux are what the daemon's patrols run; ca-certificates is what its
 # HTTPS calls verify against; openssh-client is the ssh git runs for a push over
-# SSH, which app-promote does to GitHub with the promote keys. These four are the
-# only things installed.
+# SSH, which app-promote does to GitHub with the promote keys; curl is what the
+# ntfy push script posts with. These five are the only things installed.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates git openssh-client tmux \
+    && apt-get install -y --no-install-recommends ca-certificates curl git openssh-client tmux \
     && rm -rf /var/lib/apt/lists/*
+
+# GitHub's host key, pinned in the system known_hosts that openssh-client reads.
+# The file is staged in the build context by BuildImage, the same way the
+# binaries are, because a COPY reads the context and nothing else. Host checking
+# is never turned off here.
+COPY ssh_known_hosts /etc/ssh/ssh_known_hosts
 
 # The Dolt client, from the image above. It is a client only: the town's data
 # stays on the Mac and the daemon reaches it over the socket, so no data
