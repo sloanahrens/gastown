@@ -75,13 +75,14 @@ func makefileLines(mk string) []makefileLine {
 }
 
 // makefileStampVars are the Makefile variables that record gt's commit stamp.
-// HEAD_STAMP cuts the full sha to STAMP_LEN characters; the others take their
-// value from it, so there is one length in the Makefile.
+// Every one of them uses STAMP_LEN: HEAD_STAMP cuts the full sha to it, and the
+// others take HEAD_STAMP or cut the sha to it themselves, so there is one length
+// in the Makefile.
 var makefileStampVars = []string{"HEAD_STAMP", "COMMIT", "POLE_TAG"}
 
 // makefileProblems returns each way the Makefile breaks the stamp rule: a
-// STAMP_LEN that is not Len, a stamp variable that does not take the stamp from
-// HEAD_STAMP, or a logical line that asks git for an abbreviation.
+// STAMP_LEN that is not Len, a stamp variable that does not use STAMP_LEN, or a
+// logical line that asks git for an abbreviation.
 func makefileProblems(mk string) []string {
 	var problems []string
 	if err := makefileStampLenErr(mk); err != nil {
@@ -116,8 +117,8 @@ func makefileStampVarProblems(lines []makefileLine, name string) []string {
 			if !strings.Contains(l.text, "rev-parse") || !strings.Contains(l.text, "cut -c1-$(STAMP_LEN)") {
 				problems = append(problems, fmt.Sprintf("%s:%d: HEAD_STAMP must cut the full sha to the first STAMP_LEN characters (cut -c1-$(STAMP_LEN))", makefilePath, l.no))
 			}
-		} else if !strings.Contains(l.text, "$(HEAD_STAMP)") {
-			problems = append(problems, fmt.Sprintf("%s:%d: %s must take the stamp from $(HEAD_STAMP), not its own git request", makefilePath, l.no, name))
+		} else if !strings.Contains(l.text, "$(HEAD_STAMP)") && !strings.Contains(l.text, "cut -c1-$(STAMP_LEN)") {
+			problems = append(problems, fmt.Sprintf("%s:%d: %s must take the stamp from $(HEAD_STAMP), or cut the full sha with cut -c1-$(STAMP_LEN)", makefilePath, l.no, name))
 		}
 	}
 	if !defined {
@@ -249,6 +250,10 @@ func TestMakefileProblems(t *testing.T) {
 			name: "COMMIT cut to a literal length",
 			mk:   strings.Replace(goodMakefile, "COMMIT := $(or $(HEAD_STAMP),unknown)", "COMMIT := $(shell git rev-parse HEAD | cut -c1-8)", 1),
 			want: "Makefile:3: COMMIT must take the stamp from $(HEAD_STAMP)",
+		},
+		{
+			name: "COMMIT cut to STAMP_LEN directly",
+			mk:   strings.Replace(goodMakefile, "COMMIT := $(or $(HEAD_STAMP),unknown)", "COMMIT := $(shell git rev-parse HEAD | cut -c1-$(STAMP_LEN))", 1),
 		},
 		{
 			name: "POLE_TAG takes the full sha",
