@@ -9,7 +9,7 @@ DeepSeek polecats run in OpenShell sandboxes on Kubernetes, first on a local kin
 - **The Mac daemon stays the control plane** until the cutover work is decided.
 - **Isolated from the town by default.** The kind VM has its own Colima profile, and the gateway is registered in a private CLI config (`XDG_CONFIG_HOME`).
 
-## Decisions (Sloan, 2026-10-24)
+## Decisions (the operator, 2026-10-24)
 
 1. The gateway is reached on a fixed loopback port through a kind port mapping and a NodePort Service, not `kubectl port-forward`.
 2. A local registry runs beside kind; the polecat image is published to it, and the profile image becomes a registry reference.
