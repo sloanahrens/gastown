@@ -317,8 +317,11 @@ func landingName(who func(rig, bead string) string, rig, bead string) string {
 // record would carry (asOf zero), and a running row takes the time so far (asOf
 // now). Both lookups are asked only for the rows the table keeps — the
 // rejections the bound left, and the live rows above it — so the reads are
-// bounded like the titles.
-func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, live []dashboard.LandingRow, ship func(rig, bead string) tailShip, title func(rig, bead string) string, who func(rig, bead string) string, crew func(rig, bead string) bool, polecat func(bead string, asOf time.Time) (float64, []land.PolecatAttempt, bool), limit int) []dashboard.LandingRow {
+// bounded like the titles. A rejected row takes its rig from the landed record
+// of its bead when there is one; a bead with no landed record has only its id,
+// so rigOfPrefix names the rig its prefix routes to (gt-a64mi). An empty answer
+// falls back to gastown.
+func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, live []dashboard.LandingRow, ship func(rig, bead string) tailShip, title func(rig, bead string) string, who func(rig, bead string) string, crew func(rig, bead string) bool, polecat func(bead string, asOf time.Time) (float64, []land.PolecatAttempt, bool), rigOfPrefix func(bead string) string, limit int) []dashboard.LandingRow {
 	since := now.Add(-trendHours * time.Hour)
 	var rows []dashboard.LandingRow
 	rigOf := map[string]string{} // a rejection line names no rig; a landing of the same bead does
@@ -373,6 +376,9 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 			continue
 		}
 		rig := rigOf[rj.Bead]
+		if rig == "" && rigOfPrefix != nil {
+			rig = rigOfPrefix(rj.Bead)
+		}
 		if rig == "" {
 			rig = "gastown" // the only rig with a landing worker running
 		}
