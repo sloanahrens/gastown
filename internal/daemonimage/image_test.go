@@ -264,11 +264,11 @@ func TestDaemonDockerfileHasNoBuildStep(t *testing.T) {
 // TestDaemonDockerfileFetchesNothingAndInstallsOnlyThePackages: the image is
 // config, so no instruction downloads anything over the network and the only RUN
 // that is not a git identity command installs exactly ca-certificates, git,
-// openssh-client, tmux and curl. The Dolt client arrives by COPY from the official
-// Dolt image, whose registry layers the daemon verifies by digest, rather than by
-// a download inside a RUN that no checksum would guard. curl is named only as a
-// package: a RUN that fetched with it would be a second install RUN and fail the
-// count below.
+// openssh-client, tmux, curl and tzdata. The Dolt client arrives by COPY from the
+// official Dolt image, whose registry layers the daemon verifies by digest, rather
+// than by a download inside a RUN that no checksum would guard. curl is named only
+// as a package: a RUN that fetched with it would be a second install RUN and fail
+// the count below.
 func TestDaemonDockerfileFetchesNothingAndInstallsOnlyThePackages(t *testing.T) {
 	t.Parallel()
 	var installs []string
@@ -294,8 +294,20 @@ func TestDaemonDockerfileFetchesNothingAndInstallsOnlyThePackages(t *testing.T) 
 	if problem != "" {
 		t.Fatalf("%s: %s", DockerfilePath, problem)
 	}
-	if want := []string{"ca-certificates", "curl", "git", "openssh-client", "tmux"}; !reflect.DeepEqual(got, want) {
+	if want := []string{"ca-certificates", "curl", "git", "openssh-client", "tmux", "tzdata"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("%s installs %q, want %q", DockerfilePath, got, want)
+	}
+}
+
+// TestDaemonDockerfileInstallsTimezoneData: the compose file sets TZ on the
+// container, and Ubuntu carries no zone database, so the zone name it gives
+// cannot be loaded without tzdata. Without it the daemon log, the maintenance
+// windows and every reader of the log are in UTC (gt-gg9hv.34).
+func TestDaemonDockerfileInstallsTimezoneData(t *testing.T) {
+	t.Parallel()
+	args := daemonInstallRun(t).args
+	if !slices.Contains(args, "tzdata") {
+		t.Errorf("%s install line %q does not list tzdata, so TZ names no zone the image can load", DockerfilePath, strings.Join(args, " "))
 	}
 }
 

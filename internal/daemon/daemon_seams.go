@@ -34,6 +34,18 @@ type daemonSeams struct {
 	// timestamps, so the production encoder cannot fail; the seam exists so
 	// the note's failure branch has a test.
 	shadowEncodeJSON func(any) ([]byte, error)
+	// loadZone loads the time zone TZ names for the start-up line. nil is
+	// time.LoadLocation; the unit tier replaces it so no test reads a zone
+	// database.
+	loadZone func(string) (*time.Location, error)
+}
+
+// zoneLoader returns the loader the start-up zone line resolves TZ through.
+func (s daemonSeams) zoneLoader() func(string) (*time.Location, error) {
+	if s.loadZone != nil {
+		return s.loadZone
+	}
+	return time.LoadLocation
 }
 
 // encodeShadowLanding renders one landing for the shadow note's JSON lines.
