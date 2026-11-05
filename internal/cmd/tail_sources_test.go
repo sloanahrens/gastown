@@ -1052,9 +1052,9 @@ func TestTailEventsSource_TitlesTheBeadAndReadsAVerdict(t *testing.T) {
 		},
 	}}
 	j := &fakeTailJournal{config: "true", records: []beads.EventRecord{
-		{Seq: 1, TS: "2026-09-30T13:50:00Z", Op: "create", IssueID: "gt-1", Actor: "sloan", Status: "open"},
+		{Seq: 1, TS: "2026-09-30T13:50:00Z", Op: "create", IssueID: "gt-1", Actor: "Test Operator", Status: "open"},
 		{Seq: 2, TS: "2026-09-30T13:50:00.5Z", Op: "update", IssueID: "gt-1", Actor: "daemon", Status: "open"},
-		{Seq: 3, TS: "2026-09-30T13:51:00Z", Op: "comment", IssueID: "gt-1", Actor: "sloan"},
+		{Seq: 3, TS: "2026-09-30T13:51:00Z", Op: "comment", IssueID: "gt-1", Actor: "Test Operator"},
 		{Seq: 4, TS: "2026-09-30T13:52:00Z", Op: "comment", IssueID: "gt-2", Actor: "witness"},
 		{Seq: 5, TS: "2026-09-30T13:53:00Z", Op: "update", IssueID: "gt-gastown-polecat-opal", Actor: "daemon"},
 	}}
@@ -1064,7 +1064,7 @@ func TestTailEventsSource_TitlesTheBeadAndReadsAVerdict(t *testing.T) {
 		t.Fatalf("poll = %q", texts(got))
 	}
 	// The text is the journal's; the verdict is the only thing added.
-	if got[0].Text != "create gt-1 status=open actor=sloan seq=1" {
+	if got[0].Text != "create gt-1 status=open actor=Test Operator seq=1" {
 		t.Fatalf("create line = %q", got[0].Text)
 	}
 	wantVerdicts := []string{
@@ -1091,7 +1091,7 @@ func TestTailEventsSource_TitlesTheBeadAndReadsAVerdict(t *testing.T) {
 	// The next poll adds a comment the bead already answered with: it is not
 	// the review loop's, and a verdict already shown is not shown again.
 	j.records = append(j.records,
-		beads.EventRecord{Seq: 6, TS: "2026-09-30T13:54:00Z", Op: "comment", IssueID: "gt-1", Actor: "sloan"},
+		beads.EventRecord{Seq: 6, TS: "2026-09-30T13:54:00Z", Op: "comment", IssueID: "gt-1", Actor: "Test Operator"},
 		beads.EventRecord{Seq: 7, TS: "2026-09-30T13:55:00Z", Op: "update", IssueID: "gt-1", Actor: "daemon"},
 	)
 	got = s.Poll()
@@ -1106,11 +1106,11 @@ func TestTailEventsSource_UnreadableBeadIsNotAnErrorLine(t *testing.T) {
 	t.Parallel()
 	store := &fakeTailStore{errs: map[string]error{"gt-1": errors.New("dolt: connection refused")}}
 	j := &fakeTailJournal{config: "true", records: []beads.EventRecord{
-		{Seq: 1, TS: "2026-09-30T13:50:00Z", Op: "comment", IssueID: "gt-1", Actor: "sloan"},
+		{Seq: 1, TS: "2026-09-30T13:50:00Z", Op: "comment", IssueID: "gt-1", Actor: "Test Operator"},
 	}}
 	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: newTailBeads(store.show)}
 	got := s.Poll()
-	if len(got) != 1 || got[0].Text != "comment gt-1 actor=sloan seq=1" || got[0].Verdict != "" {
+	if len(got) != 1 || got[0].Text != "comment gt-1 actor=Test Operator seq=1" || got[0].Verdict != "" {
 		t.Fatalf("poll = %+v", got)
 	}
 }
@@ -1340,9 +1340,9 @@ func TestTailEventsSource_CommentTextAndSubmittedLine(t *testing.T) {
 		"gt-4": {ID: "gt-4", Title: "t", Comments: []beads.Comment{{Text: "OVERSEER REVIEW aaaa PASS: reads well"}}},
 	}}
 	j := &fakeTailJournal{config: "true", records: []beads.EventRecord{
-		{Seq: 1, TS: "2026-09-30T13:50:00Z", Op: "comment", IssueID: "gt-1", Actor: "sloan"},
+		{Seq: 1, TS: "2026-09-30T13:50:00Z", Op: "comment", IssueID: "gt-1", Actor: "Test Operator"},
 		{Seq: 2, TS: "2026-09-30T13:51:00Z", Op: "update", IssueID: "gt-2", Actor: "opal", Status: "open"},
-		{Seq: 3, TS: "2026-09-30T13:52:00Z", Op: "comment", IssueID: "gt-3", Actor: "sloan"},
+		{Seq: 3, TS: "2026-09-30T13:52:00Z", Op: "comment", IssueID: "gt-3", Actor: "Test Operator"},
 		{Seq: 4, TS: "2026-09-30T13:53:00Z", Op: "comment", IssueID: "gt-4", Actor: "witness"},
 	}}
 	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: newTailBeads(store.show)}
@@ -1368,7 +1368,7 @@ func TestTailEventsSource_CommentTextAndSubmittedLine(t *testing.T) {
 	}
 	// The same text is not shown twice, however often the bead is rewritten.
 	j.records = append(j.records,
-		beads.EventRecord{Seq: 5, TS: "2026-09-30T13:54:00Z", Op: "comment", IssueID: "gt-1", Actor: "sloan"},
+		beads.EventRecord{Seq: 5, TS: "2026-09-30T13:54:00Z", Op: "comment", IssueID: "gt-1", Actor: "Test Operator"},
 		beads.EventRecord{Seq: 6, TS: "2026-09-30T13:55:00Z", Op: "update", IssueID: "gt-2", Actor: "opal", Status: "open"},
 	)
 	got = s.Poll()

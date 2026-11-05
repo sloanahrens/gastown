@@ -7,7 +7,7 @@
 2026-10-02T14:00:04Z	town	daemon	doctor_dog: all clear (latency 2ms, connections 7/1000, orphans 1); no molecule
 2026-10-02T14:00:05Z	gastown	events	create gt-wisp-c3w9 status=open actor=daemon seq=6902
 2026-10-02T14:00:05Z	gastown	events	close gt-wisp-c3w9 status=closed actor=daemon seq=6903
-2026-10-02T14:00:06Z	gastown	events	create gt-hk555 status=open actor=sloan seq=6904
+2026-10-02T14:00:06Z	gastown	events	create gt-hk555 status=open actor=Test Operator seq=6904
 2026-10-02T14:00:06Z	town	daemon	patrol_scan: gastown: checked 3 polecat(s): 0 restarted, 0 refused, 0 unknown, 0 molecule(s) closed, 0 stranded reported, 0 error(s)
 2026-10-02T14:00:07Z	town	daemon	townhealth: GREEN tick 4ms ago: exec-tax=133ms/exec needs-human=0
 2026-10-02T14:00:07Z	gastown	events	update gt-gastown-polecat-garnet status=open actor=daemon seq=6905
@@ -32,7 +32,7 @@
 2026-10-02T14:00:52Z	town	daemon	doctor_dog: all clear (latency 2ms, connections 7/1000, orphans 1); no molecule
 2026-10-02T14:00:54Z	gastown	events	create gt-wisp-liqn status=open actor=daemon seq=6912
 2026-10-02T14:00:58Z	gastown	events	close gt-wisp-liqn status=closed actor=daemon seq=6913
-2026-10-02T14:01:00Z	gastown	events	create gt-826cp status=open actor=sloan seq=6914
+2026-10-02T14:01:00Z	gastown	events	create gt-826cp status=open actor=Test Operator seq=6914
 2026-10-02T14:01:02Z	town	daemon	Heartbeat starting (recovery-focused)
 2026-10-02T14:01:04Z	town	daemon	Heartbeat complete (#533)
 2026-10-02T14:01:06Z	gastown	events	update gt-gastown-polecat-garnet actor=gastown/polecats/garnet seq=6915
@@ -61,7 +61,7 @@
 2026-10-02T14:02:14Z	gastown	events	update gt-gastown-polecat-garnet status=open actor=daemon seq=6922
 2026-10-02T14:02:16Z	town	daemon	townhealth: RED tick 4ms ago: escalation=oldest_2h needs-human=1
 2026-10-02T14:02:18Z	town	daemon	patrol_scan: gastown: checked 3 polecat(s): 0 restarted, 0 refused, 0 unknown, 0 molecule(s) closed, 0 stranded reported, 0 error(s)
-2026-10-02T14:02:20Z	gastown	events	create gt-vsct7.5 status=open actor=sloan seq=6923
+2026-10-02T14:02:20Z	gastown	events	create gt-vsct7.5 status=open actor=Test Operator seq=6923
 2026-10-02T14:02:22Z	town	daemon	clearAlerts(checkpoint_dog:scan): scan completed
 2026-10-02T14:02:24Z	town	daemon	jsonl_git_backup: not due — last run 3m ago, interval 15m0s
 2026-10-02T14:02:26Z	gastown	landings	landed gt-826cp polecat/opal/gt-826cp -> main commit=55555555 patch=66666666 gate=pass om=approve/0.90 route=worker
@@ -105,7 +105,7 @@
 2026-10-02T14:04:06Z	town	daemon	Heartbeat starting (recovery-focused)
 2026-10-02T14:04:08Z	town	daemon	Heartbeat complete (#541)
 2026-10-02T14:04:24Z	town	daemon	patrol_scan: gastown: checked 3 polecat(s): 0 restarted, 0 refused, 0 unknown, 0 molecule(s) closed, 0 stranded reported, 0 error(s)
-2026-10-02T14:04:26Z	gastown	events	create gt-ufjol status=open actor=sloan seq=6932
+2026-10-02T14:04:26Z	gastown	events	create gt-ufjol status=open actor=Test Operator seq=6932
 2026-10-02T14:04:28Z	town	daemon	Heartbeat starting (recovery-focused)
 2026-10-02T14:04:30Z	town	daemon	Heartbeat complete (#542)
 2026-10-02T14:04:32Z	town	daemon	clearAlerts(jsonl_git_backup:push): backup push succeeded

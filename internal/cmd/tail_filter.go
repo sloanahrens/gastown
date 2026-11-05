@@ -385,7 +385,7 @@ var tailSeqFieldRe = regexp.MustCompile(` seq=[0-9]+`)
 
 // tailDropActorField drops " actor=<name>" when name is gitUser. The name is
 // whatever the writer recorded, and bd records a person's name with its space
-// ("Sloan Ahrens"), so the field runs to the next field or to the end — not to
+// ("the operator"), so the field runs to the next field or to the end — not to
 // the next space, which would match only the given name.
 func tailDropActorField(text, gitUser string) string {
 	const field = " actor="
