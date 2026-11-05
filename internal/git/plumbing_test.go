@@ -493,7 +493,7 @@ func TestCommitAuthorshipUnknownCommit(t *testing.T) {
 func TestFirstParentCommitSummariesParsesAuthorEmailAndSubject(t *testing.T) {
 	t.Parallel()
 	const format = "log --first-parent --format=%H%x00%an%x00%ae%x00%s"
-	const out = "bbb\x00capable\x00seat@test.com\x00feat: second, with a colon: here\naaa\x00Sloan Ahrens\x00sloan@test.com\x00fix: first\n"
+	const out = "bbb\x00capable\x00seat@test.com\x00feat: second, with a colon: here\naaa\x00Test Operator\x00operator@example.test\x00fix: first\n"
 	s := newScripted(map[string]reply{
 		format + " a..b": ok(out),
 		format + " h..h": ok(""),
@@ -505,7 +505,7 @@ func TestFirstParentCommitSummariesParsesAuthorEmailAndSubject(t *testing.T) {
 	}
 	want := []CommitSummary{
 		{SHA: "bbb", Author: "capable", Email: "seat@test.com", Subject: "feat: second, with a colon: here"},
-		{SHA: "aaa", Author: "Sloan Ahrens", Email: "sloan@test.com", Subject: "fix: first"},
+		{SHA: "aaa", Author: "Test Operator", Email: "operator@example.test", Subject: "fix: first"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("FirstParentCommitSummaries = %+v, want %+v", got, want)
@@ -520,7 +520,7 @@ func TestFirstParentCommitSummariesParsesAuthorEmailAndSubject(t *testing.T) {
 func TestFullRangeCommitSummariesParsesWithoutFirstParent(t *testing.T) {
 	t.Parallel()
 	const format = "log --format=%H%x00%an%x00%ae%x00%s"
-	const out = "mmm\x00capable\x00seat@test.com\x00Merge branch 'side'\nsss\x00Sloan Ahrens\x00sloan@test.com\x00fix: side\n"
+	const out = "mmm\x00capable\x00seat@test.com\x00Merge branch 'side'\nsss\x00Test Operator\x00operator@example.test\x00fix: side\n"
 	s := newScripted(map[string]reply{
 		format + " a..b": ok(out),
 		format + " h..h": ok(""),
@@ -532,7 +532,7 @@ func TestFullRangeCommitSummariesParsesWithoutFirstParent(t *testing.T) {
 	}
 	want := []CommitSummary{
 		{SHA: "mmm", Author: "capable", Email: "seat@test.com", Subject: "Merge branch 'side'"},
-		{SHA: "sss", Author: "Sloan Ahrens", Email: "sloan@test.com", Subject: "fix: side"},
+		{SHA: "sss", Author: "Test Operator", Email: "operator@example.test", Subject: "fix: side"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("FullRangeCommitSummaries = %+v, want %+v", got, want)

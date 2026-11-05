@@ -18,11 +18,11 @@ func TestDispatchHoldRegistryField(t *testing.T) {
 	root := copyFixtureTown(t)
 	since := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 
-	kept, err := Hold(root, "gastown", config.RigDispatchHold{Since: since, By: "sloan", Reason: "drain the landing backlog"})
+	kept, err := Hold(root, "gastown", config.RigDispatchHold{Since: since, By: "operator", Reason: "drain the landing backlog"})
 	if err != nil {
 		t.Fatalf("Hold = %v", err)
 	}
-	if !kept.Since.Equal(since) || kept.By != "sloan" || kept.Reason != "drain the landing backlog" {
+	if !kept.Since.Equal(since) || kept.By != "operator" || kept.Reason != "drain the landing backlog" {
 		t.Fatalf("Hold returned %+v", kept)
 	}
 	held, err := DispatchHoldState(root, "gastown")
@@ -44,7 +44,7 @@ func TestDispatchHoldRegistryField(t *testing.T) {
 	}
 
 	again, err := Hold(root, "gastown", config.RigDispatchHold{Since: since.Add(time.Hour), By: "mayor", Reason: "other"})
-	if err != nil || again.By != "sloan" {
+	if err != nil || again.By != "operator" {
 		t.Errorf("second Hold = %+v, %v; want the first record kept", again, err)
 	}
 
@@ -74,7 +74,7 @@ func TestDispatchHoldLeavesParkStateAlone(t *testing.T) {
 	if err != nil || parked == nil {
 		t.Fatalf("ParkState(mango) = %+v, %v; the fixture rig must be parked", parked, err)
 	}
-	if _, err := Hold(root, "mango", config.RigDispatchHold{Since: time.Now().UTC(), By: "sloan", Reason: "landing backlog"}); err != nil {
+	if _, err := Hold(root, "mango", config.RigDispatchHold{Since: time.Now().UTC(), By: "operator", Reason: "landing backlog"}); err != nil {
 		t.Fatalf("Hold(mango) = %v", err)
 	}
 	after, err := ParkState(root, "mango")
@@ -88,7 +88,7 @@ func TestDispatchHoldLeavesParkStateAlone(t *testing.T) {
 		t.Errorf("ParkState(mango) after Release = %+v, %v; the rig must still be parked", after, err)
 	}
 
-	if _, err := Hold(root, "gastown", config.RigDispatchHold{Since: time.Now().UTC(), By: "sloan"}); err != nil {
+	if _, err := Hold(root, "gastown", config.RigDispatchHold{Since: time.Now().UTC(), By: "operator"}); err != nil {
 		t.Fatalf("Hold(gastown) = %v", err)
 	}
 	if p, err := ParkState(root, "gastown"); p != nil || err != nil {
@@ -96,7 +96,7 @@ func TestDispatchHoldLeavesParkStateAlone(t *testing.T) {
 	}
 	// A park written while the rig is held keeps the hold: both records are the
 	// rig's, and each command owns one.
-	if _, err := Park(root, "gastown", config.RigParked{Since: time.Now().UTC(), By: "sloan"}); err != nil {
+	if _, err := Park(root, "gastown", config.RigParked{Since: time.Now().UTC(), By: "operator"}); err != nil {
 		t.Fatalf("Park(gastown) = %v", err)
 	}
 	if held, err := DispatchHoldState(root, "gastown"); held == nil || err != nil {

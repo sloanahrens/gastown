@@ -43,7 +43,7 @@ func opStateTown(t *testing.T, parked string) string {
 // record on the rig's mayor/rigs.json entry. No bead is read for a parked rig.
 func TestGetOpState_ReadsRegistry(t *testing.T) {
 	t.Parallel()
-	townRoot := opStateTown(t, `{"since":"2026-09-30T00:00:00Z","by":"sloan","reason":"r"}`)
+	townRoot := opStateTown(t, `{"since":"2026-09-30T00:00:00Z","by":"operator","reason":"r"}`)
 	state, source := getOpState(townRoot, "testrig", noRigBead())
 	if state != OpStateParked || source != OpStateSourceRegistry {
 		t.Errorf("GetOpState() = %q, %q; want %q, %q", state, source, OpStateParked, OpStateSourceRegistry)

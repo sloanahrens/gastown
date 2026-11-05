@@ -280,7 +280,7 @@ Tasks: 512 total,   6 running, 506 sleeping
 %Cpu(s):  6.2 us, 12.5 sy, 81.2 id,  0.0 wa,  0.0 hi,  0.0 si,  0.0 st
 
     PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
-   4242 sloan     20   0   12.1g   2.0g  40000 S   3.1   1.6 900:12.34 /usr/local/bin/dolt sql-server --config /gt/.dolt-data/config.yaml
+   4242 operator  20   0   12.1g   2.0g  40000 S   3.1   1.6 900:12.34 /usr/local/bin/dolt sql-server --config /gt/.dolt-data/config.yaml
       1 root      20   0  168000  12000   8000 S   0.0   0.0   0:09.00 /sbin/init splash
 
 top - 17:35:37 up 3 days,  2:14,  4 users,  load average: 4.08, 3.99, 3.88
@@ -288,7 +288,7 @@ Tasks: 512 total,   6 running, 506 sleeping
 %Cpu(s): 18.2 us,  3.5 sy, 78.2 id,  0.0 wa,  0.0 hi,  0.0 si,  0.0 st
 
     PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
-   4242 sloan     20   0   12.1g   2.0g  40000 S 398,5   1.6 900:16.34 /usr/local/bin/dolt sql-server --config /gt/.dolt-data/config.yaml
+   4242 operator  20   0   12.1g   2.0g  40000 S 398,5   1.6 900:16.34 /usr/local/bin/dolt sql-server --config /gt/.dolt-data/config.yaml
       1 root      20   0  168000  12000   8000 S   0.0   0.0   0:09.00 /sbin/init splash
 `
 

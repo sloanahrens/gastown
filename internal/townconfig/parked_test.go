@@ -41,15 +41,15 @@ func TestParkedRegistryField(t *testing.T) {
 	t.Parallel()
 	root := copyFixtureTown(t)
 	since := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
-	rec, err := Park(root, "om", config.RigParked{Since: since, By: "sloan", Reason: "rubric work"})
+	rec, err := Park(root, "om", config.RigParked{Since: since, By: "operator", Reason: "rubric work"})
 	if err != nil {
 		t.Fatalf("Park = %v", err)
 	}
-	if rec.By != "sloan" {
+	if rec.By != "operator" {
 		t.Errorf("Park returned %+v", rec)
 	}
 	p, err := ParkState(root, "om")
-	if err != nil || p == nil || !p.Since.Equal(since) || p.By != "sloan" || p.Reason != "rubric work" {
+	if err != nil || p == nil || !p.Since.Equal(since) || p.By != "operator" || p.Reason != "rubric work" {
 		t.Fatalf("ParkState(om) = %+v, %v", p, err)
 	}
 	if parked, why := IsParked(root, "om"); !parked || !strings.Contains(why, "rubric work") {
@@ -61,7 +61,7 @@ func TestParkedRegistryField(t *testing.T) {
 
 	// A second park keeps the first record.
 	again, err := Park(root, "om", config.RigParked{Since: since.Add(time.Hour), By: "mayor", Reason: "other"})
-	if err != nil || again.By != "sloan" {
+	if err != nil || again.By != "operator" {
 		t.Errorf("second Park = %+v, %v; want the first record kept", again, err)
 	}
 
@@ -222,10 +222,10 @@ func TestMigrateLeavesUnknownStatusParked(t *testing.T) {
 func TestParkRewritesLegacyRecord(t *testing.T) {
 	t.Parallel()
 	root := legacyTown(t)
-	if _, err := Park(root, "hm", config.RigParked{Since: time.Now().UTC(), By: "sloan", Reason: "r"}); err != nil {
+	if _, err := Park(root, "hm", config.RigParked{Since: time.Now().UTC(), By: "operator", Reason: "r"}); err != nil {
 		t.Fatal(err)
 	}
-	if p, err := ParkState(root, "hm"); err != nil || p == nil || p.By != "sloan" {
+	if p, err := ParkState(root, "hm"); err != nil || p == nil || p.By != "operator" {
 		t.Errorf("ParkState(hm) = %+v, %v", p, err)
 	}
 }

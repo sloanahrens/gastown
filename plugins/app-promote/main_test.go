@@ -24,7 +24,7 @@ const (
 	stagingOnly = "cccc111122223333444455556666777788889999"
 
 	tokenText = "viewer-token-not-to-be-printed"
-	repo      = "sloan/fractals-nextjs"
+	repo      = "operator/fractals-nextjs"
 	rigName   = "fractals"
 	apiRoot   = "http://forgejo.invalid/api/v1"
 
@@ -1156,9 +1156,9 @@ func TestPromoteAllContinuesPastFailure(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	const (
-		failingRepo = "sloan/failing-repo"
-		routineRepo = "sloan/routine-repo"
-		healthyRepo = "sloan/healthy-repo"
+		failingRepo = "operator/failing-repo"
+		routineRepo = "operator/routine-repo"
+		healthyRepo = "operator/healthy-repo"
 	)
 	h.write(h.in("plugin", "rigs.conf"),
 		"failing "+failingRepo+"\nroutine "+routineRepo+"\nhealthy "+healthyRepo+"\n")
@@ -1200,8 +1200,8 @@ func TestPromoteAllNoSkipMarkerOnFailure(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	const (
-		firstRepo  = "sloan/first-repo"
-		secondRepo = "sloan/second-repo"
+		firstRepo  = "operator/first-repo"
+		secondRepo = "operator/second-repo"
 	)
 	h.write(h.in("plugin", "rigs.conf"), "first "+firstRepo+"\nsecond "+secondRepo+"\n")
 	h.promotesGreen(firstRepo, "first")
@@ -1235,8 +1235,8 @@ func TestPromoteAllNoSkipMarkerOnFailure(t *testing.T) {
 func TestPromoteAllCollectsReadErrors(t *testing.T) {
 	t.Parallel()
 	const (
-		firstRepo  = "sloan/first-repo"
-		secondRepo = "sloan/second-repo"
+		firstRepo  = "operator/first-repo"
+		secondRepo = "operator/second-repo"
 	)
 	runsOf := func(repo string) string {
 		return fmt.Sprintf("/repos/%s/actions/runs?workflow_id=%s&limit=%d&page=1", repo, deployWorkflow, runsLimit)
@@ -1369,9 +1369,9 @@ func TestSplitRig(t *testing.T) {
 		line           string
 		rig, repo, job string
 	}{
-		{"rig and repo", "fractals sloan/fractals-nextjs", "fractals", "sloan/fractals-nextjs", ""},
-		{"with a job", "fractals sloan/fractals-nextjs prod-e2e", "fractals", "sloan/fractals-nextjs", "prod-e2e"},
-		{"leading and trailing space", "  fractals   sloan/fractals-nextjs  ", "fractals", "sloan/fractals-nextjs", ""},
+		{"rig and repo", "fractals operator/fractals-nextjs", "fractals", "operator/fractals-nextjs", ""},
+		{"with a job", "fractals operator/fractals-nextjs prod-e2e", "fractals", "operator/fractals-nextjs", "prod-e2e"},
+		{"leading and trailing space", "  fractals   operator/fractals-nextjs  ", "fractals", "operator/fractals-nextjs", ""},
 		{"a rig alone", "fractals", "fractals", "", ""},
 		{"an empty line", "", "", "", ""},
 		{"whitespace after the repo keeps its own", "a b c  d", "a", "b", "c  d"},
@@ -1390,8 +1390,8 @@ func TestSplitRig(t *testing.T) {
 
 func TestRigLines(t *testing.T) {
 	t.Parallel()
-	got := rigLines("# a rig listing\n\nfractals sloan/x  # beside the repo\n   \ndevops sloan/y\n")
-	want := []string{"fractals sloan/x  ", "devops sloan/y"}
+	got := rigLines("# a rig listing\n\nfractals operator/x  # beside the repo\n   \ndevops operator/y\n")
+	want := []string{"fractals operator/x  ", "devops operator/y"}
 	if !slices.Equal(got, want) {
 		t.Errorf("rigLines = %q, want %q", got, want)
 	}

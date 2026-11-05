@@ -496,7 +496,7 @@ func TestWorksSeat(t *testing.T) {
 		{name: "a polecat's handoff-labeled bead is a handoff note too", assignee: "gastown/polecats/capable", labels: []string{"gt:handoff"}, want: false},
 		{name: "the label's spelling does not matter", assignee: "gastown/polecats/capable", labels: []string{" HANDOFF "}, want: false},
 		{name: "an operator session", assignee: "operator", want: false},
-		{name: "a person", assignee: "sloan", want: false},
+		{name: "a person", assignee: "someone", want: false},
 		{name: "no assignee", assignee: "", want: false},
 		{name: "a polecats path that is not a seat", assignee: "gastown/polecat/capable", want: false},
 		{name: "a seat with no name", assignee: "gastown/polecats/", want: false},

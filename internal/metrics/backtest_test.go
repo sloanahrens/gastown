@@ -175,11 +175,11 @@ func TestBacktestVerdictTruthTable(t *testing.T) {
 	}{
 		{"a move keeps", answer(true), nil, nil, BacktestKeep},
 		{"a replicated box keeps", answer(false), answer(true), nil, BacktestKeep},
-		{"Sloan's yes keeps", answer(false), answer(false), answer(true), BacktestKeep},
+		{"the operator's yes keeps", answer(false), answer(false), answer(true), BacktestKeep},
 		{"three noes drop", answer(false), answer(false), answer(false), BacktestDrop},
 		{"no evidence yet is not evidence against", nil, answer(false), answer(false), BacktestUndecided},
 		{"an unanswered box is undecided", answer(false), nil, answer(false), BacktestUndecided},
-		{"Sloan not asked yet is undecided", answer(false), answer(false), nil, BacktestUndecided},
+		{"the operator not asked yet is undecided", answer(false), answer(false), nil, BacktestUndecided},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
