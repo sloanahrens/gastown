@@ -622,16 +622,33 @@ func TestEventsRetentionReadsEveryWatermarkForm(t *testing.T) {
 }
 
 // TestEventsRetentionRefusesACorruptStateFile: a state file that exists but
-// is not valid JSON, or names an unsupported version, deletes nothing and
-// returns an error naming the database. It is a refusal, never a waiting pass.
+// cannot be read, is not valid JSON, or names an unsupported version, deletes
+// nothing and returns an error naming the database. It is a refusal, never a
+// waiting pass.
 func TestEventsRetentionRefusesACorruptStateFile(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name string
-		body string
+		name      string
+		statePath func(t *testing.T) string
 	}{
-		{name: "not JSON", body: `{not json`},
-		{name: "unsupported version", body: `{"version":2,"archive_events_watermarks":{}}`},
+		{
+			name: "not JSON",
+			statePath: func(t *testing.T) string {
+				return writeEventsState(t, []byte(`{not json`))
+			},
+		},
+		{
+			name: "unsupported version",
+			statePath: func(t *testing.T) string {
+				return writeEventsState(t, []byte(`{"version":2,"archive_events_watermarks":{}}`))
+			},
+		},
+		{
+			name: "unreadable path",
+			statePath: func(t *testing.T) string {
+				return t.TempDir() // a directory cannot be read as a state file
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -647,7 +664,7 @@ func TestEventsRetentionRefusesACorruptStateFile(t *testing.T) {
 				Batch:      10,
 				MaxBatches: 5,
 				Database:   eventsTestDatabase,
-				StatePath:  writeEventsState(t, []byte(tt.body)),
+				StatePath:  tt.statePath(t),
 			})
 			if err == nil {
 				t.Fatal("PurgeEvents read a corrupt state file as no watermark")
@@ -676,7 +693,8 @@ func TestEventsRetentionRefusesACorruptWatermark(t *testing.T) {
 	}{
 		{name: "created_at with no ids", entry: `"created_at":"2029-12-14 11:00:00"`},
 		{name: "created_at is not a timestamp", entry: `"created_at":"last tuesday"`},
-		{name: "created_at with no such date", entry: `"created_at":"2030-13-45 11:00:00"`},
+		{name: "created_at with no such date", entry: `"created_at":"2030-13-45 11:00:00","archived":[{"created_at":"2030-13-45 11:00:00","id":"row-1"}]`},
+		{name: "archived row with a created_at that is not a timestamp", entry: `"created_at":"2029-12-14 11:00:00","archived":[{"created_at":"last tuesday","id":"row-1"}]`},
 		{name: "archived row with an empty id", entry: `"created_at":"2029-12-14 11:00:00","archived":[{"created_at":"2029-12-14 11:00:00","id":""}]`},
 		{name: "ids without created_at", entry: `"archived":[{"created_at":"2029-12-14 11:00:00","id":"row-1"}]`},
 	}
