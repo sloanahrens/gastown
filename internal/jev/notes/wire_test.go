@@ -17,11 +17,11 @@ import (
 // root, under the config dir the caller resolved.
 func TestMemoryDirNamesTheProjectFromTheTownRoot(t *testing.T) {
 	t.Parallel()
-	got, err := memoryDir("/cfg", "/Users/sloan/gt")
-	if want := "/cfg/projects/-Users-sloan-gt/memory"; err != nil || got != want {
+	got, err := memoryDir("/cfg", "/Users/user/gt")
+	if want := "/cfg/projects/-Users-user-gt/memory"; err != nil || got != want {
 		t.Errorf("memoryDir = %q, %v; want %q, nil", got, err, want)
 	}
-	if got, want := handbookPath("/Users/sloan"), "/Users/sloan/.claude/commands/gastown.md"; got != want {
+	if got, want := handbookPath("/Users/user"), "/Users/user/.claude/commands/gastown.md"; got != want {
 		t.Errorf("handbookPath = %q, want %q", got, want)
 	}
 }

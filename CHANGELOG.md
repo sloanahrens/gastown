@@ -488,7 +488,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly not a test failure, and slot wait is never counted against the
   run budget.
 - **Dangerous-command guard now covers the town tree** (gt-6e2l) — a dog
-  session's `grep -R "record-run" -n /Users/sloan/gt` ran unblocked and
+  session's `grep -R "record-run" -n /Users/user/gt` ran unblocked and
   walked every rig, every `.repo.git`, and every worktree in the town (>64 MB
   of output, 15-minute load average 17). The unbounded-scan rule
   (`scanRootDenylist`) covered `/` and `$HOME` but not the town, which is the
