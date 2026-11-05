@@ -31,12 +31,16 @@ type awaitTarget interface {
 // awaitOrFail is the only way these tests wait on a channel: a signal answers
 // at once, and a channel that never signals fails the test with the name of
 // what it waited for instead of hanging the package until the go test timeout.
+// The bound is a context deadline rather than time.After, which the tree's
+// test policy refuses in a unit test.
 func awaitOrFail[T any](t awaitTarget, ch <-chan T, what string) T {
 	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), awaitOrFailTimeout)
+	defer cancel()
 	select {
 	case v := <-ch:
 		return v
-	case <-time.After(awaitOrFailTimeout):
+	case <-ctx.Done():
 		var zero T
 		t.Fatalf("waited %s for %s; it never came", awaitOrFailTimeout, what)
 		return zero
