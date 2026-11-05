@@ -126,6 +126,30 @@ var doltStatusCmd = &cobra.Command{
 	RunE:  runDoltStatus,
 }
 
+var doltArchiveNowCmd = &cobra.Command{
+	Use:   "archive-now",
+	Short: "Ask the daemon to run the history archive pass now",
+	Long: `Ask the daemon to run the history archive pass now and wait for its answer.
+
+The pass writes the dolt_log and events history of every database out to the
+archive, so a flatten afterwards discards only history the archive holds. This
+command only writes the archive request: it runs no gc, no backup and no
+flatten.
+
+It refuses unless the overseer's dispatch hold exists at the town root, and
+while another archive request is still pending. Under the hold it prints one
+line per database with the commits and events behind the archive before and
+after the pass.
+
+Exit codes:
+  0  the daemon completed the pass and every database reads 0 behind after
+  1  the daemon answered failed, or the pass could not be read back
+  2  still pending: the wait timed out, or the daemon deferred the pass
+  3  refused: no dispatch hold, or an archive request is already pending`,
+	Args: cobra.NoArgs,
+	RunE: runDoltArchiveNow,
+}
+
 var doltLogsCmd = &cobra.Command{
 	Use:   "logs",
 	Short: "View Dolt server logs",
@@ -246,6 +270,7 @@ var (
 	doltCleanupDry          bool
 	doltCleanupForce        bool
 	doltCleanupAuthorizedBy string
+	doltArchiveNowTimeout   time.Duration
 )
 
 func init() {
@@ -255,6 +280,7 @@ func init() {
 	doltCmd.AddCommand(doltRestartCmd)
 	doltCmd.AddCommand(doltKillImpostersCmd)
 	doltCmd.AddCommand(doltStatusCmd)
+	doltCmd.AddCommand(doltArchiveNowCmd)
 	doltCmd.AddCommand(doltLogsCmd)
 	doltCmd.AddCommand(doltDumpCmd)
 	doltCmd.AddCommand(doltSQLCmd)
@@ -272,6 +298,7 @@ func init() {
 	doltCleanupCmd.Flags().BoolVar(&doltCleanupDry, "dry-run", false, "Preview what would be removed without making changes")
 	doltCleanupCmd.Flags().BoolVar(&doltCleanupForce, "force", false, "Remove databases even if they have user tables")
 	doltCleanupCmd.Flags().StringVar(&doltCleanupAuthorizedBy, "authorized-by", "", "Bead ID recording the authorization for a forced cleanup (required for --force when run by an agent)")
+	doltArchiveNowCmd.Flags().DurationVar(&doltArchiveNowTimeout, "timeout", 20*time.Minute, "How long to wait for the daemon's answer before reporting the pass still pending")
 	doltLogsCmd.Flags().IntVarP(&doltLogLines, "lines", "n", 50, "Number of lines to show")
 	doltLogsCmd.Flags().BoolVarP(&doltLogFollow, "follow", "f", false, "Follow log output")
 
