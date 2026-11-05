@@ -6,10 +6,12 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/polecat/cachevol"
@@ -19,7 +21,8 @@ import (
 
 // TestTrimSweepCacheKeepsTheCap: a claim over the cap loses its least recently
 // used build-cache files until it is at or under the cap and keeps its module
-// cache, and a claim under the cap loses nothing.
+// cache, a claim under the cap loses nothing, and a cap of zero or less is
+// refused before anything is listed.
 func TestTrimSweepCacheKeepsTheCap(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -49,12 +52,20 @@ func TestTrimSweepCacheKeepsTheCap(t *testing.T) {
 			want:    []string{"gomodcache/mod"},
 			wantErr: "still 50 bytes over its 50-byte cap",
 		},
+		{
+			// Zero is not a default: a trim asked for no cap is refused, and the
+			// claim keeps every file.
+			name:    "a cap of zero is refused",
+			cap:     0,
+			want:    []string{"gocache/mid", "gocache/new", "gocache/newest", "gocache/old", "gomodcache/mod"},
+			wantErr: "want a cap above zero",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			root := cacheClaim(t)
-			trim := &CacheTrim{Root: root, CapBytes: tc.cap, List: listSweepCache, Remove: removeSweepCacheFile}
+			trim := &CacheTrim{Root: root, CapBytes: tc.cap, Claim: diskClaim, Remove: removeSweepCacheFile}
 			err := trimSweepCache(trim)
 			if tc.wantErr == "" && err != nil {
 				t.Fatalf("trimSweepCache: %v", err)
@@ -70,8 +81,8 @@ func TestTrimSweepCacheKeepsTheCap(t *testing.T) {
 }
 
 // TestTrimSweepCacheRefusesAnUnwiredTrim: a trim that was never wired, or that
-// is missing one of its seams, is reported rather than read as a claim with
-// nothing to remove.
+// is missing one of its seams or its cap, is reported rather than read as a
+// claim with nothing to remove.
 func TestTrimSweepCacheRefusesAnUnwiredTrim(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -81,11 +92,11 @@ func TestTrimSweepCacheRefusesAnUnwiredTrim(t *testing.T) {
 		want string
 	}{
 		{"no trim", nil, "not wired"},
-		{"no root", &CacheTrim{List: listSweepCache, Remove: removeSweepCacheFile}, "no claim root"},
-		{"a relative root", &CacheTrim{Root: "cache", List: listSweepCache, Remove: removeSweepCacheFile}, "absolute path"},
-		{"a negative cap", &CacheTrim{Root: root, CapBytes: -1, List: listSweepCache, Remove: removeSweepCacheFile}, "names a -1-byte cap"},
-		{"no listing", &CacheTrim{Root: root, Remove: removeSweepCacheFile}, "no listing"},
-		{"no removal", &CacheTrim{Root: root, List: listSweepCache}, "no removal"},
+		{"no root", &CacheTrim{CapBytes: 1, Claim: diskClaim, Remove: removeSweepCacheFile}, "no claim root"},
+		{"a relative root", &CacheTrim{Root: "cache", CapBytes: 1, Claim: diskClaim, Remove: removeSweepCacheFile}, "absolute path"},
+		{"a negative cap", &CacheTrim{Root: root, CapBytes: -1, Claim: diskClaim, Remove: removeSweepCacheFile}, "CapBytes is -1"},
+		{"no claim", &CacheTrim{Root: root, CapBytes: 1, Remove: removeSweepCacheFile}, "has no claim"},
+		{"no removal", &CacheTrim{Root: root, CapBytes: 1, Claim: diskClaim}, "no removal"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -104,23 +115,31 @@ func TestTrimSweepCacheRefusesAnUnwiredTrim(t *testing.T) {
 func TestTrimSweepCacheDoesNothingWithoutAMountedClaim(t *testing.T) {
 	t.Parallel()
 	root := filepath.Join(t.TempDir(), "not-mounted")
-	trim := &CacheTrim{Root: root, CapBytes: 1, List: listSweepCache, Remove: removeSweepCacheFile}
+	trim := &CacheTrim{Root: root, CapBytes: 1, Claim: diskClaim, Remove: removeSweepCacheFile}
 	if err := trimSweepCache(trim); err != nil {
 		t.Fatalf("trimSweepCache without a claim root: %v", err)
 	}
 }
 
-// TestTrimSweepCacheRefusesAClaimItCannotRead: a root that is a symbolic link
-// or not a directory is reported, never walked as an empty claim.
+// TestTrimSweepCacheRefusesAClaimItCannotRead: a root or a cache tree that is a
+// symbolic link, a root that is not a directory, and a root that cannot be
+// measured are reported, never walked as an empty claim.
 func TestTrimSweepCacheRefusesAClaimItCannotRead(t *testing.T) {
 	t.Parallel()
-	fixed := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	linkRoot := filepath.Join(t.TempDir(), "claim")
 	if err := os.Symlink(t.TempDir(), linkRoot); err != nil {
 		t.Fatalf("planting the claim link: %v", err)
 	}
 	fileRoot := filepath.Join(t.TempDir(), "claim")
-	writeFile(t, fileRoot, 10, fixed)
+	writeFile(t, fileRoot, 10, base)
+	treeRoot := emptyClaimRoot(t)
+	if err := os.RemoveAll(filepath.Join(treeRoot, cachevol.SeedBuildCacheDir)); err != nil {
+		t.Fatalf("clearing the build cache: %v", err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(treeRoot, cachevol.SeedBuildCacheDir)); err != nil {
+		t.Fatalf("planting the tree link: %v", err)
+	}
 	cases := []struct {
 		name string
 		root string
@@ -128,57 +147,31 @@ func TestTrimSweepCacheRefusesAClaimItCannotRead(t *testing.T) {
 	}{
 		{"a symbolic link", linkRoot, "symbolic link"},
 		{"a file", fileRoot, "not a directory"},
+		{"a symbolic link for a cache tree", treeRoot, "symbolic link, not a cache tree"},
 		// A path whose parent is a file cannot be measured, and that failure is
 		// not a claim that is simply not mounted.
-		{"a path through a file", filepath.Join(fileRoot, "claim"), "listing the cache claim"},
+		{"a path through a file", filepath.Join(fileRoot, "claim"), "opening the cache claim"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			trim := &CacheTrim{Root: tc.root, CapBytes: 1, List: listSweepCache, Remove: removeSweepCacheFile}
+			trim := &CacheTrim{Root: tc.root, CapBytes: 1, Claim: diskClaim, Remove: removeSweepCacheFile}
 			err := trimSweepCache(trim)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("trimSweepCache = %v, want a refusal naming %q", err, tc.want)
 			}
 		})
 	}
-	// A claim tree that cannot be read is a failure, never an empty tree.
-	t.Run("a cache tree that cannot be read", func(t *testing.T) {
-		t.Parallel()
-		if os.Geteuid() == 0 {
-			//testpolicy:allow no-skip — a root-owned process reads a 0o000 directory, so the failure cannot be made
-			t.Skip("a root-owned process reads a 0o000 directory, so the failure cannot be made")
-		}
-		root := t.TempDir()
-		tree := filepath.Join(root, cachevol.SeedBuildCacheDir)
-		writeFile(t, filepath.Join(tree, "entry"), 10, fixed)
-		if err := os.Chmod(tree, 0o000); err != nil {
-			t.Fatalf("making the build cache unreadable: %v", err)
-		}
-		t.Cleanup(func() {
-			if err := os.Chmod(tree, 0o755); err != nil { //testpolicy:allow no-exec-files — restores the traverse bit so TempDir can remove the tree
-				t.Errorf("restoring the mode of %s: %v", tree, err)
-			}
-		})
-		trim := &CacheTrim{Root: root, CapBytes: 1, List: listSweepCache, Remove: removeSweepCacheFile}
-		// The walk cannot list the tree, so it must report rather than plan a
-		// trim of nothing.
-		if err := trimSweepCache(trim); err == nil {
-			t.Fatal("trimSweepCache read an unreadable cache tree as empty")
-		}
-	})
 }
 
 // TestTrimSweepCacheAcceptsAFileAnotherRunRemoved: a planned file that is
 // already gone is the goal, not a failure.
 func TestTrimSweepCacheAcceptsAFileAnotherRunRemoved(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	trim := &CacheTrim{
-		Root: root, CapBytes: 1,
-		List: func(string) ([]cachevol.Entry, error) {
-			return []cachevol.Entry{{Path: "gocache/gone", Cache: cachevol.BuildCache, Size: 1000}}, nil
-		},
+		Root: t.TempDir(), CapBytes: 1,
+		Claim:  fakeClaimOf(fakeClaim(map[string]*fstest.MapFile{"gocache/gone": fakeFile(1000, base)})),
 		Remove: removeSweepCacheFile,
 	}
 	if err := trimSweepCache(trim); err != nil {
@@ -186,27 +179,126 @@ func TestTrimSweepCacheAcceptsAFileAnotherRunRemoved(t *testing.T) {
 	}
 }
 
+// TestTrimSweepCacheSkipsAFileThatVanishedMidWalk: a file another Job removes
+// between the directory read and its stat is not in the listing, so it is not
+// planned, and the trim still reaches the cap from the files that remain.
+func TestTrimSweepCacheSkipsAFileThatVanishedMidWalk(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	// The vanished file is the least recently used, so a listing that kept it
+	// would plan it first.
+	claim := faultyClaim{
+		MapFS: fakeClaim(map[string]*fstest.MapFile{
+			"gocache/vanished": fakeFile(40, base.Add(-time.Hour)),
+			"gocache/old":      fakeFile(40, base),
+			"gocache/mid":      fakeFile(40, base.Add(time.Hour)),
+			"gocache/new":      fakeFile(40, base.Add(2*time.Hour)),
+			"gocache/newest":   fakeFile(40, base.Add(3*time.Hour)),
+			"gomodcache/mod":   fakeFile(100, base.Add(-2*time.Hour)),
+		}),
+		stats: map[string]error{"gocache/vanished": fs.ErrNotExist},
+	}
+	var removed []string
+	trim := &CacheTrim{
+		Root: t.TempDir(), CapBytes: 220,
+		Claim:  fakeClaimOf(claim),
+		Remove: recordRemovals(&removed),
+	}
+	if err := trimSweepCache(trim); err != nil {
+		t.Fatalf("trimSweepCache with a file that vanished mid-walk: %v", err)
+	}
+	if want := []string{"gocache/old"}; !equal(removed, want) {
+		t.Errorf("removed = %q, want %q: the vanished file must not be planned", removed, want)
+	}
+}
+
+// TestTrimSweepCacheFailsClosedOnAPartialWalk: a missing cache tree, an
+// unreadable directory and a file whose stat fails for another reason each make
+// the listing partial. Nothing is removed, the cap is reported unverified, and
+// the error names the directory. The fake filesystem makes the unreadable
+// directory fail as root as well, so no case is skipped.
+func TestTrimSweepCacheFailsClosedOnAPartialWalk(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	claimFiles := func() fstest.MapFS {
+		return fakeClaim(map[string]*fstest.MapFile{
+			"gocache/old":    fakeFile(40, base),
+			"gocache/new":    fakeFile(40, base.Add(time.Hour)),
+			"gomodcache/mod": fakeFile(100, base.Add(-time.Hour)),
+		})
+	}
+	cases := []struct {
+		name  string
+		claim faultyClaim
+		want  string
+	}{
+		{
+			name:  "a missing build cache",
+			claim: faultyClaim{MapFS: fstest.MapFS{"gomodcache/mod": fakeFile(100, base)}},
+			want:  "listing gocache:",
+		},
+		{
+			name:  "a missing module cache",
+			claim: faultyClaim{MapFS: fstest.MapFS{"gocache/old": fakeFile(40, base)}},
+			want:  "listing gomodcache:",
+		},
+		{
+			name:  "an unreadable build cache",
+			claim: faultyClaim{MapFS: claimFiles(), dirs: map[string]error{"gocache": fs.ErrPermission}},
+			want:  "listing gocache:",
+		},
+		{
+			name:  "an unreadable module cache",
+			claim: faultyClaim{MapFS: claimFiles(), dirs: map[string]error{"gomodcache": fs.ErrPermission}},
+			want:  "listing gomodcache:",
+		},
+		{
+			name:  "a file whose stat fails for another reason",
+			claim: faultyClaim{MapFS: claimFiles(), stats: map[string]error{"gocache/old": fs.ErrPermission}},
+			want:  "listing gocache/old:",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var removed []string
+			trim := &CacheTrim{
+				Root: t.TempDir(), CapBytes: 1,
+				Claim:  fakeClaimOf(tc.claim),
+				Remove: recordRemovals(&removed),
+			}
+			err := trimSweepCache(trim)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("trimSweepCache = %v, want a refusal naming %q", err, tc.want)
+			}
+			if !strings.Contains(err.Error(), "not verified") {
+				t.Errorf("trimSweepCache = %v, want the cap reported as not verified", err)
+			}
+			if len(removed) != 0 {
+				t.Errorf("removed %q from a partial listing, want nothing", removed)
+			}
+		})
+	}
+}
+
 // TestTrimSweepCacheRefusesPathsOutsideTheCaches: a symbolic link in a cache
-// tree and a planned path that leaves the two trees are refused, the files they
-// name are still there, and the refusal is reported.
+// tree and a planned path that leaves the two trees are each refused with the
+// named refusal, and the files they name are still there.
 func TestTrimSweepCacheRefusesPathsOutsideTheCaches(t *testing.T) {
 	t.Parallel()
-	fixed := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	t.Run("a symbolic link in the cache", func(t *testing.T) {
 		t.Parallel()
 		outside := filepath.Join(t.TempDir(), "keep")
-		writeFile(t, outside, 10, fixed)
-		root := t.TempDir()
-		if err := os.MkdirAll(filepath.Join(root, cachevol.SeedBuildCacheDir), 0o755); err != nil {
-			t.Fatalf("making the build cache: %v", err)
-		}
+		writeFile(t, outside, 10, base)
+		root := emptyClaimRoot(t)
 		link := filepath.Join(root, cachevol.SeedBuildCacheDir, "link")
 		if err := os.Symlink(outside, link); err != nil {
 			t.Fatalf("planting the link: %v", err)
 		}
-		trim := &CacheTrim{Root: root, CapBytes: 1, List: listSweepCache, Remove: removeSweepCacheFile}
+		trim := &CacheTrim{Root: root, CapBytes: 1, Claim: diskClaim, Remove: removeSweepCacheFile}
 		err := trimSweepCache(trim)
-		if err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		if err == nil || !strings.Contains(err.Error(), "is a symbolic link, not a cache file") {
 			t.Fatalf("trimSweepCache = %v, want a refusal naming the symbolic link", err)
 		}
 		assertPresent(t, outside)
@@ -216,8 +308,7 @@ func TestTrimSweepCacheRefusesPathsOutsideTheCaches(t *testing.T) {
 	cases := []struct {
 		name string
 		// path is the entry a plan names, target the file that must survive the
-		// trim's refusal, and want a phrase of the refusal; empty accepts any
-		// refusal the removal gives.
+		// refusal, and want a phrase of the refusal the removal gives.
 		path    func(outsideDir string) string
 		target  func(outsideDir, root string) string
 		linkOut bool
@@ -227,13 +318,13 @@ func TestTrimSweepCacheRefusesPathsOutsideTheCaches(t *testing.T) {
 			name:   "a parent segment",
 			path:   func(outsideDir string) string { return "../" + filepath.Base(outsideDir) + "/keep" },
 			target: func(outsideDir, _ string) string { return filepath.Join(outsideDir, "keep") },
-			want:   "want a clean path",
+			want:   "want a path a walk of the claim root gives",
 		},
 		{
 			name:   "an absolute path",
 			path:   func(outsideDir string) string { return filepath.Join(outsideDir, "keep") },
 			target: func(outsideDir, _ string) string { return filepath.Join(outsideDir, "keep") },
-			want:   "want a clean path",
+			want:   "want a path a walk of the claim root gives",
 		},
 		{
 			name:   "a clean path under no cache tree",
@@ -254,36 +345,25 @@ func TestTrimSweepCacheRefusesPathsOutsideTheCaches(t *testing.T) {
 			path:    func(string) string { return "gocache/escape/keep" },
 			target:  func(outsideDir, _ string) string { return filepath.Join(outsideDir, "keep") },
 			linkOut: true,
+			want:    "path escapes from parent",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			outsideDir := t.TempDir()
-			writeFile(t, filepath.Join(outsideDir, "keep"), 10, fixed)
-			root := t.TempDir()
-			writeFile(t, filepath.Join(root, "other", "keep"), 10, fixed)
-			for _, dir := range []string{cachevol.SeedBuildCacheDir, cachevol.SeedModuleCacheDir} {
-				if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
-					t.Fatalf("making the %s cache: %v", dir, err)
-				}
-			}
+			writeFile(t, filepath.Join(outsideDir, "keep"), 10, base)
+			root := emptyClaimRoot(t)
+			writeFile(t, filepath.Join(root, "other", "keep"), 10, base)
 			if tc.linkOut {
 				if err := os.Symlink(outsideDir, filepath.Join(root, cachevol.SeedBuildCacheDir, "escape")); err != nil {
 					t.Fatalf("planting the link: %v", err)
 				}
 			}
 			path := tc.path(outsideDir)
-			trim := &CacheTrim{
-				Root: root, CapBytes: 1,
-				List: func(string) ([]cachevol.Entry, error) {
-					return []cachevol.Entry{{Path: path, Cache: cachevol.BuildCache, Size: 1000}}, nil
-				},
-				Remove: removeSweepCacheFile,
-			}
-			err := trimSweepCache(trim)
-			if err == nil || (tc.want != "" && !strings.Contains(err.Error(), tc.want)) {
-				t.Fatalf("trimSweepCache(%q) = %v, want a refusal naming %q", path, err, tc.want)
+			err := removeSweepCacheFile(root, path)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("removeSweepCacheFile(%q) = %v, want a refusal naming %q", path, err, tc.want)
 			}
 			assertPresent(t, tc.target(outsideDir, root))
 		})
@@ -372,30 +452,97 @@ func failingTrimHarness(t *testing.T, removeErr error) *harness {
 		fmt.Fprintf(stdout, "tier-sweep: integration GREEN passed=1 failed=0 skipped=0 (logs %s) in 1s\n", overrides[tiersweep.EnvLogDir])
 		return 0
 	})
-	root := t.TempDir()
+	root := emptyClaimRoot(t)
 	writeFile(t, filepath.Join(root, cachevol.SeedBuildCacheDir, "entry"), 10, time.Now())
 	h.deps.Trim = &CacheTrim{
 		Root: root, CapBytes: 1,
-		List:   listSweepCache,
+		Claim:  diskClaim,
 		Remove: func(string, string) error { return removeErr },
 	}
 	return h
 }
 
 // TestTrimSweepCacheRefusesAClaimItCannotOpen: a planned removal whose claim
-// root cannot be opened is reported rather than skipped.
+// root cannot be opened is reported as a missing root rather than skipped.
 func TestTrimSweepCacheRefusesAClaimItCannotOpen(t *testing.T) {
 	t.Parallel()
 	root := filepath.Join(t.TempDir(), "gone")
 	trim := &CacheTrim{
 		Root: root, CapBytes: 1,
-		List: func(string) ([]cachevol.Entry, error) {
-			return []cachevol.Entry{{Path: "gocache/entry", Cache: cachevol.BuildCache, Size: 1000}}, nil
-		},
+		Claim:  fakeClaimOf(fakeClaim(map[string]*fstest.MapFile{"gocache/entry": fakeFile(1000, time.Now())})),
 		Remove: removeSweepCacheFile,
 	}
-	if err := trimSweepCache(trim); err == nil {
-		t.Fatal("trimSweepCache of a claim root that cannot be opened = nil, want a refusal")
+	err := trimSweepCache(trim)
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("trimSweepCache of a claim root that cannot be opened = %v, want a missing-root refusal", err)
+	}
+}
+
+// faultyClaim is a fake claim whose listing fails where it names: a directory
+// in dirs fails its read, and a file in stats fails its stat after the directory
+// read, as a file another Job removes mid-walk does.
+type faultyClaim struct {
+	fstest.MapFS
+	dirs  map[string]error
+	stats map[string]error
+}
+
+// ReadDir is the fake's directory read, failing where dirs names the directory
+// and returning the entries whose stat fails where stats names the file.
+func (c faultyClaim) ReadDir(name string) ([]fs.DirEntry, error) {
+	if err := c.dirs[name]; err != nil {
+		return nil, err
+	}
+	entries, err := fs.ReadDir(c.MapFS, name)
+	if err != nil {
+		return nil, err
+	}
+	for i, e := range entries {
+		if err := c.stats[path.Join(name, e.Name())]; err != nil {
+			entries[i] = statFailure{DirEntry: e, err: err}
+		}
+	}
+	return entries, nil
+}
+
+// statFailure is a directory entry whose stat fails.
+type statFailure struct {
+	fs.DirEntry
+	err error
+}
+
+// Info is the stat of the entry, which fails.
+func (s statFailure) Info() (fs.FileInfo, error) { return nil, s.err }
+
+// fakeClaim is a claim of files with both cache trees present, empty or not:
+// MapFS makes a directory only of the files under it, so a tree with none would
+// otherwise read as missing.
+func fakeClaim(files map[string]*fstest.MapFile) fstest.MapFS {
+	claim := fstest.MapFS(files)
+	for _, dir := range []string{cachevol.SeedBuildCacheDir, cachevol.SeedModuleCacheDir} {
+		if _, ok := claim[dir]; !ok {
+			claim[dir] = &fstest.MapFile{Mode: fs.ModeDir | 0o755}
+		}
+	}
+	return claim
+}
+
+// fakeClaimOf is the Claim seam that hands out fsys for any root.
+func fakeClaimOf(fsys fs.FS) func(string) (fs.FS, error) {
+	return func(string) (fs.FS, error) { return fsys, nil }
+}
+
+// fakeFile is a fake claim file of size bytes, last used at mtime.
+func fakeFile(size int, mtime time.Time) *fstest.MapFile {
+	return &fstest.MapFile{Data: make([]byte, size), ModTime: mtime}
+}
+
+// recordRemovals is the Remove seam that records each planned path and removes
+// nothing, so a fake claim is never touched on disk.
+func recordRemovals(removed *[]string) func(string, string) error {
+	return func(_, name string) error {
+		*removed = append(*removed, name)
+		return nil
 	}
 }
 
@@ -409,6 +556,19 @@ func cacheClaim(t *testing.T) string {
 		writeFile(t, filepath.Join(root, cachevol.SeedBuildCacheDir, name), 40, base.Add(time.Duration(i)*time.Hour))
 	}
 	writeFile(t, filepath.Join(root, cachevol.SeedModuleCacheDir, "mod"), 100, base.Add(-time.Hour))
+	return root
+}
+
+// emptyClaimRoot is a claim mount under t.TempDir() with both cache trees
+// present and holding nothing.
+func emptyClaimRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	for _, dir := range []string{cachevol.SeedBuildCacheDir, cachevol.SeedModuleCacheDir} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatalf("making the %s cache: %v", dir, err)
+		}
+	}
 	return root
 }
 

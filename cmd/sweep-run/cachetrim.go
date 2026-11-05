@@ -6,7 +6,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 
@@ -28,18 +27,18 @@ const (
 )
 
 // CacheTrim is the trim a run ends with: the shared cache claim's root, the
-// listing of its two cache trees, and the removal of one planned path. A test
-// points Root at a t.TempDir tree and scripts either seam, so no test reads or
-// removes a real cache (gt-hlo07.2).
+// claim's files as a read-only filesystem, and the removal of one planned path.
+// A test points Claim at a fake filesystem and Remove at a recorder, so no test
+// reads or removes a real cache (gt-hlo07.2).
 type CacheTrim struct {
 	// Root is the claim's mount, holding the GOCACHE and GOMODCACHE trees.
 	Root string
-	// CapBytes is the size the claim is brought under; zero takes
-	// sweepCacheCapBytes.
+	// CapBytes is the size the claim is brought under. A value of zero or less
+	// is refused; the runner sets sweepCacheCapBytes.
 	CapBytes int64
-	// List is the claim's cache files as PlanTrim's entries, named relative to
-	// Root.
-	List func(root string) ([]cachevol.Entry, error)
+	// Claim is the claim at Root as a read-only filesystem holding the two cache
+	// trees, or nil when the claim is not mounted.
+	Claim func(root string) (fs.FS, error)
 	// Remove deletes name, a Root-relative path the plan chose, and refuses one
 	// that leaves the two cache trees.
 	Remove func(root, name string) error
@@ -48,7 +47,7 @@ type CacheTrim struct {
 // diskCacheTrim is the trim of the claim the run mounts, with the process
 // filesystem behind its seams.
 func diskCacheTrim(root string) *CacheTrim {
-	return &CacheTrim{Root: root, List: listSweepCache, Remove: removeSweepCacheFile}
+	return &CacheTrim{Root: root, CapBytes: sweepCacheCapBytes, Claim: diskClaim, Remove: removeSweepCacheFile}
 }
 
 // recordTrim trims the cache claim and writes a failure to the run's log
@@ -61,11 +60,17 @@ func recordTrim(trim *CacheTrim, logDir string, stderr io.Writer) {
 	}
 }
 
-// trimSweepCache brings the shared cache claim under its cap: it lists the two
-// cache trees, plans the removals with cachevol.PlanTrim and removes what the
-// plan names. A trim that is not wired, a listing that cannot be read, a
-// removal that fails and a plan that cannot reach the cap are all returned, so
-// a claim the run could not trim is never reported as trimmed.
+// trimSweepCache brings the shared cache claim under its cap. The runner calls it
+// at the end of every Job that writes its result, so a Job that fails before the
+// result is written does not trim, and a claim already under the cap lists its
+// files and removes nothing. It lists the two cache trees, plans the removals with
+// cachevol.PlanTrim and removes what the plan names.
+//
+// A listing that is partial removes nothing: a cache tree the claim lacks, or a
+// directory the walk cannot list, makes the cap unverifiable, so the error names
+// that directory. A trim that is not wired, a cap of zero or less, a removal that
+// fails and a plan that cannot reach the cap are all returned, so a claim the run
+// could not trim is never reported as trimmed.
 func trimSweepCache(trim *CacheTrim) error {
 	switch {
 	case trim == nil:
@@ -74,24 +79,28 @@ func trimSweepCache(trim *CacheTrim) error {
 		return errors.New("the cache trim names no claim root")
 	case !filepath.IsAbs(trim.Root):
 		return fmt.Errorf("the cache trim names the claim root %q: want an absolute path", trim.Root)
-	case trim.CapBytes < 0:
-		return fmt.Errorf("the cache trim names a %d-byte cap", trim.CapBytes)
-	case trim.List == nil:
-		return errors.New("the cache trim has no listing")
+	case trim.CapBytes <= 0:
+		return fmt.Errorf("the cache trim's CapBytes is %d: want a cap above zero", trim.CapBytes)
+	case trim.Claim == nil:
+		return errors.New("the cache trim has no claim")
 	case trim.Remove == nil:
 		return errors.New("the cache trim has no removal")
 	}
-	capBytes := trim.CapBytes
-	if capBytes == 0 {
-		capBytes = sweepCacheCapBytes
-	}
-	listing, err := trim.List(trim.Root)
+	claim, err := trim.Claim(trim.Root)
 	if err != nil {
-		return fmt.Errorf("listing the cache claim %s: %w", trim.Root, err)
+		return fmt.Errorf("opening the cache claim %s: %w", trim.Root, err)
+	}
+	if claim == nil {
+		// A claim that is not mounted has nothing to trim.
+		return nil
+	}
+	listing, err := listClaim(claim)
+	if err != nil {
+		return fmt.Errorf("the cap on the cache claim %s is not verified, so nothing was removed: %w", trim.Root, err)
 	}
 	// Another Job on the node may be building against the module cache while
 	// this run ends, so PlanTrim's cautious case leaves that cache alone.
-	plan := cachevol.PlanTrim(listing, capBytes, true)
+	plan := cachevol.PlanTrim(listing, trim.CapBytes, true)
 	var errs []error
 	for _, removal := range plan.Removals {
 		// One failed removal does not stop the rest: the claim is still over
@@ -101,7 +110,7 @@ func trimSweepCache(trim *CacheTrim) error {
 		}
 	}
 	if plan.Overflow {
-		errs = append(errs, fmt.Errorf("the cache claim is still %d bytes over its %d-byte cap after every removal the rules allow", plan.OverBytes, capBytes))
+		errs = append(errs, fmt.Errorf("the cache claim is still %d bytes over its %d-byte cap after every removal the rules allow", plan.OverBytes, trim.CapBytes))
 	}
 	return errors.Join(errs...)
 }
@@ -126,11 +135,12 @@ func recordTrimError(logDir string, err error, stderr io.Writer) {
 	}
 }
 
-// listSweepCache is the claim at root as PlanTrim's entries: every regular file
-// under GOCACHE and GOMODCACHE, named relative to root. A claim that is not
-// mounted lists nothing, and any other failure is returned, so a claim the run
-// cannot read is never trimmed as if it were empty.
-func listSweepCache(root string) ([]cachevol.Entry, error) {
+// diskClaim is the claim at root as a read-only filesystem. A claim that is not
+// mounted is nil, since a runner started outside the sweep Job has nothing to
+// trim. A root that is a symbolic link or not a directory is refused, and so is a
+// cache tree that is a symbolic link, because the walk would follow it out of the
+// claim.
+func diskClaim(root string) (fs.FS, error) {
 	info, err := os.Lstat(root) //nolint:gosec // G304: root is the claim mount this file names
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -144,6 +154,26 @@ func listSweepCache(root string) ([]cachevol.Entry, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("%s is not a directory", root)
 	}
+	for _, dir := range []string{cachevol.SeedBuildCacheDir, cachevol.SeedModuleCacheDir} {
+		tree := filepath.Join(root, dir)
+		info, err := os.Lstat(tree) //nolint:gosec // G304: tree is a cache directory under the claim mount
+		// A tree the claim lacks is reported by listClaim, which names it.
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return nil, fmt.Errorf("%s is a symbolic link, not a cache tree", tree)
+		}
+	}
+	return os.DirFS(root), nil
+}
+
+// listClaim is the claim's cache files as PlanTrim's entries, named relative to
+// the claim root. Any failure makes the listing partial and is returned.
+func listClaim(claim fs.FS) ([]cachevol.Entry, error) {
 	var listing []cachevol.Entry
 	for _, c := range []struct {
 		dir   string
@@ -152,7 +182,7 @@ func listSweepCache(root string) ([]cachevol.Entry, error) {
 		{dir: cachevol.SeedBuildCacheDir, cache: cachevol.BuildCache},
 		{dir: cachevol.SeedModuleCacheDir, cache: cachevol.ModuleCache},
 	} {
-		files, err := listCacheTree(root, c.dir, c.cache)
+		files, err := listCacheTree(claim, c.dir, c.cache)
 		if err != nil {
 			return nil, err
 		}
@@ -161,35 +191,42 @@ func listSweepCache(root string) ([]cachevol.Entry, error) {
 	return listing, nil
 }
 
-// listCacheTree is one cache tree's regular files as PlanTrim's entries. A tree
-// the run has not written yet lists nothing; a symbolic link in it is refused
-// whole, because a walk does not follow links and PlanTrim's removal does not
-// distinguish one from the file a build wrote.
-func listCacheTree(root, dir string, cache cachevol.Cache) ([]cachevol.Entry, error) {
+// listCacheTree is one cache tree's regular files as PlanTrim's entries. The
+// claim is shared, so a file another Job removes between the directory read and
+// its stat is skipped. Every other failure of the walk is returned, and a tree
+// the claim lacks is an error rather than an empty tree, so a partial listing
+// never plans a trim. A symbolic link in the tree is refused whole, because the
+// walk does not follow links and PlanTrim's removal does not distinguish one from
+// the file a build wrote.
+func listCacheTree(claim fs.FS, dir string, cache cachevol.Cache) ([]cachevol.Entry, error) {
 	var out []cachevol.Entry
-	treeRoot := filepath.Join(root, dir)
-	err := filepath.Walk(treeRoot, func(p string, info fs.FileInfo, err error) error {
+	err := fs.WalkDir(claim, dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			return fmt.Errorf("listing %s: %w", p, err)
 		}
-		if info.IsDir() {
+		if d.IsDir() {
 			return nil
 		}
-		if info.Mode()&fs.ModeSymlink != 0 {
+		if d.Type()&fs.ModeSymlink != 0 {
 			return fmt.Errorf("%s in the cache is a symbolic link, not a cache file", p)
 		}
-		if !info.Mode().IsRegular() {
+		if !d.Type().IsRegular() {
 			return nil
 		}
-		// Every child the walk visits lies under treeRoot, so its own prefix is
-		// trimmed rather than filepath.Rel, whose error no such path takes.
-		rel := strings.TrimPrefix(p, treeRoot+string(filepath.Separator))
+		info, err := d.Info()
+		if errors.Is(err, fs.ErrNotExist) {
+			// Another Job removed the file after the directory was read.
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("listing %s: %w", p, err)
+		}
 		// Go touches an entry's mtime when it reuses it, so that is the walk's
 		// last-use figure for both times: a noatime or relatime mount leaves
 		// atime stale, and PlanTrim orders by the later of the two.
 		used := info.ModTime()
 		out = append(out, cachevol.Entry{
-			Path:  path.Join(dir, filepath.ToSlash(rel)),
+			Path:  p,
 			Cache: cache,
 			Size:  info.Size(),
 			Atime: used,
@@ -197,10 +234,10 @@ func listCacheTree(root, dir string, cache cachevol.Cache) ([]cachevol.Entry, er
 		})
 		return nil
 	})
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+	if err != nil {
+		return nil, err
 	}
-	return out, err
+	return out, nil
 }
 
 // removeSweepCacheFile deletes name, relative to the claim at root, through an
@@ -209,8 +246,8 @@ func listCacheTree(root, dir string, cache cachevol.Cache) ([]cachevol.Entry, er
 // before anything is opened: PlanTrim chose it, but only those trees are a
 // trim's to remove.
 func removeSweepCacheFile(root, name string) (err error) {
-	if !cacheRelative(name) {
-		return fmt.Errorf("the cache trim names %q: want a clean path under %s/ or %s/", name, cachevol.SeedBuildCacheDir, cachevol.SeedModuleCacheDir)
+	if !cachevol.ClaimRelative(name) {
+		return fmt.Errorf("the cache trim names %q: want a path a walk of the claim root gives, such as gocache/ab/cdef", name)
 	}
 	dir, _, ok := strings.Cut(name, "/")
 	if !ok || (dir != cachevol.SeedBuildCacheDir && dir != cachevol.SeedModuleCacheDir) {
@@ -231,17 +268,4 @@ func removeSweepCacheFile(root, name string) (err error) {
 		return nil
 	}
 	return err
-}
-
-// cacheRelative reports whether p is a path a walk of the claim gives: relative
-// to the claim root, already clean, and below it rather than at it or above it.
-// It is cachevol's rule for a path its planner may name (claimRelative in
-// internal/polecat/cachevol/trimjob.go), which keeps a ".." component from
-// reaching the removal wherever it sits.
-func cacheRelative(p string) bool {
-	if p == "" || path.IsAbs(p) || path.Clean(p) != p {
-		return false
-	}
-	first, _, _ := strings.Cut(p, "/")
-	return first != "." && first != ".."
 }
