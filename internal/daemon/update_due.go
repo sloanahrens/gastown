@@ -21,6 +21,9 @@ type UpdateFacts struct {
 	Running bool
 	// InstallPending reports an install marker that has not been cleared.
 	InstallPending bool
+	// SourceMissing reports the town has no gt source checkout: main cannot be
+	// read for a target and a run cannot install, so nothing may launch.
+	SourceMissing bool
 	// MainMoved reports main differs from the installed build.
 	MainMoved bool
 	// Waiting counts landings waiting to deploy.
@@ -43,6 +46,12 @@ type UpdateFacts struct {
 func updateDue(now time.Time, s config.UpdateSettings, f UpdateFacts) (due bool, reason string) {
 	if !s.Enabled {
 		return false, "update disabled: patrols.update.enabled is false"
+	}
+	// Without a checkout there is no main to target and no build to install,
+	// so nothing makes a run due there; name that rather than let a standby or
+	// a running state answer for it.
+	if f.SourceMissing {
+		return false, "the town has no gt source checkout: gt update cannot run here"
 	}
 	if f.Standby != "" {
 		return false, "town in standby: " + f.Standby
@@ -73,7 +82,9 @@ func updateDue(now time.Time, s config.UpdateSettings, f UpdateFacts) (due bool,
 	// past midnight, so when now is before today's start the open one is the
 	// window yesterday's start left behind. LastStarted before that start
 	// means no run has started since it opened, so a zero LastStarted
-	// qualifies too.
+	// qualifies too. The hold above has already returned for a failed or
+	// aborted run on main's target, and the source check for a town that
+	// cannot update, so neither opens a window here.
 	windowStart := time.Date(now.Year(), now.Month(), now.Day(), s.WindowHour, s.WindowMinute, 0, 0, now.Location())
 	if now.Before(windowStart) {
 		windowStart = windowStart.AddDate(0, 0, -1)

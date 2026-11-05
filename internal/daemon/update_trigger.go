@@ -55,6 +55,9 @@ type updateTriggerState struct {
 	// configErr is the last settings error printed, so an unchanged broken
 	// config logs once rather than once per heartbeat.
 	configErr string
+	// notDueReason is the last not-due reason printed, so a hold that stands
+	// logs once rather than once per heartbeat.
+	notDueReason string
 }
 
 // triggerUpdate is the heartbeat's update block: decide whether an update is
@@ -80,8 +83,12 @@ func (d *Daemon) triggerUpdate() {
 
 	due, reason := updateDue(now, settings, facts)
 	if !due {
+		// Name the hold, so an operator can see why updates have stopped
+		// rather than only when one starts.
+		d.noteUpdateNotDue(reason)
 		return
 	}
+	d.clearUpdateNotDue()
 	if d.updateRefusedRecently(now) {
 		return
 	}
@@ -138,6 +145,28 @@ func (d *Daemon) noteUpdateConfigError(msg string) {
 func (d *Daemon) clearUpdateConfigError() {
 	d.updateTrigger.mu.Lock()
 	d.updateTrigger.configErr = ""
+	d.updateTrigger.mu.Unlock()
+}
+
+// noteUpdateNotDue logs a not-due reason once per distinct value, so a hold
+// that stands is visible without one line per heartbeat.
+func (d *Daemon) noteUpdateNotDue(reason string) {
+	d.updateTrigger.mu.Lock()
+	seen := d.updateTrigger.notDueReason == reason
+	if !seen {
+		d.updateTrigger.notDueReason = reason
+	}
+	d.updateTrigger.mu.Unlock()
+	if !seen {
+		d.logger.Printf("update: not due — %s", reason)
+	}
+}
+
+// clearUpdateNotDue forgets the last not-due reason once a run is due, so a
+// later hold on the same reason is reported again.
+func (d *Daemon) clearUpdateNotDue() {
+	d.updateTrigger.mu.Lock()
+	d.updateTrigger.notDueReason = ""
 	d.updateTrigger.mu.Unlock()
 }
 
@@ -217,7 +246,11 @@ func (d *Daemon) updateFacts(now time.Time) (UpdateFacts, error) {
 	repoRoot, err := version.GetRepoRootForTown(d.config.TownRoot)
 	if err != nil {
 		// No gt source checkout: there is no binary for an install to move,
-		// which is how rebuild_gt's own cycle reads the same town.
+		// which is how rebuild_gt's own cycle reads the same town. Main's sha
+		// cannot be read either, so record the missing checkout rather than
+		// leave MainSHA empty for the failed-run hold to read as unknown
+		// (gt-fj9n1).
+		facts.SourceMissing = true
 		return facts, nil
 	}
 	info, ok := d.rebuildGTStale(repoRoot)

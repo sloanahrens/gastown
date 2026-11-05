@@ -70,6 +70,7 @@ func TestUpdateTriggerLaunchesWhenDue(t *testing.T) {
 		Enabled: true,
 		Window:  "03:00",
 	})
+	setUpdateSource(t, d)
 
 	d.triggerUpdate()
 
@@ -99,6 +100,10 @@ func TestUpdateTriggerStaysQuiet(t *testing.T) {
 		name  string
 		setup func(t *testing.T, d *Daemon)
 		cfg   *config.UpdateConfig
+		// wantReason is the guard the logged reason must name, for a town with
+		// a source checkout. Without one the no-checkout short-circuit would
+		// answer for every row and hide the guard under test.
+		wantReason string
 	}{
 		{
 			name: "unconfigured",
@@ -113,18 +118,22 @@ func TestUpdateTriggerStaysQuiet(t *testing.T) {
 			cfg:  &config.UpdateConfig{Enabled: true, Window: "25:00"},
 		},
 		{
-			name: "standby",
-			cfg:  &config.UpdateConfig{Enabled: true, Window: "03:00"},
+			name:       "standby",
+			cfg:        &config.UpdateConfig{Enabled: true, Window: "03:00"},
+			wantReason: "town in standby",
 			setup: func(t *testing.T, d *Daemon) {
+				setUpdateSource(t, d)
 				if err := os.WriteFile(estop.FilePath(d.config.TownRoot), nil, 0o644); err != nil {
 					t.Fatalf("write ESTOP: %v", err)
 				}
 			},
 		},
 		{
-			name: "fresh running state",
-			cfg:  &config.UpdateConfig{Enabled: true, Window: "03:00"},
+			name:       "fresh running state",
+			cfg:        &config.UpdateConfig{Enabled: true, Window: "03:00"},
+			wantReason: "an update run is in progress",
 			setup: func(t *testing.T, d *Daemon) {
+				setUpdateSource(t, d)
 				writeState(t, d.config.TownRoot, update.State{
 					RunID:       "run-1",
 					StartedAt:   updateTriggerTestTime.Add(-10 * time.Minute),
@@ -134,9 +143,11 @@ func TestUpdateTriggerStaysQuiet(t *testing.T) {
 			},
 		},
 		{
-			name: "install pending",
-			cfg:  &config.UpdateConfig{Enabled: true, Window: "03:00"},
+			name:       "install pending",
+			cfg:        &config.UpdateConfig{Enabled: true, Window: "03:00"},
+			wantReason: "an install marker is pending",
 			setup: func(t *testing.T, d *Daemon) {
+				setUpdateSource(t, d)
 				store := installpending.StoreIn(filepath.Join(d.config.TownRoot, "daemon", installpending.FileName))
 				if err := store.Write(updateTriggerTestTime, os.Getpid()); err != nil {
 					t.Fatalf("write install marker: %v", err)
@@ -166,6 +177,11 @@ func TestUpdateTriggerStaysQuiet(t *testing.T) {
 			if *launches != 0 {
 				t.Fatalf("launches = %d, want none", *launches)
 			}
+			if tt.wantReason != "" {
+				if got := logs.String(); !strings.Contains(got, tt.wantReason) {
+					t.Errorf("log = %q, want the guard that held the launch named (%q), not another reason", got, tt.wantReason)
+				}
+			}
 		})
 	}
 
@@ -175,6 +191,7 @@ func TestUpdateTriggerStaysQuiet(t *testing.T) {
 			Enabled: true,
 			Window:  "03:00",
 		})
+		setUpdateSource(t, d)
 		d.triggerUpdate()
 		// The fake clock has not moved: this is the next heartbeat, seconds
 		// after the launch, before the job's first state could land.
@@ -327,6 +344,93 @@ func TestUpdateTriggerHoldsAFailedRunOnMainsTarget(t *testing.T) {
 	}
 }
 
+// A town with no gt source checkout has no main to read and no build to
+// install, so the trigger launches nothing even inside the nightly window: the
+// missing checkout is the reason, not a failed run holding an unknown main.
+// The reason is logged once, so an operator sees the hold without a line on
+// every heartbeat.
+func TestUpdateTriggerDoesNotLaunchWithoutASource(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		state *update.State
+	}{
+		{name: "no run has happened"},
+		{
+			name: "the last run failed",
+			state: &update.State{
+				RunID:     "run-1",
+				StartedAt: updateTriggerTestTime.Add(-54 * time.Hour),
+				EndedAt:   updateTriggerTestTime.Add(-53 * time.Hour),
+				Outcome:   update.OutcomeFailed,
+				Target:    update.Target{SHA: strings.Repeat("a", 40)},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, logs, launches, _ := newUpdateTriggerTestDaemon(t, &config.UpdateConfig{
+				Enabled: true,
+				Window:  "03:00",
+			})
+			if tt.state != nil {
+				store := update.Store{Dir: update.Dir(d.config.TownRoot)}
+				if err := store.Write(*tt.state); err != nil {
+					t.Fatalf("write state: %v", err)
+				}
+			}
+
+			d.triggerUpdate()
+			// The next heartbeat reads the same missing checkout: the reason
+			// is reported once, not once per heartbeat.
+			d.triggerUpdate()
+
+			if *launches != 0 {
+				t.Fatalf("launches = %d, want none: the town has no checkout to read main from or install onto", *launches)
+			}
+			if got := strings.Count(logs.String(), "no gt source checkout"); got != 1 {
+				t.Errorf("no-checkout lines = %d, want one per standing hold; log = %q", got, logs.String())
+			}
+		})
+	}
+}
+
+// A quiet reason is reported once while it stands, and again if it returns
+// after a run was due in between.
+func TestUpdateTriggerReportsARepeatedHoldAfterALaunch(t *testing.T) {
+	t.Parallel()
+
+	d, logs, launches, _ := newUpdateTriggerTestDaemon(t, &config.UpdateConfig{
+		Enabled: true,
+		Window:  "03:00",
+	})
+	setUpdateSource(t, d)
+	// Noon is outside the 03:00 window and main is current: nothing is due.
+	noon := time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC)
+	d.clock = clockwork.NewFakeClockAt(noon)
+	d.triggerUpdate()
+	d.triggerUpdate()
+	if got := strings.Count(logs.String(), "nothing due"); got != 1 {
+		t.Fatalf("quiet lines = %d, want one for a reason that stands; log = %q", got, logs.String())
+	}
+
+	// The window opens and the launch retires the quiet reason.
+	d.clock = clockwork.NewFakeClockAt(updateTriggerTestTime)
+	d.triggerUpdate()
+	if *launches != 1 {
+		t.Fatalf("launches = %d, want one inside the nightly window", *launches)
+	}
+
+	// The same hold returns that day and is reported again.
+	d.clock = clockwork.NewFakeClockAt(noon)
+	d.triggerUpdate()
+	if got := strings.Count(logs.String(), "nothing due"); got != 2 {
+		t.Errorf("quiet lines = %d, want the hold reported again after a launch; log = %q", got, logs.String())
+	}
+}
+
 func TestUpdateIsRegisteredAsALifecycleStep(t *testing.T) {
 	t.Parallel()
 
@@ -344,6 +448,16 @@ func TestUpdateIsRegisteredAsALifecycleStep(t *testing.T) {
 		return
 	}
 	t.Fatal("heartbeatSteps has no step named \"update\"")
+}
+
+// setUpdateSource gives d's town a gt source checkout whose build is current
+// with main, so a launch is the nightly rule's decision alone.
+func setUpdateSource(t *testing.T, d *Daemon) {
+	t.Helper()
+	createUpdateSource(t, d.config.TownRoot)
+	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo {
+		return &version.StaleBinaryInfo{RepoCommit: strings.Repeat("a", 40)}
+	}
 }
 
 // createUpdateSource makes town/gastown look like a gt source checkout, which
@@ -497,6 +611,7 @@ func TestUpdateTriggerBacksOffARefusedLaunch(t *testing.T) {
 		attempts++
 		return errors.New("refused")
 	}
+	setUpdateSource(t, d)
 
 	d.triggerUpdate()
 	// The next heartbeat is seconds later, with the launcher still refusing.

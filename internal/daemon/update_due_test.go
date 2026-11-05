@@ -244,6 +244,57 @@ func TestUpdateDueHoldsAFailedRunOnMainsTarget(t *testing.T) {
 	}
 }
 
+// A town with no gt source checkout cannot read main or install, so no rule
+// makes an update due there; the reason names the checkout rather than a hold
+// the town could never leave.
+func TestUpdateDueRefusesATownWithoutASource(t *testing.T) {
+	t.Parallel()
+
+	const target = "a1b2c3"
+	noon := time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC)
+	nightly := time.Date(2026, 3, 10, 3, 30, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		now   time.Time
+		facts UpdateFacts
+	}{
+		{
+			name:  "the nightly window is open",
+			now:   nightly,
+			facts: UpdateFacts{SourceMissing: true},
+		},
+		{
+			name: "main moved with a landing waiting",
+			now:  noon,
+			facts: UpdateFacts{
+				SourceMissing: true, MainMoved: true, Waiting: 2,
+				LastEnded: noon.Add(-4 * time.Hour),
+			},
+		},
+		{
+			name: "the last run failed on main's target",
+			now:  nightly,
+			facts: UpdateFacts{
+				SourceMissing: true, LastOutcome: update.OutcomeFailed, LastTarget: target,
+				LastStarted: nightly.AddDate(0, 0, -1), LastEnded: nightly.AddDate(0, 0, -1).Add(time.Minute),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			due, reason := updateDue(tt.now, testUpdateSettings, tt.facts)
+			if due {
+				t.Fatalf("updateDue() due = true (%q), want false: the town cannot run an update", reason)
+			}
+			if !strings.Contains(reason, "no gt source checkout") {
+				t.Errorf("updateDue() reason = %q, want it to name the missing checkout", reason)
+			}
+		})
+	}
+}
+
 func TestUpdateNeverDueUnderStandbyRunningPendingOrDisabled(t *testing.T) {
 	t.Parallel()
 
