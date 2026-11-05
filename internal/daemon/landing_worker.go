@@ -1411,13 +1411,27 @@ func writeRedMainStatus(townRoot, rigName, line string, now time.Time) error {
 	return os.Rename(tmp, path)
 }
 
-// newPromoter is a rig's one GitHub promotion owner (gt-fn9e6.37): the git
-// surface reads the target's main and pushes to it from the rig's own
-// repository, the lock is the rig's, and every failure is recorded in the
-// state the caller already keeps. Like NewRigPromoter, it returns nil for a
-// rig that does not promote, so the caller has nothing to wire and a rig that
-// has not cut over is unchanged.
+// newPromoter is a rig's one GitHub promotion owner for the daemon's own
+// paths (gt-fn9e6.37): the git surface reads the target's main and pushes to
+// it from the rig's own repository, the lock is the rig's, and every failure
+// is recorded in the state the caller already keeps. Like NewRigPromoter, it
+// returns nil for a rig that does not promote, so the caller has nothing to
+// wire and a rig that has not cut over is unchanged.
+//
+// A rig whose promote_via names another owner gets nil here too, after one
+// log line naming it: app-promote lets only gt promote advance GitHub main,
+// so GitHub follows prod (gt-182zb), and an unknown value is refused rather
+// than read as the empty default. gt promote calls NewRigPromoter itself, so
+// the opt-out stays in the daemon's callers and never in the constructor.
 func (d *Daemon) newPromoter(rigName, repo string, fj *config.ForgejoConfig) *promote.Promoter {
+	if fj != nil && fj.PromoteVia != "" {
+		if err := config.ValidateForgejoPromoteVia(fj.PromoteVia); err != nil {
+			d.logger.Printf("promote: %s: %v, so the verdict and the tier sweep do not promote it", rigName, err)
+			return nil
+		}
+		d.logger.Printf("promote: %s: merge_queue.forgejo.promote_via is %q, so the verdict and the tier sweep leave its GitHub main to gt promote", rigName, fj.PromoteVia)
+		return nil
+	}
 	return NewRigPromoter(d.config.TownRoot, rigName, fj, git.NewGit(repo), func(message string) {
 		d.escalateAlert(PromoteDivergedAlertKey(rigName), "landing_worker", message)
 	}, d.logger.Printf)

@@ -252,8 +252,26 @@ func validateMergeQueueConfig(c *MergeQueueConfig) error {
 	if c.FollowupBackpressure < 0 {
 		return fmt.Errorf("%w: followup_backpressure must be non-negative", ErrMissingField)
 	}
+	if c.Forgejo != nil {
+		if err := ValidateForgejoPromoteVia(c.Forgejo.PromoteVia); err != nil {
+			return err
+		}
+	}
 
 	return nil
+}
+
+// ValidateForgejoPromoteVia refuses a merge_queue.forgejo.promote_via that is
+// neither the empty default nor PromoteViaAppPromote, naming the key. A value
+// this binary does not implement cannot be left to read as the empty default:
+// that would let a green verdict or the tier sweep promote a rig whose GitHub
+// copy is meant to follow prod.
+func ValidateForgejoPromoteVia(v string) error {
+	switch v {
+	case "", PromoteViaAppPromote:
+		return nil
+	}
+	return fmt.Errorf("merge_queue.forgejo.promote_via = %q is not a supported value (allowed: %q, or empty)", v, PromoteViaAppPromote)
 }
 
 // NewRigConfig creates a new RigConfig (identity only).
@@ -375,6 +393,7 @@ func mergeForgejoConfig(base, override *ForgejoConfig) *ForgejoConfig {
 		out.MirrorTarget = base.MirrorTarget
 		out.PromoteTarget = base.PromoteTarget
 		out.PromoteKeyFile = base.PromoteKeyFile
+		out.PromoteVia = base.PromoteVia
 	}
 	if override != nil {
 		if override.RemoteURL != "" {
@@ -391,6 +410,9 @@ func mergeForgejoConfig(base, override *ForgejoConfig) *ForgejoConfig {
 		}
 		if override.PromoteKeyFile != "" {
 			out.PromoteKeyFile = override.PromoteKeyFile
+		}
+		if override.PromoteVia != "" {
+			out.PromoteVia = override.PromoteVia
 		}
 	}
 	// One fresh map whether the bots come from base, override, or both.

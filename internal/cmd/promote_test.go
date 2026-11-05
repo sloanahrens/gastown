@@ -127,6 +127,26 @@ func TestPromotePushesTheSHAAndRecordsIt(t *testing.T) {
 	}
 }
 
+// A rig whose promote_via leaves GitHub main to gt promote opts out of the
+// green verdict and the tier sweep, not out of gt promote itself: the plugin's
+// call is the one path that advances GitHub main (gt-182zb).
+func TestPromoteStillPromotesAppPromoteRig(t *testing.T) {
+	t.Parallel()
+	fx := newPromoteFixture(t)
+	fx.writeForgejo(t, fmt.Sprintf(`{"remote_url":%q,"promote_target":%q,"promote_key_file":%q,"promote_via":"app-promote"}`,
+		fx.forgejo, fx.github, fx.key))
+
+	if err := promoteRigSHA(fx.deps(), promoteTestRig, fx.sha); err != nil {
+		t.Fatalf("promoteRigSHA: %v", err)
+	}
+	if got := fx.f.Ref(fx.github, promote.MainRef); got != fx.sha {
+		t.Errorf("GitHub main = %q, want the promoted commit %s", got, fx.sha)
+	}
+	if st := fx.record(t); st.LastPromoted != fx.sha {
+		t.Errorf("last_promoted = %q, want %s", st.LastPromoted, fx.sha)
+	}
+}
+
 // A commit Forgejo holds on another branch is not on main, so it is not
 // promotable: nothing reaches GitHub and nothing is recorded.
 func TestPromoteRefusesACommitNotOnTheRigMain(t *testing.T) {
