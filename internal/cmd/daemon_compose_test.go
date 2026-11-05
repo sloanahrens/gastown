@@ -891,6 +891,29 @@ func TestComposeWriteBindROBlankIsRefused(t *testing.T) {
 	}
 }
 
+// The --bind-ro paragraph of the write help wraps within 80 columns: no line of
+// it runs past 80.
+func TestComposeWriteBindROHelpIsWrapped(t *testing.T) {
+	t.Parallel()
+	write, _, err := newDaemonComposeCmd(func(io.Writer, daemonComposeFlags) error { return nil }).Find([]string{"write"})
+	if err != nil {
+		t.Fatalf("find write: %v", err)
+	}
+	lines := strings.Split(write.Long, "\n")
+	start := slices.IndexFunc(lines, func(l string) bool { return strings.HasPrefix(l, "--bind-ro names") })
+	if start < 0 {
+		t.Fatal("the write help has no --bind-ro paragraph")
+	}
+	for _, l := range lines[start:] {
+		if l == "" {
+			break
+		}
+		if len(l) > 80 {
+			t.Errorf("help line is %d columns, want at most 80: %q", len(l), l)
+		}
+	}
+}
+
 // The host's isDir is the stat the --bind-ro check reads: a directory is true, a
 // file is false, and a path that is not there is an error the command refuses
 // (gt-vqexg). Every path sits under t.TempDir(), so nothing outside it is read.

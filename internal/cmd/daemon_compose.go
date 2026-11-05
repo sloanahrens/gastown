@@ -238,11 +238,11 @@ server container writes each night's backup there at the same path, so the rende
 mounts it read-write at that same path on the daemon and sets GT_DOLT_BACKUP_ROOT
 to it; a relative path is refused. Without the flag the render is unchanged.
 
---bind-ro names a host directory, an absolute path, that the daemon mounts read-only
-at that same path; repeat it for more. A path that is not a directory is refused,
-and so is one the render cannot mount read-only (relative, not cleaned, under ..,
-inside or containing the town, already mounted, or given twice). The mounts are sorted by path. Without
-the flag the render is unchanged.
+--bind-ro names a host directory, an absolute path, that the daemon mounts
+read-only at that same path; repeat it for more. A path that is not a directory
+is refused, and so is one the render cannot mount read-only (relative, not
+cleaned, under .., inside or containing the town, already mounted, or given
+twice). The mounts are sorted by path. Without the flag the render is unchanged.
 
 --print prints the render and writes no file.`,
 		Args: cobra.NoArgs,
