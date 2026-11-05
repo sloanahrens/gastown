@@ -117,6 +117,7 @@ func remoteTownRoot(t *testing.T) string {
 // flatten runbook's "0 commits behind" check can be read in the town's own mode
 // (gt-w1ekf).
 func TestDoltStatusContainerPrintsArchiveLines(t *testing.T) {
+	t.Parallel()
 	townRoot := externalContainerTownRoot(t, "gt-dolt")
 	writeStatusFile(t, townRoot, "maintenance_state.json", `{
   "archive_watermarks": {
@@ -176,6 +177,7 @@ func TestDoltStatusContainerPrintsArchiveLines(t *testing.T) {
 // cannot read still prints the header and gives every database line the
 // unreadable state, so no database reads as caught up (gt-w1ekf).
 func TestDoltStatusContainerUnreadableWatermarks(t *testing.T) {
+	t.Parallel()
 	townRoot := externalContainerTownRoot(t, "gt-dolt")
 	writeStatusFile(t, townRoot, "maintenance_state.json", "{not json")
 
@@ -206,6 +208,7 @@ func TestDoltStatusContainerUnreadableWatermarks(t *testing.T) {
 // fails prints the exact unavailable line naming the ping, so a flatten's
 // pre-check cannot pass over the failure (gt-w1ekf).
 func TestDoltStatusUnavailableOnContainerPingFailure(t *testing.T) {
+	t.Parallel()
 	townRoot := externalContainerTownRoot(t, "gt-dolt")
 	reads := stubStatusReads(townRoot)
 	reads.isRunning = func(string) (bool, int, error) {
@@ -228,6 +231,7 @@ func TestDoltStatusUnavailableOnContainerPingFailure(t *testing.T) {
 // TestDoltStatusUnavailableOnContainerNotRunning: a stopped container prints
 // the exact unavailable line naming it (gt-w1ekf).
 func TestDoltStatusUnavailableOnContainerNotRunning(t *testing.T) {
+	t.Parallel()
 	townRoot := externalContainerTownRoot(t, "gt-dolt")
 	reads := stubStatusReads(townRoot)
 	reads.isRunning = func(string) (bool, int, error) { return false, 0, nil }
@@ -245,6 +249,7 @@ func TestDoltStatusUnavailableOnContainerNotRunning(t *testing.T) {
 // TestDoltStatusUnavailableOnHostNotRunning: a stopped host server prints the
 // exact unavailable line naming it (gt-w1ekf).
 func TestDoltStatusUnavailableOnHostNotRunning(t *testing.T) {
+	t.Parallel()
 	townRoot := plainTownRoot(t, "2026-11-02T09:30:00Z")
 	reads := stubStatusReads(townRoot)
 	reads.isRunning = func(string) (bool, int, error) { return false, 0, nil }
@@ -263,6 +268,7 @@ func TestDoltStatusUnavailableOnHostNotRunning(t *testing.T) {
 // database, in container and host modes, prints the exact no-databases line
 // rather than nothing (gt-w1ekf).
 func TestDoltStatusUnavailableOnEmptyDatabaseList(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		// wantErr is the failure the status must name beside the unavailable
