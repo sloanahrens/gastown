@@ -1107,6 +1107,16 @@ type Daemon struct {
 	// skip line's latch, a restart that already deferred a younger sweep would
 	// swallow it (gt-icmdq).
 	tierSweepStaleLogged atomic.Bool
+	// tierSweepStep is the step of the cycle running now (fetch, work dir,
+	// checkout, a stage name), set beside tierSweepStartedAt so a stuck cycle
+	// names where it stopped (gt-gg9hv.37). Nil or empty means no step has run.
+	tierSweepStep atomic.Pointer[string]
+	// tierSweepNotStarted is the trigger's latch on the reasons it starts no
+	// cycle: one line per reason, and a new line only when the reason changes.
+	tierSweepNotStarted dispatch.HoldLatch
+	// tierSweepStuckLoggedAt is the UnixNano time the stuck line last ran, 0
+	// before the first, so the line repeats at most once an hour.
+	tierSweepStuckLoggedAt atomic.Int64
 	// tierSweepSeams replace the tier_sweep job's outside effects in tests;
 	// the zero value is production (see tier_sweep.go).
 	tierSweepSeams tierSweepSeams

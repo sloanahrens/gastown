@@ -625,6 +625,7 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// a failed collector keeps the previous tick's items of its own kind,
 		// so one entry cannot preserve two kinds (gt-hkldq).
 		{kind: attention.KindTierSweepStarved, collect: s.collectTierSweepStarved},
+		{kind: attention.KindTierSweepStuck, collect: s.collectTierSweepStuck},
 		{kind: attention.KindOverrunStopped, collect: s.collectOverrunStopped, owns: overrunStoppedItem},
 		// A second entry of the same kind: a stop that handed its bead back
 		// and one that never released its seat are the guard's two outcomes,
@@ -1725,6 +1726,35 @@ func (s *attentionSources) collectTierSweepStarved(ctx context.Context) ([]atten
 		}
 	}
 	return out, nil
+}
+
+// collectTierSweepStuck raises one item while the cycle the tier sweep's guard
+// holds has run past tierSweepStuckAfter (gt-gg9hv.37): every later trigger
+// starts nothing, and the daemon's own state is the only record of the cycle.
+// The reconciler clears the item on the first tick after the cycle ends,
+// because the guard then observes no cycle to report.
+func (s *attentionSources) collectTierSweepStuck(context.Context) ([]attention.Item, error) {
+	if s.d == nil || !s.d.tierSweepRunning.Load() {
+		return nil, nil
+	}
+	started := s.d.tierSweepStartedAt.Load()
+	if started == 0 {
+		return nil, nil
+	}
+	age := s.now.Sub(time.Unix(0, started))
+	if age < tierSweepStuckAfter {
+		return nil, nil
+	}
+	step := s.d.tierSweepStepName()
+	if step == "" {
+		step = "unknown"
+	}
+	return []attention.Item{{
+		Key:      tierSweepStuckKey,
+		Kind:     attention.KindTierSweepStuck,
+		Severity: attention.SeverityHigh,
+		Summary:  fmt.Sprintf("tier sweep cycle running %s, step %s", age.Round(time.Minute), step),
+	}}, nil
 }
 
 // tierSweepStarvedVerdict is the verdict a starved tier is still carrying, for

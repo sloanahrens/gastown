@@ -73,6 +73,20 @@ const (
 	// slot wait included.
 	tierSweepRunBudget = 2 * time.Hour
 
+	// tierSweepStuckAfter is how long a cycle may run before the trigger calls
+	// it stuck and names its step: twice the sum of the stage budgets, so a
+	// cycle still inside its own bounds is never named (gt-gg9hv.37).
+	tierSweepStuckAfter = 2 * (tierSweepShellBudget + tierSweepIntegrationBudget)
+
+	// tierSweepStuckLogGap is how often the stuck line repeats while the cycle
+	// stays stuck. An hour is enough for a reader to find it, and it keeps the
+	// heartbeat's every-tick check from filling the log.
+	tierSweepStuckLogGap = time.Hour
+
+	// tierSweepStuckKey is the attention item's key for a cycle past its bound:
+	// one item standing while the guard holds, cleared when the cycle ends.
+	tierSweepStuckKey = "tier_sweep.stuck"
+
 	// tierSweepLogTailLines is how much of a stage's output the daemon log
 	// keeps. The whole log is written to the state file's log path.
 	tierSweepLogTailLines = 20
@@ -647,7 +661,15 @@ type tierSweepBeadStore interface {
 // is due: a cycle runs the shell tier and then the integration suite, so
 // inline it would stall the heartbeat.
 func (d *Daemon) triggerTierSweep() {
-	if !d.isPatrolActive("tier_sweep") {
+	now := d.clk().Now()
+	// The guard's state is checked before any reason can return: a cycle past
+	// its bound holds every later trigger off, and that is the state a silent
+	// trigger would hide (gt-gg9hv.37).
+	d.logTierSweepStuck(now)
+	if reason := d.patrolOffReason("tier_sweep"); reason != "" {
+		d.logTierSweepNotStarting("inactive:"+reason, func() string {
+			return "patrol inactive (" + reason + ")"
+		})
 		return
 	}
 	if !d.upgradeRestartDrains() {
@@ -655,15 +677,18 @@ func (d *Daemon) triggerTierSweep() {
 		d.tierSweepSkipLogged.Store(false)
 		d.tierSweepStaleLogged.Store(false)
 	}
-	now := d.clk().Now()
 	// A standby (the town ESTOP or a Waned Ring) starts no cycle and creates
 	// no bead; a cycle already running finishes.
 	reason := d.standbyReason(now)
 	d.logStandby(&d.standbyTierSweep, "tier_sweep", reason)
 	if reason != "" {
+		d.logTierSweepNotStarting("standby:"+reason, func() string {
+			return "standby (" + reason + ")"
+		})
 		return
 	}
-	dec := evaluatePatrolDue(d.config.TownRoot, "tier_sweep", d.tierSweepRun.last(), now, tierSweepInterval(d.patrolConfig))
+	interval := tierSweepInterval(d.patrolConfig)
+	dec := evaluatePatrolDue(d.config.TownRoot, "tier_sweep", d.tierSweepRun.last(), now, interval)
 	// Inside the interval, a rig whose last cycle was red may still be due early
 	// (gt-giai1). The state files pick the candidates; the bead store and
 	// origin/main are read on the cycle's goroutine.
@@ -671,21 +696,37 @@ func (d *Daemon) triggerTierSweep() {
 	if !dec.due {
 		early = d.tierSweepEarlyCandidates(now)
 		if len(early) == 0 {
+			d.logTierSweepNotStarting("not-due", func() string {
+				return "not due (" +
+					tierSweepDueDetail(d.config.TownRoot, d.tierSweepRun.last(), interval, dec.note) +
+					"); no early re-run candidate"
+			})
 			return
 		}
 	}
 	if !d.tierSweepRunning.CompareAndSwap(false, true) {
+		started := time.Unix(0, d.tierSweepStartedAt.Load())
+		d.logTierSweepNotStarting("running:"+strconv.FormatInt(started.UnixNano(), 10), func() string {
+			return fmt.Sprintf("a cycle is already running (started %s, %d minutes ago)",
+				started.Format(time.RFC3339), int(now.Sub(started)/time.Minute))
+		})
 		return
 	}
+	// The reason this trigger was held is over: the next one logs fresh.
+	d.logTierSweepNotStarting("", nil)
 	// The hold the restart reads starts here, with the cycle, not with the
 	// marker: a sweep that begins while the restart has already waited out
 	// tierSweepRestartCap gets that much of its own (gt-zvqn8).
 	d.tierSweepStartedAt.Store(now.UnixNano())
+	d.setTierSweepStep("start")
 	if dec.warn != "" {
 		d.logger.Printf("tier_sweep: WARNING: %s — %s", dec.warn, dec.note)
 	}
 	go func() {
 		defer d.tierSweepRunning.Store(false)
+		// The step dies with the cycle, before the guard opens: a tick between
+		// the two must not name a step nothing is in (gt-gg9hv.37).
+		defer d.setTierSweepStep("")
 		if !dec.due {
 			// An early re-run leaves the patrol's hourly clock alone: the rig's
 			// own record carries the gap, and a heartbeat that finds main
@@ -700,6 +741,80 @@ func (d *Daemon) triggerTierSweep() {
 		}
 		d.recordPatrolRun(&d.tierSweepRun, "tier_sweep", d.clk().Now())
 	}()
+}
+
+// logTierSweepNotStarting logs why the trigger started no cycle, once for each
+// reason: on the first heartbeat it holds, and again only when the reason
+// changes. The key is the reason's identity, so a message whose wording ages
+// (the minutes in "already running") does not re-log; an empty key lifts the
+// latch with no line, because the reason is over. message is built only when
+// the line prints, so a detail that reads state (the last-run record) is read
+// on the heartbeat that logs, not on every heartbeat.
+func (d *Daemon) logTierSweepNotStarting(key string, message func() string) {
+	if key == "" {
+		d.tierSweepNotStarted.Changed("")
+		return
+	}
+	if !d.tierSweepNotStarted.Changed(key) {
+		return
+	}
+	d.logger.Printf("tier_sweep: not starting: %s", message())
+}
+
+// tierSweepDueDetail says when the sweep last ran and when it next falls due,
+// for the not-due line. A record this read cannot place falls back to the due
+// decision's own note rather than inventing a time.
+func tierSweepDueDetail(townRoot string, inMemory time.Time, interval time.Duration, note string) string {
+	lastRun, found, _, err := latestPatrolLastRun(townRoot, "tier_sweep", inMemory)
+	if err != nil || !found {
+		return note
+	}
+	return "last run " + lastRun.Format(time.RFC3339) +
+		", next due " + lastRun.Add(interval).Format(time.RFC3339)
+}
+
+// setTierSweepStep records the step of the cycle running now, beside
+// tierSweepStartedAt, so the stuck line names where the cycle stopped.
+func (d *Daemon) setTierSweepStep(step string) {
+	d.tierSweepStep.Store(&step)
+}
+
+// tierSweepStepName is the step of the cycle running now, or "" when none ran.
+func (d *Daemon) tierSweepStepName() string {
+	if p := d.tierSweepStep.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
+// logTierSweepStuck logs a cycle that has run past tierSweepStuckAfter, naming
+// its step and how long it has run, at most once per tierSweepStuckLogGap. The
+// attention queue raises the item; this line is what a reader of the daemon log
+// sees when nobody is watching the queue (gt-gg9hv.37).
+func (d *Daemon) logTierSweepStuck(now time.Time) {
+	if !d.tierSweepRunning.Load() {
+		return
+	}
+	started := d.tierSweepStartedAt.Load()
+	if started == 0 {
+		return
+	}
+	age := now.Sub(time.Unix(0, started))
+	if age < tierSweepStuckAfter {
+		return
+	}
+	last := d.tierSweepStuckLoggedAt.Load()
+	if last != 0 && now.Sub(time.Unix(0, last)) < tierSweepStuckLogGap {
+		return
+	}
+	if !d.tierSweepStuckLoggedAt.CompareAndSwap(last, now.UnixNano()) {
+		return
+	}
+	step := d.tierSweepStepName()
+	if step == "" {
+		step = "unknown"
+	}
+	d.logger.Printf("tier_sweep: cycle running %d minutes, step %s", int(age/time.Minute), step)
 }
 
 // tierSweepEarlyDue reports whether st is a red record old enough to re-run
@@ -788,7 +903,10 @@ func (d *Daemon) runTierSweepEarly(rigs []string, now time.Time) {
 		if mainSHA == nil {
 			mainSHA = tierSweepMainSHA
 		}
+		stepStart := d.clk().Now()
+		d.setTierSweepStep("fetch")
 		sha, err := mainSHA(ctx, repo)
+		d.logger.Printf("tier_sweep: %s: fetch in %s", rig, d.clk().Now().Sub(stepStart))
 		if err != nil {
 			d.logger.Printf("tier_sweep: %s: cannot read origin/main (%v); deferring the early re-run", rig, err)
 			continue
@@ -968,6 +1086,12 @@ func (d *Daemon) runTierSweep() bool {
 	if d.tierSweepDeferForRestart(d.clk().Now()) {
 		return false
 	}
+	// The cycle's first line. A cycle that never reaches a stage still says
+	// what asked it to start, and a reader dating the silence has the
+	// due-ness the trigger used (gt-gg9hv.37).
+	dec := evaluatePatrolDue(d.config.TownRoot, "tier_sweep", d.tierSweepRun.last(),
+		d.clk().Now(), tierSweepInterval(d.patrolConfig))
+	d.logger.Printf("tier_sweep: cycle started (due: %s)", dec.note)
 	rigs := tierSweepRigs(d.patrolConfig, d.getKnownRigs())
 	if len(rigs) == 0 {
 		d.logger.Printf("tier_sweep: no rig configured to sweep; nothing to do")
@@ -1008,7 +1132,10 @@ func (d *Daemon) runTierSweepRig(ctx context.Context, cycle *dogCycle, rig strin
 	if mainSHA == nil {
 		mainSHA = tierSweepMainSHA
 	}
+	stepStart := d.clk().Now()
+	d.setTierSweepStep("fetch")
 	sha, err := mainSHA(ctx, repo)
+	d.logger.Printf("tier_sweep: %s: fetch in %s", rig, d.clk().Now().Sub(stepStart))
 	if err != nil {
 		cycle.skipStep(rig, "cannot read origin/main: "+err.Error())
 		d.logger.Printf("tier_sweep: %s: cannot read origin/main (%v); deferring", rig, err)
@@ -1148,7 +1275,10 @@ const (
 func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, repo, sha string, state tierSweepState, now time.Time, kind tierSweepRunKind) bool {
 	seams := d.tierSweepSeams
 
+	stepStart := d.clk().Now()
+	d.setTierSweepStep("work dir")
 	dir, err := d.tierSweepWorkDir(rig)
+	d.logger.Printf("tier_sweep: %s: work dir in %s", rig, d.clk().Now().Sub(stepStart))
 	if err != nil {
 		cycle.skipStep(rig, "work root: "+err.Error())
 		d.logger.Printf("tier_sweep: %s: %v; deferring", rig, err)
@@ -1158,7 +1288,10 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 	if worktree == nil {
 		worktree = tierSweepCheckout
 	}
+	stepStart = d.clk().Now()
+	d.setTierSweepStep("checkout")
 	cleanup, err := worktree(ctx, repo, dir, sha)
+	d.logger.Printf("tier_sweep: %s: checkout in %s", rig, d.clk().Now().Sub(stepStart))
 	if err != nil {
 		cycle.skipStep(rig, "cannot check out "+shortSHA(sha)+": "+err.Error())
 		d.logger.Printf("tier_sweep: %s: cannot check out %s: %v; deferring", rig, shortSHA(sha), err)
@@ -1196,6 +1329,7 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 		// The stage's own start, so `gt tail` shows a slow or hung stage on the
 		// line that names it (gt-iqzr0).
 		stageStart := d.clk().Now()
+		d.setTierSweepStep(planned.step)
 		// The command is picked from the tree this cycle checked out, before the
 		// stage runs (gt-j0wki). A tree with neither the Go command nor the
 		// script runs nothing, and a tree that cannot be read runs nothing
@@ -1545,12 +1679,28 @@ func (d *Daemon) tierSweepWorkDir(rig string) (string, error) {
 	return filepath.Join(root, "tier-sweep", "wt"), nil
 }
 
+// tierSweepFetchBudget is the bound the origin/main fetch runs under: what is
+// left of ctx's deadline, or git.RemoteQueryTimeout when the cycle set none. An
+// exhausted budget is an error rather than a zero timeout, which git reads as
+// "no timeout" (gt-gg9hv.37).
+func tierSweepFetchBudget(ctx context.Context) (time.Duration, error) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return git.RemoteQueryTimeout, nil
+	}
+	budget := time.Until(deadline)
+	if budget <= 0 {
+		return 0, context.DeadlineExceeded
+	}
+	return budget, nil
+}
+
 // tierSweepCheckout checks sha out detached at the sweep's one fixed path. The
 // worktree from an earlier cycle is moved to the new sha rather than recreated,
 // so the checkout is reused; anything else at the path is dropped first, because
 // a stale tree there would sweep the wrong commit.
-func tierSweepCheckout(_ context.Context, repo, dir, sha string) (func(), error) {
-	return tierSweepCheckoutWith(tierSweepGit(), repo, dir, sha)
+func tierSweepCheckout(ctx context.Context, repo, dir, sha string) (func(), error) {
+	return tierSweepCheckoutWith(ctx, tierSweepGit(), repo, dir, sha)
 }
 
 // tierSweepGitOps is the git surface tierSweepCheckout drives. It is a value
@@ -1576,7 +1726,15 @@ func tierSweepGit() tierSweepGitOps {
 	}
 }
 
-func tierSweepCheckoutWith(g tierSweepGitOps, repo, dir, sha string) (func(), error) {
+func tierSweepCheckoutWith(ctx context.Context, g tierSweepGitOps, repo, dir, sha string) (func(), error) {
+	// The calls below take no bound of their own: a checkout or worktree add
+	// that waits inside git cannot be ended from here, so a check runs before
+	// the calls with somewhere to stop, and a checkout that already spent the
+	// cycle's budget starts no further step (gt-gg9hv.37).
+	check := func() error { return ctx.Err() }
+	if err := check(); err != nil {
+		return nil, err
+	}
 	if _, err := os.Stat(dir); err == nil {
 		if err := g.moveTo(dir, sha); err == nil {
 			// The worktree is reused, so whatever the last cycle built is still
@@ -1585,6 +1743,9 @@ func tierSweepCheckoutWith(g tierSweepGitOps, repo, dir, sha string) (func(), er
 			// verdict the sweep is about to take. Clean it before the sweep
 			// reads anything, and fail the cycle rather than sweep a tree that
 			// could not be cleaned (gt-oyrav).
+			if err := check(); err != nil {
+				return nil, err
+			}
 			if err := g.clean(dir); err != nil {
 				return nil, err
 			}
@@ -1594,12 +1755,21 @@ func tierSweepCheckoutWith(g tierSweepGitOps, repo, dir, sha string) (func(), er
 		// at the path by an unclean shutdown survives it and then wedges every
 		// add with "already exists". Remove exactly this path - never its
 		// parent or a sibling - and re-add the worktree (gt-9yfgm).
+		if err := check(); err != nil {
+			return nil, err
+		}
 		if err := g.remove(repo, dir); err != nil {
+			if err := check(); err != nil {
+				return nil, err
+			}
 			if err := os.RemoveAll(dir); err != nil {
 				return nil, err
 			}
 		}
 		_ = g.prune(repo)
+	}
+	if err := check(); err != nil {
+		return nil, err
 	}
 	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
 		return nil, err
@@ -1621,12 +1791,18 @@ func tierSweepLocalMainSHA(repo string) (string, error) {
 }
 
 // tierSweepMainSHA fetches origin/main and returns its tip.
+//
+// The fetch is bounded by what is left of the cycle's context:
+// git.FetchBranch takes no bound and ignores the context, so a remote that
+// accepts the connection and then goes silent would hold the cycle — and the
+// guard — for good (gt-gg9hv.37). tierSweepFetchBudget reads that bound.
 func tierSweepMainSHA(ctx context.Context, repo string) (string, error) {
-	if err := ctx.Err(); err != nil {
+	budget, err := tierSweepFetchBudget(ctx)
+	if err != nil {
 		return "", err
 	}
 	g := git.NewGit(repo)
-	if err := g.FetchBranch("origin", "main"); err != nil {
+	if err := g.FetchBranchWithTimeout("origin", "main", budget); err != nil {
 		return "", fmt.Errorf("fetching origin/main: %w", err)
 	}
 	sha, err := g.Rev("origin/main")

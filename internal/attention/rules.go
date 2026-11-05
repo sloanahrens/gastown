@@ -54,6 +54,9 @@ const (
 	RuleHostMemLow       = "host.mem_low"
 	RuleHostDockerDown   = "host.docker_stack_down"
 	RuleHostProbe        = "host.probe_failed"
+	// RuleTierSweepStuck is the tier sweep's own key: the guard's cycle, not a
+	// tier's verdict (gt-gg9hv.37).
+	RuleTierSweepStuck = "tier_sweep.stuck"
 
 	// The overseer-question rules (gt-47rea).
 	RuleQuestionNew      = "question.new"
@@ -108,6 +111,9 @@ var ruleFlags = map[string]RuleFlags{
 	RuleHostDiskCrit:     flagsWake,
 	RuleHostMemLow:       flagsWake,
 	RuleHostDockerDown:   flagsWake,
+	// A cycle the guard holds past its bound blocks every later cycle: the
+	// tiers the sweep alone gates go unmeasured until someone looks.
+	RuleTierSweepStuck: flagsWake,
 	// Free seats and dispatchable beads with nothing started is work that is
 	// not happening, which no rule over existing work can see.
 	RuleDispatchIdle: flagsWake,
@@ -195,6 +201,7 @@ var kindRules = map[Kind]string{
 	KindBDSlow:           RuleBDSlow,
 	KindTierSweepRed:     RuleTierSweepRed,
 	KindTierSweepStarved: RuleTierSweepStarved,
+	KindTierSweepStuck:   RuleTierSweepStuck,
 	KindRevertRefused:    RuleRevertRefused,
 	KindBlockedMail:      RuleBlockedMail,
 	KindOverrunStopped:   RuleOverrunStopped,

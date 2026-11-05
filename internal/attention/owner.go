@@ -73,6 +73,7 @@ var ruleOwners = map[string]Owner{
 	RuleBDSlow:           OwnerOverseer,
 	RuleTierSweepRed:     OwnerOverseer,
 	RuleTierSweepStarved: OwnerOverseer,
+	RuleTierSweepStuck:   OwnerOverseer,
 	RuleRevertRefused:    OwnerOverseer,
 	RuleBlockedMail:      OwnerOverseer,
 	RuleOverrunStopped:   OwnerOverseer,
