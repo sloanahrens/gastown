@@ -2195,8 +2195,8 @@ type TierSweepRunnerConfig struct {
 }
 
 // DefaultSweepProtectedNamespaces is what the sweep's priority preflight
-// protects when the setting names none: Forgejo's namespace, the workload the
-// 2026-11-05 sweep displaced (gt-gg9hv.39).
+// protects when the setting names none: Forgejo's namespace, whose pods ran
+// below the sweep on 2026-11-05 (gt-gg9hv.39).
 var DefaultSweepProtectedNamespaces = []string{"forgejo"}
 
 // ProtectedNamespaceList is the namespaces the sweep's preflight checks: the

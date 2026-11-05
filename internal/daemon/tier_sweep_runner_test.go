@@ -921,6 +921,9 @@ func runnerKubernetesDaemon(t *testing.T, now time.Time) (*Daemon, sweeprunner.S
 // with AlreadyExists. failApply is the 1-based apply that fails, 0 for none: 1
 // is the repo claim, 2 the output claim, 3 the Job and 4 the reader pod.
 // failWait fails the reader pod's readiness wait, not the sync pod's.
+// priority answers the priority preflight's listing instead of the healthy one,
+// so a cycle can be driven from a protected pod the sweep outranks to a healthy
+// cluster and back.
 type runnerCluster struct {
 	t              *testing.T
 	status         string
@@ -938,6 +941,7 @@ type runnerCluster struct {
 	failWait       bool
 	failApply      int
 	applies        int
+	priority       []byte
 }
 
 // runnerPriorityListing is what the priority preflight's kubectl call answers:
@@ -955,6 +959,9 @@ const runnerPriorityListing = `{"kind":"List","items":[
 func (c *runnerCluster) answer(argv []string) ([]byte, []byte, error) {
 	switch {
 	case slices.Contains(argv, "get") && slices.Contains(argv, "pods,priorityclasses"):
+		if c.priority != nil {
+			return c.priority, nil, nil
+		}
 		return []byte(runnerPriorityListing), nil, nil
 	case slices.Contains(argv, "get") && slices.Contains(argv, "jobs"):
 		if c.jobsErr {
@@ -1665,10 +1672,22 @@ func TestTierSweepRunnerKubernetesCycleEndsDuringCollect(t *testing.T) {
 	}
 }
 
+// runnerPriorityDeclineListing is what the priority preflight answers while a
+// Forgejo pod runs at priority 0 under the sweep's class at 100: the run would
+// outrank that pod.
+const runnerPriorityDeclineListing = `{"kind":"List","items":[
+{"kind":"PriorityClass","metadata":{"name":"gt-ci"},"value":100},
+{"kind":"PriorityClass","metadata":{"name":"gt-ci-gate"},"value":200},
+{"kind":"PriorityClass","metadata":{"name":"gt-control-plane"},"value":1000000},
+{"kind":"Pod","metadata":{"name":"forgejo-abc","namespace":"forgejo"},"spec":{"priority":0}}]}`
+
 // A preflight decline is not a failed run: nothing was attempted and nothing
 // was learned about the tree, so the stage reports that it did not run and the
 // cycle defers. The line naming the pod is logged at most once an hour while
-// the reason stands (gt-gg9hv.39).
+// the reason stands, and at once again when the preflight clears and the
+// decline re-arises inside that hour. The decline comes from the priority
+// guard over the launcher's kubectl listing, the path a cycle really takes
+// (gt-gg9hv.39).
 func TestTierSweepRunnerPriorityDeclineDefers(t *testing.T) {
 	t.Parallel()
 	now := atHour(time.Now(), 15)
@@ -1676,40 +1695,38 @@ func TestTierSweepRunnerPriorityDeclineDefers(t *testing.T) {
 	cfg := runnerTestConfig(t)
 	cfg.Backend = config.TierSweepRunnerKubernetes
 	d.patrolConfig.Patrols.TierSweep.Runner = cfg
-	st := tierSweepStage{tiers: []string{"integration"}, slot: true, rig: "gastown", tested: runnerTestSHA, budget: time.Minute}
+	st := tierSweepStage{tiers: []string{"integration", "race"}, slot: true, rig: "gastown", tested: runnerTestSHA, budget: time.Minute}
 	spec, ok, err := d.tierSweepRunnerSpec(st)
 	if err != nil || !ok {
 		t.Fatalf("spec = %+v, ok = %v, err = %v; want the runner to take the stage", spec, ok, err)
 	}
-	// The guard's own refusal, from a listing whose Forgejo pod runs at
-	// priority 0 with the sweep's class at 100.
-	const listing = `{"kind":"List","items":[
-{"kind":"PriorityClass","metadata":{"name":"gt-ci"},"value":100},
-{"kind":"PriorityClass","metadata":{"name":"gt-ci-gate"},"value":200},
-{"kind":"PriorityClass","metadata":{"name":"gt-control-plane"},"value":1000000},
-{"kind":"Pod","metadata":{"name":"forgejo-abc","namespace":"forgejo"},"spec":{"priority":0}}]}`
-	declined := sweeprunner.PriorityGuard(spec, spec.ProtectedNamespaces).Refuse([]byte(listing))
-	if declined == nil {
-		t.Fatal("the guard passed a listing whose Forgejo pod runs below the sweep")
-	}
-	d.tierSweepSeams.launch = func(context.Context, tierSweepStage, sweeprunner.Spec) tierSweepLaunch {
-		return tierSweepLaunch{exitCode: -1, err: declined}
-	}
-	const line = "tier_sweep: not launching: pod forgejo/forgejo-abc"
+	result := runnerTestResult(spec, now)
+	cluster := &runnerCluster{t: t, status: "Complete", result: &result, priority: []byte(runnerPriorityDeclineListing)}
+	d.execCmd = (&runnerFakeCmds{answer: cluster.answer}).run
 
-	stage := d.tierSweepRunRunner(context.Background(), st, spec)
-	if stage.ran {
-		t.Fatalf("stage = %+v, want ran=false so the cycle defers rather than going red", stage)
+	const line = "tier_sweep: not launching: pod forgejo/forgejo-abc"
+	cycle := func() tierSweepStageResult {
+		t.Helper()
+		return d.tierSweepRunRunner(context.Background(), st, spec)
 	}
-	if stage.err == nil {
-		t.Error("the declined stage reports no error for the cycle's deferral line")
+	declined := func() {
+		t.Helper()
+		stage := cycle()
+		if stage.ran {
+			t.Fatalf("stage = %+v, want ran=false so the cycle defers rather than going red", stage)
+		}
+		if stage.err == nil {
+			t.Error("the declined stage reports no error for the cycle's deferral line")
+		}
 	}
+
+	declined()
 	if got := strings.Count(logs.String(), line); got != 1 {
 		t.Fatalf("the decline line appears %d times after the first cycle, want once:\n%s", got, logs.String())
 	}
 
 	// A second cycle inside the hour retries the launch and says nothing new.
-	d.tierSweepRunRunner(context.Background(), st, spec)
+	declined()
 	if got := strings.Count(logs.String(), line); got != 1 {
 		t.Errorf("the decline line appears %d times inside the hour, want it once:\n%s", got, logs.String())
 	}
@@ -1718,9 +1735,36 @@ func TestTierSweepRunnerPriorityDeclineDefers(t *testing.T) {
 	if !ok {
 		t.Fatalf("test clock = %T, want a fake clock to advance", d.clock)
 	}
-	clk.Advance(61 * time.Minute)
-	d.tierSweepRunRunner(context.Background(), st, spec)
+
+	// The preflight passes: the same launch path starts the run, so no decline
+	// stands. Its result is removed so the next cycle launches instead of
+	// folding this run's result.
+	cluster.priority = nil
+	clk.Advance(time.Minute)
+	if stage := cycle(); !stage.ran {
+		t.Fatalf("stage = %+v, want the run launched once the preflight passed", stage)
+	}
+	if err := os.Remove(filepath.Join(spec.OutDir, sweeprunner.ResultFileName)); err != nil {
+		t.Fatalf("removing the launched run's result for the next cycle: %v", err)
+	}
+
+	// The decline re-arises inside the hour: it logs at once.
+	cluster.priority = []byte(runnerPriorityDeclineListing)
+	clk.Advance(time.Minute)
+	declined()
 	if got := strings.Count(logs.String(), line); got != 2 {
+		t.Errorf("the decline line appears %d times after it cleared and re-arose, want it logged again at once:\n%s", got, logs.String())
+	}
+
+	// It still stands: the next report waits out the hour from that line.
+	clk.Advance(30 * time.Minute)
+	declined()
+	if got := strings.Count(logs.String(), line); got != 2 {
+		t.Errorf("the standing decline was logged again inside the hour:\n%s", logs.String())
+	}
+	clk.Advance(31 * time.Minute)
+	declined()
+	if got := strings.Count(logs.String(), line); got != 3 {
 		t.Errorf("the decline line appears %d times after the hour, want the standing decline reported again:\n%s", got, logs.String())
 	}
 }

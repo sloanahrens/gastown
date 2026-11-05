@@ -2254,8 +2254,13 @@ func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec
 				}
 				return tierSweepStageResult{exitCode: -1, err: decline}
 			}
+			// Anything else was refused after the preflight passed, so no
+			// decline stands: a decline that comes back logs at once.
+			d.tierSweepPriorityLog.Clear()
 			return tierSweepRunnerNoResultStage(started, started.err, false)
 		}
+		// The launch got past the preflight: the next decline is a new one.
+		d.tierSweepPriorityLog.Clear()
 		// The record is what the next cycle reads to adopt this run: the run id,
 		// and the start its budget is measured from.
 		if err := tierSweepWriteRunnerRecord(spec.OutDir, tierSweepRunnerRecord{RunID: spec.RunID, Started: d.clk().Now()}); err != nil {

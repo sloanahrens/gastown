@@ -28,7 +28,9 @@ type ControlPriority struct {
 	// Namespace is the namespace the Deployment's pods run in.
 	Namespace string
 	// Deployment is the Deployment the pods belong to; a pod belongs to it
-	// when its owner's name is the Deployment's name or starts with it.
+	// when its ReplicaSet owner is that Deployment's name, or that name plus the
+	// one suffix segment the cluster generates, never a Deployment whose name
+	// starts the same way.
 	Deployment string
 	// Class is the PriorityClass the Deployment's pods must name.
 	Class string
@@ -50,10 +52,10 @@ var ControlPriorities = []ControlPriority{
 }
 
 // PriorityGuard is the preflight that refuses a launch while a protected
-// workload's pod runs at or below the sweep's priority, or while a live pod's
-// priority differs from the table's row for it. A node with no room sheds the
-// sweep first; a pod the sweep outranks is one the scheduler may displace for
-// it, which is what took Forgejo down on 2026-11-05 (gt-gg9hv.39).
+// workload's live pod runs at or below the sweep's priority, or while a live
+// pod's priority differs from the table's row for it. The Forgejo Deployments
+// carried no priorityClassName on 2026-11-05, so they ran at priority 0 and the
+// sweep, at a higher class, was free to shed them (gt-gg9hv.39).
 //
 // One kubectl call reads the pods across every namespace and the PriorityClass
 // objects the sweep compares against: the sweep's own priority is the value of
@@ -107,6 +109,11 @@ func refuseControlPriorities(protected []string) func(stdout []byte) error {
 func refuseProtectedPods(pods []listedPod, protected []string, sweep int) *PriorityDecline {
 	var offenders []listedPod
 	for _, pod := range pods {
+		// A pod being deleted is no longer what the scheduler could shed: it is
+		// already going, and its replacement is a pod of its own in the listing.
+		if pod.terminating {
+			continue
+		}
 		if !slices.Contains(protected, pod.namespace) {
 			continue
 		}
@@ -141,6 +148,9 @@ func refusePriorityTable(listing priorityListing, sweep int) *PriorityDecline {
 		return newPriorityDecline("not launching: %v", err)
 	}
 	for _, pod := range listing.pods {
+		if pod.terminating {
+			continue
+		}
 		row, ok := tableRow(pod)
 		if !ok {
 			continue
@@ -177,29 +187,31 @@ func checkPriorityTable(rows []ControlPriority, classes map[string]int, sweep in
 	return nil
 }
 
-// tableRow is the table row a pod belongs to: the longest Deployment name in
-// the pod's namespace that owns it, so the runner's pods are read against the
-// runner's row and not the Forgejo Deployment whose name they also start with.
+// tableRow is the table row a pod belongs to: the one row in the pod's
+// namespace whose Deployment owns it.
 func tableRow(pod listedPod) (ControlPriority, bool) {
-	var best ControlPriority
-	found := false
 	for _, row := range ControlPriorities {
-		if row.Namespace != pod.namespace || !pod.ownedBy(row.Deployment) {
-			continue
-		}
-		if !found || len(row.Deployment) > len(best.Deployment) {
-			best, found = row, true
+		if row.Namespace == pod.namespace && pod.ownedBy(row.Deployment) {
+			return row, true
 		}
 	}
-	return best, found
+	return ControlPriority{}, false
 }
 
-// ownedBy reports whether a Deployment owns the pod: the pod's owner (the
-// Deployment's ReplicaSet) is named after the Deployment, with a generated
-// suffix when the cluster adds one.
+// ownedBy reports whether a Deployment owns the pod: a ReplicaSet named after
+// it owns the pod, and a generated suffix adds exactly one segment to that name.
+// Anything else is another Deployment, so a runner pod never satisfies a row
+// for the Forgejo Deployment its name starts with.
 func (p listedPod) ownedBy(deployment string) bool {
 	for _, owner := range p.owners {
-		if owner.Name == deployment || strings.HasPrefix(owner.Name, deployment+"-") {
+		if owner.Kind != "ReplicaSet" {
+			continue
+		}
+		if owner.Name == deployment {
+			return true
+		}
+		suffix, ok := strings.CutPrefix(owner.Name, deployment+"-")
+		if ok && suffix != "" && !strings.Contains(suffix, "-") {
 			return true
 		}
 	}
@@ -214,12 +226,14 @@ type priorityListing struct {
 }
 
 // listedPod is one pod the listing names: where it runs, its live priority (nil
-// when the listing omits it) and its owners.
+// when the listing omits it), its owners, and whether it is already being
+// deleted.
 type listedPod struct {
-	namespace string
-	name      string
-	priority  *int
-	owners    []ownerRef
+	namespace   string
+	name        string
+	priority    *int
+	owners      []ownerRef
+	terminating bool
 }
 
 // ownerRef is an object's owner as the listing names it.
@@ -273,8 +287,9 @@ func (l *priorityListing) add(raw json.RawMessage) error {
 	var item struct {
 		Kind     string `json:"kind"`
 		Metadata struct {
-			Name      string `json:"name"`
-			Namespace string `json:"namespace"`
+			Name              string `json:"name"`
+			Namespace         string `json:"namespace"`
+			DeletionTimestamp string `json:"deletionTimestamp"`
 		} `json:"metadata"`
 		Spec struct {
 			Priority        *int       `json:"priority"`
@@ -295,10 +310,11 @@ func (l *priorityListing) add(raw json.RawMessage) error {
 			return errors.New("the listing holds a pod with no namespace or name")
 		}
 		l.pods = append(l.pods, listedPod{
-			namespace: item.Metadata.Namespace,
-			name:      item.Metadata.Name,
-			priority:  item.Spec.Priority,
-			owners:    item.Spec.OwnerReferences,
+			namespace:   item.Metadata.Namespace,
+			name:        item.Metadata.Name,
+			priority:    item.Spec.Priority,
+			owners:      item.Spec.OwnerReferences,
+			terminating: item.Metadata.DeletionTimestamp != "",
 		})
 	case "PriorityClass":
 		if item.Value != nil {
@@ -334,19 +350,28 @@ func (d *PriorityDecline) Line() string { return "tier_sweep: " + d.line }
 const declineRepeat = time.Hour
 
 // DeclineLog reports a standing decline's line at most once in declineRepeat:
-// the first report, a report after an hour, and a report of a changed line are
-// all logged; the same line inside the hour is not.
+// the first report, a report after an hour, and a report of a line that
+// re-arises after a launch got through are all logged; the same line inside the
+// hour is not.
 type DeclineLog struct {
-	last    time.Time
-	message string
+	last     time.Time
+	message  string
+	standing bool
 }
 
 // Report returns whether the daemon should log message now, and records the
 // report when it should.
 func (l *DeclineLog) Report(now time.Time, message string) bool {
-	if message == l.message && now.Sub(l.last) < declineRepeat {
+	if l.standing && message == l.message && now.Sub(l.last) < declineRepeat {
 		return false
 	}
-	l.last, l.message = now, message
+	l.last, l.message, l.standing = now, message, true
 	return true
+}
+
+// Clear records that no decline stands: the next Report logs at once, even
+// inside the hour. A preflight that passed reports nothing to clear it.
+func (l *DeclineLog) Clear() {
+	l.standing = false
+	l.message = ""
 }

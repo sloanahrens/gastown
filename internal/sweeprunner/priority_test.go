@@ -185,6 +185,107 @@ func TestPriorityTableChecksTheLivePods(t *testing.T) {
 	}
 }
 
+// A pod being deleted is already going and the scheduler cannot shed it again:
+// it is not counted, while its Pending replacement, with no deletionTimestamp,
+// is live and declines (gt-gg9hv.39).
+func TestPriorityTerminatingPodIsIgnored(t *testing.T) {
+	t.Parallel()
+	guard := PriorityGuard(goldenSpec(), []string{"forgejo"})
+	zero := 0
+	pending := priorityPod("forgejo", "forgejo-new", &zero, "")
+	terminating := `{"kind":"Pod","metadata":{"name":"forgejo-old","namespace":"forgejo","deletionTimestamp":"2026-11-05T15:20:00Z"},"spec":{"priority":0}}`
+
+	if err := guard.Refuse(priorityListingJSON(100, terminating)); err != nil {
+		t.Errorf("a terminating pod at priority 0 refused the launch: %v", err)
+	}
+
+	decline := priorityDeclineOf(t, guard.Refuse(priorityListingJSON(100, terminating, pending)))
+	if !strings.Contains(decline.Line(), "pod forgejo/forgejo-new") {
+		t.Errorf("the decline = %q, want it to name the live replacement forgejo/forgejo-new, not the terminating pod", decline.Line())
+	}
+}
+
+// A pod belongs to a table row only when a ReplicaSet named for exactly that
+// Deployment owns it: a Deployment whose name only starts the same way is not
+// the row, and an owner of another kind is not a Deployment's ReplicaSet
+// (gt-gg9hv.39).
+func TestPriorityOwnerMatchIsExact(t *testing.T) {
+	t.Parallel()
+	guard := PriorityGuard(goldenSpec(), []string{"forgejo"})
+	top, gate := 1000000, 200
+
+	for name, tc := range map[string]struct {
+		listing []byte
+		refused string
+	}{
+		"the forgejo Deployment's pod at its row's class": {
+			listing: priorityListingJSON(100, priorityPod("forgejo", "forgejo-abc", &top, "forgejo-57658978cf")),
+		},
+		"a runner pod at its own row's class": {
+			listing: priorityListingJSON(100, priorityPod("forgejo", "forgejo-runner-abc", &gate, "forgejo-runner-df77dd979")),
+		},
+		"a runner pod is checked against the runner row": {
+			listing: priorityListingJSON(100, priorityPod("forgejo", "forgejo-runner-abc", &top, "forgejo-runner-df77dd979")),
+			refused: "not the 200 the table records for deployment forgejo-runner",
+		},
+		"a ReplicaSet that only starts with the forgejo name is not the forgejo row": {
+			listing: priorityListingJSON(100, priorityPod("forgejo", "forgejo-extra-abc", &gate, "forgejo-extra-123abc")),
+		},
+		"an owner that is not a ReplicaSet is not the Deployment": {
+			listing: priorityListingJSON(100,
+				`{"kind":"Pod","metadata":{"name":"forgejo-abc","namespace":"forgejo"},"spec":{"priority":200,"ownerReferences":[{"kind":"Job","name":"forgejo-57658978cf"}]}}`),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			err := guard.Refuse(tc.listing)
+			if tc.refused == "" {
+				if err != nil {
+					t.Fatalf("Refuse = %v, want the launch to pass", err)
+				}
+				return
+			}
+			decline := priorityDeclineOf(t, err)
+			if !strings.Contains(decline.Line(), tc.refused) {
+				t.Errorf("the decline = %q, want it to name %q", decline.Line(), tc.refused)
+			}
+		})
+	}
+}
+
+// A standing decline logs once and then stays silent inside the hour, but a
+// decline that clears and re-arises inside that hour logs at once: the log is
+// cleared by the launch that passed, not only by the hour (gt-gg9hv.39).
+func TestPriorityDeclineLogRearmsWhenItClears(t *testing.T) {
+	t.Parallel()
+	guard := PriorityGuard(goldenSpec(), []string{"forgejo"})
+	zero, top := 0, 1000000
+	now := time.Date(2026, 11, 5, 15, 0, 0, 0, time.UTC)
+
+	declined := priorityDeclineOf(t, guard.Refuse(priorityListingJSON(100, priorityPod("forgejo", "forgejo-abc", &zero, ""))))
+	var reports DeclineLog
+	if !reports.Report(now, declined.Line()) {
+		t.Fatal("the first decline was not reported")
+	}
+	if reports.Report(now.Add(30*time.Minute), declined.Line()) {
+		t.Error("the same standing decline was reported again inside the hour")
+	}
+
+	// The preflight passes, so the decline clears: a launch got through.
+	if err := guard.Refuse(priorityListingJSON(100, priorityPod("forgejo", "forgejo-abc", &top, ""))); err != nil {
+		t.Fatalf("the pod at the control plane's priority refused the launch: %v", err)
+	}
+	reports.Clear()
+
+	again := priorityDeclineOf(t, guard.Refuse(priorityListingJSON(100, priorityPod("forgejo", "forgejo-abc", &zero, ""))))
+	if !reports.Report(now.Add(40*time.Minute), again.Line()) {
+		t.Error("a decline that cleared and re-arose inside the hour was not reported at once")
+	}
+	if reports.Report(now.Add(50*time.Minute), again.Line()) {
+		t.Error("the re-arisen standing decline was reported again inside the hour")
+	}
+}
+
 // A guard whose namespaces were never wired checks nothing, so it refuses: a
 // preflight that did not run is not a preflight that passed.
 func TestPriorityRefusesWithNoProtectedNamespaces(t *testing.T) {

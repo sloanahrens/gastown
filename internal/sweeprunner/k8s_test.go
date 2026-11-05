@@ -523,17 +523,11 @@ func TestSyncGuardReadsConditionsNotCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rendering the golden spec: %v", err)
 	}
-	// The plan's other guard is the priority preflight; this test reads the one
-	// that lists the Jobs.
-	var guard Guard
-	for _, candidate := range plan.Guards {
-		if slices.Contains(candidate.Step.Argv, "jobs") {
-			guard = candidate
-		}
+	// The Jobs guard comes first and the priority preflight second.
+	if len(plan.Guards) != 2 {
+		t.Fatalf("the plan renders %d guards, want the Jobs listing and the priority preflight", len(plan.Guards))
 	}
-	if len(guard.Step.Argv) == 0 {
-		t.Fatalf("the plan renders %d guards and none lists this rig's active sweep Jobs", len(plan.Guards))
-	}
+	guard := plan.Guards[0]
 	if !slices.Contains(guard.Step.Argv, "get") || !slices.Contains(guard.Step.Argv, "jobs") {
 		t.Errorf("the guard runs %v, want a listing of the Jobs", guard.Step.Argv)
 	}
