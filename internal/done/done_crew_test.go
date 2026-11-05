@@ -30,7 +30,7 @@ func newCrewSubmitHarness(t *testing.T) *submitHarness {
 	writeTownHuman(t, h.townRoot, crewTestHumanName, crewTestHumanEmail)
 	h.r.branch = crewTestBranch
 	h.r.polecatName = ""
-	h.r.sender = "Sloan Ahrens"
+	h.r.sender = "Test Operator"
 	h.r.opts = doneOptions{}
 	// A hex head, so the comment is one the worker's pattern can read.
 	h.repo.head = crewTestHead
@@ -209,7 +209,7 @@ func TestCrewSubmitCommentAuthoredBySessionActor(t *testing.T) {
 	t.Parallel()
 	const actor = "town/crew/overseer"
 	h := newCrewSubmitHarness(t)
-	r := crewRunFromEnv(t, h, map[string]string{"BEADS_ACTOR": actor}, "Sloan Ahrens")
+	r := crewRunFromEnv(t, h, map[string]string{"BEADS_ACTOR": actor}, "Test Operator")
 	if err := submitCrewForLanding(r); err != nil {
 		t.Fatalf("crew submit: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestCrewSubmitCommentAuthoredBySessionActor(t *testing.T) {
 // still records the submission under the git committer, as it always did.
 func TestCrewSubmitWithNoSessionActorKeepsCommitter(t *testing.T) {
 	t.Parallel()
-	const committer = "Sloan Ahrens"
+	const committer = "Test Operator"
 	h := newCrewSubmitHarness(t)
 	r := crewRunFromEnv(t, h, map[string]string{}, committer)
 	if err := submitCrewForLanding(r); err != nil {
@@ -252,8 +252,8 @@ func TestCrewDoneRunSenderPrefersSessionActor(t *testing.T) {
 		committer string
 		want      string
 	}{
-		{"session actor wins over the committer", map[string]string{"BEADS_ACTOR": "town/crew/overseer"}, "Sloan Ahrens", "town/crew/overseer"},
-		{"no session actor falls back to the committer", map[string]string{}, "Sloan Ahrens", "Sloan Ahrens"},
+		{"session actor wins over the committer", map[string]string{"BEADS_ACTOR": "town/crew/overseer"}, "Test Operator", "town/crew/overseer"},
+		{"no session actor falls back to the committer", map[string]string{}, "Test Operator", "Test Operator"},
 		{"no session actor and no committer names no one", map[string]string{}, "  ", ""},
 	}
 	for _, tc := range cases {
@@ -422,10 +422,10 @@ func TestCrewSubmitStandDownSkips(t *testing.T) {
 		sender   string
 		sessions map[string]bool
 	}{
-		{"empty assignee", "", "Sloan Ahrens", map[string]bool{}},
+		{"empty assignee", "", "Test Operator", map[string]bool{}},
 		{"submitter as assignee", "gastown/polecats/agate", "gastown/polecats/agate", map[string]bool{"gt-agate": true}},
-		{"non-polecat assignee", "gastown/crew/sloan", "Sloan Ahrens", map[string]bool{}},
-		{"polecat with no session", "gastown/polecats/agate", "Sloan Ahrens", map[string]bool{}},
+		{"non-polecat assignee", "gastown/crew/sloan", "Test Operator", map[string]bool{}},
+		{"polecat with no session", "gastown/polecats/agate", "Test Operator", map[string]bool{}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

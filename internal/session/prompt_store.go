@@ -13,7 +13,7 @@ import (
 // polecatPromptRetention is how long a stored polecat prompt is kept after it
 // was last written. A file is kept while its modification time is within this
 // window, so the prompt a landing's author had is still on disk when rejections
-// are read (gt-js6di; Sloan 2026-10-26). Prompts are kept by age, not by a
+// are read (gt-js6di; the operator 2026-10-26). Prompts are kept by age, not by a
 // reference count from bead comments, which is not cheap to compute.
 const polecatPromptRetention = 30 * 24 * time.Hour
 

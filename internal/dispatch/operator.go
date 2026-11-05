@@ -15,7 +15,7 @@ const OperatorLabel = "operator"
 // slash-qualified address (gastown/polecats/onyx, gastown/crew/sloan,
 // gastown/witness), so an assignee that is not one is a person — the bare
 // handle left behind when the operator takes a bead by hand (`sloan`,
-// `Sloan Ahrens`, `overseer`).
+// `the operator`, `overseer`).
 //
 // The reservation is a record on the bead, so every dispatcher can read it
 // without asking who wrote it: an automatic dispatcher re-slings a ready
