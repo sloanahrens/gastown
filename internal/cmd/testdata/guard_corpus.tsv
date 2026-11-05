@@ -1,0 +1,188 @@
+guard	context	command	verdict	reason_key	bead	stamp
+# The command-guard characterization corpus (gt-cynhwl).
+#
+# One row per command, with the verdict the named guard answers today. Columns:
+#   guard      container_suite, dangerous or test_scope
+#   context    polecat, refinery, crew or other — the session the row is judged in
+#   command    a Go-quoted string literal (so tabs and newlines in a command survive)
+#   verdict    allow or refuse
+#   reason_key a stable substring of the refusal reason; empty for allow
+#   bead       the bead that added the row; seed for the first rows
+#   stamp      empty until the freeze-rule bead fills it; while it is empty a
+#              row may end at the bead column and the missing field reads as ""
+#
+# {town} and {home} in a command are replaced with the fixture's town root and
+# home directory; see guard_corpus_test.go.
+#
+# Seed rows come from the command strings of the three guards' existing tests.
+# A row records the verdict the guard gives, not an opinion about it.
+#
+# A container_suite or test_scope refusal is recorded under the polecat context
+# the hook consults the rule in: those classifiers are role-blind, but the hook
+# only calls them for a polecat (tapGuardContainerSuite returns without a
+# refusal for every other role), so a refusal recorded under another role would
+# describe a session the rule never judges. Their allow rows also appear under
+# the other contexts, where the hook lets the same command through.
+#
+# --- container_suite: refusals ---
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/beads/..."	refuse	targets testcontainers-backed package(s)	seed
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/daemon/... ./internal/cmd/..."	refuse	targets testcontainers-backed package(s)	seed
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/..."	refuse	targets testcontainers-backed package(s)	seed
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/git/..."	refuse	targets testcontainers-backed package(s)	seed
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal//beads/..."	refuse	targets testcontainers-backed package(s)	seed
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./..."	refuse	with a whole-repo target	seed
+container_suite	polecat	"GT_TEST_DOCKER=1 go test github.com/steveyegge/gastown/..."	refuse	with a whole-repo target	seed
+container_suite	polecat	"GT_TEST_DOCKER=1 go -C=/tmp test ./internal/beads/..."	refuse	targets testcontainers-backed package(s)	seed
+container_suite	polecat	"env GT_TEST_DOCKER=1 go test ./internal/beads/..."	refuse	targets testcontainers-backed package(s)	seed
+container_suite	polecat	"export GT_TEST_DOCKER=1; go test ./internal/beads/..."	refuse	targets testcontainers-backed package(s)	seed
+container_suite	polecat	`GT_TEST_DOCKER="1" go test ./internal/beads/...`	refuse	targets testcontainers-backed package(s)	seed
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/b..."	refuse	has a wildcard inside a path element	seed
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/.../beads"	refuse	has a wildcard inside a path element	seed
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/[b]eads"	refuse	has a wildcard inside a path element	seed
+container_suite	polecat	"GT_TEST_DOCKER=1 make test"	refuse	bare 'make test' runs	seed
+container_suite	polecat	"make test"	refuse	bare 'make test' runs	seed
+container_suite	polecat	"GOFLAGS=-p=6 make test"	refuse	bare 'make test' runs	seed
+container_suite	polecat	"2>/dev/null make test"	refuse	bare 'make test' runs	seed
+container_suite	polecat	`cd "$X" && GT_TEST_DOCKER=1 bash -c 'go test -run TestOne ./beads'`	refuse	names a directory the guard cannot place	seed
+container_suite	polecat	"cd \"$X\" && GT_TEST_DOCKER=1 bash <<EOF\ngo test .\nEOF"	refuse	names a directory the guard cannot place	seed
+container_suite	polecat	`cd "$X" && GT_TEST_DOCKER=1 v=$(go test ./beads)`	refuse	names a directory the guard cannot place	seed
+container_suite	polecat	`GT_TEST_DOCKER=1 go -C "$PWD/internal/beads" test .`	refuse	names a directory the guard cannot place	seed
+container_suite	polecat	`GT_TEST_DOCKER=1 go -C "$PWD/internal" test ./style`	refuse	runs in a -C directory the shell expands	seed
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/beads/... -run TestFoo"	refuse	targets testcontainers-backed package(s)	seed
+container_suite	polecat	"bash -c \"bash -c \\\"bash -c 'bash -c true'\\\"\""	refuse	cannot be inspected for a test run	seed
+# --- container_suite: allows ---
+container_suite	polecat	"go test ./internal/beads/..."	allow		seed
+container_suite	polecat	"GT_TEST_DOCKER=0 go test ./internal/beads/..."	allow		seed
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/style/..."	allow		seed
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/st..."	allow		seed
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/s*"	allow		seed
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal//style/./..."	allow		seed
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/style ./internal/version"	allow		seed
+container_suite	polecat	"GT_TEST_DOCKER=1 gt slot run --role gastown/refinery -- go test ./internal/beads/..."	allow		seed
+container_suite	polecat	"timeout 5 gt slot run -- go test ./internal/beads"	allow		seed
+container_suite	polecat	"GT_TEST_DOCKER=0 gt slot run -- go test ./internal/beads"	allow		seed
+container_suite	polecat	"GT_TEST_DOCKER=1 go build ./..."	allow		seed
+container_suite	polecat	"GT_TEST_DOCKER=1 go vet ./internal/beads/"	allow		seed
+container_suite	polecat	"GT_TEST_DOCKER=1 go -C /tmp test ./internal/style/..."	allow		seed
+container_suite	polecat	"GT_TEST_DOCKER=1 go -C internal test ./style"	allow		seed
+container_suite	polecat	`GT_TEST_DOCKER=1 go -C "$PWD/internal" test github.com/steveyegge/gastown/internal/style`	allow		seed
+container_suite	polecat	"make build"	allow		seed
+container_suite	polecat	"make lint"	allow		seed
+container_suite	polecat	"make presubmit"	allow		seed
+container_suite	polecat	`echo 'GT_TEST_DOCKER=1 go test ./internal/beads/...'`	allow		seed
+container_suite	polecat	`gt mail send x -s note -m "GT_TEST_DOCKER=1 go test ./internal/beads/..."`	allow		seed
+container_suite	crew	"GT_TEST_DOCKER=1 go test ./internal/style/..."	allow		seed
+container_suite	refinery	"GT_TEST_DOCKER=1 go test ./internal/style/..."	allow		seed
+container_suite	other	"GT_TEST_DOCKER=1 go test ./internal/style/..."	allow		seed
+# --- test_scope: refusals ---
+test_scope	polecat	"go test ./..."	refuse	polecat 'go test' of the whole repo	seed
+test_scope	polecat	"go test -count=1 ./..."	refuse	polecat 'go test' of the whole repo	seed
+test_scope	polecat	"go test github.com/steveyegge/gastown/..."	refuse	polecat 'go test' of the whole repo	seed
+test_scope	polecat	"go test ./internal/..."	refuse	polecat 'go test' of a whole heavy package with no -run filter	seed
+test_scope	polecat	"go test ./internal/cmd/"	refuse	polecat 'go test' of a whole heavy package with no -run filter	seed
+test_scope	polecat	"go test ./internal/cmd/..."	refuse	polecat 'go test' of a whole heavy package with no -run filter	seed
+test_scope	polecat	"go test ./internal/daemon/ -count=1"	refuse	polecat 'go test' of a whole heavy package with no -run filter	seed
+test_scope	polecat	"go test ./internal/polecat/ ./internal/cmd/ -count=1"	refuse	polecat 'go test' of a whole heavy package with no -run filter	seed
+test_scope	polecat	"go test ./internal/cmd/sub/"	refuse	polecat 'go test' of a whole heavy package with no -run filter	seed
+test_scope	polecat	"gofmt -l . && go test ./internal/daemon/"	refuse	polecat 'go test' of a whole heavy package with no -run filter	seed
+test_scope	polecat	"gt slot run --role gastown/flint -- go test ./internal/polecat/ -count=1"	refuse	polecat 'go test' of a whole heavy package with no -run filter	seed
+test_scope	polecat	"make test"	refuse	polecat 'make test' runs the whole suite	seed
+test_scope	polecat	"GOFLAGS=-p=8 make test"	refuse	polecat 'make test' runs the whole suite	seed
+test_scope	polecat	"make -j4 test"	refuse	polecat 'make test' runs the whole suite	seed
+test_scope	polecat	"make gate"	refuse	polecat 'make gate' runs the whole suite	seed
+test_scope	polecat	"make gate-test"	refuse	polecat 'make gate-test' runs the whole suite	seed
+test_scope	polecat	"make test-integration"	refuse	polecat 'make test-integration' runs the whole suite	seed
+test_scope	polecat	"make test-timing"	refuse	polecat 'make test-timing' runs the whole suite	seed
+test_scope	polecat	"gt slot run --role gastown/zircon -- make gate"	refuse	polecat 'make gate' runs the whole suite	seed
+test_scope	polecat	`make -C "$PWD/sub" test`	refuse	polecat 'make test' runs the whole suite	seed
+test_scope	polecat	`cd "$X" && go test .`	refuse	names a directory the guard cannot place	seed
+test_scope	polecat	`go -C "$PWD/internal/cmd" test .`	refuse	names a directory the guard cannot place	seed
+test_scope	polecat	`go -C "$PWD/internal" test ./style`	refuse	runs in a -C directory the shell expands	seed
+test_scope	polecat	`cd "$(git rev-parse --show-toplevel)/internal" && go test ./cmd`	refuse	runs in a directory the guard cannot place	seed
+test_scope	polecat	"go test ./internal/c?d"	refuse	has a wildcard that can reach a whole heavy package	seed
+test_scope	polecat	"go test $PWD/internal/cmd"	refuse	has a wildcard that can reach a whole heavy package	seed
+test_scope	polecat	"bash -c \"bash -c \\\"bash -c 'bash -c true'\\\"\""	refuse	cannot be inspected for a test run	seed
+# --- test_scope: allows ---
+test_scope	polecat	"go test ./internal/cmd/ -run TestFoo"	allow		seed
+test_scope	polecat	"go test -run=TestFoo ./internal/daemon/"	allow		seed
+test_scope	polecat	"go test ./internal/cmd/ ./internal/polecat/ -run TestFoo -count=1"	allow		seed
+test_scope	polecat	"go test ./internal/cmd/ -- -test.run TestFoo"	allow		seed
+test_scope	polecat	"go test --run TestOne ./internal/cmd"	allow		seed
+test_scope	polecat	"go test --run=TestOne ./internal/cmd"	allow		seed
+test_scope	polecat	"gt slot run --role gastown/flint -- go test ./internal/daemon/ -run TestFeedFirstReady"	allow		seed
+test_scope	polecat	"go test ./internal/git/ -count=1"	allow		seed
+test_scope	polecat	"go test ./internal/style/... ./internal/config/"	allow		seed
+test_scope	polecat	"go test ./internal/style/ -run TestX"	allow		seed
+test_scope	polecat	"go vet ./internal/cmd/ ./internal/daemon/"	allow		seed
+test_scope	polecat	"go build ./..."	allow		seed
+test_scope	polecat	"make build"	allow		seed
+test_scope	polecat	"make lint"	allow		seed
+test_scope	polecat	"make presubmit"	allow		seed
+test_scope	polecat	"make gate-lint"	allow		seed
+test_scope	polecat	"make test-timing PKGS=./internal/style"	allow		seed
+test_scope	crew	"go test ./internal/cmd/ -run TestFoo"	allow		seed
+test_scope	other	"go build ./..."	allow		seed
+test_scope	refinery	"go build ./..."	allow		seed
+# --- dangerous: refusals ---
+dangerous	polecat	"sudo rm -rf /tmp/x"	refuse	Agents must never use sudo	seed
+dangerous	crew	"sudo apt update"	refuse	Agents must never use sudo	seed
+dangerous	crew	"apt install curl"	refuse	System package install (apt)	seed
+dangerous	crew	"apt-get -y install curl"	refuse	System package install (apt-get)	seed
+dangerous	crew	"dnf install curl"	refuse	System package install (dnf)	seed
+dangerous	crew	"yum install curl"	refuse	System package install (yum)	seed
+dangerous	crew	"pacman -Syu curl"	refuse	System package install (pacman)	seed
+dangerous	crew	"brew install jq"	refuse	Package install (brew)	seed
+dangerous	crew	"gem install rails"	refuse	System gem install	seed
+dangerous	crew	"pip install --system requests"	refuse	System-level pip install	seed
+dangerous	crew	"npm install -g foo"	refuse	Global npm install	seed
+dangerous	polecat	"rm -rf /"	refuse	filesystem destruction (rm -rf /)	seed
+dangerous	crew	"git push --force origin main"	refuse	Force push rewrites remote history	seed
+dangerous	crew	"git push -f origin feature/x"	refuse	Force push rewrites remote history	seed
+dangerous	polecat	"git push origin HEAD:main"	refuse	Polecats never push to main/master	seed
+dangerous	polecat	"git push --all origin"	refuse	Polecats never push to main/master	seed
+dangerous	polecat	`bd comments add gt-x --author "Sloan Ahrens" "looks fine"`	refuse	polecat may not set a comment author or actor	seed
+dangerous	polecat	"gt bead comment gt-x \"ACCEPTED-RISK: fine\""	refuse	polecat may not post an ACCEPTED-RISK: comment	seed
+dangerous	polecat	"bd comment gt-x --file notes.txt"	refuse	polecat comment text must be inline	seed
+dangerous	polecat	`gt bead note gt-x "$T"`	refuse	polecat comment text must not expand	seed
+dangerous	polecat	"git reset --soft origin/main"	refuse	Reset onto a remote-tracking ref drops merged work	seed
+dangerous	polecat	`git reset --soft "$(git rev-parse origin/main)"`	refuse	Reset onto a shell expansion hides the ref	seed
+dangerous	crew	"git clean -fd"	refuse	git clean -f/--force deletes untracked files	seed
+dangerous	crew	"git reset --hard"	refuse	Hard reset discards all uncommitted changes	seed
+dangerous	crew	"drop table users"	refuse	database table destruction	seed
+dangerous	crew	"drop database prod"	refuse	database destruction	seed
+dangerous	crew	"truncate table users"	refuse	database table truncation	seed
+dangerous	crew	"go clean -modcache"	refuse	wipes the Go build cache shared by every agent	seed
+dangerous	polecat	"go test -count=1 ./..."	refuse	recompiles every package from scratch	seed
+dangerous	polecat	"for i in 1 2 3; do gt done --status DEFERRED; done"	refuse	Never poll the slot or script a gt done retry	seed
+dangerous	crew	"while true; do gt slot status; done"	refuse	Never poll the slot or script a gt done retry	seed
+dangerous	crew	"find / -name x"	refuse	Unbounded scan (find rooted at /)	seed
+dangerous	crew	"bfs ~ -name x"	refuse	Unbounded scan (bfs rooted at ~)	seed
+dangerous	crew	"find $HOME -name x"	refuse	Unbounded scan (find rooted at $HOME)	seed
+dangerous	crew	"find {home} -name x"	refuse	rooted at the home directory	seed
+dangerous	crew	"cd {town} && find -name x"	refuse	cwd is the town root	seed
+dangerous	crew	"find {town} -name x"	refuse	Unbounded scan (find rooted at the town root)	seed
+dangerous	crew	"find {town}/gastown -name x"	refuse	Unbounded scan (find rooted at a rig root)	seed
+dangerous	crew	"find {town}/gastown/polecats -name x"	refuse	a rig's worktree dir	seed
+dangerous	crew	"find {town}/gastown/.repo.git -name x"	refuse	a .repo.git bare repo	seed
+dangerous	crew	"grep -rn TODO /opt"	refuse	Unbounded scan (grep rooted at /opt)	seed
+# --- dangerous: allows ---
+dangerous	crew	"ls -la"	allow		seed
+dangerous	crew	"git status"	allow		seed
+dangerous	crew	"git push origin HEAD:main"	allow		seed
+dangerous	crew	"go test -count=1 ./..."	allow		seed
+dangerous	crew	"git reset --soft HEAD~1"	allow		seed
+dangerous	crew	"git reset HEAD~1"	allow		seed
+dangerous	crew	"rm -rf ./build/"	allow		seed
+dangerous	crew	"git push --force-with-lease origin feature/x"	allow		seed
+dangerous	crew	`echo "git clean -f"`	allow		seed
+dangerous	crew	"grep -rn TODO ./docs"	allow		seed
+dangerous	polecat	"git push origin polecat/topaz/gt-x"	allow		seed
+dangerous	crew	"make test"	allow		seed
+dangerous	crew	"go build ./..."	allow		seed
+dangerous	polecat	`git commit -m "git clean -fd"`	allow		seed
+dangerous	crew	"find {town}/gastown/polecats/topaz/gastown -name x"	allow		seed
+dangerous	crew	`bd comments add gt-x "looks fine"`	allow		seed
+dangerous	crew	"pacman -Ss curl"	allow		seed
+dangerous	crew	"go clean"	allow		seed
+dangerous	crew	"ls -R ./docs"	allow		seed
+dangerous	polecat	`gt bead note gt-x 'the guard is deliberate'`	allow		seed
