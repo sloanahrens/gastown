@@ -1057,3 +1057,27 @@ func TestCacheTrimFailureRetriesSoonAndLogsOnce(t *testing.T) {
 		t.Fatalf("trimmed %d times two hours after the verdict, want 5", trims)
 	}
 }
+
+// TestCacheTrimRefusesAnUnreadableKubeconfig pins the preflight's other
+// refusal: a kubeconfig kubectl cannot read stops the pass after that one call
+// with a line naming the read, and trims nothing. It is a failure, not a
+// verdict, so the patrol retries it soon.
+func TestCacheTrimRefusesAnUnreadableKubeconfig(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+		cacheTrimPreflightVerb: {stderr: "error: no configuration has been provided", code: 2},
+	})
+	f.d.runDiskMaintenance()
+
+	if logged := f.log.String(); !strings.Contains(logged, "the kubeconfig could not be read") {
+		t.Errorf("log = %q, want the preflight's read failure named", logged)
+	}
+	if got := f.verbs(); len(got) != 1 || got[0] != cacheTrimPreflightVerb {
+		t.Errorf("the pass ran %v, want the context preflight alone", got)
+	}
+	for _, call := range f.cli.recorded() {
+		if strings.HasPrefix(cacheTrimVerb(call.args), "apply ") {
+			t.Errorf("the pass applied a trim from a kubeconfig it could not read: %q", cacheTrimVerb(call.args))
+		}
+	}
+}
