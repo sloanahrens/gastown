@@ -1,0 +1,642 @@
+package shellparse_test
+
+import (
+	"errors"
+	"os"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/steveyegge/gastown/internal/shellparse"
+	"github.com/steveyegge/gastown/internal/testutil/unittier"
+)
+
+func TestMain(m *testing.M) {
+	os.Exit(unittier.Main(m))
+}
+
+// heredocView is the test's view of one here-document.
+type heredocView struct {
+	Delimiter string
+	Quoted    bool
+	Body      string
+}
+
+// segmentView is the test's view of one command site.
+type segmentView struct {
+	Words    []string
+	Assigns  []string
+	Redirs   []string
+	Heredocs []heredocView
+	Subs     int
+}
+
+// summarize turns a parsed Script into the values the table asserts.
+func summarize(script shellparse.Script) []segmentView {
+	var out []segmentView
+	for _, seg := range script.Segments {
+		view := segmentView{Subs: len(seg.Subs)}
+		for _, w := range seg.Words {
+			view.Words = append(view.Words, w.Text)
+		}
+		for _, a := range seg.Assigns {
+			view.Assigns = append(view.Assigns, a.Text)
+		}
+		for _, r := range seg.Redirs {
+			view.Redirs = append(view.Redirs, r.N+r.Op+r.Word.Text)
+		}
+		for _, h := range seg.Heredocs {
+			view.Heredocs = append(view.Heredocs, heredocView{h.Delimiter, h.Quoted, h.Body})
+		}
+		out = append(out, view)
+	}
+	return out
+}
+
+func TestParseConstructs(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		command  string
+		want     []segmentView
+		wantSubs int
+	}{
+		{
+			name:    "pipeline",
+			command: "echo a | grep b",
+			want:    []segmentView{{Words: []string{"echo", "a"}}, {Words: []string{"grep", "b"}}},
+		},
+		{
+			name:    "and list",
+			command: "echo a && echo b",
+			want:    []segmentView{{Words: []string{"echo", "a"}}, {Words: []string{"echo", "b"}}},
+		},
+		{
+			name:    "or list",
+			command: "echo a || echo b",
+			want:    []segmentView{{Words: []string{"echo", "a"}}, {Words: []string{"echo", "b"}}},
+		},
+		{
+			name:    "semicolon list",
+			command: "echo a; echo b",
+			want:    []segmentView{{Words: []string{"echo", "a"}}, {Words: []string{"echo", "b"}}},
+		},
+		{
+			name:    "newline list",
+			command: "echo a\necho b",
+			want:    []segmentView{{Words: []string{"echo", "a"}}, {Words: []string{"echo", "b"}}},
+		},
+		{
+			name:    "subshell",
+			command: "(cd /src; echo x)",
+			want:    []segmentView{{Words: []string{"cd", "/src"}}, {Words: []string{"echo", "x"}}},
+		},
+		{
+			name:    "brace group",
+			command: "{ echo z; }",
+			want:    []segmentView{{Words: []string{"echo", "z"}}},
+		},
+		{
+			name:    "if body",
+			command: "if true; then echo y; else echo n; fi",
+			want: []segmentView{
+				{Words: []string{"true"}},
+				{Words: []string{"echo", "y"}},
+				{Words: []string{"echo", "n"}},
+			},
+		},
+		{
+			name:    "for body",
+			command: "for i in 1 2; do echo $i; done",
+			want:    []segmentView{{Words: []string{"echo", "$i"}}},
+		},
+		{
+			name:    "while body",
+			command: "while true; do break; done",
+			want:    []segmentView{{Words: []string{"true"}}, {Words: []string{"break"}}},
+		},
+		{
+			name:    "case body",
+			command: "case x in a) echo y;; esac",
+			want:    []segmentView{{Words: []string{"echo", "y"}}},
+		},
+		{
+			name:    "command substitution",
+			command: "echo $(date)",
+			want:    []segmentView{{Words: []string{"echo", "$(date)"}, Subs: 1}},
+		},
+		{
+			name:    "backtick substitution",
+			command: "echo `date`",
+			want:    []segmentView{{Words: []string{"echo", "`date`"}, Subs: 1}},
+		},
+		{
+			name:    "process substitution",
+			command: "diff <(ls a) >(wc)",
+			want:    []segmentView{{Words: []string{"diff", "<(ls a)", ">(wc)"}, Subs: 2}},
+		},
+		{
+			name:    "here document unquoted delimiter",
+			command: "cat <<EOF\nhello $USER\nEOF\n",
+			want: []segmentView{{
+				Words:    []string{"cat"},
+				Heredocs: []heredocView{{Delimiter: "EOF", Quoted: false, Body: "hello $USER\n"}},
+			}},
+		},
+		{
+			name:    "here document quoted delimiter",
+			command: "cat <<'EOF'\nhello $USER\nEOF\n",
+			want: []segmentView{{
+				Words:    []string{"cat"},
+				Heredocs: []heredocView{{Delimiter: "EOF", Quoted: true, Body: "hello $USER\n"}},
+			}},
+		},
+		{
+			// bash strips every leading tab of the body and of the delimiter
+			// line, so this program's body is "hello\n".
+			name:    "here document dash strips tabs",
+			command: "cat <<-EOF\n\t\thello\n\tEOF\n",
+			want: []segmentView{{
+				Words:    []string{"cat"},
+				Heredocs: []heredocView{{Delimiter: "EOF", Quoted: false, Body: "hello\n"}},
+			}},
+		},
+		{
+			name:    "here string",
+			command: `cat <<< "hi"`,
+			want:    []segmentView{{Words: []string{"cat"}, Redirs: []string{"<<<hi"}}},
+		},
+		{
+			name:    "redirections",
+			command: "echo hi > out 2>&1 < in",
+			want: []segmentView{{
+				Words:  []string{"echo", "hi"},
+				Redirs: []string{">out", "2>&1", "<in"},
+			}},
+		},
+		{
+			name:    "quoting",
+			command: `echo 'a b' "c d" $'e\nf'`,
+			want:    []segmentView{{Words: []string{"echo", "a b", "c d", "e\nf"}}},
+		},
+		{
+			name:    "backslash newline",
+			command: "echo a\\\nb",
+			want:    []segmentView{{Words: []string{"echo", "ab"}}},
+		},
+		{
+			name:    "leading assignments",
+			command: "FOO=1 BAR=$x cmd arg",
+			want:    []segmentView{{Assigns: []string{"FOO=1", "BAR=$x"}, Words: []string{"cmd", "arg"}}},
+		},
+		{
+			name:    "function definition",
+			command: "f() { echo hi; }",
+			want:    []segmentView{{Words: []string{"echo", "hi"}}},
+		},
+		{
+			name:    "comment",
+			command: "# rm -rf /\nrm safe",
+			want:    []segmentView{{Words: []string{"rm", "safe"}}},
+		},
+		{
+			name:     "substitution in a for header",
+			command:  "for i in $(seq 3); do echo $i; done",
+			want:     []segmentView{{Words: []string{"echo", "$i"}}},
+			wantSubs: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			script, err := shellparse.Parse(tt.command)
+			if err != nil {
+				t.Fatalf("Parse(%q): %v", tt.command, err)
+			}
+			got := summarize(script)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("Parse(%q) segments = %#v, want %#v", tt.command, got, tt.want)
+			}
+			if len(script.Subs) != tt.wantSubs {
+				t.Errorf("Parse(%q) script subs = %d, want %d", tt.command, len(script.Subs), tt.wantSubs)
+			}
+		})
+	}
+}
+
+// TestParseHeredocBodies checks each body against what bash passes for the same
+// fixture. An unquoted delimiter decodes only an escaped backslash, dollar or
+// backtick and a line continuation; a quoted delimiter decodes nothing; <<-
+// strips the leading tabs from the raw source before either rule runs.
+func TestParseHeredocBodies(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{
+			name:    "unquoted keeps backslash quote",
+			command: "cat <<EOF\nsay \\\"hi\\\" and \\'bye\\'\nEOF\n",
+			want:    "say \\\"hi\\\" and \\'bye\\'\n",
+		},
+		{
+			name:    "unquoted decodes escaped backslash",
+			command: "cat <<EOF\na\\\\b\nEOF\n",
+			want:    "a\\b\n",
+		},
+		{
+			name:    "unquoted decodes escaped dollar",
+			command: "cat <<EOF\n\\$HOME\nEOF\n",
+			want:    "$HOME\n",
+		},
+		{
+			name:    "unquoted decodes escaped backtick",
+			command: "cat <<EOF\n\\`x\\`\nEOF\n",
+			want:    "`x`\n",
+		},
+		{
+			name:    "unquoted line continuation",
+			command: "cat <<EOF\nab\\\ncd\nEOF\n",
+			want:    "abcd\n",
+		},
+		{
+			name:    "quoted delimiter decodes nothing",
+			command: "cat <<'EOF'\n\\$HOME \\\"hi\\\"\nEOF\n",
+			want:    "\\$HOME \\\"hi\\\"\n",
+		},
+		{
+			name:    "dash strips tabs before decoding",
+			command: "cat <<-EOF\n\t\tx\\\\y\n\tEOF\n",
+			want:    "x\\y\n",
+		},
+		{
+			name:    "dash quoted delimiter strips tabs and decodes nothing",
+			command: "cat <<-'EOF'\n\t\tx\\\\y\n\tEOF\n",
+			want:    "x\\\\y\n",
+		},
+		{
+			// bash strips the first line's tabs, joins the continuation, and
+			// keeps the tabs the second line starts with.
+			name:    "dash keeps tabs after a line continuation",
+			command: "cat <<-EOF\nab\\\n\tcd\nEOF\n",
+			want:    "ab\tcd\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			script, err := shellparse.Parse(tt.command)
+			if err != nil {
+				t.Fatalf("Parse(%q): %v", tt.command, err)
+			}
+			if len(script.Segments) != 1 || len(script.Segments[0].Heredocs) != 1 {
+				t.Fatalf("Parse(%q) has no here-document", tt.command)
+			}
+			if got := script.Segments[0].Heredocs[0].Body; got != tt.want {
+				t.Errorf("Parse(%q) body = %q, want %q", tt.command, got, tt.want)
+			}
+		})
+	}
+}
+
+// redirView is the test's view of one redirection on a segment.
+type redirView struct {
+	Op        string
+	Target    string
+	Inherited bool
+}
+
+func TestParseCompoundRedirections(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		want    [][]redirView
+	}{
+		{
+			name:    "subshell",
+			command: "( a; b ) > f",
+			want: [][]redirView{
+				{{Op: ">", Target: "f", Inherited: true}},
+				{{Op: ">", Target: "f", Inherited: true}},
+			},
+		},
+		{
+			name:    "brace group",
+			command: "{ a; b; } 2>&1",
+			want: [][]redirView{
+				{{Op: ">&", Target: "1", Inherited: true}},
+				{{Op: ">&", Target: "1", Inherited: true}},
+			},
+		},
+		{
+			name:    "while body",
+			command: "while c; do d; done < f",
+			want: [][]redirView{
+				{{Op: "<", Target: "f", Inherited: true}},
+				{{Op: "<", Target: "f", Inherited: true}},
+			},
+		},
+		{
+			name:    "function body",
+			command: "f() { a; b; } > out",
+			want: [][]redirView{
+				{{Op: ">", Target: "out", Inherited: true}},
+				{{Op: ">", Target: "out", Inherited: true}},
+			},
+		},
+		{
+			name:    "if body",
+			command: "if c; then d; fi > out",
+			want: [][]redirView{
+				{{Op: ">", Target: "out", Inherited: true}},
+				{{Op: ">", Target: "out", Inherited: true}},
+			},
+		},
+		{
+			name:    "simple command keeps its own",
+			command: "echo hi > out",
+			want:    [][]redirView{{{Op: ">", Target: "out", Inherited: false}}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			script, err := shellparse.Parse(tt.command)
+			if err != nil {
+				t.Fatalf("Parse(%q): %v", tt.command, err)
+			}
+			if len(script.Segments) != len(tt.want) {
+				t.Fatalf("Parse(%q) has %d segments, want %d", tt.command, len(script.Segments), len(tt.want))
+			}
+			for i, seg := range script.Segments {
+				var got []redirView
+				for _, r := range seg.Redirs {
+					got = append(got, redirView{r.Op, r.Word.Text, r.Inherited})
+				}
+				if !reflect.DeepEqual(got, tt.want[i]) {
+					t.Errorf("Parse(%q) segment %d redirs = %#v, want %#v", tt.command, i, got, tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestParseWordText(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		word    int
+		text    string
+		literal bool
+	}{
+		{name: "single quotes", command: `echo 'a b'`, word: 1, text: "a b", literal: true},
+		{name: "double quote escapes", command: "echo \"a\\\"b\\\\c\\$d\\`e\"", word: 1, text: "a\"b\\c$d`e", literal: true},
+		{name: "backslash newline", command: "echo a\\\nb", word: 1, text: "ab", literal: true},
+		{name: "unquoted escape", command: `echo a\ b`, word: 1, text: "a b", literal: true},
+		{name: "ansi-c decoded", command: `echo $'a\tb\x41é'`, word: 1, text: "a\tbAé", literal: true},
+		{name: "ansi-c unicode escape", command: `echo $'a\tb\x41` + `\` + `u00e9'`, word: 1, text: "a\tbAé", literal: true},
+		{name: "ansi-c control", command: `echo $'\cA'`, word: 1, text: "\x01", literal: true},
+		{name: "ansi-c octal", command: `echo $'\101'`, word: 1, text: "A", literal: true},
+		{name: "double quoted expansion", command: `echo "$HOME/x"`, word: 1, text: "$HOME/x", literal: false},
+		{name: "command substitution", command: "echo $(cmd)", word: 1, text: "$(cmd)", literal: false},
+		{name: "single quoted dollar", command: `echo '$HOME'`, word: 1, text: "$HOME", literal: true},
+		{name: "plain word", command: `echo plain`, word: 1, text: "plain", literal: true},
+		{name: "double quoted plain", command: `echo "plain"`, word: 1, text: "plain", literal: true},
+		{name: "invalid ansi-c escape", command: `echo $'bad\q'`, word: 1, text: `bad\q`, literal: false},
+		{name: "invalid unicode escape", command: `echo $'\uD800'`, word: 1, text: `\uD800`, literal: false},
+		{name: "tilde", command: `echo ~`, word: 1, text: "~", literal: false},
+		{name: "tilde path", command: `echo ~/x`, word: 1, text: "~/x", literal: false},
+		{name: "tilde user", command: `echo ~user`, word: 1, text: "~user", literal: false},
+		{name: "tilde inside a word", command: `echo a~b`, word: 1, text: "a~b", literal: true},
+		{name: "single quoted tilde", command: `echo '~'`, word: 1, text: "~", literal: true},
+		{name: "escaped tilde", command: `echo \~`, word: 1, text: "~", literal: true},
+		{name: "glob star", command: `echo *.go`, word: 1, text: "*.go", literal: false},
+		{name: "glob question", command: `echo a?b`, word: 1, text: "a?b", literal: false},
+		{name: "glob bracket", command: `echo [ab]c`, word: 1, text: "[ab]c", literal: false},
+		{name: "unmatched bracket", command: `echo [ab`, word: 1, text: "[ab", literal: true},
+		{name: "single quoted glob", command: `echo '*'`, word: 1, text: "*", literal: true},
+		{name: "double quoted glob", command: `echo "*"`, word: 1, text: "*", literal: true},
+		{name: "escaped glob", command: `echo \*`, word: 1, text: "*", literal: true},
+		{name: "brace list", command: `echo {a,b}`, word: 1, text: "{a,b}", literal: false},
+		{name: "brace sequence", command: `echo {1..3}`, word: 1, text: "{1..3}", literal: false},
+		{name: "brace without expansion", command: `echo {a}`, word: 1, text: "{a}", literal: true},
+		{name: "quoted brace", command: `echo '{a,b}'`, word: 1, text: "{a,b}", literal: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			script, err := shellparse.Parse(tt.command)
+			if err != nil {
+				t.Fatalf("Parse(%q): %v", tt.command, err)
+			}
+			if len(script.Segments) != 1 || len(script.Segments[0].Words) <= tt.word {
+				t.Fatalf("Parse(%q) has no word %d", tt.command, tt.word)
+			}
+			word := script.Segments[0].Words[tt.word]
+			if word.Text != tt.text {
+				t.Errorf("Parse(%q) word %d Text = %q, want %q", tt.command, tt.word, word.Text, tt.text)
+			}
+			if word.Literal != tt.literal {
+				t.Errorf("Parse(%q) word %d Literal = %t, want %t", tt.command, tt.word, word.Literal, tt.literal)
+			}
+		})
+	}
+}
+
+func TestParseWordRaw(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		word    int
+		want    string
+		assign  bool
+	}{
+		{name: "backslash newline kept", command: "echo a\\\nb", word: 1, want: "a\\\nb"},
+		{name: "quotes kept", command: `echo 'a b'`, word: 1, want: "'a b'"},
+		{name: "expansion kept", command: "echo $(date)", word: 1, want: "$(date)"},
+		{name: "assignment kept", command: "FOO=$(x) cmd", word: 0, want: "FOO=$(x)", assign: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			script, err := shellparse.Parse(tt.command)
+			if err != nil {
+				t.Fatalf("Parse(%q): %v", tt.command, err)
+			}
+			var got string
+			if tt.assign {
+				got = script.Segments[0].Assigns[0].Raw
+			} else {
+				got = script.Segments[0].Words[tt.word].Raw
+			}
+			if got != tt.want {
+				t.Errorf("Parse(%q) Raw = %q, want %q", tt.command, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseUnparseableNamesConstruct(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		want    string
+		// anyPhrase holds the contract for a command whose parser message this
+		// package does not classify by name: a typed error with a phrase of ours
+		// and no partial script. Pinning the phrase there would pin the parser's
+		// wording instead; TestConstructOfUnknownError pins the fallback phrase.
+		anyPhrase bool
+	}{
+		{name: "unterminated here document", command: "cat <<EOF\nbody\n", want: "unterminated here-document"},
+		{name: "unbalanced parenthesis", command: "(echo x", want: "unbalanced parenthesis"},
+		{name: "stray closing parenthesis", command: "echo )", want: "unbalanced parenthesis"},
+		{name: "unterminated single quote", command: "echo 'oops", want: "unterminated quote"},
+		{name: "unterminated double quote", command: `echo "oops`, want: "unterminated quote"},
+		{name: "unterminated command substitution", command: "echo $(echo", want: "unterminated command substitution"},
+		{name: "unterminated parameter expansion", command: "echo ${x", want: "unterminated parameter expansion"},
+		{name: "unterminated process substitution", command: "echo <(x", want: "unterminated process substitution"},
+		{name: "unbalanced brace", command: "f() { echo x", want: "unbalanced brace"},
+		{name: "unterminated if statement", command: "if true; then echo x", want: "unterminated if statement"},
+		{name: "unterminated case statement", command: "case x in", want: "unterminated case statement"},
+		{name: "unterminated loop", command: "for i in 1; do echo x", want: "unterminated loop"},
+		{name: "incomplete command", command: "echo a |", want: "incomplete command"},
+		{name: "syntax outside bash", command: "echo ${(f)x}", want: "shell syntax outside bash"},
+		{name: "unrecognized syntax", command: "coproc", anyPhrase: true},
+		{name: "ansi-c escape decoding to nul", command: `echo $'a\0b'`, want: "ANSI-C escape that decodes to a NUL byte"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			script, err := shellparse.Parse(tt.command)
+			if err == nil {
+				t.Fatalf("Parse(%q) = nil error, want *UnparseableError", tt.command)
+			}
+			var unparseable *shellparse.UnparseableError
+			if !errors.As(err, &unparseable) {
+				t.Fatalf("Parse(%q) error = %T %v, want *UnparseableError", tt.command, err, err)
+			}
+			if tt.anyPhrase {
+				if unparseable.Construct == "" {
+					t.Errorf("Parse(%q) Construct is empty, want a phrase of ours", tt.command)
+				}
+			} else if unparseable.Construct != tt.want {
+				t.Errorf("Parse(%q) Construct = %q, want %q", tt.command, unparseable.Construct, tt.want)
+			}
+			if tt.want != "" && !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("Parse(%q) error %q does not name %q", tt.command, err.Error(), tt.want)
+			}
+			if len(script.Segments) != 0 || len(script.Subs) != 0 {
+				t.Errorf("Parse(%q) returned a partial script: %#v", tt.command, script)
+			}
+		})
+	}
+}
+
+func TestParseNestedSubstitutions(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		// want is the command name of each nested script, outermost first.
+		want []string
+	}{
+		{
+			name:    "from the command name",
+			command: "$(printf deep) arg",
+			want:    []string{"printf"},
+		},
+		{
+			name:    "from an argument",
+			command: "echo $(printf deep)",
+			want:    []string{"printf"},
+		},
+		{
+			name:    "from an assignment value",
+			command: "X=$(printf deep) cmd",
+			want:    []string{"printf"},
+		},
+		{
+			name:    "from a redirection target",
+			command: "echo > $(printf deep)",
+			want:    []string{"printf"},
+		},
+		{
+			name:    "from a here-document body",
+			command: "cat <<EOF\n$(printf deep)\nEOF\n",
+			want:    []string{"printf"},
+		},
+		{
+			name: "through a double quoted word in a here-document fed script",
+			command: `bash <<OUTER
+bash -c "echo $(echo "$(echo "$(echo "$(printf deep)")")")"
+OUTER
+`,
+			want: []string{"echo", "echo", "echo", "printf"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			script, err := shellparse.Parse(tt.command)
+			if err != nil {
+				t.Fatalf("Parse(%q): %v", tt.command, err)
+			}
+			for level, want := range tt.want {
+				if len(script.Segments) == 0 {
+					t.Fatalf("level %d: no segment", level)
+				}
+				subs := script.Segments[0].Subs
+				if len(subs) != 1 {
+					t.Fatalf("level %d: subs = %d, want 1", level, len(subs))
+				}
+				script = subs[0]
+				if len(script.Segments) == 0 || len(script.Segments[0].Words) < 2 {
+					t.Fatalf("level %d: no segment with a command and an argument", level)
+				}
+				words := script.Segments[0].Words
+				if words[0].Text != want {
+					t.Fatalf("level %d: command = %q, want %q", level, words[0].Text, want)
+				}
+				if level == len(tt.want)-1 && words[1].Text != "deep" {
+					t.Fatalf("deepest level: argument = %q, want %q", words[1].Text, "deep")
+				}
+			}
+		})
+	}
+}
+
+func TestParseNestedSubstitutionDepth(t *testing.T) {
+	t.Parallel()
+	script, err := shellparse.Parse("echo $(echo $(echo $(echo $(printf deep))))")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	want := []string{"echo", "echo", "echo", "echo", "printf"}
+	for level, command := range want {
+		if len(script.Segments) != 1 || len(script.Segments[0].Words) == 0 {
+			t.Fatalf("level %d: no segment with words", level)
+		}
+		words := script.Segments[0].Words
+		if words[0].Text != command {
+			t.Fatalf("level %d: command = %q, want %q", level, words[0].Text, command)
+		}
+		if level == len(want)-1 {
+			if len(words) != 2 || words[1].Text != "deep" {
+				t.Fatalf("deepest segment words = %#v, want [printf deep]", words)
+			}
+			if len(script.Segments[0].Subs) != 0 {
+				t.Fatalf("deepest segment has %d subs, want 0", len(script.Segments[0].Subs))
+			}
+			return
+		}
+		if len(script.Segments[0].Subs) != 1 {
+			t.Fatalf("level %d: subs = %d, want 1", level, len(script.Segments[0].Subs))
+		}
+		script = script.Segments[0].Subs[0]
+	}
+}

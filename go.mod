@@ -20,11 +20,16 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go v0.42.0
 	golang.org/x/mod v0.35.0
-	golang.org/x/sys v0.45.0
-	golang.org/x/term v0.43.0
+	golang.org/x/sys v0.47.0
+	golang.org/x/term v0.45.0
 	golang.org/x/text v0.37.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	gopkg.in/yaml.v3 v3.0.1
+	// Shell parser for internal/shellparse: v3.14.1, released 2026-09-06,
+	// BSD-3-Clause. Its go.mod requires the golang.org/x/sys v0.47.0,
+	// golang.org/x/term v0.45.0 and github.com/rogpeppe/go-internal v1.15.0
+	// this file lists, so the bump of each is mvdan.cc/sh/v3's requirement.
+	mvdan.cc/sh/v3 v3.14.1
 )
 
 require (
