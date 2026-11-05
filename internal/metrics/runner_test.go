@@ -157,6 +157,64 @@ func TestRunnerOSRunnerExecsWithTheAllowlistedEnvironment(t *testing.T) {
 	}
 }
 
+// runChildEnv runs `env` through the OSRunnerDir seam, with parent as the
+// parent's environment, and returns the child's environment by name.
+func runChildEnv(t *testing.T, parent map[string]string) map[string]string {
+	t.Helper()
+	lookup := func(name string) (string, bool) {
+		v, ok := parent[name]
+		return v, ok
+	}
+	out, err := osRunnerDirLookup(DefaultAllowEnv, lookup)(context.Background(), t.TempDir(), []string{"/bin/sh", "-c", "env"})
+	if err != nil {
+		t.Fatalf("OSRunnerDir: %v", err)
+	}
+	env := map[string]string{}
+	for _, line := range strings.Split(string(out), "\n") {
+		if name, value, ok := strings.Cut(line, "="); ok {
+			env[name] = value
+		}
+	}
+	return env
+}
+
+func TestDefaultAllowEnvPassesTheDoltEndpoint(t *testing.T) {
+	t.Parallel()
+	env := runChildEnv(t, map[string]string{
+		"BEADS_DOLT_SERVER_HOST": "host.docker.internal",
+		"BEADS_DOLT_SERVER_PORT": "3307",
+	})
+	if got := env["BEADS_DOLT_SERVER_HOST"]; got != "host.docker.internal" {
+		t.Errorf("child BEADS_DOLT_SERVER_HOST = %q, want %q", got, "host.docker.internal")
+	}
+	if got := env["BEADS_DOLT_SERVER_PORT"]; got != "3307" {
+		t.Errorf("child BEADS_DOLT_SERVER_PORT = %q, want %q", got, "3307")
+	}
+}
+
+func TestDefaultAllowEnvStillDropsOtherVariables(t *testing.T) {
+	t.Parallel()
+	env := runChildEnv(t, map[string]string{
+		"TOWN_METRICS_TEST_TOKEN": "parent-only",
+		"BEADS_DOLT_PASSWORD":     "parent-only",
+	})
+	for _, name := range []string{"TOWN_METRICS_TEST_TOKEN", "BEADS_DOLT_PASSWORD"} {
+		if _, ok := env[name]; ok {
+			t.Errorf("child sees %s, which the allowlist does not name", name)
+		}
+	}
+}
+
+func TestDefaultAllowEnvUnsetEndpointStaysAbsent(t *testing.T) {
+	t.Parallel()
+	env := runChildEnv(t, map[string]string{})
+	for _, name := range []string{"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT"} {
+		if _, ok := env[name]; ok {
+			t.Errorf("child sees %s although the parent does not set it", name)
+		}
+	}
+}
+
 func TestRunnerOSRunnerEnvDeliversExtraEnvironment(t *testing.T) {
 	t.Parallel()
 	out, err := OSRunnerEnv(DefaultAllowEnv)(context.Background(), []string{"/bin/sh", "-c", `printf %s "$TOWN_METRICS_TOWN"`}, []string{"TOWN_METRICS_TOWN=/town"})

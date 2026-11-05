@@ -18,8 +18,9 @@ import (
 const killGrace = 2 * time.Second
 
 // DefaultAllowEnv is the environment a source's child commands inherit: enough
-// to find binaries and the user's config, and nothing else.
-var DefaultAllowEnv = []string{"PATH", "HOME", "TMPDIR", "LANG"}
+// to find binaries and the user's config, and the Dolt endpoint a child bd
+// needs to reach the server, and nothing else.
+var DefaultAllowEnv = []string{"PATH", "HOME", "TMPDIR", "LANG", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT"}
 
 // OSRunner returns a Runner that runs argv as a child process with no
 // environment beyond the allowlist.
@@ -46,8 +47,15 @@ func OSRunnerEnv(allowEnv []string) RunnerEnv {
 // directory, so a command that resolves its town from it reads the named town
 // and not the snapshot process's.
 func OSRunnerDir(allowEnv []string) RunnerDir {
+	return osRunnerDirLookup(allowEnv, os.LookupEnv)
+}
+
+// osRunnerDirLookup is OSRunnerDir with the parent's environment supplied by
+// lookup, so a test can name the parent's variables without changing the
+// process environment.
+func osRunnerDirLookup(allowEnv []string, lookup func(string) (string, bool)) RunnerDir {
 	return func(ctx context.Context, dir string, argv []string) ([]byte, error) {
-		return osRun(ctx, dir, argv, childEnv(allowEnv, nil, os.LookupEnv))
+		return osRun(ctx, dir, argv, childEnv(allowEnv, nil, lookup))
 	}
 }
 
