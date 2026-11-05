@@ -733,6 +733,56 @@ func TestDiskMaintenanceConfigRefusesWhatThePatrolCannotActOn(t *testing.T) {
 	}
 }
 
+// TestTierSweepRunnerImageRegistrySetting: image_registry is optional, and an
+// empty value or a bare host:port decodes. A scheme, a path, whitespace, a
+// missing port and a port out of range are each refused, naming the key, so a
+// URL typed where a host:port belongs never reaches the daemon (gt-gg9hv.26).
+func TestTierSweepRunnerImageRegistrySetting(t *testing.T) {
+	t.Parallel()
+
+	const head = `{"backend":"docker","image":"installed","cpus":8,"memory":24,"jobs":4,"output_root":"/tmp/o","context":"c"`
+	good := map[string]struct{ block, want string }{
+		"no registry":    {head + `}`, ""},
+		"empty registry": {head + `,"image_registry":""}`, ""},
+		"host and port":  {head + `,"image_registry":"localhost:5001"}`, "localhost:5001"},
+	}
+	for name, tt := range good {
+		t.Run("accepts "+name, func(t *testing.T) {
+			t.Parallel()
+			var p PatrolsConfig
+			if err := json.Unmarshal([]byte(`{"tier_sweep": {"runner": `+tt.block+`}}`), &p); err != nil {
+				t.Fatalf("a runner block with %s does not decode: %v", name, err)
+			}
+			if got := p.TierSweep.Runner.ImageRegistry; got != tt.want {
+				t.Errorf("image_registry = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	bad := map[string]string{
+		"scheme":            head + `,"image_registry":"http://localhost:5001"}`,
+		"path":              head + `,"image_registry":"localhost:5001/v2"}`,
+		"whitespace":        head + `,"image_registry":"localhost :5001"}`,
+		"no port":           head + `,"image_registry":"localhost"}`,
+		"no host":           head + `,"image_registry":":5001"}`,
+		"unparseable host":  head + `,"image_registry":"local%zz:5001"}`,
+		"port out of range": head + `,"image_registry":"localhost:99999"}`,
+	}
+	for name, block := range bad {
+		t.Run("refuses "+name, func(t *testing.T) {
+			t.Parallel()
+			var p PatrolsConfig
+			err := json.Unmarshal([]byte(`{"tier_sweep": {"runner": `+block+`}}`), &p)
+			if err == nil {
+				t.Fatalf("decoded image_registry with a %s: %+v", name, p.TierSweep.Runner)
+			}
+			if !strings.Contains(err.Error(), "runner.image_registry") {
+				t.Errorf("error = %v, want it to name runner.image_registry", err)
+			}
+		})
+	}
+}
+
 // A runner block moves the integration and race tiers off the host, so the
 // engine and limit fields are required and a key or value no run can use is
 // refused at decode, naming the key: a block the daemon half-understands would
