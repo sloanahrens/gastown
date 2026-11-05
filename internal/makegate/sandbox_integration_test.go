@@ -101,6 +101,7 @@ func (s *Sandbox) WriteFile(rel, body string) {
 func (s *Sandbox) SeedMake(build string, args ...string) (string, error) {
 	vars := []string{
 		"POLE_TOWN=" + s.root,
+		"POLE_BUILD_SRC=" + s.Path("gastown", "mayor", "rig"),
 		"POLE_SEED_PINS=" + s.Path("pins"),
 		"POLE_SEED_DIR=" + s.Path("out"),
 		"POLE_SEED_RIGS=" + seedSandboxRig,

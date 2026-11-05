@@ -53,7 +53,12 @@ func goMod(module string, requires ...string) string {
 // seedRig fills the table for one rig: its origin/main, and the go.mod files at
 // the pin and at main, each listed by ls-tree and read by show.
 func seedRig(f *guardGit, rig, main string, files map[string]map[string]string) {
-	dir := rigDir(rig)
+	seedRigAt(f, rigDir(rig), main, files)
+}
+
+// seedRigAt is seedRig for a checkout at an arbitrary directory, such as a build
+// source that is not under the town.
+func seedRigAt(f *guardGit, dir, main string, files map[string]map[string]string) {
 	f.answer[dir+" rev-parse --verify origin/main^{commit}"] = main + "\n"
 	for commit, mods := range files {
 		var names []string

@@ -83,12 +83,27 @@ func Plan(pins []Source, buildRig, seedAt string) ([]Source, error) {
 	return out, nil
 }
 
+// buildRigCheckout returns the directory the build rig's commits and sources are
+// read from: buildSrc when the caller names one, and the rig's canonical
+// checkout under town otherwise.
+func buildRigCheckout(town, buildRig, buildSrc string) string {
+	if buildSrc != "" {
+		return buildSrc
+	}
+	return filepath.Join(town, buildRig, "mayor", "rig")
+}
+
 // Stage writes each source into <dest>/<rig>, read from that rig's canonical
 // checkout <town>/<rig>/mayor/rig at the source's commit, so the seed holds
-// exactly that commit's tree.
-func Stage(dest, town string, sources []Source, git Git) error {
+// exactly that commit's tree. The build rig is read from buildSrc when one is
+// given, because an image build already runs in a checkout holding its commit;
+// the other rigs keep their canonical checkouts.
+func Stage(dest, town, buildRig, buildSrc string, sources []Source, git Git) error {
 	for _, s := range sources {
 		checkout := filepath.Join(town, s.Rig, "mayor", "rig")
+		if buildSrc != "" && s.Rig == buildRig {
+			checkout = buildSrc
+		}
 		tree, err := git(checkout, "archive", "--format=tar", s.Commit)
 		if err != nil {
 			return fmt.Errorf("cannot stage rig %s at %s from %s: %w", s.Rig, s.Commit, checkout, err)
