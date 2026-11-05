@@ -421,3 +421,14 @@ func TestReleaseReporterVersionIsReadFromTheBinary(t *testing.T) {
 		})
 	}
 }
+
+// The hm repo has no Go files at its root: its main package is cmd/hm. The other
+// tests read HMPackage itself, so only this literal catches the constant being
+// pointed back at the repository root (the first real image build failed with
+// "no Go files" on it).
+func TestHMPackageIsTheCmdHmMain(t *testing.T) {
+	t.Parallel()
+	if HMPackage != "./cmd/hm" {
+		t.Fatalf("HMPackage = %q, want ./cmd/hm: the hm repo's main package", HMPackage)
+	}
+}

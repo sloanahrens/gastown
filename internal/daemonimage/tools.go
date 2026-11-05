@@ -13,10 +13,10 @@ import (
 )
 
 // The packages the tools are built from, inside their checkouts. hm is the hm
-// repo's main package; the two reporters are the devops repo's cmd/reporter and
-// cmd/release-reporter.
+// repo's cmd/hm (the repo root has no Go files); the two reporters are the
+// devops repo's cmd/reporter and cmd/release-reporter.
 const (
-	HMPackage              = "."
+	HMPackage              = "./cmd/hm"
 	DevopsReporterPackage  = "./cmd/reporter"
 	ReleaseReporterPackage = "./cmd/release-reporter"
 )
