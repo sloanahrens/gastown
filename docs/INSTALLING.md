@@ -159,7 +159,7 @@ cost lands on every landing gate, and the daemon reports it as its `exec-tax`
 field, RED over `operational.health.exec_tax_red`.
 
 A tmux server started from Terminal.app inherits Terminal's exemption. The
-daemon does not: launchd starts it, and it is the parent of every landing gate,
+daemon does not: its supervisor starts it (launchd on a host-supervised town, the container in the live town since 2026-11-04), and it is the parent of every landing gate,
 so until the grant exists each gate exec pays the full scan. What exempts it is
 a Developer Tools grant on `~/.local/bin/gt`.
 
@@ -316,6 +316,8 @@ gt peek myproject/<polecat>
 **When to use**: Production workflows with multiple concurrent agents.
 
 #### Auto-Restart on Crash/Boot (Optional)
+
+The live town has been container-supervised since 2026-11-04: `gt daemon status` shows `Supervised: container gt-daemon`, and the daemon is stopped and started with `gt daemon stop` and `gt daemon start`. The launchd recipe below describes a host-supervised town and is the rollback path; the cutover and rollback steps are in [daemon-container.md](daemon-container.md).
 
 To have the daemon auto-restart if it crashes and start automatically on
 login/boot, hand it off to the OS supervisor (launchd on macOS, systemd on
