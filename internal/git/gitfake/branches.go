@@ -332,7 +332,7 @@ func (h *handle) RefreshRemoteDefaultBranch(remote string) error {
 }
 
 func (h *handle) ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error) {
-	return h.ListRemoteRefsWithHashesTimeout(remote, prefix, 0)
+	return h.ListRemoteRefsWithHashesEnv(remote, prefix, nil)
 }
 
 // ListRemoteRefsWithHashesEnv is ListRemoteRefsWithHashes, recording env for
