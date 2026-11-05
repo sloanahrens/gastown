@@ -1,9 +1,9 @@
 // Package daemonimage builds the gastown daemon's container artifacts on the
 // host: the linux/arm64 gt, bd and om binaries the image runs (gt-qpeei.9), the
-// pinned claude CLI om's reviewer runs (gt-qpeei.35), and the image built from
-// them (gt-qpeei.16). Every command it runs and every download it makes is one
-// injected call, so the gate proves what a build runs without Docker, a running
-// daemon, a cluster or the network.
+// image's cgo-built mango (gt-wznahy), the pinned claude CLI om's reviewer runs
+// (gt-qpeei.35), and the image built from them (gt-qpeei.16). Every command it
+// runs and every download it makes is one injected call, so the gate proves what
+// a build runs without Docker, a running daemon, a cluster or the network.
 package daemonimage
 
 import (
@@ -120,6 +120,11 @@ type Builder struct {
 	// two reporters are built from, and its pinned commit.
 	HMSrc, HMCommit         string
 	DevopsSrc, DevopsCommit string
+	// MangoSrc is the mango checkout the image's mango is built from, and
+	// MangoCommit the commit it is built at. mango is compiled in a container of
+	// mangoBuildImage, never cross-compiled on the host, because its go-api
+	// module links DuckDB through cgo.
+	MangoSrc, MangoCommit string
 	// Pins and PinsPath are the image-pins file Plan names: the four pins the
 	// commit fields above came from, and the file's path for the operator to edit.
 	Pins     []Pin
@@ -132,28 +137,35 @@ type Builder struct {
 	// that fetch.
 	Fetch Fetcher
 
-	// The fields below are test seams for the filesystem calls the plugin move
-	// and its rollback make; nil means the os function of the same shape.
+	// The fields below are test seams for the filesystem calls the plugin and
+	// mango moves and their rollbacks make; nil means the os function of the same
+	// shape.
 	rename func(oldpath, newpath string) error
 	remove func(path string) error
+	lstat  func(path string) (os.FileInfo, error)
 }
 
-// fileOps is the filesystem the plugin move publishes and rolls back with:
-// os.Rename and os.Remove, or the test seams standing in for them.
+// fileOps is the filesystem the plugin and mango moves publish and roll back
+// with: the os functions of the same shape, or the test seams standing in for
+// them.
 type fileOps struct {
 	rename func(oldpath, newpath string) error
 	remove func(path string) error
+	lstat  func(path string) (os.FileInfo, error)
 }
 
 // fileOps returns b's filesystem, with the os functions filling any seam b
 // leaves nil.
 func (b Builder) fileOps() fileOps {
-	ops := fileOps{rename: os.Rename, remove: os.Remove}
+	ops := fileOps{rename: os.Rename, remove: os.Remove, lstat: os.Lstat}
 	if b.rename != nil {
 		ops.rename = b.rename
 	}
 	if b.remove != nil {
 		ops.remove = b.remove
+	}
+	if b.lstat != nil {
+		ops.lstat = b.lstat
 	}
 	return ops
 }
@@ -591,9 +603,10 @@ func isCommit(s string) bool {
 // none of them: it makes no worktree, resolves no commit, writes no file and
 // reaches no network. It names the pins file and each pin first. It refuses the
 // inputs a build refuses before it runs anything (an empty or relative Out, a
-// rev, bd or om commit that is not a commit, an unnamed source, an hm or devops
-// commit that is missing or not a commit, a canonical clone as any input, no
-// pins, a Dockerfile that is not an absolute regular file). It does not check
+// rev, bd or om commit that is not a commit, an unnamed source, a mango source
+// or commit that is missing or not a commit, an hm or devops commit that is
+// missing or not a commit, a canonical clone as any input, no pins, a Dockerfile
+// that is not an absolute regular file). It does not check
 // the claude CLI pin, and it does not check that a commit exists in its
 // checkout, that a checkout is at its pin and clean, or that a pin is fresh:
 // CheckPins and a build check those when they run, so a plan that prints can
@@ -624,6 +637,10 @@ func (b Builder) Plan(rev string) ([]string, error) {
 	if err := b.checkToolInputs(); err != nil {
 		return nil, err
 	}
+	mangoCommit, err := b.checkMangoInputs()
+	if err != nil {
+		return nil, err
+	}
 	stamp := planCommitStamp(rev)
 	tag := ImageTag(rev)
 	lines := []string{fmt.Sprintf("pins: %s", b.PinsPath)}
@@ -639,6 +656,8 @@ func (b Builder) Plan(rev string) ([]string, error) {
 		lines = append(lines, fmt.Sprintf("build %s: %s   (clean worktree of %s at %s)", p.name, strings.Join(goBuildArgv(filepath.Join(b.Out, "plugins", p.name, p.name), p.pkg, ""), " "), b.GTSrc, rev))
 	}
 	lines = append(lines, b.toolPlanLines()...)
+	lines = append(lines, fmt.Sprintf("build mango: %s   (clean worktree of %s at %s)",
+		strings.Join(mangoArgv(planMangoWorktree, planMangoStage), " "), b.MangoSrc, mangoCommit))
 	lines = append(lines,
 		fmt.Sprintf("fetch claude: GET %s -> %s   (sha256 %s)", fmt.Sprintf(templates.ClaudeCLIURLFormat, templates.ClaudeCLIVersion), filepath.Join(b.Out, claudeCLIName), templates.ClaudeCLISHA256),
 	)
@@ -899,9 +918,10 @@ func (b Builder) stageKnownHosts() error {
 
 // checkImageBinaries refuses a set of binaries the Dockerfile's COPY lines could
 // not read: each of the image's binaries (gt, bd, om, claude, the toolNames and
-// ClientToolNames) and each of imagePlugins once, at the path under b.Out its COPY
-// reads. Docker would report a missing or misplaced one only after the package
-// install ran, so it is caught here first, against what the caller passed.
+// ClientToolNames), each of imagePlugins and each of mangoNames once, at the path
+// under b.Out its COPY reads. Docker would report a missing or misplaced one only
+// after the package install ran, so it is caught here first, against what the
+// caller passed.
 func (b Builder) checkImageBinaries(bins []string) error {
 	// rels is each binary's COPY source relative to the build context; want holds
 	// the same names in the order the refusal messages use.
@@ -914,6 +934,10 @@ func (b Builder) checkImageBinaries(bins []string) error {
 	for _, p := range imagePlugins {
 		rels[p.name] = filepath.Join("plugins", p.name, p.name)
 		want = append(want, p.name)
+	}
+	for _, name := range mangoNames {
+		rels[name] = filepath.Join(mangoDir, name)
+		want = append(want, name)
 	}
 	seen := make(map[string]bool, len(want))
 	for _, p := range bins {

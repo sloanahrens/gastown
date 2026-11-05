@@ -36,6 +36,15 @@ func imageBuilder(t *testing.T) (Builder, *fakeRunner) {
 			t.Fatalf("writing the %s plugin binary: %v", p.name, err)
 		}
 	}
+	for _, name := range mangoNames {
+		dir := filepath.Join(b.Out, mangoDir)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("making the mango directory: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("binary"), 0o600); err != nil {
+			t.Fatalf("writing the mango %s: %v", name, err)
+		}
+	}
 	return b, run
 }
 
@@ -43,15 +52,18 @@ func imageBuilder(t *testing.T) (Builder, *fakeRunner) {
 // context.
 var imageBinaryNames = []string{"gt", "bd", "om", "claude", "hm", "devops-reporter", "release-reporter", "openshell", "docker", "kubectl"}
 
-// imageBinaries is the list of the image's binaries and plugin binaries in
-// b.Out, in the order the Dockerfile copies them from its context.
+// imageBinaries is the list of the image's binaries, plugin binaries and mango
+// files in b.Out, in the order the Dockerfile copies them from its context.
 func imageBinaries(b Builder) []string {
-	out := make([]string, 0, len(imageBinaryNames)+len(imagePlugins))
+	out := make([]string, 0, len(imageBinaryNames)+len(imagePlugins)+len(mangoNames))
 	for _, name := range imageBinaryNames {
 		out = append(out, filepath.Join(b.Out, name))
 	}
 	for _, p := range imagePlugins {
 		out = append(out, filepath.Join(b.Out, "plugins", p.name, p.name))
+	}
+	for _, name := range mangoNames {
+		out = append(out, filepath.Join(b.Out, mangoDir, name))
 	}
 	return out
 }
@@ -68,6 +80,19 @@ func pluginCopies() []pluginCopy {
 		copies = append(copies, pluginCopy{
 			src: "plugins/" + p.name + "/" + p.name,
 			dst: "/usr/local/lib/gt/plugins/" + p.name + "/" + p.name,
+		})
+	}
+	return copies
+}
+
+// mangoCopies are the COPY operands the Dockerfile must carry for mangoNames,
+// in the order BuildMango publishes them.
+func mangoCopies() []pluginCopy {
+	copies := make([]pluginCopy, 0, len(mangoNames))
+	for _, name := range mangoNames {
+		copies = append(copies, pluginCopy{
+			src: mangoDir + "/" + name,
+			dst: "/usr/local/lib/gt/mango/" + name,
 		})
 	}
 	return copies
@@ -198,6 +223,9 @@ func TestBuildImageRefusesBeforeDockerRuns(t *testing.T) {
 		{name: "the claude CLI missing from the list", rev: testRev, breakIt: func(_ *testing.T, _ *Builder, bins *[]string) {
 			*bins = (*bins)[:3]
 		}, want: "no claude binary"},
+		{name: "the mango files missing from the list", rev: testRev, breakIt: func(_ *testing.T, _ *Builder, bins *[]string) {
+			*bins = (*bins)[:len(*bins)-len(mangoNames)]
+		}, want: "no mango binary"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -426,19 +454,20 @@ func gitConfigGlobal(in dockerfileInstruction) (key, value string, ok bool) {
 // kinds. The Dolt client is copied from the dolt stage, and nothing else is.
 // Each of the image binaries (imageBinaryNames) is copied from the build context
 // by its bare name to /usr/local/bin, once each; each plugin binary is copied
-// from its plugin directory to the image's plugin directory, once each. A COPY
-// from any other source, or a second copy of a name, fails, so the image cannot
-// ship a binary the deployer did not build or fetch, or miss one it did.
+// from its plugin directory to the image's plugin directory, once each; and each
+// of mangoNames is copied from mango/ to /usr/local/lib/gt/mango, once each. A
+// COPY from any other source, or a second copy of a name, fails, so the image
+// cannot ship a binary the deployer did not build or fetch, or miss one it did.
 func TestDaemonDockerfileCopiesOnlyTheBinariesAndDolt(t *testing.T) {
 	t.Parallel()
-	wantPlugin := map[string]string{}
-	for _, p := range pluginCopies() {
-		wantPlugin[p.src] = p.dst
+	wantOther := map[string]string{}
+	for _, p := range append(pluginCopies(), mangoCopies()...) {
+		wantOther[p.src] = p.dst
 	}
 	doltCopies := 0
 	knownHostsCopies := 0
 	contextCopies := map[string]int{}
-	pluginCopied := map[string]int{}
+	otherCopied := map[string]int{}
 	for _, in := range dockerfileInstructions(t, readDockerfile(t)) {
 		if in.cmd != "COPY" {
 			continue
@@ -450,11 +479,11 @@ func TestDaemonDockerfileCopiesOnlyTheBinariesAndDolt(t *testing.T) {
 				continue
 			}
 			if !slices.Contains(imageBinaryNames, src) {
-				if want, ok := wantPlugin[src]; ok && dst == want {
-					pluginCopied[src]++
+				if want, ok := wantOther[src]; ok && dst == want {
+					otherCopied[src]++
 					continue
 				}
-				t.Errorf("%s COPY %q reads %q from the build context; want one of gt, bd, om or claude by its bare name to /usr/local/bin, or a plugin's binary to the image's plugin directory", DockerfilePath, in.args, src)
+				t.Errorf("%s COPY %q reads %q from the build context; want one of gt, bd, om or claude by its bare name to /usr/local/bin, a plugin's binary to the image's plugin directory, or a mango file to /usr/local/lib/gt/mango", DockerfilePath, in.args, src)
 				continue
 			}
 			if dst != "/usr/local/bin/"+src {
@@ -481,9 +510,9 @@ func TestDaemonDockerfileCopiesOnlyTheBinariesAndDolt(t *testing.T) {
 			t.Errorf("%s COPYs %s from the build context %d times, want once", DockerfilePath, name, contextCopies[name])
 		}
 	}
-	for _, p := range pluginCopies() {
-		if pluginCopied[p.src] != 1 {
-			t.Errorf("%s COPYs %s from the build context %d times, want once", DockerfilePath, p.src, pluginCopied[p.src])
+	for _, p := range append(pluginCopies(), mangoCopies()...) {
+		if otherCopied[p.src] != 1 {
+			t.Errorf("%s COPYs %s from the build context %d times, want once", DockerfilePath, p.src, otherCopied[p.src])
 		}
 	}
 }
@@ -511,6 +540,32 @@ func TestDaemonDockerfileCopiesThePluginBinaries(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("%s copies the plugin binaries as %q, want %q", DockerfilePath, got, want)
+	}
+}
+
+// TestDaemonDockerfileCopiesTheMangoBinary: the image ships mango and its commit
+// stamp at /usr/local/lib/gt/mango, by one COPY of mode 0755 from the build
+// context each.
+func TestDaemonDockerfileCopiesTheMangoBinary(t *testing.T) {
+	t.Parallel()
+	var got []string
+	for _, in := range dockerfileInstructions(t, readDockerfile(t)) {
+		if in.cmd != "COPY" {
+			continue
+		}
+		_, src, _ := copyOperands(in.args)
+		for _, p := range mangoCopies() {
+			if src == p.src {
+				got = append(got, in.cmd+" "+strings.Join(in.args, " "))
+			}
+		}
+	}
+	var want []string
+	for _, p := range mangoCopies() {
+		want = append(want, "COPY --chmod=0755 "+p.src+" "+p.dst)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("%s copies the mango files as %q, want %q", DockerfilePath, got, want)
 	}
 }
 

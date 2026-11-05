@@ -16,11 +16,12 @@ import (
 )
 
 const (
-	imageTestRev       = "0123456789abcdef0123456789abcdef01234567"
-	imageTestBDCommit  = "fedcba9876543210fedcba9876543210fedcba98"
-	imageTestOMCommit  = "00112233445566778899aabbccddeeff00112233"
-	imageTestHMCommit  = "abcdef0123456789abcdef0123456789abcdef01"
-	imageTestDevCommit = "1234567890abcdef1234567890abcdef12345678"
+	imageTestRev         = "0123456789abcdef0123456789abcdef01234567"
+	imageTestBDCommit    = "fedcba9876543210fedcba9876543210fedcba98"
+	imageTestOMCommit    = "00112233445566778899aabbccddeeff00112233"
+	imageTestHMCommit    = "abcdef0123456789abcdef0123456789abcdef01"
+	imageTestDevCommit   = "1234567890abcdef1234567890abcdef12345678"
+	imageTestMangoCommit = "2233445566778899aabbccddeeff001122334455"
 )
 
 // imagePinsText is the pins file newImageRig writes, one line per source.
@@ -66,6 +67,7 @@ func newImageRig(t *testing.T) *imageRig {
 	r.flags = daemonImageFlags{
 		rev: imageTestRev, out: mk("out"), gtSrc: gtSrc, bdSrc: mk("beads"),
 		omSrc: mk("om"), hmSrc: mk("hm"), devopsSrc: mk("devops"),
+		mangoSrc: mk("mango"), mangoCommit: imageTestMangoCommit,
 		pins: filepath.Join(root, "image-pins"),
 	}
 	if err := os.WriteFile(r.flags.pins, []byte(imagePinsText()), 0o600); err != nil {
@@ -136,6 +138,13 @@ func (f fakeImageBuilder) BuildTools(context.Context) ([]string, error) {
 	return []string{"/out/hm", "/out/devops-reporter", "/out/release-reporter"}, nil
 }
 
+func (f fakeImageBuilder) BuildMango(context.Context) ([]string, error) {
+	if err := f.step("mango"); err != nil {
+		return nil, err
+	}
+	return []string{"/out/mango/mango", "/out/mango/mango.sha"}, nil
+}
+
 func (f fakeImageBuilder) FetchClaudeCLI(context.Context) (string, error) {
 	if err := f.step("claude"); err != nil {
 		return "", err
@@ -183,6 +192,8 @@ func TestDaemonImageDryRunPrintsThePlanAndRunsNothing(t *testing.T) {
 		"build devops-reporter: go build -trimpath -o " + filepath.Join(r.flags.out, "devops-reporter") + " ./cmd/reporter",
 		"build release-reporter: go build -trimpath -o " + filepath.Join(r.flags.out, "release-reporter") + " ./cmd/release-reporter",
 		"check release-reporter: go version -m " + filepath.Join(r.flags.out, "release-reporter"),
+		"build mango: docker --context " + daemonimage.DockerContext + " run --rm --platform linux/arm64",
+		"CGO_ENABLED=1 GOOS=linux go build -trimpath -buildvcs=false",
 		"fetch claude: GET ",
 		"image: docker --context " + daemonimage.DockerContext + " build -f " + filepath.Join(r.flags.gtSrc, daemonimage.DockerfilePath) + " -t gt-daemon:" + imageTestRev + " " + r.flags.out,
 		"dry run: nothing was run",
@@ -204,8 +215,9 @@ func TestDaemonImageApplyRunsTheStepsInOrder(t *testing.T) {
 	t.Parallel()
 	const plugins = "/out/plugins/app-promote/app-promote,/out/plugins/town-metrics/town-metrics"
 	const hmTools = "/out/hm,/out/devops-reporter,/out/release-reporter"
-	const image = "image " + imageTestRev + " /out/gt,/out/bd,/out/om," + plugins + "," + hmTools + ",/out/claude,/out/openshell,/out/docker,/out/kubectl"
-	all := []string{"binaries " + imageTestRev, "plugins " + imageTestRev, "hm tools", "claude", "tools", image}
+	const mango = "/out/mango/mango,/out/mango/mango.sha"
+	const image = "image " + imageTestRev + " /out/gt,/out/bd,/out/om," + plugins + "," + hmTools + "," + mango + ",/out/claude,/out/openshell,/out/docker,/out/kubectl"
+	all := []string{"binaries " + imageTestRev, "plugins " + imageTestRev, "hm tools", "mango", "claude", "tools", image}
 	for _, tc := range []struct {
 		name      string
 		failAt    string
@@ -217,8 +229,9 @@ func TestDaemonImageApplyRunsTheStepsInOrder(t *testing.T) {
 		{"the binaries fail", "binaries " + imageTestRev, all[:1], false, "failed"},
 		{"the plugins fail", "plugins " + imageTestRev, all[:2], false, "plugins " + imageTestRev + " failed"},
 		{"the hm tools fail", "hm tools", all[:3], false, "hm tools failed"},
-		{"the claude CLI fails", "claude", all[:4], false, "claude failed"},
-		{"the client tools fail", "tools", all[:5], false, "tools failed"},
+		{"the mango build fails", "mango", all[:4], false, "mango failed"},
+		{"the claude CLI fails", "claude", all[:5], false, "claude failed"},
+		{"the client tools fail", "tools", all[:6], false, "tools failed"},
 		{"the image build fails", image, all, false, image + " failed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -273,6 +286,8 @@ func TestDaemonImageRefusesBeforeAnything(t *testing.T) {
 		{"no --om-src", func(_ *testing.T, f *daemonImageFlags) { f.omSrc = "" }, "--om-src is required"},
 		{"no --hm-src", func(_ *testing.T, f *daemonImageFlags) { f.hmSrc = "" }, "--hm-src is required"},
 		{"no --devops-src", func(_ *testing.T, f *daemonImageFlags) { f.devopsSrc = "" }, "--devops-src is required"},
+		{"no --mango-src", func(_ *testing.T, f *daemonImageFlags) { f.mangoSrc = "" }, "--mango-src is required"},
+		{"no --mango-commit", func(_ *testing.T, f *daemonImageFlags) { f.mangoCommit = "" }, "--mango-commit is required"},
 		{"no --pins", func(_ *testing.T, f *daemonImageFlags) { f.pins = "" }, "--pins is required"},
 		{"a relative --out", func(_ *testing.T, f *daemonImageFlags) { f.out = "out" }, "--out \"out\" is not absolute"},
 		{"a relative --gt-src", func(_ *testing.T, f *daemonImageFlags) { f.gtSrc = "gt" }, "--gt-src \"gt\" is not absolute"},
@@ -280,6 +295,7 @@ func TestDaemonImageRefusesBeforeAnything(t *testing.T) {
 		{"a relative --om-src", func(_ *testing.T, f *daemonImageFlags) { f.omSrc = "om" }, "--om-src \"om\" is not absolute"},
 		{"a relative --hm-src", func(_ *testing.T, f *daemonImageFlags) { f.hmSrc = "hm" }, "--hm-src \"hm\" is not absolute"},
 		{"a relative --devops-src", func(_ *testing.T, f *daemonImageFlags) { f.devopsSrc = "devops" }, "--devops-src \"devops\" is not absolute"},
+		{"a relative --mango-src", func(_ *testing.T, f *daemonImageFlags) { f.mangoSrc = "mango" }, "--mango-src \"mango\" is not absolute"},
 		{"a relative --pins", func(_ *testing.T, f *daemonImageFlags) { f.pins = "image-pins" }, "--pins \"image-pins\" is not absolute"},
 		{"a missing pins file", func(t *testing.T, f *daemonImageFlags) {
 			f.pins = filepath.Join(t.TempDir(), "absent")
@@ -307,6 +323,7 @@ func TestDaemonImageRefusesBeforeAnything(t *testing.T) {
 		{"the canonical clone as --om-src", func(t *testing.T, f *daemonImageFlags) { f.omSrc = canon(t) }, "canonical clone"},
 		{"the canonical clone as --hm-src", func(t *testing.T, f *daemonImageFlags) { f.hmSrc = canon(t) }, "canonical clone"},
 		{"the canonical clone as --devops-src", func(t *testing.T, f *daemonImageFlags) { f.devopsSrc = canon(t) }, "canonical clone"},
+		{"the canonical clone as --mango-src", func(t *testing.T, f *daemonImageFlags) { f.mangoSrc = canon(t) }, "canonical clone"},
 		{"a directory inside the canonical clone", func(t *testing.T, f *daemonImageFlags) { f.omSrc = filepath.Join(canon(t), "sub") }, "canonical clone"},
 		{"a symlink to the canonical clone", func(t *testing.T, f *daemonImageFlags) {
 			link := filepath.Join(t.TempDir(), "link")
@@ -355,6 +372,14 @@ func TestDaemonImageDockerBuildIgnoresTheShellsDockerEnvironment(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := os.MkdirAll(filepath.Join(r.flags.out, "mango"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"mango", "mango.sha"} {
+		if err := os.WriteFile(filepath.Join(r.flags.out, "mango", name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	pluginBinary := func(name string) string {
 		dir := filepath.Join(r.flags.out, "plugins", name)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -384,6 +409,7 @@ func TestDaemonImageDockerBuildIgnoresTheShellsDockerEnvironment(t *testing.T) {
 		filepath.Join(r.flags.out, "hm"), filepath.Join(r.flags.out, "devops-reporter"), filepath.Join(r.flags.out, "release-reporter"),
 		filepath.Join(r.flags.out, "openshell"), filepath.Join(r.flags.out, "docker"), filepath.Join(r.flags.out, "kubectl"),
 		pluginBinary("app-promote"), pluginBinary("town-metrics"),
+		filepath.Join(r.flags.out, "mango", "mango"), filepath.Join(r.flags.out, "mango", "mango.sha"),
 	})
 	if err != nil {
 		t.Fatalf("BuildImage: %v", err)
@@ -411,12 +437,12 @@ func TestDaemonImageFlagsAreWired(t *testing.T) {
 		return nil
 	})
 	var _ *cobra.Command = c
-	c.SetArgs([]string{"--rev", "abc1234", "--out", "/o", "--gt-src", "/g", "--bd-src", "/b", "--om-src", "/m", "--hm-src", "/h", "--devops-src", "/d", "--pins", "/p"})
+	c.SetArgs([]string{"--rev", "abc1234", "--out", "/o", "--gt-src", "/g", "--bd-src", "/b", "--om-src", "/m", "--hm-src", "/h", "--devops-src", "/d", "--mango-src", "/mg", "--mango-commit", "aabbccdd", "--pins", "/p"})
 	c.SilenceUsage, c.SilenceErrors = true, true
 	if err := c.Execute(); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	want := daemonImageFlags{rev: "abc1234", out: "/o", gtSrc: "/g", bdSrc: "/b", omSrc: "/m", hmSrc: "/h", devopsSrc: "/d", pins: "/p"}
+	want := daemonImageFlags{rev: "abc1234", out: "/o", gtSrc: "/g", bdSrc: "/b", omSrc: "/m", hmSrc: "/h", devopsSrc: "/d", mangoSrc: "/mg", mangoCommit: "aabbccdd", pins: "/p"}
 	if got != want {
 		t.Errorf("flags = %+v, want %+v (apply off by default)", got, want)
 	}
