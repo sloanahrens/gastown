@@ -1,0 +1,7 @@
+# SHA-256 of each lower-cased blocked word. The words themselves are not kept
+# in this repository. One hash per line; blank lines and lines starting with
+# "#" are ignored.
+be034c581744e2d11ae7547f0ab239dd53e4b99b1aee041d98f4ace02cf38c5a
+dae25bc7b90ad062f0d7f944e26210658a643dcfc18ab64aed140783f37183c3
+e935640741692c6145bec1cafb0069a99f90baa514bf2e3be6b0ce0c0836550c
+e38a1c90e775710fe4f773326d6efea029da2574c022e799da01a2e766378876
