@@ -22,7 +22,7 @@
     {
       "name": "tests",
       "weight": 2,
-      "guidance": "Changed behavior needs tests; regression fixes need a test that fails before the fix. Flag untested behavior changes. A test whose fixture builds the layout the implementation already assumes proves nothing: for behavior that depends on the runtime environment (worktree path, cwd, module root), at least one case must drive the shape production actually takes, or the finding stands (moves the score; does not block alone)."
+      "guidance": "Changed behavior needs tests; regression fixes need a test that fails before the fix. Flag untested behavior changes. A test whose fixture builds the layout the implementation already assumes proves nothing: for behavior that depends on the runtime environment (worktree path, cwd, module root), at least one case must drive the shape production actually takes, or the finding stands (moves the score; does not block alone). The gate runs the unit tier only (docs/testing.md): for changed code, look for integration-tagged test files in its package and its callers, and flag any the diff does not run under -tags integration."
     },
     {
       "name": "test-engineering",
