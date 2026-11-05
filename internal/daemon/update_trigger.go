@@ -33,6 +33,11 @@ const (
 	// anything waits to deploy. It is the window the attention queue reads;
 	// landings older than it are long since in the installed build.
 	updateLandingRecords = 50
+
+	// updateRemoteTimeout bounds the ls-remote the failed-run hold makes for
+	// main's tip. The recovery heartbeat is minutes apart, so this stays well
+	// inside one heartbeat; a read that outlasts it is an unknown tip.
+	updateRemoteTimeout = 30 * time.Second
 )
 
 // updateTriggerState is the trigger's state between heartbeats: the launch
@@ -258,6 +263,13 @@ func (d *Daemon) updateFacts(now time.Time) (UpdateFacts, error) {
 		return facts, errors.New("the installed build's staleness could not be read")
 	}
 	facts.MainSHA = strings.TrimSpace(info.RepoCommit)
+	if facts.LastOutcome == update.OutcomeFailed || facts.LastOutcome == update.OutcomeAborted {
+		// The checkout's own origin/main ref lags main until something fetches,
+		// and a run that fails before the installer never fetches. The hold
+		// compares the failed run's target with the tip the run itself reads, so
+		// the same failed run cannot restart (gt-tb5vx).
+		facts.MainSHA = d.updateRemoteMainSHA(repoRoot)
+	}
 	facts.MainMoved = info.IsStale
 	if !info.IsStale {
 		return facts, nil
@@ -269,6 +281,26 @@ func (d *Daemon) updateFacts(now time.Time) (UpdateFacts, error) {
 	}
 	facts.Waiting = waiting
 	return facts, nil
+}
+
+// updateRemoteMainSHA reads main's tip from origin the way the run does, bounded
+// by updateRemoteTimeout. A read that fails returns empty, which the hold reads
+// as an unknown main: it holds and names the by-hand command rather than
+// comparing against a ref it cannot trust. The error is logged so the operator
+// can see why the tip is unknown.
+func (d *Daemon) updateRemoteMainSHA(repoRoot string) string {
+	run := d.updateRemoteRun
+	if run == nil {
+		run = update.ExecRun
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), updateRemoteTimeout)
+	defer cancel()
+	sha, err := update.RemoteMainSHA(ctx, run, repoRoot)
+	if err != nil {
+		d.logger.Printf("update: cannot read main's tip from origin: %v; the failed-run hold reads main as unknown", err)
+		return ""
+	}
+	return sha
 }
 
 // knownUpdateOutcome reports whether o is one a run writes to its state file.
