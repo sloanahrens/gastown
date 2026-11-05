@@ -44,6 +44,9 @@ func RenderRegistryForward(env string, hostsYAML []byte) (string, error) {
 	if hosts.RegistryHost == "" {
 		return "", fmt.Errorf("the hosts file has no registry_host")
 	}
+	// The host part of registry_host is checked for shape only. The listener
+	// is this node's own 127.0.0.1 and the relay goes to control_plane_host, so
+	// the registry's host name is never dialed; only its port is used.
 	registryName, portText, ok := strings.Cut(hosts.RegistryHost, ":")
 	port, err := strconv.Atoi(portText)
 	if !ok || err != nil || !ValidHost(registryName) || !registryPortOK.MatchString(portText) || port > 65535 {
