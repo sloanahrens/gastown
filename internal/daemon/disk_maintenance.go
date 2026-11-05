@@ -8,7 +8,9 @@ package daemon
 // A target may set a cadence of its own, and the CI cache volumes do: they grow
 // faster than a daily window can hold, so civol runs on its interval
 // (agentconfig.DiskMaintenanceDefaultCivolInterval by default) in any window
-// while the rest keep the daily pass (gt-z6qre.17).
+// while the rest keep the daily pass (gt-z6qre.17). The shared Go cache trim is
+// on the same footing: it runs on cache_trim_interval (2h by default) in any
+// window, not in the daily pass (gt-gg9hv.24.2).
 //
 // The patrol is opt-in twice over. It runs only when
 // daemon.patrols.disk_maintenance.enabled is true, and it changes nothing
@@ -68,6 +70,10 @@ const (
 
 	// diskMaintKeepEnv is the keep knob gt maint and the plugin read.
 	diskMaintKeepEnv = "POLECAT_IMAGE_REGISTRY_KEEP"
+
+	// diskMaintCacheTrimName is the schedule key the cache trim's last run is
+	// recorded under. It is not a target name, so it cannot collide with one.
+	diskMaintCacheTrimName = "cache_trim"
 )
 
 // diskMaintSeams are the patrol's outside reads and side effects, replaceable
@@ -162,6 +168,17 @@ func diskMaintenanceWindow(cfg *DaemonPatrolConfig) string {
 	return agentconfig.DiskMaintenanceDefaultWindow
 }
 
+// diskMaintenanceCacheTrimEvery returns the cache trim's cadence: the default
+// when the block or its setting is absent, and the refusal for a setting the
+// patrol cannot schedule.
+func diskMaintenanceCacheTrimEvery(cfg *DaemonPatrolConfig) (time.Duration, error) {
+	var settings agentconfig.DiskMaintenanceConfig
+	if c := diskMaintenanceSettings(cfg); c != nil {
+		settings = *c
+	}
+	return settings.CacheTrimEvery()
+}
+
 // diskMaintenanceMode returns the pass mode, or the refusal for a mode the
 // patrol cannot act on. Decoding refuses one too; this catches a config built
 // in code, where the default must not silently become an apply.
@@ -249,10 +266,15 @@ type diskMaintDue struct {
 	// daily is whether the targets without a cadence are due: the window is
 	// open and the day's pass has not concluded.
 	daily bool
+	// cacheTrim is whether the cache trim's interval is due. It runs in any
+	// window, and the daily window does not run it.
+	cacheTrim bool
 }
 
 // empty reports whether this tick has nothing to run.
-func (due diskMaintDue) empty() bool { return !due.daily && len(due.interval) == 0 }
+func (due diskMaintDue) empty() bool {
+	return !due.daily && !due.cacheTrim && len(due.interval) == 0
+}
 
 // selection returns the built targets this tick runs, sorted. A target with a
 // cadence runs only when the cadence is due; the daily window never reaches it.
@@ -304,6 +326,14 @@ func (d *Daemon) diskMaintenanceDue(now time.Time) (diskMaintDue, []error) {
 				due.interval = append(due.interval, name)
 			}
 		}
+	}
+	// The cache trim is due from its own last run in any window. A malformed
+	// setting is refused and the trim runs nothing, as a target's would
+	// (gt-gg9hv.24.2).
+	if every, err := diskMaintenanceCacheTrimEvery(d.patrolConfig); err != nil {
+		errs = append(errs, err)
+	} else if last := d.diskMaintSchedule.lastRunAt(diskMaintCacheTrimName); last.IsZero() || now.Sub(last) >= every {
+		due.cacheTrim = true
 	}
 	if !shouldRunMaintenanceCycle(now, d.diskMaintenanceSettledAt()) {
 		return due, errs
@@ -405,9 +435,17 @@ func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDu
 	d.applyDiskAlerts(readings)
 
 	// The cache trim is independent of the targets: it trims the claim the
-	// sandbox profiles mount, so it runs in the window's pass whether or not a
-	// maintenance target publishes here (gt-rm4am).
-	d.cacheTrim(ctx, mode)
+	// sandbox profiles mount, so it runs when its interval is due whether or not
+	// a maintenance target publishes here (gt-rm4am, gt-gg9hv.24.2). Any
+	// conclusion settles the run, a refused one included, so a trim that cannot
+	// read its claim waits for its next interval rather than every tick.
+	if due.cacheTrim {
+		d.cacheTrim(ctx, mode)
+		d.diskMaintSchedule.record(diskMaintCacheTrimName, s.now())
+	}
+	if !due.daily && len(due.interval) == 0 {
+		return // only the cache trim was due, and it has run
+	}
 
 	keep, err := diskMaintenanceKeep(s.getenv, readings)
 	if err != nil {

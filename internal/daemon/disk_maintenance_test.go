@@ -425,6 +425,90 @@ func TestDiskMaintenanceCadenceAppliesAndRetriesADeferral(t *testing.T) {
 	}
 }
 
+// countCacheTrims counts the trims a pass runs. A cache trim reads the sandbox
+// profiles before anything else, so each read is one trim.
+func countCacheTrims(d *Daemon) *int {
+	trims := new(int)
+	d.diskMaint.sandboxes = func() (map[string]agentconfig.SandboxProfile, error) {
+		*trims++
+		return nil, nil
+	}
+	return trims
+}
+
+// TestCacheTrimIntervalIsDueOutsideTheDailyWindow: the cache trim is due two
+// hours after its last run in any window, and not before. A tick outside the
+// window runs it when it is due, and a tick inside the window does not run it
+// early.
+func TestCacheTrimIntervalIsDueOutsideTheDailyWindow(t *testing.T) {
+	t.Parallel()
+	d, _, _ := diskMaintTestDaemon(t)
+	trims := countCacheTrims(d)
+	now := diskMaintNow // 04:45, inside the window: the first tick finds the trim never run
+	d.diskMaint.now = func() time.Time { return now }
+
+	d.runDiskMaintenance()
+	if *trims != 1 {
+		t.Fatalf("trimmed %d times at 04:45, want 1: a trim that has never run is due", *trims)
+	}
+
+	now = diskMaintNow.Add(time.Hour + 59*time.Minute) // 06:44, outside the window, a minute short of 2h
+	d.runDiskMaintenance()
+	if *trims != 1 {
+		t.Fatalf("trimmed %d times at 06:44, want 1: a minute short of its 2h interval is not due", *trims)
+	}
+
+	now = now.Add(time.Minute) // 06:45, two hours after the 04:45 run
+	d.runDiskMaintenance()
+	if *trims != 2 {
+		t.Fatalf("trimmed %d times at 06:45, want 2: due two hours after its last run, outside the window", *trims)
+	}
+}
+
+// TestCacheTrimRunsOncePerDueTick: a tick that is both in the window and due
+// for the cache trim runs it once, with the window's targets planned alongside,
+// and the next tick at the same moment does not run it again.
+func TestCacheTrimRunsOncePerDueTick(t *testing.T) {
+	t.Parallel()
+	d, _, f := diskMaintTestDaemon(t)
+	trims := countCacheTrims(d)
+
+	d.runDiskMaintenance() // 04:45: in the window, and the trim is due
+	if *trims != 1 {
+		t.Fatalf("trimmed %d times in a tick that is both in the window and due, want 1", *trims)
+	}
+	if len(f.target.policies) != 1 {
+		t.Fatalf("registry planned %d times, want 1: the window's pass still plans the daily targets", len(f.target.policies))
+	}
+
+	d.runDiskMaintenance()
+	if *trims != 1 {
+		t.Fatalf("trimmed %d times after a second tick at the same moment, want 1: the run concluded", *trims)
+	}
+}
+
+// TestCacheTrimIntervalRefusesAnUnreadableSetting: a cache_trim_interval the
+// patrol cannot schedule runs no trim, even in the window, and is said once
+// rather than on every tick. It does not fall back to the 2h default.
+func TestCacheTrimIntervalRefusesAnUnreadableSetting(t *testing.T) {
+	t.Parallel()
+	d, logs, _ := diskMaintTestDaemon(t)
+	trims := countCacheTrims(d)
+	d.patrolConfig.Patrols.DiskMaintenance.CacheTrimInterval = "soon"
+
+	for i := 0; i < 2; i++ {
+		d.runDiskMaintenance() // 04:45, in the window
+	}
+
+	if *trims != 0 {
+		t.Fatalf("trimmed %d times with an unreadable cache_trim_interval, want 0", *trims)
+	}
+	const setting = "patrols.disk_maintenance.cache_trim_interval"
+	if got := strings.Count(logs.String(), setting); got != 1 {
+		t.Errorf("logged the refused cache_trim_interval %d times, want 1: %q", got, logs.String())
+	}
+}
+
 // TestDiskMaintenanceRefusesAnUnreadableCadence: an interval the patrol cannot
 // schedule runs that target on no cadence at all — never on the daily window —
 // and says so once rather than on every tick.

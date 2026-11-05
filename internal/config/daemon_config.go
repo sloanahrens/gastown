@@ -1125,9 +1125,27 @@ type DiskMaintenanceConfig struct {
 	Interval string `json:"interval"` // "daily"
 	Window   string `json:"window"`   // "04:30", local time
 	Mode     string `json:"mode"`     // "dry_run" (default) | "apply"
+	// CacheTrimInterval is how often the shared Go cache is trimmed, in any
+	// window. Empty means DiskMaintenanceDefaultCacheTrimInterval.
+	CacheTrimInterval string `json:"cache_trim_interval,omitempty"` // Go duration such as "2h"
 	// Targets holds the targets with a cadence of their own. A target absent
 	// here keeps the daily window.
 	Targets map[string]DiskMaintenanceTarget `json:"targets,omitempty"`
+}
+
+// CacheTrimEvery returns the cadence the cache trim runs on: the default when
+// the setting is empty, and an error naming the setting for a value the patrol
+// cannot schedule. The error never falls back to the default (gt-gg9hv.24.2).
+func (c DiskMaintenanceConfig) CacheTrimEvery() (time.Duration, error) {
+	raw := c.CacheTrimInterval
+	if raw == "" {
+		raw = DiskMaintenanceDefaultCacheTrimInterval
+	}
+	every, err := parseDiskMaintenanceCadence(raw)
+	if err != nil {
+		return 0, fmt.Errorf("patrols.disk_maintenance.cache_trim_interval: %w", err)
+	}
+	return every, nil
 }
 
 // DiskMaintenanceTarget is one target's own cadence: a set Interval runs that
@@ -1144,12 +1162,19 @@ func (t DiskMaintenanceTarget) Every() (time.Duration, error) {
 	if t.Interval == "" {
 		return 0, nil
 	}
-	every, err := time.ParseDuration(t.Interval)
+	return parseDiskMaintenanceCadence(t.Interval)
+}
+
+// parseDiskMaintenanceCadence reads a cadence: a Go duration of at least a
+// minute. A zero or negative duration is under that minimum, so it is refused
+// here too.
+func parseDiskMaintenanceCadence(raw string) (time.Duration, error) {
+	every, err := time.ParseDuration(raw)
 	if err != nil {
-		return 0, fmt.Errorf("%q is not a Go duration such as \"2h\"", t.Interval)
+		return 0, fmt.Errorf("%q is not a Go duration such as \"2h\"", raw)
 	}
 	if every < time.Minute {
-		return 0, fmt.Errorf("%q is under the one-minute minimum", t.Interval)
+		return 0, fmt.Errorf("%q is under the one-minute minimum", raw)
 	}
 	return every, nil
 }
@@ -1205,6 +1230,10 @@ const (
 	// they grow about 3 GB an hour, so the daily window cannot hold them. It
 	// matches the shell job the patrol replaces (gt-z6qre.17).
 	DiskMaintenanceDefaultCivolInterval = "2h"
+	// DiskMaintenanceDefaultCacheTrimInterval is the shared Go cache's cadence:
+	// it grows about 3 GB an hour, so one trim a day cannot hold the 10 GB cap
+	// (gt-gg9hv.24.2).
+	DiskMaintenanceDefaultCacheTrimInterval = "2h"
 )
 
 // UnmarshalJSON decodes the patrol's block strictly, refusing a value the
@@ -1238,6 +1267,9 @@ func (c *DiskMaintenanceConfig) UnmarshalJSON(data []byte) error {
 		}
 	}
 	cfg := DiskMaintenanceConfig(p)
+	if _, err := cfg.CacheTrimEvery(); err != nil {
+		return err
+	}
 	for _, name := range slices.Sorted(maps.Keys(cfg.Targets)) {
 		if _, err := cfg.Cadence(name); err != nil {
 			return err

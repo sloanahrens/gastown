@@ -842,6 +842,63 @@ func TestTierSweepConfigRunnerShellDefaultsFalse(t *testing.T) {
 	}
 }
 
+// TestDiskMaintenanceCacheTrimInterval: the cache trim's cadence is 2h unless the
+// setting names another, and a value the patrol cannot schedule is an error
+// that names the setting, at decode and when read, never a fallback to the
+// default (gt-gg9hv.24.2).
+func TestDiskMaintenanceCacheTrimInterval(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		interval string
+		want     time.Duration
+		wantErr  string
+	}{
+		{name: "empty is the 2h default", want: 2 * time.Hour},
+		{name: "a valid override is read", interval: "45m", want: 45 * time.Minute},
+		{name: "not a duration", interval: "soon", wantErr: "not a Go duration"},
+		{name: "zero", interval: "0s", wantErr: "one-minute minimum"},
+		{name: "negative", interval: "-2h", wantErr: "one-minute minimum"},
+		{name: "sub-minute", interval: "30s", wantErr: "one-minute minimum"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := DiskMaintenanceConfig{CacheTrimInterval: tt.interval}.CacheTrimEvery()
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) ||
+					!strings.Contains(err.Error(), "patrols.disk_maintenance.cache_trim_interval") {
+					t.Fatalf("CacheTrimEvery(%q) = %v, %v; want an error naming the setting and %q", tt.interval, got, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CacheTrimEvery(%q) error = %v", tt.interval, err)
+			}
+			if got != tt.want {
+				t.Errorf("CacheTrimEvery(%q) = %v, want %v", tt.interval, got, tt.want)
+			}
+		})
+	}
+
+	var cfg PatrolsConfig
+	if err := json.Unmarshal([]byte(`{"disk_maintenance": {"cache_trim_interval": "45m"}}`), &cfg); err != nil {
+		t.Fatalf("a valid cache_trim_interval does not decode: %v", err)
+	}
+	if got := cfg.DiskMaintenance.CacheTrimInterval; got != "45m" {
+		t.Errorf("cache_trim_interval decoded as %q, want 45m", got)
+	}
+	for name, doc := range map[string]string{
+		"malformed": `{"disk_maintenance": {"cache_trim_interval": "soon"}}`,
+		"zero":      `{"disk_maintenance": {"cache_trim_interval": "0s"}}`,
+	} {
+		var p PatrolsConfig
+		if err := json.Unmarshal([]byte(doc), &p); err == nil {
+			t.Errorf("%s cache_trim_interval decoded without an error: %+v", name, p.DiskMaintenance)
+		}
+	}
+}
+
 // TestDiskMaintenanceTargetEvery: a cadence is a Go duration of at least a
 // minute, and an empty one keeps the daily window.
 func TestDiskMaintenanceTargetEvery(t *testing.T) {
