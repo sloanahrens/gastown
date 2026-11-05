@@ -530,10 +530,9 @@ func parseQuantity(value string, scale int64) (int64, error) {
 	if !plainDecimal(number) {
 		return 0, fmt.Errorf("%q is not a plain integer or decimal (base prefixes and underscores are refused)", value)
 	}
-	mantissa, ok := new(big.Rat).SetString(number)
-	if !ok {
-		return 0, fmt.Errorf("%q is not a quantity", value)
-	}
+	// plainDecimal admitted only digits and one point, which SetString always
+	// reads, so its ok result carries no information here.
+	mantissa, _ := new(big.Rat).SetString(number)
 	multiplier, ok := quantityMultiplier(suffix)
 	if !ok {
 		return 0, fmt.Errorf("%q has a suffix the preflight does not read", value)

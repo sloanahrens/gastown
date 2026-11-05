@@ -799,3 +799,21 @@ func TestCapacityNoExecuteTaintBlocksPlacement(t *testing.T) {
 		t.Error("an Exists toleration with no effect does not tolerate the NoExecute taint")
 	}
 }
+
+// TestPodRequestTotalRefusesAnUnreadableInitContainer: a rendered init container
+// whose request cannot be read is an error naming it, as an unreadable container
+// is, rather than a zero that reads the pod lighter than it is.
+func TestPodRequestTotalRefusesAnUnreadableInitContainer(t *testing.T) {
+	t.Parallel()
+	pod := PodSpec{
+		InitContainers: []Container{{Name: "prep", Resources: &Resources{Requests: ResourceList{CPU: "4x", Memory: "1Gi"}}}},
+		Containers:     []Container{{Name: "runner", Resources: &Resources{Requests: ResourceList{CPU: "2", Memory: "1Gi"}}}},
+	}
+	got, err := PodRequestTotal(pod)
+	if err == nil {
+		t.Fatalf("PodRequestTotal read an unreadable init request as %+v, want it refused", got)
+	}
+	if !strings.Contains(err.Error(), `"prep"`) {
+		t.Errorf("error = %v, want it to name the init container", err)
+	}
+}
