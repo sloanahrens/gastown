@@ -65,6 +65,7 @@ func newComposeRig(t *testing.T) *composeRig {
 		containerEnv: func(string) (map[string]string, error) { return map[string]string{}, nil },
 		readFile:     func(string) ([]byte, error) { return nil, fs.ErrNotExist },
 		evalSymlinks: func(p string) (string, error) { return p, nil },
+		isDir:        func(string) (bool, error) { return true, nil },
 		townZone:     func(string) (string, error) { return "", nil },
 		omConfig: func() ([]byte, error) {
 			return templates.RenderOMConfig(templates.DefaultOMConfigSettings())
@@ -775,5 +776,152 @@ func TestComposeWriteBackupDirRelativeIsRefused(t *testing.T) {
 	}
 	if got := r.disk[r.composePath()]; !bytes.Equal(got, old) {
 		t.Errorf("compose file = %q, want the old render %q kept", got, old)
+	}
+}
+
+// --bind-ro reaches the spec through the real command: each directory is mounted
+// read-only at its own path, and the mounts come out sorted by path whatever
+// order the flags were given in (gt-vqexg).
+func TestComposeWriteBindRO(t *testing.T) {
+	t.Parallel()
+	r := newComposeRig(t)
+	const reports, releases = "/Users/Shared/gt-cloud/reports", "/Users/Shared/gt-cloud/releases"
+	c := newDaemonComposeCmd(func(_ io.Writer, f daemonComposeFlags) error {
+		return runDaemonCompose(f, r.deps)
+	})
+	c.SetArgs([]string{"write", "--image", daemonimage.ImageTag(composeTestRev),
+		"--bind-ro", reports, "--bind-ro", releases})
+	c.SilenceUsage, c.SilenceErrors = true, true
+
+	if err := c.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	file, ok := r.disk[r.composePath()]
+	if !ok {
+		t.Fatalf("no compose file written at %s", r.composePath())
+	}
+	mount := func(dir string) string {
+		return fmt.Sprintf("source: %q\n        target: %q\n        read_only: true\n", dir, dir)
+	}
+	relAt, repAt := strings.Index(string(file), mount(releases)), strings.Index(string(file), mount(reports))
+	if relAt < 0 || repAt < 0 {
+		t.Fatalf("compose file does not carry both read-only mounts:\n%s", file)
+	}
+	if relAt > repAt {
+		t.Errorf("the read-only mounts are not sorted by path:\n%s", file)
+	}
+}
+
+// Each --bind-ro the command or the render cannot mount read-only is refused
+// with the path named, and the command writes no file and keeps the old one.
+func TestComposeWriteBindRORefuses(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		value      string
+		duplicate  bool
+		notDir     bool
+		unreadable bool
+		want       string
+	}{
+		{name: "relative path", value: "gt-cloud/reports", want: "not an absolute path"},
+		{name: "dot-dot path", value: "/fake/../etc/reports", want: "under .."},
+		{name: "inside the town", value: composeTestTown + "/reports", want: "inside or contains the town root"},
+		{name: "containing the town", value: "/fake", want: "inside or contains the town root"},
+		{name: "given twice", value: "/host/reports", duplicate: true, want: "more than once"},
+		{name: "not a directory", value: "/host/reports.txt", notDir: true, want: "is not a directory"},
+		{name: "cannot be stat'd", value: "/host/missing", unreadable: true, want: "cannot be read"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newComposeRig(t)
+			r.deps.isDir = func(string) (bool, error) {
+				switch {
+				case tc.unreadable:
+					return false, fs.ErrNotExist
+				case tc.notDir:
+					return false, nil
+				}
+				return true, nil
+			}
+			old := []byte("old render")
+			r.disk[r.composePath()] = old
+			c := newDaemonComposeCmd(func(_ io.Writer, f daemonComposeFlags) error {
+				return runDaemonCompose(f, r.deps)
+			})
+			args := []string{"write", "--image", daemonimage.ImageTag(composeTestRev), "--bind-ro", tc.value}
+			if tc.duplicate {
+				args = append(args, "--bind-ro", tc.value)
+			}
+			c.SetArgs(args)
+			c.SilenceUsage, c.SilenceErrors = true, true
+
+			err := c.Execute()
+			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), tc.value) {
+				t.Fatalf("error = %v, want a refusal that says %q and names %q", err, tc.want, tc.value)
+			}
+			if len(r.wrote) != 0 {
+				t.Errorf("a refusal wrote %v", r.wrote)
+			}
+			if got := r.disk[r.composePath()]; !bytes.Equal(got, old) {
+				t.Errorf("compose file = %q, want the old render %q kept", got, old)
+			}
+		})
+	}
+}
+
+// A blank --bind-ro names no directory, so the command refuses it rather than
+// render as if the flag were unset.
+func TestComposeWriteBindROBlankIsRefused(t *testing.T) {
+	t.Parallel()
+	r := newComposeRig(t)
+	c := newDaemonComposeCmd(func(_ io.Writer, f daemonComposeFlags) error {
+		return runDaemonCompose(f, r.deps)
+	})
+	c.SetArgs([]string{"write", "--image", daemonimage.ImageTag(composeTestRev), "--bind-ro", "  "})
+	c.SilenceUsage, c.SilenceErrors = true, true
+
+	err := c.Execute()
+	if err == nil || !strings.Contains(err.Error(), "blank") {
+		t.Fatalf("error = %v, want a refusal of the blank --bind-ro", err)
+	}
+	if len(r.wrote) != 0 {
+		t.Errorf("a refusal wrote %v", r.wrote)
+	}
+}
+
+// The host's isDir is the stat the --bind-ro check reads: a directory is true, a
+// file is false, and a path that is not there is an error the command refuses
+// (gt-vqexg). Every path sits under t.TempDir(), so nothing outside it is read.
+func TestRealDaemonComposeIsDir(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	file := filepath.Join(dir, "reports.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatalf("writing the fixture file: %v", err)
+	}
+	isDir := realDaemonComposeDeps(io.Discard).isDir
+	cases := []struct {
+		name    string
+		path    string
+		want    bool
+		wantErr bool
+	}{
+		{name: "a directory", path: dir, want: true},
+		{name: "a file", path: file, want: false},
+		{name: "a missing path", path: filepath.Join(dir, "missing"), wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := isDir(tc.path)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("isDir(%q) error = %v, want an error %v", tc.path, err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("isDir(%q) = %v, want %v", tc.path, got, tc.want)
+			}
+		})
 	}
 }

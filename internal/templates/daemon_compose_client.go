@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -42,8 +43,8 @@ var composeEnvName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // values the render cannot carry, and any of them on a scratch spec.
 func (s ComposeSpec) validateClient() error {
 	if s.Scratch && (len(s.Env) > 0 || len(s.KubeconfigFiles) > 0 || s.OpenShellConfigDir != "" || s.ConfigDir != "" ||
-		s.OMTokenMetaFile != "" || s.LandingWorkRoot != "" || s.TimeZone != "" || s.BackupDir != "") {
-		return fmt.Errorf("compose spec: Env, KubeconfigFiles, OpenShellConfigDir, ConfigDir, OMTokenMetaFile, LandingWorkRoot, TimeZone or BackupDir is set on a scratch spec; only the live render carries the client configuration")
+		s.OMTokenMetaFile != "" || s.LandingWorkRoot != "" || s.TimeZone != "" || s.BackupDir != "" || len(s.BindRO) > 0) {
+		return fmt.Errorf("compose spec: Env, KubeconfigFiles, OpenShellConfigDir, ConfigDir, OMTokenMetaFile, LandingWorkRoot, TimeZone, BackupDir or BindRO is set on a scratch spec; only the live render carries the client configuration")
 	}
 	if _, set := s.Env[liveBackupRootEnv]; set && s.BackupDir != "" {
 		return fmt.Errorf("compose spec: Env names %s, which the render sets from BackupDir; a daemon.env entry would repeat the key", liveBackupRootEnv)
@@ -89,6 +90,26 @@ func (s ComposeSpec) validateClient() error {
 			return fmt.Errorf("compose spec: BackupDir %q is the filesystem root or overlaps the town root %q; it is bound read-write beside the town, not over it", s.BackupDir, s.TownRoot)
 		}
 	}
+	for i, p := range s.BindRO {
+		if !filepath.IsAbs(p) || strings.ContainsFunc(p, func(r rune) bool { return r < 0x20 || r == 0x7f || r == ':' }) {
+			return fmt.Errorf("compose spec: BindRO %q is not an absolute path without a colon or control character; the render mounts it at the same path", p)
+		}
+		if slices.Contains(strings.Split(p, "/"), "..") {
+			return fmt.Errorf("compose spec: BindRO %q is under .., so it is not a cleaned path", p)
+		}
+		if clean := filepath.Clean(p); clean != p {
+			return fmt.Errorf("compose spec: BindRO %q is not cleaned, and its clean form is %q", p, clean)
+		}
+		if pathContains(s.TownRoot, p) || pathContains(p, s.TownRoot) {
+			return fmt.Errorf("compose spec: BindRO %q is inside or contains the town root %q, which the town bind already mounts", p, s.TownRoot)
+		}
+		if slices.Contains(renderedHostPaths(s), p) {
+			return fmt.Errorf("compose spec: BindRO %q is a path the render already mounts", p)
+		}
+		if slices.Contains(s.BindRO[:i], p) {
+			return fmt.Errorf("compose spec: BindRO %q is given more than once", p)
+		}
+	}
 	if s.ConfigDir != "" {
 		// The config directory is mounted read-only with everything under it, so a
 		// read-write mount inside it would be writable behind a read-only mount. The
@@ -102,6 +123,13 @@ func (s ComposeSpec) validateClient() error {
 		}
 	}
 	return nil
+}
+
+// renderedHostPaths are the host paths the live render mounts or names, so a
+// BindRO entry may not repeat one of them.
+func renderedHostPaths(s ComposeSpec) []string {
+	return append([]string{s.OpenShellConfigDir, s.ConfigDir, s.BackupDir, s.OMTokenMetaFile,
+		s.LandingWorkRoot, s.OMTokenFile, s.OMConfigFile, s.ForgeTokenFile}, s.KubeconfigFiles...)
 }
 
 func isOwnedEnv(name string) bool {
@@ -145,11 +173,12 @@ func liveClientEnv(s ComposeSpec) string {
 }
 
 // liveClientMounts is the read-only mount of the openshell config directory and
-// the town's config directory, and the read-write mount of the Dolt backup
-// directory. Each holds client material or backups; the render carries the
-// paths, never a file's contents. The config directory is mounted at its own
-// path as well as under XDG_CONFIG_HOME, because settings in the town name it
-// both ways (gt-gg9hv.3).
+// the town's config directory, the read-write mount of the Dolt backup
+// directory, and the read-only mounts of the BindRO directories, sorted by path.
+// Each holds client material, backups or reports; the render carries the paths,
+// never a file's contents. The config directory is mounted at its own path as
+// well as under XDG_CONFIG_HOME, because settings in the town name it both ways
+// (gt-gg9hv.3).
 func liveClientMounts(s ComposeSpec) string {
 	var b strings.Builder
 	if s.OpenShellConfigDir != "" {
@@ -172,6 +201,14 @@ func liveClientMounts(s ComposeSpec) string {
 	if s.LandingWorkRoot != "" {
 		q := strconv.Quote(composeLiteral(s.LandingWorkRoot))
 		fmt.Fprintf(&b, "      - type: bind\n        source: %s\n        target: %s\n", q, q)
+	}
+	bindRO := append([]string(nil), s.BindRO...)
+	sort.Strings(bindRO)
+	for _, p := range bindRO {
+		// Read-only, as the token mounts are: the daemon reads these directories
+		// and the render grants no write to them (gt-vqexg).
+		q := strconv.Quote(composeLiteral(p))
+		fmt.Fprintf(&b, "      - type: bind\n        source: %s\n        target: %s\n        read_only: true\n", q, q)
 	}
 	return b.String()
 }

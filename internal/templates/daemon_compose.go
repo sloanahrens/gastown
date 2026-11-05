@@ -143,6 +143,13 @@ type ComposeSpec struct {
 	// Unset, the render carries neither the mount nor the variable.
 	BackupDir string
 
+	// BindRO are host directories the live daemon mounts read-only at the same
+	// path, from `gt daemon compose write --bind-ro` (gt-vqexg). Each is absolute
+	// and cleaned, does not lie inside, contain or equal the town root, does not
+	// equal a path the render already mounts, and is given once. The render sorts
+	// them by path. Unset, the render carries none. A scratch spec sets none.
+	BindRO []string
+
 	// OMTokenMetaFile is the host path of the om token's expiry sidecar
 	// (daemon.om_token_meta); the render mounts it read-only at the same path, so
 	// the setting reads it unchanged. LandingWorkRoot is the landing worker's work

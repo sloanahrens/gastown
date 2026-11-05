@@ -1252,3 +1252,113 @@ func TestLiveComposeWithoutBackupDirIsUnchanged(t *testing.T) {
 		t.Errorf("the live render without a backup dir differs from the golden\ngot:\n%s\nwant:\n%s", out, golden)
 	}
 }
+
+// --bind-ro mounts each named host directory read-only at its own path, and the
+// mounts come out sorted by path whatever order the flags were given in
+// (gt-vqexg).
+func TestDaemonComposeBindRO(t *testing.T) {
+	t.Parallel()
+	const reports, releases = "/Users/Shared/gt-cloud/reports", "/Users/Shared/gt-cloud/releases"
+
+	t.Run("each directory is a read-only bind at its own path, sorted", func(t *testing.T) {
+		t.Parallel()
+		spec := liveSpec()
+		spec.BindRO = []string{reports, releases}
+
+		_, f := render(t, spec)
+
+		var got []composeVolume
+		for _, v := range f.Services["daemon"].Volumes {
+			if v.Target == reports || v.Target == releases {
+				got = append(got, v)
+			}
+		}
+		want := []composeVolume{
+			{Type: "bind", Source: releases, Target: releases, ReadOnly: true},
+			{Type: "bind", Source: reports, Target: reports, ReadOnly: true},
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("bind-ro volumes = %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("no bind-ro directory renders the golden file", func(t *testing.T) {
+		t.Parallel()
+		spec := liveSpec()
+		spec.BindRO = nil
+
+		out, _ := render(t, spec)
+
+		golden, err := os.ReadFile(filepath.Join("testdata", "daemon-compose.golden.yml"))
+		if err != nil {
+			t.Fatalf("reading golden file: %v", err)
+		}
+		if out != string(golden) {
+			t.Errorf("the render without bind-ro differs from the golden\ngot:\n%s\nwant:\n%s", out, golden)
+		}
+	})
+}
+
+// A --bind-ro path the render cannot mount as given is refused, and the error
+// names it. Every refusal branch of the render has a row.
+func TestDaemonComposeBindRORefuses(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		value string
+		bind  []string
+		edit  func(*templates.ComposeSpec)
+		want  string
+	}{
+		{name: "relative path", value: "gt-cloud/reports", want: "not an absolute path"},
+		{name: "colon in the path", value: "/Users/a:b", want: "not an absolute path"},
+		{name: "control character", value: "/Users/\x01a", want: "not an absolute path"},
+		{name: "dot-dot segment", value: "/Users/Shared/../etc", want: "under .."},
+		{name: "trailing slash", value: "/Users/Shared/gt-cloud/", want: "not cleaned"},
+		{name: "doubled slash", value: "/Users//Shared", want: "not cleaned"},
+		{name: "equal to the town root", value: "/towns/live", want: "inside or contains the town root"},
+		{name: "inside the town root", value: "/towns/live/reports", want: "inside or contains the town root"},
+		{name: "containing the town root", value: "/towns", want: "inside or contains the town root"},
+		{name: "equal to a path the render mounts", value: "/host/cfg", want: "already mounts",
+			edit: func(s *templates.ComposeSpec) { s.ConfigDir = "/host/cfg" }},
+		{name: "equal to the om token meta file", value: "/host/meta.json", want: "already mounts",
+			edit: func(s *templates.ComposeSpec) { s.OMTokenMetaFile = "/host/meta.json" }},
+		{name: "given twice", value: "/Users/Shared/gt-cloud/reports", want: "more than once",
+			bind: []string{"/Users/Shared/gt-cloud/reports", "/Users/Shared/gt-cloud/reports"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec := liveSpec()
+			spec.BindRO = tc.bind
+			if spec.BindRO == nil {
+				spec.BindRO = []string{tc.value}
+			}
+			if tc.edit != nil {
+				tc.edit(&spec)
+			}
+
+			out, err := templates.RenderDaemonCompose(spec)
+			if err == nil {
+				t.Fatalf("RenderDaemonCompose with bind-ro %q = a render, want a refusal:\n%s", spec.BindRO, out)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to say %q", err, tc.want)
+			}
+			if !strings.Contains(err.Error(), strconv.Quote(tc.value)) {
+				t.Errorf("error = %q, want it to name the path %q", err, tc.value)
+			}
+		})
+	}
+
+	t.Run("a scratch spec carries no bind-ro", func(t *testing.T) {
+		t.Parallel()
+		spec := scratchSpec()
+		spec.BindRO = []string{"/Users/Shared/gt-cloud/reports"}
+
+		_, err := templates.RenderDaemonCompose(spec)
+		if err == nil || !strings.Contains(err.Error(), "scratch spec") {
+			t.Fatalf("RenderDaemonCompose of a scratch spec with bind-ro = %v, want it refused as a scratch spec", err)
+		}
+	})
+}
