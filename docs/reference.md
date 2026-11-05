@@ -430,6 +430,10 @@ for the CI cache volumes; a target without one runs in the daily window. An
 interval that is not a Go duration of at least a minute, or a target name the
 patrol does not know, is refused when the config is read.
 
+`cache_trim_interval` sets how often the shared cache claim is trimmed, in any
+window; it defaults to `2h` when empty. A value that is not a Go duration of at
+least a minute is refused when the config is read.
+
 The two environment knobs are read from the environment of the run: the
 daemon's for the plugin and the patrol, the shell's for a hand-run `gt maint`.
 None of the three applies anything by default. A value the run cannot act on

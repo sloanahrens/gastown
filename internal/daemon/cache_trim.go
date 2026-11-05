@@ -1,10 +1,10 @@
 package daemon
 
 // cacheTrim applies the shared cache claim's trim from the disk_maintenance
-// patrol (gt-rm4am): in the patrol's window the pass reads the claim's listing,
-// builds the trim Job with internal/polecat/cachevol, and in apply mode applies
-// the manifest's documents in order, the shard ConfigMaps before the Job that
-// mounts them.
+// patrol (gt-rm4am): when its interval is due, in any window (gt-gg9hv.24.2),
+// the pass reads the claim's listing, builds the trim Job with
+// internal/polecat/cachevol, and in apply mode applies the manifest's documents
+// in order, the shard ConfigMaps before the Job that mounts them.
 //
 // The patrol is the one applier, and dry run is its default as for every
 // maintenance target: the manifest is built and the objects it would apply are
