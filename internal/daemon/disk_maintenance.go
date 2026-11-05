@@ -74,6 +74,19 @@ const (
 	// diskMaintCacheTrimName is the schedule key the cache trim's last run is
 	// recorded under. It is not a target name, so it cannot collide with one.
 	diskMaintCacheTrimName = "cache_trim"
+
+	// diskMaintSandboxContext is the context the kind bootstrap generates for
+	// cluster gt-sbx (deploy/k8s/kind, .runtime/sbx-k8s/kubeconfig). Every
+	// cache trim call names it, so no call relies on the kubeconfig's
+	// current-context, which the container's derived file does not carry
+	// (gt-gg9hv.24.6).
+	diskMaintSandboxContext = diskmaint.SandboxContext
+
+	// cacheTrimRetryInterval is when a cache trim that could not reach a
+	// verdict is tried again. A failed trim records this rather than the full
+	// interval, so a transient refusal costs the next few five-minute ticks
+	// instead of two hours (gt-gg9hv.24.6).
+	cacheTrimRetryInterval = 15 * time.Minute
 )
 
 // diskMaintSeams are the patrol's outside reads and side effects, replaceable
@@ -209,13 +222,16 @@ func diskMaintenanceModeOrDefault(cfg *DaemonPatrolConfig) string {
 }
 
 // diskMaintSchedule is the patrol's state between ticks: when each target with
-// a cadence of its own last concluded a run, and the settings the patrol has
-// already refused to schedule. Both are in memory, as the daily window's own
+// a cadence of its own last concluded a run, when a failed run asks for a
+// retry, the lines already said, and the settings the patrol has already
+// refused to schedule. All of it is in memory, as the daily window's own
 // marker is, so a restarted daemon runs each target once rather than
 // inheriting a deadline it never met.
 type diskMaintSchedule struct {
 	mu      sync.Mutex
 	lastRun map[string]time.Time
+	retryAt map[string]time.Time
+	logged  map[string]time.Time
 	refused map[string]bool
 }
 
@@ -238,6 +254,61 @@ func (s *diskMaintSchedule) record(name string, at time.Time) {
 		s.lastRun = make(map[string]time.Time)
 	}
 	s.lastRun[name] = at.Round(0)
+	// A verdict replaces a failed run's retry: the interval runs from now.
+	delete(s.retryAt, name)
+}
+
+// retryAtOf is when a failed run asked to be tried again; the zero time when
+// it asked for none.
+func (s *diskMaintSchedule) retryAtOf(name string) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.retryAt[name]
+}
+
+// cacheTrimDue reports whether the cache trim is due at now: a failed run's
+// retry comes first, and otherwise the interval runs from the last verdict.
+func (s *diskMaintSchedule) cacheTrimDue(now time.Time, every time.Duration) bool {
+	if retry := s.retryAtOf(diskMaintCacheTrimName); !retry.IsZero() {
+		return !now.Before(retry)
+	}
+	last := s.lastRunAt(diskMaintCacheTrimName)
+	return last.IsZero() || now.Sub(last) >= every
+}
+
+// recordRetry keeps the time a failed run asks to be tried again. The last
+// verdict is left as it was: if this failure clears, the interval still counts
+// from the last run that concluded.
+func (s *diskMaintSchedule) recordRetry(name string, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.retryAt == nil {
+		s.retryAt = make(map[string]time.Time)
+	}
+	s.retryAt[name] = at.Round(0)
+}
+
+// allowLog reports whether the line key may be logged at now, and remembers
+// it: the same line is said once per window, so a trim that fails on every
+// retry is one line an hour rather than one every fifteen minutes. Entries
+// past the window are dropped, so the set holds only the lines it still
+// suppresses.
+func (s *diskMaintSchedule) allowLog(key string, now time.Time, window time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.logged == nil {
+		s.logged = make(map[string]time.Time)
+	}
+	if last, ok := s.logged[key]; ok && now.Sub(last) < window {
+		return false
+	}
+	for k, at := range s.logged {
+		if now.Sub(at) >= window {
+			delete(s.logged, k)
+		}
+	}
+	s.logged[key] = now.Round(0)
+	return true
 }
 
 // firstRefusal reports whether the patrol has yet to report the refusal key
@@ -328,12 +399,12 @@ func (d *Daemon) diskMaintenanceDue(now time.Time) (diskMaintDue, []error) {
 			}
 		}
 	}
-	// The cache trim is due from its own last run in any window. A malformed
-	// setting is refused and the trim runs nothing, as a target's would
-	// (gt-gg9hv.24.2).
+	// The cache trim is due from its own last run in any window, or from a
+	// failed run's retry. A malformed setting is refused and the trim runs
+	// nothing, as a target's would (gt-gg9hv.24.2).
 	if every, err := diskMaintenanceCacheTrimEvery(d.patrolConfig); err != nil {
 		errs = append(errs, err)
-	} else if last := d.diskMaintSchedule.lastRunAt(diskMaintCacheTrimName); last.IsZero() || now.Sub(last) >= every {
+	} else if d.diskMaintSchedule.cacheTrimDue(now, every) {
 		due.cacheTrim = true
 	}
 	if !shouldRunMaintenanceCycle(now, d.diskMaintenanceSettledAt()) {
@@ -437,12 +508,17 @@ func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDu
 
 	// The cache trim is independent of the targets: it trims the claim the
 	// sandbox profiles mount, so it runs when its interval is due whether or not
-	// a maintenance target publishes here (gt-rm4am, gt-gg9hv.24.2). Any
-	// conclusion settles the run, a refused one included, so a trim that cannot
-	// read its claim waits for its next interval rather than every tick.
+	// a maintenance target publishes here (gt-rm4am, gt-gg9hv.24.2). A run that
+	// reached a verdict -- trimmed, or nothing to trim -- spends the full
+	// interval; a run that could not start or conclude records a retry instead,
+	// so a cluster that was briefly unreachable does not leave the disk growing
+	// for two hours (gt-gg9hv.24.6).
 	if due.cacheTrim {
-		d.cacheTrim(ctx, mode)
-		d.diskMaintSchedule.record(diskMaintCacheTrimName, s.now())
+		if d.cacheTrim(ctx, mode) {
+			d.diskMaintSchedule.record(diskMaintCacheTrimName, s.now())
+		} else {
+			d.diskMaintSchedule.recordRetry(diskMaintCacheTrimName, s.now().Add(cacheTrimRetryInterval))
+		}
 	}
 	if !due.daily && len(due.interval) == 0 {
 		return // only the cache trim was due, and it has run
@@ -627,8 +703,9 @@ func (d *Daemon) diskMaintenanceTargets(mode string, getenv func(string) string,
 }
 
 // diskMaintRegistryConfig is the registry target's configuration. Its in-use
-// read names the cluster through the kubeconfig diskMaintKubeconfig picks, the
-// same file the cache trim reads, so the two agree on which cluster they see.
+// read names the cluster through the kubeconfig diskMaintKubeconfig picks and
+// the context every cluster call names, so the two readers agree on which
+// cluster they see.
 func (d *Daemon) diskMaintRegistryConfig(mode string, cfg polecatimage.Config, home string, getenv func(string) string) (registry.Config, error) {
 	town := d.config.TownRoot
 	ledgerDir := filepath.Join(town, ".runtime", "diskmaint")
@@ -645,6 +722,7 @@ func (d *Daemon) diskMaintRegistryConfig(mode string, cfg polecatimage.Config, h
 	regCfg := registry.Config{
 		Base:         "http://" + cfg.Registry,
 		Kubeconfig:   diskMaintKubeconfig(town, getenv),
+		Context:      diskMaintSandboxContext,
 		RecordsDir:   cfg.SandboxRecords,
 		DockerHost:   "unix://" + filepath.Join(home, ".colima", "gt-sbx", "docker.sock"),
 		Container:    diskMaintRegistryContainer,

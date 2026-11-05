@@ -159,6 +159,7 @@ func testConfig(t *testing.T, reg *fakeRegistry, records ...string) Config {
 		Base:       "http://registry.test",
 		HTTP:       &http.Client{Transport: roundTrip(reg.handler)},
 		Kubeconfig: "/kubeconfig",
+		Context:    "kind-gt-sbx",
 		RecordsDir: dir,
 		Run:        podRunner(`{"items":[]}`),
 		Installed:  func() (string, error) { return commit("c000099"), nil },

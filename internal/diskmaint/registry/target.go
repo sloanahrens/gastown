@@ -17,6 +17,11 @@ type Config struct {
 	Base string
 	// Kubeconfig and RecordsDir are the two in-use sources ReadInUse reads.
 	Kubeconfig, RecordsDir string
+	// Context is the cluster context every in-use kubectl call names, so the
+	// read never depends on the kubeconfig's current-context. Empty refuses the
+	// plan: kubectl would otherwise fall back to the file's own context, or to
+	// localhost:8080 when it carries none.
+	Context string
 	// DockerHost and Container address the garbage-collect command.
 	DockerHost, Container string
 	// CollectUnavailable, when set, is why this process cannot run the garbage
@@ -188,7 +193,7 @@ func (t *Target) readInUse(ctx context.Context, in *PlanInput) []string {
 	if t.cfg.Run == nil {
 		return []string{"in use: no runner configured"}
 	}
-	inUse, err := ReadInUse(ctx, t.cfg.Run, t.cfg.Kubeconfig, t.cfg.RecordsDir)
+	inUse, err := ReadInUse(ctx, t.cfg.Run, t.cfg.Kubeconfig, t.cfg.Context, t.cfg.RecordsDir)
 	if err != nil {
 		return []string{err.Error()}
 	}

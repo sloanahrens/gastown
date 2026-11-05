@@ -402,6 +402,7 @@ func maintRegistryTargets(ctx context.Context, town string, cfg polecatimage.Con
 	regCfg := registry.Config{
 		Base:         "http://" + cfg.Registry,
 		Kubeconfig:   filepath.Join(town, ".runtime", "sbx-k8s", "kubeconfig"),
+		Context:      diskmaint.SandboxContext,
 		RecordsDir:   cfg.SandboxRecords,
 		DockerHost:   maintColimaHost(home),
 		Container:    maintRegistryContainer,

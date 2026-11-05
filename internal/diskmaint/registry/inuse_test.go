@@ -10,6 +10,9 @@ import (
 	"testing"
 )
 
+// testKubeContext is the cluster context the in-use read's tests name.
+const testKubeContext = "kind-gt-sbx"
+
 // digestN is a manifest digest from a repeated hex digit.
 func digestN(b byte) string { return "sha256:" + repeatByte(b, 64) }
 
@@ -74,7 +77,7 @@ func TestReadInUseCollectsDigestsFromEachImageIDShape(t *testing.T) {
 		podJSON(image, bare),
 	)}
 
-	got, err := ReadInUse(context.Background(), run.run, "/kubeconfig", recordsDir(t, nil))
+	got, err := ReadInUse(context.Background(), run.run, "/kubeconfig", testKubeContext, recordsDir(t, nil))
 	if err != nil {
 		t.Fatalf("ReadInUse: %v", err)
 	}
@@ -86,8 +89,8 @@ func TestReadInUseCollectsDigestsFromEachImageIDShape(t *testing.T) {
 	// step 1): it names no manifest, so keeping it would keep nothing, and it
 	// names no repository either: "sha256" is not a repo.
 	assertSet(t, "Repos", got.Repos, "gastown-polecat")
-	if len(run.calls) != 1 || strings.Join(run.calls[0], " ") != "kubectl --kubeconfig /kubeconfig get pods -A -o json" {
-		t.Errorf("ran %q, want kubectl --kubeconfig /kubeconfig get pods -A -o json", run.calls)
+	if want := []string{"kubectl", "--kubeconfig", "/kubeconfig", "--context", testKubeContext, "get", "pods", "-A", "-o", "json"}; len(run.calls) != 1 || !slices.Equal(run.calls[0], want) {
+		t.Errorf("ran %q, want %q", run.calls, want)
 	}
 }
 
@@ -98,7 +101,7 @@ func TestReadInUseCollectsTagsFromImageFields(t *testing.T) {
 		`"initContainers":[{"image":"localhost:5001/seedtest/polecat:init1"}]}}]}`)
 	run := &fakeRunner{out: pods}
 
-	got, err := ReadInUse(context.Background(), run.run, "/kubeconfig", recordsDir(t, nil))
+	got, err := ReadInUse(context.Background(), run.run, "/kubeconfig", testKubeContext, recordsDir(t, nil))
 	if err != nil {
 		t.Fatalf("ReadInUse: %v", err)
 	}
@@ -110,7 +113,7 @@ func TestReadInUseCollectsReposFromRefs(t *testing.T) {
 	t.Parallel()
 	run := &fakeRunner{out: podListJSON(podJSON("localhost:5001/seedtest/polecat:x", ""))}
 
-	got, err := ReadInUse(context.Background(), run.run, "/kubeconfig", recordsDir(t, nil))
+	got, err := ReadInUse(context.Background(), run.run, "/kubeconfig", testKubeContext, recordsDir(t, nil))
 	if err != nil {
 		t.Fatalf("ReadInUse: %v", err)
 	}
@@ -136,7 +139,7 @@ func TestReadInUseReadsSandboxRecords(t *testing.T) {
 	}
 	run := &fakeRunner{out: podListJSON()}
 
-	got, err := ReadInUse(context.Background(), run.run, "/kubeconfig", dir)
+	got, err := ReadInUse(context.Background(), run.run, "/kubeconfig", testKubeContext, dir)
 	if err != nil {
 		t.Fatalf("ReadInUse: %v", err)
 	}
@@ -152,7 +155,7 @@ func TestReadInUseReadsRefsWithoutHostPort(t *testing.T) {
 	})
 	run := &fakeRunner{out: podListJSON()}
 
-	got, err := ReadInUse(context.Background(), run.run, "/kubeconfig", dir)
+	got, err := ReadInUse(context.Background(), run.run, "/kubeconfig", testKubeContext, dir)
 	if err != nil {
 		t.Fatalf("ReadInUse: %v", err)
 	}
@@ -170,7 +173,7 @@ func TestReadInUseReadsSlashlessTaggedRefInRecord(t *testing.T) {
 	})
 	run := &fakeRunner{out: podListJSON()}
 
-	got, err := ReadInUse(context.Background(), run.run, "/kubeconfig", dir)
+	got, err := ReadInUse(context.Background(), run.run, "/kubeconfig", testKubeContext, dir)
 	if err != nil {
 		t.Fatalf("ReadInUse: %v", err)
 	}
@@ -192,7 +195,7 @@ func TestReadInUseIgnoresURLsAndPathsInRecords(t *testing.T) {
 	})
 	run := &fakeRunner{out: podListJSON()}
 
-	got, err := ReadInUse(context.Background(), run.run, "/kubeconfig", dir)
+	got, err := ReadInUse(context.Background(), run.run, "/kubeconfig", testKubeContext, dir)
 	if err != nil {
 		t.Fatalf("ReadInUse refused a record naming a URL and a path: %v", err)
 	}
@@ -205,7 +208,7 @@ func TestReadInUseFailsClosedOnKubectlError(t *testing.T) {
 	t.Parallel()
 	run := &fakeRunner{err: errors.New("connection refused")}
 
-	_, err := ReadInUse(context.Background(), run.run, "/kubeconfig", recordsDir(t, nil))
+	_, err := ReadInUse(context.Background(), run.run, "/kubeconfig", testKubeContext, recordsDir(t, nil))
 	if err == nil {
 		t.Fatal("ReadInUse succeeded with a kubectl error; want an error")
 	}
@@ -224,7 +227,7 @@ func TestReadInUseFailsClosedOnBadJSON(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			run := &fakeRunner{out: out}
-			_, err := ReadInUse(context.Background(), run.run, "/kubeconfig", recordsDir(t, nil))
+			_, err := ReadInUse(context.Background(), run.run, "/kubeconfig", testKubeContext, recordsDir(t, nil))
 			if err == nil {
 				t.Fatalf("ReadInUse succeeded on the %s reply; want an error", name)
 			}
@@ -243,7 +246,7 @@ func TestReadInUseMissingPodListIsAnError(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			run := &fakeRunner{out: out}
-			_, err := ReadInUse(context.Background(), run.run, "/kubeconfig", recordsDir(t, nil))
+			_, err := ReadInUse(context.Background(), run.run, "/kubeconfig", testKubeContext, recordsDir(t, nil))
 			if err == nil {
 				t.Fatalf("ReadInUse succeeded on the reply with %s; want an error", name)
 			}
@@ -256,7 +259,7 @@ func TestReadInUseMissingRecordsDirIsAnError(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "absent")
 	run := &fakeRunner{out: podListJSON()}
 
-	_, err := ReadInUse(context.Background(), run.run, "/kubeconfig", dir)
+	_, err := ReadInUse(context.Background(), run.run, "/kubeconfig", testKubeContext, dir)
 	if err == nil {
 		t.Fatal("ReadInUse succeeded with a missing records directory; want an error")
 	}
@@ -272,7 +275,7 @@ func TestReadInUseUnreadableRecordsDirIsAnError(t *testing.T) {
 	}
 	run := &fakeRunner{out: podListJSON()}
 
-	_, err := ReadInUse(context.Background(), run.run, "/kubeconfig", path)
+	_, err := ReadInUse(context.Background(), run.run, "/kubeconfig", testKubeContext, path)
 	if err == nil {
 		t.Fatal("ReadInUse succeeded with an unreadable records directory; want an error")
 	}
@@ -288,7 +291,7 @@ func TestReadInUseUnreadableRecordIsAnError(t *testing.T) {
 	}
 	run := &fakeRunner{out: podListJSON()}
 
-	_, err := ReadInUse(context.Background(), run.run, "/kubeconfig", dir)
+	_, err := ReadInUse(context.Background(), run.run, "/kubeconfig", testKubeContext, dir)
 	if err == nil {
 		t.Fatal("ReadInUse succeeded with an unreadable record; want an error")
 	}
@@ -333,10 +336,47 @@ func TestReadInUseDropsNamesFailingValidation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			run := &fakeRunner{out: tc.out}
-			_, err := ReadInUse(context.Background(), run.run, "/kubeconfig", recordsDir(t, tc.files))
+			_, err := ReadInUse(context.Background(), run.run, "/kubeconfig", testKubeContext, recordsDir(t, tc.files))
 			if !errors.Is(err, ErrBadName) {
 				t.Fatalf("ReadInUse error = %v, want ErrBadName", err)
 			}
 		})
+	}
+}
+
+// TestReadInUseNamesTheContext pins the target's Context field: the in-use
+// read's cluster-client argv carries the context the target configures, and a
+// target built without one refuses the read with an error naming the field
+// rather than letting kubectl pick the kubeconfig's current-context or fall
+// back to localhost.
+func TestReadInUseNamesTheContext(t *testing.T) {
+	t.Parallel()
+	// A digest-only image needs no registry read to resolve its tag.
+	image := "localhost:5001/gastown-polecat@" + digestN('a')
+	run := &fakeRunner{out: podListJSON(podJSON(image, image))}
+	target := NewTarget(Config{
+		Kubeconfig: "/kubeconfig",
+		Context:    testKubeContext,
+		RecordsDir: recordsDir(t, nil),
+		Run:        run.run,
+	})
+
+	in := PlanInput{InUseDigests: map[string]bool{}, InUseRepos: map[string]bool{}}
+	if errs := target.readInUse(context.Background(), &in); len(errs) != 0 {
+		t.Fatalf("readInUse = %v, want no error", errs)
+	}
+	want := []string{"kubectl", "--kubeconfig", "/kubeconfig", "--context", testKubeContext, "get", "pods", "-A", "-o", "json"}
+	if len(run.calls) != 1 || !slices.Equal(run.calls[0], want) {
+		t.Errorf("ran %q, want %q", run.calls, want)
+	}
+
+	unset := &fakeRunner{out: podListJSON()}
+	noContext := NewTarget(Config{Kubeconfig: "/kubeconfig", RecordsDir: recordsDir(t, nil), Run: unset.run})
+	errs := noContext.readInUse(context.Background(), &PlanInput{})
+	if len(errs) != 1 || !strings.Contains(errs[0], "Context") {
+		t.Errorf("readInUse with no Context = %v, want one error naming the field", errs)
+	}
+	if len(unset.calls) != 0 {
+		t.Errorf("ran %q with no cluster context, want no cluster call", unset.calls)
 	}
 }
