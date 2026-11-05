@@ -419,3 +419,103 @@ func TestDoltHistoryDocStep2RefusesWithoutArchiveLines(t *testing.T) {
 		}
 	}
 }
+
+// historyDocSection returns the flatten runbook from heading up to the next
+// "## " heading, so a test can assert the text of the procedure that carries
+// the rule rather than a phrase anywhere in the document.
+func historyDocSection(t *testing.T, heading string) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("..", "..", "docs", "dolt-history-offline.md"))
+	if err != nil {
+		t.Fatalf("reading docs/dolt-history-offline.md: %v", err)
+	}
+	doc := string(body)
+	start := strings.Index(doc, heading)
+	if start < 0 {
+		t.Fatalf("docs/dolt-history-offline.md has no %q heading", heading)
+	}
+	section := doc[start:]
+	if end := strings.Index(section[len(heading):], "\n## "); end >= 0 {
+		section = section[:len(heading)+end]
+	}
+	return section
+}
+
+// TestDoltHistoryDocNamesArchiveNow: the flatten runbook runs the history
+// archive pass under the overseer's dispatch hold and re-reads the status
+// until every database is caught up, so the pre-flatten check cannot be read
+// as satisfied by an archive nothing brought up to date (gt-xr2byt.3).
+func TestDoltHistoryDocNamesArchiveNow(t *testing.T) {
+	t.Parallel()
+	section := historyDocSection(t, "## Before any rewrite")
+
+	for _, want := range []string{
+		"gt dolt archive-now",
+		"The overseer creates the dispatch hold",
+		"~/gt/seat-refill.hold",
+		"no bird and no operator session creates or lifts",
+		"With the hold set and the town parked, run",
+		"read `gt dolt status` again until",
+		"every database's commit line and events line read",
+		"0 commits behind",
+		"0 events behind",
+	} {
+		if !strings.Contains(section, want) {
+			t.Errorf("\"Before any rewrite\" does not carry %q:\n%s", want, section)
+		}
+	}
+
+	archive := strings.Index(section, "gt dolt archive-now")
+	check := strings.Index(section, "Check that every database's archive line")
+	if archive < 0 || check < 0 || archive > check {
+		t.Errorf("\"Before any rewrite\" does not run the archive pass before the 0-commits-behind check:\n%s", section)
+	}
+}
+
+// TestDoltHistoryDocArchiveNowExitCodes: the runbook says to stop on each of
+// archive-now's non-zero exits and reads each one as what happened, so an
+// operator who stops does not read a pending or refused pass as a done one
+// (gt-xr2byt.3).
+func TestDoltHistoryDocArchiveNowExitCodes(t *testing.T) {
+	t.Parallel()
+	section := historyDocSection(t, "## Before any rewrite")
+
+	for _, want := range []string{
+		"Stop if it exits 1, 2 or 3",
+		"1 is a failed pass",
+		"2 is still pending, so run `gt dolt archive-now`",
+		"3 is a refusal",
+		"for want of the dispatch hold",
+		"archive request is already pending",
+	} {
+		if !strings.Contains(section, want) {
+			t.Errorf("\"Before any rewrite\" does not carry %q:\n%s", want, section)
+		}
+	}
+}
+
+// TestDoltHistoryDocPlansAfterAWindow: the runbook plans the flatten for the
+// morning after a maintenance window, names the daemon's clock and how to
+// confirm it, and waits for the window's cycle to finish, so the archive the
+// pre-flatten check reads is the window's pass plus archive-now (gt-xr2byt.3).
+func TestDoltHistoryDocPlansAfterAWindow(t *testing.T) {
+	t.Parallel()
+	section := historyDocSection(t, "## Plan the flatten for the morning after a window")
+
+	for _, want := range []string{
+		"morning after a maintenance window",
+		"gt dolt archive-now",
+		"daemon's clock",
+		"in window HH:MM",
+		"daemon container's own timezone",
+		"until gt-gg9hv.34",
+		"confirm the clock with `date`",
+		"docker exec <daemon container> date",
+		"cycle completed",
+		"before parking the town",
+	} {
+		if !strings.Contains(section, want) {
+			t.Errorf("the planning section does not carry %q:\n%s", want, section)
+		}
+	}
+}
