@@ -122,7 +122,7 @@ var ruleCountWords = []string{"", "One", "Two", "Three", "Four", "Five", "Six",
 // grew (gt-o87rv, gt-pccx7, gt-2iro9).
 func TestPolecatDirectiveRuleHeadings(t *testing.T) {
 	t.Parallel()
-	const rules = 16
+	const rules = 17
 	text := readDirective(t, "polecat.md")
 	var got []string
 	for _, line := range strings.Split(text, "\n") {
@@ -183,4 +183,76 @@ func TestPolecatDirectiveRule16HasItsBody(t *testing.T) {
 			t.Errorf("rule 16 lacks the clause %q", clause)
 		}
 	}
+}
+
+// TestPolecatDirectiveRule17HasItsBody holds rule 17 to its body, as rule 16's
+// test does: the heading count passes with the rule cut to a fragment, so this
+// reads the rule's own section and requires the clauses it rests on, and the
+// om flags line that names its findings.
+func TestPolecatDirectiveRule17HasItsBody(t *testing.T) {
+	t.Parallel()
+	text := readDirective(t, "polecat.md")
+	const heading = "\n## 17. Run the tier the gate skips\n"
+	start := strings.Index(text, heading)
+	if start < 0 {
+		t.Fatal("polecat.md has no rule 17 titled \"Run the tier the gate skips\"")
+	}
+	body := text[start+len(heading):]
+	end := strings.Index(body, "\n# Before gt done")
+	if end < 0 {
+		t.Fatal("polecat.md has no \"# Before gt done\" checklist after rule 17")
+	}
+	rule := body[:end]
+	for _, clause := range []string{
+		"tagged `//go:build integration`",
+		"in your package or a caller's",
+		"-tags integration",
+		"\"not run: <reason>\"",
+		"\n- om flags: ",
+	} {
+		if !strings.Contains(rule, clause) {
+			t.Errorf("rule 17 lacks the clause %q", clause)
+		}
+	}
+}
+
+// TestPolecatDirectiveChecklistPointsAtRule17 pins gt-qgum2's rework: line 11
+// of the "Before gt done" checklist is the checklist's caller of rule 17. It
+// points at the rule instead of restating its command, and its search covers
+// integration-tagged files in every package, as the rule's caller scope does.
+func TestPolecatDirectiveChecklistPointsAtRule17(t *testing.T) {
+	t.Parallel()
+	text := readDirective(t, "polecat.md")
+	start := strings.Index(text, "\n# Before gt done\n")
+	if start < 0 {
+		t.Fatal("polecat.md has no \"# Before gt done\" checklist")
+	}
+	var line11 string
+	for _, l := range strings.Split(text[start:], "\n") {
+		if strings.HasPrefix(l, "11. ") {
+			line11 = l
+			break
+		}
+	}
+	if line11 == "" {
+		t.Fatal("the \"Before gt done\" checklist has no line 11")
+	}
+	t.Run("points at rule 17 without restating its command", func(t *testing.T) {
+		t.Parallel()
+		if !strings.Contains(line11, "rule 17") {
+			t.Errorf("checklist line 11 does not point at rule 17: %q", line11)
+		}
+		if strings.Contains(line11, "-tags integration") {
+			t.Errorf("checklist line 11 restates rule 17's command instead of pointing at it: %q", line11)
+		}
+	})
+	t.Run("searches every package, not the changed one", func(t *testing.T) {
+		t.Parallel()
+		if !strings.Contains(line11, "go:build integration") {
+			t.Errorf("checklist line 11 does not search for integration-tagged files: %q", line11)
+		}
+		if strings.Contains(line11, "<pkg>") {
+			t.Errorf("checklist line 11 searches only the changed package, not callers in other packages: %q", line11)
+		}
+	})
 }
