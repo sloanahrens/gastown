@@ -1,6 +1,6 @@
 ## Changelog
 
-- 2026-11-05 gt-qgum2: added rule 17, run the integration tier the gate skips (seventeen rules); a "Before gt done" line 11 checks for `//go:build integration` files in each changed package.
+- 2026-11-05 gt-qgum2: added rule 17, run the integration tier the gate skips (seventeen rules); a "Before gt done" line 11 points at rule 17 and searches the whole tree for `//go:build integration` files, callers in other packages included.
 - 2026-11-01 gt-2iro9: added rule 16, one workspace per answer (sixteen rules); the rule-count test is now TestPolecatDirectiveRuleHeadings.
 - 2026-10-31 gt-pccx7: one coherent revision from the 2026-10-28..31 rejection record (842 majors): a plan section first, town rules and tests merged to one copy each, rules 12-15 (cloud) leave for the devops layer, new rules 12-14 (finish and wire, state and locks, docs say what the code does), rule 16 becomes 15, and a closing pre-submit checklist ordered by rounds burned (fifteen rules).
 - 2026-11-01 gt-9givh: added a "Before gt done: five checks on your added lines" checklist after rule 16; it cites existing rules, so the count stays sixteen.
@@ -152,6 +152,6 @@ Run these on your added lines, in the order om rejects most. A hit is a question
 8. Secrets (11): no added error or log line prints captured output, a token or a password.
 9. Scope (9): `git diff --stat origin/main...HEAD` lists only files your Constraints name; go.mod changes carry a Rationale line.
 10. Workspace (16): for each record type the diff reads for one workspace, make the check rule 16 names and grep the diff for its workspace field: `D | grep -nE '^\+.*[Ww]orkspace'`; a read with no check is a question.
-11. Tier (17): for each package you changed, `grep -l 'go:build integration' <pkg>/*_test.go`; a hit is run with `-tags integration` or named "not run".
+11. Tier (17): apply rule 17 to every integration-tagged file your diff reaches, in any package, not only the one you changed: `grep -rl 'go:build integration' --include='*.go' .` lists them.
 
 Tick each acceptance box only after its test exists.
