@@ -40,5 +40,6 @@ func depsWith(env []string) Deps {
 		RemoveAll:   os.RemoveAll,
 		Environ:     env,
 		Now:         time.Now,
+		Trim:        diskCacheTrim(sweepCacheRoot),
 	}
 }

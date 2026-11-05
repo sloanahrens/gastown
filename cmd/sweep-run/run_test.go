@@ -76,6 +76,8 @@ func newHarness(t *testing.T, clone func(repo, sha, work string) error, sweep fu
 			calls++
 			return start.Add(time.Duration(calls) * time.Second)
 		},
+		// An empty claim: the trim finds neither cache tree and removes nothing.
+		Trim: diskCacheTrim(t.TempDir()),
 	}
 	return h
 }

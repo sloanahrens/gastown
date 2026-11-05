@@ -140,6 +140,9 @@ type Deps struct {
 	Environ []string
 	// Now is the clock the result's started and finished times are read from.
 	Now func() time.Time
+	// Trim is the shared cache claim's trim at the end of the run. A test
+	// points its Root at a t.TempDir tree, so no run trims a real cache.
+	Trim *CacheTrim
 }
 
 // options is one resolved command line: the run's inputs, with the container's
@@ -211,6 +214,9 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 		fmt.Fprintf(stderr, "%s: %v\n", name, err)
 		return FailureExit
 	}
+	// The trim runs after the result is on disk, so a trim that fails cannot
+	// keep the daemon from reading the verdicts it just measured (gt-hlo07.2).
+	recordTrim(d.Trim, opts.logDir(), stderr)
 	return 0
 }
 
