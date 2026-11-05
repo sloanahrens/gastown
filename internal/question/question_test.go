@@ -49,8 +49,8 @@ func TestQuestionAnsweredReadsTheNewestComment(t *testing.T) {
 	}{
 		{"no comment", nil, false},
 		{"overseer note only", []beads.Comment{c("[overseer] asked", 0)}, false},
-		{"sloan after the overseer", []beads.Comment{c("[overseer] asked", 0), c("yes", 5)}, true},
-		{"overseer after sloan", []beads.Comment{c("[overseer] asked", 0), c("yes", 5), c("[overseer] on it", 9)}, false},
+		{"the operator after the overseer", []beads.Comment{c("[overseer] asked", 0), c("yes", 5)}, true},
+		{"overseer after the operator", []beads.Comment{c("[overseer] asked", 0), c("yes", 5), c("[overseer] on it", 9)}, false},
 		{"listed out of order, newest by time wins", []beads.Comment{c("yes", 5), c("[overseer] asked", 0)}, true},
 		{"same second, the one listed last wins", []beads.Comment{c("yes", 5), c("[overseer] on it", 5)}, false},
 	}
@@ -87,7 +87,7 @@ func TestAskParsesTheBodyGtAskFiles(t *testing.T) {
 	}
 }
 
-func TestAskRefusesWhatSloanCannotAnswer(t *testing.T) {
+func TestAskRefusesWhatOperatorCannotAnswer(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name, title, body, want string

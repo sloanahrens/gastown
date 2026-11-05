@@ -237,7 +237,8 @@ func WriteMangoSection(ctx context.Context, env Env, outDir, binary string, o Ma
 }
 
 // WriteBacktest is the backtest command: the weekly metrics backtested against
-// docsDir's regime events and Sloan's answers, written into outDir and returned.
+// docsDir's regime events and the operator's answers, written into outDir and
+// returned.
 func WriteBacktest(env Env, outDir, docsDir string) (string, error) {
 	if env.ReadFile == nil {
 		return "", errors.New("write backtest: Env.ReadFile is unset")

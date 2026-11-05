@@ -33,10 +33,10 @@ PhysMem: 31G used (4200M wired, 12G compressor), 191M unused.
 `
 
 const hostLsofFixture = `COMMAND   PID    USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
-dolt    41022   sloan   45u  IPv4 0x8a1b2c3d4e5f6071      0t0  TCP 127.0.0.1:3307->127.0.0.1:52946 (ESTABLISHED)
-dolt    41022   sloan   46u  IPv4 0x8a1b2c3d4e5f6082      0t0  TCP 127.0.0.1:3307->127.0.0.1:53012 (ESTABLISHED)
-bd      41099   sloan    5u  IPv4 0x7f0c1d2e3f405162      0t0  TCP 127.0.0.1:52946->127.0.0.1:3307 (ESTABLISHED)
-bd      41112   sloan    5u  IPv4 0x7f0c1d2e3f405173      0t0  TCP 127.0.0.1:53012->127.0.0.1:3307 (ESTABLISHED)
+dolt    41022   operator 45u  IPv4 0x8a1b2c3d4e5f6071      0t0  TCP 127.0.0.1:3307->127.0.0.1:52946 (ESTABLISHED)
+dolt    41022   operator 46u  IPv4 0x8a1b2c3d4e5f6082      0t0  TCP 127.0.0.1:3307->127.0.0.1:53012 (ESTABLISHED)
+bd      41099   operator  5u  IPv4 0x7f0c1d2e3f405162      0t0  TCP 127.0.0.1:52946->127.0.0.1:3307 (ESTABLISHED)
+bd      41112   operator  5u  IPv4 0x7f0c1d2e3f405173      0t0  TCP 127.0.0.1:53012->127.0.0.1:3307 (ESTABLISHED)
 `
 
 const hostLsofHeader = `COMMAND   PID    USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
@@ -165,7 +165,7 @@ func TestSourceHostParsers(t *testing.T) {
 		{"lsof counts each connection once", parseDoltConns, hostLsofFixture, 2, false},
 		{"lsof with no connections", parseDoltConns, hostLsofHeader, 0, false},
 		{"lsof printing nothing", parseDoltConns, "", nil, true},
-		{"lsof line that is not an established connection", parseDoltConns, hostLsofHeader + "dolt 41022 sloan 45u IPv4 0x8a TCP 127.0.0.1:3307 (LISTEN)\n", nil, true},
+		{"lsof line that is not an established connection", parseDoltConns, hostLsofHeader + "dolt 41022 operator 45u IPv4 0x8a TCP 127.0.0.1:3307 (LISTEN)\n", nil, true},
 		{"df reads the root capacity", parseDockerDiskPct, hostDFFixture, 59.0, false},
 		{"df without a root line", parseDockerDiskPct, "Filesystem 1024-blocks Used Available Capacity Mounted on\n", nil, true},
 	}
@@ -399,7 +399,7 @@ func TestSourceHostUnreadableOutputNilsOnlyItsColumnAndCountsIt(t *testing.T) {
 	}{
 		{name: "sysctl with a truncated load line", command: "/usr/sbin/sysctl", output: "{ 13.77 }\n", column: "load1"},
 		{name: "top with no CPU line", command: "/usr/bin/top", output: "Processes: 641 total\n", column: "cpu_idle_pct"},
-		{name: "lsof with a line that is no connection", command: "lsof", output: hostLsofHeader + "dolt 41022 sloan 45u IPv4 0x1 0t0 TCP *:3307 (LISTEN)\n", column: "dolt_conns"},
+		{name: "lsof with a line that is no connection", command: "lsof", output: hostLsofHeader + "dolt 41022 operator 45u IPv4 0x1 0t0 TCP *:3307 (LISTEN)\n", column: "dolt_conns"},
 		{name: "lsof that printed nothing at all", command: "lsof", output: "", column: "dolt_conns"},
 		{name: "df with no root line", command: "docker", output: "Filesystem 1024-blocks Used Available Capacity Mounted on\n", column: "docker_disk_pct"},
 	}

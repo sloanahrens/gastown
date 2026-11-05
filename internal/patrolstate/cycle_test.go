@@ -122,9 +122,9 @@ func TestAdvanceCycleIgnoresAnotherSessionsWait(t *testing.T) {
 	}
 }
 
-// TestCycleBoundaryTruthTable is the approved boundary (Sloan, claude-8w7):
-// respawn when the wait timed out at the idle cap and the session has run at
-// least 3 cycles, or at 8 cycles regardless.
+// TestCycleBoundaryTruthTable is the approved boundary (the operator,
+// claude-8w7): respawn when the wait timed out at the idle cap and the session
+// has run at least 3 cycles, or at 8 cycles regardless.
 func TestCycleBoundaryTruthTable(t *testing.T) {
 	t.Parallel()
 	signal := &WaitOutcome{Reason: "signal", At: t0}

@@ -48,9 +48,9 @@ const stubPrefix = "stub:"
 
 // ParseAsk checks the title, the flags and the body gt ask was given and reads
 // the work the question holds. A body without a ## Question or a ## Recommended
-// answer section is refused: a question Sloan cannot answer from one glance is
-// not worth waking for. ## Held work and ## Facts are optional, and a missing
-// ## Held work holds nothing.
+// answer section is refused: a question the operator cannot answer from one
+// glance is not worth waking for. ## Held work and ## Facts are optional, and
+// a missing ## Held work holds nothing.
 //
 // A held line that is neither a bead id, "stub: <title>" nor "none" is an
 // error, so a malformed line files nothing rather than half a question.

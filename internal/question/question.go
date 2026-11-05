@@ -2,8 +2,8 @@
 // database under the overseer-question label, whose description carries
 // "## Question", "## Recommended answer", "## Held work" and "## Facts"
 // sections and whose comments carry the conversation. The overseer asks with
-// gt ask, Sloan answers with gt answer, and three readers share the one
-// parse: gt questions, the dashboard's Attention panel and the daemon's
+// gt ask, the operator answers with gt answer, and three readers share the
+// one parse: gt questions, the dashboard's Attention panel and the daemon's
 // question collector.
 package question
 
@@ -23,9 +23,9 @@ const (
 	Statuses = "open,in_progress,blocked"
 
 	// OverseerPrefix marks a comment as the overseer's own. A question is
-	// waiting while the newest comment carries it, and answered once Sloan has
-	// replied without it: bead authors are the git committer, the same for
-	// both, so the prefix is the only way to tell them apart.
+	// waiting while the newest comment carries it, and answered once the
+	// operator has replied without it: bead authors are the git committer, the
+	// same for both, so the prefix is the only way to tell them apart.
 	OverseerPrefix = "[overseer]"
 
 	// FieldMax caps a parsed field in runes. The description is the
@@ -125,10 +125,10 @@ func Parse(issue *beads.Issue) Fields {
 	}
 }
 
-// Answered reports whether a question's newest comment is Sloan's: the newest
-// comment without the overseer prefix is his answer, and the overseer is to act
-// on it. A question with no comment, or whose newest comment is the
-// overseer's, is still Sloan's to answer.
+// Answered reports whether a question's newest comment is the operator's: the
+// newest comment without the overseer prefix is his answer, and the overseer is
+// to act on it. A question with no comment, or whose newest comment is the
+// overseer's, is still the operator's to answer.
 func Answered(comments []beads.Comment) bool {
 	newest, ok := NewestComment(comments)
 	return ok && !strings.HasPrefix(newest.Text, OverseerPrefix)

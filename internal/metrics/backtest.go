@@ -11,9 +11,9 @@ import (
 )
 
 // The usefulness backtest: whether a metric moved at a regime event nobody told
-// it about, with a mango box that replicates and Sloan's answer as the other
-// evidence for keeping it. Each verdict is a function of the weekly rows and the
-// events alone, so the same inputs give the same verdicts.
+// it about, with a mango box that replicates and the operator's answer as the
+// other evidence for keeping it. Each verdict is a function of the weekly rows
+// and the events alone, so the same inputs give the same verdicts.
 
 // backtestMetric is one metric and the weekly columns that carry it, in the
 // order the report lists them.
