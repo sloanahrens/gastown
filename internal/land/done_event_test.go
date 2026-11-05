@@ -294,6 +294,65 @@ func TestDoneEventRecorderCapsTheStampAndSkipsCrew(t *testing.T) {
 	})
 }
 
+// A crew member or bird submits with a Worker naming the actor it runs as
+// (town/crew/<name>), and that actor has no seat to end. Record answers it
+// like a submission with no Worker: no event, no error, and no bead or log
+// read. A Worker that is not a crew actor still takes the seat check, so a
+// forged seat is refused rather than silently skipped.
+func TestDoneEventRecorderCrewActor(t *testing.T) {
+	t.Parallel()
+	t.Run("writes nothing", func(t *testing.T) {
+		t.Parallel()
+		w := doneWork()
+		w.Rig = "beads"
+		w.Worker = "town/crew/dipper"
+		townRoot := t.TempDir()
+		called := false
+		rec := &DoneEventRecorder{
+			TownRoot: townRoot,
+			Assignee: func(string) (string, error) { called = true; return "", nil },
+			Now:      func() time.Time { return recordAt },
+		}
+		wrote, err := rec.Record(w)
+		if err != nil || wrote {
+			t.Fatalf("Record = %v, %v for a crew actor; want false, nil", wrote, err)
+		}
+		if called {
+			t.Fatal("the assignee was read for a crew actor; the crew test must read the Worker string only")
+		}
+		if lines := readEventLines(t, filepath.Join(townRoot, events.EventsFile)); len(lines) != 0 {
+			t.Fatalf("events = %d lines, want none for a crew actor", len(lines))
+		}
+	})
+	t.Run("refuses a Worker that is not a crew actor", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct{ name, rig, worker string }{
+			{"space", "gastown", "a b"},
+			{"crew with no name", "town", "town/crew/"},
+			{"crew with an extra part", "town", "town/crew/dipper/x"},
+			{"another role under a slash", "town", "town/polecats/dipper"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				w := doneWork()
+				w.Rig = tc.rig
+				w.Worker = tc.worker
+				rec, path := newDoneRecorder(t, w)
+				wrote, err := rec.Record(w)
+				if err == nil || !strings.Contains(err.Error(), "is not a seat") {
+					t.Fatalf("Record error = %v for worker %q; want one naming 'is not a seat'", err, tc.worker)
+				}
+				if wrote {
+					t.Fatal("Record = true for a Worker that is not a crew actor")
+				}
+				if lines := readEventLines(t, path); len(lines) != 0 {
+					t.Fatalf("events = %d lines, want none for a refused Worker", len(lines))
+				}
+			})
+		}
+	})
+}
+
 // A seat may name any Worker in its READY TO LAND block, so the host writes
 // the event only for the seat it actually slung: a block naming another
 // polecat is refused with nothing appended.

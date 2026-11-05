@@ -62,10 +62,12 @@ type DoneEventRecorder struct {
 }
 
 // Record writes w's done event unless the town's log already holds one for the
-// bead, and reports whether it wrote one. A crew submission (no Worker) writes
-// nothing: it has no seat to end, and its own gt done wrote the log.
+// bead, and reports whether it wrote one. A crew submission writes nothing: it
+// has no seat to end, and its own gt done wrote the log. That is true whether
+// its note left Worker empty or named the crew actor the member runs as
+// (town/crew/<name>), so both are answered before any log or bead read.
 func (r *DoneEventRecorder) Record(w Work) (bool, error) {
-	if w.Worker == "" {
+	if w.Worker == "" || isCrewActor(w.Worker) {
 		return false, nil
 	}
 	if r.TownRoot == "" {
@@ -181,6 +183,17 @@ func validSeatPart(s string) bool {
 		}
 	}
 	return true
+}
+
+// isCrewActor reports whether worker is the address of a crew actor,
+// <rig>/crew/<name>: the identity a crew member or bird runs as, which names no
+// polecat seat. Both ends must be addressable seat parts, so a string that only
+// looks like a crew address (a malformed name, an extra part) is left to the
+// seat check to refuse.
+func isCrewActor(worker string) bool {
+	parts := strings.Split(worker, "/")
+	return len(parts) == 3 && parts[1] == "crew" &&
+		validSeatPart(parts[0]) && validSeatPart(parts[2])
 }
 
 // splitPolecatSeat reads <rig>/polecats/<name>, the address a sling assigns a
