@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/buildstamp"
 )
 
 // DefaultMainRef is the ref the check deploys from when DEPLOY_MAIN_REF is
@@ -51,7 +53,7 @@ func OptionsFromEnv(getenv func(string) string) Options {
 type Git interface {
 	// Fetch updates remote/branch; the caller treats a failure as a warning.
 	Fetch(remote, branch string) error
-	// ShortHead is HEAD's abbreviated commit id.
+	// ShortHead is HEAD's commit id in the stamp form gt records.
 	ShortHead() (string, error)
 	// Resolve reports whether ref names a commit.
 	Resolve(ref string) (bool, error)
@@ -192,14 +194,18 @@ func (g ExecGit) Fetch(remote, branch string) error {
 	return err
 }
 
-// ShortHead returns HEAD's abbreviated commit id, or an error when git cannot
-// read it.
+// ShortHead returns HEAD's commit id in the form gt records, the buildstamp
+// stamp of the full sha, or an error when git cannot read it.
 func (g ExecGit) ShortHead() (string, error) {
-	out, err := g.output("rev-parse", "--short", "HEAD")
+	out, err := g.output("rev-parse", "HEAD")
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(out), nil
+	short, err := buildstamp.Short(strings.TrimSpace(out))
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse HEAD: %w", err)
+	}
+	return short, nil
 }
 
 // Resolve reports whether ref names a commit, and returns an error when git

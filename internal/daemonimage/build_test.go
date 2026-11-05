@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/buildstamp"
 	"github.com/steveyegge/gastown/internal/polecat/bdbuild"
 )
 
@@ -272,11 +273,11 @@ func TestBuildBinariesStartsFromTheHermeticEnvironment(t *testing.T) {
 	}
 }
 
-// TestBuildBinariesStampsGTWithTheNineCharacterCommit: gt records the short
-// commit the polecat image is tagged with, not the full sha the checkout
-// resolves the build to, or the tier sweep refuses the container's build
-// (gt-c3sue).
-func TestBuildBinariesStampsGTWithTheNineCharacterCommit(t *testing.T) {
+// TestGTCommitStampUsesBuildstamp: gt records the buildstamp stamp of the full
+// commit a build resolves, not git's abbreviation of it, so the stamp cannot
+// drift when git's abbreviation length changes (gt-x5kgt). It goes red if the
+// stamp cuts at any width but buildstamp.Len.
+func TestGTCommitStampUsesBuildstamp(t *testing.T) {
 	t.Parallel()
 	const short = "0123456"
 	b, run := builderFor(t)
@@ -284,15 +285,33 @@ func TestBuildBinariesStampsGTWithTheNineCharacterCommit(t *testing.T) {
 	if _, err := b.BuildBinaries(context.Background(), short); err != nil {
 		t.Fatalf("BuildBinaries: %v", err)
 	}
-	want := []string{gtCommitFlag + testRev[:gtCommitStampLen]}
+	want := []string{gtCommitFlag + testRev[:buildstamp.Len]}
 	if got := ldflagsOf(run.calls[0].argv); !reflect.DeepEqual(got, want) {
-		t.Errorf("gt build ldflags = %q, want the first %d characters of the resolved %s: %q", got, gtCommitStampLen, testRev, want)
+		t.Errorf("gt build ldflags = %q, want the first %d characters of the resolved %s: %q", got, buildstamp.Len, testRev, want)
+	}
+}
+
+// TestBuildBinariesRefusesAnUnstampableCommit: a git that resolves the build to
+// something buildstamp will not cut is an error, never a build stamped with a
+// guessed or padded commit.
+func TestBuildBinariesRefusesAnUnstampableCommit(t *testing.T) {
+	t.Parallel()
+	const short = "0123456"
+	const notASha = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+	b, run := builderFor(t)
+	b.Git = run.git(map[string]string{short: notASha, testBDCommit: testBDCommit, "HEAD": testOMCommit})
+	paths, err := b.BuildBinaries(context.Background(), short)
+	if err == nil {
+		t.Fatalf("BuildBinaries = %q, want an error for a resolved %q", paths, notASha)
+	}
+	if !strings.Contains(err.Error(), "buildstamp") {
+		t.Errorf("BuildBinaries error = %v, want it to name the stamp rule", err)
 	}
 }
 
 // TestPlanStampsACommitShorterThanTheStampWhole: Plan stamps the commit the
 // caller named, and it accepts one as short as seven hex characters, so a
-// commit shorter than gtCommitStampLen is stamped whole: the plan names the
+// commit shorter than buildstamp.Len is stamped whole: the plan names the
 // commit it was given (gt-gg9hv.20).
 func TestPlanStampsACommitShorterThanTheStampWhole(t *testing.T) {
 	t.Parallel()
@@ -309,6 +328,30 @@ func TestPlanStampsACommitShorterThanTheStampWhole(t *testing.T) {
 		}
 		if !strings.Contains(line, want) {
 			t.Errorf("gt plan line = %q, want it to stamp %q", line, gtCommitFlag+short)
+		}
+		return
+	}
+	t.Fatalf("plan has no build gt: line:\n%s", strings.Join(lines, "\n"))
+}
+
+// TestPlanCutsACommitLongerThanTheStamp: Plan accepts a name up to the full
+// sha, and one longer than the stamp is cut to buildstamp.Len, the width the
+// build stamps, so the plan cannot name a commit the image is not tagged with.
+func TestPlanCutsACommitLongerThanTheStamp(t *testing.T) {
+	t.Parallel()
+	const name = "0123456789a"
+	b := planBuilder(t)
+	lines, err := b.Plan(name)
+	if err != nil {
+		t.Fatalf("Plan(%q): %v", name, err)
+	}
+	want := gtCommitFlag + name[:buildstamp.Len] + " "
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "build gt: ") {
+			continue
+		}
+		if !strings.Contains(line, want) {
+			t.Errorf("gt plan line = %q, want it to stamp %q", line, gtCommitFlag+name[:buildstamp.Len])
 		}
 		return
 	}
