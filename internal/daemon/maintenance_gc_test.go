@@ -480,7 +480,7 @@ func TestMaintenanceGCCycleDefersToAnotherActorsPause(t *testing.T) {
 	d, _ := gcTestDaemon(t)
 	f := withGCFakes(t, d)
 	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}}
-	f.foreignPause = &doltpause.Marker{Actor: "sloan", Reason: "restore drill", Until: gcTestNow.Add(time.Hour)}
+	f.foreignPause = &doltpause.Marker{Actor: "operator", Reason: "restore drill", Until: gcTestNow.Add(time.Hour)}
 
 	out := d.maintenanceGCCycle([]string{"hq"}, "/unused")
 
@@ -490,7 +490,7 @@ func TestMaintenanceGCCycleDefersToAnotherActorsPause(t *testing.T) {
 	if len(f.gcCalls) != 0 || len(f.events) != 0 {
 		t.Errorf("gc touched a pause it does not own: gc=%v events=%v", f.gcCalls, f.events)
 	}
-	if !strings.Contains(out.reason, "Dolt paused by sloan") {
+	if !strings.Contains(out.reason, "Dolt paused by operator") {
 		t.Errorf("deferral reason %q does not name the pause", out.reason)
 	}
 }

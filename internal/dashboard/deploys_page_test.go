@@ -343,10 +343,10 @@ func TestDeploysBlockDrawsAnAppWithNoScheduledCheckAsSayingSo(t *testing.T) {
 	t.Parallel()
 
 	stub := &deployStub{
-		repos: []string{"sloan/beads", "sloan/fractals-nextjs"},
+		repos: []string{"operator/beads", "operator/fractals-nextjs"},
 		runs: map[string][]forgejo.ActionRun{
-			"sloan/beads":           {testDeployRun(4, "v0.2.0", "success", 20)},
-			"sloan/fractals-nextjs": {testHealthRun(1, "success", 5)},
+			"operator/beads":           {testDeployRun(4, "v0.2.0", "success", 20)},
+			"operator/fractals-nextjs": {testHealthRun(1, "success", 5)},
 		},
 		jobs: map[int64][]forgejo.ActionRunJob{1: healthJobs("success", "success", "success")},
 	}
@@ -440,12 +440,12 @@ func TestDeploysReaderFeedsTheStripWhatItMarks(t *testing.T) {
 	t.Parallel()
 
 	stub := &deployStub{
-		repos: []string{"sloan/arkansas-beaver-committee", "sloan/beads", "sloan/fractals-nextjs", "sloan/gt-cloud"},
+		repos: []string{"operator/arkansas-beaver-committee", "operator/beads", "operator/fractals-nextjs", "operator/gt-cloud"},
 		runs: map[string][]forgejo.ActionRun{
-			"sloan/arkansas-beaver-committee": {testHealthRun(1, "success", 5)},
-			"sloan/beads":                     {testHealthRun(2, "success", 5)},
-			"sloan/fractals-nextjs":           {testHealthRun(3, "success", 5)},
-			"sloan/gt-cloud":                  {testHealthRun(4, "failure", 5)},
+			"operator/arkansas-beaver-committee": {testHealthRun(1, "success", 5)},
+			"operator/beads":                     {testHealthRun(2, "success", 5)},
+			"operator/fractals-nextjs":           {testHealthRun(3, "success", 5)},
+			"operator/gt-cloud":                  {testHealthRun(4, "failure", 5)},
 		},
 		jobs: map[int64][]forgejo.ActionRunJob{
 			1: healthJobs("success", "success", "success"),
@@ -457,8 +457,8 @@ func TestDeploysReaderFeedsTheStripWhatItMarks(t *testing.T) {
 	}
 	d := newDeployTestReader(stub, nil).Read()
 
-	assert.Equal(t, []string{"sloan/fractals-nextjs"}, d.HealthFailed)
-	assert.Equal(t, []string{"sloan/gt-cloud"}, d.HealthUnread)
+	assert.Equal(t, []string{"operator/fractals-nextjs"}, d.HealthFailed)
+	assert.Equal(t, []string{"operator/gt-cloud"}, d.HealthUnread)
 	assert.Empty(t, d.HealthMissing)
 
 	// The two words and the two colours are the page's, not the reader's, so
@@ -505,37 +505,37 @@ func TestDeploysReaderGivesTheStripEachOfItsThreeStates(t *testing.T) {
 		{
 			name: "a town with nothing wrong raises no pill",
 			runs: map[string][]forgejo.ActionRun{
-				"sloan/arkansas-beaver-committee": {testHealthRun(1, "success", 5)},
-				"sloan/beads":                     {testHealthRun(2, "success", 5)},
+				"operator/arkansas-beaver-committee": {testHealthRun(1, "success", 5)},
+				"operator/beads":                     {testHealthRun(2, "success", 5)},
 			},
 			jobs: map[int64][]forgejo.ActionRunJob{1: passing, 2: off},
 		},
 		{
 			name: "a failed check alone raises the red pill",
-			runs: map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {testHealthRun(3, "failure", 5)}},
+			runs: map[string][]forgejo.ActionRun{"operator/fractals-nextjs": {testHealthRun(3, "failure", 5)}},
 			jobs: map[int64][]forgejo.ActionRunJob{3: failing},
 			// owner/name, so two repos of the same base name are two entries.
-			failed: []string{"sloan/fractals-nextjs"},
-			mark:   &HealthMark{State: "red", Text: "health: sloan/fractals-nextjs"},
+			failed: []string{"operator/fractals-nextjs"},
+			mark:   &HealthMark{State: "red", Text: "health: operator/fractals-nextjs"},
 		},
 		{
 			name:    "an unread check alone raises the degraded pill",
-			runs:    map[string][]forgejo.ActionRun{"sloan/gt-cloud": {testHealthRun(4, "success", 5)}},
+			runs:    map[string][]forgejo.ActionRun{"operator/gt-cloud": {testHealthRun(4, "success", 5)}},
 			jobsErr: map[int64]error{4: io.EOF},
-			unread:  []string{"sloan/gt-cloud"},
-			mark:    &HealthMark{State: "degraded", Text: "not read: sloan/gt-cloud"},
+			unread:  []string{"operator/gt-cloud"},
+			mark:    &HealthMark{State: "degraded", Text: "not read: operator/gt-cloud"},
 		},
 		{
 			name: "an unread check beside a failed one is said with it",
 			runs: map[string][]forgejo.ActionRun{
-				"sloan/fractals-nextjs": {testHealthRun(3, "failure", 5)},
-				"sloan/gt-cloud":        {testHealthRun(4, "success", 5)},
+				"operator/fractals-nextjs": {testHealthRun(3, "failure", 5)},
+				"operator/gt-cloud":        {testHealthRun(4, "success", 5)},
 			},
 			jobs:    map[int64][]forgejo.ActionRunJob{3: failing},
 			jobsErr: map[int64]error{4: io.EOF},
-			failed:  []string{"sloan/fractals-nextjs"},
-			unread:  []string{"sloan/gt-cloud"},
-			mark:    &HealthMark{State: "red", Text: "health: sloan/fractals-nextjs · not read: sloan/gt-cloud"},
+			failed:  []string{"operator/fractals-nextjs"},
+			unread:  []string{"operator/gt-cloud"},
+			mark:    &HealthMark{State: "red", Text: "health: operator/fractals-nextjs · not read: operator/gt-cloud"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -567,17 +567,17 @@ func TestDeploysReaderSendsThePageOnlyStatusesItDraws(t *testing.T) {
 
 	stub := &deployStub{
 		repos: []string{
-			"sloan/beads", "sloan/cancelled", "sloan/failing", "sloan/moving",
-			"sloan/off", "sloan/passing", "sloan/unread",
+			"operator/beads", "operator/cancelled", "operator/failing", "operator/moving",
+			"operator/off", "operator/passing", "operator/unread",
 		},
 		runs: map[string][]forgejo.ActionRun{
-			"sloan/beads":     {testDeployRun(90, "v0.1.0", "success", 60)},
-			"sloan/cancelled": {testHealthRun(1, forgejoRunCancelled, 5)},
-			"sloan/failing":   {testHealthRun(2, "failure", 5)},
-			"sloan/moving":    {testHealthRun(3, "running", 5)},
-			"sloan/off":       {testHealthRun(4, "success", 5)},
-			"sloan/passing":   {testHealthRun(5, "success", 5)},
-			"sloan/unread":    {testHealthRun(6, "success", 5)},
+			"operator/beads":     {testDeployRun(90, "v0.1.0", "success", 60)},
+			"operator/cancelled": {testHealthRun(1, forgejoRunCancelled, 5)},
+			"operator/failing":   {testHealthRun(2, "failure", 5)},
+			"operator/moving":    {testHealthRun(3, "running", 5)},
+			"operator/off":       {testHealthRun(4, "success", 5)},
+			"operator/passing":   {testHealthRun(5, "success", 5)},
+			"operator/unread":    {testHealthRun(6, "success", 5)},
 		},
 		jobs: map[int64][]forgejo.ActionRunJob{
 			1: healthJobs("success", forgejoRunCancelled, "skipped"),

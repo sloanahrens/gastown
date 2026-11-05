@@ -26,8 +26,8 @@ func sizeTownRoot(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	writeSizeTownFile(t, root, "mayor/rigs.json", `{"version":1,"rigs":{
-  "gastown":{"git_url":"http://forgejo.test/sloan/gastown.git","added_at":"2026-10-31T00:00:00Z","beads":{"repo":"local","prefix":"gt"}},
-  "beads":{"git_url":"http://forgejo.test/sloan/beads.git","added_at":"2026-10-31T00:00:00Z","beads":{"repo":"local","prefix":"bd"}}
+  "gastown":{"git_url":"http://forgejo.test/operator/gastown.git","added_at":"2026-10-31T00:00:00Z","beads":{"repo":"local","prefix":"gt"}},
+  "beads":{"git_url":"http://forgejo.test/operator/beads.git","added_at":"2026-10-31T00:00:00Z","beads":{"repo":"local","prefix":"bd"}}
 }}`)
 	writeSizeTownFile(t, root, "settings/workspaces.json", `{"default":"customer-zero","rigs":{"gt":"workspace-a","bd":"workspace-b"}}`)
 	return root
@@ -103,8 +103,8 @@ func sizeDayLines(t *testing.T, root string) []string {
 func TestForgejoRepoSizesParse(t *testing.T) {
 	t.Parallel()
 	w := newForgejoSizeWriter(t, `[
-	  {"id":12,"name":"gastown","full_name":"sloan/gastown","size":1280},
-	  {"id":7,"name":"beads","full_name":"sloan/beads","size":4711}
+	  {"id":12,"name":"gastown","full_name":"operator/gastown","size":1280},
+	  {"id":7,"name":"beads","full_name":"operator/beads","size":4711}
 	]`)
 	rows, err := w.Write(context.Background())
 	require.NoError(t, err)
@@ -115,14 +115,14 @@ func TestForgejoRepoSizesParse(t *testing.T) {
 		require.NotNil(t, row.SizeKB, "the reply carried a size for %s", row.Repo)
 		sizes[row.Repo] = *row.SizeKB
 	}
-	assert.Equal(t, map[string]int64{"sloan/gastown": 1280, "sloan/beads": 4711}, sizes)
+	assert.Equal(t, map[string]int64{"operator/gastown": 1280, "operator/beads": 4711}, sizes)
 }
 
 func TestForgejoSizeLinesWritten(t *testing.T) {
 	t.Parallel()
 	w := newForgejoSizeWriter(t, `[
-	  {"id":12,"name":"gastown","full_name":"sloan/gastown","size":1280},
-	  {"id":7,"name":"beads","full_name":"sloan/beads","size":4711}
+	  {"id":12,"name":"gastown","full_name":"operator/gastown","size":1280},
+	  {"id":7,"name":"beads","full_name":"operator/beads","size":4711}
 	]`)
 	_, err := w.Write(context.Background())
 	require.NoError(t, err)
@@ -139,20 +139,20 @@ func TestForgejoSizeLinesWritten(t *testing.T) {
 	assert.Equal(t, map[string]any{
 		"ts":        "2026-11-01T03:00:00Z",
 		"workspace": "workspace-a",
-		"repo":      "sloan/gastown",
+		"repo":      "operator/gastown",
 		"size_kb":   float64(1280),
 	}, first)
 	assert.Equal(t, map[string]any{
 		"ts":        "2026-11-01T03:00:00Z",
 		"workspace": "workspace-b",
-		"repo":      "sloan/beads",
+		"repo":      "operator/beads",
 		"size_kb":   float64(4711),
 	}, second)
 }
 
 func TestForgejoSizeMissingFieldIsNull(t *testing.T) {
 	t.Parallel()
-	w := newForgejoSizeWriter(t, `[{"id":12,"name":"gastown","full_name":"sloan/gastown"}]`)
+	w := newForgejoSizeWriter(t, `[{"id":12,"name":"gastown","full_name":"operator/gastown"}]`)
 	_, err := w.Write(context.Background())
 	require.NoError(t, err)
 
@@ -170,11 +170,11 @@ func TestForgejoSizeMissingFieldIsNull(t *testing.T) {
 // to some workspace; writing the town default would bill customer zero for it.
 func TestForgejoSizeUnmappedRepoWritesNothing(t *testing.T) {
 	t.Parallel()
-	w := newForgejoSizeWriter(t, `[{"id":1,"name":"stranger","full_name":"sloan/stranger","size":9}]`)
+	w := newForgejoSizeWriter(t, `[{"id":1,"name":"stranger","full_name":"operator/stranger","size":9}]`)
 	_, err := w.Write(context.Background())
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "sloan/stranger")
+	assert.Contains(t, err.Error(), "operator/stranger")
 	_, statErr := os.Stat(filepath.Join(ForgejoSizesDir(w.townRoot), "2026-11-01.jsonl"))
 	assert.True(t, os.IsNotExist(statErr), "a refused report leaves no file")
 }
@@ -198,7 +198,7 @@ func TestForgejoSizeUnreadableTownConfigWritesNothing(t *testing.T) {
 			t.Parallel()
 			root := sizeTownRoot(t)
 			tc.breakTown(t, root)
-			w := newForgejoSizeWriterAt(t, root, forgejoReposStub{body: `[{"full_name":"sloan/gastown","size":1280}]`})
+			w := newForgejoSizeWriterAt(t, root, forgejoReposStub{body: `[{"full_name":"operator/gastown","size":1280}]`})
 			_, err := w.Write(context.Background())
 
 			require.Error(t, err)
@@ -223,7 +223,7 @@ func TestForgejoSizeListFailureWritesNothing(t *testing.T) {
 
 func TestForgejoSizeNoTownRootFails(t *testing.T) {
 	t.Parallel()
-	w := newForgejoSizeWriterAt(t, "", forgejoReposStub{body: `[{"full_name":"sloan/gastown","size":1280}]`})
+	w := newForgejoSizeWriterAt(t, "", forgejoReposStub{body: `[{"full_name":"operator/gastown","size":1280}]`})
 	_, err := w.Write(context.Background())
 
 	require.Error(t, err)
@@ -247,13 +247,13 @@ func TestForgejoSizePrefixlessRigIsUnmapped(t *testing.T) {
 	t.Parallel()
 	root := sizeTownRoot(t)
 	writeSizeTownFile(t, root, "mayor/rigs.json", `{"version":1,"rigs":{
-  "bare":{"git_url":"http://forgejo.test/sloan/bare.git","added_at":"2026-10-31T00:00:00Z"}
+  "bare":{"git_url":"http://forgejo.test/operator/bare.git","added_at":"2026-10-31T00:00:00Z"}
 }}`)
-	w := newForgejoSizeWriterAt(t, root, forgejoReposStub{body: `[{"full_name":"sloan/bare","size":7}]`})
+	w := newForgejoSizeWriterAt(t, root, forgejoReposStub{body: `[{"full_name":"operator/bare","size":7}]`})
 	_, err := w.Write(context.Background())
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "sloan/bare")
+	assert.Contains(t, err.Error(), "operator/bare")
 	_, statErr := os.Stat(filepath.Join(ForgejoSizesDir(root), "2026-11-01.jsonl"))
 	assert.True(t, os.IsNotExist(statErr), "a refused report leaves no file")
 }
@@ -263,7 +263,7 @@ func TestForgejoSizePrefixlessRigIsUnmapped(t *testing.T) {
 // the bill without saying so.
 func TestForgejoSizeWorkspaceLookupFailureFails(t *testing.T) {
 	t.Parallel()
-	w := newForgejoSizeWriter(t, `[{"full_name":"sloan/gastown","size":1280}]`)
+	w := newForgejoSizeWriter(t, `[{"full_name":"operator/gastown","size":1280}]`)
 	w.forRig = func(*workspaceid.Map, string) (string, error) { return "", errors.New("workspace map is unreadable") }
 	_, err := w.Write(context.Background())
 
@@ -277,7 +277,7 @@ func TestForgejoSizeWorkspaceLookupFailureFails(t *testing.T) {
 // is a failed run and never a day file that stops mid-report.
 func TestForgejoSizeUnopenableTempFileFails(t *testing.T) {
 	t.Parallel()
-	w := newForgejoSizeWriter(t, `[{"full_name":"sloan/gastown","size":1280}]`)
+	w := newForgejoSizeWriter(t, `[{"full_name":"operator/gastown","size":1280}]`)
 	w.openTemp = func(string) (io.WriteCloser, error) { return nil, errors.New("day file is locked") }
 	_, err := w.Write(context.Background())
 
@@ -289,7 +289,7 @@ func TestForgejoSizeUnopenableTempFileFails(t *testing.T) {
 // trusting a file that stops mid-report.
 func TestForgejoSizeWriteFailureFails(t *testing.T) {
 	t.Parallel()
-	w := newForgejoSizeWriter(t, `[{"full_name":"sloan/gastown","size":1280}]`)
+	w := newForgejoSizeWriter(t, `[{"full_name":"operator/gastown","size":1280}]`)
 	sink := &sizeSink{writeErr: errors.New("no space left")}
 	w.openTemp = func(string) (io.WriteCloser, error) { return sink, nil }
 	_, err := w.Write(context.Background())
@@ -303,7 +303,7 @@ func TestForgejoSizeWriteFailureFails(t *testing.T) {
 // it rather than a clean night.
 func TestForgejoSizeCloseFailureFails(t *testing.T) {
 	t.Parallel()
-	w := newForgejoSizeWriter(t, `[{"full_name":"sloan/gastown","size":1280}]`)
+	w := newForgejoSizeWriter(t, `[{"full_name":"operator/gastown","size":1280}]`)
 	sink := &sizeSink{closeErr: errors.New("flush failed")}
 	w.openTemp = func(string) (io.WriteCloser, error) { return sink, nil }
 	_, err := w.Write(context.Background())
@@ -320,8 +320,8 @@ func sizeDayPath(root string) string {
 // twoRepoReply is a reply with one repository per town rig, so a complete run
 // writes two lines.
 const twoRepoReply = `[
-  {"id":12,"name":"gastown","full_name":"sloan/gastown","size":1280},
-  {"id":7,"name":"beads","full_name":"sloan/beads","size":4711}
+  {"id":12,"name":"gastown","full_name":"operator/gastown","size":1280},
+  {"id":7,"name":"beads","full_name":"operator/beads","size":4711}
 ]`
 
 // A rerun that fails partway through must leave the earlier complete day file
@@ -385,7 +385,7 @@ func TestForgejoSizeRerunWritesOneSetPerDay(t *testing.T) {
 // is not refused by this one's leftovers.
 func TestForgejoSizeRenameFailureFails(t *testing.T) {
 	t.Parallel()
-	w := newForgejoSizeWriter(t, `[{"full_name":"sloan/gastown","size":1280}]`)
+	w := newForgejoSizeWriter(t, `[{"full_name":"operator/gastown","size":1280}]`)
 	require.NoError(t, os.MkdirAll(sizeDayPath(w.townRoot), 0o755))
 	_, err := w.Write(context.Background())
 
@@ -398,7 +398,7 @@ func TestForgejoSizeRenameFailureFails(t *testing.T) {
 // A metrics directory that cannot be made is a failed run.
 func TestForgejoSizeBlockedMetricsDirFails(t *testing.T) {
 	t.Parallel()
-	w := newForgejoSizeWriter(t, `[{"full_name":"sloan/gastown","size":1280}]`)
+	w := newForgejoSizeWriter(t, `[{"full_name":"operator/gastown","size":1280}]`)
 	// A regular file where the directory belongs makes MkdirAll fail.
 	writeSizeTownFile(t, w.townRoot, ".runtime/metrics/forgejo-sizes", "not a directory")
 	_, err := w.Write(context.Background())
@@ -455,7 +455,7 @@ func (s *sizeFailAfter) Close() error {
 func TestForgejoSizeSameNameOtherOwnerIsRefused(t *testing.T) {
 	t.Parallel()
 	w := newForgejoSizeWriter(t, `[
-	  {"full_name":"sloan/gastown","size":1280},
+	  {"full_name":"operator/gastown","size":1280},
 	  {"full_name":"other-org/gastown","size":99}
 	]`)
 	_, err := w.Write(context.Background())
@@ -468,7 +468,7 @@ func TestForgejoSizeSameNameOtherOwnerIsRefused(t *testing.T) {
 
 func TestForgejoSizeOwnerAndNameMatchIgnoringCase(t *testing.T) {
 	t.Parallel()
-	w := newForgejoSizeWriter(t, `[{"full_name":"Sloan/GastOwn","size":5}]`)
+	w := newForgejoSizeWriter(t, `[{"full_name":"Operator/GastOwn","size":5}]`)
 	rows, err := w.Write(context.Background())
 
 	require.NoError(t, err)
@@ -482,9 +482,9 @@ func TestForgejoSizeScpStyleGitURLMapsTheRepository(t *testing.T) {
 	t.Parallel()
 	root := sizeTownRoot(t)
 	writeSizeTownFile(t, root, "mayor/rigs.json", `{"version":1,"rigs":{
-  "gastown":{"git_url":"git@forgejo.test:sloan/gastown.git","added_at":"2026-10-31T00:00:00Z","beads":{"repo":"local","prefix":"gt"}}
+  "gastown":{"git_url":"git@forgejo.test:operator/gastown.git","added_at":"2026-10-31T00:00:00Z","beads":{"repo":"local","prefix":"gt"}}
 }}`)
-	w := newForgejoSizeWriterAt(t, root, forgejoReposStub{body: `[{"full_name":"sloan/gastown","size":7}]`})
+	w := newForgejoSizeWriterAt(t, root, forgejoReposStub{body: `[{"full_name":"operator/gastown","size":7}]`})
 	rows, err := w.Write(context.Background())
 
 	require.NoError(t, err)
@@ -500,11 +500,11 @@ func TestForgejoSizeRigWithoutAnOwnerInItsGitURLIsUnmapped(t *testing.T) {
 	writeSizeTownFile(t, root, "mayor/rigs.json", `{"version":1,"rigs":{
   "gastown":{"git_url":"gastown","added_at":"2026-10-31T00:00:00Z","beads":{"repo":"local","prefix":"gt"}}
 }}`)
-	w := newForgejoSizeWriterAt(t, root, forgejoReposStub{body: `[{"full_name":"sloan/gastown","size":7}]`})
+	w := newForgejoSizeWriterAt(t, root, forgejoReposStub{body: `[{"full_name":"operator/gastown","size":7}]`})
 	_, err := w.Write(context.Background())
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "sloan/gastown")
+	assert.Contains(t, err.Error(), "operator/gastown")
 }
 
 // Two rigs naming one repository would bill it twice or to the wrong one.
@@ -512,21 +512,21 @@ func TestForgejoSizeTwoRigsOneRepositoryFails(t *testing.T) {
 	t.Parallel()
 	root := sizeTownRoot(t)
 	writeSizeTownFile(t, root, "mayor/rigs.json", `{"version":1,"rigs":{
-  "a":{"git_url":"http://forgejo.test/sloan/shared.git","added_at":"2026-10-31T00:00:00Z","beads":{"repo":"local","prefix":"gt"}},
-  "b":{"git_url":"http://forgejo.test/sloan/shared.git","added_at":"2026-10-31T00:00:00Z","beads":{"repo":"local","prefix":"bd"}}
+  "a":{"git_url":"http://forgejo.test/operator/shared.git","added_at":"2026-10-31T00:00:00Z","beads":{"repo":"local","prefix":"gt"}},
+  "b":{"git_url":"http://forgejo.test/operator/shared.git","added_at":"2026-10-31T00:00:00Z","beads":{"repo":"local","prefix":"bd"}}
 }}`)
-	w := newForgejoSizeWriterAt(t, root, forgejoReposStub{body: `[{"full_name":"sloan/shared","size":7}]`})
+	w := newForgejoSizeWriterAt(t, root, forgejoReposStub{body: `[{"full_name":"operator/shared","size":7}]`})
 	_, err := w.Write(context.Background())
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "sloan/shared")
+	assert.Contains(t, err.Error(), "operator/shared")
 }
 
 // A run killed mid-write leaves its temporary file behind. The next run clears
 // it and writes its own complete snapshot instead of failing every night.
 func TestForgejoSizeStaleTempFromACrashedRunDoesNotBlock(t *testing.T) {
 	t.Parallel()
-	w := newForgejoSizeWriter(t, `[{"full_name":"sloan/gastown","size":1280}]`)
+	w := newForgejoSizeWriter(t, `[{"full_name":"operator/gastown","size":1280}]`)
 	dir := ForgejoSizesDir(w.townRoot)
 	require.NoError(t, os.MkdirAll(dir, 0o755))
 	stale := filepath.Join(dir, "2026-11-01.jsonl.tmp")

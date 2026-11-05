@@ -21,10 +21,10 @@ func TestHoldChipDrawsTheReadersReading(t *testing.T) {
 	}{
 		{
 			name:  "the hold is on",
-			hold:  map[string]any{"present": true, "note": "sloan: paused for the night", "age_seconds": 7200},
+			hold:  map[string]any{"present": true, "note": "operator: paused for the night", "age_seconds": 7200},
 			text:  "hold",
 			class: "warn",
-			title: []string{"set 2h00m ago", "sloan: paused for the night"},
+			title: []string{"set 2h00m ago", "operator: paused for the night"},
 		},
 		{
 			name:  "the town is dispatching",

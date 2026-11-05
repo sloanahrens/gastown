@@ -11,9 +11,9 @@ import (
 )
 
 // attentionQuestionStale is how long a question may stay open before it is a
-// question.stale item. The overseer's questions are for Sloan, who may not look
-// for a day; past a day the overseer is told, as info, that the work they hold
-// is still held.
+// question.stale item. The overseer's questions are for the operator, who may
+// not look for a day; past a day the overseer is told, as info, that the work
+// they hold is still held.
 const attentionQuestionStale = 24 * time.Hour
 
 // questionReads are the outside reads the question collectors make: the open
@@ -129,8 +129,8 @@ func (s *attentionSources) questionCollectors() []attentionCollector {
 
 // questionNewItems raises question.new for each open question nobody has
 // commented on: a question appeared. It clears with the first comment, the
-// overseer's note or Sloan's answer, since from then on the question is being
-// handled.
+// overseer's note or the operator's answer, since from then on the question is
+// being handled.
 func questionNewItems(snap *questionSnapshot, _ time.Time) []attention.Item {
 	var out []attention.Item
 	for _, q := range snap.questions {
@@ -144,9 +144,9 @@ func questionNewItems(snap *questionSnapshot, _ time.Time) []attention.Item {
 }
 
 // questionAnsweredItems raises question.answered for each open question whose
-// newest comment is not the overseer's: Sloan has answered, and the overseer
-// has yet to act on it. It clears when the overseer comments, and the daemon
-// says it again every attention.RepeatEvery until then.
+// newest comment is not the overseer's: the operator has answered, and the
+// overseer has yet to act on it. It clears when the overseer comments, and the
+// daemon says it again every attention.RepeatEvery until then.
 func questionAnsweredItems(snap *questionSnapshot, _ time.Time) []attention.Item {
 	var out []attention.Item
 	for _, q := range snap.questions {

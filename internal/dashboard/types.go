@@ -736,8 +736,8 @@ type State struct {
 	Deploys *Deploys `json:"deploys,omitempty"`
 	// Reports is the overseer's latest hourly report, read from the directory it
 	// writes under the town root. It is nil until the reader first reports.
-	// Questions is the overseer's open questions for Sloan, read from the town's
-	// own beads database. It is nil until the reader first reports.
+	// Questions is the overseer's open questions for the operator, read from the
+	// town's own beads database. It is nil until the reader first reports.
 	Reports   *Reports   `json:"reports,omitempty"`
 	Questions *Questions `json:"questions,omitempty"`
 	// Birds is the birds' daily reports as the Reports page lists them, read
@@ -890,7 +890,7 @@ type Config struct {
 	// BirdsDir when the page is asked for.
 	Birds    func() []BirdReport
 	BirdsDir string
-	// Questions reads the overseer's open questions for Sloan.
+	// Questions reads the overseer's open questions for the operator.
 	Questions func() *Questions
 	// Overseer reads the overseer's heartbeat and journal.
 	Overseer func() *Overseer

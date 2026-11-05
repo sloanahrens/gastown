@@ -61,11 +61,11 @@ func TestStagingShipCoveredByItsOwnRun(t *testing.T) {
 	t.Parallel()
 	stub := &stagingStub{
 		runs: map[string][]forgejo.ActionRun{
-			"sloan/fractals": {stagingRun(1, "aaaa", "success", "2026-10-08T17:00:00Z", "2026-10-08T17:02:00Z")},
+			"operator/fractals": {stagingRun(1, "aaaa", "success", "2026-10-08T17:00:00Z", "2026-10-08T17:02:00Z")},
 		},
-		covers: map[string]bool{"sloan/fractals\x00aaaa\x00aaaa": true},
+		covers: map[string]bool{"operator/fractals\x00aaaa\x00aaaa": true},
 	}
-	r := stagingTestReader(stub, map[string]string{"fractals": "sloan/fractals"})
+	r := stagingTestReader(stub, map[string]string{"fractals": "operator/fractals"})
 
 	ship, ok := r.Ship("fractals", "aaaa", time.Date(2026, 10, 8, 16, 59, 0, 0, time.UTC))
 	if !ok || ship.State != StagingDeployed {
@@ -83,17 +83,17 @@ func TestStagingShipCoveredByALaterRunAfterASkippedOne(t *testing.T) {
 	t.Parallel()
 	stub := &stagingStub{
 		runs: map[string][]forgejo.ActionRun{
-			"sloan/fractals": {
+			"operator/fractals": {
 				stagingRun(2, "bbbb", "success", "2026-10-08T17:04:00Z", "2026-10-08T17:06:00Z"),
 				stagingRun(1, "aaaa", "skipped", "2026-10-08T17:00:00Z", "2026-10-08T17:00:10Z"),
 			},
 		},
 		covers: map[string]bool{
-			"sloan/fractals\x00aaaa\x00aaaa": true,
-			"sloan/fractals\x00bbbb\x00aaaa": true,
+			"operator/fractals\x00aaaa\x00aaaa": true,
+			"operator/fractals\x00bbbb\x00aaaa": true,
 		},
 	}
-	r := stagingTestReader(stub, map[string]string{"fractals": "sloan/fractals"})
+	r := stagingTestReader(stub, map[string]string{"fractals": "operator/fractals"})
 
 	ship, ok := r.Ship("fractals", "aaaa", time.Date(2026, 10, 8, 16, 59, 0, 0, time.UTC))
 	if !ok || ship.State != StagingDeployed {
@@ -110,17 +110,17 @@ func TestStagingShipEarliestSuccessfulRunDatesTheLanding(t *testing.T) {
 	t.Parallel()
 	stub := &stagingStub{
 		runs: map[string][]forgejo.ActionRun{
-			"sloan/fractals": {
+			"operator/fractals": {
 				stagingRun(2, "cccc", "success", "2026-10-08T17:20:00Z", "2026-10-08T17:22:00Z"),
 				stagingRun(1, "bbbb", "success", "2026-10-08T17:04:00Z", "2026-10-08T17:06:00Z"),
 			},
 		},
 		covers: map[string]bool{
-			"sloan/fractals\x00bbbb\x00aaaa": true,
-			"sloan/fractals\x00cccc\x00aaaa": true,
+			"operator/fractals\x00bbbb\x00aaaa": true,
+			"operator/fractals\x00cccc\x00aaaa": true,
 		},
 	}
-	r := stagingTestReader(stub, map[string]string{"fractals": "sloan/fractals"})
+	r := stagingTestReader(stub, map[string]string{"fractals": "operator/fractals"})
 
 	ship, ok := r.Ship("fractals", "aaaa", time.Date(2026, 10, 8, 16, 59, 0, 0, time.UTC))
 	if !ok || ship.State != StagingDeployed {
@@ -149,21 +149,21 @@ func TestStagingShipPendingUntilASuccessfulRunCovers(t *testing.T) {
 		{
 			name:  "a run created before it",
 			runs:  []forgejo.ActionRun{stagingRun(1, "aaaa", "success", "2026-10-08T16:00:00Z", "2026-10-08T16:02:00Z")},
-			covrs: map[string]bool{"sloan/fractals\x00aaaa\x00aaaa": true},
+			covrs: map[string]bool{"operator/fractals\x00aaaa\x00aaaa": true},
 		},
 		{
 			name:  "a run that has not ended",
 			runs:  []forgejo.ActionRun{stagingRun(1, "aaaa", "running", "2026-10-08T17:01:00Z", "1970-01-01T00:00:00Z")},
-			covrs: map[string]bool{"sloan/fractals\x00aaaa\x00aaaa": true},
+			covrs: map[string]bool{"operator/fractals\x00aaaa\x00aaaa": true},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			stub := &stagingStub{
-				runs:   map[string][]forgejo.ActionRun{"sloan/fractals": tc.runs},
+				runs:   map[string][]forgejo.ActionRun{"operator/fractals": tc.runs},
 				covers: tc.covrs,
 			}
-			r := stagingTestReader(stub, map[string]string{"fractals": "sloan/fractals"})
+			r := stagingTestReader(stub, map[string]string{"fractals": "operator/fractals"})
 			ship, ok := r.Ship("fractals", "aaaa", landed)
 			if !ok || ship.State != StagingPending {
 				t.Fatalf("ship = %+v ok %v, want pending", ship, ok)
@@ -178,11 +178,11 @@ func TestStagingShipFailedWhenTheNewestCoveringRunFailed(t *testing.T) {
 	t.Parallel()
 	stub := &stagingStub{
 		runs: map[string][]forgejo.ActionRun{
-			"sloan/fractals": {stagingRun(1, "aaaa", "failure", "2026-10-08T17:01:00Z", "2026-10-08T17:02:00Z")},
+			"operator/fractals": {stagingRun(1, "aaaa", "failure", "2026-10-08T17:01:00Z", "2026-10-08T17:02:00Z")},
 		},
-		covers: map[string]bool{"sloan/fractals\x00aaaa\x00aaaa": true},
+		covers: map[string]bool{"operator/fractals\x00aaaa\x00aaaa": true},
 	}
-	r := stagingTestReader(stub, map[string]string{"fractals": "sloan/fractals"})
+	r := stagingTestReader(stub, map[string]string{"fractals": "operator/fractals"})
 
 	ship, ok := r.Ship("fractals", "aaaa", time.Date(2026, 10, 8, 17, 0, 0, 0, time.UTC))
 	if !ok || ship.State != StagingFailed || ship.RunState != "failure" {
@@ -197,17 +197,17 @@ func TestStagingShipSuccessfulOlderRunBeatsANewerFailure(t *testing.T) {
 	t.Parallel()
 	stub := &stagingStub{
 		runs: map[string][]forgejo.ActionRun{
-			"sloan/fractals": {
+			"operator/fractals": {
 				stagingRun(2, "bbbb", "failure", "2026-10-08T17:10:00Z", "2026-10-08T17:11:00Z"),
 				stagingRun(1, "aaaa", "success", "2026-10-08T17:01:00Z", "2026-10-08T17:03:00Z"),
 			},
 		},
 		covers: map[string]bool{
-			"sloan/fractals\x00aaaa\x00aaaa": true,
-			"sloan/fractals\x00bbbb\x00aaaa": true,
+			"operator/fractals\x00aaaa\x00aaaa": true,
+			"operator/fractals\x00bbbb\x00aaaa": true,
 		},
 	}
-	r := stagingTestReader(stub, map[string]string{"fractals": "sloan/fractals"})
+	r := stagingTestReader(stub, map[string]string{"fractals": "operator/fractals"})
 
 	ship, ok := r.Ship("fractals", "aaaa", time.Date(2026, 10, 8, 17, 0, 0, 0, time.UTC))
 	if !ok || ship.State != StagingDeployed {
@@ -220,8 +220,8 @@ func TestStagingShipSuccessfulOlderRunBeatsANewerFailure(t *testing.T) {
 // definition, so the landing carries no ship time and never reads as pending.
 func TestStagingShipNoDefinitionWithoutStagingRuns(t *testing.T) {
 	t.Parallel()
-	stub := &stagingStub{runs: map[string][]forgejo.ActionRun{"sloan/devops": nil}}
-	r := stagingTestReader(stub, map[string]string{"devops": "sloan/devops"})
+	stub := &stagingStub{runs: map[string][]forgejo.ActionRun{"operator/devops": nil}}
+	r := stagingTestReader(stub, map[string]string{"devops": "operator/devops"})
 
 	if ship, ok := r.Ship("devops", "aaaa", time.Date(2026, 10, 8, 17, 0, 0, 0, time.UTC)); ok {
 		t.Fatalf("ship = %+v; want no ship definition", ship)
@@ -235,10 +235,10 @@ func TestStagingShipRunsOnAnotherBranchAreNotTheStagingDeploy(t *testing.T) {
 	run := stagingRun(1, "aaaa", "success", "2026-10-08T17:01:00Z", "2026-10-08T17:02:00Z")
 	run.PrettyRef = "land/fr-1ab"
 	stub := &stagingStub{
-		runs:   map[string][]forgejo.ActionRun{"sloan/fractals": {run}},
-		covers: map[string]bool{"sloan/fractals\x00aaaa\x00aaaa": true},
+		runs:   map[string][]forgejo.ActionRun{"operator/fractals": {run}},
+		covers: map[string]bool{"operator/fractals\x00aaaa\x00aaaa": true},
 	}
-	r := stagingTestReader(stub, map[string]string{"fractals": "sloan/fractals"})
+	r := stagingTestReader(stub, map[string]string{"fractals": "operator/fractals"})
 
 	if ship, ok := r.Ship("fractals", "aaaa", time.Date(2026, 10, 8, 17, 0, 0, 0, time.UTC)); ok {
 		t.Fatalf("ship = %+v; want no ship definition from a non-main run", ship)
@@ -249,8 +249,8 @@ func TestStagingShipRunsOnAnotherBranchAreNotTheStagingDeploy(t *testing.T) {
 // viewer cannot read shows no ship time, and never reports an error.
 func TestStagingShipUnreadableRepoIsNoDefinitionNotAnError(t *testing.T) {
 	t.Parallel()
-	stub := &stagingStub{runsErr: map[string]error{"sloan/fractals": errors.New("403")}}
-	r := stagingTestReader(stub, map[string]string{"fractals": "sloan/fractals"})
+	stub := &stagingStub{runsErr: map[string]error{"operator/fractals": errors.New("403")}}
+	r := stagingTestReader(stub, map[string]string{"fractals": "operator/fractals"})
 
 	if ship, ok := r.Ship("fractals", "aaaa", time.Date(2026, 10, 8, 17, 0, 0, 0, time.UTC)); ok {
 		t.Fatalf("ship = %+v; want no ship definition", ship)
@@ -264,11 +264,11 @@ func TestStagingShipUnansweredCompareLeavesTheLandingPending(t *testing.T) {
 	t.Parallel()
 	stub := &stagingStub{
 		runs: map[string][]forgejo.ActionRun{
-			"sloan/fractals": {stagingRun(1, "aaaa", "success", "2026-10-08T17:01:00Z", "2026-10-08T17:02:00Z")},
+			"operator/fractals": {stagingRun(1, "aaaa", "success", "2026-10-08T17:01:00Z", "2026-10-08T17:02:00Z")},
 		},
 		cmpErr: errors.New("boom"),
 	}
-	r := stagingTestReader(stub, map[string]string{"fractals": "sloan/fractals"})
+	r := stagingTestReader(stub, map[string]string{"fractals": "operator/fractals"})
 
 	ship, ok := r.Ship("fractals", "aaaa", time.Date(2026, 10, 8, 17, 0, 0, 0, time.UTC))
 	if !ok || ship.State != StagingPending {
@@ -281,7 +281,7 @@ func TestStagingShipUnansweredCompareLeavesTheLandingPending(t *testing.T) {
 func TestStagingShipUnknownRigHasNoDefinition(t *testing.T) {
 	t.Parallel()
 	stub := &stagingStub{}
-	r := stagingTestReader(stub, map[string]string{"fractals": "sloan/fractals"})
+	r := stagingTestReader(stub, map[string]string{"fractals": "operator/fractals"})
 
 	if _, ok := r.Ship("devops", "aaaa", time.Now()); ok {
 		t.Fatal("an unmapped rig was given a ship definition")
@@ -298,11 +298,11 @@ func TestStagingShipReusesAReadWithinTheTTL(t *testing.T) {
 	t.Parallel()
 	stub := &stagingStub{
 		runs: map[string][]forgejo.ActionRun{
-			"sloan/fractals": {stagingRun(1, "aaaa", "success", "2026-10-08T17:01:00Z", "2026-10-08T17:02:00Z")},
+			"operator/fractals": {stagingRun(1, "aaaa", "success", "2026-10-08T17:01:00Z", "2026-10-08T17:02:00Z")},
 		},
-		covers: map[string]bool{"sloan/fractals\x00aaaa\x00aaaa": true},
+		covers: map[string]bool{"operator/fractals\x00aaaa\x00aaaa": true},
 	}
-	r := stagingTestReader(stub, map[string]string{"fractals": "sloan/fractals"})
+	r := stagingTestReader(stub, map[string]string{"fractals": "operator/fractals"})
 	landed := time.Date(2026, 10, 8, 17, 0, 0, 0, time.UTC)
 
 	for i := 0; i < 3; i++ {
@@ -331,15 +331,15 @@ func TestStagingShipRunKeysArePerRepo(t *testing.T) {
 	t.Parallel()
 	stub := &stagingStub{
 		runs: map[string][]forgejo.ActionRun{
-			"sloan/fractals": {stagingRun(1, "aaaa", "success", "2026-10-08T17:01:00Z", "2026-10-08T17:02:00Z")},
-			"sloan/beaver":   {stagingRun(1, "aaaa", "success", "2026-10-08T17:01:00Z", "2026-10-08T17:05:00Z")},
+			"operator/fractals": {stagingRun(1, "aaaa", "success", "2026-10-08T17:01:00Z", "2026-10-08T17:02:00Z")},
+			"operator/beaver":   {stagingRun(1, "aaaa", "success", "2026-10-08T17:01:00Z", "2026-10-08T17:05:00Z")},
 		},
 		covers: map[string]bool{
-			"sloan/fractals\x00aaaa\x00aaaa": true,
-			"sloan/beaver\x00aaaa\x00aaaa":   true,
+			"operator/fractals\x00aaaa\x00aaaa": true,
+			"operator/beaver\x00aaaa\x00aaaa":   true,
 		},
 	}
-	r := stagingTestReader(stub, map[string]string{"fractals": "sloan/fractals", "beaver": "sloan/beaver"})
+	r := stagingTestReader(stub, map[string]string{"fractals": "operator/fractals", "beaver": "operator/beaver"})
 	landed := time.Date(2026, 10, 8, 17, 0, 0, 0, time.UTC)
 
 	fr, _ := r.Ship("fractals", "aaaa", landed)
@@ -367,17 +367,17 @@ func TestStagingShipRunsAreOrderedByTheirOwnStamps(t *testing.T) {
 	t.Parallel()
 	stub := &stagingStub{
 		runs: map[string][]forgejo.ActionRun{
-			"sloan/fractals": {
+			"operator/fractals": {
 				stagingRun(1, "aaaa", "failure", "2026-10-08T17:01:00Z", "2026-10-08T17:02:00Z"),
 				stagingRun(2, "bbbb", "success", "2026-10-08T17:04:00Z", "2026-10-08T17:06:00Z"),
 			},
 		},
 		covers: map[string]bool{
-			"sloan/fractals\x00aaaa\x00aaaa": true,
-			"sloan/fractals\x00bbbb\x00aaaa": true,
+			"operator/fractals\x00aaaa\x00aaaa": true,
+			"operator/fractals\x00bbbb\x00aaaa": true,
 		},
 	}
-	r := stagingTestReader(stub, map[string]string{"fractals": "sloan/fractals"})
+	r := stagingTestReader(stub, map[string]string{"fractals": "operator/fractals"})
 
 	ship, ok := r.Ship("fractals", "aaaa", time.Date(2026, 10, 8, 17, 0, 0, 0, time.UTC))
 	if !ok || ship.State != StagingDeployed {

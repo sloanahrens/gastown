@@ -1,9 +1,9 @@
 package dashboard
 
 // The question rows of the Attention panel: the questions the overseer has
-// filed for Sloan, so he can see what is waiting on him and answer it from a
-// terminal. The page stays read-only — there is no form and no write path, and
-// Sloan answers with gt answer, which comments on the bead.
+// filed for the operator, so they can see what is waiting on them and answer it
+// from a terminal. The page stays read-only — there is no form and no write
+// path, and the operator answers with gt answer, which comments on the bead.
 //
 // The reader that fills this payload lives with the town's other bd readers,
 // internal/cmd/dashboard_questions.go: every bd read this page makes runs
@@ -13,10 +13,10 @@ package dashboard
 // A question's state, read from its newest comment.
 const (
 	// QuestionAwaiting is the overseer's own newest comment, or no comment at
-	// all: the question is still Sloan's to answer.
+	// all: the question is still the operator's to answer.
 	QuestionAwaiting = "awaiting"
 	// QuestionAnswered is a newest comment that is not the overseer's, which is
-	// Sloan's reply, and the overseer is acting on it.
+	// the operator's reply, and the overseer is acting on it.
 	QuestionAnswered = "answered"
 )
 
@@ -49,7 +49,7 @@ type QuestionRow struct {
 	// Comments is how many comments the bead carries.
 	Comments int `json:"comments"`
 	// State is awaiting while the newest comment is the overseer's own, and
-	// answered once Sloan has replied.
+	// answered once the operator has replied.
 	State string `json:"state"`
 	// Malformed marks a description without both sections the pane draws. The
 	// row is still shown, with the title alone: a question the operator cannot

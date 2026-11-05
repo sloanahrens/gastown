@@ -220,7 +220,7 @@ func TestHandlersRefuseAQueryFormTheTrackerDoesNotAnswer(t *testing.T) {
 		{name: "an assignee named twice", expr: `assignee="a" AND assignee="b"`, want: "more than once"},
 		{name: "an ephemeral that is not a boolean", expr: `ephemeral=maybe`, want: "not a boolean"},
 		{name: "an ephemeral with a range", expr: `ephemeral>=true`, want: "ephemeral does not take >="},
-		{name: "an assignee with a range", expr: `assignee>=sloan`, want: "assignee does not take >="},
+		{name: "an assignee with a range", expr: `assignee>=operator`, want: "assignee does not take >="},
 		{name: "a label with a range", expr: `label>=gt:agent`, want: "label does not take >="},
 		{name: "a parent with a range", expr: `parent>=fx-parent`, want: "parent does not take >="},
 		{name: "a status with a range", expr: `status>=open`, want: "status does not take >="},
@@ -299,9 +299,9 @@ func TestParseQueryAcceptsTheFormsGTAggregatesSend(t *testing.T) {
 		},
 		{
 			name:      "--all defaults to every status",
-			expr:      `assignee="sloan"`,
+			expr:      `assignee="operator"`,
 			all:       true,
-			want:      beads.ListOptions{Assignee: "sloan", Status: "all"},
+			want:      beads.ListOptions{Assignee: "operator", Status: "all"},
 			ephemeral: "both",
 		},
 	}
@@ -455,7 +455,7 @@ func TestReadyRowsKeepsOpenUnblockedWork(t *testing.T) {
 			{ID: "held", Status: "open"},
 			{ID: "closed", Status: "closed"},
 			{ID: "merge", Status: "open", Type: "merge-request"},
-			{ID: "assigned", Status: "open", Assignee: "sloan"},
+			{ID: "assigned", Status: "open", Assignee: "operator"},
 		},
 		blocked: map[string]bool{"held": true},
 	}

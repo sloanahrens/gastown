@@ -89,7 +89,7 @@ func TestHandlersRefuseAnUnknownFlag(t *testing.T) {
 		flag string
 	}{
 		{name: "show refuses --children", argv: []string{"show", "--json", "--children", "fx-parent"}, flag: "--children"},
-		{name: "list refuses --assignee", argv: []string{"list", "--json", "--assignee", "sloan"}, flag: "--assignee"},
+		{name: "list refuses --assignee", argv: []string{"list", "--json", "--assignee", "operator"}, flag: "--assignee"},
 		{name: "children refuses --format", argv: []string{"children", "--json", "--format", "tree", "fx-parent"}, flag: "--format"},
 		{name: "list refuses a global flag before the verb", argv: []string{"--allow-stale", "list", "--json"}, flag: "--allow-stale"},
 	}
