@@ -1,5 +1,6 @@
 ## Changelog
 
+- 2026-11-05 gt-qgum2: added rule 17, run the integration tier the gate skips (seventeen rules); a "Before gt done" line 11 checks for `//go:build integration` files in each changed package.
 - 2026-11-01 gt-2iro9: added rule 16, one workspace per answer (sixteen rules); the rule-count test is now TestPolecatDirectiveRuleHeadings.
 - 2026-10-31 gt-pccx7: one coherent revision from the 2026-10-28..31 rejection record (842 majors): a plan section first, town rules and tests merged to one copy each, rules 12-15 (cloud) leave for the devops layer, new rules 12-14 (finish and wire, state and locks, docs say what the code does), rule 16 becomes 15, and a closing pre-submit checklist ordered by rounds burned (fifteen rules).
 - 2026-11-01 gt-9givh: added a "Before gt done: five checks on your added lines" checklist after rule 16; it cites existing rules, so the count stays sixteen.
@@ -50,7 +51,7 @@ Full standard: `~/.claude/docs/standards/test-engineering.md`. om flags a breach
 
 # What om rejects
 
-Read before you write code. Sixteen rules. Each names om's finding and an example.
+Read before you write code. Seventeen rules. Each names om's finding and an example.
 
 ## 1. Failure is not success (fail-open)
 
@@ -132,6 +133,11 @@ A bead that comes back has a MERGE REJECTION block in its notes. Fix every findi
 Code that builds a view, a total, a bill or a limit for one workspace checks that every record it reads names that workspace: the cap, the spend records, the usage export, the seat and storage rows, the token counts. List the records that enter before you write the check, and test each with a record from another workspace and with an empty workspace id; both are refused, never summed or copied. A missing registry, prefix or map is an error, never the default workspace.
 - om flags: "another workspace's", "empty id matches", "falls back to the default prefix". Examples: gt-6f4mk, gt-1sriy.
 
+## 17. Run the tier the gate skips
+
+`make gate` runs the unit tier only; docs/testing.md says what it runs. When your diff changes a function, type or fixture that a file tagged `//go:build integration` uses, in your package or a caller's, run those packages with `go test -tags integration ./<pkg>/...` and paste the result, or write "not run: <reason>" in the bead notes. A package whose tests need a container is "not run: container": the landing worker runs the container suites on the merged tree. Never call a change tested on the gate's result alone.
+- om flags: "integration-tagged callers not run", "gate does not exercise this change" (proposed wording, no finding yet). Example: gt-26dvk.
+
 # Before gt done
 
 Run these on your added lines, in the order om rejects most. A hit is a question, not a verdict. `D` below stands for `git diff -U0 origin/main...HEAD`, run as written with the pipe after it.
@@ -146,5 +152,6 @@ Run these on your added lines, in the order om rejects most. A hit is a question
 8. Secrets (11): no added error or log line prints captured output, a token or a password.
 9. Scope (9): `git diff --stat origin/main...HEAD` lists only files your Constraints name; go.mod changes carry a Rationale line.
 10. Workspace (16): for each record type the diff reads for one workspace, make the check rule 16 names and grep the diff for its workspace field: `D | grep -nE '^\+.*[Ww]orkspace'`; a read with no check is a question.
+11. Tier (17): for each package you changed, `grep -l 'go:build integration' <pkg>/*_test.go`; a hit is run with `-tags integration` or named "not run".
 
 Tick each acceptance box only after its test exists.

@@ -122,7 +122,7 @@ var ruleCountWords = []string{"", "One", "Two", "Three", "Four", "Five", "Six",
 // grew (gt-o87rv, gt-pccx7, gt-2iro9).
 func TestPolecatDirectiveRuleHeadings(t *testing.T) {
 	t.Parallel()
-	const rules = 16
+	const rules = 17
 	text := readDirective(t, "polecat.md")
 	var got []string
 	for _, line := range strings.Split(text, "\n") {
@@ -181,6 +181,37 @@ func TestPolecatDirectiveRule16HasItsBody(t *testing.T) {
 	} {
 		if !strings.Contains(rule, clause) {
 			t.Errorf("rule 16 lacks the clause %q", clause)
+		}
+	}
+}
+
+// TestPolecatDirectiveRule17HasItsBody holds rule 17 to its body, as rule 16's
+// test does: the heading count passes with the rule cut to a fragment, so this
+// reads the rule's own section and requires the clauses it rests on, and the
+// om flags line that names its findings.
+func TestPolecatDirectiveRule17HasItsBody(t *testing.T) {
+	t.Parallel()
+	text := readDirective(t, "polecat.md")
+	const heading = "\n## 17. Run the tier the gate skips\n"
+	start := strings.Index(text, heading)
+	if start < 0 {
+		t.Fatal("polecat.md has no rule 17 titled \"Run the tier the gate skips\"")
+	}
+	body := text[start+len(heading):]
+	end := strings.Index(body, "\n# Before gt done")
+	if end < 0 {
+		t.Fatal("polecat.md has no \"# Before gt done\" checklist after rule 17")
+	}
+	rule := body[:end]
+	for _, clause := range []string{
+		"`make gate` runs the unit tier only",
+		"tagged `//go:build integration`",
+		"go test -tags integration ./<pkg>/...",
+		"\"not run: <reason>\"",
+		"\n- om flags: ",
+	} {
+		if !strings.Contains(rule, clause) {
+			t.Errorf("rule 17 lacks the clause %q", clause)
 		}
 	}
 }
