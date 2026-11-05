@@ -2743,7 +2743,7 @@ func TestHookMatchersDoNotOverfireOnSafeCommands(t *testing.T) {
 // TestUnboundedScanLiteralHomeDir: the denylist catches the shell spellings
 // of the home directory (~, $HOME, /Users) but an agent that writes the
 // EXPANDED path names the same root and walked through unblocked — dog alpha
-// ran `find /Users/sloan -maxdepth 3 -name .git` on 2026-09-18 and macOS
+// ran `find /Users/user -maxdepth 3 -name .git` on 2026-09-18 and macOS
 // privacy prompts for Documents/Desktop/Music landed on the operator. The
 // literal home path must block exactly like ~; a path one level below it
 // must stay allowed, or the fix is just "block scans" wearing a home check.

@@ -13,7 +13,7 @@ import (
 // (matchesUnboundedScan, tap_guard_dangerous.go) from the host's broad
 // filesystem roots to the Gas Town tree itself (gt-6e2l).
 //
-// The incident: a dog session ran `grep -R "record-run" -n /Users/sloan/gt`
+// The incident: a dog session ran `grep -R "record-run" -n /Users/user/gt`
 // — a recursive scan of the town root, which holds every rig, every
 // .repo.git, and every polecat/crew worktree. The existing scanRootDenylist
 // covered / and $HOME but not the town, so the command executed: >64 MB of
@@ -136,8 +136,8 @@ func townScanHazard(scanRoot, townRoot string) string {
 		return ""
 	}
 	// Compared case-insensitively on purpose: the operator's host is macOS,
-	// whose default filesystem is case-insensitive, so /Users/sloan/GT and
-	// /Users/sloan/gt name the same tree and a case-sensitive compare would
+	// whose default filesystem is case-insensitive, so /Users/user/GT and
+	// /Users/user/gt name the same tree and a case-sensitive compare would
 	// leave an easy way around this rule. On a case-sensitive filesystem the
 	// only effect is a redundant block for a path differing from a hook or
 	// aggregate-directory name in case alone, which is the safe direction to
@@ -210,7 +210,7 @@ func isWithinRel(rel string) bool {
 // isHomeDirScanRoot reports whether a resolved scan root IS the home
 // directory. scanRootDenylist catches the shell spellings (~, $HOME, /Users),
 // but an agent that writes the expanded path (/Users/me) has named the same
-// root; a dog did exactly that on 2026-09-18 (`find /Users/sloan -maxdepth 3
+// root; a dog did exactly that on 2026-09-18 (`find /Users/user -maxdepth 3
 // -name .git`) and walked Documents/Desktop/Music, firing macOS privacy
 // prompts at the operator. Only the exact home path is denied — /Users/me/
 // project stays bounded, consistent with the rest of the denylist.
