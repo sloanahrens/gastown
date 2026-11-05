@@ -281,7 +281,7 @@ read -r gastown_first _ < <(mkrig gastown)
 read -r pinned newest < <(mkrig fx)
 printf '# comment\nfx %s\n' "$pinned" >"$seedtown/pins"
 build=$gastown_first
-seedmk() { make -C "$ROOT" --no-print-directory POLE_TOWN="$seedtown" POLE_SEED_PINS="$seedtown/pins" POLE_SEED_DIR="$seedtown/out" POLE_SEED_RIGS=fx POLE_COMMIT="$build" "$@"; }
+seedmk() { make -C "$ROOT" --no-print-directory POLE_TOWN="$seedtown" POLE_BUILD_SRC="$seedtown/gastown/mayor/rig" POLE_SEED_PINS="$seedtown/pins" POLE_SEED_DIR="$seedtown/out" POLE_SEED_RIGS=fx POLE_COMMIT="$build" "$@"; }
 if sout=$(seedmk polecat-seed-stage 2>&1) \
   && [[ -f "$seedtown/out/gastown/first.txt" && ! -e "$seedtown/out/gastown/second.txt" ]] \
   && grep -q -F "gastown at ${gastown_first:0:12} (the build commit)" <<<"$sout"; then
@@ -368,7 +368,7 @@ git -C "$gtown2/gastown/mayor/rig" add g.txt
 git -C "$gtown2/gastown/mayor/rig" -c user.name=t -c user.email=t@example.invalid commit -q -m build
 gbuild2=$(git -C "$gtown2/gastown/mayor/rig" rev-parse HEAD)
 printf 'fx %s\n' "$bpin" >"$gtown2/pins"
-if bout=$(make -C "$ROOT" --no-print-directory polecat-seed-stage POLE_TOWN="$gtown2" POLE_SEED_PINS="$gtown2/pins" POLE_SEED_DIR="$gtown2/out" POLE_SEED_RIGS=fx POLE_COMMIT="$gbuild2" 2>&1); then
+if bout=$(make -C "$ROOT" --no-print-directory polecat-seed-stage POLE_TOWN="$gtown2" POLE_BUILD_SRC="$gtown2/gastown/mayor/rig" POLE_SEED_PINS="$gtown2/pins" POLE_SEED_DIR="$gtown2/out" POLE_SEED_RIGS=fx POLE_COMMIT="$gbuild2" 2>&1); then
   fail "a stale committed pin stops the seed stage before anything is staged" "exited 0: $bout"
 elif grep -q -F 'pin-drift guard: rig fx pin' <<<"$bout" && grep -q -F 'lacks modules its main' <<<"$bout" && grep -q -F 'github.com/x/missing' <<<"$bout" && [[ ! -e "$gtown2/out/fx" ]]; then
   pass "a stale committed pin stops the seed stage before anything is staged"

@@ -16,7 +16,7 @@ func TestBuildRigSeedUsesThePinThatCoversTheBuildCommit(t *testing.T) {
 		pinSHA:  {"go.mod": goMod("example/gastown", "github.com/x/a")},
 		mainSHA: {"go.mod": goMod("example/gastown", "github.com/x/a")},
 	})
-	commit, notes, err := BuildRigSeed([]Source{{Rig: "gastown", Commit: pinSHA}}, "gastown", mainSHA, town, f.run)
+	commit, notes, err := BuildRigSeed([]Source{{Rig: "gastown", Commit: pinSHA}}, "gastown", mainSHA, town, "", f.run)
 	if err != nil {
 		t.Fatalf("BuildRigSeed: %v", err)
 	}
@@ -35,7 +35,7 @@ func TestBuildRigSeedFallsBackToTheBuildCommitWhenThePinLacksAModule(t *testing.
 		pinSHA:  {"go.mod": goMod("example/gastown", "github.com/x/a")},
 		mainSHA: {"go.mod": goMod("example/gastown", "github.com/x/a", "github.com/x/new")},
 	})
-	commit, notes, err := BuildRigSeed([]Source{{Rig: "gastown", Commit: pinSHA}}, "gastown", mainSHA, town, f.run)
+	commit, notes, err := BuildRigSeed([]Source{{Rig: "gastown", Commit: pinSHA}}, "gastown", mainSHA, town, "", f.run)
 	if err != nil {
 		t.Fatalf("BuildRigSeed on a pin lacking a module = %v, want the build commit, not an error", err)
 	}
@@ -54,7 +54,7 @@ func TestBuildRigSeedFailsWhenThePinCannotBeRead(t *testing.T) {
 	seedRig(f, "gastown", mainSHA, map[string]map[string]string{
 		mainSHA: {"go.mod": goMod("example/gastown", "github.com/x/a")},
 	})
-	_, _, err := BuildRigSeed([]Source{{Rig: "gastown", Commit: pinSHA}}, "gastown", mainSHA, town, f.run)
+	_, _, err := BuildRigSeed([]Source{{Rig: "gastown", Commit: pinSHA}}, "gastown", mainSHA, town, "", f.run)
 	if err == nil || !strings.Contains(err.Error(), "not readable in its canonical checkout") {
 		t.Fatalf("BuildRigSeed on an unreadable pin = %v, want an unreadable-pin error", err)
 	}
@@ -63,8 +63,52 @@ func TestBuildRigSeedFailsWhenThePinCannotBeRead(t *testing.T) {
 func TestBuildRigSeedWithNoPinUsesTheBuildCommit(t *testing.T) {
 	t.Parallel()
 	f := &guardGit{answer: map[string]string{rigDir("gastown") + " cat-file -t " + mainSHA: "commit"}}
-	commit, notes, err := BuildRigSeed(nil, "gastown", mainSHA, town, f.run)
+	commit, notes, err := BuildRigSeed(nil, "gastown", mainSHA, town, "", f.run)
 	if err != nil || commit != mainSHA || len(notes) != 0 {
 		t.Errorf("BuildRigSeed without a pin = %s, %v, %v; want the build commit and no notes", commit, notes, err)
+	}
+}
+
+// A build source that does not hold the build commit is named, with advice
+// that fits it: fetching the town's copy cannot help.
+func TestBuildRigSeedFailsWhenTheBuildSourceLacksTheBuildCommit(t *testing.T) {
+	t.Parallel()
+	const buildSrc = "/build/checkout"
+	f := &guardGit{answer: map[string]string{}}
+	_, _, err := BuildRigSeed([]Source{{Rig: "gastown", Commit: pinSHA}}, "gastown", mainSHA, town, buildSrc, f.run)
+	if err == nil {
+		t.Fatal("BuildRigSeed on a build source lacking the build commit = nil, want an error")
+	}
+	for _, want := range []string{"cannot read the build commit", buildSrc, "build from a checkout that holds the commit being built"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+}
+
+// With a build source, the build rig's commit check and pin comparison are
+// asked of that directory, never of the town's canonical checkout.
+func TestBuildRigSeedReadsTheBuildSource(t *testing.T) {
+	t.Parallel()
+	const buildSrc = "/build/checkout"
+	f := &guardGit{answer: map[string]string{buildSrc + " cat-file -t " + mainSHA: "commit"}}
+	seedRigAt(f, buildSrc, mainSHA, map[string]map[string]string{
+		pinSHA:  {"go.mod": goMod("example/gastown", "github.com/x/a")},
+		mainSHA: {"go.mod": goMod("example/gastown", "github.com/x/a")},
+	})
+	commit, _, err := BuildRigSeed([]Source{{Rig: "gastown", Commit: pinSHA}}, "gastown", mainSHA, town, buildSrc, f.run)
+	if err != nil {
+		t.Fatalf("BuildRigSeed with a build source: %v", err)
+	}
+	if commit != pinSHA {
+		t.Errorf("seeded at %s, want the pin %s", commit, pinSHA)
+	}
+	if len(f.calls) == 0 {
+		t.Fatal("BuildRigSeed made no git calls")
+	}
+	for _, c := range f.calls {
+		if !strings.HasPrefix(c, buildSrc+" ") {
+			t.Errorf("read %q, want every build rig read under the build source %s", c, buildSrc)
+		}
 	}
 }

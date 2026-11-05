@@ -178,6 +178,11 @@ POLE_SEED_DIR ?= $(CURDIR)/deploy/polecat/seed
 # The rig this repo is: its seed is the commit the image is built at, never a
 # pin, so a sandbox always has the modules of the gt it runs (gt-1rz2r).
 POLE_SEED_BUILD_RIG ?= gastown
+# The checkout the build rig's sources are read from: the one make runs in,
+# whose HEAD is POLE_COMMIT, because polecat-image refuses a tree with any
+# change (gt-omnuhc). The fixture towns in scripts/makefile-gate_test.sh and
+# internal/makegate keep their own checkouts.
+POLE_BUILD_SRC ?= $(CURDIR)
 # Removing the old images from the sandbox nodes is opt-in, so a build changes
 # only the image registry unless the operator asks for the cluster too: set
 # POLE_NODE_PRUNE=1 to run polecat-node-prune after the build (gt-06ni7).
@@ -220,6 +225,7 @@ polecat-seed-stage:
 		-town "$(POLE_TOWN)" \
 		-dest "$(POLE_SEED_DIR)" \
 		-build-rig "$(POLE_SEED_BUILD_RIG)" \
+		-build-src "$(POLE_BUILD_SRC)" \
 		-build-commit "$(POLE_COMMIT)"
 
 # polecat-node-prune removes old polecat images from the sandbox nodes

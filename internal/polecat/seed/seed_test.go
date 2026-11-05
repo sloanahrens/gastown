@@ -103,7 +103,7 @@ func TestStageReadsTheBuildCommit(t *testing.T) {
 		t.Fatalf("Plan: %v", err)
 	}
 
-	if err := Stage(dest, town, sources, g.archives); err != nil {
+	if err := Stage(dest, town, "gastown", "", sources, g.archives); err != nil {
 		t.Fatalf("Stage: %v", err)
 	}
 
@@ -125,6 +125,47 @@ func TestStageReadsTheBuildCommit(t *testing.T) {
 	}
 }
 
+// With a build source, the build rig's sources come from that directory while
+// every other pinned rig is still read from its own canonical checkout under
+// the town.
+func TestStageReadsTheBuildRigFromTheBuildSource(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	buildSrc := t.TempDir()
+	dest := t.TempDir()
+	const buildCommit = "f05e821cda74197a137049fc69f9a46c0c23c78f"
+	const pin = "92b9e510ac2f9ff8c80b0291f312ac482bf96c38"
+	g := &fakeGit{t: t, trees: map[string]map[string]string{
+		buildCommit: {"go.mod": "module example.com/gastown\n"},
+		pin:         {"go.mod": "module example.com/devops\n"},
+	}}
+	sources, err := Plan([]Source{{Rig: "devops", Commit: pin}}, "gastown", buildCommit)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	if err := Stage(dest, town, "gastown", buildSrc, sources, g.archives); err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+
+	wantCalls := []string{
+		buildSrc + " archive --format=tar " + buildCommit,
+		filepath.Join(town, "devops", "mayor", "rig") + " archive --format=tar " + pin,
+	}
+	if got := strings.Join(g.calls, "\n"); got != strings.Join(wantCalls, "\n") {
+		t.Errorf("git calls:\n%s\nwant:\n%s", got, strings.Join(wantCalls, "\n"))
+	}
+	for _, want := range []struct{ rig, commit string }{{"gastown", buildCommit}, {"devops", pin}} {
+		got, err := os.ReadFile(filepath.Join(dest, want.rig, "go.mod"))
+		if err != nil {
+			t.Fatalf("stage of %s: %v", want.rig, err)
+		}
+		if !strings.Contains(string(got), "/"+want.rig) {
+			t.Errorf("%s staged %q, want the tree of %s", want.rig, got, want.commit)
+		}
+	}
+}
+
 func TestStageClearsARigStagedBefore(t *testing.T) {
 	t.Parallel()
 	dest := t.TempDir()
@@ -138,7 +179,7 @@ func TestStageClearsARigStagedBefore(t *testing.T) {
 	const buildCommit = "f05e821cda74197a137049fc69f9a46c0c23c78f"
 	g := &fakeGit{t: t, trees: map[string]map[string]string{buildCommit: {"go.mod": "module example.com/gastown\n"}}}
 
-	if err := Stage(dest, t.TempDir(), []Source{{Rig: "gastown", Commit: buildCommit}}, g.archives); err != nil {
+	if err := Stage(dest, t.TempDir(), "gastown", "", []Source{{Rig: "gastown", Commit: buildCommit}}, g.archives); err != nil {
 		t.Fatalf("Stage: %v", err)
 	}
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
@@ -150,7 +191,7 @@ func TestStageNamesTheRigAndCommitTheCheckoutLacks(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	g := &fakeGit{t: t, trees: map[string]map[string]string{}}
-	err := Stage(t.TempDir(), town, []Source{{Rig: "gastown", Commit: "f05e821c"}}, g.archives)
+	err := Stage(t.TempDir(), town, "gastown", "", []Source{{Rig: "gastown", Commit: "f05e821c"}}, g.archives)
 	if err == nil {
 		t.Fatal("Stage accepted a commit no checkout holds")
 	}

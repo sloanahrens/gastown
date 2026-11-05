@@ -2,7 +2,6 @@ package seed
 
 import (
 	"fmt"
-	"path"
 	"strings"
 )
 
@@ -11,7 +10,12 @@ import (
 // lacks one falls back to the build commit: slower to seed, but complete, and a
 // line names the module so seed-pins gets bumped. Only a pin that cannot be read
 // at all is an error. The image itself always builds the build commit.
-func BuildRigSeed(pins []Source, buildRig, buildCommit, town string, git Git) (commit string, notes []string, err error) {
+//
+// buildSrc is the directory the build rig is read from, or "" for its canonical
+// checkout under town. An image build already runs in a checkout holding the
+// build commit, so it passes its own directory rather than depending on the
+// town's copy.
+func BuildRigSeed(pins []Source, buildRig, buildCommit, town, buildSrc string, git Git) (commit string, notes []string, err error) {
 	if !isCommit(buildCommit) {
 		return "", nil, fmt.Errorf("cannot read the build commit: %q is not a 7+ character hex commit, so build from a git checkout", buildCommit)
 	}
@@ -24,13 +28,21 @@ func BuildRigSeed(pins []Source, buildRig, buildCommit, town string, git Git) (c
 	if pin == "" || pin == buildCommit {
 		return buildCommit, nil, nil
 	}
-	dir := path.Join(town, buildRig, "mayor", "rig")
+	dir := buildRigCheckout(town, buildRig, buildSrc)
 	if _, err := git(dir, "cat-file", "-t", buildCommit); err != nil {
-		return "", nil, fmt.Errorf("cannot read the build commit %s in %s (%v): the checkout must hold the commit being built; fetch that checkout through the town's path, then rerun", short(buildCommit), dir, err)
+		advice := "fetch that checkout through the town's path, then rerun"
+		if buildSrc != "" {
+			advice = "build from a checkout that holds the commit being built, then rerun"
+		}
+		return "", nil, fmt.Errorf("cannot read the build commit %s in %s (%v): the checkout must hold the commit being built; %s", short(buildCommit), dir, err, advice)
 	}
 	missing, err := missingModules(git, dir, pin, buildCommit)
 	if err != nil {
-		return "", nil, fmt.Errorf("pin-drift guard: rig %s pin %s is not readable in its canonical checkout, so it cannot be compared with the build commit %s (%v): fetch or fix that checkout, then rerun", buildRig, short(pin), short(buildCommit), err)
+		where := "its canonical checkout"
+		if buildSrc != "" {
+			where = "the build source " + buildSrc
+		}
+		return "", nil, fmt.Errorf("pin-drift guard: rig %s pin %s is not readable in %s, so it cannot be compared with the build commit %s (%v): fetch or fix that checkout, then rerun", buildRig, short(pin), where, short(buildCommit), err)
 	}
 	if len(missing) > 0 {
 		return buildCommit, []string{fmt.Sprintf("seed: pin %s lacks %s; seeding at the build commit (bump seed-pins)", short(pin), strings.Join(missing, ", "))}, nil
