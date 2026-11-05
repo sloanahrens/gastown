@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -29,6 +30,10 @@ type SeatConfig struct {
 	// PinnedOnly keeps the seat for beads labeled agent:<its agent>: the
 	// dispatcher's random draw for unlabelled beads never lands here.
 	PinnedOnly bool `json:"pinned_only,omitempty"`
+	// GoFlags are extra go flags for this seat's GOFLAGS, space-separated.
+	// Only the flags seatGoFlags accepts; a flag that can override the
+	// toolchain or linker is refused at load (gt-gg9hv.42).
+	GoFlags string `json:"go_flags,omitempty"`
 }
 
 // Seat is a validated seat, as every reader sees it.
@@ -40,6 +45,7 @@ type Seat struct {
 	Backend    string // BackendTmux or BackendOpenShell, never empty
 	Sandbox    string // key in TownSettings.Sandboxes; set only for an openshell seat
 	PinnedOnly bool   // only beads labeled agent:<Agent> may take this seat
+	GoFlags    string // extra validated go flags for this seat's GOFLAGS, "" for none
 }
 
 // Window is a daily closed period in one timezone.
@@ -106,7 +112,11 @@ func Seats(ts *TownSettings, known func(agent string) bool) ([]Seat, error) {
 		} else if c.Sandbox != "" {
 			return nil, fmt.Errorf("polecat_pool.seats.%s.sandbox: only an openshell seat names a sandbox", a)
 		}
-		s := Seat{Agent: a, Cap: c.Cap, Names: c.Names, Backend: backend, Sandbox: c.Sandbox, PinnedOnly: c.PinnedOnly}
+		goFlags, err := seatGoFlags(a, c.GoFlags)
+		if err != nil {
+			return nil, err
+		}
+		s := Seat{Agent: a, Cap: c.Cap, Names: c.Names, Backend: backend, Sandbox: c.Sandbox, PinnedOnly: c.PinnedOnly, GoFlags: goFlags}
 		if c.Closed != "" {
 			if loc == nil {
 				return nil, fmt.Errorf("polecat_pool.seats.%s.closed needs polecat_pool.timezone", a)
@@ -163,6 +173,57 @@ func ParseWindow(s string, loc *time.Location) (*Window, error) {
 		return nil, fmt.Errorf("window %q: start and end are the same", s)
 	}
 	return &Window{StartMin: start, EndMin: end, Loc: loc}, nil
+}
+
+// seatGoFlags returns the extra go flags seat agent may add to its GOFLAGS,
+// space-normalized. Only -trimpath, -mod=readonly, -race and -p=<n> are
+// accepted; every other flag is refused by name, so a seat's go_flags can
+// change build modes but cannot replace the toolchain, linker or compiler a
+// flag such as -toolexec or -ldflags would retarget (gt-gg9hv.42).
+func seatGoFlags(agent, value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	tokens := strings.Split(value, " ")
+	for _, f := range tokens {
+		if f == "" {
+			return "", fmt.Errorf("polecat_pool.seats.%s.go_flags: an empty flag", agent)
+		}
+		if seatGoFlagAccepted(f) {
+			continue
+		}
+		return "", fmt.Errorf("polecat_pool.seats.%s.go_flags: flag %q is not accepted; want -trimpath, -mod=readonly, -race or -p=<n>", agent, f)
+	}
+	return strings.Join(tokens, " "), nil
+}
+
+// seatGoFlagAccepted reports whether f is one of the go flags a seat may add.
+func seatGoFlagAccepted(f string) bool {
+	switch f {
+	case "-trimpath", "-mod=readonly", "-race":
+		return true
+	}
+	n, ok := strings.CutPrefix(f, "-p=")
+	if !ok {
+		return false
+	}
+	par, err := strconv.Atoi(n)
+	return err == nil && par >= 1
+}
+
+// SeatGoFlags returns seat agent's validated extra go flags, or "" when the
+// pool has no seat for it. A spawn reads the pool alone, without Seats(), so
+// it validates here too: a value the loader refuses never reaches a GOFLAGS.
+func (p *PolecatPool) SeatGoFlags(agent string) (string, error) {
+	if p == nil || agent == "" {
+		return "", nil
+	}
+	c, ok := p.Seats[agent]
+	if !ok {
+		return "", nil
+	}
+	return seatGoFlags(agent, c.GoFlags)
 }
 
 // SeatWindow resolves seat's closed window in pool's timezone, or returns nil for
