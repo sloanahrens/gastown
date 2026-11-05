@@ -24,6 +24,10 @@ const (
 	KindRiskPath Kind = "risk-path"
 	// KindRedMain: the tier sweep found main red.
 	KindRedMain Kind = "red-main"
+	// KindCacheTrimNoOp: a shared cache trim completed and its claim still
+	// holds more than twice the cap, so the Job may have run the wrong
+	// helper (gt-gg9hv.46).
+	KindCacheTrimNoOp Kind = "cache-trim-noop"
 	// KindRejectedTwice: a bead was rejected by landing twice.
 	KindRejectedTwice Kind = "rejected-twice"
 	// KindEscalation: an open escalation awaits the overseer.
@@ -98,7 +102,7 @@ const (
 // that must know the full set.
 func Kinds() []Kind {
 	return []Kind{
-		KindRiskPath, KindRedMain, KindRejectedTwice, KindEscalation,
+		KindRiskPath, KindRedMain, KindCacheTrimNoOp, KindRejectedTwice, KindEscalation,
 		KindPolecatStall, KindLandingStuck, KindQueueStuck, KindDirectPush,
 		KindSlotHeld, KindSlotDeadHolder, KindBDSlow, KindTierSweepRed,
 		KindTierSweepStarved, KindTierSweepStuck,
