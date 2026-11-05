@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	crewTestHumanName  = "Sloan Ahrens"
-	crewTestHumanEmail = "sloan.ahrens@example.com"
+	crewTestHumanName  = "Test Operator"
+	crewTestHumanEmail = "operator@example.test"
 )
 
 // writeTownHuman writes the town's overseer section: the one record gt done
@@ -63,8 +63,8 @@ func TestCrewSubmitRefusesBranchNamingTheHuman(t *testing.T) {
 		name, humanName, humanEmail, branch string
 	}{
 		{"the configured name, in any case", "sloan", "ops@example.com", "crew/Sloan/gt-1"},
-		{"the email local part, in any case", "Sloan Ahrens", "Sloan.Ahrens@example.com", "crew/sloan.ahrens/gt-1"},
-		{"a crew branch missing its bead still names its agent", "Sloan Ahrens", "sloan.ahrens@example.com", "crew/sloan.ahrens"},
+		{"the email local part, in any case", "Test Operator", "Sloan.Ahrens@example.com", "crew/sloan.ahrens/gt-1"},
+		{"a crew branch missing its bead still names its agent", "Test Operator", "sloan.ahrens@example.com", "crew/sloan.ahrens"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -99,34 +99,34 @@ func TestCrewSubmitRefusesHeadCommitNamingTheHuman(t *testing.T) {
 		{
 			name: "author name",
 			commit: git.CommitAuthorship{
-				AuthorName: "SLOAN AHRENS", AuthorEmail: "dunlin@example.com",
+				AuthorName: "TEST OPERATOR", AuthorEmail: "dunlin@example.com",
 				CommitterName: "dunlin", CommitterEmail: "dunlin@example.com",
 			},
-			field: "author name", shownHuman: "SLOAN AHRENS",
+			field: "author name", shownHuman: "TEST OPERATOR",
 		},
 		{
 			name: "author email",
 			commit: git.CommitAuthorship{
-				AuthorName: "dunlin", AuthorEmail: "Sloan.Ahrens@example.com",
+				AuthorName: "dunlin", AuthorEmail: "operator@example.test",
 				CommitterName: "dunlin", CommitterEmail: "dunlin@example.com",
 			},
-			field: "author email", shownHuman: "Sloan.Ahrens@example.com",
+			field: "author email", shownHuman: "operator@example.test",
 		},
 		{
 			name: "committer name",
 			commit: git.CommitAuthorship{
 				AuthorName: "dunlin", AuthorEmail: "dunlin@example.com",
-				CommitterName: "Sloan Ahrens", CommitterEmail: "dunlin@example.com",
+				CommitterName: "Test Operator", CommitterEmail: "dunlin@example.com",
 			},
-			field: "committer name", shownHuman: "Sloan Ahrens",
+			field: "committer name", shownHuman: "Test Operator",
 		},
 		{
 			name: "committer email",
 			commit: git.CommitAuthorship{
 				AuthorName: "dunlin", AuthorEmail: "dunlin@example.com",
-				CommitterName: "dunlin", CommitterEmail: "sloan.ahrens@example.com",
+				CommitterName: "dunlin", CommitterEmail: "operator@example.test",
 			},
-			field: "committer email", shownHuman: "sloan.ahrens@example.com",
+			field: "committer email", shownHuman: "operator@example.test",
 		},
 	}
 	for _, tc := range cases {

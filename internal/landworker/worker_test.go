@@ -226,7 +226,7 @@ const branch = "polecat/opal/gt-abc+x1"
 
 // humanActor is the town's overseer identity the harness hands the worker:
 // the name a submission this worker refuses carries.
-const humanActor = "Sloan Ahrens"
+const humanActor = "Test Operator"
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()

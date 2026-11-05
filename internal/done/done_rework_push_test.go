@@ -127,7 +127,7 @@ func TestSubmitReworkOfRejectedHeadPushesUnderLeaseFromBead(t *testing.T) {
 
 func TestSubmitReworkForeignAuthorOnOriginRefusesFromBead(t *testing.T) {
 	t.Parallel()
-	h := reworkWiringHarness(t, "Sloan Ahrens", reworkWiringEmail)
+	h := reworkWiringHarness(t, "Test Operator", reworkWiringEmail)
 	if err := h.submit(); err == nil {
 		t.Fatal("submit succeeded over another author's commit on origin")
 	}
@@ -151,7 +151,7 @@ func TestSubmitReworkForeignSecondParentRefusesFromBead(t *testing.T) {
 	h := reworkWiringHarness(t, reworkWiringSeat, reworkWiringEmail)
 	h.repo.fullSummaries[reworkWiringRejected] = []git.CommitSummary{
 		{SHA: reworkWiringRejected, Author: reworkWiringSeat, Email: reworkWiringEmail, Subject: "Merge branch 'side'"},
-		{SHA: "s1", Author: "Sloan Ahrens", Email: reworkWiringEmail, Subject: "fix: the foreign commit"},
+		{SHA: "s1", Author: "Test Operator", Email: reworkWiringEmail, Subject: "fix: the foreign commit"},
 		{SHA: "p1", Author: reworkWiringSeat, Email: reworkWiringEmail, Subject: "feat: the first parent"},
 	}
 	if err := h.submit(); err == nil {

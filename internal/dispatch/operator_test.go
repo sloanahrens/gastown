@@ -4,7 +4,7 @@ import "testing"
 
 // TestOperatorReservation pins the two records that reserve a bead for the
 // human operator (gt-21pl0). The human assignees are the ones the town's own
-// beads carry today — `sloan` on gt-nj23.9, `Sloan Ahrens` and `overseer`
+// beads carry today — `sloan` on gt-nj23.9, `the operator` and `overseer`
 // elsewhere — and the agent addresses are the forms every dispatch path writes.
 func TestOperatorReservation(t *testing.T) {
 	t.Parallel()
@@ -20,7 +20,7 @@ func TestOperatorReservation(t *testing.T) {
 		{name: "another label", labels: []string{"run-blocker"}, want: ""},
 
 		{name: "bare handle is a person", assignee: "sloan", want: "assignee sloan is not an agent address"},
-		{name: "a name with a space is a person", assignee: "Sloan Ahrens", want: "assignee Sloan Ahrens is not an agent address"},
+		{name: "a name with a space is a person", assignee: "Test Operator", want: "assignee Test Operator is not an agent address"},
 		{name: "overseer is a person", assignee: "overseer", want: "assignee overseer is not an agent address"},
 
 		{name: "polecat address", assignee: "gastown/polecats/onyx"},

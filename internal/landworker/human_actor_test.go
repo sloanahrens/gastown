@@ -105,7 +105,7 @@ func TestPassRefusesASubmissionWithNoRecordedActor(t *testing.T) {
 // its submission lands (gt-2ge3z).
 func TestPassAcceptsAnAgentWhoseNameContainsTheHumanName(t *testing.T) {
 	t.Parallel()
-	for _, author := range []string{"sloan-runner", "Sloan Ahrens (agent)", "sloan"} {
+	for _, author := range []string{"sloan-runner", humanActor + " (agent)", "sloan"} {
 		t.Run(author, func(t *testing.T) {
 			t.Parallel()
 			h := newHarness(t)
