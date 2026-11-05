@@ -1117,6 +1117,14 @@ type Daemon struct {
 	// tierSweepStuckLoggedAt is the UnixNano time the stuck line last ran, 0
 	// before the first, so the line repeats at most once an hour.
 	tierSweepStuckLoggedAt atomic.Int64
+	// tierSweepDeclineKey names the capacity decline the job last logged, and
+	// tierSweepDeclineAt when: a reason that stands is one line an hour while
+	// the deferred cycle retries on every heartbeat, and the key ignores the
+	// figures, which move as the node's pods come and go
+	// (tier_sweep.go, gt-gg9hv.38). Only the job's single-flight cycle writes
+	// them.
+	tierSweepDeclineKey string
+	tierSweepDeclineAt  time.Time
 	// tierSweepSeams replace the tier_sweep job's outside effects in tests;
 	// the zero value is production (see tier_sweep.go).
 	tierSweepSeams tierSweepSeams

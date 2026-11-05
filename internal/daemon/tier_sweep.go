@@ -175,6 +175,12 @@ const (
 	// against an image nobody confirmed (gt-c3sue).
 	tierSweepRunnerImageBudget = 10 * time.Minute
 
+	// tierSweepPreflightDeclineInterval is how often the capacity preflight's
+	// decline line is logged while the reason stands. A deferred cycle retries
+	// on the next heartbeat, so the figures would otherwise be one line a
+	// minute for as long as the node is short (gt-gg9hv.38).
+	tierSweepPreflightDeclineInterval = time.Hour
+
 	// tierSweepPolecatImage is the repository make polecat-image tags
 	// (POLE_IMAGE), so a run naming anything else starts an image no build on
 	// this town wrote. TestTierSweepRunnerImageMatchesMakefile holds it to the
@@ -2318,6 +2324,10 @@ type tierSweepLaunch struct {
 	exitCode int
 	stop     func()
 	err      error
+	// declined is true for a launch the capacity preflight refused: nothing was
+	// created and the launcher has logged why, so the stage does not run and the
+	// cycle defers rather than judging the tree RED (gt-gg9hv.38).
+	declined bool
 }
 
 // tierSweepRunRunner runs one stage through the runner: it starts the rendered
@@ -2416,6 +2426,13 @@ func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec
 		started = launch(ctx, st, spec)
 		if started.stop != nil {
 			stop = started.stop
+		}
+		if started.declined {
+			// Nothing was created and nothing was learned about the tree, so
+			// the cycle defers instead of recording a RED verdict and a bead.
+			// The launcher logged the figures; this line stays short so they
+			// are one an hour, not one a heartbeat (gt-gg9hv.38).
+			return tierSweepStageResult{exitCode: -1, err: errors.New("the capacity preflight declined the launch")}
 		}
 		if started.err != nil {
 			stop()
@@ -2713,6 +2730,19 @@ func (d *Daemon) tierSweepLaunchRunner(ctx context.Context, st tierSweepStage, s
 	}
 	launch := tierSweepLaunch{}
 	launch.stop = func() { d.tierSweepRunnerStop(ctx, spec) }
+	// The capacity preflight runs before anything is applied: a Job the node
+	// cannot hold beside the control plane's pods is never created, and a
+	// preflight that cannot answer declines (gt-gg9hv.38).
+	if plan.Preflight != nil {
+		report, preflightErr := d.tierSweepRunnerPreflight(ctx, plan.Preflight)
+		if preflightErr != nil {
+			d.tierSweepLogPreflightDecline(spec.Context, preflightErr)
+			return tierSweepLaunch{exitCode: -1, declined: true}
+		}
+		// The reason stopped standing, so the next decline is news again.
+		d.tierSweepDeclineKey, d.tierSweepDeclineAt = "", time.Time{}
+		d.logger.Printf("tier_sweep: preflight on %s: %s", spec.Context, report)
+	}
 	// The guards run before anything is applied, and a refusal leaves nothing
 	// to apply: the run would share an engine object with a run still using it.
 	if guardOut, code, guardErr := d.tierSweepRunnerGuards(ctx, plan.Guards); guardErr != nil {
@@ -2737,6 +2767,52 @@ func (d *Daemon) tierSweepLaunchRunner(ctx context.Context, st tierSweepStage, s
 		launch.err = fmt.Errorf("the run did not start (exit %d)", code)
 	}
 	return launch
+}
+
+// tierSweepRunnerPreflight runs a plan's capacity preflight and returns what it
+// read. Every failure is the preflight's decline: a command that did not run or
+// an answer that cannot be read says nothing about the node's free capacity
+// (gt-gg9hv.38).
+func (d *Daemon) tierSweepRunnerPreflight(ctx context.Context, preflight *sweeprunner.Preflight) (sweeprunner.CapacityReport, error) {
+	step := preflight.Step
+	// A preflight that was not rendered has not passed: an unset command or
+	// reader is a plan the daemon cannot trust, not one it may skip.
+	if len(step.Argv) == 0 {
+		return sweeprunner.CapacityReport{}, errors.New("the run's capacity preflight has no command to run")
+	}
+	if preflight.Read == nil {
+		return sweeprunner.CapacityReport{}, errors.New("the run's capacity preflight has no reader")
+	}
+	cmd := exec.CommandContext(ctx, step.Argv[0], step.Argv[1:]...) //nolint:gosec // G204: the argv a Backend rendered from a validated Spec, run directly and never through a shell
+	if step.Stdin != nil {
+		cmd.Stdin = bytes.NewReader(step.Stdin)
+	}
+	stdout, _, err := d.runCmd(cmd)
+	if err != nil {
+		// The error names the command; its captured output is never quoted,
+		// since it can carry a credential (gt-tpg0p.35).
+		return sweeprunner.CapacityReport{}, fmt.Errorf("cannot read the node's capacity: %w", err)
+	}
+	return preflight.Read(stdout)
+}
+
+// tierSweepLogPreflightDecline logs why a launch was declined, at most once an
+// hour while the same reason stands: the cycle retries every heartbeat, and a
+// line per retry would bury every other tier_sweep line. The key is the context
+// and whether the node was short or unreadable, not the figures, which move as
+// the node's pods come and go; a reason of another kind is its own line at once.
+func (d *Daemon) tierSweepLogPreflightDecline(context string, reason error) {
+	key := context + ": could not be read"
+	var noRoom *sweeprunner.NoRoomError
+	if errors.As(reason, &noRoom) {
+		key = context + ": no room"
+	}
+	now := d.clk().Now()
+	if key == d.tierSweepDeclineKey && now.Sub(d.tierSweepDeclineAt) < tierSweepPreflightDeclineInterval {
+		return
+	}
+	d.logger.Printf("tier_sweep: not launching on %s: %v", context, reason)
+	d.tierSweepDeclineKey, d.tierSweepDeclineAt = key, now
 }
 
 // tierSweepRunnerGuards runs a plan's guards in order and stops at the first

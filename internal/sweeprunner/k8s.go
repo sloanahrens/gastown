@@ -311,8 +311,11 @@ type ClaimRef struct {
 type EmptyDirVolumeSource struct{}
 
 // Render returns the run as a Job and the steps that remove it, or the Validate
-// error that refuses the Spec. The guard refuses while another sweep Job of the
-// rig is still active, because every run of the rig reads the one repo claim.
+// error that refuses the Spec. Before anything is applied, the caller runs the
+// capacity preflight, which reads the node's allocatable and requested amounts
+// and declines a run that would not leave room for the control plane's pods
+// (gt-gg9hv.38). The guard refuses while another sweep Job of the rig is still
+// active, because every run of the rig reads the one repo claim.
 // Apply then creates the repo claim, fills it through a short-lived root sync pod
 // (cleared, copied into, chowned to the runner, removed), and only then creates
 // the output claim, the cache claim and the Job. The teardown removes the sync
@@ -331,8 +334,18 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 	claim := renderClaim(OutClaimName(spec), outClaimStorage)
 	reader := renderReader(spec)
 	sync := renderSyncPod(spec)
+	request, err := podRequestTotal(job, sync, reader)
+	if err != nil {
+		return Plan{}, err
+	}
 	return Plan{
 		Job: job,
+		// One kubectl call lists every node and pod: the preflight decides from
+		// the node's allocatable amounts and what its pods already request.
+		Preflight: &Preflight{
+			Step: Step{Argv: kubectlArgv(spec, "get", "nodes,pods", "-A", "-o", "json")},
+			Read: capacityRead(request),
+		},
 		Guards: []Guard{{
 			// The repo claim is shared by every run of the rig, and a run's Job
 			// mounts it read-only while the sweep runs: rewriting it under an
@@ -539,7 +552,32 @@ func syncPodName(spec Spec) string {
 	return k8sName("gt-sweep-sync", spec.Rig)
 }
 
+// podRequestTotal is the amount the launch asks a node for: every container of
+// the Job's pod, which is where a sidecar's share is counted beside the
+// runner's, and the sync and reader pods the run creates on the same cluster.
+func podRequestTotal(job *Job, sync, reader *Pod) (Amount, error) {
+	total, err := PodRequestTotal(job.Spec.Template.Spec)
+	if err != nil {
+		return Amount{}, fmt.Errorf("the Job's pod: %w", err)
+	}
+	for _, pod := range []*Pod{sync, reader} {
+		request, err := PodRequestTotal(pod.Spec)
+		if err != nil {
+			return Amount{}, fmt.Errorf("pod %q: %w", pod.Metadata.Name, err)
+		}
+		total = total.Add(request)
+	}
+	return total, nil
+}
+
 // renderJob is the Job for a Spec that has passed Validate.
+//
+// Spec.CPUs and Spec.MemoryGB are the runner container's share, not the pod's:
+// the dind sidecar requests its own fixed share (dindCPU and dindMemory) beside
+// it, so a run with Dind asks the node for the Spec's share plus the sidecar's.
+// A pod total that had to hold both would leave a Spec at the bottom of its
+// range nothing for the runner once the sidecar's share came out of it
+// (gt-gg9hv.38).
 func renderJob(spec Spec) *Job {
 	containers := []Container{runnerContainer(spec)}
 	volumes := []Volume{
