@@ -18,6 +18,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
+	"github.com/steveyegge/gastown/internal/diskmaint/disks"
 	"github.com/steveyegge/gastown/internal/hostprobe"
 	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -209,7 +210,9 @@ func runHostAgent(ctx context.Context, townRoot string) error {
 		interval: hostAgentInterval,
 		path:     hostprobe.Path(townRoot),
 		collect: func(ctx context.Context, now time.Time) hostprobe.Probes {
-			return hostAgentWithLaunchd(ctx, hostprobe.Collect(ctx, hostAgentRunner, townRoot, now), templates.SupervisorJobState)
+			p := hostprobe.Collect(ctx, hostAgentRunner, townRoot, now)
+			p = hostAgentWithDockerDisk(ctx, p, hostAgentRunner)
+			return hostAgentWithLaunchd(ctx, p, templates.SupervisorJobState)
 		},
 		write: hostAgentWrite,
 		logf: func(format string, args ...any) {
@@ -253,6 +256,39 @@ func hostAgentWithLaunchd(ctx context.Context, p hostprobe.Probes, read template
 	case <-ctx.Done():
 		p.Launchd = &hostprobe.Field[hostprobe.Launchd]{Err: "launchd job read: " + ctx.Err().Error()}
 	}
+	return p
+}
+
+// hostAgentDoltContainer is the Docker Desktop container whose disk the agent
+// measures. gt-dolt is the container the town cannot run without, so it is
+// present whenever the town is; the runner container the patrol used to name is
+// removed between jobs (gt-gg9hv.24).
+const hostAgentDoltContainer = "gt-dolt"
+
+// hostAgentDockerDiskTimeout bounds the docker exec, as hostprobe bounds each of
+// its own field reads: a docker that hangs must not hold the whole reading.
+const hostAgentDockerDiskTimeout = 30 * time.Second
+
+// hostAgentWithDockerDisk fills the reading's Docker Desktop disk from the df of
+// hostAgentDoltContainer, through the agent's runner. A container daemon cannot
+// run docker against the host, so this field is how it learns the use of the
+// disk a container it depends on lives on. A failed read or output that names no
+// capacity sets the field's Err and leaves Value zero, so the daemon omits the
+// disk rather than reading it as empty.
+func hostAgentWithDockerDisk(ctx context.Context, p hostprobe.Probes, run hostprobe.Runner) hostprobe.Probes {
+	ctx, cancel := context.WithTimeout(ctx, hostAgentDockerDiskTimeout)
+	defer cancel()
+	out, err := run(ctx, []string{"docker", "exec", hostAgentDoltContainer, "df", "-P", "/"})
+	if err != nil {
+		p.DockerDisk = hostprobe.Field[hostprobe.Disk]{Err: fmt.Sprintf("docker exec %s df: %v", hostAgentDoltContainer, err)}
+		return p
+	}
+	pct, err := disks.ParseDF(string(out))
+	if err != nil {
+		p.DockerDisk = hostprobe.Field[hostprobe.Disk]{Err: fmt.Sprintf("docker exec %s df: %v", hostAgentDoltContainer, err)}
+		return p
+	}
+	p.DockerDisk = hostprobe.Field[hostprobe.Disk]{Value: hostprobe.Disk{UsedPct: pct}}
 	return p
 }
 

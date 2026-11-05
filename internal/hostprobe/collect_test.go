@@ -92,6 +92,9 @@ func fullProbeReading() Probes {
 		// field must carry the not-collected error, never a zero value that
 		// would read as a job that is not running.
 		Launchd: &Field[Launchd]{Err: LaunchdNotCollected},
+		// Collect never reads the Docker Desktop disk either (the host agent
+		// fills it): a zero value would read as a disk at 0% used.
+		DockerDisk: Field[Disk]{Err: DockerDiskNotCollected},
 	}
 }
 
