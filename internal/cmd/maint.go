@@ -51,6 +51,11 @@ const (
 	maintTargetColima = "colima"
 	maintTargetCivol  = "civol"
 
+	// maintTargetRegistryCollect is the registry's garbage collect on its own:
+	// the Mac's registry-collect job applies it whether or not a delete ran,
+	// since the container cannot reach the registry's engine to collect.
+	maintTargetRegistryCollect = "registry-collect"
+
 	// maintNodesContext and maintNodesPrefix name the docker context and the
 	// kind node prefix of the sandbox cluster, the defaults cmd/nodeprune uses.
 	maintNodesContext = "colima-gt-sbx"
@@ -85,8 +90,10 @@ lock held defers and says to retry. The other targets keep no lock: the local
 ones touch only the worktrees, backups and directories this machine owns, and
 the docker ones only the images and volumes their daemons list.
 
-A target names what to maintain: baks, civol, colima, nodes, registry (only
-when the town configures a registry), sizes or worktree. The known targets are
+A target names what to maintain: baks, civol, colima, nodes, registry and
+registry-collect (both only when the town configures a registry), sizes or
+worktree. registry-collect runs the registry's garbage collect without deleting
+anything, so a night's collect can reclaim what an earlier run's deletes freed. The known targets are
 listed when a name is unknown, and naming none runs every target in name order.
 A plan that could not read its inputs refuses instead of guessing, and both
 leaves exit non-zero then.`,
@@ -346,9 +353,9 @@ func maintKeep(get func(string) string) (int, error) {
 func maintTargets(ctx context.Context, town string, cfg polecatimage.Config, keep int, mode string, run diskmaint.Runner, home string, out io.Writer) (map[string]diskmaint.Target, error) {
 	ledgerDir := filepath.Join(town, ".runtime", "diskmaint")
 	ledger := diskmaint.NewLedger(filepath.Join(ledgerDir, "ledger.jsonl"), maintLedgerMaxBytes)
-	// The registry target is built first, so a town that configures a registry
+	// The registry targets are built first, so a town that configures a registry
 	// refuses on what it refused on before, with the same message.
-	registryTarget, err := maintRegistryTarget(ctx, town, cfg, keep, run, home, out, ledger)
+	registryTargets, err := maintRegistryTargets(ctx, town, cfg, keep, run, home, out, ledger)
 	if err != nil {
 		return nil, err
 	}
@@ -367,17 +374,19 @@ func maintTargets(ctx context.Context, town string, cfg polecatimage.Config, kee
 	for name, target := range maintDockerTargets(home, run, ledger) {
 		targets[name] = target
 	}
-	if registryTarget != nil {
-		targets[maintTargetRegistry] = registryTarget
+	for name, target := range registryTargets {
+		targets[name] = target
 	}
 	return targets, nil
 }
 
-// maintRegistryTarget builds the registry target. A town that names no registry
-// publishes nothing, so it has no registry to prune and gets no target: nil and
-// no error. A registry address that is not host:port, or a town with no HOME,
-// refuses rather than building a target that would guess its docker socket.
-func maintRegistryTarget(ctx context.Context, town string, cfg polecatimage.Config, keep int, run diskmaint.Runner, home string, out io.Writer, ledger *diskmaint.Ledger) (diskmaint.Target, error) {
+// maintRegistryTargets builds the registry targets: the prune and the collect
+// on its own, which share one config and one push gate. A town that names no
+// registry publishes nothing, so it has no registry to prune and gets no
+// targets: nil and no error. A registry address that is not host:port, or a
+// town with no HOME, refuses rather than building a target that would guess
+// its docker socket.
+func maintRegistryTargets(ctx context.Context, town string, cfg polecatimage.Config, keep int, run diskmaint.Runner, home string, out io.Writer, ledger *diskmaint.Ledger) (map[string]diskmaint.Target, error) {
 	if cfg.Registry == "" {
 		return nil, nil
 	}
@@ -390,7 +399,7 @@ func maintRegistryTarget(ctx context.Context, town string, cfg polecatimage.Conf
 		return nil, errors.New("cannot locate the colima docker socket: HOME is unset")
 	}
 	gate := &maintPushGate{cfg: cfg, out: out, now: time.Now}
-	return registry.NewTarget(registry.Config{
+	regCfg := registry.Config{
 		Base:         "http://" + cfg.Registry,
 		Kubeconfig:   filepath.Join(town, ".runtime", "sbx-k8s", "kubeconfig"),
 		RecordsDir:   cfg.SandboxRecords,
@@ -402,7 +411,11 @@ func maintRegistryTarget(ctx context.Context, town string, cfg polecatimage.Conf
 		Lock:         gate.withLock,
 		Run:          run,
 		Ledger:       ledger,
-	}), nil
+	}
+	return map[string]diskmaint.Target{
+		maintTargetRegistry:        registry.NewTarget(regCfg),
+		maintTargetRegistryCollect: registry.NewCollectTarget(regCfg),
+	}, nil
 }
 
 // maintLocalTargets builds the targets that maintain this machine's own files:

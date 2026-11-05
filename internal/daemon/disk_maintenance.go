@@ -642,7 +642,7 @@ func (d *Daemon) diskMaintRegistryConfig(mode string, cfg polecatimage.Config, h
 		out: d.diskMaintenanceOut(),
 		now: func() time.Time { return d.clk().Now() },
 	}
-	return registry.Config{
+	regCfg := registry.Config{
 		Base:         "http://" + cfg.Registry,
 		Kubeconfig:   diskMaintKubeconfig(town, getenv),
 		RecordsDir:   cfg.SandboxRecords,
@@ -654,8 +654,17 @@ func (d *Daemon) diskMaintRegistryConfig(mode string, cfg polecatimage.Config, h
 		Lock:         gate.withLock,
 		Run:          d.diskMaintRunner,
 		Ledger:       diskmaint.NewLedger(filepath.Join(ledgerDir, "ledger.jsonl"), diskMaintLedgerMaxBytes),
-	}, nil
+	}
+	if containerMode(getenv) {
+		regCfg.CollectUnavailable = diskMaintCollectUnavailable
+	}
+	return regCfg, nil
 }
+
+// diskMaintCollectUnavailable is why the container's registry target records a
+// collect as skipped: the container has no engine socket to the registry, and
+// the garbage collect runs from the Mac's registry-collect job instead.
+const diskMaintCollectUnavailable = "the garbage collect runs from the Mac's registry-collect job, which this container cannot reach"
 
 const (
 	// diskMaintHostKubeconfig is the town's sandbox kubeconfig, relative to the

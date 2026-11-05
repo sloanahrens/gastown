@@ -37,16 +37,21 @@ const collectGrace = time.Second
 // run: a skipped collect and a quiet one look alike in a ledger otherwise.
 const collectSkipped = "collect skipped: "
 
-// gc reclaims the registry's own space after the deletes result records, and
-// sets Result.Collected when the collect ran. It returns the lines the ledger
-// records: each reason it did not run, and the command's failure.
+// gc reclaims the registry's own space and sets Result.Collected when the
+// collect ran. It returns the lines the ledger records: each reason it did not
+// run, and the command's failure. The caller decides whether a collect is due:
+// the delete path calls gc only after a delete succeeded, and the collect-only
+// target calls it on every run.
 //
-// Collect drops blobs no kept tag shares, so it runs only when a delete
-// succeeded and no push is in flight. A guard gc cannot read — an unwired
-// push reader, runner or container name — refuses the collect instead of
-// reading as "no push, nothing waiting": a wrong answer there lets collect
-// walk storage a push is writing. A failed collect is the same refusal to act
-// on an unknown, so it is recorded and does not fail the apply.
+// A Config that names CollectUnavailable (the container, which has no engine
+// socket to the registry) records that reason and touches nothing else.
+//
+// Collect drops blobs no kept tag shares, so it runs only when no push is in
+// flight. A guard gc cannot read — an unwired push reader, runner or container
+// name — refuses the collect instead of reading as "no push, nothing waiting":
+// a wrong answer there lets collect walk storage a push is writing. A failed
+// collect is the same refusal to act on an unknown, so it is recorded and does
+// not fail the apply.
 //
 // The caller's deadline is what ends a collect that never returns: it sets the
 // container's timeout (see collectTimeout), so the collect is normally over
@@ -57,8 +62,8 @@ const collectSkipped = "collect skipped: "
 // that still has not answered at the deadline is abandoned and recorded a
 // failure, so the retention returns and releases the plugin lock.
 func (t *Target) gc(ctx context.Context, result *diskmaint.Result) []string {
-	if len(result.Done) == 0 {
-		return nil
+	if t.cfg.CollectUnavailable != "" {
+		return []string{collectSkipped + t.cfg.CollectUnavailable}
 	}
 	switch {
 	case t.cfg.PushInFlight == nil:

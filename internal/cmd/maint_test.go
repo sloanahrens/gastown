@@ -482,9 +482,9 @@ func TestMaintTargetsBuildTheRegistryFromTheTownConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("maintTargets() error = %v", err)
 	}
-	want := []string{maintTargetBaks, maintTargetCivol, maintTargetColima, maintTargetNodes, maintTargetRegistry, maintTargetSizes, maintTargetWorktree}
+	want := []string{maintTargetBaks, maintTargetCivol, maintTargetColima, maintTargetNodes, maintTargetRegistry, maintTargetRegistryCollect, maintTargetSizes, maintTargetWorktree}
 	if got := maintTargetNames(targets); !slices.Equal(got, want) {
-		t.Fatalf("targets = %v, want %v: the registry joins the local and docker targets", got, want)
+		t.Fatalf("targets = %v, want %v: the registry and its collect join the local and docker targets", got, want)
 	}
 	if got := targets[maintTargetRegistry].Name(); got != maintTargetRegistry {
 		t.Errorf("Name() = %q, want %q", got, maintTargetRegistry)
@@ -494,6 +494,41 @@ func TestMaintTargetsBuildTheRegistryFromTheTownConfig(t *testing.T) {
 	}
 	if runner.calls != nil {
 		t.Errorf("building a target ran %v, want no program", runner.calls)
+	}
+}
+
+// TestMaintRegistryCollectIsATarget pins that registry-collect is a target the
+// command names, and that its plan is the one collect action: it prunes nothing,
+// so the plan carries no delete and runs no program.
+func TestMaintRegistryCollectIsATarget(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	cfg := polecatimage.Config{Registry: "localhost:5001"}
+	runner := &fakeMaintRunner{}
+
+	targets, err := maintTargets(context.Background(), town, cfg, 5, maintModePlan, runner.run, t.TempDir(), io.Discard)
+	if err != nil {
+		t.Fatalf("maintTargets() error = %v", err)
+	}
+	target, ok := targets[maintTargetRegistryCollect]
+	if !ok {
+		t.Fatalf("targets = %v, want %s beside the other targets", maintTargetNames(targets), maintTargetRegistryCollect)
+	}
+	if got := target.Name(); got != maintTargetRegistryCollect {
+		t.Errorf("Name() = %q, want %q", got, maintTargetRegistryCollect)
+	}
+	plan, err := target.Plan(context.Background(), diskmaint.Policy{Keep: 5})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if plan.Refused != "" {
+		t.Fatalf("Plan() refused: %s", plan.Refused)
+	}
+	if len(plan.Actions) != 1 || plan.Actions[0].Kind != "collect" {
+		t.Fatalf("actions = %+v, want the one collect action", plan.Actions)
+	}
+	if runner.calls != nil {
+		t.Errorf("planning ran %v, want no program", runner.calls)
 	}
 }
 

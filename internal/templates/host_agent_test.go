@@ -324,6 +324,23 @@ func TestMacMaintJobs_NodesRunsAt0530(t *testing.T) {
 	}
 }
 
+// TestMacMaintJobsIncludeRegistryCollect pins the registry collect's row: the
+// Mac applies registry-collect at 05:45, a quarter hour after the nodes prune,
+// and the nodes row keeps its own time.
+func TestMacMaintJobsIncludeRegistryCollect(t *testing.T) {
+	t.Parallel()
+	job := macMaintJob(t, "registry-collect")
+	if job.Target != "registry-collect" {
+		t.Errorf("the registry-collect row applies target %q, want registry-collect", job.Target)
+	}
+	if job.Hour != 5 || job.Minute != 45 {
+		t.Errorf("the registry-collect row starts at %02d:%02d, want 05:45", job.Hour, job.Minute)
+	}
+	if nodes := macMaintJob(t, "nodes"); nodes.Target != "nodes" || nodes.Hour != 5 || nodes.Minute != 30 {
+		t.Errorf("the nodes row is %s at %02d:%02d, want nodes at 05:30", nodes.Target, nodes.Hour, nodes.Minute)
+	}
+}
+
 // TestMacMaintJobPlist_EscapesTheValuesItWritesIntoXML covers a town path that
 // holds XML syntax: the plist has to parse and carry the path as its text.
 func TestMacMaintJobPlist_EscapesTheValuesItWritesIntoXML(t *testing.T) {

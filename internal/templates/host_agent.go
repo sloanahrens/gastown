@@ -108,9 +108,12 @@ type MacMaintJob struct {
 }
 
 // macMaintJobs is the table install renders. One row is one Mac-only target
-// and the time it runs; gt-gg9hv.24.5 adds the next row.
+// and the time it runs. registry-collect runs after the nodes prune: the
+// registry's collect is the Mac's, because the container has no engine socket
+// to the registry.
 var macMaintJobs = []MacMaintJob{
 	{LabelSuffix: "nodes", Target: "nodes", Hour: 5, Minute: 30},
+	{LabelSuffix: "registry-collect", Target: "registry-collect", Hour: 5, Minute: 45},
 }
 
 // MacMaintJobs returns the table's rows. It is a copy, so a caller cannot

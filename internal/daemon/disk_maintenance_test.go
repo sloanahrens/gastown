@@ -1193,3 +1193,52 @@ func TestDiskMaintenanceRegistryTargetUsesTheHelpersKubeconfig(t *testing.T) {
 		})
 	}
 }
+
+// TestDiskMaintContainerModeRegistryCollectUnavailable pins that the container's
+// registry target records its garbage collect as skipped: the container has no
+// engine socket to the registry, and the Mac's registry-collect job collects
+// instead. Outside container mode the target keeps its collect.
+func TestDiskMaintContainerModeRegistryCollectUnavailable(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	tests := []struct {
+		name       string
+		supervisor string
+		want       string
+	}{
+		{"container mode", agentconfig.SupervisorContainer, diskMaintCollectUnavailable},
+		{"host, unset", "", ""},
+		{"launchd owner", agentconfig.SupervisorLaunchd, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			getenv := func(key string) string {
+				switch key {
+				case agentconfig.ContainerModeEnv:
+					return tt.supervisor
+				case "POLECAT_IMAGE_REGISTRY":
+					return "127.0.0.1:1"
+				}
+				return ""
+			}
+			cfg, err := polecatimage.ConfigFromEnv(func(key string) string {
+				if key == "POLECAT_IMAGE_TOWN_ROOT" {
+					return town
+				}
+				return getenv(key)
+			})
+			if err != nil {
+				t.Fatalf("reading the plugin config: %v", err)
+			}
+			d := &Daemon{config: &Config{TownRoot: town}}
+			regCfg, err := d.diskMaintRegistryConfig(agentconfig.DiskMaintenanceModeDryRun, cfg, t.TempDir(), getenv)
+			if err != nil {
+				t.Fatalf("building the registry config: %v", err)
+			}
+			if regCfg.CollectUnavailable != tt.want {
+				t.Errorf("registry target CollectUnavailable = %q, want %q", regCfg.CollectUnavailable, tt.want)
+			}
+		})
+	}
+}

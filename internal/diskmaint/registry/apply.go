@@ -40,9 +40,15 @@ const actionDelete = "delete-manifest"
 // A refused plan, and an empty one, have nothing to delete: Apply records that
 // and returns before taking the lock.
 func (t *Target) Apply(ctx context.Context, plan diskmaint.Plan) (diskmaint.Result, error) {
-	result := diskmaint.Result{Target: planTarget}
+	result := diskmaint.Result{Target: t.Name()}
 	if t.cfg.Ledger == nil {
 		return result, errNoLedger
+	}
+	if t.collectOnly && !allCollectActions(plan.Actions) {
+		// A collect-only target makes no deletes, so a plan that asks for one
+		// is refused before the lock is taken, and the refusal is recorded.
+		err := fmt.Errorf("%s apply: the plan holds an action that is not %s", collectTarget, actionCollect)
+		return result, errors.Join(err, t.record(plan, result, []string{err.Error()}))
 	}
 	if plan.Refused != "" || len(plan.Actions) == 0 {
 		return result, t.record(plan, result, nil)
@@ -53,8 +59,17 @@ func (t *Target) Apply(ctx context.Context, plan diskmaint.Plan) (diskmaint.Resu
 	ran := false
 	body := func(ctx context.Context) error {
 		ran = true
+		if t.collectOnly {
+			errs = t.gc(ctx, &result)
+			return nil
+		}
 		errs, stopped = t.deleteAll(ctx, plan.Actions, &result)
-		errs = append(errs, t.gc(ctx, &result)...)
+		// The collect reclaims what deletes freed, so it is due only when one
+		// succeeded; a run that deleted nothing leaves the collect to the
+		// registry-collect target.
+		if len(result.Done) > 0 {
+			errs = append(errs, t.gc(ctx, &result)...)
+		}
 		return nil
 	}
 
@@ -136,7 +151,7 @@ func actionRef(action diskmaint.Action) (repo, digest string, err error) {
 func (t *Target) record(plan diskmaint.Plan, result diskmaint.Result, errs []string) error {
 	err := t.cfg.Ledger.Append(diskmaint.LedgerEntry{
 		TS:         time.Now().UTC(),
-		Target:     planTarget,
+		Target:     t.Name(),
 		Mode:       "apply",
 		Planned:    len(plan.Actions),
 		Done:       len(result.Done),

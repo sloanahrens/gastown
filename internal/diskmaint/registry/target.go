@@ -19,6 +19,10 @@ type Config struct {
 	Kubeconfig, RecordsDir string
 	// DockerHost and Container address the garbage-collect command.
 	DockerHost, Container string
+	// CollectUnavailable, when set, is why this process cannot run the garbage
+	// collect (the container has no engine socket to the registry). A collect
+	// is then recorded as skipped with this reason, and nothing runs.
+	CollectUnavailable string
 	// Keep is the window a Policy without one falls back to.
 	Keep int
 	// Installed reads the full commit of the installed gt, from gt version.
@@ -37,10 +41,12 @@ type Config struct {
 	Ledger *diskmaint.Ledger
 }
 
-// Target prunes the town's container registry.
+// Target prunes the town's container registry. A Target from NewCollectTarget
+// runs only the garbage collect instead (see collect.go).
 type Target struct {
-	cfg    Config
-	client *Client
+	cfg         Config
+	client      *Client
+	collectOnly bool
 }
 
 // NewTarget returns a Target that reads the registry at cfg.Base.
@@ -49,11 +55,21 @@ func NewTarget(cfg Config) *Target {
 }
 
 // Name is the target's name in plans and ledger entries.
-func (t *Target) Name() string { return planTarget }
+func (t *Target) Name() string {
+	if t.collectOnly {
+		return collectTarget
+	}
+	return planTarget
+}
 
 // Measure reports the bytes the registry's manifests hold and how many tags
 // name them; Capacity is 0 because the registry shares its disk with the town.
+// A collect-only target measures nothing and says so, rather than reporting an
+// empty registry.
 func (t *Target) Measure(ctx context.Context) (diskmaint.Measurement, error) {
+	if t.collectOnly {
+		return diskmaint.Measurement{}, errCollectMeasure
+	}
 	repos, err := t.client.Catalog(ctx)
 	if err != nil {
 		return diskmaint.Measurement{}, fmt.Errorf("measure: catalog: %w", err)
@@ -93,6 +109,9 @@ func (t *Target) Measure(ctx context.Context) (diskmaint.Measurement, error) {
 // BuildPlan's decision for them; a read that fails refuses the plan rather than
 // letting it guess.
 func (t *Target) Plan(ctx context.Context, p diskmaint.Policy) (diskmaint.Plan, error) {
+	if t.collectOnly {
+		return collectPlan(p), nil
+	}
 	keep := t.cfg.Keep
 	if p.Keep > 0 {
 		keep = p.Keep
