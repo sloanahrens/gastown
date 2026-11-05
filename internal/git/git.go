@@ -2693,11 +2693,8 @@ func (g *Git) ListRemoteRefsWithHashes(remote, prefix string) ([]RemoteRef, erro
 	return g.ListRemoteRefsWithHashesEnv(remote, prefix, nil)
 }
 
-// ListRemoteRefsWithHashesEnv is ListRemoteRefsWithHashes under additional
-// environment variables (FetchRefspecWithEnv's counterpart for reads), bounded
-// by the read-only remote-query timeout. A caller that authenticates with a
-// deploy key passes the same GIT_SSH_COMMAND it would fetch and push with, so
-// every read and write of the target reaches it under one identity.
+// ListRemoteRefsWithHashesEnv is ListRemoteRefsWithHashes with env passed to
+// the git process, so a deploy key's GIT_SSH_COMMAND reaches ls-remote.
 func (g *Git) ListRemoteRefsWithHashesEnv(remote, prefix string, env []string) ([]RemoteRef, error) {
 	out, err := g.runWithEnvAndTimeout([]string{"ls-remote", "--refs", remote, prefix + "*"}, env, remoteQueryTimeout)
 	return parseRemoteRefs(out, err)

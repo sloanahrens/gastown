@@ -85,6 +85,11 @@ type Fake struct {
 	// pushFileLimit, when positive, is the size in bytes a single file of a
 	// push may have. See SetPushFileLimit.
 	pushFileLimit int64
+
+	// lsRemoteEnv is the environment of the most recent
+	// ListRemoteRefsWithHashesEnv call; the world has no process
+	// environment of its own. See ListRemoteEnv.
+	lsRemoteEnv []string
 }
 
 // New returns an empty world.

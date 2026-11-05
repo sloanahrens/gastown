@@ -335,11 +335,21 @@ func (h *handle) ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRe
 	return h.ListRemoteRefsWithHashesTimeout(remote, prefix, 0)
 }
 
-// ListRemoteRefsWithHashesEnv is ListRemoteRefsWithHashes; the fake models no
-// process environment, so the variables git would run with (a deploy key's
-// GIT_SSH_COMMAND) change nothing here, as in FetchRefspecWithEnv.
-func (h *handle) ListRemoteRefsWithHashesEnv(remote, prefix string, _ []string) ([]git.RemoteRef, error) {
+// ListRemoteRefsWithHashesEnv is ListRemoteRefsWithHashes, recording env for
+// ListRemoteEnv since the fake has no process to apply it to (gt-4tc05).
+func (h *handle) ListRemoteRefsWithHashesEnv(remote, prefix string, env []string) ([]git.RemoteRef, error) {
+	h.f.mu.Lock()
+	h.f.lsRemoteEnv = append([]string(nil), env...)
+	h.f.mu.Unlock()
 	return h.ListRemoteRefsWithHashesTimeout(remote, prefix, 0)
+}
+
+// ListRemoteEnv returns env from the most recent ListRemoteRefsWithHashesEnv
+// call on the world, or nil when none ran; a copy the caller may keep.
+func (f *Fake) ListRemoteEnv() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.lsRemoteEnv...)
 }
 
 func (h *handle) ListRemoteRefsWithHashesTimeout(remote, prefix string, _ time.Duration) ([]git.RemoteRef, error) {
