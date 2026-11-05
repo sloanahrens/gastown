@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -124,6 +125,18 @@ func TestRunnerOSRunnerFailureCarriesTheStderrTail(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "disk full") {
 		t.Fatalf("error %q does not carry the child's stderr", err)
+	}
+}
+
+// TestRunnerOSRunnerFailureKeepsItsWholeStderr pins that the exit error holds
+// the child's whole stderr, so a caller can name its first line without parsing
+// the message.
+func TestRunnerOSRunnerFailureKeepsItsWholeStderr(t *testing.T) {
+	t.Parallel()
+	_, err := OSRunner(DefaultAllowEnv)(context.Background(), []string{"/bin/sh", "-c", "printf 'first\\nsecond\\n' >&2; exit 3"})
+	var exit *exitError
+	if !errors.As(err, &exit) || exit.stderr != "first\nsecond\n" {
+		t.Fatalf("error = %v, want an exit error holding the whole stderr", err)
 	}
 }
 

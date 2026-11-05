@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 )
@@ -35,12 +36,12 @@ type bdCall struct {
 
 // fakeBd answers every call with the same output, and records the calls.
 func fakeBd(out string, ok bool, calls *[]bdCall) BdRun {
-	return func(dir string, args []string) ([]byte, bool) {
+	return func(dir string, args []string) ([]byte, error) {
 		*calls = append(*calls, bdCall{dir, args})
 		if !ok {
-			return nil, false
+			return nil, errors.New("bd failed")
 		}
-		return []byte(out), true
+		return []byte(out), nil
 	}
 }
 
@@ -130,6 +131,17 @@ func TestLoadBeadsFailedListIsAStructuredFailure(t *testing.T) {
 	LoadBeads(fakeBd("", false, &calls), []string{"/g"}, &d)
 	if want := []string{"bd:/g"}; !reflect.DeepEqual(d.Failed, want) {
 		t.Errorf("failed = %v, want %v", d.Failed, want)
+	}
+}
+
+// A listing whose output is not JSON is refused with that as its cause.
+func TestLoadBeadsNotJSONNamesItsCause(t *testing.T) {
+	t.Parallel()
+	var calls []bdCall
+	var d Dropped
+	LoadBeads(fakeBd("not json", true, &calls), []string{"/g"}, &d)
+	if want := "bd list failed in /g: output is not JSON"; len(d.Items) != 1 || d.Items[0].Reason != want {
+		t.Fatalf("dropped = %+v, want the one reason %q", d.Items, want)
 	}
 }
 

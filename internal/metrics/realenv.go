@@ -244,11 +244,10 @@ func RealEnv(ctx context.Context, opts RealEnvOptions) (RealTown, error) {
 }
 
 // realBd is the extract's bd seam over the runner: bd in dir, its stdout, and
-// ok false for any failure.
+// the error of any failure.
 func realBd(ctx context.Context, r RunnerDir) BdRun {
-	return func(dir string, args []string) ([]byte, bool) {
-		out, err := run(ctx, r, dir, append([]string{"bd"}, args...), runTimeout)
-		return out, err == nil
+	return func(dir string, args []string) ([]byte, error) {
+		return run(ctx, r, dir, append([]string{"bd"}, args...), runTimeout)
 	}
 }
 
