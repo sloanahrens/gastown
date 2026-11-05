@@ -376,29 +376,59 @@ func TestTrimSweepCacheRefusesPathsOutsideTheCaches(t *testing.T) {
 func TestTrimSweepCacheErrorDoesNotChangeTheVerdict(t *testing.T) {
 	t.Parallel()
 	removeErr := errors.New("the claim is read-only")
-	h := failingTrimHarness(t, removeErr)
+	cases := []struct {
+		name string
+		trim func(root string) *CacheTrim
+		// logged is the failure the trim log must name.
+		logged string
+	}{
+		{
+			name:   "a failing remove",
+			trim:   failingRemoveTrim(removeErr),
+			logged: removeErr.Error(),
+		},
+		{
+			// A directory the claim cannot list makes the listing partial, so the
+			// trim fails before it removes anything.
+			name: "a failing walk",
+			trim: func(root string) *CacheTrim {
+				claim := faultyClaim{
+					MapFS: fakeClaim(map[string]*fstest.MapFile{"gocache/entry": fakeFile(10, time.Now())}),
+					dirs:  map[string]error{cachevol.SeedBuildCacheDir: fs.ErrPermission},
+				}
+				return &CacheTrim{Root: root, CapBytes: 1, Claim: fakeClaimOf(claim), Remove: removeSweepCacheFile}
+			},
+			logged: "listing " + cachevol.SeedBuildCacheDir + ":",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := failingTrimHarness(t, tc.trim)
 
-	code := h.run("--rig", "gastown", "--sha", testSHA, "--tiers", "integration", "--out", h.out, "--repo", "/repo.git")
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0 with the result written (stderr %q)", code, h.stderr.String())
-	}
-	r, err := sweeprunner.Read(h.out, "gastown", testSHA)
-	if err != nil {
-		t.Fatalf("read the result: %v", err)
-	}
-	verdicts, err := sweeprunner.ToTierResults(r)
-	if err != nil {
-		t.Fatalf("convert the result: %v", err)
-	}
-	if v := verdicts[tiersweep.TierIntegration]; v.Verdict != "GREEN" {
-		t.Errorf("integration = %+v, want the sweep's GREEN verdict", v)
-	}
-	logData, err := os.ReadFile(filepath.Join(h.out, "logs", cacheTrimLogName))
-	if err != nil {
-		t.Fatalf("read the trim log: %v", err)
-	}
-	if !strings.Contains(string(logData), removeErr.Error()) {
-		t.Errorf("trim log %q does not name the failure %q", logData, removeErr)
+			code := h.run("--rig", "gastown", "--sha", testSHA, "--tiers", "integration", "--out", h.out, "--repo", "/repo.git")
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0 with the result written (stderr %q)", code, h.stderr.String())
+			}
+			r, err := sweeprunner.Read(h.out, "gastown", testSHA)
+			if err != nil {
+				t.Fatalf("read the result: %v", err)
+			}
+			verdicts, err := sweeprunner.ToTierResults(r)
+			if err != nil {
+				t.Fatalf("convert the result: %v", err)
+			}
+			if v := verdicts[tiersweep.TierIntegration]; v.Verdict != "GREEN" {
+				t.Errorf("integration = %+v, want the sweep's GREEN verdict", v)
+			}
+			logData, err := os.ReadFile(filepath.Join(h.out, "logs", cacheTrimLogName))
+			if err != nil {
+				t.Fatalf("read the trim log: %v", err)
+			}
+			if !strings.Contains(string(logData), tc.logged) {
+				t.Errorf("trim log %q does not name the failure %q", logData, tc.logged)
+			}
+		})
 	}
 }
 
@@ -429,7 +459,7 @@ func TestTrimSweepCacheFailureFallsBackToStderr(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			removeErr := errors.New("the claim is read-only")
-			h := failingTrimHarness(t, removeErr)
+			h := failingTrimHarness(t, failingRemoveTrim(removeErr))
 			tc.setup(t, h.out)
 			code := h.run("--rig", "gastown", "--sha", testSHA, "--tiers", "integration", "--out", h.out, "--repo", "/repo.git")
 			if code != 0 {
@@ -445,21 +475,28 @@ func TestTrimSweepCacheFailureFallsBackToStderr(t *testing.T) {
 	}
 }
 
-// failingTrimHarness is a run whose sweep passes and whose claim removal fails.
-func failingTrimHarness(t *testing.T, removeErr error) *harness {
+// failingTrimHarness is a run whose sweep passes and whose claim trim is the one
+// trim builds on the claim root.
+func failingTrimHarness(t *testing.T, trim func(root string) *CacheTrim) *harness {
 	t.Helper()
 	h := newHarness(t, nil, func(_ []string, overrides map[string]string, stdout, _ io.Writer) int {
 		fmt.Fprintf(stdout, "tier-sweep: integration GREEN passed=1 failed=0 skipped=0 (logs %s) in 1s\n", overrides[tiersweep.EnvLogDir])
 		return 0
 	})
-	root := emptyClaimRoot(t)
-	writeFile(t, filepath.Join(root, cachevol.SeedBuildCacheDir, "entry"), 10, time.Now())
-	h.deps.Trim = &CacheTrim{
-		Root: root, CapBytes: 1,
-		Claim:  diskClaim,
-		Remove: func(string, string) error { return removeErr },
-	}
+	h.deps.Trim = trim(emptyClaimRoot(t))
 	return h
+}
+
+// failingRemoveTrim is a trim with one planned removal, which fails with err.
+func failingRemoveTrim(err error) func(root string) *CacheTrim {
+	return func(root string) *CacheTrim {
+		claim := fakeClaim(map[string]*fstest.MapFile{"gocache/entry": fakeFile(10, time.Now())})
+		return &CacheTrim{
+			Root: root, CapBytes: 1,
+			Claim:  fakeClaimOf(claim),
+			Remove: func(string, string) error { return err },
+		}
+	}
 }
 
 // TestTrimSweepCacheRefusesAClaimItCannotOpen: a planned removal whose claim
