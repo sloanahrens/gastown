@@ -143,12 +143,32 @@ func shouldRunMaintenanceCycle(now, lastRun time.Time) bool {
 
 // runScheduledMaintenance checks if we're in the maintenance window and, once
 // per window, dispatches a backup-then-gc cycle over every database in the
-// data dir. Every tick also settles the stale-gc alerts, in the window or not
-// (maintenance_gc_stale.go). A request file from the update job runs a cycle
-// at any hour and is answered through its result file (maintenance_request.go).
+// data dir. The stale-gc alerts are settled before the tick does any window
+// work, in the window and out of it (maintenance_gc_stale.go); an archive-now
+// request is served only after that check. A request file from the update job
+// runs a cycle at any hour and is answered through its result file
+// (maintenance_request.go). An archive-now request runs only the history
+// archive pass and answers it (scheduled_maintenance_archive_request.go).
 func (d *Daemon) runScheduledMaintenance() {
 	files := osRequestFiles{}
 	dir := update.Dir(d.config.TownRoot)
+
+	// The archive-now request runs the history archive pass and nothing else,
+	// so a tick serving one returns before any window work. A malformed or
+	// invalid-id archive request is settled and the tick carries on as if there
+	// were none; an unreadable one is left for the next tick. The request is
+	// served after the stale-gc check below, so it rides the tick like every
+	// other request.
+	archiveRequest, archiveRequested, err := readArchiveRequest(files, dir)
+	switch {
+	case errors.Is(err, errMalformedRequest):
+		d.dropUnanswerableRequest(files, archiveRequestPath(dir), "archive", err)
+	case errors.Is(err, errInvalidRunID):
+		d.answerInvalidArchiveRequest(files, dir, err)
+	case err != nil:
+		d.logger.Printf("scheduled_maintenance: WARNING: %v — leaving the archive request for the next tick", err)
+	}
+
 	request, requested, err := readMaintenanceRequest(files, dir)
 	switch {
 	case errors.Is(err, errMalformedRequest):
@@ -175,6 +195,9 @@ func (d *Daemon) runScheduledMaintenance() {
 		if requested {
 			d.answerRequest(request, gcOutcomeFailed, "the scheduled_maintenance patrol is not active")
 		}
+		if archiveRequested {
+			d.answerArchive(archiveRequest, "failed", "the scheduled_maintenance patrol is not active")
+		}
 		return
 	}
 
@@ -185,6 +208,14 @@ func (d *Daemon) runScheduledMaintenance() {
 	// in-window check would sleep through (gt-2l9zd). It reads the state file,
 	// not the window, so it runs before the window is parsed.
 	d.checkStaleMaintenanceGC(now)
+
+	// An archive-now request runs the history archive pass and nothing else,
+	// and returns before any window work. It is reached only after the check
+	// above, so a tick that serves one still settles the stale-gc alerts.
+	if archiveRequested {
+		d.serveArchiveRequest(archiveRequest)
+		return
+	}
 
 	// The update job owns the nightly cycle when its trigger is on: this tick
 	// starts none of its own. A B11 request is an instruction rather than this

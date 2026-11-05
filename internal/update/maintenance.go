@@ -19,6 +19,37 @@ const RequestFileName = "maintenance-request"
 // it removes the request.
 const ResultFileName = "maintenance-result.json"
 
+// ArchiveRequestFileName is the archive-now command's request file: the
+// history archive pass alone, under a name of its own so a daemon that predates
+// archive-now never reads it and the command times out still pending
+// (gt-xr2byt).
+const ArchiveRequestFileName = "archive-request"
+
+// ArchiveResultFileName is the daemon's answer to ArchiveRequestFileName.
+const ArchiveResultFileName = "archive-result.json"
+
+// requestPair names one request and result file and the word the protocol's
+// error text uses for them.
+type requestPair struct {
+	request string
+	result  string
+	kind    string
+}
+
+func maintenancePair() requestPair {
+	return requestPair{request: RequestFileName, result: ResultFileName, kind: "maintenance"}
+}
+
+func archivePair() requestPair {
+	return requestPair{request: ArchiveRequestFileName, result: ArchiveResultFileName, kind: "archive"}
+}
+
+// requestPath is the request file inside dir.
+func (p requestPair) requestPath(dir string) string { return filepath.Join(dir, p.request) }
+
+// resultPath is the result file inside dir.
+func (p requestPair) resultPath(dir string) string { return filepath.Join(dir, p.result) }
+
 // Outcomes Wait reports itself; a daemon-written result may also carry
 // "completed", which Wait returns unchanged.
 const (
@@ -63,6 +94,18 @@ type MaintenanceRequest struct {
 	Clock Clock
 }
 
+// ArchiveRequest is the archive-now command's handle on the archive request and
+// result files: the same exclusive-create and wait protocol as
+// MaintenanceRequest, over the archive pair (gt-xr2byt).
+type ArchiveRequest struct {
+	// Dir is the .runtime/update directory.
+	Dir string
+	// Files is the file system both files are read and written through.
+	Files MaintFiles
+	// Clock stamps the request and measures the wait.
+	Clock Clock
+}
+
 // Request asks the daemon for a maintenance cycle for runID.
 //
 // A request file already holding runID makes the call a no-op; one holding
@@ -71,31 +114,42 @@ type MaintenanceRequest struct {
 // earlier run, so a result another job is still waiting to read is never
 // destroyed.
 func (m *MaintenanceRequest) Request(runID string) error {
+	return requestCycle(m.Dir, maintenancePair(), m.Files, m.Clock, runID)
+}
+
+// Request asks the daemon for the history archive pass for runID, with the
+// same rules as MaintenanceRequest.Request.
+func (a *ArchiveRequest) Request(runID string) error {
+	return requestCycle(a.Dir, archivePair(), a.Files, a.Clock, runID)
+}
+
+// requestCycle is Request over one file pair.
+func requestCycle(dir string, p requestPair, files MaintFiles, clock Clock, runID string) error {
 	if runID == "" {
-		return errors.New("write maintenance request: empty run id")
+		return fmt.Errorf("write %s request: empty run id", p.kind)
 	}
-	data, err := json.Marshal(RequestFile{RunID: runID, At: m.Clock.Now()})
+	data, err := json.Marshal(RequestFile{RunID: runID, At: clock.Now()})
 	if err != nil {
 		// A clock time outside the year range JSON can carry is the one way
 		// this fails; refuse rather than write a request the daemon cannot parse.
-		return fmt.Errorf("encode maintenance request: %w", err)
+		return fmt.Errorf("encode %s request: %w", p.kind, err)
 	}
-	reqPath := m.requestPath()
-	if err := m.Files.CreateExclusive(reqPath, data, fileMode); err != nil {
+	reqPath := p.requestPath(dir)
+	if err := files.CreateExclusive(reqPath, data, fileMode); err != nil {
 		if !errors.Is(err, fs.ErrExist) {
-			return fmt.Errorf("create maintenance request %s: %w", reqPath, err)
+			return fmt.Errorf("create %s request %s: %w", p.kind, reqPath, err)
 		}
-		return m.settleExistingRequest(reqPath, runID)
+		return settleExistingRequest(files, p, reqPath, runID)
 	}
-	resultPath := m.resultPath()
-	if err := m.Files.Remove(resultPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	resultPath := p.resultPath(dir)
+	if err := files.Remove(resultPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		// Release the request this call just created: a retry must retry the
 		// removal, not return nil as if the stale result were gone.
-		releaseErr := m.Files.Remove(reqPath)
+		releaseErr := files.Remove(reqPath)
 		if releaseErr != nil && !errors.Is(releaseErr, fs.ErrNotExist) {
-			return fmt.Errorf("clear stale maintenance result %s: %w; release request %s: %v", resultPath, err, reqPath, releaseErr)
+			return fmt.Errorf("clear stale %s result %s: %w; release request %s: %v", p.kind, resultPath, err, reqPath, releaseErr)
 		}
-		return fmt.Errorf("clear stale maintenance result %s: %w", resultPath, err)
+		return fmt.Errorf("clear stale %s result %s: %w", p.kind, resultPath, err)
 	}
 	return nil
 }
@@ -103,19 +157,19 @@ func (m *MaintenanceRequest) Request(runID string) error {
 // settleExistingRequest decides what a request file that already exists means
 // for runID: nil when it is this run's own, an error naming the other run
 // otherwise.
-func (m *MaintenanceRequest) settleExistingRequest(path, runID string) error {
-	data, err := m.Files.ReadFile(path)
+func settleExistingRequest(files MaintFiles, p requestPair, path, runID string) error {
+	data, err := files.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("read existing maintenance request %s: %w", path, err)
+		return fmt.Errorf("read existing %s request %s: %w", p.kind, path, err)
 	}
 	var req RequestFile
 	if err := json.Unmarshal(data, &req); err != nil {
-		return fmt.Errorf("parse existing maintenance request %s: %w; remove %s to recover", path, err, path)
+		return fmt.Errorf("parse existing %s request %s: %w; remove %s to recover", p.kind, path, err, path)
 	}
 	if req.RunID == runID {
 		return nil
 	}
-	return fmt.Errorf("maintenance request %s is for run %q: another update job is waiting for it", path, req.RunID)
+	return fmt.Errorf("%s request %s is for run %q: another update job is waiting for it", p.kind, path, req.RunID)
 }
 
 // Wait polls the request file through sleep until it is gone, then returns the
@@ -126,25 +180,42 @@ func (m *MaintenanceRequest) settleExistingRequest(path, runID string) error {
 // timeout the result is Outcome "deferred" with the request left in place for
 // the daemon's next tick. A canceled context returns its error.
 func (m *MaintenanceRequest) Wait(ctx context.Context, sleep func(context.Context, time.Duration) error, runID string, timeout, poll time.Duration) (MaintenanceResult, error) {
+	return waitForCycle(ctx, m.Dir, maintenancePair(), m.Files, m.Clock, sleep, runID, timeout, poll)
+}
+
+// Wait polls the archive request file exactly as MaintenanceRequest.Wait polls
+// the maintenance one and returns the daemon's answer.
+func (a *ArchiveRequest) Wait(ctx context.Context, sleep func(context.Context, time.Duration) error, runID string, timeout, poll time.Duration) (MaintenanceResult, error) {
+	return waitForCycle(ctx, a.Dir, archivePair(), a.Files, a.Clock, sleep, runID, timeout, poll)
+}
+
+// requestPath is the maintenance request file inside Dir.
+func (m *MaintenanceRequest) requestPath() string { return maintenancePair().requestPath(m.Dir) }
+
+// resultPath is the maintenance result file inside Dir.
+func (m *MaintenanceRequest) resultPath() string { return maintenancePair().resultPath(m.Dir) }
+
+// waitForCycle is Wait over one file pair.
+func waitForCycle(ctx context.Context, dir string, p requestPair, files MaintFiles, clock Clock, sleep func(context.Context, time.Duration) error, runID string, timeout, poll time.Duration) (MaintenanceResult, error) {
 	if runID == "" {
-		return MaintenanceResult{}, errors.New("wait for maintenance result: empty run id")
+		return MaintenanceResult{}, fmt.Errorf("wait for %s result: empty run id", p.kind)
 	}
-	start := m.Clock.Now()
-	reqPath := m.requestPath()
+	start := clock.Now()
+	reqPath := p.requestPath(dir)
 	for {
 		if err := ctx.Err(); err != nil {
 			return MaintenanceResult{}, err
 		}
-		_, err := m.Files.ReadFile(reqPath)
+		_, err := files.ReadFile(reqPath)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
-			return m.readResult(runID), nil
+			return readResult(p, files, dir, runID), nil
 		case err != nil:
 			// An unreadable request is not a finished one: report it instead of
 			// reading the result as if the daemon had answered.
-			return MaintenanceResult{}, fmt.Errorf("read maintenance request %s: %w", reqPath, err)
+			return MaintenanceResult{}, fmt.Errorf("read %s request %s: %w", p.kind, reqPath, err)
 		}
-		now := m.Clock.Now()
+		now := clock.Now()
 		if now.Sub(start) >= timeout {
 			return MaintenanceResult{Outcome: maintenanceDeferred, Detail: "the daemon did not finish in time"}, nil
 		}
@@ -157,31 +228,21 @@ func (m *MaintenanceRequest) Wait(ctx context.Context, sleep func(context.Contex
 // readResult reads the result file after the request is gone and returns it
 // only when it answers this run; every other state is a failure the caller
 // must not mistake for a completed cycle.
-func (m *MaintenanceRequest) readResult(runID string) MaintenanceResult {
-	path := m.resultPath()
-	data, err := m.Files.ReadFile(path)
+func readResult(p requestPair, files MaintFiles, dir, runID string) MaintenanceResult {
+	path := p.resultPath(dir)
+	data, err := files.ReadFile(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return MaintenanceResult{Outcome: maintenanceFailed, Detail: fmt.Sprintf("the daemon removed the maintenance request without writing %s", ResultFileName)}
+		return MaintenanceResult{Outcome: maintenanceFailed, Detail: fmt.Sprintf("the daemon removed the %s request without writing %s", p.kind, p.result)}
 	case err != nil:
-		return MaintenanceResult{Outcome: maintenanceFailed, Detail: fmt.Sprintf("read maintenance result %s: %v", path, err)}
+		return MaintenanceResult{Outcome: maintenanceFailed, Detail: fmt.Sprintf("read %s result %s: %v", p.kind, path, err)}
 	}
 	var res MaintenanceResult
 	if err := json.Unmarshal(data, &res); err != nil {
-		return MaintenanceResult{Outcome: maintenanceFailed, Detail: fmt.Sprintf("parse maintenance result %s: %v", path, err)}
+		return MaintenanceResult{Outcome: maintenanceFailed, Detail: fmt.Sprintf("parse %s result %s: %v", p.kind, path, err)}
 	}
 	if res.RunID != runID {
-		return MaintenanceResult{Outcome: maintenanceFailed, Detail: fmt.Sprintf("maintenance result %s is for run %q, not %q", path, res.RunID, runID)}
+		return MaintenanceResult{Outcome: maintenanceFailed, Detail: fmt.Sprintf("%s result %s is for run %q, not %q", p.kind, path, res.RunID, runID)}
 	}
 	return res
-}
-
-// requestPath is the request file inside Dir.
-func (m *MaintenanceRequest) requestPath() string {
-	return filepath.Join(m.Dir, RequestFileName)
-}
-
-// resultPath is the result file inside Dir.
-func (m *MaintenanceRequest) resultPath() string {
-	return filepath.Join(m.Dir, ResultFileName)
 }

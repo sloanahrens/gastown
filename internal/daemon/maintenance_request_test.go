@@ -444,23 +444,24 @@ func TestReadMaintenanceRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := []struct {
-		name      string
-		files     *recordingRequestFiles
-		ok        bool
-		malformed bool
-		invalid   bool
-		wantErr   bool
-		wantRunID string
+		name       string
+		files      *recordingRequestFiles
+		ok         bool
+		malformed  bool
+		invalid    bool
+		wantErr    bool
+		wantRunID  string
+		wantPrefix string // the message the update job has always read
 	}{
 		{name: "no file", files: &recordingRequestFiles{}},
 		{name: "valid", files: &recordingRequestFiles{read: valid}, ok: true, wantRunID: "run-1"},
 		{name: "allowed punctuation", files: &recordingRequestFiles{read: []byte(`{"run_id":"run.1-a_b"}`)}, ok: true, wantRunID: "run.1-a_b"},
 		{name: "64 characters", files: &recordingRequestFiles{read: []byte(`{"run_id":"` + strings.Repeat("a", 64) + `"}`)}, ok: true, wantRunID: strings.Repeat("a", 64)},
-		{name: "unparseable", files: &recordingRequestFiles{read: []byte("{")}, malformed: true, wantErr: true},
-		{name: "no run id", files: &recordingRequestFiles{read: []byte(`{"at":"2026-10-01T14:00:00Z"}`)}, malformed: true, wantErr: true},
-		{name: "run id too long", files: &recordingRequestFiles{read: []byte(`{"run_id":"` + strings.Repeat("a", 65) + `"}`)}, invalid: true, wantErr: true},
-		{name: "run id with a slash", files: &recordingRequestFiles{read: []byte(`{"run_id":"run/1"}`)}, invalid: true, wantErr: true},
-		{name: "run id with a newline", files: &recordingRequestFiles{read: []byte(`{"run_id":"run\n1"}`)}, invalid: true, wantErr: true},
+		{name: "unparseable", files: &recordingRequestFiles{read: []byte("{")}, malformed: true, wantErr: true, wantPrefix: "malformed maintenance request: parse /update/maintenance-request: "},
+		{name: "no run id", files: &recordingRequestFiles{read: []byte(`{"at":"2026-10-01T14:00:00Z"}`)}, malformed: true, wantErr: true, wantPrefix: "malformed maintenance request: /update/maintenance-request has no run id"},
+		{name: "run id too long", files: &recordingRequestFiles{read: []byte(`{"run_id":"` + strings.Repeat("a", 65) + `"}`)}, invalid: true, wantErr: true, wantPrefix: "invalid maintenance run id: /update/maintenance-request"},
+		{name: "run id with a slash", files: &recordingRequestFiles{read: []byte(`{"run_id":"run/1"}`)}, invalid: true, wantErr: true, wantPrefix: "invalid maintenance run id: /update/maintenance-request"},
+		{name: "run id with a newline", files: &recordingRequestFiles{read: []byte(`{"run_id":"run\n1"}`)}, invalid: true, wantErr: true, wantPrefix: "invalid maintenance run id: /update/maintenance-request"},
 		{name: "unreadable", files: &recordingRequestFiles{readErr: errors.New("permission denied")}, wantErr: true},
 	}
 	for _, tc := range cases {
@@ -479,6 +480,9 @@ func TestReadMaintenanceRequest(t *testing.T) {
 			}
 			if got := errors.Is(err, errInvalidRunID); got != tc.invalid {
 				t.Errorf("invalid run id = %v, want %v (err=%v)", got, tc.invalid, err)
+			}
+			if tc.wantPrefix != "" && (err == nil || !strings.HasPrefix(err.Error(), tc.wantPrefix)) {
+				t.Errorf("error = %q, want it to start %q", err, tc.wantPrefix)
 			}
 			if tc.ok && req.RunID != tc.wantRunID {
 				t.Errorf("run id = %q, want %q", req.RunID, tc.wantRunID)

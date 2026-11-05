@@ -455,7 +455,7 @@ func TestMaintenanceArchiveAdvancesTheWatermarkOnlyAfterTheFileIsClosed(t *testi
 			return appendArchiveTable(path, columns, rowValues)
 		}
 
-		if _, _, err := d.maintenanceArchiveCommits(ctx, dir, "gt", ArchiveWatermark{}); err != nil {
+		if _, _, _, err := d.maintenanceArchiveCommits(ctx, dir, "gt", ArchiveWatermark{}); err != nil {
 			t.Fatalf("export: %v", err)
 		}
 		if !appended {
@@ -482,7 +482,7 @@ func TestMaintenanceArchiveAdvancesTheWatermarkOnlyAfterTheFileIsClosed(t *testi
 		d.maint.archiveAppend = func(string, []string, [][]string) error {
 			return errors.New("close failed")
 		}
-		if _, _, err := d.maintenanceArchiveCommits(ctx, t.TempDir(), "gt", ArchiveWatermark{}); err == nil {
+		if _, _, _, err := d.maintenanceArchiveCommits(ctx, t.TempDir(), "gt", ArchiveWatermark{}); err == nil {
 			t.Fatal("an append that failed reported success")
 		}
 		st, err := loadMaintenanceGCState(d.config.TownRoot)
@@ -1853,7 +1853,7 @@ func TestEventsArchiveFirstReadIsBounded(t *testing.T) {
 	d.maint.archiveOpenDB = archiveFakeOpener(t, &archiveFakeServer{columns: columns, rows: rows})
 
 	ctx := context.Background()
-	if _, _, err := d.maintenanceArchiveEvents(ctx, dir, "gt", EventsArchiveWatermark{}); err != nil {
+	if _, _, _, err := d.maintenanceArchiveEvents(ctx, dir, "gt", EventsArchiveWatermark{}); err != nil {
 		t.Fatalf("first export: %v", err)
 	}
 	wantRows := func(n int) [][]string {
@@ -1876,7 +1876,7 @@ func TestEventsArchiveFirstReadIsBounded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loading state: %v", err)
 	}
-	if _, _, err := d.maintenanceArchiveEvents(ctx, dir, "gt", st.ArchiveEventsWatermarks["gt"]); err != nil {
+	if _, _, _, err := d.maintenanceArchiveEvents(ctx, dir, "gt", st.ArchiveEventsWatermarks["gt"]); err != nil {
 		t.Fatalf("second export: %v", err)
 	}
 	got = readArchiveCSV(t, eventsArchiveFile(dir, "gt"))
@@ -2252,7 +2252,7 @@ func TestArchiveLimitsComeFromConfig(t *testing.T) {
 			rows:    archiveCommitRows(10, gcTestNow),
 		})
 
-		if _, _, err := d.maintenanceArchiveCommits(ctx, dir, "gt", ArchiveWatermark{}); err != nil {
+		if _, _, _, err := d.maintenanceArchiveCommits(ctx, dir, "gt", ArchiveWatermark{}); err != nil {
 			t.Fatalf("export: %v", err)
 		}
 		got := readArchiveCSV(t, archiveFile(dir, "gt"))
@@ -2291,7 +2291,7 @@ func TestArchiveLimitsComeFromConfig(t *testing.T) {
 			rows:    archiveEventRows(10, base),
 		})
 
-		if _, _, err := d.maintenanceArchiveEvents(ctx, dir, "gt", EventsArchiveWatermark{}); err != nil {
+		if _, _, _, err := d.maintenanceArchiveEvents(ctx, dir, "gt", EventsArchiveWatermark{}); err != nil {
 			t.Fatalf("export: %v", err)
 		}
 		got := readArchiveCSV(t, eventsArchiveFile(dir, "gt"))
@@ -2400,7 +2400,7 @@ func TestArchiveLoopTakesSeveralBatchesInOneCycle(t *testing.T) {
 		return open(dsn)
 	}
 
-	out, unarchived := d.maintenanceArchive([]string{"gt"})
+	out, unarchived, _ := d.maintenanceArchive([]string{"gt"})
 
 	if out.outcome != gcOutcomeCompleted || len(unarchived) != 0 {
 		t.Fatalf("maintenanceArchive = %v, unarchived %v; want completed with none", out, unarchived)
@@ -2456,7 +2456,7 @@ func TestArchiveEventsLoopTakesSeveralBatchesInOneCycle(t *testing.T) {
 		return open(dsn)
 	}
 
-	out, unarchived := d.maintenanceArchive([]string{"gt"})
+	out, unarchived, _ := d.maintenanceArchive([]string{"gt"})
 
 	if out.outcome != gcOutcomeCompleted || len(unarchived) != 0 {
 		t.Fatalf("maintenanceArchive = %v, unarchived %v; want completed with none", out, unarchived)
@@ -2529,7 +2529,7 @@ func TestArchiveEventsLoopKeepsGoingPastTheLookbackReRead(t *testing.T) {
 		return page, nil
 	}
 
-	out, unarchived := d.maintenanceArchive([]string{"gt"})
+	out, unarchived, _ := d.maintenanceArchive([]string{"gt"})
 
 	if out.outcome != gcOutcomeCompleted || len(unarchived) != 0 {
 		t.Fatalf("maintenanceArchive = %v, unarchived %v; want completed with none", out, unarchived)
@@ -2613,7 +2613,7 @@ func TestArchiveEventsFullPageOfArchivedRowsAdvances(t *testing.T) {
 		return page, nil
 	}
 
-	out, unarchived := d.maintenanceArchive([]string{"gt"})
+	out, unarchived, _ := d.maintenanceArchive([]string{"gt"})
 
 	if out.outcome != gcOutcomeCompleted || len(unarchived) != 0 {
 		t.Fatalf("maintenanceArchive = %v, unarchived %v; want completed with none", out, unarchived)
@@ -2680,7 +2680,7 @@ func TestArchiveEventsOneTimestampFillingAPageFailsVisibly(t *testing.T) {
 		return archiveEvents{Columns: columns, Rows: rows[:limit]}, nil // the same full page every time
 	}
 
-	_, unarchived := d.maintenanceArchive([]string{"gt"})
+	_, unarchived, _ := d.maintenanceArchive([]string{"gt"})
 
 	if !strings.Contains(logs.String(), "fill more than one page") || !strings.Contains(logs.String(), "archive_events_limit") {
 		t.Errorf("log does not name the same-timestamp page and the setting to raise:\n%s", logs.String())
@@ -2726,7 +2726,7 @@ func TestArchiveEventsRefusesAnUndateableArchivedPage(t *testing.T) {
 		}, nil
 	}
 
-	_, _, err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", seeded)
+	_, _, _, err := d.maintenanceArchiveEvents(context.Background(), dir, "gt", seeded)
 
 	if err == nil || !strings.Contains(err.Error(), "cannot be parsed") {
 		t.Errorf("maintenanceArchiveEvents = %v, want an error naming the undateable created_at", err)
@@ -2779,7 +2779,7 @@ func TestArchiveLoopStopsAtTheBudgetButEveryDatabaseGetsABatch(t *testing.T) {
 	}
 	d.maint.archiveOpenDB = open
 
-	out, unarchived := d.maintenanceArchive([]string{"gt", "hq"})
+	out, unarchived, _ := d.maintenanceArchive([]string{"gt", "hq"})
 
 	if out.outcome != gcOutcomeCompleted || len(unarchived) != 0 {
 		t.Fatalf("maintenanceArchive = %v, unarchived %v; want completed with none", out, unarchived)
@@ -2820,7 +2820,7 @@ func TestArchiveLoopStopsWhenNothingIsBehindOrThereIsNoProgress(t *testing.T) {
 		d.patrolConfig = archiveConfig(dir)
 		fake := withArchiveFakes(d, f, nil, nil)
 
-		if out, unarchived := d.maintenanceArchive([]string{"gt"}); out.outcome != gcOutcomeCompleted || len(unarchived) != 0 {
+		if out, unarchived, _ := d.maintenanceArchive([]string{"gt"}); out.outcome != gcOutcomeCompleted || len(unarchived) != 0 {
 			t.Fatalf("maintenanceArchive = %v, unarchived %v; want completed with none", out, unarchived)
 		}
 		if fake.reads != 1 {
@@ -2856,7 +2856,7 @@ func TestArchiveLoopStopsWhenNothingIsBehindOrThereIsNoProgress(t *testing.T) {
 			return []archiveCommit{{Hash: "h0", Committer: "c", Date: gcTestNow.Add(-time.Second), Message: "stale"}}, nil
 		}
 
-		if out, unarchived := d.maintenanceArchive([]string{"gt"}); out.outcome != gcOutcomeCompleted || len(unarchived) != 0 {
+		if out, unarchived, _ := d.maintenanceArchive([]string{"gt"}); out.outcome != gcOutcomeCompleted || len(unarchived) != 0 {
 			t.Fatalf("maintenanceArchive = %v, unarchived %v; want completed with none", out, unarchived)
 		}
 		if reads != 1 {
@@ -2893,7 +2893,7 @@ func TestArchiveLoopStopsWhenABatchFailsMidLoop(t *testing.T) {
 		return nil, errors.New("the server went away")
 	}
 
-	out, unarchived := d.maintenanceArchive([]string{"gt"})
+	out, unarchived, _ := d.maintenanceArchive([]string{"gt"})
 
 	if out.outcome != gcOutcomeCompleted {
 		t.Fatalf("maintenanceArchive = %v, want completed", out)
@@ -2943,7 +2943,7 @@ func TestArchiveLoopHasAnIterationBound(t *testing.T) {
 		}}, nil
 	}
 
-	out, unarchived := d.maintenanceArchive([]string{"gt"})
+	out, unarchived, _ := d.maintenanceArchive([]string{"gt"})
 
 	if out.outcome != gcOutcomeCompleted || len(unarchived) != 0 {
 		t.Fatalf("maintenanceArchive = %v, unarchived %v; want completed with none", out, unarchived)
@@ -3073,7 +3073,7 @@ func TestArchiveLimitsRefuseABadSettingAtTheRead(t *testing.T) {
 			return archiveEvents{}, errors.New("not reached")
 		}
 
-		_, _, err := d.maintenanceArchiveEvents(context.Background(), t.TempDir(), "gt", EventsArchiveWatermark{})
+		_, _, _, err := d.maintenanceArchiveEvents(context.Background(), t.TempDir(), "gt", EventsArchiveWatermark{})
 		if err == nil || !strings.Contains(err.Error(), config.MaintenanceArchiveEventsLimitKey) {
 			t.Errorf("events export = %v, want an error naming %s", err, config.MaintenanceArchiveEventsLimitKey)
 		}
