@@ -8,6 +8,8 @@ import (
 	"io/fs"
 	"maps"
 	"math"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -16,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // The daemon patrol schema (gt-y3pgh.1): settings/config.json's "daemon"
@@ -2168,6 +2171,13 @@ type TierSweepRunnerConfig struct {
 	// the config means.
 	Context string `json:"context"`
 
+	// ImageRegistry is the registry the runner image is read from: a bare
+	// host:port (localhost:5001) the daemon reaches through its sidecar. When
+	// it is set and the image follows the installed build, the run names the
+	// image inside the registry and checks that its tag is there, and no engine
+	// load runs (gt-gg9hv.26). Empty keeps the engine load as before.
+	ImageRegistry string `json:"image_registry,omitempty"`
+
 	// Dind starts a Docker-in-Docker sidecar for the packages whose tests need
 	// a Docker API (internal/testutil starts Dolt through testcontainers).
 	Dind bool `json:"dind"`
@@ -2252,6 +2262,36 @@ func (c *TierSweepRunnerConfig) validate() error {
 	}
 	if c.Context == "" {
 		return errors.New("context: want the engine context the run starts in")
+	}
+	if c.ImageRegistry != "" {
+		if err := validImageRegistry(c.ImageRegistry); err != nil {
+			return fmt.Errorf("image_registry = %q: %w", c.ImageRegistry, err)
+		}
+	}
+	return nil
+}
+
+// validImageRegistry reports why registry is not a bare host:port with a port
+// in range, or nil. A scheme, a path and whitespace each get their own message,
+// since a URL pasted in where a host:port belongs is the likely mistake.
+func validImageRegistry(registry string) error {
+	switch {
+	case strings.Contains(registry, "://"):
+		return errors.New("want a bare host:port, not a URL with a scheme")
+	case strings.Contains(registry, "/"):
+		return errors.New("want a bare host:port, not a path")
+	case strings.ContainsFunc(registry, unicode.IsSpace):
+		return errors.New("want a bare host:port with no whitespace")
+	}
+	host, port, err := net.SplitHostPort(registry)
+	if err != nil || host == "" {
+		return errors.New("want host:port, such as localhost:5001")
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return errors.New("want host:port with a port from 1 to 65535")
+	}
+	if _, err := url.Parse("http://" + registry); err != nil {
+		return errors.New("want a host:port the registry address parses as")
 	}
 	return nil
 }

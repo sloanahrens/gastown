@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -610,6 +611,10 @@ type tierSweepSeams struct {
 	// loading it there. Zero is tierSweepRunnerImageBudget; a test sets it short
 	// so a held load lock's wait ends without sitting out the real budget.
 	imageBudget time.Duration
+	// registry is the client the sweep asks the runner image registry with: a
+	// HEAD of the tag's manifest. Nil is the daemon's default client; a test
+	// sets one whose transport answers without a listener (gt-gg9hv.26).
+	registry *http.Client
 	// treeHas reports whether the checked-out tree at dir ships rel, a file or a
 	// directory, and an error when the tree cannot be read. Each stage's command
 	// is picked from it before the stage runs.
@@ -1800,10 +1805,11 @@ func (d *Daemon) withPolecatImageTrimContext(env []string) []string {
 
 // tierSweepRunnerImage is the image a run's containers use: the pin the config
 // names, or, when it names none or asks for the installed build, the polecat
-// image make polecat-image publishes at the installed gt's build revision. An
-// installed build the binary records no usable revision for cannot name an
-// image, and an unnameable image is an error: guessing one would run a tree no
-// build produced (gt-c3sue).
+// image make polecat-image publishes at the installed gt's build revision, named
+// inside the image_registry when one is set (gt-gg9hv.26). An installed build
+// the binary records no usable revision for cannot name an image, and an
+// unnameable image is an error: guessing one would run a tree no build produced
+// (gt-c3sue).
 func (d *Daemon) tierSweepRunnerImage(cfg *config.TierSweepRunnerConfig) (string, error) {
 	if !tierSweepRunnerImageFollowsInstalled(cfg.Image) {
 		return cfg.Image, nil
@@ -1819,6 +1825,9 @@ func (d *Daemon) tierSweepRunnerImage(cfg *config.TierSweepRunnerConfig) (string
 	// installed gt (COMMIT) and names the image with the same stamp (POLE_TAG),
 	// both the first buildstamp.Len characters of the full sha, so the length is
 	// already fixed in both and does not depend on git's object count (gt-ian66).
+	if registry := cfg.ImageRegistry; registry != "" {
+		return registry + "/" + tierSweepPolecatImage + ":" + rev, nil
+	}
 	return tierSweepPolecatImage + ":" + rev, nil
 }
 
@@ -1842,6 +1851,10 @@ func tierSweepRunnerImageFollowsInstalled(image string) bool {
 // images, so it gets the same presence check and the same save-and-load the
 // Docker backend does (gt-uv611).
 //
+// With an image_registry set, the image is checked in that registry instead:
+// no engine is touched, no load lock is taken, and nothing is streamed
+// (gt-gg9hv.26).
+//
 // It returns the commands' combined output for the stage log, and an error
 // when the image could not be confirmed or loaded. An image the daemon cannot
 // confirm is never assumed present, and a load that fails is never answered
@@ -1857,6 +1870,13 @@ func (d *Daemon) tierSweepEnsureRunnerImage(ctx context.Context, spec sweeprunne
 	}
 	ensureCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
+
+	// With a registry configured the image is asked for there instead: no
+	// engine is touched, no load lock is taken, and nothing is streamed. The
+	// sweep cannot publish a missing tag, so a missing one is an error here.
+	if cfg.ImageRegistry != "" {
+		return "", d.tierSweepRegistryImageCheck(ensureCtx, cfg.ImageRegistry, spec.Image)
+	}
 
 	present, out, err := d.tierSweepRunnerImagePresent(ensureCtx, spec)
 	if err != nil || present {
@@ -1893,6 +1913,68 @@ func (d *Daemon) tierSweepRunnerImagePresent(ctx context.Context, spec sweeprunn
 		return false, string(stderr), fmt.Errorf("looking for %s in the %s engine: %w", spec.Image, spec.Context, err)
 	}
 	return strings.TrimSpace(string(stdout)) != "", "", nil
+}
+
+// tierSweepManifestAccept asks for every manifest type the registry may hold
+// for a tag, so the tag is found whichever type the build pushed it as.
+const tierSweepManifestAccept = "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
+
+// tierSweepRegistryRepoRE and tierSweepRegistryTagRE are the repository and tag
+// shapes the OCI distribution spec allows. The tag and repository reach the
+// request path, so they are checked before they are spliced into it.
+var (
+	tierSweepRegistryRepoRE = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$`)
+	tierSweepRegistryTagRE  = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
+)
+
+// tierSweepRegistryImageCheck asks the runner image registry whether image's
+// tag is there, with a HEAD of its manifest. image is named inside registry, as
+// tierSweepRunnerImage names it. 200 is present and 404 is missing, which is an
+// error: the sweep cannot publish a tag, so the error names the image and the
+// publish step. Any other answer, and a call that fails, are errors too, never
+// present or missing (gt-gg9hv.26).
+func (d *Daemon) tierSweepRegistryImageCheck(ctx context.Context, registry, image string) error {
+	repo, tag, ok := tierSweepSplitRegistryImage(registry, image)
+	if !ok {
+		return fmt.Errorf("runner image %s is not named inside the image registry %s", image, registry)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, "http://"+registry+"/v2/"+repo+"/manifests/"+tag, nil)
+	if err != nil {
+		return fmt.Errorf("asking the image registry %s for %s: %w", registry, image, err)
+	}
+	req.Header.Set("Accept", tierSweepManifestAccept)
+	client := d.tierSweepSeams.registry
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("asking the image registry %s for %s: %w", registry, image, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return nil
+	case http.StatusNotFound:
+		return fmt.Errorf("runner image %s is not in the image registry %s: run make polecat-image, then push it to the registry at the daemon's commit; the sweep cannot publish it", image, registry)
+	default:
+		return fmt.Errorf("asking the image registry %s for %s: HTTP %d, want 200 or 404", registry, image, resp.StatusCode)
+	}
+}
+
+// tierSweepSplitRegistryImage returns the repository and tag of image when it is
+// named inside registry as "<registry>/<repo>:<tag>", and false when it is not
+// or when either part is not a shape the registry accepts.
+func tierSweepSplitRegistryImage(registry, image string) (repo, tag string, ok bool) {
+	rest, found := strings.CutPrefix(image, registry+"/")
+	if !found {
+		return "", "", false
+	}
+	repo, tag, found = strings.Cut(rest, ":")
+	if !found || !tierSweepRegistryRepoRE.MatchString(repo) || !tierSweepRegistryTagRE.MatchString(tag) {
+		return "", "", false
+	}
+	return repo, tag, true
 }
 
 // tierSweepRunnerImageLockPath is the town's lock for loading the runner image
