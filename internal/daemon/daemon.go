@@ -61,6 +61,7 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/townconfig"
 	"github.com/steveyegge/gastown/internal/townhealth"
+	"github.com/steveyegge/gastown/internal/update"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/version"
 	"github.com/steveyegge/gastown/internal/wisp"
@@ -111,6 +112,10 @@ type Daemon struct {
 	// and Wait. A test injects one to prove the reap runs on its own goroutine
 	// (update_trigger.go).
 	updateStarter updateProcessStarter
+	// updateRemoteRun runs the git command that reads main's tip from origin
+	// for the failed-run hold; nil is update.ExecRun. A test answers it so no
+	// test reaches a remote (update_trigger.go).
+	updateRemoteRun update.RunFunc
 	// updateTrigger is the update block's own state: the launch seam (New wires
 	// it to (*Daemon).launchUpdate; a test replaces it), the launch and refusal
 	// clocks, and the last settings error logged.

@@ -323,6 +323,8 @@ func TestUpdateTriggerHoldsAFailedRunOnMainsTarget(t *testing.T) {
 			d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo {
 				return &version.StaleBinaryInfo{RepoCommit: main}
 			}
+			// The hold reads main's tip from origin, which is main here.
+			d.updateRemoteRun = (&updateRemoteFake{output: main + "\trefs/heads/main\n"}).run
 			store := update.Store{Dir: update.Dir(d.config.TownRoot)}
 			ended := updateTriggerTestTime.Add(-24 * time.Hour)
 			if err := store.Write(update.State{
@@ -341,6 +343,160 @@ func TestUpdateTriggerHoldsAFailedRunOnMainsTarget(t *testing.T) {
 				t.Fatalf("launches = %d, want %d", *launches, tt.wantLaunches)
 			}
 		})
+	}
+}
+
+// updateRemoteFake answers the failed-run hold's ls-remote and counts the calls,
+// so a test can see whether the hold read main's tip from origin at all.
+type updateRemoteFake struct {
+	calls  int
+	output string
+	exit   int
+	err    error
+}
+
+func (f *updateRemoteFake) run(_ context.Context, _ string, _ []string, _ string, _ ...string) (string, int, error) {
+	f.calls++
+	return f.output, f.exit, f.err
+}
+
+// A checkout whose origin/main ref lags main reads the remote tip for a failed
+// or aborted run, so the hold compares the run's target with main's real tip
+// and the same failed run does not restart (gt-tb5vx).
+func TestUpdateFactsRemoteMainSHAForAFailedRun(t *testing.T) {
+	t.Parallel()
+
+	const lagging = "1111111111111111111111111111111111111111"
+	const tip = "2222222222222222222222222222222222222222"
+	tests := []struct {
+		name        string
+		outcome     update.Outcome
+		output      string
+		exit        int
+		err         error
+		wantMainSHA string
+		wantCalls   int
+	}{
+		{"aborted reads the remote tip", update.OutcomeAborted, tip + "\trefs/heads/main\n", 0, nil, tip, 1},
+		{"failed reads the remote tip", update.OutcomeFailed, tip + "\trefs/heads/main\n", 0, nil, tip, 1},
+		{"ok makes no remote call", update.OutcomeOK, tip + "\trefs/heads/main\n", 0, nil, lagging, 0},
+		{"nonzero exit leaves the tip unknown", update.OutcomeAborted, "", 2, nil, "", 1},
+		{"runner error leaves the tip unknown", update.OutcomeFailed, "", -1, errors.New("no git"), "", 1},
+		{"empty answer leaves the tip unknown", update.OutcomeAborted, "\n", 0, nil, "", 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, _, _ := newUpdateTriggerTestDaemon(t, nil)
+			createUpdateSource(t, d.config.TownRoot)
+			d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo {
+				return &version.StaleBinaryInfo{RepoCommit: lagging}
+			}
+			remote := &updateRemoteFake{output: tt.output, exit: tt.exit, err: tt.err}
+			d.updateRemoteRun = remote.run
+			store := update.Store{Dir: update.Dir(d.config.TownRoot)}
+			ended := updateTriggerTestTime.Add(-time.Hour)
+			if err := store.Write(update.State{
+				RunID:     "run-1",
+				StartedAt: ended.Add(-time.Minute),
+				EndedAt:   ended,
+				Outcome:   tt.outcome,
+				Target:    update.Target{SHA: lagging},
+			}); err != nil {
+				t.Fatalf("write state: %v", err)
+			}
+
+			facts, err := d.updateFacts(updateTriggerTestTime)
+			if err != nil {
+				t.Fatalf("updateFacts: %v", err)
+			}
+			if facts.MainSHA != tt.wantMainSHA {
+				t.Errorf("MainSHA = %q, want %q", facts.MainSHA, tt.wantMainSHA)
+			}
+			if remote.calls != tt.wantCalls {
+				t.Errorf("ls-remote calls = %d, want %d", remote.calls, tt.wantCalls)
+			}
+		})
+	}
+}
+
+// The failed-run hold holds a failed run on main's real tip even when the
+// checkout's own ref lags: the run targeted tip, the checkout still reads an
+// older sha, and the trigger launches nothing.
+func TestUpdateTriggerHoldsAFailedRunWhenTheCheckoutLags(t *testing.T) {
+	t.Parallel()
+
+	const lagging = "1111111111111111111111111111111111111111"
+	const tip = "2222222222222222222222222222222222222222"
+	d, _, launches, _ := newUpdateTriggerTestDaemon(t, &config.UpdateConfig{
+		Enabled: true,
+		Window:  "03:00",
+	})
+	createUpdateSource(t, d.config.TownRoot)
+	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo {
+		return &version.StaleBinaryInfo{RepoCommit: lagging}
+	}
+	d.updateRemoteRun = (&updateRemoteFake{output: tip + "\trefs/heads/main\n"}).run
+	store := update.Store{Dir: update.Dir(d.config.TownRoot)}
+	ended := updateTriggerTestTime.Add(-24 * time.Hour)
+	if err := store.Write(update.State{
+		RunID:     "run-1",
+		StartedAt: ended.Add(-time.Minute),
+		EndedAt:   ended,
+		Outcome:   update.OutcomeAborted,
+		Target:    update.Target{SHA: tip},
+	}); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+
+	d.triggerUpdate()
+
+	if *launches != 0 {
+		t.Fatalf("launches = %d, want 0: the failed run targeted main's tip", *launches)
+	}
+}
+
+// When main's tip cannot be read after a failed run, the hold stands and names
+// the by-hand command: an unknown main is not a reason to launch again.
+func TestUpdateFactsHoldsWhenTheRemoteTipIsUnreadable(t *testing.T) {
+	t.Parallel()
+
+	const lagging = "1111111111111111111111111111111111111111"
+	d, _, _, _ := newUpdateTriggerTestDaemon(t, &config.UpdateConfig{
+		Enabled: true,
+		Window:  "03:00",
+	})
+	createUpdateSource(t, d.config.TownRoot)
+	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo {
+		return &version.StaleBinaryInfo{RepoCommit: lagging}
+	}
+	d.updateRemoteRun = (&updateRemoteFake{exit: 128}).run
+	store := update.Store{Dir: update.Dir(d.config.TownRoot)}
+	ended := updateTriggerTestTime.Add(-24 * time.Hour)
+	if err := store.Write(update.State{
+		RunID:     "run-1",
+		StartedAt: ended.Add(-time.Minute),
+		EndedAt:   ended,
+		Outcome:   update.OutcomeFailed,
+		Target:    update.Target{SHA: lagging},
+	}); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+
+	facts, err := d.updateFacts(updateTriggerTestTime)
+	if err != nil {
+		t.Fatalf("updateFacts: %v", err)
+	}
+	if facts.MainSHA != "" {
+		t.Fatalf("MainSHA = %q, want empty while main's tip is unread", facts.MainSHA)
+	}
+	due, reason := updateDue(updateTriggerTestTime, testUpdateSettings, facts)
+	if due {
+		t.Fatalf("updateDue() due = true (reason %q), want the hold while main's tip is unknown", reason)
+	}
+	if !strings.Contains(reason, "run gt update by hand") {
+		t.Errorf("updateDue() reason = %q, want the by-hand hold named", reason)
 	}
 }
 

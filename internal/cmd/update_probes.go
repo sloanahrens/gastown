@@ -103,19 +103,7 @@ func (p *updateProbes) InstalledSHA(context.Context) (string, error) {
 // MainSHA is the tip of origin's main, read with ls-remote. It never fetches:
 // nothing in the town's checkouts fetches except the installer.
 func (p *updateProbes) MainSHA(ctx context.Context) (string, error) {
-	out, exit, err := p.env.Run(ctx, "", nil, "git", "-C", p.env.RepoRoot, "ls-remote", "origin", "refs/heads/main")
-	if err != nil {
-		return "", fmt.Errorf("running git ls-remote for main in %s: %w", p.env.RepoRoot, err)
-	}
-	if exit != 0 {
-		return "", fmt.Errorf("git ls-remote for main in %s exited %d", p.env.RepoRoot, exit)
-	}
-	line, _, _ := strings.Cut(out, "\n")
-	fields := strings.Fields(line)
-	if len(fields) == 0 {
-		return "", fmt.Errorf("git ls-remote for main in %s named no ref", p.env.RepoRoot)
-	}
-	return fields[0], nil
+	return update.RemoteMainSHA(ctx, p.env.Run, p.env.RepoRoot)
 }
 
 // ArchiveBehind is the archive gap B10b2 supplies: how many commits and events
