@@ -148,13 +148,14 @@ func abbreviate(full string, known map[string]string) string {
 func validBuilder(run *fakeRunner, out string) Builder {
 	return Builder{
 		Run:      run.run,
-		Git:      run.git(map[string]string{testRev: testRev, testBDCommit: testBDCommit, "HEAD": testOMCommit}),
+		Git:      run.git(map[string]string{testRev: testRev, testBDCommit: testBDCommit, testOMCommit: testOMCommit}),
 		Environ:  testEnv,
 		Out:      out,
 		GTSrc:    filepath.Join("src", "gt"),
 		BDSrc:    filepath.Join("src", "beads"),
 		BDCommit: testBDCommit,
 		OMSrc:    filepath.Join("src", "om"),
+		OMCommit: testOMCommit,
 	}
 }
 
@@ -281,7 +282,7 @@ func TestGTCommitStampUsesBuildstamp(t *testing.T) {
 	t.Parallel()
 	const short = "0123456"
 	b, run := builderFor(t)
-	b.Git = run.git(map[string]string{short: testRev, testBDCommit: testBDCommit, "HEAD": testOMCommit})
+	b.Git = run.git(map[string]string{short: testRev, testBDCommit: testBDCommit, testOMCommit: testOMCommit})
 	if _, err := b.BuildBinaries(context.Background(), short); err != nil {
 		t.Fatalf("BuildBinaries: %v", err)
 	}
@@ -299,7 +300,7 @@ func TestBuildBinariesRefusesAnUnstampableCommit(t *testing.T) {
 	const short = "0123456"
 	const notASha = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
 	b, run := builderFor(t)
-	b.Git = run.git(map[string]string{short: notASha, testBDCommit: testBDCommit, "HEAD": testOMCommit})
+	b.Git = run.git(map[string]string{short: notASha, testBDCommit: testBDCommit, testOMCommit: testOMCommit})
 	paths, err := b.BuildBinaries(context.Background(), short)
 	if err == nil {
 		t.Fatalf("BuildBinaries = %q, want an error for a resolved %q", paths, notASha)
@@ -365,7 +366,7 @@ func TestBuildBinariesStillChecksOutTheFullCommit(t *testing.T) {
 	t.Parallel()
 	const short = "0123456"
 	b, run := builderFor(t)
-	b.Git = run.git(map[string]string{short: testRev, testBDCommit: testBDCommit, "HEAD": testOMCommit})
+	b.Git = run.git(map[string]string{short: testRev, testBDCommit: testBDCommit, testOMCommit: testOMCommit})
 	if _, err := b.BuildBinaries(context.Background(), short); err != nil {
 		t.Fatalf("BuildBinaries: %v", err)
 	}
@@ -403,7 +404,7 @@ func TestBuildBinariesStampsTheAbbreviationGitGives(t *testing.T) {
 	// eighth, so the abbreviation git would print is eight characters.
 	const collider = "fedcba9000000000000000000000000000000000"
 	b, run := builderFor(t)
-	b.Git = run.git(map[string]string{testRev: testRev, testBDCommit: testBDCommit, "HEAD": testOMCommit, collider: collider})
+	b.Git = run.git(map[string]string{testRev: testRev, testBDCommit: testBDCommit, testOMCommit: testOMCommit, collider: collider})
 	if _, err := b.BuildBinaries(context.Background(), testRev); err != nil {
 		t.Fatalf("BuildBinaries: %v", err)
 	}
@@ -572,7 +573,9 @@ func TestBuildBinariesRefusesBeforeAnyBuild(t *testing.T) {
 		{name: "no bd commit", breakIt: func(b *Builder) { b.BDCommit = "" }, rev: testRev, want: "no bd commit"},
 		{name: "a bd commit that is not hex", breakIt: func(b *Builder) { b.BDCommit = "main" }, rev: testRev, want: `bd commit "main" is not`},
 		{name: "a bd commit the bd checkout does not hold", breakIt: func(b *Builder) { b.BDCommit = "7654321" }, rev: testRev, want: "does not hold commit 7654321"},
-		{name: "an om checkout that does not hold its HEAD", breakIt: func(b *Builder) { b.Git = gitHolding(map[string]string{testRev: testRev, testBDCommit: testBDCommit}) }, rev: testRev, want: "does not hold commit HEAD"},
+		{name: "no om commit", breakIt: func(b *Builder) { b.OMCommit = "" }, rev: testRev, want: "no om commit"},
+		{name: "an om commit that is not hex", breakIt: func(b *Builder) { b.OMCommit = "main" }, rev: testRev, want: `om commit "main" is not`},
+		{name: "an om checkout that does not hold its pin", breakIt: func(b *Builder) { b.Git = gitHolding(map[string]string{testRev: testRev, testBDCommit: testBDCommit}) }, rev: testRev, want: "does not hold commit " + testOMCommit},
 		{name: "an output directory that does not exist", breakIt: func(b *Builder) { b.Out = filepath.Join(b.Out, "missing") }, rev: testRev, want: "cannot stage the binaries"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
