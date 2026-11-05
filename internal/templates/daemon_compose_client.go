@@ -1,7 +1,10 @@
 package templates
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -102,6 +105,19 @@ func (s ComposeSpec) validateClient() error {
 		}
 		if pathContains(s.TownRoot, p) || pathContains(p, s.TownRoot) {
 			return fmt.Errorf("compose spec: BindRO %q is inside or contains the town root %q, which the town bind already mounts", p, s.TownRoot)
+		}
+		// The mount follows a link in the path, so the directory the path
+		// resolves to is the one that overlaps the town, not its text (gt-7kjw1).
+		real, err := resolvedHostPath(p)
+		if err != nil {
+			return fmt.Errorf("compose spec: BindRO %q cannot be resolved, so it cannot be checked against the town root %q: %w", p, s.TownRoot, err)
+		}
+		town, err := resolvedHostPath(s.TownRoot)
+		if err != nil {
+			return fmt.Errorf("compose spec: the town root %q cannot be resolved, so BindRO %q cannot be checked against it: %w", s.TownRoot, p, err)
+		}
+		if pathContains(town, real) || pathContains(real, town) {
+			return fmt.Errorf("compose spec: BindRO %q resolves to %q, which is inside or contains the town root %q, which the town bind already mounts", p, real, town)
 		}
 		if slices.Contains(renderedHostPaths(s), p) {
 			return fmt.Errorf("compose spec: BindRO %q is a path the render already mounts", p)
@@ -217,4 +233,24 @@ func liveClientMounts(s ComposeSpec) string {
 func pathContains(dir, child string) bool {
 	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(child))
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// resolvedHostPath is path with the symlinks it crosses followed. The part of a
+// path that does not exist yet has no link to follow, so it resolves beneath its
+// nearest existing ancestor, where the mount would follow a link. A link that
+// exists but cannot be resolved, such as a dangling one, is an error rather than
+// a path taken as it is written.
+func resolvedHostPath(path string) (string, error) {
+	cur, rest := filepath.Clean(path), ""
+	for {
+		real, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			return filepath.Join(real, rest), nil
+		}
+		parent := filepath.Dir(cur)
+		if _, statErr := os.Lstat(cur); !errors.Is(statErr, fs.ErrNotExist) || parent == cur {
+			return "", err
+		}
+		cur, rest = parent, filepath.Join(filepath.Base(cur), rest)
+	}
 }
