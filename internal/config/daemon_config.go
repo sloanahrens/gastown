@@ -2171,11 +2171,9 @@ type TierSweepRunnerConfig struct {
 	// the config means.
 	Context string `json:"context"`
 
-	// ImageRegistry is the registry the runner image is read from: a bare
-	// host:port (localhost:5001) the daemon reaches through its sidecar. When
-	// it is set and the image follows the installed build, the run names the
-	// image inside the registry and checks that its tag is there, and no engine
-	// load runs (gt-gg9hv.26). Empty keeps the engine load as before.
+	// ImageRegistry is a bare host:port (localhost:5001) the daemon reaches
+	// through its sidecar, for the installed build's runner image (gt-gg9hv.26).
+	// Empty keeps the engine load as before.
 	ImageRegistry string `json:"image_registry,omitempty"`
 
 	// Dind starts a Docker-in-Docker sidecar for the packages whose tests need

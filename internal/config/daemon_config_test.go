@@ -733,10 +733,6 @@ func TestDiskMaintenanceConfigRefusesWhatThePatrolCannotActOn(t *testing.T) {
 	}
 }
 
-// A runner block moves the integration and race tiers off the host, so the
-// engine and limit fields are required and a key or value no run can use is
-// refused at decode, naming the key: a block the daemon half-understands would
-// start a container the operator never described (gt-z4ppb).
 // TestTierSweepRunnerImageRegistrySetting: image_registry is optional, and an
 // empty value or a bare host:port decodes. A scheme, a path, whitespace, a
 // missing port and a port out of range are each refused, naming the key, so a
@@ -787,6 +783,10 @@ func TestTierSweepRunnerImageRegistrySetting(t *testing.T) {
 	}
 }
 
+// A runner block moves the integration and race tiers off the host, so the
+// engine and limit fields are required and a key or value no run can use is
+// refused at decode, naming the key: a block the daemon half-understands would
+// start a container the operator never described (gt-z4ppb).
 func TestTierSweepRunnerConfigStrict(t *testing.T) {
 	t.Parallel()
 

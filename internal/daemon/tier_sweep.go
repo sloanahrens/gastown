@@ -1805,11 +1805,12 @@ func (d *Daemon) withPolecatImageTrimContext(env []string) []string {
 
 // tierSweepRunnerImage is the image a run's containers use: the pin the config
 // names, or, when it names none or asks for the installed build, the polecat
-// image make polecat-image publishes at the installed gt's build revision, named
-// inside the image_registry when one is set (gt-gg9hv.26). An installed build
-// the binary records no usable revision for cannot name an image, and an
-// unnameable image is an error: guessing one would run a tree no build produced
-// (gt-c3sue).
+// image make polecat-image publishes at the installed gt's build revision. With
+// image_registry set, that installed image is named inside the registry, and a
+// pin is always used as named, never inside the registry (gt-gg9hv.26). An
+// installed build the binary records no usable revision for cannot name an
+// image, and an unnameable image is an error: guessing one would run a tree no
+// build produced (gt-c3sue).
 func (d *Daemon) tierSweepRunnerImage(cfg *config.TierSweepRunnerConfig) (string, error) {
 	if !tierSweepRunnerImageFollowsInstalled(cfg.Image) {
 		return cfg.Image, nil
@@ -1851,9 +1852,8 @@ func tierSweepRunnerImageFollowsInstalled(image string) bool {
 // images, so it gets the same presence check and the same save-and-load the
 // Docker backend does (gt-uv611).
 //
-// With an image_registry set, the image is checked in that registry instead:
-// no engine is touched, no load lock is taken, and nothing is streamed
-// (gt-gg9hv.26).
+// With an image_registry set, the installed image is checked in the registry
+// instead (see tierSweepRunnerImage).
 //
 // It returns the commands' combined output for the stage log, and an error
 // when the image could not be confirmed or loaded. An image the daemon cannot
@@ -1871,9 +1871,7 @@ func (d *Daemon) tierSweepEnsureRunnerImage(ctx context.Context, spec sweeprunne
 	ensureCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
-	// With a registry configured the image is asked for there instead: no
-	// engine is touched, no load lock is taken, and nothing is streamed. The
-	// sweep cannot publish a missing tag, so a missing one is an error here.
+	// The registry is asked instead of the engine (gt-gg9hv.26).
 	if cfg.ImageRegistry != "" {
 		return "", d.tierSweepRegistryImageCheck(ensureCtx, cfg.ImageRegistry, spec.Image)
 	}

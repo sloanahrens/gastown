@@ -280,3 +280,38 @@ func TestTierSweepEnsureImageWithoutARegistryIsUnchanged(t *testing.T) {
 		t.Errorf("registry requests = %q, want none without image_registry", got)
 	}
 }
+
+// TestTierSweepEnsureImagePinnedImageKeepsTheEnginePath: with image_registry set
+// and the runner image pinned, the pin is launched as named, the registry is
+// never asked (it answers 404 here, which would fail the stage if asked), and
+// the engine runs nothing, as it does for a pin with no registry. A pin is the
+// operator's, so the registry names only the installed build (gt-gg9hv.26).
+func TestTierSweepEnsureImagePinnedImageKeepsTheEnginePath(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	const pin = "gastown-polecat:23017b4dd"
+	reg := &registryFake{status: http.StatusNotFound}
+	d, fake := runnerImageDaemon(t, now, pin)
+	d.patrolConfig.Patrols.TierSweep.Runner.ImageRegistry = testRunnerRegistry
+	d.tierSweepSeams.registry = &http.Client{Transport: reg}
+	var launched sweeprunner.Spec
+	var launches int
+	registryImageLaunch(t, d, now, &launched, &launches)
+	st := tierSweepStage{tiers: []string{"integration", "race"}, slot: true, rig: "gastown", tested: runnerTestSHA, budget: time.Minute}
+
+	if res := d.tierSweepRunStage(context.Background(), t.TempDir(), st); !res.ran {
+		t.Fatalf("stage result = %+v, want it run", res)
+	}
+
+	if launches != 1 || launched.Image != pin {
+		t.Errorf("launches = %d, image = %q; want one launch on the pin %q", launches, launched.Image, pin)
+	}
+	if got := reg.requests(); len(got) != 0 {
+		t.Errorf("registry requests = %q, want none for a pinned image", got)
+	}
+	for _, word := range []string{"image", "save", "load"} {
+		if got := fake.callsMatching(word); len(got) != 0 {
+			t.Errorf("%s calls = %q, want none: a pinned image is never checked or loaded", word, got)
+		}
+	}
+}
