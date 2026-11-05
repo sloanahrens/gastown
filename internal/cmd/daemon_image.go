@@ -55,6 +55,7 @@ type imageBuilder interface {
 type daemonImageDeps struct {
 	run          daemonimage.Runner
 	git          bdbuild.Git
+	goTool       bdbuild.Go
 	fetch        daemonimage.Fetcher
 	environ      []string
 	evalSymlinks func(path string) (string, error)
@@ -68,6 +69,7 @@ func realDaemonImageDeps(out io.Writer) daemonImageDeps {
 	return daemonImageDeps{
 		run:          execImageRunner,
 		git:          bdbuild.ExecGit,
+		goTool:       bdbuild.ExecGo,
 		fetch:        imageFetcher(&http.Client{Timeout: imageFetchCeiling}),
 		environ:      os.Environ(),
 		evalSymlinks: filepath.EvalSymlinks,
@@ -219,6 +221,7 @@ func newDaemonImageBuilder(f daemonImageFlags, d daemonImageDeps) daemonimage.Bu
 	return daemonimage.Builder{
 		Run:          d.run,
 		Git:          d.git,
+		Go:           d.goTool,
 		Fetch:        d.fetch,
 		Environ:      d.environ,
 		Out:          f.out,

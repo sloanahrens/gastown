@@ -87,6 +87,9 @@ type Builder struct {
 	// Git resolves the commits the binaries are built from, and makes the clean
 	// worktrees they are built in.
 	Git bdbuild.Git
+	// Go runs go version -m on the release-reporter binary BuildTools builds, to
+	// read the version the go command stamped into it.
+	Go bdbuild.Go
 	// Environ is the host environment the builds start from; nil reads the
 	// host's. bdbuild.Env keeps the variables that locate the toolchain and drops
 	// the ones that would change what is compiled.

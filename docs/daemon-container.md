@@ -116,7 +116,9 @@ validates the flags, prints the commands it would run, ends with
 that output, then run the same command with `--apply`. With `--apply` it builds
 gt, bd and om for linux/arm64 in clean worktrees of the commits named, builds hm
 and the two devops reporters (devops-reporter, release-reporter) the same way from
-their pinned checkouts, downloads
+their pinned checkouts. release-reporter's version is the one the go command stamps
+from that checkout (a pseudo-version past its last tag); the build reads it back with
+`go version -m` and refuses it unless it is vMAJOR.MINOR.PATCH[-pre]. It downloads
 the pinned claude CLI and the pinned client tools (`templates.DaemonClientTools`;
 each is checked against its sha256), and builds the image with the `desktop-linux`
 context. The Dockerfile is read from `--gt-src`'s working tree. Expected: the last line it

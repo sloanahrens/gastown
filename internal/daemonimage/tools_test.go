@@ -6,12 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
 const (
@@ -21,20 +18,18 @@ const (
 	testOtherCommit = "9999999999999999999999999999999999999999"
 )
 
-// testDevopsTime is the committer time git reports for testDevopsCommit.
-var testDevopsTime = time.Date(2026, 11, 5, 12, 30, 45, 0, time.UTC)
+// testReleaseVersion is the version the go command stamps release-reporter with
+// when it builds from testDevopsCommit: a pseudo-version past a tag.
+var testReleaseVersion = "v0.1.4-0.20261105123045-" + testDevopsCommit[:12]
 
 // checkout is one fake source checkout: the commits it holds, the commit its HEAD
-// is at, whether its worktree has changes, and the time git reports for its
-// commits. badTime makes that report something that is not a unix time. fail names
-// the one read that errors for this checkout: HEAD, status or show.
+// is at, and whether its worktree has changes. fail names the one read that errors
+// for this checkout: HEAD or status.
 type checkout struct {
-	holds   []string
-	head    string
-	dirty   bool
-	when    time.Time
-	badTime bool
-	fail    string
+	holds []string
+	head  string
+	dirty bool
+	fail  string
 }
 
 // toolsGit is a bdbuild.Git over checkouts keyed by directory. It answers the
@@ -76,30 +71,40 @@ func (g *toolsGit) git(dir string, args ...string) ([]byte, error) {
 			return []byte(" M internal/x.go\n"), nil
 		}
 		return nil, nil
-	case args[0] == "show":
-		if co.fail == "show" {
-			return nil, errors.New("fatal: the commit is unreadable")
-		}
-		if co.badTime {
-			return []byte("not-a-time\n"), nil
-		}
-		return []byte(strconv.FormatInt(co.when.Unix(), 10) + "\n"), nil
 	}
 	return nil, errors.New("fake git: unexpected " + strings.Join(args, " "))
 }
 
+// versionGo is a Go runner whose go version -m prints info and returns no error.
+func versionGo(info string) func(string, []string, ...string) ([]byte, error) {
+	return func(string, []string, ...string) ([]byte, error) { return []byte(info), nil }
+}
+
+// versionInfo is go version -m output for a release-reporter binary whose main
+// module is at version: the header, the package path, and the mod line that
+// carries the version, as the go command prints it.
+func versionInfo(version string) string {
+	return "release-reporter: go1.27.1\n" +
+		"\tpath\tgt.local/devops/cmd/release-reporter\n" +
+		"\tmod\tgt.local/devops\t" + version + "\t\n" +
+		"\tbuild\t-buildmode=exe\n" +
+		"\tbuild\tvcs.modified=false\n"
+}
+
 // toolsBuilder is a Builder ready to build the tools: the hm and devops checkouts
 // clean and at their pins, the output directory out, over run and the fake git.
+// Its go reads back testReleaseVersion, a pseudo-version of testDevopsCommit.
 func toolsBuilder(t *testing.T) (Builder, *fakeRunner, *toolsGit) {
 	t.Helper()
 	run := &fakeRunner{}
 	g := &toolsGit{checkouts: map[string]checkout{
 		"/src/hm":     {holds: []string{testHMCommit}, head: testHMCommit},
-		"/src/devops": {holds: []string{testDevopsCommit}, head: testDevopsCommit, when: testDevopsTime},
+		"/src/devops": {holds: []string{testDevopsCommit}, head: testDevopsCommit},
 	}}
 	return Builder{
 		Run:          run.run,
 		Git:          g.git,
+		Go:           versionGo(versionInfo(testReleaseVersion)),
 		Environ:      testEnv,
 		Out:          t.TempDir(),
 		HMSrc:        "/src/hm",
@@ -167,9 +172,6 @@ func TestDeployBuildsHMAndReporters(t *testing.T) {
 			t.Errorf("build %d env = %q, want the linux/arm64 cross-compile", i, c.env)
 		}
 	}
-	if got := argAfter(run.calls[2].argv, "-ldflags"); got != releaseReporterVersionFlag+"v0.1.4-0.20261105123045-"+testDevopsCommit[:12] {
-		t.Errorf("release-reporter ldflags = %q, want the pseudo-version stamp of the devops commit", got)
-	}
 	if got := argAfter(run.calls[0].argv, "-ldflags"); got != "" {
 		t.Errorf("hm ldflags = %q, want none", got)
 	}
@@ -229,12 +231,9 @@ func TestDeployRefusesUnpinnedOrDirtyHMAndDevopsSources(t *testing.T) {
 			g.checkouts["/src/devops"] = co
 		}, "--devops-src"},
 		{"the canonical clone as --devops-src", func(b *Builder, _ *toolsGit) { b.DevopsSrc = "/town/rig/mayor/rig" }, "canonical clone"},
-		{"a devops commit git does not expand to a full sha", func(b *Builder, g *toolsGit) {
-			b.DevopsCommit = "abcdef1"
-			g.checkouts["/src/devops"] = checkout{holds: []string{"abcdef1"}, head: "abcdef1", when: testDevopsTime}
-		}, "too short to stamp release-reporter"},
 		{"no runner", func(b *Builder, _ *toolsGit) { b.Run = nil }, "no runner"},
 		{"no git", func(b *Builder, _ *toolsGit) { b.Git = nil }, "no git to resolve"},
+		{"no go to read the version", func(b *Builder, _ *toolsGit) { b.Go = nil }, "no go to read the release-reporter version"},
 		{"no output directory", func(b *Builder, _ *toolsGit) { b.Out = "" }, "no output directory for the tools"},
 		{"a relative output directory", func(b *Builder, _ *toolsGit) { b.Out = filepath.Join("rel", "out") }, "is not absolute"},
 		{"an hm checkout whose HEAD cannot be read", func(_ *Builder, g *toolsGit) {
@@ -298,36 +297,6 @@ func TestDeployNamesAToolItCannotMoveIntoTheContext(t *testing.T) {
 	}
 }
 
-// TestDeployRefusesAnUnreadableDevopsCommitTime: the release-reporter stamp needs
-// the commit's time, so a time git does not print as a unix time stops the build
-// before anything runs.
-func TestDeployRefusesAnUnreadableDevopsCommitTime(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name string
-		edit func(*checkout)
-		want string
-	}{
-		{"git prints something that is not a unix time", func(c *checkout) { c.badTime = true }, "not a unix time"},
-		{"git cannot read the commit", func(c *checkout) { c.fail = "show" }, "cannot read the commit time"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			b, run, g := toolsBuilder(t)
-			co := g.checkouts["/src/devops"]
-			tc.edit(&co)
-			g.checkouts["/src/devops"] = co
-			_, err := b.BuildTools(context.Background())
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("BuildTools error = %v, want one containing %q", err, tc.want)
-			}
-			if len(run.calls) != 0 {
-				t.Errorf("a build with no commit time ran %d commands", len(run.calls))
-			}
-		})
-	}
-}
-
 // TestDeployBuildFailureLeavesNothing: a build that fails returns its error and no
 // paths, and leaves no tool in the build context.
 func TestDeployBuildFailureLeavesNothing(t *testing.T) {
@@ -369,36 +338,86 @@ func TestDockerfileCopiesHMAndReporters(t *testing.T) {
 	}
 }
 
-// TestReleaseReporterVersionIsAcceptedByRunSh: the stamp has the vMAJOR.MINOR.PATCH[-pre]
-// shape the release-reporter plugin's run.sh accepts, and its core is above MIN_VERSION.
-// The shape is copied here because run.sh is not in this repo.
-func TestReleaseReporterVersionIsAcceptedByRunSh(t *testing.T) {
+// TestReleaseReporterBuildStampsNoLinkerVariable: release-reporter's version is the
+// one the go command stamps from its checkout, so its compile carries no -X flag
+// (a -X for a symbol the package lacks is dropped without an error) and does not
+// turn VCS stamping off (which leaves the module version at (devel)).
+func TestReleaseReporterBuildStampsNoLinkerVariable(t *testing.T) {
 	t.Parallel()
-	shape := regexp.MustCompile(`^v([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z.-]+)?$`)
-	v := releaseReporterVersion(testDevopsTime, testDevopsCommit)
-	got := shape.FindStringSubmatch(v)
-	if got == nil {
-		t.Fatalf("the stamp %q is not vMAJOR.MINOR.PATCH[-pre]", v)
+	b, run, _ := toolsBuilder(t)
+	if _, err := b.BuildTools(context.Background()); err != nil {
+		t.Fatalf("BuildTools: %v", err)
 	}
-	minVersion := shape.FindStringSubmatch(releaseReporterMinVersion)
-	if minVersion == nil {
-		t.Fatalf("MIN_VERSION %q is not vMAJOR.MINOR.PATCH[-pre]", releaseReporterMinVersion)
+	if len(run.calls) != 3 {
+		t.Fatalf("ran %d builds, want 3", len(run.calls))
 	}
-	for i := 1; i <= 3; i++ {
-		a, err := strconv.Atoi(got[i])
-		if err != nil {
-			t.Fatalf("the stamp's core %q: %v", got[i], err)
+	argv := run.calls[2].argv
+	if got := argv[len(argv)-1]; got != ReleaseReporterPackage {
+		t.Fatalf("build 2 compiles %q, want %q", got, ReleaseReporterPackage)
+	}
+	for _, a := range argv {
+		if strings.HasPrefix(a, "-X") || strings.HasPrefix(a, "-buildvcs") {
+			t.Errorf("release-reporter build argv %q carries %q: its version comes from the checkout, not a flag", argv, a)
 		}
-		m, err := strconv.Atoi(minVersion[i])
-		if err != nil {
-			t.Fatalf("MIN_VERSION's core %q: %v", minVersion[i], err)
-		}
-		if a != m {
-			if a < m {
-				t.Errorf("the stamp %q is below MIN_VERSION %s", v, releaseReporterMinVersion)
+	}
+}
+
+// TestReleaseReporterVersionIsReadFromTheBinary: BuildTools reads the version the
+// go command stamped into the release-reporter it built, with go version -m on that
+// binary, and accepts only the vMAJOR.MINOR.PATCH[-pre] form run.sh accepts. A
+// refusal names the binary and leaves the build context empty.
+func TestReleaseReporterVersionIsReadFromTheBinary(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		info   string
+		goErr  bool
+		refuse string
+	}{
+		{name: "a pseudo-version past a tag", info: versionInfo("v0.1.4-0.20261105123045-abcdef123456")},
+		{name: "a tagged release", info: versionInfo("v0.1.3")},
+		{name: "a pre-release", info: versionInfo("v1.2.3-rc.1")},
+		{name: "an empty module version", info: versionInfo(""), refuse: "carries no main module version"},
+		{name: "no mod line", info: "release-reporter: go1.27.1\n\tpath\tgt.local/devops/cmd/release-reporter\n", refuse: "carries no main module version"},
+		{name: "(devel)", info: versionInfo("(devel)"), refuse: "is a (devel) build"},
+		{name: "a dirty build", info: versionInfo("v0.1.4-0.20261105123045-abcdef123456+dirty"), refuse: "not vMAJOR.MINOR.PATCH[-pre]"},
+		{name: "a version with no v", info: versionInfo("0.1.4"), refuse: "not vMAJOR.MINOR.PATCH[-pre]"},
+		{name: "a version with no patch", info: versionInfo("v0.1"), refuse: "not vMAJOR.MINOR.PATCH[-pre]"},
+		{name: "go version fails", goErr: true, refuse: "cannot read the version of release-reporter"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b, run, _ := toolsBuilder(t)
+			var readPath string
+			b.Go = func(_ string, _ []string, args ...string) ([]byte, error) {
+				readPath = args[len(args)-1]
+				if tc.goErr {
+					return nil, errors.New("go: not found")
+				}
+				return []byte(tc.info), nil
 			}
-			return
-		}
+			paths, err := b.BuildTools(context.Background())
+			if built := argAfter(run.calls[2].argv, "-o"); readPath != built {
+				t.Fatalf("go version -m read %q, want the binary the build wrote, %q", readPath, built)
+			}
+			if tc.refuse == "" {
+				if err != nil {
+					t.Fatalf("BuildTools: %v", err)
+				}
+				if len(paths) != 3 {
+					t.Errorf("BuildTools returned %q, want the three tools", paths)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.refuse) || !strings.Contains(err.Error(), "release-reporter") {
+				t.Fatalf("BuildTools = %q, %v; want an error naming release-reporter and %q", paths, err, tc.refuse)
+			}
+			if paths != nil {
+				t.Errorf("a refused version returned paths %q", paths)
+			}
+			if got := outEntries(t, b.Out); len(got) != 0 {
+				t.Errorf("a refused version left %v in the build context", got)
+			}
+		})
 	}
-	t.Errorf("the stamp %q has MIN_VERSION's core %s; it must sort above it", v, releaseReporterMinVersion)
 }

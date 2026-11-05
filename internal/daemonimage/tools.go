@@ -6,9 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
+	"regexp"
 	"strings"
-	"time"
 
 	"github.com/steveyegge/gastown/internal/polecat/bdbuild"
 )
@@ -22,25 +21,11 @@ const (
 	ReleaseReporterPackage = "./cmd/release-reporter"
 )
 
-// releaseReporterMinVersion is the MIN_VERSION the release-reporter plugin
-// compares its binary's --version against.
-const releaseReporterMinVersion = "v0.1.3"
-
-// releaseReporterBase is the core version the release-reporter stamp is a
-// pseudo-version of: the patch after releaseReporterMinVersion. A pre-release of
-// the core it names sorts above MIN_VERSION whether a comparison reads the
-// pre-release or only the core, which a stamp of MIN_VERSION itself would not.
-const releaseReporterBase = "v0.1.4"
-
-// releaseReporterVersionFlag stamps release-reporter's version. The symbol is
-// the conventional main.version; the devops source is not in this checkout, so
-// the in-container --version check is what confirms it names that variable.
-const releaseReporterVersionFlag = "-X main.version="
-
-// planVersion stands in for the release-reporter stamp in Plan, as planBuildID
-// stands in for bd's build id: the stamp needs the commit time, which Plan does
-// not read. It is one shell-safe token.
-const planVersion = "pseudo_version_read_in_checkout"
+// releaseReporterVersionShape is the form of version run.sh accepts from
+// release-reporter: vMAJOR.MINOR.PATCH with an optional pre-release. run.sh is not
+// in this repo; BuildTools reads the binary's version against this pattern before
+// the binary is placed, so a version run.sh would refuse fails the build instead.
+var releaseReporterVersionShape = regexp.MustCompile(`^v([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z.-]+)?$`)
 
 // toolNames are the tools BuildTools builds, in the order it writes them. Each is
 // a binary in the build context root and a COPY into /usr/local/bin.
@@ -51,13 +36,18 @@ var toolNames = []string{"hm", "devops-reporter", "release-reporter"}
 // its pinned commit, as BuildBinaries builds gt, bd and om: hm from HMSrc at
 // HMCommit, and both reporters from DevopsSrc at DevopsCommit. A checkout that is
 // not at its commit, or has uncommitted changes, is refused before any build runs.
-// Staging and the move into b.Out follow BuildBinaries.
+// release-reporter's version is the one the go command stamps from the checkout;
+// it is read back from the built binary and refused unless it has the form run.sh
+// accepts. Staging and the move into b.Out follow BuildBinaries.
 func (b Builder) BuildTools(ctx context.Context) ([]string, error) {
 	if b.Run == nil {
 		return nil, errors.New("daemonimage: no runner to build the tools with")
 	}
 	if b.Git == nil {
 		return nil, errors.New("daemonimage: no git to resolve the commits with")
+	}
+	if b.Go == nil {
+		return nil, errors.New("daemonimage: no go to read the release-reporter version with")
 	}
 	if err := b.checkToolInputs(); err != nil {
 		return nil, err
@@ -70,17 +60,10 @@ func (b Builder) BuildTools(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(devopsCommit) < 12 {
-		return nil, fmt.Errorf("daemonimage: git printed %q for --devops-commit %s, too short to stamp release-reporter with", devopsCommit, b.DevopsCommit)
-	}
-	when, err := b.commitTime(b.DevopsSrc, devopsCommit)
-	if err != nil {
-		return nil, err
-	}
 	builds := []binary{
 		{name: "hm", src: b.HMSrc, commit: hmCommit, pkg: HMPackage},
 		{name: "devops-reporter", src: b.DevopsSrc, commit: devopsCommit, pkg: DevopsReporterPackage},
-		{name: "release-reporter", src: b.DevopsSrc, commit: devopsCommit, pkg: ReleaseReporterPackage, ldflags: releaseReporterVersionFlag + releaseReporterVersion(when, devopsCommit)},
+		{name: "release-reporter", src: b.DevopsSrc, commit: devopsCommit, pkg: ReleaseReporterPackage},
 	}
 	stage, err := os.MkdirTemp(b.Out, ".daemonimage-tools-")
 	if err != nil {
@@ -92,6 +75,9 @@ func (b Builder) BuildTools(ctx context.Context) ([]string, error) {
 		if err := b.build(ctx, build, stage, env); err != nil {
 			return nil, err
 		}
+	}
+	if err := b.checkReleaseReporterVersion(stage, env); err != nil {
+		return nil, err
 	}
 	paths := make([]string, 0, len(builds))
 	for _, build := range builds {
@@ -169,37 +155,56 @@ func (b Builder) pinnedCommit(p pin) (string, error) {
 	return full, nil
 }
 
-// commitTime returns the committer time git reports for commit in src.
-func (b Builder) commitTime(src, commit string) (time.Time, error) {
-	out, err := b.Git(src, "show", "-s", "--format=%ct", commit)
+// checkReleaseReporterVersion reads the version the go command stamped into the
+// release-reporter binary built in stage, and refuses it unless it has the form
+// releaseReporterVersionShape accepts. The stamp is the main module's version,
+// which go version -m prints on its mod line; no stamp is needed on the command
+// line, and a build with VCS stamping off reads (devel).
+func (b Builder) checkReleaseReporterVersion(stage string, env []string) error {
+	path := filepath.Join(stage, "release-reporter")
+	out, err := b.Go(stage, env, "version", "-m", path)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("daemonimage: cannot read the commit time of %s in %s: %w", commit, src, err)
+		return fmt.Errorf("daemonimage: cannot read the version of release-reporter at %s: %w", path, err)
 	}
-	secs, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("daemonimage: git in %s printed %q as the commit time of %s, not a unix time", src, strings.TrimSpace(string(out)), commit)
+	version := mainModuleVersion(string(out))
+	switch {
+	case version == "":
+		return fmt.Errorf("daemonimage: release-reporter at %s carries no main module version; go version -m names none", path)
+	case version == "(devel)":
+		return fmt.Errorf("daemonimage: release-reporter at %s is a (devel) build, which carries no version from its checkout", path)
+	case !releaseReporterVersionShape.MatchString(version):
+		return fmt.Errorf("daemonimage: release-reporter at %s is version %q, not vMAJOR.MINOR.PATCH[-pre], the form run.sh accepts", path, version)
 	}
-	return time.Unix(secs, 0), nil
+	return nil
 }
 
-// releaseReporterVersion is the version release-reporter is stamped with: a Go
-// pseudo-version of the devops commit, releaseReporterBase with the commit's UTC
-// time and its first twelve characters. It has the vMAJOR.MINOR.PATCH[-pre] form
-// the bead names as the one run.sh accepts, and its core is above
-// releaseReporterMinVersion.
-func releaseReporterVersion(committed time.Time, commit string) string {
-	return fmt.Sprintf("%s-0.%s-%s", releaseReporterBase, committed.UTC().Format("20060102150405"), commit[:12])
+// mainModuleVersion returns the version on the first mod line of go version -m
+// output, which is the main module's, or "" when there is no such line or it has
+// no version field.
+func mainModuleVersion(info string) string {
+	for _, line := range strings.Split(info, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != "mod" {
+			continue
+		}
+		if len(fields) < 3 {
+			return ""
+		}
+		return fields[2]
+	}
+	return ""
 }
 
-// toolPlanLines are Plan's lines for BuildTools: the argv each build runs, with the
-// release-reporter stamp left as planVersion, since it needs the commit time.
+// toolPlanLines are Plan's lines for BuildTools: the argv each build runs, and the
+// check that reads release-reporter's version back from its binary.
 func (b Builder) toolPlanLines() []string {
 	hm := strings.Join(goBuildArgv(filepath.Join(b.Out, "hm"), HMPackage, ""), " ")
 	devops := strings.Join(goBuildArgv(filepath.Join(b.Out, "devops-reporter"), DevopsReporterPackage, ""), " ")
-	release := strings.Join(goBuildArgv(filepath.Join(b.Out, "release-reporter"), ReleaseReporterPackage, releaseReporterVersionFlag+planVersion), " ")
+	release := strings.Join(goBuildArgv(filepath.Join(b.Out, "release-reporter"), ReleaseReporterPackage, ""), " ")
 	return []string{
 		fmt.Sprintf("build hm: %s   (clean worktree of %s at %s)", hm, b.HMSrc, strings.TrimSpace(b.HMCommit)),
 		fmt.Sprintf("build devops-reporter: %s   (clean worktree of %s at %s)", devops, b.DevopsSrc, strings.TrimSpace(b.DevopsCommit)),
 		fmt.Sprintf("build release-reporter: %s   (clean worktree of %s at %s)", release, b.DevopsSrc, strings.TrimSpace(b.DevopsCommit)),
+		fmt.Sprintf("check release-reporter: go version -m %s   (refused unless vMAJOR.MINOR.PATCH[-pre])", filepath.Join(b.Out, "release-reporter")),
 	}
 }
