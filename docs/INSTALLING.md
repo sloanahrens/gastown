@@ -159,9 +159,10 @@ cost lands on every landing gate, and the daemon reports it as its `exec-tax`
 field, RED over `operational.health.exec_tax_red`.
 
 A tmux server started from Terminal.app inherits Terminal's exemption. The
-daemon does not: its supervisor starts it (launchd on a host-supervised town, the container in the live town since 2026-11-04), and it is the parent of every landing gate,
-so until the grant exists each gate exec pays the full scan. What exempts it is
-a Developer Tools grant on `~/.local/bin/gt`.
+daemon does not: its supervisor starts it (launchd on a host-supervised town,
+the container in the live town since 2026-11-04), and it is the parent of every
+landing gate, so until the grant exists each gate exec pays the full scan. What
+exempts it is a Developer Tools grant on `~/.local/bin/gt`.
 
 Add the grant once, after the first signed install:
 
