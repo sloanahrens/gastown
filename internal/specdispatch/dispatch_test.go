@@ -127,7 +127,7 @@ func TestEligibleFollowsTheSharedHoldRule(t *testing.T) {
 	for _, tc := range markers {
 		s := goodSpec()
 		tc.edit(&s)
-		if want := dispatch.DispatchHoldFields(s.Status, s.Labels, s.Assignee, s.Design, s.Notes); want == "" {
+		if want := dispatch.DispatchHoldFields(s.Status, s.Labels, s.Assignee, s.Design, s.Notes, nil); want == "" {
 			t.Fatalf("%s: the shared rule asserts no hold; this test is stale", tc.name)
 		}
 		if ok, why := Eligible(s, 2); ok {

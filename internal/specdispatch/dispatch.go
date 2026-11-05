@@ -192,7 +192,10 @@ func Eligible(s Spec, maxPriority int) (bool, string) {
 	// so the dispatcher must not re-sling it (gt-lxxo4). Reading the rule
 	// here is what keeps the dispatcher's draw and the sling guard's the same
 	// line.
-	if why := dispatch.DispatchHoldFields(s.Status, s.Labels, s.Assignee, s.Design, s.Notes); why != "" {
+	// No operator identities are passed: the assignee check above already
+	// skipped every assigned bead, so the operator's handle cannot add a hold
+	// here. The label and prose arms are unaffected by the setting (gt-ywuip).
+	if why := dispatch.DispatchHoldFields(s.Status, s.Labels, s.Assignee, s.Design, s.Notes, nil); why != "" {
 		return false, "hold: " + why
 	}
 	if s.Priority < 0 || s.Priority > maxPriority {

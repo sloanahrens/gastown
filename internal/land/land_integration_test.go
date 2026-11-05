@@ -250,8 +250,8 @@ func TestIntegrationLandPastADeadLandingsWorktree(t *testing.T) {
 func TestIntegrationLandCommitIdentity(t *testing.T) {
 	t.Setenv("GIT_AUTHOR_NAME", "Ambient Author")
 	t.Setenv("GIT_AUTHOR_EMAIL", "ambient@example.com")
-	t.Setenv("GIT_COMMITTER_NAME", "Sloan Ahrens")
-	t.Setenv("GIT_COMMITTER_EMAIL", "sloan@example.com")
+	t.Setenv("GIT_COMMITTER_NAME", "Test Operator")
+	t.Setenv("GIT_COMMITTER_EMAIL", "operator@example.test")
 	f := newRealLandFixture(t)
 	gitT(t, f.repo, "config", "user.name", "Configured User")
 	gitT(t, f.repo, "config", "user.email", "configured@example.com")

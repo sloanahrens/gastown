@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/land"
@@ -656,7 +657,14 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	// feeder re-slung gt-nj23.9 to a fresh polecat minutes after it had been
 	// un-slung and assigned to the operator. The marker makes an
 	// automatic dispatcher read this as a deferral rather than a failure.
-	if reason := dispatch.OperatorReservation(info.Labels, info.Assignee); reason != "" && !r.opts.force {
+	// The operator identities come from the town settings (operator.names); a
+	// settings file that cannot be read refuses the sling, since taking a bead
+	// the setting may reserve is what the guard exists to prevent (gt-ywuip).
+	op, err := config.LoadOperatorConfig(townRoot)
+	if err != nil {
+		return fmt.Errorf("reading the operator identities from the town settings: %w", err)
+	}
+	if reason := dispatch.OperatorReservation(info.Labels, info.Assignee, op); reason != "" && !r.opts.force {
 		return fmt.Errorf("%s %s is the operator's work (%s)\nAn agent does not take it. Use --force to sling it to one anyway",
 			dispatch.SlingRefusalMarker, beadID, reason)
 	}

@@ -157,7 +157,7 @@ func writeRigs(t *testing.T, townRoot string, held, unheld []string) {
 		if !hold {
 			return `"` + name + `": {}`
 		}
-		return `"` + name + `": {"dispatch_hold": {"since": "2026-10-25T12:00:00Z", "by": "sloan", "reason": "drain the landing backlog"}}`
+		return `"` + name + `": {"dispatch_hold": {"since": "2026-10-25T12:00:00Z", "by": "ada", "reason": "drain the landing backlog"}}`
 	}
 	var entries []string
 	for _, name := range held {

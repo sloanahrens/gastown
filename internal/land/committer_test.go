@@ -31,12 +31,12 @@ func TestCommittingEnv(t *testing.T) {
 		},
 		{
 			name:   "human-looking author",
-			author: Identity{Name: "Sloan Ahrens", Email: "sloan@example.com"},
+			author: Identity{Name: "Test Operator", Email: "operator@example.test"},
 			want: []string{
 				"GIT_COMMITTER_NAME=gt-landing",
 				"GIT_COMMITTER_EMAIL=gt-landing@gastown.local",
-				"GIT_AUTHOR_NAME=Sloan Ahrens",
-				"GIT_AUTHOR_EMAIL=sloan@example.com",
+				"GIT_AUTHOR_NAME=Test Operator",
+				"GIT_AUTHOR_EMAIL=operator@example.test",
 			},
 		},
 		{

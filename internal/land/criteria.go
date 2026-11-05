@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // acceptedRiskMarker opens a bead comment that records a decision already
@@ -47,8 +48,8 @@ const acceptedRiskExcerptCap = 80
 // against. When any comment's date does not parse, the order is the list's own,
 // since no date can say where that comment belongs. Empty means the bead
 // records no accepted risk, and the review runs without the flag.
-func AcceptedRisksText(comments []beads.Comment) string {
-	kept := acceptedRiskComments(comments)
+func AcceptedRisksText(comments []beads.Comment, op *config.OperatorConfig) string {
+	kept := acceptedRiskComments(comments, op)
 	entries := make([]string, len(kept))
 	for i, c := range kept {
 		entries[i] = acceptedRiskEntry(c.comment.Author, c.comment.CreatedAt, c.text)
@@ -73,8 +74,8 @@ type AcceptedRisk struct {
 // file om reads, while an audit that dropped the oldest waivers would defeat
 // the reason it exists — so every qualifying comment is reported here. Empty
 // means the bead records no accepted risk.
-func AcceptedRisksUsed(comments []beads.Comment) []AcceptedRisk {
-	kept := acceptedRiskComments(comments)
+func AcceptedRisksUsed(comments []beads.Comment, op *config.OperatorConfig) []AcceptedRisk {
+	kept := acceptedRiskComments(comments, op)
 	used := make([]AcceptedRisk, len(kept))
 	for i, c := range kept {
 		used[i] = AcceptedRisk{
@@ -99,11 +100,11 @@ type acceptedRiskComment struct {
 // acceptedRiskComments filters comments to the ones that record an accepted
 // risk and orders them oldest first. AcceptedRisksText and AcceptedRisksUsed
 // both read this filter, so they qualify and order comments identically.
-func acceptedRiskComments(comments []beads.Comment) []acceptedRiskComment {
+func acceptedRiskComments(comments []beads.Comment, op *config.OperatorConfig) []acceptedRiskComment {
 	kept := make([]acceptedRiskComment, 0, len(comments))
 	dated := true
 	for _, c := range comments {
-		text, ok := decisionComment(c, acceptedRiskMarker)
+		text, ok := decisionComment(c, acceptedRiskMarker, op)
 		if !ok {
 			continue
 		}
@@ -121,9 +122,9 @@ func acceptedRiskComments(comments []beads.Comment) []acceptedRiskComment {
 // text, trimmed, when marker opens it and the author may write that marker.
 // ACCEPTED-RISK and REBUTTAL read this one check, so the two markers cannot
 // disagree about who may settle a finding (gt-yphcl).
-func decisionComment(c beads.Comment, marker string) (string, bool) {
+func decisionComment(c beads.Comment, marker string, op *config.OperatorConfig) (string, bool) {
 	text := strings.TrimSpace(c.Text)
-	if !strings.HasPrefix(text, marker) || !isAcceptedRiskAuthor(c.Author) {
+	if !strings.HasPrefix(text, marker) || !isAcceptedRiskAuthor(c.Author, op) {
 		return "", false
 	}
 	return text, true
@@ -176,20 +177,17 @@ func acceptedRiskExcerpt(text string) string {
 }
 
 // isAcceptedRiskAuthor reports whether an author may record an accepted risk:
-// the shared human identity or the overseer, matched exactly after trimming and
-// case-sensitively. Every other author, polecats included, is ignored (gt-lauly).
+// an identity the town settings name as the operator's (operator.names) or the
+// overseer, matched exactly after trimming and case-sensitively. Every other
+// author, polecats included, is ignored (gt-lauly).
 //
 // This allowlist is a policy fence, not proof of authorship: bd records no
 // session, all writers share one OS user, and a comment's author is whatever
 // the writer typed. The layers that catch a bypass are the tap guard refusing a
 // polecat's ACCEPTED-RISK write (gt-z71j0) and the audit of every use
 // (gt-tvhg8).
-func isAcceptedRiskAuthor(author string) bool {
-	switch strings.TrimSpace(author) {
-	case "Sloan Ahrens", "town/crew/overseer":
-		return true
-	}
-	return false
+func isAcceptedRiskAuthor(author string, op *config.OperatorConfig) bool {
+	return isOverseerAuthor(author, op) || isOperatorAuthor(author, op)
 }
 
 // capAcceptedRisks joins entries oldest first and keeps the longest run of the

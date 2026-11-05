@@ -352,14 +352,14 @@ func TestFindingOutcome(t *testing.T) {
 	t.Parallel()
 	const at = "2026-10-26T12:00:00Z"
 	comments := []beads.Comment{
-		{Author: "Sloan Ahrens", Text: "ACCEPTED-RISK: F2 the mount is approved by design 5.5", CreatedAt: at},
+		{Author: "Test Operator", Text: "ACCEPTED-RISK: F2 the mount is approved by design 5.5", CreatedAt: at},
 		{Author: "town/crew/overseer", Text: "REBUTTAL: F3 the guard runs on the write path too", CreatedAt: at},
 		{Author: "town/crew/overseer", Text: "ACCEPTED-RISK: internal/land/rounds.go:F4 approved there too", CreatedAt: at},
-		{Author: "Sloan Ahrens", Text: "ACCEPTED-RISK:F7 approved with no space after the marker", CreatedAt: at},
-		{Author: "Sloan Ahrens", Text: "ACCEPTED-RISK: internal/land/other.go:F1 approved there", CreatedAt: at},
+		{Author: "Test Operator", Text: "ACCEPTED-RISK:F7 approved with no space after the marker", CreatedAt: at},
+		{Author: "Test Operator", Text: "ACCEPTED-RISK: internal/land/other.go:F1 approved there", CreatedAt: at},
 		{Author: "gastown/polecats/immortan", Text: "ACCEPTED-RISK: F1 my own work is fine", CreatedAt: at},
 		{Author: "gastown/polecats/immortan", Text: "REBUTTAL: F6 not my problem", CreatedAt: at},
-		{Author: "Sloan Ahrens", Text: "ACCEPTED-RISK: F5 approved\nACCEPTED-RISK: F10 approved too\nthe F8 mention here is prose", CreatedAt: at},
+		{Author: "Test Operator", Text: "ACCEPTED-RISK: F5 approved\nACCEPTED-RISK: F10 approved too\nthe F8 mention here is prose", CreatedAt: at},
 	}
 	inFile := FindingKey{File: "internal/land/rounds.go", ID: "F1"}
 	tests := []struct {
@@ -390,7 +390,7 @@ func TestFindingOutcome(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := FindingOutcome(tc.prev, tc.class, comments, tc.key); got != tc.want {
+			if got := findingOutcome(t, tc.prev, tc.class, comments, tc.key); got != tc.want {
 				t.Errorf("FindingOutcome(%q, %q, %s) = %q, want %q", tc.prev, tc.class, tc.key, got, tc.want)
 			}
 		})

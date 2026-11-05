@@ -1,11 +1,15 @@
 package dispatch
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/steveyegge/gastown/internal/config"
+)
 
 // TestOperatorReservation pins the two records that reserve a bead for the
-// human operator (gt-21pl0). The human assignees are the ones the town's own
-// beads carry today — `sloan` on gt-nj23.9, `the operator` and `overseer`
-// elsewhere — and the agent addresses are the forms every dispatch path writes.
+// human operator (gt-21pl0): the operator label, and an assignee that is not an
+// agent address. The human assignees are the handles the town's own beads carry
+// today, and the agent addresses are the forms every dispatch path writes.
 func TestOperatorReservation(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -19,7 +23,7 @@ func TestOperatorReservation(t *testing.T) {
 		{name: "label, however typed", labels: []string{"  Operator "}, want: "label operator"},
 		{name: "another label", labels: []string{"run-blocker"}, want: ""},
 
-		{name: "bare handle is a person", assignee: "sloan", want: "assignee sloan is not an agent address"},
+		{name: "bare handle is a person", assignee: "ada", want: "assignee ada is not an agent address"},
 		{name: "a name with a space is a person", assignee: "Test Operator", want: "assignee Test Operator is not an agent address"},
 		{name: "overseer is a person", assignee: "overseer", want: "assignee overseer is not an agent address"},
 
@@ -43,8 +47,38 @@ func TestOperatorReservation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := OperatorReservation(tt.labels, tt.assignee); got != tt.want {
+			if got := OperatorReservation(tt.labels, tt.assignee, nil); got != tt.want {
 				t.Errorf("OperatorReservation(%v, %q) = %q, want %q", tt.labels, tt.assignee, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestOperatorReservationUsesSettingsNames: an assignee equal to a name the
+// town settings list in operator.names is the operator's, whether the name is
+// bare or carries a slash, while an unlisted bare name follows the
+// bare-address rule (gt-ywuip).
+func TestOperatorReservationUsesSettingsNames(t *testing.T) {
+	t.Parallel()
+	op := &config.OperatorConfig{Names: []string{"Test Operator", "operator/handle"}}
+	tests := []struct {
+		name     string
+		assignee string
+		want     string
+	}{
+		{name: "a listed bare name", assignee: "Test Operator", want: "assignee Test Operator is the operator"},
+		{name: "a listed name padded with spaces", assignee: "  Test Operator  ", want: "assignee Test Operator is the operator"},
+		// A listed name with a slash is the added rule: without the setting it
+		// would parse as an agent address and the bead would be dispatchable.
+		{name: "a listed name carrying a slash", assignee: "operator/handle", want: "assignee operator/handle is the operator"},
+		{name: "an unlisted bare name follows today's rule", assignee: "someone", want: "assignee someone is not an agent address"},
+		{name: "an unlisted agent address is still an agent", assignee: "gastown/polecats/onyx", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := OperatorReservation(nil, tt.assignee, op); got != tt.want {
+				t.Errorf("OperatorReservation(nil, %q) = %q, want %q", tt.assignee, got, tt.want)
 			}
 		})
 	}

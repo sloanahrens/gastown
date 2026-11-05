@@ -569,6 +569,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Remote:             landingRemote,
 		WorkRoot:           workRoot,
 		Route:              "daemon",
+		TownRoot:           townRoot,
 		Reviewer:           reviewer,
 		Beads:              bd,
 		Landings:           landings,

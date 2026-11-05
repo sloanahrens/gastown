@@ -420,17 +420,17 @@ func TestReapOptionsWiring(t *testing.T) {
 
 	off := patrolScanOptions(&DaemonPatrolConfig{Patrols: &PatrolsConfig{
 		PatrolScan: &PatrolScanConfig{Enabled: true},
-	}}, now)
+	}}, nil, nil, now)
 	if off.Reap != nil {
 		t.Fatalf("an absent worktree_cleanup block set Reap = %+v", off.Reap)
 	}
-	if patrolScanOptions(nil, now).Reap != nil {
+	if patrolScanOptions(nil, nil, nil, now).Reap != nil {
 		t.Fatal("no config set Reap")
 	}
 
 	on := patrolScanOptions(&DaemonPatrolConfig{Patrols: &PatrolsConfig{
 		PatrolScan: &PatrolScanConfig{Enabled: true, WorktreeCleanup: &agentconfig.WorktreeCleanupConfig{Enabled: true}},
-	}}, now)
+	}}, nil, nil, now)
 	want := &patrolscan.ReapOptions{
 		DryRun:      true,
 		Grace:       patrolscan.DefaultReapGrace,

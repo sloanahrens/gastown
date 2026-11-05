@@ -390,7 +390,7 @@ func TestPatrolScanIsSubmittedMatchesPolecat(t *testing.T) {
 
 func TestPatrolScanOptionsUseDispatchHoldRule(t *testing.T) {
 	t.Parallel()
-	o := patrolScanOptions(nil, time.Now)
+	o := patrolScanOptions(nil, nil, nil, time.Now)
 	if why := o.HoldReason(patrolscan.Work{Status: "hooked", Labels: []string{"gt:needs-human"}}); why == "" {
 		t.Error("gt:needs-human work must read as held")
 	}
@@ -402,9 +402,45 @@ func TestPatrolScanOptionsUseDispatchHoldRule(t *testing.T) {
 		t.Error("IsRefusal must match supervisor refusals only")
 	}
 	cfg := &DaemonPatrolConfig{Patrols: &PatrolsConfig{PatrolScan: &PatrolScanConfig{DeadSamples: 3, ReportWindow: "6h"}}}
-	o = patrolScanOptions(cfg, time.Now)
+	o = patrolScanOptions(cfg, nil, nil, time.Now)
 	if o.DeadSamples != 3 || o.ReportWindow != 6*time.Hour {
 		t.Errorf("options = %+v", o)
+	}
+}
+
+// TestPatrolHoldUnreadableSettingsFailsClosedAndLogs: when the town settings
+// cannot be read, the hold rule fails closed — an assigned bead is held rather
+// than possibly restarted as an agent's — and the read is logged once, naming
+// the file and why it did not parse (gt-ywuip).
+func TestPatrolHoldUnreadableSettingsFailsClosedAndLogs(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "settings"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "settings", "config.json"), []byte("not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var logs strings.Builder
+	d := &Daemon{logger: log.New(&logs, "", 0), config: &Config{TownRoot: townRoot}}
+	h := &patrolScanHost{d: d}
+
+	opts := d.patrolScanRunOptions(h)
+
+	if why := opts.HoldReason(patrolscan.Work{Status: "hooked", Assignee: "gastown/polecats/onyx"}); why == "" {
+		t.Error("an assigned bead is not held when the operator identities cannot be read")
+	}
+	if why := opts.HoldReason(patrolscan.Work{Status: "hooked"}); why != "" {
+		t.Errorf("an unassigned bead is held: %q", why)
+	}
+	got := logs.String()
+	if n := strings.Count(got, "could not read operator.names"); n != 1 {
+		t.Errorf("the failed settings read is logged %d times, want once:\n%s", n, got)
+	}
+	for _, want := range []string{"config.json", "does not parse"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the log line does not name %q:\n%s", want, got)
+		}
 	}
 }
 
@@ -1155,7 +1191,7 @@ func TestPatrolScanRootWork(t *testing.T) {
 // whose bead has not closed yet (gt-iwgbd).
 func TestPatrolScanDoneCloseGraceMatchesCrashDetector(t *testing.T) {
 	t.Parallel()
-	if got := patrolScanOptions(nil, time.Now).DoneCloseGrace; got != polecatDoneCloseGrace {
+	if got := patrolScanOptions(nil, nil, nil, time.Now).DoneCloseGrace; got != polecatDoneCloseGrace {
 		t.Fatalf("patrol scan DoneCloseGrace = %s, crash detector polecatDoneCloseGrace = %s", got, polecatDoneCloseGrace)
 	}
 	const seat = "myr/polecats/mycat"

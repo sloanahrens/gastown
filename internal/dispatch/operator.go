@@ -1,6 +1,10 @@
 package dispatch
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/steveyegge/gastown/internal/config"
+)
 
 // OperatorLabel marks a bead as the human operator's own work: a hand-run
 // audit, a config change, a decision only the person in the loop can make. No
@@ -14,22 +18,31 @@ const OperatorLabel = "operator"
 // mark. The other is the assignee: every Gas Town agent is addressed by a
 // slash-qualified address (gastown/polecats/onyx, gastown/crew/sloan,
 // gastown/witness), so an assignee that is not one is a person — the bare
-// handle left behind when the operator takes a bead by hand (`sloan`,
-// `the operator`, `overseer`).
+// handle left behind when the operator takes a bead by hand. An assignee equal
+// to a name the town settings configure as the operator's (operator.names) is
+// a person's handle too, even one that carries a slash: the settings say whose
+// address it is, and no dispatcher is entitled to take that person's work
+// (gt-ywuip).
 //
 // The reservation is a record on the bead, so every dispatcher can read it
 // without asking who wrote it: an automatic dispatcher re-slings a ready
 // bead, and on 2026-09-25 one re-slung gt-nj23.9 to a fresh polecat two
 // minutes after it had been un-slung and assigned to the operator, undoing
 // the reversal (gt-21pl0).
-func OperatorReservation(labels []string, assignee string) string {
+func OperatorReservation(labels []string, assignee string, op *config.OperatorConfig) string {
 	for _, label := range labels {
 		if strings.EqualFold(strings.TrimSpace(label), OperatorLabel) {
 			return "label " + OperatorLabel
 		}
 	}
 	assignee = strings.TrimSpace(assignee)
-	if assignee != "" && !isAgentAddress(assignee) {
+	if assignee == "" {
+		return ""
+	}
+	if op.Matches(assignee) {
+		return "assignee " + assignee + " is the operator"
+	}
+	if !isAgentAddress(assignee) {
 		return "assignee " + assignee + " is not an agent address"
 	}
 	return ""

@@ -22,7 +22,7 @@ func TestAttributionLine(t *testing.T) {
 		{"fix: Claude Code hooks fire on Bash(*)", false},
 		{"docs: explain the anthropic API key rotation", false},
 		{"feat: x\n\nCo-Authored-By: Jane Doe <jane@example.com>", false},
-		{"feat: x\n\nSigned-off-by: Sloan Ahrens <s@example.com>", false},
+		{"feat: x\n\nSigned-off-by: Test Operator <operator@example.test>", false},
 		{"feat: generated with go generate", false},
 	} {
 		if got := AttributionLine(tc.msg) != ""; got != tc.want {

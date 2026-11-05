@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/land"
@@ -66,6 +67,16 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		if err != nil {
 			return nil, err
 		}
+	}
+	// The operator identities the reservation reads (operator.names). Settings
+	// that cannot be read refuse the dispatch rather than dispatch without
+	// them: an unreadable setting leaves the operator's bead possibly
+	// unreserved, and taking it is what the guard exists to prevent
+	// (gt-ywuip).
+	op, err := config.LoadOperatorConfig(townRoot)
+	if err != nil {
+		result.ErrMsg = "the town settings could not be read"
+		return result, fmt.Errorf("reading the operator identities from the town settings: %w", err)
 	}
 
 	// Acquire per-bead flock to prevent concurrent dispatch races (TOCTOU).
@@ -178,7 +189,7 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 	// Mirrors the guard in the single-sling CLI path so the batch and queue
 	// callers refuse one too, and read the refusal as a deferral rather than a
 	// failed dispatch.
-	if reason := dispatch.OperatorReservation(info.Labels, info.Assignee); reason != "" && !explicitForce {
+	if reason := dispatch.OperatorReservation(info.Labels, info.Assignee, op); reason != "" && !explicitForce {
 		result.ErrMsg = "operator-reserved"
 		return result, fmt.Errorf("%s %s is the operator's work (%s)\nAn agent does not take it. Use --force to sling it to one anyway",
 			dispatch.SlingRefusalMarker, opts.BeadID, reason)
@@ -540,7 +551,7 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 			// same --force. A hooked or pinned status is deliberately not
 			// re-read: those are the re-slings that --force, and a dead
 			// holder, are allowed to make.
-			hold = dispatch.SlingHoldFields(latest.Labels, latest.Assignee, latest.Design, latest.Notes)
+			hold = dispatch.SlingHoldFields(latest.Labels, latest.Assignee, latest.Design, latest.Notes, op)
 			if hold == "" && IsDeferredBead(latest) {
 				hold = "deferred"
 			}

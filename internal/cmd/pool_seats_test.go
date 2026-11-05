@@ -89,7 +89,7 @@ func TestIsActionableReadyBead(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isActionableReadyBead(tc.issue, 2, nil); got != tc.want {
+			if got := isActionableReadyBead(tc.issue, 2, nil, nil); got != tc.want {
 				t.Errorf("isActionableReadyBead = %v, want %v", got, tc.want)
 			}
 		})
@@ -102,13 +102,13 @@ func TestIsActionableReadyBead(t *testing.T) {
 func TestIsActionableReadyBeadHonorsTheCeiling(t *testing.T) {
 	t.Parallel()
 	p3 := &beads.Issue{ID: "gt-3", Title: "someday", Priority: 3}
-	if isActionableReadyBead(p3, 2, nil) {
+	if isActionableReadyBead(p3, 2, nil, nil) {
 		t.Error("a P3 bead is dispatchable at the default P2 ceiling")
 	}
-	if !isActionableReadyBead(p3, 4, nil) {
+	if !isActionableReadyBead(p3, 4, nil, nil) {
 		t.Error("a P3 bead is backlog at a P4 ceiling")
 	}
-	if isActionableReadyBead(&beads.Issue{ID: "gt-u", Title: "unscored", Priority: -1}, 4, nil) {
+	if isActionableReadyBead(&beads.Issue{ID: "gt-u", Title: "unscored", Priority: -1}, 4, nil, nil) {
 		t.Error("an unscored bead is dispatchable")
 	}
 }
@@ -127,18 +127,18 @@ func TestIsActionableReadyBead_HoldsRedMainBeadWhileItsRevertIsInFlight(t *testi
 	revert := &specdispatch.Revert{Culprit: "gt-cq5gb"}
 	plain := &beads.Issue{ID: "gt-plain", Title: "ordinary work", Priority: 1}
 
-	if isActionableReadyBead(redMain, 2, revert) {
+	if isActionableReadyBead(redMain, 2, revert, nil) {
 		t.Error("a red-main bead is dispatchable while the rig's revert of the same breakage is in flight")
 	}
 	// The hold is the label's: a revert in flight does not hold the rig's
 	// other work, and a red-main bead is work again once the revert is gone.
-	if !isActionableReadyBead(plain, 2, revert) {
+	if !isActionableReadyBead(plain, 2, revert, nil) {
 		t.Error("a bead without the red-main label is held by another bead's revert")
 	}
-	if !isActionableReadyBead(redMain, 2, nil) {
+	if !isActionableReadyBead(redMain, 2, nil, nil) {
 		t.Error("a red-main bead is held with no revert in flight")
 	}
-	if !isActionableReadyBead(redMain, 2, &specdispatch.Revert{}) {
+	if !isActionableReadyBead(redMain, 2, &specdispatch.Revert{}, nil) {
 		t.Error("a revert with no culprit is no hold")
 	}
 }
@@ -157,7 +157,7 @@ func TestIsActionableReadyBead_AbsentRedMainStateCountsAsToday(t *testing.T) {
 	if rv != nil {
 		t.Fatalf("absent red-main state = %+v, want no revert", rv)
 	}
-	if !isActionableReadyBead(bead, 2, rv) {
+	if !isActionableReadyBead(bead, 2, rv, nil) {
 		t.Error("a red-main bead is held by a rig whose red-main state file does not exist")
 	}
 }
