@@ -30,6 +30,11 @@ var (
 	// bdURLCredentialRE is the userinfo of a URL, the user:password before
 	// its host.
 	bdURLCredentialRE = regexp.MustCompile(`://[^\s/]*@`)
+	// bdDSNCredentialRE is the user and password of a driver DSN, the
+	// user:password before its protocol and address: user:password@tcp(host)/db,
+	// or user:password@/db for the default protocol. The protocol or slash is
+	// kept, so the receipt still says where bd was pointed.
+	bdDSNCredentialRE = regexp.MustCompile(`[^\s:@/]*:[^\s/]*@([A-Za-z][A-Za-z0-9]*\(|/)`)
 	// bdAssignmentRE is one NAME=value pair. Every name is scrubbed, not only
 	// the token-looking ones: a name does not say whether its value is secret.
 	bdAssignmentRE = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*=\S+`)
@@ -66,8 +71,9 @@ func bdListGap(dir string, err error) string {
 
 // bdFailureCause is the cause a failed bd call adds to its gap: bd's first
 // non-blank stderr line when the call exited with stderr, else the error's own
-// text. The cause is scrubbed of credentials and bounded to bdCauseMax
-// characters. A nil error has no cause.
+// text. The cause is scrubbed of credentials, whether they are a URL's
+// userinfo, a driver DSN's user and password, or a NAME=value pair, and
+// bounded to bdCauseMax characters. A nil error has no cause.
 func bdFailureCause(err error) string {
 	if err == nil {
 		return ""
@@ -79,6 +85,7 @@ func bdFailureCause(err error) string {
 			text = line
 		}
 	}
+	text = bdDSNCredentialRE.ReplaceAllString(text, "...@$1")
 	text = bdURLCredentialRE.ReplaceAllString(text, "://...@")
 	text = bdAssignmentRE.ReplaceAllString(text, "...")
 	runes := []rune(text)
