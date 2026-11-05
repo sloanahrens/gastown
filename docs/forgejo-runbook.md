@@ -57,8 +57,9 @@ Run it with `--help` for the flags.
 
 ## Before the first run
 
-- Forgejo is up: `docker compose up -d` in `~/forgejo` (`~/forgejo/README.md`
-  covers the stack, the runner and the registry).
+- Forgejo is up: it runs as pods in the control cluster, namespace `forgejo`;
+  `kubectl --context colima-gt-control -n forgejo get pods` shows the server and
+  the runner Running. The old compose stack in `~/forgejo` is stopped.
 - The broker is installed and its policy holds a `run` rule for the script.
 - `curl` is on PATH.
 
