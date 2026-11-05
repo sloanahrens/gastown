@@ -58,13 +58,23 @@ type harness struct {
 	promotes      []string
 	gtOut         string
 	gtRC          int
-	out           bytes.Buffer
+	// gtByRig answers `gt promote` per rig when a case lists several rigs; a
+	// rig it does not name falls back to gtOut and gtRC.
+	gtByRig map[string]promoteReply
+	out     bytes.Buffer
 }
 
 // reply is one canned Forgejo answer.
 type reply struct {
 	status int
 	body   string
+}
+
+// promoteReply is one canned `gt promote` outcome: its combined output and exit
+// code.
+type promoteReply struct {
+	out  string
+	code int
 }
 
 // newHarness starts a case from a working install: a town with a red-main
@@ -114,6 +124,9 @@ func (h *harness) run() int {
 				h.t.Errorf("gt promote ran in %q, want the town root %q", dir, h.in("town"))
 			}
 			h.promotes = append(h.promotes, fmt.Sprintf("promote --rig %s --sha %s", rig, sha))
+			if r, ok := h.gtByRig[rig]; ok {
+				return r.out, r.code
+			}
 			return h.gtOut, h.gtRC
 		},
 	})
@@ -220,6 +233,20 @@ func (h *harness) setTag(tag, sha string) {
 // setCompare answers a compare of head against base.
 func (h *harness) setCompare(base, head, body string) {
 	h.setReply(comparePath(base, head), body)
+}
+
+// promotesGreen answers Forgejo for repo so the gate promotes green there: the
+// newest deploy run's tag names green, green is on main, and it is ahead of the
+// rig's last_promoted older. The job list is the case's, shared by every repo.
+func (h *harness) promotesGreen(repo, rig string) {
+	h.state(rig, older)
+	h.replies[fmt.Sprintf("/repos/%s/actions/runs?workflow_id=%s&limit=%d&page=1", repo, deployWorkflow, runsLimit)] = reply{
+		status: http.StatusOK,
+		body:   `{"total_count":1,"workflow_runs":[` + runJSON(9, deployWorkflow, "success", "v0.2.0", green, "2026-10-09T03:14:42Z") + `]}`,
+	}
+	h.setReply("/repos/"+repo+"/tags/v0.2.0", fmt.Sprintf(`{"name":"v0.2.0","commit":{"sha":%q}}`, green))
+	h.setReply("/repos/"+repo+"/compare/"+mainBranch+"..."+green, `{"total_commits":0,"commits":[]}`)
+	h.setReply("/repos/"+repo+"/compare/"+older+"..."+green, `{"total_commits":2,"commits":[{},{}]}`)
 }
 
 // output is everything the run printed.
@@ -335,7 +362,7 @@ func TestGate(t *testing.T) {
 				h.setReply("/repos/"+repo+"/actions/runs/9/jobs", `{"message":"not a list"}`)
 			},
 			code: 1,
-			want: []string{"app-promote: cannot read the jobs of run 9 in " + repo},
+			want: []string{"rig fractals: cannot read the jobs of run 9 in " + repo},
 		},
 		{
 			name: "a green staging run and its jobs with no release run: nothing",
@@ -497,7 +524,7 @@ func TestGate(t *testing.T) {
 			},
 			code: 1,
 			want: []string{
-				"app-promote: rig fractals: cannot read the red-main record",
+				"rig fractals: cannot read the red-main record",
 				"last_promoted is not a commit id",
 			},
 			avoid: []string{"/compare/"},
@@ -544,7 +571,7 @@ func TestGate(t *testing.T) {
 				h.setCompare(mainBranch, green, "")
 			},
 			code: 1,
-			want: []string{"app-promote: compare main...aaaa111122223333444455556666777788889999 in " + repo + ": no commit count in the reply"},
+			want: []string{"rig fractals: compare main...aaaa111122223333444455556666777788889999 in " + repo + ": no commit count in the reply"},
 		},
 		{
 			name: "a compare against main answering no json fails closed",
@@ -607,13 +634,13 @@ func TestGate(t *testing.T) {
 				h.setCompare(older, green, "{}")
 			},
 			code: 1,
-			want: []string{"app-promote: compare " + older + "...aaaa111122223333444455556666777788889999 in " + repo + ": no commit count in the reply"},
+			want: []string{"rig fractals: compare " + older + "...aaaa111122223333444455556666777788889999 in " + repo + ": no commit count in the reply"},
 		},
 		{
 			name:  "a Forgejo that cannot be reached fails the run",
 			setup: func(h *harness) { h.down = true },
 			code:  1,
-			want:  []string{"app-promote: GET " + apiRoot + runsPath(1) + ": could not reach Forgejo"},
+			want:  []string{"rig fractals: GET " + apiRoot + runsPath(1) + ": could not reach Forgejo"},
 		},
 		{
 			name:  "a reply whose body cannot be read fails the run",
@@ -739,18 +766,18 @@ func TestGate(t *testing.T) {
 			want: []string{"rigs.conf: 'fractals ' needs a rig and an owner/repo"},
 		},
 		{
-			name: "exit 1 from gt promote is logged and the run records skipped",
+			name: "an exit 1 refusal that is not a routine skip fails the run",
 			setup: func(h *harness) {
 				h.state(rigName, older)
 				h.gtRC = 1
 				h.gtOut = "Error: rig fractals names no merge_queue.forgejo.promote_target, so it does not promote\n"
 			},
-			code: 0,
+			code: 1,
 			want: []string{
-				"[app-promote] rig fractals: not promotable: Error: rig fractals names no merge_queue.forgejo.promote_target, so it does not promote",
-				"[plugin-result skipped]",
+				"app-promote: 1 rig(s) failed:\nrig fractals: gt promote --sha " + green + " exited 1: rig fractals names no merge_queue.forgejo.promote_target, so it does not promote",
 			},
 			promotes: []string{"promote --rig fractals --sha " + green},
+			avoid:    []string{skippedMarker},
 		},
 		{
 			name: "exit 2 from gt promote: the plugin exits 1 with the cause",
@@ -761,7 +788,7 @@ func TestGate(t *testing.T) {
 			},
 			code: 1,
 			want: []string{
-				"app-promote: rig fractals: gt promote --sha " + green + " exited 2: Error: rig fractals: the promotion failed: pushing aaaa failed",
+				"app-promote: 1 rig(s) failed:\nrig fractals: gt promote --sha " + green + " exited 2: rig fractals: the promotion failed: pushing aaaa failed",
 			},
 			promotes: []string{"promote --rig fractals --sha " + green},
 		},
@@ -774,8 +801,7 @@ func TestGate(t *testing.T) {
 			},
 			code: 0,
 			want: []string{
-				"[app-promote] rig fractals: Error: rig fractals: the promotion target's main is at 1234, which is not an ancestor of aaaa, so it was left alone and the divergence is escalated",
-				"divergence is escalated",
+				"[app-promote] rig fractals: the promotion target's main is at 1234, which is not an ancestor of aaaa, so it was left alone and the divergence is escalated",
 				"[plugin-result skipped]",
 			},
 			promotes: []string{"promote --rig fractals --sha " + green},
@@ -787,7 +813,7 @@ func TestGate(t *testing.T) {
 			},
 			code: 1,
 			wantf: func(h *harness) []string {
-				return []string{"app-promote: rig fractals: cannot read the red-main record " + h.in("town", ".runtime", "red-main", rigName+".json")}
+				return []string{"rig fractals: cannot read the red-main record " + h.in("town", ".runtime", "red-main", rigName+".json")}
 			},
 		},
 		{
@@ -814,7 +840,7 @@ func TestGate(t *testing.T) {
 				h.setReply(runsPath(1), "not json")
 			},
 			code: 1,
-			want: []string{"app-promote: cannot read the run list of " + repo},
+			want: []string{"rig fractals: cannot read the run list of " + repo},
 		},
 		{
 			name: "a run list of null fails the run",
@@ -847,7 +873,7 @@ func TestGate(t *testing.T) {
 				h.setStatus("/repos/"+repo+"/tags/v0.2.0", http.StatusInternalServerError)
 			},
 			code: 1,
-			want: []string{"app-promote: GET " + apiRoot + "/repos/" + repo + "/tags/v0.2.0 returned 500"},
+			want: []string{"rig fractals: GET " + apiRoot + "/repos/" + repo + "/tags/v0.2.0 returned 500"},
 		},
 		{
 			name: "a jobs read answering 500 fails the run",
@@ -856,7 +882,7 @@ func TestGate(t *testing.T) {
 				h.setStatus("/repos/"+repo+"/actions/runs/9/jobs", http.StatusInternalServerError)
 			},
 			code: 1,
-			want: []string{"app-promote: GET " + apiRoot + "/repos/" + repo + "/actions/runs/9/jobs returned 500"},
+			want: []string{"rig fractals: GET " + apiRoot + "/repos/" + repo + "/actions/runs/9/jobs returned 500"},
 		},
 		{
 			name: "a compare read answering 500 fails the run",
@@ -865,7 +891,7 @@ func TestGate(t *testing.T) {
 				h.setStatus(comparePath(mainBranch, green), http.StatusInternalServerError)
 			},
 			code: 1,
-			want: []string{"app-promote: GET " + apiRoot + comparePath(mainBranch, green) + " returned 500"},
+			want: []string{"rig fractals: GET " + apiRoot + comparePath(mainBranch, green) + " returned 500"},
 		},
 		{
 			name: "an API root that is not a URL fails the run",
@@ -874,7 +900,7 @@ func TestGate(t *testing.T) {
 				h.env["FORGEJO_API_URL"] = "http://forgejo.invalid/%zz"
 			},
 			code: 1,
-			want: []string{"app-promote: GET http://forgejo.invalid/%zz/repos/"},
+			want: []string{"rig fractals: GET http://forgejo.invalid/%zz/repos/"},
 		},
 		{
 			name: "a tag reply that cannot be read fails the run",
@@ -883,7 +909,7 @@ func TestGate(t *testing.T) {
 				h.setReply("/repos/"+repo+"/tags/v0.2.0", "[1]")
 			},
 			code: 1,
-			want: []string{"app-promote: cannot read tag v0.2.0 of " + repo},
+			want: []string{"rig fractals: cannot read tag v0.2.0 of " + repo},
 		},
 		{
 			name: "the third column names the integration job",
@@ -986,6 +1012,354 @@ func TestGate_ViewerTokenStaysOutOfOutput(t *testing.T) {
 			t.Errorf("read %s carries Authorization %q, want the token header", h.requests[i], header)
 		}
 	}
+}
+
+// TestPromoteClassifies holds every gt promote message the plugin knows to its
+// outcome: a routine skip that logs gt promote's own line and does not fail the
+// run, or a hard failure naming the rig, the exit code and the cause (gt-lym1z).
+// A message the routine list does not name is hard, so a new one fails the run
+// until it is classified.
+func TestPromoteClassifies(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		code  int
+		out   string
+		cause string
+		skip  bool
+	}{
+		{
+			name:  "the commit is not on the rig's main",
+			code:  1,
+			out:   "Error: aaaa1111 is not on rig fractals's Forgejo main, so it is not promotable\n",
+			cause: "aaaa1111 is not on rig fractals's Forgejo main, so it is not promotable",
+			skip:  true,
+		},
+		{
+			name:  "the sweep has no fully green cycle yet",
+			code:  1,
+			out:   "Error: rig fractals's promotion is owned by the tier sweep, which has no fully green cycle on record yet, so no commit is promotable\n",
+			cause: "rig fractals's promotion is owned by the tier sweep, which has no fully green cycle on record yet, so no commit is promotable",
+			skip:  true,
+		},
+		{
+			name:  "the sweep's last green commit is not this one",
+			code:  1,
+			out:   "Error: rig fractals's promotion is owned by the tier sweep: only its last green commit bbbb1111 is promotable, not aaaa1111\n",
+			cause: "rig fractals's promotion is owned by the tier sweep: only its last green commit bbbb1111 is promotable, not aaaa1111",
+			skip:  true,
+		},
+		{
+			name:  "another promotion holds the lock",
+			code:  1,
+			out:   "Error: rig fractals: not promoted: another promotion holds /town/.runtime/promote/fractals.lock; retry later\n",
+			cause: "rig fractals: not promoted: another promotion holds /town/.runtime/promote/fractals.lock; retry later",
+			skip:  true,
+		},
+		{
+			name:  "the divergence is escalated",
+			code:  2,
+			out:   "Error: rig fractals: the promotion target's main is at 1234, which is not an ancestor of aaaa, so it was left alone and the divergence is escalated\n",
+			cause: "rig fractals: the promotion target's main is at 1234, which is not an ancestor of aaaa, so it was left alone and the divergence is escalated",
+			skip:  true,
+		},
+		{
+			name:  "the rig is not configured for Forgejo-primary landing",
+			code:  1,
+			out:   "Error: rig fractals is not configured for Forgejo-primary landing: merge_queue.forgejo.remote_url is unset, so no Forgejo main names what may be promoted\n",
+			cause: "rig fractals is not configured for Forgejo-primary landing: merge_queue.forgejo.remote_url is unset, so no Forgejo main names what may be promoted",
+		},
+		{
+			name:  "the rig names no promote_target",
+			code:  1,
+			out:   "Error: rig fractals names no merge_queue.forgejo.promote_target, so it does not promote\n",
+			cause: "rig fractals names no merge_queue.forgejo.promote_target, so it does not promote",
+		},
+		{
+			name:  "the rig names a promote_target but no promote_key_file",
+			code:  1,
+			out:   "Error: rig fractals names a promote_target but no promote_key_file, so nothing can push to it\n",
+			cause: "rig fractals names a promote_target but no promote_key_file, so nothing can push to it",
+		},
+		{
+			name:  "--rig is required",
+			code:  1,
+			out:   "Error: --rig is required\nUsage:\n  gt promote [flags]\n",
+			cause: "--rig is required",
+		},
+		{
+			name:  "--sha is required",
+			code:  1,
+			out:   "Error: --sha is required\nUsage:\n  gt promote [flags]\n",
+			cause: "--sha is required",
+		},
+		{
+			name:  "exit 2 with the promotion failed",
+			code:  2,
+			out:   "Error: rig fractals: the promotion failed: pushing aaaa failed\n",
+			cause: "rig fractals: the promotion failed: pushing aaaa failed",
+		},
+		{
+			name:  "exit 127, gt cannot start",
+			code:  127,
+			out:   "bash: gt: command not found\n",
+			cause: "bash: gt: command not found",
+		},
+		{
+			name:  "an exit code the contract does not name",
+			code:  3,
+			out:   "gt: the promotion daemon is not running\n",
+			cause: "gt: the promotion daemon is not running",
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			h.state(rigName, older)
+			h.gtRC = tc.code
+			h.gtOut = tc.out
+
+			code := h.run()
+			if tc.skip {
+				if code != 0 {
+					t.Fatalf("exit = %d, want 0; output:\n%s", code, h.output())
+				}
+				if want := "[app-promote] " + tc.cause + "\n"; !strings.Contains(h.output(), want) {
+					t.Errorf("output does not hold the real line %q; output:\n%s", want, h.output())
+				}
+				if !strings.Contains(h.output(), skippedMarker) {
+					t.Errorf("the routine skip is not recorded as skipped; output:\n%s", h.output())
+				}
+				return
+			}
+			if code != 1 {
+				t.Fatalf("exit = %d, want 1; output:\n%s", code, h.output())
+			}
+			want := "app-promote: 1 rig(s) failed:\nrig " + rigName + ": gt promote --sha " + green +
+				" exited " + strconv.Itoa(tc.code) + ": " + tc.cause
+			if !strings.Contains(h.output(), want) {
+				t.Errorf("output does not hold %q; output:\n%s", want, h.output())
+			}
+			if strings.Contains(h.output(), skippedMarker) {
+				t.Errorf("the failed run says skipped; output:\n%s", h.output())
+			}
+		})
+	}
+}
+
+// TestPromoteAllContinuesPastFailure holds the run to checking every rig after
+// one fails: the failing rig is reported with its exit code and cause, a routine
+// skip stays a skip, and a later rig still promotes (gt-lym1z).
+func TestPromoteAllContinuesPastFailure(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	const (
+		failingRepo = "sloan/failing-repo"
+		routineRepo = "sloan/routine-repo"
+		healthyRepo = "sloan/healthy-repo"
+	)
+	h.write(h.in("plugin", "rigs.conf"),
+		"failing "+failingRepo+"\nroutine "+routineRepo+"\nhealthy "+healthyRepo+"\n")
+	h.promotesGreen(failingRepo, "failing")
+	h.promotesGreen(routineRepo, "routine")
+	h.promotesGreen(healthyRepo, "healthy")
+	h.gtByRig = map[string]promoteReply{
+		"failing": {out: "Error: rig failing: the promotion failed: pushing aaaa failed\n", code: 2},
+		"routine": {out: "Error: aaaa1111 is not on rig routine's Forgejo main, so it is not promotable\n", code: 1},
+		"healthy": {out: "rig healthy: GitHub main holds aaaa1111\n", code: 0},
+	}
+
+	if code := h.run(); code != 1 {
+		t.Fatalf("exit = %d, want 1; output:\n%s", code, h.output())
+	}
+	if len(h.promotes) != 3 {
+		t.Fatalf("gt promote ran %d time(s), want once for each of the 3 rigs: %v", len(h.promotes), h.promotes)
+	}
+	want := "app-promote: 1 rig(s) failed:\nrig failing: gt promote --sha " + green +
+		" exited 2: rig failing: the promotion failed: pushing aaaa failed"
+	if !strings.Contains(h.output(), want) {
+		t.Errorf("output does not hold %q; output:\n%s", want, h.output())
+	}
+	if !strings.Contains(h.output(), "[app-promote] rig healthy: promoted aaaa1111 (v0.2.0)") {
+		t.Errorf("the log does not hold the third rig's promotion; output:\n%s", h.output())
+	}
+	if !strings.Contains(h.output(), "[app-promote] aaaa1111 is not on rig routine's Forgejo main, so it is not promotable") {
+		t.Errorf("the log does not hold the routine skip's real line; output:\n%s", h.output())
+	}
+	if strings.Contains(h.output(), skippedMarker) {
+		t.Errorf("a run with a promoted rig says skipped; output:\n%s", h.output())
+	}
+}
+
+// TestPromoteAllNoSkipMarkerOnFailure holds a run with two failing rigs to one
+// error naming both, one line each, and never the skipped marker: a receipt that
+// says skipped would hide rigs that cannot promote (gt-lym1z).
+func TestPromoteAllNoSkipMarkerOnFailure(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	const (
+		firstRepo  = "sloan/first-repo"
+		secondRepo = "sloan/second-repo"
+	)
+	h.write(h.in("plugin", "rigs.conf"), "first "+firstRepo+"\nsecond "+secondRepo+"\n")
+	h.promotesGreen(firstRepo, "first")
+	h.promotesGreen(secondRepo, "second")
+	h.gtByRig = map[string]promoteReply{
+		"first":  {out: "Error: rig first names no merge_queue.forgejo.promote_target, so it does not promote\n", code: 1},
+		"second": {out: "Error: rig second: the promotion failed: pushing aaaa failed\n", code: 2},
+	}
+
+	if code := h.run(); code != 1 {
+		t.Fatalf("exit = %d, want 1; output:\n%s", code, h.output())
+	}
+	if strings.Contains(h.output(), skippedMarker) {
+		t.Errorf("the failed run says skipped; output:\n%s", h.output())
+	}
+	want := "app-promote: 2 rig(s) failed:\n" +
+		"rig first: gt promote --sha " + green + " exited 1: rig first names no merge_queue.forgejo.promote_target, so it does not promote\n" +
+		"rig second: gt promote --sha " + green + " exited 2: rig second: the promotion failed: pushing aaaa failed"
+	if !strings.Contains(h.output(), want) {
+		t.Errorf("output does not name both failed rigs, one line each; want %q; output:\n%s", want, h.output())
+	}
+	if lines := strings.Count(h.output(), "rig second: gt promote --sha"); lines != 1 {
+		t.Errorf("the second rig appears on %d lines, want 1; output:\n%s", lines, h.output())
+	}
+}
+
+// TestPromoteAllCollectsReadErrors holds a Forgejo read failure to the rule a gt
+// promote refusal follows: it fails its rig, the loop checks the rigs after it,
+// and the run names every failed rig, one line each, in rigs.conf order, never
+// as skipped (gt-lym1z).
+func TestPromoteAllCollectsReadErrors(t *testing.T) {
+	t.Parallel()
+	const (
+		firstRepo  = "sloan/first-repo"
+		secondRepo = "sloan/second-repo"
+	)
+	runsOf := func(repo string) string {
+		return fmt.Sprintf("/repos/%s/actions/runs?workflow_id=%s&limit=%d&page=1", repo, deployWorkflow, runsLimit)
+	}
+	readFailure := func(repo string) string {
+		return "GET " + apiRoot + runsOf(repo) + ` returned 500: {"message":"stub says 500"}`
+	}
+
+	t.Run("a read error after an earlier hard failure names both rigs", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.write(h.in("plugin", "rigs.conf"), "first "+firstRepo+"\nsecond "+secondRepo+"\n")
+		h.promotesGreen(firstRepo, "first")
+		h.setStatus(runsOf(secondRepo), http.StatusInternalServerError)
+		h.gtByRig = map[string]promoteReply{
+			"first": {out: "Error: rig first: the promotion failed: pushing aaaa failed\n", code: 2},
+		}
+
+		if code := h.run(); code != 1 {
+			t.Fatalf("exit = %d, want 1; output:\n%s", code, h.output())
+		}
+		if len(h.promotes) != 1 {
+			t.Fatalf("gt promote ran %d time(s), want once for the first rig: %v", len(h.promotes), h.promotes)
+		}
+		want := "app-promote: 2 rig(s) failed:\n" +
+			"rig first: gt promote --sha " + green + " exited 2: rig first: the promotion failed: pushing aaaa failed\n" +
+			"rig second: " + readFailure(secondRepo)
+		if !strings.Contains(h.output(), want) {
+			t.Errorf("output does not name both failed rigs, one line each; want %q; output:\n%s", want, h.output())
+		}
+		if strings.Contains(h.output(), skippedMarker) {
+			t.Errorf("the failed run says skipped; output:\n%s", h.output())
+		}
+	})
+
+	t.Run("a read error in the first rig does not stop the rigs after it", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.write(h.in("plugin", "rigs.conf"), "first "+firstRepo+"\nsecond "+secondRepo+"\n")
+		h.setStatus(runsOf(firstRepo), http.StatusInternalServerError)
+		h.promotesGreen(secondRepo, "second")
+
+		if code := h.run(); code != 1 {
+			t.Fatalf("exit = %d, want 1; output:\n%s", code, h.output())
+		}
+		if len(h.promotes) != 1 || !strings.Contains(h.promotes[0], "--rig second") {
+			t.Fatalf("gt promote ran %v, want once for the second rig", h.promotes)
+		}
+		if !strings.Contains(h.output(), "[app-promote] rig second: promoted aaaa1111 (v0.2.0)") {
+			t.Errorf("the log does not hold the second rig's promotion; output:\n%s", h.output())
+		}
+		want := "app-promote: 1 rig(s) failed:\nrig first: " + readFailure(firstRepo)
+		if !strings.Contains(h.output(), want) {
+			t.Errorf("output does not name the first rig's read failure; want %q; output:\n%s", want, h.output())
+		}
+	})
+
+	t.Run("two read errors name both rigs, one line each, in rigs.conf order", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.write(h.in("plugin", "rigs.conf"), "first "+firstRepo+"\nsecond "+secondRepo+"\n")
+		h.setStatus(runsOf(firstRepo), http.StatusInternalServerError)
+		h.setStatus(runsOf(secondRepo), http.StatusInternalServerError)
+
+		if code := h.run(); code != 1 {
+			t.Fatalf("exit = %d, want 1; output:\n%s", code, h.output())
+		}
+		if len(h.promotes) != 0 {
+			t.Errorf("gt promote ran for a run with no readable rig: %v", h.promotes)
+		}
+		want := "app-promote: 2 rig(s) failed:\n" +
+			"rig first: " + readFailure(firstRepo) + "\n" +
+			"rig second: " + readFailure(secondRepo)
+		if !strings.Contains(h.output(), want) {
+			t.Errorf("output does not name both rigs, one line each; want %q; output:\n%s", want, h.output())
+		}
+		if strings.Contains(h.output(), skippedMarker) {
+			t.Errorf("the failed run says skipped; output:\n%s", h.output())
+		}
+	})
+}
+
+// TestPluginDocStatesContract holds plugin.md and README.md to the contract the
+// code keeps: each routine skip is named, a missing promote_target is a hard
+// failure, the loop continues past a failing rig, and the run ends with one error
+// naming every failed rig. A stale statement of the old contract fails it
+// (gt-lym1z).
+func TestPluginDocStatesContract(t *testing.T) {
+	t.Parallel()
+	plugin := readDoc(t, "plugin.md")
+	readme := readDoc(t, "README.md")
+
+	for _, phrase := range []string{notOnRigPhrase, tierSweepPhrase, lockPhrase, divergedPhrase} {
+		if !strings.Contains(plugin, phrase) {
+			t.Errorf("plugin.md does not name the routine skip %q", phrase)
+		}
+	}
+	for _, want := range []string{
+		"promote_target` is a hard failure",
+		"continues past a failing rig",
+		"one error naming every failed rig",
+		"plugin:app-promote:failed",
+	} {
+		if !strings.Contains(plugin, want) {
+			t.Errorf("plugin.md does not state %q", want)
+		}
+	}
+	if strings.Contains(plugin, "exits non-zero with one line of cause") {
+		t.Errorf("plugin.md still states the old failure contract")
+	}
+	if strings.Contains(readme, "logs `not promotable` each run") {
+		t.Errorf("README.md still states that a refusal is logged as not promotable each run")
+	}
+}
+
+// readDoc reads one of the plugin's documents from the package directory.
+func readDoc(t *testing.T, name string) string {
+	t.Helper()
+	data, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }
 
 func TestSplitRig(t *testing.T) {
@@ -1178,26 +1552,61 @@ func TestReleaseCandidates(t *testing.T) {
 	}
 }
 
-func TestLastLine(t *testing.T) {
+// TestPromoteCause holds the cause of a failed gt promote to the Error: line
+// with its prefix off, or to the first non-empty line before the usage block.
+// Flag help is never the cause, and with neither line the cause is a literal
+// naming the exit code, never an empty string (gt-lym1z).
+func TestPromoteCause(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
 		out  string
+		code int
 		want string
 	}{
-		{"the last line", "one\ntwo\n", "two"},
-		{"a trailing blank line", "one\ntwo\n\n", "two"},
-		{"a whitespace-only last line", "one\ntwo\n  \n", "two"},
-		{"one line", "only", "only"},
-		{"nothing", "", ""},
-		{"whitespace only", " \n\t\n", ""},
+		{
+			name: "the Error line before the usage block, prefix off",
+			out:  "Error: --sha is required\nUsage:\n  gt promote [flags]\nFlags:\n      --sha string   Commit on the rig's Forgejo main to promote\n",
+			code: 1,
+			want: "--sha is required",
+		},
+		{
+			name: "an indented line outside the usage block is the cause, trimmed",
+			out:  "  gt: the promotion daemon is not running  \nUsage:\n  gt promote [flags]\n",
+			code: 1,
+			want: "gt: the promotion daemon is not running",
+		},
+		{
+			name: "an Error line after a warning",
+			out:  "\nwarning: the sweep is idle\nError: boom\n",
+			code: 1,
+			want: "boom",
+		},
+		{
+			name: "usage text alone names no cause",
+			out:  "Usage:\n  gt promote [flags]\n\nFlags:\n      --sha string   Commit\n",
+			code: 1,
+			want: "no error text (exit 1)",
+		},
+		{
+			name: "empty output names no cause",
+			out:  "",
+			code: 2,
+			want: "no error text (exit 2)",
+		},
+		{
+			name: "an Error line with no text names no cause",
+			out:  "Error:\n",
+			code: 127,
+			want: "no error text (exit 127)",
+		},
 	}
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := lastLine(tc.out); got != tc.want {
-				t.Errorf("lastLine(%q) = %q, want %q", tc.out, got, tc.want)
+			if got := promoteCause(tc.out, tc.code); got != tc.want {
+				t.Errorf("promoteCause(%q, %d) = %q, want %q", tc.out, tc.code, got, tc.want)
 			}
 		})
 	}
