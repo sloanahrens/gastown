@@ -65,6 +65,15 @@ const (
 	trimListFilePerm = 0o644
 )
 
+// TrimListRoom is the room WriteTrimList needs in the claim for an encoded list of
+// listBytes bytes: the list and its digest are each on disk twice while the second
+// is renamed into place. The daemon's early fit check compares the free space it
+// reads against this same function, so the check refuses exactly what the writer
+// would refuse and the two cannot drift apart.
+func TrimListRoom(listBytes int) int64 {
+	return 2 * int64(listBytes+sha256.Size*2)
+}
+
 // WriteTrimList writes paths, PlanTrim's removal list, into the claim files answers for, where a
 // claim-carried trim reads it, and returns the list's SHA-256 digest, the value the trim container
 // checks the list against.
@@ -96,7 +105,7 @@ func WriteTrimList(paths []string, files TrimListFiles) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("measuring the room the claim has for the trim list: %w", err)
 	}
-	if need := 2 * int64(len(data)+len(digest)); free < need {
+	if need := TrimListRoom(len(data)); free < need {
 		return "", fmt.Errorf("the claim has %d bytes free and the trim list needs %d: want room in the claim for the list and its digest", free, need)
 	}
 
