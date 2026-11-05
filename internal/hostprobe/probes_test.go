@@ -27,6 +27,7 @@ func fullProbes() Probes {
 		At:           testAt(),
 		MemFreePct:   Field[float64]{Value: 94},
 		Disk:         Field[Disk]{Value: Disk{UsedPct: 61.5, FreeGB: 120.25}},
+		DockerDisk:   Field[Disk]{Value: Disk{UsedPct: 72, FreeGB: 40}},
 		Containers:   Field[[]string]{Value: []string{"gastown-daemon", "gastown-dolt"}},
 		CPUIdlePct:   Field[float64]{Value: 78.5},
 		TopConsumers: Field[[]Consumer]{Value: []Consumer{{Name: "dolt", CPU: 120.5}, {Name: "gt", CPU: 40}}},
@@ -81,6 +82,40 @@ func TestWriteReadKeepsFieldError(t *testing.T) {
 	}
 }
 
+// TestDockerDiskRoundTripsAndBumpsTheSchema: the Docker Desktop reading survives
+// a write and a read, and a file of the previous schema is refused, so a daemon
+// never half-reads a file that may lack the field and reads it as a disk at 0%.
+func TestDockerDiskRoundTripsAndBumpsTheSchema(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "probes.json")
+	want := Disk{UsedPct: 72, FreeGB: 40}
+	in := fullProbes()
+	in.DockerDisk = Field[Disk]{Value: want}
+	if err := Write(path, in); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	got, err := Read(path, testAt().Add(30*time.Second), 3*time.Minute)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got.DockerDisk != (Field[Disk]{Value: want}) {
+		t.Errorf("DockerDisk = %+v, want %+v", got.DockerDisk, want)
+	}
+
+	// The previous schema's file is refused rather than decoded with a zero
+	// DockerDisk. The version is written out, not SchemaVersion-1: this row is
+	// what fails if the schema is left at 2 while the field is added.
+	previous := filepath.Join(t.TempDir(), "previous.json")
+	body := fmt.Sprintf(`{"v":2,"at":%q,"docker_disk":{"value":{"used_pct":72}}}`, testAt().Format(time.RFC3339))
+	if err := os.WriteFile(previous, []byte(body), 0o644); err != nil {
+		t.Fatalf("write the previous-schema fixture: %v", err)
+	}
+	if got, err := Read(previous, testAt(), 3*time.Minute); err == nil || !strings.Contains(err.Error(), "schema version 2") {
+		t.Fatalf("Read of the previous schema = %+v, %v; want a refusal naming schema version 2", got, err)
+	}
+}
+
 // TestReadRefusesUnusableFile covers the refusals that do not depend on the
 // clock: no file, no JSON, and a schema version this binary does not know.
 func TestReadRefusesUnusableFile(t *testing.T) {
@@ -94,7 +129,7 @@ func TestReadRefusesUnusableFile(t *testing.T) {
 	}{
 		{name: "a missing file", wantErr: fs.ErrNotExist, want: "read probe file"},
 		{name: "not JSON", body: "{", want: "decode probe file"},
-		{name: "a later schema version", body: fmt.Sprintf(`{"v":3,"at":%q}`, now.Format(time.RFC3339)), want: "schema version 3"},
+		{name: "a later schema version", body: fmt.Sprintf(`{"v":%d,"at":%q}`, SchemaVersion+1, now.Format(time.RFC3339)), want: fmt.Sprintf("schema version %d", SchemaVersion+1)},
 		{name: "a zero schema version", body: fmt.Sprintf(`{"at":%q}`, now.Format(time.RFC3339)), want: "schema version 0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

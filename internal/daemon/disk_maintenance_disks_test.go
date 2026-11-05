@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -13,6 +15,7 @@ import (
 
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/diskmaint/disks"
+	"github.com/steveyegge/gastown/internal/hostprobe"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
@@ -546,6 +549,120 @@ func TestDiskMaintSandboxDiskReadsNodeStats(t *testing.T) {
 				if len(args) < 3 || args[1] != "--kubeconfig" || args[2] != wantKubeconfig {
 					t.Errorf("kubectl ran %q, want --kubeconfig %s", args, wantKubeconfig)
 				}
+			}
+		})
+	}
+}
+
+// diskMaintContainerDaemon is a daemon in container mode whose sandbox disk
+// reads healthily and whose exec seam refuses every command: the Mac and
+// Docker Desktop readings must come from the probe file, never from df.
+//
+// The sandbox disk is injected with a kubelet stats summary, the reading its
+// parser takes, so the pass reads it without running kubectl.
+func diskMaintContainerDaemon(t *testing.T) (*Daemon, *bytes.Buffer, *diskMaintFakes) {
+	t.Helper()
+	d, logs, f := diskMaintTestDaemon(t)
+	d.containerMode = true
+	d.diskMaint.readDisks = nil // the production read
+	d.diskMaint.dfReaders = map[string]DFReader{
+		"colima": func(context.Context) ([]byte, error) { return []byte(diskMaintNodeStats(16000)), nil },
+	}
+	d.execCmd = func(*exec.Cmd) ([]byte, []byte, error) {
+		return nil, nil, errors.New("unexpected command: a host disk must not run df in container mode")
+	}
+	return d, logs, f
+}
+
+// writeDiskMaintProbe publishes a probe reading where the host agent writes it.
+func writeDiskMaintProbe(t *testing.T, town string, p hostprobe.Probes) {
+	t.Helper()
+	path := hostprobe.Path(town)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("create the probe directory: %v", err)
+	}
+	if err := hostprobe.Write(path, p); err != nil {
+		t.Fatalf("write the probe file: %v", err)
+	}
+}
+
+// TestDiskMaintHostReadingsFromProbes: in container mode the Mac volume and the
+// Docker Desktop disk come from a fresh probe file, and both readings reach the
+// alerts and the keep.
+func TestDiskMaintHostReadingsFromProbes(t *testing.T) {
+	t.Parallel()
+	d, _, f := diskMaintContainerDaemon(t)
+	writeDiskMaintProbe(t, d.config.TownRoot, hostprobe.Probes{
+		At:         diskMaintNow,
+		Disk:       hostprobe.Field[hostprobe.Disk]{Value: hostprobe.Disk{UsedPct: 91}},
+		DockerDisk: hostprobe.Field[hostprobe.Disk]{Value: hostprobe.Disk{UsedPct: 82}},
+	})
+
+	d.runDiskMaintenance()
+
+	if !diskMaintAlertIsOpen(f.notify, "diskmaint:mac") {
+		t.Errorf("escalations = %+v, want an open diskmaint:mac alert from the probe reading",
+			f.notify.Escalations())
+	}
+	if !diskMaintAlertIsOpen(f.notify, "diskmaint:docker-desktop") {
+		t.Errorf("escalations = %+v, want an open diskmaint:docker-desktop alert from the probe reading",
+			f.notify.Escalations())
+	}
+	if len(f.target.policies) != 1 {
+		t.Fatalf("planned %d times, want 1", len(f.target.policies))
+	}
+	if got := f.target.policies[0].Keep; got != 3 {
+		t.Errorf("keep = %d with the Mac volume at 91%% in the probe, want 3", got)
+	}
+}
+
+// TestDiskMaintHostDisksUnknownIsNotAnError: a stale file, an absent file and a
+// field the agent recorded as failed each leave the two readings out, log the
+// unknown line once, raise no unreadable alert and let the pass plan without
+// them (gt-1pyid).
+func TestDiskMaintHostDisksUnknownIsNotAnError(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		stage func(t *testing.T, town string)
+	}{
+		{"a stale file", func(t *testing.T, town string) {
+			writeDiskMaintProbe(t, town, hostprobe.Probes{
+				At:         diskMaintNow.Add(-fileHostProbeMaxAge - time.Second),
+				Disk:       hostprobe.Field[hostprobe.Disk]{Value: hostprobe.Disk{UsedPct: 95}},
+				DockerDisk: hostprobe.Field[hostprobe.Disk]{Value: hostprobe.Disk{UsedPct: 95}},
+			})
+		}},
+		{"an absent file", func(*testing.T, string) {}},
+		{"a failed field", func(t *testing.T, town string) {
+			writeDiskMaintProbe(t, town, hostprobe.Probes{
+				At:         diskMaintNow,
+				Disk:       hostprobe.Field[hostprobe.Disk]{Value: hostprobe.Disk{UsedPct: 95}},
+				DockerDisk: hostprobe.Field[hostprobe.Disk]{Err: "docker exec gt-dolt df: exit status 1"},
+			})
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, logs, f := diskMaintContainerDaemon(t)
+			tc.stage(t, d.config.TownRoot)
+
+			d.runDiskMaintenance()
+
+			if got := strings.Count(logs.String(), "disk_maintenance: host disks unknown:"); got != 1 {
+				t.Errorf("logged %d host-disks-unknown lines, want 1: %q", got, logs.String())
+			}
+			for _, key := range []string{
+				"diskmaint:mac", "diskmaint:mac:unreadable",
+				"diskmaint:docker-desktop", "diskmaint:docker-desktop:unreadable",
+			} {
+				if diskMaintAlertIsOpen(f.notify, key) {
+					t.Errorf("an alert is open under %s for a disk the agent did not report", key)
+				}
+			}
+			if len(f.target.policies) != 1 {
+				t.Fatalf("planned %d times, want the pass to plan without the host disks", len(f.target.policies))
 			}
 		})
 	}

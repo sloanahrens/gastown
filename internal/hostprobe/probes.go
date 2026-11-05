@@ -12,7 +12,7 @@ import (
 // A file stamped with another version is refused rather than half-read: a
 // field added in a later schema would decode as its zero value, and a zero
 // reads as a host with nothing running and no disk left.
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 // futureTolerance is how far ahead of the reader's clock a probe's stamp may
 // sit. The agent and the daemon read one host's clock, so a stamp beyond this
@@ -28,8 +28,8 @@ type Field[T any] struct {
 	Err   string `json:"err,omitempty"`
 }
 
-// Disk is the town volume's use, in the shape the daemon's disk rule reads
-// (hostDisk in internal/daemon/attention_host.go).
+// Disk is a disk's use, in the shape the daemon's disk rule reads (hostDisk in
+// internal/daemon/attention_host.go).
 type Disk struct {
 	UsedPct float64 `json:"used_pct"`
 	FreeGB  float64 `json:"free_gb"`
@@ -55,16 +55,25 @@ type Launchd struct {
 // the host agent fills it from launchctl.
 const LaunchdNotCollected = "launchd job not collected by this reader"
 
+// DockerDiskNotCollected is the error a reading carries in its DockerDisk field
+// until the host agent fills it from the Docker Desktop container's df.
+const DockerDiskNotCollected = "docker desktop disk not collected by this reader"
+
 // Probes is one reading of the host: what the host agent writes to
 // .runtime/host/probes.json and what the container daemon reads, since a
 // container cannot run memory_pressure or ps against the host.
 type Probes struct {
 	// V is the schema version. Write stamps it, so the file always says what
 	// wrote it and Read can refuse a file from another schema.
-	V            int               `json:"v"`
-	At           time.Time         `json:"at"`
-	MemFreePct   Field[float64]    `json:"mem_free_pct"`
-	Disk         Field[Disk]       `json:"disk"`
+	V          int            `json:"v"`
+	At         time.Time      `json:"at"`
+	MemFreePct Field[float64] `json:"mem_free_pct"`
+	Disk       Field[Disk]    `json:"disk"`
+	// DockerDisk is the Docker Desktop disk a container of the town writes to,
+	// which a container daemon cannot measure with docker exec into that
+	// container: the host agent reads it instead (gt-gg9hv.24.4). Only UsedPct
+	// is filled; the agent parses it from the container's df.
+	DockerDisk   Field[Disk]       `json:"docker_disk"`
 	Containers   Field[[]string]   `json:"containers"`
 	CPUIdlePct   Field[float64]    `json:"cpu_idle_pct"`
 	TopConsumers Field[[]Consumer] `json:"top_consumers"`

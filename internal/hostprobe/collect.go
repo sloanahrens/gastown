@@ -91,6 +91,10 @@ func collect(ctx context.Context, c collectors, townRoot string, now time.Time) 
 		// until it does the field carries an error, so an unfilled reading is
 		// unknown to the guard and never a job that is not running.
 		Launchd: &Field[Launchd]{Err: LaunchdNotCollected},
+		// The Docker Desktop disk is read by the host agent through the container
+		// runtime, not by Collect: an unfilled field carries the not-collected
+		// error, so it is unknown to the daemon and never a disk at 0% used.
+		DockerDisk: Field[Disk]{Err: DockerDiskNotCollected},
 	}
 }
 

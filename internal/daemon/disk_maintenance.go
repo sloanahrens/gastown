@@ -125,7 +125,8 @@ func (d *Daemon) diskMaintenanceSeams() diskMaintSeams {
 	}
 	if s.readDisks == nil {
 		s.readDisks = func(ctx context.Context) []disks.Reading {
-			return d.diskMaintenanceReadings(ctx, s.dfReaders, diskMaintKubeconfig(d.config.TownRoot, s.getenv))
+			return d.diskMaintenanceReadings(ctx, s.now(), s.dfReaders,
+				diskMaintKubeconfig(d.config.TownRoot, s.getenv))
 		}
 	}
 	if s.environ == nil {

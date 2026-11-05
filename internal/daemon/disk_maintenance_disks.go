@@ -7,7 +7,10 @@ package daemon
 //
 // A disk the patrol cannot measure is not a quiet disk: a failed read or
 // output it cannot parse raises diskmaint:<disk>:unreadable and refuses the
-// plan, rather than reading as an empty disk that keeps everything.
+// plan, rather than reading as an empty disk that keeps everything. The Mac and
+// Docker Desktop disks are the exception in container mode: they come from the
+// host agent's probe file, and a missing reading there omits them instead
+// (gt-gg9hv.24.4).
 //
 // The active alert keys live in memory, keyed by alert rather than rebuilt from
 // the escalation store at boot: a restart forgets them and re-raises an open
@@ -19,8 +22,10 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/diskmaint/disks"
+	"github.com/steveyegge/gastown/internal/hostprobe"
 )
 
 const (
@@ -45,14 +50,19 @@ const (
 // a disk it could not reach for a disk with room.
 type DFReader func(ctx context.Context) ([]byte, error)
 
-// diskMaintDisk is one watched disk: the name its alerts are keyed by, the
-// reader that measures it, and the parser its output needs.
+// diskMaintDisk is one watched disk: the name its alerts are keyed by, how the
+// patrol reads it, and the parser its output needs. Exactly one of df and probe
+// is set.
 type diskMaintDisk struct {
 	name string
-	df   DFReader
+	// df measures the disk with a command the daemon runs itself.
+	df DFReader
 	// parse turns the reader's output into the disk's used share; nil is
-	// disks.ParseDF.
+	// disks.ParseDF. It applies only to a df reading.
 	parse func(string) (float64, error)
+	// probe names the reading in the host agent's probe file, for the disks a
+	// container daemon cannot reach from inside the container.
+	probe func(hostprobe.Probes) hostprobe.Field[hostprobe.Disk]
 }
 
 // diskMaintDisks returns the disks the patrol reads, in report order: the Mac
@@ -61,10 +71,24 @@ type diskMaintDisk struct {
 //
 // The sandbox disk keeps the name "colima": it is the alert key's middle part,
 // and an open alert under a new name would be orphaned.
+//
+// In container mode the Mac and Docker Desktop readings come from the host
+// agent's probe file instead of df: df -P / inside the container names the
+// container's own root, and the runner container the patrol used to exec into
+// is gone (gt-gg9hv.24). The sandbox disk is read the same way in both modes,
+// through the town's kubeconfig (gt-gg9hv.24.3).
 func (d *Daemon) diskMaintDisks(kubeconfig string) []diskMaintDisk {
+	colima := diskMaintDisk{name: diskMaintDiskColima, df: d.diskMaintSandboxDisk(kubeconfig), parse: disks.ParseNodeStats}
+	if d.containerMode {
+		return []diskMaintDisk{
+			{name: diskMaintDiskMac, probe: func(p hostprobe.Probes) hostprobe.Field[hostprobe.Disk] { return p.Disk }},
+			colima,
+			{name: diskMaintDiskDockerDesktop, probe: func(p hostprobe.Probes) hostprobe.Field[hostprobe.Disk] { return p.DockerDisk }},
+		}
+	}
 	return []diskMaintDisk{
 		{name: diskMaintDiskMac, df: d.diskMaintDF("df", "-P", "/")},
-		{name: diskMaintDiskColima, df: d.diskMaintSandboxDisk(kubeconfig), parse: disks.ParseNodeStats},
+		colima,
 		{name: diskMaintDiskDockerDesktop, df: d.diskMaintDF("docker", "exec",
 			diskMaintRunnerContainer, "df", "-P", "/")},
 	}
@@ -170,33 +194,83 @@ func (d *Daemon) diskMaintDF(name string, args ...string) DFReader {
 }
 
 // diskMaintenanceReadings reads every watched disk once, through the injected
-// reader a disk has in tests and its own command otherwise. A failed read or
-// output the disk's parser refuses becomes that disk's reading error.
-func (d *Daemon) diskMaintenanceReadings(ctx context.Context, injected map[string]DFReader, kubeconfig string) []disks.Reading {
+// reader a disk has in tests and its own command otherwise. A probe-backed disk
+// is read from the host agent's file. A failed read or output the disk's parser
+// refuses becomes that disk's reading error.
+func (d *Daemon) diskMaintenanceReadings(ctx context.Context, now time.Time, injected map[string]DFReader, kubeconfig string) []disks.Reading {
 	watched := d.diskMaintDisks(kubeconfig)
+	host, hostErr := d.diskMaintHostReadings(watched, injected, now)
+	if hostErr != nil {
+		// The town never depends on the host agent (gt-1pyid): the two readings
+		// are omitted and the pass plans without them, rather than raising an
+		// unreadable alert for a disk the agent did not report.
+		d.logger.Printf("disk_maintenance: host disks unknown: %v", hostErr)
+	}
 	readings := make([]disks.Reading, 0, len(watched))
 	for _, disk := range watched {
-		read := disk.df
 		if fn, ok := injected[disk.name]; ok {
-			read = fn
-		}
-		parse := disk.parse
-		if parse == nil {
-			parse = disks.ParseDF
-		}
-		out, err := read(ctx)
-		if err != nil {
-			readings = append(readings, disks.Reading{Name: disk.name, Err: err})
+			readings = append(readings, readDF(ctx, disk.name, fn, disk.parse))
 			continue
 		}
-		pct, err := parse(string(out))
-		if err != nil {
-			readings = append(readings, disks.Reading{Name: disk.name, Err: err})
+		if disk.probe != nil {
+			if r, ok := host[disk.name]; ok {
+				readings = append(readings, r)
+			}
 			continue
 		}
-		readings = append(readings, disks.Reading{Name: disk.name, UsedPct: pct})
+		readings = append(readings, readDF(ctx, disk.name, disk.df, disk.parse))
 	}
 	return readings
+}
+
+// readDF runs one disk's reader and parses its used share.
+func readDF(ctx context.Context, name string, df DFReader, parse func(string) (float64, error)) disks.Reading {
+	if parse == nil {
+		parse = disks.ParseDF
+	}
+	out, err := df(ctx)
+	if err != nil {
+		return disks.Reading{Name: name, Err: err}
+	}
+	pct, err := parse(string(out))
+	if err != nil {
+		return disks.Reading{Name: name, Err: err}
+	}
+	return disks.Reading{Name: name, UsedPct: pct}
+}
+
+// diskMaintHostReadings reads the probe-backed disks from the host agent's
+// file, at the patrol's clock. Both share one file, so it is read once.
+//
+// A file that is absent, from another schema or older than fileHostProbeMaxAge,
+// and a field the agent recorded as failed, each mean the host agent is not
+// reporting: no reading is returned for either disk.
+func (d *Daemon) diskMaintHostReadings(watched []diskMaintDisk, injected map[string]DFReader, now time.Time) (map[string]disks.Reading, error) {
+	wanted := make([]diskMaintDisk, 0, len(watched))
+	for _, disk := range watched {
+		if _, ok := injected[disk.name]; ok {
+			continue
+		}
+		if disk.probe != nil {
+			wanted = append(wanted, disk)
+		}
+	}
+	if len(wanted) == 0 {
+		return nil, nil
+	}
+	p, err := hostprobe.Read(hostprobe.Path(d.config.TownRoot), now, fileHostProbeMaxAge)
+	if err != nil {
+		return nil, err
+	}
+	readings := make(map[string]disks.Reading, len(wanted))
+	for _, disk := range wanted {
+		field := disk.probe(p)
+		if field.Err != "" {
+			return nil, fmt.Errorf("%s probe: %s", disk.name, field.Err)
+		}
+		readings[disk.name] = disks.Reading{Name: disk.name, UsedPct: field.Value.UsedPct}
+	}
+	return readings, nil
 }
 
 // diskMaintAlerts is the patrol's memory of the disk alert keys it has open.
