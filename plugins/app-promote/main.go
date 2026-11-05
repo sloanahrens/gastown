@@ -6,8 +6,8 @@
 //
 // It is the entry point plugin.md's [execution] block names, and the daemon
 // execs it directly. A run exits 0 with or without a promotion, and exits 1
-// with one line of cause on stderr, which is what the plugin contract records
-// and escalates (internal/daemon/plugin_script.go).
+// naming each rig gt promote failed on, one line each, which is what the plugin
+// contract records and escalates (internal/daemon/plugin_script.go).
 package main
 
 import (
@@ -149,7 +149,9 @@ func run(e env) int {
 }
 
 // promoteAll walks the rig list, promotes what the gate proves, and reports the
-// run as skipped when it promoted nothing.
+// run as skipped when it promoted nothing. Every rig is checked even after one
+// fails, so a rig that cannot promote does not hide the rigs listed after it
+// (gt-lym1z).
 func promoteAll(e env) error {
 	townRoot := townRoot(e.getenv)
 	if info, err := os.Stat(townRoot); err != nil || !info.IsDir() {
@@ -170,6 +172,7 @@ func promoteAll(e env) error {
 	f := forgejo{apiURL: apiURL(e.getenv), token: token, do: e.do}
 
 	checked, promoted := 0, 0
+	var failed []*promoteFailure
 	for _, line := range rigLines(string(list)) {
 		rig, repo, job := splitRig(line)
 		if rig == "" || repo == "" {
@@ -180,6 +183,14 @@ func promoteAll(e env) error {
 		}
 		checked++
 		didPromote, err := promoteRig(e, f, townRoot, rig, repo, job)
+		// A rig gt promote failed on does not stop the others: the failures are
+		// reported together after the last rig. A read that failed stops the run,
+		// because the rigs after it would be gated on the same broken source.
+		var refusal *promoteFailure
+		if errors.As(err, &refusal) {
+			failed = append(failed, refusal)
+			continue
+		}
 		if err != nil {
 			return err
 		}
@@ -193,6 +204,13 @@ func promoteAll(e env) error {
 	if checked == 0 {
 		return fmt.Errorf("no rigs in %s", rigsFile)
 	}
+	if len(failed) > 0 {
+		lines := make([]string, len(failed))
+		for i, failure := range failed {
+			lines[i] = failure.Error()
+		}
+		return fmt.Errorf("%d rig(s) failed:\n%s", len(failed), strings.Join(lines, "\n"))
+	}
 	if promoted == 0 {
 		e.log("=== nothing to promote (%d rig(s) checked) ===", checked)
 		fmt.Fprintln(e.out, skippedMarker)
@@ -203,9 +221,10 @@ func promoteAll(e env) error {
 }
 
 // promoteRig advances one rig's GitHub main when the gate allows it, and reports
-// whether it promoted. A gate that finds nothing, and the two retryable
-// refusals, are logged and are this run's nothing-to-do; any other failure of
-// gt promote is returned, so the run exits non-zero.
+// whether it promoted. A gate that finds nothing, and a refusal gt promote
+// documents as retryable, are logged and are this run's nothing-to-do; any other
+// failure of gt promote is returned as a *promoteFailure naming the rig, so the
+// run exits non-zero.
 func promoteRig(e env, f forgejo, townRoot, rig, repo, job string) (bool, error) {
 	rel, found, err := f.findRelease(repo)
 	if err != nil {
@@ -258,22 +277,35 @@ func promoteRig(e env, f forgejo, townRoot, rig, repo, job string) (bool, error)
 	}
 
 	out, code := e.promote(townRoot, rig, rel.sha)
-	cause := promoteCause(out)
 	if code == 0 {
 		e.log("rig %s: promoted %s (%s)", rig, short, rel.tag)
 		return true, nil
 	}
-	// Only the lock and the divergence are retryable: the cooldown retries the
-	// lock, and a diverged target already raises its own alert
-	// (landing-promote-diverged:<rig>, internal/cmd/promote.go), so failing the
-	// plugin on top would page a human twice for one condition. Every other
-	// refusal (a rig that names no promote_target, say) is a plugin that cannot
-	// do its job, and a skip would hide it (gt-lym1z).
-	if retryableRefusal(out) {
-		e.log("rig %s: %s", rig, cause)
+	cause := promoteCause(out, code)
+	// A routine refusal is a state the next run resolves on its own, and it is
+	// logged with gt promote's own line so the run log names it. Every other
+	// non-zero exit is a failure: a refusal the plugin does not know is hard by
+	// default, so a message gt promote adds fails loudly until it is classified
+	// (gt-lym1z).
+	if routineSkip(code, cause) {
+		e.log("%s", cause)
 		return false, nil
 	}
-	return false, fmt.Errorf("rig %s: gt promote --sha %s exited %d: %s", rig, rel.sha, code, cause)
+	return false, &promoteFailure{rig: rig, sha: rel.sha, code: code, cause: cause}
+}
+
+// promoteFailure is one rig's hard failure of gt promote: the rig, its exit code
+// and the cause line, so promoteAll can name every failed rig in one error, one
+// line each (gt-lym1z).
+type promoteFailure struct {
+	rig   string
+	sha   string
+	code  int
+	cause string
+}
+
+func (f *promoteFailure) Error() string {
+	return fmt.Sprintf("rig %s: gt promote --sha %s exited %d: %s", f.rig, f.sha, f.code, f.cause)
 }
 
 // log prints one run line under the plugin's name, on stdout, which is where the
@@ -733,46 +765,57 @@ func firstN(s string, n int) string {
 	return s[:n]
 }
 
-// retryableRefusal reports whether gt promote's output is one of the two
-// refusals it documents as retryable (internal/cmd/promote.go): the lock
-// another promotion holds, and the diverged target it escalates itself. The
-// match is on gt promote's own wording, so a refusal it does not document
-// fails the run instead of being mistaken for these (gt-lym1z).
-func retryableRefusal(out string) bool {
-	return strings.Contains(out, "another promotion holds") ||
-		strings.Contains(out, "divergence is escalated")
+// routineSkip reports whether gt promote's non-zero exit is a state the next run
+// resolves on its own, so this run is not failed for it (gt-lym1z). The match is
+// gt promote's own wording (internal/cmd/promote.go): the commit is not on the
+// rig's Forgejo main yet, the tier sweep owns the promotion and has no green
+// cycle yet, another promotion holds the lock, or the target diverged and gt
+// promote has already raised its own escalation. Anything else is a refusal the
+// plugin does not know, and a skip would hide it.
+func routineSkip(code int, cause string) bool {
+	switch code {
+	case 1:
+		return strings.Contains(cause, "is not on rig") ||
+			strings.Contains(cause, "is owned by the tier sweep") ||
+			strings.Contains(cause, "another promotion holds")
+	case 2:
+		return strings.Contains(cause, "the divergence is escalated")
+	}
+	return false
 }
 
 // promoteCause returns the line that explains a failed gt promote: cobra's own
-// "Error:" line, or the first line that is neither usage text nor flag help.
-// Never the last line, because cobra prints the usage block after the error and
-// its flag help names no cause (gt-lym1z).
-func promoteCause(out string) string {
+// "Error:" line with the prefix dropped, or the first non-empty line before the
+// usage block. The usage block starts at the first line that starts "Usage:" and
+// runs to the end of the output, flag help included, so a flag help line is never
+// the cause. With neither line the cause is a literal naming the exit code,
+// never an empty string (gt-lym1z).
+func promoteCause(out string, code int) string {
 	lines := strings.Split(out, "\n")
-	for _, line := range lines {
-		if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "Error:") {
-			return trimmed
+	usage := len(lines)
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "Usage:") {
+			usage = i
+			break
 		}
 	}
-	for _, line := range lines {
+	for _, line := range lines[:usage] {
 		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || usageLine(line) {
+		if !strings.HasPrefix(trimmed, "Error:") {
+			continue
+		}
+		if cause := strings.TrimSpace(strings.TrimPrefix(trimmed, "Error:")); cause != "" {
+			return cause
+		}
+	}
+	for _, line := range lines[:usage] {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "Error:") {
 			continue
 		}
 		return trimmed
 	}
-	return ""
-}
-
-// usageLine reports whether a line of gt promote's output belongs to cobra's
-// usage block: a section label, or the usage syntax and flag help it indents
-// below one.
-func usageLine(line string) bool {
-	switch strings.TrimSpace(line) {
-	case "Usage:", "Aliases:", "Examples:", "Flags:", "Global Flags:":
-		return true
-	}
-	return strings.HasPrefix(line, "  ") || strings.HasPrefix(line, "\t")
+	return fmt.Sprintf("no error text (exit %d)", code)
 }
 
 // bodyExcerpt cuts a failure's reply to the start of its cause line, newlines
