@@ -113,3 +113,15 @@ func TestJevSubmissionSettingsWithNoPatrolConfig(t *testing.T) {
 		t.Errorf("settings = %+v, want zero values", got)
 	}
 }
+
+// The pass summary line prints the other-rig count beside the asked, skipped
+// and repeated counts, so an entry passed over for its rig is visible (gt-uy19f).
+func TestJevSubmissionSummary(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	writeSubmissionSummary(&out, submission.Summary{Asked: 2, Skipped: 1, Repeated: 3, OtherRig: 4})
+	want := "jev submission: asked 2 submissions, skipped 1, repeated 3, other rig 4\n"
+	if out.String() != want {
+		t.Errorf("summary line = %q, want %q", out.String(), want)
+	}
+}

@@ -1072,6 +1072,98 @@ func TestJevSubmissionRecordWithoutSubjectsFallsBackToTheClone(t *testing.T) {
 	}
 }
 
+// An entry of another rig with no stored subjects is passed over with no
+// warning and no log line, and counted as OtherRig: the clone holds only this
+// rig's commits, so the entry can never be read here (gt-uy19f). The cursor
+// still moves past it, so it is not listed again.
+func TestPassOtherRig(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		rig        string
+		subjects   []string
+		gitErr     error
+		wantAsked  int
+		wantSkip   int
+		wantOther  int
+		wantSynced int
+		wantWarn   bool
+	}{
+		{name: "other rig without subjects is counted", rig: "beads", wantOther: 1},
+		{name: "other rig with subjects is asked", rig: "beads", subjects: []string{"fix: do the thing (gt-a)"}, wantAsked: 1},
+		{name: "gastown unreadable still warns", rig: "gastown", gitErr: errors.New("bad object"), wantSkip: 1, wantSynced: 1, wantWarn: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newRig(t)
+			issue := r.ready("gt-a", time.Minute)
+			r.submissions.entries = []Entry{{
+				Issue: issue,
+				Work: land.Work{
+					BeadID: "gt-a", Rig: tc.rig, Branch: "polecat/opal/gt-a", Head: "head-gt-a",
+					Target: "main", Submitted: t0.Add(time.Minute),
+				},
+				Seen:     t0.Add(2 * time.Minute),
+				Subjects: tc.subjects,
+			}}
+			r.git.err = tc.gitErr
+			var warnings strings.Builder
+			r.pass.Warnings = &warnings
+
+			sum, err := r.pass.Run(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sum.Asked != tc.wantAsked || sum.Skipped != tc.wantSkip || sum.OtherRig != tc.wantOther {
+				t.Errorf("summary = %+v, want asked %d, skipped %d, other rig %d", sum, tc.wantAsked, tc.wantSkip, tc.wantOther)
+			}
+			if r.git.synced != tc.wantSynced {
+				t.Errorf("clone synced %d times, want %d", r.git.synced, tc.wantSynced)
+			}
+			if got := warnings.String() != ""; got != tc.wantWarn {
+				t.Errorf("warned = %v (%q), want %v", got, warnings.String(), tc.wantWarn)
+			}
+			_, statErr := os.Stat(r.pass.LogPath)
+			if logged := statErr == nil; logged != (tc.wantAsked == 1) {
+				t.Errorf("log written = %v, want %v", logged, tc.wantAsked == 1)
+			}
+			cur, ok, err := battery.ReadCursor(r.pass.CursorPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !ok || cur.ID != "gt-a" {
+				t.Errorf("cursor = %+v ok=%v, want it past gt-a", cur, ok)
+			}
+		})
+	}
+}
+
+// With the day's cap spent, an other-rig entry is still passed over and counted
+// rather than stopping the pass: it costs no Jev call, so the cap does not
+// hold it back (gt-uy19f).
+func TestPassOtherRigIgnoresTheCap(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	r.allows = func() (bool, error) { return false, nil }
+	r.submissions.entries = []Entry{{
+		Issue: r.ready("gt-a", time.Minute),
+		Work: land.Work{
+			BeadID: "gt-a", Rig: "beads", Branch: "polecat/opal/gt-a", Head: "head-gt-a",
+			Target: "main", Submitted: t0.Add(time.Minute),
+		},
+		Seen: t0.Add(2 * time.Minute),
+	}}
+
+	sum, err := r.pass.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.OtherRig != 1 || sum.CapReached {
+		t.Errorf("summary = %+v, want the entry counted as other rig and no cap stop", sum)
+	}
+}
+
 // A bead that wears more than one agent: label has no agent in the record,
 // because the dispatcher seats no such bead. A bead with no agent: label still
 // takes the agent its attached vars name.
