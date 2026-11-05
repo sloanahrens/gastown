@@ -217,7 +217,11 @@ func (d *Daemon) updateFacts(now time.Time) (UpdateFacts, error) {
 	repoRoot, err := version.GetRepoRootForTown(d.config.TownRoot)
 	if err != nil {
 		// No gt source checkout: there is no binary for an install to move,
-		// which is how rebuild_gt's own cycle reads the same town.
+		// which is how rebuild_gt's own cycle reads the same town. Main's sha
+		// cannot be read either, so record the missing checkout rather than
+		// leave MainSHA empty for the failed-run hold to read as unknown
+		// (gt-fj9n1).
+		facts.SourceMissing = true
 		return facts, nil
 	}
 	info, ok := d.rebuildGTStale(repoRoot)

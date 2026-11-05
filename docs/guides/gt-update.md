@@ -173,6 +173,12 @@ passed since the last run ended. The daemon launches nothing while a run is in
 progress, while an install marker is pending, or in standby — the town ESTOP or
 a waned Ring.
 
+A run that ended failed or aborted on main's current target holds both rules:
+nothing launches until main moves to a new target or a run succeeds, and the
+reason says to run `gt update` by hand. A town with no gt source checkout has
+no main to read and no build to install, so nothing launches there either;
+restore the checkout to bring the trigger back.
+
 The daemon reads the block at start, so a change needs a daemon restart. Restart
 it between landing passes:
 

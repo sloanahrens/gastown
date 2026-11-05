@@ -70,6 +70,7 @@ func TestUpdateTriggerLaunchesWhenDue(t *testing.T) {
 		Enabled: true,
 		Window:  "03:00",
 	})
+	setUpdateSource(t, d)
 
 	d.triggerUpdate()
 
@@ -175,6 +176,7 @@ func TestUpdateTriggerStaysQuiet(t *testing.T) {
 			Enabled: true,
 			Window:  "03:00",
 		})
+		setUpdateSource(t, d)
 		d.triggerUpdate()
 		// The fake clock has not moved: this is the next heartbeat, seconds
 		// after the launch, before the job's first state could land.
@@ -327,6 +329,51 @@ func TestUpdateTriggerHoldsAFailedRunOnMainsTarget(t *testing.T) {
 	}
 }
 
+// A town with no gt source checkout has no main to read and no build to
+// install, so the trigger launches nothing even inside the nightly window: the
+// missing checkout is the reason, not a failed run holding an unknown main.
+func TestUpdateTriggerDoesNotLaunchWithoutASource(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		state *update.State
+	}{
+		{name: "no run has happened"},
+		{
+			name: "the last run failed",
+			state: &update.State{
+				RunID:     "run-1",
+				StartedAt: updateTriggerTestTime.Add(-54 * time.Hour),
+				EndedAt:   updateTriggerTestTime.Add(-53 * time.Hour),
+				Outcome:   update.OutcomeFailed,
+				Target:    update.Target{SHA: strings.Repeat("a", 40)},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, launches, _ := newUpdateTriggerTestDaemon(t, &config.UpdateConfig{
+				Enabled: true,
+				Window:  "03:00",
+			})
+			if tt.state != nil {
+				store := update.Store{Dir: update.Dir(d.config.TownRoot)}
+				if err := store.Write(*tt.state); err != nil {
+					t.Fatalf("write state: %v", err)
+				}
+			}
+
+			d.triggerUpdate()
+
+			if *launches != 0 {
+				t.Fatalf("launches = %d, want none: the town has no checkout to read main from or install onto", *launches)
+			}
+		})
+	}
+}
+
 func TestUpdateIsRegisteredAsALifecycleStep(t *testing.T) {
 	t.Parallel()
 
@@ -344,6 +391,16 @@ func TestUpdateIsRegisteredAsALifecycleStep(t *testing.T) {
 		return
 	}
 	t.Fatal("heartbeatSteps has no step named \"update\"")
+}
+
+// setUpdateSource gives d's town a gt source checkout whose build is current
+// with main, so a launch is the nightly rule's decision alone.
+func setUpdateSource(t *testing.T, d *Daemon) {
+	t.Helper()
+	createUpdateSource(t, d.config.TownRoot)
+	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo {
+		return &version.StaleBinaryInfo{RepoCommit: strings.Repeat("a", 40)}
+	}
 }
 
 // createUpdateSource makes town/gastown look like a gt source checkout, which
@@ -497,6 +554,7 @@ func TestUpdateTriggerBacksOffARefusedLaunch(t *testing.T) {
 		attempts++
 		return errors.New("refused")
 	}
+	setUpdateSource(t, d)
 
 	d.triggerUpdate()
 	// The next heartbeat is seconds later, with the launcher still refusing.
