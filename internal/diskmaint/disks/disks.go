@@ -151,6 +151,10 @@ func KeepFor(readings []Reading, base int) Keep {
 	return Keep{count: base, decided: true}
 }
 
+// UnreadableAlertKey is the alert key a disk raises while it cannot be read, so
+// a caller holding an errored reading can ask whether that alert is open.
+func UnreadableAlertKey(name string) string { return unreadableAlertKey(name) }
+
 func usageAlertKey(name string) string { return "diskmaint:" + name }
 
 func unreadableAlertKey(name string) string { return usageAlertKey(name) + ":unreadable" }
