@@ -773,9 +773,10 @@ type WispReaperConfig struct {
 	AutoClose *bool `json:"auto_close,omitempty"`
 
 	// EventsRetentionStr turns on events retention (e.g. "30d", "720h"): rows
-	// of the events table older than it are deleted in counted batches. Empty
-	// leaves the step off (gt-hk21d, opt-in because deleting audit rows is the
-	// operator's call).
+	// of the events table older than it are deleted in counted batches, and only
+	// those the events archive has already written out (gt-2i850). A database
+	// with no archive watermark deletes nothing. Empty leaves the step off
+	// (gt-hk21d, opt-in because deleting audit rows is the operator's call).
 	EventsRetentionStr string `json:"events_retention,omitempty"`
 
 	// ExtraBeadsRoots are directories searched for a database's beads

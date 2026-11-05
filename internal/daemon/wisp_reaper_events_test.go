@@ -81,3 +81,28 @@ func TestWispReaperEventsRetentionStepRefusesABadValue(t *testing.T) {
 		t.Errorf("log = %q, want the refusal to name the field", p.log.String())
 	}
 }
+
+// TestWispReaperEventsRetentionStepSkipsWhileWaitingForTheArchive: a database
+// whose events archive has no watermark deletes nothing, is logged as waiting
+// for the archive, and makes the step skipped rather than passed (gt-2i850).
+func TestWispReaperEventsRetentionStepSkipsWhileWaitingForTheArchive(t *testing.T) {
+	t.Parallel()
+	p := newTrackerPass(t, trackerPassRoutes)
+	p.d.reaperOpenDBFn = func(string, time.Duration, time.Duration) (*beadsql.DB, error) {
+		return openEmptySweepDB(t), nil
+	}
+
+	p.d.reapWispsInline(&WispReaperConfig{
+		Databases:          []string{"beads_db"},
+		EventsRetentionStr: "30d",
+	}, 0, 0, 0, p.cycle)
+
+	if s := eventsRetentionStep(t, p.cycle); s.result != dogStepSkipped {
+		t.Errorf("events-retention step = %+v, want skipped while the archive has no watermark", s)
+	} else if s.reason != "1 databases waiting for the events archive watermark" {
+		t.Errorf("events-retention reason = %q, want the waiting database counted", s.reason)
+	}
+	if !strings.Contains(p.log.String(), "beads_db: events retention: skipped: waiting for the events archive watermark") {
+		t.Errorf("log = %q, want the database reported as waiting for the archive", p.log.String())
+	}
+}

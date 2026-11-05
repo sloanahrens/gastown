@@ -467,6 +467,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 		cycle.skipStep("events-retention", "patrols.wisp_reaper.events_retention is not set")
 	} else {
 		retentionErrors := 0
+		waitingForArchive := 0
 		for _, dbName := range databases {
 			if err := reaper.ValidateDBName(dbName); err != nil {
 				continue
@@ -487,6 +488,8 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 				Batch:      defaultEventsPurgeBatch,
 				MaxBatches: defaultEventsPurgeMaxBatches,
 				DryRun:     dryRun,
+				Database:   dbName,
+				StatePath:  maintenanceGCStatePath(d.config.TownRoot),
 			})
 			cancel()
 			db.Close()
@@ -499,11 +502,19 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 				retentionErrors++
 				continue
 			}
+			if result.Waiting != "" {
+				waitingForArchive++
+			}
 			d.logger.Printf("wisp_reaper: %s: events retention: %s", dbName, result.Summary())
 		}
-		if retentionErrors > 0 {
+		// A database waiting for the events archive is skipped, not passed:
+		// retention deletes only what the archive has written out (gt-2i850).
+		switch {
+		case retentionErrors > 0:
 			cycle.failStep("events-retention", fmt.Sprintf("%d databases had events retention errors", retentionErrors))
-		} else {
+		case waitingForArchive > 0:
+			cycle.skipStep("events-retention", fmt.Sprintf("%d databases waiting for the events archive watermark", waitingForArchive))
+		default:
 			cycle.closeStep("events-retention")
 		}
 	}
