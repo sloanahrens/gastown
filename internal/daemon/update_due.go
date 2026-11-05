@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/update"
 )
 
 // updateWindowLength is how long the nightly update window stays open after
@@ -28,6 +29,13 @@ type UpdateFacts struct {
 	LastStarted time.Time
 	// LastEnded is when the last run ended; zero when none.
 	LastEnded time.Time
+	// LastOutcome is how the last run ended; empty when none has.
+	LastOutcome update.Outcome
+	// LastTarget is the main sha the last run set out to install.
+	LastTarget string
+	// MainSHA is main's current sha, the target a new run would set out to
+	// install; empty when it could not be read.
+	MainSHA string
 }
 
 // updateDue reports whether an update is due at now and why. It is pure: the
@@ -44,6 +52,20 @@ func updateDue(now time.Time, s config.UpdateSettings, f UpdateFacts) (due bool,
 	}
 	if f.InstallPending {
 		return false, "an install marker is pending"
+	}
+
+	// A run that failed or aborted on main's current target would fail the same
+	// way again: it drains the town and fails at the same step. Hold it until
+	// main moves to a new target or a run succeeds. A failure on an older
+	// target holds nothing. An unknown main sha cannot show the target moved,
+	// so it holds too.
+	if f.LastOutcome == update.OutcomeFailed || f.LastOutcome == update.OutcomeAborted {
+		if f.MainSHA == "" {
+			return false, "last run failed and main's sha is unknown; run gt update by hand"
+		}
+		if f.LastTarget == f.MainSHA {
+			return false, "last run failed on this target; run gt update by hand"
+		}
 	}
 
 	// The nightly rule: one run per day, and only inside the hour that opens

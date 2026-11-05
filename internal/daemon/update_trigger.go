@@ -186,7 +186,12 @@ func (d *Daemon) updateFacts(now time.Time) (UpdateFacts, error) {
 	st, err := store.Read()
 	switch {
 	case err == nil:
+		if !knownUpdateOutcome(st.Outcome) {
+			// An outcome no run writes is unreadable: read as ok it would launch a run.
+			return facts, fmt.Errorf("the update state's outcome %q is not a run outcome", st.Outcome)
+		}
 		facts.LastStarted, facts.LastEnded = st.StartedAt, st.EndedAt
+		facts.LastOutcome, facts.LastTarget = st.Outcome, st.Target.SHA
 		if st.Outcome == update.OutcomeRunning &&
 			!st.HeartbeatAt.IsZero() && now.Sub(st.HeartbeatAt) < updateHeartbeatFresh {
 			facts.Running = true
@@ -219,6 +224,7 @@ func (d *Daemon) updateFacts(now time.Time) (UpdateFacts, error) {
 	if !ok {
 		return facts, errors.New("the installed build's staleness could not be read")
 	}
+	facts.MainSHA = strings.TrimSpace(info.RepoCommit)
 	facts.MainMoved = info.IsStale
 	if !info.IsStale {
 		return facts, nil
@@ -230,6 +236,16 @@ func (d *Daemon) updateFacts(now time.Time) (UpdateFacts, error) {
 	}
 	facts.Waiting = waiting
 	return facts, nil
+}
+
+// knownUpdateOutcome reports whether o is one a run writes to its state file.
+func knownUpdateOutcome(o update.Outcome) bool {
+	switch o {
+	case update.OutcomeRunning, update.OutcomeOK, update.OutcomePartial,
+		update.OutcomeAborted, update.OutcomeFailed, update.OutcomeInterrupted:
+		return true
+	}
+	return false
 }
 
 // updateLandingsWaiting counts the landings recorded on the rig whose checkout
