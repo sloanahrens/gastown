@@ -924,6 +924,8 @@ func runnerKubernetesDaemon(t *testing.T, now time.Time) (*Daemon, sweeprunner.S
 // priority answers the priority preflight's listing instead of the healthy one,
 // so a cycle can be driven from a protected pod the sweep outranks to a healthy
 // cluster and back.
+// capacity answers the capacity preflight; empty is runnerRoomyCapacity, so a
+// test about the launch itself is not declined for want of room.
 type runnerCluster struct {
 	t              *testing.T
 	status         string
@@ -932,6 +934,7 @@ type runnerCluster struct {
 	statusReads    int
 	jobs           string
 	jobsErr        bool
+	capacity       string
 	result         *sweeprunner.Result
 	skipWrite      bool
 	failCopy       bool
@@ -956,6 +959,10 @@ const runnerPriorityListing = `{"kind":"List","items":[
 {"kind":"Pod","metadata":{"name":"forgejo-6884fd5d78-6mqpl","namespace":"forgejo-trial"},"spec":{"priority":1000000,"ownerReferences":[{"kind":"ReplicaSet","name":"forgejo-6884fd5d78"}]}}
 ]}`
 
+// runnerRoomyCapacity is a node with room for the default runner block's Job
+// (8 CPU, 24 GiB with dind) and the control plane's headroom.
+const runnerRoomyCapacity = `{"items": [{"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"allocatable": {"cpu": "16", "memory": "64Gi"}}}]}`
+
 func (c *runnerCluster) answer(argv []string) ([]byte, []byte, error) {
 	switch {
 	case slices.Contains(argv, "get") && slices.Contains(argv, "pods,priorityclasses"):
@@ -968,6 +975,11 @@ func (c *runnerCluster) answer(argv []string) ([]byte, []byte, error) {
 			return nil, []byte("Error from server (Forbidden): jobs.batch is forbidden\n"), errors.New("exit status 1")
 		}
 		return []byte(c.jobs), nil, nil
+	case slices.Contains(argv, "get") && slices.Contains(argv, "nodes,pods"):
+		if c.capacity != "" {
+			return []byte(c.capacity), nil, nil
+		}
+		return []byte(runnerRoomyCapacity), nil, nil
 	case slices.Contains(argv, "get"):
 		c.statusReads++
 		if c.statusErr || c.statusReads <= c.flakyStatus {
@@ -1257,11 +1269,21 @@ func TestSyncRefusesWhileASweepJobReadsTheClaim(t *testing.T) {
 					t.Errorf("a step applied %q after the guard refused; nothing must be applied", argv)
 				}
 			}
-			if len(cmds.ran) == 0 || !slices.Contains(strings.Fields(cmds.ran[0]), "jobs") {
-				t.Errorf("commands = %q, want the first to be the guard's listing of the Jobs", cmds.ran)
+			// The capacity preflight reads the node first and writes nothing; the
+			// guard's listing of the Jobs follows and nothing is applied after it.
+			guardAt := slices.IndexFunc(cmds.ran, func(ran string) bool {
+				return slices.Contains(strings.Fields(ran), "jobs")
+			})
+			if guardAt < 0 {
+				t.Fatalf("commands = %q, want the guard's listing of the Jobs", cmds.ran)
 			}
-			if len(cmds.ran) > 0 && slices.Contains(strings.Fields(cmds.ran[0]), "-l") {
-				t.Errorf("the guard runs %q, want an unlabelled listing: a Job that lost its labels still reads the claim", cmds.ran[0])
+			for _, ran := range cmds.ran[:guardAt] {
+				if !slices.Contains(strings.Fields(ran), "nodes,pods") {
+					t.Errorf("step %q ran before the guard's listing; only the read-only capacity preflight may", ran)
+				}
+			}
+			if slices.Contains(strings.Fields(cmds.ran[guardAt]), "-l") {
+				t.Errorf("the guard runs %q, want an unlabelled listing: a Job that lost its labels still reads the claim", cmds.ran[guardAt])
 			}
 		})
 	}
