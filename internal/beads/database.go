@@ -366,12 +366,7 @@ var bdEndpointEnvKeys = []string{"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PO
 func addResolvedDoltConnectionEnv(env, base []string, beadsDir string) []string {
 	if townRoot := FindTownRoot(filepath.Dir(beadsDir)); beadsDir != "" && townRoot != "" {
 		if ep, ok := agentconfig.ResolveDoltEndpoint(townRoot); ok {
-			env = stripEnvKeys(env, bdEndpointEnvKeys...)
-			if ep.Host != "" {
-				env = append(env, "BEADS_DOLT_SERVER_HOST="+ep.Host)
-			}
-			port := strconv.Itoa(ep.Port)
-			return append(env, "BEADS_DOLT_SERVER_PORT="+port, "BEADS_DOLT_PORT="+port)
+			return append(stripEnvKeys(env, bdEndpointEnvKeys...), doltEndpointEnv(ep)...)
 		}
 	}
 	inherited := map[string]string{}
@@ -401,4 +396,25 @@ func stripEnvKeys(env []string, keys ...string) []string {
 		env = StripEnvKey(env, key)
 	}
 	return env
+}
+
+// doltEndpointEnv is the environment that names ep: the server host when the
+// endpoint names one, and its port under both names bd reads.
+func doltEndpointEnv(ep agentconfig.DoltEndpoint) []string {
+	var env []string
+	if ep.Host != "" {
+		env = append(env, "BEADS_DOLT_SERVER_HOST="+ep.Host)
+	}
+	port := strconv.Itoa(ep.Port)
+	return append(env, "BEADS_DOLT_SERVER_PORT="+port, "BEADS_DOLT_PORT="+port)
+}
+
+// ResolvedDoltEndpointEnv returns the variables that name the town's Dolt
+// endpoint as inContainer resolves it, and false when the town names none.
+func ResolvedDoltEndpointEnv(townRoot string, inContainer bool) ([]string, bool) {
+	ep, ok := agentconfig.ResolveDoltEndpointFor(townRoot, inContainer)
+	if !ok {
+		return nil, false
+	}
+	return doltEndpointEnv(ep), true
 }
