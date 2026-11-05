@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -763,29 +764,79 @@ func TestDiskMaintHostModeEngineDiskUsesTheProbeContainer(t *testing.T) {
 	}
 }
 
-// TestDiskMaintProductionNamesNoRetiredContainer: the patrol's production code
-// names no container retired with the Docker Forgejo stack; the engine disk
-// names only the container hostprobe shares. attention_host.go's stack check is
-// gt-gg9hv.36's scope, so the scan stays on the patrol's own files.
-func TestDiskMaintProductionNamesNoRetiredContainer(t *testing.T) {
+// TestRunnerDefaultNamesTheProbeContainer: the patrol's non-container reading
+// of the Docker Desktop disk execs into the container the host agent's probe
+// measures, named once in hostprobe. It runs the reader diskMaintDisks builds,
+// so a default changed at the call site is caught.
+func TestRunnerDefaultNamesTheProbeContainer(t *testing.T) {
 	t.Parallel()
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatalf("read the package directory: %v", err)
+	d, _, _ := diskMaintTestDaemon(t)
+	var ran []string
+	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		ran = slices.Clone(cmd.Args)
+		return []byte(diskMaintHealthyDF), nil, nil
 	}
-	const retired = "forgejo-runner-daemon-1"
-	for _, entry := range entries {
-		name := entry.Name()
-		if !strings.HasPrefix(name, "disk_maintenance") || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+
+	for _, disk := range d.diskMaintDisks(filepath.Join("scratch", "kubeconfig")) {
+		if disk.name != diskMaintDiskDockerDesktop {
 			continue
 		}
-		data, err := os.ReadFile(name)
+		if _, err := disk.df(context.Background()); err != nil {
+			t.Fatalf("read the Docker Desktop disk: %v", err)
+		}
+		want := []string{"docker", "exec", hostprobe.DockerDiskContainer, "df", "-P", "/"}
+		if !slices.Equal(ran, want) {
+			t.Fatalf("the Docker Desktop read ran %q, want %q", ran, want)
+		}
+		if hostprobe.DockerDiskContainer == "forgejo-runner-daemon-1" {
+			t.Fatal("hostprobe.DockerDiskContainer is the retired runner container")
+		}
+		return
+	}
+	t.Fatal("the patrol has no Docker Desktop disk")
+}
+
+// TestRetiredRunnerNameIsGoneFromCode: the retired Docker Forgejo runner is
+// named in no production file under internal, cmd, deploy or docs, so a default
+// added outside the files this bead edited cannot hide. The whole tree is
+// walked; docs/plans keeps the plan history and is exempt by name.
+func TestRetiredRunnerNameIsGoneFromCode(t *testing.T) {
+	t.Parallel()
+	const retired = "forgejo-runner-daemon-1"
+	root := filepath.Join("..", "..")
+	exempt := filepath.Join(root, "docs", "plans")
+	scanned := 0
+	for _, dir := range []string{"internal", "cmd", "deploy", "docs"} {
+		base := filepath.Join(root, dir)
+		err := filepath.WalkDir(base, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if entry.IsDir() {
+				if path == exempt {
+					return fs.SkipDir
+				}
+				return nil
+			}
+			if strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			scanned++
+			if strings.Contains(string(data), retired) {
+				t.Errorf("%s names the retired container %s", path, retired)
+			}
+			return nil
+		})
 		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
+			t.Fatalf("walk %s: %v", base, err)
 		}
-		if strings.Contains(string(data), retired) {
-			t.Errorf("%s names the retired container %s", name, retired)
-		}
+	}
+	if scanned < 100 {
+		t.Fatalf("scanned %d files; the walk is not rooted at the repository", scanned)
 	}
 }
 
@@ -867,5 +918,32 @@ func TestDiskMaintUnreadableIsRaisedOncePerOutage(t *testing.T) {
 	d.runDiskMaintenance()
 	if got := diskMaintEscalationsFor(f.notify, "diskmaint:colima:unreadable"); got != 2 {
 		t.Errorf("raised the unreadable alert %d times across two outages, want 2", got)
+	}
+}
+
+// TestDiskMaintUnreadableFailedRaiseLogsTheReset: when the notifier refuses an
+// unreadable alert's raise, the next pass retries it and restarts the hourly
+// clock. That reset pushes the reminder out, so it gets its own line rather
+// than making the outage quieter each time the raise fails.
+func TestDiskMaintUnreadableFailedRaiseLogsTheReset(t *testing.T) {
+	t.Parallel()
+	d, logs, f := diskMaintTestDaemon(t)
+	clk := newFixedClock()
+	d.clock = clk // the refused raise retries on this clock, so the test drives it
+	d.patrolConfig = diskMaintCadence("registry", "5m")
+	now := diskMaintNow
+	d.diskMaint.now = func() time.Time { return now }
+	f.readings = []disks.Reading{{Name: "colima", Err: errors.New("ssh: i/o timeout")}}
+	f.notify.Fail(notifyfake.KindEscalate, errors.New("the notifier is down"))
+
+	runOnClock(t, clk, time.Second, d.runDiskMaintenance)
+	if got := strings.Count(logs.String(), "alert raised again"); got != 0 {
+		t.Fatalf("logged the reset %d times on the first attempt, want none: %q", got, logs.String())
+	}
+
+	now = now.Add(5 * time.Minute)
+	runOnClock(t, clk, time.Second, d.runDiskMaintenance)
+	if got := strings.Count(logs.String(), "alert raised again"); got != 1 {
+		t.Fatalf("logged the reset %d times after the refused raise was retried, want 1: %q", got, logs.String())
 	}
 }

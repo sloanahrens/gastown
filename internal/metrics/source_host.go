@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/hostprobe"
 )
 
 // hostCommandTimeout bounds each host probe separately, so a wedged top,
@@ -33,19 +34,20 @@ type hostSource struct {
 	// server too busy to answer still reports its connection count.
 	doltPort string
 	// dockerContainer is a container whose filesystem is the Docker VM's disk,
-	// so df inside it reads the usage Docker Desktop fills (gt-mexpf). It is
-	// the runner service of the town's compose stack, whose name comes from the
-	// compose file; if that name changes, docker_disk_pct goes nil and
-	// host_probe_failures says so until this default follows it.
+	// so df inside it reads the usage Docker Desktop fills (gt-mexpf). The
+	// default is hostprobe.DockerDiskContainer, the container the host agent
+	// probes for the same disk: the runner container the column used to name
+	// was retired with the Docker Forgejo stack (gt-gg9hv.35).
 	dockerContainer string
 }
 
 // newHostSource is the host group as the registry runs it: the default Dolt
-// port and the Forgejo runner, which is part of the stack a town keeps up.
+// port and the town's Dolt container, which is on the Docker Desktop disk the
+// column measures.
 func newHostSource() hostSource {
 	return hostSource{
 		doltPort:        strconv.Itoa(doltserver.DefaultPort),
-		dockerContainer: "forgejo-runner-daemon-1",
+		dockerContainer: hostprobe.DockerDiskContainer,
 	}
 }
 

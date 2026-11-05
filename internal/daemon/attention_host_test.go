@@ -11,6 +11,7 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/hostprobe"
 )
 
 // fakeHost is a hostProbes whose answers a test sets. The zero value is not
@@ -213,7 +214,7 @@ func TestAttentionHostDocker(t *testing.T) {
 		{"extra containers are fine", append(without(), "unrelated-1"), ""},
 		{"forgejo down", without("forgejo-forgejo-1"), "forgejo-forgejo-1"},
 		{"db down", without("forgejo-db-1"), "forgejo-db-1"},
-		{"runner down", without("forgejo-runner-daemon-1"), "forgejo-runner-daemon-1"},
+		{"dolt down", without(hostprobe.DockerDiskContainer), hostprobe.DockerDiskContainer},
 		{"dind down", without("forgejo-docker-in-docker-1"), "forgejo-docker-in-docker-1"},
 		{"hm-postgres down", without("hm-postgres"), "hm-postgres"},
 		{"two down", without("forgejo-db-1", "hm-postgres"), "2 of 5"},
@@ -286,8 +287,8 @@ func TestAttentionHostDockerHMPostgresFollowsParkState(t *testing.T) {
 		{"live, forgejo-db-1 and hm-postgres missing", false, nil, forgejoOnly("forgejo-db-1"),
 			"2 of 5 stack containers not running: forgejo-db-1, hm-postgres"},
 		{"unreadable park state treats hm-postgres as not required", false, unreadable, forgejoOnly(), ""},
-		{"unreadable park state still requires forgejo", false, unreadable, forgejoOnly("forgejo-runner-daemon-1"),
-			"1 of 4 stack containers not running: forgejo-runner-daemon-1"},
+		{"unreadable park state still requires forgejo", false, unreadable, forgejoOnly(hostprobe.DockerDiskContainer),
+			"1 of 4 stack containers not running: " + hostprobe.DockerDiskContainer},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

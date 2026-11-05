@@ -36,9 +36,16 @@ type Reading struct {
 
 // Alert is one keyed change for the daemon's alert store to apply.
 type Alert struct {
-	Key    string // "diskmaint:<name>" or "diskmaint:<name>:unreadable"
-	Raise  bool
-	Clear  bool
+	Key   string // "diskmaint:<name>" or "diskmaint:<name>:unreadable"
+	Name  string // the disk the alert is about
+	Raise bool
+	Clear bool
+	// Unreadable marks an alert about a disk that could not be read.
+	Unreadable bool
+	// Still is set on an unreadable alert that was already open at the pass's
+	// start. The alert stays open, so the caller logs the detail at its own
+	// pace rather than raising it again.
+	Still  bool
 	Detail string
 }
 
@@ -67,40 +74,54 @@ func ParseDF(out string) (float64, error) {
 // Evaluate compares the readings with the active alert keys and returns the
 // alerts to apply: a readable disk raises its usage alert at or over RaiseAt and
 // clears it below ClearAt, an unreadable disk raises its unreadable alert and
-// leaves the usage alert alone, and no alert is raised for a key already active
-// (gt-dl4nv.3).
+// leaves the usage alert alone, and an unreadable alert that is already active
+// is reported as still unreadable rather than raised again (gt-dl4nv.3).
 func Evaluate(readings []Reading, active map[string]bool) []Alert {
 	var alerts []Alert
 	for _, r := range readings {
 		usage := usageAlertKey(r.Name)
 		unreadable := unreadableAlertKey(r.Name)
 		if r.Err != nil {
-			if !active[unreadable] {
+			if active[unreadable] {
 				alerts = append(alerts, Alert{
-					Key:    unreadable,
-					Raise:  true,
-					Detail: fmt.Sprintf("disk %s cannot be read: %v", r.Name, r.Err),
+					Key:        unreadable,
+					Name:       r.Name,
+					Still:      true,
+					Unreadable: true,
+					Detail:     fmt.Sprintf("disk %s is still unreadable: %v", r.Name, r.Err),
 				})
+				continue
 			}
+			alerts = append(alerts, Alert{
+				Key:        unreadable,
+				Name:       r.Name,
+				Raise:      true,
+				Unreadable: true,
+				Detail:     fmt.Sprintf("disk %s cannot be read: %v", r.Name, r.Err),
+			})
 			continue
 		}
 		if active[unreadable] {
 			alerts = append(alerts, Alert{
-				Key:    unreadable,
-				Clear:  true,
-				Detail: fmt.Sprintf("disk %s reads again at %.0f%% used", r.Name, r.UsedPct),
+				Key:        unreadable,
+				Name:       r.Name,
+				Clear:      true,
+				Unreadable: true,
+				Detail:     fmt.Sprintf("disk %s reads again at %.0f%% used", r.Name, r.UsedPct),
 			})
 		}
 		switch {
 		case r.UsedPct >= RaiseAt && !active[usage]:
 			alerts = append(alerts, Alert{
 				Key:    usage,
+				Name:   r.Name,
 				Raise:  true,
 				Detail: fmt.Sprintf("disk %s is %.0f%% used (alert at %.0f%%)", r.Name, r.UsedPct, RaiseAt),
 			})
 		case r.UsedPct < ClearAt && active[usage]:
 			alerts = append(alerts, Alert{
 				Key:    usage,
+				Name:   r.Name,
 				Clear:  true,
 				Detail: fmt.Sprintf("disk %s is %.0f%% used (clears below %.0f%%)", r.Name, r.UsedPct, ClearAt),
 			})
@@ -150,10 +171,6 @@ func KeepFor(readings []Reading, base int) Keep {
 	}
 	return Keep{count: base, decided: true}
 }
-
-// UnreadableAlertKey is the alert key a disk raises while it cannot be read, so
-// a caller holding an errored reading can ask whether that alert is open.
-func UnreadableAlertKey(name string) string { return unreadableAlertKey(name) }
 
 func usageAlertKey(name string) string { return "diskmaint:" + name }
 

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/diskmaint"
+	"github.com/steveyegge/gastown/internal/hostprobe"
 )
 
 // Placeholder container and image names, so a test never names a real one.
@@ -260,6 +261,28 @@ func TestName(t *testing.T) {
 	t.Parallel()
 	if got := target(newFake()).Name(); got != "civol" {
 		t.Fatalf("Name() = %q, want civol", got)
+	}
+}
+
+// TestRunnerDefaultNamesTheProbeContainer: a target built without a Runner
+// execs into the container hostprobe names for the Docker Desktop disk, not
+// the runner container retired with the Docker Forgejo stack. The default is
+// driven through Measure, the read that uses it.
+func TestRunnerDefaultNamesTheProbeContainer(t *testing.T) {
+	t.Parallel()
+	f := newFake()
+	f.runner = hostprobe.DockerDiskContainer
+	tgt := NewTarget(Config{Run: f.run})
+
+	if _, err := tgt.Measure(context.Background()); err != nil {
+		t.Fatalf("measure with the default runner: %v", err)
+	}
+	want := "docker exec " + hostprobe.DockerDiskContainer + " df -P /"
+	if len(f.calls) != 1 || f.calls[0] != want {
+		t.Fatalf("calls = %v, want exactly %q", f.calls, want)
+	}
+	if hostprobe.DockerDiskContainer == "forgejo-runner-daemon-1" {
+		t.Fatalf("hostprobe.DockerDiskContainer is the retired runner container")
 	}
 }
 

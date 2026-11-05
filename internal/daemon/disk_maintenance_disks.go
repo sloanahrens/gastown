@@ -334,15 +334,20 @@ func (a *diskMaintAlerts) stillUnreadableDue(key string, now time.Time) bool {
 	return true
 }
 
-// recordUnreadableRaised starts the repeat clock at the pass that first saw the
-// disk unreadable, so the first reminder comes one interval later.
-func (a *diskMaintAlerts) recordUnreadableRaised(key string, now time.Time) {
+// recordUnreadableRaised starts the repeat clock at the pass that tried to
+// raise the alert, so the first reminder comes one interval later. It reports
+// whether it replaced an earlier clock: a raise the notifier refused is retried
+// on the next pass, and that retry is a reset the operator must be told about,
+// because it means the hour starts again.
+func (a *diskMaintAlerts) recordUnreadableRaised(key string, now time.Time) (again bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.stillLogged == nil {
 		a.stillLogged = map[string]time.Time{}
 	}
+	_, again = a.stillLogged[key]
 	a.stillLogged[key] = now
+	return again
 }
 
 // applyDiskAlerts raises and clears the alerts the readings call for, and
@@ -353,40 +358,32 @@ func (a *diskMaintAlerts) recordUnreadableRaised(key string, now time.Time) {
 //
 // An unreadable disk raises its alert once per outage. While that alert stays
 // open the pass logs the still-unreadable line at most once an hour, so an
-// outage that lasts is visible without a repeat alert.
+// outage that lasts is visible without a repeat alert. A raise the notifier
+// refused is retried on the next pass, and each retry restarts the hour; the
+// retry gets its own line so those restarts are not silent.
 func (d *Daemon) applyDiskAlerts(readings []disks.Reading, now time.Time) {
-	before := d.diskMaintAlerts.snapshot()
-	for _, alert := range disks.Evaluate(readings, before) {
+	for _, alert := range disks.Evaluate(readings, d.diskMaintAlerts.snapshot()) {
 		switch {
 		case alert.Raise:
-			if err := d.escalateAlertErr(alert.Key, diskMaintAlertSource, alert.Detail); err != nil {
+			err := d.escalateAlertErr(alert.Key, diskMaintAlertSource, alert.Detail)
+			if err != nil {
 				d.logger.Printf("disk_maintenance: alert %s was not delivered: %v", alert.Key, err)
-				continue
+			} else {
+				d.diskMaintAlerts.mark(alert.Key, true)
 			}
-			d.diskMaintAlerts.mark(alert.Key, true)
+			if alert.Unreadable && d.diskMaintAlerts.recordUnreadableRaised(alert.Key, now) {
+				d.logger.Printf("disk_maintenance: disk %s still unreadable, alert raised again", alert.Name)
+			}
 		case alert.Clear:
 			if err := d.clearAlertsErr(alert.Detail, alert.Key); err != nil {
 				d.logger.Printf("disk_maintenance: alert %s was not cleared: %v", alert.Key, err)
 				continue // still open, and the next pass clears it again
 			}
 			d.diskMaintAlerts.mark(alert.Key, false)
-		}
-	}
-	for _, r := range readings {
-		if r.Err == nil {
-			continue
-		}
-		key := disks.UnreadableAlertKey(r.Name)
-		if !before[key] {
-			// The alert was not open at the pass's start, so this pass raises
-			// it: the raise is the notice, and it starts the repeat clock. A
-			// raise the notifier refused re-raises next pass, which restarts
-			// the clock then.
-			d.diskMaintAlerts.recordUnreadableRaised(key, now)
-			continue
-		}
-		if d.diskMaintAlerts.stillUnreadableDue(key, now) {
-			d.logger.Printf("disk_maintenance: disk %s is still unreadable: %v", r.Name, r.Err)
+		case alert.Still:
+			if d.diskMaintAlerts.stillUnreadableDue(alert.Key, now) {
+				d.logger.Printf("disk_maintenance: %s", alert.Detail)
+			}
 		}
 	}
 }
