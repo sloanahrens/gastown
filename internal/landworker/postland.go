@@ -42,27 +42,32 @@ type PostLandResult struct {
 	Err     error
 }
 
-// PostLandTrigger starts the post-landing command for a landing.
+// PostLandTrigger starts the post-landing verdict for a landing, and reads the
+// verdicts still waiting on CI once per worker pass.
 type PostLandTrigger interface {
 	Trigger(ctx context.Context, pl PostLand)
+	PollPending(ctx context.Context)
 }
 
 // postLandTailLines is how much output a red comment quotes.
 const postLandTailLines = 10
 
-// PostLandRunner decides a rig's post-land verdict after each landing,
-// asynchronously and one at a time: either by running merge_queue.
-// post_land_command (the slow test tier), or, when merge_queue.
-// post_land_status_context is set, by waiting for the landed commit's CI
-// status in that context. A landing that completes while a run is in flight is
-// coalesced: when the run finishes, it runs once more at the newest landed
-// commit, whatever number of landings arrived meanwhile.
+// PostLandRunner decides a rig's post-land verdict after each landing. Either
+// it runs merge_queue.post_land_command (the slow test tier) asynchronously,
+// one at a time: a landing that completes while a run is in flight is
+// coalesced, and when the run finishes it runs once more at the newest landed
+// commit, whatever number of landings arrived meanwhile. Or, when
+// merge_queue.post_land_status_context is set, it reads the landed commit's CI
+// status in that context: the landing records a pending verdict and returns,
+// and PollPending reads it on a later worker pass. Nothing waits on CI
+// (gt-gg9hv.7.1).
 //
 // A red verdict never blocks anything. OnRed and OnGreen receive every verdict
-// on the runner's goroutine, so a landing that arrives while they work
-// coalesces like one that arrives mid-run; RedMain is the production pair
+// on the goroutine that decides it (the runner's, or a worker pass's in status
+// mode), so a landing that arrives while they work coalesces like one that
+// arrives mid-run; RedMain is the production pair
 // (gt-v4ssj.4). An UNKNOWN status verdict calls neither and raises one
-// attention item per landed commit (gt-gg9hv.7.1).
+// attention item per landed commit.
 type PostLandRunner struct {
 	Rig string
 	// Command returns the command to run; "" leaves the command mode off.
@@ -74,16 +79,20 @@ type PostLandRunner struct {
 	// status mode wins. It is read at every trigger and every run too.
 	StatusContext func() string
 	// Status reads the landed commit's combined status; nil disables status
-	// mode. It is read with every poll.
+	// mode. It is read at most once per PostLandStatusPollInterval per pending
+	// commit.
 	Status func(ctx context.Context, pl PostLand) (*forgejo.CombinedStatus, error)
+	// State holds the pending status-mode verdicts, so a restarted daemon
+	// resumes them; nil disables status mode.
+	State MainStateStore
 	// OnUnknown, when set, receives the record for a landed commit whose
 	// status context never reached a verdict before Timeout. It is called
 	// once per landed commit.
 	OnUnknown func(ctx context.Context, u PostLandUnknown)
-	// Clock is the time source status mode waits with; nil means the real
-	// clock.
+	// Clock is the time source status mode reads its deadlines by; nil means
+	// the real clock.
 	Clock PostLandClock
-	// Timeout bounds one status wait; 0 means PostLandStatusDefaultTimeout.
+	// Timeout bounds one pending verdict; 0 means PostLandStatusDefaultTimeout.
 	// Production passes merge_queue.post_land_timeout.
 	Timeout time.Duration
 	// Run runs cmd for pl (throwaway worktree at pl.Commit, container slot).
@@ -103,11 +112,6 @@ type PostLandRunner struct {
 	running bool
 	pending *PostLand
 	wg      sync.WaitGroup
-
-	// unknownMu guards unknownRaised: the status-mode commits whose missing
-	// verdict already raised an attention item.
-	unknownMu     sync.Mutex
-	unknownRaised map[string]bool
 }
 
 var _ PostLandTrigger = (*PostLandRunner)(nil)
@@ -130,9 +134,17 @@ func (p *PostLandRunner) enabled() bool {
 	return p.statusEnabled() || p.command() != ""
 }
 
-// Trigger schedules the verdict for pl and returns at once.
+// Trigger schedules the verdict for pl and returns at once. In status mode it
+// only records the pending verdict; the command mode starts a run.
 func (p *PostLandRunner) Trigger(ctx context.Context, pl PostLand) {
 	if !p.enabled() {
+		return
+	}
+	if p.statusEnabled() {
+		if cmd := p.command(); cmd != "" {
+			p.logf("merge_queue.post_land_status_context %q is set, so it decides the verdict and post_land_command %q is not run", p.statusContext(), cmd)
+		}
+		p.recordPending(ctx, pl, p.statusContext())
 		return
 	}
 	p.mu.Lock()
@@ -175,18 +187,7 @@ func (p *PostLandRunner) loop(ctx context.Context, pl PostLand) {
 }
 
 func (p *PostLandRunner) runOne(ctx context.Context, pl PostLand) {
-	name := p.statusContext()
 	cmd := p.command()
-	if name != "" && p.Status != nil {
-		if cmd != "" {
-			p.logf("merge_queue.post_land_status_context %q is set, so it decides the verdict and post_land_command %q is not run", name, cmd)
-		}
-		if ctx.Err() != nil {
-			return
-		}
-		p.runStatus(ctx, pl, name)
-		return
-	}
 	if cmd == "" || ctx.Err() != nil {
 		return
 	}

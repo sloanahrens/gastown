@@ -5,23 +5,32 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/forgejo"
 )
 
-// PostLandStatusPollInterval is how long status mode waits between reads of
-// the landed commit's combined status.
+// PostLandStatusPollInterval is the least time between two reads of one
+// pending landed commit's combined status.
 const PostLandStatusPollInterval = 30 * time.Second
 
-// PostLandStatusDefaultTimeout bounds a status wait whose runner names no
+// PostLandStatusDefaultTimeout bounds a pending verdict whose runner names no
 // timeout. Production passes merge_queue.post_land_timeout instead.
 const PostLandStatusDefaultTimeout = 60 * time.Minute
 
-// PostLandClock is the time source status mode polls with. A clockwork.Clock
-// satisfies it, so the daemon passes its own clock.
+// postLandPendingLimit is how many pending verdicts a rig keeps. The newest are
+// read; an older one is dropped with a log line.
+const postLandPendingLimit = 20
+
+// postLandStatusTextRunes bounds the status text that reaches a bead comment,
+// an attention summary or a log line. It is untrusted text from Forgejo.
+const postLandStatusTextRunes = 200
+
+// PostLandClock is the time source status mode reads its deadlines by. A
+// clockwork.Clock satisfies it, so the daemon passes its own clock.
 type PostLandClock interface {
 	Now() time.Time
-	After(d time.Duration) <-chan time.Time
 }
 
 // PostLandStatusVerdict is what the configured status context says about a
@@ -132,6 +141,39 @@ func postLandStatusRead(cs *forgejo.CombinedStatus, err error, name, sha string)
 	}
 }
 
+// sanitizeStatusText makes untrusted status text safe for one line: control
+// characters and newlines become a space, the text is cut to
+// postLandStatusTextRunes runes, and its ends are trimmed.
+func sanitizeStatusText(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, s)
+	if utf8.RuneCountInString(s) > postLandStatusTextRunes {
+		s = string([]rune(s)[:postLandStatusTextRunes])
+	}
+	return strings.TrimSpace(s)
+}
+
+// PendingPostLand is a landed commit whose status-mode verdict is still
+// waiting on CI. It lives in the rig's MainState, so a daemon restart resumes
+// the wait (gt-gg9hv.7.1).
+type PendingPostLand struct {
+	// Land is the landing the verdict is for: the run the callbacks receive.
+	Land PostLand `json:"land"`
+	// Context is the status context the verdict is read from.
+	Context string `json:"context"`
+	// Since is when the verdict was recorded. The timeout counts from it.
+	Since time.Time `json:"since"`
+	// LastRead is the last time the status was read; zero before the first read.
+	LastRead time.Time `json:"last_read,omitzero"`
+	// LastState and LastDescription are what that read found.
+	LastState       string `json:"last_state,omitempty"`
+	LastDescription string `json:"last_description,omitempty"`
+}
+
 // PostLandUnknown is a landed commit whose post-land status context never
 // reached a verdict before post_land_timeout: CI stopped reporting, so the
 // post-land check is silent.
@@ -165,9 +207,11 @@ func (p *PostLandRunner) statusContext() string {
 	return strings.TrimSpace(p.StatusContext())
 }
 
-// statusEnabled reports whether status mode can decide this runner's verdict.
+// statusEnabled reports whether status mode decides this runner's verdict: a
+// context is set, and the runner can both read the status and keep the
+// pending verdict it waits on.
 func (p *PostLandRunner) statusEnabled() bool {
-	return p.Status != nil && p.statusContext() != ""
+	return p.Status != nil && p.State != nil && p.statusContext() != ""
 }
 
 func (p *PostLandRunner) statusClock() PostLandClock {
@@ -187,90 +231,154 @@ func (p *PostLandRunner) statusTimeout() time.Duration {
 // realPostLandClock is time's own clock.
 type realPostLandClock struct{}
 
-func (realPostLandClock) Now() time.Time                         { return time.Now() }
-func (realPostLandClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
+func (realPostLandClock) Now() time.Time { return time.Now() }
 
-// runStatus waits for the landed commit's status context to reach a verdict,
-// then calls OnGreen or OnRed exactly once. A wait that ends at the timeout
-// with no verdict calls neither: it hands OnUnknown one record for the commit,
-// so a silent CI is never read as green (gt-gg9hv.7.1).
-func (p *PostLandRunner) runStatus(ctx context.Context, pl PostLand, name string) {
-	clock := p.statusClock()
+// recordPending starts status mode's wait for pl. It writes a pending verdict
+// into the rig's main state and returns: nothing waits on CI, and PollPending
+// reads the status on a later pass. A verdict that cannot be recorded is
+// raised as UNKNOWN at once, so the silence is an attention item.
+func (p *PostLandRunner) recordPending(ctx context.Context, pl PostLand, name string) {
+	now := p.statusClock().Now()
+	st, err := p.State.Load()
+	if err != nil {
+		p.unrecorded(ctx, pl, name, fmt.Errorf("reading the main state: %w", err))
+		return
+	}
+	for _, e := range st.PostLandPending {
+		if e.Land.Commit == pl.Commit && e.Context == name {
+			return
+		}
+	}
+	st.PostLandPending = append(st.PostLandPending, PendingPostLand{Land: pl, Context: name, Since: now})
+	if drop := len(st.PostLandPending) - postLandPendingLimit; drop > 0 {
+		for _, e := range st.PostLandPending[:drop] {
+			p.logf("dropping the pending verdict for %s (%s): the rig keeps the newest %d", short(e.Land.Commit), e.Land.by(), postLandPendingLimit)
+		}
+		st.PostLandPending = st.PostLandPending[drop:]
+	}
+	if err := p.State.Save(st); err != nil {
+		p.unrecorded(ctx, pl, name, fmt.Errorf("saving the main state: %w", err))
+		return
+	}
+	p.logf("pending at %s (%s): status %q is read on the next pass; nothing waits", short(pl.Commit), pl.by(), name)
+}
+
+// unrecorded raises the UNKNOWN for a landed commit whose pending verdict could
+// not be written.
+func (p *PostLandRunner) unrecorded(ctx context.Context, pl PostLand, name string, err error) {
+	p.logf("WARNING could not record the pending verdict for %s (%s): %v", short(pl.Commit), pl.by(), err)
+	p.raiseUnknown(ctx, pl, name, PostLandStatusResult{
+		State:       "unrecorded",
+		Description: sanitizeStatusText(err.Error()),
+	})
+}
+
+// PollPending is one pass over the pending verdicts. It never waits: a pending
+// commit is read at most once per PostLandStatusPollInterval; a green or red
+// read fires its callback once and drops the entry; a commit still open at its
+// timeout raises one UNKNOWN and is dropped. The entries are saved before any
+// callback runs, so a verdict fires at most once, even across a restart.
+func (p *PostLandRunner) PollPending(ctx context.Context) {
+	if p.State == nil || ctx.Err() != nil {
+		return
+	}
+	st, err := p.State.Load()
+	if err != nil {
+		p.logf("reading the pending post-land verdicts: %v", err)
+		return
+	}
+	if len(st.PostLandPending) == 0 {
+		return
+	}
+	now := p.statusClock().Now()
 	timeout := p.statusTimeout()
-	deadline := clock.Now().Add(timeout)
-	last := p.readStatus(ctx, pl, name)
-	if ctx.Err() != nil {
-		return
-	}
-	if p.verdict(ctx, pl, name, last) {
-		return
-	}
-	if !clock.Now().Before(deadline) {
-		p.raiseUnknown(ctx, pl, name, last)
-		return
-	}
-	p.logf("UNKNOWN at %s (%s): status %q is %s; waiting up to %s: %s",
-		short(pl.Commit), pl.by(), name, last.State, timeout, last.Description)
-	logged := last.State
-	for {
-		wait := PostLandStatusPollInterval
-		if remaining := deadline.Sub(clock.Now()); remaining < wait {
-			wait = remaining
-		}
-		if wait > 0 {
-			select {
-			case <-ctx.Done():
-				return
-			case <-clock.After(wait):
-			}
-		}
-		last = p.readStatus(ctx, pl, name)
+	var keep []PendingPostLand
+	var fires []func()
+	changed := false
+	for _, e := range st.PostLandPending {
 		if ctx.Err() != nil {
-			return
+			keep = append(keep, e)
+			continue
 		}
-		if p.verdict(ctx, pl, name, last) {
-			return
+		pl, name := e.Land, e.Context
+		if p.Status != nil && (e.LastRead.IsZero() || now.Sub(e.LastRead) >= PostLandStatusPollInterval) {
+			res := p.readStatus(ctx, pl, name)
+			if ctx.Err() != nil {
+				keep = append(keep, e)
+				continue
+			}
+			changed = true
+			if res.Verdict != PostLandStatusUnknown {
+				fires = append(fires, func() { p.fire(ctx, pl, name, res) })
+				continue
+			}
+			if res.State != e.LastState {
+				p.logf("waiting at %s (%s): status %q is now %s: %s", short(pl.Commit), pl.by(), name, res.State, res.Description)
+			}
+			e.LastRead, e.LastState, e.LastDescription = now, res.State, res.Description
 		}
-		if last.State != logged {
-			p.logf("waiting at %s (%s): status %q is now %s: %s",
-				short(pl.Commit), pl.by(), name, last.State, last.Description)
-			logged = last.State
+		if !now.Before(e.Since.Add(timeout)) {
+			last := PostLandStatusResult{State: e.LastState, Description: e.LastDescription}
+			if last.State == "" {
+				last.State = "unread"
+			}
+			changed = true
+			fires = append(fires, func() { p.raiseUnknown(ctx, pl, name, last) })
+			continue
 		}
-		if !clock.Now().Before(deadline) {
-			p.raiseUnknown(ctx, pl, name, last)
-			return
-		}
+		keep = append(keep, e)
+	}
+	if !changed {
+		return
+	}
+	st.PostLandPending = keep
+	if err := p.State.Save(st); err != nil {
+		// Nothing fires without its record, so the entries are read again on
+		// the next pass.
+		p.logf("saving the pending post-land verdicts: %v", err)
+		return
+	}
+	for _, fire := range fires {
+		fire()
 	}
 }
 
-// readStatus reads the landed commit's combined status once.
+// readStatus reads the landed commit's combined status once, with its text
+// made safe for a bead comment, an attention summary and a log line.
 func (p *PostLandRunner) readStatus(ctx context.Context, pl PostLand, name string) PostLandStatusResult {
 	cs, err := p.Status(ctx, pl)
-	return postLandStatusRead(cs, err, name, pl.Commit)
+	res := postLandStatusRead(cs, err, name, pl.Commit)
+	res.State = sanitizeStatusText(res.State)
+	res.Description = sanitizeStatusText(res.Description)
+	return res
 }
 
-// verdict calls the runner's callback for a decided read and reports whether
-// the wait is over.
-func (p *PostLandRunner) verdict(ctx context.Context, pl PostLand, name string, res PostLandStatusResult) bool {
+// fire hands a decided read to the runner's callback: OnGreen for green, and
+// for red a bead comment and OnRed. An UNKNOWN calls neither.
+func (p *PostLandRunner) fire(ctx context.Context, pl PostLand, name string, res PostLandStatusResult) {
 	switch res.Verdict {
 	case PostLandStatusGreen:
 		p.logf("green at %s (%s): status %q is success", short(pl.Commit), pl.by(), name)
 		if p.OnGreen != nil {
 			p.OnGreen(ctx, name, pl, PostLandResult{ExitCode: 0})
 		}
-		return true
 	case PostLandStatusRed:
 		p.logf("RED at %s (%s): status %q is %s: %s", short(pl.Commit), pl.by(), name, res.State, res.Description)
+		if p.Beads != nil && pl.BeadID != "" {
+			msg := fmt.Sprintf("post-landing status RED at %s: status %q is %s: %s", pl.Commit, name, res.State, res.Description)
+			if err := p.Beads.AddComment(pl.BeadID, msg); err != nil {
+				p.logf("commenting on %s: %v", pl.BeadID, err)
+			}
+		}
 		if p.OnRed != nil {
 			p.OnRed(ctx, name, pl, PostLandResult{ExitCode: 1, Tail: res.Description})
 		}
-		return true
 	}
-	return false
 }
 
-// raiseUnknown records that the commit's status context never gave a verdict,
-// once per landed commit, and hands the record on for the attention queue.
+// raiseUnknown records that a landed commit's status context gave no verdict
+// before its timeout, and hands the record on for the attention queue. Its
+// pending entry is already gone, so each commit raises once.
 func (p *PostLandRunner) raiseUnknown(ctx context.Context, pl PostLand, name string, last PostLandStatusResult) {
 	u := PostLandUnknown{
 		Rig:     p.Rig,
@@ -279,19 +387,8 @@ func (p *PostLandRunner) raiseUnknown(ctx context.Context, pl PostLand, name str
 		State:   last.State,
 		At:      p.statusClock().Now(),
 	}
-	key := u.Key()
-	p.unknownMu.Lock()
-	if p.unknownRaised == nil {
-		p.unknownRaised = map[string]bool{}
-	}
-	if p.unknownRaised[key] {
-		p.unknownMu.Unlock()
-		return
-	}
-	p.unknownRaised[key] = true
-	p.unknownMu.Unlock()
-	p.logf("UNKNOWN: no verdict for status %q on %s (%s) within %s (last state %s: %s); the post-land check is silent and nothing is reverted",
-		name, short(pl.Commit), pl.by(), p.statusTimeout(), last.State, last.Description)
+	p.logf("UNKNOWN: no verdict for status %q on %s (%s) (last state %s: %s); the post-land check is silent and nothing is reverted",
+		name, short(pl.Commit), pl.by(), last.State, last.Description)
 	if p.OnUnknown != nil {
 		p.OnUnknown(ctx, u)
 	}

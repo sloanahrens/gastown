@@ -704,31 +704,17 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	} else {
 		redMain.Promote = d.newPromoter(rigName, repo, forgejoCfg)
 	}
-	postLand := &landworker.PostLandRunner{
-		Rig:           rigName,
-		Command:       func() string { return rigPostLandCommand(rigPath) },
-		StatusContext: func() string { return rigPostLandStatusContext(rigPath) },
+	postLand := d.newPostLandRunner(rigName, rigPath, postLandWiring{
 		Status: func(ctx context.Context, pl landworker.PostLand) (*forgejo.CombinedStatus, error) {
 			return merger.Client.CombinedStatus(ctx, merger.Owner, merger.RepoName, pl.Commit)
 		},
-		OnUnknown: func(_ context.Context, u landworker.PostLandUnknown) {
-			d.postLandUnknowns.record(u, postLandUnknownWindow)
-		},
-		Clock:   d.clk(),
+		State:   mainState,
 		Timeout: postLandTimeout,
 		Run:     run,
 		Beads:   bd,
-		Logf:    d.logger.Printf,
 		OnRed:   redMain.Red,
 		OnGreen: redMain.Green,
-		Busy: func(busy bool) {
-			if busy {
-				d.postLandRuns.Add(1)
-			} else {
-				d.postLandRuns.Add(-1)
-			}
-		},
-	}
+	})
 	// The human's recorded identity is what the worker refuses a submission
 	// under, so a town whose overseer identity cannot be read gets no worker:
 	// without the name no submission can be checked, and landing one would
@@ -1167,6 +1153,52 @@ func rigPostLandStatusContext(rigPath string) string {
 		return ""
 	}
 	return strings.TrimSpace(settings.MergeQueue.PostLandStatusContext)
+}
+
+// postLandWiring is the landing worker's half of a rig's post-land runner: the
+// collaborators newRigLandingWorker builds. newPostLandRunner takes them, so
+// the one place the runner is wired is the place a test drives.
+type postLandWiring struct {
+	Status  func(ctx context.Context, pl landworker.PostLand) (*forgejo.CombinedStatus, error)
+	State   landworker.MainStateStore
+	Timeout time.Duration
+	Run     func(ctx context.Context, cmd string, pl landworker.PostLand) landworker.PostLandResult
+	Beads   interface {
+		AddComment(id, text string) error
+	}
+	OnRed   func(ctx context.Context, cmd string, pl landworker.PostLand, res landworker.PostLandResult)
+	OnGreen func(ctx context.Context, cmd string, pl landworker.PostLand, res landworker.PostLandResult)
+}
+
+// newPostLandRunner builds a rig's post-land runner. The command and the
+// status context are read from the rig's own settings at every use. An UNKNOWN
+// status verdict is recorded where the attention queue reads it, and a
+// command run holds an upgrade restart while it is in flight (gt-gb4ij).
+func (d *Daemon) newPostLandRunner(rigName, rigPath string, w postLandWiring) *landworker.PostLandRunner {
+	return &landworker.PostLandRunner{
+		Rig:           rigName,
+		Command:       func() string { return rigPostLandCommand(rigPath) },
+		StatusContext: func() string { return rigPostLandStatusContext(rigPath) },
+		Status:        w.Status,
+		State:         w.State,
+		OnUnknown: func(_ context.Context, u landworker.PostLandUnknown) {
+			d.postLandUnknowns.record(u, postLandUnknownWindow)
+		},
+		Clock:   d.clk(),
+		Timeout: w.Timeout,
+		Run:     w.Run,
+		Beads:   w.Beads,
+		Logf:    d.logger.Printf,
+		OnRed:   w.OnRed,
+		OnGreen: w.OnGreen,
+		Busy: func(busy bool) {
+			if busy {
+				d.postLandRuns.Add(1)
+			} else {
+				d.postLandRuns.Add(-1)
+			}
+		},
+	}
 }
 
 // rigFollowupsEnabled is landing.followups from the rig's own

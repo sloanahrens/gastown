@@ -176,6 +176,9 @@ type recordTrigger struct{ got []PostLand }
 
 func (r *recordTrigger) Trigger(_ context.Context, pl PostLand) { r.got = append(r.got, pl) }
 
+// PollPending is a no-op: the recorded triggers have no status verdict to read.
+func (r *recordTrigger) PollPending(context.Context) {}
+
 func TestPassTriggersPostLandForNewLandingsOnly(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)

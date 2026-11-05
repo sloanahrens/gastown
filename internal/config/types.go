@@ -1365,13 +1365,15 @@ type MergeQueueConfig struct {
 	PostLandCommand string `json:"post_land_command,omitempty"`
 
 	// PostLandStatusContext names the commit-status context a landing's
-	// verdict comes from instead of PostLandCommand (gt-gg9hv.7.1): the
+	// verdict comes from instead of PostLandCommand (gt-gg9hv.7.1). The
 	// landing worker reads the landed commit's combined status on the rig's
-	// Forgejo remote and takes the status with this context. Success is
-	// green; failure or error is red; pending, warning, skipped, absent or
-	// unreadable is UNKNOWN, which neither callbacks and never reverts. It
-	// wins over PostLandCommand when both are set. Read only from the rig's
-	// own settings/config.json, so merged repo content cannot choose it.
+	// Forgejo remote and takes every status with this context: all success is
+	// green, and any failure or error is red. UNKNOWN covers pending, warning,
+	// skipped, missing, hand-posted and unreadable; an UNKNOWN calls neither
+	// callback, reverts nothing, and raises one attention item once
+	// post_land_timeout passes. It wins over PostLandCommand when both are
+	// set. Read only from the rig's own settings/config.json, so merged repo
+	// content cannot choose it.
 	PostLandStatusContext string `json:"post_land_status_context,omitempty"`
 
 	// Forgejo is the rig's Forgejo landing block (gt-fn9e6.3, slice 3 of

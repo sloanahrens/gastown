@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -955,14 +956,14 @@ func TestFileMainStateRoundTrips(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	f := fileMainState{path: RedMainStatePath(town, "gastown")}
-	if st, err := f.Load(); err != nil || st != (landworker.MainState{}) {
+	if st, err := f.Load(); err != nil || !reflect.DeepEqual(st, landworker.MainState{}) {
 		t.Fatalf("missing file: %+v %v; want the zero state", st, err)
 	}
 	want := landworker.MainState{LastGreen: "g1", LastRun: "r1"}
 	if err := f.Save(want); err != nil {
 		t.Fatal(err)
 	}
-	if st, err := f.Load(); err != nil || st != want {
+	if st, err := f.Load(); err != nil || !reflect.DeepEqual(st, want) {
 		t.Fatalf("loaded %+v %v; want %+v", st, err, want)
 	}
 }

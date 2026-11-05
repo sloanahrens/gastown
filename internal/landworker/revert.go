@@ -54,6 +54,9 @@ type MainState struct {
 	// dispatcher outside this process reads it to leave the rig's red-main
 	// beads alone until the revert lands (gt-zkdwt).
 	Revert *PendingRevert `json:"revert,omitempty"`
+	// PostLandPending is the status-mode verdicts still waiting on CI, oldest
+	// first, so a restarted worker resumes each one (gt-gg9hv.7.1).
+	PostLandPending []PendingPostLand `json:"post_land_pending,omitempty"`
 	// promote.State is the rig's GitHub promotion record (gt-fn9e6.37),
 	// embedded so it lands in this same file: one rig, one main record, read
 	// by the red-main owner, the tier sweep and town health alike

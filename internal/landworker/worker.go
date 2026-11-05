@@ -414,6 +414,12 @@ func (w *Worker) Pass(ctx context.Context) Report {
 	rep := w.landReady(ctx)
 	if !w.draining() {
 		w.watchTarget(ctx)
+		// The pending post-land verdicts are read here, once per pass: status
+		// mode never waits on CI, so a verdict still open holds no landing
+		// (gt-gg9hv.7.1).
+		if w.PostLand != nil {
+			w.PostLand.PollPending(ctx)
+		}
 		// Last, so a slow or failing sweep never holds up a landing this
 		// pass.
 		w.sweepIfDue(ctx)
@@ -1328,8 +1334,9 @@ func (w *Worker) annotate(id, key, what, msg string) {
 	st.wrote = true
 }
 
-// afterLanding runs the post-landing command for a new landing and tells
-// the red-main owner, which finishes the landing if it was a revert.
+// afterLanding starts the post-landing verdict for a new landing (a command run
+// or a pending status wait) and tells the red-main owner, which finishes the
+// landing if it was a revert.
 func (w *Worker) afterLanding(ctx context.Context, work land.Work, res land.Result) {
 	if res.LandedCommit != "" && work.Target == w.WatchTarget {
 		w.lastSeen = res.LandedCommit
