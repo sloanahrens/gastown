@@ -27,9 +27,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 # git and tmux are what the daemon's patrols run; ca-certificates is what its
 # HTTPS calls verify against; openssh-client is the ssh git runs for a push over
 # SSH, which app-promote does to GitHub with the promote keys; curl is what the
-# ntfy push script posts with. These five are the only things installed.
+# ntfy push script posts with; tzdata is the zone database the compose file's
+# TZ name is resolved from, so the container's clock and the daemon's log
+# stamps can be the operator's zone rather than UTC (gt-gg9hv.34). These six
+# are the only things installed.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl git openssh-client tmux \
+    && apt-get install -y --no-install-recommends ca-certificates curl git openssh-client tmux tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 # GitHub's host key, pinned in the system known_hosts that openssh-client reads.

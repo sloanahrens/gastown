@@ -1558,6 +1558,11 @@ func (d *Daemon) Run() (err error) {
 	d.logger.Printf("Daemon starting (PID %d)", pid)
 	d.logger.Printf("Daemon owner: %s %q", self.Kind, self.ID)
 
+	// Name the zone the log stamps and the maintenance windows are read in:
+	// the compose file's TZ, or a CRITICAL line when it cannot be loaded
+	// (gt-gg9hv.34).
+	d.logTimeZone()
+
 	// Acquire exclusive lock to prevent multiple daemons from running.
 	// This prevents the TOCTOU race condition where multiple concurrent starts
 	// can all pass the IsRunning() check before any writes the PID file.
