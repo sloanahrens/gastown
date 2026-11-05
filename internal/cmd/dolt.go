@@ -1277,7 +1277,7 @@ func printBeadsRuntimeConfig(w io.Writer, townRoot string) {
 	}
 	fmt.Fprintf(w, "  Beads client: %s\n", beadsClientSummary(cfg))
 	if hint := beadsScopeHint(cfg.Database, townRoot); hint != "" {
-		fmt.Fprint(w, hint)
+		fmt.Fprintf(w, "%s", hint)
 	}
 }
 
