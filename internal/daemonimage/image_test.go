@@ -173,6 +173,11 @@ func TestBuildImageRefusesBeforeDockerRuns(t *testing.T) {
 			}
 			b.Dockerfile = filepath.Join(dir, "Dockerfile")
 		}, want: "is not readable"},
+		{name: "a known_hosts path the build context cannot hold", rev: testRev, breakIt: func(t *testing.T, b *Builder, _ *[]string) {
+			if err := os.Mkdir(filepath.Join(b.Out, KnownHostsName), 0o755); err != nil {
+				t.Fatalf("making a directory where the staged file goes: %v", err)
+			}
+		}, want: "staging ssh_known_hosts"},
 		{name: "a binary the image does not copy", rev: testRev, breakIt: func(_ *testing.T, b *Builder, bins *[]string) {
 			(*bins)[2] = filepath.Join(b.Out, "om-extra")
 		}, want: "is not one of the image's binaries"},
