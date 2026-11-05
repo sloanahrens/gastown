@@ -189,7 +189,7 @@ func TestReadInUseIgnoresURLsAndPathsInRecords(t *testing.T) {
 	// a record that is perfectly valid.
 	dir := recordsDir(t, map[string]string{
 		"s-1.json": `{"session":"s-1","image":"localhost:5001/gastown-polecat:rec4",` +
-			`"note":"see https://forgejo.internal:3000/sloan/gastown/src/x.json",` +
+			`"note":"see https://forgejo.internal:3000/operator/gastown/src/x.json",` +
 			`"artifact":"/var/lib/gastown/export.tar",` +
 			`"policy":"~/gt/.runtime/sandboxes/s-1.json"}`,
 	})

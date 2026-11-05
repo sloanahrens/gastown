@@ -60,10 +60,10 @@ func TestAppPowerReadsOnAndTheThreeOffEnvironments(t *testing.T) {
 	t.Parallel()
 
 	p := appFixture(t, map[string]string{
-		"stg":    "since=" + markerSince + " by=sloan env=staging reason=staging drill\n",
-		"prd":    "since=" + markerSince + " by=sloan env=prod reason=cost freeze\n",
-		"all":    "since=" + markerSince + " by=sloan env=all reason=parked\n",
-		"legacy": "since=" + markerSince + " by=sloan reason=old marker with spaces\n",
+		"stg":    "since=" + markerSince + " by=operator env=staging reason=staging drill\n",
+		"prd":    "since=" + markerSince + " by=operator env=prod reason=cost freeze\n",
+		"all":    "since=" + markerSince + " by=operator env=all reason=parked\n",
+		"legacy": "since=" + markerSince + " by=operator reason=old marker with spaces\n",
 	}, map[string]string{
 		"live": `{"time":"2026-10-14T11:00:00Z","app":"live","action":"skip","reason":"no_green_commit"}` + "\n",
 	}).Read(appNow)
@@ -82,7 +82,7 @@ func TestAppPowerReadsOnAndTheThreeOffEnvironments(t *testing.T) {
 			t.Errorf("%s: state %q env %q reason %q, want %q %q %q", tc.app, r.State, r.Env, r.Reason, tc.state, tc.env, tc.reason)
 		}
 		if tc.state == AppOff {
-			if !r.Since.Equal(time.Date(2026, 10, 14, 9, 30, 0, 0, time.UTC)) || r.By != "sloan" {
+			if !r.Since.Equal(time.Date(2026, 10, 14, 9, 30, 0, 0, time.UTC)) || r.By != "operator" {
 				t.Errorf("%s: since %v by %q, want the marker's", tc.app, r.Since, r.By)
 			}
 		}
@@ -122,7 +122,7 @@ func TestAppPowerEmptyAndMissingLedgers(t *testing.T) {
 	t.Parallel()
 
 	p := appFixture(t, map[string]string{
-		"noledger": "since=" + markerSince + " by=sloan env=prod reason=x\n",
+		"noledger": "since=" + markerSince + " by=operator env=prod reason=x\n",
 	}, map[string]string{"empty": "", "blank": "\n \n"}).Read(appNow)
 
 	for _, app := range []string{"empty", "blank", "noledger"} {
@@ -145,8 +145,8 @@ func TestAppPowerUnparsableMarkerIsOffNeverOn(t *testing.T) {
 	p := appFixture(t, map[string]string{
 		"empty":    "",
 		"garbage":  "not a marker\n",
-		"badsince": "since=yesterday by=sloan env=prod reason=x\n",
-		"badenv":   "since=" + markerSince + " by=sloan env=dev reason=x\n",
+		"badsince": "since=yesterday by=operator env=prod reason=x\n",
+		"badenv":   "since=" + markerSince + " by=operator env=dev reason=x\n",
 	}, map[string]string{}).Read(appNow)
 
 	for _, app := range []string{"empty", "garbage", "badsince", "badenv"} {
@@ -163,11 +163,11 @@ func TestAppPowerSkipsUnknownMarkerFields(t *testing.T) {
 	t.Parallel()
 
 	p := appFixture(t, map[string]string{
-		"a": "host=mini env=staging since=" + markerSince + " ticket=GT-1 by=sloan reason=drill, then back\n",
+		"a": "host=mini env=staging since=" + markerSince + " ticket=GT-1 by=operator reason=drill, then back\n",
 	}, map[string]string{}).Read(appNow)
 
 	r := appRow(t, p, "a")
-	if r.State != AppOff || r.Env != AppEnvStaging || r.By != "sloan" || r.Reason != "drill, then back" {
+	if r.State != AppOff || r.Env != AppEnvStaging || r.By != "operator" || r.Reason != "drill, then back" {
 		t.Errorf("row %+v, want the known fields read around the unknown ones", r)
 	}
 }

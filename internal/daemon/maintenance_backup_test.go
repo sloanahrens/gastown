@@ -196,7 +196,7 @@ func TestMaintenanceBackupDefersToAnotherActorsPause(t *testing.T) {
 	t.Parallel()
 	d, _ := gcTestDaemon(t)
 	f := withGCFakes(t, d)
-	f.foreignPause = &doltpause.Marker{Actor: "sloan", Reason: "manual restore", Until: gcTestNow.Add(time.Hour)}
+	f.foreignPause = &doltpause.Marker{Actor: "operator", Reason: "manual restore", Until: gcTestNow.Add(time.Hour)}
 
 	res := d.maintenanceBackup([]string{"hq"})
 	if res.outcome != gcOutcomeDeferred || !strings.Contains(res.reason, "manual restore") {

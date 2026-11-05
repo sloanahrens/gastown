@@ -92,7 +92,7 @@ func TestAQueuedRowNamesACrewAssigneeByBareName(t *testing.T) {
 			map[string]any{"id": "gt-crew", "assignee": "town/crew/heron"},
 			map[string]any{"id": "gt-rig", "assignee": "gastown/crew/jay"},
 			map[string]any{"id": "gt-polecat", "assignee": "gastown/polecats/dag"},
-			map[string]any{"id": "gt-other", "assignee": "sloan"},
+			map[string]any{"id": "gt-other", "assignee": "operator"},
 		}},
 	})
 
@@ -120,7 +120,7 @@ func TestAQueuedRowNamesACrewAssigneeByBareName(t *testing.T) {
 		{"gt-crew", "heron", "heron"},
 		{"gt-rig", "jay", "jay"},
 		{"gt-polecat", "dag", "gastown/dag"},
-		{"gt-other", "sloan", "sloan"},
+		{"gt-other", "operator", "operator"},
 	}
 	if len(rows) != len(wantRows) {
 		t.Fatalf("the table drew %d waiting rows, want %d, one per queued bead", len(rows), len(wantRows))

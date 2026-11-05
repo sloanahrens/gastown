@@ -82,7 +82,8 @@ func TestOverseerSilentFiresOnlyWithAStaleHeartbeatAndWaitingWork(t *testing.T) 
 		beat  *time.Time
 		ready int
 		// ask files one question: "" none, "new" with no comment,
-		// "answered" with Sloan's reply, "awaiting" with the overseer's note.
+		// "answered" with the operator's reply, "awaiting" with the
+		// overseer's note.
 		ask  string
 		want bool
 	}{
@@ -91,8 +92,8 @@ func TestOverseerSilentFiresOnlyWithAStaleHeartbeatAndWaitingWork(t *testing.T) 
 		{"stale heartbeat, nothing waiting", &stale, 0, "", false},
 		{"stale heartbeat, ready work", &stale, 2, "", true},
 		{"stale heartbeat, new question", &stale, 0, "new", true},
-		{"stale heartbeat, question Sloan answered", &stale, 0, "answered", true},
-		{"stale heartbeat, question waiting on Sloan", &stale, 0, "awaiting", false},
+		{"stale heartbeat, question the operator answered", &stale, 0, "answered", true},
+		{"stale heartbeat, question waiting on the operator", &stale, 0, "awaiting", false},
 		{"no heartbeat ever, ready work", nil, 1, "", true},
 		{"no heartbeat ever, nothing waiting", nil, 0, "", false},
 	} {

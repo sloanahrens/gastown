@@ -94,8 +94,8 @@ func newFake() *fake {
 	return &fake{
 		pins: pinsFile,
 		remotes: map[string]string{
-			"gastown": "http://host.docker.internal:3000/sloan/gastown.git",
-			"devops":  "http://host.docker.internal:3000/sloan/devops.git",
+			"gastown": "http://host.docker.internal:3000/operator/gastown.git",
+			"devops":  "http://host.docker.internal:3000/operator/devops.git",
 		},
 	}
 }
@@ -189,8 +189,8 @@ func TestRunBuildsAPinForEachPinnedRig(t *testing.T) {
 		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
 	}
 	want := []cachevol.Pin{
-		{Rig: "gastown", Commit: gastownCommit, URL: "http://host.docker.internal:3000/sloan/gastown.git"},
-		{Rig: "devops", Commit: devopsCommit, URL: "http://host.docker.internal:3000/sloan/devops.git"},
+		{Rig: "gastown", Commit: gastownCommit, URL: "http://host.docker.internal:3000/operator/gastown.git"},
+		{Rig: "devops", Commit: devopsCommit, URL: "http://host.docker.internal:3000/operator/devops.git"},
 	}
 	pins := seedPins(t, appliedJob(t, f))
 	if len(pins) != len(want) {
@@ -226,7 +226,7 @@ func TestRunSwapsTheCloneHost(t *testing.T) {
 		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
 	}
 	for _, p := range seedPins(t, appliedJob(t, f)) {
-		if !strings.HasPrefix(p.URL, "http://forgejo.openshell:3000/sloan/") {
+		if !strings.HasPrefix(p.URL, "http://forgejo.openshell:3000/operator/") {
 			t.Errorf("pin %s clones from %q, want the -forgejo-host authority", p.Rig, p.URL)
 		}
 	}
@@ -426,29 +426,29 @@ func TestCloneURL(t *testing.T) {
 	}{
 		{
 			name:   "no host keeps the configured remote",
-			remote: "http://host.docker.internal:3000/sloan/gastown.git",
-			want:   "http://host.docker.internal:3000/sloan/gastown.git",
+			remote: "http://host.docker.internal:3000/operator/gastown.git",
+			want:   "http://host.docker.internal:3000/operator/gastown.git",
 		},
 		{
 			name:   "host and port replace the remote's",
-			remote: "http://host.docker.internal:3000/sloan/gastown.git",
+			remote: "http://host.docker.internal:3000/operator/gastown.git",
 			host:   "forgejo.openshell:3001",
-			want:   "http://forgejo.openshell:3001/sloan/gastown.git",
+			want:   "http://forgejo.openshell:3001/operator/gastown.git",
 		},
 		{
 			name:   "a host with no port keeps the remote's port",
-			remote: "https://forgejo.example:8443/sloan/gastown.git",
+			remote: "https://forgejo.example:8443/operator/gastown.git",
 			host:   "forgejo.openshell",
-			want:   "https://forgejo.openshell:8443/sloan/gastown.git",
+			want:   "https://forgejo.openshell:8443/operator/gastown.git",
 		},
 		{
 			name:   "userinfo is dropped",
-			remote: "http://bot:secret@forgejo.example/sloan/gastown.git",
-			want:   "http://forgejo.example/sloan/gastown.git",
+			remote: "http://bot:secret@forgejo.example/operator/gastown.git",
+			want:   "http://forgejo.example/operator/gastown.git",
 		},
 		{
 			name:    "an ssh remote is refused without quoting it",
-			remote:  "git@forgejo.example:sloan/gastown.git",
+			remote:  "git@forgejo.example:operator/gastown.git",
 			wantErr: "not an http(s) URL",
 		},
 		{

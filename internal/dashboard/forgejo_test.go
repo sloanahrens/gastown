@@ -22,10 +22,10 @@ import (
 // only.
 const forgejoFeedJSON = `[
   {"id":2,"op_type":"commit_repo","created":"2026-10-04T23:42:12Z","ref_name":"refs/heads/main",
-   "act_user":{"id":1,"login":"bot-polecat"},"repo":{"full_name":"sloan/beads"},
+   "act_user":{"id":1,"login":"bot-polecat"},"repo":{"full_name":"operator/beads"},
    "content":"{\"Commits\":[],\"HeadCommit\":{\"Message\":\"fix: the thing (gt-1)\"}}"},
   {"id":1,"op_type":"delete_branch","created":"2026-10-04T22:42:12Z","ref_name":"refs/heads/land/gt-1",
-   "act_user":{"id":1,"login":"bot-landing"},"repo":{"full_name":"sloan/beads"},"content":""}
+   "act_user":{"id":1,"login":"bot-landing"},"repo":{"full_name":"operator/beads"},"content":""}
 ]`
 
 // forgejoStub is a stand-in Forgejo that serves the two repos and one feed
@@ -97,8 +97,8 @@ func (s *forgejoStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.WriteString(w, `[]`)
 			return
 		}
-		_, _ = io.WriteString(w, `[{"full_name":"sloan/beads"}]`)
-	case r.URL.Path == "/api/v1/repos/sloan/beads/activities/feeds":
+		_, _ = io.WriteString(w, `[{"full_name":"operator/beads"}]`)
+	case r.URL.Path == "/api/v1/repos/operator/beads/activities/feeds":
 		_, _ = io.WriteString(w, forgejoFeedJSON)
 	case strings.HasSuffix(r.URL.Path, "/activities/feeds"):
 		// Any other repo is readable and quiet; a test that wants it invisible
@@ -177,15 +177,15 @@ func TestMergeForgejoActivitiesKeepsTheNewestAcrossReposOldestFirst(t *testing.T
 	base := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
 	var acts []forgejo.Activity
 	for i := 0; i < 40; i++ {
-		repo := "sloan/beads"
+		repo := "operator/beads"
 		if i%2 == 0 {
-			repo = "sloan/mango"
+			repo = "operator/mango"
 		}
 		acts = append(acts, forgejo.Activity{
 			OpType:  "commit_repo",
 			RefName: "refs/heads/main",
 			Created: base.Add(time.Duration(i) * time.Minute),
-			ActUser: &forgejo.User{Login: "sloan"},
+			ActUser: &forgejo.User{Login: "operator"},
 			Repo:    &forgejo.Repository{FullName: repo},
 			Content: `{"HeadCommit":{"Message":"commit ` + strconv.Itoa(i) + `"}}`,
 		})
@@ -197,8 +197,8 @@ func TestMergeForgejoActivitiesKeepsTheNewestAcrossReposOldestFirst(t *testing.T
 	for i := 1; i < len(feed.Events); i++ {
 		assert.False(t, feed.Events[i].At.Before(feed.Events[i-1].At), "events must run oldest to newest")
 	}
-	assert.Equal(t, "sloan/mango", feed.Events[0].Repo)
-	assert.Equal(t, "sloan", feed.Events[0].Actor)
+	assert.Equal(t, "operator/mango", feed.Events[0].Repo)
+	assert.Equal(t, "operator", feed.Events[0].Actor)
 }
 
 // An empty read must still be an empty list, never null: the page would draw
@@ -253,7 +253,7 @@ func TestForgejoReaderMergesTheViewersRepos(t *testing.T) {
 	assert.Equal(t, []string{
 		"/api/v1/user/repos",
 		"/api/v1/user/repos",
-		"/api/v1/repos/sloan/beads/activities/feeds",
+		"/api/v1/repos/operator/beads/activities/feeds",
 	}, activitiesAsked(stub))
 
 	// The stub echoes the feed's newest row first; the panel turns it the
@@ -262,7 +262,7 @@ func TestForgejoReaderMergesTheViewersRepos(t *testing.T) {
 		At:      time.Date(2026, 10, 4, 22, 42, 12, 0, time.UTC),
 		Actor:   "bot-landing",
 		Summary: "deleted branch land/gt-1",
-		Repo:    "sloan/beads",
+		Repo:    "operator/beads",
 	}, feed.Events[0])
 	assert.Equal(t, "pushed main: fix: the thing (gt-1)", feed.Events[1].Summary)
 }
@@ -324,18 +324,18 @@ func TestForgejoFeedKeepsItsReadTimeAcrossAFailedRefresh(t *testing.T) {
 func TestForgejoReaderNamesReposTheViewerCannotRead(t *testing.T) {
 	t.Parallel()
 	stub := &forgejoStub{failPaths: map[string]int{
-		"/api/v1/repos/sloan/organic-mechanic/activities/feeds": http.StatusNotFound,
+		"/api/v1/repos/operator/organic-mechanic/activities/feeds": http.StatusNotFound,
 	}}
-	feed := newForgejoTestReader(t, stub, []string{"sloan/beads", "sloan/organic-mechanic"}).Read()
+	feed := newForgejoTestReader(t, stub, []string{"operator/beads", "operator/organic-mechanic"}).Read()
 	require.Empty(t, feed.Error)
 	require.Len(t, feed.Events, 2, "the readable repo's feed still arrives")
-	assert.Equal(t, []string{"sloan/organic-mechanic"}, feed.Missing)
+	assert.Equal(t, []string{"operator/organic-mechanic"}, feed.Missing)
 	assert.Empty(t, feed.Failed, "a repo the token cannot see is a permission, not an outage")
 	// The repos are read in parallel, so the order the stub saw them in is not
 	// the assertion: every named repo is asked for, not just the readable ones.
 	assert.ElementsMatch(t, []string{
-		"/api/v1/repos/sloan/beads/activities/feeds",
-		"/api/v1/repos/sloan/organic-mechanic/activities/feeds",
+		"/api/v1/repos/operator/beads/activities/feeds",
+		"/api/v1/repos/operator/organic-mechanic/activities/feeds",
 	}, activitiesAsked(stub))
 }
 
@@ -345,14 +345,14 @@ func TestForgejoReaderNamesReposTheViewerCannotRead(t *testing.T) {
 // (gt-p7lkd).
 func TestForgejoReaderOneSlowRepoDoesNotBlankTheOthers(t *testing.T) {
 	t.Parallel()
-	stub := &forgejoStub{hangPaths: map[string]bool{"/api/v1/repos/sloan/slow/activities/feeds": true}}
-	reader := newForgejoTestReader(t, stub, []string{"sloan/beads", "sloan/slow"})
+	stub := &forgejoStub{hangPaths: map[string]bool{"/api/v1/repos/operator/slow/activities/feeds": true}}
+	reader := newForgejoTestReader(t, stub, []string{"operator/beads", "operator/slow"})
 	// The bound, not a sleep, is what ends the hung feed.
 	reader.callTimeout = 50 * time.Millisecond
 	feed := reader.Read()
 	require.Empty(t, feed.Error)
 	require.Len(t, feed.Events, 2, "the readable repo's feed still arrives")
-	assert.Equal(t, []string{"sloan/slow"}, feed.Failed, "the slow repo is named, not silently dropped")
+	assert.Equal(t, []string{"operator/slow"}, feed.Failed, "the slow repo is named, not silently dropped")
 	assert.Empty(t, feed.Missing, "a slow repo is an outage, not a permission the viewer lacks")
 }
 
@@ -360,12 +360,12 @@ func TestForgejoReaderOneSlowRepoDoesNotBlankTheOthers(t *testing.T) {
 func TestForgejoReaderOneFailingRepoDoesNotBlankTheOthers(t *testing.T) {
 	t.Parallel()
 	stub := &forgejoStub{failPaths: map[string]int{
-		"/api/v1/repos/sloan/broken/activities/feeds": http.StatusInternalServerError,
+		"/api/v1/repos/operator/broken/activities/feeds": http.StatusInternalServerError,
 	}}
-	feed := newForgejoTestReader(t, stub, []string{"sloan/beads", "sloan/broken"}).Read()
+	feed := newForgejoTestReader(t, stub, []string{"operator/beads", "operator/broken"}).Read()
 	require.Empty(t, feed.Error)
 	require.Len(t, feed.Events, 2, "the readable repo's feed still arrives")
-	assert.Equal(t, []string{"sloan/broken"}, feed.Failed)
+	assert.Equal(t, []string{"operator/broken"}, feed.Failed)
 	assert.Empty(t, feed.Missing)
 }
 
@@ -378,8 +378,8 @@ func TestForgejoReaderOneFailingRepoDoesNotBlankTheOthers(t *testing.T) {
 func TestForgejoReaderReadsTheReposConcurrently(t *testing.T) {
 	t.Parallel()
 	const (
-		first  = "/api/v1/repos/sloan/first/activities/feeds"
-		second = "/api/v1/repos/sloan/second/activities/feeds"
+		first  = "/api/v1/repos/operator/first/activities/feeds"
+		second = "/api/v1/repos/operator/second/activities/feeds"
 	)
 	release := make(chan struct{})
 	firstAsked, secondAsked := make(chan struct{}), make(chan struct{})
@@ -387,7 +387,7 @@ func TestForgejoReaderReadsTheReposConcurrently(t *testing.T) {
 		started:   map[string]chan struct{}{first: firstAsked, second: secondAsked},
 		holdPaths: map[string]chan struct{}{first: release, second: release},
 	}
-	reader := newForgejoTestReader(t, stub, []string{"sloan/first", "sloan/second"})
+	reader := newForgejoTestReader(t, stub, []string{"operator/first", "operator/second"})
 	done := make(chan *ForgejoFeed, 1)
 	go func() { done <- reader.Read() }()
 
@@ -413,10 +413,10 @@ func TestForgejoReaderReadsTheReposConcurrently(t *testing.T) {
 func TestForgejoReaderEveryRepoFailingIsAFailedRefresh(t *testing.T) {
 	t.Parallel()
 	stub := &forgejoStub{failPaths: map[string]int{
-		"/api/v1/repos/sloan/beads/activities/feeds": http.StatusInternalServerError,
-		"/api/v1/repos/sloan/mango/activities/feeds": http.StatusBadGateway,
+		"/api/v1/repos/operator/beads/activities/feeds": http.StatusInternalServerError,
+		"/api/v1/repos/operator/mango/activities/feeds": http.StatusBadGateway,
 	}}
-	feed := newForgejoTestReader(t, stub, []string{"sloan/beads", "sloan/mango"}).Read()
+	feed := newForgejoTestReader(t, stub, []string{"operator/beads", "operator/mango"}).Read()
 	assert.Equal(t, "http 500", feed.Error)
 	assert.Empty(t, feed.Events)
 }
@@ -427,15 +427,15 @@ func TestForgejoReaderEveryRepoFailingIsAFailedRefresh(t *testing.T) {
 func TestForgejoReaderKeepsTheLastGoodFeedWhenEveryRepoFails(t *testing.T) {
 	t.Parallel()
 	stub := &forgejoStub{}
-	reader := newForgejoTestReader(t, stub, []string{"sloan/beads", "sloan/mango"})
+	reader := newForgejoTestReader(t, stub, []string{"operator/beads", "operator/mango"})
 	at := time.Date(2026, 10, 5, 16, 0, 0, 0, time.UTC)
 	reader.now = func() time.Time { return at }
 	good := reader.Read()
 	require.Empty(t, good.Error)
 	require.Len(t, good.Events, 2)
 
-	stub.failPath("/api/v1/repos/sloan/beads/activities/feeds", http.StatusInternalServerError)
-	stub.failPath("/api/v1/repos/sloan/mango/activities/feeds", http.StatusInternalServerError)
+	stub.failPath("/api/v1/repos/operator/beads/activities/feeds", http.StatusInternalServerError)
+	stub.failPath("/api/v1/repos/operator/mango/activities/feeds", http.StatusInternalServerError)
 	reader.now = func() time.Time { return at.Add(time.Minute) }
 	stale := reader.Read()
 	assert.Equal(t, "http 500", stale.Error)
@@ -450,14 +450,14 @@ func TestForgejoReaderKeepsTheLastGoodFeedWhenEveryRepoFails(t *testing.T) {
 func TestForgejoReaderDoesNotStoreAnAllInvisibleRefreshAsGood(t *testing.T) {
 	t.Parallel()
 	stub := &forgejoStub{}
-	reader := newForgejoTestReader(t, stub, []string{"sloan/beads"})
+	reader := newForgejoTestReader(t, stub, []string{"operator/beads"})
 	at := time.Date(2026, 10, 5, 16, 0, 0, 0, time.UTC)
 	reader.now = func() time.Time { return at }
 	good := reader.Read()
 	require.Empty(t, good.Error)
 	require.Len(t, good.Events, 2)
 
-	stub.failPath("/api/v1/repos/sloan/beads/activities/feeds", http.StatusNotFound)
+	stub.failPath("/api/v1/repos/operator/beads/activities/feeds", http.StatusNotFound)
 	reader.now = func() time.Time { return at.Add(time.Minute) }
 	stale := reader.Read()
 	assert.Equal(t, "http 404", stale.Error)
@@ -467,8 +467,8 @@ func TestForgejoReaderDoesNotStoreAnAllInvisibleRefreshAsGood(t *testing.T) {
 	// With nothing good to fall back on, the panel is told the read failed
 	// rather than shown "no activity".
 	first := newForgejoTestReader(t, &forgejoStub{failPaths: map[string]int{
-		"/api/v1/repos/sloan/beads/activities/feeds": http.StatusNotFound,
-	}}, []string{"sloan/beads"}).Read()
+		"/api/v1/repos/operator/beads/activities/feeds": http.StatusNotFound,
+	}}, []string{"operator/beads"}).Read()
 	assert.Equal(t, "http 404", first.Error, "an all-invisible first read is an outage, not an empty town")
 	assert.Empty(t, first.Events)
 }
@@ -500,9 +500,9 @@ func TestForgejoReaderBeforeAnyGoodRead(t *testing.T) {
 func TestForgejoReaderReadsTheNamedReposInsteadOfTheViewerList(t *testing.T) {
 	t.Parallel()
 	stub := &forgejoStub{}
-	feed := newForgejoTestReader(t, stub, []string{"sloan/beads"}).Read()
+	feed := newForgejoTestReader(t, stub, []string{"operator/beads"}).Read()
 	require.Empty(t, feed.Error)
-	assert.Equal(t, []string{"/api/v1/repos/sloan/beads/activities/feeds"}, activitiesAsked(stub))
+	assert.Equal(t, []string{"/api/v1/repos/operator/beads/activities/feeds"}, activitiesAsked(stub))
 
 	bad := newForgejoTestReader(t, &forgejoStub{}, []string{"beads"}).Read()
 	assert.Equal(t, "bad repo name", bad.Error)

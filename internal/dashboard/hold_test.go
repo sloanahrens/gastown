@@ -55,10 +55,10 @@ func TestHoldReaderReadsTheTownRootHoldFile(t *testing.T) {
 		{
 			name: "a hold file: its first line and the age from its mtime",
 			setUp: func(t *testing.T, town string) {
-				writeHold(t, town, "sloan: paused for the night\n", holdNow.Add(-2*time.Hour))
+				writeHold(t, town, "operator: paused for the night\n", holdNow.Add(-2*time.Hour))
 			},
 			present: true,
-			note:    "sloan: paused for the night",
+			note:    "operator: paused for the night",
 			age:     2 * 60 * 60,
 		},
 		{
@@ -203,7 +203,7 @@ func TestHoldReachesTheAPI(t *testing.T) {
 	t.Parallel()
 
 	present := true
-	read := &Hold{Present: &present, Note: "sloan: paused", AgeSeconds: 7200}
+	read := &Hold{Present: &present, Note: "operator: paused", AgeSeconds: 7200}
 	h := NewHub(Config{Hold: func() *Hold { return read }})
 	h.pollHold()
 
@@ -215,7 +215,7 @@ func TestHoldReachesTheAPI(t *testing.T) {
 		t.Fatalf("GET /api/state = %d", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{`"hold"`, `"present":true`, `"note":"sloan: paused"`, `"age_seconds":7200`} {
+	for _, want := range []string{`"hold"`, `"present":true`, `"note":"operator: paused"`, `"age_seconds":7200`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("/api/state does not carry %s: %s", want, body)
 		}

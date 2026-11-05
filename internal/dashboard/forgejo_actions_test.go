@@ -60,12 +60,12 @@ func TestMergeForgejoRunsOrdersCurrentOldestFirst(t *testing.T) {
 	// current runs the other way round: a reader wants the run that has been
 	// waiting longest at the top.
 	got := mergeForgejoRuns([]repoRuns{
-		doneRepo("sloan/beads",
+		doneRepo("operator/beads",
 			[]forgejo.ActionRun{
 				testRun(3, "land: c (dddd4444) onto main", "waiting", 20, -1, 0),
 				testRun(1, "land: a (aaaa1111) onto main", "running", 5, -1, 0),
 			}, nil),
-		doneRepo("sloan/mango",
+		doneRepo("operator/mango",
 			[]forgejo.ActionRun{testRun(2, "land: b (bbbb2222) onto main", "blocked", 10, -1, 0)}, nil),
 	})
 	require.NotNil(t, got)
@@ -83,7 +83,7 @@ func TestMergeForgejoRunsKeepsTheNewestFiveCompleted(t *testing.T) {
 			"land: polecat/mica/gt-fn9e6.4"+strconv.Itoa(i)+"+muvk2gi0 (aaaa1111) onto main",
 			"success", i, i+1, time.Duration(i+1)*time.Second))
 	}
-	got := mergeForgejoRuns([]repoRuns{doneRepo("sloan/beads", nil, runs)})
+	got := mergeForgejoRuns([]repoRuns{doneRepo("operator/beads", nil, runs)})
 	require.NotNil(t, got)
 	require.Len(t, got.Recent, forgejoRecentKept, "the section lists five")
 	assert.Equal(t, []string{
@@ -115,7 +115,7 @@ func TestMergeForgejoRunsTakesStatsOverTheNewestTwentyCompleted(t *testing.T) {
 		}
 		runs = append(runs, testRun(int64(i+1), "land: polecat/mica/gt-abc (aaaa1111) onto main", status, i, i+1, d))
 	}
-	got := mergeForgejoRuns([]repoRuns{doneRepo("sloan/beads", nil, runs)})
+	got := mergeForgejoRuns([]repoRuns{doneRepo("operator/beads", nil, runs)})
 	require.NotNil(t, got)
 	assert.Equal(t, 10, got.Stats.OK, "the oldest success falls outside the twenty")
 	assert.Equal(t, 8, got.Stats.Failed)
@@ -127,11 +127,11 @@ func TestMergeForgejoRunsTakesStatsOverTheNewestTwentyCompleted(t *testing.T) {
 func TestMergeForgejoRunsNamesTheRepoItCouldNotRead(t *testing.T) {
 	t.Parallel()
 	got := mergeForgejoRuns([]repoRuns{
-		doneRepo("sloan/beads", []forgejo.ActionRun{testRun(1, "land: a (aaaa1111) onto main", "running", 1, -1, 0)}, nil),
-		{repo: "sloan/mango", err: io.EOF},
+		doneRepo("operator/beads", []forgejo.ActionRun{testRun(1, "land: a (aaaa1111) onto main", "running", 1, -1, 0)}, nil),
+		{repo: "operator/mango", err: io.EOF},
 	})
 	require.NotNil(t, got)
-	assert.Equal(t, []string{"sloan/mango"}, got.Errors)
+	assert.Equal(t, []string{"operator/mango"}, got.Errors)
 	assert.Len(t, got.Current, 1, "the readable repo still appears")
 	assert.Equal(t, 1, got.Stats.Running)
 }
@@ -141,14 +141,14 @@ func TestMergeForgejoRunsNamesTheRepoItCouldNotRead(t *testing.T) {
 func TestMergeForgejoRunsIsNilWhenEveryRepoFails(t *testing.T) {
 	t.Parallel()
 	assert.Nil(t, mergeForgejoRuns(nil))
-	assert.Nil(t, mergeForgejoRuns([]repoRuns{{repo: "sloan/beads", err: io.EOF}}))
+	assert.Nil(t, mergeForgejoRuns([]repoRuns{{repo: "operator/beads", err: io.EOF}}))
 }
 
 // A repo that answered with no runs at all is an answer: the section is empty
 // rather than absent, and the page draws its idle line.
 func TestMergeForgejoRunsIsEmptyNotNilForAQuietRepo(t *testing.T) {
 	t.Parallel()
-	got := mergeForgejoRuns([]repoRuns{doneRepo("sloan/beads", nil, nil)})
+	got := mergeForgejoRuns([]repoRuns{doneRepo("operator/beads", nil, nil)})
 	require.NotNil(t, got)
 	require.NotNil(t, got.Current)
 	require.NotNil(t, got.Recent)
@@ -190,7 +190,7 @@ func TestForgejoActionCarriesTheCommitAndNumber(t *testing.T) {
 	finished := testRun(5, "fix: the thing (gt-abc)", "success", 0, 2, 27*time.Second)
 	finished.CommitSHA, finished.Index = "0123456789abcdef0123456789abcdef01234567", 19
 
-	got := mergeForgejoRuns([]repoRuns{doneRepo("sloan/gastown",
+	got := mergeForgejoRuns([]repoRuns{doneRepo("operator/gastown",
 		[]forgejo.ActionRun{current}, []forgejo.ActionRun{finished})})
 	require.NotNil(t, got)
 	require.Len(t, got.Current, 1)
@@ -214,7 +214,7 @@ func TestForgejoActionCarriesTheCommitAndNumber(t *testing.T) {
 // name a run that does not exist (gt-qes2r).
 func TestForgejoActionWithoutACommitLeavesTheFieldsEmpty(t *testing.T) {
 	t.Parallel()
-	got := newRunRow("sloan/beads", testRun(1, "gate: the suite", "success", 0, 1, 5*time.Second)).action()
+	got := newRunRow("operator/beads", testRun(1, "gate: the suite", "success", 0, 1, 5*time.Second)).action()
 	assert.Empty(t, got.Hash)
 	assert.Empty(t, got.SHA)
 	assert.Zero(t, got.Number)
@@ -230,14 +230,14 @@ func TestForgejoActionWithoutACommitLeavesTheFieldsEmpty(t *testing.T) {
 // started", and rendering year 1 would tick elapsed from the wrong epoch.
 func TestForgejoActionStamps(t *testing.T) {
 	t.Parallel()
-	got := newRunRow("sloan/beads", forgejo.ActionRun{
+	got := newRunRow("operator/beads", forgejo.ActionRun{
 		Created: stamp(1), Started: stamp(2), Stopped: stamp(3), Duration: int64(30 * time.Second),
 	}).action()
 	assert.Equal(t, stamp(2), got.Started)
 	assert.Equal(t, stamp(3), got.Stopped)
 	assert.Equal(t, 30.0, got.DurationSecs)
 
-	queued := newRunRow("sloan/beads", forgejo.ActionRun{
+	queued := newRunRow("operator/beads", forgejo.ActionRun{
 		Created: stamp(1), Started: "0001-01-01T00:00:00Z", Stopped: "0001-01-01T00:00:00Z",
 	}).action()
 	assert.Empty(t, queued.Started, "Forgejo's zero time is not a start")
@@ -435,19 +435,19 @@ func newForgejoActionsReader(t *testing.T, stub *forgejoActionsStub, repos []str
 // runs read per repo with a bounded query per status.
 func TestForgejoReaderReadsActionsWithTheFeed(t *testing.T) {
 	t.Parallel()
-	stub := &forgejoActionsStub{repos: []string{"sloan/beads", "sloan/mango"}, runs: map[string][]forgejo.ActionRun{
-		"sloan/beads": {
+	stub := &forgejoActionsStub{repos: []string{"operator/beads", "operator/mango"}, runs: map[string][]forgejo.ActionRun{
+		"operator/beads": {
 			testRun(9, "land: c (dddd4444) onto main", "waiting", 3, -1, 0),
 			testRun(7, "land: polecat/mica/gt-fn9e6.47+muvk2gi0 (aaaa1111) onto main", "running", 1, -1, 0),
 			testRun(5, "fix: the thing (gt-abc)", "success", 0, 2, 27*time.Second),
 			testRun(4, "gate: the suite", "failure", 0, 1, 90*time.Second),
 		},
-		"sloan/mango": {
+		"operator/mango": {
 			testRun(6, "land: b (bbbb2222) onto main", "blocked", 2, -1, 0),
 			testRun(3, "gate: the suite", "success", 0, 1, 5*time.Second),
 		},
 	}}
-	feed := newForgejoActionsReader(t, stub, []string{"sloan/beads", "sloan/mango"}).Read()
+	feed := newForgejoActionsReader(t, stub, []string{"operator/beads", "operator/mango"}).Read()
 	require.Empty(t, feed.Error)
 	require.NotNil(t, feed.Actions)
 
@@ -463,7 +463,7 @@ func TestForgejoReaderReadsActionsWithTheFeed(t *testing.T) {
 	assert.Empty(t, a.Errors)
 
 	assert.Equal(t, ForgejoAction{
-		Repo:    "sloan/beads",
+		Repo:    "operator/beads",
 		Bead:    "gt-fn9e6.47",
 		Polecat: "mica",
 		Status:  "running",
@@ -476,7 +476,7 @@ func TestForgejoReaderReadsActionsWithTheFeed(t *testing.T) {
 	// The repos are read in parallel, so only each repo's own order is fixed:
 	// its feed first, then one bounded query per current status and one for
 	// every finished status (gt-p7lkd).
-	for _, repo := range []string{"sloan/beads", "sloan/mango"} {
+	for _, repo := range []string{"operator/beads", "operator/mango"} {
 		assert.Equal(t, []string{
 			"/api/v1/repos/" + repo + "/activities/feeds?limit=30",
 			"/api/v1/repos/" + repo + "/actions/runs?limit=20&status=waiting",
@@ -502,16 +502,16 @@ func askedForRepo(asked []string, repo string) []string {
 // bargain it strikes for the events.
 func TestForgejoReaderKeepsTheLastGoodActionsWhenEveryRepoFails(t *testing.T) {
 	t.Parallel()
-	stub := &forgejoActionsStub{repos: []string{"sloan/beads"}, runs: map[string][]forgejo.ActionRun{
-		"sloan/beads": {testRun(5, "fix: the thing (gt-abc)", "success", 0, 2, 27*time.Second)},
+	stub := &forgejoActionsStub{repos: []string{"operator/beads"}, runs: map[string][]forgejo.ActionRun{
+		"operator/beads": {testRun(5, "fix: the thing (gt-abc)", "success", 0, 2, 27*time.Second)},
 	}}
-	reader := newForgejoActionsReader(t, stub, []string{"sloan/beads"})
+	reader := newForgejoActionsReader(t, stub, []string{"operator/beads"})
 	good := reader.Read()
 	require.NotNil(t, good.Actions)
 	require.Len(t, good.Actions.Recent, 1)
 
 	stub.mu.Lock()
-	stub.fail = map[string]int{"sloan/beads": http.StatusInternalServerError}
+	stub.fail = map[string]int{"operator/beads": http.StatusInternalServerError}
 	stub.mu.Unlock()
 	stale := reader.Read()
 	require.Empty(t, stale.Error, "the feed itself was read fine")
@@ -522,16 +522,16 @@ func TestForgejoReaderKeepsTheLastGoodActionsWhenEveryRepoFails(t *testing.T) {
 func TestForgejoReaderNamesTheRepoWhoseRunsFailed(t *testing.T) {
 	t.Parallel()
 	stub := &forgejoActionsStub{
-		repos: []string{"sloan/beads", "sloan/mango"},
+		repos: []string{"operator/beads", "operator/mango"},
 		runs: map[string][]forgejo.ActionRun{
-			"sloan/beads": {testRun(5, "fix: the thing (gt-abc)", "success", 0, 2, 27*time.Second)},
+			"operator/beads": {testRun(5, "fix: the thing (gt-abc)", "success", 0, 2, 27*time.Second)},
 		},
-		fail: map[string]int{"sloan/mango": http.StatusInternalServerError},
+		fail: map[string]int{"operator/mango": http.StatusInternalServerError},
 	}
-	feed := newForgejoActionsReader(t, stub, []string{"sloan/beads", "sloan/mango"}).Read()
+	feed := newForgejoActionsReader(t, stub, []string{"operator/beads", "operator/mango"}).Read()
 	require.Empty(t, feed.Error)
 	require.NotNil(t, feed.Actions)
-	assert.Equal(t, []string{"sloan/mango"}, feed.Actions.Errors)
+	assert.Equal(t, []string{"operator/mango"}, feed.Actions.Errors)
 	assert.Equal(t, []string{"https://forgejo.test/runs/5"}, urls(feed.Actions.Recent))
 }
 
@@ -539,7 +539,7 @@ func TestForgejoReaderNamesTheRepoWhoseRunsFailed(t *testing.T) {
 // the page draws its idle line rather than hiding the section.
 func TestForgejoReaderPublishesAnEmptyActionsSectionForAQuietRepo(t *testing.T) {
 	t.Parallel()
-	feed := newForgejoActionsReader(t, &forgejoActionsStub{repos: []string{"sloan/beads"}}, []string{"sloan/beads"}).Read()
+	feed := newForgejoActionsReader(t, &forgejoActionsStub{repos: []string{"operator/beads"}}, []string{"operator/beads"}).Read()
 	require.NotNil(t, feed.Actions)
 	assert.Empty(t, feed.Actions.Current)
 	assert.Empty(t, feed.Actions.Recent)
@@ -555,10 +555,10 @@ func TestForgejoReaderPublishesAnEmptyActionsSectionForAQuietRepo(t *testing.T) 
 func TestForgejoReaderWithoutAFreshActionsValueLeavesActionsOut(t *testing.T) {
 	t.Parallel()
 	stub := &forgejoActionsStub{
-		repos: []string{"sloan/beads"},
-		fail:  map[string]int{"sloan/beads": http.StatusInternalServerError},
+		repos: []string{"operator/beads"},
+		fail:  map[string]int{"operator/beads": http.StatusInternalServerError},
 	}
-	feed := newForgejoActionsReader(t, stub, []string{"sloan/beads"}).Read()
+	feed := newForgejoActionsReader(t, stub, []string{"operator/beads"}).Read()
 	assert.Nil(t, feed.Actions)
 
 	b, err := json.Marshal(feed)
@@ -572,16 +572,16 @@ func TestForgejoReaderWithoutAFreshActionsValueLeavesActionsOut(t *testing.T) {
 // failed refresh (gt-p7lkd).
 func TestForgejoReaderSkipsRunsForAMissingRepo(t *testing.T) {
 	t.Parallel()
-	stub := &forgejoActionsStub{repos: []string{"sloan/beads"}}
-	feed := newForgejoActionsReader(t, stub, []string{"sloan/beads", "sloan/mango"}).Read()
+	stub := &forgejoActionsStub{repos: []string{"operator/beads"}}
+	feed := newForgejoActionsReader(t, stub, []string{"operator/beads", "operator/mango"}).Read()
 	require.Empty(t, feed.Error)
-	assert.Equal(t, []string{"sloan/mango"}, feed.Missing, "the invisible repo is named")
+	assert.Equal(t, []string{"operator/mango"}, feed.Missing, "the invisible repo is named")
 
 	for _, asked := range stub.askedFor() {
 		if strings.Contains(asked, "/activities/feeds") {
 			continue // the feed is what names the repo invisible in the first place
 		}
-		assert.NotContains(t, asked, "sloan/mango", "a repo the viewer cannot read is not asked for runs")
+		assert.NotContains(t, asked, "operator/mango", "a repo the viewer cannot read is not asked for runs")
 	}
 }
 
@@ -592,7 +592,7 @@ func TestForgejoReaderSkipsRunsForAMissingRepo(t *testing.T) {
 func TestForgejoActionURLIsHTTPOnly(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct{ in, want string }{
-		{"https://forgejo.test/sloan/gastown/actions/runs/7", "https://forgejo.test/sloan/gastown/actions/runs/7"},
+		{"https://forgejo.test/operator/gastown/actions/runs/7", "https://forgejo.test/operator/gastown/actions/runs/7"},
 		{"http://forgejo.test/runs/7", "http://forgejo.test/runs/7"},
 		{"javascript:alert(1)", ""},
 		{"data:text/html,<script>alert(1)</script>", ""},
@@ -600,7 +600,7 @@ func TestForgejoActionURLIsHTTPOnly(t *testing.T) {
 	} {
 		run := testRun(7, "gate: the suite", "success", 0, 1, time.Second)
 		run.HTMLURL = tc.in
-		got := newRunRow("sloan/gastown", run).action()
+		got := newRunRow("operator/gastown", run).action()
 		assert.Equal(t, tc.want, got.URL, "HTMLURL %q", tc.in)
 	}
 }

@@ -171,9 +171,9 @@ func TestDeployReaderDrawsARunAsStagesInNeedsOrder(t *testing.T) {
 	t.Parallel()
 
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs"},
+		repos: []string{"operator/fractals-nextjs"},
 		runs: map[string][]forgejo.ActionRun{
-			"sloan/fractals-nextjs": {testDeployRun(7, "v0.1.0", "success", 30)},
+			"operator/fractals-nextjs": {testDeployRun(7, "v0.1.0", "success", 30)},
 		},
 		jobs: map[int64][]forgejo.ActionRunJob{
 			7: {
@@ -190,7 +190,7 @@ func TestDeployReaderDrawsARunAsStagesInNeedsOrder(t *testing.T) {
 	require.Empty(t, d.Missing)
 	require.Len(t, d.Runs, 1)
 	row := d.Runs[0]
-	assert.Equal(t, "sloan/fractals-nextjs", row.Repo)
+	assert.Equal(t, "operator/fractals-nextjs", row.Repo)
 	assert.Equal(t, "v0.1.0", row.Ref, "the ref is a tag like v0.1.0 or a branch")
 	assert.Equal(t, "645edaf6", row.Hash, "the commit is cut to the eight characters the Actions page shows")
 	assert.Equal(t, "success", row.Status)
@@ -210,9 +210,9 @@ func TestDeployReaderDrawsAFailedStageAndTheStagesItHeldUp(t *testing.T) {
 	t.Parallel()
 
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs"},
+		repos: []string{"operator/fractals-nextjs"},
 		runs: map[string][]forgejo.ActionRun{
-			"sloan/fractals-nextjs": {testDeployRun(7, "v0.1.0", "failure", 30)},
+			"operator/fractals-nextjs": {testDeployRun(7, "v0.1.0", "failure", 30)},
 		},
 		jobs: map[int64][]forgejo.ActionRunJob{
 			7: {
@@ -239,10 +239,10 @@ func TestDeployReaderSaysNoRunnerPickedUpARunThatWaited(t *testing.T) {
 	t.Parallel()
 
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs"},
+		repos: []string{"operator/fractals-nextjs"},
 		runs: map[string][]forgejo.ActionRun{
 			// Six minutes waiting, against the five-minute threshold.
-			"sloan/fractals-nextjs": {testDeployRun(7, "v0.1.0", "waiting", 54)},
+			"operator/fractals-nextjs": {testDeployRun(7, "v0.1.0", "waiting", 54)},
 		},
 		jobs: map[int64][]forgejo.ActionRunJob{7: {testJob("build", "waiting")}},
 	}
@@ -253,7 +253,7 @@ func TestDeployReaderSaysNoRunnerPickedUpARunThatWaited(t *testing.T) {
 	assert.Equal(t, []string{"build waiting"}, stageNames(d.Runs[0].Stages))
 
 	// Exactly at the threshold is not past it.
-	stub.runs["sloan/fractals-nextjs"] = []forgejo.ActionRun{testDeployRun(8, "v0.1.0", "waiting", 55)}
+	stub.runs["operator/fractals-nextjs"] = []forgejo.ActionRun{testDeployRun(8, "v0.1.0", "waiting", 55)}
 	d = newDeployTestReader(stub, nil).Read()
 	require.Len(t, d.Runs, 1)
 	assert.Empty(t, d.Runs[0].Warn, "five minutes of waiting is not yet trouble")
@@ -266,9 +266,9 @@ func TestDeployReaderSaysARunningRunThatHasNotMoved(t *testing.T) {
 	t.Parallel()
 
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs"},
+		repos: []string{"operator/fractals-nextjs"},
 		runs: map[string][]forgejo.ActionRun{
-			"sloan/fractals-nextjs": {testDeployRun(7, "v0.1.0", "running", 40)},
+			"operator/fractals-nextjs": {testDeployRun(7, "v0.1.0", "running", 40)},
 		},
 		jobs: map[int64][]forgejo.ActionRunJob{
 			7: {testJob("build", "running"), testJob("staging-preview", "waiting", "build")},
@@ -319,8 +319,8 @@ func TestDeployReaderTakesTheRunsOfBothWorkflows(t *testing.T) {
 	release := testDeployRun(1, "v0.1.0", "success", 30)
 
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs"},
-		runs:  map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {release, staging}},
+		repos: []string{"operator/fractals-nextjs"},
+		runs:  map[string][]forgejo.ActionRun{"operator/fractals-nextjs": {release, staging}},
 		jobs: map[int64][]forgejo.ActionRunJob{
 			1: {testJob("build", "success"), testJob("staging-preview", "success", "build"), testJob("prod", "success", "staging-preview")},
 			2: {testJob("build", "success"), testJob("staging", "running", "build")},
@@ -345,9 +345,9 @@ func TestDeployReaderSaysNoRunnerPickedUpAStagingRunThatWaited(t *testing.T) {
 	t.Parallel()
 
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs"},
+		repos: []string{"operator/fractals-nextjs"},
 		// Six minutes waiting, against the five-minute threshold.
-		runs: map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {testStagingRun(7, "main", "waiting", 54)}},
+		runs: map[string][]forgejo.ActionRun{"operator/fractals-nextjs": {testStagingRun(7, "main", "waiting", 54)}},
 		jobs: map[int64][]forgejo.ActionRunJob{7: {testJob("build", "waiting")}},
 	}
 	d := newDeployTestReader(stub, nil).Read()
@@ -373,8 +373,8 @@ func TestDeployReaderCapsBothWorkflowsTogether(t *testing.T) {
 		runs = append(runs, testDeployRun(int64(i+1), "v0."+strconv.Itoa(i), "success", i))
 	}
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs"},
-		runs:  map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": runs},
+		repos: []string{"operator/fractals-nextjs"},
+		runs:  map[string][]forgejo.ActionRun{"operator/fractals-nextjs": runs},
 	}
 	d := newDeployTestReader(stub, nil).Read()
 
@@ -399,9 +399,9 @@ func TestDeployReaderWithNoDeployRuns(t *testing.T) {
 	nameless.WorkflowID = ""
 
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs", "sloan/beads"},
+		repos: []string{"operator/fractals-nextjs", "operator/beads"},
 		runs: map[string][]forgejo.ActionRun{
-			"sloan/fractals-nextjs": {gate, nameless},
+			"operator/fractals-nextjs": {gate, nameless},
 		},
 	}
 	d := newDeployTestReader(stub, nil).Read()
@@ -411,8 +411,8 @@ func TestDeployReaderWithNoDeployRuns(t *testing.T) {
 	assert.Empty(t, d.Runs)
 	assert.NotNil(t, d.Runs, "an empty list, never nil: the page draws its own line for it")
 	assert.Equal(t, []string{
-		"sloan/fractals-nextjs deploy.yml", "sloan/fractals-nextjs staging.yml",
-		"sloan/beads deploy.yml", "sloan/beads staging.yml",
+		"operator/fractals-nextjs deploy.yml", "operator/fractals-nextjs staging.yml",
+		"operator/beads deploy.yml", "operator/beads staging.yml",
 	}, stub.runsAsked, "both repos were asked, each by workflow")
 }
 
@@ -437,11 +437,11 @@ func TestDeployReaderNamesEveryRepoItCouldNotRead(t *testing.T) {
 	stub := &deployStub{
 		reposErr: io.EOF, // the explicit list skips ListUserRepos
 		runsErr: map[string]error{
-			"sloan/beads":           &forgejo.APIError{StatusCode: http.StatusForbidden},
-			"sloan/fractals-nextjs": &forgejo.APIError{StatusCode: http.StatusNotFound},
+			"operator/beads":           &forgejo.APIError{StatusCode: http.StatusForbidden},
+			"operator/fractals-nextjs": &forgejo.APIError{StatusCode: http.StatusNotFound},
 		},
 	}
-	d := newDeployTestReader(stub, []string{"sloan/beads", "sloan/fractals-nextjs"}).Read()
+	d := newDeployTestReader(stub, []string{"operator/beads", "operator/fractals-nextjs"}).Read()
 	assert.NotEmpty(t, d.Error, "no repo answered, so the note names the failure")
 	assert.Empty(t, d.Runs)
 }
@@ -453,18 +453,18 @@ func TestDeployReaderNamesTheRepoItCouldNotRead(t *testing.T) {
 
 	stub := &deployStub{
 		runs: map[string][]forgejo.ActionRun{
-			"sloan/beads": {testDeployRun(1, "v0.2.0", "success", 10)},
+			"operator/beads": {testDeployRun(1, "v0.2.0", "success", 10)},
 		},
 		runsErr: map[string]error{
-			"sloan/fractals-nextjs": &forgejo.APIError{StatusCode: http.StatusNotFound},
+			"operator/fractals-nextjs": &forgejo.APIError{StatusCode: http.StatusNotFound},
 		},
 	}
-	d := newDeployTestReader(stub, []string{"sloan/beads", "sloan/fractals-nextjs"}).Read()
+	d := newDeployTestReader(stub, []string{"operator/beads", "operator/fractals-nextjs"}).Read()
 
 	assert.Empty(t, d.Error, "one readable repo is an answer")
-	assert.Equal(t, []string{"sloan/fractals-nextjs"}, d.Missing)
+	assert.Equal(t, []string{"operator/fractals-nextjs"}, d.Missing)
 	require.Len(t, d.Runs, 1)
-	assert.Equal(t, "sloan/beads", d.Runs[0].Repo)
+	assert.Equal(t, "operator/beads", d.Runs[0].Repo)
 }
 
 // A stage name and a ref are a repository's own text: the characters that carry
@@ -476,8 +476,8 @@ func TestDeployReaderStripsAndCapsHostileStageNames(t *testing.T) {
 	const long = "staging-preview-that-goes-on-and-on-and-on-and-does-not-stop"
 	run := testDeployRun(7, "v0.1.0‮\u0007", "success", 30)
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs"},
-		runs:  map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {run}},
+		repos: []string{"operator/fractals-nextjs"},
+		runs:  map[string][]forgejo.ActionRun{"operator/fractals-nextjs": {run}},
 		jobs: map[int64][]forgejo.ActionRunJob{
 			7: {testJob("build\u001b[31m\non two lines", "success"), testJob(long, "success", "build\u001b[31m\non two lines")},
 		},
@@ -510,8 +510,8 @@ func TestDeployReaderFetchesJobsForTheNewestRunsOnly(t *testing.T) {
 		runs = append(runs, testDeployRun(int64(i+1), "v0."+strconv.Itoa(i), "success", i))
 	}
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs"},
-		runs:  map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": runs},
+		repos: []string{"operator/fractals-nextjs"},
+		runs:  map[string][]forgejo.ActionRun{"operator/fractals-nextjs": runs},
 	}
 	d := newDeployTestReader(stub, nil).Read()
 
@@ -570,8 +570,8 @@ func TestDeployReaderTakesTheRunsOfTheDeployWorkflowWhateverTheirEvent(t *testin
 	impostor.WorkflowID = ".forgejo/workflows/not-deploy.yml"
 
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs"},
-		runs:  map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {tagPush, manual, teardown, bare, impostor}},
+		repos: []string{"operator/fractals-nextjs"},
+		runs:  map[string][]forgejo.ActionRun{"operator/fractals-nextjs": {tagPush, manual, teardown, bare, impostor}},
 	}
 	d := newDeployTestReader(stub, nil).Read()
 
@@ -701,8 +701,8 @@ func TestDeployReaderFoldsTheHealthRunsIntoRowsPerAppAndEnvironment(t *testing.T
 	t.Parallel()
 
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs"},
-		runs: map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {
+		repos: []string{"operator/fractals-nextjs"},
+		runs: map[string][]forgejo.ActionRun{"operator/fractals-nextjs": {
 			testHealthRun(3, "success", 41),
 			testHealthRun(2, "success", 21),
 			testHealthRun(1, "success", 1),
@@ -723,7 +723,7 @@ func TestDeployReaderFoldsTheHealthRunsIntoRowsPerAppAndEnvironment(t *testing.T
 	assert.Equal(t, []string{"fractals-nextjs/staging-integration", "fractals-nextjs/prod-smoke"}, healthRowsOf(d.Health))
 
 	row := d.Health[0]
-	assert.Equal(t, "sloan/fractals-nextjs", row.Repo)
+	assert.Equal(t, "operator/fractals-nextjs", row.Repo)
 	assert.Equal(t, "success", row.Status)
 	assert.Equal(t, "https://forgejo.test/runs/3", row.URL, "the row links the newest run it folded")
 	assert.True(t, row.At.Equal(time.Date(2026, 10, 5, 10, 41, 0, 0, time.UTC)), "the result carries the newest run's own time")
@@ -735,8 +735,8 @@ func TestDeployReaderFoldsTheHealthRunsIntoRowsPerAppAndEnvironment(t *testing.T
 
 	// Both reads are per repo: the repo's deploy runs, one query per workflow so
 	// the checks cannot crowd the deploys off the page, then its health runs.
-	assert.Equal(t, []string{"sloan/fractals-nextjs deploy.yml", "sloan/fractals-nextjs staging.yml"}, stub.runsAsked)
-	assert.Equal(t, []string{"sloan/fractals-nextjs"}, stub.healthAsked)
+	assert.Equal(t, []string{"operator/fractals-nextjs deploy.yml", "operator/fractals-nextjs staging.yml"}, stub.runsAsked)
+	assert.Equal(t, []string{"operator/fractals-nextjs"}, stub.healthAsked)
 	assert.Equal(t, []int64{3, 2, 1}, stub.jobsAsked, "the jobs of every run of the window, which is what tells a pass from an app that is off")
 }
 
@@ -747,8 +747,8 @@ func TestDeployReaderCountsThePassesAndFindsTheLastGreen(t *testing.T) {
 	t.Parallel()
 
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs"},
-		runs: map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {
+		repos: []string{"operator/fractals-nextjs"},
+		runs: map[string][]forgejo.ActionRun{"operator/fractals-nextjs": {
 			testHealthRun(3, "failure", 41),
 			testHealthRun(2, "success", 21),
 			testHealthRun(1, "success", 1),
@@ -761,7 +761,7 @@ func TestDeployReaderCountsThePassesAndFindsTheLastGreen(t *testing.T) {
 	}
 	d := newDeployTestReader(stub, nil).Read()
 
-	assert.Equal(t, []string{"sloan/fractals-nextjs"}, d.HealthFailed, "the newest run of a turned-on app failed, so the strip marks it")
+	assert.Equal(t, []string{"operator/fractals-nextjs"}, d.HealthFailed, "the newest run of a turned-on app failed, so the strip marks it")
 	require.Len(t, d.Health, 2)
 
 	staging, prod := d.Health[0], d.Health[1]
@@ -781,8 +781,8 @@ func TestDeployReaderReadsASkippedHealthRunAsOffNotAsAPass(t *testing.T) {
 	t.Parallel()
 
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs"},
-		runs: map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {
+		repos: []string{"operator/fractals-nextjs"},
+		runs: map[string][]forgejo.ActionRun{"operator/fractals-nextjs": {
 			testHealthRun(2, "success", 41),
 			testHealthRun(1, "success", 21),
 		}},
@@ -823,8 +823,8 @@ func TestDeployReaderCountsTheHealthWindowAndNoMore(t *testing.T) {
 		jobs[id] = healthJobs("success", "success", "success")
 	}
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs"},
-		runs:  map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": runs},
+		repos: []string{"operator/fractals-nextjs"},
+		runs:  map[string][]forgejo.ActionRun{"operator/fractals-nextjs": runs},
 		jobs:  jobs,
 	}
 	d := newDeployTestReader(stub, nil).Read()
@@ -842,8 +842,8 @@ func TestDeployReaderNamesADeployedAppWithNoScheduledChecks(t *testing.T) {
 	t.Parallel()
 
 	stub := &deployStub{
-		repos: []string{"sloan/beads"},
-		runs:  map[string][]forgejo.ActionRun{"sloan/beads": {testDeployRun(4, "v0.2.0", "success", 20)}},
+		repos: []string{"operator/beads"},
+		runs:  map[string][]forgejo.ActionRun{"operator/beads": {testDeployRun(4, "v0.2.0", "success", 20)}},
 	}
 	d := newDeployTestReader(stub, nil).Read()
 
@@ -862,7 +862,7 @@ func TestDeployReaderNamesADeployedAppWithNoScheduledChecks(t *testing.T) {
 	assert.Empty(t, d.HealthFailed)
 	assert.Empty(t, d.HealthUnread)
 	assert.Nil(t, d.HealthMark)
-	assert.Equal(t, []string{"sloan/beads"}, stub.healthAsked, "the repo was asked, and answered with no health run")
+	assert.Equal(t, []string{"operator/beads"}, stub.healthAsked, "the repo was asked, and answered with no health run")
 	assert.Equal(t, []int64{4}, stub.jobsAsked, "the deploy run's jobs, and no health run's")
 }
 
@@ -872,14 +872,14 @@ func TestDeployReaderWithNoDeployOrHealthRunsShowsNothingExtra(t *testing.T) {
 	t.Parallel()
 
 	stub := &deployStub{
-		repos: []string{"sloan/gastown"},
+		repos: []string{"operator/gastown"},
 	}
 	d := newDeployTestReader(stub, nil).Read()
 
 	assert.Empty(t, d.Runs)
 	assert.Empty(t, d.Health)
 	assert.Empty(t, d.HealthFailed)
-	assert.Equal(t, []string{"sloan/gastown"}, stub.healthAsked, "the repo was asked, and answered with no health run")
+	assert.Equal(t, []string{"operator/gastown"}, stub.healthAsked, "the repo was asked, and answered with no health run")
 	assert.Empty(t, stub.jobsAsked)
 }
 
@@ -891,17 +891,17 @@ func TestDeployReaderClearsTheMarkOnTheNextGreenRun(t *testing.T) {
 	t.Parallel()
 
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs"},
-		runs:  map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {testHealthRun(1, "failure", 5)}},
+		repos: []string{"operator/fractals-nextjs"},
+		runs:  map[string][]forgejo.ActionRun{"operator/fractals-nextjs": {testHealthRun(1, "failure", 5)}},
 		jobs:  map[int64][]forgejo.ActionRunJob{1: healthJobs("success", "success", "failure")},
 	}
 	r := newDeployTestReader(stub, nil)
 
 	red := r.Read()
-	require.Equal(t, []string{"sloan/fractals-nextjs"}, red.HealthFailed)
+	require.Equal(t, []string{"operator/fractals-nextjs"}, red.HealthFailed)
 	require.NotNil(t, red.HealthMark)
 
-	stub.runs["sloan/fractals-nextjs"] = []forgejo.ActionRun{testHealthRun(2, "success", 30), testHealthRun(1, "failure", 5)}
+	stub.runs["operator/fractals-nextjs"] = []forgejo.ActionRun{testHealthRun(2, "success", 30), testHealthRun(1, "failure", 5)}
 	stub.jobs[2] = healthJobs("success", "success", "success")
 
 	green := r.Read()
@@ -927,22 +927,22 @@ func TestDeployReaderDoesNotCallAnUnreadAppNoChecksYet(t *testing.T) {
 		t.Parallel()
 
 		stub := &deployStub{
-			repos:     []string{"sloan/fractals-nextjs"},
-			runs:      map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {deploy}},
-			healthErr: map[string]error{"sloan/fractals-nextjs": io.EOF},
+			repos:     []string{"operator/fractals-nextjs"},
+			runs:      map[string][]forgejo.ActionRun{"operator/fractals-nextjs": {deploy}},
+			healthErr: map[string]error{"operator/fractals-nextjs": io.EOF},
 		}
 		d := newDeployTestReader(stub, nil).Read()
 
 		assert.Empty(t, d.Health, "a listing that failed is not a repo with no checks")
-		assert.Equal(t, []string{"sloan/fractals-nextjs"}, d.HealthUnread)
+		assert.Equal(t, []string{"operator/fractals-nextjs"}, d.HealthUnread)
 	})
 
 	t.Run("the checks name no known environment", func(t *testing.T) {
 		t.Parallel()
 
 		stub := &deployStub{
-			repos: []string{"sloan/fractals-nextjs"},
-			runs: map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {
+			repos: []string{"operator/fractals-nextjs"},
+			runs: map[string][]forgejo.ActionRun{"operator/fractals-nextjs": {
 				deploy,
 				testHealthRun(1, "success", 5),
 			}},
@@ -952,7 +952,7 @@ func TestDeployReaderDoesNotCallAnUnreadAppNoChecksYet(t *testing.T) {
 		d := newDeployTestReader(stub, nil).Read()
 
 		assert.Empty(t, d.Health, "checks the block cannot fold are not a repo with no checks")
-		assert.Equal(t, []string{"sloan/fractals-nextjs"}, d.HealthMissing)
+		assert.Equal(t, []string{"operator/fractals-nextjs"}, d.HealthMissing)
 	})
 }
 
@@ -962,10 +962,10 @@ func TestDeployReaderGivenTwoAppsNamesOnlyTheFailedOne(t *testing.T) {
 	t.Parallel()
 
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs", "sloan/arkansas-beaver-committee"},
+		repos: []string{"operator/fractals-nextjs", "operator/arkansas-beaver-committee"},
 		runs: map[string][]forgejo.ActionRun{
-			"sloan/fractals-nextjs":           {testHealthRun(2, "failure", 5)},
-			"sloan/arkansas-beaver-committee": {testHealthRun(1, "success", 7)},
+			"operator/fractals-nextjs":           {testHealthRun(2, "failure", 5)},
+			"operator/arkansas-beaver-committee": {testHealthRun(1, "success", 7)},
 		},
 		jobs: map[int64][]forgejo.ActionRunJob{
 			2: healthJobs("success", "success", "failure"),
@@ -974,7 +974,7 @@ func TestDeployReaderGivenTwoAppsNamesOnlyTheFailedOne(t *testing.T) {
 	}
 	d := newDeployTestReader(stub, nil).Read()
 
-	assert.Equal(t, []string{"sloan/fractals-nextjs"}, d.HealthFailed)
+	assert.Equal(t, []string{"operator/fractals-nextjs"}, d.HealthFailed)
 	require.Len(t, d.Health, 4)
 	assert.Equal(t, []string{
 		"arkansas-beaver-committee/staging-integration", "arkansas-beaver-committee/prod-smoke",
@@ -991,15 +991,15 @@ func TestDeployReaderSaysAHealthRowItCouldNotRead(t *testing.T) {
 	t.Parallel()
 
 	stub := &deployStub{
-		repos:   []string{"sloan/fractals-nextjs"},
-		runs:    map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {testHealthRun(2, "failure", 5)}},
+		repos:   []string{"operator/fractals-nextjs"},
+		runs:    map[string][]forgejo.ActionRun{"operator/fractals-nextjs": {testHealthRun(2, "failure", 5)}},
 		jobsErr: map[int64]error{2: io.EOF},
 	}
 	d := newDeployTestReader(stub, nil).Read()
 
 	require.Empty(t, d.Error)
 	assert.Empty(t, d.HealthFailed, "a run the block could not read is no word on the app")
-	assert.Equal(t, []string{"sloan/fractals-nextjs"}, d.HealthUnread,
+	assert.Equal(t, []string{"operator/fractals-nextjs"}, d.HealthUnread,
 		"an app nobody has a reading of is named, not left to read as a town that is green")
 	require.Len(t, d.Health, 2, "the app's checks are still drawn, as rows it could not read")
 	for _, row := range d.Health {
@@ -1017,12 +1017,12 @@ func TestDeployReaderSaysAHealthRowItCouldNotRead(t *testing.T) {
 	// one, and draws no row at all: the repo is said as one whose checks the
 	// block cannot read rather than drawn as a repo with no checks. The run
 	// passed: a failing one is filed as failed (TestFoldHealthUnknownEnvKeepsFailure).
-	stub.runs = map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {testHealthRun(2, "success", 5)}}
+	stub.runs = map[string][]forgejo.ActionRun{"operator/fractals-nextjs": {testHealthRun(2, "success", 5)}}
 	stub.jobsErr = nil
 	stub.jobs = map[int64][]forgejo.ActionRunJob{2: {testJob("off", "skipped"), testJob("something-else", "success")}}
 	d = newDeployTestReader(stub, nil).Read()
 	assert.Empty(t, d.Health)
-	assert.Equal(t, []string{"sloan/fractals-nextjs"}, d.HealthMissing)
+	assert.Equal(t, []string{"operator/fractals-nextjs"}, d.HealthMissing)
 	assert.Empty(t, d.HealthFailed)
 	assert.Empty(t, d.HealthUnread)
 }
@@ -1037,8 +1037,8 @@ func TestDeployReaderRaisesNoMarkerFromARunUnderAnUnreadNewest(t *testing.T) {
 	t.Parallel()
 
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs"},
-		runs: map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {
+		repos: []string{"operator/fractals-nextjs"},
+		runs: map[string][]forgejo.ActionRun{"operator/fractals-nextjs": {
 			testHealthRun(2, "failure", 41),
 			testHealthRun(1, "failure", 21),
 		}},
@@ -1053,13 +1053,13 @@ func TestDeployReaderRaisesNoMarkerFromARunUnderAnUnreadNewest(t *testing.T) {
 	assert.True(t, d.Health[1].Unread)
 	assert.Empty(t, d.Health[1].Status)
 	assert.Empty(t, d.HealthFailed, "the newest check was not read, so nothing is known to have failed")
-	assert.Equal(t, []string{"sloan/fractals-nextjs"}, d.HealthUnread, "and the strip says the check went unread")
+	assert.Equal(t, []string{"operator/fractals-nextjs"}, d.HealthUnread, "and the strip says the check went unread")
 
 	// And with the newest run read and passed, the failure under it is not the
 	// marker's either: only the newest run's own result is.
 	stub.jobsErr = nil
 	stub.jobs[2] = healthJobs("success", "success", "success")
-	stub.runs["sloan/fractals-nextjs"] = []forgejo.ActionRun{
+	stub.runs["operator/fractals-nextjs"] = []forgejo.ActionRun{
 		testHealthRun(2, "success", 41),
 		testHealthRun(1, "failure", 21),
 	}
@@ -1105,8 +1105,8 @@ func TestDeployReaderKeepsTheNewestRunAsTheRowsResult(t *testing.T) {
 	t.Parallel()
 
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs"},
-		runs: map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {
+		repos: []string{"operator/fractals-nextjs"},
+		runs: map[string][]forgejo.ActionRun{"operator/fractals-nextjs": {
 			testHealthRun(2, "failure", 41),
 			testHealthRun(1, "success", 21),
 		}},
@@ -1121,7 +1121,7 @@ func TestDeployReaderKeepsTheNewestRunAsTheRowsResult(t *testing.T) {
 	assert.Equal(t, "failure", d.Health[1].Status)
 	assert.Equal(t, 0, d.Health[1].Passed, "the run under it was not read, so it is not counted either way")
 	assert.Equal(t, 1, d.Health[1].Runs)
-	assert.Equal(t, []string{"sloan/fractals-nextjs"}, d.HealthFailed)
+	assert.Equal(t, []string{"operator/fractals-nextjs"}, d.HealthFailed)
 }
 
 // The page reads the block by the reader's own field names, so the names the
@@ -1134,7 +1134,7 @@ func TestDeploysJSONCarriesTheNamesThePageReads(t *testing.T) {
 	d := &Deploys{
 		Runs: []DeployRun{},
 		Health: []DeployHealthRow{{
-			Repo:      "sloan/fractals-nextjs",
+			Repo:      "operator/fractals-nextjs",
 			App:       "fractals-nextjs",
 			Env:       healthEnvProd,
 			Status:    healthFailure,
@@ -1145,17 +1145,17 @@ func TestDeploysJSONCarriesTheNamesThePageReads(t *testing.T) {
 			URL:       "https://forgejo.test/runs/7",
 			Unread:    true,
 		}},
-		HealthFailed:  []string{"sloan/fractals-nextjs"},
-		HealthUnread:  []string{"sloan/gt-cloud"},
-		HealthMark:    &HealthMark{State: "red", Text: "health: sloan/fractals-nextjs"},
-		HealthMissing: []string{"sloan/beads"},
+		HealthFailed:  []string{"operator/fractals-nextjs"},
+		HealthUnread:  []string{"operator/gt-cloud"},
+		HealthMark:    &HealthMark{State: "red", Text: "health: operator/fractals-nextjs"},
+		HealthMissing: []string{"operator/beads"},
 	}
 	b, err := json.Marshal(d)
 	require.NoError(t, err)
 	for _, want := range []string{
-		`"health":[`, `"health_failed":["sloan/fractals-nextjs"]`, `"health_unread":["sloan/gt-cloud"]`,
-		`"health_missing":["sloan/beads"]`, `"health_mark":{"state":"red","text":"health: sloan/fractals-nextjs"}`,
-		`"repo":"sloan/fractals-nextjs"`, `"app":"fractals-nextjs"`, `"env":"prod-smoke"`,
+		`"health":[`, `"health_failed":["operator/fractals-nextjs"]`, `"health_unread":["operator/gt-cloud"]`,
+		`"health_missing":["operator/beads"]`, `"health_mark":{"state":"red","text":"health: operator/fractals-nextjs"}`,
+		`"repo":"operator/fractals-nextjs"`, `"app":"fractals-nextjs"`, `"env":"prod-smoke"`,
 		`"status":"failure"`, `"at":`, `"last_green":`, `"passed":23`, `"runs":24`,
 		`"url":"https://forgejo.test/runs/7"`, `"unread":true`,
 	} {
@@ -1174,24 +1174,24 @@ func TestDeployReaderNamesTheReposWhoseChecksItCouldNotList(t *testing.T) {
 
 	for _, cause := range []error{io.EOF, context.DeadlineExceeded} {
 		stub := &deployStub{
-			repos: []string{"sloan/beads", "sloan/fractals-nextjs"},
+			repos: []string{"operator/beads", "operator/fractals-nextjs"},
 			runs: map[string][]forgejo.ActionRun{
-				"sloan/beads":           {testDeployRun(4, "v0.2.0", "success", 20)},
-				"sloan/fractals-nextjs": {testHealthRun(1, "success", 5)},
+				"operator/beads":           {testDeployRun(4, "v0.2.0", "success", 20)},
+				"operator/fractals-nextjs": {testHealthRun(1, "success", 5)},
 			},
-			healthErr: map[string]error{"sloan/fractals-nextjs": cause},
+			healthErr: map[string]error{"operator/fractals-nextjs": cause},
 		}
 		d := newDeployTestReader(stub, nil).Read()
 
 		require.Empty(t, d.Error)
 		require.Len(t, d.Runs, 1, "the repo's own runs answered, and are drawn whatever its checks did")
 		assert.Empty(t, d.Missing, "the repo's deploy runs answered, so it is not a repo that failed")
-		assert.Equal(t, []string{"sloan/fractals-nextjs"}, d.HealthUnread, "a listing that failed is an unread check, which the strip says")
+		assert.Equal(t, []string{"operator/fractals-nextjs"}, d.HealthUnread, "a listing that failed is an unread check, which the strip says")
 		assert.Empty(t, d.HealthMissing, "the repo may well have health.yml; missing is for runs that name no known environment")
 		assert.Equal(t, []string{"beads/staging-integration", "beads/prod-smoke"}, healthRowsOf(d.Health), "beads deploys with no check yet; fractals' checks are unknown, so it has no rows to draw")
 		assert.Empty(t, d.HealthFailed)
 		require.NotNil(t, d.HealthMark, "a repo whose checks could not be listed must not leave the strip quiet")
-		assert.Equal(t, HealthMark{State: "degraded", Text: "not read: sloan/fractals-nextjs"}, *d.HealthMark)
+		assert.Equal(t, HealthMark{State: "degraded", Text: "not read: operator/fractals-nextjs"}, *d.HealthMark)
 	}
 }
 
@@ -1202,8 +1202,8 @@ func TestDeployReaderRaisesNothingForARepoWithNoHealthRuns(t *testing.T) {
 	t.Parallel()
 
 	stub := &deployStub{
-		repos: []string{"sloan/beads"},
-		runs:  map[string][]forgejo.ActionRun{"sloan/beads": {testDeployRun(4, "v0.2.0", "success", 20)}},
+		repos: []string{"operator/beads"},
+		runs:  map[string][]forgejo.ActionRun{"operator/beads": {testDeployRun(4, "v0.2.0", "success", 20)}},
 	}
 	d := newDeployTestReader(stub, nil).Read()
 
@@ -1245,10 +1245,10 @@ func TestDeployReaderNamesTheReposWhoseChecksNameNoEnvironment(t *testing.T) {
 	t.Parallel()
 
 	stub := &deployStub{
-		repos: []string{"sloan/beads", "sloan/fractals-nextjs"},
+		repos: []string{"operator/beads", "operator/fractals-nextjs"},
 		runs: map[string][]forgejo.ActionRun{
-			"sloan/beads":           {testDeployRun(4, "v0.2.0", "success", 20)},
-			"sloan/fractals-nextjs": {testHealthRun(1, "success", 5)},
+			"operator/beads":           {testDeployRun(4, "v0.2.0", "success", 20)},
+			"operator/fractals-nextjs": {testHealthRun(1, "success", 5)},
 		},
 		// The workflow's jobs were renamed: the block knows neither of these.
 		jobs: map[int64][]forgejo.ActionRunJob{1: {testJob("off", "success"), testJob("integration-staging", "success")}},
@@ -1256,7 +1256,7 @@ func TestDeployReaderNamesTheReposWhoseChecksNameNoEnvironment(t *testing.T) {
 	d := newDeployTestReader(stub, nil).Read()
 
 	require.Len(t, d.Runs, 1, "the repo's own runs are drawn whatever its checks did")
-	assert.Equal(t, []string{"sloan/fractals-nextjs"}, d.HealthMissing)
+	assert.Equal(t, []string{"operator/fractals-nextjs"}, d.HealthMissing)
 	assert.Equal(t, []string{"beads/staging-integration", "beads/prod-smoke"}, healthRowsOf(d.Health), "beads deploys with no check yet; fractals has no rows to draw")
 	assert.Empty(t, d.HealthFailed)
 	assert.Empty(t, d.HealthUnread)
@@ -1269,9 +1269,9 @@ func TestReadHealthHasOwnDeadline(t *testing.T) {
 	t.Parallel()
 
 	stub := &deployStub{
-		repos:        []string{"sloan/fractals-nextjs"},
+		repos:        []string{"operator/fractals-nextjs"},
 		spendTimeout: true,
-		runs: map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {
+		runs: map[string][]forgejo.ActionRun{"operator/fractals-nextjs": {
 			testHealthRun(1, "success", 1),
 		}},
 		jobs: map[int64][]forgejo.ActionRunJob{1: healthJobs("success", "success", "success")},
@@ -1297,18 +1297,18 @@ func TestFoldHealthUnknownEnvKeepsFailure(t *testing.T) {
 		envs:   map[string]string{},
 		failed: true,
 	}}
-	got := foldHealth("sloan/fractals-nextjs", window)
+	got := foldHealth("operator/fractals-nextjs", window)
 
 	assert.True(t, got.failed, "a failing newest run is a failure whatever its jobs are called")
 	assert.Empty(t, got.rows)
 
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs"},
-		runs:  map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {testHealthRun(1, "failure", 5)}},
+		repos: []string{"operator/fractals-nextjs"},
+		runs:  map[string][]forgejo.ActionRun{"operator/fractals-nextjs": {testHealthRun(1, "failure", 5)}},
 		jobs:  map[int64][]forgejo.ActionRunJob{1: {testJob("off", "success"), testJob("integration-staging", "failure")}},
 	}
 	d := newDeployTestReader(stub, nil).Read()
-	assert.Equal(t, []string{"sloan/fractals-nextjs"}, d.HealthFailed)
+	assert.Equal(t, []string{"operator/fractals-nextjs"}, d.HealthFailed)
 	assert.Empty(t, d.HealthMissing)
 }
 
@@ -1318,10 +1318,10 @@ func TestDeployReaderTellsACancelledCheckFromARunStillMoving(t *testing.T) {
 	t.Parallel()
 
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs", "sloan/gt-cloud"},
+		repos: []string{"operator/fractals-nextjs", "operator/gt-cloud"},
 		runs: map[string][]forgejo.ActionRun{
-			"sloan/fractals-nextjs": {testHealthRun(1, forgejoRunCancelled, 5)},
-			"sloan/gt-cloud":        {testHealthRun(2, "running", 5)},
+			"operator/fractals-nextjs": {testHealthRun(1, forgejoRunCancelled, 5)},
+			"operator/gt-cloud":        {testHealthRun(2, "running", 5)},
 		},
 		jobs: map[int64][]forgejo.ActionRunJob{
 			1: healthJobs("success", forgejoRunCancelled, "skipped"),
@@ -1343,8 +1343,8 @@ func TestDeployReaderTellsACancelledCheckFromARunStillMoving(t *testing.T) {
 	// alarm on a check that is still going, and cannot take the alarm away again
 	// the moment that job is retried. The row still carries the job's own word.
 	inFlight := &deployStub{
-		repos: []string{"sloan/gt-cloud"},
-		runs:  map[string][]forgejo.ActionRun{"sloan/gt-cloud": {testHealthRun(2, "running", 5)}},
+		repos: []string{"operator/gt-cloud"},
+		runs:  map[string][]forgejo.ActionRun{"operator/gt-cloud": {testHealthRun(2, "running", 5)}},
 		jobs:  map[int64][]forgejo.ActionRunJob{2: healthJobs("success", "failure", "waiting")},
 	}
 	d = newDeployTestReader(inFlight, nil).Read()
@@ -1361,8 +1361,8 @@ func TestDeployReaderMarksAFailureInAJobTheRowsDoNotName(t *testing.T) {
 	t.Parallel()
 
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs"},
-		runs:  map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {testHealthRun(1, "failure", 5)}},
+		repos: []string{"operator/fractals-nextjs"},
+		runs:  map[string][]forgejo.ActionRun{"operator/fractals-nextjs": {testHealthRun(1, "failure", 5)}},
 		jobs: map[int64][]forgejo.ActionRunJob{1: {
 			testJob("off", "success"),
 			testJob("staging-integration", "success", "off"),
@@ -1372,7 +1372,7 @@ func TestDeployReaderMarksAFailureInAJobTheRowsDoNotName(t *testing.T) {
 	}
 	d := newDeployTestReader(stub, nil).Read()
 
-	assert.Equal(t, []string{"sloan/fractals-nextjs"}, d.HealthFailed)
+	assert.Equal(t, []string{"operator/fractals-nextjs"}, d.HealthFailed)
 	require.Len(t, d.Health, 2)
 	for _, row := range d.Health {
 		assert.Equal(t, "success", row.Status, "both environments passed; the run itself is what failed")
@@ -1387,8 +1387,8 @@ func TestDeployReaderGivesTheChecksABudgetOfTheirOwn(t *testing.T) {
 	t.Parallel()
 
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs"},
-		runs: map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {
+		repos: []string{"operator/fractals-nextjs"},
+		runs: map[string][]forgejo.ActionRun{"operator/fractals-nextjs": {
 			testDeployRun(7, "v0.1.0", "success", 30),
 			testHealthRun(1, "success", 5),
 		}},
@@ -1414,8 +1414,8 @@ func TestDeployReaderReadsAFinishedChecksJobsOnce(t *testing.T) {
 	t.Parallel()
 
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs"},
-		runs: map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {
+		repos: []string{"operator/fractals-nextjs"},
+		runs: map[string][]forgejo.ActionRun{"operator/fractals-nextjs": {
 			testHealthRun(1, "success", 5),
 		}},
 		jobs: map[int64][]forgejo.ActionRunJob{1: healthJobs("success", "success", "success")},
@@ -1430,7 +1430,7 @@ func TestDeployReaderReadsAFinishedChecksJobsOnce(t *testing.T) {
 
 	// A run still in flight is not final, so it is read on each refresh until it
 	// ends; the run under it is not read again.
-	stub.runs["sloan/fractals-nextjs"] = []forgejo.ActionRun{
+	stub.runs["operator/fractals-nextjs"] = []forgejo.ActionRun{
 		testHealthRun(2, "running", 6),
 		testHealthRun(1, "success", 5),
 	}
@@ -1448,7 +1448,7 @@ func TestDeployReaderReadsAFinishedChecksJobsOnce(t *testing.T) {
 func TestDeployReaderHoldsOnlyAFinalRead(t *testing.T) {
 	t.Parallel()
 
-	const repo = "sloan/fractals-nextjs"
+	const repo = "operator/fractals-nextjs"
 	run := testHealthRun(1, "failure", 5)
 	run.Stopped = stamp(4)
 	stub := &deployStub{
@@ -1496,20 +1496,20 @@ func TestDeployReaderKeepsAMarkerThroughAReadThatFails(t *testing.T) {
 	t.Parallel()
 
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs"},
-		runs: map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {
+		repos: []string{"operator/fractals-nextjs"},
+		runs: map[string][]forgejo.ActionRun{"operator/fractals-nextjs": {
 			testHealthRun(1, "failure", 5),
 		}},
 		jobs: map[int64][]forgejo.ActionRunJob{1: healthJobs("success", "success", "failure")},
 	}
 	reader := newDeployTestReader(stub, nil)
 	d := reader.Read()
-	require.Equal(t, []string{"sloan/fractals-nextjs"}, d.HealthFailed)
+	require.Equal(t, []string{"operator/fractals-nextjs"}, d.HealthFailed)
 
 	stub.jobsErr = map[int64]error{1: context.DeadlineExceeded}
 	d = reader.Read()
 	assert.Empty(t, d.HealthUnread, "a check that has been read is not read again as unreadable")
-	assert.Equal(t, []string{"sloan/fractals-nextjs"}, d.HealthFailed, "and the strip's alarm stands")
+	assert.Equal(t, []string{"operator/fractals-nextjs"}, d.HealthFailed, "and the strip's alarm stands")
 	require.Len(t, d.Health, 2)
 	assert.Equal(t, healthFailure, d.Health[1].Status)
 }
@@ -1523,15 +1523,15 @@ func TestDeployReaderReadsAnEndedCheckWithNoJobsAsUnread(t *testing.T) {
 	t.Parallel()
 
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs"},
+		repos: []string{"operator/fractals-nextjs"},
 		// No jobs entry for run 1: the API answered with an empty list.
-		runs: map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {testHealthRun(1, "failure", 5)}},
+		runs: map[string][]forgejo.ActionRun{"operator/fractals-nextjs": {testHealthRun(1, "failure", 5)}},
 	}
 	reader := newDeployTestReader(stub, nil)
 	d := reader.Read()
 
 	assert.Empty(t, d.HealthFailed, "a run with no jobs is no word on the app, whatever the run's own status says")
-	assert.Equal(t, []string{"sloan/fractals-nextjs"}, d.HealthUnread)
+	assert.Equal(t, []string{"operator/fractals-nextjs"}, d.HealthUnread)
 	require.Len(t, d.Health, 2)
 	for _, row := range d.Health {
 		assert.True(t, row.Unread)
@@ -1547,7 +1547,7 @@ func TestDeployReaderReadsAnEndedCheckWithNoJobsAsUnread(t *testing.T) {
 	// failure with jobs that read green is still the app's newest check failing.
 	stub.jobs = map[int64][]forgejo.ActionRunJob{1: healthJobs("success", "success", "success")}
 	d = newDeployTestReader(stub, nil).Read()
-	assert.Equal(t, []string{"sloan/fractals-nextjs"}, d.HealthFailed, "the run's own word on the app was ignored")
+	assert.Equal(t, []string{"operator/fractals-nextjs"}, d.HealthFailed, "the run's own word on the app was ignored")
 }
 
 // The pass count is over the runs the block read the window for, and the runs it
@@ -1558,8 +1558,8 @@ func TestDeployReaderCountsTheRunsItCouldNotReadBesideThePasses(t *testing.T) {
 	t.Parallel()
 
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs"},
-		runs: map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {
+		repos: []string{"operator/fractals-nextjs"},
+		runs: map[string][]forgejo.ActionRun{"operator/fractals-nextjs": {
 			testHealthRun(3, "success", 41),
 			testHealthRun(2, "success", 21),
 			testHealthRun(1, "success", 1),
@@ -1580,7 +1580,7 @@ func TestDeployReaderCountsTheRunsItCouldNotReadBesideThePasses(t *testing.T) {
 	}
 
 	// The newest run unread is the same count with no passes to put it beside.
-	stub.runs["sloan/fractals-nextjs"] = []forgejo.ActionRun{testHealthRun(3, "success", 41)}
+	stub.runs["operator/fractals-nextjs"] = []forgejo.ActionRun{testHealthRun(3, "success", 41)}
 	stub.jobsErr = map[int64]error{3: io.EOF}
 	d = newDeployTestReader(stub, nil).Read()
 	require.Len(t, d.Health, 2)
@@ -1603,8 +1603,8 @@ func TestDeployReaderAsksForTheDeployWorkflowsByName(t *testing.T) {
 		runs = append(runs, testHealthRun(int64(100+i), "success", i))
 	}
 	stub := &deployStub{
-		repos: []string{"sloan/fractals-nextjs"},
-		runs:  map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": runs},
+		repos: []string{"operator/fractals-nextjs"},
+		runs:  map[string][]forgejo.ActionRun{"operator/fractals-nextjs": runs},
 		jobs:  map[int64][]forgejo.ActionRunJob{9: {testJob("build", "success")}},
 	}
 	d := newDeployTestReader(stub, nil).Read()
@@ -1612,6 +1612,6 @@ func TestDeployReaderAsksForTheDeployWorkflowsByName(t *testing.T) {
 	require.Len(t, d.Runs, 1, "the release is drawn under the checks the repo has run since")
 	assert.Equal(t, "v0.1.0", d.Runs[0].Ref)
 	assert.Equal(t,
-		[]string{"sloan/fractals-nextjs " + deployWorkflow, "sloan/fractals-nextjs " + stagingWorkflow},
+		[]string{"operator/fractals-nextjs " + deployWorkflow, "operator/fractals-nextjs " + stagingWorkflow},
 		stub.runsAsked, "the deploy read names each workflow rather than taking the repo's runs whole")
 }

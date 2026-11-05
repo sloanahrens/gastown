@@ -117,8 +117,9 @@ func (s *attentionSources) collectOverseerSilent(ctx context.Context, read func(
 }
 
 // overseerOwedQuestions counts the open questions the overseer owes a move on:
-// none commented on yet, or answered by Sloan and not yet acted on. A question
-// whose newest comment is the overseer's waits on Sloan, not on the overseer.
+// none commented on yet, or answered by the operator and not yet acted on. A
+// question whose newest comment is the overseer's waits on the operator, not
+// on the overseer.
 func overseerOwedQuestions(snap *questionSnapshot) int {
 	n := 0
 	for _, q := range snap.questions {
