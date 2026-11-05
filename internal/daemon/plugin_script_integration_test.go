@@ -44,7 +44,7 @@ func TestIntegrationRunPluginScript_TimeoutKillsProcessGroup(t *testing.T) {
 		}
 	}()
 	start := time.Now()
-	res := runPluginScript(deadline, nil, daemonScriptEnv(), p, "/town", time.Hour)
+	res := runPluginScript(deadline, nil, daemonScriptEnv(false), p, "/town", time.Hour)
 	if time.Since(start) > 30*time.Second {
 		t.Fatalf("timeout did not bound the run: %s", time.Since(start))
 	}

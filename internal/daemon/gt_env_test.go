@@ -5,6 +5,8 @@ import (
 	"context"
 	"io"
 	"log"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -347,5 +349,220 @@ func TestPluginScriptRunsAsTheDaemonPlugin(t *testing.T) {
 	assertDaemonIdentity(t, "plugin script", calls[0].env, "GT_ROLE=daemon/plugin")
 	if got := calls[0].getenv("GT_ROLE"); got != "daemon/plugin" {
 		t.Errorf("GT_ROLE = %q, want daemon/plugin", got)
+	}
+}
+
+// doltEndpointTown is a town whose Dolt server answers to the host's loopback
+// and to the name the daemon's container reaches it by.
+func doltEndpointTown(t *testing.T) string {
+	t.Helper()
+	return townWithDolt(t, `{"host":"127.0.0.1","container_host":"host.docker.internal","port":4407}`)
+}
+
+// townWithDolt is a town whose mayor/town.json carries the dolt block given.
+func townWithDolt(t *testing.T, dolt string) string {
+	t.Helper()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"type":"town","version":2,"name":"t","dolt":` + dolt + `}`
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return townRoot
+}
+
+// In container mode a plugin's bd has no endpoint of its own; unset, it asks
+// 127.0.0.1 and reaches the container instead of the town's server. The
+// runner gives every plugin child the endpoint the daemon's own bd calls use
+// (gt-8txy8).
+func TestPluginEnvDoltEndpoint(t *testing.T) {
+	t.Parallel()
+	townRoot := doltEndpointTown(t)
+	p := scriptPlugin(t, "town-metrics", "exit 0\n")
+	bash := scriptBash(cliReply{})
+	res := runPluginScript(context.Background(), bash.run,
+		scriptEnv{environ: []string{"PATH=/usr/bin"}, inContainer: true}, p, townRoot, 5*time.Second)
+	if !res.ok() {
+		t.Fatalf("expected success, got %+v", res)
+	}
+	calls := bash.recorded()
+	if len(calls) != 1 {
+		t.Fatalf("ran %d processes, want 1", len(calls))
+	}
+	for key, want := range map[string]string{
+		"BEADS_DOLT_SERVER_HOST": "host.docker.internal",
+		"BEADS_DOLT_SERVER_PORT": "4407",
+	} {
+		if got := calls[0].getenv(key); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+// An endpoint the daemon environment already names wins over the town's whole,
+// and outside container mode the environment is the daemon's own, unchanged
+// (gt-8txy8).
+func TestPluginEnvDoltEndpointExisting(t *testing.T) {
+	t.Parallel()
+	townRoot := doltEndpointTown(t)
+	p := scriptPlugin(t, "kept", "exit 0\n")
+
+	t.Run("a daemon endpoint wins whole", func(t *testing.T) {
+		environ := []string{"PATH=/usr/bin", "BEADS_DOLT_SERVER_HOST=stale.example", "BEADS_DOLT_SERVER_PORT=9999"}
+		bash := scriptBash(cliReply{})
+		res := runPluginScript(context.Background(), bash.run,
+			scriptEnv{environ: environ, inContainer: true}, p, townRoot, 5*time.Second)
+		if !res.ok() {
+			t.Fatalf("expected success, got %+v", res)
+		}
+		calls := bash.recorded()
+		if len(calls) != 1 {
+			t.Fatalf("ran %d processes, want 1", len(calls))
+		}
+		if got := calls[0].getenv("BEADS_DOLT_SERVER_HOST"); got != "stale.example" {
+			t.Errorf("BEADS_DOLT_SERVER_HOST = %q, want the daemon's value", got)
+		}
+		if got := calls[0].getenv("BEADS_DOLT_SERVER_PORT"); got != "9999" {
+			t.Errorf("BEADS_DOLT_SERVER_PORT = %q, want the daemon's port", got)
+		}
+		if got := calls[0].getenv("BEADS_DOLT_PORT"); got != "" {
+			t.Errorf("BEADS_DOLT_PORT = %q, want the town's port not mixed into the daemon's endpoint", got)
+		}
+	})
+
+	t.Run("a partial daemon endpoint is refused, not split", func(t *testing.T) {
+		environ := []string{"PATH=/usr/bin", "BEADS_DOLT_SERVER_HOST=stale.example"}
+		bash := scriptBash(cliReply{})
+		res := runPluginScript(context.Background(), bash.run,
+			scriptEnv{environ: environ, inContainer: true}, p, townRoot, 5*time.Second)
+		if res.ok() {
+			t.Fatalf("a host with no port must not run against the town's port: %+v", res)
+		}
+		if n := len(bash.recorded()); n != 0 {
+			t.Fatalf("%d processes ran, want none", n)
+		}
+		if !strings.Contains(res.status(), "BEADS_DOLT_SERVER_PORT") {
+			t.Errorf("refusal does not name the missing port: %s", res.status())
+		}
+	})
+
+	t.Run("outside container mode the child env is unchanged", func(t *testing.T) {
+		environ := []string{"PATH=/usr/bin", "HOME=/home/daemon"}
+		bash := scriptBash(cliReply{})
+		res := runPluginScript(context.Background(), bash.run,
+			scriptEnv{environ: environ}, p, townRoot, 5*time.Second)
+		if !res.ok() {
+			t.Fatalf("expected success, got %+v", res)
+		}
+		calls := bash.recorded()
+		if len(calls) != 1 {
+			t.Fatalf("ran %d processes, want 1", len(calls))
+		}
+		want := append(daemonGTEnv(environ),
+			"GT_ROOT="+townRoot,
+			"GT_TOWN_ROOT="+townRoot,
+			"GT_PLUGIN_NAME="+p.Name,
+			"GT_PLUGIN_RUNNER=daemon",
+			"GT_ROLE=daemon/plugin",
+		)
+		if got := calls[0].env; !slices.Equal(got, want) {
+			t.Errorf("child env = %q, want %q", got, want)
+		}
+	})
+}
+
+// The daemon's endpoint is the only source once it names one: a daemon that
+// sets only the host, or only the port, is refused, and the town's complete
+// endpoint never fills the missing half (gt-8txy8).
+func TestPluginEnvDoltEndpointOneSource(t *testing.T) {
+	t.Parallel()
+	townRoot := doltEndpointTown(t)
+	p := scriptPlugin(t, "one-source", "exit 0\n")
+	cases := []struct {
+		name    string
+		environ []string
+		key     string
+	}{
+		{"host only names the port", []string{"PATH=/usr/bin", "BEADS_DOLT_SERVER_HOST=stale.example"}, "BEADS_DOLT_SERVER_PORT"},
+		{"port only names the host", []string{"PATH=/usr/bin", "BEADS_DOLT_SERVER_PORT=9999"}, "BEADS_DOLT_SERVER_HOST"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bash := scriptBash(cliReply{})
+			res := runPluginScript(context.Background(), bash.run,
+				scriptEnv{environ: tc.environ, inContainer: true}, p, townRoot, 5*time.Second)
+			if res.ok() {
+				t.Fatalf("a half daemon endpoint must not run: %+v", res)
+			}
+			if n := len(bash.recorded()); n != 0 {
+				t.Fatalf("%d processes ran, want none", n)
+			}
+			if !strings.Contains(res.status(), tc.key+" is missing") {
+				t.Errorf("refusal does not name %s as missing: %s", tc.key, res.status())
+			}
+		})
+	}
+}
+
+// An endpoint that cannot reach a server refuses the run before the process
+// starts, and the receipt names the variable and the problem instead of
+// reporting a green run. The port value itself is never named, since a port
+// may come from a variable that carries a secret (gt-8txy8).
+func TestPluginEnvDoltEndpointUnresolved(t *testing.T) {
+	t.Parallel()
+	const complete = `{"host":"127.0.0.1","container_host":"host.docker.internal","port":4407}`
+	cases := []struct {
+		name    string
+		environ []string
+		dolt    string // town.json dolt block; "" writes no town.json
+		key     string
+		problem string
+		value   string // a value the receipt must not echo
+	}{
+		{"no_endpoint", []string{"PATH=/usr/bin"}, "", "BEADS_DOLT_SERVER_HOST", "is missing", ""},
+		{"empty_host", []string{"PATH=/usr/bin", "BEADS_DOLT_SERVER_HOST=", "BEADS_DOLT_SERVER_PORT=4407"}, "", "BEADS_DOLT_SERVER_HOST", "is empty", ""},
+		{"town_json_empty_host", []string{"PATH=/usr/bin"}, `{"port":4407}`, "BEADS_DOLT_SERVER_HOST", "is missing", ""},
+		{"no_port", []string{"PATH=/usr/bin", "BEADS_DOLT_SERVER_HOST=stale.example"}, complete, "BEADS_DOLT_SERVER_PORT", "is missing", ""},
+		{"port_empty", []string{"PATH=/usr/bin", "BEADS_DOLT_SERVER_HOST=stale.example", "BEADS_DOLT_SERVER_PORT="}, complete, "BEADS_DOLT_SERVER_PORT", "is empty", ""},
+		{"port_zero", []string{"PATH=/usr/bin", "BEADS_DOLT_SERVER_HOST=stale.example", "BEADS_DOLT_SERVER_PORT=0"}, complete, "BEADS_DOLT_SERVER_PORT", "is zero", ""},
+		{"port_70000", []string{"PATH=/usr/bin", "BEADS_DOLT_SERVER_HOST=stale.example", "BEADS_DOLT_SERVER_PORT=70000"}, complete, "BEADS_DOLT_SERVER_PORT", "is out of range", "70000"},
+		{"port_non_numeric", []string{"PATH=/usr/bin", "BEADS_DOLT_SERVER_HOST=stale.example", "BEADS_DOLT_SERVER_PORT=+4407"}, complete, "BEADS_DOLT_SERVER_PORT", "is not a number", "+4407"},
+		{"town_json_port_zero", []string{"PATH=/usr/bin"}, `{"host":"127.0.0.1"}`, "mayor/town.json", "does not load: dolt.port 0 is not a TCP port", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			if tc.dolt != "" {
+				townRoot = townWithDolt(t, tc.dolt)
+			}
+			p := scriptPlugin(t, "no-endpoint", "exit 0\n")
+			bash := scriptBash(cliReply{})
+			res := runPluginScript(context.Background(), bash.run,
+				scriptEnv{environ: tc.environ, inContainer: true}, p, townRoot, 5*time.Second)
+			if res.ok() {
+				t.Fatalf("an unresolved endpoint must not run: %+v", res)
+			}
+			if n := len(bash.recorded()); n != 0 {
+				t.Fatalf("%d processes ran, want none", n)
+			}
+			var rec plugin.PluginRunRecord
+			completeScriptRun(p, res, scriptRunHooks{
+				record: func(r plugin.PluginRunRecord) error { rec = r; return nil },
+				logf:   t.Logf,
+			})
+			if rec.Result != plugin.ResultFailure {
+				t.Errorf("receipt result = %q, want a failure", rec.Result)
+			}
+			if want := tc.key + " " + tc.problem; !strings.Contains(rec.Body, want) {
+				t.Errorf("receipt body does not name %q:\n%s", want, rec.Body)
+			}
+			if tc.value != "" && strings.Contains(rec.Body, tc.value) {
+				t.Errorf("receipt body echoes the port value %q:\n%s", tc.value, rec.Body)
+			}
+		})
 	}
 }

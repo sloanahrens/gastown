@@ -256,17 +256,24 @@ func scriptTimeout(p *plugin.Plugin) time.Duration {
 	return defaultScriptTimeout
 }
 
-// scriptEnv carries what a script run inherits: the daemon's environment and
-// the tmux socket it resolved, read once by the caller so a test can hand in
-// its own.
+// scriptEnv carries what a script run inherits: the daemon's environment, the
+// tmux socket it resolved, and whether the daemon runs in container mode,
+// handed in by the caller so a test can supply its own.
 type scriptEnv struct {
-	environ    []string
-	tmuxSocket string
+	environ     []string
+	tmuxSocket  string
+	inContainer bool
 }
 
-// daemonScriptEnv is the scriptEnv of this daemon process.
-func daemonScriptEnv() scriptEnv {
-	return scriptEnv{environ: os.Environ(), tmuxSocket: tmux.GetDefaultSocket()}
+// daemonScriptEnv is the scriptEnv of this daemon process; inContainer is the
+// daemon's own settled mode (Daemon.containerMode), so the run reads no
+// environment beyond the daemon's own.
+func daemonScriptEnv(inContainer bool) scriptEnv {
+	return scriptEnv{
+		environ:     os.Environ(),
+		tmuxSocket:  tmux.GetDefaultSocket(),
+		inContainer: inContainer,
+	}
 }
 
 // pluginProcess builds what a script-type plugin runs: the binary its
@@ -290,19 +297,23 @@ func pluginProcess(ctx context.Context, p *plugin.Plugin) (*exec.Cmd, error) {
 // rather than the `bash` wrapper alone (gt-6t43 is the orphan this avoids).
 // The environment is env's plus the town identity a dog would have carried:
 // scripts read GT_TOWN_ROOT/GT_ROOT, and bd inside them reads the
-// BEADS_DOLT_* endpoint the daemon exports. The process runs through run (nil
-// runs it for real).
+// BEADS_DOLT_* endpoint the daemon exports, or the one pluginChildEnv adds in
+// container mode. The process runs through run (nil runs it for real).
 func runPluginScript(ctx context.Context, run cmdRunFunc, env scriptEnv, p *plugin.Plugin, townRoot string, timeout time.Duration) scriptResult {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	childEnv, err := pluginChildEnv(env, townRoot)
+	if err != nil {
+		return scriptResult{duration: time.Since(start), err: err}
+	}
 	cmd, err := pluginProcess(ctx, p)
 	if err != nil {
 		return scriptResult{duration: time.Since(start), err: err}
 	}
 	cmd.Dir = p.Path
-	cmd.Env = append(daemonGTEnv(env.environ),
+	cmd.Env = append(childEnv,
 		"GT_ROOT="+townRoot,
 		"GT_TOWN_ROOT="+townRoot,
 		"GT_PLUGIN_NAME="+p.Name,
@@ -444,7 +455,7 @@ func (d *Daemon) startScriptPlugin(p *plugin.Plugin, recorder runRecorder) {
 	d.logger.Printf("Handler: running script plugin %s directly (timeout %s)", p.Name, timeout)
 	go func() {
 		defer d.scripts.finish(p.Name)
-		res := runPluginScript(d.ctx, d.execCmd, daemonScriptEnv(), p, townRoot, timeout)
+		res := runPluginScript(d.ctx, d.execCmd, daemonScriptEnv(d.containerMode), p, townRoot, timeout)
 		writeScriptLog(townRoot, p.Name, res)
 		completeScriptRun(p, res, scriptRunHooks{
 			record: func(rec plugin.PluginRunRecord) error {

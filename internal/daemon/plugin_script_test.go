@@ -278,11 +278,20 @@ func TestRunPluginScript_ExportsTownTmuxSocket(t *testing.T) {
 }
 
 // daemonScriptEnv is the wiring for the pair above: the socket handed to a
-// script is the one the tmux package resolved for this process.
+// script is the one the tmux package resolved for this process, and the
+// container mode is the daemon's own, not an environment read of the run's
+// (gt-8txy8).
 func TestDaemonScriptEnvCarriesTheResolvedSocket(t *testing.T) {
 	t.Parallel()
-	if got, want := daemonScriptEnv().tmuxSocket, tmux.GetDefaultSocket(); got != want {
-		t.Errorf("daemonScriptEnv().tmuxSocket = %q, want tmux.GetDefaultSocket() %q", got, want)
+	env := daemonScriptEnv(true)
+	if got, want := env.tmuxSocket, tmux.GetDefaultSocket(); got != want {
+		t.Errorf("daemonScriptEnv(true).tmuxSocket = %q, want tmux.GetDefaultSocket() %q", got, want)
+	}
+	if !env.inContainer {
+		t.Error("daemonScriptEnv(true).inContainer = false, want the daemon's mode")
+	}
+	if daemonScriptEnv(false).inContainer {
+		t.Error("daemonScriptEnv(false).inContainer = true, want the daemon's mode")
 	}
 }
 

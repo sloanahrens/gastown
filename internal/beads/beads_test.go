@@ -815,6 +815,46 @@ func TestBuildPinnedBDEnvIgnoresGTDoltEndpoint(t *testing.T) {
 	}
 }
 
+// ResolvedDoltEndpointEnv names the town's endpoint, and refuses a town.json
+// that exists but does not load rather than falling back to config.yaml
+// (gt-8txy8).
+func TestResolvedDoltEndpointEnvTownConfig(t *testing.T) {
+	cases := []struct {
+		name    string
+		town    string // mayor/town.json body; "" writes no file
+		wantEnv []string
+		wantErr bool
+	}{
+		{"absent town names no endpoint", "", nil, false},
+		{"valid town names its endpoint", `{"type":"town","version":2,"name":"t","dolt":{"host":"127.0.0.1","port":4407}}`,
+			[]string{"BEADS_DOLT_SERVER_HOST=127.0.0.1", "BEADS_DOLT_SERVER_PORT=4407", "BEADS_DOLT_PORT=4407"}, false},
+		{"town with dolt port zero is refused", `{"type":"town","version":2,"name":"t","dolt":{"host":"127.0.0.1","port":0}}`, nil, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			townRoot := t.TempDir()
+			if tc.town != "" {
+				if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(tc.town), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			env, ok, err := ResolvedDoltEndpointEnv(townRoot, false)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, want error %v", err, tc.wantErr)
+			}
+			if ok != (tc.wantEnv != nil) {
+				t.Errorf("ok = %v, want %v", ok, tc.wantEnv != nil)
+			}
+			if !reflect.DeepEqual(env, tc.wantEnv) {
+				t.Errorf("env = %v, want %v", env, tc.wantEnv)
+			}
+		})
+	}
+}
+
 func TestSuppressBDSideEffectsOverridesInherited(t *testing.T) {
 	env := SuppressBDSideEffects([]string{
 		"PATH=/usr/bin",
