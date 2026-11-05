@@ -111,3 +111,37 @@ func TestPostLandUnknownStoreSurvivesARestart(t *testing.T) {
 		t.Fatal("record under an unwritable path answered nil, want the error that keeps the pending entry")
 	}
 }
+
+// TestPostLandUnknownStoreSaveFailuresAreErrors: a record that cannot be
+// encoded and a temporary file that cannot be written each answer an error, so
+// the runner keeps the pending entry and raises the alarm again on the next
+// pass (gt-gg9hv.7.1).
+func TestPostLandUnknownStoreSaveFailuresAreErrors(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	u := landworker.PostLandUnknown{Rig: attentionRig, SHA: "abc1234567890", Context: "ci / post-land (push)", State: "pending", At: now}
+
+	t.Run("a record that cannot be encoded", func(t *testing.T) {
+		t.Parallel()
+		// A time outside years 0 to 9999 has no JSON form.
+		bad := u
+		bad.At = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+		s := postLandUnknownStore{path: filepath.Join(t.TempDir(), "daemon", postLandUnknownFile)}
+		if err := s.record(bad, postLandUnknownWindow); err == nil {
+			t.Fatal("record of an unencodable time answered nil, want the encoding error")
+		}
+	})
+
+	t.Run("a temporary file that cannot be written", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "daemon", postLandUnknownFile)
+		// A directory where the temporary file belongs makes the write fail.
+		if err := os.MkdirAll(path+".tmp", 0o700); err != nil {
+			t.Fatal(err)
+		}
+		s := postLandUnknownStore{path: path}
+		if err := s.record(u, postLandUnknownWindow); err == nil {
+			t.Fatal("record with a directory in the temporary file's place answered nil, want the write error")
+		}
+	})
+}
