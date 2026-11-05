@@ -52,11 +52,11 @@ func (b Builder) BuildTools(ctx context.Context) ([]string, error) {
 	if err := b.checkToolInputs(); err != nil {
 		return nil, err
 	}
-	hmCommit, err := b.pinnedCommit(pin{what: "hm", src: b.HMSrc, commit: b.HMCommit, srcFlag: "--hm-src", commitFlag: "--hm-commit"})
+	hmCommit, err := b.pinnedCommit(pin{what: "hm", src: b.HMSrc, commit: b.HMCommit, srcFlag: "--hm-src"})
 	if err != nil {
 		return nil, err
 	}
-	devopsCommit, err := b.pinnedCommit(pin{what: "devops", src: b.DevopsSrc, commit: b.DevopsCommit, srcFlag: "--devops-src", commitFlag: "--devops-commit"})
+	devopsCommit, err := b.pinnedCommit(pin{what: "devops", src: b.DevopsSrc, commit: b.DevopsCommit, srcFlag: "--devops-src"})
 	if err != nil {
 		return nil, err
 	}
@@ -100,19 +100,19 @@ func (b Builder) checkToolInputs() error {
 		return fmt.Errorf("daemonimage: output directory %q is not absolute; a build runs in a worktree, not in the caller's directory", b.Out)
 	}
 	for _, p := range []struct {
-		flag, dir, commitFlag, commit string
+		flag, dir, name, commit string
 	}{
-		{"--hm-src", b.HMSrc, "--hm-commit", b.HMCommit},
-		{"--devops-src", b.DevopsSrc, "--devops-commit", b.DevopsCommit},
+		{"--hm-src", b.HMSrc, "hm", b.HMCommit},
+		{"--devops-src", b.DevopsSrc, "devops", b.DevopsCommit},
 	} {
 		if strings.TrimSpace(p.dir) == "" {
 			return fmt.Errorf("daemonimage: %s is required: the tool is built from that checkout", p.flag)
 		}
 		if strings.TrimSpace(p.commit) == "" {
-			return fmt.Errorf("daemonimage: %s is required: the tool is built at that commit and nothing else", p.commitFlag)
+			return fmt.Errorf("daemonimage: no %s pin in %s: the tool is built at that commit and nothing else", p.name, b.pinsFile())
 		}
 		if !isCommit(strings.TrimSpace(p.commit)) {
-			return fmt.Errorf("daemonimage: %s %q is not a 7+ character hex commit", p.commitFlag, p.commit)
+			return fmt.Errorf("daemonimage: %s pin %q is not a 7+ character hex commit", p.name, p.commit)
 		}
 		if err := refuseCanonicalClone(p.flag, p.dir); err != nil {
 			return err
@@ -121,21 +121,30 @@ func (b Builder) checkToolInputs() error {
 	return refuseCanonicalClone("output directory", b.Out)
 }
 
+// pinsFile names the file the commits come from in a refusal: the caller's pins
+// file, or the repository's own when a Builder is used without one.
+func (b Builder) pinsFile() string {
+	if b.PinsPath != "" {
+		return b.PinsPath
+	}
+	return PinsPath
+}
+
 // pin is one checkout a tool is built from: the directory, the commit it is
-// pinned to, and the two flags that name them in a refusal.
+// pinned to, and the flag that names the directory in a refusal.
 type pin struct {
-	what, src, commit, srcFlag, commitFlag string
+	what, src, commit, srcFlag string
 }
 
 // pinnedCommit returns the full sha of p's commit after checking that the
 // checkout's HEAD is that commit and its worktree has no changes. The build reads
 // the commit in a clean worktree either way; a checkout that has drifted from its
-// pin is refused because it is not the code the flags name.
+// pin is refused because it is not the code the pin names.
 func (b Builder) pinnedCommit(p pin) (string, error) {
 	commit := strings.TrimSpace(p.commit)
 	out, err := b.Git(p.src, "rev-parse", "--verify", commit+"^{commit}")
 	if err != nil {
-		return "", fmt.Errorf("daemonimage: %s %s is not a commit of %s: %w", p.commitFlag, commit, p.src, err)
+		return "", fmt.Errorf("daemonimage: %s pin %s is not a commit of %s: %w", p.what, commit, p.src, err)
 	}
 	full := strings.TrimSpace(string(out))
 	head, err := b.Git(p.src, "rev-parse", "--verify", "HEAD^{commit}")
@@ -143,14 +152,14 @@ func (b Builder) pinnedCommit(p pin) (string, error) {
 		return "", fmt.Errorf("daemonimage: cannot read HEAD of the %s checkout %s: %w", p.what, p.src, err)
 	}
 	if got := strings.TrimSpace(string(head)); got != full {
-		return "", fmt.Errorf("daemonimage: the %s checkout %s is at %s, not %s %s; check that commit out there", p.what, p.src, got, p.commitFlag, commit)
+		return "", fmt.Errorf("daemonimage: the %s checkout %s is at %s, not its pin %s; check that commit out there", p.what, p.src, got, commit)
 	}
 	status, err := b.Git(p.src, "status", "--porcelain")
 	if err != nil {
 		return "", fmt.Errorf("daemonimage: cannot read the status of the %s checkout %s: %w", p.what, p.src, err)
 	}
 	if strings.TrimSpace(string(status)) != "" {
-		return "", fmt.Errorf("daemonimage: the %s checkout %s has uncommitted changes; %s is built from a clean checkout at %s", p.what, p.src, p.srcFlag, commit)
+		return "", fmt.Errorf("daemonimage: the %s checkout %s has uncommitted changes; %s is built from a clean checkout at its pin %s", p.what, p.src, p.what, commit)
 	}
 	return full, nil
 }

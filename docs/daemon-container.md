@@ -86,9 +86,9 @@ put nothing else here.
 ```
 cd <scratch-parent>
 gt daemon image --rev <rev> --out <scratch-parent>/build --gt-src <gt checkout> \
-  --bd-src <beads checkout> --bd-commit <beads commit> --om-src <om checkout> \
-  --hm-src <hm checkout> --hm-commit <hm commit> \
-  --devops-src <devops checkout> --devops-commit <devops commit>
+  --bd-src <beads checkout> --om-src <om checkout> \
+  --hm-src <hm checkout> --devops-src <devops checkout> \
+  --pins <gt checkout>/deploy/daemon/image-pins
 ```
 
 Run it with a `gt` built by `make build` in a checkout of `main`: a binary built
@@ -96,25 +96,26 @@ with plain `go build` refuses to run ("use 'make build' instead"). The five
 source paths are checkouts, not the canonical `mayor/rig` clones, which the
 command refuses: make each with a local clone of the canonical repo's objects
 (`git clone --no-checkout <canonical> <new dir>`, which reads the canonical clone
-and never fetches in it) and check out the commit to build. `--om-src` has no
-commit flag: om is built at the checkout's `HEAD`. Observed: in the L1 run the
-running `bd` and `om` commits were not in those clones, so the clones' `HEAD`
-commits were built instead. That is a provenance mismatch, and it is not a
-pass. The image's `bd` is stamped with the commit it was built from
-(`main.Commit`), so compare that stamp with the running `bd`'s commit before the
-image is used. `om` has no commit stamp to compare, so record the `om` commit
-the build used (the clone's `HEAD`) and treat it as unverified against the
-running `om`.
+and never fetches in it) and fetch the commit to build. The bd, om, hm and
+devops commits come from `--pins`, the committed `deploy/daemon/image-pins`
+(one `<name> <url> <commit>` line each), not from flags: om is built at its
+pinned commit, never at the checkout's `HEAD`. Every source checkout must hold
+its pinned commit, and `--hm-src` and `--devops-src` must be at it with no
+uncommitted changes. The image's `bd` is stamped with the commit it was built
+from (`main.Commit`), so compare that stamp with the running `bd`'s commit
+before the image is used. `om` carries no commit stamp: compare it with its pin.
 
-Every flag is required. Each path must be absolute and an existing directory;
-`--rev`, `--bd-commit`, `--hm-commit` and `--devops-commit` are 7 or more hex
-characters. `--hm-src` and `--devops-src` are pinned like `--bd-commit`: each
-checkout must be at its commit with no uncommitted changes, or the build is
-refused. Without `--apply` it
-validates the flags, prints the commands it would run, ends with
+Every flag is required. Each path must be absolute and an existing directory (and
+`--pins` an absolute existing file), `--rev` is 7 or more hex characters, and
+each commit in the pins file is a full 40-character lowercase hex sha. Without
+`--apply` it
+validates the flags, prints the pins and the commands it would run, ends with
 `dry run: nothing was run. Pass --apply to build.`, and writes nothing. Read
-that output, then run the same command with `--apply`. With `--apply` it builds
-gt, bd and om for linux/arm64 in clean worktrees of the commits named, builds hm
+that output, then run the same command with `--apply`. With `--apply` the
+pin-drift guard first reads each source checkout's `origin/main` and refuses a
+pin that is not an ancestor of it, more than 40 commits behind it, or more than
+7 days older than its tip, naming the pin and the line to edit. It then builds
+gt, bd and om for linux/arm64 in clean worktrees of the pins, builds hm
 and the two devops reporters (devops-reporter, release-reporter) the same way from
 their pinned checkouts. release-reporter's version is the one the go command stamps
 from that checkout (a pseudo-version past its last tag); the build reads it back with

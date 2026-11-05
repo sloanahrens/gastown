@@ -110,14 +110,20 @@ type Builder struct {
 	// the commit bdbuild.Commit picks for the polecat image.
 	BDCommit string
 	// OMSrc is the om checkout the image's om is built from: the clone the
-	// rebuild_om job keeps at <town>/.runtime/om-src. om is built from its HEAD,
-	// in a clean worktree of it.
+	// rebuild_om job keeps at <town>/.runtime/om-src. om is built at OMCommit in
+	// a clean worktree of it, never at the checkout's HEAD.
 	OMSrc string
+	// OMCommit is the om commit the image's om is built from: the om pin.
+	OMCommit string
 	// HMSrc and HMCommit are the hm checkout BuildTools builds hm from, and the
 	// commit it must be at. DevopsSrc and DevopsCommit are the devops checkout the
 	// two reporters are built from, and its pinned commit.
 	HMSrc, HMCommit         string
 	DevopsSrc, DevopsCommit string
+	// Pins and PinsPath are the image-pins file Plan names: the four pins the
+	// commit fields above came from, and the file's path for the operator to edit.
+	Pins     []Pin
+	PinsPath string
 	// Dockerfile is the file BuildImage builds the image from: DockerfilePath in
 	// the gt checkout, as an absolute path. It must be absolute for the same
 	// reason Out must: docker resolves -f against the directory it runs in.
@@ -192,7 +198,7 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 	if b.Git == nil {
 		return nil, errors.New("daemonimage: no git to resolve the commits with")
 	}
-	rev, bdCommit, err := b.checkBuildInputs(rev)
+	rev, bdCommit, omCommit, err := b.checkBuildInputs(rev)
 	if err != nil {
 		return nil, err
 	}
@@ -204,7 +210,7 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 	if err != nil {
 		return nil, err
 	}
-	omCommit, err := b.resolve(b.OMSrc, "HEAD")
+	omCommit, err = b.resolve(b.OMSrc, omCommit)
 	if err != nil {
 		return nil, err
 	}
@@ -240,31 +246,47 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 }
 
 // checkBuildInputs refuses the inputs BuildBinaries cannot build from, before
-// anything runs, and returns rev and the bd commit trimmed. It reads nothing
-// from the host, which is what lets Plan refuse exactly what a build would.
-func (b Builder) checkBuildInputs(rev string) (string, string, error) {
+// anything runs, and returns rev and the bd and om commits trimmed. It reads
+// nothing from the host, which is what lets Plan refuse exactly what a build
+// would.
+func (b Builder) checkBuildInputs(rev string) (string, string, string, error) {
 	rev, err := b.checkOutAndRev(rev, "the binaries")
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	for _, src := range []struct{ name, dir string }{{"gt", b.GTSrc}, {"bd", b.BDSrc}, {"om", b.OMSrc}} {
 		if src.dir == "" {
-			return "", "", fmt.Errorf("daemonimage: no %s source checkout named", src.name)
+			return "", "", "", fmt.Errorf("daemonimage: no %s source checkout named", src.name)
 		}
 	}
 	for _, p := range []struct{ name, dir string }{{"output directory", b.Out}, {"gt source", b.GTSrc}, {"bd source", b.BDSrc}, {"om source", b.OMSrc}} {
 		if err := refuseCanonicalClone(p.name, p.dir); err != nil {
-			return "", "", err
+			return "", "", "", err
 		}
 	}
-	bdCommit := strings.TrimSpace(b.BDCommit)
-	if bdCommit == "" {
-		return "", "", errors.New("daemonimage: no bd commit to stamp bd with")
+	bdCommit, err := checkPinnedCommit("bd", b.BDCommit, "to stamp bd with")
+	if err != nil {
+		return "", "", "", err
 	}
-	if !isCommit(bdCommit) {
-		return "", "", fmt.Errorf("daemonimage: bd commit %q is not a 7+ character hex commit", bdCommit)
+	omCommit, err := checkPinnedCommit("om", b.OMCommit, "to build om at")
+	if err != nil {
+		return "", "", "", err
 	}
-	return rev, bdCommit, nil
+	return rev, bdCommit, omCommit, nil
+}
+
+// checkPinnedCommit refuses a binary's commit when it is missing or not a
+// commit, and returns it trimmed. what says why the build needs it, so the
+// refusal reads as the fix.
+func checkPinnedCommit(name, commit, what string) (string, error) {
+	commit = strings.TrimSpace(commit)
+	if commit == "" {
+		return "", fmt.Errorf("daemonimage: no %s commit %s", name, what)
+	}
+	if !isCommit(commit) {
+		return "", fmt.Errorf("daemonimage: %s commit %q is not a 7+ character hex commit", name, commit)
+	}
+	return commit, nil
 }
 
 // checkPluginInputs refuses the inputs BuildPlugins cannot build from, before
@@ -567,19 +589,20 @@ func isCommit(s string) bool {
 
 // Plan returns the steps a full build of rev would run, one line each, and runs
 // none of them: it makes no worktree, resolves no commit, writes no file and
-// reaches no network. It refuses the inputs a build refuses before it runs
-// anything (an empty or relative Out, a rev or bd commit that is not a commit,
-// an unnamed source, an hm or devops commit that is missing or not a commit, a
-// canonical clone as any input, a Dockerfile that is not an absolute regular
-// file). It does not check the claude CLI pin, and it does not check that a
-// commit exists in its checkout or that a checkout is at its pin and clean: a
-// build checks those when it runs, so a plan that prints can still fail there.
-// The commits in it are the ones named, not resolved: the gt line stamps
-// buildstamp.Len characters of the named commit, and the bd
+// reaches no network. It names the pins file and each pin first. It refuses the
+// inputs a build refuses before it runs anything (an empty or relative Out, a
+// rev, bd or om commit that is not a commit, an unnamed source, an hm or devops
+// commit that is missing or not a commit, a canonical clone as any input, no
+// pins, a Dockerfile that is not an absolute regular file). It does not check
+// the claude CLI pin, and it does not check that a commit exists in its
+// checkout, that a checkout is at its pin and clean, or that a pin is fresh:
+// CheckPins and a build check those when they run, so a plan that prints can
+// still fail there. The commits in it are the ones named, not resolved: the gt
+// line stamps buildstamp.Len characters of the named commit, and the bd
 // line's main.Build is planBuildID, since the build id is git's abbreviation of
 // the commit in the worktree a build makes and Plan makes none.
 func (b Builder) Plan(rev string) ([]string, error) {
-	rev, bdCommit, err := b.checkBuildInputs(rev)
+	rev, bdCommit, omCommit, err := b.checkBuildInputs(rev)
 	if err != nil {
 		return nil, err
 	}
@@ -592,16 +615,26 @@ func (b Builder) Plan(rev string) ([]string, error) {
 	if info, err := os.Stat(b.Dockerfile); err != nil || !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("daemonimage: Dockerfile %s is not a file", b.Dockerfile)
 	}
+	if b.PinsPath == "" {
+		return nil, fmt.Errorf("daemonimage: no pins file named; set PinsPath to %s in the gt checkout", PinsPath)
+	}
+	if len(b.Pins) != len(PinNames) {
+		return nil, fmt.Errorf("daemonimage: %d pins named, want the four (%s) from %s", len(b.Pins), strings.Join(PinNames, ", "), b.PinsPath)
+	}
 	if err := b.checkToolInputs(); err != nil {
 		return nil, err
 	}
 	stamp := planCommitStamp(rev)
 	tag := ImageTag(rev)
-	lines := []string{
+	lines := []string{fmt.Sprintf("pins: %s", b.PinsPath)}
+	for _, p := range b.Pins {
+		lines = append(lines, fmt.Sprintf("pin %s: %s at %s", p.Name, p.URL, p.Commit))
+	}
+	lines = append(lines,
 		fmt.Sprintf("build gt: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "gt"), GTPackage, gtCommitFlag+stamp), " "), b.GTSrc, rev),
 		fmt.Sprintf("build bd: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "bd"), BDPackage, bdBuildFlag+planBuildID+" "+bdCommitFlag+bdCommit), " "), b.BDSrc, bdCommit),
-		fmt.Sprintf("build om: %s   (clean worktree of %s at HEAD)", strings.Join(goBuildArgv(filepath.Join(b.Out, "om"), OMPackage, ""), " "), b.OMSrc),
-	}
+		fmt.Sprintf("build om: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "om"), OMPackage, ""), " "), b.OMSrc, omCommit),
+	)
 	for _, p := range imagePlugins {
 		lines = append(lines, fmt.Sprintf("build %s: %s   (clean worktree of %s at %s)", p.name, strings.Join(goBuildArgv(filepath.Join(b.Out, "plugins", p.name, p.name), p.pkg, ""), " "), b.GTSrc, rev))
 	}

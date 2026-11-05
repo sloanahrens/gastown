@@ -22,19 +22,18 @@ const imageFetchCeiling = 15 * time.Minute
 
 // daemonImageFlags are the values `gt daemon image` parsed. Every one is
 // required: nothing is inferred from the live town, so a build never reads a
-// checkout or writes a directory the operator did not name.
+// checkout or writes a directory the operator did not name. The four source
+// commits come from the pins file, not from flags.
 type daemonImageFlags struct {
-	rev          string // the gt commit the image is built at and tagged with
-	out          string // the absolute directory the binaries and the build context live in
-	gtSrc        string
-	bdSrc        string
-	omSrc        string
-	bdCommit     string
-	hmSrc        string
-	hmCommit     string
-	devopsSrc    string
-	devopsCommit string
-	apply        bool
+	rev       string // the gt commit the image is built at and tagged with
+	out       string // the absolute directory the binaries and the build context live in
+	gtSrc     string
+	bdSrc     string
+	omSrc     string
+	hmSrc     string
+	devopsSrc string
+	pins      string // the absolute image-pins file naming the bd, om, hm and devops commits
+	apply     bool
 }
 
 // imageBuilder is the build's steps, in the order they run. A
@@ -124,17 +123,22 @@ func newDaemonImageCmd(run func(ctx context.Context, out io.Writer, f daemonImag
 		Short: "Build the daemon's container image (a dry run unless --apply)",
 		Long: `Build gt-daemon:<rev>, the image the town's daemon runs in.
 
-It builds gt, bd and om for linux/arm64 in clean worktrees of the commits named,
+It builds gt, bd and om for linux/arm64 in clean worktrees of the pinned commits,
 the plugins the container daemon runs (app-promote and town-metrics),
 builds hm and the devops reporters (devops-reporter, release-reporter) from
 their pinned checkouts, downloads the pinned claude CLI, and builds the image
-with docker --context desktop-linux. The Dockerfile is read from --gt-src's
-working tree.
+with docker --context desktop-linux. The bd, om, hm and devops commits are read
+from --pins, the image-pins file the repository carries; the --*-src checkouts
+must hold them, and the hm and devops checkouts must be at their commits and
+clean. The Dockerfile is read from --gt-src's working tree.
 
 Every flag is required and none has a default read from the live town. Without
---apply it validates them, prints the commands it would run and runs none, writes
-nothing and reaches no network. A path that is a canonical clone (.../mayor/rig)
-is refused for --out and every source: the build adds worktrees to its sources.`,
+--apply it validates them, prints the pins and the commands it would run and runs
+none, writes nothing and reaches no network. With --apply the pin-drift guard reads each
+source checkout's origin/main before anything builds and refuses a pin that is
+not an ancestor of it, more than 40 commits behind it, or more than 7 days older
+than its tip. A path that is a canonical clone (.../mayor/rig) is refused for
+--out and every source: the build adds worktrees to its sources.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return run(cmd.Context(), cmd.OutOrStdout(), f)
@@ -145,12 +149,10 @@ is refused for --out and every source: the build adds worktrees to its sources.`
 	fl.StringVar(&f.out, "out", "", "existing absolute directory for the binaries and the build context")
 	fl.StringVar(&f.gtSrc, "gt-src", "", "absolute gt checkout")
 	fl.StringVar(&f.bdSrc, "bd-src", "", "absolute beads checkout")
-	fl.StringVar(&f.bdCommit, "bd-commit", "", "beads commit to build bd at (7+ hex characters)")
-	fl.StringVar(&f.omSrc, "om-src", "", "absolute om checkout (built from its HEAD)")
+	fl.StringVar(&f.omSrc, "om-src", "", "absolute om checkout")
 	fl.StringVar(&f.hmSrc, "hm-src", "", "absolute hm checkout")
-	fl.StringVar(&f.hmCommit, "hm-commit", "", "hm commit to build hm at; the checkout must be at it and clean (7+ hex characters)")
 	fl.StringVar(&f.devopsSrc, "devops-src", "", "absolute devops checkout the two reporters are built from")
-	fl.StringVar(&f.devopsCommit, "devops-commit", "", "devops commit to build the reporters at; the checkout must be at it and clean (7+ hex characters)")
+	fl.StringVar(&f.pins, "pins", "", "absolute image-pins file naming the bd, om, hm and devops commits")
 	fl.BoolVar(&f.apply, "apply", false, "run the build; without it only print the plan")
 	return cmd
 }
@@ -163,14 +165,28 @@ func init() {
 	daemonCmd.AddCommand(daemonImageCmd)
 }
 
-// runDaemonImage validates the flags, prints the plan, and with --apply runs the
-// build: the binaries, the plugins, the claude CLI, the image, in that order,
-// stopping at the first failure.
+// runDaemonImage validates the flags, reads the pins file, prints the plan, and
+// with --apply runs the pin-drift guard and then the build: the binaries, the
+// plugins, the claude CLI, the image, in that order, stopping at the first
+// failure.
 func runDaemonImage(ctx context.Context, f daemonImageFlags, d daemonImageDeps) error {
 	if err := validateDaemonImageFlags(f, d.evalSymlinks); err != nil {
 		return err
 	}
-	b := newDaemonImageBuilder(f, d)
+	pins, err := readImagePins(f.pins)
+	if err != nil {
+		return err
+	}
+	b := newDaemonImageBuilder(f, d, pins)
+	if f.apply {
+		notes, err := daemonimage.CheckPins(pins, pinsMainOf(f), f.pins, d.git)
+		if err != nil {
+			return err
+		}
+		for _, note := range notes {
+			fmt.Fprintln(d.out, note)
+		}
+	}
 	plan, err := b.Plan(f.rev)
 	if err != nil {
 		return err
@@ -216,8 +232,44 @@ func runDaemonImage(ctx context.Context, f daemonImageFlags, d daemonImageDeps) 
 	return nil
 }
 
-// newDaemonImageBuilder is the Builder the flags describe, on the host's seams.
-func newDaemonImageBuilder(f daemonImageFlags, d daemonImageDeps) daemonimage.Builder {
+// readImagePins reads and parses the pins file at path. A file that cannot be
+// read and one the parser refuses are both errors naming the path, so the
+// operator knows which file to fix.
+func readImagePins(path string) ([]daemonimage.Pin, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("--pins %q cannot be read: %w", path, err)
+	}
+	pins, err := daemonimage.ParsePins(body)
+	if err != nil {
+		return nil, fmt.Errorf("--pins %q: %w", path, err)
+	}
+	return pins, nil
+}
+
+// pinsMainOf maps each pin to the --*-src checkout the build takes as that
+// source: the checkout whose origin/main the pin-drift guard reads. A pin with
+// no checkout is an error, never a guess.
+func pinsMainOf(f daemonImageFlags) daemonimage.MainOf {
+	srcs := map[string]string{
+		"bd": f.bdSrc, "om": f.omSrc, "hm": f.hmSrc, "devops": f.devopsSrc,
+	}
+	return func(p daemonimage.Pin) (string, error) {
+		dir, ok := srcs[p.Name]
+		if !ok || dir == "" {
+			return "", fmt.Errorf("no source checkout named for the %s pin; pass --%s-src", p.Name, p.Name)
+		}
+		return dir, nil
+	}
+}
+
+// newDaemonImageBuilder is the Builder the flags and the pins describe, on the
+// host's seams.
+func newDaemonImageBuilder(f daemonImageFlags, d daemonImageDeps, pins []daemonimage.Pin) daemonimage.Builder {
+	commits := make(map[string]string, len(pins))
+	for _, p := range pins {
+		commits[p.Name] = p.Commit
+	}
 	return daemonimage.Builder{
 		Run:          d.run,
 		Git:          d.git,
@@ -227,26 +279,29 @@ func newDaemonImageBuilder(f daemonImageFlags, d daemonImageDeps) daemonimage.Bu
 		Out:          f.out,
 		GTSrc:        f.gtSrc,
 		BDSrc:        f.bdSrc,
-		BDCommit:     f.bdCommit,
+		BDCommit:     commits["bd"],
 		OMSrc:        f.omSrc,
+		OMCommit:     commits["om"],
 		HMSrc:        f.hmSrc,
-		HMCommit:     f.hmCommit,
+		HMCommit:     commits["hm"],
 		DevopsSrc:    f.devopsSrc,
-		DevopsCommit: f.devopsCommit,
+		DevopsCommit: commits["devops"],
+		Pins:         pins,
+		PinsPath:     f.pins,
 		Dockerfile:   filepath.Join(f.gtSrc, daemonimage.DockerfilePath),
 	}
 }
 
 // validateDaemonImageFlags refuses, before anything runs, a missing flag, a
-// relative path, a path that is not an existing directory, and a path that is
-// or lies inside a canonical clone. The commit shapes are the Builder's to
-// refuse; the plan asks it first.
+// relative path, a path that is not an existing directory, a pins path that is
+// not an existing file, and a source path that is or lies inside a canonical
+// clone. The commit shapes and the pins file's syntax are the Builder's and the
+// parser's to refuse; the plan asks them first.
 func validateDaemonImageFlags(f daemonImageFlags, evalSymlinks func(string) (string, error)) error {
 	for _, req := range []struct{ flag, value string }{
 		{"--rev", f.rev}, {"--out", f.out}, {"--gt-src", f.gtSrc},
-		{"--bd-src", f.bdSrc}, {"--bd-commit", f.bdCommit}, {"--om-src", f.omSrc},
-		{"--hm-src", f.hmSrc}, {"--hm-commit", f.hmCommit},
-		{"--devops-src", f.devopsSrc}, {"--devops-commit", f.devopsCommit},
+		{"--bd-src", f.bdSrc}, {"--om-src", f.omSrc},
+		{"--hm-src", f.hmSrc}, {"--devops-src", f.devopsSrc}, {"--pins", f.pins},
 	} {
 		if strings.TrimSpace(req.value) == "" {
 			return fmt.Errorf("%s is required: nothing is inferred from the live town", req.flag)
@@ -269,6 +324,12 @@ func validateDaemonImageFlags(f daemonImageFlags, evalSymlinks func(string) (str
 		if daemonimage.IsCanonicalClone(resolved) {
 			return fmt.Errorf("%s %q is or lies inside a canonical clone (.../mayor/rig): the build adds worktrees to its sources and the canonical clone is never touched", p.flag, p.value)
 		}
+	}
+	if !filepath.IsAbs(f.pins) {
+		return fmt.Errorf("--pins %q is not absolute: name the image-pins file outright", f.pins)
+	}
+	if info, err := os.Stat(f.pins); err != nil || !info.Mode().IsRegular() {
+		return fmt.Errorf("--pins %q is not an existing file", f.pins)
 	}
 	return nil
 }
