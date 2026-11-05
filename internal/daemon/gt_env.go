@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -27,11 +29,6 @@ func daemonGTEnv(base []string) []string {
 	return append(env, "BD_ACTOR="+daemonActor)
 }
 
-// requiredDoltEndpointEnv are the variables a plugin's bd needs to reach the
-// town's server from inside the container. Unset, bd asks 127.0.0.1:3307,
-// which is the container itself (gt-8txy8).
-var requiredDoltEndpointEnv = []string{"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT"}
-
 // doltEndpointKeys are every variable bd reads to find its server. A daemon
 // environment that sets any of them names an endpoint as a whole, and that
 // endpoint is used whole: its host with the town's port would name a server
@@ -54,24 +51,59 @@ func pluginChildEnv(env scriptEnv, townRoot string) ([]string, error) {
 		return child, nil
 	}
 	if !namesDoltEndpoint(env.environ) {
-		if endpoint, ok := beads.ResolvedDoltEndpointEnv(townRoot, env.inContainer); ok {
+		endpoint, ok, err := beads.ResolvedDoltEndpointEnv(townRoot, env.inContainer)
+		if err != nil {
+			return nil, fmt.Errorf("container mode needs the town's Dolt endpoint for a plugin child: mayor/town.json does not load: %w", err)
+		}
+		if ok {
 			for _, kv := range endpoint {
 				key, _, _ := strings.Cut(kv, "=")
 				child = append(filterEnvKey(child, key), kv)
 			}
 		}
 	}
-	var missing []string
-	for _, key := range requiredDoltEndpointEnv {
-		if value, set := lookupEnvIn(child, key); !set || value == "" {
-			missing = append(missing, key)
-		}
-	}
-	if len(missing) > 0 {
-		return nil, fmt.Errorf("container mode needs the town's Dolt endpoint for a plugin child: %s unset (set dolt.port and a host the container reaches in mayor/town.json)",
-			strings.Join(missing, " and "))
+	if err := checkDoltEndpointEnv(child); err != nil {
+		return nil, fmt.Errorf("container mode needs the town's Dolt endpoint for a plugin child: %w", err)
 	}
 	return child, nil
+}
+
+// maxDoltPort is the highest TCP port an endpoint can name.
+const maxDoltPort = 65535
+
+// checkDoltEndpointEnv names the first endpoint variable in child that cannot
+// reach a server: a host that is missing or empty, or a port that is missing,
+// empty, not ASCII digits, zero or above maxDoltPort. The error names the
+// variable and the problem, never the value, since a port may come from a
+// variable that carries a secret.
+func checkDoltEndpointEnv(child []string) error {
+	host, set := lookupEnvIn(child, "BEADS_DOLT_SERVER_HOST")
+	switch {
+	case !set:
+		return errors.New("BEADS_DOLT_SERVER_HOST is missing")
+	case host == "":
+		return errors.New("BEADS_DOLT_SERVER_HOST is empty")
+	}
+	port, set := lookupEnvIn(child, "BEADS_DOLT_SERVER_PORT")
+	if !set {
+		return errors.New("BEADS_DOLT_SERVER_PORT is missing")
+	}
+	if port == "" {
+		return errors.New("BEADS_DOLT_SERVER_PORT is empty")
+	}
+	for _, r := range port {
+		if r < '0' || r > '9' {
+			return errors.New("BEADS_DOLT_SERVER_PORT is not a number")
+		}
+	}
+	n, err := strconv.Atoi(port)
+	switch {
+	case err != nil || n > maxDoltPort:
+		return errors.New("BEADS_DOLT_SERVER_PORT is out of range")
+	case n == 0:
+		return errors.New("BEADS_DOLT_SERVER_PORT is zero")
+	}
+	return nil
 }
 
 // namesDoltEndpoint reports whether env sets any variable bd reads for its

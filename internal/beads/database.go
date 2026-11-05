@@ -2,6 +2,7 @@ package beads
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -410,11 +411,31 @@ func doltEndpointEnv(ep agentconfig.DoltEndpoint) []string {
 }
 
 // ResolvedDoltEndpointEnv returns the variables that name the town's Dolt
-// endpoint as inContainer resolves it, and false when the town names none.
-func ResolvedDoltEndpointEnv(townRoot string, inContainer bool) ([]string, bool) {
+// endpoint as inContainer resolves it, and false when the town names none. A
+// mayor/town.json that exists but does not load is an error: the resolver would
+// otherwise fall back to config.yaml without saying so.
+func ResolvedDoltEndpointEnv(townRoot string, inContainer bool) ([]string, bool, error) {
+	if err := townConfigError(townRoot); err != nil {
+		return nil, false, err
+	}
 	ep, ok := agentconfig.ResolveDoltEndpointFor(townRoot, inContainer)
 	if !ok {
-		return nil, false
+		return nil, false, nil
 	}
-	return doltEndpointEnv(ep), true
+	return doltEndpointEnv(ep), true, nil
+}
+
+// townConfigError is the error of loading townRoot's mayor/town.json when the
+// file exists and does not load, and nil when it loads or is absent. The
+// resolver drops that error and falls back to config.yaml; a caller that must
+// not run against a fallback reads it here (gt-8txy8).
+func townConfigError(townRoot string) error {
+	if townRoot == "" {
+		return nil
+	}
+	_, err := agentconfig.LoadTownConfig(filepath.Join(townRoot, "mayor", "town.json"))
+	if err == nil || errors.Is(err, agentconfig.ErrNotFound) {
+		return nil
+	}
+	return err
 }

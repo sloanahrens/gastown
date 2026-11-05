@@ -356,11 +356,17 @@ func TestPluginScriptRunsAsTheDaemonPlugin(t *testing.T) {
 // and to the name the daemon's container reaches it by.
 func doltEndpointTown(t *testing.T) string {
 	t.Helper()
+	return townWithDolt(t, `{"host":"127.0.0.1","container_host":"host.docker.internal","port":4407}`)
+}
+
+// townWithDolt is a town whose mayor/town.json carries the dolt block given.
+func townWithDolt(t *testing.T, dolt string) string {
+	t.Helper()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	body := `{"type":"town","version":2,"name":"t","dolt":{"host":"127.0.0.1","container_host":"host.docker.internal","port":4407}}`
+	body := `{"type":"town","version":2,"name":"t","dolt":` + dolt + `}`
 	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -467,33 +473,96 @@ func TestPluginEnvDoltEndpointExisting(t *testing.T) {
 	})
 }
 
-// A town with no endpoint and a daemon environment that sets neither variable
-// cannot give bd a server: the run is refused before the process starts, and
-// the receipt names what is missing instead of reporting a green run
-// (gt-8txy8).
+// The daemon's endpoint is the only source once it names one: a daemon that
+// sets only the host, or only the port, is refused, and the town's complete
+// endpoint never fills the missing half (gt-8txy8).
+func TestPluginEnvDoltEndpointOneSource(t *testing.T) {
+	t.Parallel()
+	townRoot := doltEndpointTown(t)
+	p := scriptPlugin(t, "one-source", "exit 0\n")
+	cases := []struct {
+		name    string
+		environ []string
+		key     string
+	}{
+		{"host only names the port", []string{"PATH=/usr/bin", "BEADS_DOLT_SERVER_HOST=stale.example"}, "BEADS_DOLT_SERVER_PORT"},
+		{"port only names the host", []string{"PATH=/usr/bin", "BEADS_DOLT_SERVER_PORT=9999"}, "BEADS_DOLT_SERVER_HOST"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bash := scriptBash(cliReply{})
+			res := runPluginScript(context.Background(), bash.run,
+				scriptEnv{environ: tc.environ, inContainer: true}, p, townRoot, 5*time.Second)
+			if res.ok() {
+				t.Fatalf("a half daemon endpoint must not run: %+v", res)
+			}
+			if n := len(bash.recorded()); n != 0 {
+				t.Fatalf("%d processes ran, want none", n)
+			}
+			if !strings.Contains(res.status(), tc.key+" is missing") {
+				t.Errorf("refusal does not name %s as missing: %s", tc.key, res.status())
+			}
+		})
+	}
+}
+
+// An endpoint that cannot reach a server refuses the run before the process
+// starts, and the receipt names the variable and the problem instead of
+// reporting a green run. The port value itself is never named, since a port
+// may come from a variable that carries a secret (gt-8txy8).
 func TestPluginEnvDoltEndpointUnresolved(t *testing.T) {
 	t.Parallel()
-	p := scriptPlugin(t, "no-endpoint", "exit 0\n")
-	bash := scriptBash(cliReply{})
-	res := runPluginScript(context.Background(), bash.run,
-		scriptEnv{environ: []string{"PATH=/usr/bin"}, inContainer: true}, p, t.TempDir(), 5*time.Second)
-	if res.ok() {
-		t.Fatalf("a plugin with no Dolt endpoint must not run: %+v", res)
+	const complete = `{"host":"127.0.0.1","container_host":"host.docker.internal","port":4407}`
+	cases := []struct {
+		name    string
+		environ []string
+		dolt    string // town.json dolt block; "" writes no town.json
+		key     string
+		problem string
+		value   string // a value the receipt must not echo
+	}{
+		{"no_endpoint", []string{"PATH=/usr/bin"}, "", "BEADS_DOLT_SERVER_HOST", "is missing", ""},
+		{"empty_host", []string{"PATH=/usr/bin", "BEADS_DOLT_SERVER_HOST=", "BEADS_DOLT_SERVER_PORT=4407"}, "", "BEADS_DOLT_SERVER_HOST", "is empty", ""},
+		{"town_json_empty_host", []string{"PATH=/usr/bin"}, `{"port":4407}`, "BEADS_DOLT_SERVER_HOST", "is missing", ""},
+		{"no_port", []string{"PATH=/usr/bin", "BEADS_DOLT_SERVER_HOST=stale.example"}, complete, "BEADS_DOLT_SERVER_PORT", "is missing", ""},
+		{"port_empty", []string{"PATH=/usr/bin", "BEADS_DOLT_SERVER_HOST=stale.example", "BEADS_DOLT_SERVER_PORT="}, complete, "BEADS_DOLT_SERVER_PORT", "is empty", ""},
+		{"port_zero", []string{"PATH=/usr/bin", "BEADS_DOLT_SERVER_HOST=stale.example", "BEADS_DOLT_SERVER_PORT=0"}, complete, "BEADS_DOLT_SERVER_PORT", "is zero", ""},
+		{"port_70000", []string{"PATH=/usr/bin", "BEADS_DOLT_SERVER_HOST=stale.example", "BEADS_DOLT_SERVER_PORT=70000"}, complete, "BEADS_DOLT_SERVER_PORT", "is out of range", "70000"},
+		{"port_non_numeric", []string{"PATH=/usr/bin", "BEADS_DOLT_SERVER_HOST=stale.example", "BEADS_DOLT_SERVER_PORT=+4407"}, complete, "BEADS_DOLT_SERVER_PORT", "is not a number", "+4407"},
+		{"town_json_port_zero", []string{"PATH=/usr/bin"}, `{"host":"127.0.0.1"}`, "mayor/town.json", "does not load: dolt.port 0 is not a TCP port", ""},
 	}
-	if n := len(bash.recorded()); n != 0 {
-		t.Fatalf("%d processes ran, want none", n)
-	}
-	var rec plugin.PluginRunRecord
-	completeScriptRun(p, res, scriptRunHooks{
-		record: func(r plugin.PluginRunRecord) error { rec = r; return nil },
-		logf:   t.Logf,
-	})
-	if rec.Result != plugin.ResultFailure {
-		t.Errorf("receipt result = %q, want a failure", rec.Result)
-	}
-	for _, key := range []string{"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT"} {
-		if !strings.Contains(rec.Body, key) {
-			t.Errorf("receipt body does not name %s:\n%s", key, rec.Body)
-		}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			if tc.dolt != "" {
+				townRoot = townWithDolt(t, tc.dolt)
+			}
+			p := scriptPlugin(t, "no-endpoint", "exit 0\n")
+			bash := scriptBash(cliReply{})
+			res := runPluginScript(context.Background(), bash.run,
+				scriptEnv{environ: tc.environ, inContainer: true}, p, townRoot, 5*time.Second)
+			if res.ok() {
+				t.Fatalf("an unresolved endpoint must not run: %+v", res)
+			}
+			if n := len(bash.recorded()); n != 0 {
+				t.Fatalf("%d processes ran, want none", n)
+			}
+			var rec plugin.PluginRunRecord
+			completeScriptRun(p, res, scriptRunHooks{
+				record: func(r plugin.PluginRunRecord) error { rec = r; return nil },
+				logf:   t.Logf,
+			})
+			if rec.Result != plugin.ResultFailure {
+				t.Errorf("receipt result = %q, want a failure", rec.Result)
+			}
+			if want := tc.key + " " + tc.problem; !strings.Contains(rec.Body, want) {
+				t.Errorf("receipt body does not name %q:\n%s", want, rec.Body)
+			}
+			if tc.value != "" && strings.Contains(rec.Body, tc.value) {
+				t.Errorf("receipt body echoes the port value %q:\n%s", tc.value, rec.Body)
+			}
+		})
 	}
 }
