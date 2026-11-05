@@ -287,6 +287,13 @@ func (l *priorityListing) add(raw json.RawMessage) error {
 	}
 	switch item.Kind {
 	case "Pod":
+		// A pod the listing does not place in a namespace could be in a
+		// protected one: it is read as a listing the guard cannot follow, not
+		// skipped, because a skipped pod is one the check silently does not
+		// make.
+		if item.Metadata.Namespace == "" || item.Metadata.Name == "" {
+			return errors.New("the listing holds a pod with no namespace or name")
+		}
 		l.pods = append(l.pods, listedPod{
 			namespace: item.Metadata.Namespace,
 			name:      item.Metadata.Name,

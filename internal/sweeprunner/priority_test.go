@@ -151,6 +151,10 @@ func TestPriorityTableChecksTheLivePods(t *testing.T) {
 			listing: []byte("Error from server (Forbidden)\n"),
 			refused: "reading the pods' priorities",
 		},
+		"a pod the listing places in no namespace": {
+			listing: priorityListingJSON(100, `{"kind":"Pod","metadata":{"name":"forgejo-abc"},"spec":{"priority":0}}`),
+			refused: "no namespace or name",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
