@@ -54,6 +54,10 @@ type NodeCapacity struct {
 	Node        string
 	Allocatable Amount
 	Requested   Amount
+	// Ready is the node's Ready condition. A listing that states anything but
+	// True, or names no Ready condition at all, leaves it false: a node whose
+	// health the listing does not state is not a node to launch on.
+	Ready bool
 	// Unschedulable is a node the cluster has cordoned: no new pod is placed
 	// on it.
 	Unschedulable bool
@@ -121,9 +125,9 @@ type Preflight struct {
 
 // capacityRead is the Read for a launch that creates the given Job, sync pod
 // and reader pod and tolerates the given taints: it sums what those objects ask
-// for, reads kubectl's node and pod listing, and decides whether the run fits
-// on a node the cluster may place it on beside what that node already carries.
-// A request it cannot read is a decline, never a run sized from zero.
+// for, reads kubectl's node and pod listing, and decides whether at least one
+// eligible node fits the run beside what that node already carries. A request
+// it cannot read is a decline, never a run sized from zero.
 func capacityRead(job *Job, syncPod, reader *Pod, tolerations []Toleration) func(stdout []byte) (CapacityReport, error) {
 	return func(stdout []byte) (CapacityReport, error) {
 		request, err := jobRequest(job, syncPod, reader)
@@ -134,20 +138,20 @@ func capacityRead(job *Job, syncPod, reader *Pod, tolerations []Toleration) func
 		if err != nil {
 			return CapacityReport{}, fmt.Errorf("cannot read the node's capacity: %w", err)
 		}
-		return decideCapacity(nodes, request, tolerations)
+		return DecideCapacity(nodes, request, tolerations)
 	}
 }
 
 // ParseCapacity reads the document `kubectl get nodes,pods -A -o json` prints:
 // one List whose items are every node and every pod of the cluster. Each node
-// reports its allocatable amounts, whether it is cordoned, and its NoSchedule
-// taints; it carries the sum of the requests of the pods placed on it whose
-// phase is not Succeeded or Failed. A pod's request is what the scheduler adds
-// to a node for it: the pod's overhead, plus, per resource, the larger of the
-// sum over its containers and the largest request of a single init container. A
-// pod the scheduler has not placed asks no node for anything and is not
-// counted. Anything else that cannot be read is an error: a request missed is a
-// node that reads freer than it is.
+// reports its allocatable amounts, whether its Ready condition is True, whether
+// it is cordoned, and its NoSchedule taints; it carries the sum of the requests
+// of the pods placed on it whose phase is not Succeeded or Failed. A pod's
+// request is what the scheduler adds to a node for it: the pod's overhead, plus,
+// per resource, the larger of the sum over its containers and the largest
+// request of a single init container. A pod the scheduler has not placed asks
+// no node for anything and is not counted. Anything else that cannot be read is
+// an error: a request missed is a node that reads freer than it is.
 func ParseCapacity(stdout []byte) ([]NodeCapacity, error) {
 	var listing clusterListing
 	if err := json.Unmarshal(stdout, &listing); err != nil {
@@ -169,6 +173,7 @@ func ParseCapacity(stdout []byte) ([]NodeCapacity, error) {
 			node := &NodeCapacity{
 				Node:          item.Metadata.Name,
 				Allocatable:   allocatable,
+				Ready:         nodeReady(item.Status.Conditions),
 				Unschedulable: item.Spec.Unschedulable,
 			}
 			for _, taint := range item.Spec.Taints {
@@ -208,18 +213,19 @@ func ParseCapacity(stdout []byte) ([]NodeCapacity, error) {
 	return nodes, nil
 }
 
-// decideCapacity picks the node the launch is judged against and reports
-// whether the run fits there with the headroom the control plane needs. Only a
-// node the cluster would place a new pod on is considered: not cordoned, and
-// carrying no NoSchedule taint the Job pod does not tolerate. Among those, a
-// node the run fits beside wins, then the most free CPU, then the most free
-// memory, so a decline names the best-fitting node there is and a launch names
-// the one the run fits on.
+// DecideCapacity picks the node the launch is judged against and reports
+// whether the launch may go ahead: it may when at least one eligible node fits
+// the run beside the headroom the control plane needs. A node is eligible when
+// it is Ready, not cordoned, and carries no NoSchedule taint the Job pod does
+// not tolerate. An eligible node that does not fit stays in the judgment but
+// does not block a node that does: the launch goes ahead when the best of them
+// fits, and a decline names the best-fitting eligible node and its figures.
 //
 // The check judges placement; it does not pin the Job to the node it names. The
-// scheduler may still choose another node, but every node it may choose is one
-// this check found eligible and fitting when it read the listing (gt-gg9hv.38).
-func decideCapacity(nodes []NodeCapacity, job Amount, tolerations []Toleration) (CapacityReport, error) {
+// scheduler may still choose another eligible node, which had room when it
+// placed the pod; this check promises only that one eligible node had room at
+// the read (gt-gg9hv.38).
+func DecideCapacity(nodes []NodeCapacity, job Amount, tolerations []Toleration) (CapacityReport, error) {
 	if len(nodes) == 0 {
 		return CapacityReport{}, errors.New("cannot read the node's capacity: the listing names no node")
 	}
@@ -230,7 +236,7 @@ func decideCapacity(nodes []NodeCapacity, job Amount, tolerations []Toleration) 
 		}
 	}
 	if len(eligible) == 0 {
-		return CapacityReport{}, &NoRoomError{Reason: "no node the Job may be placed on: every node is cordoned or carries a NoSchedule taint the Job does not tolerate"}
+		return CapacityReport{}, &NoRoomError{Reason: "no node the Job may be placed on: every node is not Ready, cordoned, or carries a NoSchedule taint the Job does not tolerate"}
 	}
 	chosen := eligible[0]
 	for _, node := range eligible[1:] {
@@ -251,9 +257,11 @@ func decideCapacity(nodes []NodeCapacity, job Amount, tolerations []Toleration) 
 }
 
 // schedulable reports whether the cluster would place a new pod on the node:
-// the node is not cordoned, and the pod tolerates every NoSchedule taint on it.
+// the node is Ready, not cordoned, and the pod tolerates every NoSchedule taint
+// on it. A NotReady node is not eligible even when it lists room: the cluster is
+// not placing new pods on it.
 func schedulable(node NodeCapacity, tolerations []Toleration) bool {
-	if node.Unschedulable {
+	if !node.Ready || node.Unschedulable {
 		return false
 	}
 	for _, taint := range node.NoSchedule {
@@ -262,6 +270,18 @@ func schedulable(node NodeCapacity, tolerations []Toleration) bool {
 		}
 	}
 	return true
+}
+
+// nodeReady reports whether the listing's Ready condition is True. Anything
+// else — False, Unknown, or no Ready condition at all — is not ready: a node
+// whose health the listing does not state is not a node to launch on.
+func nodeReady(conditions []nodeCondition) bool {
+	for _, condition := range conditions {
+		if condition.Type == "Ready" {
+			return condition.Status == "True"
+		}
+	}
+	return false
 }
 
 // tolerated reports whether one of the pod's tolerations matches the taint. A
@@ -443,14 +463,18 @@ func amountOf(cpu, memory string) (Amount, error) {
 
 // parseQuantity reads a Kubernetes resource quantity as the preflight accepts
 // it: a plain integer or decimal, or one of the suffixes m (milli), Mi and Gi.
-// The forms are the ones a node and pod listing uses; any other suffix, an
-// exponent, a sign, or anything else is refused with the input in the error,
-// because a request read wrong is a node read freer than it is. A quantity that
-// is not a whole unit rounds up, so a request never reads lower than it is.
+// The forms are the ones a node and pod listing uses; any other suffix, a
+// fraction, an exponent, a sign, or anything else is refused with the input in
+// the error, because a request read wrong is a node read freer than it is. A
+// quantity that is not a whole unit rounds up, so a request never reads lower
+// than it is.
 func parseQuantity(value string, scale int64) (int64, error) {
 	number, suffix := splitQuantity(value)
 	if number == "" {
 		return 0, fmt.Errorf("%q is not a quantity", value)
+	}
+	if strings.Contains(number, "/") {
+		return 0, fmt.Errorf("%q is a fraction, which the preflight does not read", value)
 	}
 	if strings.ContainsAny(number, "+-") {
 		return 0, fmt.Errorf("%q has a sign, which no quantity the preflight reads uses", value)
@@ -533,7 +557,15 @@ type listingItem struct {
 	Status struct {
 		Phase       string            `json:"phase"`
 		Allocatable map[string]string `json:"allocatable"`
+		Conditions  []nodeCondition   `json:"conditions"`
 	} `json:"status"`
+}
+
+// nodeCondition is one condition of a node's status as the API prints it. The
+// preflight reads only the Ready condition.
+type nodeCondition struct {
+	Type   string `json:"type"`
+	Status string `json:"status"`
 }
 
 // nodeTaint is one node taint as the API prints it.

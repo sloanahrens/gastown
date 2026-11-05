@@ -450,18 +450,23 @@ detached, and reads the `result.json` it writes.
 
 `cpus` and `memory` are the pod's total share, not one container's: on the
 Kubernetes backend the Job's pod asks for exactly that total, and the dind
-sidecar's fixed share comes out of it before the runner container gets the rest. A total that cannot hold the sidecar and leave the
-runner a share is refused when the run is rendered. The Docker backend has no
-pod, so its runner container asks for the whole share.
+sidecar's fixed share comes out of it before the runner container gets the
+rest. A total that cannot hold the sidecar and leave the runner a share is
+refused when the run is rendered; on the Kubernetes backend with dind the
+setting must be at least 3 CPUs and 6 GB, because the sidecar asks for 2 and 4
+of them. The Docker backend has no pod, so its runner container asks for the
+whole share.
 
 Before a Kubernetes Job is created, the daemon reads every node and pod once
-(`kubectl get nodes,pods -A -o json`) and launches only when the Job, with the
-sync and reader pods the run also creates, fits on at least one node with 2 CPU
-and 2 GiB to spare. A cordoned node, or one carrying a NoSchedule taint the Job
-pod does not tolerate, is not a candidate. On a decline the cycle defers — no
-Job, no bead, the patrol clock untouched — and one line an hour names the
-best-fitting node and its figures; a capacity read that fails declines the
-launch with the error in that line.
+(`kubectl get nodes,pods -A -o json`). A node is eligible when it is Ready, is
+not cordoned, and carries no NoSchedule taint the Job pod does not tolerate.
+The daemon launches only when the Job, with the sync and reader pods the run
+also creates, fits on at least one eligible node with 2 CPU and 2 GiB to spare;
+an eligible node the Job does not fit on stays in the judgment but does not
+block one it does. On a decline the cycle defers — no Job, no bead, the patrol
+clock untouched — and one line an hour names the best-fitting eligible node and
+its figures; a capacity read that fails declines the launch with the error in
+that line.
 
 ### Bird Reports
 

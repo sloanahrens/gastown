@@ -924,16 +924,16 @@ func runnerKubernetesDaemon(t *testing.T, now time.Time) (*Daemon, sweeprunner.S
 // priority answers the priority preflight's listing instead of the healthy one,
 // so a cycle can be driven from a protected pod the sweep outranks to a healthy
 // cluster and back.
-// capacity answers the capacity preflight; empty is runnerRoomyCapacity, so a
-// test about the launch itself is not declined for want of room.
 type runnerCluster struct {
-	t              *testing.T
-	status         string
-	statusErr      bool
-	flakyStatus    int
-	statusReads    int
-	jobs           string
-	jobsErr        bool
+	t           *testing.T
+	status      string
+	statusErr   bool
+	flakyStatus int
+	statusReads int
+	jobs        string
+	jobsErr     bool
+	// capacity answers the capacity preflight; empty is runnerRoomyCapacity, so
+	// a test about the launch itself is not declined for want of room.
 	capacity       string
 	result         *sweeprunner.Result
 	skipWrite      bool
@@ -961,7 +961,7 @@ const runnerPriorityListing = `{"kind":"List","items":[
 
 // runnerRoomyCapacity is a node with room for the default runner block's Job
 // (8 CPU, 24 GiB with dind) and the control plane's headroom.
-const runnerRoomyCapacity = `{"items": [{"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"allocatable": {"cpu": "16", "memory": "64Gi"}}}]}`
+const runnerRoomyCapacity = `{"items": [{"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "16", "memory": "64Gi"}}}]}`
 
 func (c *runnerCluster) answer(argv []string) ([]byte, []byte, error) {
 	switch {

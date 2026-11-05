@@ -323,10 +323,10 @@ type EmptyDirVolumeSource struct{}
 
 // Render returns the run as a Job and the steps that remove it, or the Validate
 // error that refuses the Spec. Before anything is applied, the caller runs the
-// capacity preflight, which reads the node's allocatable and requested amounts
-// and declines a run that would not leave room for the control plane's pods
-// (gt-gg9hv.38). The guard refuses while another sweep Job of the rig is still
-// active, because every run of the rig reads the one repo claim.
+// capacity preflight, which reads every node and pod and declines the launch
+// unless at least one eligible node can hold the run beside the control plane's
+// headroom (gt-gg9hv.38). The guard refuses while another sweep Job of the rig
+// is still active, because every run of the rig reads the one repo claim.
 // Apply then creates the repo claim, fills it through a short-lived root sync pod
 // (cleared, copied into, chowned to the runner, removed), and only then creates
 // the output claim, the cache claim and the Job. The teardown removes the sync
@@ -352,9 +352,10 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 		Job: job,
 		// One kubectl call lists every node and pod: the preflight decides from
 		// each node's allocatable amounts, what its pods already request, and
-		// whether the cluster would place the Job on it at all. It sums the
-		// rendered objects' requests itself, so a request it cannot read
-		// declines the launch instead of sizing it from zero.
+		// whether the cluster would place the Job on it at all, and launches
+		// only when at least one eligible node fits. It sums the rendered
+		// objects' requests itself, so a request it cannot read declines the
+		// launch instead of sizing it from zero.
 		Preflight: &Preflight{
 			Step: Step{Argv: kubectlArgv(spec, "get", "nodes,pods", "-A", "-o", "json")},
 			Read: capacityRead(job, sync, reader, job.Spec.Template.Spec.Tolerations),

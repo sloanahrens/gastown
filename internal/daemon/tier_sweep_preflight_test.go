@@ -26,7 +26,7 @@ const preflightShellSummary = "tier-sweep: shell GREEN passed=3 failed=0 skipped
 const preflightTightListing = `{
   "kind": "List",
   "items": [
-    {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"allocatable": {"cpu": "6", "memory": "24Gi"}}}
+    {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "6", "memory": "24Gi"}}}
   ]
 }`
 
@@ -35,7 +35,7 @@ const preflightTightListing = `{
 const preflightShorterListing = `{
   "kind": "List",
   "items": [
-    {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"allocatable": {"cpu": "5", "memory": "24Gi"}}}
+    {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "5", "memory": "24Gi"}}}
   ]
 }`
 
@@ -44,7 +44,7 @@ const preflightShorterListing = `{
 const preflightRoomyListing = `{
   "kind": "List",
   "items": [
-    {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"allocatable": {"cpu": "7", "memory": "24Gi"}}}
+    {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "7", "memory": "24Gi"}}}
   ]
 }`
 

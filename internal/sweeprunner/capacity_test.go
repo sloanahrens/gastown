@@ -1,6 +1,9 @@
 package sweeprunner
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"reflect"
 	"strconv"
 	"strings"
@@ -14,8 +17,8 @@ const capacityListing = `{
   "apiVersion": "v1",
   "kind": "List",
   "items": [
-    {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"allocatable": {"cpu": "12", "memory": "24Gi"}}},
-    {"kind": "Node", "metadata": {"name": "gt-worker"}, "status": {"allocatable": {"cpu": "8", "memory": "16Gi"}}},
+    {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "12", "memory": "24Gi"}}},
+    {"kind": "Node", "metadata": {"name": "gt-worker"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "8", "memory": "16Gi"}}},
     {"kind": "Pod", "metadata": {"name": "forgejo"}, "spec": {"nodeName": "gt-control", "containers": [
       {"name": "forgejo", "resources": {"requests": {"cpu": "500m", "memory": "512Mi"}}},
       {"name": "sidecar"}
@@ -59,11 +62,13 @@ func TestCapacityFreeIsAllocatableMinusRequests(t *testing.T) {
 			Node:        "gt-control",
 			Allocatable: Amount{CPU: 12_000, Memory: 24 << 30},
 			Requested:   Amount{CPU: 1_750, Memory: 1_792 << 20},
+			Ready:       true,
 		},
 		"gt-worker": {
 			Node:        "gt-worker",
 			Allocatable: Amount{CPU: 8_000, Memory: 16 << 30},
 			Requested:   Amount{CPU: 2_000, Memory: 4 << 30},
+			Ready:       true,
 		},
 	}
 	if len(nodes) != len(want) {
@@ -90,7 +95,7 @@ func TestCapacityFreeIsAllocatableMinusRequests(t *testing.T) {
 // taken from: a plan must decline on all of them, never launch on a guess.
 func TestCapacityRefusesWhatItCannotRead(t *testing.T) {
 	t.Parallel()
-	const node = `{"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"allocatable": {"cpu": "12", "memory": "24Gi"}}}`
+	const node = `{"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "12", "memory": "24Gi"}}}`
 	for _, tc := range []struct {
 		name    string
 		listing string
@@ -99,10 +104,10 @@ func TestCapacityRefusesWhatItCannotRead(t *testing.T) {
 		{name: "not JSON", listing: "Error from server (Forbidden)", want: "reading the node and pod listing"},
 		{name: "an item that is neither", listing: `{"items": [` + node + `, {"kind": "Service", "metadata": {"name": "x"}}]}`, want: "neither a node nor a pod"},
 		{name: "no node", listing: `{"items": []}`, want: "names no node"},
-		{name: "no cpu allocatable", listing: `{"items": [{"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"allocatable": {"memory": "24Gi"}}}]}`, want: "no cpu allocatable"},
-		{name: "no memory allocatable", listing: `{"items": [{"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"allocatable": {"cpu": "12"}}}]}`, want: "no memory allocatable"},
+		{name: "no cpu allocatable", listing: `{"items": [{"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"memory": "24Gi"}}}]}`, want: "no cpu allocatable"},
+		{name: "no memory allocatable", listing: `{"items": [{"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "12"}}}]}`, want: "no memory allocatable"},
 		{name: "an unreadable quantity", listing: `{"items": [` + node + `, {"kind": "Pod", "metadata": {"name": "p"}, "spec": {"nodeName": "gt-control", "containers": [{"resources": {"requests": {"cpu": "4x"}}}]}}]}`, want: "cpu"},
-		{name: "a node with an unreadable quantity", listing: `{"items": [{"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"allocatable": {"cpu": "4x", "memory": "24Gi"}}}]}`, want: `node "gt-control": cpu`},
+		{name: "a node with an unreadable quantity", listing: `{"items": [{"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "4x", "memory": "24Gi"}}}]}`, want: `node "gt-control": cpu`},
 		{name: "a negative quantity", listing: `{"items": [` + node + `, {"kind": "Pod", "metadata": {"name": "p"}, "spec": {"nodeName": "gt-control", "containers": [{"resources": {"requests": {"memory": "-1Gi"}}}]}}]}`, want: "has a sign"},
 		{name: "a pod on a node the listing omits", listing: `{"items": [` + node + `, {"kind": "Pod", "metadata": {"name": "p"}, "spec": {"nodeName": "gt-gone", "containers": []}}]}`, want: "gt-gone"},
 		{name: "a node named twice", listing: `{"items": [` + node + `, ` + node + `]}`, want: "twice"},
@@ -130,8 +135,9 @@ func TestCapacityDecidesWithHeadroom(t *testing.T) {
 	exact := NodeCapacity{
 		Node:        "gt-control",
 		Allocatable: job.Add(headroom),
+		Ready:       true,
 	}
-	report, err := decideCapacity([]NodeCapacity{exact}, job, nil)
+	report, err := DecideCapacity([]NodeCapacity{exact}, job, nil)
 	if err != nil {
 		t.Fatalf("a node whose free amount is the job plus the headroom declined: %v", err)
 	}
@@ -139,22 +145,22 @@ func TestCapacityDecidesWithHeadroom(t *testing.T) {
 		t.Errorf("report = %+v, want the node and the job's request", report)
 	}
 
-	short := NodeCapacity{Node: "gt-control", Allocatable: Amount{CPU: job.CPU + headroom.CPU - 1, Memory: job.Memory + headroom.Memory}}
-	report, err = decideCapacity([]NodeCapacity{short}, job, nil)
+	short := NodeCapacity{Node: "gt-control", Allocatable: Amount{CPU: job.CPU + headroom.CPU - 1, Memory: job.Memory + headroom.Memory}, Ready: true}
+	report, err = DecideCapacity([]NodeCapacity{short}, job, nil)
 	if err == nil {
 		t.Fatalf("a node one milli-CPU short of the headroom launched: %+v", report)
 	}
 	if want := "node gt-control: free 7999m/11264Mi, job needs 6000m/9216Mi, headroom 2000m/2048Mi"; err.Error() != want {
 		t.Errorf("decline = %q, want %q", err, want)
 	}
-	if _, err := decideCapacity(nil, job, nil); err == nil {
+	if _, err := DecideCapacity(nil, job, nil); err == nil {
 		t.Error("a listing with no node decided; free capacity cannot be read from nothing")
 	}
 
 	// The roomiest node by CPU does not hold the job; another node does.
-	roomy := NodeCapacity{Node: "gt-a", Allocatable: Amount{CPU: 10_000, Memory: 1 << 30}}
-	fits := NodeCapacity{Node: "gt-b", Allocatable: Amount{CPU: 8_000, Memory: 16 << 30}}
-	report, err = decideCapacity([]NodeCapacity{roomy, fits}, job, nil)
+	roomy := NodeCapacity{Node: "gt-a", Allocatable: Amount{CPU: 10_000, Memory: 1 << 30}, Ready: true}
+	fits := NodeCapacity{Node: "gt-b", Allocatable: Amount{CPU: 8_000, Memory: 16 << 30}, Ready: true}
+	report, err = DecideCapacity([]NodeCapacity{roomy, fits}, job, nil)
 	if err != nil {
 		t.Fatalf("the node that fits was not chosen: %v", err)
 	}
@@ -277,7 +283,7 @@ func TestCapacityReadDeclinesARequestItCannotRead(t *testing.T) {
 	}
 	reader := renderReader(spec)
 	reader.Spec.Containers[0].Resources.Requests.CPU = "four"
-	roomy := `{"items": [{"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"allocatable": {"cpu": "64", "memory": "256Gi"}}}]}`
+	roomy := `{"items": [{"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "64", "memory": "256Gi"}}}]}`
 	report, err := capacityRead(job, renderSyncPod(spec), reader, nil)([]byte(roomy))
 	if err == nil {
 		t.Fatalf("capacityRead = %+v, want the unreadable request refused", report)
@@ -312,7 +318,7 @@ func TestK8sPreflightIsOneNodesPodsCall(t *testing.T) {
 	}
 
 	listing := `{"items": [
-	  {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"allocatable": {"cpu": "12", "memory": "24Gi"}}},
+	  {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "12", "memory": "24Gi"}}},
 	  {"kind": "Pod", "metadata": {"name": "forgejo"}, "spec": {"nodeName": "gt-control", "containers": [
 	    {"name": "forgejo", "resources": {"requests": {"cpu": "500m", "memory": "512Mi"}}}]}, "status": {"phase": "Running"}}
 	]}`
@@ -338,7 +344,7 @@ func TestK8sPreflightIsOneNodesPodsCall(t *testing.T) {
 func TestK8sPreflightJobMatchesTheRenderedPods(t *testing.T) {
 	t.Parallel()
 	listing := `{"items": [
-	  {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"allocatable": {"cpu": "64", "memory": "256Gi"}}}
+	  {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "64", "memory": "256Gi"}}}
 	]}`
 	for _, dind := range []bool{true, false} {
 		spec := goldenSpec()
@@ -368,12 +374,12 @@ func TestK8sPreflightJobMatchesTheRenderedPods(t *testing.T) {
 	}
 }
 
-// TestParseCapacityReadsTheAPIsQuantityForms holds the parser to the forms a
-// quantity takes: a plain integer or decimal, milli-CPU, and MiB or GiB. Every
-// other form (Ki, an exponent, a sign, emptiness, trailing junk) is refused with
-// the input in the error, so a request the preflight cannot read never counts
-// as a node with room.
-func TestParseCapacityReadsTheAPIsQuantityForms(t *testing.T) {
+// TestParseQuantity holds the parser to the forms a quantity takes: a plain
+// integer or decimal, milli-CPU, and MiB or GiB. Every other form (a fraction
+// such as 1/2, Ki, an exponent, a sign, emptiness, trailing junk) is refused
+// with the input in the error, so a request the preflight cannot read never
+// counts as a node with room.
+func TestParseQuantity(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		value string
@@ -396,7 +402,7 @@ func TestParseCapacityReadsTheAPIsQuantityForms(t *testing.T) {
 			t.Errorf("parseQuantity(%q, %d) = %d, want %d", tc.value, tc.scale, got, tc.want)
 		}
 	}
-	for _, value := range []string{"", "abc", "4x", "-1", "+1", "1e3", "1Ei2", "10Ei", "14492Ki", "4 Mi", "4m ", "999999999999999999999999999999"} {
+	for _, value := range []string{"", "abc", "4x", "1/2", "1/2Gi", "-1", "+1", "1e3", "1Ei2", "10Ei", "14492Ki", "4 Mi", "4m ", "999999999999999999999999999999"} {
 		got, err := parseQuantity(value, cpuMilli)
 		if err == nil {
 			t.Errorf("parseQuantity(%q) = %d, want it refused", value, got)
@@ -432,11 +438,13 @@ func TestCapacityReportShowsTheFiguresTheDaemonLogs(t *testing.T) {
 	}
 }
 
-// TestCapacityTwoNodes holds the decision to every node the Job could land on:
-// a node that fits is chosen even when another reads roomier, a decline names
-// the best-fitting node, and a cordoned node or one whose NoSchedule taint the
-// Job does not tolerate is never chosen, however much room it has.
-func TestCapacityTwoNodes(t *testing.T) {
+// TestCapacityEligibleNodes holds the decision to the rule: the launch goes
+// ahead when at least one eligible node fits, a node that fits is chosen even
+// when another reads roomier, and a decline names the best-fitting eligible
+// node. A node that is not Ready, is cordoned, or carries a NoSchedule taint the
+// Job does not tolerate is never chosen, however much room it has, and an
+// eligible node that does not fit does not block one that does.
+func TestCapacityEligibleNodes(t *testing.T) {
 	t.Parallel()
 	job := Amount{CPU: 4_200, Memory: 5_376 << 20}
 	headroom := Amount{CPU: sweepHeadroomCPU, Memory: sweepHeadroomMemory}
@@ -456,8 +464,8 @@ func TestCapacityTwoNodes(t *testing.T) {
 		{
 			name: "only the second node has room",
 			listing: `{"items": [
-			  {"kind": "Node", "metadata": {"name": "gt-small"}, "status": {"allocatable": {"cpu": "6", "memory": "24Gi"}}},
-			  {"kind": "Node", "metadata": {"name": "gt-roomy"}, "status": {"allocatable": {"cpu": "8", "memory": "24Gi"}}}
+			  {"kind": "Node", "metadata": {"name": "gt-small"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "6", "memory": "24Gi"}}},
+			  {"kind": "Node", "metadata": {"name": "gt-roomy"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "8", "memory": "24Gi"}}}
 			]}`,
 			wantLaunch: true,
 			wantNode:   "gt-roomy",
@@ -465,27 +473,38 @@ func TestCapacityTwoNodes(t *testing.T) {
 		{
 			name: "neither fits names the best-fitting node",
 			listing: `{"items": [
-			  {"kind": "Node", "metadata": {"name": "gt-a"}, "status": {"allocatable": {"cpu": "5", "memory": "24Gi"}}},
-			  {"kind": "Node", "metadata": {"name": "gt-b"}, "status": {"allocatable": {"cpu": "6", "memory": "24Gi"}}}
+			  {"kind": "Node", "metadata": {"name": "gt-a"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "5", "memory": "24Gi"}}},
+			  {"kind": "Node", "metadata": {"name": "gt-b"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "6", "memory": "24Gi"}}}
 			]}`,
 			wantNode: "gt-b",
 			wantErr:  "node gt-b: free",
 		},
 		{
-			name: "a cordoned node and a tainted node are never chosen",
+			name: "an ineligible node is never chosen",
 			listing: `{"items": [
-			  {"kind": "Node", "metadata": {"name": "gt-cordon"}, "spec": {"unschedulable": true}, "status": {"allocatable": {"cpu": "32", "memory": "64Gi"}}},
-			  {"kind": "Node", "metadata": {"name": "gt-tainted"}, "spec": {"taints": [{"key": "dedicated", "value": "ci", "effect": "NoSchedule"}]}, "status": {"allocatable": {"cpu": "32", "memory": "64Gi"}}},
-			  {"kind": "Node", "metadata": {"name": "gt-tight"}, "status": {"allocatable": {"cpu": "6", "memory": "24Gi"}}}
+			  {"kind": "Node", "metadata": {"name": "gt-notready"}, "status": {"conditions": [{"type": "Ready", "status": "False"}], "allocatable": {"cpu": "32", "memory": "64Gi"}}},
+			  {"kind": "Node", "metadata": {"name": "gt-cordon"}, "spec": {"unschedulable": true}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "32", "memory": "64Gi"}}},
+			  {"kind": "Node", "metadata": {"name": "gt-tainted"}, "spec": {"taints": [{"key": "dedicated", "value": "ci", "effect": "NoSchedule"}]}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "32", "memory": "64Gi"}}},
+			  {"kind": "Node", "metadata": {"name": "gt-tight"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "6", "memory": "24Gi"}}}
 			]}`,
 			wantNode: "gt-tight",
 			wantErr:  "node gt-tight: free",
 		},
 		{
+			name: "a node with no Ready condition is not eligible",
+			listing: `{"items": [
+			  {"kind": "Node", "metadata": {"name": "gt-unknown"}, "status": {"conditions": [{"type": "Ready", "status": "Unknown"}], "allocatable": {"cpu": "32", "memory": "64Gi"}}},
+			  {"kind": "Node", "metadata": {"name": "gt-nocondition"}, "status": {"allocatable": {"cpu": "32", "memory": "64Gi"}}},
+			  {"kind": "Node", "metadata": {"name": "gt-ready"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "6", "memory": "24Gi"}}}
+			]}`,
+			wantNode: "gt-ready",
+			wantErr:  "node gt-ready: free",
+		},
+		{
 			name: "a tolerated taint is a node the Job may use",
 			listing: `{"items": [
-			  {"kind": "Node", "metadata": {"name": "gt-cordon"}, "spec": {"unschedulable": true}, "status": {"allocatable": {"cpu": "32", "memory": "64Gi"}}},
-			  {"kind": "Node", "metadata": {"name": "gt-tainted"}, "spec": {"taints": [{"key": "dedicated", "value": "ci", "effect": "NoSchedule"}]}, "status": {"allocatable": {"cpu": "32", "memory": "64Gi"}}}
+			  {"kind": "Node", "metadata": {"name": "gt-cordon"}, "spec": {"unschedulable": true}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "32", "memory": "64Gi"}}},
+			  {"kind": "Node", "metadata": {"name": "gt-tainted"}, "spec": {"taints": [{"key": "dedicated", "value": "ci", "effect": "NoSchedule"}]}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "32", "memory": "64Gi"}}}
 			]}`,
 			tolerations: []Toleration{{Key: "dedicated", Operator: "Equal", Value: "ci", Effect: "NoSchedule"}},
 			wantLaunch:  true,
@@ -494,8 +513,9 @@ func TestCapacityTwoNodes(t *testing.T) {
 		{
 			name: "no eligible node declines",
 			listing: `{"items": [
-			  {"kind": "Node", "metadata": {"name": "gt-cordon"}, "spec": {"unschedulable": true}, "status": {"allocatable": {"cpu": "32", "memory": "64Gi"}}},
-			  {"kind": "Node", "metadata": {"name": "gt-tainted"}, "spec": {"taints": [{"key": "dedicated", "value": "ci", "effect": "NoSchedule"}]}, "status": {"allocatable": {"cpu": "32", "memory": "64Gi"}}}
+			  {"kind": "Node", "metadata": {"name": "gt-notready"}, "status": {"conditions": [{"type": "Ready", "status": "False"}], "allocatable": {"cpu": "32", "memory": "64Gi"}}},
+			  {"kind": "Node", "metadata": {"name": "gt-cordon"}, "spec": {"unschedulable": true}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "32", "memory": "64Gi"}}},
+			  {"kind": "Node", "metadata": {"name": "gt-tainted"}, "spec": {"taints": [{"key": "dedicated", "value": "ci", "effect": "NoSchedule"}]}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "32", "memory": "64Gi"}}}
 			]}`,
 			wantErr: "no node the Job may be placed on",
 		},
@@ -506,13 +526,13 @@ func TestCapacityTwoNodes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseCapacity: %v", err)
 			}
-			report, err := decideCapacity(nodes, job, tc.tolerations)
+			report, err := DecideCapacity(nodes, job, tc.tolerations)
 			if tc.wantLaunch {
 				if err != nil {
 					t.Fatalf("the node with room was not chosen: %v", err)
 				}
 			} else if err == nil {
-				t.Fatalf("decideCapacity = %+v, want it declined", report)
+				t.Fatalf("DecideCapacity = %+v, want it declined", report)
 			} else if !strings.Contains(err.Error(), tc.wantErr) {
 				t.Errorf("decline = %v, want it to hold %q", err, tc.wantErr)
 			}
@@ -524,19 +544,49 @@ func TestCapacityTwoNodes(t *testing.T) {
 
 	// The headroom bound itself: a node with exactly the job plus the headroom
 	// launches; one milli-CPU less declines against that same node.
-	exact := `{"items": [{"kind": "Node", "metadata": {"name": "gt-exact"}, "status": {"allocatable": {"cpu": "` +
+	exact := `{"items": [{"kind": "Node", "metadata": {"name": "gt-exact"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "` +
 		strconv.FormatInt(fitting.CPU, 10) + `m", "memory": "` +
 		strconv.FormatInt(fitting.Memory>>20, 10) + `Mi"}}}]}`
 	nodes, err := ParseCapacity([]byte(exact))
 	if err != nil {
 		t.Fatalf("ParseCapacity: %v", err)
 	}
-	if report, err := decideCapacity(nodes, job, nil); err != nil {
+	if report, err := DecideCapacity(nodes, job, nil); err != nil {
 		t.Fatalf("a node with exactly the job plus the headroom declined: %+v, %v", report, err)
 	}
 	nodes[0].Allocatable = short
-	if report, err := decideCapacity(nodes, job, nil); err == nil {
+	if report, err := DecideCapacity(nodes, job, nil); err == nil {
 		t.Fatalf("a node one milli-CPU short of the headroom launched: %+v", report)
+	}
+}
+
+// TestCapacityDocMatchesTheRule holds the preflight's doc comment to the rule
+// the code applies: the launch goes ahead when at least one eligible node fits,
+// an eligible node that does not fit does not block one that does, and a
+// decline names the best-fitting eligible node. The doc is read from the source
+// so a sentence about the wrong rule fails here, not in a review (gt-gg9hv.38).
+func TestCapacityDocMatchesTheRule(t *testing.T) {
+	t.Parallel()
+	file, err := parser.ParseFile(token.NewFileSet(), "capacity.go", nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parsing capacity.go: %v", err)
+	}
+	var doc string
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if ok && fn.Name.Name == "DecideCapacity" {
+			doc = fn.Doc.Text()
+			break
+		}
+	}
+	if doc == "" {
+		t.Fatal("capacity.go has no DecideCapacity doc comment to read")
+	}
+	if !strings.Contains(doc, "at least one eligible node") {
+		t.Errorf("the preflight's doc does not state that at least one eligible node must fit:\n%s", doc)
+	}
+	if strings.Contains(doc, "every placeable node") {
+		t.Errorf("the preflight's doc claims every placeable node fits:\n%s", doc)
 	}
 }
 
@@ -547,7 +597,7 @@ func TestCapacityTwoNodes(t *testing.T) {
 func TestPodRequestMatchesTheScheduler(t *testing.T) {
 	t.Parallel()
 	const listing = `{"items": [
-	  {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"allocatable": {"cpu": "64", "memory": "256Gi"}}},
+	  {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "64", "memory": "256Gi"}}},
 	  {"kind": "Pod", "metadata": {"name": "mixed"}, "spec": {
 	    "nodeName": "gt-control",
 	    "overhead": {"cpu": "100m", "memory": "64Mi"},
@@ -580,14 +630,14 @@ func TestPodRequestMatchesTheScheduler(t *testing.T) {
 	}
 
 	orphan := `{"items": [
-	  {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"allocatable": {"cpu": "64", "memory": "256Gi"}}},
+	  {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "64", "memory": "256Gi"}}},
 	  {"kind": "Pod", "metadata": {"name": "bad"}, "spec": {"nodeName": "gt-control", "overhead": {"cpu": "4x"}, "containers": []}, "status": {"phase": "Running"}}
 	]}`
 	if got, err := ParseCapacity([]byte(orphan)); err == nil {
 		t.Errorf("ParseCapacity read an unreadable overhead as %+v, want it refused", got)
 	}
 	badInit := `{"items": [
-	  {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"allocatable": {"cpu": "64", "memory": "256Gi"}}},
+	  {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "64", "memory": "256Gi"}}},
 	  {"kind": "Pod", "metadata": {"name": "bad-init"}, "spec": {"nodeName": "gt-control", "initContainers": [{"resources": {"requests": {"cpu": "4x"}}}], "containers": []}, "status": {"phase": "Running"}}
 	]}`
 	if got, err := ParseCapacity([]byte(badInit)); err == nil {

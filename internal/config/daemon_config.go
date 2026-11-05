@@ -2152,11 +2152,13 @@ type TierSweepRunnerConfig struct {
 	Image string `json:"image"`
 
 	// CPUs is the run's CPU share, 1 to 16. On the Kubernetes backend it is the
-	// whole Job pod's total: the dind sidecar's fixed share comes out of it.
+	// whole Job pod's total: the dind sidecar's fixed share comes out of it, so
+	// with dind the minimum is 3 (the sidecar's 2 CPUs and the runner's 1).
 	CPUs int `json:"cpus"`
 
 	// Memory is the run's memory limit in GB, 2 to 48, and on the Kubernetes
-	// backend the whole Job pod's total, as CPUs is.
+	// backend the whole Job pod's total, as CPUs is. With dind the minimum is 6
+	// (the sidecar's 4 GB and the runner's 2).
 	Memory int `json:"memory"`
 
 	// Jobs is how many packages the run tests at once, 1 to 16.
@@ -2225,6 +2227,16 @@ const (
 	runnerJobsMax   = 16
 )
 
+// The dind sidecar's fixed share on the Kubernetes backend, as
+// internal/sweeprunner's dindCPU and dindMemory render it. The config package
+// cannot render a run, so it names the figures again to refuse a pod total that
+// cannot hold the sidecar and leave the runner its minimum; the spec's own
+// validation is the authority for the rendered share (gt-gg9hv.38).
+const (
+	runnerDindCPUs     = 2
+	runnerDindMemoryGB = 4
+)
+
 // The backends TierSweepRunnerConfig names, as sweeprunner's Backends spell
 // them.
 const (
@@ -2275,6 +2287,18 @@ func (c *TierSweepRunnerConfig) validate() error {
 	}
 	if c.Memory < runnerMemoryMin || c.Memory > runnerMemoryMax {
 		return fmt.Errorf("memory = %d: want %d-%d GB", c.Memory, runnerMemoryMin, runnerMemoryMax)
+	}
+	// With dind the Kubernetes setting is the whole pod's total, so it must hold
+	// the sidecar's fixed share and still leave the runner its own minimum. A
+	// total at or below the sidecar's share renders a runner with nothing
+	// (gt-gg9hv.38).
+	if c.Backend == TierSweepRunnerKubernetes && c.Dind {
+		if min := runnerCPUsMin + runnerDindCPUs; c.CPUs < min {
+			return fmt.Errorf("cpus = %d: want at least %d with dind (the sidecar's %d CPUs plus the runner's %d)", c.CPUs, min, runnerDindCPUs, runnerCPUsMin)
+		}
+		if min := runnerMemoryMin + runnerDindMemoryGB; c.Memory < min {
+			return fmt.Errorf("memory = %d: want at least %d GB with dind (the sidecar's %d GB plus the runner's %d)", c.Memory, min, runnerDindMemoryGB, runnerMemoryMin)
+		}
 	}
 	if c.Jobs < runnerJobsMin || c.Jobs > runnerJobsMax {
 		return fmt.Errorf("jobs = %d: want %d-%d", c.Jobs, runnerJobsMin, runnerJobsMax)
