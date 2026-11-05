@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
@@ -63,6 +64,8 @@ type rehearseHost struct {
 	plugins   []string          // plugin directories under <live>/plugins
 	log       string            // what docker logs of the entrypoint container returns
 	logErr    error
+	home      string // what userHomeDir answers
+	homeErr   error  // when set, userHomeDir fails with it
 }
 
 func newRehearseHost() *rehearseHost {
@@ -76,6 +79,7 @@ func newRehearseHost() *rehearseHost {
 			rehearseLive + "/daemon/container/compose.yml": []byte("services:\n  daemon:\n    volumes:\n      - type: bind\n        source: /live/gt\n        target: /live/gt\n      - type: bind\n        source: /h/landing\n        target: /h/landing\n      - type: volume\n        source: v\n        target: /vol\n"),
 		},
 		heartbeat: true,
+		home:      "/home/operator",
 	}
 }
 
@@ -160,9 +164,10 @@ func (h *rehearseHost) deps(out *bytes.Buffer) rehearseDeps {
 			h.captures = append(h.captures, argv)
 			return []byte(h.log), h.logErr
 		},
-		newID: func() string { return "t1" },
-		now:   func() time.Time { return h.clock },
-		sleep: func(d time.Duration) { h.clock = h.clock.Add(d); h.slept += d },
+		userHomeDir: func() (string, error) { return h.home, h.homeErr },
+		newID:       func() string { return "t1" },
+		now:         func() time.Time { return h.clock },
+		sleep:       func(d time.Duration) { h.clock = h.clock.Add(d); h.slept += d },
 	}
 }
 
@@ -1038,13 +1043,17 @@ func TestContainerRehearsalProbesTheTownJsonDoltAddress(t *testing.T) {
 // the landing path the compose rewrite binds is not accepted.
 func TestContainerRehearsalListsAcceptedPaths(t *testing.T) {
 	t.Parallel()
-	const accepted = `{"gotmp":"/Users/Shared/gt-gotmp.noindex","imessage":"/Users/sloan/.claude/tools/imessage-push.sh","ntfy":"/Users/sloan/.config/gt/ntfy-push.sh"}`
+	home := t.TempDir()
+	imessage := filepath.Join(home, ".claude", "tools", "imessage-push.sh")
+	ntfy := filepath.Join(home, ".config", "gt", "ntfy-push.sh")
+	accepted := `{"gotmp":"/Users/Shared/gt-gotmp.noindex","imessage":"` + imessage + `","ntfy":"` + ntfy + `"}`
 	t.Run("the three print as accepted and are not probed", func(t *testing.T) {
 		t.Parallel()
 		h := newRehearseHost()
+		h.home = home
 		h.files[rehearseLive+"/settings/config.json"] = []byte(`{"paths":` + accepted + `,"daemon":{"container_off":` + offJSON() + `}}`)
 		// A probe of any of the three would fail, so a probed accepted path fails the row.
-		h.failing = []string{"-e /Users/"}
+		h.failing = []string{"-e " + home, "-e /Users/Shared/gt-gotmp.noindex"}
 		var out bytes.Buffer
 		err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
 		got := out.String()
@@ -1054,15 +1063,15 @@ func TestContainerRehearsalListsAcceptedPaths(t *testing.T) {
 		for _, want := range []string{
 			"paths            ok",
 			"    accepted: /Users/Shared/gt-gotmp.noindex (GOTMPDIR is host-only and dropped from the container env)",
-			"    accepted: /Users/sloan/.claude/tools/imessage-push.sh (escalation notify, deferred by the operator)",
-			"    accepted: /Users/sloan/.config/gt/ntfy-push.sh (escalation notify, deferred by the operator)",
+			"    accepted: " + imessage + " (escalation notify, deferred by the operator)",
+			"    accepted: " + ntfy + " (escalation notify, deferred by the operator)",
 		} {
 			if !strings.Contains(got, want) {
 				t.Errorf("the output lacks %q:\n%s", want, got)
 			}
 		}
 		for _, run := range h.runs {
-			if n := len(run); n >= 2 && run[n-2] == "-e" && strings.HasPrefix(run[n-1], "/Users/") {
+			if n := len(run); n >= 2 && run[n-2] == "-e" && slices.Contains([]string{"/Users/Shared/gt-gotmp.noindex", imessage, ntfy}, run[n-1]) {
 				t.Errorf("an accepted path was probed: %v", run)
 			}
 		}
@@ -1078,4 +1087,72 @@ func TestContainerRehearsalListsAcceptedPaths(t *testing.T) {
 			t.Fatalf("err=%v\n%s", err, out.String())
 		}
 	})
+}
+
+// TestDaemonRehearseAuditPathsFollowHome: the two accepted notify paths are
+// built from the account's home directory, never a literal. A run whose home is
+// a temp directory accepts the notify scripts there; a settings value under
+// another account's home is not accepted; and a home the run cannot determine
+// fails the row rather than silently dropping the accept list.
+func TestDaemonRehearseAuditPathsFollowHome(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	imessage := filepath.Join(home, ".claude", "tools", "imessage-push.sh")
+	ntfy := filepath.Join(home, ".config", "gt", "ntfy-push.sh")
+	t.Run("the notify paths follow the home the run is given", func(t *testing.T) {
+		t.Parallel()
+		h := newRehearseHost()
+		h.home = home
+		h.files[rehearseLive+"/settings/config.json"] = []byte(`{"paths":{"imessage":"` + imessage + `","ntfy":"` + ntfy + `"},"daemon":{"container_off":` + offJSON() + `}}`)
+		// A probe of either accepted path would fail, so a probed one fails the row.
+		h.failing = []string{"-e " + home}
+		var out bytes.Buffer
+		err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
+		got := out.String()
+		if err != nil {
+			t.Fatalf("the notify paths under the run's home failed the rehearsal: %v\n%s", err, got)
+		}
+		for _, want := range []string{
+			"paths            ok",
+			"    accepted: " + imessage + " (escalation notify, deferred by the operator)",
+			"    accepted: " + ntfy + " (escalation notify, deferred by the operator)",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("the output lacks %q:\n%s", want, got)
+			}
+		}
+	})
+	t.Run("another account's notify path is not accepted", func(t *testing.T) {
+		t.Parallel()
+		const other = "/home/other/.claude/tools/imessage-push.sh"
+		h := newRehearseHost()
+		h.home = home
+		h.files[rehearseLive+"/settings/config.json"] = []byte(`{"paths":{"imessage":"` + other + `"},"daemon":{"container_off":` + offJSON() + `}}`)
+		h.failing = []string{"test -e " + other}
+		var out bytes.Buffer
+		err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
+		if err == nil || !strings.Contains(out.String(), "paths            FAIL") || !strings.Contains(out.String(), other+": named by a setting") {
+			t.Fatalf("err=%v\n%s", err, out.String())
+		}
+	})
+	for _, tc := range []struct {
+		name    string
+		home    string
+		homeErr error
+		want    string
+	}{
+		{"the home cannot be determined", "", errors.New("HOME is unset"), "the home directory cannot be determined"},
+		{"the home is not absolute", "relative/home", nil, "the home directory is not an absolute path"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newRehearseHost()
+			h.home, h.homeErr = tc.home, tc.homeErr
+			var out bytes.Buffer
+			err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
+			if err == nil || !strings.Contains(out.String(), "paths            FAIL") || !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("err=%v, want %q:\n%s", err, tc.want, out.String())
+			}
+		})
+	}
 }

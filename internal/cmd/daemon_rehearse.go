@@ -117,6 +117,9 @@ type rehearseDeps struct {
 	evalSymlinks func(path string) (string, error)
 	// callBudget bounds one docker call; zero means rehearseCallBudget.
 	callBudget time.Duration
+	// userHomeDir is the account's home directory, under which two accepted
+	// notify paths lie; a test supplies a temp directory.
+	userHomeDir func() (string, error)
 	// patrolKeys overrides the daemon config type's patrol keys, for a test.
 	patrolKeys func() []string
 	// newID is a unique run id (the pid and the time in the real one).
@@ -130,8 +133,9 @@ func realRehearseDeps(out io.Writer) rehearseDeps {
 		run: execImageRunner, capture: execImageCapture, environ: os.Environ(), out: out,
 		readFile: os.ReadFile, readDir: os.ReadDir, mkdirAll: os.MkdirAll, write: os.WriteFile,
 		removeAll: os.RemoveAll, evalSymlinks: filepath.EvalSymlinks,
-		newID: func() string { return fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()) },
-		now:   time.Now, sleep: time.Sleep,
+		userHomeDir: os.UserHomeDir,
+		newID:       func() string { return fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()) },
+		now:         time.Now, sleep: time.Sleep,
 	}
 }
 
@@ -519,13 +523,17 @@ func checkImageBinaries(ctx context.Context, r *rehearsal) []string {
 	return fails
 }
 
-// rehearseAcceptedPaths are the absolute paths a setting may name that the
+// rehearseAcceptedPaths returns the absolute paths a setting may name that the
 // rehearsal does not probe, each with the reason it is accepted. An accepted path
-// prints as accepted in the paths row and does not fail it.
-var rehearseAcceptedPaths = map[string]string{
-	"/Users/Shared/gt-gotmp.noindex":              "GOTMPDIR is host-only and dropped from the container env",
-	"/Users/sloan/.claude/tools/imessage-push.sh": "escalation notify, deferred by the operator",
-	"/Users/sloan/.config/gt/ntfy-push.sh":        "escalation notify, deferred by the operator",
+// prints as accepted in the paths row and does not fail it. The two notify
+// scripts are named under the account's home, so they follow the home directory
+// of the account running the rehearsal rather than one literal path.
+func rehearseAcceptedPaths(home string) map[string]string {
+	return map[string]string{
+		"/Users/Shared/gt-gotmp.noindex":                            "GOTMPDIR is host-only and dropped from the container env",
+		filepath.Join(home, ".claude", "tools", "imessage-push.sh"): "escalation notify, deferred by the operator",
+		filepath.Join(home, ".config", "gt", "ntfy-push.sh"):        "escalation notify, deferred by the operator",
+	}
 }
 
 // settingPaths returns the distinct file paths the staged settings name, sorted,
@@ -588,6 +596,15 @@ func exitCodeOf(err error) int {
 }
 
 func checkSettingPaths(ctx context.Context, r *rehearsal) []string {
+	home, err := r.d.userHomeDir()
+	if err != nil {
+		return []string{"the home directory cannot be determined, so the accepted paths are unknown: " + err.Error()}
+	}
+	home = strings.TrimSpace(home)
+	if !filepath.IsAbs(home) {
+		return []string{"the home directory is not an absolute path, so the accepted paths are unknown: " + strconv.Quote(home)}
+	}
+	accepted := rehearseAcceptedPaths(home)
 	composePath := config.ContainerComposeFile(r.f.liveRoot)
 	data, err := r.d.readFile(composePath)
 	if err != nil {
@@ -599,7 +616,7 @@ func checkSettingPaths(ctx context.Context, r *rehearsal) []string {
 	}
 	var fails []string
 	for _, p := range r.settingPaths(binds) {
-		if reason, ok := rehearseAcceptedPaths[p]; ok {
+		if reason, ok := accepted[p]; ok {
 			r.notes = append(r.notes, "accepted: "+p+" ("+reason+")")
 			continue
 		}
