@@ -517,7 +517,10 @@ func TestArchiveRequestRefusals(t *testing.T) {
 		mustNotExist(t, path, "the answered archive request")
 	})
 
-	t.Run("a result write failure leaves the request", func(t *testing.T) {
+	// A write that keeps failing must not run the whole archive on every tick:
+	// the pass has already run, so the unanswered request is dropped and the
+	// next tick has nothing to serve.
+	t.Run("a result write failure drops the request instead of repeating the pass", func(t *testing.T) {
 		t.Parallel()
 		d, _, cf := archiveRequestDaemon(t, outsideRequestNow, "hq")
 		cf.commits = map[string][]archiveCommit{
@@ -535,8 +538,11 @@ func TestArchiveRequestRefusals(t *testing.T) {
 
 		d.runScheduledMaintenance()
 
-		if _, err := os.Stat(path); err != nil {
-			t.Errorf("the request was removed although no result was written: %v", err)
+		mustNotExist(t, path, "the unanswered archive request")
+		reads := cf.reads
+		d.runScheduledMaintenance()
+		if cf.reads != reads {
+			t.Errorf("archive reads = %d on the next tick, want %d: the pass repeated without a request", cf.reads, reads)
 		}
 	})
 }

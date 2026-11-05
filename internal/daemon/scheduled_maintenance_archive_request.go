@@ -44,11 +44,24 @@ func (d *Daemon) answerInvalidArchiveRequest(files requestFiles, dir string, cau
 }
 
 // answerArchive applies answerArchiveRequest to the town's update directory.
-// The tick has no caller to return to, so a failure is logged with the run id:
-// the request stays and the command sees its timeout.
+// The tick has no caller to return to, so a failure is logged with the run id.
+//
+// When the answer cannot be written the request is dropped, not left for the
+// next tick: the pass it asked for has already run (or was refused before
+// running), and leaving the request would run the whole archive again every
+// five minutes for as long as the write keeps failing. The command then finds
+// the request gone with no result and reports that the daemon removed it
+// without answering, which is what happened.
 func (d *Daemon) answerArchive(req update.RequestFile, outcome maintenanceGCOutcome, detail string) {
-	if err := answerArchiveRequest(osRequestFiles{}, update.Dir(d.config.TownRoot), req.RunID, d.maintenance().now(), outcome.String(), detail); err != nil {
-		d.logger.Printf("scheduled_maintenance: WARNING: cannot answer the archive request for run %s: %v — the request stays", req.RunID, err)
+	files := osRequestFiles{}
+	dir := update.Dir(d.config.TownRoot)
+	if err := answerArchiveRequest(files, dir, req.RunID, d.maintenance().now(), outcome.String(), detail); err != nil {
+		d.logger.Printf("scheduled_maintenance: WARNING: cannot answer the archive request for run %s: %v", req.RunID, err)
+		if err := removeAnsweredRequestAt(files, archiveRequestPath(dir), "archive", req.RunID); err != nil {
+			d.logger.Printf("scheduled_maintenance: WARNING: cannot drop the unanswered archive request for run %s: %v — the next tick serves it again", req.RunID, err)
+			return
+		}
+		d.logger.Printf("scheduled_maintenance: WARNING: the archive request for run %s was dropped instead of left for the next tick", req.RunID)
 	}
 }
 
