@@ -310,12 +310,27 @@ func TestEventsPurgeResultSummary(t *testing.T) {
 const eventsTestDatabase = "hq"
 
 // eventsWatermarkState writes a maintenance state file whose events archive
-// watermark for database is createdAt, and returns its path.
+// watermark for database is createdAt, and returns its path. The watermark
+// carries one archived id at that created_at: a watermark with a created_at
+// and no ids fails Validate, so it cannot stand in for a healthy archive.
 func eventsWatermarkState(t *testing.T, database string, createdAt time.Time) string {
 	t.Helper()
+	return eventsWatermarkStateArchived(t, database, createdAt, createdAt)
+}
+
+// eventsWatermarkStateArchived writes a maintenance state file whose events
+// archive watermark for database is createdAt, whose archived set holds one
+// row at archivedAt, and returns its path.
+func eventsWatermarkStateArchived(t *testing.T, database string, createdAt, archivedAt time.Time) string {
+	t.Helper()
+	at := createdAt.UTC().Format("2006-01-02 15:04:05")
+	archived := archivedAt.UTC().Format("2006-01-02 15:04:05")
 	body := map[string]any{
 		"archive_events_watermarks": map[string]any{
-			database: map[string]string{"created_at": createdAt.Format("2006-01-02 15:04:05")},
+			database: map[string]any{
+				"created_at": at,
+				"archived":   []map[string]string{{"created_at": archived, "id": "archived-row"}},
+			},
 		},
 	}
 	data, err := json.Marshal(body)
@@ -336,26 +351,59 @@ func writeEventsState(t *testing.T, data []byte) string {
 	return path
 }
 
-// TestEventsRetentionDeletesOnlyRowsCoveredByTheWatermark: the watermark is
-// older than the retention cutoff, so it bounds the pass. Rows older than the
-// watermark go. The row at the watermark stays, and so does a row newer than
-// the watermark but older than the retention cutoff, because the archive has
-// not written it out yet.
-func TestEventsRetentionDeletesOnlyRowsCoveredByTheWatermark(t *testing.T) {
+// TestEventsRetentionKeepsRowsInsideTheLookbackWindow: the archive re-reads
+// the 24h before its watermark on every run, so a row inside that window is
+// kept whether or not the Archived set lists it. A row older than the window
+// and older than the retention cutoff is deleted.
+func TestEventsRetentionKeepsRowsInsideTheLookbackWindow(t *testing.T) {
 	t.Parallel()
 	state := newEventsState()
-	state.addEvent(1, eventsNow, 50*24*time.Hour)
-	state.addEvent(2, eventsNow, 50*24*time.Hour)
-	state.addEvent(3, eventsNow, 40*24*time.Hour) // exactly the watermark: kept
-	state.addEvent(4, eventsNow, 35*24*time.Hour) // after the watermark, before the retention cutoff: kept
-	state.addEvent(5, eventsNow, 10*24*time.Hour)
+	watermark := eventsNow.Add(-10 * time.Hour)
+	windowStart := watermark.Add(-24 * time.Hour)
+	state.addEvent(1, eventsNow, 11*time.Hour) // inside the window, not in Archived
+	state.addEvent(2, eventsNow, 11*time.Hour) // inside the window, in Archived
+	state.addEvent(3, eventsNow, 40*time.Hour) // older than the window and the retention cutoff
 	db := openFakeReaperDB(t, state)
 	t.Cleanup(func() { _ = db.Close() })
 
-	watermark := eventsNow.Add(-40 * 24 * time.Hour)
 	result, err := PurgeEvents(context.Background(), db, EventsPurgeOptions{
 		Now:        eventsNow,
-		Retain:     30 * 24 * time.Hour,
+		Retain:     1 * time.Hour,
+		Batch:      10,
+		MaxBatches: 5,
+		Database:   eventsTestDatabase,
+		StatePath:  eventsWatermarkStateArchived(t, eventsTestDatabase, watermark, eventsNow.Add(-11*time.Hour)),
+	})
+	if err != nil {
+		t.Fatalf("PurgeEvents: %v", err)
+	}
+	if result.Rows != 1 {
+		t.Errorf("rows = %d, want 1 (only the row older than the window)", result.Rows)
+	}
+	if !result.Cutoff.Equal(windowStart) {
+		t.Errorf("cutoff = %s, want the window start %s", result.Cutoff, windowStart)
+	}
+	if got := eventIDs(state.events); !slices.Equal(got, []int64{1, 2}) {
+		t.Errorf("remaining events = %v, want [1 2]: both rows inside the lookback window stay", got)
+	}
+}
+
+// TestEventsRetentionBoundaryIsStrict: a row exactly at the bound is kept and
+// a row one second older is deleted, and the DELETE the pass sends asks for
+// created_at < bound, not <=.
+func TestEventsRetentionBoundaryIsStrict(t *testing.T) {
+	t.Parallel()
+	state := newEventsState()
+	watermark := eventsNow.Add(-10 * time.Hour)
+	bound := watermark.Add(-24 * time.Hour)
+	state.addEvent(1, eventsNow, 34*time.Hour)             // exactly at the bound: kept
+	state.addEvent(2, eventsNow, 34*time.Hour+time.Second) // one second older: deleted
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+
+	result, err := PurgeEvents(context.Background(), db, EventsPurgeOptions{
+		Now:        eventsNow,
+		Retain:     1 * time.Hour, // the retention cutoff is later, so the window governs
 		Batch:      10,
 		MaxBatches: 5,
 		Database:   eventsTestDatabase,
@@ -364,21 +412,36 @@ func TestEventsRetentionDeletesOnlyRowsCoveredByTheWatermark(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PurgeEvents: %v", err)
 	}
-	if result.Rows != 2 {
-		t.Errorf("rows = %d, want 2 (the two rows older than the watermark)", result.Rows)
+	if result.Rows != 1 {
+		t.Errorf("rows = %d, want 1 (only the row one second older than the bound)", result.Rows)
 	}
-	if !result.Cutoff.Equal(watermark) {
-		t.Errorf("cutoff = %s, want the watermark %s: the batch DELETE is bounded by it", result.Cutoff, watermark)
+	if !result.Cutoff.Equal(bound) {
+		t.Errorf("cutoff = %s, want %s", result.Cutoff, bound)
 	}
-	if got := eventIDs(state.events); !slices.Equal(got, []int64{3, 4, 5}) {
-		t.Errorf("remaining events = %v, want [3 4 5]: nothing at or after the watermark is deleted", got)
+	if got := eventIDs(state.events); !slices.Equal(got, []int64{1}) {
+		t.Errorf("remaining events = %v, want [1]: the row exactly at the bound is kept", got)
+	}
+	deletes := 0
+	for _, ops := range state.ops {
+		for _, op := range ops {
+			if !strings.Contains(op, "DELETE FROM events") {
+				continue
+			}
+			deletes++
+			if strings.Contains(op, "created_at <=") {
+				t.Errorf("delete statement = %q, want the strict predicate created_at < bound", op)
+			}
+		}
+	}
+	if deletes == 0 {
+		t.Fatal("the pass sent no bounded events delete")
 	}
 }
 
 // TestEventsRetentionWaitsWithoutAWatermark: a database with no watermark
-// entry, a watermark that has not written a row, a missing state file, or an
-// unreadable one deletes nothing. The pass says it is waiting for the archive
-// and is counted as skipped, not as a pass that deleted zero rows.
+// entry, a zero watermark, or a missing state file deletes nothing. The pass
+// says it is waiting for the archive and is counted as skipped, not as a pass
+// that deleted zero rows and not as a failure.
 func TestEventsRetentionWaitsWithoutAWatermark(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -401,12 +464,6 @@ func TestEventsRetentionWaitsWithoutAWatermark(t *testing.T) {
 			name: "state file missing",
 			statePath: func(t *testing.T) string {
 				return filepath.Join(t.TempDir(), "maintenance_state.json")
-			},
-		},
-		{
-			name: "state file unreadable",
-			statePath: func(t *testing.T) string {
-				return writeEventsState(t, []byte("{not json"))
 			},
 		},
 	}
@@ -446,29 +503,32 @@ func TestEventsRetentionWaitsWithoutAWatermark(t *testing.T) {
 	}
 }
 
-// TestEventsRetentionUsesTheOlderOfCutoffAndWatermark: the pass cuts at the
-// older of the retention cutoff and the watermark, so a watermark newer than
-// the retention cutoff leaves retention in charge, and an older one takes over.
-func TestEventsRetentionUsesTheOlderOfCutoffAndWatermark(t *testing.T) {
+// TestEventsRetentionUsesTheEarlierOfCutoffAndWindowStart: the pass cuts at
+// the earlier of the retention cutoff and the archive's window start (the
+// watermark minus its 24h lookback), so whichever is older bounds the delete.
+func TestEventsRetentionUsesTheEarlierOfCutoffAndWindowStart(t *testing.T) {
 	t.Parallel()
 	retentionCutoff := eventsNow.Add(-30 * 24 * time.Hour)
 	tests := []struct {
 		name          string
 		watermark     time.Time
+		retain        time.Duration
 		wantCutoff    time.Time
 		wantRemaining []int64
 	}{
 		{
-			name:          "watermark newer than the retention cutoff",
-			watermark:     eventsNow.Add(-10 * 24 * time.Hour),
+			name:          "retention cutoff earlier than the window start",
+			watermark:     eventsNow.Add(-1 * time.Hour), // window start = now - 25h
+			retain:        30 * 24 * time.Hour,
 			wantCutoff:    retentionCutoff,
-			wantRemaining: []int64{2},
+			wantRemaining: []int64{2, 3},
 		},
 		{
-			name:          "watermark older than the retention cutoff",
-			watermark:     eventsNow.Add(-40 * 24 * time.Hour),
-			wantCutoff:    eventsNow.Add(-40 * 24 * time.Hour),
-			wantRemaining: []int64{1, 2},
+			name:          "window start earlier than the retention cutoff",
+			watermark:     eventsNow.Add(-10 * time.Hour), // window start = now - 34h
+			retain:        1 * time.Hour,
+			wantCutoff:    eventsNow.Add(-34 * time.Hour),
+			wantRemaining: []int64{3},
 		},
 	}
 	for _, tt := range tests {
@@ -476,14 +536,14 @@ func TestEventsRetentionUsesTheOlderOfCutoffAndWatermark(t *testing.T) {
 			t.Parallel()
 			state := newEventsState()
 			state.addEvent(1, eventsNow, 31*24*time.Hour)
-			state.addEvent(2, eventsNow, 20*24*time.Hour)
-			state.addEvent(3, eventsNow, 45*24*time.Hour)
+			state.addEvent(2, eventsNow, 40*time.Hour)
+			state.addEvent(3, eventsNow, 20*time.Hour)
 			db := openFakeReaperDB(t, state)
 			t.Cleanup(func() { _ = db.Close() })
 
 			result, err := PurgeEvents(context.Background(), db, EventsPurgeOptions{
 				Now:        eventsNow,
-				Retain:     30 * 24 * time.Hour,
+				Retain:     tt.retain,
 				Batch:      10,
 				MaxBatches: 5,
 				Database:   eventsTestDatabase,
@@ -500,16 +560,35 @@ func TestEventsRetentionUsesTheOlderOfCutoffAndWatermark(t *testing.T) {
 			}
 		})
 	}
+
+	// The window start itself is the watermark minus the archive's 24h
+	// lookback, truncated to whole seconds. The daemon's
+	// EventsArchiveWatermark.Since is pinned to this in
+	// TestEventsRetentionWindowStartMatchesTheArchiveSince (package daemon, which
+	// can import both), so changing the lookback in either place turns a test
+	// red.
+	t.Run("window start is the watermark minus the lookback", func(t *testing.T) {
+		t.Parallel()
+		got, err := EventsArchiveWindowStart("2030-01-15 02:00:00.5")
+		if err != nil {
+			t.Fatalf("EventsArchiveWindowStart: %v", err)
+		}
+		want := time.Date(2030, 1, 14, 2, 0, 0, 0, time.UTC)
+		if !got.Equal(want) {
+			t.Errorf("window start = %s, want %s", got, want)
+		}
+	})
 }
 
-// TestEventsRetentionReadsEveryWatermarkForm: the watermark's created_at is read
-// in each datetime form beadsql.TimestampLiteral accepts, and a form with no
-// zone is read as UTC.
+// TestEventsRetentionReadsEveryWatermarkForm: the watermark's created_at is
+// read in each datetime form beadsql.TimestampLiteral accepts, and a form with
+// no zone is read as UTC. The cutoff is the window start, the watermark minus
+// the lookback, truncated to whole seconds.
 func TestEventsRetentionReadsEveryWatermarkForm(t *testing.T) {
 	t.Parallel()
-	// Older than the retention cutoff (2029-12-16 12:00 UTC), so the watermark
-	// is the cutoff the pass reports.
-	want := time.Date(2029, 12, 14, 11, 0, 0, 500_000_000, time.UTC)
+	// Older than the retention cutoff (2029-12-16 12:00 UTC), so the archive's
+	// window start is the cutoff the pass reports.
+	want := time.Date(2029, 12, 13, 11, 0, 0, 0, time.UTC)
 	for _, form := range []string{
 		"2029-12-14 11:00:00.5",
 		"2029-12-14T11:00:00.5",
@@ -521,7 +600,7 @@ func TestEventsRetentionReadsEveryWatermarkForm(t *testing.T) {
 			state := newEventsState()
 			db := openFakeReaperDB(t, state)
 			t.Cleanup(func() { _ = db.Close() })
-			statePath := writeEventsState(t, []byte(`{"archive_events_watermarks":{"hq":{"created_at":"`+form+`"}}}`))
+			statePath := writeEventsState(t, []byte(`{"archive_events_watermarks":{"hq":{"created_at":"`+form+`","archived":[{"created_at":"`+form+`","id":"row-1"}]}}}`))
 
 			result, err := PurgeEvents(context.Background(), db, EventsPurgeOptions{
 				Now:        eventsNow,
@@ -542,18 +621,17 @@ func TestEventsRetentionReadsEveryWatermarkForm(t *testing.T) {
 	}
 }
 
-// TestEventsRetentionRefusesAWatermarkThatIsNotATimestamp: a watermark whose
-// created_at is not a timestamp is refused as an error, never read as no
-// watermark or as the retention cutoff, and the pass deletes nothing. A value
-// with the timestamp's shape but no real date is refused the same way.
-func TestEventsRetentionRefusesAWatermarkThatIsNotATimestamp(t *testing.T) {
+// TestEventsRetentionRefusesACorruptStateFile: a state file that exists but
+// is not valid JSON, or names an unsupported version, deletes nothing and
+// returns an error naming the database. It is a refusal, never a waiting pass.
+func TestEventsRetentionRefusesACorruptStateFile(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name      string
-		createdAt string
+		name string
+		body string
 	}{
-		{name: "not a timestamp", createdAt: "last tuesday"},
-		{name: "timestamp shape with no such date", createdAt: "2030-13-45 11:00:00"},
+		{name: "not JSON", body: `{not json`},
+		{name: "unsupported version", body: `{"version":2,"archive_events_watermarks":{}}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -563,8 +641,55 @@ func TestEventsRetentionRefusesAWatermarkThatIsNotATimestamp(t *testing.T) {
 			db := openFakeReaperDB(t, state)
 			t.Cleanup(func() { _ = db.Close() })
 
-			statePath := writeEventsState(t, []byte(`{"archive_events_watermarks":{"hq":{"created_at":"`+tt.createdAt+`"}}}`))
-			_, err := PurgeEvents(context.Background(), db, EventsPurgeOptions{
+			result, err := PurgeEvents(context.Background(), db, EventsPurgeOptions{
+				Now:        eventsNow,
+				Retain:     30 * 24 * time.Hour,
+				Batch:      10,
+				MaxBatches: 5,
+				Database:   eventsTestDatabase,
+				StatePath:  writeEventsState(t, []byte(tt.body)),
+			})
+			if err == nil {
+				t.Fatal("PurgeEvents read a corrupt state file as no watermark")
+			}
+			if !strings.Contains(err.Error(), eventsTestDatabase) {
+				t.Errorf("error = %v, want it to name the database %s", err, eventsTestDatabase)
+			}
+			if result.Waiting != "" || result.Skipped {
+				t.Errorf("result = %+v, want a refusal, not a waiting skipped pass", result)
+			}
+			if got := eventIDs(state.events); !slices.Equal(got, []int64{1}) {
+				t.Errorf("remaining events = %v, want [1] untouched", got)
+			}
+		})
+	}
+}
+
+// TestEventsRetentionRefusesACorruptWatermark: a watermark that fails
+// Validate, or whose created_at does not parse, deletes nothing and returns an
+// error naming the database. It is a refusal, never a waiting pass.
+func TestEventsRetentionRefusesACorruptWatermark(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		entry string
+	}{
+		{name: "created_at with no ids", entry: `"created_at":"2029-12-14 11:00:00"`},
+		{name: "created_at is not a timestamp", entry: `"created_at":"last tuesday"`},
+		{name: "created_at with no such date", entry: `"created_at":"2030-13-45 11:00:00"`},
+		{name: "archived row with an empty id", entry: `"created_at":"2029-12-14 11:00:00","archived":[{"created_at":"2029-12-14 11:00:00","id":""}]`},
+		{name: "ids without created_at", entry: `"archived":[{"created_at":"2029-12-14 11:00:00","id":"row-1"}]`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			state := newEventsState()
+			state.addEvent(1, eventsNow, 400*24*time.Hour)
+			db := openFakeReaperDB(t, state)
+			t.Cleanup(func() { _ = db.Close() })
+
+			statePath := writeEventsState(t, []byte(`{"archive_events_watermarks":{"hq":{`+tt.entry+`}}}`))
+			result, err := PurgeEvents(context.Background(), db, EventsPurgeOptions{
 				Now:        eventsNow,
 				Retain:     30 * 24 * time.Hour,
 				Batch:      10,
@@ -573,7 +698,13 @@ func TestEventsRetentionRefusesAWatermarkThatIsNotATimestamp(t *testing.T) {
 				StatePath:  statePath,
 			})
 			if err == nil {
-				t.Fatal("PurgeEvents accepted a watermark that is not a timestamp")
+				t.Fatal("PurgeEvents accepted a corrupt watermark")
+			}
+			if !strings.Contains(err.Error(), eventsTestDatabase) {
+				t.Errorf("error = %v, want it to name the database %s", err, eventsTestDatabase)
+			}
+			if result.Waiting != "" || result.Skipped {
+				t.Errorf("result = %+v, want a refusal, not a waiting skipped pass", result)
 			}
 			if got := eventIDs(state.events); !slices.Equal(got, []int64{1}) {
 				t.Errorf("remaining events = %v, want [1] untouched", got)
