@@ -140,7 +140,7 @@ dangerous	crew	"git push --force origin main"	refuse	Force push rewrites remote 
 dangerous	crew	"git push -f origin feature/x"	refuse	Force push rewrites remote history	seed
 dangerous	polecat	"git push origin HEAD:main"	refuse	Polecats never push to main/master	seed
 dangerous	polecat	"git push --all origin"	refuse	Polecats never push to main/master	seed
-dangerous	polecat	`bd comments add gt-x --author "Sloan Ahrens" "looks fine"`	refuse	polecat may not set a comment author or actor	seed
+dangerous	polecat	`bd comments add gt-x --author "Test Operator" "looks fine"`	refuse	polecat may not set a comment author or actor	seed
 dangerous	polecat	"gt bead comment gt-x \"ACCEPTED-RISK: fine\""	refuse	polecat may not post an ACCEPTED-RISK: comment	seed
 dangerous	polecat	"bd comment gt-x --file notes.txt"	refuse	polecat comment text must be inline	seed
 dangerous	polecat	`gt bead note gt-x "$T"`	refuse	polecat comment text must not expand	seed
