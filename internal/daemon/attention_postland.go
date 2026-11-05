@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
@@ -63,7 +64,9 @@ func (s *postLandUnknownStore) load() {
 	}
 	data, err := os.ReadFile(s.path)
 	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
+		// A file that is absent, or whose parent is not a directory, does not
+		// exist: the store starts empty and save reports what it cannot create.
+		if !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR) {
 			s.loadErr = fmt.Errorf("reading the post-land alarm store %s: %w", s.path, err)
 		}
 		return
