@@ -1362,3 +1362,74 @@ func TestDaemonComposeBindRORefuses(t *testing.T) {
 		}
 	})
 }
+
+// The town-overlap check of a --bind-ro path is made on resolved paths, so a
+// symlink that leads into the town, or to a directory holding it, is refused as
+// the directory it names would be. A path that cannot be resolved is refused, and
+// a link to a directory outside the town still renders (gt-7kjw1).
+func TestDaemonComposeBindROSymlinkOverlap(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	town := filepath.Join(root, "town")
+	reports := filepath.Join(town, "reports")
+	sibling := filepath.Join(root, "sibling")
+	for _, dir := range []string{reports, sibling} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("creating %s: %v", dir, err)
+		}
+	}
+	link := func(name, target string) string {
+		t.Helper()
+		p := filepath.Join(root, name)
+		if err := os.Symlink(target, p); err != nil {
+			t.Fatalf("linking %s to %s: %v", p, target, err)
+		}
+		return p
+	}
+	intoTown := link("into-town", reports)
+	containsTown := link("contains-town", root)
+	townLink := link("town-link", town)
+	dangling := link("dangling", filepath.Join(root, "missing"))
+	danglingTown := link("dangling-town", filepath.Join(root, "gone"))
+	toSibling := link("to-sibling", sibling)
+
+	cases := []struct {
+		name     string
+		townRoot string
+		bind     string
+		want     string
+	}{
+		{name: "link into the town", townRoot: town, bind: intoTown, want: "inside or contains the town root"},
+		{name: "link to a directory holding the town", townRoot: town, bind: containsTown, want: "inside or contains the town root"},
+		{name: "town root is a link to a real directory", townRoot: townLink, bind: reports, want: "inside or contains the town root"},
+		{name: "path under a link into the town", townRoot: town, bind: filepath.Join(intoTown, "new"), want: "inside or contains the town root"},
+		{name: "dangling link", townRoot: town, bind: dangling, want: "cannot be resolved"},
+		{name: "town root is a dangling link", townRoot: danglingTown, bind: reports, want: "cannot be resolved"},
+		{name: "link to a sibling directory renders", townRoot: town, bind: toSibling},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec := liveSpec()
+			spec.TownRoot = tc.townRoot
+			spec.BindRO = []string{tc.bind}
+
+			out, err := templates.RenderDaemonCompose(spec)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("RenderDaemonCompose with bind-ro %q = %v, want a render", tc.bind, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("RenderDaemonCompose with bind-ro %q = a render, want a refusal:\n%s", tc.bind, out)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to say %q", err, tc.want)
+			}
+			if !strings.Contains(err.Error(), strconv.Quote(tc.bind)) {
+				t.Errorf("error = %q, want it to name the path %q", err, tc.bind)
+			}
+		})
+	}
+}
