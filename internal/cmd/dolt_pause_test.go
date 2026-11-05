@@ -15,11 +15,11 @@ func TestPauseActor(t *testing.T) {
 			return ""
 		}
 	}
-	git := func() string { return " Sloan Ahrens\n" }
+	git := func() string { return " Test Operator\n" }
 	if got := pauseActor(env("deacon"), git); got != "deacon" {
 		t.Errorf("BD_ACTOR set: actor = %q", got)
 	}
-	if got := pauseActor(env(""), git); got != "Sloan Ahrens" {
+	if got := pauseActor(env(""), git); got != "Test Operator" {
 		t.Errorf("BD_ACTOR unset: actor = %q, want the git identity", got)
 	}
 }
