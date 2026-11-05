@@ -509,10 +509,10 @@ func runDoltRestart(cmd *cobra.Command, args []string) error {
 
 // doltStatusReads is where `gt dolt status` reads the town and the server: the
 // town root, whether the server answers, its metrics, the databases it serves,
-// the archive reader the database lines count through, and the stray-server
-// warning. Production passes the real calls; a test passes fakes, so the report
-// runs with no live Dolt, no Docker container and no host process scan
-// (gt-w1ekf).
+// the archive reader the database lines count through, the beads client config,
+// and the stray-server warning. Production passes the real calls; a test passes
+// fakes, so the report runs with no live Dolt, no Docker container, no host
+// process scan and no beads config on disk (gt-w1ekf).
 type doltStatusReads struct {
 	townRoot           func() (string, error)
 	isRunning          func(townRoot string) (bool, int, error)
