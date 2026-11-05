@@ -55,3 +55,80 @@ func TestRenderServicesRefusesWithEmptyStdout(t *testing.T) {
 		}
 	}
 }
+
+func TestRegistryForwardFlag(t *testing.T) {
+	t.Parallel()
+	const hosts = "values/lab/hosts.yaml"
+	read := fakeRead(map[string]string{hosts: "control_plane_host: cp.example\nregistry_host: localhost:5001\n"})
+
+	t.Run("renders the DaemonSet to stdout", func(t *testing.T) {
+		t.Parallel()
+		var out, errw bytes.Buffer
+		if code := run([]string{"--registry-forward", hosts}, read, &out, &errw); code != 0 {
+			t.Fatalf("exit %d, stderr %q", code, errw.String())
+		}
+		if !strings.Contains(out.String(), "kind: DaemonSet") {
+			t.Errorf("no DaemonSet in the output:\n%s", out.String())
+		}
+		if !strings.Contains(out.String(), "TCP:cp.example:5001") {
+			t.Errorf("the relay does not name the hosts file's control_plane_host:\n%s", out.String())
+		}
+		if strings.Contains(out.String(), "kind: Service") {
+			t.Errorf("the forwarder output carries a Service:\n%s", out.String())
+		}
+	})
+
+	t.Run("without the flag the Services are rendered as before", func(t *testing.T) {
+		t.Parallel()
+		var out, errw bytes.Buffer
+		if code := run([]string{hosts}, read, &out, &errw); code != 0 {
+			t.Fatalf("exit %d, stderr %q", code, errw.String())
+		}
+		if strings.Contains(out.String(), "DaemonSet") || strings.Count(out.String(), "kind: Service") != 4 {
+			t.Errorf("without the flag the output is not the four Services:\n%s", out.String())
+		}
+	})
+
+	t.Run("wrong command lines exit 2", func(t *testing.T) {
+		t.Parallel()
+		for _, args := range [][]string{
+			{"--registry-forward"},
+			{"--registry-forward", hosts, hosts},
+			{hosts, "--registry-forward"},
+		} {
+			var out, errw bytes.Buffer
+			if code := run(args, read, &out, &errw); code != 2 {
+				t.Errorf("args %q: exit %d, want 2 (stderr %q)", args, code, errw.String())
+			}
+			if out.Len() != 0 {
+				t.Errorf("args %q: stdout is not empty: %q", args, out.String())
+			}
+		}
+	})
+
+	t.Run("an unreadable file exits 1 with empty stdout", func(t *testing.T) {
+		t.Parallel()
+		var out, errw bytes.Buffer
+		if code := run([]string{"--registry-forward", "missing/hosts.yaml"}, read, &out, &errw); code != 1 {
+			t.Errorf("exit %d, want 1 (stderr %q)", code, errw.String())
+		}
+		if out.Len() != 0 {
+			t.Errorf("stdout is not empty: %q", out.String())
+		}
+	})
+
+	t.Run("a hosts file without a registry_host exits 1 with empty stdout", func(t *testing.T) {
+		t.Parallel()
+		var out, errw bytes.Buffer
+		noRegistry := fakeRead(map[string]string{hosts: "control_plane_host: cp.example\n"})
+		if code := run([]string{"--registry-forward", hosts}, noRegistry, &out, &errw); code != 1 {
+			t.Errorf("exit %d, want 1 (stderr %q)", code, errw.String())
+		}
+		if out.Len() != 0 {
+			t.Errorf("stdout is not empty: %q", out.String())
+		}
+		if !strings.Contains(errw.String(), "registry_host") {
+			t.Errorf("stderr %q does not name registry_host", errw.String())
+		}
+	})
+}

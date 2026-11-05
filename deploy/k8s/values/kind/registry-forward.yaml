@@ -1,0 +1,25 @@
+# GENERATED from values/kind/hosts.yaml by `go run ./cmd/render-services --registry-forward`; do not edit.
+# A host-network forwarder on every node: the node's localhost port is the registry port
+# of registry_host, relayed to control_plane_host. The listener binds 127.0.0.1 only,
+# because the registry has no authentication.
+apiVersion: v1
+kind: Namespace
+metadata: {name: sweep-registry-forward}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: registry-forward, namespace: sweep-registry-forward}
+spec:
+  selector: {matchLabels: {app: registry-forward}}
+  template:
+    metadata: {labels: {app: registry-forward}}
+    spec:
+      hostNetwork: true
+      priorityClassName: gt-control-plane
+      containers:
+        - name: socat
+          image: alpine/socat:1.8.0.3
+          args: ["TCP-LISTEN:5001,fork,reuseaddr,bind=127.0.0.1", "TCP:host.lima.internal:5001"]
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}
