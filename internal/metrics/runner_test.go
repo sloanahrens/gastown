@@ -157,6 +157,50 @@ func TestRunnerOSRunnerExecsWithTheAllowlistedEnvironment(t *testing.T) {
 	}
 }
 
+// fakeParentEnv is a parent environment for childEnv: only the names in parent
+// are set, so a test never reads or changes the process environment.
+func fakeParentEnv(parent map[string]string) func(string) (string, bool) {
+	return func(name string) (string, bool) {
+		v, ok := parent[name]
+		return v, ok
+	}
+}
+
+func TestDefaultAllowEnvPassesTheDoltEndpoint(t *testing.T) {
+	t.Parallel()
+	got := childEnv(DefaultAllowEnv, nil, fakeParentEnv(map[string]string{
+		"BEADS_DOLT_SERVER_HOST": "host.docker.internal",
+		"BEADS_DOLT_SERVER_PORT": "3307",
+	}))
+	want := []string{"BEADS_DOLT_SERVER_HOST=host.docker.internal", "BEADS_DOLT_SERVER_PORT=3307"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("childEnv(DefaultAllowEnv) = %v, want %v (the Dolt endpoint must reach a child bd)", got, want)
+	}
+}
+
+func TestDefaultAllowEnvStillDropsOtherVariables(t *testing.T) {
+	t.Parallel()
+	got := childEnv(DefaultAllowEnv, nil, fakeParentEnv(map[string]string{
+		"BEADS_DOLT_SERVER_HOST":  "host.docker.internal",
+		"BEADS_DOLT_SERVER_PORT":  "3307",
+		"BEADS_DOLT_PASSWORD":     "parent-only",
+		"TOWN_METRICS_TEST_TOKEN": "parent-only",
+	}))
+	want := []string{"BEADS_DOLT_SERVER_HOST=host.docker.internal", "BEADS_DOLT_SERVER_PORT=3307"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("childEnv(DefaultAllowEnv) = %v, want only the endpoint %v (a credential the allowlist omits must not reach a child)", got, want)
+	}
+}
+
+func TestDefaultAllowEnvUnsetEndpointStaysAbsent(t *testing.T) {
+	t.Parallel()
+	got := childEnv(DefaultAllowEnv, nil, fakeParentEnv(map[string]string{"PATH": "/usr/bin"}))
+	want := []string{"PATH=/usr/bin"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("childEnv(DefaultAllowEnv) = %v, want %v (an unset endpoint variable must stay absent)", got, want)
+	}
+}
+
 func TestRunnerOSRunnerEnvDeliversExtraEnvironment(t *testing.T) {
 	t.Parallel()
 	out, err := OSRunnerEnv(DefaultAllowEnv)(context.Background(), []string{"/bin/sh", "-c", `printf %s "$TOWN_METRICS_TOWN"`}, []string{"TOWN_METRICS_TOWN=/town"})

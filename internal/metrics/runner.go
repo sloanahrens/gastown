@@ -18,8 +18,9 @@ import (
 const killGrace = 2 * time.Second
 
 // DefaultAllowEnv is the environment a source's child commands inherit: enough
-// to find binaries and the user's config, and nothing else.
-var DefaultAllowEnv = []string{"PATH", "HOME", "TMPDIR", "LANG"}
+// to find binaries and the user's config, and the Dolt endpoint a child bd
+// needs to reach the server, and nothing else.
+var DefaultAllowEnv = []string{"PATH", "HOME", "TMPDIR", "LANG", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT"}
 
 // OSRunner returns a Runner that runs argv as a child process with no
 // environment beyond the allowlist.
