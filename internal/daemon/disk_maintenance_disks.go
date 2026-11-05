@@ -15,6 +15,9 @@ package daemon
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/steveyegge/gastown/internal/diskmaint/disks"
@@ -35,39 +38,131 @@ const (
 	// diskMaintRunnerContainer is the container whose root filesystem is the
 	// Docker Desktop disk the CI runner fills; deploy creates it.
 	diskMaintRunnerContainer = "forgejo-runner-daemon-1"
-
-	// diskMaintColimaProfile is the sandbox profile whose data disk the
-	// runner's images land on.
-	diskMaintColimaProfile = "gt-sbx"
 )
 
-// DFReader runs one disk's df and returns its output. A failed read is an
-// error, never an empty reading: the patrol must not mistake a disk it could
-// not reach for a disk with room.
+// DFReader runs one disk's read and returns the output its parser reads. A
+// failed read is an error, never an empty reading: the patrol must not mistake
+// a disk it could not reach for a disk with room.
 type DFReader func(ctx context.Context) ([]byte, error)
 
-// diskMaintDisk is one watched disk: the name its alerts are keyed by and the
-// df command that measures it.
+// diskMaintDisk is one watched disk: the name its alerts are keyed by, the
+// reader that measures it, and the parser its output needs.
 type diskMaintDisk struct {
 	name string
 	df   DFReader
+	// parse turns the reader's output into the disk's used share; nil is
+	// disks.ParseDF.
+	parse func(string) (float64, error)
 }
 
 // diskMaintDisks returns the disks the patrol reads, in report order: the Mac
-// volume, Colima's sandbox data disk, and the Docker Desktop disk the CI
+// volume, the sandbox cluster's data disk, and the Docker Desktop disk the CI
 // runner writes to.
-func (d *Daemon) diskMaintDisks() []diskMaintDisk {
+//
+// The sandbox disk keeps the name "colima": it is the alert key's middle part,
+// and an open alert under a new name would be orphaned.
+func (d *Daemon) diskMaintDisks(kubeconfig string) []diskMaintDisk {
 	return []diskMaintDisk{
 		{name: diskMaintDiskMac, df: d.diskMaintDF("df", "-P", "/")},
-		{name: diskMaintDiskColima, df: d.diskMaintDF("colima", "ssh", "-p", diskMaintColimaProfile,
-			"--", "df", "-P", "/mnt/lima-colima-gt-sbx")},
+		{name: diskMaintDiskColima, df: d.diskMaintSandboxDisk(kubeconfig), parse: disks.ParseNodeStats},
 		{name: diskMaintDiskDockerDesktop, df: d.diskMaintDF("docker", "exec",
 			diskMaintRunnerContainer, "df", "-P", "/")},
 	}
 }
 
+// diskMaintSandboxDisk reads the sandbox cluster's data disk from the kubelet
+// node stats, which works from inside the town's container: there is no colima
+// binary there, and every node reports its own root filesystem (gt-gg9hv.24.3).
+//
+// It returns the summary of the node with the highest used share, which the
+// disk's parser turns into the reading. A node the cluster lists whose summary
+// cannot be read makes the read an error naming every such node, never a lower
+// number.
+func (d *Daemon) diskMaintSandboxDisk(kubeconfig string) DFReader {
+	return func(ctx context.Context) ([]byte, error) {
+		nodes, err := d.diskMaintSandboxNodes(ctx, kubeconfig)
+		if err != nil {
+			return nil, err
+		}
+		if len(nodes) == 0 {
+			return nil, errors.New("the sandbox cluster lists no nodes")
+		}
+		var (
+			worst    []byte
+			worstPct float64
+			failures []error
+		)
+		for _, node := range nodes {
+			summary, err := d.diskMaintRunner(ctx, nil, "kubectl", "--kubeconfig", kubeconfig,
+				"get", "--raw", "/api/v1/nodes/"+node+"/proxy/stats/summary")
+			if err != nil {
+				failures = append(failures, fmt.Errorf("node %s: %w", node, err))
+				continue
+			}
+			pct, err := disks.ParseNodeStats(string(summary))
+			if err != nil {
+				failures = append(failures, fmt.Errorf("node %s: %w", node, err))
+				continue
+			}
+			if worst == nil || pct > worstPct {
+				worst, worstPct = summary, pct
+			}
+		}
+		if len(failures) > 0 {
+			return nil, errors.Join(failures...)
+		}
+		return worst, nil
+	}
+}
+
+// diskMaintSandboxNodes names the nodes the sandbox cluster lists, which are
+// the nodes that hold its work.
+func (d *Daemon) diskMaintSandboxNodes(ctx context.Context, kubeconfig string) ([]string, error) {
+	out, err := d.diskMaintRunner(ctx, nil, "kubectl", "--kubeconfig", kubeconfig, "get", "nodes", "-o", "name")
+	if err != nil {
+		return nil, fmt.Errorf("listing the sandbox cluster's nodes: %w", err)
+	}
+	var nodes []string
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		name, ok := strings.CutPrefix(line, "node/")
+		if !ok {
+			return nil, fmt.Errorf("kubectl get nodes named %q, want a node/name", line)
+		}
+		if !validSandboxNodeName(name) {
+			return nil, fmt.Errorf("kubectl get nodes named %q, which is not a node name", name)
+		}
+		nodes = append(nodes, name)
+	}
+	return nodes, nil
+}
+
+// validSandboxNodeName reports whether name has the DNS subdomain shape a
+// Kubernetes node name has. The name becomes part of a request path, so
+// anything else is refused before it is fetched.
+func validSandboxNodeName(name string) bool {
+	if name == "" || len(name) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(name, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, r := range label {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
 // diskMaintDF runs one disk's df through the daemon's exec seam, so the unit
-// tier never launches df, colima or docker.
+// tier never launches df or docker.
 func (d *Daemon) diskMaintDF(name string, args ...string) DFReader {
 	return func(ctx context.Context) ([]byte, error) {
 		return d.diskMaintRunner(ctx, nil, name, args...)
@@ -75,22 +170,26 @@ func (d *Daemon) diskMaintDF(name string, args ...string) DFReader {
 }
 
 // diskMaintenanceReadings reads every watched disk once, through the injected
-// reader a disk has in tests and its own df command otherwise. A failed read
-// or output that names no capacity becomes that disk's reading error.
-func (d *Daemon) diskMaintenanceReadings(ctx context.Context, injected map[string]DFReader) []disks.Reading {
-	watched := d.diskMaintDisks()
+// reader a disk has in tests and its own command otherwise. A failed read or
+// output the disk's parser refuses becomes that disk's reading error.
+func (d *Daemon) diskMaintenanceReadings(ctx context.Context, injected map[string]DFReader, kubeconfig string) []disks.Reading {
+	watched := d.diskMaintDisks(kubeconfig)
 	readings := make([]disks.Reading, 0, len(watched))
 	for _, disk := range watched {
 		read := disk.df
 		if fn, ok := injected[disk.name]; ok {
 			read = fn
 		}
+		parse := disk.parse
+		if parse == nil {
+			parse = disks.ParseDF
+		}
 		out, err := read(ctx)
 		if err != nil {
 			readings = append(readings, disks.Reading{Name: disk.name, Err: err})
 			continue
 		}
-		pct, err := disks.ParseDF(string(out))
+		pct, err := parse(string(out))
 		if err != nil {
 			readings = append(readings, disks.Reading{Name: disk.name, Err: err})
 			continue

@@ -3,12 +3,15 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/diskmaint/disks"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
@@ -207,7 +210,7 @@ func TestDiskMaintenanceReadsTheThreeDisks(t *testing.T) {
 	d.diskMaint.dfReaders = map[string]DFReader{
 		"mac": reader("mac", "Filesystem 1024-blocks Used Available Capacity Mounted on\n"+
 			"/dev/disk3s1 1000000 910000 90000 91% /\n"),
-		"colima":         reader("colima", diskMaintHealthyDF),
+		"colima":         reader("colima", diskMaintNodeStats(100000)),
 		"docker-desktop": reader("docker-desktop", diskMaintHealthyDF),
 	}
 
@@ -252,7 +255,7 @@ func TestDiskMaintenanceUnparsableDFIsUnreadable(t *testing.T) {
 			healthy := func(context.Context) ([]byte, error) { return []byte(diskMaintHealthyDF), nil }
 			d.diskMaint.dfReaders = map[string]DFReader{
 				"mac":            tt.df,
-				"colima":         healthy,
+				"colima":         func(context.Context) ([]byte, error) { return []byte(diskMaintNodeStats(100000)), nil },
 				"docker-desktop": healthy,
 			}
 
@@ -317,24 +320,31 @@ func TestDiskMaintenanceFailedClearIsLogged(t *testing.T) {
 }
 
 // TestDiskMaintenanceProductionDFVectors: the patrol measures each watched
-// disk with its production command line, so a renamed container, profile or
-// mount point fails here rather than in a pass that reads the wrong filesystem
-// or none.
+// disk with its production command line, so a renamed container or mount point
+// fails here rather than in a pass that reads the wrong filesystem or none.
 func TestDiskMaintenanceProductionDFVectors(t *testing.T) {
 	t.Parallel()
 	d, _, _ := diskMaintTestDaemon(t)
-	d.diskMaint.readDisks = nil // the production read, with these df commands
+	d.diskMaint.readDisks = nil // the production read, with these commands
 	var ran [][]string
 	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
 		ran = append(ran, cmd.Args)
+		if len(cmd.Args) > 4 && cmd.Args[3] == "get" && cmd.Args[4] == "nodes" {
+			return []byte("node/kind-worker\n"), nil, nil
+		}
+		if len(cmd.Args) > 4 && cmd.Args[3] == "get" && cmd.Args[4] == "--raw" {
+			return []byte(diskMaintNodeStats(100000)), nil, nil
+		}
 		return []byte(diskMaintHealthyDF), nil, nil
 	}
 
 	d.runDiskMaintenance()
 
+	kubeconfig := diskMaintKubeconfig(d.config.TownRoot, d.diskMaint.getenv)
 	want := [][]string{
 		{"df", "-P", "/"},
-		{"colima", "ssh", "-p", "gt-sbx", "--", "df", "-P", "/mnt/lima-colima-gt-sbx"},
+		{"kubectl", "--kubeconfig", kubeconfig, "get", "nodes", "-o", "name"},
+		{"kubectl", "--kubeconfig", kubeconfig, "get", "--raw", "/api/v1/nodes/kind-worker/proxy/stats/summary"},
 		{"docker", "exec", "forgejo-runner-daemon-1", "df", "-P", "/"},
 	}
 	if len(ran) != len(want) {
@@ -374,5 +384,169 @@ func TestDiskMaintenanceUndeliveredAlertIsRaisedAgain(t *testing.T) {
 	if !diskMaintAlertIsOpen(f.notify, "diskmaint:mac") {
 		t.Errorf("escalations = %+v, want the alert raised on the pass after the failed delivery",
 			f.notify.Escalations())
+	}
+}
+
+// diskMaintNodeStats is the kubelet stats summary of a node whose filesystem
+// holds 160000 bytes, used as given.
+func diskMaintNodeStats(used int64) string {
+	return fmt.Sprintf(`{"node":{"fs":{"capacityBytes":160000,"usedBytes":%d}}}`, used)
+}
+
+// TestDiskMaintSandboxDiskReadsNodeStats: the sandbox disk is the kubelet node
+// stats' worst node, read through kubectl with the patrol's kubeconfig; any
+// node the cluster lists whose stats cannot be read, or a node listing that
+// cannot be trusted, is an unreadable disk rather than a lower reading.
+func TestDiskMaintSandboxDiskReadsNodeStats(t *testing.T) {
+	t.Parallel()
+	type sandboxRead struct {
+		container    bool
+		nodes        string
+		nodesErr     error
+		summaries    map[string]string
+		summaryErrs  map[string]error
+		wantPct      float64
+		wantErr      bool
+		wantErrNames []string
+	}
+	cases := map[string]sandboxRead{
+		"the busier node wins": {
+			nodes:     "node/kind-worker\nnode/kind-worker-2\n",
+			summaries: map[string]string{"kind-worker": diskMaintNodeStats(80000), "kind-worker-2": diskMaintNodeStats(120000)},
+			wantPct:   75,
+		},
+		"the busier node wins listed second to last": {
+			nodes:     "node/kind-worker-2\nnode/kind-worker\n",
+			summaries: map[string]string{"kind-worker": diskMaintNodeStats(120000), "kind-worker-2": diskMaintNodeStats(80000)},
+			wantPct:   75,
+		},
+		"a runner error on the first node": {
+			nodes:        "node/kind-worker\nnode/kind-worker-2\n",
+			summaries:    map[string]string{"kind-worker-2": diskMaintNodeStats(120000)},
+			summaryErrs:  map[string]error{"kind-worker": errors.New("the connection to the server was refused")},
+			wantErr:      true,
+			wantErrNames: []string{"kind-worker"},
+		},
+		"a runner error on the second node": {
+			nodes:        "node/kind-worker\nnode/kind-worker-2\n",
+			summaries:    map[string]string{"kind-worker": diskMaintNodeStats(80000)},
+			summaryErrs:  map[string]error{"kind-worker-2": errors.New("the connection to the server was refused")},
+			wantErr:      true,
+			wantErrNames: []string{"kind-worker-2"},
+		},
+		"a summary the parser refuses": {
+			nodes:        "node/kind-worker\n",
+			summaries:    map[string]string{"kind-worker": `{"node":{"nodeName":"kind-worker"}}`},
+			wantErr:      true,
+			wantErrNames: []string{"kind-worker", "node.fs"},
+		},
+		"a node name that is not a name": {
+			nodes:        "node/../etc\n",
+			summaries:    map[string]string{"../etc": diskMaintNodeStats(120000)},
+			wantErr:      true,
+			wantErrNames: []string{"../etc", "not a node name"},
+		},
+		"a listing line that is not a node": {
+			nodes:        "kind-worker\n",
+			summaries:    map[string]string{"kind-worker": diskMaintNodeStats(120000)},
+			wantErr:      true,
+			wantErrNames: []string{"kind-worker", "node/name"},
+		},
+		"the cluster lists no nodes": {
+			nodes:        "\n\n",
+			wantErr:      true,
+			wantErrNames: []string{"no nodes"},
+		},
+		"the node listing fails": {
+			nodesErr:     errors.New("the connection to the server was refused"),
+			wantErr:      true,
+			wantErrNames: []string{"nodes"},
+		},
+		// In the town's container the host's kubeconfig names a loopback the
+		// container cannot reach; the read must use the derived one.
+		"container mode uses the container kubeconfig": {
+			container: true,
+			nodes:     "node/kind-worker\n",
+			summaries: map[string]string{"kind-worker": diskMaintNodeStats(120000)},
+			wantPct:   75,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			d := &Daemon{config: &Config{TownRoot: town}}
+			d.diskMaint.getenv = func(key string) string {
+				if tc.container && key == agentconfig.ContainerModeEnv {
+					return agentconfig.SupervisorContainer
+				}
+				return ""
+			}
+			healthy := func(context.Context) ([]byte, error) { return []byte(diskMaintHealthyDF), nil }
+			d.diskMaint.dfReaders = map[string]DFReader{"mac": healthy, "docker-desktop": healthy}
+
+			var kubectl [][]string
+			d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+				args := cmd.Args
+				if args[0] != "kubectl" {
+					return nil, []byte("unexpected command"), fmt.Errorf("unexpected command %q", args)
+				}
+				kubectl = append(kubectl, args)
+				switch {
+				case len(args) > 4 && args[3] == "get" && args[4] == "nodes":
+					return []byte(tc.nodes), nil, tc.nodesErr
+				case len(args) > 4 && args[3] == "get" && args[4] == "--raw":
+					node := strings.TrimSuffix(strings.TrimPrefix(args[5], "/api/v1/nodes/"), "/proxy/stats/summary")
+					if err := tc.summaryErrs[node]; err != nil {
+						return nil, []byte(err.Error()), err
+					}
+					summary, ok := tc.summaries[node]
+					if !ok {
+						return nil, []byte("no summary"), fmt.Errorf("no summary for node %s", node)
+					}
+					return []byte(summary), nil, nil
+				}
+				return nil, []byte("unexpected kubectl"), fmt.Errorf("unexpected kubectl %q", args)
+			}
+
+			readings := d.diskMaintenanceSeams().readDisks(context.Background())
+
+			var got disks.Reading
+			for _, r := range readings {
+				if r.Name == "colima" {
+					got = r
+				}
+			}
+			if tc.wantErr {
+				if got.Err == nil {
+					t.Fatalf("sandbox disk reading = %.1f%%, want an error", got.UsedPct)
+				}
+				for _, want := range tc.wantErrNames {
+					if !strings.Contains(got.Err.Error(), want) {
+						t.Errorf("reading error %q does not name %s", got.Err, want)
+					}
+				}
+			} else {
+				if got.Err != nil {
+					t.Fatalf("sandbox disk reading = error %v, want %.1f%%", got.Err, tc.wantPct)
+				}
+				if got.UsedPct != tc.wantPct {
+					t.Fatalf("sandbox disk reading = %.1f%%, want %.1f%%", got.UsedPct, tc.wantPct)
+				}
+			}
+
+			wantKubeconfig := filepath.Join(town, ".runtime", "sbx-k8s", "kubeconfig")
+			if tc.container {
+				wantKubeconfig = filepath.Join(town, ".runtime", "container", "kubeconfig.yaml")
+			}
+			if len(kubectl) == 0 {
+				t.Fatal("the sandbox disk ran no kubectl")
+			}
+			for _, args := range kubectl {
+				if len(args) < 3 || args[1] != "--kubeconfig" || args[2] != wantKubeconfig {
+					t.Errorf("kubectl ran %q, want --kubeconfig %s", args, wantKubeconfig)
+				}
+			}
+		})
 	}
 }

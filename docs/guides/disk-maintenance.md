@@ -105,9 +105,10 @@ that it did what the plan said.
 ## Disk alerts and keep tightening
 
 The patrol reads three disks: `mac` (the machine's root filesystem, `df -P /`),
-`colima` (the sandbox data disk, through `colima ssh -p gt-sbx`), and
-`docker-desktop` (the CI runner container's root filesystem, through
-`docker exec`).
+`colima` (the sandbox data disk, the worst node's used share from the kubelet
+node stats, so the read works inside the town's container where there is no
+colima binary), and `docker-desktop` (the CI runner container's root
+filesystem, through `docker exec`).
 
 - At 80% used a disk raises `diskmaint:<disk>`; the alert clears only below
   70%, so a disk at the line does not flap.
