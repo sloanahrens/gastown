@@ -48,6 +48,12 @@ const (
 	// the claim.
 	cacheTrimListVerb = "exec -n " + cacheTrimNamespace + " sbx-a -c agent -- " + cachevol.HelperPath + " trim-list --root " + cacheTrimMountPath
 
+	// cacheTrimFreeVerb is the pass's read of the claim's free space, made only
+	// when the trim takes the claim route: df in the pod the listing came from,
+	// not a helper subcommand, since an older image sends an unknown subcommand
+	// to a full plugin run (gt-gg9hv.41).
+	cacheTrimFreeVerb = "exec -n " + cacheTrimNamespace + " sbx-a -c agent -- df -Pk " + cacheTrimMountPath
+
 	// cacheTrimLastAppliedLimit is the metadata size the API server holds
 	// kubectl's last-applied-configuration annotation to, in bytes.
 	cacheTrimLastAppliedLimit = 262144
@@ -110,8 +116,10 @@ func newCacheTrimFixture(t *testing.T, mode string, overrides map[string]cliRepl
 			return cliReply{stdout: cacheTrimClaimsJSON}
 		case strings.HasPrefix(verb, "get pods "):
 			return cliReply{stdout: cacheTrimPodsJSON}
-		case strings.HasPrefix(verb, "exec "):
+		case strings.Contains(verb, " "+cachevol.HelperPath+" trim-list "):
 			return cliReply{stdout: cacheTrimListingJSON}
+		case strings.Contains(verb, " df -Pk "):
+			return cliReply{stdout: cacheTrimDfReply(t, 1<<30)}
 		case strings.HasPrefix(verb, "get job,configmap "):
 			return cliReply{stdout: cacheTrimExistingJSON}
 		}
@@ -665,6 +673,12 @@ func TestDiskMaintenanceCacheTrimStopsAtTheReadItCannotMake(t *testing.T) {
 			"the pod list for namespace " + cacheTrimNamespace + " names the pod sbx-z in elsewhere"},
 		{"the listing is not JSON", map[string]cliReply{execList: {stdout: "not json"}},
 			"the listing could not be read: decoding the trim listing"},
+		{"the listing is empty", map[string]cliReply{execList: {stdout: " "}},
+			"the listing could not be read: decoding the trim listing"},
+		{"the listing is an array of numbers", map[string]cliReply{execList: {stdout: "[1]"}},
+			"the listing could not be read: decoding the trim listing"},
+		{"the listing is a document, not the bare array", map[string]cliReply{execList: {stdout: `{"entries":[]}`}},
+			"the listing could not be read: decoding the trim listing"},
 		{"the object list fails", map[string]cliReply{getObjects: {stderr: "forbidden", code: 1}},
 			"the apply failed: listing the trim's objects"},
 		{"the object list is not JSON", map[string]cliReply{getObjects: {stdout: "not json"}},
@@ -1162,6 +1176,13 @@ func (f *cacheTrimFixture) listReads() int {
 // one path per shard, every shard over the limit a client-side apply's
 // last-applied annotation would break (gt-gg9hv.40).
 func cacheTrimLargeListingJSON(shards int) string {
+	return cacheTrimLargeListingPadded(shards, 0)
+}
+
+// cacheTrimLargeListingPadded is cacheTrimLargeListingJSON with pad extra
+// characters on the first path, so a test can put the encoded removal list on
+// the whole-KiB grid df -Pk reports its room by.
+func cacheTrimLargeListingPadded(shards, pad int) string {
 	// One byte past the shard bound in the path text, so the encoded entry
 	// takes a shard of its own and its ConfigMap carries the file list past
 	// the metadata limit.
@@ -1172,9 +1193,15 @@ func cacheTrimLargeListingJSON(shards int) string {
 		if i > 0 {
 			b.WriteByte(',')
 		}
+		extra := ""
+		if i == 0 {
+			extra = strings.Repeat("a", pad)
+		}
+		// The minute wraps, so a listing of more than 59 entries still names a
+		// time the decoder reads.
 		fmt.Fprintf(&b,
-			`{"path":"gocache/%03d%s","cache":"build","size":%d,"atime":"2026-10-29T01:%02d:00Z","mtime":"2026-10-29T01:%02d:00Z"}`,
-			i, pathText, cachevol.TrimShardBytes, i, i)
+			`{"path":"gocache/%03d%s%s","cache":"build","size":%d,"atime":"2026-10-29T01:%02d:00Z","mtime":"2026-10-29T01:%02d:00Z"}`,
+			i, pathText, extra, cachevol.TrimShardBytes, i%60, i%60)
 	}
 	b.WriteByte(']')
 	return b.String()
@@ -1354,6 +1381,558 @@ func TestCacheTrimApplyFailureRetriesSoon(t *testing.T) {
 	if got := f.listReads(); got != 3 {
 		t.Fatalf("trimmed %d times fifteen minutes after a verdict, want 3: a verdict spends the interval", got)
 	}
+}
+
+// cacheTrimDfReply is df -Pk's reply for a claim with free bytes of room: the
+// header df -Pk prints and one data row, its Available column in KiB. The room
+// is a whole number of KiB, as df reports it (gt-gg9hv.41).
+func cacheTrimDfReply(t *testing.T, free int64) string {
+	t.Helper()
+	if free%1024 != 0 {
+		t.Fatalf("cacheTrimDfReply(%d): df -Pk reports whole KiB", free)
+	}
+	return "Filesystem 1024-blocks Used Available Capacity Mounted on\n" +
+		fmt.Sprintf("overlay 1000000 1 %d 1%% /", free/1024)
+}
+
+// cacheTrimAppliedLine is the pass's applied line from the log.
+func cacheTrimAppliedLine(t *testing.T, logged string) string {
+	t.Helper()
+	for _, line := range strings.Split(logged, "\n") {
+		if strings.Contains(line, "cache trim "+cacheTrimClaimName+" in "+cacheTrimNamespace+" applied") {
+			return line
+		}
+	}
+	t.Fatalf("the log carries no applied line: %s", logged)
+	return ""
+}
+
+// cacheTrimRemovalListBytes is the removal list a listing plans, encoded as the
+// claim-carried writer encodes it.
+func cacheTrimRemovalListBytes(t *testing.T, listing string) int {
+	t.Helper()
+	entries, err := cacheTrimParseListing([]byte(listing))
+	if err != nil {
+		t.Fatalf("the listing does not parse: %v", err)
+	}
+	plan := cachevol.PlanTrim(entries, 1024, true)
+	paths := make([]string, 0, len(plan.Removals))
+	for _, removal := range plan.Removals {
+		paths = append(paths, removal.Path)
+	}
+	data, err := json.Marshal(paths)
+	if err != nil {
+		t.Fatalf("encoding the removal list: %v", err)
+	}
+	return len(data)
+}
+
+// cacheTrimListingAcrossTheCeilingOnAKiBGrid is a listing whose removal list
+// packs past the shard ceiling and whose encoding is a whole number of KiB, so
+// a df -Pk reply can name exactly the room it takes and the fit, equal and
+// no-fit cases are each one KiB apart.
+func cacheTrimListingAcrossTheCeilingOnAKiBGrid(t *testing.T) (string, int64) {
+	t.Helper()
+	listing := cacheTrimLargeListingJSON(cachevol.TrimMaxShards + 1)
+	need := cacheTrimRemovalListBytes(t, listing)
+	if pad := (1024 - need%1024) % 1024; pad > 0 {
+		listing = cacheTrimLargeListingPadded(cachevol.TrimMaxShards+1, pad)
+		need = cacheTrimRemovalListBytes(t, listing)
+	}
+	if need%1024 != 0 {
+		t.Fatalf("the removal list is %d bytes, which a df -Pk reply cannot name", need)
+	}
+	return listing, int64(need)
+}
+
+// TestCacheTrimCrossesTheShardCeilingByTheClaimRoute is the bead's gate: a
+// removal list that packs into more than TrimMaxShards shard ConfigMaps takes
+// the claim, and the pass applies the one Job that plans its list there, with
+// no ConfigMap and no shard cleanup (gt-gg9hv.41).
+func TestCacheTrimCrossesTheShardCeilingByTheClaimRoute(t *testing.T) {
+	t.Parallel()
+	listing, free := cacheTrimListingAcrossTheCeilingOnAKiBGrid(t)
+	// The claim reports exactly the room the encoded removal list takes: the
+	// equal case fits, since only a list larger than the claim is refused.
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+		cacheTrimListVerb: {stdout: listing},
+		cacheTrimFreeVerb: {stdout: cacheTrimDfReply(t, free)},
+	})
+	f.d.runDiskMaintenance()
+
+	if applied := f.applied(t); !slices.Equal(applied, []string{"Job " + cacheTrimJob}) {
+		t.Fatalf("the pass applied %v, want the one Job and no ConfigMap; log: %s", applied, f.log.String())
+	}
+	if applies := f.applyCalls(); len(applies) != 1 {
+		t.Fatalf("the pass made %d applies, want the one Job", len(applies))
+	}
+	if logged := f.log.String(); !strings.Contains(logged, "one Job, which plans its list in the claim") {
+		t.Errorf("the log does not name the claim route: %s", logged)
+	}
+	if _, ok := f.indexOf(cacheTrimFreeVerb); !ok {
+		t.Errorf("the pass never asked the pod for the claim's free space; calls: %v", f.verbs())
+	}
+	for _, verb := range f.verbs() {
+		if strings.HasPrefix(verb, "wait ") {
+			t.Errorf("the claim route waited for a Job whose shards it must clean: %q", verb)
+		}
+		if strings.HasPrefix(verb, "delete configmap ") && strings.Contains(verb, " -l ") {
+			t.Errorf("the claim route ran a shard cleanup: %q", verb)
+		}
+	}
+
+	// The Job plans and writes the list itself, under the cap and the sandbox
+	// count the pass computed.
+	pod := f.appliedTrimJob(t).Spec.Template.Spec
+	if len(pod.InitContainers) != 1 {
+		t.Fatalf("the applied Job runs %d init containers, want the list writer", len(pod.InitContainers))
+	}
+	writer := pod.InitContainers[0]
+	if want := []string{cachevol.HelperPath, "trim-list-write"}; !slices.Equal(writer.Command, want) {
+		t.Errorf("the init container runs %v, want the image's list writer %v", writer.Command, want)
+	}
+	if want := []string{"--root", cachevol.SeedCacheRoot, "--cap-bytes", "1024", "--sandboxes", "1"}; !slices.Equal(writer.Args, want) {
+		t.Errorf("the list writer's args = %v, want the pass's cap and sandbox count %v", writer.Args, want)
+	}
+}
+
+// TestCacheTrimLogsItsRoute pins the route on the applied line: a small list
+// names the shards it took, and a list past the ceiling names the claim, so a
+// manual reading of the log shows which route ran (gt-gg9hv.41).
+func TestCacheTrimLogsItsRoute(t *testing.T) {
+	t.Parallel()
+	large, free := cacheTrimListingAcrossTheCeilingOnAKiBGrid(t)
+	tests := []struct {
+		name    string
+		listing string
+		free    int64
+		want    string
+	}{
+		{
+			"a small list takes the shards",
+			cacheTrimListingJSON,
+			0,
+			"route=shards n=1",
+		},
+		{
+			"a list past the ceiling takes the claim",
+			large,
+			free,
+			"route=claim",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+				cacheTrimListVerb: {stdout: tc.listing},
+				cacheTrimFreeVerb: {stdout: cacheTrimDfReply(t, tc.free)},
+			})
+			f.d.runDiskMaintenance()
+
+			applied := cacheTrimAppliedLine(t, f.log.String())
+			if !strings.Contains(applied, tc.want) {
+				t.Errorf("the applied line %q does not name %q", applied, tc.want)
+			}
+		})
+	}
+}
+
+// TestCacheTrimRefusesAListThatDoesNotFitTheClaim pins the claim route's size
+// guard: a list larger than the free space the pod reports is refused before
+// any apply, with both byte counts; a list smaller than the room, and one that
+// exactly fills it, apply. A refused run records the short retry rather than
+// the full interval (gt-gg9hv.41).
+func TestCacheTrimRefusesAListThatDoesNotFitTheClaim(t *testing.T) {
+	t.Parallel()
+	listing, need := cacheTrimListingAcrossTheCeilingOnAKiBGrid(t)
+	for _, tc := range cacheTrimFitCases(need) {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cacheTrimCheckFitCase(t, listing, need, tc)
+		})
+	}
+
+	// The refusal is a failed run: the retry is due in fifteen minutes, not at
+	// the full interval.
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+		cacheTrimListVerb: {stdout: listing},
+		cacheTrimFreeVerb: {stdout: cacheTrimDfReply(t, need-1024)},
+	})
+	now := diskMaintNow
+	f.d.diskMaint.now = func() time.Time { return now }
+
+	f.d.runDiskMaintenance() // 04:45: the list does not fit the claim
+	if got := f.listReads(); got != 1 {
+		t.Fatalf("the pass read the listing %d times, want 1", got)
+	}
+	now = now.Add(5 * time.Minute)
+	f.d.runDiskMaintenance() // 04:50: a failed run is due in fifteen minutes, not now
+	if got := f.listReads(); got != 1 {
+		t.Errorf("the pass retried %d times five minutes after a refusal, want 1: a retry is due at fifteen", got)
+	}
+	now = now.Add(10 * time.Minute)
+	f.d.runDiskMaintenance() // 05:00: the short retry
+	if got := f.listReads(); got != 2 {
+		t.Errorf("the pass read the listing %d times fifteen minutes after a refusal, want 2", got)
+	}
+}
+
+// cacheTrimFitCase is one room-versus-list case for the claim route's size
+// guard: the room df reports, and whether the pass applies the trim.
+type cacheTrimFitCase struct {
+	name    string
+	free    int64
+	applies bool
+}
+
+// cacheTrimFitCases is the size guard's three cases, each a KiB apart because
+// df -Pk reports whole KiB: a list smaller than the room and one that exactly
+// fills it apply, and one KiB more than the room is refused.
+func cacheTrimFitCases(need int64) []cacheTrimFitCase {
+	return []cacheTrimFitCase{
+		{"a list smaller than the claim's room fits", need + 1024, true},
+		{"a list equal to the claim's room fits", need, true},
+		{"a list larger than the claim's room is refused", need - 1024, false},
+	}
+}
+
+// cacheTrimCheckFitCase runs one room-versus-list case: the claim route applies
+// its one Job when the list fits, and otherwise makes no apply and logs the
+// refusal with both byte counts.
+func cacheTrimCheckFitCase(t *testing.T, listing string, need int64, tc cacheTrimFitCase) {
+	t.Helper()
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+		cacheTrimListVerb: {stdout: listing},
+		cacheTrimFreeVerb: {stdout: cacheTrimDfReply(t, tc.free)},
+	})
+	f.d.runDiskMaintenance()
+
+	applies := len(f.applyCalls())
+	if tc.applies {
+		if applies != 1 {
+			t.Errorf("the pass applied %d documents for a list the claim has room for, want the one Job: %s", applies, f.log.String())
+		}
+		if logged := f.log.String(); strings.Contains(logged, "does not fit") {
+			t.Errorf("the pass refused a list the claim has room for: %s", logged)
+		}
+		return
+	}
+	if applies != 0 {
+		t.Errorf("the pass applied %d documents for a list the claim cannot hold", applies)
+	}
+	want := fmt.Sprintf("cache trim %s in %s: the removal list (%d) does not fit the claim's free space (%d); nothing trimmed",
+		cacheTrimClaimName, cacheTrimNamespace, need, tc.free)
+	if logged := f.log.String(); !strings.Contains(logged, want) {
+		t.Errorf("the log does not carry the refusal %q: %s", want, logged)
+	}
+}
+
+// TestCacheTrimOldImageFreeSpace pins the rollout case the df read exists for.
+// The listing is the bare array the cycle-2 image prints; df runs in the pod,
+// never through the helper, whose dispatcher sends any first argument it does
+// not know to a full plugin run. Each shape an older or broken image gives
+// leaves the room unknown, and that is a DELIBERATE fail-open: the claim route
+// still applies its one Job, the unknown line names the reason, and no fit
+// refusal is made. The same line is held to once an hour. With a good df row
+// the fit, equal and no-fit cases behave as the refusal box says (gt-gg9hv.41).
+func TestCacheTrimOldImageFreeSpace(t *testing.T) {
+	t.Parallel()
+	listing, need := cacheTrimListingAcrossTheCeilingOnAKiBGrid(t)
+	tests := []struct {
+		name   string
+		reply  cliReply
+		reason string
+	}{
+		{
+			"df is not in the pod",
+			cliReply{stderr: "df: executable file not found in $PATH", code: 127},
+			"exit status 127",
+		},
+		{
+			"df prints something that is not its table",
+			cliReply{stdout: "no room here\n"},
+			"df printed 1 non-empty line(s), want the header and one data row",
+		},
+		{
+			"df's header is not the one df -Pk prints",
+			cliReply{stdout: "Filesystem 1024-blocks Used Available Use% Mounted on\noverlay 1000000 1 100 1% /\n"},
+			"df printed an unexpected header",
+		},
+		{
+			"df's data row has no Available column",
+			cliReply{stdout: "Filesystem 1024-blocks Used Available Capacity Mounted on\noverlay 1000000 1\n"},
+			"df's data row names no Available column",
+		},
+		{
+			"df's Available column is not a number",
+			cliReply{stdout: "Filesystem 1024-blocks Used Available Capacity Mounted on\noverlay 1000000 1 lots 1% /\n"},
+			"df's Available column is not a whole number of KiB",
+		},
+		{
+			"df's Available column is too large to read as bytes",
+			cliReply{stdout: "Filesystem 1024-blocks Used Available Capacity Mounted on\noverlay 1000000 1 99999999999999999 1% /\n"},
+			"df's Available column is too large to read as bytes",
+		},
+		{
+			"df's room is negative",
+			cliReply{stdout: "Filesystem 1024-blocks Used Available Capacity Mounted on\noverlay 1000000 1 -1 1% /\n"},
+			"df names -1 KiB available",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+				cacheTrimListVerb: {stdout: listing},
+				cacheTrimFreeVerb: tc.reply,
+			})
+			f.d.runDiskMaintenance()
+
+			if applied := f.applied(t); !slices.Equal(applied, []string{"Job " + cacheTrimJob}) {
+				t.Fatalf("the pass applied %v, want the one Job: an unknown free space does not stop the trim; log: %s", applied, f.log.String())
+			}
+			logged := f.log.String()
+			if got := strings.Count(logged, "free space unknown: "); got != 1 {
+				t.Errorf("the log says the free space is unknown %d times, want 1: %s", got, logged)
+			}
+			if !strings.Contains(logged, tc.reason) {
+				t.Errorf("the unknown line does not name the reason %q: %s", tc.reason, logged)
+			}
+			if strings.Contains(logged, "does not fit") {
+				t.Errorf("the pass refused a trim it could not size: %s", logged)
+			}
+		})
+	}
+
+	// A good df row: the fit, equal and no-fit cases each behave as the refusal
+	// box says, so the guard is exercised through the same read the old image
+	// leaves unanswerable.
+	for _, tc := range cacheTrimFitCases(need) {
+		t.Run("a good df row: "+tc.name, func(t *testing.T) {
+			t.Parallel()
+			cacheTrimCheckFitCase(t, listing, need, tc)
+		})
+	}
+
+	// The unknown line is held to once an hour: the trim runs on its own
+	// schedule, and the same line is said once rather than on every run.
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+		cacheTrimListVerb: {stdout: listing},
+		cacheTrimFreeVerb: {stderr: "df: executable file not found in $PATH", code: 127},
+	})
+	now := diskMaintNow
+	f.d.diskMaint.now = func() time.Time { return now }
+	const unknown = "free space unknown: "
+
+	f.d.runDiskMaintenance() // 04:45
+	if applies := f.applyCalls(); len(applies) != 1 {
+		t.Fatalf("the pass applied %d documents, want the one Job", len(applies))
+	}
+	if got := strings.Count(f.log.String(), unknown); got != 1 {
+		t.Fatalf("the log says the free space is unknown %d times, want 1: %s", got, f.log.String())
+	}
+
+	// A second trim inside the hour is made due; the same line is held back.
+	now = now.Add(15 * time.Minute)
+	f.d.diskMaintSchedule.record(diskMaintCacheTrimName, now.Add(-3*time.Hour))
+	f.d.runDiskMaintenance() // 05:00
+	if applies := f.applyCalls(); len(applies) != 2 {
+		t.Fatalf("the pass applied %d documents at the second trim, want 2", len(applies))
+	}
+	if got := strings.Count(f.log.String(), unknown); got != 1 {
+		t.Errorf("the log said the free space is unknown %d times inside the hour, want once: %s", got, f.log.String())
+	}
+
+	// An hour after the first line, it is said again.
+	now = now.Add(50 * time.Minute)
+	f.d.diskMaintSchedule.record(diskMaintCacheTrimName, now.Add(-3*time.Hour))
+	f.d.runDiskMaintenance() // 05:50
+	if applies := f.applyCalls(); len(applies) != 3 {
+		t.Fatalf("the pass applied %d documents at the third trim, want 3", len(applies))
+	}
+	if got := strings.Count(f.log.String(), unknown); got != 2 {
+		t.Errorf("the log said the free space is unknown %d times after the hour, want 2: %s", got, f.log.String())
+	}
+}
+
+// cacheTrimHelperSubcommands are the first arguments the image's helper
+// dispatches, read from internal/polecatimage/program.go runProgram at
+// cf0d2c17b. The daemon must never pass a helper argument outside them: the
+// shipped runProgram sends any other first argument to runMain, a full plugin
+// run -- image refresh and cache work -- so an older image would not answer the
+// daemon's ask (gt-gg9hv.41).
+var cacheTrimHelperSubcommands = []string{
+	"trim-cache",
+	"trim-paths",
+	"trim-list",
+	"trim-list-write",
+	"seed-clone",
+	"seed-cache",
+}
+
+// cacheTrimHelperSubcommand returns the first argument a trim verb passes the
+// image's helper, and whether the verb runs the helper at all.
+func cacheTrimHelperSubcommand(verb string) (string, bool) {
+	fields := strings.Fields(verb)
+	for i, field := range fields {
+		if field != cachevol.HelperPath {
+			continue
+		}
+		if i+1 == len(fields) {
+			return "", true
+		}
+		return fields[i+1], true
+	}
+	return "", false
+}
+
+// TestCacheTrimNeverSendsAnUnknownHelperArgument pins the rollout rule the df
+// read exists for: every helper argv the pass builds, and every call site in
+// the daemon that can build one, names a subcommand the image dispatches. A
+// new subcommand fails here before an older image meets it and starts a plugin
+// run (gt-gg9hv.41).
+func TestCacheTrimNeverSendsAnUnknownHelperArgument(t *testing.T) {
+	t.Parallel()
+	large, need := cacheTrimListingAcrossTheCeilingOnAKiBGrid(t)
+
+	// Every helper argv the pass actually builds, on both routes.
+	for _, tc := range []struct {
+		name    string
+		listing string
+		free    int64
+	}{
+		{"the shard route", cacheTrimListingJSON, 0},
+		{"the claim route", large, need},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+				cacheTrimListVerb: {stdout: tc.listing},
+				cacheTrimFreeVerb: {stdout: cacheTrimDfReply(t, tc.free)},
+			})
+			f.d.runDiskMaintenance()
+
+			helperCalls := 0
+			for _, verb := range f.verbs() {
+				sub, ok := cacheTrimHelperSubcommand(verb)
+				if !ok {
+					continue
+				}
+				helperCalls++
+				if !slices.Contains(cacheTrimHelperSubcommands, sub) {
+					t.Errorf("the pass ran %q: %q is not a subcommand the image dispatches", verb, sub)
+				}
+			}
+			if helperCalls == 0 {
+				t.Errorf("the pass ran no helper at all; calls: %v", f.verbs())
+			}
+		})
+	}
+
+	// And no call site in the daemon can build another: the literal beside each
+	// cachevol.HelperPath in the production source is one of the six.
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	dir := filepath.Dir(thisFile)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading %s: %v", dir, err)
+	}
+	sites := 0
+	var problems []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		args, err := cacheTrimHelperArgs(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("parsing %s: %v", name, err)
+		}
+		for _, arg := range args {
+			sites++
+			if !slices.Contains(cacheTrimHelperSubcommands, arg) {
+				problems = append(problems, name+": "+arg)
+			}
+		}
+	}
+	if sites == 0 {
+		problems = append(problems, "no call in the daemon passes cachevol.HelperPath, so the pin checked nothing")
+	}
+	if len(problems) > 0 {
+		t.Fatalf("helper arguments: %s", strings.Join(problems, "; "))
+	}
+}
+
+// cacheTrimHelperArgs returns the literal each argument list in path passes the
+// image's helper as its first argument, for every list naming
+// cachevol.HelperPath. A helper named without a following literal, or outside an
+// argument list, is reported as a problem rather than skipped.
+func cacheTrimHelperArgs(path string) ([]string, error) {
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, src, 0)
+	if err != nil {
+		return nil, err
+	}
+	var args []string
+	w := &cacheTrimWalker{visit: func(n ast.Node, ancestors []ast.Node) {
+		sel, ok := n.(*ast.SelectorExpr)
+		if !ok || !cacheTrimIsHelperPath(sel) {
+			return
+		}
+		elements := cacheTrimArgList(ancestors)
+		for i, element := range elements {
+			if element != sel {
+				continue
+			}
+			if i+1 >= len(elements) {
+				args = append(args, "<HelperPath ends the argument list>")
+				return
+			}
+			lit, ok := elements[i+1].(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				args = append(args, "<not a string literal>")
+				return
+			}
+			value, err := strconv.Unquote(lit.Value)
+			if err != nil {
+				args = append(args, "<unquotable literal>")
+				return
+			}
+			args = append(args, value)
+			return
+		}
+		args = append(args, "<HelperPath outside an argument list>")
+	}}
+	ast.Walk(w, file)
+	return args, nil
+}
+
+// cacheTrimIsHelperPath reports whether sel names cachevol.HelperPath.
+func cacheTrimIsHelperPath(sel *ast.SelectorExpr) bool {
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && pkg.Name == "cachevol" && sel.Sel.Name == "HelperPath"
+}
+
+// cacheTrimArgList returns the elements of the innermost call or composite
+// literal above a node.
+func cacheTrimArgList(ancestors []ast.Node) []ast.Expr {
+	for i := len(ancestors) - 1; i >= 0; i-- {
+		switch container := ancestors[i].(type) {
+		case *ast.CallExpr:
+			return container.Args
+		case *ast.CompositeLit:
+			return container.Elts
+		}
+	}
+	return nil
 }
 
 // cacheTrimSmallApplies are the client-side kubectl applies in the daemon and

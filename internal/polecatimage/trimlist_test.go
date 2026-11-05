@@ -656,6 +656,41 @@ func TestTrimListMainPrintsTheListing(t *testing.T) {
 	}
 }
 
+// TestTrimListReplyStaysABareArray pins the trim-list reply's shape against the rollout skew that
+// matters: an image and a daemon are updated at different times, and an older daemon decodes the
+// reply as the bare JSON array trim-list has always printed. The reply may not grow a document
+// wrapper; the claim's room the trim needs is read by the daemon itself, not by this reply
+// (gt-gg9hv.41).
+func TestTrimListReplyStaysABareArray(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	plantCacheFile(t, filepath.Join(root, cachevol.SeedBuildCacheDir, "ab", "cdef"), 100, testTime)
+
+	var stdout, stderr bytes.Buffer
+	if code := runProgram([]string{"trim-list", "--root", root}, &stdout, &stderr, func(string) string { return "" }); code != 0 {
+		t.Fatalf("trim-list exit = %d, want 0 (stderr %q)", code, stderr.String())
+	}
+	// An older consumer's decode: the reply is an array of entries, not an object.
+	var entries []trimListEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("trim-list printed %q, which an older consumer cannot decode as the bare array: %v", stdout.String(), err)
+	}
+	if len(entries) != 1 || entries[0].Path != cachevol.SeedBuildCacheDir+"/ab/cdef" {
+		t.Fatalf("trim-list printed %+v, want the one build-cache file", entries)
+	}
+	// Byte for byte: the encoder's array, with no field beside the entries.
+	want, err := json.Marshal(entries)
+	if err != nil {
+		t.Fatalf("encoding the expected reply: %v", err)
+	}
+	if got := strings.TrimSpace(stdout.String()); got != string(want) {
+		t.Errorf("trim-list printed %q, want the bare array %q", got, want)
+	}
+	if strings.Contains(stdout.String(), "free") {
+		t.Errorf("trim-list printed %q, want no free-space field: the daemon reads the room itself", stdout.String())
+	}
+}
+
 // TestTrimListMainRefusesAClaimItCannotRead pins the fail-closed read: a root that is not there is
 // exit 3 with the reason, since an empty listing would plan a trim of a claim nothing looked at.
 func TestTrimListMainRefusesAClaimItCannotRead(t *testing.T) {

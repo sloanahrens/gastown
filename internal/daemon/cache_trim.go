@@ -21,6 +21,15 @@ package daemon
 // the registry target's in-use provider reads pods -- counts the ones holding
 // it as PlanTrim's sandbox count, and asks a running one of them to print the
 // listing with the image's trim-list helper.
+//
+// A removal list past the shard ceiling is carried in the claim itself, and the
+// applied line names the route that carried it. That route writes the list into
+// the claim before its Job runs, so a list the claim cannot hold is refused
+// before the apply: the pass reads the room from df in the pod the listing ran
+// in, not from the image's helper, whose dispatcher runs a plugin run for any
+// first argument it does not know. A room df cannot read leaves the fit check
+// unknown and the trim still runs, deliberately: the writer refuses a list that
+// will not fit (gt-gg9hv.41).
 
 import (
 	"bytes"
@@ -31,6 +40,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"os/exec"
 	"regexp"
 	"slices"
@@ -381,6 +391,27 @@ func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim ca
 		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: %v; nothing trimmed", claim.ClaimName, namespace, err)
 		return false
 	}
+	// A claim-carried list is written into the claim before the Job runs, so a
+	// list the claim has no room for is refused here rather than part way
+	// through the write (gt-gg9hv.41). The shard route carries no list in the
+	// claim and is not judged by its room.
+	//
+	// The room is read with df, not with a helper subcommand: the image's
+	// helper dispatches only its known subcommands, and an older image answers
+	// any other first argument with a full plugin run. A df that cannot answer
+	// leaves the room unknown and the trim still runs -- a DELIBERATE fail-open:
+	// the Job's writer measures the free space again and refuses a list that
+	// will not fit, so skipping this early check loses the clearer refusal, not
+	// the guard. The unknown line is held to one an hour like a refusal.
+	if m.Route() == cachevol.TrimRouteClaim {
+		free, err := d.cacheTrimFree(ctx, kubeconfig, sources[0])
+		if err != nil {
+			d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: free space unknown: %v; trimming the claim route without the fit check", claim.ClaimName, namespace, err)
+		} else if err := cacheTrimClaimFits(listing, capBytes, sandboxes, free); err != nil {
+			d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: %v; nothing trimmed", claim.ClaimName, namespace, err)
+			return false
+		}
+	}
 	if !apply {
 		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s dry_run: %s", claim.ClaimName, namespace, cacheTrimManifestLine(jobName, m))
 		return true
@@ -389,8 +420,40 @@ func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim ca
 		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: the apply failed: %v", claim.ClaimName, namespace, err)
 		return false
 	}
-	d.cacheTrimLogf("disk_maintenance: cache trim %s in %s applied: %s", claim.ClaimName, namespace, cacheTrimManifestLine(jobName, m))
+	d.cacheTrimLogf("disk_maintenance: cache trim %s in %s applied: %s %s", claim.ClaimName, namespace, cacheTrimRouteLine(m), cacheTrimManifestLine(jobName, m))
 	return true
+}
+
+// cacheTrimClaimFits refuses a claim-carried trim whose removal list the claim
+// has no room for: the Job's init container writes the list into the claim, so a
+// list larger than the free space df reported would fail the writer.
+//
+// The list's size is PlanTrim's removals encoded as the writer encodes them --
+// json.Marshal of the path slice, internal/polecatimage/trimlist.go WriteTrimList
+// -- measured from the listing this pass already has; the writer plans the same
+// list again when the Job runs, so a claim that changed in between can still end
+// under its cap.
+func cacheTrimClaimFits(listing []cachevol.Entry, capBytes int64, sandboxes int, free int64) error {
+	plan := cachevol.PlanTrim(listing, capBytes, sandboxes > 0)
+	paths := make([]string, 0, len(plan.Removals))
+	for _, removal := range plan.Removals {
+		paths = append(paths, removal.Path)
+	}
+	// A string slice's JSON encoding cannot fail, so the error is dropped.
+	data, _ := json.Marshal(paths)
+	if int64(len(data)) > free {
+		return fmt.Errorf("the removal list (%d) does not fit the claim's free space (%d)", len(data), free)
+	}
+	return nil
+}
+
+// cacheTrimRouteLine names how the trim's removal list reached its Job: the
+// shard ConfigMaps it mounts, or the claim its init container writes.
+func cacheTrimRouteLine(m *cachevol.TrimManifest) string {
+	if m.Route() == cachevol.TrimRouteClaim {
+		return "route=claim"
+	}
+	return fmt.Sprintf("route=shards n=%d", len(m.Shards()))
 }
 
 // cacheTrimManifestLine names what a trim applies: the shard ConfigMaps the
@@ -806,6 +869,62 @@ func (d *Daemon) cacheTrimListing(ctx context.Context, kubeconfig string, source
 	return cacheTrimParseListing(out)
 }
 
+// cacheTrimDfHeader is the columns df -Pk prints above its one data row.
+var cacheTrimDfHeader = []string{"Filesystem", "1024-blocks", "Used", "Available", "Capacity", "Mounted", "on"}
+
+// cacheTrimFree reads the room the claim has left, in bytes, with df in the pod
+// that mounts it: df is a separate command, not a helper subcommand, because the
+// image's runProgram dispatches only its known subcommands and sends any other
+// first argument to a full plugin run (internal/polecatimage/program.go). The
+// daemon must never ask an older image for one (gt-gg9hv.41).
+//
+// A df that fails, is absent, prints anything but the expected header and one
+// data row, or whose Available column is not a whole number of KiB returns an
+// error. The caller reads that as an unknown room, names the error, and trims
+// without the fit check rather than failing the trim.
+func (d *Daemon) cacheTrimFree(ctx context.Context, kubeconfig string, source cacheTrimSource) (int64, error) {
+	out, err := d.cacheTrimKubectl(ctx, kubeconfig, "exec", "-n", source.Namespace, source.Pod, "-c", source.Container,
+		"--", "df", "-Pk", source.Root)
+	if err != nil {
+		return 0, err
+	}
+	return cacheTrimParseDf(out)
+}
+
+// cacheTrimParseDf turns df -Pk's reply into the claim's free bytes: the
+// Available column is in KiB, and the reply must be the header and one data row
+// and nothing else. A reply that is not that shape is an error naming the rule,
+// never a zero figure, since a zero would refuse every claim-carried trim.
+func cacheTrimParseDf(out []byte) (int64, error) {
+	var lines []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) != 2 {
+		return 0, fmt.Errorf("df printed %d non-empty line(s), want the header and one data row", len(lines))
+	}
+	if header := strings.Fields(lines[0]); !slices.Equal(header, cacheTrimDfHeader) {
+		return 0, errors.New("df printed an unexpected header")
+	}
+	row := strings.Fields(lines[1])
+	if len(row) < 4 {
+		return 0, errors.New("df's data row names no Available column")
+	}
+	kib, err := strconv.ParseInt(row[3], 10, 64)
+	if err != nil {
+		return 0, errors.New("df's Available column is not a whole number of KiB")
+	}
+	if kib < 0 {
+		return 0, fmt.Errorf("df names %d KiB available", kib)
+	}
+	if kib > math.MaxInt64/1024 {
+		return 0, errors.New("df's Available column is too large to read as bytes")
+	}
+	return kib * 1024, nil
+}
+
 // cacheTrimListingEntry is one entry of the JSON `polecat-image trim-list`
 // prints.
 type cacheTrimListingEntry struct {
@@ -816,10 +935,13 @@ type cacheTrimListingEntry struct {
 	Mtime time.Time `json:"mtime"`
 }
 
-// cacheTrimParseListing turns the helper's JSON into PlanTrim's entries. A
-// cache name it does not know refuses the listing: PlanTrim chooses what to
-// remove by the cache, and a name read as the wrong one would admit a module
-// file to a trim while a sandbox builds.
+// cacheTrimParseListing turns the helper's JSON into PlanTrim's entries. The
+// reply is the bare array trim-list has always printed; a document is refused,
+// because that is the reply an older daemon cannot parse and the room this one
+// needs is read with df, not carried here. A cache name it does not know
+// refuses the listing: PlanTrim chooses what to remove by the cache, and a name
+// read as the wrong one would admit a module file to a trim while a sandbox
+// builds.
 func cacheTrimParseListing(out []byte) ([]cachevol.Entry, error) {
 	var entries []cacheTrimListingEntry
 	if err := json.Unmarshal(out, &entries); err != nil {
