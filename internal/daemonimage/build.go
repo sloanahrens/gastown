@@ -59,12 +59,6 @@ const (
 	bdCommitFlag = "-X main.Commit="
 )
 
-// gtCommitStamp returns the stamp buildstamp records for the full sha
-// BuildBinaries resolved (gt-x5kgt).
-func gtCommitStamp(commit string) (string, error) {
-	return buildstamp.Short(commit)
-}
-
 // planCommitStamp returns the stamp Plan prints for the commit the caller
 // named. That name may be abbreviated already; checkBuildInputs has refused
 // anything that is not 7-40 lowercase hex, so a name shorter than the stamp is
@@ -206,7 +200,7 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 	if err != nil {
 		return nil, err
 	}
-	gtStamp, err := gtCommitStamp(gtCommit)
+	gtStamp, err := buildstamp.Short(gtCommit)
 	if err != nil {
 		return nil, fmt.Errorf("daemonimage: cannot stamp gt with the commit resolved in %s: %w", b.GTSrc, err)
 	}
