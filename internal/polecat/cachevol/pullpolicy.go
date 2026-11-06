@@ -9,10 +9,9 @@ const pullPolicyAlways = "Always"
 // reference names a moving tag (dev, latest, or no tag, which Kubernetes reads as latest), and the
 // empty policy otherwise.
 //
-// A digest names one image, and a tag of seven or more lowercase hex characters names the commit it
-// was built from: a node's cached copy of either is the one the reference asks for. Any other tag is
-// fixed enough that the cluster's default, IfNotPresent for a non-latest tag, is right for it, and
-// a tag that merely contains a moving tag's name, such as devel, is not itself one.
+// A digest names one image: a node's cached copy of it is the one the reference asks for. Any other
+// tag is fixed enough that the cluster's default, IfNotPresent for a non-latest tag, is right for it,
+// and a tag that merely contains a moving tag's name, such as devel, is not itself one.
 func PullPolicyFor(image string) string {
 	if strings.Contains(image, "@") {
 		return ""
