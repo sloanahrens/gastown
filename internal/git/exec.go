@@ -39,10 +39,14 @@ var errTimedOut = errors.New("git timed out")
 // runner returns the runFunc g sends git through: the real git on PATH
 // unless a test set one.
 func (g *Git) runner() runFunc {
-	if g.exec == nil {
-		return realRun
+	run := realRun
+	if g.exec != nil {
+		run = g.exec
 	}
-	return g.exec
+	if g.configRetry {
+		return g.withConfigReadRetry(run)
+	}
+	return run
 }
 
 // realRun runs git on PATH.
