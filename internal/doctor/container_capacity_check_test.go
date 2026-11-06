@@ -21,8 +21,14 @@ func TestContainerCapacityCheck_SmallVMWarns(t *testing.T) {
 	if !strings.Contains(result.FixHint, "16 GiB") {
 		t.Errorf("FixHint = %q, want the remedy (>= 16 GiB)", result.FixHint)
 	}
-	if joined := strings.Join(result.Details, "\n"); !strings.Contains(joined, "2026-09 test-suite concurrency notes in git history") {
-		t.Errorf("Details = %q, want the measurement reference", joined)
+	joined := strings.Join(result.Details, "\n")
+	if !strings.Contains(joined, "Dolt-backed tests time out") {
+		t.Errorf("Details = %q, want the consequence of a too-small VM", joined)
+	}
+	// A doctor warning is user-visible output: it must be actionable on its
+	// own, not send the reader into git history or an unrelated CHANGELOG.
+	if strings.Contains(joined, "git history") || strings.Contains(joined, "CHANGELOG") {
+		t.Errorf("Details = %q, want no pointer into git history or CHANGELOG", joined)
 	}
 }
 
