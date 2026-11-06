@@ -367,8 +367,9 @@ func (l MangoLookup) withDefaults() MangoLookup {
 // FindMango resolves the mango binary, in order: MANGO_BIN as given; the binary
 // built for the platform in the town's runtime; the legacy binary a town built
 // before the per-platform directories; mango on PATH. The legacy and PATH hits
-// are skipped when their header is a binary of another OS, since a Mac binary
-// in a linux container fails to start. "" when there is none.
+// are skipped when their header is a binary of another OS or cannot be read,
+// since a Mac binary in a linux container fails to start and a header nobody
+// can read names no platform at all. "" when there is none.
 func FindMango(town string, lookup MangoLookup) string {
 	lookup = lookup.withDefaults()
 	if bin := lookup.Getenv(mangoBinEnv); bin != "" {
@@ -389,13 +390,14 @@ func FindMango(town string, lookup MangoLookup) string {
 }
 
 // runsHere reports whether the binary at path can run on the lookup's
-// platform: false only when its header is a known format of another OS. A
-// header that cannot be read or is in no known format is returned, so the
-// binary's own exec error is the one that surfaces.
+// platform: false when its header is a known format of another OS, and false
+// when the header cannot be read at all, since a binary whose platform is
+// unknown is not taken for this one. A header in no known format is returned,
+// so the binary's own exec error is the one that surfaces.
 func (l MangoLookup) runsHere(path string) bool {
 	head, err := l.ReadHead(path)
 	if err != nil {
-		return true
+		return false
 	}
 	owner, known := binaryOwner(head)
 	return !known || owner == l.GOOS
