@@ -2257,6 +2257,108 @@ func TestInstallMangoBinary(t *testing.T) {
 		}
 	})
 
+	t.Run("puts the installed binary back when its stamp cannot be written", func(t *testing.T) {
+		t.Parallel()
+		imageDir := mangoImage(t, "new mango", "new123\n")
+		townRoot := t.TempDir()
+		bin := townMangoFile(townRoot, mangoBinName)
+		writeEntrypointFile(t, bin, []byte("old mango"), 0o755)
+		// A directory where the stamp belongs refuses the second write after the
+		// binary has already been replaced.
+		stampPath := townMangoFile(townRoot, mangoShaName)
+		if err := os.MkdirAll(stampPath, 0o755); err != nil {
+			t.Fatalf("mkdir the stamp path: %v", err)
+		}
+
+		err := installMangoBinary(imageDir, townRoot)
+		if err == nil || !strings.Contains(err.Error(), stampPath) {
+			t.Fatalf("error = %v, want a refusal naming the stamp path", err)
+		}
+		got, readErr := os.ReadFile(bin)
+		if readErr != nil {
+			t.Fatalf("read the installed binary: %v", readErr)
+		}
+		if string(got) != "old mango" {
+			t.Errorf("installed binary = %q, want the binary the town had before the failed install", got)
+		}
+	})
+
+	t.Run("leaves no binary when its stamp cannot be written", func(t *testing.T) {
+		t.Parallel()
+		imageDir := mangoImage(t, "new mango", "new123\n")
+		townRoot := t.TempDir()
+		stampPath := townMangoFile(townRoot, mangoShaName)
+		if err := os.MkdirAll(stampPath, 0o755); err != nil {
+			t.Fatalf("mkdir the stamp path: %v", err)
+		}
+
+		if err := installMangoBinary(imageDir, townRoot); err == nil {
+			t.Fatal("installMangoBinary installed a binary whose stamp it could not write, want a refusal")
+		}
+		if _, err := os.Stat(townMangoFile(townRoot, mangoBinName)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("a failed install left the image's binary behind: stat error = %v", err)
+		}
+	})
+
+	t.Run("refuses an installed binary it cannot read", func(t *testing.T) {
+		t.Parallel()
+		imageDir := mangoImage(t, "new mango", "new123\n")
+		townRoot := t.TempDir()
+		bin := townMangoFile(townRoot, mangoBinName)
+		writeEntrypointFile(t, bin, []byte("old mango"), 0o755)
+		if err := os.Chmod(bin, 0o000); err != nil {
+			t.Fatalf("chmod the installed binary: %v", err)
+		}
+
+		err := installMangoBinary(imageDir, townRoot)
+		if err == nil || !strings.Contains(err.Error(), bin) {
+			t.Fatalf("error = %v, want a refusal naming the installed binary", err)
+		}
+	})
+
+	t.Run("refuses an installed stamp it cannot read", func(t *testing.T) {
+		t.Parallel()
+		imageDir := mangoImage(t, "new mango", "new123\n")
+		townRoot := t.TempDir()
+		stampPath := townMangoFile(townRoot, mangoShaName)
+		writeEntrypointFile(t, stampPath, []byte("old123\n"), 0o644)
+		if err := os.Chmod(stampPath, 0o000); err != nil {
+			t.Fatalf("chmod the installed stamp: %v", err)
+		}
+
+		err := installMangoBinary(imageDir, townRoot)
+		if err == nil || !strings.Contains(err.Error(), stampPath) {
+			t.Fatalf("error = %v, want a refusal naming the installed stamp", err)
+		}
+		if _, statErr := os.Stat(townMangoFile(townRoot, mangoBinName)); !errors.Is(statErr, os.ErrNotExist) {
+			t.Errorf("an install that could not read the stamp wrote a binary: stat error = %v", statErr)
+		}
+	})
+
+	t.Run("reports the previous binary it cannot put back", func(t *testing.T) {
+		t.Parallel()
+		imageDir := mangoImage(t, "new mango", "new123\n")
+		townRoot := t.TempDir()
+		bin := townMangoFile(townRoot, mangoBinName)
+		writeEntrypointFile(t, bin, []byte("old mango"), 0o644)
+		dir := filepath.Dir(bin)
+		//testpolicy:allow no-exec-files — the target is the platform directory, and its search bit must stay to reach the binary inside: the write bit is what the test drops
+		if err := os.Chmod(dir, 0o555); err != nil {
+			t.Fatalf("chmod the platform directory: %v", err)
+		}
+		t.Cleanup(func() {
+			//testpolicy:allow no-exec-files — the same directory, and traversal needs its search bit back so the test's cleanup can walk it
+			if err := os.Chmod(dir, 0o755); err != nil {
+				t.Errorf("restore the platform directory mode: %v", err)
+			}
+		})
+
+		err := installMangoBinary(imageDir, townRoot)
+		if err == nil || !strings.Contains(err.Error(), bin) || !strings.Contains(err.Error(), "put the installed mango back") {
+			t.Fatalf("error = %v, want the failed install and the failed restore", err)
+		}
+	})
+
 	t.Run("an absent image directory is not an error", func(t *testing.T) {
 		t.Parallel()
 		townRoot := t.TempDir()
@@ -2333,6 +2435,55 @@ func TestInstallMangoBinary(t *testing.T) {
 		err := installMangoBinary(imageDir, t.TempDir())
 		if err == nil || !strings.Contains(err.Error(), imageDir) {
 			t.Fatalf("error = %v, want a refusal naming %s", err, imageDir)
+		}
+	})
+}
+
+// TestInstalledMango drives the read and restore failures whose paths a town
+// directory the install can write cannot produce.
+func TestInstalledMango(t *testing.T) {
+	t.Parallel()
+
+	t.Run("read reports a path under a file", func(t *testing.T) {
+		t.Parallel()
+		parent := t.TempDir()
+		writeEntrypointFile(t, filepath.Join(parent, "mango"), []byte("not a directory"), 0o644)
+		path := filepath.Join(parent, "mango", "outer", "mango")
+
+		if _, err := readInstalledMango(path); err == nil || !strings.Contains(err.Error(), path) {
+			t.Fatalf("readInstalledMango(%s) error = %v, want a refusal naming the path", path, err)
+		}
+	})
+
+	t.Run("putBack reports a path it cannot read", func(t *testing.T) {
+		t.Parallel()
+		parent := t.TempDir()
+		writeEntrypointFile(t, filepath.Join(parent, "mango"), []byte("not a directory"), 0o644)
+		path := filepath.Join(parent, "mango", "outer", "mango")
+
+		if err := (installedMango{path: path}).putBack(); err == nil || !strings.Contains(err.Error(), path) {
+			t.Fatalf("putBack(%s) error = %v, want a refusal naming the path", path, err)
+		}
+	})
+
+	t.Run("putBack reports a file it cannot remove", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		path := filepath.Join(dir, mangoBinName)
+		writeEntrypointFile(t, path, []byte("the image's binary"), 0o755)
+		//testpolicy:allow no-exec-files — the target is the directory, and its search bit must stay to reach the file inside: the write bit is what the test drops
+		if err := os.Chmod(dir, 0o555); err != nil {
+			t.Fatalf("chmod the directory: %v", err)
+		}
+		t.Cleanup(func() {
+			//testpolicy:allow no-exec-files — the same directory, and traversal needs its search bit back so the test's cleanup can walk it
+			if err := os.Chmod(dir, 0o755); err != nil {
+				t.Errorf("restore the directory mode: %v", err)
+			}
+		})
+
+		if err := (installedMango{path: path}).putBack(); err == nil || !strings.Contains(err.Error(), path) {
+			t.Fatalf("putBack(%s) error = %v, want a refusal naming the path", path, err)
 		}
 	})
 }
