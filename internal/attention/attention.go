@@ -68,10 +68,14 @@ const (
 	KindHostDisk Kind = "host-disk"
 	// KindHostMem: the host's free memory is low.
 	KindHostMem Kind = "host-mem"
-	// KindHostDocker: a container of the Forgejo or hm stack is not running.
+	// KindHostDocker: a Docker Desktop container the town cannot run without
+	// is not running.
 	KindHostDocker Kind = "host-docker"
-	// KindHostProbe: a host probe (disk, memory or docker) failed, so its rule
-	// could not be judged this tick.
+	// KindHostForgejo: the town's Forgejo has not answered its health endpoint
+	// for several heartbeats in a row (gt-gg9hv.36).
+	KindHostForgejo Kind = "host-forgejo"
+	// KindHostProbe: a host probe (disk, memory, docker or Forgejo health)
+	// failed, so its rule could not be judged this tick.
 	KindHostProbe Kind = "host-probe"
 	// KindQuestionNew: an overseer question has been filed and nobody has
 	// commented on it yet.
@@ -107,7 +111,7 @@ func Kinds() []Kind {
 		KindSlotHeld, KindSlotDeadHolder, KindBDSlow, KindTierSweepRed,
 		KindTierSweepStarved, KindTierSweepStuck,
 		KindRevertRefused, KindBlockedMail, KindOverrunStopped, KindScheduledGate,
-		KindHostDisk, KindHostMem, KindHostDocker, KindHostProbe,
+		KindHostDisk, KindHostMem, KindHostDocker, KindHostForgejo, KindHostProbe,
 		KindQuestionNew, KindQuestionAnswered, KindQuestionStale,
 		KindOverseerSilent, KindDispatchIdle, KindDeployFailed, KindReviewBacklog,
 		KindBirdReportStale,

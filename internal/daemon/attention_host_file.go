@@ -36,10 +36,12 @@ type fileHostProbes struct {
 }
 
 // newFileHostProbes returns the file-backed host reads for the town rooted at
-// townRoot.
-func newFileHostProbes(townRoot string) fileHostProbes {
+// townRoot. forgejoBaseURL is the town's Forgejo origin, which the health read
+// asks over the network because the probe file the host agent publishes has no
+// say in it.
+func newFileHostProbes(townRoot string, forgejoBaseURL func() (string, error)) fileHostProbes {
 	return fileHostProbes{
-		systemHostProbes: systemHostProbes{townRoot: townRoot},
+		systemHostProbes: systemHostProbes{townRoot: townRoot, forgejoBaseURL: forgejoBaseURL},
 		path:             filepath.Join(townRoot, ".runtime", "host", "probes.json"),
 		now:              time.Now,
 		maxAge:           fileHostProbeMaxAge,
@@ -86,6 +88,14 @@ func (p fileHostProbes) MemFreePct(context.Context) (float64, error) {
 		return 0, err
 	}
 	return pr.MemFreePct.Value, nil
+}
+
+// ForgejoHealthy asks the town's Forgejo itself. The health read is one HTTP
+// request, which the container makes as the host does, so unlike
+// memory_pressure and docker ps it is not the host's namespace the probe is
+// about and the published file has nothing to answer for it.
+func (p fileHostProbes) ForgejoHealthy(ctx context.Context) error {
+	return p.systemHostProbes.ForgejoHealthy(ctx)
 }
 
 func (p fileHostProbes) Containers(context.Context) ([]string, error) {

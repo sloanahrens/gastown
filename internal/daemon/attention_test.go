@@ -428,10 +428,11 @@ func TestAttentionSources_EscalationBeadReadsTheBeadsOwnRig(t *testing.T) {
 	bd.onlyIn = rigBeads
 	bd.seed("gt-abc", "open", time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC))
 	d := &Daemon{
-		config:        &Config{TownRoot: townRoot},
-		logger:        log.New(io.Discard, "", 0),
-		openWorkBeads: bd.open,
-		execCmd:       bd.run,
+		config:         &Config{TownRoot: townRoot},
+		logger:         log.New(io.Discard, "", 0),
+		openWorkBeads:  bd.open,
+		execCmd:        bd.run,
+		forgejoBaseURL: noForgejo,
 	}
 	src := d.attentionSources(time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC))
 
@@ -467,9 +468,10 @@ func TestAttentionSources_ReworkReadsEveryPersonLabel(t *testing.T) {
 		land.LabelNeedsOperator: {{ID: "gt-operator", Status: "open"}},
 	}}
 	d := &Daemon{
-		config:        &Config{TownRoot: t.TempDir()},
-		logger:        log.New(io.Discard, "", 0),
-		openWorkBeads: bd.open,
+		config:         &Config{TownRoot: t.TempDir()},
+		logger:         log.New(io.Discard, "", 0),
+		openWorkBeads:  bd.open,
+		forgejoBaseURL: noForgejo,
 	}
 	issues, err := d.attentionSources(now).rework(context.Background(), attentionRig)
 	if err != nil {

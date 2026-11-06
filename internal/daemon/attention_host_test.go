@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"testing"
@@ -23,8 +24,10 @@ type fakeHost struct {
 	memErr              error
 	containers          []string
 	containersErr       error
+	forgejoErr          error
 	diskCalls, memCalls int
 	containerCalls      int
+	forgejoCalls        int
 	// parked and parkedErr are the hm rig's park state; the zero value is a
 	// live rig.
 	parked    bool
@@ -42,6 +45,11 @@ func (f *fakeHost) RigParked(rig string) (bool, error) {
 	}
 	return f.parked, f.parkedErr
 }
+
+// noForgejo is a town that runs no Forgejo: the production health probe built
+// over it makes no request, so a test that drives the daemon's own tick
+// reaches no network.
+func noForgejo() (string, error) { return "", nil }
 
 // healthyHost is a host no rule fires on.
 func healthyHost() *fakeHost {
@@ -65,6 +73,11 @@ func (f *fakeHost) MemFreePct(context.Context) (float64, error) {
 func (f *fakeHost) Containers(context.Context) ([]string, error) {
 	f.containerCalls++
 	return f.containers, f.containersErr
+}
+
+func (f *fakeHost) ForgejoHealthy(context.Context) error {
+	f.forgejoCalls++
+	return f.forgejoErr
 }
 
 // hostItems are the items of the state that name a host rule or probe.
@@ -185,9 +198,9 @@ func TestAttentionHostMem(t *testing.T) {
 	}
 }
 
-// The stack is down when any of the five containers is not running, and the
-// event names which.
-func TestAttentionHostDocker(t *testing.T) {
+// The stack is down when any of the containers the town cannot run without is
+// not running, and the event names which.
+func TestHostStackRequiresTheRealContainers(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
 	without := func(drop ...string) []string {
@@ -212,13 +225,11 @@ func TestAttentionHostDocker(t *testing.T) {
 	}{
 		{"all running", without(), ""},
 		{"extra containers are fine", append(without(), "unrelated-1"), ""},
-		{"forgejo down", without("forgejo-forgejo-1"), "forgejo-forgejo-1"},
 		{"db down", without("forgejo-db-1"), "forgejo-db-1"},
 		{"dolt down", without(hostprobe.DockerDiskContainer), hostprobe.DockerDiskContainer},
-		{"dind down", without("forgejo-docker-in-docker-1"), "forgejo-docker-in-docker-1"},
 		{"hm-postgres down", without("hm-postgres"), "hm-postgres"},
-		{"two down", without("forgejo-db-1", "hm-postgres"), "2 of 5"},
-		{"nothing running", nil, "5 of 5"},
+		{"two down", without(hostprobe.DockerDiskContainer, "hm-postgres"), "2 of 3"},
+		{"nothing running", nil, "3 of 3"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -248,13 +259,42 @@ func TestAttentionHostDocker(t *testing.T) {
 	}
 }
 
+// The three containers the retired Docker Forgejo stack ran appear in no item
+// and in no production string: Forgejo and its runner are watched by the
+// health endpoint now, and forgejo-docker-in-docker-1 is the operator's to
+// retire.
+func TestHostStackNeverNamesTheRetiredContainers(t *testing.T) {
+	t.Parallel()
+	retired := []string{"forgejo-forgejo-1", "forgejo-runner-daemon-1", "forgejo-docker-in-docker-1"}
+
+	f := newAttentionFixture(t, time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC))
+	h := healthyHost()
+	h.containers = nil
+	f.src.host = h
+	items := f.collect(t, f.src.collectHostDocker)
+	if len(items) != 1 {
+		t.Fatalf("items = %+v, want the one stack-down item", items)
+	}
+	want := fmt.Sprintf("3 of 3 stack containers not running: forgejo-db-1, %s, hm-postgres", hostprobe.DockerDiskContainer)
+	if got := items[0].Summary; got != want {
+		t.Errorf("summary = %q, want %q", got, want)
+	}
+	for _, name := range retired {
+		for _, it := range items {
+			if strings.Contains(it.Summary, name) || strings.Contains(it.Key, name) {
+				t.Errorf("item %+v names the retired container %s", it, name)
+			}
+		}
+	}
+}
+
 // hm-postgres is required only while the hm rig is live. A parked rig, or a
-// park state that cannot be read, drops it from the required set; the Forgejo
-// four stay required in every case.
-func TestAttentionHostDockerHMPostgresFollowsParkState(t *testing.T) {
+// park state that cannot be read, drops it from the required set; the two
+// containers the town cannot run without stay required in every case.
+func TestHostHMContainerStaysConditionalOnTheRig(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
-	forgejoOnly := func(drop ...string) []string {
+	stackOnly := func(drop ...string) []string {
 		var out []string
 		for _, n := range hostStackContainers {
 			dropped := false
@@ -275,20 +315,20 @@ func TestAttentionHostDockerHMPostgresFollowsParkState(t *testing.T) {
 		running   []string
 		summary   string // exact summary, "" for silence
 	}{
-		{"parked, hm-postgres off, forgejo up", true, nil, forgejoOnly(), ""},
-		{"parked, hm-postgres on, forgejo up", true, nil, allStackContainers(), ""},
-		{"parked, forgejo-db-1 missing", true, nil, forgejoOnly("forgejo-db-1"),
-			"1 of 4 stack containers not running: forgejo-db-1"},
-		{"parked, two forgejo missing, hm-postgres off", true, nil, forgejoOnly("forgejo-db-1", "forgejo-forgejo-1"),
-			"2 of 4 stack containers not running: forgejo-forgejo-1, forgejo-db-1"},
-		{"live, hm-postgres missing", false, nil, forgejoOnly(),
-			"1 of 5 stack containers not running: hm-postgres"},
+		{"parked, hm-postgres off, stack up", true, nil, stackOnly(), ""},
+		{"parked, hm-postgres on, stack up", true, nil, allStackContainers(), ""},
+		{"parked, forgejo-db-1 missing", true, nil, stackOnly("forgejo-db-1"),
+			"1 of 2 stack containers not running: forgejo-db-1"},
+		{"parked, both stack containers missing, hm-postgres off", true, nil, stackOnly("forgejo-db-1", hostprobe.DockerDiskContainer),
+			"2 of 2 stack containers not running: forgejo-db-1, " + hostprobe.DockerDiskContainer},
+		{"live, hm-postgres missing", false, nil, stackOnly(),
+			"1 of 3 stack containers not running: hm-postgres"},
 		{"live, all up", false, nil, allStackContainers(), ""},
-		{"live, forgejo-db-1 and hm-postgres missing", false, nil, forgejoOnly("forgejo-db-1"),
-			"2 of 5 stack containers not running: forgejo-db-1, hm-postgres"},
-		{"unreadable park state treats hm-postgres as not required", false, unreadable, forgejoOnly(), ""},
-		{"unreadable park state still requires forgejo", false, unreadable, forgejoOnly(hostprobe.DockerDiskContainer),
-			"1 of 4 stack containers not running: " + hostprobe.DockerDiskContainer},
+		{"live, forgejo-db-1 and hm-postgres missing", false, nil, stackOnly("forgejo-db-1"),
+			"2 of 3 stack containers not running: forgejo-db-1, hm-postgres"},
+		{"unreadable park state treats hm-postgres as not required", false, unreadable, stackOnly(), ""},
+		{"unreadable park state still requires the stack", false, unreadable, stackOnly(hostprobe.DockerDiskContainer),
+			"1 of 2 stack containers not running: " + hostprobe.DockerDiskContainer},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -346,13 +386,17 @@ func TestAttentionHostFailingProbeIsNamedAndIsolated(t *testing.T) {
 		{"disk", func(h *fakeHost) { h.diskErr = errors.New("statfs /town: no such file") }, hostProbeDisk},
 		{"memory", func(h *fakeHost) { h.memErr = errors.New("exec: \"memory_pressure\": not found") }, hostProbeMem},
 		{"docker", func(h *fakeHost) { h.containersErr = errors.New("Cannot connect to the Docker daemon\nIs it running?") }, hostProbeDocker},
+		{"forgejo", func(h *fakeHost) {
+			h.forgejoErr = errors.New("forgejo health https://forgejo.example/api/healthz: no route to host")
+		}, hostProbeForgejo},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			f := newAttentionFixture(t, now)
-			// The other two probes each have a rule firing, so the test can
-			// see they were not hidden by the failure.
+			// The three probes with a rule to fire each have it firing, so the
+			// test can see they were not hidden by the failure. The Forgejo
+			// probe has none of its own: a healthy instance raises nothing.
 			h := &fakeHost{
 				disk:       hostDisk{UsedPct: 95, FreeGB: 3},
 				memFree:    5,
@@ -431,7 +475,7 @@ func TestAttentionHostCollectorsAreRegistered(t *testing.T) {
 	h := &fakeHost{
 		disk:       hostDisk{UsedPct: 82, FreeGB: 80},
 		memFree:    9,
-		containers: []string{"forgejo-forgejo-1"},
+		containers: []string{"forgejo-db-1"},
 	}
 	logs := &bytes.Buffer{}
 	d := &Daemon{
@@ -465,8 +509,9 @@ func TestAttentionHostCollectorsAreRegistered(t *testing.T) {
 	if len(classes) != 3 {
 		t.Errorf("event classes = %v, want the three host rules raised", classes)
 	}
-	if h.diskCalls != 1 || h.memCalls != 1 || h.containerCalls != 1 {
-		t.Errorf("probe calls = disk %d mem %d docker %d, want one each per tick", h.diskCalls, h.memCalls, h.containerCalls)
+	if h.diskCalls != 1 || h.memCalls != 1 || h.containerCalls != 1 || h.forgejoCalls != 1 {
+		t.Errorf("probe calls = disk %d mem %d docker %d forgejo %d, want one each per tick",
+			h.diskCalls, h.memCalls, h.containerCalls, h.forgejoCalls)
 	}
 }
 
@@ -497,8 +542,8 @@ func TestAttentionHostMemFreePctReadsSharedParser(t *testing.T) {
 
 func TestAttentionHostParseContainerNames(t *testing.T) {
 	t.Parallel()
-	got := parseContainerNames("forgejo-db-1\n  hm-postgres \n\nforgejo-forgejo-1\n")
-	want := []string{"forgejo-db-1", "hm-postgres", "forgejo-forgejo-1"}
+	got := parseContainerNames("forgejo-db-1\n  hm-postgres \n\ngt-dolt\n")
+	want := []string{"forgejo-db-1", "hm-postgres", "gt-dolt"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("names = %v, want %v", got, want)
 	}

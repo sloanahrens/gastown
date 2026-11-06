@@ -1357,6 +1357,46 @@ func resolveForgejoConfigIn(open RepoFileOpener, townRoot, rigName string) (*con
 	return mq.Forgejo, err
 }
 
+// ResolveForgejoConfigWithError is ResolveForgejoConfigIn that returns, rather
+// than drops, the error of a settings tier this run could not read, so a caller
+// acting on the absence of a block can tell a rig that names no Forgejo from one
+// whose setting it could not read (gt-gg9hv.36).
+//
+// It reports the repo-tier error resolveForgejoConfigIn carries, and the
+// rig-root config.json floor and the rig-local settings/config.json override
+// when either exists but cannot be read or parsed: a block one of them may have
+// carried is unknown, never absent. A tier that is not there is absence and no
+// error. A repo tier that read but did not parse stays the absence
+// resolveForgejoConfigIn makes it, because that tier can never carry the block
+// (gt-mvbbe).
+func ResolveForgejoConfigWithError(open RepoFileOpener, townRoot, rigName string) (*config.ForgejoConfig, error) {
+	fc, err := resolveForgejoConfigIn(open, townRoot, rigName)
+	if err != nil {
+		return nil, err
+	}
+	if err := unreadableForgejoTier(townRoot, rigName); err != nil {
+		return nil, err
+	}
+	return fc, nil
+}
+
+// unreadableForgejoTier is the error of a settings file that exists but cannot
+// be read or parsed, for the two tiers that can choose the Forgejo block.
+func unreadableForgejoTier(townRoot, rigName string) error {
+	if townRoot == "" || rigName == "" {
+		return nil
+	}
+	rigPath := filepath.Join(townRoot, rigName)
+	if _, err := LoadRigConfigIfPresent(rigPath); err != nil {
+		return fmt.Errorf("rig %s: reading %s: %w", rigName, filepath.Join(rigPath, "config.json"), err)
+	}
+	path := filepath.Join(rigPath, "settings", "config.json")
+	if _, err := config.LoadRigSettings(path); err != nil && !errors.Is(err, config.ErrNotFound) {
+		return fmt.Errorf("rig %s: reading %s: %w", rigName, path, err)
+	}
+	return nil
+}
+
 // LandingRemoteOrigin is the remote a rig lands through when its settings name
 // no other.
 const LandingRemoteOrigin = "origin"

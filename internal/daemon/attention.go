@@ -171,6 +171,9 @@ type attentionCache struct {
 	diskWarnBeats int
 	// dockerProbeFails is how many consecutive ticks docker ps has failed.
 	dockerProbeFails int
+	// forgejoProbeFails is how many consecutive ticks the town's Forgejo has
+	// not answered its health endpoint.
+	forgejoProbeFails int
 	// repeatedAt is when each repeating item (attention.Repeats) was last
 	// said. It is memory only: after a restart an item's clock starts again.
 	repeatedAt map[string]time.Time
@@ -323,6 +326,10 @@ type attentionSources struct {
 	// dockerProbeFails is how many consecutive ticks docker ps has failed,
 	// carried across ticks by the daemon. collectHostDocker updates it.
 	dockerProbeFails int
+	// forgejoProbeFails is how many consecutive ticks the town's Forgejo has
+	// not answered its health endpoint, carried across ticks by the daemon.
+	// collectHostForgejo updates it.
+	forgejoProbeFails int
 
 	// questions is the overseer-question collectors' read of the town
 	// database (attention_questions.go).
@@ -394,6 +401,7 @@ func (d *Daemon) writeAttentionWith(budget time.Duration, sources func(now time.
 	}
 	src.diskWarnBeats = cache.diskWarnBeats
 	src.dockerProbeFails = cache.dockerProbeFails
+	src.forgejoProbeFails = cache.forgejoProbeFails
 	src.repeatedAt = cache.repeatedAt
 	src.backlogSamples = cache.backlogSamples
 	src.riskSkipped = cache.riskSkipped
@@ -427,7 +435,7 @@ func (d *Daemon) writeAttentionWith(budget time.Duration, sources func(now time.
 		d.logger.Printf("attention: auditing resolved risk-path FAILs: %v", err)
 	}
 	state := d.attentionTick(ctx, src, prev, acks, now)
-	d.lastAttention = &attentionCache{state: state, reworkNotes: src.reworkNotes, diskWarnBeats: src.diskWarnBeats, dockerProbeFails: src.dockerProbeFails, repeatedAt: src.repeatedAt, backlogSamples: src.backlogSamples, riskSkipped: src.riskSkipped, auditNext: src.auditNext, escalationLogs: src.escalationLogs}
+	d.lastAttention = &attentionCache{state: state, reworkNotes: src.reworkNotes, diskWarnBeats: src.diskWarnBeats, dockerProbeFails: src.dockerProbeFails, forgejoProbeFails: src.forgejoProbeFails, repeatedAt: src.repeatedAt, backlogSamples: src.backlogSamples, riskSkipped: src.riskSkipped, auditNext: src.auditNext, escalationLogs: src.escalationLogs}
 	if len(src.tips.Rigs) == 0 {
 		return
 	}
@@ -639,6 +647,7 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindHostDisk, collect: s.collectHostDisk},
 		{kind: attention.KindHostMem, collect: s.collectHostMem},
 		{kind: attention.KindHostDocker, collect: s.collectHostDocker},
+		{kind: attention.KindHostForgejo, collect: s.collectHostForgejo},
 		{kind: attention.KindDispatchIdle, collect: s.collectDispatchIdle},
 		{kind: attention.KindDeployFailed, collect: s.collectDeployFailures},
 		{kind: attention.KindBirdReportStale, collect: s.collectBirdReports},
@@ -658,7 +667,11 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 		host:        d.hostProbes,
 	}
 	if s.host == nil {
-		s.host = attentionHostProbes(d.config.TownRoot, os.Getenv)
+		forgejoBaseURL := d.forgejoBaseURL
+		if forgejoBaseURL == nil {
+			forgejoBaseURL = d.townForgejoBaseURL
+		}
+		s.host = attentionHostProbes(d.config.TownRoot, os.Getenv, forgejoBaseURL)
 	}
 	s.landingRigs = d.attentionLandingRigs
 	overseerCfg := d.loadOperationalConfig().GetOverseerConfig()
