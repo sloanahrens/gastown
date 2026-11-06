@@ -26,7 +26,7 @@ const doltHostGateway = "host.docker.internal"
 const composeService = "daemon"
 
 // composeProject is the compose project the town's daemon runs under. It appears
-// only in the start command downError names.
+// only in the start command downText names.
 const composeProject = "gt-live"
 
 // probeTimeout is the bound on each probe when Docker.ProbeTimeout is unset. A
@@ -82,17 +82,32 @@ func (d Docker) Launch(call Call) (int, error) {
 	if err := checkCall(call); err != nil {
 		return exitDown, err
 	}
+	rung, reason := d.rung(svc)
+	switch rung {
+	case RungExec:
+		return d.Exec(call)
+	case RungRun:
+		return d.Run(call)
+	default:
+		return exitDown, fmt.Errorf("gtwrap: %s", reason)
+	}
+}
+
+// rung chooses the step of the ladder that runs a call and the reason for it,
+// running nothing in the container. Launch and Doctor both come through here,
+// so the doctor cannot report a different step from the one a call takes.
+func (d Docker) rung(svc daemonService) (Rung, string) {
 	if _, exit, err := d.probe("info"); err != nil || exit != 0 {
-		return exitDown, d.downError(svc)
+		return RungDown, d.downText(svc)
 	}
 	running, exit, err := d.probe("ps", "-q", "--filter", "name=^"+svc.ContainerName+"$")
 	if err != nil || exit != 0 {
-		return exitDown, fmt.Errorf("gtwrap: could not list the containers, so it is not known whether %s is running; the call did not run", svc.ContainerName)
+		return RungDown, fmt.Sprintf("could not list the containers, so it is not known whether %s is running; the call did not run", svc.ContainerName)
 	}
 	if strings.TrimSpace(running) != "" {
-		return d.Exec(call)
+		return RungExec, "the daemon container " + svc.ContainerName + " is running"
 	}
-	return d.Run(call)
+	return RungRun, "the daemon container " + svc.ContainerName + " is not running, so a throwaway container of the image runs the tool"
 }
 
 // Exec runs call in the running daemon container: rung 1.
@@ -171,12 +186,12 @@ func (d Docker) daemonService() (daemonService, error) {
 	return daemonService{Image: s.Image, ContainerName: s.ContainerName}, nil
 }
 
-// downError names what is down and the commands that start it: Docker Desktop,
+// downText names what is down and the commands that start it: Docker Desktop,
 // which takes the container down with it, and the compose command that starts
 // the daemon once Docker answers.
-func (d Docker) downError(svc daemonService) error {
+func (d Docker) downText(svc daemonService) string {
 	start := strings.Join(d.dockerArgv("compose", "-p", composeProject, "-f", d.composePath(), "up", "-d", composeService), " ")
-	return fmt.Errorf("gtwrap: Docker is down: docker info did not answer, so the container %s cannot be reached. Start Docker Desktop with `open -a Docker`, then start the daemon with `%s`, and run the command again", svc.ContainerName, start)
+	return fmt.Sprintf("Docker is down: docker info did not answer, so the container %s cannot be reached. Start Docker Desktop with `open -a Docker`, then start the daemon with `%s`, and run the command again", svc.ContainerName, start)
 }
 
 // probe runs one docker command that only reads state, bounded by ProbeTimeout.
