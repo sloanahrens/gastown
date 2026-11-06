@@ -25,8 +25,9 @@ const (
 
 // cutoverPrechecks is the operator's list of conditions this command cannot
 // check for itself. Install prints it, and
-// docs/design/gt-in-container-cutover.md repeats each line word for word, so
-// the runbook and the command cannot drift (gt-yjzepk.12).
+// docs/design/gt-in-container-cutover.md repeats each line word for word;
+// TestCutoverRunbookNamesEveryPrecheck holds the two lists equal, so an edit to
+// one alone fails the test (gt-yjzepk.12).
 var cutoverPrechecks = []string{
 	"the dry run against every Mac caller passed",
 	"the compose environment names the Dolt host, so bd in the container reaches Dolt",
@@ -329,34 +330,42 @@ func place(files Files, data []byte, mode fs.FileMode, t Target, stamp string) e
 		return fmt.Errorf("gtwrap: make a temporary file beside %s: %w", t.Path, err)
 	}
 	tempPath := temp.Name()
-	discard := func() {
-		_ = temp.Close()
-		_ = files.Remove(tempPath)
+	// fail returns the step's error joined with any failure to remove the
+	// temporary file, so a file left beside the tool is named, not dropped.
+	fail := func(err error) error {
+		return errors.Join(err, removeTemp(files, tempPath))
+	}
+	discard := func(err error) error {
+		return errors.Join(err, temp.Close(), removeTemp(files, tempPath))
 	}
 	if _, err := temp.Write(data); err != nil {
-		discard()
-		return fmt.Errorf("gtwrap: write the wrapper beside %s: %w", t.Path, err)
+		return discard(fmt.Errorf("gtwrap: write the wrapper beside %s: %w", t.Path, err))
 	}
 	if err := temp.Chmod(mode); err != nil {
-		discard()
-		return fmt.Errorf("gtwrap: set the wrapper's mode beside %s: %w", t.Path, err)
+		return discard(fmt.Errorf("gtwrap: set the wrapper's mode beside %s: %w", t.Path, err))
 	}
 	if err := temp.Close(); err != nil {
-		_ = files.Remove(tempPath)
-		return fmt.Errorf("gtwrap: finish the wrapper beside %s: %w", t.Path, err)
+		return fail(fmt.Errorf("gtwrap: finish the wrapper beside %s: %w", t.Path, err))
 	}
 	kept := dated(t, stamp)
 	if err := files.Rename(t.Path, kept); err != nil {
-		_ = files.Remove(tempPath)
-		return fmt.Errorf("gtwrap: keep %s as %s: %w", t.Path, kept, err)
+		return fail(fmt.Errorf("gtwrap: keep %s as %s: %w", t.Path, kept, err))
 	}
 	if err := files.Rename(tempPath, t.Path); err != nil {
 		backErr := files.Rename(kept, t.Path)
-		_ = files.Remove(tempPath)
 		if backErr != nil {
-			return fmt.Errorf("gtwrap: rename the wrapper into place at %s: %v; putting %s back also failed: %v", t.Path, err, kept, backErr)
+			return fail(fmt.Errorf("gtwrap: rename the wrapper into place at %s: %v; putting %s back also failed: %v", t.Path, err, kept, backErr))
 		}
-		return fmt.Errorf("gtwrap: rename the wrapper into place at %s: %w", t.Path, err)
+		return fail(fmt.Errorf("gtwrap: rename the wrapper into place at %s: %w", t.Path, err))
+	}
+	return nil
+}
+
+// removeTemp removes the temporary file a failed step left behind. It returns
+// nil when the file is gone.
+func removeTemp(files Files, path string) error {
+	if err := files.Remove(path); err != nil {
+		return fmt.Errorf("gtwrap: remove the temporary file %s: %w", path, err)
 	}
 	return nil
 }

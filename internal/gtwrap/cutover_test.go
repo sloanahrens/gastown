@@ -1188,6 +1188,50 @@ func TestInstallListsTheToolsItLeftInstalledWhenALaterPlacementFails(t *testing.
 	}
 }
 
+// TestInstallNamesATemporaryFileItCannotRemove: when a placement step fails and
+// the temporary file cannot be removed either, the error names both, so the
+// file left beside the tool is not silent.
+func TestInstallNamesATemporaryFileItCannotRemove(t *testing.T) {
+	t.Parallel()
+	target := Target{Name: "gt", Path: "/Users/operator/.local/bin/gt"}
+	kept := dated(target, testStamp)
+	tests := []struct {
+		name string
+		// fail is the step that fails before the temporary file is removed.
+		fail func(op, path string) bool
+		want string
+	}{
+		{
+			name: "the write fails",
+			fail: func(op, path string) bool { return op == "write" },
+			want: "write the wrapper beside",
+		},
+		{
+			name: "the old file cannot be kept aside",
+			fail: func(op, path string) bool { return op == "rename" && path == target.Path+" -> "+kept },
+			want: "keep " + target.Path,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			files := cutoverFiles([]Target{target})
+			files.errFor = func(op, path string) error {
+				if op == "remove" || tt.fail(op, path) {
+					return permission(path)
+				}
+				return nil
+			}
+			err := Install(installConfig(files, &fakeDoctor{}, &bytes.Buffer{}, []Target{target}))
+			for _, want := range []string{tt.want, "remove the temporary file"} {
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("Install = %v, want it to name %q", err, want)
+				}
+			}
+		})
+	}
+}
+
 func TestInstallNamesNoToolWhenTheFirstFails(t *testing.T) {
 	t.Parallel()
 	targets := fourTargets()[:1]
