@@ -2382,6 +2382,7 @@ func TestCacheTrimNoOpNeverFailsATrim(t *testing.T) {
 	}{
 		{"df fails", cliReply{stderr: "df: executable file not found in $PATH", code: 127}, "exit status 127"},
 		{"df prints something that is not its table", cliReply{stdout: "no room here\n"}, "df printed 1 non-empty line(s), want the header and one data row"},
+		{"df's Used column is not a number", cliReply{stdout: "Filesystem 1024-blocks Used Available Capacity Mounted on\noverlay 1000000 lots 1 1% /\n"}, "df's Used column is not a whole number of KiB"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
