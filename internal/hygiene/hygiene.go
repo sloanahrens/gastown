@@ -237,11 +237,19 @@ func scanPath(fsys fs.FS, path string, rules []Rule, blocked map[string]struct{}
 	}
 
 	var findings []Finding
-	if isForbiddenPath(path) && !excused(allow, path, RuleForbiddenDir, "") {
+	forbidden := isForbiddenPath(path)
+	if forbidden && !excused(allow, path, RuleForbiddenDir, "") {
 		findings = append(findings, Finding{Path: path, Rule: RuleForbiddenDir})
 	}
 	if hasBlockedWord(path, blocked) && !excused(allow, path, RuleBlockedWord, "") {
 		findings = append(findings, Finding{Path: path, Rule: RuleBlockedWord})
+	}
+	// A file under a forbidden directory is reported by its path alone. Its
+	// contents are not scanned: a backup export or a session log repeats the
+	// same names and paths thousands of times, and the path finding already
+	// says the file must not be tracked.
+	if forbidden {
+		return findings, data, nil
 	}
 	if bytes.IndexByte(data, 0) >= 0 {
 		if !excused(allow, path, RuleBinaryFile, "") {
@@ -409,7 +417,7 @@ func emailFinding(line string) bool {
 		at := strings.LastIndex(line[loc[0]:loc[1]], "@") + loc[0]
 		local := line[loc[0]:at]
 		domain := line[at+1 : loc[1]]
-		if !lastLabelIsName(domain) {
+		if !addressDomain(domain) {
 			continue
 		}
 		if emailIsFinding(local, domain, line[loc[1]:]) {
@@ -419,14 +427,19 @@ func emailFinding(line string) bool {
 	return false
 }
 
-// lastLabelIsName reports whether the domain's last label is a host label: it
-// starts with a letter and does not mix lower and upper case. A case-mixing
-// label is a Go identifier such as queueLandingColumn, while 127.0.0.1 and
-// other all-digit hosts are not names at all.
-func lastLabelIsName(domain string) bool {
-	labels := strings.Split(domain, ".")
-	last := labels[len(labels)-1]
-	if last == "" || !isASCIILetter(last[0]) {
+// addressDomain reports whether domain has the shape of an address: at least
+// one dot, and a last label that starts with a letter, is two or more letters
+// long and does not mix lower and upper case. Without a dot the match is a
+// version pin or an id (checkout@v4, image@sha256, main@a); a one-letter or
+// all-digit last label (a@b.c, 127.0.0.1) is not a host name; and a case-mixing
+// label is a Go identifier such as queueLandingColumn.
+func addressDomain(domain string) bool {
+	dot := strings.LastIndex(domain, ".")
+	if dot < 0 {
+		return false
+	}
+	last := domain[dot+1:]
+	if len(last) < 2 || !isASCIILetter(last[0]) {
 		return false
 	}
 	return !mixedCase(last)

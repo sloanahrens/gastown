@@ -247,6 +247,39 @@ func TestIdentifierShapedDomainIsNotAnEmail(t *testing.T) {
 	}
 }
 
+func TestEmailNeedsADottedDomain(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		text string
+		want int
+	}{
+		{"workflow action pin", "actions/checkout@" + "v4", 0},
+		{"image digest", "image@" + "sha256:9e79b8", 0},
+		{"tool tag", "bd@" + "latest", 0},
+		{"source ref", "gt-source@" + "abc", 0},
+		{"short branch", "main@" + "a", 0},
+		{"shell prompt", "user@" + "host:~$", 0},
+		{"one-label domain", "a@" + "host", 0},
+		{"plain address", "a@" + "host.com", 1},
+		{"address in a subdomain", "a@" + "sub.host.co.uk", 1},
+		{"one-letter last label", "a@" + "b.c", 0},
+		{"digit last label", "a@" + "x.1", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := "contact " + tc.text + " please"
+			findings := scanFS(t, singleFile("docs/note.md", line+"\n"), nil)
+			if len(findings) != tc.want {
+				t.Fatalf("got %d findings %v, want %d", len(findings), findings, tc.want)
+			}
+			if tc.want == 1 && findings[0].Rule != RuleEmail {
+				t.Errorf("rule = %q, want %q", findings[0].Rule, RuleEmail)
+			}
+		})
+	}
+}
+
 func TestBlockedWordIsFoundInContentAndInPathsAndNeverEchoed(t *testing.T) {
 	t.Parallel()
 	word := planted("ahr", "ens")
@@ -496,6 +529,45 @@ func TestForbiddenDirectory(t *testing.T) {
 	}
 }
 
+func TestForbiddenDirectoryContentsAreNotScanned(t *testing.T) {
+	t.Parallel()
+	word := planted("ahr", "ens")
+	body := strings.Join([]string{
+		"intro",
+		"contact " + planted("alice", "@github.com") + " please",
+		"mentions " + word + " in prose",
+		"opened " + planted("/Users/", "zephyr", "/project/file.go"),
+		"wrote " + planted("/private/", "tmp", "/note.txt"),
+		"recorded " + planted("session", "_id: ", "1234abcd", "-", "5678"),
+		"",
+	}, "\n")
+
+	for _, dir := range ForbiddenDirs {
+		t.Run(dir, func(t *testing.T) {
+			path := dir + "/notes.md"
+			assertFindings(t, scanFS(t, singleFile(path, body), nil),
+				Finding{Path: path, Rule: RuleForbiddenDir})
+		})
+	}
+
+	t.Run("a file outside those directories is still scanned", func(t *testing.T) {
+		findings := scanFS(t, singleFile("docs/notes.md", body), nil)
+		for _, rule := range []string{
+			RuleEmail, RuleBlockedWord, RuleHomePath, RulePrivateTemp, RuleAgentSession,
+		} {
+			var found bool
+			for _, finding := range findings {
+				if finding.Rule == rule && finding.Line > 0 {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("rule %q found no line finding outside the forbidden directories", rule)
+			}
+		}
+	})
+}
+
 func TestCleanTreeHasNoFindings(t *testing.T) {
 	t.Parallel()
 	fsys := fstest.MapFS{
@@ -536,7 +608,7 @@ func TestAnAddressFollowedByAColonInProseIsAFinding(t *testing.T) {
 		{"gitx user", planted("gitx", "@github.com:org/repo"), 1},
 		{"xgit user", planted("xgit", "@github.com:org/repo"), 1},
 		{"writer ssh lookalike", planted("writer", "@github.com:org/repo"), 1},
-		{"ssh remote followed by prose", planted("git@", "host: prose"), 1},
+		{"ssh remote followed by prose", planted("git@", "host.example: prose"), 1},
 		{"address followed by a colon", planted("writer", "@example.com:"), 1},
 	}
 	for _, tc := range cases {
