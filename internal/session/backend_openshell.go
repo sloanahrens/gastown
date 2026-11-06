@@ -1069,7 +1069,6 @@ func (b *openshellBackend) contract(spec SpawnSpec, tracker sandboxTracker) map[
 		"BEADS_DOLT_SERVER_MODE":                   "1",
 		"BEADS_DOLT_SERVER_HOST":                   b.controlPlaneHost(),
 		"BEADS_DOLT_SERVER_PORT":                   sandboxDoltPort,
-		"BD_DISABLE_METRICS":                       "1",
 		"DO_NOT_TRACK":                             "1",
 		"DISABLE_AUTOUPDATER":                      "1",
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",

@@ -35,11 +35,11 @@ func TestCleanGTEnv_PreservesBeadsDoltPort(t *testing.T) {
 	}
 }
 
-// The hermetic markers, the Dolt passthroughs and bd's telemetry switches
-// reach subprocesses; other GT_*/BD_* context does not.
+// The hermetic markers and the Dolt passthroughs reach subprocesses; other
+// GT_*/BD_* context does not.
 func TestCleanGTEnv_KeepsHarnessMarkers(t *testing.T) {
 	t.Parallel()
-	keep := []string{"GT_DOLT_HOST=h", "GT_TEST_EXTERNAL_DOLT=1", "GT_TEST_HERMETIC=1", "GT_TEST_FORBIDDEN_TOWN_ROOT=/live", "BD_DISABLE_METRICS=1", "BD_DISABLE_EVENT_FLUSH=1"}
+	keep := []string{"GT_DOLT_HOST=h", "GT_TEST_EXTERNAL_DOLT=1", "GT_TEST_HERMETIC=1", "GT_TEST_FORBIDDEN_TOWN_ROOT=/live"}
 	env := cleanGTEnv(append([]string{"GT_ROLE=x", "BD_ACTOR=y"}, keep...))
 	if !slices.Equal(env, keep) {
 		t.Errorf("CleanGTEnv = %q, want %q", env, keep)
