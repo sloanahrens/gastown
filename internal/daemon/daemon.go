@@ -852,6 +852,15 @@ type Daemon struct {
 	// holds a restart for it separately, up to postLandRestartCap (gt-gb4ij).
 	postLandRuns atomic.Int32
 
+	// postLandRunners holds each rig's post-land runner, which the attention
+	// collector asks for the alarms its durable pending entries imply
+	// (gt-gg9hv.7.1).
+	postLandRunners postLandRunnerSet
+	// postLandSettingsErr remembers, per rig, the last reason an unreadable rig
+	// settings file turned status mode off, so it is logged once per reason.
+	postLandSettingsMu  sync.Mutex
+	postLandSettingsErr map[string]string
+
 	// jsonlGitBackupRunning, wispReaperRunning, and checkpointDogRunning are
 	// the single-flight guards for their patrols, on their own goroutines —
 	// the same gt-ima2 shape as compactor_dog

@@ -224,6 +224,49 @@ func TestRigSettingsWithCustomMergeQueue(t *testing.T) {
 	}
 }
 
+// gt-gg9hv.7.1: merge_queue.post_land_status_context is the setting that
+// switches a rig's post-land verdict to main's CI status. It round-trips, and
+// an unset value stays empty, which leaves the verdict with post_land_command.
+func TestPostLandStatusContextIsReadFromTheRigSettings(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "settings", "config.json")
+	if err := SaveRigSettings(path, &RigSettings{
+		Type:    "rig-settings",
+		Version: 1,
+		MergeQueue: &MergeQueueConfig{
+			PostLandCommand:       "make test-slow",
+			PostLandStatusContext: "ci / post-land (push)",
+		},
+	}); err != nil {
+		t.Fatalf("SaveRigSettings: %v", err)
+	}
+	loaded, err := LoadRigSettings(path)
+	if err != nil {
+		t.Fatalf("LoadRigSettings: %v", err)
+	}
+	if got := loaded.MergeQueue.PostLandStatusContext; got != "ci / post-land (push)" {
+		t.Fatalf("post_land_status_context = %q, want the configured context", got)
+	}
+	if got := loaded.MergeQueue.PostLandCommand; got != "make test-slow" {
+		t.Fatalf("post_land_command = %q", got)
+	}
+
+	if err := SaveRigSettings(path, &RigSettings{
+		Type:       "rig-settings",
+		Version:    1,
+		MergeQueue: &MergeQueueConfig{PostLandCommand: "make test-slow"},
+	}); err != nil {
+		t.Fatalf("SaveRigSettings: %v", err)
+	}
+	loaded, err = LoadRigSettings(path)
+	if err != nil {
+		t.Fatalf("LoadRigSettings: %v", err)
+	}
+	if got := loaded.MergeQueue.PostLandStatusContext; got != "" {
+		t.Fatalf("post_land_status_context with no context = %q, want empty", got)
+	}
+}
+
 // TestRigSettingsToleratesTheRetiredOMQueueKey: landing.om_queue turned on the
 // om finding queue, which is gone (gt-50k2e). A rig settings file decodes
 // strictly, so the key stays declared or every rig whose file still sets it

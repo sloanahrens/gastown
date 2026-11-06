@@ -660,7 +660,8 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	// stuckEnd ends the in-flight bead's watch; nil between beads. Only the
 	// Active callback below touches it.
 	var stuckEnd func()
-	run := postLandRun(repo, workRoot, d.landingLogRoot(rigName), townRoot, rigName, landingRemote, landingWorkerDuration(cfg.PostLandTimeoutStr, defaultPostLandTimeout))
+	postLandTimeout := landingWorkerDuration(cfg.PostLandTimeoutStr, defaultPostLandTimeout)
+	run := postLandRun(repo, workRoot, d.landingLogRoot(rigName), townRoot, rigName, landingRemote, postLandTimeout)
 	// Every rig that lands here does so through Forgejo, so the merge happens
 	// on the remote and the author seat's remote-tracking default branch is
 	// stale until something fetches it (gt-fn9e6.55).
@@ -703,22 +704,9 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	} else {
 		redMain.Promote = d.newPromoter(rigName, repo, forgejoCfg)
 	}
-	postLand := &landworker.PostLandRunner{
-		Rig:     rigName,
-		Command: func() string { return rigPostLandCommand(rigPath) },
-		Run:     run,
-		Beads:   bd,
-		Logf:    d.logger.Printf,
-		OnRed:   redMain.Red,
-		OnGreen: redMain.Green,
-		Busy: func(busy bool) {
-			if busy {
-				d.postLandRuns.Add(1)
-			} else {
-				d.postLandRuns.Add(-1)
-			}
-		},
-	}
+	postLand := d.newPostLandRunner(rigName, rigPath, newPostLandWiring(
+		merger.Client, merger.Owner, merger.RepoName, mainState, postLandTimeout, run, bd, redMain,
+		git.NewGit(repo).IsAncestor))
 	// The human's recorded identity is what the worker refuses a submission
 	// under, so a town whose overseer identity cannot be read gets no worker:
 	// without the name no submission can be checked, and landing one would
@@ -1145,6 +1133,117 @@ func rigPostLandCommand(rigPath string) string {
 		return ""
 	}
 	return strings.TrimSpace(settings.MergeQueue.PostLandCommand)
+}
+
+// rigPostLandStatusContext is merge_queue.post_land_status_context from the
+// rig's own settings/config.json only, for the reason rigPostLandCommand reads
+// its file: the setting decides what counts as red main, so merged repo
+// content must not choose it (gt-gg9hv.7.1).
+func rigPostLandStatusContext(rigPath string) string {
+	name, _ := rigPostLandStatusContextErr(rigPath)
+	return name
+}
+
+// rigPostLandStatusContextErr is rigPostLandStatusContext with the reason a
+// present settings file could not be read: a missing file is no setting and no
+// error, but an unreadable or invalid one turns status mode off, and the caller
+// says so (gt-gg9hv.7.1).
+func rigPostLandStatusContextErr(rigPath string) (string, error) {
+	settings, err := config.LoadRigSettings(config.RigSettingsPath(rigPath))
+	if err != nil {
+		if errors.Is(err, config.ErrNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+	if settings == nil || settings.MergeQueue == nil {
+		return "", nil
+	}
+	return strings.TrimSpace(settings.MergeQueue.PostLandStatusContext), nil
+}
+
+// postLandWiring is the landing worker's half of a rig's post-land runner: the
+// collaborators newRigLandingWorker builds. newPostLandRunner takes them, so
+// the one place the runner is wired is the place a test drives.
+type postLandWiring struct {
+	Status  func(ctx context.Context, pl landworker.PostLand) (*forgejo.CombinedStatus, error)
+	State   landworker.MainStateStore
+	Timeout time.Duration
+	// IsAncestor orders status verdicts: an older commit's verdict moves nothing
+	// once a newer one stands.
+	IsAncestor func(ancestor, descendant string) (bool, error)
+	Run        func(ctx context.Context, cmd string, pl landworker.PostLand) landworker.PostLandResult
+	Beads      interface {
+		AddComment(id, text string) error
+	}
+	OnRed   func(ctx context.Context, cmd string, pl landworker.PostLand, res landworker.PostLandResult)
+	OnGreen func(ctx context.Context, cmd string, pl landworker.PostLand, res landworker.PostLandResult)
+}
+
+// postLandStatusClient is the Forgejo read the status closure makes.
+type postLandStatusClient interface {
+	CombinedStatus(ctx context.Context, owner, repo, ref string) (*forgejo.CombinedStatus, error)
+}
+
+// newPostLandWiring is the one place newRigLandingWorker's collaborators become
+// the post-land runner's wiring, so a test drives the same assembly production
+// does. The status it reads is the LANDED commit's (a landing's verdict is never
+// the verdict of whatever main is by then). Every parameter is positional, so a
+// piece left out of the call does not compile.
+func newPostLandWiring(client postLandStatusClient, owner, repo string, state landworker.MainStateStore, timeout time.Duration,
+	run func(ctx context.Context, cmd string, pl landworker.PostLand) landworker.PostLandResult,
+	beads interface{ AddComment(id, text string) error }, redMain *landworker.RedMain,
+	isAncestor func(ancestor, descendant string) (bool, error)) postLandWiring {
+	return postLandWiring{
+		Status: func(ctx context.Context, pl landworker.PostLand) (*forgejo.CombinedStatus, error) {
+			return client.CombinedStatus(ctx, owner, repo, pl.Commit)
+		},
+		State:      state,
+		Timeout:    timeout,
+		IsAncestor: isAncestor,
+		Run:        run,
+		Beads:      beads,
+		OnRed:      redMain.Red,
+		OnGreen:    redMain.Green,
+	}
+}
+
+// newPostLandRunner builds a rig's post-land runner. The command and the
+// status context are read from the rig's own settings at every use. An UNKNOWN
+// status verdict is recorded where the attention queue reads it, and a
+// command run holds an upgrade restart while it is in flight (gt-gb4ij).
+func (d *Daemon) newPostLandRunner(rigName, rigPath string, w postLandWiring) *landworker.PostLandRunner {
+	runner := &landworker.PostLandRunner{
+		Rig:     rigName,
+		Command: func() string { return rigPostLandCommand(rigPath) },
+		StatusContext: func() string {
+			name, err := rigPostLandStatusContextErr(rigPath)
+			if err != nil && d.postLandSettingsErrLogged(rigName, err) {
+				d.logger.Printf("post-land: %s: the rig settings file cannot be read, so status mode is off and the post-land command (if any) decides: %v", rigName, err)
+			}
+			return name
+		},
+		Status:     w.Status,
+		State:      w.State,
+		IsAncestor: w.IsAncestor,
+		Clock:      d.clk(),
+		Timeout:    w.Timeout,
+		Run:        w.Run,
+		Beads:      w.Beads,
+		Logf:       d.logger.Printf,
+		OnRed:      w.OnRed,
+		OnGreen:    w.OnGreen,
+		Busy: func(busy bool) {
+			if busy {
+				d.postLandRuns.Add(1)
+			} else {
+				d.postLandRuns.Add(-1)
+			}
+		},
+	}
+	d.postLandRunners.set(rigName, runner)
+	d.postLandRunners.setSettingsPath(rigName, rigPath)
+	return runner
 }
 
 // rigFollowupsEnabled is landing.followups from the rig's own
@@ -1746,4 +1845,20 @@ func roundsDirFor(reviewer land.Reviewer, dir string) string {
 		return ""
 	}
 	return dir
+}
+
+// postLandSettingsErrLogged reports whether err is a new reason for rig, so the
+// daemon says an unreadable rig settings file turned status mode off once per
+// reason, not on every trigger and pass.
+func (d *Daemon) postLandSettingsErrLogged(rig string, err error) bool {
+	d.postLandSettingsMu.Lock()
+	defer d.postLandSettingsMu.Unlock()
+	if d.postLandSettingsErr == nil {
+		d.postLandSettingsErr = map[string]string{}
+	}
+	if d.postLandSettingsErr[rig] == err.Error() {
+		return false
+	}
+	d.postLandSettingsErr[rig] = err.Error()
+	return true
 }

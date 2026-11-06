@@ -88,6 +88,9 @@ const (
 	// RuleBirdReportStale is the late-or-missing daily bird report rule
 	// (gt-cbsat).
 	RuleBirdReportStale = "bird.report_stale"
+
+	// RulePostLandUnknown is the silent post-land check rule (gt-gg9hv.7.1).
+	RulePostLandUnknown = "landing.post_land_unknown"
 )
 
 var (
@@ -146,6 +149,9 @@ var ruleFlags = map[string]RuleFlags{
 	// A late report is for the next overseer look, not a reason to wake it:
 	// the queue row and the dashboard pill are what the beat reads.
 	RuleBirdReportStale: flagsAsk,
+	// A silent post-land check is for a person to look at, not a page: the 24
+	// hour townhealth reading is the backstop behind it (gt-gg9hv.7.2).
+	RulePostLandUnknown: flagsAsk,
 	// A question is waiting on the operator, or the operator has answered and
 	// the overseer has yet to act; both are the overseer's to pick up.
 	RuleQuestionNew:      flagsWake,
@@ -240,6 +246,7 @@ var kindRules = map[Kind]string{
 	KindDeployFailed:             RuleDeployFailed,
 	KindReviewBacklog:            RuleReviewBacklog,
 	KindBirdReportStale:          RuleBirdReportStale,
+	KindPostLandUnknown:          RulePostLandUnknown,
 }
 
 // RuleFor is the rule id of an item. The disk collector's key is its rule

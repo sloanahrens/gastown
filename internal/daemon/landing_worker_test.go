@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -399,6 +400,27 @@ func TestRigPostLandCommandReadsRigSettingsOnly(t *testing.T) {
 	}
 	if got := rigPostLandCommand(rigPath); got != "make test-slow" {
 		t.Fatalf("post_land_command = %q", got)
+	}
+}
+
+// TestRigPostLandStatusContextReadsRigSettingsOnly: the setting decides what
+// counts as red main, so it comes from the rig's own settings/config.json and
+// never from repo-committed content (gt-gg9hv.7.1).
+func TestRigPostLandStatusContextReadsRigSettingsOnly(t *testing.T) {
+	t.Parallel()
+	rigPath := t.TempDir()
+	if got := rigPostLandStatusContext(rigPath); got != "" {
+		t.Fatalf("no settings: %q", got)
+	}
+	if err := os.MkdirAll(filepath.Join(rigPath, "settings"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"type":"rig-settings","version":1,"merge_queue":{"post_land_status_context":" ci / post-land (push) "}}`
+	if err := os.WriteFile(filepath.Join(rigPath, "settings", "config.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := rigPostLandStatusContext(rigPath); got != "ci / post-land (push)" {
+		t.Fatalf("post_land_status_context = %q", got)
 	}
 }
 
@@ -934,14 +956,14 @@ func TestFileMainStateRoundTrips(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	f := fileMainState{path: RedMainStatePath(town, "gastown")}
-	if st, err := f.Load(); err != nil || st != (landworker.MainState{}) {
+	if st, err := f.Load(); err != nil || !reflect.DeepEqual(st, landworker.MainState{}) {
 		t.Fatalf("missing file: %+v %v; want the zero state", st, err)
 	}
 	want := landworker.MainState{LastGreen: "g1", LastRun: "r1"}
 	if err := f.Save(want); err != nil {
 		t.Fatal(err)
 	}
-	if st, err := f.Load(); err != nil || st != want {
+	if st, err := f.Load(); err != nil || !reflect.DeepEqual(st, want) {
 		t.Fatalf("loaded %+v %v; want %+v", st, err, want)
 	}
 }

@@ -1356,10 +1356,28 @@ type MergeQueueConfig struct {
 	// in a throwaway worktree at the landed commit (e.g. "make test-slow":
 	// the gate, then the shell tests). The landing worker runs it asynchronously, one at a
 	// time per rig, coalescing landings that finish while one runs; a red
-	// run comments on the landed bead and never reverts the landing
-	// (gt-v4ssj.2). Empty disables it. Read only from the rig's own
-	// settings/config.json, so merged repo content cannot choose it.
+	// run comments on the landed bead and, when the landing is the sole
+	// change since the last green commit, reverts it through a revert bead
+	// (`RevertLanded`, gt-v4ssj.4.1; gt-0jgnd is one). Only a direct push with
+	// no work bead is never reverted. An UNKNOWN verdict reverts nothing.
+	// Empty disables it. Read only from the rig's own settings/config.json,
+	// so merged repo content cannot choose it.
 	PostLandCommand string `json:"post_land_command,omitempty"`
+
+	// PostLandStatusContext names the commit-status context a landing's
+	// verdict comes from instead of PostLandCommand (gt-gg9hv.7.1). The
+	// landing worker reads the landed commit's combined status on the rig's
+	// Forgejo remote and takes every status with this context: all success is
+	// green, and any failure or error is red. UNKNOWN covers pending, warning,
+	// skipped, missing, hand-posted and unreadable; an UNKNOWN calls neither
+	// callback, reverts nothing, and raises one attention item once
+	// post_land_timeout passes. A red status alone never reverts: with a
+	// PostLandCommand the check is rerun at the landed commit and only a
+	// rerun that fails again takes the red-main path that can revert; with
+	// none, the red-main bead is filed and nothing is reverted. It wins
+	// over PostLandCommand when both are set. Read only from the rig's own settings/config.json, so merged repo
+	// content cannot choose it.
+	PostLandStatusContext string `json:"post_land_status_context,omitempty"`
 
 	// Forgejo is the rig's Forgejo landing block (gt-fn9e6.3, slice 3 of
 	// docs/design/forgejo-primary-landing.md): where its remote is, which
