@@ -48,8 +48,17 @@ type daemonComposeFlags struct {
 	extraHosts []string
 	// configDir is --config-dir: the town's config directory on the host, an
 	// absolute path. The render mounts it read-only at that path and at the
-	// container's XDG path (gt-gg9hv.3).
+	// container's XDG path, or with --secrets-manifest only the files the
+	// manifest lists (gt-gg9hv.3, gt-gg9hv.66).
 	configDir string
+	// secretsManifest is --secrets-manifest: the path of the enumerated list of
+	// files the daemon reads from the config directory. With it the render
+	// mounts those files read-only and no directory of the tree; without it the
+	// render is unchanged (gt-gg9hv.66).
+	secretsManifest string
+	// secretsManifestSet is whether --secrets-manifest was given at all, so a
+	// blank value is refused rather than read as unset.
+	secretsManifestSet bool
 	// backupDir is --backup-dir: the host's Dolt backup directory, an absolute
 	// path. The render mounts it read-write at that path and sets
 	// GT_DOLT_BACKUP_ROOT to it; a relative path is refused by the render
@@ -86,8 +95,15 @@ type daemonComposeDeps struct {
 	// omConfig derives the om config the container reads from the default
 	// settings, which the render takes; a test stands in a failure for it.
 	omConfig func() ([]byte, error)
-	files    composeFiles
-	out      io.Writer
+	// secretsFS is the seam the secrets render reads the config directory
+	// through. Nil is the host's filesystem; a test supplies a fake that records
+	// every call and refuses a content read (gt-gg9hv.66).
+	secretsFS templates.SecretFS
+	files     composeFiles
+	out       io.Writer
+	// errOut is where a warning goes, apart from the compose file on out: the
+	// rendered file must stay the whole of what --print prints.
+	errOut io.Writer
 }
 
 // composeFiles is the filesystem the compose file is written through: a
@@ -143,7 +159,8 @@ func realDaemonComposeDeps(out io.Writer) daemonComposeDeps {
 			mkdirAll: func(dir string) error { return os.MkdirAll(dir, 0o755) },
 			write:    daemonimage.WriteComposeFile,
 		},
-		out: out,
+		out:    out,
+		errOut: os.Stderr,
 	}
 }
 
@@ -233,6 +250,15 @@ directly after init. Without the flag the render is unchanged.
 the container's XDG_CONFIG_HOME path, because the town's settings name the
 directory both ways; without the flag the render is unchanged.
 
+--secrets-manifest names deploy/daemon/secrets.yaml, the enumerated list of files
+in the config directory that the daemon reads. Its header defines the fields and
+what rotating a listed file costs. With it the render mounts each listed file
+read-only at its own path and at the container's XDG path, and mounts no
+directory of the config tree, so the town's other config files stay on the host.
+The flag requires --config-dir, since its entries are files in that directory,
+and a blank value is refused. The command reads the manifest and opens none of
+the files it lists.
+
 --backup-dir names the host's Dolt backup directory, an absolute path. The Dolt
 server container writes each night's backup there at the same path, so the render
 mounts it read-write at that same path on the daemon and sets GT_DOLT_BACKUP_ROOT
@@ -248,6 +274,7 @@ twice). The mounts are sorted by path. Without the flag the render is unchanged.
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			f.omTokenFileSet = cmd.Flags().Changed(config.OMTokenFileFlag)
+			f.secretsManifestSet = cmd.Flags().Changed("secrets-manifest")
 			return run(cmd.OutOrStdout(), f)
 		},
 	}
@@ -266,7 +293,9 @@ twice). The mounts are sorted by path. Without the flag the render is unchanged.
 	write.Flags().StringArrayVar(&f.extraHosts, "extra-host", nil,
 		"A host alias the container resolves, as <hostname>:<ipv4 or host-gateway>; repeat for more, and a malformed entry is refused by name")
 	write.Flags().StringVar(&f.configDir, "config-dir", "",
-		"the town's config directory on the host (an absolute path), mounted read-only at that path and at the container's XDG path; unset renders neither mount")
+		"the town's config directory on the host (an absolute path), mounted read-only at that path and at the container's XDG path, or with --secrets-manifest only the files the manifest lists")
+	write.Flags().StringVar(&f.secretsManifest, "secrets-manifest", "",
+		"the secrets manifest listing the config-directory files the daemon reads; with it the render mounts those files and no directory of the tree, and requires --config-dir")
 	write.Flags().StringVar(&f.backupDir, "backup-dir", "",
 		"the host's Dolt backup directory (an absolute path), mounted read-write at that path and named by GT_DOLT_BACKUP_ROOT; unset renders neither")
 	write.Flags().StringArrayVar(&f.bindRO, "bind-ro", nil,
@@ -303,6 +332,29 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 	// command opens neither.
 	forgeHost := strings.TrimSpace(f.forgeHost)
 	forgeTokenFile := strings.TrimSpace(f.forgeTokenFile)
+	configDir := strings.TrimSpace(f.configDir)
+	// The manifest names files in the config directory, so the two flags are
+	// given together. The manifest file itself is read; none of the files it
+	// lists is, so no contents reach the render or an error.
+	secretsManifest := strings.TrimSpace(f.secretsManifest)
+	if f.secretsManifestSet && secretsManifest == "" {
+		return fmt.Errorf("--secrets-manifest was given blank; name the manifest file, or leave the flag out to mount the config directory")
+	}
+	var secretFiles []templates.SecretFile
+	if secretsManifest != "" {
+		if configDir == "" {
+			return fmt.Errorf("--secrets-manifest lists files in the config directory, so --config-dir must name it; no compose file was written")
+		}
+		data, err := d.readFile(secretsManifest)
+		if err != nil {
+			return fmt.Errorf("reading the secrets manifest %s, and no compose file was written: %w", secretsManifest, err)
+		}
+		manifest, err := templates.ParseSecretsManifest(data)
+		if err != nil {
+			return fmt.Errorf("the secrets manifest %s is refused: %w", secretsManifest, err)
+		}
+		secretFiles = manifest.Files
+	}
 	// Each --bind-ro must name a directory the command can stat. A blank value
 	// names nothing, so it is refused rather than rendered as unset. The render
 	// refuses the rest of what a read-only mount cannot carry (gt-vqexg).
@@ -379,7 +431,9 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 		LandingWorkRoot:    landingWorkRoot(cfg),
 		KubeconfigFiles:    kubeconfigFiles,
 		OpenShellConfigDir: strings.TrimSpace(f.openShellConfigDir),
-		ConfigDir:          strings.TrimSpace(f.configDir),
+		ConfigDir:          configDir,
+		Secrets:            secretFiles,
+		SecretsFS:          d.secretsFS,
 		BackupDir:          strings.TrimSpace(f.backupDir),
 		BindRO:             bindRO,
 		Project:            project,
@@ -397,6 +451,16 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 	content, err := templates.RenderDaemonCompose(spec)
 	if err != nil {
 		return fmt.Errorf("cannot render the live compose file, and no file was written: %w", err)
+	}
+	if len(secretFiles) > 0 {
+		// Every manifest render says what rotating a listed secret costs (the
+		// manifest's header says the same). The warning stream, not out: with
+		// --print, out must stay the compose file alone.
+		warn := d.errOut
+		if warn == nil {
+			warn = io.Discard
+		}
+		fmt.Fprintln(warn, templates.SecretsRecreateNotice)
 	}
 	if f.print {
 		_, err = d.out.Write(content)

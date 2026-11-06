@@ -128,13 +128,28 @@ type ComposeSpec struct {
 	// are absolute paths joined into KUBECONFIG, first file first; the render checks
 	// they are absolute, and the caller sees to it that they lie under the town bind. OpenShellConfigDir is the host's openshell config directory,
 	// mounted read-only at LiveOpenShellConfigPath, with XDG_CONFIG_HOME set to
-	// its parent. ConfigDir is the town's config directory (~/.config/gt), mounted
-	// read-only both at its own path and at LiveConfigDirPath, so a setting that
-	// names either path finds its file. A scratch spec sets none of them.
+	// its parent. ConfigDir is the town's config directory (~/.config/gt). With
+	// no Secrets it is mounted read-only both at its own path and at
+	// LiveConfigDirPath, so a setting that names either path finds its file;
+	// with Secrets only the listed files are mounted, because the directory
+	// holds far more than the daemon reads (gt-gg9hv.66). A scratch spec sets
+	// none of them.
 	Env                map[string]string
 	KubeconfigFiles    []string
 	OpenShellConfigDir string
 	ConfigDir          string
+
+	// Secrets is the enumerated manifest of files the daemon reads from
+	// ConfigDir (deploy/daemon/secrets.yaml, whose header defines the fields).
+	// Non-empty, the render mounts each listed file read-only at its own path
+	// and at LiveConfigDirPath and mounts no directory of the config tree.
+	// Empty, the render mounts ConfigDir as a directory, as it always has.
+	Secrets []SecretFile
+
+	// SecretsFS is the seam the render lstats and stats the listed files
+	// through. Unset, it is the host's filesystem; a test supplies a fake that
+	// records every call and refuses a content read (gt-gg9hv.66).
+	SecretsFS SecretFS
 
 	// BackupDir is the host's Dolt backup directory, an absolute path. The Dolt
 	// server container writes each night's backup there at the same path, so the
@@ -819,7 +834,11 @@ func RenderDaemonCompose(s ComposeSpec) ([]byte, error) {
 		}
 	} else {
 		command = liveDaemonCommand(s)
-		tokenMounts = liveTokenMounts(s) + liveClientMounts(s)
+		clientMounts, err := liveClientMounts(s)
+		if err != nil {
+			return nil, err
+		}
+		tokenMounts = liveTokenMounts(s) + clientMounts
 	}
 
 	out := fmt.Sprintf(daemonComposeBody,
@@ -904,6 +923,9 @@ func (s ComposeSpec) validate() error {
 		return fmt.Errorf("compose spec: DoltHost is empty; pass town.json's dolt.container_host or dolt.host resolved, and an empty dolt.host is the local machine, which inside the container is the container itself")
 	}
 	if err := s.validateClient(); err != nil {
+		return err
+	}
+	if err := s.validateSecrets(); err != nil {
 		return err
 	}
 	if err := s.validateForge(); err != nil {
