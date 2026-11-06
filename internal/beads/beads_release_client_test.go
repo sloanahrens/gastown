@@ -100,7 +100,7 @@ func (c showFailsClient) Show(string) (*beads.Issue, error) { return nil, c.err 
 // error. Each declined case leaves the bead exactly as it was.
 func TestTransferIfHeldOverClient(t *testing.T) {
 	t.Parallel()
-	const holder = "gastown/crew/sloan"
+	const holder = "gastown/crew/operator"
 	const thief = "gastown/polecats/Toast"
 	hooked := beads.StatusHooked
 	inProgress := string(beads.StatusInProgress)

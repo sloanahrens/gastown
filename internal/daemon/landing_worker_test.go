@@ -1690,7 +1690,7 @@ func TestBirdOwnedAssignee(t *testing.T) {
 		{"gastown/polecats", false},
 		{"gastown/polecats/opal/extra", false},
 		{"polecats/opal", false},
-		{"gastown/crew/sloan", true},
+		{"gastown/crew/operator", true},
 		{"town/crew/robin", true},
 		{"dipper", true},
 		{"", false},
@@ -1755,7 +1755,7 @@ func TestNewRigLandingWorker_WiresTheBirdRejectionPath(t *testing.T) {
 		t.Fatalf("BirdOwned set = %v, RejectionAlert set = %v; want the bird rejection path wired",
 			lander.BirdOwned != nil, lander.RejectionAlert != nil)
 	}
-	if !lander.BirdOwned("gastown/crew/sloan") || lander.BirdOwned("gastown/polecats/opal") {
+	if !lander.BirdOwned("gastown/crew/operator") || lander.BirdOwned("gastown/polecats/opal") {
 		t.Error("the wired classifier does not tell a crew from a polecat seat")
 	}
 	const key = "rejected:gt-abc"

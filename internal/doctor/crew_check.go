@@ -219,7 +219,7 @@ func (c *CrewStateCheck) findAllCrewDirs(townRoot string) []crewDir {
 // A crew member is the clone `gt crew add` makes, so dot-dirs (the shared
 // crew/.claude) are skipped, and so is a linked git worktree (.git is a
 // file): operators keep throwaway worktrees of a crew clone beside it
-// (crew/sloan-<topic>), and those are not crew members.
+// (crew/<name>-<topic>), and those are not crew members.
 func crewCloneDirs(crewDir string) []string {
 	entries, err := os.ReadDir(crewDir)
 	if err != nil {

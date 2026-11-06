@@ -28,7 +28,7 @@ func TestOperatorReservation(t *testing.T) {
 		{name: "overseer is a person", assignee: "overseer", want: "assignee overseer is not an agent address"},
 
 		{name: "polecat address", assignee: "gastown/polecats/onyx"},
-		{name: "crew address", assignee: "gastown/crew/sloan"},
+		{name: "crew address", assignee: "gastown/crew/operator"},
 		{name: "witness address", assignee: "gastown/witness"},
 		{name: "dog address", assignee: "deacon/dogs/rex"},
 		// The mayor's seat was retired (gt-rwp7z.11). Its slash-qualified

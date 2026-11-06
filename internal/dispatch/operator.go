@@ -16,7 +16,7 @@ const OperatorLabel = "operator"
 //
 // Two things reserve a bead. The operator label is the operator's explicit
 // mark. The other is the assignee: every Gas Town agent is addressed by a
-// slash-qualified address (gastown/polecats/onyx, gastown/crew/sloan,
+// slash-qualified address (gastown/polecats/onyx, gastown/crew/<name>,
 // gastown/witness), so an assignee that is not one is a person — the bare
 // handle left behind when the operator takes a bead by hand. An assignee equal
 // to a name the town settings configure as the operator's (operator.names) is

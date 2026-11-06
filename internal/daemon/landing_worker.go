@@ -1317,7 +1317,7 @@ func (d *Daemon) acceptedRiskAlert() func(key, message string) error {
 }
 
 // birdOwnedAssignee reports whether an assignee is a bird — a crew or
-// operator identity such as gastown/crew/sloan, town/crew/name, or a bare
+// operator identity such as gastown/crew/<name>, town/crew/<name>, or a bare
 // town handle — rather than a polecat seat. Any assignee carrying a "polecats"
 // path segment counts as a seat, whatever the surrounding shape: a shape this
 // function does not expect must release the bead to dispatch, not leave it

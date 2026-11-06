@@ -9,7 +9,7 @@ import (
 // omReworkStatsTable is the table ~/.claude/tools/om-rework-stats.py printed
 // for the reviews in omReworkStatsReviews (gt-weelq). To regenerate it after
 // the script's grouping changes, build a throwaway HOME the script reads: a
-// rig repo at gt/gastown/crew/sloan whose origin/main history sets .om.json's
+// rig repo at gt/gastown/crew/<name> whose origin/main history sets .om.json's
 // threshold to 0.7 at 160h and to 0.8 at 48h before reworkNow, a gt/daemon/
 // daemon.log "landing rejected (review)" line per rejection, and a
 // gt/.runtime/landings/gastown.jsonl record per approval; then run

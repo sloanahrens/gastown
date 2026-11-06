@@ -74,14 +74,15 @@ func TestTransferIfHeldUsesBothGuards(t *testing.T) {
 	dir := t.TempDir()
 	argsLog := bdGuardStub(t, dir, "13")
 
-	transferred, err := TransferIfHeld(New(dir), "gt-moxlb", "gastown/crew/sloan", "hooked", "hooked", "gastown/polecats/pearl")
+	const holder = "gastown/crew/operator"
+	transferred, err := TransferIfHeld(New(dir), "gt-moxlb", holder, "hooked", "hooked", "gastown/polecats/pearl")
 	if err != nil || transferred {
 		t.Fatalf("transferred=%v err=%v, want the guard read as a lost race", transferred, err)
 	}
 	args, _ := os.ReadFile(argsLog)
 	fields := strings.Fields(string(args))
 	for _, want := range []string{"update", "gt-moxlb", "--status=hooked", "--assignee=gastown/polecats/pearl",
-		"--if-assignee=gastown/crew/sloan", "--if-status=hooked"} {
+		"--if-assignee=" + holder, "--if-status=hooked"} {
 		if !slices.Contains(fields, want) {
 			t.Fatalf("bd args %q missing the field %q", args, want)
 		}

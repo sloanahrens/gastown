@@ -1559,15 +1559,15 @@ func TestSubmitStopsBeforeTheParentPushWhenASubmodulePushFails(t *testing.T) {
 func TestParseBranchNameNonPolecatBranch(t *testing.T) {
 	t.Parallel()
 	for branch, want := range map[string]string{
-		"fix/add-retry":                 "",
-		"feature/routed-submit":         "",
-		"main":                          "",
-		"release-2":                     "release-2", // a bare id is an id
-		"gt-abc.2":                      "gt-abc.2",
-		"gt-abc":                        "gt-abc",
-		"polecat/jasper/gt-a8i3+xyz":    "gt-a8i3",
-		"polecat/jasper-abc":            "",
-		"crew/sloan/gt-3e7tk-crew-done": "",
+		"fix/add-retry":                    "",
+		"feature/routed-submit":            "",
+		"main":                             "",
+		"release-2":                        "release-2", // a bare id is an id
+		"gt-abc.2":                         "gt-abc.2",
+		"gt-abc":                           "gt-abc",
+		"polecat/jasper/gt-a8i3+xyz":       "gt-a8i3",
+		"polecat/jasper-abc":               "",
+		"crew/operator/gt-3e7tk-crew-done": "",
 	} {
 		if got := parseBranchName(branch).Issue; got != want {
 			t.Errorf("parseBranchName(%q).Issue = %q, want %q", branch, got, want)
