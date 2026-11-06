@@ -72,7 +72,10 @@ const tailMissingTTL = 5 * time.Minute
 // failure — a timeout, an outage — is retried as above.
 type tailBeads struct {
 	show func(rig, id string) (*beads.Issue, error)
-	max  int
+	// comments reads one bead's comments. It is nil for a reader built without
+	// a comment source, and then submittedBy names no one.
+	comments func(rig, id string) ([]beads.Comment, error)
+	max      int
 
 	mu     sync.Mutex
 	titles map[string]string
@@ -196,6 +199,31 @@ func (b *tailBeads) title(rig, id string) string {
 	return title
 }
 
+// submittedBy names the actor of a bead's newest "Submitted for landing"
+// comment, the builder a landing on the reserved ops branch shows: the comment
+// is gt done's own record of who submitted the bead (gt-6ua0sn). It answers ""
+// when the comments cannot be read or name no submission, which the page draws
+// as an operator landing. Nothing is cached: a submission can be written after
+// an earlier read, and the answer is asked for only by an ops row.
+func (b *tailBeads) submittedBy(rig, id string) string {
+	// The id reaches bd's argv, so it is checked before it can: an id shaped
+	// like a flag would choose bd's behavior instead of naming a bead
+	// (gt-ecfaa).
+	if b == nil || b.comments == nil || !beads.IsBeadIDToken(id) {
+		return ""
+	}
+	comments, err := b.comments(rig, id)
+	if err != nil {
+		return ""
+	}
+	for i := len(comments) - 1; i >= 0; i-- {
+		if submissionCommentRE.MatchString(strings.TrimSpace(comments[i].Text)) {
+			return strings.TrimSpace(comments[i].Author)
+		}
+	}
+	return ""
+}
+
 // cache stores one successfully read title, evicting the least recently used
 // id when the cache is full so a long-lived reader keeps taking new titles.
 // Caller holds b.mu.
@@ -258,22 +286,38 @@ func tailTitleBeadID(l tailLine) (string, bool) {
 func openTailBeads(townRoot string) *tailBeads {
 	var mu sync.Mutex
 	stores := map[string]*beads.Beads{}
-	show := func(rig, id string) (*beads.Issue, error) {
+	store := func(rig string) (*beads.Beads, error) {
 		mu.Lock()
-		store, ok := stores[rig]
-		if !ok {
-			dir := doltserver.FindRigBeadsDir(townRoot, rig)
-			if dir == "" {
-				mu.Unlock()
-				return nil, fmt.Errorf("no beads directory for %s", rig)
-			}
-			store = beads.NewWithBeadsDir(townRoot, dir)
-			stores[rig] = store
+		defer mu.Unlock()
+		if s, ok := stores[rig]; ok {
+			return s, nil
 		}
-		mu.Unlock()
-		return store.Show(id)
+		dir := doltserver.FindRigBeadsDir(townRoot, rig)
+		if dir == "" {
+			return nil, fmt.Errorf("no beads directory for %s", rig)
+		}
+		s := beads.NewWithBeadsDir(townRoot, dir)
+		stores[rig] = s
+		return s, nil
 	}
-	return newTailBeads(show)
+	b := newTailBeads(func(rig, id string) (*beads.Issue, error) {
+		s, err := store(rig)
+		if err != nil {
+			return nil, err
+		}
+		return s.Show(id)
+	})
+	// The comments read shares the store map: a landing's submitter is asked
+	// of the same reader the bead's title is, so the town's stores are opened
+	// once for both.
+	b.comments = func(rig, id string) ([]beads.Comment, error) {
+		s, err := store(rig)
+		if err != nil {
+			return nil, err
+		}
+		return s.Comments(id)
+	}
+	return b
 }
 
 func (o *tailOnce) first(msg string) bool {
