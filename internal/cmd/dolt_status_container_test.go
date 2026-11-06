@@ -472,6 +472,50 @@ func TestDoltHistoryDocNamesArchiveNow(t *testing.T) {
 	}
 }
 
+// TestDoltHistoryDocStatesTheArchiveCheckOnce: gt dolt status prints the commit
+// and events archive counts on one line per database, so step 2 of "Before any
+// rewrite" states the 0-commits-behind reading once. A second paragraph that
+// restates it is the same check said twice (gt-37bxs3).
+func TestDoltHistoryDocStatesTheArchiveCheckOnce(t *testing.T) {
+	t.Parallel()
+	step2 := historyDocStep(t, "## Before any rewrite", "\n2. ", "\n3. ")
+
+	if n := strings.Count(step2, "`0 commits behind`"); n != 1 {
+		t.Errorf("step 2 of \"Before any rewrite\" states the 0-commits-behind reading %d times, want once:\n%s", n, step2)
+	}
+}
+
+// TestDoltHistoryDocExitOneSaysWhatItMeans: exit 1 from archive-now is a failed
+// pass that leaves the archive not caught up, so step 2 says what the operator
+// does before running it again, not only that the pass failed (gt-37bxs3).
+func TestDoltHistoryDocExitOneSaysWhatItMeans(t *testing.T) {
+	t.Parallel()
+	step2 := strings.Join(strings.Fields(historyDocStep(t, "## Before any rewrite", "\n2. ", "\n3. ")), " ")
+
+	for _, want := range []string{
+		"1 is a failed pass",
+		"the archive is not caught up",
+		"before you run it again",
+	} {
+		if !strings.Contains(step2, want) {
+			t.Errorf("step 2 of \"Before any rewrite\" does not carry %q:\n%s", want, step2)
+		}
+	}
+}
+
+// historyDocStep returns the part of the heading's section from the line that
+// starts with from up to the line that starts with to, so a test reads one
+// numbered step of the runbook.
+func historyDocStep(t *testing.T, heading, from, to string) string {
+	t.Helper()
+	section := historyDocSection(t, heading)
+	start, stop := strings.Index(section, from), strings.Index(section, to)
+	if start < 0 || stop < 0 || start >= stop {
+		t.Fatalf("%q does not hold the steps %q to %q in order:\n%s", heading, from, to, section)
+	}
+	return section[start:stop]
+}
+
 // TestDoltHistoryDocArchivesBeforeTheBackup: the runbook brings the archive to
 // 0 behind before it stops the server and copies the database directory, and
 // says the copy is taken only then, so the copy and the archive describe the
