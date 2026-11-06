@@ -890,6 +890,43 @@ func TestDiskMaintBlockedNotifierKeepsNoLaterTrimOff(t *testing.T) {
 	}
 }
 
+// TestAlertSendsEndWithTheirPassContext: a raise or a clear sent under a context
+// that has already ended is abandoned with that context's error and reaches the
+// notifier not at all, so a pass that has ended leaves the alert as it was and
+// the next pass decides again (gt-gg9hv.48).
+func TestAlertSendsEndWithTheirPassContext(t *testing.T) {
+	t.Parallel()
+	d, _, f := diskMaintTestDaemon(t)
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := d.escalateAlertCtx(ended, "diskmaint:colima", diskMaintAlertSource, "colima is at 88%")
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("escalateAlertCtx on an ended context = %v, want context.Canceled", err)
+	}
+	if diskMaintAlertIsOpen(f.notify, "diskmaint:colima") {
+		t.Error("an alert is open after a raise sent on an ended context: it reached the notifier")
+	}
+
+	// The same alert raised on a live context, then cleared on an ended one,
+	// stays open; cleared on a live one, it closes.
+	if err := d.escalateAlertCtx(context.Background(), "diskmaint:colima", diskMaintAlertSource, "colima is at 88%"); err != nil {
+		t.Fatalf("escalateAlertCtx on a live context = %v", err)
+	}
+	if err := d.clearAlertsCtx(ended, "colima is back under 80%", "diskmaint:colima"); !errors.Is(err, context.Canceled) {
+		t.Errorf("clearAlertsCtx on an ended context = %v, want context.Canceled", err)
+	}
+	if !diskMaintAlertIsOpen(f.notify, "diskmaint:colima") {
+		t.Error("the alert closed after a clear sent on an ended context: it reached the notifier")
+	}
+	if err := d.clearAlertsCtx(context.Background(), "colima is back under 80%", "diskmaint:colima"); err != nil {
+		t.Fatalf("clearAlertsCtx on a live context = %v", err)
+	}
+	if diskMaintAlertIsOpen(f.notify, "diskmaint:colima") {
+		t.Error("the alert is still open after a clear on a live context")
+	}
+}
+
 // TestDiskMaintTrimDoesNotRunTwiceInOneInterval: a combined pass carries the due
 // set its tick found. When a busy tick's trim pass concludes before that pass
 // runs, the interval is spent and the combined pass must not trim again
