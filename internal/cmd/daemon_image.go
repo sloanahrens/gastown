@@ -20,23 +20,27 @@ import (
 // which is a few hundred megabytes.
 const imageFetchCeiling = 15 * time.Minute
 
-// daemonImageFlags are the values `gt daemon image` parsed. Every one is
-// required: nothing is inferred from the live town, so a build never reads a
-// checkout or writes a directory the operator did not name. The bd, om, hm and
-// devops commits come from the pins file; the mango commit is a flag of its own,
-// because mango is not one of the pinned sources.
+// daemonImageFlags are the values `gt daemon image` parsed. Nothing is inferred
+// from the live town: a build reads only the checkouts the operator named or the
+// sources their pins URL, and writes only inside --out. A bd, om, hm or devops
+// source flag may be left out: that source is then fetched from its URL and commit
+// in the pins file, so the build needs no local checkout of it. The gt and mango
+// sources and the pins file are required. The bd, om, hm and devops commits come
+// from the pins file; the mango commit is a flag of its own, because mango is not
+// one of the pinned sources.
 type daemonImageFlags struct {
 	rev         string // the gt commit the image is built at and tagged with
 	out         string // the absolute directory the binaries and the build context live in
 	gtSrc       string
-	bdSrc       string
-	omSrc       string
-	hmSrc       string
-	devopsSrc   string
+	bdSrc       string // empty: bd is fetched from its pin
+	omSrc       string // empty: om is fetched from its pin
+	hmSrc       string // empty: hm is fetched from its pin
+	devopsSrc   string // empty: devops is fetched from its pin
 	mangoSrc    string
 	mangoCommit string
 	pins        string // the absolute image-pins file naming the bd, om, hm and devops commits
 	apply       bool
+	contextOnly bool // stop after the staged build context, before any engine step
 }
 
 // imageBuilder is the build's steps, in the order they run. A
@@ -138,13 +142,25 @@ docker --context desktop-linux. The bd, om, hm and devops commits are read from
 hold them, and the hm and devops checkouts must be at their commits and clean.
 The Dockerfile is read from --gt-src's working tree.
 
-Every flag is required and none has a default read from the live town. Without
---apply it validates them, prints the pins and the commands it would run and runs
-none, writes nothing and reaches no network. With --apply the pin-drift guard reads each
-source checkout's origin/main before anything builds and refuses a pin that is
-not an ancestor of it, more than 40 commits behind it, or more than 7 days older
-than its tip. A path that is a canonical clone (.../mayor/rig) is refused for
---out and every source: the build adds worktrees to its sources.`,
+No flag has a default read from the live town. --rev, --out, --gt-src,
+--mango-src, --mango-commit and --pins are required. A --bd-src, --om-src,
+--hm-src or --devops-src left out fetches that source from the URL and commit its
+line in --pins names, with the caller's environment answering for authentication;
+the fetch procedure is the image-build step in docs/daemon-container.md. A source
+flag that is named keeps that checkout, and the checkout must hold its pin.
+Without --apply it validates the flags, prints the pins and the commands it would
+run and runs none, writes nothing and reaches no network. With --apply the
+pin-drift guard refuses a pin that is not an ancestor of its source's main, more
+than 40 commits behind it, or more than 7 days older than its tip; a fetched
+source's main tip is fetched from the same pin URL for that check. A path that is
+a canonical clone (.../mayor/rig) is refused for --out and every source: the
+build adds worktrees to its sources.
+
+With --apply and --context-only it stages the image's build context, the same
+binary, plugin, claude CLI and client tool steps, and stops there: neither the
+mango build nor the image build runs, so no container-engine command is issued.
+Its last line is "context: <absolute dir>", the directory to build the image
+from. Without --apply, --context-only prints that build's plan and runs nothing.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return run(cmd.Context(), cmd.OutOrStdout(), f)
@@ -154,14 +170,15 @@ than its tip. A path that is a canonical clone (.../mayor/rig) is refused for
 	fl.StringVar(&f.rev, "rev", "", "gt commit to build and tag the image with (7+ hex characters)")
 	fl.StringVar(&f.out, "out", "", "existing absolute directory for the binaries and the build context")
 	fl.StringVar(&f.gtSrc, "gt-src", "", "absolute gt checkout")
-	fl.StringVar(&f.bdSrc, "bd-src", "", "absolute beads checkout")
-	fl.StringVar(&f.omSrc, "om-src", "", "absolute om checkout")
-	fl.StringVar(&f.hmSrc, "hm-src", "", "absolute hm checkout")
-	fl.StringVar(&f.devopsSrc, "devops-src", "", "absolute devops checkout the two reporters are built from")
+	fl.StringVar(&f.bdSrc, "bd-src", "", "absolute beads checkout; without it bd is fetched from its pin")
+	fl.StringVar(&f.omSrc, "om-src", "", "absolute om checkout; without it om is fetched from its pin")
+	fl.StringVar(&f.hmSrc, "hm-src", "", "absolute hm checkout; without it hm is fetched from its pin")
+	fl.StringVar(&f.devopsSrc, "devops-src", "", "absolute devops checkout the two reporters are built from; without it devops is fetched from its pin")
 	fl.StringVar(&f.mangoSrc, "mango-src", "", "absolute mango checkout the image's mango is built from")
 	fl.StringVar(&f.mangoCommit, "mango-commit", "", "mango commit to build the image's mango at (7+ hex characters)")
 	fl.StringVar(&f.pins, "pins", "", "absolute image-pins file naming the bd, om, hm and devops commits")
 	fl.BoolVar(&f.apply, "apply", false, "run the build; without it only print the plan")
+	fl.BoolVar(&f.contextOnly, "context-only", false, "with --apply, stage the build context and stop before any container-engine step, printing its directory")
 	return cmd
 }
 
@@ -176,7 +193,9 @@ func init() {
 // runDaemonImage validates the flags, reads the pins file, prints the plan, and
 // with --apply runs the pin-drift guard and then the build: the binaries, the
 // plugins, the tools, mango, the claude CLI, the client tools, the image, in
-// that order, stopping at the first failure.
+// that order, stopping at the first failure. With --context-only the build stops
+// after the client tools, before mango and the image: it stages the build context
+// and prints its directory, and no container-engine command is issued.
 func runDaemonImage(ctx context.Context, f daemonImageFlags, d daemonImageDeps) error {
 	if err := validateDaemonImageFlags(f, d.evalSymlinks); err != nil {
 		return err
@@ -187,7 +206,17 @@ func runDaemonImage(ctx context.Context, f daemonImageFlags, d daemonImageDeps) 
 	}
 	b := newDaemonImageBuilder(f, d, pins)
 	if f.apply {
-		notes, err := daemonimage.CheckPins(pins, pinsMainOf(f), f.pins, d.git)
+		// A pin whose source has a checkout is checked here. A source fetched
+		// from its pin URL has no checkout yet: the build fetches the source
+		// first and then checks the pin against that source's main tip, so the
+		// guard runs on every pin in the CI path too.
+		checked := make([]daemonimage.Pin, 0, len(pins))
+		for _, p := range pins {
+			if pinCheckout(f, p.Name) != "" {
+				checked = append(checked, p)
+			}
+		}
+		notes, err := daemonimage.CheckPins(checked, pinsMainOf(f), f.pins, d.git)
 		if err != nil {
 			return err
 		}
@@ -195,7 +224,12 @@ func runDaemonImage(ctx context.Context, f daemonImageFlags, d daemonImageDeps) 
 			fmt.Fprintln(d.out, note)
 		}
 	}
-	plan, err := b.Plan(f.rev)
+	var plan []string
+	if f.contextOnly {
+		plan, err = b.PlanContext(f.rev)
+	} else {
+		plan, err = b.Plan(f.rev)
+	}
 	if err != nil {
 		return err
 	}
@@ -209,6 +243,9 @@ func runDaemonImage(ctx context.Context, f daemonImageFlags, d daemonImageDeps) 
 	var build imageBuilder = b
 	if d.builder != nil {
 		build = d.builder(b)
+	}
+	if f.contextOnly {
+		return runContextOnly(ctx, build, f.rev, f.out, d.out)
 	}
 	bins, err := build.BuildBinaries(ctx, f.rev)
 	if err != nil {
@@ -245,6 +282,31 @@ func runDaemonImage(ctx context.Context, f daemonImageFlags, d daemonImageDeps) 
 	return nil
 }
 
+// runContextOnly runs the steps that stage the image's build context, in the
+// order the full build runs them: the binaries, the plugins, the tools, the
+// claude CLI, the client tools. It runs neither BuildMango nor BuildImage, the
+// two steps that use the container engine, and prints the directory the context
+// is in as its last line.
+func runContextOnly(ctx context.Context, build imageBuilder, rev, ctxDir string, out io.Writer) error {
+	if _, err := build.BuildBinaries(ctx, rev); err != nil {
+		return err
+	}
+	if _, err := build.BuildPlugins(ctx, rev); err != nil {
+		return err
+	}
+	if _, err := build.BuildTools(ctx); err != nil {
+		return err
+	}
+	if _, err := build.FetchClaudeCLI(ctx); err != nil {
+		return err
+	}
+	if _, err := build.FetchClientTools(ctx); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, daemonimage.ContextLine(ctxDir))
+	return nil
+}
+
 // readImagePins reads and parses the pins file at path. A file that cannot be
 // read and one the parser refuses are both errors naming the path, so the
 // operator knows which file to fix.
@@ -260,16 +322,30 @@ func readImagePins(path string) ([]daemonimage.Pin, error) {
 	return pins, nil
 }
 
-// pinsMainOf maps each pin to the --*-src checkout the build takes as that
-// source: the checkout whose origin/main the pin-drift guard reads. A pin with
-// no checkout is an error, never a guess.
-func pinsMainOf(f daemonImageFlags) daemonimage.MainOf {
-	srcs := map[string]string{
-		"bd": f.bdSrc, "om": f.omSrc, "hm": f.hmSrc, "devops": f.devopsSrc,
+// pinCheckout is the --<name>-src checkout named for pin name, or "" when the
+// build fetches that source from its pin URL instead.
+func pinCheckout(f daemonImageFlags, name string) string {
+	switch name {
+	case "bd":
+		return f.bdSrc
+	case "om":
+		return f.omSrc
+	case "hm":
+		return f.hmSrc
+	case "devops":
+		return f.devopsSrc
 	}
+	return ""
+}
+
+// pinsMainOf maps each pin to the --*-src checkout the build takes as that
+// source: the checkout whose origin/main the pin-drift guard reads. The guard is
+// given only pins with a checkout; a pin with none is an error here, never a
+// guess.
+func pinsMainOf(f daemonImageFlags) daemonimage.MainOf {
 	return func(p daemonimage.Pin) (string, error) {
-		dir, ok := srcs[p.Name]
-		if !ok || dir == "" {
+		dir := pinCheckout(f, p.Name)
+		if dir == "" {
 			return "", fmt.Errorf("no source checkout named for the %s pin; pass --%s-src", p.Name, p.Name)
 		}
 		return dir, nil
@@ -310,23 +386,31 @@ func newDaemonImageBuilder(f daemonImageFlags, d daemonImageDeps, pins []daemoni
 // validateDaemonImageFlags refuses, before anything runs, a missing flag, a
 // relative path, a path that is not an existing directory, a pins path that is
 // not an existing file, and a source path that is or lies inside a canonical
-// clone. The commit shapes and the pins file's syntax are the Builder's and the
-// parser's to refuse; the plan asks them first.
+// clone. A --bd-src, --om-src, --hm-src or --devops-src left out is not a
+// refusal: the build fetches that source from its pin. The commit shapes and the
+// pins file's syntax are the Builder's and the parser's to refuse; the plan asks
+// them first.
 func validateDaemonImageFlags(f daemonImageFlags, evalSymlinks func(string) (string, error)) error {
 	for _, req := range []struct{ flag, value string }{
 		{"--rev", f.rev}, {"--out", f.out}, {"--gt-src", f.gtSrc},
-		{"--bd-src", f.bdSrc}, {"--om-src", f.omSrc},
-		{"--hm-src", f.hmSrc}, {"--devops-src", f.devopsSrc},
 		{"--mango-src", f.mangoSrc}, {"--mango-commit", f.mangoCommit}, {"--pins", f.pins},
 	} {
 		if strings.TrimSpace(req.value) == "" {
 			return fmt.Errorf("%s is required: nothing is inferred from the live town", req.flag)
 		}
 	}
+	paths := []struct{ flag, value string }{
+		{"--out", f.out}, {"--gt-src", f.gtSrc}, {"--mango-src", f.mangoSrc},
+	}
 	for _, p := range []struct{ flag, value string }{
-		{"--out", f.out}, {"--gt-src", f.gtSrc}, {"--bd-src", f.bdSrc}, {"--om-src", f.omSrc},
-		{"--hm-src", f.hmSrc}, {"--devops-src", f.devopsSrc}, {"--mango-src", f.mangoSrc},
+		{"--bd-src", f.bdSrc}, {"--om-src", f.omSrc},
+		{"--hm-src", f.hmSrc}, {"--devops-src", f.devopsSrc},
 	} {
+		if strings.TrimSpace(p.value) != "" {
+			paths = append(paths, p)
+		}
+	}
+	for _, p := range paths {
 		if !filepath.IsAbs(p.value) {
 			return fmt.Errorf("%s %q is not absolute: a build runs in a worktree, not in this directory", p.flag, p.value)
 		}

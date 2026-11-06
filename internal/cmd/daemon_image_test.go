@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/steveyegge/gastown/internal/daemonimage"
 )
 
@@ -261,6 +262,131 @@ func TestDaemonImageApplyRunsTheStepsInOrder(t *testing.T) {
 	}
 }
 
+// TestDaemonImageContextOnly: without --apply the flag prints the context-only
+// plan and runs nothing; with --apply it runs the binaries, the plugins, the
+// tools, the claude CLI and the client tools, stops before the mango build and
+// the image build, and its last line names the absolute context directory.
+func TestDaemonImageContextOnly(t *testing.T) {
+	t.Parallel()
+	t.Run("dry run", func(t *testing.T) {
+		t.Parallel()
+		r := newImageRig(t)
+		r.flags.contextOnly = true
+
+		if err := runDaemonImage(context.Background(), r.flags, r.deps); err != nil {
+			t.Fatalf("runDaemonImage: %v", err)
+		}
+
+		out := r.out.String()
+		if !strings.Contains(out, "dry run: nothing was run") {
+			t.Errorf("a dry run did not say so:\n%s", out)
+		}
+		if !strings.Contains(out, daemonimage.ContextLine(r.flags.out)+"\n") {
+			t.Errorf("the plan does not name the context %q:\n%s", r.flags.out, out)
+		}
+		for _, unwanted := range []string{"build mango:", "image: "} {
+			if strings.Contains(out, unwanted) {
+				t.Errorf("the context-only plan holds %q, which needs the engine:\n%s", unwanted, out)
+			}
+		}
+	})
+
+	// A source with no checkout is fetched from its pin, so the command has no
+	// origin/main to read for it before the build; the build fetches the source
+	// and checks the pin against that source's tip, so no pin is reported
+	// unchecked. Only the pins with a checkout are checked here.
+	t.Run("a fetched source is not reported unchecked", func(t *testing.T) {
+		t.Parallel()
+		r := newImageRig(t)
+		r.flags.apply = true
+		r.flags.contextOnly = true
+		r.flags.bdSrc = ""
+		var calls []string
+		r.deps.builder = func(daemonimage.Builder) imageBuilder {
+			return fakeImageBuilder{calls: &calls}
+		}
+
+		if err := runDaemonImage(context.Background(), r.flags, r.deps); err != nil {
+			t.Fatalf("runDaemonImage: %v", err)
+		}
+
+		if strings.Contains(r.out.String(), "unchecked") {
+			t.Errorf("the apply path reported a pin unchecked:\n%s", r.out.String())
+		}
+		if strings.Contains(r.out.String(), "pin-drift guard: bd") {
+			t.Errorf("the command read bd's origin/main although bd is fetched:\n%s", r.out.String())
+		}
+	})
+
+	steps := strings.Join([]string{
+		"binaries " + imageTestRev, "plugins " + imageTestRev, "hm tools", "claude", "tools",
+	}, ",")
+	for _, tc := range []struct {
+		name      string
+		failAt    string
+		want      string
+		wantError string
+	}{
+		{"all succeed", "", steps, ""},
+		{"the binaries fail", "binaries " + imageTestRev, "binaries " + imageTestRev, "failed"},
+		{"the plugins fail", "plugins " + imageTestRev, "binaries " + imageTestRev + ",plugins " + imageTestRev, "plugins " + imageTestRev + " failed"},
+		{"the hm tools fail", "hm tools", "binaries " + imageTestRev + ",plugins " + imageTestRev + ",hm tools", "hm tools failed"},
+		{"the claude CLI fails", "claude", "binaries " + imageTestRev + ",plugins " + imageTestRev + ",hm tools,claude", "claude failed"},
+		{"the client tools fail", "tools", "binaries " + imageTestRev + ",plugins " + imageTestRev + ",hm tools,claude,tools", "tools failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newImageRig(t)
+			r.flags.apply = true
+			r.flags.contextOnly = true
+			var calls []string
+			r.deps.builder = func(daemonimage.Builder) imageBuilder {
+				return fakeImageBuilder{calls: &calls, failAt: tc.failAt}
+			}
+
+			err := runDaemonImage(context.Background(), r.flags, r.deps)
+
+			if strings.Join(calls, ",") != tc.want {
+				t.Errorf("steps = %v, want %v", calls, tc.want)
+			}
+			for _, call := range calls {
+				if strings.HasPrefix(call, "mango") || strings.HasPrefix(call, "image") {
+					t.Errorf("a context-only build ran %q, which needs the engine", call)
+				}
+			}
+			// The plan is printed before the steps run, and it ends with the
+			// context line; the build's own print is the one after it, so a
+			// finished build names the context twice and a failed one once.
+			lines := strings.Split(strings.TrimRight(r.out.String(), "\n"), "\n")
+			context := daemonimage.ContextLine(r.flags.out)
+			printed := 0
+			for _, line := range lines {
+				if line == context {
+					printed++
+				}
+			}
+			if tc.wantError == "" {
+				if err != nil {
+					t.Fatalf("runDaemonImage: %v", err)
+				}
+				if got := lines[len(lines)-1]; got != context {
+					t.Errorf("last line = %q, want %q", got, context)
+				}
+				if printed != 2 {
+					t.Errorf("the context line printed %d times, want the plan's and the build's", printed)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("error = %v, want it to contain %q", err, tc.wantError)
+			}
+			if printed != 1 {
+				t.Errorf("a failed build printed the context line %d times, want only the plan's", printed)
+			}
+		})
+	}
+}
+
 // Every refusal comes before any step runs (the rig's deps fail the test if one
 // does), with --apply as well as without. Each row removes one thing; a test
 // fails if any one refusal is removed.
@@ -282,10 +408,6 @@ func TestDaemonImageRefusesBeforeAnything(t *testing.T) {
 		{"no --rev", func(_ *testing.T, f *daemonImageFlags) { f.rev = "" }, "--rev is required"},
 		{"no --out", func(_ *testing.T, f *daemonImageFlags) { f.out = "" }, "--out is required"},
 		{"no --gt-src", func(_ *testing.T, f *daemonImageFlags) { f.gtSrc = "" }, "--gt-src is required"},
-		{"no --bd-src", func(_ *testing.T, f *daemonImageFlags) { f.bdSrc = "" }, "--bd-src is required"},
-		{"no --om-src", func(_ *testing.T, f *daemonImageFlags) { f.omSrc = "" }, "--om-src is required"},
-		{"no --hm-src", func(_ *testing.T, f *daemonImageFlags) { f.hmSrc = "" }, "--hm-src is required"},
-		{"no --devops-src", func(_ *testing.T, f *daemonImageFlags) { f.devopsSrc = "" }, "--devops-src is required"},
 		{"no --mango-src", func(_ *testing.T, f *daemonImageFlags) { f.mangoSrc = "" }, "--mango-src is required"},
 		{"no --mango-commit", func(_ *testing.T, f *daemonImageFlags) { f.mangoCommit = "" }, "--mango-commit is required"},
 		{"no --pins", func(_ *testing.T, f *daemonImageFlags) { f.pins = "" }, "--pins is required"},
@@ -577,6 +699,87 @@ func TestReadImagePinsRefusesAnUnreadableFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "absent")
 	if _, err := readImagePins(path); err == nil || !strings.Contains(err.Error(), "cannot be read") {
 		t.Fatalf("readImagePins = %v, want an error naming the unreadable file", err)
+	}
+}
+
+// TestOnlyFetchedPinsAreURLValidated: ParsePins validates every pin URL at parse
+// (the gt-gg9hv.31 contract), and a build validates the URL of only the pins it
+// fetches. A named checkout's pin URL is not the plan's to check, while a fetched
+// pin with a malformed URL is refused before any fetch runs.
+func TestOnlyFetchedPinsAreURLValidated(t *testing.T) {
+	t.Parallel()
+	const credentialURL = "http://user:s3cret@forgejo:3000/sloan/beads.git"
+	pins := func(bdURL string) []daemonimage.Pin {
+		return []daemonimage.Pin{
+			{Name: "bd", URL: bdURL, Commit: imageTestBDCommit},
+			{Name: "om", URL: "http://forgejo:3000/sloan/organic-mechanic.git", Commit: imageTestOMCommit},
+			{Name: "hm", URL: "http://forgejo:3000/sloan/history-man.git", Commit: imageTestHMCommit},
+			{Name: "devops", URL: "http://forgejo:3000/sloan/devops.git", Commit: imageTestDevCommit},
+		}
+	}
+
+	t.Run("a named checkout's pin URL is not checked", func(t *testing.T) {
+		t.Parallel()
+		r := newImageRig(t)
+		b := newDaemonImageBuilder(r.flags, r.deps, pins(credentialURL))
+
+		if _, err := b.Plan(imageTestRev); err != nil {
+			t.Fatalf("Plan with a named checkout and a malformed pin URL = %v, want no error", err)
+		}
+	})
+
+	t.Run("a fetched pin's malformed URL is refused before any fetch", func(t *testing.T) {
+		t.Parallel()
+		r := newImageRig(t)
+		r.flags.bdSrc = ""
+		b := newDaemonImageBuilder(r.flags, r.deps, pins(credentialURL))
+
+		if _, err := b.Plan(imageTestRev); err == nil || !strings.Contains(err.Error(), "credential") {
+			t.Fatalf("Plan with a fetched malformed pin URL = %v, want the credential refusal", err)
+		}
+	})
+
+	t.Run("ParsePins still refuses a malformed pin URL at parse", func(t *testing.T) {
+		t.Parallel()
+		text := strings.Replace(imagePinsText(), "http://forgejo:3000/sloan/beads.git", credentialURL, 1)
+		_, err := daemonimage.ParsePins([]byte(text))
+		if err == nil || !strings.Contains(err.Error(), "credential") {
+			t.Fatalf("ParsePins = %v, want the credential refusal", err)
+		}
+		if strings.Contains(err.Error(), "s3cret") || strings.Contains(err.Error(), "@") {
+			t.Errorf("the refusal echoes the URL: %v", err)
+		}
+	})
+}
+
+// TestFetchProcedureHasOneCopy: the fetch steps (init, the depth-1 pin fetch, the
+// detached checkout and the depth-41 main fetch for the drift check) are written
+// once, in docs/daemon-container.md; the command's help and flag usage point
+// there and do not repeat them.
+func TestFetchProcedureHasOneCopy(t *testing.T) {
+	t.Parallel()
+	c := newDaemonImageCmd(func(context.Context, io.Writer, daemonImageFlags) error { return nil })
+	guide := c.Long
+	c.Flags().VisitAll(func(f *pflag.Flag) { guide += "\n" + f.Usage })
+
+	for _, step := range []string{"git init", "git fetch", "FETCH_HEAD", "--depth", "detached checkout"} {
+		if strings.Contains(guide, step) {
+			t.Errorf("the command's help or a flag usage repeats the fetch step %q", step)
+		}
+	}
+	if !strings.Contains(guide, "docs/daemon-container.md") {
+		t.Error("the command's help does not point to docs/daemon-container.md for the fetch procedure")
+	}
+
+	body, err := os.ReadFile(filepath.Join("..", "..", "docs", "daemon-container.md"))
+	if err != nil {
+		t.Fatalf("reading docs/daemon-container.md: %v", err)
+	}
+	doc := string(body)
+	for _, step := range []string{"git init", "git fetch --depth 1 <url> <commit>", "FETCH_HEAD", "git fetch --depth 41 <url> main:refs/remotes/origin/main"} {
+		if !strings.Contains(doc, step) {
+			t.Errorf("docs/daemon-container.md lacks the fetch step %q", step)
+		}
 	}
 }
 

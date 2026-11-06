@@ -34,11 +34,13 @@ var toolNames = []string{"hm", "devops-reporter", "release-reporter"}
 // BuildTools writes hm, devops-reporter and release-reporter to b.Out and returns
 // their paths in that order. Each is built for linux/arm64 in a clean worktree of
 // its pinned commit, as BuildBinaries builds gt, bd and om: hm from HMSrc at
-// HMCommit, and both reporters from DevopsSrc at DevopsCommit. A checkout that is
-// not at its commit, or has uncommitted changes, is refused before any build runs.
-// release-reporter's version is the one the go command stamps from the checkout;
-// it is read back from the built binary and refused unless it has the form run.sh
-// accepts. Staging and the move into b.Out follow BuildBinaries.
+// HMCommit, and both reporters from DevopsSrc at DevopsCommit. A source with no
+// checkout named is fetched from its pin into b.Out first, and the fetched tree is
+// removed when the call returns. A checkout that is not at its commit, or has
+// uncommitted changes, is refused before any build runs. release-reporter's
+// version is the one the go command stamps from the checkout; it is read back from
+// the built binary and refused unless it has the form run.sh accepts. Staging and
+// the move into b.Out follow BuildBinaries.
 func (b Builder) BuildTools(ctx context.Context) ([]string, error) {
 	if b.Run == nil {
 		return nil, errors.New("daemonimage: no runner to build the tools with")
@@ -52,18 +54,28 @@ func (b Builder) BuildTools(ctx context.Context) ([]string, error) {
 	if err := b.checkToolInputs(); err != nil {
 		return nil, err
 	}
-	hmCommit, err := b.pinnedCommit(pin{what: "hm", src: b.HMSrc, commit: b.HMCommit, srcFlag: "--hm-src"})
+	hmSrc, hmCleanup, err := b.source(ctx, "hm", b.HMSrc)
 	if err != nil {
 		return nil, err
 	}
-	devopsCommit, err := b.pinnedCommit(pin{what: "devops", src: b.DevopsSrc, commit: b.DevopsCommit, srcFlag: "--devops-src"})
+	defer hmCleanup()
+	devopsSrc, devopsCleanup, err := b.source(ctx, "devops", b.DevopsSrc)
+	if err != nil {
+		return nil, err
+	}
+	defer devopsCleanup()
+	hmCommit, err := b.pinnedCommit(pin{what: "hm", src: hmSrc, commit: b.HMCommit, srcFlag: "--hm-src"})
+	if err != nil {
+		return nil, err
+	}
+	devopsCommit, err := b.pinnedCommit(pin{what: "devops", src: devopsSrc, commit: b.DevopsCommit, srcFlag: "--devops-src"})
 	if err != nil {
 		return nil, err
 	}
 	builds := []binary{
-		{name: "hm", src: b.HMSrc, commit: hmCommit, pkg: HMPackage},
-		{name: "devops-reporter", src: b.DevopsSrc, commit: devopsCommit, pkg: DevopsReporterPackage},
-		{name: "release-reporter", src: b.DevopsSrc, commit: devopsCommit, pkg: ReleaseReporterPackage},
+		{name: "hm", src: hmSrc, commit: hmCommit, pkg: HMPackage},
+		{name: "devops-reporter", src: devopsSrc, commit: devopsCommit, pkg: DevopsReporterPackage},
+		{name: "release-reporter", src: devopsSrc, commit: devopsCommit, pkg: ReleaseReporterPackage},
 	}
 	stage, err := os.MkdirTemp(b.Out, ".daemonimage-tools-")
 	if err != nil {
@@ -105,14 +117,14 @@ func (b Builder) checkToolInputs() error {
 		{"--hm-src", b.HMSrc, "hm", b.HMCommit},
 		{"--devops-src", b.DevopsSrc, "devops", b.DevopsCommit},
 	} {
-		if strings.TrimSpace(p.dir) == "" {
-			return fmt.Errorf("daemonimage: %s is required: the tool is built from that checkout", p.flag)
-		}
 		if strings.TrimSpace(p.commit) == "" {
 			return fmt.Errorf("daemonimage: no %s pin in %s: the tool is built at that commit and nothing else", p.name, b.pinsFile())
 		}
 		if !isCommit(strings.TrimSpace(p.commit)) {
 			return fmt.Errorf("daemonimage: %s pin %q is not a 7+ character hex commit", p.name, p.commit)
+		}
+		if strings.TrimSpace(p.dir) == "" {
+			continue // fetched from its pin; the fetch refuses a pin that cannot be used
 		}
 		if err := refuseCanonicalClone(p.flag, p.dir); err != nil {
 			return err
@@ -205,15 +217,17 @@ func mainModuleVersion(info string) string {
 }
 
 // toolPlanLines are Plan's lines for BuildTools: the argv each build runs, and the
-// check that reads release-reporter's version back from its binary.
-func (b Builder) toolPlanLines() []string {
+// check that reads release-reporter's version back from its binary. hmSrc and
+// devopsSrc are the directories the tools are built from: the named checkouts, or
+// the directories their pins are fetched into.
+func (b Builder) toolPlanLines(hmSrc, devopsSrc string) []string {
 	hm := strings.Join(goBuildArgv(filepath.Join(b.Out, "hm"), HMPackage, ""), " ")
 	devops := strings.Join(goBuildArgv(filepath.Join(b.Out, "devops-reporter"), DevopsReporterPackage, ""), " ")
 	release := strings.Join(goBuildArgv(filepath.Join(b.Out, "release-reporter"), ReleaseReporterPackage, ""), " ")
 	return []string{
-		fmt.Sprintf("build hm: %s   (clean worktree of %s at %s)", hm, b.HMSrc, strings.TrimSpace(b.HMCommit)),
-		fmt.Sprintf("build devops-reporter: %s   (clean worktree of %s at %s)", devops, b.DevopsSrc, strings.TrimSpace(b.DevopsCommit)),
-		fmt.Sprintf("build release-reporter: %s   (clean worktree of %s at %s)", release, b.DevopsSrc, strings.TrimSpace(b.DevopsCommit)),
+		fmt.Sprintf("build hm: %s   (clean worktree of %s at %s)", hm, hmSrc, strings.TrimSpace(b.HMCommit)),
+		fmt.Sprintf("build devops-reporter: %s   (clean worktree of %s at %s)", devops, devopsSrc, strings.TrimSpace(b.DevopsCommit)),
+		fmt.Sprintf("build release-reporter: %s   (clean worktree of %s at %s)", release, devopsSrc, strings.TrimSpace(b.DevopsCommit)),
 		fmt.Sprintf("check release-reporter: go version -m %s   (refused unless vMAJOR.MINOR.PATCH[-pre])", filepath.Join(b.Out, "release-reporter")),
 	}
 }

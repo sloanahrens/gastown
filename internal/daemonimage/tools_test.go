@@ -202,8 +202,8 @@ func TestDeployRefusesUnpinnedOrDirtyHMAndDevopsSources(t *testing.T) {
 	}{
 		{"no hm pin", func(b *Builder, _ *toolsGit) { b.HMCommit = "" }, "no hm pin"},
 		{"no devops pin", func(b *Builder, _ *toolsGit) { b.DevopsCommit = "" }, "no devops pin"},
-		{"no --hm-src", func(b *Builder, _ *toolsGit) { b.HMSrc = "" }, "--hm-src is required"},
-		{"no --devops-src", func(b *Builder, _ *toolsGit) { b.DevopsSrc = "" }, "--devops-src is required"},
+		{"no --hm-src and no hm pin", func(b *Builder, _ *toolsGit) { b.HMSrc = "" }, "no --hm-src and no hm pin"},
+		{"no --devops-src and no devops pin", func(b *Builder, _ *toolsGit) { b.DevopsSrc = "" }, "no --devops-src and no devops pin"},
 		{"a hm pin that is not hex", func(b *Builder, _ *toolsGit) { b.HMCommit = "main" }, "hm pin \"main\" is not a 7+ character hex commit"},
 		{"a hm pin the checkout does not hold", func(b *Builder, g *toolsGit) {
 			co := g.checkouts["/src/hm"]

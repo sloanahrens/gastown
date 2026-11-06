@@ -146,30 +146,65 @@ func CheckPins(pins []Pin, mainOf MainOf, pinsPath string, git bdbuild.Git) (not
 		if err != nil {
 			return nil, fmt.Errorf("pin-drift guard: cannot read origin/main of rig %s in %s (%v): fetch that checkout through its remote, then rerun", pin.Name, dir, err)
 		}
-		main := strings.TrimSpace(string(out))
-		if pin.Commit == main {
-			continue
-		}
-		if _, err := git(dir, "merge-base", "--is-ancestor", pin.Commit, main); err != nil {
-			return nil, fmt.Errorf("pin-drift guard: rig %s pin %s is not an ancestor of main %s (ahead or diverged): %s", pin.Name, short(pin.Commit), short(main), pinEdit(pin, pinsPath, main))
-		}
-		behind, err := commitsBehind(git, dir, pin.Commit, main)
+		pinNotes, err := checkPinAgainstMain(git, dir, pin, strings.TrimSpace(string(out)), pinsPath)
 		if err != nil {
-			return nil, fmt.Errorf("pin-drift guard: rig %s pin %s: cannot count the commits to main %s in %s (%v): fetch or fix that checkout, then rerun", pin.Name, short(pin.Commit), short(main), dir, err)
+			return nil, err
 		}
-		if behind > MaxPinBehind {
-			return nil, fmt.Errorf("pin-drift guard: rig %s pin %s is %d commits behind main %s, over the %d-commit bound: %s", pin.Name, short(pin.Commit), behind, short(main), MaxPinBehind, pinEdit(pin, pinsPath, main))
-		}
-		age, err := commitAge(git, dir, pin.Commit, main)
-		if err != nil {
-			return nil, fmt.Errorf("pin-drift guard: rig %s pin %s: cannot read the commit times against main %s in %s (%v): fetch or fix that checkout, then rerun", pin.Name, short(pin.Commit), short(main), dir, err)
-		}
-		if age > MaxPinAge {
-			return nil, fmt.Errorf("pin-drift guard: rig %s pin %s is %d commits behind main %s, and its commit is %s older than main's tip, over the %s bound: %s", pin.Name, short(pin.Commit), behind, short(main), age.Round(time.Hour), MaxPinAge, pinEdit(pin, pinsPath, main))
-		}
-		notes = append(notes, fmt.Sprintf("pin-drift guard: rig %s pin %s is %d commits behind main %s, within the %d-commit and %s bounds", pin.Name, short(pin.Commit), behind, short(main), MaxPinBehind, MaxPinAge))
+		notes = append(notes, pinNotes...)
 	}
 	return notes, nil
+}
+
+// fetchTipDepth is the depth the pin-drift guard fetches a fetched source's main
+// at: MaxPinBehind commits behind its tip, plus the tip itself, so a pin exactly
+// at the bound is in the fetched history and one beyond it is not.
+const fetchTipDepth = MaxPinBehind + 1
+
+// checkFetchedPin is the pin-drift check for a source the build fetches by URL
+// rather than reads from a checkout. dir was fetched at pin.Commit and holds no
+// origin/main, so the guard first fetches that source's main tip from pin.URL
+// into origin/main, through git, and then applies the rules CheckPins applies to
+// a checkout. A tip fetch that fails and a tip that cannot be read are errors: a
+// fetched pin with no main to compare against is refused, never passed. Its
+// caller has refused a nil git, as FetchSource does before the fetch runs.
+func checkFetchedPin(git bdbuild.Git, dir string, pin Pin, pinsPath string) error {
+	if _, err := git(dir, "fetch", "--depth", strconv.Itoa(fetchTipDepth), pin.URL, "main:refs/remotes/origin/main"); err != nil {
+		return fmt.Errorf("pin-drift guard: cannot fetch main of the %s pin from its pin URL: %w", pin.Name, err)
+	}
+	out, err := git(dir, "rev-parse", "--verify", "origin/main^{commit}")
+	if err != nil {
+		return fmt.Errorf("pin-drift guard: cannot read the main tip fetched for the %s pin: %w", pin.Name, err)
+	}
+	_, err = checkPinAgainstMain(git, dir, pin, strings.TrimSpace(string(out)), pinsPath)
+	return err
+}
+
+// checkPinAgainstMain applies the three pin-drift rules to one pin: a pin at
+// main passes silently; one that is not an ancestor of main, more than
+// MaxPinBehind commits behind it, or whose commit is more than MaxPinAge older
+// than main's tip is refused; one inside both bounds passes with one note.
+func checkPinAgainstMain(git bdbuild.Git, dir string, pin Pin, main, pinsPath string) (notes []string, err error) {
+	if pin.Commit == main {
+		return nil, nil
+	}
+	if _, err := git(dir, "merge-base", "--is-ancestor", pin.Commit, main); err != nil {
+		return nil, fmt.Errorf("pin-drift guard: rig %s pin %s is not an ancestor of main %s (ahead or diverged): %s", pin.Name, short(pin.Commit), short(main), pinEdit(pin, pinsPath, main))
+	}
+	behind, err := commitsBehind(git, dir, pin.Commit, main)
+	if err != nil {
+		return nil, fmt.Errorf("pin-drift guard: rig %s pin %s: cannot count the commits to main %s in %s (%v): fetch or fix that checkout, then rerun", pin.Name, short(pin.Commit), short(main), dir, err)
+	}
+	if behind > MaxPinBehind {
+		return nil, fmt.Errorf("pin-drift guard: rig %s pin %s is %d commits behind main %s, over the %d-commit bound: %s", pin.Name, short(pin.Commit), behind, short(main), MaxPinBehind, pinEdit(pin, pinsPath, main))
+	}
+	age, err := commitAge(git, dir, pin.Commit, main)
+	if err != nil {
+		return nil, fmt.Errorf("pin-drift guard: rig %s pin %s: cannot read the commit times against main %s in %s (%v): fetch or fix that checkout, then rerun", pin.Name, short(pin.Commit), short(main), dir, err)
+	}
+	if age > MaxPinAge {
+		return nil, fmt.Errorf("pin-drift guard: rig %s pin %s is %d commits behind main %s, and its commit is %s older than main's tip, over the %s bound: %s", pin.Name, short(pin.Commit), behind, short(main), age.Round(time.Hour), MaxPinAge, pinEdit(pin, pinsPath, main))
+	}
+	return []string{fmt.Sprintf("pin-drift guard: rig %s pin %s is %d commits behind main %s, within the %d-commit and %s bounds", pin.Name, short(pin.Commit), behind, short(main), MaxPinBehind, MaxPinAge)}, nil
 }
 
 // pinEdit is the exact edit a refused pin needs, for the reader to paste from
