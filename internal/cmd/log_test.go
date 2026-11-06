@@ -82,7 +82,7 @@ func TestRunLogPruneWorktreeEmitsFeedEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := logPruneWorktree(townRoot, "deacon", "dog", "rex", "/Users/rex/gt/deacon/dogs/rex/gastown"); err != nil {
+	if err := logPruneWorktree(townRoot, "deacon", "dog", "rex", "/Users/user/gt/deacon/dogs/rex/gastown"); err != nil {
 		t.Fatalf("runLogPruneWorktree: %v", err)
 	}
 
@@ -107,5 +107,5 @@ func TestRunLogPruneWorktreeEmitsFeedEvent(t *testing.T) {
 	}
 	assertPayloadString(t, event.Payload, "kind", "dog")
 	assertPayloadString(t, event.Payload, "owner", "rex")
-	assertPayloadString(t, event.Payload, "path", "/Users/rex/gt/deacon/dogs/rex/gastown")
+	assertPayloadString(t, event.Payload, "path", "/Users/user/gt/deacon/dogs/rex/gastown")
 }

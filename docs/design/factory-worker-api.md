@@ -215,7 +215,7 @@ POST /identity
   "env": {
     "GT_ROLE": "gastown/polecats/alpha",
     "BD_ACTOR": "gastown/polecats/alpha",
-    "GT_ROOT": "/Users/stevey/gt"
+    "GT_ROOT": "/Users/user/gt"
   }
 }
 ```

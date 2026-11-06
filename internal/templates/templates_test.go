@@ -263,7 +263,7 @@ func TestRenderRole_TownRootInOutput(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	const customRoot = "/Users/pa/dev/gastown-tests/my-instance"
+	const customRoot = "/Users/user/dev/gastown-tests/my-instance"
 
 	roles := []struct {
 		role string

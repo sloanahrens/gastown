@@ -173,20 +173,20 @@ func TestIsGitRemoteURL(t *testing.T) {
 		{"gs://my-bucket/repos/foo", true},
 
 		// Local paths — should return false
-		{"/Users/scott/projects/foo", false},
+		{"/Users/user/projects/foo", false},
 		{"/tmp/repo", false},
 		{"./foo", false},
 		{"../foo", false},
 		{"~/projects/foo", false},
-		{"C:\\Users\\scott\\projects\\foo", false},
-		{"C:/Users/scott/projects/foo", false},
+		{"C:\\Users\\user\\projects\\foo", false},
+		{"C:/Users/user/projects/foo", false},
 
 		// Bare directory name — should return false
 		{"foo", false},
 
 		// file:// URIs — explicit local git remotes are allowed
 		{"file:///tmp/local-repo.git", true},
-		{"file:///Users/scott/projects/foo", true},
+		{"file:///Users/user/projects/foo", true},
 		{"file://user@localhost:/tmp/local-repo.git", true},
 
 		// Argument injection — should return false

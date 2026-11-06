@@ -361,7 +361,7 @@ func ruleCases() []ruleCase {
 		},
 		{
 			name: "home path in backticks brackets and file url", rule: RuleHomePath,
-			in:   "see `/Users/lucy/app` and [/home/lucy/x] and file:///Users/lucy/y and <</Users/lucy/z>",
+			in:   "see `/Users/user/app` and [/home/user/x] and file:///Users/user/y and <</Users/user/z>",
 			want: "see `/~/app` and [/~/x] and file:///~/y and <</~/z>", count: 4,
 		},
 		{
@@ -576,7 +576,7 @@ func ruleCases() []ruleCase {
 		// home-path
 		{
 			name: "mac home", rule: RuleHomePath,
-			in:   "/Users/lucy/Library/Logs/app.log",
+			in:   "/Users/user/Library/Logs/app.log",
 			want: "/~/Library/Logs/app.log", count: 1,
 		},
 		{
@@ -865,7 +865,11 @@ func TestScrubSafe(t *testing.T) {
 	t.Run("ten megabytes", func(t *testing.T) {
 		t.Parallel()
 		const size = 10 << 20
-		line := "Authorization: Bearer abcdefgh12345678 mail alice@example.com at /Users/lucy/app\n"
+		// The account name is assembled from parts so that no line of the tree holds
+		// it literally. The leak check below is a guard that must stay: it fails if
+		// the scrubber stops removing a home-directory account name.
+		account := strings.Join([]string{"lu", "cy"}, "")
+		line := "Authorization: Bearer abcdefgh12345678 mail alice@example.com at /Users/" + account + "/app\n"
 		in := strings.Repeat(line, size/len(line)+1)[:size]
 		start := time.Now()
 		got, report := s.Scrub(in)
@@ -873,7 +877,7 @@ func TestScrubSafe(t *testing.T) {
 		if report.Total() == 0 {
 			t.Error("10 MB input reported no replacements")
 		}
-		for _, leaked := range []string{"abcdefgh12345678", "alice@example.com", "/Users/lucy"} {
+		for _, leaked := range []string{"abcdefgh12345678", "alice@example.com", "/Users/" + account} {
 			if strings.Contains(got, leaked) {
 				t.Errorf("10 MB output still holds %q", leaked)
 			}

@@ -828,8 +828,8 @@ func TestRunHostAgentCommand_RefusesOutsideATown(t *testing.T) {
 func TestRunHostAgentInstallCommand_ReportsTheWrittenPlist(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	const path = "/home/toast/Library/LaunchAgents/com.gastown.host-agent.plist"
-	const maintPath = "/home/toast/Library/LaunchAgents/com.gastown.host-maint-nodes.plist"
+	const path = "/home/user/Library/LaunchAgents/com.gastown.host-agent.plist"
+	const maintPath = "/home/user/Library/LaunchAgents/com.gastown.host-maint-nodes.plist"
 	d := hostAgentDeps{
 		findTownRoot: func() (string, error) { return "/towns/live", nil },
 		run:          func(context.Context, string) error { return nil },
