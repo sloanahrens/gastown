@@ -8,21 +8,19 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
-// The first auxiliary handlers: comments, comment and label for a tracker rig
+// The first auxiliary handlers: comments and label for a tracker rig
 // (gt-p85pw.98). Each answers the flags its recorded goldens cover and refuses
 // any other flag by name, so a caller never gets a wider read or write than it
 // asked for. The store is opened through the backend seam, from the route the
 // router chose, so this package holds no second tracker client.
 //
-// bd's comments (plural) reads an issue's comments and comment (singular) adds
-// one, so the two verbs answer different commands. label is one verb with two
+// bd's comments (plural) reads an issue's comments. label is one verb with two
 // subcommands, list and add, and the handler reads which one the argv names
 // before it does anything.
 
 // The flag set each auxiliary verb answers: the flags its golden rows cover.
 var (
 	commentsFlags  = readFlagSpec{"--json": {}}
-	commentFlags   = readFlagSpec{}
 	labelListFlags = readFlagSpec{"--json": {}}
 	labelAddFlags  = readFlagSpec{}
 )
@@ -48,15 +46,6 @@ type bdComment struct {
 type bdLabelAnswer struct {
 	Data          []string `json:"data"`
 	SchemaVersion int      `json:"schema_version"`
-}
-
-// auxCommentStore is the part of a rig's store the comment handlers use. The
-// handlers open the full backend.Store; the narrow interface lets a test drive
-// each refusal without a tracker server.
-type auxCommentStore interface {
-	Show(id string) (*beads.Issue, error)
-	Comments(id string) ([]beads.Comment, error)
-	AddComment(id, comment string) error
 }
 
 // auxLabelStore is the part of a rig's store the label handler uses, narrowed
@@ -118,47 +107,6 @@ func commentRows(comments []beads.Comment) []bdComment {
 		})
 	}
 	return rows
-}
-
-// commentHandler answers bd comment (singular, which adds a comment) for a
-// tracker rig.
-func commentHandler(env Env, d Decision) int {
-	fl, err := parseReadArgs("comment", env.Args)
-	if err != nil {
-		return shimError(env, err)
-	}
-	if err := refuseUnknownFlags(fl, commentFlags, d.Route.Prefix); err != nil {
-		return shimError(env, err)
-	}
-	if len(fl.operands) == 0 {
-		return shimError(env, errors.New("comment needs an issue id"))
-	}
-	text := strings.TrimSpace(strings.Join(fl.operands[1:], " "))
-	if text == "" {
-		return shimError(env, errors.New("comment needs text"))
-	}
-	st, err := openTrackerStore(env, d)
-	if err != nil {
-		return shimError(env, err)
-	}
-	return commentIssue(env, st, fl.operands[0], text)
-}
-
-// commentIssue adds text to id and prints bd's line, which names the issue's
-// title. The title is read before the write, so a refused write prints no line
-// and an id the store does not hold fails before anything is appended.
-func commentIssue(env Env, st auxCommentStore, id, text string) int {
-	is, err := st.Show(id)
-	if err != nil {
-		return shimError(env, fmt.Errorf("comment %s: %w", id, err))
-	}
-	if err := st.AddComment(id, text); err != nil {
-		return shimError(env, fmt.Errorf("comment %s: %w", id, err))
-	}
-	if _, err := fmt.Fprintf(env.Stdout, "✓ Comment added to %s — %s\n", id, is.Title); err != nil {
-		return shimError(env, fmt.Errorf("writing bd's answer: %w", err))
-	}
-	return 0
 }
 
 // labelHandler answers bd label list and label add for a tracker rig. Any
