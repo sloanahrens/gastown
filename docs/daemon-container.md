@@ -108,23 +108,26 @@ so compare that stamp with the running `bd`'s commit before the image is used.
 
 `--rev`, `--out`, `--gt-src`, `--mango-src`, `--mango-commit` and `--pins` are
 required. A `--bd-src`, `--om-src`, `--hm-src` or `--devops-src` left out fetches
-that source from the URL and commit its line in `--pins` names: an empty
-directory under `--out`, then `git init`, `git fetch --depth 1 <url> <commit>`
-and a detached checkout of `FETCH_HEAD`, with the caller's environment answering
-for authentication; the fetched tree is refused unless it is at the pinned
-commit, and it is removed once the binaries are built. Each path must be absolute
-and an existing directory (and `--pins` an absolute existing file), `--rev` is 7
-or more hex characters, and each commit in the pins file is a full 40-character
-lowercase hex sha. Without
-`--apply` it
-validates the flags, prints the pins and the commands it would run, ends with
+that source from the URL and commit its line in `--pins` names, with the
+caller's environment answering for authentication. The fetch is: an empty
+directory under `--out`, then `git init`, `git fetch --depth 1 <url> <commit>`,
+and a detached checkout of `FETCH_HEAD`; the fetched tree is refused unless it is
+at the pinned commit. For the drift check it then runs
+`git fetch --depth 41 <url> main:refs/remotes/origin/main` in that directory: the
+guard's 40-commit bound plus the tip, so a pin exactly at the bound is in the
+fetched history. The fetched tree is removed once the binaries are built.
+Each path must be absolute and an existing directory (and `--pins` an absolute
+existing file), `--rev` is 7 or more hex characters, and each commit in the pins
+file is a full 40-character lowercase hex sha. Without `--apply` it validates the
+flags, prints the pins and the commands it would run, ends with
 `dry run: nothing was run. Pass --apply to build.`, and writes nothing. Read
 that output, then run the same command with `--apply`. With `--apply` the
-pin-drift guard first reads the `origin/main` of each source that has a checkout
-and refuses a pin that is not an ancestor of it, more than 40 commits behind it,
-or more than 7 days older than its tip, naming the pin and the line to edit; a
-source fetched from its URL has no checkout, and the guard prints a line saying
-its drift is unchecked. It then builds
+pin-drift guard compares each pin with its source's `origin/main` and refuses a
+pin that is not an ancestor of it, more than 40 commits behind it, or more than
+7 days older than its tip, naming the pin and the line to edit. A source that
+has a checkout is read from it; a fetched source's main tip is the one fetched
+from its pin URL above, and a tip that cannot be fetched or read is a refusal.
+It then builds
 gt, bd and om for linux/arm64 in clean worktrees of the pins, builds hm
 and the two devops reporters (devops-reporter, release-reporter) the same way from
 their pinned checkouts. mango is compiled for linux/arm64 inside a container of

@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/steveyegge/gastown/internal/daemonimage"
 )
 
@@ -290,10 +291,11 @@ func TestDaemonImageContextOnly(t *testing.T) {
 		}
 	})
 
-	// A source with no checkout is fetched from its pin, so the pin-drift guard
-	// has no origin/main to read for it: it says so and checks the others, rather
-	// than passing the pin silently.
-	t.Run("a fetched source's drift is reported unchecked", func(t *testing.T) {
+	// A source with no checkout is fetched from its pin, so the command has no
+	// origin/main to read for it before the build; the build fetches the source
+	// and checks the pin against that source's tip, so no pin is reported
+	// unchecked. Only the pins with a checkout are checked here.
+	t.Run("a fetched source is not reported unchecked", func(t *testing.T) {
 		t.Parallel()
 		r := newImageRig(t)
 		r.flags.apply = true
@@ -308,11 +310,11 @@ func TestDaemonImageContextOnly(t *testing.T) {
 			t.Fatalf("runDaemonImage: %v", err)
 		}
 
-		if !strings.Contains(r.out.String(), "pin-drift guard: bd is fetched from its pin URL") {
-			t.Errorf("the command did not report bd's unchecked drift:\n%s", r.out.String())
+		if strings.Contains(r.out.String(), "unchecked") {
+			t.Errorf("the apply path reported a pin unchecked:\n%s", r.out.String())
 		}
-		if strings.Contains(r.out.String(), "pin-drift guard: om is fetched") {
-			t.Errorf("om has a checkout, and its drift was reported unchecked:\n%s", r.out.String())
+		if strings.Contains(r.out.String(), "pin-drift guard: bd") {
+			t.Errorf("the command read bd's origin/main although bd is fetched:\n%s", r.out.String())
 		}
 	})
 
@@ -697,6 +699,87 @@ func TestReadImagePinsRefusesAnUnreadableFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "absent")
 	if _, err := readImagePins(path); err == nil || !strings.Contains(err.Error(), "cannot be read") {
 		t.Fatalf("readImagePins = %v, want an error naming the unreadable file", err)
+	}
+}
+
+// TestOnlyFetchedPinsAreURLValidated: ParsePins validates every pin URL at parse
+// (the gt-gg9hv.31 contract), and a build validates the URL of only the pins it
+// fetches. A named checkout's pin URL is not the plan's to check, while a fetched
+// pin with a malformed URL is refused before any fetch runs.
+func TestOnlyFetchedPinsAreURLValidated(t *testing.T) {
+	t.Parallel()
+	const credentialURL = "http://user:s3cret@forgejo:3000/sloan/beads.git"
+	pins := func(bdURL string) []daemonimage.Pin {
+		return []daemonimage.Pin{
+			{Name: "bd", URL: bdURL, Commit: imageTestBDCommit},
+			{Name: "om", URL: "http://forgejo:3000/sloan/organic-mechanic.git", Commit: imageTestOMCommit},
+			{Name: "hm", URL: "http://forgejo:3000/sloan/history-man.git", Commit: imageTestHMCommit},
+			{Name: "devops", URL: "http://forgejo:3000/sloan/devops.git", Commit: imageTestDevCommit},
+		}
+	}
+
+	t.Run("a named checkout's pin URL is not checked", func(t *testing.T) {
+		t.Parallel()
+		r := newImageRig(t)
+		b := newDaemonImageBuilder(r.flags, r.deps, pins(credentialURL))
+
+		if _, err := b.Plan(imageTestRev); err != nil {
+			t.Fatalf("Plan with a named checkout and a malformed pin URL = %v, want no error", err)
+		}
+	})
+
+	t.Run("a fetched pin's malformed URL is refused before any fetch", func(t *testing.T) {
+		t.Parallel()
+		r := newImageRig(t)
+		r.flags.bdSrc = ""
+		b := newDaemonImageBuilder(r.flags, r.deps, pins(credentialURL))
+
+		if _, err := b.Plan(imageTestRev); err == nil || !strings.Contains(err.Error(), "credential") {
+			t.Fatalf("Plan with a fetched malformed pin URL = %v, want the credential refusal", err)
+		}
+	})
+
+	t.Run("ParsePins still refuses a malformed pin URL at parse", func(t *testing.T) {
+		t.Parallel()
+		text := strings.Replace(imagePinsText(), "http://forgejo:3000/sloan/beads.git", credentialURL, 1)
+		_, err := daemonimage.ParsePins([]byte(text))
+		if err == nil || !strings.Contains(err.Error(), "credential") {
+			t.Fatalf("ParsePins = %v, want the credential refusal", err)
+		}
+		if strings.Contains(err.Error(), "s3cret") || strings.Contains(err.Error(), "@") {
+			t.Errorf("the refusal echoes the URL: %v", err)
+		}
+	})
+}
+
+// TestFetchProcedureHasOneCopy: the fetch steps (init, the depth-1 pin fetch, the
+// detached checkout and the depth-41 main fetch for the drift check) are written
+// once, in docs/daemon-container.md; the command's help and flag usage point
+// there and do not repeat them.
+func TestFetchProcedureHasOneCopy(t *testing.T) {
+	t.Parallel()
+	c := newDaemonImageCmd(func(context.Context, io.Writer, daemonImageFlags) error { return nil })
+	guide := c.Long
+	c.Flags().VisitAll(func(f *pflag.Flag) { guide += "\n" + f.Usage })
+
+	for _, step := range []string{"git init", "git fetch", "FETCH_HEAD", "--depth", "detached checkout"} {
+		if strings.Contains(guide, step) {
+			t.Errorf("the command's help or a flag usage repeats the fetch step %q", step)
+		}
+	}
+	if !strings.Contains(guide, "docs/daemon-container.md") {
+		t.Error("the command's help does not point to docs/daemon-container.md for the fetch procedure")
+	}
+
+	body, err := os.ReadFile(filepath.Join("..", "..", "docs", "daemon-container.md"))
+	if err != nil {
+		t.Fatalf("reading docs/daemon-container.md: %v", err)
+	}
+	doc := string(body)
+	for _, step := range []string{"git init", "git fetch --depth 1 <url> <commit>", "FETCH_HEAD", "git fetch --depth 41 <url> main:refs/remotes/origin/main"} {
+		if !strings.Contains(doc, step) {
+			t.Errorf("docs/daemon-container.md lacks the fetch step %q", step)
+		}
 	}
 }
 

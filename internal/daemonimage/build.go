@@ -357,8 +357,9 @@ func (b Builder) checkOutAndRev(rev, what string) (string, error) {
 // source returns the directory a source is built from, and a cleanup to run once
 // the build is done. A checkout the caller named is used as it is and cleanup
 // does nothing; an absent one is fetched from its pin into a fresh directory
-// under Out, and cleanup removes the fetched tree, so a full checkout never stays
-// in the build context.
+// under Out, the pin-drift guard checks it against the main tip fetched from the
+// same pin URL, and cleanup removes the fetched tree, so a full checkout never
+// stays in the build context.
 func (b Builder) source(ctx context.Context, name, src string) (string, func(), error) {
 	if src != "" {
 		return src, func() {}, nil
@@ -373,6 +374,10 @@ func (b Builder) source(ctx context.Context, name, src string) (string, func(), 
 	}
 	cleanup := func() { _ = os.RemoveAll(dir) }
 	if err := FetchSource(ctx, b.Run, b.Git, dir, b.Environ, pin); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	if err := checkFetchedPin(b.Git, dir, pin, b.pinsFile()); err != nil {
 		cleanup()
 		return "", nil, err
 	}
@@ -661,18 +666,18 @@ func isCommit(s string) bool {
 // reaches no network. It names the pins file and each pin first. It refuses the
 // inputs a build refuses before it runs anything (an empty or relative Out, a
 // rev, bd or om commit that is not a commit, an unnamed source with no pin to
-// fetch it from, a pin whose URL is not a credential-free http(s) repository URL
-// or whose commit is not a full sha, a mango source or commit that is missing or
-// not a commit, an hm or devops commit that is missing or not a commit, a
-// canonical clone as any input, no pins, a Dockerfile that is not an absolute
-// regular file). It does not
-// check the claude CLI pin, and it does not check that a commit exists in its
-// checkout, that a checkout is at its pin and clean, or that a pin is fresh:
-// CheckPins and a build check those when they run, so a plan that prints can
-// still fail there. The commits in it are the ones named, not resolved: the gt
-// line stamps buildstamp.Len characters of the named commit, and the bd line's
-// main.Build is planBuildID, since the build id is git's abbreviation of the
-// commit in the worktree a build makes and Plan makes none.
+// fetch it from, a fetched pin whose URL is not a credential-free http(s)
+// repository URL or whose commit is not a full sha, a mango source or commit
+// that is missing or not a commit, an hm or devops commit that is missing or not
+// a commit, a canonical clone as any input, no pins, a Dockerfile that is not an
+// absolute regular file). It does not check the claude CLI pin, and it does not
+// check that a commit exists in its checkout, that a checkout is at its pin and
+// clean, or that a pin is fresh: CheckPins and a build's fetched-pin check
+// refuse those when they run, so a plan that prints can still fail there. The
+// commits in it are the ones named, not resolved: the gt line stamps
+// buildstamp.Len characters of the named commit, and the bd line's main.Build
+// is planBuildID, since the build id is git's abbreviation of the commit in the
+// worktree a build makes and Plan makes none.
 func (b Builder) Plan(rev string) ([]string, error) { return b.plan(rev, false) }
 
 // PlanContext returns the steps a context-only build of rev would run: the same
@@ -704,13 +709,10 @@ func (b Builder) plan(rev string, contextOnly bool) ([]string, error) {
 	if len(b.Pins) != len(PinNames) {
 		return nil, fmt.Errorf("daemonimage: %d pins named, want the four (%s) from %s", len(b.Pins), strings.Join(PinNames, ", "), b.PinsPath)
 	}
-	// Every pin is checked before any line is built, so the plan never prints a
-	// URL a fetch would refuse, a credential among them.
-	for _, p := range b.Pins {
-		if err := checkFetchable(p.Name, p); err != nil {
-			return nil, err
-		}
-	}
+	// A pin is checked where a build would use it: sourcePlan checks the pin of
+	// a source with no checkout, and a named checkout's pin URL is not the
+	// plan's to refuse. The pins file is validated at parse, so a credential
+	// committed to it never reaches here.
 	if err := b.checkToolInputs(); err != nil {
 		return nil, err
 	}

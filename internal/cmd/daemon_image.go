@@ -145,17 +145,16 @@ The Dockerfile is read from --gt-src's working tree.
 No flag has a default read from the live town. --rev, --out, --gt-src,
 --mango-src, --mango-commit and --pins are required. A --bd-src, --om-src,
 --hm-src or --devops-src left out fetches that source from the URL and commit its
-line in --pins names: an empty directory under --out, then git init, a depth-1
-fetch of the pinned commit and a detached checkout, with the caller's environment
-answering for authentication. A source flag that is named keeps that checkout, and
-the checkout must hold its pin. Without --apply it validates the flags, prints the
-pins and the commands it would run and runs none, writes nothing and reaches no
-network. With --apply the pin-drift guard reads the origin/main of each source that
-has a checkout and refuses a pin that is not an ancestor of it, more than 40
-commits behind it, or more than 7 days older than its tip; a source fetched from its
-URL has no checkout to compare, and the guard says so. A path that is a canonical
-clone (.../mayor/rig) is refused for --out and every source: the build adds
-worktrees to its sources.
+line in --pins names, with the caller's environment answering for authentication;
+the fetch procedure is the image-build step in docs/daemon-container.md. A source
+flag that is named keeps that checkout, and the checkout must hold its pin.
+Without --apply it validates the flags, prints the pins and the commands it would
+run and runs none, writes nothing and reaches no network. With --apply the
+pin-drift guard refuses a pin that is not an ancestor of its source's main, more
+than 40 commits behind it, or more than 7 days older than its tip; a fetched
+source's main tip is fetched from the same pin URL for that check. A path that is
+a canonical clone (.../mayor/rig) is refused for --out and every source: the
+build adds worktrees to its sources.
 
 With --apply and --context-only it stages the image's build context, the same
 binary, plugin, claude CLI and client tool steps, and stops there: neither the
@@ -207,16 +206,15 @@ func runDaemonImage(ctx context.Context, f daemonImageFlags, d daemonImageDeps) 
 	}
 	b := newDaemonImageBuilder(f, d, pins)
 	if f.apply {
+		// A pin whose source has a checkout is checked here. A source fetched
+		// from its pin URL has no checkout yet: the build fetches the source
+		// first and then checks the pin against that source's main tip, so the
+		// guard runs on every pin in the CI path too.
 		checked := make([]daemonimage.Pin, 0, len(pins))
 		for _, p := range pins {
 			if pinCheckout(f, p.Name) != "" {
 				checked = append(checked, p)
-				continue
 			}
-			// A source fetched from its pin has no checkout, so there is no
-			// origin/main to compare the pin with. Saying so is the honest
-			// answer: the guard is not silently passing this pin.
-			fmt.Fprintf(d.out, "pin-drift guard: %s is fetched from its pin URL, and with no checkout there is no origin/main to compare it with; its drift is unchecked\n", p.Name)
 		}
 		notes, err := daemonimage.CheckPins(checked, pinsMainOf(f), f.pins, d.git)
 		if err != nil {

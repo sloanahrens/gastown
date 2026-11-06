@@ -5,8 +5,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/polecat/bdbuild"
 )
@@ -16,12 +18,19 @@ import (
 const testBDURL = "http://forgejo:3000/sloan/beads.git"
 
 // fetchedGit is a git that answers HEAD with head in any directory gitHolding
-// does not know as a checkout, so the tree a fetch leaves reads as head, and
-// answers every other call as gitHolding over known.
+// does not know as a checkout, so the tree a fetch leaves reads as head. It
+// answers the pin-drift guard's main-tip fetch for that tree with a tip at head,
+// the fresh case, and answers every other call as gitHolding over known.
 func fetchedGit(run *fakeRunner, known map[string]string, head string) bdbuild.Git {
 	g := run.git(known)
 	return func(dir string, args ...string) ([]byte, error) {
 		if len(args) == 3 && args[0] == "rev-parse" && args[1] == "--verify" && args[2] == "HEAD^{commit}" {
+			return []byte(head + "\n"), nil
+		}
+		if len(args) == 5 && args[0] == "fetch" && args[1] == "--depth" {
+			return nil, nil
+		}
+		if len(args) == 3 && args[0] == "rev-parse" && args[1] == "--verify" && args[2] == "origin/main^{commit}" {
 			return []byte(head + "\n"), nil
 		}
 		return g(dir, args...)
@@ -162,6 +171,199 @@ func TestFetchSourceKeepsACheckoutFlagExactly(t *testing.T) {
 	}
 }
 
+// staleGuard is what the pin-drift guard reads for a fetched source: whether the
+// tip fetch fails, whether the tip cannot be read, and the shape of the pin
+// against the tip.
+type staleGuard struct {
+	tip         string
+	tipFetchErr error
+	tipReadErr  bool
+	notAncestor bool
+	behind      int
+	age         time.Duration
+	now         time.Time
+	fetches     [][]string
+}
+
+// fetchedCommit returns the commit run recorded fetching into dir.
+func fetchedCommit(run *fakeRunner, dir string) (string, bool) {
+	for _, call := range run.calls {
+		if call.dir == dir && len(call.argv) == 6 && call.argv[0] == "git" && call.argv[1] == "fetch" && call.argv[3] == "1" {
+			return call.argv[5], true
+		}
+	}
+	return "", false
+}
+
+// guardGit is a git over the fetched trees a run recorded a fetch in: it answers
+// the tree's HEAD, its clean status, and the pin-drift guard's tip fetch and
+// rules from g, and answers every other call as inner.
+func guardGit(run *fakeRunner, inner bdbuild.Git, g *staleGuard) bdbuild.Git {
+	return func(dir string, args ...string) ([]byte, error) {
+		pin, fetched := fetchedCommit(run, dir)
+		if !fetched {
+			return inner(dir, args...)
+		}
+		switch {
+		case len(args) == 3 && args[0] == "rev-parse" && args[1] == "--verify" && args[2] == "HEAD^{commit}":
+			return []byte(pin + "\n"), nil
+		case args[0] == "status":
+			return nil, nil
+		case len(args) == 5 && args[0] == "fetch" && args[1] == "--depth":
+			g.fetches = append(g.fetches, append([]string(nil), args...))
+			if g.tipFetchErr != nil {
+				return nil, g.tipFetchErr
+			}
+			return nil, nil
+		case len(args) == 3 && args[0] == "rev-parse" && args[1] == "--verify" && args[2] == "origin/main^{commit}":
+			if g.tipReadErr {
+				return nil, errors.New("fatal: bad revision 'origin/main'")
+			}
+			return []byte(g.tip + "\n"), nil
+		case args[0] == "merge-base":
+			if g.notAncestor {
+				return nil, errors.New("exit status 1")
+			}
+			return nil, nil
+		case args[0] == "rev-list":
+			return []byte(strconv.Itoa(g.behind) + "\n"), nil
+		case args[0] == "show":
+			if args[len(args)-1] == pin {
+				return []byte(strconv.FormatInt(g.now.Add(-g.age).Unix(), 10) + "\n"), nil
+			}
+			return []byte(strconv.FormatInt(g.now.Unix(), 10) + "\n"), nil
+		}
+		return inner(dir, args...)
+	}
+}
+
+// TestFetchedPinsAreStalenessChecked: a source the build fetches by URL is
+// checked against the main tip fetched from the same pin URL with the rules
+// CheckPins applies to a checkout. Every fetched source is checked, a fresh pin
+// passes, and a pin that is not an ancestor of the tip, one more than the
+// 40-commit bound behind it, one more than the 7-day bound older than it, a tip
+// fetch that fails and a tip that cannot be read are each refused naming the
+// source, never reported as unchecked.
+func TestFetchedPinsAreStalenessChecked(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_790_000_000, 0)
+	// testOMCommit and testHMCommit are the same sha, so the map names it once.
+	known := map[string]string{
+		testRev: testRev, testBDCommit: testBDCommit, testOMCommit: testOMCommit,
+		testDevopsCommit: testDevopsCommit,
+	}
+
+	t.Run("every source fetched is checked", func(t *testing.T) {
+		t.Parallel()
+		run := &fakeRunner{}
+		guard := &staleGuard{tip: testOtherCommit, behind: 3, age: 2 * 24 * time.Hour, now: now}
+		b := Builder{
+			Run: run.run, Git: guardGit(run, run.git(known), guard),
+			Go: versionGo(versionInfo(testReleaseVersion)), Environ: testEnv, Out: t.TempDir(),
+			GTSrc:    "/src/gt",
+			BDCommit: testBDCommit, OMCommit: testOMCommit,
+			HMCommit: testHMCommit, DevopsCommit: testDevopsCommit,
+			Pins: []Pin{
+				{Name: "bd", URL: "http://forgejo:3000/sloan/beads.git", Commit: testBDCommit},
+				{Name: "om", URL: "http://forgejo:3000/sloan/organic-mechanic.git", Commit: testOMCommit},
+				{Name: "hm", URL: "http://forgejo:3000/sloan/history-man.git", Commit: testHMCommit},
+				{Name: "devops", URL: "http://forgejo:3000/sloan/devops.git", Commit: testDevopsCommit},
+			},
+		}
+
+		if _, err := b.BuildBinaries(context.Background(), testRev); err != nil {
+			t.Fatalf("BuildBinaries: %v", err)
+		}
+		if _, err := b.BuildTools(context.Background()); err != nil {
+			t.Fatalf("BuildTools: %v", err)
+		}
+
+		if len(guard.fetches) != len(PinNames) {
+			t.Fatalf("the guard fetched %d main tips, want one per fetched source (%d): %v", len(guard.fetches), len(PinNames), guard.fetches)
+		}
+		wantDepth := strconv.Itoa(MaxPinBehind + 1)
+		for _, argv := range guard.fetches {
+			if argv[1] != "--depth" || argv[2] != wantDepth || argv[4] != "main:refs/remotes/origin/main" {
+				t.Errorf("tip fetch = %v, want --depth %s main:refs/remotes/origin/main", argv, wantDepth)
+			}
+		}
+	})
+
+	refusal := func(t *testing.T, guard staleGuard) error {
+		t.Helper()
+		run := &fakeRunner{}
+		guard.now = now
+		guard.tip = testOtherCommit
+		b := Builder{
+			Run: run.run, Git: guardGit(run, run.git(known), &guard),
+			Environ: testEnv, Out: t.TempDir(), GTSrc: "/src/gt",
+			OMSrc: "/src/om", OMCommit: testOMCommit, BDCommit: testBDCommit,
+			Pins: []Pin{{Name: "bd", URL: testBDURL, Commit: testBDCommit}},
+		}
+		if _, err := b.BuildBinaries(context.Background(), testRev); err != nil {
+			for _, call := range run.calls {
+				if len(call.argv) != 0 && call.argv[0] == "go" {
+					t.Errorf("a build ran on a refused pin: %v", call.argv)
+				}
+			}
+			if len(run.calls) != 0 {
+				dir := run.calls[0].dir
+				if _, statErr := os.Stat(dir); !errors.Is(statErr, os.ErrNotExist) {
+					t.Errorf("a refused fetched pin left %s in the build context (err %v)", dir, statErr)
+				}
+			}
+			return err
+		}
+		t.Fatal("BuildBinaries passed a fetched pin the guard refuses")
+		return nil
+	}
+
+	for _, tc := range []struct {
+		name  string
+		guard staleGuard
+		want  []string
+	}{
+		{
+			name:  "a pin that is not an ancestor of the fetched tip",
+			guard: staleGuard{notAncestor: true},
+			want:  []string{"pin-drift guard:", "rig bd pin", "is not an ancestor of main"},
+		},
+		{
+			name:  "a pin 41 commits behind the fetched tip",
+			guard: staleGuard{behind: MaxPinBehind + 1},
+			want:  []string{"pin-drift guard:", "rig bd pin", "is 41 commits behind", "over the 40-commit bound"},
+		},
+		{
+			name:  "a pin more than 7 days older than the fetched tip",
+			guard: staleGuard{behind: 3, age: MaxPinAge + 24*time.Hour},
+			want:  []string{"pin-drift guard:", "rig bd pin", "older than main's tip", "over the " + MaxPinAge.String() + " bound"},
+		},
+		{
+			name:  "a tip fetch that fails",
+			guard: staleGuard{tipFetchErr: errors.New("fatal: could not fetch")},
+			want:  []string{"pin-drift guard:", "cannot fetch main of the bd pin"},
+		},
+		{
+			name:  "a tip that cannot be read",
+			guard: staleGuard{tipReadErr: true},
+			want:  []string{"pin-drift guard:", "cannot read the main tip fetched for the bd pin"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := refusal(t, tc.guard)
+			for _, w := range tc.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("refusal = %v, want it to contain %q", err, w)
+				}
+			}
+			if strings.Contains(err.Error(), "unchecked") {
+				t.Errorf("refusal = %v, want a refusal, not an unchecked pin", err)
+			}
+		})
+	}
+}
+
 // planArgv returns the argv a plan line prints: the text after the line's label
 // and before the note Plan puts in parentheses.
 func planArgv(line string) string {
@@ -285,17 +487,13 @@ func TestNoCredentialInAnyArgv(t *testing.T) {
 		t.Errorf("a refused fetch ran %v", run.calls)
 	}
 
-	// The plan prints every pin's URL, so a credential in a pin that is not even
-	// fetched still keeps it out of the plan.
+	// A named checkout's pin URL is not the plan's to check: the pins file is
+	// validated at parse, and only the pins a build fetches are refused here.
 	named := planBuilder(t)
 	named.Pins = append([]Pin(nil), planPins...)
 	named.Pins[0].URL = credentialURL
-	lines, err = named.Plan(testRev)
-	if err == nil || !strings.Contains(err.Error(), "credential") {
-		t.Fatalf("Plan with a named checkout = %q, %v; want the credential refusal", lines, err)
-	}
-	if len(lines) != 0 {
-		t.Errorf("a refused plan printed %q", lines)
+	if _, err := named.Plan(testRev); err != nil {
+		t.Fatalf("Plan with a named checkout = %v, want the named checkout used as it is", err)
 	}
 
 	dir := filepath.Join(t.TempDir(), "src")
