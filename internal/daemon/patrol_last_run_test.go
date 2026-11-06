@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -273,4 +275,52 @@ func TestEvaluatePatrolDueUsesInMemoryWhenTheRecordIsMissing(t *testing.T) {
 	if dec := evaluatePatrolDue(townRoot, "jev_dedupe", time.Time{}, now, 15*time.Minute); !dec.due {
 		t.Error("due=false with no record on disk and no in-memory completion")
 	}
+}
+
+// TestReadPatrolLastRuns pins the one reader of the last-run record: a record
+// the daemon wrote reads back per patrol, a missing file is fs.ErrNotExist, and
+// a file that is not JSON is ErrPatrolLastRunCorrupt, so callers can tell the
+// two apart without matching text.
+func TestReadPatrolLastRuns(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+
+	t.Run("valid record reads back per patrol", func(t *testing.T) {
+		t.Parallel()
+		townRoot := t.TempDir()
+		if err := savePatrolLastRun(townRoot, "jev_dedupe", at); err != nil {
+			t.Fatalf("save: %v", err)
+		}
+		runs, err := ReadPatrolLastRuns(townRoot)
+		if err != nil {
+			t.Fatalf("ReadPatrolLastRuns: %v", err)
+		}
+		if got, ok := runs["jev_dedupe"]; !ok || !got.Equal(at) {
+			t.Errorf("jev_dedupe = %v (found %v), want %v", got, ok, at)
+		}
+	})
+
+	t.Run("missing file wraps fs.ErrNotExist", func(t *testing.T) {
+		t.Parallel()
+		_, err := ReadPatrolLastRuns(t.TempDir())
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("want fs.ErrNotExist, got %v", err)
+		}
+	})
+
+	t.Run("corrupt file wraps ErrPatrolLastRunCorrupt", func(t *testing.T) {
+		t.Parallel()
+		townRoot := t.TempDir()
+		path := patrolLastRunPath(townRoot)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("create daemon dir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+			t.Fatalf("write corrupt state: %v", err)
+		}
+		_, err := ReadPatrolLastRuns(townRoot)
+		if !errors.Is(err, ErrPatrolLastRunCorrupt) {
+			t.Errorf("want ErrPatrolLastRunCorrupt, got %v", err)
+		}
+	})
 }
