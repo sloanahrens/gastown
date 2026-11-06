@@ -222,12 +222,16 @@ trim does, so a landing pass in flight does not hold it off.
   the error names the setting.
 - The exec goes to the control cluster, which is the context
   `patrols.tier_sweep.runner.context` names. The runner must be on the kubernetes
-  backend with that context set; otherwise the trim runs nothing and says why.
+  backend with that context set. On any other backend, or with no tier sweep
+  runner at all, the trim is not configured: it runs nothing and logs nothing. A
+  kubernetes runner whose context is empty, or leads with a dash, runs nothing
+  and says why.
 - Each run is one exec into the `dind` container. It removes the files under the
   volume's data directory whose last write is older than `ci_cache_max_age`, then
-  the directories that removal left empty. The volume's top level, where Go keeps
-  its `trim.txt` bookkeeping, is left to Go. `ci-gomod` and `ci-npm` are not
-  touched.
+  every empty directory below the top level, including any that was already
+  empty before the run. The volume's top level is left to Go: its `trim.txt`
+  bookkeeping and its 256 two-hex-digit shard directories, which Go creates once
+  and does not recreate. `ci-gomod` and `ci-npm` are not touched.
 - The mode applies as it does to the rest of the patrol. `dry_run` lists what
   would be removed and removes nothing; `apply` removes. An applied run logs one
   line, `disk_maintenance: ci cache trim: removed N files, X to Y (older than 12h)`,
