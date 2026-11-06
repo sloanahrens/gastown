@@ -1160,6 +1160,12 @@ func (d *Daemon) runTierSweepRig(ctx context.Context, cycle *dogCycle, rig strin
 		// may still be outstanding: retrying it here is the only place a quiet
 		// rig would ever retry it (gt-fn9e6.52).
 		d.tierSweepRetryOwedPromotion(rig, repo, state.LastGreenSHA)
+		// The green ref is retried here for the same reason: a push that
+		// failed, or that a previous process never made, would otherwise wait
+		// for main to move before the image build saw the commit
+		// (gt-gg9hv.61). The publish lists the ref first, so a ref already at
+		// the commit costs no push.
+		d.tierSweepPublishGreenRef(rig, state.LastGreenSHA)
 		cycle.skipStep(rig, "origin/main "+shortSHA(sha)+" unchanged since the last green sweep")
 		d.logger.Printf("tier_sweep: %s: origin/main %s unchanged since the last green sweep; skipping", rig, shortSHA(sha))
 		return true
@@ -1503,6 +1509,10 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 	// tier at this commit. A red or partial cycle promotes nothing.
 	if green {
 		d.tierSweepPromote(rig, repo, sha)
+		// The image build's ref is not part of the promotion: a rig that
+		// promotes nowhere still publishes its green commits when
+		// tier_sweep.image_rigs names it (gt-gg9hv.61).
+		d.tierSweepPublishGreenRef(rig, sha)
 	}
 	cycle.closeStep(rig)
 	d.logger.Print(tierSweepSweptLine(rig, sha, results, stages, d.clk().Now().Sub(now)))

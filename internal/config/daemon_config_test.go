@@ -784,6 +784,54 @@ func TestTierSweepRunnerImageRegistrySetting(t *testing.T) {
 	}
 }
 
+// image_rigs names the rigs whose green sweep publishes an image ref. It
+// defaults to none, so a town that never sets it pushes nothing; a named rig
+// is returned; and a name the town does not register is refused with the name,
+// because the push builds the rig's repository path from it (gt-gg9hv.61).
+func TestTierSweepImageRigs(t *testing.T) {
+	t.Parallel()
+	known := []string{"gastown", "otherrig"}
+
+	t.Run("defaults to none", func(t *testing.T) {
+		t.Parallel()
+		var p PatrolsConfig
+		if err := json.Unmarshal([]byte(`{"tier_sweep": {"enabled": true}}`), &p); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		got, err := p.TierSweep.TierSweepImageRigs(known)
+		if err != nil || len(got) != 0 {
+			t.Fatalf("TierSweepImageRigs = %v, %v; want none", got, err)
+		}
+	})
+
+	t.Run("a named rig enables it", func(t *testing.T) {
+		t.Parallel()
+		var p PatrolsConfig
+		if err := json.Unmarshal([]byte(`{"tier_sweep": {"enabled": true, "image_rigs": ["otherrig"]}}`), &p); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		got, err := p.TierSweep.TierSweepImageRigs(known)
+		if err != nil {
+			t.Fatalf("TierSweepImageRigs: %v", err)
+		}
+		if len(got) != 1 || got[0] != "otherrig" {
+			t.Fatalf("TierSweepImageRigs = %v, want [otherrig]", got)
+		}
+	})
+
+	t.Run("an unknown rig is refused by name", func(t *testing.T) {
+		t.Parallel()
+		var p PatrolsConfig
+		if err := json.Unmarshal([]byte(`{"tier_sweep": {"enabled": true, "image_rigs": ["gastwon"]}}`), &p); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		_, err := p.TierSweep.TierSweepImageRigs(known)
+		if err == nil || !strings.Contains(err.Error(), "gastwon") || !strings.Contains(err.Error(), "image_rigs") {
+			t.Fatalf("TierSweepImageRigs = %v, want a refusal naming gastwon and image_rigs", err)
+		}
+	})
+}
+
 // A runner block moves the integration and race tiers off the host, so the
 // engine and limit fields are required and a key or value no run can use is
 // refused at decode, naming the key: a block the daemon half-understands would

@@ -2354,6 +2354,33 @@ type TierSweepConfig struct {
 	// host, as before. The shell stage leaves the host only when the runner
 	// block's Shell is set.
 	Runner *TierSweepRunnerConfig `json:"runner,omitempty"`
+
+	// ImageRigs names the rigs whose fully green sweep publishes a
+	// green/<sha12> ref for the image build to build from. Empty means none:
+	// a town publishes nothing until the overseer names a rig (gt-gg9hv.61).
+	ImageRigs []string `json:"image_rigs,omitempty"`
+}
+
+// TierSweepImageRigs returns the rigs a fully green sweep publishes a
+// green/<sha12> ref for, and refuses a name that is not one of known, naming
+// it: the push builds the rig's repository path from the name, so a typo must
+// not read as a rig that publishes nothing. An empty list publishes nothing.
+func (c *TierSweepConfig) TierSweepImageRigs(known []string) ([]string, error) {
+	if c == nil || len(c.ImageRigs) == 0 {
+		return nil, nil
+	}
+	registered := make(map[string]bool, len(known))
+	for _, name := range known {
+		registered[name] = true
+	}
+	out := make([]string, 0, len(c.ImageRigs))
+	for _, name := range c.ImageRigs {
+		if !registered[name] {
+			return nil, fmt.Errorf("patrols.tier_sweep.image_rigs: %q is not a known rig", name)
+		}
+		out = append(out, name)
+	}
+	return out, nil
 }
 
 // TierSweepRunnerConfig is where the sweep's tiers run when they run off the
