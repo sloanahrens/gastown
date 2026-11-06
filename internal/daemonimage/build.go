@@ -685,11 +685,10 @@ func isCommit(s string) bool {
 // clean, or that a pin is fresh. Freshness is checked where it runs: the gt
 // daemon image command's CheckPins, with --apply, for each pin whose checkout is
 // named, and the fetched-pin check a build makes on a source it fetches. A plan
-// that prints can still fail there. The
-// commits in it are the ones named, not resolved: the gt line stamps
-// buildstamp.Len characters of the named commit, and the bd line's main.Build
-// is planBuildID, since the build id is git's abbreviation of the commit in the
-// worktree a build makes and Plan makes none.
+// that prints can still fail there. The commits in it are the ones named, not
+// resolved: the gt line stamps buildstamp.Len characters of the named commit,
+// and the bd line's main.Build is planBuildID, since the build id is git's
+// abbreviation of the commit in the worktree a build makes and Plan makes none.
 func (b Builder) Plan(rev string) ([]string, error) { return b.plan(rev, false) }
 
 // PlanContext returns the steps a context-only build of rev would run: the same
