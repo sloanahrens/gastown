@@ -144,6 +144,9 @@ func TestRecordSeatSampleDoesNotWriteOverASlingSinceTheRead(t *testing.T) {
 func TestSeatWorkDir(t *testing.T) {
 	t.Parallel()
 	reg := session.NewPrefixRegistry()
+	// crewSeat names the crew seat in the seat it builds and in the worktree
+	// it expects: one constant, so the two sides cannot drift apart.
+	const crewSeat = "operator"
 	tests := []struct {
 		name     string
 		seat     supervisor.Seat
@@ -176,13 +179,13 @@ func TestSeatWorkDir(t *testing.T) {
 		},
 		{
 			name:   "crew worktree",
-			seat:   supervisor.SeatIn(reg, "gastown", "crew", "operator"),
-			mkdirs: []string{"gastown/crew/operator"},
-			want:   "gastown/crew/operator",
+			seat:   supervisor.SeatIn(reg, "gastown", "crew", crewSeat),
+			mkdirs: []string{"gastown/crew/" + crewSeat},
+			want:   "gastown/crew/" + crewSeat,
 		},
 		{
 			name:     "crew with no worktree logs what it tried",
-			seat:     supervisor.SeatIn(reg, "gastown", "crew", "operator"),
+			seat:     supervisor.SeatIn(reg, "gastown", "crew", crewSeat),
 			wantLogs: true,
 		},
 		{
