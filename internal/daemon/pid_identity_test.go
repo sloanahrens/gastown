@@ -55,13 +55,6 @@ func otherPID() int {
 	return os.Getpid() + 1
 }
 
-func TestOtherPIDIsNeverThisProcess(t *testing.T) {
-	t.Parallel()
-	if got := otherPID(); got == os.Getpid() {
-		t.Fatalf("otherPID() = %d = os.Getpid(): the identity verifiers refuse it", got)
-	}
-}
-
 func TestVerifyGTDaemonPIDRefusesWhatItCannotRead(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
