@@ -26,6 +26,10 @@ const (
 	priorityGolden = "priority-listing.json"
 )
 
+// TestGoldenFixturesAreAllRead was replaced by TestMain's coverage check in
+// main_test.go, which judges the files the tests opened rather than a list of
+// names the tests were expected to open (gt-gg9hv.52).
+
 // openedGoldenFixtures holds every name loadGoldenFixture opened in this run,
 // which TestMain's coverage check reads once the tests returned. The mutex
 // guards the writes the parallel golden tests make while they run
@@ -54,11 +58,15 @@ func recordGoldenFixtureOpened(name string) {
 	openedGoldenFixtures[name] = true
 }
 
-// goldenFixtureWasOpened reports whether loadGoldenFixture read name.
-func goldenFixtureWasOpened(name string) bool {
+// openedGoldenFixtureNames returns the names loadGoldenFixture recorded.
+func openedGoldenFixtureNames() map[string]bool {
 	openedGoldenFixturesMu.Lock()
 	defer openedGoldenFixturesMu.Unlock()
-	return openedGoldenFixtures[name]
+	names := make(map[string]bool, len(openedGoldenFixtures))
+	for name := range openedGoldenFixtures {
+		names[name] = true
+	}
+	return names
 }
 
 // TestGoldenCapacityListing reads the node and pod listing the live cluster
@@ -239,7 +247,9 @@ func TestPodRequestRefusesAnUnreadablePodLevelQuantity(t *testing.T) {
 // the live listing: one real Running pod's requests copied onto the Succeeded
 // restore pod leave the node's requested amount at the golden figures. Without
 // the skip the copy lands on colima-gt-control and the figures grow by it, so
-// the row is red for the guard rather than for the copy (gt-gg9hv.52).
+// the row is red for the guard rather than for the copy. Verified in a scratch
+// copy: removing the podTerminated skip from capacity.go turned this row red
+// (gt-gg9hv.52).
 func TestGoldenSucceededPodWithRequestsIsNotCounted(t *testing.T) {
 	t.Parallel()
 	altered := goldenListingWithEndedPodRequests(t, loadGoldenFixture(t, capacityGolden),
@@ -262,11 +272,9 @@ func TestGoldenSucceededPodWithRequestsIsNotCounted(t *testing.T) {
 }
 
 // goldenListingWithEndedPodRequests returns the live listing with one Running
-// pod's container requests copied onto one Succeeded pod's container, both
-// found by namespace and name. The copy is a json round trip with UseNumber, so
-// no shape is hand-written and every other value is written back as printed. A
-// pod whose phase the listing has changed, or a source that asks for no cpu and
-// memory, fails the test rather than leaving the row vacuous (gt-gg9hv.52).
+// pod's container requests copied onto one Succeeded pod's container by a json
+// round trip, faulting the test when either pod is not what the copy needs so
+// the row cannot pass vacuously (gt-gg9hv.52).
 func goldenListingWithEndedPodRequests(t *testing.T, listing []byte, runningNamespace, runningName, endedNamespace, endedName string) []byte {
 	t.Helper()
 	dec := json.NewDecoder(bytes.NewReader(listing))
