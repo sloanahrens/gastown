@@ -61,7 +61,7 @@ func TestRigsConfigRoundTrip(t *testing.T) {
 		Version: 1,
 		Rigs: map[string]RigEntry{
 			"gastown": {
-				GitURL:    "git@github.com:steveyegge/gastown.git",
+				GitURL:    "git@example.com:steveyegge/gastown.git",
 				LocalRepo: "/tmp/local-repo",
 				AddedAt:   time.Now().Truncate(time.Second),
 				BeadsConfig: &BeadsConfig{
@@ -125,7 +125,9 @@ func TestRigConfigRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 
-	original := NewRigConfig("gastown", "git@github.com:test/gastown.git")
+	// The URL is both the configured value and the one expected back.
+	const gitURL = "git@example.com:test/gastown.git"
+	original := NewRigConfig("gastown", gitURL)
 	original.CreatedAt = time.Now().Truncate(time.Second)
 	original.Beads = &BeadsConfig{Prefix: "gt-"}
 	original.LocalRepo = "/tmp/local-repo"
@@ -148,7 +150,7 @@ func TestRigConfigRoundTrip(t *testing.T) {
 	if loaded.Name != "gastown" {
 		t.Errorf("Name = %q, want 'gastown'", loaded.Name)
 	}
-	if loaded.GitURL != "git@github.com:test/gastown.git" {
+	if loaded.GitURL != gitURL {
 		t.Errorf("GitURL = %q, want expected URL", loaded.GitURL)
 	}
 	if loaded.LocalRepo != "/tmp/local-repo" {
@@ -537,12 +539,14 @@ func TestMergeSettingsCommand_Forgejo(t *testing.T) {
 	t.Parallel()
 
 	t.Run("a tier that omits the block carries the floor through", func(t *testing.T) {
+		// The target is both the floor's configured value and the one the result must keep.
+		const target = "git@example.com:sloanahrens/gastown.git"
 		t.Parallel()
 		floor := &MergeQueueConfig{Forgejo: &ForgejoConfig{
 			RemoteURL:      "https://forgejo.example/gastown/gastown",
 			GateWorkflow:   "gate",
-			MirrorTarget:   "git@github.com:sloanahrens/gastown.git",
-			PromoteTarget:  "git@github.com:sloanahrens/gastown.git",
+			MirrorTarget:   target,
+			PromoteTarget:  target,
 			PromoteKeyFile: "/home/gt/.config/gt/promote-gastown.key",
 			Bots:           map[string]string{ForgejoRoleLanding: "gt-landing"},
 		}}
@@ -553,7 +557,7 @@ func TestMergeSettingsCommand_Forgejo(t *testing.T) {
 		if result.Forgejo.RemoteURL != "https://forgejo.example/gastown/gastown" {
 			t.Errorf("RemoteURL = %q, want the floor value", result.Forgejo.RemoteURL)
 		}
-		if result.Forgejo.PromoteTarget != "git@github.com:sloanahrens/gastown.git" || result.Forgejo.PromoteKeyFile != "/home/gt/.config/gt/promote-gastown.key" {
+		if result.Forgejo.PromoteTarget != target || result.Forgejo.PromoteKeyFile != "/home/gt/.config/gt/promote-gastown.key" {
 			t.Errorf("promotion = %q, %q; want the floor values", result.Forgejo.PromoteTarget, result.Forgejo.PromoteKeyFile)
 		}
 		if result.Forgejo.BotLogin(ForgejoRoleLanding) != "gt-landing" {
@@ -667,7 +671,7 @@ func TestStripRepoForgejo(t *testing.T) {
 		Forgejo: &ForgejoConfig{
 			RemoteURL:    "https://forgejo.example/repo/gastown",
 			Bots:         map[string]string{ForgejoRoleLanding: "repo-landing"},
-			MirrorTarget: "git@github.com:sloanahrens/gastown.git",
+			MirrorTarget: "git@example.com:sloanahrens/gastown.git",
 		},
 	}
 	got, ok := StripRepoForgejo(repo)
@@ -894,14 +898,19 @@ func TestAccountsConfigRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mayor", "accounts.json")
 
+	// Each email is both the configured value and the one expected back.
+	const (
+		yeggeEmail      = "steve.yegge@example.com"
+		ghosttrackEmail = "steve@example.com"
+	)
 	original := NewAccountsConfig()
 	original.Accounts["yegge"] = Account{
-		Email:       "steve.yegge@gmail.com",
+		Email:       yeggeEmail,
 		Description: "Personal account",
 		ConfigDir:   "~/.claude-accounts/yegge",
 	}
 	original.Accounts["ghosttrack"] = Account{
-		Email:       "steve@ghosttrack.com",
+		Email:       ghosttrackEmail,
 		Description: "Business account",
 		ConfigDir:   "~/.claude-accounts/ghosttrack",
 	}
@@ -930,16 +939,20 @@ func TestAccountsConfigRoundTrip(t *testing.T) {
 	if yegge == nil {
 		t.Fatal("GetAccount('yegge') returned nil")
 	}
-	if yegge.Email != "steve.yegge@gmail.com" {
-		t.Errorf("yegge.Email = %q, want 'steve.yegge@gmail.com'", yegge.Email)
+	if yegge.Email != yeggeEmail {
+		t.Errorf("yegge.Email = %q, want %q", yegge.Email, yeggeEmail)
+	}
+	// The other polarity: a handle that was never configured does not resolve.
+	if loaded.GetAccount("nobody") != nil {
+		t.Error("GetAccount('nobody') resolved an account that was never configured")
 	}
 
 	defAcct := loaded.GetDefaultAccount()
 	if defAcct == nil {
 		t.Fatal("GetDefaultAccount() returned nil")
 	}
-	if defAcct.Email != "steve@ghosttrack.com" {
-		t.Errorf("default.Email = %q, want 'steve@ghosttrack.com'", defAcct.Email)
+	if defAcct.Email != ghosttrackEmail {
+		t.Errorf("default.Email = %q, want %q", defAcct.Email, ghosttrackEmail)
 	}
 }
 

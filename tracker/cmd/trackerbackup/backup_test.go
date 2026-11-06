@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	testDSN      = "postgres://tracker:s3cr3t-Pa55w0rd@db.internal:5433/tracker"
+	testDSN      = "postgres://tracker:s3cr3t-Pa55w0rd@db.example.test:5433/tracker"
 	testPassword = "s3cr3t-Pa55w0rd"
 )
 
@@ -154,7 +154,7 @@ func TestRunWritesDatedDump(t *testing.T) {
 		}
 	}
 	for name, want := range map[string]string{
-		"PGHOST":     "db.internal",
+		"PGHOST":     "db.example.test",
 		"PGPORT":     "5433",
 		"PGUSER":     "tracker",
 		"PGDATABASE": "tracker",
@@ -295,10 +295,10 @@ func TestRunFailureKeepsOlderDumpsAndLeavesNoPartial(t *testing.T) {
 func TestRunLogsNoSecrets(t *testing.T) {
 	t.Parallel()
 	const password = "pa55 word!"
-	base := url.URL{Scheme: "postgres", User: url.UserPassword("tracker", password), Host: "db.internal:5433", Path: "/tracker"}
+	base := url.URL{Scheme: "postgres", User: url.UserPassword("tracker", password), Host: "db.example.test:5433", Path: "/tracker"}
 	// A keyword DSN carries the password in the same field a URI does, in the
 	// other syntax libpq accepts, so the redaction is exercised for both.
-	keyword := "host=db.internal port=5433 user=tracker dbname=tracker password='" + password + "'"
+	keyword := "host=db.example.test port=5433 user=tracker dbname=tracker password='" + password + "'"
 	cases := []struct {
 		name    string
 		fake    *fakeDump
@@ -330,7 +330,7 @@ func TestRunLogsNoSecrets(t *testing.T) {
 		{
 			name:    "an unparsable DSN is refused",
 			fake:    &fakeDump{body: []byte("dump")},
-			dsn:     "postgres://tracker:" + url.QueryEscape(password) + "@db.internal:not-a-port/tracker",
+			dsn:     "postgres://tracker:" + url.QueryEscape(password) + "@db.example.test:not-a-port/tracker",
 			wantErr: true,
 			want:    "cannot use TRACKER_DSN as a connection string",
 		},
@@ -522,16 +522,16 @@ func TestParseDSN(t *testing.T) {
 	}{
 		{
 			name: "URI",
-			dsn:  "postgres://tracker:p%40ss@db.internal:5433/tracker",
-			want: credentials{host: "db.internal", port: "5433", user: "tracker", database: "tracker", password: "p@ss"},
+			dsn:  "postgres://tracker:p%40ss@db.example.test:5433/tracker",
+			want: credentials{host: "db.example.test", port: "5433", user: "tracker", database: "tracker", password: "p@ss"},
 		},
 		{
 			name: "keyword string with a quoted password",
-			dsn:  "host=db.internal port=5433 user=tracker password='two words' dbname=tracker",
-			want: credentials{host: "db.internal", port: "5433", user: "tracker", database: "tracker", password: "two words"},
+			dsn:  "host=db.example.test port=5433 user=tracker password='two words' dbname=tracker",
+			want: credentials{host: "db.example.test", port: "5433", user: "tracker", database: "tracker", password: "two words"},
 		},
 		{name: "empty", dsn: "", wantErr: "TRACKER_DSN is not set"},
-		{name: "bad port", dsn: "postgres://tracker:hunter2@db.internal:notaport/tracker", wantErr: "cannot use TRACKER_DSN"},
+		{name: "bad port", dsn: "postgres://tracker:hunter2@db.example.test:notaport/tracker", wantErr: "cannot use TRACKER_DSN"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -567,7 +567,7 @@ func TestDumpEnvDropsInheritedSettings(t *testing.T) {
 		"PGSERVICEFILE=/tmp/service.conf",
 		"TRACKER_DSN=" + testDSN,
 	}
-	env := dumpEnv(inherited, credentials{host: "db.internal", port: "5433", user: "tracker", database: "tracker", password: testPassword})
+	env := dumpEnv(inherited, credentials{host: "db.example.test", port: "5433", user: "tracker", database: "tracker", password: testPassword})
 	for _, kv := range inherited[:2] {
 		if !slices.Contains(env, kv) {
 			t.Errorf("%s was dropped from the child environment, want it kept", kv)
@@ -579,7 +579,7 @@ func TestDumpEnvDropsInheritedSettings(t *testing.T) {
 		}
 	}
 	for name, want := range map[string]string{
-		"PGHOST":     "db.internal",
+		"PGHOST":     "db.example.test",
 		"PGPORT":     "5433",
 		"PGUSER":     "tracker",
 		"PGDATABASE": "tracker",
@@ -593,7 +593,7 @@ func TestDumpEnvDropsInheritedSettings(t *testing.T) {
 
 func TestRedact(t *testing.T) {
 	t.Parallel()
-	dsn := "postgres://tracker:" + testPassword + "@db.internal:5433/tracker"
+	dsn := "postgres://tracker:" + testPassword + "@db.example.test:5433/tracker"
 	cases := []struct {
 		name    string
 		text    string
@@ -610,7 +610,7 @@ func TestRedact(t *testing.T) {
 			name:    "password inside an echoed DSN",
 			text:    "could not connect to " + dsn,
 			secrets: []string{testPassword},
-			want:    "could not connect to postgres://tracker:***@db.internal:5433/tracker",
+			want:    "could not connect to postgres://tracker:***@db.example.test:5433/tracker",
 		},
 		{
 			name:    "whole DSN",
@@ -631,8 +631,8 @@ func TestRedact(t *testing.T) {
 		},
 		{
 			name: "URI credentials",
-			text: "postgres://tracker:hunter2@db.internal/tracker",
-			want: "postgres://tracker:***@db.internal/tracker",
+			text: "postgres://tracker:hunter2@db.example.test/tracker",
+			want: "postgres://tracker:***@db.example.test/tracker",
 		},
 		{
 			name:    "short password is masked wherever it appears",
@@ -642,9 +642,9 @@ func TestRedact(t *testing.T) {
 		},
 		{
 			name:    "short password in credential position",
-			text:    "postgres://tracker:abc@db.internal/tracker",
+			text:    "postgres://tracker:abc@db.example.test/tracker",
 			secrets: []string{"abc"},
-			want:    "postgres://tracker:***@db.internal/tracker",
+			want:    "postgres://tracker:***@db.example.test/tracker",
 		},
 		{
 			name:    "empty password",
@@ -717,7 +717,7 @@ func TestRunKeepsTheDSNSettingsButNotThePassword(t *testing.T) {
 	t.Parallel()
 	fake := &fakeDump{body: []byte("dump")}
 	b, _ := newBackup(t, fake, 7)
-	b.dsn = "postgres://tracker:s3cr3t-Pa55w0rd@db.internal:5433/tracker?sslmode=verify-full"
+	b.dsn = "postgres://tracker:s3cr3t-Pa55w0rd@db.example.test:5433/tracker?sslmode=verify-full"
 	if err := b.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}

@@ -46,7 +46,7 @@ func (f *fakeGit) argvs() [][]string {
 	return out
 }
 
-const testGitHubURL = "https://github.com/acme/rig.git"
+const testGitHubURL = "https://example.com/acme/rig.git"
 
 // gateWorkflow is a gate file in the shape the probe's script test used: one
 // workflow, one job.
@@ -172,7 +172,7 @@ func TestCloneCopyIsFull(t *testing.T) {
 		// git echoes a credentialed form of the URL, not the URL as passed.
 		g := &fakeGit{answers: map[string]gitAnswer{
 			"clone --quiet -- " + testGitHubURL + " dest/copy": {err: errors.New(
-				"fatal: unable to access 'https://ci:s3cret@github.com/acme/rig.git/': timed out")},
+				"fatal: unable to access 'https://ci:s3cret@example.com/acme/rig.git/': timed out")},
 		}}
 		err := CloneCopy(g, testGitHubURL, "dest/copy")
 		if err == nil {
@@ -189,7 +189,7 @@ func TestCloneCopyIsFull(t *testing.T) {
 	})
 	t.Run("a URL git prints whole is replaced by its name", func(t *testing.T) {
 		t.Parallel()
-		const withToken = "https://github.com/acme/rig.git?token=abc123"
+		const withToken = "https://example.com/acme/rig.git?token=abc123"
 		g := &fakeGit{answers: map[string]gitAnswer{
 			"clone --quiet -- " + withToken + " dest/copy": {err: errors.New("fatal: repository '" + withToken + "' not found")},
 		}}

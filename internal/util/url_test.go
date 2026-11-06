@@ -9,11 +9,11 @@ func TestRedactURL(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"no credentials", "https://github.com/org/repo", "https://github.com/org/repo"},
-		{"user info", "https://user:pass@github.com/org/repo", "https://github.com/org/repo"},
-		{"token auth", "https://x-access-token:ghp_abc123@github.com/org/repo.git", "https://github.com/org/repo.git"},
-		{"user only", "https://user@github.com/org/repo", "https://github.com/org/repo"},
-		{"ssh url", "git@github.com:org/repo.git", "git@github.com:org/repo.git"},
+		{"no credentials", "https://example.com/org/repo", "https://example.com/org/repo"},
+		{"user info", "https://user:pass@example.com/org/repo", "https://example.com/org/repo"},
+		{"token auth", "https://x-access-token:ghp_abc123@example.com/org/repo.git", "https://example.com/org/repo.git"},
+		{"user only", "https://user@example.com/org/repo", "https://example.com/org/repo"},
+		{"ssh url", "git@example.com:org/repo.git", "git@example.com:org/repo.git"},
 		{"empty string", "", ""},
 		{"invalid url no creds", "://bad", "://bad"},
 		{"invalid url with creds", "://user:pass@host", "<invalid URL>"},
