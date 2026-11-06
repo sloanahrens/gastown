@@ -226,11 +226,13 @@ func TestRenderDeploymentRecreates(t *testing.T) {
 	}
 }
 
-// TestRunnerDoesNotTolerateDiskPressure keeps the runner out of the disk-pressure
-// toleration the two Forgejo Deployments carry. The runner's store is the writer
-// that filled the disk, so a runner held Pending under pressure stops the filling
-// (gt-gg9hv.59, deploy/k8s/forgejo-tolerations.yaml). It reads the rendered object
-// an operator applies, not a struct field, so a toleration added to the builder
+// diskPressureTaint is the taint the runner's Deployment must not tolerate
+// (gt-gg9hv.59, docs/guides/control-cluster-disk.md).
+const diskPressureTaint = "node.kubernetes.io/disk-pressure"
+
+// TestRunnerDoesNotTolerateDiskPressure fails when the runner Deployment
+// tolerates node.kubernetes.io/disk-pressure. It reads the rendered object an
+// operator applies, not a struct field, so a toleration added to the builder
 // later still fails here.
 func TestRunnerDoesNotTolerateDiskPressure(t *testing.T) {
 	t.Parallel()
@@ -243,24 +245,75 @@ func TestRunnerDoesNotTolerateDiskPressure(t *testing.T) {
 	if err := yaml.Unmarshal(buf.Bytes(), &rendered); err != nil {
 		t.Fatalf("decoding the rendered Deployment: %v", err)
 	}
-	podSpec := renderedPodSpec(t, rendered)
+	if msg := diskPressureToleration(renderedPodSpec(t, rendered)); msg != "" {
+		t.Error(msg)
+	}
+}
+
+// TestDiskPressureTolerationIsReported drives every branch of
+// diskPressureToleration: a pod with no tolerations or an unrelated one is
+// clean, while a disk-pressure toleration, or a tolerations value that is not a
+// list of maps, is reported.
+func TestDiskPressureTolerationIsReported(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		podSpec map[string]any
+		want    string
+	}{
+		{name: "no tolerations", podSpec: map[string]any{}},
+		{name: "unrelated toleration", podSpec: map[string]any{"tolerations": []any{
+			map[string]any{"key": "node.kubernetes.io/not-ready"},
+		}}},
+		{name: "disk-pressure toleration", podSpec: map[string]any{"tolerations": []any{
+			map[string]any{"key": diskPressureTaint},
+		}}, want: "the runner tolerates " + diskPressureTaint},
+		{name: "disk-pressure after another toleration", podSpec: map[string]any{"tolerations": []any{
+			map[string]any{"key": "node.kubernetes.io/not-ready"},
+			map[string]any{"key": diskPressureTaint},
+		}}, want: "the runner tolerates " + diskPressureTaint},
+		{name: "tolerations not a list", podSpec: map[string]any{"tolerations": map[string]any{"key": diskPressureTaint}}, want: "want a list"},
+		{name: "toleration not a map", podSpec: map[string]any{"tolerations": []any{diskPressureTaint}}, want: "want a map"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := diskPressureToleration(tc.podSpec)
+			if tc.want == "" {
+				if got != "" {
+					t.Errorf("diskPressureToleration = %q, want no message", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("diskPressureToleration = %q, want it to contain %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// diskPressureToleration returns a message when a rendered pod spec tolerates
+// diskPressureTaint, or when its tolerations are not shaped as a list of maps.
+// "" means the runner stays out of the taint.
+func diskPressureToleration(podSpec map[string]any) string {
 	raw, has := podSpec["tolerations"]
 	if !has {
-		return
+		return ""
 	}
 	tols, ok := raw.([]any)
 	if !ok {
-		t.Fatalf("rendered tolerations = %v (%T), want a list", raw, raw)
+		return fmt.Sprintf("rendered tolerations = %v (%T), want a list", raw, raw)
 	}
 	for _, entry := range tols {
 		tol, ok := entry.(map[string]any)
 		if !ok {
-			t.Fatalf("rendered toleration = %v (%T), want a map", entry, entry)
+			return fmt.Sprintf("rendered toleration = %v (%T), want a map", entry, entry)
 		}
-		if tol["key"] == "node.kubernetes.io/disk-pressure" {
-			t.Errorf("the runner tolerates node.kubernetes.io/disk-pressure (%v); it must stay Pending under disk pressure", tol)
+		if tol["key"] == diskPressureTaint {
+			return fmt.Sprintf("the runner tolerates %s (%v); it must stay Pending under disk pressure", diskPressureTaint, tol)
 		}
 	}
+	return ""
 }
 
 // renderedPodSpec walks a decoded Deployment to its pod template spec and fails
