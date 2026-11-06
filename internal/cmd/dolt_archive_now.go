@@ -210,6 +210,13 @@ func runDoltArchiveNowWith(ctx context.Context, w io.Writer, reads doltArchiveNo
 
 	res, err := req.Wait(ctx, reads.sleep, runID, reads.timeout, doltArchiveNowPoll)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// An interrupted wait leaves the request in place, so the daemon may
+			// still run the pass: that is still pending, not a failure, and the
+			// exit code must not tell the operator to start a second run.
+			fmt.Fprintf(w, "archive-now: still pending: the wait was interrupted, and the request is still at %s for the daemon. Run archive-now again once it has answered.\n", requestPath)
+			return NewSilentExit(2)
+		}
 		return fmt.Errorf("waiting for the archive request %s: %w", requestPath, err)
 	}
 

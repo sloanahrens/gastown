@@ -143,8 +143,11 @@ after the pass.
 
 Exit codes:
   0  the daemon completed the pass and every database reads 0 behind after
-  1  the daemon answered failed, or the pass could not be read back
-  2  still pending: the wait timed out, or the daemon deferred the pass
+  1  the daemon answered failed or an outcome this command does not
+     understand, or the pass could not be read back
+  2  not done: the wait timed out or was interrupted, the daemon deferred the
+     pass, the pass stopped partial, or a database still reads history behind
+     the archive
   3  refused: no dispatch hold, or an archive request is already pending`,
 	Args: cobra.NoArgs,
 	RunE: runDoltArchiveNow,
