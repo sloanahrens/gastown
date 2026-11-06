@@ -72,9 +72,9 @@ const (
 	// overseerSidecarDecisionItems, overseerSidecarDecisionRunes and
 	// overseerSidecarSummaryRunes bound what the sidecar carries to what the
 	// dashboard shows: birdDecisionItemsMax items of birdDecisionItemRunes
-	// each and a birdSummaryRunes summary. A longer list is cut there anyway,
-	// and an unbounded one pushed the whole sidecar past the cap, which left
-	// the Birds card stale instead of current (gt-ag7u0c rework).
+	// each and a birdSummaryRunes summary. The reader cuts a longer list to
+	// those values anyway, so the writer cuts there too: a sidecar over the cap
+	// is refused by the reader, and the Birds card would stay stale.
 	overseerSidecarDecisionItems = 8
 	overseerSidecarDecisionRunes = 240
 	overseerSidecarSummaryRunes  = 1200
@@ -200,7 +200,7 @@ func writeOverseerReport(townRoot string, interval time.Duration, s *overseerRep
 		// files may still be missing: the run that published the report can
 		// have failed after the link and before the sidecar. Repair them from
 		// that report's own text, or the Birds card stays on the last sidecar
-		// it got until the next slot (gt-ag7u0c rework).
+		// it got until the next slot.
 		if err := refreshOverseerDaily(dir, newest); err != nil {
 			return "", err
 		}
@@ -368,12 +368,15 @@ func ensureOverseerDirectory(path string) error {
 }
 
 // refreshOverseerDaily writes the daily files for the report at the instant at
-// when the sidecar beside them is not for it, so a run in a slot whose daily
-// write failed repairs the pair rather than leaving the Birds card at the last
-// sidecar it got. The text is the report file's own, never the text a later
-// run would render, so the row and the page never describe different reads. A
-// file without any section the digest renders is refused: summarizing it would
-// publish a clean-looking row built from text no run read.
+// when the pair beside them is not current for it, so a run in a slot whose
+// daily write failed repairs the pair rather than leaving the Birds card at the
+// last sidecar it got. The text is the report file's own, never the text a
+// later run would render, so the row and the page never describe different
+// reads. A file without any section the digest renders is refused: summarizing
+// it would publish a clean-looking row built from text no run read. That
+// refusal, and the refusal of a symlinked daily file, repeat on every run in
+// the slot until the operator moves the file aside. The error is returned, not
+// logged once: the run's error is the only signal the slot gives.
 func refreshOverseerDaily(dir string, at time.Time) error {
 	if overseerDailyIsCurrent(dir, at) {
 		return nil
@@ -390,11 +393,22 @@ func refreshOverseerDaily(dir string, at time.Time) error {
 }
 
 // overseerDailyIsCurrent reports whether dir's daily.json is the sidecar for
-// the report at at: one whose written_at is that instant. A sidecar that is
-// missing, unreadable, not a valid instant, or written for another instant —
-// older, or from a clock that ran ahead — is not current: the caller writes one
-// from the report, which either repairs it or fails with the write's own error.
+// the report at at, and whether daily.html is beside it: a sidecar whose
+// written_at is that instant, and a page that is there. A file that is missing,
+// unreadable, not a regular file (a symlink is not followed: the dashboard reads
+// no symlink, so a sidecar behind one would never show), not a valid instant, or
+// written for another instant (older, or from a clock that ran ahead) is not
+// current. The caller then writes the pair from the report, which either repairs
+// it or fails with the write's own error.
 func overseerDailyIsCurrent(dir string, at time.Time) bool {
+	page, err := os.Lstat(filepath.Join(dir, overseerPageName))
+	if err != nil || !page.Mode().IsRegular() {
+		return false
+	}
+	fi, err := os.Lstat(filepath.Join(dir, overseerSidecarName))
+	if err != nil || !fi.Mode().IsRegular() {
+		return false
+	}
 	raw, err := os.ReadFile(filepath.Join(dir, overseerSidecarName))
 	if err != nil {
 		return false
