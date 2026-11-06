@@ -23,8 +23,8 @@ on:
 
 env:
   # The Forgejo host, the registry owner and the two image names are typed here
-  # only, so gt update images (gt-gg9hv.63) types the same values once and a
-  # test can hold them equal to this file's.
+  # only; gt update images (gt-gg9hv.63) types the same values, so the two
+  # spellings are one to keep equal.
   FORGEJO_HOST: forgejo:3000
   REGISTRY_OWNER: sloan
   DAEMON_IMAGE: gastown-daemon
@@ -109,11 +109,21 @@ jobs:
           printf '%s' "$REGISTRY_TOKEN" | docker login "$FORGEJO_HOST" --username "$REGISTRY_USER" --password-stdin
       - name: let git read the pinned sources with the read-only token
         run: |
+          set -euo pipefail
           # SOURCES_TOKEN reaches git only through this helper, which reads it
           # from the environment at each use: no URL, argument or .gitconfig
-          # value holds it.
-          git config --global credential."http://$FORGEJO_HOST".helper \
-            '!f() { test "$1" = get || exit 0; printf "username=%s\npassword=%s\n" "$SOURCES_USER" "$SOURCES_TOKEN"; }; f'
+          # value holds it. GIT_CONFIG_GLOBAL keeps the helper out of the
+          # runner's own global config, and the scheme loop covers every scheme
+          # the preflight accepts for MANGO_URL.
+          cfg="$RUNNER_TEMP/gitconfig"
+          : > "$cfg"
+          chmod 600 "$cfg"
+          export GIT_CONFIG_GLOBAL="$cfg"
+          for scheme in http https; do
+            git config --global credential."$scheme://$FORGEJO_HOST".helper \
+              '!f() { test "$1" = get || exit 0; printf "username=%s\npassword=%s\n" "$SOURCES_USER" "$SOURCES_TOKEN"; }; f'
+          done
+          echo "GIT_CONFIG_GLOBAL=$cfg" >> "$GITHUB_ENV"
       - name: fetch mango at its pin
         env:
           SOURCES_TOKEN: ${{ secrets.SOURCES_TOKEN }}
@@ -197,38 +207,28 @@ jobs:
       - name: push both images and publish their digests
         run: |
           set -euo pipefail
-          for kind in daemon polecat; do
-            case "$kind" in
-              daemon) name="$FORGEJO_HOST/$REGISTRY_OWNER/$DAEMON_IMAGE" ;;
-              polecat) name="$FORGEJO_HOST/$REGISTRY_OWNER/$POLECAT_IMAGE" ;;
-            esac
-            ref="$name:$TAG"
-            docker push "$ref"
-            # The digest the deploy pins is the registry's own: read it back
-            # from the manifest the registry serves, never the local image id.
-            docker pull --quiet "$ref" >/dev/null
-            digests=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$ref" | sed -n "s#^$name@##p")
-            count=$(printf '%s\n' "$digests" | grep -Ec '^sha256:[0-9a-f]{64}$' || true)
-            lines=$(printf '%s\n' "$digests" | wc -l)
-            if [ "$count" -ne 1 ] || [ "$lines" -ne 1 ]; then
-              echo "images: the registry answered no single sha256 digest for $ref: '$digests'" >&2
-              exit 1
-            fi
-            echo "IMAGE $kind $TAG $digests"
-          done
+          # The push, the registry digest read and the IMAGE line are
+          # internal/ci/cmd/imagepublish push, whose refusals (no digest, two
+          # digests, a digest of another shape, a failed docker call) are
+          # driven in internal/ci/imagepublish's tests. The error leaves the
+          # step red with no IMAGE line for that image.
+          go run ./internal/ci/cmd/imagepublish push \
+            -registry "$FORGEJO_HOST" \
+            -owner "$REGISTRY_OWNER" \
+            -daemon "$DAEMON_IMAGE" \
+            -polecat "$POLECAT_IMAGE" \
+            -tag "$TAG" \
+            -sha "$SHA"
       - name: check both images carry the one commit
         run: |
           set -euo pipefail
-          status=0
-          for kind in daemon polecat; do
-            case "$kind" in
-              daemon) name="$FORGEJO_HOST/$REGISTRY_OWNER/$DAEMON_IMAGE" ;;
-              polecat) name="$FORGEJO_HOST/$REGISTRY_OWNER/$POLECAT_IMAGE" ;;
-            esac
-            got=$(docker image inspect --format '{{index .Config.Labels "org.gastown.gt-commit"}}' "$name:$TAG")
-            if [ "$got" != "$SHA" ]; then
-              echo "images: $name:$TAG carries org.gastown.gt-commit=$got, but the green commit is $SHA" >&2
-              status=1
-            fi
-          done
-          exit "$status"
+          # The label read and the comparison are internal/ci/cmd/imagepublish
+          # check; its mismatch and unreadable-label refusals are driven in
+          # internal/ci/imagepublish's tests.
+          go run ./internal/ci/cmd/imagepublish check \
+            -registry "$FORGEJO_HOST" \
+            -owner "$REGISTRY_OWNER" \
+            -daemon "$DAEMON_IMAGE" \
+            -polecat "$POLECAT_IMAGE" \
+            -tag "$TAG" \
+            -sha "$SHA"

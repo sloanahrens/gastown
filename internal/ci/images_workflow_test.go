@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -13,6 +15,35 @@ import (
 // workflowPath is the images workflow text, relative to this package: the file
 // the operator copies to .forgejo/workflows/images.yml.
 const workflowPath = "../../deploy/ci/images.workflow.yml"
+
+// preflightAcceptScheme is one scheme the preflight's MANGO_URL case accepts.
+var preflightAcceptScheme = regexp.MustCompile(`(https?)://\*`)
+
+// helperSchemeLoop is the scheme list the credential helper step iterates: a
+// scheme the preflight accepts but this list omits gets no credential.
+var helperSchemeLoop = regexp.MustCompile(`for scheme in ([a-z ]+)`)
+
+// acceptedSchemes is the schemes the preflight's MANGO_URL case accepts, sorted
+// so two spellings compare equal.
+func acceptedSchemes(script string) []string {
+	var out []string
+	for _, m := range preflightAcceptScheme.FindAllStringSubmatch(script, -1) {
+		out = append(out, m[1])
+	}
+	slices.Sort(out)
+	return out
+}
+
+// helperSchemes is the scheme list the credential helper step iterates, sorted.
+func helperSchemes(script string) []string {
+	m := helperSchemeLoop.FindStringSubmatch(script)
+	if m == nil {
+		return nil
+	}
+	out := strings.Fields(m[1])
+	slices.Sort(out)
+	return out
+}
 
 // step is one entry of the images job's steps: its name, the run script, the
 // env a secret reaches it through, and the action it uses.
@@ -68,8 +99,8 @@ func text(t *testing.T, v any, what string) string {
 	return s
 }
 
-// loadJob reads the images job and its steps. A file without the single job the
-// workflow runs fails here, so every rule below reads steps that exist.
+// loadJob reads the images job and its steps. A file without that job fails
+// here, so every rule below reads steps that exist.
 func loadJob(t *testing.T) (map[string]any, []step) {
 	t.Helper()
 	wf := loadWorkflow(t)
@@ -127,6 +158,17 @@ func countRuns(steps []step, substr string) int {
 		}
 	}
 	return n
+}
+
+// runsDocker reports whether script has a line that invokes docker as a
+// command, rather than naming it in a comment.
+func runsDocker(script string) bool {
+	for _, line := range strings.Split(script, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "docker ") {
+			return true
+		}
+	}
+	return false
 }
 
 // echoes reports whether script has an echo line that prints the named value.
@@ -298,31 +340,33 @@ func TestImagesWorkflowBuildsBothImagesAtOneCommit(t *testing.T) {
 		}
 	})
 
-	t.Run("the label check reads both images' commit labels", func(t *testing.T) {
+	t.Run("the label check runs the tested Go check on both images", func(t *testing.T) {
 		t.Parallel()
-		at := named(steps, "check both images carry the one commit")
-		if at < 0 {
-			t.Fatal("no step is named: check both images carry the one commit")
-		}
-		for _, want := range []string{"$DAEMON_IMAGE", "$POLECAT_IMAGE", `org.gastown.gt-commit`} {
-			if !strings.Contains(steps[at].run, want) {
-				t.Errorf("the label check does not name %s", want)
-			}
-		}
-	})
-
-	t.Run("the label check fails on a difference from the one commit", func(t *testing.T) {
-		t.Parallel()
+		// The mismatch and unreadable-label refusals are driven against the
+		// check itself by TestCheckReportsEveryImageOffTheCommit and
+		// TestCheckStopsWhenALabelCannotBeRead in internal/ci/imagepublish.
 		at := named(steps, "check both images carry the one commit")
 		if at < 0 {
 			t.Fatal("no step is named: check both images carry the one commit")
 		}
 		run := steps[at].run
-		if !strings.Contains(run, `"$got" != "$SHA"`) {
-			t.Error("the label check does not compare the read label with $SHA")
+		if !strings.Contains(run, "go run ./internal/ci/cmd/imagepublish check") {
+			t.Fatalf("the label check does not run go run ./internal/ci/cmd/imagepublish check: %s", run)
 		}
-		if !strings.Contains(run, `exit "$status"`) || !strings.Contains(run, "status=1") {
-			t.Error("the label check does not fail the job when a label differs")
+		for _, want := range []string{
+			`-registry "$FORGEJO_HOST"`,
+			`-owner "$REGISTRY_OWNER"`,
+			`-daemon "$DAEMON_IMAGE"`,
+			`-polecat "$POLECAT_IMAGE"`,
+			`-tag "$TAG"`,
+			`-sha "$SHA"`,
+		} {
+			if !strings.Contains(run, want) {
+				t.Errorf("the label check does not pass %s", want)
+			}
+		}
+		if runsDocker(run) {
+			t.Errorf("the label check types its own docker logic instead of the tested check: %s", run)
 		}
 	})
 }
@@ -395,11 +439,53 @@ func TestImagesWorkflowKeepsSecretsOffArgv(t *testing.T) {
 		}
 		at := named(steps, helper)
 		run := steps[at].run
-		if !strings.Contains(run, `credential."http://$FORGEJO_HOST".helper`) {
+		if !strings.Contains(run, `credential."$scheme://$FORGEJO_HOST".helper`) {
 			t.Error("the helper is not scoped to the Forgejo host the pins name")
 		}
 		if !strings.Contains(run, `"$SOURCES_TOKEN"`) {
 			t.Error("the helper does not read the token from the environment")
+		}
+	})
+
+	t.Run("the credential helper covers every scheme the preflight accepts", func(t *testing.T) {
+		t.Parallel()
+		// MANGO_URL may be http or https; a scheme the preflight accepts but
+		// the helper is not scoped to sends the fetch with no credential.
+		preflight := steps[named(steps, "preflight")].run
+		want := acceptedSchemes(preflight)
+		if len(want) == 0 {
+			t.Fatal("the preflight accepts no scheme for MANGO_URL")
+		}
+		at := named(steps, "let git read the pinned sources with the read-only token")
+		if at < 0 {
+			t.Fatal("no step configures the source credential helper")
+		}
+		got := helperSchemes(steps[at].run)
+		if !slices.Equal(got, want) {
+			t.Errorf("the helper is configured for %v, but the preflight accepts %v", got, want)
+		}
+	})
+
+	t.Run("the helper stays out of the runner's global git config", func(t *testing.T) {
+		t.Parallel()
+		// A credential helper written to the runner's own ~/.gitconfig would
+		// outlive the job; GIT_CONFIG_GLOBAL points the write at the job's
+		// temporary file, which later steps inherit.
+		at := named(steps, "let git read the pinned sources with the read-only token")
+		if at < 0 {
+			t.Fatal("no step configures the source credential helper")
+		}
+		run := steps[at].run
+		exported := strings.Index(run, `export GIT_CONFIG_GLOBAL=`)
+		written := strings.Index(run, `git config --global credential.`)
+		if exported < 0 || !strings.Contains(run, `$RUNNER_TEMP/gitconfig`) {
+			t.Fatal("the helper step does not point GIT_CONFIG_GLOBAL at a file under $RUNNER_TEMP")
+		}
+		if written < exported {
+			t.Error("the helper is written to the global config before GIT_CONFIG_GLOBAL is set")
+		}
+		if !strings.Contains(run, `GIT_CONFIG_GLOBAL=$cfg" >> "$GITHUB_ENV"`) {
+			t.Error("the helper step does not hand GIT_CONFIG_GLOBAL to the later fetch steps")
 		}
 	})
 
@@ -479,58 +565,40 @@ func TestImagesWorkflowPrintsTheDigestLines(t *testing.T) {
 		}
 	})
 
-	t.Run("each push is followed by a registry digest read and its IMAGE line", func(t *testing.T) {
+	t.Run("the push step follows both builds and runs the tested Go publish", func(t *testing.T) {
 		t.Parallel()
+		// The digest read, its refusals and the IMAGE line's order are driven
+		// against the publish itself by TestPushPrintsTheRegistryDigestForEachImage,
+		// TestPushRefusesWhenTheRegistryListsNoSingleDigest and
+		// TestPushStopsAtTheFirstFailedCommand in internal/ci/imagepublish.
 		at := named(steps, "push both images and publish their digests")
 		if at < 0 {
 			t.Fatal("no step is named: push both images and publish their digests")
 		}
+		if daemon := named(steps, "build the daemon image"); daemon < 0 || at < daemon {
+			t.Errorf("the push is step %d, before the daemon build (step %d)", at, daemon)
+		}
+		if polecat := named(steps, "build the polecat image"); polecat < 0 || at < polecat {
+			t.Errorf("the push is step %d, before the polecat build (step %d)", at, polecat)
+		}
 		run := steps[at].run
-		push := strings.Index(run, "docker push")
-		pull := strings.Index(run, "docker pull")
-		digest := strings.Index(run, "RepoDigests")
-		if push < 0 || pull < 0 || digest < 0 {
-			t.Fatalf("the push step does not push and read the registry digest back: %s", run)
+		if !strings.Contains(run, "go run ./internal/ci/cmd/imagepublish push") {
+			t.Fatalf("the push step does not run go run ./internal/ci/cmd/imagepublish push: %s", run)
 		}
-		if !(push < pull && pull < digest) {
-			t.Errorf("the digest read is not after the push (push %d, pull %d, digest %d)", push, pull, digest)
-		}
-		if !strings.Contains(run, "for kind in daemon polecat") {
-			t.Fatalf("the push step does not visit both images: %s", run)
-		}
-		printed := strings.Index(run, `echo "IMAGE $kind $TAG $digests"`)
-		if printed < 0 {
-			t.Fatalf("the push step does not print the IMAGE line: %s", run)
-		}
-		if printed < digest {
-			t.Error("the IMAGE line is printed before the registry digest was read")
-		}
-	})
-
-	t.Run("the registry read must answer exactly one sha256 digest", func(t *testing.T) {
-		t.Parallel()
-		run := steps[named(steps, "push both images and publish their digests")].run
 		for _, want := range []string{
-			`grep -Ec '^sha256:[0-9a-f]{64}$'`,
-			`[ "$count" -ne 1 ] || [ "$lines" -ne 1 ]`,
-			`wc -l`,
+			`-registry "$FORGEJO_HOST"`,
+			`-owner "$REGISTRY_OWNER"`,
+			`-daemon "$DAEMON_IMAGE"`,
+			`-polecat "$POLECAT_IMAGE"`,
+			`-tag "$TAG"`,
+			`-sha "$SHA"`,
 		} {
 			if !strings.Contains(run, want) {
-				t.Errorf("the push step does not contain %q", want)
+				t.Errorf("the push step does not pass %s", want)
 			}
 		}
-	})
-
-	t.Run("the IMAGE line is printed only after the digest check", func(t *testing.T) {
-		t.Parallel()
-		run := steps[named(steps, "push both images and publish their digests")].run
-		check := strings.Index(run, `'^sha256:[0-9a-f]{64}$'`)
-		printed := strings.Index(run, `echo "IMAGE`)
-		if check < 0 {
-			t.Fatal("the push step does not check the digest's shape")
-		}
-		if printed < check {
-			t.Error("the IMAGE line is printed before the digest's shape is checked")
+		if runsDocker(run) {
+			t.Errorf("the push step types its own docker logic instead of the tested publish: %s", run)
 		}
 	})
 }
