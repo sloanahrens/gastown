@@ -472,6 +472,67 @@ func TestDoltHistoryDocNamesArchiveNow(t *testing.T) {
 	}
 }
 
+// TestDoltHistoryDocArchivesBeforeTheBackup: the runbook brings the archive to
+// 0 behind before it stops the server and copies the database directory, and
+// says the copy is taken only then, so the copy and the archive describe the
+// same moment and the copy is not taken before the archive pass has run
+// (gt-oqoedu).
+func TestDoltHistoryDocArchivesBeforeTheBackup(t *testing.T) {
+	t.Parallel()
+	section := historyDocSection(t, "## Before any rewrite")
+
+	archive := strings.Index(section, "gt dolt archive-now")
+	behind := strings.Index(section, "Check that every database's archive line")
+	stop := strings.Index(section, "Stop the server, then take the backup")
+	if archive < 0 || behind < 0 || stop < 0 {
+		t.Fatalf("\"Before any rewrite\" does not carry the archive pass, the 0-commits-behind check and the backup step in that form:\n%s", section)
+	}
+	if archive > stop {
+		t.Errorf("\"Before any rewrite\" stops the server and takes the backup before it runs the archive pass:\n%s", section)
+	}
+	if behind > stop {
+		t.Errorf("\"Before any rewrite\" stops the server and takes the backup before the 0-commits-behind check:\n%s", section)
+	}
+
+	const sequenced = "Take the copy only after every database reads"
+	if !strings.Contains(section, sequenced) {
+		t.Errorf("\"Before any rewrite\" does not say the copy is taken only after every database reads 0 behind; it does not carry %q:\n%s", sequenced, section)
+	}
+}
+
+// TestDoltHistoryDocBackupNamesTheStoppedServer: the backup instruction still
+// copies the database directory with the server stopped and still points at
+// the nightly backups and docs/dolt-restore.md, so reordering the steps does
+// not turn the copy into one taken against a running server or lose the
+// other copy (gt-oqoedu).
+func TestDoltHistoryDocBackupNamesTheStoppedServer(t *testing.T) {
+	t.Parallel()
+	section := historyDocSection(t, "## Before any rewrite")
+
+	// The runbook wraps its lines, so match the unwrapped prose.
+	prose := strings.Join(strings.Fields(section), " ")
+	const copy = "copy the database directory while the server is stopped"
+	at := strings.Index(prose, copy)
+	if at < 0 {
+		t.Fatalf("\"Before any rewrite\" does not carry the backup copy taken while the server is stopped:\n%s", section)
+	}
+	step := prose[at:]
+	if end := strings.Index(step, "Record row counts"); end >= 0 {
+		step = step[:end]
+	}
+
+	for _, want := range []string{
+		copy,
+		"nightly backups under",
+		"~/gt-backups/dolt",
+		"docs/dolt-restore.md",
+	} {
+		if !strings.Contains(step, want) {
+			t.Errorf("the backup step does not carry %q:\n%s", want, step)
+		}
+	}
+}
+
 // TestDoltHistoryDocArchiveNowExitCodes: the runbook says to stop on each of
 // archive-now's non-zero exits and reads each one as what happened, so an
 // operator who stops does not read a pending or refused pass as a done one

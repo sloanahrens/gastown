@@ -81,11 +81,7 @@ gc — before parking the town.
 1. Park the town, or at least every rig that writes to the database. A
    rebase fails on a concurrent commit, and a flatten is only safe against
    concurrent writes because Dolt merges the in-flight transaction.
-2. Take a backup (copy the database directory while the server is stopped;
-   the nightly backups under `~/gt-backups/dolt` are the other copy, see
-   `docs/dolt-restore.md`).
-
-   Then bring the archive up to date. The overseer creates the dispatch hold
+2. Bring the archive up to date. The overseer creates the dispatch hold
    `~/gt/seat-refill.hold`; no bird and no operator session creates or lifts
    it. With the hold set and the town parked, run:
 
@@ -107,7 +103,12 @@ gc — before parking the town.
    archive, so it has checked nothing.
    Stop too when no database line shows an archive line, and when any
    database line says `archive state unreadable`.
-3. Record row counts for every table so you can verify afterwards:
+3. Stop the server, then take the backup: copy the database directory while
+   the server is stopped. Take the copy only after every database reads
+   `0 commits behind` and `0 events behind` in step 2, so the copy and the
+   archive describe the same moment. The nightly backups under
+   `~/gt-backups/dolt` are the other copy, see `docs/dolt-restore.md`.
+4. Record row counts for every table so you can verify afterwards:
 
    ```sql
    USE `<db>`;
