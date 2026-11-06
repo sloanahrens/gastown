@@ -828,7 +828,6 @@ func TestCommandSubstitutionRecursion(t *testing.T) {
 		{"quoted paren, safe body", `x=$(grep -E '(a|b)' f)`, false},
 		{"single-quoted substitution is data", `echo '$(git reset --hard)'`, false},
 		{"single-quoted backtick is data", "echo '`git reset --hard`'", false},
-		{"escaped substitution is data", `echo \$(git reset --hard)`, false},
 		{"eval of a single-quoted substitution runs it", `eval '$(git reset --hard)'`, true},
 		{"bash -c of a single-quoted substitution runs it", `bash -c 'x=$(grep -E "(a|b)" f; git reset --hard)'`, true},
 
@@ -837,8 +836,6 @@ func TestCommandSubstitutionRecursion(t *testing.T) {
 		{"unterminated dollar-paren is judged", `echo $(git reset --hard`, true},
 		{"unterminated backtick is judged", "echo `git reset --hard", true},
 		{"unterminated quote in the body is judged", `echo $(git reset --hard "x`, true},
-		{"unterminated dollar-paren, safe body", `echo $(ls -la`, false},
-		{"unterminated quote, safe body", `echo $(ls -la "x`, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -4291,6 +4288,11 @@ func TestDangerousRefusesWhatTheParserCannotRead(t *testing.T) {
 		{"an ANSI-C string on the operator line opened across a continuation", "cat <<EOF $\\\n'a\\''\nrm -rf /\nEOF", "unterminated quote"},
 		{"a close paren in backtick text", "x=`echo )`; cat <<EOF\ngit reset --hard\nEOF", "unbalanced parenthesis"},
 		{"a brace group after an assignment with a substitution", "y=$(echo a) { cat <<'EOF'\nit's a note: sudo rm -rf /tmp\nEOF\n}", "unrecognized shell syntax"},
+		// Moved from TestCommandSubstitutionRecursion (gt-m6x4py): bash rejects
+		// each of these too, so none of them runs and the guard refuses them.
+		{"an escaped dollar before a paren is not valid shell", `echo \$(git reset --hard)`, "unrecognized shell syntax"},
+		{"an unterminated dollar-paren with a safe body", `echo $(ls -la`, "unterminated command substitution"},
+		{"an unterminated quote in a dollar-paren with a safe body", `echo $(ls -la "x`, "unterminated quote"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
