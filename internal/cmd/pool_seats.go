@@ -940,8 +940,8 @@ func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, dispositi
 	if townRoot == "" || !poolOwnsSeats(pool) {
 		return nil, 0, nil
 	}
-	if disposition == nil || hookHeld == nil {
-		return nil, 0, errors.New("the dead-hooked walk needs a seat disposition and a hook read")
+	if hookHeld == nil {
+		return nil, 0, errors.New("the dead-hooked walk needs a hook read")
 	}
 	fallback := unrecordedSeatAgent(townRoot, pool)
 	liveSeats := liveSeatKeys(live)
@@ -975,7 +975,11 @@ func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, dispositi
 				continue
 			}
 			// The seat holds a hook, so the rest of its state is worth the
-			// worktree probe.
+			// worktree probe. A held seat with no disposition to read it is a
+			// seam not wired, which must not pass as an empty walk.
+			if disposition == nil {
+				return nil, probed, errors.New("the dead-hooked walk needs a seat disposition for a held seat")
+			}
 			state, err := disposition(rigName, name)
 			if err != nil {
 				continue

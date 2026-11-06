@@ -178,6 +178,9 @@ func TestIsActionableReadyBead_AbsentRedMainStateCountsAsToday(t *testing.T) {
 // submitted, naming the work bead it handed to the landing worker.
 func writeLandingSeat(t *testing.T, townRoot, rigName, polecatName, workBead string) {
 	t.Helper()
+	// The seat picture reads the town's rig registry; a town without one
+	// cannot be read, so the fixture names its rig.
+	writeTestRigsConfig(t, townRoot, rigName)
 	if err := os.MkdirAll(filepath.Join(townRoot, rigName, "polecats", polecatName), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -265,6 +268,7 @@ func TestPoolSeatSessionsCountsEveryKindOfTakenSeat(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			town := t.TempDir()
+			writeTestRigsConfig(t, town, "gastown")
 			work := submittedWork()
 			if c.claim {
 				writeSeatClaim(t, town, "claim-1", "deepseek-flash")
@@ -274,7 +278,7 @@ func TestPoolSeatSessionsCountsEveryKindOfTakenSeat(t *testing.T) {
 				work = submittedWork("gt-ruby")
 			}
 
-			got, err := poolSeatSessionsWith(c.lister, town, nil, nil, work, pool)
+			got, err := poolSeatSessionsWith(c.lister, town, nil, noHeldHooks, work, pool)
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
@@ -704,6 +708,7 @@ func TestPoolLandingSeatEndsWithTheLabel(t *testing.T) {
 	t.Parallel()
 	pool := seatPool("deepseek-flash", 3)
 	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
 	writeLandingSeat(t, town, "gastown", "ruby", "gt-ruby")
 
 	// The record says submitted, the bead says otherwise.
@@ -714,7 +719,7 @@ func TestPoolLandingSeatEndsWithTheLabel(t *testing.T) {
 		}
 		return out, nil
 	}
-	got, err := poolSeatSessionsWith(&fakeLister{}, town, nil, nil, over, pool)
+	got, err := poolSeatSessionsWith(&fakeLister{}, town, nil, noHeldHooks, over, pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -724,7 +729,7 @@ func TestPoolLandingSeatEndsWithTheLabel(t *testing.T) {
 
 	// A record with no work bead names nothing to confirm, so it holds nothing.
 	writeLandingSeat(t, town, "gastown", "opal", "")
-	got, err = poolSeatSessionsWith(&fakeLister{}, town, nil, nil, over, pool)
+	got, err = poolSeatSessionsWith(&fakeLister{}, town, nil, noHeldHooks, over, pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -740,6 +745,7 @@ func TestPoolLandingSeatSkipsASeatThatIsGone(t *testing.T) {
 	t.Parallel()
 	pool := seatPool("deepseek-flash", 3)
 	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
 
 	// A submitted record with no polecat directory behind it.
 	writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "ghost"}, town,
@@ -748,7 +754,7 @@ func TestPoolLandingSeatSkipsASeatThatIsGone(t *testing.T) {
 	writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: "witness"}, town,
 		intent.Record{Desired: intent.DesiredSubmitted, WorkBead: "gt-witness"})
 
-	got, err := poolSeatSessionsWith(&fakeLister{}, town, nil, nil, submittedWork("gt-ghost", "gt-witness"), pool)
+	got, err := poolSeatSessionsWith(&fakeLister{}, town, nil, noHeldHooks, submittedWork("gt-ghost", "gt-witness"), pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -793,13 +799,14 @@ func TestSpecRosterCountsACompletingSeatOnce(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			town := t.TempDir()
+			writeTestRigsConfig(t, town, "gastown")
 			work := submittedWork()
 			if c.landing {
 				writeLandingSeat(t, town, "gastown", "jade", "gt-jade")
 				work = submittedWork("gt-jade")
 			}
 
-			sessions, err := poolSeatSessionsWith(&fakeLister{sessions: c.sessions}, town, nil, nil, work, pool)
+			sessions, err := poolSeatSessionsWith(&fakeLister{sessions: c.sessions}, town, nil, noHeldHooks, work, pool)
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
@@ -1509,6 +1516,12 @@ func (s agentBeadFailsStore) ShowMultiple([]string) (map[string]*beads.Issue, er
 }
 func (s agentBeadFailsStore) Show(string) (*beads.Issue, error) { return nil, s.err }
 
+// noHeldHooks is the hook read of a town with no held hook. A test whose seats
+// are all live, landing or claimed passes it where it has no seat state to
+// read: the walk asks it for each dead seat and skips them all, which is what
+// a nil seam meant before the walk refused nil seams (gt-gg9hv.73).
+func noHeldHooks(string, string) (bool, error) { return false, nil }
+
 // TestPoolDeadHookedReadFailuresAreReturned is the fail-closed half of the
 // split (gt-gg9hv.73): each read the seat picture can fail on returns its
 // error rather than a smaller count, the cheap hold read included. An
@@ -1607,14 +1620,23 @@ func TestPoolDeadHookedReadFailuresAreReturned(t *testing.T) {
 		}
 	})
 
-	t.Run("a missing hook read or disposition is an error, not an empty walk", func(t *testing.T) {
+	t.Run("a nil hook read is an error, not an empty walk", func(t *testing.T) {
 		t.Parallel()
 		town, pool := deadHookedWalkTestTown(t, "ember")
 		if _, _, err := poolDeadHookedSessions(town, pool, heldDisposition, nil, nil, now); err == nil {
 			t.Fatal("a nil hook read walked to an empty result without an error")
 		}
+	})
+
+	t.Run("a nil disposition is an error only for a held seat", func(t *testing.T) {
+		t.Parallel()
+		town, pool := deadHookedWalkTestTown(t, "ember")
 		if _, _, err := poolDeadHookedSessions(town, pool, nil, heldHook, nil, now); err == nil {
-			t.Fatal("a nil disposition walked to an empty result without an error")
+			t.Fatal("a held seat with a nil disposition walked to an empty result without an error")
+		}
+		got, _, err := poolDeadHookedSessions(town, pool, nil, noHeldHooks, nil, now)
+		if err != nil || len(got) != 0 {
+			t.Fatalf("no held hook with a nil disposition = %+v, %v, want no seats and no error", got, err)
 		}
 	})
 }

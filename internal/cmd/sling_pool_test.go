@@ -342,6 +342,7 @@ func (w *testPoolTown) process() *poolRouter {
 		pool:        func() *config.PolecatPool { return w.pool },
 		sessions:    func() sessionLister { return w.lister },
 		disposition: nil,
+		hookHeld:    noHeldHooks,
 		seats: &poolSeatLedger{
 			townRoot: w.root,
 			fs:       w.fs,
@@ -1925,6 +1926,7 @@ func TestPoolAdmissionAndSeatPictureCountTheSameSeats(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			town := t.TempDir()
+			writeTestRigsConfig(t, town, "gastown")
 			if c.claim {
 				writeSeatClaim(t, town, "claim-1", claimAgent)
 			}
@@ -1935,7 +1937,7 @@ func TestPoolAdmissionAndSeatPictureCountTheSameSeats(t *testing.T) {
 
 			// The picture `gt daemon dispatch-check` nudges from and the spec
 			// dispatcher's roster reads.
-			picture, err := poolSeatSessionsWith(c.lister, town, nil, nil, work, pool)
+			picture, err := poolSeatSessionsWith(c.lister, town, nil, noHeldHooks, work, pool)
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
@@ -1950,6 +1952,7 @@ func TestPoolAdmissionAndSeatPictureCountTheSameSeats(t *testing.T) {
 				pool:        func() *config.PolecatPool { return pool },
 				sessions:    func() sessionLister { return c.lister },
 				disposition: nil,
+				hookHeld:    noHeldHooks,
 				work:        work,
 				seats:       poolSeatLedgerFor(town, newPoolSeatClaimStore()),
 				now:         func() time.Time { return poolTestNow },
@@ -1984,6 +1987,7 @@ func TestRouteRefusesASeatMidLanding(t *testing.T) {
 		pool:        func() *config.PolecatPool { return pool },
 		sessions:    func() sessionLister { return &fakeLister{} },
 		disposition: nil,
+		hookHeld:    noHeldHooks,
 		work:        submittedWork("gt-ruby"),
 		seats:       poolSeatLedgerFor(town, newPoolSeatClaimStore()),
 		now:         func() time.Time { return poolTestNow },
@@ -2251,11 +2255,11 @@ func poolHookHeldAnswering(town string, reads poolSeatReads) polecatHookHeldFunc
 
 // hookHeldOf answers the cheap hook read from a fake full seat read, for the
 // tests that drive the seat picture without measuring the split: it reports
-// the same HookHeld the full read does. A nil read answers nil, so a caller
-// with no seat read still runs no dead-hooked walk.
+// the same HookHeld the full read does. A nil read answers noHeldHooks, so a
+// caller with no seat read still walks to no dead-hooked seat.
 func hookHeldOf(disposition polecatDispositionFunc) polecatHookHeldFunc {
 	if disposition == nil {
-		return nil
+		return noHeldHooks
 	}
 	return func(rigName, polecatName string) (bool, error) {
 		state, err := disposition(rigName, polecatName)
