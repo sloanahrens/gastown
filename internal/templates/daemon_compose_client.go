@@ -189,20 +189,30 @@ func liveClientEnv(s ComposeSpec) string {
 }
 
 // liveClientMounts is the read-only mount of the openshell config directory and
-// the town's config directory, the read-write mount of the Dolt backup
-// directory, and the read-only mounts of the BindRO directories, sorted by path.
-// Each holds client material, backups or reports; the render carries the paths,
-// never a file's contents. The config directory is mounted at its own path as
-// well as under XDG_CONFIG_HOME, because settings in the town name it both ways
-// (gt-gg9hv.3).
-func liveClientMounts(s ComposeSpec) string {
+// of the town's config directory or of the files its secrets manifest lists, the
+// read-write mount of the Dolt backup directory, and the read-only mounts of the
+// BindRO directories, sorted by path. Each holds client material, backups or
+// reports; the render carries the paths, never a file's contents. The config
+// directory is mounted at its own path as well as under XDG_CONFIG_HOME,
+// because settings in the town name it both ways (gt-gg9hv.3); with a secrets
+// manifest only the listed files are mounted at those two paths, and no
+// directory of the tree is (gt-gg9hv.66).
+func liveClientMounts(s ComposeSpec) (string, error) {
 	var b strings.Builder
 	if s.OpenShellConfigDir != "" {
 		b.WriteString(liveTokenMount(s.OpenShellConfigDir, LiveOpenShellConfigPath))
 	}
 	if s.ConfigDir != "" {
-		b.WriteString(liveTokenMount(s.ConfigDir, s.ConfigDir))
-		b.WriteString(liveTokenMount(s.ConfigDir, LiveConfigDirPath))
+		if len(s.Secrets) > 0 {
+			mounts, err := secretMounts(s)
+			if err != nil {
+				return "", err
+			}
+			b.WriteString(mounts)
+		} else {
+			b.WriteString(liveTokenMount(s.ConfigDir, s.ConfigDir))
+			b.WriteString(liveTokenMount(s.ConfigDir, LiveConfigDirPath))
+		}
 	}
 	if s.BackupDir != "" {
 		// Read-write, unlike the mounts above: the Dolt server writes each night's
@@ -226,7 +236,7 @@ func liveClientMounts(s ComposeSpec) string {
 		q := strconv.Quote(composeLiteral(p))
 		fmt.Fprintf(&b, "      - type: bind\n        source: %s\n        target: %s\n        read_only: true\n", q, q)
 	}
-	return b.String()
+	return b.String(), nil
 }
 
 // pathContains reports whether child is dir or lies under it, on cleaned paths.

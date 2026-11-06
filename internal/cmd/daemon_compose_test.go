@@ -35,10 +35,11 @@ const (
 // all: the command has no way to start or run anything, which is what "starts
 // nothing" means here.
 type composeRig struct {
-	town  string
-	flags daemonComposeFlags
-	deps  daemonComposeDeps
-	out   *bytes.Buffer
+	town   string
+	flags  daemonComposeFlags
+	deps   daemonComposeDeps
+	out    *bytes.Buffer
+	errOut *bytes.Buffer
 
 	disk     map[string][]byte
 	made     []string
@@ -51,7 +52,7 @@ type composeRig struct {
 // through the host the container resolves.
 func newComposeRig(t *testing.T) *composeRig {
 	t.Helper()
-	r := &composeRig{town: composeTestTown, out: &bytes.Buffer{}, disk: map[string][]byte{}}
+	r := &composeRig{town: composeTestTown, out: &bytes.Buffer{}, errOut: &bytes.Buffer{}, disk: map[string][]byte{}}
 	r.flags = daemonComposeFlags{image: daemonimage.ImageTag(composeTestRev)}
 	r.deps = daemonComposeDeps{
 		findTown: func() (string, error) { return r.town, nil },
@@ -87,7 +88,8 @@ func newComposeRig(t *testing.T) *composeRig {
 				return nil
 			},
 		},
-		out: r.out,
+		out:    r.out,
+		errOut: r.errOut,
 	}
 	return r
 }

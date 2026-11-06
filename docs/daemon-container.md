@@ -1304,7 +1304,11 @@ program bead holds the output.
 - The landing worker found no bot token: `XDG_CONFIG_HOME` is `/run/gt/xdg` in
   the container, so `~/.config/gt/...` resolved to an unmounted path.
   `gt daemon compose write --config-dir` mounts the directory at both paths
-  (gt-gg9hv.3).
+  (gt-gg9hv.3). Add `--secrets-manifest deploy/daemon/secrets.yaml` to mount
+  only the files the manifest lists, each read-only at its own path and at the
+  XDG path, and no directory of the config tree (gt-gg9hv.66); the manifest's
+  header defines its fields and what rotating a listed file costs. The same list
+  becomes the cluster Secrets when the daemon moves into the cluster.
 - Rig git remotes name `forgejo:3000`, which a container cannot resolve;
   `--extra-host forgejo:host-gateway` fixes it (gt-gg9hv.2).
 - om withholds `CLAUDE_CODE_OAUTH_TOKEN` from its reviewer by design, and the
