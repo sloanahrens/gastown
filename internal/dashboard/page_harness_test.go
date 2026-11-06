@@ -788,7 +788,7 @@ func (p *pageDOM) element(t *testing.T, id string) drawn {
 // cellWithText reads back the first leaf under the element id whose text is
 // exactly text: the cell a render drew, with the title it carries. Matching the
 // whole text keeps a cell from answering for a longer one that merely starts
-// with it, where "docker-sbx" would also read the k8s seat's cell. A render
+// with it, where "flash" would also read the "flash 1/3" seat cell. A render
 // that drew no such cell fails here rather than reading as an empty string.
 func (p *pageDOM) cellWithText(t *testing.T, id, text string) drawn {
 	t.Helper()
