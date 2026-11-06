@@ -14,6 +14,12 @@ import (
 // reads as a host with nothing running and no disk left.
 const SchemaVersion = 3
 
+// Rollout note for version 3 (the docker_disk field): a reader refuses a file of
+// another version, so until both sides run version 3 each side refuses the
+// other's file and the rules report the probe as failing. Install the new gt,
+// then restart the host agent and the daemon back to back: the agent writes as
+// soon as it starts, so the window is the seconds between the two restarts.
+
 // futureTolerance is how far ahead of the reader's clock a probe's stamp may
 // sit. The agent and the daemon read one host's clock, so a stamp beyond this
 // is a clock that jumped, and a future stamp must not read as fresh however
