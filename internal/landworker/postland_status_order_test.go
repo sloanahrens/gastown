@@ -156,7 +156,7 @@ func receive(t *testing.T, ch <-chan struct{}, what string) {
 	t.Helper()
 	select {
 	case <-ch:
-	case <-time.After(10 * time.Second):
+	case <-time.After(10 * time.Second): //testpolicy:allow no-sleep — a hang guard: only a broken run reaches it, and a correct run passes by the event, not by this bound
 		t.Fatalf("timed out waiting for %s", what)
 	}
 }
@@ -384,7 +384,7 @@ func TestPostLandStatusRerunDoesNotHoldThePass(t *testing.T) {
 	go func() { o.run.PollPending(ctx); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(10 * time.Second): //testpolicy:allow no-sleep — a hang guard: only a pass that waited for the rerun reaches it, and a correct run passes by the done signal
 		t.Fatal("PollPending waited for the rerun")
 	}
 	receive(t, started, "the rerun to start")
