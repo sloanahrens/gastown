@@ -1,0 +1,19 @@
+# Every kubectl read the Kubernetes backend renders for a sweep run, one line per
+# distinct call as `<verb> <resource> <scope>`: scope is cluster for -A and
+# namespace otherwise. cp copies through pods/exec, as kubectl does.
+# TestSweepRBACGoldenMatchesTheRenderedPlan derives these lines from the plan;
+# TestSweepRBACCoversEveryRead holds them to deploy/k8s/sweep-rbac.yaml.
+apply jobs namespace
+apply persistentvolumeclaims namespace
+apply pods namespace
+create pods namespace
+cp pods/exec namespace
+delete jobs namespace
+delete persistentvolumeclaims namespace
+delete pods namespace
+exec pods/exec namespace
+get jobs namespace
+get nodes cluster
+get pods cluster
+get priorityclasses cluster
+wait pods namespace
