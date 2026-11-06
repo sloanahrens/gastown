@@ -2,10 +2,21 @@ package imagectx
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// fileAt makes a regular file at rel under the output, where a later step makes a
+// directory, so that step fails.
+func (w *world) fileAt(rel string) {
+	w.t.Helper()
+	if err := os.WriteFile(filepath.Join(w.out, rel), []byte("not a directory\n"), 0o644); err != nil {
+		w.t.Fatalf("fileAt %s: %v", rel, err)
+	}
+}
 
 // These cases drive each failure path of the build, one step per row, through the
 // fault knobs of the world. Each row names the step it breaks: a row that breaks
@@ -69,6 +80,15 @@ func TestContextStopsOnAFailedStep(t *testing.T) {
 		mutate func(w *world, in *Inputs)
 		want   string
 	}{
+		{"the tree status cannot be read", func(w *world, _ *Inputs) {
+			w.failGit = []string{"status"}
+		}, "cannot read the status of"},
+		{"HEAD cannot be read", func(w *world, _ *Inputs) {
+			w.failGit = []string{"rev-parse --verify HEAD^{commit}"}
+		}, "cannot read HEAD of"},
+		{"the bin directory cannot be made once the status is read", func(w *world, _ *Inputs) {
+			w.onStatus = func() { w.fileAt("bin") }
+		}, "cannot make the bin directory"},
 		{"the build rig's tree cannot be archived", func(w *world, _ *Inputs) {
 			w.failGit = []string{"archive --format=tar " + gastownRev}
 		}, "cannot archive"},
