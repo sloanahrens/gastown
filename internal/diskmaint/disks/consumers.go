@@ -59,8 +59,9 @@ type consumer struct {
 // neither is no consumer. A summary with no pods list, or a count that is not a
 // whole non-negative number, is an error rather than a shorter list.
 //
-// Names are cluster text: control characters and line separators become a space
-// and each name is cut at consumerNameRunes runes, so the result is one line.
+// Names are cluster text: control characters, line separators and format
+// characters (bidi overrides, zero-width marks) become a space and each name is
+// cut at consumerNameRunes runes, so the result is one line.
 func TopConsumers(summary string) (string, error) {
 	var stats consumersStats
 	if err := json.Unmarshal([]byte(summary), &stats); err != nil {
@@ -128,10 +129,11 @@ func optionalBytes(field string, raw json.Number) (n int64, set bool, err error)
 	return n, true, nil
 }
 
-// sanitizeConsumerName turns a cluster-supplied name into one bounded line.
+// sanitizeConsumerName turns a cluster-supplied name into one bounded line of
+// plain text: control, line-separator and format characters become a space.
 func sanitizeConsumerName(name string) string {
 	clean := strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) || unicode.Is(unicode.Cf, r) {
 			return ' '
 		}
 		return r
