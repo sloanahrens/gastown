@@ -146,6 +146,48 @@ func (d Docker) Run(call Call) (int, error) {
 	return d.Shell.Attach(d.dockerArgv(args...))
 }
 
+// toolCheck is the shell command ToolExists runs in the container: command -v is
+// a shell builtin, so the image needs sh and nothing else.
+const toolCheck = `command -v "$1"`
+
+// ToolExists checks that name answers inside the image the ladder reaches: the
+// running container's command, or a throwaway container of the same image when
+// the daemon is stopped. It refuses when the rung is down, so a cutover never
+// runs against a Docker that cannot answer.
+func (d Docker) ToolExists(name string) error {
+	if _, err := toolFor(name); err != nil {
+		return err
+	}
+	svc, err := d.daemonService()
+	if err != nil {
+		return err
+	}
+	rung, reason := d.rung(svc)
+	switch rung {
+	case RungExec:
+		args := []string{"exec", svc.ContainerName, "sh", "-c", toolCheck, "sh", name}
+		return d.checkTool(args, name, svc.Image)
+	case RungRun:
+		args := []string{"run", "--rm", "--entrypoint", "sh", svc.Image, "-c", toolCheck, "sh", name}
+		return d.checkTool(args, name, svc.Image)
+	default:
+		return fmt.Errorf("gtwrap: %s", reason)
+	}
+}
+
+// checkTool runs one tool check and refuses when it cannot answer or finds
+// nothing on PATH.
+func (d Docker) checkTool(args []string, name, image string) error {
+	out, exit, err := d.probe(args...)
+	if err != nil {
+		return fmt.Errorf("gtwrap: check that %s answers in the image %s: %w", name, image, err)
+	}
+	if exit != 0 || strings.TrimSpace(out) == "" {
+		return fmt.Errorf("gtwrap: %s does not answer in the image %s: the check exited %d", name, image, exit)
+	}
+	return nil
+}
+
 // daemonService is the daemon service of the compose file: the image a throwaway
 // run starts and the container name exec and the probe use. Both are read, never
 // hard-coded, and a file that does not supply both is an error.

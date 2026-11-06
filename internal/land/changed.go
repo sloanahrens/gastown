@@ -467,6 +467,15 @@ var treeWideGuards = []treeWideGuard{
 		removal: true,
 	},
 	{
+		// The cutover runbook guard holds the runbook's pre-check list equal to
+		// the list install prints, so an edit to either alone fails it. A
+		// removal counts: the guard opens the file.
+		pkg:     "internal/gtwrap",
+		tests:   []string{"TestCutoverRunbookNamesEveryPrecheck"},
+		judges:  func(rel string) bool { return rel == "docs/design/gt-in-container-cutover.md" },
+		removal: true,
+	},
+	{
 		// The shelltier reference guard reads every manifest script's text
 		// plus the Makefile, so a .sh edit that names a repo path the entry's
 		// triggers miss fails it. It also reads the manifest in manifest.go,

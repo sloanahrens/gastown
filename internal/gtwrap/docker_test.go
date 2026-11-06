@@ -34,11 +34,16 @@ const testCompose = `services:
 // fakeShell records every docker line and answers from canned fields. Capture
 // answers by the docker verb: info and ps are the only probes Launch makes.
 type fakeShell struct {
-	infoExit   int
-	infoErr    error
-	psOut      string
-	psExit     int
-	psErr      error
+	infoExit int
+	infoErr  error
+	psOut    string
+	psExit   int
+	psErr    error
+	// toolOut, toolExit and toolErr answer ToolExists's check of a tool in the
+	// image.
+	toolOut    string
+	toolExit   int
+	toolErr    error
 	attachExit int
 	attachErr  error
 	// outlast makes each bounded probe run until its context stops it, as a hung
@@ -71,6 +76,8 @@ func (f *fakeShell) Capture(ctx context.Context, argv []string) (string, int, er
 		return "", f.infoExit, f.infoErr
 	case "ps":
 		return f.psOut, f.psExit, f.psErr
+	case "exec", "run":
+		return f.toolOut, f.toolExit, f.toolErr
 	}
 	panic("unexpected probe: " + strings.Join(argv, " "))
 }
@@ -423,5 +430,97 @@ func TestRunnerSetsTheDoltHost(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestToolExistsChecksTheRunningContainer(t *testing.T) {
+	t.Parallel()
+	shell := &fakeShell{psOut: "5c1e0a7f\n", toolOut: "/usr/local/bin/gt\n"}
+	d := Docker{Town: testTown, Shell: shell, ReadFile: readCompose(testCompose)}
+	if err := d.ToolExists("gt"); err != nil {
+		t.Fatalf("ToolExists(gt) = %v, want nil", err)
+	}
+	want := []string{"docker", "exec", "gt-daemon", "sh", "-c", toolCheck, "sh", "gt"}
+	if len(shell.captured) != 3 || !slices.Equal(shell.captured[2], want) {
+		t.Fatalf("probes = %q, want the info and ps probes then %q", shell.captured, want)
+	}
+}
+
+func TestToolExistsChecksAThrowawayContainerWhenTheDaemonIsStopped(t *testing.T) {
+	t.Parallel()
+	shell := &fakeShell{psOut: "", toolOut: "/usr/local/bin/om\n"}
+	d := Docker{Town: testTown, Shell: shell, ReadFile: readCompose(testCompose)}
+	if err := d.ToolExists("om"); err != nil {
+		t.Fatalf("ToolExists(om) = %v, want nil", err)
+	}
+	want := []string{"docker", "run", "--rm", "--entrypoint", "sh", testImage, "-c", toolCheck, "sh", "om"}
+	if len(shell.captured) != 3 || !slices.Equal(shell.captured[2], want) {
+		t.Fatalf("probes = %q, want the info and ps probes then %q", shell.captured, want)
+	}
+}
+
+func TestToolExistsRefusesAToolThatDoesNotAnswer(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		shell fakeShell
+	}{
+		{"the check exits non-zero", fakeShell{psOut: "5c1e0a7f\n", toolExit: 127}},
+		{"the check finds nothing", fakeShell{psOut: "5c1e0a7f\n"}},
+		{"the check cannot run", fakeShell{psOut: "5c1e0a7f\n", toolErr: errors.New("docker: executable not found")}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			shell := tt.shell
+			d := Docker{Town: testTown, Shell: &shell, ReadFile: readCompose(testCompose)}
+			err := d.ToolExists("hm")
+			if err == nil {
+				t.Fatal("ToolExists(hm) = nil, want a refusal")
+			}
+			if !strings.Contains(err.Error(), "hm") || !strings.Contains(err.Error(), testImage) {
+				t.Fatalf("error %q does not name the tool and the image", err)
+			}
+		})
+	}
+}
+
+func TestToolExistsRefusesWhenTheRungIsDown(t *testing.T) {
+	t.Parallel()
+	shell := &fakeShell{infoExit: 1}
+	d := Docker{Town: testTown, Shell: shell, ReadFile: readCompose(testCompose)}
+	err := d.ToolExists("gt")
+	if err == nil {
+		t.Fatal("ToolExists = nil with Docker down, want a refusal")
+	}
+	if !strings.Contains(err.Error(), "Docker Desktop") {
+		t.Fatalf("error %q does not say what is down", err)
+	}
+	if len(shell.captured) != 1 {
+		t.Fatalf("probes = %q, want only the info probe", shell.captured)
+	}
+}
+
+func TestToolExistsRefusesANameItDoesNotAnswerAs(t *testing.T) {
+	t.Parallel()
+	shell := &fakeShell{}
+	d := Docker{Town: testTown, Shell: shell, ReadFile: readCompose(testCompose)}
+	if err := d.ToolExists("bash"); err == nil {
+		t.Fatal("ToolExists(bash) = nil, want a refusal")
+	}
+	if len(shell.captured) != 0 {
+		t.Fatalf("a name the wrapper does not answer as ran docker: %q", shell.captured)
+	}
+}
+
+func TestToolExistsRefusesAnUnusableComposeFile(t *testing.T) {
+	t.Parallel()
+	shell := &fakeShell{}
+	d := Docker{Town: testTown, Shell: shell, ReadFile: func(string) ([]byte, error) { return nil, fs.ErrNotExist }}
+	if err := d.ToolExists("gt"); err == nil {
+		t.Fatal("ToolExists = nil with no compose file, want a refusal")
+	}
+	if len(shell.captured) != 0 {
+		t.Fatalf("the compose file is unusable but docker ran: %q", shell.captured)
 	}
 }

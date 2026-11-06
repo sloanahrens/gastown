@@ -208,6 +208,7 @@ var guardTriggers = []struct {
 	{"internal/testdb", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/testutil", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/land", "M\x00.om.json\x00"},
+	{"internal/gtwrap", "M\x00docs/design/gt-in-container-cutover.md\x00"},
 	{"internal/repoguard", "A\x00scripts/new.sh\x00"},
 	{"internal/repoguard", "D\x00scripts/gone.sh\x00"},
 	{"internal/repoguard", "R100\x00scripts/old.sh\x00scripts/new.sh\x00"},
