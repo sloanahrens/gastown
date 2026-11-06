@@ -224,7 +224,7 @@ func analysisEnv(t *testing.T, town, dayDir string, answer func(recordedCall) ([
 func analysisAnswer(t *testing.T, dayDir string) func(recordedCall) ([]byte, error) {
 	t.Helper()
 	archive := tarOf(t, map[string]string{
-		"go-api/go.mod":            "module github.com/sloan/mango/go-api\n",
+		"go-api/go.mod":            "module github.com/owner/mango/go-api\n",
 		"go-api/cmd/mango/main.go": "package main\n",
 	})
 	return func(c recordedCall) ([]byte, error) {

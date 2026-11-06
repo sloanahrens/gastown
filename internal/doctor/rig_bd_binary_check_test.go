@@ -46,7 +46,7 @@ func TestRigBDBinaryCheck_RunReportsFindingsWithRemedy(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 
-	crewBD := filepath.Join(town, "alpha", "crew", "sloan", "bd")
+	crewBD := filepath.Join(town, "alpha", "crew", "operator", "bd")
 	polecatBD := filepath.Join(town, "alpha", "polecats", "ruby", "alpha", "bd")
 	writeFileAt(t, crewBD, "binary\n", 0o755)
 	writeFileAt(t, polecatBD, "binary\n", 0o700)
@@ -96,10 +96,10 @@ func TestRigBDBinaryCheck_NonFindingsAreClean(t *testing.T) {
 	writeFileAt(t, filepath.Join(town, "bd"), "binary\n", 0o755)
 	writeFileAt(t, filepath.Join(town, "notarig", "bd"), "binary\n", 0o755)
 	// Skipped subtrees.
-	writeFileAt(t, filepath.Join(rig, "crew", "sloan", ".git", "hooks", "bd"), "binary\n", 0o755)
-	writeFileAt(t, filepath.Join(rig, "crew", "sloan", "node_modules", "x", "bd"), "binary\n", 0o755)
+	writeFileAt(t, filepath.Join(rig, "crew", "operator", ".git", "hooks", "bd"), "binary\n", 0o755)
+	writeFileAt(t, filepath.Join(rig, "crew", "operator", "node_modules", "x", "bd"), "binary\n", 0o755)
 	// Past the depth bound (root a/b/c/d is depth 4).
-	writeFileAt(t, filepath.Join(rig, "crew", "sloan", "a", "b", "c", "bd"), "binary\n", 0o755)
+	writeFileAt(t, filepath.Join(rig, "crew", "operator", "a", "b", "c", "bd"), "binary\n", 0o755)
 	// A symlink named bd is not a regular file and is never followed.
 	target := filepath.Join(town, "outside-target")
 	writeFileAt(t, target, "binary\n", 0o755)
@@ -110,7 +110,7 @@ func TestRigBDBinaryCheck_NonFindingsAreClean(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 	// A symlinked crew entry is not a directory to descend into.
-	if err := os.Symlink(filepath.Join(rig, "crew", "sloan"), filepath.Join(rig, "crew", "clone")); err != nil {
+	if err := os.Symlink(filepath.Join(rig, "crew", "operator"), filepath.Join(rig, "crew", "clone")); err != nil {
 		t.Fatalf("symlink crew clone: %v", err)
 	}
 
@@ -149,7 +149,7 @@ func TestRigBDBinaryCheck_ScanRootsStayUnderRigs(t *testing.T) {
 	town := t.TempDir()
 
 	wantRoots := []string{
-		filepath.Join(town, "alpha", "crew", "sloan"),
+		filepath.Join(town, "alpha", "crew", "operator"),
 		filepath.Join(town, "alpha", "refinery", "one"),
 		filepath.Join(town, "alpha", "mayor", "rig"),
 		filepath.Join(town, "beta", "polecats", "ruby"),

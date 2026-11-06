@@ -158,7 +158,7 @@ func TestSystemPromptFilePath_PerAgentForPolecatAndCrew(t *testing.T) {
 	town, rig := "/town", "/town/myrig"
 	cases := []struct{ role, agent, want string }{
 		{"polecat", "nux", "/town/myrig/polecats/.claude/system-prompt-nux.md"},
-		{"crew", "sloan", "/town/myrig/crew/.claude/system-prompt-sloan.md"},
+		{"crew", "operator", "/town/myrig/crew/.claude/system-prompt-operator.md"},
 		{"polecat", "", ""}, // the template bakes in the agent's name; no shared file
 		{"crew", "", ""},
 	}
@@ -278,14 +278,14 @@ func TestResolveRoleAgentConfigWithOverrideAppliesRoleFlags(t *testing.T) {
 	}
 
 	// Crew: per-worker file, same as polecat.
-	crewPath := SystemPromptFilePath("crew", townRoot, rigPath, "sloan")
+	crewPath := SystemPromptFilePath("crew", townRoot, rigPath, "operator")
 	if err := os.MkdirAll(filepath.Dir(crewPath), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(crewPath, []byte("# crew sloan\n"), 0644); err != nil {
+	if err := os.WriteFile(crewPath, []byte("# crew operator\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	rc, err = ResolveRoleAgentConfigWithOverride("crew", townRoot, rigPath, "deepseek-flash", "sloan")
+	rc, err = ResolveRoleAgentConfigWithOverride("crew", townRoot, rigPath, "deepseek-flash", "operator")
 	if err != nil {
 		t.Fatalf("resolve crew: %v", err)
 	}

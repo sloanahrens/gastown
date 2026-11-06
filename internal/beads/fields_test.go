@@ -268,10 +268,10 @@ func TestMRFieldsSubmitter(t *testing.T) {
 		},
 		{
 			name:          "crew submitter with no polecat worker",
-			description:   "branch: crew/sloan/ci\nsubmitter: sloan",
+			description:   "branch: crew/operator/ci\nsubmitter: operator",
 			wantWorker:    "",
-			wantSubmitter: "sloan",
-			wantAttrib:    "sloan",
+			wantSubmitter: "operator",
+			wantAttrib:    "operator",
 		},
 		{
 			// The shape every MR bead written before the field existed has.
@@ -311,10 +311,10 @@ func TestMRFieldsSubmitter(t *testing.T) {
 
 func TestMRFieldsSubmitterRoundTrip(t *testing.T) {
 	original := &MRFields{
-		Branch:      "crew/sloan/ci",
+		Branch:      "crew/operator/ci",
 		Target:      "main",
 		SourceIssue: "gt-x",
-		Submitter:   "sloan",
+		Submitter:   "operator",
 		Rig:         "gastown",
 	}
 	parsed := ParseMRFields(&Issue{Description: FormatMRFields(original)})
