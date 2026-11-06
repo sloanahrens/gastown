@@ -205,83 +205,6 @@ func jevRead(extra map[string]any) map[string]any {
 	return map[string]any{"jev_spend": r}
 }
 
-// ParseJevScorecard turns one battery's `gt jev scorecard --json` report into
-// its line: the parsed items, the ones a rule labeled, the lines the report
-// skipped as unanswered, and each question's verdict in the report's order. The
-// packages battery says what its items are.
-func TestParseJevScorecard(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name   string
-		report string
-		want   JevBattery
-	}{
-		{"questions and labels", `{"battery":"finding","items":3,"lines_skipped":1,
- "questions":[{"id":"any_duplicate","kind":"noul","logged":3,"labeled":2,"verdict":"not-yet"},
-              {"id":"fix_worthy","kind":"noul","logged":3,"labeled":2,"verdict":"earning"}],
- "lines":[{"id":"a","labeled":true},{"id":"b","labeled":false},{"id":"c","labeled":true}]}`,
-			JevBattery{Name: "finding", Items: 3, Labeled: 2, Unanswered: 1, Questions: []JevQuestion{
-				{ID: "any_duplicate", Verdict: "not-yet", Labeled: 2}, {ID: "fix_worthy", Verdict: "earning", Labeled: 2}}}},
-		{"the skipped lines are the unanswered count", `{"battery":"finding","items":7,"lines_skipped":3,"questions":[]}`,
-			JevBattery{Name: "finding", Items: 7, Unanswered: 3}},
-		{"the chip's figures", `{"battery":"landing","items":9,"labeled":7,
- "questions":[{"id":"first_try","kind":"noul","logged":9,"labeled":7,"positives":3,"negatives":4,"base_rate":0.25,"precision":0.625,"recall":0.5,"verdict":"earning"}]}`,
-			JevBattery{Name: "landing", Items: 9, Labeled: 7, Questions: []JevQuestion{
-				{ID: "first_try", Verdict: "earning", Labeled: 7, BaseRate: jevFloat(0.25), Precision: jevFloat(0.625)}}}},
-		{"a null figure is absent", `{"battery":"drift","items":4,
- "questions":[{"id":"noise","kind":"noul","logged":4,"labeled":1,"base_rate":null,"precision":null,"recall":null,"verdict":"not-yet"}]}`,
-			JevBattery{Name: "drift", Items: 4, Questions: []JevQuestion{{ID: "noise", Verdict: "not-yet", Labeled: 1}}}},
-		{"the labeled total stands in for rows the report left out", `{"battery":"testsel","items":9000,"labeled":6000,"lines_omitted":true,
- "questions":[{"id":"affects_tests","verdict":"earning"}]}`,
-			JevBattery{Name: "testsel", Items: 9000, Labeled: 6000, Unit: "packages", Questions: []JevQuestion{{ID: "affects_tests", Verdict: "earning"}}}},
-		{"the labeled total is the one the report states", `{"battery":"finding","items":2,"labeled":1,
- "questions":[],"lines":[{"id":"a","labeled":true},{"id":"b","labeled":false}]}`,
-			JevBattery{Name: "finding", Items: 2, Labeled: 1}},
-		{"no log is an empty report", `{"battery":"landing","items":0,"lines_skipped":0,"questions":[]}`,
-			JevBattery{Name: "landing"}},
-		{"the text report's lines are optional", `{"battery":"dispatch","items":5,
- "questions":[{"id":"first_try","verdict":"no-signal"}]}`,
-			JevBattery{Name: "dispatch", Items: 5, Questions: []JevQuestion{{ID: "first_try", Verdict: "no-signal"}}}},
-	}
-	for _, tc := range cases {
-		got, err := ParseJevScorecard([]byte(tc.report))
-		if err != nil {
-			t.Errorf("%s: %v", tc.name, err)
-			continue
-		}
-		if !reflect.DeepEqual(*got, tc.want) {
-			t.Errorf("%s: got %+v, want %+v", tc.name, *got, tc.want)
-		}
-	}
-}
-
-func TestParseJevScorecardRefusesWhatIsNotTheReport(t *testing.T) {
-	t.Parallel()
-
-	for _, out := range []string{"", "   ", "gt: unknown battery", "[]", `{"items":3}`, `{"battery":"finding"}`, `{"battery":`} {
-		if got, err := ParseJevScorecard([]byte(out)); err == nil {
-			t.Errorf("ParseJevScorecard(%q) = %+v, want an error", out, got)
-		}
-	}
-}
-
-func TestJevScorecardWindowReadsTheCommandsSince(t *testing.T) {
-	t.Parallel()
-
-	cases := map[string]string{
-		"gt jev scorecard --json --since 7d": "7d",
-		"gt jev scorecard --since=36h":       "36h",
-		"gt jev scorecard --json":            "",
-		"gt jev scorecard --since":           "",
-	}
-	for cmd, want := range cases {
-		if got := JevScorecardWindow(strings.Fields(cmd)); got != want {
-			t.Errorf("JevScorecardWindow(%q) = %q, want %q", cmd, got, want)
-		}
-	}
-}
-
 // The scorecard read and the spend read fail apart, and a failed scorecard
 // read keeps the last good lines.
 func TestFailedJevScorecardReadKeepsTheLinesAndLeavesTheSpendAlone(t *testing.T) {
@@ -427,9 +350,6 @@ func TestHubLeavesAPlaceholderForABatteryItNeverRead(t *testing.T) {
 	}
 }
 
-// jevFloat is a scorecard figure for a want value.
-func jevFloat(v float64) *float64 { return &v }
-
 // jevDrawn is one element a JEV row's questions cell holds: a question's chip,
 // the fold's chip button, or the folded list of not-yet chips.
 type jevDrawn struct {
@@ -462,9 +382,10 @@ func TestJevPanelNamesTheBatteriesTheReadLost(t *testing.T) {
 	now := time.Now()
 	s := jevScorecardState(now, nil)
 	sc := s["jev_scorecard"].(map[string]any)
+	scored := now.Add(-5 * time.Hour).UTC().Format(time.RFC3339)
 	sc["batteries"] = []any{
 		map[string]any{"name": "finding", "items": 212, "labeled": 140},
-		map[string]any{"name": "dispatch", "items": 4, "labeled": 1, "failed": true, "kept": true},
+		map[string]any{"name": "dispatch", "items": 4, "labeled": 1, "scored_at": scored, "failed": true, "kept": true},
 		map[string]any{"name": "drift", "failed": true},
 	}
 	sc["unavailable"] = []any{"dispatch", "drift"}
@@ -473,7 +394,7 @@ func TestJevPanelNamesTheBatteriesTheReadLost(t *testing.T) {
 	rows, note, _ := drawJevAt(t, now, s)
 	got := jevRowTexts(rows)
 	want := []string{
-		"dispatch41 (stale: the read failed)",
+		"dispatchscored 5h00m ago41 (kept: the last refresh failed)",
 		"drift--unavailable",
 		"finding212140",
 	}
@@ -508,14 +429,15 @@ func TestJevPanelSaysWhenTheReadsAgeIsUnknown(t *testing.T) {
 // one no-signal question. The totals are what Tally makes of them, which
 // TestJevScorecardTallyCountsTheTitleLine pins.
 func jevScorecardState(now time.Time, read map[string]any) map[string]any {
+	scored := now.Add(-5 * time.Hour).UTC().Format(time.RFC3339)
 	over := map[string]any{
 		"reads": jevRead(nil),
 		"jev_scorecard": map[string]any{"window": "7d", "batteries": []any{
-			map[string]any{"name": "finding", "items": 212, "labeled": 140, "questions": []any{
+			map[string]any{"name": "finding", "items": 212, "labeled": 140, "scored_at": scored, "questions": []any{
 				map[string]any{"id": "fix_worthy", "verdict": "earning", "labeled": 140, "base_rate": 0.5, "precision": 0.75},
 				map[string]any{"id": "any_duplicate", "verdict": "not-yet", "labeled": 40}}},
-			map[string]any{"name": "landing", "items": 0, "labeled": 0},
-			map[string]any{"name": "targets", "items": 9, "labeled": 0, "questions": []any{
+			map[string]any{"name": "landing", "items": 0, "labeled": 0, "scored_at": scored},
+			map[string]any{"name": "targets", "items": 9, "labeled": 0, "scored_at": scored, "questions": []any{
 				map[string]any{"id": "needs_review", "verdict": "no-signal", "labeled": 9, "base_rate": 0.111}}},
 		}, "totals": map[string]any{"batteries": 3, "items": 221, "labeled": 140, "earning": 1, "no_signal": 1, "not_yet": 1}},
 	}
@@ -978,13 +900,101 @@ func TestJevPanelFailureSaysUnavailableOnItsTitle(t *testing.T) {
 	}
 }
 
-// No scorecard command, or one that has not answered yet, leaves the panel out.
+// No value and no status leaves the panel out.
 func TestJevPanelAbsentIsHidden(t *testing.T) {
 	t.Parallel()
 
 	_, _, sec := drawJev(t, jevState(map[string]any{"reads": jevRead(nil)}))
 	if !sec.Hidden {
 		t.Error("a missing scorecard shows the JEV panel")
+	}
+}
+
+// A cache no refresh has written yet says how to make one and draws no battery
+// rows, rather than reading as a scorecard with nothing in it.
+func TestJevPanelMissingScorecardSaysHowToMakeOne(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	state := jevStateAt(now, map[string]any{
+		"reads":         map[string]any{"jev_scorecard": map[string]any{"at": now.UTC().Format(time.RFC3339), "every_sec": 60}},
+		"jev_scorecard": map[string]any{"no_scorecard": true},
+	})
+	rows, note, sec := drawJevAt(t, now, state)
+	if want := "no scorecard yet: run gt jev scorecard --refresh"; note.Text != want {
+		t.Errorf("title line = %q, want %q", note.Text, want)
+	}
+	if len(rows) != 0 {
+		t.Errorf("a missing cache drew rows: %q", jevRowTexts(rows))
+	}
+	if sec.Hidden {
+		t.Error("the panel is hidden over a missing cache")
+	}
+}
+
+// Every battery line says how old its own score is: the age comes from the
+// block's scored_at, not from the age of the read that carried it.
+func TestJevPanelShowsEachBatterysScoreAge(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	rows, _, _ := drawJevAt(t, now, jevScorecardState(now, nil))
+	names := map[string]string{}
+	for _, r := range rows {
+		if len(r.Cells[0].Kids) < 2 {
+			t.Fatalf("row %q draws no score age", r.Cells[0].Text)
+		}
+		names[r.Cells[0].Kids[0].Text] = r.Cells[0].Kids[1].Text
+	}
+	for _, name := range []string{"finding", "landing", "targets"} {
+		if got := names[name]; got != "scored 5h00m ago" {
+			t.Errorf("%s's score age = %q, want %q", name, got, "scored 5h00m ago")
+		}
+	}
+}
+
+// A cache-kept block is the block the cache drew: the hub does not replace it
+// with its older copy of the line.
+func TestHubLeavesACacheKeptBlockAsTheReaderDrewIt(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	scored := now.Add(-time.Hour)
+	reads := []JevBattery{
+		{Name: "finding", Items: 5, ScoredAt: &scored},
+		{Name: "finding", Items: 9, Failed: true, Kept: true, ScoredAt: &scored},
+	}
+	next := 0
+	h := NewHub(Config{
+		Now: func() time.Time { return now },
+		JevScorecard: func() *JevScorecard {
+			sc := &JevScorecard{Batteries: []JevBattery{reads[next]}}
+			next++
+			sc.Tally()
+			return sc
+		},
+	})
+	h.pollJevScorecard()
+	h.pollJevScorecard()
+	got := h.State().JevScorecard.Batteries[0]
+	if !got.Kept || got.Items != 9 {
+		t.Errorf("after a kept block = %+v, want the cache's kept line", got)
+	}
+}
+
+// A cache no refresh has written is a value, not a failed read: the page says
+// how to make one and the read is not flagged.
+func TestJevScorecardNoCacheIsNotAFailedRead(t *testing.T) {
+	t.Parallel()
+
+	h := NewHub(Config{JevScorecard: func() *JevScorecard { return &JevScorecard{NoScorecard: true} }})
+	h.pollJevScorecard()
+	st := h.State()
+	if st.JevScorecard == nil || !st.JevScorecard.NoScorecard {
+		t.Errorf("a missing cache read %+v, want the no-scorecard value", st.JevScorecard)
+	}
+	if r := st.Reads[SourceJevScorecard]; r.Error || r.Stale {
+		t.Errorf("a missing cache is flagged as a failed read: %+v", r)
 	}
 }
 

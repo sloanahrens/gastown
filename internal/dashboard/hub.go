@@ -1308,9 +1308,10 @@ func (h *Hub) pollJevSpend() {
 	h.publishLocked()
 }
 
-// pollJevScorecard keeps the last good scorecard lines across a failed read.
-// A read that lost only some batteries keeps each lost battery's last good
-// line, marked Failed and Kept, and leaves the others as the read drew them.
+// pollJevScorecard publishes the cached scorecard read. A read that failed
+// whole keeps the last good panel. The cache itself keeps a battery's last
+// good block when a refresh failed, so those blocks arrive already marked
+// Kept; a battery left with no line at all is filled from the previous panel.
 // It fails apart from the spend row: neither touches the other's value or
 // status.
 func (h *Hub) pollJevScorecard() {
@@ -1328,17 +1329,19 @@ func (h *Hub) pollJevScorecard() {
 	h.publishLocked()
 }
 
-// jevKeptMaxAge is how old a kept battery line may be, counted from the last
-// good read of its battery, before the page drops it to the name alone. An
-// hour is four default polls, so a verdict nobody has re-read that long is no
-// longer the battery's current one.
+// jevKeptMaxAge is how old a battery line the hub falls back to may be,
+// counted from the last good read of its battery, before the page drops it to
+// the name alone. The poll is a file read every minute, so an hour is sixty
+// polls; a verdict nobody has re-read that long is no longer current.
 const jevKeptMaxAge = time.Hour
 
-// keepLastGoodJevBatteries puts prev's line back for every battery that sc
-// reports failed, so one battery's failed read does not blank its line, unless
-// that line is older than jevKeptMaxAge at now. A battery prev never read stays
-// a placeholder. goodAt records each battery's last good read and is updated
-// from sc. sc is retallied.
+// keepLastGoodJevBatteries puts prev's line back for every battery the new
+// read left with no line (a failed block the cache could not keep), so one
+// failed refresh does not blank a line the panel already had, unless that line is older than
+// jevKeptMaxAge at now. A block the cache kept already carries its own last
+// good line and is left as the reader drew it; its scored_at states the age. A
+// battery prev never read stays a placeholder. goodAt records each battery's
+// last good read and is updated from sc. sc is retallied.
 func keepLastGoodJevBatteries(prev, sc *JevScorecard, goodAt map[string]time.Time, now time.Time) {
 	last := map[string]JevBattery{}
 	if prev != nil {
@@ -1351,6 +1354,9 @@ func keepLastGoodJevBatteries(prev, sc *JevScorecard, goodAt map[string]time.Tim
 	for i, b := range sc.Batteries {
 		if !b.Failed {
 			goodAt[b.Name] = now
+			continue
+		}
+		if b.Kept {
 			continue
 		}
 		old, ok := last[b.Name]

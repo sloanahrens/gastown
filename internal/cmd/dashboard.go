@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -15,7 +16,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -46,7 +46,6 @@ var (
 	dashboardSpendCmd             string
 	dashboardJevSpendCmd          string
 	dashboardJevUSDPerBillion     float64
-	dashboardJevScorecardCmd      string
 	dashboardForgejoRepos         []string
 	dashboardClaudePlanUSD        float64
 	dashboardClaudePlanRenewalDay int
@@ -96,21 +95,21 @@ beside the DeepSeek and Claude lines: the calls and dollars over the command's
 prints anything else shows the row as unavailable and leaves the other spend
 lines alone; an empty value leaves the row out.
 
---jev-scorecard-cmd names the command that prints one Jev battery's scorecard as
-JSON (default: gt jev scorecard --json --since 7d). It is split like a shell
-line and run once per registered battery with --battery added, every 15 minutes
-while a page is open. The JEV panel, under the Tier sweeps, draws one line per
+The JEV panel, under the Tier sweeps, reads the scorecard cache that
+gt jev scorecard --refresh writes (<town>/.runtime/jev/scorecard.json) every
+minute while a page is open and starts no process for it. It draws one line per
 battery: its items logged, how many of them are labeled, how many the report
 skipped as unanswered, and each question's verdict (earning, not-yet or
-no-signal), such as finding 212/140 fix_worthy:earning any_duplicate:not-yet. A
-battery with no log in the window shows -. The test-selection battery counts
-packages rather than items: its line says packages and the title line leaves it
-out, so its packages cannot swamp a headline about items. Each run has 60
-seconds. A battery whose run fails, times out or prints another battery's report
-drops only its own line (its last good line stays, marked stale) and the title
-names it as unavailable; only when every battery fails does the title read
-unavailable on its own. The Cost panel's spend row is left alone; an empty value
-leaves the panel out.
+no-signal), such as finding 212/140 fix_worthy:earning any_duplicate:not-yet,
+and how long ago that battery's score was computed. A battery with no log in
+the window shows -. The test-selection battery counts packages rather than
+items: its line says packages and the title line leaves it out, so its packages
+cannot swamp a headline about items. A battery whose refresh failed draws the
+last good block the cache kept and says so; one with no block to keep shows
+unavailable and the title names it. A missing cache reads "no scorecard yet: run
+gt jev scorecard --refresh". A cache that cannot be read shows the scorecard
+unavailable and keeps the last good panel. The Cost panel's spend row is left
+alone.
 
 --claude-plan-usd prices the plan meter beside it: the Claude weekly and
 five-hour limits, read every minute from the samples the status line appends to
@@ -221,7 +220,6 @@ func init() {
 	dashboardCmd.Flags().StringVar(&dashboardSpendCmd, "spend-cmd", "", "Command that prints the DeepSeek spend report as JSON (default: the ~/.claude tool when present)")
 	dashboardCmd.Flags().StringVar(&dashboardJevSpendCmd, "jev-spend-cmd", defaultJevSpendCmd, "Command that prints the Jev ledger's spend as JSON; empty leaves the Jev row out")
 	dashboardCmd.Flags().Float64Var(&dashboardJevUSDPerBillion, "jev-usd-per-billion-tokens", defaultJevUSDPerBillionTokens, "Price of Jev's tokens in US dollars per billion, passed to the --jev-spend-cmd command")
-	dashboardCmd.Flags().StringVar(&dashboardJevScorecardCmd, "jev-scorecard-cmd", defaultJevScorecardCmd, "Command that prints a Jev battery's scorecard as JSON, run once per registered battery with --battery added; empty leaves the scorecard lines out")
 	dashboardCmd.Flags().StringArrayVar(&dashboardForgejoRepos, "forgejo-repo", nil, "Repo (owner/name) the Forgejo panel reads; repeatable (default: every rig cut over to Forgejo)")
 	dashboardCmd.Flags().BoolVar(&dashboardOpen, "open", false, "Open the page in the default browser")
 	dashboardCmd.Flags().Float64Var(&dashboardClaudePlanUSD, "claude-plan-usd", dashboard.ClaudePlanDefaultUSD, "Monthly price of the Claude plan the plan meter's percentages are drawn against")
@@ -248,11 +246,7 @@ func runDashboard(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	jevScorecardArgv, err := jevScorecardArgv(dashboardJevScorecardCmd)
-	if err != nil {
-		return err
-	}
-	hub, closeSources, err := newDashboardHub(townRoot, cutoff, loc, dashboardSpendCmd, jevArgv, jevScorecardArgv, dashboardClaudePlanUSD, dashboardClaudePlanRenewalDay, dashboardMangoDir, cmd.OutOrStdout())
+	hub, closeSources, err := newDashboardHub(townRoot, cutoff, loc, dashboardSpendCmd, jevArgv, dashboardClaudePlanUSD, dashboardClaudePlanRenewalDay, dashboardMangoDir, cmd.OutOrStdout())
 	if err != nil {
 		return err
 	}
@@ -367,7 +361,7 @@ func dashboardClaudePlanPath(townRoot string) string {
 // newDashboardHub wires a hub to the readers gt tail -f uses. The returned
 // function releases the connections the feed holds open; the caller runs it
 // when the server stops.
-func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string, jevSpendArgv, jevScorecardArgv []string, claudePlanUSD float64, claudePlanRenewalDay int, mangoDir string, out io.Writer) (*dashboard.Hub, func(), error) {
+func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string, jevSpendArgv []string, claudePlanUSD float64, claudePlanRenewalDay int, mangoDir string, out io.Writer) (*dashboard.Hub, func(), error) {
 	beadReads := openTailBeads(townRoot)
 	rigOfBead := landingRig(townRoot)
 	// The deploy block reads the same repos through the same viewer client as
@@ -480,7 +474,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		WatchDir:       dashboardWatchDir(townRoot),
 		SpendHours:     dashboardSpendHours(),
 		JevSpend:       dashboardJevSpend(jevSpendArgv),
-		JevScorecard:   dashboardJevScorecard(jevScorecardArgv),
+		JevScorecard:   dashboardJevScorecard(townRoot),
 		OM:             func() *dashboard.OM { return om.read(time.Now()) },
 		TierSweep:      func() *dashboard.TierSweep { return tierSweeps.read(time.Now()) },
 		Update:         func() *dashboard.UpdateStatus { return updateStatus.read(time.Now()) },
@@ -721,11 +715,6 @@ func dashboardReadyToLand(townRoot string) (int, *time.Time, map[string]bool, er
 
 const dashboardSpendTimeout = 25 * time.Second
 
-// dashboardJevScorecardTimeout bounds one battery's scorecard run. It is not
-// dashboardSpendTimeout: the slowest battery takes about 32s to answer, past
-// the spend command's 25s, and a run that outlives this loses only its own line.
-const dashboardJevScorecardTimeout = 60 * time.Second
-
 // resolveSpendCmd is the command that prints the spend report: the flag's, or
 // the ~/.claude tool when it exists, or nothing.
 func resolveSpendCmd(flagValue string) []string {
@@ -810,93 +799,60 @@ func dashboardJevSpendWith(argv []string, run func(ctx context.Context, argv []s
 	}
 }
 
-// defaultJevScorecardCmd is --jev-scorecard-cmd's default: the last week of a
-// battery's log. The scorecard names one battery per run, so the reader adds
-// --battery for each registered battery.
-const defaultJevScorecardCmd = "gt jev scorecard --json --since 7d"
-
-// jevScorecardArgv turns --jev-scorecard-cmd into the argv the dashboard runs,
-// split like a shell line. An empty command is no argv, which leaves the
-// scorecard lines out; an unbalanced quote is an error at startup.
-func jevScorecardArgv(cmd string) ([]string, error) {
-	argv, err := shlex.Split(cmd)
-	if err != nil {
-		return nil, fmt.Errorf("--jev-scorecard-cmd %q: %w", cmd, err)
-	}
-	if len(argv) == 0 {
-		return nil, nil
-	}
-	return argv, nil
+// dashboardJevScorecard reads the cached scorecard that gt jev scorecard
+// --refresh writes. The dashboard starts no process for it: the cache is the
+// one source, so opening the page costs a file read rather than a score of
+// every battery.
+func dashboardJevScorecard(townRoot string) func() *dashboard.JevScorecard {
+	return dashboardJevScorecardWith(townRoot, scorecard.Cache{})
 }
 
-// dashboardJevScorecard runs the scorecard command for every registered
-// battery and folds each report into its line. A nil argv is no scorecard
-// lines.
-func dashboardJevScorecard(argv []string) func() *dashboard.JevScorecard {
-	return dashboardJevScorecardWith(argv, scorecard.Registered(), dashboardJevScorecardTimeout, func(ctx context.Context, argv []string) ([]byte, error) {
-		return exec.CommandContext(ctx, argv[0], argv[1:]...).Output()
-	})
-}
-
-// dashboardJevScorecardWith is dashboardJevScorecard over run, the battery
-// names and each run's timeout, so a test stands in for the process. The runs
-// go out together, so the read takes as long as its slowest battery, not the
-// sum of them. A battery whose run fails, times out or prints anything but its
-// own report loses only its line: it stays in the result as a Failed
-// placeholder, which the hub puts its last good line back over. Only when every
-// battery fails is the read nil, which the hub shows as the scorecard
-// unavailable.
-func dashboardJevScorecardWith(argv, batteries []string, timeout time.Duration, run func(ctx context.Context, argv []string) ([]byte, error)) func() *dashboard.JevScorecard {
-	if len(argv) == 0 {
-		return nil
-	}
-	window := dashboard.JevScorecardWindow(argv)
+// dashboardJevScorecardWith is dashboardJevScorecard over cache, so a test
+// stands in for a file it cannot read. A cache that does not exist yet is a
+// value with NoScorecard set, which the page answers with how to make one; any
+// other read error is nil, which the hub shows as the scorecard unavailable
+// and keeps the last good panel over.
+func dashboardJevScorecardWith(townRoot string, cache scorecard.Cache) func() *dashboard.JevScorecard {
 	return func() *dashboard.JevScorecard {
-		sc := &dashboard.JevScorecard{Batteries: make([]dashboard.JevBattery, len(batteries)), Window: window}
-		var wg sync.WaitGroup
-		for i, name := range batteries {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				b, err := readJevBattery(argv, name, timeout, run)
-				if err != nil {
-					b = &dashboard.JevBattery{Name: name, Failed: true}
-				}
-				sc.Batteries[i] = *b
-			}()
-		}
-		wg.Wait()
-		failed := 0
-		for _, b := range sc.Batteries {
-			if b.Failed {
-				failed++
+		doc, err := cache.Read(scorecard.CachePath(townRoot))
+		if err != nil {
+			if errors.Is(err, scorecard.ErrNoScorecard) {
+				return &dashboard.JevScorecard{NoScorecard: true}
 			}
-		}
-		if failed > 0 && failed == len(batteries) {
 			return nil
+		}
+		sc := &dashboard.JevScorecard{
+			Batteries: make([]dashboard.JevBattery, 0, len(doc.Batteries)),
+			Window:    doc.Since,
+		}
+		for _, block := range doc.Batteries {
+			sc.Batteries = append(sc.Batteries, jevBatteryFromCache(block))
 		}
 		sc.Tally()
 		return sc
 	}
 }
 
-// readJevBattery runs the scorecard command for one battery under its own
-// timeout and parses the report, refusing one that names another battery.
-func readJevBattery(argv []string, name string, timeout time.Duration, run func(ctx context.Context, argv []string) ([]byte, error)) (*dashboard.JevBattery, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	out, err := run(ctx, append(append([]string{}, argv...), "--battery", name))
-	if err != nil {
-		return nil, err
+// jevBatteryFromCache folds one cache block into the panel's line. A block a
+// failed refresh kept carries its report and the time it was scored; one with
+// no report is a placeholder that has only its name and failure.
+func jevBatteryFromCache(block scorecard.BatteryBlock) dashboard.JevBattery {
+	b := dashboard.JevBattery{Name: block.Name, Failed: block.Failed, Kept: block.Kept}
+	if block.Report == nil {
+		return b
 	}
-	b, err := dashboard.ParseJevScorecard(out)
-	if err != nil {
-		return nil, err
+	scored := block.ScoredAt
+	b.ScoredAt = &scored
+	b.Items = block.Report.Items
+	b.Labeled = block.Report.Labeled
+	b.Unanswered = block.Report.LinesSkipped
+	if b.Name == dashboard.JevPackagesBattery {
+		b.Unit = "packages"
 	}
-	if b.Name != name {
-		return nil, fmt.Errorf("jev scorecard: asked for %q, got %q", name, b.Name)
+	for _, q := range block.Report.Questions {
+		b.Questions = append(b.Questions, dashboard.JevQuestion{ID: q.ID, Verdict: q.Verdict, Labeled: q.Labeled, BaseRate: q.BaseRate, Precision: q.Precision})
 	}
-	return b, nil
+	return b
 }
 
 // dashboardForgejoReaders wires the readers the viewer's token feeds — the
