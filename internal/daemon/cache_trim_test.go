@@ -8,6 +8,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"log"
 	"maps"
 	"os"
@@ -1405,17 +1406,21 @@ func TestCacheTrimAppliesLargeShardsServerSide(t *testing.T) {
 	}
 }
 
-// TestCacheTrimApplyFailureNamesTheDocument pins the apply failure's line: it
-// names the document's place in the manifest, the object it holds, and only the
-// first line of kubectl's stderr, which for a shard can be followed by the file
-// list itself (gt-gg9hv.40).
+// TestCacheTrimApplyFailureNamesTheDocument pins the apply failure's line in the
+// log an operator reads: it names the document's place in the manifest, the
+// object it holds, and only the first line of kubectl's stderr, which for a
+// shard can be followed by the file list itself (gt-gg9hv.40). It drives the
+// whole pass, so the line is checked where cacheTrim writes it, not only in the
+// error the apply returns.
 func TestCacheTrimApplyFailureNamesTheDocument(t *testing.T) {
 	t.Parallel()
 	const (
 		firstLine  = "The ConfigMap is invalid: metadata.annotations: Too long: may not be more than 262144 bytes"
 		secondLine = "See 'kubectl apply --help' for more information."
 	)
-	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, nil)
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+		cacheTrimListVerb: {stdout: cacheTrimLargeListingJSON(60)},
+	})
 	inner := f.cli.answer
 	applies := 0
 	f.cli.answer = func(c cliCall) cliReply {
@@ -1428,21 +1433,16 @@ func TestCacheTrimApplyFailureNamesTheDocument(t *testing.T) {
 		return inner(c)
 	}
 
-	m := cacheTrimManifestWithLargeShards(t, 60)
-	if docs := m.Documents(); len(docs) != 61 {
-		t.Fatalf("the manifest holds %d documents, want the 60 shards and the Job", len(docs))
-	}
-	_, err := f.d.cacheTrimApply(context.Background(), "/kubeconfig", cacheTrimNamespace, cacheTrimJob, m)
-	if err == nil {
-		t.Fatal("the apply failed at document 7 and returned no error")
-	}
-	for _, want := range []string{"7 of 61", "ConfigMap", cacheTrimShardName(6), firstLine} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("the error %q does not name %q", err, want)
+	f.d.runDiskMaintenance()
+
+	logged := f.log.String()
+	for _, want := range []string{"the apply failed: applying document 7 of 61", "ConfigMap", cacheTrimShardName(6), firstLine} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("the log does not name %q: %s", want, logged)
 		}
 	}
-	if strings.Contains(err.Error(), secondLine) {
-		t.Errorf("the error carries stderr's second line: %q", err)
+	if strings.Contains(logged, secondLine) {
+		t.Errorf("the log carries stderr's second line: %s", logged)
 	}
 	if applies != 7 {
 		t.Errorf("the pass made %d applies, want it to stop at the seventh", applies)
@@ -1500,7 +1500,7 @@ func TestCacheTrimApplyFailureRetriesSoon(t *testing.T) {
 	}
 
 	now = now.Add(10 * time.Minute)
-	f.d.runDiskMaintenance() // 04:55: the short retry, not the two-hour interval
+	f.d.runDiskMaintenance() // 05:00: the short retry, not the two-hour interval
 	if got := f.listReads(); got != 2 {
 		t.Fatalf("trimmed %d times fifteen minutes after a failed apply, want 2", got)
 	}
@@ -1509,13 +1509,13 @@ func TestCacheTrimApplyFailureRetriesSoon(t *testing.T) {
 	// interval rather than the retry.
 	delete(overrides, cacheTrimApplyVerb)
 	now = now.Add(15 * time.Minute)
-	f.d.runDiskMaintenance() // 05:10: the retry after the last failure
+	f.d.runDiskMaintenance() // 05:15: the retry after the last failure
 	if got := f.listReads(); got != 3 {
 		t.Fatalf("trimmed %d times at the retry after the cluster recovered, want 3", got)
 	}
 
 	now = now.Add(15 * time.Minute)
-	f.d.runDiskMaintenance() // 05:25: fifteen minutes after the verdict, not due
+	f.d.runDiskMaintenance() // 05:30: fifteen minutes after the verdict, not due
 	if got := f.listReads(); got != 3 {
 		t.Fatalf("trimmed %d times fifteen minutes after a verdict, want 3: a verdict spends the interval", got)
 	}
@@ -2096,7 +2096,9 @@ var cacheTrimSmallApplies = map[string]string{
 // daemon and the sweep runner: each is server-side, or one of the reviewed
 // small objects, which hold no file list and so cannot grow past the
 // 262144-byte last-applied annotation limit. A new apply fails this test until
-// its object is reviewed and named in cacheTrimSmallApplies (gt-gg9hv.40).
+// its object is reviewed and named in cacheTrimSmallApplies (gt-gg9hv.40). The
+// walk covers every directory under each package, so a .go file in a nested
+// directory is audited like a top-level one.
 func TestCacheTrimNoOtherLargeClientSideApply(t *testing.T) {
 	t.Parallel()
 	_, thisFile, _, ok := runtime.Caller(0)
@@ -2110,31 +2112,39 @@ func TestCacheTrimNoOtherLargeClientSideApply(t *testing.T) {
 	var problems []string
 	for _, pkg := range []string{"internal/daemon", "internal/sweeprunner"} {
 		dir := filepath.Join(root, filepath.FromSlash(pkg))
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			t.Fatalf("reading %s: %v", dir, err)
-		}
-		for _, entry := range entries {
+		err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
 			name := entry.Name()
 			if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-				continue
+				return nil
 			}
-			sites, err := cacheTrimApplySites(filepath.Join(dir, name))
+			rel, err := filepath.Rel(dir, path)
 			if err != nil {
-				t.Fatalf("parsing %s: %v", name, err)
+				return err
+			}
+			rel = filepath.ToSlash(rel)
+			sites, err := cacheTrimApplySites(path)
+			if err != nil {
+				t.Fatalf("parsing %s: %v", rel, err)
 			}
 			for _, site := range sites {
 				if site.serverSide {
 					serverSide++
 					continue
 				}
-				key := pkg + "/" + name + ": " + site.object
+				key := pkg + "/" + rel + ": " + site.object
 				if _, reviewed := cacheTrimSmallApplies[key]; reviewed {
 					seen[key] = true
 					continue
 				}
 				problems = append(problems, key+" is a client-side apply that is not a reviewed small object")
 			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("reading %s: %v", dir, err)
 		}
 	}
 	for key := range cacheTrimSmallApplies {
