@@ -137,11 +137,11 @@ func TestCloneDivergenceCheck_StaleCrewCloneIsStillReported(t *testing.T) {
 	t.Parallel()
 	f := gitfake.New()
 	townRoot := t.TempDir()
-	cloneBehind(t, f, filepath.Join(townRoot, "devops", "crew", "sloan"), 60, false)
+	cloneBehind(t, f, filepath.Join(townRoot, "devops", "crew", "operator"), 60, false)
 
 	result := NewCloneDivergenceCheck().Run(withGit(&CheckContext{TownRoot: townRoot}, f))
 
 	if result.Status != StatusError {
-		t.Fatalf("devops/crew/sloan 60 behind: %v %v, want Error", result.Status, result.Details)
+		t.Fatalf("devops/crew/operator 60 behind: %v %v, want Error", result.Status, result.Details)
 	}
 }

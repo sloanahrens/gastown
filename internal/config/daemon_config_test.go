@@ -631,7 +631,7 @@ func TestForgejoTokenDir(t *testing.T) {
 func TestForgejoTokenDirDefault(t *testing.T) {
 	t.Parallel()
 
-	const home = "/home/sloan"
+	const home = "/home/user"
 	homeDir := func() (string, error) { return home, nil }
 
 	got, err := forgejoTokenDir(func(string) string { return "/xdg" }, homeDir)

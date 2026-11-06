@@ -247,9 +247,9 @@ func WriteBacktest(env Env, outDir, docsDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	events, sloan := ReadBacktestInputs(env, docsDir)
+	events, answers := ReadBacktestInputs(env, docsDir)
 	summary := readMangoSummary(env, filepath.Join(outDir, mangoSummaryName))
-	text, err := BacktestSection(backtestRows(result.Weekly), events, ReplicatedFromSummary(summary), sloan)
+	text, err := BacktestSection(backtestRows(result.Weekly), events, ReplicatedFromSummary(summary), answers)
 	if err != nil {
 		return "", err
 	}

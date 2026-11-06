@@ -245,11 +245,11 @@ func CorrelatedPairs(weekly []WeeklyRow, columns []string, threshold float64, mi
 //
 // The name carries its stage because Verdict in panel.go already names the
 // mango panel's per-target answer.
-func BacktestVerdict(moved, replicated, sloanWouldAct Answer) string {
-	if isTrue(moved) || isTrue(replicated) || isTrue(sloanWouldAct) {
+func BacktestVerdict(moved, replicated, wouldAct Answer) string {
+	if isTrue(moved) || isTrue(replicated) || isTrue(wouldAct) {
 		return BacktestKeep
 	}
-	if isFalse(moved) && isFalse(replicated) && isFalse(sloanWouldAct) {
+	if isFalse(moved) && isFalse(replicated) && isFalse(wouldAct) {
 		return BacktestDrop
 	}
 	return BacktestUndecided
@@ -258,7 +258,7 @@ func BacktestVerdict(moved, replicated, sloanWouldAct Answer) string {
 // BacktestSection renders the backtest as the report's Markdown: one table row
 // per metric with the evidence for keeping it, then the notes that keep a
 // verdict from reading as more than it is.
-func BacktestSection(weekly []WeeklyRow, events []RegimeEvent, replicated, sloan map[string]Answer) (string, error) {
+func BacktestSection(weekly []WeeklyRow, events []RegimeEvent, replicated, answers map[string]Answer) (string, error) {
 	var allRows []WeeklyRow
 	for _, r := range weekly {
 		if r.Rig == "ALL" {
@@ -292,8 +292,8 @@ func BacktestSection(weekly []WeeklyRow, events []RegimeEvent, replicated, sloan
 			shown,
 			percentCell(worst),
 			answerCell(replicated[m.name]),
-			answerCell(sloan[m.name]),
-			BacktestVerdict(counted, replicated[m.name], sloan[m.name]),
+			answerCell(answers[m.name]),
+			BacktestVerdict(counted, replicated[m.name], answers[m.name]),
 		}, " | ")+" |")
 	}
 	lines = append(lines, table...)
@@ -320,17 +320,23 @@ func ReplicatedFromSummary(summary map[string]MangoSummary) map[string]Answer {
 	return out
 }
 
-// ReadBacktestInputs reads regime-events.json and sloan-answers.json from
-// docsDir through env.ReadFile; a file that is missing or does not parse
+// answersFileName is the operator's hand-written backtest answers, a file
+// outside this repository. Its name carries the operator's name, so it is not
+// a fixture: renaming it would silently stop the backtest reading the answers.
+// It stays a must-stay literal for the operator-name tree guard's allowlist.
+const answersFileName = "sloan-answers.json"
+
+// ReadBacktestInputs reads regime-events.json and the operator's answers file
+// from docsDir through env.ReadFile; a file that is missing or does not parse
 // contributes nothing, so a hand-edited file cannot stop the report.
-func ReadBacktestInputs(env Env, docsDir string) (events []RegimeEvent, sloan map[string]Answer) {
+func ReadBacktestInputs(env Env, docsDir string) (events []RegimeEvent, answers map[string]Answer) {
 	if data, err := env.ReadFile(filepath.Join(docsDir, "regime-events.json")); err == nil {
 		_ = json.Unmarshal(data, &events)
 	}
-	if data, err := env.ReadFile(filepath.Join(docsDir, "sloan-answers.json")); err == nil {
-		_ = json.Unmarshal(data, &sloan)
+	if data, err := env.ReadFile(filepath.Join(docsDir, answersFileName)); err == nil {
+		_ = json.Unmarshal(data, &answers)
 	}
-	return events, sloan
+	return events, answers
 }
 
 // weakEvidenceNote and insufficientHistoryNote are the report's two readings of

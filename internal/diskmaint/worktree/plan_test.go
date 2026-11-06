@@ -92,7 +92,7 @@ func TestBuildPlanPushedOnlyWorktreeKeepsBranch(t *testing.T) {
 // overseer one, and its local branch goes with it.
 func TestBuildPlanRemovesOtherOwnersLandedCleanIdleWorktrees(t *testing.T) {
 	t.Parallel()
-	for _, dir := range []string{"sloan-x", "dipper-y"} {
+	for _, dir := range []string{"operator-x", "dipper-y"} {
 		t.Run(dir, func(t *testing.T) {
 			t.Parallel()
 			w := cleanWorktree()
@@ -135,13 +135,13 @@ func TestBuildPlanKeepsCloneDirtyUnpushedAndFreshOthers(t *testing.T) {
 	old := testNow.Add(-72 * time.Hour)
 	for name, c := range map[string]row{
 		// The clone is landed and old, so only being a clone keeps it.
-		"the clone": {dir: "sloan", path: "/town/repo-a/crew/sloan", landed: true, last: old, want: "clone"},
-		"a dirty worktree": {dir: "sloan-dirty", path: "/town/repo-a/crew/sloan-dirty",
-			dirty: 1, landed: true, last: old, want: "report-only: owner sloan, age 3d, dirty 1"},
-		"a pushed worktree": {dir: "sloan-pushed", path: "/town/repo-a/crew/sloan-pushed",
-			pushed: true, last: old, want: "report-only: owner sloan, age 3d, dirty 0"},
-		"a fresh worktree": {dir: "sloan-fresh", path: "/town/repo-a/crew/sloan-fresh",
-			landed: true, last: testNow.Add(-47 * time.Hour), want: "report-only: owner sloan, age 1d, dirty 0"},
+		"the clone": {dir: "operator", path: "/town/repo-a/crew/operator", landed: true, last: old, want: "clone"},
+		"a dirty worktree": {dir: "operator-dirty", path: "/town/repo-a/crew/operator-dirty",
+			dirty: 1, landed: true, last: old, want: "report-only: owner operator, age 3d, dirty 1"},
+		"a pushed worktree": {dir: "operator-pushed", path: "/town/repo-a/crew/operator-pushed",
+			pushed: true, last: old, want: "report-only: owner operator, age 3d, dirty 0"},
+		"a fresh worktree": {dir: "operator-fresh", path: "/town/repo-a/crew/operator-fresh",
+			landed: true, last: testNow.Add(-47 * time.Hour), want: "report-only: owner operator, age 1d, dirty 0"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
