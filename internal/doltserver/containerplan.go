@@ -3,14 +3,20 @@ package doltserver
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 
 	configpkg "github.com/steveyegge/gastown/internal/config"
 )
 
 // ContainerSpec is the docker create plan for a container that serves the
 // town's Dolt data.
+//
+// ContainerPort is the port the server listens on inside the container: the
+// port the config's listener names, which ContainerPortFromConfig reads.
 type ContainerSpec struct {
 	Name, Image, DataDir, BackupDir, ConfigPath string
 	MemoryGiB, HostPort, ContainerPort          int
@@ -37,8 +43,11 @@ var containerRestartPolicies = map[string]bool{
 //
 // The data and backup directories are mounted at the same absolute path inside
 // and outside the container, so host tools that read .dolt-data and the
-// backups the server writes keep working. The keep label sits directly before
-// the image reference.
+// backups the server writes keep working. The host port is published on the
+// loopback and maps to ContainerPort, the listener port the server binds
+// inside the container. The keep label sits directly before the image
+// reference. The arguments after the image are --config and its path only:
+// they go to the image's own entrypoint, which starts the server.
 func ContainerPlan(s ContainerSpec) ([]string, error) {
 	if s.Name == "" {
 		return nil, errors.New("container name is required")
@@ -94,8 +103,42 @@ func ContainerPlan(s ContainerSpec) ([]string, error) {
 		"-v", configMount,
 		"--label", keepLabel,
 		s.Image,
-		"dolt", "sql-server", "--config", s.ConfigPath,
+		"--config", s.ConfigPath,
 	}, nil
+}
+
+// ContainerPortFromConfig returns the port the Dolt server listens on inside
+// the container, from listener.port in the config file at path.
+//
+// The live container publishes the host's port to this listener port, so the
+// command reads it instead of assuming the host's port. A path ContainerPlan
+// would refuse, a file that cannot be read or does not parse, and a file that
+// names no listener.port or names one outside 1..65535 are all errors naming
+// path: the plan never guesses a port.
+func ContainerPortFromConfig(path string) (int, error) {
+	if err := validateContainerPath("config path", path); err != nil {
+		return 0, fmt.Errorf("container port: %w", err)
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // G304: the config path the operator passes to the plan
+	if err != nil {
+		return 0, fmt.Errorf("container port: reading the config: %w", err)
+	}
+	var cfg struct {
+		Listener struct {
+			Port *int `yaml:"port"`
+		} `yaml:"listener"`
+	}
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return 0, fmt.Errorf("container port: %s: %w", path, err)
+	}
+	if cfg.Listener.Port == nil {
+		return 0, fmt.Errorf("container port: %s names no listener.port", path)
+	}
+	port := *cfg.Listener.Port
+	if port < 1 || port > 65535 {
+		return 0, fmt.Errorf("container port: %s names listener.port %d: want 1 to 65535", path, port)
+	}
+	return port, nil
 }
 
 // validateContainerPath refuses a path docker cannot mount as written. The
