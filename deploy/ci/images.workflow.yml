@@ -1,0 +1,234 @@
+# The image build: runs on a push to green/<sha12>, the ref a fully green tier
+# sweep publishes (gt-gg9hv.61), and builds and pushes the daemon and the
+# polecat image at that one commit (gt-gg9hv.62).
+#
+# This text lives under deploy/ci/ because .forgejo/workflows/ is
+# operator-protected: the pre-receive hook refuses an agent push that changes a
+# workflow file. The operator copies it to .forgejo/workflows/images.yml, the
+# way .forgejo/workflows/post-land.yml went in.
+#
+# One commit for both images: the job reads GITHUB_SHA once, tags each image
+# with its first twelve characters, labels each with the full sha, and after
+# both builds reads the commit label back from each pushed image and fails when
+# either is not GITHUB_SHA. A daemon image and a polecat image at different
+# commits are a pair the town cannot run (gt-gg9hv.63).
+#
+# No concurrency block on purpose: a cancelled run would leave a failure on a
+# commit that did not fail, and a replaced pending run would leave no image at
+# all.
+name: images
+on:
+  push:
+    branches: ["green/**"]
+
+env:
+  # The Forgejo host, the registry owner and the two image names are typed here
+  # only, so gt update images (gt-gg9hv.63) types the same values once and a
+  # test can hold them equal to this file's.
+  FORGEJO_HOST: forgejo:3000
+  REGISTRY_OWNER: sloan
+  DAEMON_IMAGE: gastown-daemon
+  POLECAT_IMAGE: gastown-polecat
+  # The account REGISTRY_TOKEN was minted for: the bot the provisioner gives
+  # write:package (scripts/forgejo-provision.sh, role registry).
+  REGISTRY_USER: bot-registry
+  # The account SOURCES_TOKEN was minted for, the login the credential helper
+  # answers as.
+  SOURCES_USER: bot-viewer
+  # mango is not one of the four image pins (deploy/daemon/image-pins names bd,
+  # om, hm and devops, and its parser refuses a fifth name), yet the daemon
+  # image's Dockerfile copies the mango binary. The operator sets these two
+  # repository variables to the mango source and commit the image carries; the
+  # preflight refuses when either is empty.
+  MANGO_URL: ${{ vars.MANGO_URL }}
+  MANGO_COMMIT: ${{ vars.MANGO_COMMIT }}
+
+jobs:
+  images:
+    runs-on: ci-base
+    steps:
+      - name: preflight
+        run: |
+          set -u
+          missing=""
+          for tool in jq go docker git; do
+            command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+          done
+          if [ -n "$missing" ]; then
+            echo "images: the ci-base runner is missing:$missing" >&2
+            exit 1
+          fi
+          version=$(jq --version)
+          if [ "$version" != "jq-1.7.1" ]; then
+            echo "images: jq --version printed '$version', but this workflow needs jq-1.7.1 (deploy/ci-base/Dockerfile); the base image's jq is another version" >&2
+            exit 1
+          fi
+          if [ -z "$MANGO_URL" ] || [ -z "$MANGO_COMMIT" ]; then
+            echo "images: the MANGO_URL and MANGO_COMMIT repository variables must name the mango source the daemon image carries" >&2
+            exit 1
+          fi
+          case "$MANGO_URL" in
+            http://*|https://*) ;;
+            *)
+              echo "images: MANGO_URL is not an http(s) repository URL: $MANGO_URL" >&2
+              exit 1
+              ;;
+          esac
+          if [ "${#MANGO_COMMIT}" -ne 40 ]; then
+            echo "images: MANGO_COMMIT is ${#MANGO_COMMIT} characters, want a full 40-character sha" >&2
+            exit 1
+          fi
+          case "$MANGO_COMMIT" in
+            *[!0-9a-f]*)
+              echo "images: MANGO_COMMIT is not lowercase hex: $MANGO_COMMIT" >&2
+              exit 1
+              ;;
+          esac
+      - uses: actions/checkout@v4
+      - name: resolve the one commit
+        run: |
+          set -u
+          if [ -z "${GITHUB_SHA:-}" ] || [ "${#GITHUB_SHA}" -ne 40 ]; then
+            echo "images: GITHUB_SHA is not the green ref's full commit: '${GITHUB_SHA:-}'" >&2
+            exit 1
+          fi
+          case "$GITHUB_SHA" in
+            *[!0-9a-f]*)
+              echo "images: GITHUB_SHA is not lowercase hex: $GITHUB_SHA" >&2
+              exit 1
+              ;;
+          esac
+          echo "SHA=$GITHUB_SHA" >> "$GITHUB_ENV"
+          echo "TAG=${GITHUB_SHA:0:12}" >> "$GITHUB_ENV"
+      - name: log in to the registry
+        env:
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          # The token reaches docker login on standard input only: never an
+          # argument, an echo or a log line.
+          printf '%s' "$REGISTRY_TOKEN" | docker login "$FORGEJO_HOST" --username "$REGISTRY_USER" --password-stdin
+      - name: let git read the pinned sources with the read-only token
+        run: |
+          # SOURCES_TOKEN reaches git only through this helper, which reads it
+          # from the environment at each use: no URL, argument or .gitconfig
+          # value holds it.
+          git config --global credential."http://$FORGEJO_HOST".helper \
+            '!f() { test "$1" = get || exit 0; printf "username=%s\npassword=%s\n" "$SOURCES_USER" "$SOURCES_TOKEN"; }; f'
+      - name: fetch mango at its pin
+        env:
+          SOURCES_TOKEN: ${{ secrets.SOURCES_TOKEN }}
+        run: |
+          set -euo pipefail
+          mango=$(mktemp -d "$RUNNER_TEMP/mango.XXXXXX")
+          git -C "$mango" init --quiet
+          git -C "$mango" fetch --quiet --depth 1 "$MANGO_URL" "$MANGO_COMMIT"
+          git -C "$mango" checkout --quiet --detach FETCH_HEAD
+          got=$(git -C "$mango" rev-parse HEAD)
+          if [ "$got" != "$MANGO_COMMIT" ]; then
+            echo "images: the mango fetch landed on $got, not the pinned $MANGO_COMMIT" >&2
+            exit 1
+          fi
+          echo "MANGO_SRC=$mango" >> "$GITHUB_ENV"
+      - name: stage the daemon image's build context
+        env:
+          SOURCES_TOKEN: ${{ secrets.SOURCES_TOKEN }}
+        run: |
+          set -euo pipefail
+          ctx=$(mktemp -d "$RUNNER_TEMP/daemon-context.XXXXXX")
+          go run ./cmd/gt daemon image --apply --context-only \
+            --rev "$SHA" \
+            --out "$ctx" \
+            --gt-src "$GITHUB_WORKSPACE" \
+            --mango-src "$MANGO_SRC" \
+            --mango-commit "$MANGO_COMMIT" \
+            --pins "$GITHUB_WORKSPACE/deploy/daemon/image-pins"
+          # A full build stages this beside the binaries for its own engine
+          # step; a context-only run stops before that step, so the workflow
+          # copies the file the Dockerfile's COPY reads from the checkout.
+          cp "$GITHUB_WORKSPACE/deploy/daemon/ssh_known_hosts" "$ctx/ssh_known_hosts"
+          echo "DAEMON_CONTEXT=$ctx" >> "$GITHUB_ENV"
+      - name: build the daemon image
+        run: |
+          set -euo pipefail
+          docker build \
+            --platform linux/arm64 \
+            -f "$GITHUB_WORKSPACE/deploy/daemon/Dockerfile" \
+            -t "$FORGEJO_HOST/$REGISTRY_OWNER/$DAEMON_IMAGE:$TAG" \
+            --label org.gastown.gt-commit="$SHA" \
+            "$DAEMON_CONTEXT"
+      - name: stage the polecat image's build context
+        env:
+          SOURCES_TOKEN: ${{ secrets.SOURCES_TOKEN }}
+        run: |
+          set -euo pipefail
+          ctx=$(mktemp -d "$RUNNER_TEMP/polecat-context.XXXXXX")
+          staged=$(go run ./internal/polecat/imagectx/cmd/build \
+            -pins deploy/daemon/image-pins \
+            -seed-pins deploy/polecat/seed-pins \
+            -seed-urls deploy/polecat/seed-urls \
+            -rev "$SHA" \
+            -out "$ctx")
+          printf '%s\n' "$staged"
+          gt_commit=$(printf '%s\n' "$staged" | sed -n 's/^label: org.gastown.gt-commit=//p')
+          bd_commit=$(printf '%s\n' "$staged" | sed -n 's/^label: org.gastown.bd-commit=//p')
+          go_floor=$(printf '%s\n' "$staged" | sed -n 's/^label: go-floor=//p')
+          if [ "$gt_commit" != "$SHA" ]; then
+            echo "images: the polecat context staged at $gt_commit, not the green commit $SHA" >&2
+            exit 1
+          fi
+          if [ -z "$bd_commit" ] || [ -z "$go_floor" ]; then
+            echo "images: the polecat context named no bd commit or Go floor, so the image cannot be labelled or built" >&2
+            exit 1
+          fi
+          echo "POLECAT_CONTEXT=$ctx" >> "$GITHUB_ENV"
+          echo "BD_COMMIT=$bd_commit" >> "$GITHUB_ENV"
+          echo "GO_FLOOR=$go_floor" >> "$GITHUB_ENV"
+      - name: build the polecat image
+        run: |
+          set -euo pipefail
+          docker build \
+            --platform linux/arm64 \
+            -f "$GITHUB_WORKSPACE/deploy/polecat/Dockerfile" \
+            -t "$FORGEJO_HOST/$REGISTRY_OWNER/$POLECAT_IMAGE:$TAG" \
+            --label org.gastown.gt-commit="$SHA" \
+            --label org.gastown.bd-commit="$BD_COMMIT" \
+            --build-arg GO_FLOOR="$GO_FLOOR" \
+            "$POLECAT_CONTEXT"
+      - name: push both images and publish their digests
+        run: |
+          set -euo pipefail
+          for kind in daemon polecat; do
+            case "$kind" in
+              daemon) name="$FORGEJO_HOST/$REGISTRY_OWNER/$DAEMON_IMAGE" ;;
+              polecat) name="$FORGEJO_HOST/$REGISTRY_OWNER/$POLECAT_IMAGE" ;;
+            esac
+            ref="$name:$TAG"
+            docker push "$ref"
+            # The digest the deploy pins is the registry's own: read it back
+            # from the manifest the registry serves, never the local image id.
+            docker pull --quiet "$ref" >/dev/null
+            digests=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$ref" | sed -n "s#^$name@##p")
+            count=$(printf '%s\n' "$digests" | grep -Ec '^sha256:[0-9a-f]{64}$' || true)
+            lines=$(printf '%s\n' "$digests" | wc -l)
+            if [ "$count" -ne 1 ] || [ "$lines" -ne 1 ]; then
+              echo "images: the registry answered no single sha256 digest for $ref: '$digests'" >&2
+              exit 1
+            fi
+            echo "IMAGE $kind $TAG $digests"
+          done
+      - name: check both images carry the one commit
+        run: |
+          set -euo pipefail
+          status=0
+          for kind in daemon polecat; do
+            case "$kind" in
+              daemon) name="$FORGEJO_HOST/$REGISTRY_OWNER/$DAEMON_IMAGE" ;;
+              polecat) name="$FORGEJO_HOST/$REGISTRY_OWNER/$POLECAT_IMAGE" ;;
+            esac
+            got=$(docker image inspect --format '{{index .Config.Labels "org.gastown.gt-commit"}}' "$name:$TAG")
+            if [ "$got" != "$SHA" ]; then
+              echo "images: $name:$TAG carries org.gastown.gt-commit=$got, but the green commit is $SHA" >&2
+              status=1
+            fi
+          done
+          exit "$status"
