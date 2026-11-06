@@ -156,7 +156,11 @@ it while the sandbox disk fills. That pass reads the disks and applies their
 alerts beside the trim, so a notifier that does not answer delays the end of
 the alerts and not the trim. Alert applications from different passes take
 turns, so a later reading is never applied over an earlier one's state, and
-every other target still waits for a quiet tick. A tick that finds no trim due
+every other target still waits for a quiet tick. A notifier that does not
+answer holds the alert turn for up to three attempts of the 60-second escalation
+timeout for each alert; another pass waits 30 seconds for the turn, then reads
+the disks for its own decisions and goes on, and the alerts of that time stay
+with the holder. A tick that finds no trim due
 reads no disk: while the town is busy the alerts are applied each time the trim
 comes due (`cache_trim_interval`), and on every quiet pass.
 

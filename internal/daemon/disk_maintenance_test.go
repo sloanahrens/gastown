@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
+
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/diskmaint"
 	"github.com/steveyegge/gastown/internal/diskmaint/disks"
@@ -947,12 +949,17 @@ func TestAlertSendsEndWithTheirPassContext(t *testing.T) {
 // TestDiskMaintCombinedPassGoesOnWhenTheTurnIsNotGranted: a pass that waits for
 // its turn to apply the alerts and does not get it in time reads the disks for
 // itself and carries on to its targets, leaving the alerts to the pass that has
-// the turn (gt-gg9hv.48).
+// the turn (gt-gg9hv.48). The readings of that fallback read are the ones the
+// pass decides with, so the keep it plans is the tightened one (gt-gg9hv.54).
 func TestDiskMaintCombinedPassGoesOnWhenTheTurnIsNotGranted(t *testing.T) {
 	t.Parallel()
 	d, logs, f := diskMaintTestDaemon(t)
 	countCacheTrims(d)
-	f.readings = []disks.Reading{{Name: "colima", UsedPct: 88}}
+	var reads atomic.Int32
+	d.diskMaint.readDisks = func(context.Context) []disks.Reading {
+		reads.Add(1)
+		return []disks.Reading{{Name: "colima", UsedPct: 88}}
+	}
 	// The turn is not granted within the wait: the wait's own deadline has
 	// passed, reported at once so the test does not spend the real wait.
 	d.diskMaintAlerts.acquireTurn = func(context.Context) (func(), error) {
@@ -960,13 +967,160 @@ func TestDiskMaintCombinedPassGoesOnWhenTheTurnIsNotGranted(t *testing.T) {
 	}
 	d.runDiskMaintenance()
 	if len(f.target.policies) != 1 {
-		t.Errorf("planned the target %d times, want 1: a pass without the alert turn still plans its targets", len(f.target.policies))
+		t.Fatalf("planned the target %d times, want 1: a pass without the alert turn still plans its targets", len(f.target.policies))
+	}
+	if got := reads.Load(); got != 1 {
+		t.Errorf("disk reads = %d, want 1: the fallback reads the disks once, for its own decisions", got)
+	}
+	// 3 is the tightened keep a disk at or over 80% asks for; the pass starts
+	// from the default 5.
+	if keep := f.target.policies[0].Keep; keep != 3 {
+		t.Errorf("planned keep = %d, want 3: the keep decision did not use the fallback's readings of a disk at 88%%", keep)
 	}
 	if diskMaintAlertIsOpen(f.notify, "diskmaint:colima") {
 		t.Error("an alert is open: the pass without the turn applied the alerts")
 	}
 	if !strings.Contains(logs.String(), "another pass is applying the disk alerts") {
 		t.Errorf("log = %q, want the read-only fallback named", logs.String())
+	}
+}
+
+// TestDiskMaintCombinedPassEndsWhenItsContextEndsWhileWaitingForTheTurn: a pass
+// whose own context ends while it waits for the alert turn is over, not
+// fallback: it reads no disk, applies nothing, plans nothing, and leaves its
+// targets due for the next tick (gt-gg9hv.54).
+func TestDiskMaintCombinedPassEndsWhenItsContextEndsWhileWaitingForTheTurn(t *testing.T) {
+	t.Parallel()
+	d, logs, f := diskMaintTestDaemon(t)
+	countCacheTrims(d)
+	var reads atomic.Int32
+	d.diskMaint.readDisks = func(context.Context) []disks.Reading {
+		reads.Add(1)
+		return []disks.Reading{{Name: "colima", UsedPct: 88}}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	d.ctx = ctx
+	entered := make(chan struct{})
+	d.diskMaintAlerts.acquireTurn = func(waitCtx context.Context) (func(), error) {
+		close(entered)
+		<-waitCtx.Done()
+		return nil, waitCtx.Err()
+	}
+
+	tickDone := make(chan struct{})
+	go func() {
+		defer close(tickDone)
+		d.runDiskMaintenance()
+	}()
+	awaitOrFail(t, entered, "the pass to reach its turn wait")
+	cancel() // the pass's own context, not the wait's deadline
+	awaitOrFail(t, tickDone, "the pass to end with its context")
+
+	if strings.Contains(logs.String(), "another pass is applying the disk alerts") {
+		t.Errorf("log = %q, want no read-only fallback: the pass itself was over", logs.String())
+	}
+	if !strings.Contains(logs.String(), "the disk alerts were not applied") {
+		t.Errorf("log = %q, want the unapplied alerts named", logs.String())
+	}
+	if got := reads.Load(); got != 0 {
+		t.Errorf("disk reads = %d, want 0: a pass that ended while waiting for the turn reads nothing", got)
+	}
+	if got := len(f.target.policies); got != 0 {
+		t.Errorf("planned the target %d times, want 0: a pass that ended plans nothing", got)
+	}
+
+	// The next tick, with a live context, finds the target still due.
+	d.ctx = context.Background()
+	d.diskMaintAlerts.acquireTurn = nil
+	d.runDiskMaintenance()
+	if got := len(f.target.policies); got != 1 {
+		t.Errorf("planned the target %d times on the next tick, want 1: an ended pass leaves its targets due", got)
+	}
+}
+
+// blockingNotifier blocks in its first send until the context it was handed
+// ends, so a test can end a pass under a send. Later sends go to the wrapped
+// notifier, which is how the next pass is seen to raise the alert again.
+type blockingNotifier struct {
+	notify.Notifier
+	ctx    chan context.Context
+	err    chan error
+	blocks atomic.Bool
+}
+
+func newBlockingNotifier(wrapped notify.Notifier) *blockingNotifier {
+	n := &blockingNotifier{
+		Notifier: wrapped,
+		ctx:      make(chan context.Context, 1),
+		err:      make(chan error, 1),
+	}
+	n.blocks.Store(true)
+	return n
+}
+
+func (n *blockingNotifier) Escalate(ctx context.Context, e notify.Escalation) error {
+	if !n.blocks.CompareAndSwap(true, false) {
+		return n.Notifier.Escalate(ctx, e)
+	}
+	n.ctx <- ctx
+	<-ctx.Done()
+	n.err <- ctx.Err()
+	return ctx.Err()
+}
+
+// passCtxMark is carried by the pass context so the test can see that the send
+// it blocks runs under a context derived from that pass.
+type passCtxMark struct{}
+
+// diskMaintNoSleepClock tells time from a fake clock and returns at once from a
+// sleep, so the escalation retry's backoff is a wait the test does not spend.
+type diskMaintNoSleepClock struct {
+	*clockwork.FakeClock
+}
+
+func (*diskMaintNoSleepClock) Sleep(time.Duration) {}
+
+// TestDiskMaintPassCancelAbandonsABlockedAlertSend: ending a pass's context
+// while a notifier is inside the send ends the send, leaves the alert
+// unrecorded for the next pass to raise again, and lets the pass finish. The
+// send runs under the pass's context, not context.Background() (gt-gg9hv.54).
+func TestDiskMaintPassCancelAbandonsABlockedAlertSend(t *testing.T) {
+	t.Parallel()
+	d, _, f := diskMaintTestDaemon(t)
+	countCacheTrims(d)
+	f.readings = []disks.Reading{{Name: "colima", UsedPct: 88}}
+	blocking := newBlockingNotifier(f.notify)
+	d.notifier = blocking
+	d.clock = &diskMaintNoSleepClock{FakeClock: clockwork.NewFakeClockAt(diskMaintNow)} // the retry's backoff
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), passCtxMark{}, "the pass"))
+	d.ctx = ctx
+
+	tickDone := make(chan struct{})
+	go func() {
+		defer close(tickDone)
+		d.runDiskMaintenance()
+	}()
+	got := awaitOrFail(t, blocking.ctx, "the notifier's send to begin")
+	if v := got.Value(passCtxMark{}); v != "the pass" {
+		t.Errorf("the notifier's context carries %v, want the pass's own context: applyDiskAlerts was handed another context", v)
+	}
+	cancel() // end the pass under the send
+	if err := awaitOrFail(t, blocking.err, "the send to end with the pass"); !errors.Is(err, context.Canceled) {
+		t.Errorf("the send ended with %v, want context.Canceled: it was not derived from the pass context", err)
+	}
+	awaitOrFail(t, tickDone, "the pass to finish")
+
+	if diskMaintAlertIsOpen(f.notify, "diskmaint:colima") {
+		t.Error("an alert is open: a send abandoned with its pass recorded the alert")
+	}
+
+	// The next day's pass raises the alert again: the abandoned send left the
+	// key undecided rather than open.
+	d.ctx = context.Background()
+	d.diskMaint.now = func() time.Time { return diskMaintNow.Add(24 * time.Hour) }
+	d.runDiskMaintenance()
+	if !diskMaintAlertIsOpen(f.notify, "diskmaint:colima") {
+		t.Error("no alert open on the next pass: an abandoned send must leave its alert to be raised again")
 	}
 }
 
