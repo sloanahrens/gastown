@@ -162,6 +162,7 @@ type (
 	JevProgressConfig          = agentconfig.JevProgressConfig
 	JevStaleConfig             = agentconfig.JevStaleConfig
 	JevNotesConfig             = agentconfig.JevNotesConfig
+	JevScorecardConfig         = agentconfig.JevScorecardConfig
 	JevScrub                   = agentconfig.JevScrub
 	ScheduledSlingsConfig      = agentconfig.ScheduledSlingsConfig
 	ScheduledSlingEntry        = agentconfig.ScheduledSlingEntry
@@ -477,6 +478,14 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.JevNotes.Enabled
+	}
+	// jev_scorecard is opt-in: a refresh scores every registered battery, so
+	// only an explicit enabled:true turns it on (gt-jk0162).
+	if patrol == "jev_scorecard" {
+		if config == nil || config.Patrols == nil || config.Patrols.JevScorecard == nil {
+			return false
+		}
+		return config.Patrols.JevScorecard.Enabled
 	}
 	// jev_targets is opt-in for the same reason: each deep-review run it
 	// serves pays for Jev calls. It is called by the deep-review schedule, not

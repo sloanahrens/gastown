@@ -1064,6 +1064,21 @@ type Daemon struct {
 	jevNotesRunning atomic.Bool
 	jevNotesOpen    jevNotesOpener
 
+	// jevScorecardRunning is the jev_scorecard refresh's single-flight guard
+	// (jev_scorecard_patrol.go), and jevScorecardRun is its in-memory last-run
+	// time. jevScorecardSeams replace its clock, zone, runner and dispatch in
+	// tests; the zero value is production. jevScorecardStartMu guards
+	// jevScorecardStartedAt, the first tick this process evaluated the patrol,
+	// which the daily clock is counted from when the town has no last-run
+	// record. jevScorecardLogs holds back the lines the patrol would otherwise
+	// repeat every heartbeat.
+	jevScorecardRunning   atomic.Bool
+	jevScorecardRun       patrolLastRunMemory
+	jevScorecardSeams     jevScorecardSeams
+	jevScorecardStartMu   sync.Mutex
+	jevScorecardStartedAt time.Time
+	jevScorecardLogs      jevScorecardThrottle
+
 	// The in-memory last-run times of the patrols below, as jevDedupeRun is
 	// jev_dedupe's: each outranks the persisted record when a save failed, so
 	// an unwritable daemon directory cannot make the patrol due on every
@@ -2415,6 +2430,12 @@ var heartbeatSteps = []heartbeatStep{
 	// mechanical label (internal/jev/notes). Opt-in and lifecycle, like
 	// jev-dedupe.
 	{name: "jev-notes", lifecycle: true, run: (*Daemon).triggerJevNotes},
+
+	// Refresh the cached scorecard once a day and at start when the cache is
+	// older than its interval, by running `gt jev scorecard --refresh`
+	// (internal/daemon/jev_scorecard_patrol.go, gt-jk0162). Opt-in and
+	// lifecycle: a refresh scores every registered battery.
+	{name: "jev-scorecard", lifecycle: true, run: (*Daemon).triggerJevScorecard},
 
 	// Sweep the tiers `make gate` does not run against origin/main
 	// (gt-vsct7.5). Non-lifecycle: it runs tests and files beads, and an

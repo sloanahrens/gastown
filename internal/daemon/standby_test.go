@@ -418,7 +418,7 @@ func TestStandbyExceptions(t *testing.T) {
 		"dispatch", "rebuild-gt", "update", "rebuild-om", "rebuild-hm", "jev-dedupe", "jev-attention",
 		"jev-landing", "jev-submission", "jev-drift", "jev-logtriage", "jev-rework",
 		"jev-dispatch", "jev-thrash", "jev-rules", "jev-conflict", "jev-progress",
-		"jev-stale", "jev-notes",
+		"jev-stale", "jev-notes", "jev-scorecard",
 	}
 	if got := standbyStepNames(true); !slices.Equal(got, wantLifecycle) {
 		t.Errorf("lifecycle steps = %v, want %v", got, wantLifecycle)
