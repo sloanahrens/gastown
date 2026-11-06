@@ -673,7 +673,15 @@ func onePassAtATime(t *testing.T, grantAlways bool) (rec *notifyfake.Recorder, a
 		defer inFlight.Add(-1)
 		if n == 1 {
 			close(first)
-			<-hold
+			// Off the test goroutine, so a missed release is an error and a
+			// return, not a FailNow; the wait is bounded like every other.
+			waitCtx, cancelWait := context.WithTimeout(context.Background(), awaitOrFailTimeout)
+			defer cancelWait()
+			select {
+			case <-hold:
+			case <-waitCtx.Done():
+				t.Errorf("waited %s for the test to release the held disk read; it never came", awaitOrFailTimeout)
+			}
 			return []disks.Reading{{Name: "mac", UsedPct: 85}}
 		}
 		return []disks.Reading{{Name: "colima", UsedPct: 88}}
@@ -750,8 +758,16 @@ type stuckNotifier struct {
 func (n *stuckNotifier) Escalate(ctx context.Context, e notify.Escalation) error {
 	if n.calls.Add(1) == 1 {
 		n.once.Do(func() { close(n.entered) })
-		<-ctx.Done()
-		return ctx.Err()
+		// The pass context ends the wait; the bound only stops a test that
+		// forgot to end it from hanging the package.
+		bound, cancelBound := context.WithTimeout(context.Background(), awaitOrFailTimeout)
+		defer cancelBound()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-bound.Done():
+			return errors.New("the stuck notifier was never released by its pass context")
+		}
 	}
 	return n.Notifier.Escalate(ctx, e)
 }

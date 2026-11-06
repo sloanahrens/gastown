@@ -494,9 +494,7 @@ func (d *Daemon) runDiskMaintenanceTrim(mode string, due diskMaintDue, why strin
 
 // runCacheTrimPass is the trim's own pass, the one a busy tick dispatches: the
 // disk readings and their alerts first, as the combined pass raises them, then
-// the trim. Its caller holds the trim's guard (see runDiskMaintenanceTrim),
-// which is the trim's own and not the target pass's, so a long target pass
-// does not keep it waiting.
+// the trim. Its caller holds the trim's own guard (see runDiskMaintenanceTrim).
 func (d *Daemon) runCacheTrimPass(mode string) {
 	ctx, cancel := d.diskMaintenanceContext()
 	defer cancel()
