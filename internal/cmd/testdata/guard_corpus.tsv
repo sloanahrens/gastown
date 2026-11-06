@@ -18,13 +18,14 @@ guard	context	command	verdict	reason_key	bead	stamp
 # A row records the verdict the guard gives, not an opinion about it.
 #
 # A container_suite or test_scope refusal is recorded under the polecat context
-# the hook consults the rule in: those classifiers are role-blind, but the hook
-# calls test_scope only for a polecat, and calls container_suite for a polecat or
-# a refinery (tapGuardContainerSuite returns without a refusal for crew and the
-# other roles). A test_scope refusal recorded under another role would describe
-# a session the rule never judges. Allow rows also appear under the other
-# contexts; a container_suite allow under refinery is one the hook judges and
-# lets through.
+# the hook consults the rule in. The hook calls test_scope only for a polecat,
+# and container_suite only where isPolecatOrRefineryContext accepts the session;
+# when GT_ROLE is set (every spawn carries it) that gate answers
+# isPolecatContext, which a refinery's GT_ROLE does not satisfy, so a refinery
+# session is not judged. Crew and the other roles are skipped outright. A
+# refusal recorded under another role would describe a session the rule never
+# judges, and an allow row there shows the classifier's answer, not the hook
+# letting the command through.
 #
 # --- container_suite: refusals ---
 container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/beads/..."	refuse	targets testcontainers-backed package(s)	seed
@@ -206,10 +207,10 @@ dangerous	crew	"pacman -Ss curl"	allow		seed
 dangerous	crew	"go clean"	allow		seed
 dangerous	crew	"ls -R ./docs"	allow		seed
 dangerous	polecat	`gt bead note gt-x 'the guard is deliberate'`	allow		seed
-# --- dangerous: commands the shell cannot read, refused in every session (gt-m6x4py) ---
-# The hook judges every command, so each unreadable construct is refused for a
-# polecat and for crew alike. A lenient read that finds a dangerous operation
-# inside the unreadable text keeps that operation's reason.
+# --- dangerous: commands the shell cannot read, refused for a polecat and crew (gt-m6x4py) ---
+# The dangerous-command guard has no role skip, so each unreadable construct is
+# refused in both contexts the corpus records for it. A lenient read that finds
+# a dangerous operation inside the unreadable text keeps that operation's reason.
 dangerous	polecat	"(make test"	refuse	cannot be read (unbalanced parenthesis)	gt-m6x4py
 dangerous	crew	"(make test"	refuse	cannot be read (unbalanced parenthesis)	gt-m6x4py
 dangerous	polecat	"echo 'make test"	refuse	cannot be read (unterminated quote)	gt-m6x4py
