@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -193,6 +194,23 @@ func TestRunMetricsAnalyseNeedsNoSourceCheckout(t *testing.T) {
 			t.Fatalf("the analysis was not reached: no panel published: %v", err)
 		}
 	})
+}
+
+// The command wires the analysis to the binary this host builds, in the town's
+// platform directory. analysisPaths is a test stand-in with its own MangoBin,
+// so this drives the production analysisOptions the command and the run use.
+func TestAnalysisOptionsWiresThePlatformMangoBin(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	opts := analysisOptions(town)
+	wantBin := filepath.Join(town, ".runtime", "metrics", "bin", runtime.GOOS+"-"+runtime.GOARCH, "mango")
+	if opts.MangoBin != wantBin {
+		t.Fatalf("MangoBin = %q, want the platform binary %q", opts.MangoBin, wantBin)
+	}
+	wantGitDir := filepath.Join(town, "mango", ".repo.git")
+	if opts.MangoGitDir != wantGitDir {
+		t.Fatalf("MangoGitDir = %q, want %q", opts.MangoGitDir, wantGitDir)
+	}
 }
 
 // analyseTown is a town with a metrics day and no gt source checkout: the day
