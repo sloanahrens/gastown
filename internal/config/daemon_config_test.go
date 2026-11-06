@@ -1265,6 +1265,19 @@ func TestMayBeContainerTown(t *testing.T) {
 	}
 }
 
+// TestContainerKubeconfigFile pins the one definition of the container's
+// derived kubeconfig: the compose render writes this path and the daemon's
+// container-mode patrol and cache trim read it, each pinned to the same literal
+// in its own package.
+func TestContainerKubeconfigFile(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	want := filepath.Join(town, ".runtime", "container", "kubeconfig.yaml")
+	if got := ContainerKubeconfigFile(town); got != want {
+		t.Errorf("ContainerKubeconfigFile = %q, want %q", got, want)
+	}
+}
+
 // A spec_dispatch block that sets no max_in_flight runs the code default of
 // two slings at once, and a zero or negative value is the default too: the cap
 // never reads as unbounded (gt-16pqa).

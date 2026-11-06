@@ -332,7 +332,10 @@ func TestComposeWriteCarriesTheClientConfiguration(t *testing.T) {
 	if err := runDaemonCompose(r.flags, r.deps); err != nil {
 		t.Fatal(err)
 	}
-	kube := containerKubeconfigPath(r.town)
+	// The literal, not containerKubeconfigPath: the daemon's container-mode
+	// patrol and cache trim read this path, and its own test pins the same
+	// literal, so either side drifting from it turns one of them red.
+	kube := filepath.Join(r.town, ".runtime", "container", "kubeconfig.yaml")
 	if len(r.wrote) != 2 || r.wrote[0] != kube || r.wrote[1] != r.composePath() {
 		t.Fatalf("wrote %v, want the derived kubeconfig then the compose file", r.wrote)
 	}
