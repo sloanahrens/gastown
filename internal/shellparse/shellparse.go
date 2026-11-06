@@ -57,6 +57,17 @@ type Segment struct {
 	// Subs are the substitutions in this segment's words, assignment values,
 	// redirection targets and here-document bodies.
 	Subs []Script
+
+	// After is the operator that ends the segment: ";", "&&", "||", "|", "&",
+	// or "" for the segment that ends the script. A newline reads as ";", the
+	// way the shell's grammar treats it.
+	After string
+
+	// Shells holds the ids of the subshells enclosing the segment, outermost
+	// first. One id belongs to one "(" group, so two segments share a prefix
+	// only when they run in the same subshell. A brace group is not a
+	// subshell and contributes no id.
+	Shells []int
 }
 
 // Word is one shell word: Text has quoting resolved, Raw is the source text,
@@ -65,6 +76,26 @@ type Word struct {
 	Text    string
 	Raw     string
 	Literal bool
+
+	// Src is the byte offset of the word's first byte in the source Parse
+	// read, or -1 when the parser gave it no position. It puts words back in
+	// source order next to a redirection, whose operator may stand between
+	// them.
+	Src int
+
+	// ProcSubs are the process substitutions written in the word, in order. A
+	// word that is one of them ("<(cmd)", ">(cmd)") names a file the shell
+	// fills by running it, so nothing has to cut the body out of the word
+	// text; a word with text around one, or two side by side, is an ordinary
+	// operand path.
+	ProcSubs []ProcSubst
+}
+
+// ProcSubst is one process substitution: its source text and the command lines
+// it runs.
+type ProcSubst struct {
+	Raw    string
+	Script Script
 }
 
 // Redirection is one redirection: Op is the operator as written, N the file
@@ -80,6 +111,15 @@ type Redirection struct {
 	// segment inside that command. It is false when the redirection belongs to
 	// the command itself.
 	Inherited bool
+
+	// Src is the byte offset of the redirection's target word, or -1 when the
+	// parser gave it no position.
+	Src int
+
+	// OpSrc is the byte offset of the operator. With Src it tells a target
+	// glued to its operator ("0<<<text") from one written after it ("<<< text"),
+	// which is where a shell reads a bare here-string's word run from.
+	OpSrc int
 }
 
 // Heredoc is one here-document: the delimiter as written, whether it was
@@ -88,6 +128,11 @@ type Heredoc struct {
 	Delimiter string
 	Quoted    bool
 	Body      string
+
+	// N is the file descriptor the body is read on: "0", "3", "{name}", or ""
+	// for the shell's default. Only the standard input descriptor feeds a
+	// shell its script.
+	N string
 }
 
 // UnparseableError reports a command Parse could not read, naming the
@@ -184,6 +229,29 @@ type flattener struct {
 	// err is the first construct the walk could not read; flatten turns it into
 	// the *UnparseableError Parse returns and drops the partial result.
 	err error
+
+	// shells is the stack of subshell ids the walk is inside, and nextShell the
+	// id the next "(" group takes.
+	shells    []int
+	nextShell int
+}
+
+// segmentShells is the subshell stack a new segment carries, copied so a later
+// sibling group cannot rewrite it.
+func (f *flattener) segmentShells() []int {
+	if len(f.shells) == 0 {
+		return nil
+	}
+	return append([]int(nil), f.shells...)
+}
+
+// setAfter records op as the operator ending the last segment the walk has
+// added since index from. A statement that added no segment leaves nothing to
+// mark.
+func setAfter(into *Script, from int, op string) {
+	if from < len(into.Segments) {
+		into.Segments[len(into.Segments)-1].After = op
+	}
 }
 
 // fail records the first construct the walk could not read.
@@ -200,11 +268,23 @@ func (f *flattener) record(err error) {
 
 // stmts flattens every statement in list into the script accumulated so far.
 func (f *flattener) stmts(list []*syntax.Stmt, into *Script) {
-	for _, s := range list {
+	for i, s := range list {
 		if f.err != nil {
 			return
 		}
+		before := len(into.Segments)
 		f.stmt(s, into)
+		if i < len(list)-1 {
+			// A statement list is separated by ";" or a newline, which the
+			// shell's grammar treats the same way, or by a background "&",
+			// which the parser records on the statement rather than as an
+			// operator between two of them.
+			op := ";"
+			if s.Background {
+				op = "&"
+			}
+			setAfter(into, before, op)
+		}
 	}
 }
 
@@ -245,7 +325,7 @@ func (f *flattener) stmt(s *syntax.Stmt, into *Script) {
 	if len(redirs) == 0 && len(heredocs) == 0 && len(subs) == 0 {
 		return
 	}
-	into.Segments = append(into.Segments, Segment{Redirs: redirs, Heredocs: heredocs, Subs: subs})
+	into.Segments = append(into.Segments, Segment{Redirs: redirs, Heredocs: heredocs, Subs: subs, Shells: f.segmentShells()})
 }
 
 // compoundCommand reports whether c encloses other commands, so a redirection
@@ -274,22 +354,32 @@ func (f *flattener) command(c syntax.Command, into *Script) {
 		if f.err != nil {
 			return
 		}
+		seg.Shells = f.segmentShells()
 		into.Segments = append(into.Segments, seg)
 
 	case *syntax.BinaryCmd:
+		before := len(into.Segments)
 		f.stmt(x.X, into)
+		setAfter(into, before, x.Op.String())
 		f.stmt(x.Y, into)
 
 	case *syntax.Subshell:
+		f.shells = append(f.shells, f.nextShell)
+		f.nextShell++
 		f.stmts(x.Stmts, into)
+		f.shells = f.shells[:len(f.shells)-1]
 
 	case *syntax.Block:
 		f.stmts(x.Stmts, into)
 
 	case *syntax.IfClause:
+		cond := len(into.Segments)
 		f.stmts(x.Cond, into)
+		setAfter(into, cond, ";")
+		then := len(into.Segments)
 		f.stmts(x.Then, into)
 		if x.Else != nil {
+			setAfter(into, then, ";")
 			f.command(x.Else, into)
 		}
 
@@ -309,7 +399,9 @@ func (f *flattener) command(c syntax.Command, into *Script) {
 		f.stmts(x.Do, into)
 
 	case *syntax.WhileClause:
+		cond := len(into.Segments)
 		f.stmts(x.Cond, into)
+		setAfter(into, cond, ";")
 		f.stmts(x.Do, into)
 
 	case *syntax.CaseClause:
@@ -349,6 +441,7 @@ func (f *flattener) command(c syntax.Command, into *Script) {
 		if f.err != nil {
 			return
 		}
+		seg.Shells = f.segmentShells()
 		into.Segments = append(into.Segments, seg)
 
 	case *syntax.LetClause:
@@ -363,6 +456,7 @@ func (f *flattener) command(c syntax.Command, into *Script) {
 			seg.Words = append(seg.Words, Word{Text: raw, Raw: raw})
 			f.arithmSubs(expr, &seg.Subs)
 		}
+		seg.Shells = f.segmentShells()
 		into.Segments = append(into.Segments, seg)
 
 	case *syntax.TestDecl:
@@ -468,7 +562,11 @@ func (f *flattener) redirect(r *syntax.Redirect, redirs *[]Redirection, heredocs
 		if f.err != nil {
 			return
 		}
-		*heredocs = append(*heredocs, Heredoc{Delimiter: delimiter, Quoted: quoted, Body: body})
+		n := ""
+		if r.N != nil {
+			n = r.N.Value
+		}
+		*heredocs = append(*heredocs, Heredoc{Delimiter: delimiter, Quoted: quoted, Body: body, N: n})
 		f.wordSubs(r.Hdoc, subs)
 	default:
 		target := f.word(r.Word)
@@ -479,7 +577,13 @@ func (f *flattener) redirect(r *syntax.Redirect, redirs *[]Redirection, heredocs
 		if r.N != nil {
 			n = r.N.Value
 		}
-		*redirs = append(*redirs, Redirection{Op: r.Op.String(), N: n, Word: target})
+		*redirs = append(*redirs, Redirection{
+			Op:    r.Op.String(),
+			N:     n,
+			Word:  target,
+			Src:   target.Src,
+			OpSrc: posOffset(r.OpPos),
+		})
 		f.wordSubs(r.Word, subs)
 	}
 }
@@ -563,11 +667,69 @@ func (f *flattener) word(w *syntax.Word) Word {
 	if f.err != nil {
 		return Word{}
 	}
-	return Word{
+	word := Word{
 		Text:    text,
 		Raw:     f.raw(w),
 		Literal: literalWord(w.Parts, decoded),
+		Src:     offsetOf(w),
 	}
+	word.ProcSubs = f.procSubsts(w)
+	if f.err != nil {
+		return Word{}
+	}
+	return word
+}
+
+// procSubsts flattens the process substitutions written in a word. A
+// substitution inside double quotes is plain text to the shell, and mvdan does
+// not give it a ProcSubst part, so it is not collected here either.
+func (f *flattener) procSubsts(w *syntax.Word) []ProcSubst {
+	if w == nil {
+		return nil
+	}
+	var subs []ProcSubst
+	f.partsProcSubsts(w.Parts, &subs)
+	return subs
+}
+
+// partsProcSubsts is the walk behind procSubsts.
+func (f *flattener) partsProcSubsts(parts []syntax.WordPart, dest *[]ProcSubst) {
+	for _, part := range parts {
+		switch x := part.(type) {
+		case *syntax.DblQuoted:
+			f.partsProcSubsts(x.Parts, dest)
+		case *syntax.ProcSubst:
+			raw := f.raw(part)
+			if f.err != nil {
+				return
+			}
+			var scripts []Script
+			f.script(x.Stmts, &scripts)
+			if f.err != nil {
+				return
+			}
+			if len(scripts) == 1 {
+				*dest = append(*dest, ProcSubst{Raw: raw, Script: scripts[0]})
+			}
+		}
+	}
+}
+
+// offsetOf is the source byte offset a node starts at, or -1 when the parser
+// gave it no position.
+func offsetOf(n syntax.Node) int {
+	if n == nil {
+		return -1
+	}
+	return posOffset(n.Pos())
+}
+
+// posOffset is offsetOf for a position already in hand.
+func posOffset(p syntax.Pos) int {
+	if !p.IsValid() {
+		return -1
+	}
+	return int(p.Offset())
 }
 
 // literalWord reports whether the shell passes the word's text unchanged: every
@@ -776,8 +938,13 @@ func (f *flattener) partsSubs(parts []syntax.WordPart, dest *[]Script) {
 // script flattens one substitution's statements into a nested Script appended
 // to dest.
 func (f *flattener) script(stmts []*syntax.Stmt, dest *[]Script) {
+	// A substitution runs in a shell of its own, so the subshells enclosing
+	// the word it is written in do not enclose its segments.
+	outer := f.shells
+	f.shells = nil
 	var script Script
 	f.stmts(stmts, &script)
+	f.shells = outer
 	if f.err != nil {
 		return
 	}
