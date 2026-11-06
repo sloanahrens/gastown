@@ -83,6 +83,10 @@ type Fake struct {
 	// ViewerExists makes the viewer bot exist before any create call, as on an instance
 	// a viewer run has already provisioned.
 	ViewerExists bool
+	// SecretRefusal makes every Actions-secret write answer this status, its refusal
+	// echoing the value the request carried, as a server that quotes the request back
+	// in its error does. Zero serves the route normally.
+	SecretRefusal int
 
 	users          map[string]*fakeUser
 	repos          map[string]*fakeRepo
