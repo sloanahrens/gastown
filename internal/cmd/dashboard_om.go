@@ -96,8 +96,6 @@ var (
 // after the bead; scanLog keeps a line that has it.
 const infraFailedMarker = ": landing failed ("
 
-const omLogTimeLayout = "2006/01/02 15:04:05"
-
 // omStage is one gated merge's stage timings, off a "stages:" log line. A
 // stage the line does not name is nil; om is nil when the review did not run.
 type omStage struct {
@@ -423,6 +421,17 @@ type omReader struct {
 	offset int64
 	// now is the clock the rotated-log window is cut against; nil reads time.Now.
 	now func() time.Time
+	// loc is the zone the log's stamps are read in; nil reads time.Local.
+	loc *time.Location
+	// parser follows the log's zone changes across scans; the rotated files and
+	// the live file are read through one, in order.
+	parser *daemonlog.Parser
+	// filter decides whether a line can reach a rule this reader has; nil uses
+	// omWantedLine plus the lines that can change the zone.
+	filter func(string) bool
+	// stamp dates one line; nil reads it through the parser. A test wraps it to
+	// count the lines the parser is asked to date.
+	stamp func(string) (time.Time, string)
 	// rotated holds each rotated log read already, by file name, and what
 	// failed on it: a rotated file never changes, so it is read once, and a
 	// failed one is reported every scan and not read again (its good lines
@@ -687,6 +696,27 @@ func loadOMConfig(path string) omConfig {
 // rejection (a rotated log holds only lines older than its stamp).
 const omRotatedWindow = 25 * time.Hour
 
+// logParser is the daemon-log reader, one per reader so the zone a log region
+// left in force carries to the next scan.
+func (r *omReader) logParser() *daemonlog.Parser {
+	if r.parser == nil {
+		loc := r.loc
+		if loc == nil {
+			loc = time.Local
+		}
+		r.parser = &daemonlog.Parser{
+			Loc: loc,
+			Now: func() time.Time {
+				if r.now != nil {
+					return r.now()
+				}
+				return time.Now()
+			},
+		}
+	}
+	return r.parser
+}
+
 // scanLog reads the rotated daemon logs inside the window, each once, oldest
 // first, then what the live log gained since the last scan. A daemon restart
 // rotates the live log to daemon-<stamp>.log.gz, so without the rotated files
@@ -722,7 +752,10 @@ func (r *omReader) scanRotated() error {
 			continue
 		}
 		err := daemonlog.ReadBackup(path, func(line string) {
-			if strings.Contains(line, dispatchTickMarker) || !omWantedLine(line) {
+			if strings.Contains(line, dispatchTickMarker) {
+				// The latest tick is the live log's: an old one would read as
+				// current. The line carries no zone marker, so the parser can
+				// skip it.
 				return
 			}
 			r.parseLogLine(line)
@@ -734,11 +767,6 @@ func (r *omReader) scanRotated() error {
 		r.rotated[name] = err
 	}
 	return errors.Join(errs...)
-}
-
-// omWantedLine is the prefilter: the lines parseLogLine has a rule for.
-func omWantedLine(line string) bool {
-	return strings.Contains(line, "[land]") || strings.Contains(line, infraFailedMarker) || strings.Contains(line, dispatchTickMarker) || strings.Contains(line, daemonStartMarker)
 }
 
 // scanCurrent reads what the live daemon log gained since the last scan. A log
@@ -771,16 +799,42 @@ func (r *omReader) scanCurrent() error {
 			return err
 		}
 		r.offset += int64(len(line))
-		if !omWantedLine(line) {
-			continue
-		}
 		r.parseLogLine(strings.TrimRight(line, "\r\n"))
 	}
 }
 
+// omWantedLine is the prefilter: the lines parseLogLine has a rule for. It
+// runs before the parser so a line that cannot be an event costs substring
+// tests and no time parsing.
+func omWantedLine(line string) bool {
+	return strings.Contains(line, "[land]") || strings.Contains(line, infraFailedMarker) ||
+		strings.Contains(line, dispatchTickMarker) || strings.Contains(line, daemonStartMarker)
+}
+
+// wantedLine reports whether a line can matter: one with a rule, or one that
+// can change the zone the parser dates later lines in.
+func (r *omReader) wantedLine(line string) bool {
+	if r.filter != nil {
+		return r.filter(line)
+	}
+	return omWantedLine(line) || daemonlog.MayChangeZone(line)
+}
+
+// dateLine dates one line, through the counting seam when a test set one.
+func (r *omReader) dateLine(line string) (time.Time, string) {
+	if r.stamp != nil {
+		return r.stamp(line)
+	}
+	return r.logParser().Parse(line)
+}
+
 func (r *omReader) parseLogLine(line string) {
+	if !r.wantedLine(line) {
+		return
+	}
+	at, _ := r.dateLine(line)
 	if strings.Contains(line, dispatchTickMarker) {
-		if d := parseDispatchTick(line); d != nil {
+		if d := parseDispatchTick(line, at); d != nil {
 			r.lastTick = d
 		}
 		return
@@ -789,49 +843,39 @@ func (r *omReader) parseLogLine(line string) {
 		r.endAllMerges()
 		return
 	}
+	if !strings.Contains(line, "[land]") && !strings.Contains(line, infraFailedMarker) {
+		return
+	}
+	if at.IsZero() {
+		return
+	}
 	if m := omMergeRe.FindStringSubmatch(line); m != nil {
-		if at, err := omLogAt(m[1]); err == nil {
-			r.beginMerge(omMerge{At: at, Bead: m[2], Head: m[3], Tip: m[4], Cand: m[5]})
-		}
+		r.beginMerge(omMerge{At: at, Bead: m[2], Head: m[3], Tip: m[4], Cand: m[5]})
 		return
 	}
 	if m := omLandedRe.FindStringSubmatch(line); m != nil {
-		if at, err := omLogAt(m[1]); err == nil {
-			r.endMerge(m[2], at)
-		}
+		r.endMerge(m[2], at)
 		return
 	}
 	if m := omInfraFailedRe.FindStringSubmatch(line); m != nil {
-		if at, err := omLogAt(m[1]); err == nil {
-			r.endMerge(m[2], at)
-		}
+		r.endMerge(m[2], at)
 		return
 	}
 	if m := omStageRe.FindStringSubmatch(line); m != nil {
-		if at, err := omLogAt(m[1]); err == nil {
-			lint, gate, om := omStageTimes(m[3])
-			r.stages = append(r.stages, omStage{At: at, Bead: m[2], Lint: lint, Gate: gate, OM: om})
-		}
+		lint, gate, om := omStageTimes(m[3])
+		r.stages = append(r.stages, omStage{At: at, Bead: m[2], Lint: lint, Gate: gate, OM: om})
 		return
 	}
 	if m := omRejectRe.FindStringSubmatch(line); m != nil {
-		if at, err := omLogAt(m[1]); err == nil {
-			rj := omRejection{At: at, Bead: m[2], Kind: m[3], Detail: m[4]}
-			if sm := omScoreRe.FindStringSubmatch(m[4]); sm != nil {
-				if v, err := strconv.ParseFloat(sm[1], 64); err == nil {
-					rj.Score = &v
-				}
+		rj := omRejection{At: at, Bead: m[2], Kind: m[3], Detail: m[4]}
+		if sm := omScoreRe.FindStringSubmatch(m[4]); sm != nil {
+			if v, err := strconv.ParseFloat(sm[1], 64); err == nil {
+				rj.Score = &v
 			}
-			r.rejects = append(r.rejects, rj)
-			r.endMerge(m[2], at)
 		}
+		r.rejects = append(r.rejects, rj)
+		r.endMerge(m[2], at)
 	}
-}
-
-// omLogAt parses the timestamp a daemon.log line opens with. The log is
-// stamped in local time with no zone.
-func omLogAt(stamp string) (time.Time, error) {
-	return time.ParseInLocation(omLogTimeLayout, stamp, time.Local)
 }
 
 // beginMerge records that a bead's tree has been merged and its landing is in

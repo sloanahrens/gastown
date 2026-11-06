@@ -3,13 +3,20 @@ package cmd
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/dashboard"
 )
 
+// tickAt is the instant the log reader hands parseDispatchTick for the fixtures
+// below; the parser dates the line, the regex only matches its text.
+func tickAt(year, month, day, hour, min, sec int) time.Time {
+	return time.Date(year, time.Month(month), day, hour, min, sec, 0, time.UTC)
+}
+
 func TestParseDispatchTickCountsOnly(t *testing.T) {
 	t.Parallel()
-	d := parseDispatchTick("2026/10/03 17:14:32 spec_dispatch: tick: 0 candidate(s), roster deepseek-flash 1/3, 2 dispatched, 1 refused, 3 planning, 0 skipped, 4 failed, 5 held by the failed label")
+	d := parseDispatchTick("2026/10/03 17:14:32 spec_dispatch: tick: 0 candidate(s), roster deepseek-flash 1/3, 2 dispatched, 1 refused, 3 planning, 0 skipped, 4 failed, 5 held by the failed label", tickAt(2026, 10, 3, 17, 14, 32))
 	if d == nil {
 		t.Fatal("a tick line did not parse")
 	}
@@ -26,7 +33,7 @@ func TestParseDispatchTickCountsOnly(t *testing.T) {
 // it still parse (gt-iydx1).
 func TestParseDispatchTickReadsTheOverlapBypassCount(t *testing.T) {
 	t.Parallel()
-	d := parseDispatchTick("2026/10/26 17:14:32 spec_dispatch: tick: 2 candidate(s), roster deepseek-flash 1/3, 1 dispatched, 0 refused, 0 planning, 1 skipped, 0 failed, 0 held by the failed label, 1 overlap hold bypassed; skipped: gt-b (no seat: full)")
+	d := parseDispatchTick("2026/10/26 17:14:32 spec_dispatch: tick: 2 candidate(s), roster deepseek-flash 1/3, 1 dispatched, 0 refused, 0 planning, 1 skipped, 0 failed, 0 held by the failed label, 1 overlap hold bypassed; skipped: gt-b (no seat: full)", tickAt(2026, 10, 26, 17, 14, 32))
 	if d == nil {
 		t.Fatal("a tick line with a bypass count did not parse")
 	}
@@ -40,7 +47,7 @@ func TestParseDispatchTickReadsTheOverlapBypassCount(t *testing.T) {
 
 func TestParseDispatchTickNamesSkippedBeadsAndReasons(t *testing.T) {
 	t.Parallel()
-	d := parseDispatchTick("2026/10/03 17:24:40 spec_dispatch: tick: 3 candidate(s), roster deepseek-flash 0/3, 0 dispatched, 0 refused, 0 planning, 3 skipped, 0 failed, 0 held by the failed label; skipped: gt-aoltu (unshaped: ## Goal, ## Constraints, acceptance); gt-b.1 (no seat: claude-sonnet 2/2); hq-c (held) +4 more")
+	d := parseDispatchTick("2026/10/03 17:24:40 spec_dispatch: tick: 3 candidate(s), roster deepseek-flash 0/3, 0 dispatched, 0 refused, 0 planning, 3 skipped, 0 failed, 0 held by the failed label; skipped: gt-aoltu (unshaped: ## Goal, ## Constraints, acceptance); gt-b.1 (no seat: claude-sonnet 2/2); hq-c (held) +4 more", tickAt(2026, 10, 3, 17, 24, 40))
 	if d == nil {
 		t.Fatal("did not parse")
 	}
@@ -69,7 +76,7 @@ func TestParseDispatchTickIgnoresOtherLines(t *testing.T) {
 		"2026/10/03 17:25:39 spec_dispatch: dispatched: gt-x: slung to gastown/agate",
 		"not a log line",
 	} {
-		if d := parseDispatchTick(line); d != nil {
+		if d := parseDispatchTick(line, tickAt(2026, 10, 3, 17, 25, 39)); d != nil {
 			t.Errorf("%q parsed as a tick: %+v", line, d)
 		}
 	}

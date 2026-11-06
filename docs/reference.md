@@ -1404,8 +1404,12 @@ the same.
 
 `spend` is the one section left out whole rather than reported empty — a
 `.runtime/watch/spend.json` older than 15 minutes is not a live reading.
-daemon.log is local time and bd JSON is UTC; the window is tz-aware, so a line
-stamped just inside it counts in either zone.
+daemon.log holds three clock regions (gt-gg9hv.44): Mac-local time under
+launchd until 2026-11-04, UTC from the container cutover that day until
+21:37Z on 2026-11-05 (the image had no zone database), and local time again
+after the start wrote its `log timezone: America/Chicago (UTC-06:00)` line.
+bd JSON is UTC. A reader dates each line in the region it was written in, so
+a stamp just inside the window counts in either zone.
 
 ### Jev Batteries
 

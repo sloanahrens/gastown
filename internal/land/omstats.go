@@ -155,7 +155,7 @@ func AggregateOmStats(records, log io.Reader, since time.Time) (OmStats, error) 
 	}
 
 	if log != nil {
-		events, err := readOmStatsLog(log)
+		events, err := readOmStatsLog(log, time.Local)
 		if err != nil {
 			return OmStats{}, err
 		}
@@ -401,6 +401,7 @@ func readOmStatsRecords(r io.Reader) ([]omStatsReviewRecord, int, error) {
 // or a landing that reached the target. hasFindings and hasScore say whether
 // the line named that figure, so an unnamed one enters no mean.
 type omStatsLogEvent struct {
+	at          time.Time
 	day         string
 	bead        string
 	rejected    bool
@@ -411,9 +412,10 @@ type omStatsLogEvent struct {
 }
 
 var (
-	// omStatsLogLineRe splits a landing-worker line into its stamp, bead and
-	// the text after it. A line with neither shape is some other daemon work.
-	omStatsLogLineRe = regexp.MustCompile(`^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) landing_worker: \[land\] (\S+): (.*)$`)
+	// omStatsLogTextRe splits a landing-worker line's text (the stamp is off)
+	// into its bead and the text after it. A line with neither shape is some
+	// other daemon work.
+	omStatsLogTextRe = regexp.MustCompile(`^landing_worker: \[land\] (\S+): (.*)$`)
 	// Only a review rejection counts: a gate or infrastructure rejection never
 	// reached om. Three reasons are one: a request for changes, logged as "om
 	// requested changes (score S, N finding(s))", and the two findings refusals
@@ -434,41 +436,47 @@ var (
 	omStatsLogFindRe   = regexp.MustCompile(`(\d+) finding`)
 )
 
-// readOmStatsLog reads the landing-worker lines of r that count as a verdict.
-func readOmStatsLog(r io.Reader) ([]omStatsLogEvent, error) {
+// readOmStatsLog reads the landing-worker lines of r that count as a verdict,
+// dated in the zone the log was writing in and bucketed by day in loc.
+func readOmStatsLog(r io.Reader, loc *time.Location) ([]omStatsLogEvent, error) {
+	p := &daemonlog.Parser{Loc: loc}
 	var events []omStatsLogEvent
-	err := scanLogLines(r, func(line []byte) {
-		m := omStatsLogLineRe.FindStringSubmatch(string(line))
-		if m == nil {
-			return
-		}
-		at, err := time.ParseInLocation(daemonlog.Stamp, m[1], time.Local)
-		if err != nil {
-			return
-		}
-		ev := omStatsLogEvent{day: at.Format(OmStatsDayLayout), bead: m[2]}
-		switch {
-		case omStatsLogRejectRe.MatchString(m[3]):
-			ev.rejected = true
-			if sm := omStatsLogScoreRe.FindStringSubmatch(m[3]); sm != nil {
-				if v, err := strconv.ParseFloat(sm[1], 64); err == nil {
-					ev.score, ev.hasScore = v, true
-				}
+	add := func(lines []daemonlog.Line) {
+		for _, line := range lines {
+			// An event is a line with its own stamp. A continuation line
+			// carries the entry above it and is never a verdict of its own.
+			if !line.Stamped {
+				continue
 			}
-			if fm := omStatsLogFindRe.FindStringSubmatch(m[3]); fm != nil {
-				if v, err := strconv.Atoi(fm[1]); err == nil {
-					ev.findings, ev.hasFindings = float64(v), true
-				}
+			m := omStatsLogTextRe.FindStringSubmatch(line.Text)
+			if m == nil {
+				continue
 			}
-		case omStatsLogLandedRe.MatchString(m[3]):
-		default:
-			return
+			ev := omStatsLogEvent{at: line.At, day: line.At.In(loc).Format(OmStatsDayLayout), bead: m[1]}
+			switch {
+			case omStatsLogRejectRe.MatchString(m[2]):
+				ev.rejected = true
+				if sm := omStatsLogScoreRe.FindStringSubmatch(m[2]); sm != nil {
+					if v, err := strconv.ParseFloat(sm[1], 64); err == nil {
+						ev.score, ev.hasScore = v, true
+					}
+				}
+				if fm := omStatsLogFindRe.FindStringSubmatch(m[2]); fm != nil {
+					if v, err := strconv.Atoi(fm[1]); err == nil {
+						ev.findings, ev.hasFindings = float64(v), true
+					}
+				}
+			case omStatsLogLandedRe.MatchString(m[2]):
+			default:
+				continue
+			}
+			events = append(events, ev)
 		}
-		events = append(events, ev)
-	})
-	if err != nil {
+	}
+	if err := scanLogLines(r, func(line []byte) { add(p.Feed(string(line))) }); err != nil {
 		return nil, fmt.Errorf("reading the daemon log: %w", err)
 	}
+	add(p.Flush())
 	return events, nil
 }
 

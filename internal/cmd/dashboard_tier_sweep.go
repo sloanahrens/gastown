@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/daemonlog"
 	"github.com/steveyegge/gastown/internal/dashboard"
 )
 
@@ -88,6 +89,10 @@ type tierSweepReader struct {
 	mu     sync.Mutex
 	offset int64
 	readOK bool
+	// loc is the zone the log's stamps are read in; nil reads time.Local.
+	loc *time.Location
+	// parser follows the log's zone changes across scans.
+	parser *daemonlog.Parser
 	last   map[string]tierSweepEvent
 	// start holds the cycle each rig opened and has not closed. A rig absent
 	// from it is read the old way, off its shell stage's finished line.
@@ -177,17 +182,32 @@ func (r *tierSweepReader) scanLog() error {
 			return err
 		}
 		r.offset += int64(len(line))
-		if !strings.Contains(line, "tier_sweep: ") {
-			continue
-		}
 		r.parseLogLine(strings.TrimRight(line, "\r\n"))
 	}
 }
 
+// logParser is the daemon-log reader, one per reader so the zone a log region
+// left in force carries to the next scan.
+func (r *tierSweepReader) logParser() *daemonlog.Parser {
+	if r.parser == nil {
+		loc := r.loc
+		if loc == nil {
+			loc = time.Local
+		}
+		r.parser = &daemonlog.Parser{Loc: loc}
+	}
+	return r.parser
+}
+
 func (r *tierSweepReader) parseLogLine(line string) {
+	// The prefilter: only a sweep line reaches a rule, but a line that can
+	// change the zone must still reach the parser.
+	if !strings.Contains(line, "tier_sweep: ") && !daemonlog.MayChangeZone(line) {
+		return
+	}
+	at, _ := r.logParser().Parse(line)
 	if m := tierSweepStartedRe.FindStringSubmatch(line); m != nil {
-		at, err := time.ParseInLocation(omLogTimeLayout, m[1], time.Local)
-		if err != nil {
+		if at.IsZero() {
 			return
 		}
 		r.start[m[2]] = tierSweepStarted{at: at, sha: m[3], tiers: splitTierSweepTiers(m[4])}
@@ -208,8 +228,7 @@ func (r *tierSweepReader) parseLogLine(line string) {
 		return
 	}
 	if m := tierSweepSweptRe.FindStringSubmatch(line); m != nil {
-		at, err := time.ParseInLocation(omLogTimeLayout, m[1], time.Local)
-		if err != nil {
+		if at.IsZero() {
 			return
 		}
 		row := dashboard.TierSweepRow{At: at, Rig: m[2], SHA: m[3], Stages: parseTierSweepVerdicts(m[4]), Walls: copyWalls(r.walls[m[2]])}
@@ -226,8 +245,7 @@ func (r *tierSweepReader) parseLogLine(line string) {
 		return
 	}
 	if m := tierSweepStageRe.FindStringSubmatch(line); m != nil {
-		at, err := time.ParseInLocation(omLogTimeLayout, m[1], time.Local)
-		if err != nil {
+		if at.IsZero() {
 			return
 		}
 		r.last[m[2]] = tierSweepEvent{at: at, stage: m[3]}
