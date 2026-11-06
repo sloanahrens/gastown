@@ -174,7 +174,7 @@ func Build(ctx context.Context, in Inputs, s Seams) (Result, error) {
 		{"sweep-run", "./cmd/sweep-run"},
 	} {
 		out := filepath.Join(in.Out, "bin", b.name)
-		if _, err := s.Go(in.Src, env, "build", "-trimpath", "-o", out, b.pkg); err != nil {
+		if _, err := s.Go(in.Src, env, bdbuild.GoBuildArgv(out, b.pkg)...); err != nil {
 			return Result{}, fmt.Errorf("imagectx: cannot build %s at %s: %w", b.name, in.Rev, err)
 		}
 	}

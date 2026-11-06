@@ -29,6 +29,14 @@ const (
 // checkout.
 const Package = "./cmd/bd"
 
+// GoBuildArgv is the argv, after the go command, that compiles one image binary
+// to out from pkg: the flags every image binary is built with, then the output
+// and the package. The polecat context command and the daemon image both build
+// gt with it, so the two compile the same way (gt-gg9hv.33).
+func GoBuildArgv(out, pkg string) []string {
+	return []string{"build", "-trimpath", "-o", out, pkg}
+}
+
 // hostEnv names the host variables the compile passes through: those that
 // locate the toolchain, the Go caches and the module proxy, so the compile
 // reuses what the host already has. Anything else — a shell's GOFLAGS,

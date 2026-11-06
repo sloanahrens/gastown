@@ -2,9 +2,16 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
+
+func TestMain(m *testing.M) {
+	os.Exit(unittier.Main(m))
+}
 
 // TestRunRefusesAMissingRevOrOut checks the command refuses to run without the
 // commit the image is built at or the directory the context goes in, before it
