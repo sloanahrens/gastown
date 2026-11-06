@@ -238,7 +238,7 @@ func buildBdCloseInvariantTown(t *testing.T, town, rig, branch string, commitsAh
 	remote := filepath.Join(town, "remote.git")
 	testRunGit(t, town, "init", "--bare", "--initial-branch", "main", remote)
 	testRunGit(t, town, "clone", remote, work)
-	testRunGit(t, work, "config", "user.email", "test@test.com")
+	testRunGit(t, work, "config", "user.email", "test@example.com")
 	testRunGit(t, work, "config", "user.name", "Test")
 	if err := os.WriteFile(filepath.Join(work, "README.md"), []byte("# base\n"), 0o644); err != nil {
 		t.Fatal(err)

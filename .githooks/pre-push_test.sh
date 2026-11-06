@@ -45,7 +45,7 @@ setup_repos() {
   mkdir -p "$(dirname "$WORK_DIR/$local_rel")"
   git clone "$WORK_DIR/remote.git" "$WORK_DIR/$local_rel" >/dev/null 2>&1
   cd "$WORK_DIR/$local_rel"
-  git config user.email "test@test.com"
+  git config user.email "test@example.com"
   git config user.name "Test"
   # Initial commit
   echo "init" > file.txt

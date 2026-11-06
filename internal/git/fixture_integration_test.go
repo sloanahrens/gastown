@@ -130,7 +130,7 @@ func buildCommittedRepo(dir string) error {
 	}
 	if err := fixtureSteps(dir,
 		[]string{"init"},
-		[]string{"config", "user.email", "test@test.com"},
+		[]string{"config", "user.email", "test@example.com"},
 		[]string{"config", "user.name", "Test User"},
 	); err != nil {
 		return err

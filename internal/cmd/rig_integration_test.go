@@ -80,7 +80,7 @@ func createTestGitRepo(t *testing.T, name string) string {
 	// (system default may vary, causing checkout failures)
 	cmds := [][]string{
 		{"git", "init", "--initial-branch=main"},
-		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.email", "test@example.com"},
 		{"git", "config", "user.name", "Test User"},
 	}
 	for _, args := range cmds {
@@ -123,7 +123,7 @@ func createTestGitRepoAt(t *testing.T, repoDir string) {
 
 	cmds := [][]string{
 		{"git", "init", "--initial-branch=main"},
-		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.email", "test@example.com"},
 		{"git", "config", "user.name", "Test User"},
 	}
 	for _, args := range cmds {
@@ -850,7 +850,7 @@ func runAgentCleanTest(t *testing.T, hasTrackedBeads bool, port string, baseEnv 
 	// Initialize git repo
 	gitCmds := [][]string{
 		{"git", "init", "--initial-branch=main"},
-		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.email", "test@example.com"},
 		{"git", "config", "user.name", "Test User"},
 	}
 	for _, args := range gitCmds {

@@ -210,7 +210,7 @@ func buildPolecatStopTestRepo(t *testing.T, tmp string) {
 	}
 	runPolecatStopTestGit(t, repo, "init")
 	runPolecatStopTestGit(t, repo, "branch", "-M", "main")
-	runPolecatStopTestGit(t, repo, "config", "user.email", "test@test.com")
+	runPolecatStopTestGit(t, repo, "config", "user.email", "test@example.com")
 	runPolecatStopTestGit(t, repo, "config", "user.name", "Test User")
 	writePolecatStopTestFile(t, repo, "README.md", "# Test\n")
 	runPolecatStopTestGit(t, repo, "add", "README.md")

@@ -27,7 +27,7 @@ func initLocalSweepOrigin(t *testing.T, tmp string) string {
 	seedDir := filepath.Join(tmp, "seed")
 	runGit(t, tmp, "init", "--bare", "--initial-branch", "main", remoteDir)
 	runGit(t, tmp, "clone", remoteDir, seedDir)
-	runGit(t, seedDir, "config", "user.email", "test@test.com")
+	runGit(t, seedDir, "config", "user.email", "test@example.com")
 	runGit(t, seedDir, "config", "user.name", "Test User")
 	writePolecatPruneTestFile(t, filepath.Join(seedDir, "README.md"), "test\n")
 	runGit(t, seedDir, "add", "README.md")
@@ -141,7 +141,7 @@ func TestIntegrationPruneLocalPolecatBranchBacklogSweepsMayorRigLayout(t *testin
 		t.Fatalf("mkdir rig: %v", err)
 	}
 	runGit(t, tmp, "clone", remoteDir, cloneDir)
-	runGit(t, cloneDir, "config", "user.email", "test@test.com")
+	runGit(t, cloneDir, "config", "user.email", "test@example.com")
 	runGit(t, cloneDir, "config", "user.name", "Test User")
 	merged := "polecat/legacy/gt-4+dd"
 	runGit(t, cloneDir, "branch", merged, "origin/main")

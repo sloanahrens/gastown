@@ -21,7 +21,7 @@ func newRealRepo(t *testing.T) string {
 	}
 	dir := t.TempDir()
 	realGitRun(t, dir, "init", "-q", "-b", "main")
-	realGitRun(t, dir, "config", "user.email", "test@test.com")
+	realGitRun(t, dir, "config", "user.email", "test@example.com")
 	realGitRun(t, dir, "config", "user.name", "Test")
 	realGitRun(t, dir, "config", "commit.gpgsign", "false")
 	// A local hooksPath shadows the host's global one. The squash commit runs

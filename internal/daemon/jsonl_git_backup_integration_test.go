@@ -19,7 +19,7 @@ func realBackupRepo(t *testing.T, dir string) {
 	t.Helper()
 	for _, args := range [][]string{
 		{"init", "-q", "-b", "main"},
-		{"config", "user.email", "test@test.com"},
+		{"config", "user.email", "test@example.com"},
 		{"config", "user.name", "Test"},
 		{"commit", "-q", "--allow-empty", "-m", "init"},
 	} {

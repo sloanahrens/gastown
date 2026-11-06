@@ -23,7 +23,7 @@ func TestIntegrationDoneCloseTimeInvariantSkipReason(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		testRunGit(t, dir, "init", "-b", "main")
-		testRunGit(t, dir, "config", "user.email", "test@test.com")
+		testRunGit(t, dir, "config", "user.email", "test@example.com")
 		testRunGit(t, dir, "config", "user.name", "Test")
 		if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Test\n"), 0644); err != nil {
 			t.Fatal(err)
@@ -46,7 +46,7 @@ func TestIntegrationDoneCloseTimeInvariantSkipReason(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		testRunGit(t, dir, "init", "-b", "main")
-		testRunGit(t, dir, "config", "user.email", "test@test.com")
+		testRunGit(t, dir, "config", "user.email", "test@example.com")
 		testRunGit(t, dir, "config", "user.name", "Test")
 		if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Test\n"), 0644); err != nil {
 			t.Fatal(err)
@@ -77,7 +77,7 @@ func TestIntegrationDoneCloseTimeInvariantSkipReason(t *testing.T) {
 
 		seed := filepath.Join(tmp, "seed")
 		testRunGit(t, tmp, "init", "--initial-branch", "main", seed)
-		testRunGit(t, seed, "config", "user.email", "test@test.com")
+		testRunGit(t, seed, "config", "user.email", "test@example.com")
 		testRunGit(t, seed, "config", "user.name", "Test")
 		if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("# initial\n"), 0644); err != nil {
 			t.Fatal(err)
@@ -91,7 +91,7 @@ func TestIntegrationDoneCloseTimeInvariantSkipReason(t *testing.T) {
 		// is what leaves "work"'s local "main" ref stale.
 		work := filepath.Join(tmp, "work")
 		testRunGit(t, tmp, "clone", remote, work)
-		testRunGit(t, work, "config", "user.email", "test@test.com")
+		testRunGit(t, work, "config", "user.email", "test@example.com")
 		testRunGit(t, work, "config", "user.name", "Test")
 
 		// origin/main advances independently (another polecat merged) while the
@@ -146,7 +146,7 @@ func TestIntegrationCloseTimeBranchTargetHonoursBaseBranch(t *testing.T) {
 
 	testRunGit(t, tmp, "init", "--bare", "--initial-branch", "main", remote)
 	testRunGit(t, tmp, "init", "--initial-branch", "main", seed)
-	testRunGit(t, seed, "config", "user.email", "test@test.com")
+	testRunGit(t, seed, "config", "user.email", "test@example.com")
 	testRunGit(t, seed, "config", "user.name", "Test")
 	testRunGit(t, seed, "commit", "--allow-empty", "-m", "initial")
 	testRunGit(t, seed, "remote", "add", "origin", remote)
@@ -160,7 +160,7 @@ func TestIntegrationCloseTimeBranchTargetHonoursBaseBranch(t *testing.T) {
 	testRunGit(t, seed, "push", "origin", "develop")
 
 	testRunGit(t, tmp, "clone", remote, work)
-	testRunGit(t, work, "config", "user.email", "test@test.com")
+	testRunGit(t, work, "config", "user.email", "test@example.com")
 	testRunGit(t, work, "config", "user.name", "Test")
 	testRunGit(t, work, "checkout", "-b", "polecat/basalt/gt-6hmz+abc", "origin/develop")
 

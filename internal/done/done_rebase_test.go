@@ -616,7 +616,7 @@ const (
 	reworkTestRejected = "aaaa1111bbbb2222cccc3333dddd4444eeee5555"
 	reworkTestLocal    = "ffff0000111122223333444455556666777788889"
 	reworkTestSeat     = "capable"
-	reworkTestEmail    = "seat@test.com"
+	reworkTestEmail    = "seat@example.com"
 )
 
 // reworkFakeGit is a divergence where origin's tip is one commit, written by
@@ -808,7 +808,7 @@ func TestReworkPushAllows(t *testing.T) {
 	t.Parallel()
 	const (
 		localAddr = reworkTestSeat + "@gastown.local"
-		legacy    = "host@test.com"
+		legacy    = "host@example.com"
 	)
 	seatOnly := []gitpkg.CommitSummary{{SHA: reworkTestRejected, Author: reworkTestSeat, Email: reworkTestEmail}}
 	seat := reworkPush{rejectedHead: reworkTestRejected, seatAuthor: reworkTestSeat, seatEmail: reworkTestEmail}
@@ -825,7 +825,7 @@ func TestReworkPushAllows(t *testing.T) {
 		{name: "abbreviated rejected head matches", rework: reworkPush{rejectedHead: reworkTestRejected[:8], seatAuthor: reworkTestSeat, seatEmail: reworkTestEmail}, origin: reworkTestRejected, commit: seatOnly, want: true},
 		{name: "origin tip is not the rejected head", rework: seat, origin: reworkTestLocal, commit: seatOnly},
 		{name: "foreign author on origin", rework: seat, origin: reworkTestRejected, commit: []gitpkg.CommitSummary{{SHA: reworkTestRejected, Author: "Test Operator", Email: reworkTestEmail}}},
-		{name: "seat name from another mailbox", rework: seat, origin: reworkTestRejected, commit: []gitpkg.CommitSummary{{SHA: reworkTestRejected, Author: reworkTestSeat, Email: "other@test.com"}}},
+		{name: "seat name from another mailbox", rework: seat, origin: reworkTestRejected, commit: []gitpkg.CommitSummary{{SHA: reworkTestRejected, Author: reworkTestSeat, Email: "other@example.com"}}},
 		{name: "one foreign commit among seat commits", rework: seat, origin: reworkTestRejected, commit: []gitpkg.CommitSummary{{SHA: "c1", Author: reworkTestSeat, Email: reworkTestEmail}, {SHA: reworkTestRejected, Author: "Test Operator", Email: reworkTestEmail}}},
 		{name: "empty origin range is not all seat's", rework: seat, origin: reworkTestRejected},
 		{name: "no seat author", rework: reworkPush{rejectedHead: reworkTestRejected, seatEmail: reworkTestEmail}, origin: reworkTestRejected, commit: seatOnly},
@@ -858,7 +858,7 @@ func TestReworkPushForNilIssueIsEmpty(t *testing.T) {
 func TestReworkPushForNoSeatEmailIsEmpty(t *testing.T) {
 	t.Parallel()
 	issue := reworkBead([]string{land.LabelRework}, reworkStandDownNote("", "feature", reworkTestRejected))
-	if got := reworkPushFor(issue, reworkTestSeat, "", reworkTestSeat+"@gastown.local", "host@test.com"); got != (reworkPush{}) {
+	if got := reworkPushFor(issue, reworkTestSeat, "", reworkTestSeat+"@gastown.local", "host@example.com"); got != (reworkPush{}) {
 		t.Errorf("reworkPushFor with no seat email = %+v, want the zero value", got)
 	}
 }

@@ -38,7 +38,7 @@ func TestIntegrationManagerAddUsesLocalRepoReference(t *testing.T) {
 	if err := runCmd("git", "init", localRepoPath); err != nil {
 		t.Fatalf("failed to init local repo: %v", err)
 	}
-	if err := runCmd("git", "-C", localRepoPath, "config", "user.email", "test@test.com"); err != nil {
+	if err := runCmd("git", "-C", localRepoPath, "config", "user.email", "test@example.com"); err != nil {
 		t.Fatalf("failed to configure email: %v", err)
 	}
 	if err := runCmd("git", "-C", localRepoPath, "config", "user.name", "Test"); err != nil {
@@ -183,7 +183,7 @@ func bareRepoWithCommit(t *testing.T, dir string) string {
 	if err := runCmd("git", "init", "-q", "-b", "main", work); err != nil {
 		t.Fatalf("failed to init %s: %v", work, err)
 	}
-	for _, kv := range [][2]string{{"user.email", "test@test.com"}, {"user.name", "Test"}} {
+	for _, kv := range [][2]string{{"user.email", "test@example.com"}, {"user.name", "Test"}} {
 		if err := runCmd("git", "-C", work, "config", kv[0], kv[1]); err != nil {
 			t.Fatalf("failed to configure %s: %v", kv[0], err)
 		}

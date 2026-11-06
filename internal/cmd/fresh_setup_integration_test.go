@@ -118,7 +118,7 @@ func configureGitIdentityForEnv(t *testing.T, env []string) {
 	t.Helper()
 	for _, args := range [][]string{
 		{"config", "--global", "user.name", "Test User"},
-		{"config", "--global", "user.email", "test@test.com"},
+		{"config", "--global", "user.email", "test@example.com"},
 	} {
 		runFreshSetupCmd(t, "", env, "git", args...)
 	}
@@ -132,7 +132,7 @@ func createFreshSetupSourceRepo(t *testing.T, tmpDir string) string {
 	}
 
 	runFreshSetupCmd(t, repoDir, nil, "git", "init", "--initial-branch=main")
-	runFreshSetupCmd(t, repoDir, nil, "git", "config", "user.email", "test@test.com")
+	runFreshSetupCmd(t, repoDir, nil, "git", "config", "user.email", "test@example.com")
 	runFreshSetupCmd(t, repoDir, nil, "git", "config", "user.name", "Test User")
 
 	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("# Fresh setup fixture\n"), 0644); err != nil {
