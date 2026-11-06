@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/templates"
 )
 
 const (
@@ -522,5 +524,95 @@ func TestToolExistsRefusesAnUnusableComposeFile(t *testing.T) {
 	}
 	if len(shell.captured) != 0 {
 		t.Fatalf("the compose file is unusable but docker ran: %q", shell.captured)
+	}
+}
+
+// TestRunnerSetsHMConfig: every hm call carries HM_CONFIG set to the mounted
+// config's path in the container, replacing a forwarded value; gt, bd and om
+// carry none, and rung 2 mounts the derived file where that path names it.
+func TestRunnerSetsHMConfig(t *testing.T) {
+	t.Parallel()
+	tools := []struct {
+		name string
+		argv []string
+		hm   bool
+	}{
+		{"hm", []string{"hm", "status"}, true},
+		{"gt", []string{"gt", "status", "--line"}, false},
+		{"bd", []string{"bd", "show", "gt-abc"}, false},
+		{"om", []string{"om", "review"}, false},
+	}
+	envs := []struct {
+		name string
+		env  []string
+	}{
+		{"nothing forwarded", []string{"GT_TOWN=" + testTown}},
+		{"a forwarded HM_CONFIG is replaced", []string{"HM_CONFIG=/Users/operator/.config/gt/hm-config.json", "GT_TOWN=" + testTown}},
+	}
+	rungs := []struct {
+		name string
+		run  func(Docker, Call) (int, error)
+	}{
+		{"exec", Docker.Exec},
+		{"run", Docker.Run},
+	}
+	for _, tool := range tools {
+		for _, env := range envs {
+			for _, rung := range rungs {
+				t.Run(tool.name+"/"+env.name+"/"+rung.name, func(t *testing.T) {
+					t.Parallel()
+					shell := &fakeShell{}
+					d := Docker{Town: testTown, Shell: shell, ReadFile: readCompose(testCompose)}
+					call := Call{Argv: tool.argv, Env: env.env, Dir: testDir}
+					if _, err := rung.run(d, call); err != nil {
+						t.Fatalf("%s returned an error: %v", rung.name, err)
+					}
+					if len(shell.attached) != 1 {
+						t.Fatalf("%s attached %d lines, want 1", rung.name, len(shell.attached))
+					}
+					argv := shell.attached[0]
+					var set []string
+					for _, arg := range argv {
+						if strings.HasPrefix(arg, hmConfigVar+"=") {
+							set = append(set, arg)
+						}
+					}
+					if !tool.hm {
+						if len(set) != 0 {
+							t.Fatalf("%s line %q sets %s, want none for %s", rung.name, argv, hmConfigVar, tool.name)
+						}
+						return
+					}
+					if want := []string{hmConfigVar + "=" + hmConfigPath}; !slices.Equal(set, want) {
+						t.Fatalf("%s line %q sets %s %q, want exactly %q", rung.name, argv, hmConfigVar, set, want)
+					}
+					for _, arg := range argv {
+						if strings.Contains(arg, "/Users/operator/.config/gt/hm-config.json") {
+							t.Fatalf("%s line %q carries the caller's own %s", rung.name, argv, hmConfigVar)
+						}
+					}
+					wantMount := filepath.Join(testTown, filepath.FromSlash(hmConfigTownPath)) + ":" + hmConfigPath + ":ro"
+					switch rung.name {
+					case "run":
+						if !slices.Contains(argv, wantMount) {
+							t.Fatalf("%s line %q does not mount the derived config %s", rung.name, argv, wantMount)
+						}
+					case "exec":
+						if slices.Contains(argv, wantMount) {
+							t.Fatalf("%s line %q mounts the config itself, but the running container carries it", rung.name, argv)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestHMConfigPathIsTheRenderTarget pins the wrapper's HM_CONFIG path to the
+// render's mount target, so the two cannot send hm to different files.
+func TestHMConfigPathIsTheRenderTarget(t *testing.T) {
+	t.Parallel()
+	if hmConfigPath != templates.LiveHMConfigPath {
+		t.Fatalf("the wrapper names %s, the render mounts %s", hmConfigPath, templates.LiveHMConfigPath)
 	}
 }
