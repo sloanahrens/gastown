@@ -48,6 +48,148 @@ func cacheTestDoc(at time.Time) CacheDoc {
 	}
 }
 
+// FingerprintLog counts a log's lines and records its size; a last line with
+// no newline still counts, an empty log is zero of both, and a line longer
+// than a scanner's token cap is one line.
+func TestFingerprintLogCountsLinesAndBytes(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		body  string
+		lines int
+	}{
+		{"trailing newline", "a\nb\n", 2},
+		{"no trailing newline", "a\nb", 2},
+		{"one line", "a\n", 1},
+		{"empty", "", 0},
+		{"long line", strings.Repeat("x", 256*1024) + "\n", 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "log.jsonl")
+			if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			fp, err := FingerprintLog(path)
+			if err != nil {
+				t.Fatalf("fingerprinting: %v", err)
+			}
+			if fp.Lines != tc.lines || fp.Bytes != int64(len(tc.body)) {
+				t.Errorf("fingerprint = %d lines %d bytes, want %d lines %d bytes", fp.Lines, fp.Bytes, tc.lines, len(tc.body))
+			}
+		})
+	}
+}
+
+// A log that cannot be read is an error naming it, not an empty log: the
+// refresh must score the battery rather than reuse its block.
+func TestFingerprintLogRefusesAMissingLog(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "absent.jsonl")
+	_, err := FingerprintLog(path)
+	if err == nil {
+		t.Fatal("fingerprinting a missing log succeeded")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error %q does not name %s", err, path)
+	}
+}
+
+// A path that opens but cannot be read, such as a directory, is the same kind
+// of error: the refresh scores the battery instead of reading it as empty.
+func TestFingerprintLogRefusesAnUnreadableLog(t *testing.T) {
+	t.Parallel()
+	path := t.TempDir()
+	_, err := FingerprintLog(path)
+	if err == nil {
+		t.Fatal("fingerprinting a directory succeeded")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error %q does not name %s", err, path)
+	}
+}
+
+// A block is reused only while it holds a good report scored over the same
+// window, less than ReuseAge ago, against the same log fingerprint.
+func TestReusableBlock(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	scored := now.Add(-24 * time.Hour)
+	fp := LogFingerprint{Lines: 3, Bytes: 30}
+	prev := func(mut func(*BatteryBlock)) CacheDoc {
+		b := BatteryBlock{Name: "finding", ScoredAt: scored, LogLines: 3, LogBytes: 30, Report: &Report{Battery: "finding"}}
+		if mut != nil {
+			mut(&b)
+		}
+		return CacheDoc{ScoredAt: scored, Since: "7d", Batteries: []BatteryBlock{b}}
+	}
+	cases := []struct {
+		name   string
+		prev   CacheDoc
+		fp     LogFingerprint
+		window string
+		want   bool
+	}{
+		{"unchanged", prev(nil), fp, "7d", true},
+		{"just under ReuseAge", prev(func(b *BatteryBlock) { b.ScoredAt = now.Add(-ReuseAge + time.Minute) }), fp, "7d", true},
+		{"log gained a line", prev(nil), LogFingerprint{Lines: 4, Bytes: 31}, "7d", false},
+		{"log gained a byte", prev(nil), LogFingerprint{Lines: 3, Bytes: 31}, "7d", false},
+		{"log cannot be measured", prev(nil), LogFingerprint{}, "7d", false},
+		{"block is ReuseAge old", prev(func(b *BatteryBlock) { b.ScoredAt = now.Add(-ReuseAge) }), fp, "7d", false},
+		{"block is past ReuseAge", prev(func(b *BatteryBlock) { b.ScoredAt = now.Add(-4 * 24 * time.Hour) }), fp, "7d", false},
+		{"block scored over another window", prev(nil), fp, "14d", false},
+		{"block failed", prev(func(b *BatteryBlock) { b.Failed = true }), fp, "7d", false},
+		{"block kept", prev(func(b *BatteryBlock) { b.Kept = true }), fp, "7d", false},
+		{"block has no report", prev(func(b *BatteryBlock) { b.Report = nil }), fp, "7d", false},
+		{"another battery", prev(func(b *BatteryBlock) { b.Name = "drift" }), fp, "7d", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := ReusableBlock(tc.prev, "finding", tc.fp, tc.window, now)
+			if ok != tc.want {
+				t.Fatalf("reusable = %v, want %v", ok, tc.want)
+			}
+			if !tc.want {
+				if got != (BatteryBlock{}) {
+					t.Errorf("refused block = %+v, want the zero block", got)
+				}
+				return
+			}
+			if !got.ScoredAt.Equal(tc.prev.Batteries[0].ScoredAt) {
+				t.Errorf("reused scored_at = %v, want the block's %v", got.ScoredAt, tc.prev.Batteries[0].ScoredAt)
+			}
+			if got.Report != tc.prev.Batteries[0].Report {
+				t.Errorf("reused report = %v, want the block's own", got.Report)
+			}
+		})
+	}
+}
+
+// A kept block carries the fingerprint of the report it keeps, so a later
+// refresh compares the log against the score that report came from.
+func TestKeepFailedKeepsTheGoodBlocksFingerprint(t *testing.T) {
+	t.Parallel()
+	scored := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	prev := CacheDoc{Batteries: []BatteryBlock{{
+		Name: "finding", ScoredAt: scored, LogLines: 7, LogBytes: 700,
+		Report: &Report{Battery: "finding", Items: 7},
+	}}}
+	failed := BatteryBlock{Name: "finding", ScoredAt: scored.Add(time.Hour), Failed: true, Error: "boom", LogLines: 9, LogBytes: 900}
+
+	got := KeepFailed(prev, failed)
+	if !got.Kept {
+		t.Fatalf("kept = false, want the previous report kept")
+	}
+	if got.LogLines != 7 || got.LogBytes != 700 {
+		t.Errorf("kept fingerprint = %d lines %d bytes, want the kept report's 7 and 700", got.LogLines, got.LogBytes)
+	}
+	if !got.ScoredAt.Equal(scored) {
+		t.Errorf("kept scored_at = %v, want %v", got.ScoredAt, scored)
+	}
+}
+
 func TestCacheWriteReadRoundTrip(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "nested", "scorecard.json")

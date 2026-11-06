@@ -62,6 +62,124 @@ func blockFor(t *testing.T, doc scorecard.CacheDoc, name string) scorecard.Batte
 	return scorecard.BatteryBlock{}
 }
 
+// writeBatteryLog puts body at the log the battery registered under name
+// reads for the town at town, and returns that path.
+func writeBatteryLog(t *testing.T, town, name, body string) string {
+	t.Helper()
+	a, err := scorecard.Open(name, town)
+	if err != nil {
+		t.Fatalf("opening battery %q: %v", name, err)
+	}
+	path := a.LogPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("creating the log directory for %q: %v", name, err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("writing the log for %q: %v", name, err)
+	}
+	return path
+}
+
+// A battery whose log has not changed since its block was scored is not
+// scored again, and the reused block keeps the scored_at the dashboard ages.
+func TestJevScorecardRefreshReusesAnUnchangedLogsBlock(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	writeBatteryLog(t, town, "finding", "one\ntwo\n")
+	scored := now.Add(-24 * time.Hour)
+	prev := scorecard.CacheDoc{
+		ScoredAt: now.Add(-25 * time.Hour),
+		Since:    "7d",
+		Batteries: []scorecard.BatteryBlock{{
+			Name: "finding", ScoredAt: scored, LogLines: 2, LogBytes: 8,
+			Report: &scorecard.Report{Battery: "finding", Items: 2, Labeled: 1},
+		}},
+	}
+	if err := (scorecard.Cache{}).Write(scorecard.CachePath(town), prev); err != nil {
+		t.Fatal(err)
+	}
+	scorer := &jevRefreshScorer{}
+
+	if err := jevScorecardRun(context.Background(), io.Discard, town,
+		jevScorecardOptions{Refresh: true}, now, scorer.score, scorecard.Cache{}); err != nil {
+		t.Fatalf("refreshing: %v", err)
+	}
+	if scorer.calledFor("finding") {
+		t.Error("finding was scored, want the unchanged log's block reused")
+	}
+	b := blockFor(t, readJevCache(t, town), "finding")
+	if !b.ScoredAt.Equal(scored) {
+		t.Errorf("scored_at = %v, want the reused block's %v", b.ScoredAt, scored)
+	}
+	if b.Report == nil || b.Report.Items != 2 || b.Report.Labeled != 1 {
+		t.Errorf("report = %+v, want the previous report", b.Report)
+	}
+	if b.LogLines != 2 || b.LogBytes != 8 {
+		t.Errorf("fingerprint = %d lines %d bytes, want the log's 2 and 8", b.LogLines, b.LogBytes)
+	}
+}
+
+// A battery whose log grew, whose block is four days old, whose block was
+// scored over another window, or whose log cannot be measured is scored, not
+// reused.
+func TestJevScorecardRefreshScoresWhenTheBlockIsNotReusable(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	body := "one\ntwo\n"
+	cases := []struct {
+		name      string
+		log       string
+		lines     int
+		bytes     int64
+		age       time.Duration
+		since     string
+		wantLines int
+		wantBytes int64
+	}{
+		{"log grew", body, 1, 4, 24 * time.Hour, "7d", 2, 8},
+		{"block is four days old", body, 2, 8, 4 * 24 * time.Hour, "7d", 2, 8},
+		{"log cannot be stat-ed", "", 0, 0, 24 * time.Hour, "7d", 0, 0},
+		{"block was scored over another window", body, 2, 8, 24 * time.Hour, "14d", 2, 8},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			if tc.log != "" {
+				writeBatteryLog(t, town, "finding", tc.log)
+			}
+			prev := scorecard.CacheDoc{
+				ScoredAt: now.Add(-25 * time.Hour),
+				Since:    tc.since,
+				Batteries: []scorecard.BatteryBlock{{
+					Name: "finding", ScoredAt: now.Add(-tc.age), LogLines: tc.lines, LogBytes: tc.bytes,
+					Report: &scorecard.Report{Battery: "finding", Items: 9},
+				}},
+			}
+			if err := (scorecard.Cache{}).Write(scorecard.CachePath(town), prev); err != nil {
+				t.Fatal(err)
+			}
+			scorer := &jevRefreshScorer{}
+
+			if err := jevScorecardRun(context.Background(), io.Discard, town,
+				jevScorecardOptions{Refresh: true}, now, scorer.score, scorecard.Cache{}); err != nil {
+				t.Fatalf("refreshing: %v", err)
+			}
+			if !scorer.calledFor("finding") {
+				t.Error("finding was not scored, want the block re-scored")
+			}
+			b := blockFor(t, readJevCache(t, town), "finding")
+			if !b.ScoredAt.Equal(now) {
+				t.Errorf("scored_at = %v, want this refresh's %v", b.ScoredAt, now)
+			}
+			if b.LogLines != tc.wantLines || b.LogBytes != tc.wantBytes {
+				t.Errorf("fingerprint = %d lines %d bytes, want the log's %d and %d", b.LogLines, b.LogBytes, tc.wantLines, tc.wantBytes)
+			}
+		})
+	}
+}
+
 func TestJevScorecardRefreshWritesEveryRegisteredBattery(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -288,6 +406,15 @@ func TestJevScorecardRefreshReportsAFailedWrite(t *testing.T) {
 	}
 	if len(scorer.calls) != len(scorecard.Registered()) {
 		t.Errorf("scored %d batteries before the failed write, want %d", len(scorer.calls), len(scorecard.Registered()))
+	}
+}
+
+// The fingerprint reader reports a battery name it cannot open.
+func TestJevBatteryLogFingerprintRefusesAnUnknownName(t *testing.T) {
+	t.Parallel()
+	_, err := jevBatteryLogFingerprint("no-such-battery", t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "no-such-battery") {
+		t.Fatalf("error = %v, want one naming no-such-battery", err)
 	}
 }
 

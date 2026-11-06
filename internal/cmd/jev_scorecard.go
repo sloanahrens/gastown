@@ -46,12 +46,14 @@ its --json report leaves out the per-item rows (the totals stay); --lines prints
 them.
 
 --refresh replaces --battery, --json and --lines: it scores every registered
-battery over --since (7d when empty), keeps the cached block of a battery whose
-scoring failed, and writes <town>/.runtime/jev/scorecard.json by temp file and
-rename, so a failed write leaves the previous file as it was. A refresh that
-wrote the file exits zero only when every battery scored; otherwise it names
-the failed batteries and exits non-zero with their last good blocks kept in the
-file.
+battery over --since (7d when empty), except that it reuses a battery's cached
+block when the log has not gained a line or a byte since that block was scored,
+the block is under three days old, and it was scored over the same window. It
+keeps the cached block of a battery whose scoring failed, and writes
+<town>/.runtime/jev/scorecard.json by temp file and rename, so a failed write
+leaves the previous file as it was. A refresh that wrote the file exits zero
+only when every battery scored or was reused; otherwise it names the failed
+batteries and exits non-zero with their last good blocks kept in the file.
 
 Examples:
   gt jev scorecard --battery fixture
@@ -134,12 +136,25 @@ func scoreJevBattery(ctx context.Context, name, townRoot string, from time.Time)
 // week where a single battery's score still defaults to all time.
 const jevScorecardRefreshSince = "7d"
 
+// jevBatteryLogFingerprint measures the log of the battery registered under
+// name for the town at townRoot. A refresh reuses a cached block while this
+// fingerprint is unchanged.
+func jevBatteryLogFingerprint(name, townRoot string) (scorecard.LogFingerprint, error) {
+	a, err := scorecard.Open(name, townRoot)
+	if err != nil {
+		return scorecard.LogFingerprint{}, err
+	}
+	return scorecard.FingerprintLog(a.LogPath())
+}
+
 // jevScorecardRefreshWith scores every registered battery over the window,
-// keeps each failed battery's last good cached block, and writes the result to
-// the town's cache path. A corrupt previous cache stops the refresh before it
-// scores anything; a missing one starts fresh. Every battery's failure still
-// writes the file, then names the failed batteries in the returned error so the
-// caller's exit status says the cache is not wholly fresh.
+// reuses each battery's cached block whose log has not changed and whose block
+// is still young enough, keeps each failed battery's last good cached block,
+// and writes the result to the town's cache path. A corrupt previous cache
+// stops the refresh before it scores anything; a missing one starts fresh.
+// Every battery's failure still writes the file, then names the failed
+// batteries in the returned error so the caller's exit status says the cache is
+// not wholly fresh.
 func jevScorecardRefreshWith(ctx context.Context, w io.Writer, townRoot, since string, now time.Time,
 	score jevBatteryScorer, cache scorecard.Cache) error {
 	window := since
@@ -156,9 +171,22 @@ func jevScorecardRefreshWith(ctx context.Context, w io.Writer, townRoot, since s
 		return fmt.Errorf("refreshing the scorecard: %w", err)
 	}
 	doc := scorecard.CacheDoc{ScoredAt: now, Since: window, Batteries: make([]scorecard.BatteryBlock, 0, len(scorecard.Registered()))}
-	var failed []string
+	var failed, reused []string
 	for _, name := range scorecard.Registered() {
-		block := scorecard.BatteryBlock{Name: name, ScoredAt: now}
+		// The fingerprint is taken before scoring: a line appended while the
+		// battery is being scored then leaves the fingerprint smaller than
+		// what was scored, so the next refresh sees a change and scores
+		// again. Recording it afterwards could claim lines the report never
+		// saw.
+		fp, fpErr := jevBatteryLogFingerprint(name, townRoot)
+		if fpErr == nil {
+			if block, ok := scorecard.ReusableBlock(prev, name, fp, window, now); ok {
+				doc.Batteries = append(doc.Batteries, block)
+				reused = append(reused, name)
+				continue
+			}
+		}
+		block := scorecard.BatteryBlock{Name: name, ScoredAt: now, LogLines: fp.Lines, LogBytes: fp.Bytes}
 		rep, err := score(ctx, name, townRoot, from)
 		if err != nil {
 			block.Failed, block.Error = true, err.Error()
@@ -171,7 +199,7 @@ func jevScorecardRefreshWith(ctx context.Context, w io.Writer, townRoot, since s
 	if err := cache.Write(path, doc); err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "wrote %s: %d batteries, %d failed\n", path, len(doc.Batteries), len(failed))
+	fmt.Fprintf(w, "wrote %s: %d batteries, %d reused, %d failed\n", path, len(doc.Batteries), len(reused), len(failed))
 	if len(failed) > 0 {
 		return fmt.Errorf("scoring failed for %s; the cache keeps each battery's last good block", strings.Join(failed, ", "))
 	}
