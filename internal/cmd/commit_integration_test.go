@@ -30,7 +30,7 @@ func TestIntegrationGtCommitAuthorMatchesSeatIdentity(t *testing.T) {
 	// The host's configured identity differs from the seat's in both halves, so
 	// only the seat's own decision can produce the expected author.
 	runGit("config", "user.name", "Host Human")
-	runGit("config", "user.email", "seat@test.com")
+	runGit("config", "user.email", "seat@example.com")
 	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("x\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

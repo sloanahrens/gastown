@@ -2557,8 +2557,8 @@ func runGitEnv(t *testing.T, dir string, env []string, args ...string) string {
 func landOnRemoteSquash(t *testing.T, remoteDir, branch, mainBranch string) {
 	t.Helper()
 	ident := []string{
-		"GIT_AUTHOR_NAME=Test User", "GIT_AUTHOR_EMAIL=test@test.com",
-		"GIT_COMMITTER_NAME=Test User", "GIT_COMMITTER_EMAIL=test@test.com",
+		"GIT_AUTHOR_NAME=Test User", "GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=Test User", "GIT_COMMITTER_EMAIL=test@example.com",
 	}
 	tree := runGitEnv(t, remoteDir, nil, "rev-parse", branch+"^{tree}")
 	base := runGitEnv(t, remoteDir, nil, "rev-parse", mainBranch)
@@ -3280,22 +3280,29 @@ func TestIntegrationFullRangeCommitSummariesListsAMergedInForeignCommit(t *testi
 		}
 		return out
 	}
-	commitAs := func(name, file, msg string) {
+	// The seat's email is both the commit author it writes and the -c identity
+	// of the merge, and the foreign email is both the author and the expected
+	// value, so each is one constant.
+	const (
+		seatEmail    = "seat@example.com"
+		foreignEmail = "other@example.com"
+	)
+	commitAs := func(name, email, file, msg string) {
 		t.Helper()
 		if err := os.WriteFile(filepath.Join(dir, file), []byte(msg+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		step("add", file)
-		step("commit", "--author="+name+" <"+name+"@test.com>", "-m", msg)
+		step("commit", "--author="+name+" <"+email+">", "-m", msg)
 	}
 	main := step("rev-parse", "--abbrev-ref", "HEAD")
 	base := step("rev-parse", "HEAD")
 
 	step("checkout", "-b", "side")
-	commitAs("other", "side.txt", "fix: side")
+	commitAs("other", foreignEmail, "side.txt", "fix: side")
 	step("checkout", "-b", "feature", main)
-	commitAs("seat", "feature.txt", "feat: first parent")
-	step("-c", "user.name=seat", "-c", "user.email=seat@test.com", "merge", "--no-ff", "-m", "Merge side", "side")
+	commitAs("seat", seatEmail, "feature.txt", "feat: first parent")
+	step("-c", "user.name=seat", "-c", "user.email="+seatEmail, "merge", "--no-ff", "-m", "Merge side", "side")
 	head := step("rev-parse", "HEAD")
 
 	full, err := g.FullRangeCommitSummaries(base, head)
@@ -3318,8 +3325,13 @@ func TestIntegrationFullRangeCommitSummariesListsAMergedInForeignCommit(t *testi
 	if got, want := slices.Sorted(slices.Values(subjects[1:])), []string{"feat: first parent", "fix: side"}; !slices.Equal(got, want) {
 		t.Fatalf("full-range subjects under the merge = %q, want %q (the foreign commit and the first parent)", got, want)
 	}
-	if foreign != "other <other@test.com>" {
-		t.Errorf("foreign commit author = %q, want other <other@test.com>", foreign)
+	if want := "other <" + foreignEmail + ">"; foreign != want {
+		t.Errorf("foreign commit author = %q, want %s", foreign, want)
+	}
+	for _, c := range full {
+		if c.Subject == "feat: first parent" && c.Email != seatEmail {
+			t.Errorf("seat commit email = %q, want the seat's %s", c.Email, seatEmail)
+		}
 	}
 
 	first, err := g.FirstParentCommitSummaries(base, head)

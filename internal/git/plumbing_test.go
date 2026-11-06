@@ -493,7 +493,7 @@ func TestCommitAuthorshipUnknownCommit(t *testing.T) {
 func TestFirstParentCommitSummariesParsesAuthorEmailAndSubject(t *testing.T) {
 	t.Parallel()
 	const format = "log --first-parent --format=%H%x00%an%x00%ae%x00%s"
-	const out = "bbb\x00capable\x00seat@test.com\x00feat: second, with a colon: here\naaa\x00Test Operator\x00operator@example.test\x00fix: first\n"
+	const out = "bbb\x00capable\x00seat@example.com\x00feat: second, with a colon: here\naaa\x00Test Operator\x00operator@example.test\x00fix: first\n"
 	s := newScripted(map[string]reply{
 		format + " a..b": ok(out),
 		format + " h..h": ok(""),
@@ -504,7 +504,7 @@ func TestFirstParentCommitSummariesParsesAuthorEmailAndSubject(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []CommitSummary{
-		{SHA: "bbb", Author: "capable", Email: "seat@test.com", Subject: "feat: second, with a colon: here"},
+		{SHA: "bbb", Author: "capable", Email: "seat@example.com", Subject: "feat: second, with a colon: here"},
 		{SHA: "aaa", Author: "Test Operator", Email: "operator@example.test", Subject: "fix: first"},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -520,7 +520,7 @@ func TestFirstParentCommitSummariesParsesAuthorEmailAndSubject(t *testing.T) {
 func TestFullRangeCommitSummariesParsesWithoutFirstParent(t *testing.T) {
 	t.Parallel()
 	const format = "log --format=%H%x00%an%x00%ae%x00%s"
-	const out = "mmm\x00capable\x00seat@test.com\x00Merge branch 'side'\nsss\x00Test Operator\x00operator@example.test\x00fix: side\n"
+	const out = "mmm\x00capable\x00seat@example.com\x00Merge branch 'side'\nsss\x00Test Operator\x00operator@example.test\x00fix: side\n"
 	s := newScripted(map[string]reply{
 		format + " a..b": ok(out),
 		format + " h..h": ok(""),
@@ -531,7 +531,7 @@ func TestFullRangeCommitSummariesParsesWithoutFirstParent(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []CommitSummary{
-		{SHA: "mmm", Author: "capable", Email: "seat@test.com", Subject: "Merge branch 'side'"},
+		{SHA: "mmm", Author: "capable", Email: "seat@example.com", Subject: "Merge branch 'side'"},
 		{SHA: "sss", Author: "Test Operator", Email: "operator@example.test", Subject: "fix: side"},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -544,15 +544,18 @@ func TestFullRangeCommitSummariesParsesWithoutFirstParent(t *testing.T) {
 
 func TestAuthorEmailReadsTheWorktreeIdentity(t *testing.T) {
 	t.Parallel()
+	// The configured worktree email is both the scripted reply and the value
+	// the reader must return, so one constant serves both.
+	const seatEmail = "seat@example.com"
 	s := newScripted(map[string]reply{
-		"config --get user.email": ok("seat@test.com\n"),
+		"config --get user.email": ok(seatEmail + "\n"),
 	})
 	g := newTestGit(t, s)
 	got, err := g.AuthorEmail()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "seat@test.com" {
-		t.Errorf("AuthorEmail = %q, want seat@test.com", got)
+	if got != seatEmail {
+		t.Errorf("AuthorEmail = %q, want %s", got, seatEmail)
 	}
 }

@@ -36,7 +36,7 @@ func seedRepoWithCommit(t *testing.T, dir, remote, branch string) (*gitpkg.Git, 
 	t.Helper()
 	repo := filepath.Join(dir, "work")
 	testRunGit(t, dir, "init", "--initial-branch", "main", repo)
-	testRunGit(t, repo, "config", "user.email", "test@test.com")
+	testRunGit(t, repo, "config", "user.email", "test@example.com")
 	testRunGit(t, repo, "config", "user.name", "Test")
 	writeRepoFile(t, repo, "README.md", "# seed\n")
 	testRunGit(t, repo, "add", ".")

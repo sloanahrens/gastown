@@ -11,6 +11,11 @@ import (
 	gitpkg "github.com/steveyegge/gastown/internal/git"
 )
 
+// testRepoEmail is the repo's configured user.email, and it is also the seat
+// email the rework lease is handed and the author of origin's commit in the
+// refusal case, so every use names this one constant.
+const testRepoEmail = "test@example.com"
+
 // recoverDivergedPush against real repos: what real git's patch-ids make of
 // a rebase, a rework redispatch, genuine divergence and a merge commit's own
 // content. The decision table itself is unit-tested against a fake in
@@ -30,7 +35,7 @@ func TestIntegrationRecoverDivergedPush_RealRepo(t *testing.T) {
 
 	seed := filepath.Join(tmp, "seed")
 	testRunGit(t, tmp, "init", "--initial-branch", "main", seed)
-	testRunGit(t, seed, "config", "user.email", "test@test.com")
+	testRunGit(t, seed, "config", "user.email", testRepoEmail)
 	testRunGit(t, seed, "config", "user.name", "Test")
 	writeRepoFile(t, seed, "README.md", "# initial\n")
 	testRunGit(t, seed, "add", ".")
@@ -58,7 +63,7 @@ func TestIntegrationRecoverDivergedPush_RealRepo(t *testing.T) {
 	// origin while keeping the content identical.
 	work := filepath.Join(tmp, "work")
 	testRunGit(t, tmp, "clone", remote, work)
-	testRunGit(t, work, "config", "user.email", "test@test.com")
+	testRunGit(t, work, "config", "user.email", testRepoEmail)
 	testRunGit(t, work, "config", "user.name", "Test")
 	testRunGit(t, work, "checkout", "-b", "feature", "origin/feature")
 	testRunGit(t, work, "fetch", "origin")
@@ -108,7 +113,7 @@ func TestIntegrationRecoverDivergedPush_RealRepoReworkRedispatch(t *testing.T) {
 
 	seed := filepath.Join(tmp, "seed")
 	testRunGit(t, tmp, "init", "--initial-branch", "main", seed)
-	testRunGit(t, seed, "config", "user.email", "test@test.com")
+	testRunGit(t, seed, "config", "user.email", testRepoEmail)
 	testRunGit(t, seed, "config", "user.name", "Test")
 	writeRepoFile(t, seed, "README.md", "# initial\n")
 	testRunGit(t, seed, "add", ".")
@@ -138,7 +143,7 @@ func TestIntegrationRecoverDivergedPush_RealRepoReworkRedispatch(t *testing.T) {
 	// targeted fix commit the rework produced.
 	work := filepath.Join(tmp, "work")
 	testRunGit(t, tmp, "clone", remote, work)
-	testRunGit(t, work, "config", "user.email", "test@test.com")
+	testRunGit(t, work, "config", "user.email", testRepoEmail)
 	testRunGit(t, work, "config", "user.name", "Test")
 	testRunGit(t, work, "checkout", "-b", "feature", "origin/feature")
 	testRunGit(t, work, "fetch", "origin")
@@ -186,7 +191,7 @@ func TestIntegrationRecoverDivergedPush_RealRepoRefusesGenuineDivergence(t *test
 
 	seed := filepath.Join(tmp, "seed")
 	testRunGit(t, tmp, "init", "--initial-branch", "main", seed)
-	testRunGit(t, seed, "config", "user.email", "test@test.com")
+	testRunGit(t, seed, "config", "user.email", testRepoEmail)
 	testRunGit(t, seed, "config", "user.name", "Test")
 	writeRepoFile(t, seed, "README.md", "# initial\n")
 	testRunGit(t, seed, "add", ".")
@@ -202,7 +207,7 @@ func TestIntegrationRecoverDivergedPush_RealRepoRefusesGenuineDivergence(t *test
 
 	work := filepath.Join(tmp, "work")
 	testRunGit(t, tmp, "clone", remote, work)
-	testRunGit(t, work, "config", "user.email", "test@test.com")
+	testRunGit(t, work, "config", "user.email", testRepoEmail)
 	testRunGit(t, work, "config", "user.name", "Test")
 	testRunGit(t, work, "checkout", "feature")
 	writeRepoFile(t, work, "feature-more.txt", "more local work\n")
@@ -213,7 +218,7 @@ func TestIntegrationRecoverDivergedPush_RealRepoRefusesGenuineDivergence(t *test
 	// concurrently.
 	other := filepath.Join(tmp, "other")
 	testRunGit(t, tmp, "clone", remote, other)
-	testRunGit(t, other, "config", "user.email", "test@test.com")
+	testRunGit(t, other, "config", "user.email", testRepoEmail)
 	testRunGit(t, other, "config", "user.name", "Test")
 	testRunGit(t, other, "checkout", "feature")
 	writeRepoFile(t, other, "someone-elses-work.txt", "different content\n")
@@ -260,7 +265,7 @@ func TestIntegrationRecoverDivergedPush_RealRepoMergeCommitContentRefuses(t *tes
 
 	seed := filepath.Join(tmp, "seed")
 	testRunGit(t, tmp, "init", "--initial-branch", "main", seed)
-	testRunGit(t, seed, "config", "user.email", "test@test.com")
+	testRunGit(t, seed, "config", "user.email", testRepoEmail)
 	testRunGit(t, seed, "config", "user.name", "Test")
 	writeRepoFile(t, seed, "README.md", "# initial\n")
 	testRunGit(t, seed, "add", ".")
@@ -306,7 +311,7 @@ func TestIntegrationRecoverDivergedPush_RealRepoMergeCommitContentRefuses(t *tes
 	// does not.
 	work := filepath.Join(tmp, "work")
 	testRunGit(t, tmp, "clone", remote, work)
-	testRunGit(t, work, "config", "user.email", "test@test.com")
+	testRunGit(t, work, "config", "user.email", testRepoEmail)
 	testRunGit(t, work, "config", "user.name", "Test")
 	testRunGit(t, work, "checkout", "-b", "feature", "origin/feature")
 	testRunGit(t, work, "fetch", "origin")
@@ -362,7 +367,7 @@ func TestIntegrationRecoverDivergedPush_RealRepoReworkOfRejectedHead(t *testing.
 
 	seed := filepath.Join(tmp, "seed")
 	testRunGit(t, tmp, "init", "--initial-branch", "main", seed)
-	testRunGit(t, seed, "config", "user.email", "test@test.com")
+	testRunGit(t, seed, "config", "user.email", testRepoEmail)
 	testRunGit(t, seed, "config", "user.name", "Test")
 	writeRepoFile(t, seed, "README.md", "# initial\n")
 	testRunGit(t, seed, "add", ".")
@@ -392,7 +397,7 @@ func TestIntegrationRecoverDivergedPush_RealRepoReworkOfRejectedHead(t *testing.
 	// patch-id differs from the one origin holds.
 	work := filepath.Join(tmp, "work")
 	testRunGit(t, tmp, "clone", remote, work)
-	testRunGit(t, work, "config", "user.email", "test@test.com")
+	testRunGit(t, work, "config", "user.email", testRepoEmail)
 	testRunGit(t, work, "config", "user.name", "Test")
 	testRunGit(t, work, "checkout", "-b", "feature", "origin/feature")
 	testRunGit(t, work, "rebase", "origin/main")
@@ -406,7 +411,7 @@ func TestIntegrationRecoverDivergedPush_RealRepoReworkOfRejectedHead(t *testing.
 	}
 
 	recovered, diagnosis, err := recoverDivergedPush(g, "origin", "feature:feature", "feature", "origin/main",
-		reworkPush{rejectedHead: rejected, seatAuthor: reworkTestSeat, seatEmail: "test@test.com"})
+		reworkPush{rejectedHead: rejected, seatAuthor: reworkTestSeat, seatEmail: testRepoEmail})
 	if err != nil {
 		t.Fatalf("recoverDivergedPush: %v (diagnosis: %s)", err, diagnosis)
 	}
@@ -430,7 +435,7 @@ func TestIntegrationRecoverDivergedPush_RealRepoReworkRefusesForeignAuthor(t *te
 
 	seed := filepath.Join(tmp, "seed")
 	testRunGit(t, tmp, "init", "--initial-branch", "main", seed)
-	testRunGit(t, seed, "config", "user.email", "test@test.com")
+	testRunGit(t, seed, "config", "user.email", testRepoEmail)
 	testRunGit(t, seed, "config", "user.name", "Test")
 	writeRepoFile(t, seed, "README.md", "# initial\n")
 	testRunGit(t, seed, "add", ".")
@@ -442,7 +447,7 @@ func TestIntegrationRecoverDivergedPush_RealRepoReworkRefusesForeignAuthor(t *te
 	testRunGit(t, seed, "checkout", "-b", "feature")
 	writeRepoFile(t, seed, "feature.txt", "first attempt\n")
 	testRunGit(t, seed, "add", ".")
-	testRunGit(t, seed, "commit", "--author=Test Operator <test@test.com>", "-m", "feat: first attempt")
+	testRunGit(t, seed, "commit", "--author=Test Operator <"+testRepoEmail+">", "-m", "feat: first attempt")
 	testRunGit(t, seed, "push", "origin", "feature:feature")
 	rejected := gitpkgRev(t, seed, "HEAD")
 
@@ -454,7 +459,7 @@ func TestIntegrationRecoverDivergedPush_RealRepoReworkRefusesForeignAuthor(t *te
 
 	work := filepath.Join(tmp, "work")
 	testRunGit(t, tmp, "clone", remote, work)
-	testRunGit(t, work, "config", "user.email", "test@test.com")
+	testRunGit(t, work, "config", "user.email", testRepoEmail)
 	testRunGit(t, work, "config", "user.name", "Test")
 	testRunGit(t, work, "checkout", "-b", "feature", "origin/feature")
 	testRunGit(t, work, "rebase", "origin/main")
@@ -464,7 +469,7 @@ func TestIntegrationRecoverDivergedPush_RealRepoReworkRefusesForeignAuthor(t *te
 
 	g := gitpkg.NewGit(work)
 	recovered, diagnosis, err := recoverDivergedPush(g, "origin", "feature:feature", "feature", "origin/main",
-		reworkPush{rejectedHead: rejected, seatAuthor: reworkTestSeat, seatEmail: "test@test.com"})
+		reworkPush{rejectedHead: rejected, seatAuthor: reworkTestSeat, seatEmail: testRepoEmail})
 	if err != nil {
 		t.Fatalf("recoverDivergedPush: %v (diagnosis: %s)", err, diagnosis)
 	}
@@ -493,7 +498,7 @@ func TestIntegrationRecoverDivergedPush_RealRepoOriginDeletedBranch(t *testing.T
 
 	seed := filepath.Join(tmp, "seed")
 	testRunGit(t, tmp, "init", "--initial-branch", "main", seed)
-	testRunGit(t, seed, "config", "user.email", "test@test.com")
+	testRunGit(t, seed, "config", "user.email", testRepoEmail)
 	testRunGit(t, seed, "config", "user.name", "Test")
 	writeRepoFile(t, seed, "README.md", "# initial\n")
 	testRunGit(t, seed, "add", ".")
@@ -508,7 +513,7 @@ func TestIntegrationRecoverDivergedPush_RealRepoOriginDeletedBranch(t *testing.T
 
 	work := filepath.Join(tmp, "work")
 	testRunGit(t, tmp, "clone", remote, work)
-	testRunGit(t, work, "config", "user.email", "test@test.com")
+	testRunGit(t, work, "config", "user.email", testRepoEmail)
 	testRunGit(t, work, "config", "user.name", "Test")
 	testRunGit(t, work, "checkout", "-b", "feature", "origin/feature")
 

@@ -19,7 +19,7 @@ const (
 	reworkWiringRejected = "aaaa1111bbbb2222cccc3333dddd4444eeee5555"
 	reworkWiringLocal    = "feature1"
 	reworkWiringSeat     = "refuge"
-	reworkWiringEmail    = "seat@test.com"
+	reworkWiringEmail    = "seat@example.com"
 )
 
 // reworkWiringHarness is a submit whose source bead is a rework of
@@ -67,7 +67,7 @@ func TestSubmitReworkUnderSeatLocalAddressPushesFromBead(t *testing.T) {
 // reports it.
 func TestSubmitReworkUnderLegacyGlobalEmailPushesFromBead(t *testing.T) {
 	t.Parallel()
-	const legacy = "host@test.com"
+	const legacy = "host@example.com"
 	h := reworkWiringHarness(t, reworkWiringSeat, legacy)
 	h.r.deps.globalEmail = func() string { return legacy }
 	if err := h.submit(); err != nil {
@@ -82,7 +82,7 @@ func TestSubmitReworkUnderLegacyGlobalEmailPushesFromBead(t *testing.T) {
 // commit is another address and the rework is refused.
 func TestSubmitReworkUnderLegacyEmailWithUnsetGlobalRefusesFromBead(t *testing.T) {
 	t.Parallel()
-	h := reworkWiringHarness(t, reworkWiringSeat, "host@test.com")
+	h := reworkWiringHarness(t, reworkWiringSeat, "host@example.com")
 	h.r.deps.globalEmail = func() string { return "" }
 	if err := h.submit(); err == nil {
 		t.Fatal("submit succeeded over a commit under an address the seat does not own")
@@ -100,7 +100,7 @@ func TestSubmitNonReworkPushDoesNotReadGlobalEmail(t *testing.T) {
 	reads := 0
 	h.r.deps.globalEmail = func() string {
 		reads++
-		return "host@test.com"
+		return "host@example.com"
 	}
 	if err := h.submit(); err != nil {
 		t.Fatalf("submit = %v, want the plain push to land", err)

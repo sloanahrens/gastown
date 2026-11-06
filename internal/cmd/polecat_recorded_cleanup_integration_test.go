@@ -24,7 +24,7 @@ func initInventoryGitWorktree(t *testing.T) string {
 	dir := filepath.Join(root, "work")
 	runGitCmd(t, root, "init", "--bare", "-b", "main", origin)
 	runGitCmd(t, root, "clone", origin, dir)
-	runGitCmd(t, dir, "config", "user.email", "test@test.com")
+	runGitCmd(t, dir, "config", "user.email", "test@example.com")
 	runGitCmd(t, dir, "config", "user.name", "Test User")
 	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Test\n"), 0644); err != nil {
 		t.Fatalf("write file: %v", err)
@@ -69,7 +69,7 @@ func TestIntegrationPolecatListReuseVerdictRedrivesFromLiveGit(t *testing.T) {
 	// The probe must fail closed rather than read it as clean (gt-sg75r).
 	noOriginWorktree := t.TempDir()
 	runGitCmd(t, noOriginWorktree, "init", "-b", "polecat/topaz")
-	runGitCmd(t, noOriginWorktree, "config", "user.email", "test@test.com")
+	runGitCmd(t, noOriginWorktree, "config", "user.email", "test@example.com")
 	runGitCmd(t, noOriginWorktree, "config", "user.name", "Test User")
 	runGitCmd(t, noOriginWorktree, "commit", "--allow-empty", "-m", "initial")
 

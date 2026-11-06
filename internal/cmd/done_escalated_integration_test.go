@@ -20,7 +20,7 @@ func TestIntegrationEscalatedDoneWithCommitsAheadLeavesBeadOpen(t *testing.T) {
 	townRoot := escalatedTown(t)
 	repo := filepath.Join(townRoot, "gastown")
 	testRunGit(t, repo, "init", "-b", "main")
-	testRunGit(t, repo, "config", "user.email", "test@test.com")
+	testRunGit(t, repo, "config", "user.email", "test@example.com")
 	testRunGit(t, repo, "config", "user.name", "Test")
 	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("# Test\n"), 0644); err != nil {
 		t.Fatal(err)

@@ -184,6 +184,9 @@ func TestCommitIdentity(t *testing.T) {
 // writes is one gt done's rework lease recognizes (gt-tip6u).
 func TestCommitGitArgsCarryTheSeatIdentity(t *testing.T) {
 	t.Parallel()
+	// The seat email is both the identity the wrapper is given and the -c
+	// user.email it must hand git, so one constant serves both.
+	const seatEmail = "seat@example.com"
 	tests := []struct {
 		name string
 		seat git.SeatIdentity
@@ -191,8 +194,8 @@ func TestCommitGitArgsCarryTheSeatIdentity(t *testing.T) {
 	}{
 		{
 			name: "seat identity",
-			seat: git.SeatIdentity{Name: "coma", Email: "seat@test.com"},
-			want: []string{"-c", "user.name=coma", "-c", "user.email=seat@test.com", "commit", "-m", "msg"},
+			seat: git.SeatIdentity{Name: "coma", Email: seatEmail},
+			want: []string{"-c", "user.name=coma", "-c", "user.email=" + seatEmail, "commit", "-m", "msg"},
 		},
 		{
 			name: "name without an email",
@@ -221,21 +224,24 @@ func TestCommitGitArgsCarryTheSeatIdentity(t *testing.T) {
 // holds for the committer pair, which outranks the -c user.* commitGitArgs sets.
 func TestWithAuthorEnvReplacesInheritedAuthor(t *testing.T) {
 	t.Parallel()
+	// The seat email is both the identity the wrapper is given and the author
+	// and committer email it must write, so one constant serves both.
+	const seatEmail = "seat@example.com"
 	env := []string{
 		"PATH=/bin",
 		"GIT_AUTHOR_NAME=stale",
-		"GIT_AUTHOR_EMAIL=stale@test.com",
+		"GIT_AUTHOR_EMAIL=stale@example.com",
 		"GIT_COMMITTER_NAME=stale",
-		"GIT_COMMITTER_EMAIL=stale@test.com",
+		"GIT_COMMITTER_EMAIL=stale@example.com",
 	}
-	got := withAuthorEnv(env, git.SeatIdentity{Name: "coma", Email: "seat@test.com"})
+	got := withAuthorEnv(env, git.SeatIdentity{Name: "coma", Email: seatEmail})
 	// The order is fixed, so the same seat always yields the same environment.
 	want := []string{
 		"PATH=/bin",
 		"GIT_AUTHOR_NAME=coma",
-		"GIT_AUTHOR_EMAIL=seat@test.com",
+		"GIT_AUTHOR_EMAIL=" + seatEmail,
 		"GIT_COMMITTER_NAME=coma",
-		"GIT_COMMITTER_EMAIL=seat@test.com",
+		"GIT_COMMITTER_EMAIL=" + seatEmail,
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("withAuthorEnv = %v, want %v", got, want)

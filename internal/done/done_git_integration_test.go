@@ -24,7 +24,7 @@ func TestIntegrationAutoCommitSafetyNet(t *testing.T) {
 	// Set up a git repo with uncommitted changes
 	dir := t.TempDir()
 	testRunGit(t, dir, "init")
-	testRunGit(t, dir, "config", "user.email", "test@test.com")
+	testRunGit(t, dir, "config", "user.email", "test@example.com")
 	testRunGit(t, dir, "config", "user.name", "Test")
 
 	// Create initial commit
@@ -117,7 +117,7 @@ func TestIntegrationAutoCommitSafetyNet(t *testing.T) {
 	t.Run("auto-commit excludes runtime artifacts recursively", func(t *testing.T) {
 		repo := t.TempDir()
 		testRunGit(t, repo, "init")
-		testRunGit(t, repo, "config", "user.email", "test@test.com")
+		testRunGit(t, repo, "config", "user.email", "test@example.com")
 		testRunGit(t, repo, "config", "user.name", "Test")
 		if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("# Test\n"), 0644); err != nil {
 			t.Fatal(err)
@@ -200,7 +200,7 @@ func TestIntegrationPushSubmoduleChanges(t *testing.T) {
 	// Create a working clone of the submodule to add initial content
 	subWork := filepath.Join(tmp, "sub-work")
 	testRunGit(t, tmp, "clone", subRemote, subWork)
-	testRunGit(t, subWork, "config", "user.email", "test@test.com")
+	testRunGit(t, subWork, "config", "user.email", "test@example.com")
 	testRunGit(t, subWork, "config", "user.name", "Test User")
 	if err := os.WriteFile(filepath.Join(subWork, "lib.go"), []byte("package lib\n"), 0644); err != nil {
 		t.Fatalf("write sub file: %v", err)
@@ -216,7 +216,7 @@ func TestIntegrationPushSubmoduleChanges(t *testing.T) {
 	// Create the parent repo
 	parent := filepath.Join(tmp, "parent")
 	testRunGit(t, tmp, "init", "--initial-branch", "main", parent)
-	testRunGit(t, parent, "config", "user.email", "test@test.com")
+	testRunGit(t, parent, "config", "user.email", "test@example.com")
 	testRunGit(t, parent, "config", "user.name", "Test User")
 	if err := os.WriteFile(filepath.Join(parent, "README.md"), []byte("# Parent\n"), 0644); err != nil {
 		t.Fatalf("write parent file: %v", err)
@@ -305,7 +305,7 @@ func TestIntegrationSubmitReadsTheMarkerBearingCLAUDEmd(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
 			testRunGit(t, dir, "init")
-			testRunGit(t, dir, "config", "user.email", "test@test.com")
+			testRunGit(t, dir, "config", "user.email", "test@example.com")
 			testRunGit(t, dir, "config", "user.name", "Test")
 			if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Test\n"), 0o644); err != nil {
 				t.Fatal(err)

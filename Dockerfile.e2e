@@ -47,10 +47,10 @@ RUN for i in 1 2 3; do \
 
 # Configure git and dolt identity (required for gt install --git and dolt init)
 RUN git config --global user.name "Test User" && \
-    git config --global user.email "test@test.com" && \
+    git config --global user.email "test@example.com" && \
     git config --global init.defaultBranch main && \
     dolt config --global --add user.name "Test User" && \
-    dolt config --global --add user.email "test@test.com"
+    dolt config --global --add user.email "test@example.com"
 
 # Set up workspace
 WORKDIR /app

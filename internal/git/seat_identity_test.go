@@ -10,6 +10,13 @@ import (
 
 func TestSeatIdentityFor(t *testing.T) {
 	t.Parallel()
+	// Each worktree email is both the input the seat is read from and the
+	// email the identity must carry, so each is defined once here.
+	const (
+		seatEmail   = "seat@example.com"
+		crewEmail   = "crew@example.com"
+		deaconEmail = "deacon@example.com"
+	)
 	tests := []struct {
 		name          string
 		seat          string
@@ -19,20 +26,20 @@ func TestSeatIdentityFor(t *testing.T) {
 		{
 			name:          "polecat takes its bare name and the worktree email",
 			seat:          "gastown/polecats/coma",
-			worktreeEmail: "seat@test.com",
-			want:          SeatIdentity{Name: "coma", Email: "seat@test.com"},
+			worktreeEmail: seatEmail,
+			want:          SeatIdentity{Name: "coma", Email: seatEmail},
 		},
 		{
 			name:          "crew takes its bare name",
 			seat:          "gastown/crew/jack",
-			worktreeEmail: "crew@test.com",
-			want:          SeatIdentity{Name: "jack", Email: "crew@test.com"},
+			worktreeEmail: crewEmail,
+			want:          SeatIdentity{Name: "jack", Email: crewEmail},
 		},
 		{
 			name:          "trailing slash names the role",
 			seat:          "deacon/",
-			worktreeEmail: "deacon@test.com",
-			want:          SeatIdentity{Name: "deacon", Email: "deacon@test.com"},
+			worktreeEmail: deaconEmail,
+			want:          SeatIdentity{Name: "deacon", Email: deaconEmail},
 		},
 		{
 			name:          "no worktree email leaves the email empty",
@@ -43,8 +50,8 @@ func TestSeatIdentityFor(t *testing.T) {
 		{
 			name:          "surrounding space is not part of the identity",
 			seat:          " gastown/polecats/coma ",
-			worktreeEmail: " seat@test.com ",
-			want:          SeatIdentity{Name: "coma", Email: "seat@test.com"},
+			worktreeEmail: " " + seatEmail + " ",
+			want:          SeatIdentity{Name: "coma", Email: seatEmail},
 		},
 	}
 	for _, tt := range tests {
@@ -83,13 +90,16 @@ func TestSeatLocalEmail(t *testing.T) {
 
 func TestGlobalAuthorEmailFrom(t *testing.T) {
 	t.Parallel()
+	// The host's global email is both the scripted git output and the value
+	// the reader must return, so one constant serves both.
+	const hostEmail = "host@example.com"
 	tests := []struct {
 		name string
 		out  string
 		err  error
 		want string
 	}{
-		{name: "trimmed global email", out: "host@test.com\n", want: "host@test.com"},
+		{name: "trimmed global email", out: hostEmail + "\n", want: hostEmail},
 		{name: "unset global email", err: errors.New("exit status 1"), want: ""},
 		{name: "blank global email", out: "  \n", want: ""},
 	}

@@ -140,7 +140,7 @@ func initSeatPoolRepo(t *testing.T) string {
 	}
 	run(origin, "init", "--bare", "-b", "main")
 	run(dir, "clone", origin, ".")
-	run(dir, "config", "user.email", "test@test.com")
+	run(dir, "config", "user.email", "test@example.com")
 	run(dir, "config", "user.name", "Test User")
 	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Test\n"), 0644); err != nil {
 		t.Fatalf("write README: %v", err)
