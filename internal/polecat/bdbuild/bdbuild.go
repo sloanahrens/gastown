@@ -173,6 +173,13 @@ type Options struct {
 	// Compile drops the variables that would change what is compiled and sets
 	// GOOS, GOARCH and CGO_ENABLED itself.
 	Env []string
+	// InstalledBuildID and InstalledCommit are the BuildID and Commit of the
+	// installed bd's own version report. When they name the commit being
+	// built, Compile stamps InstalledBuildID as main.Build, so the image's bd
+	// prints the host's build id whatever this checkout abbreviates it to
+	// (gt-7qinix). Empty falls back to git's abbreviation.
+	InstalledBuildID string
+	InstalledCommit  string
 }
 
 // Compile writes opt.Out (resolved to an absolute path, so it survives the
@@ -224,7 +231,7 @@ func Compile(opt Options, git Git, goBuild Go) (string, error) {
 	}
 	defer removeWorktree(opt.Src, dir, git)
 
-	shortRev, err := buildID(git, dir, commit)
+	stamp, err := buildStamp(git, dir, commit, opt.InstalledBuildID, opt.InstalledCommit)
 	if err != nil {
 		return "", err
 	}
@@ -232,20 +239,49 @@ func Compile(opt Options, git Git, goBuild Go) (string, error) {
 	env := buildEnv(opt.Env)
 	// -X main.Build and -X main.Commit stamp the two halves of the build id `bd
 	// version` prints, the same variables the beads Makefile stamps. main.Build
-	// is the abbreviation git prints for the commit, so the image's bd reports
-	// the same build id as the host's installed bd (gt-glsx8).
-	ldflags := "-X main.Build=" + shortRev + " -X main.Commit=" + commit
+	// is the installed bd's own build id when it names this commit, so both
+	// print the same id whatever this checkout abbreviates it to (gt-glsx8,
+	// gt-7qinix).
+	ldflags := "-X main.Build=" + stamp + " -X main.Commit=" + commit
 	if _, err := goBuild(dir, env, "build", "-trimpath", "-ldflags", ldflags, "-o", out, Package); err != nil {
 		return "", fmt.Errorf("cannot build bd at %s: %w", commit, err)
 	}
 	return commit, nil
 }
 
-// buildID returns the value stamped into main.Build: the abbreviation git prints
-// for commit in dir, which git picks from the checkout's object count, so it has
-// the length the host build's abbreviation has. An answer that is not a commit
-// is refused rather than stamped: an empty main.Build makes the image's bd
-// report a build id no host build has.
+// buildStamp returns the value stamped into main.Build: the installed bd's
+// build id when it names commit, otherwise git's abbreviation of commit in dir
+// (buildID). The installed id wins because it is the id the host build prints,
+// whatever this checkout abbreviates the commit to (gt-7qinix).
+func buildStamp(git Git, dir, commit, installedBuildID, installedCommit string) (string, error) {
+	if id, ok := installedBuildIDFor(commit, installedBuildID, installedCommit); ok {
+		return id, nil
+	}
+	return buildID(git, dir, commit)
+}
+
+// installedBuildIDFor reports whether the installed bd's build id names
+// commit: installedCommit is a non-empty prefix of the full sha, and
+// installedBuildID is a non-empty hex string that is also a prefix of it. A
+// build id that does not name this commit — a branch stamp, or a build of
+// another commit — is not used, so the image falls back to git's abbreviation.
+func installedBuildIDFor(commit, installedBuildID, installedCommit string) (string, bool) {
+	if installedCommit == "" || !strings.HasPrefix(commit, installedCommit) {
+		return "", false
+	}
+	if !isHex(installedBuildID) || !strings.HasPrefix(commit, installedBuildID) {
+		return "", false
+	}
+	return installedBuildID, true
+}
+
+// buildID returns git's abbreviation of commit in dir: the fallback value
+// stamped into main.Build. git picks the abbreviation's length from the
+// checkout's object count, and this checkout is a different clone from the one
+// the host build ran in, so the same commit can abbreviate to a different
+// length than the host printed. An answer that is not a commit is refused
+// rather than stamped: an empty main.Build makes the image's bd report a build
+// id no host build has.
 func buildID(git Git, dir, commit string) (string, error) {
 	out, err := git(dir, "rev-parse", "--short", commit)
 	if err != nil {
@@ -270,7 +306,13 @@ func removeWorktree(src, dir string, git Git) {
 // isCommit reports whether s has the shape of git's abbreviated or full commit
 // sha: the shape `git rev-parse HEAD` prints.
 func isCommit(s string) bool {
-	if len(s) < 7 {
+	return len(s) >= 7 && isHex(s)
+}
+
+// isHex reports whether s is non-empty and made of lowercase hex digits, the
+// characters a git sha is written in.
+func isHex(s string) bool {
+	if s == "" {
 		return false
 	}
 	for _, r := range s {

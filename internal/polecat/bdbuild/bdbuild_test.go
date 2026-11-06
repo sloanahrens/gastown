@@ -16,6 +16,10 @@ const (
 	// shortID is what the fake git answers `rev-parse --short` with: an
 	// abbreviation shorter than the full sha, as git prints one.
 	shortID = "3b90ab0"
+	// hostBuildID is what the installed bd reports when it was built from
+	// fullCommit in another clone, whose object count made git abbreviate the
+	// commit one character longer (gt-7qinix).
+	hostBuildID = "3b90ab0c"
 )
 
 // fakeBD answers the store's version report with info and err, and counts the
@@ -263,6 +267,74 @@ func TestBuildStampsTheBuildIDAndTheCommit(t *testing.T) {
 	}
 	if ldflags := build.args[i+1]; ldflags != want {
 		t.Errorf("Compile built with -ldflags %q, want %q", ldflags, want)
+	}
+}
+
+// The image and the host build the same commit in different clones, so git can
+// abbreviate it to different lengths (d0f0010 against the host's d0f0010e), and
+// the recorder refuses the image's bd. When the installed bd reports this
+// commit, its build id is stamped as is, without asking this clone's git.
+func TestCompileStampsTheInstalledBDsBuildIDForTheSameCommit(t *testing.T) {
+	t.Parallel()
+	git := &fakeGit{revParse: fullCommit, short: shortID}
+	build := &fakeGo{}
+	out := filepath.Join(t.TempDir(), "bd")
+	_, err := Compile(Options{
+		Src: "/beads", Out: out, Commit: hostCommit, BuildDir: t.TempDir(),
+		InstalledBuildID: hostBuildID, InstalledCommit: fullCommit[:12],
+	}, git.run, build.run)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	want := "-X main.Build=" + hostBuildID + " -X main.Commit=" + fullCommit
+	i := indexOf(build.args, "-ldflags")
+	if i < 0 || i+1 >= len(build.args) {
+		t.Fatalf("Compile ran go %v with no -ldflags value", build.args)
+	}
+	if ldflags := build.args[i+1]; ldflags != want {
+		t.Errorf("Compile built with -ldflags %q, want %q", ldflags, want)
+	}
+	if short := git.find("rev-parse", "--short"); short != nil {
+		t.Errorf("Compile asked git for an abbreviation the installed bd already supplies: %v", short)
+	}
+}
+
+// The installed bd's build id is stamped only when it names the commit being
+// built. Anything else — another commit, an id that is not a prefix, a
+// branch-stamped id, no id, or no reported commit — keeps git's abbreviation.
+func TestCompileKeepsGitsAbbreviationWhenTheInstalledBDDoesNotNameTheCommit(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		buildID string
+		commit  string
+	}{
+		{"another commit", hostBuildID, hostCommit},
+		{"a build id that is not a prefix", "fffffff", fullCommit},
+		{"a branch-stamped build id", "dev", fullCommit},
+		{"no build id", "", fullCommit},
+		{"no reported commit", hostBuildID, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			git := &fakeGit{revParse: fullCommit, short: shortID}
+			build := &fakeGo{}
+			out := filepath.Join(t.TempDir(), "bd")
+			if _, err := Compile(Options{
+				Src: "/beads", Out: out, Commit: fullCommit, BuildDir: t.TempDir(),
+				InstalledBuildID: tc.buildID, InstalledCommit: tc.commit,
+			}, git.run, build.run); err != nil {
+				t.Fatalf("Compile: %v", err)
+			}
+			want := "-X main.Build=" + shortID + " -X main.Commit=" + fullCommit
+			i := indexOf(build.args, "-ldflags")
+			if i < 0 || i+1 >= len(build.args) {
+				t.Fatalf("Compile ran go %v with no -ldflags value", build.args)
+			}
+			if ldflags := build.args[i+1]; ldflags != want {
+				t.Errorf("Compile built with -ldflags %q, want %q", ldflags, want)
+			}
+		})
 	}
 }
 
