@@ -40,7 +40,7 @@ func TestListUserRepos(t *testing.T) {
 	assert.Equal(t, []string{"/api/v1/user/repos", "/api/v1/user/repos"}, gotPaths)
 	assert.Equal(t, []string{"1", "2"}, gotPages)
 	assert.Equal(t, []string{"100", "100"}, gotLimits)
-	assert.Equal(t, []Repository{{FullName: "sloan/beads"}, {FullName: "sloan/mango"}}, repos)
+	assert.Equal(t, []Repository{{FullName: "owner/beads"}, {FullName: "owner/mango"}}, repos)
 }
 
 // A viewer with more repositories than one page holds is read to its end: a
@@ -50,7 +50,7 @@ func TestListUserReposReadsEveryPage(t *testing.T) {
 	t.Parallel()
 	full := make([]Repository, userReposLimit)
 	for i := range full {
-		full[i] = Repository{FullName: fmt.Sprintf("sloan/repo-%d", i)}
+		full[i] = Repository{FullName: fmt.Sprintf("owner/repo-%d", i)}
 	}
 	// The handler runs on the server's own goroutine: pages is guarded by mu,
 	// and a handler write failure is recorded for the test goroutine to assert
@@ -68,7 +68,7 @@ func TestListUserReposReadsEveryPage(t *testing.T) {
 		case "1":
 			err = json.NewEncoder(w).Encode(full)
 		case "2":
-			err = json.NewEncoder(w).Encode([]Repository{{FullName: "sloan/last"}})
+			err = json.NewEncoder(w).Encode([]Repository{{FullName: "owner/last"}})
 		default:
 			_, err = w.Write([]byte("[]"))
 		}
@@ -90,8 +90,8 @@ func TestListUserReposReadsEveryPage(t *testing.T) {
 	require.NoError(t, gotWriteErr, "the stub wrote its canned pages")
 	assert.Equal(t, []string{"1", "2", "3"}, gotPages, "a short page is not the end: the empty page is")
 	require.Len(t, repos, userReposLimit+1)
-	assert.Equal(t, "sloan/repo-0", repos[0].FullName)
-	assert.Equal(t, "sloan/last", repos[userReposLimit].FullName)
+	assert.Equal(t, "owner/repo-0", repos[0].FullName)
+	assert.Equal(t, "owner/last", repos[userReposLimit].FullName)
 }
 
 // A page the client cannot read fails the whole list: reporting the pages it
@@ -118,7 +118,7 @@ func TestListUserReposEndlessPagesFails(t *testing.T) {
 	t.Parallel()
 	full := make([]Repository, userReposLimit)
 	for i := range full {
-		full[i] = Repository{FullName: fmt.Sprintf("sloan/repo-%d", i)}
+		full[i] = Repository{FullName: fmt.Sprintf("owner/repo-%d", i)}
 	}
 	// calls and writeErr are written on the handler's goroutine, so each is
 	// guarded by mu and read under it on the test goroutine.
@@ -155,16 +155,16 @@ func TestListUserReposEndlessPagesFails(t *testing.T) {
 func TestListRepoActivities(t *testing.T) {
 	t.Parallel()
 	rec := &recorder{body: golden(t, "activities.json")}
-	acts, err := newTestClient(t, rec).ListRepoActivities(context.Background(), "sloan", "beads", 30)
+	acts, err := newTestClient(t, rec).ListRepoActivities(context.Background(), "owner", "beads", 30)
 	require.NoError(t, err)
 
-	assert.Equal(t, "/api/v1/repos/sloan/beads/activities/feeds", rec.req.URL.Path)
+	assert.Equal(t, "/api/v1/repos/owner/beads/activities/feeds", rec.req.URL.Path)
 	assert.Equal(t, "30", rec.req.URL.Query().Get("limit"))
 	require.Len(t, acts, 3)
 	assert.Equal(t, "commit_repo", acts[0].OpType)
 	assert.Equal(t, "refs/heads/main", acts[0].RefName)
 	require.NotNil(t, acts[0].Repo)
-	assert.Equal(t, "sloan/beads", acts[0].Repo.FullName)
+	assert.Equal(t, "owner/beads", acts[0].Repo.FullName)
 	require.NotNil(t, acts[0].ActUser)
 	assert.Equal(t, "bot-polecat", acts[0].ActUser.Login)
 }
@@ -174,7 +174,7 @@ func TestListRepoActivities(t *testing.T) {
 func TestListRepoActivitiesErrorHasNoToken(t *testing.T) {
 	t.Parallel()
 	c := newTestClient(t, &recorder{status: http.StatusUnauthorized, body: []byte(`{"message":"unauthorized"}`)})
-	_, err := c.ListRepoActivities(context.Background(), "sloan", "beads", 30)
+	_, err := c.ListRepoActivities(context.Background(), "owner", "beads", 30)
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "test-token")
 }

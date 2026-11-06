@@ -23,7 +23,7 @@ func fixtureSpec(t *testing.T) SkeletonSpec {
 		TownRoot:         filepath.Join("testdata", "town"),
 		Rig:              "gastown",
 		ControlPlaneHost: "host.docker.internal",
-		SandboxRepoURL:   "http://host.docker.internal:3000/sloan/gastown.git",
+		SandboxRepoURL:   "http://host.docker.internal:3000/owner/gastown.git",
 	}
 }
 
@@ -221,7 +221,7 @@ func TestSkeletonScrubsCopiedFiles(t *testing.T) {
 	got := untar(t, renderFixture(t))
 
 	town := decodeJSON(t, got["gt/mayor/town.json"])
-	if v := at(t, town, "registry", "rigs", "gastown", "git_url"); v != "http://REDACTED@forgejo:3000/sloan/gastown.git" {
+	if v := at(t, town, "registry", "rigs", "gastown", "git_url"); v != "http://REDACTED@forgejo:3000/owner/gastown.git" {
 		t.Errorf("town.json git_url = %v, want the userinfo redacted and the host kept", v)
 	}
 	if v := at(t, town, "name"); v != "testtown" {
@@ -229,7 +229,7 @@ func TestSkeletonScrubsCopiedFiles(t *testing.T) {
 	}
 
 	meta := decodeJSON(t, got["gt/gastown/metadata.json"])
-	if v := at(t, meta, "repo"); v != "https://REDACTED@forgejo:3000/sloan/gastown.git" {
+	if v := at(t, meta, "repo"); v != "https://REDACTED@forgejo:3000/owner/gastown.git" {
 		t.Errorf("rig metadata repo = %v, want the userinfo redacted", v)
 	}
 
@@ -320,7 +320,7 @@ func TestSkeletonWithoutOptionalFiles(t *testing.T) {
 		TownRoot:         writeTown(t, minimalTown()),
 		Rig:              "gastown",
 		ControlPlaneHost: "host.docker.internal",
-		SandboxRepoURL:   "http://host.docker.internal:3000/sloan/gastown.git",
+		SandboxRepoURL:   "http://host.docker.internal:3000/owner/gastown.git",
 	}
 	data, err := RenderSkeleton(spec)
 	if err != nil {
@@ -351,7 +351,7 @@ func TestSkeletonWithoutRigMetadata(t *testing.T) {
 		TownRoot:         writeTown(t, files),
 		Rig:              "gastown",
 		ControlPlaneHost: "host.docker.internal",
-		SandboxRepoURL:   "http://host.docker.internal:3000/sloan/gastown.git",
+		SandboxRepoURL:   "http://host.docker.internal:3000/owner/gastown.git",
 	}
 	data, err := RenderSkeleton(spec)
 	if err != nil {
@@ -380,7 +380,7 @@ func TestSkeletonRejectsADirectivesFile(t *testing.T) {
 		TownRoot:         writeTown(t, town),
 		Rig:              "gastown",
 		ControlPlaneHost: "host.docker.internal",
-		SandboxRepoURL:   "http://host.docker.internal:3000/sloan/gastown.git",
+		SandboxRepoURL:   "http://host.docker.internal:3000/owner/gastown.git",
 	}
 	if _, err := RenderSkeleton(spec); err == nil || !strings.Contains(err.Error(), "not a directory") {
 		t.Fatalf("RenderSkeleton error = %v, want a not-a-directory error", err)
@@ -409,7 +409,7 @@ func TestSkeletonRefusesAnEscapingSymlink(t *testing.T) {
 		TownRoot:         townRoot,
 		Rig:              "gastown",
 		ControlPlaneHost: "host.docker.internal",
-		SandboxRepoURL:   "http://host.docker.internal:3000/sloan/gastown.git",
+		SandboxRepoURL:   "http://host.docker.internal:3000/owner/gastown.git",
 	}
 	data, err := RenderSkeleton(spec)
 	if err == nil {
@@ -438,7 +438,7 @@ func TestSkeletonRejectsMalformedJSON(t *testing.T) {
 				TownRoot:         writeTown(t, town),
 				Rig:              "gastown",
 				ControlPlaneHost: "host.docker.internal",
-				SandboxRepoURL:   "http://host.docker.internal:3000/sloan/gastown.git",
+				SandboxRepoURL:   "http://host.docker.internal:3000/owner/gastown.git",
 			}
 			if _, err := RenderSkeleton(spec); err == nil {
 				t.Fatalf("RenderSkeleton(%s) = nil error, want one", name)
@@ -456,7 +456,7 @@ func TestSkeletonRejectsAMissingTownRoot(t *testing.T) {
 		TownRoot:         filepath.Join(t.TempDir(), "absent"),
 		Rig:              "gastown",
 		ControlPlaneHost: "host.docker.internal",
-		SandboxRepoURL:   "http://host.docker.internal:3000/sloan/gastown.git",
+		SandboxRepoURL:   "http://host.docker.internal:3000/owner/gastown.git",
 	}
 	if _, err := RenderSkeleton(spec); err == nil {
 		t.Fatal("RenderSkeleton = nil error, want one")
@@ -472,7 +472,7 @@ func TestSkeletonValidation(t *testing.T) {
 		TownRoot:         t.TempDir(),
 		Rig:              "gastown",
 		ControlPlaneHost: "host.docker.internal",
-		SandboxRepoURL:   "http://host.docker.internal:3000/sloan/gastown.git",
+		SandboxRepoURL:   "http://host.docker.internal:3000/owner/gastown.git",
 	}
 	tests := []struct {
 		name string
@@ -655,7 +655,7 @@ func TestLooksLikeCredential(t *testing.T) {
 	t.Parallel()
 
 	credential := []string{
-		"http://bot:s3cret@forgejo:3000/sloan/gastown.git",
+		"http://bot:s3cret@forgejo:3000/owner/gastown.git",
 		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.fixture-signature-not-a-real-token",
 		"sk-abcdefghijklmnopqrstuvwx",
 		"ghp_abcdefghijklmnopqrstuvwxyz",
@@ -679,7 +679,7 @@ func TestLooksLikeCredential(t *testing.T) {
 	}
 	plain := []string{
 		"http://host.docker.internal:4000",
-		"http://forgejo:3000/sloan/gastown.git",
+		"http://forgejo:3000/owner/gastown.git",
 		"host.docker.internal",
 		"make gate",
 		"main",
@@ -700,10 +700,10 @@ func TestLooksLikeCredential(t *testing.T) {
 func TestStripUserInfo(t *testing.T) {
 	t.Parallel()
 
-	if got, want := stripUserInfo("http://bot:PLANTED-TOKEN-1@forgejo:3000/sloan/gastown.git"), "http://REDACTED@forgejo:3000/sloan/gastown.git"; got != want {
+	if got, want := stripUserInfo("http://bot:PLANTED-TOKEN-1@forgejo:3000/owner/gastown.git"), "http://REDACTED@forgejo:3000/owner/gastown.git"; got != want {
 		t.Errorf("stripUserInfo = %q, want %q", got, want)
 	}
-	if got := stripUserInfo("https://forgejo:3000/sloan/gastown.git"); got != "https://forgejo:3000/sloan/gastown.git" {
+	if got := stripUserInfo("https://forgejo:3000/owner/gastown.git"); got != "https://forgejo:3000/owner/gastown.git" {
 		t.Errorf("stripUserInfo changed a URL without userinfo: %q", got)
 	}
 }
@@ -820,7 +820,7 @@ func TestSkeletonKeepsProjectIDAndTightensBeadsDirs(t *testing.T) {
 		TownRoot:         writeTown(t, files),
 		Rig:              "gastown",
 		ControlPlaneHost: "host.docker.internal",
-		SandboxRepoURL:   "http://host.docker.internal:3000/sloan/gastown.git",
+		SandboxRepoURL:   "http://host.docker.internal:3000/owner/gastown.git",
 	})
 	if err != nil {
 		t.Fatalf("RenderSkeleton: %v", err)
@@ -878,7 +878,7 @@ func TestSkeletonRejectsANonUUIDProjectID(t *testing.T) {
 		TownRoot:         writeTown(t, files),
 		Rig:              "gastown",
 		ControlPlaneHost: "host.docker.internal",
-		SandboxRepoURL:   "http://host.docker.internal:3000/sloan/gastown.git",
+		SandboxRepoURL:   "http://host.docker.internal:3000/owner/gastown.git",
 	})
 	if err == nil {
 		t.Fatal("RenderSkeleton kept a project_id that is not a UUID")
@@ -1067,7 +1067,7 @@ func renderTown(t *testing.T, townRoot string) (map[string][]byte, error) {
 		TownRoot:         townRoot,
 		Rig:              "gastown",
 		ControlPlaneHost: "host.docker.internal",
-		SandboxRepoURL:   "http://host.docker.internal:3000/sloan/gastown.git",
+		SandboxRepoURL:   "http://host.docker.internal:3000/owner/gastown.git",
 	})
 	if err != nil {
 		return nil, err
