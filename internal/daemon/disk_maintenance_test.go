@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/diskmaint"
 	"github.com/steveyegge/gastown/internal/diskmaint/disks"
 	"github.com/steveyegge/gastown/internal/diskmaint/registry"
+	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/polecatimage"
 )
@@ -618,6 +621,165 @@ func TestDiskMaintTrimPassIsSingleFlight(t *testing.T) {
 	pending[1]()
 	if *trims != 2 {
 		t.Errorf("trimmed %d times after the combined pass finished, want 2", *trims)
+	}
+}
+
+// TestDiskMaintAlertApplicationIsSerialised: the trim pass and the combined
+// pass both apply the disk alerts, and they may run at the same time. One
+// application at a time is what keeps the two from deciding from state the
+// other is halfway through changing: a target pass that starts while the trim
+// pass holds the alert application waits, and neither raise is lost
+// (gt-gg9hv.48).
+func TestDiskMaintAlertApplicationIsSerialised(t *testing.T) {
+	t.Parallel()
+	d, _, f := diskMaintTestDaemon(t)
+	gate := newGatedAlertNotifier(f.notify)
+	d.notifier = gate
+	// The trim itself reaches no claim, so the passes under test are their
+	// alert applications and the decisions that follow.
+	d.diskMaint.sandboxes = func() (map[string]agentconfig.SandboxProfile, error) { return nil, nil }
+
+	// The town is busy for the trim's tick and quiet for the target's, so the
+	// test drives both passes through the tick that dispatches each of them.
+	var quiet atomic.Bool
+	d.maint.quiet = func(*Daemon) (bool, string) {
+		if quiet.Load() {
+			return true, ""
+		}
+		return false, "daemon has work in flight (landing pass dv-x)"
+	}
+	var passes []func()
+	d.diskMaint.dispatch = func(fn func()) { passes = append(passes, fn) }
+
+	var reads atomic.Int32
+	targetRead := make(chan struct{})
+	d.diskMaint.readDisks = func(context.Context) []disks.Reading {
+		switch reads.Add(1) {
+		case 1:
+			return []disks.Reading{{Name: "mac", UsedPct: 85}}
+		case 2:
+			close(targetRead)
+			return []disks.Reading{{Name: "colima", UsedPct: 88}}
+		default:
+			return nil
+		}
+	}
+
+	d.runDiskMaintenance() // 04:45, busy: dispatches the trim pass alone
+	if len(passes) != 1 {
+		t.Fatalf("dispatched %d passes, want 1: the busy tick's trim pass", len(passes))
+	}
+	trimPass := passes[0]
+	trimDone := make(chan struct{})
+	go func() {
+		defer close(trimDone)
+		trimPass()
+	}()
+	<-gate.entered // the trim pass is inside its alert application, holding it
+
+	quiet.Store(true)
+	d.runDiskMaintenance() // 04:45, quiet: dispatches the combined pass
+	if len(passes) != 2 {
+		t.Fatalf("dispatched %d passes, want 2: the quiet tick's combined pass", len(passes))
+	}
+	targetPass := passes[1]
+	targetDone := make(chan struct{})
+	go func() {
+		defer close(targetDone)
+		targetPass()
+	}()
+	<-targetRead // the combined pass has read the disks and is at the same application
+	close(gate.release)
+
+	<-trimDone
+	<-targetDone
+
+	if got := gate.max.Load(); got != 1 {
+		t.Errorf("%d alert applications ran at once, want 1: the trim pass and the target pass applied the alerts concurrently", got)
+	}
+	for _, key := range []string{"diskmaint:mac", "diskmaint:colima"} {
+		if !diskMaintAlertIsOpen(f.notify, key) {
+			t.Errorf("alert %s is not open: a raise was lost", key)
+		}
+	}
+}
+
+// gatedAlertNotifier holds the first escalation inside its delivery, so a test
+// can keep one pass in the middle of its alert application, and counts the
+// escalations inside at once: their applications were serialized if that never
+// exceeds one.
+type gatedAlertNotifier struct {
+	notify.Notifier
+	entered  chan struct{}
+	release  chan struct{}
+	once     sync.Once
+	inFlight atomic.Int32
+	max      atomic.Int32
+}
+
+func newGatedAlertNotifier(inner notify.Notifier) *gatedAlertNotifier {
+	return &gatedAlertNotifier{
+		Notifier: inner,
+		entered:  make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+}
+
+func (n *gatedAlertNotifier) Escalate(ctx context.Context, e notify.Escalation) error {
+	cur := n.inFlight.Add(1)
+	defer n.inFlight.Add(-1)
+	for {
+		if m := n.max.Load(); cur <= m || n.max.CompareAndSwap(m, cur) {
+			break
+		}
+	}
+	n.once.Do(func() {
+		close(n.entered)
+		<-n.release
+	})
+	return n.Notifier.Escalate(ctx, e)
+}
+
+// TestDiskMaintBusyTrimFailureIsLoggedOnceAndTargetsWait: a trim that fails on
+// a busy tick records the short retry, so the next ticks try it again, and its
+// failure line is held to once by its own key rather than repeated on every
+// retry. The targets the busy ticks deferred stay due, and the disk alerts
+// still go up (gt-gg9hv.48).
+func TestDiskMaintBusyTrimFailureIsLoggedOnceAndTargetsWait(t *testing.T) {
+	t.Parallel()
+	d, logs, f := diskMaintTestDaemon(t)
+	f.quiet, f.quietWhy = false, "daemon has work in flight (landing pass dv-x)"
+	f.readings = []disks.Reading{{Name: "colima", UsedPct: 88}}
+	const trimFailure = "the sandbox profiles could not be read"
+	var trims atomic.Int32
+	d.diskMaint.sandboxes = func() (map[string]agentconfig.SandboxProfile, error) {
+		trims.Add(1)
+		return nil, errors.New(trimFailure)
+	}
+	now := diskMaintNow
+	d.diskMaint.now = func() time.Time { return now }
+
+	// 04:45 fails and asks to be retried in fifteen minutes; 05:00 and 05:15
+	// are the retries, still in the window and all still busy.
+	for _, at := range []time.Time{diskMaintNow, diskMaintNow.Add(15 * time.Minute), diskMaintNow.Add(30 * time.Minute)} {
+		now = at
+		d.runDiskMaintenance()
+	}
+
+	if got := trims.Load(); got != 3 {
+		t.Errorf("trimmed %d times over three ticks, want 3: a failed trim records the short retry", got)
+	}
+	if got := strings.Count(logs.String(), "disk_maintenance: cache trim:"); got != 1 {
+		t.Errorf("logged the trim failure %d times, want 1: its own key holds the line for the hour: %q", got, logs.String())
+	}
+	if got := strings.Count(logs.String(), "targets skipped"); got != 3 {
+		t.Errorf("logged the targets' skip %d times, want 3: a busy tick still defers them", got)
+	}
+	if len(f.target.policies) != 0 {
+		t.Errorf("planned the target %d times while the town was busy, want 0", len(f.target.policies))
+	}
+	if !diskMaintAlertIsOpen(f.notify, "diskmaint:colima") {
+		t.Error("no alert open for a disk at 88%: the busy tick's trim pass must raise it")
 	}
 }
 

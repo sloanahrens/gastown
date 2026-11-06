@@ -488,15 +488,16 @@ func (d *Daemon) runDiskMaintenanceTrim(mode string, due diskMaintDue, why strin
 	}
 	d.diskMaintenanceSeams().dispatch(func() {
 		defer d.diskMaintTrimRunning.Store(false)
-		d.diskMaintenanceTrimPass(mode)
+		d.runCacheTrimPass(mode)
 	})
 }
 
-// diskMaintenanceTrimPass is the trim's own pass: the disk readings and their
-// alerts first, as the combined pass raises them, then the trim. Its caller
-// holds the trim's guard (see runDiskMaintenanceTrim), which is the trim's own
-// and not the target pass's, so a long target pass does not keep it waiting.
-func (d *Daemon) diskMaintenanceTrimPass(mode string) {
+// runCacheTrimPass is the trim's own pass, the one a busy tick dispatches: the
+// disk readings and their alerts first, as the combined pass raises them, then
+// the trim. Its caller holds the trim's guard (see runDiskMaintenanceTrim),
+// which is the trim's own and not the target pass's, so a long target pass
+// does not keep it waiting.
+func (d *Daemon) runCacheTrimPass(mode string) {
 	ctx, cancel := d.diskMaintenanceContext()
 	defer cancel()
 	s := d.diskMaintenanceSeams()
@@ -504,10 +505,11 @@ func (d *Daemon) diskMaintenanceTrimPass(mode string) {
 	d.diskMaintenanceTrim(ctx, mode)
 }
 
-// diskMaintenanceTrimRun tries the trim's single-flight guard and, when it wins,
-// runs the trim under it. It reports whether this call ran the trim: one already
-// in flight is left to finish, and two trim passes never overlap.
-func (d *Daemon) diskMaintenanceTrimRun(ctx context.Context, mode string) bool {
+// runCacheTrimInPass is the trim inside the combined pass: it tries the trim's
+// single-flight guard and, when it wins, runs the trim under it. It reports
+// whether this call ran the trim: one already in flight is left to finish, and
+// two trim passes never overlap.
+func (d *Daemon) runCacheTrimInPass(ctx context.Context, mode string) bool {
 	if !d.diskMaintTrimRunning.CompareAndSwap(false, true) {
 		return false
 	}
@@ -574,7 +576,7 @@ func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDu
 	// than trimmed twice, and this pass's targets do not keep the next trim
 	// waiting (gt-gg9hv.48).
 	if due.cacheTrim {
-		d.diskMaintenanceTrimRun(ctx, mode)
+		d.runCacheTrimInPass(ctx, mode)
 	}
 	if !due.daily && len(due.interval) == 0 {
 		return // only the cache trim was due, and it has run

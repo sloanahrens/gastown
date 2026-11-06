@@ -279,11 +279,16 @@ func (d *Daemon) diskMaintHostReadings(watched []diskMaintDisk, injected map[str
 
 // diskMaintAlerts is the patrol's memory of the disk alert keys it has open,
 // and of when it last logged that each open unreadable key is still unreadable.
-// A pass writes it and the next pass reads it, one pass at a time, but the
-// mutex keeps the read off a pass that has not settled yet.
+// A pass writes it and the next pass reads it. applyMu serializes the alert
+// application itself -- the snapshot, the raise and clear decisions, and what
+// each decision records -- so the trim pass and a target pass may run at the
+// same time without one deciding from state the other is halfway through
+// changing (gt-gg9hv.48). mu keeps a single accessor safe on its own; applyMu
+// is what makes one whole application atomic against another pass's.
 type diskMaintAlerts struct {
-	mu     sync.Mutex
-	active map[string]bool
+	applyMu sync.Mutex
+	mu      sync.Mutex
+	active  map[string]bool
 	// stillLogged is the pass time of the last "still unreadable" line for a
 	// key, or of the pass that first saw its disk unreadable. The clear forgets
 	// it, so a new outage starts its own hour.
@@ -361,7 +366,14 @@ func (a *diskMaintAlerts) recordUnreadableRaised(key string, now time.Time) (aga
 // outage that lasts is visible without a repeat alert. A raise the notifier
 // refused is retried on the next pass, and each retry restarts the hour; the
 // retry gets its own line so those restarts are not silent.
+//
+// The whole application holds applyMu, so a trim pass and a target pass that
+// overlap apply one after the other: the later one decides from the state the
+// earlier one recorded, and no raise or clear is lost between them
+// (gt-gg9hv.48).
 func (d *Daemon) applyDiskAlerts(readings []disks.Reading, now time.Time) {
+	d.diskMaintAlerts.applyMu.Lock()
+	defer d.diskMaintAlerts.applyMu.Unlock()
 	for _, alert := range disks.Evaluate(readings, d.diskMaintAlerts.snapshot()) {
 		switch {
 		case alert.Raise:
