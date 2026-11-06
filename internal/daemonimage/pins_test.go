@@ -65,6 +65,14 @@ func TestParseImagePins(t *testing.T) {
 			file:    strings.Replace(validImagePins(), "http://forgejo:3000/sloan/beads.git", "http://sloan:secret@forgejo:3000/sloan/beads.git", 1),
 			want:    line(3, "carries a credential"),
 			notWant: []string{"secret"}},
+		{name: "a url with a token in its query",
+			file:    strings.Replace(validImagePins(), "http://forgejo:3000/sloan/beads.git", "http://forgejo:3000/sloan/beads.git?access_token=tok3n", 1),
+			want:    line(3, "carries a query or fragment"),
+			notWant: []string{"tok3n"}},
+		{name: "a url with a token in its fragment",
+			file:    strings.Replace(validImagePins(), "http://forgejo:3000/sloan/beads.git", "http://forgejo:3000/sloan/beads.git#tok3n", 1),
+			want:    line(3, "carries a query or fragment"),
+			notWant: []string{"tok3n"}},
 		{"a url that is not http(s)", strings.Replace(validImagePins(), "http://forgejo:3000/sloan/beads.git", "git://forgejo:3000/sloan/beads.git", 1),
 			line(3, "is not http:// or https://"), nil},
 		{"a url with no repository path", strings.Replace(validImagePins(), "http://forgejo:3000/sloan/beads.git", "http://forgejo:3000", 1),
@@ -113,13 +121,27 @@ const (
 var pinsMainAt = time.Unix(1_780_000_000, 0)
 
 // pinsGit answers git from a table keyed by the directory and arguments, and
-// fails a call the test did not plan, so an unexpected read is a failure.
+// fails a call the test did not plan, so an unexpected read is a failure. errs
+// holds the calls that fail, with the error git gave them.
 type pinsGit struct {
 	answer map[string]string
+	errs   map[string]error
 }
+
+// exitStatus is the error a git command that exited with code gives: the exit
+// status, which is what isNotAncestor reads. The fake leaves out the stderr line
+// runGit adds.
+type exitStatus int
+
+func (e exitStatus) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
+
+func (e exitStatus) ExitCode() int { return int(e) }
 
 func (f *pinsGit) run(dir string, args ...string) ([]byte, error) {
 	key := dir + " " + strings.Join(args, " ")
+	if err, ok := f.errs[key]; ok {
+		return nil, err
+	}
 	if out, ok := f.answer[key]; ok {
 		return []byte(out), nil
 	}
@@ -170,8 +192,25 @@ func TestCheckPinsRefusesAStalePin(t *testing.T) {
 			name: "a pin that is not an ancestor of main",
 			setup: func(f *pinsGit) {
 				f.answer[pinsTestDir+" rev-parse --verify origin/main^{commit}"] = pinsTestMain + "\n"
+				f.errs[pinsTestDir+" merge-base --is-ancestor "+pinsTestPin+" "+pinsTestMain] = exitStatus(1)
 			},
 			wantErr: []string{"pin-drift guard:", "is not an ancestor of main", "ahead or diverged", edit},
+		},
+		{
+			name: "an ancestry check git cannot answer",
+			setup: func(f *pinsGit) {
+				f.answer[pinsTestDir+" rev-parse --verify origin/main^{commit}"] = pinsTestMain + "\n"
+				f.errs[pinsTestDir+" merge-base --is-ancestor "+pinsTestPin+" "+pinsTestMain] = exitStatus(128)
+			},
+			wantErr: []string{"pin-drift guard:", "cannot test whether it is an ancestor of main", "fetch or fix that checkout"},
+		},
+		{
+			name: "an ancestry check that fails with no exit status",
+			setup: func(f *pinsGit) {
+				f.answer[pinsTestDir+" rev-parse --verify origin/main^{commit}"] = pinsTestMain + "\n"
+				f.errs[pinsTestDir+" merge-base --is-ancestor "+pinsTestPin+" "+pinsTestMain] = fmt.Errorf("git was canceled")
+			},
+			wantErr: []string{"pin-drift guard:", "cannot test whether it is an ancestor of main", "git was canceled"},
 		},
 		{
 			name:    "a pin 41 commits behind",
@@ -243,7 +282,7 @@ func TestCheckPinsRefusesAStalePin(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			f := &pinsGit{answer: map[string]string{}}
+			f := &pinsGit{answer: map[string]string{}, errs: map[string]error{}}
 			if tc.setup != nil {
 				tc.setup(f)
 			}

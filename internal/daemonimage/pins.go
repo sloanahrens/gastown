@@ -100,8 +100,10 @@ func isPinName(name string) bool {
 // checkPinURL refuses a URL that is not a credential-free http(s) repository
 // URL: a pin is committed to the repository, so a credential in it is a leaked
 // secret, and a scheme other than http(s) cannot be fetched by the step that
-// later replaces the checkouts by URL. No refusal echoes the URL, which may
-// hold the credential it refuses.
+// later replaces the checkouts by URL. A credential may sit in the user-info, the
+// query or the fragment, so a query or fragment is refused too: a repository URL
+// names neither. No refusal echoes the URL, which may hold the credential it
+// refuses.
 func checkPinURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -115,6 +117,9 @@ func checkPinURL(raw string) error {
 	}
 	if u.User != nil {
 		return errors.New("url carries a credential: name the repository URL without one")
+	}
+	if u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
+		return errors.New("url carries a query or fragment: name the repository URL without one, since a token can sit there")
 	}
 	if u.Path == "" || u.Path == "/" {
 		return errors.New("url names no repository path")
@@ -188,6 +193,9 @@ func checkPinAgainstMain(git bdbuild.Git, dir string, pin Pin, main, pinsPath st
 		return nil, nil
 	}
 	if _, err := git(dir, "merge-base", "--is-ancestor", pin.Commit, main); err != nil {
+		if !isNotAncestor(err) {
+			return nil, fmt.Errorf("pin-drift guard: rig %s pin %s: cannot test whether it is an ancestor of main %s in %s (%v): fetch or fix that checkout, then rerun", pin.Name, short(pin.Commit), short(main), dir, err)
+		}
 		return nil, fmt.Errorf("pin-drift guard: rig %s pin %s is not an ancestor of main %s (ahead or diverged): %s", pin.Name, short(pin.Commit), short(main), pinEdit(pin, pinsPath, main))
 	}
 	behind, err := commitsBehind(git, dir, pin.Commit, main)
@@ -211,6 +219,15 @@ func checkPinAgainstMain(git bdbuild.Git, dir string, pin Pin, main, pinsPath st
 // the failure.
 func pinEdit(pin Pin, pinsPath, main string) string {
 	return fmt.Sprintf("set the %s line in %s to %s, the commit origin/main names", pin.Name, pinsPath, main)
+}
+
+// isNotAncestor reports whether err is git's answer that a commit is not an
+// ancestor of another. merge-base --is-ancestor exits 1 for that answer and with
+// a different status when it cannot answer, such as an unknown commit, so only
+// an exit status of 1 is the answer; an error with no status is a failure.
+func isNotAncestor(err error) bool {
+	var coded interface{ ExitCode() int }
+	return errors.As(err, &coded) && coded.ExitCode() == 1
 }
 
 // commitsBehind counts the commits from pin to main; the caller has checked
