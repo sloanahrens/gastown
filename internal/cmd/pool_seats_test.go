@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 
 	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -1512,6 +1514,98 @@ func TestPoolDeadHookedLeavesOtherCallersAlone(t *testing.T) {
 	if probes != 1 {
 		t.Fatalf("the polecat list path probed the worktree %d times, want once", probes)
 	}
+}
+
+// agentBeadFailsStore is a store whose bead reads all fail, so the batch's own
+// read answers nothing and its seat read falls through to the live lookup the
+// failure is measured on.
+type agentBeadFailsStore struct {
+	*beadsfake.Fake
+	err error
+}
+
+func (s agentBeadFailsStore) List(beads.ListOptions) ([]*beads.Issue, error) { return nil, s.err }
+func (s agentBeadFailsStore) ShowMultiple([]string) (map[string]*beads.Issue, error) {
+	return nil, s.err
+}
+func (s agentBeadFailsStore) Show(string) (*beads.Issue, error) { return nil, s.err }
+
+// TestPoolDeadHookedReadFailuresAreReturned is the fail-closed half of the
+// split (gt-gg9hv.73): each read the seat picture can fail on returns its
+// error rather than a smaller count, the cheap hold read included. An
+// unreadable read is an unknown count, not an empty one.
+func TestPoolDeadHookedReadFailuresAreReturned(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1760000000, 0)
+	heldDisposition := func(string, string) (poolSeatState, error) {
+		return poolSeatState{Disposition: polecat.WorkstateDisposition{CountsTowardCapacity: true}, HookHeld: true}, nil
+	}
+	heldHook := func(string, string) (bool, error) { return true, nil }
+
+	t.Run("the rig registry cannot be read", func(t *testing.T) {
+		t.Parallel()
+		town, pool := deadHookedWalkTestTown(t, "ember")
+		if err := os.WriteFile(filepath.Join(town, "mayor", "rigs.json"), []byte("{"), 0o644); err != nil {
+			t.Fatalf("write rigs.json: %v", err)
+		}
+		_, _, err := poolDeadHookedSessions(town, pool, heldDisposition, heldHook, nil, now)
+		if err == nil || !strings.Contains(err.Error(), "rig registry") {
+			t.Fatalf("an unreadable rig registry = %v, want the load failure", err)
+		}
+	})
+
+	t.Run("a rig's polecats cannot be listed", func(t *testing.T) {
+		t.Parallel()
+		town, pool := deadHookedWalkTestTown(t, "ember")
+		polecats := filepath.Join(town, "gastown", "polecats")
+		if err := os.RemoveAll(polecats); err != nil {
+			t.Fatalf("clear %s: %v", polecats, err)
+		}
+		if err := os.WriteFile(polecats, []byte("not a directory"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", polecats, err)
+		}
+		_, _, err := poolDeadHookedSessions(town, pool, heldDisposition, heldHook, nil, now)
+		if err == nil || !strings.Contains(err.Error(), "listing polecats in gastown") {
+			t.Fatalf("an unlistable rig = %v, want the listing failure", err)
+		}
+	})
+
+	t.Run("the claim set cannot be read", func(t *testing.T) {
+		t.Parallel()
+		town, pool := deadHookedWalkTestTown(t, "ember")
+		claims := poolSeatClaimDir(town)
+		if err := os.MkdirAll(filepath.Dir(claims), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(claims, []byte("not a directory"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", claims, err)
+		}
+		if _, _, err := poolSeatSessionsProbedWith(&fakeLister{}, town, heldDisposition, heldHook, nil, pool); err == nil {
+			t.Fatal("an unreadable claim set counted as no claims")
+		}
+	})
+
+	t.Run("the batch's hold read cannot read the agent bead", func(t *testing.T) {
+		t.Parallel()
+		town, _ := deadHookedWalkTestTown(t, "ember")
+		store := agentBeadFailsStore{Fake: beadsfake.New(), err: errors.New("bd show: boom")}
+		batch := newPoolSeatBatch(town,
+			func(string) beads.Client { return store },
+			func(_ beads.Client, id string) (*beads.Issue, error) { return store.Show(id) })
+		if held, err := batch.hookHeld("gastown", "ember"); err == nil {
+			t.Fatalf("a failing agent-bead read answered held=%v", held)
+		}
+	})
+
+	t.Run("the town's hold read cannot read the agent bead", func(t *testing.T) {
+		t.Parallel()
+		reads := poolSeatReads{agentBead: func(beads.Client, string) (*beads.Issue, *beads.AgentFields, error) {
+			return nil, nil, errors.New("bd show: boom")
+		}}
+		if held, err := poolPolecatHookHeldWith(t.TempDir(), "gastown", "ember", reads); err == nil {
+			t.Fatalf("a failing agent-bead read answered held=%v", held)
+		}
+	})
 }
 
 // TestRosterLogsTheProbedWorktreeCount is gt-gg9hv.73's observable effect: the
