@@ -741,6 +741,70 @@ func TestJudgeLastRun(t *testing.T) {
 	}
 }
 
+// TestJudgeLastRunWeekly judges a weekly battery by its patrol's recorded last
+// run, as a quarter-hour battery is judged. Its cursor is nine days old in every
+// case, so the cursor alone would call it late.
+func TestJudgeLastRunWeekly(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name       string
+		in         health.Input
+		want       health.Status
+		reason     string
+		lastPassAt time.Time
+	}{
+		{
+			name:       "a patrol run a day old is ok with a nine-day-old cursor, and the reason names both",
+			in:         patrolInput(now, 9*24*time.Hour, 24*time.Hour),
+			want:       health.OK,
+			reason:     "no events since 12:00Z; last pass 24h ago",
+			lastPassAt: now.Add(-24 * time.Hour),
+		},
+		{
+			name:       "a patrol run exactly at LateAfter is still ok",
+			in:         patrolInput(now, time.Hour, health.LateAfter),
+			want:       health.OK,
+			reason:     "no events since 11:00Z; last pass 8d ago",
+			lastPassAt: now.Add(-health.LateAfter),
+		},
+		{
+			name:       "a patrol run just past LateAfter is late, whatever the cursor says",
+			in:         patrolInput(now, time.Hour, health.LateAfter+time.Second),
+			want:       health.Late,
+			reason:     "no events since 11:00Z; last pass 8d ago",
+			lastPassAt: now.Add(-health.LateAfter - time.Second),
+		},
+		{
+			name:       "no entry for the patrol falls back to a fresh cursor",
+			in:         cursorInput(now, 24*time.Hour),
+			want:       health.OK,
+			lastPassAt: now.Add(-24 * time.Hour),
+		},
+		{
+			name:       "no entry for the patrol falls back to an old cursor and is late",
+			in:         cursorInput(now, 9*24*time.Hour),
+			want:       health.Late,
+			reason:     "last pass 9d ago",
+			lastPassAt: now.Add(-9 * 24 * time.Hour),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			row := judgeRow(t, now, "notes", "jev_notes", tc.in)
+			assert.Equal(t, tc.want, row.Status, "reason %q", row.Reason)
+			if tc.reason != "" {
+				assert.Equal(t, tc.reason, row.Reason)
+			}
+			require.NotNil(t, row.LastPass)
+			assert.WithinDuration(t, tc.lastPassAt, *row.LastPass, time.Second, "the last pass the row shows")
+		})
+	}
+}
+
 // TestJudgeLastRunUnreadable covers a missing or corrupt last-run record: the
 // continuous battery falls back to its cursor, says the record was unreadable,
 // and never reads as ok. A battery whose rule does not read the record is
@@ -787,12 +851,22 @@ func TestJudgeLastRunUnreadable(t *testing.T) {
 			reason:  "no pass recorded; last-run file unreadable: patrol_last_run.json is not valid JSON",
 		},
 		{
-			name:       "a weekly battery does not read the record, so a missing one changes nothing",
+			name:       "a weekly battery with an unreadable record and a fresh cursor is unknown and names the file",
 			battery:    "notes",
 			key:        "jev_notes",
-			in:         withRecordErr(logInput(logLine(now.Add(-time.Hour), `{"q":"a"}`)), missing),
-			want:       health.OK,
+			in:         withRecordErr(cursorInput(now, time.Hour), missing),
+			want:       health.Unknown,
+			reason:     "last pass 1h ago; last-run file unreadable: patrol_last_run.json is missing",
 			lastPassAt: now.Add(-time.Hour),
+		},
+		{
+			name:       "a weekly battery with an unreadable record and an old cursor is late and names the file",
+			battery:    "stale",
+			key:        "jev_stale",
+			in:         withRecordErr(cursorInput(now, 9*24*time.Hour), corrupt),
+			want:       health.Late,
+			reason:     "last pass 9d ago; last-run file unreadable: patrol_last_run.json is not valid JSON",
+			lastPassAt: now.Add(-9 * 24 * time.Hour),
 		},
 	}
 
