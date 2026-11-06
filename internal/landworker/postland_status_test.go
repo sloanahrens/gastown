@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode"
@@ -1061,12 +1062,14 @@ func TestPostLandStatusPassHasOneDeadline(t *testing.T) {
 	v := &statusVerdicts{}
 	store := &MemoryMainState{}
 	clk := &manualClock{now: statusT0}
+	var reads atomic.Int32
 	stall := func(readCtx context.Context, _ PostLand) (*forgejo.CombinedStatus, error) {
+		reads.Add(1)
 		<-readCtx.Done() // a Forgejo that never answers: only the deadline ends the read
 		return nil, readCtx.Err()
 	}
 	r := v.runner(stall, store, clk, time.Hour)
-	r.readTimeoutOverride = time.Minute
+	r.readTimeoutOverride = 500 * time.Millisecond
 	r.passBudgetOverride = 50 * time.Millisecond
 	for i := range 5 {
 		r.Trigger(ctx, PostLand{Commit: fmt.Sprintf("commit%02d", i), Target: "main"})
@@ -1078,6 +1081,9 @@ func TestPostLandStatusPassHasOneDeadline(t *testing.T) {
 	}
 	if got := len(pendingOf(t, store)); got != 5 {
 		t.Fatalf("%d pending entries after a budget-cut pass, want all five kept", got)
+	}
+	if got := reads.Load(); got != 1 {
+		t.Fatalf("%d reads started inside a 50ms pass budget, want only the first: the budget ends the pass, not each read", got)
 	}
 }
 

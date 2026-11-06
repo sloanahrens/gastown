@@ -597,3 +597,88 @@ func TestPostLandStatusRedBeadNamesTheStatus(t *testing.T) {
 		}
 	}
 }
+
+// TestPostLandStatusReadCutOffByThePassIsNotLearned: a read that returns after
+// the pass's deadline (or a stop) has ended may be partial, so it decides
+// nothing and leaves the entry unread, to be read first on the next pass
+// (owl gt-3cjvrp).
+func TestPostLandStatusReadCutOffByThePassIsNotLearned(t *testing.T) {
+	t.Parallel()
+	o := newOrderedStatus(t, "", redSHA)
+	ctx, stop := context.WithCancel(context.Background())
+	o.run.Status = func(context.Context, PostLand) (*forgejo.CombinedStatus, error) {
+		stop() // the pass ends while the read is in flight, which still returns a green
+		return green(), nil
+	}
+	o.run.Trigger(context.Background(), landOf("gt-cul", redSHA))
+	o.run.PollPending(ctx)
+
+	if greens, reds := o.counts(); greens != 0 || reds != 0 {
+		t.Fatalf("green %d red %d from a read the pass had cut off, want none", greens, reds)
+	}
+	left := pendingOf(t, o.state)
+	if len(left) != 1 || !left[0].LastRead.IsZero() {
+		t.Fatalf("pending = %+v, want the entry kept and still unread", left)
+	}
+}
+
+// TestPostLandStatusWithoutAStoreRecordsNothing: a configured context with a
+// reader but no state store has nowhere to keep a pending verdict, so it is not
+// status mode: Trigger says so and records nothing, instead of dereferencing a
+// store that is not there (owl gt-3cjvrp).
+func TestPostLandStatusWithoutAStoreRecordsNothing(t *testing.T) {
+	t.Parallel()
+	var logs []string
+	r := &PostLandRunner{
+		Rig:           "gastown",
+		StatusContext: func() string { return statusContext },
+		Status: func(context.Context, PostLand) (*forgejo.CombinedStatus, error) {
+			t.Error("a runner with no store read a status")
+			return nil, nil
+		},
+		Logf: func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+	}
+	r.Trigger(context.Background(), landOf("gt-cul", redSHA))
+	r.PollPending(context.Background())
+	if len(logs) != 1 || !strings.Contains(logs[0], "no status reader or state store") {
+		t.Fatalf("log = %q, want one line saying the context is unwired", logs)
+	}
+}
+
+// TestPostLandStatusEmptyCombinedStatusIsUnknown: a nil combined status with no
+// error is no verdict and never green.
+func TestPostLandStatusEmptyCombinedStatusIsUnknown(t *testing.T) {
+	t.Parallel()
+	res := postLandStatusRead(nil, nil, statusContext, redSHA)
+	if res.Verdict != PostLandStatusUnknown || res.State != "unreadable" {
+		t.Fatalf("result %+v, want UNKNOWN and unreadable", res)
+	}
+}
+
+// TestPostLandStatusFailedSavesRaiseTheStoreFailure: a pass that reads entries
+// but cannot save what it learned counts as a store failure, and the rig reports
+// the blind safety net after PostLandStatusStoreFailureAfter such passes (owl
+// gt-3cjvrp).
+func TestPostLandStatusFailedSavesRaiseTheStoreFailure(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	v := &statusVerdicts{}
+	store := &flakyMainState{}
+	clk := &manualClock{now: statusT0}
+	reads := &fakeStatusReads{responses: []fakeStatusRead{{status: pending()}}}
+	r := v.runner(reads.read, store, clk, time.Hour)
+	r.Trigger(ctx, landOf("gt-cul", redSHA))
+	store.failSave(errors.New("disk full"))
+	for range PostLandStatusStoreFailureAfter - 1 {
+		clk.Advance(PostLandStatusPollInterval + time.Second)
+		r.PollPending(ctx)
+		if r.StoreFailure() != nil {
+			t.Fatal("the store failure was raised before the threshold")
+		}
+	}
+	clk.Advance(PostLandStatusPollInterval + time.Second)
+	r.PollPending(ctx)
+	if f := r.StoreFailure(); f == nil || !strings.Contains(f.Error, "disk full") {
+		t.Fatalf("store failure = %+v after %d failed saves, want it raised naming the error", f, PostLandStatusStoreFailureAfter)
+	}
+}
