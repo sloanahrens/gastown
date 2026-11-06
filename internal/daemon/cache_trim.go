@@ -271,9 +271,11 @@ func cacheTrimJobName(claim string) string {
 //
 // It reports whether the pass reached a verdict: trimmed, or nothing to trim.
 // A pass that could not start -- unreadable profiles or cap, a kubeconfig that
-// names no sandbox context, an unreadable claim list -- or a claim that could
-// not be trimmed reports false, and the patrol retries it soon rather than
-// after the full interval.
+// names no sandbox context, an unreadable claim list -- or a claim whose trim
+// failed for a reason the next run may clear reports false, and the patrol
+// retries it soon rather than after the full interval. A refusal the config or
+// the listing decides is a verdict: the next run judges it again at the full
+// interval.
 func (d *Daemon) cacheTrim(ctx context.Context, mode string) bool {
 	s := d.diskMaintenanceSeams()
 	profiles, err := s.sandboxes()
@@ -329,9 +331,8 @@ func (d *Daemon) cacheTrim(ctx context.Context, mode string) bool {
 
 // cacheTrimPreflight refuses a kubeconfig that does not resolve the sandbox
 // context, before the pass makes any other cluster call. Every call names the
-// context with --context; a file that does not hold it would otherwise fall
-// back to the file's current-context, or -- as the container's derived
-// kubeconfig did -- to localhost:8080 (gt-gg9hv.24.6).
+// context with --context, because a file that does not hold it falls back to
+// its current-context, and to localhost:8080 when it has none (gt-gg9hv.24.6).
 //
 // The preflight is one call and the pass stops when it refuses: the caller logs
 // the refusal and returns without a second cluster call.
@@ -346,9 +347,10 @@ func (d *Daemon) cacheTrimPreflight(ctx context.Context, kubeconfig string) erro
 	return nil
 }
 
-// cacheTrimLogf logs one cache trim line, at most once an hour for the same
-// line: a trim that cannot start is retried in fifteen minutes, and saying the
-// same refusal on every retry would be four lines an hour for one fault.
+// cacheTrimLogf logs one refusal or failure line, at most once an hour for the
+// same line: a trim that cannot start is retried in fifteen minutes, and saying
+// the same refusal on every retry would be four lines an hour for one fault. A
+// success is not a repeat to hold back, so it is logged through d.logger.
 func (d *Daemon) cacheTrimLogf(format string, args ...any) {
 	line := fmt.Sprintf(format, args...)
 	if d.diskMaintSchedule.allowLog(line, d.diskMaintenanceSeams().now(), cacheTrimRefusalLogInterval) {
@@ -433,8 +435,10 @@ func cacheTrimOverTheCap(used, capBytes int64) bool {
 // claim joins.
 //
 // It reports whether this claim reached a verdict. A read that failed, no
-// running pod to read the listing through, or an apply that failed reports
-// false, so the pass records a retry instead of the full interval.
+// running pod to read the listing through, a list that does not fit the claim,
+// or an apply that failed reports false, so the pass records a retry instead of
+// the full interval. A claim the config refuses, and a listing at or under the
+// cap, are verdicts.
 func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim cacheTrimClaim, namespace string, capBytes int64, apply bool, trimmed map[string]string) bool {
 	sandboxes, sources, err := d.cacheTrimPods(ctx, kubeconfig, namespace, claim.ClaimName)
 	if err != nil {
@@ -455,11 +459,23 @@ func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim ca
 	// claims get two Jobs and a rerun of a trim overwrites its own rather than a
 	// neighbour's.
 	jobName := cacheTrimJobName(claim.ClaimName)
+	// This refusal is the town's config, the same on every pass, so it is a
+	// verdict: the claim is judged again at the full interval, not in fifteen
+	// minutes.
 	if other, taken := trimmed[namespace]; taken {
 		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: the claim %s is trimmed in the same namespace, and a trim's labels cannot tell the two sets of objects apart; nothing trimmed", claim.ClaimName, namespace, other)
-		return false
+		return true
 	}
 	trimmed[namespace] = claim.ClaimName
+	// A listing at or under the cap has nothing to remove whatever the sandboxes
+	// do, so that is this claim's verdict for this listing. A listing over the
+	// cap with nothing removable, because a running sandbox pins the module
+	// cache, is not: it clears when the sandbox stops, so it falls through to
+	// the trim's refusal and is retried soon.
+	if plan := cachevol.PlanTrim(listing, capBytes, sandboxes > 0); plan.Total <= capBytes {
+		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: the listing is %d bytes, at or under the cap of %d; nothing trimmed", claim.ClaimName, namespace, plan.Total, capBytes)
+		return true
+	}
 	m, err := cachevol.BuildTrimManifest(cachevol.TrimJobInput{
 		Name:             jobName,
 		Namespace:        namespace,
@@ -499,7 +515,7 @@ func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim ca
 		}
 	}
 	if !apply {
-		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s dry_run: %s", claim.ClaimName, namespace, cacheTrimManifestLine(jobName, m))
+		d.logger.Printf("disk_maintenance: cache trim %s in %s dry_run: %s", claim.ClaimName, namespace, cacheTrimManifestLine(jobName, m))
 		return true
 	}
 	finished, err := d.cacheTrimApply(ctx, kubeconfig, namespace, jobName, m)
@@ -507,7 +523,7 @@ func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim ca
 		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: the apply failed: %v", claim.ClaimName, namespace, err)
 		return false
 	}
-	d.cacheTrimLogf("disk_maintenance: cache trim %s in %s applied: %s %s", claim.ClaimName, namespace, cacheTrimRouteLine(m), cacheTrimManifestLine(jobName, m))
+	d.logger.Printf("disk_maintenance: cache trim %s in %s applied: %s %s", claim.ClaimName, namespace, cacheTrimRouteLine(m), cacheTrimManifestLine(jobName, m))
 	// A trim is judged by what it left behind, not by its apply having been
 	// accepted, and only once its Job has finished: a reading taken while the
 	// Job runs is the usage the trim is about to remove (gt-gg9hv.46).
@@ -646,7 +662,7 @@ func (d *Daemon) cacheTrimApply(ctx context.Context, kubeconfig, namespace, jobN
 		if _, err := d.cacheTrimKubectl(ctx, kubeconfig, args...); err != nil {
 			return false, fmt.Errorf("deleting the stale %s %s: %w", object.Kind, object.Name, err)
 		}
-		d.cacheTrimLogf("disk_maintenance: cache trim %s: deleted the stale %s %s", jobName, object.Kind, object.Name)
+		d.logger.Printf("disk_maintenance: cache trim %s: deleted the stale %s %s", jobName, object.Kind, object.Name)
 	}
 
 	docs := m.Documents()
