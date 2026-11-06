@@ -141,6 +141,9 @@ type cutoverDoctor struct {
 	shell  gtwrap.Shell
 	read   func(string) ([]byte, error)
 	report io.Writer
+	// run runs argv as a process; nil runs it on the host. Tests inject it so
+	// the doctor's invocation is checked without starting a process.
+	run func(argv ...string) error
 }
 
 // InImage runs the wrapper's tool check through the docker ladder.
@@ -150,12 +153,22 @@ func (d cutoverDoctor) InImage(name string) error {
 
 // Installed runs the file install placed as the tool it replaced.
 func (d cutoverDoctor) Installed(name, path string) error {
-	command := exec.Command(path, doctorFlag) //nolint:gosec // G204: path is the tool file install just placed
-	if d.report != nil {
-		command.Stdout, command.Stderr = d.report, d.report
+	run := d.run
+	if run == nil {
+		run = d.process
 	}
-	if err := command.Run(); err != nil {
+	if err := run(path, doctorFlag); err != nil {
 		return fmt.Errorf("%s --doctor at %s: %w", name, path, err)
 	}
 	return nil
+}
+
+// process runs argv on the host, sending its output to the report writer when
+// one is set.
+func (d cutoverDoctor) process(argv ...string) error {
+	command := exec.Command(argv[0], argv[1:]...) //nolint:gosec // G204: argv[0] is the tool file install just placed
+	if d.report != nil {
+		command.Stdout, command.Stderr = d.report, d.report
+	}
+	return command.Run()
 }

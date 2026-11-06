@@ -138,10 +138,10 @@ func Install(cfg InstallConfig) error {
 	placed := make([]Target, 0, len(targets))
 	for _, t := range targets {
 		if err := place(files, data, mode, t, cfg.Stamp); err != nil {
-			return err
+			return leftInstalled(out, cfg.Stamp, placed, err)
 		}
 		if err := cfg.Doctor.Installed(t.Name, t.Path); err != nil {
-			return stopped(t, placed, err, restore(files, t, cfg.Stamp))
+			return leftInstalled(out, cfg.Stamp, placed, stopped(t, placed, err, restore(files, t, cfg.Stamp)))
 		}
 		placed = append(placed, t)
 		fmt.Fprintf(out, "installed %s at %s; old file %s\n", t.Name, t.Path, dated(t, cfg.Stamp))
@@ -321,7 +321,8 @@ func readWrapper(files Files, source string) ([]byte, fs.FileMode, error) {
 
 // place writes the wrapper to a new file in the target's own directory and
 // renames it into place, after renaming the file it replaces to the dated name.
-// A rename never lands on an existing path.
+// The old file moves first, so the rename into place has no existing file to
+// replace: os.Rename would overwrite one on POSIX.
 func place(files Files, data []byte, mode fs.FileMode, t Target, stamp string) error {
 	temp, err := files.CreateTemp(filepath.Dir(t.Path), "."+t.Name+".gt-wrap-*")
 	if err != nil {
@@ -361,8 +362,19 @@ func place(files Files, data []byte, mode fs.FileMode, t Target, stamp string) e
 }
 
 // restorable is rollback's per-tool refusal before any change is made: it names
-// why the tool cannot be restored, or returns "" when it can.
+// why the tool cannot be restored, or returns "" when it can. The wrapper at the
+// target and the dated file are both checked, so rollback only ever renames
+// regular files (or symlinks to them).
 func restorable(files Files, t Target, stamp string) string {
+	wrapper, err := files.Stat(t.Path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return fmt.Sprintf("%s: %s does not exist, so there is no wrapper to keep aside", t.Name, t.Path)
+	case err != nil:
+		return fmt.Sprintf("%s: read %s: %v", t.Name, t.Path, err)
+	case !wrapper.Mode().IsRegular():
+		return fmt.Sprintf("%s: the wrapper %s is not a regular file or a symlink to one, so it was not moved aside", t.Name, t.Path)
+	}
 	info, err := files.Stat(dated(t, stamp))
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -395,6 +407,19 @@ func restore(files Files, t Target, stamp string) error {
 		return fmt.Errorf("rename %s back: %w", kept, err)
 	}
 	return nil
+}
+
+// leftInstalled is install's refusal after a step fails with some tools already
+// placed: it prints the rollback command and the dated files for those tools,
+// and names the command in the error, so the operator can undo them. With no
+// tool placed it returns cause unchanged.
+func leftInstalled(out io.Writer, stamp string, placed []Target, cause error) error {
+	if len(placed) == 0 {
+		return cause
+	}
+	command := rollbackCommand(stamp, placed)
+	printRollback(out, stamp, placed)
+	return fmt.Errorf("%w; the tools still installed can be undone with: %s", cause, command)
 }
 
 // stopped is install's refusal when a placed file fails its doctor: it names
@@ -475,15 +500,20 @@ func printPrechecks(out io.Writer) {
 // printRollback prints the exact command that undoes this run and the files it
 // kept, one per tool.
 func printRollback(out io.Writer, stamp string, placed []Target) {
-	command := "gt-wrap rollback --stamp " + shellQuote(stamp)
-	for _, t := range placed {
-		command += " --target " + shellQuote(t.Name+"="+t.Path)
-	}
-	fmt.Fprintf(out, "rollback: %s\n", command)
+	fmt.Fprintf(out, "rollback: %s\n", rollbackCommand(stamp, placed))
 	fmt.Fprintln(out, "dated files:")
 	for _, t := range placed {
 		fmt.Fprintf(out, "  %s\n", dated(t, stamp))
 	}
+}
+
+// rollbackCommand is the gt-wrap rollback command that restores placed.
+func rollbackCommand(stamp string, placed []Target) string {
+	command := "gt-wrap rollback --stamp " + shellQuote(stamp)
+	for _, t := range placed {
+		command += " --target " + shellQuote(t.Name+"="+t.Path)
+	}
+	return command
 }
 
 // shellQuote renders s as one POSIX shell word, so a path holding a space or a

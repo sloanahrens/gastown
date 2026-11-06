@@ -347,6 +347,12 @@ func TestInstallStopsAndUndoesOnADoctorFailure(t *testing.T) {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output does not list the tool left installed:\n%s", out.String())
 		}
+		if !strings.Contains(out.String(), "rollback: gt-wrap rollback --stamp '"+testStamp+"'") {
+			t.Errorf("output does not print the rollback command for the tools left installed:\n%s", out.String())
+		}
+		if !strings.Contains(err.Error(), "gt-wrap rollback --stamp") {
+			t.Errorf("error %q does not name the rollback command", err)
+		}
 		if strings.Contains(out.String(), "installed om at ") {
 			t.Errorf("output lists om as installed after its doctor failed:\n%s", out.String())
 		}
@@ -780,6 +786,23 @@ func TestRollbackRefusesBadConfigurationBeforeAnyChange(t *testing.T) {
 			want: "not a regular file",
 		},
 		{
+			name: "the wrapper at the target is missing",
+			build: func(files *fakeFiles) RollbackConfig {
+				files.add(dated(target, testStamp), "old gt", 0o755)
+				return RollbackConfig{Stamp: testStamp, Targets: []Target{target}, Files: files, Out: &bytes.Buffer{}}
+			},
+			want: "no wrapper to keep aside",
+		},
+		{
+			name: "the wrapper at the target is a directory",
+			build: func(files *fakeFiles) RollbackConfig {
+				files.addDir(target.Path)
+				files.add(dated(target, testStamp), "old gt", 0o755)
+				return RollbackConfig{Stamp: testStamp, Targets: []Target{target}, Files: files, Out: &bytes.Buffer{}}
+			},
+			want: "not a regular file",
+		},
+		{
 			name: "a wrapper already kept aside",
 			build: func(files *fakeFiles) RollbackConfig {
 				files.add(target.Path, wrapperData, 0o755)
@@ -1118,6 +1141,50 @@ func TestInstallStopsWhenTheUndoItselfFails(t *testing.T) {
 	err := Install(installConfig(files, doctor, &bytes.Buffer{}, targets))
 	if err == nil || !strings.Contains(err.Error(), "undoing it also failed") {
 		t.Fatalf("Install = %v, want the failed undo named", err)
+	}
+}
+
+// TestInstallListsTheToolsItLeftInstalledWhenALaterPlacementFails: a placement
+// that fails after earlier tools were placed prints the rollback command and
+// the dated files for those tools, and names the command in the error.
+func TestInstallListsTheToolsItLeftInstalledWhenALaterPlacementFails(t *testing.T) {
+	t.Parallel()
+	targets := fourTargets()
+	om := named(targets, "om")
+	files := cutoverFiles(targets)
+	files.errFor = func(op, path string) error {
+		if op == "rename" && strings.Contains(path, ".gt-wrap-") && strings.HasSuffix(path, " -> "+om.Path) {
+			return permission(path)
+		}
+		return nil
+	}
+	var out bytes.Buffer
+	err := Install(installConfig(files, &fakeDoctor{}, &out, targets))
+	if err == nil || !strings.Contains(err.Error(), "rename the wrapper into place at "+om.Path) {
+		t.Fatalf("Install = %v, want the failed placement of om named", err)
+	}
+	command := "gt-wrap rollback --stamp '" + testStamp + "'"
+	for _, name := range []string{"gt", "bd"} {
+		target := named(targets, name)
+		command += " --target '" + name + "=" + target.Path + "'"
+	}
+	if !strings.Contains(out.String(), "rollback: "+command+"\n") {
+		t.Errorf("output does not print the rollback command for gt and bd:\n%s", out.String())
+	}
+	if !strings.Contains(err.Error(), command) {
+		t.Errorf("error %q does not name the rollback command %q", err, command)
+	}
+	for _, name := range []string{"gt", "bd"} {
+		target := named(targets, name)
+		if want := "\n  " + dated(target, testStamp) + "\n"; !strings.Contains(out.String(), want) {
+			t.Errorf("output does not list the dated file of %s:\n%s", name, out.String())
+		}
+	}
+	if got := files.data(om.Path); got != "old om" {
+		t.Errorf("om holds %q, want the file it replaced back", got)
+	}
+	if got := files.data(named(targets, "hm").Path); got != "old hm" {
+		t.Errorf("hm holds %q, want it untouched after the failure", got)
 	}
 }
 

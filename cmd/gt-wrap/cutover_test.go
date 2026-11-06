@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"os"
+	"fmt"
+	"io/fs"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/gtwrap"
 )
@@ -25,33 +27,121 @@ type cutoverDoctorFake struct {
 func (d cutoverDoctorFake) InImage(string) error           { return d.inImage }
 func (d cutoverDoctorFake) Installed(string, string) error { return d.installed }
 
-func writeFile(t *testing.T, path, contents string) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
-		t.Fatalf("write %s: %v", path, err)
-	}
+// memFiles is the in-memory filesystem the CLI's cutover changes. Its Rename
+// refuses a destination that already exists, so a run that succeeds also proves
+// no step wrote over a file.
+type memFiles struct {
+	files map[string]memFile
+	dirs  map[string]bool
+	next  int
 }
 
-func readFile(t *testing.T, path string) string {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	return string(data)
+type memFile struct {
+	data string
+	mode fs.FileMode
 }
+
+func newMemFiles() *memFiles {
+	return &memFiles{files: map[string]memFile{}, dirs: map[string]bool{}}
+}
+
+func (f *memFiles) add(path, data string, mode fs.FileMode) {
+	f.files[path] = memFile{data: data, mode: mode}
+}
+
+// data is a file's contents, or "" when the file is absent.
+func (f *memFiles) data(path string) string { return f.files[path].data }
+
+func (f *memFiles) Stat(path string) (fs.FileInfo, error) {
+	if file, ok := f.files[path]; ok {
+		return memInfo{name: filepath.Base(path), mode: file.mode, size: int64(len(file.data))}, nil
+	}
+	if f.dirs[path] {
+		return memInfo{name: filepath.Base(path), mode: fs.ModeDir | 0o755}, nil
+	}
+	return nil, &fs.PathError{Op: "stat", Path: path, Err: fs.ErrNotExist}
+}
+
+func (f *memFiles) ReadFile(path string) ([]byte, error) {
+	file, ok := f.files[path]
+	if !ok {
+		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
+	}
+	return []byte(file.data), nil
+}
+
+func (f *memFiles) CreateTemp(dir, pattern string) (gtwrap.TempFile, error) {
+	f.next++
+	name := filepath.Join(dir, strings.Replace(pattern, "*", fmt.Sprint(f.next), 1))
+	return &memTemp{files: f, name: name, mode: 0o600}, nil
+}
+
+func (f *memFiles) Rename(oldpath, newpath string) error {
+	file, ok := f.files[oldpath]
+	if !ok {
+		return &fs.PathError{Op: "rename", Path: oldpath, Err: fs.ErrNotExist}
+	}
+	if _, exists := f.files[newpath]; exists {
+		return fmt.Errorf("rename %s over the existing %s", oldpath, newpath)
+	}
+	delete(f.files, oldpath)
+	f.files[newpath] = file
+	return nil
+}
+
+func (f *memFiles) Remove(path string) error {
+	if _, ok := f.files[path]; !ok {
+		return &fs.PathError{Op: "remove", Path: path, Err: fs.ErrNotExist}
+	}
+	delete(f.files, path)
+	return nil
+}
+
+// memTemp is the new file place writes the wrapper into; it appears in the
+// filesystem when it is closed.
+type memTemp struct {
+	files *memFiles
+	name  string
+	mode  fs.FileMode
+	buf   bytes.Buffer
+}
+
+func (t *memTemp) Write(p []byte) (int, error) { return t.buf.Write(p) }
+func (t *memTemp) Name() string                { return t.name }
+func (t *memTemp) Chmod(mode fs.FileMode) error {
+	t.mode = mode
+	return nil
+}
+
+func (t *memTemp) Close() error {
+	t.files.add(t.name, t.buf.String(), t.mode)
+	return nil
+}
+
+// memInfo is the fs.FileInfo memFiles answers with.
+type memInfo struct {
+	name string
+	mode fs.FileMode
+	size int64
+}
+
+func (i memInfo) Name() string       { return i.name }
+func (i memInfo) Size() int64        { return i.size }
+func (i memInfo) Mode() fs.FileMode  { return i.mode }
+func (i memInfo) ModTime() time.Time { return time.Time{} }
+func (i memInfo) IsDir() bool        { return i.mode.IsDir() }
+func (i memInfo) Sys() any           { return nil }
 
 func TestRunInstallPlacesTheWrapperOverTheNamedTools(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
-	dir := t.TempDir()
 	targets := map[string]string{}
 	for _, name := range []string{"gt", "bd"} {
-		targets[name] = filepath.Join(dir, name)
-		writeFile(t, targets[name], "old "+name)
+		targets[name] = filepath.Join("/tools", name)
+		h.files.add(targets[name], "old "+name, 0o755)
 	}
-	source := filepath.Join(t.TempDir(), "gt-wrap")
-	writeFile(t, source, "the wrapper")
+	const source = "/src/gt-wrap"
+	h.files.add(source, "the wrapper", 0o755)
 	h.surface.executable = func() (string, error) { return source, nil }
 	h.surface.newDoctor = func(town string) gtwrap.Doctor {
 		if town != h.town {
@@ -66,10 +156,10 @@ func TestRunInstallPlacesTheWrapperOverTheNamedTools(t *testing.T) {
 		t.Fatalf("run = %d, want 0; stderr: %s", exit, h.stderr)
 	}
 	for _, name := range []string{"gt", "bd"} {
-		if got := readFile(t, targets[name]); got != "the wrapper" {
+		if got := h.files.data(targets[name]); got != "the wrapper" {
 			t.Errorf("%s holds %q, want the wrapper", targets[name], got)
 		}
-		if got := readFile(t, targets[name]+".pre-wrap-"+cutoverStamp); got != "old "+name {
+		if got := h.files.data(targets[name] + ".pre-wrap-" + cutoverStamp); got != "old "+name {
 			t.Errorf("%s holds %q, want the file it replaced", targets[name], got)
 		}
 	}
@@ -83,19 +173,18 @@ func TestRunRollbackRestoresTheFilesWithoutATown(t *testing.T) {
 	h := newHarness(t)
 	h.surface.getwd = func() (string, error) { return "", errors.New("no working directory") }
 	h.surface.getenv = func(string) string { return "" }
-	dir := t.TempDir()
-	path := filepath.Join(dir, "gt")
-	writeFile(t, path, "the wrapper")
-	writeFile(t, path+".pre-wrap-"+cutoverStamp, "old gt")
+	path := "/tools/gt"
+	h.files.add(path, "the wrapper", 0o755)
+	h.files.add(path+".pre-wrap-"+cutoverStamp, "old gt", 0o755)
 
 	exit := h.run("gt-wrap", "rollback", "--stamp", cutoverStamp, "--target", "gt="+path)
 	if exit != 0 {
 		t.Fatalf("run = %d, want 0; stderr: %s", exit, h.stderr)
 	}
-	if got := readFile(t, path); got != "old gt" {
+	if got := h.files.data(path); got != "old gt" {
 		t.Errorf("%s holds %q, want the dated file back", path, got)
 	}
-	if got := readFile(t, path+".wrapper-"+cutoverStamp); got != "the wrapper" {
+	if got := h.files.data(path + ".wrapper-" + cutoverStamp); got != "the wrapper" {
 		t.Errorf("the wrapper was not kept aside: %q", got)
 	}
 	if !strings.Contains(h.stdout.String(), "restored "+path) {
@@ -133,19 +222,18 @@ func TestRunSendsInstallToTheToolWhenInvokedAsOne(t *testing.T) {
 func TestRunInstallRefusesWithoutAStampBeforeChangingFiles(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "gt")
-	writeFile(t, path, "old gt")
-	h.surface.executable = func() (string, error) { return filepath.Join(t.TempDir(), "gt-wrap"), nil }
+	path := "/tools/gt"
+	h.files.add(path, "old gt", 0o755)
+	h.surface.executable = func() (string, error) { return "/src/gt-wrap", nil }
 	h.surface.newDoctor = func(string) gtwrap.Doctor { return cutoverDoctorFake{} }
 
-	if exit := h.run("gt-wrap", "install", "--dir", dir); exit != 1 {
+	if exit := h.run("gt-wrap", "install", "--dir", "/tools"); exit != 1 {
 		t.Fatalf("run = %d, want 1", exit)
 	}
 	if !strings.Contains(h.stderr.String(), "stamp") {
 		t.Errorf("stderr %q does not name the missing stamp", h.stderr)
 	}
-	if got := readFile(t, path); got != "old gt" {
+	if got := h.files.data(path); got != "old gt" {
 		t.Errorf("%s holds %q, want the file it had before the run", path, got)
 	}
 }
@@ -153,7 +241,7 @@ func TestRunInstallRefusesWithoutAStampBeforeChangingFiles(t *testing.T) {
 func TestRunRefusesBothADirectoryAndTargets(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
-	exit := h.run("gt-wrap", "install", "--stamp", cutoverStamp, "--dir", t.TempDir(), "--target", "gt=/bin/gt")
+	exit := h.run("gt-wrap", "install", "--stamp", cutoverStamp, "--dir", "/tools", "--target", "gt=/bin/gt")
 	if exit != 1 {
 		t.Fatalf("run = %d, want 1", exit)
 	}
@@ -165,10 +253,9 @@ func TestRunRefusesBothADirectoryAndTargets(t *testing.T) {
 func TestRunInstallRefusesAToolTheWrapperDoesNotAnswerAs(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "bash")
-	writeFile(t, path, "a shell")
-	h.surface.executable = func() (string, error) { return filepath.Join(t.TempDir(), "gt-wrap"), nil }
+	path := "/tools/bash"
+	h.files.add(path, "a shell", 0o755)
+	h.surface.executable = func() (string, error) { return "/src/gt-wrap", nil }
 	h.surface.newDoctor = func(string) gtwrap.Doctor { return cutoverDoctorFake{} }
 
 	exit := h.run("gt-wrap", "install", "--stamp", cutoverStamp, "--target", "bash="+path)
@@ -178,7 +265,7 @@ func TestRunInstallRefusesAToolTheWrapperDoesNotAnswerAs(t *testing.T) {
 	if !strings.Contains(h.stderr.String(), "gt, bd, om and hm") {
 		t.Errorf("stderr %q does not name the tools the wrapper answers as", h.stderr)
 	}
-	if got := readFile(t, path); got != "a shell" {
+	if got := h.files.data(path); got != "a shell" {
 		t.Errorf("%s holds %q, want the file it had before the run", path, got)
 	}
 }
@@ -188,10 +275,10 @@ func TestRunInstallRefusesWithoutATown(t *testing.T) {
 	h := newHarness(t)
 	h.surface.getwd = func() (string, error) { return t.TempDir(), nil }
 	h.surface.getenv = func(string) string { return "" }
-	h.surface.executable = func() (string, error) { return filepath.Join(t.TempDir(), "gt-wrap"), nil }
+	h.surface.executable = func() (string, error) { return "/src/gt-wrap", nil }
 	h.surface.newDoctor = func(string) gtwrap.Doctor { return cutoverDoctorFake{} }
 
-	if exit := h.run("gt-wrap", "install", "--stamp", cutoverStamp, "--dir", t.TempDir()); exit != 1 {
+	if exit := h.run("gt-wrap", "install", "--stamp", cutoverStamp, "--dir", "/tools"); exit != 1 {
 		t.Fatalf("run = %d, want 1", exit)
 	}
 	if !strings.Contains(h.stderr.String(), "no town root") {
@@ -268,10 +355,29 @@ func TestCutoverDoctorChecksTheImageOfItsTown(t *testing.T) {
 	}
 }
 
+// TestCutoverDoctorRunsThePlacedFileWithDoctor: install's doctor runs the file
+// it placed with --doctor, so the check is the placed tool's own answer.
+func TestCutoverDoctorRunsThePlacedFileWithDoctor(t *testing.T) {
+	t.Parallel()
+	const path = "/Users/operator/.local/bin/gt"
+	var ran []string
+	doctor := cutoverDoctor{run: func(argv ...string) error {
+		ran = argv
+		return nil
+	}}
+	if err := doctor.Installed("gt", path); err != nil {
+		t.Fatalf("Installed = %v, want nil", err)
+	}
+	if want := []string{path, doctorFlag}; !slices.Equal(ran, want) {
+		t.Fatalf("ran %q, want %q", ran, want)
+	}
+}
+
 func TestCutoverDoctorReportsAFailedInstalledFile(t *testing.T) {
 	t.Parallel()
-	path := filepath.Join(t.TempDir(), "gt")
-	err := cutoverDoctor{report: &bytes.Buffer{}}.Installed("gt", path)
+	const path = "/Users/operator/.local/bin/gt"
+	doctor := cutoverDoctor{run: func(...string) error { return errors.New("exit status 1") }}
+	err := doctor.Installed("gt", path)
 	if err == nil || !strings.Contains(err.Error(), "gt --doctor at "+path) {
 		t.Fatalf("Installed = %v, want the failed doctor named", err)
 	}
@@ -314,7 +420,7 @@ func TestRunInstallRefusesWhenTheWrapperCannotBeLocated(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.surface.executable = func() (string, error) { return "", errors.New("no executable") }
-	if exit := h.run("gt-wrap", "install", "--stamp", cutoverStamp, "--dir", t.TempDir()); exit != 1 {
+	if exit := h.run("gt-wrap", "install", "--stamp", cutoverStamp, "--dir", "/tools"); exit != 1 {
 		t.Fatalf("run = %d, want 1", exit)
 	}
 	if !strings.Contains(h.stderr.String(), "wrapper binary") {
@@ -338,8 +444,8 @@ func TestRunRefusesAnEmptyCutoverCommand(t *testing.T) {
 func TestRunRollbackReportsWhatItCouldNotRestore(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
-	path := filepath.Join(t.TempDir(), "gt")
-	writeFile(t, path, "the wrapper")
+	path := "/tools/gt"
+	h.files.add(path, "the wrapper", 0o755)
 	if exit := h.run("gt-wrap", "rollback", "--stamp", cutoverStamp, "--target", "gt="+path); exit != 1 {
 		t.Fatalf("run = %d, want 1", exit)
 	}

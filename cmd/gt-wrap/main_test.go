@@ -45,6 +45,7 @@ func (f *fakeTarget) Doctor() (gtwrap.Diagnosis, error) {
 type harness struct {
 	surface   surface
 	fake      *fakeTarget
+	files     *memFiles
 	town      string
 	home      string
 	builtTown string
@@ -59,6 +60,7 @@ func newHarness(t *testing.T) *harness {
 	writeTownMarker(t, town)
 	h := &harness{
 		fake:   &fakeTarget{},
+		files:  newMemFiles(),
 		town:   town,
 		home:   t.TempDir(),
 		stdout: &bytes.Buffer{},
@@ -77,6 +79,7 @@ func newHarness(t *testing.T) *harness {
 		stat:     os.Stat,
 		stdout:   h.stdout,
 		stderr:   h.stderr,
+		files:    h.files,
 		newDocker: func(town string) target {
 			h.builtTown, h.targetSet = town, true
 			return h.fake

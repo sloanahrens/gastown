@@ -38,10 +38,12 @@ answer, when a file it would replace is not a regular file, or when a file
 dated with the same stamp already exists. It replaces each tool by renaming the
 old file to `<name>.pre-wrap-<stamp>` and renaming a new copy into place, so a
 running binary is never written through. When a placed tool fails `--doctor`,
-install undoes that tool, stops, and lists the tools it left installed.
+or a later step fails after a tool was placed, install undoes the tool that
+failed, stops, and prints the rollback command and the dated files for the
+tools it left installed.
 
 The last lines install prints are the exact rollback command and the dated
-files it kept. Keep them.
+files it kept, on success or on a stop. Keep them.
 
 ## The watch hour
 
