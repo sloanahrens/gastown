@@ -1,0 +1,45 @@
+{
+  "node": {
+    "nodeName": "gt-ctl-1",
+    "fs": {
+      "time": "2026-11-05T23:09:00Z",
+      "availableBytes": 19000000000,
+      "capacityBytes": 100000000000,
+      "usedBytes": 81000000000,
+      "inodesFree": 6000000,
+      "inodes": 6553600,
+      "inodesUsed": 553600
+    }
+  },
+  "pods": [
+    {
+      "podRef": {"name": "forgejo-0", "namespace": "forgejo", "uid": "5d1c0a4e-0000-4000-8000-000000000001"},
+      "ephemeral-storage": {"time": "2026-11-05T23:09:00Z", "availableBytes": 9000000000, "capacityBytes": 10000000000, "usedBytes": 3000000000, "inodesFree": 900000, "inodes": 1000000, "inodesUsed": 100000},
+      "volume": [
+        {"time": "2026-11-05T23:09:00Z", "availableBytes": 88000000000, "capacityBytes": 100000000000, "usedBytes": 12000000000, "inodesFree": 500000, "inodes": 512000, "inodesUsed": 12000, "name": "data", "pvcRef": {"name": "forgejo-data", "namespace": "forgejo"}}
+      ]
+    },
+    {
+      "podRef": {"name": "forgejo-trial-0", "namespace": "forgejo-trial", "uid": "5d1c0a4e-0000-4000-8000-000000000002"},
+      "ephemeral-storage": {"time": "2026-11-05T23:09:00Z", "availableBytes": 9000000000, "capacityBytes": 10000000000, "usedBytes": 2000000000, "inodesFree": 900000, "inodes": 1000000, "inodesUsed": 100000},
+      "volume": [
+        {"time": "2026-11-05T23:09:00Z", "availableBytes": 41000000000, "capacityBytes": 50000000000, "usedBytes": 9000000000, "inodesFree": 400000, "inodes": 409600, "inodesUsed": 9600, "name": "data", "pvcRef": {"name": "forgejo-trial-data", "namespace": "forgejo-trial"}}
+      ]
+    },
+    {
+      "podRef": {"name": "forgejo-runner-6c8f9", "namespace": "forgejo", "uid": "5d1c0a4e-0000-4000-8000-000000000003"},
+      "ephemeral-storage": {"time": "2026-11-05T23:09:00Z", "availableBytes": 9000000000, "capacityBytes": 10000000000, "usedBytes": 5000000000, "inodesFree": 900000, "inodes": 1000000, "inodesUsed": 100000},
+      "volume": [
+        {"time": "2026-11-05T23:09:00Z", "availableBytes": 19000000000, "capacityBytes": 80000000000, "usedBytes": 61000000000, "inodesFree": 700000, "inodes": 716800, "inodesUsed": 16800, "name": "dind-store", "pvcRef": {"name": "runner-dind-store", "namespace": "forgejo"}}
+      ]
+    },
+    {
+      "podRef": {"name": "coredns-7d4b9c", "namespace": "kube-system", "uid": "5d1c0a4e-0000-4000-8000-000000000004"},
+      "ephemeral-storage": {"time": "2026-11-05T23:09:00Z", "availableBytes": 9900000000, "capacityBytes": 10000000000, "usedBytes": 100000000, "inodesFree": 990000, "inodes": 1000000, "inodesUsed": 10000}
+    },
+    {
+      "podRef": {"name": "polecat-7f2e1", "namespace": "ci", "uid": "5d1c0a4e-0000-4000-8000-000000000005"},
+      "ephemeral-storage": {"time": "2026-11-05T23:09:00Z", "availableBytes": 6000000000, "capacityBytes": 10000000000, "usedBytes": 4000000000, "inodesFree": 900000, "inodes": 1000000, "inodesUsed": 100000}
+    }
+  ]
+}

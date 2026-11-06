@@ -29,9 +29,17 @@ const tightenedKeep = 3
 
 // Reading is one disk's used share, or the error that stopped it being read.
 type Reading struct {
-	Name    string // "mac", "colima", "docker-desktop"
+	Name    string // "mac", "colima", "docker-desktop", "control"
 	UsedPct float64
 	Err     error // non-nil: the disk could not be read
+	// Detail names the biggest consumers on the disk, as TopConsumers renders
+	// them. Evaluate appends it to a usage raise and to nothing else.
+	Detail string
+	// AlertOnly marks a reading that raises and clears its alerts but never
+	// tightens the keep or refuses a plan: KeepFor ignores it, even when it is
+	// unreadable or full. The control cluster's disk is alert-only, because the
+	// keep and the plans are decided by the town's own disks.
+	AlertOnly bool
 }
 
 // Alert is one keyed change for the daemon's alert store to apply.
@@ -112,11 +120,15 @@ func Evaluate(readings []Reading, active map[string]bool) []Alert {
 		}
 		switch {
 		case r.UsedPct >= RaiseAt && !active[usage]:
+			detail := fmt.Sprintf("disk %s is %.0f%% used (alert at %.0f%%)", r.Name, r.UsedPct, RaiseAt)
+			if r.Detail != "" {
+				detail += "; biggest consumers: " + r.Detail
+			}
 			alerts = append(alerts, Alert{
 				Key:    usage,
 				Name:   r.Name,
 				Raise:  true,
-				Detail: fmt.Sprintf("disk %s is %.0f%% used (alert at %.0f%%)", r.Name, r.UsedPct, RaiseAt),
+				Detail: detail,
 			})
 		case r.UsedPct < ClearAt && active[usage]:
 			alerts = append(alerts, Alert{
@@ -153,10 +165,14 @@ func (k Keep) Count() (int, error) {
 }
 
 // KeepFor returns base tightened when a readable disk is at or over RaiseAt, or a
-// refusal when any disk could not be read, whatever the other disks say.
+// refusal when any disk could not be read, whatever the other disks say. An
+// alert-only reading is left out of both.
 func KeepFor(readings []Reading, base int) Keep {
 	var failures []error
 	for _, r := range readings {
+		if r.AlertOnly {
+			continue
+		}
 		if r.Err != nil {
 			failures = append(failures, fmt.Errorf("disk %s cannot be read: %w", r.Name, r.Err))
 		}
@@ -165,6 +181,9 @@ func KeepFor(readings []Reading, base int) Keep {
 		return Keep{refusal: errors.Join(failures...)}
 	}
 	for _, r := range readings {
+		if r.AlertOnly {
+			continue
+		}
 		if r.UsedPct >= RaiseAt && base > tightenedKeep {
 			return Keep{count: tightenedKeep, decided: true}
 		}
