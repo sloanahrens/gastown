@@ -233,7 +233,7 @@ func TestRebuildGTRigCheckoutSlowRigThatAnswersIsNotATimeout(t *testing.T) {
 	d.logger = log.New(&logs, "", 0)
 
 	// The slow rig's git answers promptly; it is clean and behind origin/main,
-	// so its real result is a fast-forward, not the timeout its bound allows.
+	// so its real result is a fast-forward, not a timeout.
 	cli := newFakeCLIFor(func(c cliCall) cliReply {
 		switch {
 		case gitSub(c, "branch"):
