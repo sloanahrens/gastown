@@ -62,7 +62,8 @@ type GitEnv func(dir string, env []string, args ...string) ([]byte, error)
 
 // Seams are the commands a build runs: Run for a fetch, Git for a read or a
 // worktree, GitEnv for a read of a URL, Go for a compile. The real ones are
-// ExecRun, bdbuild.ExecGit, ExecGitEnv and bdbuild.ExecGo. Nothing else runs.
+// ExecRun, bdbuild.ExecGit, bdbuild.ExecGitEnv and bdbuild.ExecGo. Nothing else
+// runs.
 type Seams struct {
 	Run    daemonimage.Runner
 	Git    bdbuild.Git
@@ -498,32 +499,6 @@ func compareVersions(a, b []int) int {
 // waiting on a terminal.
 func buildEnv() []string {
 	return append(bdbuild.Env(nil), "GIT_TERMINAL_PROMPT=0")
-}
-
-// ExecGitEnv runs the host's git with env as its whole environment and returns
-// its standard output, and stops it past runCeiling. A failure names git and
-// the last line of its stderr.
-func ExecGitEnv(dir string, env []string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), runCeiling)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = env
-	// A git read that reaches the network can leave a child holding the output
-	// pipes, so WaitDelay bounds the wait after git is killed, as ExecRun does.
-	cmd.WaitDelay = time.Second
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		switch {
-		case errors.Is(ctx.Err(), context.DeadlineExceeded):
-			return nil, fmt.Errorf("git timed out: %w", ctx.Err())
-		case errors.Is(ctx.Err(), context.Canceled):
-			return nil, fmt.Errorf("git was canceled: %w", ctx.Err())
-		}
-		return nil, fmt.Errorf("git failed: %w: %s", err, lastLine(stderr.String()))
-	}
-	return out, nil
 }
 
 // ExecRun runs argv in dir with env as its whole environment, and stops it past

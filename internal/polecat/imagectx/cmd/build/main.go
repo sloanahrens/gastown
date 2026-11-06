@@ -67,7 +67,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	res, err := imagectx.Build(context.Background(), imagectx.Inputs{
 		Src: src, Rev: *rev, Out: *out, BD: bd, Seeds: seeds, SeedURLs: urls,
-	}, imagectx.Seams{Run: imagectx.ExecRun, Git: bdbuild.ExecGit, GitEnv: imagectx.ExecGitEnv, Go: bdbuild.ExecGo})
+	}, imagectx.Seams{Run: imagectx.ExecRun, Git: bdbuild.ExecGit, GitEnv: bdbuild.ExecGitEnv, Go: bdbuild.ExecGo})
 	if err != nil {
 		fmt.Fprintf(stderr, "polecat-image: %v\n", err)
 		return 1

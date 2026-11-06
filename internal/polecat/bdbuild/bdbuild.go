@@ -93,14 +93,25 @@ const gitCeiling = 5 * time.Minute
 func ExecGit(dir string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitCeiling)
 	defer cancel()
-	return runGit(ctx, dir, args...)
+	return runGit(ctx, dir, os.Environ(), args...)
 }
 
-// runGit runs the host's git under ctx, which kills it when ctx ends. A command
-// that ctx ends fails naming the timeout or the cancellation; any other failure
-// reports git's last stderr line.
-func runGit(ctx context.Context, dir string, args ...string) ([]byte, error) {
+// ExecGitEnv is ExecGit with env as git's whole environment. A read that reaches
+// a repository URL goes through it, so git sees the build's environment and
+// cannot prompt on a terminal for a credential the build does not have
+// (gt-gg9hv.33).
+func ExecGitEnv(dir string, env []string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), gitCeiling)
+	defer cancel()
+	return runGit(ctx, dir, env, args...)
+}
+
+// runGit runs the host's git under ctx with env as its whole environment, which
+// kills it when ctx ends. A command that ctx ends fails naming the timeout or
+// the cancellation; any other failure reports git's last stderr line.
+func runGit(ctx context.Context, dir string, env []string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = env
 	// A git fetch leaves a git-remote-https child holding the output pipes, so
 	// Wait would block on it after git is killed; WaitDelay bounds that wait.
 	cmd.WaitDelay = time.Second
