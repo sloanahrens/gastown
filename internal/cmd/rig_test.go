@@ -297,7 +297,7 @@ func TestMigrateParkedRigsNamesTheRegistryItWroteTo(t *testing.T) {
 		".beads-wisp/config/testrig.json": `{"rig":"testrig","values":{"status":"parked"}}`,
 	})
 	var out bytes.Buffer
-	if err := migrateParkedRigs(&out, town, "sloan"); err != nil {
+	if err := migrateParkedRigs(&out, town, "operator"); err != nil {
 		t.Fatalf("migrateParkedRigs = %v\n%s", err, out.String())
 	}
 	got := out.String()

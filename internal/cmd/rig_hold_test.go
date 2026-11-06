@@ -16,7 +16,7 @@ func TestHoldAndReleaseRigs(t *testing.T) {
 	t.Parallel()
 	town := parkTown(t)
 	var out bytes.Buffer
-	rec := config.RigDispatchHold{Since: time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC), By: "sloan", Reason: "drain the landing backlog"}
+	rec := config.RigDispatchHold{Since: time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC), By: "operator", Reason: "drain the landing backlog"}
 	if err := holdRigs(&out, town, []string{"testrig"}, rec); err != nil {
 		t.Fatalf("holdRigs = %v\n%s", err, out.String())
 	}
@@ -27,7 +27,7 @@ func TestHoldAndReleaseRigs(t *testing.T) {
 	if reason := townconfig.DispatchHeldReason(town, "otherrig"); reason != "" {
 		t.Errorf("DispatchHeldReason(otherrig) = %q; the hold must cover testrig alone", reason)
 	}
-	if !strings.Contains(out.String(), "drain the landing backlog") || !strings.Contains(out.String(), "sloan") {
+	if !strings.Contains(out.String(), "drain the landing backlog") || !strings.Contains(out.String(), "operator") {
 		t.Errorf("hold output = %q, want the record it wrote", out.String())
 	}
 
@@ -49,7 +49,7 @@ func TestHoldRigs_UnknownRig(t *testing.T) {
 	t.Parallel()
 	town := parkTown(t)
 	var out bytes.Buffer
-	err := holdRigs(&out, town, []string{"nosuchrig", "testrig"}, config.RigDispatchHold{Since: time.Now().UTC(), By: "sloan"})
+	err := holdRigs(&out, town, []string{"nosuchrig", "testrig"}, config.RigDispatchHold{Since: time.Now().UTC(), By: "operator"})
 	if err == nil {
 		t.Fatalf("holdRigs with an unknown rig = nil error\n%s", out.String())
 	}

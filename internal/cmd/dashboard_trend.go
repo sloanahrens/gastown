@@ -502,9 +502,9 @@ func landingRig(townRoot string) func(bead string) string {
 // polecatOfBranch names who built a landing from its branch: the polecat in a
 // "polecat/<name>/<bead>+<nonce>" branch, the crew member in a
 // "crew/<name>/<bead>" or "crew/<name>" branch, or the first path element of
-// any other branch ("sloan/dashboard" is the operator's, an operator landing). It is
-// empty when the branch says nothing: a crew branch that names no one is empty
-// too, never the operator rule's "crew".
+// any other branch ("operator/dashboard" is the operator's, an operator
+// landing). It is empty when the branch says nothing: a crew branch that
+// names no one is empty too, never the operator rule's "crew".
 func polecatOfBranch(branch string) string {
 	parts := strings.Split(branch, "/")
 	switch {

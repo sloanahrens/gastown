@@ -27,15 +27,15 @@ func TestRigForgejoReposIsEveryCutOverRig(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	writeTestRigsConfig(t, town, "beads", "hm", "mango", "om")
-	writeRigForgejo(t, town, "beads", "http://forgejo:3000/sloan/beads.git")
-	writeRigForgejo(t, town, "mango", "http://forgejo:3000/sloan/mango.git")
-	writeRigForgejo(t, town, "om", "http://forgejo:3000/sloan/organic-mechanic.git")
+	writeRigForgejo(t, town, "beads", "http://forgejo:3000/owner/beads.git")
+	writeRigForgejo(t, town, "mango", "http://forgejo:3000/owner/mango.git")
+	writeRigForgejo(t, town, "om", "http://forgejo:3000/owner/organic-mechanic.git")
 	// hm is not cut over, and a remote that names no repository contributes
 	// nothing rather than a name the API would 404 on.
 	writeRigForgejo(t, town, "hm", "http://forgejo:3000/not-a-repo")
 
 	assert.Equal(t,
-		[]string{"sloan/beads", "sloan/mango", "sloan/organic-mechanic"},
+		[]string{"owner/beads", "owner/mango", "owner/organic-mechanic"},
 		rigForgejoRepos(town),
 		"rig-name order, every rig with a forgejo remote, none of the rest")
 }

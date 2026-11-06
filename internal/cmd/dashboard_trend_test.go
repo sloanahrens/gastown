@@ -245,7 +245,7 @@ func TestBuildRecentLandingsJoinsStagesAndOrdersNewestFirst(t *testing.T) {
 	recs := []omRecord{
 		{Record: landings.Record{Bead: "gt-old", Rig: "gastown", Branch: "polecat/agate/gt-old+x", LandedCommit: "0123456789abcdef", OMVerdict: "approve", OMScore: 0.8, Route: "daemon", LandedAt: now.Add(-3 * time.Hour)}},
 		{Record: landings.Record{Bead: "gt-new", Rig: "gastown", Branch: "polecat/basalt/gt-new+y", LandedCommit: "fedcba9876543210", OMVerdict: "approve", OMScore: 0.9, Route: "daemon", LandedAt: now.Add(-10 * time.Minute)}, RiskPaths: []string{"internal/git/git.go"}},
-		{Record: landings.Record{Bead: "gt-manual", Rig: "gastown", Branch: "sloan/dashboard", OMVerdict: "skipped", Route: "overseer-manual", LandedAt: now.Add(-5 * time.Hour)}},
+		{Record: landings.Record{Bead: "gt-manual", Rig: "gastown", Branch: "operator/dashboard", OMVerdict: "skipped", Route: "overseer-manual", LandedAt: now.Add(-5 * time.Hour)}},
 		{Record: landings.Record{Bead: "gt-ancient", Rig: "gastown", OMVerdict: "approve", LandedAt: now.Add(-30 * time.Hour)}},
 	}
 	stages := []omStage{{At: now.Add(-11 * time.Minute), Bead: "gt-new", Lint: d(12), Gate: d(34), OM: d(100)}}
@@ -273,7 +273,7 @@ func TestBuildRecentLandingsJoinsStagesAndOrdersNewestFirst(t *testing.T) {
 	if rj.Kind != "review" || rj.Rig != "gastown" || rj.Score == nil || *rj.Score != 0.55 || rj.Detail == "" {
 		t.Errorf("rejected row = %+v", rj)
 	}
-	if rows[3].Polecat != "sloan" || rows[3].Verdict != "skipped" {
+	if rows[3].Polecat != "operator" || rows[3].Verdict != "skipped" {
 		t.Errorf("a crew landing names its builder, and landed without review: %+v", rows[3])
 	}
 	if len(asked) != 3 {
@@ -409,7 +409,7 @@ func TestBuildRecentLandingsShipCellPerRig(t *testing.T) {
 func TestPolecatOfBranch(t *testing.T) {
 	t.Parallel()
 	for in, want := range map[string]string{
-		"polecat/agate/gt-1+abc": "agate", "polecat/x": "", "sloan/dashboard": "sloan", "": "", "polecat/mica/gt-2.1+q": "mica", "main": "",
+		"polecat/agate/gt-1+abc": "agate", "polecat/x": "", "operator/dashboard": "operator", "": "", "polecat/mica/gt-2.1+q": "mica", "main": "",
 		"crew/heron/dv-zqw7.4": "heron", "crew/jay/gt-byiyo": "jay", "crew/heron": "heron", "crew": "",
 		"crew//gt-1": "", "crew/": "",
 	} {
@@ -1030,7 +1030,7 @@ func TestLandingRigFollowsTheRoutesFile(t *testing.T) {
 func TestPolecatOfAssignee(t *testing.T) {
 	t.Parallel()
 	for in, want := range map[string]string{
-		"gastown/polecats/mica": "mica", "gastown/crew/sloan": "", "": "", "mica": "", "gastown/polecats/": "",
+		"gastown/polecats/mica": "mica", "gastown/crew/operator": "", "": "", "mica": "", "gastown/polecats/": "",
 	} {
 		if got := polecatOfAssignee(in); got != want {
 			t.Errorf("polecatOfAssignee(%q) = %q, want %q", in, got, want)
@@ -1108,7 +1108,7 @@ func TestBuildRecentLandingsCarriesThePolecatTime(t *testing.T) {
 			PolecatAttempts:   []land.PolecatAttempt{{Seat: "gastown/onyx", LowerBound: true}},
 		}},
 		{Record: landings.Record{
-			Bead: "gt-crew", Rig: "gastown", Branch: "sloan/dashboard", OMVerdict: "skipped", LandedAt: now.Add(-3 * time.Minute),
+			Bead: "gt-crew", Rig: "gastown", Branch: "operator/dashboard", OMVerdict: "skipped", LandedAt: now.Add(-3 * time.Minute),
 		}},
 	}
 
@@ -1213,7 +1213,7 @@ func TestBuildRecentLandingsMarksACrewBranchRow(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 26, 14, 0, 0, 0, time.UTC)
 	recs := []omRecord{
-		{Record: landings.Record{Bead: "gt-crew", Rig: "gastown", Branch: "crew/sloan/gt-crew", OMVerdict: "approve", LandedAt: now.Add(-time.Minute)}},
+		{Record: landings.Record{Bead: "gt-crew", Rig: "gastown", Branch: "crew/operator/gt-crew", OMVerdict: "approve", LandedAt: now.Add(-time.Minute)}},
 		{Record: landings.Record{Bead: "gt-pc", Rig: "gastown", Branch: "polecat/opal/gt-pc+x", OMVerdict: "approve", LandedAt: now.Add(-2 * time.Minute)}},
 	}
 
@@ -1227,8 +1227,8 @@ func TestBuildRecentLandingsMarksACrewBranchRow(t *testing.T) {
 	}
 	// The crew branch names its agent, so the row carries it for the By cell;
 	// a polecat branch carries none.
-	if got := byBead["gt-crew"].CrewAgent; got != "sloan" {
-		t.Errorf("crew branch row CrewAgent = %q, want the branch's agent sloan", got)
+	if got := byBead["gt-crew"].CrewAgent; got != "operator" {
+		t.Errorf("crew branch row CrewAgent = %q, want the branch's agent operator", got)
 	}
 	if byBead["gt-pc"].Crew {
 		t.Errorf("polecat branch row is marked crew: %+v", byBead["gt-pc"])

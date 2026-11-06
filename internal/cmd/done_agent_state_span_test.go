@@ -167,7 +167,7 @@ func TestCrewDoneWritesNoPolecatSpan(t *testing.T) {
 	t.Parallel()
 	townRoot, db := submittedSpanTown(t)
 	env := submittedSpanEnv(db)
-	env.getenv = envMap(map[string]string{"GT_ROLE": "crew", "GT_RIG": "gastown", "GT_CREW": "sloan"})
+	env.getenv = envMap(map[string]string{"GT_ROLE": "crew", "GT_RIG": "gastown", "GT_CREW": "operator"})
 	store := spans.New(spans.DefaultDir(townRoot), nil)
 	if err := store.Start("gt-base-123", "gastown/nux"); err != nil {
 		t.Fatalf("start span: %v", err)
