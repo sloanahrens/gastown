@@ -88,10 +88,10 @@ const (
 	// instead of two hours (gt-gg9hv.24.6).
 	cacheTrimRetryInterval = 15 * time.Minute
 
-	// diskMaintBusyAlertEvery is how often a busy tick with nothing else due
-	// re-reads the disks to apply the alerts. The trim's interval can be hours,
-	// and a disk that fills in that time raises its alert too late to leave
-	// room above the kubelet's eviction line (gt-gg9hv.53).
+	// diskMaintBusyAlertEvery is how often a busy tick with no trim due re-reads
+	// the disks to apply the alerts. The trim's interval can be hours, and a
+	// disk that fills in that time raises its alert too late to leave room above
+	// the kubelet's eviction line (gt-gg9hv.53).
 	diskMaintBusyAlertEvery = 10 * time.Minute
 
 	// diskMaintAlertOnlyFallbackKey is the key the alert-only pass holds its
@@ -486,7 +486,7 @@ func (d *Daemon) runDiskMaintenance() {
 
 	quiet, why := d.maintenance().quiet(d)
 	if !quiet {
-		d.runDiskMaintenanceTrim(mode, due, why)
+		d.runDiskMaintenanceTrim(mode, due, why, now)
 		return
 	}
 	if !d.diskMaintRunning.CompareAndSwap(false, true) {
@@ -504,8 +504,9 @@ func (d *Daemon) runDiskMaintenance() {
 // reads them through a pass of their own (gt-gg9hv.53).
 //
 // The spacing is checked before the quiet guard, so a tick inside it costs no
-// quiet call, and it is measured from the last application any pass made, so
-// this pass never repeats a reading a trim or a full pass just took.
+// quiet call, and it is measured from the last application any pass made and
+// from the alert-only pass's own last read, so this pass never repeats a
+// reading another pass just took or one it took itself.
 func (d *Daemon) runDiskMaintenanceAlertOnlyTick(now time.Time) {
 	if !d.diskMaintAlerts.alertOnlyDue(now, diskMaintBusyAlertEvery) {
 		return
@@ -513,6 +514,13 @@ func (d *Daemon) runDiskMaintenanceAlertOnlyTick(now time.Time) {
 	if quiet, _ := d.maintenance().quiet(d); quiet {
 		return // a quiet tick with nothing due has nothing to do
 	}
+	d.dispatchDiskMaintenanceAlertOnly()
+}
+
+// dispatchDiskMaintenanceAlertOnly starts the alert-only pass unless one is
+// already in flight, which it leaves alone without a line of its own: a pass in
+// flight is not news the tick has to say again (gt-gg9hv.53).
+func (d *Daemon) dispatchDiskMaintenanceAlertOnly() {
 	if !d.diskMaintAlertOnlyRunning.CompareAndSwap(false, true) {
 		return // the alert-only pass is still running
 	}
@@ -527,16 +535,21 @@ func (d *Daemon) runDiskMaintenanceAlertOnlyTick(now time.Time) {
 // trim's interval nor delay a target. It waits for the alert turn like a full
 // pass; a wait that runs out leaves it reading the disks alone and the alerts
 // with the pass that holds the turn, a result it reports once an hour rather
-// than on every pass the spacing allows (gt-gg9hv.53).
+// than on every pass the spacing allows. A read it made without the turn still
+// spends its own spacing, because the reading is what the next tick would
+// repeat (gt-gg9hv.53).
 func (d *Daemon) diskMaintenanceAlertOnlyPass() {
 	ctx, cancel := d.diskMaintenanceContext()
 	defer cancel()
 	now := d.diskMaintenanceSeams().now()
-	d.readAndApplyDiskAlertsLogging(ctx, now, func(err error) {
+	_, read := d.readAndApplyDiskAlertsLogging(ctx, now, func(err error) {
 		if d.diskMaintAlerts.allowHourlyLog(diskMaintAlertOnlyFallbackKey, now) {
 			d.logAlertFallback(err)
 		}
 	})
+	if read {
+		d.diskMaintAlerts.recordAlertOnlyRead(now)
+	}
 }
 
 // runDiskMaintenanceTrim is the tick's busy case: the cache trim may run, the
@@ -544,9 +557,16 @@ func (d *Daemon) diskMaintenanceAlertOnlyPass() {
 // landing passes cannot starve it (gt-gg9hv.48; docs/guides/disk-maintenance.md).
 // Everything else the tick found keeps the guard: it stays due, and the next
 // quiet tick runs it.
-func (d *Daemon) runDiskMaintenanceTrim(mode string, due diskMaintDue, why string) {
+func (d *Daemon) runDiskMaintenanceTrim(mode string, due diskMaintDue, why string, now time.Time) {
 	if !due.cacheTrim {
 		d.logger.Printf("disk_maintenance: skipped: %s", why)
+		// No trim pass runs, so nothing this tick dispatches would read the
+		// disks, and the due targets wait for a quiet tick a busy town may not
+		// reach for hours: the alerts get their reading from the alert-only
+		// pass instead (gt-gg9hv.53).
+		if d.diskMaintAlerts.alertOnlyDue(now, diskMaintBusyAlertEvery) {
+			d.dispatchDiskMaintenanceAlertOnly()
+		}
 		return
 	}
 	if due.daily || len(due.interval) > 0 {

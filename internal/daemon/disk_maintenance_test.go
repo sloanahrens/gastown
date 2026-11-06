@@ -678,6 +678,41 @@ func TestDiskMaintAlertOnlyRunsOnABusyTickWithNothingDue(t *testing.T) {
 	}
 }
 
+// TestDiskMaintAlertOnlyRunsWhenATargetIsDueOnABusyTick: a busy tick with a
+// target due and the trim not due dispatched nothing that read the disks, so
+// the target's wait for a quiet tick starved the alerts. The tick reads them
+// for the alerts alone, and the target stays due (gt-gg9hv.53).
+func TestDiskMaintAlertOnlyRunsWhenATargetIsDueOnABusyTick(t *testing.T) {
+	t.Parallel()
+	h := newDiskMaintAlertOnly(t)
+	// The registry runs on a cadence of its own, and has never run: it is due,
+	// while the trim's interval is spent.
+	h.d.patrolConfig = diskMaintCadence("registry", "1h")
+	reads := h.reads()
+	h.f.readings = []disks.Reading{{Name: "colima", UsedPct: 88}}
+
+	h.d.runDiskMaintenance()
+
+	if got := reads.Load(); got != 1 {
+		t.Fatalf("disk reads = %d, want 1: the busy tick with a target due reads the disks for the alerts", got)
+	}
+	if !diskMaintAlertIsOpen(h.f.notify, "diskmaint:colima") {
+		t.Errorf("escalations = %+v, want an open diskmaint:colima alert", h.f.notify.Escalations())
+	}
+	if got := len(h.f.target.policies); got != 0 {
+		t.Errorf("planned the target %d times while the town was busy, want 0: it waits for a quiet tick", got)
+	}
+	if !strings.Contains(h.logs.String(), "skipped") {
+		t.Errorf("log = %q, want the skipped target named", h.logs.String())
+	}
+	if got := h.d.diskMaintSchedule.lastRunAt("registry"); !got.IsZero() {
+		t.Errorf("registry last run = %v, want none: the alert-only pass records no target", got)
+	}
+	if got, want := h.d.diskMaintSchedule.lastRunAt(diskMaintCacheTrimName), h.now; !got.Equal(want) {
+		t.Errorf("cache trim last run = %v, want %v untouched", got, want)
+	}
+}
+
 // TestDiskMaintAlertOnlyIsSpacedAndSharesTheClock: the alert-only pass runs at
 // most once per diskMaintBusyAlertEvery, measured from the last application any
 // pass made, and a tick inside the spacing makes no quiet call. A reading that
@@ -733,7 +768,7 @@ func TestDiskMaintAlertOnlyIsSpacedAndSharesTheClock(t *testing.T) {
 		}
 	})
 
-	t.Run("a reading whose turn was not taken restarts nothing", func(t *testing.T) {
+	t.Run("a fallback read spends its own spacing", func(t *testing.T) {
 		t.Parallel()
 		h := newDiskMaintAlertOnly(t)
 		reads := h.reads()
@@ -746,10 +781,20 @@ func TestDiskMaintAlertOnlyIsSpacedAndSharesTheClock(t *testing.T) {
 		if got := reads.Load(); got != 1 {
 			t.Fatalf("disk reads = %d on the fallback, want 1", got)
 		}
+		if diskMaintAlertIsOpen(h.f.notify, "diskmaint:colima") {
+			t.Fatal("an alert is open after a fallback read, want none: the pass never took the turn")
+		}
+
 		h.now = h.now.Add(5 * time.Minute)
 		h.d.runDiskMaintenance()
+		if got := reads.Load(); got != 1 {
+			t.Errorf("disk reads = %d inside the spacing, want 1: the pass's own read spends it even without the turn", got)
+		}
+
+		h.now = h.now.Add(5 * time.Minute) // diskMaintBusyAlertEvery after the fallback read
+		h.d.runDiskMaintenance()
 		if got := reads.Load(); got != 2 {
-			t.Errorf("disk reads = %d after a fallback read, want 2: a reading that did not apply must not spend the spacing", got)
+			t.Errorf("disk reads = %d past the spacing, want 2: a fallback read spaces the next one, it does not end the pass", got)
 		}
 	})
 }
@@ -811,13 +856,22 @@ func TestDiskMaintAlertOnlyIsBoundedByTheTurnGate(t *testing.T) {
 	h.f.readings = []disks.Reading{{Name: "colima", UsedPct: 88}}
 	counting := &countingNotifier{Notifier: h.f.notify}
 	h.d.notifier = counting
-	// A turn that never answers, reported at its deadline instead of waited
-	// for: the wait is diskMaintAlertTurnWait, which the test does not spend.
-	h.d.diskMaintAlerts.acquireTurn = func(context.Context) (func(), error) {
+	// A turn that never answers: the fake reads the wait's deadline and gives
+	// up at it, so the bound is driven without the test spending it.
+	var waitDeadline time.Time
+	hasDeadline := false
+	h.d.diskMaintAlerts.acquireTurn = func(ctx context.Context) (func(), error) {
+		waitDeadline, hasDeadline = ctx.Deadline()
 		return nil, context.DeadlineExceeded
 	}
 
 	h.d.runDiskMaintenance()
+	if !hasDeadline {
+		t.Fatal("the turn wait has no deadline, want one of diskMaintAlertTurnWait")
+	}
+	if wait := time.Until(waitDeadline); wait > diskMaintAlertTurnWait || wait < diskMaintAlertTurnWait-time.Minute {
+		t.Errorf("turn wait = %v, want about %v: the pass is bounded below its own %v", wait, diskMaintAlertTurnWait, diskMaintRunTimeout)
+	}
 	if got := reads.Load(); got != 1 {
 		t.Errorf("disk reads = %d, want 1: a pass without the turn reads the disks for itself", got)
 	}
@@ -834,12 +888,18 @@ func TestDiskMaintAlertOnlyIsBoundedByTheTurnGate(t *testing.T) {
 		t.Errorf("cache trim last run = %v, want %v untouched", got, want)
 	}
 
-	// Five minutes on the pass runs again, because nothing was applied, and the
-	// line stays said: a busy town must not repeat it every ten minutes.
+	// Five minutes on the tick makes no pass: the fallback read spent the
+	// spacing. Ten minutes after it the pass reads again, and the line stays
+	// said: a busy town must not repeat it every ten minutes.
 	h.now = h.now.Add(5 * time.Minute)
 	h.d.runDiskMaintenance()
+	if got := reads.Load(); got != 1 {
+		t.Errorf("disk reads = %d inside the spacing a fallback read spent, want 1", got)
+	}
+	h.now = h.now.Add(5 * time.Minute) // diskMaintBusyAlertEvery after the fallback read
+	h.d.runDiskMaintenance()
 	if got := reads.Load(); got != 2 {
-		t.Errorf("disk reads = %d on the next pass, want 2", got)
+		t.Errorf("disk reads = %d past the spacing, want 2", got)
 	}
 	if got := strings.Count(h.logs.String(), "another pass is applying the disk alerts"); got != 1 {
 		t.Errorf("logged the fallback %d times inside the hour, want 1: %q", got, h.logs.String())

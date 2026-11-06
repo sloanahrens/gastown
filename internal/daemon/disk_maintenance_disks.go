@@ -383,25 +383,44 @@ type diskMaintAlerts struct {
 	// pass clock. The busy tick's alert-only pass spaces its reads from it, so
 	// it never repeats a reading a trim or a full pass just took (gt-gg9hv.53).
 	appliedAt time.Time
+	// alertOnlyReadAt is when the alert-only pass last read the disks, whether
+	// or not its turn came. A fallback read applies nothing but still spends
+	// the pass's spacing, so a turn a slow notifier holds cannot make the pass
+	// re-read the disks on every tick (gt-gg9hv.53).
+	alertOnlyReadAt time.Time
 }
 
 // alertOnlyDue reports whether a busy tick's alert-only pass may read the disks
-// at now: the last application, by any pass, was at least every ago, or there
-// has been none.
+// at now: the last application by any pass, and the pass's own last read, were
+// both at least every ago, or there were none.
 func (a *diskMaintAlerts) alertOnlyDue(now time.Time, every time.Duration) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.appliedAt.IsZero() || now.Sub(a.appliedAt) >= every
+	return spacedSince(a.appliedAt, now, every) && spacedSince(a.alertOnlyReadAt, now, every)
+}
+
+// spacedSince reports whether at was at least every before now, or is unset.
+func spacedSince(at, now time.Time, every time.Duration) bool {
+	return at.IsZero() || now.Sub(at) >= every
 }
 
 // recordApplied keeps when an application last read the disks and applied the
 // alerts. Only readAndApplyDiskAlerts writes it, and only after it applied, so a
 // pass that never took its turn, or whose context ended first, restarts no
-// spacing (gt-gg9hv.53).
+// application spacing (gt-gg9hv.53).
 func (a *diskMaintAlerts) recordApplied(at time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.appliedAt = at.Round(0)
+}
+
+// recordAlertOnlyRead keeps when the alert-only pass last read the disks,
+// applied or not. It spends only that pass's own spacing, never the
+// application spacing a trim or a full pass sets (gt-gg9hv.53).
+func (a *diskMaintAlerts) recordAlertOnlyRead(at time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.alertOnlyReadAt = at.Round(0)
 }
 
 // takeTurn waits for this pass's turn to apply the alerts. A pass whose context
