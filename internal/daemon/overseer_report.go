@@ -184,6 +184,14 @@ func writeOverseerReport(townRoot string, interval time.Duration, s *overseerRep
 	slot := now.UTC().Truncate(interval)
 	dir := townreport.ReportsDir(townRoot)
 
+	// Every level below the town root must be a real directory before anything
+	// is read from or written under it: the covered-slot repair below writes the
+	// daily files without reaching writeOverseerReportFile, so a symlinked level
+	// whose target already holds the slot's report would otherwise be written
+	// through.
+	if err := ensureOverseerDirectories(townRoot, dir); err != nil {
+		return "", err
+	}
 	prev, newest, err := overseerReportPrevious(dir, slot)
 	if err != nil {
 		return "", err

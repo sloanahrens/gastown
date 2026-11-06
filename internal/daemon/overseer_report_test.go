@@ -1281,6 +1281,34 @@ func TestOverseerReportRefusesASymlinkedDirectory(t *testing.T) {
 	}
 }
 
+// A symlinked level below the town root is refused on a covered slot too: the
+// repair of the daily files writes under the directory the link points at, so
+// the levels are checked before the report directory is read, and nothing is
+// created or replaced in the link's target.
+func TestOverseerReportCoveredSlotRefusesASymlinkedLevel(t *testing.T) {
+	t.Parallel()
+	w := newOverseerWorld(t, "2026-10-14T20:17:33Z")
+	w.seedReport(t, "20261014T201500Z")
+	link := filepath.Join(w.town, ".runtime", "overseer")
+	target := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.Rename(link, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := writeOverseerReport(w.town, 15*time.Minute, w.seams())
+	if err == nil || !strings.Contains(err.Error(), "not a real directory") || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("write = %v, want a refusal naming the symlinked level", err)
+	}
+	for _, name := range []string{overseerSidecarName, overseerPageName} {
+		if _, serr := os.Lstat(filepath.Join(target, "reports", name)); serr == nil {
+			t.Errorf("%s was written through the symlink", name)
+		}
+	}
+}
+
 // A long open-questions list is cut to what the dashboard shows, and the
 // sidecar says its list is shorter than its count, rather than pushing
 // daily.json past the reader's cap: an oversize sidecar is refused there,
