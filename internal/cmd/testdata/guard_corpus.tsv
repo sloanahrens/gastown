@@ -74,6 +74,24 @@ container_suite	polecat	`gt mail send x -s note -m "GT_TEST_DOCKER=1 go test ./i
 container_suite	crew	"GT_TEST_DOCKER=1 go test ./internal/style/..."	allow		seed
 container_suite	refinery	"GT_TEST_DOCKER=1 go test ./internal/style/..."	allow		seed
 container_suite	other	"GT_TEST_DOCKER=1 go test ./internal/style/..."	allow		seed
+# --- container_suite: commands the shell cannot read, one refuse-for-polecat
+# and one allow-for-crew row per fail-closed construct (gt-fs6l3g) ---
+container_suite	polecat	"bash <<'EOF'\nmake test\n"	refuse	cannot be read (unterminated here-document)	gt-fs6l3g
+container_suite	crew	"bash <<'EOF'\nmake test\n"	allow		gt-fs6l3g
+container_suite	polecat	"echo 'make test"	refuse	cannot be read (unterminated quote)	gt-fs6l3g
+container_suite	crew	"echo 'make test"	allow		gt-fs6l3g
+container_suite	polecat	"(make test"	refuse	cannot be read (unbalanced parenthesis)	gt-fs6l3g
+container_suite	crew	"(make test"	allow		gt-fs6l3g
+container_suite	polecat	"bash <(echo 'make test'"	refuse	cannot be read (unterminated process substitution)	gt-fs6l3g
+container_suite	crew	"bash <(echo 'make test'"	allow		gt-fs6l3g
+container_suite	polecat	"echo $(make test"	refuse	cannot be read (unterminated command substitution)	gt-fs6l3g
+container_suite	crew	"echo $(make test"	allow		gt-fs6l3g
+container_suite	polecat	"echo ${X"	refuse	cannot be read (unterminated parameter expansion)	gt-fs6l3g
+container_suite	crew	"echo ${X"	allow		gt-fs6l3g
+container_suite	polecat	"if true; then make test"	refuse	cannot be read (unterminated if statement)	gt-fs6l3g
+container_suite	crew	"if true; then make test"	allow		gt-fs6l3g
+container_suite	polecat	"x=$'\\0' make test"	refuse	cannot be read (ANSI-C escape that decodes to a NUL byte)	gt-fs6l3g
+container_suite	crew	"x=$'\\0' make test"	allow		gt-fs6l3g
 # --- test_scope: refusals ---
 test_scope	polecat	"go test ./..."	refuse	polecat 'go test' of the whole repo	seed
 test_scope	polecat	"go test -count=1 ./..."	refuse	polecat 'go test' of the whole repo	seed

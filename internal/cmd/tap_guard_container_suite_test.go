@@ -707,7 +707,12 @@ func TestShellFedScriptBehindOtherRedirectionShapesIsJudged(t *testing.T) {
 		{"process substitution on stdin", `bash < <(echo 'make test')`, true},
 		{"process substitution on fd 0", `bash 0< <(echo 'make test')`, true},
 		{"process substitution after a redirection word", `bash 2>&1 <(echo 'make test')`, true},
-		{"process substitution that never closes", `bash <(echo 'make test'`, true},
+		// The line is a shell syntax error, so nothing runs; this fixture runs
+		// unbound (no polecat or refinery role), and only a bound session
+		// refuses an unreadable command. The bound refusal is
+		// TestContainerSuiteFailsClosedOnUnparseable's "unterminated process
+		// substitution" case.
+		{"process substitution that never closes", `bash <(echo 'make test'`, false},
 		{"harmless process substitution", `bash <(echo 'make lint')`, false},
 		{"process substitution of a file the guards cannot read", `bash <(cat ./run.sh)`, false},
 		{"process substitution replaces the pipe", `echo 'make test' | bash <(echo true)`, false},
@@ -2493,7 +2498,10 @@ func TestEvaluateContainerSuiteCommand_NestedShapes(t *testing.T) {
 		{"substitution with a group, opt-in off", `GT_TEST_DOCKER=0 out=$(go test ./internal/beads -run 'Test(A|B)' 2>&1)`, false},
 		{"pwd", `echo $(pwd)`, false},
 		{"single-quoted substitution", `echo '$(make test)'`, false},
-		{"escaped substitution", `echo \$(make test)`, false},
+		// echo \$(make test) is a bash syntax error ("near unexpected token
+		// ("), and this table runs in a polecat worktree, so the fail-closed
+		// refusal replaces the old lenient read of the line.
+		{"escaped substitution is a shell syntax error", `echo \$(make test)`, true},
 		{"eval of echo", `eval "echo hi"`, false},
 		{"eval as an argument", `grep eval notes.txt`, false},
 		{"quoted heredoc body", "cat > note.md <<'EOF'\nrun $(make test)\nEOF", false},
@@ -2753,11 +2761,17 @@ func TestTapGuardDeepReviewP3Batch(t *testing.T) {
 		for _, command := range []string{
 			`GT_TEST_DOCKER=1 cat <(go test ./internal/beads)`,
 			`GT_TEST_DOCKER=1 cat >(go test ./internal/beads)`,
-			`GT_TEST_DOCKER=1 cat <(go test ./internal/beads`,
 		} {
 			if reason, _ := evaluateContainerSuiteCommand(proc, command, ""); !strings.Contains(reason, wantContainer) {
 				t.Errorf("evaluateContainerSuiteCommand(%q) reason = %q, want %q", command, reason, wantContainer)
 			}
+		}
+		// An unterminated "<(" is a shell syntax error, so nothing runs, but
+		// this fixture runs in a polecat worktree: the guard fails closed and
+		// names the construct rather than reading the line leniently.
+		unterminated := `GT_TEST_DOCKER=1 cat <(go test ./internal/beads`
+		if reason, _ := evaluateContainerSuiteCommand(proc, unterminated, ""); !strings.Contains(reason, "unterminated process substitution") {
+			t.Errorf("evaluateContainerSuiteCommand(%q) reason = %q, want the unterminated process substitution refusal", unterminated, reason)
 		}
 		scopeBlocked := `cat <(make test)`
 		scopeReason, _ := evaluatePolecatTestScope(proc, scopeBlocked)
@@ -2934,7 +2948,10 @@ func TestStdinShellPayloadsMultiCommandProcessSubstitution(t *testing.T) {
 		{"second command behind &&", `bash <(echo true && echo 'make test')`, true},
 		{"second command behind a pipe", `bash <(echo true | echo 'make test')`, true},
 		{"on stdin", `bash < <(echo 'echo a'; echo 'make test')`, true},
-		{"multi-command body that never closes", `bash <(echo 'echo a'; echo 'make test'`, true},
+		// A shell syntax error runs nothing, and this fixture runs unbound; the
+		// bound refusal is TestContainerSuiteFailsClosedOnUnparseable's
+		// "unterminated process substitution" case.
+		{"multi-command body that never closes", `bash <(echo 'echo a'; echo 'make test'`, false},
 		{"nested substitution then the script", `bash <(echo $(date); echo 'make test')`, true},
 		{"quoted close paren ahead of the script", `bash <(echo ')'; echo 'make test')`, true},
 		{"quoted open paren ahead of the script", `bash <(echo '('; echo 'make test')`, true},
@@ -3010,6 +3027,90 @@ func TestSplitHereStringsWordSplitBody(t *testing.T) {
 			rest, texts := splitHereStrings(tt.args)
 			if !reflect.DeepEqual(rest, tt.rest) || !reflect.DeepEqual(texts, tt.texts) {
 				t.Errorf("splitHereStrings(%q) = rest %q, texts %q; want rest %q, texts %q", tt.args, rest, texts, tt.rest, tt.texts)
+			}
+		})
+	}
+}
+
+// A command the shell cannot read is not inspected, and the guard must not read
+// it leniently either: a polecat or refinery session is refused with the
+// construct named, while a crew session — which the hook never binds — is left
+// alone, as every unparseable line was before (operator ruling 11-05: fail
+// closed). The ANSI-C NUL row parses, so it drives the branch that names a
+// construct the parser itself accepted but the walk refused.
+func TestContainerSuiteFailsClosedOnUnparseable(t *testing.T) {
+	t.Parallel()
+	goTree := fakeModule(t, "gastown/polecats/bullet/gastown")
+	polecat := fakeGuardProcess(map[string]string{
+		"GT_ROLE":    "gastown/polecats/bullet",
+		"GT_POLECAT": "bullet",
+	}, goTree)
+	crew := fakeGuardProcess(map[string]string{"GT_ROLE": "gastown/crew/sloan"}, goTree)
+	tests := []struct {
+		name      string
+		command   string
+		construct string
+	}{
+		{"unterminated here-document", "bash <<'EOF'\nmake test\n", "unterminated here-document"},
+		{"unterminated quote", `echo 'make test`, "unterminated quote"},
+		{"unbalanced parenthesis", "(make test", "unbalanced parenthesis"},
+		{"unterminated process substitution", `bash <(echo 'make test'`, "unterminated process substitution"},
+		{"ANSI-C escape that decodes to a NUL byte", `x=$'\0' make test`, "ANSI-C escape that decodes to a NUL byte"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reason, _ := evaluateContainerSuiteCommand(polecat, tt.command, "")
+			if !strings.Contains(reason, "cannot be read") || !strings.Contains(reason, tt.construct) {
+				t.Errorf("evaluateContainerSuiteCommand(%q) from a polecat = %q, want a refusal naming %q", tt.command, reason, tt.construct)
+			}
+			if reason, _ := evaluateContainerSuiteCommand(crew, tt.command, ""); reason != "" {
+				t.Errorf("evaluateContainerSuiteCommand(%q) from crew = %q, want allowed (the hook leaves crew unguarded)", tt.command, reason)
+			}
+		})
+	}
+}
+
+// The container opt-in is read from the line's own top-level segments, not from
+// the text of a command substitution: an assignment inside one sets the
+// variable in that subshell only, so it cannot turn on the outer line's run.
+// This narrows the old whole-line scan, and the first two rows pin that the
+// opt-in still reaches a later segment when the line itself carries it.
+func TestContainerSuiteDockerOptInReadsTopLevelSegments(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "gastown/refinery/rig")
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{
+			name:    "exported opt-in on an earlier segment enables the run",
+			command: "export GT_TEST_DOCKER=1; go test ./internal/beads/...",
+			blocked: true,
+		},
+		{
+			name:    "opt-in prefix on an earlier segment enables the run",
+			command: "GT_TEST_DOCKER=1 true; go test ./internal/beads/...",
+			blocked: true,
+		},
+		{
+			name:    "opt-in inside a command substitution does not enable the outer line",
+			command: `x=$( GT_TEST_DOCKER=1 true ); go test ./internal/beads/...`,
+			blocked: false,
+		},
+		{
+			name:    "opt-in inside a command substitution still enables its own body",
+			command: `x=$( GT_TEST_DOCKER=1 go test ./internal/beads/... )`,
+			blocked: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reason, _ := evaluateContainerSuiteCommand(fakeGuardProcess(nil, root), tt.command, "")
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluateContainerSuiteCommand(%q) blocked = %v (reason %q), want %v", tt.command, got, reason, tt.blocked)
 			}
 		})
 	}

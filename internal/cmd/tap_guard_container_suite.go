@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/shellparse"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
@@ -1043,105 +1044,156 @@ func evaluateContainerSuiteCommand(proc guardProcess, command, envOptIn string) 
 // against cwd, which is no evidence of where the shell is (gt-jj3or, the
 // reading evaluatePolecatTestScopeDepth gives the same handoff, gt-rws47).
 func evaluateContainerSuiteCommandDepth(proc guardProcess, command, cwd string, cwdKnown bool, envOptIn string, depth int) (reason string, matched []string) {
-	tokens := shellTokenize(strings.TrimSpace(stripHeredocBodies(command)))
-	// Container-backed tests are opt-in (testutil.DockerTestsEnv). A bare
-	// `go test` of a container-bearing package cannot start a container
-	// unless the command turns the switch on somewhere — as an env prefix,
-	// via env(1), or an earlier `export` on the same line — so only then is
-	// the slot required. `make test` sets it in the Makefile and is judged
-	// unconditionally. The switch is looked for across the WHOLE command,
-	// not per segment, because `export X=1; go test ...` enables it for the
-	// later segment. An opt-in already exported in the hook's environment
-	// counts too: the test process inherits it without it being typed.
-	dockerOn := commandEnablesDockerTests(tokens) || envOptIn == "1"
-	vars := shellVarAssignments(tokens)
+	script, err := shellparse.Parse(command)
+	if err != nil {
+		return containerSuiteUnreadable(proc, err)
+	}
+	return evaluateContainerSuiteScript(proc, script, cwd, cwdKnown, envOptIn, depth)
+}
+
+// containerSuiteUnreadable is the verdict on a command the parser could not
+// read. A polecat or refinery session is refused — a line the shell cannot
+// parse might still run something, and the guard cannot say what, so it fails
+// closed — with a reason naming the construct. Crew and the other agent
+// contexts are left unguarded, as the hook leaves every command they run: the
+// old lenient tokenizer never refused a line, so they keep that reading.
+//
+// construct is the name shellparse gives the unreadable construct. The parser
+// names what it rejected; a failure the walk itself meets (a $'...' escape
+// that decodes to a NUL byte, which mvdan parses but the walk refuses) arrives
+// the same way. An error that is not an *shellparse.UnparseableError keeps the
+// generic name rather than being echoed, so parser text cannot become the
+// refusal.
+func containerSuiteUnreadable(proc guardProcess, err error) (string, []string) {
+	if !isPolecatOrRefineryContext(proc) {
+		return "", nil
+	}
+	construct := "shell syntax"
+	var unparseable *shellparse.UnparseableError
+	if errors.As(err, &unparseable) && unparseable.Construct != "" {
+		construct = unparseable.Construct
+	}
+	return fmt.Sprintf("command cannot be read (%s), so it cannot be inspected for a test run", construct), nil
+}
+
+// containerSuiteDir is the directory one segment runs in, and whether the walk
+// could place it.
+type containerSuiteDir struct {
+	dir   string
+	known bool
+}
+
+// containerSuiteScript judges one parsed command: every segment in its
+// directory, the shells it starts, the substitutions the shell expands and the
+// here-document bodies a shell reads as a script. The line's container opt-in
+// (testutil.DockerTestsEnv) is read from its top-level segments.
+func evaluateContainerSuiteScript(proc guardProcess, script shellparse.Script, cwd string, cwdKnown bool, envOptIn string, depth int) (reason string, matched []string) {
+	dockerOn := containerSuiteDockerOptIn(script) || envOptIn == "1"
 	// nestedOptIn is what every script this command runs as a separate shell
 	// inherits: the line's own opt-in when it carries one, the hook
 	// environment's otherwise. A -c payload, a command substitution and a
 	// shell-fed heredoc body are all that same handoff, so a GT_TEST_DOCKER=1
-	// before the reader word reaches the body the shell reads
-	// (gt-zyccn).
+	// before the reader word reaches the body the shell reads (gt-zyccn).
 	nestedOptIn := envOptIn
 	if dockerOn {
 		nestedOptIn = "1"
 	}
 
-	// judge covers one segment and the -c payloads of the shells it starts. A
-	// payload runs in the segment's directory and inherits the line's container
-	// opt-in; a slot-run wrapper exempts its payload with the rest of the
-	// segment. A directory the walk cannot place is carried to the payload as
-	// unplaced rather than read as the base, so a payload that names it
-	// ("bash -c 'go test ./beads'") is refused (gt-jj3or).
-	judge := func(segment []string, start int) (string, []string) {
-		segment = commandSegment(segment)
-		dir, known := segmentWalkRoot(proc, tokens, start, cwd, vars)
-		known = known && cwdKnown
-		if r, m := evaluateContainerSuiteSegment(segment, dockerOn, dir, known); r != "" {
-			return r, m
-		}
-		if slotRunWrapped(segment) {
-			return "", nil
-		}
-		payloads := segmentPayloads(tokens, start, segment)
-		if depth >= maxTestGuardNestDepth {
-			return nestedTooDeepRefusal(len(payloads) > 0)
-		}
-		if !known {
+	tokens, starts := containerSuiteWalkLine(script)
+	vars := shellVarAssignments(tokens)
+	dirs := make([]containerSuiteDir, len(script.Segments))
+	for i := range script.Segments {
+		dir, known := segmentWalkRoot(proc, tokens, starts[i], cwd, vars)
+		dirs[i] = containerSuiteDir{dir: dir, known: known && cwdKnown}
+	}
+	payloadDir := func(i int) (string, bool) {
+		dir := dirs[i].dir
+		if !dirs[i].known {
 			dir = cwd
 		}
+		return dir, dirs[i].known
+	}
+
+	for i, seg := range script.Segments {
+		words := containerSuiteWords(seg)
+		if r, m := evaluateContainerSuiteSegment(words, dockerOn, dirs[i].dir, dirs[i].known); r != "" {
+			return r, m
+		}
+		if slotRunWrapped(words) {
+			continue
+		}
+		payloads := containerSuitePayloads(script, i)
+		if depth >= maxTestGuardNestDepth {
+			if len(payloads) > 0 {
+				return nestedTooDeepRefusal(true)
+			}
+			continue
+		}
+		dir, known := payloadDir(i)
 		for _, payload := range payloads {
 			if r, m := evaluateContainerSuiteCommandDepth(proc, payload, dir, known, nestedOptIn, depth+1); r != "" {
 				return r, m
 			}
 		}
-		return "", nil
 	}
 
-	var segment []string
-	start := 0
-	for i, tok := range tokens {
-		if shellCommandSeparators[tok] {
-			if r, m := judge(segment, start); r != "" {
-				return r, m
+	// A command substitution runs outside any slot-run wrapper that precedes it
+	// on the line (`gt slot run -- echo $(go test ./...)`), so it is judged
+	// whatever its segment is, in the directory its segment runs in, with the
+	// container opt-in the line carries. A substitution whose directory the
+	// walk could not place is judged as unplaced, the handoff the payloads get
+	// (gt-jj3or). A substitution written in a construct header (a for list, a
+	// case pattern) runs in the line's own directory.
+	var subs []containerSuiteNested
+	for i, seg := range script.Segments {
+		for _, sub := range seg.Subs {
+			if containerSuiteScriptEmpty(sub) {
+				continue
 			}
-			segment = nil
-			start = i + 1
+			dir, known := payloadDir(i)
+			subs = append(subs, containerSuiteNested{script: sub, dir: dir, known: known})
+		}
+	}
+	for _, sub := range script.Subs {
+		if containerSuiteScriptEmpty(sub) {
 			continue
 		}
-		segment = append(segment, tok)
-	}
-	if r, m := judge(segment, start); r != "" {
-		return r, m
+		subs = append(subs, containerSuiteNested{script: sub, dir: cwd, known: cwdKnown})
 	}
 
-	spans := shellFedHeredocSpans(command)
-	subs := substitutionScripts(proc, command, cwd, cwdKnown)
-	if depth >= maxTestGuardNestDepth {
-		return nestedTooDeepRefusal(len(spans) > 0 || len(subs) > 0)
+	// A here-document body is data unless a shell reads it as a script: the
+	// segment's own command, or a shell anywhere on the reader line the body
+	// is fed to ("cat <<EOF | bash"). Only stdin's body feeds a shell its
+	// script (gt-ohe8n, gt-hizij). The body runs in the directory the reader
+	// segment runs in, so "cd <Go tree> && bash <<EOF" is judged there and a
+	// cd after the body is read is not (gt-1cvqj, gt-v02wh).
+	var bodies []containerSuiteNested
+	for i, seg := range script.Segments {
+		if !containerSuiteHeredocReadAsScript(script, i) {
+			continue
+		}
+		dir, known := payloadDir(i)
+		for _, h := range seg.Heredocs {
+			if h.N != "" && h.N != "0" {
+				continue
+			}
+			if strings.TrimSpace(h.Body) == "" {
+				continue
+			}
+			bodies = append(bodies, containerSuiteNested{dir: dir, known: known, body: h.Body})
+		}
 	}
-	// A command substitution runs outside any slot-run wrapper that precedes
-	// it on the line (`gt slot run -- echo $(go test ./...)`), so it is judged
-	// whatever its segment is, with the container opt-in the line carries. A
-	// substitution whose directory the walk could not place is judged as
-	// unplaced, the handoff the payload above gets (gt-jj3or).
+
+	if depth >= maxTestGuardNestDepth {
+		return nestedTooDeepRefusal(len(subs) > 0 || len(bodies) > 0)
+	}
 	for _, sub := range subs {
-		if r, m := evaluateContainerSuiteCommandDepth(proc, sub.body, sub.dir, sub.known, nestedOptIn, depth+1); r != "" {
+		if r, m := evaluateContainerSuiteScript(proc, sub.script, sub.dir, sub.known, nestedOptIn, depth+1); r != "" {
 			return r, m
 		}
 	}
-	// The bodies come off the untouched command: stripHeredocBodies removed
-	// them from the text above, so they are judged here once, as code, in the
-	// directory the shell had reached by the time it read them
-	// (heredocBodyCwd, gt-1cvqj, gt-v02wh). A body whose directory the walk
-	// cannot place is judged as unplaced, as heredocSubstitutionScripts
-	// already judges the substitutions inside one (gt-jj3or).
-	for _, span := range spans {
-		bodyCwd, placed := heredocBodyCwd(proc, command, span, cwd)
-		known := placed && cwdKnown
-		if !known {
-			bodyCwd = cwd
-		}
-		if r, m := evaluateContainerSuiteCommandDepth(proc, span.body, bodyCwd, known, nestedOptIn, depth+1); r != "" {
+	for _, body := range bodies {
+		if r, m := evaluateContainerSuiteCommandDepth(proc, body.body, body.dir, body.known, nestedOptIn, depth+1); r != "" {
 			return r, m
 		}
 	}
@@ -1154,19 +1206,44 @@ func evaluateContainerSuiteCommandDepth(proc guardProcess, command, cwd string, 
 // TestDockerTestsEnvMatchesTestutil keeps the two in step.
 const dockerTestsEnv = "GT_TEST_DOCKER"
 
-// commandEnablesDockerTests reports whether any token sets the container
-// opt-in switch to 1 (GT_TEST_DOCKER=1, bare, quoted, or as an export/env
-// value). The hook's own environment is checked by the caller: an exported
-// GT_TEST_DOCKER=1 in the session reaches `go test` without appearing in
-// the command text.
-func commandEnablesDockerTests(tokens []string) bool {
+// containerSuiteNested is a command line the guard judges as a separate shell:
+// either a parsed substitution (script set) or a here-document body (body set),
+// with the directory the shell runs it in. known is false when that directory
+// is only standing in for one the walk could not place.
+type containerSuiteNested struct {
+	script shellparse.Script
+	body   string
+	dir    string
+	known  bool
+}
+
+// containerSuiteScriptEmpty reports whether a substitution holds no command,
+// the shape "$( )" produces. There is nothing to judge in it.
+func containerSuiteScriptEmpty(script shellparse.Script) bool {
+	return len(script.Segments) == 0 && len(script.Subs) == 0
+}
+
+// containerSuiteDockerOptIn reports whether the command's own top-level
+// segments set the container opt-in switch: a leading GT_TEST_DOCKER=1, an
+// env(1) assignment or an earlier `export GT_TEST_DOCKER=1` segment. An
+// assignment written inside a command substitution is not one of them — it
+// sets the variable in that subshell, never on this line — so the outer line
+// stays without the switch and the substitution is judged with its own.
+func containerSuiteDockerOptIn(script shellparse.Script) bool {
+	var tokens []string
+	for _, seg := range script.Segments {
+		for _, a := range seg.Assigns {
+			tokens = append(tokens, a.Text)
+		}
+		for _, w := range seg.Words {
+			tokens = append(tokens, w.Text)
+		}
+	}
 	return commandSetsDockerTests(tokens, "1")
 }
 
 // commandSetsDockerTests reports whether any token assigns the container
 // opt-in switch the given value (bare, quoted, or as an export/env value).
-// It is commandEnablesDockerTests' parser, shared with gt done's
-// --pre-verified slot decision, which also needs to see an explicit "0".
 func commandSetsDockerTests(tokens []string, value string) bool {
 	prefix := dockerTestsEnv + "="
 	for _, t := range tokens {
@@ -1176,6 +1253,351 @@ func commandSetsDockerTests(tokens []string, value string) bool {
 				return true
 			}
 		}
+	}
+	return false
+}
+
+// containerSuiteWords is a segment's command and arguments as the tokens the
+// policy readers take: quoting resolved, with no assignment or redirection
+// among them. A word with a substitution keeps the substitution's source text,
+// which is what the package-argument checks read as an expansion.
+func containerSuiteWords(seg shellparse.Segment) []string {
+	words := make([]string, len(seg.Words))
+	for i, w := range seg.Words {
+		words[i] = w.Text
+	}
+	return words
+}
+
+// containerSuiteWalkLine rebuilds the shell line the parsed segments came from,
+// as the token line segmentWalkRoot reads for directory changes: each segment's
+// assignments and words in source order, the operator that ends it
+// (Segment.After), and a "(" / ")" pair around the segments a subshell
+// encloses so a cd inside one cannot carry. starts[i] is the token index the
+// segment begins at, which is the point the walk stops reading at.
+func containerSuiteWalkLine(script shellparse.Script) (tokens []string, starts []int) {
+	starts = make([]int, len(script.Segments))
+	var shells []int
+	for i, seg := range script.Segments {
+		common := containerSuiteCommonShells(shells, seg.Shells)
+		for len(shells) > common {
+			tokens = append(tokens, ")")
+			shells = shells[:len(shells)-1]
+		}
+		for len(shells) < len(seg.Shells) {
+			tokens = append(tokens, "(")
+			shells = append(shells, seg.Shells[len(shells)])
+		}
+		starts[i] = len(tokens)
+		for _, a := range seg.Assigns {
+			tokens = append(tokens, a.Text)
+		}
+		for _, w := range seg.Words {
+			tokens = append(tokens, w.Text)
+		}
+		if seg.After != "" {
+			tokens = append(tokens, seg.After)
+		}
+	}
+	for len(shells) > 0 {
+		tokens = append(tokens, ")")
+		shells = shells[:len(shells)-1]
+	}
+	return tokens, starts
+}
+
+// containerSuiteCommonShells is the length of the prefix two subshell stacks
+// share: the groups still open when the walk reaches the second one.
+func containerSuiteCommonShells(a, b []int) int {
+	n := 0
+	for n < len(a) && n < len(b) && a[n] == b[n] {
+		n++
+	}
+	return n
+}
+
+// containerSuitePayloads returns the command lines the segment at index runs
+// through another shell, each judged as a command line of its own: a -c
+// payload, an eval string and a script the shell reads on stdin. It is the
+// parsed counterpart of segmentPayloads, which the other guards still use.
+func containerSuitePayloads(script shellparse.Script, index int) []string {
+	words := containerSuiteWords(script.Segments[index])
+	payloads := append(shellCPayloads(words), evalPayloads(words)...)
+	return append(payloads, containerSuiteStdinPayloads(script, index)...)
+}
+
+// containerSuiteStdinPayloads returns the script text fed to a shell that reads
+// stdin, the parsed counterpart of stdinShellPayloads. The text comes from a
+// here-string on the shell, a here-document on stdin, a process substitution
+// the shell runs as its script, or an upstream echo/printf/yes in the same
+// pipeline. A redirection that replaces stdin ("< file", "<&3", a here-
+// document) feeds the shell something this guard cannot read, so neither the
+// pipe nor a here-string is its script (gt-sveq8, gt-hizij).
+//
+// A process substitution is the script whether the shell opens it as a script
+// file or reads it on stdin; the body's output is the script, so each producer
+// in it is read the way a pipe's producer is (gt-hizij). The exception is
+// "sh -s <(cmd)": -s reads the script from stdin, leaving the substitution as a
+// positional parameter and the pipe as the script (gt-n2gt8).
+func containerSuiteStdinPayloads(script shellparse.Script, index int) []string {
+	seg := script.Segments[index]
+	word, args := containerSuiteStdinArgs(seg)
+	if !shellInvokers[filepath.Base(strings.ToLower(word))] {
+		return nil
+	}
+	if containerSuiteStdinReplaced(seg) {
+		return nil
+	}
+	payloads := containerSuiteHereStringPayloads(seg)
+
+	// A word that is one process substitution is the script; a word with text
+	// around one, or two side by side, is an operand path and stays one.
+	var before []string
+	var rest []string
+	var procSubs []containerSuiteProcSub
+	seenSub := false
+	for _, arg := range args {
+		if sub, ok := containerSuiteSoleProcessSubstitution(arg); ok {
+			if !seenSub {
+				before = append([]string(nil), rest...)
+				seenSub = true
+			}
+			procSubs = append(procSubs, containerSuiteProcSub{script: sub})
+			continue
+		}
+		rest = append(rest, arg.Text)
+	}
+	if !seenSub {
+		before = rest
+	}
+	for _, r := range seg.Redirs {
+		if r.N != "" && r.N != "0" || r.Op != "<" {
+			continue
+		}
+		if sub, ok := containerSuiteSoleProcessSubstitution(r.Word); ok {
+			procSubs = append(procSubs, containerSuiteProcSub{script: sub, onStdin: true})
+		}
+	}
+	_, dashS := shellReadsStdin(toLowerTokens(before))
+	if reads, _ := shellReadsStdin(toLowerTokens(rest)); !reads {
+		return nil
+	}
+	scripted := false
+	for _, sub := range procSubs {
+		if dashS && !sub.onStdin {
+			continue
+		}
+		scripted = true
+		payloads = append(payloads, containerSuiteProducerPayloadsIn(sub.script)...)
+	}
+	if scripted {
+		return payloads
+	}
+	for j := index - 1; j >= 0 && script.Segments[j].After == "|"; j-- {
+		payloads = append(payloads, containerSuiteProducerPayloads(script.Segments[j])...)
+	}
+	return payloads
+}
+
+// containerSuiteProcSub is one process substitution the shell runs: the parsed body of
+// its command substitution, and whether a redirection ahead of it makes the
+// shell read that output on stdin.
+type containerSuiteProcSub struct {
+	script  shellparse.Script
+	onStdin bool
+}
+
+// containerSuiteSoleProcessSubstitution returns the parsed substitution a word
+// is, when the whole word is one "<(...)" or ">(...)" group. A word with text
+// around one ("foo<(cmd)") or two side by side ("<(a)<(b)") is an operand the
+// shell passes as a path, never the script it runs, so it is not one.
+func containerSuiteSoleProcessSubstitution(w shellparse.Word) (shellparse.Script, bool) {
+	if len(w.ProcSubs) != 1 || w.Text != w.ProcSubs[0].Raw {
+		return shellparse.Script{}, false
+	}
+	return w.ProcSubs[0].Script, true
+}
+
+// containerSuiteStdinReplaced reports whether a redirection of the segment
+// replaces its stdin, so a pipe or a here-string is not what the shell runs.
+// A here-document on stdin is one, and judged as a script of its own; a
+// process substitution on stdin is the script, judged as one.
+func containerSuiteStdinReplaced(seg shellparse.Segment) bool {
+	for _, h := range seg.Heredocs {
+		if h.N == "" || h.N == "0" {
+			return true
+		}
+	}
+	for _, r := range seg.Redirs {
+		if r.N != "" && r.N != "0" {
+			continue
+		}
+		if r.Op == "<<<" {
+			continue
+		}
+		if !strings.HasPrefix(r.Op, "<") {
+			continue
+		}
+		if _, ok := containerSuiteSoleProcessSubstitution(r.Word); ok {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// containerSuiteStdinArgs is a shell segment's command word and the arguments
+// the shell passes it, with the word run a bare here-string consumes left out:
+// a run word is the here-string's text, not an operand, so it cannot be read as
+// a script file the way a real operand is.
+func containerSuiteStdinArgs(seg shellparse.Segment) (string, []shellparse.Word) {
+	words := containerSuiteWords(seg)
+	word, args := shellCommandWord(words)
+	if word == "" || len(args) >= len(words) {
+		return word, nil
+	}
+	// shellCommandWord returns the words after the command word unchanged, so
+	// the command word is the one at this index even when a launcher's own
+	// value spells a shell's name ("sudo -u bash bash").
+	start := len(words) - len(args) - 1
+	skip := containerSuiteHereStringRunWords(seg)
+	var kept []shellparse.Word
+	for i := start + 1; i < len(seg.Words); i++ {
+		if !skip[i] {
+			kept = append(kept, seg.Words[i])
+		}
+	}
+	return word, kept
+}
+
+// containerSuiteProducerPayloadsIn returns the script text the producers of
+// every command line in a process substitution print.
+func containerSuiteProducerPayloadsIn(script shellparse.Script) []string {
+	var payloads []string
+	for _, seg := range script.Segments {
+		payloads = append(payloads, containerSuiteProducerPayloads(seg)...)
+	}
+	return payloads
+}
+
+// containerSuiteHereStringRunWords marks the words a bare here-string consumes
+// as its text: the run after the operator up to the next redirection. A
+// here-string glued to its text ("<<<word") has no run.
+func containerSuiteHereStringRunWords(seg shellparse.Segment) []bool {
+	skip := make([]bool, len(seg.Words))
+	for _, r := range seg.Redirs {
+		if r.Op != "<<<" {
+			continue
+		}
+		if r.Src >= 0 && r.OpSrc >= 0 && r.Src == r.OpSrc+len(r.Op) {
+			continue
+		}
+		end := containerSuiteNextRedirectionSrc(seg, r.Src)
+		for i, w := range seg.Words {
+			if w.Src > r.Src && (end < 0 || w.Src < end) {
+				skip[i] = true
+			}
+		}
+	}
+	return skip
+}
+
+// containerSuiteHereStringPayloads returns the text each here-string on the
+// segment's stdin feeds it, the parsed counterpart of splitHereStrings. A
+// here-string on another descriptor feeds that descriptor, not the script.
+// A bare "<<<" takes the words after it as its text: the shell word-splits the
+// run up to the next redirection, and the first word is read on its own as
+// well, so a body of several words adds a reading rather than replacing the
+// one a single word drew (gt-norvx).
+func containerSuiteHereStringPayloads(seg shellparse.Segment) []string {
+	var payloads []string
+	for _, r := range seg.Redirs {
+		if r.Op != "<<<" || (r.N != "" && r.N != "0") {
+			continue
+		}
+		if r.Src >= 0 && r.OpSrc >= 0 && r.Src == r.OpSrc+len(r.Op) {
+			payloads = append(payloads, r.Word.Text)
+			continue
+		}
+		run := []string{r.Word.Text}
+		end := containerSuiteNextRedirectionSrc(seg, r.Src)
+		for _, w := range seg.Words {
+			if w.Src <= r.Src || (end >= 0 && w.Src >= end) {
+				continue
+			}
+			run = append(run, w.Text)
+		}
+		payloads = append(payloads, run[0])
+		if len(run) > 1 {
+			payloads = append(payloads, strings.Join(run, " "))
+		}
+	}
+	return payloads
+}
+
+// containerSuiteNextRedirectionSrc is the source offset of the next redirection
+// after from, where a here-string's word run stops, or -1 when none follows.
+func containerSuiteNextRedirectionSrc(seg shellparse.Segment, from int) int {
+	next := -1
+	for _, r := range seg.Redirs {
+		if r.OpSrc > from && (next < 0 || r.OpSrc < next) {
+			next = r.OpSrc
+		}
+	}
+	return next
+}
+
+// containerSuiteProducerPayloads returns the script text a producer command
+// line prints, and the text of any here-string it is fed: what a shell reading
+// its output runs. Only echo, printf and yes print text this guard can read;
+// any other producer (a file, a download) yields none.
+func containerSuiteProducerPayloads(seg shellparse.Segment) []string {
+	words := containerSuiteWords(seg)
+	producer, printed := segmentCommandWordPastRedirections(trimShellKeywords(words))
+	payloads := containerSuiteHereStringPayloads(seg)
+	switch filepath.Base(strings.ToLower(producer)) {
+	case "echo", "printf", "yes":
+		for len(printed) > 0 && strings.HasPrefix(printed[0], "-") && len(printed[0]) > 1 {
+			printed = printed[1:]
+		}
+		text := strings.ReplaceAll(strings.Join(printed, " "), `\n`, "\n")
+		payloads = append(payloads, text)
+		for _, arg := range printed {
+			payloads = append(payloads, strings.ReplaceAll(arg, `\n`, "\n"))
+		}
+	}
+	return payloads
+}
+
+// containerSuiteHeredocReadAsScript reports whether a shell runs the
+// here-documents on the segment at index as a script. A here-document is data
+// unless a shell invoker runs on its reader line — the segment itself or one
+// joined to it by a non-";" operator, so "bash <<EOF" and "cat <<EOF | bash"
+// both count while a bash on a later line does not (gt-ohe8n).
+func containerSuiteHeredocReadAsScript(script shellparse.Script, index int) bool {
+	lo, hi := index, index
+	for lo > 0 && containerSuiteLineOperator(script.Segments[lo-1].After) {
+		lo--
+	}
+	for hi+1 < len(script.Segments) && containerSuiteLineOperator(script.Segments[hi].After) {
+		hi++
+	}
+	for j := lo; j <= hi; j++ {
+		word, _ := shellCommandWord(containerSuiteWords(script.Segments[j]))
+		if shellInvokers[filepath.Base(strings.ToLower(word))] {
+			return true
+		}
+	}
+	return false
+}
+
+// containerSuiteLineOperator reports whether op keeps two segments on one
+// reader line. A ";" or a newline starts a new line, and a here-document is
+// read by the line its operator stands on.
+func containerSuiteLineOperator(op string) bool {
+	switch op {
+	case "|", "&&", "||", "&":
+		return true
 	}
 	return false
 }

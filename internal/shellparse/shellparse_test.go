@@ -640,3 +640,198 @@ func TestParseNestedSubstitutionDepth(t *testing.T) {
 		script = script.Segments[0].Subs[0]
 	}
 }
+
+// TestParseLineStructure checks the operator that ends each segment and the
+// subshells enclosing it, the two facts a guard needs to put the segments back
+// in the shell line it judges directory changes on.
+func TestParseLineStructure(t *testing.T) {
+	t.Parallel()
+	type lineSegment struct {
+		after  string
+		shells []int
+	}
+	tests := []struct {
+		name    string
+		command string
+		want    []lineSegment
+	}{
+		{
+			name:    "and list and pipeline",
+			command: "echo a && echo b | grep c",
+			want:    []lineSegment{{after: "&&"}, {after: "|"}, {}},
+		},
+		{
+			name:    "semicolon and background",
+			command: "echo a; echo b & echo c",
+			want:    []lineSegment{{after: ";"}, {after: "&"}, {}},
+		},
+		{
+			name:    "newline reads as a semicolon",
+			command: "echo a\necho b",
+			want:    []lineSegment{{after: ";"}, {}},
+		},
+		{
+			name:    "subshell",
+			command: "(echo a; echo b) | cat",
+			want:    []lineSegment{{after: ";", shells: []int{0}}, {after: "|", shells: []int{0}}, {}},
+		},
+		{
+			name:    "two subshells are different groups",
+			command: "echo a; (echo b); (echo c)",
+			want:    []lineSegment{{after: ";"}, {after: ";", shells: []int{0}}, {shells: []int{1}}},
+		},
+		{
+			name:    "nested subshells",
+			command: "(echo a; (echo b))",
+			want:    []lineSegment{{after: ";", shells: []int{0}}, {shells: []int{0, 1}}},
+		},
+		{
+			name:    "brace group is not a subshell",
+			command: "{ echo a; echo b; }",
+			want:    []lineSegment{{after: ";"}, {}},
+		},
+		{
+			name:    "if condition then else",
+			command: "if cd x; then echo a; else echo b; fi",
+			want:    []lineSegment{{after: ";"}, {after: ";"}, {}},
+		},
+		{
+			name:    "while condition and body",
+			command: "while true; do echo a; done",
+			want:    []lineSegment{{after: ";"}, {}},
+		},
+		{
+			name:    "substitution runs in a shell of its own",
+			command: "(echo $(echo a; echo b))",
+			want:    []lineSegment{{shells: []int{0}}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			script, err := shellparse.Parse(tt.command)
+			if err != nil {
+				t.Fatalf("Parse(%q): %v", tt.command, err)
+			}
+			if len(script.Segments) != len(tt.want) {
+				t.Fatalf("Parse(%q) segments = %d, want %d", tt.command, len(script.Segments), len(tt.want))
+			}
+			for i, seg := range script.Segments {
+				if seg.After != tt.want[i].after {
+					t.Errorf("Parse(%q) segment %d after = %q, want %q", tt.command, i, seg.After, tt.want[i].after)
+				}
+				if !reflect.DeepEqual(seg.Shells, tt.want[i].shells) && (len(seg.Shells) != 0 || len(tt.want[i].shells) != 0) {
+					t.Errorf("Parse(%q) segment %d shells = %v, want %v", tt.command, i, seg.Shells, tt.want[i].shells)
+				}
+			}
+		})
+	}
+}
+
+// TestParseSourceOffsets checks the byte offsets the walk records for words and
+// redirections: a here-string's word run and a target glued to its operator are
+// read from them.
+func TestParseSourceOffsets(t *testing.T) {
+	t.Parallel()
+	script, err := shellparse.Parse("echo a b")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	words := script.Segments[0].Words
+	for i, want := range []int{0, 5, 7} {
+		if words[i].Src != want {
+			t.Errorf("word %d Src = %d, want %d", i, words[i].Src, want)
+		}
+	}
+}
+
+func TestParseRedirectionOffsets(t *testing.T) {
+	t.Parallel()
+	command := "bash <<< make test"
+	script, err := shellparse.Parse(command)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	redir := script.Segments[0].Redirs[0]
+	if want := strings.Index(command, "make"); redir.Src != want {
+		t.Errorf("redirection Src = %d, want %d", redir.Src, want)
+	}
+	if want := strings.Index(command, "<<<"); redir.OpSrc != want {
+		t.Errorf("redirection OpSrc = %d, want %d", redir.OpSrc, want)
+	}
+	if want := strings.Index(command, "test"); script.Segments[0].Words[1].Src != want {
+		t.Errorf("word after the operator Src = %d, want %d", script.Segments[0].Words[1].Src, want)
+	}
+
+	glued := "bash 0<<<'make test'"
+	script, err = shellparse.Parse(glued)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	redir = script.Segments[0].Redirs[0]
+	if redir.Src != redir.OpSrc+len(redir.Op) {
+		t.Errorf("glued target Src = %d, OpSrc = %d, op %q; want the target to start where the operator ends", redir.Src, redir.OpSrc, redir.Op)
+	}
+}
+
+// TestParseHeredocDescriptor checks the descriptor each here-document is read
+// on, which decides whether it feeds a shell its script.
+func TestParseHeredocDescriptor(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		command string
+		want    string
+	}{
+		{"bash <<EOF\ntrue\nEOF\n", ""},
+		{"bash 0<<EOF\ntrue\nEOF\n", "0"},
+		{"bash 3<<EOF\ntrue\nEOF\n", "3"},
+		{"bash {fd}<<EOF\ntrue\nEOF\n", "{fd}"},
+	}
+	for _, tt := range tests {
+		script, err := shellparse.Parse(tt.command)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", tt.command, err)
+		}
+		if got := script.Segments[0].Heredocs[0].N; got != tt.want {
+			t.Errorf("Parse(%q) heredoc N = %q, want %q", tt.command, got, tt.want)
+		}
+	}
+}
+
+// TestParseProcessSubstitutions checks that a word carries each process
+// substitution written in it with its parsed body, so a guard need not cut the
+// body out of the word text.
+func TestParseProcessSubstitutions(t *testing.T) {
+	t.Parallel()
+	script, err := shellparse.Parse("bash <(echo a; echo b)")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	subs := script.Segments[0].Words[1].ProcSubs
+	if len(subs) != 1 || subs[0].Raw != "<(echo a; echo b)" {
+		t.Fatalf("ProcSubs = %#v, want one substitution holding <(echo a; echo b)", subs)
+	}
+	if got := len(subs[0].Script.Segments); got != 2 {
+		t.Fatalf("body segments = %d, want 2", got)
+	}
+	if got := subs[0].Script.Segments[0].Words[0].Text; got != "echo" {
+		t.Errorf("body first word = %q, want %q", got, "echo")
+	}
+
+	script, err = shellparse.Parse("bash <(a)<(b)")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	subs = script.Segments[0].Words[1].ProcSubs
+	if len(subs) != 2 || subs[0].Raw != "<(a)" || subs[1].Raw != "<(b)" {
+		t.Errorf("ProcSubs = %#v, want <(a) then <(b)", subs)
+	}
+
+	script, err = shellparse.Parse(`bash "<(echo x)"`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if subs := script.Segments[0].Words[1].ProcSubs; len(subs) != 0 {
+		t.Errorf("quoted process substitution collected %d bodies, want 0", len(subs))
+	}
+}
