@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"testing"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/hostprobe"
 )
 
 // fakeHost is a hostProbes whose answers a test sets. The zero value is not
@@ -224,9 +226,9 @@ func TestHostStackRequiresTheRealContainers(t *testing.T) {
 		{"all running", without(), ""},
 		{"extra containers are fine", append(without(), "unrelated-1"), ""},
 		{"db down", without("forgejo-db-1"), "forgejo-db-1"},
-		{"dolt down", without("gt-dolt"), "gt-dolt"},
+		{"dolt down", without(hostprobe.DockerDiskContainer), hostprobe.DockerDiskContainer},
 		{"hm-postgres down", without("hm-postgres"), "hm-postgres"},
-		{"two down", without("gt-dolt", "hm-postgres"), "2 of 3"},
+		{"two down", without(hostprobe.DockerDiskContainer, "hm-postgres"), "2 of 3"},
 		{"nothing running", nil, "3 of 3"},
 	}
 	for _, tt := range tests {
@@ -273,7 +275,7 @@ func TestHostStackNeverNamesTheRetiredContainers(t *testing.T) {
 	if len(items) != 1 {
 		t.Fatalf("items = %+v, want the one stack-down item", items)
 	}
-	want := "3 of 3 stack containers not running: forgejo-db-1, gt-dolt, hm-postgres"
+	want := fmt.Sprintf("3 of 3 stack containers not running: forgejo-db-1, %s, hm-postgres", hostprobe.DockerDiskContainer)
 	if got := items[0].Summary; got != want {
 		t.Errorf("summary = %q, want %q", got, want)
 	}
@@ -317,16 +319,16 @@ func TestHostHMContainerStaysConditionalOnTheRig(t *testing.T) {
 		{"parked, hm-postgres on, stack up", true, nil, allStackContainers(), ""},
 		{"parked, forgejo-db-1 missing", true, nil, stackOnly("forgejo-db-1"),
 			"1 of 2 stack containers not running: forgejo-db-1"},
-		{"parked, both stack containers missing, hm-postgres off", true, nil, stackOnly("forgejo-db-1", "gt-dolt"),
-			"2 of 2 stack containers not running: forgejo-db-1, gt-dolt"},
+		{"parked, both stack containers missing, hm-postgres off", true, nil, stackOnly("forgejo-db-1", hostprobe.DockerDiskContainer),
+			"2 of 2 stack containers not running: forgejo-db-1, " + hostprobe.DockerDiskContainer},
 		{"live, hm-postgres missing", false, nil, stackOnly(),
 			"1 of 3 stack containers not running: hm-postgres"},
 		{"live, all up", false, nil, allStackContainers(), ""},
 		{"live, forgejo-db-1 and hm-postgres missing", false, nil, stackOnly("forgejo-db-1"),
 			"2 of 3 stack containers not running: forgejo-db-1, hm-postgres"},
 		{"unreadable park state treats hm-postgres as not required", false, unreadable, stackOnly(), ""},
-		{"unreadable park state still requires the stack", false, unreadable, stackOnly("gt-dolt"),
-			"1 of 2 stack containers not running: gt-dolt"},
+		{"unreadable park state still requires the stack", false, unreadable, stackOnly(hostprobe.DockerDiskContainer),
+			"1 of 2 stack containers not running: " + hostprobe.DockerDiskContainer},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

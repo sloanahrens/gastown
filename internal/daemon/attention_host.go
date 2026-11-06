@@ -65,7 +65,9 @@ const (
 // here.
 var hostStackContainers = []string{
 	"forgejo-db-1",
-	"gt-dolt",
+	// Dolt, through the same constant the disk patrol reads, so the two
+	// probers cannot name different containers.
+	hostprobe.DockerDiskContainer,
 }
 
 // The history-man database is required only while its rig is live: the operator
@@ -259,15 +261,96 @@ func (p systemHostProbes) ForgejoHealthy(ctx context.Context) error {
 	return nil
 }
 
+// errForgejoRigListUnknown says the landing worker's rig list was empty or
+// could not be read, so whether the town runs a Forgejo is unknown rather than
+// absent. A town whose rigs are not listed is not a town without Forgejo: the
+// reading failed, so the collector keeps its last answer (gt-gg9hv.36).
+var errForgejoRigListUnknown = errors.New("the landing worker's rig list is unreadable or empty, so the town's Forgejo origin is unknown")
+
 // forgejoOriginFromRemoteURL is the origin of the instance a Forgejo remote
 // URL names: scheme and host, with no path, query or user info, so the URL a
 // summary carries holds no credential.
-func forgejoOriginFromRemoteURL(raw string) (string, error) {
+//
+// The error names the rig and the field, and the host only when it can be
+// recovered after the user info is stripped. A remote URL can carry a
+// credential in its user info, so no other part of it appears in the error or
+// in anything built from it (gt-gg9hv.36).
+func forgejoOriginFromRemoteURL(rigName, raw string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return "", fmt.Errorf("forgejo remote %q is not a URL with a scheme and host, so the instance it names cannot be asked for its health", raw)
+	if err == nil && u.Scheme != "" && u.Host != "" {
+		return u.Scheme + "://" + u.Host, nil
 	}
-	return u.Scheme + "://" + u.Host, nil
+	if host := forgejoHostFromUnparseableRemote(raw); host != "" {
+		return "", fmt.Errorf("remote origin for rig %s is unparseable (host %s)", rigName, host)
+	}
+	return "", fmt.Errorf("remote origin for rig %s is unparseable", rigName)
+}
+
+// forgejoHostFromUnparseableRemote is the host a remote URL names when the URL
+// itself does not parse, and "" when none can be recovered. It cuts the user
+// info first, at the last '@' of the authority, because that is where a
+// credential sits; then it keeps the result only if it is shaped like a host
+// with an optional numeric port: a dotted name or a bracketed literal, every
+// character one such a host can hold. Anything else is dropped rather than
+// guessed at, so a malformed URL cannot put a token into the message.
+func forgejoHostFromUnparseableRemote(raw string) string {
+	s := strings.TrimSpace(raw)
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	if i := strings.IndexAny(s, "/?#"); i >= 0 {
+		s = s[:i]
+	}
+	if i := strings.LastIndexByte(s, '@'); i >= 0 {
+		s = s[i+1:]
+	}
+	if s == "" {
+		return ""
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.' || r == '-' || r == '_' || r == ':' || r == '[' || r == ']':
+		default:
+			return ""
+		}
+	}
+	host, port := s, ""
+	if strings.HasPrefix(s, "[") {
+		end := strings.IndexByte(s, ']')
+		if end < 0 {
+			return ""
+		}
+		host = s[:end+1]
+		if rest := s[end+1:]; rest != "" {
+			if !strings.HasPrefix(rest, ":") {
+				return ""
+			}
+			port = rest[1:]
+		}
+	} else if i := strings.LastIndexByte(s, ':'); i >= 0 {
+		host, port = s[:i], s[i+1:]
+		if host == "" {
+			return ""
+		}
+	}
+	if port != "" && !allDigits(port) {
+		return ""
+	}
+	if !strings.HasPrefix(host, "[") && !strings.Contains(host, ".") {
+		return ""
+	}
+	return s
+}
+
+// allDigits says s is a non-empty run of ASCII digits.
+func allDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return s != ""
 }
 
 // townForgejoBaseURL is the origin of the town's Forgejo, read from the
@@ -276,17 +359,22 @@ func forgejoOriginFromRemoteURL(raw string) (string, error) {
 // (rig.ResolveForgejoConfigWithError). The first rig in name order that names
 // one answers for the town, because a town's rigs land through one instance;
 // the order is sorted rather than the worker's, so a town whose rigs disagree
-// does not watch a different instance from tick to tick. A town where no such
-// rig names a remote URL returns "" and no error, because it has no Forgejo to
-// watch. A setting the run cannot read, or a remote URL that is not a URL, is
-// an error, never a skip to the next rig or an absence: the instance the town
-// believes it lands through is unknown until the setting is fixed, and the
-// collector keeps its last answer rather than clearing an alarm.
+// does not watch a different instance from tick to tick. A rig list read
+// cleanly where no rig names a remote URL returns "" and no error, because the
+// town has no Forgejo to watch. An empty or unreadable rig list is an error,
+// never that absence: the list itself failed, so the town's instance is
+// unknown. A setting the run cannot read, or a remote URL that is not a URL, is
+// an error too, never a skip to the next rig: the instance the town believes it
+// lands through is unknown until the setting is fixed, and the collector keeps
+// its last answer rather than clearing an alarm.
 func (d *Daemon) townForgejoBaseURL() (string, error) {
 	// The worker's own list when it has no allowlist is the daemon's cached
 	// one, so sort a copy.
 	rigs := append([]string(nil), landingWorkerRigs(d.patrolConfig, d.getKnownRigs())...)
 	sort.Strings(rigs)
+	if len(rigs) == 0 {
+		return "", errForgejoRigListUnknown
+	}
 	var base string
 	for _, name := range rigs {
 		fj, err := rig.ResolveForgejoConfigWithError(d.repoFileOpener(), d.config.TownRoot, name)
@@ -296,7 +384,7 @@ func (d *Daemon) townForgejoBaseURL() (string, error) {
 		if base != "" || fj == nil || strings.TrimSpace(fj.RemoteURL) == "" {
 			continue
 		}
-		origin, err := forgejoOriginFromRemoteURL(fj.RemoteURL)
+		origin, err := forgejoOriginFromRemoteURL(name, fj.RemoteURL)
 		if err != nil {
 			return "", err
 		}
