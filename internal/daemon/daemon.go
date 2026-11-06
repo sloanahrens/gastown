@@ -331,6 +331,10 @@ type Daemon struct {
 	// cap, which the attention queue raises until a later trim's reading finds
 	// them under it (gt-gg9hv.46).
 	cacheTrimNoOp cacheTrimNoOp
+	// ciCacheTrimRunning is the single-flight guard of the CI build-cache trim's
+	// pass, which runs on its own interval and off the quiet guard
+	// (gt-gg9hv.57).
+	ciCacheTrimRunning atomic.Bool
 
 	// hmSync replaces the hm_sync patrol's clock and run seam in tests (see
 	// hmSyncSeams); the zero value is production.

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1003,6 +1004,96 @@ func TestDiskMaintenanceCacheTrimInterval(t *testing.T) {
 		if err := json.Unmarshal([]byte(doc), &p); err == nil {
 			t.Errorf("%s cache_trim_interval decoded without an error: %+v", name, p.DiskMaintenance)
 		}
+	}
+}
+
+// TestDiskMaintenanceCICacheSettings: the CI build-cache trim's three settings
+// default to 1h, 12h and 30GB, and a value the patrol cannot act on is refused
+// naming its own key, zero and negative values included, never read as the
+// default (gt-gg9hv.57).
+func TestDiskMaintenanceCICacheSettings(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		field   string
+		value   string
+		want    string
+		wantErr string
+	}{
+		{name: "interval empty is the 1h default", field: "ci_cache_trim_interval", want: "1h0m0s"},
+		{name: "interval override is read", field: "ci_cache_trim_interval", value: "30m", want: "30m0s"},
+		{name: "interval zero is refused", field: "ci_cache_trim_interval", value: "0s", wantErr: "one-minute minimum"},
+		{name: "interval negative is refused", field: "ci_cache_trim_interval", value: "-1h", wantErr: "one-minute minimum"},
+		{name: "interval malformed is refused", field: "ci_cache_trim_interval", value: "hourly", wantErr: "not a Go duration"},
+		{name: "max age empty is the 12h default", field: "ci_cache_max_age", want: "12h0m0s"},
+		{name: "max age override is read", field: "ci_cache_max_age", value: "24h", want: "24h0m0s"},
+		{name: "max age zero is refused", field: "ci_cache_max_age", value: "0h", wantErr: "one-minute minimum"},
+		{name: "max age negative is refused", field: "ci_cache_max_age", value: "-12h", wantErr: "one-minute minimum"},
+		{name: "warn bytes empty is the 30GB default", field: "ci_cache_warn_bytes", want: "32212254720"},
+		{name: "warn bytes override is read", field: "ci_cache_warn_bytes", value: "512MB", want: "536870912"},
+		{name: "warn bytes zero is refused", field: "ci_cache_warn_bytes", value: "0GB", wantErr: "zero"},
+		{name: "warn bytes negative is refused", field: "ci_cache_warn_bytes", value: "-30GB", wantErr: "not a size"},
+		{name: "warn bytes malformed is refused", field: "ci_cache_warn_bytes", value: "lots", wantErr: "not a size"},
+		{name: "warn bytes overflow is refused", field: "ci_cache_warn_bytes", value: "99999999TB", wantErr: "too large"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := DiskMaintenanceConfig{}
+			var (
+				got string
+				err error
+			)
+			switch tt.field {
+			case "ci_cache_trim_interval":
+				cfg.CICacheTrimInterval = tt.value
+				var d time.Duration
+				d, err = cfg.CICacheTrimEvery()
+				got = d.String()
+			case "ci_cache_max_age":
+				cfg.CICacheMaxAge = tt.value
+				var d time.Duration
+				d, err = cfg.CICacheMaxAgeDuration()
+				got = d.String()
+			case "ci_cache_warn_bytes":
+				cfg.CICacheWarnBytes = tt.value
+				var n int64
+				n, err = cfg.CICacheWarnLimit()
+				got = strconv.FormatInt(n, 10)
+			}
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) ||
+					!strings.Contains(err.Error(), "patrols.disk_maintenance."+tt.field) {
+					t.Fatalf("%s = %q: got %s, %v; want an error naming the key and %q", tt.field, tt.value, got, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("%s = %q: error %v", tt.field, tt.value, err)
+			}
+			if got != tt.want {
+				t.Errorf("%s = %q: got %s, want %s", tt.field, tt.value, got, tt.want)
+			}
+		})
+	}
+
+	for name, doc := range map[string]string{
+		"interval zero":   `{"disk_maintenance": {"ci_cache_trim_interval": "0s"}}`,
+		"max age zero":    `{"disk_maintenance": {"ci_cache_max_age": "0h"}}`,
+		"warn bytes zero": `{"disk_maintenance": {"ci_cache_warn_bytes": "0GB"}}`,
+	} {
+		var p PatrolsConfig
+		if err := json.Unmarshal([]byte(doc), &p); err == nil {
+			t.Errorf("%s decoded without an error: %+v", name, p.DiskMaintenance)
+		}
+	}
+	var p PatrolsConfig
+	doc := `{"disk_maintenance": {"ci_cache_trim_interval": "2h", "ci_cache_max_age": "6h", "ci_cache_warn_bytes": "10GB"}}`
+	if err := json.Unmarshal([]byte(doc), &p); err != nil {
+		t.Fatalf("valid ci_cache settings do not decode: %v", err)
+	}
+	if p.DiskMaintenance.CICacheTrimInterval != "2h" || p.DiskMaintenance.CICacheMaxAge != "6h" || p.DiskMaintenance.CICacheWarnBytes != "10GB" {
+		t.Errorf("ci_cache settings decoded as %+v", p.DiskMaintenance)
 	}
 }
 
