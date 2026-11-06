@@ -70,7 +70,13 @@ type entrypointRig struct {
 	pluginTownRoots []string
 	pluginRanAt     int
 	pluginErr       error
-	calls           [][]string
+	// installs records the installer seams in the order the start-up ran them;
+	// mangoTownRoots is the town root each mango install was given, and mangoErr
+	// fails it.
+	installs       []string
+	mangoTownRoots []string
+	mangoErr       error
+	calls          [][]string
 }
 
 // scratchRig is a container whose town root is the scratch town: every
@@ -149,9 +155,15 @@ func (r *entrypointRig) entrypoint() containerEntrypoint {
 			return r.removeErr
 		},
 		installPlugins: func(townRoot string) error {
+			r.installs = append(r.installs, "plugins")
 			r.pluginTownRoots = append(r.pluginTownRoots, townRoot)
 			r.pluginRanAt = len(r.calls)
 			return r.pluginErr
+		},
+		installMango: func(townRoot string) error {
+			r.installs = append(r.installs, "mango")
+			r.mangoTownRoots = append(r.mangoTownRoots, townRoot)
+			return r.mangoErr
 		},
 		scratch:     r.scratch,
 		omTokenFile: r.omTokenFile,
@@ -2150,5 +2162,210 @@ func TestEntrypointPluginsFailureStopsBeforeTheDaemonExec(t *testing.T) {
 	}
 	if n := r.execCalls(); n != 0 {
 		t.Errorf("the daemon was exec'd %d times after a failed plugin install, want none", n)
+	}
+}
+
+// townMangoFile is the path a file of the image's mango directory takes under
+// the town's runtime directory for this platform, where the metrics analysis
+// reads it.
+func townMangoFile(townRoot, name string) string {
+	return filepath.Join(townRoot, ".runtime", "metrics", "bin", runtime.GOOS+"-"+runtime.GOARCH, name)
+}
+
+// mangoImage makes an image directory holding the mango binary and its commit
+// stamp.
+func mangoImage(t *testing.T, binary, stamp string) string {
+	t.Helper()
+	imageDir := t.TempDir()
+	writeEntrypointFile(t, filepath.Join(imageDir, mangoBinName), []byte(binary), 0o644)
+	writeEntrypointFile(t, filepath.Join(imageDir, mangoShaName), []byte(stamp), 0o644)
+	return imageDir
+}
+
+func TestInstallMangoBinary(t *testing.T) {
+	t.Parallel()
+
+	t.Run("installs the binary and its stamp", func(t *testing.T) {
+		t.Parallel()
+		imageDir := mangoImage(t, "linux mango", "abc123\n")
+		townRoot := t.TempDir()
+
+		if err := installMangoBinary(imageDir, townRoot); err != nil {
+			t.Fatalf("installMangoBinary: %v", err)
+		}
+
+		bin := townMangoFile(townRoot, mangoBinName)
+		got, err := os.ReadFile(bin)
+		if err != nil {
+			t.Fatalf("read the installed binary: %v", err)
+		}
+		if string(got) != "linux mango" {
+			t.Errorf("installed binary = %q, want the image's bytes", got)
+		}
+		info, err := os.Stat(bin)
+		if err != nil {
+			t.Fatalf("stat the installed binary: %v", err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o755 {
+			t.Errorf("installed binary mode = %o, want 0755", perm)
+		}
+		stamp, err := os.ReadFile(townMangoFile(townRoot, mangoShaName))
+		if err != nil {
+			t.Fatalf("read the installed stamp: %v", err)
+		}
+		if string(stamp) != "abc123\n" {
+			t.Errorf("installed stamp = %q, want the image's bytes", stamp)
+		}
+	})
+
+	t.Run("replaces a previous install", func(t *testing.T) {
+		t.Parallel()
+		imageDir := mangoImage(t, "new mango", "new123\n")
+		townRoot := t.TempDir()
+		bin := townMangoFile(townRoot, mangoBinName)
+		writeEntrypointFile(t, bin, []byte("old mango"), 0o755)
+		writeEntrypointFile(t, townMangoFile(townRoot, mangoShaName), []byte("old123\n"), 0o644)
+
+		if err := installMangoBinary(imageDir, townRoot); err != nil {
+			t.Fatalf("installMangoBinary: %v", err)
+		}
+
+		got, err := os.ReadFile(bin)
+		if err != nil {
+			t.Fatalf("read the replaced binary: %v", err)
+		}
+		if string(got) != "new mango" {
+			t.Errorf("replaced binary = %q, want the image's bytes", got)
+		}
+		stamp, err := os.ReadFile(townMangoFile(townRoot, mangoShaName))
+		if err != nil {
+			t.Fatalf("read the replaced stamp: %v", err)
+		}
+		if string(stamp) != "new123\n" {
+			t.Errorf("replaced stamp = %q, want the image's bytes", stamp)
+		}
+		entries, err := os.ReadDir(filepath.Dir(bin))
+		if err != nil {
+			t.Fatalf("read the platform directory: %v", err)
+		}
+		var names []string
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		if !slices.Equal(names, []string{mangoBinName, mangoShaName}) {
+			t.Errorf("the platform directory holds %v, want only the binary and its stamp", names)
+		}
+	})
+
+	t.Run("an absent image directory is not an error", func(t *testing.T) {
+		t.Parallel()
+		townRoot := t.TempDir()
+		if err := installMangoBinary(filepath.Join(t.TempDir(), "absent"), townRoot); err != nil {
+			t.Fatalf("installMangoBinary with an absent image directory: %v, want nil", err)
+		}
+		if _, err := os.Stat(townMangoFile(townRoot, mangoBinName)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("an older image installed a binary: stat error = %v", err)
+		}
+	})
+
+	t.Run("refuses an image directory without mango", func(t *testing.T) {
+		t.Parallel()
+		imageDir := t.TempDir()
+		writeEntrypointFile(t, filepath.Join(imageDir, mangoShaName), []byte("abc123\n"), 0o644)
+		townRoot := t.TempDir()
+
+		err := installMangoBinary(imageDir, townRoot)
+		if err == nil || !strings.Contains(err.Error(), filepath.Join(imageDir, mangoBinName)) {
+			t.Fatalf("error = %v, want a refusal naming the missing mango", err)
+		}
+		if _, statErr := os.Stat(townMangoFile(townRoot, mangoBinName)); !errors.Is(statErr, os.ErrNotExist) {
+			t.Errorf("a broken image wrote a binary: stat error = %v", statErr)
+		}
+	})
+
+	t.Run("refuses an image directory without its stamp", func(t *testing.T) {
+		t.Parallel()
+		imageDir := t.TempDir()
+		writeEntrypointFile(t, filepath.Join(imageDir, mangoBinName), []byte("linux mango"), 0o755)
+
+		err := installMangoBinary(imageDir, t.TempDir())
+		if err == nil || !strings.Contains(err.Error(), filepath.Join(imageDir, mangoShaName)) {
+			t.Fatalf("error = %v, want a refusal naming the missing stamp", err)
+		}
+	})
+
+	t.Run("refuses a destination it cannot write", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct {
+			name  string
+			write func(t *testing.T, townRoot string)
+		}{
+			{"a file where the platform directory belongs", func(t *testing.T, townRoot string) {
+				writeEntrypointFile(t, filepath.Dir(townMangoFile(townRoot, mangoBinName)), []byte("not a directory"), 0o644)
+			}},
+			{"a directory where the binary belongs", func(t *testing.T, townRoot string) {
+				if err := os.MkdirAll(townMangoFile(townRoot, mangoBinName), 0o755); err != nil {
+					t.Fatalf("mkdir the binary path: %v", err)
+				}
+			}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				imageDir := mangoImage(t, "linux mango", "abc123\n")
+				townRoot := t.TempDir()
+				tc.write(t, townRoot)
+
+				if err := installMangoBinary(imageDir, townRoot); err == nil {
+					t.Fatal("installMangoBinary wrote an install it cannot place, want a refusal")
+				}
+			})
+		}
+	})
+
+	t.Run("refuses an image path it cannot read", func(t *testing.T) {
+		t.Parallel()
+		// A regular file in the middle of the path makes stat fail with ENOTDIR,
+		// which is neither an absent image nor a broken file inside one.
+		parent := t.TempDir()
+		writeEntrypointFile(t, filepath.Join(parent, "mango"), []byte("not a directory"), 0o644)
+		imageDir := filepath.Join(parent, "mango", "inner")
+
+		err := installMangoBinary(imageDir, t.TempDir())
+		if err == nil || !strings.Contains(err.Error(), imageDir) {
+			t.Fatalf("error = %v, want a refusal naming %s", err, imageDir)
+		}
+	})
+}
+
+// The mango install is in place before the daemon starts: it runs for the town
+// root, after the plugin binaries and immediately before the exec.
+func TestEntrypointMangoInstallsAfterThePluginsBeforeTheDaemonExec(t *testing.T) {
+	t.Parallel()
+	r := townRig()
+	if err := runContainerEntrypoint(r.entrypoint()); err != nil {
+		t.Fatalf("runContainerEntrypoint: %v", err)
+	}
+	if !slices.Equal(r.installs, []string{"plugins", "mango"}) {
+		t.Errorf("installers ran in order %v, want the plugins and then mango", r.installs)
+	}
+	if !slices.Equal(r.mangoTownRoots, []string{entrypointTown}) {
+		t.Errorf("mango installs ran for %v, want the town root once", r.mangoTownRoots)
+	}
+	if n := r.execCalls(); n != 1 {
+		t.Errorf("recorded %d daemon exec argv, want one after the installs", n)
+	}
+}
+
+// A failed mango copy refuses and the daemon is never exec'd.
+func TestEntrypointMangoFailureStopsBeforeTheDaemonExec(t *testing.T) {
+	t.Parallel()
+	r := townRig()
+	r.mangoErr = errors.New("copy failed")
+	err := runContainerEntrypoint(r.entrypoint())
+	if err == nil || !strings.Contains(err.Error(), "mango") {
+		t.Fatalf("error = %v, want a refusal naming the mango install", err)
+	}
+	if n := r.execCalls(); n != 0 {
+		t.Errorf("the daemon was exec'd %d times after a failed mango install, want none", n)
 	}
 }

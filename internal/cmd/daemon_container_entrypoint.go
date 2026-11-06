@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/metrics"
 )
 
 // The environment the entrypoint reads beyond the container-mode flag.
@@ -45,6 +46,20 @@ const (
 	// The town's plugin directories live on the shared town volume, so the
 	// entrypoint copies each binary into the town at start (gt-gg9hv.10).
 	containerImagePluginsDir = "/usr/local/lib/gt/plugins"
+
+	// containerImageMangoDir is where the image carries the mango build for the
+	// platform the daemon runs on, with the commit it was built from
+	// (deploy/daemon/Dockerfile). The town's runtime directory lives on the
+	// shared town volume, so the entrypoint copies both files into the town at
+	// start (gt-eijn2z).
+	containerImageMangoDir = "/usr/local/lib/gt/mango"
+
+	// mangoBinName and mangoShaName are the two files the image's mango
+	// directory holds, and the names they take in the town's runtime directory:
+	// the binary and the stamp of the commit it was built from, which the
+	// metrics analysis reads before it decides to rebuild.
+	mangoBinName = "mango"
+	mangoShaName = "mango.sha"
 )
 
 // entrypointFlags are the values the command's flags parsed.
@@ -172,7 +187,11 @@ type containerEntrypoint struct {
 	// directories; it runs after a scratch install has made them and before the
 	// daemon is exec'd.
 	installPlugins func(townRoot string) error
-	scratch        bool // --scratch-town: the scratch project asked for a scratch town
+	// installMango puts the image's mango binary and its commit stamp into the
+	// town's runtime directory for this platform; it runs after installPlugins
+	// and before the daemon is exec'd.
+	installMango func(townRoot string) error
+	scratch      bool // --scratch-town: the scratch project asked for a scratch town
 	// omTokenFile is --om-token-file: the file the om subscription token is read
 	// from; "" loads no token.
 	omTokenFile string
@@ -221,6 +240,9 @@ func runDaemonContainerEntrypoint(flags entrypointFlags) error {
 			return installPluginBinaries(containerImagePluginsDir, townRoot, func(format string, args ...any) {
 				fmt.Fprintf(os.Stderr, format+"\n", args...)
 			})
+		},
+		installMango: func(townRoot string) error {
+			return installMangoBinary(containerImageMangoDir, townRoot)
 		},
 		scratch:     flags.scratch,
 		omTokenFile: flags.omTokenFile,
@@ -362,6 +384,13 @@ func runContainerEntrypoint(e containerEntrypoint) error {
 	// daemon run the Mac binaries the town volume also holds (gt-gg9hv.10).
 	if err := e.installPlugins(townRoot); err != nil {
 		return fmt.Errorf("install the image's plugin binaries under %s: %w; the daemon was not started", townRoot, err)
+	}
+	// The metrics lookup runs the town's mango binary; the town runtime is on
+	// the shared volume, so the image's build and its commit stamp are in place
+	// before the daemon starts. An image without mango is older than the
+	// per-platform build and is not an error (gt-eijn2z).
+	if err := e.installMango(townRoot); err != nil {
+		return fmt.Errorf("install the image's mango under %s: %w; the daemon was not started", townRoot, err)
 	}
 	if err := e.exec([]string{self, "daemon", "run"}, daemonEnv); err != nil {
 		return fmt.Errorf("exec gt daemon run: %w", err)
@@ -771,6 +800,55 @@ func (e containerEntrypoint) setForgeCredentialHelper(self string) error {
 	helper := "!" + self + " " + config.GitCredentialForgejoCommand + " --host " + host + " --token-file " + e.forgeTokenFile
 	if err := e.run([]string{"git", "config", "--global", "credential.http://" + host + ".helper", helper}); err != nil {
 		return fmt.Errorf("set the git credential helper for %s: %w", host, err)
+	}
+	return nil
+}
+
+// installMangoBinary copies the image's mango binary and the stamp of the
+// commit it was built from into the town's runtime directory for this
+// platform, where the metrics analysis reads them. An image older than the
+// per-platform build carries no mango directory and is not an error; a mango
+// directory without its files is a broken image and is refused rather than
+// leave the town running the Mac binary the shared runtime also holds. Both
+// files are read before either is written, so a broken image writes nothing.
+// The roots are parameters, so a test uses temporary directories.
+func installMangoBinary(imageDir, townRoot string) error {
+	if _, err := os.Stat(imageDir); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("read the image's mango directory %s: %w", imageDir, err)
+	}
+	// The destination is the directory the metrics lookup reads, so the install
+	// and the lookup cannot drift apart.
+	dir := filepath.Dir(metrics.PlatformMangoBin(townRoot))
+	type mangoFile struct {
+		name string
+		mode os.FileMode
+		data []byte
+	}
+	files := make([]mangoFile, 0, 2)
+	for _, spec := range []struct {
+		name string
+		mode os.FileMode
+	}{
+		{mangoBinName, 0o755},
+		{mangoShaName, 0o644},
+	} {
+		source := filepath.Join(imageDir, spec.name)
+		data, err := os.ReadFile(source)
+		if err != nil {
+			return fmt.Errorf("read the image's %s: %w", source, err)
+		}
+		files = append(files, mangoFile{name: spec.name, mode: spec.mode, data: data})
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create the town's mango directory %s: %w", dir, err)
+	}
+	for _, file := range files {
+		dest := filepath.Join(dir, file.name)
+		if err := atomicfile.WriteFile(dest, file.data, file.mode); err != nil {
+			return fmt.Errorf("install the image's mango at %s: %w", dest, err)
+		}
 	}
 	return nil
 }
