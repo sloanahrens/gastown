@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/templates"
 )
 
 const (
@@ -99,6 +101,21 @@ func readCompose(data string) func(string) ([]byte, error) {
 			return nil, fs.ErrNotExist
 		}
 		return []byte(data), nil
+	}
+}
+
+// testHMConfig is the derived hm config a throwaway hm run binds, under the town.
+var testHMConfig = filepath.Join(testTown, filepath.FromSlash(hmConfigTownPath))
+
+// fakeStat answers a stat from a table: a listed path is an entry of that mode,
+// and an unlisted path does not exist.
+func fakeStat(modes map[string]fs.FileMode) func(string) (fs.FileInfo, error) {
+	return func(path string) (fs.FileInfo, error) {
+		mode, ok := modes[path]
+		if !ok {
+			return nil, &fs.PathError{Op: "stat", Path: path, Err: fs.ErrNotExist}
+		}
+		return fakeInfo{name: filepath.Base(path), mode: mode}, nil
 	}
 }
 
@@ -523,4 +540,156 @@ func TestToolExistsRefusesAnUnusableComposeFile(t *testing.T) {
 	if len(shell.captured) != 0 {
 		t.Fatalf("the compose file is unusable but docker ran: %q", shell.captured)
 	}
+}
+
+// TestRunnerSetsHMConfig: every hm call carries HM_CONFIG set to the mounted
+// config's path in the container, replacing a forwarded value; gt, bd and om
+// carry none, and rung 2 mounts the derived file where that path names it.
+func TestRunnerSetsHMConfig(t *testing.T) {
+	t.Parallel()
+	tools := []struct {
+		name string
+		argv []string
+		hm   bool
+	}{
+		{"hm", []string{"hm", "status"}, true},
+		{"gt", []string{"gt", "status", "--line"}, false},
+		{"bd", []string{"bd", "show", "gt-abc"}, false},
+		{"om", []string{"om", "review"}, false},
+	}
+	envs := []struct {
+		name string
+		env  []string
+	}{
+		{"nothing forwarded", []string{"GT_TOWN=" + testTown}},
+		{"a forwarded HM_CONFIG is replaced", []string{"HM_CONFIG=/Users/operator/.config/gt/hm-config.json", "GT_TOWN=" + testTown}},
+	}
+	rungs := []struct {
+		name string
+		run  func(Docker, Call) (int, error)
+	}{
+		{"exec", Docker.Exec},
+		{"run", Docker.Run},
+	}
+	for _, tool := range tools {
+		for _, env := range envs {
+			for _, rung := range rungs {
+				t.Run(tool.name+"/"+env.name+"/"+rung.name, func(t *testing.T) {
+					t.Parallel()
+					shell := &fakeShell{}
+					d := Docker{Town: testTown, Shell: shell, ReadFile: readCompose(testCompose), Stat: fakeStat(map[string]fs.FileMode{testHMConfig: 0o600})}
+					call := Call{Argv: tool.argv, Env: env.env, Dir: testDir}
+					if _, err := rung.run(d, call); err != nil {
+						t.Fatalf("%s returned an error: %v", rung.name, err)
+					}
+					if len(shell.attached) != 1 {
+						t.Fatalf("%s attached %d lines, want 1", rung.name, len(shell.attached))
+					}
+					argv := shell.attached[0]
+					var set []string
+					for _, arg := range argv {
+						if strings.HasPrefix(arg, hmConfigVar+"=") {
+							set = append(set, arg)
+						}
+					}
+					if !tool.hm {
+						if len(set) != 0 {
+							t.Fatalf("%s line %q sets %s, want none for %s", rung.name, argv, hmConfigVar, tool.name)
+						}
+						return
+					}
+					if want := []string{hmConfigVar + "=" + hmConfigPath}; !slices.Equal(set, want) {
+						t.Fatalf("%s line %q sets %s %q, want exactly %q", rung.name, argv, hmConfigVar, set, want)
+					}
+					for _, arg := range argv {
+						if strings.Contains(arg, "/Users/operator/.config/gt/hm-config.json") {
+							t.Fatalf("%s line %q carries the caller's own %s", rung.name, argv, hmConfigVar)
+						}
+					}
+					wantMount := filepath.Join(testTown, filepath.FromSlash(hmConfigTownPath)) + ":" + hmConfigPath + ":ro"
+					switch rung.name {
+					case "run":
+						if !slices.Contains(argv, wantMount) {
+							t.Fatalf("%s line %q does not mount the derived config %s", rung.name, argv, wantMount)
+						}
+					case "exec":
+						if slices.Contains(argv, wantMount) {
+							t.Fatalf("%s line %q mounts the config itself, but the running container carries it", rung.name, argv)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestHMConfigPathIsTheRenderTarget pins the wrapper's HM_CONFIG path to the
+// render's mount target, so the two cannot send hm to different files.
+func TestHMConfigPathIsTheRenderTarget(t *testing.T) {
+	t.Parallel()
+	if hmConfigPath != templates.LiveHMConfigPath {
+		t.Fatalf("the wrapper names %s, the render mounts %s", hmConfigPath, templates.LiveHMConfigPath)
+	}
+}
+
+// TestHMConfigTownPathIsTheWriteTarget pins the throwaway run's source path to the
+// path the compose write derives, so the two cannot read different files.
+func TestHMConfigTownPathIsTheWriteTarget(t *testing.T) {
+	t.Parallel()
+	if hmConfigTownPath != templates.ContainerHMConfigRP {
+		t.Fatalf("the wrapper binds %s, the compose write derives %s", hmConfigTownPath, templates.ContainerHMConfigRP)
+	}
+}
+
+// TestRunnerRefusesAMissingHMConfig: a throwaway hm run is refused, naming the
+// derived config and the command that generates it, when that path is absent, a
+// directory, unreadable, or never checked, and it attaches no engine command. A
+// regular file plans as before. Launch drives the run rung: the container is
+// stopped, so the call would otherwise be a throwaway run.
+func TestRunnerRefusesAMissingHMConfig(t *testing.T) {
+	t.Parallel()
+	hmCall := Call{Argv: []string{"hm", "status"}, Env: []string{"GT_TOWN=" + testTown}, Dir: testDir}
+	refusals := []struct {
+		name string
+		stat func(string) (fs.FileInfo, error)
+	}{
+		{"absent", fakeStat(nil)},
+		{"a directory", fakeStat(map[string]fs.FileMode{testHMConfig: fs.ModeDir | 0o755})},
+		{"unreadable", func(string) (fs.FileInfo, error) { return nil, fs.ErrPermission }},
+		{"never checked", nil},
+	}
+	for _, tt := range refusals {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			shell := &fakeShell{}
+			d := Docker{Town: testTown, Shell: shell, ReadFile: readCompose(testCompose), Stat: tt.stat}
+			_, err := d.Launch(hmCall)
+			if err == nil {
+				t.Fatalf("Launch planned a throwaway hm run with %s, want a refusal", tt.name)
+			}
+			for _, want := range []string{testHMConfig, "gt daemon compose write"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("refusal %q does not name %q", err, want)
+				}
+			}
+			if len(shell.attached) != 0 {
+				t.Fatalf("attached %q, want no engine command", shell.attached)
+			}
+		})
+	}
+	t.Run("a regular file plans as before", func(t *testing.T) {
+		t.Parallel()
+		shell := &fakeShell{}
+		d := Docker{Town: testTown, Shell: shell, ReadFile: readCompose(testCompose), Stat: fakeStat(map[string]fs.FileMode{testHMConfig: 0o600})}
+		if _, err := d.Launch(hmCall); err != nil {
+			t.Fatalf("Launch returned an error for a regular file: %v", err)
+		}
+		if len(shell.attached) != 1 {
+			t.Fatalf("attached %d lines, want 1", len(shell.attached))
+		}
+		want := testHMConfig + ":" + hmConfigPath + ":ro"
+		if !slices.Contains(shell.attached[0], want) {
+			t.Fatalf("line %q does not mount the derived config %s", shell.attached[0], want)
+		}
+	})
 }

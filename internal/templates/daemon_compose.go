@@ -98,6 +98,14 @@ type ComposeSpec struct {
 	// file, or on a scratch spec, is refused (gt-gg9hv.13).
 	OMConfigFile string
 
+	// HMConfigFile is the host path of the hm config RenderHMConfig derives for
+	// the live container, which the command writes beside the compose file. The
+	// render mounts it read-only at LiveHMConfigPath and sets HM_CONFIG to that
+	// path, so the container's hm reaches the Mac's database instead of its own
+	// loopback. Unset, neither the mount nor the variable is rendered; a scratch
+	// spec may not set it (gt-yjzepk.13).
+	HMConfigFile string
+
 	// ForgeHost and ForgeTokenFile give the live container's git the Forgejo
 	// credential helper: ForgeHost is the forge's bare host:port, and
 	// ForgeTokenFile is the host path of the landing bot's token file. A live
@@ -540,6 +548,9 @@ func liveTokenMounts(s ComposeSpec) string {
 	if s.OMConfigFile != "" {
 		b.WriteString(liveTokenMount(s.OMConfigFile, LiveOMConfigPath))
 	}
+	if s.HMConfigFile != "" {
+		b.WriteString(liveTokenMount(s.HMConfigFile, LiveHMConfigPath))
+	}
 	if s.ForgeTokenFile != "" {
 		b.WriteString(liveTokenMount(s.ForgeTokenFile, LiveForgeTokenPath))
 	}
@@ -611,6 +622,30 @@ func (s ComposeSpec) validateOMConfig() error {
 		return fmt.Errorf("compose spec: OMConfigFile %q is set without a live OMTokenFile; the derived config names the token mount, and only a live token file has one", s.OMConfigFile)
 	case s.OMConfigFile != "" && !filepath.IsAbs(s.OMConfigFile):
 		return fmt.Errorf("compose spec: OMConfigFile %q is not an absolute path; the live render mounts it on the host", s.OMConfigFile)
+	}
+	return nil
+}
+
+// validateHMConfig pairs the derived hm config with the mount and the variable
+// that name it. The config is mounted at LiveHMConfigPath and HM_CONFIG names
+// that path, so a daemon.env entry naming another path is refused rather than
+// left pointing hm at a file no mount provides; the render writes HM_CONFIG
+// itself when it mounts the config, so an entry naming the same path is not
+// repeated (gt-yjzepk.13).
+func (s ComposeSpec) validateHMConfig() error {
+	if s.HMConfigFile == "" {
+		return nil
+	}
+	switch {
+	case s.Scratch:
+		return fmt.Errorf("compose spec: HMConfigFile %q is set on a scratch spec; only the live render mounts the container's hm config", s.HMConfigFile)
+	case !filepath.IsAbs(s.HMConfigFile):
+		return fmt.Errorf("compose spec: HMConfigFile %q is not an absolute path; the live render mounts it on the host", s.HMConfigFile)
+	case strings.ContainsFunc(s.HMConfigFile, func(r rune) bool { return r < 0x20 || r == 0x7f }):
+		return fmt.Errorf("compose spec: HMConfigFile %q holds a control character, which neither a mount nor a compose value can carry", s.HMConfigFile)
+	}
+	if v, ok := s.Env[hmConfigEnv]; ok && v != LiveHMConfigPath {
+		return fmt.Errorf("compose spec: Env names %s as %q, but the render mounts the container's hm config at %s; name that path or leave the entry out", hmConfigEnv, v, LiveHMConfigPath)
 	}
 	return nil
 }
@@ -791,6 +826,10 @@ services:
 // file, an argv or an error; only its host path, and the fixed mount target,
 // do (gt-yaqct).
 //
+// A live spec's HMConfigFile is mounted read-only at LiveHMConfigPath, and
+// HM_CONFIG names that path, so the container's hm reads the derived config
+// rather than the Mac's copy under the config directory mount (gt-yjzepk.13).
+//
 // When a live spec carries ForgeHost and ForgeTokenFile, the render mounts the
 // host's token file read-only at LiveForgeTokenPath and passes both to the
 // entrypoint, which sets the container's git credential helper from them; with
@@ -932,6 +971,9 @@ func (s ComposeSpec) validate() error {
 		return err
 	}
 	if err := s.validateOMConfig(); err != nil {
+		return err
+	}
+	if err := s.validateHMConfig(); err != nil {
 		return err
 	}
 	if err := s.validateExtraHosts(); err != nil {

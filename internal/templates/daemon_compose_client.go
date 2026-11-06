@@ -145,7 +145,7 @@ func (s ComposeSpec) validateClient() error {
 // BindRO entry may not repeat one of them.
 func renderedHostPaths(s ComposeSpec) []string {
 	return append([]string{s.OpenShellConfigDir, s.ConfigDir, s.BackupDir, s.OMTokenMetaFile,
-		s.LandingWorkRoot, s.OMTokenFile, s.OMConfigFile, s.ForgeTokenFile}, s.KubeconfigFiles...)
+		s.LandingWorkRoot, s.OMTokenFile, s.OMConfigFile, s.HMConfigFile, s.ForgeTokenFile}, s.KubeconfigFiles...)
 }
 
 func isOwnedEnv(name string) bool {
@@ -171,6 +171,9 @@ func liveClientEnv(s ComposeSpec) string {
 	if s.OpenShellConfigDir != "" || s.ConfigDir != "" || s.OMConfigFile != "" {
 		line("XDG_CONFIG_HOME", LiveOpenShellConfigHome)
 	}
+	if s.HMConfigFile != "" {
+		line(hmConfigEnv, LiveHMConfigPath)
+	}
 	if s.TimeZone != "" {
 		line("TZ", s.TimeZone)
 	}
@@ -183,6 +186,11 @@ func liveClientEnv(s ComposeSpec) string {
 	}
 	sort.Strings(names)
 	for _, n := range names {
+		// The render set HM_CONFIG above from the mount it writes, and
+		// validateHMConfig refused an entry naming another path.
+		if n == hmConfigEnv && s.HMConfigFile != "" {
+			continue
+		}
 		line(n, s.Env[n])
 	}
 	return b.String()
