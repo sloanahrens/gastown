@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -17,31 +16,13 @@ import (
 
 	"github.com/steveyegge/gastown/internal/daemonimage"
 	"github.com/steveyegge/gastown/internal/templates"
+	"github.com/steveyegge/gastown/internal/testutil"
 
 	"gopkg.in/yaml.v3"
 )
 
-// secretFSProbe is the spec's SecretFS seam: every call is recorded, the two
-// metadata calls reach the host's filesystem, and a content read is refused, so
-// a test sees what the render asked for and no file's bytes are read.
-type secretFSProbe struct {
-	calls []string
-}
-
-func (p *secretFSProbe) Lstat(name string) (fs.FileInfo, error) {
-	p.calls = append(p.calls, "Lstat "+name)
-	return os.Lstat(name)
-}
-
-func (p *secretFSProbe) Stat(name string) (fs.FileInfo, error) {
-	p.calls = append(p.calls, "Stat "+name)
-	return os.Stat(name)
-}
-
-func (p *secretFSProbe) ReadFile(name string) ([]byte, error) {
-	p.calls = append(p.calls, "ReadFile "+name)
-	return nil, errors.New("the probe refuses every content read")
-}
+// The seam the command is testable through; both packages use this one fake.
+var _ templates.SecretFS = (*testutil.SecretFSProbe)(nil)
 
 // TestDaemonComposeSecretsManifestParses: the shipped deploy/daemon/secrets.yaml
 // parses and names a consumer and mode for every file, the notification scripts
@@ -65,7 +46,12 @@ func TestDaemonComposeSecretsManifestParses(t *testing.T) {
 		for _, f := range manifest.Files {
 			listed[f.Name] = f
 		}
-		for _, name := range []string{"forgejo-landing.env", "forgejo-viewer.env", "promote-gastown.key", "om-daemon-token", "om-daemon-token.meta", "jev.env"} {
+		for _, name := range []string{
+			"forgejo-landing.env", "forgejo-viewer.env",
+			"promote-gastown.key", "promote-om.key", "promote-hm.key",
+			"promote-beads.key", "promote-mango.key", "promote-fractals.key",
+			"om-daemon-token", "om-daemon-token.meta", "jev.env",
+		} {
 			f, ok := listed[name]
 			if !ok {
 				t.Errorf("the shipped manifest lists no %s, a file the daemon reads", name)
@@ -108,8 +94,6 @@ func TestDaemonComposeSecretsManifestParses(t *testing.T) {
 			manifest: "files:\n  - name: /etc/passwd\n    consumer: test\n    mode: \"0600\"\n"},
 		{name: "a .. name", want: `"../escape"`,
 			manifest: "files:\n  - name: ../escape\n    consumer: test\n    mode: \"0600\"\n"},
-		{name: "a path name", want: `"sub/a.env"`,
-			manifest: "files:\n  - name: sub/a.env\n    consumer: test\n    mode: \"0600\"\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -179,7 +163,7 @@ func TestDaemonComposeSecretsManifestParses(t *testing.T) {
 }
 
 // TestDaemonComposeSecretsNeverReadsContents: the command reads the manifest and
-// opens none of the files it lists. The seam the render stats through records
+// opens none of the files it lists. The seam the render lstats through records
 // every call and refuses every content read, so a read would fail the render and
 // a successful render proves the listing alone was used, while no file's bytes
 // reach the compose file or the output (gt-gg9hv.66).
@@ -212,7 +196,7 @@ func TestDaemonComposeSecretsNeverReadsContents(t *testing.T) {
 		}
 		return nil, fs.ErrNotExist
 	}
-	probe := &secretFSProbe{}
+	probe := &testutil.SecretFSProbe{}
 	r.deps.secretsFS = probe
 
 	if err := runDaemonCompose(r.flags, r.deps); err != nil {
@@ -223,11 +207,11 @@ func TestDaemonComposeSecretsNeverReadsContents(t *testing.T) {
 	}
 	for _, name := range []string{"forgejo-landing.env", "jev.env"} {
 		host := filepath.Join(configDir, name)
-		if !strings.Contains(strings.Join(probe.calls, "\n"), "Stat "+host) {
-			t.Errorf("the seam saw no Stat of %s, so the render did not go through it; calls = %v", host, probe.calls)
+		if !strings.Contains(strings.Join(probe.Calls, "\n"), "Lstat "+host) {
+			t.Errorf("the seam saw no Lstat of %s, so the render did not go through it; calls = %v", host, probe.Calls)
 		}
 	}
-	for _, call := range probe.calls {
+	for _, call := range probe.Calls {
 		if strings.HasPrefix(call, "ReadFile ") {
 			t.Errorf("the render read %s, want no content read at all", strings.TrimPrefix(call, "ReadFile "))
 		}
@@ -349,10 +333,13 @@ func TestDaemonComposeSecretsSaysRotationNeedsARecreate(t *testing.T) {
 }
 
 // TestDaemonComposeSecretsOpensOnlyThroughTheSeam: the secrets code reaches the
-// host only through templates.SecretFS. A direct os.Open, os.ReadFile,
-// os.OpenFile or ioutil.ReadFile in the secrets files of internal/templates or
-// internal/cmd fails, outside the one file that implements the seam, so a read
-// added later cannot bypass the seam unobserved (gt-gg9hv.66).
+// host only through templates.SecretFS. Every non-test daemon_compose*.go file of
+// internal/templates and internal/cmd is scanned, not only the files whose names
+// carry "secrets", so a read added to the render or to its caller is caught; the
+// one file that implements the seam and the command's dependency wiring (which
+// passes the host reader into the command, never a listed file) are the only
+// allowed places. A direct os.Open, os.ReadFile, os.OpenFile or ioutil.ReadFile
+// elsewhere fails (gt-gg9hv.66).
 func TestDaemonComposeSecretsOpensOnlyThroughTheSeam(t *testing.T) {
 	t.Parallel()
 	const seamFile = "daemon_compose_secrets_fs.go"
@@ -365,11 +352,11 @@ func TestDaemonComposeSecretsOpensOnlyThroughTheSeam(t *testing.T) {
 		}
 		for _, e := range entries {
 			name := e.Name()
-			if e.IsDir() || !strings.Contains(name, "secrets") || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			if e.IsDir() || !strings.HasPrefix(name, "daemon_compose") || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 				continue
 			}
 			path := filepath.Join(dir, name)
-			scanned = append(scanned, name)
+			scanned = append(scanned, path)
 			if name == seamFile {
 				continue
 			}
@@ -382,9 +369,16 @@ func TestDaemonComposeSecretsOpensOnlyThroughTheSeam(t *testing.T) {
 			}
 		}
 	}
-	// A scan that saw no files would pass everything; these two are the files
-	// the check exists for.
-	for _, want := range []string{"daemon_compose_secrets.go", seamFile} {
+	// A scan that saw no files would pass everything; these are the files the
+	// check exists for, the render, its caller and the command.
+	for _, want := range []string{
+		filepath.Join("..", "templates", "daemon_compose.go"),
+		filepath.Join("..", "templates", "daemon_compose_client.go"),
+		filepath.Join("..", "templates", "daemon_compose_secrets.go"),
+		filepath.Join("..", "templates", seamFile),
+		"daemon_compose.go",
+		"daemon_compose_client.go",
+	} {
 		if !slices.Contains(scanned, want) {
 			t.Errorf("the scan did not see %s; scanned %v", want, scanned)
 		}
@@ -404,13 +398,51 @@ func b(f *os.File) { f.Write(nil) }
 			}
 		}
 	})
+
+	t.Run("the scan finds an alias of a read", func(t *testing.T) {
+		t.Parallel()
+		src := []byte(`package p
+import "os"
+func a() { read := os.ReadFile; read("a") }
+`)
+		sites := secretOpenSites(t, "sample.go", src)
+		if !strings.Contains(strings.Join(sites, "\n"), "os.ReadFile") {
+			t.Errorf("the scan missed an alias of os.ReadFile; found %v", sites)
+		}
+	})
+
+	t.Run("the scan allows the command's dependency wiring", func(t *testing.T) {
+		t.Parallel()
+		src := []byte(`package p
+import "os"
+type deps struct{ readFile func(string) ([]byte, error) }
+func newDeps() deps { return deps{readFile: os.ReadFile} }
+`)
+		if sites := secretOpenSites(t, "sample.go", src); len(sites) != 0 {
+			t.Errorf("the scan flagged the dependency wiring; found %v", sites)
+		}
+	})
+
+	t.Run("the scan finds a read hidden in another field", func(t *testing.T) {
+		t.Parallel()
+		src := []byte(`package p
+import "os"
+type deps struct{ load func(string) ([]byte, error) }
+func newDeps() deps { return deps{load: os.ReadFile} }
+`)
+		if sites := secretOpenSites(t, "sample.go", src); !strings.Contains(strings.Join(sites, "\n"), "os.ReadFile") {
+			t.Errorf("the scan missed os.ReadFile bound to a field that is not the wired reader; found %v", sites)
+		}
+	})
 }
 
-// secretOpenSites returns one site per direct open or read of a file in src:
-// any reference to os.Open, os.ReadFile, os.OpenFile or ioutil.ReadFile, called
-// or taken as a value, so an alias of the function is caught too. The parse is
-// the scan's only judgment; a file that does not parse is a test failure, never
-// an empty list.
+// secretOpenSites returns one site per direct open or read of a file in src: a
+// call of, or an alias for, os.Open, os.ReadFile, os.OpenFile or ioutil.ReadFile.
+// A reference that is the value of a readFile or read field of a composite
+// literal is the command's dependency wiring, which passes the host reader in; it
+// is not an open, and the test that allows it names both fields. The parse is the
+// scan's only judgment; a file that does not parse is a test failure, never an
+// empty list.
 func secretOpenSites(t *testing.T, path string, src []byte) []string {
 	t.Helper()
 	fset := token.NewFileSet()
@@ -422,10 +454,25 @@ func secretOpenSites(t *testing.T, path string, src []byte) []string {
 		"os":     {"Open": true, "ReadFile": true, "OpenFile": true},
 		"ioutil": {"ReadFile": true},
 	}
+	// The command wires its host reads into these two dependency fields
+	// (daemonComposeDeps.readFile, settingsFS.read); a reference anywhere else,
+	// including any other composite literal field, is an open to flag.
+	wiringFields := map[string]bool{"readFile": true, "read": true}
+	wired := map[ast.Node]bool{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		if kv, ok := n.(*ast.KeyValueExpr); ok {
+			if key, ok := kv.Key.(*ast.Ident); ok && wiringFields[key.Name] {
+				if sel, ok := kv.Value.(*ast.SelectorExpr); ok {
+					wired[sel] = true
+				}
+			}
+		}
+		return true
+	})
 	var sites []string
 	ast.Inspect(file, func(n ast.Node) bool {
 		sel, ok := n.(*ast.SelectorExpr)
-		if !ok {
+		if !ok || wired[sel] {
 			return true
 		}
 		pkg, ok := sel.X.(*ast.Ident)

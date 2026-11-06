@@ -1,16 +1,20 @@
 package templates_test
 
 import (
-	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/templates"
+	"github.com/steveyegge/gastown/internal/testutil"
 )
+
+// The seam the render is testable through; both packages use this one fake.
+var _ templates.SecretFS = (*testutil.SecretFSProbe)(nil)
 
 // secretConfigDir makes a config directory holding the named files, each with
 // the same placeholder bytes and the manifest's usual mode, so a test can prove
@@ -31,39 +35,6 @@ func secretConfigDir(t *testing.T, names ...string) (dir, marker string) {
 // passes from the manifest it parsed.
 func secretEntry(name string, required bool) templates.SecretFile {
 	return templates.SecretFile{Name: name, Consumer: "internal/daemon (test)", Mode: "0600", Required: required}
-}
-
-// secretFSFake is the spec's SecretFS seam over the host's filesystem, with an
-// Lstat or Stat that can be made to fail for one file and a ReadFile that always
-// does, so the branches no real file reaches are driven and a content read is
-// caught rather than performed.
-type secretFSFake struct {
-	// failName is the file whose call fails; "" fails none, so the config
-	// directory's own Stat still succeeds.
-	failName          string
-	lstatErr, statErr error
-	calls             []string
-}
-
-func (f *secretFSFake) Lstat(name string) (fs.FileInfo, error) {
-	f.calls = append(f.calls, "Lstat "+name)
-	if f.lstatErr != nil && filepath.Base(name) == f.failName {
-		return nil, f.lstatErr
-	}
-	return os.Lstat(name)
-}
-
-func (f *secretFSFake) Stat(name string) (fs.FileInfo, error) {
-	f.calls = append(f.calls, "Stat "+name)
-	if f.statErr != nil && filepath.Base(name) == f.failName {
-		return nil, f.statErr
-	}
-	return os.Stat(name)
-}
-
-func (f *secretFSFake) ReadFile(name string) ([]byte, error) {
-	f.calls = append(f.calls, "ReadFile "+name)
-	return nil, errors.New("the fake refuses every content read")
 }
 
 // With a secrets manifest the daemon service mounts each listed file read-only
@@ -210,31 +181,12 @@ func TestDaemonComposeSecretsRefusesAMissingRequiredFile(t *testing.T) {
 		dir, _ := secretConfigDir(t, "present.env")
 		s := liveSpec()
 		s.ConfigDir = dir
-		s.SecretsFS = &secretFSFake{failName: "present.env", lstatErr: fs.ErrPermission}
+		s.SecretsFS = &testutil.SecretFSProbe{FailName: "present.env", LstatErr: fs.ErrPermission}
 		s.Secrets = []templates.SecretFile{secretEntry("present.env", false)}
 
 		out, err := templates.RenderDaemonCompose(s)
 		if err == nil {
 			t.Fatalf("RenderDaemonCompose with an entry the seam cannot lstat = a render, want a refusal:\n%s", out)
-		}
-		for _, want := range []string{`"present.env"`, "cannot be read"} {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("error = %q, want it to say %q", err, want)
-			}
-		}
-	})
-
-	t.Run("an entry the seam can lstat but not stat", func(t *testing.T) {
-		t.Parallel()
-		dir, _ := secretConfigDir(t, "present.env")
-		s := liveSpec()
-		s.ConfigDir = dir
-		s.SecretsFS = &secretFSFake{failName: "present.env", statErr: fs.ErrPermission}
-		s.Secrets = []templates.SecretFile{secretEntry("present.env", false)}
-
-		out, err := templates.RenderDaemonCompose(s)
-		if err == nil {
-			t.Fatalf("RenderDaemonCompose with an entry the seam cannot stat = a render, want a refusal:\n%s", out)
 		}
 		for _, want := range []string{`"present.env"`, "cannot be read"} {
 			if !strings.Contains(err.Error(), want) {
@@ -420,8 +372,11 @@ func TestDaemonComposeSecretsRefusesWhatTheSpecCannotCarry(t *testing.T) {
 // The manifest parser reads one entry per file with its name, consumer, mode and
 // required flag and records the unclaimed files with their searches. Every
 // malformed manifest is refused naming the entry or the key it cannot take, so a
-// manifest a hand edit broke never reaches the render.
-func TestDaemonComposeSecretsManifestParses(t *testing.T) {
+// manifest a hand edit broke never reaches the render. The command's own
+// TestDaemonComposeSecretsManifestParses proves the refusal reaches its caller;
+// this table is the one place the parser's own refusals are enumerated
+// (gt-gg9hv.66).
+func TestSecretsManifestParsing(t *testing.T) {
 	t.Parallel()
 
 	t.Run("the entries and their fields", func(t *testing.T) {
@@ -518,6 +473,131 @@ unclaimed:
 			}
 		})
 	}
+}
+
+// TestDaemonComposeSecretsManifestAccountsForEveryName: every file name in the
+// config directory's golden list is accounted for by deploy/daemon/secrets.yaml,
+// either as a files entry the daemon reads or as an unclaimed line recording the
+// search that found no consumer, and a required entry names a file in that list.
+// The six rigs whose settings name a promote key are entries with their
+// rig-settings consumer, not unclaimed (gt-gg9hv.66).
+func TestDaemonComposeSecretsManifestAccountsForEveryName(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile(filepath.Join("..", "..", "deploy", "daemon", "secrets.yaml"))
+	if err != nil {
+		t.Fatalf("reading the shipped manifest: %v", err)
+	}
+	manifest, err := templates.ParseSecretsManifest(data)
+	if err != nil {
+		t.Fatalf("the shipped manifest does not parse: %v", err)
+	}
+	golden, err := os.ReadFile(filepath.Join("testdata", "daemon-configdir-names.golden"))
+	if err != nil {
+		t.Fatalf("reading the config directory's name list: %v", err)
+	}
+	names := goldenNames(string(golden))
+
+	unaccounted, requiredAbsent := manifestGaps(names, manifest)
+	for _, name := range unaccounted {
+		t.Errorf("the config directory holds %q, which deploy/daemon/secrets.yaml neither lists as a file the daemon reads nor records as unclaimed; add an entry or an unclaimed line with the search that found no consumer", name)
+	}
+	for _, name := range requiredAbsent {
+		t.Errorf("deploy/daemon/secrets.yaml marks %q required, but the config directory's name list does not hold it; a required entry the daemon cannot find refuses every render", name)
+	}
+
+	listed := map[string]templates.SecretFile{}
+	for _, f := range manifest.Files {
+		listed[f.Name] = f
+	}
+	for _, rig := range []string{"gastown", "om", "hm", "beads", "mango", "fractals"} {
+		name := "promote-" + rig + ".key"
+		f, ok := listed[name]
+		if !ok {
+			t.Errorf("deploy/daemon/secrets.yaml lists no %s, though %s's settings name it as forgejo.promote_key_file", name, rig)
+			continue
+		}
+		want := "forgejo.promote_key_file in " + rig + "'s settings (the promoter, internal/promote)"
+		if f.Consumer != want {
+			t.Errorf("%s consumer = %q, want %q", name, f.Consumer, want)
+		}
+		if f.Required {
+			t.Errorf("%s is required, but the daemon starts without a promote key and the promotion records its own failure", name)
+		}
+	}
+
+	t.Run("a name in neither list fails", func(t *testing.T) {
+		t.Parallel()
+		m := templates.SecretsManifest{
+			Files:     []templates.SecretFile{secretEntry("listed.env", true)},
+			Unclaimed: []templates.UnclaimedSecret{{Name: "known.env", Search: "grep"}},
+		}
+		unaccounted, requiredAbsent := manifestGaps([]string{"listed.env", "known.env", "forgotten.env"}, m)
+		if strings.Join(unaccounted, ",") != "forgotten.env" {
+			t.Errorf("unaccounted = %v, want the one name neither list carries", unaccounted)
+		}
+		if len(requiredAbsent) != 0 {
+			t.Errorf("requiredAbsent = %v, want none", requiredAbsent)
+		}
+	})
+
+	t.Run("a required entry absent from the list fails", func(t *testing.T) {
+		t.Parallel()
+		m := templates.SecretsManifest{Files: []templates.SecretFile{
+			secretEntry("present.env", true),
+			secretEntry("absent.env", true),
+			secretEntry("optional.env", false),
+		}}
+		unaccounted, requiredAbsent := manifestGaps([]string{"present.env"}, m)
+		if len(unaccounted) != 0 {
+			t.Errorf("unaccounted = %v, want none", unaccounted)
+		}
+		if strings.Join(requiredAbsent, ",") != "absent.env" {
+			t.Errorf("requiredAbsent = %v, want the required entry the list does not hold", requiredAbsent)
+		}
+	})
+}
+
+// goldenNames returns the names a golden list holds: each non-blank line with
+// its surrounding space trimmed, and # comments skipped.
+func goldenNames(golden string) []string {
+	var names []string
+	for _, line := range strings.Split(golden, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		names = append(names, line)
+	}
+	return names
+}
+
+// manifestGaps returns the golden names that neither the files list nor the
+// unclaimed list carries, and the names of required entries the golden does not
+// carry. Both are sorted and both are empty when the manifest accounts for every
+// name.
+func manifestGaps(names []string, m templates.SecretsManifest) (unaccounted, requiredAbsent []string) {
+	known := make(map[string]bool, len(m.Files)+len(m.Unclaimed))
+	for _, f := range m.Files {
+		known[f.Name] = true
+	}
+	for _, u := range m.Unclaimed {
+		known[u.Name] = true
+	}
+	inGolden := make(map[string]bool, len(names))
+	for _, name := range names {
+		inGolden[name] = true
+		if !known[name] {
+			unaccounted = append(unaccounted, name)
+		}
+	}
+	for _, f := range m.Files {
+		if f.Required && !inGolden[f.Name] {
+			requiredAbsent = append(requiredAbsent, f.Name)
+		}
+	}
+	sort.Strings(unaccounted)
+	sort.Strings(requiredAbsent)
+	return unaccounted, requiredAbsent
 }
 
 // inside reports whether path is dir or lies under it, for the rendered paths a

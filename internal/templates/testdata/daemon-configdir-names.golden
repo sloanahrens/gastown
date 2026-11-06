@@ -1,0 +1,30 @@
+# The config directory's file names, names only: no contents, no modes.
+# TestDaemonComposeSecretsManifestAccountsForEveryName holds
+# deploy/daemon/secrets.yaml to this list: every name here is one of its files
+# entries or one of its unclaimed lines, and every required entry names a file
+# here. Blank lines and # comments are not names (gt-gg9hv.66).
+forgejo-landing.env
+forgejo-polecat.env
+forgejo-registry.env
+forgejo-viewer.env
+promote-gastown.key
+promote-gastown.key.pub
+promote-om.key
+promote-om.key.pub
+promote-hm.key
+promote-hm.key.pub
+promote-beads.key
+promote-beads.key.pub
+promote-mango.key
+promote-mango.key.pub
+promote-fractals.key
+promote-fractals.key.pub
+dolt-archive.key
+om-daemon-token
+om-daemon-token.meta
+claude-sbx-haiku-token
+deepseek.env
+jev.env
+hm-config.json
+ntfy-push.sh
+probe-gastown.record

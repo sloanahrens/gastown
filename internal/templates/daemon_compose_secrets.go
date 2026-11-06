@@ -14,19 +14,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// SecretsRecreateNotice is printed with every manifest render and written in the
-// header of deploy/daemon/secrets.yaml. A bind mount of one file pins that
-// file's inode, so a secret replaced by rename (an editor's atomic save, mv)
-// stays the old file inside the running container; a rewrite in place does not.
-// A Kubernetes Secret volume has no such property, so this is a compose-only
-// cost (gt-gg9hv.66, gt-gg9hv.30).
+// SecretsRecreateNotice is printed with every manifest render. It is the one Go
+// copy of the rotation line deploy/daemon/secrets.yaml's header carries; that
+// header defines what rotating a listed secret costs (gt-gg9hv.66,
+// gt-gg9hv.30).
 const SecretsRecreateNotice = "rotating any listed secret requires recreating the daemon service (a bind mount of one file pins its inode)"
 
 // SecretFS is the one seam through which the secrets code touches the host. The
-// render stats and lstats each listed file and never reads one; ReadFile is on
-// the seam so a content read added later has one place to go through, and a fake
-// can record every call and refuse it. The host's filesystem is osSecretFS
-// (gt-gg9hv.66).
+// render lstats each listed file and never reads one; ReadFile is on the seam so
+// a content read added later has one place to go through, and a fake can record
+// every call and refuse it. The host's filesystem is osSecretFS (gt-gg9hv.66).
 type SecretFS interface {
 	Stat(name string) (fs.FileInfo, error)
 	Lstat(name string) (fs.FileInfo, error)
@@ -43,8 +40,9 @@ type SecretFile struct {
 	Required bool   `yaml:"required"`
 }
 
-// UnclaimedSecret is one entry of the manifest's unclaimed list, a file no
-// daemon code or setting was found to read. It is recorded and never mounted.
+// UnclaimedSecret is one entry of the manifest's unclaimed list. The header of
+// deploy/daemon/secrets.yaml defines what an unclaimed entry is and how it is
+// used; the render records it and mounts nothing for it.
 type UnclaimedSecret struct {
 	Name   string `yaml:"name"`
 	Search string `yaml:"search"`
@@ -58,9 +56,8 @@ type SecretsManifest struct {
 	Unclaimed []UnclaimedSecret `yaml:"unclaimed"`
 }
 
-// secretMode is the form of a manifest entry's mode: four octal digits with no
-// group or other bits, since every file the manifest names is a credential or a
-// script the daemon runs, and neither may be readable by another account.
+// secretMode is the form of a manifest entry's mode. The manifest header defines
+// the mode's meaning; this regexp is the form the parser accepts.
 var secretMode = regexp.MustCompile(`^0[0-7]00$`)
 
 // ParseSecretsManifest reads a secrets manifest. A key the format does not
@@ -204,13 +201,16 @@ func (s ComposeSpec) validateSecrets() error {
 // secretMounts renders the daemon service's volumes for a spec's secrets
 // manifest: one read-only bind of each listed file at its own path and one at
 // the container's XDG_CONFIG_HOME path, sorted by name so a manifest reordered
-// by hand renders the same file. An optional file that is not present is
-// recorded as a comment and not mounted; a required one that is not present, or
-// an entry that is a directory, a symlink, a special file or one whose mode
-// exceeds the entry's maximum, is refused naming the entry.
+// by hand renders the same file. The header of deploy/daemon/secrets.yaml
+// defines what a required or optional entry and the mode maximum mean; this
+// function refuses what the header says it refuses, naming the entry.
 //
-// It lstats and stats each file through the spec's SecretFS and reads none of
-// them: the render carries paths, never contents.
+// Each entry is one Lstat, with no follow: an entry that is a symlink is refused
+// rather than mounted as the file it names, and the mode checked is the mode of
+// the name the manifest lists. The check happens here, at render time; the
+// container engine makes the bind later, so a swap between the check and the
+// mount is inherent to a file mount and is not something this render can rule
+// out. The render carries paths, never contents.
 func secretMounts(s ComposeSpec) (string, error) {
 	files := append([]SecretFile(nil), s.Secrets...)
 	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
@@ -218,10 +218,7 @@ func secretMounts(s ComposeSpec) (string, error) {
 	var b strings.Builder
 	for _, f := range files {
 		host := filepath.Join(s.ConfigDir, f.Name)
-		// Lstat, not Stat alone: a link would be mounted as the file it names,
-		// and the bind would then pin the target's inode, which is the file the
-		// operator did not list.
-		link, err := secrets.Lstat(host)
+		info, err := secrets.Lstat(host)
 		switch {
 		case err != nil && errors.Is(err, fs.ErrNotExist) && f.Required:
 			return "", fmt.Errorf("compose spec: secrets manifest entry %q is required, and %s does not exist", f.Name, host)
@@ -230,13 +227,8 @@ func secretMounts(s ComposeSpec) (string, error) {
 			continue
 		case err != nil:
 			return "", fmt.Errorf("compose spec: secrets manifest entry %q cannot be read at %s: %w", f.Name, host, err)
-		case link.Mode()&fs.ModeSymlink != 0:
+		case info.Mode()&fs.ModeSymlink != 0:
 			return "", fmt.Errorf("compose spec: secrets manifest entry %q is a symlink at %s; the manifest mounts a regular file, never a link to one", f.Name, host)
-		}
-		info, err := secrets.Stat(host)
-		switch {
-		case err != nil:
-			return "", fmt.Errorf("compose spec: secrets manifest entry %q cannot be read at %s: %w", f.Name, host, err)
 		case info.IsDir():
 			return "", fmt.Errorf("compose spec: secrets manifest entry %q is the directory %s; the manifest mounts files, not directories", f.Name, host)
 		case !info.Mode().IsRegular():
@@ -251,10 +243,10 @@ func secretMounts(s ComposeSpec) (string, error) {
 	return b.String(), nil
 }
 
-// checkSecretMode refuses a file whose permission bits go beyond what the entry
-// allows: any group or other bit, or any bit its maximum mode does not carry
-// (gt-gg9hv.66). The message names the entry and the mode on disk, never the
-// file's contents.
+// checkSecretMode enforces the manifest entry's mode maximum. The header of
+// deploy/daemon/secrets.yaml defines the maximum; this function compares the
+// mode on disk to it and names the entry and that mode, never the file's
+// contents (gt-gg9hv.66).
 func checkSecretMode(f SecretFile, perm fs.FileMode) error {
 	if perm&0o077 != 0 {
 		return fmt.Errorf("compose spec: secrets manifest entry %q is mode %04o on disk; it is readable by group or other, and the manifest mounts it for one account", f.Name, perm)
