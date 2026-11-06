@@ -22,12 +22,6 @@ func TestHandlersComments(t *testing.T) {
 	testHandlerRows(t, "comments")
 }
 
-// TestHandlersComment answers every comment golden row.
-func TestHandlersComment(t *testing.T) {
-	t.Parallel()
-	testHandlerRows(t, "comment")
-}
-
 // TestHandlersLabel answers every label golden row.
 func TestHandlersLabel(t *testing.T) {
 	t.Parallel()
@@ -51,9 +45,6 @@ func TestHandlersRefuseAnAuxCommandTheyCannotAnswer(t *testing.T) {
 		{name: "comments with no id", argv: []string{"comments", "--json"}, want: "comments needs an issue id"},
 		{name: "comments with two ids", argv: []string{"comments", "--json", "fx-1", "fx-2"}, want: "comments takes one issue id"},
 		{name: "comments add is refused by name", argv: []string{"comments", "add", "--author", "fixture", "fx-1"}, want: "comments add is not implemented"},
-		{name: "comment refuses --file", argv: []string{"comment", "--file", "note.txt", "fx-1"}, want: "--file"},
-		{name: "comment with no id", argv: []string{"comment"}, want: "comment needs an issue id"},
-		{name: "comment with no text", argv: []string{"comment", "fx-1"}, want: "comment needs text"},
 		{name: "label remove is refused by name", argv: []string{"label", "remove", "fx-1", "fixture-label"}, want: "label remove is not implemented"},
 		{name: "a bare label is refused by name", argv: []string{"label"}, want: "label is not implemented"},
 		{name: "label list refuses --json=false", argv: []string{"label", "list", "--json=false", "fx-1"}, want: "--json takes no value"},
@@ -91,7 +82,6 @@ func TestHandlersRefuseAnAuxCommandWhoseStoreCannotAnswer(t *testing.T) {
 	town := newTown(t, routeFixture)
 	for _, argv := range [][]string{
 		{"comments", "--json", "fx-9"},
-		{"comment", "fx-9", "a note"},
 		{"label", "list", "--json", "fx-9"},
 		{"label", "add", "fx-9", "a-label"},
 	} {
@@ -162,46 +152,6 @@ func TestLabelAddWritesTheLabelItReports(t *testing.T) {
 	}
 }
 
-// TestCommentWritesTheCommentItReports: the line the handler prints is the
-// comment it added, so the text is in the store when it is printed.
-func TestCommentWritesTheCommentItReports(t *testing.T) {
-	t.Parallel()
-	fixture, _ := readFixture(t)
-	town := newTown(t, routeFixture)
-	env, stdout, stderr, st := fixtureEnvWithStore(t, town, fixture, []string{"comment", "fx-2", "added", "by", "test"})
-	if code := Main(env); code != 0 {
-		t.Fatalf("comment: exit code is %d, want 0 (stderr %q)", code, stderr.String())
-	}
-	if want := "✓ Comment added to fx-2 — fixture bead two\n"; stdout.String() != want {
-		t.Errorf("stdout = %q, want %q", stdout.String(), want)
-	}
-	comments, err := st.Comments(t.Context(), "fx-2")
-	if err != nil {
-		t.Fatalf("reading fx-2's comments back: %v", err)
-	}
-	if len(comments) != 1 || comments[0].Text != "added by test" {
-		t.Errorf("fx-2 comments = %+v, want one holding %q", comments, "added by test")
-	}
-}
-
-// TestCommentIssueReportsAnAnswerItCannotWrite: a stream that refuses the line
-// is the shim's error, not a comment the caller never hears about.
-func TestCommentIssueReportsAnAnswerItCannotWrite(t *testing.T) {
-	t.Parallel()
-	st := stubAuxCommentStore{
-		show: func(id string) (*beads.Issue, error) { return &beads.Issue{ID: id, Title: "t"}, nil },
-		add:  func(string, string) error { return nil },
-	}
-	stderr := &bytes.Buffer{}
-	env := Env{Stdout: failingWriter{}, Stderr: stderr}
-	if code := commentIssue(env, st, "fx-1", "note"); code != 1 {
-		t.Errorf("exit code is %d, want 1 for a write that failed", code)
-	}
-	if !strings.Contains(stderr.String(), "writing bd's answer") {
-		t.Errorf("stderr = %q, want the write failure named", stderr.String())
-	}
-}
-
 // TestAddLabelsReportsAnAnswerItCannotWrite: bd's line for each label is the
 // write's receipt, so a stream that refuses it fails the verb.
 func TestAddLabelsReportsAnAnswerItCannotWrite(t *testing.T) {
@@ -261,40 +211,6 @@ func TestAddLabelsRefusesAnEmptyLabelSet(t *testing.T) {
 		t.Errorf("stdout = %q, want nothing", stdout.String())
 	}
 }
-
-// TestCommentIssueDoesNotAddToAnIssueItCannotRead: the title line needs a bead
-// the store holds, so a failed read stops the verb before the write.
-func TestCommentIssueDoesNotAddToAnIssueItCannotRead(t *testing.T) {
-	t.Parallel()
-	added := false
-	st := stubAuxCommentStore{
-		show: func(string) (*beads.Issue, error) { return nil, beads.ErrNotFound },
-		add:  func(string, string) error { added = true; return nil },
-	}
-	env := Env{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
-	if code := commentIssue(env, st, "fx-9", "note"); code != 1 {
-		t.Errorf("exit code is %d, want 1", code)
-	}
-	if added {
-		t.Error("a comment was added to an issue the store did not answer")
-	}
-}
-
-// stubAuxCommentStore is a store whose comment reads and write a test scripts.
-type stubAuxCommentStore struct {
-	show     func(string) (*beads.Issue, error)
-	comments func(string) ([]beads.Comment, error)
-	add      func(string, string) error
-}
-
-func (s stubAuxCommentStore) Show(id string) (*beads.Issue, error) { return s.show(id) }
-func (s stubAuxCommentStore) Comments(id string) ([]beads.Comment, error) {
-	if s.comments == nil {
-		return nil, errors.New("stubAuxCommentStore: Comments was not scripted")
-	}
-	return s.comments(id)
-}
-func (s stubAuxCommentStore) AddComment(id, text string) error { return s.add(id, text) }
 
 // stubAuxLabelStore is a store whose label write a test scripts.
 type stubAuxLabelStore struct {

@@ -28,6 +28,7 @@ var refusedVerbs = []string{
 	"backup",
 	"batch",
 	"branch",
+	"comment",
 	"compact",
 	"conflicts",
 	"create-form",

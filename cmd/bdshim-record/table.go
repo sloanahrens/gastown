@@ -116,7 +116,6 @@ func Table() []Row {
 		{Verb: "unclaim", Operands: []string{fixtureID}, Mutates: true},
 		{Verb: "dep add", Operands: []string{fixtureID, fixtureDepID}, Mutates: true},
 		{Verb: "label add", Operands: []string{fixtureID, "fixture-label"}, Mutates: true},
-		{Verb: "comment", Operands: []string{fixtureID, "fixture note"}, Mutates: true},
 		{Verb: "kv set", Operands: []string{"fixture-key", "fixture-value"}, Mutates: true},
 		{Verb: "config set", Operands: []string{"export.auto", "false"}, Mutates: true},
 	}
