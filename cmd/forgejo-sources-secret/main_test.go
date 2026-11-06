@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"net/http"
@@ -82,11 +83,29 @@ type viewerNetwork struct {
 	fake     *forgejotest.Fake
 	statuses map[string]int
 	reads    []string
+	// cancelOnMint, when set, runs once the mint has been answered, as an interrupt
+	// that lands after the token exists.
+	cancelOnMint context.CancelFunc
+	// failReads makes every read made with the minted token fail in transport, with no
+	// reply.
+	failReads bool
 }
 
+// errNoReply is the transport failure a read made with failReads meets.
+var errNoReply = errors.New("no route to host")
+
 func (v *viewerNetwork) RoundTrip(req *http.Request) (*http.Response, error) {
+	// A request whose context is done never reaches the server, as on a real transport.
+	if err := req.Context().Err(); err != nil {
+		return nil, err
+	}
 	auth := req.Header.Get("Authorization")
 	const repoRoot = forgejotest.APIPath + "/repos/"
+	if v.cancelOnMint != nil && req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, forgejotest.APIPath+"/admin/users/"+viewerAccount+"/tokens") {
+		resp, err := v.fake.RoundTrip(req)
+		v.cancelOnMint()
+		return resp, err
+	}
 	if auth == "token "+forgejotest.AdminToken || req.Method != http.MethodGet || !strings.HasPrefix(req.URL.Path, repoRoot) {
 		return v.fake.RoundTrip(req)
 	}
@@ -96,6 +115,9 @@ func (v *viewerNetwork) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	repo := strings.TrimPrefix(req.URL.Path, repoRoot)
 	v.reads = append(v.reads, repo)
+	if v.failReads {
+		return nil, errNoReply
+	}
 	status := http.StatusOK
 	scopes, _ := v.fake.TokenScopes(viewerAccount, testName)
 	switch {
@@ -133,10 +155,16 @@ type runResult struct {
 // viewer's grants, and extra arguments after the admin token file.
 func runCommand(t *testing.T, f *forgejotest.Fake, statuses map[string]int, extra ...string) runResult {
 	t.Helper()
-	net := &viewerNetwork{fake: f, statuses: statuses}
+	return runNetwork(t, context.Background(), &viewerNetwork{fake: f, statuses: statuses}, extra...)
+}
+
+// runNetwork runs the command under ctx against net, with extra arguments after the
+// admin token file.
+func runNetwork(t *testing.T, ctx context.Context, net *viewerNetwork, extra ...string) runResult {
+	t.Helper()
 	args := append([]string{"--api-url", forgejotest.APIRoot + forgejotest.APIPath, "--admin-token-file", adminFile}, extra...)
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), args, env{
+	code := run(ctx, args, env{
 		Now:      testClock,
 		ReadFile: adminReader(t),
 		HTTP:     &http.Client{Transport: net},
@@ -246,6 +274,65 @@ func TestSourcesSecretRefusesAndRevokesOnAnUnreadableRepo(t *testing.T) {
 	}
 }
 
+// TestSourcesSecretRevokesAfterInterrupt covers a run cancelled after the mint and a read
+// that fails in transport. The fake refuses a request whose context is done, so a revoke
+// made on the run's cancelled context never reaches it: the token is gone only when the
+// revoke runs on a context detached from the run's. Either way nothing is stored and the
+// run exits 1.
+func TestSourcesSecretRevokesAfterInterrupt(t *testing.T) {
+	t.Parallel()
+	t.Run("the run is cancelled after the mint", func(t *testing.T) {
+		t.Parallel()
+		f := newSourcesFake(t, "")
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		res := runNetwork(t, ctx, &viewerNetwork{fake: f, cancelOnMint: cancel})
+
+		if res.code != forgejoprov.ExitFailure {
+			t.Fatalf("exit %d, want %d; stdout: %s stderr: %s", res.code, forgejoprov.ExitFailure, res.stdout, res.stderr)
+		}
+		if !strings.Contains(res.stderr, "interrupted; nothing is stored") {
+			t.Fatalf("stderr does not report the interrupt:\n%s", res.stderr)
+		}
+		if _, ok := f.TokenScopes(viewerAccount, testName); ok {
+			t.Fatal("the minted token was left live after the interrupt")
+		}
+		if _, ok := f.Secret(secretOwner+"/"+secretRepo, secretName); ok {
+			t.Fatal("a secret was stored after the interrupt")
+		}
+		if strings.Contains(res.stdout, "RESULT") {
+			t.Fatalf("an interrupted run printed the RESULT line:\n%s", res.stdout)
+		}
+	})
+	t.Run("a read fails in transport", func(t *testing.T) {
+		t.Parallel()
+		f := newSourcesFake(t, "")
+		res := runNetwork(t, context.Background(), &viewerNetwork{fake: f, failReads: true})
+
+		if res.code != forgejoprov.ExitFailure {
+			t.Fatalf("exit %d, want %d; stdout: %s stderr: %s", res.code, forgejoprov.ExitFailure, res.stdout, res.stderr)
+		}
+		for _, repo := range readRepos {
+			want := secretOwner + "/" + repo + ": request failed (no HTTP status)"
+			if !strings.Contains(res.stdout, want) {
+				t.Fatalf("stdout lacks %q:\n%s", want, res.stdout)
+			}
+		}
+		if !strings.Contains(res.stderr, "sloan/beads was not read (no HTTP reply, a transport failure)") {
+			t.Fatalf("stderr does not name the transport failure:\n%s", res.stderr)
+		}
+		if out := res.stdout + res.stderr; strings.Contains(out, "HTTP 0") {
+			t.Fatalf("the output reports a transport failure as HTTP 0:\n%s", out)
+		}
+		if _, ok := f.TokenScopes(viewerAccount, testName); ok {
+			t.Fatal("the minted token was not revoked after the transport failure")
+		}
+		if _, ok := f.Secret(secretOwner+"/"+secretRepo, secretName); ok {
+			t.Fatal("a secret was stored after a transport failure")
+		}
+	})
+}
+
 // TestSourcesSecretRefusesAnAdminFileWithNoToken checks an admin token file that holds no
 // token stops the run before any request, with the message naming the file.
 func TestSourcesSecretRefusesAnAdminFileWithNoToken(t *testing.T) {
@@ -304,9 +391,11 @@ func TestSourcesSecretDryRunMintsNothing(t *testing.T) {
 }
 
 // TestSourcesSecretNeverPrintsTheToken runs the success path and each refusal with a
-// minted value that holds a quote, a backslash and non-ASCII runes. The store refusal
-// echoes that value back in its body. No output line carries the value or its
-// JSON-escaped form, while the repository names, statuses and target still print.
+// minted value that holds a quote, a backslash and non-ASCII runes. The fake's store
+// refusal echoes that value back in its body; the command never reads a store reply, so
+// the echo can reach the output only if the command starts reading it. No output line
+// carries the value or its JSON-escaped form, while the repository names, statuses and
+// target still print.
 func TestSourcesSecretNeverPrintsTheToken(t *testing.T) {
 	t.Parallel()
 	escaped, err := json.Marshal(leakyValue)

@@ -37,6 +37,13 @@ const (
 // before the secret is stored.
 var readRepos = []string{"beads", "om", "hm", "devops"}
 
+// noReply is the status a read records when the request got no HTTP reply at all. No
+// HTTP status is 0, so it marks a transport failure and is never printed as a status.
+const noReply = 0
+
+// revokeTimeout bounds the revoke a refusal or an interrupt makes after the mint.
+const revokeTimeout = 30 * time.Second
+
 // env is what the command reads and writes through: the clock the token's name is
 // taken from, the file the admin token is read from, and the HTTP client Forgejo is
 // reached through (nil means the client's default, with a timeout).
@@ -96,8 +103,8 @@ func run(ctx context.Context, args []string, env env, stdout, stderr io.Writer) 
 	for _, repo := range readRepos {
 		status, err := readRepoStatus(reader, repo)
 		if err != nil {
-			fmt.Fprintf(stdout, "%s/%s: request failed\n", secretOwner, repo)
-			unreadable[repo] = 0
+			fmt.Fprintf(stdout, "%s/%s: request failed (no HTTP status)\n", secretOwner, repo)
+			unreadable[repo] = noReply
 			continue
 		}
 		fmt.Fprintf(stdout, "%s/%s: HTTP %d\n", secretOwner, repo, status)
@@ -105,27 +112,38 @@ func run(ctx context.Context, args []string, env env, stdout, stderr io.Writer) 
 			unreadable[repo] = status
 		}
 	}
+	if ctx.Err() != nil {
+		fmt.Fprintf(stderr, "forgejo-sources-secret: interrupted; nothing is stored on %s/%s (%s)\n", secretOwner, secretRepo, secretName)
+		revokeMinted(ctx, admin, name, stderr)
+		return forgejoprov.ExitFailure
+	}
 	if len(unreadable) > 0 {
 		for _, repo := range readRepos {
 			status, bad := unreadable[repo]
 			if !bad {
 				continue
 			}
-			if status == http.StatusNotFound || status == http.StatusForbidden {
+			switch {
+			case status == noReply:
+				fmt.Fprintf(stderr, "forgejo-sources-secret: %s/%s was not read (no HTTP reply, a transport failure); nothing is stored for it\n", secretOwner, repo)
+			case status == http.StatusNotFound || status == http.StatusForbidden:
 				fmt.Fprintf(stderr, "forgejo-sources-secret: %s/%s is not readable by %s; the operator should add %s as a read collaborator on %s/%s in the Forgejo UI, then run this again\n",
 					secretOwner, repo, viewerAccount, viewerAccount, secretOwner, repo)
-				continue
+			default:
+				fmt.Fprintf(stderr, "forgejo-sources-secret: %s/%s was not read (HTTP %d); nothing is stored for it\n", secretOwner, repo, status)
 			}
-			fmt.Fprintf(stderr, "forgejo-sources-secret: %s/%s was not read (HTTP %d); nothing is stored for it\n", secretOwner, repo, status)
 		}
-		revokeMinted(admin, name, stderr)
 		fmt.Fprintf(stderr, "forgejo-sources-secret: nothing stored on %s/%s (%s)\n", secretOwner, secretRepo, secretName)
+		revokeMinted(ctx, admin, name, stderr)
 		return forgejoprov.ExitFailure
 	}
 
 	if err := admin.SetRepoSecret(ctx, secretOwner, secretRepo, secretName, value); err != nil {
 		fmt.Fprintf(stderr, "forgejo-sources-secret: could not store %s on %s/%s: %v\n", secretName, secretOwner, secretRepo, err)
-		revokeMinted(admin, name, stderr)
+		if ctx.Err() != nil {
+			fmt.Fprintln(stderr, "forgejo-sources-secret: the run was interrupted during the store")
+		}
+		revokeMinted(ctx, admin, name, stderr)
 		return forgejoprov.ExitFailure
 	}
 	fmt.Fprintf(stdout, "RESULT: stored %s on %s/%s\n", secretName, secretOwner, secretRepo)
@@ -192,10 +210,16 @@ func readRepoStatus(reader *forgejoprov.Client, repo string) (int, error) {
 	return status, err
 }
 
-// revokeMinted revokes the token the run minted. A revoke that fails is reported by
-// name, since that token is then still live and the operator must remove it.
-func revokeMinted(admin *forgejoprov.Client, name string, stderr io.Writer) {
-	if err := admin.RevokeToken(viewerAccount, name); err != nil {
+// revokeMinted revokes the token the run minted. The revoke runs on a context detached
+// from the run's, with its own timeout, so a signal that cancelled the run cannot stop
+// it and leave the token live. A revoke that fails is reported by name, since that
+// token is then still live and the operator must remove it.
+func revokeMinted(ctx context.Context, admin *forgejoprov.Client, name string, stderr io.Writer) {
+	detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), revokeTimeout)
+	defer cancel()
+	revoker := *admin
+	revoker.Ctx = detached
+	if err := revoker.RevokeToken(viewerAccount, name); err != nil {
 		fmt.Fprintf(stderr, "forgejo-sources-secret: could not revoke the minted token %s, so it is still live: revoke it in the Forgejo UI (%v)\n", name, err)
 		return
 	}
