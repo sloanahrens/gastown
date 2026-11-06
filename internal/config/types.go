@@ -1371,8 +1371,11 @@ type MergeQueueConfig struct {
 	// green, and any failure or error is red. UNKNOWN covers pending, warning,
 	// skipped, missing, hand-posted and unreadable; an UNKNOWN calls neither
 	// callback, reverts nothing, and raises one attention item once
-	// post_land_timeout passes. It wins over PostLandCommand when both are
-	// set. Read only from the rig's own settings/config.json, so merged repo
+	// post_land_timeout passes. A red status alone never reverts: with a
+	// PostLandCommand the check is rerun at the landed commit and only a
+	// rerun that fails again takes the red-main path that can revert; with
+	// none, the red-main bead is filed and nothing is reverted. It wins
+	// over PostLandCommand when both are set. Read only from the rig's own settings/config.json, so merged repo
 	// content cannot choose it.
 	PostLandStatusContext string `json:"post_land_status_context,omitempty"`
 
