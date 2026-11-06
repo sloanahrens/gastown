@@ -744,7 +744,7 @@ func TestPoolShowNamesTheDeadHookedSeatsInTheCount(t *testing.T) {
 		t.Fatal(err)
 	}
 	live := poolLiveForWith(root, func(pool *config.PolecatPool) ([]poolSession, error) {
-		return poolSeatSessionsWith(&fakeLister{}, root, poolDispositionAnswering(root, reads), nil, pool)
+		return poolSeatSessionsWith(&fakeLister{}, root, poolDispositionAnswering(root, reads), poolHookHeldAnswering(root, reads), nil, pool)
 	})
 
 	var out bytes.Buffer
@@ -787,7 +787,7 @@ func TestPoolShowAndTheTickAgreeOnAMixedPoolsSessionlessSeat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sessions, err := poolSeatSessionsWith(&fakeLister{}, root, poolDispositionAnswering(root, reads), nil, ts.PolecatPool)
+	sessions, err := poolSeatSessionsWith(&fakeLister{}, root, poolDispositionAnswering(root, reads), poolHookHeldAnswering(root, reads), nil, ts.PolecatPool)
 	if err != nil {
 		t.Fatalf("poolSeatSessionsWith: %v", err)
 	}
@@ -800,7 +800,7 @@ func TestPoolShowAndTheTickAgreeOnAMixedPoolsSessionlessSeat(t *testing.T) {
 
 	// The page: the same seats, occupied from the same seats' picture.
 	live := poolLiveForWith(root, func(pool *config.PolecatPool) ([]poolSession, error) {
-		return poolSeatSessionsWith(&fakeLister{}, root, poolDispositionAnswering(root, reads), nil, pool)
+		return poolSeatSessionsWith(&fakeLister{}, root, poolDispositionAnswering(root, reads), poolHookHeldAnswering(root, reads), nil, pool)
 	})
 	var out bytes.Buffer
 	if err := runPoolSeatMapShow(&out, root, ts, poolTestNow, live); err != nil {

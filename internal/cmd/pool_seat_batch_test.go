@@ -83,6 +83,13 @@ func batchOverStore(town string, store beads.Client) *poolSeatBatch {
 		func(_ beads.Client, id string) (*beads.Issue, error) { return store.Show(id) })
 }
 
+// poolSeatSessionsOverBatch is the seat picture over a batch built inline,
+// handing the call site both reads the batch answers.
+func poolSeatSessionsOverBatch(t *testing.T, lister sessionLister, town string, batch *poolSeatBatch, work poolSeatWorkFunc, pool *config.PolecatPool) ([]poolSession, error) {
+	t.Helper()
+	return poolSeatSessionsWith(lister, town, batch.disposition, batch.hookHeld, work, pool)
+}
+
 // TestPoolSeatBatchReadsIdlePolecatsInBatches is the roster over 25 polecat
 // directories: the seats counted are the per-seat read's, and the reads are one
 // batched assigned-work list for the rig, which also answers the agent beads it
@@ -94,13 +101,13 @@ func TestPoolSeatBatchReadsIdlePolecatsInBatches(t *testing.T) {
 	pool := seatPool("deepseek-flash", 30)
 
 	perSeat := newCountingStore(db)
-	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), nil, pool)
+	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), poolHookHeldAnswering(town, seatReadsOver(perSeat)), nil, pool)
 	if err != nil {
 		t.Fatalf("per-seat roster: %v", err)
 	}
 
 	store := newCountingStore(db)
-	got, err := poolSeatSessionsWith(lister, town, batchOver(town, store).disposition, nil, pool)
+	got, err := poolSeatSessionsOverBatch(t, lister, town, batchOver(town, store), nil, pool)
 	if err != nil {
 		t.Fatalf("batched roster: %v", err)
 	}
@@ -226,7 +233,7 @@ func TestPoolSeatBatchFallsBackWhenTheBatchFails(t *testing.T) {
 	town, db, lister := seatTown(t, 6)
 	store := newCountingStore(db)
 	store.failBatch = true
-	got, err := poolSeatSessionsWith(lister, town, batchOver(town, store).disposition, nil, seatPool("deepseek-flash", 30))
+	got, err := poolSeatSessionsOverBatch(t, lister, town, batchOver(town, store), nil, seatPool("deepseek-flash", 30))
 	if err != nil {
 		t.Fatalf("poolSeatSessionsWith: %v", err)
 	}
@@ -302,6 +309,21 @@ func closedSourceTown(t *testing.T, polecats int, lastSource func(name string) s
 // closedSourceOf names each polecat's own closed source issue.
 func closedSourceOf(name string) string { return "gt-old-" + name }
 
+// holdSeatHook gives a fixture polecat an open hook and the hint hint, so the
+// cheap hold read finds its seat held and the full seat read runs for it — the
+// read a test about the full read's own lookups needs.
+func holdSeatHook(t *testing.T, town string, db *beadsfake.Fake, rig, name, hint string) {
+	t.Helper()
+	prefix := beads.GetPrefixForRig(town, rig)
+	id := beads.PolecatBeadIDWithPrefix(prefix, rig, name)
+	hook := "gt-hook-" + name
+	desc := beads.FormatAgentDescription(id, &beads.AgentFields{
+		RoleType: "polecat", Rig: rig, AgentState: "idle", LastSourceIssue: hint, HookBead: hook,
+	})
+	db.Seed(beads.Issue{ID: id, Title: id, Type: "agent", Labels: []string{"gt:agent"}, Description: desc},
+		beads.Issue{ID: hook, Status: string(beads.StatusOpen)})
+}
+
 // polecatNames names the first n polecats a fixture town seeds.
 func polecatNames(n int) []string {
 	names := make([]string, 0, n)
@@ -363,14 +385,14 @@ func TestPoolSeatBatchReadsClosedSourceIssuesInOneBatch(t *testing.T) {
 	pool := seatPool("deepseek-flash", 30)
 
 	perSeat := newCountingStore(db)
-	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), nil, pool)
+	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), poolHookHeldAnswering(town, seatReadsOver(perSeat)), nil, pool)
 	if err != nil {
 		t.Fatalf("per-seat roster: %v", err)
 	}
 
 	store := newCountingStore(db)
 	batch := batchOver(town, store)
-	got, err := poolSeatSessionsWith(lister, town, batch.disposition, nil, pool)
+	got, err := poolSeatSessionsWith(lister, town, batch.disposition, batch.hookHeld, nil, pool)
 	if err != nil {
 		t.Fatalf("batched roster: %v", err)
 	}
@@ -400,16 +422,23 @@ func TestPoolSeatBatchReadsClosedSourceIssuesInOneBatch(t *testing.T) {
 func TestPoolSeatBatchReadsSourceIssuesLiveWhenTheBatchFails(t *testing.T) {
 	t.Parallel()
 	town, db, lister := closedSourceTown(t, 6, closedSourceOf)
+	// The dead seats hold a hook, so every seat's read runs and every source
+	// issue is looked up live: the test is about where that lookup goes, not
+	// about which seats the cheap hold read can skip (gt-gg9hv.73).
+	for i := 3; i <= 6; i++ {
+		name := fmt.Sprintf("p%02d", i)
+		holdSeatHook(t, town, db, "gastown", name, closedSourceOf(name))
+	}
 	pool := seatPool("deepseek-flash", 30)
 
 	perSeat := newCountingStore(db)
-	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), nil, pool)
+	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), poolHookHeldAnswering(town, seatReadsOver(perSeat)), nil, pool)
 	if err != nil {
 		t.Fatalf("per-seat roster: %v", err)
 	}
 
 	store := &showMultipleFails{countingStore: newCountingStore(db), fail: sourcesUnder}
-	got, err := poolSeatSessionsWith(lister, town, batchOverStore(town, store).disposition, nil, pool)
+	got, err := poolSeatSessionsOverBatch(t, lister, town, batchOverStore(town, store), nil, pool)
 	if err != nil {
 		t.Fatalf("batched roster: %v", err)
 	}
@@ -445,17 +474,20 @@ func TestPoolSeatBatchReadsAbsentSourceIssueLive(t *testing.T) {
 		}
 		return closedSourceOf(name)
 	})
+	// p04's seat holds a hook, so its full read runs and its absent source issue
+	// is the read this test is about (gt-gg9hv.73).
+	holdSeatHook(t, town, db, "gastown", "p04", "gt-elsewhere")
 	pool := seatPool("deepseek-flash", 30)
 
 	perSeat := newCountingStore(db)
-	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), nil, pool)
+	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), poolHookHeldAnswering(town, seatReadsOver(perSeat)), nil, pool)
 	if err != nil {
 		t.Fatalf("per-seat roster: %v", err)
 	}
 
 	store := newCountingStore(db)
 	batch := batchOver(town, store)
-	got, err := poolSeatSessionsWith(lister, town, batch.disposition, nil, pool)
+	got, err := poolSeatSessionsWith(lister, town, batch.disposition, batch.hookHeld, nil, pool)
 	if err != nil {
 		t.Fatalf("batched roster: %v", err)
 	}
@@ -524,13 +556,13 @@ func TestPoolSeatBatchAnswersHookBeads(t *testing.T) {
 	pool := seatPool("deepseek-flash", 30)
 
 	perSeat := newCountingStore(db)
-	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), nil, pool)
+	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), poolHookHeldAnswering(town, seatReadsOver(perSeat)), nil, pool)
 	if err != nil {
 		t.Fatalf("per-seat roster: %v", err)
 	}
 
 	store := newCountingStore(db)
-	got, err := poolSeatSessionsWith(lister, town, batchOver(town, store).disposition, nil, pool)
+	got, err := poolSeatSessionsOverBatch(t, lister, town, batchOver(town, store), nil, pool)
 	if err != nil {
 		t.Fatalf("batched roster: %v", err)
 	}
@@ -777,13 +809,13 @@ func TestPoolSeatBatchCountsSeatsWhenTheWorkListFails(t *testing.T) {
 	pool := seatPool("deepseek-flash", 30)
 
 	perSeat := newCountingStore(db)
-	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), nil, pool)
+	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), poolHookHeldAnswering(town, seatReadsOver(perSeat)), nil, pool)
 	if err != nil {
 		t.Fatalf("per-seat roster: %v", err)
 	}
 
 	store := &workListFails{countingStore: newCountingStore(db)}
-	got, err := poolSeatSessionsWith(lister, town, batchOverStore(town, store).disposition, nil, pool)
+	got, err := poolSeatSessionsOverBatch(t, lister, town, batchOverStore(town, store), nil, pool)
 	if err != nil {
 		t.Fatalf("batched roster: %v", err)
 	}

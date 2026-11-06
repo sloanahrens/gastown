@@ -924,6 +924,42 @@ func TestSpecDispatchTickTookLineNamesItsPhaseCalls(t *testing.T) {
 	}
 }
 
+// A tick that read a roster logs the worktree probes that read paid for, beside
+// the tick's timing, zero included: a roster whose polecats hold no hook shows
+// the probe it did not run, and a tick that read no roster reports no count at
+// all (gt-gg9hv.73).
+func TestSpecDispatchTickLogsTheProbedWorktreeCount(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name   string
+		report string
+		want   string
+	}{
+		{"no count reported", `{"candidates": 0}`, ""},
+		{"a roster that probed none", `{"candidates": 0, "probed_worktrees": 0}`, "spec_dispatch: roster probed 0 worktrees"},
+		{"a roster that probed two", `{"candidates": 0, "probed_worktrees": 2}`, "spec_dispatch: roster probed 2 worktrees"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			fake := newFakeCLI(func([]string) cliReply { return cliReply{stdout: string(wireOut(c.report))} })
+			logger, lines := lineLogger()
+			d := specDispatchFake(t, fake, logger)
+
+			d.runSpecDispatch()
+
+			got := countContaining(lines(), "roster probed")
+			if c.want == "" {
+				if got != 0 {
+					t.Errorf("probed-worktree lines = %d, want none: %v", got, lines())
+				}
+				return
+			}
+			if n := countContaining(lines(), c.want); n != 1 {
+				t.Errorf("probed-worktree lines = %d, want one %q: %v", n, c.want, lines())
+			}
+		})
+	}
+}
+
 // A tick's census file is logged once the tick returns, as the daemon's census
 // line, naming the busiest callers of the subprocess's bd reads (gt-139dp).
 func TestSpecDispatchLogsItsCensus(t *testing.T) {

@@ -170,6 +170,11 @@ type specDispatchTickReport struct {
 	RosterCalls     int `json:"roster_calls,omitempty"`
 	BoardCalls      int `json:"board_calls,omitempty"`
 	CandidatesCalls int `json:"candidates_calls,omitempty"`
+	// ProbedWorktrees is how many polecat worktrees the roster's dead-hooked
+	// walk ran the full seat read for. It is logged beside the tick's timing
+	// (gt-gg9hv.73). Nil is a tick that read no roster, which is not the same
+	// as a roster that probed none.
+	ProbedWorktrees *int `json:"probed_worktrees,omitempty"`
 	// seq is the daemon's own id for the tick, set after decoding: a
 	// background sling's outcome names the tick that planned it, which the
 	// tick's own report cannot (gt-pk2q8).
@@ -345,6 +350,7 @@ func (d *Daemon) runSpecDispatchUnder(bound time.Duration) {
 	// The 'tick took' line is logged for a tick that decided something; a held
 	// tick runs no phase, so it has no timing to name.
 	took := ""
+	probed := ""
 	if r, perr := parseSpecDispatchReport(out); perr == nil {
 		now := d.clk().Now()
 		// A held tick decided nothing and carries no roster, so it observes no
@@ -357,6 +363,12 @@ func (d *Daemon) runSpecDispatchUnder(bound time.Duration) {
 			d.dispatchIdle.Observe(r, now)
 			d.recordDispatchTick(r, now)
 			took = specDispatchTookLine(r, now.Sub(start))
+			// The worktree probes the roster paid for: beside the tick's
+			// timing, so a tick whose roster stopped probing seats no hook
+			// holds reads as the saving it is (gt-gg9hv.73).
+			if r.ProbedWorktrees != nil {
+				probed = fmt.Sprintf("roster probed %d worktrees", *r.ProbedWorktrees)
+			}
 			// The tick has returned; its slings run on from here, and the next
 			// tick does not wait for them (gt-5h70s). Each sling's outcome
 			// returns to this tick's counts (gt-pk2q8).
@@ -372,6 +384,9 @@ func (d *Daemon) runSpecDispatchUnder(bound time.Duration) {
 	}
 	if took != "" {
 		d.logger.Printf("spec_dispatch: %s", took)
+	}
+	if probed != "" {
+		d.logger.Printf("spec_dispatch: %s", probed)
 	}
 }
 

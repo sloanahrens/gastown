@@ -1,11 +1,20 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 
 	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -169,6 +178,9 @@ func TestIsActionableReadyBead_AbsentRedMainStateCountsAsToday(t *testing.T) {
 // submitted, naming the work bead it handed to the landing worker.
 func writeLandingSeat(t *testing.T, townRoot, rigName, polecatName, workBead string) {
 	t.Helper()
+	// The seat picture reads the town's rig registry; a town without one
+	// cannot be read, so the fixture names its rig.
+	writeTestRigsConfig(t, townRoot, rigName)
 	if err := os.MkdirAll(filepath.Join(townRoot, rigName, "polecats", polecatName), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -256,6 +268,7 @@ func TestPoolSeatSessionsCountsEveryKindOfTakenSeat(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			town := t.TempDir()
+			writeTestRigsConfig(t, town, "gastown")
 			work := submittedWork()
 			if c.claim {
 				writeSeatClaim(t, town, "claim-1", "deepseek-flash")
@@ -265,7 +278,7 @@ func TestPoolSeatSessionsCountsEveryKindOfTakenSeat(t *testing.T) {
 				work = submittedWork("gt-ruby")
 			}
 
-			got, err := poolSeatSessionsWith(c.lister, town, nil, work, pool)
+			got, err := poolSeatSessionsWith(c.lister, town, nil, noHeldHooks, work, pool)
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
@@ -346,7 +359,7 @@ func TestPoolSeatSessionsCountsDeadHookedSeats(t *testing.T) {
 				}
 				return c.state, nil
 			}
-			got, err := poolSeatSessionsWith(&fakeLister{sessions: c.sessions}, town, disposition, nil, pool)
+			got, err := poolSeatSessionsWith(&fakeLister{sessions: c.sessions}, town, disposition, hookHeldOf(disposition), nil, pool)
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
@@ -516,7 +529,7 @@ func TestPoolSeatSessionsCountsADeadSandboxSeatAsDeadHooked(t *testing.T) {
 				readTown = ""
 			}
 
-			got, err := poolOccupiedSessions(answering, town, disposition, nil, pool, time.Now, sandboxSeatDeathsFor(readTown))
+			got, err := poolOccupiedSessions(answering, town, disposition, hookHeldOf(disposition), nil, pool, time.Now, sandboxSeatDeathsFor(readTown))
 			if err != nil {
 				t.Fatalf("poolOccupiedSessions: %v", err)
 			}
@@ -584,7 +597,8 @@ func TestPoolSeatSessionsKeepsASandboxSeatShortOfTheDeadThreshold(t *testing.T) 
 				created: map[string]time.Time{sandbox: created},
 			}
 
-			got, err := poolOccupiedSessions(answering, town, func(string, string) (poolSeatState, error) { return held, nil }, nil, pool, time.Now, sandboxSeatDeathsFor(town))
+			heldRead := func(string, string) (poolSeatState, error) { return held, nil }
+			got, err := poolOccupiedSessions(answering, town, heldRead, hookHeldOf(heldRead), nil, pool, time.Now, sandboxSeatDeathsFor(town))
 			if err != nil {
 				t.Fatalf("poolOccupiedSessions: %v", err)
 			}
@@ -656,7 +670,7 @@ func TestPoolSeatSessionsRestartKeepsTheCount(t *testing.T) {
 		}, nil
 	}
 
-	crashed, err := poolSeatSessionsWith(&fakeLister{}, town, disposition, nil, pool)
+	crashed, err := poolSeatSessionsWith(&fakeLister{}, town, disposition, hookHeldOf(disposition), nil, pool)
 	if err != nil {
 		t.Fatalf("poolSeatSessionsWith (crashed): %v", err)
 	}
@@ -667,7 +681,7 @@ func TestPoolSeatSessionsRestartKeepsTheCount(t *testing.T) {
 	restarted := &fakeLister{sessions: map[string]map[string]string{
 		"gt-ember": {"GT_ROLE": "gastown/polecats/ember", "GT_AGENT": "deepseek-flash"},
 	}}
-	after, err := poolSeatSessionsWith(restarted, town, disposition, nil, pool)
+	after, err := poolSeatSessionsWith(restarted, town, disposition, hookHeldOf(disposition), nil, pool)
 	if err != nil {
 		t.Fatalf("poolSeatSessionsWith (restarted): %v", err)
 	}
@@ -694,6 +708,7 @@ func TestPoolLandingSeatEndsWithTheLabel(t *testing.T) {
 	t.Parallel()
 	pool := seatPool("deepseek-flash", 3)
 	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
 	writeLandingSeat(t, town, "gastown", "ruby", "gt-ruby")
 
 	// The record says submitted, the bead says otherwise.
@@ -704,7 +719,7 @@ func TestPoolLandingSeatEndsWithTheLabel(t *testing.T) {
 		}
 		return out, nil
 	}
-	got, err := poolSeatSessionsWith(&fakeLister{}, town, nil, over, pool)
+	got, err := poolSeatSessionsWith(&fakeLister{}, town, nil, noHeldHooks, over, pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -714,7 +729,7 @@ func TestPoolLandingSeatEndsWithTheLabel(t *testing.T) {
 
 	// A record with no work bead names nothing to confirm, so it holds nothing.
 	writeLandingSeat(t, town, "gastown", "opal", "")
-	got, err = poolSeatSessionsWith(&fakeLister{}, town, nil, over, pool)
+	got, err = poolSeatSessionsWith(&fakeLister{}, town, nil, noHeldHooks, over, pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -730,6 +745,7 @@ func TestPoolLandingSeatSkipsASeatThatIsGone(t *testing.T) {
 	t.Parallel()
 	pool := seatPool("deepseek-flash", 3)
 	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
 
 	// A submitted record with no polecat directory behind it.
 	writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "ghost"}, town,
@@ -738,7 +754,7 @@ func TestPoolLandingSeatSkipsASeatThatIsGone(t *testing.T) {
 	writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: "witness"}, town,
 		intent.Record{Desired: intent.DesiredSubmitted, WorkBead: "gt-witness"})
 
-	got, err := poolSeatSessionsWith(&fakeLister{}, town, nil, submittedWork("gt-ghost", "gt-witness"), pool)
+	got, err := poolSeatSessionsWith(&fakeLister{}, town, nil, noHeldHooks, submittedWork("gt-ghost", "gt-witness"), pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -783,13 +799,14 @@ func TestSpecRosterCountsACompletingSeatOnce(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			town := t.TempDir()
+			writeTestRigsConfig(t, town, "gastown")
 			work := submittedWork()
 			if c.landing {
 				writeLandingSeat(t, town, "gastown", "jade", "gt-jade")
 				work = submittedWork("gt-jade")
 			}
 
-			sessions, err := poolSeatSessionsWith(&fakeLister{sessions: c.sessions}, town, nil, work, pool)
+			sessions, err := poolSeatSessionsWith(&fakeLister{sessions: c.sessions}, town, nil, noHeldHooks, work, pool)
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
@@ -919,7 +936,7 @@ func TestSessionlessSeatsCountOnTheAgentTheyWereSlung(t *testing.T) {
 			}
 			writeIntentRecord(t, seat, town, rec)
 
-			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, disposition, work, pool)
+			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, disposition, hookHeldOf(disposition), work, pool)
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
@@ -1123,7 +1140,7 @@ func TestPoolSeatSessionsDropsAnOverrunStoppedSeatOnceItsAgentBeadIsReset(t *tes
 					return handedBack, nil
 				},
 			}
-			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, poolDispositionAnswering(town, reads), nil, pool)
+			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, poolDispositionAnswering(town, reads), poolHookHeldAnswering(town, reads), nil, pool)
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
@@ -1188,7 +1205,7 @@ func TestPoolDeadHookedSessions_ParkedSeatReleasesAfterThirtyMinutes(t *testing.
 					intent.Record{Desired: intent.DesiredPark, Reason: "hand-edited"})
 			}
 
-			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, hooked, nil, pool)
+			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, hooked, hookHeldOf(hooked), nil, pool)
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
@@ -1250,7 +1267,7 @@ func TestPoolDeadHookedSessions_SupervisorFreezeHoldsSeatPastThirtyMinutes(t *te
 		}, nil
 	}
 
-	sessions, err := poolSeatSessionsWith(&fakeLister{}, town, hooked, nil, pool)
+	sessions, err := poolSeatSessionsWith(&fakeLister{}, town, hooked, hookHeldOf(hooked), nil, pool)
 	if err != nil {
 		t.Fatalf("poolSeatSessionsWith: %v", err)
 	}
@@ -1291,5 +1308,421 @@ func TestPoolCounts_SkipParkedStaleSeat(t *testing.T) {
 	held := append(sessions, poolSession{name: "live/ember", agent: "deepseek-flash"})
 	if _, _, refused, _ := choosePoolAgent(pool, "deepseek-flash", held, poolTestNow); !refused {
 		t.Error("a live session beside a released seat did not fill max_total 1")
+	}
+}
+
+// deadHookedWalkTestTown stages one polecat directory per name under one rig,
+// the enumeration poolDeadHookedSessions walks, and the pool those seats count
+// against.
+func deadHookedWalkTestTown(t *testing.T, names ...string) (string, *config.PolecatPool) {
+	t.Helper()
+	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
+	for _, name := range names {
+		writeTownPolecatDir(t, town, "gastown", name)
+	}
+	return town, seatPool("deepseek-flash", 3)
+}
+
+// poolDeadHookedSessionsBeforeTheSplit is the dead-hooked walk as it was before
+// gt-gg9hv.73: the full seat read for every polecat directory that is not a
+// live seat, HookHeld taken from that read. It is the equivalence test's oracle,
+// kept here rather than in production so the two walks can be compared.
+func poolDeadHookedSessionsBeforeTheSplit(townRoot string, pool *config.PolecatPool, disposition polecatDispositionFunc, live []poolSession, now time.Time) ([]poolSession, error) {
+	if townRoot == "" || !poolOwnsSeats(pool) || disposition == nil {
+		return nil, nil
+	}
+	fallback := unrecordedSeatAgent(townRoot, pool)
+	liveSeats := liveSeatKeys(live)
+	rigs, err := knownRigNames(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	var out []poolSession
+	for _, rigName := range rigs {
+		names, err := listPolecatDirectoryNames(filepath.Join(townRoot, rigName))
+		if err != nil {
+			return nil, fmt.Errorf("listing polecats in %s: %w", rigName, err)
+		}
+		for _, name := range names {
+			if liveSeats[rigName+"/"+name] {
+				continue
+			}
+			state, err := disposition(rigName, name)
+			if err != nil || !state.HookHeld || !state.Disposition.CountsTowardCapacity {
+				continue
+			}
+			rec, _ := intent.Read(townRoot, polecatIntentSeat(rigName, name))
+			stale := parkedStale(townRoot, rigName, name, now)
+			out = append(out, poolSession{
+				name:        "dead/" + rigName + "/" + name,
+				agent:       slungAgent(rec, fallback(rigName)),
+				rig:         rigName,
+				polecat:     name,
+				deadHooked:  !stale,
+				parkedStale: stale,
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+	return out, nil
+}
+
+// TestPoolDeadHookedEquivalentToTheOldWalk is gt-gg9hv.73's behaviour proof:
+// the walk that reads the hook before the worktree probe returns exactly the
+// seats the old walk returned, over every combination of a hook held or not, a
+// session live or not, and a state counting toward capacity or not. The old
+// walk is the oracle; the probe is the full seat read's fake, counted here.
+func TestPoolDeadHookedEquivalentToTheOldWalk(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1760000000, 0)
+	cases := []struct {
+		name   string
+		held   bool
+		live   bool
+		counts bool
+	}{
+		{"a held hook on a dead seat counts", true, false, true},
+		{"a held hook whose state does not count", true, false, false},
+		{"a held hook on a live seat", true, true, true},
+		{"a held hook on a live seat whose state does not count", true, true, false},
+		{"no held hook on a dead seat", false, false, true},
+		{"no held hook and a state that does not count", false, false, false},
+		{"no held hook on a live seat", false, true, true},
+		{"no held hook on a live seat whose state does not count", false, true, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town, pool := deadHookedWalkTestTown(t, "ember")
+			var live []poolSession
+			if c.live {
+				live = []poolSession{{name: "gt-ember", agent: "deepseek-flash", rig: "gastown", polecat: "ember"}}
+			}
+			disposition := func(rigName, polecatName string) (poolSeatState, error) {
+				return poolSeatState{
+					Disposition: polecat.WorkstateDisposition{CountsTowardCapacity: c.counts},
+					HookHeld:    c.held,
+				}, nil
+			}
+			hookHeld := func(string, string) (bool, error) { return c.held, nil }
+
+			want, err := poolDeadHookedSessionsBeforeTheSplit(town, pool, disposition, live, now)
+			if err != nil {
+				t.Fatalf("the old walk: %v", err)
+			}
+			got, probed, err := poolDeadHookedSessions(town, pool, disposition, hookHeld, live, now)
+			if err != nil {
+				t.Fatalf("poolDeadHookedSessions: %v", err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("dead-hooked seats = %+v, want the old walk's %+v", got, want)
+			}
+			// The full seat read (the worktree probe) runs only for a seat
+			// whose hook is held and whose session is gone.
+			wantProbed := 0
+			if c.held && !c.live {
+				wantProbed = 1
+			}
+			if probed != wantProbed {
+				t.Fatalf("probed %d worktrees, want %d", probed, wantProbed)
+			}
+		})
+	}
+}
+
+// TestPoolDeadHookedProbesOnlyHeldHooks is gt-gg9hv.73's cost proof: the
+// worktree probe (the full seat read) runs for the seats whose hook is held and
+// for no other, while the cheap hook read runs for every dead seat. Moving the
+// probe back before the hook read makes the probed names include the seat whose
+// hook is not held.
+func TestPoolDeadHookedProbesOnlyHeldHooks(t *testing.T) {
+	t.Parallel()
+	town, pool := deadHookedWalkTestTown(t, "amber", "basalt", "cobalt")
+	held := map[string]bool{"amber": true, "basalt": false, "cobalt": true}
+	var hookReads, probedNames []string
+	disposition := func(_ string, polecatName string) (poolSeatState, error) {
+		probedNames = append(probedNames, polecatName)
+		return poolSeatState{Disposition: polecat.WorkstateDisposition{CountsTowardCapacity: true}, HookHeld: held[polecatName]}, nil
+	}
+	hookHeld := func(_ string, polecatName string) (bool, error) {
+		hookReads = append(hookReads, polecatName)
+		return held[polecatName], nil
+	}
+	got, probed, err := poolDeadHookedSessions(town, pool, disposition, hookHeld, nil, time.Unix(1760000000, 0))
+	if err != nil {
+		t.Fatalf("poolDeadHookedSessions: %v", err)
+	}
+	if want := []string{"amber", "basalt", "cobalt"}; !reflect.DeepEqual(hookReads, want) {
+		t.Fatalf("the hook read ran for %v, want every dead seat %v", hookReads, want)
+	}
+	if want := []string{"amber", "cobalt"}; !reflect.DeepEqual(probedNames, want) {
+		t.Fatalf("the worktree probe ran for %v, want only the held hooks %v", probedNames, want)
+	}
+	if probed != 2 {
+		t.Fatalf("probed = %d, want 2", probed)
+	}
+	if len(got) != 2 {
+		t.Fatalf("dead-hooked seats = %+v, want the two held ones", got)
+	}
+}
+
+// TestPoolDeadHookedLeavesOtherCallersAlone pins that the split stays inside
+// the dead-hooked walk (gt-gg9hv.73): the live-session occupancy read through
+// polecatSeatOccupied and the `gt polecat list` inventory still measure the
+// worktree, because for them CountsTowardCapacity decides whatever the hook
+// says.
+func TestPoolDeadHookedLeavesOtherCallersAlone(t *testing.T) {
+	t.Parallel()
+	// A live seat's occupancy is the full seat state, hook or no hook.
+	reads := 0
+	disposition := func(string, string) (poolSeatState, error) {
+		reads++
+		return poolSeatState{Disposition: polecat.WorkstateDisposition{CountsTowardCapacity: true}, HookHeld: false}, nil
+	}
+	if !polecatSeatOccupied(disposition, "gastown", "ember") {
+		t.Fatal("an occupied seat read as free")
+	}
+	if reads != 1 {
+		t.Fatalf("polecatSeatOccupied read the seat state %d times, want once", reads)
+	}
+
+	// The list path measures the worktree through its own probe.
+	probes := 0
+	env := polecatInventoryEnv{
+		WorktreePath: filepath.Join(t.TempDir(), "gastown", "polecats", "ember"),
+		probe: func(string, bool) polecat.LiveGitState {
+			probes++
+			return polecat.LiveGitState{}
+		},
+	}
+	buildPolecatInventoryItem("gastown", "ember", &beads.AgentFields{AgentState: "idle"}, nil, polecatSessionSet{}, env)
+	if probes != 1 {
+		t.Fatalf("the polecat list path probed the worktree %d times, want once", probes)
+	}
+}
+
+// agentBeadFailsStore is a store whose bead reads all fail, so the batch's own
+// read answers nothing and its seat read falls through to the live lookup the
+// failure is measured on.
+type agentBeadFailsStore struct {
+	*beadsfake.Fake
+	err error
+}
+
+func (s agentBeadFailsStore) List(beads.ListOptions) ([]*beads.Issue, error) { return nil, s.err }
+func (s agentBeadFailsStore) ShowMultiple([]string) (map[string]*beads.Issue, error) {
+	return nil, s.err
+}
+func (s agentBeadFailsStore) Show(string) (*beads.Issue, error) { return nil, s.err }
+
+// noHeldHooks is the hook read of a town with no held hook. A test whose seats
+// are all live, landing or claimed passes it where it has no seat state to
+// read: the walk asks it for each dead seat and skips them all, which is what
+// a nil seam meant before the walk refused nil seams (gt-gg9hv.73).
+func noHeldHooks(string, string) (bool, error) { return false, nil }
+
+// TestPoolDeadHookedReadFailuresAreReturned is the fail-closed half of the
+// split (gt-gg9hv.73): each read the seat picture can fail on returns its
+// error rather than a smaller count, the cheap hold read included. An
+// unreadable read is an unknown count, not an empty one.
+func TestPoolDeadHookedReadFailuresAreReturned(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1760000000, 0)
+	heldDisposition := func(string, string) (poolSeatState, error) {
+		return poolSeatState{Disposition: polecat.WorkstateDisposition{CountsTowardCapacity: true}, HookHeld: true}, nil
+	}
+	heldHook := func(string, string) (bool, error) { return true, nil }
+
+	t.Run("the rig registry cannot be read", func(t *testing.T) {
+		t.Parallel()
+		town, pool := deadHookedWalkTestTown(t, "ember")
+		if err := os.WriteFile(filepath.Join(town, "mayor", "rigs.json"), []byte("{"), 0o644); err != nil {
+			t.Fatalf("write rigs.json: %v", err)
+		}
+		_, _, err := poolDeadHookedSessions(town, pool, heldDisposition, heldHook, nil, now)
+		if err == nil || !strings.Contains(err.Error(), "rig registry") {
+			t.Fatalf("an unreadable rig registry = %v, want the load failure", err)
+		}
+	})
+
+	t.Run("a rig's polecats cannot be listed", func(t *testing.T) {
+		t.Parallel()
+		town, pool := deadHookedWalkTestTown(t, "ember")
+		polecats := filepath.Join(town, "gastown", "polecats")
+		if err := os.RemoveAll(polecats); err != nil {
+			t.Fatalf("clear %s: %v", polecats, err)
+		}
+		if err := os.WriteFile(polecats, []byte("not a directory"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", polecats, err)
+		}
+		_, _, err := poolDeadHookedSessions(town, pool, heldDisposition, heldHook, nil, now)
+		if err == nil || !strings.Contains(err.Error(), "listing polecats in gastown") {
+			t.Fatalf("an unlistable rig = %v, want the listing failure", err)
+		}
+	})
+
+	t.Run("the claim set cannot be read", func(t *testing.T) {
+		t.Parallel()
+		town, pool := deadHookedWalkTestTown(t, "ember")
+		claims := poolSeatClaimDir(town)
+		if err := os.MkdirAll(filepath.Dir(claims), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(claims, []byte("not a directory"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", claims, err)
+		}
+		if _, _, err := poolSeatSessionsProbedWith(&fakeLister{}, town, heldDisposition, heldHook, nil, pool); err == nil {
+			t.Fatal("an unreadable claim set counted as no claims")
+		}
+	})
+
+	t.Run("the batch's hold read cannot read the agent bead", func(t *testing.T) {
+		t.Parallel()
+		town, _ := deadHookedWalkTestTown(t, "ember")
+		store := agentBeadFailsStore{Fake: beadsfake.New(), err: errors.New("bd show: boom")}
+		batch := newPoolSeatBatch(town,
+			func(string) beads.Client { return store },
+			func(_ beads.Client, id string) (*beads.Issue, error) { return store.Show(id) })
+		if held, err := batch.hookHeld("gastown", "ember"); err == nil {
+			t.Fatalf("a failing agent-bead read answered held=%v", held)
+		}
+	})
+
+	t.Run("the town's hold read cannot read the agent bead", func(t *testing.T) {
+		t.Parallel()
+		reads := poolSeatReads{agentBead: func(beads.Client, string) (*beads.Issue, *beads.AgentFields, error) {
+			return nil, nil, errors.New("bd show: boom")
+		}}
+		if held, err := poolPolecatHookHeldWith(t.TempDir(), "gastown", "ember", reads); err == nil {
+			t.Fatalf("a failing agent-bead read answered held=%v", held)
+		}
+	})
+
+	t.Run("a hook read that fails keeps the seat counted and returns the error", func(t *testing.T) {
+		t.Parallel()
+		town, pool := deadHookedWalkTestTown(t, "ember")
+		probes := 0
+		disposition := func(string, string) (poolSeatState, error) {
+			probes++
+			return poolSeatState{Disposition: polecat.WorkstateDisposition{CountsTowardCapacity: true}, HookHeld: true}, nil
+		}
+		hookHeld := func(string, string) (bool, error) { return false, errors.New("beads unavailable") }
+		got, probed, err := poolDeadHookedSessions(town, pool, disposition, hookHeld, nil, now)
+		if err == nil || !strings.Contains(err.Error(), "beads unavailable") {
+			t.Fatalf("an unreadable hook = %v, want the read's error", err)
+		}
+		if len(got) != 1 || got[0].polecat != "ember" || !got[0].deadHooked {
+			t.Fatalf("an unreadable hook counted %+v, want the seat counted as dead-hooked", got)
+		}
+		if probes != 0 || probed != 0 {
+			t.Fatalf("an unreadable hook ran %d probes (probed %d), want none", probes, probed)
+		}
+	})
+
+	t.Run("a state read that fails on a held seat keeps the seat counted and returns the error", func(t *testing.T) {
+		t.Parallel()
+		town, pool := deadHookedWalkTestTown(t, "ember")
+		disposition := func(string, string) (poolSeatState, error) {
+			return poolSeatState{}, errors.New("worktree unreadable")
+		}
+		got, probed, err := poolDeadHookedSessions(town, pool, disposition, heldHook, nil, now)
+		if err == nil || !strings.Contains(err.Error(), "worktree unreadable") {
+			t.Fatalf("an unreadable state = %v, want the read's error", err)
+		}
+		if len(got) != 1 || got[0].polecat != "ember" || !got[0].deadHooked {
+			t.Fatalf("an unreadable state counted %+v, want the held seat counted as dead-hooked", got)
+		}
+		if probed != 0 {
+			t.Fatalf("an unreadable state counted %d probes, want none", probed)
+		}
+	})
+
+	t.Run("a nil hook read is an error, not an empty walk", func(t *testing.T) {
+		t.Parallel()
+		town, pool := deadHookedWalkTestTown(t, "ember")
+		if _, _, err := poolDeadHookedSessions(town, pool, heldDisposition, nil, nil, now); err == nil {
+			t.Fatal("a nil hook read walked to an empty result without an error")
+		}
+	})
+
+	t.Run("a nil disposition is an error only for a held seat", func(t *testing.T) {
+		t.Parallel()
+		town, pool := deadHookedWalkTestTown(t, "ember")
+		if _, _, err := poolDeadHookedSessions(town, pool, nil, heldHook, nil, now); err == nil {
+			t.Fatal("a held seat with a nil disposition walked to an empty result without an error")
+		}
+		got, _, err := poolDeadHookedSessions(town, pool, nil, noHeldHooks, nil, now)
+		if err != nil || len(got) != 0 {
+			t.Fatalf("no held hook with a nil disposition = %+v, %v, want no seats and no error", got, err)
+		}
+	})
+}
+
+// TestRosterLogsTheProbedWorktreeCount is gt-gg9hv.73's observable effect: the
+// tick's roster read counts the worktrees its dead-hooked walk probed, and the
+// report logs that count, zero for a roster of polecats with no held hook.
+func TestRosterLogsTheProbedWorktreeCount(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1760000000, 0)
+	cases := []struct {
+		name       string
+		held       func(string) bool
+		wantProbed int
+	}{
+		{"a roster of polecats with no held hook", func(string) bool { return false }, 0},
+		{"a roster with one held hook", func(name string) bool { return name == "cobalt" }, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town, pool := deadHookedWalkTestTown(t, "amber", "cobalt")
+			disposition := func(_ string, polecatName string) (poolSeatState, error) {
+				return poolSeatState{Disposition: polecat.WorkstateDisposition{CountsTowardCapacity: true}, HookHeld: c.held(polecatName)}, nil
+			}
+			hookHeld := func(_ string, polecatName string) (bool, error) { return c.held(polecatName), nil }
+			snap, err := poolSeatSnapshotWith(&fakeLister{}, town, disposition, hookHeld, nil, pool, func() time.Time { return now })
+			if err != nil {
+				t.Fatalf("poolSeatSnapshotWith: %v", err)
+			}
+			ts := config.NewTownSettings()
+			ts.PolecatPool = pool
+			roster, err := specRosterOf(snap, ts, func() ([]poolSession, error) { return snap.sessions, nil })
+			if err != nil {
+				t.Fatalf("specRosterOf: %v", err)
+			}
+			if roster.ProbedWorktrees != c.wantProbed {
+				t.Fatalf("the roster probed %d worktrees, want %d", roster.ProbedWorktrees, c.wantProbed)
+			}
+			probed := roster.ProbedWorktrees
+			report := specDispatchReport{Template: "spec.md", Roster: "deepseek-flash 0/3", ProbedWorktrees: &probed}
+			var out bytes.Buffer
+			cmd := &cobra.Command{}
+			cmd.SetOut(&out)
+			printSpecDispatchReport(cmd, report)
+			want := fmt.Sprintf("roster probed %d worktrees", c.wantProbed)
+			if !strings.Contains(out.String(), want) {
+				t.Fatalf("the tick's output does not log %q:\n%s", want, out.String())
+			}
+			// The daemon reads the count from the tick's JSON, so it has to be
+			// there whether it is zero or not.
+			wire, err := json.Marshal(report)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			if !strings.Contains(string(wire), fmt.Sprintf(`"probed_worktrees":%d`, c.wantProbed)) {
+				t.Fatalf("the tick's report does not carry the count: %s", wire)
+			}
+		})
+	}
+
+	// A tick that read no roster reports no count: an unread roster is not a
+	// roster that probed nothing.
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	printSpecDispatchReport(cmd, specDispatchReport{Template: "spec.md", Roster: "unreadable"})
+	if strings.Contains(out.String(), "roster probed") {
+		t.Fatalf("a tick with no roster logged a probe count:\n%s", out.String())
 	}
 }
