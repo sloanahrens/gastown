@@ -128,8 +128,8 @@ what to wait for.
 ## The shared cache claim
 
 The patrol also trims the shared cache claim a kubernetes sandbox profile
-mounts, on its own interval (`cache_trim_interval`, `2h` by default) in any
-window, and behind the same mode:
+mounts, on its own interval (`cache_trim_interval`) in any window, and behind
+the same mode:
 
 - A claim's namespace comes from the claim itself, and every pod read, listing
   exec and apply, delete or wait names it. A claim of the same name in another
