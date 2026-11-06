@@ -441,6 +441,7 @@ func TestGuardsIgnoreTheCallerCwd(t *testing.T) {
 		prev := hookWorktreeIntegrityGetwd
 		//testpolicy:allow no-global-swap — the production getwd seam of the hook integrity guard, restored below
 		hookWorktreeIntegrityGetwd = func() (string, error) { return forbiddenCrew, nil }
+		//testpolicy:allow no-global-swap — restores the seam swapped above
 		defer func() { hookWorktreeIntegrityGetwd = prev }()
 		return run()
 	}
