@@ -87,6 +87,21 @@ type world struct {
 	// resolve maps a commit a rev-parse asks for to the commit git answers
 	// with, so a test can make a pin resolve to another commit.
 	resolve map[string]string
+	// The fault knobs: a substring in failRun, failGit or failGo fails the call
+	// whose joined argv contains it, so a test drives one failure path. lsRemote
+	// replaces an ls-remote answer. The hooks run at a step: onStatus before the
+	// tree status is read, onArchive for a commit before its archive is returned,
+	// and onGo after a build wrote its output. A test uses them to break the
+	// output directory at the point a later step would need it.
+	failRun   []string
+	failGit   []string
+	failGo    []string
+	lsRemote  map[string]string
+	onStatus  func()
+	onArchive map[string]func()
+	onGo      func(args []string)
+	// out is the output directory the test builds into.
+	out string
 }
 
 // newWorld is the default world: a clean gt checkout at gastownRev, bd and the
@@ -101,6 +116,8 @@ func newWorld(t *testing.T) *world {
 		moveAfterLsRemote: map[string]string{},
 		fetched:           map[string]string{},
 		resolve:           map[string]string{},
+		lsRemote:          map[string]string{},
+		onArchive:         map[string]func(){},
 	}
 	w.commits[gastownRev] = map[string]string{
 		"go.mod":                     goMod("github.com/steveyegge/gastown", "1.9.0"),
@@ -118,6 +135,7 @@ func newWorld(t *testing.T) *world {
 
 // inputs is the build the default world stages into out.
 func (w *world) inputs(out string) Inputs {
+	w.out = out
 	return Inputs{
 		Src: srcDir,
 		Rev: gastownRev,
@@ -138,6 +156,9 @@ func (w *world) seams() Seams {
 
 func (w *world) runCmd(_ context.Context, dir string, _ []string, argv []string) error {
 	w.calls = append(w.calls, fmt.Sprintf("run %s %s", dir, strings.Join(argv, " ")))
+	if err := w.fault(w.failRun, argv); err != nil {
+		return err
+	}
 	if len(argv) >= 5 && argv[0] == "git" && argv[1] == "fetch" {
 		url, ref := argv[len(argv)-2], argv[len(argv)-1]
 		if argv[2] == "--unshallow" {
@@ -152,16 +173,37 @@ func (w *world) runCmd(_ context.Context, dir string, _ []string, argv []string)
 	return nil
 }
 
+// fault returns the failure a knob names for argv: an error when one of subs is
+// a substring of the joined argv, nil otherwise.
+func (w *world) fault(subs []string, argv []string) error {
+	joined := strings.Join(argv, " ")
+	for _, s := range subs {
+		if strings.Contains(joined, s) {
+			return fmt.Errorf("fake failure on %q", s)
+		}
+	}
+	return nil
+}
+
 func (w *world) gitCmd(dir string, args ...string) ([]byte, error) {
 	w.calls = append(w.calls, fmt.Sprintf("git %s %s", dir, strings.Join(args, " ")))
+	if err := w.fault(w.failGit, args); err != nil {
+		return nil, err
+	}
 	switch args[0] {
 	case "status":
+		if w.onStatus != nil {
+			w.onStatus()
+		}
 		if dir == srcDir && w.dirty {
 			return []byte(" M cmd/gt/main.go\n"), nil
 		}
 		return nil, nil
 	case "ls-remote":
 		url := args[1]
+		if ans, ok := w.lsRemote[url]; ok {
+			return []byte(ans), nil
+		}
 		main := w.mains[url]
 		if next, ok := w.moveAfterLsRemote[url]; ok {
 			w.mains[url] = next
@@ -170,6 +212,9 @@ func (w *world) gitCmd(dir string, args ...string) ([]byte, error) {
 		return []byte(main + "\trefs/heads/main\n"), nil
 	case "archive":
 		commit := args[len(args)-1]
+		if hook := w.onArchive[commit]; hook != nil {
+			hook()
+		}
 		files, ok := w.commits[commit]
 		if !ok {
 			return nil, fmt.Errorf("archive: no commit %s", commit)
@@ -225,6 +270,9 @@ func (w *world) gitCmd(dir string, args ...string) ([]byte, error) {
 func (w *world) goCmd(dir string, env []string, args ...string) ([]byte, error) {
 	w.goCalls = append(w.goCalls, fmt.Sprintf("go %s %s", dir, strings.Join(args, " ")))
 	w.goEnvs = append(w.goEnvs, env)
+	if err := w.fault(w.failGo, args); err != nil {
+		return nil, err
+	}
 	for i, a := range args {
 		if a == "-o" && i+1 < len(args) {
 			if err := os.MkdirAll(filepath.Dir(args[i+1]), 0o755); err != nil {
@@ -235,7 +283,31 @@ func (w *world) goCmd(dir string, env []string, args ...string) ([]byte, error) 
 			}
 		}
 	}
+	if w.onGo != nil {
+		w.onGo(args)
+	}
 	return nil, nil
+}
+
+// breakOut makes the output directory a regular file, so every later step that
+// writes into it fails. The steps before it have written what they need.
+func (w *world) breakOut() {
+	w.t.Helper()
+	if err := os.RemoveAll(w.out); err != nil {
+		w.t.Fatalf("breakOut: %v", err)
+	}
+	if err := os.WriteFile(w.out, []byte("not a directory\n"), 0o644); err != nil {
+		w.t.Fatalf("breakOut: %v", err)
+	}
+}
+
+// makeDirAt makes a directory at rel under the output, where a later step writes
+// a file, so that step fails.
+func (w *world) makeDirAt(rel string) {
+	w.t.Helper()
+	if err := os.MkdirAll(filepath.Join(w.out, rel), 0o755); err != nil {
+		w.t.Fatalf("makeDirAt %s: %v", rel, err)
+	}
 }
 
 // envOfCall is the environment of the one go call whose argv names pkg, failing

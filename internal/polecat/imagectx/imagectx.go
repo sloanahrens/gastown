@@ -145,21 +145,27 @@ func Build(ctx context.Context, in Inputs, s Seams) (Result, error) {
 	env := buildEnv()
 	res := Result{Dir: in.Out, GTCommit: in.Rev}
 
-	// The build rig's seed is the tree at Rev, read from the checkout it runs in.
-	if err := unpackTree(in.Src, in.Rev, filepath.Join(in.Out, "seed", BuildRig), s.Git); err != nil {
+	// Every tree is read and every pin guarded before anything is unpacked into
+	// the context, so a refusal leaves the context without a seed directory. The
+	// build rig's tree is the one at Rev, read from the checkout it runs in.
+	trees := map[string][]byte{}
+	gastown, err := archiveTree(in.Src, in.Rev, s.Git)
+	if err != nil {
 		return Result{}, err
 	}
+	trees[BuildRig] = gastown
 	for _, src := range in.Seeds {
 		if src.Rig == BuildRig {
 			continue
 		}
-		note, err := stageRig(ctx, in, s, env, src)
+		note, tree, err := stageRig(ctx, in, s, env, src)
 		if err != nil {
 			return Result{}, err
 		}
 		if note != "" {
 			res.Notes = append(res.Notes, note)
 		}
+		trees[src.Rig] = tree
 	}
 
 	bdCommit, err := buildBD(ctx, in, s, env)
@@ -179,10 +185,17 @@ func Build(ctx context.Context, in Inputs, s Seams) (Result, error) {
 		}
 	}
 
+	// The seeds are unpacked only now, after the last step that writes into the
+	// context has finished, so no step fails on a directory the unpack made.
 	rigs := []string{BuildRig}
 	for _, src := range in.Seeds {
 		if src.Rig != BuildRig {
 			rigs = append(rigs, src.Rig)
+		}
+	}
+	for _, rig := range rigs {
+		if err := unpackInto(in.Out, rig, trees[rig]); err != nil {
+			return Result{}, err
 		}
 	}
 	floor, err := goFloor(in.Out, rigs)
@@ -282,14 +295,15 @@ func checkCleanAt(in Inputs, git bdbuild.Git) error {
 }
 
 // stageRig fetches one seeded rig at its pin by URL, reads its main by URL,
-// applies the pin-drift guard to the pin against that main, and unpacks the
-// pinned tree into the seed directory. The fetch directory is removed on every
-// path. The returned note is the guard's note, empty when the pin is main.
-func stageRig(ctx context.Context, in Inputs, s Seams, env []string, src seed.Source) (string, error) {
+// applies the pin-drift guard to the pin against that main, and archives the
+// pinned tree. It writes nothing into the context: Build unpacks the tree once
+// every rig has passed. The fetch directory is removed on every path. The
+// returned note is the guard's note, empty when the pin is main.
+func stageRig(ctx context.Context, in Inputs, s Seams, env []string, src seed.Source) (string, []byte, error) {
 	url := in.SeedURLs[src.Rig]
 	tmp, err := os.MkdirTemp(in.Out, ".imagectx-"+src.Rig+"-")
 	if err != nil {
-		return "", fmt.Errorf("imagectx: cannot make a fetch directory for rig %s in %s: %w", src.Rig, in.Out, err)
+		return "", nil, fmt.Errorf("imagectx: cannot make a fetch directory for rig %s in %s: %w", src.Rig, in.Out, err)
 	}
 	defer os.RemoveAll(tmp)
 
@@ -297,38 +311,39 @@ func stageRig(ctx context.Context, in Inputs, s Seams, env []string, src seed.So
 	// the ls-remote below is only ever given a credential-free URL.
 	pin := daemonimage.Pin{Name: src.Rig, URL: url, Commit: src.Commit}
 	if err := daemonimage.FetchSource(ctx, s.Run, s.Git, tmp, env, pin); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	out, err := s.Git(tmp, "ls-remote", url, "refs/heads/main")
 	if err != nil {
-		return "", fmt.Errorf("imagectx: cannot read the main of rig %s from its URL: %w", src.Rig, err)
+		return "", nil, fmt.Errorf("imagectx: cannot read the main of rig %s from its URL: %w", src.Rig, err)
 	}
 	main, err := mainFromLsRemote(out)
 	if err != nil {
-		return "", fmt.Errorf("imagectx: rig %s: %w", src.Rig, err)
+		return "", nil, fmt.Errorf("imagectx: rig %s: %w", src.Rig, err)
 	}
 	if main != src.Commit {
 		// The history back to the pin is fetched whole, so the guard's
 		// ancestry and behind counts read the real history, not a shallow cut.
 		if err := s.Run(ctx, tmp, env, []string{"git", "fetch", "--unshallow", url, "refs/heads/main"}); err != nil {
-			return "", fmt.Errorf("imagectx: cannot fetch the main of rig %s from its URL: %w", src.Rig, err)
+			return "", nil, fmt.Errorf("imagectx: cannot fetch the main of rig %s from its URL: %w", src.Rig, err)
 		}
 		fetched, err := s.Git(tmp, "rev-parse", "--verify", "FETCH_HEAD^{commit}")
 		if err != nil {
-			return "", fmt.Errorf("imagectx: cannot read the main fetched for rig %s: %w", src.Rig, err)
+			return "", nil, fmt.Errorf("imagectx: cannot read the main fetched for rig %s: %w", src.Rig, err)
 		}
 		if got := strings.TrimSpace(string(fetched)); got != main {
-			return "", fmt.Errorf("imagectx: the main of rig %s moved from %s to %s while it was fetched; rerun", src.Rig, short(main), short(got))
+			return "", nil, fmt.Errorf("imagectx: the main of rig %s moved from %s to %s while it was fetched; rerun", src.Rig, short(main), short(got))
 		}
 	}
 	note, err := seed.CheckAgainstMain(src.Rig, src.Commit, main, "the fetched "+src.Rig+" source", tmp, seed.Git(s.Git))
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	if err := unpackTree(tmp, src.Commit, filepath.Join(in.Out, "seed", src.Rig), s.Git); err != nil {
-		return "", err
+	tree, err := archiveTree(tmp, src.Commit, s.Git)
+	if err != nil {
+		return "", nil, err
 	}
-	return note, nil
+	return note, tree, nil
 }
 
 // mainFromLsRemote reads the one line `git ls-remote <url> refs/heads/main`
@@ -371,16 +386,22 @@ func buildBD(ctx context.Context, in Inputs, s Seams, env []string) (string, err
 	return full, nil
 }
 
-// unpackTree writes the tree of commit in checkout into dir, the way the seed
-// stage does: a `git archive` stream, unpacked through seed.Unpack, which
-// refuses a tree that would write outside dir.
-func unpackTree(checkout, commit, dir string, git bdbuild.Git) error {
+// archiveTree reads the tree of commit in checkout as a `git archive` stream, the
+// form the seed stage reads it in. Nothing is written.
+func archiveTree(checkout, commit string, git bdbuild.Git) ([]byte, error) {
 	tree, err := git(checkout, "archive", "--format=tar", commit)
 	if err != nil {
-		return fmt.Errorf("imagectx: cannot archive %s from %s: %w", short(commit), checkout, err)
+		return nil, fmt.Errorf("imagectx: cannot archive %s from %s: %w", short(commit), checkout, err)
 	}
+	return tree, nil
+}
+
+// unpackInto writes a rig's archived tree into the seed directory under out. It
+// is seed.Unpack, which refuses a tree that would write outside that directory.
+func unpackInto(out, rig string, tree []byte) error {
+	dir := filepath.Join(out, "seed", rig)
 	if err := seed.Unpack(dir, tree); err != nil {
-		return fmt.Errorf("imagectx: cannot unpack %s into %s: %w", short(commit), dir, err)
+		return fmt.Errorf("imagectx: cannot unpack the %s tree into %s: %w", rig, dir, err)
 	}
 	return nil
 }
@@ -475,6 +496,13 @@ func buildEnv() []string {
 func ExecRun(ctx context.Context, dir string, env, argv []string) error {
 	ctx, cancel := context.WithTimeout(ctx, runCeiling)
 	defer cancel()
+	return runArgv(ctx, dir, env, argv)
+}
+
+// runArgv runs argv under ctx, which kills it when ctx ends. A command ctx ends
+// fails naming the timeout or the cancellation; any other failure names the
+// command and the last line of its stderr.
+func runArgv(ctx context.Context, dir string, env, argv []string) error {
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = dir
 	cmd.Env = env
@@ -484,8 +512,11 @@ func ExecRun(ctx context.Context, dir string, env, argv []string) error {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return fmt.Errorf("%s timed out after the %s ceiling", argv[0], runCeiling)
+		switch {
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			return fmt.Errorf("%s timed out: %w", argv[0], ctx.Err())
+		case errors.Is(ctx.Err(), context.Canceled):
+			return fmt.Errorf("%s was canceled: %w", argv[0], ctx.Err())
 		}
 		return fmt.Errorf("%s failed: %w: %s", argv[0], err, lastLine(stderr.String()))
 	}

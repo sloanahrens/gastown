@@ -48,11 +48,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	bd, err := readBDPin(*pins)
+	imagePins, err := readFile(*pins, daemonimage.ParsePins)
 	if err != nil {
 		fmt.Fprintf(stderr, "polecat-image: %v\n", err)
 		return 1
 	}
+	bd := bdPin(imagePins)
 	seeds, err := readFile(*seedPins, seed.Pins)
 	if err != nil {
 		fmt.Fprintf(stderr, "polecat-image: %v\n", err)
@@ -77,23 +78,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// readBDPin reads the image-pins file and returns its bd pin, the source the
-// image's bd is built from.
-func readBDPin(path string) (daemonimage.Pin, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return daemonimage.Pin{}, fmt.Errorf("cannot read %s: %w", path, err)
-	}
-	pins, err := daemonimage.ParsePins(data)
-	if err != nil {
-		return daemonimage.Pin{}, fmt.Errorf("%s: %w", path, err)
-	}
+// bdPin returns the bd line of the image-pins file, the source the image's bd is
+// built from. ParsePins names each source once, so the line is there; a pin with
+// no name is never built, because Build refuses a bd pin it does not name bd.
+func bdPin(pins []daemonimage.Pin) daemonimage.Pin {
 	for _, p := range pins {
 		if p.Name == "bd" {
-			return p, nil
+			return p
 		}
 	}
-	return daemonimage.Pin{}, fmt.Errorf("%s names no bd pin", path)
+	return daemonimage.Pin{}
 }
 
 // readFile reads path and parses it with parse, naming the file in any error.
