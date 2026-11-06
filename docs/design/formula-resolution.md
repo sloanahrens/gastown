@@ -115,14 +115,14 @@ description = "..."
 [formula]
 name = "mol-polecat-work"
 version = "4.0.0"                          # Semver
-author = "steve@gastown.io"                # Author identity
+author = "steve@example.com"                # Author identity
 license = "MIT"
 repository = "https://github.com/steveyegge/gastown"
 
 [formula.registry]
 uri = "hop://molmall.gastown.io/formulas/mol-polecat-work@4.0.0"
 checksum = "sha256:abc123..."              # Integrity verification
-signed_by = "steve@gastown.io"             # Optional signing
+signed_by = "steve@example.com"             # Optional signing
 
 [formula.capabilities]
 # What capabilities does this formula exercise? Used for agent routing.

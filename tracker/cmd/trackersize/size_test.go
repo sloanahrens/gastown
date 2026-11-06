@@ -12,7 +12,7 @@ import (
 )
 
 // testDSN is a connection string the fakes never read.
-const testDSN = "postgres://tracker:s3cr3t-Pa55w0rd@db.internal:5433/tracker"
+const testDSN = "postgres://tracker:s3cr3t-Pa55w0rd@db.example.test:5433/tracker"
 
 // testNow is the 03:00 report on 2026-01-09, in UTC.
 var testNow = time.Date(2026, 1, 9, 3, 0, 0, 0, time.UTC)

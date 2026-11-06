@@ -11,6 +11,11 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 )
 
+// testTrackerHost is the tracker host the config write, the config set input
+// and the expectations all name. One constant keeps them from splitting: a
+// change to one side alone fails the tests that compare them.
+const testTrackerHost = "tracker.example.test"
+
 // loadTestTown reads the town.json setupTestTownForConfig wrote.
 func loadTestTown(t *testing.T, townRoot string) *config.TownConfig {
 	t.Helper()
@@ -49,7 +54,7 @@ func TestConfigSetTrackerPortOverwritesAnInstalledPort(t *testing.T) {
 	t.Parallel()
 	townRoot := setupTestTownForConfig(t)
 	if err := config.UpdateConfigJSON(filepath.Join(townRoot, "mayor", "town.json"), 0o600, func(town *config.TownConfig, _ bool) error {
-		town.Tracker = &config.TrackerEndpoint{Host: "tracker.internal", Port: config.DefaultTrackerPort}
+		town.Tracker = &config.TrackerEndpoint{Host: testTrackerHost, Port: config.DefaultTrackerPort}
 		return nil
 	}); err != nil {
 		t.Fatalf("write the installed tracker endpoint: %v", err)
@@ -58,7 +63,7 @@ func TestConfigSetTrackerPortOverwritesAnInstalledPort(t *testing.T) {
 	if err := configSet(townConfigCmdEnv(townRoot, io.Discard), []string{"tracker.port", "8000"}); err != nil {
 		t.Fatalf("config set tracker.port: %v", err)
 	}
-	want := config.TrackerEndpoint{Host: "tracker.internal", Port: 8000}
+	want := config.TrackerEndpoint{Host: testTrackerHost, Port: 8000}
 	if town := loadTestTown(t, townRoot); town.Tracker == nil || *town.Tracker != want {
 		t.Errorf("town.json tracker = %+v, want %+v", town.Tracker, want)
 	}
@@ -71,11 +76,11 @@ func TestConfigSetTrackerHostKeepsThePort(t *testing.T) {
 	if err := configSet(townConfigCmdEnv(townRoot, io.Discard), []string{"tracker.port", "8000"}); err != nil {
 		t.Fatalf("config set tracker.port: %v", err)
 	}
-	if err := configSet(townConfigCmdEnv(townRoot, io.Discard), []string{"tracker.host", "tracker.internal"}); err != nil {
+	if err := configSet(townConfigCmdEnv(townRoot, io.Discard), []string{"tracker.host", testTrackerHost}); err != nil {
 		t.Fatalf("config set tracker.host: %v", err)
 	}
 	town := loadTestTown(t, townRoot)
-	want := config.TrackerEndpoint{Host: "tracker.internal", Port: 8000}
+	want := config.TrackerEndpoint{Host: testTrackerHost, Port: 8000}
 	if town.Tracker == nil || *town.Tracker != want {
 		t.Fatalf("town.json tracker = %+v, want %+v", town.Tracker, want)
 	}
@@ -84,8 +89,8 @@ func TestConfigSetTrackerHostKeepsThePort(t *testing.T) {
 	if err := configGet(townConfigCmdEnv(townRoot, &out), []string{"tracker.host"}); err != nil {
 		t.Fatalf("config get tracker.host: %v", err)
 	}
-	if got := strings.TrimSpace(out.String()); got != "tracker.internal" {
-		t.Errorf("config get tracker.host = %q, want tracker.internal", got)
+	if got := strings.TrimSpace(out.String()); got != testTrackerHost {
+		t.Errorf("config get tracker.host = %q, want %s", got, testTrackerHost)
 	}
 }
 
@@ -132,9 +137,9 @@ func TestConfigSetTrackerRefusesBadValues(t *testing.T) {
 		{"port above the range", "tracker.port", "70000", "expected port number"},
 		{"empty host", "tracker.host", " ", "expected a host name"},
 		{"host with a path", "tracker.host", "tracker/internal", "expected a host name"},
-		{"host with a user", "tracker.host", "user@tracker.internal", "expected a host name"},
-		{"host with a query", "tracker.host", "tracker.internal?x=1", "expected a host name"},
-		{"host with a fragment", "tracker.host", "tracker.internal#frag", "expected a host name"},
+		{"host with a user", "tracker.host", "user@tracker.example.test", "expected a host name"},
+		{"host with a query", "tracker.host", "tracker.example.test?x=1", "expected a host name"},
+		{"host with a fragment", "tracker.host", "tracker.example.test#frag", "expected a host name"},
 		{"host with a bracketed IPv6 literal", "tracker.host", "[::1]", "expected a host name"},
 	}
 	for _, tt := range tests {
@@ -169,7 +174,7 @@ func TestConfigSetTrackerFailsOnATownJSONItCannotWrite(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct{ key, value string }{
 		{"tracker.port", "8000"},
-		{"tracker.host", "tracker.internal"},
+		{"tracker.host", testTrackerHost},
 	} {
 		t.Run(tt.key, func(t *testing.T) {
 			t.Parallel()

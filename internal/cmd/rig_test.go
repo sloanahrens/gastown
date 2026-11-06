@@ -46,7 +46,7 @@ func registeredRigTown(t *testing.T) string {
 	rigsConfig := &config.RigsConfig{
 		Version: 1,
 		Rigs: map[string]config.RigEntry{
-			"testrig": {GitURL: "git@github.com:test/testrig.git", AddedAt: time.Now().Truncate(time.Second)},
+			"testrig": {GitURL: "git@example.com:test/testrig.git", AddedAt: time.Now().Truncate(time.Second)},
 		},
 	}
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
@@ -160,12 +160,12 @@ func TestIsGitRemoteURL(t *testing.T) {
 		want  bool
 	}{
 		// Remote URLs — should return true
-		{"https://github.com/org/repo.git", true},
-		{"http://github.com/org/repo.git", true},
-		{"git@github.com:org/repo.git", true},
-		{"ssh://git@github.com/org/repo.git", true},
-		{"git://github.com/org/repo.git", true},
-		{"deploy@private-host.internal:repos/app.git", true},
+		{"https://example.com/org/repo.git", true},
+		{"http://example.com/org/repo.git", true},
+		{"git@example.com:org/repo.git", true},
+		{"ssh://git@example.com/org/repo.git", true},
+		{"git://example.com/org/repo.git", true},
+		{"deploy@private-host.example.test:repos/app.git", true},
 
 		// Custom git remote helper schemes — should return true
 		{"s3://my-bucket/rigs/my-project", true},

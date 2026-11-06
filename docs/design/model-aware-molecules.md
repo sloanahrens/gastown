@@ -382,7 +382,7 @@ func EstimateCost(model *ModelEntry, tokensIn, tokensOut int) float64
 ```bash
 # Subscription detection
 export CLAUDE_CODE_SUBSCRIPTION=active    # enables subscription preference
-export CLAUDE_CODE_ACCOUNT=user@co.com   # informational
+export CLAUDE_CODE_ACCOUNT=user@example.com   # informational
 export CLAUDE_CODE_PLAN=pro              # informational
 
 # API Key Access (existing)

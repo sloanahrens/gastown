@@ -206,8 +206,8 @@ func TestCheckKeepsThePasswordOutOfArgv(t *testing.T) {
 		},
 		{
 			name:           "URI form",
-			dsn:            "postgres://tracker:s3cret@db.internal:5433/tracker?sslmode=verify-full",
-			wantRestoreDSN: "postgres://tracker@db.internal:5433/restorecheck_probe?sslmode=verify-full",
+			dsn:            "postgres://tracker:s3cret@db.example.test:5433/tracker?sslmode=verify-full",
+			wantRestoreDSN: "postgres://tracker@db.example.test:5433/restorecheck_probe?sslmode=verify-full",
 		},
 	}
 	for _, tc := range cases {
@@ -297,7 +297,7 @@ func TestCheckRefusesAMissingInput(t *testing.T) {
 		},
 		{
 			name: "URI that does not parse",
-			edit: func(c *Config) { c.DSN = "postgres://tracker:%zz@db.internal/tracker" },
+			edit: func(c *Config) { c.DSN = "postgres://tracker:%zz@db.example.test/tracker" },
 			want: "connection string",
 		},
 		{
