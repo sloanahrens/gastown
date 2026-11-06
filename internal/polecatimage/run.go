@@ -25,10 +25,9 @@ type Config struct {
 	// calls. BD is the installed bd whose commit the image's bd label must
 	// match.
 	GT, BD, Docker, Git, Make, Pgrep, Openshell string
-	// RigRepo is the bare repository a build makes its worktree from, BuildRoot
-	// holds the worktrees it makes there, and BDSrc is the beads checkout the
-	// image's bd is built from.
-	RigRepo, BuildRoot, BDSrc string
+	// RigRepo is the bare repository a build makes its worktree from, and
+	// BuildRoot holds the worktrees it makes there.
+	RigRepo, BuildRoot string
 	// LockDir is the lock one run holds the image under.
 	LockDir string
 	// StaleAfter is how long the lock may sit unmodified before the next run

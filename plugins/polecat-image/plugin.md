@@ -54,11 +54,13 @@ detached, escalating a failure under `install-gt:image-build-failed`.
    minutes is taken over by renaming it aside, and only the run that wins the
    rename proceeds); a second run while it is held prints `already running` and
    stops. A run removes the lock only while its own pid is in it.
-4. Makes a detached worktree of the rig repo at the installed commit under
-   `~/gt/gastown/.polecat-image-build/<sha>`, runs `make polecat-image
-   BD_SRC=~/gt/beads/mayor/rig` there, removes the worktree, and checks the
-   labels it ended with; the Makefile's `BD_COMMIT` comment says which bd
-   commit goes into the image and when the build fetches one (gt-7b7a5).
+4. Makes a detached rig-repo worktree at the installed commit under
+   `~/gt/gastown/.polecat-image-build/<sha>`, runs `make polecat-image` there,
+   removes the worktree, and checks the labels it ended with. The recipe stages
+   the context with `internal/polecat/imagectx/cmd/build` from
+   `deploy/daemon/image-pins`, `deploy/polecat/seed-pins` and
+   `deploy/polecat/seed-urls`, each source fetched by URL; docker build and push
+   follow (gt-gg9hv.33).
 5. Reads both commits again; if either moved it builds again, at most 3 rounds.
    A bd label still behind then fails the run, naming both commits, and records
    the pair in `~/gt/.runtime/polecat-image.bd-stuck`. A later run that finds gt

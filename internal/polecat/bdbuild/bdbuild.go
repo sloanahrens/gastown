@@ -29,6 +29,14 @@ const (
 // checkout.
 const Package = "./cmd/bd"
 
+// GoBuildArgv is the argv, after the go command, that compiles one image binary
+// to out from pkg: the flags every image binary is built with, then the output
+// and the package. The polecat context command and the daemon image both build
+// gt with it, so the two compile the same way (gt-gg9hv.33).
+func GoBuildArgv(out, pkg string) []string {
+	return []string{"build", "-trimpath", "-o", out, pkg}
+}
+
 // hostEnv names the host variables the compile passes through: those that
 // locate the toolchain, the Go caches and the module proxy, so the compile
 // reuses what the host already has. Anything else — a shell's GOFLAGS,
@@ -85,14 +93,25 @@ const gitCeiling = 5 * time.Minute
 func ExecGit(dir string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitCeiling)
 	defer cancel()
-	return runGit(ctx, dir, args...)
+	return runGit(ctx, dir, os.Environ(), args...)
 }
 
-// runGit runs the host's git under ctx, which kills it when ctx ends. A command
-// that ctx ends fails naming the timeout or the cancellation; any other failure
-// reports git's last stderr line.
-func runGit(ctx context.Context, dir string, args ...string) ([]byte, error) {
+// ExecGitEnv is ExecGit with env as git's whole environment. A read that reaches
+// a repository URL goes through it, so git sees the build's environment and
+// cannot prompt on a terminal for a credential the build does not have
+// (gt-gg9hv.33).
+func ExecGitEnv(dir string, env []string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), gitCeiling)
+	defer cancel()
+	return runGit(ctx, dir, env, args...)
+}
+
+// runGit runs the host's git under ctx with env as its whole environment, which
+// kills it when ctx ends. A command that ctx ends fails naming the timeout or
+// the cancellation; any other failure reports git's last stderr line.
+func runGit(ctx context.Context, dir string, env []string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = env
 	// A git fetch leaves a git-remote-https child holding the output pipes, so
 	// Wait would block on it after git is killed; WaitDelay bounds that wait.
 	cmd.WaitDelay = time.Second
@@ -150,10 +169,10 @@ func Commit(override string, v Versioner) (string, error) {
 		return "", fmt.Errorf("cannot read the installed bd's commit: %w", err)
 	}
 	if info.Commit == "" {
-		return "", fmt.Errorf("the installed bd reports no commit (bd %s, build %s); install a beads fork build that records one, or name the commit (-commit, BD_COMMIT under make)", info.Version, orUnknown(firstNonEmpty(info.BuildID, info.Build)))
+		return "", fmt.Errorf("the installed bd reports no commit (bd %s, build %s); install a beads fork build that records one, or name the commit (-commit)", info.Version, orUnknown(firstNonEmpty(info.BuildID, info.Build)))
 	}
 	if !isCommit(info.Commit) {
-		return "", fmt.Errorf("the installed bd reports commit %q, which is not a 7+ character hex commit; rebuild bd, or name the commit (-commit, BD_COMMIT under make)", info.Commit)
+		return "", fmt.Errorf("the installed bd reports commit %q, which is not a 7+ character hex commit; rebuild bd, or name the commit (-commit)", info.Commit)
 	}
 	return info.Commit, nil
 }
@@ -189,7 +208,7 @@ type Options struct {
 // (gt-pme82).
 func Compile(opt Options, git Git, goBuild Go) (string, error) {
 	if opt.Src == "" {
-		return "", errors.New("no beads checkout named (make polecat-image BD_SRC=<checkout>)")
+		return "", errors.New("no beads checkout named: name the checkout the image's bd is built from")
 	}
 	if opt.Out == "" {
 		return "", errors.New("no output path named for the bd binary")

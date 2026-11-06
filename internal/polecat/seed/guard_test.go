@@ -112,10 +112,12 @@ func TestGuardFailsWhenABehindPinLacksAModuleMainRequires(t *testing.T) {
 	if err == nil {
 		t.Fatal("Guard on a pin lacking a module main requires = nil, want an error")
 	}
-	for _, want := range []string{"devops", short(pinSHA), short(mainSHA), "github.com/x/new (in .)"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not name %q", err, want)
-		}
+	// The whole sentence is pinned, so the Guard path keeps the wording it has
+	// (gt-gg9hv.33).
+	want := fmt.Sprintf("pin-drift guard: rig devops pin %s lacks modules its main %s requires: github.com/x/new (in .); run make polecat-seed-pins on the canonical checkout at main, then commit the pin",
+		short(pinSHA), short(mainSHA))
+	if got := err.Error(); got != want {
+		t.Errorf("refusal = %q, want the canonical-checkout sentence unchanged: %q", got, want)
 	}
 }
 
@@ -196,10 +198,13 @@ func TestGuardNamesAPinThatIsNotInItsCheckout(t *testing.T) {
 	if err == nil {
 		t.Fatal("Guard on a pin the checkout lacks = nil, want an error")
 	}
-	for _, want := range []string{"devops", short(pinSHA), "not readable in its canonical checkout"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not name %q", err, want)
-		}
+	// The whole sentence is pinned: CheckAgainstMain takes the sentence's
+	// location from its caller, and this keeps the Guard path reading what it
+	// always has (gt-gg9hv.33).
+	want := fmt.Sprintf("pin-drift guard: rig devops pin %s is not readable in its canonical checkout, so it cannot be compared with main %s (no answer for %q): fetch or fix that checkout, then rerun",
+		short(pinSHA), short(mainSHA), rigDir("devops")+" ls-tree -r --name-only "+pinSHA)
+	if got := err.Error(); got != want {
+		t.Errorf("refusal = %q, want the canonical-checkout sentence unchanged: %q", got, want)
 	}
 }
 

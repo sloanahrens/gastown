@@ -188,32 +188,25 @@ func TestIntegrationTargetsPolecatImageDryRunExitsZero(t *testing.T) {
 // cross-compiles for the sandbox image.
 const arm64CrossBuild = "GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build"
 
-// TestIntegrationTargetsPolecatImageCrossCompilesForArm64 checks "polecat-image
-// cross-compiles gt, the cache-trim helper and the tier-sweep runner for
-// linux/arm64 and builds bd through the bd build helper".
-// Mutation: drop any go build line, point one at another package, or build bd
-// outside the helper, and the image loses a binary or its commit provenance.
-func TestIntegrationTargetsPolecatImageCrossCompilesForArm64(t *testing.T) {
+// TestIntegrationTargetsPolecatImageStagesItsHelpersThroughTheCommand checks
+// "polecat-image stages gt, polecat-image, sweep-run and bd through the context
+// command, not in the recipe". The command builds them for linux/arm64 with its
+// own environment, which the imagectx unit tests check.
+// Mutation: put a cross-compile line back in the recipe, and the binaries stop
+// coming from the pins' one staging path.
+func TestIntegrationTargetsPolecatImageStagesItsHelpersThroughTheCommand(t *testing.T) {
 	out := dryTarget(t, polecatImageMake(t, repoRoot(t)), "polecat-image")
-	cross := 0
-	for _, line := range strings.Split(out, "\n") {
-		if strings.Contains(line, arm64CrossBuild) {
-			cross++
-		}
+	if cross := strings.Count(out, arm64CrossBuild); cross != 0 {
+		t.Fatalf("polecat-image cross-compiles %d helpers in the recipe, want none: the context command builds them\n%s", cross, out)
 	}
-	if cross != 3 {
-		t.Fatalf("polecat-image cross-compiles %d helpers, want gt, the cache-trim helper and the tier-sweep runner\n%s", cross, out)
-	}
-	for _, want := range []string{"./cmd/gt", "./plugins/polecat-image", "./cmd/sweep-run", "go run ./internal/polecat/bdbuild/cmd/build"} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("polecat-image does not build %s\n%s", want, out)
-		}
+	if !strings.Contains(out, "go run ./internal/polecat/imagectx/cmd/build -rev") {
+		t.Fatalf("polecat-image does not run the context command\n%s", out)
 	}
 }
 
 // taggedDockerBuild matches the image build carrying both the short-sha tag and
-// :dev, from the Dockerfile in deploy/polecat.
-var taggedDockerBuild = regexp.MustCompile(`docker build --platform linux/arm64 .*-t gastown-polecat:[^ ]+ -t gastown-polecat:dev -f deploy/polecat/Dockerfile deploy/polecat`)
+// :dev, from the Dockerfile in deploy/polecat, over the staged context.
+var taggedDockerBuild = regexp.MustCompile(`docker build --platform linux/arm64 .*-t gastown-polecat:[^ ]+ -t gastown-polecat:dev -f deploy/polecat/Dockerfile "\$ctx"`)
 
 // TestIntegrationTargetsPolecatImageBuildsTheImageTaggedShortShaAndDev checks
 // "polecat-image builds deploy/polecat/Dockerfile, tagged both the short sha and
@@ -236,33 +229,31 @@ func TestIntegrationTargetsPolecatImageBuildsTheImageTaggedShortShaAndDev(t *tes
 	}
 }
 
-// TestIntegrationTargetsPolecatImageTakesBDSrc checks "polecat-image takes
-// BD_SRC pointing at another beads checkout".
-// Mutation: stop passing BD_SRC to the bd build helper, and the image's bd comes
-// from wherever the host's checkout happens to be.
-func TestIntegrationTargetsPolecatImageTakesBDSrc(t *testing.T) {
+// TestIntegrationTargetsPolecatImageBuildsBDFromItsPin checks "polecat-image
+// builds bd at its image pin, so BD_SRC names no checkout the image reads".
+// Mutation: pass BD_SRC to the context command, and the dry run names the
+// checkout the image's bd would be read from.
+func TestIntegrationTargetsPolecatImageBuildsBDFromItsPin(t *testing.T) {
 	out := dryTarget(t, polecatImageMake(t, repoRoot(t)), "polecat-image", "BD_SRC=/somewhere/else")
-	if !strings.Contains(out, `-src "/somewhere/else"`) {
-		t.Fatalf("polecat-image does not build bd from BD_SRC\n%s", out)
+	if strings.Contains(out, "/somewhere/else") {
+		t.Fatalf("polecat-image reads BD_SRC, so bd is not built at its pin\n%s", out)
 	}
 }
 
 // TestIntegrationTargetsPolecatImageLabelsTheBDCommit checks "polecat-image
-// labels the image with the bd commit the helper built".
-// Mutation: label the image from the host bd instead of the file the helper
-// wrote, and a checkout that predates it leaves the label naming another commit
-// (gt-7b7a5).
+// labels the image with the bd commit the context command printed".
+// Mutation: label the image from the host bd or a make variable instead of the
+// commit the staged context names, and the label no longer matches the bd the
+// image carries (gt-7b7a5).
 func TestIntegrationTargetsPolecatImageLabelsTheBDCommit(t *testing.T) {
-	out := dryTarget(t, polecatImageMake(t, repoRoot(t)), "polecat-image", "BD_SRC=/somewhere/else", "BD_COMMIT=3b90ab0")
+	out := dryTarget(t, polecatImageMake(t, repoRoot(t)), "polecat-image")
 	for _, want := range []string{
-		`-commit "3b90ab0"`,
-		"bd_commit=$(go run ./internal/polecat/bdbuild/cmd/build",
-		`test -n "$bd_commit"`,
-		"bd_commit=$(cat deploy/polecat/bin/bd.commit)",
+		"s/^label: org.gastown.bd-commit=//p",
+		`test -n "$ctx" -a -n "$gt_commit" -a -n "$bd_commit"`,
 		`--label org.gastown.bd-commit="$bd_commit"`,
 	} {
 		if !strings.Contains(out, want) {
-			t.Fatalf("polecat-image does not label the image with the bd commit the helper built (missing %q)\n%s", want, out)
+			t.Fatalf("polecat-image does not label the image with the bd commit the context command printed (missing %q)\n%s", want, out)
 		}
 	}
 }

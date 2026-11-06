@@ -665,45 +665,24 @@ func TestBDPinMatchesThePolecatImageFlow(t *testing.T) {
 	}
 }
 
-// TestGTPinMatchesThePolecatImageFlow compares the argv the daemon image builds
-// gt with against the polecat-image recipe's gt build, bar the rev stamp the
-// daemon image adds on purpose.
-func TestGTPinMatchesThePolecatImageFlow(t *testing.T) {
+// TestGTPinMatchesTheSharedBuildArgv compares the argv the daemon image builds
+// gt with against bdbuild.GoBuildArgv, the shared argv the polecat context
+// command compiles gt with, bar the rev stamp the daemon image adds on purpose.
+// The polecat side's recorded call is compared in that package's
+// TestGTPinMatchesTheDaemonImageGtBuild: this package's test cannot import it
+// (the context package imports this one), so here the shared helper is what
+// pins the two flows together.
+func TestGTPinMatchesTheSharedBuildArgv(t *testing.T) {
 	t.Parallel()
-	src, err := os.ReadFile(filepath.Join("..", "..", "Makefile"))
-	if err != nil {
-		t.Fatalf("reading the repo Makefile: %v", err)
-	}
-	recipe := strings.Fields(polecatImageGTBuild(t, string(src)))
-	recipe = recipe[indexOf(recipe, "go"):]
-	if got := outOf(recipe); got != "deploy/polecat/bin/gt" {
-		t.Fatalf("the polecat image writes gt to %q, want deploy/polecat/bin/gt", got)
-	}
 	b, run := builderFor(t)
 	if _, err := b.BuildBinaries(context.Background(), testRev); err != nil {
 		t.Fatalf("BuildBinaries: %v", err)
 	}
 	got := withoutLdflags(run.calls[0].argv)
-	if !reflect.DeepEqual(withOut(got), withOut(recipe)) {
-		t.Errorf("the daemon image builds gt with %q, the polecat image with %q", got, recipe)
+	polecat := append([]string{"go"}, bdbuild.GoBuildArgv(filepath.Join("bin", "gt"), GTPackage)...)
+	if !reflect.DeepEqual(withOut(got), withOut(polecat)) {
+		t.Errorf("the daemon image builds gt with %q, the polecat image with %q", got, polecat)
 	}
-}
-
-// polecatImageGTBuild returns the polecat-image recipe line that builds gt.
-func polecatImageGTBuild(t *testing.T, makefile string) string {
-	t.Helper()
-	inTarget := false
-	for _, line := range strings.Split(makefile, "\n") {
-		if !strings.HasPrefix(line, "\t") {
-			inTarget = strings.HasPrefix(line, "polecat-image:")
-			continue
-		}
-		if inTarget && strings.Contains(line, "deploy/polecat/bin/gt ") {
-			return line
-		}
-	}
-	t.Fatalf("the Makefile's polecat-image recipe builds no deploy/polecat/bin/gt")
-	return ""
 }
 
 // contains reports whether ss holds s.

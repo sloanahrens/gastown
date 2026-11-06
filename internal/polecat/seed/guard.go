@@ -42,19 +42,35 @@ func Guard(pins []Source, buildRig, town string, git Git) (notes []string, err e
 			return nil, fmt.Errorf("pin-drift guard: cannot read origin/main of rig %s in %s (%v): fetch that checkout through the town's path, then rerun", src.Rig, dir, err)
 		}
 		main := strings.TrimSpace(string(out))
-		if src.Commit == main {
-			continue
-		}
-		missing, err := missingModules(git, dir, src.Commit, main)
+		note, err := CheckAgainstMain(src.Rig, src.Commit, main, "its canonical checkout", dir, git)
 		if err != nil {
-			return nil, fmt.Errorf("pin-drift guard: rig %s pin %s is not readable in its canonical checkout, so it cannot be compared with main %s (%v): fetch or fix that checkout, then rerun", src.Rig, short(src.Commit), short(main), err)
+			return nil, err
 		}
-		if len(missing) > 0 {
-			return nil, fmt.Errorf("pin-drift guard: rig %s pin %s lacks modules its main %s requires: %s; run make polecat-seed-pins on the canonical checkout at main, then commit the pin", src.Rig, short(src.Commit), short(main), strings.Join(missing, ", "))
+		if note != "" {
+			notes = append(notes, note)
 		}
-		notes = append(notes, fmt.Sprintf("pin-drift guard: rig %s pin %s is %s, main %s: no module coverage gap", src.Rig, short(src.Commit), behind(git, dir, src.Commit, main), short(main)))
 	}
 	return notes, nil
+}
+
+// CheckAgainstMain is Guard's rule for one rig: the pin must carry every module
+// main requires, both commits read from dir, a tree that holds the pin and main
+// and is named by where in the refusal. A pin at main returns no note. A pin
+// behind main with no coverage gap returns the note Guard prints. A pin whose
+// modules lack one main requires is refused. The caller reads main; this never
+// fetches.
+func CheckAgainstMain(rig, pin, main, where, dir string, git Git) (note string, err error) {
+	if pin == main {
+		return "", nil
+	}
+	missing, err := missingModules(git, dir, pin, main)
+	if err != nil {
+		return "", fmt.Errorf("pin-drift guard: rig %s pin %s is not readable in %s, so it cannot be compared with main %s (%v): fetch or fix that checkout, then rerun", rig, short(pin), where, short(main), err)
+	}
+	if len(missing) > 0 {
+		return "", fmt.Errorf("pin-drift guard: rig %s pin %s lacks modules its main %s requires: %s; run make polecat-seed-pins on the canonical checkout at main, then commit the pin", rig, short(pin), short(main), strings.Join(missing, ", "))
+	}
+	return fmt.Sprintf("pin-drift guard: rig %s pin %s is %s, main %s: no module coverage gap", rig, short(pin), behind(git, dir, pin, main), short(main)), nil
 }
 
 // behind describes where the pin stands against main: how many commits behind

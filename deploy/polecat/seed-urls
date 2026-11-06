@@ -1,0 +1,3 @@
+# <rig> <url>: the repository each seeded rig other than gastown is fetched from. gastown is seeded from the commit the image is built at, so it has no line here (gt-gg9hv.33).
+devops http://forgejo:3000/sloan/devops.git
+beads http://forgejo:3000/sloan/beads.git

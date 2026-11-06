@@ -39,8 +39,10 @@ const (
 
 // polecatStubGo answers go for the scratch checkout. It logs every invocation to
 // GO_ARGS_LOG so a case can see which recipe lines ran, writes (and makes
-// executable) any -o path a recipe names, and answers the bd build helper with
-// STUB_BD_COMMIT, or exits STUB_BD_EXIT when that is set.
+// executable) any -o path a recipe names, and answers the context command
+// (internal/polecat/imagectx/cmd/build) with the context and label lines it
+// prints, the bd label taken from STUB_BD_COMMIT, or exits STUB_BD_EXIT when that
+// is set.
 const polecatStubGo = `#!/bin/sh
 [ -n "$GO_ARGS_LOG" ] && printf '%s\n' "$*" >>"$GO_ARGS_LOG"
 out=""; prev=""
@@ -51,9 +53,19 @@ done
 if [ -n "$out" ]; then
   mkdir -p "$(dirname "$out")" && printf 'stub\n' >"$out" && chmod +x "$out" || exit 1
 fi
-if [ "$1" = "run" ] && [ "$2" = "./internal/polecat/bdbuild/cmd/build" ]; then
+if [ "$1" = "run" ] && [ "$2" = "./internal/polecat/imagectx/cmd/build" ]; then
   [ -n "$STUB_BD_EXIT" ] && exit "$STUB_BD_EXIT"
-  printf '%s\n' "$STUB_BD_COMMIT"
+  rev=""; ctx=""; prev=""
+  for a in "$@"; do
+    [ "$prev" = "-rev" ] && rev="$a"
+    [ "$prev" = "-out" ] && ctx="$a"
+    prev="$a"
+  done
+  mkdir -p "$ctx/bin" || exit 1
+  printf 'context: %s\n' "$ctx"
+  printf 'label: org.gastown.gt-commit=%s\n' "$rev"
+  printf 'label: org.gastown.bd-commit=%s\n' "$STUB_BD_COMMIT"
+  printf 'label: go-floor=1.27.1\n'
 fi
 exit 0
 `
@@ -112,18 +124,16 @@ func newPolecatScratch(t *testing.T, files map[string]string) *polecatScratch {
 }
 
 // newLabelScratch is the checkout the label family runs: the Makefile, a
-// compilable cmd/gt, the seed pins the seed stage requires and the floor script
-// the image build runs. The rig floor is read from the scratch go.mod itself, as
-// the shell fixture passes POLE_RIG_GO_MODS, so the case never reads a live rig.
+// compilable cmd/gt, the seed pins and the floor script the context carries. The
+// context command is stubbed, so the labels it prints come from the stub, and no
+// case reads a live rig or the host's toolchain.
 func newLabelScratch(t *testing.T) *polecatScratch {
-	p := newPolecatScratch(t, map[string]string{
+	return newPolecatScratch(t, map[string]string{
 		"go.mod":                     scratchGoMod,
 		"cmd/gt/main.go":             scratchGTMain,
 		"deploy/polecat/seed-pins":   "fx 92b9e510ac2f9ff8c80b0291f312ac482bf96c38\n",
 		"deploy/polecat/go-floor.sh": "#!/bin/sh\necho 1.21\n",
 	})
-	p.env = []string{"POLE_RIG_GO_MODS=" + filepath.Join(p.dir, "go.mod")}
-	return p
 }
 
 // run runs the recipe for real in the scratch checkout with args, under
@@ -156,15 +166,14 @@ func (p *polecatScratch) run(t *testing.T, extra []string, args ...string) (stri
 // must apply: `?=` does not override a variable that is set, even to nothing.
 func polecatEnv(add []string) []string {
 	decided := map[string]bool{
-		"PATH":             true,
-		"POLE_TOWN":        true,
-		"POLE_SEED_DIR":    true,
-		"POLE_RIG_GO_MODS": true,
-		"POLE_NODE_PRUNE":  true,
-		"GO_ARGS_LOG":      true,
-		"DOCKER_ARGS_LOG":  true,
-		"STUB_BD_COMMIT":   true,
-		"STUB_BD_EXIT":     true,
+		"PATH":            true,
+		"POLE_TOWN":       true,
+		"POLE_SEED_DIR":   true,
+		"POLE_NODE_PRUNE": true,
+		"GO_ARGS_LOG":     true,
+		"DOCKER_ARGS_LOG": true,
+		"STUB_BD_COMMIT":  true,
+		"STUB_BD_EXIT":    true,
 	}
 	var env []string
 	for _, kv := range sandboxEnv() {
@@ -210,8 +219,8 @@ func (p *polecatScratch) goInvocations(t *testing.T) string {
 		t.Fatalf("the stub go recorded no invocation, so nothing proves the run reached the build: %v", err)
 	}
 	log := string(data)
-	if !strings.Contains(log, "run ./internal/polecat/bdbuild/cmd/build") {
-		t.Fatalf("the stub go log holds no bd build helper invocation, so the run stopped before the point these assertions cover\n%s", log)
+	if !strings.Contains(log, "run ./internal/polecat/imagectx/cmd/build") {
+		t.Fatalf("the stub go log holds no context command invocation, so the run stopped before the point these assertions cover\n%s", log)
 	}
 	return log
 }
@@ -227,23 +236,20 @@ func (p *polecatScratch) dockerArgs(t *testing.T) string {
 	return string(data)
 }
 
-// TestIntegrationPolecatImageRefusesToRunWithoutBDSrc checks "polecat-image
-// refuses to run without BD_SRC, before building anything".
-// Mutation: drop the recipe's first guard line, and the run falls through to
-// the next guard: nothing names BD_SRC, and nothing refuses it before a build.
-func TestIntegrationPolecatImageRefusesToRunWithoutBDSrc(t *testing.T) {
-	p := newPolecatScratch(t, map[string]string{
-		"go.mod":         scratchGoMod,
-		"cmd/gt/main.go": scratchGTMain,
-	})
-	out, err := p.run(t, nil, "polecat-image", "BD_SRC=")
-	if code := exitCode(t, err); code != 2 {
-		t.Fatalf("polecat-image with BD_SRC unset exited %d, want 2\n%s", code, out)
+// TestIntegrationPolecatImageNeedsNoBDSrc checks "polecat-image builds bd from
+// the pins, so a run with no BD_SRC reaches the context command and the image".
+// Mutation: put back a BD_SRC guard ahead of the context command, and the run
+// with BD_SRC unset refuses before the command is logged.
+func TestIntegrationPolecatImageNeedsNoBDSrc(t *testing.T) {
+	p := newLabelScratch(t)
+	out, err := p.run(t, []string{"STUB_BD_COMMIT=" + helperCommit}, "polecat-image", "BD_SRC=")
+	if err != nil {
+		t.Fatalf("polecat-image with BD_SRC unset failed: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "BD_SRC is unset") {
-		t.Fatalf("polecat-image with BD_SRC unset does not name the guard\n%s", out)
+	if log := p.goInvocations(t); !strings.Contains(log, "run ./internal/polecat/imagectx/cmd/build") {
+		t.Fatalf("polecat-image with BD_SRC unset did not reach the context command\n%s", log)
 	}
-	mustNotBuild(t, out)
+	p.dockerArgs(t)
 }
 
 // TestIntegrationPolecatImageRefusesATreeWithAnUntrackedFile checks "polecat-image
@@ -270,20 +276,19 @@ func TestIntegrationPolecatImageRefusesATreeWithAnUntrackedFile(t *testing.T) {
 }
 
 // TestIntegrationPolecatImageLetsACleanTreePastItsGuardToTheBuild checks
-// "polecat-image lets a clean tree past its guard to the build".
+// "polecat-image lets a clean tree past its guard to the context command".
 // Mutation: replace the tree guard with a constant false, and the clean tree is
-// refused; drop the rig go.mod guard's fixture, and the run stops there. Either
-// way the gt build line never writes its -o path. The fake go writes that path
-// itself, so the case reads the recipe line that ran, not the host's toolchain.
+// refused; drop the staging line, and the command never runs. The stub go
+// answers the command, so the case reads the line the recipe ran, with the
+// context directory it named, not the host's toolchain or a checkout.
 func TestIntegrationPolecatImageLetsACleanTreePastItsGuardToTheBuild(t *testing.T) {
 	p := newPolecatScratch(t, map[string]string{
 		"go.mod":         scratchGoMod,
 		"cmd/gt/main.go": scratchGTMain,
 	})
-	p.s.WriteFile("town/fx/mayor/rig/go.mod", "module example.invalid/fx\n\ngo 1.21\n")
 
-	// The bd build helper prints nothing here, so the recipe still exits non-zero
-	// after the build line; this case reads the build, not the run's verdict.
+	// No bd commit is printed here, so the recipe still exits non-zero after the
+	// command; this case reads the command, not the run's verdict.
 	out, err := p.run(t, nil, "polecat-image", "BD_SRC=/nonexistent")
 	if code := exitCode(t, err); code != 2 {
 		t.Fatalf("polecat-image on a clean tree exited %d, want 2 as the empty bd commit stops the recipe\n%s", code, out)
@@ -291,20 +296,10 @@ func TestIntegrationPolecatImageLetsACleanTreePastItsGuardToTheBuild(t *testing.
 	if strings.Contains(out, "uncommitted or untracked") {
 		t.Fatalf("polecat-image refused a clean tree at its tree guard\n%s", out)
 	}
-	bin := filepath.Join(p.dir, "deploy", "polecat", "bin", "gt")
-	info, err := os.Stat(bin)
-	if err != nil {
-		t.Fatalf("the clean tree's gt build wrote no binary at the recipe's -o path: %v\n%s", err, out)
-	}
-	if info.Mode()&0o111 == 0 {
-		t.Fatalf("the gt build's output %s is not executable\n%s", bin, out)
-	}
-	log, err := os.ReadFile(p.goLog)
-	if err != nil {
-		t.Fatalf("the stub go recorded no invocation: %v", err)
-	}
-	if lineOf(string(log), "-o deploy/polecat/bin/gt ./cmd/gt") == 0 {
-		t.Fatalf("the recipe never ran its gt build line into %s\n%s\nlog: %s", bin, out, log)
+	ctx := filepath.Join(p.dir, "deploy", "polecat", "context")
+	log := p.goInvocations(t)
+	if !strings.Contains(log, "run ./internal/polecat/imagectx/cmd/build -rev ") || !strings.Contains(log, "-out "+ctx) {
+		t.Fatalf("the recipe never ran the context command into %s\n%s", ctx, log)
 	}
 }
 
@@ -360,15 +355,16 @@ func TestIntegrationPolecatImagePrunesTheSandboxNodesOnOptIn(t *testing.T) {
 }
 
 // TestIntegrationPolecatImageStopsBeforeDockerWhenTheBDBuildFails checks
-// "polecat-image stops before docker when the bd build fails".
-// Mutation: drop the helper's `|| { echo ...; exit 2; }` guard, and the failed
-// run is read as an empty commit instead, so the output no longer names the bd
-// build failure.
+// "polecat-image stops before docker when the context command fails, bd's build
+// among its steps".
+// Mutation: drop the staging line's `|| { echo ...; exit 2; }` guard, and the
+// failed run is read as an empty context instead, so the output no longer names
+// the failure.
 func TestIntegrationPolecatImageStopsBeforeDockerWhenTheBDBuildFails(t *testing.T) {
 	p := newLabelScratch(t)
 	out, err := p.run(t, []string{"STUB_BD_EXIT=1", "POLE_NODE_PRUNE=1"}, "polecat-image", "BD_SRC=/somewhere/else")
 	exitCode(t, err)
-	if !strings.Contains(out, "the bd build failed") {
+	if !strings.Contains(out, "did not stage from the pins") {
 		t.Fatalf("polecat-image with a failing bd build does not name the failure\n%s", out)
 	}
 	mustNotExist(t, p.dockerLog)
@@ -378,15 +374,15 @@ func TestIntegrationPolecatImageStopsBeforeDockerWhenTheBDBuildFails(t *testing.
 }
 
 // TestIntegrationPolecatImageRefusesAnEmptyBDCommit checks "polecat-image
-// refuses an empty bd commit before docker builds the image".
-// Mutation: drop `test -n "$bd_commit"`, and the empty commit is written to
-// bd.commit; the file guard that reads it refuses next, so the output no longer
-// names the helper's empty output.
+// refuses a context with an empty bd commit before docker builds the image".
+// Mutation: drop the `test -n "$bd_commit"` part of the label guard, and docker
+// runs with an empty org.gastown.bd-commit label, so the output no longer names
+// the refusal.
 func TestIntegrationPolecatImageRefusesAnEmptyBDCommit(t *testing.T) {
 	p := newLabelScratch(t)
 	out, err := p.run(t, []string{"STUB_BD_COMMIT=", "POLE_NODE_PRUNE=1"}, "polecat-image", "BD_SRC=/somewhere/else")
 	exitCode(t, err)
-	if !strings.Contains(out, "printed no commit") {
+	if !strings.Contains(out, "names no context, gt commit, bd commit or Go floor") {
 		t.Fatalf("polecat-image with an empty bd commit does not name the refusal\n%s", out)
 	}
 	mustNotExist(t, p.dockerLog)

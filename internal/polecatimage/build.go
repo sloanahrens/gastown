@@ -45,9 +45,11 @@ func (r *Run) BuildAt(commit string) error {
 	if made.failed() {
 		return r.failf("cannot make a worktree of %s under %s", full, r.Cfg.BuildRoot)
 	}
-	r.Logf("building %s at %s (BD_SRC=%s)", r.Cfg.Image, shortCommit(full), r.Cfg.BDSrc)
+	r.Logf("building %s at %s", r.Cfg.Image, shortCommit(full))
 	started := r.clock()
-	build := r.in(r.Worktree, r.Cfg.Make, "polecat-image", "BD_SRC="+r.Cfg.BDSrc)
+	// The recipe stages its context from the pins and needs no checkout named
+	// (gt-gg9hv.33), so the build passes it no variable.
+	build := r.in(r.Worktree, r.Cfg.Make, "polecat-image")
 	if build.failed() {
 		lines := strings.Split(strings.TrimRight(build.combined(), "\n"), "\n")
 		if len(lines) > buildTailLines {
