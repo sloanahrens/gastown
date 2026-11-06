@@ -18,12 +18,12 @@ Protomolecule (frozen template) ─── Solid
 **Step wisps:** `bd` always materializes a formula's steps as child wisps of the
 root wisp. Each step is its own issue with its own status, so closed steps stay
 closed if a session dies. Gastown agents still read the checklist from `gt prime`,
-which renders the steps inline. `gt mol step done <step-id>` closes a step and
-hands the next ready step to the session.
+which renders the steps inline. `gt mol step done <step-id>` closes the
+completed step and assigns the next ready step to this session.
 
 **Pour** (`bd mol pour`): creates a persistent mol. Its steps are stored as beads
 and sync like any other bead (`bd dolt push` / `bd dolt pull`). Use it for work
-you want to keep in git history, such as feature work that spans sessions.
+you want to keep in the database, such as feature work that spans sessions.
 
 ## Core Concepts
 
