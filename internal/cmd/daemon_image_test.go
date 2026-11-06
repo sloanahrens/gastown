@@ -261,6 +261,130 @@ func TestDaemonImageApplyRunsTheStepsInOrder(t *testing.T) {
 	}
 }
 
+// TestDaemonImageContextOnly: without --apply the flag prints the context-only
+// plan and runs nothing; with --apply it runs the binaries, the plugins, the
+// tools, the claude CLI and the client tools, stops before the mango build and
+// the image build, and its last line names the absolute context directory.
+func TestDaemonImageContextOnly(t *testing.T) {
+	t.Parallel()
+	t.Run("dry run", func(t *testing.T) {
+		t.Parallel()
+		r := newImageRig(t)
+		r.flags.contextOnly = true
+
+		if err := runDaemonImage(context.Background(), r.flags, r.deps); err != nil {
+			t.Fatalf("runDaemonImage: %v", err)
+		}
+
+		out := r.out.String()
+		if !strings.Contains(out, "dry run: nothing was run") {
+			t.Errorf("a dry run did not say so:\n%s", out)
+		}
+		if !strings.Contains(out, daemonimage.ContextLine(r.flags.out)+"\n") {
+			t.Errorf("the plan does not name the context %q:\n%s", r.flags.out, out)
+		}
+		for _, unwanted := range []string{"build mango:", "image: "} {
+			if strings.Contains(out, unwanted) {
+				t.Errorf("the context-only plan holds %q, which needs the engine:\n%s", unwanted, out)
+			}
+		}
+	})
+
+	// A source with no checkout is fetched from its pin, so the pin-drift guard
+	// has no origin/main to read for it: it says so and checks the others, rather
+	// than passing the pin silently.
+	t.Run("a fetched source's drift is reported unchecked", func(t *testing.T) {
+		t.Parallel()
+		r := newImageRig(t)
+		r.flags.apply = true
+		r.flags.contextOnly = true
+		r.flags.bdSrc = ""
+		var calls []string
+		r.deps.builder = func(daemonimage.Builder) imageBuilder {
+			return fakeImageBuilder{calls: &calls}
+		}
+
+		if err := runDaemonImage(context.Background(), r.flags, r.deps); err != nil {
+			t.Fatalf("runDaemonImage: %v", err)
+		}
+
+		if !strings.Contains(r.out.String(), "pin-drift guard: bd is fetched from its pin URL") {
+			t.Errorf("the command did not report bd's unchecked drift:\n%s", r.out.String())
+		}
+		if strings.Contains(r.out.String(), "pin-drift guard: om is fetched") {
+			t.Errorf("om has a checkout, and its drift was reported unchecked:\n%s", r.out.String())
+		}
+	})
+
+	steps := strings.Join([]string{
+		"binaries " + imageTestRev, "plugins " + imageTestRev, "hm tools", "claude", "tools",
+	}, ",")
+	for _, tc := range []struct {
+		name      string
+		failAt    string
+		want      string
+		wantError string
+	}{
+		{"all succeed", "", steps, ""},
+		{"the binaries fail", "binaries " + imageTestRev, "binaries " + imageTestRev, "failed"},
+		{"the plugins fail", "plugins " + imageTestRev, "binaries " + imageTestRev + ",plugins " + imageTestRev, "plugins " + imageTestRev + " failed"},
+		{"the hm tools fail", "hm tools", "binaries " + imageTestRev + ",plugins " + imageTestRev + ",hm tools", "hm tools failed"},
+		{"the claude CLI fails", "claude", "binaries " + imageTestRev + ",plugins " + imageTestRev + ",hm tools,claude", "claude failed"},
+		{"the client tools fail", "tools", "binaries " + imageTestRev + ",plugins " + imageTestRev + ",hm tools,claude,tools", "tools failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newImageRig(t)
+			r.flags.apply = true
+			r.flags.contextOnly = true
+			var calls []string
+			r.deps.builder = func(daemonimage.Builder) imageBuilder {
+				return fakeImageBuilder{calls: &calls, failAt: tc.failAt}
+			}
+
+			err := runDaemonImage(context.Background(), r.flags, r.deps)
+
+			if strings.Join(calls, ",") != tc.want {
+				t.Errorf("steps = %v, want %v", calls, tc.want)
+			}
+			for _, call := range calls {
+				if strings.HasPrefix(call, "mango") || strings.HasPrefix(call, "image") {
+					t.Errorf("a context-only build ran %q, which needs the engine", call)
+				}
+			}
+			// The plan is printed before the steps run, and it ends with the
+			// context line; the build's own print is the one after it, so a
+			// finished build names the context twice and a failed one once.
+			lines := strings.Split(strings.TrimRight(r.out.String(), "\n"), "\n")
+			context := daemonimage.ContextLine(r.flags.out)
+			printed := 0
+			for _, line := range lines {
+				if line == context {
+					printed++
+				}
+			}
+			if tc.wantError == "" {
+				if err != nil {
+					t.Fatalf("runDaemonImage: %v", err)
+				}
+				if got := lines[len(lines)-1]; got != context {
+					t.Errorf("last line = %q, want %q", got, context)
+				}
+				if printed != 2 {
+					t.Errorf("the context line printed %d times, want the plan's and the build's", printed)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("error = %v, want it to contain %q", err, tc.wantError)
+			}
+			if printed != 1 {
+				t.Errorf("a failed build printed the context line %d times, want only the plan's", printed)
+			}
+		})
+	}
+}
+
 // Every refusal comes before any step runs (the rig's deps fail the test if one
 // does), with --apply as well as without. Each row removes one thing; a test
 // fails if any one refusal is removed.
@@ -282,10 +406,6 @@ func TestDaemonImageRefusesBeforeAnything(t *testing.T) {
 		{"no --rev", func(_ *testing.T, f *daemonImageFlags) { f.rev = "" }, "--rev is required"},
 		{"no --out", func(_ *testing.T, f *daemonImageFlags) { f.out = "" }, "--out is required"},
 		{"no --gt-src", func(_ *testing.T, f *daemonImageFlags) { f.gtSrc = "" }, "--gt-src is required"},
-		{"no --bd-src", func(_ *testing.T, f *daemonImageFlags) { f.bdSrc = "" }, "--bd-src is required"},
-		{"no --om-src", func(_ *testing.T, f *daemonImageFlags) { f.omSrc = "" }, "--om-src is required"},
-		{"no --hm-src", func(_ *testing.T, f *daemonImageFlags) { f.hmSrc = "" }, "--hm-src is required"},
-		{"no --devops-src", func(_ *testing.T, f *daemonImageFlags) { f.devopsSrc = "" }, "--devops-src is required"},
 		{"no --mango-src", func(_ *testing.T, f *daemonImageFlags) { f.mangoSrc = "" }, "--mango-src is required"},
 		{"no --mango-commit", func(_ *testing.T, f *daemonImageFlags) { f.mangoCommit = "" }, "--mango-commit is required"},
 		{"no --pins", func(_ *testing.T, f *daemonImageFlags) { f.pins = "" }, "--pins is required"},

@@ -249,11 +249,8 @@ func TestPlanRefusesWhatABuildRefuses(t *testing.T) {
 		{"no rev", func(*Builder) {}, " ", "no rev"},
 		{"a rev that is an option", func(*Builder) {}, "--upload-pack=sh", "is not a 7+ character hex commit"},
 		{"no gt source", func(b *Builder) { b.GTSrc = "" }, testRev, "no gt source"},
-		{"no bd source", func(b *Builder) { b.BDSrc = "" }, testRev, "no bd source"},
-		{"no om source", func(b *Builder) { b.OMSrc = "" }, testRev, "no om source"},
 		{"no bd commit", func(b *Builder) { b.BDCommit = "" }, testRev, "no bd commit"},
 		{"no om commit", func(b *Builder) { b.OMCommit = "" }, testRev, "no om commit"},
-		{"no hm source", func(b *Builder) { b.HMSrc = "" }, testRev, "--hm-src is required"},
 		{"no mango source", func(b *Builder) { b.MangoSrc = "" }, testRev, "--mango-src is required"},
 		{"no mango commit", func(b *Builder) { b.MangoCommit = "" }, testRev, "no mango commit"},
 		{"a mango commit that is not hex", func(b *Builder) { b.MangoCommit = "main" }, testRev, "is not a 7+ character hex commit"},
@@ -263,6 +260,10 @@ func TestPlanRefusesWhatABuildRefuses(t *testing.T) {
 		{"an om commit that is not hex", func(b *Builder) { b.OMCommit = "main" }, testRev, "is not a 7+ character hex commit"},
 		{"no pins file", func(b *Builder) { b.PinsPath = "" }, testRev, "no pins file named"},
 		{"three pins", func(b *Builder) { b.Pins = planPins[:3] }, testRev, "3 pins named, want the four"},
+		{"an absent source with no pin", func(b *Builder) {
+			b.OMSrc = ""
+			b.Pins = []Pin{planPins[0], planPins[0], planPins[2], planPins[3]}
+		}, testRev, "no --om-src and no om pin"},
 		{"no Dockerfile", func(b *Builder) { b.Dockerfile = "" }, testRev, "no Dockerfile"},
 		{"a relative Dockerfile", func(b *Builder) { b.Dockerfile = "Dockerfile" }, testRev, "Dockerfile \"Dockerfile\" is not absolute"},
 		{"a Dockerfile that is not a file", func(b *Builder) { b.Dockerfile = filepath.Join(b.Out, "absent") }, testRev, "is not a file"},

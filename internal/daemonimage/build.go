@@ -104,7 +104,9 @@ type Builder struct {
 	// worktree of rev, so uncommitted changes in GTSrc never reach the binary.
 	GTSrc string
 	// BDSrc is the beads checkout the image's bd is built from: the BD_SRC the
-	// polecat image takes.
+	// polecat image takes. An empty BDSrc (and an empty OMSrc, HMSrc or
+	// DevopsSrc) fetches that source from its pin in Pins instead, so a build
+	// needs no local checkout of it.
 	BDSrc string
 	// BDCommit is the beads commit the image's bd is built from and stamped with:
 	// the commit bdbuild.Commit picks for the polecat image.
@@ -202,7 +204,9 @@ var imagePlugins = []plugin{
 // order. Every refusal comes before the first build runs, so a refused call
 // writes nothing. Each binary is built in a clean worktree of its commit and is
 // staged under b.Out until all three have built, so a build that fails returns
-// its error and no paths, and leaves nothing in b.Out.
+// its error and no paths, and leaves nothing in b.Out. A bd or om checkout that
+// is not named is fetched from its pin into b.Out first, and the fetched tree is
+// removed when the call returns.
 func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error) {
 	if b.Run == nil {
 		return nil, errors.New("daemonimage: no runner to build with")
@@ -218,11 +222,21 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 	if err != nil {
 		return nil, err
 	}
-	bdCommit, err = b.resolve(b.BDSrc, bdCommit)
+	bdSrc, bdCleanup, err := b.source(ctx, "bd", b.BDSrc)
 	if err != nil {
 		return nil, err
 	}
-	omCommit, err = b.resolve(b.OMSrc, omCommit)
+	defer bdCleanup()
+	omSrc, omCleanup, err := b.source(ctx, "om", b.OMSrc)
+	if err != nil {
+		return nil, err
+	}
+	defer omCleanup()
+	bdCommit, err = b.resolve(bdSrc, bdCommit)
+	if err != nil {
+		return nil, err
+	}
+	omCommit, err = b.resolve(omSrc, omCommit)
 	if err != nil {
 		return nil, err
 	}
@@ -232,8 +246,8 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 	}
 	builds := []binary{
 		{name: "gt", src: b.GTSrc, commit: gtCommit, pkg: GTPackage, ldflags: gtCommitFlag + gtStamp},
-		{name: "bd", src: b.BDSrc, commit: bdCommit, pkg: BDPackage, ldflags: bdCommitFlag + bdCommit, stampsBuildID: true},
-		{name: "om", src: b.OMSrc, commit: omCommit, pkg: OMPackage},
+		{name: "bd", src: bdSrc, commit: bdCommit, pkg: BDPackage, ldflags: bdCommitFlag + bdCommit, stampsBuildID: true},
+		{name: "om", src: omSrc, commit: omCommit, pkg: OMPackage},
 	}
 	stage, err := os.MkdirTemp(b.Out, ".daemonimage-")
 	if err != nil {
@@ -260,18 +274,20 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 // checkBuildInputs refuses the inputs BuildBinaries cannot build from, before
 // anything runs, and returns rev and the bd and om commits trimmed. It reads
 // nothing from the host, which is what lets Plan refuse exactly what a build
-// would.
+// would. A bd or om checkout that is absent is not refused: the build fetches
+// that source from its pin.
 func (b Builder) checkBuildInputs(rev string) (string, string, string, error) {
 	rev, err := b.checkOutAndRev(rev, "the binaries")
 	if err != nil {
 		return "", "", "", err
 	}
-	for _, src := range []struct{ name, dir string }{{"gt", b.GTSrc}, {"bd", b.BDSrc}, {"om", b.OMSrc}} {
-		if src.dir == "" {
-			return "", "", "", fmt.Errorf("daemonimage: no %s source checkout named", src.name)
-		}
+	if b.GTSrc == "" {
+		return "", "", "", errors.New("daemonimage: no gt source checkout named")
 	}
 	for _, p := range []struct{ name, dir string }{{"output directory", b.Out}, {"gt source", b.GTSrc}, {"bd source", b.BDSrc}, {"om source", b.OMSrc}} {
+		if p.dir == "" {
+			continue // fetched from its pin; the fetch refuses a pin that cannot be used
+		}
 		if err := refuseCanonicalClone(p.name, p.dir); err != nil {
 			return "", "", "", err
 		}
@@ -336,6 +352,47 @@ func (b Builder) checkOutAndRev(rev, what string) (string, error) {
 		return "", fmt.Errorf("daemonimage: rev %q is not a 7+ character hex commit", rev)
 	}
 	return rev, nil
+}
+
+// source returns the directory a source is built from, and a cleanup to run once
+// the build is done. A checkout the caller named is used as it is and cleanup
+// does nothing; an absent one is fetched from its pin into a fresh directory
+// under Out, and cleanup removes the fetched tree, so a full checkout never stays
+// in the build context.
+func (b Builder) source(ctx context.Context, name, src string) (string, func(), error) {
+	if src != "" {
+		return src, func() {}, nil
+	}
+	pin, err := b.sourcePin(name)
+	if err != nil {
+		return "", nil, err
+	}
+	dir, err := os.MkdirTemp(b.Out, ".daemonimage-src-"+name+"-")
+	if err != nil {
+		return "", nil, fmt.Errorf("daemonimage: cannot make a fetch directory for %s in %s: %w", name, b.Out, err)
+	}
+	cleanup := func() { _ = os.RemoveAll(dir) }
+	if err := FetchSource(ctx, b.Run, b.Git, dir, b.Environ, pin); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	return dir, cleanup, nil
+}
+
+// sourcePin returns the pin a source with no checkout is fetched from, and
+// refuses one it cannot fetch: no pin named at all, or a pin whose URL or commit
+// a fetch cannot use. The pin is checked here, before Plan prints it, so a
+// credential never reaches a plan line or an argv.
+func (b Builder) sourcePin(name string) (Pin, error) {
+	for _, p := range b.Pins {
+		if p.Name == name {
+			if err := checkFetchable(name, p); err != nil {
+				return Pin{}, err
+			}
+			return p, nil
+		}
+	}
+	return Pin{}, fmt.Errorf("daemonimage: no --%s-src and no %s pin in %s: name the checkout or pin the source", name, name, b.pinsFile())
 }
 
 // BuildPlugins writes the image's plugin binaries to b.Out/plugins/<name>/<name>
@@ -603,18 +660,31 @@ func isCommit(s string) bool {
 // none of them: it makes no worktree, resolves no commit, writes no file and
 // reaches no network. It names the pins file and each pin first. It refuses the
 // inputs a build refuses before it runs anything (an empty or relative Out, a
-// rev, bd or om commit that is not a commit, an unnamed source, a mango source
-// or commit that is missing or not a commit, an hm or devops commit that is
-// missing or not a commit, a canonical clone as any input, no pins, a Dockerfile
-// that is not an absolute regular file). It does not check
-// the claude CLI pin, and it does not check that a commit exists in its
+// rev, bd or om commit that is not a commit, an unnamed source with no pin to
+// fetch it from, a pin whose URL is not a credential-free http(s) repository URL
+// or whose commit is not a full sha, a mango source or commit that is missing or
+// not a commit, an hm or devops commit that is missing or not a commit, a
+// canonical clone as any input, no pins, a Dockerfile that is not an absolute
+// regular file). It does not
+// check the claude CLI pin, and it does not check that a commit exists in its
 // checkout, that a checkout is at its pin and clean, or that a pin is fresh:
 // CheckPins and a build check those when they run, so a plan that prints can
 // still fail there. The commits in it are the ones named, not resolved: the gt
-// line stamps buildstamp.Len characters of the named commit, and the bd
-// line's main.Build is planBuildID, since the build id is git's abbreviation of
-// the commit in the worktree a build makes and Plan makes none.
-func (b Builder) Plan(rev string) ([]string, error) {
+// line stamps buildstamp.Len characters of the named commit, and the bd line's
+// main.Build is planBuildID, since the build id is git's abbreviation of the
+// commit in the worktree a build makes and Plan makes none.
+func (b Builder) Plan(rev string) ([]string, error) { return b.plan(rev, false) }
+
+// PlanContext returns the steps a context-only build of rev would run: the same
+// steps as Plan up to the staged build context, and neither the mango build (a
+// container of its own) nor the image build, so no line of it runs the container
+// engine. Its last line is ContextLine, naming the absolute directory of the
+// context the build stages.
+func (b Builder) PlanContext(rev string) ([]string, error) { return b.plan(rev, true) }
+
+// plan is Plan and PlanContext: the steps of the build, without the two engine
+// steps when contextOnly is set.
+func (b Builder) plan(rev string, contextOnly bool) ([]string, error) {
 	rev, bdCommit, omCommit, err := b.checkBuildInputs(rev)
 	if err != nil {
 		return nil, err
@@ -634,13 +704,30 @@ func (b Builder) Plan(rev string) ([]string, error) {
 	if len(b.Pins) != len(PinNames) {
 		return nil, fmt.Errorf("daemonimage: %d pins named, want the four (%s) from %s", len(b.Pins), strings.Join(PinNames, ", "), b.PinsPath)
 	}
+	// Every pin is checked before any line is built, so the plan never prints a
+	// URL a fetch would refuse, a credential among them.
+	for _, p := range b.Pins {
+		if err := checkFetchable(p.Name, p); err != nil {
+			return nil, err
+		}
+	}
 	if err := b.checkToolInputs(); err != nil {
 		return nil, err
 	}
-	mangoCommit, err := b.checkMangoInputs()
-	if err != nil {
-		return nil, err
+	// Each source is planned once, in the order the build reads it, so a source
+	// with no checkout and no usable pin is refused before any line is built.
+	sources := make(map[string]plannedSource, len(PinNames))
+	for _, s := range []struct{ name, src string }{
+		{"bd", b.BDSrc}, {"om", b.OMSrc}, {"hm", b.HMSrc}, {"devops", b.DevopsSrc},
+	} {
+		p, err := b.sourcePlan(s.name, s.src)
+		if err != nil {
+			return nil, err
+		}
+		sources[s.name] = p
 	}
+	bd, om := sources["bd"], sources["om"]
+	devops := sources["devops"]
 	stamp := planCommitStamp(rev)
 	tag := ImageTag(rev)
 	lines := []string{fmt.Sprintf("pins: %s", b.PinsPath)}
@@ -649,24 +736,80 @@ func (b Builder) Plan(rev string) ([]string, error) {
 	}
 	lines = append(lines,
 		fmt.Sprintf("build gt: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "gt"), GTPackage, gtCommitFlag+stamp), " "), b.GTSrc, rev),
-		fmt.Sprintf("build bd: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "bd"), BDPackage, bdBuildFlag+planBuildID+" "+bdCommitFlag+bdCommit), " "), b.BDSrc, bdCommit),
-		fmt.Sprintf("build om: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "om"), OMPackage, ""), " "), b.OMSrc, omCommit),
 	)
+	lines = append(lines, bd.fetch...)
+	lines = append(lines, fmt.Sprintf("build bd: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "bd"), BDPackage, bdBuildFlag+planBuildID+" "+bdCommitFlag+bdCommit), " "), bd.dir, bdCommit))
+	lines = append(lines, om.fetch...)
+	lines = append(lines, fmt.Sprintf("build om: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "om"), OMPackage, ""), " "), om.dir, omCommit))
 	for _, p := range imagePlugins {
 		lines = append(lines, fmt.Sprintf("build %s: %s   (clean worktree of %s at %s)", p.name, strings.Join(goBuildArgv(filepath.Join(b.Out, "plugins", p.name, p.name), p.pkg, ""), " "), b.GTSrc, rev))
 	}
-	lines = append(lines, b.toolPlanLines()...)
-	lines = append(lines, fmt.Sprintf("build mango: %s   (clean worktree of %s at %s)",
-		strings.Join(mangoArgv(planMangoWorktree, planMangoStage), " "), b.MangoSrc, mangoCommit))
+	hm := sources["hm"]
+	lines = append(lines, hm.fetch...)
+	lines = append(lines, devops.fetch...)
+	lines = append(lines, b.toolPlanLines(hm.dir, devops.dir)...)
+	if !contextOnly {
+		mangoCommit, err := b.checkMangoInputs()
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, fmt.Sprintf("build mango: %s   (clean worktree of %s at %s)",
+			strings.Join(mangoArgv(planMangoWorktree, planMangoStage), " "), b.MangoSrc, mangoCommit))
+	}
 	lines = append(lines,
 		fmt.Sprintf("fetch claude: GET %s -> %s   (sha256 %s)", fmt.Sprintf(templates.ClaudeCLIURLFormat, templates.ClaudeCLIVersion), filepath.Join(b.Out, claudeCLIName), templates.ClaudeCLISHA256),
 	)
 	for _, t := range templates.DaemonClientTools {
 		lines = append(lines, fmt.Sprintf("fetch %s: GET %s -> %s   (sha256 %s)", t.Name, t.URL, filepath.Join(b.Out, t.Name), t.SHA256))
 	}
-	lines = append(lines, fmt.Sprintf("image: %s", strings.Join(imageArgv(b.Dockerfile, tag, b.Out), " ")))
+	if contextOnly {
+		lines = append(lines, ContextLine(b.Out))
+	} else {
+		lines = append(lines, fmt.Sprintf("image: %s", strings.Join(imageArgv(b.Dockerfile, tag, b.Out), " ")))
+	}
 	return lines, nil
 }
+
+// ContextLine is the line a context-only build ends with: the absolute directory
+// holding the staged build context, ready for the engine step that builds the
+// image from it.
+func ContextLine(dir string) string { return "context: " + dir }
+
+// plannedSource is one source's place in the plan: the directory it is built from
+// and, for a source with no checkout, the line that fetches it there.
+type plannedSource struct {
+	dir   string
+	fetch []string
+}
+
+// sourcePlan returns the directory a source is built from in a plan, and the
+// line that fetches it when it has no checkout flag. Nothing runs: a source with
+// neither a checkout nor a pin a fetch can use is refused exactly as a build
+// would refuse it. A fetched source's directory is a placeholder, planFetchedDir:
+// the build makes its own under Out and Plan cannot know the name.
+func (b Builder) sourcePlan(name, src string) (plannedSource, error) {
+	if src != "" {
+		return plannedSource{dir: src}, nil
+	}
+	pin, err := b.sourcePin(name)
+	if err != nil {
+		return plannedSource{}, err
+	}
+	argv := make([]string, 0, len(fetchArgv(pin)))
+	for _, cmd := range fetchArgv(pin) {
+		argv = append(argv, strings.Join(cmd, " "))
+	}
+	dir := filepath.Join(b.Out, planFetchedDir(name))
+	return plannedSource{
+		dir:   dir,
+		fetch: []string{fmt.Sprintf("fetch %s: %s   (in %s, made fresh)", name, strings.Join(argv, "; "), dir)},
+	}, nil
+}
+
+// planFetchedDir is what Plan prints in place of a fetched source's directory:
+// the build makes a fresh one under Out with a name Plan cannot know. It is one
+// shell-safe token, because Plan prints it inside a command line.
+func planFetchedDir(name string) string { return "fetched_" + name + "_dir" }
 
 // planBuildID is what Plan prints in place of bd's build id: git answers it
 // inside the worktree BuildBinaries makes, and Plan makes none. It is one
