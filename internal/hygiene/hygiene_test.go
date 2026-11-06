@@ -2,6 +2,7 @@ package hygiene
 
 import (
 	"bytes"
+	"embed"
 	"errors"
 	"fmt"
 	"os"
@@ -325,7 +326,7 @@ func TestBlockedWordIsFoundInContentAndInPathsAndNeverEchoed(t *testing.T) {
 		path:             {Data: []byte("nothing here\n")},
 	}
 
-	findings, _, err := Scan(fsys, sortedPaths(fsys), nil, blocked, nil)
+	findings, _, err := Scan(fsys, sortedPaths(fsys), DefaultRules(), blocked, nil)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -333,8 +334,8 @@ func TestBlockedWordIsFoundInContentAndInPathsAndNeverEchoed(t *testing.T) {
 		Finding{Path: path, Rule: RuleBlockedWord},
 		Finding{Path: "docs/readme.md", Rule: RuleBlockedWord, Line: 2, LineHash: HashLine(contentLine)},
 	)
-	if strings.Contains(findings[1].String(), word) {
-		t.Errorf("content finding %q echoes the blocked word", findings[0].String())
+	if content := findings[1].String(); strings.Contains(content, word) {
+		t.Errorf("content finding %q echoes the blocked word", content)
 	}
 }
 
@@ -357,7 +358,7 @@ func TestBlockedWordMatchesWholeWordsOnly(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			findings, _, err := Scan(singleFile("docs/a.md", tc.line+"\n"), []string{"docs/a.md"}, nil, blocked, nil)
+			findings, _, err := Scan(singleFile("docs/a.md", tc.line+"\n"), []string{"docs/a.md"}, DefaultRules(), blocked, nil)
 			if err != nil {
 				t.Fatalf("Scan: %v", err)
 			}
@@ -380,7 +381,7 @@ func TestBlockedWordMatchesWholeWordsOnly(t *testing.T) {
 			{word + "2", 0},
 			{"x" + word, 0},
 		} {
-			findings, _, err := Scan(singleFile("docs/a.md", tc.line+"\n"), []string{"docs/a.md"}, nil, blocked, nil)
+			findings, _, err := Scan(singleFile("docs/a.md", tc.line+"\n"), []string{"docs/a.md"}, DefaultRules(), blocked, nil)
 			if err != nil {
 				t.Fatalf("Scan: %v", err)
 			}
@@ -404,7 +405,7 @@ func TestWordBoundaryIsLettersAndDigitsNotUnderscoreOnly(t *testing.T) {
 		{"zebra2", 0},
 		{"2zebra", 0},
 	} {
-		findings, _, err := Scan(singleFile("docs/a.md", tc.line+"\n"), []string{"docs/a.md"}, nil, blocked, nil)
+		findings, _, err := Scan(singleFile("docs/a.md", tc.line+"\n"), []string{"docs/a.md"}, DefaultRules(), blocked, nil)
 		if err != nil {
 			t.Fatalf("Scan: %v", err)
 		}
@@ -765,8 +766,36 @@ func TestBlockedFileHoldsOnlyHashes(t *testing.T) {
 
 func TestScanRefusesAMissingFile(t *testing.T) {
 	t.Parallel()
-	if _, _, err := Scan(fstest.MapFS{}, []string{"docs/missing.md"}, DefaultRules(), nil, nil); err == nil {
+	if _, _, err := Scan(fstest.MapFS{}, []string{"docs/missing.md"}, DefaultRules(), shippedBlocked(t), nil); err == nil {
 		t.Fatal("Scan reported a missing file as clean")
+	}
+}
+
+func TestScanRefusesAnEmptyRuleSetOrBlocklist(t *testing.T) {
+	t.Parallel()
+	fsys := singleFile("docs/note.md", "clean text\n")
+	paths := []string{"docs/note.md"}
+	cases := []struct {
+		name    string
+		rules   []Rule
+		blocked map[string]struct{}
+		want    string
+	}{
+		{"no rules", nil, shippedBlocked(t), "no rules"},
+		{"empty rule set", []Rule{}, shippedBlocked(t), "no rules"},
+		{"no blocklist", DefaultRules(), nil, "no blocklist"},
+		{"empty blocklist", DefaultRules(), map[string]struct{}{}, "no blocklist"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			findings, excused, err := Scan(fsys, paths, tc.rules, tc.blocked, nil)
+			if err == nil {
+				t.Fatalf("Scan reported %d findings and %d excused as clean", len(findings), len(excused))
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not say %q", err, tc.want)
+			}
+		})
 	}
 }
 
@@ -803,7 +832,7 @@ func TestUnreadableAndMalformedInputsAreErrors(t *testing.T) {
 			{Match: func(string) bool { return false }},
 			{Name: "no matcher"},
 		} {
-			if _, _, err := Scan(fsys, []string{"docs/a.md"}, []Rule{rule}, nil, nil); err == nil {
+			if _, _, err := Scan(fsys, []string{"docs/a.md"}, []Rule{rule}, shippedBlocked(t), nil); err == nil {
 				t.Errorf("Scan accepted rule %q", rule.Name)
 			}
 		}
@@ -811,7 +840,7 @@ func TestUnreadableAndMalformedInputsAreErrors(t *testing.T) {
 
 	t.Run("invalid path", func(t *testing.T) {
 		t.Parallel()
-		if _, _, err := Scan(singleFile("docs/a.md", "plain text\n"), []string{"../escape"}, DefaultRules(), nil, nil); err == nil {
+		if _, _, err := Scan(singleFile("docs/a.md", "plain text\n"), []string{"../escape"}, DefaultRules(), shippedBlocked(t), nil); err == nil {
 			t.Fatal("Scan accepted a path outside its filesystem")
 		}
 	})
@@ -827,11 +856,17 @@ func TestUnreadableAndMalformedInputsAreErrors(t *testing.T) {
 	t.Run("allow row for a file that cannot be read", func(t *testing.T) {
 		t.Parallel()
 		allow := []Allow{{Path: "docs/a.md", Rule: RuleEmail, Line: "0123456789abcdef", Reason: "fixture"}}
-		if err := ValidateAllow(fstest.MapFS{}, []string{"docs/a.md"}, DefaultRules(), nil, allow); err == nil {
+		if err := ValidateAllow(fstest.MapFS{}, []string{"docs/a.md"}, DefaultRules(), shippedBlocked(t), allow); err == nil {
 			t.Fatal("ValidateAllow reported an unreadable file as valid")
 		}
 	})
 }
+
+// ownSources holds the package's own files at compile time, so the self-scan
+// reads what was built rather than whatever sits in the working directory.
+//
+//go:embed blocked.sha256 hygiene.go hygiene_test.go
+var ownSources embed.FS
 
 // TestTheScannerDoesNotFlagItsOwnFiles keeps every rule safe to publish: no
 // line of the package's own sources matches one of its rules.
@@ -839,7 +874,7 @@ func TestTheScannerDoesNotFlagItsOwnFiles(t *testing.T) {
 	t.Parallel()
 	blocked := shippedBlocked(t)
 	paths := []string{"blocked.sha256", "hygiene.go", "hygiene_test.go"}
-	findings, _, err := Scan(os.DirFS("."), paths, DefaultRules(), blocked, nil)
+	findings, _, err := Scan(ownSources, paths, DefaultRules(), blocked, nil)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}

@@ -220,6 +220,8 @@ func SaveAllow(w io.Writer, rows []Allow) error {
 
 // Scan reports every finding in paths, applying allow rows as excuses. Each
 // path is read from fsys; a read failure is an error, never a clean result.
+// An empty rule set or blocklist is an error too, since a scan with nothing to
+// apply would report every file clean.
 // An allow row that excuses a forbidden-directory file's path finding is
 // returned in excused: the file's contents are not scanned, so that record is
 // how a report still names the file and the reason it is allowed.
@@ -242,10 +244,16 @@ func Scan(fsys fs.FS, paths []string, rules []Rule, blocked map[string]struct{},
 // scanPath reports the findings in one file and returns the bytes it read, plus
 // the forbidden-path record when an allow row excuses that path's finding.
 func scanPath(fsys fs.FS, path string, rules []Rule, blocked map[string]struct{}, allow []Allow) ([]Finding, *ExcusedForbiddenPath, []byte, error) {
+	if len(rules) == 0 {
+		return nil, nil, nil, fmt.Errorf("hygiene: scan has no rules")
+	}
 	for _, rule := range rules {
 		if rule.Name == "" || rule.Match == nil {
 			return nil, nil, nil, fmt.Errorf("hygiene: rule with an empty name or no matcher")
 		}
+	}
+	if len(blocked) == 0 {
+		return nil, nil, nil, fmt.Errorf("hygiene: scan has no blocklist")
 	}
 	if !fs.ValidPath(path) {
 		return nil, nil, nil, fmt.Errorf("hygiene: invalid path %q", path)
