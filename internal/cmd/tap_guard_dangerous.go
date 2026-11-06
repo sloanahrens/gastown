@@ -188,7 +188,9 @@ const maxDangerousNestDepth = 3
 // and Heredocs, the way the container-suite guard reads them. Every payload is
 // parsed before it is judged, so a fragment the shell never runs is never
 // judged; one the parser cannot read is refused with the construct named,
-// because nothing can say what it runs (gt-7ydceb).
+// because the parser's reading is the only structured reading the nested
+// checks have (gt-7ydceb). Bash-valid shapes the parser misreads are refused
+// by the same gate; that fail-closed trade is decided in gt-wnblap.
 func evaluateDangerousCommand(command string, depth int, sess guardSession) (reason, alternative string) {
 	reason, alternative = judgeDangerousText(command, depth, sess)
 	if reason != "" {
