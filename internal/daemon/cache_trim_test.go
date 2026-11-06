@@ -2379,6 +2379,18 @@ func (f *cacheTrimFixture) setDfReply(reply cliReply) {
 	}
 }
 
+// answerFrom makes reply the answer for every later call whose verb starts with
+// prefix, so a test changes one kind of call between passes.
+func (f *cacheTrimFixture) answerFrom(prefix string, reply cliReply) {
+	inner := f.cli.answer
+	f.cli.answer = func(c cliCall) cliReply {
+		if strings.HasPrefix(cacheTrimVerb(c.args), prefix) {
+			return reply
+		}
+		return inner(c)
+	}
+}
+
 // trimDue puts the cache trim back in the due state, so a test can run a second
 // pass after the first one spent the interval.
 func (f *cacheTrimFixture) trimDue() {
@@ -2614,5 +2626,98 @@ func TestCacheTrimNoOpNeverFailsATrim(t *testing.T) {
 	unfinished.d.runDiskMaintenance()
 	if got := unfinished.noOpItems(t); len(got) != 0 {
 		t.Errorf("a Job that did not finish yielded %+v, want no item", got)
+	}
+}
+
+// TestCacheTrimNoOpClearsWhenTheClaimVanishes is the bead's first box: an item a
+// completed trim raised goes when a later pass finds the claim gone -- the claim
+// listing names no claim of that name, or no pod holds it -- while a pass whose
+// cluster call cannot tell leaves it.
+func TestCacheTrimNoOpClearsWhenTheClaimVanishes(t *testing.T) {
+	t.Parallel()
+	const overTheCap = 63 << 30
+	failWith := cliReply{stderr: "Error from server (Timeout): the server did not respond", code: 1}
+	// raised runs a trim that finishes with the claim over twice the cap, the
+	// reading the item is raised from.
+	raised := func(t *testing.T) *cacheTrimFixture {
+		t.Helper()
+		f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDfUsedReply(t, overTheCap, 1<<30)})
+		f.d.runDiskMaintenance()
+		if got := f.noOpItems(t); len(got) != 1 {
+			t.Fatalf("the first pass yielded %d items, want the one it raised: %+v\nlog: %s", len(got), got, f.log.String())
+		}
+		return f
+	}
+
+	t.Run("the claim listing names no claim", func(t *testing.T) {
+		t.Parallel()
+		f := raised(t)
+		f.answerFrom(cacheTrimClaimsVerb, cliReply{stdout: `{"items":[]}`})
+		f.trimDue()
+		f.d.runDiskMaintenance()
+		if got := f.noOpItems(t); len(got) != 0 {
+			t.Errorf("a pass that found the claim gone yielded %+v, want no item", got)
+		}
+	})
+
+	t.Run("no pod holds the claim", func(t *testing.T) {
+		t.Parallel()
+		f := raised(t)
+		f.answerFrom("get pods ", cliReply{stdout: `{"items":[]}`})
+		f.trimDue()
+		f.d.runDiskMaintenance()
+		if got := f.noOpItems(t); len(got) != 0 {
+			t.Errorf("a pass that found no pod holding the claim yielded %+v, want no item", got)
+		}
+	})
+
+	// A call that fails cannot tell whether the claim is there, so the record is
+	// left as it was: the item survives both the claim listing's failure and the
+	// pod listing's.
+	for _, tc := range []struct {
+		name    string
+		prefix  string
+		survive string
+	}{
+		{"the claim listing fails", cacheTrimClaimsVerb, "the cluster's claims could not be read"},
+		{"the pod listing fails", "get pods ", "the pods that mount it could not be read"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := raised(t)
+			f.answerFrom(tc.prefix, failWith)
+			f.trimDue()
+			f.d.runDiskMaintenance()
+			if got := f.noOpItems(t); len(got) != 1 {
+				t.Errorf("a pass whose cluster call failed yielded %+v, want the item left as it was", got)
+			}
+			if logged := f.log.String(); !strings.Contains(logged, tc.survive) {
+				t.Errorf("the failed pass does not say %q: %s", tc.survive, logged)
+			}
+		})
+	}
+}
+
+// TestCacheTrimNoOpSummaryAllowsForOpenSandboxPaths is the bead's second box:
+// the item's summary keeps the used and cap figures and says open sandbox paths
+// can explain a claim still over the threshold, since the reading is the whole
+// claim rather than only what the trim left.
+func TestCacheTrimNoOpSummaryAllowsForOpenSandboxPaths(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDfUsedReply(t, 63<<30, 1<<30)})
+	f.d.runDiskMaintenance()
+
+	items := f.noOpItems(t)
+	if len(items) != 1 {
+		t.Fatalf("the collector yielded %d items, want one for a claim over the cap: %+v\nlog: %s", len(items), items, f.log.String())
+	}
+	for _, want := range []string{
+		polecatimage.Human(63 << 30),
+		polecatimage.Human(cacheTrimNoOpCap),
+		"open sandbox paths can explain this; the claim is read whole, not just what the trim left",
+	} {
+		if !strings.Contains(items[0].Summary, want) {
+			t.Errorf("item summary %q does not name %q", items[0].Summary, want)
+		}
 	}
 }
