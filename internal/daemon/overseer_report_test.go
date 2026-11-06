@@ -1205,6 +1205,48 @@ func TestOverseerReportDailyWriteRefusesSymlinkedTarget(t *testing.T) {
 	}
 }
 
+// Each way creating the levels below the town root can fail names the level:
+// a path that is not below the root at all, a level under a root that is not
+// there, and a level below a plain file.
+func TestWriteOverseerReportFileRefusesLevelsItCannotMake(t *testing.T) {
+	t.Parallel()
+	slot := overseerAt("2026-10-14T20:15:00Z")
+	text := "overseer report 2026-10-14T20:15:00Z\n"
+
+	t.Run("outside the town root", func(t *testing.T) {
+		t.Parallel()
+		base, outside := t.TempDir(), t.TempDir()
+		dir := filepath.Join(outside, "overseer", "reports")
+		_, err := writeOverseerReportFile(base, dir, slot, text, nil)
+		if err == nil || !strings.Contains(err.Error(), "not below the town root") || !strings.Contains(err.Error(), base) {
+			t.Fatalf("write = %v, want a refusal naming the town root", err)
+		}
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Errorf("the path outside the town root was created: %v", err)
+		}
+	})
+	t.Run("under a town root that is not there", func(t *testing.T) {
+		t.Parallel()
+		base := filepath.Join(t.TempDir(), "gone")
+		if err := os.Symlink(filepath.Join(t.TempDir(), "nowhere"), base); err != nil {
+			t.Fatal(err)
+		}
+		_, err := writeOverseerReportFile(base, filepath.Join(base, "overseer", "reports"), slot, text, nil)
+		if err == nil || !strings.Contains(err.Error(), "creating") || !strings.Contains(err.Error(), base) {
+			t.Fatalf("write = %v, want the create failure naming the level", err)
+		}
+	})
+	t.Run("below a plain file", func(t *testing.T) {
+		t.Parallel()
+		base := filepath.Join(t.TempDir(), "file")
+		writeOverseerFile(t, base, "not a directory\n")
+		_, err := writeOverseerReportFile(base, filepath.Join(base, "overseer", "reports"), slot, text, nil)
+		if err == nil || !strings.Contains(err.Error(), "reading") || !strings.Contains(err.Error(), base) {
+			t.Fatalf("write = %v, want the read failure naming the level", err)
+		}
+	})
+}
+
 // A symlinked level between the town root and the reports directory is
 // refused, and nothing at all is created inside the link's target: the
 // dashboard reads the reports only below real directories, so a page written
@@ -1544,6 +1586,57 @@ func TestOverseerReportRefusesToSummarizeAForeignReport(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, overseerSidecarName)); !os.IsNotExist(err) {
 		t.Errorf("daily.json is there after the refusal: %v", err)
+	}
+}
+
+// A report at the slot's name that cannot be read is reported by name: the
+// daily files are not built from a read that failed.
+func TestOverseerReportCoveredSlotReportsAReportItCannotRead(t *testing.T) {
+	t.Parallel()
+	w := newOverseerWorld(t, "2026-10-14T20:17:33Z")
+	dir := townreport.ReportsDir(w.town)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A report name that is a symlink to nothing: the lister sees the name and
+	// the read fails.
+	name := "20261014T201500Z.md"
+	if err := os.Symlink(filepath.Join(t.TempDir(), "gone"), filepath.Join(dir, name)); err != nil {
+		t.Fatal(err)
+	}
+
+	path, err := writeOverseerReport(w.town, 15*time.Minute, w.seams())
+	if path != "" {
+		t.Errorf("wrote %s although the slot has a report", path)
+	}
+	if err == nil || !strings.Contains(err.Error(), name) {
+		t.Fatalf("write = %v, want a refusal naming %s", err, name)
+	}
+	if _, err := os.Stat(filepath.Join(dir, overseerSidecarName)); !os.IsNotExist(err) {
+		t.Errorf("daily.json is there after the failed read: %v", err)
+	}
+}
+
+// A daily write that fails while repairing a covered slot is returned, so the
+// run says the row is not current instead of leaving the failure to the slot.
+func TestOverseerReportCoveredSlotReportsAFailedDailyWrite(t *testing.T) {
+	t.Parallel()
+	w := newOverseerWorld(t, "2026-10-14T20:17:33Z")
+	dir := townreport.ReportsDir(w.town)
+	w.seedReport(t, "20261014T201500Z")
+	if err := os.MkdirAll(filepath.Join(dir, overseerPageName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	path, err := writeOverseerReport(w.town, 15*time.Minute, w.seams())
+	if path != "" {
+		t.Errorf("wrote %s although the slot has a report", path)
+	}
+	if err == nil || !strings.Contains(err.Error(), overseerPageName) {
+		t.Fatalf("write = %v, want the page write failure naming %s", err, overseerPageName)
+	}
+	if _, err := os.Stat(filepath.Join(dir, overseerSidecarName)); !os.IsNotExist(err) {
+		t.Errorf("daily.json is there after the failed write: %v", err)
 	}
 }
 

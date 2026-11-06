@@ -320,27 +320,23 @@ func writeOverseerReportFile(base, dir string, slot time.Time, text string, logf
 }
 
 // ensureOverseerDirectories creates dir and the levels below base that are
-// missing, one at a time, refusing any level that exists but is not a real
-// directory. os.MkdirAll is not used because it follows a symlinked level: a
-// symlinked bird directory would get its reports directory created inside the
-// link's target before any check could refuse the write.
+// missing, one at a time from base down, refusing any level that exists but is
+// not a real directory. os.MkdirAll is not used because it follows a symlinked
+// level: a symlinked bird directory would get its reports directory created
+// inside the link's target before any check could refuse the write.
 func ensureOverseerDirectories(base, dir string) error {
-	rel, err := filepath.Rel(base, dir)
-	if err != nil {
-		return fmt.Errorf("locating %s under %s: %w", dir, base, err)
-	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return fmt.Errorf("%s is not below the town root %s, so no report is written there", dir, base)
-	}
-	path := base
-	for _, level := range strings.Split(rel, string(filepath.Separator)) {
-		if level == "" || level == "." {
-			continue
+	base, dir = filepath.Clean(base), filepath.Clean(dir)
+	var levels []string
+	for path := dir; path != base; path = filepath.Dir(path) {
+		if path == filepath.Dir(path) {
+			return fmt.Errorf("%s is not below the town root %s, so no report is written there", dir, base)
 		}
-		path = filepath.Join(path, level)
-		// The parent was created or checked in the pass before, so a level is
-		// only ever made under a directory this loop has seen as real.
-		if err := ensureOverseerDirectory(path); err != nil {
+		levels = append(levels, path)
+	}
+	// Outermost first, so each level is made under a parent this loop has just
+	// created or checked as a real directory.
+	for i := len(levels) - 1; i >= 0; i-- {
+		if err := ensureOverseerDirectory(levels[i]); err != nil {
 			return err
 		}
 	}
@@ -351,22 +347,24 @@ func ensureOverseerDirectories(base, dir string) error {
 // when it is a real directory. A name that exists as anything else is refused:
 // the dashboard reads the bird directory and its reports directory only when
 // both are real, so a file or a symlink there would hold a page no row shows.
+// The check runs before the create, so no level is ever made under a link; a
+// level that appears between the two makes the create fail, which refuses too.
 func ensureOverseerDirectory(path string) error {
-	err := os.Mkdir(path, 0o755)
-	if err == nil {
-		return nil
-	}
-	if !os.IsExist(err) {
-		return fmt.Errorf("creating %s: %w", path, err)
-	}
-	fi, lerr := os.Lstat(path)
-	if lerr != nil {
-		return fmt.Errorf("reading %s: %w", path, lerr)
-	}
-	if !fi.IsDir() {
+	fi, err := os.Lstat(path)
+	switch {
+	case err == nil:
+		if fi.IsDir() {
+			return nil
+		}
 		return fmt.Errorf("%s is not a real directory, and the dashboard reads no symlink", path)
+	case os.IsNotExist(err):
+		if err := os.Mkdir(path, 0o755); err != nil {
+			return fmt.Errorf("creating %s: %w", path, err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("reading %s: %w", path, err)
 	}
-	return nil
 }
 
 // refreshOverseerDaily writes the daily files for the report at the instant at
