@@ -116,6 +116,9 @@ type diskMaintSeams struct {
 	sandboxes func() (map[string]agentconfig.SandboxProfile, error)
 	// homeDir locates the colima docker socket's home.
 	homeDir func() (string, error)
+	// trim runs the cache trim a due tick asks for in the given mode and
+	// reports whether it reached a verdict; nil is d.cacheTrim.
+	trim func(ctx context.Context, mode string) bool
 	// dispatch runs a pass off the calling goroutine, so a slow registry does
 	// not hold the heartbeat. Nil means one goroutine per pass.
 	dispatch func(fn func())
@@ -156,6 +159,9 @@ func (d *Daemon) diskMaintenanceSeams() diskMaintSeams {
 	}
 	if s.homeDir == nil {
 		s.homeDir = os.UserHomeDir
+	}
+	if s.trim == nil {
+		s.trim = d.cacheTrim
 	}
 	if s.dispatch == nil {
 		s.dispatch = func(fn func()) { go fn() }
@@ -495,6 +501,13 @@ func (d *Daemon) diskMaintenanceSettledAt() time.Time {
 // conclusion about — a kept plan, a refused one, a failed read — and left due
 // when an apply deferred, so the next tick retries once the push holding the
 // lock is done.
+//
+// The pass reads two clocks and keeps them apart. now is the tick's instant,
+// when the due decision was taken: the policy and the alerts are read at it.
+// Every instant the pass stores — the trim's next due, a target's last run,
+// the window's settle — is a clock read taken when the run it reports was
+// reached, because a run that takes minutes must not shorten the wait before
+// the next one (gt-ummt9). The tick's now is never stored as a conclusion.
 func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDue) {
 	ctx, cancel := d.diskMaintenanceContext()
 	defer cancel()
@@ -514,10 +527,12 @@ func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDu
 	// so a cluster that was briefly unreachable does not leave the disk growing
 	// for two hours (gt-gg9hv.24.6).
 	if due.cacheTrim {
-		if d.cacheTrim(ctx, mode) {
-			d.diskMaintSchedule.record(diskMaintCacheTrimName, s.now())
+		verdict := s.trim(ctx, mode)
+		concluded := s.now()
+		if verdict {
+			d.diskMaintSchedule.record(diskMaintCacheTrimName, concluded)
 		} else {
-			d.diskMaintSchedule.recordRetry(diskMaintCacheTrimName, s.now().Add(cacheTrimRetryInterval))
+			d.diskMaintSchedule.recordRetry(diskMaintCacheTrimName, concluded.Add(cacheTrimRetryInterval))
 		}
 	}
 	if !due.daily && len(due.interval) == 0 {
@@ -527,18 +542,18 @@ func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDu
 	keep, err := diskMaintenanceKeep(s.getenv, readings)
 	if err != nil {
 		d.logger.Printf("disk_maintenance: not running: %v", err)
-		d.concludeDiskMaintenance(now, due)
+		d.concludeDiskMaintenance(s.now(), due)
 		return
 	}
 	targets, err := s.targets(ctx, d, mode)
 	if err != nil {
 		d.logger.Printf("disk_maintenance: the targets could not be built: %v", err)
-		d.concludeDiskMaintenance(now, due)
+		d.concludeDiskMaintenance(s.now(), due)
 		return
 	}
 	if len(targets) == 0 {
 		d.logger.Printf("disk_maintenance: no maintenance target publishes here; nothing to do")
-		d.concludeDiskMaintenance(now, due)
+		d.concludeDiskMaintenance(s.now(), due)
 		return
 	}
 	for _, name := range due.interval {
@@ -572,19 +587,21 @@ func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDu
 		return
 	}
 	if due.daily {
-		d.settleDiskMaintenanceWindow(now)
+		d.settleDiskMaintenanceWindow(s.now())
 	}
 }
 
 // concludeDiskMaintenance settles the targets due this tick without running
 // them, for a pass that refused whole: a failed read concludes a run as a plan
 // does, and retrying it on every tick would be a line and a build apiece.
-func (d *Daemon) concludeDiskMaintenance(now time.Time, due diskMaintDue) {
+// concluded is the instant the pass reached its refusal, and the window's
+// settle and every record it writes name that one instant.
+func (d *Daemon) concludeDiskMaintenance(concluded time.Time, due diskMaintDue) {
 	if due.daily {
-		d.settleDiskMaintenanceWindow(now)
+		d.settleDiskMaintenanceWindow(concluded)
 	}
 	for _, name := range due.interval {
-		d.diskMaintSchedule.record(name, d.diskMaintenanceSeams().now())
+		d.diskMaintSchedule.record(name, concluded)
 	}
 }
 
