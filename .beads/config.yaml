@@ -17,11 +17,10 @@
 # Path to database (overridden by BEADS_DB or --db)
 # db: ""
 
-# Git branch for beads commits (bd sync will commit to this branch)
-# IMPORTANT: Set this for team projects so all clones use the same sync branch.
+# Git branch that beads commits go to, if they go to a separate branch
+# IMPORTANT: Set this for team projects so all clones use the same branch.
 # This setting persists across clones (unlike database config which is gitignored).
 # Can also use BEADS_SYNC_BRANCH env var for local override.
-# If not set, bd sync will require you to run 'bd config set sync.branch <branch>'.
 # sync-branch: "beads-sync"
 
 # Integration settings (access with 'bd config get/set')
