@@ -114,7 +114,7 @@ var nonPersonalHomeNames = map[string]struct{}{
 	"op": {}, "operator": {}, "someone": {}, "other": {}, "name": {},
 	"NAME": {}, "example": {}, "test": {}, "tester": {}, "fixture": {},
 	"dev": {}, "ci": {}, "ops": {}, "agent": {}, "builder": {}, "coder": {},
-	"go": {}, "bin": {}, "alice": {}, "bob": {}, "ann": {},
+	"go": {}, "bin": {}, "bob": {}, "ann": {},
 	// The town's service account and the macOS shared directory.
 	"gt": {}, "Shared": {},
 }
