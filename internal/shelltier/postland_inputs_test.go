@@ -60,6 +60,50 @@ func checkPostLandInputs(entries []Entry, pattern string, topLevel []string) []s
 	return out
 }
 
+// postLandScript is the post-land check (merge_queue.post_land_command). Its
+// INPUTS line is the regex the live skip filter applies to main's changed paths
+// until the overseer switches the setting to the Go command.
+const postLandScript = "scripts/post-land-shell.sh"
+
+// checkPostLandScript returns the problems the live script's INPUTS line has: a
+// line that cannot be read, a line that differs from the Go constant
+// postLandInputs, or a rule checkPostLandInputs names. The two copies must agree
+// until the script is deleted, so the live skip and the port cannot disagree on
+// what runs the tier (gt-tpg0p.116).
+func checkPostLandScript(script string, entries []Entry, topLevel []string) []string {
+	pattern, err := postLandScriptInputs(script)
+	if err != nil {
+		return []string{fmt.Sprintf("%s: %v", postLandScript, err)}
+	}
+	var out []string
+	if pattern != postLandInputs {
+		out = append(out, fmt.Sprintf("%s INPUTS %q differs from postLandInputs %q; the two must agree until the script is deleted", postLandScript, pattern, postLandInputs))
+	}
+	return append(out, checkPostLandInputs(entries, pattern, topLevel)...)
+}
+
+// postLandScriptInputs returns the ERE the script's INPUTS line holds. A script
+// with no INPUTS line, an unterminated value or a value that is not an ERE has
+// no rule the guard can read, so it is an error: a filter nothing can parse is
+// not one that skips with evidence (gt-vt2g4, gt-r2u9g).
+func postLandScriptInputs(script string) (string, error) {
+	for _, line := range strings.Split(script, "\n") {
+		rest, ok := strings.CutPrefix(line, "INPUTS='")
+		if !ok {
+			continue
+		}
+		if !strings.HasSuffix(rest, "'") {
+			return "", fmt.Errorf("the INPUTS line is not closed with a quote: %s", line)
+		}
+		pattern := strings.TrimSuffix(rest, "'")
+		if _, err := regexp.CompilePOSIX(pattern); err != nil {
+			return "", fmt.Errorf("the INPUTS line is not a POSIX ERE: %w", err)
+		}
+		return pattern, nil
+	}
+	return "", fmt.Errorf("no INPUTS='...' line, so the skip filter has no rule to check")
+}
+
 // triggerSample is a repo path whose change the trigger says runs the tier:
 // the trigger itself when it names a file, and a path under it when it names a
 // directory.
@@ -197,4 +241,89 @@ func TestPostLandShellInputsCoverTheManifestTriggers(t *testing.T) {
 			t.Error(p)
 		}
 	})
+	t.Run("a Go constant that drops a trigger is named", func(t *testing.T) {
+		t.Parallel()
+		dropped := strings.Replace(postLandInputs, "deploy/|", "", 1)
+		if dropped == postLandInputs {
+			t.Fatal("postLandInputs has no deploy/| alternative to drop")
+		}
+		got := checkPostLandInputs(Manifest(), dropped, repoTopLevelPaths(t))
+		for _, p := range got {
+			if strings.Contains(p, `does not match the manifest trigger "deploy/"`) {
+				return
+			}
+		}
+		t.Fatalf("checkPostLandInputs() = %q, want a problem naming the deploy/ trigger", got)
+	})
+	t.Run("the live script", func(t *testing.T) {
+		t.Parallel()
+		script, err := repoFiles(t)(postLandScript)
+		if err != nil {
+			t.Fatalf("read %s: %v", postLandScript, err)
+		}
+		for _, p := range checkPostLandScript(script, Manifest(), repoTopLevelPaths(t)) {
+			t.Error(p)
+		}
+	})
+}
+
+// TestPostLandScriptInputsLine: the live script's INPUTS line is read the way
+// the guard reads it, and it must equal the Go constant, so the script's skip
+// and the port's skip cannot disagree before the overseer deletes the script.
+func TestPostLandScriptInputsLine(t *testing.T) {
+	t.Parallel()
+	entries := []Entry{{Path: "scripts/a_test.sh", StubsGo: "none: names no go command"}}
+	tests := []struct {
+		name   string
+		script string
+		want   string
+	}{
+		{
+			name:   "the same rule as the Go constant passes",
+			script: "INPUTS='" + postLandInputs + "'\n",
+		},
+		{
+			name:   "a rule that differs from the Go constant is named",
+			script: "INPUTS='^(scripts/|Makefile$)'\n",
+			want:   "differs from postLandInputs",
+		},
+		{
+			name:   "a script with no INPUTS line is a problem",
+			script: "set -uo pipefail\n",
+			want:   "no INPUTS",
+		},
+		{
+			name:   "an unterminated INPUTS value is a problem",
+			script: "INPUTS='^(scripts/)\n",
+			want:   "not closed with a quote",
+		},
+		{
+			name:   "an INPUTS value that is not a POSIX ERE is a problem",
+			script: "INPUTS='^(scripts/'\n",
+			want:   "not a POSIX ERE",
+		},
+		{
+			name:   "an RE2 Perl class is refused instead of read as a literal",
+			script: "INPUTS='^\\d'\n",
+			want:   "not a POSIX ERE",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := checkPostLandScript(tc.script, entries, nil)
+			if tc.want == "" {
+				if len(got) != 0 {
+					t.Fatalf("checkPostLandScript() = %q, want no problem", got)
+				}
+				return
+			}
+			for _, p := range got {
+				if strings.Contains(p, tc.want) {
+					return
+				}
+			}
+			t.Fatalf("checkPostLandScript() = %q, want a problem naming %q", got, tc.want)
+		})
+	}
 }

@@ -15,7 +15,9 @@ import (
 // under one of these paths can move a shell test's verdict, so the post-land
 // check runs the tier for it. TestPostLandShellInputsCoverTheManifestTriggers
 // holds it to the manifest trigger by trigger, so a trigger added there cannot
-// leave this skip behind (gt-vt2g4).
+// leave this skip behind (gt-vt2g4). The live script's INPUTS line repeats this
+// until the overseer switches the setting; TestPostLandScriptInputsLine holds
+// the two equal.
 const postLandInputs = `^(scripts/|plugins/|\.githooks/|deploy/|Makefile$|go\.mod$|go\.sum$|internal/|cmd/)`
 
 // postLandWindow is how far back main's history is read when --window names
