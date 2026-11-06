@@ -298,11 +298,12 @@ func hostAgentWithDockerDisk(ctx context.Context, p hostprobe.Probes, run hostpr
 // publishes the last one that finished. So a docker that hangs cannot extend the
 // write cycle, and its read ends at hostAgentDockerDiskTimeout with the error set.
 // The published reading is one tick behind the disk; before the first read
-// finishes it is hostprobe.DockerDiskNotCollected, never 0% used.
+// finishes it is hostprobe.DockerDiskNotCollected, never 0% used. A read still
+// running past its deadline publishes an error, never the last finished value.
 type hostAgentDockerDisk struct {
 	mu       sync.Mutex
 	inFlight bool
-	reads    int // reads started, counted when a tick starts one
+	started  time.Time // the tick that started the read in flight
 	latest   hostprobe.Field[hostprobe.Disk]
 }
 
@@ -312,14 +313,19 @@ func newHostAgentDockerDisk() *hostAgentDockerDisk {
 
 // reading returns the latest finished reading and starts the next read unless
 // one is still running, so a hung docker holds one goroutine, not one per tick.
-func (d *hostAgentDockerDisk) reading(ctx context.Context, run hostprobe.Runner) hostprobe.Field[hostprobe.Disk] {
+// now is the tick's clock: a read in flight at its deadline is no reading at all.
+func (d *hostAgentDockerDisk) reading(ctx context.Context, run hostprobe.Runner, now time.Time) hostprobe.Field[hostprobe.Disk] {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if !d.inFlight {
-		d.inFlight = true
-		d.reads++
-		go d.refresh(ctx, run)
+	if d.inFlight {
+		if now.Sub(d.started) >= hostAgentDockerDiskTimeout {
+			return hostprobe.Field[hostprobe.Disk]{Err: fmt.Sprintf("docker exec %s df: still running %s after it started", hostprobe.DockerDiskContainer, hostAgentDockerDiskTimeout)}
+		}
+		return d.latest
 	}
+	d.inFlight = true
+	d.started = now
+	go d.refresh(ctx, run)
 	return d.latest
 }
 
@@ -336,7 +342,7 @@ func (d *hostAgentDockerDisk) refresh(ctx context.Context, run hostprobe.Runner)
 // Desktop disk from dockerDisk, and the launchd job from read.
 func hostAgentCollect(ctx context.Context, run hostprobe.Runner, townRoot string, now time.Time, dockerDisk *hostAgentDockerDisk, read templates.SupervisorReader) hostprobe.Probes {
 	p := hostprobe.Collect(ctx, run, townRoot, now)
-	p.DockerDisk = dockerDisk.reading(ctx, run)
+	p.DockerDisk = dockerDisk.reading(ctx, run, now)
 	return hostAgentWithLaunchd(ctx, p, read)
 }
 
