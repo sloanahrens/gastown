@@ -7,15 +7,22 @@
 # workflow file. The operator copies it to .forgejo/workflows/images.yml, the
 # way .forgejo/workflows/post-land.yml went in.
 #
-# One commit for both images: the job reads GITHUB_SHA once, tags each image
-# with its first twelve characters, labels each with the full sha, and after
-# both builds reads the commit label back from each pushed image and fails when
-# either is not GITHUB_SHA. A daemon image and a polecat image at different
-# commits are a pair the town cannot run (gt-gg9hv.63).
+# One commit for both images: the preflight reads GITHUB_SHA once and writes
+# the tag, each image is built at it and labelled with the full sha, and after
+# both builds a step reads the commit label back from each pushed image and
+# fails when either is not GITHUB_SHA. A daemon image and a polecat image at
+# different commits are a pair the town cannot run (gt-gg9hv.63).
 #
 # No concurrency block on purpose: a cancelled run would leave a failure on a
 # commit that did not fail, and a replaced pending run would leave no image at
 # all.
+#
+# The shell lines here are glue. Before the checkout one asks whether go is
+# installed, since the Go commands it starts cannot run before then; the rest
+# run those commands. Every decision — the runner's tools, jq's version, the
+# mango pin, the commit, the digests, the labels — is a Go command in this
+# repository with unit tests (internal/ci/preflight, internal/ci/imagepublish,
+# internal/ci/ctxlabels).
 name: images
 on:
   push:
@@ -39,7 +46,7 @@ env:
   # om, hm and devops, and its parser refuses a fifth name), yet the daemon
   # image's Dockerfile copies the mango binary. The operator sets these two
   # repository variables to the mango source and commit the image carries; the
-  # preflight refuses when either is empty.
+  # preflight refuses when either is empty or names another host.
   MANGO_URL: ${{ vars.MANGO_URL }}
   MANGO_COMMIT: ${{ vars.MANGO_COMMIT }}
 
@@ -47,59 +54,28 @@ jobs:
   images:
     runs-on: ci-base
     steps:
+      # The one shell that runs before the checkout, and so before the
+      # repository's Go code exists: it only asks whether go is there. The
+      # step after the checkout is the preflight proper.
       - name: preflight
         run: |
-          set -u
-          missing=""
-          for tool in jq go docker git; do
-            command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
-          done
-          if [ -n "$missing" ]; then
-            echo "images: the ci-base runner is missing:$missing" >&2
+          if ! command -v go >/dev/null 2>&1; then
+            echo "images: the ci-base runner has no go, so the preflight cannot run" >&2
             exit 1
           fi
-          version=$(jq --version)
-          if [ "$version" != "jq-1.7.1" ]; then
-            echo "images: jq --version printed '$version', but this workflow needs jq-1.7.1 (deploy/ci-base/Dockerfile); the base image's jq is another version" >&2
-            exit 1
-          fi
-          if [ -z "$MANGO_URL" ] || [ -z "$MANGO_COMMIT" ]; then
-            echo "images: the MANGO_URL and MANGO_COMMIT repository variables must name the mango source the daemon image carries" >&2
-            exit 1
-          fi
-          case "$MANGO_URL" in
-            http://*|https://*) ;;
-            *)
-              echo "images: MANGO_URL is not an http(s) repository URL: $MANGO_URL" >&2
-              exit 1
-              ;;
-          esac
-          if [ "${#MANGO_COMMIT}" -ne 40 ]; then
-            echo "images: MANGO_COMMIT is ${#MANGO_COMMIT} characters, want a full 40-character sha" >&2
-            exit 1
-          fi
-          case "$MANGO_COMMIT" in
-            *[!0-9a-f]*)
-              echo "images: MANGO_COMMIT is not lowercase hex: $MANGO_COMMIT" >&2
-              exit 1
-              ;;
-          esac
       - uses: actions/checkout@v4
-      - name: resolve the one commit
+      # The preflight proper: jq, go, docker and git are installed, jq is
+      # 1.7.1, the mango pin is a source on the Forgejo host, and GITHUB_SHA is
+      # the full green commit. It writes SHA and TAG to $GITHUB_ENV and stops
+      # the job on the first rule it cannot hold.
+      - name: "preflight: the runner, the mango pin and the green commit"
         run: |
-          set -u
-          if [ -z "${GITHUB_SHA:-}" ] || [ "${#GITHUB_SHA}" -ne 40 ]; then
-            echo "images: GITHUB_SHA is not the green ref's full commit: '${GITHUB_SHA:-}'" >&2
-            exit 1
-          fi
-          case "$GITHUB_SHA" in
-            *[!0-9a-f]*)
-              echo "images: GITHUB_SHA is not lowercase hex: $GITHUB_SHA" >&2
-              exit 1
-              ;;
-          esac
-          echo "SHA=$GITHUB_SHA" >> "$GITHUB_ENV"
-          echo "TAG=${GITHUB_SHA:0:12}" >> "$GITHUB_ENV"
+          go run ./internal/ci/cmd/imagepreflight \
+            -sha "${GITHUB_SHA:-}" \
+            -mango-url "$MANGO_URL" \
+            -mango-commit "$MANGO_COMMIT" \
+            -host "$FORGEJO_HOST" \
+            -env-out "$GITHUB_ENV"
       - name: log in to the registry
         env:
           REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
@@ -112,9 +88,11 @@ jobs:
           set -euo pipefail
           # SOURCES_TOKEN reaches git only through this helper, which reads it
           # from the environment at each use: no URL, argument or .gitconfig
-          # value holds it. GIT_CONFIG_GLOBAL keeps the helper out of the
-          # runner's own global config, and the scheme loop covers every scheme
-          # the preflight accepts for MANGO_URL.
+          # value holds it. GIT_CONFIG_GLOBAL points the helper at a file under
+          # $RUNNER_TEMP, so the runner's own config is untouched; only the
+          # steps that fetch name that file in their env (as
+          # ${{ runner.temp }}/gitconfig, the same directory), so no step that
+          # runs no fetch inherits a credential helper.
           cfg="$RUNNER_TEMP/gitconfig"
           : > "$cfg"
           chmod 600 "$cfg"
@@ -123,10 +101,10 @@ jobs:
             git config --global credential."$scheme://$FORGEJO_HOST".helper \
               '!f() { test "$1" = get || exit 0; printf "username=%s\npassword=%s\n" "$SOURCES_USER" "$SOURCES_TOKEN"; }; f'
           done
-          echo "GIT_CONFIG_GLOBAL=$cfg" >> "$GITHUB_ENV"
       - name: fetch mango at its pin
         env:
           SOURCES_TOKEN: ${{ secrets.SOURCES_TOKEN }}
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/gitconfig
         run: |
           set -euo pipefail
           mango=$(mktemp -d "$RUNNER_TEMP/mango.XXXXXX")
@@ -142,6 +120,7 @@ jobs:
       - name: stage the daemon image's build context
         env:
           SOURCES_TOKEN: ${{ secrets.SOURCES_TOKEN }}
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/gitconfig
         run: |
           set -euo pipefail
           ctx=$(mktemp -d "$RUNNER_TEMP/daemon-context.XXXXXX")
@@ -169,6 +148,7 @@ jobs:
       - name: stage the polecat image's build context
         env:
           SOURCES_TOKEN: ${{ secrets.SOURCES_TOKEN }}
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/gitconfig
         run: |
           set -euo pipefail
           ctx=$(mktemp -d "$RUNNER_TEMP/polecat-context.XXXXXX")
@@ -179,20 +159,14 @@ jobs:
             -rev "$SHA" \
             -out "$ctx")
           printf '%s\n' "$staged"
-          gt_commit=$(printf '%s\n' "$staged" | sed -n 's/^label: org.gastown.gt-commit=//p')
-          bd_commit=$(printf '%s\n' "$staged" | sed -n 's/^label: org.gastown.bd-commit=//p')
-          go_floor=$(printf '%s\n' "$staged" | sed -n 's/^label: go-floor=//p')
-          if [ "$gt_commit" != "$SHA" ]; then
-            echo "images: the polecat context staged at $gt_commit, not the green commit $SHA" >&2
-            exit 1
-          fi
-          if [ -z "$bd_commit" ] || [ -z "$go_floor" ]; then
-            echo "images: the polecat context named no bd commit or Go floor, so the image cannot be labelled or built" >&2
-            exit 1
-          fi
+          # The build's labels are read and held to the green commit by the Go
+          # command; it writes BD_COMMIT and GO_FLOOR to $GITHUB_ENV and fails
+          # the step on a listing that names another commit or no bd commit or
+          # Go floor.
+          printf '%s\n' "$staged" | go run ./internal/ci/cmd/ctxlabels \
+            -sha "$SHA" \
+            -env-out "$GITHUB_ENV"
           echo "POLECAT_CONTEXT=$ctx" >> "$GITHUB_ENV"
-          echo "BD_COMMIT=$bd_commit" >> "$GITHUB_ENV"
-          echo "GO_FLOOR=$go_floor" >> "$GITHUB_ENV"
       - name: build the polecat image
         run: |
           set -euo pipefail

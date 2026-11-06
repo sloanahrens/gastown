@@ -10,26 +10,22 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/steveyegge/gastown/internal/ci/preflight"
 )
 
 // workflowPath is the images workflow text, relative to this package: the file
 // the operator copies to .forgejo/workflows/images.yml.
 const workflowPath = "../../deploy/ci/images.workflow.yml"
 
-// preflightAcceptScheme is one scheme the preflight's MANGO_URL case accepts.
-var preflightAcceptScheme = regexp.MustCompile(`(https?)://\*`)
-
 // helperSchemeLoop is the scheme list the credential helper step iterates: a
 // scheme the preflight accepts but this list omits gets no credential.
 var helperSchemeLoop = regexp.MustCompile(`for scheme in ([a-z ]+)`)
 
-// acceptedSchemes is the schemes the preflight's MANGO_URL case accepts, sorted
-// so two spellings compare equal.
-func acceptedSchemes(script string) []string {
-	var out []string
-	for _, m := range preflightAcceptScheme.FindAllStringSubmatch(script, -1) {
-		out = append(out, m[1])
-	}
+// acceptedSchemes is the schemes the preflight accepts for the mango pin,
+// sorted so two spellings compare equal.
+func acceptedSchemes() []string {
+	out := slices.Clone(preflight.Schemes)
 	slices.Sort(out)
 	return out
 }
@@ -149,6 +145,11 @@ func containing(steps []step, substr string) int {
 	return -1
 }
 
+// preflightStep is the index of the step that runs the Go preflight, or -1.
+func preflightStep(steps []step) int {
+	return containing(steps, "go run ./internal/ci/cmd/imagepreflight")
+}
+
 // countRuns is how many steps' run scripts hold substr.
 func countRuns(steps []step, substr string) int {
 	n := 0
@@ -184,7 +185,7 @@ func echoes(script, name string) bool {
 
 // TestImagesWorkflowTriggersOnlyOnGreenRefs holds the trigger rule: the only
 // event is a push to a green/<sha12> ref, and the file has no concurrency
-// block that a cancelled or replaced run could turn into a false failure or a
+// block that a canceled or replaced run could turn into a false failure or a
 // missing image.
 func TestImagesWorkflowTriggersOnlyOnGreenRefs(t *testing.T) {
 	t.Parallel()
@@ -217,38 +218,48 @@ func TestImagesWorkflowTriggersOnlyOnGreenRefs(t *testing.T) {
 	t.Run("there is no concurrency block", func(t *testing.T) {
 		t.Parallel()
 		if v, ok := wf["concurrency"]; ok {
-			t.Fatalf("the workflow has a concurrency block (%v); a cancelled or replaced run would leave a false failure or no image", v)
+			t.Fatalf("the workflow has a concurrency block (%v); a canceled or replaced run would leave a false failure or no image", v)
 		}
 	})
 }
 
 // TestImagesWorkflowBuildsBothImagesAtOneCommit holds the one-commit rule: the
-// job reads GITHUB_SHA once, both image builds take their revision, tag and
-// commit label from it, and a step after both builds reads the label back from
-// each image and fails when either disagrees.
+// preflight reads GITHUB_SHA once and writes the tag, both image builds take
+// their revision, tag and commit label from it, and a step after both builds
+// reads the label back from each image and fails when either disagrees.
 func TestImagesWorkflowBuildsBothImagesAtOneCommit(t *testing.T) {
 	t.Parallel()
 	_, steps := loadJob(t)
 
-	t.Run("GITHUB_SHA is read once and the sha12 tag computed once", func(t *testing.T) {
+	t.Run("GITHUB_SHA is read once, by the preflight", func(t *testing.T) {
 		t.Parallel()
-		if got := countRuns(steps, `SHA=$GITHUB_SHA`); got != 1 {
-			t.Fatalf("%d run scripts compute SHA=$GITHUB_SHA, want 1", got)
+		// The sha and its tag are checked and computed in internal/ci/preflight;
+		// TestCheckRefusesAGreenCommitThatIsNotAFullSHA and
+		// TestCheckAcceptsTheRunnerAndTheGreenCommit drive both.
+		if got := countRuns(steps, "GITHUB_SHA"); got != 1 {
+			t.Fatalf("%d run scripts name GITHUB_SHA, want only the preflight", got)
 		}
-		if got := countRuns(steps, `TAG=${GITHUB_SHA:0:12}`); got != 1 {
-			t.Fatalf("%d run scripts compute TAG=${GITHUB_SHA:0:12}, want 1", got)
+		at := preflightStep(steps)
+		if at < 0 {
+			t.Fatal("no step runs go run ./internal/ci/cmd/imagepreflight")
+		}
+		if !strings.Contains(steps[at].run, `-sha "${GITHUB_SHA:-}"`) {
+			t.Errorf("the preflight does not pass GITHUB_SHA as the green commit: %s", steps[at].run)
+		}
+		if got := countRuns(steps, "GITHUB_SHA:0:12"); got != 0 {
+			t.Errorf("%d run scripts compute the tag from GITHUB_SHA; the preflight computes it", got)
 		}
 	})
 
-	t.Run("the commit is refused unless it is a full sha", func(t *testing.T) {
+	t.Run("the preflight runs before anything is fetched or built", func(t *testing.T) {
 		t.Parallel()
-		at := named(steps, "resolve the one commit")
+		at := preflightStep(steps)
 		if at < 0 {
-			t.Fatal("no step is named: resolve the one commit")
+			t.Fatal("no step runs the preflight")
 		}
-		for _, want := range []string{`[ "${#GITHUB_SHA}" -ne 40 ]`, `case "$GITHUB_SHA"`, "*[!0-9a-f]*"} {
-			if !strings.Contains(steps[at].run, want) {
-				t.Errorf("the resolve step does not contain %q", want)
+		for _, later := range []string{"fetch mango at its pin", "stage the daemon image's build context", "build the daemon image"} {
+			if i := named(steps, later); i < 0 || at > i {
+				t.Errorf("the preflight is step %d, after %q (step %d)", at, later, i)
 			}
 		}
 	})
@@ -294,7 +305,30 @@ func TestImagesWorkflowBuildsBothImagesAtOneCommit(t *testing.T) {
 		}
 	})
 
-	t.Run("the daemon image is tagged and labelled with the one commit", func(t *testing.T) {
+	t.Run("the polecat context labels are held by the tested Go read", func(t *testing.T) {
+		t.Parallel()
+		// The off-commit, missing and unbuildable label refusals are driven by
+		// TestParseRefusesAContextOffTheGreenCommit and
+		// TestParseRefusesAnUnusableBDOrGoFloor in internal/ci/ctxlabels.
+		at := named(steps, "stage the polecat image's build context")
+		if at < 0 {
+			t.Fatal("no step is named: stage the polecat image's build context")
+		}
+		run := steps[at].run
+		if !strings.Contains(run, "go run ./internal/ci/cmd/ctxlabels") {
+			t.Fatalf("the polecat context step does not run the Go label read: %s", run)
+		}
+		for _, want := range []string{`-sha "$SHA"`, `-env-out "$GITHUB_ENV"`} {
+			if !strings.Contains(run, want) {
+				t.Errorf("the label read does not pass %s", want)
+			}
+		}
+		if strings.Contains(run, "sed -n") {
+			t.Errorf("the polecat context step parses its labels in shell instead of the tested read: %s", run)
+		}
+	})
+
+	t.Run("the daemon image is tagged and labeled with the one commit", func(t *testing.T) {
 		t.Parallel()
 		at := named(steps, "build the daemon image")
 		if at < 0 {
@@ -310,7 +344,7 @@ func TestImagesWorkflowBuildsBothImagesAtOneCommit(t *testing.T) {
 		}
 	})
 
-	t.Run("the polecat image is tagged and labelled with the one commit", func(t *testing.T) {
+	t.Run("the polecat image is tagged and labeled with the one commit", func(t *testing.T) {
 		t.Parallel()
 		at := named(steps, "build the polecat image")
 		if at < 0 {
@@ -395,11 +429,11 @@ func TestImagesWorkflowKeepsSecretsOffArgv(t *testing.T) {
 			t.Fatal("no step runs docker login")
 		}
 		run := steps[at].run
-		if !strings.Contains(run, "--password-stdin") {
-			t.Error("the registry login does not read the token from standard input")
-		}
-		if !strings.Contains(run, `printf '%s' "$REGISTRY_TOKEN" | docker login`) {
-			t.Error("the registry token is not piped into the login")
+		// The whole login command, so a flag that stops being an argument is
+		// not still found as a substring.
+		want := `printf '%s' "$REGISTRY_TOKEN" | docker login "$FORGEJO_HOST" --username "$REGISTRY_USER" --password-stdin`
+		if !strings.Contains(run, want) {
+			t.Errorf("the registry login is not %q", want)
 		}
 		for _, s := range steps {
 			if strings.Contains(s.run, "--password ") || strings.Contains(s.run, "--password=") {
@@ -449,13 +483,10 @@ func TestImagesWorkflowKeepsSecretsOffArgv(t *testing.T) {
 
 	t.Run("the credential helper covers every scheme the preflight accepts", func(t *testing.T) {
 		t.Parallel()
-		// MANGO_URL may be http or https; a scheme the preflight accepts but
-		// the helper is not scoped to sends the fetch with no credential.
-		preflight := steps[named(steps, "preflight")].run
-		want := acceptedSchemes(preflight)
-		if len(want) == 0 {
-			t.Fatal("the preflight accepts no scheme for MANGO_URL")
-		}
+		// The preflight holds the accepted schemes in internal/ci/preflight,
+		// where each is driven; a scheme it accepts and this helper omits
+		// sends that fetch with no credential.
+		want := acceptedSchemes()
 		at := named(steps, "let git read the pinned sources with the read-only token")
 		if at < 0 {
 			t.Fatal("no step configures the source credential helper")
@@ -470,7 +501,7 @@ func TestImagesWorkflowKeepsSecretsOffArgv(t *testing.T) {
 		t.Parallel()
 		// A credential helper written to the runner's own ~/.gitconfig would
 		// outlive the job; GIT_CONFIG_GLOBAL points the write at the job's
-		// temporary file, which later steps inherit.
+		// temporary file instead.
 		at := named(steps, "let git read the pinned sources with the read-only token")
 		if at < 0 {
 			t.Fatal("no step configures the source credential helper")
@@ -484,8 +515,35 @@ func TestImagesWorkflowKeepsSecretsOffArgv(t *testing.T) {
 		if written < exported {
 			t.Error("the helper is written to the global config before GIT_CONFIG_GLOBAL is set")
 		}
-		if !strings.Contains(run, `GIT_CONFIG_GLOBAL=$cfg" >> "$GITHUB_ENV"`) {
-			t.Error("the helper step does not hand GIT_CONFIG_GLOBAL to the later fetch steps")
+	})
+
+	t.Run("only the steps that fetch get the helper's config", func(t *testing.T) {
+		t.Parallel()
+		// GIT_CONFIG_GLOBAL reaches each fetching step through its own env, not
+		// through $GITHUB_ENV, so no step that runs no fetch inherits a
+		// credential helper.
+		const want = "${{ runner.temp }}/gitconfig"
+		fetchers := []string{
+			"fetch mango at its pin",
+			"stage the daemon image's build context",
+			"stage the polecat image's build context",
+		}
+		for _, name := range fetchers {
+			at := named(steps, name)
+			if at < 0 {
+				t.Fatalf("no step is named: %s", name)
+			}
+			if got := steps[at].env["GIT_CONFIG_GLOBAL"]; got != want {
+				t.Errorf("the step %q gets GIT_CONFIG_GLOBAL=%q, want %q", name, got, want)
+			}
+		}
+		for _, s := range steps {
+			if _, ok := s.env["GIT_CONFIG_GLOBAL"]; ok && !slices.Contains(fetchers, s.name) {
+				t.Errorf("the step %q gets the credential helper's config but runs no fetch", s.name)
+			}
+			if strings.Contains(s.run, "GITHUB_ENV") && strings.Contains(s.run, "GIT_CONFIG_GLOBAL") {
+				t.Errorf("the step %q hands GIT_CONFIG_GLOBAL to every later step", s.name)
+			}
 		}
 	})
 
@@ -511,8 +569,9 @@ func TestImagesWorkflowKeepsSecretsOffArgv(t *testing.T) {
 
 // TestImagesWorkflowPrintsTheDigestLines holds the output and preflight rules:
 // each push is followed by a registry digest read and the IMAGE line the deploy
-// reads, printed only once the digest check passed, and the first step is a
-// preflight that names what the runner is missing and refuses another jq.
+// reads, printed only once the digest check passed, and the job starts with a
+// bootstrap that asks for go and then runs the Go preflight, which holds the
+// runner's tools, jq's version, the mango pin and the green commit.
 func TestImagesWorkflowPrintsTheDigestLines(t *testing.T) {
 	t.Parallel()
 	_, steps := loadJob(t)
@@ -530,38 +589,41 @@ func TestImagesWorkflowPrintsTheDigestLines(t *testing.T) {
 		}
 	})
 
-	t.Run("the preflight names what is missing and stops", func(t *testing.T) {
+	t.Run("the bootstrap asks for go and stops", func(t *testing.T) {
 		t.Parallel()
+		// This is the one shell check the job makes: nothing else can run
+		// before the checkout brings the Go source the preflight is written in.
 		run := steps[named(steps, "preflight")].run
-		for _, want := range []string{"for tool in jq go docker git", "command -v", "missing:", "exit 1"} {
+		for _, want := range []string{"command -v go", "exit 1"} {
 			if !strings.Contains(run, want) {
-				t.Errorf("the preflight does not contain %q", want)
+				t.Errorf("the bootstrap does not contain %q", want)
 			}
 		}
 	})
 
-	t.Run("the preflight refuses another jq", func(t *testing.T) {
+	t.Run("the preflight proper runs the Go check on the runner, the pin and the commit", func(t *testing.T) {
 		t.Parallel()
-		run := steps[named(steps, "preflight")].run
-		for _, want := range []string{"jq --version", `[ "$version" != "jq-1.7.1" ]`, "exit 1"} {
-			if !strings.Contains(run, want) {
-				t.Errorf("the preflight does not contain %q", want)
-			}
+		// The tools, jq's version, the mango pin and the commit are held by
+		// internal/ci/preflight, whose refusals
+		// TestCheckRefusesAMissingTool, TestCheckRefusesAnotherJQ,
+		// TestCheckRefusesAMangoURLTheTokenMayNotReach and
+		// TestCheckRefusesAGreenCommitThatIsNotAFullSHA drive.
+		at := preflightStep(steps)
+		if at < 0 {
+			t.Fatal("no step runs go run ./internal/ci/cmd/imagepreflight")
 		}
-	})
-
-	t.Run("the preflight refuses a malformed mango pin", func(t *testing.T) {
-		t.Parallel()
-		run := steps[named(steps, "preflight")].run
 		for _, want := range []string{
-			`case "$MANGO_URL"`,
-			"http://*|https://*)",
-			`[ "${#MANGO_COMMIT}" -ne 40 ]`,
-			`case "$MANGO_COMMIT"`,
+			`-mango-url "$MANGO_URL"`,
+			`-mango-commit "$MANGO_COMMIT"`,
+			`-host "$FORGEJO_HOST"`,
+			`-env-out "$GITHUB_ENV"`,
 		} {
-			if !strings.Contains(run, want) {
-				t.Errorf("the preflight does not contain %q", want)
+			if !strings.Contains(steps[at].run, want) {
+				t.Errorf("the preflight does not pass %s", want)
 			}
+		}
+		if runsDocker(steps[at].run) || strings.Contains(steps[at].run, "go run ./cmd/gt") {
+			t.Errorf("the preflight builds something instead of checking: %s", steps[at].run)
 		}
 	})
 
