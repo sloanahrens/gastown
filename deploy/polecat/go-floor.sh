@@ -5,7 +5,7 @@
 # floor is read from the rig files on the host and checked inside the image, so
 # no version is kept by hand here.
 #
-#   go-floor.sh rig <go.mod>...  (host, make polecat-image) prints the highest
+#   go-floor.sh rig <go.mod>...  (host) prints the highest
 #                                `go` line of the files; exits 2 when none has one.
 #   go-floor.sh check <floor>    (image, the Dockerfile's RUN) exits 0 when the Go
 #                                in $GO_BIN (default /usr/local/go/bin/go) is at

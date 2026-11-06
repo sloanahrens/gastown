@@ -176,20 +176,15 @@ POLE_TAG ?= $(or $(HEAD_STAMP),dev)
 # The build compiles the working tree, so the label is only true of a tree with no
 # changes: polecat-image refuses one that has any (gt-9fz0k).
 POLE_COMMIT := $(shell git rev-parse HEAD 2>/dev/null)
-# bd is built from a beads fork checkout, not this repo. That checkout is host
-# state, so there is no default: the operator names it, BD_SRC=<checkout>.
-BD_SRC ?=
-# The commit of BD_SRC the image's bd is built from: empty builds the commit the
-# installed bd reports (`bd version --json`, gt-7b7a5), so host and sandbox
-# share one schema ceiling. A commit the checkout's object store does not hold
-# is fetched for once there and looked for again; still missing, or a fetch that
-# fails, refuses the build (gt-pme82).
-BD_COMMIT ?=
-# The image's Go floor is the highest `go` line of the rigs' go.mod files, read
-# from each rig's canonical checkout under POLE_TOWN (deploy/polecat/go-floor.sh).
-# POLE_RIG_GO_MODS names the files; override it to read other checkouts.
+# The image's bd is built at the commit deploy/daemon/image-pins names for bd,
+# fetched by URL, and the Go floor is the highest `go` line of the seeded rigs'
+# go.mod files; internal/polecat/imagectx stages both (gt-gg9hv.33). No checkout
+# of bd or a rig is read from the town for the image.
 POLE_TOWN ?= $(HOME)/gt
-POLE_RIG_GO_MODS ?= $(wildcard $(POLE_TOWN)/*/mayor/rig/go.mod)
+# The directory the build context is staged in. The command refuses a directory
+# that is not empty, so the recipe clears it first; deploy/polecat/.gitignore
+# keeps it out of the tree.
+POLE_CONTEXT ?= $(CURDIR)/deploy/polecat/context
 # The rigs whose Go build and module caches the image is seeded with (gt-ieuvf).
 # A pinned sha, not the rig's moving HEAD, keeps the seed layer's cache key (and
 # so the image publish time) stable until the pins change: `make
@@ -214,27 +209,24 @@ POLE_BUILD_SRC ?= $(CURDIR)
 # POLE_NODE_PRUNE=1 to run polecat-node-prune after the build (gt-06ni7).
 POLE_NODE_PRUNE ?= 0
 
-# Cross-compile gt, bd, the plugin's cache-trim helper and the tier-sweep
-# runner for the sandbox image, then build it. The Dockerfile copies
-# deploy/polecat/bin/, so that directory is the build context's payload. The
-# guard is the first recipe line, so a run without BD_SRC stops before
-# anything is built.
+# Stage the build context from the pins, then build the image from it. The
+# command (internal/polecat/imagectx/cmd/build) fetches every source by URL,
+# builds gt, polecat-image, sweep-run and bd, and writes the seed directory,
+# go-floor.sh and bd.commit; it issues no engine call. The recipe reads its
+# context, labels and Go floor from the printed lines and does the engine build
+# and the push itself. The tree guard runs first, so a dirty tree stops before
+# anything is staged.
 polecat-image:
-	@test -n "$(BD_SRC)" || { echo "polecat-image: BD_SRC is unset; run make polecat-image BD_SRC=<beads checkout>" >&2; exit 2; }
 	@test -z "$$(git status --porcelain -- . ':(exclude).beads')" || { echo "polecat-image: the tree has uncommitted or untracked changes, so its gt is not the commit the label names ($(POLE_COMMIT)); commit or remove them first" >&2; exit 2; }
-	@test -n "$(POLE_RIG_GO_MODS)" || { echo "polecat-image: no rig go.mod under $(POLE_TOWN)/*/mayor/rig; set POLE_TOWN=<town root>" >&2; exit 2; }
-	@mkdir -p deploy/polecat/bin
-	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o deploy/polecat/bin/gt ./cmd/gt
-	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o deploy/polecat/bin/polecat-image ./plugins/polecat-image
-	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o deploy/polecat/bin/sweep-run ./cmd/sweep-run
-	@bd_commit=$$(go run ./internal/polecat/bdbuild/cmd/build -src "$(BD_SRC)" -out $(CURDIR)/deploy/polecat/bin/bd -commit "$(BD_COMMIT)") || { echo "polecat-image: the bd build failed, so the image has no bd commit to label" >&2; exit 2; }; \
-	test -n "$$bd_commit" || { echo "polecat-image: the bd build printed no commit, so the image's bd cannot be labelled" >&2; exit 2; }; \
-	printf '%s\n' "$$bd_commit" > deploy/polecat/bin/bd.commit
-	@$(MAKE) --no-print-directory polecat-seed-stage
-	bd_commit=$$(cat deploy/polecat/bin/bd.commit) || { echo "polecat-image: no bd commit recorded, so the image's bd cannot be labelled; the bd build did not finish" >&2; exit 2; }; \
-	test -n "$$bd_commit" || { echo "polecat-image: the bd commit file is empty, so the image's bd cannot be labelled" >&2; exit 2; }; \
-	floor=$$(bash deploy/polecat/go-floor.sh rig $(POLE_RIG_GO_MODS)) || { echo "polecat-image: cannot read the rig Go floor from $(POLE_RIG_GO_MODS)" >&2; exit 2; }; \
-	docker build --platform linux/arm64 --label org.gastown.gt-commit=$(POLE_COMMIT) --label org.gastown.bd-commit="$$bd_commit" --build-arg GO_FLOOR="$$floor" -t $(POLE_IMAGE):$(POLE_TAG) -t $(POLE_IMAGE):dev -f deploy/polecat/Dockerfile deploy/polecat
+	@rm -rf "$(POLE_CONTEXT)" && mkdir -p "$(POLE_CONTEXT)"
+	@staged=$$(go run ./internal/polecat/imagectx/cmd/build -rev "$(POLE_COMMIT)" -out "$(POLE_CONTEXT)") || { echo "polecat-image: the build context did not stage from the pins; the reason is above" >&2; exit 2; }; \
+	printf '%s\n' "$$staged"; \
+	ctx=$$(printf '%s\n' "$$staged" | sed -n 's/^context: //p'); \
+	gt_commit=$$(printf '%s\n' "$$staged" | sed -n 's/^label: org.gastown.gt-commit=//p'); \
+	bd_commit=$$(printf '%s\n' "$$staged" | sed -n 's/^label: org.gastown.bd-commit=//p'); \
+	floor=$$(printf '%s\n' "$$staged" | sed -n 's/^label: go-floor=//p'); \
+	test -n "$$ctx" -a -n "$$gt_commit" -a -n "$$bd_commit" -a -n "$$floor" || { echo "polecat-image: the staged context names no context, gt commit, bd commit or Go floor, so the image cannot be built or labelled" >&2; exit 2; }; \
+	docker build --platform linux/arm64 --label org.gastown.gt-commit="$$gt_commit" --label org.gastown.bd-commit="$$bd_commit" --build-arg GO_FLOOR="$$floor" -t $(POLE_IMAGE):$(POLE_TAG) -t $(POLE_IMAGE):dev -f deploy/polecat/Dockerfile "$$ctx"
 ifeq ($(POLE_NODE_PRUNE),1)
 	@$(MAKE) --no-print-directory polecat-node-prune
 endif

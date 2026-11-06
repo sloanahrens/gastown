@@ -177,13 +177,14 @@ func TestIntegrationSeedPinsPinsEachRigToItsCheckoutHead(t *testing.T) {
 }
 
 // TestIntegrationSeedPolecatImageRunsTheStageBeforeDockerBuild checks
-// "polecat-image runs the seed stage, with the pin-drift guard, before docker
-// build".
-// Mutation: move the `$(MAKE) polecat-seed-stage` line after the docker build,
-// and the image is built from an unseeded or stale seed directory.
+// "polecat-image stages the seed, with the pin-drift guard, before docker build".
+// The context command stages the seed directory (gt-gg9hv.33), so the case reads
+// that command's line against the engine build.
+// Mutation: move the context command line after the docker build, and the image
+// is built from an unseeded or stale seed directory.
 func TestIntegrationSeedPolecatImageRunsTheStageBeforeDockerBuild(t *testing.T) {
 	out := dryTarget(t, polecatImageMake(t, repoRoot(t)), "polecat-image", "BD_SRC=/somewhere/else")
-	stage := lineOf(out, "internal/polecat/seed/cmd/stage")
+	stage := lineOf(out, "./internal/polecat/imagectx/cmd/build")
 	build := lineOf(out, "docker build")
 	if stage == 0 || build == 0 || stage >= build {
 		t.Fatalf("polecat-image does not run the seed stage before docker build (stage line %d, build line %d)\n%s", stage, build, out)

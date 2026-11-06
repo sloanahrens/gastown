@@ -1,7 +1,9 @@
 # Gas Town polecat image for OpenShell sandboxes.
 #
-# Build: `make polecat-image` (cross-compiles gt and bd into bin/, then runs
-# docker build on this directory and tags gastown-polecat:<short sha> and :dev).
+# Build: `make polecat-image` stages the build context from the pins (the
+# command in internal/polecat/imagectx cross-compiles gt and bd into the
+# context's bin/), then runs docker build on that context and tags
+# gastown-polecat:<short sha> and :dev.
 #
 # The image carries the Claude Code CLI, the Go toolchain and git, plus the
 # town's own binaries from bin/. OpenShell ignores ENTRYPOINT and
@@ -46,7 +48,7 @@ FROM ubuntu:24.04
 
 ARG GO_VERSION=1.27.1
 # GO_FLOOR is the highest `go` line of the rigs' go.mod files. make polecat-image
-# reads it from those files (deploy/polecat/go-floor.sh rig) and passes it in.
+# takes it from the staged seed sources (internal/polecat/imagectx) and passes it in.
 # There is no default: an image built without it fails the check below.
 ARG GO_FLOOR
 # sha256 of go1.27.1.linux-arm64.tar.gz and go1.27.1.linux-amd64.tar.gz, as listed
