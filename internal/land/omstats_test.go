@@ -506,3 +506,59 @@ func TestOmStatsIgnoresTheHeadField(t *testing.T) {
 		t.Errorf("the report changed when the records carried a head:\nwith    %+v\nwithout %+v", with, without)
 	}
 }
+
+// TestOmStatsWindowUsesTheSequenceAwareParser reads the container's UTC region:
+// parsed as local time those lines sit six hours in the future, and the window
+// must count them at the instant they happened. A line with no stamp of its
+// own is a continuation of the entry above and never a verdict of its own.
+func TestOmStatsWindowUsesTheSequenceAwareParser(t *testing.T) {
+	t.Parallel()
+	cst := time.FixedZone("CST", -6*3600)
+	fixture := strings.Join([]string{
+		// The container cutover at 18:08 UTC, from an image with no zone data.
+		"2026/11/04 18:08:19 Loaded patrol config from /gt/settings/config.json",
+		"2026/11/04 18:09:20 Loaded patrol config from /gt/settings/config.json",
+		"2026/11/04 18:10:02 Daemon starting (PID 1)",
+		"2026/11/04 18:10:02 Daemon owner: container \"gt-daemon-1\"",
+		"2026/11/04 22:30:00 landing_worker: [land] gt-r: rejected (review): om requested changes (score 0.40, 2 finding(s))",
+		// A continuation of the rejection above: it carries no stamp of its own.
+		"landing_worker: [land] gt-forged: rejected (review): om requested changes (score 0.10, 1 finding(s))",
+		"2026/11/05 11:10:00 landing_worker: [land] gt-r: landed abc on main",
+	}, "\n") + "\n"
+
+	events, err := readOmStatsLog(strings.NewReader(fixture), cst)
+	if err != nil {
+		t.Fatalf("readOmStatsLog: %v", err)
+	}
+	want := []struct {
+		at       time.Time
+		day      string
+		rejected bool
+	}{
+		{time.Date(2026, 11, 4, 22, 30, 0, 0, time.UTC), "2026-11-04", true},
+		{time.Date(2026, 11, 5, 11, 10, 0, 0, time.UTC), "2026-11-05", false},
+	}
+	if len(events) != len(want) {
+		t.Fatalf("events = %+v, want %d", events, len(want))
+	}
+	for i, w := range want {
+		if !events[i].at.Equal(w.at) || events[i].day != w.day || events[i].rejected != w.rejected {
+			t.Errorf("event %d = %+v, want at %v day %s rejected %v", i, events[i], w.at, w.day, w.rejected)
+		}
+	}
+
+	stats, err := AggregateOmStats(nil, strings.NewReader(fixture), time.Time{})
+	if err != nil {
+		t.Fatalf("AggregateOmStats: %v", err)
+	}
+	for _, w := range want {
+		day := w.at.In(time.Local).Format(OmStatsDayLayout)
+		want := OmStatsDay{Day: day, Fallback: true}
+		if w.rejected {
+			want.Rejections, want.Rate, want.MeanFindings, want.MeanScore = 1, 1, 2, 0.40
+		} else {
+			want.Approvals = 1
+		}
+		wantOmStatsDay(t, stats, want)
+	}
+}

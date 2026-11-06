@@ -23,14 +23,10 @@ var (
 // parseDispatchTick reads one spec_dispatch tick line: its counts, and the
 // skipped beads it names, which the dispatcher writes after the counts as
 // "; skipped: gt-a (reason); gt-b (reason) +N more" (gt-gzav5). A line that is
-// not a tick yields nil.
-func parseDispatchTick(line string) *dashboard.Dispatch {
+// not a tick, or a stamp the caller could not date, yields nil.
+func parseDispatchTick(line string, at time.Time) *dashboard.Dispatch {
 	m := dispatchTickRe.FindStringSubmatch(line)
-	if m == nil {
-		return nil
-	}
-	at, err := time.ParseInLocation(omLogTimeLayout, m[1], time.Local)
-	if err != nil {
+	if m == nil || at.IsZero() {
 		return nil
 	}
 	n := func(i int) int { v, _ := strconv.Atoi(m[i]); return v }

@@ -436,3 +436,26 @@ func TestTierSweepTrendKeepsTheNewest30(t *testing.T) {
 		t.Error("the trend is not oldest first")
 	}
 }
+
+// TestTierSweepReaderDatesTheUTCRegion reads a sweep from the container's UTC
+// region: parsed as local time its row would be six hours later than it ran.
+func TestTierSweepReaderDatesTheUTCRegion(t *testing.T) {
+	t.Parallel()
+	r, _ := tierSweepTestReader(t,
+		"2026/11/04 18:08:19 Loaded patrol config from /gt/settings/config.json",
+		"2026/11/04 18:09:20 Loaded patrol config from /gt/settings/config.json",
+		"2026/11/04 18:10:02 Daemon starting (PID 1)",
+		"2026/11/04 18:10:02 Daemon owner: container \"gt-daemon-1\"",
+		"2026/11/05 02:00:19 tier_sweep: gastown: swept a9be03e4 (shell GREEN, integration GREEN, race GREEN) in 9m36s",
+	)
+	r.loc = time.FixedZone("CST", -6*3600)
+	if err := r.scanLog(); err != nil {
+		t.Fatalf("scanLog: %v", err)
+	}
+	if len(r.rows) != 1 {
+		t.Fatalf("rows = %+v, want the one sweep", r.rows)
+	}
+	if want := time.Date(2026, 11, 5, 2, 0, 19, 0, time.UTC); !r.rows[0].At.Equal(want) {
+		t.Errorf("sweep at %v, want %v", r.rows[0].At.UTC(), want)
+	}
+}
