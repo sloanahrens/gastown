@@ -2,12 +2,14 @@ package scorecard
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -296,6 +298,214 @@ func TestLandingLabelLeavesAMissingBeadUnlabeled(t *testing.T) {
 	}
 	if lab.Labeled || lab.Labels != nil || lab.Rule != "" {
 		t.Errorf("labeling = %+v, want none", lab)
+	}
+}
+
+// TestTownNotesCommentsReadsOneQuery decodes bd sql's CSV answer into comments
+// by bead, quoted fields included. A bead the issues table holds with no
+// comments is an entry with none, so the rules adapter never reads it again; an
+// id the table does not hold is absent, and only that one is read on its own.
+func TestTownNotesCommentsReadsOneQuery(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	var calls [][]string
+	run := func(_ context.Context, argv []string) (stdout, stderr []byte, err error) {
+		calls = append(calls, argv)
+		csv := "issue_id,commented,author,text,created_at\n" +
+			"gt-a,1,gastown/polecats/furiosa,DONE_CLOSE_SKIPPED: head unchanged since the rejection,2026-10-21T17:02:00.500000Z\n" +
+			"gt-a,1,daemon,\"a second comment, with a comma\",2026-10-21T17:03:00.000000Z\n" +
+			"gt-b,0,,,\n"
+		return []byte(csv), nil, nil
+	}
+	tn := &townNotes{town: dir, stores: map[string]*beads.Beads{
+		"gastown": beads.New(dir, beads.WithRunner(run)),
+	}}
+
+	got, err := tn.Comments("gastown", []string{"gt-a", "gt-b", "gt-missing"})
+	if err != nil {
+		t.Fatalf("Comments: %v", err)
+	}
+	sqlCalls := 0
+	for _, argv := range calls {
+		if slices.Contains(argv, "sql") {
+			sqlCalls++
+		}
+	}
+	if sqlCalls != 1 {
+		t.Fatalf("bd calls = %v, want one bd sql query", calls)
+	}
+	if c, ok := got["gt-b"]; !ok || len(c) != 0 {
+		t.Errorf("gt-b = %+v, %v; want an empty entry: the issues table holds it", c, ok)
+	}
+	if _, ok := got["gt-missing"]; ok {
+		t.Errorf("gt-missing has an entry, want absent: the issues table does not hold it")
+	}
+	want := []beads.Comment{
+		{IssueID: "gt-a", Author: "gastown/polecats/furiosa",
+			Text: "DONE_CLOSE_SKIPPED: head unchanged since the rejection", CreatedAt: "2026-10-21T17:02:00.500000Z"},
+		{IssueID: "gt-a", Author: "daemon",
+			Text: "a second comment, with a comma", CreatedAt: "2026-10-21T17:03:00.000000Z"},
+	}
+	if !slices.Equal(got["gt-a"], want) {
+		t.Errorf("gt-a's comments = %+v, want %+v", got["gt-a"], want)
+	}
+}
+
+// mysqlDateFormat renders at the way MySQL's DATE_FORMAT renders format, for
+// the specifiers CommentsOf may use. The batch stub answers with it, so the
+// batch time is whatever the format CommentsOf really builds would print, not a
+// string the test chose. A specifier it does not know fails the test rather
+// than printing something the server would not.
+func mysqlDateFormat(t *testing.T, at time.Time, format string) string {
+	t.Helper()
+	at = at.UTC()
+	var b strings.Builder
+	for i := 0; i < len(format); i++ {
+		if format[i] != '%' {
+			b.WriteByte(format[i])
+			continue
+		}
+		i++
+		if i == len(format) {
+			t.Fatalf("DATE_FORMAT format %q ends in a bare %%", format)
+		}
+		switch format[i] {
+		case 'Y':
+			fmt.Fprintf(&b, "%04d", at.Year())
+		case 'm':
+			fmt.Fprintf(&b, "%02d", int(at.Month()))
+		case 'd':
+			fmt.Fprintf(&b, "%02d", at.Day())
+		case 'H':
+			fmt.Fprintf(&b, "%02d", at.Hour())
+		case 'i':
+			fmt.Fprintf(&b, "%02d", at.Minute())
+		case 's':
+			fmt.Fprintf(&b, "%02d", at.Second())
+		case 'f':
+			fmt.Fprintf(&b, "%06d", at.Nanosecond()/1000)
+		case '%':
+			b.WriteByte('%')
+		default:
+			t.Fatalf("DATE_FORMAT specifier %%%c is not modelled by mysqlDateFormat", format[i])
+		}
+	}
+	return b.String()
+}
+
+// createdAtFormat finds the DATE_FORMAT format the comments query applies to
+// created_at, so the stub prints with the format the code under test built.
+var createdAtFormat = regexp.MustCompile(`DATE_FORMAT\(c\.created_at, '([^']*)'\)`)
+
+// TestTownNotesCommentsKeepsSubSecondTimes: the time the batch read reports for
+// a comment equals the time bd's per-bead comments --json reports for it, for a
+// comment with sub-second digits and for one without. A time truncated to whole
+// seconds could move a stand-down out of its rule window. The per-bead stub
+// prints the instant the way bd does (a Go time marshalled as RFC3339, the shape
+// the bdshim comments golden holds); the batch stub prints it with the DATE_FORMAT
+// format the query really carries, so dropping the fraction or adding a stray
+// character to that format fails here.
+func TestTownNotesCommentsKeepsSubSecondTimes(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		at   time.Time
+	}{
+		{"with microseconds", time.Date(2026, 10, 21, 17, 2, 0, 123456000, time.UTC)},
+		{"on a whole second", time.Date(2026, 11, 6, 17, 31, 26, 0, time.UTC)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			perBeadTime, err := json.Marshal(tc.at)
+			if err != nil {
+				t.Fatalf("marshalling the instant: %v", err)
+			}
+			run := func(_ context.Context, argv []string) (stdout, stderr []byte, err error) {
+				if slices.Contains(argv, "sql") {
+					m := createdAtFormat.FindStringSubmatch(argv[len(argv)-1])
+					if m == nil {
+						t.Errorf("the batch query has no DATE_FORMAT of c.created_at: %q", argv[len(argv)-1])
+						return nil, nil, errors.New("unmodelled batch query")
+					}
+					return []byte("issue_id,commented,author,text,created_at\n" +
+						"gt-a,1,someone,DONE_CLOSE_SKIPPED: went ahead," + mysqlDateFormat(t, tc.at, m[1]) + "\n"), nil, nil
+				}
+				return []byte(`[{"issue_id":"gt-a","author":"someone","text":"DONE_CLOSE_SKIPPED: went ahead","created_at":` + string(perBeadTime) + `}]`), nil, nil
+			}
+			b := beads.New(dir, beads.WithRunner(run))
+			tn := &townNotes{town: dir, stores: map[string]*beads.Beads{"gastown": b}}
+
+			batch, err := tn.Comments("gastown", []string{"gt-a"})
+			if err != nil {
+				t.Fatalf("Comments: %v", err)
+			}
+			if len(batch["gt-a"]) != 1 {
+				t.Fatalf("batch comments = %+v, want gt-a's one comment", batch)
+			}
+			perBead, err := b.Comments("gt-a")
+			if err != nil {
+				t.Fatalf("per-bead Comments: %v", err)
+			}
+			if len(perBead) != 1 {
+				t.Fatalf("per-bead comments = %+v, want gt-a's one comment", perBead)
+			}
+			got, err := time.Parse(time.RFC3339Nano, batch["gt-a"][0].CreatedAt)
+			if err != nil {
+				t.Fatalf("parsing the batch time %q: %v", batch["gt-a"][0].CreatedAt, err)
+			}
+			want, err := time.Parse(time.RFC3339Nano, perBead[0].CreatedAt)
+			if err != nil {
+				t.Fatalf("parsing the per-bead time %q: %v", perBead[0].CreatedAt, err)
+			}
+			if !got.Equal(want) {
+				t.Errorf("batch time %v (%q), want the per-bead read's %v (%q)", got, batch["gt-a"][0].CreatedAt, want, perBead[0].CreatedAt)
+			}
+			if !want.Equal(tc.at) {
+				t.Errorf("per-bead time %v, want the instant %v the stub was given", want, tc.at)
+			}
+		})
+	}
+}
+
+// TestTownNotesCommentsReadsAMissingRigAsAnError: a rig with no beads
+// directory fails the read as not found, the way its single-bead reads do, and
+// opens no store. An empty comment set would leave every bead of the rig
+// unlabeled with a clean pass.
+func TestTownNotesCommentsReadsAMissingRigAsAnError(t *testing.T) {
+	t.Parallel()
+	tn := &townNotes{town: t.TempDir(), stores: map[string]*beads.Beads{}}
+	if _, err := tn.Comments("gastown", []string{"gt-a"}); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Comments of a rig with no beads directory = %v, want not found", err)
+	}
+	if len(tn.stores) != 0 {
+		t.Errorf("a rig with no beads directory opened %d store(s)", len(tn.stores))
+	}
+}
+
+// TestTownNotesCommentsRefusesAnUnexpectedAnswer: an answer the query was not
+// written for is an error, never an empty comment set, so no bead can read as
+// having no stand-down record because the read was misparsed.
+func TestTownNotesCommentsRefusesAnUnexpectedAnswer(t *testing.T) {
+	t.Parallel()
+	for name, answer := range map[string]string{
+		"no header":      "",
+		"missing column": "issue_id,commented,author,text\n",
+		"short row":      "issue_id,commented,author,text,created_at\ngt-a,1,someone,text\n",
+		"bad commented":  "issue_id,commented,author,text,created_at\ngt-a,maybe,,,\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			tn := &townNotes{town: dir, stores: map[string]*beads.Beads{
+				"gastown": beads.New(dir, beads.WithRunner(func(context.Context, []string) ([]byte, []byte, error) {
+					return []byte(answer), nil, nil
+				})),
+			}}
+			if _, err := tn.Comments("gastown", []string{"gt-a"}); err == nil {
+				t.Errorf("Comments accepted %q", answer)
+			}
+		})
 	}
 }
 

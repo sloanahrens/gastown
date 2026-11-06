@@ -3,6 +3,7 @@ package beadsql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -106,12 +107,12 @@ func quote(s string) string {
 }
 
 // quoteList is values as a comma-separated list of SQL string literals.
-func quoteList(values []string, sep string) string {
+func quoteList(values []string) string {
 	quoted := make([]string, len(values))
 	for i, v := range values {
 		quoted[i] = quote(v)
 	}
-	return strings.Join(quoted, sep)
+	return strings.Join(quoted, ", ")
 }
 
 var identifier = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
@@ -180,6 +181,31 @@ func LabelPresent(id, label string) Query {
 	return declared("SELECT 1 AS present FROM labels WHERE issue_id = " + quote(id) + " AND label = " + quote(label) + " LIMIT 1")
 }
 
+// CommentsOf reads the comments of the issues named ids in one query: one row
+// per comment, with the issue id, its author, its text and when it was written,
+// so a caller reading many beads pays one read instead of one per bead
+// (gt-ueaagp).
+//
+// Every id the issues table holds answers with at least one row, so a bead
+// with no comments is an answer (commented 0, its comment columns empty) and
+// not a bead the read must go back for. An id the issues table does not hold
+// contributes no row at all, and only such an id needs a read of its own.
+//
+// created_at keeps the sub-second digits the column holds, in the RFC3339 UTC
+// form bd's own `comments --json` reports, so the times a caller compares from
+// the two reads parse to the same instant.
+func CommentsOf(ids []string) Query {
+	if len(ids) == 0 {
+		return Query{err: errors.New("beadsql: CommentsOf needs at least one issue id")}
+	}
+	return declared("SELECT i.id AS issue_id, CASE WHEN c.id IS NULL THEN 0 ELSE 1 END AS commented" +
+		", COALESCE(c.author, '') AS author, COALESCE(c.text, '') AS text" +
+		", COALESCE(DATE_FORMAT(c.created_at, '%Y-%m-%dT%H:%i:%s.%fZ'), '') AS created_at" +
+		" FROM issues i LEFT JOIN comments c ON c.issue_id = i.id" +
+		" WHERE i.id IN (" + quoteList(ids) + ")" +
+		" ORDER BY i.id, c.created_at")
+}
+
 // wispRowSelect is the SELECT list the row-only wisps reads share, derived
 // from the preload column list so the two stay in step; internal/beads'
 // bdSQLIssueRow decodes it. The LEFT JOIN on wisp_labels populates
@@ -199,7 +225,7 @@ func AllWisps() Query { return declared(wispRowSelect() + wispRowGroupBy()) }
 func WispsWithLabels(labels []string) Query {
 	return declared(wispRowSelect() +
 		" JOIN wisp_labels l ON w.id = l.issue_id" +
-		" WHERE l.label IN (" + quoteList(labels, ", ") + ")" +
+		" WHERE l.label IN (" + quoteList(labels) + ")" +
 		wispRowGroupBy())
 }
 
@@ -394,10 +420,10 @@ const preloadOrderBy = "dep_row, priority, created_at, id"
 func issueScopeClauses(alias string, labels, statuses []string) []string {
 	var clauses []string
 	if len(labels) > 0 {
-		clauses = append(clauses, alias+".id IN (SELECT issue_id FROM labels WHERE label IN ("+quoteList(labels, ", ")+"))")
+		clauses = append(clauses, alias+".id IN (SELECT issue_id FROM labels WHERE label IN ("+quoteList(labels)+"))")
 	}
 	if len(statuses) > 0 {
-		clauses = append(clauses, alias+".status IN ("+quoteList(statuses, ", ")+")")
+		clauses = append(clauses, alias+".status IN ("+quoteList(statuses)+")")
 	}
 	return clauses
 }

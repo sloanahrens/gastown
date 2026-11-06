@@ -19,6 +19,7 @@ func TestDeclaredQueriesAreReadOnlyBdReads(t *testing.T) {
 		"UnassignedInProgress":        UnassignedInProgress(),
 		"InProgressByAge":             InProgressByAge(),
 		"LabelPresent":                LabelPresent("gt-1", "gt:agent"),
+		"CommentsOf":                  CommentsOf([]string{"gt-1", "o'brien"}),
 		"AllWisps":                    AllWisps(),
 		"WispsWithLabels":             WispsWithLabels([]string{"gt:merge-request", "it's"}),
 		"PreloadedBeads":              PreloadedBeads([]string{"gt:agent"}, []string{"open", "hooked"}),
@@ -65,12 +66,36 @@ func TestQueriesRefuseBadIdentifiers(t *testing.T) {
 		"BackupTable":      BackupTable("hq", "labels;"),
 		"BackupEvents":     BackupEvents("hq; DROP TABLE events", ""),
 		"BackupEventBound": BackupEvents("hq", "2026-10-31' OR '1'='1"),
+		// An empty list would build `IN ()`, which is not a statement, so it is
+		// refused rather than sent.
+		"CommentsOfNoIDs": CommentsOf(nil),
 	} {
 		if _, err := q.BdArgs(); err == nil {
 			t.Errorf("%s: BdArgs accepted %s", name, q)
 		}
 		if _, err := (&DB{}).Query(context.Background(), q); err == nil {
 			t.Errorf("%s: DB.Query accepted it", name)
+		}
+	}
+}
+
+// TestCommentsOfQuotesItsIDs: an issue id is a value, not SQL text, so one
+// holding a quote or a fragment is quoted as a literal and the statement still
+// passes ReadOnly. created_at keeps the whole timestamp, sub-second digits
+// included, in the RFC3339 UTC form bd's own comments read reports, which is
+// what the scorecard parses and compares.
+func TestCommentsOfQuotesItsIDs(t *testing.T) {
+	t.Parallel()
+	s, err := CommentsOf([]string{"gt-1", "x') OR ('1'='1", `rig\id`}).Inline()
+	if err != nil {
+		t.Fatalf("Inline: %v", err)
+	}
+	for _, want := range []string{
+		`FROM issues i LEFT JOIN comments c ON c.issue_id = i.id WHERE i.id IN ('gt-1', 'x'') OR (''1''=''1', 'rig\\id')`,
+		`COALESCE(DATE_FORMAT(c.created_at, '%Y-%m-%dT%H:%i:%s.%fZ'), '') AS created_at`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("CommentsOf lacks %q:\n%s", want, s)
 		}
 	}
 }
@@ -86,9 +111,9 @@ func TestQuoteEscapesSQLLiterals(t *testing.T) {
 		{[]string{`rig\agent`}, `'rig\\agent'`},
 		{[]string{`rig\`}, `'rig\\'`},
 		{[]string{`rig/o\'malley`}, `'rig/o\\''malley'`},
-		{[]string{"mayor/", `rig/o\'malley`}, `'mayor/','rig/o\\''malley'`},
+		{[]string{"mayor/", `rig/o\'malley`}, `'mayor/', 'rig/o\\''malley'`},
 	} {
-		if got := quoteList(tt.values, ","); got != tt.want {
+		if got := quoteList(tt.values); got != tt.want {
 			t.Errorf("quoteList(%q) = %s, want %s", tt.values, got, tt.want)
 		}
 	}
