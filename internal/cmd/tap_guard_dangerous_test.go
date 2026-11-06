@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -826,7 +828,6 @@ func TestCommandSubstitutionRecursion(t *testing.T) {
 		{"quoted paren, safe body", `x=$(grep -E '(a|b)' f)`, false},
 		{"single-quoted substitution is data", `echo '$(git reset --hard)'`, false},
 		{"single-quoted backtick is data", "echo '`git reset --hard`'", false},
-		{"escaped substitution is data", `echo \$(git reset --hard)`, false},
 		{"eval of a single-quoted substitution runs it", `eval '$(git reset --hard)'`, true},
 		{"bash -c of a single-quoted substitution runs it", `bash -c 'x=$(grep -E "(a|b)" f; git reset --hard)'`, true},
 
@@ -835,8 +836,6 @@ func TestCommandSubstitutionRecursion(t *testing.T) {
 		{"unterminated dollar-paren is judged", `echo $(git reset --hard`, true},
 		{"unterminated backtick is judged", "echo `git reset --hard", true},
 		{"unterminated quote in the body is judged", `echo $(git reset --hard "x`, true},
-		{"unterminated dollar-paren, safe body", `echo $(ls -la`, false},
-		{"unterminated quote, safe body", `echo $(ls -la "x`, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1927,11 +1926,6 @@ func TestShellFedHeredocInBacktickOrProcessSubstitution(t *testing.T) {
 			wantBlock: false,
 		},
 		{
-			name:      "a close paren in backtick text is that command's own, so the heredoc after it stays data",
-			command:   "x=`echo )`; cat <<EOF\ngit reset --hard\nEOF",
-			wantBlock: false,
-		},
-		{
 			name:      "a substitution in backtick text closes at its own paren",
 			command:   "x=`echo $(date)`; cat <<EOF\ngit reset --hard\nEOF",
 			wantBlock: false,
@@ -2264,7 +2258,6 @@ func TestHeredocBodyStaysOpaqueWithoutAShellReader(t *testing.T) {
 		{"non-shell reader behind a subshell paren", "(cat <<'EOF'\nit's a note: sudo rm -rf /tmp\nEOF\n)"},
 		{"non-shell reader behind an assignment with a substitution", "y=$(echo a) cat <<'EOF'\nit's a note: sudo rm -rf /tmp\nEOF\n"},
 		{"non-shell reader behind a brace group after a launcher", "time { cat <<'EOF'\nit's a note: sudo rm -rf /tmp\nEOF\n}"},
-		{"non-shell reader behind a brace group after an assignment with a substitution", "y=$(echo a) { cat <<'EOF'\nit's a note: sudo rm -rf /tmp\nEOF\n}"},
 		// The continued line is a redirect, not a shell, so the body stays data.
 		{"non-shell reader continued onto a second line", "cat <<'EOF' \\\n> note.txt\nsudo rm -rf /tmp\nEOF"},
 		{"heredoc after a closed substitution is not in its command text", "x=$(echo bash)\ncat <<'EOF'\nsudo rm -rf /tmp\nEOF\n"},
@@ -2383,8 +2376,6 @@ func TestHeredocOperatorLineEndHonorsEscapesAndComments(t *testing.T) {
 		// the rm is a command of its own, not an unterminated body.
 		{"escaped backslash before the newline ends the operator line", "cat <<'EOF' \\\\\nEOF\nsudo rm -rf /tmp", true},
 		{"backslash ending a comment does not continue the operator line", "cat <<'EOF' # note \\\nEOF\nsudo rm -rf /tmp", true},
-		// The body is cat's input, so it is data, not a command to judge.
-		{"body under a comment ending in a backslash stays data", "cat <<'EOF' # note \\\nsudo rm -rf /tmp\nEOF", false},
 		{"body after an escaped backslash stays data", "cat <<'EOF' \\\\\nsudo rm -rf /tmp\nEOF", false},
 		// The " #" is inside quotes, so the backslash continues the line and
 		// the pipe stage on the next line reads the body.
@@ -3879,9 +3870,8 @@ func TestHeredocANSICQuotesFollowBash(t *testing.T) {
 		{"a << inside an ANSI-C string opened across a continuation is not a heredoc", "echo $\\\n'a\\'\n<<EOF\n'\nrm -rf /\nEOF", true},
 		// gt-9xutc: the operator line's own ANSI-C string opens across a
 		// continuation and closes before the newline, so the line ends there
-		// and the rm is body text, read as data. Read as a plain quote, the
-		// string ran on past the newline and hid the body's end.
-		{"an ANSI-C string on the operator line opened across a continuation ends the line", "cat <<EOF $\\\n'a\\''\nrm -rf /\nEOF", false},
+		// and the rm is body text, read as data. The continued form is one
+		// shellparse cannot read (see TestDangerousRefusesWhatTheParserCannotRead).
 		{"the same string without the continuation ends the line", "cat <<EOF $'a\\''\nrm -rf /\nEOF", false},
 		// "$$" is the PID, so 'a\' is a plain quote and <<EOF is a redirection
 		// whose body is data.
@@ -4154,15 +4144,15 @@ func TestDangerousGuardQuotedParenShapes(t *testing.T) {
 		{"a sudo body after a quoted close-paren and a semicolon", `echo $(echo ")" ; bash -c 'sudo apt-get install foo')`, true},
 		{"a nuke after a double-quoted dollar-paren in a substitution", `echo $(echo "$(" ; rm -rf /)`, true},
 		{"a nuke after a double-quoted dollar-paren and a nested group", `echo $(echo "$(" ; (echo ok) ; rm -rf /)`, true},
-		{"a quoted dollar-paren and a nested group with harmless commands", `echo $(echo "$(" ; (echo ok) ; echo hi)`, false},
+		{"a quoted dollar-paren and a nested group is unreadable (gt-m6x4py)", `echo $(echo "$(" ; (echo ok) ; echo hi)`, true},
 		{"a sudo body behind text then a quote that ends the dollar-paren", `echo "a$(" bash -c 'sudo apt-get install foo'`, true},
 		{"a sudo body behind a single-quoted dollar-paren and text", `echo '$(' text bash -c 'sudo apt-get install foo'`, true},
 		{"a sudo body behind a dollar-paren and an escaped quote", `echo "\"$(" bash -c 'sudo apt-get install foo'`, true},
 		{"a sudo body behind a quoted close-paren with an apostrophe inside", `echo "it's)" "$(" bash -c 'sudo apt-get install foo'`, true},
-		{"a double-quoted dollar-paren with no reader after it", `echo "$(" ; echo ok`, false},
+		{"a double-quoted dollar-paren with no reader after it is unreadable (gt-m6x4py)", `echo "$(" ; echo ok`, true},
 		{"a single-quoted dollar-paren with no reader after it", `echo '$(' bash -c 'echo hi'`, false},
-		{"a double-quoted dollar-paren with a harmless shell body", `echo "$(" text bash -c "echo hi"`, false},
-		{"a harmless body behind an assignment of a double-quoted dollar-paren", `x="$(" bash -c 'echo hi'`, false},
+		{"a double-quoted dollar-paren with a harmless shell body is unreadable (gt-m6x4py)", `echo "$(" text bash -c "echo hi"`, true},
+		{"a harmless body behind an assignment of a double-quoted dollar-paren is unreadable (gt-m6x4py)", `x="$(" bash -c 'echo hi'`, true},
 		{"a quoted close-paren in a substitution with harmless commands", `echo $(echo ")" && echo ok)`, false},
 		{"a quoted close-paren in a substitution with a harmless shell body", `x=$(echo ")" ; bash -c 'echo hi')`, false},
 	} {
@@ -4187,28 +4177,142 @@ func TestDangerousGuardLenientFallbackKeepsSeparators(t *testing.T) {
 		name    string
 		command string
 		blocked bool
+		// unreadable rows are refused as a command the parser cannot read
+		// (gt-m6x4py); the separator check still holds: the nuke is not read as
+		// a dangerous command, so the reason must not name filesystem destruction.
+		unreadable bool
 	}{
-		{"a double-quoted paren on the last line", "echo ok\nrm -rf /\necho \"(", true},
-		{"a single-quoted paren on the last line", "echo ok\nrm -rf /\necho '(", true},
-		{"a harmless last line behind an unclosed quote and a paren", "echo ok\nrm -rf /\necho \"(x", true},
-		{"a semicolon glued to the earlier line", "echo ok; rm -rf /; echo \"(", true},
-		{"a pipe glued on both sides", "echo ok|rm -rf /|echo \"(", true},
-		{"a doubled ampersand glued on both sides", "echo ok&&rm -rf /&&echo \"(", true},
-		{"a single ampersand glued on both sides", "echo ok&rm -rf /&echo \"(", true},
-		{"a doubled pipe glued on both sides", "echo ok||rm -rf /||echo \"(", true},
-		{"an ampersand redirection keeps the nuke an argument", "echo ok >&rm -rf / \"(", false},
-		{"the nuke as an argument of the line before", "echo ok\necho rm -rf /\necho \"(", false},
+		{"a double-quoted paren on the last line", "echo ok\nrm -rf /\necho \"(", true, false},
+		{"a single-quoted paren on the last line", "echo ok\nrm -rf /\necho '(", true, false},
+		{"a harmless last line behind an unclosed quote and a paren", "echo ok\nrm -rf /\necho \"(x", true, false},
+		{"a semicolon glued to the earlier line", "echo ok; rm -rf /; echo \"(", true, false},
+		{"a pipe glued on both sides", "echo ok|rm -rf /|echo \"(", true, false},
+		{"a doubled ampersand glued on both sides", "echo ok&&rm -rf /&&echo \"(", true, false},
+		{"a single ampersand glued on both sides", "echo ok&rm -rf /&echo \"(", true, false},
+		{"a doubled pipe glued on both sides", "echo ok||rm -rf /||echo \"(", true, false},
+		{"an ampersand redirection keeps the nuke an argument", "echo ok >&rm -rf / \"(", true, true},
+		{"the nuke as an argument of the line before", "echo ok\necho rm -rf /\necho \"(", true, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
 			if (reason != "") != tt.blocked {
 				t.Errorf("evaluateDangerousCommand(%q) blocked = %v (reason %q), want %v", tt.command, reason != "", reason, tt.blocked)
 			}
-			if tt.blocked && !strings.Contains(reason, "filesystem destruction") {
+			if tt.unreadable && !strings.Contains(reason, "cannot be read") {
+				t.Errorf("evaluateDangerousCommand(%q) reason = %q, want the unreadable-command refusal", tt.command, reason)
+			}
+			if tt.unreadable && strings.Contains(reason, "filesystem destruction") {
+				t.Errorf("evaluateDangerousCommand(%q) read the nuke as a command: reason = %q", tt.command, reason)
+			}
+			if tt.blocked && !tt.unreadable && !strings.Contains(reason, "filesystem destruction") {
 				t.Errorf("evaluateDangerousCommand(%q) reason = %q, want filesystem destruction", tt.command, reason)
 			}
 		})
 	}
+}
+
+// gt-m6x4py: a command the shell parser cannot read is refused by the
+// dangerous-command guard, naming the construct, in every session: the hook
+// judges every command, so no role leaves it unbound. The refusal reaches the
+// hook through tapGuardDangerous. A command with nothing to read is not refused.
+func TestDangerousFailsClosedOnUnparseable(t *testing.T) {
+	t.Parallel()
+	tree := fakeModule(t, "rig")
+	sessions := map[string]guardProcess{
+		"polecat": fakeGuardProcess(map[string]string{"GT_ROLE": "gastown/polecats/coral", "GT_POLECAT": "coral"}, tree),
+		"crew":    fakeGuardProcess(map[string]string{"GT_ROLE": "gastown/crew/sloan"}, tree),
+	}
+	for _, tt := range []struct {
+		name      string
+		command   string
+		construct string
+	}{
+		{"an unbalanced parenthesis", "(make test", "unbalanced parenthesis"},
+		{"an unterminated quote", "echo 'make test", "unterminated quote"},
+		{"an unterminated command substitution", "echo $(make test", "unterminated command substitution"},
+		{"an unterminated here-document", "bash <<'EOF'\nmake test\n", "unterminated here-document"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
+			if !strings.Contains(reason, "cannot be read ("+tt.construct+")") {
+				t.Errorf("evaluateDangerousCommand(%q) reason = %q, want it to name %q", tt.command, reason, tt.construct)
+			}
+			for role, proc := range sessions {
+				var buf strings.Builder
+				if err := tapGuardDangerous(strings.NewReader(dangerousHookInput(t, tt.command)), &buf, proc); err == nil {
+					t.Errorf("%s: tapGuardDangerous(%q) was not refused; stderr:\n%s", role, tt.command, buf.String())
+				} else if !strings.Contains(buf.String(), "command cannot be read") {
+					t.Errorf("%s: tapGuardDangerous(%q) refused without the unreadable reason; stderr:\n%s", role, tt.command, buf.String())
+				}
+			}
+		})
+	}
+
+	t.Run("a parser error that names no construct keeps the generic name", func(t *testing.T) {
+		reason := dangerousUnreadable(errors.New("parser says secret-text"))
+		if !strings.Contains(reason, "cannot be read (shell syntax)") {
+			t.Errorf("dangerousUnreadable(plain error) = %q, want the generic construct", reason)
+		}
+		if strings.Contains(reason, "secret-text") {
+			t.Errorf("dangerousUnreadable(plain error) echoes the parser text: %q", reason)
+		}
+	})
+	t.Run("a readable command is not refused", func(t *testing.T) {
+		var buf strings.Builder
+		if err := tapGuardDangerous(strings.NewReader(dangerousHookInput(t, "echo ok")), &buf, sessions["polecat"]); err != nil {
+			t.Errorf("tapGuardDangerous(echo ok) refused: %v; stderr:\n%s", err, buf.String())
+		}
+	})
+	t.Run("an empty command has nothing to read and is not refused", func(t *testing.T) {
+		var buf strings.Builder
+		if err := tapGuardDangerous(strings.NewReader(dangerousHookInput(t, "")), &buf, sessions["polecat"]); err != nil {
+			t.Errorf("tapGuardDangerous(empty command) refused: %v; stderr:\n%s", err, buf.String())
+		}
+	})
+}
+
+// TestDangerousRefusesWhatTheParserCannotRead pins the commands the parser
+// refuses today, each with the construct it names. The first three are valid
+// bash that shellparse (mvdan.cc/sh) rejects, so the guard over-refuses them
+// until the parser reads them; a fix to the parser flips these rows. The last
+// one bash rejects too: its line "}" is a syntax error, so the refusal is right.
+// Their bodies were judged as data before the parse gate (gt-m6x4py).
+func TestDangerousRefusesWhatTheParserCannotRead(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name      string
+		command   string
+		construct string
+	}{
+		{"a backslash ending a comment on the operator line", "cat <<'EOF' # note \\\nsudo rm -rf /tmp\nEOF", "unterminated here-document"},
+		{"an ANSI-C string on the operator line opened across a continuation", "cat <<EOF $\\\n'a\\''\nrm -rf /\nEOF", "unterminated quote"},
+		{"a close paren in backtick text", "x=`echo )`; cat <<EOF\ngit reset --hard\nEOF", "unbalanced parenthesis"},
+		{"a brace group after an assignment with a substitution", "y=$(echo a) { cat <<'EOF'\nit's a note: sudo rm -rf /tmp\nEOF\n}", "unrecognized shell syntax"},
+		// Moved from TestCommandSubstitutionRecursion (gt-m6x4py): bash rejects
+		// each of these too, so none of them runs and the guard refuses them.
+		{"an escaped dollar before a paren is not valid shell", `echo \$(git reset --hard)`, "unrecognized shell syntax"},
+		{"an unterminated dollar-paren with a safe body", `echo $(ls -la`, "unterminated command substitution"},
+		{"an unterminated quote in a dollar-paren with a safe body", `echo $(ls -la "x`, "unterminated quote"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
+			if !strings.Contains(reason, "cannot be read ("+tt.construct+")") {
+				t.Errorf("evaluateDangerousCommand(%q) reason = %q, want it to name %q", tt.command, reason, tt.construct)
+			}
+		})
+	}
+}
+
+// dangerousHookInput is the PreToolUse payload the hook reads for one Bash
+// command, with the command JSON-escaped.
+func dangerousHookInput(t *testing.T, command string) string {
+	t.Helper()
+	payload := map[string]any{"tool_name": "Bash", "tool_input": map[string]string{"command": command}}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal hook input for %q: %v", command, err)
+	}
+	return string(data)
 }
 
 // gt-w9eli: a command holding a quote but no paren takes the strings.Fields
@@ -4222,26 +4326,36 @@ func TestDangerousGuardFieldsFallbackKeepsSeparators(t *testing.T) {
 		name    string
 		command string
 		blocked bool
+		// unreadable rows are refused as a command the parser cannot read
+		// (gt-m6x4py); the separator check still holds: the nuke is not read as
+		// a dangerous command, so the reason must not name filesystem destruction.
+		unreadable bool
 	}{
-		{"an unclosed double quote on the last line", "echo ok\nrm -rf /\necho \"", true},
-		{"an unclosed double quote with text on the last line", "echo ok\nrm -rf /\necho \"x", true},
-		{"a harmless last line behind a closed quote and an unclosed one", "echo ok\nrm -rf /\necho \"x\" \"y", true},
-		{"a semicolon glued to the earlier line", "echo ok;rm -rf /;echo \"", true},
-		{"a pipe glued on both sides", "echo ok|rm -rf /|echo \"", true},
-		{"a doubled ampersand glued on both sides", "echo ok&&rm -rf /&&echo \"", true},
-		{"a single ampersand glued on both sides", "echo ok&rm -rf /&echo \"", true},
-		{"a doubled pipe glued on both sides", "echo ok||rm -rf /||echo \"", true},
-		{"a semicolon glued before an unclosed single quote", "echo ok;rm -rf /;echo 'x", true},
-		{"a nuke inside a quote glued to a separator stays text", "echo \"a;rm -rf /\" '", false},
-		{"a harmless malformed command with glued separators stays allowed", "echo ok;ls;echo 'x", false},
-		{"the nuke as an argument of the line before", "echo ok\necho rm -rf /\necho \"", false},
+		{"an unclosed double quote on the last line", "echo ok\nrm -rf /\necho \"", true, false},
+		{"an unclosed double quote with text on the last line", "echo ok\nrm -rf /\necho \"x", true, false},
+		{"a harmless last line behind a closed quote and an unclosed one", "echo ok\nrm -rf /\necho \"x\" \"y", true, false},
+		{"a semicolon glued to the earlier line", "echo ok;rm -rf /;echo \"", true, false},
+		{"a pipe glued on both sides", "echo ok|rm -rf /|echo \"", true, false},
+		{"a doubled ampersand glued on both sides", "echo ok&&rm -rf /&&echo \"", true, false},
+		{"a single ampersand glued on both sides", "echo ok&rm -rf /&echo \"", true, false},
+		{"a doubled pipe glued on both sides", "echo ok||rm -rf /||echo \"", true, false},
+		{"a semicolon glued before an unclosed single quote", "echo ok;rm -rf /;echo 'x", true, false},
+		{"a nuke inside a quote glued to a separator is unreadable (gt-m6x4py)", "echo \"a;rm -rf /\" '", true, true},
+		{"a harmless malformed command with glued separators is unreadable (gt-m6x4py)", "echo ok;ls;echo 'x", true, true},
+		{"the nuke as an argument of the line before", "echo ok\necho rm -rf /\necho \"", true, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
 			if (reason != "") != tt.blocked {
 				t.Errorf("evaluateDangerousCommand(%q) blocked = %v (reason %q), want %v", tt.command, reason != "", reason, tt.blocked)
 			}
-			if tt.blocked && !strings.Contains(reason, "filesystem destruction") {
+			if tt.unreadable && !strings.Contains(reason, "cannot be read") {
+				t.Errorf("evaluateDangerousCommand(%q) reason = %q, want the unreadable-command refusal", tt.command, reason)
+			}
+			if tt.unreadable && strings.Contains(reason, "filesystem destruction") {
+				t.Errorf("evaluateDangerousCommand(%q) read the nuke as a command: reason = %q", tt.command, reason)
+			}
+			if tt.blocked && !tt.unreadable && !strings.Contains(reason, "filesystem destruction") {
 				t.Errorf("evaluateDangerousCommand(%q) reason = %q, want filesystem destruction", tt.command, reason)
 			}
 		})
