@@ -517,6 +517,37 @@ func TestInstallHostAgent_RefusesAnUnreadableJob(t *testing.T) {
 	}
 }
 
+// TestInstallHostAgent_RefusesAnExistingPlistItCannotRead covers a plist that
+// exists and serves this town, so the free-for check passes and the read is the
+// only thing that fails: install cannot tell what the file holds, so it refuses
+// rather than overwrite it, and leaves the file as it was.
+func TestInstallHostAgent_RefusesAnExistingPlistItCannotRead(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := filepath.Join(t.TempDir(), "com.gastown.host-agent.plist")
+	existing, err := templates.HostAgentPlist(hostAgentTestGTPath, town)
+	if err != nil {
+		t.Fatalf("rendering the existing plist: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(existing), 0o644); err != nil {
+		t.Fatalf("writing the existing plist: %v", err)
+	}
+	boom := errors.New("boom")
+	d := hostAgentInstallDepsFor(path, "darwin", templates.HostAgentPlist)
+	d.readFile = func(string) ([]byte, error) { return nil, boom }
+
+	if _, err := installHostAgent(town, d); !errors.Is(err, boom) {
+		t.Fatalf("installHostAgent over an unreadable plist = %v, want the read error", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the untouched plist: %v", err)
+	}
+	if string(data) != existing {
+		t.Errorf("a refused install rewrote the plist:\n%s", data)
+	}
+}
+
 // TestInstallHostAgent_RefusesAJobItCannotInstall drives the two refusals that
 // come before any file is written: an OS with no launchd, and no town root to
 // render for.
