@@ -58,6 +58,10 @@ const (
 	// tier's verdict (gt-gg9hv.37).
 	RuleTierSweepStuck = "tier_sweep.stuck"
 
+	// RuleCacheTrimNoOp is a completed cache trim whose claim is still over
+	// twice the cap, so the Job may have trimmed nothing (gt-gg9hv.46).
+	RuleCacheTrimNoOp = "cache.trim_noop"
+
 	// The overseer-question rules (gt-47rea).
 	RuleQuestionNew      = "question.new"
 	RuleQuestionAnswered = "question.answered"
@@ -114,6 +118,10 @@ var ruleFlags = map[string]RuleFlags{
 	// A cycle the guard holds past its bound blocks every later cycle: the
 	// tiers the sweep alone gates go unmeasured until someone looks.
 	RuleTierSweepStuck: flagsWake,
+	// A trim that left the claim over twice the cap is a measurement of a
+	// Job that did not do its work: the queue has it for the next overseer
+	// look, and a claim that really grows already wakes host.disk_crit.
+	RuleCacheTrimNoOp: flagsAsk,
 	// Free seats and dispatchable beads with nothing started is work that is
 	// not happening, which no rule over existing work can see.
 	RuleDispatchIdle: flagsWake,
@@ -202,6 +210,7 @@ var kindRules = map[Kind]string{
 	KindTierSweepRed:     RuleTierSweepRed,
 	KindTierSweepStarved: RuleTierSweepStarved,
 	KindTierSweepStuck:   RuleTierSweepStuck,
+	KindCacheTrimNoOp:    RuleCacheTrimNoOp,
 	KindRevertRefused:    RuleRevertRefused,
 	KindBlockedMail:      RuleBlockedMail,
 	KindOverrunStopped:   RuleOverrunStopped,

@@ -337,6 +337,9 @@ type attentionSources struct {
 	// birdReports is the last bird_reports check's items, or nil when the
 	// patrol is off (bird_reports.go).
 	birdReports func() []attention.Item
+	// cacheTrimNoOp is the claims a completed cache trim left over twice the
+	// cap (cache_trim.go); nil when the trim pass is not wired.
+	cacheTrimNoOp func() []attention.Item
 	// repeatedAt is when each repeating item was last said, carried across
 	// ticks by the daemon. attentionTick updates it.
 	repeatedAt map[string]time.Time
@@ -639,6 +642,7 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindDispatchIdle, collect: s.collectDispatchIdle},
 		{kind: attention.KindDeployFailed, collect: s.collectDeployFailures},
 		{kind: attention.KindBirdReportStale, collect: s.collectBirdReports},
+		{kind: attention.KindCacheTrimNoOp, collect: s.collectCacheTrimNoOp},
 	}, s.questionCollectors()...)
 }
 
@@ -668,6 +672,7 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 	if d.isPatrolActive("bird_reports") {
 		s.birdReports = d.birdReportStale.observed
 	}
+	s.cacheTrimNoOp = d.cacheTrimNoOp.observed
 	s.redMain = func(ctx context.Context, rig string) ([]*beads.Issue, error) {
 		return d.rigWorkBeads(rig).List(beads.ListOptions{
 			Status: "open", Label: landworker.LabelRedMain, Priority: -1, Limit: 0,

@@ -319,6 +319,10 @@ type Daemon struct {
 	// diskMaintAlerts is the set of disk alert keys the patrol has open: it
 	// alerts a disk once, and a clear needs a reading that says so.
 	diskMaintAlerts diskMaintAlerts
+	// cacheTrimNoOp is the claims a completed cache trim left over twice the
+	// cap, which the attention queue raises until a later trim's reading finds
+	// them under it (gt-gg9hv.46).
+	cacheTrimNoOp cacheTrimNoOp
 
 	// hmSync replaces the hm_sync patrol's clock and run seam in tests (see
 	// hmSyncSeams); the zero value is production.

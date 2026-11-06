@@ -87,6 +87,10 @@ var ruleOwners = map[string]Owner{
 	RuleReviewBacklog: OwnerOverseer,
 	// A late report is chased by the overseer, which the birds answer to.
 	RuleBirdReportStale: OwnerOverseer,
+	// A trim that left its claim over the cap is the town's own maintenance to
+	// look at: the overseer chases the image or the Job, and the person hears
+	// about it only if the disk itself fills.
+	RuleCacheTrimNoOp: OwnerOverseer,
 }
 
 // humanFamilies are the rule families the table gives the human as a whole:
