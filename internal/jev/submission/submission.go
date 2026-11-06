@@ -162,15 +162,14 @@ type Summary struct {
 var ErrFetch = errors.New("the bare clone could not be fetched")
 
 // Run does one pass. Entries are taken oldest first, and each is logged and the
-// cursor advanced before the next, so a pass stopped partway never asks about
-// a submission twice. An entry the log already holds a line for at the current
+// cursor advanced before the next, so a pass stopped partway never asks about a
+// submission twice. An entry the log already holds a line for at the current
 // question version is passed over instead of asked, and counted as Repeated: a
 // submission listed under two seen times is asked once (gt-v419b). An entry of
 // another rig with no stored subjects is passed over and counted as OtherRig,
-// with no warning and no cap check. An entry whose Ask fails for any reason
-// but an unusable response stops the pass with that error and is asked again
-// by the next one. Run returns ErrBusy when
-// another pass holds the run lock.
+// with no warning and no cap check. An entry whose Ask fails for any reason but
+// an unusable response stops the pass with that error and is asked again by the
+// next one. Run returns ErrBusy when another pass holds the run lock.
 func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	var sum Summary
 	release, err := lockRun(p.CursorPath)
