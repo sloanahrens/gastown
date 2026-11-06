@@ -1,0 +1,46 @@
+# The cluster access the tier sweep runs with (gt-gg9hv.55): the gt-sweeps
+# namespace, the sweep-runner service account the Kubernetes backend's Job runs
+# as, its namespaced Role and binding, the token Secret, and the read-only
+# gt-sweep-reader ClusterRole the capacity and priority guards read through.
+#
+# This file is not applied by the daemon. An operator applies it to the control
+# cluster with:
+#   kubectl --context colima-gt-control apply -f deploy/k8s/sweep-rbac.yaml
+# (docs/reference.md, Tier sweep runner). TestSweepRBACManifestParses,
+# TestSweepRBACCoversEveryRead and TestSweepRBACClusterGrantIsReadOnly hold it to
+# the reads in internal/sweeprunner/testdata/rbac-reads.golden.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gt-sweeps
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sweep-runner
+  namespace: gt-sweeps
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gt-sweep-reader
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list"]
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gt-sweep-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gt-sweep-reader
+subjects:
+  - kind: ServiceAccount
+    name: sweep-runner
+    namespace: gt-sweeps
