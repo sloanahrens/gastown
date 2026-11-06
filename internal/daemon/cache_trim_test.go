@@ -56,6 +56,11 @@ const (
 	// to a full plugin run (gt-gg9hv.41).
 	cacheTrimFreeVerb = "exec -n " + cacheTrimNamespace + " sbx-a -c agent -- df -Pk " + cacheTrimMountPath
 
+	// cacheTrimDuVerb is the pass's read of the claim's own size after a
+	// completed trim: du in the pod the listing came from, since df reports the
+	// whole node filesystem for a local-path claim (gt-eyjgal).
+	cacheTrimDuVerb = "exec -n " + cacheTrimNamespace + " sbx-a -c agent -- du -sk " + cacheTrimMountPath
+
 	// cacheTrimLastAppliedLimit is the metadata size the API server holds
 	// kubectl's last-applied-configuration annotation to, in bytes.
 	cacheTrimLastAppliedLimit = 262144
@@ -122,6 +127,8 @@ func newCacheTrimFixture(t *testing.T, mode string, overrides map[string]cliRepl
 			return cliReply{stdout: cacheTrimListingJSON}
 		case strings.Contains(verb, " df -Pk "):
 			return cliReply{stdout: cacheTrimDfReply(t, 1<<30)}
+		case verb == cacheTrimDuVerb:
+			return cliReply{stdout: cacheTrimDuReply(t, 1<<10)}
 		case strings.HasPrefix(verb, "get job,configmap "):
 			return cliReply{stdout: cacheTrimExistingJSON}
 		}
@@ -2349,9 +2356,19 @@ const cacheTrimNoOpListingJSON = `[` +
 	`{"path":"gocache/bb/b","cache":"build","size":5368709120,"atime":"2026-10-29T02:00:00Z","mtime":"2026-10-29T02:00:00Z"},` +
 	`{"path":"gocache/cc/c","cache":"build","size":5368709120,"atime":"2026-10-29T03:00:00Z","mtime":"2026-10-29T03:00:00Z"}]`
 
+// cacheTrimDuReply is du -sk's reply for a claim holding used bytes: the size
+// in whole KiB and the path du measured.
+func cacheTrimDuReply(t *testing.T, used int64) string {
+	t.Helper()
+	if used%1024 != 0 {
+		t.Fatalf("cacheTrimDuReply(%d): du -sk reports whole KiB", used)
+	}
+	return fmt.Sprintf("%d\t%s\n", used/1024, cacheTrimMountPath)
+}
+
 // newCacheTrimNoOpFixture builds the fixture in mode under the plugin's 10GB
-// cap, with a listing the cap has something to trim, answering the pass's df
-// read with reply.
+// cap, with a listing the cap has something to trim, answering the pass's du
+// read -- the claim's size after the trim -- with reply.
 func newCacheTrimNoOpFixture(t *testing.T, mode string, reply cliReply) *cacheTrimFixture {
 	t.Helper()
 	f := newCacheTrimFixture(t, mode, map[string]cliReply{
@@ -2363,7 +2380,7 @@ func newCacheTrimNoOpFixture(t *testing.T, mode string, reply cliReply) *cacheTr
 		}
 		return ""
 	}
-	f.setDfReply(reply)
+	f.setDuReply(reply)
 	return f
 }
 
@@ -2373,6 +2390,18 @@ func (f *cacheTrimFixture) setDfReply(reply cliReply) {
 	inner := f.cli.answer
 	f.cli.answer = func(c cliCall) cliReply {
 		if strings.Contains(cacheTrimVerb(c.args), " df -Pk ") {
+			return reply
+		}
+		return inner(c)
+	}
+}
+
+// setDuReply answers the pass's du read -- the claim's size after a trim --
+// with reply, in place of the fixture's default.
+func (f *cacheTrimFixture) setDuReply(reply cliReply) {
+	inner := f.cli.answer
+	f.cli.answer = func(c cliCall) cliReply {
+		if cacheTrimVerb(c.args) == cacheTrimDuVerb {
 			return reply
 		}
 		return inner(c)
@@ -2416,7 +2445,7 @@ func (f *cacheTrimFixture) noOpItems(t *testing.T) []attention.Item {
 // pass raises no second item, and a claim under twice the cap raises none.
 func TestCacheTrimNoOpRaisesOneItemWhenTheClaimStaysOverTwiceTheCap(t *testing.T) {
 	t.Parallel()
-	f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDfUsedReply(t, 63<<30, 1<<30)})
+	f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDuReply(t, 63<<30)})
 	f.d.runDiskMaintenance()
 
 	items := f.noOpItems(t)
@@ -2462,14 +2491,14 @@ func TestCacheTrimNoOpRaisesOneItemWhenTheClaimStaysOverTwiceTheCap(t *testing.T
 	}
 
 	// 19GB against a 10GB cap is under twice the cap, and no item is raised.
-	under := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDfUsedReply(t, 19<<30, 1<<30)})
+	under := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDuReply(t, 19<<30)})
 	under.d.runDiskMaintenance()
 	if got := under.noOpItems(t); len(got) != 0 {
 		t.Errorf("a claim at 19GB against a 10GB cap yielded %+v, want no item", got)
 	}
 
 	// Exactly twice the cap is at the boundary, not over it.
-	at := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDfUsedReply(t, 2*cacheTrimNoOpCap, 1<<30)})
+	at := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDuReply(t, 2*cacheTrimNoOpCap)})
 	at.d.runDiskMaintenance()
 	if got := at.noOpItems(t); len(got) != 0 {
 		t.Errorf("a claim at exactly twice the cap yielded %+v, want no item", got)
@@ -2481,14 +2510,14 @@ func TestCacheTrimNoOpRaisesOneItemWhenTheClaimStaysOverTwiceTheCap(t *testing.T
 // twice the cap drops it.
 func TestCacheTrimNoOpClearsWhenTheClaimComesDown(t *testing.T) {
 	t.Parallel()
-	f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDfUsedReply(t, 63<<30, 1<<30)})
+	f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDuReply(t, 63<<30)})
 	f.d.runDiskMaintenance()
 	if got := f.noOpItems(t); len(got) != 1 {
 		t.Fatalf("the first pass yielded %d items, want the one it raised: %+v", len(got), got)
 	}
 
 	// The next trim finds 12GB: under twice the 10GB cap, so the item goes.
-	f.setDfReply(cliReply{stdout: cacheTrimDfUsedReply(t, 12<<30, 1<<30)})
+	f.setDuReply(cliReply{stdout: cacheTrimDuReply(t, 12<<30)})
 	f.trimDue()
 	f.d.runDiskMaintenance()
 	if got := f.noOpItems(t); len(got) != 0 {
@@ -2496,10 +2525,47 @@ func TestCacheTrimNoOpClearsWhenTheClaimComesDown(t *testing.T) {
 	}
 }
 
-// TestCacheTrimNoOpNeverFailsATrim is the bead's third box: a df that fails or
-// prints garbage after the apply leaves the trim a verdict on its full
-// interval, raises no item, and says the unreadable reading once an hour under
-// a key of its own; a dry run and a refused trim raise nothing.
+// TestCacheTrimNoOpReadsTheClaimWithDu is the bead's first box: a completed trim
+// is judged by du's size of the claim, not df's Used, which on a local-path
+// claim is the whole node filesystem. df at 58GB used with du at 11GB against a
+// 10GB cap raises nothing; du at 25GB raises the item naming 25GB.
+func TestCacheTrimNoOpReadsTheClaimWithDu(t *testing.T) {
+	t.Parallel()
+	df := cliReply{stdout: cacheTrimDfUsedReply(t, 58<<30, 1<<30)}
+
+	t.Run("du is under twice the cap", func(t *testing.T) {
+		t.Parallel()
+		f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDuReply(t, 11<<30)})
+		f.setDfReply(df)
+		f.d.runDiskMaintenance()
+		if got := f.noOpItems(t); len(got) != 0 {
+			t.Errorf("df at %s used and du at %s against a %s cap yielded %+v, want no item",
+				polecatimage.Human(58<<30), polecatimage.Human(11<<30), polecatimage.Human(cacheTrimNoOpCap), got)
+		}
+	})
+
+	t.Run("du is over twice the cap", func(t *testing.T) {
+		t.Parallel()
+		f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDuReply(t, 25<<30)})
+		f.setDfReply(df)
+		f.d.runDiskMaintenance()
+		items := f.noOpItems(t)
+		if len(items) != 1 {
+			t.Fatalf("du at 25GB against a 10GB cap yielded %+v, want one item", items)
+		}
+		if want := polecatimage.Human(25 << 30); !strings.Contains(items[0].Summary, want) {
+			t.Errorf("item summary %q does not name du's %q", items[0].Summary, want)
+		}
+		if stale := polecatimage.Human(58 << 30); strings.Contains(items[0].Summary, stale) {
+			t.Errorf("item summary %q names df's %q, want du's figure", items[0].Summary, stale)
+		}
+	})
+}
+
+// TestCacheTrimNoOpNeverFailsATrim is the bead's third box and its second:
+// a du that fails or prints anything but one whole-KiB line after the apply
+// leaves the reading unknown, raises no item, and says why once an hour under a
+// key of its own; a dry run and a refused trim raise nothing.
 func TestCacheTrimNoOpNeverFailsATrim(t *testing.T) {
 	t.Parallel()
 	const measured = "the claim could not be measured after the trim"
@@ -2508,9 +2574,12 @@ func TestCacheTrimNoOpNeverFailsATrim(t *testing.T) {
 		reply cliReply
 		want  string
 	}{
-		{"df fails", cliReply{stderr: "df: executable file not found in $PATH", code: 127}, "exit status 127"},
-		{"df prints something that is not its table", cliReply{stdout: "no room here\n"}, "df printed 1 non-empty line(s), want the header and one data row"},
-		{"df's Used column is not a number", cliReply{stdout: "Filesystem 1024-blocks Used Available Capacity Mounted on\noverlay 1000000 lots 1 1% /\n"}, "df's Used column is not a whole number of KiB"},
+		{"du is not in the pod", cliReply{stderr: "du: executable file not found in $PATH", code: 127}, "exit status 127"},
+		{"du prints nothing", cliReply{}, "du printed 0 non-empty line(s), want one"},
+		{"du prints two lines", cliReply{stdout: "1\t/a\n2\t/b\n"}, "du printed 2 non-empty line(s), want one"},
+		{"du's line names no path", cliReply{stdout: "1024\n"}, "du's line names no path"},
+		{"du's size is not a number", cliReply{stdout: "lots\t" + cacheTrimMountPath + "\n"}, "du's size column is not a whole number of KiB"},
+		{"du's size is negative", cliReply{stdout: "-1\t" + cacheTrimMountPath + "\n"}, "du names -1 KiB size"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2570,7 +2639,7 @@ func TestCacheTrimNoOpNeverFailsATrim(t *testing.T) {
 	}
 
 	// A dry run applies nothing, so there is nothing to judge and no item.
-	dry := newCacheTrimNoOpFixture(t, "", cliReply{stdout: cacheTrimDfUsedReply(t, 63<<30, 1<<30)})
+	dry := newCacheTrimNoOpFixture(t, "", cliReply{stdout: cacheTrimDuReply(t, 63<<30)})
 	dry.d.patrolConfig = diskMaintEnabled("", agentconfig.DiskMaintenanceModeDryRun)
 	dry.d.runDiskMaintenance()
 	if got := dry.applyCalls(); len(got) != 0 {
@@ -2582,7 +2651,7 @@ func TestCacheTrimNoOpNeverFailsATrim(t *testing.T) {
 
 	// A trim refused before its apply is not measured either: no running pod
 	// mounts the claim, so there is no reading to judge.
-	refused := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDfUsedReply(t, 63<<30, 1<<30)})
+	refused := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDuReply(t, 63<<30)})
 	inner := refused.cli.answer
 	refused.cli.answer = func(c cliCall) cliReply {
 		if strings.HasPrefix(cacheTrimVerb(c.args), "get pods ") {
@@ -2600,7 +2669,7 @@ func TestCacheTrimNoOpNeverFailsATrim(t *testing.T) {
 
 	// A failed apply raises nothing: the trim never ran, so the claim was not
 	// left over the cap by it.
-	failed := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDfUsedReply(t, 63<<30, 1<<30)})
+	failed := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDuReply(t, 63<<30)})
 	failedInner := failed.cli.answer
 	failed.cli.answer = func(c cliCall) cliReply {
 		if strings.HasPrefix(cacheTrimVerb(c.args), "apply ") {
@@ -2615,7 +2684,7 @@ func TestCacheTrimNoOpNeverFailsATrim(t *testing.T) {
 
 	// A Job still running when the wait ends is not measured: the claim holds
 	// what the Job is removing, so a reading then would raise a false item.
-	unfinished := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDfUsedReply(t, 63<<30, 1<<30)})
+	unfinished := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDuReply(t, 63<<30)})
 	unfinishedInner := unfinished.cli.answer
 	unfinished.cli.answer = func(c cliCall) cliReply {
 		if strings.HasPrefix(cacheTrimVerb(c.args), "wait ") {
@@ -2641,7 +2710,7 @@ func TestCacheTrimNoOpClearsWhenTheClaimVanishes(t *testing.T) {
 	// reading the item is raised from.
 	raised := func(t *testing.T) *cacheTrimFixture {
 		t.Helper()
-		f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDfUsedReply(t, overTheCap, 1<<30)})
+		f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDuReply(t, overTheCap)})
 		f.d.runDiskMaintenance()
 		if got := f.noOpItems(t); len(got) != 1 {
 			t.Fatalf("the first pass yielded %d items, want the one it raised: %+v\nlog: %s", len(got), got, f.log.String())
@@ -2704,7 +2773,7 @@ func TestCacheTrimNoOpClearsWhenTheClaimVanishes(t *testing.T) {
 // claim rather than only what the trim left.
 func TestCacheTrimNoOpSummaryAllowsForOpenSandboxPaths(t *testing.T) {
 	t.Parallel()
-	f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDfUsedReply(t, 63<<30, 1<<30)})
+	f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDuReply(t, 63<<30)})
 	f.d.runDiskMaintenance()
 
 	items := f.noOpItems(t)

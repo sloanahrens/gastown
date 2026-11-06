@@ -109,7 +109,7 @@ const (
 	cacheTrimNoOpKeyPrefix = "cache-trim-noop:"
 
 	// cacheTrimNoOpOpenSandboxes is the item's closing sentence: the reading is
-	// df's Used for the whole claim, not only what the trim left, so a sandbox
+	// the claim's whole size from du, not only what the trim left, so a sandbox
 	// that is open while the trim runs can explain a claim still over the
 	// threshold without the Job having failed to remove anything.
 	cacheTrimNoOpOpenSandboxes = "open sandbox paths can explain this; the claim is read whole, not just what the trim left"
@@ -571,25 +571,26 @@ func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim ca
 	return true
 }
 
-// cacheTrimMeasure reads the claim after a completed trim and raises or clears
-// its attention item: while the claim holds more than cacheTrimNoOpFactor times
-// the cap the trim left it there, and the Job may have run the wrong helper.
-// The reading is df's Used for the whole claim, so the item names open sandbox
-// paths as another explanation. A reading at or under the threshold drops the
-// item: the trim did its work.
+// cacheTrimMeasure reads the claim's own size after a completed trim with du
+// and raises or clears its attention item: while the claim holds more than
+// cacheTrimNoOpFactor times the cap the trim left it there, and the Job may have
+// run the wrong helper. du is the claim's size, where df's Used on a local-path
+// claim is the whole node filesystem, which a trim can never lower
+// (gt-eyjgal). The item names open sandbox paths as another explanation. A
+// reading at or under the threshold drops the item: the trim did its work.
 //
-// A df that cannot be read logs once an hour under a key of its own and raises
+// A du that cannot be read logs once an hour under a key of its own and raises
 // nothing. This check never fails the trim: the trim reached a verdict, and a
 // claim nobody could measure is not a claim that stayed full.
 func (d *Daemon) cacheTrimMeasure(ctx context.Context, kubeconfig string, source cacheTrimSource, claim string, capBytes int64) {
-	reading, err := d.cacheTrimDf(ctx, kubeconfig, source)
+	used, err := d.cacheTrimDu(ctx, kubeconfig, source)
 	if err != nil {
 		d.cacheTrimLogKeyed("cache_trim_noop_unknown:"+source.Namespace+"/"+claim,
 			"disk_maintenance: cache trim %s in %s: the claim could not be measured after the trim: %v; no attention item is raised", claim, source.Namespace, err)
 		return
 	}
 	key := cacheTrimNoOpKey(source.Namespace, claim)
-	if !cacheTrimOverTheCap(reading.Used, capBytes) {
+	if !cacheTrimOverTheCap(used, capBytes) {
 		d.cacheTrimNoOp.clear(key)
 		return
 	}
@@ -598,7 +599,7 @@ func (d *Daemon) cacheTrimMeasure(ctx context.Context, kubeconfig string, source
 		Kind:     attention.KindCacheTrimNoOp,
 		Severity: attention.SeverityLow,
 		Summary: fmt.Sprintf("cache trim of %s completed but the claim still holds %s against a cap of %s: the Job may have run the wrong helper. %s",
-			claim, polecatimage.Human(reading.Used), polecatimage.Human(capBytes), cacheTrimNoOpOpenSandboxes),
+			claim, polecatimage.Human(used), polecatimage.Human(capBytes), cacheTrimNoOpOpenSandboxes),
 	})
 }
 
@@ -1089,8 +1090,9 @@ func (d *Daemon) cacheTrimListing(ctx context.Context, kubeconfig string, source
 var cacheTrimDfHeader = []string{"Filesystem", "1024-blocks", "Used", "Available", "Capacity", "Mounted", "on"}
 
 // cacheTrimDfReading is what df -Pk says about the claim, in bytes: the space
-// it holds, and the space left. The fit check reads Available; the reading
-// taken after a trim reads Used (gt-gg9hv.46).
+// it holds, and the space left. Only Available is read, for the fit check: on
+// a local-path claim df's Used is the whole node filesystem, so the space a
+// trim leaves behind is read with du (gt-eyjgal).
 type cacheTrimDfReading struct {
 	Used      int64
 	Available int64
@@ -1138,30 +1140,71 @@ func cacheTrimParseDf(out []byte) (cacheTrimDfReading, error) {
 	if len(row) < 4 {
 		return cacheTrimDfReading{}, errors.New("df's data row names no Available column")
 	}
-	available, err := cacheTrimDfKiB(row[3], "Available")
+	available, err := cacheTrimKiB("df", "Available", row[3])
 	if err != nil {
 		return cacheTrimDfReading{}, err
 	}
 	// Used sits before Available, so a row with an Available column has one.
-	used, err := cacheTrimDfKiB(row[2], "Used")
+	used, err := cacheTrimKiB("df", "Used", row[2])
 	if err != nil {
 		return cacheTrimDfReading{}, err
 	}
 	return cacheTrimDfReading{Used: used, Available: available}, nil
 }
 
-// cacheTrimDfKiB reads one df -Pk column as bytes: the figure is whole KiB,
-// never negative, and small enough that its byte count fits an int64.
-func cacheTrimDfKiB(field, column string) (int64, error) {
+// cacheTrimDu reads the claim's own used space, in bytes, with du in the pod
+// that mounts it. du is the claim's size where df's Used is the node's whole
+// filesystem on a local-path claim, so a trim that removes the claim's files
+// moves only du's figure (gt-eyjgal). The command runs the same way as
+// cacheTrimDf: a separate binary in the listing's pod and container, never a
+// helper subcommand an older image would send to a full plugin run
+// (gt-gg9hv.41), and with only `du -sk`, which busybox and GNU/BSD du accept.
+//
+// A du that fails, is absent, prints anything but one line, or whose size is
+// not a whole number of KiB returns an error. The caller reads that as an
+// unknown reading, names the error, and raises nothing.
+func (d *Daemon) cacheTrimDu(ctx context.Context, kubeconfig string, source cacheTrimSource) (int64, error) {
+	out, err := d.cacheTrimKubectl(ctx, kubeconfig, "exec", "-n", source.Namespace, source.Pod, "-c", source.Container,
+		"--", "du", "-sk", source.Root)
+	if err != nil {
+		return 0, err
+	}
+	return cacheTrimParseDu(out)
+}
+
+// cacheTrimParseDu turns du -sk's reply into the claim's used bytes: one line
+// naming the size in whole KiB and the path du measured, and nothing else. A
+// reply that is not that shape is an error naming the rule, never a zero
+// figure: a zero would drop the item for a claim nobody read.
+func cacheTrimParseDu(out []byte) (int64, error) {
+	var lines []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) != 1 {
+		return 0, fmt.Errorf("du printed %d non-empty line(s), want one", len(lines))
+	}
+	fields := strings.Fields(lines[0])
+	if len(fields) < 2 {
+		return 0, errors.New("du's line names no path")
+	}
+	return cacheTrimKiB("du", "size", fields[0])
+}
+
+// cacheTrimKiB reads one whole-KiB column of command's output as bytes: the
+// figure is never negative and small enough that its byte count fits an int64.
+func cacheTrimKiB(command, column, field string) (int64, error) {
 	kib, err := strconv.ParseInt(field, 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("df's %s column is not a whole number of KiB", column)
+		return 0, fmt.Errorf("%s's %s column is not a whole number of KiB", command, column)
 	}
 	if kib < 0 {
-		return 0, fmt.Errorf("df names %d KiB %s", kib, strings.ToLower(column))
+		return 0, fmt.Errorf("%s names %d KiB %s", command, kib, strings.ToLower(column))
 	}
 	if kib > math.MaxInt64/1024 {
-		return 0, fmt.Errorf("df's %s column is too large to read as bytes", column)
+		return 0, fmt.Errorf("%s's %s column is too large to read as bytes", command, column)
 	}
 	return kib * 1024, nil
 }
