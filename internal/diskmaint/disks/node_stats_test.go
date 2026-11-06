@@ -55,6 +55,7 @@ func TestParseNodeStatsRefusesWhatItCannotRead(t *testing.T) {
 		"negative capacity":                 `{"node":{"fs":{"capacityBytes":-1,"usedBytes":0}}}`,
 		"negative used bytes":               `{"node":{"fs":{"capacityBytes":160,"usedBytes":-1}}}`,
 		"more used than it has":             `{"node":{"fs":{"capacityBytes":100,"usedBytes":101}}}`,
+		"one byte over at 2^60":             `{"node":{"fs":{"capacityBytes":1152921504606846976,"usedBytes":1152921504606846977}}}`,
 		"a fractional byte count":           `{"node":{"fs":{"capacityBytes":160.5,"usedBytes":120}}}`,
 		"a byte count that is not a number": `{"node":{"fs":{"capacityBytes":"lots","usedBytes":120}}}`,
 	} {
