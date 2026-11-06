@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -91,5 +92,36 @@ func TestMainOutputStreams(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), "GREEN") {
 		t.Errorf("a summary line reached stderr: %q", stderr.String())
+	}
+}
+
+// TestPostLandCommandRoutesToTheCheck: through run, post-land reads main's
+// history with git, and with no input changed prints the skip and exits 0
+// without starting the sweep. The fake Exec answers only git; any other command
+// fails the test.
+func TestPostLandCommandRoutesToTheCheck(t *testing.T) {
+	t.Parallel()
+	var gitCalls int
+	d := processDeps()
+	d.Exec = func(dir string, env []string, argv []string, out io.Writer) int {
+		if argv[0] != "git" || !slices.Contains(argv, "--first-parent") {
+			t.Errorf("unexpected command %q", argv)
+			return 1
+		}
+		gitCalls++
+		fmt.Fprint(out, "docs/reference.md\n")
+		return 0
+	}
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"post-land"}, &stdout, &stderr, d)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr %q)", code, stderr.String())
+	}
+	if gitCalls != 1 {
+		t.Errorf("git ran %d times, want 1", gitCalls)
+	}
+	want := "post-land-shell: no shell-test input changed on main in the last 2 hours; shell tier skipped\n"
+	if stdout.String() != want {
+		t.Errorf("stdout = %q, want %q", stdout.String(), want)
 	}
 }
