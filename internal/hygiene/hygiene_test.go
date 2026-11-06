@@ -219,16 +219,46 @@ func TestNonPersonalHomeNamesAreExemptByWholeName(t *testing.T) {
 	})
 }
 
-func TestIdentifierShapedDomainIsNotAnEmail(t *testing.T) {
+func TestTitleCaseTopLevelLabelIsStillAnAddress(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		addr string
+	}{
+		{"title-case top label", planted("jane.doe@", "gmail.Com")},
+		{"title-case second label", planted("jane.doe@", "Gmail.Com")},
+		{"upper-case top label", planted("jane.doe@", "gmail.COM")},
+		{"title-case two-letter top label", planted("jane.doe@", "acme.Io")},
+		{"title-case top label outside any list", planted("jane.doe@", "acme.Club")},
+		{"title-case short top label outside any list", planted("jane.doe@", "x.Shop")},
+		// Func and List are shaped like Shop: a Title-case label is a domain
+		// whatever it spells, so these identifier-looking tails are findings.
+		{"title-case identifier-looking top label", planted("jane.doe@", "pkg.Func")},
+		{"title-case method chain tail", planted("jane.doe@", "landworker.RetryBeads.List")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := "contact " + tc.addr + " please"
+			findings := scanFS(t, singleFile("docs/note.md", line+"\n"), nil)
+			if len(findings) != 1 || findings[0].Rule != RuleEmail {
+				t.Fatalf("got %v, want one %q finding", findings, RuleEmail)
+			}
+		})
+	}
+}
+
+func TestIdentifierShapedDomainIsNoAddress(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
 		addr string
 		want int
 	}{
-		{"metric column", planted("x@", "metrics.queueLandingColumn"), 0},
-		{"method chain", planted("show@", "landworker.RetryBeads.List"), 0},
-		{"short identifier", planted("a@", "pkg.Func"), 0},
+		// The reverted-rule row: a camel-case last label is no address (gt-qq01cp).
+		{"metric column, camel-case last label", planted("x@", "metrics.queueLandingColumn"), 0},
+		{"bare identifier top label, camel-case", planted("x@", "metrics.landingColumn"), 0},
+		{"capitalised identifier with a digit", planted("x@", "caller.Retry2"), 0},
+		{"capitalised identifier with an underscore", planted("x@", "caller.Do_thing"), 0},
 		{"upper-case top label is a host", planted("a@", "host.COM"), 1},
 		{"lower-case top label is a host", planted("a@", "host.com"), 1},
 		{"mixed-case host with a lower-case top label", planted("a@", "Host.com"), 1},

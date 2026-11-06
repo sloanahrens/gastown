@@ -58,7 +58,9 @@ var (
 	agentSessionPattern = regexp.MustCompile(
 		`\.claude/` + `projects/` +
 			`|session[-_]id["']?\s*[:=]\s*["']?[0-9a-f]{8}-` + `[0-9a-f]{4}`)
-	emailPattern = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*`)
+	// The domain takes an underscore too, so a label such as Do_thing is read
+	// whole and identifierShaped can see it.
+	emailPattern = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-_]+(?:\.[A-Za-z0-9\-_]+)*`)
 )
 
 // Rule is a per-line check; Match reports whether the line holds a finding.
@@ -468,10 +470,9 @@ func colonThenProse(rest string) bool {
 
 // addressDomain reports whether domain has the shape of an address: at least
 // one dot, and a last label that starts with a letter, is two or more letters
-// long and does not mix lower and upper case. Without a dot the match is a
-// version pin or an id (checkout@v4, image@sha256, main@a); a one-letter or
-// all-digit last label (a@b.c, 127.0.0.1) is not a host name; and a case-mixing
-// label is a Go identifier such as queueLandingColumn.
+// long and is not an identifier (see identifierShaped). Without a dot the match
+// is a version pin or an id (checkout@v4, image@sha256, main@a); a one-letter or
+// all-digit last label (a@b.c, 127.0.0.1) is not a host name.
 func addressDomain(domain string) bool {
 	dot := strings.LastIndex(domain, ".")
 	if dot < 0 {
@@ -481,19 +482,24 @@ func addressDomain(domain string) bool {
 	if len(last) < 2 || !isASCIILetter(last[0]) {
 		return false
 	}
-	return !mixedCase(last)
+	return !identifierShaped(last)
 }
 
-func mixedCase(s string) bool {
-	var upper, lower bool
+// identifierShaped reports whether a last label is a Go identifier rather than a
+// top-level domain. A label that holds a digit or an underscore (Retry2, Do_thing)
+// is one. So is a camel-case label, where a lower-case letter is followed later
+// by an upper-case one (queueLandingColumn). Every other label is a domain label,
+// whatever its case: Com, COM, com and Shop all are. The shape alone decides, so
+// a capitalised identifier such as Func is read as a domain too.
+func identifierShaped(s string) bool {
+	var lower bool
 	for _, r := range s {
-		if unicode.IsUpper(r) {
-			upper = true
-		}
-		if unicode.IsLower(r) {
+		switch {
+		case r == '_' || r >= '0' && r <= '9':
+			return true
+		case unicode.IsLower(r):
 			lower = true
-		}
-		if upper && lower {
+		case unicode.IsUpper(r) && lower:
 			return true
 		}
 	}
