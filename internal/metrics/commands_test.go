@@ -603,15 +603,15 @@ func TestFindMango(t *testing.T) {
 			legacy,
 		},
 		{
-			"a legacy file whose header cannot be read is returned, so its exec error surfaces",
+			"a legacy file whose header cannot be read is skipped, so PATH is asked",
 			linux,
 			MangoLookup{
 				Getenv:   func(string) string { return "" },
 				Exists:   present(legacy),
-				LookPath: wrongPath,
-				ReadHead: heads(nil),
+				LookPath: func(name string) (string, error) { return "/usr/local/bin/" + name, nil },
+				ReadHead: heads(map[string][]byte{"/usr/local/bin/mango": elf}),
 			},
-			legacy,
+			"/usr/local/bin/mango",
 		},
 		{
 			"a PATH hit with the other OS's header is skipped",
@@ -634,6 +634,17 @@ func TestFindMango(t *testing.T) {
 				ReadHead: heads(map[string][]byte{"/usr/local/bin/mango": elf}),
 			},
 			"/usr/local/bin/mango",
+		},
+		{
+			"a PATH hit whose header cannot be read is not returned",
+			linux,
+			MangoLookup{
+				Getenv:   func(string) string { return "" },
+				Exists:   present(),
+				LookPath: func(name string) (string, error) { return "/usr/local/bin/" + name, nil },
+				ReadHead: heads(nil),
+			},
+			"",
 		},
 		{
 			"no binary at all",
@@ -660,7 +671,8 @@ func TestFindMango(t *testing.T) {
 
 // TestFindMangoReadsTheHeaderOfTheFileItFinds runs the lookup's own header read
 // over a legacy file in a temp town: a Mac binary is skipped, a file of this OS
-// is returned, and no PATH is asked when the legacy file answers.
+// is returned, a legacy path whose header cannot be read is skipped, and no
+// PATH is asked when the legacy file answers.
 func TestFindMangoReadsTheHeaderOfTheFileItFinds(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -680,6 +692,17 @@ func TestFindMangoReadsTheHeaderOfTheFileItFinds(t *testing.T) {
 	writeTownFile(t, legacy, "\x7fELF\x02\x01\x01\x00")
 	if got := FindMango(town, lookup); got != legacy {
 		t.Errorf("FindMango over an ELF legacy file = %q, want %q", got, legacy)
+	}
+	// A directory at the legacy path exists, so Exists answers true, but its
+	// header cannot be read: the lookup skips it rather than returning a path
+	// the host cannot run.
+	dirTown := t.TempDir()
+	legacyDir := filepath.Join(dirTown, ".runtime", "metrics", "bin", "mango")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", legacyDir, err)
+	}
+	if got := FindMango(dirTown, lookup); got != "" {
+		t.Errorf("FindMango over a legacy path with no readable header = %q, want none", got)
 	}
 }
 
