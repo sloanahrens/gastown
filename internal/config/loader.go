@@ -240,7 +240,9 @@ func validateRigSettings(c *RigSettings) error {
 	return nil
 }
 
-// validateMergeQueueConfig validates a MergeQueueConfig.
+// validateMergeQueueConfig validates a MergeQueueConfig in the rig-local
+// settings/config.json tier: the one tier whose merge resolves PromoteViaDefault
+// to the empty default, so "default" is accepted here.
 func validateMergeQueueConfig(c *MergeQueueConfig) error {
 	// Zero is the documented "guard off" value, so only a negative is invalid:
 	// a typo'd -1 would silently disable the ceiling the operator meant to set.
@@ -253,7 +255,7 @@ func validateMergeQueueConfig(c *MergeQueueConfig) error {
 		return fmt.Errorf("%w: followup_backpressure must be non-negative", ErrMissingField)
 	}
 	if c.Forgejo != nil {
-		if err := ValidateForgejoPromoteVia(c.Forgejo.PromoteVia); err != nil {
+		if err := validateForgejoPromoteVia(c.Forgejo.PromoteVia, true); err != nil {
 			return err
 		}
 	}
@@ -266,10 +268,31 @@ func validateMergeQueueConfig(c *MergeQueueConfig) error {
 // this binary does not implement cannot be left to read as the empty default:
 // that would let a green verdict or the tier sweep promote a rig whose GitHub
 // copy is meant to follow prod.
+//
+// PromoteViaDefault is not accepted here. It clears an inherited value only in
+// the rig-local settings/config.json, the one tier the merge resolves it
+// against, so a rig-root floor or merged value that still carries it names no
+// value to clear and is refused rather than read as an opt-out. LoadRepoSettings
+// applies the same rule to the repo-committed tier.
 func ValidateForgejoPromoteVia(v string) error {
+	return validateForgejoPromoteVia(v, false)
+}
+
+// validateForgejoPromoteVia is the tier-scoped rule: allowClear admits
+// PromoteViaDefault for the rig-local settings tier, whose merge turns it into
+// the empty default.
+func validateForgejoPromoteVia(v string, allowClear bool) error {
 	switch v {
 	case "", PromoteViaAppPromote:
 		return nil
+	case PromoteViaDefault:
+		if allowClear {
+			return nil
+		}
+		return fmt.Errorf("merge_queue.forgejo.promote_via = %q clears an inherited value and is accepted only in the rig-local settings/config.json (otherwise allowed: %q, or empty)", v, PromoteViaAppPromote)
+	}
+	if allowClear {
+		return fmt.Errorf("merge_queue.forgejo.promote_via = %q is not a supported value (allowed: %q, %q, or empty)", v, PromoteViaAppPromote, PromoteViaDefault)
 	}
 	return fmt.Errorf("merge_queue.forgejo.promote_via = %q is not a supported value (allowed: %q, or empty)", v, PromoteViaAppPromote)
 }
@@ -314,6 +337,14 @@ func LoadRepoSettings(repoRoot string) (*RigSettings, error) {
 	var settings RigSettings
 	if err := json.Unmarshal(data, &settings); err != nil {
 		return nil, fmt.Errorf("parsing repo settings %s: %w", path, err)
+	}
+	// The repo-committed tier is another settings tier that can name
+	// promote_via, and its Forgejo block is stripped before the merge, so a
+	// "default" here names no value to clear. Refuse it rather than pass it on.
+	if settings.MergeQueue != nil && settings.MergeQueue.Forgejo != nil {
+		if err := ValidateForgejoPromoteVia(settings.MergeQueue.Forgejo.PromoteVia); err != nil {
+			return nil, fmt.Errorf("parsing repo settings %s: %w", path, err)
+		}
 	}
 
 	return &settings, nil
@@ -431,6 +462,13 @@ func mergeForgejoConfig(base, override *ForgejoConfig) *ForgejoConfig {
 		for role, login := range overrideBots {
 			out.Bots[role] = login
 		}
+	}
+	// Only a rig-local "default" clears the inherited value, and only the
+	// override's own value is cleared: a "default" the base carries is kept, so
+	// a rig-local block that omits promote_via cannot turn the rig-root marker
+	// into an opt-out. The promoter refuses the kept value.
+	if override != nil && override.PromoteVia == PromoteViaDefault {
+		out.PromoteVia = ""
 	}
 	return out
 }

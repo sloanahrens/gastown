@@ -1473,6 +1473,12 @@ type ForgejoConfig struct {
 // it, and gt promote alone advances its GitHub main.
 const PromoteViaAppPromote = "app-promote"
 
+// PromoteViaDefault is merge_queue.forgejo.promote_via's value for a rig-local
+// file that clears an inherited promote_via back to the empty default. The
+// rig-local merge resolves it to "", and no other tier accepts it, so no
+// promoter ever reads it as an opt-out.
+const PromoteViaDefault = "default"
+
 // UnmarshalJSON decodes the block, ignoring a key it does not declare: the
 // block is operator-owned and gains keys across the Forgejo rollout, so config
 // written for one gt version must not leave another unable to read the rig's
