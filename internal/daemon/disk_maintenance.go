@@ -492,22 +492,27 @@ func (d *Daemon) runDiskMaintenanceTrim(mode string, due diskMaintDue, why strin
 	if !d.diskMaintTrimRunning.CompareAndSwap(false, true) {
 		return // a trim pass is still running
 	}
+	// The guard is handed back by the trim pass itself the moment its trim ends,
+	// and here as well in case the pass never gets that far; once, so a later
+	// pass's guard is never cleared by this one.
+	release := sync.OnceFunc(func() { d.diskMaintTrimRunning.Store(false) })
 	d.diskMaintenanceSeams().dispatch(func() {
-		defer d.diskMaintTrimRunning.Store(false)
-		d.runCacheTrimPass(mode)
+		defer release()
+		d.runCacheTrimPass(mode, release)
 	})
 }
 
 // runCacheTrimPass is the trim's own pass, the one a busy tick dispatches: the
 // disk readings and their alerts, and the trim, side by side. Neither holds the
-// other: a notifier that takes its time delays the alerts' end, not the trim's
-// start, and the alerts take their turn behind any other pass's. Its caller
-// holds the trim's own guard (see runDiskMaintenanceTrim).
-func (d *Daemon) runCacheTrimPass(mode string) {
+// other: the trim's guard is handed back as soon as the trim ends, before the
+// alerts have, so a notifier that does not answer keeps no later trim off. Its
+// caller holds the trim's guard and passes the release that returns it.
+func (d *Daemon) runCacheTrimPass(mode string, releaseTrim func()) {
 	ctx, cancel := d.diskMaintenanceContext()
 	defer cancel()
 	if !d.cacheTrimStillDue() {
-		return // another pass trimmed between the tick and this run
+		releaseTrim() // another pass trimmed between the tick and this run
+		return
 	}
 	var alerts sync.WaitGroup
 	alerts.Add(1)
@@ -516,6 +521,7 @@ func (d *Daemon) runCacheTrimPass(mode string) {
 		d.readAndApplyDiskAlerts(ctx, d.diskMaintenanceSeams().now())
 	}()
 	d.diskMaintenanceTrim(ctx, mode)
+	releaseTrim()
 	alerts.Wait()
 }
 
@@ -525,7 +531,8 @@ func (d *Daemon) runCacheTrimPass(mode string) {
 func (d *Daemon) cacheTrimStillDue() bool {
 	every, err := diskMaintenanceCacheTrimEvery(d.patrolConfig)
 	if err != nil {
-		return false // the tick refused a malformed setting and said so
+		d.refuseDiskMaintenance(err) // said once, as the tick does
+		return false
 	}
 	return d.diskMaintSchedule.cacheTrimDue(d.diskMaintenanceSeams().now(), every)
 }

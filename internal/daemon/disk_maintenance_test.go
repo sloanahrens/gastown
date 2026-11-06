@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -22,7 +23,6 @@ import (
 	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/polecatimage"
-	"sync"
 )
 
 // diskMaintNow is a quarter past four on the day of the patrol's default
@@ -826,6 +826,67 @@ func TestDiskMaintBlockedNotifierDoesNotHoldTheTrim(t *testing.T) {
 	awaitOrFail(t, done, "the trim pass to finish once the notifier answered")
 	if !diskMaintAlertIsOpen(f.notify, "diskmaint:colima") {
 		t.Error("no alert open for a disk at 88% once the notifier answered")
+	}
+}
+
+// TestDiskMaintBlockedNotifierKeepsNoLaterTrimOff: the trim's guard is handed
+// back when the trim ends, not when the alerts do. With the notifier still
+// blocked on the first pass's alert, the trim that comes due again runs on a
+// pass of its own (gt-gg9hv.48).
+func TestDiskMaintBlockedNotifierKeepsNoLaterTrimOff(t *testing.T) {
+	t.Parallel()
+	d, _, f := diskMaintTestDaemon(t)
+	blocked := &blockedNotifier{Notifier: f.notify, entered: make(chan struct{}), release: make(chan struct{})}
+	d.notifier = blocked
+	f.readings = []disks.Reading{{Name: "colima", UsedPct: 88}}
+	f.quiet, f.quietWhy = false, "daemon has work in flight (landing pass dv-x)"
+	var trims atomic.Int32
+	firstTrimmed := make(chan struct{})
+	d.diskMaint.trim = func(context.Context, string) bool {
+		if trims.Add(1) == 1 {
+			close(firstTrimmed)
+		}
+		return true
+	}
+	// The first pass is still reading the clock from its alert goroutine when the
+	// test moves it on, so the clock is atomic.
+	var clock atomic.Int64
+	clock.Store(diskMaintNow.UnixNano())
+	d.diskMaint.now = func() time.Time { return time.Unix(0, clock.Load()).In(diskMaintNow.Location()) }
+	var passes []func()
+	d.diskMaint.dispatch = func(fn func()) { passes = append(passes, fn) }
+	release := sync.OnceFunc(func() { close(blocked.release) })
+	t.Cleanup(release)
+
+	d.runDiskMaintenance() // the first trim pass: its alert blocks in the notifier
+	if len(passes) != 1 {
+		t.Fatalf("dispatched %d passes, want 1", len(passes))
+	}
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		passes[0]()
+	}()
+	awaitOrFail(t, blocked.entered, "the first pass's alert to reach the notifier")
+	awaitOrFail(t, firstTrimmed, "the first trim")
+
+	// Two hours on the trim is due again, while the first pass is still waiting
+	// on its notifier: the guard was handed back, so a second trim pass starts.
+	clock.Add(int64(2 * time.Hour))
+	d.runDiskMaintenance()
+	if len(passes) != 2 {
+		t.Fatalf("dispatched %d passes, want 2: the guard must be free once the first trim ended", len(passes))
+	}
+	secondDone := make(chan struct{})
+	go func() {
+		defer close(secondDone)
+		passes[1]()
+	}()
+	release()
+	awaitOrFail(t, firstDone, "the first pass to finish once the notifier answered")
+	awaitOrFail(t, secondDone, "the second pass to finish")
+	if got := trims.Load(); got != 2 {
+		t.Errorf("trimmed %d times, want 2: the later trim ran while the first alert was blocked", got)
 	}
 }
 

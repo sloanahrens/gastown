@@ -136,7 +136,9 @@ it while the sandbox disk fills. That pass reads the disks and applies their
 alerts beside the trim, so a notifier that does not answer delays the end of
 the alerts and not the trim. Alert applications from different passes take
 turns, so a later reading is never applied over an earlier one's state, and
-every other target still waits for a quiet tick.
+every other target still waits for a quiet tick. A tick that finds no trim due
+reads no disk: while the town is busy the alerts are applied each time the trim
+comes due (`cache_trim_interval`), and on every quiet pass.
 
 - A claim's namespace comes from the claim itself, and every pod read, listing
   exec and apply, delete or wait names it. A claim of the same name in another

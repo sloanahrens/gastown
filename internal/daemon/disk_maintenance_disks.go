@@ -335,7 +335,7 @@ func (d *Daemon) readAndApplyDiskAlerts(ctx context.Context, now time.Time) ([]d
 	}
 	defer release()
 	readings := d.diskMaintenanceSeams().readDisks(ctx)
-	d.applyDiskAlerts(readings, now)
+	d.applyDiskAlerts(ctx, readings, now)
 	return readings, true
 }
 
@@ -409,12 +409,14 @@ func (a *diskMaintAlerts) recordUnreadableRaised(key string, now time.Time) (aga
 // open the pass logs the still-unreadable line at most once an hour, so an
 // outage that lasts is visible without a repeat alert. A raise the notifier
 // refused is retried on the next pass, and each retry restarts the hour; the
-// retry gets its own line so those restarts are not silent.
-func (d *Daemon) applyDiskAlerts(readings []disks.Reading, now time.Time) {
+// retry gets its own line so those restarts are not silent. Every send runs
+// under the pass's context, so a notifier that never answers is abandoned when
+// the pass ends and its alert is decided again by the next one.
+func (d *Daemon) applyDiskAlerts(ctx context.Context, readings []disks.Reading, now time.Time) {
 	for _, alert := range disks.Evaluate(readings, d.diskMaintAlerts.snapshot()) {
 		switch {
 		case alert.Raise:
-			err := d.escalateAlertErr(alert.Key, diskMaintAlertSource, alert.Detail)
+			err := d.escalateAlertCtx(ctx, alert.Key, diskMaintAlertSource, alert.Detail)
 			if err != nil {
 				d.logger.Printf("disk_maintenance: alert %s was not delivered: %v", alert.Key, err)
 			} else {
@@ -424,7 +426,7 @@ func (d *Daemon) applyDiskAlerts(readings []disks.Reading, now time.Time) {
 				d.logger.Printf("disk_maintenance: disk %s still unreadable, alert raised again", alert.Name)
 			}
 		case alert.Clear:
-			if err := d.clearAlertsErr(alert.Detail, alert.Key); err != nil {
+			if err := d.clearAlertsCtx(ctx, alert.Detail, alert.Key); err != nil {
 				d.logger.Printf("disk_maintenance: alert %s was not cleared: %v", alert.Key, err)
 				continue // still open, and the next pass clears it again
 			}
