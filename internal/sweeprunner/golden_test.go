@@ -49,6 +49,7 @@ func loadGoldenFixture(t *testing.T, name string) []byte {
 // refuses to read the Ki quantity at all, so the listing never reaches a
 // decision (gt-gg9hv.49).
 func TestGoldenCapacityListing(t *testing.T) {
+	t.Parallel()
 	nodes, err := ParseCapacity(loadGoldenFixture(t, capacityGolden))
 	if err != nil {
 		t.Fatalf("ParseCapacity on the live cluster's listing: %v", err)
@@ -92,6 +93,7 @@ func TestGoldenCapacityListing(t *testing.T) {
 // to priority 0 declines naming that pod, so the pass is not the guard's
 // default (gt-gg9hv.49).
 func TestGoldenPriorityGuard(t *testing.T) {
+	t.Parallel()
 	listing := loadGoldenFixture(t, priorityGolden)
 	guard := PriorityGuard(goldenSpec(), []string{"forgejo", "forgejo-trial"})
 	if err := guard.Refuse(listing); err != nil {
@@ -112,6 +114,7 @@ func TestGoldenPriorityGuard(t *testing.T) {
 // name it also starts with. A pod with the old placement, owners under spec,
 // is a shape the API never prints and parses no owner (gt-gg9hv.49).
 func TestPriorityOwnersComeFromMetadata(t *testing.T) {
+	t.Parallel()
 	listing, err := readPriorityListing(loadGoldenFixture(t, priorityGolden))
 	if err != nil {
 		t.Fatalf("readPriorityListing on the live cluster's listing: %v", err)
@@ -156,6 +159,7 @@ func TestPriorityOwnersComeFromMetadata(t *testing.T) {
 // they count as before (gt-gg9hv.49). The hand-built pod below is the shape the
 // live listing has no example of.
 func TestPodRequestHonoursPodLevelResources(t *testing.T) {
+	t.Parallel()
 	const listing = `{"items": [
 	  {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "16", "memory": "64Gi"}}},
 	  {"kind": "Pod", "metadata": {"name": "pod-level-cpu"}, "spec": {
@@ -195,6 +199,7 @@ func TestPodRequestHonoursPodLevelResources(t *testing.T) {
 // the preflight's rule: a quantity it cannot read is an error, never a zero, so
 // the node cannot read freer than it is.
 func TestPodRequestRefusesAnUnreadablePodLevelQuantity(t *testing.T) {
+	t.Parallel()
 	const listing = `{"items": [
 	  {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "16", "memory": "64Gi"}}},
 	  {"kind": "Pod", "metadata": {"name": "bad"}, "spec": {
@@ -213,6 +218,7 @@ func TestPodRequestRefusesAnUnreadablePodLevelQuantity(t *testing.T) {
 // golden test reads: a fixture nothing consumes is one that can drift from the
 // code it was captured for (gt-gg9hv.49).
 func TestGoldenFixturesAreAllRead(t *testing.T) {
+	t.Parallel()
 	entries, err := os.ReadDir(goldenDir)
 	if err != nil {
 		t.Fatalf("reading %s: %v", goldenDir, err)
