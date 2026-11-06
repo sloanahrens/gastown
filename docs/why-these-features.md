@@ -55,14 +55,12 @@ Event logs:     actor: gastown/polecats/nux
 Some are great at Go. Some have never touched it. Some are flaky. How do you
 choose?
 
-**The solution:** Every agent accumulates a work history:
+**The solution:** Every agent accumulates a work history, read from the beads it
+has closed. Each closed bead records who was assigned the work and how it landed:
 
 ```bash
-# What has this agent done?
-bd audit --actor=gastown/polecats/toast
-
-# Success rate on Go projects
-bd stats --actor=gastown/polecats/toast --tag=go
+# What has this agent done? Closed work assigned to it
+bd list --assignee gastown/polecats/toast --status closed
 ```
 
 **Why it matters:**
@@ -85,12 +83,11 @@ with varying capabilities. Manual assignment doesn't scale.
 **The solution:** Work carries skill requirements. Agents have demonstrated
 capabilities (derived from their work history). Matching is automatic:
 
-```bash
-# Agent capabilities (derived from work history)
-bd skills gastown/polecats/toast
-# → go: 47 tasks, python: 12 tasks, typescript: 3 tasks
+```text
+# Planned: agent capabilities derived from work history
+# gastown/polecats/toast → go: 47 tasks, python: 12 tasks, typescript: 3 tasks
 
-# Route based on fit
+# Planned: route based on fit
 gt dispatch gt-xyz --prefer-skill=go
 ```
 
@@ -162,10 +159,10 @@ sometimes multiple organizations (contractors, partners). Visibility is fragment
 ```bash
 # Register remote workspace
 gt remote add partner hop://partner.com/their-project
-
-# Query across workspaces
-bd list --remote=partner --tag=integration
 ```
+
+Querying across registered workspaces is part of the same planned work; no `bd`
+command does it yet.
 
 **Why it matters:**
 - **Enterprise scale:** Not limited to single-repo thinking

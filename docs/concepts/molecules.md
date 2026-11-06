@@ -12,17 +12,18 @@ Protomolecule (frozen template) ─── Solid
     │
     ├─▶ bd mol pour ──▶ Mol (persistent) ─── Liquid
     │
-    └─▶ bd mol wisp --root-only ──▶ Root Wisp (ephemeral) ─── Vapor
+    └─▶ bd mol wisp ──▶ Wisp (ephemeral, with step wisps) ─── Vapor
 ```
 
-**Root-only wisps** (default): Formula steps are NOT materialized as database rows.
-Only a single root wisp is created. Agents read steps inline from the embedded
-formula at prime time. This prevents wisp accumulation (~6,000+ rows/day → ~400/day).
+**Step wisps:** `bd` always materializes a formula's steps as child wisps of the
+root wisp. Each step is its own issue with its own status, so closed steps stay
+closed if a session dies. Gastown agents still read the checklist from `gt prime`,
+which renders the steps inline. `gt mol step done <step-id>` closes a step and
+hands the next ready step to the session.
 
-**Poured wisps** (`pour = true`): Steps ARE materialized as sub-wisps with
-checkpoint recovery. If a session dies, completed steps remain closed and work
-resumes from the last checkpoint. Use pour for expensive, low-frequency workflows
-where losing progress would be costly (e.g., release workflows).
+**Pour** (`bd mol pour`): creates a persistent mol. Its steps are stored as beads
+and sync like any other bead (`bd dolt push` / `bd dolt pull`). Use it for work
+you want to keep in git history, such as feature work that spans sessions.
 
 ## Core Concepts
 
@@ -30,10 +31,10 @@ where losing progress would be costly (e.g., release workflows).
 |------|-------------|
 | **Formula** | Source TOML template defining workflow steps |
 | **Protomolecule** | Frozen template ready for instantiation |
-| **Molecule** | Active workflow instance (root wisp only) |
+| **Molecule** | Active workflow instance: a root issue plus its step children |
 | **Wisp** | Ephemeral molecule for patrols and polecat work (never synced) |
-| **Root-only** | Only root wisp created; steps read from embedded formula |
-| **Pour** | Formula flag (`pour = true`); steps materialized as sub-wisps with checkpoint recovery |
+| **Step wisps** | Child wisps of the root, one per formula step; `gt prime` renders them as the checklist |
+| **Pour** | `bd mol pour`: persistent mol whose steps sync like any other bead |
 
 ## How Agents See Steps
 
@@ -63,9 +64,8 @@ bd formula show <name>       # Formula details
 bd cook <formula>            # Formula → Proto
 
 # Molecules (data operations)
-bd mol list                  # Available protos
 bd mol show <id>             # Proto details
-bd mol wisp <proto>          # Create wisp (root-only by default)
+bd mol wisp <proto>          # Create wisp (root plus step wisps)
 bd mol bond <proto> <parent> # Attach to existing mol
 ```
 
@@ -100,13 +100,13 @@ through each step in order.
 
 ### Molecule Types
 
-| Type | Storage | Use Case |
-|------|---------|----------|
-| **Root-only Wisp** (`pour = false`) | `.beads/` (ephemeral) | Polecat work, patrols — high frequency, cheap steps |
-| **Poured Wisp** (`pour = true`) | `.beads/` (sub-wisps) | Releases, long workflows — low frequency, expensive steps |
+| Type | Command | Storage | Use Case |
+|------|---------|---------|----------|
+| **Wisp** | `bd mol wisp` | `.beads/` (ephemeral, never synced) | Polecat work, patrols, operational loops |
+| **Pour** | `bd mol pour` | `.beads/` (persistent, synced) | Feature work you want to keep in history |
 
-**Heuristic**: If you would curse losing the progress after a crash, set `pour = true`.
-High frequency + cheap steps = inline (default). Low frequency + expensive steps = pour.
+**Heuristic**: If the work should stay in the database and sync with git, pour it.
+Operational work that is frequent or disposable belongs in a wisp.
 
 ## Patrol Workflow
 
