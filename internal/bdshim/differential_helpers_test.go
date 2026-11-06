@@ -121,9 +121,7 @@ var knownSeatDivergences = map[string]seatDivergence{
 // the tree. The run asserts the shim's answer against the listed difference and
 // skips the golden comparison, which it makes once the golden exists; an entry
 // whose golden exists fails, so the list only shrinks.
-var awaitingRecording = map[string]bool{
-	"close-force-reason-fixture-close": true,
-}
+var awaitingRecording = map[string]bool{}
 
 // newDifferentialCase is the run the committed goldens get: the real golden
 // directory, the fixture file the recorder seeded from, and the shim's own
