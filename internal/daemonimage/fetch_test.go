@@ -222,7 +222,7 @@ func guardGit(run *fakeRunner, inner bdbuild.Git, g *staleGuard) bdbuild.Git {
 			return []byte(g.tip + "\n"), nil
 		case args[0] == "merge-base":
 			if g.notAncestor {
-				return nil, errors.New("exit status 1")
+				return nil, exitStatus(1)
 			}
 			return nil, nil
 		case args[0] == "rev-list":
