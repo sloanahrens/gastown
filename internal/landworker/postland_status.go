@@ -479,10 +479,6 @@ func (p *PostLandRunner) PollPending(ctx context.Context) {
 		if removed[i] {
 			continue
 		}
-		if p.handling[e.Land.Commit] {
-			keep = append(keep, e)
-			continue
-		}
 		if p.done[e.Land.Commit] {
 			changed = true
 			decided = append(decided, e.Land.Commit) // its removal is saved below, which clears the marker
