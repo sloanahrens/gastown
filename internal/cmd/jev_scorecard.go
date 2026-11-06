@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -20,6 +21,7 @@ var (
 	jevScorecardSince   string
 	jevScorecardJSON    bool
 	jevScorecardLines   bool
+	jevScorecardRefresh bool
 )
 
 var jevScorecardCmd = &cobra.Command{
@@ -34,29 +36,38 @@ label and the best cut on the score in place of precision, recall and bands.
 
 The verdict is earning when the best F1 beats the label base rate by 0.1 or
 more on at least 30 labeled lines, not-yet below 30 labeled lines, and
-no-signal otherwise. The command is read-only.
+no-signal otherwise. Scoring one battery is read-only; only --refresh writes.
 
---battery is required. An unknown name is an error that lists the registered
-batteries. --since keeps only the lines stamped in the window ending now, given
-as Nd for days or a Go duration such as 36h. --json prints the same report as
-JSON. The testsel battery asks about every package of every change, so its
---json report leaves out the per-item rows (the totals stay); --lines prints
+--battery is required, and an unknown name is an error that lists the
+registered batteries. --since keeps only the lines stamped in the window ending
+now, given as Nd for days or a Go duration such as 36h. --json prints the same
+report as JSON. The testsel battery asks about every package of every change, so
+its --json report leaves out the per-item rows (the totals stay); --lines prints
 them.
+
+--refresh replaces --battery, --json and --lines: it scores every registered
+battery over --since (7d when empty), keeps the cached block of a battery whose
+scoring failed, and writes <town>/.runtime/jev/scorecard.json by temp file and
+rename, so a failed write leaves the previous file as it was. A refresh that
+wrote the file exits zero only when every battery scored; otherwise it names
+the failed batteries and exits non-zero with their last good blocks kept in the
+file.
 
 Examples:
   gt jev scorecard --battery fixture
-  gt jev scorecard --battery fixture --since 14d --json`,
+  gt jev scorecard --battery fixture --since 14d --json
+  gt jev scorecard --refresh`,
 	Args: cobra.NoArgs,
 	RunE: runJevScorecard,
 }
 
 func init() {
 	f := jevScorecardCmd.Flags()
-	f.StringVar(&jevScorecardBattery, "battery", "", "Battery to score (required)")
-	f.StringVar(&jevScorecardSince, "since", "", "Score only lines from this window ending now: Nd or a Go duration (default: all time)")
+	f.StringVar(&jevScorecardBattery, "battery", "", "Battery to score (required unless --refresh)")
+	f.StringVar(&jevScorecardSince, "since", "", "Score only lines from this window ending now: Nd or a Go duration (default: all time, or 7d with --refresh)")
 	f.BoolVar(&jevScorecardJSON, "json", false, "Print the report as JSON")
 	f.BoolVar(&jevScorecardLines, "lines", false, "With --json, print every item's labeling for a battery that leaves them out by default")
-	_ = jevScorecardCmd.MarkFlagRequired("battery")
+	f.BoolVar(&jevScorecardRefresh, "refresh", false, "Score every registered battery and write <town>/.runtime/jev/scorecard.json")
 	jevCmd.AddCommand(jevScorecardCmd)
 }
 
@@ -65,7 +76,106 @@ func runJevScorecard(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("finding the town root: %w", err)
 	}
-	return jevScorecardWithFlags(cmd.Context(), cmd.OutOrStdout(), townRoot, jevScorecardBattery, jevScorecardSince, jevScorecardJSON, jevScorecardLines, time.Now())
+	o := jevScorecardOptions{
+		Battery: jevScorecardBattery,
+		Since:   jevScorecardSince,
+		JSON:    jevScorecardJSON,
+		Lines:   jevScorecardLines,
+		Refresh: jevScorecardRefresh,
+	}
+	return jevScorecardRun(cmd.Context(), cmd.OutOrStdout(), townRoot, o, time.Now(), scoreJevBattery, scorecard.Cache{})
+}
+
+// jevScorecardOptions is the command's flags, passed as values so the dispatch
+// below can be tested without the process's globals.
+type jevScorecardOptions struct {
+	Battery string
+	Since   string
+	JSON    bool
+	Lines   bool
+	Refresh bool
+}
+
+// jevBatteryScorer builds one battery's report over the window starting at
+// from. It is a parameter so a test can stand in for the adapters.
+type jevBatteryScorer func(ctx context.Context, name, townRoot string, from time.Time) (scorecard.Report, error)
+
+// jevScorecardRun dispatches one invocation of the command: a single battery's
+// report, or a refresh of every registered battery into the cache.
+func jevScorecardRun(ctx context.Context, w io.Writer, townRoot string, o jevScorecardOptions, now time.Time,
+	score jevBatteryScorer, cache scorecard.Cache) error {
+	if !o.Refresh {
+		if o.Battery == "" {
+			return fmt.Errorf("--battery is required unless --refresh is given")
+		}
+		return jevScorecardWithFlags(ctx, w, townRoot, o.Battery, o.Since, o.JSON, o.Lines, now)
+	}
+	if o.Battery != "" {
+		return fmt.Errorf("--refresh scores every registered battery; drop --battery %q", o.Battery)
+	}
+	if o.JSON || o.Lines {
+		return fmt.Errorf("--refresh writes the scorecard cache; --json and --lines apply only to --battery")
+	}
+	return jevScorecardRefreshWith(ctx, w, townRoot, o.Since, now, score, cache)
+}
+
+// scoreJevBattery scores one registered battery through its adapter over the
+// window starting at from.
+func scoreJevBattery(ctx context.Context, name, townRoot string, from time.Time) (scorecard.Report, error) {
+	a, err := scorecard.Open(name, townRoot)
+	if err != nil {
+		return scorecard.Report{}, err
+	}
+	return scorecard.Build(ctx, a, from)
+}
+
+// jevScorecardRefreshSince is the window a refresh scores when --since is not
+// given: a refresh is the periodic review of the batteries, so it defaults to a
+// week where a single battery's score still defaults to all time.
+const jevScorecardRefreshSince = "7d"
+
+// jevScorecardRefreshWith scores every registered battery over the window,
+// keeps each failed battery's last good cached block, and writes the result to
+// the town's cache path. A corrupt previous cache stops the refresh before it
+// scores anything; a missing one starts fresh. Every battery's failure still
+// writes the file, then names the failed batteries in the returned error so the
+// caller's exit status says the cache is not wholly fresh.
+func jevScorecardRefreshWith(ctx context.Context, w io.Writer, townRoot, since string, now time.Time,
+	score jevBatteryScorer, cache scorecard.Cache) error {
+	window := since
+	if window == "" {
+		window = jevScorecardRefreshSince
+	}
+	from, err := parseSince(window, now)
+	if err != nil {
+		return err
+	}
+	path := scorecard.CachePath(townRoot)
+	prev, err := cache.Read(path)
+	if err != nil && !errors.Is(err, scorecard.ErrNoScorecard) {
+		return fmt.Errorf("refreshing the scorecard: %w", err)
+	}
+	doc := scorecard.CacheDoc{ScoredAt: now, Since: window, Batteries: make([]scorecard.BatteryBlock, 0, len(scorecard.Registered()))}
+	var failed []string
+	for _, name := range scorecard.Registered() {
+		block := scorecard.BatteryBlock{Name: name, ScoredAt: now}
+		rep, err := score(ctx, name, townRoot, from)
+		if err != nil {
+			block.Failed, block.Error = true, err.Error()
+			failed = append(failed, name)
+		} else {
+			block.Report = &rep
+		}
+		doc.Batteries = append(doc.Batteries, scorecard.KeepFailed(prev, block))
+	}
+	if err := cache.Write(path, doc); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "wrote %s: %d batteries, %d failed\n", path, len(doc.Batteries), len(failed))
+	if len(failed) > 0 {
+		return fmt.Errorf("scoring failed for %s; the cache keeps each battery's last good block", strings.Join(failed, ", "))
+	}
+	return nil
 }
 
 // jevScorecardWithFlags resolves the window and the battery, then prints the
