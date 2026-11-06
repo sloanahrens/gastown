@@ -52,7 +52,12 @@ const (
 	dindVolume  = "dind-data"
 
 	// cacheMount is where the rig's cache claim is mounted read-write in the
-	// runner, and the Go build and module caches live under it.
+	// runner, and the Go build and module caches live under it. Nothing renders
+	// a chown for it, so the runner (runnerUser) can write here only if the
+	// provisioner created the claim's directory writable by that user. That is
+	// assumed, not verified on the control cluster (gt-hlo07.1). If a sweep log
+	// shows permission denied under this path, add an init container that chowns
+	// this directory alone, never recursively.
 	cacheMount = "/var/cache/gt-sweep"
 
 	// cacheClaimStorage is the cache claim's requested size: room for one rig's
