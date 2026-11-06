@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/style"
@@ -85,7 +86,7 @@ Examples:
 		if err != nil {
 			return err
 		}
-		return newBeadVerbs(cmd).create(r)
+		return withBeadVerbs(cmd, func(bv *beadVerbs) error { return bv.create(r) })
 	},
 }
 
@@ -129,7 +130,7 @@ Example:
   gt bead note gt-abc "Findings so far: the retry loop never resets"`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return newBeadVerbs(cmd).note(args[0], args[1])
+		return withBeadVerbs(cmd, func(bv *beadVerbs) error { return bv.note(args[0], args[1]) })
 	},
 }
 
@@ -151,7 +152,7 @@ Examples:
   gt bead update gt-abc --acceptance="- [x] the refusal names the verb"`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return newBeadVerbs(cmd).update(args[0], beadUpdateOptions(cmd.Flags()))
+		return withBeadVerbs(cmd, func(bv *beadVerbs) error { return bv.update(args[0], beadUpdateOptions(cmd.Flags())) })
 	},
 }
 
@@ -190,7 +191,7 @@ A bead that is unassigned, or already yours, is claimed. One held by another
 agent is refused.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return newBeadVerbs(cmd).claim(args[0])
+		return withBeadVerbs(cmd, func(bv *beadVerbs) error { return bv.claim(args[0]) })
 	},
 }
 
@@ -208,7 +209,7 @@ Example:
   gt bead reset gt-abc --reason="Orphaned with partial work on <branch>"`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return newBeadVerbs(cmd).reset(args[0], beadResetReason)
+		return withBeadVerbs(cmd, func(bv *beadVerbs) error { return bv.reset(args[0], beadResetReason) })
 	},
 }
 
@@ -217,7 +218,7 @@ var beadCommentCmd = &cobra.Command{
 	Short: "Add a comment to a bead",
 	Args:  cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return newBeadVerbs(cmd).comment(args[0], args[1])
+		return withBeadVerbs(cmd, func(bv *beadVerbs) error { return bv.comment(args[0], args[1]) })
 	},
 }
 
@@ -234,7 +235,7 @@ var beadDepAddCmd = &cobra.Command{
 	Short: "Make <issue> depend on <depends-on>",
 	Args:  cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return newBeadVerbs(cmd).depAdd(args[0], args[1])
+		return withBeadVerbs(cmd, func(bv *beadVerbs) error { return bv.depAdd(args[0], args[1]) })
 	},
 }
 
@@ -243,7 +244,7 @@ var beadDepRemoveCmd = &cobra.Command{
 	Short: "Remove the dependency of <issue> on <depends-on>",
 	Args:  cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return newBeadVerbs(cmd).depRemove(args[0], args[1])
+		return withBeadVerbs(cmd, func(bv *beadVerbs) error { return bv.depRemove(args[0], args[1]) })
 	},
 }
 
@@ -261,7 +262,7 @@ Examples:
   gt bead close gt-abc --reason="no-changes: already fixed by gt-xyz"`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return newBeadVerbs(cmd).close(beadCloseReason, args...)
+		return withBeadVerbs(cmd, func(bv *beadVerbs) error { return bv.close(beadCloseReason, args...) })
 	},
 }
 
@@ -270,7 +271,7 @@ var beadReopenCmd = &cobra.Command{
 	Short: "Return beads to open",
 	Args:  cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return newBeadVerbs(cmd).reopen(args...)
+		return withBeadVerbs(cmd, func(bv *beadVerbs) error { return bv.reopen(args...) })
 	},
 }
 
@@ -338,11 +339,14 @@ type beadVerbs struct {
 	recordClosed func(ids []string)
 }
 
-// newBeadVerbs builds the verbs for this session: a client on the current
-// directory's database that routes each ID by its prefix, and the session's
+// newBeadVerbs builds the verbs for this session: a client on the caller's
+// directory database that routes each ID by its prefix, and the session's
 // actor (BD_ACTOR, else the role gt detects).
-func newBeadVerbs(cmd *cobra.Command) *beadVerbs {
-	cwd, _ := os.Getwd()
+func newBeadVerbs(cmd *cobra.Command) (*beadVerbs, error) {
+	cwd, err := callercwd.Getwd()
+	if err != nil {
+		return nil, err
+	}
 	actor := os.Getenv("BD_ACTOR")
 	if actor == "" {
 		if a := detectActor(); a != "unknown" {
@@ -362,7 +366,16 @@ func newBeadVerbs(cmd *cobra.Command) *beadVerbs {
 			return landedOverseerHead(townRoot, id, sha)
 		},
 		recordClosed: func(ids []string) { logClosedBeads(beads.FindTownRoot(cwd), actor, ids) },
+	}, nil
+}
+
+// withBeadVerbs runs one verb over the verbs the caller's directory resolves.
+func withBeadVerbs(cmd *cobra.Command, run func(*beadVerbs) error) error {
+	bv, err := newBeadVerbs(cmd)
+	if err != nil {
+		return err
 	}
+	return run(bv)
 }
 
 // logClosedBeads records the run end of each bead a close closed. An event that

@@ -133,6 +133,22 @@ func New(workerDir string) *Lock {
 	}
 }
 
+// NewWithLiveness creates a Lock whose staleness rule reads the process table
+// through table: alive reports whether a process has pid, and token is the
+// kernel's start token for it (empty when the kernel will not say). New is
+// this with liveProcess; tests pass a table so a lock's verdict never depends
+// on which processes the host happens to be running.
+func NewWithLiveness(workerDir string, table func(pid int) (token string, alive bool)) *Lock {
+	if table == nil {
+		table = liveProcess
+	}
+	return &Lock{
+		workerDir: workerDir,
+		lockPath:  filepath.Join(workerDir, ".runtime", "agent.lock"),
+		table:     table,
+	}
+}
+
 // Acquire attempts to acquire the lock for this worker.
 // Returns ErrLocked if another live process holds the lock.
 // Automatically cleans up stale locks.

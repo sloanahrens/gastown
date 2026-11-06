@@ -62,7 +62,9 @@ Examples:
   gt bead review gt-abc WAIVED --reason "docs-only change under a risk path"`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return newBeadVerbs(cmd).review(args[0], args[1], beadReviewSHA, beadReviewReason, beadReviewFindings)
+		return withBeadVerbs(cmd, func(bv *beadVerbs) error {
+			return bv.review(args[0], args[1], beadReviewSHA, beadReviewReason, beadReviewFindings)
+		})
 	},
 }
 
