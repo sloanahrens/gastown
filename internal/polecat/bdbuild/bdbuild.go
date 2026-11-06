@@ -158,10 +158,10 @@ func Commit(override string, v Versioner) (string, error) {
 		return "", fmt.Errorf("cannot read the installed bd's commit: %w", err)
 	}
 	if info.Commit == "" {
-		return "", fmt.Errorf("the installed bd reports no commit (bd %s, build %s); install a beads fork build that records one, or name the commit (-commit, BD_COMMIT under make)", info.Version, orUnknown(firstNonEmpty(info.BuildID, info.Build)))
+		return "", fmt.Errorf("the installed bd reports no commit (bd %s, build %s); install a beads fork build that records one, or name the commit (-commit)", info.Version, orUnknown(firstNonEmpty(info.BuildID, info.Build)))
 	}
 	if !isCommit(info.Commit) {
-		return "", fmt.Errorf("the installed bd reports commit %q, which is not a 7+ character hex commit; rebuild bd, or name the commit (-commit, BD_COMMIT under make)", info.Commit)
+		return "", fmt.Errorf("the installed bd reports commit %q, which is not a 7+ character hex commit; rebuild bd, or name the commit (-commit)", info.Commit)
 	}
 	return info.Commit, nil
 }
@@ -197,7 +197,7 @@ type Options struct {
 // (gt-pme82).
 func Compile(opt Options, git Git, goBuild Go) (string, error) {
 	if opt.Src == "" {
-		return "", errors.New("no beads checkout named (make polecat-image BD_SRC=<checkout>)")
+		return "", errors.New("no beads checkout named: name the checkout the image's bd is built from")
 	}
 	if opt.Out == "" {
 		return "", errors.New("no output path named for the bd binary")

@@ -126,10 +126,10 @@ func TestBuildAtBuildsInADetachedWorktree(t *testing.T) {
 	if makeCalls[0].dir != worktree {
 		t.Errorf("make ran in %q, want the worktree %q", makeCalls[0].dir, worktree)
 	}
-	if got := strings.Join(makeCalls[0].args, " "); got != "polecat-image BD_SRC="+tr.Cfg.BDSrc {
-		t.Errorf("make ran with %q, want the build target and BD_SRC", got)
+	if got := strings.Join(makeCalls[0].args, " "); got != "polecat-image" {
+		t.Errorf("make ran with %q, want the build target alone: the recipe stages its context from the pins", got)
 	}
-	tr.wantLogged(t, "building gastown-polecat:dev at "+testShortSHA+" (BD_SRC="+tr.Cfg.BDSrc+")")
+	tr.wantLogged(t, "building gastown-polecat:dev at "+testShortSHA)
 	tr.wantLogged(t, "build took 42s at "+testShortSHA)
 	if tr.Worktree != "" {
 		t.Errorf("Worktree = %q after a finished build, want empty", tr.Worktree)

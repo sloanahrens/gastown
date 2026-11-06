@@ -1,6 +1,8 @@
-// Command build compiles the polecat image's bd from the commit the installed
-// bd reports, or from -commit's override, and prints that commit's full sha on
-// stdout for the image's label (gt-7b7a5). `make polecat-image` runs it.
+// Command build compiles a bd from the commit the installed bd reports, or from
+// -commit's override, and prints that commit's full sha on stdout (gt-7b7a5).
+// The polecat image's context command builds bd by calling bdbuild.Compile
+// itself, from the source its pin names (internal/polecat/imagectx); this
+// command remains for building a bd from a checkout of your own.
 //
 //	build -src <beads checkout> -out <bd binary> [-commit <sha>] [-build-dir <dir>]
 //

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -82,8 +83,14 @@ type world struct {
 	// goCalls are the go invocations, separate from calls so a test can assert
 	// none ran.
 	goCalls []string
-	// goEnvs is the environment each go call ran with, parallel to goCalls.
+	// goEnvs is the environment each go call ran with, and goArgs the argv, both
+	// parallel to goCalls.
 	goEnvs [][]string
+	goArgs [][]string
+	// gitEnvCalls are the GitEnv reads, and gitEnvs the environment each ran
+	// with, parallel to them.
+	gitEnvCalls []string
+	gitEnvs     [][]string
 	// resolve maps a commit a rev-parse asks for to the commit git answers
 	// with, so a test can make a pin resolve to another commit.
 	resolve map[string]string
@@ -151,7 +158,15 @@ func (w *world) inputs(out string) Inputs {
 }
 
 func (w *world) seams() Seams {
-	return Seams{Run: w.runCmd, Git: w.gitCmd, Go: w.goCmd}
+	return Seams{Run: w.runCmd, Git: w.gitCmd, GitEnv: w.gitEnvCmd, Go: w.goCmd}
+}
+
+// gitEnvCmd is the GitEnv seam: it records the read and the environment it ran
+// with, then answers through gitCmd, which is the read's whole behaviour.
+func (w *world) gitEnvCmd(dir string, env []string, args ...string) ([]byte, error) {
+	w.gitEnvCalls = append(w.gitEnvCalls, fmt.Sprintf("git %s %s", dir, strings.Join(args, " ")))
+	w.gitEnvs = append(w.gitEnvs, append([]string(nil), env...))
+	return w.gitCmd(dir, args...)
 }
 
 func (w *world) runCmd(_ context.Context, dir string, _ []string, argv []string) error {
@@ -270,6 +285,7 @@ func (w *world) gitCmd(dir string, args ...string) ([]byte, error) {
 func (w *world) goCmd(dir string, env []string, args ...string) ([]byte, error) {
 	w.goCalls = append(w.goCalls, fmt.Sprintf("go %s %s", dir, strings.Join(args, " ")))
 	w.goEnvs = append(w.goEnvs, env)
+	w.goArgs = append(w.goArgs, append([]string(nil), args...))
 	if err := w.fault(w.failGo, args); err != nil {
 		return nil, err
 	}
@@ -366,6 +382,17 @@ func TestContextFromPinsFetchesEverySourceByURL(t *testing.T) {
 				t.Errorf("no call %q\n%s", want, w.dump())
 			}
 		}
+		// A read of another repository's main reaches the network, so it runs
+		// with git told never to prompt: a missing credential fails the read
+		// instead of waiting on a terminal.
+		if len(w.gitEnvCalls) == 0 {
+			t.Fatalf("no main was read by URL\n%s", w.dump())
+		}
+		for i, c := range w.gitEnvCalls {
+			if !contains(w.gitEnvs[i], "GIT_TERMINAL_PROMPT=0") {
+				t.Errorf("%s ran without GIT_TERMINAL_PROMPT=0: %v", c, w.gitEnvs[i])
+			}
+		}
 	})
 
 	t.Run("reads the build rig from the checkout at --rev and never fetches it", func(t *testing.T) {
@@ -459,6 +486,96 @@ func TestContextHoldsThePayloadTheDockerfileCopies(t *testing.T) {
 	if res.GoFloor != "1.10.0" {
 		t.Errorf("GoFloor = %q, want 1.10.0", res.GoFloor)
 	}
+}
+
+// TestGTPinMatchesTheDaemonImageGtBuild compares the gt compile the context
+// command runs with the one the daemon image runs, each recorded from its own
+// production call. The daemon image stamps gt's rev on purpose (gt-yjzepk), and
+// the two write to different directories, so the stamp and the output path are
+// compared aside. The polecat half of this pin belongs here, not in the daemon
+// image's own test: that package cannot import this one, so a comparison there
+// can only name the shared argv helper, never this package's recorded call.
+// Mutation: add a flag to either flow's gt build, and this fails.
+func TestGTPinMatchesTheDaemonImageGtBuild(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	if _, err := Build(context.Background(), w.inputs(t.TempDir()), w.seams()); err != nil {
+		t.Fatalf("Build: %v\n%s", err, w.dump())
+	}
+	polecat := goArgvOf(t, w, "./cmd/gt")
+
+	var calls [][]string
+	run := func(_ context.Context, _ string, _ []string, argv []string) error {
+		calls = append(calls, append([]string(nil), argv...))
+		for i, a := range argv {
+			if a == "-o" && i+1 < len(argv) {
+				if err := os.WriteFile(argv[i+1], []byte("bin\n"), 0o644); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	// The daemon image's own gt build, from a clean worktree of its gt checkout
+	// at the same commit, through the same bdbuild.Env.
+	b := daemonimage.Builder{
+		Run: run, Git: w.gitCmd,
+		Out: t.TempDir(), GTSrc: "/fx/gt", BDSrc: "/fx/beads", BDCommit: bdPin,
+		OMSrc: "/fx/om", OMCommit: devopsPin,
+	}
+	if _, err := b.BuildBinaries(context.Background(), gastownRev); err != nil {
+		t.Fatalf("BuildBinaries: %v", err)
+	}
+	if len(calls) < 3 || calls[0][len(calls[0])-1] != "./cmd/gt" {
+		t.Fatalf("the daemon image's first build is not gt: %v", calls)
+	}
+	daemon := withoutLdflagsArgv(calls[0][1:]) // drop the leading "go"
+	if !reflect.DeepEqual(normalizeOut(polecat), normalizeOut(daemon)) {
+		t.Errorf("the context command builds gt with %q, the daemon image with %q", polecat, daemon)
+	}
+}
+
+// goArgvOf returns the argv of the one go call that builds pkg, failing the test
+// when no call or more than one does.
+func goArgvOf(t *testing.T, w *world, pkg string) []string {
+	t.Helper()
+	var found []string
+	n := 0
+	for i, c := range w.goCalls {
+		if strings.HasSuffix(c, " "+pkg) {
+			found = w.goArgs[i]
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d go calls build %s, want one\n%s", n, pkg, w.dump())
+	}
+	return found
+}
+
+// withoutLdflagsArgv returns argv with any "-ldflags" and its value removed.
+func withoutLdflagsArgv(argv []string) []string {
+	var out []string
+	for i := 0; i < len(argv); i++ {
+		if argv[i] == "-ldflags" {
+			i++
+			continue
+		}
+		out = append(out, argv[i])
+	}
+	return out
+}
+
+// normalizeOut replaces each "-o" value with "<out>", so two builds writing to
+// different directories compare equal.
+func normalizeOut(argv []string) []string {
+	out := append([]string(nil), argv...)
+	for i, a := range out {
+		if a == "-o" && i+1 < len(out) {
+			out[i+1] = "<out>"
+		}
+	}
+	return out
 }
 
 // TestNoEngineCommandIsIssued checks no recorded call names a container engine,

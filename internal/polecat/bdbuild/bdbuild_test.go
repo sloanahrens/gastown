@@ -516,6 +516,36 @@ func TestCompileNamesWhatItCannotBuild(t *testing.T) {
 	}
 }
 
+// TestRefusalsNameNoMakeVariableTheRecipeDropped checks the refusals an operator
+// reads name no Makefile variable the polecat-image recipe dropped
+// (gt-gg9hv.33): the recipe stages the context from the pins now, so pointing at
+// BD_SRC or BD_COMMIT under make sends the operator to a knob that does nothing.
+// Mutation: put "(make polecat-image BD_SRC=<checkout>)" back in Compile's
+// refusal, and the first case fails.
+func TestRefusalsNameNoMakeVariableTheRecipeDropped(t *testing.T) {
+	t.Parallel()
+	refusals := map[string]error{}
+	if _, err := Compile(Options{}, (&fakeGit{}).run, (&fakeGo{}).run); err != nil {
+		refusals["Compile with no source"] = err
+	}
+	if _, err := Commit("", &fakeBD{info: beads.VersionInfo{Version: "1.2.2", BuildID: "da4983e"}}); err != nil {
+		refusals["Commit with no commit reported"] = err
+	}
+	if _, err := Commit("", &fakeBD{info: beads.VersionInfo{Version: "1.2.2", BuildID: "da4983e", Commit: "main"}}); err != nil {
+		refusals["Commit with a commit that is not hex"] = err
+	}
+	if len(refusals) != 3 {
+		t.Fatalf("got %d refusals, want the three this test drives", len(refusals))
+	}
+	for name, err := range refusals {
+		for _, dropped := range []string{"BD_SRC", "BD_COMMIT"} {
+			if strings.Contains(err.Error(), dropped) {
+				t.Errorf("%s: %q names %s, which the polecat-image recipe no longer takes", name, err, dropped)
+			}
+		}
+	}
+}
+
 func TestCompilePutsTheWorktreeUnderTheBuildDir(t *testing.T) {
 	t.Parallel()
 	buildDir := t.TempDir()

@@ -50,7 +50,6 @@ func newTestRun(t *testing.T) *testRun {
 			Openshell:      "openshell",
 			RigRepo:        filepath.Join(root, "rig.git"),
 			BuildRoot:      filepath.Join(root, "build"),
-			BDSrc:          filepath.Join(root, "beads"),
 			LockDir:        filepath.Join(root, "runtime", "polecat-image.lock"),
 			StaleAfter:     20 * time.Minute,
 			SandboxRecords: filepath.Join(root, "runtime", "sandboxes"),

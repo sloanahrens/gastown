@@ -665,10 +665,14 @@ func TestBDPinMatchesThePolecatImageFlow(t *testing.T) {
 	}
 }
 
-// TestGTPinMatchesThePolecatImageFlow compares the argv the daemon image builds
-// gt with against the argv the polecat context command compiles gt with (the
-// shared bdbuild.GoBuildArgv), bar the rev stamp the daemon image adds on purpose.
-func TestGTPinMatchesThePolecatImageFlow(t *testing.T) {
+// TestGTPinMatchesTheSharedBuildArgv compares the argv the daemon image builds
+// gt with against bdbuild.GoBuildArgv, the shared argv the polecat context
+// command compiles gt with, bar the rev stamp the daemon image adds on purpose.
+// The polecat side's recorded call is compared in that package's
+// TestGTPinMatchesTheDaemonImageGtBuild: this package's test cannot import it
+// (the context package imports this one), so here the shared helper is what
+// pins the two flows together.
+func TestGTPinMatchesTheSharedBuildArgv(t *testing.T) {
 	t.Parallel()
 	b, run := builderFor(t)
 	if _, err := b.BuildBinaries(context.Background(), testRev); err != nil {

@@ -55,13 +55,19 @@ type Inputs struct {
 	SeedURLs map[string]string
 }
 
+// GitEnv runs git with env as its whole environment and returns its standard
+// output. A read that reaches a repository URL goes through it, so git sees the
+// build's environment and cannot prompt on a terminal for a credential.
+type GitEnv func(dir string, env []string, args ...string) ([]byte, error)
+
 // Seams are the commands a build runs: Run for a fetch, Git for a read or a
-// worktree, Go for a compile. The real ones are ExecRun, bdbuild.ExecGit and
-// bdbuild.ExecGo. Nothing else runs.
+// worktree, GitEnv for a read of a URL, Go for a compile. The real ones are
+// ExecRun, bdbuild.ExecGit, ExecGitEnv and bdbuild.ExecGo. Nothing else runs.
 type Seams struct {
-	Run daemonimage.Runner
-	Git bdbuild.Git
-	Go  bdbuild.Go
+	Run    daemonimage.Runner
+	Git    bdbuild.Git
+	GitEnv GitEnv
+	Go     bdbuild.Go
 }
 
 // Result is a staged context and the labels its image build needs.
@@ -130,8 +136,8 @@ func ParseSeedURLs(data []byte) (map[string]string, error) {
 // it builds anything when an input is wrong, the tree is dirty or not at Rev, or
 // a seeded pin fails the pin-drift guard.
 func Build(ctx context.Context, in Inputs, s Seams) (Result, error) {
-	if s.Run == nil || s.Git == nil || s.Go == nil {
-		return Result{}, errors.New("imagectx: a run, git and go seam are all needed to stage the context")
+	if s.Run == nil || s.Git == nil || s.GitEnv == nil || s.Go == nil {
+		return Result{}, errors.New("imagectx: a run, git, git-env and go seam are all needed to stage the context")
 	}
 	if err := checkInputs(in); err != nil {
 		return Result{}, err
@@ -313,7 +319,10 @@ func stageRig(ctx context.Context, in Inputs, s Seams, env []string, src seed.So
 	if err := daemonimage.FetchSource(ctx, s.Run, s.Git, tmp, env, pin); err != nil {
 		return "", nil, err
 	}
-	out, err := s.Git(tmp, "ls-remote", url, "refs/heads/main")
+	// The read goes through GitEnv, so it runs with the build's environment:
+	// GIT_TERMINAL_PROMPT=0 makes a missing credential fail the read instead of
+	// waiting on a terminal.
+	out, err := s.GitEnv(tmp, env, "ls-remote", url, "refs/heads/main")
 	if err != nil {
 		return "", nil, fmt.Errorf("imagectx: cannot read the main of rig %s from its URL: %w", src.Rig, err)
 	}
@@ -482,13 +491,39 @@ func compareVersions(a, b []int) int {
 	return 0
 }
 
-// buildEnv is the environment the builds and the fetch commands ExecRun runs
-// start with: the host's toolchain variables and the cross-compile settings
-// bdbuild.Env keeps, with git told never to prompt, so a fetch that wants a
-// credential fails rather than waiting on a terminal. The ls-remote read goes
-// through bdbuild.ExecGit, which keeps the process environment.
+// buildEnv is the environment the builds, the fetch commands ExecRun runs and
+// the ls-remote read ExecGitEnv runs start with: the host's toolchain variables
+// and the cross-compile settings bdbuild.Env keeps, with git told never to
+// prompt, so a fetch or a read that wants a credential fails rather than
+// waiting on a terminal.
 func buildEnv() []string {
 	return append(bdbuild.Env(nil), "GIT_TERMINAL_PROMPT=0")
+}
+
+// ExecGitEnv runs the host's git with env as its whole environment and returns
+// its standard output, and stops it past runCeiling. A failure names git and
+// the last line of its stderr.
+func ExecGitEnv(dir string, env []string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), runCeiling)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = env
+	// A git read that reaches the network can leave a child holding the output
+	// pipes, so WaitDelay bounds the wait after git is killed, as ExecRun does.
+	cmd.WaitDelay = time.Second
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		switch {
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			return nil, fmt.Errorf("git timed out: %w", ctx.Err())
+		case errors.Is(ctx.Err(), context.Canceled):
+			return nil, fmt.Errorf("git was canceled: %w", ctx.Err())
+		}
+		return nil, fmt.Errorf("git failed: %w: %s", err, lastLine(stderr.String()))
+	}
+	return out, nil
 }
 
 // ExecRun runs argv in dir with env as its whole environment, and stops it past

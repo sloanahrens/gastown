@@ -316,14 +316,25 @@ var treeWideGuards = []treeWideGuard{
 		judges: func(rel string) bool { return rel == "Makefile" || commandTreeInputs(rel) },
 	},
 	{
-		// TestGTPinMatchesThePolecatImageFlow reads the Makefile's polecat-image
-		// recipe, which is where the image's gt is built. The Dockerfile tests
-		// read the daemon image's Dockerfile, whose deletion they fail on.
+		// TestGTPinMatchesTheSharedBuildArgv pins the daemon image's gt build
+		// against the shared argv helper the polecat context command also uses;
+		// the polecat side's own call is pinned in internal/polecat/imagectx.
+		// The Dockerfile tests read the daemon image's Dockerfile, whose
+		// deletion they fail on.
 		pkg: "internal/daemonimage",
-		tests: []string{"TestGTPinMatchesThePolecatImageFlow", "TestDaemonDockerfileHasNoBuildStep",
+		tests: []string{"TestGTPinMatchesTheSharedBuildArgv", "TestDaemonDockerfileHasNoBuildStep",
 			"TestDaemonDockerfileFetchesNothingAndInstallsOnlyThePackages",
 			"TestDaemonDockerfileCopiesOnlyTheBinariesAndDolt", "TestDaemonDockerfileMatchesTheImageTable"},
-		judges:  func(rel string) bool { return rel == "Makefile" || rel == "deploy/daemon/Dockerfile" },
+		judges:  func(rel string) bool { return rel == "deploy/daemon/Dockerfile" },
+		removal: true,
+	},
+	{
+		// TestPolecatImageRecipe and TestPolecatImagePluginDocMatchesTheRecipe
+		// read the Makefile's polecat-image recipe and the plugin doc an agent
+		// runs that recipe from (gt-gg9hv.33).
+		pkg:     "internal/makegate",
+		tests:   []string{"TestPolecatImageRecipe", "TestPolecatImagePluginDocMatchesTheRecipe"},
+		judges:  func(rel string) bool { return rel == "Makefile" || rel == "plugins/polecat-image/plugin.md" },
 		removal: true,
 	},
 	{

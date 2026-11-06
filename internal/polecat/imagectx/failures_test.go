@@ -183,16 +183,17 @@ func TestContextStopsOnAFailedStep(t *testing.T) {
 	}
 }
 
-// TestContextRefusesAMissingSeam checks Build refuses to run with any of its three
+// TestContextRefusesAMissingSeam checks Build refuses to run with any of its four
 // seams unset, before it reads an input.
 func TestContextRefusesAMissingSeam(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t)
 	full := w.seams()
 	for name, s := range map[string]Seams{
-		"no run": {Git: full.Git, Go: full.Go},
-		"no git": {Run: full.Run, Go: full.Go},
-		"no go":  {Run: full.Run, Git: full.Git},
+		"no run":     {Git: full.Git, GitEnv: full.GitEnv, Go: full.Go},
+		"no git":     {Run: full.Run, GitEnv: full.GitEnv, Go: full.Go},
+		"no git env": {Run: full.Run, Git: full.Git, Go: full.Go},
+		"no go":      {Run: full.Run, Git: full.Git, GitEnv: full.GitEnv},
 	} {
 		_, err := Build(context.Background(), w.inputs(t.TempDir()), s)
 		if err == nil || !strings.Contains(err.Error(), "seam") {

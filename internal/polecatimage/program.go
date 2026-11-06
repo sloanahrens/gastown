@@ -72,7 +72,6 @@ func ConfigFromEnv(get func(string) string) (Config, error) {
 		Crane:          crane,
 		RigRepo:        envOr(get, "POLECAT_IMAGE_RIG_REPO", filepath.Join(town, "gastown", ".repo.git")),
 		BuildRoot:      envOr(get, "POLECAT_IMAGE_BUILD_ROOT", filepath.Join(town, "gastown", ".polecat-image-build")),
-		BDSrc:          envOr(get, "POLECAT_IMAGE_BD_SRC", filepath.Join(town, "beads", "mayor", "rig")),
 		LockDir:        envOr(get, "POLECAT_IMAGE_LOCK", filepath.Join(town, ".runtime", "polecat-image.lock")),
 		StaleAfter:     time.Duration(minutes) * time.Minute,
 		SandboxRecords: envOr(get, "POLECAT_IMAGE_SANDBOX_RECORDS", filepath.Join(town, ".runtime", "sandboxes")),
