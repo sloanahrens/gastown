@@ -105,13 +105,20 @@ func refuseControlPriorities(protected []string) func(stdout []byte) error {
 
 // refuseProtectedPods names the first protected pod (in namespace and name
 // order) that runs at or below the sweep's priority: the sweep would outrank
-// it, so the scheduler could shed it to make room for the run.
+// it, so the scheduler could shed it to make room for the run. A pod already
+// being deleted and a pod whose phase is Succeeded or Failed hold nothing the
+// sweep could displace, so neither counts against it.
 func refuseProtectedPods(pods []listedPod, protected []string, sweep int) *PriorityDecline {
 	var offenders []listedPod
 	for _, pod := range pods {
 		// A pod being deleted is no longer what the scheduler could shed: it is
 		// already going, and its replacement is a pod of its own in the listing.
 		if pod.terminating {
+			continue
+		}
+		// A Succeeded or Failed pod holds nothing and cannot be displaced: the
+		// sweep shedding it would free no room, so it counts against nothing.
+		if pod.terminated {
 			continue
 		}
 		if !slices.Contains(protected, pod.namespace) {
@@ -148,7 +155,7 @@ func refusePriorityTable(listing priorityListing, sweep int) *PriorityDecline {
 		return newPriorityDecline("not launching: %v", err)
 	}
 	for _, pod := range listing.pods {
-		if pod.terminating {
+		if pod.terminating || pod.terminated {
 			continue
 		}
 		row, ok := tableRow(pod)
@@ -226,14 +233,15 @@ type priorityListing struct {
 }
 
 // listedPod is one pod the listing names: where it runs, its live priority (nil
-// when the listing omits it), its owners, and whether it is already being
-// deleted.
+// when the listing omits it), its owners, whether it is already being deleted,
+// and whether its phase says it has ended.
 type listedPod struct {
 	namespace   string
 	name        string
 	priority    *int
 	owners      []ownerRef
 	terminating bool
+	terminated  bool
 }
 
 // ownerRef is an object's owner as the listing names it.
@@ -287,14 +295,17 @@ func (l *priorityListing) add(raw json.RawMessage) error {
 	var item struct {
 		Kind     string `json:"kind"`
 		Metadata struct {
-			Name              string `json:"name"`
-			Namespace         string `json:"namespace"`
-			DeletionTimestamp string `json:"deletionTimestamp"`
+			Name              string     `json:"name"`
+			Namespace         string     `json:"namespace"`
+			DeletionTimestamp string     `json:"deletionTimestamp"`
+			OwnerReferences   []ownerRef `json:"ownerReferences"`
 		} `json:"metadata"`
 		Spec struct {
-			Priority        *int       `json:"priority"`
-			OwnerReferences []ownerRef `json:"ownerReferences"`
+			Priority *int `json:"priority"`
 		} `json:"spec"`
+		Status struct {
+			Phase string `json:"phase"`
+		} `json:"status"`
 		Value *int `json:"value"`
 	}
 	if err := json.Unmarshal(raw, &item); err != nil {
@@ -313,8 +324,9 @@ func (l *priorityListing) add(raw json.RawMessage) error {
 			namespace:   item.Metadata.Namespace,
 			name:        item.Metadata.Name,
 			priority:    item.Spec.Priority,
-			owners:      item.Spec.OwnerReferences,
+			owners:      item.Metadata.OwnerReferences,
 			terminating: item.Metadata.DeletionTimestamp != "",
+			terminated:  podTerminated(item.Status.Phase),
 		})
 	case "PriorityClass":
 		if item.Value != nil {
