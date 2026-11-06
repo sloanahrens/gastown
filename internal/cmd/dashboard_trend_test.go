@@ -522,7 +522,7 @@ func TestBuildRecentLandingsRejectedRowOfAnUnlandedBeadTakesItsRigFromThePrefix(
 		{Rig: "beads", Bead: "be-xu2.22", Branch: "crew/dipper/be-xu2.22", SeenAt: now.Add(-time.Hour)},
 	}
 	rejs := []omRejection{{At: now.Add(-30 * time.Minute), Bead: "be-xu2.22", Kind: "review"}}
-	rigOfPrefix := func(bead string) string {
+	rigOfBead := func(bead string) string {
 		if strings.HasPrefix(bead, "be-") {
 			return "beads"
 		}
@@ -534,7 +534,7 @@ func TestBuildRecentLandingsRejectedRowOfAnUnlandedBeadTakesItsRigFromThePrefix(
 	who := func(rig, bead string) string { whoAsked = append(whoAsked, rig); return submitters(rig, bead) }
 	crew := func(rig, bead string) bool { crewAsked = append(crewAsked, rig); return crewOf(rig, bead) }
 
-	rows := buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, who, crew, nil, rigOfPrefix, 30)
+	rows := buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, who, crew, nil, rigOfBead, 30)
 	if len(rows) != 1 {
 		t.Fatalf("%d rows, want 1: %+v", len(rows), rows)
 	}
@@ -565,9 +565,9 @@ func TestBuildRecentLandingsLandedRigOutranksThePrefix(t *testing.T) {
 		{Record: landings.Record{Bead: "be-xu2.22", Rig: "beads", Branch: "crew/dipper/be-xu2.22", OMVerdict: "approve", LandedAt: now.Add(-2 * time.Hour)}},
 	}
 	rejs := []omRejection{{At: now.Add(-30 * time.Minute), Bead: "be-xu2.22", Kind: "review"}}
-	rigOfPrefix := func(string) string { return "gastown" }
+	rigOfBead := func(string) string { return "gastown" }
 
-	rows := buildRecentLandings(now, recs, nil, rejs, nil, nil, nil, nil, nil, nil, rigOfPrefix, 30)
+	rows := buildRecentLandings(now, recs, nil, rejs, nil, nil, nil, nil, nil, nil, rigOfBead, 30)
 	var rejected *dashboard.LandingRow
 	for i := range rows {
 		if rows[i].Outcome == "rejected" {
@@ -601,6 +601,52 @@ func TestBuildRecentLandingsUnknownPrefixKeepsTodaysRow(t *testing.T) {
 	}
 	if len(before) != 1 || before[0].Rig != "gastown" || before[0].Polecat != "agate" {
 		t.Errorf("row = %+v, want gastown rig and submitter agate", before)
+	}
+}
+
+// The lookup production passes buildRecentLandings is landingRig(townRoot), a
+// bead-level lookup through the town's routes table (dashboard.go), not a
+// hand-built stub. This drives that lookup over a real routes.jsonl: a rejected
+// row of a never-landed bead takes the rig the table routes its prefix to, and
+// the crew and submitter lookups are asked for that rig. It fails if landingRig
+// stops reading the table, leaving the row on the gastown fallback (gt-a64mi).
+func TestBuildRecentLandingsRigComesFromTheProductionRoutesFile(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	routes := `{"prefix":"be-","path":"beads/mayor/rig"}
+`
+	if err := os.WriteFile(filepath.Join(beadsDir, beads.RoutesFileName), []byte(routes), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 5, 14, 0, 0, 0, time.UTC)
+	subs := []land.SubmissionRecord{
+		{Rig: "beads", Bead: "be-xu2.22", Branch: "crew/dipper/be-xu2.22", SeenAt: now.Add(-time.Hour)},
+	}
+	rejs := []omRejection{{At: now.Add(-30 * time.Minute), Bead: "be-xu2.22", Kind: "review"}}
+	names, crewOf := landingNameLookup(subs), crewLandingLookup(subs)
+	who := func(rig, bead string) string {
+		if rig != "beads" {
+			t.Errorf("submitter lookup for rig %q, want the rig the route table names", rig)
+		}
+		return names(rig, bead)
+	}
+	crew := func(rig, bead string) bool {
+		if rig != "beads" {
+			t.Errorf("crew lookup for rig %q, want the rig the route table names", rig)
+		}
+		return crewOf(rig, bead)
+	}
+
+	rows := buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, who, crew, nil, landingRig(townRoot), 30)
+	if len(rows) != 1 {
+		t.Fatalf("%d rows, want 1: %+v", len(rows), rows)
+	}
+	if row := rows[0]; row.Rig != "beads" || row.Polecat != "dipper" || !row.Crew || row.CrewAgent != "dipper" {
+		t.Errorf("row = %+v, want dipper's crew row of the beads rig the routes file names", rows[0])
 	}
 }
 
