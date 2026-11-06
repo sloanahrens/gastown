@@ -118,6 +118,7 @@ func loadGuardCorpus(t *testing.T) []guardCorpusRow {
 // guardCorpusFixture is the scratch session the rows are judged in: a Go
 // module worktree (fakeModule, the helper the existing guard tests build
 // their trees with), a home directory and a town root, all under t.TempDir().
+// The town root also holds the rig directories the rows name.
 // Nothing here reads the live host: the guards reach their answer through the
 // same guardProcess injection their own tests use.
 type guardCorpusFixture struct {
@@ -135,6 +136,14 @@ func newGuardCorpusFixture(t *testing.T) guardCorpusFixture {
 	town := filepath.Join(t.TempDir(), "town")
 	if err := os.MkdirAll(town, 0o755); err != nil {
 		t.Fatalf("mkdir town: %v", err)
+	}
+	// The rig the dangerous rows name: a rig root with its polecats/
+	// aggregate, one polecat worktree and the bare repo. Built so each row is
+	// judged against a directory that exists, as it is in a real town.
+	for _, rel := range []string{"gastown/polecats/topaz/gastown", "gastown/.repo.git"} {
+		if err := os.MkdirAll(filepath.Join(town, rel), 0o755); err != nil {
+			t.Fatalf("mkdir town/%s: %v", rel, err)
+		}
 	}
 	return guardCorpusFixture{
 		// The neutral "rig" layout carries no "polecats/" or "crew/" element,
@@ -226,6 +235,26 @@ func TestGuardCorpusMatchesCurrentVerdicts(t *testing.T) {
 					guardCorpusPath, row.line, row.guard, row.context, row.command, reason, row.reasonKey)
 			}
 		})
+	}
+}
+
+// TestGuardCorpusNamedPathsExist checks that every {town} or {home} path a row
+// names is a directory in the fixture. A row whose path the fixture never
+// builds is judged against a path that does not exist, so its verdict says
+// nothing about the directory the row names.
+func TestGuardCorpusNamedPathsExist(t *testing.T) {
+	t.Parallel()
+	fixture := newGuardCorpusFixture(t)
+	for _, row := range loadGuardCorpus(t) {
+		for _, token := range strings.Fields(row.command) {
+			if !strings.HasPrefix(token, "{town}") && !strings.HasPrefix(token, "{home}") {
+				continue
+			}
+			path := fixture.expand(token)
+			if st, err := os.Stat(path); err != nil || !st.IsDir() {
+				t.Errorf("%s:%d: row names %s, which the fixture does not build as a directory", guardCorpusPath, row.line, path)
+			}
+		}
 	}
 }
 
