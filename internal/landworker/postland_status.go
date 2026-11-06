@@ -287,7 +287,7 @@ func (realPostLandClock) Now() time.Time { return time.Now() }
 // into the rig's main state and returns: nothing waits on CI, and PollPending
 // reads the status on a later pass. A verdict that cannot be recorded is
 // reported through StoreFailure at once, so the silence is an attention item.
-func (p *PostLandRunner) recordPending(ctx context.Context, pl PostLand, name string) {
+func (p *PostLandRunner) recordPending(pl PostLand, name string) {
 	p.statusMu.Lock()
 	defer p.statusMu.Unlock()
 	now := p.statusClock().Now()

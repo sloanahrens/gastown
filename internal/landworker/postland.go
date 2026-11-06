@@ -187,7 +187,7 @@ func (p *PostLandRunner) Trigger(ctx context.Context, pl PostLand) {
 		if cmd := p.command(); cmd != "" {
 			p.logf("merge_queue.post_land_status_context %q is set, so it decides the verdict and post_land_command %q is not run", p.statusContext(), cmd)
 		}
-		p.recordPending(ctx, pl, p.statusContext())
+		p.recordPending(pl, p.statusContext())
 		return
 	}
 	p.mu.Lock()
