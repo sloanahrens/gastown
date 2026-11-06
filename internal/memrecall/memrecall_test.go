@@ -74,7 +74,7 @@ func TestParse(t *testing.T) {
 	}{{
 		name: "modern header block",
 		key:  "memory.always-check-argv",
-		value: "recorded: 2026-10-14 by gastown/crew/sloan (bead gt-xyz)\n" +
+		value: "recorded: 2026-10-14 by gastown/crew/operator (bead gt-xyz)\n" +
 			"verified: 2026-09-01\n" +
 			"type: project\n" +
 			"durable: true\n" +
@@ -98,9 +98,9 @@ func TestParse(t *testing.T) {
 	}, {
 		name:      "legacy value takes its type from the key",
 		key:       "gt.feedback.absence-is-not-evidence",
-		value:     "Before treating an absence as evidence, check.\n\n[recorded by: sloan @ 2026-09-30 at 12:03]",
+		value:     "Before treating an absence as evidence, check.\n\n[recorded by: operator @ 2026-09-30 at 12:03]",
 		wantType:  "feedback",
-		wantBody:  "Before treating an absence as evidence, check.\n\n[recorded by: sloan @ 2026-09-30 at 12:03]",
+		wantBody:  "Before treating an absence as evidence, check.\n\n[recorded by: operator @ 2026-09-30 at 12:03]",
 		wantScope: "rig",
 		verified:  time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC),
 	}, {
@@ -305,7 +305,7 @@ func TestScore(t *testing.T) {
 	t.Parallel()
 
 	parse := func(key, body string) Memory {
-		return Parse(key, "recorded: 2026-10-14 by gastown/crew/sloan\n\n"+body)
+		return Parse(key, "recorded: 2026-10-14 by gastown/crew/operator\n\n"+body)
 	}
 
 	tests := []struct {
