@@ -3147,6 +3147,72 @@ func TestMaintenanceArchiveCaughtUpDatabasesStillGc(t *testing.T) {
 	}
 }
 
+// TestMaintenanceArchiveNoProgressStopLeavesDatabaseUnmarked: a full batch that
+// records the watermark it started with ends the export, and unlike a budget or
+// batch-bound stop it leaves nothing known behind: the database is not marked
+// unarchived, so its gc runs in the same cycle with no "skipped" line (gt-fa5sjm).
+func TestMaintenanceArchiveNoProgressStopLeavesDatabaseUnmarked(t *testing.T) {
+	t.Parallel()
+
+	// A full batch of one stale commit: limit-sized, dated before the seeded
+	// watermark, so writing it cannot move the watermark. Only the no-progress
+	// rule can end the loop.
+	setup := func(t *testing.T) (*Daemon, *gcFakes, *bytes.Buffer) {
+		t.Helper()
+		d, logs := gcTestDaemon(t)
+		f := withGCFakes(t, d)
+		f.sizes = map[string]gcMeasure{"gt": {633 * mib, 0}}
+		dir := t.TempDir()
+		d.patrolConfig = archiveConfig(dir)
+		limit := 1
+		d.patrolConfig.Patrols.ScheduledMaintenance.ArchiveCommitLimit = &limit
+		d.maint.now = func() time.Time { return gcTestNow }
+		wm := ArchiveWatermark{Date: gcTestNow, Hashes: []string{"h1"}}
+		if err := recordArchiveWatermark(d.config.TownRoot, "gt", wm); err != nil {
+			t.Fatalf("seeding the watermark: %v", err)
+		}
+		commits := map[string][]archiveCommit{"gt": {
+			{Hash: "h0", Committer: "c", Date: gcTestNow.Add(-time.Second), Message: "stale"},
+		}}
+		withArchiveFakes(d, f, commits, nil)
+		return d, f, logs
+	}
+
+	t.Run("the result does not mark it", func(t *testing.T) {
+		t.Parallel()
+		d, _, _ := setup(t)
+
+		out, unarchived, outcomes := d.maintenanceArchive([]string{"gt"})
+
+		if got := outcomes["gt"].commits.stop; got != archiveStopNoProgress {
+			t.Fatalf("commit stop = %v, want the no-progress stop: the fixture must be a full batch that cannot advance", got)
+		}
+		if out.outcome != gcOutcomeCompleted {
+			t.Errorf("outcome = %v, want completed: a no-progress stop is not a failure", out.outcome)
+		}
+		if len(unarchived) != 0 {
+			t.Errorf("unarchived = %v, want none: a no-progress stop leaves nothing known behind", unarchived)
+		}
+	})
+
+	t.Run("its gc runs", func(t *testing.T) {
+		t.Parallel()
+		d, f, logs := setup(t)
+
+		d.runScheduledMaintenance()
+
+		if got := strings.Join(f.gcCalls, ","); got != "gt" {
+			t.Errorf("gc calls = %v, want gt: a no-progress stop does not skip its database's gc", f.gcCalls)
+		}
+		if strings.Contains(logs.String(), "gc gt: skipped") {
+			t.Errorf("log reports gt's gc skipped for a no-progress stop:\n%s", logs.String())
+		}
+		if len(f.escalations) != 0 {
+			t.Errorf("escalations = %v, want none: a no-progress stop is not a failure", f.escalations)
+		}
+	})
+}
+
 // TestMaintenanceArchiveStopRaisesNoAttentionItem: a stop leaves the cycle's
 // outcome as a clean run's and raises no attention item, while an export that
 // fails still raises exactly one item and keeps its watermark (gt-s5edka).
