@@ -59,7 +59,7 @@ that carry no answers, and how many of its log lines did not parse.
 A battery is ok; disabled, when the town has not turned it on under
 patrols.<name>; idle by design, for the batteries only an event writes
 (progress, failcause, and targets while scheduled_slings is off), where a
-quiet log is expected; stale, for a continuous battery whose patrol has not
+quiet log is expected; stale, for a quarter-hour battery whose patrol has not
 run for more than %s, or for a landing battery the town landed past
 without a line; late, for a weekly battery more than %s behind; low, when a
 battery with a median of %d or more lines a day wrote under %s of it;
