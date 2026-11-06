@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/polecat/cachevol"
+	"github.com/steveyegge/gastown/internal/imagepolicy"
 	"github.com/steveyegge/gastown/internal/templates"
 )
 
@@ -670,7 +670,7 @@ func runnerContainer(spec Spec) (Container, error) {
 	return Container{
 		Name:            runnerContainerName,
 		Image:           spec.Image,
-		ImagePullPolicy: cachevol.PullPolicyFor(spec.Image),
+		ImagePullPolicy: imagepolicy.PullPolicyFor(spec.Image),
 		Command:         []string{RunnerCommand},
 		// The unprivileged polecat user from the start: the pod's shared process
 		// namespace has a root pause process as pid 1, so a test that signals
@@ -761,7 +761,7 @@ func dindContainer() Container {
 		Image: templates.SweepDindImage,
 		// The engine is pinned by digest today, so this renders nothing; the same rule keeps it
 		// pulling if that reference ever becomes a moving tag.
-		ImagePullPolicy: cachevol.PullPolicyFor(templates.SweepDindImage),
+		ImagePullPolicy: imagepolicy.PullPolicyFor(templates.SweepDindImage),
 		Args: []string{
 			// dockerd named as the command, so the image's entrypoint adds no
 			// host of its own on 0.0.0.0:2375 beside the loopback one below.
