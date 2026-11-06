@@ -2427,6 +2427,19 @@ func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec
 		if started.stop != nil {
 			stop = started.stop
 		}
+		// A guard whose read failed answered nothing: no decline stands, no
+		// verdict is taken, and nothing was applied, so there is nothing to
+		// take down. The cycle defers, one line an hour while the reason
+		// stands, and the rig's attention item stands with it (gt-gg9hv.56).
+		var unreadable *sweeprunner.GuardUnreadable
+		if errors.As(started.err, &unreadable) {
+			d.tierSweepGuardReads.set(spec.Rig, unreadable)
+			d.tierSweepPriorityLog.Clear()
+			if d.tierSweepGuardLog.Report(d.clk().Now(), unreadable.Line()) {
+				d.logger.Printf("%s", unreadable.Line())
+			}
+			return tierSweepStageResult{exitCode: -1, err: unreadable}
+		}
 		if started.declined {
 			// Nothing was created and nothing was learned about the tree, so
 			// the cycle defers instead of recording a RED verdict and a bead.
@@ -2732,7 +2745,15 @@ func (d *Daemon) tierSweepLaunchRunner(ctx context.Context, st tierSweepStage, s
 	launch.stop = func() { d.tierSweepRunnerStop(ctx, spec) }
 	// The guards run before anything is applied, and a refusal leaves nothing
 	// to apply: the run would share an engine object with a run still using it.
-	if guardOut, code, guardErr := d.tierSweepRunnerGuards(ctx, plan.Guards); guardErr != nil {
+	guardOut, code, guardErr := d.tierSweepRunnerGuards(ctx, plan.Guards)
+	// Guards that answered, as a pass or a refusal, end any read failure
+	// standing for the rig; only a read that failed keeps it (gt-gg9hv.56).
+	var unreadable *sweeprunner.GuardUnreadable
+	if !errors.As(guardErr, &unreadable) {
+		d.tierSweepGuardReads.clear(spec.Rig)
+		d.tierSweepGuardLog.Clear()
+	}
+	if guardErr != nil {
 		launch.output, launch.exitCode, launch.err = guardOut, code, guardErr
 		return launch
 	}
@@ -2857,7 +2878,9 @@ func (d *Daemon) tierSweepLogPreflightDecline(context string, reason error) {
 // tierSweepRunnerGuards runs a plan's guards in order and stops at the first
 // that refuses. It returns the combined output of the steps it ran and the
 // refusal as an error; the caller then applies nothing. A guard command that
-// cannot run is a refusal too: a check that did not answer is not a pass.
+// cannot run, or exits non-zero, returns a *sweeprunner.GuardUnreadable: a
+// check that did not answer is not a pass, and the caller defers the cycle
+// rather than recording a verdict (gt-gg9hv.56).
 func (d *Daemon) tierSweepRunnerGuards(ctx context.Context, guards []sweeprunner.Guard) (string, int, error) {
 	var b strings.Builder
 	for _, guard := range guards {
@@ -2883,12 +2906,14 @@ func (d *Daemon) tierSweepRunnerGuards(ctx context.Context, guards []sweeprunner
 		b.Write(stderr)
 		if err != nil {
 			code := -1
-			var exitErr *exec.ExitError
-			if errors.As(err, &exitErr) {
-				code = exitErr.ExitCode()
+			var coded interface{ ExitCode() int }
+			if errors.As(err, &coded) {
+				code = coded.ExitCode()
 			}
 			fmt.Fprintf(&b, "sweep-run: %s failed (exit %d): %v\n", strings.Join(step.Argv, " "), code, err)
-			return b.String(), code, fmt.Errorf("the run's guard did not pass (exit %d)", code)
+			// A read that did not answer is not a refusal and not a pass: the
+			// cycle defers rather than going RED (gt-gg9hv.56).
+			return b.String(), code, sweeprunner.NewGuardUnreadable(step.Argv, code, stderr)
 		}
 		if err := guard.Refuse(stdout); err != nil {
 			fmt.Fprintf(&b, "sweep-run: %v\n", err)
@@ -2896,6 +2921,38 @@ func (d *Daemon) tierSweepRunnerGuards(ctx context.Context, guards []sweeprunner
 		}
 	}
 	return b.String(), 0, nil
+}
+
+// tierSweepGuardReads is the guard read that failed for each rig, the state the
+// attention tick raises one item per rig from (gt-gg9hv.56). The cycle writes
+// it and the tick reads it from another goroutine, so it is locked.
+type tierSweepGuardReads struct {
+	mu    sync.Mutex
+	byRig map[string]*sweeprunner.GuardUnreadable
+}
+
+// set records the failed read for rig; it replaces an earlier one.
+func (r *tierSweepGuardReads) set(rig string, unreadable *sweeprunner.GuardUnreadable) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.byRig == nil {
+		r.byRig = map[string]*sweeprunner.GuardUnreadable{}
+	}
+	r.byRig[rig] = unreadable
+}
+
+// clear removes rig's failed read: a cycle whose guards answered ended it.
+func (r *tierSweepGuardReads) clear(rig string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.byRig, rig)
+}
+
+// get returns rig's failed read, nil when none stands.
+func (r *tierSweepGuardReads) get(rig string) *sweeprunner.GuardUnreadable {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.byRig[rig]
 }
 
 // tierSweepRunnerStop takes the run in spec.OutDir down: it renders the Spec

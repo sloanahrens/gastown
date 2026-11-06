@@ -77,11 +77,15 @@ var ruleOwners = map[string]Owner{
 	RuleTierSweepRed:     OwnerOverseer,
 	RuleTierSweepStarved: OwnerOverseer,
 	RuleTierSweepStuck:   OwnerOverseer,
-	RuleRevertRefused:    OwnerOverseer,
-	RuleBlockedMail:      OwnerOverseer,
-	RuleOverrunStopped:   OwnerOverseer,
-	RuleScheduledGate:    OwnerOverseer,
-	RuleDispatchIdle:     OwnerOverseer,
+	// A guard read the sweep could not make defers the cycle: the overseer
+	// triages it, and the cluster access the read needs is the operator's to
+	// grant (gt-gg9hv.56).
+	RuleTierSweepGuardUnreadable: OwnerOverseer,
+	RuleRevertRefused:            OwnerOverseer,
+	RuleBlockedMail:              OwnerOverseer,
+	RuleOverrunStopped:           OwnerOverseer,
+	RuleScheduledGate:            OwnerOverseer,
+	RuleDispatchIdle:             OwnerOverseer,
 	// A deploy that did not ship is work, not a decision: the overseer re-runs
 	// it or finds what stopped it, and the operator hears about it only if it
 	// stays failed (gt-hcbft).

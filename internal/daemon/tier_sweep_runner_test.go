@@ -1278,21 +1278,23 @@ func TestTierSweepRunnerGuardsRefuseAMalformedGuard(t *testing.T) {
 
 // TestSyncRefusesWhileASweepJobReadsTheClaim drives the guard through a fake
 // kubectl: a rig sweep Job still active refuses the run, naming it, and nothing
-// is applied; a listing that cannot be read refuses too. A Job whose listing
-// holds three true condition types ending in Complete is ended, not refused, so
-// the run goes on in its order.
+// is applied; a listing that cannot be read defers the run instead, since a
+// read that did not answer is no verdict on the sweep Job (gt-gg9hv.56). A Job
+// whose listing holds three true condition types ending in Complete is ended,
+// not refused, so the run goes on in its order.
 func TestSyncRefusesWhileASweepJobReadsTheClaim(t *testing.T) {
 	t.Parallel()
 	const activeJob = "gt-sweep-gastown-deadbeef-otherrun"
 	for _, tc := range []struct {
-		name string
-		jobs string
-		err  bool
-		want string
+		name     string
+		jobs     string
+		err      bool
+		want     string
+		deferred bool
 	}{
 		{name: "an unlabelled active Job", jobs: activeJob + "\n", want: activeJob},
 		{name: "a true condition neither ended type", jobs: activeJob + " Suspended\n", want: activeJob},
-		{name: "a listing that cannot be read", err: true, want: "the run's guard did not pass"},
+		{name: "a listing that cannot be read", err: true, want: "the guard's read failed", deferred: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1305,14 +1307,24 @@ func TestSyncRefusesWhileASweepJobReadsTheClaim(t *testing.T) {
 
 			stage := d.tierSweepRunRunner(context.Background(), st, spec)
 
-			if stage.reason != tierSweepRunnerNoResult {
-				t.Fatalf("stage = %+v, want RED with reason %q", stage, tierSweepRunnerNoResult)
-			}
-			if stage.exitCode == 0 {
-				t.Error("exit code 0 for a run the guard refused")
-			}
-			if !strings.Contains(stage.output, tc.want) {
-				t.Errorf("stage output does not name %q:\n%s", tc.want, stage.output)
+			if tc.deferred {
+				var unreadable *sweeprunner.GuardUnreadable
+				if stage.ran || !errors.As(stage.err, &unreadable) {
+					t.Fatalf("stage = %+v, want the run deferred on the guard's unreadable listing", stage)
+				}
+				if !strings.Contains(unreadable.Line(), tc.want) {
+					t.Errorf("deferral line %q does not say %q", unreadable.Line(), tc.want)
+				}
+			} else {
+				if stage.reason != tierSweepRunnerNoResult {
+					t.Fatalf("stage = %+v, want RED with reason %q", stage, tierSweepRunnerNoResult)
+				}
+				if stage.exitCode == 0 {
+					t.Error("exit code 0 for a run the guard refused")
+				}
+				if !strings.Contains(stage.output, tc.want) {
+					t.Errorf("stage output does not name %q:\n%s", tc.want, stage.output)
+				}
 			}
 			for _, argv := range cmds.ran {
 				if slices.Contains(strings.Fields(argv), "apply") || slices.Contains(strings.Fields(argv), "create") {
