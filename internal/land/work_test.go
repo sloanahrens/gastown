@@ -167,6 +167,48 @@ func TestReadyNoteIgnoresAnUnreadableSubmissionTime(t *testing.T) {
 	}
 }
 
+// A Worker line may hold the polecat's full actor, as a hand-written note does.
+// It reads as the bare seat name gt done writes; any other value is kept as
+// written, a crew actor included.
+func TestReadyNoteWorkerActorForm(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, worker, want string }{
+		{"full polecat actor", "beaver/polecats/cypress", "cypress"},
+		{"bare seat name", "cypress", "cypress"},
+		{"crew actor", "gastown/crew/egret", "gastown/crew/egret"},
+		{"too many parts", "a/polecats/b/c", "a/polecats/b/c"},
+		{"empty rig", "/polecats/x", "/polecats/x"},
+		{"empty name", "beaver/polecats/", "beaver/polecats/"},
+		{"invalid name", "beaver/polecats/a+b", "beaver/polecats/a+b"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := sampleWork()
+			w.Worker = tc.worker
+			got, ok := ParseReadyNote(FormatReadyNote(w))
+			if !ok || got.Worker != tc.want {
+				t.Fatalf("Worker = %q (ok=%v), want %q", got.Worker, ok, tc.want)
+			}
+		})
+	}
+}
+
+// refusalSeat reads the seat from the branch and compares the note's Worker
+// with it, so a note that names the full actor must still name the seat.
+func TestRefusalSeatReadsAFullActorNote(t *testing.T) {
+	t.Parallel()
+	w := sampleWork()
+	w.Worker = "gastown/polecats/opal"
+	got, ok := ParseReadyNote(FormatReadyNote(w))
+	if !ok {
+		t.Fatal("ParseReadyNote found no block")
+	}
+	got.Rig = "gastown"
+	if seat := refusalSeat(got); seat != "gastown/opal" {
+		t.Fatalf("refusalSeat = %q, want %q", seat, "gastown/opal")
+	}
+}
+
 func TestWorkFromBeadNeedsLabelAndBlock(t *testing.T) {
 	t.Parallel()
 	note := FormatReadyNote(sampleWork())

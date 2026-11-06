@@ -353,6 +353,38 @@ func TestDoneEventRecorderCrewActor(t *testing.T) {
 	})
 }
 
+// A READY TO LAND block whose Worker line holds the full actor writes the same
+// done event as the bare seat name: the recorder reads the parsed note.
+func TestDoneEventRecorderFullActorNote(t *testing.T) {
+	t.Parallel()
+	w := doneWork()
+	full := w
+	full.Worker = w.Rig + "/polecats/" + w.Worker
+	full.Head = sampleWork().Head
+	got, ok := ParseReadyNote(FormatReadyNote(full))
+	if !ok {
+		t.Fatal("ParseReadyNote found no block")
+	}
+	got.BeadID, got.Rig = w.BeadID, w.Rig
+	rec, path := newDoneRecorder(t, w)
+
+	wrote, err := rec.Record(got)
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if !wrote {
+		t.Fatal("Record = false; want the full-actor note's done event written")
+	}
+	lines := readEventLines(t, path)
+	if len(lines) != 1 {
+		t.Fatalf("events = %d lines, want 1", len(lines))
+	}
+	actor, _ := decodeDoneEvent(t, lines[0])
+	if want := w.Rig + "/polecats/" + w.Worker; actor != want {
+		t.Errorf("actor = %q, want %q", actor, want)
+	}
+}
+
 // A seat may name any Worker in its READY TO LAND block, so the host writes
 // the event only for the seat it actually slung: a block naming another
 // polecat is refused with nothing appended.

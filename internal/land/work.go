@@ -214,7 +214,7 @@ func ParseReadyNote(notes string) (Work, bool) {
 		case "target":
 			w.Target = value
 		case "worker":
-			w.Worker = value
+			w.Worker = polecatSeat(value)
 		case "submitted":
 			// A time this code cannot read orders as if the block carried
 			// none: a bad stamp is not a reason to refuse to land the work.
@@ -233,6 +233,19 @@ func finishReady(w Work) (Work, bool) {
 		return Work{}, false
 	}
 	return w, true
+}
+
+// polecatSeat reads a Worker value as the bare seat name gt done writes. A note
+// written by hand may name the polecat's full actor (<rig>/polecats/<name>),
+// which reads as <name>. Any other value is kept as written, a crew actor
+// (<rig>/crew/<name>) included. The rig part is not read: the seat's rig is the
+// landing worker's own, and the recorder checks the seat against the bead's
+// assignee.
+func polecatSeat(worker string) string {
+	if _, name, ok := splitPolecatSeat(worker); ok {
+		return name
+	}
+	return worker
 }
 
 // SubmittedAt is when issue was submitted for landing: the READY TO LAND
