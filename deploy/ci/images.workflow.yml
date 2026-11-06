@@ -1,0 +1,208 @@
+# The image build: runs on a push to green/<sha12>, the ref a fully green tier
+# sweep publishes (gt-gg9hv.61), and builds and pushes the daemon and the
+# polecat image at that one commit (gt-gg9hv.62).
+#
+# This text lives under deploy/ci/ because .forgejo/workflows/ is
+# operator-protected: the pre-receive hook refuses an agent push that changes a
+# workflow file. The operator copies it to .forgejo/workflows/images.yml, the
+# way .forgejo/workflows/post-land.yml went in.
+#
+# One commit for both images: the preflight reads GITHUB_SHA once and writes
+# the tag, each image is built at it and labelled with the full sha, and after
+# both builds a step reads the commit label back from each pushed image and
+# fails when either is not GITHUB_SHA. A daemon image and a polecat image at
+# different commits are a pair the town cannot run (gt-gg9hv.63).
+#
+# No concurrency block on purpose: a cancelled run would leave a failure on a
+# commit that did not fail, and a replaced pending run would leave no image at
+# all.
+#
+# The shell lines here are glue. Before the checkout one asks whether go is
+# installed, since the Go commands it starts cannot run before then; the rest
+# run those commands. Every decision — the runner's tools, jq's version, the
+# mango pin, the commit, the digests, the labels — is a Go command in this
+# repository with unit tests (internal/ci/preflight, internal/ci/imagepublish,
+# internal/ci/ctxlabels).
+name: images
+on:
+  push:
+    branches: ["green/**"]
+
+env:
+  # The Forgejo host, the registry owner and the two image names are typed here
+  # only; gt update images (gt-gg9hv.63) types the same values, so the two
+  # spellings are one to keep equal.
+  FORGEJO_HOST: forgejo:3000
+  REGISTRY_OWNER: sloan
+  DAEMON_IMAGE: gastown-daemon
+  POLECAT_IMAGE: gastown-polecat
+  # The account REGISTRY_TOKEN was minted for: the bot the provisioner gives
+  # write:package (scripts/forgejo-provision.sh, role registry).
+  REGISTRY_USER: bot-registry
+  # The account SOURCES_TOKEN was minted for, the login the credential helper
+  # answers as.
+  SOURCES_USER: bot-viewer
+  # mango is not one of the four image pins (deploy/daemon/image-pins names bd,
+  # om, hm and devops, and its parser refuses a fifth name), yet the daemon
+  # image's Dockerfile copies the mango binary. The operator sets these two
+  # repository variables to the mango source and commit the image carries; the
+  # preflight refuses when either is empty or names another host.
+  MANGO_URL: ${{ vars.MANGO_URL }}
+  MANGO_COMMIT: ${{ vars.MANGO_COMMIT }}
+
+jobs:
+  images:
+    runs-on: ci-base
+    steps:
+      # The one shell that runs before the checkout, and so before the
+      # repository's Go code exists: it only asks whether go is there. The
+      # step after the checkout is the preflight proper.
+      - name: preflight
+        run: |
+          if ! command -v go >/dev/null 2>&1; then
+            echo "images: the ci-base runner has no go, so the preflight cannot run" >&2
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+      # The preflight proper: jq, go, docker and git are installed, jq is
+      # 1.7.1, the mango pin is a source on the Forgejo host, and GITHUB_SHA is
+      # the full green commit. It writes SHA and TAG to $GITHUB_ENV and stops
+      # the job on the first rule it cannot hold.
+      - name: "preflight: the runner, the mango pin and the green commit"
+        run: |
+          go run ./internal/ci/cmd/imagepreflight \
+            -sha "${GITHUB_SHA:-}" \
+            -mango-url "$MANGO_URL" \
+            -mango-commit "$MANGO_COMMIT" \
+            -host "$FORGEJO_HOST" \
+            -env-out "$GITHUB_ENV"
+      - name: log in to the registry
+        env:
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          # The token reaches docker login on standard input only: never an
+          # argument, an echo or a log line.
+          printf '%s' "$REGISTRY_TOKEN" | docker login "$FORGEJO_HOST" --username "$REGISTRY_USER" --password-stdin
+      - name: let git read the pinned sources with the read-only token
+        run: |
+          set -euo pipefail
+          # SOURCES_TOKEN reaches git only through this helper, which reads it
+          # from the environment at each use: no URL, argument or .gitconfig
+          # value holds it. GIT_CONFIG_GLOBAL points the helper at a file under
+          # $RUNNER_TEMP, so the runner's own config is untouched; only the
+          # steps that fetch name that file in their env (as
+          # ${{ runner.temp }}/gitconfig, the same directory), so no step that
+          # runs no fetch inherits a credential helper.
+          cfg="$RUNNER_TEMP/gitconfig"
+          : > "$cfg"
+          chmod 600 "$cfg"
+          export GIT_CONFIG_GLOBAL="$cfg"
+          for scheme in http https; do
+            git config --global credential."$scheme://$FORGEJO_HOST".helper \
+              '!f() { test "$1" = get || exit 0; printf "username=%s\npassword=%s\n" "$SOURCES_USER" "$SOURCES_TOKEN"; }; f'
+          done
+      - name: fetch mango at its pin
+        env:
+          SOURCES_TOKEN: ${{ secrets.SOURCES_TOKEN }}
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/gitconfig
+        run: |
+          set -euo pipefail
+          mango=$(mktemp -d "$RUNNER_TEMP/mango.XXXXXX")
+          git -C "$mango" init --quiet
+          git -C "$mango" fetch --quiet --depth 1 "$MANGO_URL" "$MANGO_COMMIT"
+          git -C "$mango" checkout --quiet --detach FETCH_HEAD
+          got=$(git -C "$mango" rev-parse HEAD)
+          if [ "$got" != "$MANGO_COMMIT" ]; then
+            echo "images: the mango fetch landed on $got, not the pinned $MANGO_COMMIT" >&2
+            exit 1
+          fi
+          echo "MANGO_SRC=$mango" >> "$GITHUB_ENV"
+      - name: stage the daemon image's build context
+        env:
+          SOURCES_TOKEN: ${{ secrets.SOURCES_TOKEN }}
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/gitconfig
+        run: |
+          set -euo pipefail
+          ctx=$(mktemp -d "$RUNNER_TEMP/daemon-context.XXXXXX")
+          go run ./cmd/gt daemon image --apply --context-only \
+            --rev "$SHA" \
+            --out "$ctx" \
+            --gt-src "$GITHUB_WORKSPACE" \
+            --mango-src "$MANGO_SRC" \
+            --mango-commit "$MANGO_COMMIT" \
+            --pins "$GITHUB_WORKSPACE/deploy/daemon/image-pins"
+          # A full build stages this beside the binaries for its own engine
+          # step; a context-only run stops before that step, so the workflow
+          # copies the file the Dockerfile's COPY reads from the checkout.
+          cp "$GITHUB_WORKSPACE/deploy/daemon/ssh_known_hosts" "$ctx/ssh_known_hosts"
+          echo "DAEMON_CONTEXT=$ctx" >> "$GITHUB_ENV"
+      - name: build the daemon image
+        run: |
+          set -euo pipefail
+          docker build \
+            --platform linux/arm64 \
+            -f "$GITHUB_WORKSPACE/deploy/daemon/Dockerfile" \
+            -t "$FORGEJO_HOST/$REGISTRY_OWNER/$DAEMON_IMAGE:$TAG" \
+            --label org.gastown.gt-commit="$SHA" \
+            "$DAEMON_CONTEXT"
+      - name: stage the polecat image's build context
+        env:
+          SOURCES_TOKEN: ${{ secrets.SOURCES_TOKEN }}
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/gitconfig
+        run: |
+          set -euo pipefail
+          ctx=$(mktemp -d "$RUNNER_TEMP/polecat-context.XXXXXX")
+          staged=$(go run ./internal/polecat/imagectx/cmd/build \
+            -pins deploy/daemon/image-pins \
+            -seed-pins deploy/polecat/seed-pins \
+            -seed-urls deploy/polecat/seed-urls \
+            -rev "$SHA" \
+            -out "$ctx")
+          printf '%s\n' "$staged"
+          # The build's labels are read and held to the green commit by the Go
+          # command; it writes BD_COMMIT and GO_FLOOR to $GITHUB_ENV and fails
+          # the step on a listing that names another commit or no bd commit or
+          # Go floor.
+          printf '%s\n' "$staged" | go run ./internal/ci/cmd/ctxlabels \
+            -sha "$SHA" \
+            -env-out "$GITHUB_ENV"
+          echo "POLECAT_CONTEXT=$ctx" >> "$GITHUB_ENV"
+      - name: build the polecat image
+        run: |
+          set -euo pipefail
+          docker build \
+            --platform linux/arm64 \
+            -f "$GITHUB_WORKSPACE/deploy/polecat/Dockerfile" \
+            -t "$FORGEJO_HOST/$REGISTRY_OWNER/$POLECAT_IMAGE:$TAG" \
+            --label org.gastown.gt-commit="$SHA" \
+            --label org.gastown.bd-commit="$BD_COMMIT" \
+            --build-arg GO_FLOOR="$GO_FLOOR" \
+            "$POLECAT_CONTEXT"
+      - name: push both images and publish their digests
+        run: |
+          set -euo pipefail
+          # The push, the registry digest read and the IMAGE line are
+          # internal/ci/cmd/imagepublish push, whose refusals (no digest, two
+          # digests, a digest of another shape, a failed docker call) are
+          # driven in internal/ci/imagepublish's tests. The error leaves the
+          # step red with no IMAGE line for that image.
+          go run ./internal/ci/cmd/imagepublish push \
+            -registry "$FORGEJO_HOST" \
+            -owner "$REGISTRY_OWNER" \
+            -daemon "$DAEMON_IMAGE" \
+            -polecat "$POLECAT_IMAGE" \
+            -tag "$TAG" \
+            -sha "$SHA"
+      - name: check both images carry the one commit
+        run: |
+          set -euo pipefail
+          # The label read and the comparison are internal/ci/cmd/imagepublish
+          # check; its mismatch and unreadable-label refusals are driven in
+          # internal/ci/imagepublish's tests.
+          go run ./internal/ci/cmd/imagepublish check \
+            -registry "$FORGEJO_HOST" \
+            -owner "$REGISTRY_OWNER" \
+            -daemon "$DAEMON_IMAGE" \
+            -polecat "$POLECAT_IMAGE" \
+            -tag "$TAG" \
+            -sha "$SHA"
