@@ -212,21 +212,33 @@ fi
 [ "$1" = "${STUB_GO_FAIL:-}" ] && [ "$dir_ok" = 1 ] && exit 1
 exit 0
 `
-	gateStubGo = "#!/bin/sh\n" + gateStubHead + gateStubTail
+	// gateStubGoPlusLintpin forwards the recipe's `go run ./cmd/lintpin` to a
+	// binary a case built from the checkout under test, so the recipe's linter
+	// check runs for real against the case's stub linter. A case that sets no
+	// STUB_LINTPIN gets a no-op, which keeps the other gate cases about their own
+	// stage; the check's branches are unit-tested in internal/lintpin.
+	gateStubGoPlusLintpin = `if [ "$1" = run ] && [ "$2" = ./cmd/lintpin ]; then
+	if [ -n "${STUB_LINTPIN:-}" ]; then
+		shift 2
+		exec "$STUB_LINTPIN" "$@"
+	fi
+	exit 0
+fi
+`
+	gateStubGo = "#!/bin/sh\n" + gateStubHead + gateStubGoPlusLintpin + gateStubTail
 
 	// gateStubLint stands in for golangci-lint, including the one behaviour the
 	// gate relies on it for: with STUB_LINT_CONTEND=n another run holds the module
 	// lock for the first n runs, so each of those exits 3 with golangci-lint's
 	// lock line, as the real one does, and the gate's wait script has to retry.
-	// `version --short` answers with the Makefile's own pin, so a case that does
-	// not set STUB_LINT_VERSION carries the version the gate requires;
+	// `version --short` answers STUB_LINT_VERSION, or the pin the fixture passes
+	// in STUB_LINT_SHORT, so a case never reads the Makefile itself, and
 	// STUB_LINT_MISSING models a PATH with no linter at all.
 	gateStubLint = `#!/bin/sh
 echo "golangci-lint $*" >>"$STUB_LOG"
 [ -n "${STUB_LINT_MISSING:-}" ] && exit 127
 if [ "$1" = version ]; then
-	pin=$(sed -n 's/^GOLANGCI_LINT_VERSION[[:space:]]*?=[[:space:]]*//p' Makefile | head -1)
-	echo "${STUB_LINT_VERSION-${pin#v}}"
+	echo "${STUB_LINT_VERSION:-$STUB_LINT_SHORT}"
 	exit 0
 fi
 rel=$(pwd -P); rel=${rel#"$STUB_REPO"}; rel=${rel#/}
@@ -254,6 +266,12 @@ exit 0
 `
 	gateStubShellTests = `#!/bin/sh
 echo "shell-tests" >>"$STUB_LOG"
+exit 0
+`
+	// gateStubDocker logs the docker command line the image recipes run. It
+	// starts no build, so a case reads which build args a recipe passes.
+	gateStubDocker = `#!/bin/sh
+echo "docker $*" >>"$STUB_LOG"
 exit 0
 `
 )
@@ -312,6 +330,7 @@ func newGateSandbox(t *testing.T) *GateSandbox {
 	for _, stub := range []struct{ name, body string }{
 		{"go", gateStubGo},
 		{"golangci-lint", gateStubLint},
+		{"docker", gateStubDocker},
 		{"preflight", gateStubPreflight},
 		{"shell-tests", gateStubShellTests},
 	} {
@@ -438,7 +457,10 @@ func (g *GateSandbox) gateEnv(vars []string) []string {
 	if err != nil {
 		g.t.Fatalf("resolve the checkout %s: %v", g.repo, err)
 	}
-	env = append(env, "GT_TEST_DOCKER=1", "STUB_LOG="+g.Path("calls"), "STUB_REPO="+repo)
+	// The stub linter answers the Makefile's own pin, so a case that sets no
+	// STUB_LINT_VERSION carries the version the recipe requires.
+	env = append(env, "GT_TEST_DOCKER=1", "STUB_LOG="+g.Path("calls"), "STUB_REPO="+repo,
+		"STUB_LINT_SHORT="+strings.TrimPrefix(golangciPin(g.t), "v"))
 	return append(env, vars...)
 }
 

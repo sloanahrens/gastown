@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -69,6 +70,17 @@ func makefileText(t *testing.T, root string) string {
 		t.Fatalf("read Makefile: %v", err)
 	}
 	return string(data)
+}
+
+// golangciPin is the version the Makefile under test pins, read from the
+// checkout so no case repeats it (gt-zzo1g2).
+func golangciPin(t *testing.T) string {
+	t.Helper()
+	m := regexp.MustCompile(`(?m)^GOLANGCI_LINT_VERSION[ \t]*\?=[ \t]*(\S+)[ \t]*$`).FindStringSubmatch(makefileText(t, repoRoot(t)))
+	if m == nil {
+		t.Fatal("the Makefile has no GOLANGCI_LINT_VERSION ?= pin: the image and the gate have nothing to agree on")
+	}
+	return m[1]
 }
 
 // hasTargetLine reports whether text declares target: at the start of a line.

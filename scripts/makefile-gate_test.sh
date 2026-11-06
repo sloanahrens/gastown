@@ -773,14 +773,6 @@ STUB
 cat >"$TMP/bin/golangci-lint" <<'STUB'
 #!/usr/bin/env bash
 echo "golangci-lint $*" >>"$STUB_LOG"
-[[ -n "${STUB_LINT_MISSING:-}" ]] && exit 127
-# `version --short` answers with the Makefile's own pin, so the recipe's check
-# carries the version it requires without the fixture repeating it.
-if [[ "$1" == version ]]; then
-  pin="$(sed -n 's/^GOLANGCI_LINT_VERSION[[:space:]]*?=[[:space:]]*//p' Makefile | head -1)"
-  echo "${STUB_LINT_VERSION-${pin#v}}"
-  exit 0
-fi
 [[ "${PWD##*/}" == tracker ]] && echo "golangci-lint in tracker" >>"$STUB_LOG"
 [[ "$1" == run && -n "${STUB_LINT_FAIL:-}" ]] && exit 1
 [[ "$1" == run && "${PWD##*/}" == "${STUB_LINT_FAIL_DIR:-}" ]] && exit 1
