@@ -94,6 +94,15 @@ type Allow struct {
 	Reason string `json:"reason"`
 }
 
+// ExcusedForbiddenPath is a file under a forbidden directory whose path-level
+// finding an allow row excuses. Its contents are not scanned, so this record
+// says, beside the findings, that the file is still there and why it is
+// allowed; a report that prints only findings would otherwise hide it.
+type ExcusedForbiddenPath struct {
+	Path   string
+	Reason string
+}
+
 // nonPersonalHomeNames are account names that documentation, fixtures and CI
 // paths use for a placeholder. A home path whose account name is exactly one
 // of these is not a finding; the whole name must match, so names such as
@@ -209,45 +218,66 @@ func SaveAllow(w io.Writer, rows []Allow) error {
 
 // Scan reports every finding in paths, applying allow rows as excuses. Each
 // path is read from fsys; a read failure is an error, never a clean result.
-func Scan(fsys fs.FS, paths []string, rules []Rule, blocked map[string]struct{}, allow []Allow) ([]Finding, error) {
+// An allow row that excuses a forbidden-directory file's path finding is
+// returned in excused: the file's contents are not scanned, so that record is
+// how a report still names the file and the reason it is allowed.
+func Scan(fsys fs.FS, paths []string, rules []Rule, blocked map[string]struct{}, allow []Allow) ([]Finding, []ExcusedForbiddenPath, error) {
 	var findings []Finding
+	var excused []ExcusedForbiddenPath
 	for _, path := range paths {
-		pathFindings, _, err := scanPath(fsys, path, rules, blocked, allow)
+		pathFindings, excusedPath, _, err := scanPath(fsys, path, rules, blocked, allow)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		findings = append(findings, pathFindings...)
+		if excusedPath != nil {
+			excused = append(excused, *excusedPath)
+		}
 	}
-	return findings, nil
+	return findings, excused, nil
 }
 
-// scanPath reports the findings in one file and returns the bytes it read.
-func scanPath(fsys fs.FS, path string, rules []Rule, blocked map[string]struct{}, allow []Allow) ([]Finding, []byte, error) {
+// scanPath reports the findings in one file and returns the bytes it read, plus
+// the forbidden-path record when an allow row excuses that path's finding.
+func scanPath(fsys fs.FS, path string, rules []Rule, blocked map[string]struct{}, allow []Allow) ([]Finding, *ExcusedForbiddenPath, []byte, error) {
 	for _, rule := range rules {
 		if rule.Name == "" || rule.Match == nil {
-			return nil, nil, fmt.Errorf("hygiene: rule with an empty name or no matcher")
+			return nil, nil, nil, fmt.Errorf("hygiene: rule with an empty name or no matcher")
 		}
 	}
 	if !fs.ValidPath(path) {
-		return nil, nil, fmt.Errorf("hygiene: invalid path %q", path)
+		return nil, nil, nil, fmt.Errorf("hygiene: invalid path %q", path)
 	}
 	data, err := fs.ReadFile(fsys, path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("hygiene: read %s: %w", path, err)
+		return nil, nil, nil, fmt.Errorf("hygiene: read %s: %w", path, err)
 	}
 
 	var findings []Finding
-	if isForbiddenPath(path) && !excused(allow, path, RuleForbiddenDir, "") {
-		findings = append(findings, Finding{Path: path, Rule: RuleForbiddenDir})
+	var excusedPath *ExcusedForbiddenPath
+	forbidden := isForbiddenPath(path)
+	if forbidden {
+		if reason, ok := excuseReason(allow, path, RuleForbiddenDir, ""); ok {
+			excusedPath = &ExcusedForbiddenPath{Path: path, Reason: reason}
+		} else {
+			findings = append(findings, Finding{Path: path, Rule: RuleForbiddenDir})
+		}
 	}
 	if hasBlockedWord(path, blocked) && !excused(allow, path, RuleBlockedWord, "") {
 		findings = append(findings, Finding{Path: path, Rule: RuleBlockedWord})
+	}
+	// A file under a forbidden directory is reported by its path alone, as a
+	// finding or as an excused path. Its contents are not scanned: a backup
+	// export or a session log repeats the same names and paths thousands of
+	// times, and the path already says the file must not be tracked.
+	if forbidden {
+		return findings, excusedPath, data, nil
 	}
 	if bytes.IndexByte(data, 0) >= 0 {
 		if !excused(allow, path, RuleBinaryFile, "") {
 			findings = append(findings, Finding{Path: path, Rule: RuleBinaryFile})
 		}
-		return findings, data, nil
+		return findings, nil, data, nil
 	}
 	for i, line := range strings.Split(string(data), "\n") {
 		hash := HashLine(line)
@@ -261,7 +291,7 @@ func scanPath(fsys fs.FS, path string, rules []Rule, blocked map[string]struct{}
 			findings = append(findings, Finding{Path: path, Rule: RuleBlockedWord, Line: i + 1, LineHash: hash})
 		}
 	}
-	return findings, data, nil
+	return findings, nil, data, nil
 }
 
 // ValidateAllow refuses a row that names no path or reason, a row for an
@@ -284,7 +314,7 @@ func ValidateAllow(fsys fs.FS, paths []string, rules []Rule, blocked map[string]
 		if _, ok := tracked[row.Path]; !ok {
 			return fmt.Errorf("hygiene: allow row for %s: path is not tracked", row.Path)
 		}
-		findings, data, err := scanPath(fsys, row.Path, rules, blocked, nil)
+		findings, _, data, err := scanPath(fsys, row.Path, rules, blocked, nil)
 		if err != nil {
 			return err
 		}
@@ -306,15 +336,21 @@ func ValidateAllow(fsys fs.FS, paths []string, rules []Rule, blocked map[string]
 }
 
 func excused(allow []Allow, path, rule, lineHash string) bool {
+	_, ok := excuseReason(allow, path, rule, lineHash)
+	return ok
+}
+
+// excuseReason returns the reason of the allow row that excuses one finding.
+func excuseReason(allow []Allow, path, rule, lineHash string) (string, bool) {
 	for _, row := range allow {
 		if row.Path == "" || row.Path != path || row.Rule != rule {
 			continue
 		}
 		if row.Line == lineHash {
-			return true
+			return row.Reason, true
 		}
 	}
-	return false
+	return "", false
 }
 
 func hasPathFinding(findings []Finding, rule string) bool {
@@ -409,24 +445,40 @@ func emailFinding(line string) bool {
 		at := strings.LastIndex(line[loc[0]:loc[1]], "@") + loc[0]
 		local := line[loc[0]:at]
 		domain := line[at+1 : loc[1]]
-		if !lastLabelIsName(domain) {
+		rest := line[loc[1]:]
+		// A colon and then whitespace after the address is how a person
+		// writes a host in a document. It is a finding whatever the host
+		// looks like: a dotless host there is a host, not a version pin.
+		prose := colonThenProse(rest)
+		if !addressDomain(domain) && !prose {
 			continue
 		}
-		if emailIsFinding(local, domain, line[loc[1]:]) {
+		if emailIsFinding(local, domain, rest) {
 			return true
 		}
 	}
 	return false
 }
 
-// lastLabelIsName reports whether the domain's last label is a host label: it
-// starts with a letter and does not mix lower and upper case. A case-mixing
-// label is a Go identifier such as queueLandingColumn, while 127.0.0.1 and
-// other all-digit hosts are not names at all.
-func lastLabelIsName(domain string) bool {
-	labels := strings.Split(domain, ".")
-	last := labels[len(labels)-1]
-	if last == "" || !isASCIILetter(last[0]) {
+// colonThenProse reports whether rest starts with a colon followed by
+// whitespace, the scp-like prose shape.
+func colonThenProse(rest string) bool {
+	return strings.HasPrefix(rest, ":") && len(rest) > 1 && unicode.IsSpace(rune(rest[1]))
+}
+
+// addressDomain reports whether domain has the shape of an address: at least
+// one dot, and a last label that starts with a letter, is two or more letters
+// long and does not mix lower and upper case. Without a dot the match is a
+// version pin or an id (checkout@v4, image@sha256, main@a); a one-letter or
+// all-digit last label (a@b.c, 127.0.0.1) is not a host name; and a case-mixing
+// label is a Go identifier such as queueLandingColumn.
+func addressDomain(domain string) bool {
+	dot := strings.LastIndex(domain, ".")
+	if dot < 0 {
+		return false
+	}
+	last := domain[dot+1:]
+	if len(last) < 2 || !isASCIILetter(last[0]) {
 		return false
 	}
 	return !mixedCase(last)
