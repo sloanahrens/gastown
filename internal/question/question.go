@@ -126,9 +126,9 @@ func Parse(issue *beads.Issue) Fields {
 }
 
 // Answered reports whether a question's newest comment is the operator's: the
-// newest comment without the overseer prefix is his answer, and the overseer is
-// to act on it. A question with no comment, or whose newest comment is the
-// overseer's, is still the operator's to answer.
+// newest comment without the overseer prefix is their answer, and the
+// overseer is to act on it. A question with no comment, or whose newest
+// comment is the overseer's, is still the operator's to answer.
 func Answered(comments []beads.Comment) bool {
 	newest, ok := NewestComment(comments)
 	return ok && !strings.HasPrefix(newest.Text, OverseerPrefix)
