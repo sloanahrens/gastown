@@ -461,6 +461,14 @@ func isASCIILetter(b byte) bool {
 	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
 }
 
+// knownAddresses are the two addresses that belong to nobody: the well-known
+// attribution address and GitHub's ssh user. A match is exact, so a lookalike
+// local part or domain is still an address.
+var knownAddresses = map[string]bool{
+	"noreply@anthropic.com": true,
+	"git@github.com":        true,
+}
+
 // emailFinding reports whether the line holds an address the exemptions do not
 // cover.
 func emailFinding(line string) bool {
@@ -469,10 +477,15 @@ func emailFinding(line string) bool {
 		local := line[loc[0]:at]
 		domain := line[at+1 : loc[1]]
 		rest := line[loc[1]:]
+		if knownAddresses[local+"@"+domain] {
+			continue
+		}
 		// A colon and then whitespace after the address is how a person
 		// writes a host in a document. It is a finding whatever the host
 		// looks like: a dotless host there is a host, not a version pin.
-		prose := colonThenProse(rest)
+		// The one exception is a dotless host whose local part follows a
+		// slash: that is a segment of a branch or ref name, not prose.
+		prose := colonThenProse(rest) && !(dotless(domain) && loc[0] > 0 && line[loc[0]-1] == '/')
 		if !addressDomain(domain) && !prose {
 			continue
 		}
@@ -527,11 +540,24 @@ func identifierShaped(s string) bool {
 	return false
 }
 
+// colonThenPath reports whether rest starts with a colon and then a character
+// that is not whitespace: an ssh path or a port.
+func colonThenPath(rest string) bool {
+	return strings.HasPrefix(rest, ":") && len(rest) > 1 && !unicode.IsSpace(rune(rest[1]))
+}
+
+// dotless reports whether domain has no dot: a version pin or a ref, not a host
+// name with a top-level domain.
+func dotless(domain string) bool {
+	return !strings.Contains(domain, ".")
+}
+
 func emailIsFinding(local, domain, rest string) bool {
 	if strings.HasPrefix(rest, ":") {
-		// A path right after the colon marks the ssh remote shape; a space
-		// after the colon marks prose, and the user must be exactly git.
-		if local == "git" && len(rest) > 1 && !unicode.IsSpace(rune(rest[1])) {
+		// A path or port right after the colon is read by the host before it:
+		// the ssh remote shape for git, and a reserved host for anyone. A space
+		// after the colon marks prose, which is a finding.
+		if colonThenPath(rest) && (local == "git" || exemptDomain(domain)) {
 			return false
 		}
 		return true
