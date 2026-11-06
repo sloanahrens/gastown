@@ -1147,6 +1147,12 @@ type Daemon struct {
 	// most once an hour: a cycle runs every few minutes, and the same cause in
 	// every one of them would fill the log (gt-gg9hv.39).
 	tierSweepPriorityLog sweeprunner.DeclineLog
+	// tierSweepGuardLog reports a standing failed guard read at most once an
+	// hour, the same rule as the priority decline (gt-gg9hv.56).
+	tierSweepGuardLog sweeprunner.DeclineLog
+	// tierSweepGuardReads is the failed guard read per rig, which the attention
+	// tick raises an item from (gt-gg9hv.56).
+	tierSweepGuardReads tierSweepGuardReads
 
 	// goos is the platform the platform-gated patrols decide on (see
 	// platform); "" is runtime.GOOS. Tests set it to reach a gated path.

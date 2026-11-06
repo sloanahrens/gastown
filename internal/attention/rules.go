@@ -59,6 +59,11 @@ const (
 	// tier's verdict (gt-gg9hv.37).
 	RuleTierSweepStuck = "tier_sweep.stuck"
 
+	// RuleTierSweepGuardUnreadable is a tier sweep's guard read that failed:
+	// the cycle defers, and no tier is judged until a read answers
+	// (gt-gg9hv.56).
+	RuleTierSweepGuardUnreadable = "sweep.guard_unreadable"
+
 	// RuleCacheTrimNoOp is a completed cache trim whose claim is still over
 	// twice the cap, so the Job may have trimmed nothing (gt-gg9hv.46).
 	RuleCacheTrimNoOp = "cache.trim_noop"
@@ -122,6 +127,9 @@ var ruleFlags = map[string]RuleFlags{
 	// A cycle the guard holds past its bound blocks every later cycle: the
 	// tiers the sweep alone gates go unmeasured until someone looks.
 	RuleTierSweepStuck: flagsWake,
+	// A read the guard could not make defers the cycle; the operator grants the
+	// cluster access the read needs, so it is queued rather than woken for.
+	RuleTierSweepGuardUnreadable: flagsAsk,
 	// A trim that left the claim over twice the cap is a measurement of a
 	// Job that did not do its work: the queue has it for the next overseer
 	// look, and a claim that really grows already wakes host.disk_crit.
@@ -200,37 +208,38 @@ func Rules() []string {
 // kindRules maps a kind to its rule id. The disk kind is keyed by the item
 // instead (RuleFor), because it raises two rules.
 var kindRules = map[Kind]string{
-	KindRiskPath:         RuleRiskPath,
-	KindRedMain:          RuleRedMain,
-	KindRejectedTwice:    RuleRejectedTwice,
-	KindEscalation:       RuleEscalation,
-	KindPolecatStall:     RulePolecatStall,
-	KindLandingStuck:     RuleLandingStuck,
-	KindQueueStuck:       RuleQueueStuck,
-	KindDirectPush:       RuleDirectPush,
-	KindSlotHeld:         RuleSlotHeld,
-	KindSlotDeadHolder:   RuleSlotDeadHolder,
-	KindBDSlow:           RuleBDSlow,
-	KindTierSweepRed:     RuleTierSweepRed,
-	KindTierSweepStarved: RuleTierSweepStarved,
-	KindTierSweepStuck:   RuleTierSweepStuck,
-	KindCacheTrimNoOp:    RuleCacheTrimNoOp,
-	KindRevertRefused:    RuleRevertRefused,
-	KindBlockedMail:      RuleBlockedMail,
-	KindOverrunStopped:   RuleOverrunStopped,
-	KindScheduledGate:    RuleScheduledGate,
-	KindHostMem:          RuleHostMemLow,
-	KindHostDocker:       RuleHostDockerDown,
-	KindHostForgejo:      RuleHostForgejoDown,
-	KindHostProbe:        RuleHostProbe,
-	KindQuestionNew:      RuleQuestionNew,
-	KindQuestionAnswered: RuleQuestionAnswered,
-	KindQuestionStale:    RuleQuestionStale,
-	KindOverseerSilent:   RuleOverseerSilent,
-	KindDispatchIdle:     RuleDispatchIdle,
-	KindDeployFailed:     RuleDeployFailed,
-	KindReviewBacklog:    RuleReviewBacklog,
-	KindBirdReportStale:  RuleBirdReportStale,
+	KindRiskPath:                 RuleRiskPath,
+	KindRedMain:                  RuleRedMain,
+	KindRejectedTwice:            RuleRejectedTwice,
+	KindEscalation:               RuleEscalation,
+	KindPolecatStall:             RulePolecatStall,
+	KindLandingStuck:             RuleLandingStuck,
+	KindQueueStuck:               RuleQueueStuck,
+	KindDirectPush:               RuleDirectPush,
+	KindSlotHeld:                 RuleSlotHeld,
+	KindSlotDeadHolder:           RuleSlotDeadHolder,
+	KindBDSlow:                   RuleBDSlow,
+	KindTierSweepRed:             RuleTierSweepRed,
+	KindTierSweepStarved:         RuleTierSweepStarved,
+	KindTierSweepStuck:           RuleTierSweepStuck,
+	KindTierSweepGuardUnreadable: RuleTierSweepGuardUnreadable,
+	KindCacheTrimNoOp:            RuleCacheTrimNoOp,
+	KindRevertRefused:            RuleRevertRefused,
+	KindBlockedMail:              RuleBlockedMail,
+	KindOverrunStopped:           RuleOverrunStopped,
+	KindScheduledGate:            RuleScheduledGate,
+	KindHostMem:                  RuleHostMemLow,
+	KindHostDocker:               RuleHostDockerDown,
+	KindHostForgejo:              RuleHostForgejoDown,
+	KindHostProbe:                RuleHostProbe,
+	KindQuestionNew:              RuleQuestionNew,
+	KindQuestionAnswered:         RuleQuestionAnswered,
+	KindQuestionStale:            RuleQuestionStale,
+	KindOverseerSilent:           RuleOverseerSilent,
+	KindDispatchIdle:             RuleDispatchIdle,
+	KindDeployFailed:             RuleDeployFailed,
+	KindReviewBacklog:            RuleReviewBacklog,
+	KindBirdReportStale:          RuleBirdReportStale,
 }
 
 // RuleFor is the rule id of an item. The disk collector's key is its rule
