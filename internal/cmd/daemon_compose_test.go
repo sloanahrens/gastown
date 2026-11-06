@@ -1061,12 +1061,31 @@ func TestDaemonComposeWriteRefusesAnUnusableHMConfig(t *testing.T) {
 			want:   "database_url is not a string",
 		},
 		{
-			name: "database_url does not parse",
+			name: "database_url (URL form) does not parse",
 			config: func(string) ([]byte, error) {
 				return []byte(`{"database_url": "postgres://hm:s3 cret@localhost:5433/hm"}`), nil
 			},
-			want:   "database_url does not parse",
+			want:   "database_url (URL form) does not parse",
 			secret: "s3 cret",
+		},
+		{
+			// A key=value string with a loopback host is rewritten (the render
+			// case below); one this cannot parse is refused, naming the file it
+			// came from and the form, never copied and never the password.
+			name: "a key=value database_url that does not parse names the file and the form",
+			config: func(string) ([]byte, error) {
+				return []byte(`{"database_url": "host=localhost password='s3cret"}`), nil
+			},
+			want:   "hm-config.json",
+			secret: "s3cret",
+		},
+		{
+			name: "a key=value database_url that cannot be rewritten names the form",
+			config: func(string) ([]byte, error) {
+				return []byte(`{"database_url": "host=/var/run/postgresql password=s3cret"}`), nil
+			},
+			want:   "(key=value form) names a unix-socket host",
+			secret: "s3cret",
 		},
 	}
 	for _, tc := range cases {

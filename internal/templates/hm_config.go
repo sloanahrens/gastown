@@ -98,26 +98,248 @@ func RenderHMConfig(host []byte) ([]byte, error) {
 // parse.
 func hmControl(r rune) bool { return r < 0x20 || r == 0x7f }
 
-// containerHMURL returns the database URL a process in the container reaches:
-// the Mac's loopback host becomes hmContainerHost, and every other URL is
-// returned unchanged, since a remote database needs no rewrite. The error never
-// quotes the URL: it holds the database password.
+// containerHMURL returns the database address a process in the container
+// reaches. hm hands the field to a Postgres driver, which accepts two forms: a
+// URL (postgres://user:password@host:port/db?...) and a key=value string (host=...
+// port=... user=... password=...). A loopback host in either form is the
+// container itself, so each form is parsed and its host rewritten to
+// hmContainerHost; a non-loopback host is left as it is, since a remote database
+// needs no rewrite. A form this cannot parse, a unix-socket host, a numeric
+// hostaddr that would still point at the container, or a key=value string with
+// no host at all (which defaults to the local machine) is REFUSED with the form
+// named, never copied: a copy would leave hm pointed at the container's own
+// loopback. The errors never quote the value: it holds the database password.
 func containerHMURL(databaseURL string) (string, error) {
-	u, err := url.Parse(databaseURL)
+	trimmed := strings.TrimSpace(databaseURL)
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(lower, "postgres://") || strings.HasPrefix(lower, "postgresql://") {
+		out, err := containerHMURLForm(trimmed)
+		if err != nil {
+			return "", fmt.Errorf("(URL form) %w", err)
+		}
+		return out, nil
+	}
+	if strings.Contains(trimmed, "://") {
+		return "", errors.New("(URL form) has a scheme other than postgres or postgresql")
+	}
+	out, err := containerHMKeyValue(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("(key=value form) %w", err)
+	}
+	return out, nil
+}
+
+// hmLoopback reports whether host names the machine it is read on.
+func hmLoopback(host string) bool {
+	h := strings.Trim(host, "[]")
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
+}
+
+// hmHostElement turns one element of a host list into the container's: a
+// loopback name becomes hmContainerHost, a unix-socket path (a leading slash) is
+// refused since a socket on the Mac is not in the container, and anything else
+// is kept.
+func hmHostElement(h string) (string, error) {
+	if strings.HasPrefix(h, "/") {
+		return "", errors.New("names a unix-socket host, which is not reachable from the container")
+	}
+	if hmLoopback(h) {
+		return hmContainerHost, nil
+	}
+	return h, nil
+}
+
+// containerHMURLForm rewrites the host of a postgres:// URL. The authority is
+// parsed, and so are the host and hostaddr query parameters libpq lets override
+// it.
+func containerHMURLForm(raw string) (string, error) {
+	u, err := url.Parse(raw)
 	if err != nil {
 		return "", errors.New("does not parse as a URL")
 	}
-	switch u.Hostname() {
-	case "localhost", "127.0.0.1":
-	default:
-		return databaseURL, nil
+	if strings.Contains(u.Host, ",") {
+		return "", errors.New("lists several hosts in the authority, which this does not rewrite; use one host")
 	}
-	if port := u.Port(); port != "" {
-		u.Host = net.JoinHostPort(hmContainerHost, port)
-	} else {
-		u.Host = hmContainerHost
+	if h := u.Hostname(); h != "" {
+		nh, err := hmHostElement(h)
+		if err != nil {
+			return "", err
+		}
+		if nh != h {
+			if port := u.Port(); port != "" {
+				u.Host = net.JoinHostPort(nh, port)
+			} else {
+				u.Host = nh
+			}
+		}
+	}
+	q := u.Query()
+	changedQuery := false
+	if v := q.Get("hostaddr"); v != "" {
+		for _, el := range strings.Split(v, ",") {
+			if hmLoopback(el) {
+				return "", errors.New("has a loopback hostaddr, a numeric address that would still point at the container; remove it")
+			}
+		}
+	}
+	if v := q.Get("host"); v != "" {
+		parts := strings.Split(v, ",")
+		for i, el := range parts {
+			nh, err := hmHostElement(el)
+			if err != nil {
+				return "", err
+			}
+			if nh != el {
+				parts[i] = nh
+				changedQuery = true
+			}
+		}
+		if changedQuery {
+			q.Set("host", strings.Join(parts, ","))
+		}
+	}
+	if changedQuery {
+		u.RawQuery = q.Encode()
 	}
 	return u.String(), nil
+}
+
+// hmKV is one key=value pair of a libpq-style string: the key, the decoded
+// value, and the byte span of the raw value in the string, so the rewrite
+// replaces the value alone and keeps every other byte.
+type hmKV struct {
+	key        string
+	value      string
+	start, end int
+	quoted     bool
+}
+
+// parseHMKeyValue reads a libpq key=value string: pairs separated by white
+// space, optional white space around "=", a value bare (ending at white space)
+// or single-quoted with \' and \\ escapes.
+func parseHMKeyValue(s string) ([]hmKV, error) {
+	var out []hmKV
+	i := 0
+	skipSpace := func() {
+		for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') {
+			i++
+		}
+	}
+	for {
+		skipSpace()
+		if i >= len(s) {
+			return out, nil
+		}
+		ks := i
+		for i < len(s) && s[i] != '=' && s[i] != ' ' && s[i] != '\t' && s[i] != '\n' && s[i] != '\r' {
+			i++
+		}
+		key := s[ks:i]
+		if key == "" {
+			return nil, errors.New("has a pair with no key")
+		}
+		skipSpace()
+		if i >= len(s) || s[i] != '=' {
+			return nil, errors.New("has a key with no \"=\"")
+		}
+		i++
+		skipSpace()
+		kv := hmKV{key: key, start: i}
+		if i < len(s) && s[i] == '\'' {
+			kv.quoted = true
+			i++
+			var b strings.Builder
+			closed := false
+			for i < len(s) {
+				c := s[i]
+				if c == '\\' && i+1 < len(s) {
+					b.WriteByte(s[i+1])
+					i += 2
+					continue
+				}
+				if c == '\'' {
+					i++
+					closed = true
+					break
+				}
+				b.WriteByte(c)
+				i++
+			}
+			if !closed {
+				return nil, errors.New("has an unterminated quoted value")
+			}
+			kv.value = b.String()
+		} else {
+			vs := i
+			for i < len(s) && s[i] != ' ' && s[i] != '\t' && s[i] != '\n' && s[i] != '\r' {
+				i++
+			}
+			kv.value = s[vs:i]
+		}
+		kv.end = i
+		out = append(out, kv)
+	}
+}
+
+// quoteHMValue writes v as a libpq value: bare when it holds nothing that needs
+// quoting, else single-quoted with backslash escapes.
+func quoteHMValue(v string, wasQuoted bool) string {
+	if !wasQuoted && v != "" && !strings.ContainsAny(v, " \t\n\r'\\") {
+		return v
+	}
+	r := strings.NewReplacer("\\", "\\\\", "'", "\\'")
+	return "'" + r.Replace(v) + "'"
+}
+
+// containerHMKeyValue rewrites the host of a key=value string, keeping every
+// other byte. Both host and hostaddr are read; a string that names no host is
+// refused, since libpq then connects to the local machine's socket.
+func containerHMKeyValue(s string) (string, error) {
+	pairs, err := parseHMKeyValue(s)
+	if err != nil {
+		return "", err
+	}
+	sawHost := false
+	var b strings.Builder
+	last := 0
+	for _, kv := range pairs {
+		switch kv.key {
+		case "hostaddr":
+			for _, el := range strings.Split(kv.value, ",") {
+				if hmLoopback(el) {
+					return "", errors.New("has a loopback hostaddr, a numeric address that would still point at the container; remove it")
+				}
+			}
+		case "host":
+			sawHost = true
+			parts := strings.Split(kv.value, ",")
+			changed := false
+			for i, el := range parts {
+				nh, err := hmHostElement(el)
+				if err != nil {
+					return "", err
+				}
+				if nh != el {
+					parts[i] = nh
+					changed = true
+				}
+			}
+			if changed {
+				b.WriteString(s[last:kv.start])
+				b.WriteString(quoteHMValue(strings.Join(parts, ","), kv.quoted))
+				last = kv.end
+			}
+		}
+	}
+	if !sawHost {
+		return "", errors.New("names no host, which defaults to the local machine; name one")
+	}
+	b.WriteString(s[last:])
+	return b.String(), nil
 }
 
 // hmConfigTemp is the temporary file WriteHMConfigFile writes through. *os.File

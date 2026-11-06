@@ -72,7 +72,7 @@ func TestHMContainerConfigRewritesTheLocalHost(t *testing.T) {
 		// A host with a space cannot be a URL; the message names the field and
 		// never the URL, whose password would otherwise reach a log.
 		{name: "database_url does not parse", config: `{"database_url": "postgres://hm:s3 cret@localhost:5433/hm"}`,
-			wantReason: "database_url does not parse"},
+			wantReason: "database_url (URL form) does not parse"},
 		{name: "a field name holds a control character", config: `{"database_url": "postgres://hm@host.docker.internal:5433/hm", "\u0001x": 1}`,
 			wantReason: "field name holds a control character"},
 	}
@@ -248,5 +248,93 @@ func TestHMContainerConfigAnswersOneHMConfigLine(t *testing.T) {
 	out, _ := render(t, spec)
 	if got := strings.Count(out, "HM_CONFIG:"); got != 1 {
 		t.Errorf("the rendered file carries HM_CONFIG %d times, want once:\n%s", got, out)
+	}
+}
+
+// TestHMContainerConfigRewritesBothDSNForms: the Postgres driver accepts a URL
+// and a key=value string, and a loopback host in either one is the container
+// itself. Each form is parsed and its host rewritten; the rest of the string is
+// kept byte for byte; a form that cannot be parsed or rewritten is refused with
+// the form named and never repeats the password.
+func TestHMContainerConfigRewritesBothDSNForms(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		dsn        string
+		want       string
+		wantReason string
+	}{
+		{name: "key=value, bare",
+			dsn:  "host=localhost port=5433 user=hm password=s3cret dbname=hm sslmode=disable",
+			want: "host=host.docker.internal port=5433 user=hm password=s3cret dbname=hm sslmode=disable"},
+		{name: "key=value, host last and 127.0.0.1",
+			dsn:  "port=5433 user=hm dbname=hm host=127.0.0.1",
+			want: "port=5433 user=hm dbname=hm host=host.docker.internal"},
+		{name: "key=value, spaces around the equals sign",
+			dsn:  "host = localhost port = 5433 user = hm",
+			want: "host = host.docker.internal port = 5433 user = hm"},
+		{name: "key=value, quoted values keep their quoting",
+			dsn:  "host='localhost' port=5433 password='p w\\'x' dbname=hm",
+			want: "host='host.docker.internal' port=5433 password='p w\\'x' dbname=hm"},
+		{name: "key=value, a host list rewrites each loopback element",
+			dsn:  "host=localhost,db.example.test port=5433,5432 dbname=hm",
+			want: "host=host.docker.internal,db.example.test port=5433,5432 dbname=hm"},
+		{name: "key=value, IPv6 loopback",
+			dsn:  "host=::1 port=5433 dbname=hm",
+			want: "host=host.docker.internal port=5433 dbname=hm"},
+		{name: "key=value, a remote host is unchanged",
+			dsn:  "host=db.example.test port=5433 password=s3cret dbname=hm",
+			want: "host=db.example.test port=5433 password=s3cret dbname=hm"},
+		{name: "URL, IPv6 loopback in brackets",
+			dsn:  "postgres://hm:s3cret@[::1]:5433/hm",
+			want: "postgres://hm:s3cret@host.docker.internal:5433/hm"},
+		{name: "URL, 127.0.0.2 is loopback too",
+			dsn:  "postgresql://hm@127.0.0.2:5433/hm",
+			want: "postgresql://hm@host.docker.internal:5433/hm"},
+		{name: "URL, the host query parameter overrides the authority",
+			dsn:  "postgres://hm@/hm?host=localhost&port=5433",
+			want: "postgres://hm@/hm?host=host.docker.internal&port=5433"},
+
+		{name: "key=value, no host defaults to the local machine",
+			dsn: "port=5433 user=hm password=s3cret dbname=hm", wantReason: "(key=value form) names no host"},
+		{name: "key=value, a unix-socket host",
+			dsn: "host=/var/run/postgresql user=hm password=s3cret", wantReason: "(key=value form) names a unix-socket host"},
+		{name: "key=value, a loopback hostaddr would still point at the container",
+			dsn: "host=db.example.test hostaddr=127.0.0.1 password=s3cret", wantReason: "(key=value form) has a loopback hostaddr"},
+		{name: "key=value, a key with no equals sign",
+			dsn: "host=localhost s3cret", wantReason: "(key=value form) has a key with no"},
+		{name: "key=value, an unterminated quote",
+			dsn: "host=localhost password='s3cret", wantReason: "(key=value form) has an unterminated quoted value"},
+		{name: "URL, several hosts in the authority",
+			dsn: "postgres://hm:s3cret@localhost:5433,db.example.test:5432/hm", wantReason: "(URL form)"},
+		{name: "URL, a unix-socket host in the query",
+			dsn: "postgres://hm:s3cret@/hm?host=/var/run/postgresql", wantReason: "(URL form) names a unix-socket host"},
+		{name: "a scheme that is not postgres",
+			dsn: "mysql://hm:s3cret@localhost:3306/hm", wantReason: "(URL form) has a scheme other than postgres"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := json.Marshal(map[string]string{"database_url": tc.dsn, "town_root": "/town"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := templates.RenderHMConfig(cfg)
+			if tc.wantReason != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantReason) {
+					t.Fatalf("RenderHMConfig error = %v, want it to contain %q", err, tc.wantReason)
+				}
+				if strings.Contains(err.Error(), "s3cret") {
+					t.Errorf("the error repeats the database password: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("RenderHMConfig: %v", err)
+			}
+			if got := decodeHMConfig(t, out)["database_url"]; got != tc.want {
+				t.Errorf("database_url = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

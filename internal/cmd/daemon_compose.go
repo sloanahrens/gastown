@@ -484,7 +484,13 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 	}
 	hmConfig, err := templates.RenderHMConfig(hostHMConfig)
 	if err != nil {
-		return fmt.Errorf("deriving the hm config, and no compose file was written: %w", err)
+		// Name the file the form came from; the error itself names the form and
+		// never the database password.
+		src, pathErr := hostHMConfigPath(configDir, os.Getenv, os.UserHomeDir)
+		if pathErr != nil {
+			src = "the Mac's hm config"
+		}
+		return fmt.Errorf("deriving the hm config from %s, and no compose file was written: %w", src, err)
 	}
 	hmConfigFile := containerHMConfigPath(townRoot)
 	kubeconfig := strings.TrimSpace(f.kubeconfig)

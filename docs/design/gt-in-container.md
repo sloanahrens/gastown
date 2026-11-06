@@ -63,6 +63,7 @@ End state, enforced: a guard test fails any commit that adds `launchctl`, `cmux`
 ## Container changes
 
 - `$HOME/.claude/.beads` is mounted read-write in the daemon container (the wisp reaper needs it now; Mac-side `bd` calls in that directory need it once `bd` runs through the wrapper).
+- `hm` needs its own config in the container (gt-yjzepk.13). hm reads its Postgres address from the config file `HM_CONFIG` names, and the Mac's file says `localhost`, which inside the container is the container itself. `gt daemon compose write` derives a container copy (the database host, in URL or key=value form, rewritten to `host.docker.internal`; any other form is refused with the form named) under `.runtime/container/hm-config.json`, mode 0600, and mounts it read-only. The throwaway-run rung of the wrapper mounts that file itself and refuses when it does not exist. The EXEC rung runs in the already running `gt-daemon`, which sees the file only after the compose file has been re-rendered with it and the service recreated: until then `hm` through the exec rung reads the Mac's config and fails.
 - First check, before any cutover: how `bd` finds the Dolt server for a workspace whose `metadata.json` says `127.0.0.1`. Inside the container that address is the container itself, so the host must come from `BEADS_DOLT_SERVER_HOST` (or the equivalent) set in the container. The first bead verifies this and stops with the finding if it does not hold.
 
 ## Cutover and rollback
