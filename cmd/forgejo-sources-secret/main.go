@@ -1,11 +1,15 @@
 // Command forgejo-sources-secret stores the SOURCES_TOKEN Actions secret on
 // sloan/gastown without any person seeing the token. It mints a read:repository
 // token for bot-viewer, checks that the token reads four repositories, and stores
-// it only when all four answer 200. It exits 0 when the secret is stored or a dry
-// run finishes, 1 when a step fails and 2 when the command line is refused. With --check
-// it mints, revokes and stores nothing: it reads whether SOURCES_TOKEN is listed, whether
-// bot-viewer is a collaborator on each read repository, and the names of its sources-token-
-// tokens, and exits 0 when it could read all three.
+// it only when all four answer 200. With --check it mints, revokes and stores
+// nothing: it reads whether SOURCES_TOKEN is listed, whether bot-viewer is a
+// collaborator on each read repository, and the names of its sources-token-
+// tokens. The exit codes are 0 when the secret is stored, a dry run finishes or a
+// check reads everything and every read repository is readable; 1 when a step
+// fails, a read fails or a required repository is unreadable; and 2 when the
+// command line is refused. An unlisted secret is a state a check reports, not a
+// failure, because the check runs before the first real run, when the secret is
+// absent.
 package main
 
 import (
@@ -233,10 +237,13 @@ var mintedName = regexp.MustCompile(`^` + regexp.QuoteMeta(tokenNamePrefix) + `[
 // listed on sloan/gastown, the status of bot-viewer's collaborator check on each read
 // repository, and the sources-token- tokens bot-viewer holds. It sends GETs only, so it
 // mints, revokes and stores nothing. Every read is made before any is judged, so the
-// operator sees each one. A collaborator check that answers 204 (readable) or 404 (not
-// readable) is a reading of the state; any other status, or no reply, is a read that failed.
-// It exits ExitOK when every read is a reading of the state and ExitFailure otherwise. A
-// failure's detail goes to stderr and carries no reply body.
+// operator sees each one. A collaborator check that answers 204 is readable; 404 is a
+// required repository that is not readable, and the real run refuses on it. Any other
+// status, or no reply, is a read that failed. An unlisted secret is printed as a state
+// and is not a failure: the check runs before the first real run, when the secret is
+// legitimately absent. The exit codes are ExitOK when every read answered and every read
+// repository is readable, and ExitFailure when a read failed or a required repository is
+// unreadable. A failure's detail goes to stderr and carries no reply body.
 func checkState(admin *forgejoprov.Client, stdout, stderr io.Writer) int {
 	code := forgejoprov.ExitOK
 
@@ -262,6 +269,9 @@ func checkState(admin *forgejoprov.Client, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "%s/%s: readable by %s (HTTP %d)\n", secretOwner, repo, viewerAccount, status)
 		case status == http.StatusNotFound:
 			fmt.Fprintf(stdout, "%s/%s: not readable by %s (HTTP %d)\n", secretOwner, repo, viewerAccount, status)
+			fmt.Fprintf(stderr, "forgejo-sources-secret: %s/%s is not readable by %s; a real run refuses on it, so add %s as a read collaborator on %s/%s first\n",
+				secretOwner, repo, viewerAccount, viewerAccount, secretOwner, repo)
+			code = forgejoprov.ExitFailure
 		default:
 			fmt.Fprintf(stderr, "forgejo-sources-secret: the collaborator check on %s/%s answered HTTP %d\n", secretOwner, repo, status)
 			code = forgejoprov.ExitFailure
@@ -279,7 +289,7 @@ func checkState(admin *forgejoprov.Client, stdout, stderr io.Writer) int {
 	if code == forgejoprov.ExitOK {
 		fmt.Fprintln(stdout, "RESULT: checked the secret, the collaborators and the tokens; nothing minted, revoked or stored")
 	} else {
-		fmt.Fprintln(stderr, "forgejo-sources-secret: the check could not read everything; the lines above say what failed")
+		fmt.Fprintln(stderr, "forgejo-sources-secret: the check failed a read or found a required repository unreadable; the lines above say which")
 	}
 	return code
 }

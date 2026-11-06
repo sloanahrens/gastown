@@ -717,12 +717,88 @@ func TestSourcesSecretCheckReportsTheState(t *testing.T) {
 	}
 }
 
-// TestSourcesSecretCheckReportsWhatIsMissing checks a --check run where the secret is not
-// listed, bot-viewer is not a collaborator on sloan/om, and the token list fails. It says so
-// for each, names the repository and the failed list, and exits 1.
+// storeCheckSecret stores SOURCES_TOKEN on the target repository of a check fake, as an
+// earlier real run would have.
+func storeCheckSecret(t *testing.T, f *forgejotest.Fake) {
+	t.Helper()
+	f.Call(t, http.MethodPut, "/repos/"+secretOwner+"/"+secretRepo+"/actions/secrets/"+secretName,
+		forgejotest.JSONBody(map[string]string{"data": "stored-value-0a1b"}))
+}
+
+// TestSourcesSecretCheckUnreadableRepositoryExitsOne checks a required repository that answers
+// 404 for bot-viewer makes the check name it as not readable and exit 1, with the secret listed
+// and the token list fine. The same check with all four readable exits 0.
+func TestSourcesSecretCheckUnreadableRepositoryExitsOne(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		ungranted string
+		wantCode  int
+	}{
+		{name: "one repository answers 404", ungranted: "om", wantCode: forgejoprov.ExitFailure},
+		{name: "all four answer 204", ungranted: "", wantCode: forgejoprov.ExitOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCheckFake(t, tc.ungranted)
+			storeCheckSecret(t, f)
+			mintTokenNamed(t, f, testName)
+			f.ClearCalls()
+
+			res := runCheckNetwork(t, &checkNetwork{fake: f})
+
+			if res.code != tc.wantCode {
+				t.Fatalf("exit %d, want %d; stderr: %s", res.code, tc.wantCode, res.stderr)
+			}
+			if tc.ungranted == "" {
+				return
+			}
+			if !strings.Contains(res.stdout, "sloan/om: not readable by bot-viewer (HTTP 404)\n") {
+				t.Fatalf("stdout does not name sloan/om as not readable:\n%s", res.stdout)
+			}
+			if !strings.Contains(res.stderr, "sloan/om is not readable by bot-viewer") {
+				t.Fatalf("stderr does not name sloan/om as not readable:\n%s", res.stderr)
+			}
+			if !strings.Contains(res.stdout, "sloan/beads: readable by bot-viewer (HTTP 204)\n") {
+				t.Fatalf("stdout does not report the readable repositories:\n%s", res.stdout)
+			}
+			if n := len(f.Writes()); n != 0 {
+				t.Fatalf("the fake saw %d write(s), want none", n)
+			}
+		})
+	}
+}
+
+// TestSourcesSecretCheckUnlistedSecretIsReportedAndExitsZero checks that with the secret absent
+// and every other read fine, the check prints that SOURCES_TOKEN is not listed and exits 0. That
+// is the state before the first real run, so it is reported, not failed.
+func TestSourcesSecretCheckUnlistedSecretIsReportedAndExitsZero(t *testing.T) {
+	t.Parallel()
+	f := newCheckFake(t, "")
+	mintTokenNamed(t, f, testName)
+	f.ClearCalls()
+
+	res := runCheckNetwork(t, &checkNetwork{fake: f})
+
+	if res.code != forgejoprov.ExitOK {
+		t.Fatalf("exit %d, want %d; stderr: %s", res.code, forgejoprov.ExitOK, res.stderr)
+	}
+	if !strings.Contains(res.stdout, "sloan/gastown secret SOURCES_TOKEN: not listed\n") {
+		t.Fatalf("stdout does not say the secret is not listed:\n%s", res.stdout)
+	}
+	if res.stderr != "" {
+		t.Fatalf("stderr is not empty for an unlisted secret:\n%s", res.stderr)
+	}
+}
+
+// TestSourcesSecretCheckReportsWhatIsMissing checks a failing token list alone, with the secret
+// listed and the four repositories readable, is reported and exits 1. No other read fails, so
+// the exit code rides on the token list alone.
 func TestSourcesSecretCheckReportsWhatIsMissing(t *testing.T) {
 	t.Parallel()
-	f := newCheckFake(t, "om")
+	f := newCheckFake(t, "")
+	storeCheckSecret(t, f)
 	f.ClearCalls()
 	net := &checkNetwork{
 		fake:       f,
@@ -736,13 +812,10 @@ func TestSourcesSecretCheckReportsWhatIsMissing(t *testing.T) {
 	if res.code != forgejoprov.ExitFailure {
 		t.Fatalf("exit %d, want %d; stdout: %s", res.code, forgejoprov.ExitFailure, res.stdout)
 	}
-	if !strings.Contains(res.stdout, "sloan/gastown secret SOURCES_TOKEN: not listed\n") {
-		t.Fatalf("stdout does not say the secret is not listed:\n%s", res.stdout)
+	if !strings.Contains(res.stdout, "sloan/gastown secret SOURCES_TOKEN: listed\n") {
+		t.Fatalf("stdout does not say the secret is listed:\n%s", res.stdout)
 	}
-	if !strings.Contains(res.stdout, "sloan/om: not readable by bot-viewer (HTTP 404)\n") {
-		t.Fatalf("stdout does not name sloan/om as unreadable:\n%s", res.stdout)
-	}
-	if !strings.Contains(res.stdout, "sloan/beads: readable by bot-viewer (HTTP 204)\n") {
+	if !strings.Contains(res.stdout, "sloan/om: readable by bot-viewer (HTTP 204)\n") {
 		t.Fatalf("stdout does not report the readable repositories:\n%s", res.stdout)
 	}
 	if !strings.Contains(res.stderr, "could not list the tokens of bot-viewer") || !strings.Contains(res.stderr, "HTTP 500") {
