@@ -61,7 +61,7 @@ func blockedFrom(t *testing.T, words ...string) map[string]struct{} {
 
 func scanFS(t *testing.T, fsys fstest.MapFS, allow []Allow) []Finding {
 	t.Helper()
-	findings, err := Scan(fsys, sortedPaths(fsys), DefaultRules(), shippedBlocked(t), allow)
+	findings, _, err := Scan(fsys, sortedPaths(fsys), DefaultRules(), shippedBlocked(t), allow)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestBlockedWordIsFoundInContentAndInPathsAndNeverEchoed(t *testing.T) {
 		path:             {Data: []byte("nothing here\n")},
 	}
 
-	findings, err := Scan(fsys, sortedPaths(fsys), nil, blocked, nil)
+	findings, _, err := Scan(fsys, sortedPaths(fsys), nil, blocked, nil)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestBlockedWordMatchesWholeWordsOnly(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			findings, err := Scan(singleFile("docs/a.md", tc.line+"\n"), []string{"docs/a.md"}, nil, blocked, nil)
+			findings, _, err := Scan(singleFile("docs/a.md", tc.line+"\n"), []string{"docs/a.md"}, nil, blocked, nil)
 			if err != nil {
 				t.Fatalf("Scan: %v", err)
 			}
@@ -349,7 +349,7 @@ func TestBlockedWordMatchesWholeWordsOnly(t *testing.T) {
 			{word + "2", 0},
 			{"x" + word, 0},
 		} {
-			findings, err := Scan(singleFile("docs/a.md", tc.line+"\n"), []string{"docs/a.md"}, nil, blocked, nil)
+			findings, _, err := Scan(singleFile("docs/a.md", tc.line+"\n"), []string{"docs/a.md"}, nil, blocked, nil)
 			if err != nil {
 				t.Fatalf("Scan: %v", err)
 			}
@@ -373,7 +373,7 @@ func TestWordBoundaryIsLettersAndDigitsNotUnderscoreOnly(t *testing.T) {
 		{"zebra2", 0},
 		{"2zebra", 0},
 	} {
-		findings, err := Scan(singleFile("docs/a.md", tc.line+"\n"), []string{"docs/a.md"}, nil, blocked, nil)
+		findings, _, err := Scan(singleFile("docs/a.md", tc.line+"\n"), []string{"docs/a.md"}, nil, blocked, nil)
 		if err != nil {
 			t.Fatalf("Scan: %v", err)
 		}
@@ -568,6 +568,50 @@ func TestForbiddenDirectoryContentsAreNotScanned(t *testing.T) {
 	})
 }
 
+func TestExcusedForbiddenPathIsReportedAndNotScanned(t *testing.T) {
+	t.Parallel()
+	word := planted("ahr", "ens")
+	body := strings.Join([]string{
+		"contact " + planted("alice", "@github.com") + " please",
+		"mentions " + word + " in prose",
+		"",
+	}, "\n")
+	path := ".beads/backup/events.jsonl"
+	allow := []Allow{{Path: path, Rule: RuleForbiddenDir, Reason: "upstream bead export"}}
+
+	t.Run("excused path is reported and its contents are not scanned", func(t *testing.T) {
+		findings, excused, err := Scan(singleFile(path, body), []string{path}, DefaultRules(), shippedBlocked(t), allow)
+		if err != nil {
+			t.Fatalf("Scan: %v", err)
+		}
+		if len(findings) != 0 {
+			t.Errorf("an excused forbidden file produced %d findings %v, want none", len(findings), findings)
+		}
+		want := []ExcusedForbiddenPath{{Path: path, Reason: "upstream bead export"}}
+		if !reflect.DeepEqual(excused, want) {
+			t.Errorf("excused = %v, want %v", excused, want)
+		}
+	})
+
+	t.Run("the row still validates", func(t *testing.T) {
+		if err := validate(t, singleFile(path, body), allow); err != nil {
+			t.Fatalf("ValidateAllow refused an excused forbidden path: %v", err)
+		}
+	})
+
+	t.Run("an unexcused forbidden file still reports its path finding", func(t *testing.T) {
+		other := ".beads/backup/issues.jsonl"
+		findings, excused, err := Scan(singleFile(other, body), []string{other}, DefaultRules(), shippedBlocked(t), allow)
+		if err != nil {
+			t.Fatalf("Scan: %v", err)
+		}
+		assertFindings(t, findings, Finding{Path: other, Rule: RuleForbiddenDir})
+		if len(excused) != 0 {
+			t.Errorf("excused = %v, want none", excused)
+		}
+	})
+}
+
 func TestCleanTreeHasNoFindings(t *testing.T) {
 	t.Parallel()
 	fsys := fstest.MapFS{
@@ -608,7 +652,7 @@ func TestAnAddressFollowedByAColonInProseIsAFinding(t *testing.T) {
 		{"gitx user", planted("gitx", "@github.com:org/repo"), 1},
 		{"xgit user", planted("xgit", "@github.com:org/repo"), 1},
 		{"writer ssh lookalike", planted("writer", "@github.com:org/repo"), 1},
-		{"ssh remote followed by prose", planted("git@", "host.example: prose"), 1},
+		{"git user on a reserved host followed by prose", planted("git@", "host.example: prose"), 1},
 		{"address followed by a colon", planted("writer", "@example.com:"), 1},
 	}
 	for _, tc := range cases {
@@ -688,7 +732,7 @@ func TestBlockedFileHoldsOnlyHashes(t *testing.T) {
 
 func TestScanRefusesAMissingFile(t *testing.T) {
 	t.Parallel()
-	if _, err := Scan(fstest.MapFS{}, []string{"docs/missing.md"}, DefaultRules(), nil, nil); err == nil {
+	if _, _, err := Scan(fstest.MapFS{}, []string{"docs/missing.md"}, DefaultRules(), nil, nil); err == nil {
 		t.Fatal("Scan reported a missing file as clean")
 	}
 }
@@ -726,7 +770,7 @@ func TestUnreadableAndMalformedInputsAreErrors(t *testing.T) {
 			{Match: func(string) bool { return false }},
 			{Name: "no matcher"},
 		} {
-			if _, err := Scan(fsys, []string{"docs/a.md"}, []Rule{rule}, nil, nil); err == nil {
+			if _, _, err := Scan(fsys, []string{"docs/a.md"}, []Rule{rule}, nil, nil); err == nil {
 				t.Errorf("Scan accepted rule %q", rule.Name)
 			}
 		}
@@ -734,7 +778,7 @@ func TestUnreadableAndMalformedInputsAreErrors(t *testing.T) {
 
 	t.Run("invalid path", func(t *testing.T) {
 		t.Parallel()
-		if _, err := Scan(singleFile("docs/a.md", "plain text\n"), []string{"../escape"}, DefaultRules(), nil, nil); err == nil {
+		if _, _, err := Scan(singleFile("docs/a.md", "plain text\n"), []string{"../escape"}, DefaultRules(), nil, nil); err == nil {
 			t.Fatal("Scan accepted a path outside its filesystem")
 		}
 	})
@@ -762,7 +806,7 @@ func TestTheScannerDoesNotFlagItsOwnFiles(t *testing.T) {
 	t.Parallel()
 	blocked := shippedBlocked(t)
 	paths := []string{"blocked.sha256", "hygiene.go", "hygiene_test.go"}
-	findings, err := Scan(os.DirFS("."), paths, DefaultRules(), blocked, nil)
+	findings, _, err := Scan(os.DirFS("."), paths, DefaultRules(), blocked, nil)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
