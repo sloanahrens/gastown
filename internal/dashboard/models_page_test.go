@@ -113,7 +113,7 @@ func TestTheModelsLineFoldsTheTablesUnderIt(t *testing.T) {
 func TestTheHeaderStripCountsTheDispatchersRoster(t *testing.T) {
 	t.Parallel()
 
-	const seat = "deepseek-flash-sandbox-k8s"
+	const seat = "sbx-flash"
 	now := time.Date(2026, 10, 24, 15, 47, 0, 0, time.UTC)
 	h := NewHub(Config{
 		Now: func() time.Time { return now },
@@ -164,7 +164,7 @@ func TestTheHeaderStripTellsAFailedRosterReadFromOneNotMade(t *testing.T) {
 	t.Parallel()
 
 	models := func() *Models {
-		return &Models{SeatCap: 3, SeatRows: []ModelSeat{{Agent: "deepseek-flash-sandbox-k8s", Cap: 3, State: "open"}}}
+		return &Models{SeatCap: 3, SeatRows: []ModelSeat{{Agent: "sbx-flash", Cap: 3, State: "open"}}}
 	}
 
 	// No roster source at all: the count has not been read.
@@ -191,7 +191,7 @@ func TestTheHeaderStripTellsAFailedRosterReadFromOneNotMade(t *testing.T) {
 
 	// The next poll that reads the roster clears the flag and fills the count.
 	h = NewHub(Config{Models: models, SeatRoster: func() SeatRoster {
-		return SeatRoster{Live: map[string]int{"deepseek-flash-sandbox-k8s": 1}, Total: 1, Read: true}
+		return SeatRoster{Live: map[string]int{"sbx-flash": 1}, Total: 1, Read: true}
 	}})
 	h.pollModels()
 	st = h.State()
@@ -214,13 +214,13 @@ func TestTheModelsPanelNamesTheSandboxSeatsByTheirShortNames(t *testing.T) {
 	}
 	dom.call(t, "renderModelsPanel", map[string]any{
 		"models": map[string]any{"seat_rows": []any{
-			map[string]any{"agent": "deepseek-flash-sandbox", "cap": 3, "state": "open", "live": 1, "key": "gastown.deepseek-flash-sandbox"},
-			map[string]any{"agent": "deepseek-flash-sandbox-k8s", "cap": 3, "state": "open", "live": 0, "key": "gastown.deepseek-flash-sandbox-k8s"},
+			map[string]any{"agent": "sbx-haiku", "cap": 3, "state": "open", "live": 1, "key": "gastown.sbx-haiku"},
+			map[string]any{"agent": "sbx-flash", "cap": 3, "state": "open", "live": 0, "key": "gastown.sbx-flash"},
 		}},
 	})
 	for _, c := range []struct{ shown, full, key string }{
-		{"docker-sbx", "deepseek-flash-sandbox", "gastown.deepseek-flash-sandbox"},
-		{"sbx-flash", "deepseek-flash-sandbox-k8s", "gastown.deepseek-flash-sandbox-k8s"},
+		{"haiku", "sbx-haiku", "gastown.sbx-haiku"},
+		{"flash", "sbx-flash", "gastown.sbx-flash"},
 	} {
 		cell := dom.cellWithText(t, "modelspanel", c.shown)
 		if want := c.full + " · " + c.key; cell.Title != want {
@@ -241,13 +241,13 @@ func TestTheModelsPanelActivityTableNamesAgentsByTheirShortNames(t *testing.T) {
 	}
 	dom.call(t, "renderModelsPanel", map[string]any{
 		"models": map[string]any{"activity": []any{
-			map[string]any{"agent": "deepseek-flash-sandbox", "landed": 2, "rejected": 1},
-			map[string]any{"agent": "deepseek-flash-sandbox-k8s", "landed": 0, "rejected": 3},
+			map[string]any{"agent": "sbx-haiku", "landed": 2, "rejected": 1},
+			map[string]any{"agent": "sbx-flash", "landed": 0, "rejected": 3},
 		}},
 	})
 	for i, c := range []struct{ shown, full, landed, rejected string }{
-		{"docker-sbx", "deepseek-flash-sandbox", "2", "1"},
-		{"sbx-flash", "deepseek-flash-sandbox-k8s", "0", "3"},
+		{"haiku", "sbx-haiku", "2", "1"},
+		{"flash", "sbx-flash", "0", "3"},
 	} {
 		cell := dom.cellWithText(t, "modelspanel", c.shown)
 		if cell.Title != c.full {

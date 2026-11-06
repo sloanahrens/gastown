@@ -1,9 +1,11 @@
 package dashboard
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The strip is the whole of the page's top: the day's landings, the seats, the
@@ -320,7 +322,7 @@ func TestTheStripNamesTheOpenSeatsAndTheRetiredSeatIsGone(t *testing.T) {
 func TestTheStripTellsAFailedSeatReadFromOneNotMade(t *testing.T) {
 	t.Parallel()
 
-	const seat = "deepseek-flash-sandbox-k8s"
+	const seat = "sbx-flash"
 	unread := map[string]any{"agent": seat, "cap": 3, "state": "open", "key": "gastown." + seat}
 	read := map[string]any{"agent": seat, "cap": 3, "state": "open", "key": "gastown." + seat, "live": 3}
 	dom := newPageDOM(t)
@@ -330,9 +332,9 @@ func TestTheStripTellsAFailedSeatReadFromOneNotMade(t *testing.T) {
 		cell   string
 		why    string
 	}{
-		{"not yet read", map[string]any{"seat_rows": []any{unread}}, "sbx-flash –/3", "has not been read yet"},
-		{"read failed", map[string]any{"seat_rows": []any{unread}, "seats_unreadable": true}, "sbx-flash ?/3", "could not be read"},
-		{"read", map[string]any{"seat_rows": []any{read}}, "sbx-flash 3/3", ""},
+		{"not yet read", map[string]any{"seat_rows": []any{unread}}, "flash –/3", "has not been read yet"},
+		{"read failed", map[string]any{"seat_rows": []any{unread}, "seats_unreadable": true}, "flash ?/3", "could not be read"},
+		{"read", map[string]any{"seat_rows": []any{read}}, "flash 3/3", ""},
 	} {
 		dom.call(t, "renderStrip", map[string]any{"models": c.models})
 		cell := dom.cellWithText(t, "strip", c.cell)
@@ -348,32 +350,121 @@ func TestTheStripTellsAFailedSeatReadFromOneNotMade(t *testing.T) {
 	}
 }
 
-// The header strip prints the two DeepSeek sandbox seats by their short names
-// and keeps each full name on hover; any other seat prints as it always has
-// (gt-2mnrl).
+// The header strip prints the two sandbox seats as flash and haiku and keeps
+// each full name on hover; a seat in no table prints as it always has, and a
+// seat with no agent prints "no agent" (gt-2mnrl, gt-1f68sk).
 func TestTheStripNamesTheSandboxSeatsByTheirShortNames(t *testing.T) {
 	t.Parallel()
 
 	dom := newPageDOM(t)
 	dom.call(t, "renderStrip", map[string]any{
 		"models": map[string]any{"seat_rows": []any{
-			map[string]any{"agent": "deepseek-flash-sandbox", "cap": 3, "state": "open", "live": 1, "key": "gastown.deepseek-flash-sandbox"},
-			map[string]any{"agent": "deepseek-flash-sandbox-k8s", "cap": 3, "state": "open", "live": 0, "key": "gastown.deepseek-flash-sandbox-k8s"},
+			map[string]any{"agent": "sbx-flash", "cap": 3, "state": "open", "live": 1, "key": "gastown.sbx-flash"},
+			map[string]any{"agent": "sbx-haiku", "cap": 2, "state": "open", "live": 0, "key": "gastown.sbx-haiku"},
 			map[string]any{"agent": "claude-haiku", "cap": 2, "state": "open", "live": 1, "key": "gastown.claude-haiku"},
+			map[string]any{"agent": "gemini-pro", "cap": 1, "state": "open", "live": 0, "key": "gastown.gemini-pro"},
+			map[string]any{"agent": "", "cap": 1, "state": "open", "live": 0, "key": "gastown.unnamed"},
 		}},
 	})
 	// Each fact after the first is drawn with the strip's " · " separator in
 	// its own cell, and cellWithText reads a cell by its whole text.
 	for _, c := range []struct{ cell, full string }{
-		{"docker-sbx 1/3", "deepseek-flash-sandbox"},
-		{" · sbx-flash 0/3", "deepseek-flash-sandbox-k8s"},
+		{"flash 1/3", "sbx-flash"},
+		{" · haiku 0/2", "sbx-haiku"},
 		{" · claude-haiku 1/2", "claude-haiku"},
+		{" · gemini-pro 0/1", "gemini-pro"},
 	} {
 		cell := dom.cellWithText(t, "strip", c.cell)
 		if !strings.Contains(cell.Title, c.full) {
 			t.Errorf("the strip's %q does not carry the full name %q on hover: %q", c.cell, c.full, cell.Title)
 		}
 	}
+	noAgent := dom.cellWithText(t, "strip", " · no agent 0/1")
+	if !strings.Contains(noAgent.Title, "gastown.unnamed") {
+		t.Errorf("the strip's no-agent seat carries %q on hover, want its config key", noAgent.Title)
+	}
+}
+
+// The sandbox seats print as flash and haiku on every surface that names a
+// seat: the header strip, the models panel's seat table and the polecat panel's
+// Agent cell. Each keeps the full name on hover, and no surface prints the sbx-
+// prefix as text (gt-1f68sk).
+func TestTheSandboxSeatsPrintAsFlashAndHaikuOnEverySeatSurface(t *testing.T) {
+	t.Parallel()
+
+	seats := []any{
+		map[string]any{"agent": "sbx-flash", "cap": 3, "state": "open", "live": 1, "key": "gastown.sbx-flash"},
+		map[string]any{"agent": "sbx-haiku", "cap": 2, "state": "open", "live": 0, "key": "gastown.sbx-haiku"},
+	}
+	dom := newPageDOM(t)
+	dom.call(t, "renderStrip", map[string]any{"models": map[string]any{"seat_rows": seats}})
+	if _, err := dom.vm.RunString("modelsOpen = true"); err != nil {
+		t.Fatalf("opening the models panel: %v", err)
+	}
+	dom.call(t, "renderModelsPanel", map[string]any{"models": map[string]any{"seat_rows": seats}})
+	callWork(t, dom, workState([]any{
+		seat("gastown", "alpha", "working", "gt-a1", "flash seat", "sbx-flash", time.Minute),
+		seat("gastown", "bravo", "working", "gt-a2", "haiku seat", "sbx-haiku", time.Minute),
+	}, workQueueReading(0, 0, 0, 0)))
+
+	for _, c := range []struct{ id, cell, full string }{
+		{"strip", "flash 1/3", "sbx-flash"},
+		{"strip", " · haiku 0/2", "sbx-haiku"},
+		{"modelspanel", "flash", "sbx-flash"},
+		{"modelspanel", "haiku", "sbx-haiku"},
+	} {
+		cell := dom.cellWithText(t, c.id, c.cell)
+		if !strings.Contains(cell.Title, c.full) {
+			t.Errorf("#%s's %q carries %q on hover, want the full name %q", c.id, c.cell, cell.Title, c.full)
+		}
+	}
+
+	// The Agent cell's tooltip opens with the agent's full name, so the cell
+	// is matched to its seat by that name.
+	shown := map[string]string{}
+	agents := workCells(t, dom, "wagent")
+	for _, a := range agents {
+		shown[strings.SplitN(a.Title, " ", 2)[0]] = a.Text
+	}
+	if len(agents) != 2 || shown["sbx-flash"] != "flash" || shown["sbx-haiku"] != "haiku" {
+		t.Errorf("the polecat panel's Agent cells read %v, want sbx-flash as flash and sbx-haiku as haiku", shown)
+	}
+
+	for _, id := range []string{"strip", "modelspanel", "polecats"} {
+		for _, text := range leafTexts(t, dom, id) {
+			if strings.Contains(text, "sbx-") {
+				t.Errorf("#%s prints %q as text, want the short names only", id, text)
+			}
+		}
+	}
+}
+
+// leafTexts reads the text of every leaf under the element id, in the order the
+// page drew them, so a test can check every cell a surface prints.
+func leafTexts(t *testing.T, dom *pageDOM, id string) []string {
+	t.Helper()
+
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
+		const out = [];
+		(function walk(n) {
+			for (const c of (n.children || [])) {
+				if (c.children && c.children.length === 0) out.push(String(c.textContent));
+				walk(c);
+			}
+		})(__byId[` + quoteJS(id) + `]);
+		return out;
+	})())`)
+	if err != nil {
+		t.Fatalf("reading the text under #%s: %v", id, err)
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(v.String()), &out); err != nil {
+		t.Fatalf("reading the text under #%s: %v", id, err)
+	}
+	if len(out) == 0 {
+		t.Fatalf("#%s draws no text, so nothing under it can be checked", id)
+	}
+	return out
 }
 
 // contains reports whether a state is one of the ones the table means.

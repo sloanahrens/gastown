@@ -887,10 +887,10 @@ func TestTheWorkPanelShortensTheAgentButKeepsItsFullNameOnHover(t *testing.T) {
 
 	dom := newPageDOM(t)
 	callWork(t, dom, workState([]any{
-		seat("gastown", "alpha", "working", "gt-a1", "sandboxed", "deepseek-flash-sandbox", time.Minute),
+		seat("gastown", "alpha", "working", "gt-a1", "sandboxed", "sbx-haiku", time.Minute),
 		seat("gastown", "bravo", "working", "gt-a2", "haiku", "claude-haiku", time.Minute),
 		seat("gastown", "charlie", "working", "gt-a3", "unprefixed", "gemini-pro", time.Minute),
-		seat("gastown", "delta", "working", "gt-a4", "sandboxed k8s", "deepseek-flash-sandbox-k8s", time.Minute),
+		seat("gastown", "delta", "working", "gt-a4", "sandboxed k8s", "sbx-flash", time.Minute),
 		seat("gastown", "echo", "working", "gt-a5", "sonnet", "claude-sonnet", time.Minute),
 		seat("gastown", "foxtrot", "working", "gt-a6", "flash", "deepseek-flash", time.Minute),
 	}, workQueueReading(0, 0, 0, 0)))
@@ -905,8 +905,8 @@ func TestTheWorkPanelShortensTheAgentButKeepsItsFullNameOnHover(t *testing.T) {
 		byPolecat[n.Text] = agents[i]
 	}
 	for _, c := range []struct{ polecat, shown, full string }{
-		{"alpha", "docker-sbx", "deepseek-flash-sandbox"},
-		{"delta", "sbx-flash", "deepseek-flash-sandbox-k8s"},
+		{"alpha", "haiku", "sbx-haiku"},
+		{"delta", "flash", "sbx-flash"},
 		{"bravo", "haiku", "claude-haiku"},
 		{"echo", "sonnet", "claude-sonnet"},
 		{"foxtrot", "flash", "deepseek-flash"},
