@@ -231,6 +231,7 @@ dangerous	crew	"eval 'git clean -fd'"	refuse	git clean -f/--force deletes untrac
 dangerous	crew	"x=$(git push --force origin main)"	refuse	Force push	gt-7ydceb
 dangerous	crew	"diff <(go clean -modcache) f"	refuse	wipes the Go build cache	gt-7ydceb
 dangerous	polecat	"bash -c 'echo hi )'"	refuse	nested command cannot be read (unbalanced parenthesis)	gt-7ydceb
+dangerous	crew	"bash -c 'echo hi )'"	refuse	nested command cannot be read (unbalanced parenthesis)	gt-7ydceb
 dangerous	polecat	"eval 'echo hi )'"	refuse	nested command cannot be read (unbalanced parenthesis)	gt-7ydceb
 dangerous	polecat	"x=$(echo \")\" ; bash -c \"echo hi\")"	allow		gt-7ydceb
 dangerous	crew	"x=$(echo \")\" ; bash -c \"echo hi\")"	allow		gt-7ydceb
