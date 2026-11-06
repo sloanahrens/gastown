@@ -328,8 +328,8 @@ type Daemon struct {
 	// alerts a disk once, and a clear needs a reading that says so.
 	diskMaintAlerts diskMaintAlerts
 	// cacheTrimNoOp is the claims a completed cache trim left over twice the
-	// cap, which the attention queue raises until a later trim's reading finds
-	// them under it (gt-gg9hv.46).
+	// cap, which the attention queue raises until a later pass reads one under
+	// it or finds the claim gone (gt-gg9hv.46, gt-gg9hv.50).
 	cacheTrimNoOp cacheTrimNoOp
 	// ciCacheTrimRunning is the single-flight guard of the CI build-cache trim's
 	// pass, which runs on its own interval and off the quiet guard
