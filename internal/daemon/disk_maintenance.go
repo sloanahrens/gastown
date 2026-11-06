@@ -499,14 +499,28 @@ func (d *Daemon) runDiskMaintenanceTrim(mode string, due diskMaintDue, why strin
 }
 
 // runCacheTrimPass is the trim's own pass, the one a busy tick dispatches: the
-// disk readings and their alerts first, as the combined pass raises them, then
-// the trim. Its caller holds the trim's own guard (see runDiskMaintenanceTrim).
+// trim and nothing else. The disk alerts stay with the combined pass: a second
+// pass applying them beside it would have to be serialised against it, and a
+// stuck notifier would then hold the trim (gt-gg9hv.48). Its caller holds the
+// trim's own guard (see runDiskMaintenanceTrim).
 func (d *Daemon) runCacheTrimPass(mode string) {
 	ctx, cancel := d.diskMaintenanceContext()
 	defer cancel()
-	s := d.diskMaintenanceSeams()
-	d.applyDiskAlerts(ctx, s.readDisks, s.now())
+	if !d.cacheTrimStillDue() {
+		return // another pass trimmed between the tick and this run
+	}
 	d.diskMaintenanceTrim(ctx, mode)
+}
+
+// cacheTrimStillDue reads the schedule again at run time: a pass carries the
+// due set its tick found, and a trim that concluded after that tick (the other
+// pass's) has spent the interval, so the trim must not run a second time in it.
+func (d *Daemon) cacheTrimStillDue() bool {
+	every, err := diskMaintenanceCacheTrimEvery(d.patrolConfig)
+	if err != nil {
+		return false
+	}
+	return d.diskMaintSchedule.cacheTrimDue(d.diskMaintenanceSeams().now(), every)
 }
 
 // runCacheTrimInPass is the trim inside the combined pass: it tries the trim's
@@ -518,6 +532,9 @@ func (d *Daemon) runCacheTrimInPass(ctx context.Context, mode string) bool {
 		return false
 	}
 	defer d.diskMaintTrimRunning.Store(false)
+	if !d.cacheTrimStillDue() {
+		return false
+	}
 	d.diskMaintenanceTrim(ctx, mode)
 	return true
 }
@@ -579,7 +596,8 @@ func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDu
 	// The disk alerts are an alarm rather than a change, so they are read and
 	// raised before anything that can refuse the plan: a disk too full to keep
 	// pruning, or a keep the patrol cannot decide, must not silence them.
-	readings := d.applyDiskAlerts(ctx, s.readDisks, now)
+	readings := s.readDisks(ctx)
+	d.applyDiskAlerts(readings, now)
 
 	// The cache trim is independent of the targets: it trims the claim the
 	// sandbox profiles mount, so it runs when its interval is due whether or not

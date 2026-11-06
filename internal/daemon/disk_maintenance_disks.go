@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/diskmaint/disks"
@@ -280,34 +279,15 @@ func (d *Daemon) diskMaintHostReadings(watched []diskMaintDisk, injected map[str
 
 // diskMaintAlerts is the patrol's memory of the disk alert keys it has open,
 // and of when it last logged that each open unreadable key is still unreadable.
-// A pass writes it and the next pass reads it. One pass applies the alerts at a
-// time: applying is the single-applier claim, and a pass that finds it taken
-// skips the alert application and carries on with its own work, so nothing
-// waits for another pass and two passes never decide, or deliver, against each
-// other (gt-gg9hv.48). mu keeps a single accessor safe on its own.
+// A pass writes it and the next pass reads it, one pass at a time, but the
+// mutex keeps the read off a pass that has not settled yet.
 type diskMaintAlerts struct {
-	applying atomic.Bool
-	// claim, when set, replaces the single-applier claim: a test swaps in one
-	// that always grants it, to show the one-applier test goes red without it.
-	claim  func() (release func(), ok bool)
 	mu     sync.Mutex
 	active map[string]bool
 	// stillLogged is the pass time of the last "still unreadable" line for a
 	// key, or of the pass that first saw its disk unreadable. The clear forgets
 	// it, so a new outage starts its own hour.
 	stillLogged map[string]time.Time
-}
-
-// tryApply claims the right to apply the alerts. It reports false, without
-// waiting, when another pass holds it; release hands it back.
-func (a *diskMaintAlerts) tryApply() (release func(), ok bool) {
-	if a.claim != nil {
-		return a.claim()
-	}
-	if !a.applying.CompareAndSwap(false, true) {
-		return nil, false
-	}
-	return func() { a.applying.Store(false) }, true
 }
 
 // snapshot returns a copy of the open keys, which is what disks.Evaluate
@@ -322,59 +302,19 @@ func (a *diskMaintAlerts) snapshot() map[string]bool {
 	return open
 }
 
-// markRaised records a key as open.
-func (a *diskMaintAlerts) markRaised(key string) {
+// mark records a key as open, or forgets it once its alert is cleared.
+func (a *diskMaintAlerts) mark(key string, open bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if !open {
+		delete(a.active, key)
+		delete(a.stillLogged, key)
+		return
+	}
 	if a.active == nil {
 		a.active = map[string]bool{}
 	}
 	a.active[key] = true
-}
-
-// undoRaise forgets the raise of a send the notifier refused, so the next pass
-// raises it again. The unreadable clock recordUnreadableRaised set stays, so
-// that retry restarts the hour and says so.
-func (a *diskMaintAlerts) undoRaise(key string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	delete(a.active, key)
-}
-
-// diskMaintAlertUndo is the unreadable clock a clear replaced, so a clear the
-// notifier refused can be undone.
-type diskMaintAlertUndo struct {
-	still    time.Time
-	hadStill bool
-}
-
-// markCleared forgets a key and the unreadable clock behind it, returning the
-// clock so undoClear can put it back if the notifier refuses the clear.
-func (a *diskMaintAlerts) markCleared(key string) diskMaintAlertUndo {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	u := diskMaintAlertUndo{}
-	u.still, u.hadStill = a.stillLogged[key]
-	delete(a.active, key)
-	delete(a.stillLogged, key)
-	return u
-}
-
-// undoClear reopens a key whose clear the notifier refused, with the clock it
-// had, so the next pass clears it again and no reminder is rescheduled.
-func (a *diskMaintAlerts) undoClear(key string, u diskMaintAlertUndo) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.active == nil {
-		a.active = map[string]bool{}
-	}
-	a.active[key] = true
-	if u.hadStill {
-		if a.stillLogged == nil {
-			a.stillLogged = map[string]time.Time{}
-		}
-		a.stillLogged[key] = u.still
-	}
 }
 
 // stillUnreadableDue reports whether the patrol may log that key is still
@@ -421,54 +361,29 @@ func (a *diskMaintAlerts) recordUnreadableRaised(key string, now time.Time) (aga
 // outage that lasts is visible without a repeat alert. A raise the notifier
 // refused is retried on the next pass, and each retry restarts the hour; the
 // retry gets its own line so those restarts are not silent.
-//
-// One pass applies the alerts at a time. A pass that finds another applying
-// skips the application and only reads the disks, so it neither waits nor
-// decides against state the other is halfway through changing, and a raise and
-// a clear for one key are never delivered out of order (gt-gg9hv.48). The
-// applying pass makes every send under the pass's own context, so a stuck
-// notifier is abandoned when the pass ends and the send it refused undoes the
-// state it recorded, so the next pass decides again.
-//
-// The readings it read are returned, so the combined pass makes its keep
-// decision from the same read it alerted on.
-func (d *Daemon) applyDiskAlerts(ctx context.Context, read func(context.Context) []disks.Reading, now time.Time) []disks.Reading {
-	a := &d.diskMaintAlerts
-	release, ok := a.tryApply()
-	if !ok {
-		d.logger.Printf("disk_maintenance: another pass is applying the disk alerts; this pass reads the disks only")
-		return read(ctx)
-	}
-	defer release()
-	readings := read(ctx)
-	for _, alert := range disks.Evaluate(readings, a.snapshot()) {
+func (d *Daemon) applyDiskAlerts(readings []disks.Reading, now time.Time) {
+	for _, alert := range disks.Evaluate(readings, d.diskMaintAlerts.snapshot()) {
 		switch {
 		case alert.Raise:
-			a.markRaised(alert.Key)
-			again := false
-			if alert.Unreadable {
-				again = a.recordUnreadableRaised(alert.Key, now)
-			}
-			if err := d.escalateAlertCtx(ctx, alert.Key, diskMaintAlertSource, alert.Detail); err != nil {
-				// The next pass decides again: a raise it refused is raised again.
-				a.undoRaise(alert.Key)
+			err := d.escalateAlertErr(alert.Key, diskMaintAlertSource, alert.Detail)
+			if err != nil {
 				d.logger.Printf("disk_maintenance: alert %s was not delivered: %v", alert.Key, err)
+			} else {
+				d.diskMaintAlerts.mark(alert.Key, true)
 			}
-			if again {
+			if alert.Unreadable && d.diskMaintAlerts.recordUnreadableRaised(alert.Key, now) {
 				d.logger.Printf("disk_maintenance: disk %s still unreadable, alert raised again", alert.Name)
 			}
 		case alert.Clear:
-			undo := a.markCleared(alert.Key)
-			if err := d.clearAlertsCtx(ctx, alert.Detail, alert.Key); err != nil {
-				// A clear it refused is cleared again.
-				a.undoClear(alert.Key, undo)
+			if err := d.clearAlertsErr(alert.Detail, alert.Key); err != nil {
 				d.logger.Printf("disk_maintenance: alert %s was not cleared: %v", alert.Key, err)
+				continue // still open, and the next pass clears it again
 			}
+			d.diskMaintAlerts.mark(alert.Key, false)
 		case alert.Still:
-			if a.stillUnreadableDue(alert.Key, now) {
+			if d.diskMaintAlerts.stillUnreadableDue(alert.Key, now) {
 				d.logger.Printf("disk_maintenance: %s", alert.Detail)
 			}
 		}
 	}
-	return readings
 }
