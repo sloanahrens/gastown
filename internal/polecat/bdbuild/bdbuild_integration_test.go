@@ -151,7 +151,7 @@ func TestIntegrationRunGitStopsACommandItsContextEnds(t *testing.T) {
 			ctx, cancel := tc.ctx()
 			defer cancel()
 			start := time.Now()
-			_, err := runGit(ctx, t.TempDir(), "--version")
+			_, err := runGit(ctx, t.TempDir(), nil, "--version")
 			elapsed := time.Since(start)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("runGit under %s: err = %v, want one naming %q", tc.name, err, tc.want)
