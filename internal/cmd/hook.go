@@ -581,13 +581,41 @@ func hookPolecatRefusal(getenv func(string) string) error {
 	return nil
 }
 
+// hookWorktreeIntegrityGetwd is the directory the hook integrity check
+// validates. It is os.Getwd, the real process directory: this is a guard, and
+// GT_CALLER_CWD must never steer it. Tests inject their own getwd to drive the
+// failure branches.
+var hookWorktreeIntegrityGetwd = os.Getwd
+
 func ensureCurrentHookWorktreeIntegrity() error {
-	cwd, err := os.Getwd()
+	return hookWorktreeIntegrityIn(hookWorktreeIntegrityGetwd, workspace.Find)
+}
+
+// hookWorktreeIntegrityIn is ensureCurrentHookWorktreeIntegrity reading the
+// working directory through getwd and resolving the town through findTown
+// (workspace.Find in production).
+//
+// An absent or unreadable directory is a FAILURE that blocks the hook, never a
+// pass: with no directory there is no worktree to validate, and a guard that
+// reports "checked and fine" for something it could not check is fail-open
+// (gt-yjzepk.1 rework).
+func hookWorktreeIntegrityIn(getwd func() (string, error), findTown func(string) (string, error)) error {
+	cwd, err := getwd()
 	if err != nil {
 		return fmt.Errorf("getting current directory: %w", err)
 	}
-	townRoot, err := workspace.FindFromCwd()
-	if err != nil || townRoot == "" {
+	info, statErr := os.Stat(cwd)
+	if statErr != nil {
+		return fmt.Errorf("hook integrity: the current directory %s is not present here: %w", cwd, statErr)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("hook integrity: the current directory %s is not a directory", cwd)
+	}
+	townRoot, err := findTown(cwd)
+	if err != nil {
+		return fmt.Errorf("hook integrity: finding workspace: %w", err)
+	}
+	if townRoot == "" {
 		return nil
 	}
 	roleCtx := detectRole(cwd, townRoot)

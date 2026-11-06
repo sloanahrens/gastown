@@ -16,6 +16,7 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/lock"
@@ -151,8 +152,19 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 	if err != nil {
 		return fmt.Errorf("detecting role: %w", err)
 	}
-	if err := ensureRoleWorktreeIntegrity(cwd, townRoot, roleInfo.Role); err != nil {
+	callerPresent, err := callercwd.Exists()
+	if err != nil {
 		return err
+	}
+	if callerPresent {
+		if err := ensureRoleWorktreeIntegrity(cwd, townRoot, roleInfo.Role); err != nil {
+			return err
+		}
+	} else {
+		// The caller's worktree is not in this process (a Mac path in a pod),
+		// so there is no .git here to validate and no lock or redirect to
+		// write. Saying so keeps the skip visible rather than reading as clean.
+		fmt.Fprintf(os.Stderr, "gt prime: the caller's directory %s is not present here; worktree checks and the identity lock run where it lives\n", cwd)
 	}
 
 	// --step is a read-only fetch: no hook handling, no handoff-marker removal,
@@ -227,7 +239,7 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 
 	primeContinuationMode = primeHookSource == "compact" || primeHandoffReason == "compaction"
 
-	if err := setupPrimeSession(ctx, roleInfo); err != nil {
+	if err := setupPrimeSession(ctx, roleInfo, callerPresent, lock.New(ctx.WorkDir)); err != nil {
 		return err
 	}
 
@@ -468,12 +480,15 @@ func validatePrimeFlags() error {
 // resolvePrimeWorkspace finds the cwd and town root for prime.
 // Returns empty townRoot (not an error) when not in a workspace and not enabled.
 func resolvePrimeWorkspace() (cwd, townRoot string, err error) {
-	cwd, err = os.Getwd()
+	// prime is an identity path: it answers for the caller's seat, so it reads
+	// GT_CALLER_CWD when set. workspace.Find takes the start directory
+	// explicitly, so the generic resolver stays on os.Getwd (gt-yjzepk.1).
+	cwd, err = callercwd.Getwd()
 	if err != nil {
-		return "", "", fmt.Errorf("getting current directory: %w", err)
+		return "", "", fmt.Errorf("getting the caller's directory: %w", err)
 	}
 
-	townRoot, err = workspace.FindFromCwd()
+	townRoot, err = workspace.Find(cwd)
 	if err != nil {
 		return "", "", fmt.Errorf("finding workspace: %w", err)
 	}
@@ -599,16 +614,23 @@ func warnRoleMismatch(roleInfo RoleInfo, cwd string) {
 }
 
 // setupPrimeSession handles identity locking, beads redirect, and session events.
-// Skipped entirely in dry-run mode.
-func setupPrimeSession(ctx RoleContext, roleInfo RoleInfo) error {
+// Skipped entirely in dry-run mode. The lock and redirect live in the caller's
+// worktree, so callerPresent false (a Mac path in a pod) skips both.
+//
+// identityLock is the lock for ctx.WorkDir. runPrime passes lock.New there;
+// tests pass one whose staleness comes from a scripted process table, so the
+// collision check never depends on which processes this host is running.
+func setupPrimeSession(ctx RoleContext, roleInfo RoleInfo, callerPresent bool, identityLock *lock.Lock) error {
 	if primeDryRun {
 		return nil
 	}
-	if err := acquireIdentityLock(ctx); err != nil {
-		return err
-	}
-	if !roleInfo.Mismatch {
-		ensureBeadsRedirect(ctx)
+	if callerPresent {
+		if err := claimIdentityLock(identityLock, ctx); err != nil {
+			return err
+		}
+		if !roleInfo.Mismatch {
+			ensureBeadsRedirect(ctx)
+		}
 	}
 	repairSessionEnv(ctx, roleInfo)
 	// --hook is the flag that lets a run emit session_start at all; whether
@@ -1520,17 +1542,15 @@ func getAgentIdentity(ctx RoleContext) string {
 	}
 }
 
-// acquireIdentityLock checks and acquires the identity lock for worker roles.
+// claimIdentityLock checks and acquires the identity lock for worker roles.
 // This prevents multiple agents from claiming the same worker identity.
-// Returns an error if another agent already owns this identity.
-func acquireIdentityLock(ctx RoleContext) error {
+// Returns an error if another agent already owns this identity. The lock is
+// passed in so a test can script its staleness.
+func claimIdentityLock(l *lock.Lock, ctx RoleContext) error {
 	// Only lock worker roles (polecat, crew)
 	if ctx.Role != RolePolecat && ctx.Role != RoleCrew {
 		return nil
 	}
-
-	// Create lock for this worker directory
-	l := lock.New(ctx.WorkDir)
 
 	// Determine session ID from environment or context
 	sessionID := os.Getenv("TMUX_PANE")

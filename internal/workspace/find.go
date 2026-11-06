@@ -37,6 +37,9 @@ type procEnv struct {
 }
 
 // processEnv reads the running process's environment and working directory.
+// It reads the real process directory: workspace resolution is a generic
+// resolver, and the caller-directory variable (internal/callercwd) must not
+// steer it. Callers that know the caller's directory pass it to Find.
 var processEnv = procEnv{getenv: os.Getenv, getwd: os.Getwd}
 
 // ForbiddenTownRoot returns the live town root the hermetic test harness
@@ -123,6 +126,10 @@ const (
 // Always continues to the outermost workspace, correctly handling nested
 // workspace structures (e.g., rig directories with their own mayor/town.json).
 // Does not resolve symlinks to stay consistent with os.Getwd().
+//
+// Ancestors that are not present are skipped rather than ending the walk: the
+// walk is lexical, so a caller directory that this process cannot see (a Mac
+// crew worktree in a pod) still resolves the town root above it.
 func Find(startDir string) (string, error) {
 	return processEnv.find(startDir)
 }

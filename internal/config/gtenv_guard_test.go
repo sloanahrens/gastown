@@ -61,6 +61,11 @@ var gtEnvInvocation = map[string]bool{
 	// launches (withRoleSystemPromptFlag), and prime reads it back in that
 	// process to tell whether the static text was delivered (gt-a94xe).
 	EnvSystemPromptFile: true,
+	// The Mac wrapper sets GT_CALLER_CWD on the one gt process it execs into
+	// the daemon container: the directory the caller stands in, which can be a
+	// Mac path the container does not have, so no config file in the town can
+	// hold it (gt-yjzepk.1; the wrapper is gt-yjzepk.10).
+	"GT_CALLER_CWD": true,
 	// The spawner sets the backend for the one session it launches: a sandbox
 	// seat runs inside the sandbox, so its gt done reads the marker from the
 	// environment it was started with (gt-g0u8g).

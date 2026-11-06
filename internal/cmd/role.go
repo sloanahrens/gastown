@@ -48,6 +48,11 @@ func (r RoleInfo) formulaCooker() formulaCooker {
 
 // GetRole returns the current role, checking GT_ROLE first then falling back to cwd.
 // This is the canonical function for role detection.
+//
+// It reads the real process directory, never GT_CALLER_CWD: its callers include
+// checkStopSlungWork, a stop guard, and a guard must not be steered by a
+// variable the agent can set. Identity paths that must follow the caller take
+// the directory explicitly through GetRoleWithContext.
 func GetRole() (RoleInfo, error) {
 	cwd, err := os.Getwd()
 	if err != nil {

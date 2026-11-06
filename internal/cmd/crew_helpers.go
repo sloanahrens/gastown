@@ -2,10 +2,10 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/crew"
 	"github.com/steveyegge/gastown/internal/git"
@@ -81,9 +81,11 @@ type crewDetection struct {
 // detectCrewFromCwd attempts to detect the crew workspace from the current directory.
 // It looks for the pattern <town>/<rig>/crew/<name>/ in the current path.
 func detectCrewFromCwd() (*crewDetection, error) {
-	cwd, err := os.Getwd()
+	// The crew workspace is the caller's directory: one that this process
+	// cannot see is refused rather than resolved from the process directory.
+	cwd, err := callercwd.Require()
 	if err != nil {
-		return nil, fmt.Errorf("getting cwd: %w", err)
+		return nil, err
 	}
 
 	// Find town root
