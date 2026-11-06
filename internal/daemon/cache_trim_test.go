@@ -635,6 +635,122 @@ func TestDiskMaintenanceCacheTrimRefusesASecondClaimInOneNamespace(t *testing.T)
 	}
 }
 
+// TestCacheTrimRefusedByTheConfigIsAVerdictNotARetry pins that a second claim in
+// one namespace is refused by the town's config, which holds on every pass: the
+// pass records a verdict and judges the claim again at the full interval, not
+// in fifteen minutes.
+func TestCacheTrimRefusedByTheConfigIsAVerdictNotARetry(t *testing.T) {
+	t.Parallel()
+	const otherClaim = "gt-other-cache"
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+		cacheTrimClaimsVerb: {stdout: `{"items":[` +
+			`{"metadata":{"name":"` + cacheTrimClaimName + `","namespace":"` + cacheTrimNamespace + `"}},` +
+			`{"metadata":{"name":"` + otherClaim + `","namespace":"` + cacheTrimNamespace + `"}}]}`},
+		"get pods -n " + cacheTrimNamespace + " -o json": {stdout: `{"items":[` +
+			cacheTrimPodJSON("sbx-a", "Running", cacheTrimClaimName) + `,` +
+			cacheTrimPodJSON("sbx-b", "Running", otherClaim) + `]}`},
+	})
+	f.setProfiles(map[string]agentconfig.SandboxProfile{
+		"first": {
+			Driver:               agentconfig.SandboxDriverKubernetes,
+			Image:                "gastown-polecat:dev",
+			KubernetesCacheClaim: cacheTrimClaimName,
+		},
+		"second": {
+			Driver:               agentconfig.SandboxDriverKubernetes,
+			Image:                "gastown-polecat:dev",
+			KubernetesCacheClaim: otherClaim,
+		},
+	})
+	now := diskMaintNow
+	f.d.diskMaint.now = func() time.Time { return now }
+
+	f.d.runDiskMaintenance() // 04:45: the second claim is refused
+	reads := f.listReads()
+	now = now.Add(15 * time.Minute)
+	f.d.runDiskMaintenance() // 05:00: the refusal holds, so nothing is due
+	if got := f.listReads(); got != reads {
+		t.Errorf("the pass read the listings %d more times fifteen minutes after a config refusal, want none: the refusal is a verdict", got-reads)
+	}
+}
+
+// TestCacheTrimUnderTheCapIsAVerdictNotARetry pins that a claim under the cap
+// has nothing for the trim to remove. That is the claim's answer for its
+// listing, so the pass judges it again at the full interval, not in fifteen
+// minutes.
+func TestCacheTrimUnderTheCapIsAVerdictNotARetry(t *testing.T) {
+	t.Parallel()
+	const underCap = `[{"path":"gocache/aa/a","cache":"build","size":500,` +
+		`"atime":"2026-10-29T01:00:00Z","mtime":"2026-10-29T01:00:00Z"}]`
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+		cacheTrimListVerb: {stdout: underCap},
+	})
+	now := diskMaintNow
+	f.d.diskMaint.now = func() time.Time { return now }
+
+	f.d.runDiskMaintenance() // 04:45: the listing is under the one-kilobyte cap
+	if got := f.listReads(); got != 1 {
+		t.Fatalf("the pass read the listing %d times, want 1", got)
+	}
+	now = now.Add(15 * time.Minute)
+	f.d.runDiskMaintenance() // 05:00: a verdict spends the full interval
+	if got := f.listReads(); got != 1 {
+		t.Errorf("the pass read the listing %d times fifteen minutes after a clean verdict, want 1: nothing to trim is not a retry", got)
+	}
+	now = now.Add(105 * time.Minute)
+	f.d.runDiskMaintenance() // 06:45: two hours after the verdict
+	if got := f.listReads(); got != 2 {
+		t.Errorf("the pass read the listing %d times two hours after the verdict, want 2", got)
+	}
+}
+
+// TestCacheTrimOverTheCapPinnedByASandboxRetriesSoon pins the other side of the
+// cap verdict: a claim over the cap whose only removable files are module cache
+// files, while a sandbox runs, has nothing the trim may remove yet. That clears
+// when the sandbox stops, so it is a failed run, retried in fifteen minutes.
+func TestCacheTrimOverTheCapPinnedByASandboxRetriesSoon(t *testing.T) {
+	t.Parallel()
+	const pinned = `[{"path":"gomodcache/aa/a","cache":"module","size":1000,` +
+		`"atime":"2026-10-29T01:00:00Z","mtime":"2026-10-29T01:00:00Z"},` +
+		`{"path":"gomodcache/bb/b","cache":"module","size":1000,` +
+		`"atime":"2026-10-29T02:00:00Z","mtime":"2026-10-29T02:00:00Z"}]`
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+		cacheTrimListVerb: {stdout: pinned},
+	})
+	now := diskMaintNow
+	f.d.diskMaint.now = func() time.Time { return now }
+
+	f.d.runDiskMaintenance() // 04:45: the running sandbox pins the module cache
+	if got := f.listReads(); got != 1 {
+		t.Fatalf("the pass read the listing %d times, want 1", got)
+	}
+	now = now.Add(5 * time.Minute)
+	f.d.runDiskMaintenance() // 04:50: a failed run is due in fifteen minutes, not now
+	if got := f.listReads(); got != 1 {
+		t.Errorf("the pass retried %d times five minutes after a pinned refusal, want 1: a retry is due at fifteen", got)
+	}
+	now = now.Add(10 * time.Minute)
+	f.d.runDiskMaintenance() // 05:00: the short retry
+	if got := f.listReads(); got != 2 {
+		t.Errorf("the pass read the listing %d times fifteen minutes after a pinned refusal, want 2", got)
+	}
+}
+
+// TestCacheTrimLogsEverySuccessfulTrim pins that a success is not held back by
+// the once-an-hour hold on refusals: the same trim run twice in one hour says it
+// applied both times.
+func TestCacheTrimLogsEverySuccessfulTrim(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, nil)
+	for range 2 {
+		f.d.cacheTrim(context.Background(), agentconfig.DiskMaintenanceModeApply)
+	}
+	applied := "cache trim " + cacheTrimClaimName + " in " + cacheTrimNamespace + " applied"
+	if got := strings.Count(f.log.String(), applied); got != 2 {
+		t.Errorf("logged the applied trim %d times in one hour, want 2: %s", got, f.log.String())
+	}
+}
+
 // TestDiskMaintenanceCacheTrimStopsAtTheReadItCannotMake pins each read the
 // trim depends on: one that fails, or answers something this pass cannot
 // decode, stops the trim where it happened and the log names it. A reply it
