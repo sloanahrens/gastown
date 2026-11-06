@@ -97,7 +97,7 @@ func TestWithBackoffRowsNamesTheSubmitter(t *testing.T) {
 	who := landingNameLookup([]land.SubmissionRecord{
 		{Rig: "gastown", Bead: "gt-polecat", Branch: "polecat/agate/gt-polecat+1", SeenAt: now.Add(-time.Hour)},
 		{Rig: "gastown", Bead: "gt-crew", Branch: "crew/heron/gt-crew", SeenAt: now.Add(-time.Hour)},
-	})
+	}, nil)
 
 	got := withBackoffRows(nil, backoff, nil, who)
 	for bead, want := range map[string]string{"gt-polecat": "agate", "gt-crew": "heron", "gt-quiet": ""} {
@@ -136,7 +136,7 @@ func TestWithBackoffRowsKeepsASubmitterTheRowCarries(t *testing.T) {
 	who := landingNameLookup([]land.SubmissionRecord{
 		{Rig: "gastown", Bead: "gt-known", Branch: "polecat/agate/gt-known+1", SeenAt: now.Add(-time.Hour)},
 		{Rig: "gastown", Bead: "gt-looked-up", Branch: "polecat/agate/gt-looked-up+1", SeenAt: now.Add(-time.Hour)},
-	})
+	}, nil)
 
 	got := withBackoffRows(nil, backoff, nil, who)
 	byBead := map[string]string{}

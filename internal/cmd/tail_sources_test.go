@@ -1668,6 +1668,68 @@ func TestTailBeads_NotFoundIsAskedAgainAfterTheWindow(t *testing.T) {
 	}
 }
 
+// TestTailBeadsSubmittedBy: the actor of a bead's newest "Submitted for
+// landing" comment is its submitter, and a comment written after it (om's
+// verdict, a follow-up) does not hide it. A bead with no submission, an
+// unreadable comments read and a reader with no comment source name no one, so
+// the page reads the landing as the operator's (gt-6ua0sn).
+func TestTailBeadsSubmittedBy(t *testing.T) {
+	t.Parallel()
+	comments := []beads.Comment{
+		{Author: "gastown/polecats/keeper", Text: "Submitted for landing: polecat/keeper/gt-1+old @ 1111 onto main"},
+		{Author: "town/crew/overseer", Text: "Submitted for landing: crew/ops/gt-1 @ 2222 onto main"},
+		{Author: "daemon", Text: "om approve 0.88"},
+	}
+	for name, tc := range map[string]struct {
+		read func(rig, id string) ([]beads.Comment, error)
+		want string
+	}{
+		"newest submission wins": {func(string, string) ([]beads.Comment, error) { return comments, nil }, "town/crew/overseer"},
+		"no submission comment": {func(string, string) ([]beads.Comment, error) {
+			return []beads.Comment{{Author: "daemon", Text: "om approve 0.88"}}, nil
+		}, ""},
+		"unreadable comments": {func(string, string) ([]beads.Comment, error) { return nil, fmt.Errorf("bd failed") }, ""},
+		"no comments source":  {nil, ""},
+	} {
+		b := newTailBeads(nil)
+		b.comments = tc.read
+		if got := b.submittedBy("gastown", "gt-1"); got != tc.want {
+			t.Errorf("%s: submittedBy = %q, want %q", name, got, tc.want)
+		}
+	}
+	var nilReader *tailBeads
+	if got := nilReader.submittedBy("gastown", "gt-1"); got != "" {
+		t.Errorf("nil reader submittedBy = %q, want none", got)
+	}
+
+	read := false
+	b := newTailBeads(nil)
+	b.comments = func(string, string) ([]beads.Comment, error) { read = true; return comments, nil }
+	if got := b.submittedBy("gastown", "-danger"); got != "" {
+		t.Errorf("flag-shaped id submittedBy = %q, want none", got)
+	}
+	if read {
+		t.Error("a flag-shaped bead id reached the comments read")
+	}
+}
+
+// TestOpenTailBeadsWithoutATown: a reader with no town to resolve a rig's beads
+// directory from names no title and no submitter rather than reaching bd, and
+// its comments read reports the missing store instead of an empty answer.
+func TestOpenTailBeadsWithoutATown(t *testing.T) {
+	t.Parallel()
+	b := openTailBeads("")
+	if got := b.title("gastown", "gt-1"); got != "" {
+		t.Errorf("title = %q with no beads directory, want none", got)
+	}
+	if got := b.submittedBy("gastown", "gt-1"); got != "" {
+		t.Errorf("submittedBy = %q with no beads directory, want none", got)
+	}
+	if _, err := b.comments("gastown", "gt-1"); err == nil {
+		t.Error("comments read with no beads directory answered no error")
+	}
+}
+
 // TestEventsSource_NotFoundBeadIsReadOnceAcrossPolls: a journal that keeps
 // naming a bead bd reports as not found makes one bd show for it in the whole
 // run. pollIssue's per-poll map is cleared every poll, so it is the not-found
