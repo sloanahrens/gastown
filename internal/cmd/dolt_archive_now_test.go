@@ -247,12 +247,6 @@ func TestDoltArchiveNowExitCodes(t *testing.T) {
 			wantOut:  []string{"still pending: the daemon is in standby", "Run archive-now again"},
 		},
 		{
-			name:     "a timeout is still pending",
-			result:   update.MaintenanceResult{Outcome: archiveOutcomeDeferred, Detail: "the daemon did not finish in time"},
-			wantCode: 2,
-			wantOut:  []string{"the daemon did not finish in time", "Run archive-now again"},
-		},
-		{
 			name:     "a partial pass prints its per-database stop lines",
 			result:   update.MaintenanceResult{Outcome: archiveOutcomePartial, Detail: "gt: commits archived 2 (stopped at the archive_budget, still behind); events archived 2 (caught up)"},
 			wantCode: 2,
@@ -342,6 +336,169 @@ func archiveNowExitCode(err error) int {
 		return 0
 	}
 	return exitCodeForError(err)
+}
+
+// archiveNowTickingClock advances by step on every Now, so the real wait
+// measured against it reaches its bound after a known number of polls.
+type archiveNowTickingClock struct {
+	now  time.Time
+	step time.Duration
+}
+
+func (c *archiveNowTickingClock) Now() time.Time {
+	now := c.now
+	c.now = c.now.Add(c.step)
+	return now
+}
+
+// A wait the daemon never answers reaches the command's timeout bound through
+// the real request protocol, and is reported still pending with the request
+// left for the daemon's next tick (gt-ngqk20).
+func TestDoltArchiveNowReportsATimedOutWaitStillPending(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	requestPath := filepath.Join(update.Dir(townRoot), update.ArchiveRequestFileName)
+
+	files := newArchiveNowRecordingFiles()
+	clock := &archiveNowTickingClock{now: time.Date(2026, 11, 5, 21, 0, 0, 0, time.UTC), step: 20 * time.Second}
+	reads := newArchiveNowTestReads(t, townRoot)
+	reads.stat = archiveNowFakeStat(dispatch.HoldFilePath(townRoot))
+	behind, _ := archiveNowBehindScripted(t,
+		map[string]archiveNowReading{"gt": {commits: 1, events: 0}, "hq": {commits: 0, events: 0}},
+		map[string]archiveNowReading{"gt": {commits: 1, events: 0}, "hq": {commits: 0, events: 0}},
+	)
+	reads.behind = behind
+	reads.request = func(string) archiveNowRequester {
+		return &update.ArchiveRequest{Dir: update.Dir(townRoot), Files: files, Clock: clock}
+	}
+	reads.timeout = 45 * time.Second
+	polls := 0
+	reads.sleep = func(context.Context, time.Duration) error {
+		polls++
+		if polls > 10 {
+			t.Fatalf("the wait polled %d times without reaching its %s bound", polls, reads.timeout)
+		}
+		return nil
+	}
+
+	var out bytes.Buffer
+	err := runDoltArchiveNowWith(context.Background(), &out, reads)
+
+	if code, ok := IsSilentExit(err); !ok || code != 2 {
+		t.Fatalf("exit = (%v, %v), want silent exit 2 for a timed-out wait", code, ok)
+	}
+	for _, want := range []string{"still pending: the daemon did not finish in time", "Run archive-now again"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output = %q, want it to hold %q", out.String(), want)
+		}
+	}
+	if _, ok := files.entries[requestPath]; !ok {
+		t.Errorf("the request was removed from %s, want it left for the daemon's next tick", requestPath)
+	}
+	if polls == 0 {
+		t.Error("the wait returned without polling the request file")
+	}
+}
+
+// An interrupted wait leaves the request at the town root, so the command
+// reports it still pending rather than failed, and never takes the after
+// reading with a cancelled context (gt-ngqk20).
+func TestDoltArchiveNowReportsAnInterruptedWaitStillPending(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	requestPath := filepath.Join(update.Dir(townRoot), update.ArchiveRequestFileName)
+
+	files := newArchiveNowRecordingFiles()
+	clock := archiveNowFakeClock{now: time.Date(2026, 11, 5, 21, 0, 0, 0, time.UTC)}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	reads := newArchiveNowTestReads(t, townRoot)
+	reads.stat = archiveNowFakeStat(dispatch.HoldFilePath(townRoot))
+	behind, calls := archiveNowBehindScripted(t,
+		map[string]archiveNowReading{"gt": {commits: 1, events: 0}, "hq": {commits: 0, events: 0}},
+	)
+	reads.behind = behind
+	reads.request = func(string) archiveNowRequester {
+		return &update.ArchiveRequest{Dir: update.Dir(townRoot), Files: files, Clock: clock}
+	}
+	reads.sleep = func(context.Context, time.Duration) error {
+		cancel()
+		return nil
+	}
+
+	var out bytes.Buffer
+	err := runDoltArchiveNowWith(ctx, &out, reads)
+
+	if code, ok := IsSilentExit(err); !ok || code != 2 {
+		t.Fatalf("exit = (%v, %v), want silent exit 2 for an interrupted wait", code, ok)
+	}
+	if !strings.Contains(out.String(), "still pending: the wait was interrupted") {
+		t.Errorf("output = %q, want it to report the interrupted wait still pending", out.String())
+	}
+	if !strings.Contains(out.String(), requestPath) {
+		t.Errorf("output = %q, want it to name the pending request %s", out.String(), requestPath)
+	}
+	if strings.Contains(out.String(), "failed") {
+		t.Errorf("output = %q, want no failure report while the request is still pending", out.String())
+	}
+	if _, ok := files.entries[requestPath]; !ok {
+		t.Errorf("the request was removed from %s, want it left for the daemon", requestPath)
+	}
+	if *calls != 1 {
+		t.Errorf("the archive lag was read %d times, want only the reading before the interrupted wait", *calls)
+	}
+}
+
+// archiveNowHelpExitCodes reads the help's exit-code block into one entry per
+// code, with each entry's wrapped lines joined.
+func archiveNowHelpExitCodes(t *testing.T, help string) map[byte]string {
+	t.Helper()
+	out := make(map[byte]string)
+	inBlock := false
+	var code byte
+	for _, line := range strings.Split(help, "\n") {
+		text := strings.TrimSpace(line)
+		switch {
+		case text == "Exit codes:":
+			inBlock = true
+		case !inBlock || text == "":
+		case len(text) > 2 && text[0] >= '0' && text[0] <= '3' && text[1] == ' ' && text[2] == ' ':
+			code = text[0]
+			out[code] = text
+		default:
+			out[code] += " " + text
+		}
+	}
+	return out
+}
+
+// The help's exit codes name every branch that returns them: the default
+// branch reports an outcome the command does not understand as 1, and every
+// not-done answer is 2 (gt-ngqk20).
+func TestDoltArchiveNowHelpMatchesTheOutcomeBranches(t *testing.T) {
+	t.Parallel()
+	exit := archiveNowHelpExitCodes(t, doltArchiveNowCmd.Long)
+
+	cases := []struct {
+		code byte
+		want []string
+	}{
+		{code: '1', want: []string{"does not understand"}},
+		{code: '2', want: []string{"timed out", "interrupted", "deferred", "partial", "reads history behind"}},
+	}
+	for _, tc := range cases {
+		text, ok := exit[tc.code]
+		if !ok {
+			t.Fatalf("the help has no exit code %c", tc.code)
+		}
+		text = strings.Join(strings.Fields(text), " ")
+		for _, want := range tc.want {
+			if !strings.Contains(text, want) {
+				t.Errorf("exit %c help = %q, want it to name %q", tc.code, text, want)
+			}
+		}
+	}
 }
 
 // archiveNowStubReader scripts each archive count's result and failure
