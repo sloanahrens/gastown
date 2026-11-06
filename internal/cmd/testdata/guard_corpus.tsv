@@ -220,3 +220,22 @@ dangerous	crew	"echo $(make test"	refuse	cannot be read (unterminated command su
 dangerous	polecat	"bash <<'EOF'\nmake test\n"	refuse	cannot be read (unterminated here-document)	gt-m6x4py
 dangerous	crew	"bash <<'EOF'\nmake test\n"	refuse	cannot be read (unterminated here-document)	gt-m6x4py
 dangerous	polecat	"echo ok;rm -rf /;echo \""	refuse	filesystem destruction	gt-m6x4py
+# --- dangerous: nested payloads judged from the parsed Script (gt-7ydceb) ---
+# A -c payload, an eval string, a command substitution and a process
+# substitution run as command lines of their own, and a payload the parser
+# cannot read is refused naming the construct. The two allow rows are the
+# false-refusal pair the parsed read exists for: the substitution parses
+# whole, so no fragment cut from it is judged, and the harmless body it holds
+# is allowed. The last two rows pin the nesting cap: a payload past
+# maxDangerousNestDepth is refused, never allowed unjudged.
+dangerous	crew	"bash -c 'git reset --hard'"	refuse	Hard reset	gt-7ydceb
+dangerous	crew	"eval 'git clean -fd'"	refuse	git clean -f/--force deletes untracked files	gt-7ydceb
+dangerous	crew	"x=$(git push --force origin main)"	refuse	Force push	gt-7ydceb
+dangerous	crew	"diff <(go clean -modcache) f"	refuse	wipes the Go build cache	gt-7ydceb
+dangerous	polecat	"bash -c 'echo hi )'"	refuse	nested command cannot be read (unbalanced parenthesis)	gt-7ydceb
+dangerous	crew	"bash -c 'echo hi )'"	refuse	nested command cannot be read (unbalanced parenthesis)	gt-7ydceb
+dangerous	polecat	"eval 'echo hi )'"	refuse	nested command cannot be read (unbalanced parenthesis)	gt-7ydceb
+dangerous	polecat	"x=$(echo \")\" ; bash -c \"echo hi\")"	allow		gt-7ydceb
+dangerous	crew	"x=$(echo \")\" ; bash -c \"echo hi\")"	allow		gt-7ydceb
+dangerous	polecat	"eval eval eval eval 'echo hi'"	refuse	deeper than maxDangerousNestDepth	gt-7ydceb
+dangerous	crew	"eval eval eval eval 'echo hi'"	refuse	deeper than maxDangerousNestDepth	gt-7ydceb

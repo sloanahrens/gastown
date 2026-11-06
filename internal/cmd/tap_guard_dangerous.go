@@ -164,61 +164,70 @@ func evaluateIdleGate(proc guardProcess, command string, hostCPUIdle func() (flo
 	return cpuIdle, idleKnown, heldAction
 }
 
-// maxDangerousNestDepth bounds nestedCommands recursion so a pathological
-// input (e.g. deeply chained "eval eval eval ...") can't loop unboundedly.
+// maxDangerousNestDepth bounds the nested-payload recursion in
+// evaluateDangerousCommand so a pathological input (e.g. deeply chained
+// "eval eval eval ...") can't loop unboundedly. The bound fails closed: a
+// payload nested past it is refused rather than allowed unjudged (gt-7ydceb).
 const maxDangerousNestDepth = 3
 
 // evaluateDangerousCommand runs every dangerous-pattern check against
-// command and, up to maxDangerousNestDepth, recurses into any shell command
-// it finds embedded as an argument (bash -c/sh -c/eval), as a command
-// substitution ($(...) / `...`), or as a heredoc body fed to a shell
-// (bash <<EOF). Without this, a wrapper like `bash -c "git reset --hard"`
-// was invisible to every check: shlex collapses the quoted payload into a
-// single token, so none of the fragment-based matchers (which require each
-// fragment as its own token) ever fire on it. Quoted text that is NOT one of
-// these shell-executing forms (a SQL string, a mail body, a jq/sed script)
-// deliberately stays opaque — that is where this guard's real false
-// positives have come from (gt-5ihs attempt 2, gt-wisp-db27 finding 4).
+// command and, up to maxDangerousNestDepth, recurses into every command line
+// it runs through another shell: a -c payload, an eval string, a script a
+// shell reads on stdin (a here-string, a pipeline producer, a process
+// substitution run as the script), a gt slot run argv, a heredoc body a shell
+// reads, and every command and process substitution. Without this, a wrapper
+// like `bash -c "git reset --hard"` was invisible to every check: shlex
+// collapses the quoted payload into a single token, so none of the
+// fragment-based matchers (which require each fragment as its own token) ever
+// fire on it. Quoted text that is NOT one of these shell-executing forms (a
+// SQL string, a mail body, a jq/sed script) deliberately stays opaque — that
+// is where this guard's real false positives have come from (gt-5ihs attempt
+// 2, gt-wisp-db27 finding 4).
+//
+// The nested command lines come from the parsed Script — its Segments, Subs
+// and Heredocs, the way the container-suite guard reads them. Every payload is
+// parsed before it is judged, so a fragment the shell never runs is never
+// judged; one the parser cannot read is refused with the construct named,
+// because nothing can say what it runs (gt-7ydceb).
 func evaluateDangerousCommand(command string, depth int, sess guardSession) (reason, alternative string) {
 	reason, alternative = judgeDangerousText(command, depth, sess)
-	if reason != "" || depth != 0 {
+	if reason != "" {
 		return reason, alternative
 	}
-	// The lenient read found no dangerous operation, but a command the shell
-	// cannot parse was not read in full: something the token checks cannot see
-	// may run, so the command the hook received is refused (gt-m6x4py). A
-	// dangerous operation the lenient read did find is refused above with its
-	// own reason. Nested payloads are not gated: the lenient scan cuts them, and
-	// it can cut a fragment a real shell would never run.
-	if _, err := shellparse.Parse(command); err != nil {
+	script, err := shellparse.Parse(command)
+	if err != nil {
+		if depth > 0 {
+			return dangerousNestedUnreadable(err), ""
+		}
 		return dangerousUnreadable(err), ""
 	}
-	return "", ""
+	return evaluateDangerousScriptNested(script, command, depth, sess)
 }
 
-// judgeDangerousText is the lenient judgment behind evaluateDangerousCommand:
-// the token checks and the nested-command recursion, read off the command text
-// as the guard has always read it.
+// judgeDangerousText is the lenient judgment of one command line's own words:
+// the token checks, read off the command text as the guard has always read it.
+// Nested command lines are not judged here — they come from the parsed Script
+// — except for the done/slot loop rule, whose reading of a substitution body
+// dangerousSubstitutionLoop explains.
 func judgeDangerousText(command string, depth int, sess guardSession) (reason, alternative string) {
-	// Read the shell-fed bodies off the untouched command: stripHeredocBodies
-	// removes them from the text scanned below, and they come back in as
-	// nested commands of their own (gt-9g0y).
-	shellFedBodies := shellFedHeredocBodies(command)
-	// An unquoted heredoc body is data to its reader but not to the shell,
-	// which expands $(...) and backticks in it while reading it. Those
-	// substitutions run, so they are judged as nested commands (gt-x50o8).
-	bodySubstitutions := heredocBodySubstitutions(command)
 	// Kept for the checks that need the pre-strip text: the done/slot loop
 	// rule reads heredoc bodies the command writes to a FILE, which the
 	// stripping below is exactly what removes from view (gt-7dxw).
 	rawCommand := command
 	command = stripHeredocBodies(command)
 	tokens := shellTokenize(command)
-	lowerTokens := make([]string, len(tokens))
-	for i, t := range tokens {
-		lowerTokens[i] = strings.ToLower(t)
+	lowerTokens := toLowerTokens(tokens)
+	if reason, alternative = judgeDangerousTokens(rawCommand, tokens, lowerTokens, sess); reason != "" {
+		return reason, alternative
 	}
+	return dangerousSubstitutionLoop(rawCommand, depth)
+}
 
+// judgeDangerousTokens is the dangerous rules read over one token line.
+// rawCommand is the text the tokens came from, read by the checks that need
+// more than tokens (the done/slot rule's heredoc-written retry scripts); a
+// substitution script passes "" because it keeps no raw text (gt-7ydceb).
+func judgeDangerousTokens(rawCommand string, tokens, lowerTokens []string, sess guardSession) (reason, alternative string) {
 	// Check privilege escalation and package manager commands first
 	if r := matchesSudo(lowerTokens); r != "" {
 		return r, ""
@@ -276,16 +285,141 @@ func judgeDangerousText(command string, depth int, sess guardSession) (reason, a
 	if r := matchesDDLDestruction(tokens); r != "" {
 		return r, ""
 	}
+	return "", ""
+}
 
+// evaluateDangerousScriptNested judges the command lines one parsed script runs
+// through another shell, up to maxDangerousNestDepth; a script that nests past
+// that depth is refused, never allowed unjudged (gt-7ydceb). The text payloads
+// are judged as text — each is a command line of its own, parsed and gated by
+// evaluateDangerousCommand — and every substitution the shell expands is judged
+// as the already-parsed script it is. text is the source the script was parsed
+// from, or "" for a substitution script, whose text is not kept; it feeds the
+// here-document scanner at dangerousHeredocBodies.
+func evaluateDangerousScriptNested(script shellparse.Script, text string, depth int, sess guardSession) (reason, alternative string) {
+	payloads := nestedCommands(script)
+	payloads = append(payloads, dangerousHeredocBodies(script, text)...)
+	subs := dangerousScriptSubs(script)
+	// A script that nests nothing is judged in full: its own words are the
+	// whole of what it runs. One that nests something at the cap has reached
+	// an unjudged payload, so the cap refuses it (gt-7ydceb).
+	if depth >= maxDangerousNestDepth {
+		if len(payloads) > 0 || len(subs) > 0 {
+			return dangerousNestTooDeep(), ""
+		}
+		return "", ""
+	}
+	for _, payload := range payloads {
+		if r, alt := evaluateDangerousCommand(payload, depth+1, sess); r != "" {
+			return r, alt
+		}
+	}
+	for _, sub := range subs {
+		if r, alt := evaluateDangerousScript(sub, depth+1, sess); r != "" {
+			return r, alt
+		}
+	}
+	return "", ""
+}
+
+// evaluateDangerousScript judges one command line a shell runs from a
+// substitution — "$(...)", "<(...)" or `...` — with the same rules, then
+// recurses into what it nests. The substitution was parsed as part of the
+// command that held it, so there is no text left to gate: whatever it runs, the
+// parser read.
+func evaluateDangerousScript(script shellparse.Script, depth int, sess guardSession) (reason, alternative string) {
+	// The script is judged on the token line rebuilt from its segments, so the
+	// matchers read the same shapes they read on the lenient path. The raw text
+	// is "" here: a substitution keeps none, so the done/slot rule cannot see a
+	// retry script the substitution writes to a file in its here-document
+	// (gt-7ydceb).
+	tokens, _ := containerSuiteWalkLine(script)
+	if reason, alternative = judgeDangerousTokens("", tokens, toLowerTokens(tokens), sess); reason != "" {
+		return reason, alternative
+	}
+	return evaluateDangerousScriptNested(script, "", depth, sess)
+}
+
+// nestedCommands returns the command lines a parsed script hands to another
+// shell: a gt slot run argv, a -c payload, an eval string and a script a shell
+// reads on stdin. Each is judgement text: it is parsed by the caller, and
+// refused when the parser cannot read it.
+func nestedCommands(script shellparse.Script) []string {
+	tokens, _ := containerSuiteWalkLine(script)
+	payloads := slotRunPayloads(tokens)
+	for i := range script.Segments {
+		words := containerSuiteWords(script.Segments[i])
+		payloads = append(payloads, shellCPayloads(words)...)
+		payloads = append(payloads, evalPayloads(words)...)
+		payloads = append(payloads, containerSuiteStdinPayloads(script, i)...)
+	}
+	return payloads
+}
+
+// dangerousHeredocBodies returns the here-document bodies a shell runs as a
+// script. A body is data to its reader unless a shell invoker runs on its
+// reader line, and only stdin's body feeds a shell its script (gt-9g0y,
+// gt-ohe8n).
+//
+// The parsed bodies are read first. The scanner's bodies follow, because the
+// parser and the shell disagree on one shape: bash ends a "#" comment at the
+// newline, so `echo hi # note \` ends there and the `bash <<EOF` on the next
+// line reads the body, while the parser joins the two lines through the
+// backslash and reads one `echo hi bash` for which nothing reads the body
+// (gt-3vky2). Reading the body both ways keeps the shell's reading, and the
+// body is judged and gated like every other payload.
+func dangerousHeredocBodies(script shellparse.Script, text string) []string {
+	var bodies []string
+	for i, seg := range script.Segments {
+		if !containerSuiteHeredocReadAsScript(script, i) {
+			continue
+		}
+		for _, h := range seg.Heredocs {
+			if h.N != "" && h.N != "0" {
+				continue
+			}
+			if strings.TrimSpace(h.Body) == "" {
+				continue
+			}
+			bodies = append(bodies, h.Body)
+		}
+	}
+	return append(bodies, shellFedHeredocBodies(text)...)
+}
+
+// dangerousScriptSubs returns every substitution a parsed script makes the
+// shell expand, as the scripts they are: command and process substitutions in
+// words, assignment values, redirection targets and here-document bodies, plus
+// the ones written in a construct header (a for loop's list, a case word).
+func dangerousScriptSubs(script shellparse.Script) []shellparse.Script {
+	var subs []shellparse.Script
+	for _, seg := range script.Segments {
+		subs = append(subs, seg.Subs...)
+	}
+	return append(subs, script.Subs...)
+}
+
+// dangerousSubstitutionLoop is the done/slot loop rule read from the command
+// substitutions in command. It is the one nested read the parsed Script cannot
+// feed that rule: the flattener records what a shell runs, and a for or while
+// block's keywords open and close around their segments instead of being
+// segments of their own ("for i in 1 2; do gt done; done" flattens to one "gt
+// done" segment). The rule is a shape of the text — a block that CLOSES around
+// a gt done or gt slot, a repeat or an xargs beside one (gt-7dxw) — so its
+// bodies keep the lenient substitution scan rather than the parsed Script. It
+// only ever answers that rule: a body it cannot read is never refused here,
+// and every other nested judgment and every unreadable-payload refusal comes
+// from the parsed Script (gt-7ydceb).
+func dangerousSubstitutionLoop(command string, depth int) (reason, alternative string) {
 	if depth >= maxDangerousNestDepth {
 		return "", ""
 	}
-	nested := nestedCommands(tokens, lowerTokens)
-	nested = append(nested, commandSubstitutions(command)...)
-	nested = append(nested, shellFedBodies...)
-	nested = append(nested, bodySubstitutions...)
-	for _, n := range nested {
-		if r, alt := evaluateDangerousCommand(n, depth+1, sess); r != "" {
+	for _, body := range append(commandSubstitutions(command), heredocBodySubstitutions(command)...) {
+		tokens := shellTokenize(body)
+		if r, alt := matchesDoneSlotLoop(body, tokens, toLowerTokens(tokens)); r != "" {
+			return r, alt
+		}
+		if r, alt := dangerousSubstitutionLoop(body, depth+1); r != "" {
 			return r, alt
 		}
 	}
@@ -298,12 +432,32 @@ func judgeDangerousText(command string, depth int, sess guardSession) (reason, a
 // own text is not echoed; an error that is not an *shellparse.UnparseableError
 // keeps the generic construct name.
 func dangerousUnreadable(err error) string {
-	construct := "shell syntax"
+	return "command cannot be read (" + dangerousConstruct(err) + "), so it cannot be checked for dangerous operations"
+}
+
+// dangerousNestedUnreadable is the refusal for a nested command line the parser
+// could not read. Its text is refused the way a top-level command is, and for
+// the same reason: nothing can say what it runs. The construct is named so the
+// operator can see what was rejected.
+func dangerousNestedUnreadable(err error) string {
+	return "nested command cannot be read (" + dangerousConstruct(err) + "), so it cannot be checked for dangerous operations"
+}
+
+// dangerousNestTooDeep is the refusal for a payload nested past
+// maxDangerousNestDepth (gt-7ydceb). It names the cap so the operator can tell
+// it from a payload the parser could not read.
+func dangerousNestTooDeep() string {
+	return fmt.Sprintf("nested command is deeper than maxDangerousNestDepth (%d), so it cannot be checked for dangerous operations", maxDangerousNestDepth)
+}
+
+// dangerousConstruct is the shellparse name of the construct that made a
+// command unreadable, or a generic name for a failure the parser did not name.
+func dangerousConstruct(err error) string {
 	var unparseable *shellparse.UnparseableError
 	if errors.As(err, &unparseable) && unparseable.Construct != "" {
-		construct = unparseable.Construct
+		return unparseable.Construct
 	}
-	return fmt.Sprintf("command cannot be read (%s), so it cannot be checked for dangerous operations", construct)
+	return "shell syntax"
 }
 
 // shellInvokers are commands whose "-c" argument is itself a nested shell
@@ -359,56 +513,6 @@ func shellClusterValues(a string) int {
 		return 0
 	}
 	return strings.Count(a[1:], "o") + strings.Count(a[1:], "O")
-}
-
-// nestedCommands extracts shell command strings embedded as arguments to
-// shell-invoking wrappers (bash -c/sh -c/zsh -c/eval) so evaluateDangerousCommand
-// can check their contents the same as a top-level command. tokens and
-// lowerTokens must be the same length and index-aligned (see shellTokenize).
-//
-// "<shell> -c" takes exactly ONE command-string argument — any further
-// tokens are positional parameters ($0, $1, ...) passed to that command,
-// never concatenated onto it, so only tokens[i+2] is nested here. Joining
-// the rest of the line (as this used to do) fabricates shell syntax that
-// was never live: quoting is already gone by the time we have tokens, so
-// two separately-quoted args like "echo a" and "rm -rf /" — real argv0
-// and argv1 for the invoked command, not appended text — get glued into
-// one string with a bare space, indistinguishable from an actual
-// "echo a rm -rf /" command line (gt-mkrj). "eval", by contrast, really
-// does concatenate all of its arguments with spaces before evaluating
-// them as one shell command, so joining tokens[i+1:] there matches actual
-// eval semantics rather than fabricating it.
-func nestedCommands(tokens, lowerTokens []string) []string {
-	var nested []string
-	for i, lt := range lowerTokens {
-		if shellInvokers[filepath.Base(lt)] {
-			if idx := shellCPayloadIndex(lowerTokens[i+1:]); idx >= 0 {
-				nested = append(nested, tokens[i+1+idx])
-			}
-		}
-		if lt == "eval" && i+1 < len(tokens) {
-			nested = append(nested, strings.Join(tokens[i+1:], " "))
-		}
-	}
-	nested = append(nested, slotRunPayloads(tokens)...)
-	return append(nested, pipedShellPayloads(tokens)...)
-}
-
-// pipedShellPayloads returns the script text fed to a shell that reads stdin,
-// from a pipe or a here-string ("echo 'git reset --hard' | bash", "sh <<<
-// 'rm -rf /'"), which the matchers see as a quoted word and a bare shell. The
-// test guards read the same shapes through stdinShellPayloads (gt-1daus).
-func pipedShellPayloads(tokens []string) []string {
-	var payloads []string
-	start := 0
-	for i := 0; i <= len(tokens); i++ {
-		if i < len(tokens) && !shellCommandSeparators[tokens[i]] {
-			continue
-		}
-		payloads = append(payloads, stdinShellPayloads(tokens, start, tokens[start:i])...)
-		start = i + 1
-	}
-	return payloads
 }
 
 // slotRunPayloads returns, for every `gt slot run [flags] <argv>` the command
