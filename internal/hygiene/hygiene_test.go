@@ -263,6 +263,7 @@ func TestEmailNeedsADottedDomain(t *testing.T) {
 		{"one-label domain", "a@" + "host", 0},
 		{"plain address", "a@" + "host.com", 1},
 		{"address in a subdomain", "a@" + "sub.host.co.uk", 1},
+		{"dotted internal host", "a@" + "db.internal", 1},
 		{"one-letter last label", "a@" + "b.c", 0},
 		{"digit last label", "a@" + "x.1", 0},
 	}
@@ -652,7 +653,9 @@ func TestAnAddressFollowedByAColonInProseIsAFinding(t *testing.T) {
 		{"gitx user", planted("gitx", "@github.com:org/repo"), 1},
 		{"xgit user", planted("xgit", "@github.com:org/repo"), 1},
 		{"writer ssh lookalike", planted("writer", "@github.com:org/repo"), 1},
-		{"git user on a reserved host followed by prose", planted("git@", "host.example: prose"), 1},
+		{"ssh remote followed by prose", planted("git@", "host: prose"), 1},
+		{"dotless host followed by prose", planted("writer", "@host: prose"), 1},
+		{"dotless host with a path", planted("bob", "@host:/srv/x"), 0},
 		{"address followed by a colon", planted("writer", "@example.com:"), 1},
 	}
 	for _, tc := range cases {

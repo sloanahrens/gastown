@@ -445,14 +445,25 @@ func emailFinding(line string) bool {
 		at := strings.LastIndex(line[loc[0]:loc[1]], "@") + loc[0]
 		local := line[loc[0]:at]
 		domain := line[at+1 : loc[1]]
-		if !addressDomain(domain) {
+		rest := line[loc[1]:]
+		// A colon and then whitespace after the address is how a person
+		// writes a host in a document. It is a finding whatever the host
+		// looks like: a dotless host there is a host, not a version pin.
+		prose := colonThenProse(rest)
+		if !addressDomain(domain) && !prose {
 			continue
 		}
-		if emailIsFinding(local, domain, line[loc[1]:]) {
+		if emailIsFinding(local, domain, rest) {
 			return true
 		}
 	}
 	return false
+}
+
+// colonThenProse reports whether rest starts with a colon followed by
+// whitespace, the scp-like prose shape.
+func colonThenProse(rest string) bool {
+	return strings.HasPrefix(rest, ":") && len(rest) > 1 && unicode.IsSpace(rune(rest[1]))
 }
 
 // addressDomain reports whether domain has the shape of an address: at least
