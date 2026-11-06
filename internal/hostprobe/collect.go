@@ -39,12 +39,17 @@ var (
 	psArgv  = []string{"ps", "-axo", "pcpu=,command="}
 )
 
+// DiskReader reads the space of the filesystem at path. It is
+// util.GetDiskSpace in production, which runs diskutil on macOS to include the
+// APFS container's purgeable space.
+type DiskReader func(path string) (*util.DiskSpaceInfo, error)
+
 // collectors are the reads one Collect makes. Disk and exec tax are not
 // commands the Runner can run, so they are fields too: a test swaps the one it
 // is about and nothing touches the host.
 type collectors struct {
 	run     Runner
-	disk    func(path string) (*util.DiskSpaceInfo, error)
+	disk    DiskReader
 	execTax func(ctx context.Context) (time.Duration, error)
 	timeout time.Duration
 }
@@ -53,9 +58,19 @@ type collectors struct {
 // is its own read, so a read that fails sets that field's Err and leaves the
 // rest filled. townRoot is the town volume the disk reading is taken from.
 func Collect(ctx context.Context, run Runner, townRoot string, now time.Time) Probes {
+	return CollectWith(ctx, run, util.GetDiskSpace, townRoot, now)
+}
+
+// CollectWith is Collect with the town volume's disk read given: a nil reader
+// reads through util.GetDiskSpace, exactly as Collect does. A test gives a fake
+// reader, so the collection reads a fixed disk and no diskutil starts.
+func CollectWith(ctx context.Context, run Runner, disk DiskReader, townRoot string, now time.Time) Probes {
+	if disk == nil {
+		disk = util.GetDiskSpace
+	}
 	return collect(ctx, collectors{
 		run:  run,
-		disk: util.GetDiskSpace,
+		disk: disk,
 		execTax: func(ctx context.Context) (time.Duration, error) {
 			return probeExecTax(ctx, exectax.Probe, run)
 		},

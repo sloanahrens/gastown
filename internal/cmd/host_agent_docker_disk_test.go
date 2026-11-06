@@ -3,7 +3,9 @@ package cmd
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/hostprobe"
 	"github.com/steveyegge/gastown/internal/templates"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 // TestHostAgentFillsDockerDisk pins what the agent publishes for the Docker
@@ -126,14 +129,15 @@ func TestHostAgentDockerDiskDoesNotHoldTheWriteCycle(t *testing.T) {
 		clock:    clock,
 		interval: hostAgentInterval,
 		path:     "/town/.runtime/host/probes.json",
-		collect: func(ctx context.Context, now time.Time) hostprobe.Probes {
-			return hostAgentCollect(ctx, run, town, now, dockerDisk, read)
-		},
+		disk:     newFakeDiskReader().read,
 		write: func(_ string, p hostprobe.Probes) error {
 			writes <- p
 			return nil
 		},
 		logf: func(string, ...any) {},
+	}
+	loop.collect = func(ctx context.Context, now time.Time) hostprobe.Probes {
+		return hostAgentCollect(ctx, run, town, now, dockerDisk, read, loop.disk)
 	}
 	done := startHostAgentLoop(loop, ctx)
 
@@ -214,14 +218,15 @@ func TestHostAgentDockerDiskStuckReadPublishesAnError(t *testing.T) {
 		clock:    clock,
 		interval: hostAgentInterval,
 		path:     "/town/.runtime/host/probes.json",
-		collect: func(ctx context.Context, now time.Time) hostprobe.Probes {
-			return hostAgentCollect(ctx, run, town, now, dockerDisk, read)
-		},
+		disk:     newFakeDiskReader().read,
 		write: func(_ string, p hostprobe.Probes) error {
 			writes <- p
 			return nil
 		},
 		logf: func(string, ...any) {},
+	}
+	loop.collect = func(ctx context.Context, now time.Time) hostprobe.Probes {
+		return hostAgentCollect(ctx, run, town, now, dockerDisk, read, loop.disk)
 	}
 	done := startHostAgentLoop(loop, ctx)
 
@@ -271,4 +276,91 @@ func awaitProbes(t *testing.T, writes <-chan hostprobe.Probes, done <-chan error
 		t.Fatal("no write within the test's bound")
 	}
 	return hostprobe.Probes{}
+}
+
+// fakeDiskReader is the town volume's disk read a test gives the agent: a fixed
+// reading, and the paths it was asked, so the agent never reaches
+// util.GetDiskSpace and no test starts diskutil (gt-yjzepk.15).
+type fakeDiskReader struct {
+	info  *util.DiskSpaceInfo
+	paths []string
+}
+
+func newFakeDiskReader() *fakeDiskReader {
+	return &fakeDiskReader{info: &util.DiskSpaceInfo{AvailableBytes: 1 << 30, UsedPercent: 42}}
+}
+
+func (f *fakeDiskReader) read(path string) (*util.DiskSpaceInfo, error) {
+	f.paths = append(f.paths, path)
+	return f.info, nil
+}
+
+// TestHostAgentLoopDefaultsToTheRealDiskReader pins the disk reader a loop's
+// tick reads the town volume with: a loop with no reader set reads through the
+// production reader, and a loop given a fake reads through the fake and never
+// the production reader.
+//
+// The loop with no reader is given a town root that does not exist, so the
+// production reader fails its statfs there and returns before the APFS branch
+// that runs diskutil: this test reads through the real reader without starting
+// an external tool, on macOS as on Linux (gt-yjzepk.15).
+func TestHostAgentLoopDefaultsToTheRealDiskReader(t *testing.T) {
+	t.Parallel()
+	missingTown := filepath.Join(t.TempDir(), "no-such-town")
+
+	// No reader set: the production reader's statfs fails on the missing root,
+	// and that failure is the published reading.
+	got := firstHostAgentReading(t, missingTown, nil)
+	if !strings.Contains(got.Disk.Err, "statfs") {
+		t.Errorf("a loop with no disk reader published Disk = %+v, want the production reader's statfs error", got.Disk)
+	}
+	if got.Disk.Value != (hostprobe.Disk{}) {
+		t.Errorf("a failed disk read left Value = %+v, want it zero", got.Disk.Value)
+	}
+
+	// A fake reader: the loop publishes its reading, so the production reader
+	// that would fail on the missing root was never the one read.
+	fake := newFakeDiskReader()
+	got = firstHostAgentReading(t, missingTown, fake.read)
+	if want := (hostprobe.Disk{UsedPct: 42, FreeGB: 1}); got.Disk.Err != "" || got.Disk.Value != want {
+		t.Errorf("a loop with a fake disk reader published %+v, want %+v with no error", got.Disk, want)
+	}
+	if want := []string{missingTown}; !slices.Equal(fake.paths, want) {
+		t.Errorf("the fake disk reader was asked for %q, want %q", fake.paths, want)
+	}
+}
+
+// firstHostAgentReading runs one tick of a loop wired the way production wires
+// it, with the test's runner, launchd reader and write and the given disk
+// reader, and returns the reading it wrote.
+func firstHostAgentReading(t *testing.T, townRoot string, disk hostprobe.DiskReader) hostprobe.Probes {
+	t.Helper()
+	clock := clockwork.NewFakeClockAt(hostAgentEpoch)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	run := func(context.Context, []string) ([]byte, error) { return nil, errors.New("not under test") }
+	read := func(string) templates.SupervisorState { return templates.SupervisorState{Loaded: true} }
+	writes := make(chan hostprobe.Probes, 1)
+	loop := &hostAgentLoop{
+		clock:    clock,
+		interval: hostAgentInterval,
+		path:     "/town/.runtime/host/probes.json",
+		disk:     disk,
+		write: func(_ string, p hostprobe.Probes) error {
+			writes <- p
+			return nil
+		},
+		logf: func(string, ...any) {},
+	}
+	loop.collect = func(ctx context.Context, now time.Time) hostprobe.Probes {
+		return hostAgentCollect(ctx, run, townRoot, now, newHostAgentDockerDisk(), read, loop.disk)
+	}
+	done := startHostAgentLoop(loop, ctx)
+
+	first := awaitProbes(t, writes, done)
+	cancel()
+	if err := awaitExit(t, done); err != nil {
+		t.Errorf("loop after cancel = %v, want nil", err)
+	}
+	return first
 }

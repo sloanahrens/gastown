@@ -178,6 +178,10 @@ type hostAgentLoop struct {
 	collect func(ctx context.Context, now time.Time) hostprobe.Probes
 	write   func(path string, p hostprobe.Probes) error
 	logf    func(format string, args ...any)
+	// disk is the town volume's disk read each tick makes. Production leaves it
+	// nil, which hostprobe.CollectWith reads through util.GetDiskSpace; a test
+	// sets a fake, so no test starts diskutil (gt-yjzepk.15).
+	disk hostprobe.DiskReader
 }
 
 // run is the agent's tick.
@@ -214,17 +218,18 @@ func (l *hostAgentLoop) run(ctx context.Context) error {
 // real collectors, and hostprobe.Write under the town's probe path.
 func runHostAgent(ctx context.Context, townRoot string) error {
 	dockerDisk := newHostAgentDockerDisk()
+	// disk stays nil: every tick reads the town volume through util.GetDiskSpace.
 	loop := &hostAgentLoop{
 		clock:    clockwork.NewRealClock(),
 		interval: hostAgentInterval,
 		path:     hostprobe.Path(townRoot),
-		collect: func(ctx context.Context, now time.Time) hostprobe.Probes {
-			return hostAgentCollect(ctx, hostAgentRunner, townRoot, now, dockerDisk, templates.SupervisorJobState)
-		},
-		write: hostAgentWrite,
+		write:    hostAgentWrite,
 		logf: func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, format+"\n", args...)
 		},
+	}
+	loop.collect = func(ctx context.Context, now time.Time) hostprobe.Probes {
+		return hostAgentCollect(ctx, hostAgentRunner, townRoot, now, dockerDisk, templates.SupervisorJobState, loop.disk)
 	}
 	return loop.run(ctx)
 }
@@ -347,10 +352,11 @@ func (d *hostAgentDockerDisk) refresh(ctx context.Context, run hostprobe.Runner)
 	}
 }
 
-// hostAgentCollect is one tick's reading: the probes Collect reads, the Docker
-// Desktop disk from dockerDisk, and the launchd job from read.
-func hostAgentCollect(ctx context.Context, run hostprobe.Runner, townRoot string, now time.Time, dockerDisk *hostAgentDockerDisk, read templates.SupervisorReader) hostprobe.Probes {
-	p := hostprobe.Collect(ctx, run, townRoot, now)
+// hostAgentCollect is one tick's reading: the probes hostprobe.CollectWith reads
+// through disk (nil reads through util.GetDiskSpace), the Docker Desktop disk
+// from dockerDisk, and the launchd job from read.
+func hostAgentCollect(ctx context.Context, run hostprobe.Runner, townRoot string, now time.Time, dockerDisk *hostAgentDockerDisk, read templates.SupervisorReader, disk hostprobe.DiskReader) hostprobe.Probes {
+	p := hostprobe.CollectWith(ctx, run, disk, townRoot, now)
 	p.DockerDisk = dockerDisk.reading(ctx, run, now)
 	return hostAgentWithLaunchd(ctx, p, read)
 }
