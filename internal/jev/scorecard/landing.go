@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/jev/landing"
 	"github.com/steveyegge/gastown/internal/land"
@@ -107,6 +108,64 @@ func (t *townNotes) ShowAll(rig string, ids []string) (map[string]*beads.Issue, 
 // rigShowAller reads several of a rig's beads at once. townNotes is one.
 type rigShowAller interface {
 	ShowAll(rig string, ids []string) (map[string]*beads.Issue, error)
+}
+
+// commentColumns are the columns Comments reads, in the order the query
+// selects them.
+var commentColumns = []string{"issue_id", "commented", "author", "text", "created_at"}
+
+// Comments reads the comments of several of a rig's beads in one query, and
+// returns them by bead. ids is one chunk; the caller keeps it inside
+// commentChunk. Every bead the rig's issues table holds has an entry, empty
+// when the bead has no comments, so the caller reads none of those again. An id
+// the table does not hold (a wisp, say) is absent, and the caller reads that
+// one on its own.
+func (t *townNotes) Comments(rig string, ids []string) (map[string][]beads.Comment, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	b, err := t.store(rig)
+	if err != nil {
+		return nil, fmt.Errorf("opening %s's beads: %w", rig, err)
+	}
+	records, err := b.SQLCSV(beadsql.CommentsOf(ids))
+	if err != nil {
+		return nil, fmt.Errorf("reading %s's comments: %w", rig, err)
+	}
+	// An answer the read was not written for must not come back as "no
+	// comments": every bead would then be read as having no stand-down record.
+	if len(records) == 0 {
+		return nil, fmt.Errorf("reading %s's comments: no header row", rig)
+	}
+	if !slices.Equal(records[0], commentColumns) {
+		return nil, fmt.Errorf("reading %s's comments: columns %q, want %q", rig, records[0], commentColumns)
+	}
+	// SQLCSV reads the rows with encoding/csv's default field count, so every
+	// row has the header's five fields or ReadAll has already failed.
+	comments := make(map[string][]beads.Comment, len(ids))
+	for _, row := range records[1:] {
+		id := row[0]
+		if _, ok := comments[id]; !ok {
+			comments[id] = nil
+		}
+		// The left join answers a bead with no comments with commented 0 and
+		// empty comment columns. Any other value is an answer this read was not
+		// written for, so it fails rather than pass the bead as silent.
+		switch row[1] {
+		case "0":
+			continue
+		case "1":
+		default:
+			return nil, fmt.Errorf("reading %s's comments: bead %s answered commented %q, want 0 or 1", rig, id, row[1])
+		}
+		comments[id] = append(comments[id], beads.Comment{
+			IssueID:   id,
+			Author:    row[2],
+			Text:      row[3],
+			CreatedAt: row[4],
+		})
+	}
+	return comments, nil
 }
 
 // List reads the rig's beads matching opts. A rig with no beads directory fails

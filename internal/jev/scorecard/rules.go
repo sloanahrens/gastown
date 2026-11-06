@@ -50,6 +50,9 @@ func init() {
 			comments: func(rig, bead string) ([]beads.Comment, error) {
 				return beadComments(stores, &storesMu, rig, bead)
 			},
+			commentsBatch: func(rig string, ids []string) (map[string][]beads.Comment, error) {
+				return batchComments(stores, &storesMu, rig, ids)
+			},
 			lines: map[string]rules.Line{},
 			now:   time.Now,
 		}
@@ -63,6 +66,11 @@ type rulesAdapter struct {
 	town string
 	// comments reads a bead's comments in its rig.
 	comments func(rig, bead string) ([]beads.Comment, error)
+	// commentsBatch reads several of one rig's beads' comments in one query,
+	// keyed by bead, for Prefetch. Every id the rig's issues table holds is a
+	// key, empty when the bead has no comments. A nil reader leaves every bead
+	// to comments.
+	commentsBatch func(rig string, ids []string) (map[string][]beads.Comment, error)
 	// lines holds each parsed line by item ID, so Label has the line's bead,
 	// rig and submission time.
 	lines map[string]rules.Line
@@ -85,6 +93,15 @@ type rulesAdapter struct {
 // rulesPrefetchWorkers caps how many comment reads Prefetch runs at once. Each
 // read is a bd subprocess, and the host is shared, so the pool stays small.
 const rulesPrefetchWorkers = 4
+
+// commentChunk is how many bead ids Prefetch puts in one comments query, the
+// way showChunk bounds a batch of shows (batch.go). One `bd sql` call answers
+// for a whole chunk, so a pass costs a handful of calls per rig rather than one
+// per bead (gt-ueaagp).
+const commentChunk = 100
+
+// beadPair is one bead whose comments Prefetch reads, in its rig.
+type beadPair struct{ rig, bead string }
 
 // commentKey names a bead's comments in the cache. Parse rejects a slash in a
 // bead id, so the last slash in a key divides its rig from its bead.
@@ -233,15 +250,18 @@ func (a *rulesAdapter) windowClosed(line rules.Line) bool {
 }
 
 // Prefetch reads the comments of the beads Label will read, once per (rig,
-// bead), with a pool of rulesPrefetchWorkers reads. It reads the bead of every
-// parsed line whose window has closed, which covers each bead Label reads for a
-// line that reaches that read (Label can stop at an earlier check, so Prefetch
-// may read a bead Label never asks for). A read that fails is left out of the
-// cache, so Label reads that bead itself and answers as it always did, and each
-// failure is named on stderr.
+// bead). Each rig's beads are read a chunk at a time, one query per chunk.
+// Whatever the batch does not answer for is read one bead at a time, with a
+// pool of rulesPrefetchWorkers reads: a bead the rig's issues table does not
+// hold, or every bead of a chunk whose query failed.
+//
+// It reads the bead of every parsed line whose window has closed, which covers
+// each bead Label reads for a line that reaches that read (Label can stop at an
+// earlier check, so Prefetch may read a bead Label never asks for). A read that
+// fails is left out of the cache, so Label reads that bead itself and answers
+// as it always did, and each failure is named on stderr.
 func (a *rulesAdapter) Prefetch(_ context.Context, items []Item) {
-	type pair struct{ rig, bead string }
-	var pairs []pair
+	var pairs []beadPair
 	seen := map[string]bool{}
 	for _, it := range items {
 		line, ok := a.lines[it.ID]
@@ -253,16 +273,76 @@ func (a *rulesAdapter) Prefetch(_ context.Context, items []Item) {
 			continue
 		}
 		seen[key] = true
-		pairs = append(pairs, pair{line.Rig, line.Bead})
+		pairs = append(pairs, beadPair{line.Rig, line.Bead})
 	}
 
+	warn := a.warn
+	if warn == nil {
+		warn = warnf
+	}
+	// Both reads fill the cache and leave a failure for Label, so a batch that
+	// gets a bead wrong costs time and never a label.
+	rest := pairs
+	if a.commentsBatch != nil {
+		rest = a.prefetchBatch(pairs, warn)
+	}
+	a.prefetchEach(rest, warn)
+}
+
+// prefetchBatch caches what the batched read returned and gives back the pairs
+// it did not answer for, for prefetchEach to read one at a time. It reads one
+// query per rig per chunk of commentChunk ids. A chunk whose query fails is
+// warned about, and every pair of it is read one at a time; so is a pair the
+// result has no entry for, which is an id the rig's issues table does not hold.
+// A bead with no comments is answered, with no comments, and is not read again.
+func (a *rulesAdapter) prefetchBatch(pairs []beadPair, warn func(string, ...any)) []beadPair {
+	// Group by rig in first-seen order, so the queries and their warnings come
+	// out in the same order on every pass.
+	var rigs []string
+	byRig := map[string][]beadPair{}
+	for _, p := range pairs {
+		if _, ok := byRig[p.rig]; !ok {
+			rigs = append(rigs, p.rig)
+		}
+		byRig[p.rig] = append(byRig[p.rig], p)
+	}
+	var rest []beadPair
+	for _, rig := range rigs {
+		group := byRig[rig]
+		for start := 0; start < len(group); start += commentChunk {
+			chunk := group[start:min(start+commentChunk, len(group))]
+			ids := make([]string, len(chunk))
+			for i, p := range chunk {
+				ids[i] = p.bead
+			}
+			got, err := a.commentsBatch(rig, ids)
+			if err != nil {
+				warn("reading the comments of %s in a batch: %v", rig, err)
+				rest = append(rest, chunk...)
+				continue
+			}
+			for _, p := range chunk {
+				comments, ok := got[p.bead]
+				if !ok {
+					rest = append(rest, p)
+					continue
+				}
+				a.cacheComments(p.rig, p.bead, comments)
+			}
+		}
+	}
+	return rest
+}
+
+// prefetchEach reads one bead at a time with a pool of rulesPrefetchWorkers
+// reads. Each worker writes only the results index it was handed, so the
+// results need no lock, and the cache is filled in pair order, not in the order
+// the reads finished. A failed read is warned about and left uncached.
+func (a *rulesAdapter) prefetchEach(pairs []beadPair, warn func(string, ...any)) {
 	type result struct {
 		comments []beads.Comment
 		err      error
 	}
-	// Each worker writes only the results index it was handed, so the results
-	// need no lock, and the cache is filled below in pair order, not in the order
-	// the reads finished.
 	results := make([]result, len(pairs))
 	jobs := make(chan int)
 	var wg sync.WaitGroup
@@ -281,10 +361,6 @@ func (a *rulesAdapter) Prefetch(_ context.Context, items []Item) {
 	close(jobs)
 	wg.Wait()
 
-	warn := a.warn
-	if warn == nil {
-		warn = warnf
-	}
 	for i, p := range pairs {
 		if results[i].err != nil {
 			warn("prefetching the comments of %s/%s: %v", p.rig, p.bead, results[i].err)
@@ -374,4 +450,13 @@ func beadComments(stores *townNotes, mu *sync.Mutex, rig, bead string) ([]beads.
 		return nil, err
 	}
 	return b.Comments(bead)
+}
+
+// batchComments reads several of a rig's beads' comments in one query, through
+// the store beadComments opens lazily. It holds mu for the whole call, since
+// the store map is filled lazily and Prefetch makes these reads one at a time.
+func batchComments(stores *townNotes, mu *sync.Mutex, rig string, ids []string) (map[string][]beads.Comment, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	return stores.Comments(rig, ids)
 }

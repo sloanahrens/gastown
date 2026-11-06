@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -84,6 +85,40 @@ func (f *fakeCommentReader) readsByBead() map[beadRef]int {
 		out[ref] = n
 	}
 	return out
+}
+
+// fakeBatchReader is a batched comment reader. It answers every id in its
+// comments map — with no comments when its slice is empty — and counts its
+// calls. An id that is not a key is left out of the answer, the way the query
+// returns no row for a bead the issues table does not hold.
+type fakeBatchReader struct {
+	comments map[beadRef][]beads.Comment
+	fail     error
+
+	mu    sync.Mutex
+	calls int
+}
+
+func (f *fakeBatchReader) read(rig string, ids []string) (map[string][]beads.Comment, error) {
+	f.mu.Lock()
+	f.calls++
+	f.mu.Unlock()
+	if f.fail != nil {
+		return nil, f.fail
+	}
+	out := make(map[string][]beads.Comment, len(ids))
+	for _, id := range ids {
+		if c, ok := f.comments[beadRef{rig, id}]; ok {
+			out[id] = c
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeBatchReader) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
 }
 
 // newPrefetchAdapter is the rules adapter for town, its clock at now, and the
@@ -344,6 +379,153 @@ func TestRulesPrefetchWorkerCap(t *testing.T) {
 			t.Errorf("reads = %d, want %d, one per bead", got, n)
 		}
 	})
+}
+
+// TestRulesPrefetchBatchesEachRigsReads: 250 beads in one rig cost three
+// batched reads — chunks of 100, 100 and 50 — and no per-bead read, including
+// for the beads that exist with no comments, the common case, which the batch
+// answers as silent.
+func TestRulesPrefetchBatchesEachRigsReads(t *testing.T) {
+	t.Parallel()
+	const n = 250
+	batch := &fakeBatchReader{comments: map[beadRef][]beads.Comment{}}
+	perBead := newFakeCommentReader()
+	a := newPrefetchAdapter(t.TempDir(), prefetchFixtureNow(), perBead.read)
+	a.commentsBatch = batch.read
+	var lines [][]byte
+	for i := range n {
+		bead := fmt.Sprintf("gt-%03d", i)
+		batch.comments[beadRef{"gastown", bead}] = []beads.Comment{}
+		lines = append(lines, prefetchLine(t, "gastown", bead, "furiosa", prefetchFixtureDoneAt))
+	}
+	items := parseRulesLines(t, a, lines...)
+
+	a.Prefetch(context.Background(), items)
+
+	if got := batch.callCount(); got != 3 {
+		t.Errorf("batched reads = %d, want 3: chunks of %d", got, commentChunk)
+	}
+	if got := len(a.commentCache); got != n {
+		t.Errorf("cache holds %d beads, want %d", got, n)
+	}
+	// A silent bead the batch answered labels as having no stand-down record,
+	// and neither Label nor Prefetch reads it one at a time.
+	lab, err := a.Label(context.Background(), items[0])
+	if err != nil {
+		t.Fatalf("Label: %v", err)
+	}
+	if !lab.Labeled || lab.Labels[qBrokeStandingRule] || lab.Rule != ruleRulesNoRecord {
+		t.Errorf("labeling = %+v, want labeled false with no record", lab)
+	}
+	if got := perBead.readsByBead(); len(got) != 0 {
+		t.Errorf("per-bead reads = %v, want none: every bead's batch answer arrived", got)
+	}
+}
+
+// TestRulesPrefetchReadsAnUnansweredPairOneAtATime: an id the batch answered no
+// row for — the issues table does not hold it — is read one at a time, and its
+// label comes from that read. A bead the batch answered, silent or not, is not
+// read again.
+func TestRulesPrefetchReadsAnUnansweredPairOneAtATime(t *testing.T) {
+	t.Parallel()
+	d0 := prefetchFixtureDoneAt
+	batch := &fakeBatchReader{comments: map[beadRef][]beads.Comment{
+		{"gastown", "gt-batched"}: {},
+	}}
+	perBead := newFakeCommentReader()
+	perBead.comments[beadRef{"gastown", "gt-quiet"}] = []beads.Comment{{
+		Author:    "gastown/polecats/furiosa",
+		Text:      reworkStandDownPrefix + ": head unchanged since the rejection",
+		CreatedAt: d0.Add(2 * time.Minute).Format(time.RFC3339Nano),
+	}}
+	a := newPrefetchAdapter(t.TempDir(), prefetchFixtureNow(), perBead.read)
+	a.commentsBatch = batch.read
+	items := parseRulesLines(t, a,
+		prefetchLine(t, "gastown", "gt-batched", "furiosa", d0),
+		prefetchLine(t, "gastown", "gt-quiet", "furiosa", d0))
+
+	a.Prefetch(context.Background(), items)
+
+	want := map[beadRef]int{{"gastown", "gt-quiet"}: 1}
+	if got := perBead.readsByBead(); !reflect.DeepEqual(got, want) {
+		t.Errorf("per-bead reads = %v, want only the bead the batch had no row for %v", got, want)
+	}
+	if got := batch.callCount(); got != 1 {
+		t.Errorf("batched reads = %d, want 1", got)
+	}
+	lab, err := a.Label(context.Background(), items[1])
+	if err != nil {
+		t.Fatalf("Label: %v", err)
+	}
+	if !lab.Labeled || !lab.Labels[qBrokeStandingRule] || lab.Rule != ruleRulesStandDown {
+		t.Errorf("labeling = %+v, want broke true from the stand-down the fallback read", lab)
+	}
+	// The silent bead the batch answered is not read again: it labels as having
+	// no stand-down record.
+	silent, err := a.Label(context.Background(), items[0])
+	if err != nil {
+		t.Fatalf("Label: %v", err)
+	}
+	if !silent.Labeled || silent.Labels[qBrokeStandingRule] || silent.Rule != ruleRulesNoRecord {
+		t.Errorf("silent bead labeling = %+v, want labeled false with no record", silent)
+	}
+	if got := perBead.readsByBead(); !reflect.DeepEqual(got, want) {
+		t.Errorf("per-bead reads = %v after labeling, want only %v", got, want)
+	}
+}
+
+// TestRulesPrefetchFailedBatchLabelsAsThePerBeadReads: when the batch query
+// fails, the failure is warned about and every pair is read one at a time, so
+// every label, error and missing-bead answer matches the serial run.
+func TestRulesPrefetchFailedBatchLabelsAsThePerBeadReads(t *testing.T) {
+	t.Parallel()
+	d0 := prefetchFixtureDoneAt
+	lines := [][]byte{
+		prefetchLine(t, "gastown", "gt-ok", "furiosa", d0),
+		prefetchLine(t, "gastown", "gt-quiet", "furiosa", d0),
+		prefetchLine(t, "gastown", "gt-missing", "furiosa", d0),
+	}
+	comments := map[beadRef][]beads.Comment{
+		{"gastown", "gt-quiet"}: {{
+			Author:    "gastown/polecats/furiosa",
+			Text:      reworkStandDownPrefix + ": head unchanged since the rejection",
+			CreatedAt: d0.Add(2 * time.Minute).Format(time.RFC3339Nano),
+		}},
+	}
+	run := func(prefetch bool) (map[string]labelOutcome, []string) {
+		reader := newFakeCommentReader()
+		reader.comments = comments
+		reader.fail[beadRef{"gastown", "gt-missing"}] = beads.ErrNotFound
+		a := newPrefetchAdapter(t.TempDir(), prefetchFixtureNow(), reader.read)
+		a.commentsBatch = (&fakeBatchReader{fail: errors.New("bd sql: boom")}).read
+		var warnings []string
+		a.warn = func(format string, args ...any) {
+			warnings = append(warnings, fmt.Sprintf(format, args...))
+		}
+		return labelOneByOne(t, a, prefetch, lines), warnings
+	}
+	withLabels, warnings := run(true)
+	serialLabels, serialWarnings := run(false)
+
+	for bead, want := range serialLabels {
+		got := withLabels[bead]
+		if !reflect.DeepEqual(got.lab, want.lab) || errString(got.err) != errString(want.err) {
+			t.Errorf("%s = (%+v, %v), want the serial (%+v, %v)", bead, got.lab, got.err, want.lab, want.err)
+		}
+	}
+	const batchWarning = "reading the comments of gastown in a batch: bd sql: boom"
+	n := 0
+	for _, w := range warnings {
+		if w == batchWarning {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("batch warnings = %d in %q, want exactly one", n, warnings)
+	}
+	if slices.Contains(serialWarnings, batchWarning) {
+		t.Errorf("the serial run warned about a batch it never made: %q", serialWarnings)
+	}
 }
 
 // TestRulesPrefetchCommentKeyNeedsSlashFreeBead checks the guard commentKey
