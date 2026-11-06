@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -156,6 +157,36 @@ func TestJevScorecardPatrolConfigDecodes(t *testing.T) {
 	}
 	if got := c.BatteriesValue(); len(got) != 1 || got[0] != scorecard.AttentionBattery {
 		t.Errorf("batteries = %v, want [%s]", got, scorecard.AttentionBattery)
+	}
+}
+
+// TestJevScorecardPatrolConfigRefusesAnUnknownBatteryAtLoad holds the registry
+// check at the load: a name the binary does not register stops the config read
+// with an error naming it, so the daemon reads the refusal once instead of
+// leaving the patrol to skip every tick.
+func TestJevScorecardPatrolConfigRefusesAnUnknownBatteryAtLoad(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := filepath.Join(town, constants.DirMayor, "daemon.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"type":"daemon-patrol-config","version":1,"patrols":{"jev_scorecard":{` +
+		`"enabled":true,"batteries":["attention","retired_battery"]}}}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := ReadPatrolConfig(town)
+
+	if err == nil {
+		t.Fatal("ReadPatrolConfig accepted a battery the binary does not register")
+	}
+	if !strings.Contains(err.Error(), `"retired_battery"`) {
+		t.Errorf("load error = %v, want it to name retired_battery", err)
+	}
+	if cfg != nil {
+		t.Errorf("ReadPatrolConfig returned a config beside the error: %+v", cfg)
 	}
 }
 
@@ -386,10 +417,10 @@ func TestJevScorecardPatrolEmptyBatteriesRefreshNothing(t *testing.T) {
 	}
 }
 
-// TestJevScorecardPatrolUnknownBatteryIsRefused holds the name check: a
-// battery the binary does not register is an error that names it when the
-// patrol reads its settings, and the trigger reports it instead of refreshing
-// as if the battery cost nothing.
+// TestJevScorecardPatrolUnknownBatteryIsRefused holds the backstop for a
+// config built in code: it never passed ReadPatrolConfig, so the patrol's own
+// settings read still refuses a battery the binary does not register, naming
+// it, and the trigger reports it instead of refreshing as if it cost nothing.
 func TestJevScorecardPatrolUnknownBatteryIsRefused(t *testing.T) {
 	t.Parallel()
 	start := time.Date(2026, 11, 2, 10, 0, 0, 0, jevScorecardTestZone)
@@ -408,6 +439,67 @@ func TestJevScorecardPatrolUnknownBatteryIsRefused(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), `"retired_battery"`) {
 		t.Errorf("log = %q, want the unknown battery named", logs)
+	}
+}
+
+// TestJevScorecardPatrolAFailedRefreshOverACorruptCacheNamesTheRemedy holds
+// the wedge: a corrupt cache stops every refresh before it scores anything, so
+// the failure line names the cache path and what the operator has to do, not
+// just the exit status.
+func TestJevScorecardPatrolAFailedRefreshOverACorruptCacheNamesTheRemedy(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 2, 10, 0, 0, 0, jevScorecardTestZone)
+	logs := &bytes.Buffer{}
+	runner := &jevScorecardTestRunner{err: errors.New("exit status 1")}
+	d, _ := jevScorecardTestDaemon(t, start, jevScorecardEnabled(scorecard.AttentionBattery), runner, logs)
+	path := scorecard.CachePath(d.config.TownRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("not a scorecard"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d.triggerJevScorecard()
+
+	if runner.calls != 1 {
+		t.Fatalf("refreshes over a corrupt cache = %d, want 1", runner.calls)
+	}
+	if !strings.Contains(logs.String(), path) {
+		t.Errorf("log = %q, want the cache path %s", logs, path)
+	}
+	if !strings.Contains(logs.String(), "delete it and rerun gt jev scorecard --refresh") {
+		t.Errorf("log = %q, want the corrupt-cache remedy", logs)
+	}
+}
+
+// TestJevScorecardPatrolATimedOutRefreshIsADistinctOutcome holds the budget: a
+// refresh that runs past jevScorecardRefreshBudget is reported as a timeout
+// rather than as a battery failure, and the attempt is still recorded so the
+// next tick does not start it again.
+func TestJevScorecardPatrolATimedOutRefreshIsADistinctOutcome(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 2, 10, 0, 0, 0, jevScorecardTestZone)
+	logs := &bytes.Buffer{}
+	runner := &jevScorecardTestRunner{err: fmt.Errorf("gt jev scorecard --refresh: %w", context.DeadlineExceeded)}
+	d, clk := jevScorecardTestDaemon(t, start, jevScorecardEnabled(scorecard.AttentionBattery), runner, logs)
+	jevScorecardTestCache(t, d.config.TownRoot, start.Add(-25*time.Hour))
+
+	d.triggerJevScorecard()
+	if runner.calls != 1 {
+		t.Fatalf("refreshes at start on a stale cache = %d, want 1", runner.calls)
+	}
+	if !strings.Contains(logs.String(), "timed out") {
+		t.Errorf("log = %q, want the timeout named", logs)
+	}
+	if strings.Contains(logs.String(), "refresh failed") {
+		t.Errorf("log = %q, want a timeout, not a plain failure", logs)
+	}
+
+	clk.Advance(10 * time.Minute)
+	d.triggerJevScorecard()
+	if runner.calls != 1 {
+		t.Errorf("retried a timed-out refresh on the next tick = %d, want 1", runner.calls)
 	}
 }
 

@@ -367,9 +367,8 @@ type PatrolsConfig struct {
 	// JevDedupe.
 	JevNotes *JevNotesConfig `json:"jev_notes,omitempty"`
 
-	// JevScorecard refreshes the cached scorecard once a day and at start when
-	// the cache is older than its interval (internal/daemon/jev_scorecard_patrol.go).
-	// It runs `gt jev scorecard --refresh`, so it is opt-in like JevDedupe.
+	// JevScorecard refreshes the cached scorecard on a schedule
+	// (internal/daemon/jev_scorecard_patrol.go).
 	JevScorecard *JevScorecardConfig `json:"jev_scorecard,omitempty"`
 
 	// JevLogtriage asks Jev about each group of the daemon log's warning and
@@ -1706,9 +1705,9 @@ func (c *JevScorecardConfig) BatteriesValue() []string {
 // UnmarshalJSON decodes the patrol's block strictly, refusing a value the
 // patrol cannot act on: an hour that is not HH:MM, an interval it cannot
 // schedule, or an empty or repeated battery name. Whether a name is one the
-// binary registers is checked when the daemon reads the patrol's settings: the
-// scorecard package imports this one, so the registry cannot be read here
-// without a cycle.
+// binary registers is checked when the daemon loads the patrol config
+// (daemon.ReadPatrolConfig): the scorecard package imports this one, so the
+// registry cannot be read here without a cycle.
 //
 // The unknown-field check is repeated here because a type that decodes itself
 // is decoded by the config kernel's strict decoder opaquely.

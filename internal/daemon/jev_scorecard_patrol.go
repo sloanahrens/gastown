@@ -2,23 +2,23 @@ package daemon
 
 // The jev_scorecard patrol (gt-jk0162): the scorecard is a periodic review,
 // not a live panel (gt-hh07o2), so the daemon keeps its cache fresh on a
-// schedule. Once a day at patrols.jev_scorecard.hour (default 04:30 local) the
-// patrol runs `gt jev scorecard --refresh`, which scores every registered
-// battery and writes <town>/.runtime/jev/scorecard.json. At start it runs once
-// when the cache is older than patrols.jev_scorecard.interval (default 24h),
-// and a cache within that interval is left alone until the next hour.
+// schedule. Once a day at patrols.jev_scorecard.hour it runs
+// `gt jev scorecard --refresh`, which scores every registered battery and
+// writes <town>/.runtime/jev/scorecard.json; at start it runs once when the
+// cache is older than patrols.jev_scorecard.interval, and a cache within that
+// interval is left alone until the next hour.
 //
-// The refresh scores every registered battery; patrols.jev_scorecard.batteries
-// names the batteries the town expects it to score, so a name the binary does
-// not register — a battery retired by the 2026-11-20 review, say — is refused
-// when the patrol reads its settings instead of passing silently. An empty
-// list refreshes nothing.
+// The refresh scores every registered battery, so the patrol runs only when
+// patrols.jev_scorecard.batteries names at least one. A name the binary does
+// not register is refused when the daemon loads its config (ReadPatrolConfig),
+// naming it: a battery dropped from the binary after the 2026-11-20 review
+// would otherwise cost nothing and say nothing.
 //
-// The patrol is opt-in (patrols.jev_scorecard.enabled). A refresh runs on its
-// own goroutine, one at a time; a tick that finds one in flight is skipped
-// with one line an hour. A refresh that exits non-zero is one line in the
-// daemon log and raises no attention item: the cache keeps every battery's
-// last good block (gt-hh07o2), and the next scheduled run still happens.
+// A refresh runs on its own goroutine, one at a time; a tick that finds one in
+// flight is skipped with one line an hour. A refresh that exits non-zero is
+// one line in the daemon log and raises no attention item: the cache keeps
+// every battery's last good block (gt-hh07o2), and the next scheduled run
+// still happens.
 
 import (
 	"context"
@@ -91,10 +91,28 @@ type jevScorecardSettings struct {
 	batteries   []string
 }
 
+// jevScorecardBatteriesRefusal returns an error naming the first declared
+// battery the binary does not register, or nil. ReadPatrolConfig runs it when
+// the daemon loads the file; jevScorecardSettingsOf runs it again for a config
+// built in code, which never passed the loader.
+func jevScorecardBatteriesRefusal(cfg *DaemonPatrolConfig) error {
+	var c *JevScorecardConfig
+	if cfg != nil && cfg.Patrols != nil {
+		c = cfg.Patrols.JevScorecard
+	}
+	known := scorecard.Registered()
+	for _, name := range c.BatteriesValue() {
+		if !slices.Contains(known, name) {
+			return fmt.Errorf(
+				"patrols.jev_scorecard.batteries: unknown battery %q; the binary registers %s",
+				name, strings.Join(known, ", "))
+		}
+	}
+	return nil
+}
+
 // jevScorecardSettingsOf reads the patrol's settings from the daemon patrol
-// config, or the error for a setting it cannot act on. A battery the binary
-// does not register is refused here, naming it: a name left in the list after
-// its battery was struck would otherwise read as a battery that costs nothing.
+// config, or the error for a setting it cannot act on.
 func jevScorecardSettingsOf(cfg *DaemonPatrolConfig) (jevScorecardSettings, error) {
 	var c *JevScorecardConfig
 	if cfg != nil && cfg.Patrols != nil {
@@ -108,16 +126,10 @@ func jevScorecardSettingsOf(cfg *DaemonPatrolConfig) (jevScorecardSettings, erro
 	if err != nil {
 		return jevScorecardSettings{}, err
 	}
-	batteries := c.BatteriesValue()
-	known := scorecard.Registered()
-	for _, name := range batteries {
-		if !slices.Contains(known, name) {
-			return jevScorecardSettings{}, fmt.Errorf(
-				"patrols.jev_scorecard.batteries: unknown battery %q; the binary registers %s",
-				name, strings.Join(known, ", "))
-		}
+	if err := jevScorecardBatteriesRefusal(cfg); err != nil {
+		return jevScorecardSettings{}, err
 	}
-	return jevScorecardSettings{clockMinute: clockMinute, interval: interval, batteries: batteries}, nil
+	return jevScorecardSettings{clockMinute: clockMinute, interval: interval, batteries: c.BatteriesValue()}, nil
 }
 
 // jevScorecardSchedule is the clock a due decision is made against: the local
@@ -233,12 +245,24 @@ func (d *Daemon) triggerJevScorecard() {
 		defer d.jevScorecardRunning.Store(false)
 		ctx, cancel := context.WithTimeout(context.Background(), jevScorecardRefreshBudget)
 		defer cancel()
-		err := s.refresh(ctx, d.config.TownRoot)
+		townRoot := d.config.TownRoot
+		err := s.refresh(ctx, townRoot)
 		concluded := s.now()
-		if err != nil {
-			d.logger.Printf("jev_scorecard: refresh failed: %v", err)
-		} else {
+		switch {
+		case err == nil:
 			d.logger.Printf("jev_scorecard: refreshed the scorecard cache")
+		case errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded):
+			d.logger.Printf("jev_scorecard: refresh timed out after %s: %v; the next scheduled run still happens", jevScorecardRefreshBudget, err)
+		default:
+			// A corrupt cache stops every refresh, so when the cache cannot be
+			// read as a scorecard this line carries the path and the remedy an
+			// operator needs; any other failure is named alone.
+			line := fmt.Sprintf("jev_scorecard: refresh failed: %v", err)
+			path := scorecard.CachePath(townRoot)
+			if _, readErr := (scorecard.Cache{}).Read(path); errors.Is(readErr, scorecard.ErrCorruptScorecard) {
+				line += fmt.Sprintf("; the cache %s is corrupt: delete it and rerun gt jev scorecard --refresh", path)
+			}
+			d.logger.Print(line)
 		}
 		// The attempt is spent whether it succeeded or not: recording it here
 		// keeps a failing refresh to one line and one try per scheduled run

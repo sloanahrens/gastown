@@ -2431,10 +2431,9 @@ var heartbeatSteps = []heartbeatStep{
 	// jev-dedupe.
 	{name: "jev-notes", lifecycle: true, run: (*Daemon).triggerJevNotes},
 
-	// Refresh the cached scorecard once a day and at start when the cache is
-	// older than its interval, by running `gt jev scorecard --refresh`
-	// (internal/daemon/jev_scorecard_patrol.go, gt-jk0162). Opt-in and
-	// lifecycle: a refresh scores every registered battery.
+	// Refresh the cached scorecard on its schedule
+	// (internal/daemon/jev_scorecard_patrol.go, gt-jk0162). Lifecycle: an
+	// E-stopped town starts no refresh.
 	{name: "jev-scorecard", lifecycle: true, run: (*Daemon).triggerJevScorecard},
 
 	// Sweep the tiers `make gate` does not run against origin/main
