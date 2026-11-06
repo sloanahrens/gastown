@@ -638,6 +638,7 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindTierSweepStarved, collect: s.collectTierSweepStarved},
 		{kind: attention.KindTierSweepStuck, collect: s.collectTierSweepStuck},
 		{kind: attention.KindTierSweepGuardUnreadable, collect: s.collectTierSweepGuardUnreadable},
+		{kind: attention.KindGreenRef, collect: s.collectGreenRef},
 		{kind: attention.KindOverrunStopped, collect: s.collectOverrunStopped, owns: overrunStoppedItem},
 		// A second entry of the same kind: a stop that handed its bead back
 		// and one that never released its seat are the guard's two outcomes,

@@ -695,6 +695,11 @@ type Daemon struct {
 	// name. The patrol goroutine writes it and the attention tick reads it.
 	scheduledGateFailures scheduledGateCounts
 
+	// greenRefs is the green ref push's memory between cycles: consecutive
+	// failures and remote conflicts per rig (gt-gg9hv.61). The sweep goroutine
+	// writes it and the attention tick reads it.
+	greenRefs greenRefPublishState
+
 	// birdReportStale is the bird_reports patrol's last check: the reporters
 	// whose daily report was missing or late (gt-cbsat). The check replaces it
 	// and the attention tick reads it, both on the run loop.
