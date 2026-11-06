@@ -58,7 +58,9 @@ var (
 	agentSessionPattern = regexp.MustCompile(
 		`\.claude/` + `projects/` +
 			`|session[-_]id["']?\s*[:=]\s*["']?[0-9a-f]{8}-` + `[0-9a-f]{4}`)
-	emailPattern = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*`)
+	// The domain takes an underscore too, so a label such as Do_thing is read
+	// whole and identifierShaped can see it.
+	emailPattern = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-_]+(?:\.[A-Za-z0-9\-_]+)*`)
 )
 
 // Rule is a per-line check; Match reports whether the line holds a finding.
@@ -470,8 +472,7 @@ func colonThenProse(rest string) bool {
 // one dot, and a last label that starts with a letter, is two or more letters
 // long and is not an identifier (see identifierShaped). Without a dot the match
 // is a version pin or an id (checkout@v4, image@sha256, main@a); a one-letter or
-// all-digit last label (a@b.c, 127.0.0.1) is not a host name; and a camel-case
-// label is a Go identifier such as queueLandingColumn.
+// all-digit last label (a@b.c, 127.0.0.1) is not a host name.
 func addressDomain(domain string) bool {
 	dot := strings.LastIndex(domain, ".")
 	if dot < 0 {
@@ -485,47 +486,24 @@ func addressDomain(domain string) bool {
 }
 
 // identifierShaped reports whether a last label is a Go identifier rather than a
-// top-level domain. A lower-case letter followed later by an upper-case one is
-// the camel-case shape (queueLandingColumn). A capitalised label is shaped the
-// same as a top-level domain (Com, Io), so it is an identifier only when it is
-// not a known top-level domain (Func, List). A label that is one case throughout
-// (com, COM) is a domain label.
+// top-level domain. A label that holds a digit or an underscore (Retry2, Do_thing)
+// is one. So is a camel-case label, where a lower-case letter is followed later
+// by an upper-case one (queueLandingColumn). Every other label is a domain label,
+// whatever its case: Com, COM, com and Shop all are. The shape alone decides, so
+// a capitalised identifier such as Func is read as a domain too.
 func identifierShaped(s string) bool {
 	var lower bool
 	for _, r := range s {
-		if unicode.IsLower(r) {
+		switch {
+		case r == '_' || r >= '0' && r <= '9':
+			return true
+		case unicode.IsLower(r):
 			lower = true
-		} else if unicode.IsUpper(r) && lower {
+		case unicode.IsUpper(r) && lower:
 			return true
 		}
 	}
-	return titleCase(s) && !topLevelDomains[strings.ToLower(s)]
-}
-
-// titleCase reports whether s is one capital letter followed by lower-case
-// letters only.
-func titleCase(s string) bool {
-	for i, r := range s {
-		if i == 0 && !unicode.IsUpper(r) || i > 0 && !unicode.IsLower(r) {
-			return false
-		}
-	}
-	return len(s) > 0
-}
-
-// topLevelDomains lists the top-level domains an address is written with in
-// the capitalised form. It only decides between a capitalised domain label and
-// a capitalised identifier, so it is not a full registry.
-var topLevelDomains = map[string]bool{
-	"com": true, "net": true, "org": true, "edu": true, "gov": true, "mil": true,
-	"int": true, "info": true, "biz": true, "name": true, "pro": true, "mobi": true,
-	"app": true, "dev": true, "io": true, "ai": true, "me": true, "co": true,
-	"tv": true, "cc": true, "xyz": true, "tech": true, "online": true, "site": true,
-	"store": true, "email": true, "cloud": true, "uk": true, "us": true, "ca": true,
-	"au": true, "nz": true, "de": true, "fr": true, "nl": true, "se": true, "ch": true,
-	"es": true, "it": true, "jp": true, "cn": true, "in": true, "ru": true, "br": true,
-	"mx": true, "ie": true, "eu": true, "kr": true, "za": true, "pl": true, "be": true,
-	"at": true, "dk": true, "no": true, "fi": true,
+	return false
 }
 
 func emailIsFinding(local, domain, rest string) bool {
