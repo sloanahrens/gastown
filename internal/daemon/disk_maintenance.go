@@ -500,7 +500,7 @@ func (d *Daemon) runDiskMaintenanceTrim(mode string, due diskMaintDue, why strin
 
 // runCacheTrimPass is the trim's own pass, the one a busy tick dispatches: the
 // trim and nothing else. The disk alerts stay with the combined pass: a second
-// pass applying them beside it would have to be serialised against it, and a
+// pass applying them beside it would have to be serialized against it, and a
 // stuck notifier would then hold the trim (gt-gg9hv.48). Its caller holds the
 // trim's own guard (see runDiskMaintenanceTrim).
 func (d *Daemon) runCacheTrimPass(mode string) {

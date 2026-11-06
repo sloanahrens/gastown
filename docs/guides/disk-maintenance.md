@@ -135,7 +135,7 @@ neither the landing worker nor Dolt, so a landing pass in flight cannot starve
 it while the sandbox disk fills. That pass only trims: the disk readings and
 their alerts stay with the combined pass, which every other target still waits
 for a quiet tick to join. Applying the alerts from two passes would need them
-serialised, and a stuck notifier would then hold the trim; while the town is
+serialized, and a stuck notifier would then hold the trim; while the town is
 busy the alerts wait for the next quiet tick, as they did before.
 
 - A claim's namespace comes from the claim itself, and every pod read, listing
