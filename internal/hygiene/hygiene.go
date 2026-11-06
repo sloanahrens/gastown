@@ -140,7 +140,7 @@ func homePathFinding(line string) bool {
 		}
 		name := line[start+loc[4] : start+loc[5]]
 		root := line[start+loc[2] : start+loc[3]]
-		if _, ok := nonPersonalHomeNames[name]; !ok && !homeSegmentMidPath(line, start+loc[0], root) {
+		if _, ok := nonPersonalHomeNames[name]; !ok && !homeSegmentMidPath(line, start+loc[0], root, name) {
 			return true
 		}
 		// Keep the trailing separator so a second path that shares it is
@@ -150,13 +150,24 @@ func homePathFinding(line string) bool {
 	return false
 }
 
+// midPathHomeNames are the directory names that fixtures and backup paths put
+// after a mid-path home segment under a host directory. Only these are read as
+// directories: any other name after such a segment is somebody's home and stays
+// a finding.
+var midPathHomeNames = map[string]struct{}{
+	"gt-backups": {}, "forgejo": {},
+}
+
 // homeSegmentMidPath reports whether the home root at index at follows a name
 // inside a longer path, as a home directory does inside a host or fixture
 // directory. A path whose first segment is a home root is not exempt, so a
 // second home segment under one still reports. The exemption is for the home
 // root only: a Users segment in the middle stays a finding.
-func homeSegmentMidPath(line string, at int, root string) bool {
+func homeSegmentMidPath(line string, at int, root, name string) bool {
 	if root != "home" || at == 0 || !isNameByte(line[at-1]) {
+		return false
+	}
+	if _, ok := midPathHomeNames[name]; !ok {
 		return false
 	}
 	begin := at
@@ -508,9 +519,9 @@ func emailFinding(line string) bool {
 		// A colon and then whitespace after the address is how a person
 		// writes a host in a document. It is a finding whatever the host
 		// looks like: a dotless host there is a host, not a version pin.
-		// The one exception is a dotless host whose local part follows a
-		// slash: that is a segment of a branch or ref name, not prose.
-		prose := colonThenProse(rest) && !(dotless(domain) && loc[0] > 0 && line[loc[0]-1] == '/')
+		// The one exception is a dotless name that is the last segment of a
+		// polecat branch path: that is a ref, not prose.
+		prose := colonThenProse(rest) && !(dotless(domain) && branchRefLocal(line, loc[0]))
 		if !addressDomain(domain) && !prose {
 			continue
 		}
@@ -519,6 +530,23 @@ func emailFinding(line string) bool {
 		}
 	}
 	return false
+}
+
+// branchRefLocal reports whether the local part starting at index at is the
+// last segment of a polecat branch path such as polecat/toast/gt-work. The path
+// before it must start with polecat/, hold at least two segments, and carry no
+// scheme or empty segment, so ssh://jane@laptop and docs/jane@laptop do not
+// qualify.
+func branchRefLocal(line string, at int) bool {
+	begin := at
+	for begin > 0 && (isNameByte(line[begin-1]) || line[begin-1] == '/') {
+		begin--
+	}
+	prefix := line[begin:at]
+	return strings.HasPrefix(prefix, "polecat/") &&
+		strings.Count(prefix, "/") >= 2 &&
+		strings.HasSuffix(prefix, "/") &&
+		!strings.Contains(prefix, "//")
 }
 
 // colonThenProse reports whether rest starts with a colon followed by

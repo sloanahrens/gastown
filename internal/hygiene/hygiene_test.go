@@ -789,6 +789,9 @@ func TestDotlessNameInABranchPathIsNotAnAddress(t *testing.T) {
 	}{
 		{"branch name before a colon", "branch " + planted("polecat/toast/gt-work", "@abc123") + ": dolt locked", 0},
 		{"twin: dotless scp form after a space", planted("user", "@host: ") + "dolt locked", 1},
+		{"twin: url user with a dotless host", planted("ssh://jane", "@laptop: ") + "dolt locked", 1},
+		{"twin: one segment before a dotless host", planted("docs/jane", "@laptop: ") + "dolt locked", 1},
+		{"twin: polecat name without a bead segment", planted("polecat/jane", "@laptop: ") + "dolt locked", 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -820,6 +823,8 @@ func TestHomeSegmentMidPathIsNotAHomeDirectory(t *testing.T) {
 		{"twin: home directory", planted("/home/", "jane", "/x"), 1},
 		{"twin: quoted home directory", planted("\"/Users/", "jane", "/x\""), 1},
 		{"twin: users segment under a host directory", planted("/host/Users/", "jane", "/x"), 1},
+		{"twin: account name under a host directory", planted("/host/home/", "jane", "/x"), 1},
+		{"twin: account name under a srv directory", planted("/srv/home/", "jane", "/x"), 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
