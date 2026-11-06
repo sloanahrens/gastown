@@ -73,7 +73,7 @@ func launchTown(t *testing.T) (town, rigPath, workDir string, w *world) {
 	if err := os.MkdirAll(settings, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cfg := `{"type":"rig-settings","version":1,"merge_queue":{"forgejo":{"remote_url":"http://forgejo:3000/sloan/gastown.git"}}}`
+	cfg := `{"type":"rig-settings","version":1,"merge_queue":{"forgejo":{"remote_url":"http://forgejo:3000/owner/gastown.git"}}}`
 	if err := os.WriteFile(filepath.Join(settings, "config.json"), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}

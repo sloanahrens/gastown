@@ -30,7 +30,7 @@ func TestBranchForBead(t *testing.T) {
 		{"refs/heads/polecat/opal/gt-abc", "gt-abc", false}, // no mutation suffix
 		{"refs/heads/polecat//gt-abc+x1", "gt-abc", false},
 		{"refs/heads/polecat/gt-abc+x1", "gt-abc", false},
-		{"refs/heads/sloan/gt-abc+x1", "gt-abc", false},
+		{"refs/heads/owner/gt-abc+x1", "gt-abc", false},
 		{"refs/heads/main", "gt-abc", false},
 	}
 	for _, c := range cases {
@@ -49,7 +49,7 @@ func TestLandingDeletesTheBeadsPolecatBranches(t *testing.T) {
 		"refs/heads/polecat/agate/gt-abc+x0":   noteHead, // an earlier rejected attempt
 		"refs/heads/polecat/opal/gt-abc.10+x1": noteHead, // a child bead
 		"refs/heads/polecat/opal/gt-abcd+x1":   noteHead, // a longer id sharing the prefix
-		"refs/heads/sloan/gt-abc+x1":           noteHead, // not a polecat branch
+		"refs/heads/owner/gt-abc+x1":           noteHead, // not a polecat branch
 		"refs/heads/main":                      noteHead,
 	}
 
@@ -64,7 +64,7 @@ func TestLandingDeletesTheBeadsPolecatBranches(t *testing.T) {
 	for _, ref := range []string{
 		"refs/heads/polecat/opal/gt-abc.10+x1",
 		"refs/heads/polecat/opal/gt-abcd+x1",
-		"refs/heads/sloan/gt-abc+x1",
+		"refs/heads/owner/gt-abc+x1",
 		"refs/heads/main",
 	} {
 		if _, ok := h.remote.remoteRefs[ref]; !ok {
@@ -543,7 +543,7 @@ func TestBeadForBranch(t *testing.T) {
 		{"polecat//gt-abc+x1", ""},                // no author
 		{"polecat/gt-abc+x1", ""},                 // no bead segment
 		{"polecat", ""},                           // the prefix alone
-		{"sloan/gt-abc+x1", ""},                   // not a polecat branch
+		{"owner/gt-abc+x1", ""},                   // not a polecat branch
 		{"refs/heads/polecat/opal/gt-abc+x1", ""}, // a full ref, not the name
 		{"polecat/opal/-x+y", ""},                 // a flag is not an id
 		{"polecat/opal/--read-only+y", ""},        // neither is a long one
@@ -568,7 +568,7 @@ func TestLandingRefreshesEachAuthorSeat(t *testing.T) {
 		"refs/heads/polecat/opal/gt-abc+x1":    tipHead,  // the branch that landed
 		"refs/heads/polecat/agate/gt-abc+x0":   noteHead, // an earlier rejected attempt
 		"refs/heads/polecat/opal/gt-abc.10+x1": noteHead, // a child bead
-		"refs/heads/sloan/gt-abc+x1":           noteHead, // not a polecat branch
+		"refs/heads/owner/gt-abc+x1":           noteHead, // not a polecat branch
 		"refs/heads/main":                      noteHead,
 	}
 	var refreshed []string
@@ -650,7 +650,7 @@ func TestAuthorPolecat(t *testing.T) {
 		{"polecat//gt-abc+x1", ""},     // no author
 		{"polecat/gt-abc+x1", ""},      // no bead segment, so no author
 		{"polecat", ""},                // the prefix alone
-		{"sloan/gt-abc+x1", ""},        // not a polecat branch
+		{"owner/gt-abc+x1", ""},        // not a polecat branch
 		{"refs/heads/polecat/x+y", ""}, // a full ref, not the short name
 		{"", ""},
 	}
@@ -700,12 +700,12 @@ func TestLandingDeletesOnlyTheBeadsLocalBranchAtTheLandedHead(t *testing.T) {
 	h.remote.remoteRefs = map[string]string{
 		"refs/heads/polecat/opal/gt-abc+x1":  tipHead,
 		"refs/heads/polecat/agate/gt-abc+x0": noteHead,
-		"refs/heads/sloan/gt-abc+x1":         noteHead,
+		"refs/heads/owner/gt-abc+x1":         noteHead,
 	}
 	h.remote.localBranches = map[string]string{
 		"polecat/opal/gt-abc+x1":  tipHead,
 		"polecat/agate/gt-abc+x0": noteHead,
-		"sloan/gt-abc+x1":         noteHead,
+		"owner/gt-abc+x1":         noteHead,
 	}
 	h.files.recs = []land.LandingRecord{{BeadID: "gt-abc", Head: tipHead, LandedCommit: "cccccccccc"}}
 	var logs []string
@@ -724,7 +724,7 @@ func TestLandingDeletesOnlyTheBeadsLocalBranchAtTheLandedHead(t *testing.T) {
 	if !logged(logs, "kept local polecat/agate/gt-abc+x0: its tip") {
 		t.Fatalf("logs %q; want the kept branch named with the tip that kept it", logs)
 	}
-	if _, ok := h.remote.localBranches["sloan/gt-abc+x1"]; !ok {
+	if _, ok := h.remote.localBranches["owner/gt-abc+x1"]; !ok {
 		t.Error("a branch that is not a polecat branch of the bead was deleted")
 	}
 }

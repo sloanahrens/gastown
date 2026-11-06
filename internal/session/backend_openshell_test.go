@@ -31,7 +31,7 @@ const (
 	openshellTestPolecat  = "sandbox-ace"
 	openshellTestSession  = "gt-gastown-sandbox-ace"
 	openshellTestBranch   = "polecat/sandbox-ace/gt-1+abc"
-	openshellTestRepoURL  = "http://host.docker.internal:3000/sloan/gastown.git"
+	openshellTestRepoURL  = "http://host.docker.internal:3000/owner/gastown.git"
 	openshellTestGitEmail = "host-dev@example.test"
 	openshellTestWorkDir  = "/sandbox/gt/gastown/polecats/sandbox-ace/gastown"
 
@@ -2289,7 +2289,7 @@ func TestOpenShellMainScriptHolderIsNotThePolecatSession(t *testing.T) {
 		openshellTestSession,
 		PolecatSessionName(DefaultPrefix, openshellTestPolecat),
 		PolecatSessionName("bd", "furiosa"),
-		CrewSessionName(DefaultPrefix, "sloan"),
+		CrewSessionName(DefaultPrefix, "operator"),
 		OverseerSessionName(),
 	} {
 		if sandboxHolderSession == sess {

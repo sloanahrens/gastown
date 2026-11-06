@@ -176,13 +176,13 @@ func TestSeatWorkDir(t *testing.T) {
 		},
 		{
 			name:   "crew worktree",
-			seat:   supervisor.SeatIn(reg, "gastown", "crew", "sloan"),
-			mkdirs: []string{"gastown/crew/sloan"},
-			want:   "gastown/crew/sloan",
+			seat:   supervisor.SeatIn(reg, "gastown", "crew", "operator"),
+			mkdirs: []string{"gastown/crew/operator"},
+			want:   "gastown/crew/operator",
 		},
 		{
 			name:     "crew with no worktree logs what it tried",
-			seat:     supervisor.SeatIn(reg, "gastown", "crew", "sloan"),
+			seat:     supervisor.SeatIn(reg, "gastown", "crew", "operator"),
 			wantLogs: true,
 		},
 		{

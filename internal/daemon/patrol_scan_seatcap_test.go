@@ -118,7 +118,7 @@ func TestPatrolScanSeatCap(t *testing.T) {
 				polecat("gastown", "pearl", poolAgent),
 				{rig: "gastown", name: "witness", crew: true},  // a session with no polecat role
 				{rig: "gastown", name: "refinery", crew: true}, // a session with no polecat role
-				{rig: "gastown", name: "sloan", crew: true},
+				{rig: "gastown", name: "operator", crew: true},
 			},
 		},
 		{

@@ -30,7 +30,7 @@ func TestOverrunGuardEscalationWaiting(t *testing.T) {
 	t.Parallel()
 	bd := newWorkBD(t)
 	townRoot := t.TempDir()
-	for _, name := range []string{"capable", "titled", "closer", "other", "sloan", "furiosa"} {
+	for _, name := range []string{"capable", "titled", "closer", "other", "operator", "furiosa"} {
 		seedOverrunAgent(bd, townRoot, name, "stuck", done.ExitEscalated)
 	}
 	escalation := func(id, raiser, related, title, status string) beads.Issue {
@@ -43,7 +43,7 @@ func TestOverrunGuardEscalationWaiting(t *testing.T) {
 	bd.db.Seed(escalation("hq-wisp-titled", "gastown/polecats/titled", "", "gt-esc1: a decision", "open"))
 	bd.db.Seed(escalation("hq-wisp-closed", "gastown/polecats/closer", "gt-esc1", "gt-esc1: answered", "closed"))
 	bd.db.Seed(escalation("hq-wisp-other-bead", "gastown/polecats/other", "gt-esc2", "gt-esc2: a decision", "open"))
-	bd.db.Seed(escalation("hq-wisp-other-role", "gastown/crew/sloan", "gt-esc1", "gt-esc1: a decision", "open"))
+	bd.db.Seed(escalation("hq-wisp-other-role", "gastown/crew/operator", "gt-esc1", "gt-esc1: a decision", "open"))
 	d := &Daemon{config: &Config{TownRoot: townRoot}, openWorkBeads: bd.open}
 	r := newOverrunEscalationReader(d)
 
@@ -56,7 +56,7 @@ func TestOverrunGuardEscalationWaiting(t *testing.T) {
 		{"open escalation named by its title", overrunSeat{Rig: "gastown", Polecat: "titled", Bead: "gt-esc1"}, true},
 		{"escalation closed", overrunSeat{Rig: "gastown", Polecat: "closer", Bead: "gt-esc1"}, false},
 		{"escalation for another bead", overrunSeat{Rig: "gastown", Polecat: "other", Bead: "gt-esc1"}, false},
-		{"escalation raised by another role", overrunSeat{Rig: "gastown", Polecat: "sloan", Bead: "gt-esc1"}, false},
+		{"escalation raised by another role", overrunSeat{Rig: "gastown", Polecat: "operator", Bead: "gt-esc1"}, false},
 		{"seat with no escalation", overrunSeat{Rig: "gastown", Polecat: "furiosa", Bead: "gt-esc1"}, false},
 	}
 	for _, tt := range tests {
