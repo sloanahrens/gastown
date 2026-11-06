@@ -143,9 +143,8 @@ func containerEnvFor(townRoot string, load func(string) (map[string]string, erro
 // the name the kind API server's certificate carries (it names localhost and
 // 127.0.0.1, not host.docker.internal).
 const (
-	containerKubeHost     = "host.docker.internal"
-	containerKubeTLSName  = "localhost"
-	containerKubeconfigRP = ".runtime/container/kubeconfig.yaml"
+	containerKubeHost    = "host.docker.internal"
+	containerKubeTLSName = "localhost"
 )
 
 // kubeconfigFile is the part of a kubeconfig the derived one reads. Credentials
@@ -223,10 +222,10 @@ func portSuffix(port string) string {
 	return ":" + port
 }
 
-// containerKubeconfigPath is where the derived kubeconfig is written: under the
-// town's .runtime, which the town bind already carries into the container.
+// containerKubeconfigPath is where the render writes the derived kubeconfig the
+// daemon's container-mode patrol and cache trim read.
 func containerKubeconfigPath(townRoot string) string {
-	return filepath.Join(townRoot, filepath.FromSlash(containerKubeconfigRP))
+	return config.ContainerKubeconfigFile(townRoot)
 }
 
 // containerZone is the IANA zone name the container's TZ carries: the zone
