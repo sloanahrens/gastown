@@ -138,7 +138,9 @@ func homePathFinding(line string) bool {
 		if loc == nil {
 			return false
 		}
-		if _, ok := nonPersonalHomeNames[line[start+loc[4]:start+loc[5]]]; !ok {
+		name := line[start+loc[4] : start+loc[5]]
+		root := line[start+loc[2] : start+loc[3]]
+		if _, ok := nonPersonalHomeNames[name]; !ok && !homeSegmentMidPath(line, start+loc[0], root) {
 			return true
 		}
 		// Keep the trailing separator so a second path that shares it is
@@ -146,6 +148,29 @@ func homePathFinding(line string) bool {
 		start += loc[1] - 1
 	}
 	return false
+}
+
+// homeSegmentMidPath reports whether the home root at index at follows a name
+// inside a longer path, as a home directory does inside a host or fixture
+// directory. A path whose first segment is a home root is not exempt, so a
+// second home segment under one still reports. The exemption is for the home
+// root only: a Users segment in the middle stays a finding.
+func homeSegmentMidPath(line string, at int, root string) bool {
+	if root != "home" || at == 0 || !isNameByte(line[at-1]) {
+		return false
+	}
+	begin := at
+	for begin > 0 && (isNameByte(line[begin-1]) || line[begin-1] == '/') {
+		begin--
+	}
+	first, _, _ := strings.Cut(strings.TrimLeft(line[begin:], "/"), "/")
+	return first != "home" && first != "Users"
+}
+
+// isNameByte reports whether b can sit in a file or ref name: a letter, a digit,
+// or one of . _ - ~ + %. A slash separates segments and is not a name byte.
+func isNameByte(b byte) bool {
+	return isASCIILetter(b) || b >= '0' && b <= '9' || strings.IndexByte("._-~+%", b) >= 0
 }
 
 // HashWord returns the hex SHA-256 of word lower-cased.

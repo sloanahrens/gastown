@@ -804,6 +804,37 @@ func TestDotlessNameInABranchPathIsNotAnAddress(t *testing.T) {
 	}
 }
 
+// A home segment that sits inside a host or fixture path is a directory of that
+// path, not a home. A path that starts with a home root keeps its later home
+// segments as findings, and a Users segment in the middle of a path stays one.
+func TestHomeSegmentMidPathIsNotAHomeDirectory(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		text string
+		want int
+	}{
+		{"host directory holds a home segment", planted("/host/home/", "gt-backups", "/dolt"), 0},
+		{"fixture directory holds a home segment", planted("/fixture/home/", "forgejo", "/.env"), 0},
+		{"twin: second home segment under a home root", planted("/home/", "user", "/home/", "real", "/x"), 1},
+		{"twin: home directory", planted("/home/", "jane", "/x"), 1},
+		{"twin: quoted home directory", planted("\"/Users/", "jane", "/x\""), 1},
+		{"twin: users segment under a host directory", planted("/host/Users/", "jane", "/x"), 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := "opened " + tc.text
+			findings := scanFS(t, singleFile("docs/note.md", line+"\n"), nil)
+			if len(findings) != tc.want {
+				t.Fatalf("got %d findings %v, want %d", len(findings), findings, tc.want)
+			}
+			if tc.want == 1 && findings[0].Rule != RuleHomePath {
+				t.Errorf("rule = %q, want %q", findings[0].Rule, RuleHomePath)
+			}
+		})
+	}
+}
+
 func TestAllowRowsRoundTripThroughJSON(t *testing.T) {
 	t.Parallel()
 	rows := []Allow{
