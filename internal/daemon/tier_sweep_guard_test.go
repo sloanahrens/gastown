@@ -194,6 +194,48 @@ func TestTierSweepGuardReadFailureLogsOnceAnHour(t *testing.T) {
 	}
 }
 
+// TestTierSweepGuardReadFailureClearsThePriorityDeclineLog: a priority decline
+// that stood before a guard read failed is no decline the failed read observed,
+// so it does not survive it: the same decline re-arising inside the hour logs at
+// once instead of being suppressed as the standing one.
+func TestTierSweepGuardReadFailureClearsThePriorityDeclineLog(t *testing.T) {
+	t.Parallel()
+	g := newGuardFixture(t, atHour(time.Now(), 15))
+	g.cluster.priority = []byte(runnerPriorityDeclineListing)
+	const line = "tier_sweep: not launching: pod forgejo/forgejo-abc"
+	count := func() int { return strings.Count(g.logs.String(), line) }
+
+	// The priority guard refuses: its line stands, logged once.
+	if stage := g.cycle(); stage.ran {
+		t.Fatalf("stage = %+v, want the priority decline to defer the cycle", stage)
+	}
+	if n := count(); n != 1 {
+		t.Fatalf("the decline line appears %d times after the first cycle, want once:\n%s", n, g.logs.String())
+	}
+
+	// The guard's read fails, still inside the hour: what stands is now the
+	// failed read, not the decline it never re-observed.
+	g.fail = map[string][]byte{"pods,priorityclasses": []byte(guardForbidden)}
+	stage := g.cycle()
+	if stage.ran {
+		t.Fatalf("stage = %+v, want the failed read to defer the cycle", stage)
+	}
+	var unreadable *sweeprunner.GuardUnreadable
+	if !errors.As(stage.err, &unreadable) {
+		t.Fatalf("stage err = %v, want the guard's *GuardUnreadable", stage.err)
+	}
+	g.fail = nil
+
+	// The same decline comes back inside the hour: the failed read cleared it,
+	// so it is news again and logs at once.
+	if stage := g.cycle(); stage.ran {
+		t.Fatalf("stage = %+v, want the returning priority decline to defer the cycle", stage)
+	}
+	if n := count(); n != 2 {
+		t.Errorf("the decline line appears %d times after a failed guard read cleared it, want it logged at once:\n%s", n, g.logs.String())
+	}
+}
+
 // TestTierSweepGuardUnreadableAttentionItem: the guard collector, stored through
 // the attention reconcile, raises one item keyed by the rig, naming the read and
 // its first line; a later cycle that is still failing adds none, and a cycle
@@ -364,8 +406,20 @@ func TestTierSweepGuardRefusalStillRefuses(t *testing.T) {
 			name: "a failed capacity preflight read defers with no bead",
 			fail: map[string][]byte{"nodes,pods": []byte(guardForbidden)},
 			check: func(t *testing.T, g *guardFixture, stage tierSweepStageResult) {
-				if stage.err == nil {
-					t.Error("the declined preflight names no reason for the deferral")
+				// The deferral is the preflight's decline, not the typed guard
+				// read failure: the two defer the cycle for different reasons,
+				// and only the guard's raises an attention item (gt-adkq39).
+				const want = "the capacity preflight declined the launch"
+				if stage.err == nil || stage.err.Error() != want {
+					t.Errorf("stage err = %v, want %q", stage.err, want)
+				}
+				var unreadable *sweeprunner.GuardUnreadable
+				if errors.As(stage.err, &unreadable) {
+					t.Errorf("a failed preflight read was reported as a guard read failure: %v", stage.err)
+				}
+				var decline *sweeprunner.PriorityDecline
+				if errors.As(stage.err, &decline) {
+					t.Errorf("a failed preflight read was reported as a priority decline: %v", stage.err)
 				}
 				if g.applied() {
 					t.Errorf("the launch applied objects after a failed preflight read: %v", g.cmds.ran)
