@@ -353,8 +353,8 @@ containers, and the gate slot pool admits more than one suite. On Docker Desktop
 least 16 GiB (Settings → Resources); `gt doctor`'s `container-capacity` check warns below that.
 Test containers keep their Dolt data on tmpfs (`/var/lib/dolt`, capped at 2 GiB each) so each
 migration's commit does not fsync through to the host disk. Set `GT_TEST_DOLT_TMPFS=0` to use the VM disk
-instead, for a Docker runtime that cannot mount tmpfs there. Measurements:
-`docs/plans/2026-09-24-test-suite-concurrency-design.md`.
+instead, for a Docker runtime that cannot mount tmpfs there. The measurements
+that chose the 16 GiB floor are in git history (see CHANGELOG).
 
 ### Spec Dispatch (`polecat_pool`)
 

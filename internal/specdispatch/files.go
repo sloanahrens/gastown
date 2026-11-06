@@ -8,8 +8,8 @@ import (
 )
 
 // filesSection is the "## " heading, lower-cased as Sections keys it, whose
-// lines say what the bead does with each repo file (design decision 1,
-// docs/plans/2026-11-03-bead-lint-v2-design.md).
+// lines say what the bead does with each repo file (bead-lint design
+// decision 1).
 const filesSection = "files"
 
 // FileVerb is what a bead does with a path it lists under "## Files".

@@ -41,4 +41,4 @@ evaluation is a scheduled ticket, not a mood.
   single shared server.
 
 Decision record: wayfinder map claude-1ey, ticket claude-1ey.3; measurements in that ticket's
-comments; evidence in `~/.claude/docs/research/deep-review/beads-storage.md`.
+comments; evidence in the deep-review notes on beads storage.

@@ -3,7 +3,7 @@ package daemon
 // disk_maintenance_disks is the disk half of the patrol: it reads the three
 // disks the town writes to, raises the 80/70 usage alerts and the unreadable
 // alert, and tightens the registry keep while a disk is nearly full
-// (gt-dl4nv.16, docs/plans/2026-10-28-disk-maintenance-design.md).
+// (gt-dl4nv.16).
 //
 // A disk the patrol cannot measure is not a quiet disk: a failed read or
 // output it cannot parse raises diskmaint:<disk>:unreadable and refuses the

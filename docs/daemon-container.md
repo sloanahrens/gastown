@@ -1,13 +1,10 @@
 # Daemon in a container: runbooks
 
 The town's daemon can run in a container on Docker Desktop instead of under
-launchd. The design is in
-[plans/2026-10-28-daemon-container-design.md](plans/2026-10-28-daemon-container-design.md)
-and the tasks in
-[plans/2026-10-28-daemon-container-plan.md](plans/2026-10-28-daemon-container-plan.md).
+launchd. The design and plan notes are in git history (see CHANGELOG).
 This page is the operator's side: the ladder of live checks, one section per
 rung. Run a rung only after the one before it is recorded green. The list
-below is a summary; the design doc is authoritative.
+below is a summary.
 
 - L1, below: a scratch town's daemon starts in a container and stays healthy for
   30 minutes. Nothing in it touches the live daemon.
@@ -1113,8 +1110,8 @@ day.
       internal network that the daemon waits on. The compose names its image by
       digest (`templates.DindImage`, `data.forgejo.org/oci/docker@sha256:...`);
       that digest must still be served by the engine the daemon will use
-      (`gt daemon rehearse` pulls it). Reasons:
-      `docs/plans/2026-10-28-daemon-container-design.md`.
+      (`gt daemon rehearse` pulls it). The design notes that chose the paired
+      engines are in git history (see CHANGELOG).
 - [ ] **A recorded baseline.** Before starting, keep the output of
       `docker --context desktop-linux ps --format '{{.Names}} {{.Status}}'`
       (it shows neither container yet),

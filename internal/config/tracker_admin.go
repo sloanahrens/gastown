@@ -32,8 +32,7 @@ type TrackerAdminToken struct {
 // environment is not a fallback for the key itself, so a token exported into a
 // shell never becomes the admin credential by accident.
 //
-// The value is a ${VAR} reference in settings/daemon.env, as item 2 of
-// docs/research/tracker/R7-seat-lifecycle.md specifies, resolved the way the
+// The value is a ${VAR} reference in settings/daemon.env, resolved the way the
 // secret mechanism resolves one (resolveSpawnEnv): from daemon.env first, and
 // from this process's environment for a name daemon.env does not define. A
 // value that names only itself also takes the process value, never its own

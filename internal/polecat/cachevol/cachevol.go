@@ -1,8 +1,7 @@
 // Package cachevol plans the shared polecat cache: the seed Job that fills it, the seed steps that
 // Job runs for each pinned rig, and the trim that keeps the claim under its cap. All of it is pure:
 // the seed pins, the file listing and the sandbox state are inputs, and nothing here touches a
-// filesystem, a cluster or a clock (design: docs/plans/2026-10-26-k8s-shared-cache-design.md, "The
-// seed pass" and "Cap and trim").
+// filesystem, a cluster or a clock.
 package cachevol
 
 import (

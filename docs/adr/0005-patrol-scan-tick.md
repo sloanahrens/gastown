@@ -181,5 +181,5 @@ Boot, so `gt warrant` filings are no longer executed; the supervisor's `Kill` is
 Rollback is deleting the keys. Deleting `internal/witness`, `internal/deacon`, their formulas and
 roles is gt-4k3fj.6.1, after the tick has run for a day.
 
-Decision record: epic gt-4k3fj, bead gt-4k3fj.6; step enumeration in
-`~/.claude/docs/research/deep-review/patrol-steps-vs-daemon.md` (claude-1ey.13).
+Decision record: epic gt-4k3fj, bead gt-4k3fj.6; step enumeration in the
+deep-review notes on patrol steps versus the daemon (claude-1ey.13).

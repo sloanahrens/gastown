@@ -1,8 +1,7 @@
 # Disk maintenance
 
 The town's sandbox registry holds a ~2 GiB polecat image per commit, and
-nothing deleted a tag from it until slice 1 of the disk-maintenance plan
-(`docs/plans/2026-10-28-disk-maintenance-design.md`, historical) shipped a Go
+nothing deleted a tag from it until the disk-maintenance work shipped a Go
 pruner for it. `internal/diskmaint` measures, plans and applies the deletions,
 writes a ledger line per apply, and refuses a plan it cannot justify from what
 it read.

@@ -249,8 +249,8 @@ func TestHandlersRefuseAQueryFormTheTrackerDoesNotAnswer(t *testing.T) {
 }
 
 // TestParseQueryAcceptsTheFormsGTAggregatesSend pins the dialect's supported
-// forms (docs/research/tracker/R4-aggregates.md §4.1) to the store filter they
-// name, so a form the tracker can answer is not refused and narrowed.
+// forms to the store filter they name, so a form the tracker can answer is not
+// refused and narrowed.
 func TestParseQueryAcceptsTheFormsGTAggregatesSend(t *testing.T) {
 	t.Parallel()
 	created := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)

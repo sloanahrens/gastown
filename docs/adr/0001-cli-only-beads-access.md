@@ -52,4 +52,4 @@ knows. gastown never installs `bd`.
   (gt-jw9sr).
 
 Decision record: wayfinder map claude-1ey, ticket claude-1ey.1, in the operator's `~/.claude`
-tracker; evidence in `~/.claude/docs/research/deep-review/synthesis.md` (theme T1).
+tracker; evidence in the deep-review synthesis (theme T1).

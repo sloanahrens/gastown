@@ -21,8 +21,8 @@ func TestContainerCapacityCheck_SmallVMWarns(t *testing.T) {
 	if !strings.Contains(result.FixHint, "16 GiB") {
 		t.Errorf("FixHint = %q, want the remedy (>= 16 GiB)", result.FixHint)
 	}
-	if joined := strings.Join(result.Details, "\n"); !strings.Contains(joined, "2026-09-24-test-suite-concurrency-design.md") {
-		t.Errorf("Details = %q, want the design doc reference", joined)
+	if joined := strings.Join(result.Details, "\n"); !strings.Contains(joined, "2026-09 test-suite concurrency notes in git history") {
+		t.Errorf("Details = %q, want the measurement reference", joined)
 	}
 }
 
