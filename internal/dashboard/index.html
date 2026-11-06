@@ -2055,14 +2055,19 @@ function renderCloud(s) {
 // and the bird's own ask for the operator as a badge. What a row shows is the
 // sidecar the reader read, so a summary holding markup goes through el() and
 // reads as that text; the name is itself the link to the bird's report, and the
-// "report" and "yesterday" links beside it open the two pages in a new tab.
+// "report" and "previous" links beside it open the two pages in a new tab. The
+// previous link carries when that page was written, so its label never has to
+// claim it is yesterday's.
 //
 // The reader's verdicts are drawn rather than smoothed over: a stale row
-// carries the amber the digest marks an overdue report with, a row in error or
-// withheld carries its note in the alarm red and no summary, and a list with no
-// rows names that state instead of drawing nothing. The heading's note ages the
-// read, so rows kept through a failed read are drawn as the last reading they
-// are (gt-q6h8e).
+// carries the amber the digest marks an overdue report with and says STALE
+// beside the age of its last report, a row in error or withheld carries its
+// note in the alarm red and no summary, and a list with no rows names that
+// state instead of drawing nothing. A stale report's ask is days old, so it
+// keeps no "needs the operator" badge and does not count in the heading's need
+// count: the heading says what the operator has to answer today (gt-59ft9w).
+// The heading's note ages the read, so rows kept through a failed read are
+// drawn as the last reading they are (gt-q6h8e).
 //
 // The rows keep the reader's order within each group, with the stale reporters
 // moved after the fresh ones: a reporter a day behind is still worth reading,
@@ -2075,13 +2080,18 @@ function drawBirds(box, s) {
   const r = readOf(s, "birds"), note = $("birdsnote");
   paintsRead(box, note, r);
   const all = s.birds || [];
+  // A row is stale when the flag or the state says so, so a feed from a reader
+  // that set only one of them still reads as stale rather than as current.
+  const isStale = b => !!b.stale || b.state === "stale";
   // The reader marks the town's headline report, so the page names no reporter.
   const rest = all.filter(b => !b.headline);
   const rows = all.filter(b => b.headline)
-    .concat(rest.filter(b => !b.stale), rest.filter(b => b.stale));
+    .concat(rest.filter(b => !isStale(b)), rest.filter(isStale));
   // The counts sit in the note, which the closed panel's header shows as its
-  // summary line, so a closed panel still says whether anything waits.
-  const need = all.filter(b => b.needs_operator).length;
+  // summary line, so a closed panel still says whether anything waits. A stale
+  // report's ask is not counted: it is what the report asked days ago, not what
+  // waits on the operator now.
+  const need = all.filter(b => b.needs_operator && !isStale(b)).length;
   note.textContent = readCaption(r, [
     all.length ? all.length + (all.length === 1 ? " bird" : " birds") : null,
     all.length ? need + " need you" : null,
@@ -2092,7 +2102,7 @@ function drawBirds(box, s) {
     return;
   }
   for (const b of rows) {
-    const row = el("div", "brow" + (b.stale ? " warnc" : ""));
+    const row = el("div", "brow" + (isStale(b) ? " warnc" : ""));
     const head = el("div", "bhead");
     // The bird name is the one the reader validated before it built a path,
     // and the route checks it again before it opens anything: every link is
@@ -2112,13 +2122,17 @@ function drawBirds(box, s) {
       head.append(page);
     }
     if (b.has_prev) {
-      const prev = el("a", "bprev", "yesterday");
+      // The page before this one may be days old, so its label names no day;
+      // its own written age, when the reader has one, goes in the hover.
+      const prev = el("a", "bprev", "previous");
       prev.href = "/birds/" + b.bird + "/daily.prev.html";
       prev.target = "_blank";
       prev.rel = "noopener";
+      if (b.prev_written) prev.title = "written " + age(b.prev_written) + " ago";
       head.append(prev);
     }
-    if (b.needs_operator) head.append(el("span", "badge warnc", "needs the operator"));
+    if (isStale(b)) head.append(el("span", "badge warnc", "STALE"));
+    else if (b.needs_operator) head.append(el("span", "badge warnc", "needs the operator"));
     if (b.written) head.append(el("span", "bage", "written " + age(b.written) + " ago"));
     row.append(head);
     if (b.state === "error" || b.state === "withheld") row.append(el("div", "badc", b.note || b.state));
@@ -2156,7 +2170,7 @@ function drawBirds(box, s) {
   // last: its question may be days old, and a fresh group is the one the day is
   // about (gt-9t6lr).
   asks.sort((a, b) => {
-    if (!!a.stale !== !!b.stale) return a.stale ? 1 : -1;
+    if (isStale(a) !== isStale(b)) return isStale(a) ? 1 : -1;
     const at = a.written ? new Date(a.written).getTime() : 0;
     const bt = b.written ? new Date(b.written).getTime() : 0;
     if (at !== bt) return bt - at;
@@ -2167,8 +2181,8 @@ function drawBirds(box, s) {
     // stale reporter's are named apart, so the header does not call an old
     // question as urgent as a new one.
     const count = list => list.reduce((n, b) => n + (b.decision_items || []).length, 0);
-    const total = count(asks.filter(b => !b.stale));
-    const staleTotal = count(asks.filter(b => b.stale));
+    const total = count(asks.filter(b => !isStale(b)));
+    const staleTotal = count(asks.filter(isStale));
     // A list holding only withheld decisions says how many were withheld
     // rather than "Needs you (0)".
     const held = asks.reduce((n, b) => n + (b.decision_items_withheld || []).length, 0);
@@ -2180,7 +2194,7 @@ function drawBirds(box, s) {
     for (const b of asks) {
       const group = el("div", "nygroup");
       group.append(el("div", "nybird", b.bird || "–"));
-      if (b.stale) {
+      if (isStale(b)) {
         const d = b.written ? new Date(b.written) : null;
         group.append(el("div", "warnc", d ? "stale: last report " + d.toLocaleDateString([], {month: "short", day: "numeric"}) + " " + clock(b.written).slice(0, 5) : "stale: no report time"));
       }

@@ -94,6 +94,7 @@ type birdDrawnCell struct {
 	Href   string `json:"href"`
 	Target string `json:"target"`
 	Rel    string `json:"rel"`
+	Title  string `json:"title"`
 	Kids   int    `json:"kids"`
 }
 
@@ -112,7 +113,7 @@ func birdRows(t *testing.T, dom *pageDOM) []birdDrawnRow {
 	t.Helper()
 
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
-		const cell = c => ({tag: c.tagName, text: c.textContent, class: c.className, href: c.href || "", target: c.target || "", rel: c.rel || "", kids: c.children.length});
+		const cell = c => ({tag: c.tagName, text: c.textContent, class: c.className, href: c.href || "", target: c.target || "", rel: c.rel || "", title: c.title || "", kids: c.children.length});
 		return __byId["birds"].children.__arr.filter(c => (" " + (c.className || "") + " ").indexOf(" brow ") >= 0).map(row => ({
 			class: row.className,
 			head: (row.children[0] ? row.children[0].children.__arr : []).map(cell),
@@ -146,9 +147,10 @@ func birdLines(t *testing.T, dom *pageDOM) []string {
 }
 
 // The block draws the row the reader decided: the name, the summary and the age
-// of it, the amber mark on a stale row, a row in error named in the alert
-// class, the badge a bird asks for the operator with, and the two pages it
-// wrote as links that open in a new tab, the name itself linking to the report.
+// of it, the amber mark and STALE chip on a stale row, a row in error named in
+// the alert class, the badge a bird asks for the operator with, and the two
+// pages it wrote as links that open in a new tab, the name itself linking to
+// the report.
 // Every cell is the page's own text, so a tag a bird wrote shows as that text
 // rather than as markup.
 func TestBirdPanelDrawsAgeStaleSummaryAndLinks(t *testing.T) {
@@ -183,7 +185,7 @@ func TestBirdPanelDrawsAgeStaleSummaryAndLinks(t *testing.T) {
 	wantHead := []birdDrawnCell{
 		{Tag: "A", Text: "dunlin", Class: "bname", Href: "/birds/dunlin/daily.html", Target: "_blank", Rel: "noopener"},
 		{Tag: "A", Text: "report", Class: "bpage", Href: "/birds/dunlin/daily.html", Target: "_blank", Rel: "noopener"},
-		{Tag: "A", Text: "yesterday", Class: "bprev", Href: "/birds/dunlin/daily.prev.html", Target: "_blank", Rel: "noopener"},
+		{Tag: "A", Text: "previous", Class: "bprev", Href: "/birds/dunlin/daily.prev.html", Target: "_blank", Rel: "noopener"},
 		{Tag: "SPAN", Text: "needs the operator", Class: "badge warnc"},
 		{Tag: "SPAN", Text: "written 30m ago", Class: "bage"},
 	}
@@ -206,13 +208,18 @@ func TestBirdPanelDrawsAgeStaleSummaryAndLinks(t *testing.T) {
 	}
 
 	// The stale bird wears the amber mark and sorts after the fresh and failed
-	// rows. It wrote no page and no summary, so its head carries only its name
-	// and the age.
+	// rows. It wrote no page and no summary, so its head carries its name, the
+	// STALE chip and the age of the report it did write.
 	if rows[2].Class != "brow warnc" {
 		t.Errorf("a stale row is drawn as %q, want the amber mark", rows[2].Class)
 	}
-	if len(rows[2].Head) != 2 || rows[2].Head[0].Text != "heron" || rows[2].Head[1].Class != "bage" {
-		t.Errorf("the stale row's head reads %+v, want its name and age", rows[2].Head)
+	wantStale := []birdDrawnCell{
+		{Tag: "SPAN", Text: "heron", Class: "bname"},
+		{Tag: "SPAN", Text: "STALE", Class: "badge warnc"},
+		{Tag: "SPAN", Text: "written 30m ago", Class: "bage"},
+	}
+	if !slices.Equal(rows[2].Head, wantStale) {
+		t.Errorf("the stale row's head reads %+v, want its name, STALE chip and age: %+v", rows[2].Head, wantStale)
 	}
 	if rows[2].Body != nil {
 		t.Errorf("the stale row drew a body line it has no words for: %+v", rows[2].Body)
@@ -342,6 +349,7 @@ func TestBirdPanelStateEncodesTheRows(t *testing.T) {
 		NeedsOperator: true,
 		HasPage:       true,
 		HasPrev:       true,
+		PrevWritten:   written.Add(-24 * time.Hour),
 	}}}
 	payload, err := json.Marshal(st)
 	if err != nil {
@@ -357,6 +365,7 @@ func TestBirdPanelStateEncodesTheRows(t *testing.T) {
 		`"needs_operator":true`,
 		`"has_page":true`,
 		`"has_prev":true`,
+		`"prev_written":"2026-10-31T09:30:00Z"`,
 	} {
 		if !strings.Contains(string(payload), want) {
 			t.Errorf("the state payload has no %s: %s", want, payload)
@@ -701,6 +710,114 @@ func TestBirdsStaleLast(t *testing.T) {
 	}
 }
 
+// A stale report is drawn as a stale one and not as an ask: its row carries a
+// STALE chip beside the age of its last report, no "needs the operator" badge
+// even when the sidecar set one, and no place in the heading's need count. A
+// fresh asking row keeps its badge and its count. The row reads as stale from
+// either the flag or the state, so a feed carrying only one still does
+// (gt-59ft9w).
+func TestBirdsStaleReportIsNotAnAsk(t *testing.T) {
+	t.Parallel()
+
+	stamp := time.Now().UTC().Format(time.RFC3339)
+	written := time.Now().UTC().Add(-2 * time.Minute).Format(time.RFC3339)
+	dom := newPageDOM(t)
+	dom.call(t, "renderBirds", map[string]any{
+		"birds": []any{
+			map[string]any{"bird": "dunlin", "state": "fresh", "written": written, "needs_operator": true},
+			map[string]any{"bird": "heron", "state": "stale", "stale": true, "written": written, "needs_operator": true},
+			map[string]any{"bird": "curlew", "state": "stale", "written": written, "needs_operator": true},
+		},
+		"reads": map[string]any{"birds": map[string]any{"at": stamp, "every_sec": 60}},
+	})
+
+	rows := birdRows(t, dom)
+	if len(rows) != 3 {
+		t.Fatalf("the panel drew %d rows, want the reader's three: %+v", len(rows), rows)
+	}
+	var names []string
+	for _, r := range rows {
+		names = append(names, r.Head[0].Text)
+	}
+	if want := []string{"dunlin", "heron", "curlew"}; !slices.Equal(names, want) {
+		t.Fatalf("the rows read %v, want the fresh row before the stale ones: %v", names, want)
+	}
+
+	// The fresh asking row is unchanged: its badge, then the age of its report.
+	wantFresh := []birdDrawnCell{
+		{Tag: "SPAN", Text: "dunlin", Class: "bname"},
+		{Tag: "SPAN", Text: "needs the operator", Class: "badge warnc"},
+		{Tag: "SPAN", Text: "written 2m ago", Class: "bage"},
+	}
+	if !slices.Equal(rows[0].Head, wantFresh) {
+		t.Errorf("the fresh asking row reads %+v, want its badge and age as before: %+v", rows[0].Head, wantFresh)
+	}
+
+	for _, r := range rows[1:] {
+		want := []birdDrawnCell{
+			{Tag: "SPAN", Text: r.Head[0].Text, Class: "bname"},
+			{Tag: "SPAN", Text: "STALE", Class: "badge warnc"},
+			{Tag: "SPAN", Text: "written 2m ago", Class: "bage"},
+		}
+		if !slices.Equal(r.Head, want) {
+			t.Errorf("the stale row %s reads %+v, want its STALE chip and age with no asking badge: %+v",
+				r.Head[0].Text, r.Head, want)
+		}
+	}
+
+	// The heading counts only the fresh ask; the stale rows are still birds.
+	note := dom.element(t, "birdsnote").Text
+	if !strings.Contains(note, "3 birds") || !strings.Contains(note, "1 need you") {
+		t.Errorf("the heading reads %q, want the three birds and the one fresh ask counted", note)
+	}
+}
+
+// The previous link carries the age of the page it opens when the reader has
+// its own written instant, so the label names no day it cannot vouch for
+// (gt-59ft9w).
+func TestBirdsPreviousLinkCarriesItsAge(t *testing.T) {
+	t.Parallel()
+
+	stamp := time.Now().UTC()
+	dom := newPageDOM(t)
+	dom.call(t, "renderBirds", map[string]any{
+		"birds": []any{
+			map[string]any{"bird": "dunlin", "state": "fresh", "written": stamp.Format(time.RFC3339),
+				"has_prev": true, "prev_written": stamp.Add(-50 * time.Hour).Format(time.RFC3339)},
+			map[string]any{"bird": "heron", "state": "fresh", "written": stamp.Format(time.RFC3339),
+				"has_prev": true},
+		},
+		"reads": map[string]any{"birds": map[string]any{"at": stamp.Format(time.RFC3339), "every_sec": 60}},
+	})
+
+	rows := birdRows(t, dom)
+	if len(rows) != 2 {
+		t.Fatalf("the panel drew %d rows, want the reader's two: %+v", len(rows), rows)
+	}
+	previous := func(row birdDrawnRow) (birdDrawnCell, bool) {
+		for _, c := range row.Head {
+			if c.Class == "bprev" {
+				return c, true
+			}
+		}
+		return birdDrawnCell{}, false
+	}
+	aged, ok := previous(rows[0])
+	if !ok {
+		t.Fatalf("the row with a previous page drew no link: %+v", rows[0].Head)
+	}
+	if aged.Text != "previous" || !strings.HasPrefix(aged.Title, "written ") || !strings.HasSuffix(aged.Title, " ago") {
+		t.Errorf("the previous link reads %q with hover %q, want \"previous\" and its written age", aged.Text, aged.Title)
+	}
+	plain, ok := previous(rows[1])
+	if !ok {
+		t.Fatalf("the row with a previous page drew no link: %+v", rows[1].Head)
+	}
+	if plain.Title != "" {
+		t.Errorf("the previous link with no written instant carries hover %q, want none", plain.Title)
+	}
+}
+
 // The report the reader marks as the town's headline leads the panel even when
 // it is stale, and the other reporters keep the fresh-before-stale order. A
 // reporter's name earns no place of its own: the row named overseer below is
@@ -767,9 +884,9 @@ func TestBirdsNameLinksToReport(t *testing.T) {
 	}
 }
 
-// The links beside the name read "report" and "yesterday", and a bird that
-// wrote no previous page has no "yesterday" link (gt-gm9lq).
-func TestBirdsReportAndYesterdayLabels(t *testing.T) {
+// The links beside the name read "report" and "previous", and a bird that
+// wrote no previous page has no "previous" link (gt-gm9lq, gt-59ft9w).
+func TestBirdsReportAndPreviousLabels(t *testing.T) {
 	t.Parallel()
 
 	stamp := time.Now().UTC().Format(time.RFC3339)
@@ -788,9 +905,9 @@ func TestBirdsReportAndYesterdayLabels(t *testing.T) {
 		t.Fatalf("the panel drew %d rows, want the reader's three: %+v", len(rows), rows)
 	}
 	wantReport := birdDrawnCell{Tag: "A", Text: "report", Class: "bpage", Href: "/birds/dunlin/daily.html", Target: "_blank", Rel: "noopener"}
-	wantYesterday := birdDrawnCell{Tag: "A", Text: "yesterday", Class: "bprev", Href: "/birds/dunlin/daily.prev.html", Target: "_blank", Rel: "noopener"}
-	if len(rows[0].Head) < 3 || rows[0].Head[1] != wantReport || rows[0].Head[2] != wantYesterday {
-		t.Errorf("the row with both pages reads %+v, want the report and yesterday links after the name", rows[0].Head)
+	wantPrevious := birdDrawnCell{Tag: "A", Text: "previous", Class: "bprev", Href: "/birds/dunlin/daily.prev.html", Target: "_blank", Rel: "noopener"}
+	if len(rows[0].Head) < 3 || rows[0].Head[1] != wantReport || rows[0].Head[2] != wantPrevious {
+		t.Errorf("the row with both pages reads %+v, want the report and previous links after the name", rows[0].Head)
 	}
 	wantHeronReport := birdDrawnCell{Tag: "A", Text: "report", Class: "bpage", Href: "/birds/heron/daily.html", Target: "_blank", Rel: "noopener"}
 	if len(rows[1].Head) < 2 || rows[1].Head[1] != wantHeronReport {

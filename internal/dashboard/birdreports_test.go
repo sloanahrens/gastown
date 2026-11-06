@@ -583,9 +583,18 @@ func TestBirdReportsSaysWhichPagesAreThere(t *testing.T) {
 		t.Errorf("with-page: has_page %v has_prev %v note %q, want both pages and no note",
 			page.HasPage, page.HasPrev, page.Note)
 	}
+	// The page before this one carries its own written instant, so the row can
+	// age the link rather than call it yesterday's.
+	if want := now.Add(-30 * time.Hour); !page.PrevWritten.Equal(want) {
+		t.Errorf("with-page: prev_written %v, want the previous page's mtime %v", page.PrevWritten, want)
+	}
 
-	if late := byName["late-page"]; late.Note != "page older than its summary" {
+	late := byName["late-page"]
+	if late.Note != "page older than its summary" {
 		t.Errorf("late-page: note %q, want the page named as older than its summary", late.Note)
+	}
+	if !late.PrevWritten.IsZero() {
+		t.Errorf("late-page: prev_written %v, want no instant without a previous page", late.PrevWritten)
 	}
 
 	for _, name := range []string{"big-page", "exact-page"} {
