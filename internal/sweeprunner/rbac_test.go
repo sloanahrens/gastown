@@ -21,11 +21,13 @@ import (
 // below derive those lines from the rendered plan, and prove the manifest
 // grants each one (gt-gg9hv.55).
 const (
-	sweepRBACManifest = "../../deploy/k8s/sweep-rbac.yaml"
-	sweepReadsGolden  = "testdata/rbac-reads.golden"
-	sweepReaderRole   = "gt-sweep-reader"
-	sweepRunnerNS     = "gt-sweeps"
-	sweepRunnerRole   = "sweep-runner"
+	sweepRBACManifest  = "../../deploy/k8s/sweep-rbac.yaml"
+	sweepReadsGolden   = "testdata/rbac-reads.golden"
+	sweepReaderRole    = "gt-sweep-reader"
+	sweepRunnerNS      = "gt-sweeps"
+	sweepRunnerRole    = "sweep-runner"
+	sweepCacheTrimNS   = "forgejo"
+	sweepCacheTrimRole = "gt-ci-cache-trim"
 )
 
 // sweepRoleGrant is what the namespaced Role may grant one resource: the API
@@ -47,6 +49,64 @@ var sweepRoleAllowed = map[string]sweepRoleGrant{
 	"pods/exec":              {"", []string{"create"}},
 	"pods/log":               {"", []string{"get"}},
 	"persistentvolumeclaims": {"", []string{"get", "list", "create", "patch", "delete", "watch", "update"}},
+}
+
+// sweepCacheTrimAllowed is the exact set the CI cache trim's Role in forgejo may
+// grant. The trim lists the runner's pods to find its dind container, then execs
+// the trim script into that container; nothing else in forgejo is its to touch.
+var sweepCacheTrimAllowed = map[string]sweepRoleGrant{
+	"pods":      {"", []string{"get", "list"}},
+	"pods/exec": {"", []string{"create"}},
+}
+
+// sweepScopeRole is the namespaced Role a golden scope other than cluster reads
+// through: the sweep's Role in gt-sweeps for `namespace`, and the trim's Role for
+// a scope named after its namespace.
+type sweepScopeRole struct {
+	namespace string
+	name      string
+}
+
+// sweepScopeRoles maps each namespaced golden scope to the Role that grants it.
+// A scope missing here fails TestSweepRBACCoversEveryRead by name.
+var sweepScopeRoles = map[string]sweepScopeRole{
+	"namespace":      {sweepRunnerNS, sweepRunnerRole},
+	sweepCacheTrimNS: {sweepCacheTrimNS, sweepCacheTrimRole},
+}
+
+// sweepDaemonRead is a read the daemon makes outside the sweep plan, so the plan
+// does not render it. It is still a golden line, because the manifest grants it.
+type sweepDaemonRead struct {
+	line   string
+	reason string
+}
+
+// sweepDaemonReads is every golden line the sweep plan does not render, with why
+// the manifest grants it. TestSweepRBACGoldenMatchesTheRenderedPlan does not
+// expect these from the plan; TestSweepRBACCoversEveryRead requires each one.
+var sweepDaemonReads = []sweepDaemonRead{
+	{
+		line:   "raw nodes/proxy cluster",
+		reason: "the control-disk alert reads each node's kubelet stats summary through the node proxy: kubectl get --raw /api/v1/nodes/<node>/proxy/stats/summary",
+	},
+	{
+		line:   "get pods forgejo",
+		reason: "the CI cache trim lists the forgejo-runner's pods to find the dind container it execs into",
+	},
+	{
+		line:   "exec pods/exec forgejo",
+		reason: "the CI cache trim execs its script into the forgejo-runner's dind container",
+	},
+}
+
+// sweepClusterVerbs is what the ClusterRole may grant on each resource it names.
+// nodes/proxy is get alone: the control-disk alert's stats read is one GET through
+// the node proxy, and a list or create through it would be a wider grant than that.
+var sweepClusterVerbs = map[string][]string{
+	"nodes":           {"get", "list", "watch"},
+	"pods":            {"get", "list", "watch"},
+	"priorityclasses": {"get", "list", "watch"},
+	"nodes/proxy":     {"get"},
 }
 
 // sweepGrant is one API group, resource and RBAC verb the golden needs.
@@ -107,6 +167,7 @@ var sweepRoleExtras = []sweepRoleExtra{
 // guess a group for a call it has not been taught.
 var rbacResourceGroup = map[string]string{
 	"nodes":                  "",
+	"nodes/proxy":            "",
 	"pods":                   "",
 	"pods/exec":              "",
 	"persistentvolumeclaims": "",
@@ -133,9 +194,10 @@ var rbacKindResource = map[string]string{
 // with no object name is a list, so the golden's get needs both verbs; wait
 // lists and then watches the object it waits on; apply reads the object, then
 // patches it or creates it; cp copies through the pod's exec subresource, as
-// kubectl does.
+// kubectl does. raw is `kubectl get --raw`: one GET with no list, so get alone.
 var rbacVerbsOf = map[string][]string{
 	"get":    {"get", "list"},
+	"raw":    {"get"},
 	"apply":  {"get", "create", "patch"},
 	"create": {"create"},
 	"wait":   {"get", "list", "watch"},
@@ -511,6 +573,8 @@ func TestSweepRBACManifestParses(t *testing.T) {
 		{"Namespace", sweepRunnerNS, ""},
 		{"ClusterRole", sweepReaderRole, ""},
 		{"ClusterRoleBinding", sweepReaderRole, ""},
+		{"Role", sweepCacheTrimRole, sweepCacheTrimNS},
+		{"RoleBinding", sweepCacheTrimRole, sweepCacheTrimNS},
 	}
 	for _, w := range want {
 		if findRBAC(docs, w.kind, w.name, w.namespace) == nil {
@@ -530,9 +594,20 @@ func TestSweepRBACManifestParses(t *testing.T) {
 	}
 }
 
+// sweepIsDaemonRead reports whether a golden line is one of sweepDaemonReads.
+func sweepIsDaemonRead(line string) bool {
+	for _, d := range sweepDaemonReads {
+		if d.line == line {
+			return true
+		}
+	}
+	return false
+}
+
 // TestSweepRBACGoldenMatchesTheRenderedPlan renders the sample Spec and holds
 // the golden file to the reads it makes. A kubectl call added to the plan with
-// no golden line fails and names the call; a golden line no call needs fails.
+// no golden line fails and names the call; a golden line no call needs fails,
+// unless it is a sweepDaemonReads line the daemon makes outside the plan.
 func TestSweepRBACGoldenMatchesTheRenderedPlan(t *testing.T) {
 	t.Parallel()
 	plan, err := Kubernetes{}.Render(goldenSpec())
@@ -547,15 +622,17 @@ func TestSweepRBACGoldenMatchesTheRenderedPlan(t *testing.T) {
 		}
 	}
 	for _, line := range golden {
-		if _, ok := rendered[line]; !ok {
+		if _, ok := rendered[line]; !ok && !sweepIsDaemonRead(line) {
 			t.Errorf("%s has %q, which no rendered call needs", sweepReadsGolden, line)
 		}
 	}
 }
 
 // TestSweepRBACCoversEveryRead proves every golden line is allowed by the
-// manifest: a namespaced read by the Role or the ClusterRole, a cluster-wide
-// read by the ClusterRole. A missing Role fails every namespaced line by name.
+// manifest: a read in a namespace by that namespace's Role or the ClusterRole, a
+// cluster-wide read by the ClusterRole. A missing Role fails every line that
+// reads through it by name, and a scope with no Role in sweepScopeRoles fails.
+// Every sweepDaemonReads line must be in the golden, so removing one fails here.
 func TestSweepRBACCoversEveryRead(t *testing.T) {
 	t.Parallel()
 	docs := loadSweepRBAC(t)
@@ -563,11 +640,13 @@ func TestSweepRBACCoversEveryRead(t *testing.T) {
 	if clusterReader == nil {
 		t.Fatalf("%s has no ClusterRole %q", sweepRBACManifest, sweepReaderRole)
 	}
-	var namespaced []rbacRule
-	if role := findRBAC(docs, "Role", sweepRunnerRole, sweepRunnerNS); role != nil {
-		namespaced = role.Rules
+	golden := loadReadsGolden(t)
+	for _, d := range sweepDaemonReads {
+		if !slices.Contains(golden, d.line) {
+			t.Errorf("%s has no line %q, which the daemon makes: %s", sweepReadsGolden, d.line, d.reason)
+		}
 	}
-	for _, line := range loadReadsGolden(t) {
+	for _, line := range golden {
 		fields := strings.Fields(line)
 		if len(fields) != 3 {
 			t.Fatalf("%s: %q is not `<verb> <resource> <scope>`", sweepReadsGolden, line)
@@ -585,9 +664,18 @@ func TestSweepRBACCoversEveryRead(t *testing.T) {
 		}
 		rules := clusterReader.Rules
 		source := "ClusterRole " + sweepReaderRole
-		if scope == "namespace" {
+		if scope != "cluster" {
+			ref, known := sweepScopeRoles[scope]
+			if !known {
+				t.Errorf("golden line %q: scope %q names no namespaced Role in sweepScopeRoles", line, scope)
+				continue
+			}
+			var namespaced []rbacRule
+			if role := findRBAC(docs, "Role", ref.name, ref.namespace); role != nil {
+				namespaced = role.Rules
+			}
 			rules = append(slices.Clone(namespaced), rules...)
-			source = "Role " + sweepRunnerRole + " or ClusterRole " + sweepReaderRole
+			source = "Role " + ref.name + " in " + ref.namespace + " or ClusterRole " + sweepReaderRole
 		}
 		for _, v := range verbs {
 			if !rbacAllows(rules, group, resource, v) {
@@ -597,32 +685,268 @@ func TestSweepRBACCoversEveryRead(t *testing.T) {
 	}
 }
 
-// TestSweepRBACClusterGrantIsReadOnly keeps the cluster-wide grant to get, list and
-// watch on nodes, pods and priorityclasses, each in its own API group.
-func TestSweepRBACClusterGrantIsReadOnly(t *testing.T) {
-	t.Parallel()
-	docs := loadSweepRBAC(t)
+// sweepClusterProblems holds the ClusterRole gt-sweep-reader to sweepClusterVerbs:
+// each resource a rule names must be one the table has, in its API group, with
+// only the verbs the table gives it. It returns every way the reader grants more,
+// and nothing when the reader is as bound.
+func sweepClusterProblems(docs []rbacDoc) []string {
 	reader := findRBAC(docs, "ClusterRole", sweepReaderRole, "")
 	if reader == nil {
-		t.Fatalf("%s has no ClusterRole %q", sweepRBACManifest, sweepReaderRole)
+		return []string{fmt.Sprintf("%s has no ClusterRole %q", sweepRBACManifest, sweepReaderRole)}
 	}
+	var problems []string
 	for _, rule := range reader.Rules {
-		for _, v := range rule.Verbs {
-			if v != "get" && v != "list" && v != "watch" {
-				t.Errorf("ClusterRole %s grants %q, want only get, list and watch", sweepReaderRole, v)
-			}
-		}
 		for _, res := range rule.Resources {
+			verbs, allowed := sweepClusterVerbs[res]
 			group, known := rbacResourceGroup[res]
-			if !known || (res != "nodes" && res != "pods" && res != "priorityclasses") {
-				t.Errorf("ClusterRole %s grants resource %q, want only nodes, pods and priorityclasses", sweepReaderRole, res)
+			if !allowed || !known {
+				problems = append(problems, fmt.Sprintf("ClusterRole %s grants resource %q, which the sweep does not read cluster-wide", sweepReaderRole, res))
 				continue
 			}
 			if !slices.Contains(rule.APIGroups, group) {
-				t.Errorf("ClusterRole %s grants %q in %q, want group %q", sweepReaderRole, res, rule.APIGroups, group)
+				problems = append(problems, fmt.Sprintf("ClusterRole %s grants %q in %q, want group %q", sweepReaderRole, res, rule.APIGroups, group))
+			}
+			for _, v := range rule.Verbs {
+				if !slices.Contains(verbs, v) {
+					problems = append(problems, fmt.Sprintf("ClusterRole %s grants %q on %q, which the sweep does not need", sweepReaderRole, v, res))
+				}
 			}
 		}
 	}
+	return problems
+}
+
+// TestSweepRBACClusterGrantIsReadOnly holds the cluster-wide grant to the verbs
+// sweepClusterVerbs gives each resource, so nodes/proxy stays get alone.
+func TestSweepRBACClusterGrantIsReadOnly(t *testing.T) {
+	t.Parallel()
+	for _, problem := range sweepClusterProblems(loadSweepRBAC(t)) {
+		t.Error(problem)
+	}
+}
+
+// sweepRoleProblems holds every namespaced Role the manifest holds to a bound:
+// the sweep's Role to sweepRoleAllowed, the CI cache trim's Role to
+// sweepCacheTrimAllowed, and any other Role to no grant at all, so a pods/exec in
+// another namespace fails. It also holds the trim's RoleBinding to the forgejo
+// namespace and to the sweep-runner subject, and both Roles to exist.
+func sweepRoleProblems(docs []rbacDoc) []string {
+	var problems []string
+	for _, d := range docs {
+		if d.Kind != "Role" {
+			continue
+		}
+		var bound map[string]sweepRoleGrant
+		switch {
+		case d.Metadata.Name == sweepRunnerRole && d.Metadata.Namespace == sweepRunnerNS:
+			bound = sweepRoleAllowed
+		case d.Metadata.Name == sweepCacheTrimRole && d.Metadata.Namespace == sweepCacheTrimNS:
+			bound = sweepCacheTrimAllowed
+		default:
+			if len(d.Rules) > 0 {
+				problems = append(problems, fmt.Sprintf("Role %s in %s grants rules, and the manifest names no grant for it", d.Metadata.Name, d.Metadata.Namespace))
+			}
+			continue
+		}
+		for _, w := range sweepRoleWidenings(d.Rules, bound) {
+			problems = append(problems, fmt.Sprintf("Role %s in %s: %s", d.Metadata.Name, d.Metadata.Namespace, w))
+		}
+	}
+	if findRBAC(docs, "Role", sweepRunnerRole, sweepRunnerNS) == nil {
+		problems = append(problems, fmt.Sprintf("no Role %q in %q", sweepRunnerRole, sweepRunnerNS))
+	}
+	if findRBAC(docs, "Role", sweepCacheTrimRole, sweepCacheTrimNS) == nil {
+		problems = append(problems, fmt.Sprintf("no Role %q in %q", sweepCacheTrimRole, sweepCacheTrimNS))
+	}
+	binding := findRBAC(docs, "RoleBinding", sweepCacheTrimRole, sweepCacheTrimNS)
+	switch {
+	case binding == nil:
+		problems = append(problems, fmt.Sprintf("no RoleBinding %q in %q", sweepCacheTrimRole, sweepCacheTrimNS))
+	case binding.RoleRef.Kind != "Role" || binding.RoleRef.Name != sweepCacheTrimRole:
+		problems = append(problems, fmt.Sprintf("RoleBinding %s refs %s %q, want Role %q", sweepCacheTrimRole, binding.RoleRef.Kind, binding.RoleRef.Name, sweepCacheTrimRole))
+	case len(binding.Subjects) != 1 || binding.Subjects[0].Kind != "ServiceAccount" ||
+		binding.Subjects[0].Name != sweepRunnerRole || binding.Subjects[0].Namespace != sweepRunnerNS:
+		problems = append(problems, fmt.Sprintf("RoleBinding %s binds %+v, want ServiceAccount %s/%s", sweepCacheTrimRole, binding.Subjects, sweepRunnerNS, sweepRunnerRole))
+	}
+	return problems
+}
+
+// TestSweepRBACEveryRoleIsBounded holds the manifest's Roles and the trim's
+// binding to sweepRoleProblems: the sweep's Role, the CI cache trim's Role in
+// forgejo, nothing else granted, and the trim bound to the sweep-runner.
+func TestSweepRBACEveryRoleIsBounded(t *testing.T) {
+	t.Parallel()
+	for _, problem := range sweepRoleProblems(loadSweepRBAC(t)) {
+		t.Error(problem)
+	}
+}
+
+// cloneRBACDocs returns a copy of docs whose rules and subjects a test can edit
+// without touching the manifest the other tests read.
+func cloneRBACDocs(docs []rbacDoc) []rbacDoc {
+	out := slices.Clone(docs)
+	for i := range out {
+		rules := make([]rbacRule, len(out[i].Rules))
+		for j, r := range out[i].Rules {
+			rules[j] = rbacRule{
+				APIGroups: slices.Clone(r.APIGroups),
+				Resources: slices.Clone(r.Resources),
+				Verbs:     slices.Clone(r.Verbs),
+			}
+		}
+		out[i].Rules = rules
+		out[i].Subjects = slices.Clone(out[i].Subjects)
+	}
+	return out
+}
+
+// TestSweepRBACGuardsRefuseEachWidening drives sweepRoleProblems and
+// sweepClusterProblems on a clone of the manifest with one widening applied, so
+// each refusal the guards make has a row that turns it red. The unmutated
+// manifest passes both.
+func TestSweepRBACGuardsRefuseEachWidening(t *testing.T) {
+	t.Parallel()
+	manifest := loadSweepRBAC(t)
+	rows := []struct {
+		name   string
+		edit   func(t *testing.T, docs []rbacDoc) []rbacDoc
+		refuse bool
+	}{
+		{
+			name:   "the manifest as written",
+			edit:   func(_ *testing.T, docs []rbacDoc) []rbacDoc { return docs },
+			refuse: false,
+		},
+		{
+			name:   "wildcard resource on the cache trim's pods rule",
+			edit:   editRoleRule(sweepCacheTrimRole, sweepCacheTrimNS, 0, func(r *rbacRule) { r.Resources = []string{"*"} }),
+			refuse: true,
+		},
+		{
+			name:   "wildcard verb on the cache trim's exec rule",
+			edit:   editRoleRule(sweepCacheTrimRole, sweepCacheTrimNS, 1, func(r *rbacRule) { r.Verbs = []string{"*"} }),
+			refuse: true,
+		},
+		{
+			name:   "wildcard API group on the cache trim's pods rule",
+			edit:   editRoleRule(sweepCacheTrimRole, sweepCacheTrimNS, 0, func(r *rbacRule) { r.APIGroups = []string{"*"} }),
+			refuse: true,
+		},
+		{
+			name:   "secrets added to the cache trim's pods rule",
+			edit:   editRoleRule(sweepCacheTrimRole, sweepCacheTrimNS, 0, func(r *rbacRule) { r.Resources = append(r.Resources, "secrets") }),
+			refuse: true,
+		},
+		{
+			name: "the cache trim Role removed",
+			edit: func(_ *testing.T, docs []rbacDoc) []rbacDoc {
+				return slices.DeleteFunc(docs, func(d rbacDoc) bool {
+					return d.Kind == "Role" && d.Metadata.Name == sweepCacheTrimRole
+				})
+			},
+			refuse: true,
+		},
+		{
+			name: "the cache trim RoleBinding moved to another namespace",
+			edit: func(t *testing.T, docs []rbacDoc) []rbacDoc {
+				findRBACOrFail(t, docs, "RoleBinding", sweepCacheTrimRole, sweepCacheTrimNS).Metadata.Namespace = "default"
+				return docs
+			},
+			refuse: true,
+		},
+		{
+			name: "the cache trim RoleBinding binds a subject outside gt-sweeps",
+			edit: func(t *testing.T, docs []rbacDoc) []rbacDoc {
+				findRBACOrFail(t, docs, "RoleBinding", sweepCacheTrimRole, sweepCacheTrimNS).Subjects[0].Namespace = "default"
+				return docs
+			},
+			refuse: true,
+		},
+		{
+			name: "pods/exec granted by a Role in another namespace",
+			edit: func(_ *testing.T, docs []rbacDoc) []rbacDoc {
+				var leak rbacDoc
+				leak.Kind = "Role"
+				leak.Metadata.Name = "exec-anywhere"
+				leak.Metadata.Namespace = "default"
+				leak.Rules = []rbacRule{{APIGroups: []string{""}, Resources: []string{"pods/exec"}, Verbs: []string{"create"}}}
+				return append(docs, leak)
+			},
+			refuse: true,
+		},
+		{
+			name: "nodes/proxy given create",
+			edit: func(t *testing.T, docs []rbacDoc) []rbacDoc {
+				findClusterRule(t, docs, "nodes/proxy").Verbs = []string{"get", "create"}
+				return docs
+			},
+			refuse: true,
+		},
+		{
+			name: "nodes/proxy given list",
+			edit: func(t *testing.T, docs []rbacDoc) []rbacDoc {
+				findClusterRule(t, docs, "nodes/proxy").Verbs = []string{"get", "list"}
+				return docs
+			},
+			refuse: true,
+		},
+		{
+			name: "wildcard resource on the cluster reader",
+			edit: func(t *testing.T, docs []rbacDoc) []rbacDoc {
+				findClusterRule(t, docs, "nodes/proxy").Resources = []string{"*"}
+				return docs
+			},
+			refuse: true,
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			docs := row.edit(t, cloneRBACDocs(manifest))
+			problems := append(sweepRoleProblems(docs), sweepClusterProblems(docs)...)
+			if row.refuse && len(problems) == 0 {
+				t.Fatalf("%s passed both guards; want a refusal", row.name)
+			}
+			if !row.refuse && len(problems) != 0 {
+				t.Fatalf("%s refused: %v", row.name, problems)
+			}
+		})
+	}
+}
+
+// editRoleRule returns an edit that changes the i-th rule (0-based, as the
+// manifest writes it) of the named namespaced Role.
+func editRoleRule(name, namespace string, i int, change func(*rbacRule)) func(*testing.T, []rbacDoc) []rbacDoc {
+	return func(t *testing.T, docs []rbacDoc) []rbacDoc {
+		role := findRBACOrFail(t, docs, "Role", name, namespace)
+		change(&role.Rules[i])
+		return docs
+	}
+}
+
+// findRBACOrFail is findRBAC for a mutation test: the document must be in the
+// manifest, or the test fails rather than editing nothing.
+func findRBACOrFail(t *testing.T, docs []rbacDoc, kind, name, namespace string) *rbacDoc {
+	t.Helper()
+	d := findRBAC(docs, kind, name, namespace)
+	if d == nil {
+		t.Fatalf("the manifest has no %s %q in %q", kind, name, namespace)
+	}
+	return d
+}
+
+// findClusterRule returns the first rule of the gt-sweep-reader ClusterRole that
+// names resource, so a test can edit it. It fails the test when no rule names it.
+func findClusterRule(t *testing.T, docs []rbacDoc, resource string) *rbacRule {
+	t.Helper()
+	reader := findRBACOrFail(t, docs, "ClusterRole", sweepReaderRole, "")
+	for i := range reader.Rules {
+		if slices.Contains(reader.Rules[i].Resources, resource) {
+			return &reader.Rules[i]
+		}
+	}
+	t.Fatalf("the ClusterRole %q has no rule granting %q", sweepReaderRole, resource)
+	return nil
 }
 
 // TestSweepRBACRoleGrantsOnlyWhatTheSweepNeeds holds the namespaced Role to

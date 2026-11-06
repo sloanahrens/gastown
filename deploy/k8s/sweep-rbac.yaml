@@ -1,7 +1,9 @@
 # The cluster access the tier sweep runs with (gt-gg9hv.55): the gt-sweeps
 # namespace, the sweep-runner service account the Kubernetes backend's Job runs
-# as, its namespaced Role and binding, the token Secret, and the read-only
-# gt-sweep-reader ClusterRole the capacity and priority guards read through.
+# as, its namespaced Role and binding, the token Secret, the read-only
+# gt-sweep-reader ClusterRole the capacity, priority and control-disk guards read
+# through, and the gt-ci-cache-trim Role and binding in the forgejo namespace the
+# CI cache trim execs through.
 #
 # This file is not applied by the daemon. An operator applies it to the control
 # cluster with:
@@ -76,6 +78,9 @@ rules:
   - apiGroups: [""]
     resources: ["nodes", "pods"]
     verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["nodes/proxy"]
+    verbs: ["get"]
   - apiGroups: ["scheduling.k8s.io"]
     resources: ["priorityclasses"]
     verbs: ["get", "list"]
@@ -88,6 +93,36 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: gt-sweep-reader
+subjects:
+  - kind: ServiceAccount
+    name: sweep-runner
+    namespace: gt-sweeps
+---
+# The CI cache trim (gt-gg9hv.57) runs as the sweep-runner service account and
+# execs into the forgejo-runner's dind container in the forgejo namespace. Its
+# grant lives in that namespace, not in gt-sweeps.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gt-ci-cache-trim
+  namespace: forgejo
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gt-ci-cache-trim
+  namespace: forgejo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gt-ci-cache-trim
 subjects:
   - kind: ServiceAccount
     name: sweep-runner
