@@ -1,0 +1,24 @@
+# The post-land check: runs on every push to main, on the landed commit, and
+# posts the commit status "post-land / check (push)". The landing worker reads
+# that status as the rig's post-land verdict (merge_queue.post_land_status_context
+# in the rig's own settings). Changing this file is a human step.
+#
+# The workflow's name and its one job key are the status context; renaming
+# either orphans the setting that names it. No concurrency block on purpose:
+# a cancelled or replaced run would leave a failure or no status on a commit
+# that did nothing wrong.
+name: post-land
+on:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ci-base
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # post-land-shell.sh reads the last two hours of first-parent history
+      - name: fetch the tags
+        run: git fetch --no-tags --prune origin "+refs/tags/*:refs/tags/*"
+      - run: GT_TEST_DOCKER=0 bash scripts/post-land-shell.sh
