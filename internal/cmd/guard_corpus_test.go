@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -238,6 +239,25 @@ func TestGuardCorpusMatchesCurrentVerdicts(t *testing.T) {
 	}
 }
 
+// guardCorpusNamedPath matches one fixture path a command names: a placeholder
+// and the run of characters after it up to a separator or quote. It matches
+// wherever the placeholder sits in a token (`--out={town}/x`, `"{home}/y"`).
+var guardCorpusNamedPath = regexp.MustCompile(`\{(?:town|home)\}[^\s'"\x60;&|()<>]*`)
+
+// missingNamedPaths returns each {town} or {home} path the command names that
+// the fixture does not build as a directory. A path that cannot be stat'd is
+// missing too, so an unreadable fixture fails the check instead of passing it.
+func (f guardCorpusFixture) missingNamedPaths(command string) []string {
+	var missing []string
+	for _, ref := range guardCorpusNamedPath.FindAllString(command, -1) {
+		path := f.expand(ref)
+		if st, err := os.Stat(path); err != nil || !st.IsDir() {
+			missing = append(missing, path)
+		}
+	}
+	return missing
+}
+
 // TestGuardCorpusNamedPathsExist checks that every {town} or {home} path a row
 // names is a directory in the fixture. A row whose path the fixture never
 // builds is judged against a path that does not exist, so its verdict says
@@ -246,15 +266,45 @@ func TestGuardCorpusNamedPathsExist(t *testing.T) {
 	t.Parallel()
 	fixture := newGuardCorpusFixture(t)
 	for _, row := range loadGuardCorpus(t) {
-		for _, token := range strings.Fields(row.command) {
-			if !strings.HasPrefix(token, "{town}") && !strings.HasPrefix(token, "{home}") {
-				continue
-			}
-			path := fixture.expand(token)
-			if st, err := os.Stat(path); err != nil || !st.IsDir() {
-				t.Errorf("%s:%d: row names %s, which the fixture does not build as a directory", guardCorpusPath, row.line, path)
-			}
+		for _, path := range fixture.missingNamedPaths(row.command) {
+			t.Errorf("%s:%d: row names %s, which the fixture does not build as a directory", guardCorpusPath, row.line, path)
 		}
+	}
+}
+
+// TestMissingNamedPathsReportsUnbuiltPaths drives the refusal branch of the
+// check: a named path the fixture does not build is reported, wherever the
+// placeholder sits in the command, and a built one is not.
+func TestMissingNamedPathsReportsUnbuiltPaths(t *testing.T) {
+	t.Parallel()
+	fixture := newGuardCorpusFixture(t)
+	tests := []struct {
+		name    string
+		command string
+		want    []string
+	}{
+		{name: "no placeholder", command: "ls -la", want: nil},
+		{name: "built rig at token start", command: "find {town}/gastown -name x", want: nil},
+		{name: "built polecat at token start", command: "cd {town}/gastown/polecats/topaz/gastown", want: nil},
+		{name: "built home mid-token", command: "--cache={home}", want: nil},
+		{name: "built path quoted", command: `find "{town}/gastown/.repo.git" -name x`, want: nil},
+		{name: "unbuilt rig at token start", command: "find {town}/nope -name x", want: []string{"/nope"}},
+		{name: "unbuilt rig mid-token", command: "tar --out={town}/gastown/missing", want: []string{"/gastown/missing"}},
+		{name: "unbuilt home quoted", command: `cp x "{home}/absent"`, want: []string{"/absent"}},
+		{name: "unbuilt path followed by semicolon", command: "cd {home}/gone; ls", want: []string{"/gone"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := fixture.missingNamedPaths(tt.command)
+			if len(got) != len(tt.want) {
+				t.Fatalf("missingNamedPaths(%q) = %v, want %d path(s) ending in %v", tt.command, got, len(tt.want), tt.want)
+			}
+			for i, suffix := range tt.want {
+				if !strings.HasSuffix(got[i], suffix) {
+					t.Errorf("missingNamedPaths(%q)[%d] = %q, want a path ending in %q", tt.command, i, got[i], suffix)
+				}
+			}
+		})
 	}
 }
 
