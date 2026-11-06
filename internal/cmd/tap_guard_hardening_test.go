@@ -17,7 +17,7 @@ func TestPolecatContextGTRoleWinsOverStaleGTPolecat(t *testing.T) {
 		want                bool
 	}{
 		{"refinery with a stale GT_POLECAT", "nux", "gastown/refinery", false},
-		{"crew with a stale GT_POLECAT", "nux", "gastown/crew/sloan", false},
+		{"crew with a stale GT_POLECAT", "nux", "gastown/crew/operator", false},
 		{"polecat role with GT_POLECAT", "nux", "gastown/polecats/nux", true},
 		{"GT_POLECAT alone, no role", "nux", "", true},
 	}

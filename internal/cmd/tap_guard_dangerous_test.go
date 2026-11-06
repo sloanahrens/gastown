@@ -4220,7 +4220,7 @@ func TestDangerousFailsClosedOnUnparseable(t *testing.T) {
 	tree := fakeModule(t, "rig")
 	sessions := map[string]guardProcess{
 		"polecat": fakeGuardProcess(map[string]string{"GT_ROLE": "gastown/polecats/coral", "GT_POLECAT": "coral"}, tree),
-		"crew":    fakeGuardProcess(map[string]string{"GT_ROLE": "gastown/crew/sloan"}, tree),
+		"crew":    fakeGuardProcess(map[string]string{"GT_ROLE": "gastown/crew/operator"}, tree),
 	}
 	for _, tt := range []struct {
 		name      string

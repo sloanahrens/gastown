@@ -24,7 +24,7 @@ func (k *killAllTmux) KillSessionWithProcesses(name string) error {
 	return nil
 }
 
-var killAllSessions = []string{"hq-overseer", "hq-mayor", "gt-crew-sloan", "gt-flint", "do-toast", "random-xyz"}
+var killAllSessions = []string{"hq-overseer", "hq-mayor", "gt-crew-operator", "gt-flint", "do-toast", "random-xyz"}
 
 func killAllHarness(t *testing.T) (string, *killAllTmux, *supervisor.Supervisor) {
 	t.Helper()
@@ -48,7 +48,7 @@ func TestKillAllWithoutYesOnlyPrintsThePlan(t *testing.T) {
 	if _, err := os.Stat(estop.FilePath(town)); !os.IsNotExist(err) {
 		t.Fatalf("plan wrote the ESTOP sentinel (stat err %v)", err)
 	}
-	for _, want := range []string{"would kill gt-flint", "hq-overseer: overseer", "gt-crew-sloan: crew", "random-xyz: not a known seat", "--yes"} {
+	for _, want := range []string{"would kill gt-flint", "hq-overseer: overseer", "gt-crew-operator: crew", "random-xyz: not a known seat", "--yes"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("plan output lacks %q:\n%s", want, out.String())
 		}
@@ -74,7 +74,7 @@ func TestKillAllTownSetsEstopAndKillsThroughTheSupervisor(t *testing.T) {
 	}
 	// The hq-mayor fixture session is a leftover: its role retired, so it no
 	// longer names a seat and the kill-all passes over it (gt-rwp7z).
-	if got, want := strings.Join(k.killed, ","), "gt-crew-sloan,gt-flint,do-toast"; got != want {
+	if got, want := strings.Join(k.killed, ","), "gt-crew-operator,gt-flint,do-toast"; got != want {
 		t.Errorf("killed %s, want %s", got, want)
 	}
 	info := estop.Read(town)

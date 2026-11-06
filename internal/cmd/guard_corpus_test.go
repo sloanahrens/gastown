@@ -180,7 +180,7 @@ func (f guardCorpusFixture) process(t *testing.T, context string) guardProcess {
 		env["GT_REFINERY"] = "1"
 		env["GT_ROLE"] = "gastown/refinery"
 	case corpusCrew:
-		env["GT_ROLE"] = "gastown/crew/sloan"
+		env["GT_ROLE"] = "gastown/crew/operator"
 	case corpusOther:
 		// no role markers
 	default:

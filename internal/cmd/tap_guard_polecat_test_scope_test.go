@@ -775,7 +775,7 @@ func TestIsPolecatContext(t *testing.T) {
 		{"GT_ROLE bare", "", "polecat", true},
 		{"GT_POLECAT only", "topaz", "", true},
 		{"refinery", "", "gastown/refinery", false},
-		{"crew", "", "gastown/crew/sloan", false},
+		{"crew", "", "gastown/crew/operator", false},
 		{"nothing", "", "", false},
 	}
 	for _, c := range cases {

@@ -69,14 +69,17 @@ func actionLog(t *testing.T, town string) string {
 // crew and polecat sessions, each logged as verb stop with the actor.
 func TestDownStopsThroughEstopAndLogs(t *testing.T) {
 	t.Parallel()
+	// The crew seat's session is set up live in the fake tmux, stopped by name,
+	// and named in the killed list: one constant keeps the three in step.
+	const crewSeatSession = "gt-crew-operator"
 	town := t.TempDir()
 	if err := estop.Activate(town, estop.TriggerManual, "x"); err != nil {
 		t.Fatal(err)
 	}
-	tm := newOpTmux("gt-crew-sloan", "gt-flint")
+	tm := newOpTmux(crewSeatSession, "gt-flint")
 	stop := downStop{tmux: tm, sup: opSupervisor(town, tm), townRoot: town, actor: "gt down/overseer", force: true}
 
-	if err := stop.session("gt-crew-sloan"); err != nil {
+	if err := stop.session(crewSeatSession); err != nil {
 		t.Fatalf("crew stop = %v", err)
 	}
 	if err := stop.kill("gt-flint"); err != nil {
@@ -85,7 +88,7 @@ func TestDownStopsThroughEstopAndLogs(t *testing.T) {
 	if err := stop.session("gt-gone"); err != nil {
 		t.Fatalf("absent session = %v, want nil", err)
 	}
-	if got, want := strings.Join(tm.killed, ","), "gt-crew-sloan,gt-flint"; got != want {
+	if got, want := strings.Join(tm.killed, ","), crewSeatSession+",gt-flint"; got != want {
 		t.Errorf("killed %s, want %s", got, want)
 	}
 	if len(tm.keys) != 0 {

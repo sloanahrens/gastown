@@ -140,7 +140,7 @@ type stubPolecatSessionLister struct{}
 func (stubPolecatSessionLister) List() ([]polecat.SessionInfo, error) {
 	return []polecat.SessionInfo{
 		{Polecat: "amber", SessionID: "gt-amber", Running: true},
-		{Polecat: "crew-sloan", SessionID: "gt-crew-sloan", Running: true},
+		{Polecat: "crew-operator", SessionID: "gt-crew-operator", Running: true},
 	}, nil
 }
 
@@ -150,7 +150,7 @@ func (stubPolecatSessionLister) ListPolecats() ([]polecat.SessionInfo, error) {
 
 // listPolecatSessions reports what the lister's ListPolecats returns, never
 // its List: a crew session shares the rig prefix, and listed as polecat
-// crew-sloan it names a seat `gt session stop` cannot find. The real filter
+// crew-operator it names a seat `gt session stop` cannot find. The real filter
 // behind ListPolecats is held to this in session_list_integration_test.go.
 func TestRunSessionListSkipsCrewSessions(t *testing.T) {
 	t.Parallel()

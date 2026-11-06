@@ -2711,7 +2711,7 @@ func TestSnapshotOccupied(t *testing.T) {
 	lister := &fakeLister{sessions: map[string]map[string]string{
 		"gt-capable": {"GT_ROLE": "gastown/polecats/capable", "GT_AGENT": "claude-haiku"},
 		"gt-dag":     {"GT_ROLE": "gastown/polecats/dag", "GT_AGENT": "deepseek-flash"},
-		"gt-crew":    {"GT_ROLE": "gastown/crew/sloan"},
+		"gt-crew":    {"GT_ROLE": "gastown/crew/operator"},
 	}}
 	snapshot := []poolSession{
 		{name: "gt-capable", agent: "claude-haiku", rig: "gastown", polecat: "capable"}, // live then and now: the listing wins

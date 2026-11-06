@@ -359,10 +359,13 @@ func TestQueueMarksBeadsInParkedRigsNotDispatchable(t *testing.T) {
 // work nobody can pick up. A parked rig still outranks the assignee.
 func TestQueueHoldsBeadsAssignedToSomeone(t *testing.T) {
 	t.Parallel()
+	// The assignee the held rows carry is both the bead state the queue reads
+	// and the name the held row's note must print.
+	const heldSeat = "gastown/crew/operator"
 	shaped := "## Goal\n\ng\n\n## Constraints\n\nc\n\n## Out of scope\n\no\n\n## Gate\n\nmake gate\n\n## Size\n\none worker, one landing\n\n## Acceptance\n\n- [ ] done\n"
 	gastown := &fakeQueueStore{ready: []*beads.Issue{
-		{ID: "gt-held-shaped", Title: "someone is on it", Type: "task", Description: shaped, Assignee: "gastown/crew/sloan"},
-		{ID: "gt-held-rough", Title: "someone is shaping it", Type: "task", Description: "note", Assignee: "gastown/crew/sloan"},
+		{ID: "gt-held-shaped", Title: "someone is on it", Type: "task", Description: shaped, Assignee: heldSeat},
+		{ID: "gt-held-rough", Title: "someone is shaping it", Type: "task", Description: "note", Assignee: heldSeat},
 		{ID: "gt-free-shaped", Title: "free", Type: "task", Description: shaped},
 		{ID: "gt-free-rough", Title: "free and rough", Type: "task", Description: "note"},
 	}}
@@ -387,7 +390,7 @@ func TestQueueHoldsBeadsAssignedToSomeone(t *testing.T) {
 			t.Errorf("%s: shape = %q, want %q", id, shape[id], want)
 		}
 	}
-	if n := note["gt-held-shaped"]; !strings.Contains(n, "gastown/crew/sloan") || !strings.Contains(n, "unassigned") {
+	if n := note["gt-held-shaped"]; !strings.Contains(n, heldSeat) || !strings.Contains(n, "unassigned") {
 		t.Errorf("a held row's note names the assignee and the rule: %q", n)
 	}
 }
@@ -504,7 +507,7 @@ func TestDashQueueKeepsAHeldOrParkedShapeWithTheVerdict(t *testing.T) {
 	t.Parallel()
 	at := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
 	gastown := &fakeQueueStore{ready: []*beads.Issue{
-		{ID: "gt-held", Title: "someone is on it", Type: "task", Description: dashesShape, Assignee: "gastown/crew/sloan"},
+		{ID: "gt-held", Title: "someone is on it", Type: "task", Description: dashesShape, Assignee: "gastown/crew/operator"},
 		{ID: "gt-rough", Title: "unshaped", Type: "task", Description: "just a note"},
 	}}
 	mango := &fakeQueueStore{ready: []*beads.Issue{
