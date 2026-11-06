@@ -846,7 +846,7 @@ func (l *Lander) openLanding(dir string, env []string) Repo {
 	if l.openRepo != nil {
 		return l.openRepo(dir)
 	}
-	return git.NewGit(dir).WithEnv(env)
+	return git.NewGit(dir).WithEnv(env).WithConfigReadRetry()
 }
 
 // landingCommitEnv is the environment the landing's merge commit is made under:

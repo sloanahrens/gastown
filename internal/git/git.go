@@ -117,6 +117,9 @@ type Git struct {
 	timeout time.Duration // deadline for every call when set (WithTimeout)
 	env     []string      // added to every call's environment (WithEnv)
 	unset   []string      // removed from every call's environment (WithoutEnv)
+
+	configRetry bool                // retry once when git cannot read its config files (WithConfigReadRetry)
+	retryWait   func(time.Duration) // the wait before that retry; nil means time.Sleep
 }
 
 // ErrUnsafeTownRootGitMutation is returned when a mutating git operation would

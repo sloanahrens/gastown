@@ -70,10 +70,11 @@ func RevertGit(dir string) *git.Git {
 // process's own, and os/exec keeps the last entry for a key, so an inherited
 // GIT_COMMITTER_* loses (gt-dc4y3). A landing's merge commit is made through a
 // handle opened with CommittingEnv instead, which also sets the author, and a
-// revert commit through RevertGit.
+// revert commit through RevertGit. Every call retries once when git cannot read
+// its config files (git.WithConfigReadRetry, gt-n3slrv).
 func CommittingGit(dir string) *git.Git {
 	return git.NewGit(dir).WithEnv([]string{
 		"GIT_COMMITTER_NAME=" + LandingCommitterName,
 		"GIT_COMMITTER_EMAIL=" + LandingCommitterEmail,
-	})
+	}).WithConfigReadRetry()
 }

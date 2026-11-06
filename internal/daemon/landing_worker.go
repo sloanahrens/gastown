@@ -706,7 +706,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	}
 	postLand := d.newPostLandRunner(rigName, rigPath, newPostLandWiring(
 		merger.Client, merger.Owner, merger.RepoName, mainState, postLandTimeout, run, bd, redMain,
-		git.NewGit(repo).IsAncestor))
+		git.NewGit(repo).WithConfigReadRetry().IsAncestor))
 	// The human's recorded identity is what the worker refuses a submission
 	// under, so a town whose overseer identity cannot be read gets no worker:
 	// without the name no submission can be checked, and landing one would
@@ -724,7 +724,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		TownRoot:   townRoot,
 		HumanActor: human.Name,
 		Beads:      bd,
-		Remote:     gitRemote{g: git.NewGit(repo), remote: landingRemote},
+		Remote:     gitRemote{g: git.NewGit(repo).WithConfigReadRetry(), remote: landingRemote},
 		Lander:     lander,
 		Landings:   landings,
 		Backoff:    backoff,
