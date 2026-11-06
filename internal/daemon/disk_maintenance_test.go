@@ -890,6 +890,18 @@ func TestDiskMaintBlockedNotifierKeepsNoLaterTrimOff(t *testing.T) {
 	}
 }
 
+// countingNotifier counts the escalations that reach the notifier at all,
+// whether or not the notifier then accepts them.
+type countingNotifier struct {
+	notify.Notifier
+	escalations atomic.Int32
+}
+
+func (n *countingNotifier) Escalate(ctx context.Context, e notify.Escalation) error {
+	n.escalations.Add(1)
+	return n.Notifier.Escalate(ctx, e)
+}
+
 // TestAlertSendsEndWithTheirPassContext: a raise or a clear sent under a context
 // that has already ended is abandoned with that context's error and reaches the
 // notifier not at all, so a pass that has ended leaves the alert as it was and
@@ -897,6 +909,8 @@ func TestDiskMaintBlockedNotifierKeepsNoLaterTrimOff(t *testing.T) {
 func TestAlertSendsEndWithTheirPassContext(t *testing.T) {
 	t.Parallel()
 	d, _, f := diskMaintTestDaemon(t)
+	counting := &countingNotifier{Notifier: f.notify}
+	d.notifier = counting
 	ended, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -906,6 +920,9 @@ func TestAlertSendsEndWithTheirPassContext(t *testing.T) {
 	}
 	if diskMaintAlertIsOpen(f.notify, "diskmaint:colima") {
 		t.Error("an alert is open after a raise sent on an ended context: it reached the notifier")
+	}
+	if got := counting.escalations.Load(); got != 0 {
+		t.Errorf("the notifier was called %d times for a raise on an ended context, want 0: no attempt is spent on a send nobody waits for", got)
 	}
 
 	// The same alert raised on a live context, then cleared on an ended one,
@@ -924,6 +941,32 @@ func TestAlertSendsEndWithTheirPassContext(t *testing.T) {
 	}
 	if diskMaintAlertIsOpen(f.notify, "diskmaint:colima") {
 		t.Error("the alert is still open after a clear on a live context")
+	}
+}
+
+// TestDiskMaintCombinedPassGoesOnWhenTheTurnIsNotGranted: a pass that waits for
+// its turn to apply the alerts and does not get it in time reads the disks for
+// itself and carries on to its targets, leaving the alerts to the pass that has
+// the turn (gt-gg9hv.48).
+func TestDiskMaintCombinedPassGoesOnWhenTheTurnIsNotGranted(t *testing.T) {
+	t.Parallel()
+	d, logs, f := diskMaintTestDaemon(t)
+	countCacheTrims(d)
+	f.readings = []disks.Reading{{Name: "colima", UsedPct: 88}}
+	// The turn is not granted within the wait: the wait's own deadline has
+	// passed, reported at once so the test does not spend the real wait.
+	d.diskMaintAlerts.acquireTurn = func(context.Context) (func(), error) {
+		return nil, context.DeadlineExceeded
+	}
+	d.runDiskMaintenance()
+	if len(f.target.policies) != 1 {
+		t.Errorf("planned the target %d times, want 1: a pass without the alert turn still plans its targets", len(f.target.policies))
+	}
+	if diskMaintAlertIsOpen(f.notify, "diskmaint:colima") {
+		t.Error("an alert is open: the pass without the turn applied the alerts")
+	}
+	if !strings.Contains(logs.String(), "another pass is applying the disk alerts") {
+		t.Errorf("log = %q, want the read-only fallback named", logs.String())
 	}
 }
 

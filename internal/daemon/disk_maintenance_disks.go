@@ -277,6 +277,12 @@ func (d *Daemon) diskMaintHostReadings(watched []diskMaintDisk, injected map[str
 	return readings, nil
 }
 
+// diskMaintAlertTurnWait is how long a pass waits for its turn to apply the
+// alerts before it reads the disks for itself and goes on: long enough for an
+// ordinary application, short of the pass's own bound, so a notifier that does
+// not answer cannot hold another pass's targets off for minutes.
+const diskMaintAlertTurnWait = 30 * time.Second
+
 // diskMaintAlerts is the patrol's memory of the disk alert keys it has open,
 // and of when it last logged that each open unreadable key is still unreadable.
 // A pass writes it and the next pass reads it. Whole applications -- the
@@ -328,10 +334,19 @@ func (a *diskMaintAlerts) takeGate(ctx context.Context) (release func(), err err
 // decision; false means the pass's context ended before its turn came and
 // nothing was read.
 func (d *Daemon) readAndApplyDiskAlerts(ctx context.Context, now time.Time) ([]disks.Reading, bool) {
-	release, err := d.diskMaintAlerts.takeTurn(ctx)
+	waitCtx, cancelWait := context.WithTimeout(ctx, diskMaintAlertTurnWait)
+	release, err := d.diskMaintAlerts.takeTurn(waitCtx)
+	cancelWait()
 	if err != nil {
-		d.logger.Printf("disk_maintenance: the disk alerts were not applied: %v", err)
-		return nil, false
+		if ctx.Err() != nil {
+			d.logger.Printf("disk_maintenance: the disk alerts were not applied: %v", err)
+			return nil, false // the pass itself is over
+		}
+		// Another pass has held the turn for the whole wait, a notifier that
+		// is slow to answer: this pass reads the disks for its own decisions and
+		// leaves the alerts to that one, so its targets are not held off.
+		d.logger.Printf("disk_maintenance: another pass is applying the disk alerts; this pass reads the disks only: %v", err)
+		return d.diskMaintenanceSeams().readDisks(ctx), true
 	}
 	defer release()
 	readings := d.diskMaintenanceSeams().readDisks(ctx)
