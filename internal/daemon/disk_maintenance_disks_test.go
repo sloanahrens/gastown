@@ -419,9 +419,9 @@ func TestDiskMaintSandboxDiskReadsNodeStats(t *testing.T) {
 			summaries: map[string]string{"kind-worker": diskMaintNodeStats(80000), "kind-worker-2": diskMaintNodeStats(120000)},
 			wantPct:   75,
 		},
-		"the busier node wins listed second to last": {
+		"the busier node wins listed first": {
 			nodes:     "node/kind-worker-2\nnode/kind-worker\n",
-			summaries: map[string]string{"kind-worker": diskMaintNodeStats(120000), "kind-worker-2": diskMaintNodeStats(80000)},
+			summaries: map[string]string{"kind-worker": diskMaintNodeStats(80000), "kind-worker-2": diskMaintNodeStats(120000)},
 			wantPct:   75,
 		},
 		"a runner error on the first node": {
@@ -478,8 +478,9 @@ func TestDiskMaintSandboxDiskReadsNodeStats(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			town := t.TempDir()
-			d := &Daemon{config: &Config{TownRoot: town}}
+			d, _, f := diskMaintTestDaemon(t)
+			town := d.config.TownRoot
+			d.diskMaint.readDisks = nil // the production read, with the kubectl fake below
 			d.diskMaint.getenv = func(key string) string {
 				if tc.container && key == agentconfig.ContainerModeEnv {
 					return agentconfig.SupervisorContainer
@@ -529,6 +530,12 @@ func TestDiskMaintSandboxDiskReadsNodeStats(t *testing.T) {
 					if !strings.Contains(got.Err.Error(), want) {
 						t.Errorf("reading error %q does not name %s", got.Err, want)
 					}
+				}
+				// The unreadable disk is what the town sees: a pass must raise the alert.
+				d.runDiskMaintenance()
+				if !diskMaintAlertIsOpen(f.notify, "diskmaint:colima:unreadable") {
+					t.Errorf("escalations = %+v, want an open diskmaint:colima:unreadable alert",
+						f.notify.Escalations())
 				}
 			} else {
 				if got.Err != nil {
