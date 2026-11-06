@@ -197,6 +197,10 @@ type BirdReport struct {
 	// regular files small enough to serve. The reader does not open them.
 	HasPage bool `json:"has_page"`
 	HasPrev bool `json:"has_prev"`
+	// PrevWritten is when the previous page was last written, off its own
+	// mtime, so the row can age that page rather than call it yesterday's. It
+	// is zero on a bird with no previous page to serve.
+	PrevWritten time.Time `json:"prev_written,omitzero"`
 	// Pages are the bird's other pages in its reports directory (topic reports),
 	// newest first, at most birdTopicPagesMax. The route serves each by Name.
 	Pages []BirdPage `json:"pages,omitempty"`
@@ -331,6 +335,9 @@ func (r *BirdReportsReader) readBird(now time.Time, name string) (BirdReport, bo
 		HasPage:  pageIsFile && pageFi.Size() < birdPageMaxBytes,
 		HasPrev:  prevIsFile && prevFi.Size() < birdPageMaxBytes,
 		Pages:    birdTopicPages(reports, birdTopicTitle),
+	}
+	if row.HasPrev {
+		row.PrevWritten = prevFi.ModTime().UTC()
 	}
 
 	raw, err := readReportsFile(filepath.Join(reports, birdSidecarName), birdSidecarMaxBytes)
