@@ -324,9 +324,11 @@ func TestParseQuantityRefusesAMalformedOrOversizedExponent(t *testing.T) {
 }
 
 // TestSplitExponentRefusesAnExponentWithNoDigits drives the empty-exponent
-// refusal directly: parseQuantity reads a trailing e as the exa suffix before
-// the exponent split sees it, so the split's own guard is reached only here
-// (gt-gg9hv.49).
+// refusal directly: splitQuantity hands every trailing letter to the suffix, so
+// the number parseQuantity passes on never ends in e and the split's own guard
+// cannot be reached through parseQuantity (the value "1e" is refused there as an
+// unknown suffix instead). The guard stays as the split's own contract, and
+// this is the only place it is exercised (gt-gg9hv.49).
 func TestSplitExponentRefusesAnExponentWithNoDigits(t *testing.T) {
 	t.Parallel()
 	_, _, err := splitExponent("1e", "1e")

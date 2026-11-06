@@ -1,9 +1,11 @@
 # Live-cluster golden listings
 
 Captured 2026-11-05 from the control cluster (k3s on the gt-control VM): they are what the API
-printed, stripped of env, volumes, images, annotations and tokens, with every other field kept
-as the API prints it. They exist because the guards' tests once used fabricated shapes and so
-passed against listings the real API never prints.
+printed, trimmed to the fields the guards read: kind, name, namespace, owner references, node name,
+priority and priority class, container requests and limits, phase, and for the node its conditions and
+allocatable. Env, volumes, images, annotations and tokens are not kept, and the shapes are unchanged.
+They exist because the guards' tests once used fabricated shapes and so passed against
+listings the real API never prints.
 
 - `capacity-listing.json`: what `get nodes,pods -A -o json` prints: the node (allocatable
   `memory` is `24556112Ki`, `cpu` is `12`) and every pod with its requests, `phase`, owners
