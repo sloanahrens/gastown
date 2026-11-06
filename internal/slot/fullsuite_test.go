@@ -26,11 +26,11 @@ func TestIsFullSuiteRole(t *testing.T) {
 	}{
 		{name: "the tier sweep", role: "gastown/tier-sweep", want: true},
 		{name: "the flake sweep", role: "gastown/flake-sweep", want: true},
-		{name: "a caller that names the class", role: "gastown/crew/sloan/full-suite", want: true},
+		{name: "a caller that names the class", role: "gastown/crew/operator/full-suite", want: true},
 		{name: "a rig-qualified class role", role: "gastown/full-suite", want: true},
 		{name: "the landing gate is not full-suite class", role: "gastown/landing", want: false},
 		{name: "the post-land runner is not full-suite class", role: "gastown/post-land", want: false},
-		{name: "a package-scoped suite", role: "gastown/crew/sloan", want: false},
+		{name: "a package-scoped suite", role: "gastown/crew/operator", want: false},
 		{name: "a polecat seat", role: "gastown/polecats/agate", want: false},
 		{name: "the unnamed placeholder", role: "pid-1234", want: false},
 		{name: "a suffix that only looks like the class", role: "gastown/full-suite-x", want: false},
@@ -93,7 +93,7 @@ func TestFullSuite_AdmissionMatrix(t *testing.T) {
 		{
 			name: "a third whole-tree start waits at a cap of 2",
 			pool: fiveSlots, hold: []string{"gastown/tier-sweep", "gastown/flake-sweep"},
-			role: "gastown/crew/sloan/full-suite", wantSlot: -1, wantWait: "full-suite cap",
+			role: "gastown/crew/operator/full-suite", wantSlot: -1, wantWait: "full-suite cap",
 		},
 		{
 			name: "one below the cap is admitted",
@@ -108,7 +108,7 @@ func TestFullSuite_AdmissionMatrix(t *testing.T) {
 		{
 			name: "a package-scoped suite is not capped",
 			pool: fullSuitePool(), hold: []string{"gastown/tier-sweep"},
-			role: "gastown/crew/sloan", wantSlot: 3,
+			role: "gastown/crew/operator", wantSlot: 3,
 		},
 		{
 			name: "the landing gate is not capped and does not queue behind one",
@@ -382,7 +382,7 @@ func TestFullSuite_StaleMarkerDoesNotExemptTheCap(t *testing.T) {
 	defer release(t, run)
 
 	done := goAcquire(func() (*Handle, error) {
-		return child.AcquirePool(town, "gastown/crew/sloan/full-suite", time.Hour, pool)
+		return child.AcquirePool(town, "gastown/crew/operator/full-suite", time.Hour, pool)
 	})
 	waitBlocked(t, tg.clk)
 	select {

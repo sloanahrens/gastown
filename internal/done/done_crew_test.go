@@ -18,8 +18,11 @@ import (
 var crewSubmittedRE = regexp.MustCompile(`Submitted for landing: (\S+) @ ([0-9a-fA-F]{4,40})(?: onto (\S+))?`)
 
 const (
-	crewTestBranch = "crew/sloan/crew-done-submit"
+	crewTestBranch = "crew/operator/crew-done-submit"
 	crewTestHead   = "c0ffee1234abcdef"
+	// crewTestActor is the crew seat the env and assignee cases name: it is
+	// both the identity the test configures and the one it expects back.
+	crewTestActor = "gastown/crew/operator"
 )
 
 // newCrewSubmitHarness is the submit harness as a crew run: a crew branch
@@ -170,8 +173,8 @@ func TestCrewActorFromEnv(t *testing.T) {
 		want string
 	}{
 		{"BEADS_ACTOR is the session's identity", map[string]string{"BEADS_ACTOR": "town/crew/overseer"}, "town/crew/overseer"},
-		{"BEADS_ACTOR leads BD_ACTOR", map[string]string{"BD_ACTOR": "gastown/crew/sloan", "BEADS_ACTOR": "town/crew/overseer"}, "town/crew/overseer"},
-		{"BD_ACTOR is the identity when BEADS_ACTOR is unset", map[string]string{"BD_ACTOR": "gastown/crew/sloan"}, "gastown/crew/sloan"},
+		{"BEADS_ACTOR leads BD_ACTOR", map[string]string{"BD_ACTOR": crewTestActor, "BEADS_ACTOR": "town/crew/overseer"}, "town/crew/overseer"},
+		{"BD_ACTOR is the identity when BEADS_ACTOR is unset", map[string]string{"BD_ACTOR": crewTestActor}, crewTestActor},
 		{"GT_ROLE names the crew member", map[string]string{"GT_ROLE": "town/crew/overseer"}, "town/crew/overseer"},
 		{"a bare crew role is its own identity", map[string]string{"GT_ROLE": "crew"}, "crew"},
 		{"a blank BEADS_ACTOR names no one", map[string]string{"BEADS_ACTOR": "  "}, ""},
@@ -289,7 +292,7 @@ func TestCrewSubmitRefusesWithNoIdentity(t *testing.T) {
 func TestDoneIsCrewRun(t *testing.T) {
 	t.Parallel()
 	const (
-		crewDir    = "/town/gastown/crew/sloan"
+		crewDir    = "/town/gastown/crew/operator"
 		polecatDir = "/town/gastown/polecats/refuge/gastown"
 		townDir    = "/town"
 	)
@@ -299,10 +302,10 @@ func TestDoneIsCrewRun(t *testing.T) {
 		want bool
 	}{
 		{map[string]string{}, crewDir, true},
-		{map[string]string{}, "/town/gastown/crew/sloan-cmd-sling/internal/cmd", true},
-		{map[string]string{"BD_ACTOR": "gastown/crew/sloan"}, townDir, true},
+		{map[string]string{}, "/town/gastown/crew/operator-cmd-sling/internal/cmd", true},
+		{map[string]string{"BD_ACTOR": crewTestActor}, townDir, true},
 		{map[string]string{"GT_ROLE": "crew"}, townDir, true},
-		{map[string]string{"BD_ACTOR": "gastown/crew/sloan", "GT_ROLE": "gastown/crew/sloan"}, crewDir, true},
+		{map[string]string{"BD_ACTOR": crewTestActor, "GT_ROLE": crewTestActor}, crewDir, true},
 		// No identity anywhere is not crew.
 		{map[string]string{}, townDir, false},
 		{map[string]string{}, "", false},
@@ -424,7 +427,7 @@ func TestCrewSubmitStandDownSkips(t *testing.T) {
 	}{
 		{"empty assignee", "", "Test Operator", map[string]bool{}},
 		{"submitter as assignee", "gastown/polecats/agate", "gastown/polecats/agate", map[string]bool{"gt-agate": true}},
-		{"non-polecat assignee", "gastown/crew/sloan", "Test Operator", map[string]bool{}},
+		{"non-polecat assignee", crewTestActor, "Test Operator", map[string]bool{}},
 		{"polecat with no session", "gastown/polecats/agate", "Test Operator", map[string]bool{}},
 	}
 	for _, tc := range cases {
@@ -485,7 +488,7 @@ func TestPolecatAssigneeSeat(t *testing.T) {
 		"gastown/polecats/agate": "gt-agate",
 		"gastown/polecats/":      "",
 		"gastown/agate":          "",
-		"gastown/crew/sloan":     "",
+		crewTestActor:            "",
 		"gastown/witness":        "",
 		"":                       "",
 	} {
@@ -508,14 +511,14 @@ func TestCrewBeadFromBranch(t *testing.T) {
 	t.Parallel()
 	routed := func(prefix string) bool { return prefix == "gt-" }
 	for branch, want := range map[string]string{
-		"crew/sloan/gt-3e7tk-crew-submit": "gt-3e7tk",
-		"crew/sloan/crew-done-submit":     "",
-		"crew/sloan/fix":                  "",
-		"gt-abc.2":                        "gt-abc.2",
+		"crew/operator/gt-3e7tk-crew-submit": "gt-3e7tk",
+		"crew/operator/crew-done-submit":     "",
+		"crew/operator/fix":                  "",
+		"gt-abc.2":                           "gt-abc.2",
 		// parseBranchName reads only a bare id; the embedded fallback finds
 		// the routed id inside a crew slug, and drops an unrouted one.
-		"crew/sloan/gt-3e7tk.2-crew-submit": "gt-3e7tk.2",
-		"feature/xx-abc-thing":              "",
+		"crew/operator/gt-3e7tk.2-crew-submit": "gt-3e7tk.2",
+		"feature/xx-abc-thing":                 "",
 	} {
 		if got := crewBeadFromBranch(branch, routed); got != want {
 			t.Errorf("crewBeadFromBranch(%q) = %q, want %q", branch, got, want)

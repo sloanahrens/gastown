@@ -10,6 +10,11 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 )
 
+// crewTestRole is the crew seat that contends for a slot: it is the role fed
+// to AcquirePool and the role compared in the lock history and status, so one
+// constant keeps the caller and the expectation from drifting apart.
+const crewTestRole = "gastown/crew/operator"
+
 // yieldPool is the town's shape (operational.container_gate on 2026-09-29):
 // four slots, two reserved for the gate, with non-gate starts yielding to a
 // running gate (gt-22hdp.29).
@@ -31,7 +36,7 @@ func TestYield_NonGateWaitsWhileGateHoldsReservedSlot(t *testing.T) {
 		t.Fatalf("landing gate got slot %d, want reserved slot 0", gate.Index)
 	}
 
-	done := goAcquire(func() (*Handle, error) { return tg.AcquirePool(town, "gastown/crew/sloan", time.Hour, pool) })
+	done := goAcquire(func() (*Handle, error) { return tg.AcquirePool(town, crewTestRole, time.Hour, pool) })
 	// Several blocked passes: the crew suite must still be waiting.
 	for i := 0; i < 3; i++ {
 		waitBlocked(t, tg.clk)
@@ -61,7 +66,7 @@ func TestYield_NonGateWaitsWhileGateHoldsReservedSlot(t *testing.T) {
 		t.Fatal(err)
 	}
 	last := hist[len(hist)-1]
-	if last.Role != "gastown/crew/sloan" || last.Reason != WaitReasonGateRunning || last.HolderRole != "gastown/landing" {
+	if last.Role != crewTestRole || last.Reason != WaitReasonGateRunning || last.HolderRole != "gastown/landing" {
 		t.Fatalf("history entry = %+v, want the crew wait attributed to the running gate", last)
 	}
 }
@@ -74,7 +79,7 @@ func TestYield_GateNeverWaitsOnNonGateHolders(t *testing.T) {
 	town := t.TempDir()
 	pool := yieldPool()
 
-	a := tg.mustAcquirePool(t, town, "gastown/crew/sloan", pool)
+	a := tg.mustAcquirePool(t, town, crewTestRole, pool)
 	b := tg.mustAcquirePool(t, town, "gastown/amber", pool)
 	defer release(t, a)
 	defer release(t, b)
@@ -99,7 +104,7 @@ func TestYield_RunningHolderIsNotPreempted(t *testing.T) {
 	town := t.TempDir()
 	pool := yieldPool()
 
-	crew := tg.mustAcquirePool(t, town, "gastown/crew/sloan", pool)
+	crew := tg.mustAcquirePool(t, town, crewTestRole, pool)
 	gate := tg.mustAcquirePool(t, town, "gastown/landing", pool)
 	defer release(t, gate)
 
@@ -107,7 +112,7 @@ func TestYield_RunningHolderIsNotPreempted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !rep.Slots[crew.Index].Held || rep.Slots[crew.Index].Owner.Role != "gastown/crew/sloan" {
+	if !rep.Slots[crew.Index].Held || rep.Slots[crew.Index].Owner.Role != crewTestRole {
 		t.Fatalf("crew slot %d after the gate started: %+v", crew.Index, rep.Slots[crew.Index])
 	}
 	release(t, crew)
@@ -124,7 +129,7 @@ func TestYield_KnobOffRestoresOldBehaviour(t *testing.T) {
 
 	gate := tg.mustAcquirePool(t, town, "gastown/landing", pool)
 	defer release(t, gate)
-	h, err, elapsed := tg.run(t, func() (*Handle, error) { return tg.AcquirePool(town, "gastown/crew/sloan", time.Minute, pool) })
+	h, err, elapsed := tg.run(t, func() (*Handle, error) { return tg.AcquirePool(town, crewTestRole, time.Minute, pool) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +157,7 @@ func TestYield_NoReservedSlotsMeansNoYield(t *testing.T) {
 
 	gate := tg.mustAcquirePool(t, town, "gastown/landing", pool)
 	defer release(t, gate)
-	h, err, elapsed := tg.run(t, func() (*Handle, error) { return tg.AcquirePool(town, "gastown/crew/sloan", time.Minute, pool) })
+	h, err, elapsed := tg.run(t, func() (*Handle, error) { return tg.AcquirePool(town, crewTestRole, time.Minute, pool) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +180,7 @@ func TestYield_LeakedGateHoldIsIgnored(t *testing.T) {
 	defer release(t, gate)
 	tg.gone[tg.pid] = true
 
-	h, err, elapsed := tg.run(t, func() (*Handle, error) { return tg.AcquirePool(town, "gastown/crew/sloan", time.Minute, pool) })
+	h, err, elapsed := tg.run(t, func() (*Handle, error) { return tg.AcquirePool(town, crewTestRole, time.Minute, pool) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +211,7 @@ func TestYield_BoundedByMaxGateYield(t *testing.T) {
 	gate := tg.mustAcquirePool(t, town, "gastown/landing", pool)
 	defer release(t, gate)
 
-	h, err, elapsed := tg.run(t, func() (*Handle, error) { return tg.AcquirePool(town, "gastown/crew/sloan", time.Hour, pool) })
+	h, err, elapsed := tg.run(t, func() (*Handle, error) { return tg.AcquirePool(town, crewTestRole, time.Hour, pool) })
 	if err != nil {
 		t.Fatalf("crew acquire behind a gate that never releases: %v", err)
 	}
@@ -245,7 +250,7 @@ func TestYield_TimeoutWhileYieldingIsAttributed(t *testing.T) {
 	defer release(t, gate)
 
 	if _, err, _ := tg.run(t, func() (*Handle, error) {
-		return tg.AcquirePool(town, "gastown/crew/sloan", 3*tg.pollInterval, pool)
+		return tg.AcquirePool(town, crewTestRole, 3*tg.pollInterval, pool)
 	}); err == nil {
 		t.Fatal("crew acquire succeeded inside its timeout while the gate ran")
 	} else if !strings.Contains(err.Error(), "gate running: gastown/landing") {
@@ -275,7 +280,7 @@ func TestYield_GateDescendantDoesNotYieldToItsOwnGate(t *testing.T) {
 	defer release(t, gate)
 
 	child := tg.child()
-	h, err, elapsed := tg.run(t, func() (*Handle, error) { return child.AcquirePool(town, "gastown/crew/sloan", time.Minute, pool) })
+	h, err, elapsed := tg.run(t, func() (*Handle, error) { return child.AcquirePool(town, crewTestRole, time.Minute, pool) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +368,7 @@ func TestYield_StaleGateMarkerStillYields(t *testing.T) {
 	gate := tg.mustAcquirePool(t, town, "gastown/landing", pool)
 	defer release(t, gate)
 
-	h, err, elapsed := tg.run(t, func() (*Handle, error) { return child.AcquirePool(town, "gastown/crew/sloan", time.Hour, pool) })
+	h, err, elapsed := tg.run(t, func() (*Handle, error) { return child.AcquirePool(town, crewTestRole, time.Hour, pool) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +400,7 @@ func TestYield_LeftoverIntentFileIsIgnored(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h, err, elapsed := tg.run(t, func() (*Handle, error) { return tg.AcquirePool(town, "gastown/crew/sloan", time.Hour, pool) })
+	h, err, elapsed := tg.run(t, func() (*Handle, error) { return tg.AcquirePool(town, crewTestRole, time.Hour, pool) })
 	if err != nil {
 		t.Fatal(err)
 	}

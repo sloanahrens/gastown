@@ -1634,7 +1634,7 @@ func TestExtractSimpleRole(t *testing.T) {
 		"gastown/crew":           "crew",
 		"gastown/witness":        "witness",
 		"gastown/refinery":       "refinery",
-		"gastown/crew/sloan":     "crew",
+		"gastown/crew/operator":  "crew",
 		"gastown/polecats/pearl": constants.RolePolecat,
 		// Unknown shapes pass through untouched.
 		"too/many/parts/here": "too/many/parts/here",

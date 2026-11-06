@@ -242,7 +242,7 @@ func TestPatrolScanPolecatEscalations(t *testing.T) {
 	bd.db.Seed(escalation("hq-wisp-open", "myr/polecats/mycat", "be-adu: a decision", "open"))
 	bd.db.Seed(escalation("hq-wisp-done", "myr/polecats/mycat", "be-adu: another decision", "closed"))
 	bd.db.Seed(escalation("hq-wisp-other-rig", "beads/polecats/guzzle", "be-adu: a decision", "open"))
-	bd.db.Seed(escalation("hq-wisp-other-role", "myr/crew/sloan", "be-adu: a decision", "open"))
+	bd.db.Seed(escalation("hq-wisp-other-role", "myr/crew/operator", "be-adu: a decision", "open"))
 	bd.db.Seed(escalation("hq-wisp-carrier", "myr/polecats/mycat", "be-adu: a decision", "open", "gt:message"))
 	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, openWorkBeads: bd.open}
 
