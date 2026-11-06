@@ -382,7 +382,7 @@ func TestIntegrationRecoverDivergedPush_RealRepoReworkOfRejectedHead(t *testing.
 	testRunGit(t, seed, "checkout", "-b", "feature")
 	writeRepoFile(t, seed, "feature.txt", "first attempt\n")
 	testRunGit(t, seed, "add", ".")
-	testRunGit(t, seed, "commit", "--author="+reworkTestSeat+" <test@test.com>", "-m", "feat: first attempt")
+	testRunGit(t, seed, "commit", "--author="+reworkTestSeat+" <"+testRepoEmail+">", "-m", "feat: first attempt")
 	testRunGit(t, seed, "push", "origin", "feature:feature")
 	rejected := gitpkgRev(t, seed, "HEAD")
 
