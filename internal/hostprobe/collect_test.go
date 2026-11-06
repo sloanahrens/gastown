@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -366,5 +367,50 @@ func TestParseContainers(t *testing.T) {
 				t.Errorf("parseContainers(%q) = %q, want %q", tc.out, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestCollectWithUsesTheGivenDiskReader pins the disk seam: a collection reads
+// the town volume through the reader it is given, once per collection, and
+// Collect reads through the production reader. The production reader is only
+// ever given a town root that does not exist, so its statfs fails before the
+// APFS branch that runs diskutil: this test starts no external tool even on
+// macOS (gt-yjzepk.15).
+func TestCollectWithUsesTheGivenDiskReader(t *testing.T) {
+	t.Parallel()
+	host := newFakeHost()
+	var paths []string
+	disk := func(path string) (*util.DiskSpaceInfo, error) {
+		paths = append(paths, path)
+		return &util.DiskSpaceInfo{AvailableBytes: 4 << 30, UsedPercent: 42}, nil
+	}
+
+	// One collection, one read of the town volume through the given reader.
+	for range 2 {
+		got := CollectWith(context.Background(), host.run, disk, "/town", testAt())
+		if want := (Disk{UsedPct: 42, FreeGB: 4}); got.Disk.Err != "" || got.Disk.Value != want {
+			t.Errorf("CollectWith published %+v, want %+v with no error", got.Disk, want)
+		}
+	}
+	if want := []string{"/town", "/town"}; !reflect.DeepEqual(paths, want) {
+		t.Errorf("the disk reader was asked for %q, want %q, one read per collection", paths, want)
+	}
+
+	// A missing town root separates the production reader from every fake: only
+	// util.GetDiskSpace's statfs fails there, and it fails before diskutil.
+	missing := filepath.Join(t.TempDir(), "no-such-town")
+	for name, read := range map[string]func() Probes{
+		"Collect": func() Probes { return Collect(context.Background(), host.run, missing, testAt()) },
+		"CollectWith with no reader": func() Probes {
+			return CollectWith(context.Background(), host.run, nil, missing, testAt())
+		},
+	} {
+		got := read()
+		if !strings.Contains(got.Disk.Err, "statfs") {
+			t.Errorf("%s on a missing town root published Disk = %+v, want the production reader's statfs error", name, got.Disk)
+		}
+		if got.Disk.Value != (Disk{}) {
+			t.Errorf("%s left Disk.Value = %+v on a failed read, want it zero", name, got.Disk.Value)
+		}
 	}
 }
