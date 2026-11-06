@@ -298,6 +298,33 @@ func TestJevHealthJSON(t *testing.T) {
 	assert.WithinDuration(t, now.Add(-3*time.Minute), *dedupe.LastPass, time.Second)
 }
 
+// TestJevHealthWeeklyReadsPatrolRecord judges the weekly notes battery by its
+// patrol's last run: its newest log line is nine days old, but the daemon
+// recorded the patrol's last run a day ago, so the row reads ok.
+func TestJevHealthWeeklyReadsPatrolRecord(t *testing.T) {
+	t.Parallel()
+	now := jevHealthFixedNow()
+	town := newJevHealthTown(t, now, 5*time.Minute)
+	cfg := `{"daemon":{"patrols":{"jev_dedupe":{"enabled":true,"max_usd_per_day":1,"usd_per_billion_tokens":42},"jev_notes":{"enabled":true}}}}`
+	require.NoError(t, os.WriteFile(filepath.Join(town, "settings", "config.json"), []byte(cfg), 0o644))
+	old := fmt.Sprintf(`{"ts":%q,"answers":{"q":"a"}}`, now.Add(-9*24*time.Hour).UTC().Format(time.RFC3339))
+	require.NoError(t, os.WriteFile(filepath.Join(town, ".runtime", "jev", "notes.jsonl"), []byte(old+"\n"), 0o600))
+	writeJevPatrolRuns(t, town, map[string]time.Time{
+		"jev_dedupe": now.Add(-5 * time.Minute),
+		"jev_notes":  now.Add(-24 * time.Hour),
+	})
+
+	out, err := runJevHealthCommand(t, town, now, true)
+	require.NoError(t, err)
+
+	var doc jevHealthDoc
+	require.NoError(t, json.Unmarshal([]byte(out), &doc))
+	notes := jevHealthRow(t, doc.Batteries, "notes")
+	assert.Equal(t, health.OK, notes.Status, "reason %q", notes.Reason)
+	require.NotNil(t, notes.LastPass)
+	assert.WithinDuration(t, now.Add(-24*time.Hour), *notes.LastPass, time.Second)
+}
+
 // TestJevHealthMissingPatrolRecordIsNotOK removes the daemon's last-run record
 // from an otherwise healthy town: dedupe reads unknown, not ok, and the command
 // exits 1.

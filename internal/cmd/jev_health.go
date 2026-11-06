@@ -66,8 +66,7 @@ battery with a median of %d or more lines a day wrote under %s of it;
 unanswered, when over %s of its last day's lines carry no answers;
 unparseable, when its log holds lines and none of them parses; or unknown,
 when a landing battery has no landing clock to be judged against, or a
-continuous battery's patrol last-run record cannot be read and its cursor is
-not stale.
+battery's patrol last-run record cannot be read and its cursor is not stale.
 
 The exit status is 1 when any enabled battery that is not idle by design is
 stale, late, low, unanswered, unparseable or unknown, and 0 otherwise, so one
