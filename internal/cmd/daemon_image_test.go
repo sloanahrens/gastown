@@ -622,41 +622,55 @@ func TestDaemonImagePinsFlag(t *testing.T) {
 	}
 }
 
-// A stale pin stops --apply before the plan is printed or a build step runs:
-// the pin-drift guard's error names the pin, and the builder is never reached.
+// A pin the guard cannot place against main stops --apply before the plan is
+// printed or a build step runs: the pin-drift guard's error names the pin, and
+// the builder is never reached. git exits 1 for a stale pin, and with another
+// status when it cannot answer, such as for a commit it does not have.
 func TestDaemonImageRefusesAStalePinBeforeBuilding(t *testing.T) {
 	t.Parallel()
-	r := newImageRig(t)
-	r.flags.apply = true
-	bySrc := map[string]string{
-		r.flags.bdSrc: imageTestBDCommit, r.flags.omSrc: imageTestOMCommit,
-		r.flags.hmSrc: imageTestHMCommit, r.flags.devopsSrc: imageTestDevCommit,
-	}
-	otherMain := strings.Repeat("9", 40)
-	r.deps.git = func(dir string, args ...string) ([]byte, error) {
-		if len(args) == 3 && args[0] == "rev-parse" && args[1] == "--verify" && args[2] == "origin/main^{commit}" {
-			if dir == r.flags.bdSrc {
-				return []byte(otherMain + "\n"), nil
+	for _, tc := range []struct {
+		name    string
+		exit    error
+		wantErr string
+	}{
+		{name: "stale pin", exit: fakeExit(1), wantErr: "not an ancestor of main"},
+		{name: "unanswerable ancestry check", exit: fakeExit(128), wantErr: "cannot test whether it is an ancestor"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newImageRig(t)
+			r.flags.apply = true
+			bySrc := map[string]string{
+				r.flags.bdSrc: imageTestBDCommit, r.flags.omSrc: imageTestOMCommit,
+				r.flags.hmSrc: imageTestHMCommit, r.flags.devopsSrc: imageTestDevCommit,
 			}
-			return []byte(bySrc[dir] + "\n"), nil
-		}
-		if dir == r.flags.bdSrc && len(args) > 0 && args[0] == "merge-base" {
-			return nil, errors.New("exit status 1")
-		}
-		return nil, errors.New("unexpected git call")
-	}
-	r.deps.builder = func(daemonimage.Builder) imageBuilder {
-		t.Error("the builder was reached after a stale pin")
-		return fakeImageBuilder{calls: &[]string{}}
-	}
+			otherMain := strings.Repeat("9", 40)
+			r.deps.git = func(dir string, args ...string) ([]byte, error) {
+				if len(args) == 3 && args[0] == "rev-parse" && args[1] == "--verify" && args[2] == "origin/main^{commit}" {
+					if dir == r.flags.bdSrc {
+						return []byte(otherMain + "\n"), nil
+					}
+					return []byte(bySrc[dir] + "\n"), nil
+				}
+				if dir == r.flags.bdSrc && len(args) > 0 && args[0] == "merge-base" {
+					return nil, tc.exit
+				}
+				return nil, errors.New("unexpected git call")
+			}
+			r.deps.builder = func(daemonimage.Builder) imageBuilder {
+				t.Error("the builder was reached after a refused pin")
+				return fakeImageBuilder{calls: &[]string{}}
+			}
 
-	err := runDaemonImage(context.Background(), r.flags, r.deps)
+			err := runDaemonImage(context.Background(), r.flags, r.deps)
 
-	if err == nil || !strings.Contains(err.Error(), "pin-drift guard:") || !strings.Contains(err.Error(), "not an ancestor of main") {
-		t.Fatalf("runDaemonImage error = %v, want the pin-drift guard's refusal", err)
-	}
-	if out := r.out.String(); out != "" {
-		t.Errorf("a stale pin printed a plan:\n%s", out)
+			if err == nil || !strings.Contains(err.Error(), "pin-drift guard:") || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("runDaemonImage error = %v, want the pin-drift guard's refusal containing %q", err, tc.wantErr)
+			}
+			if out := r.out.String(); out != "" {
+				t.Errorf("a refused pin printed a plan:\n%s", out)
+			}
+		})
 	}
 }
 
