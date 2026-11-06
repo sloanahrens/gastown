@@ -358,7 +358,7 @@ func nestedCommands(script shellparse.Script) []string {
 // newline, so `echo hi # note \` ends there and the `bash <<EOF` on the next
 // line reads the body, while the parser joins the two lines through the
 // backslash and reads one `echo hi bash` for which nothing reads the body
-// (gt-79opc). Reading the body both ways keeps the shell's reading, and the
+// (gt-3vky2). Reading the body both ways keeps the shell's reading, and the
 // body is judged and gated like every other payload.
 func dangerousHeredocBodies(script shellparse.Script, text string) []string {
 	var bodies []string
