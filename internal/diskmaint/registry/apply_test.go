@@ -509,3 +509,30 @@ func TestApplyReportsALedgerThatCannotBeWritten(t *testing.T) {
 		t.Fatalf("done = %+v, want the delete the run made", result.Done)
 	}
 }
+
+func TestApplyCollectOnlyRecordsAFailedCollect(t *testing.T) {
+	t.Parallel()
+	reg := newRecordingRegistry(nil)
+	run := &fakeRunner{err: errors.New("registry container is not running")}
+	path := ledgerPath(t)
+	target := NewCollectTarget(gcConfig(t, reg, path, run.run))
+
+	plan, err := target.Plan(context.Background(), diskmaint.Policy{Keep: 5, Apply: true})
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	result, err := target.Apply(context.Background(), plan)
+	if err != nil {
+		t.Fatalf("apply: %v; a failed collect is recorded and does not fail the apply", err)
+	}
+	if len(run.calls) != 1 {
+		t.Fatalf("commands = %v, want the one collect attempted", run.calls)
+	}
+	if result.Collected {
+		t.Fatal("result.Collected = true; the collect command failed")
+	}
+	want := []string{"collect: registry container is not running"}
+	if entry := readLedger(t, path)[0]; !slices.Equal(entry.Errors, want) {
+		t.Fatalf("ledger errors = %v, want %v", entry.Errors, want)
+	}
+}
