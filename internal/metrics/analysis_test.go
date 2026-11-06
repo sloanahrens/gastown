@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -180,7 +181,20 @@ func analysisOptions(town string) AnalysisOptions {
 		MangoGitDir: filepath.Join(town, "mango", ".repo.git"),
 		MangoBin:    filepath.Join(town, ".runtime", "metrics", "bin", "mango"),
 		Extract:     analysisExtract(filepath.Join(town, ".runtime", "metrics", analysisDay), new([]extractCall)),
+		LookPath:    goOnPath,
 	}
+}
+
+// goOnPath is the LookPath seam of a host with a Go toolchain: the analysis
+// builds mango.
+func goOnPath(name string) (string, error) {
+	return "/usr/local/go/bin/" + name, nil
+}
+
+// noGoOnPath is the LookPath seam of a host with no Go toolchain, such as the
+// daemon image: the analysis never builds mango.
+func noGoOnPath(string) (string, error) {
+	return "", exec.ErrNotFound
 }
 
 // extractCall is the town and docs directory the analysis gave its extract.
@@ -874,6 +888,91 @@ func TestAnalyseRebuildsMangoOnlyWhenItsHeadMoved(t *testing.T) {
 				t.Errorf("mango.sha = %q, want the head %s the analysis ran against", got, analysisHead)
 			}
 		})
+	}
+}
+
+// TestEnsureMango holds the build to a host with go on PATH. Without go the
+// binary at MangoBin is used as it is, and a missing one is an error naming
+// its platform path; with go the build writes into that path.
+func TestEnsureMango(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		lookPath  func(string) (string, error)
+		binary    bool
+		wantBuild bool
+		wantErr   []string
+	}{
+		{"no go and the platform binary is present: no build, nil error", noGoOnPath, true, false, nil},
+		{"no go and no binary: an error naming the platform path and the daemon image", noGoOnPath, false, false,
+			[]string{"linux-arm64/mango", "daemon image"}},
+		{"go on PATH and no binary: builds into the platform path", goOnPath, false, true, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town, dayDir := analysisTown(t)
+			bin := filepath.Join(town, ".runtime", "metrics", "bin", "linux-arm64", "mango")
+			opts := analysisOptions(town)
+			opts.MangoBin = bin
+			opts.LookPath = tc.lookPath
+			if tc.binary {
+				writeTownFile(t, bin, "binary\n")
+			}
+			env, calls := analysisEnv(t, town, dayDir, nil)
+
+			err := ensureMango(context.Background(), env, opts.withDefaults())
+			if len(tc.wantErr) == 0 && err != nil {
+				t.Fatalf("ensureMango: %v", err)
+			}
+			for _, want := range tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Errorf("ensureMango error = %v, want it to name %q", err, want)
+				}
+			}
+			build := callWith(*calls, "go")
+			if got := build != nil; got != tc.wantBuild {
+				t.Fatalf("go build ran = %v, want %v (calls: %v)", got, tc.wantBuild, *calls)
+			}
+			if !tc.wantBuild {
+				return
+			}
+			if got := build.argv; len(got) < 6 || got[4] != "-o" || got[5] != bin {
+				t.Fatalf("go build argv = %v, want -o %s", got, bin)
+			}
+			sha, err := os.ReadFile(filepath.Join(filepath.Dir(bin), mangoShaName))
+			if err != nil {
+				t.Fatalf("mango.sha in the platform directory: %v", err)
+			}
+			if got := strings.TrimSpace(string(sha)); got != analysisHead {
+				t.Errorf("mango.sha = %q, want the head %s", got, analysisHead)
+			}
+		})
+	}
+}
+
+// TestEnsureMangoReturnsAStatThatFailsForAnotherReason holds the no-go branch
+// to a missing binary: a path that cannot be stat'ed is an error that is not
+// the daemon image's, and nothing runs.
+func TestEnsureMangoReturnsAStatThatFailsForAnotherReason(t *testing.T) {
+	t.Parallel()
+	town, dayDir := analysisTown(t)
+	blocker := filepath.Join(town, "blocker")
+	writeTownFile(t, blocker, "not a directory\n")
+	opts := analysisOptions(town)
+	opts.MangoBin = filepath.Join(blocker, "mango")
+	opts.LookPath = noGoOnPath
+	env, calls := analysisEnv(t, town, dayDir, nil)
+
+	err := ensureMango(context.Background(), env, opts.withDefaults())
+	if err == nil {
+		t.Fatal("ensureMango = nil, want the stat error")
+	}
+	if strings.Contains(err.Error(), "daemon image") {
+		t.Errorf("ensureMango error = %v, want the stat error, not the missing-binary one", err)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("ensureMango ran %v, want no command with no go on PATH", *calls)
 	}
 }
 

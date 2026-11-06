@@ -483,57 +483,165 @@ func (s commandOverrides) invocation(t *testing.T, out *bytes.Buffer) Commands {
 }
 
 // TestFindMango holds the lookup's order: the override as given, then the
-// town's own build, then PATH, and nothing when none of them is there.
+// platform's build, then the legacy build, then PATH, and nothing when none of
+// them runs here. The lookup is pinned to linux/arm64 so no case reads the host.
 func TestFindMango(t *testing.T) {
 	t.Parallel()
 	const town = "/town"
-	built := filepath.Join(town, ".runtime", "metrics", "bin", "mango")
+	const linux = "linux"
+	platform := filepath.Join(town, ".runtime", "metrics", "bin", "linux-arm64", "mango")
+	legacy := filepath.Join(town, ".runtime", "metrics", "bin", "mango")
+	elf := []byte("\x7fELF\x02\x01\x01")
+	macho := []byte{0xcf, 0xfa, 0xed, 0xfe, 0x07, 0x00}
+	text := []byte("not a binary\n")
+	// present lists the paths Exists answers true for.
+	present := func(paths ...string) func(string) bool {
+		return func(path string) bool {
+			for _, p := range paths {
+				if path == p {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	// heads answers ReadHead from a map of path to header; a path not in it is
+	// unreadable.
+	heads := func(m map[string][]byte) func(string) ([]byte, error) {
+		return func(path string) ([]byte, error) {
+			if head, ok := m[path]; ok {
+				return head, nil
+			}
+			return nil, errors.New("unreadable")
+		}
+	}
+	noPath := func(string) (string, error) { return "", errors.New("not found") }
+	// wrongExists and wrongPath answer a case that consults them where it
+	// returns something other than its expected path, so a lookup that asks
+	// first fails the case.
+	wrongExists := func(string) bool { return true }
+	wrongPath := func(string) (string, error) { return "/wrong/mango", nil }
 	cases := []struct {
 		name   string
-		lookup func(t *testing.T) MangoLookup
+		goos   string
+		lookup MangoLookup
 		want   string
 	}{
 		{
 			"MANGO_BIN is taken as given",
-			func(t *testing.T) MangoLookup {
-				return MangoLookup{
-					Getenv:   func(string) string { return "/opt/mango" },
-					Exists:   unaskedExists(t),
-					LookPath: unaskedLookPath(t),
-				}
+			linux,
+			MangoLookup{
+				Getenv:   func(string) string { return "/opt/mango" },
+				Exists:   wrongExists,
+				LookPath: wrongPath,
 			},
 			"/opt/mango",
 		},
 		{
-			"the town's built binary is next",
-			func(t *testing.T) MangoLookup {
-				return MangoLookup{
-					Getenv:   func(string) string { return "" },
-					Exists:   func(path string) bool { return path == built },
-					LookPath: unaskedLookPath(t),
-				}
+			"the platform binary is next",
+			linux,
+			MangoLookup{
+				Getenv:   func(string) string { return "" },
+				Exists:   present(platform),
+				LookPath: wrongPath,
 			},
-			built,
+			platform,
 		},
 		{
-			"PATH is last",
-			func(*testing.T) MangoLookup {
-				return MangoLookup{
-					Getenv:   func(string) string { return "" },
-					Exists:   func(string) bool { return false },
-					LookPath: func(name string) (string, error) { return "/usr/local/bin/" + name, nil },
-				}
+			"the platform binary wins over a legacy bin/mango of this OS",
+			linux,
+			MangoLookup{
+				Getenv:   func(string) string { return "" },
+				Exists:   present(platform, legacy),
+				LookPath: wrongPath,
+				ReadHead: heads(map[string][]byte{legacy: elf}),
+			},
+			platform,
+		},
+		{
+			"a legacy file with the other OS's header is not returned",
+			linux,
+			MangoLookup{
+				Getenv:   func(string) string { return "" },
+				Exists:   present(legacy),
+				LookPath: noPath,
+				ReadHead: heads(map[string][]byte{legacy: macho}),
+			},
+			"",
+		},
+		{
+			"a legacy file with the host OS's header is returned",
+			linux,
+			MangoLookup{
+				Getenv:   func(string) string { return "" },
+				Exists:   present(legacy),
+				LookPath: wrongPath,
+				ReadHead: heads(map[string][]byte{legacy: elf}),
+			},
+			legacy,
+		},
+		{
+			"an ELF legacy file is not returned on darwin",
+			"darwin",
+			MangoLookup{
+				Getenv:   func(string) string { return "" },
+				Exists:   present(legacy),
+				LookPath: noPath,
+				ReadHead: heads(map[string][]byte{legacy: elf}),
+			},
+			"",
+		},
+		{
+			"a legacy file in no known format is returned",
+			linux,
+			MangoLookup{
+				Getenv:   func(string) string { return "" },
+				Exists:   present(legacy),
+				LookPath: wrongPath,
+				ReadHead: heads(map[string][]byte{legacy: text}),
+			},
+			legacy,
+		},
+		{
+			"a legacy file whose header cannot be read is returned, so its exec error surfaces",
+			linux,
+			MangoLookup{
+				Getenv:   func(string) string { return "" },
+				Exists:   present(legacy),
+				LookPath: wrongPath,
+				ReadHead: heads(nil),
+			},
+			legacy,
+		},
+		{
+			"a PATH hit with the other OS's header is skipped",
+			linux,
+			MangoLookup{
+				Getenv:   func(string) string { return "" },
+				Exists:   present(),
+				LookPath: func(name string) (string, error) { return "/usr/local/bin/" + name, nil },
+				ReadHead: heads(map[string][]byte{"/usr/local/bin/mango": macho}),
+			},
+			"",
+		},
+		{
+			"a PATH hit with the host OS's header is returned",
+			linux,
+			MangoLookup{
+				Getenv:   func(string) string { return "" },
+				Exists:   present(),
+				LookPath: func(name string) (string, error) { return "/usr/local/bin/" + name, nil },
+				ReadHead: heads(map[string][]byte{"/usr/local/bin/mango": elf}),
 			},
 			"/usr/local/bin/mango",
 		},
 		{
 			"no binary at all",
-			func(*testing.T) MangoLookup {
-				return MangoLookup{
-					Getenv:   func(string) string { return "" },
-					Exists:   func(string) bool { return false },
-					LookPath: func(string) (string, error) { return "", errors.New("not found") },
-				}
+			linux,
+			MangoLookup{
+				Getenv:   func(string) string { return "" },
+				Exists:   present(),
+				LookPath: noPath,
 			},
 			"",
 		},
@@ -541,28 +649,80 @@ func TestFindMango(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := FindMango(town, tc.lookup(t)); got != tc.want {
+			lookup := tc.lookup
+			lookup.GOOS, lookup.GOARCH = tc.goos, "arm64"
+			if got := FindMango(town, lookup); got != tc.want {
 				t.Errorf("FindMango = %q, want %q", got, tc.want)
 			}
 		})
 	}
 }
 
-// unaskedExists is an Exists seam that fails the case it is called in.
-func unaskedExists(t *testing.T) func(string) bool {
-	t.Helper()
-	return func(string) bool {
-		t.Fatal("Exists was asked after a step had already answered")
-		return false
+// TestFindMangoReadsTheHeaderOfTheFileItFinds runs the lookup's own header read
+// over a legacy file in a temp town: a Mac binary is skipped, a file of this OS
+// is returned, and no PATH is asked when the legacy file answers.
+func TestFindMangoReadsTheHeaderOfTheFileItFinds(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	legacy := filepath.Join(town, ".runtime", "metrics", "bin", "mango")
+	writeTownFile(t, legacy, "\xcf\xfa\xed\xfe\x07\x00\x00\x01")
+	noPath := func(string) (string, error) { return "", errors.New("not found") }
+	lookup := MangoLookup{
+		Getenv:   func(string) string { return "" },
+		Exists:   hostExists,
+		LookPath: noPath,
+		GOOS:     "linux",
+		GOARCH:   "arm64",
+	}
+	if got := FindMango(town, lookup); got != "" {
+		t.Errorf("FindMango over a Mach-O legacy file = %q, want none", got)
+	}
+	writeTownFile(t, legacy, "\x7fELF\x02\x01\x01\x00")
+	if got := FindMango(town, lookup); got != legacy {
+		t.Errorf("FindMango over an ELF legacy file = %q, want %q", got, legacy)
 	}
 }
 
-// unaskedLookPath is a LookPath seam that fails the case it is called in.
-func unaskedLookPath(t *testing.T) func(string) (string, error) {
-	t.Helper()
-	return func(string) (string, error) {
-		t.Fatal("LookPath was asked after a step had already answered")
-		return "", nil
+// TestHostReadHead holds the header read to its four bytes: a longer file
+// yields its first four, a shorter file what it holds, and a file that cannot
+// be opened or read is an error rather than an empty header.
+func TestHostReadHead(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	tests := []struct {
+		name    string
+		content string
+		missing bool
+		dir     bool
+		want    string
+		wantErr bool
+	}{
+		{"a longer file yields its first four bytes", "\x7fELF\x02\x01", false, false, "\x7fELF", false},
+		{"a shorter file yields what it holds", "ab", false, false, "ab", false},
+		{"an empty file yields no bytes", "", false, false, "", false},
+		{"a missing file is an error", "", true, false, "", true},
+		{"a directory opens but cannot be read, which is an error", "", false, true, "", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(town, strings.ReplaceAll(tc.name, " ", "-"))
+			switch {
+			case tc.dir:
+				if err := os.MkdirAll(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			case !tc.missing:
+				writeTownFile(t, path, tc.content)
+			}
+			got, err := hostReadHead(path)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("hostReadHead error = %v, want error %v", err, tc.wantErr)
+			}
+			if string(got) != tc.want {
+				t.Errorf("hostReadHead = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
