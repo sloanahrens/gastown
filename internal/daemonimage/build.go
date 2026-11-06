@@ -54,10 +54,20 @@ const (
 // stamps them: main.Build, git's abbreviation of the commit in the worktree, then
 // main.Commit, the full sha, so both images' bd report one build id (gt-glsx8).
 const (
-	gtCommitFlag = "-X github.com/steveyegge/gastown/internal/cmd.Commit="
-	bdBuildFlag  = "-X main.Build="
-	bdCommitFlag = "-X main.Commit="
+	gtVersionFlag = "-X github.com/steveyegge/gastown/internal/cmd.Version="
+	gtCommitFlag  = "-X github.com/steveyegge/gastown/internal/cmd.Commit="
+	bdBuildFlag   = "-X main.Build="
+	bdCommitFlag  = "-X main.Commit="
 )
+
+// gtLdflags is the link line of the image's gt. Version carries the same short
+// commit as Commit, so the image's `gt version` names the commit on its first
+// line (gt-yjzepk.14). make stamps Version with git describe, which is that short
+// commit only while the repo has no tag. Build and Plan both take their gt flags
+// from here, so the plan prints the flags the build runs.
+func gtLdflags(stamp string) string {
+	return gtVersionFlag + stamp + " " + gtCommitFlag + stamp
+}
 
 // planCommitStamp returns the stamp Plan prints for the commit the caller
 // named. That name may be abbreviated already; checkBuildInputs has refused
@@ -245,7 +255,7 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 		return nil, fmt.Errorf("daemonimage: cannot stamp gt with the commit resolved in %s: %w", b.GTSrc, err)
 	}
 	builds := []binary{
-		{name: "gt", src: b.GTSrc, commit: gtCommit, pkg: GTPackage, ldflags: gtCommitFlag + gtStamp},
+		{name: "gt", src: b.GTSrc, commit: gtCommit, pkg: GTPackage, ldflags: gtLdflags(gtStamp)},
 		{name: "bd", src: bdSrc, commit: bdCommit, pkg: BDPackage, ldflags: bdCommitFlag + bdCommit, stampsBuildID: true},
 		{name: "om", src: omSrc, commit: omCommit, pkg: OMPackage},
 	}
@@ -737,7 +747,7 @@ func (b Builder) plan(rev string, contextOnly bool) ([]string, error) {
 		lines = append(lines, fmt.Sprintf("pin %s: %s at %s", p.Name, p.URL, p.Commit))
 	}
 	lines = append(lines,
-		fmt.Sprintf("build gt: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "gt"), GTPackage, gtCommitFlag+stamp), " "), b.GTSrc, rev),
+		fmt.Sprintf("build gt: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "gt"), GTPackage, gtLdflags(stamp)), " "), b.GTSrc, rev),
 	)
 	lines = append(lines, bd.fetch...)
 	lines = append(lines, fmt.Sprintf("build bd: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "bd"), BDPackage, bdBuildFlag+planBuildID+" "+bdCommitFlag+bdCommit), " "), bd.dir, bdCommit))

@@ -286,9 +286,42 @@ func TestGTCommitStampUsesBuildstamp(t *testing.T) {
 	if _, err := b.BuildBinaries(context.Background(), short); err != nil {
 		t.Fatalf("BuildBinaries: %v", err)
 	}
-	want := []string{gtCommitFlag + testRev[:buildstamp.Len]}
+	want := []string{gtLdflags(testRev[:buildstamp.Len])}
 	if got := ldflagsOf(run.calls[0].argv); !reflect.DeepEqual(got, want) {
 		t.Errorf("gt build ldflags = %q, want the first %d characters of the resolved %s: %q", got, buildstamp.Len, testRev, want)
+	}
+}
+
+// TestGTBuildStampsVersionAndCommit: the image's gt link line stamps Version and
+// Commit with the same short commit, so `gt version` names that commit on its
+// first line (gt-yjzepk.14). It goes red if the Version flag is dropped, or if
+// the two flags carry different values.
+func TestGTBuildStampsVersionAndCommit(t *testing.T) {
+	t.Parallel()
+	b, run := builderFor(t)
+	if _, err := b.BuildBinaries(context.Background(), testRev); err != nil {
+		t.Fatalf("BuildBinaries: %v", err)
+	}
+	stamp := testRev[:buildstamp.Len]
+	want := []string{"-X github.com/steveyegge/gastown/internal/cmd.Version=" + stamp + " -X github.com/steveyegge/gastown/internal/cmd.Commit=" + stamp}
+	if got := ldflagsOf(run.calls[0].argv); !reflect.DeepEqual(got, want) {
+		t.Errorf("gt build ldflags = %q, want %q", got, want)
+	}
+}
+
+// TestBDBuildFlagsAreUnchanged: the image's bd link line keeps the stamps it had
+// before gt's Version flag was added: main.Build from git's abbreviation of the
+// commit, then main.Commit with the full sha (gt-glsx8). It goes red if a change
+// touches bd's flags.
+func TestBDBuildFlagsAreUnchanged(t *testing.T) {
+	t.Parallel()
+	b, run := builderFor(t)
+	if _, err := b.BuildBinaries(context.Background(), testRev); err != nil {
+		t.Fatalf("BuildBinaries: %v", err)
+	}
+	want := []string{"-X main.Build=" + testBDShort + " -X main.Commit=" + testBDCommit}
+	if got := ldflagsOf(run.calls[1].argv); !reflect.DeepEqual(got, want) {
+		t.Errorf("bd build ldflags = %q, want %q", got, want)
 	}
 }
 
