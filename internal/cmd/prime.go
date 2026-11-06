@@ -152,19 +152,20 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 	if err != nil {
 		return fmt.Errorf("detecting role: %w", err)
 	}
+	// prime verifies the caller's worktree and takes the identity lock there.
+	// Neither can be done for a directory this process does not have (a Mac path
+	// in a pod), and a check that cannot run is not a check that passed: prime
+	// refuses, naming the directory, instead of printing a context it never
+	// verified (gt-yjzepk.1).
 	callerPresent, err := callercwd.Exists()
 	if err != nil {
 		return err
 	}
-	if callerPresent {
-		if err := ensureRoleWorktreeIntegrity(cwd, townRoot, roleInfo.Role); err != nil {
-			return err
-		}
-	} else {
-		// The caller's worktree is not in this process (a Mac path in a pod),
-		// so there is no .git here to validate and no lock or redirect to
-		// write. Saying so keeps the skip visible rather than reading as clean.
-		fmt.Fprintf(os.Stderr, "gt prime: the caller's directory %s is not present here; worktree checks and the identity lock run where it lives\n", cwd)
+	if !callerPresent {
+		return fmt.Errorf("gt prime: the caller's directory %s is not present here, so the worktree check and the identity lock cannot run; refusing rather than skipping them", cwd)
+	}
+	if err := ensureRoleWorktreeIntegrity(cwd, townRoot, roleInfo.Role); err != nil {
+		return err
 	}
 
 	// --step is a read-only fetch: no hook handling, no handoff-marker removal,
@@ -239,7 +240,7 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 
 	primeContinuationMode = primeHookSource == "compact" || primeHandoffReason == "compaction"
 
-	if err := setupPrimeSession(ctx, roleInfo, callerPresent, lock.New(ctx.WorkDir)); err != nil {
+	if err := setupPrimeSession(ctx, roleInfo, lock.New(ctx.WorkDir)); err != nil {
 		return err
 	}
 
@@ -615,22 +616,25 @@ func warnRoleMismatch(roleInfo RoleInfo, cwd string) {
 
 // setupPrimeSession handles identity locking, beads redirect, and session events.
 // Skipped entirely in dry-run mode. The lock and redirect live in the caller's
-// worktree, so callerPresent false (a Mac path in a pod) skips both.
+// worktree, so a work directory this process does not have is REFUSED, never
+// skipped: an identity lock nobody took would let two sessions share an identity
+// (gt-yjzepk.1).
 //
 // identityLock is the lock for ctx.WorkDir. runPrime passes lock.New there;
 // tests pass one whose staleness comes from a scripted process table, so the
 // collision check never depends on which processes this host is running.
-func setupPrimeSession(ctx RoleContext, roleInfo RoleInfo, callerPresent bool, identityLock *lock.Lock) error {
+func setupPrimeSession(ctx RoleContext, roleInfo RoleInfo, identityLock *lock.Lock) error {
 	if primeDryRun {
 		return nil
 	}
-	if callerPresent {
-		if err := claimIdentityLock(identityLock, ctx); err != nil {
-			return err
-		}
-		if !roleInfo.Mismatch {
-			ensureBeadsRedirect(ctx)
-		}
+	if info, err := os.Stat(ctx.WorkDir); err != nil || !info.IsDir() {
+		return fmt.Errorf("gt prime: the work directory %s is not present here, so the identity lock cannot be taken; refusing rather than skipping it", ctx.WorkDir)
+	}
+	if err := claimIdentityLock(identityLock, ctx); err != nil {
+		return err
+	}
+	if !roleInfo.Mismatch {
+		ensureBeadsRedirect(ctx)
 	}
 	repairSessionEnv(ctx, roleInfo)
 	// --hook is the flag that lets a run emit session_start at all; whether

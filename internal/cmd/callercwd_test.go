@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -93,6 +94,17 @@ func TestGtPrimeWithCallerCwd(t *testing.T) {
 			t.Errorf("prime ran %q in %q, want the caller's directory %q", call.line, call.workDir, callerPath)
 		}
 	}
+
+	t.Run("gt prime refuses the absent caller directory before any check is skipped", func(t *testing.T) {
+		err := runPrime(primeCmd, nil)
+		if err == nil {
+			t.Fatalf("runPrime = nil, want a refusal: the worktree check and the identity lock cannot run for %s", callerPath)
+		}
+		want := fmt.Sprintf("the caller's directory %s is not present here", callerPath)
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("runPrime error = %q, want it to name %q", err, want)
+		}
+	})
 
 	t.Run("gt done refuses the absent caller directory", func(t *testing.T) {
 		err := runDone(nil, nil)
@@ -314,22 +326,24 @@ func writeGitMetadata(t *testing.T, dir string) {
 	}
 }
 
-// TestSetupPrimeSessionSkipsAbsentCallerWork is the identity lock's skip: when
-// the caller directory is absent in this process, prime may not claim (or
-// refuse on) a lock that lives in that worktree. The lock's liveness is
-// injected, so the test never depends on the host's processes.
-func TestSetupPrimeSessionSkipsAbsentCallerWork(t *testing.T) {
+// TestSetupPrimeSessionRefusesAnAbsentWorkDir is the identity lock's fail-closed
+// case: when the work directory is absent in this process, setupPrimeSession
+// does not skip the lock, it refuses. A lock nobody took lets two sessions share
+// an identity. The lock's liveness is injected, so the test never depends on the
+// host's processes.
+func TestSetupPrimeSessionRefusesAnAbsentWorkDir(t *testing.T) {
 	t.Parallel()
-	workDir := t.TempDir()
-	writeHeldLock(t, workDir)
+	workDir := filepath.Join(t.TempDir(), "no", "such", "worktree")
 
 	ctx := RoleContext{Role: RoleCrew, Rig: "gastown", Polecat: "eagle", TownRoot: workDir, WorkDir: workDir}
 	info := RoleInfo{Role: RoleCrew, Rig: "gastown", Polecat: "eagle"}
 
-	// The lock's table says the holder is alive, so claiming it would refuse.
-	// callerPresent false must skip the claim entirely.
-	if err := setupPrimeSession(ctx, info, false, lock.NewWithLiveness(workDir, liveTable)); err != nil {
-		t.Fatalf("setupPrimeSession with an absent caller directory = %v, want the lock skipped", err)
+	err := setupPrimeSession(ctx, info, lock.NewWithLiveness(workDir, liveTable))
+	if err == nil || !strings.Contains(err.Error(), "is not present here") {
+		t.Fatalf("setupPrimeSession with an absent work directory = %v, want a refusal naming that it is not present", err)
+	}
+	if _, statErr := os.Stat(workDir); statErr == nil {
+		t.Errorf("setupPrimeSession created %s while refusing", workDir)
 	}
 }
 
@@ -362,7 +376,7 @@ func TestSetupPrimeSessionRefusesAnIdentityCollision(t *testing.T) {
 	ctx := RoleContext{Role: RoleCrew, Rig: "gastown", Polecat: "eagle", TownRoot: workDir, WorkDir: workDir}
 	info := RoleInfo{Role: RoleCrew, Rig: "gastown", Polecat: "eagle"}
 
-	err := setupPrimeSession(ctx, info, true, lock.NewWithLiveness(workDir, liveTable))
+	err := setupPrimeSession(ctx, info, lock.NewWithLiveness(workDir, liveTable))
 	if err == nil {
 		t.Fatalf("setupPrimeSession = nil, want the identity collision")
 	}
@@ -420,8 +434,24 @@ func TestGuardsIgnoreTheCallerCwd(t *testing.T) {
 	// Permitted: a directory outside any town where each guard would allow.
 	permitted := t.TempDir()
 
+	// The production hook path: the same entry the hook commands call, with the
+	// process directory seam pointed at the forbidden worktree. The variable is
+	// set around these calls, so a guard that read it would flip the verdict.
+	inForbiddenCrew := func(run func() error) error {
+		prev := hookWorktreeIntegrityGetwd
+		//testpolicy:allow no-global-swap — the production getwd seam of the hook integrity guard, restored below
+		hookWorktreeIntegrityGetwd = func() (string, error) { return forbiddenCrew, nil }
+		defer func() { hookWorktreeIntegrityGetwd = prev }()
+		return run()
+	}
 	runHookIntegrity := func() error {
-		return hookWorktreeIntegrityIn(func() (string, error) { return forbiddenCrew, nil }, workspace.Find)
+		return inForbiddenCrew(ensureCurrentHookWorktreeIntegrity)
+	}
+	runHookShowCommand := func() error {
+		return inForbiddenCrew(func() error { return runHookShow(nil, nil) })
+	}
+	runHookCommand := func() error {
+		return inForbiddenCrew(func() error { return runHook(nil, []string{"gt-abc"}) })
 	}
 
 	runDangerous := func() error {
@@ -448,6 +478,8 @@ func TestGuardsIgnoreTheCallerCwd(t *testing.T) {
 	// with the variable unset.
 	baseline := map[string]error{
 		"hook integrity":    runHookIntegrity(),
+		"gt hook show":      runHookShowCommand(),
+		"gt hook <bead>":    runHookCommand(),
 		"dangerous-command": runDangerous(),
 		"pr-workflow":       runPRWorkflow(),
 	}
@@ -459,6 +491,8 @@ func TestGuardsIgnoreTheCallerCwd(t *testing.T) {
 		run  func() error
 	}{
 		{name: "hook integrity", run: runHookIntegrity},
+		{name: "gt hook show", run: runHookShowCommand},
+		{name: "gt hook <bead>", run: runHookCommand},
 		{name: "dangerous-command", run: runDangerous},
 		{name: "pr-workflow", run: runPRWorkflow},
 	} {
@@ -474,5 +508,25 @@ func TestGuardsIgnoreTheCallerCwd(t *testing.T) {
 				t.Fatalf("%s verdict changed with GT_CALLER_CWD set: %q, want %q", tc.name, got, baseline[tc.name])
 			}
 		})
+	}
+}
+
+// TestHookIntegrityReadsTheProcessDirectory pins the production seam itself, not
+// only the verdict behind an injected one: the hook integrity check's directory
+// source IS os.Getwd, so a change that points it at GT_CALLER_CWD (directly or
+// through a wrapper) fails here even though the guard table injects its own.
+// With the variable naming an absent path and the real seam in place, the
+// verdict is about the process directory and never names the variable's path.
+//
+//testpolicy:allow parallel — GT_CALLER_CWD is the input under test, which t.Setenv shares with the whole process
+func TestHookIntegrityReadsTheProcessDirectory(t *testing.T) {
+	if reflect.ValueOf(hookWorktreeIntegrityGetwd).Pointer() != reflect.ValueOf(os.Getwd).Pointer() {
+		t.Fatalf("hookWorktreeIntegrityGetwd is not os.Getwd: the hook integrity guard must read the real directory")
+	}
+	absent := filepath.Join(t.TempDir(), "not", "here")
+	//testpolicy:allow no-env — GT_CALLER_CWD is the input under test
+	t.Setenv(callercwd.EnvCallerCwd, absent)
+	if err := ensureCurrentHookWorktreeIntegrity(); err != nil && strings.Contains(err.Error(), absent) {
+		t.Fatalf("the hook integrity guard named the variable's path %s: %v", absent, err)
 	}
 }
