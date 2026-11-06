@@ -106,7 +106,7 @@ labels:
   - priority:normal
 ```
 
-These beads sync via git, so all clones of the rig see the same state.
+These beads live in the rig's database, so all clones of the rig see the same state.
 
 ## Rig Control
 

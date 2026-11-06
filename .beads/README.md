@@ -44,11 +44,11 @@ Issues in Beads are:
 
 🚀 **Developer Focused**
 - Issues live in your repo, right next to your code
-- Works offline, syncs when you push
+- Works offline; issues live in the rig's database, not in git history
 - Fast, lightweight, and stays out of your way
 
 🔧 **Git Integration**
-- Automatic sync with git commits
+- Issues are kept in the rig's database, not in your commits
 - Branch-aware issue tracking
 - Intelligent JSONL merge resolution
 
