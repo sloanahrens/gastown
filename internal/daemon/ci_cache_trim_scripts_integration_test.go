@@ -7,10 +7,6 @@ package daemon
 // text. This is the integration tier because each case starts sh, which the
 // unit tier forbids; the temporary tree each case builds stands in for the
 // ci-gocache volume (gt-by8lm5).
-//
-// Known gap (gt-qaqvf4): the apply's empty-directory sweep runs at -mindepth 1,
-// so it also removes the cache's depth-1 two-hex directories, which Go creates
-// once and does not recreate. This test does not pin them.
 
 import (
 	"bytes"
@@ -56,8 +52,8 @@ var ciCacheScriptRemoved = []string{
 }
 
 // ciCacheScriptTree writes the volume tree the cases run against under root:
-// the old and the fresh file. The apply empties ab/cd and 00, each of which holds
-// only an old file.
+// the old and the fresh file. The apply empties 00, a depth-1 two-hex shard
+// directory, and ab/cd at depth 2, each of which holds only an old file.
 func ciCacheScriptTree(t *testing.T, root string) {
 	t.Helper()
 	now := time.Now()
@@ -130,16 +126,19 @@ func ciCacheScriptRun(t *testing.T, script, root, minutes string) (string, strin
 }
 
 // TestIntegrationCICacheTrimScripts runs the trim's two programs against a
-// temporary volume tree: the dry run reports the old files and removes none,
-// the apply removes exactly them and the directory they empty, and both keep
-// the fresh file and the root's own file, replying with the three lines the
-// parser reads.
+// temporary volume tree: the dry run reports the old files and removes none;
+// the apply removes exactly them, removing the empty directory the removal
+// leaves below the top level while keeping the depth-1 shard directory it
+// empties; both keep the fresh file and the root's own file, replying with the
+// three lines the parser reads.
 //
-// Expected to fail under three changes to the programs, each run by hand on
-// the bead (gt-by8lm5): flipping the age test from older-than to newer-than
-// (-mmin +age to -mmin -age, so the newest files go), dropping the depth floor
-// (-mindepth 2 to -mindepth 0, so the root's own files go), and moving the
-// missing-path exit away from ciCacheMissingPathExit.
+// Expected to fail under four changes to the programs, each run by hand on its
+// bead: flipping the age test from older-than to newer-than (-mmin +age to
+// -mmin -age, so the newest files go), dropping the depth floor (-mindepth 2 to
+// -mindepth 0, so the root's own files go), and moving the missing-path exit
+// away from ciCacheMissingPathExit (gt-by8lm5); and restoring the depth-1
+// empty-directory sweep (-mindepth 2 to -mindepth 1, so the cache's shard
+// directory goes) (gt-qaqvf4).
 func TestIntegrationCICacheTrimScripts(t *testing.T) {
 	t.Parallel()
 
@@ -198,6 +197,26 @@ func TestIntegrationCICacheTrimScripts(t *testing.T) {
 		}
 		if _, err := os.Stat(filepath.Join(root, "ab", "cd")); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("the directory the removal emptied is still present (stat error %v)", err)
+		}
+	})
+
+	t.Run("the apply keeps the depth-1 two-hex directory it empties", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		ciCacheScriptTree(t, root)
+		shard := filepath.Join(root, "00")
+
+		_, stderr, status := ciCacheScriptRun(t, ciCacheTrimScript, root, ciCacheScriptAgeMinutes)
+		if status != 0 {
+			t.Fatalf("the apply exited %d: %s", status, stderr)
+		}
+		// 00's only file is older than the age, so the apply empties it: the
+		// file goes, and the shard directory Go created stays for later writes.
+		if _, err := os.Stat(filepath.Join(shard, "old-at-two.txt")); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the apply kept the old file in the depth-1 directory (stat error %v)", err)
+		}
+		if _, err := os.Stat(shard); err != nil {
+			t.Errorf("the apply removed the depth-1 two-hex directory it emptied: %v", err)
 		}
 	})
 
