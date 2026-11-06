@@ -218,8 +218,17 @@ exit 0
 	// gate relies on it for: with STUB_LINT_CONTEND=n another run holds the module
 	// lock for the first n runs, so each of those exits 3 with golangci-lint's
 	// lock line, as the real one does, and the gate's wait script has to retry.
+	// `version --short` answers with the Makefile's own pin, so a case that does
+	// not set STUB_LINT_VERSION carries the version the gate requires;
+	// STUB_LINT_MISSING models a PATH with no linter at all.
 	gateStubLint = `#!/bin/sh
 echo "golangci-lint $*" >>"$STUB_LOG"
+[ -n "${STUB_LINT_MISSING:-}" ] && exit 127
+if [ "$1" = version ]; then
+	pin=$(sed -n 's/^GOLANGCI_LINT_VERSION[[:space:]]*?=[[:space:]]*//p' Makefile | head -1)
+	echo "${STUB_LINT_VERSION-${pin#v}}"
+	exit 0
+fi
 rel=$(pwd -P); rel=${rel#"$STUB_REPO"}; rel=${rel#/}
 [ "$rel" = tracker ] && echo "golangci-lint in tracker" >>"$STUB_LOG"
 if [ "$1" = run ] && [ -n "${STUB_LINT_CONTEND:-}" ]; then

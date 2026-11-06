@@ -1,4 +1,4 @@
-.PHONY: build install gt-installer install-local uninstall check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-integration-wall test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate gate-lint gate-test tier-check presubmit exec-tax-preflight polecat-image polecat-seed-stage polecat-seed-pins polecat-caches polecat-node-prune openshell-providers
+.PHONY: build install gt-installer install-local uninstall check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-integration-wall test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools golangci-lint-version docs-lint bd-command-tree gate gate-lint gate-test tier-check presubmit exec-tax-preflight polecat-image polecat-seed-stage polecat-seed-pins polecat-caches polecat-node-prune openshell-providers
 
 # The gate (docs/testing.md, "The gate"). Three tiers, each one target, and
 # every caller runs them verbatim: CI, gt done, the land path and a human at a
@@ -135,8 +135,25 @@ build:
 # installs the pinned version with the current toolchain.
 GOLANGCI_LINT_VERSION ?= v2.13.2
 
+# golangci-lint prints its version without the leading v the module pin carries,
+# so every comparison strips it.
+GOLANGCI_LINT_VERSION_SHORT := $(GOLANGCI_LINT_VERSION:v%=%)
+
+# Installs nothing when PATH already carries the pin, which is how the gate
+# runner gets its linter from the CI base image (gt-zzo1g2); it used to compile
+# the linter from source on every run (13.5 s).
 lint-tools:
-	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	@got=$$(golangci-lint version --short 2>/dev/null); \
+	if [ "$$got" = "$(GOLANGCI_LINT_VERSION_SHORT)" ]; then \
+		echo "lint-tools: golangci-lint $(GOLANGCI_LINT_VERSION) is already on PATH"; \
+	else \
+		go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION); \
+	fi
+
+# The pin, for the ci-base image build (gt-zzo1g2): the recipe takes it from
+# here, so the version lives in one place.
+golangci-lint-version:
+	@echo $(GOLANGCI_LINT_VERSION)
 
 # The OpenShell polecat sandbox pieces an operator runs by hand (claude-q3f.9).
 # deploy/polecat lands from the crew branch; no target below runs in the gate.
@@ -278,8 +295,12 @@ openshell-providers:
 # lint still contended at the end exits red with that evidence. 0 = one try.
 LINT_LOCK_WAIT ?= 600
 
+# The linter comes from PATH. A missing one, or one at another version, is
+# refused here naming the pin rather than silently linting with tools nobody
+# pinned (gt-zzo1g2).
 lint: docs-lint
-	@golangci-lint version >/dev/null 2>&1 || { echo "golangci-lint missing: run 'make lint-tools'"; exit 1; }
+	@got=$$(golangci-lint version --short 2>/dev/null) || { echo "lint: golangci-lint is missing from PATH or cannot report its version; the gate runner's CI base image must carry $(GOLANGCI_LINT_VERSION) (gt-zzo1g2), or run 'make lint-tools'"; exit 1; }; \
+	[ "$$got" = "$(GOLANGCI_LINT_VERSION_SHORT)" ] || { echo "lint: golangci-lint on PATH is $${got:-unknown}, not the pinned $(GOLANGCI_LINT_VERSION) (gt-zzo1g2): run 'make lint-tools', or rebuild the CI base image with the pin"; exit 1; }
 	@echo "lint: golangci-lint run --timeout=5m (a contended lint is retried for up to $(LINT_LOCK_WAIT)s while another run holds the module lock)"
 	bash scripts/lint-lock-wait.sh $(LINT_LOCK_WAIT) golangci-lint run --timeout=5m $(LINT_RUNNER_FLAGS) || { echo "lint failed; if the error is 'can't load config', run 'make lint-tools'"; exit 1; }
 	@for m in $(TESTED_MODULES); do echo "lint: golangci-lint run in $$m"; (cd "$$m" && bash ../scripts/lint-lock-wait.sh $(LINT_LOCK_WAIT) golangci-lint run --timeout=5m --config ../.golangci.yml --build-tags integration $(LINT_RUNNER_FLAGS)) || { echo "lint failed in $$m"; exit 1; }; done
