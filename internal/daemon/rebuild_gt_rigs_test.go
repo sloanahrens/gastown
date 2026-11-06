@@ -109,12 +109,28 @@ func TestRebuildGTSyncsOtherRigCheckouts(t *testing.T) {
 // changes the install's outcome nor stops the rigs after them. The timeout is
 // driven, not faked: the slow rig's runner returns only once the sweep's own
 // per-rig context is done.
+//
+// The bound is asked per rig, and only the slow rig is held to a short one: its
+// runner never answers, so any positive bound expires it, while every other rig
+// gets ten minutes no loaded machine can cross. The other rigs' outcomes then
+// depend on their scripted answers, never on how fast the machine is
+// (gt-gg9hv.51).
 func TestRebuildGTRigCheckoutSyncFailureNeverFailsTheInstall(t *testing.T) {
 	t.Parallel()
 	d, _ := rebuildGTTown(t)
 	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return staleInfo(3) }
 	d.rebuildGTGateFn = func() (string, bool) { return "", false }
-	d.rebuildGTRigSyncTimeoutFn = func() time.Duration { return 50 * time.Millisecond }
+	var boundsMu sync.Mutex
+	var boundsAsked []string
+	d.rebuildGTRigSyncTimeoutFn = func(rig string) time.Duration {
+		boundsMu.Lock()
+		boundsAsked = append(boundsAsked, rig)
+		boundsMu.Unlock()
+		if rig == "slow" {
+			return time.Millisecond
+		}
+		return 10 * time.Minute
+	}
 	d.rebuildGTRigSyncBudgetFn = func() time.Duration { return 10 * time.Minute }
 	broken := rigCheckout(t, d, "broken")
 	slow := rigCheckout(t, d, "slow")
@@ -145,10 +161,16 @@ func TestRebuildGTRigCheckoutSyncFailureNeverFailsTheInstall(t *testing.T) {
 		return cliReply{}
 	})
 	// The slow rig's git never answers: it waits on the context the sweep
-	// bounds with rebuildGTRigSyncTimeoutFn, so the real 50ms per-rig bound is
+	// bounds with rebuildGTRigSyncTimeoutFn, so the real 1ms per-rig bound is
 	// what cuts it off rather than an error the test pretends it returned.
 	d.rebuildGTRigGitFn = func(ctx context.Context, checkout string, args ...string) (string, error) {
 		if checkout != slow {
+			// Only the slow rig may carry a short bound: a short one on any
+			// other rig would let a loaded machine rewrite that rig's scripted
+			// outcome as a timeout.
+			if dl, ok := ctx.Deadline(); !ok || time.Until(dl) < time.Minute {
+				return "", errors.New("another rig's context carries a short bound")
+			}
 			return d.rebuildGTGitCtx(ctx, checkout, args...)
 		}
 		// The sweep's budget is ten minutes here, so a context that lives longer
@@ -179,6 +201,79 @@ func TestRebuildGTRigCheckoutSyncFailureNeverFailsTheInstall(t *testing.T) {
 		if !strings.Contains(logs.String(), want) {
 			t.Errorf("log does not contain %q:\n%s", want, logs.String())
 		}
+	}
+	// One question per rig, so the bound belongs to the rig the sweep is about
+	// to sync rather than to the sweep.
+	boundsMu.Lock()
+	asked := slices.Clone(boundsAsked)
+	boundsMu.Unlock()
+	if want := []string{"broken", "clean", "slow"}; !slices.Equal(asked, want) {
+		t.Errorf("the per-rig bound was asked for %v, want one question per rig %v", asked, want)
+	}
+}
+
+// TestRebuildGTRigCheckoutSlowRigThatAnswersIsNotATimeout holds the bound to
+// its part: with the same per-rig bounds as the failure case, a slow rig whose
+// git answers promptly is reported by its real result, never as a timeout, so
+// nothing but the bound expiring can make a rig time out (gt-gg9hv.51).
+func TestRebuildGTRigCheckoutSlowRigThatAnswersIsNotATimeout(t *testing.T) {
+	t.Parallel()
+	d, _ := rebuildGTTown(t)
+	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return staleInfo(3) }
+	d.rebuildGTGateFn = func() (string, bool) { return "", false }
+	d.rebuildGTRigSyncTimeoutFn = func(rig string) time.Duration {
+		if rig == "slow" {
+			return time.Millisecond
+		}
+		return 10 * time.Minute
+	}
+	d.rebuildGTRigSyncBudgetFn = func() time.Duration { return 10 * time.Minute }
+	broken := rigCheckout(t, d, "broken")
+	slow := rigCheckout(t, d, "slow")
+	clean := rigCheckout(t, d, "clean")
+	setupRigs(d, "broken", "slow", "clean")
+
+	var logs strings.Builder
+	d.logger = log.New(&logs, "", 0)
+
+	// The slow rig's git answers promptly; it is clean and behind origin/main,
+	// so its real result is a fast-forward, not the timeout its bound allows.
+	cli := newFakeCLIFor(func(c cliCall) cliReply {
+		switch {
+		case gitSub(c, "branch"):
+			return cliReply{stdout: "main\n"}
+		case gitSub(c, "rev-parse"):
+			return cliReply{stdout: "abc1234567890\n"}
+		case gitSub(c, "log"):
+			return cliReply{stdout: "abc1234 the commit that was inert\n"}
+		case gitSub(c, "fetch") && gitDir(c) == broken:
+			return cliReply{stderr: "fatal: could not read from remote repository", code: 1}
+		case gitSub(c, "rev-list"):
+			return cliReply{stdout: "0\t3\n"}
+		}
+		if c.name == "gt-installer" {
+			return cliReply{stdout: "install-gt: RESULT installed abc1234567890 beefbeef -\n"}
+		}
+		return cliReply{}
+	})
+	d.execCmd = cli.run
+
+	if settled := d.runRebuildGT(); !settled {
+		t.Fatal("a failing rig turned a reached verdict into a deferral")
+	}
+	if merged := mergedDirs(cli); !slices.Equal(merged, []string{clean, slow}) {
+		t.Errorf("fast-forwarded checkouts = %v, want %s and %s: the bound must not decide a rig that answered", merged, clean, slow)
+	}
+	for _, want := range []string{
+		"rebuild_gt: rig broken: cannot fetch origin: fatal: could not read from remote repository",
+		"rebuild_gt: rig checkouts: 2 moved, 0 skipped, 1 failed",
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("log does not contain %q:\n%s", want, logs.String())
+		}
+	}
+	if strings.Contains(logs.String(), "context deadline exceeded") {
+		t.Errorf("a rig that answered was reported as timed out:\n%s", logs.String())
 	}
 }
 

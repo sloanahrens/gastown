@@ -840,11 +840,6 @@ func (d *Daemon) rebuildGTSyncRigCheckouts() rebuildGTRigCheckoutCounts {
 	budgetCtx, cancel := context.WithTimeout(parent, budget)
 	defer cancel()
 
-	timeout := rebuildGTRigSyncTimeout
-	if d.rebuildGTRigSyncTimeoutFn != nil {
-		timeout = d.rebuildGTRigSyncTimeoutFn()
-	}
-
 	// Cloned before sorting: getKnownRigs hands back the daemon's cached slice,
 	// which readers on other goroutines hold.
 	rigs := slices.Clone(d.getKnownRigs())
@@ -892,6 +887,13 @@ func (d *Daemon) rebuildGTSyncRigCheckouts() rebuildGTRigCheckoutCounts {
 				d.logger.Printf("rebuild_gt: rig %s: the %s sweep budget is spent; leaving its checkout alone", rest.rig, budget)
 			}
 			break
+		}
+		// The bound is asked with the rig, so a test can hold one rig short
+		// and every other generous: the outcome each rig gets then depends on
+		// the rig, never on how fast the machine is (gt-gg9hv.51).
+		timeout := rebuildGTRigSyncTimeout
+		if d.rebuildGTRigSyncTimeoutFn != nil {
+			timeout = d.rebuildGTRigSyncTimeoutFn(rig.rig)
 		}
 		rigCtx, rigCancel := context.WithTimeout(budgetCtx, timeout)
 		moved, failed, why := d.rebuildGTSyncRigCheckout(rigCtx, rig.dir)

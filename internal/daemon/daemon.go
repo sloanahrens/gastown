@@ -474,9 +474,12 @@ type Daemon struct {
 	// no test can reach the operator's marker through that variable (gt-vc34c).
 	rebuildGTPendingFn func() installpending.Store
 	// rebuildGTRigSyncTimeoutFn answers how long one rig checkout's sync may
-	// run; nil is rebuildGTRigSyncTimeout. Tests set a short bound to drive the
-	// timeout path without waiting out the real one (gt-f91o8).
-	rebuildGTRigSyncTimeoutFn func() time.Duration
+	// run, asked with the rig it is about to sync; nil is
+	// rebuildGTRigSyncTimeout for every rig. It takes the rig so a test can
+	// give one rig a short bound and the others a bound no loaded machine can
+	// cross, making the timeout path depend on the rig and not on speed
+	// (gt-f91o8, gt-gg9hv.51).
+	rebuildGTRigSyncTimeoutFn func(rig string) time.Duration
 	// rebuildGTRigSyncBudgetFn answers how long the whole rig sweep may run;
 	// nil is rebuildGTRigSyncBudget. Tests set a spent budget to drive the
 	// branch that counts the rigs the sweep never reached (gt-f91o8).
