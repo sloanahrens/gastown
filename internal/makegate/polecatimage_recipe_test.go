@@ -18,6 +18,7 @@ import (
 // fails; build from deploy/polecat instead of the staged context, and the last
 // one does.
 func TestPolecatImageRecipe(t *testing.T) {
+	t.Parallel()
 	data, err := os.ReadFile("../../Makefile")
 	if err != nil {
 		t.Fatalf("read Makefile: %v", err)

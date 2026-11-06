@@ -10,6 +10,7 @@ import (
 // commit the image is built at or the directory the context goes in, before it
 // reads any file or runs any command.
 func TestRunRefusesAMissingRevOrOut(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		args []string

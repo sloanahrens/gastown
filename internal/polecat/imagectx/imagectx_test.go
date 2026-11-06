@@ -104,7 +104,7 @@ func newWorld(t *testing.T) *world {
 	}
 	w.commits[gastownRev] = map[string]string{
 		"go.mod":                     goMod("github.com/steveyegge/gastown", "1.9.0"),
-		"deploy/polecat/go-floor.sh": "#!/usr/bin/env bash\n",
+		"deploy/polecat/go-floor.sh": "# the image's Go floor check, as the commit holds it\n",
 		"cmd/gt/main.go":             "package main\n",
 	}
 	w.commits[bdPin] = map[string]string{"go.mod": goMod("github.com/steveyegge/beads", "1.10.0")}
@@ -230,7 +230,7 @@ func (w *world) goCmd(dir string, env []string, args ...string) ([]byte, error) 
 			if err := os.MkdirAll(filepath.Dir(args[i+1]), 0o755); err != nil {
 				return nil, err
 			}
-			if err := os.WriteFile(args[i+1], []byte("bin\n"), 0o755); err != nil {
+			if err := os.WriteFile(args[i+1], []byte("bin\n"), 0o644); err != nil {
 				return nil, err
 			}
 		}
@@ -275,6 +275,7 @@ func (w *world) dump() string {
 // gt binaries are built from the clean checkout at --rev. A dirty tree is
 // refused before any build.
 func TestContextFromPinsFetchesEverySourceByURL(t *testing.T) {
+	t.Parallel()
 	t.Run("fetches each source at its pin by URL", func(t *testing.T) {
 		w := newWorld(t)
 		out := t.TempDir()
@@ -337,6 +338,7 @@ func TestContextFromPinsFetchesEverySourceByURL(t *testing.T) {
 // its printed labels carry the gt commit, the bd commit and the Go floor, the
 // highest go line numerically (1.10.0, not 1.9.0).
 func TestContextHoldsThePayloadTheDockerfileCopies(t *testing.T) {
+	t.Parallel()
 	w := newWorld(t)
 	out := t.TempDir()
 	res, err := Build(context.Background(), w.inputs(out), w.seams())
@@ -391,6 +393,7 @@ func TestContextHoldsThePayloadTheDockerfileCopies(t *testing.T) {
 // and that a seeded pin behind main with a module gap is refused by the
 // pin-drift guard before any build runs.
 func TestNoEngineCommandIsIssued(t *testing.T) {
+	t.Parallel()
 	t.Run("a successful build issues no engine command", func(t *testing.T) {
 		w := newWorld(t)
 		if _, err := Build(context.Background(), w.inputs(t.TempDir()), w.seams()); err != nil {
@@ -422,6 +425,7 @@ func TestNoEngineCommandIsIssued(t *testing.T) {
 // URL that does not pair with the seed pins, a URL with a credential, and a main
 // that moves between its read and its fetch.
 func TestContextRefusesBadInputs(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name   string
 		mutate func(w *world, in *Inputs)
@@ -505,6 +509,7 @@ func TestContextRefusesBadInputs(t *testing.T) {
 // TestParseSeedURLs checks the seed-urls file: a line per rig, comments skipped,
 // and a refusal for a malformed line or a rig named twice.
 func TestParseSeedURLs(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		in      string
