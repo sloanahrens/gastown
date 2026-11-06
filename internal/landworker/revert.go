@@ -57,6 +57,9 @@ type MainState struct {
 	// PostLandPending is the status-mode verdicts still waiting on CI, oldest
 	// first, so a restarted worker resumes each one (gt-gg9hv.7.1).
 	PostLandPending []PendingPostLand `json:"post_land_pending,omitempty"`
+	// PostLandDropped records pending entries the bound dropped, so the
+	// attention queue can say verdicts were lost instead of a log line only.
+	PostLandDropped *PostLandDropped `json:"post_land_dropped,omitempty"`
 	// promote.State is the rig's GitHub promotion record (gt-fn9e6.37),
 	// embedded so it lands in this same file: one rig, one main record, read
 	// by the red-main owner, the tier sweep and town health alike
@@ -717,4 +720,12 @@ func (r *RedMain) RevertRejected(work land.Work, rej *land.Rejection) bool {
 	}
 	r.status("main still red: " + reason)
 	return true
+}
+
+// PostLandDropped is the durable record of pending post-land entries dropped at
+// the bound: how many, the oldest sha, and when the last drop happened.
+type PostLandDropped struct {
+	Count  int       `json:"count"`
+	Oldest string    `json:"oldest"` // the oldest sha dropped
+	At     time.Time `json:"at"`
 }

@@ -1148,11 +1148,26 @@ func rigPostLandCommand(rigPath string) string {
 // its file: the setting decides what counts as red main, so merged repo
 // content must not choose it (gt-gg9hv.7.1).
 func rigPostLandStatusContext(rigPath string) string {
+	name, _ := rigPostLandStatusContextErr(rigPath)
+	return name
+}
+
+// rigPostLandStatusContextErr is rigPostLandStatusContext with the reason a
+// present settings file could not be read: a missing file is no setting and no
+// error, but an unreadable or invalid one turns status mode off, and the caller
+// says so (gt-gg9hv.7.1).
+func rigPostLandStatusContextErr(rigPath string) (string, error) {
 	settings, err := config.LoadRigSettings(config.RigSettingsPath(rigPath))
-	if err != nil || settings == nil || settings.MergeQueue == nil {
-		return ""
+	if err != nil {
+		if errors.Is(err, config.ErrNotFound) {
+			return "", nil
+		}
+		return "", err
 	}
-	return strings.TrimSpace(settings.MergeQueue.PostLandStatusContext)
+	if settings == nil || settings.MergeQueue == nil {
+		return "", nil
+	}
+	return strings.TrimSpace(settings.MergeQueue.PostLandStatusContext), nil
 }
 
 // postLandWiring is the landing worker's half of a rig's post-land runner: the
@@ -1175,25 +1190,18 @@ type postLandWiring struct {
 // status verdict is recorded where the attention queue reads it, and a
 // command run holds an upgrade restart while it is in flight (gt-gb4ij).
 func (d *Daemon) newPostLandRunner(rigName, rigPath string, w postLandWiring) *landworker.PostLandRunner {
-	return &landworker.PostLandRunner{
-		Rig:           rigName,
-		Command:       func() string { return rigPostLandCommand(rigPath) },
-		StatusContext: func() string { return rigPostLandStatusContext(rigPath) },
-		Status:        w.Status,
-		State:         w.State,
-		OnUnknown: func(_ context.Context, u landworker.PostLandUnknown) error {
-			return d.postLandUnknowns.record(u, postLandUnknownWindow)
-		},
-		// The store failure is the same silence the timeout item reports: no
-		// verdict is being reached. It is keyed by rig, and the pass that
-		// reads the store again clears it.
-		OnStoreFailure: func(_ context.Context, f *landworker.PostLandStoreFailure) {
-			if f == nil {
-				d.postLandStoreFailures.forget(landworker.PostLandStoreFailure{Rig: rigName}.Key())
-				return
+	runner := &landworker.PostLandRunner{
+		Rig:     rigName,
+		Command: func() string { return rigPostLandCommand(rigPath) },
+		StatusContext: func() string {
+			name, err := rigPostLandStatusContextErr(rigPath)
+			if err != nil && d.postLandSettingsErrLogged(rigName, err) {
+				d.logger.Printf("post-land: %s: the rig settings file cannot be read, so status mode is off and the post-land command (if any) decides: %v", rigName, err)
 			}
-			d.postLandStoreFailures.record(*f)
+			return name
 		},
+		Status:  w.Status,
+		State:   w.State,
 		Clock:   d.clk(),
 		Timeout: w.Timeout,
 		Run:     w.Run,
@@ -1209,6 +1217,8 @@ func (d *Daemon) newPostLandRunner(rigName, rigPath string, w postLandWiring) *l
 			}
 		},
 	}
+	d.postLandRunners.set(rigName, runner)
+	return runner
 }
 
 // rigFollowupsEnabled is landing.followups from the rig's own
@@ -1810,4 +1820,20 @@ func roundsDirFor(reviewer land.Reviewer, dir string) string {
 		return ""
 	}
 	return dir
+}
+
+// postLandSettingsErrLogged reports whether err is a new reason for rig, so the
+// daemon says an unreadable rig settings file turned status mode off once per
+// reason, not on every trigger and pass.
+func (d *Daemon) postLandSettingsErrLogged(rig string, err error) bool {
+	d.postLandSettingsMu.Lock()
+	defer d.postLandSettingsMu.Unlock()
+	if d.postLandSettingsErr == nil {
+		d.postLandSettingsErr = map[string]string{}
+	}
+	if d.postLandSettingsErr[rig] == err.Error() {
+		return false
+	}
+	d.postLandSettingsErr[rig] = err.Error()
+	return true
 }

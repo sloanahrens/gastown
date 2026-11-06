@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -220,20 +222,16 @@ func TestDaemonPostLandStatusStoreFailureStoresAndClearsOneItem(t *testing.T) {
 		Timeout: 17 * time.Minute,
 	})
 
-	for pass := 1; pass < landworker.PostLandStatusStoreFailureAfter; pass++ {
+	// A store that cannot be READ is an item at once (never zero alarms), one
+	// keyed by rig however many passes fail.
+	for pass := 1; pass <= landworker.PostLandStatusStoreFailureAfter; pass++ {
 		runner.PollPending(ctx)
 		clk.Advance(time.Minute)
-		if items := postLandItems(t, f); len(items) != 0 {
-			t.Fatalf("items on failed pass %d = %d, want none before %d", pass, len(items), landworker.PostLandStatusStoreFailureAfter)
+		if items := postLandItems(t, f); len(items) != 1 {
+			t.Fatalf("items on failed pass %d = %d, want the one store-failure item", pass, len(items))
 		}
 	}
-	runner.PollPending(ctx)
-	clk.Advance(time.Minute)
-	items := postLandItems(t, f)
-	if len(items) != 1 {
-		t.Fatalf("items after %d failed passes = %d, want one", landworker.PostLandStatusStoreFailureAfter, len(items))
-	}
-	it := items[0]
+	it := postLandItems(t, f)[0]
 	if want := "post-land-store-failure:" + attentionRig; it.Key != want {
 		t.Fatalf("key = %q, want %q", it.Key, want)
 	}
@@ -243,7 +241,6 @@ func TestDaemonPostLandStatusStoreFailureStoresAndClearsOneItem(t *testing.T) {
 	if !strings.Contains(it.Summary, attentionRig) || !strings.Contains(it.Summary, "permission denied") {
 		t.Fatalf("summary %q does not name the rig and the failure", it.Summary)
 	}
-
 	runner.PollPending(ctx)
 	clk.Advance(time.Minute)
 	if got := postLandItems(t, f); len(got) != 1 {
@@ -260,9 +257,38 @@ func TestDaemonPostLandStatusStoreFailureStoresAndClearsOneItem(t *testing.T) {
 // postLandItems is the attention items the daemon's collector raises now.
 func postLandItems(t *testing.T, f *attentionFixture) []attention.Item {
 	t.Helper()
+	f.src.now = f.d.clk().Now() // the collector reads the daemon's clock, as a tick does
 	items, err := f.src.collectPostLandUnknown(context.Background())
 	if err != nil {
 		t.Fatalf("collect: %v", err)
 	}
 	return items
+}
+
+// TestDaemonPostLandUnreadableRigSettingsSaysStatusModeIsOff: a rig settings
+// file that exists but cannot be read turns status mode off, and the daemon says
+// so once per reason, not on every trigger and pass; a missing file says nothing.
+func TestDaemonPostLandUnreadableRigSettingsSaysStatusModeIsOff(t *testing.T) {
+	t.Parallel()
+	f := newAttentionFixture(t, time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC))
+	rigPath := t.TempDir()
+	runner := f.d.newPostLandRunner(attentionRig, rigPath, postLandWiring{})
+	for range 3 {
+		runner.Trigger(context.Background(), landworker.PostLand{Commit: "abc1234567890", Target: "main"})
+	}
+	if strings.Contains(f.logs.String(), "cannot be read") {
+		t.Fatalf("a missing settings file was reported as unreadable:\n%s", f.logs.String())
+	}
+	if err := os.MkdirAll(filepath.Dir(config.RigSettingsPath(rigPath)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.RigSettingsPath(rigPath), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		runner.Trigger(context.Background(), landworker.PostLand{Commit: "abc1234567890", Target: "main"})
+	}
+	if n := strings.Count(f.logs.String(), "status mode is off"); n != 1 {
+		t.Fatalf("the unreadable-settings line was logged %d times over three triggers, want once:\n%s", n, f.logs.String())
+	}
 }

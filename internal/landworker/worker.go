@@ -416,8 +416,9 @@ func (w *Worker) Pass(ctx context.Context) Report {
 		w.watchTarget(ctx)
 		// The pending post-land verdicts are read here, once per pass: status
 		// mode never waits on CI, so a verdict still open holds no landing,
-		// and each Forgejo read is bounded by PostLandStatusReadTimeout so a
-		// stalled remote cannot hold the pass either (gt-gg9hv.7.1).
+		// and the reads share one PostLandStatusPassBudget (each also bounded
+		// by PostLandStatusReadTimeout), so a stalled remote cannot hold the
+		// pass either (gt-gg9hv.7.1).
 		if w.PostLand != nil {
 			w.PostLand.PollPending(ctx)
 		}

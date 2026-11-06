@@ -2411,8 +2411,10 @@ type LandingWorkerConfig struct {
 	WorkRoot string `json:"work_root,omitempty"`
 
 	// PostLandTimeoutStr bounds one post-land verdict (e.g. "60m"): the run
-	// of merge_queue.post_land_command, or the wait for the status named by
-	// merge_queue.post_land_status_context. Default 60m.
+	// of merge_queue.post_land_command, or, in status mode, the age at which a
+	// pending verdict that is still UNKNOWN raises its attention item. Nothing
+	// waits on CI in status mode; the pending entry is read on each worker pass
+	// and the timeout is a condition of the entry. Default 60m.
 	PostLandTimeoutStr string `json:"post_land_timeout,omitempty"`
 
 	// Forgejo holds the town-level Forgejo facts this patrol needs, the same

@@ -66,20 +66,18 @@ const postLandTailLines = 10
 // on the goroutine that decides it (the runner's, or a worker pass's in status
 // mode), so a landing that arrives while they work coalesces like one that
 // arrives mid-run; RedMain is the production pair
-// (gt-v4ssj.4). An UNKNOWN status verdict calls neither and raises one
-// attention item per landed commit.
+// (gt-v4ssj.4). An UNKNOWN status verdict calls neither; a verdict still
+// UNKNOWN at the timeout is an alarm DERIVED from the durable pending entry by
+// Alarms, which the attention collector reads (there is no callback for it).
 //
 // In status mode a verdict fires before its pending entry is removed and
 // saved, so a daemon that stops between the two calls it again for the same
-// landing. Each callback is idempotent per rig and landed commit, which is
-// what makes that repeat harmless: OnUnknown's record is keyed by rig and
-// commit and the attention store replaces one with the same key, so the item
-// keeps its first_seen and is raised once; OnGreen and OnRed are
-// RedMain.Green and RedMain.Red, which records the same main state at the same
-// commit and key their artifacts by rig and package and by culprit bead, so an
-// open red-main bead is commented rather than filed a second time and an open
-// revert is found rather than built again. A repeat re-runs the red reruns, and
-// adds no duplicate bead, revert or attention item.
+// landing. OnGreen and OnRed are idempotent per rig and landed commit, which is
+// what makes that repeat harmless: they are RedMain.Green and RedMain.Red, which
+// record the same main state at the same commit and key their artifacts by rig
+// and package and by culprit bead, so an open red-main bead is commented rather
+// than filed a second time and an open revert is found rather than built again.
+// A repeat re-runs the red reruns, and adds no duplicate bead or revert.
 type PostLandRunner struct {
 	Rig string
 	// statusUnwiredLogged is true once the runner has said a configured status
@@ -100,18 +98,6 @@ type PostLandRunner struct {
 	// State holds the pending status-mode verdicts, so a restarted daemon
 	// resumes them; nil disables status mode.
 	State MainStateStore
-	// OnUnknown, when set, receives the record for a landed commit whose
-	// status context never reached a verdict before Timeout, and returns nil
-	// once the alarm is stored durably. The pending entry stays in the store,
-	// marked timed out, until it returns nil; an error keeps the entry and the
-	// next pass calls it again with the same keyed record.
-	OnUnknown func(ctx context.Context, u PostLandUnknown) error
-	// OnStoreFailure, when set, receives the rig's pending-verdict store
-	// failure once PostLandStatusStoreFailureAfter passes running have failed
-	// to read or write it, and nil on the pass that reaches the store again,
-	// which clears the attention item. A failure nobody is told about is the
-	// safety net going blind.
-	OnStoreFailure func(ctx context.Context, f *PostLandStoreFailure)
 	// readTimeoutOverride bounds one status read in place of
 	// PostLandStatusReadTimeout, which production uses. A test shortens it so
 	// a stalled read is cut off without waiting out the real bound.
@@ -151,8 +137,15 @@ type PostLandRunner struct {
 	// storeFailures counts the passes running that could not read or write
 	// the pending verdicts, and storeFailureRaised says the attention item is
 	// up; the next pass that reaches the store clears it.
-	storeFailures      int
-	storeFailureRaised bool
+	storeFailures int
+	// storeMu guards storeFailures and storeLastErr: the attention collector
+	// reads them from another goroutine while a pass, which can be slow on
+	// Forgejo, holds statusMu.
+	storeMu      sync.Mutex
+	storeLastErr string
+	// passBudgetOverride bounds a pass's reads in place of
+	// PostLandStatusPassBudget; a test sets it.
+	passBudgetOverride time.Duration
 }
 
 var _ PostLandTrigger = (*PostLandRunner)(nil)

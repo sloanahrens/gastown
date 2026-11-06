@@ -90,22 +90,22 @@ func combinedFor(name string, states ...forgejo.CommitState) *forgejo.CombinedSt
 // statusVerdicts records what a runner's callbacks, log and bead comments
 // received.
 type statusVerdicts struct {
-	mu           sync.Mutex
-	greens       int
-	reds         int
-	redTails     []string
-	unknowns     []PostLandUnknown
-	unknownErr   error // what OnUnknown answers; nil confirms the alarm stored
-	storeFails   []*PostLandStoreFailure
-	storeCleared int
-	logs         []string
-	comments     []string
+	mu       sync.Mutex
+	greens   int
+	reds     int
+	redTails []string
+	logs     []string
+	comments []string
+	// last is the runner built most recently and clk its clock: the alarms and
+	// the store failure are derived from it, as the attention collector does.
+	last *PostLandRunner
+	clk  PostLandClock
 }
 
 // runner builds a status-mode runner over status and the pending verdicts in
 // store, reading its deadlines from clk.
 func (v *statusVerdicts) runner(status func(context.Context, PostLand) (*forgejo.CombinedStatus, error), store MainStateStore, clk PostLandClock, timeout time.Duration) *PostLandRunner {
-	return &PostLandRunner{
+	r := &PostLandRunner{
 		Rig:           "gastown",
 		StatusContext: func() string { return statusContext },
 		Status:        status,
@@ -129,36 +129,29 @@ func (v *statusVerdicts) runner(status func(context.Context, PostLand) (*forgejo
 			v.redTails = append(v.redTails, res.Tail)
 			v.mu.Unlock()
 		},
-		OnUnknown: func(_ context.Context, u PostLandUnknown) error {
-			v.mu.Lock()
-			v.unknowns = append(v.unknowns, u)
-			v.mu.Unlock()
-			return v.unknownErr
-		},
-		OnStoreFailure: func(_ context.Context, f *PostLandStoreFailure) {
-			v.mu.Lock()
-			if f == nil {
-				v.storeCleared++
-			} else {
-				v.storeFails = append(v.storeFails, f)
-			}
-			v.mu.Unlock()
-		},
 	}
+	v.last, v.clk = r, clk
+	return r
 }
 
-// storeFailureRaises is how many store-failure items the runner raised, and
-// storeClears how many times it said the store is readable again.
+// storeFailureRaises is 1 when the last runner reports its store failing (the
+// item the attention collector would raise) and 0 otherwise.
 func (v *statusVerdicts) storeFailureRaises() int {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	return len(v.storeFails)
+	if v.last.StoreFailure() != nil {
+		return 1
+	}
+	return 0
 }
 
-func (v *statusVerdicts) storeClears() int {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	return v.storeCleared
+// alarms is what the attention collector would derive from the last runner's
+// durable entries now.
+func (v *statusVerdicts) alarms(t *testing.T) PostLandAlarms {
+	t.Helper()
+	a, err := v.last.Alarms(v.clk.Now())
+	if err != nil {
+		t.Fatalf("deriving the alarms: %v", err)
+	}
+	return a
 }
 
 // AddComment records a bead comment the runner wrote.
@@ -171,8 +164,14 @@ func (v *statusVerdicts) AddComment(_, text string) error {
 
 func (v *statusVerdicts) counts() (greens, reds, unknowns int) {
 	v.mu.Lock()
-	defer v.mu.Unlock()
-	return v.greens, v.reds, len(v.unknowns)
+	greens, reds = v.greens, v.reds
+	v.mu.Unlock()
+	if v.last != nil {
+		if a, err := v.last.Alarms(v.clk.Now()); err == nil {
+			unknowns = len(a.Unknown)
+		}
+	}
+	return greens, reds, unknowns
 }
 
 func (v *statusVerdicts) logText() string {
@@ -450,8 +449,11 @@ func TestPostLandStatusPendingSurvivesARestart(t *testing.T) {
 				t.Fatalf("green %d red %d unknown %d, want %d/%d/%d",
 					greens, reds, unknowns, tc.wantGreens, tc.wantReds, tc.wantUnk)
 			}
-			if n := len(pendingOf(t, store)); n != 0 {
-				t.Fatalf("%d pending entries left after the verdict, want none", n)
+			// A decided verdict leaves no entry; a timed-out one stays, as the
+			// durable source of its alarm.
+			wantLeft := tc.wantUnk
+			if n := len(pendingOf(t, store)); n != wantLeft {
+				t.Fatalf("%d pending entries left, want %d", n, wantLeft)
 			}
 		})
 	}
@@ -493,7 +495,7 @@ func TestPostLandStatusTimeoutRaisesOneAttentionItem(t *testing.T) {
 			if n := v.unknownCount(); n != 1 {
 				t.Fatalf("unknown items at the timeout = %d, want one", n)
 			}
-			u := v.unknowns[0]
+			u := v.alarms(t).Unknown[0]
 			if want := "post-land-unknown:gastown:" + pl.Commit; u.Key() != want {
 				t.Fatalf("key = %q, want %q", u.Key(), want)
 			}
@@ -534,7 +536,7 @@ func TestPostLandStatusTimeoutRaisesOneAttentionItem(t *testing.T) {
 	})
 }
 
-func TestPostLandStatusUnrecordedRaisesUnknown(t *testing.T) {
+func TestPostLandStatusUnrecordedReportsTheStoreAtOnce(t *testing.T) {
 	t.Parallel()
 	pl := PostLand{BeadID: "gt-abc", Commit: "abc1234567890", Target: "main"}
 	cases := []struct {
@@ -551,11 +553,12 @@ func TestPostLandStatusUnrecordedRaisesUnknown(t *testing.T) {
 			reads := &fakeStatusReads{responses: []fakeStatusRead{{status: combinedFor(statusContext, forgejo.StatePending)}}}
 			r := v.runner(reads.read, tc.store, &manualClock{now: statusT0}, 0)
 			r.Trigger(context.Background(), pl)
-			if n := v.unknownCount(); n != 1 {
-				t.Fatalf("unknown items = %d, want the silence raised at once", n)
+			f := r.StoreFailure()
+			if f == nil {
+				t.Fatal("the rig reports no store failure, want the silence raised at once, with no entry to derive an alarm from")
 			}
-			if u := v.unknowns[0]; u.State != "unrecorded" {
-				t.Fatalf("state = %q, want unrecorded", u.State)
+			if f.Rig != "gastown" || f.Error == "" {
+				t.Fatalf("store failure = %+v", f)
 			}
 			if greens, reds, _ := v.counts(); greens != 0 || reds != 0 {
 				t.Fatalf("green %d red %d, want neither callback", greens, reds)
@@ -628,7 +631,7 @@ func TestPostLandStatusStoreFailures(t *testing.T) {
 		if n := v.storeFailureRaises(); n != 1 {
 			t.Fatalf("items raised after %d failed passes = %d, want one", PostLandStatusStoreFailureAfter, n)
 		}
-		f := v.storeFails[0]
+		f := r.StoreFailure()
 		if f.Rig != "gastown" || f.Key() != "post-land-store-failure:gastown" {
 			t.Fatalf("record = %+v key %q, want one keyed by the rig", f, f.Key())
 		}
@@ -654,8 +657,8 @@ func TestPostLandStatusStoreFailures(t *testing.T) {
 		// The next good pass keeps the entries and clears the item.
 		store.failLoad(nil)
 		r.PollPending(ctx)
-		if n := v.storeClears(); n != 1 {
-			t.Fatalf("clears = %d, want the good pass to clear the item", n)
+		if f := r.StoreFailure(); f != nil {
+			t.Fatalf("store failure %+v after a good pass, want it cleared", f)
 		}
 		if n := len(store.stored(t)); n != 2 {
 			t.Fatalf("%d pending entries after the good pass, want both kept", n)
@@ -944,13 +947,12 @@ func TestPostLandStatusContextWinsOverCommand(t *testing.T) {
 	})
 }
 
-// TestPostLandStatusTimeoutEntryOutlivesAnUnconfirmedAlarm: a timed-out entry is
-// marked and kept in the store until OnUnknown confirms the alarm stored. A
-// daemon that stops between the mark and the confirmation (or an OnUnknown that
-// fails) loses nothing: the restarted runner finds the entry and raises the same
-// keyed record again, and once confirmed the entry goes and no second alarm
-// follows.
-func TestPostLandStatusTimeoutEntryOutlivesAnUnconfirmedAlarm(t *testing.T) {
+// TestPostLandStatusTimedOutAlarmIsDerivedFromTheDurableEntry: a timeout is a
+// condition of the durable pending entry, not an event of a pass. The entry
+// stays in the store, is read no more, and a runner built over the same store
+// after a restart derives the same keyed alarm, with no callback, no second store
+// and nothing to lose between the timeout and the item (gt-gg9hv.7.1).
+func TestPostLandStatusTimedOutAlarmIsDerivedFromTheDurableEntry(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	pl := PostLand{BeadID: "gt-abc", Commit: "abc1234567890", Target: "main"}
@@ -959,41 +961,123 @@ func TestPostLandStatusTimeoutEntryOutlivesAnUnconfirmedAlarm(t *testing.T) {
 	clk := &manualClock{now: statusT0}
 	reads := &fakeStatusReads{responses: []fakeStatusRead{{status: combinedFor(statusContext, forgejo.StatePending)}}}
 
-	// First daemon: the alarm cannot be stored, as when it stops right after
-	// the timeout fires.
-	first := &statusVerdicts{unknownErr: errors.New("attention store unavailable")}
+	first := &statusVerdicts{}
 	r := first.runner(reads.read, store, clk, timeout)
 	r.Trigger(ctx, pl)
 	r.PollPending(ctx)
+	if n := len(first.alarms(t).Unknown); n != 0 {
+		t.Fatalf("alarms before the timeout = %d, want none", n)
+	}
 	clk.Advance(timeout)
 	r.PollPending(ctx)
-	if n := first.unknownCount(); n != 1 {
-		t.Fatalf("first daemon raised %d alarms at the timeout, want one attempt", n)
+	readsAtTimeout := reads.count()
+	clk.Advance(time.Minute)
+	r.PollPending(ctx)
+	if reads.count() != readsAtTimeout {
+		t.Errorf("a timed-out entry was read again (%d reads, %d at the timeout)", reads.count(), readsAtTimeout)
 	}
-	st, err := store.Load()
-	if err != nil {
-		t.Fatal(err)
+	if left := pendingOf(t, store); len(left) != 1 {
+		t.Fatalf("store after the timeout = %+v, want the entry kept", left)
 	}
-	if len(st.PostLandPending) != 1 || !st.PostLandPending[0].TimedOut {
-		t.Fatalf("store after an unconfirmed alarm = %+v, want the one entry, marked timed out", st.PostLandPending)
+	want := first.alarms(t).Unknown
+	if len(want) != 1 || want[0].Key() != "post-land-unknown:gastown:"+pl.Commit || want[0].State != "pending" {
+		t.Fatalf("alarms at the timeout = %+v, want the one keyed alarm in state pending", want)
 	}
 
-	// Restarted daemon over the same store: the alarm is confirmed this time.
+	// A restarted daemon: a new runner over the same store derives the same alarm.
 	second := &statusVerdicts{}
 	r2 := second.runner(reads.read, store, clk, timeout)
-	r2.PollPending(ctx)
-	if n := second.unknownCount(); n != 1 {
-		t.Fatalf("restarted daemon raised %d alarms, want exactly one", n)
-	}
-	if got, want := second.unknowns[0].Key(), first.unknowns[0].Key(); got != want {
-		t.Fatalf("restarted key %q differs from the first %q: the repeat would not be idempotent", got, want)
-	}
-	if st, _ := store.Load(); len(st.PostLandPending) != 0 {
-		t.Fatalf("store after a confirmed alarm = %+v, want the entry removed", st.PostLandPending)
+	got := second.alarms(t).Unknown
+	if len(got) != 1 || got[0].Key() != want[0].Key() {
+		t.Fatalf("alarms after a restart = %+v, want the same keyed alarm %q", got, want[0].Key())
 	}
 	r2.PollPending(ctx)
-	if n := second.unknownCount(); n != 1 {
-		t.Fatalf("alarms after confirmation = %d, want still one", n)
+	if g, rd, _ := second.counts(); g != 0 || rd != 0 {
+		t.Fatalf("a timed-out entry fired a verdict: green %d red %d", g, rd)
+	}
+
+	// The alarm ends with its window, and the entry is dropped with a log line.
+	clk.Advance(PostLandAlarmWindow)
+	if n := len(second.alarms(t).Unknown); n != 0 {
+		t.Fatalf("alarms after the window = %d, want none", n)
+	}
+	r2.PollPending(ctx)
+	if left := pendingOf(t, store); len(left) != 0 {
+		t.Fatalf("store after the window = %+v, want the entry dropped", left)
+	}
+	if !strings.Contains(second.logText(), "alarm window ended") {
+		t.Fatalf("the drop is not logged:\n%s", second.logText())
+	}
+}
+
+// TestPostLandStatusUnreadableStoreIsNeverZeroAlarms: Alarms answers an error
+// for a store it cannot read, so the collector raises an item instead of reading
+// the failure as no alarms.
+func TestPostLandStatusUnreadableStoreIsNeverZeroAlarms(t *testing.T) {
+	t.Parallel()
+	v := &statusVerdicts{}
+	reads := &fakeStatusReads{responses: []fakeStatusRead{{status: combinedFor(statusContext, forgejo.StatePending)}}}
+	r := v.runner(reads.read, failingMainState{loadErr: errors.New("permission denied")}, &manualClock{now: statusT0}, time.Hour)
+	alarms, err := r.Alarms(statusT0)
+	if err == nil {
+		t.Fatalf("Alarms over an unreadable store = %+v with no error, want the error", alarms)
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Errorf("error %q does not name the failure", err)
+	}
+}
+
+// TestPostLandStatusDroppedEntriesAreRecordedInTheState: past the bound the
+// oldest entries are dropped and the drop is written into the same state, so the
+// alarms say entries were lost.
+func TestPostLandStatusDroppedEntriesAreRecordedInTheState(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	v := &statusVerdicts{}
+	store := &MemoryMainState{}
+	clk := &manualClock{now: statusT0}
+	reads := &fakeStatusReads{responses: []fakeStatusRead{{status: combinedFor(statusContext, forgejo.StatePending)}}}
+	r := v.runner(reads.read, store, clk, time.Hour)
+	for i := range postLandPendingLimit + 3 {
+		r.Trigger(ctx, PostLand{Commit: fmt.Sprintf("commit%03d", i), Target: "main"})
+	}
+	d := v.alarms(t).Dropped
+	if d == nil || d.Count != 3 || d.Oldest != "commit000" {
+		t.Fatalf("dropped record = %+v, want 3 dropped, the oldest dropped sha named", d)
+	}
+	clk.Advance(PostLandAlarmWindow)
+	if d := v.alarms(t).Dropped; d != nil {
+		t.Fatalf("dropped record after the window = %+v, want none", d)
+	}
+}
+
+// TestPostLandStatusPassHasOneDeadline: the reads of one pass share one budget,
+// so a list of entries whose reads each stall holds the pass for the budget, not
+// for the count times the read timeout; the entries it did not reach are read
+// first on the next pass.
+func TestPostLandStatusPassHasOneDeadline(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	v := &statusVerdicts{}
+	store := &MemoryMainState{}
+	clk := &manualClock{now: statusT0}
+	stall := func(readCtx context.Context, _ PostLand) (*forgejo.CombinedStatus, error) {
+		<-readCtx.Done() // a Forgejo that never answers: only the deadline ends the read
+		return nil, readCtx.Err()
+	}
+	r := v.runner(stall, store, clk, time.Hour)
+	r.readTimeoutOverride = time.Minute
+	r.passBudgetOverride = 50 * time.Millisecond
+	for i := range 5 {
+		r.Trigger(ctx, PostLand{Commit: fmt.Sprintf("commit%02d", i), Target: "main"})
+	}
+	start := time.Now()
+	r.PollPending(ctx)
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("the pass took %s with a 50ms budget and five stalled reads of a minute each", took)
+	}
+	if got := len(pendingOf(t, store)); got != 5 {
+		t.Fatalf("%d pending entries after a budget-cut pass, want all five kept", got)
 	}
 }
 
@@ -1023,39 +1107,34 @@ func TestPostLandStatusContextWithoutAReaderSaysSoOnce(t *testing.T) {
 	}
 }
 
-// TestPostLandStatusNilAlarmSinkKeepsTheTimedOutEntry: a runner with no
-// OnUnknown wired cannot tell anyone a verdict timed out, so the timed-out
-// entry stays in the store, marked, with a WARNING each pass, and is not
-// dropped without an alarm (gt-gg9hv.7.1).
-func TestPostLandStatusNilAlarmSinkKeepsTheTimedOutEntry(t *testing.T) {
+// TestPostLandStatusDoneMarkerIsClearedWhenItsEntryGoes: a verdict whose removal
+// save failed is finished on a later pass, and the process-local done marker goes
+// with the entry rather than staying for the life of the process.
+func TestPostLandStatusDoneMarkerIsClearedWhenItsEntryGoes(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	pl := PostLand{BeadID: "gt-abc", Commit: "abc1234567890", Target: "main"}
-	const timeout = 10 * time.Minute
-	store := &MemoryMainState{}
-	clk := &manualClock{now: statusT0}
-	reads := &fakeStatusReads{responses: []fakeStatusRead{{status: combinedFor(statusContext, forgejo.StatePending)}}}
-
 	v := &statusVerdicts{}
-	r := v.runner(reads.read, store, clk, timeout)
-	r.OnUnknown = nil
+	store := &flakyMainState{}
+	clk := &manualClock{now: statusT0}
+	reads := &fakeStatusReads{responses: []fakeStatusRead{{status: combinedFor(statusContext, forgejo.StateSuccess)}}}
+	r := v.runner(reads.read, store, clk, time.Hour)
 	r.Trigger(ctx, pl)
+	store.failSave(errors.New("disk full"))
 	r.PollPending(ctx)
-	clk.Advance(timeout)
+	if !r.done[pl.Commit] {
+		t.Fatal("the marker is not set after the verdict fired with the removal unsaved")
+	}
+	store.failSave(nil)
+	clk.Advance(time.Minute)
 	r.PollPending(ctx)
-	r.PollPending(ctx)
-
-	st, err := store.Load()
-	if err != nil {
-		t.Fatal(err)
+	if len(store.stored(t)) != 0 {
+		t.Fatalf("the entry is still stored after the finishing pass: %+v", store.stored(t))
 	}
-	if len(st.PostLandPending) != 1 || !st.PostLandPending[0].TimedOut {
-		t.Fatalf("store with no alarm sink = %+v, want the one entry kept, marked timed out", st.PostLandPending)
+	if r.done[pl.Commit] {
+		t.Error("the done marker outlived its entry")
 	}
-	if !strings.Contains(v.logText(), "no alarm sink is wired") {
-		t.Fatalf("the log does not say why the alarm is not stored:\n%s", v.logText())
-	}
-	if greens, reds, _ := v.counts(); greens != 0 || reds != 0 {
-		t.Fatalf("a timed-out verdict fired a callback: green %d red %d", greens, reds)
+	if greens, _, _ := v.counts(); greens != 1 {
+		t.Errorf("green fired %d times, want once", greens)
 	}
 }

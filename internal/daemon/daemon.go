@@ -837,12 +837,14 @@ type Daemon struct {
 	// holds a restart for it separately, up to postLandRestartCap (gt-gb4ij).
 	postLandRuns atomic.Int32
 
-	// postLandUnknowns holds the landed commits whose post-land status context
-	// never reached a verdict, and postLandStoreFailures the rigs whose
-	// pending-verdict store could not be read or written, for the attention
-	// queue (gt-gg9hv.7.1).
-	postLandUnknowns      postLandUnknownStore
-	postLandStoreFailures postLandStoreFailureStore
+	// postLandRunners holds each rig's post-land runner, which the attention
+	// collector asks for the alarms its durable pending entries imply
+	// (gt-gg9hv.7.1).
+	postLandRunners postLandRunnerSet
+	// postLandSettingsErr remembers, per rig, the last reason an unreadable rig
+	// settings file turned status mode off, so it is logged once per reason.
+	postLandSettingsMu  sync.Mutex
+	postLandSettingsErr map[string]string
 
 	// jsonlGitBackupRunning, wispReaperRunning, and checkpointDogRunning are
 	// the single-flight guards for their patrols, on their own goroutines —
@@ -1391,20 +1393,19 @@ func New(config *Config) (*Daemon, error) {
 	}
 
 	d := &Daemon{
-		config:           config,
-		patrolConfig:     patrolConfig,
-		postLandUnknowns: postLandUnknownStore{path: filepath.Join(config.TownRoot, "daemon", postLandUnknownFile)},
-		disabledPatrols:  disabledPatrols,
-		tmux:             tmux.NewTmux(),
-		logger:           logger,
-		logPreexisted:    logPreexisted,
-		ctx:              ctx,
-		cancel:           cancel,
-		doltServer:       doltServer,
-		gtPath:           gtPath,
-		bdPath:           bdPath,
-		notifier:         newDaemonNotifier(gtPath, config.TownRoot),
-		rigPool:          newRigWorkerPool(0, 0, logger), // defaults: 10 workers, 30s timeout
+		config:          config,
+		patrolConfig:    patrolConfig,
+		disabledPatrols: disabledPatrols,
+		tmux:            tmux.NewTmux(),
+		logger:          logger,
+		logPreexisted:   logPreexisted,
+		ctx:             ctx,
+		cancel:          cancel,
+		doltServer:      doltServer,
+		gtPath:          gtPath,
+		bdPath:          bdPath,
+		notifier:        newDaemonNotifier(gtPath, config.TownRoot),
+		rigPool:         newRigWorkerPool(0, 0, logger), // defaults: 10 workers, 30s timeout
 		// The container's compose file sets this beside the daemon; asking the
 		// process environment here, in the one constructor production runs,
 		// keeps the burst sampler from reading it (burst_sampler.go).
