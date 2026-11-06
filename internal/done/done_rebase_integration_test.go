@@ -371,11 +371,13 @@ func TestIntegrationRecoverDivergedPush_RealRepoReworkOfRejectedHead(t *testing.
 	testRunGit(t, seed, "push", "origin", "main")
 
 	// The seat's first submission, authored under its own name, pushed and then
-	// refused by the landing worker.
+	// refused by the landing worker. --author, not `-c user.name`: a spawned
+	// seat exports GIT_AUTHOR_NAME, which outranks the config, so the config
+	// form committed as the host seat, not the seat the rework check expects.
 	testRunGit(t, seed, "checkout", "-b", "feature")
 	writeRepoFile(t, seed, "feature.txt", "first attempt\n")
 	testRunGit(t, seed, "add", ".")
-	testRunGit(t, seed, "-c", "user.name="+reworkTestSeat, "commit", "-m", "feat: first attempt")
+	testRunGit(t, seed, "commit", "--author="+reworkTestSeat+" <test@test.com>", "-m", "feat: first attempt")
 	testRunGit(t, seed, "push", "origin", "feature:feature")
 	rejected := gitpkgRev(t, seed, "HEAD")
 
