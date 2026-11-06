@@ -1,6 +1,8 @@
 package forgejoprov
 
 import (
+	"go/parser"
+	"go/token"
 	"io"
 	"net/http"
 	"slices"
@@ -85,6 +87,26 @@ func TestScopedTokenMintsAndRevokes(t *testing.T) {
 
 	t.Run("refusals", func(t *testing.T) { scopedRefusals(t) })
 	t.Run("echoed value", func(t *testing.T) { scopedNeverEchoes(t) })
+	t.Run("package doc", func(t *testing.T) { scopedDocNames(t) })
+}
+
+// scopedDocNames checks the package doc in options.go names both scoped-token methods,
+// so a reader of the package's documentation finds them.
+func scopedDocNames(t *testing.T) {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), "options.go", nil, parser.ParseComments|parser.PackageClauseOnly)
+	if err != nil {
+		t.Fatalf("parse options.go: %v", err)
+	}
+	if file.Doc == nil {
+		t.Fatal("options.go has no package doc")
+	}
+	doc := file.Doc.Text()
+	for _, name := range []string{"MintToken", "RevokeToken"} {
+		if !strings.Contains(doc, name) {
+			t.Fatalf("the package doc does not name %s", name)
+		}
+	}
 }
 
 // unreachableDelete is a transport that sends every call to the fake except a DELETE,
