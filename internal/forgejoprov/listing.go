@@ -1,6 +1,7 @@
 package forgejoprov
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -36,9 +37,9 @@ func (c *Client) ListTokenNames(user string) ([]string, error) {
 }
 
 // listNames reads every page of the JSON array at base and returns the name of each
-// item. A status other than 200, a reply that is not a JSON array, an item with no string
-// name, or a list that runs past listMaxPages is an error. The error names the path and a
-// fixed phrase; it never quotes the reply, which can hold a value.
+// item. A status other than 200, a reply that is not a JSON array (JSON null included), an
+// item with no string name, or a list that runs past listMaxPages is an error. The error
+// names the path and a fixed phrase; it never quotes the reply, which can hold a value.
 func (c *Client) listNames(base string) ([]string, error) {
 	var names []string
 	for page := 1; page <= listMaxPages; page++ {
@@ -50,8 +51,12 @@ func (c *Client) listNames(base string) ([]string, error) {
 		if status != http.StatusOK {
 			return nil, fmt.Errorf("GET %s: HTTP %d", base, status)
 		}
+		var raw json.RawMessage
+		if err := json.Unmarshal(resp, &raw); err != nil || !isJSONArray(raw) {
+			return nil, fmt.Errorf("GET %s: the reply is not a JSON array", base)
+		}
 		var items []map[string]any
-		if err := json.Unmarshal(resp, &items); err != nil {
+		if err := json.Unmarshal(raw, &items); err != nil {
 			return nil, fmt.Errorf("GET %s: the reply is not a JSON array", base)
 		}
 		for _, item := range items {
@@ -66,4 +71,12 @@ func (c *Client) listNames(base string) ([]string, error) {
 		}
 	}
 	return nil, fmt.Errorf("GET %s: the list runs past %d pages of %d; it is not read to the end", base, listMaxPages, listPageSize)
+}
+
+// isJSONArray reports whether raw is a JSON array. A 200 reply of JSON null decodes into a
+// nil slice without an error, so the shape is checked before the items are decoded: a null
+// reply is a failed read, never an empty list.
+func isJSONArray(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) > 0 && trimmed[0] == '['
 }

@@ -597,19 +597,24 @@ func TestSourcesSecretRefusesBadCommandLines(t *testing.T) {
 }
 
 // checkNetwork is the network a --check run meets. Every request reaches the fake, except
-// that the reply to the one GET whose path ends in failSuffix is replaced by failStatus and
-// failBody. It records the method of every request, so a test can see a write that was sent.
+// that the one GET whose path ends in failSuffix is answered by failErr when it is set, or
+// else by failStatus and failBody. It records the method of every request, so a test can
+// see a write that was sent.
 type checkNetwork struct {
 	fake       *forgejotest.Fake
 	methods    []string
 	failSuffix string
 	failStatus int
 	failBody   string
+	failErr    error
 }
 
 func (c *checkNetwork) RoundTrip(req *http.Request) (*http.Response, error) {
 	c.methods = append(c.methods, req.Method)
 	if c.failSuffix != "" && req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, c.failSuffix) {
+		if c.failErr != nil {
+			return nil, c.failErr
+		}
 		return &http.Response{
 			StatusCode: c.failStatus,
 			Status:     http.StatusText(c.failStatus),
@@ -823,6 +828,101 @@ func TestSourcesSecretCheckReportsWhatIsMissing(t *testing.T) {
 	}
 	if n := len(f.Writes()); n != 0 {
 		t.Fatalf("the fake saw %d write(s), want none", n)
+	}
+}
+
+// TestSourcesSecretCheckRefusesANullListReply checks a 200 reply that is JSON null, or any
+// other non-array body, for the secret list or the token list is a failed read: the check
+// reports it and exits 1, and never prints the malformed reply as a state (the secret as
+// "not listed", or the tokens as none listed).
+func TestSourcesSecretCheckRefusesANullListReply(t *testing.T) {
+	t.Parallel()
+	tokenPath := "/admin/users/" + viewerAccount + "/tokens"
+	cases := []struct {
+		name       string
+		failSuffix string
+		body       string
+		wantErr    string
+		wantAbsent string
+	}{
+		{
+			name:       "the secret list replies null",
+			failSuffix: "/sloan/gastown/actions/secrets",
+			body:       `null`,
+			wantErr:    "could not list the Actions secrets of sloan/gastown",
+			wantAbsent: "secret SOURCES_TOKEN: not listed",
+		},
+		{
+			name:       "the secret list replies an object",
+			failSuffix: "/sloan/gastown/actions/secrets",
+			body:       `{"data":[]}`,
+			wantErr:    "could not list the Actions secrets of sloan/gastown",
+			wantAbsent: "secret SOURCES_TOKEN: not listed",
+		},
+		{
+			name:       "the token list replies null",
+			failSuffix: tokenPath,
+			body:       `null`,
+			wantErr:    "could not list the tokens of bot-viewer",
+			wantAbsent: "tokens listed",
+		},
+		{
+			name:       "the token list replies an object",
+			failSuffix: tokenPath,
+			body:       `{"tokens":[]}`,
+			wantErr:    "could not list the tokens of bot-viewer",
+			wantAbsent: "tokens listed",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCheckFake(t, "")
+			storeCheckSecret(t, f)
+			mintTokenNamed(t, f, testName)
+			net := &checkNetwork{fake: f, failSuffix: tc.failSuffix, failStatus: http.StatusOK, failBody: tc.body}
+
+			res := runCheckNetwork(t, net)
+
+			if res.code != forgejoprov.ExitFailure {
+				t.Fatalf("exit %d, want %d; stdout: %s stderr: %s", res.code, forgejoprov.ExitFailure, res.stdout, res.stderr)
+			}
+			if !strings.Contains(res.stderr, tc.wantErr) || !strings.Contains(res.stderr, "not a JSON array") {
+				t.Fatalf("stderr lacks %q and the refusal reason:\n%s", tc.wantErr, res.stderr)
+			}
+			if strings.Contains(res.stdout, tc.wantAbsent) {
+				t.Fatalf("stdout prints a malformed reply as a state (%q):\n%s", tc.wantAbsent, res.stdout)
+			}
+		})
+	}
+}
+
+// TestSourcesSecretCheckReportsATransportFailure checks a collaborator check that gets no
+// HTTP reply at all is reported as such and exits 1, not read as a repository state.
+func TestSourcesSecretCheckReportsATransportFailure(t *testing.T) {
+	t.Parallel()
+	f := newCheckFake(t, "")
+	storeCheckSecret(t, f)
+	mintTokenNamed(t, f, testName)
+	net := &checkNetwork{
+		fake:       f,
+		failSuffix: "/sloan/hm/collaborators/" + viewerAccount,
+		failErr:    errNoReply,
+	}
+
+	res := runCheckNetwork(t, net)
+
+	if res.code != forgejoprov.ExitFailure {
+		t.Fatalf("exit %d, want %d; stdout: %s", res.code, forgejoprov.ExitFailure, res.stdout)
+	}
+	if !strings.Contains(res.stderr, "the collaborator check on sloan/hm got no HTTP reply") {
+		t.Fatalf("stderr does not name the transport failure:\n%s", res.stderr)
+	}
+	if strings.Contains(res.stdout, "sloan/hm: ") {
+		t.Fatalf("stdout reports a state for a repository whose check got no reply:\n%s", res.stdout)
+	}
+	if !strings.Contains(res.stdout, "sloan/om: readable by bot-viewer (HTTP 204)") {
+		t.Fatalf("stdout does not report the readable repositories:\n%s", res.stdout)
 	}
 }
 

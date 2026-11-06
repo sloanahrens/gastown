@@ -1,15 +1,15 @@
 // Command forgejo-sources-secret stores the SOURCES_TOKEN Actions secret on
 // sloan/gastown without any person seeing the token. It mints a read:repository
-// token for bot-viewer, checks that the token reads four repositories, and stores
-// it only when all four answer 200. With --check it mints, revokes and stores
-// nothing: it reads whether SOURCES_TOKEN is listed, whether bot-viewer is a
-// collaborator on each read repository, and the names of its sources-token-
-// tokens. The exit codes are 0 when the secret is stored, a dry run finishes or a
-// check reads everything and every read repository is readable; 1 when a step
-// fails, a read fails or a required repository is unreadable; and 2 when the
-// command line is refused. An unlisted secret is a state a check reports, not a
-// failure, because the check runs before the first real run, when the secret is
-// absent.
+// token for bot-viewer, checks that the token reads four repositories, and
+// stores it only when all four answer 200. With --check it mints, revokes and
+// stores nothing: it reads whether SOURCES_TOKEN is listed, whether bot-viewer
+// is a collaborator on each read repository, and the names of its
+// sources-token- tokens; checkState says what a check reads, prints and judges.
+// The exit codes are 0 when the secret is stored, a dry run finishes or a check
+// reads everything and every read repository is readable; 1 when a step fails, a
+// read fails or a required repository is unreadable; and 2 when the command line
+// is refused. An unlisted secret is a state a check reports, not a failure,
+// because the check runs before the first real run, when the secret is absent.
 package main
 
 import (
@@ -241,9 +241,10 @@ var mintedName = regexp.MustCompile(`^` + regexp.QuoteMeta(tokenNamePrefix) + `[
 // required repository that is not readable, and the real run refuses on it. Any other
 // status, or no reply, is a read that failed. An unlisted secret is printed as a state
 // and is not a failure: the check runs before the first real run, when the secret is
-// legitimately absent. The exit codes are ExitOK when every read answered and every read
-// repository is readable, and ExitFailure when a read failed or a required repository is
-// unreadable. A failure's detail goes to stderr and carries no reply body.
+// legitimately absent. It returns the exit code the command header names for a check:
+// ExitOK when every read answered and every read repository is readable, ExitFailure when
+// a read failed or a required repository is unreadable. A failure's detail goes to stderr
+// and carries no reply body.
 func checkState(admin *forgejoprov.Client, stdout, stderr io.Writer) int {
 	code := forgejoprov.ExitOK
 

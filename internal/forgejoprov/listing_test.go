@@ -137,6 +137,11 @@ func TestListNamesRefusesAPartialOrUnreadableList(t *testing.T) {
 			wantText:  "not a JSON array",
 		},
 		{
+			name:      "a reply of JSON null",
+			transport: stubReply(http.StatusOK, `null`),
+			wantText:  "not a JSON array",
+		},
+		{
 			name:      "an item that carries no name",
 			transport: stubReply(http.StatusOK, `[{"id":7}]`),
 			wantText:  "carries no name",
