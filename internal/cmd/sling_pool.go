@@ -472,6 +472,17 @@ var newPoolSessionLister = func() sessionLister { return tmux.NewTmux() }
 // func is a pool that cannot read any polecat's state.
 type polecatDispositionFunc func(rigName, polecatName string) (poolSeatState, error)
 
+// polecatHookHeldFunc reports whether one polecat's seat still holds live
+// work, read from its beads alone: the same agent, assignment and hook reads
+// polecatDispositionFunc makes, stopped before the worktree probe. A nil func
+// is a pool that cannot read any polecat's hook.
+//
+// The roster's dead-hooked walk asks this first and the full seat read only
+// for a seat that holds a hook: a polecat with no hook is skipped whatever its
+// worktree says, so probing that worktree was work no answer used
+// (gt-gg9hv.73).
+type polecatHookHeldFunc func(rigName, polecatName string) (bool, error)
+
 // poolSeatReads is the town's beads reads one seat read makes, passed in rather
 // than reached for so the read can be driven with no database (docs/testing.md):
 // the polecat's agent bead, the work bead assigned to it, and the by-id lookup
@@ -531,6 +542,19 @@ func poolDispositionFor(townRoot string) polecatDispositionFunc {
 	}
 	return func(rigName, polecatName string) (poolSeatState, error) {
 		return poolPolecatSeatState(townRoot, rigName, polecatName)
+	}
+}
+
+// poolHookHeldFor is the cheap hook-held read a caller in townRoot wants, or
+// nil when there is no town to read. It is the bead half of poolDispositionFor:
+// a caller that must know whether a seat holds a hook before it pays that
+// read's worktree probe asks this first.
+func poolHookHeldFor(townRoot string) polecatHookHeldFunc {
+	if townRoot == "" {
+		return nil
+	}
+	return func(rigName, polecatName string) (bool, error) {
+		return poolPolecatHookHeld(townRoot, rigName, polecatName)
 	}
 }
 
@@ -742,24 +766,41 @@ func (r poolSeatReads) sandboxSeatState(agent, sessionName string) (polecat.Live
 	return r.sandboxSeat(strings.TrimSpace(agent), sessionName)
 }
 
-// poolPolecatSeatStateWith is poolPolecatSeatState with the town's beads reads
-// passed in: a test drives the whole seat read — the disposition the roster
-// counts and the work that holds a crashed seat — with no database.
-func poolPolecatSeatStateWith(townRoot, rigName, polecatName string, reads poolSeatReads) (poolSeatState, error) {
+// poolSeatBeadRead is the bead half of one polecat's seat read: the fields of
+// its agent bead, the facts those fields fold into, both readings of the work
+// it holds, and the answer to the hook-held question. It is everything
+// poolPolecatSeatStateWith needs before it probes a worktree, and all
+// poolPolecatHookHeldWith needs at all.
+type poolSeatBeadRead struct {
+	fields   *beads.AgentFields
+	facts    polecat.WorkstateFacts
+	hint     string
+	hookBead string
+	hd       polecat.HookBeadDisposition
+	held     bool
+}
+
+// poolReadSeatBeads reads and folds the beads one seat read decides from — the
+// agent bead, the work bead assigned to the seat, and its hook reference — the
+// way the list path reads them (listActivePolecatWorkByName,
+// assessPolecatAssignedIssueWork, agentSourceIssueHint). It reads no worktree,
+// so a seat's hook-held answer costs no git probe. It returns the rig's beads
+// client the caller's remaining reads use; a nil fields means the seat has no
+// agent bead.
+//
+// The full seat read and the cheap hook-held read both fold the work here, so
+// the two answers cannot disagree about whether a seat holds live work.
+func poolReadSeatBeads(townRoot, rigName, polecatName string, reads poolSeatReads) (poolSeatBeadRead, beads.Client, error) {
 	prefix := beads.GetPrefixForRig(townRoot, rigName)
 	agentID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
-	rigPath := filepath.Join(townRoot, rigName)
-	bd := beads.New(rigPath)
+	bd := beads.New(filepath.Join(townRoot, rigName))
 	_, fields, err := reads.agentBead(bd, agentID)
 	if err != nil {
-		return poolSeatState{}, err
+		return poolSeatBeadRead{}, bd, err
 	}
 	if fields == nil {
-		// No agent bead: nothing to read, and safest read is "still occupied"
-		// (see polecatSeatOccupied's fail-open note) rather than a disposition
-		// that happens to read as idle-pr-open by construction. No work is
-		// named, so a seat with no live session is not a held one either.
-		return poolSeatState{Disposition: polecat.WorkstateDisposition{ReuseStatus: ""}}, nil
+		// No agent bead: no work is named, so the seat holds no hook.
+		return poolSeatBeadRead{}, bd, nil
 	}
 
 	state := polecat.StateIdle
@@ -777,32 +818,6 @@ func poolPolecatSeatStateWith(townRoot, rigName, polecatName string, reads poolS
 	if activeMR := strings.TrimSpace(fields.ActiveMR); activeMR != "" {
 		facts.ActiveMR = activeMR
 		facts.ActiveMRBlocker = "active_mr=" + activeMR
-	}
-	// The same live probe the list path runs: a reuse and capacity decision
-	// comes from measured facts, not recalled ones. Without it the only trace
-	// of a finished seat's leftover commits is its recorded cleanup_status,
-	// which cannot tell the classifier the commits are preserved on the branch
-	// — so the pool would keep filling a seat the list has already stopped
-	// counting (gt-b9ud0, the gt-2nft shape of two pictures of one pool). A
-	// worktree that cannot be resolved is left unprobed, and the recorded hint
-	// stands.
-	//
-	// A sandbox seat's host worktree is a stale leftover whose commits read as
-	// unpushed, so its state comes from the gateway instead (gt-a0x2w).
-	var worktree string
-	if sandboxLive, sandboxed := reads.sandboxSeatState(fields.Agent, polecatSessionNameIn(rigName, polecatName)); sandboxed {
-		// No host worktree for a sandbox seat: the landed evidence below must not
-		// read the stale one either.
-		sandboxLive.ApplyFacts(&facts)
-	} else {
-		worktree = resolvePolecatWorktree(filepath.Join(rigPath, "polecats"), polecatName, rigName)
-		if worktree != "" {
-			probe := reads.probe
-			if probe == nil {
-				probe = polecat.ProbeLiveGitStateLocal
-			}
-			probe(worktree).ApplyFacts(&facts)
-		}
 	}
 	// The work the seat was dispatched for, read before the hook reference: the
 	// bead the seat holds, read the way the list path reads it
@@ -828,11 +843,95 @@ func poolPolecatSeatStateWith(townRoot, rigName, polecatName string, reads poolS
 	}
 	hd := polecat.ClassifyHookBead(hookBead, hookIssue, hookErr)
 	held := poolSeatWorkFacts(&facts, hd, assigned)
+	return poolSeatBeadRead{
+		fields:   fields,
+		facts:    facts,
+		hint:     hint,
+		hookBead: hookBead,
+		hd:       hd,
+		held:     held,
+	}, bd, nil
+}
+
+// poolPolecatHookHeld reports whether a polecat's seat still holds live work,
+// from its beads alone: the read poolDispositionFor makes, stopped before the
+// worktree probe. It is for a caller that needs the hold decision first and
+// the full state only for a seat that holds one.
+func poolPolecatHookHeld(townRoot, rigName, polecatName string) (bool, error) {
+	return poolPolecatHookHeldWith(townRoot, rigName, polecatName, poolSeatReadsFor())
+}
+
+// poolPolecatHookHeldWith is poolPolecatHookHeld with the town's beads reads
+// passed in, so a test drives it with no database.
+func poolPolecatHookHeldWith(townRoot, rigName, polecatName string, reads poolSeatReads) (bool, error) {
+	seat, _, err := poolReadSeatBeads(townRoot, rigName, polecatName, reads)
+	if err != nil {
+		return false, err
+	}
+	return seat.held, nil
+}
+
+// poolPolecatSeatStateWith is poolPolecatSeatState with the town's beads reads
+// passed in: a test drives the whole seat read — the disposition the roster
+// counts and the work that holds a crashed seat — with no database.
+//
+// The beads are read by poolReadSeatBeads, the same read the cheap hook-held
+// answer comes from; only the worktree probe and the facts that follow from it
+// are this read's own.
+func poolPolecatSeatStateWith(townRoot, rigName, polecatName string, reads poolSeatReads) (poolSeatState, error) {
+	seat, bd, err := poolReadSeatBeads(townRoot, rigName, polecatName, reads)
+	if err != nil {
+		return poolSeatState{}, err
+	}
+	return poolPolecatSeatStateFromBeadRead(townRoot, rigName, polecatName, reads, bd, seat)
+}
+
+// poolPolecatSeatStateFromBeadRead finishes a seat read whose beads were
+// already read, so a caller that asked the cheap hook-held question (and got
+// its answer from these beads) does not read them again. bd is the rig's beads
+// client poolReadSeatBeads returned.
+func poolPolecatSeatStateFromBeadRead(townRoot, rigName, polecatName string, reads poolSeatReads, bd beads.Client, seat poolSeatBeadRead) (poolSeatState, error) {
+	if seat.fields == nil {
+		// No agent bead: nothing to read, and safest read is "still occupied"
+		// (see polecatSeatOccupied's fail-open note) rather than a disposition
+		// that happens to read as idle-pr-open by construction. No work is
+		// named, so a seat with no live session is not a held one either.
+		return poolSeatState{Disposition: polecat.WorkstateDisposition{ReuseStatus: ""}}, nil
+	}
+	facts := seat.facts
+	rigPath := filepath.Join(townRoot, rigName)
+
+	// The same live probe the list path runs: a reuse and capacity decision
+	// comes from measured facts, not recalled ones. Without it the only trace
+	// of a finished seat's leftover commits is its recorded cleanup_status,
+	// which cannot tell the classifier the commits are preserved on the branch
+	// — so the pool would keep filling a seat the list has already stopped
+	// counting (gt-b9ud0, the gt-2nft shape of two pictures of one pool). A
+	// worktree that cannot be resolved is left unprobed, and the recorded hint
+	// stands.
+	//
+	// A sandbox seat's host worktree is a stale leftover whose commits read as
+	// unpushed, so its state comes from the gateway instead (gt-a0x2w).
+	var worktree string
+	if sandboxLive, sandboxed := reads.sandboxSeatState(seat.fields.Agent, polecatSessionNameIn(rigName, polecatName)); sandboxed {
+		// No host worktree for a sandbox seat: the landed evidence below must not
+		// read the stale one either.
+		sandboxLive.ApplyFacts(&facts)
+	} else {
+		worktree = resolvePolecatWorktree(filepath.Join(rigPath, "polecats"), polecatName, rigName)
+		if worktree != "" {
+			probe := reads.probe
+			if probe == nil {
+				probe = polecat.ProbeLiveGitStateLocal
+			}
+			probe(worktree).ApplyFacts(&facts)
+		}
+	}
 	// Leftover commits the landing already took are not at risk: the same
 	// landed evidence the list path applies, so a seat reusable there is not
 	// git-unpushed here (gt-wfxa2).
 	applyLiveWorkLandedToWorkstateFacts(&facts, reads.openWorkLanded, worktree, rigPath,
-		issueReadFunc(func(id string) (*beads.Issue, error) { return reads.show(bd, id) }), hookBead, facts.Branch)
+		issueReadFunc(func(id string) (*beads.Issue, error) { return reads.show(bd, id) }), seat.hookBead, facts.Branch)
 	// The assignment terminality the classifier accounts that seat with, read
 	// the way the list path reads it (assignedBeadTerminalForInventory: the
 	// live assigned issue, else the recorded hint — the hook itself when the
@@ -840,16 +939,16 @@ func poolPolecatSeatStateWith(townRoot, rigName, polecatName string, reads poolS
 	// false and the seat keeps counting: the exemption has to be proven, not
 	// assumed.
 	switch {
-	case hint == "":
-	case hint == hookBead:
-		facts.AssignedBeadTerminal = hd.Terminal
+	case seat.hint == "":
+	case seat.hint == seat.hookBead:
+		facts.AssignedBeadTerminal = seat.hd.Terminal
 	default:
-		if issue, err := reads.show(bd, hint); err == nil && issue != nil {
+		if issue, err := reads.show(bd, seat.hint); err == nil && issue != nil {
 			facts.AssignedBeadTerminal = beads.IssueStatus(issue.Status).IsTerminal()
 		}
 	}
 	d := polecat.DecideWorkstate(polecat.NewWorkstateInput(facts))
-	return poolSeatState{Disposition: d, HookHeld: held}, nil
+	return poolSeatState{Disposition: d, HookHeld: seat.held}, nil
 }
 
 // poolAssignedWorkEvidence reads the work bead assigned to one polecat and
@@ -1389,9 +1488,12 @@ type poolRouter struct {
 	pool        func() *config.PolecatPool
 	sessions    func() sessionLister
 	disposition polecatDispositionFunc
-	work        poolSeatWorkFunc
-	seats       *poolSeatLedger
-	now         func() time.Time
+	// hookHeld is the cheap hold read the dead-hooked walk asks before the
+	// full seat state (gt-gg9hv.73).
+	hookHeld polecatHookHeldFunc
+	work     poolSeatWorkFunc
+	seats    *poolSeatLedger
+	now      func() time.Time
 }
 
 // poolRouterFor wires the pool decision to the town on disk, the tmux server,
@@ -1424,6 +1526,7 @@ func poolRouterForWith(townRoot string, store *poolSeatClaimStore, storeFor func
 		},
 		sessions:    newPoolSessionLister,
 		disposition: batch.disposition,
+		hookHeld:    batch.hookHeld,
 		work:        poolSeatWorkFor(townRoot),
 		seats:       poolSeatLedgerFor(townRoot, store),
 		now:         time.Now,
@@ -1499,7 +1602,7 @@ func poolUncountedFallback(pool *config.PolecatPool, requested string, now time.
 // and that would put the count's bd reads inside the lock (gt-crkhv).
 func (r *poolRouter) occupied() func() ([]poolSession, error) {
 	return func() ([]poolSession, error) {
-		return poolOccupiedSessions(r.sessions(), r.townRoot, r.disposition, r.work, r.pool(), r.now, sandboxSeatDeathsFor(r.townRoot))
+		return poolOccupiedSessions(r.sessions(), r.townRoot, r.disposition, r.hookHeld, r.work, r.pool(), r.now, sandboxSeatDeathsFor(r.townRoot))
 	}
 }
 
@@ -1533,7 +1636,7 @@ func (r *poolRouter) occupied() func() ([]poolSession, error) {
 // submission records in it — the seat its restart takes again, and the window
 // the dispatcher's roster runs for a whole tick (gt-0axfg).
 func (r *poolRouter) seatSnapshot() (poolSeatSnapshot, error) {
-	return poolSeatSnapshotWith(r.sessions(), r.townRoot, r.disposition, r.work, r.pool(), r.now)
+	return poolSeatSnapshotWith(r.sessions(), r.townRoot, r.disposition, r.hookHeld, r.work, r.pool(), r.now)
 }
 
 // poolSeatSnapshot is the seat picture of one spec dispatch tick: the roster's
@@ -1548,6 +1651,10 @@ type poolSeatSnapshot struct {
 	// at is when the roster was read. A session created after it is not the
 	// one the roster released.
 	at time.Time
+	// probed is how many seats the roster's dead-hooked walk ran the full seat
+	// state read (the worktree probe) for. It is logged with the tick, so a
+	// read that stopped probing seats no hook holds shows it (gt-gg9hv.73).
+	probed int
 }
 
 // releasedAt reports whether s is a session the roster released: its seat was

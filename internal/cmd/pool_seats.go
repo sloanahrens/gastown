@@ -66,25 +66,35 @@ func sandboxDeadSamples(townRoot string) int {
 // and mid-landing together (gt-xmcyk). Each source skips the seats an earlier
 // one already named, so a seat is one seat however many of them describe it.
 func poolSeatSessions(t sessionLister, townRoot string, pool *config.PolecatPool) ([]poolSession, error) {
-	return poolSeatSessionsWith(t, townRoot, poolDispositionFor(townRoot), poolSeatWorkFor(townRoot), pool)
+	return poolSeatSessionsWith(t, townRoot, poolDispositionFor(townRoot), poolHookHeldFor(townRoot), poolSeatWorkFor(townRoot), pool)
 }
 
 // poolSeatSessionsWith is poolSeatSessions with the town's reads explicit: the
-// per-seat polecat-state read (listPolecatSessions' disposition) and the
+// per-seat polecat-state read (listPolecatSessions' disposition), the cheap
+// hook-held read the dead-hooked walk asks before that state read, and the
 // batched work-bead read the landing seats are confirmed with. A caller with
-// no town to read (a test) passes nil for both.
-func poolSeatSessionsWith(t sessionLister, townRoot string, disposition polecatDispositionFunc, work poolSeatWorkFunc, pool *config.PolecatPool) ([]poolSession, error) {
-	sessions, err := poolOccupiedSessions(t, townRoot, disposition, work, pool, time.Now, sandboxSeatDeathsFor(townRoot))
+// no town to read (a test) passes nil for all of them.
+func poolSeatSessionsWith(t sessionLister, townRoot string, disposition polecatDispositionFunc, hookHeld polecatHookHeldFunc, work poolSeatWorkFunc, pool *config.PolecatPool) ([]poolSession, error) {
+	sessions, _, err := poolSeatSessionsProbedWith(t, townRoot, disposition, hookHeld, work, pool)
+	return sessions, err
+}
+
+// poolSeatSessionsProbedWith is poolSeatSessionsWith with the number of seats
+// its dead-hooked walk ran the full state read (the worktree probe) for. The
+// roster logs it, so a tick that stopped probing worktrees no seat holds shows
+// it next to the tick's timing (gt-gg9hv.73).
+func poolSeatSessionsProbedWith(t sessionLister, townRoot string, disposition polecatDispositionFunc, hookHeld polecatHookHeldFunc, work poolSeatWorkFunc, pool *config.PolecatPool) ([]poolSession, int, error) {
+	sessions, probed, err := poolOccupiedSessionsProbed(t, townRoot, disposition, hookHeld, work, pool, time.Now, sandboxSeatDeathsFor(townRoot))
 	if err != nil {
-		return nil, err
+		return nil, probed, err
 	}
 	claims, err := poolSeatClaimSessions(townRoot, "")
 	if err != nil {
 		// A claim set that cannot be read is not an empty claim set: reading it
 		// as one is what makes the picture lie (gt-t8q5).
-		return nil, err
+		return nil, probed, err
 	}
-	return append(sessions, claims...), nil
+	return append(sessions, claims...), probed, nil
 }
 
 // poolOccupiedSessions lists the seats the pool already holds: the live polecat
@@ -108,21 +118,28 @@ func poolSeatSessionsWith(t sessionLister, townRoot string, disposition polecatD
 // deadSandbox is the liveness read a live session is dropped by (gt-tj446): a
 // sandbox seat the patrol has recorded as dead is not a working seat, and the
 // dead read below then counts it as held while its bead is hooked.
-func poolOccupiedSessions(t sessionLister, townRoot string, disposition polecatDispositionFunc, work poolSeatWorkFunc, pool *config.PolecatPool, now func() time.Time, deadSandbox sandboxSeatDeadFunc) ([]poolSession, error) {
+func poolOccupiedSessions(t sessionLister, townRoot string, disposition polecatDispositionFunc, hookHeld polecatHookHeldFunc, work poolSeatWorkFunc, pool *config.PolecatPool, now func() time.Time, deadSandbox sandboxSeatDeadFunc) ([]poolSession, error) {
+	sessions, _, err := poolOccupiedSessionsProbed(t, townRoot, disposition, hookHeld, work, pool, now, deadSandbox)
+	return sessions, err
+}
+
+// poolOccupiedSessionsProbed is poolOccupiedSessions with the number of seats
+// the dead-hooked walk probed returned beside the seats (gt-gg9hv.73).
+func poolOccupiedSessionsProbed(t sessionLister, townRoot string, disposition polecatDispositionFunc, hookHeld polecatHookHeldFunc, work poolSeatWorkFunc, pool *config.PolecatPool, now func() time.Time, deadSandbox sandboxSeatDeadFunc) ([]poolSession, int, error) {
 	live, err := listPolecatSessionsWith(t, disposition, now())
 	if err != nil {
-		return nil, &poolOccupancyError{sessions: true, err: err}
+		return nil, 0, &poolOccupancyError{sessions: true, err: err}
 	}
 	live = withoutDeadSandboxSeats(live, deadSandbox)
-	dead, err := poolDeadHookedSessions(townRoot, pool, disposition, live, now())
+	dead, probed, err := poolDeadHookedSessions(townRoot, pool, disposition, hookHeld, live, now())
 	if err != nil {
-		return nil, &poolOccupancyError{err: err}
+		return nil, probed, &poolOccupancyError{err: err}
 	}
 	landing, err := poolLandingSessions(townRoot, pool, work, live)
 	if err != nil {
-		return nil, &poolOccupancyError{err: err}
+		return nil, probed, &poolOccupancyError{err: err}
 	}
-	return append(append(live, dead...), landing...), nil
+	return append(append(live, dead...), landing...), probed, nil
 }
 
 // liveSeatKeys names the seats a live session already accounts for, keyed
@@ -202,6 +219,12 @@ type rigSeatBatch struct {
 	parsed   map[string]parsedAgent  // each agent bead's parse, once, by id
 	assigned map[string]*beads.Issue // assignee -> the issue GetAssignedIssue picks
 	held     map[string]*beads.Issue // work, hook and source-issue beads, by id
+
+	// seatMu guards seats, the bead half each seat's cheap hook-held read
+	// already made. disposition continues from it rather than reading the same
+	// beads again for the seat the dead-hooked walk then probes (gt-gg9hv.73).
+	seatMu sync.Mutex
+	seats  map[string]poolSeatBeadRead
 }
 
 // parsedAgent is one batched agent bead's parse: what a live read of the bead
@@ -223,8 +246,10 @@ func newPoolSeatBatch(townRoot string, store func(rigName string) beads.Client, 
 	return &poolSeatBatch{townRoot: townRoot, store: store, show: show, bound: poolSeatRigReads, rigs: map[string]*rigSeatBatch{}}
 }
 
-// disposition is the polecatDispositionFunc the batch answers.
-func (b *poolSeatBatch) disposition(rigName, polecatName string) (poolSeatState, error) {
+// seatReads is the polecat's seat reads this batch answers for rigName: the
+// rig's batched agent beads, assigned work and held beads, with the per-seat
+// read behind them for whatever the batch did not answer.
+func (b *poolSeatBatch) seatReads(rigName string) poolSeatReads {
 	rb := b.rig(rigName)
 	reads := poolSeatReads{
 		agentBead: func(_ beads.Client, id string) (*beads.Issue, *beads.AgentFields, error) {
@@ -249,7 +274,42 @@ func (b *poolSeatBatch) disposition(rigName, polecatName string) (poolSeatState,
 		}
 		return b.show(rb.store, id)
 	}
+	return reads
+}
+
+// disposition is the polecatDispositionFunc the batch answers. A seat whose
+// cheap hook-held read this batch already made continues from those beads, so
+// the dead-hooked walk's second read costs no bd call of its own.
+func (b *poolSeatBatch) disposition(rigName, polecatName string) (poolSeatState, error) {
+	rb := b.rig(rigName)
+	reads := b.seatReads(rigName)
+	rb.seatMu.Lock()
+	seat, ok := rb.seats[polecatName]
+	rb.seatMu.Unlock()
+	if ok {
+		bd := beads.New(filepath.Join(b.townRoot, rigName))
+		return poolPolecatSeatStateFromBeadRead(b.townRoot, rigName, polecatName, reads, bd, seat)
+	}
 	return poolPolecatSeatStateWith(b.townRoot, rigName, polecatName, reads)
+}
+
+// hookHeld is the polecatHookHeldFunc the batch answers: the bead half of
+// disposition's read, answered from the same batch, with the worktree probe
+// left unrun. It keeps that bead read for disposition, which the dead-hooked
+// walk calls for a held seat.
+func (b *poolSeatBatch) hookHeld(rigName, polecatName string) (bool, error) {
+	rb := b.rig(rigName)
+	seat, _, err := poolReadSeatBeads(b.townRoot, rigName, polecatName, b.seatReads(rigName))
+	if err != nil {
+		return false, err
+	}
+	rb.seatMu.Lock()
+	if rb.seats == nil {
+		rb.seats = make(map[string]poolSeatBeadRead)
+	}
+	rb.seats[polecatName] = seat
+	rb.seatMu.Unlock()
+	return seat.held, nil
 }
 
 // landingWork is the poolSeatWorkFunc the landing seats are confirmed with: the
@@ -847,6 +907,13 @@ func unrecordedSeatAgent(townRoot string, pool *config.PolecatPool) func(rigName
 // seats are already counted, and counting every unreadable directory would let
 // a bead-database hiccup fill every seat and refuse every sling.
 //
+// The hook-held question is asked first, from the seat's beads alone, and the
+// full seat state (with its worktree probe) only for a seat that holds a hook.
+// A polecat with no hook is skipped whatever its worktree says, so probing
+// that worktree was work no answer used; the probe is the expensive half of
+// this read (gt-gg9hv.73). The count returned beside the seats is how many
+// seats ran the full read, which the roster logs.
+//
 // The seat is rendered on the agent it was slung on, read from the seat's
 // intent record (intent.MarkSlung) — a dead seat's tmux session is what carried
 // its GT_AGENT, and the record is the copy that outlives it. A seat whose
@@ -865,28 +932,39 @@ func unrecordedSeatAgent(townRoot string, pool *config.PolecatPool) func(rigName
 // A seat parked longer than agentpause.ParkedSeatRelease stops holding its seat:
 // it comes back as a parkedStale session instead of a dead-hooked one, which the
 // roster lists apart from Live and poolHeldCount does not count (gt-t7k92).
-func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, disposition polecatDispositionFunc, live []poolSession, now time.Time) ([]poolSession, error) {
-	if townRoot == "" || !poolOwnsSeats(pool) || disposition == nil {
-		return nil, nil
+func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, disposition polecatDispositionFunc, hookHeld polecatHookHeldFunc, live []poolSession, now time.Time) ([]poolSession, int, error) {
+	if townRoot == "" || !poolOwnsSeats(pool) || disposition == nil || hookHeld == nil {
+		return nil, 0, nil
 	}
 	fallback := unrecordedSeatAgent(townRoot, pool)
 	liveSeats := liveSeatKeys(live)
 	rigs, err := knownRigNames(townRoot)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	var out []poolSession
+	probed := 0
 	for _, rigName := range rigs {
 		names, err := listPolecatDirectoryNames(filepath.Join(townRoot, rigName))
 		if err != nil {
-			return nil, fmt.Errorf("listing polecats in %s: %w", rigName, err)
+			return nil, probed, fmt.Errorf("listing polecats in %s: %w", rigName, err)
 		}
 		for _, name := range names {
 			if liveSeats[rigName+"/"+name] {
 				continue
 			}
+			held, err := hookHeld(rigName, name)
+			if err != nil || !held {
+				continue
+			}
+			// The seat holds a hook, so the rest of its state is worth the
+			// worktree probe.
 			state, err := disposition(rigName, name)
-			if err != nil || !state.HookHeld || !state.Disposition.CountsTowardCapacity {
+			if err != nil {
+				continue
+			}
+			probed++
+			if !state.Disposition.CountsTowardCapacity {
 				continue
 			}
 			// The seat's own record, read after the seat is known to hold
@@ -904,7 +982,7 @@ func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, dispositi
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
-	return out, nil
+	return out, probed, nil
 }
 
 // parkedStale reports whether the seat was parked more than

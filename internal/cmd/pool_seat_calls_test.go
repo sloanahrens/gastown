@@ -67,7 +67,7 @@ func TestSpecRosterReadsTwentySeatsInHalfTheBaseline(t *testing.T) {
 	pool := seatPool("deepseek-flash", 30)
 
 	perSeat := newCountingStore(db)
-	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), nil, pool)
+	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), poolHookHeldAnswering(town, seatReadsOver(perSeat)), nil, pool)
 	if err != nil {
 		t.Fatalf("per-seat roster: %v", err)
 	}

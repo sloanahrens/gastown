@@ -131,7 +131,7 @@ func TestSeatLiveSessionlessSeatsOnTheSeatMap(t *testing.T) {
 			}
 			writeIntentRecord(t, seat, town, rec)
 
-			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, disposition, work, ts.PolecatPool)
+			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, disposition, hookHeldOf(disposition), work, ts.PolecatPool)
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}

@@ -37,7 +37,7 @@ func TestPoolRosterDoesNotCountAHandedBackSeat(t *testing.T) {
 			writeTownPolecatDir(t, town, "gastown", "ember")
 			reads := poolSeatReadsAnswering(t, stuck, assessPolecatAssignedIssueWork(c.assigned))
 
-			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, poolDispositionAnswering(town, reads), nil, pool)
+			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, poolDispositionAnswering(town, reads), poolHookHeldAnswering(town, reads), nil, pool)
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}

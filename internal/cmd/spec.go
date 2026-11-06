@@ -1448,9 +1448,15 @@ type specDispatchReport struct {
 	// The bd reads each phase made, counted by the tick's ledger; the daemon
 	// logs them on its 'tick took' line beside the phase times, so a slow
 	// phase is also known by how many calls it cost (gt-139dp).
-	RosterCalls     int      `json:"roster_calls,omitempty"`
-	BoardCalls      int      `json:"board_calls,omitempty"`
-	CandidatesCalls int      `json:"candidates_calls,omitempty"`
+	RosterCalls     int `json:"roster_calls,omitempty"`
+	BoardCalls      int `json:"board_calls,omitempty"`
+	CandidatesCalls int `json:"candidates_calls,omitempty"`
+	// ProbedWorktrees is how many polecat worktrees the roster's dead-hooked
+	// walk probed: the seats it ran the full seat read for. The daemon logs it
+	// beside the tick's timing, so the probe's cost is visible (gt-gg9hv.73).
+	// Nil is a tick that read no roster — a held tick, or one whose roster read
+	// failed — which is not the same as a roster that probed none.
+	ProbedWorktrees *int     `json:"probed_worktrees,omitempty"`
 	Errors          []string `json:"errors,omitempty"`
 }
 
@@ -1566,6 +1572,11 @@ type specRoster struct {
 	// them to its total, so the pre-check reads the count the sling refuses on
 	// (gt-97ppg).
 	Draining map[string]int
+	// ProbedWorktrees is how many polecat worktrees the dead-hooked walk ran
+	// the full seat read for: the seats whose git state the tick measured. A
+	// seat that holds no hook is skipped before that read, so this is what the
+	// roster pays the worktree probe on (gt-gg9hv.73).
+	ProbedWorktrees int
 }
 
 // specDispatchEnv is every side effect a tick has, so the cycle runs on fakes
@@ -1826,6 +1837,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	// report speaks for (gt-t8new).
 	budget.Now = env.Now()
 	report.Roster = budget.Picture()
+	report.ProbedWorktrees = &roster.ProbedWorktrees
 	if len(roster.Unrecorded) > 0 {
 		sort.Strings(roster.Unrecorded)
 		report.Notices = append(report.Notices, fmt.Sprintf(
@@ -2832,6 +2844,7 @@ func specRosterFrom(sessions []poolSession, ts *config.TownSettings) specRoster 
 // that cannot see what a sling will count does not dispatch (gt-97ppg).
 func specRosterOf(seats poolSeatSnapshot, ts *config.TownSettings, occupied func() ([]poolSession, error)) (specRoster, error) {
 	roster := specRosterFrom(seats.sessions, ts)
+	roster.ProbedWorktrees = seats.probed
 	held, err := occupied()
 	if err != nil {
 		return specRoster{}, fmt.Errorf("counting the seats a sling will see: %w", err)
@@ -3318,7 +3331,7 @@ func rosterSnapshotOn(batch *poolSeatBatch, work poolSeatWorkFunc, townRoot stri
 	if err := batch.readRigs(rigs); err != nil {
 		return poolSeatSnapshot{}, err
 	}
-	return poolSeatSnapshotWith(lister, townRoot, batch.disposition, work, pool, now)
+	return poolSeatSnapshotWith(lister, townRoot, batch.disposition, batch.hookHeld, work, pool, now)
 }
 
 // rosterRigNames names the rigs the seat picture reads: every known rig when
@@ -3336,14 +3349,14 @@ func rosterRigNames(townRoot string, pool *config.PolecatPool) ([]string, error)
 
 // poolSeatSnapshotWith reads poolSeatSessionsWith through a recorder of the
 // seats the disposition releases, so a tick's slings can count them free too.
-func poolSeatSnapshotWith(lister sessionLister, townRoot string, disposition polecatDispositionFunc, work poolSeatWorkFunc, pool *config.PolecatPool, now func() time.Time) (poolSeatSnapshot, error) {
+func poolSeatSnapshotWith(lister sessionLister, townRoot string, disposition polecatDispositionFunc, hookHeld polecatHookHeldFunc, work poolSeatWorkFunc, pool *config.PolecatPool, now func() time.Time) (poolSeatSnapshot, error) {
 	at := now()
 	recorded, released := releasedSeatRecorder(disposition)
-	sessions, err := poolSeatSessionsWith(lister, townRoot, recorded, work, pool)
+	sessions, probed, err := poolSeatSessionsProbedWith(lister, townRoot, recorded, hookHeld, work, pool)
 	if err != nil {
 		return poolSeatSnapshot{}, err
 	}
-	return poolSeatSnapshot{sessions: sessions, released: released(), at: at}, nil
+	return poolSeatSnapshot{sessions: sessions, released: released(), at: at, probed: probed}, nil
 }
 
 func printSpecDispatchReport(cmd *cobra.Command, r specDispatchReport) {
@@ -3357,6 +3370,12 @@ func printSpecDispatchReport(cmd *cobra.Command, r specDispatchReport) {
 		summary += fmt.Sprintf(", %d held by %s", r.LabeledFailed, specdispatch.DispatchFailedLabel)
 	}
 	fmt.Fprintf(w, "%s; roster %s; template %s\n", summary, r.Roster, r.Template)
+	// The worktree probes the roster paid for, so a tick that stopped probing
+	// seats no hook holds says so where its cost is read (gt-gg9hv.73). A tick
+	// that read no roster has no count to report.
+	if r.ProbedWorktrees != nil {
+		fmt.Fprintf(w, "roster probed %d worktrees\n", *r.ProbedWorktrees)
+	}
 	for _, group := range []struct {
 		name    string
 		entries []specDispatchEntry
