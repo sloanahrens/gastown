@@ -354,7 +354,7 @@ func TestCICacheTrimFailuresAreFailedRuns(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
-		pods string
+		pods cliReply
 		exec cliReply
 		want string
 		// execs is how many exec calls the failure reaches.
@@ -368,7 +368,7 @@ func TestCICacheTrimFailuresAreFailedRuns(t *testing.T) {
 		},
 		{
 			name:  "the dind container is not running",
-			pods:  ciCachePodsDindWaitingJSON,
+			pods:  cliReply{stdout: ciCachePodsDindWaitingJSON},
 			want:  "is not running in forgejo",
 			execs: 0,
 		},
@@ -384,13 +384,31 @@ func TestCICacheTrimFailuresAreFailedRuns(t *testing.T) {
 			want:  "the volume's reply could not be read",
 			execs: 1,
 		},
+		{
+			name:  "the runner's pods cannot be read",
+			pods:  cliReply{stderr: "error: the server is unavailable\n", code: 1},
+			want:  "the runner's pods could not be read",
+			execs: 0,
+		},
+		{
+			name:  "the runner's pod list does not decode",
+			pods:  cliReply{stdout: "not json"},
+			want:  "the runner's pods could not be decoded",
+			execs: 0,
+		},
+		{
+			name:  "the runner's pod list names no item list",
+			pods:  cliReply{stdout: "{}"},
+			want:  "the reply names no item list",
+			execs: 0,
+		},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
-			if tt.pods != "" {
-				f.pods = cliReply{stdout: tt.pods}
+			if tt.pods != (cliReply{}) {
+				f.pods = tt.pods
 			}
 			if tt.exec != (cliReply{}) {
 				f.exec = tt.exec

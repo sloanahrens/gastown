@@ -1035,6 +1035,7 @@ func TestDiskMaintenanceCICacheSettings(t *testing.T) {
 		{name: "warn bytes negative is refused", field: "ci_cache_warn_bytes", value: "-30GB", wantErr: "not a size"},
 		{name: "warn bytes malformed is refused", field: "ci_cache_warn_bytes", value: "lots", wantErr: "not a size"},
 		{name: "warn bytes overflow is refused", field: "ci_cache_warn_bytes", value: "99999999TB", wantErr: "too large"},
+		{name: "warn bytes digits past int64 are refused", field: "ci_cache_warn_bytes", value: "99999999999999999999", wantErr: "not a size"},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
