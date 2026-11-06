@@ -214,14 +214,11 @@ func containerOMConfigPath(townRoot string) string {
 	return filepath.Join(townRoot, filepath.FromSlash(containerOMConfigRP))
 }
 
-// containerHMConfigRP is where the derived hm config is written, beside the om
+// containerHMConfigPath is the host path of the derived hm config, beside the om
 // config the same write derives. The town bind carries it into the container,
 // and the render mounts it at the path HM_CONFIG names (gt-yjzepk.13).
-const containerHMConfigRP = ".runtime/container/hm-config.json"
-
-// containerHMConfigPath is the host path of the derived hm config.
 func containerHMConfigPath(townRoot string) string {
-	return filepath.Join(townRoot, filepath.FromSlash(containerHMConfigRP))
+	return filepath.Join(townRoot, filepath.FromSlash(templates.ContainerHMConfigRP))
 }
 
 // writeDaemonComposeFile writes content to path, making the compose file's

@@ -19,6 +19,11 @@ import (
 // directory, so the derived file shadows the Mac's copy there.
 const LiveHMConfigPath = LiveConfigDirPath + "/hm-config.json"
 
+// ContainerHMConfigRP is the derived hm config's path under the town root, where
+// the compose write leaves the file. The wrapper keeps its own copy, which a test
+// pins to this one, since gtwrap does not import the templates package.
+const ContainerHMConfigRP = ".runtime/container/hm-config.json"
+
 // hmDatabaseField is the hm config field holding the database URL. hm reads its
 // database address from this URL alone and has no environment override for it,
 // so it is the one field the container's copy changes.
