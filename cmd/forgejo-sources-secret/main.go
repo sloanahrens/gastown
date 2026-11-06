@@ -2,7 +2,10 @@
 // sloan/gastown without any person seeing the token. It mints a read:repository
 // token for bot-viewer, checks that the token reads four repositories, and stores
 // it only when all four answer 200. It exits 0 when the secret is stored or a dry
-// run finishes, 1 when a step fails and 2 when the command line is refused.
+// run finishes, 1 when a step fails and 2 when the command line is refused. With --check
+// it mints, revokes and stores nothing: it reads whether SOURCES_TOKEN is listed, whether
+// bot-viewer is a collaborator on each read repository, and the names of its sources-token-
+// tokens, and exits 0 when it could read all three.
 package main
 
 import (
@@ -15,6 +18,9 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"regexp"
+	"slices"
+	"strings"
 	"syscall"
 	"time"
 
@@ -62,6 +68,7 @@ type options struct {
 	APIURL         string
 	AdminTokenFile string
 	DryRun         bool
+	Check          bool
 }
 
 func main() {
@@ -87,12 +94,15 @@ func run(ctx context.Context, args []string, env env, stdout, stderr io.Writer) 
 		fmt.Fprintf(stderr, "forgejo-sources-secret: %v\n", err)
 		return forgejoprov.ExitFailure
 	}
+	admin := &forgejoprov.Client{API: opts.APIURL, HTTP: env.HTTP, Token: secret, Ctx: ctx}
+	if opts.Check {
+		return checkState(admin, stdout, stderr)
+	}
 	name := tokenName(env.Now())
 	if opts.DryRun {
 		printPlan(stdout, name)
 		return forgejoprov.ExitOK
 	}
-	admin := &forgejoprov.Client{API: opts.APIURL, HTTP: env.HTTP, Token: secret, Ctx: ctx}
 
 	value, err := admin.MintToken(viewerAccount, name, []string{tokenScope})
 	if err != nil {
@@ -168,6 +178,7 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	fs.StringVar(&opts.APIURL, "api-url", forgejoprov.DefaultAPIURL, "Forgejo API root")
 	fs.StringVar(&opts.AdminTokenFile, "admin-token-file", "", "file holding FORGEJO_ADMIN_TOKEN=... (the broker hands it over)")
 	fs.BoolVar(&opts.DryRun, "dry-run", false, "print the plan; mint and store nothing")
+	fs.BoolVar(&opts.Check, "check", false, "read the secret, the collaborators and the tokens; mint, revoke and store nothing")
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
 	}
@@ -176,6 +187,9 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	}
 	if opts.AdminTokenFile == "" {
 		return options{}, errors.New("--admin-token-file is required")
+	}
+	if opts.Check && opts.DryRun {
+		return options{}, errors.New("--check and --dry-run cannot be combined")
 	}
 	return opts, nil
 }
@@ -209,6 +223,96 @@ func printPlan(stdout io.Writer, name string) {
 		fmt.Fprintf(stdout, "read check: %s/%s\n", secretOwner, repo)
 	}
 	fmt.Fprintf(stdout, "target: %s/%s secret %s\n", secretOwner, secretRepo, secretName)
+}
+
+// mintedName matches a token name this command mints. Only names of that shape are
+// printed: any other name is free text from the server, so it is counted and not shown.
+var mintedName = regexp.MustCompile(`^` + regexp.QuoteMeta(tokenNamePrefix) + `[0-9]{8}-[0-9]{6}$`)
+
+// checkState reads the state a real run depends on and prints it: whether SOURCES_TOKEN is
+// listed on sloan/gastown, the status of bot-viewer's collaborator check on each read
+// repository, and the sources-token- tokens bot-viewer holds. It sends GETs only, so it
+// mints, revokes and stores nothing. Every read is made before any is judged, so the
+// operator sees each one. A collaborator check that answers 204 (readable) or 404 (not
+// readable) is a reading of the state; any other status, or no reply, is a read that failed.
+// It exits ExitOK when every read is a reading of the state and ExitFailure otherwise. A
+// failure's detail goes to stderr and carries no reply body.
+func checkState(admin *forgejoprov.Client, stdout, stderr io.Writer) int {
+	code := forgejoprov.ExitOK
+
+	secrets, err := admin.ListRepoSecretNames(secretOwner, secretRepo)
+	if err != nil {
+		fmt.Fprintf(stderr, "forgejo-sources-secret: could not list the Actions secrets of %s/%s: %v\n", secretOwner, secretRepo, err)
+		code = forgejoprov.ExitFailure
+	} else {
+		state := "not listed"
+		if slices.Contains(secrets, secretName) {
+			state = "listed"
+		}
+		fmt.Fprintf(stdout, "%s/%s secret %s: %s\n", secretOwner, secretRepo, secretName, state)
+	}
+
+	for _, repo := range readRepos {
+		status, err := collaboratorStatus(admin, repo)
+		switch {
+		case err != nil:
+			fmt.Fprintf(stderr, "forgejo-sources-secret: the collaborator check on %s/%s got no HTTP reply\n", secretOwner, repo)
+			code = forgejoprov.ExitFailure
+		case status == http.StatusNoContent:
+			fmt.Fprintf(stdout, "%s/%s: readable by %s (HTTP %d)\n", secretOwner, repo, viewerAccount, status)
+		case status == http.StatusNotFound:
+			fmt.Fprintf(stdout, "%s/%s: not readable by %s (HTTP %d)\n", secretOwner, repo, viewerAccount, status)
+		default:
+			fmt.Fprintf(stderr, "forgejo-sources-secret: the collaborator check on %s/%s answered HTTP %d\n", secretOwner, repo, status)
+			code = forgejoprov.ExitFailure
+		}
+	}
+
+	names, err := admin.ListTokenNames(viewerAccount)
+	if err != nil {
+		fmt.Fprintf(stderr, "forgejo-sources-secret: could not list the tokens of %s: %v\n", viewerAccount, err)
+		code = forgejoprov.ExitFailure
+	} else {
+		printTokenNames(stdout, names)
+	}
+
+	if code == forgejoprov.ExitOK {
+		fmt.Fprintln(stdout, "RESULT: checked the secret, the collaborators and the tokens; nothing minted, revoked or stored")
+	} else {
+		fmt.Fprintln(stderr, "forgejo-sources-secret: the check could not read everything; the lines above say what failed")
+	}
+	return code
+}
+
+// collaboratorStatus asks whether viewerAccount is a collaborator on the read repository
+// repo, with the admin token, and returns the status alone.
+func collaboratorStatus(admin *forgejoprov.Client, repo string) (int, error) {
+	path := "/repos/" + url.PathEscape(secretOwner) + "/" + url.PathEscape(repo) + "/collaborators/" + url.PathEscape(viewerAccount)
+	status, _, err := admin.Do(http.MethodGet, path, nil)
+	return status, err
+}
+
+// printTokenNames prints each token name of this command's shape, and counts the other
+// sources-token- names without printing them.
+func printTokenNames(stdout io.Writer, names []string) {
+	printed, other := 0, 0
+	for _, name := range names {
+		if !strings.HasPrefix(name, tokenNamePrefix) {
+			continue
+		}
+		if !mintedName.MatchString(name) {
+			other++
+			continue
+		}
+		printed++
+		fmt.Fprintf(stdout, "%s token: %s\n", viewerAccount, name)
+	}
+	if printed+other == 0 {
+		fmt.Fprintf(stdout, "%s: no %s tokens listed\n", viewerAccount, tokenNamePrefix)
+	}
+	if other > 0 {
+		fmt.Fprintf(stdout, "%s: %d more %s token(s) do not have a name this command mints; their names are not printed\n", viewerAccount, other, tokenNamePrefix)
+	}
 }
 
 // readRepoStatus asks for one repository with the minted token and returns the status
