@@ -96,7 +96,7 @@ func assertFindings(t *testing.T, got []Finding, want ...Finding) {
 func TestShapeRulesFirePerRule(t *testing.T) {
 	t.Parallel()
 	billing := planted("0A1B2C", "-", "3D4E5F", "-", "6A7B8C")
-	home := planted("/Users/", "zephyr", "/project/file.go")
+	home := planted("/Users/", "alice", "/project/file.go")
 	privateTemp := planted("/private/", "tmp", "/note.txt")
 	sessionID := planted("session", "_id: ", "1234abcd", "-", "5678")
 	claudeProject := planted(".claude/", "projects/abc/transcript.txt")
@@ -158,19 +158,18 @@ func TestHomePathNameMustStartWithLetterOrDigit(t *testing.T) {
 func TestNonPersonalHomeNamesAreExemptByWholeName(t *testing.T) {
 	t.Parallel()
 
-	t.Run("the list holds exactly the documented names", func(t *testing.T) {
-		want := []string{
-			"user", "username", "me", "you", "u", "x", "op", "operator",
-			"someone", "other", "name", "NAME", "example", "test", "tester",
-			"fixture", "dev", "ci", "ops", "agent", "builder", "coder", "go",
-			"bin", "alice", "bob", "ann", "gt", "Shared",
-		}
-		if len(nonPersonalHomeNames) != len(want) {
-			t.Fatalf("got %d exempt names, want %d", len(nonPersonalHomeNames), len(want))
-		}
-		for _, name := range want {
-			if _, ok := nonPersonalHomeNames[name]; !ok {
-				t.Errorf("%q is not exempt", name)
+	// The map is the list. This pins the contract its doc comment states — a
+	// name documentation, a fixture, CI, the town's service account or the
+	// macOS shared directory uses as a placeholder is not a finding — with one
+	// name per category rather than a copy of the list, so adding a name does
+	// not fail a test that only mirrored data.
+	t.Run("documented placeholder categories are exempt", func(t *testing.T) {
+		for _, name := range []string{"user", "fixture", "ci", "gt", "Shared"} {
+			for _, base := range []string{"/Users/", "/home/"} {
+				line := "opened " + planted(base, name, "/project/file.go")
+				if findings := scanFS(t, singleFile("docs/note.md", line+"\n"), nil); len(findings) != 0 {
+					t.Errorf("%q: got %d findings %v, want none", line, len(findings), findings)
+				}
 			}
 		}
 	})
