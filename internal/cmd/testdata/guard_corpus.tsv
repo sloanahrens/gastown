@@ -204,3 +204,16 @@ dangerous	crew	"pacman -Ss curl"	allow		seed
 dangerous	crew	"go clean"	allow		seed
 dangerous	crew	"ls -R ./docs"	allow		seed
 dangerous	polecat	`gt bead note gt-x 'the guard is deliberate'`	allow		seed
+# --- dangerous: commands the shell cannot read, refused in every session (gt-m6x4py) ---
+# The hook judges every command, so each unreadable construct is refused for a
+# polecat and for crew alike. A lenient read that finds a dangerous operation
+# inside the unreadable text keeps that operation's reason.
+dangerous	polecat	"(make test"	refuse	cannot be read (unbalanced parenthesis)	gt-m6x4py
+dangerous	crew	"(make test"	refuse	cannot be read (unbalanced parenthesis)	gt-m6x4py
+dangerous	polecat	"echo 'make test"	refuse	cannot be read (unterminated quote)	gt-m6x4py
+dangerous	crew	"echo 'make test"	refuse	cannot be read (unterminated quote)	gt-m6x4py
+dangerous	polecat	"echo $(make test"	refuse	cannot be read (unterminated command substitution)	gt-m6x4py
+dangerous	crew	"echo $(make test"	refuse	cannot be read (unterminated command substitution)	gt-m6x4py
+dangerous	polecat	"bash <<'EOF'\nmake test\n"	refuse	cannot be read (unterminated here-document)	gt-m6x4py
+dangerous	crew	"bash <<'EOF'\nmake test\n"	refuse	cannot be read (unterminated here-document)	gt-m6x4py
+dangerous	polecat	"echo ok;rm -rf /;echo \""	refuse	filesystem destruction	gt-m6x4py
