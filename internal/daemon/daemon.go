@@ -78,6 +78,10 @@ type Daemon struct {
 	// per state, not every heartbeat (gt tail noise).
 	crashSkipLog logLatch
 
+	// promoteViaLog logs a rig's promote_via opt-out once, not on every
+	// verdict and tier-sweep call that builds its promoter (gt-mxa3op).
+	promoteViaLog logLatch
+
 	// sandboxRecordCursor is the name the last sandbox record pass ended on.
 	// The next pass starts after it, so the walk rotates over the records and
 	// survives records coming and going between ticks.

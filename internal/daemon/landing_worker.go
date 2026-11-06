@@ -1518,17 +1518,20 @@ func writeRedMainStatus(townRoot, rigName, line string, now time.Time) error {
 // wire and a rig that has not cut over is unchanged.
 //
 // A rig whose promote_via names another owner gets nil here too, after one
-// log line naming it: app-promote lets only gt promote advance GitHub main,
-// so GitHub follows prod (gt-182zb), and an unknown value is refused rather
-// than read as the empty default. gt promote calls NewRigPromoter itself, so
-// the opt-out stays in the daemon's callers and never in the constructor.
+// log line naming it per daemon run, not one per call: the verdict and every
+// tier-sweep tick build this owner, and the opt-out is a standing fact rather
+// than an event (gt-mxa3op). app-promote lets only gt promote advance GitHub
+// main, so GitHub follows prod (gt-182zb), and an unknown value is refused
+// rather than read as the empty default. gt promote calls NewRigPromoter
+// itself, so the opt-out stays in the daemon's callers and never in the
+// constructor.
 func (d *Daemon) newPromoter(rigName, repo string, fj *config.ForgejoConfig) *promote.Promoter {
 	if fj != nil && fj.PromoteVia != "" {
 		if err := config.ValidateForgejoPromoteVia(fj.PromoteVia); err != nil {
 			d.logger.Printf("promote: %s: %v, so the verdict and the tier sweep do not promote it", rigName, err)
 			return nil
 		}
-		d.logger.Printf("promote: %s: merge_queue.forgejo.promote_via is %q, so the verdict and the tier sweep leave its GitHub main to gt promote", rigName, fj.PromoteVia)
+		d.promoteViaLog.logf(d.logger.Printf, rigName, "promote: %s: merge_queue.forgejo.promote_via is %q, so the verdict and the tier sweep leave its GitHub main to gt promote", rigName, fj.PromoteVia)
 		return nil
 	}
 	return NewRigPromoter(d.config.TownRoot, rigName, fj, git.NewGit(repo), func(message string) {

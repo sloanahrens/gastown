@@ -14,17 +14,19 @@ import (
 // to gt promote has no daemon-side promoter on either path - the post-land
 // verdict or the tier sweep - while the same rig without the key promotes as
 // before; an unknown value is refused the same way and the refusal is logged
-// (gt-182zb).
+// (gt-182zb). The opt-out line names the rig once per daemon run, however many
+// verdicts and sweep ticks build the owner (gt-mxa3op).
 func TestPromoterSkipsAppPromoteRigs(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name, promoteVia string
 		want             bool
 		wantLog          string
+		wantOptOutLogs   int
 	}{
-		{"app-promote", `,"promote_via":"app-promote"`, false, "app-promote"},
-		{"no promote_via", "", true, ""},
-		{"unknown value", `,"promote_via":"app_promote"`, false, "promote_via"},
+		{"app-promote", `,"promote_via":"app-promote"`, false, "app-promote", 1},
+		{"no promote_via", "", true, "", 0},
+		{"unknown value", `,"promote_via":"app_promote"`, false, "promote_via", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -43,14 +45,20 @@ func TestPromoterSkipsAppPromoteRigs(t *testing.T) {
 
 			landing := d.newPromoter("testrig", repo, fj)
 			sweep := d.tierSweepPromoter("testrig", repo)
+			// The next verdict and tier-sweep tick build them again.
+			d.newPromoter("testrig", repo, fj)
+			d.tierSweepPromoter("testrig", repo)
 			if (landing != nil) != tc.want {
 				t.Errorf("landing worker promoter = %v, want non-nil = %v", landing, tc.want)
 			}
 			if (sweep != nil) != tc.want {
 				t.Errorf("tier sweep promoter = %v, want non-nil = %v", sweep, tc.want)
 			}
+			got := logs.String()
+			if n := strings.Count(got, "leave its GitHub main to gt promote"); n != tc.wantOptOutLogs {
+				t.Errorf("the opt-out line is logged %d times, want %d: %q", n, tc.wantOptOutLogs, got)
+			}
 			if tc.wantLog != "" {
-				got := logs.String()
 				if !strings.Contains(got, tc.wantLog) || !strings.Contains(got, "testrig") {
 					t.Errorf("log = %q, want the refusal for testrig naming %s", got, tc.wantLog)
 				}
