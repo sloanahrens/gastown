@@ -26,7 +26,7 @@ func midSubmissionIssue(id string) *beads.Issue {
 		ID: id, Type: "task", Status: "open", Priority: 1,
 		Description:        specTestDescription,
 		AcceptanceCriteria: "- [ ] a\n- [ ] b\n- [ ] c",
-		Notes:              readyBlock("sloan/x", "abc1234", "main"),
+		Notes:              readyBlock("operator/x", "abc1234", "main"),
 	}
 }
 
@@ -76,7 +76,7 @@ func TestSpecDispatchHoldsABeadTheReReadCatchesMidSubmission(t *testing.T) {
 // landed bead and a rework are the dispatcher's again (gt-kr5xv).
 func TestSpecLiveLandingRequestStates(t *testing.T) {
 	t.Parallel()
-	ready := readyBlock("sloan/x", "abc1234", "main")
+	ready := readyBlock("operator/x", "abc1234", "main")
 	rejection := land.MergeRejectionNoteMarker + " (attempt 1): tests failed"
 	landing := land.LandingNoteMarker + "\nlanded_commit: def5678"
 	for _, tc := range []struct {
@@ -88,7 +88,7 @@ func TestSpecLiveLandingRequestStates(t *testing.T) {
 		{name: "a later landing record settles it", notes: ready + "\n\n" + landing},
 		{name: "a later rejection settles it", notes: ready + "\n\n" + rejection},
 		{name: "a resubmission after the rejection is live", notes: ready + "\n\n" + rejection + "\n\n" + ready, want: true},
-		{name: "an incomplete block is no request", notes: land.ReadyNoteMarker + "\nBranch: sloan/x"},
+		{name: "an incomplete block is no request", notes: land.ReadyNoteMarker + "\nBranch: operator/x"},
 		{name: "notes that only name the block are no request", notes: "a note about the READY TO LAND marker"},
 		{name: "no notes are no request", notes: ""},
 	} {

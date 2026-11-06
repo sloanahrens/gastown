@@ -27,7 +27,7 @@ func TestUsageActor(t *testing.T) {
 		{"daemon spawn", map[string]string{"BD_ACTOR": "daemon"}, false, "daemon"},
 		{"BD_ACTOR qualifies bare role", map[string]string{"GT_ROLE": "polecat", "BD_ACTOR": "gastown/polecats/opal"}, false, "gastown/polecats/opal"},
 		{"bare polecat role from rig and name", map[string]string{"GT_ROLE": "polecat", "GT_RIG": "gastown", "GT_POLECAT": "opal"}, false, "gastown/polecats/opal"},
-		{"bare crew role from rig and name", map[string]string{"GT_ROLE": "crew", "GT_RIG": "gastown", "GT_CREW": "sloan"}, false, "gastown/crew/sloan"},
+		{"bare crew role from rig and name", map[string]string{"GT_ROLE": "crew", "GT_RIG": "gastown", "GT_CREW": "operator"}, false, "gastown/crew/operator"},
 		{"bare role without rig", map[string]string{"GT_ROLE": "mayor"}, true, "mayor"},
 		{"operator at a terminal", nil, true, "operator"},
 		{"no identity off-terminal", nil, false, "unknown"},
@@ -47,7 +47,7 @@ func TestUsageActor(t *testing.T) {
 // whose identity runDaemonRun then clears (gt-dswsc).
 func TestCommandActorDaemonRun(t *testing.T) {
 	t.Parallel()
-	for _, env := range []map[string]string{nil, {"GT_ROLE": "gastown/crew/sloan"}} {
+	for _, env := range []map[string]string{nil, {"GT_ROLE": "gastown/crew/operator"}} {
 		if got := commandActor(daemonRunCmd, envOf(env), false); got != "daemon" {
 			t.Errorf("commandActor(gt daemon run, %v) = %q, want daemon", env, got)
 		}

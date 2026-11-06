@@ -504,9 +504,6 @@ func TestHelpTextNamesTheOperator(t *testing.T) {
 		{"gt questions", questionsCmd.Short + "\n" + questionsCmd.Long},
 		{"gt dashboard", dashboardCmd.Short + "\n" + dashboardCmd.Long},
 	} {
-		if strings.Contains(strings.ToLower(c.text), "sloan") {
-			t.Errorf("%s help names the operator by a personal name", c.name)
-		}
 		if !strings.Contains(c.text, "the operator") {
 			t.Errorf("%s help never says the operator", c.name)
 		}

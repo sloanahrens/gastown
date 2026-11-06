@@ -66,7 +66,7 @@ func TestRenderSystemPromptFileForSpawn_PolecatMatchesInSessionPrime(t *testing.
 func TestRenderSystemPromptFileForSpawn_AllRolesMatchInSessionPrime(t *testing.T) {
 	t.Parallel()
 	town, rigPath := newSpawnRenderTown(t, "myrig", "nux")
-	if err := os.MkdirAll(filepath.Join(rigPath, "crew", "sloan"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(rigPath, "crew", "operator"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cases := []struct {
@@ -75,7 +75,7 @@ func TestRenderSystemPromptFileForSpawn_AllRolesMatchInSessionPrime(t *testing.T
 		prime RoleContext // what gt prime derives inside the live session
 	}{
 		{"polecat", "nux", RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: filepath.Join(rigPath, "polecats", "nux", "myrig")}},
-		{"crew", "sloan", RoleContext{Role: RoleCrew, Rig: "myrig", Polecat: "sloan", TownRoot: town, WorkDir: filepath.Join(rigPath, "crew", "sloan")}},
+		{"crew", "operator", RoleContext{Role: RoleCrew, Rig: "myrig", Polecat: "operator", TownRoot: town, WorkDir: filepath.Join(rigPath, "crew", "operator")}},
 	}
 	for _, tc := range cases {
 		path := config.SystemPromptFilePath(tc.role, town, rigPath, tc.agent)
@@ -106,7 +106,7 @@ func TestSpawnRoleContext_WorkDirsPerRole(t *testing.T) {
 		role, agent, wantWorkDir string
 	}{
 		{"polecat", "nux", filepath.Join(rigPath, "polecats", "nux", "myrig")},
-		{"crew", "sloan", filepath.Join(rigPath, "crew", "sloan")},
+		{"crew", "operator", filepath.Join(rigPath, "crew", "operator")},
 	}
 	for _, tc := range cases {
 		ctx, err := spawnRoleContext(tc.role, town, rigPath, tc.agent)
