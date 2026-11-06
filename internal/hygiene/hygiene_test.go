@@ -709,6 +709,137 @@ func TestAnAddressFollowedByAColonInProseIsAFinding(t *testing.T) {
 	}
 }
 
+// A reserved domain is read by its host, so the :port, /path or ?query after it
+// does not make an address out of a test or example host. The twin of each row
+// is the same shape on a real domain, which stays a finding.
+func TestReservedDomainIsReadByItsHostNotItsPortOrPath(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		text string
+		want int
+	}{
+		{"reserved host with a port", planted("proxy", "@proxy.example:3128"), 0},
+		{"reserved host with a path after a colon", planted("deploy", "@private-host.example.test:repos/app.git"), 0},
+		{"reserved host with a query", planted("svc", "@host.example?x=1"), 0},
+		{"reserved host with a userinfo, port and path", planted("user:pw", "@db.example:5432/gt"), 0},
+		{"reserved host with an id, port and path", planted("svc:s3cret/x", "@forgejo.example:3000/acme"), 0},
+		{"reserved host with an escaped password", planted("tracker:p%40ss", "@db.example.test:5433/tracker"), 0},
+		{"twin: real host with a port", planted("proxy", "@acme.com:3128"), 1},
+		{"twin: real host with a path after a colon", planted("deploy", "@private-host.acme.com:repos/app.git"), 1},
+		{"twin: real host with a query", planted("svc", "@host.acme.com?x=1"), 1},
+		{"twin: real host with a userinfo, port and path", planted("tracker:p%40ss", "@db.acme.com:5433/tracker"), 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := "contact " + tc.text + " please"
+			findings := scanFS(t, singleFile("docs/note.md", line+"\n"), nil)
+			if len(findings) != tc.want {
+				t.Fatalf("got %d findings %v, want %d", len(findings), findings, tc.want)
+			}
+			if tc.want == 1 && findings[0].Rule != RuleEmail {
+				t.Errorf("rule = %q, want %q", findings[0].Rule, RuleEmail)
+			}
+		})
+	}
+}
+
+// The attribution address and GitHub's ssh user are not anybody's, so they are
+// exempt as addresses in every form. A lookalike of either stays a finding.
+func TestKnownNoReplyAndSSHAddressesAreExemptInEveryForm(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		text string
+		want int
+	}{
+		{"attribution address", planted("noreply", "@anthropic.com"), 0},
+		{"attribution address in angle brackets", "<" + planted("noreply", "@anthropic.com") + ">", 0},
+		{"ssh -T", "ssh -T " + planted("git", "@github.com"), 0},
+		{"ssh URL", "ssh://" + planted("git", "@github.com") + "/o/r.git", 0},
+		{"git+ssh URL", "git+ssh://" + planted("git", "@github.com") + "/o/r.git", 0},
+		{"permission denied prose", planted("git", "@github.com") + ": Permission denied", 0},
+		{"twin: personal address at the attribution domain", planted("jane", "@anthropic.com"), 1},
+		{"twin: personal address at the ssh host", planted("jane", "@github.com"), 1},
+		{"twin: lookalike local part", planted("xnoreply", "@anthropic.com"), 1},
+		{"twin: lookalike ssh user", planted("x-git", "@github.com"), 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := "contact " + tc.text + " please"
+			findings := scanFS(t, singleFile("docs/note.md", line+"\n"), nil)
+			if len(findings) != tc.want {
+				t.Fatalf("got %d findings %v, want %d", len(findings), findings, tc.want)
+			}
+			if tc.want == 1 && findings[0].Rule != RuleEmail {
+				t.Errorf("rule = %q, want %q", findings[0].Rule, RuleEmail)
+			}
+		})
+	}
+}
+
+// A dotless name inside a branch path is a ref, not an address, even when a
+// colon and a space follow it. The same name after a space is still prose.
+func TestDotlessNameInABranchPathIsNotAnAddress(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		text string
+		want int
+	}{
+		{"branch name before a colon", "branch " + planted("polecat/toast/gt-work", "@abc123") + ": dolt locked", 0},
+		{"twin: dotless scp form after a space", planted("user", "@host: ") + "dolt locked", 1},
+		{"twin: url user with a dotless host", planted("ssh://jane", "@laptop: ") + "dolt locked", 1},
+		{"twin: one segment before a dotless host", planted("docs/jane", "@laptop: ") + "dolt locked", 1},
+		{"twin: polecat name without a bead segment", planted("polecat/jane", "@laptop: ") + "dolt locked", 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := "contact " + tc.text + " please"
+			findings := scanFS(t, singleFile("docs/note.md", line+"\n"), nil)
+			if len(findings) != tc.want {
+				t.Fatalf("got %d findings %v, want %d", len(findings), findings, tc.want)
+			}
+			if tc.want == 1 && findings[0].Rule != RuleEmail {
+				t.Errorf("rule = %q, want %q", findings[0].Rule, RuleEmail)
+			}
+		})
+	}
+}
+
+// A home segment that sits inside a host or fixture path is a directory of that
+// path, not a home. A path that starts with a home root keeps its later home
+// segments as findings, and a Users segment in the middle of a path stays one.
+func TestHomeSegmentMidPathIsNotAHomeDirectory(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		text string
+		want int
+	}{
+		{"host directory holds a home segment", planted("/host/home/", "gt-backups", "/dolt"), 0},
+		{"fixture directory holds a home segment", planted("/fixture/home/", "forgejo", "/.env"), 0},
+		{"twin: second home segment under a home root", planted("/home/", "user", "/home/", "real", "/x"), 1},
+		{"twin: home directory", planted("/home/", "jane", "/x"), 1},
+		{"twin: quoted home directory", planted("\"/Users/", "jane", "/x\""), 1},
+		{"twin: users segment under a host directory", planted("/host/Users/", "jane", "/x"), 1},
+		{"twin: account name under a host directory", planted("/host/home/", "jane", "/x"), 1},
+		{"twin: account name under a srv directory", planted("/srv/home/", "jane", "/x"), 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := "opened " + tc.text
+			findings := scanFS(t, singleFile("docs/note.md", line+"\n"), nil)
+			if len(findings) != tc.want {
+				t.Fatalf("got %d findings %v, want %d", len(findings), findings, tc.want)
+			}
+			if tc.want == 1 && findings[0].Rule != RuleHomePath {
+				t.Errorf("rule = %q, want %q", findings[0].Rule, RuleHomePath)
+			}
+		})
+	}
+}
+
 func TestAllowRowsRoundTripThroughJSON(t *testing.T) {
 	t.Parallel()
 	rows := []Allow{

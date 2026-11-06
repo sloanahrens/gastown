@@ -138,7 +138,9 @@ func homePathFinding(line string) bool {
 		if loc == nil {
 			return false
 		}
-		if _, ok := nonPersonalHomeNames[line[start+loc[4]:start+loc[5]]]; !ok {
+		name := line[start+loc[4] : start+loc[5]]
+		root := line[start+loc[2] : start+loc[3]]
+		if _, ok := nonPersonalHomeNames[name]; !ok && !homeSegmentMidPath(line, start+loc[0], root, name) {
 			return true
 		}
 		// Keep the trailing separator so a second path that shares it is
@@ -146,6 +148,40 @@ func homePathFinding(line string) bool {
 		start += loc[1] - 1
 	}
 	return false
+}
+
+// midPathHomeNames are the directory names that fixtures and backup paths put
+// after a mid-path home segment under a host directory. Only these are read as
+// directories: any other name after such a segment is somebody's home and stays
+// a finding.
+var midPathHomeNames = map[string]struct{}{
+	"gt-backups": {}, "forgejo": {},
+}
+
+// homeSegmentMidPath reports whether the home root at index at follows a name
+// inside a longer path, as a home directory does inside a host or fixture
+// directory. A path whose first segment is a home root is not exempt, so a
+// second home segment under one still reports. The exemption is for the home
+// root only: a Users segment in the middle stays a finding.
+func homeSegmentMidPath(line string, at int, root, name string) bool {
+	if root != "home" || at == 0 || !isNameByte(line[at-1]) {
+		return false
+	}
+	if _, ok := midPathHomeNames[name]; !ok {
+		return false
+	}
+	begin := at
+	for begin > 0 && (isNameByte(line[begin-1]) || line[begin-1] == '/') {
+		begin--
+	}
+	first, _, _ := strings.Cut(strings.TrimLeft(line[begin:], "/"), "/")
+	return first != "home" && first != "Users"
+}
+
+// isNameByte reports whether b can sit in a file or ref name: a letter, a digit,
+// or one of . _ - ~ + %. A slash separates segments and is not a name byte.
+func isNameByte(b byte) bool {
+	return isASCIILetter(b) || b >= '0' && b <= '9' || strings.IndexByte("._-~+%", b) >= 0
 }
 
 // HashWord returns the hex SHA-256 of word lower-cased.
@@ -461,6 +497,14 @@ func isASCIILetter(b byte) bool {
 	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
 }
 
+// knownAddresses are the two addresses that belong to nobody: the well-known
+// attribution address and GitHub's ssh user. A match is exact, so a lookalike
+// local part or domain is still an address.
+var knownAddresses = map[string]bool{
+	"noreply@anthropic.com": true,
+	"git@github.com":        true,
+}
+
 // emailFinding reports whether the line holds an address the exemptions do not
 // cover.
 func emailFinding(line string) bool {
@@ -469,10 +513,15 @@ func emailFinding(line string) bool {
 		local := line[loc[0]:at]
 		domain := line[at+1 : loc[1]]
 		rest := line[loc[1]:]
+		if knownAddresses[local+"@"+domain] {
+			continue
+		}
 		// A colon and then whitespace after the address is how a person
 		// writes a host in a document. It is a finding whatever the host
 		// looks like: a dotless host there is a host, not a version pin.
-		prose := colonThenProse(rest)
+		// The one exception is a dotless name that is the last segment of a
+		// polecat branch path: that is a ref, not prose.
+		prose := colonThenProse(rest) && !(dotless(domain) && branchRefLocal(line, loc[0]))
 		if !addressDomain(domain) && !prose {
 			continue
 		}
@@ -481,6 +530,23 @@ func emailFinding(line string) bool {
 		}
 	}
 	return false
+}
+
+// branchRefLocal reports whether the local part starting at index at is the
+// last segment of a polecat branch path such as polecat/toast/gt-work. The path
+// before it must start with polecat/, hold at least two segments, and carry no
+// scheme or empty segment, so ssh://jane@laptop and docs/jane@laptop do not
+// qualify.
+func branchRefLocal(line string, at int) bool {
+	begin := at
+	for begin > 0 && (isNameByte(line[begin-1]) || line[begin-1] == '/') {
+		begin--
+	}
+	prefix := line[begin:at]
+	return strings.HasPrefix(prefix, "polecat/") &&
+		strings.Count(prefix, "/") >= 2 &&
+		strings.HasSuffix(prefix, "/") &&
+		!strings.Contains(prefix, "//")
 }
 
 // colonThenProse reports whether rest starts with a colon followed by
@@ -527,11 +593,24 @@ func identifierShaped(s string) bool {
 	return false
 }
 
+// colonThenPath reports whether rest starts with a colon and then a character
+// that is not whitespace: an ssh path or a port.
+func colonThenPath(rest string) bool {
+	return strings.HasPrefix(rest, ":") && len(rest) > 1 && !unicode.IsSpace(rune(rest[1]))
+}
+
+// dotless reports whether domain has no dot: a version pin or a ref, not a host
+// name with a top-level domain.
+func dotless(domain string) bool {
+	return !strings.Contains(domain, ".")
+}
+
 func emailIsFinding(local, domain, rest string) bool {
 	if strings.HasPrefix(rest, ":") {
-		// A path right after the colon marks the ssh remote shape; a space
-		// after the colon marks prose, and the user must be exactly git.
-		if local == "git" && len(rest) > 1 && !unicode.IsSpace(rune(rest[1])) {
+		// A path or port right after the colon is read by the host before it:
+		// the ssh remote shape for git, and a reserved host for anyone. A space
+		// after the colon marks prose, which is a finding.
+		if colonThenPath(rest) && (local == "git" || exemptDomain(domain)) {
 			return false
 		}
 		return true
