@@ -1426,14 +1426,15 @@ func TestOverseerReportDailySidecarDropsItemsWhenEscapingOverflowsTheCap(t *test
 
 // The last-resort refusal: when the fixed text alone is over the cap there is
 // no list left to cut, so the sidecar is refused rather than written for a
-// reader that would not show it. Only a bird name far longer than any
+// reader that would not show it, and the daily writer reports it rather than
+// leaving the directory half-written. Only a bird name far longer than any
 // directory name can reach it.
 func TestOverseerReportDailySidecarRefusesTextWithNoRoomForIt(t *testing.T) {
 	t.Parallel()
-	_, _, err := overseerDailyFiles(strings.Repeat("b", overseerSidecarMaxBytes),
-		overseerAt("2026-10-14T20:15:00Z"), "overseer report\n\nhealth: GREEN\n")
+	dir := filepath.Join(t.TempDir(), strings.Repeat("b", overseerSidecarMaxBytes), "reports")
+	err := writeOverseerDaily(dir, overseerAt("2026-10-14T20:15:00Z"), "overseer report\n\nhealth: GREEN\n")
 	if err == nil || !strings.Contains(err.Error(), overseerSidecarName) || !strings.Contains(err.Error(), "KiB") {
-		t.Fatalf("overseerDailyFiles with no room for the fixed text = %v, want a refusal naming %s", err, overseerSidecarName)
+		t.Fatalf("writeOverseerDaily with no room for the fixed text = %v, want a refusal naming %s", err, overseerSidecarName)
 	}
 }
 
