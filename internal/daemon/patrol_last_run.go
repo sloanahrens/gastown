@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -24,11 +25,11 @@ import (
 
 const patrolLastRunFileName = "patrol_last_run.json"
 
-// errPatrolLastRunCorrupt marks a last-run file that was read but is not valid
+// ErrPatrolLastRunCorrupt marks a last-run file that was read but is not valid
 // JSON. It is the one load failure an in-memory completion time cannot explain
 // away: a write that could not create a record leaves the file missing or its
 // directory unusable, never garbled.
-var errPatrolLastRunCorrupt = errors.New("corrupt last-run file")
+var ErrPatrolLastRunCorrupt = errors.New("corrupt last-run file")
 
 // patrolLastRunWriteMu guards the read-modify-write of the shared file, so two
 // patrols recording a run at once cannot drop each other's entry.
@@ -44,25 +45,38 @@ type patrolLastRunState struct {
 	LastRun map[string]time.Time `json:"last_run"`
 }
 
+// ReadPatrolLastRuns reads the whole last-run record: each patrol's last
+// completion time. A missing file is the read's own error and wraps
+// fs.ErrNotExist; a file that is not valid JSON wraps ErrPatrolLastRunCorrupt.
+// The daemon's per-patrol loader and the jev health command both read through
+// here, so they agree on what the record says.
+func ReadPatrolLastRuns(townRoot string) (map[string]time.Time, error) {
+	data, err := os.ReadFile(patrolLastRunPath(townRoot))
+	if err != nil {
+		return nil, err
+	}
+
+	var state patrolLastRunState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("parse %s: %w: %w", patrolLastRunFileName, ErrPatrolLastRunCorrupt, err)
+	}
+	return state.LastRun, nil
+}
+
 // loadPatrolLastRun returns a patrol's last recorded completion time, and false
 // when none has ever been recorded. An unreadable or corrupt file is an error
 // the caller reports and then runs the patrol anyway: reading broken state as
 // "not due" is silent starvation (gt-ima2).
 func loadPatrolLastRun(townRoot, patrol string) (time.Time, bool, error) {
-	data, err := os.ReadFile(patrolLastRunPath(townRoot))
+	runs, err := ReadPatrolLastRuns(townRoot)
+	if errors.Is(err, fs.ErrNotExist) {
+		return time.Time{}, false, nil
+	}
 	if err != nil {
-		if os.IsNotExist(err) {
-			return time.Time{}, false, nil
-		}
 		return time.Time{}, false, err
 	}
 
-	var state patrolLastRunState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return time.Time{}, false, fmt.Errorf("parse %s: %w: %w", patrolLastRunFileName, errPatrolLastRunCorrupt, err)
-	}
-
-	lastRun, ok := state.LastRun[patrol]
+	lastRun, ok := runs[patrol]
 	if !ok || lastRun.IsZero() {
 		return time.Time{}, false, nil
 	}
@@ -149,7 +163,7 @@ func latestPatrolLastRun(townRoot, patrol string, inMemory time.Time) (lastRun t
 	// lose the warning. The in-memory time still decides whether the patrol is
 	// due; the warning rides with the decision.
 	if !inMemory.IsZero() && inMemory.After(lastRun) {
-		if errors.Is(err, errPatrolLastRunCorrupt) {
+		if errors.Is(err, ErrPatrolLastRunCorrupt) {
 			corruptWarn = fmt.Sprintf("last-run state unreadable (%v)", err)
 		}
 		lastRun, found, err = inMemory, true, nil

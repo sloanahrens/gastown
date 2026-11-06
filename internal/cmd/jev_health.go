@@ -7,7 +7,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"text/tabwriter"
 	"time"
 
@@ -173,26 +172,22 @@ type patrolRuns struct {
 	err error
 }
 
-// jevHealthPatrolRuns reads the daemon's last-run record. A missing, corrupt or
-// unreadable record is an err on the result and not a failure of the command:
-// the batteries judged against it fall back to their cursors and say so.
+// jevHealthPatrolRuns reads the daemon's last-run record through the daemon's
+// own reader, so the command and the daemon cannot disagree about it. A missing,
+// corrupt or unreadable record is an err on the result and not a failure of the
+// command: the batteries judged against it fall back to their cursors and say so.
 func jevHealthPatrolRuns(townRoot string) patrolRuns {
-	path := filepath.Join(townRoot, "daemon", patrolLastRunFile)
-	data, err := os.ReadFile(path) //nolint:gosec // G304: the path is the town's daemon directory
-	if errors.Is(err, fs.ErrNotExist) {
+	at, err := daemon.ReadPatrolLastRuns(townRoot)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
 		return patrolRuns{err: fmt.Errorf("%s is missing", patrolLastRunFile)}
-	}
-	if err != nil {
+	case errors.Is(err, daemon.ErrPatrolLastRunCorrupt):
+		// The parse error can quote the file, so this error names only the file.
+		return patrolRuns{err: fmt.Errorf("%s is not valid JSON", patrolLastRunFile)}
+	case err != nil:
 		return patrolRuns{err: fmt.Errorf("reading %s: %w", patrolLastRunFile, err)}
 	}
-	var doc struct {
-		LastRun map[string]time.Time `json:"last_run"`
-	}
-	// The decoder's message can quote the file, so the error names only the file.
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return patrolRuns{err: fmt.Errorf("%s is not valid JSON", patrolLastRunFile)}
-	}
-	return patrolRuns{at: doc.LastRun}
+	return patrolRuns{at: at}
 }
 
 // jevHealthInputs reads every battery's files, keyed by battery name. The
