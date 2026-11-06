@@ -47,6 +47,11 @@ func ParseNodeStats(summary string) (float64, error) {
 	if used < 0 {
 		return 0, fmt.Errorf("node.fs usedBytes = %d, want a byte count", used)
 	}
+	// Compare the counts as integers: above 2^53 bytes float64 rounds, so a
+	// disk one byte over capacity would divide to exactly 100 and read as full.
+	if used > capacity {
+		return 0, fmt.Errorf("node.fs usedBytes = %d is more than capacityBytes = %d, outside 0-100", used, capacity)
+	}
 	pct := float64(used) / float64(capacity) * 100
 	if pct > 100 {
 		return 0, fmt.Errorf("node.fs usedBytes = %d of capacityBytes = %d is %.1f%% used, outside 0-100", used, capacity, pct)
