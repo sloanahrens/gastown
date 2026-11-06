@@ -8,24 +8,25 @@ import (
 	"time"
 )
 
-// openEventsServer opens a DB over a fake server configured with cfg.
-func openEventsServer(t *testing.T, cfg fakeServer) (*DB, *fakeServer) {
+// openEventsServer opens a DB over the fake server cfg, which it configures
+// and returns. It takes a pointer so no fakeServer value is copied: the fake
+// holds a mutex, and the caller must observe the struct the DB writes.
+func openEventsServer(t *testing.T, cfg *fakeServer) (*DB, *fakeServer) {
 	t.Helper()
 	cfg.level = int64(SchemaVersion)
-	s := &cfg
-	db, err := open(t, s)
+	db, err := open(t, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return db, s
+	return db, cfg
 }
 
 // TestCountEventsBeforeReportsTheQueryError: a failed count is returned, not
 // read as zero rows older than the cutoff.
 func TestCountEventsBeforeReportsTheQueryError(t *testing.T) {
 	t.Parallel()
-	db, _ := openEventsServer(t, fakeServer{queryErr: errors.New("events read failed")})
+	db, _ := openEventsServer(t, &fakeServer{queryErr: errors.New("events read failed")})
 
 	_, err := db.CountEventsBefore(context.Background(), time.Unix(0, 0).UTC())
 	if err == nil || !strings.Contains(err.Error(), "count events older than") || !strings.Contains(err.Error(), "events read failed") {
@@ -36,7 +37,7 @@ func TestCountEventsBeforeReportsTheQueryError(t *testing.T) {
 // TestDeleteEventsBeforeReportsTheExecError: a failed delete is returned.
 func TestDeleteEventsBeforeReportsTheExecError(t *testing.T) {
 	t.Parallel()
-	db, _ := openEventsServer(t, fakeServer{execErr: errors.New("delete failed")})
+	db, _ := openEventsServer(t, &fakeServer{execErr: errors.New("delete failed")})
 
 	_, err := db.DeleteEventsBefore(context.Background(), time.Unix(0, 0).UTC(), 5)
 	if err == nil || !strings.Contains(err.Error(), "delete events older than") || !strings.Contains(err.Error(), "delete failed") {
@@ -48,7 +49,7 @@ func TestDeleteEventsBeforeReportsTheExecError(t *testing.T) {
 // cannot be read is an error, not a delete reported as zero rows.
 func TestDeleteEventsBeforeReportsTheRowsAffectedError(t *testing.T) {
 	t.Parallel()
-	db, _ := openEventsServer(t, fakeServer{rowsAffectedErr: errors.New("count unavailable")})
+	db, _ := openEventsServer(t, &fakeServer{rowsAffectedErr: errors.New("count unavailable")})
 
 	_, err := db.DeleteEventsBefore(context.Background(), time.Unix(0, 0).UTC(), 5)
 	if err == nil || !strings.Contains(err.Error(), "count deleted events") {
@@ -60,7 +61,7 @@ func TestDeleteEventsBeforeReportsTheRowsAffectedError(t *testing.T) {
 // server's row count and sends the bounded statement.
 func TestDeleteEventsBeforeReturnsTheRowsRemoved(t *testing.T) {
 	t.Parallel()
-	db, s := openEventsServer(t, fakeServer{execRows: 7})
+	db, s := openEventsServer(t, &fakeServer{execRows: 7})
 
 	got, err := db.DeleteEventsBefore(context.Background(), time.Unix(0, 0).UTC(), 5)
 	if err != nil {
