@@ -473,6 +473,32 @@ func TestMaintenanceGCCycleDefersWhenNotQuiet(t *testing.T) {
 	}
 }
 
+// TestMaintenanceGCStillDefersWhileALandingPassIsInFlight: the cache trim's own
+// guard did not loosen the Dolt window's. A due gc still defers while a landing
+// pass is in flight, and the reason still names the pass (gt-gg9hv.48).
+func TestMaintenanceGCStillDefersWhileALandingPassIsInFlight(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"hq": {631 * mib, 0}}
+	// The real guard over the fakes' seams, with a landing pass in flight.
+	d.maint.quiet = (*Daemon).maintenanceQuiet
+	d.maint.slotHolders = func(string) ([]string, error) { return nil, nil }
+	d.landingStates.setBead("gastown", "dv-x", gcTestNow)
+
+	out := d.maintenanceGCCycle([]string{"hq"}, "/unused")
+
+	if out.outcome != gcOutcomeDeferred {
+		t.Fatalf("outcome = %v, want deferred", out.outcome)
+	}
+	if len(f.gcCalls) != 0 {
+		t.Errorf("gc calls = %v, want none while a landing pass is in flight", f.gcCalls)
+	}
+	if !strings.Contains(out.reason, "daemon has work in flight (landing pass dv-x)") {
+		t.Errorf("deferral reason %q does not name the landing pass", out.reason)
+	}
+}
+
 // Someone else's pause (the nightly backup, an operator) defers the gc and is
 // left exactly as it was: the gc neither overwrites nor removes it.
 func TestMaintenanceGCCycleDefersToAnotherActorsPause(t *testing.T) {

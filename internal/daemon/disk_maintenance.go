@@ -461,7 +461,7 @@ func (d *Daemon) runDiskMaintenance() {
 
 	quiet, why := d.maintenance().quiet(d)
 	if !quiet {
-		d.logger.Printf("disk_maintenance: skipped: %s", why)
+		d.runDiskMaintenanceTrim(mode, due, why)
 		return
 	}
 	if !d.diskMaintRunning.CompareAndSwap(false, true) {
@@ -471,6 +471,100 @@ func (d *Daemon) runDiskMaintenance() {
 		defer d.diskMaintRunning.Store(false)
 		d.diskMaintenancePass(now, mode, due)
 	})
+}
+
+// runDiskMaintenanceTrim is the tick's busy case: the cache trim may run, the
+// targets may not. The trim is off the Dolt window's quiet guard so continuous
+// landing passes cannot starve it (gt-gg9hv.48; docs/guides/disk-maintenance.md).
+// Everything else the tick found keeps the guard: it stays due, and the next
+// quiet tick runs it.
+func (d *Daemon) runDiskMaintenanceTrim(mode string, due diskMaintDue, why string) {
+	if !due.cacheTrim {
+		d.logger.Printf("disk_maintenance: skipped: %s", why)
+		return
+	}
+	if due.daily || len(due.interval) > 0 {
+		// The targets the tick found are what this line is about, so their
+		// deferral is not read as the tick doing nothing; it is logged whether
+		// or not a trim pass is already in flight.
+		d.logger.Printf("disk_maintenance: targets skipped: %s", why)
+	}
+	if !d.diskMaintTrimRunning.CompareAndSwap(false, true) {
+		return // a trim pass is still running
+	}
+	// The guard is handed back by the trim pass itself the moment its trim ends,
+	// and here as well in case the pass never gets that far; once, so a later
+	// pass's guard is never cleared by this one.
+	release := sync.OnceFunc(func() { d.diskMaintTrimRunning.Store(false) })
+	d.diskMaintenanceSeams().dispatch(func() {
+		defer release()
+		d.runCacheTrimPass(mode, release)
+	})
+}
+
+// runCacheTrimPass is the trim's own pass, the one a busy tick dispatches: the
+// disk readings and their alerts, and the trim, side by side. Neither holds the
+// other: the trim's guard is handed back as soon as the trim ends, before the
+// alerts have, so a notifier that does not answer keeps no later trim off. Its
+// caller holds the trim's guard and passes the release that returns it.
+func (d *Daemon) runCacheTrimPass(mode string, releaseTrim func()) {
+	ctx, cancel := d.diskMaintenanceContext()
+	defer cancel()
+	if !d.cacheTrimStillDue() {
+		releaseTrim() // another pass trimmed between the tick and this run
+		return
+	}
+	var alerts sync.WaitGroup
+	alerts.Add(1)
+	go func() {
+		defer alerts.Done()
+		d.readAndApplyDiskAlerts(ctx, d.diskMaintenanceSeams().now())
+	}()
+	d.diskMaintenanceTrim(ctx, mode)
+	releaseTrim()
+	alerts.Wait()
+}
+
+// cacheTrimStillDue reads the schedule again at run time: a pass carries the
+// due set its tick found, and a trim that concluded after that tick (the other
+// pass's) has spent the interval, so the trim must not run a second time in it.
+func (d *Daemon) cacheTrimStillDue() bool {
+	every, err := diskMaintenanceCacheTrimEvery(d.patrolConfig)
+	if err != nil {
+		d.refuseDiskMaintenance(err) // said once, as the tick does
+		return false
+	}
+	return d.diskMaintSchedule.cacheTrimDue(d.diskMaintenanceSeams().now(), every)
+}
+
+// runCacheTrimInPass is the trim inside the combined pass: it tries the trim's
+// single-flight guard and, when it wins, runs the trim under it. It reports
+// whether this call ran the trim: one already in flight is left to finish, and
+// two trim passes never overlap.
+func (d *Daemon) runCacheTrimInPass(ctx context.Context, mode string) bool {
+	if !d.diskMaintTrimRunning.CompareAndSwap(false, true) {
+		return false
+	}
+	defer d.diskMaintTrimRunning.Store(false)
+	if !d.cacheTrimStillDue() {
+		return false
+	}
+	d.diskMaintenanceTrim(ctx, mode)
+	return true
+}
+
+// diskMaintenanceTrim is the trim and its schedule record: the full interval
+// once it reached a verdict, the short retry when it could not start or
+// conclude. The caller holds the trim's guard.
+func (d *Daemon) diskMaintenanceTrim(ctx context.Context, mode string) {
+	s := d.diskMaintenanceSeams()
+	verdict := s.trim(ctx, mode)
+	concluded := s.now()
+	if verdict {
+		d.diskMaintSchedule.record(diskMaintCacheTrimName, concluded)
+	} else {
+		d.diskMaintSchedule.recordRetry(diskMaintCacheTrimName, concluded.Add(cacheTrimRetryInterval))
+	}
 }
 
 // refuseDiskMaintenance says why a setting the patrol cannot schedule runs
@@ -516,25 +610,23 @@ func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDu
 	// The disk alerts are an alarm rather than a change, so they are read and
 	// raised before anything that can refuse the plan: a disk too full to keep
 	// pruning, or a keep the patrol cannot decide, must not silence them.
-	readings := s.readDisks(ctx)
-	d.applyDiskAlerts(readings, now)
-
-	// The cache trim is independent of the targets: it trims the claim the
-	// sandbox profiles mount, so it runs when its interval is due whether or not
-	// a maintenance target publishes here (gt-rm4am, gt-gg9hv.24.2). A run that
-	// reached a verdict -- trimmed, or nothing to trim -- spends the full
-	// interval; a run that could not start or conclude records a retry instead,
-	// so a cluster that was briefly unreachable does not leave the disk growing
-	// for two hours (gt-gg9hv.24.6).
+	// The cache trim is independent of the targets and of the alerts: it runs
+	// beside the alert application, so a notifier that takes its time holds the
+	// trim off nothing and the trim holds no alert off (gt-gg9hv.48).
+	var trimmed sync.WaitGroup
 	if due.cacheTrim {
-		verdict := s.trim(ctx, mode)
-		concluded := s.now()
-		if verdict {
-			d.diskMaintSchedule.record(diskMaintCacheTrimName, concluded)
-		} else {
-			d.diskMaintSchedule.recordRetry(diskMaintCacheTrimName, concluded.Add(cacheTrimRetryInterval))
-		}
+		trimmed.Add(1)
+		go func() {
+			defer trimmed.Done()
+			d.runCacheTrimInPass(ctx, mode)
+		}()
 	}
+	readings, ok := d.readAndApplyDiskAlerts(ctx, now)
+	trimmed.Wait()
+	if !ok {
+		return // the pass ended before its turn; the targets stay due
+	}
+
 	if !due.daily && len(due.interval) == 0 {
 		return // only the cache trim was due, and it has run
 	}

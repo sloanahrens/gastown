@@ -277,17 +277,81 @@ func (d *Daemon) diskMaintHostReadings(watched []diskMaintDisk, injected map[str
 	return readings, nil
 }
 
+// diskMaintAlertTurnWait is how long a pass waits for its turn to apply the
+// alerts before it reads the disks for itself and goes on: long enough for an
+// ordinary application, short of the pass's own bound, so a notifier that does
+// not answer cannot hold another pass's targets off for minutes.
+const diskMaintAlertTurnWait = 30 * time.Second
+
 // diskMaintAlerts is the patrol's memory of the disk alert keys it has open,
 // and of when it last logged that each open unreadable key is still unreadable.
-// A pass writes it and the next pass reads it, one pass at a time, but the
-// mutex keeps the read off a pass that has not settled yet.
+// A pass writes it and the next pass reads it. Whole applications -- the
+// reading, the decisions and the sends -- run one after another across passes
+// (see readAndApplyDiskAlerts), and the mutex keeps a single accessor safe on
+// its own.
 type diskMaintAlerts struct {
-	mu     sync.Mutex
-	active map[string]bool
+	// turn is the gate that makes applications run one after another: a buffered
+	// channel of one, so a pass waiting for its turn can give up with its
+	// context. acquireTurn, when set, replaces it (a test seam, so the ordering
+	// test can be shown red without the gate).
+	turn        chan struct{}
+	turnOnce    sync.Once
+	acquireTurn func(ctx context.Context) (release func(), err error)
+	mu          sync.Mutex
+	active      map[string]bool
 	// stillLogged is the pass time of the last "still unreadable" line for a
 	// key, or of the pass that first saw its disk unreadable. The clear forgets
 	// it, so a new outage starts its own hour.
 	stillLogged map[string]time.Time
+}
+
+// takeTurn waits for this pass's turn to apply the alerts. A pass whose context
+// ends while it waits gives up, and nothing it was to decide is recorded.
+func (a *diskMaintAlerts) takeTurn(ctx context.Context) (release func(), err error) {
+	if a.acquireTurn != nil {
+		return a.acquireTurn(ctx)
+	}
+	return a.takeGate(ctx)
+}
+
+// takeGate is the production wait for a turn.
+func (a *diskMaintAlerts) takeGate(ctx context.Context) (release func(), err error) {
+	a.turnOnce.Do(func() { a.turn = make(chan struct{}, 1) })
+	select {
+	case a.turn <- struct{}{}:
+		return func() { <-a.turn }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// readAndApplyDiskAlerts reads the disks and applies the alerts they call for,
+// as one application that no other pass's overlaps: the later of two passes
+// waits for the earlier, then reads and decides from the state the earlier one
+// left, so a reading is never older than the state it is applied over and a
+// raise and a clear for one key reach the notifier in the order they were
+// decided (gt-gg9hv.48). The reading is returned for the combined pass's keep
+// decision; false means the pass's context ended before its turn came and
+// nothing was read.
+func (d *Daemon) readAndApplyDiskAlerts(ctx context.Context, now time.Time) ([]disks.Reading, bool) {
+	waitCtx, cancelWait := context.WithTimeout(ctx, diskMaintAlertTurnWait)
+	release, err := d.diskMaintAlerts.takeTurn(waitCtx)
+	cancelWait()
+	if err != nil {
+		if ctx.Err() != nil {
+			d.logger.Printf("disk_maintenance: the disk alerts were not applied: %v", err)
+			return nil, false // the pass itself is over
+		}
+		// Another pass has held the turn for the whole wait, a notifier that
+		// is slow to answer: this pass reads the disks for its own decisions and
+		// leaves the alerts to that one, so its targets are not held off.
+		d.logger.Printf("disk_maintenance: another pass is applying the disk alerts; this pass reads the disks only: %v", err)
+		return d.diskMaintenanceSeams().readDisks(ctx), true
+	}
+	defer release()
+	readings := d.diskMaintenanceSeams().readDisks(ctx)
+	d.applyDiskAlerts(ctx, readings, now)
+	return readings, true
 }
 
 // snapshot returns a copy of the open keys, which is what disks.Evaluate
@@ -360,12 +424,14 @@ func (a *diskMaintAlerts) recordUnreadableRaised(key string, now time.Time) (aga
 // open the pass logs the still-unreadable line at most once an hour, so an
 // outage that lasts is visible without a repeat alert. A raise the notifier
 // refused is retried on the next pass, and each retry restarts the hour; the
-// retry gets its own line so those restarts are not silent.
-func (d *Daemon) applyDiskAlerts(readings []disks.Reading, now time.Time) {
+// retry gets its own line so those restarts are not silent. Every send runs
+// under the pass's context, so a notifier that never answers is abandoned when
+// the pass ends and its alert is decided again by the next one.
+func (d *Daemon) applyDiskAlerts(ctx context.Context, readings []disks.Reading, now time.Time) {
 	for _, alert := range disks.Evaluate(readings, d.diskMaintAlerts.snapshot()) {
 		switch {
 		case alert.Raise:
-			err := d.escalateAlertErr(alert.Key, diskMaintAlertSource, alert.Detail)
+			err := d.escalateAlertCtx(ctx, alert.Key, diskMaintAlertSource, alert.Detail)
 			if err != nil {
 				d.logger.Printf("disk_maintenance: alert %s was not delivered: %v", alert.Key, err)
 			} else {
@@ -375,7 +441,7 @@ func (d *Daemon) applyDiskAlerts(readings []disks.Reading, now time.Time) {
 				d.logger.Printf("disk_maintenance: disk %s still unreadable, alert raised again", alert.Name)
 			}
 		case alert.Clear:
-			if err := d.clearAlertsErr(alert.Detail, alert.Key); err != nil {
+			if err := d.clearAlertsCtx(ctx, alert.Detail, alert.Key); err != nil {
 				d.logger.Printf("disk_maintenance: alert %s was not cleared: %v", alert.Key, err)
 				continue // still open, and the next pass clears it again
 			}
