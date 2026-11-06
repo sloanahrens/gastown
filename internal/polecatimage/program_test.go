@@ -2,12 +2,18 @@ package polecatimage
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/plugin"
+	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 )
 
 // envMap is a get function over a fixed environment, so a test reads no
@@ -511,6 +517,252 @@ func TestRunProgramDispatchesARun(t *testing.T) {
 	if !strings.Contains(out.String(), "ERROR: cannot find the town root") {
 		t.Errorf("runProgram() logged %q, want the missing town root", out.String())
 	}
+}
+
+// TestRunProgramRefusesAnUnknownSubcommand is the refusal a stale Job meets: a
+// first argument this program does not know exits 2 and names it, and starts no
+// plugin run, which would build, publish and trim instead of trimming what the
+// Job asked for (gt-gg9hv.47).
+func TestRunProgramRefusesAnUnknownSubcommand(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, arg, want string }{
+		{"a near miss", "trim-list-free", `"trim-list-free"`},
+		{"a word", "bogus", `"bogus"`},
+		{"a flag", "--help", `"--help"`},
+		{"an empty argument", "", `""`},
+		// The newline and the terminal escape are the argument's own text: the
+		// refusal prints one line, and the rest of the argument survives as the
+		// caller wrote it.
+		{"a newline and an escape", "trim\ncache\x1b[31m", `"trim?cache?[31m"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var out, errOut bytes.Buffer
+			runs := 0
+			entry := func(io.Writer, func(string) string) int { runs++; return 0 }
+			code := runProgramWith([]string{tc.arg}, &out, &errOut, envMap(map[string]string{}), entry)
+			if code != 2 {
+				t.Errorf("runProgram(%q) = %d, want 2", tc.arg, code)
+			}
+			if runs != 0 {
+				t.Errorf("runProgram(%q) started %d plugin runs, want none", tc.arg, runs)
+			}
+			want := "polecat-image: unknown subcommand " + tc.want + ": known are run, trim-cache, trim-paths, trim-list, trim-list-write, seed-clone, seed-cache\n"
+			if got := errOut.String(); got != want {
+				t.Errorf("runProgram(%q) said %q, want %q", tc.arg, got, want)
+			}
+			if out.Len() != 0 {
+				t.Errorf("runProgram(%q) wrote %q to stdout, want nothing", tc.arg, out.String())
+			}
+		})
+	}
+}
+
+// TestRunProgramKeepsTheKnownEntries is the dispatch the refusal must not break:
+// no arguments and the verb "run" each start the plugin run once, and each of
+// the six helpers still reaches its own handler (gt-gg9hv.47).
+func TestRunProgramKeepsTheKnownEntries(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"no arguments", nil},
+		{"the verb run", []string{"run"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var out, errOut bytes.Buffer
+			runs := 0
+			entry := func(io.Writer, func(string) string) int { runs++; return 7 }
+			if code := runProgramWith(tc.args, &out, &errOut, envMap(map[string]string{}), entry); code != 7 {
+				t.Errorf("runProgram(%v) = %d, want the plugin run's status 7", tc.args, code)
+			}
+			if runs != 1 {
+				t.Errorf("runProgram(%v) started %d plugin runs, want 1", tc.args, runs)
+			}
+		})
+	}
+
+	// Each helper answers for itself: a refusal or an answer in its own words,
+	// and no plugin run behind it.
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		root   bool
+		exit   int
+		stderr string
+		stdout string
+	}{
+		{"trim-cache", []string{"trim-cache"}, false, 3, "trim-cache: --cap-bytes needs a whole number of bytes", ""},
+		{"trim-paths", []string{"trim-paths"}, false, 3, "trim-paths: --shards needs a whole number of shards, at least 1", ""},
+		{"trim-list", []string{"trim-list"}, true, 0, "", "[]"},
+		{"trim-list-write", []string{"trim-list-write"}, false, 3, "trim-list-write: --cap-bytes needs a whole number of bytes", ""},
+		{"seed-clone", []string{"seed-clone"}, false, 3, "seed-clone: no --pins: the seed Job passes the pins it renders", ""},
+		{"seed-cache", []string{"seed-cache"}, false, 3, "seed-cache: no --pins: the seed Job passes the pins it renders", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			args := append([]string(nil), tc.args...)
+			if tc.root {
+				args = append(args, "--root", t.TempDir())
+			}
+			var out, errOut bytes.Buffer
+			ran := false
+			entry := func(io.Writer, func(string) string) int { ran = true; return 0 }
+			if code := runProgramWith(args, &out, &errOut, envMap(map[string]string{}), entry); code != tc.exit {
+				t.Errorf("runProgram(%v) = %d, want %d (%s)", args, code, tc.exit, errOut.String())
+			}
+			if ran {
+				t.Errorf("runProgram(%v) ran the plugin instead of the %s helper", args, tc.name)
+			}
+			if !strings.Contains(errOut.String(), tc.stderr) {
+				t.Errorf("runProgram(%v) said %q, want it to hold %q", args, errOut.String(), tc.stderr)
+			}
+			if !strings.Contains(out.String(), tc.stdout) {
+				t.Errorf("runProgram(%v) printed %q, want it to hold %q", args, out.String(), tc.stdout)
+			}
+		})
+	}
+
+	// And runProgram hands the verb to the real plugin run: the entry it passes
+	// is the one production dispatches through, not a test's counter.
+	var out, errOut bytes.Buffer
+	if code := runProgram([]string{"run"}, &out, &errOut, envMap(map[string]string{})); code != 1 {
+		t.Errorf("runProgram(run) = %d, want the plugin run's failure 1", code)
+	}
+	if !strings.Contains(out.String(), "ERROR: cannot find the town root") {
+		t.Errorf("runProgram(run) logged %q, want the plugin run's missing town root", out.String())
+	}
+}
+
+// TestEveryHelperCallerNamesAKnownVerb pins the callers the refusal exists for:
+// every argv the tree builds for the helper starts with a verb runProgram
+// dispatches. The callers are the rendered trim and seed Jobs and the plugin
+// definition, and the verbs are the dispatcher's own table, so a Job that names
+// a verb no handler carries fails here before an image runs it (gt-gg9hv.47).
+func TestEveryHelperCallerNamesAKnownVerb(t *testing.T) {
+	t.Parallel()
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	repoRoot := filepath.Join(filepath.Dir(thisFile), "..", "..")
+
+	checked := 0
+	for _, job := range pinRenderedJobs(t) {
+		for _, c := range append(append([]cachevol.Container{}, job.Spec.Template.Spec.InitContainers...), job.Spec.Template.Spec.Containers...) {
+			if len(c.Command) == 0 || c.Command[0] != cachevol.HelperPath {
+				t.Errorf("the Job %s's container %q runs %v, want the image's helper %q", job.Metadata.Name, c.Name, c.Command, cachevol.HelperPath)
+				continue
+			}
+			if len(c.Command) < 2 {
+				t.Errorf("the Job %s's container %q runs the helper with no verb, which is a plugin run", job.Metadata.Name, c.Name)
+				continue
+			}
+			if _, known := helperRunFor(c.Command[1]); !known {
+				t.Errorf("the Job %s's container %q names %q, which runProgram does not know", job.Metadata.Name, c.Name, c.Command[1])
+			}
+			checked++
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no container ran the helper, so the pin checked nothing")
+	}
+
+	// The plugin definition starts the same binary with no arguments, which is
+	// the plugin run: the daemon execs what the [execution] block names and
+	// passes it nothing, so the definition's only part of the argv is the binary.
+	p, err := plugin.NewScanner(repoRoot, nil).GetPlugin("polecat-image")
+	if err != nil {
+		t.Fatalf("reading the polecat-image plugin definition: %v", err)
+	}
+	if p.Execution == nil || p.Execution.Type != plugin.ExecTypeScript || p.Execution.Binary == "" {
+		t.Fatalf("the polecat-image plugin runs %+v, want a script with a binary", p.Execution)
+	}
+	bin, err := p.BinaryPath()
+	if err != nil {
+		t.Fatalf("the plugin's binary %q: %v", p.Execution.Binary, err)
+	}
+	if got, want := filepath.Base(bin), filepath.Base(cachevol.HelperPath); got != want {
+		t.Errorf("the plugin runs %q, want the image's helper %q", bin, cachevol.HelperPath)
+	}
+}
+
+// pinRenderedJobs renders the trim Job on both routes and the seed Job, decoded
+// from the documents the renderers produce: what kubectl applies, not what the
+// test believes the renderers build.
+func pinRenderedJobs(t *testing.T) []cachevol.SeedJob {
+	t.Helper()
+	const image, claim = "gastown-polecat:dev", "gt-cache-shared"
+	var jobs []cachevol.SeedJob
+
+	// The shard route: a few entries the cap removes whole.
+	shard, err := cachevol.BuildTrimManifest(cachevol.TrimJobInput{
+		Image: image, ClaimName: claim, Listing: pinTrimListing(2, 32), CapBytes: 0,
+	})
+	if err != nil {
+		t.Fatalf("rendering the shard trim: %v", err)
+	}
+	jobs = append(jobs, pinDecodedJobs(t, shard.Documents())...)
+
+	// The claim route: a list past TrimMaxShards shards, whose Job plans its own
+	// list in an init container. Each entry costs its path, the two quotes around
+	// it and a separator in the encoded list, which is what a shard is measured on.
+	perShard := cachevol.TrimShardBytes/(pinPathChars+3) + 1
+	claimTrim, err := cachevol.BuildTrimManifest(cachevol.TrimJobInput{
+		Image: image, ClaimName: claim, Listing: pinTrimListing(perShard*(cachevol.TrimMaxShards+1), pinPathChars), CapBytes: 0,
+	})
+	if err != nil {
+		t.Fatalf("rendering the claim trim: %v", err)
+	}
+	jobs = append(jobs, pinDecodedJobs(t, claimTrim.Documents())...)
+
+	seed, err := cachevol.BuildSeedJob(cachevol.SeedJobInput{
+		Image: image, ClaimName: claim,
+		Pins: []cachevol.Pin{{Rig: "gastown", Commit: strings.Repeat("a", 40), URL: "https://forgejo.example/gastown.git"}},
+	})
+	if err != nil {
+		t.Fatalf("rendering the seed Job: %v", err)
+	}
+	return append(jobs, *seed)
+}
+
+// pinPathChars is the length of each path pinTrimListing writes: long enough
+// that a list past TrimMaxShards shards costs few entries.
+const pinPathChars = 4000
+
+// pinTrimListing is count distinct build-cache entries of pathChars characters,
+// which a cap of 0 removes whole.
+func pinTrimListing(count, pathChars int) []cachevol.Entry {
+	entries := make([]cachevol.Entry, count)
+	for i := range entries {
+		entries[i] = cachevol.Entry{
+			Path:  "gocache/" + fmt.Sprintf("%0*d", pathChars-8, i),
+			Cache: cachevol.BuildCache,
+			Size:  1,
+			Atime: testTime,
+			Mtime: testTime,
+		}
+	}
+	return entries
+}
+
+// pinDecodedJobs decodes the Job documents among docs, skipping the ConfigMap
+// shards a shard trim applies with its Job.
+func pinDecodedJobs(t *testing.T, docs [][]byte) []cachevol.SeedJob {
+	t.Helper()
+	var jobs []cachevol.SeedJob
+	for _, doc := range docs {
+		var job cachevol.SeedJob
+		if err := json.Unmarshal(doc, &job); err != nil {
+			t.Fatalf("decoding a rendered document: %v", err)
+		}
+		if job.Kind == "Job" {
+			jobs = append(jobs, job)
+		}
+	}
+	return jobs
 }
 
 // TestTrimCacheMainReportsAnUnderCapTree is the helper's success path: the byte
