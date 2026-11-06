@@ -18,9 +18,8 @@
 # The admin routes, and the four routes the research marks not verified, are left out
 # so a seat token that was ever minted with admin scope still could not reach
 # them from a sandbox. A grep of the four found no polecat caller: stats and
-# config get are town-side (gt tracker status, the events journal check, bd admin
-# through the shim), and snapshot and dispatch board have only the tracker
-# contract tests (gt-0f305).
+# config get are town-side (gt tracker status and the events journal check), and
+# snapshot and dispatch board have only the tracker contract tests (gt-0f305).
 #
 # Import:  openshell profile lint -f deploy/polecat/profiles/tracker-polecat.yaml
 #          openshell profile import -f deploy/polecat/profiles/tracker-polecat.yaml --global

@@ -9,21 +9,12 @@ import (
 // CleanGTEnv returns os.Environ() with GT_* and BD_* variables removed, except:
 // GT_DOLT_PORT, GT_DOLT_HOST and GT_TEST_EXTERNAL_DOLT (so subprocesses reuse
 // the test Dolt server), the hermetic markers GT_TEST_HERMETIC and
-// GT_TEST_FORBIDDEN_TOWN_ROOT, and the bd telemetry switches
-// BD_DISABLE_METRICS and BD_DISABLE_EVENT_FLUSH (bdTelemetryOff). BEADS_DOLT_PORT
-// and BEADS_DOLT_SERVER_HOST (prefix BEADS_, not BD_) pass through implicitly
-// since only BD_* is stripped.
+// GT_TEST_FORBIDDEN_TOWN_ROOT. BEADS_DOLT_PORT and BEADS_DOLT_SERVER_HOST
+// (prefix BEADS_, not BD_) pass through implicitly since only BD_* is stripped.
 //
 // Use this when setting cmd.Env on bd/gt subprocess calls in tests.
 // If you do NOT set cmd.Env, the process env (including GT_DOLT_PORT) is
 // inherited automatically — no need for this function in that case.
-// isTelemetrySwitch reports whether a KEY=value entry is one of bdTelemetryOff's.
-func isTelemetrySwitch(kv string) bool {
-	name, _, _ := strings.Cut(kv, "=")
-	_, ok := bdTelemetryOff[name]
-	return ok
-}
-
 func CleanGTEnv(extraEnv ...string) []string {
 	return cleanGTEnv(os.Environ(), extraEnv...)
 }
@@ -42,9 +33,7 @@ func cleanGTEnv(base []string, extraEnv ...string) []string {
 			!strings.HasPrefix(e, "GT_TEST_FORBIDDEN_TOWN_ROOT=") {
 			continue
 		}
-		// bd's telemetry switches are the BD_* values that must reach a
-		// subprocess; bdTelemetryOff (hermetic.go) is the one list of them.
-		if strings.HasPrefix(e, "BD_") && !isTelemetrySwitch(e) {
+		if strings.HasPrefix(e, "BD_") {
 			continue
 		}
 		clean = append(clean, e)

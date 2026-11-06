@@ -204,7 +204,6 @@ func TestOpenShellPrepareBuildsTheSandboxInOrder(t *testing.T) {
 		"--cpu", "4", "--memory", "8Gi",
 		"--label", "polecat=sandbox-ace", "--label", "rig=gastown",
 		"--env-from", "BD_ACTOR=GT_SANDBOX_ENV_BD_ACTOR",
-		"--env-from", "BD_DISABLE_METRICS=GT_SANDBOX_ENV_BD_DISABLE_METRICS",
 		"--env-from", "BEADS_DOLT_SERVER_HOST=GT_SANDBOX_ENV_BEADS_DOLT_SERVER_HOST",
 		"--env-from", "BEADS_DOLT_SERVER_MODE=GT_SANDBOX_ENV_BEADS_DOLT_SERVER_MODE",
 		"--env-from", "BEADS_DOLT_SERVER_PORT=GT_SANDBOX_ENV_BEADS_DOLT_SERVER_PORT",
