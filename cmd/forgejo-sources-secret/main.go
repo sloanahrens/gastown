@@ -44,6 +44,10 @@ const noReply = 0
 // revokeTimeout bounds the revoke a refusal or an interrupt makes after the mint.
 const revokeTimeout = 30 * time.Second
 
+// stillLiveLine is the one fixed line printed when a revoke fails and a read token stays
+// live: the token's name and the account, never its value. It is printed last.
+const stillLiveLine = "token still live: revoke token %s for %s by hand"
+
 // env is what the command reads and writes through: the clock the token's name is
 // taken from, the file the admin token is read from, and the HTTP client Forgejo is
 // reached through (nil means the client's default, with a timeout).
@@ -93,6 +97,11 @@ func run(ctx context.Context, args []string, env env, stdout, stderr io.Writer) 
 	value, err := admin.MintToken(viewerAccount, name, []string{tokenScope})
 	if err != nil {
 		fmt.Fprintf(stderr, "forgejo-sources-secret: could not mint %s for %s: %v\n", name, viewerAccount, err)
+		// A mint that got no reply may have created the token, so it is revoked by name.
+		// A refused mint (an HTTP status) created nothing and is not revoked.
+		if errors.Is(err, forgejoprov.ErrNotDone) {
+			revokeMinted(ctx, admin, name, stderr)
+		}
 		return forgejoprov.ExitFailure
 	}
 
@@ -212,16 +221,21 @@ func readRepoStatus(reader *forgejoprov.Client, repo string) (int, error) {
 
 // revokeMinted revokes the token the run minted. The revoke runs on a context detached
 // from the run's, with its own timeout, so a signal that canceled the run cannot stop
-// it and leave the token live. A revoke that fails is reported by name, since that
-// token is then still live and the operator must remove it.
+// it and leave the token live. A revoke that finds no token has nothing live to revoke.
+// A revoke that fails leaves the token live, so the last line names it and the operator
+// must remove it by hand; that line is the only signal a live read token remains.
 func revokeMinted(ctx context.Context, admin *forgejoprov.Client, name string, stderr io.Writer) {
 	detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), revokeTimeout)
 	defer cancel()
 	revoker := *admin
 	revoker.Ctx = detached
-	if err := revoker.RevokeToken(viewerAccount, name); err != nil {
-		fmt.Fprintf(stderr, "forgejo-sources-secret: could not revoke the minted token %s, so it is still live: revoke it in the Forgejo UI (%v)\n", name, err)
-		return
+	err := revoker.RevokeToken(viewerAccount, name)
+	switch {
+	case err == nil:
+		fmt.Fprintf(stderr, "forgejo-sources-secret: revoked the minted token %s\n", name)
+	case errors.Is(err, forgejoprov.ErrNoToken):
+		fmt.Fprintf(stderr, "forgejo-sources-secret: no token %s is on the server, so none is live\n", name)
+	default:
+		fmt.Fprintf(stderr, stillLiveLine+"\n", name, viewerAccount)
 	}
-	fmt.Fprintf(stderr, "forgejo-sources-secret: revoked the minted token %s\n", name)
 }

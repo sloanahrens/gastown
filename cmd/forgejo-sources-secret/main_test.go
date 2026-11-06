@@ -89,10 +89,21 @@ type viewerNetwork struct {
 	// failReads makes every read made with the minted token fail in transport, with no
 	// reply.
 	failReads bool
+	// failRevoke makes every DELETE fail in transport, so the revoke never reaches the
+	// server and the minted token stays live.
+	failRevoke bool
+	// mintReplyLost makes the mint reach the server, which creates the token, and then
+	// fails the call in transport, so no reply comes back.
+	mintReplyLost bool
+	// mintNotSent makes the mint fail in transport before it reaches the server.
+	mintNotSent bool
 }
 
-// errNoReply is the transport failure a read made with failReads meets.
+// errNoReply is the transport failure a read, a mint or a revoke made with a fault meets.
 var errNoReply = errors.New("no route to host")
+
+// mintPath is the path the run mints its token on, for the viewer account.
+const mintPath = forgejotest.APIPath + "/admin/users/" + viewerAccount + "/tokens"
 
 func (v *viewerNetwork) RoundTrip(req *http.Request) (*http.Response, error) {
 	// A request whose context is done never reaches the server, as on a real transport.
@@ -101,7 +112,20 @@ func (v *viewerNetwork) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	auth := req.Header.Get("Authorization")
 	const repoRoot = forgejotest.APIPath + "/repos/"
-	if v.cancelOnMint != nil && req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, forgejotest.APIPath+"/admin/users/"+viewerAccount+"/tokens") {
+	isMint := req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, mintPath)
+	if isMint && v.mintNotSent {
+		return nil, errNoReply
+	}
+	if isMint && v.mintReplyLost {
+		if resp, err := v.fake.RoundTrip(req); err == nil {
+			resp.Body.Close()
+		}
+		return nil, errNoReply
+	}
+	if v.failRevoke && req.Method == http.MethodDelete {
+		return nil, errNoReply
+	}
+	if v.cancelOnMint != nil && isMint {
 		resp, err := v.fake.RoundTrip(req)
 		v.cancelOnMint()
 		return resp, err
@@ -275,10 +299,10 @@ func TestSourcesSecretRefusesAndRevokesOnAnUnreadableRepo(t *testing.T) {
 }
 
 // TestSourcesSecretRevokesAfterInterrupt covers a run canceled after the mint and a read
-// that fails in transport. The fake refuses a request whose context is done, so a revoke
-// made on the run's canceled context never reaches it: the token is gone only when the
-// revoke runs on a context detached from the run's. Either way nothing is stored and the
-// run exits 1.
+// that fails in transport. viewerNetwork refuses a request whose context is done, so a
+// revoke made on the run's canceled context never reaches the fake: the token is gone only
+// when the revoke runs on a context detached from the run's. Either way nothing is stored
+// and the run exits 1.
 func TestSourcesSecretRevokesAfterInterrupt(t *testing.T) {
 	t.Parallel()
 	t.Run("the run is canceled after the mint", func(t *testing.T) {
@@ -329,6 +353,102 @@ func TestSourcesSecretRevokesAfterInterrupt(t *testing.T) {
 		}
 		if _, ok := f.Secret(secretOwner+"/"+secretRepo, secretName); ok {
 			t.Fatal("a secret was stored after a transport failure")
+		}
+	})
+}
+
+// TestSourcesSecretAlarmsWhenTheRevokeFails runs each path that revokes the minted token
+// with the revoke failing in transport, so the token stays live. Each run exits 1, its
+// last stderr line is the fixed still-live line naming the token and the account, the
+// token value appears nowhere in the output, and the fake still holds the token.
+func TestSourcesSecretAlarmsWhenTheRevokeFails(t *testing.T) {
+	t.Parallel()
+	const alarm = "token still live: revoke token " + testName + " for bot-viewer by hand"
+	cases := []struct {
+		name      string
+		statuses  map[string]int
+		storeFail int
+		cancel    bool
+		mintLost  bool
+	}{
+		{name: "after a refusal", statuses: map[string]int{"sloan/om": http.StatusNotFound}},
+		{name: "after a failed store", storeFail: http.StatusInternalServerError},
+		{name: "after an interrupt", cancel: true},
+		{name: "after a mint lost in transport", mintLost: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newSourcesFake(t, "")
+			f.SecretRefusal = tc.storeFail
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			net := &viewerNetwork{fake: f, statuses: tc.statuses, failRevoke: true, mintReplyLost: tc.mintLost}
+			if tc.cancel {
+				net.cancelOnMint = cancel
+			}
+			res := runNetwork(t, ctx, net)
+
+			if res.code != forgejoprov.ExitFailure {
+				t.Fatalf("exit %d, want %d; stdout: %s stderr: %s", res.code, forgejoprov.ExitFailure, res.stdout, res.stderr)
+			}
+			lines := strings.Split(strings.TrimSuffix(res.stderr, "\n"), "\n")
+			if last := lines[len(lines)-1]; last != alarm {
+				t.Fatalf("the last stderr line is %q, want the still-live line %q:\n%s", last, alarm, res.stderr)
+			}
+			if out := res.stdout + res.stderr; strings.Contains(out, f.Token(viewerAccount, testName)) {
+				t.Fatalf("the output carries the token value:\n%s", out)
+			}
+			if _, ok := f.TokenScopes(viewerAccount, testName); !ok {
+				t.Fatal("the fake no longer holds the token, but the revoke was made to fail")
+			}
+		})
+	}
+}
+
+// TestSourcesSecretRevokesAMintLostInTransport covers a mint whose call got no reply. When
+// the server made the token, the run revokes it by the name it minted under. When the
+// request never reached the server, the revoke finds no token, which is not a live token,
+// so there is no alarm. Either way nothing is stored and the run exits 1.
+func TestSourcesSecretRevokesAMintLostInTransport(t *testing.T) {
+	t.Parallel()
+	t.Run("the server made the token before the reply was lost", func(t *testing.T) {
+		t.Parallel()
+		f := newSourcesFake(t, "")
+		res := runNetwork(t, context.Background(), &viewerNetwork{fake: f, mintReplyLost: true})
+
+		if res.code != forgejoprov.ExitFailure {
+			t.Fatalf("exit %d, want %d; stdout: %s stderr: %s", res.code, forgejoprov.ExitFailure, res.stdout, res.stderr)
+		}
+		if !strings.Contains(res.stderr, "revoked the minted token "+testName) {
+			t.Fatalf("stderr does not report the revoke of the lost mint:\n%s", res.stderr)
+		}
+		if strings.Contains(res.stderr, "token still live") {
+			t.Fatalf("stderr alarms about a token that was revoked:\n%s", res.stderr)
+		}
+		if _, ok := f.TokenScopes(viewerAccount, testName); ok {
+			t.Fatal("the token the server made after a lost reply was left live")
+		}
+		if _, ok := f.Secret(secretOwner+"/"+secretRepo, secretName); ok {
+			t.Fatal("a secret was stored after a lost mint")
+		}
+	})
+	t.Run("the request never reached the server", func(t *testing.T) {
+		t.Parallel()
+		f := newSourcesFake(t, "")
+		res := runNetwork(t, context.Background(), &viewerNetwork{fake: f, mintNotSent: true})
+
+		if res.code != forgejoprov.ExitFailure {
+			t.Fatalf("exit %d, want %d; stdout: %s stderr: %s", res.code, forgejoprov.ExitFailure, res.stdout, res.stderr)
+		}
+		if !strings.Contains(res.stderr, "no token "+testName+" is on the server, so none is live") {
+			t.Fatalf("stderr does not report that no token was made:\n%s", res.stderr)
+		}
+		if strings.Contains(res.stderr, "token still live") {
+			t.Fatalf("stderr alarms when no token was made:\n%s", res.stderr)
+		}
+		if _, ok := f.Secret(secretOwner+"/"+secretRepo, secretName); ok {
+			t.Fatal("a secret was stored after a lost mint")
 		}
 	})
 }

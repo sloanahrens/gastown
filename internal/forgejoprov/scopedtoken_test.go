@@ -1,6 +1,7 @@
 package forgejoprov
 
 import (
+	"errors"
 	"go/parser"
 	"go/token"
 	"io"
@@ -127,11 +128,11 @@ func (u unreachableDelete) RoundTrip(req *http.Request) (*http.Response, error) 
 // revoke cannot be sent says the token it made is still live.
 func TestScopedTokenReportsATransportFailure(t *testing.T) {
 	t.Parallel()
-	if _, err := scopedClient(failingTransport{}).MintToken(scopedUser, scopedName, []string{scopedScope}); err == nil || !strings.Contains(err.Error(), "did not complete") {
-		t.Fatalf("MintToken over a dead transport returned %v, want the did-not-complete error", err)
+	if _, err := scopedClient(failingTransport{}).MintToken(scopedUser, scopedName, []string{scopedScope}); !errors.Is(err, ErrNotDone) {
+		t.Fatalf("MintToken over a dead transport returned %v, want ErrNotDone", err)
 	}
-	if err := scopedClient(failingTransport{}).RevokeToken(scopedUser, scopedName); err == nil || !strings.Contains(err.Error(), "did not complete") {
-		t.Fatalf("RevokeToken over a dead transport returned %v, want the did-not-complete error", err)
+	if err := scopedClient(failingTransport{}).RevokeToken(scopedUser, scopedName); !errors.Is(err, ErrNotDone) {
+		t.Fatalf("RevokeToken over a dead transport returned %v, want ErrNotDone", err)
 	}
 
 	f := newScopedFake()
@@ -142,71 +143,52 @@ func TestScopedTokenReportsATransportFailure(t *testing.T) {
 	}
 }
 
-// scopedRefusals drives each refusal the mint and the revoke can meet: a 403, a 422 for
-// a name already taken, a 500, and a 404 for a token that is not there. Each error names
-// the status, is free of the reply's own text, and carries no value.
+// replyMarker is the text each refusal reply echoes back. It holds the characters a JSON
+// encoder escapes, so the escaped form a server could echo differs from the raw text.
+const replyMarker = "marker \"<tag>\"\\é"
+
+// scopedRefusals drives each refusal the mint and the revoke can meet: a 403, a 422 and a
+// 500 on the mint, and a 404 and a 500 on the revoke. Each server echoes replyMarker in its
+// body. Each error names the status and carries neither the marker nor its escaped form.
+// A 404 on the revoke is ErrNoToken, since there was no token to revoke.
 func scopedRefusals(t *testing.T) {
+	forms := leakedForms(t, replyMarker)
 	cases := []struct {
-		name     string
-		status   string
-		replyTxt string
-		call     func(t *testing.T) error
+		name      string
+		status    int
+		revoke    bool
+		wantPhase string
+		want      error
 	}{
-		{
-			name: "mint forbidden", status: "HTTP 403", replyTxt: "the token needs site-administrator",
-			call: func(t *testing.T) error {
-				f := newScopedFake()
-				f.Adminless = true
-				_, err := scopedClient(f).MintToken(scopedUser, scopedName, []string{scopedScope})
-				return err
-			},
-		},
-		{
-			name: "mint name taken", status: "HTTP 422", replyTxt: "used already",
-			call: func(t *testing.T) error {
-				f := newScopedFake()
-				c := scopedClient(f)
-				if _, err := c.MintToken(scopedUser, scopedName, []string{scopedScope}); err != nil {
-					t.Fatalf("first MintToken: %v", err)
-				}
-				_, err := c.MintToken(scopedUser, scopedName, []string{scopedScope})
-				return err
-			},
-		},
-		{
-			name: "mint server error", status: "HTTP 500", replyTxt: "rejected",
-			call: func(t *testing.T) error {
-				_, err := scopedClient(echoTransport{status: http.StatusInternalServerError, value: "x"}).
-					MintToken(scopedUser, scopedName, []string{scopedScope})
-				return err
-			},
-		},
-		{
-			name: "revoke of an absent token", status: "HTTP 404", replyTxt: "does not exist",
-			call: func(t *testing.T) error {
-				return scopedClient(newScopedFake()).RevokeToken(scopedUser, scopedName)
-			},
-		},
-		{
-			name: "revoke server error", status: "HTTP 500", replyTxt: "rejected",
-			call: func(t *testing.T) error {
-				return scopedClient(echoTransport{status: http.StatusInternalServerError, value: "x"}).
-					RevokeToken(scopedUser, scopedName)
-			},
-		},
+		{name: "mint forbidden", status: http.StatusForbidden, wantPhase: "HTTP 403"},
+		{name: "mint name taken", status: http.StatusUnprocessableEntity, wantPhase: "HTTP 422"},
+		{name: "mint server error", status: http.StatusInternalServerError, wantPhase: "HTTP 500"},
+		{name: "revoke of an absent token", status: http.StatusNotFound, revoke: true, wantPhase: "HTTP 404", want: ErrNoToken},
+		{name: "revoke server error", status: http.StatusInternalServerError, revoke: true, wantPhase: "HTTP 500"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := tc.call(t)
+			c := scopedClient(echoTransport{status: tc.status, value: replyMarker})
+			var err error
+			if tc.revoke {
+				err = c.RevokeToken(scopedUser, scopedName)
+			} else {
+				_, err = c.MintToken(scopedUser, scopedName, []string{scopedScope})
+			}
 			if err == nil {
 				t.Fatal("the call returned no error, want the refusal")
 			}
-			if !strings.Contains(err.Error(), tc.status) {
-				t.Fatalf("the error %q does not name %s", err, tc.status)
+			if !strings.Contains(err.Error(), tc.wantPhase) {
+				t.Fatalf("the error %q does not name %s", err, tc.wantPhase)
 			}
-			if strings.Contains(err.Error(), tc.replyTxt) {
-				t.Fatalf("the error %q carries text from the reply", err)
+			if tc.want != nil && !errors.Is(err, tc.want) {
+				t.Fatalf("the error %q is not %v", err, tc.want)
+			}
+			for _, leak := range forms {
+				if strings.Contains(err.Error(), leak) {
+					t.Fatalf("the error %q carries the reply's marker or its escaped form", err)
+				}
 			}
 		})
 	}

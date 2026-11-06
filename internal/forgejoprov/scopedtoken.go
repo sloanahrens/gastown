@@ -2,16 +2,23 @@ package forgejoprov
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 )
 
+// ErrNotDone marks a scoped-token call that got no HTTP reply at all. The server may
+// still have acted on it, so a caller that minted must revoke the token by its name.
+var ErrNotDone = errors.New("the request did not complete")
+
+// ErrNoToken marks a revoke that found no token of that name: nothing is live to revoke.
+var ErrNoToken = errors.New("no token of that name exists; nothing to revoke")
+
 // Fixed phrases the scoped-token calls quote in place of a reply. A server can echo
 // the value it was asked to create back inside its error body, in an escaped form no
 // mask reliably catches, so nothing from a reply reaches an error.
 const (
-	scopedNotDone       = "the request did not complete"
 	scopedMintForbidden = "the admin token may not mint a token for this account; it needs site-administrator rights"
 	scopedMintRefused   = "the server refused to mint the token"
 	scopedNoValue       = "the reply held no token value"
@@ -22,13 +29,14 @@ const (
 // returns its value. The value is read from the reply's "token" field, then "sha1",
 // the two names Forgejo versions use. A reply that holds no value is an error, and
 // the token it made is revoked, since its value was not kept and no one can use it.
-// An error names the request's path and carries the status and a fixed phrase, never
-// the reply.
+// A call that got no reply returns an error wrapping ErrNotDone, since the server may
+// have made the token. An error names the request's path and carries the status and a
+// fixed phrase, never the reply.
 func (c *Client) MintToken(user, name string, scopes []string) (string, error) {
 	path := "/admin/users/" + url.PathEscape(user) + "/tokens"
 	status, resp, err := c.Do(http.MethodPost, path, map[string]any{"name": name, "scopes": scopes})
 	if err != nil {
-		return "", fmt.Errorf("POST %s: %s", path, scopedNotDone)
+		return "", fmt.Errorf("POST %s: %w", path, ErrNotDone)
 	}
 	switch status {
 	case http.StatusCreated:
@@ -60,18 +68,22 @@ func tokenFromReply(resp []byte) string {
 	return token
 }
 
-// RevokeToken deletes the token named name that user holds. It succeeds on 204 and
-// returns an error built from the path, the status and a fixed phrase otherwise.
+// RevokeToken deletes the token named name that user holds. It succeeds on 204. A 404
+// returns an error wrapping ErrNoToken, since no such token is live. Any other outcome
+// is an error built from the path, the status and a fixed phrase.
 func (c *Client) RevokeToken(user, name string) error {
 	path := "/admin/users/" + url.PathEscape(user) + "/tokens/" + url.PathEscape(name)
 	status, _, err := c.Do(http.MethodDelete, path, nil)
 	if err != nil {
-		return fmt.Errorf("DELETE %s: %s", path, scopedNotDone)
+		return fmt.Errorf("DELETE %s: %w", path, ErrNotDone)
 	}
-	if status != http.StatusNoContent {
-		return fmt.Errorf("DELETE %s: HTTP %d: %s", path, status, scopedRevokeRefused)
+	switch status {
+	case http.StatusNoContent:
+		return nil
+	case http.StatusNotFound:
+		return fmt.Errorf("DELETE %s: HTTP %d: %w", path, status, ErrNoToken)
 	}
-	return nil
+	return fmt.Errorf("DELETE %s: HTTP %d: %s", path, status, scopedRevokeRefused)
 }
 
 // WithToken returns a copy of c that sends value as its bearer token, so the calls
