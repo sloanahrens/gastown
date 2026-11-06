@@ -10,12 +10,14 @@ import (
 	"sync"
 	"testing"
 	"time"
+	_ "time/tzdata" // the DST subtests load America/Chicago, so they must not depend on the host's zoneinfo
 
 	"github.com/jonboulle/clockwork"
 )
 
 // zoneStart is one parked daemon start a zone test reads the start-up log
-// from: the log written so far and every zone name the loader was asked for.
+// from: the log and every zone name the loader was asked for, both as they
+// stood at the park point.
 type zoneStart struct {
 	logs   string
 	loaded []string
@@ -31,7 +33,9 @@ func startParkedZoneStart(t *testing.T, env map[string]string, clock clockwork.C
 	if err := os.MkdirAll(filepath.Join(town, "daemon"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	logs := &strings.Builder{}
+	// lockedBuffer: the daemon's goroutines may still log while the test
+	// holds the start parked.
+	logs := &lockedBuffer{}
 	var (
 		mu     sync.Mutex
 		loaded []string
@@ -62,7 +66,18 @@ func startParkedZoneStart(t *testing.T, env map[string]string, clock clockwork.C
 
 	parked := make(chan struct{})
 	release := make(chan struct{})
+	var (
+		startupLog    string
+		startupLoaded []string
+	)
 	d.seams.cleanupLegacySockets = func(string) (int, int) {
+		// Snapshot on the daemon's own goroutine at the park point, so the
+		// test reads the start-up log as it stood before the park and never
+		// the live buffer. close(parked) publishes both snapshots to the test.
+		startupLog = logs.String()
+		mu.Lock()
+		startupLoaded = append([]string(nil), loaded...)
+		mu.Unlock()
 		close(parked)
 		<-release
 		return 0, 0
@@ -92,7 +107,7 @@ func startParkedZoneStart(t *testing.T, env map[string]string, clock clockwork.C
 		return runResult
 	}
 	t.Cleanup(func() { _ = finish() })
-	return zoneStart{logs: logs.String(), loaded: loaded, finish: finish}
+	return zoneStart{logs: startupLog, loaded: startupLoaded, finish: finish}
 }
 
 // TestZoneLoaderSeamDefaultsToTheTimePackage: with no loader set, the start-up
@@ -111,8 +126,10 @@ func TestZoneLoaderSeamDefaultsToTheTimePackage(t *testing.T) {
 
 // TestDaemonLogsItsZoneAtStart: the start-up log names the zone TZ loaded and
 // its offset at that moment, so a reader of the log can tell which zone its
-// stamps are in (gt-gg9hv.34). With TZ unset the daemon reads the host's
-// zone and says so without a CRITICAL line.
+// stamps are in (gt-gg9hv.34). Winter and summer pick dates on either side of
+// the DST transition, so the offset in the line can only come from applying
+// the zone's rules to the daemon's clock. With TZ unset the daemon reads the
+// host's zone and says so without a CRITICAL line.
 func TestDaemonLogsItsZoneAtStart(t *testing.T) {
 	t.Parallel()
 
@@ -121,7 +138,7 @@ func TestDaemonLogsItsZoneAtStart(t *testing.T) {
 		start := startParkedZoneStart(t,
 			map[string]string{"TZ": "America/Chicago"},
 			clockwork.NewFakeClockAt(time.Date(2026, 1, 15, 9, 0, 0, 0, time.UTC)),
-			func(string) (*time.Location, error) { return time.FixedZone("America/Chicago", -6*60*60), nil })
+			func(name string) (*time.Location, error) { return time.LoadLocation(name) })
 
 		if want := "log timezone: America/Chicago (UTC-06:00)"; !strings.Contains(start.logs, want) {
 			t.Fatalf("start-up log = %q, want %q", start.logs, want)
@@ -139,7 +156,7 @@ func TestDaemonLogsItsZoneAtStart(t *testing.T) {
 		start := startParkedZoneStart(t,
 			map[string]string{"TZ": "America/Chicago"},
 			clockwork.NewFakeClockAt(time.Date(2026, 7, 15, 9, 0, 0, 0, time.UTC)),
-			func(string) (*time.Location, error) { return time.FixedZone("America/Chicago", -5*60*60), nil })
+			func(name string) (*time.Location, error) { return time.LoadLocation(name) })
 
 		if want := "log timezone: America/Chicago (UTC-05:00)"; !strings.Contains(start.logs, want) {
 			t.Fatalf("start-up log = %q, want %q", start.logs, want)
