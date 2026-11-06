@@ -1120,6 +1120,16 @@ func TestMaintExecFailureCarriesTheLastStderrLine(t *testing.T) {
 	}
 }
 
+// The maint help text wraps within 80 columns: no line of it runs past 80.
+func TestMaintHelpIsWrapped(t *testing.T) {
+	t.Parallel()
+	for _, l := range strings.Split(maintCmd.Long, "\n") {
+		if len(l) > 80 {
+			t.Errorf("help line is %d columns, want at most 80: %q", len(l), l)
+		}
+	}
+}
+
 func TestMaintTargetsRefuseWithoutAHome(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

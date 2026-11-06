@@ -93,8 +93,9 @@ the docker ones only the images and volumes their daemons list.
 A target names what to maintain: baks, civol, colima, nodes, registry and
 registry-collect (both only when the town configures a registry), sizes or
 worktree. registry-collect runs the registry's garbage collect without deleting
-anything, so a night's collect can reclaim what an earlier run's deletes freed. The known targets are
-listed when a name is unknown, and naming none runs every target in name order.
+anything, so a night's collect can reclaim what an earlier run's deletes freed.
+The known targets are listed when a name is unknown, and naming none runs every
+target in name order.
 A plan that could not read its inputs refuses instead of guessing, and both
 leaves exit non-zero then.`,
 	RunE: requireSubcommand,
