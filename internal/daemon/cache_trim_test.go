@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -2774,6 +2775,70 @@ func TestCacheTrimNoOpClearsWhenTheClaimVanishes(t *testing.T) {
 				t.Errorf("the failed pass does not say %q: %s", tc.survive, logged)
 			}
 		})
+	}
+}
+
+// TestCacheTrimNoOpClearsWhenNoProfileMountsTheClaim pins the claim a profile
+// drops: no pass reaches a claim no profile mounts, so its item is cleared from
+// the profiles the pass read. A profile read that fails clears nothing.
+func TestCacheTrimNoOpClearsWhenNoProfileMountsTheClaim(t *testing.T) {
+	t.Parallel()
+	raised := func(t *testing.T) *cacheTrimFixture {
+		t.Helper()
+		f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDuReply(t, 63<<30)})
+		f.d.runDiskMaintenance()
+		if got := f.noOpItems(t); len(got) != 1 {
+			t.Fatalf("the first pass yielded %d items, want the one it raised: %+v\nlog: %s", len(got), got, f.log.String())
+		}
+		return f
+	}
+
+	t.Run("the profiles no longer mount the claim", func(t *testing.T) {
+		t.Parallel()
+		f := raised(t)
+		f.d.diskMaint.sandboxes = func() (map[string]agentconfig.SandboxProfile, error) {
+			return map[string]agentconfig.SandboxProfile{}, nil
+		}
+		f.trimDue()
+		f.d.runDiskMaintenance()
+		if got := f.noOpItems(t); len(got) != 0 {
+			t.Errorf("a pass whose profiles drop the claim yielded %+v, want no item", got)
+		}
+	})
+
+	t.Run("the profiles cannot be read", func(t *testing.T) {
+		t.Parallel()
+		f := raised(t)
+		f.d.diskMaint.sandboxes = func() (map[string]agentconfig.SandboxProfile, error) {
+			return nil, errors.New("profiles unavailable")
+		}
+		f.trimDue()
+		f.d.runDiskMaintenance()
+		if got := f.noOpItems(t); len(got) != 1 {
+			t.Errorf("a pass that could not read the profiles yielded %+v, want the item left as it was", got)
+		}
+	})
+}
+
+// TestCacheTrimNoOpKeepsItemWhileAPodHoldsTheClaimWithoutRunning pins the branch
+// that keeps an item: a pod holds the claim but none is running, so the claim is
+// still there and a later trim can measure it.
+func TestCacheTrimNoOpKeepsItemWhileAPodHoldsTheClaimWithoutRunning(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDuReply(t, 63<<30)})
+	f.d.runDiskMaintenance()
+	if got := f.noOpItems(t); len(got) != 1 {
+		t.Fatalf("the first pass yielded %d items, want the one it raised: %+v\nlog: %s", len(got), got, f.log.String())
+	}
+
+	f.answerFrom("get pods ", cliReply{stdout: `{"items":[` + cacheTrimPodJSON("sbx-b", "Pending", cacheTrimClaimName) + `]}`})
+	f.trimDue()
+	f.d.runDiskMaintenance()
+	if got := f.noOpItems(t); len(got) != 1 {
+		t.Errorf("a pass whose only holder is pending yielded %+v, want the item kept", got)
+	}
+	if logged := f.log.String(); !strings.Contains(logged, "no running pod mounts it") {
+		t.Errorf("the pass does not say why nothing was trimmed: %s", logged)
 	}
 }
 

@@ -289,6 +289,16 @@ func (d *Daemon) cacheTrim(ctx context.Context, mode string) bool {
 		d.cacheTrimLogf("disk_maintenance: cache trim: the sandbox profiles could not be read: %v; nothing trimmed", err)
 		return false
 	}
+	// A claim no profile mounts is never reached by the loop below, so its item
+	// is cleared here, from the profiles this pass read. A failed read returned
+	// above and clears nothing.
+	mounted := map[string]bool{}
+	for _, profile := range profiles {
+		if profile.Driver == agentconfig.SandboxDriverKubernetes && profile.KubernetesCacheClaim != "" {
+			mounted[profile.KubernetesCacheClaim] = true
+		}
+	}
+	d.cacheTrimNoOp.clearUnmounted(mounted)
 	claims, errs := cacheTrimClaims(profiles)
 	for _, err := range errs {
 		d.cacheTrimLogf("disk_maintenance: cache trim: not applied: %v", err)
@@ -427,6 +437,26 @@ func (s *cacheTrimNoOp) clearClaim(claim string) {
 	suffix := "/" + claim
 	for key := range s.items {
 		if strings.HasPrefix(key, cacheTrimNoOpKeyPrefix) && strings.HasSuffix(key, suffix) {
+			delete(s.items, key)
+		}
+	}
+}
+
+// clearUnmounted drops every item whose claim no sandbox profile mounts. The
+// pass reaches a claim only through a profile, so the item of a claim the
+// profiles dropped is never measured again and describes nothing this pass can
+// judge.
+//
+// The key ends with the claim's name, so the claim is the text after its last
+// slash; the prefix keeps the CI cache trim's key out of the sweep.
+func (s *cacheTrimNoOp) clearUnmounted(mounted map[string]bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key := range s.items {
+		if !strings.HasPrefix(key, cacheTrimNoOpKeyPrefix) {
+			continue
+		}
+		if !mounted[key[strings.LastIndex(key, "/")+1:]] {
 			delete(s.items, key)
 		}
 	}
