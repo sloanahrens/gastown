@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -67,9 +68,11 @@ type StepDoneResult struct {
 func runMoleculeStepDone(cmd *cobra.Command, args []string) error {
 	stepID := args[0]
 
-	cwd, err := os.Getwd()
+	// The step hands work to the caller's worktree and commits there, so the
+	// directory has to be present in this process.
+	cwd, err := callercwd.Require()
 	if err != nil {
-		return fmt.Errorf("getting current directory: %w", err)
+		return err
 	}
 
 	// Find town root

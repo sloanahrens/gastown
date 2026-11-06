@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
 )
@@ -54,9 +55,11 @@ func runCommit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	cwd, err := os.Getwd()
+	// gt commit runs git in the caller's worktree; a directory this process
+	// cannot see is refused instead of committing in the process directory.
+	cwd, err := callercwd.Require()
 	if err != nil {
-		cwd = ""
+		return err
 	}
 
 	// No agent identity (a human at a terminal): pass through to git commit

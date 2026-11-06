@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/done"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
@@ -135,7 +136,13 @@ func init() {
 }
 
 func runDone(cmd *cobra.Command, args []string) error {
-	return submitWithStaleBaseWarning(os.Stderr, git.NewGit("."), func() error {
+	// gt done fetches, rebases, gates and pushes in the caller's worktree, so
+	// it refuses before any of that when the directory is not in this process.
+	cwd, err := callercwd.Require()
+	if err != nil {
+		return err
+	}
+	return submitWithStaleBaseWarning(os.Stderr, git.NewGit(cwd), func() error {
 		return done.Run(done.Options{
 			Status:              doneStatus,
 			Issue:               doneIssue,
@@ -147,7 +154,7 @@ func runDone(cmd *cobra.Command, args []string) error {
 			PreVerified:         donePreVerified,
 			Findings:            doneFindings,
 			Env:                 os.Getenv,
-			Getwd:               os.Getwd,
+			Getwd:               func() (string, error) { return cwd, nil },
 			Detect:              detectDoneAgent,
 			RecordAgentState: func(cwd, townRoot, exitType, issueID string, pending beads.AgentFieldUpdates) (bool, error) {
 				return updateAgentStateOnDoneFn(cwd, townRoot, exitType, issueID, pending)
