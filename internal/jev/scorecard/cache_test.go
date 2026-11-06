@@ -190,6 +190,33 @@ func TestKeepFailedKeepsTheGoodBlocksFingerprint(t *testing.T) {
 	}
 }
 
+// A battery whose scoring fails is kept only when an earlier refresh left a
+// report to keep. A previous block with no report gives nothing to keep, so the
+// failure is written as the failure alone: marking it kept would carry a nil
+// report behind Kept, and KeptSince would name a score that never happened.
+func TestCacheKeepFailedRefusesAPreviousBlockWithNoReport(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	prev := CacheDoc{ScoredAt: at, Since: "7d", Batteries: []BatteryBlock{
+		{Name: "stale", ScoredAt: at, Failed: true, Error: "no labels"},
+	}}
+	failed := BatteryBlock{Name: "stale", ScoredAt: at.Add(time.Hour), Failed: true, Error: "reading the log", LogLines: 3, LogBytes: 30}
+
+	got := KeepFailed(prev, failed)
+	if got.Kept {
+		t.Fatalf("kept = true, want the failure alone: %+v", got)
+	}
+	if got.KeptSince != nil {
+		t.Errorf("kept_since = %v, want nil when nothing is kept", got.KeptSince)
+	}
+	if got.Report != nil {
+		t.Errorf("report = %+v, want nil from the failure", got.Report)
+	}
+	if !got.ScoredAt.Equal(failed.ScoredAt) {
+		t.Errorf("scored_at = %v, want this refresh's %v", got.ScoredAt, failed.ScoredAt)
+	}
+}
+
 func TestCacheWriteReadRoundTrip(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "nested", "scorecard.json")
