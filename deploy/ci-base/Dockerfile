@@ -15,6 +15,13 @@
 ARG CI_BASE_IMAGE
 FROM ${CI_BASE_IMAGE}
 
+# The runner image's last USER is an unprivileged user, so the install steps
+# below run as root, and the image ends as BASE_USER again. The default is ci,
+# the user the runner image is built with; a base whose user is not ci passes
+# BASE_USER to name it.
+ARG BASE_USER=ci
+USER root
+
 # The pin comes from `make -s golangci-lint-version`, so the Makefile is its one
 # home and an image is only ever built with the version `make lint` accepts. The
 # test is the build's own check: a missing binary or another version fails here.
@@ -35,3 +42,6 @@ RUN curl -fsSL -o /usr/local/bin/jq \
  && echo "${JQ_SHA256}  /usr/local/bin/jq" | sha256sum -c - \
  && chmod 0755 /usr/local/bin/jq \
  && test "$(jq --version)" = "jq-${JQ_VERSION}"
+
+# Back to the base image's user, so the image runs as the user it was built on.
+USER ${BASE_USER}
