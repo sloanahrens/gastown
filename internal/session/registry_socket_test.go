@@ -110,7 +110,7 @@ func TestTownSocketName(t *testing.T) {
 
 func TestLegacySocketName(t *testing.T) {
 	t.Parallel()
-	got := LegacySocketName("/Users/hal/gt")
+	got := LegacySocketName("/Users/user/gt")
 	if got != "gt" {
 		t.Errorf("LegacySocketName = %q, want %q", got, "gt")
 	}

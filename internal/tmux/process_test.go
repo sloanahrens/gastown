@@ -99,7 +99,7 @@ func TestHasDescendantWithNamesFromPS(t *testing.T) {
 	snapshot := []byte(`
 1 0 bash
 2 1 /usr/local/bin/node
-3 2 /Users/peter/bin/claude
+3 2 /Users/user/bin/claude
 4 1 tmux: client
 5 1 claude-helper
 6 5 nodejs

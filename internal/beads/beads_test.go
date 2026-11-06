@@ -3347,9 +3347,9 @@ func TestResolveBeadsDir(t *testing.T) {
 	})
 
 	t.Run("absolute path redirect", func(t *testing.T) {
-		// Redirect file contains an absolute path (e.g., /Users/emech/.../gastown/.beads)
+		// Redirect file contains an absolute path (e.g., /Users/user/.../gastown/.beads)
 		// This was the path-doubling bug: filepath.Join(workDir, absPath) produces
-		// workDir/Users/emech/... instead of using absPath directly.
+		// workDir/Users/user/... instead of using absPath directly.
 		workDir := filepath.Join(tmpDir, "polecat", "chrome")
 		localBeadsDir := filepath.Join(workDir, ".beads")
 		targetBeadsDir := filepath.Join(tmpDir, "canonical", ".beads")
@@ -3646,12 +3646,12 @@ func TestExpandRolePattern(t *testing.T) {
 	}{
 		{
 			pattern:  "gt-mayor",
-			townRoot: "/Users/stevey/gt",
+			townRoot: "/Users/user/gt",
 			want:     "gt-mayor",
 		},
 		{
 			pattern:  "{prefix}-{role}",
-			townRoot: "/Users/stevey/gt",
+			townRoot: "/Users/user/gt",
 			rig:      "gastown",
 			role:     "witness",
 			prefix:   "gt",
@@ -3659,7 +3659,7 @@ func TestExpandRolePattern(t *testing.T) {
 		},
 		{
 			pattern:  "{prefix}-{name}",
-			townRoot: "/Users/stevey/gt",
+			townRoot: "/Users/user/gt",
 			rig:      "gastown",
 			name:     "toast",
 			prefix:   "gt",
@@ -3667,20 +3667,20 @@ func TestExpandRolePattern(t *testing.T) {
 		},
 		{
 			pattern:  "{town}/{rig}/polecats/{name}",
-			townRoot: "/Users/stevey/gt",
+			townRoot: "/Users/user/gt",
 			rig:      "gastown",
 			name:     "toast",
-			want:     "/Users/stevey/gt/gastown/polecats/toast",
+			want:     "/Users/user/gt/gastown/polecats/toast",
 		},
 		{
 			pattern:  "{town}/{rig}/refinery/rig",
-			townRoot: "/Users/stevey/gt",
+			townRoot: "/Users/user/gt",
 			rig:      "gastown",
-			want:     "/Users/stevey/gt/gastown/refinery/rig",
+			want:     "/Users/user/gt/gastown/refinery/rig",
 		},
 		{
 			pattern:  "export GT_ROLE={role} GT_RIG={rig} BD_ACTOR={rig}/polecats/{name}",
-			townRoot: "/Users/stevey/gt",
+			townRoot: "/Users/user/gt",
 			rig:      "gastown",
 			name:     "toast",
 			role:     "polecat",
