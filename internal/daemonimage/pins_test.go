@@ -170,12 +170,13 @@ func TestCheckPinsRefusesAStalePin(t *testing.T) {
 	mainOfFailing := func(Pin) (string, error) { return "", fmt.Errorf("no source checkout named") }
 	edit := "set the bd line in " + pinsTestPath + " to " + pinsTestMain
 	for _, tc := range []struct {
-		name     string
-		setup    func(*pinsGit)
-		mainOf   MainOf
-		noGit    bool
-		wantErr  []string
-		wantNote string
+		name       string
+		setup      func(*pinsGit)
+		mainOf     MainOf
+		noGit      bool
+		wantErr    []string
+		notWantErr []string
+		wantNote   string
 	}{
 		{
 			name: "a pin at main",
@@ -210,7 +211,8 @@ func TestCheckPinsRefusesAStalePin(t *testing.T) {
 				f.answer[pinsTestDir+" rev-parse --verify origin/main^{commit}"] = pinsTestMain + "\n"
 				f.errs[pinsTestDir+" merge-base --is-ancestor "+pinsTestPin+" "+pinsTestMain] = fmt.Errorf("git was canceled")
 			},
-			wantErr: []string{"pin-drift guard:", "cannot test whether it is an ancestor of main", "git was canceled"},
+			wantErr:    []string{"pin-drift guard:", "cannot test whether it is an ancestor of main", "fetch or fix that checkout"},
+			notWantErr: []string{"git was canceled"},
 		},
 		{
 			name:    "a pin 41 commits behind",
@@ -313,6 +315,11 @@ func TestCheckPinsRefusesAStalePin(t *testing.T) {
 			for _, want := range tc.wantErr {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("CheckPins error = %q, want it to contain %q", err, want)
+				}
+			}
+			for _, notWant := range tc.notWantErr {
+				if strings.Contains(err.Error(), notWant) {
+					t.Errorf("CheckPins error = %q, must not echo %q", err, notWant)
 				}
 			}
 		})

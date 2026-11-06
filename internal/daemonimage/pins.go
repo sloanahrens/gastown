@@ -194,7 +194,7 @@ func checkPinAgainstMain(git bdbuild.Git, dir string, pin Pin, main, pinsPath st
 	}
 	if _, err := git(dir, "merge-base", "--is-ancestor", pin.Commit, main); err != nil {
 		if !isNotAncestor(err) {
-			return nil, fmt.Errorf("pin-drift guard: rig %s pin %s: cannot test whether it is an ancestor of main %s in %s (%v): fetch or fix that checkout, then rerun", pin.Name, short(pin.Commit), short(main), dir, err)
+			return nil, fmt.Errorf("pin-drift guard: rig %s pin %s: cannot test whether it is an ancestor of main %s in %s (git merge-base --is-ancestor gave no not-ancestor answer): fetch or fix that checkout, then rerun", pin.Name, short(pin.Commit), short(main), dir)
 		}
 		return nil, fmt.Errorf("pin-drift guard: rig %s pin %s is not an ancestor of main %s (ahead or diverged): %s", pin.Name, short(pin.Commit), short(main), pinEdit(pin, pinsPath, main))
 	}
