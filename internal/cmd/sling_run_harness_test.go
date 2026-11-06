@@ -53,6 +53,12 @@ type slingHarness struct {
 
 const slingTestTown = "/town"
 
+// slingTestSeat is the seat the harness runs as: the actor a dispatch records
+// (the dispatcher, the blocker override). A test that makes the same seat its
+// caller or a bead's assignee, or reads it back, uses this one constant, so
+// renaming the seat cannot split the setup from the check.
+const slingTestSeat = "gastown/crew/operator"
+
 func newSlingHarness(t *testing.T) *slingHarness {
 	t.Helper()
 	h := &slingHarness{
@@ -241,7 +247,7 @@ func newSlingHarness(t *testing.T) *slingHarness {
 			h.record("instantiate %s on %s vars=%s", name, id, strings.Join(vars, ","))
 			return &FormulaOnBeadResult{WispRootID: "gt-wisp-new", BeadToHook: id}, nil
 		},
-		actor: func() string { return "gastown/crew/sloan" },
+		actor: func() string { return slingTestSeat },
 		hookDir: func(town, _, workDir string) string {
 			if workDir != "" {
 				return workDir

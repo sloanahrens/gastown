@@ -30,7 +30,7 @@ func TestSlingRefusesPolecatsByRole(t *testing.T) {
 		{"no role, polecat name", map[string]string{"GT_POLECAT": "Toast"}, true},
 		// GH #664: a coordinator keeps a stale GT_POLECAT from spawning one.
 		{"witness with stale GT_POLECAT", map[string]string{"GT_ROLE": "gastown/witness", "GT_POLECAT": "Toast"}, false},
-		{"crew", map[string]string{"GT_ROLE": "gastown/crew/sloan"}, false},
+		{"crew", map[string]string{"GT_ROLE": "gastown/crew/operator"}, false},
 		// gt-vsc9w: the daemon runs script plugins with GT_ROLE=daemon/plugin,
 		// and every sling such a runner made was refused as rig "daemon",
 		// polecat "plugin".
@@ -181,8 +181,8 @@ func TestSlingAlreadyAssigned(t *testing.T) {
 	t.Run("self target matches the caller", func(t *testing.T) {
 		t.Parallel()
 		h := newSlingHarness(t)
-		h.addBead(slingBead, beadInfo{Status: "pinned", Assignee: "gastown/crew/sloan"})
-		h.run.resolveSelf = func() (string, string, string, error) { return "gastown/crew/sloan", "%0", slingTestTown, nil }
+		h.addBead(slingBead, beadInfo{Status: "pinned", Assignee: slingTestSeat})
+		h.run.resolveSelf = func() (string, string, string, error) { return slingTestSeat, "%0", slingTestTown, nil }
 		if err := h.sling(slingBead, "."); err != nil {
 			t.Fatalf("sling: %v", err)
 		}
@@ -192,7 +192,7 @@ func TestSlingAlreadyAssigned(t *testing.T) {
 		t.Parallel()
 		h := newSlingHarness(t)
 		h.addBead(slingBead, beadInfo{Status: "in_progress", Assignee: holder})
-		wantSlingErr(t, h.sling(slingBead, "gastown/crew/sloan"), "already in_progress to "+holder)
+		wantSlingErr(t, h.sling(slingBead, "gastown/crew/operator"), "already in_progress to "+holder)
 		h.wantNo("resolve target")
 	})
 	t.Run("force reassigns from a live polecat", func(t *testing.T) {
@@ -238,7 +238,7 @@ func TestSlingAlreadyAssigned(t *testing.T) {
 			return nil
 		}
 		h.run.hook = func(_, _, _, _ string, _ *beadFieldUpdates) error { return errors.New("bd is down") }
-		if err := h.sling(slingBead, "gastown/crew/sloan"); err == nil {
+		if err := h.sling(slingBead, "gastown/crew/operator"); err == nil {
 			t.Fatal("sling succeeded, want the hook failure to roll it back")
 		}
 		h.wantCalls("unhook", "unhook "+slingBead)
@@ -547,11 +547,11 @@ func TestSlingForcedSpawnRollbackDeclinedUnhookRestoreLeavesTheRawFields(t *test
 func TestSlingForcedPinnedRollbackRestoresThePin(t *testing.T) {
 	t.Parallel()
 	h := newSlingHarness(t)
-	h.addBead(slingBead, beadInfo{Status: "pinned", Assignee: "gastown/crew/sloan"})
+	h.addBead(slingBead, beadInfo{Status: "pinned", Assignee: slingTestSeat})
 	h.run.opts.force = true
 	h.run.hook = func(string, string, string, string, *beadFieldUpdates) error { return errors.New("injected") }
 	wantSlingErr(t, h.sling(slingBead, "gastown"), "injected")
-	h.wantCalls("restore pinned", "restore pinned gt-abc123 gastown/crew/sloan")
+	h.wantCalls("restore pinned", "restore pinned gt-abc123 "+slingTestSeat)
 }
 
 // TestSlingDryRunWritesNothing: a dry run resolves the target and reports,
@@ -677,7 +677,7 @@ func TestSlingFormulaChoice(t *testing.T) {
 		{"default", "gastown", func(*slingOptions) {}, "mol-polecat-work"},
 		{"explicit", "gastown", func(o *slingOptions) { o.formula = "mol-fix" }, "mol-fix"},
 		{"raw", "gastown", func(o *slingOptions) { o.hookRawBead = true }, ""},
-		{"crew target", "gastown/crew/sloan", func(*slingOptions) {}, ""},
+		{"crew target", "gastown/crew/operator", func(*slingOptions) {}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -756,7 +756,7 @@ func TestSlingStoresRequestInBead(t *testing.T) {
 		t.Fatalf("stored %d field updates, want 1 (before the hook, none after)", len(stored))
 	}
 	u := stored[0]
-	if !u.NoMerge || !u.ReviewOnly || u.Args != "patch release" || u.Mode == nil || *u.Mode != "ralph" || u.Dispatcher != "gastown/crew/sloan" {
+	if !u.NoMerge || !u.ReviewOnly || u.Args != "patch release" || u.Mode == nil || *u.Mode != "ralph" || u.Dispatcher != slingTestSeat {
 		t.Errorf("stored fields = %+v", u)
 	}
 }
@@ -771,7 +771,7 @@ func TestSlingNudgesTheTarget(t *testing.T) {
 		t.Parallel()
 		h := newSlingHarness(t)
 		h.addBead(slingBead, beadInfo{})
-		if err := h.sling(slingBead, "gastown/crew/sloan"); err != nil {
+		if err := h.sling(slingBead, "gastown/crew/operator"); err != nil {
 			t.Fatalf("sling: %v", err)
 		}
 		h.wantCalls("nudge", "nudge %9 gt-abc123")
@@ -800,12 +800,12 @@ func TestSlingNudgesTheTarget(t *testing.T) {
 		t.Parallel()
 		h := newSlingHarness(t)
 		h.addBead(slingBead, beadInfo{})
-		h.run.resolveSelf = func() (string, string, string, error) { return "gastown/crew/sloan", "%0", slingTestTown, nil }
+		h.run.resolveSelf = func() (string, string, string, error) { return slingTestSeat, "%0", slingTestTown, nil }
 		if err := h.sling(slingBead); err != nil {
 			t.Fatalf("sling: %v", err)
 		}
 		h.wantNo("nudge")
-		h.wantCalls("hook", "hook gt-abc123 gastown/crew/sloan")
+		h.wantCalls("hook", "hook gt-abc123 "+slingTestSeat)
 	})
 }
 
@@ -846,7 +846,7 @@ func TestSlingRoutesRequests(t *testing.T) {
 				h.run.shouldDefer = func() (bool, error) { return true, nil }
 				h.run.opts.on = slingBead
 			}},
-		{name: "deferred non-rig target", args: []string{slingBead, "gastown/crew/sloan"}, wantErr: "deferred dispatch requires a rig target",
+		{name: "deferred non-rig target", args: []string{slingBead, "gastown/crew/operator"}, wantErr: "deferred dispatch requires a rig target",
 			setup: func(h *slingHarness) { h.run.shouldDefer = func() (bool, error) { return true, nil } }},
 		{name: "deferred task without a rig", args: []string{slingBead}, wantErr: "deferred dispatch requires a rig target",
 			setup: func(h *slingHarness) { h.run.shouldDefer = func() (bool, error) { return true, nil } }},
@@ -920,7 +920,7 @@ func TestSlingInputNormalization(t *testing.T) {
 		h.addBead(slingBead, beadInfo{})
 		h.run.opts.stdin = true
 		h.run.stdin = strings.NewReader("do the `thing`\n")
-		if err := h.sling(slingBead, "gastown/crew/sloan"); err != nil {
+		if err := h.sling(slingBead, "gastown/crew/operator"); err != nil {
 			t.Fatalf("sling: %v", err)
 		}
 		if got := h.stored[slingBead][0].Args; got != "do the `thing`" {
@@ -933,7 +933,7 @@ func TestSlingInputNormalization(t *testing.T) {
 		h.addBead(slingBead, beadInfo{})
 		h.run.opts.stdin, h.run.opts.argsText = true, "cli args"
 		h.run.stdin = strings.NewReader("from stdin")
-		if err := h.sling(slingBead, "gastown/crew/sloan"); err != nil {
+		if err := h.sling(slingBead, "gastown/crew/operator"); err != nil {
 			t.Fatalf("sling: %v", err)
 		}
 		if h.run.opts.message != "from stdin" || h.stored[slingBead][0].Args != "cli args" {

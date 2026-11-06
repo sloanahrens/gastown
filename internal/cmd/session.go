@@ -596,8 +596,8 @@ type polecatSessionLister interface {
 
 // listPolecatSessions collects the polecat sessions of rigs, skipping a rig
 // whose sessions cannot be listed. It asks ListPolecats, not List: a crew
-// session such as gt-crew-sloan carries the rig prefix too, and listing it as
-// polecat crew-sloan points `gt session stop` at a seat that does not exist.
+// session such as gt-crew-operator carries the rig prefix too, and listing it as
+// polecat crew-operator points `gt session stop` at a seat that does not exist.
 func listPolecatSessions(rigs []*rig.Rig, open func(*rig.Rig) polecatSessionLister) []SessionListItem {
 	var items []SessionListItem
 	for _, r := range rigs {

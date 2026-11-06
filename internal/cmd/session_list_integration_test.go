@@ -16,7 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
-// A crew session carries the rig prefix, so listing it as polecat crew-sloan
+// A crew session carries the rig prefix, so listing it as polecat crew-operator
 // pointed `gt session stop` at a seat that does not exist. This holds the real
 // polecat.SessionManager.ListPolecats filter to it, which the stub-backed unit
 // test cannot.
@@ -28,7 +28,7 @@ func TestIntegrationSessionListSkipsCrewAndRigRoleSessions(t *testing.T) {
 	prefix := townRegistry().PrefixForRig("gastown")
 	sessions := []string{
 		prefix + "-amber",
-		prefix + "-crew-sloan",
+		prefix + "-crew-operator",
 		prefix + "-witness",
 		prefix + "-refinery",
 		"other-onyx", // another rig's prefix

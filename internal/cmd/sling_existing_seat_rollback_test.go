@@ -57,7 +57,7 @@ func (s *lostReplyStore) Update(id string, opts beads.UpdateOptions) error {
 func TestSlingOntoExistingSeatRollsBackALostHookReply(t *testing.T) {
 	t.Parallel()
 	const beadID = "gt-abc"
-	const seat = "gastown/crew/sloan"
+	const seat = "gastown/crew/operator"
 
 	for _, tc := range []struct {
 		name string
@@ -107,7 +107,7 @@ func TestSlingOntoExistingSeatRollsBackALostHookReply(t *testing.T) {
 func TestSlingOntoExistingSeatHandsBackHookAfterFailure(t *testing.T) {
 	t.Parallel()
 	const beadID = "gt-abc"
-	const seat = "gastown/crew/sloan"
+	const seat = "gastown/crew/operator"
 
 	for _, tc := range []struct {
 		name string
@@ -194,7 +194,7 @@ func TestSlingOntoExistingSeatHandsBackHookAfterFailure(t *testing.T) {
 func TestHandBackHeldLeavesABeadSubmittedForLanding(t *testing.T) {
 	t.Parallel()
 	const beadID = "gt-abc"
-	const seat = "gastown/crew/sloan"
+	const seat = "gastown/crew/operator"
 
 	for _, tc := range []struct {
 		name      string
@@ -258,7 +258,7 @@ func TestHandBackHookWarnsWithoutATownRoot(t *testing.T) {
 		r.Close()
 	})
 
-	handedBack := handBackHook("", "gt-abc", "", "gastown/crew/sloan", beadHold{Status: "open"})
+	handedBack := handBackHook("", "gt-abc", "", "gastown/crew/operator", beadHold{Status: "open"})
 	w.Close()
 	out, err := io.ReadAll(r)
 	if err != nil {
@@ -356,7 +356,7 @@ func TestSlingOntoExistingSeatHandBackLeavesSpawnRollbackAlone(t *testing.T) {
 func TestSlingForcedPinnedOntoExistingSeatDeclinedHandBackKeepsThePinRestoreOff(t *testing.T) {
 	t.Parallel()
 	const beadID = "gt-abc"
-	const seat = "gastown/crew/sloan"
+	const seat = "gastown/crew/operator"
 
 	for _, tc := range []struct {
 		name  string
@@ -400,7 +400,7 @@ func TestSlingForcedPinnedOntoExistingSeatDeclinedHandBackKeepsThePinRestoreOff(
 // (gt-idly3).
 func TestRestorePinnedOnLeavesABeadAnotherActorHolds(t *testing.T) {
 	t.Parallel()
-	const owner = "gastown/crew/sloan"
+	const owner = "gastown/crew/operator"
 
 	for _, tc := range []struct {
 		name    string

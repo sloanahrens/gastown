@@ -67,7 +67,7 @@ func TestRigRemoveUnknownRigTouchesNoSessions(t *testing.T) {
 
 			var rec recordingRigTmux
 			err := removeRigIn(rigRemoveTown(t), "gastwon", force, cmdTestRegistry(),
-				rec.tmux("gt-witness", "gt-crew-sloan", "gt-furiosa"))
+				rec.tmux("gt-witness", "gt-crew-operator", "gt-furiosa"))
 			if err == nil {
 				t.Fatal("removeRigIn for an unregistered rig = nil, want the not-found error")
 			}

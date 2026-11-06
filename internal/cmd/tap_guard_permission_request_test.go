@@ -106,7 +106,7 @@ func TestPermissionRequestDeniesForAutonomousSession(t *testing.T) {
 // prompt, so the guard reports no decision for every attended role.
 func TestPermissionRequestKeepsPromptForInteractiveSession(t *testing.T) {
 	t.Parallel()
-	roles := []string{"gastown/crew/sloan", "gastown/witness", "gastown/refinery", "mayor", "deacon", ""}
+	roles := []string{"gastown/crew/operator", "gastown/witness", "gastown/refinery", "mayor", "deacon", ""}
 	for _, role := range roles {
 		t.Run(role, func(t *testing.T) {
 			if unattendedPromptRole(role) {
@@ -126,7 +126,7 @@ func TestPermissionRequestKeepsPromptForInteractiveSession(t *testing.T) {
 // a session that inherited a polecat marker from a parent — keeps its prompt.
 func TestUnattendedPromptSessionPrefersRole(t *testing.T) {
 	t.Parallel()
-	crewWithMarker := envGetter(map[string]string{"GT_POLECAT": "obsidian", "GT_ROLE": "gastown/crew/sloan"})
+	crewWithMarker := envGetter(map[string]string{"GT_POLECAT": "obsidian", "GT_ROLE": "gastown/crew/operator"})
 	if unattendedPromptSession("/home/u/gt/rig/polecats/worker/rig", crewWithMarker) {
 		t.Error("a crew role was overridden by a polecat marker or by the payload cwd")
 	}
@@ -144,7 +144,7 @@ func TestUnattendedPromptSessionPrefersRole(t *testing.T) {
 func TestUnattendedPromptRole(t *testing.T) {
 	t.Parallel()
 	unattended := []string{"gastown/polecats/obsidian", "polecat"}
-	attended := []string{"gastown/crew/sloan", "gastown/witness", "gastown/refinery", "mayor", "deacon", ""}
+	attended := []string{"gastown/crew/operator", "gastown/witness", "gastown/refinery", "mayor", "deacon", ""}
 	for _, role := range unattended {
 		if !unattendedPromptRole(role) {
 			t.Errorf("role %q must be treated as unattended", role)
@@ -626,7 +626,7 @@ func TestPermissionRequestSteerRejectsASeatOutsideTheTown(t *testing.T) {
 		"gastown/polecats/..",
 		"gastown/polecats/../../../etc",
 		"../poison/polecats/obsidian",
-		"gastown/crew/sloan",
+		"gastown/crew/operator",
 	}
 	for _, seat := range seats {
 		opened := false
@@ -659,7 +659,7 @@ func TestPromptSeat(t *testing.T) {
 		{"role names the seat", map[string]string{"GT_ROLE": "gastown/polecats/obsidian"}, worktree, "gastown/polecats/obsidian"},
 		{"bare polecat role falls back to cwd", map[string]string{"GT_ROLE": "polecat"}, worktree, "gastown/polecats/obsidian"},
 		{"no role reads the cwd", nil, worktree, "gastown/polecats/obsidian"},
-		{"crew role is not a polecat seat", map[string]string{"GT_ROLE": "gastown/crew/sloan"}, worktree, ""},
+		{"crew role is not a polecat seat", map[string]string{"GT_ROLE": "gastown/crew/operator"}, worktree, ""},
 		{"cwd outside the polecats tree names no seat", nil, "/home/u/gt/gastown/crew", ""},
 		{"role escaping the town names no seat", map[string]string{"GT_ROLE": "../poison/polecats/obsidian"}, worktree, ""},
 		{"cwd with a dot-dot rig names no seat", nil, "/home/u/gt/../polecats/obsidian/gastown", ""},
