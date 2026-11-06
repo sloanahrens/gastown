@@ -1,9 +1,11 @@
 package scorecard
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -50,13 +52,96 @@ type BatteryBlock struct {
 	// KeptSince is the instant the kept report was scored. It is set only
 	// with Kept.
 	KeptSince *time.Time `json:"kept_since,omitempty"`
+	// LogLines and LogBytes fingerprint the battery's log as it was when the
+	// report was scored. A refresh reuses the block while both still match
+	// the log. A report kept from a failed refresh keeps that report's
+	// fingerprint.
+	LogLines int   `json:"log_lines,omitempty"`
+	LogBytes int64 `json:"log_bytes,omitempty"`
+}
+
+// LogFingerprint is what a battery's log looked like when its block was
+// scored: its line count and its size in bytes.
+type LogFingerprint struct {
+	Lines int
+	Bytes int64
+}
+
+// ReuseAge is the oldest a cached block may be for a refresh to reuse it
+// without scoring again. Labels mature as beads close, so a block older than
+// this is re-scored even when its log has not changed, which is why the bound
+// exists.
+const ReuseAge = 72 * time.Hour
+
+// FingerprintLog measures the log at path. An error, as for a log that is
+// missing or cannot be read, tells the caller to score the battery: a log it
+// cannot read is never treated as an empty one that has not changed.
+func FingerprintLog(path string) (LogFingerprint, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return LogFingerprint{}, fmt.Errorf("opening the battery log %s: %w", path, err)
+	}
+	defer f.Close()
+	lines, size, err := countLines(f)
+	if err != nil {
+		return LogFingerprint{}, fmt.Errorf("reading the battery log %s: %w", path, err)
+	}
+	return LogFingerprint{Lines: lines, Bytes: size}, nil
+}
+
+// countLines counts the lines in r and the bytes it read, including a last
+// line that ends without a newline. It holds at most one line in memory, so no
+// line length makes it skip a line or fail.
+func countLines(r io.Reader) (int, int64, error) {
+	br := bufio.NewReader(r)
+	lines, size := 0, int64(0)
+	for {
+		line, err := br.ReadBytes('\n')
+		size += int64(len(line))
+		if len(line) > 0 {
+			lines++
+		}
+		if errors.Is(err, io.EOF) {
+			return lines, size, nil
+		}
+		if err != nil {
+			return 0, 0, err
+		}
+	}
+}
+
+// ReusableBlock returns the block prev holds for the battery named name when
+// a refresh over window may keep it instead of scoring: the block holds a
+// report scored over that same window, less than ReuseAge ago, and its
+// recorded log fingerprint still matches fp. A report scored over another
+// window describes different lines, and a failed or kept block would hide its
+// failure if reused, so neither is reused. ok is false when name must be
+// scored.
+func ReusableBlock(prev CacheDoc, name string, fp LogFingerprint, window string, now time.Time) (BatteryBlock, bool) {
+	if prev.Since != window {
+		return BatteryBlock{}, false
+	}
+	for _, b := range prev.Batteries {
+		if b.Name != name || b.Report == nil || b.Failed || b.Kept {
+			continue
+		}
+		if b.LogLines != fp.Lines || b.LogBytes != fp.Bytes {
+			continue
+		}
+		if now.Sub(b.ScoredAt) >= ReuseAge {
+			continue
+		}
+		return b, true
+	}
+	return BatteryBlock{}, false
 }
 
 // KeepFailed returns block with the previous document's block for the same
 // battery substituted when this refresh's scoring failed and that block holds
-// a report: the report and its scored_at are the last good ones, Kept is set,
-// and KeptSince names when the report was scored. A failed block with no good
-// report before it is returned as it is; a block that did not fail is too.
+// a report: the report, its scored_at and the log fingerprint it was scored
+// against are the last good ones, Kept is set, and KeptSince names when the
+// report was scored. A failed block with no good report before it is returned
+// as it is; a block that did not fail is too.
 func KeepFailed(prev CacheDoc, block BatteryBlock) BatteryBlock {
 	if !block.Failed || block.Kept {
 		return block
@@ -71,6 +156,7 @@ func KeepFailed(prev CacheDoc, block BatteryBlock) BatteryBlock {
 		}
 		block.Report = old.Report
 		block.ScoredAt = old.ScoredAt
+		block.LogLines, block.LogBytes = old.LogLines, old.LogBytes
 		block.Kept = true
 		block.KeptSince = &keptSince
 		return block
